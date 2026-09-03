@@ -1,0 +1,39 @@
+// P4 字节码编译器示例：覆盖函数、递归、条件、循环、泛型
+fun add(a: Int, b: Int): Int = a + b
+
+fun fib(n: Int): Int {
+    if (n < 2) {
+        return n
+    }
+    return add(fib(n - 1), fib(n - 2))
+}
+
+fun <T> identity(x: T): T = x
+
+fun max(a: Int, b: Int): Int {
+    if (a > b) {
+        return a
+    } else {
+        return b
+    }
+}
+
+fun main() {
+    val x = 10
+    val y = 20
+    println(add(x, y))
+    println(max(x, y))
+
+    var i = 0
+    while (i < 5) {
+        println(i)
+        i = i + 1
+    }
+
+    for (k in 0..3) {
+        println(k)
+    }
+
+    println(identity(x))
+    println(fib(6))
+}

@@ -2,3 +2,5 @@ target/
 
 # insta 快照测试：不匹配时生成的待审文件，不应提交
 *.snap.new
+build_log.txt
+disasm_full.txt

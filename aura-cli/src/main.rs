@@ -1,182 +1,256 @@
-//! Aura 命令行工具（P1-P2 阶段：词法/语法前端）
+//! Aura 语言命令行工具
 //!
-//! 用法：
-//!   aura tokens <file>    # 词法分析，打印 Token 流
-//!   aura parse <file>     # 语法分析，打印 AST
-//!   aura check <file>     # 检查语法错误（解析 + 报告）
-//!   aura --help
+//! 子命令：
+//! - `aura build <file.aura> [--output <out.auc>]`  编译为字节码 `.auc`
+//! - `aura run <file.aura>`                          编译并执行（预留，依赖 VM）
+//! - `aura check <file.aura>`                        仅做语法/语义检查
+//! - `aura disasm <file.auc> [--source <file.aura>]` 反汇编 `.auc` 为可读汇编
+//! - `aura tokens <file.aura>`                       输出词法分析
+//! - `aura ast <file.aura>`                          输出 AST（调试）
+//! - `aura fmt <file.aura>`                          代码格式化（预留）
 
-use aura_compiler::errors::ErrorSeverity;
-use aura_compiler::{FileId, Lexer, Parser, SourceMap, TokenKind};
-use std::process::ExitCode;
+use std::process::exit;
 
-fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+use aura_compiler::codegen::{
+    compile_source, disassemble, read_auc, to_bytes, write_auc, SerializeError,
+};
+use aura_compiler::lexer::Lexer;
+use aura_compiler::parser::Parser;
+use aura_compiler::sema::analyze_source;
 
-    let (cmd, file) = match parse_args(&args) {
-        Ok(v) => v,
-        Err(msg) => {
-            eprintln!("{}", msg);
-            print_usage();
-            return ExitCode::from(2);
-        }
-    };
-
-    let source = match std::fs::read_to_string(&file) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: cannot read '{}': {}", file, e);
-            return ExitCode::from(1);
-        }
-    };
-
-    // 注册源文件，供诊断输出源码片段（SourceMap）
-    let mut sm = SourceMap::new();
-    let file_id = sm.add_file(file.clone(), source.clone());
-
-    match cmd.as_str() {
-        "tokens" => run_tokens(&source, &sm, file_id),
-        "parse" => run_parse(&source, &sm, file_id),
-        "check" => run_check(&source, &sm, file_id),
-        _ => {
-            eprintln!("error: unknown command '{}'", cmd);
-            print_usage();
-            ExitCode::from(2)
-        }
-    }
-}
-
-fn parse_args(args: &[String]) -> Result<(String, String), String> {
-    if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
-        return Err("no command".to_string());
-    }
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        return Err(format!("missing file argument for '{}'", args[0]));
+        print_usage();
+        exit(1);
     }
-    Ok((args[0].clone(), args[1].clone()))
+    let cmd = args[1].as_str();
+    let rest = &args[2..];
+
+    match cmd {
+        "build" => cmd_build(rest),
+        "run" => cmd_run(rest),
+        "check" => cmd_check(rest),
+        "disasm" => cmd_disasm(rest),
+        "tokens" => cmd_tokens(rest),
+        "ast" => cmd_ast(rest),
+        "fmt" => cmd_fmt(rest),
+        "--help" | "-h" | "help" => print_usage(),
+        other => {
+            eprintln!("未知子命令: {}", other);
+            print_usage();
+            exit(1);
+        }
+    }
 }
 
 fn print_usage() {
-    eprintln!("\nUsage:\n  aura tokens <file>\n  aura parse <file>\n  aura check <file>");
+    println!(
+        "Aura 语言工具链\n\
+\n\
+用法:\n\
+  aura build <file.aura> [--output <out.auc>]   编译为字节码 .auc\n\
+  aura run <file.aura>                          编译并执行（依赖 VM）\n\
+  aura check <file.aura>                        仅做语法/语义检查\n\
+  aura disasm <file.auc> [--source <f.aura>]    反汇编 .auc 为可读汇编\n\
+  aura tokens <file.aura>                       输出词法分析\n\
+  aura ast <file.aura>                          输出 AST\n\
+  aura fmt <file.aura>                          代码格式化（预留）\n"
+    );
 }
 
-fn run_tokens(source: &str, sm: &SourceMap, file: FileId) -> ExitCode {
-    let mut lexer = Lexer::new(source);
-    let tokens = lexer.tokenize();
-
-    for err in lexer.errors() {
-        eprintln!(
-            "lex error [{}]: {}\n{}",
-            err.span,
-            err.message,
-            sm.snippet(file, &err.span)
-        );
+/// 解析 `--output <path>` / `--source <path>` 选项
+fn extract_opt(args: &[String], name: &str) -> Option<String> {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == name && i + 1 < args.len() {
+            return Some(args[i + 1].clone());
+        }
+        i += 1;
     }
+    None
+}
 
-    let mut has_error = false;
-    for tok in &tokens {
-        println!(
-            "{:>6}  {:<24} {:?}",
-            tok.span.start_line,
-            if tok.literal.is_empty() {
-                tok.kind.display_name()
-            } else {
-                tok.literal.as_str()
-            },
-            tok.kind
-        );
-        if tok.kind == TokenKind::Error {
-            has_error = true;
+fn first_positional<'a>(args: &'a [String], skip: &'a str) -> Option<&'a String> {
+    args.iter().find(|a| a.as_str() != skip && !a.starts_with("--"))
+}
+
+fn cmd_build(args: &[String]) {
+    let output = extract_opt(args, "--output");
+    let input = match first_positional(args, "--output") {
+        Some(p) => p,
+        None => {
+            eprintln!("错误: 缺少输入文件");
+            exit(1);
+        }
+    };
+
+    let source = match std::fs::read_to_string(input) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("错误: 无法读取 {}: {}", input, e);
+            exit(1);
+        }
+    };
+
+    let module = match compile_source(&source) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("编译失败:\n{}", e);
+            exit(1);
+        }
+    };
+
+    let out_path = output.unwrap_or_else(|| default_output(input));
+    if let Err(e) = write_auc(&out_path, &module) {
+        eprintln!("错误: 写入 {} 失败: {}", out_path, e);
+        exit(1);
+    }
+    println!(
+        "已生成 {} ({} 字节, {} 函数, {} 常量)",
+        out_path,
+        to_bytes(&module).len(),
+        module.functions.len(),
+        module.consts.len()
+    );
+}
+
+fn default_output(input: &str) -> String {
+    let base = input.trim_end_matches(".aura").trim_end_matches(".AURA");
+    format!("{}.auc", base)
+}
+
+fn cmd_disasm(args: &[String]) {
+    let input = match first_positional(args, "--source") {
+        Some(p) => p,
+        None => {
+            eprintln!("错误: 缺少输入文件");
+            exit(1);
+        }
+    };
+    match read_auc(input) {
+        Ok(module) => {
+            println!("{}", disassemble(&module));
+        }
+        Err(SerializeError::Format(m)) => {
+            eprintln!("反汇编失败（格式错误）: {}", m);
+            exit(1);
+        }
+        Err(SerializeError::Io(m)) => {
+            eprintln!("反汇编失败（IO 错误）: {}", m);
+            exit(1);
         }
     }
-    println!("{} tokens", tokens.len());
-    if has_error {
-        ExitCode::from(1)
+}
+
+fn cmd_run(_args: &[String]) {
+    eprintln!("`aura run` 尚未实现（依赖 P5 虚拟机）");
+    exit(1);
+}
+
+fn cmd_check(args: &[String]) {
+    let input = match first_positional(args, "--source") {
+        Some(p) => p,
+        None => {
+            eprintln!("错误: 缺少输入文件");
+            exit(1);
+        }
+    };
+    let source = match std::fs::read_to_string(input) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("错误: 无法读取 {}: {}", input, e);
+            exit(1);
+        }
+    };
+
+    let mut errs = 0;
+    // 词法
+    let mut lexer = Lexer::new(&source);
+    let tokens = lexer.tokenize();
+    for e in lexer.errors() {
+        eprintln!("[词法] {}", e.message);
+        errs += 1;
+    }
+    // 语法
+    let mut parser = Parser::new(tokens);
+    let _program = parser.parse_program();
+    for e in parser.errors() {
+        eprintln!("[语法] {}", e.message);
+        errs += 1;
+    }
+    // 语义
+    let (_ast, sema) = analyze_source(&source);
+    for e in &sema.errors {
+        eprintln!("[语义] {}", e.message);
+        errs += 1;
+    }
+
+    if errs == 0 {
+        println!("✓ {} 检查通过", input);
     } else {
-        ExitCode::SUCCESS
+        println!("✗ {} 存在 {} 个错误", input, errs);
+        exit(1);
     }
 }
 
-fn run_parse(source: &str, sm: &SourceMap, file: FileId) -> ExitCode {
-    let mut lexer = Lexer::new(source);
+fn cmd_tokens(args: &[String]) {
+    let input = match first_positional(args, "--source") {
+        Some(p) => p,
+        None => {
+            eprintln!("错误: 缺少输入文件");
+            exit(1);
+        }
+    };
+    let source = match std::fs::read_to_string(input) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("错误: 无法读取 {}: {}", input, e);
+            exit(1);
+        }
+    };
+    let mut lexer = Lexer::new(&source);
     let tokens = lexer.tokenize();
-    for err in lexer.errors() {
-        eprintln!(
-            "lex error [{}]: {}\n{}",
-            err.span,
-            err.message,
-            sm.snippet(file, &err.span)
-        );
+    for t in &tokens {
+        println!("{:?}", t.kind);
     }
+    if !lexer.errors().is_empty() {
+        for e in lexer.errors() {
+            eprintln!("[词法] {}", e.message);
+        }
+        exit(1);
+    }
+}
 
+fn cmd_ast(args: &[String]) {
+    let input = match first_positional(args, "--source") {
+        Some(p) => p,
+        None => {
+            eprintln!("错误: 缺少输入文件");
+            exit(1);
+        }
+    };
+    let source = match std::fs::read_to_string(input) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("错误: 无法读取 {}: {}", input, e);
+            exit(1);
+        }
+    };
+    let mut lexer = Lexer::new(&source);
+    let tokens = lexer.tokenize();
     let mut parser = Parser::new(tokens);
     let program = parser.parse_program();
-
-    for err in parser.errors() {
-        let sev = match err.severity {
-            ErrorSeverity::Error => "error",
-            ErrorSeverity::Warning => "warning",
-            ErrorSeverity::Info => "info",
-        };
-        eprintln!(
-            "parse {:<7} {}\n{}",
-            sev,
-            err.message,
-            sm.snippet(file, &err.span)
-        );
-    }
-
     println!("{:#?}", program);
-    println!("\n{} declaration(s)", program.declarations.len());
-
     if !parser.errors().is_empty() {
-        ExitCode::from(1)
-    } else {
-        ExitCode::SUCCESS
+        for e in parser.errors() {
+            eprintln!("[语法] {}", e.message);
+        }
+        exit(1);
     }
 }
 
-fn run_check(source: &str, sm: &SourceMap, file: FileId) -> ExitCode {
-    use aura_compiler::sema::analyze_source;
-
-    let mut lexer = Lexer::new(source);
-    let tokens = lexer.tokenize();
-    let mut any_err = false;
-
-    for err in lexer.errors() {
-        any_err = true;
-        eprintln!(
-            "lex     error [{}]: {}\n{}",
-            err.span,
-            err.message,
-            sm.snippet(file, &err.span)
-        );
-    }
-
-    let mut parser = Parser::new(tokens);
-    parser.parse_program();
-    for err in parser.errors() {
-        any_err = true;
-        eprintln!(
-            "parse   error [{}]: {}\n{}",
-            err.span,
-            err.message,
-            sm.snippet(file, &err.span)
-        );
-    }
-
-    // 语义分析（P3）
-    let (_program, sema_result) = analyze_source(source);
-    for err in &sema_result.errors {
-        any_err |= err.severity == ErrorSeverity::Error;
-        eprintln!("semantic {}", err.render(sm, file));
-    }
-
-    if any_err {
-        eprintln!("FAIL");
-        ExitCode::from(1)
-    } else {
-        println!("OK");
-        ExitCode::SUCCESS
-    }
+fn cmd_fmt(_args: &[String]) {
+    eprintln!("`aura fmt` 尚未实现");
+    exit(1);
 }
