@@ -7,6 +7,7 @@ pub mod sema;
 pub mod source_map;
 pub mod span;
 pub mod token;
+pub mod vm;
 
 pub use ast::*;
 pub use errors::{CompileError, ErrorSeverity};

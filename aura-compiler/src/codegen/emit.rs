@@ -61,11 +61,16 @@ fn emit_function(
     fn_index: &HashMap<&str, u16>,
     native_index: &HashMap<&str, u16>,
 ) -> Vec<u8> {
+    // 基本块布局：保证每个 `If` 的 `then` 块紧跟其条件块之后，
+    // 这样 `JumpIfFalse(else)` 后自然 fallthrough 到 `then`，与块的物理创建顺序无关。
+    let order = layout_blocks(f);
+
     // 第一遍：计算每个块的起始字节偏移
     let mut block_offsets = vec![0usize; f.blocks.len()];
     let mut off = 0usize;
-    for b in &f.blocks {
-        block_offsets[b.id] = off;
+    for &bid in &order {
+        let b = &f.blocks[bid];
+        block_offsets[bid] = off;
         for instr in &b.instrs {
             off += instr_size(instr);
         }
@@ -74,7 +79,8 @@ fn emit_function(
 
     // 第二遍：发射
     let mut code = Vec::with_capacity(off);
-    for b in &f.blocks {
+    for &bid in &order {
+        let b = &f.blocks[bid];
         for instr in &b.instrs {
             emit_instr(&mut code, instr, fn_index, native_index);
         }
@@ -105,6 +111,48 @@ fn emit_function(
     code
 }
 
+/// 计算基本块的发射顺序，使得每个 `If` 的 `then` 块紧邻其条件块之后。
+///
+/// 理由：字节码发射时 `Terminator::If` 依赖「顺序落入 then」的 fallthrough 语义，
+/// 而 MIR 降级（尤其是嵌套控制流 / LICM 插入前置块）并不保证块在数组中的物理顺序
+/// 与 fallthrough 一致。`emit` 仅使用绝对字节偏移作为跳转目标，因此只要
+/// then 块在 `order` 中紧随其条件块，`JumpIfFalse(else)` 的 fallthrough 即正确。
+fn layout_blocks(f: &MirFunction) -> Vec<usize> {
+    let n = f.blocks.len();
+    let mut order: Vec<usize> = Vec::with_capacity(n);
+    let mut visited = vec![false; n];
+    let mut pending: Vec<usize> = vec![0]; // 待处理的 trace 起点（如 if 的 else 分支）
+    while let Some(start) = pending.pop() {
+        if visited[start] {
+            continue;
+        }
+        // 沿 trace 向下：If 优先走 then（fallthrough），else 压入 pending 稍后处理；
+        // Goto 顺次前进；Return/已访问块停止当前 trace。
+        let mut cur = start;
+        while !visited[cur] {
+            visited[cur] = true;
+            order.push(cur);
+            match &f.blocks[cur].term {
+                Terminator::If {
+                    then_b, else_b, ..
+                } => {
+                    pending.push(*else_b);
+                    cur = *then_b;
+                }
+                Terminator::Goto(t) => cur = *t,
+                Terminator::Return(_) | Terminator::ReturnVoid => break,
+            }
+        }
+    }
+    // 兜底：理论上所有块均从入口可达；若有遗漏按 id 顺序补齐
+    for i in 0..n {
+        if !visited[i] {
+            order.push(i);
+        }
+    }
+    order
+}
+
 /// 单条 MIR 指令发射为字节码后的精确字节数（必须与 `emit_instr` 完全一致）
 fn instr_size(instr: &crate::codegen::mir::MirInstr) -> usize {
     use crate::codegen::mir::MirInstr::*;
@@ -132,6 +180,10 @@ fn instr_size(instr: &crate::codegen::mir::MirInstr) -> usize {
         GetField { .. } => 9,
         // SetField：LoadVar(src) + LoadVar(obj) + SetField(3) = 9
         SetField { .. } => 9,
+        // GetIndex：LoadVar(obj) + LoadVar(idx) + GetIndex(1) + StoreVar(3) = 10
+        GetIndex { .. } => 10,
+        // SetIndex：LoadVar(src) + LoadVar(obj) + LoadVar(idx) + SetIndex(1) = 10
+        SetIndex { .. } => 10,
     }
 }
 
@@ -248,6 +300,19 @@ fn emit_instr(
             OpCode::LoadVar(*obj as u16).write(code);
             let idx = field_index(field);
             OpCode::SetField(idx).write(code);
+        }
+        GetIndex { dst, obj, idx } => {
+            OpCode::LoadVar(*obj as u16).write(code);
+            OpCode::LoadVar(*idx as u16).write(code);
+            OpCode::GetIndex.write(code);
+            OpCode::StoreVar(*dst as u16).write(code);
+        }
+        SetIndex { obj, idx, src } => {
+            // 栈布局：值在下、索引在顶（与 SetField 的「值、对象」顺序一致扩展）
+            OpCode::LoadVar(*src as u16).write(code);
+            OpCode::LoadVar(*obj as u16).write(code);
+            OpCode::LoadVar(*idx as u16).write(code);
+            OpCode::SetIndex.write(code);
         }
     }
 }

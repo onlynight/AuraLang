@@ -87,6 +87,10 @@ pub enum OpCode {
     GetField(u16),
     /// 设置字段 `idx`，栈顶为值、其下为对象引用
     SetField(u16),
+    /// 数组元素读取：栈顶为索引、其下为数组引用，结果压栈
+    GetIndex,
+    /// 数组元素写入：栈顶为索引、其下为数组引用、再下为待写入值
+    SetIndex,
 
     // ── 引用计数 ──
     IncRef,
@@ -138,6 +142,8 @@ impl OpCode {
             OpCode::NewArray => 31,
             OpCode::GetField(_) => 32,
             OpCode::SetField(_) => 33,
+            OpCode::GetIndex => 38,
+            OpCode::SetIndex => 39,
             OpCode::IncRef => 34,
             OpCode::DecRef => 35,
             OpCode::CallC(_) => 36,
@@ -191,6 +197,8 @@ impl OpCode {
             31 => OpCode::NewArray,
             32 => OpCode::GetField(0),
             33 => OpCode::SetField(0),
+            38 => OpCode::GetIndex,
+            39 => OpCode::SetIndex,
             34 => OpCode::IncRef,
             35 => OpCode::DecRef,
             36 => OpCode::CallC(0),
@@ -257,6 +265,8 @@ impl fmt::Display for OpCode {
             OpCode::NewArray => write!(f, "NEW_ARRAY"),
             OpCode::GetField(i) => write!(f, "GET_FIELD {}", i),
             OpCode::SetField(i) => write!(f, "SET_FIELD {}", i),
+            OpCode::GetIndex => write!(f, "GET_INDEX"),
+            OpCode::SetIndex => write!(f, "SET_INDEX"),
             OpCode::IncRef => write!(f, "INC_REF"),
             OpCode::DecRef => write!(f, "DEC_REF"),
             OpCode::CallC(i) => write!(f, "CALL_C {}", i),

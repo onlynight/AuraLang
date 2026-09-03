@@ -4,3 +4,6 @@ target/
 *.snap.new
 build_log.txt
 disasm_full.txt
+*.log
+log/
+*.auc

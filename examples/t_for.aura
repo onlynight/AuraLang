@@ -1,0 +1,7 @@
+fun main(): Int {
+    var total = 0
+    for (k in 0..5) {
+        if (k % 2 == 0) { total = total + k }
+    }
+    return total
+}

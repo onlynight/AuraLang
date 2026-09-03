@@ -53,6 +53,10 @@ pub enum MirInstr {
     GetField { dst: Reg, obj: Reg, field: String },
     /// 写入字段：`obj.name = src`
     SetField { obj: Reg, field: String, src: Reg },
+    /// 数组元素读取：`dst = obj[idx]`
+    GetIndex { dst: Reg, obj: Reg, idx: Reg },
+    /// 数组元素写入：`obj[idx] = src`
+    SetIndex { obj: Reg, idx: Reg, src: Reg },
 }
 
 /// 基本块终结指令（控制流）
@@ -278,7 +282,12 @@ impl MirBuilder {
                             src: v,
                         });
                     }
-                    _ => { /* 其它赋值目标（索引等）在 P4 中近似忽略 */ }
+                    HirExpr::Index { container, index } => {
+                        let obj = self.lower_expr(container, ctx);
+                        let i = self.lower_expr(index, ctx);
+                        self.emit(MirInstr::SetIndex { obj, idx: i, src: v });
+                    }
+                    _ => { /* 其它赋值目标暂不支持 */ }
                 }
             }
             HirStmt::Expr(e) => {
@@ -343,7 +352,9 @@ impl MirBuilder {
                 self.lower_block(body, ctx);
                 self.exit_scope();
                 self.loop_stack.pop();
-                if !self.is_closed(body_id) {
+                // 循环体结束的「当前块」可能是嵌套 if 的 merge 块（而非 body_id），
+                // 必须向当前块补一条回边 Goto(cond_id)，否则循环只执行一次。
+                if !self.is_closed(self.current) {
                     self.set_term(Terminator::Goto(cond_id));
                 }
                 self.current = exit_id;
@@ -429,11 +440,7 @@ impl MirBuilder {
                 let c = self.lower_expr(container, ctx);
                 let i = self.lower_expr(index, ctx);
                 let dst = self.alloc_reg();
-                self.emit(MirInstr::CallNative {
-                    dst: Some(dst),
-                    func: "__get".into(),
-                    args: vec![c, i],
-                });
+                self.emit(MirInstr::GetIndex { dst, obj: c, idx: i });
                 dst
             }
             HirExpr::New { type_name, args } => {

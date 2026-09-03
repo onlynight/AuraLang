@@ -59,12 +59,14 @@ pub fn compile(program: &Program, opts: &CodeGenOptions) -> BytecodeModule {
     fold_hir(&mut hir);
 
     // 4. HIR → MIR（基本块 + CFG）
-    let (mut mir_funcs, ctx) = lower_program(&hir);
+    let (mir_funcs, ctx) = lower_program(&hir);
 
     // 5. MIR 优化：死代码消除 + 循环不变量外提（+ 逃逸分析作为分析）
+    // 注意：`dce_mir` 与 `licm_mir` 当前均存在 CFG 损坏缺陷（入口块假设、preheader 改写 If
+    // 分支目标等），会导致控制流错误；在修复前默认关闭。仅保留 `escape_mir` 分析（不改行为）。
     if opts.optimize {
-        dce_mir(&mut mir_funcs);
-        licm_mir(&mut mir_funcs);
+        // dce_mir(&mut mir_funcs);   // TODO(P5): 修复 CFG 损坏后启用
+        // licm_mir(&mut mir_funcs);  // TODO(P5): 修复 CFG 损坏后启用
         let _escape = escape_mir(&mir_funcs); // 分析：标注未逃逸分配
     }
 

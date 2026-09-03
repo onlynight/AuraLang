@@ -14,6 +14,7 @@ use std::process::exit;
 use aura_compiler::codegen::{
     compile_source, disassemble, read_auc, to_bytes, write_auc, SerializeError,
 };
+use aura_compiler::vm::{Vm, VmOptions};
 use aura_compiler::lexer::Lexer;
 use aura_compiler::parser::Parser;
 use aura_compiler::sema::analyze_source;
@@ -143,9 +144,67 @@ fn cmd_disasm(args: &[String]) {
     }
 }
 
-fn cmd_run(_args: &[String]) {
-    eprintln!("`aura run` 尚未实现（依赖 P5 虚拟机）");
-    exit(1);
+fn cmd_run(args: &[String]) {
+    let use_jit = args.iter().any(|a| a == "--jit");
+    let input = first_positional(args, "--jit").or_else(|| first_positional(args, "--output"));
+
+    let input = match input {
+        Some(p) => p,
+        None => {
+            eprintln!("错误: 缺少输入文件");
+            exit(1);
+        }
+    };
+
+    // 加载字节码：`.auc` 直接读取，`.aura` 先编译
+    let module = if input.ends_with(".auc") {
+        match read_auc(input) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("错误: 无法读取字节码 {}: {}", input, e);
+                exit(1);
+            }
+        }
+    } else {
+        let source = match std::fs::read_to_string(input) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("错误: 无法读取 {}: {}", input, e);
+                exit(1);
+            }
+        };
+        match compile_source(&source) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("编译失败:\n{}", e);
+                exit(1);
+            }
+        }
+    };
+
+    let opts = VmOptions {
+        jit: use_jit,
+        ..Default::default()
+    };
+    let mut vm = match Vm::new(&module, opts) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("VM 初始化失败: {}", e);
+            exit(1);
+        }
+    };
+
+    match vm.run() {
+        Ok(result) => {
+            if !matches!(result, aura_compiler::vm::Value::Null) {
+                println!("{}", result);
+            }
+        }
+        Err(e) => {
+            eprintln!("运行时错误: {}", e);
+            exit(1);
+        }
+    }
 }
 
 fn cmd_check(args: &[String]) {
