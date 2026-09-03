@@ -2,6 +2,7 @@
 //!
 //! 子命令：
 //! - `aura build <file.aura> [--output <out.auc>]`  编译为字节码 `.auc`
+//! - `aura build <file.aura> --aot [--output <exe>]`  AOT 编译为原生可执行文件
 //! - `aura run <file.aura>`                          编译并执行（预留，依赖 VM）
 //! - `aura check <file.aura>`                        仅做语法/语义检查
 //! - `aura disasm <file.auc> [--source <file.aura>]` 反汇编 `.auc` 为可读汇编
@@ -18,6 +19,9 @@ use aura_compiler::vm::{Vm, VmOptions};
 use aura_compiler::lexer::Lexer;
 use aura_compiler::parser::Parser;
 use aura_compiler::sema::analyze_source;
+
+#[cfg(feature = "llvm")]
+use aura_compiler::codegen::aot::{AotOptions, OptimizationLevel, TargetTriple};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -50,7 +54,12 @@ fn print_usage() {
         "Aura 语言工具链\n\
 \n\
 用法:\n\
-  aura build <file.aura> [--output <out.auc>]   编译为字节码 .auc\n\
+  aura build <file.aura> [--output <out>]        编译为字节码 .auc / 原生可执行文件\n\
+  aura build <file.aura> --aot [--output <exe>]  AOT 编译为原生可执行文件\n\
+    [--target <triple>]   目标三元组（如 aarch64-unknown-linux-gnu）\n\
+    [--opt <level>]       优化级别（0/1/2/3/s/z，默认 2）\n\
+    [--emit-llvm]         仅生成 LLVM IR（.ll）\n\
+    [--debug]             生成 DWARF 调试信息\n\
   aura run <file.aura>                          编译并执行（依赖 VM）\n\
   aura check <file.aura>                        仅做语法/语义检查\n\
   aura disasm <file.auc> [--source <f.aura>]    反汇编 .auc 为可读汇编\n\
@@ -77,6 +86,21 @@ fn first_positional<'a>(args: &'a [String], skip: &'a str) -> Option<&'a String>
 }
 
 fn cmd_build(args: &[String]) {
+    // AOT 模式（--aot）
+    if args.iter().any(|a| a == "--aot") {
+        #[cfg(feature = "llvm")]
+        {
+            cmd_build_aot(args);
+            return;
+        }
+        #[cfg(not(feature = "llvm"))]
+        {
+            eprintln!("错误: llvm feature 未启用，无法进行 AOT 编译");
+            eprintln!("提示: 使用 `cargo build --features llvm` 重新构建 aura-compiler");
+            exit(1);
+        }
+    }
+
     let output = extract_opt(args, "--output");
     let input = match first_positional(args, "--output") {
         Some(p) => p,
@@ -114,6 +138,185 @@ fn cmd_build(args: &[String]) {
         module.functions.len(),
         module.consts.len()
     );
+}
+
+/// AOT 编译（LLVM 后端）
+#[cfg(feature = "llvm")]
+fn cmd_build_aot(args: &[String]) {
+    let input = match first_positional(args, "--aot") {
+        Some(p) => p,
+        None => {
+            eprintln!("错误: 缺少输入文件");
+            exit(1);
+        }
+    };
+
+    let source = match std::fs::read_to_string(input) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("错误: 无法读取 {}: {}", input, e);
+            exit(1);
+        }
+    };
+
+    // 目标三元组
+    let target_str = extract_opt(args, "--target");
+    let target = match target_str {
+        Some(t) => match TargetTriple::from_str(&t) {
+            Some(tt) => tt,
+            None => {
+                eprintln!("错误: 不支持的目标三元组: {}", t);
+                eprintln!("支持格式: x86_64-pc-windows-msvc / aarch64-unknown-linux-gnu / armv7-unknown-linux-gnueabihf");
+                exit(1);
+            }
+        },
+        None => TargetTriple::default(),
+    };
+    let is_windows_target = {
+        use aura_compiler::codegen::aot::OperatingSystem;
+        target.os == OperatingSystem::Windows
+    };
+
+    // 优化级别
+    let opt_str = extract_opt(args, "--opt");
+    let opt_level = match opt_str {
+        Some(s) => match OptimizationLevel::from_str(&s) {
+            Some(l) => l,
+            None => {
+                eprintln!("错误: 无效的优化级别: {}（支持 0/1/2/3/s/z）", s);
+                exit(1);
+            }
+        },
+        None => OptimizationLevel::default(),
+    };
+
+    // 输出格式
+    let emit_llvm = args.iter().any(|a| a == "--emit-llvm");
+
+    // 调试信息（DWARF 元数据）
+    let debug_enabled = args.iter().any(|a| a == "--debug");
+
+    let mut options = AotOptions {
+        target,
+        opt_level,
+        debug_info: debug_enabled,
+        ..Default::default()
+    };
+
+    // 默认使用宿主 LLVM 安装（可从环境变量获取）
+    if let Ok(home) = std::env::var("AURA_LLVM_HOME") {
+        options.llvm_home = Some(home.into());
+    }
+
+    let out_path = extract_opt(args, "--output")
+        .map(|s| std::path::PathBuf::from(s))
+        .unwrap_or_else(|| {
+            let exe_name = if emit_llvm {
+                format!("{}.ll", default_output_base(input))
+            } else {
+                format!(
+                    "{}{}",
+                    default_output_base(input),
+                    if is_windows_target { ".exe" } else { "" }
+                )
+            };
+            std::path::PathBuf::from(exe_name)
+        });
+
+    // 创建输出目录（如有）
+    if let Some(dir) = out_path.parent() {
+        if !dir.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+    }
+
+    // 解析并生成 LLVM IR
+    let mut lexer = Lexer::new(&source);
+    let tokens = lexer.tokenize();
+    if let Some(e) = lexer.errors().first() {
+        eprintln!("错误: [词法] {}", e.message);
+        exit(1);
+    }
+    let mut parser = Parser::new(tokens);
+    let program = parser.parse_program();
+    if let Some(e) = parser.errors().first() {
+        eprintln!("错误: [语法] {}", e.message);
+        exit(1);
+    }
+
+    let hir = aura_compiler::codegen::hir::desugar_program(&program);
+    let codegen = aura_compiler::codegen::aot::AotCodeGenerator::new(options.clone());
+    let ir = match codegen.generate_ir(&hir) {
+        Ok(ir) => ir,
+        Err(e) => {
+            eprintln!("错误: AOT IR 生成失败: {}", e);
+            exit(1);
+        }
+    };
+
+    if emit_llvm {
+        // 仅输出 LLVM IR
+        if let Err(e) = std::fs::write(&out_path, &ir) {
+            eprintln!("错误: 无法写入 {}: {}", out_path.display(), e);
+            exit(1);
+        }
+        println!("✓ AOT 编译完成（LLVM IR）: {}", out_path.display());
+        return;
+    }
+
+    // 完整 AOT：写 .ll → llc → link
+    // 在临时目录生成中间产物
+    let tmp_dir = std::env::temp_dir().join(format!("aura_aot_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+    let ll_path = tmp_dir.join("module.ll");
+    if let Err(e) = std::fs::write(&ll_path, &ir) {
+        eprintln!("错误: 无法写入临时 IR: {}", e);
+        exit(1);
+    }
+
+    match finish_executable(&ll_path, &out_path, &options) {
+        Ok(()) => {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            println!("✓ AOT 编译完成: {}", out_path.display());
+        }
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            eprintln!("错误: AOT 编译失败: {}", e);
+            exit(1);
+        }
+    }
+}
+
+/// 完成可执行文件生成（llc + link）
+#[cfg(feature = "llvm")]
+fn finish_executable(
+    ll_path: &std::path::Path,
+    exe_path: &std::path::Path,
+    options: &AotOptions,
+) -> Result<(), String> {
+    use aura_compiler::codegen::aot::linker::{link_to_executable, link_to_object};
+
+    // 中间对象文件
+    let obj_path = ll_path.with_extension(if cfg!(target_os = "windows") {
+        "obj"
+    } else {
+        "o"
+    });
+
+    link_to_object(ll_path, &obj_path, options)
+        .map_err(|e| e.to_string())?;
+
+    link_to_executable(&obj_path, exe_path, options)
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+/// 输出文件基名（去掉扩展名）
+#[cfg(feature = "llvm")]
+fn default_output_base(input: &str) -> String {
+    let base = input.trim_end_matches(".aura").trim_end_matches(".AURA");
+    base.to_string()
 }
 
 fn default_output(input: &str) -> String {

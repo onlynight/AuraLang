@@ -22,6 +22,10 @@ pub mod opcode;
 pub mod opt;
 pub mod serialize;
 
+// AOT（LLVM）后端（P6）
+#[cfg(feature = "llvm")]
+pub mod aot;
+
 pub use disasm::disassemble;
 pub use emit::{emit_module, find_const};
 pub use hir::{desugar_program, HirProgram};
@@ -31,7 +35,39 @@ pub use opcode::{BytecodeFunction, BytecodeModule, BytecodeNative, Const, OpCode
 pub use opt::{dce_mir, escape_mir, fold_hir, inline_hir, licm_mir};
 pub use serialize::{from_bytes, read_auc, to_bytes, write_auc, SerializeError};
 
+#[cfg(feature = "llvm")]
+pub use aot::{
+    aot_compile, AotCodeGenerator, AotError, AotOptions, AotOutput, OutputFormat,
+};
+
 use crate::ast::Program;
+
+/// AOT / LLVM 后端统一错误类型（对外）
+#[derive(Debug)]
+pub enum CodegenError {
+    Aot(String),
+    Bytecode(String),
+    Other(String),
+}
+
+impl std::fmt::Display for CodegenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CodegenError::Aot(s) => write!(f, "AOT 错误: {s}"),
+            CodegenError::Bytecode(s) => write!(f, "字节码发射失败: {s}"),
+            CodegenError::Other(s) => write!(f, "{s}"),
+        }
+    }
+}
+
+impl std::error::Error for CodegenError {}
+
+#[cfg(feature = "llvm")]
+impl From<aot::AotError> for CodegenError {
+    fn from(e: aot::AotError) -> Self {
+        CodegenError::Aot(e.to_string())
+    }
+}
 
 /// 代码生成选项
 #[derive(Debug, Clone)]

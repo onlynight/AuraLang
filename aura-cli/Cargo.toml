@@ -9,3 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 aura-compiler = { path = "../aura-compiler" }
+
+[features]
+# AOT 编译支持（转发 aura-compiler 的 llvm feature）
+llvm = ["aura-compiler/llvm"]

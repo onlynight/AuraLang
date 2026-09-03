@@ -1,0 +1,267 @@
+//! 目标代码生成与链接
+//!
+//! 对应 技术方案 §9.5.2 / §9.5.3 ObjectGenerator + 交叉编译。
+//!
+//! 本模块通过调用外部 `llc`（LLVM 静态编译器）和 `clang`（LLVM 编译器）
+//! 将生成的 LLVM IR 编译为目标文件或可执行文件。
+//!
+//! 工具路径探测：
+//! 1. `AotOptions.llvm_home` 显式指定
+//! 2. 环境变量 `AURA_LLVM_HOME`（由 build.rs 检测设置）
+//! 3. 环境变量 `PATH`（系统 PATH 中的 llc / clang）
+//!
+//! 交叉编译通过 `-mtriple` 参数传递给 llc / clang。
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use super::error::AotError;
+use super::target::TargetTriple;
+use super::AotOptions;
+
+/// 调用外部 LLVM 工具的错误
+#[derive(Debug)]
+pub struct LlvmToolError {
+    pub tool: String,
+    pub status: std::process::ExitStatus,
+    pub stderr: String,
+}
+
+impl std::fmt::Display for LlvmToolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} 执行失败 (exit code {:?}): {}",
+            self.tool, self.status, self.stderr
+        )
+    }
+}
+
+impl std::error::Error for LlvmToolError {}
+
+/// LLVM 工具调用结果
+pub type LlvmToolResult<T> = std::result::Result<T, LlvmToolError>;
+
+/// 查找 LLVM 工具二进制
+fn find_tool<'a>(name: &str, options: &'a AotOptions) -> Option<PathBuf> {
+    // 1. 显式指定的 llvm_home
+    if let Some(ref home) = options.llvm_home {
+        let path = home.join("bin").join(format!(
+            "{}{}",
+            name,
+            if cfg!(target_os = "windows") { ".exe" } else { "" }
+        ));
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    // 2. 环境变量
+    if let Ok(home) = std::env::var("AURA_LLVM_HOME") {
+        let path = PathBuf::from(home)
+            .join("bin")
+            .join(format!(
+                "{}{}",
+                name,
+                if cfg!(target_os = "windows") { ".exe" } else { "" }
+            ));
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    // 3. PATH
+    if let Ok(output) = Command::new("where").arg(name).output() {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if let Some(first) = stdout.lines().next() {
+                if !first.trim().is_empty() {
+                    return Some(PathBuf::from(first.trim()));
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    if let Ok(output) = Command::new("which").arg(name).output() {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if let Some(first) = stdout.lines().next() {
+                if !first.trim().is_empty() {
+                    return Some(PathBuf::from(first.trim()));
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// 构建通用的 LLVM 工具命令
+fn build_command(
+    tool: &str,
+    options: &AotOptions,
+) -> Result<Command, AotError> {
+    let tool_path = find_tool(tool, options).ok_or_else(|| {
+        AotError::ToolError(format!(
+            "找不到 LLVM 工具 '{}'，请设置 AURA_LLVM_HOME 或将 LLVM bin 加入 PATH",
+            tool
+        ))
+    })?;
+
+    let mut cmd = Command::new(tool_path);
+
+    // 目标三元组：llc 使用 `-mtriple`，clang 使用 `--target`（或 `-target`）
+    if tool == "llc" {
+        cmd.arg("-mtriple").arg(options.target.to_string());
+    } else {
+        cmd.arg("--target").arg(options.target.to_string());
+    }
+
+    Ok(cmd)
+}
+
+/// 将 `.ll` 文件编译为 `.o` 目标文件（通过 `llc`）
+pub fn link_to_object(
+    ll_path: &Path,
+    object_path: &Path,
+    options: &AotOptions,
+) -> Result<(), AotError> {
+    let mut cmd = build_command("llc", options)?;
+    cmd.arg(ll_path)
+        .arg("-o")
+        .arg(object_path)
+        .arg(options.opt_level.as_llvm_flag())
+        .arg("-filetype=obj");
+
+    // 调试信息
+    if options.debug_info {
+        cmd.arg("-g");
+    }
+
+    run_and_report(&mut cmd, "llc")?;
+    Ok(())
+}
+
+/// 将 `.ll` 或 `.o` 文件链接为可执行文件
+///
+/// - Windows：优先使用 `clang`（自带 MSVC 运行库，正确解析 `__chkstk` 等
+///   栈探测符号）；若 clang 不可用则回退 `lld-link`（需 `/entry` + `/subsystem`）
+/// - Linux/macOS：使用 `clang`（自动选择合适的链接器）
+pub fn link_to_executable(
+    input_path: &Path,
+    exe_path: &Path,
+    options: &AotOptions,
+) -> Result<(), AotError> {
+    #[cfg(target_os = "windows")]
+    {
+        use super::target::OperatingSystem;
+        if options.target.os == OperatingSystem::Windows {
+            // 优先 clang：它链接 MSVC CRT，自动提供 `__chkstk`（大栈帧必需）
+            if let Some(clang_path) = find_tool("clang", options) {
+                let mut cmd = Command::new(clang_path);
+                cmd.arg(input_path)
+                    .arg("-o")
+                    .arg(exe_path)
+                    .arg(options.opt_level.as_llvm_flag());
+                run_and_report(&mut cmd, "clang")?;
+                return Ok(());
+            }
+            // 回退 lld-link（不提供 __chkstk，仅适用于小栈帧程序）
+            let tool_path = find_tool("lld-link", options).ok_or_else(|| {
+                AotError::ToolError(
+                    "找不到 clang 或 lld-link，请设置 AURA_LLVM_HOME 或将 LLVM bin 加入 PATH".to_string(),
+                )
+            })?;
+            let mut cmd = Command::new(tool_path);
+            cmd.arg(input_path)
+                .arg(format!("/out:{}", exe_path.display()))
+                .arg("/entry:main")
+                .arg("/subsystem:console");
+            run_and_report(&mut cmd, "lld-link")?;
+            return Ok(());
+        }
+    }
+
+    // 非 Windows 目标或非 Windows 主机：用 clang
+    let mut cmd = build_command("clang", options)?;
+    cmd.arg(input_path)
+        .arg("-o")
+        .arg(exe_path)
+        .arg(options.opt_level.as_llvm_flag());
+
+    run_and_report(&mut cmd, "clang")?;
+    Ok(())
+}
+
+/// 执行命令并报告结果
+fn run_and_report(cmd: &mut Command, tool_name: &str) -> Result<(), AotError> {
+    let output = cmd.output().map_err(|e| {
+        AotError::ToolError(format!("无法启动 {}: {}", tool_name, e))
+    })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        return Err(AotError::LinkerFailed(format!(
+            "{} 失败:\nstdout: {}\nstderr: {}",
+            tool_name, stdout, stderr
+        )));
+    }
+
+    Ok(())
+}
+
+/// 获取当前 AOT 后端使用的 LLVM 工具路径（调试用）
+pub fn tool_paths(options: &AotOptions) -> (Option<PathBuf>, Option<PathBuf>) {
+    let llc = find_tool("llc", options);
+    let clang = find_tool("clang", options);
+    (llc, clang)
+}
+
+/// 交叉编译配置（供高级用户使用）
+#[derive(Debug, Clone)]
+pub struct CrossCompilationConfig {
+    /// 目标三元组
+    pub target_triple: TargetTriple,
+    /// sysroot 路径（交叉编译工具链根目录）
+    pub sysroot: Option<PathBuf>,
+    /// 链接器路径
+    pub linker: Option<PathBuf>,
+    /// C 标准库路径
+    pub c_stdlib: Option<PathBuf>,
+}
+
+impl CrossCompilationConfig {
+    /// 为树莓派 4（aarch64）创建配置
+    pub fn for_raspberry_pi4(sysroot: Option<PathBuf>) -> Self {
+        Self {
+            target_triple: TargetTriple::linux_aarch64(),
+            sysroot: sysroot.clone(),
+            linker: Some(PathBuf::from("aarch64-linux-gnu-gcc")),
+            c_stdlib: sysroot.as_ref().map(|s| s.join("usr").join("lib")),
+        }
+    }
+
+    /// 为树莓派 3 / Zero 2（armv7）创建配置
+    pub fn for_raspberry_pi3(sysroot: Option<PathBuf>) -> Self {
+        Self {
+            target_triple: TargetTriple::linux_armv7(),
+            sysroot: sysroot.clone(),
+            linker: Some(PathBuf::from("arm-linux-gnueabihf-gcc")),
+            c_stdlib: sysroot.as_ref().map(|s| s.join("usr").join("lib")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_find_tool_no_llvm() {
+        // 在没有设置 AURA_LLVM_HOME 的情况下，find_tool 应该返回 None
+        let options = AotOptions::default();
+        // 这里仅检查不 panic
+        let _ = find_tool("llc", &options);
+    }
+}

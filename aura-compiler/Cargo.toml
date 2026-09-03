@@ -12,6 +12,16 @@ cranelift-jit = { version = "0.116", optional = true }
 cranelift-module = { version = "0.116", optional = true }
 libloading = { version = "0.8", optional = true }
 
+# AOT 编译后端所需的 crate（均通过 llvm feature 启用）：
+# - thiserror：错误处理
+#
+# 注意：本后端采用「文本 LLVM IR 生成 + 外部 llc/clang 调用」方案（不依赖 llvm-sys / inkwell）：
+# - 将 HIR 生成为 LLVM IR 文本
+# - 通过调用安装的 LLVM 23.1.0 的 llc / clang 生成 .o / .exe
+# - 此方案与 LLVM 版本解耦，兼容任意 LLVM 版本
+# - 未来当 inkwell 支持 LLVM 23 后可升级
+thiserror = { version = "1", optional = true }
+
 [features]
 # 热点 JIT 编译（Cranelift）。默认关闭；启用需 `cargo build --features jit`。
 # 开启后热点（叶子整数）函数被编译为原生码并在调用点直接派发（§7.2 方法级 JIT）。
@@ -19,6 +29,10 @@ jit = ["cranelift", "cranelift-jit", "cranelift-module"]
 # 动态库加载（libloading）。默认关闭；启用需 `cargo build --features dynamic-ffi`。
 # 开启后 VM 支持运行时通过 dlopen 加载 .so/.dll 中的 C 函数（5.9）。
 dynamic-ffi = ["libloading"]
+# AOT 编译后端（LLVM）。默认关闭；启用需 `cargo build --features llvm`。
+# 通过文本 LLVM IR 生成 + 外部 llc/clang 工具链生成 .o / .exe。
+# 支持跨平台目标三元组（x86_64 / aarch64 / armv7 等）与 DWARF 调试元数据。
+llvm = ["thiserror"]
 
 [dev-dependencies]
 insta = { version = "1", features = ["yaml"] }

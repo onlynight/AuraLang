@@ -426,7 +426,7 @@ impl Vm {
             opts,
             #[cfg(feature = "jit")]
             jit: if cfg!(feature = "jit") {
-                Some(cranelift::vm::jit::JitState::new())
+                Some(crate::vm::jit::JitState::new())
             } else {
                 None
             },
@@ -526,6 +526,27 @@ impl Vm {
     /// 各函数调用计数快照（诊断）
     pub fn call_counts(&self) -> &[u64] {
         &self.call_counts
+    }
+
+    /// JIT 状态快照（诊断，仅 jit feature）：返回每个函数是否已编译 / 已跳过
+    #[cfg(feature = "jit")]
+    pub fn jit_state(&self) -> Vec<(bool, bool)> {
+        let n = self.module.funcs.len();
+        (0..n)
+            .map(|i| {
+                let compiled = self
+                    .jit
+                    .as_ref()
+                    .map(|j| j.is_compiled(i))
+                    .unwrap_or(false);
+                let skipped = self
+                    .jit
+                    .as_ref()
+                    .map(|j| j.is_skipped(i))
+                    .unwrap_or(false);
+                (compiled, skipped)
+            })
+            .collect()
     }
 
     /// 热点编译接缝（5.12）：当 `jit` feature 且 `opts.jit` 开启时，
