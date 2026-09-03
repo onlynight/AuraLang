@@ -1,0 +1,40 @@
+// NovaOS 示例：Aura 语言语法验证
+import std.io.println
+
+struct Player(
+    val id: Int,
+    var name: String = "unknown",
+    var health: Int = 100
+)
+
+enum Color {
+    RED,
+    GREEN,
+    BLUE,
+    CUSTOM(val r: Int, val g: Int, val b: Int)
+}
+
+fun add(a: Int, b: Int): Int {
+    return a + b
+}
+
+fun greet(name: String): String = "Hello, $name!"
+
+fun main() {
+    val player = Player(1, "Alice", 50)
+    var score: Int = 0
+
+    for (i in 0..10) {
+        score += i
+    }
+
+    val result = when (score) {
+        0 -> "zero"
+        in 1..50 -> "low"
+        51..100 -> "high"
+        else -> "extreme"
+    }
+
+    val msg = "Score: ${score * 2}"
+    println(msg)
+}

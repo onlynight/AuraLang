@@ -1,0 +1,6 @@
+---
+source: aura-compiler/tests/snapshots.rs
+expression: "token_dump(\"\\\"hello $name, sum = ${a + b}\\\"\")"
+---
+StringLiteral("hello name, sum = a + b") @1:1
+EOF

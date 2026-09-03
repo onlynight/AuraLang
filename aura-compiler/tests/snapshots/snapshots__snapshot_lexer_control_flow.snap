@@ -1,0 +1,24 @@
+---
+source: aura-compiler/tests/snapshots.rs
+expression: "token_dump(\"for (i in 0..10) { if (i % 2 == 0) continue }\")"
+---
+For("for") @1:1
+LParen("(") @1:5
+Ident("i") @1:6
+In("in") @1:8
+IntLiteral("0") @1:11
+DoubleDotOp("..") @1:12
+IntLiteral("10") @1:14
+RParen(")") @1:16
+LBrace("{") @1:18
+If("if") @1:20
+LParen("(") @1:23
+Ident("i") @1:24
+Percent("%") @1:26
+IntLiteral("2") @1:28
+EqEq("==") @1:30
+IntLiteral("0") @1:33
+RParen(")") @1:34
+Continue("continue") @1:36
+RBrace("}") @1:45
+EOF

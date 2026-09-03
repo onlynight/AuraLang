@@ -1,0 +1,24 @@
+---
+source: aura-compiler/tests/snapshots.rs
+expression: "token_dump(\"fun add(a: Int, b: Int): Int { return a + b }\")"
+---
+Fun("fun") @1:1
+Ident("add") @1:5
+LParen("(") @1:8
+Ident("a") @1:9
+Colon(":") @1:10
+Ident("Int") @1:12
+Comma(",") @1:15
+Ident("b") @1:17
+Colon(":") @1:18
+Ident("Int") @1:20
+RParen(")") @1:23
+Colon(":") @1:24
+Ident("Int") @1:26
+LBrace("{") @1:30
+Return("return") @1:32
+Ident("a") @1:39
+Plus("+") @1:41
+Ident("b") @1:43
+RBrace("}") @1:45
+EOF

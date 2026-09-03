@@ -1,0 +1,234 @@
+---
+source: aura-compiler/tests/snapshots.rs
+expression: "ast_dump(\"fun grade(score: Int): String { return when (score) { in 90..100 -> \\\"A\\\" else -> \\\"F\\\" } }\")"
+---
+Program {
+    imports: [],
+    declarations: [
+        Function(
+            FnDecl {
+                visibility: Public,
+                modifiers: [],
+                name: "grade",
+                type_params: [],
+                params: [
+                    Param {
+                        name: "score",
+                        type_hint: Some(
+                            Named {
+                                name: "Int",
+                                span: Span {
+                                    start: 17,
+                                    end: 20,
+                                    start_line: 1,
+                                    start_col: 18,
+                                    end_line: 1,
+                                    end_col: 21,
+                                },
+                            },
+                        ),
+                        default_value: None,
+                        is_vararg: false,
+                        span: Span {
+                            start: 10,
+                            end: 20,
+                            start_line: 1,
+                            start_col: 11,
+                            end_line: 1,
+                            end_col: 21,
+                        },
+                    },
+                ],
+                return_type: Some(
+                    Named {
+                        name: "String",
+                        span: Span {
+                            start: 23,
+                            end: 30,
+                            start_line: 1,
+                            start_col: 24,
+                            end_line: 1,
+                            end_col: 31,
+                        },
+                    },
+                ),
+                body: Some(
+                    Block(
+                        [
+                            Expr(
+                                Return {
+                                    value: Some(
+                                        When {
+                                            subject: Some(
+                                                Ident(
+                                                    "score",
+                                                    Span {
+                                                        start: 45,
+                                                        end: 49,
+                                                        start_line: 1,
+                                                        start_col: 46,
+                                                        end_line: 1,
+                                                        end_col: 50,
+                                                    },
+                                                ),
+                                            ),
+                                            arms: [
+                                                WhenArm {
+                                                    patterns: [
+                                                        InRange {
+                                                            range: Range {
+                                                                start: Some(
+                                                                    Literal(
+                                                                        Int(
+                                                                            90,
+                                                                        ),
+                                                                        Span {
+                                                                            start: 57,
+                                                                            end: 59,
+                                                                            start_line: 1,
+                                                                            start_col: 58,
+                                                                            end_line: 1,
+                                                                            end_col: 60,
+                                                                        },
+                                                                    ),
+                                                                ),
+                                                                end: Some(
+                                                                    Literal(
+                                                                        Int(
+                                                                            100,
+                                                                        ),
+                                                                        Span {
+                                                                            start: 61,
+                                                                            end: 64,
+                                                                            start_line: 1,
+                                                                            start_col: 62,
+                                                                            end_line: 1,
+                                                                            end_col: 65,
+                                                                        },
+                                                                    ),
+                                                                ),
+                                                                inclusive: true,
+                                                                span: Span {
+                                                                    start: 57,
+                                                                    end: 67,
+                                                                    start_line: 1,
+                                                                    start_col: 58,
+                                                                    end_line: 1,
+                                                                    end_col: 68,
+                                                                },
+                                                            },
+                                                            span: Span {
+                                                                start: 54,
+                                                                end: 55,
+                                                                start_line: 1,
+                                                                start_col: 55,
+                                                                end_line: 1,
+                                                                end_col: 56,
+                                                            },
+                                                        },
+                                                    ],
+                                                    guard: None,
+                                                    body: Literal(
+                                                        String(
+                                                            "A",
+                                                        ),
+                                                        Span {
+                                                            start: 68,
+                                                            end: 71,
+                                                            start_line: 1,
+                                                            start_col: 69,
+                                                            end_line: 1,
+                                                            end_col: 72,
+                                                        },
+                                                    ),
+                                                    span: Span {
+                                                        start: 54,
+                                                        end: 75,
+                                                        start_line: 1,
+                                                        start_col: 55,
+                                                        end_line: 1,
+                                                        end_col: 76,
+                                                    },
+                                                },
+                                                WhenArm {
+                                                    patterns: [
+                                                        Ident(
+                                                            "else",
+                                                            Span {
+                                                                start: 72,
+                                                                end: 75,
+                                                                start_line: 1,
+                                                                start_col: 73,
+                                                                end_line: 1,
+                                                                end_col: 76,
+                                                            },
+                                                        ),
+                                                    ],
+                                                    guard: None,
+                                                    body: Literal(
+                                                        String(
+                                                            "F",
+                                                        ),
+                                                        Span {
+                                                            start: 80,
+                                                            end: 83,
+                                                            start_line: 1,
+                                                            start_col: 81,
+                                                            end_line: 1,
+                                                            end_col: 84,
+                                                        },
+                                                    ),
+                                                    span: Span {
+                                                        start: 72,
+                                                        end: 84,
+                                                        start_line: 1,
+                                                        start_col: 73,
+                                                        end_line: 1,
+                                                        end_col: 85,
+                                                    },
+                                                },
+                                            ],
+                                            span: Span {
+                                                start: 39,
+                                                end: 86,
+                                                start_line: 1,
+                                                start_col: 40,
+                                                end_line: 1,
+                                                end_col: 87,
+                                            },
+                                        },
+                                    ),
+                                    span: Span {
+                                        start: 32,
+                                        end: 86,
+                                        start_line: 1,
+                                        start_col: 33,
+                                        end_line: 1,
+                                        end_col: 87,
+                                    },
+                                },
+                            ),
+                        ],
+                        Span {
+                            start: 30,
+                            end: 87,
+                            start_line: 1,
+                            start_col: 31,
+                            end_line: 1,
+                            end_col: 88,
+                        },
+                    ),
+                ),
+                doc: None,
+                span: Span {
+                    start: 0,
+                    end: 87,
+                    start_line: 1,
+                    start_col: 1,
+                    end_line: 1,
+                    end_col: 88,
+                },
+            },
+        ),
+    ],
+}

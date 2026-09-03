@@ -1,0 +1,11 @@
+[package]
+name = "aura-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "aura"
+path = "src/main.rs"
+
+[dependencies]
+aura-compiler = { path = "../aura-compiler" }

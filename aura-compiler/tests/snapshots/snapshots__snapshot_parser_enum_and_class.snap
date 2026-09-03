@@ -1,0 +1,141 @@
+---
+source: aura-compiler/tests/snapshots.rs
+expression: "ast_dump(\"enum Color { RED, GREEN, CUSTOM(val r: Int) }\\nsealed class Shape { fun area(): Float }\")"
+---
+Program {
+    imports: [],
+    declarations: [
+        Enum(
+            EnumDecl {
+                visibility: Public,
+                name: "Color",
+                variants: [
+                    EnumVariant {
+                        name: "RED",
+                        fields: [],
+                        span: Span {
+                            start: 0,
+                            end: 16,
+                            start_line: 1,
+                            start_col: 1,
+                            end_line: 1,
+                            end_col: 17,
+                        },
+                    },
+                    EnumVariant {
+                        name: "GREEN",
+                        fields: [],
+                        span: Span {
+                            start: 0,
+                            end: 23,
+                            start_line: 1,
+                            start_col: 1,
+                            end_line: 1,
+                            end_col: 24,
+                        },
+                    },
+                    EnumVariant {
+                        name: "CUSTOM",
+                        fields: [
+                            Param {
+                                name: "r",
+                                type_hint: Some(
+                                    Named {
+                                        name: "Int",
+                                        span: Span {
+                                            start: 39,
+                                            end: 42,
+                                            start_line: 1,
+                                            start_col: 40,
+                                            end_line: 1,
+                                            end_col: 43,
+                                        },
+                                    },
+                                ),
+                                default_value: None,
+                                is_vararg: false,
+                                span: Span {
+                                    start: 36,
+                                    end: 42,
+                                    start_line: 1,
+                                    start_col: 37,
+                                    end_line: 1,
+                                    end_col: 43,
+                                },
+                            },
+                        ],
+                        span: Span {
+                            start: 0,
+                            end: 44,
+                            start_line: 1,
+                            start_col: 1,
+                            end_line: 1,
+                            end_col: 45,
+                        },
+                    },
+                ],
+                doc: None,
+                span: Span {
+                    start: 0,
+                    end: 51,
+                    start_line: 1,
+                    start_col: 1,
+                    end_line: 2,
+                    end_col: 7,
+                },
+            },
+        ),
+        Class(
+            ClassDecl {
+                visibility: Public,
+                sealed: true,
+                name: "Shape",
+                type_params: [],
+                superclass: None,
+                fields: [],
+                methods: [
+                    FnDecl {
+                        visibility: Public,
+                        modifiers: [],
+                        name: "area",
+                        type_params: [],
+                        params: [],
+                        return_type: Some(
+                            Named {
+                                name: "Float",
+                                span: Span {
+                                    start: 79,
+                                    end: 85,
+                                    start_line: 2,
+                                    start_col: 35,
+                                    end_line: 2,
+                                    end_col: 41,
+                                },
+                            },
+                        ),
+                        body: None,
+                        doc: None,
+                        span: Span {
+                            start: 67,
+                            end: 85,
+                            start_line: 2,
+                            start_col: 23,
+                            end_line: 2,
+                            end_col: 41,
+                        },
+                    },
+                ],
+                implementations: [],
+                doc: None,
+                span: Span {
+                    start: 46,
+                    end: 86,
+                    start_line: 2,
+                    start_col: 2,
+                    end_line: 2,
+                    end_col: 42,
+                },
+            },
+        ),
+    ],
+}

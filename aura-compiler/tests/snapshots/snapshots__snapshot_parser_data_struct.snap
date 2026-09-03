@@ -1,0 +1,84 @@
+---
+source: aura-compiler/tests/snapshots.rs
+expression: "ast_dump(\"struct Player(val id: Int, var name: String)\")"
+---
+Program {
+    imports: [],
+    declarations: [
+        Struct(
+            StructDecl {
+                visibility: Public,
+                sealed: false,
+                name: "Player",
+                type_params: [],
+                fields: [
+                    StructField {
+                        visibility: Public,
+                        is_mutable: false,
+                        name: "id",
+                        type_hint: Some(
+                            Named {
+                                name: "Int",
+                                span: Span {
+                                    start: 22,
+                                    end: 25,
+                                    start_line: 1,
+                                    start_col: 23,
+                                    end_line: 1,
+                                    end_col: 26,
+                                },
+                            },
+                        ),
+                        default_value: None,
+                        span: Span {
+                            start: 14,
+                            end: 25,
+                            start_line: 1,
+                            start_col: 15,
+                            end_line: 1,
+                            end_col: 26,
+                        },
+                    },
+                    StructField {
+                        visibility: Public,
+                        is_mutable: true,
+                        name: "name",
+                        type_hint: Some(
+                            Named {
+                                name: "String",
+                                span: Span {
+                                    start: 37,
+                                    end: 43,
+                                    start_line: 1,
+                                    start_col: 38,
+                                    end_line: 1,
+                                    end_col: 44,
+                                },
+                            },
+                        ),
+                        default_value: None,
+                        span: Span {
+                            start: 27,
+                            end: 43,
+                            start_line: 1,
+                            start_col: 28,
+                            end_line: 1,
+                            end_col: 44,
+                        },
+                    },
+                ],
+                methods: [],
+                implementations: [],
+                doc: None,
+                span: Span {
+                    start: 0,
+                    end: 44,
+                    start_line: 1,
+                    start_col: 1,
+                    end_line: 1,
+                    end_col: 45,
+                },
+            },
+        ),
+    ],
+}

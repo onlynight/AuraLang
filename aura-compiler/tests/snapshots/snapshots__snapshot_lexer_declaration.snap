@@ -1,0 +1,11 @@
+---
+source: aura-compiler/tests/snapshots.rs
+expression: "token_dump(\"val x: Int = 42\")"
+---
+Val("val") @1:1
+Ident("x") @1:5
+Colon(":") @1:6
+Ident("Int") @1:8
+Assign("=") @1:12
+IntLiteral("42") @1:14
+EOF

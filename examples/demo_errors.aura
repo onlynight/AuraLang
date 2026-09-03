@@ -1,0 +1,19 @@
+// 语义错误示例：用于验证类型检查和空安全诊断
+fun add(a: Int, b: Int): Int {
+    return a + b
+}
+
+fun main() {
+    // 错误：String 不能赋给 Int
+    var x: Int = "hello"
+
+    // 错误：未定义变量
+    val y = missingVar
+
+    // 错误：可空类型不能直接加
+    var n: Int? = null
+    var z: Int = n + 1
+
+    // 错误：函数参数类型不匹配
+    val result = add(1, "two")
+}

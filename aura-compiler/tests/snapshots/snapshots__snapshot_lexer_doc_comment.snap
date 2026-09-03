@@ -1,0 +1,12 @@
+---
+source: aura-compiler/tests/snapshots.rs
+expression: "token_dump(\"/// Adds two numbers\\nfun add() {}\")"
+---
+DocComment("Adds two numbers") @1:1
+Fun("fun") @2:2
+Ident("add") @2:6
+LParen("(") @2:9
+RParen(")") @2:10
+LBrace("{") @2:12
+RBrace("}") @2:13
+EOF

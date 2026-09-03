@@ -1,0 +1,15 @@
+---
+source: aura-compiler/tests/snapshots.rs
+expression: "token_dump(\"val len = name?.length ?: 0\")"
+---
+Val("val") @1:1
+Ident("len") @1:5
+Assign("=") @1:9
+Ident("name") @1:11
+QuestionMark("?") @1:15
+Dot(".") @1:16
+Ident("length") @1:17
+QuestionMark("?") @1:24
+Colon(":") @1:25
+IntLiteral("0") @1:27
+EOF

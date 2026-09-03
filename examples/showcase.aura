@@ -1,0 +1,234 @@
+// Aura 语言特性总览（前端：词法 / 语法 / 语义）
+//
+// 本文件用于验证编译器对“当前已支持”语法的接受度。
+// 目标：语义分析（P3）零错误。可用 `aura-cli check examples/showcase.aura` 验证。
+//
+// 覆盖：
+//   文档注释、data/普通/密封 结构体、枚举、接口、类（实现/继承）、actor、类型别名、
+//   默认参数（重载）、可空与空安全（?. ?: !!）、字符串（插值 / 原始多行 / 转义）、
+//   when（字面量 / in 范围 / is 智能转换 / 守卫 && / else）、if 表达式、循环与跳转
+//   （for / while / do-while / break / continue / 标签）、泛型（函数与类）、函数类型、
+//   lambda、解构声明、lateinit、by lazy、可变参数 vararg、命名参数、数组、try/catch/finally、
+//   注解 @Deprecated、修饰符（override / suspend / inline / comptime）、extern "c"。
+
+import std.io.println
+
+/// 文档注释：玩家结构体（data struct + 字段默认值 + 可空字段）
+data struct Player(
+    val id: Int,
+    var name: String = "unknown",
+    var health: Int = 100,
+    var tag: String? = null
+)
+
+/// 普通结构体（含表达式体方法）
+struct Point(val x: Int, val y: Int) {
+    fun manhattan(): Int = x + y
+}
+
+/// 密封类：受控继承（子类须在同文件）
+sealed class Shape {
+    fun area(): Float = 0.0f
+}
+
+/// 枚举：单元变体 + 带数据变体
+enum Color {
+    RED,
+    
+    GREEN,
+    CUSTOM(val r: Int, val g: Int, val b: Int)
+}
+
+/// 接口：声明抽象方法（实现类必须提供）
+interface Drawable {
+    fun draw(): Unit
+}
+
+/// 类实现接口
+class Circle : Drawable {
+    val radius: Int = 10
+    override fun draw() {}
+}
+
+/// 类继承 + override
+class Animal {
+    fun name(): String = "animal"
+}
+class Dog : Animal() {
+    override fun name(): String = "dog"
+}
+
+/// Actor：并发实体（语法层面支持）
+actor Scheduler {
+    var tick: Int = 0
+    fun step() { tick += 1 }
+}
+
+/// 类型别名
+typealias Vec2 = Point
+
+// ── 顶层声明 ──
+val APP_VERSION: String = "1.0"
+var globalCounter: Int = 0
+
+/// lateinit：延迟初始化（声明时无需初值）
+lateinit var cache: String
+
+/// by lazy：惰性初始化
+val lazyVal by lazy { 42 }
+
+/// 注解
+@Deprecated
+fun legacyApi(): Int = 0
+
+/// 修饰符：suspend / inline / comptime（单个前缀修饰符）
+suspend fun fetch(): Int = 0
+inline fun max(a: Int, b: Int): Int = a
+comptime fun constValue(): Int = 1
+
+/// 外部函数声明（FFI 占位）
+extern "c" fun puts(msg: String): Int
+
+/// 普通函数
+fun add(a: Int, b: Int): Int {
+    return a + b
+}
+
+/// 表达式体函数 + 字符串插值
+fun greet(name: String): String = "Hello, $name!"
+
+/// 默认参数（形成重载候选）
+fun power(base: Int, exp: Int = 2): Int = base * exp
+
+/// 可变参数
+fun join(vararg parts: String): String = "joined"
+
+/// 泛型函数（带约束）
+fun <T : Int> first(items: List<T>): T? = null
+
+/// 函数类型作为参数（类型层面支持）
+fun transform(f: (Int) -> Int, x: Int): Int = x
+
+/// 泛型约束类
+class Box<T : Number>
+
+// ── 入口 ──
+fun main() {
+    // 构造 + 字段访问
+    val p = Player(1, "Alice", 50)
+    val id: Int = p.id
+    var hp: Int = p.health
+
+    // 原始字符串 / 转义 / 插值
+    val raw = """
+    原始字符串：不做插值（$ignored），也不做转义 \\n
+    """
+    val path = "C:\\tmp\\file.aura"
+    val label = "Level: ${hp * 2}"
+
+    // if 表达式
+    val status = if (hp > 0) "alive" else "dead"
+
+    // when 表达式：字面量 / in 范围 / is 智能转换 / else
+    val score = 42
+    val band = when (score) {
+        0 -> "zero"
+        in 1..50 -> "low"
+        in 51..100 -> "high"
+        else -> "extreme"
+    }
+    val anyVal: Any = "hello"
+    val len = when (anyVal) {
+        is String -> anyVal.length
+        else -> 0
+    }
+
+    // when 守卫（&&）
+    val guarded = when (anyVal) {
+        is String && anyVal.length > 1 -> anyVal.length
+        else -> 0
+    }
+
+    // 控制流
+    var sum = 0
+    for (i in 0..10) {
+        sum += i
+    }
+    var k = 0
+    while (k < 5) {
+        k += 1
+    }
+    do {
+        k -= 1
+    } while (k > 0)
+    var cnt = 0
+    for (i in 0..5) {
+        if (i % 2 == 0) continue
+        cnt += i
+    }
+    outer@ for (a in 0..3) {
+        for (b in 0..3) {
+            if (a == b) break@outer
+        }
+    }
+
+    // 空安全：?. ?: !!
+    var n: Int? = null
+    val safe: Int = n ?: 0
+    val tl: Int? = p.tag?.length
+    val forced: Int = n!!
+
+    // 函数调用 + 默认参数 + 命名参数 + 重载
+    val r1: Int = add(1, 2)
+    val r2: Int = power(3)
+    val r3: Int = power(3, 3)
+    val r4: Int = add(a = 1, b = 2)
+
+    // 可变参数
+    val j: String = join("a", "b", "c")
+
+    // 泛型函数调用
+    val g: Int = first(Int[](1, 2, 3))
+
+    // lambda 作为参数（函数类型）
+    val r5: Int = transform({ x: Int -> x + 1 }, 5)
+
+    // 解构声明（有限支持：按 Any 绑定）
+    val (px, py) = Point(3, 4)
+
+    // 数组
+    val nums: Int[] = Int[](10, 20, 30)
+    val firstNum: Int = nums[0]
+
+    // 结构体内方法调用 + 内置成员
+    val dist: Int = Point(1, 2).manhattan()
+
+    // lateinit / by lazy
+    cache = "ready"
+    val lv: Int = lazyVal
+
+    // 修饰符函数 / 外部声明（语法层面接受）
+    val fv: Int = fetch()
+    val mv: Int = max(1, 2)
+    val cv: Int = constValue()
+    puts(label)
+
+    // try / catch / finally
+    try {
+        val x = 1
+    } catch (e: Exception) {
+        val y = 0
+    } finally {
+        val z = 0
+    }
+
+    println(label)
+    println(status)
+    println(band)
+    println(len)
+    println(guarded)
+    println(j)
+    println(firstNum)
+    println(dist)
+    println(lv)
+}

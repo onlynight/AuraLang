@@ -1,0 +1,108 @@
+---
+source: aura-compiler/tests/snapshots.rs
+expression: "ast_dump(\"fun greet(name: String): String { return \\\"hi $name\\\" }\")"
+---
+Program {
+    imports: [],
+    declarations: [
+        Function(
+            FnDecl {
+                visibility: Public,
+                modifiers: [],
+                name: "greet",
+                type_params: [],
+                params: [
+                    Param {
+                        name: "name",
+                        type_hint: Some(
+                            Named {
+                                name: "String",
+                                span: Span {
+                                    start: 16,
+                                    end: 22,
+                                    start_line: 1,
+                                    start_col: 17,
+                                    end_line: 1,
+                                    end_col: 23,
+                                },
+                            },
+                        ),
+                        default_value: None,
+                        is_vararg: false,
+                        span: Span {
+                            start: 10,
+                            end: 22,
+                            start_line: 1,
+                            start_col: 11,
+                            end_line: 1,
+                            end_col: 23,
+                        },
+                    },
+                ],
+                return_type: Some(
+                    Named {
+                        name: "String",
+                        span: Span {
+                            start: 25,
+                            end: 32,
+                            start_line: 1,
+                            start_col: 26,
+                            end_line: 1,
+                            end_col: 33,
+                        },
+                    },
+                ),
+                body: Some(
+                    Block(
+                        [
+                            Expr(
+                                Return {
+                                    value: Some(
+                                        Literal(
+                                            String(
+                                                "hi name",
+                                            ),
+                                            Span {
+                                                start: 41,
+                                                end: 51,
+                                                start_line: 1,
+                                                start_col: 42,
+                                                end_line: 1,
+                                                end_col: 52,
+                                            },
+                                        ),
+                                    ),
+                                    span: Span {
+                                        start: 34,
+                                        end: 52,
+                                        start_line: 1,
+                                        start_col: 35,
+                                        end_line: 1,
+                                        end_col: 53,
+                                    },
+                                },
+                            ),
+                        ],
+                        Span {
+                            start: 32,
+                            end: 53,
+                            start_line: 1,
+                            start_col: 33,
+                            end_line: 1,
+                            end_col: 54,
+                        },
+                    ),
+                ),
+                doc: None,
+                span: Span {
+                    start: 0,
+                    end: 53,
+                    start_line: 1,
+                    start_col: 1,
+                    end_line: 1,
+                    end_col: 54,
+                },
+            },
+        ),
+    ],
+}

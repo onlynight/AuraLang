@@ -1,0 +1,146 @@
+---
+source: aura-compiler/tests/snapshots.rs
+expression: "ast_dump(\"fun <T : Comparable<T>> max(a: T, b: T): T = a\")"
+---
+Program {
+    imports: [],
+    declarations: [
+        Function(
+            FnDecl {
+                visibility: Public,
+                modifiers: [],
+                name: "max",
+                type_params: [
+                    TypeParam {
+                        name: "T",
+                        variance: Invariant,
+                        bounds: [
+                            Generic {
+                                name: "Comparable",
+                                args: [
+                                    Named {
+                                        name: "T",
+                                        span: Span {
+                                            start: 20,
+                                            end: 23,
+                                            start_line: 1,
+                                            start_col: 21,
+                                            end_line: 1,
+                                            end_col: 24,
+                                        },
+                                    },
+                                ],
+                                span: Span {
+                                    start: 9,
+                                    end: 23,
+                                    start_line: 1,
+                                    start_col: 10,
+                                    end_line: 1,
+                                    end_col: 24,
+                                },
+                            },
+                        ],
+                        default: None,
+                        span: Span {
+                            start: 5,
+                            end: 23,
+                            start_line: 1,
+                            start_col: 6,
+                            end_line: 1,
+                            end_col: 24,
+                        },
+                    },
+                ],
+                params: [
+                    Param {
+                        name: "a",
+                        type_hint: Some(
+                            Named {
+                                name: "T",
+                                span: Span {
+                                    start: 31,
+                                    end: 32,
+                                    start_line: 1,
+                                    start_col: 32,
+                                    end_line: 1,
+                                    end_col: 33,
+                                },
+                            },
+                        ),
+                        default_value: None,
+                        is_vararg: false,
+                        span: Span {
+                            start: 28,
+                            end: 32,
+                            start_line: 1,
+                            start_col: 29,
+                            end_line: 1,
+                            end_col: 33,
+                        },
+                    },
+                    Param {
+                        name: "b",
+                        type_hint: Some(
+                            Named {
+                                name: "T",
+                                span: Span {
+                                    start: 37,
+                                    end: 38,
+                                    start_line: 1,
+                                    start_col: 38,
+                                    end_line: 1,
+                                    end_col: 39,
+                                },
+                            },
+                        ),
+                        default_value: None,
+                        is_vararg: false,
+                        span: Span {
+                            start: 34,
+                            end: 38,
+                            start_line: 1,
+                            start_col: 35,
+                            end_line: 1,
+                            end_col: 39,
+                        },
+                    },
+                ],
+                return_type: Some(
+                    Named {
+                        name: "T",
+                        span: Span {
+                            start: 41,
+                            end: 43,
+                            start_line: 1,
+                            start_col: 42,
+                            end_line: 1,
+                            end_col: 44,
+                        },
+                    },
+                ),
+                body: Some(
+                    Ident(
+                        "a",
+                        Span {
+                            start: 45,
+                            end: 45,
+                            start_line: 1,
+                            start_col: 46,
+                            end_line: 1,
+                            end_col: 46,
+                        },
+                    ),
+                ),
+                doc: None,
+                span: Span {
+                    start: 0,
+                    end: 46,
+                    start_line: 1,
+                    start_col: 1,
+                    end_line: 1,
+                    end_col: 47,
+                },
+            },
+        ),
+    ],
+}

@@ -1,0 +1,9 @@
+---
+source: aura-compiler/tests/snapshots.rs
+expression: "token_dump(\"val x = @\")"
+---
+Val("val") @1:1
+Ident("x") @1:5
+Assign("=") @1:7
+At("@") @1:9
+EOF

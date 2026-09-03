@@ -1,0 +1,59 @@
+---
+source: aura-compiler/tests/snapshots.rs
+expression: "ast_dump(\"/// A point in 2D space\\nstruct Point(val x: Int)\")"
+---
+Program {
+    imports: [],
+    declarations: [
+        Struct(
+            StructDecl {
+                visibility: Public,
+                sealed: false,
+                name: "Point",
+                type_params: [],
+                fields: [
+                    StructField {
+                        visibility: Public,
+                        is_mutable: false,
+                        name: "x",
+                        type_hint: Some(
+                            Named {
+                                name: "Int",
+                                span: Span {
+                                    start: 44,
+                                    end: 47,
+                                    start_line: 2,
+                                    start_col: 22,
+                                    end_line: 2,
+                                    end_col: 25,
+                                },
+                            },
+                        ),
+                        default_value: None,
+                        span: Span {
+                            start: 37,
+                            end: 47,
+                            start_line: 2,
+                            start_col: 15,
+                            end_line: 2,
+                            end_col: 25,
+                        },
+                    },
+                ],
+                methods: [],
+                implementations: [],
+                doc: Some(
+                    "A point in 2D space",
+                ),
+                span: Span {
+                    start: 24,
+                    end: 48,
+                    start_line: 2,
+                    start_col: 2,
+                    end_line: 2,
+                    end_col: 26,
+                },
+            },
+        ),
+    ],
+}
