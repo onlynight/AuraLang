@@ -230,3 +230,313 @@ fn jit_dispatch_matches_interpreter() {
     let mut vm = Vm::new(&module, opts).expect("VM 初始化");
     assert_eq!(vm.run().expect("运行应成功"), Value::Int(45));
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 5.6 方法 / 接口调用测试
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// 对象虚方法表查找：alloc_object_with_vtable 后通过 get_vtable_method 查方法
+#[test]
+fn method_dispatch_via_vtable() {
+    use std::collections::HashMap;
+
+    let mut heap = aura_compiler::vm::Heap::new();
+
+    // 构建 vtable：method_idx 0 → func 1
+    let mut vtable = HashMap::new();
+    vtable.insert(0u16, 1usize);
+
+    // 分配带 vtable 的对象
+    let h = heap.alloc_object_with_vtable(42, vtable);
+    assert!(h >= 0);
+
+    // 设置字段
+    heap.set_field(h, 100, Value::Int(99));
+
+    // 查方法：method_idx 0 应返回 func 1
+    let method = heap.get_vtable_method(h, 0);
+    assert_eq!(method, Some(1usize));
+
+    // 查不存在的 method_idx
+    let method2 = heap.get_vtable_method(h, 99);
+    assert_eq!(method2, None);
+
+    // 验证字段仍可读写
+    assert_eq!(heap.get_field(h, 100), Value::Int(99));
+
+    // 不含 vtable 的对象应返回 None
+    let h2 = heap.alloc_object(0);
+    assert_eq!(heap.get_vtable_method(h2, 0), None);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 5.7 集合类型测试
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// List 创建、追加、弹出、长度
+#[test]
+fn list_operations() {
+    // main():
+    //   LoadConst(0)=2   NewList          StoreVar(0)  // list
+    //   LoadConst(1)=10  LoadVar(0)       ListPush
+    //   LoadConst(2)=20  LoadVar(0)       ListPush
+    //   LoadVar(0)       ListLen          StoreVar(1)
+    //   LoadVar(0)       ListPop          StoreVar(2)
+    //   LoadVar(2)       Return
+    let mut code = Vec::new();
+    OpCode::LoadConst(0).write(&mut code); // capacity 2
+    OpCode::NewList.write(&mut code);
+    OpCode::StoreVar(0).write(&mut code);
+    OpCode::LoadConst(1).write(&mut code); // 10
+    OpCode::LoadVar(0).write(&mut code);
+    OpCode::ListPush.write(&mut code);
+    OpCode::LoadConst(2).write(&mut code); // 20
+    OpCode::LoadVar(0).write(&mut code);
+    OpCode::ListPush.write(&mut code);
+    OpCode::LoadVar(0).write(&mut code);
+    OpCode::ListLen.write(&mut code);
+    OpCode::StoreVar(1).write(&mut code);
+    OpCode::LoadVar(0).write(&mut code);
+    OpCode::ListPop.write(&mut code);
+    OpCode::StoreVar(2).write(&mut code);
+    OpCode::LoadVar(2).write(&mut code);
+    OpCode::Return.write(&mut code);
+
+    let module = BytecodeModule {
+        consts: vec![Const::Int(2), Const::Int(10), Const::Int(20)],
+        natives: vec![],
+        functions: vec![BytecodeFunction {
+            name: "main".to_string(),
+            param_count: 0,
+            locals: 3,
+            is_native: false,
+            code,
+        }],
+        entry: 0,
+    };
+    let mut vm = Vm::new(&module, VmOptions::default()).expect("VM 初始化");
+    assert_eq!(vm.run().expect("运行应成功"), Value::Int(20));
+}
+
+/// Map 创建、写入、读取、长度
+#[test]
+fn map_operations() {
+    // 栈布局（MapSet）：值在下、键在中、Map 引用在顶
+    // 即压栈顺序：LoadConst(value), LoadConst(key), LoadVar(map)
+    let mut code = Vec::new();
+    OpCode::NewMap.write(&mut code);
+    OpCode::StoreVar(0).write(&mut code);
+    // MapSet: 压 value(100), key("k1"), map(Ref)
+    OpCode::LoadConst(1).write(&mut code); // 100 (value)
+    OpCode::LoadConst(0).write(&mut code); // "k1" (key)
+    OpCode::LoadVar(0).write(&mut code);   // map
+    OpCode::MapSet.write(&mut code);
+    // MapGet: 压 key("k1"), map(Ref)
+    OpCode::LoadConst(0).write(&mut code); // "k1" (key)
+    OpCode::LoadVar(0).write(&mut code);   // map
+    OpCode::MapGet.write(&mut code);
+    OpCode::Return.write(&mut code);
+
+    let module = BytecodeModule {
+        consts: vec![Const::Str("k1".to_string()), Const::Int(100)],
+        natives: vec![],
+        functions: vec![BytecodeFunction {
+            name: "main".to_string(),
+            param_count: 0,
+            locals: 1,
+            is_native: false,
+            code,
+        }],
+        entry: 0,
+    };
+    let mut vm = Vm::new(&module, VmOptions::default()).expect("VM 初始化");
+    assert_eq!(vm.run().expect("运行应成功"), Value::Int(100));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 5.8 协程调度测试
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// 协程创建与 Yield 挂起
+#[test]
+fn coroutine_yield_and_resume() {
+    use aura_compiler::vm::CoroutineScheduler;
+
+    let mut scheduler = CoroutineScheduler::new();
+    assert_eq!(scheduler.active_count(), 0);
+    assert_eq!(scheduler.ready_count(), 0);
+
+    // spawn 返回协程 ID（从 1 开始）
+    let id = scheduler.spawn(0);
+    assert_eq!(id, 1);
+    assert_eq!(scheduler.active_count(), 1);
+    assert_eq!(scheduler.ready_count(), 1);
+
+    // 保存帧（模拟 Yield）
+    use aura_compiler::vm::Frame;
+    let frames = vec![Frame {
+        func: 0,
+        ip: 5,
+        locals: vec![Value::Int(42)],
+        stack: vec![Value::Int(99)],
+        coroutine_id: 1,
+    }];
+    scheduler.save_frames(id, frames, Value::Int(99));
+    assert_eq!(scheduler.ready_count(), 1);
+
+    // 恢复帧
+    let restored = scheduler.restore_frames(id).unwrap();
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].locals[0], Value::Int(42));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 5.9 动态 FFI 测试
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// DynamicLoader 基础操作
+#[test]
+fn dynamic_loader_basic() {
+    use aura_compiler::vm::DynamicLoader;
+
+    let mut loader = DynamicLoader::new();
+    assert_eq!(loader.len(), 0);
+    assert!(!loader.contains("foo"));
+
+    // 注册函数
+    fn dummy(_args: &[Value]) -> Value {
+        Value::Int(42)
+    }
+    loader.register_func("foo", dummy);
+    assert!(loader.contains("foo"));
+    assert_eq!(loader.len(), 1);
+
+    let f = loader.get("foo").unwrap();
+    assert_eq!(f(&[]), Value::Int(42));
+}
+
+/// 动态加载占位（无 dynamic-ffi feature 时应静默成功）
+#[test]
+fn dynamic_loader_load_lib_noop() {
+    use aura_compiler::vm::DynamicLoader;
+
+    let mut loader = DynamicLoader::new();
+    // 无 dynamic-ffi 时应返回 Ok（空操作）
+    let result = loader.load_lib("nonexistent.so");
+    assert!(result.is_ok());
+    assert_eq!(loader.len(), 0);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 5.10 ARC 生命周期测试
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// ARC 引用计数与回收
+#[test]
+fn arc_reference_counting() {
+    let mut heap = aura_compiler::vm::Heap::new();
+    let h1 = heap.alloc_object(0);
+    assert_eq!(heap.live_count(), 1);
+
+    // 重复引用
+    let _h2 = h1; // Clone handle
+    heap.inc_ref(h1);
+    heap.inc_ref(h1);
+
+    // 减两次，仍存活
+    heap.dec_ref(h1);
+    heap.dec_ref(h1);
+    assert_eq!(heap.live_count(), 1);
+
+    // 减第三次，应回收
+    heap.dec_ref(h1);
+    assert_eq!(heap.live_count(), 0);
+}
+
+/// DropRef 显式释放
+#[test]
+fn drop_ref_explicit() {
+    let mut heap = aura_compiler::vm::Heap::new();
+    let h = heap.alloc_object(0);
+    heap.set_field(h, 100, Value::Int(99));
+    assert_eq!(heap.live_count(), 1);
+
+    heap.drop_ref(h);
+    assert_eq!(heap.live_count(), 0);
+
+    // 重复 drop_ref 无害
+    heap.drop_ref(h);
+    assert_eq!(heap.live_count(), 0);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 5.14 JIT 编译范围扩展测试（需 jit feature）
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// JIT 可编译性判定：叶子整数函数应返回 true
+#[cfg(feature = "jit")]
+#[test]
+fn jit_compilable_leaf_int() {
+    use aura_compiler::vm::{DecodedFunction, Instr};
+
+    let code = vec![
+        Instr::LoadConst(0), // Int
+        Instr::LoadVar(0),
+        Instr::Add,
+        Instr::StoreVar(1),
+        Instr::LoadVar(1),
+        Instr::Return,
+    ];
+    let f = DecodedFunction {
+        name: "add".to_string(),
+        param_count: 1,
+        locals: 2,
+        is_native: false,
+        code,
+    };
+    let consts = vec![Const::Int(1)];
+    assert!(aura_compiler::vm::jit::is_jit_compilable(&f, &consts));
+}
+
+/// JIT 不可编译：含 Call 指令应返回 false
+#[cfg(feature = "jit")]
+#[test]
+fn jit_not_compilable_with_call() {
+    use aura_compiler::vm::{DecodedFunction, Instr};
+
+    let code = vec![
+        Instr::LoadConst(0),
+        Instr::Call(0), // 非叶子调用
+        Instr::Return,
+    ];
+    let f = DecodedFunction {
+        name: "foo".to_string(),
+        param_count: 0,
+        locals: 1,
+        is_native: false,
+        code,
+    };
+    let consts = vec![Const::Int(1)];
+    assert!(!aura_compiler::vm::jit::is_jit_compilable(&f, &consts));
+}
+
+/// JIT 不可编译：含非常量应返回 false
+#[cfg(feature = "jit")]
+#[test]
+fn jit_not_compilable_non_int_const() {
+    use aura_compiler::vm::{DecodedFunction, Instr};
+
+    let code = vec![
+        Instr::LoadConst(0), // Float 常量
+        Instr::Return,
+    ];
+    let f = DecodedFunction {
+        name: "foo".to_string(),
+        param_count: 0,
+        locals: 0,
+        is_native: false,
+        code,
+    };
+    let consts = vec![Const::Float(3.14)];
+    assert!(!aura_compiler::vm::jit::is_jit_compilable(&f, &consts));
+}

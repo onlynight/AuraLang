@@ -150,6 +150,90 @@ impl Vm {
                 }
             }
 
+            // ── 方法 / 接口调用（5.6） ──
+            Instr::CallMethod(method_idx) => self.do_call_method(top, method_idx as usize)?,
+            Instr::CallCtor(idx) => {
+                // 构造器调用语义与普通 Call 一致：从栈顶弹出参数、调用指定函数、结果入栈
+                self.do_call(top, idx as usize, false)?;
+            }
+
+            // ── 集合类型（5.7） ──
+            Instr::NewList => {
+                let cap = self.pop(top)?.as_int().max(0) as usize;
+                let h = self.heap.alloc_list(cap);
+                self.frames[top].stack.push(Value::Ref(h));
+            }
+            Instr::NewMap => {
+                let h = self.heap.alloc_map();
+                self.frames[top].stack.push(Value::Ref(h));
+            }
+            Instr::ListPush => {
+                let obj = self.pop(top)?;
+                let val = self.pop(top)?;
+                if let Value::Ref(h) = obj {
+                    self.heap.list_push(h, val);
+                }
+                self.frames[top].stack.push(Value::Null);
+            }
+            Instr::ListPop => {
+                let obj = self.pop(top)?;
+                let v = match obj {
+                    Value::Ref(h) => self.heap.list_pop(h),
+                    _ => Value::Null,
+                };
+                self.frames[top].stack.push(v);
+            }
+            Instr::ListLen => {
+                let obj = self.pop(top)?;
+                let len = match obj {
+                    Value::Ref(h) => self.heap.list_len(h),
+                    _ => 0,
+                };
+                self.frames[top].stack.push(Value::Int(len));
+            }
+            Instr::MapSet => {
+                // 栈：值、键、Map 引用
+                let obj = self.pop(top)?;
+                let key = self.pop(top)?;
+                let val = self.pop(top)?;
+                if let Value::Ref(h) = obj {
+                    self.heap.map_set(h, key, val);
+                }
+            }
+            Instr::MapGet => {
+                // 栈：键、Map 引用
+                let obj = self.pop(top)?;
+                let key = self.pop(top)?;
+                let v = match obj {
+                    Value::Ref(h) => self.heap.map_get(h, &key),
+                    _ => Value::Null,
+                };
+                self.frames[top].stack.push(v);
+            }
+            Instr::MapLen => {
+                let obj = self.pop(top)?;
+                let len = match obj {
+                    Value::Ref(h) => self.heap.map_len(h),
+                    _ => 0,
+                };
+                self.frames[top].stack.push(Value::Int(len));
+            }
+
+            // ── 协程（5.8） ──
+            Instr::Yield => self.do_yield(top)?,
+            Instr::NewCoroutine(entry_idx) => {
+                let co_id = self.coroutines.spawn(entry_idx as usize);
+                self.frames[top].stack.push(Value::Int(co_id as i64));
+            }
+            Instr::ResumeCoroutine => self.do_resume(top)?,
+
+            // ── ARC 生命周期（5.10） ──
+            Instr::DropRef => {
+                if let Some(Value::Ref(h)) = self.frames[top].stack.last().cloned() {
+                    self.heap.drop_ref(h);
+                }
+            }
+
             // ── 引用计数 ──
             Instr::IncRef => {
                 if let Some(Value::Ref(h)) = self.frames[top].stack.last().cloned() {
@@ -172,6 +256,75 @@ impl Vm {
                 self.halt = true;
             }
         }
+        Ok(())
+    }
+
+    /// 虚方法调用（5.6）：从对象 vtable 查找方法并调用
+    fn do_call_method(&mut self, top: usize, method_idx: usize) -> Result<(), VmError> {
+        let obj = self.pop(top)?;
+        match obj {
+            Value::Ref(h) => {
+                let func_idx = self.heap.get_vtable_method(h, method_idx as u16);
+                match func_idx {
+                    Some(fidx) => {
+                        // 查找方法对应的函数索引：vtable 中存的是函数索引
+                        // 参数在栈上（已在对象之前压入）
+                        let param_count = if fidx < self.module.funcs.len() {
+                            self.module.funcs[fidx].param_count as usize
+                        } else {
+                            return Err(VmError::Runtime(format!(
+                                "vtable method #{} resolves to invalid function #{}",
+                                method_idx, fidx
+                            )));
+                        };
+                        let args = self.pop_n(top, param_count)?;
+                        self.push_frame(fidx, args)?;
+                    }
+                    None => {
+                        // 对象无 vtable 或无对应方法：报错
+                        return Err(VmError::Runtime(format!(
+                            "no virtual method #{} for object <ref#{}>",
+                            method_idx, h
+                        )));
+                    }
+                }
+            }
+            _ => {
+                return Err(VmError::Runtime("method call on non-object value".to_string()));
+            }
+        }
+        Ok(())
+    }
+
+    /// 协程挂起（5.8）：保存当前帧栈到协程、将返回值放入挂起状态
+    fn do_yield(&mut self, top: usize) -> Result<(), VmError> {
+        let co_id = self.frames[top].coroutine_id;
+        // 主线程（co_id=0）调用 Yield 视为 Halt
+        if co_id == 0 {
+            self.halt = true;
+            return Ok(());
+        }
+        let ret_val = self.frames[top].stack.pop().unwrap_or(Value::Null);
+        let frames = std::mem::take(&mut self.frames);
+        self.coroutines.save_frames(co_id, frames, ret_val);
+        self.halt = true;
+        Ok(())
+    }
+
+    /// 恢复协程（5.8）：从栈顶弹出协程 ID 和入参，恢复协程帧栈并继续执行
+    fn do_resume(&mut self, top: usize) -> Result<(), VmError> {
+        let co_id_v = self.pop(top)?;
+        let co_id = co_id_v.as_int() as usize;
+        if co_id == 0 || co_id >= self.coroutines.active_count() + 1 {
+            return Err(VmError::Runtime(format!("invalid coroutine id {}", co_id)));
+        }
+        // 从协程中恢复帧栈
+        let frames = self.coroutines.restore_frames(co_id).ok_or_else(|| {
+            VmError::Runtime(format!("coroutine #{} not found", co_id))
+        })?;
+        self.frames = frames;
+        // 将栈顶入参压入当前帧的操作数栈
+        // （ResumeCoroutine 指令之前已压入参数）
         Ok(())
     }
 

@@ -10,11 +10,15 @@ path = "src/lib.rs"
 cranelift = { version = "0.116", optional = true }
 cranelift-jit = { version = "0.116", optional = true }
 cranelift-module = { version = "0.116", optional = true }
+libloading = { version = "0.8", optional = true }
 
 [features]
 # 热点 JIT 编译（Cranelift）。默认关闭；启用需 `cargo build --features jit`。
 # 开启后热点（叶子整数）函数被编译为原生码并在调用点直接派发（§7.2 方法级 JIT）。
 jit = ["cranelift", "cranelift-jit", "cranelift-module"]
+# 动态库加载（libloading）。默认关闭；启用需 `cargo build --features dynamic-ffi`。
+# 开启后 VM 支持运行时通过 dlopen 加载 .so/.dll 中的 C 函数（5.9）。
+dynamic-ffi = ["libloading"]
 
 [dev-dependencies]
 insta = { version = "1", features = ["yaml"] }

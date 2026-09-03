@@ -100,6 +100,42 @@ pub enum OpCode {
     /// 调用 C ABI 函数表中 `idx` 处函数
     CallC(u16),
 
+    // ── 方法 / 接口调用（5.6） ──
+    /// 虚方法调用：栈顶为对象引用、其下为方法表 `idx`，对象 vtable 中查方法并调用
+    CallMethod(u16),
+    /// 构造器调用：为已分配对象设置字段后返回引用（与 Call 相同语义，但确保对象已被 NewObject 分配）
+    CallCtor(u16),
+
+    // ── 集合类型（5.7） ──
+    /// 分配 List（栈顶为初始长度，结果引用压栈）
+    NewList,
+    /// 分配 Map（结果引用压栈）
+    NewMap,
+    /// List 尾部追加元素（栈：元素、List 引用）
+    ListPush,
+    /// List 弹出尾部元素并压栈（栈：List 引用）
+    ListPop,
+    /// List 长度压栈（栈：List 引用）
+    ListLen,
+    /// Map 插入键值对（栈：值、键、Map 引用）
+    MapSet,
+    /// Map 查找键并压栈值（栈：键、Map 引用）
+    MapGet,
+    /// Map 长度压栈（栈：Map 引用）
+    MapLen,
+
+    // ── 协程（5.8） ──
+    /// 当前协程挂起（返回栈顶值给调度器），协程状态保存
+    Yield,
+    /// 创建协程（栈顶为入口函数索引，返回协程 ID 压栈）
+    NewCoroutine(u16),
+    /// 恢复协程运行（栈顶为协程 ID、其下为入参），返回值压栈
+    ResumeCoroutine,
+
+    // ── ARC 生命周期（5.10） ──
+    /// 显式释放堆对象（触发 drop 回调，置槽为空）
+    DropRef,
+
     /// 终止整个程序（顶层入口返回时）
     Halt,
 }
@@ -147,6 +183,20 @@ impl OpCode {
             OpCode::IncRef => 34,
             OpCode::DecRef => 35,
             OpCode::CallC(_) => 36,
+            OpCode::CallMethod(_) => 40,
+            OpCode::CallCtor(_) => 41,
+            OpCode::NewList => 42,
+            OpCode::NewMap => 43,
+            OpCode::ListPush => 44,
+            OpCode::ListPop => 45,
+            OpCode::ListLen => 46,
+            OpCode::MapSet => 47,
+            OpCode::MapGet => 48,
+            OpCode::MapLen => 49,
+            OpCode::Yield => 50,
+            OpCode::NewCoroutine(_) => 51,
+            OpCode::ResumeCoroutine => 52,
+            OpCode::DropRef => 53,
             OpCode::Halt => 37,
         }
     }
@@ -157,6 +207,7 @@ impl OpCode {
             0 | 1 | 2 | 30 | 32 | 33 => 2, // u16 操作数
             23 | 24 | 25 => 4,            // i32 偏移
             26 | 27 | 36 => 2,            // u16 函数/原生索引
+            40 | 41 | 51 => 2,            // CallMethod/CallCtor/NewCoroutine u16 索引
             _ => 0,
         }
     }
@@ -203,6 +254,20 @@ impl OpCode {
             35 => OpCode::DecRef,
             36 => OpCode::CallC(0),
             37 => OpCode::Halt,
+            40 => OpCode::CallMethod(0),
+            41 => OpCode::CallCtor(0),
+            42 => OpCode::NewList,
+            43 => OpCode::NewMap,
+            44 => OpCode::ListPush,
+            45 => OpCode::ListPop,
+            46 => OpCode::ListLen,
+            47 => OpCode::MapSet,
+            48 => OpCode::MapGet,
+            49 => OpCode::MapLen,
+            50 => OpCode::Yield,
+            51 => OpCode::NewCoroutine(0),
+            52 => OpCode::ResumeCoroutine,
+            53 => OpCode::DropRef,
             _ => return None,
         })
     }
@@ -219,7 +284,10 @@ impl OpCode {
             | OpCode::SetField(i)
             | OpCode::Call(i)
             | OpCode::CallNative(i)
-            | OpCode::CallC(i) => buf.extend_from_slice(&i.to_le_bytes()),
+            | OpCode::CallC(i)
+            | OpCode::CallMethod(i)
+            | OpCode::CallCtor(i)
+            | OpCode::NewCoroutine(i) => buf.extend_from_slice(&i.to_le_bytes()),
             OpCode::Jump(o) | OpCode::JumpIfTrue(o) | OpCode::JumpIfFalse(o) => {
                 buf.extend_from_slice(&o.to_le_bytes())
             }
@@ -270,6 +338,20 @@ impl fmt::Display for OpCode {
             OpCode::IncRef => write!(f, "INC_REF"),
             OpCode::DecRef => write!(f, "DEC_REF"),
             OpCode::CallC(i) => write!(f, "CALL_C {}", i),
+            OpCode::CallMethod(i) => write!(f, "CALL_METHOD {}", i),
+            OpCode::CallCtor(i) => write!(f, "CALL_CTOR {}", i),
+            OpCode::NewList => write!(f, "NEW_LIST"),
+            OpCode::NewMap => write!(f, "NEW_MAP"),
+            OpCode::ListPush => write!(f, "LIST_PUSH"),
+            OpCode::ListPop => write!(f, "LIST_POP"),
+            OpCode::ListLen => write!(f, "LIST_LEN"),
+            OpCode::MapSet => write!(f, "MAP_SET"),
+            OpCode::MapGet => write!(f, "MAP_GET"),
+            OpCode::MapLen => write!(f, "MAP_LEN"),
+            OpCode::Yield => write!(f, "YIELD"),
+            OpCode::NewCoroutine(i) => write!(f, "NEW_COROUTINE {}", i),
+            OpCode::ResumeCoroutine => write!(f, "RESUME_COROUTINE"),
+            OpCode::DropRef => write!(f, "DROP_REF"),
             OpCode::Halt => write!(f, "HALT"),
         }
     }

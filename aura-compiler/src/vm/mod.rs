@@ -19,12 +19,16 @@ pub mod native;
 pub mod heap;
 pub mod value;
 pub mod interp;
+pub mod coroutine;
+pub mod dynamic_ffi;
 #[cfg(feature = "jit")]
 pub mod jit;
 
 pub use heap::Heap;
 pub use native::NativeRegistry;
 pub use value::Value;
+pub use coroutine::{CoroutineScheduler, CoroutineState};
+pub use dynamic_ffi::DynamicLoader;
 
 use std::collections::HashMap;
 
@@ -124,6 +128,28 @@ pub enum Instr {
     DecRef,
 
     CallC(u16),
+
+    // ── 方法 / 接口调用（5.6） ──
+    CallMethod(u16),
+    CallCtor(u16),
+
+    // ── 集合类型（5.7） ──
+    NewList,
+    NewMap,
+    ListPush,
+    ListPop,
+    ListLen,
+    MapSet,
+    MapGet,
+    MapLen,
+
+    // ── 协程（5.8） ──
+    Yield,
+    NewCoroutine(u16),
+    ResumeCoroutine,
+
+    // ── ARC 生命周期（5.10） ──
+    DropRef,
 
     Halt,
 }
@@ -278,6 +304,32 @@ fn decode_function(f: &BytecodeFunction) -> Result<DecodedFunction, VmError> {
                 ip += 2;
                 instrs.push(Instr::CallC(v));
             }
+            crate::codegen::opcode::OpCode::CallMethod(_) => {
+                let v = u16::from_le_bytes([code[ip], code[ip + 1]]);
+                ip += 2;
+                instrs.push(Instr::CallMethod(v));
+            }
+            crate::codegen::opcode::OpCode::CallCtor(_) => {
+                let v = u16::from_le_bytes([code[ip], code[ip + 1]]);
+                ip += 2;
+                instrs.push(Instr::CallCtor(v));
+            }
+            crate::codegen::opcode::OpCode::NewList => instrs.push(Instr::NewList),
+            crate::codegen::opcode::OpCode::NewMap => instrs.push(Instr::NewMap),
+            crate::codegen::opcode::OpCode::ListPush => instrs.push(Instr::ListPush),
+            crate::codegen::opcode::OpCode::ListPop => instrs.push(Instr::ListPop),
+            crate::codegen::opcode::OpCode::ListLen => instrs.push(Instr::ListLen),
+            crate::codegen::opcode::OpCode::MapSet => instrs.push(Instr::MapSet),
+            crate::codegen::opcode::OpCode::MapGet => instrs.push(Instr::MapGet),
+            crate::codegen::opcode::OpCode::MapLen => instrs.push(Instr::MapLen),
+            crate::codegen::opcode::OpCode::Yield => instrs.push(Instr::Yield),
+            crate::codegen::opcode::OpCode::NewCoroutine(_) => {
+                let v = u16::from_le_bytes([code[ip], code[ip + 1]]);
+                ip += 2;
+                instrs.push(Instr::NewCoroutine(v));
+            }
+            crate::codegen::opcode::OpCode::ResumeCoroutine => instrs.push(Instr::ResumeCoroutine),
+            crate::codegen::opcode::OpCode::DropRef => instrs.push(Instr::DropRef),
             crate::codegen::opcode::OpCode::Halt => instrs.push(Instr::Halt),
         }
     }
@@ -310,7 +362,7 @@ fn decode_function(f: &BytecodeFunction) -> Result<DecodedFunction, VmError> {
 }
 
 /// 调用帧
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Frame {
     /// 所属函数索引
     pub func: usize,
@@ -320,10 +372,12 @@ pub struct Frame {
     pub locals: Vec<Value>,
     /// 操作数栈
     pub stack: Vec<Value>,
+    /// 协程 ID（0 = 主线程）
+    pub coroutine_id: usize,
 }
 
 impl Frame {
-    fn new(func: &DecodedFunction, args: Vec<Value>) -> Self {
+    fn new(func: &DecodedFunction, args: Vec<Value>, coroutine_id: usize) -> Self {
         let mut locals = vec![Value::Null; func.locals as usize];
         let n = func.param_count as usize;
         for (i, a) in args.into_iter().take(n).enumerate() {
@@ -334,6 +388,7 @@ impl Frame {
             ip: 0,
             locals,
             stack: Vec::new(),
+            coroutine_id,
         }
     }
 }
@@ -352,6 +407,8 @@ pub struct Vm {
     opts: VmOptions,
     #[cfg(feature = "jit")]
     jit: Option<crate::vm::jit::JitState>,
+    /// 协程调度器（5.8）：协程 ID → 协程状态
+    pub coroutines: CoroutineScheduler,
 }
 
 impl Vm {
@@ -369,10 +426,11 @@ impl Vm {
             opts,
             #[cfg(feature = "jit")]
             jit: if cfg!(feature = "jit") {
-                Some(crate::vm::jit::JitState::new())
+                Some(cranelift::vm::jit::JitState::new())
             } else {
                 None
             },
+            coroutines: CoroutineScheduler::new(),
         })
     }
 
@@ -394,6 +452,14 @@ impl Vm {
         Ok(self.result.take().unwrap_or(Value::Null))
     }
 
+    /// 重置 VM 状态以重复运行（基准测试用）
+    pub fn reset_for_reuse(&mut self) {
+        self.frames.clear();
+        self.call_counts.iter_mut().for_each(|c| *c = 0);
+        self.result = None;
+        self.halt = false;
+    }
+
     /// 当前调用帧深度
     pub fn depth(&self) -> usize {
         self.frames.len()
@@ -402,6 +468,21 @@ impl Vm {
     /// 当前存活堆对象数（诊断）
     pub fn live_objects(&self) -> usize {
         self.heap.live_count()
+    }
+
+    /// 获取堆的可变引用（供测试 / 调试使用）
+    pub fn heap_mut(&mut self) -> &mut Heap {
+        &mut self.heap
+    }
+
+    /// 获取堆的引用（供测试 / 调试使用）
+    pub fn heap_ref(&self) -> &Heap {
+        &self.heap
+    }
+
+    /// 获取当前帧栈的可变引用（供测试 / 调试使用）
+    pub fn frames_mut(&mut self) -> &mut Vec<Frame> {
+        &mut self.frames
     }
 
     // ── 内部辅助 ──
@@ -413,7 +494,12 @@ impl Vm {
                 self.opts.max_call_depth
             )));
         }
-        let mut frame = Frame::new(&self.module.funcs[func_idx], args);
+        let current_co = if self.frames.is_empty() {
+            0
+        } else {
+            self.frames.last().unwrap().coroutine_id
+        };
+        let mut frame = Frame::new(&self.module.funcs[func_idx], args, current_co);
         frame.func = func_idx;
         self.frames.push(frame);
         // 热点计数

@@ -24,16 +24,28 @@ pub enum HeapData {
         type_tag: u16,
         /// 字段表
         fields: HashMap<u16, Value>,
+        /// 虚方法表：方法表索引 → 函数索引（5.6）
+        /// 允许对象动态注册方法（如接口实现、多态调度）
+        vtable: Option<HashMap<u16, usize>>,
     },
     /// 数组：定长元素序列
     Array(Vec<Value>),
+    /// 动态列表（5.7）：可变长度有序集合
+    List(Vec<Value>),
+    /// 哈希映射（5.7）：键值对集合
+    Map(HashMap<Value, Value>),
 }
 
 /// 堆槽（含引用计数与回收标记）
 struct HeapSlot {
     rc: usize,
     data: Option<HeapData>,
+    /// 释放回调（5.10）：对象回收时调用，可用于清理外部资源
+    drop_cb: Option<DropCallback>,
 }
+
+/// 释放回调函数指针
+type DropCallback = fn(Value);
 
 /// 堆管理器
 pub struct Heap {
@@ -60,6 +72,16 @@ impl Heap {
         self.alloc(HeapData::Object {
             type_tag,
             fields: HashMap::new(),
+            vtable: None,
+        })
+    }
+
+    /// 分配一个带虚方法表的对象（5.6）
+    pub fn alloc_object_with_vtable(&mut self, type_tag: u16, vtable: HashMap<u16, usize>) -> usize {
+        self.alloc(HeapData::Object {
+            type_tag,
+            fields: HashMap::new(),
+            vtable: Some(vtable),
         })
     }
 
@@ -68,11 +90,22 @@ impl Heap {
         self.alloc(HeapData::Array(vec![Value::Null; len]))
     }
 
+    /// 分配一个动态 List（5.7），返回句柄
+    pub fn alloc_list(&mut self, initial_capacity: usize) -> usize {
+        self.alloc(HeapData::List(Vec::with_capacity(initial_capacity)))
+    }
+
+    /// 分配一个 Map（5.7），返回句柄
+    pub fn alloc_map(&mut self) -> usize {
+        self.alloc(HeapData::Map(HashMap::new()))
+    }
+
     fn alloc(&mut self, data: HeapData) -> usize {
         if let Some(h) = self.free.pop() {
             self.slots[h] = HeapSlot {
                 rc: 1,
                 data: Some(data),
+                drop_cb: None,
             };
             h
         } else {
@@ -80,8 +113,16 @@ impl Heap {
             self.slots.push(HeapSlot {
                 rc: 1,
                 data: Some(data),
+                drop_cb: None,
             });
             h
+        }
+    }
+
+    /// 注册释放回调（5.10）
+    pub fn set_drop_callback(&mut self, handle: usize, cb: DropCallback) {
+        if let Some(slot) = self.slots.get_mut(handle) {
+            slot.drop_cb = Some(cb);
         }
     }
 
@@ -94,7 +135,7 @@ impl Heap {
         }
     }
 
-    /// 引用计数 -1；归零则回收槽位
+    /// 引用计数 -1；归零则回收槽位（触发 drop 回调，5.10）
     pub fn dec_ref(&mut self, handle: usize) {
         if let Some(slot) = self.slots.get_mut(handle) {
             if slot.data.is_none() {
@@ -105,9 +146,33 @@ impl Heap {
                 slot.rc -= 1;
             }
             if slot.rc == 0 {
+                // 在清除数据前，若已挂载对象则先取出最后一个值触发 drop 回调
+                let last_value = slot.data.as_ref().map(last_heap_value);
                 slot.data = None;
+                if let Some(cb) = slot.drop_cb.take() {
+                    if let Some(v) = last_value {
+                        cb(v);
+                    }
+                }
                 self.free.push(handle);
             }
+        }
+    }
+
+    /// 显式释放（DropRef 指令，5.10）：强制触发 drop 回调并回收
+    pub fn drop_ref(&mut self, handle: usize) {
+        if let Some(slot) = self.slots.get_mut(handle) {
+            if slot.data.is_none() {
+                return;
+            }
+            let last_value = slot.data.as_ref().map(last_heap_value);
+            slot.data = None;
+            if let Some(cb) = slot.drop_cb.take() {
+                if let Some(v) = last_value {
+                    cb(v);
+                }
+            }
+            self.free.push(handle);
         }
     }
 
@@ -125,6 +190,16 @@ impl Heap {
             if let Some(HeapData::Object { fields, .. }) = &mut slot.data {
                 fields.insert(field, value);
             }
+        }
+    }
+
+    /// 查找对象虚方法表中的方法，返回函数索引（5.6）
+    pub fn get_vtable_method(&self, handle: usize, method_idx: u16) -> Option<usize> {
+        match self.slots.get(handle).and_then(|s| s.data.as_ref()) {
+            Some(HeapData::Object { vtable, .. }) => {
+                vtable.as_ref().and_then(|vt| vt.get(&method_idx).copied())
+            }
+            _ => None,
         }
     }
 
@@ -147,8 +222,80 @@ impl Heap {
         }
     }
 
+    // ── List 操作（5.7） ──
+
+    /// List 尾部追加元素
+    pub fn list_push(&mut self, handle: usize, value: Value) {
+        if let Some(slot) = self.slots.get_mut(handle) {
+            if let Some(HeapData::List(elems)) = &mut slot.data {
+                elems.push(value);
+            }
+        }
+    }
+
+    /// List 弹出尾部元素
+    pub fn list_pop(&mut self, handle: usize) -> Value {
+        match self.slots.get_mut(handle).and_then(|s| s.data.as_mut()) {
+            Some(HeapData::List(elems)) => elems.pop().unwrap_or(Value::Null),
+            _ => Value::Null,
+        }
+    }
+
+    /// List 长度
+    pub fn list_len(&self, handle: usize) -> i64 {
+        match self.slots.get(handle).and_then(|s| s.data.as_ref()) {
+            Some(HeapData::List(elems)) => elems.len() as i64,
+            _ => 0,
+        }
+    }
+
+    // ── Map 操作（5.7） ──
+
+    /// Map 插入键值对
+    pub fn map_set(&mut self, handle: usize, key: Value, value: Value) {
+        if let Some(slot) = self.slots.get_mut(handle) {
+            if let Some(HeapData::Map(map)) = &mut slot.data {
+                map.insert(key, value);
+            }
+        }
+    }
+
+    /// Map 查找键并返回值
+    pub fn map_get(&self, handle: usize, key: &Value) -> Value {
+        match self.slots.get(handle).and_then(|s| s.data.as_ref()) {
+            Some(HeapData::Map(map)) => map.get(key).cloned().unwrap_or(Value::Null),
+            _ => Value::Null,
+        }
+    }
+
+    /// Map 长度
+    pub fn map_len(&self, handle: usize) -> i64 {
+        match self.slots.get(handle).and_then(|s| s.data.as_ref()) {
+            Some(HeapData::Map(map)) => map.len() as i64,
+            _ => 0,
+        }
+    }
+
     /// 当前存活对象数量（诊断用）
     pub fn live_count(&self) -> usize {
         self.slots.iter().filter(|s| s.data.is_some()).count()
+    }
+}
+
+/// 取堆对象中一个代表性值（用于 drop 回调）
+fn last_heap_value(data: &HeapData) -> Value {
+    match data {
+        HeapData::Object { fields, .. } => {
+            fields.values().next().cloned().unwrap_or(Value::Null)
+        }
+        HeapData::Array(elems) => {
+            elems.last().cloned().unwrap_or(Value::Null)
+        }
+        HeapData::List(elems) => {
+            elems.last().cloned().unwrap_or(Value::Null)
+        }
+        HeapData::Map(map) => {
+            map.values().next().cloned().unwrap_or(Value::Null)
+        }
     }
 }

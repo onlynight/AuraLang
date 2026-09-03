@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::vm::dynamic_ffi::DynamicLoader;
 use crate::vm::value::Value;
 
 /// 原生函数指针类型
@@ -19,6 +20,8 @@ pub type NativeFn = fn(&[Value]) -> Value;
 #[derive(Default)]
 pub struct NativeRegistry {
     fns: HashMap<String, NativeFn>,
+    /// 动态加载器（5.9）：未内置的原生函数从动态库查找
+    dynamic: DynamicLoader,
 }
 
 impl NativeRegistry {
@@ -26,6 +29,7 @@ impl NativeRegistry {
     pub fn new() -> Self {
         let mut r = NativeRegistry {
             fns: HashMap::new(),
+            dynamic: DynamicLoader::new(),
         };
         r.register("println", native_println);
         r.register("print", native_print);
@@ -45,14 +49,37 @@ impl NativeRegistry {
         self.fns.insert(name.to_string(), f);
     }
 
-    /// 查找原生函数
+    /// 查找原生函数（优先内置表，其次动态加载表）
     pub fn get(&self, name: &str) -> Option<NativeFn> {
-        self.fns.get(name).copied()
+        self.fns
+            .get(name)
+            .copied()
+            .or_else(|| self.dynamic.get(name))
     }
 
-    /// 是否存在该名称的原生函数
+    /// 是否存在该名称的原生函数（内置或动态）
     pub fn contains(&self, name: &str) -> bool {
-        self.fns.contains_key(name)
+        self.fns.contains_key(name) || self.dynamic.contains(name)
+    }
+
+    /// 动态加载库（5.9）
+    pub fn load_library(&mut self, path: &str) -> Result<(), String> {
+        self.dynamic.load_lib(path)
+    }
+
+    /// 从动态加载的库注册函数
+    pub fn register_dynamic(&mut self, name: &str, f: NativeFn) {
+        self.dynamic.register_func(name, f);
+    }
+
+    /// 获取动态加载器的引用
+    pub fn dynamic_loader(&self) -> &DynamicLoader {
+        &self.dynamic
+    }
+
+    /// 获取动态加载器的可变引用
+    pub fn dynamic_loader_mut(&mut self) -> &mut DynamicLoader {
+        &mut self.dynamic
     }
 }
 
