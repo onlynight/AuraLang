@@ -68,9 +68,9 @@ fun main() {
     aura.concurrent.channelSend(stage1, 100)
     aura.concurrent.channelSend(stage2, 200)
     aura.concurrent.channelSend(stage3, 300)
-    val s1 = aura.concurrent.channelRecv(stage1)
-    val s2 = aura.concurrent.channelRecv(stage2)
-    val s3 = aura.concurrent.channelRecv(stage3)
+    val s1: Int = aura.concurrent.channelRecv(stage1)
+    val s2: Int = aura.concurrent.channelRecv(stage2)
+    val s3: Int = aura.concurrent.channelRecv(stage3)
     val total = s1 + s2 + s3
     println("多级管道: " + total.toString())
 }

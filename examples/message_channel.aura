@@ -22,9 +22,9 @@ fun main() {
     aura.concurrent.channelSend(ch1, 1)
     aura.concurrent.channelSend(ch1, 2)
     aura.concurrent.channelSend(ch1, 3)
-    val a = aura.concurrent.channelRecv(ch1)
-    val b = aura.concurrent.channelRecv(ch1)
-    val c = aura.concurrent.channelRecv(ch1)
+    val a: Int = aura.concurrent.channelRecv(ch1)
+    val b: Int = aura.concurrent.channelRecv(ch1)
+    val c: Int = aura.concurrent.channelRecv(ch1)
     val sum1 = a + b + c
     println("多值顺序: " + sum1.toString())
 
@@ -33,9 +33,9 @@ fun main() {
     aura.concurrent.channelSend(producer, 100)
     aura.concurrent.channelSend(producer, 200)
     aura.concurrent.channelSend(producer, 300)
-    val consumer1 = aura.concurrent.channelRecv(producer)
-    val consumer2 = aura.concurrent.channelRecv(producer)
-    val consumer3 = aura.concurrent.channelRecv(producer)
+    val consumer1: Int = aura.concurrent.channelRecv(producer)
+    val consumer2: Int = aura.concurrent.channelRecv(producer)
+    val consumer3: Int = aura.concurrent.channelRecv(producer)
     val sum2 = consumer1 + consumer2 + consumer3
     println("生产者-消费者: " + sum2.toString())
 
@@ -54,9 +54,9 @@ fun main() {
     aura.concurrent.channelSend(boundedCh, 10)
     aura.concurrent.channelSend(boundedCh, 20)
     aura.concurrent.channelSend(boundedCh, 30)
-    val bv1 = aura.concurrent.channelRecv(boundedCh)
-    val bv2 = aura.concurrent.channelRecv(boundedCh)
-    val bv3 = aura.concurrent.channelRecv(boundedCh)
+    val bv1: Int = aura.concurrent.channelRecv(boundedCh)
+    val bv2: Int = aura.concurrent.channelRecv(boundedCh)
+    val bv3: Int = aura.concurrent.channelRecv(boundedCh)
     val sum3 = bv1 + bv2 + bv3
     println("有界通道: " + sum3.toString())
 

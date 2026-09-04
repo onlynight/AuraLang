@@ -53,11 +53,11 @@ fun main() {
     // ── 7. 连续 Select ──
     val seqCh = aura.concurrent.newChannel(0)
     aura.concurrent.channelSend(seqCh, 1)
-    val seq1 = aura.concurrent.select(seqCh, seqCh)
+    val seq1: Int = aura.concurrent.select(seqCh, seqCh)
     aura.concurrent.channelSend(seqCh, 2)
-    val seq2 = aura.concurrent.select(seqCh, seqCh)
+    val seq2: Int = aura.concurrent.select(seqCh, seqCh)
     aura.concurrent.channelSend(seqCh, 3)
-    val seq3 = aura.concurrent.select(seqCh, seqCh)
+    val seq3: Int = aura.concurrent.select(seqCh, seqCh)
     val seqSum = seq1 + seq2 + seq3
     println("连续 Select: " + seqSum.toString())
 }
