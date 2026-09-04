@@ -26,6 +26,9 @@ pub enum Value {
     Ref(usize),
     /// 弱引用句柄（不增加引用计数，P7.3）
     Weak(usize),
+    /// 原始指针（C ABI 互操作，P8.6）。`0` = `nullptr`。
+    /// 用于 `Pointer<T>` / `CString` / `CStr` / `Handle` 等 FFI 类型。
+    Ptr(i64),
 }
 
 impl Value {
@@ -44,6 +47,16 @@ impl Value {
             Value::Str(s) => !s.is_empty(),
             Value::Ref(_) => true,
             Value::Weak(_) => false,
+            // 非空指针为真，nullptr 为假
+            Value::Ptr(p) => *p != 0,
+        }
+    }
+
+    /// 是否为 `nullptr`（仅对指针类型有意义，P8.6）
+    pub fn is_null_ptr(&self) -> bool {
+        match self {
+            Value::Ptr(0) | Value::Null => true,
+            _ => false,
         }
     }
 
@@ -53,6 +66,7 @@ impl Value {
             Value::Int(i) => *i,
             Value::Float(f) => *f as i64,
             Value::Bool(b) => *b as i64,
+            Value::Ptr(p) => *p,
             _ => 0,
         }
     }
@@ -69,6 +83,19 @@ impl Value {
 
     pub fn as_bool(&self) -> bool {
         self.is_truthy()
+    }
+
+    /// 取出指针地址（仅对 `Value::Ptr` 有意义，其他类型返回 0）
+    pub fn as_ptr(&self) -> i64 {
+        match self {
+            Value::Ptr(p) => *p,
+            _ => 0,
+        }
+    }
+
+    /// 构造指针值
+    pub fn ptr(p: i64) -> Self {
+        Value::Ptr(p)
     }
 
     /// 取出字符串内容（非字符串类型返回其 Display 文本）
@@ -89,6 +116,7 @@ impl Value {
             Value::Null => "Null",
             Value::Ref(_) => "Ref",
             Value::Weak(_) => "Weak",
+            Value::Ptr(_) => "Pointer",
         }
     }
 }
@@ -105,6 +133,9 @@ impl PartialEq for Value {
             // 跨数值类型比较（整 / 浮 互通）
             (Value::Int(a), Value::Float(b)) => (*a as f64) == *b,
             (Value::Float(a), Value::Int(b)) => *a == (*b as f64),
+            (Value::Ptr(a), Value::Ptr(b)) => a == b,
+            // 指针与 null 比较（nullptr 等价于 Null）
+            (Value::Ptr(0), Value::Null) | (Value::Null, Value::Ptr(0)) => true,
             _ => false,
         }
     }
@@ -123,6 +154,7 @@ impl std::hash::Hash for Value {
             Value::Null => {}
             Value::Ref(h) => h.hash(state),
             Value::Weak(h) => h.hash(state),
+            Value::Ptr(p) => p.hash(state),
         }
     }
 }
@@ -144,6 +176,13 @@ impl fmt::Display for Value {
             Value::Null => write!(f, "null"),
             Value::Ref(h) => write!(f, "<ref#{}>", h),
             Value::Weak(h) => write!(f, "<weak#{}>", h),
+            Value::Ptr(p) => {
+                if *p == 0 {
+                    write!(f, "nullptr")
+                } else {
+                    write!(f, "<ptr#{p:x}>")
+                }
+            }
         }
     }
 }

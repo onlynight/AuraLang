@@ -67,6 +67,8 @@ pub enum MirInstr {
     WeakGet { dst: Reg, src: Reg },
     /// 显式堆分配（P7.5）：`dst = box(src)`
     Box { dst: Reg, src: Reg },
+    /// 创建 C 回调蹦床（P8.7）：`dst = makeCallback(func_name)`
+    MakeCallback { dst: Reg, func: String },
     /// defer 清理块开始标记（P7.4）
     DeferBegin,
     /// defer 清理块结束标记（P7.4）
@@ -433,6 +435,17 @@ impl MirBuilder {
                 dst
             }
             HirExpr::Call { callee, args } => {
+                // P8.7: makeCallback 特殊处理 — 生成 MakeCallback 指令
+                if callee == "makeCallback" && args.len() == 1 {
+                    if let HirExpr::Var(name) = &args[0] {
+                        let dst = self.alloc_reg();
+                        self.emit(MirInstr::MakeCallback {
+                            dst,
+                            func: name.clone(),
+                        });
+                        return dst;
+                    }
+                }
                 let argv: Vec<Reg> = args.iter().map(|a| self.lower_expr(a, ctx)).collect();
                 let dst = self.alloc_reg();
                 if ctx.natives.contains(callee.as_str()) {

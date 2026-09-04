@@ -11,6 +11,7 @@
 //! HIR 仍然是结构化、树状的表示，便于后续优化（常量折叠、内联、单态化）。
 
 use crate::ast::*;
+use crate::codegen::opcode::Const;
 use crate::span::Span;
 
 /// HIR 类型（降级阶段仅保留最简单的形式：基本类型名 / 命名类型）
@@ -20,6 +21,8 @@ pub enum HirType {
     Named(String),
     /// 可空包装
     Nullable(Box<HirType>),
+    /// 原始指针类型（P8.6）：`Pointer<T>` 映射为 C 的 `T*`
+    Pointer(Box<HirType>),
     /// 未知（由语义阶段兜底）
     Unknown,
 }
@@ -29,9 +32,33 @@ impl HirType {
         ty.as_ref().map(|t| HirType::from_ast(t))
     }
 
+    /// 从类型名字符串构造 HIR 类型（用于内置函数注册）
+    pub fn from_ast_str(name: &str) -> HirType {
+        match name {
+            "Int" => HirType::Named("Int".into()),
+            "Float" => HirType::Named("Float".into()),
+            "Double" => HirType::Named("Double".into()),
+            "Boolean" => HirType::Named("Boolean".into()),
+            "String" => HirType::Named("String".into()),
+            "Char" => HirType::Named("Char".into()),
+            "Unit" | "Void" => HirType::Named("Unit".into()),
+            "Any" => HirType::Named("Any".into()),
+            "Long" => HirType::Named("Long".into()),
+            "Short" => HirType::Named("Short".into()),
+            "Byte" => HirType::Named("Byte".into()),
+            "CStr" | "CString" | "Handle" => HirType::Named("CStr".into()),
+            s if s.starts_with("Pointer<") => {
+                let inner = &s["Pointer<".len()..s.len() - 1];
+                HirType::Pointer(Box::new(HirType::from_ast_str(inner)))
+            }
+            s => HirType::Named(s.into()),
+        }
+    }
+
     pub fn from_ast(ty: &Type) -> HirType {
         match ty {
             Type::Nullable(inner) => HirType::Nullable(Box::new(HirType::from_ast(inner))),
+            Type::Pointer(inner) => HirType::Pointer(Box::new(HirType::from_ast(inner))),
             Type::Named { name, .. } => HirType::Named(name.clone()),
             Type::Int => HirType::Named("Int".into()),
             Type::Long => HirType::Named("Long".into()),
@@ -239,6 +266,8 @@ pub struct HirProgram {
     pub structs: Vec<HirStruct>,
     /// 原生函数签名集合（extern "c" / 内置）
     pub natives: Vec<HirFunction>,
+    /// FFI 常量（P8.1）：extern 块中的 `val` 声明
+    pub constants: Vec<(String, Const)>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -250,6 +279,7 @@ pub fn desugar_program(program: &Program) -> HirProgram {
     let mut functions = Vec::new();
     let mut structs = Vec::new();
     let mut natives = Vec::new();
+    let mut constants = Vec::new();
 
     for decl in &program.declarations {
         match decl {
@@ -284,6 +314,24 @@ pub fn desugar_program(program: &Program) -> HirProgram {
                         is_native: true,
                         type_params: vec![],
                     });
+                }
+                // P8.1: 处理 extern 块中的常量
+                for stmt in &e.constants {
+                    if let Stmt::Val { name, initializer, .. } = stmt {
+                        if let Some(init) = initializer {
+                            if let Expr::Literal(lit, _) = init.as_ref() {
+                                let c = match lit {
+                                    crate::ast::Literal::Int(i) => Const::Int(*i),
+                                    crate::ast::Literal::Float(f) => Const::Float(*f),
+                                    crate::ast::Literal::String(s) => Const::Str(s.clone()),
+                                    crate::ast::Literal::Bool(b) => Const::Bool(*b),
+                                    crate::ast::Literal::Null => Const::Null,
+                                    crate::ast::Literal::Char(c) => Const::Int(*c as i64),
+                                };
+                                constants.push((name.clone(), c));
+                            }
+                        }
+                    }
                 }
             }
             // class/interface/enum/actor/typealias/import/annotation：P4 仅保留结构，
@@ -335,6 +383,59 @@ pub fn desugar_program(program: &Program) -> HirProgram {
             type_params: vec![],
         });
     }
+
+    // P8.5: 注册 CString/CStr 为原生函数
+    for &name in &["CString", "CStr"] {
+        if !natives.iter().any(|n| n.name == name) {
+            natives.push(HirFunction {
+                name: name.into(),
+                params: vec![HirParam {
+                    name: "s".into(),
+                    ty: Some(HirType::Named("String".into())),
+                }],
+                ret: Some(HirType::Pointer(Box::new(HirType::Named("Char".into())))),
+                body: HirBlock { stmts: vec![] },
+                is_native: true,
+                type_params: vec![],
+            });
+        }
+    }
+
+    // P8.6: 注册 ptrIsNull/ptrToInt/intToPtr 为原生函数
+    for &(name, ref params, ret) in &[
+        ("ptrIsNull", vec![("p", "Pointer<Int>")], "Boolean"),
+        ("ptrToInt", vec![("p", "Pointer<Int>")], "Int"),
+        ("intToPtr", vec![("n", "Int")], "Pointer<Int>"),
+    ] {
+        if !natives.iter().any(|n| n.name == name) {
+            natives.push(HirFunction {
+                name: name.into(),
+                params: params.iter().map(|&(pn, pt)| HirParam {
+                    name: pn.into(),
+                    ty: Some(HirType::from_ast_str(pt)),
+                }).collect(),
+                ret: Some(HirType::from_ast_str(ret)),
+                body: HirBlock { stmts: vec![] },
+                is_native: true,
+                type_params: vec![],
+            });
+        }
+    }
+
+    // P8.7: 注册 makeCallback 为原生函数
+    if !natives.iter().any(|n| n.name == "makeCallback") {
+        natives.push(HirFunction {
+            name: "makeCallback".into(),
+            params: vec![HirParam {
+                name: "f".into(),
+                ty: Some(HirType::Named("Any".into())),
+            }],
+            ret: Some(HirType::Pointer(Box::new(HirType::Named("Int".into())))),
+            body: HirBlock { stmts: vec![] },
+            is_native: true,
+            type_params: vec![],
+        });
+    }
     if !natives.iter().any(|n| n.name == "free") {
         natives.push(HirFunction {
             name: "free".into(),
@@ -353,6 +454,7 @@ pub fn desugar_program(program: &Program) -> HirProgram {
         functions,
         structs,
         natives,
+        constants,
     }
 }
 

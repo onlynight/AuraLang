@@ -51,6 +51,8 @@ type DropCallback = fn(Value);
 pub struct Heap {
     slots: Vec<HeapSlot>,
     free: Vec<usize>,
+    /// C 字符串存储（P8.5）：索引即指针值
+    c_strings: Vec<std::rc::Rc<str>>,
 }
 
 impl Default for Heap {
@@ -58,6 +60,7 @@ impl Default for Heap {
         Heap {
             slots: Vec::new(),
             free: Vec::new(),
+            c_strings: Vec::new(),
         }
     }
 }
@@ -102,6 +105,20 @@ impl Heap {
     /// 分配一个 Map（5.7），返回句柄
     pub fn alloc_map(&mut self) -> usize {
         self.alloc(HeapData::Map(HashMap::new()))
+    }
+
+    /// 分配一个 C 字符串（P8.5）：返回指针值（索引 + 1，0 = nullptr）
+    pub fn alloc_c_string(&mut self, s: String) -> usize {
+        self.c_strings.push(std::rc::Rc::from(s.as_str()));
+        self.c_strings.len() // 1-based index，0 = nullptr
+    }
+
+    /// 从 C 字符串指针读取字符串（P8.5）
+    pub fn read_c_string(&self, ptr: usize) -> String {
+        if ptr == 0 || ptr > self.c_strings.len() {
+            return String::new();
+        }
+        self.c_strings[ptr - 1].to_string()
     }
 
     fn alloc(&mut self, data: HeapData) -> usize {

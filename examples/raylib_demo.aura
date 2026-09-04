@@ -1,0 +1,104 @@
+// Raylib FFI 绑定示例（P8.8）
+//
+// 展示 Aura 语言通过 extern "c" 声明调用 Raylib C 库的完整流程。
+// 包含：函数声明、常量声明、CString 转换、回调注册、指针操作。
+//
+// 运行方式：aura run raylib_demo.aura
+// 注意：需要系统安装 Raylib 库（raylib.dll / libraylib.so）
+
+// ── Raylib FFI 声明 ──
+
+extern "c" "raylib" {
+    // 窗口初始化
+    fun InitWindow(width: Int, height: Int, title: CString)
+    fun CloseWindow()
+    fun WindowShouldClose(): Boolean
+
+    // 绘制
+    fun BeginDrawing()
+    fun EndDrawing()
+    fun ClearBackground(color: Int)
+    fun DrawCircle(x: Int, y: Int, radius: Float, color: Int)
+    fun DrawText(text: CString, x: Int, y: Int, fontSize: Int, color: Int)
+    fun DrawRectangle(x: Int, y: Int, width: Int, height: Int, color: Int)
+
+    // 输入
+    fun IsKeyPressed(key: Int): Boolean
+    fun IsMouseButtonPressed(button: Int): Boolean
+    fun GetMouseX(): Int
+    fun GetMouseY(): Int
+
+    // 回调注册
+    fun SetKeyCallback(callback: Pointer<Int>)
+    fun SetMouseButtonDownCallback(callback: Pointer<Int>)
+
+    // 帧控制
+    fun SetTargetFPS(fps: Int)
+
+    // 颜色常量
+    val WHITE: Int
+    val BLACK: Int
+    val RED: Int
+    val BLUE: Int
+    val GREEN: Int
+    val YELLOW: Int
+
+    // 键码常量
+    val KEY_ESCAPE: Int
+    val KEY_SPACE: Int
+    val KEY_LEFT: Int
+    val KEY_RIGHT: Int
+    val KEY_UP: Int
+    val KEY_DOWN: Int
+
+    // 鼠标按键常量
+    val MOUSE_BUTTON_LEFT: Int
+    val MOUSE_BUTTON_RIGHT: Int
+}
+
+// ── 主程序 ──
+
+fun main() {
+    // 初始化窗口（CString 转换：String → C 字符串指针）
+    val title = CString("Aura + Raylib Demo")
+    InitWindow(800, 600, title)
+    SetTargetFPS(60)
+
+    // 注册键盘回调
+    val cb = makeCallback(onKeyDown)
+    SetKeyCallback(cb)
+
+    // 游戏循环
+    while (!WindowShouldClose()) {
+        BeginDrawing()
+        ClearBackground(BLACK)
+
+        // 绘制标题
+        DrawText(CString("Hello from Aura!"), 340, 40, 20, WHITE)
+
+        // 绘制鼠标位置的圆
+        val mx = GetMouseX()
+        val my = GetMouseY()
+        DrawCircle(mx, my, 10.0f, RED)
+
+        // 检查按键
+        if (IsKeyPressed(KEY_SPACE)) {
+            // 按空格键绘制矩形
+            DrawRectangle(100, 100, 200, 150, BLUE)
+        }
+
+        EndDrawing()
+    }
+
+    CloseWindow()
+}
+
+// ── 回调函数（C → Aura 回调，P8.7）──
+
+// 键盘回调：当 C 代码调用回调时，蹦床派发回此函数
+fun onKeyDown(key: Int, code: Int, action: Int, mods: Int) {
+    if (key == KEY_ESCAPE) {
+        // 按 ESC 退出
+    }
+    // 回调返回值被忽略（C 回调返回 void）
+}

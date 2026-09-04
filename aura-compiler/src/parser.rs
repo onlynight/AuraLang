@@ -1216,11 +1216,20 @@ impl Parser {
         };
 
         let mut functions = Vec::new();
+        let mut constants = Vec::new();
         if self.check(TokenKind::LBrace) {
             self.advance();
             while !self.check(TokenKind::RBrace) && !self.is_at_end() {
                 if self.check(TokenKind::Fun) || self.is_method_modifier_token() {
                     functions.push(self.parse_fn_decl());
+                } else if self.check(TokenKind::Val) || self.check(TokenKind::Var) {
+                    // P8.1: 解析 extern 块内的常量声明
+                    let stmt = if self.check(TokenKind::Val) {
+                        self.parse_val_stmt()
+                    } else {
+                        self.parse_var_stmt()
+                    };
+                    constants.push(stmt);
                 } else {
                     self.advance();
                 }
@@ -1232,6 +1241,7 @@ impl Parser {
             abi,
             library,
             functions,
+            constants,
             span: Span::merge(&start, &self.current().span),
         }
     }

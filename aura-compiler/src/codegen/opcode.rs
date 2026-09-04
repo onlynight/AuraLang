@@ -154,6 +154,20 @@ pub enum OpCode {
 
     /// 终止整个程序（顶层入口返回时）
     Halt,
+
+    // ── FFI（P8）──
+    /// 将栈顶字符串转换为 C 字符串指针（`const char*`），结果压栈
+    CString,
+    /// 从栈顶的 C 字符串指针读取字符串（`const char*` → `String`），结果压栈
+    ReadCStr,
+    /// 栈顶指针是否为 `nullptr`（压入 `Bool`）
+    PtrIsNull,
+    /// 将栈顶指针转换为整数地址（压入 `Int`）
+    PtrToInt,
+    /// 将栈顶整数地址转换为指针（压入 `Ptr`）
+    IntToPtr,
+    /// 创建 C 回调蹦床（栈顶为函数索引，压入 `Ptr` 回调地址）
+    MakeCallback(u16),
 }
 
 impl OpCode {
@@ -221,6 +235,12 @@ impl OpCode {
             OpCode::DeferBegin => 59,
             OpCode::DeferEnd => 60,
             OpCode::Halt => 37,
+            OpCode::CString => 61,
+            OpCode::ReadCStr => 62,
+            OpCode::PtrIsNull => 63,
+            OpCode::PtrToInt => 64,
+            OpCode::IntToPtr => 65,
+            OpCode::MakeCallback(_) => 66,
         }
     }
 
@@ -231,6 +251,7 @@ impl OpCode {
             23 | 24 | 25 => 4,             // i32 偏移
             26 | 27 | 36 => 2,             // u16 函数/原生索引
             40 | 41 | 51 => 2,             // CallMethod/CallCtor/NewCoroutine u16 索引
+            66 => 2,                       // MakeCallback u16 函数索引
             _ => 0,
         }
     }
@@ -298,6 +319,12 @@ impl OpCode {
             58 => OpCode::BoxAlloc,
             59 => OpCode::DeferBegin,
             60 => OpCode::DeferEnd,
+            61 => OpCode::CString,
+            62 => OpCode::ReadCStr,
+            63 => OpCode::PtrIsNull,
+            64 => OpCode::PtrToInt,
+            65 => OpCode::IntToPtr,
+            66 => OpCode::MakeCallback(0),
             _ => return None,
         })
     }
@@ -317,7 +344,8 @@ impl OpCode {
             | OpCode::CallC(i)
             | OpCode::CallMethod(i)
             | OpCode::CallCtor(i)
-            | OpCode::NewCoroutine(i) => buf.extend_from_slice(&i.to_le_bytes()),
+            | OpCode::NewCoroutine(i)
+            | OpCode::MakeCallback(i) => buf.extend_from_slice(&i.to_le_bytes()),
             OpCode::Jump(o) | OpCode::JumpIfTrue(o) | OpCode::JumpIfFalse(o) => {
                 buf.extend_from_slice(&o.to_le_bytes())
             }
@@ -390,6 +418,12 @@ impl fmt::Display for OpCode {
             OpCode::DeferBegin => write!(f, "DEFER_BEGIN"),
             OpCode::DeferEnd => write!(f, "DEFER_END"),
             OpCode::Halt => write!(f, "HALT"),
+            OpCode::CString => write!(f, "CSTRING"),
+            OpCode::ReadCStr => write!(f, "READ_CSTR"),
+            OpCode::PtrIsNull => write!(f, "PTR_IS_NULL"),
+            OpCode::PtrToInt => write!(f, "PTR_TO_INT"),
+            OpCode::IntToPtr => write!(f, "INT_TO_PTR"),
+            OpCode::MakeCallback(i) => write!(f, "MAKE_CALLBACK {}", i),
         }
     }
 }

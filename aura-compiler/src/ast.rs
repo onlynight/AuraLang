@@ -450,6 +450,8 @@ pub struct ExternDecl {
     pub abi: String, // "c", "stdcall", etc.
     pub library: Option<String>,
     pub functions: Vec<FnDecl>,
+    /// FFI 常量（P8.1）：`val NAME: Type` 声明
+    pub constants: Vec<Stmt>,
     pub span: Span,
 }
 

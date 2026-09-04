@@ -17,6 +17,7 @@
 
 pub mod coroutine;
 pub mod dynamic_ffi;
+pub mod ffi;
 pub mod heap;
 pub mod interp;
 #[cfg(feature = "jit")]
@@ -28,6 +29,7 @@ pub mod value;
 
 pub use coroutine::{CoroutineScheduler, CoroutineState};
 pub use dynamic_ffi::DynamicLoader;
+pub use ffi::{CallbackRegistry, clear_dispatcher, resolve_static_symbol, set_dispatcher, trampoline_ptr};
 pub use heap::Heap;
 pub use native::NativeRegistry;
 pub use value::Value;
@@ -170,6 +172,20 @@ pub enum Instr {
     DeferEnd,
 
     Halt,
+
+    // ── FFI（P8）──
+    /// 将栈顶字符串转换为 C 字符串指针
+    CString,
+    /// 从栈顶的 C 字符串指针读取字符串
+    ReadCStr,
+    /// 栈顶指针是否为 nullptr
+    PtrIsNull,
+    /// 将栈顶指针转换为整数地址
+    PtrToInt,
+    /// 将栈顶整数地址转换为指针
+    IntToPtr,
+    /// 创建 C 回调蹦床
+    MakeCallback(u16),
 }
 
 /// 解码后的函数
@@ -356,6 +372,16 @@ fn decode_function(f: &BytecodeFunction) -> Result<DecodedFunction, VmError> {
             crate::codegen::opcode::OpCode::DeferBegin => instrs.push(Instr::DeferBegin),
             crate::codegen::opcode::OpCode::DeferEnd => instrs.push(Instr::DeferEnd),
             crate::codegen::opcode::OpCode::Halt => instrs.push(Instr::Halt),
+            crate::codegen::opcode::OpCode::CString => instrs.push(Instr::CString),
+            crate::codegen::opcode::OpCode::ReadCStr => instrs.push(Instr::ReadCStr),
+            crate::codegen::opcode::OpCode::PtrIsNull => instrs.push(Instr::PtrIsNull),
+            crate::codegen::opcode::OpCode::PtrToInt => instrs.push(Instr::PtrToInt),
+            crate::codegen::opcode::OpCode::IntToPtr => instrs.push(Instr::IntToPtr),
+            crate::codegen::opcode::OpCode::MakeCallback(_) => {
+                let v = u16::from_le_bytes([code[ip], code[ip + 1]]);
+                ip += 2;
+                instrs.push(Instr::MakeCallback(v));
+            }
         }
     }
 
@@ -435,6 +461,8 @@ pub struct Vm {
     jit: Option<crate::vm::jit::JitState>,
     /// 协程调度器（5.8）：协程 ID → 协程状态
     pub coroutines: CoroutineScheduler,
+    /// 回调注册表（P8.7）：Aura 函数 → C 回调蹦床
+    pub callbacks: CallbackRegistry,
 }
 
 impl Vm {
@@ -457,6 +485,7 @@ impl Vm {
                 None
             },
             coroutines: CoroutineScheduler::new(),
+            callbacks: CallbackRegistry::new(),
         })
     }
 
@@ -475,6 +504,23 @@ impl Vm {
         let entry = self.module.entry as usize;
         if entry >= self.module.funcs.len() {
             return Err(VmError::NoEntry);
+        }
+
+        // P8.7: 设置回调派发闭包（C 蹦床通过 thread-local 派发回 VM）
+        {
+            use crate::vm::ffi::set_dispatcher;
+            use std::sync::atomic::AtomicPtr;
+            let vm_ptr = std::sync::Arc::new(AtomicPtr::new(self as *mut Vm));
+            let vm_ptr_clone = vm_ptr.clone();
+            let dispatcher = std::sync::Arc::new(move |callback_id: i64, args: &[i64]| {
+                use std::sync::atomic::Ordering;
+                let ptr = vm_ptr_clone.load(Ordering::SeqCst);
+                if ptr.is_null() {
+                    return 0;
+                }
+                unsafe { (*ptr).call_callback(callback_id, args) }
+            });
+            set_dispatcher(dispatcher);
         }
 
         #[cfg(feature = "jit")]
@@ -501,7 +547,58 @@ impl Vm {
         while !self.frames.is_empty() && !self.halt {
             self.step()?;
         }
+        // P8.7: 清除回调派发闭包
+        crate::vm::ffi::clear_dispatcher();
         Ok(self.result.take().unwrap_or(Value::Null))
+    }
+
+    /// 回调派发入口（P8.7）：被 C 蹦床通过 thread-local 派发闭包调用
+    ///
+    /// 从回调 ID 查注册表，获取 Aura 函数索引，推送新帧并执行。
+    /// 执行完毕后返回结果（i64）。
+    ///
+    /// # Safety
+    ///
+    /// 此方法由 C ABI 蹦床通过 `set_dispatcher` 设置的闭包调用。
+    /// 调用者必须保证 VM 处于活跃状态且未在另一线程执行。
+    pub unsafe fn call_callback(&mut self, callback_id: i64, args: &[i64]) -> i64 {
+        let func_idx = match self.callbacks.lookup(callback_id) {
+            Some(idx) => idx,
+            None => {
+                eprintln!("[vm] 回调 #{} 未注册，返回 0", callback_id);
+                return 0;
+            }
+        };
+
+        // 检查参数数量
+        let param_count = if func_idx < self.module.funcs.len() {
+            self.module.funcs[func_idx].param_count as usize
+        } else {
+            eprintln!("[vm] 回调 #{} 指向无效函数 #{}", callback_id, func_idx);
+            return 0;
+        };
+
+        let args = args.iter().take(param_count).cloned().collect::<Vec<_>>();
+        let values: Vec<Value> = args.iter().map(|a| Value::Int(*a)).collect();
+
+        // 保存当前帧栈，执行回调，恢复
+        let old_frames = std::mem::take(&mut self.frames);
+        let old_result = self.result.take();
+        let old_halt = self.halt;
+
+        self.push_frame(func_idx, values).ok();
+        while !self.frames.is_empty() && !self.halt {
+            let _ = self.step();
+        }
+
+        let result = self.result.take().unwrap_or(Value::Null);
+
+        // 恢复帧栈
+        self.frames = old_frames;
+        self.result = old_result;
+        self.halt = old_halt;
+
+        result.as_int()
     }
 
     /// 重置 VM 状态以重复运行（基准测试用）

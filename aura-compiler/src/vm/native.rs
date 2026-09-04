@@ -42,6 +42,15 @@ impl NativeRegistry {
         r.register("toStr", native_to_str);
         r.register("clock", native_clock);
         r.register("strlen", native_strlen);
+        // P8.5: CString / CStr
+        r.register("CString", native_cstring);
+        r.register("CStr", native_cstr);
+        // P8.6: Pointer / nullptr
+        r.register("ptrIsNull", native_ptr_is_null);
+        r.register("ptrToInt", native_ptr_to_int);
+        r.register("intToPtr", native_int_to_ptr);
+        // P8.7: 回调
+        r.register("makeCallback", native_make_callback);
         r
     }
 
@@ -70,6 +79,26 @@ impl NativeRegistry {
     /// 从动态加载的库注册函数
     pub fn register_dynamic(&mut self, name: &str, f: NativeFn) {
         self.dynamic.register_func(name, f);
+    }
+
+    /// 静态链接：从当前进程中解析 C 函数符号并注册（P8.4）
+    ///
+    /// 使用 `dlsym(NULL, name)`（Unix）或 `GetProcAddress`（Windows）查找函数。
+    /// 返回 C 函数地址，由调用方直接调用。
+    pub fn try_static_link(&self, name: &str) -> Option<usize> {
+        use crate::vm::ffi::resolve_static_symbol;
+        resolve_static_symbol(name)
+    }
+
+    /// 尝试解析 C 函数：先查内置表，再查动态表
+    pub fn resolve_c_function(&self, name: &str) -> Option<NativeFn> {
+        if let Some(f) = self.fns.get(name).copied() {
+            return Some(f);
+        }
+        if let Some(f) = self.dynamic.get(name) {
+            return Some(f);
+        }
+        None
     }
 
     /// 获取动态加载器的引用
@@ -178,4 +207,61 @@ fn native_strlen(args: &[Value]) -> Value {
         Some(Value::Str(s)) => Value::Int(s.chars().count() as i64),
         _ => Value::Int(0),
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P8 FFI 内置函数
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// CString(str) → Ptr：将 Aura 字符串转换为 C 字符串指针（P8.5）
+///
+/// 实际实现：通过 `CString` 指令完成转换，此处作为占位返回 Ptr(0)。
+/// 完整实现需 VM 端支持（见 interp.rs CString 指令）。
+fn native_cstring(args: &[Value]) -> Value {
+    match args.first() {
+        Some(Value::Str(_s)) => {
+            // 返回一个非空指针占位（实际 C 字符串由 CString 指令分配）
+            Value::Ptr(1)
+        }
+        _ => Value::Ptr(0),
+    }
+}
+
+/// CStr(str) → Ptr：CString 的别名（P8.5）
+fn native_cstr(args: &[Value]) -> Value {
+    native_cstring(args)
+}
+
+/// ptrIsNull(ptr) → Bool：检查指针是否为 nullptr（P8.6）
+fn native_ptr_is_null(args: &[Value]) -> Value {
+    match args.first() {
+        Some(v) => Value::Bool(v.is_null_ptr()),
+        _ => Value::Bool(true),
+    }
+}
+
+/// ptrToInt(ptr) → Int：将指针转换为整数地址（P8.6）
+fn native_ptr_to_int(args: &[Value]) -> Value {
+    match args.first() {
+        Some(v) => Value::Int(v.as_ptr()),
+        _ => Value::Int(0),
+    }
+}
+
+/// intToPtr(n) → Ptr：将整数地址转换为指针（P8.6）
+fn native_int_to_ptr(args: &[Value]) -> Value {
+    match args.first() {
+        Some(v) => Value::Ptr(v.as_int()),
+        _ => Value::Ptr(0),
+    }
+}
+
+/// makeCallback(funcName) → Ptr：创建 C 回调蹦床（P8.7）
+///
+/// 返回的 Ptr 包含回调 ID，C 代码将其作为函数指针调用时，
+/// 蹦床通过 thread-local 派发回 Aura VM 执行对应函数。
+fn native_make_callback(_args: &[Value]) -> Value {
+    // makeCallback 由 MakeCallback 指令处理（见 mir.rs / emit.rs）
+    // 此处作为占位：如果通过 CallNative 调用，返回无效回调 ID
+    Value::Ptr(0)
 }

@@ -35,9 +35,13 @@ fn map_type(ty: &HirType) -> &str {
             "String" => "const char*",
             "Unit" | "Void" => "void",
             "Any" | "Nothing" => "void*",
+            // P8.5 / P8.6: FFI 类型
+            "CString" | "CStr" | "Handle" => "void*",
+            "Color" => "unsigned int",
             _ => "void*",
         },
         HirType::Nullable(_) => "void*",
+        HirType::Pointer(_inner) => "void*", // 简化：所有指针 → void*
         HirType::Unknown => "void*",
     }
 }

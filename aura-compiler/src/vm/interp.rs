@@ -309,6 +309,41 @@ impl Vm {
             Instr::Halt => {
                 self.halt = true;
             }
+
+            // ── FFI（P8）──
+            Instr::CString => {
+                let s = self.pop(top)?;
+                let cs = s.as_string();
+                // 分配 C 字符串到堆
+                let h = self.heap.alloc_c_string(cs);
+                self.frames[top].stack.push(Value::Ptr(h as i64));
+            }
+            Instr::ReadCStr => {
+                let v = self.pop(top)?;
+                let ptr = v.as_ptr();
+                if ptr == 0 {
+                    self.frames[top].stack.push(Value::str_(""));
+                } else {
+                    let s = self.heap.read_c_string(ptr as usize);
+                    self.frames[top].stack.push(Value::str_(s));
+                }
+            }
+            Instr::PtrIsNull => {
+                let v = self.pop(top)?;
+                self.frames[top].stack.push(Value::Bool(v.is_null_ptr()));
+            }
+            Instr::PtrToInt => {
+                let v = self.pop(top)?;
+                self.frames[top].stack.push(Value::Int(v.as_ptr()));
+            }
+            Instr::IntToPtr => {
+                let v = self.pop(top)?;
+                self.frames[top].stack.push(Value::Ptr(v.as_int()));
+            }
+            Instr::MakeCallback(func_idx) => {
+                let cb_id = self.callbacks.register(func_idx as usize);
+                self.frames[top].stack.push(Value::Ptr(cb_id as i64));
+            }
         }
         Ok(())
     }
@@ -437,14 +472,21 @@ impl Vm {
 
         let result = if let Some(f) = self.natives.get(&native.name) {
             f(&args)
+        } else if let Some(f) = self.natives.resolve_c_function(&native.name) {
+            f(&args)
         } else {
-            // 未链接的外部函数：占位实现（打印参数并返回 0），保证字节码可继续执行
-            eprintln!(
-                "[vm] 未链接的外部函数 `{}`，已忽略调用（参数: {:?}）",
-                native.name,
-                args.iter().map(|v| v.to_string()).collect::<Vec<_>>()
-            );
-            Value::Int(0)
+            // P8.4: 尝试静态链接 — 直接使用 dlsym 解析 C 函数并调用
+            match static_call_c(&native.name, &args) {
+                Some(v) => v,
+                None => {
+                    eprintln!(
+                        "[vm] 未链接的外部函数 `{}`，已忽略调用（参数: {:?}）",
+                        native.name,
+                        args.iter().map(|v| v.to_string()).collect::<Vec<_>>()
+                    );
+                    Value::Int(0)
+                }
+            }
         };
         self.frames[top].stack.push(result);
         Ok(())
@@ -477,6 +519,27 @@ impl Vm {
         let start = stack.len() - n;
         Ok(stack.split_off(start))
     }
+}
+
+/// P8.4: 静态链接 C 函数调用
+///
+/// 使用 `dlsym(NULL, name)` / `GetProcAddress` 解析 C 函数符号，
+/// 将参数转换为 `i64` 数组（最多 4 个），调用 C 函数，返回结果。
+/// 成功时返回 `Some(Value)`，失败时返回 `None`。
+fn static_call_c(name: &str, args: &[Value]) -> Option<Value> {
+    use crate::vm::ffi::resolve_static_symbol;
+    use crate::vm::ffi::CFuncPtr;
+
+    let addr = resolve_static_symbol(name)?;
+    let ptr: CFuncPtr = unsafe { std::mem::transmute(addr) };
+    let c_args: [i64; 4] = [
+        args.first().map(|v| v.as_int()).unwrap_or(0),
+        args.get(1).map(|v| v.as_int()).unwrap_or(0),
+        args.get(2).map(|v| v.as_int()).unwrap_or(0),
+        args.get(3).map(|v| v.as_int()).unwrap_or(0),
+    ];
+    let result = unsafe { ptr(c_args[0], c_args[1], c_args[2], c_args[3]) };
+    Some(Value::Int(result))
 }
 
 /// 二元运算：弹出 b、a，计算后压回结果

@@ -48,8 +48,14 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
 
     let entry = fn_index.get("main").copied().unwrap_or(0);
 
+    // P8.1: 合并 FFI 常量到常量池
+    let mut consts = ctx.consts.clone();
+    for (_name, c) in &hir.constants {
+        consts.push(c.clone());
+    }
+
     BytecodeModule {
-        consts: ctx.consts.clone(),
+        consts,
         natives,
         functions,
         entry,
@@ -192,6 +198,8 @@ fn instr_size(instr: &crate::codegen::mir::MirInstr) -> usize {
         WeakGet { .. } => 7,
         // Box：LoadVar(src) + BoxAlloc(1) + StoreVar(dst) = 7
         Box { .. } => 7,
+        // MakeCallback：MakeCallback(3) + StoreVar(3) = 6
+        MakeCallback { .. } => 6,
         // DeferBegin：DeferBegin(1) = 1
         DeferBegin => 1,
         // DeferEnd：DeferEnd(1) = 1
@@ -347,6 +355,11 @@ fn emit_instr(
         Box { dst, src } => {
             OpCode::LoadVar(*src as u16).write(code);
             OpCode::BoxAlloc.write(code);
+            OpCode::StoreVar(*dst as u16).write(code);
+        }
+        MakeCallback { dst, func } => {
+            let idx = fn_index.get(func.as_str()).copied().unwrap_or(0);
+            OpCode::MakeCallback(idx).write(code);
             OpCode::StoreVar(*dst as u16).write(code);
         }
         DeferBegin => {

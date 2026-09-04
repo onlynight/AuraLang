@@ -32,6 +32,7 @@ impl TypeMapper {
         match ty {
             HirType::Named(name) => self.map_named(name),
             HirType::Nullable(inner) => self.map_nullable(inner),
+            HirType::Pointer(_inner) => "ptr".to_string(), // LLVM 13+ 不透明指针
             HirType::Unknown => "i8*".to_string(),
         }
     }
@@ -70,6 +71,11 @@ impl TypeMapper {
             }
             "Any" => "i8*".to_string(),
             "Nothing" => "i8*".to_string(),
+            // P8.5 / P8.6: FFI 类型 → 不透明指针
+            "CString" | "CStr" | "Handle" => "i8*".to_string(),
+            "Color" => "{ i8, i8, i8, i8 }".to_string(),
+            // 函数类型 → 函数指针
+            _ if name.starts_with('(') => "ptr".to_string(),
             _ => {
                 // 用户自定义结构体/命名类型：在 emit 阶段会被替换为对应的 struct 类型名
                 // 这里返回 `%struct.<Name>` 占位符
