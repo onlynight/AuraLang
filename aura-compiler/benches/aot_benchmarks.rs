@@ -12,7 +12,7 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use aura_compiler::codegen::compile_source;
-use aura_compiler::vm::{Vm, VmOptions, Value};
+use aura_compiler::vm::{Value, Vm, VmOptions};
 
 const FIB_SRC: &str = r#"
     fun fib(n: Int): Int {
@@ -51,7 +51,10 @@ fn bench_vm(src: &str, iters: usize, expected: i64) -> f64 {
 #[cfg(feature = "jit")]
 fn bench_jit(src: &str, iters: usize, expected: i64) -> f64 {
     let module = compile_source(src).unwrap();
-    let opts = VmOptions { jit: true, ..Default::default() };
+    let opts = VmOptions {
+        jit: true,
+        ..Default::default()
+    };
     let mut vm = Vm::new(&module, opts).unwrap();
     let start = Instant::now();
     for _ in 0..iters {
@@ -139,7 +142,9 @@ fn bench_aot(src: &str, iters: usize, expected: i64) -> Result<f64, String> {
     // 运行多次并计时
     let start = Instant::now();
     for _ in 0..iters {
-        let out = Command::new(&exe_path).output().map_err(|e| e.to_string())?;
+        let out = Command::new(&exe_path)
+            .output()
+            .map_err(|e| e.to_string())?;
         let code = out.status.code().unwrap_or(-1) as i64;
         // 在 Windows 上，进程退出码是 i32；将负数转回正确值
         let code = if code < 0 { code + 256 } else { code };

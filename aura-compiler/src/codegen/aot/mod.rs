@@ -32,13 +32,13 @@ pub mod types;
 
 use std::path::Path;
 
-use crate::codegen::hir::HirProgram;
 use crate::codegen::CodegenError;
+use crate::codegen::hir::HirProgram;
 
 pub use error::AotError;
-pub use linker::{link_to_object, link_to_executable, LlvmToolError, LlvmToolResult};
+pub use linker::{LlvmToolError, LlvmToolResult, link_to_executable, link_to_object};
 pub use optimize::OptimizationLevel;
-pub use target::{Architecture, OperatingSystem, Vendor, AOTargetTriple, TargetTriple};
+pub use target::{AOTargetTriple, Architecture, OperatingSystem, TargetTriple, Vendor};
 pub use types::TypeMapper;
 
 /// AOT 编译选项
@@ -149,7 +149,11 @@ impl AotCodeGenerator {
         let object_path = output_dir.join(format!(
             "{}.{}",
             stem,
-            if cfg!(target_os = "windows") { "obj" } else { "o" }
+            if cfg!(target_os = "windows") {
+                "obj"
+            } else {
+                "o"
+            }
         ));
         link_to_object(&ll_path, &object_path, &self.options)?;
         output.object_path = Some(object_path.clone());
@@ -162,7 +166,11 @@ impl AotCodeGenerator {
         let exe_path = output_dir.join(format!(
             "{}{}",
             stem,
-            if cfg!(target_os = "windows") { ".exe" } else { "" }
+            if cfg!(target_os = "windows") {
+                ".exe"
+            } else {
+                ""
+            }
         ));
         link_to_executable(&object_path, &exe_path, &self.options)?;
         output.exe_path = Some(exe_path);
@@ -187,7 +195,11 @@ impl AotCodeGenerator {
 }
 
 /// 一键 AOT 编译入口（从源码字符串到目标文件）
-pub fn aot_compile(source: &str, output_path: &Path, options: AotOptions) -> Result<AotOutput, CodegenError> {
+pub fn aot_compile(
+    source: &str,
+    output_path: &Path,
+    options: AotOptions,
+) -> Result<AotOutput, CodegenError> {
     use crate::lexer::Lexer;
     use crate::parser::Parser;
 
@@ -200,10 +212,7 @@ pub fn aot_compile(source: &str, output_path: &Path, options: AotOptions) -> Res
     let mut parser = Parser::new(tokens);
     let program = parser.parse_program();
     if let Some(e) = parser.errors().first() {
-        return Err(CodegenError::Aot(format!(
-            "parse: {}",
-            e.message
-        )));
+        return Err(CodegenError::Aot(format!("parse: {}", e.message)));
     }
 
     let codegen = AotCodeGenerator::new(options);
@@ -224,8 +233,16 @@ pub fn aot_compile(source: &str, output_path: &Path, options: AotOptions) -> Res
         .map_err(|e| CodegenError::Aot(e.to_string()))?;
 
     // 如果用户指定了非默认输出文件名，复制或重命名
-    if output.exe_path.as_ref().map(|p| p != output_path).unwrap_or(false)
-        || output.object_path.as_ref().map(|p| p != output_path).unwrap_or(false)
+    if output
+        .exe_path
+        .as_ref()
+        .map(|p| p != output_path)
+        .unwrap_or(false)
+        || output
+            .object_path
+            .as_ref()
+            .map(|p| p != output_path)
+            .unwrap_or(false)
     {
         if let Some(ref src) = output.exe_path {
             std::fs::copy(src, output_path).map_err(|e| CodegenError::Aot(e.to_string()))?;

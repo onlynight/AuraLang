@@ -133,9 +133,7 @@ fn layout_blocks(f: &MirFunction) -> Vec<usize> {
             visited[cur] = true;
             order.push(cur);
             match &f.blocks[cur].term {
-                Terminator::If {
-                    then_b, else_b, ..
-                } => {
+                Terminator::If { then_b, else_b, .. } => {
                     pending.push(*else_b);
                     cur = *then_b;
                 }
@@ -184,6 +182,20 @@ fn instr_size(instr: &crate::codegen::mir::MirInstr) -> usize {
         GetIndex { .. } => 10,
         // SetIndex：LoadVar(src) + LoadVar(obj) + LoadVar(idx) + SetIndex(1) = 10
         SetIndex { .. } => 10,
+        // Retain：LoadVar(src) + Retain(1) = 4
+        Retain { .. } => 4,
+        // Release：LoadVar(src) + Release(1) = 4
+        Release { .. } => 4,
+        // WeakRef：LoadVar(src) + WeakRef(1) + StoreVar(dst) = 7
+        WeakRef { .. } => 7,
+        // WeakGet：LoadVar(src) + WeakGet(1) + StoreVar(dst) = 7
+        WeakGet { .. } => 7,
+        // Box：LoadVar(src) + BoxAlloc(1) + StoreVar(dst) = 7
+        Box { .. } => 7,
+        // DeferBegin：DeferBegin(1) = 1
+        DeferBegin => 1,
+        // DeferEnd：DeferEnd(1) = 1
+        DeferEnd => 1,
     }
 }
 
@@ -207,8 +219,8 @@ fn emit_instr(
     fn_index: &HashMap<&str, u16>,
     native_index: &HashMap<&str, u16>,
 ) {
-    use crate::codegen::mir::MirInstr::*;
     use crate::codegen::hir::HirBinOp::*;
+    use crate::codegen::mir::MirInstr::*;
     match instr {
         LoadConst { dst, ci } => {
             OpCode::LoadConst(*ci as u16).write(code);
@@ -313,6 +325,35 @@ fn emit_instr(
             OpCode::LoadVar(*obj as u16).write(code);
             OpCode::LoadVar(*idx as u16).write(code);
             OpCode::SetIndex.write(code);
+        }
+        Retain { src } => {
+            OpCode::LoadVar(*src as u16).write(code);
+            OpCode::Retain.write(code);
+        }
+        Release { src } => {
+            OpCode::LoadVar(*src as u16).write(code);
+            OpCode::Release.write(code);
+        }
+        WeakRef { dst, src } => {
+            OpCode::LoadVar(*src as u16).write(code);
+            OpCode::WeakRef.write(code);
+            OpCode::StoreVar(*dst as u16).write(code);
+        }
+        WeakGet { dst, src } => {
+            OpCode::LoadVar(*src as u16).write(code);
+            OpCode::WeakGet.write(code);
+            OpCode::StoreVar(*dst as u16).write(code);
+        }
+        Box { dst, src } => {
+            OpCode::LoadVar(*src as u16).write(code);
+            OpCode::BoxAlloc.write(code);
+            OpCode::StoreVar(*dst as u16).write(code);
+        }
+        DeferBegin => {
+            OpCode::DeferBegin.write(code);
+        }
+        DeferEnd => {
+            OpCode::DeferEnd.write(code);
         }
     }
 }

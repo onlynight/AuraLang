@@ -51,7 +51,14 @@ fn vm_bench(src: &str, iters: usize, expected: i64) -> f64 {
 #[cfg(feature = "jit")]
 fn jit_bench(src: &str, iters: usize, expected: i64) -> f64 {
     let module = compile_source(src).unwrap();
-    let mut vm = Vm::new(&module, VmOptions { jit: true, ..Default::default() }).unwrap();
+    let mut vm = Vm::new(
+        &module,
+        VmOptions {
+            jit: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     // 预热：前若干次运行累计调用计数，触发 JIT 编译
     let mut first_err: Option<String> = None;
     for _ in 0..iters / 2 {
@@ -89,7 +96,8 @@ fn jit_bench(_src: &str, _iters: usize, _expected: i64) -> f64 {
 }
 
 fn aot_bench(src: &str, iters: usize, expected: i64) -> Result<f64, String> {
-    let llvm_home = std::env::var("AURA_LLVM_HOME").map_err(|_| "未设置 AURA_LLVM_HOME".to_string())?;
+    let llvm_home =
+        std::env::var("AURA_LLVM_HOME").map_err(|_| "未设置 AURA_LLVM_HOME".to_string())?;
     let bin = std::path::Path::new(&llvm_home).join("bin");
 
     // 生成 LLVM IR
@@ -114,7 +122,11 @@ fn aot_bench(src: &str, iters: usize, expected: i64) -> Result<f64, String> {
 
     // llc
     let llc = bin.join({
-        if cfg!(target_os = "windows") { "llc.exe" } else { "llc" }
+        if cfg!(target_os = "windows") {
+            "llc.exe"
+        } else {
+            "llc"
+        }
     });
     let out = Command::new(&llc)
         .arg(&ll)
@@ -151,7 +163,11 @@ fn aot_bench(src: &str, iters: usize, expected: i64) -> Result<f64, String> {
     for _ in 0..iters {
         let out = Command::new(&exe).output().map_err(|e| e.to_string())?;
         let raw = out.status.code().unwrap_or(-1);
-        let code = if raw < 0 { raw as u32 as i64 } else { raw as i64 };
+        let code = if raw < 0 {
+            raw as u32 as i64
+        } else {
+            raw as i64
+        };
         assert_eq!(code, expected, "AOT 结果应为 {}", expected);
     }
     let dur = start.elapsed().as_secs_f64() / iters as f64;
@@ -169,7 +185,11 @@ fn main() {
     println!("  VM(字节码解释器): {:.4} ms/op", vm * 1000.0);
     let jit = jit_bench(FIB_SRC, 12, 75025);
     if jit.is_finite() {
-        println!("  VM(JIT 热点编译):  {:.4} ms/op (JIT 加速 {:.1}x vs VM)", jit * 1000.0, vm / jit);
+        println!(
+            "  VM(JIT 热点编译):  {:.4} ms/op (JIT 加速 {:.1}x vs VM)",
+            jit * 1000.0,
+            vm / jit
+        );
     } else {
         println!("  VM(JIT): 未启用 jit feature，跳过");
     }
@@ -190,7 +210,11 @@ fn main() {
     println!("  VM(字节码解释器): {:.4} ms/op", vm * 1000.0);
     let jit = jit_bench(SUM_SRC, 12, 1_799_970_000i64);
     if jit.is_finite() {
-        println!("  VM(JIT 热点编译):  {:.4} ms/op (JIT 加速 {:.1}x vs VM)", jit * 1000.0, vm / jit);
+        println!(
+            "  VM(JIT 热点编译):  {:.4} ms/op (JIT 加速 {:.1}x vs VM)",
+            jit * 1000.0,
+            vm / jit
+        );
     } else {
         println!("  VM(JIT): 未启用 jit feature，跳过");
     }
@@ -204,4 +228,11 @@ fn main() {
         }
         Err(e) => println!("  AOT: 跳过 ({})", e),
     }
+}
+
+#[cfg(not(feature = "llvm"))]
+fn main() {
+    eprintln!(
+        "此示例需要 --features llvm，请使用: cargo run --release --features \"llvm,jit\" -p aura-compiler --example aot_bench"
+    );
 }

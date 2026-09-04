@@ -57,6 +57,20 @@ pub enum MirInstr {
     GetIndex { dst: Reg, obj: Reg, idx: Reg },
     /// 数组元素写入：`obj[idx] = src`
     SetIndex { obj: Reg, idx: Reg, src: Reg },
+    /// 保留引用计数 +1（P7.2 ARC 自动插入）
+    Retain { src: Reg },
+    /// 释放引用计数 -1（P7.2 ARC 自动插入）
+    Release { src: Reg },
+    /// 创建弱引用（P7.3）：`dst = weak(src)`
+    WeakRef { dst: Reg, src: Reg },
+    /// 从弱引用升级（P7.3）：`dst = upgrade(src)`
+    WeakGet { dst: Reg, src: Reg },
+    /// 显式堆分配（P7.5）：`dst = box(src)`
+    Box { dst: Reg, src: Reg },
+    /// defer 清理块开始标记（P7.4）
+    DeferBegin,
+    /// defer 清理块结束标记（P7.4）
+    DeferEnd,
 }
 
 /// 基本块终结指令（控制流）
@@ -223,7 +237,10 @@ impl MirBuilder {
     }
 
     fn declare(&mut self, name: &str, slot: Reg) {
-        self.scopes.last_mut().unwrap().insert(name.to_string(), slot);
+        self.scopes
+            .last_mut()
+            .unwrap()
+            .insert(name.to_string(), slot);
     }
 
     fn lookup(&self, name: &str) -> Option<Reg> {
@@ -285,7 +302,11 @@ impl MirBuilder {
                     HirExpr::Index { container, index } => {
                         let obj = self.lower_expr(container, ctx);
                         let i = self.lower_expr(index, ctx);
-                        self.emit(MirInstr::SetIndex { obj, idx: i, src: v });
+                        self.emit(MirInstr::SetIndex {
+                            obj,
+                            idx: i,
+                            src: v,
+                        });
                     }
                     _ => { /* 其它赋值目标暂不支持 */ }
                 }
@@ -372,6 +393,14 @@ impl MirBuilder {
                 self.lower_block(b, ctx);
                 self.exit_scope();
             }
+            HirStmt::Defer(b) => {
+                // P7.4: defer 语句 — 将清理块作为延迟执行的代码
+                // 在 MIR 中，defer 块的语句立即执行（简化处理），
+                // 编译期后续通过 DeferBegin/DeferEnd 标记 defer 区域
+                self.enter_scope();
+                self.lower_block(b, ctx);
+                self.exit_scope();
+            }
         }
     }
 
@@ -394,12 +423,7 @@ impl MirBuilder {
                 let a = self.lower_expr(lhs, ctx);
                 let b = self.lower_expr(rhs, ctx);
                 let dst = self.alloc_reg();
-                self.emit(MirInstr::BinOp {
-                    dst,
-                    op: *op,
-                    a,
-                    b,
-                });
+                self.emit(MirInstr::BinOp { dst, op: *op, a, b });
                 dst
             }
             HirExpr::Unary { op, operand } => {
@@ -440,7 +464,11 @@ impl MirBuilder {
                 let c = self.lower_expr(container, ctx);
                 let i = self.lower_expr(index, ctx);
                 let dst = self.alloc_reg();
-                self.emit(MirInstr::GetIndex { dst, obj: c, idx: i });
+                self.emit(MirInstr::GetIndex {
+                    dst,
+                    obj: c,
+                    idx: i,
+                });
                 dst
             }
             HirExpr::New { type_name, args } => {
@@ -488,7 +516,10 @@ impl MirBuilder {
                 }
                 self.current = merge_id;
                 let out = self.alloc_reg();
-                self.emit(MirInstr::LoadLocal { dst: out, slot: res });
+                self.emit(MirInstr::LoadLocal {
+                    dst: out,
+                    slot: res,
+                });
                 out
             }
             HirExpr::Block(b) => {
@@ -518,6 +549,20 @@ impl MirBuilder {
                         d
                     }
                 }
+            }
+            HirExpr::Box(inner) => {
+                // P7.5: 显式堆分配 — 先求值内部表达式，再分配堆对象
+                let src = self.lower_expr(inner, ctx);
+                let dst = self.alloc_reg();
+                self.emit(MirInstr::Box { dst, src });
+                dst
+            }
+            HirExpr::WeakRef(inner) => {
+                // P7.3: 创建弱引用 — 先求值被引用对象，再创建弱引用
+                let src = self.lower_expr(inner, ctx);
+                let dst = self.alloc_reg();
+                self.emit(MirInstr::WeakRef { dst, src });
+                dst
             }
         }
     }

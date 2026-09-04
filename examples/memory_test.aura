@@ -1,0 +1,54 @@
+// P7 内存管理测试示例
+// 测试逃逸分析、ARC 自动插入、defer、box、weak 引用
+
+struct Node {
+    var next: Any
+    var value: Int
+}
+
+struct Box {
+    var value: Any
+}
+
+fun createNode(val: Int) -> Any {
+    val n = new Node()
+    n.value = val
+    return n
+}
+
+fun process(obj: Any) -> Any {
+    val result = new Node()
+    result.value = 100
+    return result
+}
+
+fun useWithDefer() {
+    // P7.4: defer 语句
+    defer {
+        println("cleanup resource")
+    }
+    val x = 42
+    // defer 注册的清理代码会在作用域结束时执行
+}
+
+fun main() {
+    // 基本函数调用（触发 ARC 自动插入）
+    val a = createNode(1)
+    val b = createNode(2)
+    
+    // 字段赋值（触发 ARC Retain）
+    a.next = b
+    
+    // 处理函数（返回值触发 ARC）
+    val result = process(a)
+    
+    // defer 语句测试
+    useWithDefer()
+    
+    // 内存泄漏检测测试
+    // 以下对象引用计数不平衡，可能被泄漏检测器报告
+    val c = createNode(3)
+    // c 没有被 Release，可能在泄漏报告中出现
+    
+    println("Memory test complete")
+}

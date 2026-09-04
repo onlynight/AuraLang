@@ -48,7 +48,9 @@ impl OptimizationLevel {
         match s {
             "0" | "O0" | "none" | "None" => Some(OptimizationLevel::None),
             "1" | "O1" | "balanced" | "Balanced" => Some(OptimizationLevel::Balanced),
-            "2" | "O2" | "aggressive" | "Aggressive" | "default" => Some(OptimizationLevel::Aggressive),
+            "2" | "O2" | "aggressive" | "Aggressive" | "default" => {
+                Some(OptimizationLevel::Aggressive)
+            }
             "3" | "O3" | "extreme" | "Extreme" => Some(OptimizationLevel::Extreme),
             "s" | "Os" | "size" | "Size" => Some(OptimizationLevel::Size),
             "z" | "Oz" | "size_extreme" | "SizeExtreme" => Some(OptimizationLevel::SizeExtreme),
@@ -89,10 +91,22 @@ mod tests {
 
     #[test]
     fn test_from_str() {
-        assert_eq!(OptimizationLevel::from_str("2"), Some(OptimizationLevel::Aggressive));
-        assert_eq!(OptimizationLevel::from_str("O3"), Some(OptimizationLevel::Extreme));
-        assert_eq!(OptimizationLevel::from_str("Os"), Some(OptimizationLevel::Size));
-        assert_eq!(OptimizationLevel::from_str("Oz"), Some(OptimizationLevel::SizeExtreme));
+        assert_eq!(
+            OptimizationLevel::from_str("2"),
+            Some(OptimizationLevel::Aggressive)
+        );
+        assert_eq!(
+            OptimizationLevel::from_str("O3"),
+            Some(OptimizationLevel::Extreme)
+        );
+        assert_eq!(
+            OptimizationLevel::from_str("Os"),
+            Some(OptimizationLevel::Size)
+        );
+        assert_eq!(
+            OptimizationLevel::from_str("Oz"),
+            Some(OptimizationLevel::SizeExtreme)
+        );
         assert_eq!(OptimizationLevel::from_str("foo"), None);
     }
 }

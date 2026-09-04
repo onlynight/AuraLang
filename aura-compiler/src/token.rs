@@ -60,6 +60,13 @@ pub enum TokenKind {
     Data,
     To,
     Await,
+    // P7 内存管理关键字
+    Box,
+    Weak,
+    Malloc,
+    Free,
+    Retain,
+    Release,
 
     // ============ Operators ============
     // Arithmetic
@@ -195,6 +202,12 @@ impl TokenKind {
                 | TokenKind::Import
                 | TokenKind::Lazy
                 | TokenKind::Lateinit
+                | TokenKind::Box
+                | TokenKind::Weak
+                | TokenKind::Malloc
+                | TokenKind::Free
+                | TokenKind::Retain
+                | TokenKind::Release
         )
     }
 

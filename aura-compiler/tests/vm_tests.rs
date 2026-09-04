@@ -3,11 +3,11 @@
 //! 覆盖 技术方案 §7.1 的字节码执行：算术 / 控制流 / 函数调用与递归 / 原生调度 /
 //! 对象模型（NewObject / SetField / GetField）/ 数组。
 
+use aura_compiler::codegen::compile_source;
 use aura_compiler::codegen::opcode::{
     BytecodeFunction, BytecodeModule, BytecodeNative, Const, OpCode,
 };
-use aura_compiler::codegen::compile_source;
-use aura_compiler::vm::{Vm, VmOptions, Value};
+use aura_compiler::vm::{Value, Vm, VmOptions};
 
 /// 编译源码并返回 `main` 的执行结果（要求 main 返回一个可断言的值）
 fn run_main(source: &str) -> Value {
@@ -329,11 +329,11 @@ fn map_operations() {
     // MapSet: 压 value(100), key("k1"), map(Ref)
     OpCode::LoadConst(1).write(&mut code); // 100 (value)
     OpCode::LoadConst(0).write(&mut code); // "k1" (key)
-    OpCode::LoadVar(0).write(&mut code);   // map
+    OpCode::LoadVar(0).write(&mut code); // map
     OpCode::MapSet.write(&mut code);
     // MapGet: 压 key("k1"), map(Ref)
     OpCode::LoadConst(0).write(&mut code); // "k1" (key)
-    OpCode::LoadVar(0).write(&mut code);   // map
+    OpCode::LoadVar(0).write(&mut code); // map
     OpCode::MapGet.write(&mut code);
     OpCode::Return.write(&mut code);
 

@@ -91,7 +91,10 @@ impl DynamicLoader {
 impl DynamicLoader {
     /// 从最后一个加载的库中获取原始符号
     pub fn get_symbol<'a, T>(&'a self, name: &str) -> Result<libloading::Symbol<'a, T>, String> {
-        let last = self.libs.last().ok_or_else(|| "no library loaded".to_string())?;
+        let last = self
+            .libs
+            .last()
+            .ok_or_else(|| "no library loaded".to_string())?;
         last.lib
             .get(name.as_bytes())
             .map_err(|e| format!("symbol '{}' not found: {}", name, e))

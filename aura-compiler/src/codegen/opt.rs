@@ -79,6 +79,7 @@ fn fold_stmt(s: &HirStmt) -> HirStmt {
         HirStmt::Break => HirStmt::Break,
         HirStmt::Continue => HirStmt::Continue,
         HirStmt::Block(b) => HirStmt::Block(fold_block(b)),
+        HirStmt::Defer(b) => HirStmt::Defer(fold_block(b)),
     }
 }
 
@@ -226,7 +227,9 @@ pub fn inline_hir(hir: &mut HirProgram) {
 fn expr_references(e: &HirExpr, name: &str) -> bool {
     match e {
         HirExpr::Var(n) => n == name,
-        HirExpr::Binary { lhs, rhs, .. } => expr_references(lhs, name) || expr_references(rhs, name),
+        HirExpr::Binary { lhs, rhs, .. } => {
+            expr_references(lhs, name) || expr_references(rhs, name)
+        }
         HirExpr::Unary { operand, .. } => expr_references(operand, name),
         HirExpr::Call { callee, args } => {
             callee == name || args.iter().any(|a| expr_references(a, name))
@@ -252,15 +255,23 @@ fn expr_references(e: &HirExpr, name: &str) -> bool {
 
 fn stmt_references(s: &HirStmt, name: &str) -> bool {
     match s {
-        HirStmt::Val { init, .. } | HirStmt::Var { init, .. } => {
-            init.as_ref().map(|e| expr_references(e, name)).unwrap_or(false)
-        }
+        HirStmt::Val { init, .. } | HirStmt::Var { init, .. } => init
+            .as_ref()
+            .map(|e| expr_references(e, name))
+            .unwrap_or(false),
         HirStmt::Assign { target, value } => {
             expr_references(target, name) || expr_references(value, name)
         }
         HirStmt::Expr(e) => expr_references(e, name),
-        HirStmt::Return(v) => v.as_ref().map(|e| expr_references(e, name)).unwrap_or(false),
-        HirStmt::If { cond, then_b, else_b } => {
+        HirStmt::Return(v) => v
+            .as_ref()
+            .map(|e| expr_references(e, name))
+            .unwrap_or(false),
+        HirStmt::If {
+            cond,
+            then_b,
+            else_b,
+        } => {
             expr_references(cond, name)
                 || then_b.stmts.iter().any(|s| stmt_references(s, name))
                 || else_b
@@ -269,8 +280,7 @@ fn stmt_references(s: &HirStmt, name: &str) -> bool {
                     .unwrap_or(false)
         }
         HirStmt::While { cond, body } => {
-            expr_references(cond, name)
-                || body.stmts.iter().any(|s| stmt_references(s, name))
+            expr_references(cond, name) || body.stmts.iter().any(|s| stmt_references(s, name))
         }
         _ => false,
     }
@@ -324,8 +334,11 @@ fn inline_expr(e: &HirExpr, cand: &HashMap<String, (Vec<String>, HirExpr)>) -> H
             let new_args: Vec<HirExpr> = args.iter().map(|a| inline_expr(a, cand)).collect();
             if let Some((params, body)) = cand.get(callee) {
                 if params.len() == new_args.len() {
-                    let mapping: Vec<(String, HirExpr)> =
-                        params.iter().cloned().zip(new_args.iter().cloned()).collect();
+                    let mapping: Vec<(String, HirExpr)> = params
+                        .iter()
+                        .cloned()
+                        .zip(new_args.iter().cloned())
+                        .collect();
                     return subst_expr(body, &mapping);
                 }
             }
@@ -446,7 +459,11 @@ fn subst_stmt(s: &HirStmt, mapping: &[(String, HirExpr)]) -> HirStmt {
         } => HirStmt::If {
             cond: subst_expr(cond, mapping),
             then_b: HirBlock {
-                stmts: then_b.stmts.iter().map(|s| subst_stmt(s, mapping)).collect(),
+                stmts: then_b
+                    .stmts
+                    .iter()
+                    .map(|s| subst_stmt(s, mapping))
+                    .collect(),
             },
             else_b: else_b.as_ref().map(|b| HirBlock {
                 stmts: b.stmts.iter().map(|s| subst_stmt(s, mapping)).collect(),

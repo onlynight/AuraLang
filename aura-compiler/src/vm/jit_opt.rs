@@ -1,5 +1,5 @@
 //! JIT Bytecode Optimization Pass
-//! 
+//!
 //! Runs before Cranelift compilation to optimize bytecode:
 //! 1. Constant folding - fold constant arithmetic at compile time
 //! 2. Dead code elimination - remove instructions whose results are never used
@@ -16,17 +16,17 @@ const MAX_INLINE_SIZE: usize = 20;
 fn schedule_instructions(func: &mut DecodedFunction) {
     let mut new_code = Vec::with_capacity(func.code.len());
     let mut i = 0;
-    
+
     while i < func.code.len() {
         let instr = &func.code[i];
-        
+
         // Pattern: LoadConst followed by arithmetic → keep together (dependency chain)
         // Pattern: LoadVar followed by LoadVar → reorder to improve parallelism
         if let Instr::LoadConst(_) = instr {
             // Look ahead for independent loads that can be moved before
             let mut j = i + 1;
             let mut independent_loads = Vec::new();
-            
+
             while j < func.code.len() {
                 match &func.code[j] {
                     Instr::LoadConst(_) | Instr::LoadVar(_) => {
@@ -34,12 +34,15 @@ fn schedule_instructions(func: &mut DecodedFunction) {
                         independent_loads.push((j, func.code[j].clone()));
                         j += 1;
                     }
-                    Instr::Jump(_) | Instr::JumpIfTrue(_) | Instr::JumpIfFalse(_) 
-                    | Instr::Call(_) | Instr::Return => break,
+                    Instr::Jump(_)
+                    | Instr::JumpIfTrue(_)
+                    | Instr::JumpIfFalse(_)
+                    | Instr::Call(_)
+                    | Instr::Return => break,
                     _ => break, // Arithmetic or other dependent instruction
                 }
             }
-            
+
             // Move independent loads before the current constant load
             // This can help the CPU pipeline by having more instructions ready
             if independent_loads.len() >= 2 {
@@ -52,11 +55,11 @@ fn schedule_instructions(func: &mut DecodedFunction) {
                 continue;
             }
         }
-        
+
         new_code.push(func.code[i].clone());
         i += 1;
     }
-    
+
     func.code = new_code;
 }
 
@@ -71,24 +74,24 @@ fn inline_functions(
     let mut new_code = Vec::with_capacity(func.code.len());
     let mut i = 0;
     let mut inlined = false;
-    
+
     while i < func.code.len() {
         let instr = &func.code[i];
-        
+
         match instr {
             Instr::Call(callee_idx) => {
                 let callee_idx = *callee_idx as usize;
-                
+
                 // Check if the callee is small enough to inline
                 if callee_idx < all_funcs.len() {
                     let callee = &all_funcs[callee_idx];
                     let callee_size = callee.code.len();
-                    
+
                     if callee_size < MAX_INLINE_SIZE && !callee.is_native {
                         // Inline the function
-                        if let Some(inlined_code) = try_inline_function(
-                            func, consts, extra, callee_idx, i,
-                        ) {
+                        if let Some(inlined_code) =
+                            try_inline_function(func, consts, extra, callee_idx, i)
+                        {
                             new_code.extend(inlined_code);
                             i += 1;
                             inlined = true;
@@ -96,7 +99,7 @@ fn inline_functions(
                         }
                     }
                 }
-                
+
                 new_code.push(func.code[i].clone());
                 i += 1;
             }
@@ -106,7 +109,7 @@ fn inline_functions(
             }
         }
     }
-    
+
     func.code = new_code;
 }
 
@@ -121,13 +124,13 @@ fn try_inline_function(
     // For now, return None - function inlining requires more complex analysis
     // to handle parameter passing, return values, and control flow correctly.
     // This would need CFG analysis and register allocation.
-    
+
     // TODO: Implement proper function inlining with:
     // 1. Parameter mapping (caller args → callee params)
     // 2. Return value handling
     // 3. Jump target adjustment within the inlined code
     // 4. Dead code elimination of the original Call instruction
-    
+
     None
 }
 
@@ -154,28 +157,33 @@ pub fn optimize_function_with_deps(
         func: func.clone(),
         extra_consts: Vec::new(),
     };
-    
+
     // Pass 1: Constant folding
     fold_constants(&mut result.func, consts, &mut result.extra_consts);
-    
+
     // Pass 2: Dead code elimination
     eliminate_dead_code(&mut result.func);
-    
+
     // Pass 3: Jump threading (eliminate redundant jumps)
     thread_jumps(&mut result.func);
-    
+
     // Pass 4: Strength reduction (replace Div/Rem by powers of 2 with shifts)
     strength_reduce(&mut result.func, consts, &mut result.extra_consts);
-    
+
     // Pass 5: Instruction scheduling (reorder for better CPU pipeline)
     schedule_instructions(&mut result.func);
-    
+
     // Pass 6: Function inlining (inline small functions)
-    inline_functions(&mut result.func, consts, &mut result.extra_consts, all_funcs);
-    
+    inline_functions(
+        &mut result.func,
+        consts,
+        &mut result.extra_consts,
+        all_funcs,
+    );
+
     // Pass 7: Loop unrolling
     unroll_loops(&mut result.func);
-    
+
     result
 }
 
@@ -183,13 +191,15 @@ pub fn optimize_function_with_deps(
 fn fold_constants(func: &mut DecodedFunction, consts: &[Const], extra: &mut Vec<Const>) {
     let mut new_code = Vec::with_capacity(func.code.len());
     let mut i = 0;
-    
+
     while i < func.code.len() {
         let instr = &func.code[i];
         match instr {
             // Fold constant arithmetic: if both operands are constants, compute result
             Instr::Add | Instr::Sub | Instr::Mul | Instr::Div | Instr::Rem => {
-                if let Some((const_idx, _folded_val)) = try_fold_binary(func, consts, i, instr, extra) {
+                if let Some((const_idx, _folded_val)) =
+                    try_fold_binary(func, consts, i, instr, extra)
+                {
                     new_code.push(Instr::LoadConst(const_idx as u16));
                     i += 1;
                     continue;
@@ -199,7 +209,9 @@ fn fold_constants(func: &mut DecodedFunction, consts: &[Const], extra: &mut Vec<
             }
             // Fold constant comparison: if both operands are constants, compute result
             Instr::Eq | Instr::Ne | Instr::Lt | Instr::Gt | Instr::Le | Instr::Ge => {
-                if let Some((const_idx, _folded_val)) = try_fold_comparison(func, consts, i, instr, extra) {
+                if let Some((const_idx, _folded_val)) =
+                    try_fold_comparison(func, consts, i, instr, extra)
+                {
                     new_code.push(Instr::LoadConst(const_idx as u16));
                     i += 1;
                     continue;
@@ -213,7 +225,7 @@ fn fold_constants(func: &mut DecodedFunction, consts: &[Const], extra: &mut Vec<
             }
         }
     }
-    
+
     func.code = new_code;
 }
 
@@ -226,19 +238,21 @@ fn try_fold_binary(
     instr: &Instr,
     extra: &mut Vec<Const>,
 ) -> Option<(usize, i64)> {
-    if idx < 2 { return None; }
-    
+    if idx < 2 {
+        return None;
+    }
+
     let instr_a = &func.code[idx - 2];
     let instr_b = &func.code[idx - 1];
-    
+
     if let (Instr::LoadConst(a_idx), Instr::LoadConst(b_idx)) = (instr_a, instr_b) {
         let a_idx = *a_idx as usize;
         let b_idx = *b_idx as usize;
-        
+
         // Resolve constants from both module-level and extra
         let a = resolve_const(consts, extra, a_idx);
         let b = resolve_const(consts, extra, b_idx);
-        
+
         if let (Some(Const::Int(a)), Some(Const::Int(b))) = (a, b) {
             let a = *a;
             let b = *b;
@@ -246,11 +260,23 @@ fn try_fold_binary(
                 Instr::Add => a + b,
                 Instr::Sub => a - b,
                 Instr::Mul => a * b,
-                Instr::Div => if b != 0 { a / b } else { return None; },
-                Instr::Rem => if b != 0 { a % b } else { return None; },
+                Instr::Div => {
+                    if b != 0 {
+                        a / b
+                    } else {
+                        return None;
+                    }
+                }
+                Instr::Rem => {
+                    if b != 0 {
+                        a % b
+                    } else {
+                        return None;
+                    }
+                }
                 _ => return None,
             };
-            
+
             // Add or find the result constant
             let const_idx = find_or_add_const(consts, extra, result);
             return Some((const_idx, result));
@@ -276,13 +302,17 @@ fn find_or_add_const(consts: &[Const], extra: &mut Vec<Const>, value: i64) -> us
     // Search module-level first
     for i in 0..consts.len() {
         if let Const::Int(v) = consts[i] {
-            if v == value { return i; }
+            if v == value {
+                return i;
+            }
         }
     }
     // Search extra
     for i in 0..extra.len() {
         if let Const::Int(v) = extra[i] {
-            if v == value { return consts.len() + i; }
+            if v == value {
+                return consts.len() + i;
+            }
         }
     }
     // Add new constant
@@ -299,18 +329,20 @@ fn try_fold_comparison(
     instr: &Instr,
     extra: &mut Vec<Const>,
 ) -> Option<(usize, i64)> {
-    if idx < 2 { return None; }
-    
+    if idx < 2 {
+        return None;
+    }
+
     let instr_a = &func.code[idx - 2];
     let instr_b = &func.code[idx - 1];
-    
+
     if let (Instr::LoadConst(a_idx), Instr::LoadConst(b_idx)) = (instr_a, instr_b) {
         let a_idx = *a_idx as usize;
         let b_idx = *b_idx as usize;
-        
+
         let a = resolve_const(consts, extra, a_idx);
         let b = resolve_const(consts, extra, b_idx);
-        
+
         if let (Some(Const::Int(a)), Some(Const::Int(b))) = (a, b) {
             let a = *a;
             let b = *b;
@@ -335,13 +367,13 @@ fn try_fold_comparison(
 fn eliminate_dead_code(func: &mut DecodedFunction) {
     let mut new_code = Vec::with_capacity(func.code.len());
     let mut skip_next = false;
-    
+
     for i in 0..func.code.len() {
         if skip_next {
             skip_next = false;
             continue;
         }
-        
+
         let instr = &func.code[i];
         match instr {
             // LoadVar followed by StoreVar to same variable = dead code
@@ -359,7 +391,7 @@ fn eliminate_dead_code(func: &mut DecodedFunction) {
             }
         }
     }
-    
+
     func.code = new_code;
 }
 
@@ -368,10 +400,10 @@ fn unroll_loops(func: &mut DecodedFunction) {
     let mut unrolled = false;
     let code_len = func.code.len();
     let mut i = 0;
-    
+
     while i < code_len && !unrolled {
         let instr = &func.code[i];
-        
+
         if let Instr::JumpIfTrue(target) | Instr::JumpIfFalse(target) = instr {
             let target = *target as usize;
             if target > i + 1 && target < code_len {
@@ -394,14 +426,14 @@ fn try_unroll_loop(
     if loop_back < loop_start + 3 {
         return None;
     }
-    
+
     let body_len = loop_back - loop_start;
-    
+
     // Only unroll small loops (body < 10 instructions)
     if body_len > 10 {
         return None;
     }
-    
+
     // Check if all jumps within the body point forward (no backward jumps)
     // Backward jumps would break when duplicated
     for i in loop_start..loop_back {
@@ -421,26 +453,26 @@ fn try_unroll_loop(
             _ => {}
         }
     }
-    
+
     let body = &func.code[loop_start..loop_back];
     let mut new_code = Vec::with_capacity(func.code.len() + body_len);
-    
+
     // Copy everything before the loop
     new_code.extend_from_slice(&func.code[..loop_start]);
-    
+
     // Copy the loop body twice (2x unrolling)
     // Adjust jump targets: any jump after loop_back needs +body_len offset
     for instr in body.iter().chain(body.iter()) {
         let adjusted = adjust_jump_target(instr, loop_back, body_len);
         new_code.push(adjusted);
     }
-    
+
     // Copy everything after the back-edge, adjusting jump targets
     for instr in &func.code[loop_back..] {
         let adjusted = adjust_jump_target_after(instr, loop_back, body_len);
         new_code.push(adjusted);
     }
-    
+
     Some(new_code)
 }
 
@@ -516,10 +548,10 @@ fn adjust_jump_target_after(instr: &Instr, loop_back: usize, body_len: usize) ->
 fn thread_jumps(func: &mut DecodedFunction) {
     let mut new_code = Vec::with_capacity(func.code.len());
     let mut i = 0;
-    
+
     while i < func.code.len() {
         let instr = &func.code[i];
-        
+
         match instr {
             // Jump followed by Jump → skip the first jump
             Instr::Jump(t1) => {
@@ -561,7 +593,7 @@ fn thread_jumps(func: &mut DecodedFunction) {
             }
         }
     }
-    
+
     func.code = new_code;
 }
 
@@ -573,10 +605,10 @@ fn thread_jumps(func: &mut DecodedFunction) {
 fn strength_reduce(func: &mut DecodedFunction, consts: &[Const], extra: &mut Vec<Const>) {
     let mut new_code = Vec::with_capacity(func.code.len());
     let mut i = 0;
-    
+
     while i < func.code.len() {
         let instr = &func.code[i];
-        
+
         match instr {
             // Check for Mul by constant power of 2
             Instr::Mul => {
@@ -614,7 +646,7 @@ fn strength_reduce(func: &mut DecodedFunction, consts: &[Const], extra: &mut Vec
             }
         }
     }
-    
+
     func.code = new_code;
 }
 
@@ -631,8 +663,10 @@ fn try_strength_reduce_mul(
     extra: &mut Vec<Const>,
     idx: usize,
 ) -> Option<Vec<Instr>> {
-    if idx < 2 { return None; }
-    
+    if idx < 2 {
+        return None;
+    }
+
     // Check if the second operand (top of stack) is a constant power of 2
     let instr_b = &func.code[idx - 1];
     if let Instr::LoadConst(b_idx) = instr_b {
@@ -659,7 +693,7 @@ fn try_strength_reduce_mul(
             }
         }
     }
-    
+
     // Check if the first operand is a constant power of 2
     let instr_a = &func.code[idx - 2];
     if let Instr::LoadConst(a_idx) = instr_a {
@@ -684,7 +718,7 @@ fn try_strength_reduce_mul(
             }
         }
     }
-    
+
     None
 }
 
@@ -695,8 +729,10 @@ fn try_strength_reduce_div(
     extra: &mut Vec<Const>,
     idx: usize,
 ) -> Option<Vec<Instr>> {
-    if idx < 2 { return None; }
-    
+    if idx < 2 {
+        return None;
+    }
+
     let instr_b = &func.code[idx - 1];
     if let Instr::LoadConst(b_idx) = instr_b {
         let b_val = resolve_const(consts, extra, *b_idx as usize);
@@ -713,7 +749,7 @@ fn try_strength_reduce_div(
             }
         }
     }
-    
+
     None
 }
 
@@ -724,8 +760,10 @@ fn try_strength_reduce_rem(
     extra: &mut Vec<Const>,
     idx: usize,
 ) -> Option<Vec<Instr>> {
-    if idx < 2 { return None; }
-    
+    if idx < 2 {
+        return None;
+    }
+
     let instr_b = &func.code[idx - 1];
     if let Instr::LoadConst(b_idx) = instr_b {
         let b_val = resolve_const(consts, extra, *b_idx as usize);
@@ -742,7 +780,7 @@ fn try_strength_reduce_rem(
             }
         }
     }
-    
+
     None
 }
 
@@ -761,12 +799,12 @@ mod tests {
             code: vec![
                 Instr::LoadConst(0), // Load 3
                 Instr::LoadConst(1), // Load 2
-                Instr::Add,           // 3 + 2 = 5
+                Instr::Add,          // 3 + 2 = 5
             ],
         };
-        
+
         let result = optimize_function(&func, &[Const::Int(3), Const::Int(2)]);
-        
+
         // Should be folded to LoadConst of 5
         assert_eq!(result.func.code.len(), 1);
         assert_eq!(result.extra_consts.len(), 1);
@@ -786,9 +824,9 @@ mod tests {
                 Instr::LoadVar(0),  // Load x (this one stays)
             ],
         };
-        
+
         let result = optimize_function(&func, &[]);
-        
+
         // Should be reduced to just LoadVar(0)
         assert_eq!(result.func.code.len(), 1);
     }

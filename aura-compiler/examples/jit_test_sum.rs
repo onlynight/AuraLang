@@ -18,7 +18,10 @@ fn main() {
     let module = compile_source(SUM_SRC).unwrap();
     let mut vm = Vm::new(
         &module,
-        VmOptions { jit: true, ..Default::default() },
+        VmOptions {
+            jit: true,
+            ..Default::default()
+        },
     )
     .unwrap();
     let r = vm.run().unwrap();

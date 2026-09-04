@@ -150,6 +150,10 @@ pub enum HirExpr {
         else_e: Box<HirExpr>,
     },
     Block(HirBlock),
+    /// 显式堆分配（P7.5）：`box expr` 强制将值分配到堆上
+    Box(Box<HirExpr>),
+    /// 弱引用（P7.3）：`weak(ref)` 创建不增加引用计数的弱引用
+    WeakRef(Box<HirExpr>),
 }
 
 impl HirExpr {
@@ -192,6 +196,8 @@ pub enum HirStmt {
     Break,
     Continue,
     Block(HirBlock),
+    /// defer 语句（P7.4）：注册的清理块在作用域结束时 LIFO 顺序执行
+    Defer(HirBlock),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -315,6 +321,34 @@ pub fn desugar_program(program: &Program) -> HirProgram {
         });
     }
 
+    // P7.6: 注册 malloc/free 为原生函数
+    if !natives.iter().any(|n| n.name == "malloc") {
+        natives.push(HirFunction {
+            name: "malloc".into(),
+            params: vec![HirParam {
+                name: "size".into(),
+                ty: Some(HirType::Named("Int".into())),
+            }],
+            ret: Some(HirType::Named("Any".into())),
+            body: HirBlock { stmts: vec![] },
+            is_native: true,
+            type_params: vec![],
+        });
+    }
+    if !natives.iter().any(|n| n.name == "free") {
+        natives.push(HirFunction {
+            name: "free".into(),
+            params: vec![HirParam {
+                name: "ptr".into(),
+                ty: Some(HirType::Named("Any".into())),
+            }],
+            ret: Some(HirType::Named("Unit".into())),
+            body: HirBlock { stmts: vec![] },
+            is_native: true,
+            type_params: vec![],
+        });
+    }
+
     HirProgram {
         functions,
         structs,
@@ -356,9 +390,11 @@ fn desugar_block(b: &Expr) -> HirBlock {
     // 表达式位置上的块：`{ stmt* }` 或 `{ stmt*; lastExpr }`
     let stmts = match b {
         Expr::Block(stmts, _) => stmts,
-        other => return HirBlock {
-            stmts: vec![desugar_expr_stmt(other)],
-        },
+        other => {
+            return HirBlock {
+                stmts: vec![desugar_expr_stmt(other)],
+            };
+        }
     };
 
     let mut out = Vec::new();
@@ -406,11 +442,7 @@ fn desugar_stmt(s: &Stmt) -> HirStmt {
             ty: HirType::from_ast_opt(type_hint),
             init: initializer.as_ref().map(|e| desugar_expr(e)),
         },
-        Stmt::Destructure {
-            patterns,
-            expr,
-            ..
-        } => {
+        Stmt::Destructure { patterns, expr, .. } => {
             // 近似：仅将首个模式绑定到表达式的值
             let init = desugar_expr(expr);
             if let Some(Expr::Ident(first, _)) = patterns.first() {
@@ -443,11 +475,15 @@ fn desugar_expr_stmt(e: &Expr) -> HirStmt {
             then_b: desugar_block(then_branch),
             else_b: else_branch.as_ref().map(|e| desugar_block(e)),
         },
-        Expr::While { condition, body, .. } => HirStmt::While {
+        Expr::While {
+            condition, body, ..
+        } => HirStmt::While {
             cond: desugar_expr(condition),
             body: desugar_block(body),
         },
-        Expr::DoWhile { condition, body, .. } => {
+        Expr::DoWhile {
+            condition, body, ..
+        } => {
             // do-while：body 至少执行一次，降级为 `while(true){ body; if(!cond) break }`
             let mut stmts = desugar_block(body).stmts;
             stmts.push(HirStmt::If {
@@ -495,7 +531,7 @@ fn desugar_expr_stmt(e: &Expr) -> HirStmt {
             }
             HirStmt::Block(HirBlock { stmts })
         }
-        Expr::Defer { block, .. } => HirStmt::Block(desugar_block(block)),
+        Expr::Defer { block, .. } => HirStmt::Defer(desugar_block(block)),
         Expr::Await { expr, .. } => HirStmt::Expr(desugar_expr(expr)),
         other => HirStmt::Expr(desugar_expr(other)),
     }
@@ -559,9 +595,7 @@ fn desugar_for(pattern: &Expr, iterable: &Expr, body: &Expr) -> HirStmt {
                         lhs: Box::new(HirExpr::Var(idx.clone())),
                         rhs: Box::new(end_e),
                     },
-                    body: HirBlock {
-                        stmts: body_stmts,
-                    },
+                    body: HirBlock { stmts: body_stmts },
                 },
             ],
         });
@@ -605,9 +639,7 @@ fn desugar_for(pattern: &Expr, iterable: &Expr, body: &Expr) -> HirStmt {
                     lhs: Box::new(HirExpr::Var(idx.clone())),
                     rhs: Box::new(len_call),
                 },
-                body: HirBlock {
-                    stmts: body_stmts,
-                },
+                body: HirBlock { stmts: body_stmts },
             },
         ],
     })
@@ -666,19 +698,27 @@ fn desugar_expr(e: &Expr) -> HirExpr {
             }
         }
         Expr::Index {
-            container,
-            index,
-            ..
+            container, index, ..
         } => HirExpr::Index {
             container: Box::new(desugar_expr(container)),
             index: Box::new(desugar_expr(index)),
         },
         Expr::New {
             type_name, args, ..
-        } => HirExpr::New {
-            type_name: type_name.clone(),
-            args: args.iter().map(desugar_expr).collect(),
-        },
+        } => {
+            // P7.5: box expr → HirExpr::Box
+            if type_name == "Box" && args.len() == 1 {
+                return HirExpr::Box(Box::new(desugar_expr(&args[0])));
+            }
+            // P7.3: weak(ref) → HirExpr::WeakRef
+            if type_name == "Weak" && args.len() == 1 {
+                return HirExpr::WeakRef(Box::new(desugar_expr(&args[0])));
+            }
+            HirExpr::New {
+                type_name: type_name.clone(),
+                args: args.iter().map(desugar_expr).collect(),
+            }
+        }
         Expr::If {
             condition,
             then_branch,
@@ -692,11 +732,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                 None => HirExpr::Lit(Literal::Null),
             }),
         },
-        Expr::When {
-            subject,
-            arms,
-            ..
-        } => desugar_when(subject, arms),
+        Expr::When { subject, arms, .. } => desugar_when(subject, arms),
         Expr::Block(_stmts, _) => HirExpr::Block(desugar_block(e)),
         Expr::Range { .. } => HirExpr::Call {
             callee: "__range".into(),
@@ -755,9 +791,7 @@ fn desugar_when(subject: &Option<Box<Expr>>, arms: &[WhenArm]) -> HirExpr {
             (Some(s), Some(p)) => {
                 // 字面量/标识符模式 → 相等比较；`is T` → 类型检查内置
                 match p {
-                    Expr::Binary {
-                        op: BinOp::To, ..
-                    } => HirExpr::Lit(Literal::Bool(true)),
+                    Expr::Binary { op: BinOp::To, .. } => HirExpr::Lit(Literal::Bool(true)),
                     _ => HirExpr::Binary {
                         op: HirBinOp::Eq,
                         lhs: Box::new(desugar_expr(s)),

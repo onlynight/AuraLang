@@ -1,12 +1,15 @@
 //! Aura VM Hotspot JIT Compiler (Cranelift)
-use std::collections::HashMap;
 use crate::codegen::opcode::Const;
 use crate::vm::value::Value;
 use crate::vm::{DecodedFunction, Instr};
+use std::collections::HashMap;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct JitValue { pub tag: i64, pub payload: i64 }
+pub struct JitValue {
+    pub tag: i64,
+    pub payload: i64,
+}
 
 pub const TAG_INT: i64 = 0;
 pub const TAG_FLOAT: i64 = 1;
@@ -14,12 +17,26 @@ pub const TAG_BOOL: i64 = 2;
 pub const TAG_NULL: i64 = 3;
 
 impl JitValue {
-    pub fn null() -> Self { JitValue { tag: TAG_NULL, payload: 0 } }
+    pub fn null() -> Self {
+        JitValue {
+            tag: TAG_NULL,
+            payload: 0,
+        }
+    }
     pub fn from_value(v: &Value) -> Self {
         match v {
-            Value::Int(i) => JitValue { tag: TAG_INT, payload: *i },
-            Value::Float(f) => JitValue { tag: TAG_FLOAT, payload: f.to_bits() as i64 },
-            Value::Bool(b) => JitValue { tag: TAG_BOOL, payload: *b as i64 },
+            Value::Int(i) => JitValue {
+                tag: TAG_INT,
+                payload: *i,
+            },
+            Value::Float(f) => JitValue {
+                tag: TAG_FLOAT,
+                payload: f.to_bits() as i64,
+            },
+            Value::Bool(b) => JitValue {
+                tag: TAG_BOOL,
+                payload: *b as i64,
+            },
             _ => JitValue::null(),
         }
     }
@@ -43,31 +60,62 @@ pub struct JitState {
 
 impl Default for JitState {
     fn default() -> Self {
-        JitState { compiled: HashMap::new(), skipped: HashMap::new(), dispatch_table: Vec::new() }
+        JitState {
+            compiled: HashMap::new(),
+            skipped: HashMap::new(),
+            dispatch_table: Vec::new(),
+        }
     }
 }
 
 impl JitState {
     pub fn ensure_capacity(&mut self, len: usize) {
-        while self.dispatch_table.len() < len { self.dispatch_table.push(None); }
+        while self.dispatch_table.len() < len {
+            self.dispatch_table.push(None);
+        }
     }
-    pub fn new() -> Self { JitState::default() }
-    pub fn is_compiled(&self, idx: usize) -> bool { self.compiled.contains_key(&idx) }
-    pub fn is_skipped(&self, idx: usize) -> bool { self.skipped.contains_key(&idx) }
+    pub fn new() -> Self {
+        JitState::default()
+    }
+    pub fn is_compiled(&self, idx: usize) -> bool {
+        self.compiled.contains_key(&idx)
+    }
+    pub fn is_skipped(&self, idx: usize) -> bool {
+        self.skipped.contains_key(&idx)
+    }
     pub fn insert(&mut self, idx: usize, entry: JitEntry) {
-        while self.dispatch_table.len() <= idx { self.dispatch_table.push(None); }
+        while self.dispatch_table.len() <= idx {
+            self.dispatch_table.push(None);
+        }
         self.dispatch_table[idx] = Some(entry);
         self.compiled.insert(idx, entry);
     }
-    pub fn skip(&mut self, idx: usize) { self.skipped.insert(idx, ()); }
-    fn dispatch_table_ptr(&self) -> *const () { self.dispatch_table.as_ptr() as *const () }
+    pub fn skip(&mut self, idx: usize) {
+        self.skipped.insert(idx, ());
+    }
+    fn dispatch_table_ptr(&self) -> *const () {
+        self.dispatch_table.as_ptr() as *const ()
+    }
     pub fn call(&self, idx: usize, args: &[JitValue]) -> Option<JitValue> {
         let entry = *self.compiled.get(&idx)?;
         let mut out = JitValue::null();
-        unsafe { entry(args.as_ptr(), &mut out, args.len(), self.dispatch_table_ptr()) };
+        unsafe {
+            entry(
+                args.as_ptr(),
+                &mut out,
+                args.len(),
+                self.dispatch_table_ptr(),
+            )
+        };
         Some(out)
     }
-    pub unsafe fn invoke(&self, idx: usize, args: *const JitValue, out: *mut JitValue, argc: usize) {
+    pub unsafe fn invoke(
+        &self,
+        idx: usize,
+        args: *const JitValue,
+        out: *mut JitValue,
+        argc: usize,
+    ) {
         if let Some(entry) = self.compiled.get(&idx) {
             unsafe { entry(args, out, argc, self.dispatch_table_ptr()) };
         }
@@ -76,7 +124,11 @@ impl JitState {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn aura_jit_dispatch(
-    dispatch_table: *const (), callee_idx: usize, args: *const JitValue, out: *mut JitValue, argc: usize,
+    dispatch_table: *const (),
+    callee_idx: usize,
+    args: *const JitValue,
+    out: *mut JitValue,
+    argc: usize,
 ) {
     let table = dispatch_table as *const Option<JitEntry>;
     let entry = unsafe { *table.add(callee_idx) };
@@ -86,27 +138,56 @@ pub unsafe extern "C" fn aura_jit_dispatch(
     }
 }
 
-pub fn is_jit_compilable(idx: usize, _f: &DecodedFunction, consts: &[Const], funcs: &[DecodedFunction]) -> bool {
+pub fn is_jit_compilable(
+    idx: usize,
+    _f: &DecodedFunction,
+    consts: &[Const],
+    funcs: &[DecodedFunction],
+) -> bool {
     is_jit_compilable_inner(idx, consts, funcs, &mut std::collections::HashSet::new())
 }
 
 fn is_jit_compilable_inner(
-    idx: usize, consts: &[Const], funcs: &[DecodedFunction], in_progress: &mut std::collections::HashSet<usize>,
+    idx: usize,
+    consts: &[Const],
+    funcs: &[DecodedFunction],
+    in_progress: &mut std::collections::HashSet<usize>,
 ) -> bool {
-    if idx >= funcs.len() { return false; }
-    if !in_progress.insert(idx) { return true; }
+    if idx >= funcs.len() {
+        return false;
+    }
+    if !in_progress.insert(idx) {
+        return true;
+    }
     let f = &funcs[idx];
     for instr in &f.code {
         match instr {
             Instr::LoadConst(ci) => match consts.get(*ci as usize) {
-                Some(Const::Int(_)) => {} _ => return false,
+                Some(Const::Int(_)) => {}
+                _ => return false,
             },
-            Instr::LoadVar(_) | Instr::StoreVar(_) | Instr::Add | Instr::Sub | Instr::Mul
-            | Instr::Div | Instr::Rem | Instr::Neg | Instr::Eq | Instr::Ne | Instr::Lt
-            | Instr::Gt | Instr::Le | Instr::Ge | Instr::Jump(_) | Instr::JumpIfTrue(_)
-            | Instr::JumpIfFalse(_) | Instr::Return => {}
+            Instr::LoadVar(_)
+            | Instr::StoreVar(_)
+            | Instr::Add
+            | Instr::Sub
+            | Instr::Mul
+            | Instr::Div
+            | Instr::Rem
+            | Instr::Neg
+            | Instr::Eq
+            | Instr::Ne
+            | Instr::Lt
+            | Instr::Gt
+            | Instr::Le
+            | Instr::Ge
+            | Instr::Jump(_)
+            | Instr::JumpIfTrue(_)
+            | Instr::JumpIfFalse(_)
+            | Instr::Return => {}
             Instr::Call(ci) => {
-                if !is_jit_compilable_inner(*ci as usize, consts, funcs, in_progress) { return false; }
+                if !is_jit_compilable_inner(*ci as usize, consts, funcs, in_progress) {
+                    return false;
+                }
             }
             _ => return false,
         }
@@ -115,17 +196,22 @@ fn is_jit_compilable_inner(
 }
 
 pub fn compile_function(
-    idx: usize, f: &DecodedFunction, consts: &[Const], funcs: &[DecodedFunction],
+    idx: usize,
+    f: &DecodedFunction,
+    consts: &[Const],
+    funcs: &[DecodedFunction],
 ) -> Option<JitEntry> {
-    if !is_jit_compilable(idx, f, consts, funcs) { return None; }
-    
+    if !is_jit_compilable(idx, f, consts, funcs) {
+        return None;
+    }
+
     // Run optimization passes before Cranelift compilation
     let opt_result = crate::vm::jit_opt::optimize_function_with_deps(f, consts, funcs);
-    
+
     // Combine original and extra constants
     let mut all_consts = consts.to_vec();
     all_consts.extend(opt_result.extra_consts);
-    
+
     cranelift_backend::jit_compile_cranelift(&opt_result.func, &all_consts, funcs)
 }
 
@@ -133,29 +219,28 @@ pub fn compile_function(
 mod cranelift_backend {
     use super::{DecodedFunction, Instr, JitEntry, TAG_BOOL, TAG_INT};
     use crate::codegen::opcode::Const;
-    use std::collections::HashMap;
+    use cranelift::codegen::ir::Block;
     use cranelift::codegen::ir::{
-        condcodes::IntCC, immediates::Offset32, types, AbiParam, InstBuilder, MemFlags,
-        Signature, StackSlotData, StackSlotKind, TrapCode, Value as IrValue,
+        AbiParam, InstBuilder, MemFlags, Signature, StackSlotData, StackSlotKind, TrapCode,
+        Value as IrValue, condcodes::IntCC, immediates::Offset32, types,
     };
     use cranelift::frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
-    use cranelift::codegen::ir::Block;
     use cranelift_jit::{JITBuilder, JITModule};
-    use cranelift_module::{default_libcall_names, Linkage, Module};
+    use cranelift_module::{Linkage, Module, default_libcall_names};
+    use std::collections::HashMap;
 
     const VALUE_BYTES: i64 = 16;
     const MAX_STACK: i64 = 256;
 
     pub(super) fn jit_compile_cranelift(
-        f: &DecodedFunction, consts: &[Const], funcs: &[DecodedFunction],
+        f: &DecodedFunction,
+        consts: &[Const],
+        funcs: &[DecodedFunction],
     ) -> Option<JitEntry> {
         // Cranelift optimization flags:
         // - opt_level: "speed" for maximum performance
         // - enable_verifier: false to speed up compilation (no runtime impact)
-        let flags = &[
-            ("opt_level", "speed"),
-            ("enable_verifier", "false"),
-        ];
+        let flags = &[("opt_level", "speed"), ("enable_verifier", "false")];
         let builder = JITBuilder::with_flags(flags, default_libcall_names()).ok()?;
         let mut module = JITModule::new(builder);
         let tc = module.target_config();
@@ -163,12 +248,19 @@ mod cranelift_backend {
         let call_conv = tc.default_call_conv;
 
         let sig = Signature {
-            params: vec![AbiParam::new(ptr_ty), AbiParam::new(ptr_ty),
-                AbiParam::new(types::I64), AbiParam::new(ptr_ty)],
-            returns: vec![], call_conv,
+            params: vec![
+                AbiParam::new(ptr_ty),
+                AbiParam::new(ptr_ty),
+                AbiParam::new(types::I64),
+                AbiParam::new(ptr_ty),
+            ],
+            returns: vec![],
+            call_conv,
         };
 
-        let func_id = module.declare_function("aura_jit_entry", Linkage::Export, &sig).ok()?;
+        let func_id = module
+            .declare_function("aura_jit_entry", Linkage::Export, &sig)
+            .ok()?;
         let mut ctx = module.make_context();
         ctx.func.signature = sig;
 
@@ -177,7 +269,9 @@ mod cranelift_backend {
         let mut pred_total: HashMap<usize, usize> = HashMap::new();
         for (idx, instr) in f.code.iter().enumerate() {
             match instr {
-                Instr::Jump(t) => { *pred_total.entry(*t).or_insert(0) += 1; }
+                Instr::Jump(t) => {
+                    *pred_total.entry(*t).or_insert(0) += 1;
+                }
                 Instr::JumpIfTrue(t) | Instr::JumpIfFalse(t) => {
                     *pred_total.entry(*t).or_insert(0) += 1;
                     *pred_total.entry(idx + 1).or_insert(0) += 1;
@@ -195,25 +289,35 @@ mod cranelift_backend {
             fb.append_block_params_for_function_params(entry);
             blocks.insert(0, entry);
             for &t in targets.iter().skip(1) {
-                if t < f.code.len() { blocks.insert(t, fb.create_block()); }
+                if t < f.code.len() {
+                    blocks.insert(t, fb.create_block());
+                }
             }
             fb.switch_to_block(entry);
 
             let jit_entry_sig = Signature {
-                params: vec![AbiParam::new(ptr_ty), AbiParam::new(ptr_ty),
-                    AbiParam::new(types::I64), AbiParam::new(ptr_ty)],
-                returns: vec![], call_conv,
+                params: vec![
+                    AbiParam::new(ptr_ty),
+                    AbiParam::new(ptr_ty),
+                    AbiParam::new(types::I64),
+                    AbiParam::new(ptr_ty),
+                ],
+                returns: vec![],
+                call_conv,
             };
             let jit_entry_sig_ref = fb.import_signature(jit_entry_sig);
 
             if pred_total.get(&0).copied().unwrap_or(0) == 0 {
-                sealed.insert(0); fb.seal_block(entry);
+                sealed.insert(0);
+                fb.seal_block(entry);
             }
 
             let tag_vars: Vec<Variable> = (0..f.locals as usize)
-                .map(|i| Variable::from_bits(100 + i as u32 * 2)).collect();
+                .map(|i| Variable::from_bits(100 + i as u32 * 2))
+                .collect();
             let payload_vars: Vec<Variable> = (0..f.locals as usize)
-                .map(|i| Variable::from_bits(100 + i as u32 * 2 + 1)).collect();
+                .map(|i| Variable::from_bits(100 + i as u32 * 2 + 1))
+                .collect();
             for v in tag_vars.iter().chain(payload_vars.iter()) {
                 fb.declare_var(*v, types::I64);
                 let zero = fb.ins().iconst(types::I64, 0);
@@ -221,7 +325,10 @@ mod cranelift_backend {
             }
 
             let stack_slot = fb.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot, (VALUE_BYTES * MAX_STACK) as u32, 4));
+                StackSlotKind::ExplicitSlot,
+                (VALUE_BYTES * MAX_STACK) as u32,
+                4,
+            ));
             let sp = Variable::from_bits(3);
             fb.declare_var(sp, types::I64);
             let zero_sp = fb.ins().iconst(types::I64, 0);
@@ -241,10 +348,18 @@ mod cranelift_backend {
                 let off = (i as i64) * VALUE_BYTES;
                 let base = fb.block_params(entry)[0];
                 let addr = fb.ins().iadd_imm(base, off);
-                let tag = fb.ins().load(types::I64, MemFlags::new(), addr, Offset32::new(0));
-                let payload = fb.ins().load(types::I64, MemFlags::new(), addr, Offset32::new(8));
-                if let Some(tv) = tag_vars.get(i) { fb.def_var(*tv, tag); }
-                if let Some(pv) = payload_vars.get(i) { fb.def_var(*pv, payload); }
+                let tag = fb
+                    .ins()
+                    .load(types::I64, MemFlags::new(), addr, Offset32::new(0));
+                let payload = fb
+                    .ins()
+                    .load(types::I64, MemFlags::new(), addr, Offset32::new(8));
+                if let Some(tv) = tag_vars.get(i) {
+                    fb.def_var(*tv, tag);
+                }
+                if let Some(pv) = payload_vars.get(i) {
+                    fb.def_var(*pv, payload);
+                }
             }
 
             let mut current = entry;
@@ -254,7 +369,14 @@ mod cranelift_backend {
                     if b != current {
                         if !terminated {
                             fb.ins().jump(b, &[]);
-                            seal_if_complete(&mut fb, idx, &pred_total, &mut pred_declared, &mut sealed, &blocks);
+                            seal_if_complete(
+                                &mut fb,
+                                idx,
+                                &pred_total,
+                                &mut pred_declared,
+                                &mut sealed,
+                                &blocks,
+                            );
                         }
                         fb.switch_to_block(b);
                         current = b;
@@ -267,31 +389,73 @@ mod cranelift_backend {
                     terminated = false;
                 }
 
-                let term = emit_instr(&mut fb, instr, consts, funcs, &tag_vars, &payload_vars,
-                    &blocks, idx, &stack_slot, sp, args_ptr, out_ptr, ptr_ty, jit_entry_sig_ref, dispatch_table);
+                let term = emit_instr(
+                    &mut fb,
+                    instr,
+                    consts,
+                    funcs,
+                    &tag_vars,
+                    &payload_vars,
+                    &blocks,
+                    idx,
+                    &stack_slot,
+                    sp,
+                    args_ptr,
+                    out_ptr,
+                    ptr_ty,
+                    jit_entry_sig_ref,
+                    dispatch_table,
+                );
                 terminated = terminated || term;
 
                 if term {
                     match instr {
                         Instr::Jump(t) => {
-                            seal_if_complete(&mut fb, *t, &pred_total, &mut pred_declared, &mut sealed, &blocks);
+                            seal_if_complete(
+                                &mut fb,
+                                *t,
+                                &pred_total,
+                                &mut pred_declared,
+                                &mut sealed,
+                                &blocks,
+                            );
                         }
                         Instr::JumpIfTrue(t) | Instr::JumpIfFalse(t) => {
-                            seal_if_complete(&mut fb, *t, &pred_total, &mut pred_declared, &mut sealed, &blocks);
-                            seal_if_complete(&mut fb, idx + 1, &pred_total, &mut pred_declared, &mut sealed, &blocks);
+                            seal_if_complete(
+                                &mut fb,
+                                *t,
+                                &pred_total,
+                                &mut pred_declared,
+                                &mut sealed,
+                                &blocks,
+                            );
+                            seal_if_complete(
+                                &mut fb,
+                                idx + 1,
+                                &pred_total,
+                                &mut pred_declared,
+                                &mut sealed,
+                                &blocks,
+                            );
                         }
                         _ => {}
                     }
                 }
             }
-            if !terminated { fb.ins().return_(&[]); }
+            if !terminated {
+                fb.ins().return_(&[]);
+            }
             fb.seal_all_blocks();
             fb.finalize();
         }
 
-        if module.define_function(func_id, &mut ctx).is_err() { return None; }
+        if module.define_function(func_id, &mut ctx).is_err() {
+            return None;
+        }
         module.clear_context(&mut ctx);
-        if module.finalize_definitions().is_err() { return None; }
+        if module.finalize_definitions().is_err() {
+            return None;
+        }
         let code = module.get_finalized_function(func_id);
         std::mem::forget(module);
         Some(unsafe { std::mem::transmute::<*const u8, JitEntry>(code) })
@@ -302,9 +466,17 @@ mod cranelift_backend {
         set.insert(0);
         for (idx, instr) in f.code.iter().enumerate() {
             match instr {
-                Instr::Jump(t) => { set.insert(*t); set.insert(idx + 1); }
-                Instr::JumpIfTrue(t) | Instr::JumpIfFalse(t) => { set.insert(*t); set.insert(idx + 1); }
-                Instr::Return => { set.insert(idx + 1); }
+                Instr::Jump(t) => {
+                    set.insert(*t);
+                    set.insert(idx + 1);
+                }
+                Instr::JumpIfTrue(t) | Instr::JumpIfFalse(t) => {
+                    set.insert(*t);
+                    set.insert(idx + 1);
+                }
+                Instr::Return => {
+                    set.insert(idx + 1);
+                }
                 _ => {}
             }
         }
@@ -312,23 +484,38 @@ mod cranelift_backend {
     }
 
     fn seal_if_complete(
-        fb: &mut FunctionBuilder, t: usize,
-        pred_total: &HashMap<usize, usize>, pred_declared: &mut HashMap<usize, usize>,
-        sealed: &mut std::collections::HashSet<usize>, blocks: &HashMap<usize, Block>,
+        fb: &mut FunctionBuilder,
+        t: usize,
+        pred_total: &HashMap<usize, usize>,
+        pred_declared: &mut HashMap<usize, usize>,
+        sealed: &mut std::collections::HashSet<usize>,
+        blocks: &HashMap<usize, Block>,
     ) {
         let d = pred_declared.entry(t).or_insert(0);
         *d += 1;
         if *d == pred_total.get(&t).copied().unwrap_or(0) && sealed.insert(t) {
-            if let Some(&b) = blocks.get(&t) { fb.seal_block(b); }
+            if let Some(&b) = blocks.get(&t) {
+                fb.seal_block(b);
+            }
         }
     }
 
     fn emit_instr(
-        fb: &mut FunctionBuilder, instr: &Instr, consts: &[Const], funcs: &[DecodedFunction],
-        tag_vars: &[Variable], payload_vars: &[Variable], blocks: &HashMap<usize, Block>,
-        idx: usize, stack_slot: &cranelift::codegen::ir::StackSlot, sp: Variable,
-        _args_ptr: Variable, out_ptr: Variable, ptr_ty: types::Type,
-        jit_entry_sig_ref: cranelift::codegen::ir::SigRef, dispatch_table: Variable,
+        fb: &mut FunctionBuilder,
+        instr: &Instr,
+        consts: &[Const],
+        funcs: &[DecodedFunction],
+        tag_vars: &[Variable],
+        payload_vars: &[Variable],
+        blocks: &HashMap<usize, Block>,
+        idx: usize,
+        stack_slot: &cranelift::codegen::ir::StackSlot,
+        sp: Variable,
+        _args_ptr: Variable,
+        out_ptr: Variable,
+        ptr_ty: types::Type,
+        jit_entry_sig_ref: cranelift::codegen::ir::SigRef,
+        dispatch_table: Variable,
     ) -> bool {
         let i64_ty = types::I64;
         let zero32 = Offset32::new(0);
@@ -363,7 +550,9 @@ mod cranelift_backend {
                     let tag = fb.ins().iconst(i64_ty, TAG_INT);
                     let payload = fb.ins().iconst(i64_ty, *v);
                     push(fb, tag, payload);
-                } else { fb.ins().trap(TrapCode::unwrap_user(2)); }
+                } else {
+                    fb.ins().trap(TrapCode::unwrap_user(2));
+                }
                 false
             }
             Instr::LoadVar(s) => {
@@ -397,16 +586,24 @@ mod cranelift_backend {
             Instr::Le => cmp_int(fb, &mut pop, &mut push, IntCC::SignedLessThanOrEqual),
             Instr::Ge => cmp_int(fb, &mut pop, &mut push, IntCC::SignedGreaterThanOrEqual),
             Instr::Jump(target) => {
-                if let Some(&b) = blocks.get(target) { fb.ins().jump(b, &[]); }
+                if let Some(&b) = blocks.get(target) {
+                    fb.ins().jump(b, &[]);
+                }
                 true
             }
             Instr::JumpIfTrue(target) => {
                 let (_t, p) = pop(fb);
                 let cond = fb.ins().icmp_imm(IntCC::NotEqual, p, 0);
                 match (blocks.get(target), blocks.get(&(idx + 1))) {
-                    (Some(&tb), Some(&nb)) => { fb.ins().brif(cond, tb, &[], nb, &[]); }
-                    (Some(&tb), None) => { fb.ins().jump(tb, &[]); }
-                    _ => { fb.ins().trap(TrapCode::unwrap_user(1)); }
+                    (Some(&tb), Some(&nb)) => {
+                        fb.ins().brif(cond, tb, &[], nb, &[]);
+                    }
+                    (Some(&tb), None) => {
+                        fb.ins().jump(tb, &[]);
+                    }
+                    _ => {
+                        fb.ins().trap(TrapCode::unwrap_user(1));
+                    }
                 }
                 true
             }
@@ -414,9 +611,15 @@ mod cranelift_backend {
                 let (_t, p) = pop(fb);
                 let cond = fb.ins().icmp_imm(IntCC::NotEqual, p, 0);
                 match (blocks.get(target), blocks.get(&(idx + 1))) {
-                    (Some(&tb), Some(&nb)) => { fb.ins().brif(cond, nb, &[], tb, &[]); }
-                    (Some(&tb), None) => { fb.ins().jump(tb, &[]); }
-                    _ => { fb.ins().trap(TrapCode::unwrap_user(1)); }
+                    (Some(&tb), Some(&nb)) => {
+                        fb.ins().brif(cond, nb, &[], tb, &[]);
+                    }
+                    (Some(&tb), None) => {
+                        fb.ins().jump(tb, &[]);
+                    }
+                    _ => {
+                        fb.ins().trap(TrapCode::unwrap_user(1));
+                    }
                 }
                 true
             }
@@ -449,7 +652,11 @@ mod cranelift_backend {
                 let entry_ptr = fb.ins().load(ptr_ty, MemFlags::new(), entry_addr, zero32);
 
                 let argc_val = fb.ins().iconst(types::I64, param_count);
-                fb.ins().call_indirect(jit_entry_sig_ref, entry_ptr, &[args_ptr_val, out_ptr_val, argc_val, dt]);
+                fb.ins().call_indirect(
+                    jit_entry_sig_ref,
+                    entry_ptr,
+                    &[args_ptr_val, out_ptr_val, argc_val, dt],
+                );
 
                 fb.def_var(sp, args_sp);
 
@@ -459,14 +666,22 @@ mod cranelift_backend {
 
                 false
             }
-            _ => { fb.ins().trap(TrapCode::unwrap_user(2)); true }
+            _ => {
+                fb.ins().trap(TrapCode::unwrap_user(2));
+                true
+            }
         }
     }
 
     fn bin_int<F>(
-        fb: &mut FunctionBuilder, pop: &mut dyn FnMut(&mut FunctionBuilder) -> (IrValue, IrValue),
-        push: &mut dyn FnMut(&mut FunctionBuilder, IrValue, IrValue), f: F,
-    ) -> bool where F: FnOnce(&mut FunctionBuilder, IrValue, IrValue) -> IrValue {
+        fb: &mut FunctionBuilder,
+        pop: &mut dyn FnMut(&mut FunctionBuilder) -> (IrValue, IrValue),
+        push: &mut dyn FnMut(&mut FunctionBuilder, IrValue, IrValue),
+        f: F,
+    ) -> bool
+    where
+        F: FnOnce(&mut FunctionBuilder, IrValue, IrValue) -> IrValue,
+    {
         let (_bt, b) = pop(fb);
         let (_at, a) = pop(fb);
         let r = f(fb, a, b);
@@ -476,8 +691,10 @@ mod cranelift_backend {
     }
 
     fn cmp_int(
-        fb: &mut FunctionBuilder, pop: &mut dyn FnMut(&mut FunctionBuilder) -> (IrValue, IrValue),
-        push: &mut dyn FnMut(&mut FunctionBuilder, IrValue, IrValue), cc: IntCC,
+        fb: &mut FunctionBuilder,
+        pop: &mut dyn FnMut(&mut FunctionBuilder) -> (IrValue, IrValue),
+        push: &mut dyn FnMut(&mut FunctionBuilder, IrValue, IrValue),
+        cc: IntCC,
     ) -> bool {
         let (_bt, b) = pop(fb);
         let (_at, a) = pop(fb);
@@ -491,5 +708,9 @@ mod cranelift_backend {
 
 #[cfg(not(feature = "jit"))]
 fn jit_compile_cranelift(
-    _f: &DecodedFunction, _consts: &[Const], _funcs: &[DecodedFunction],
-) -> Option<JitEntry> { None }
+    _f: &DecodedFunction,
+    _consts: &[Const],
+    _funcs: &[DecodedFunction],
+) -> Option<JitEntry> {
+    None
+}

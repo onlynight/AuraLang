@@ -24,6 +24,8 @@ pub enum Value {
     Null,
     /// 堆对象 / 数组句柄（索引到 `Vm::heap`）
     Ref(usize),
+    /// 弱引用句柄（不增加引用计数，P7.3）
+    Weak(usize),
 }
 
 impl Value {
@@ -41,6 +43,7 @@ impl Value {
             Value::Null => false,
             Value::Str(s) => !s.is_empty(),
             Value::Ref(_) => true,
+            Value::Weak(_) => false,
         }
     }
 
@@ -85,6 +88,7 @@ impl Value {
             Value::Str(_) => "String",
             Value::Null => "Null",
             Value::Ref(_) => "Ref",
+            Value::Weak(_) => "Weak",
         }
     }
 }
@@ -118,6 +122,7 @@ impl std::hash::Hash for Value {
             Value::Str(s) => s.hash(state),
             Value::Null => {}
             Value::Ref(h) => h.hash(state),
+            Value::Weak(h) => h.hash(state),
         }
     }
 }
@@ -138,6 +143,7 @@ impl fmt::Display for Value {
             Value::Str(s) => write!(f, "{}", s),
             Value::Null => write!(f, "null"),
             Value::Ref(h) => write!(f, "<ref#{}>", h),
+            Value::Weak(h) => write!(f, "<weak#{}>", h),
         }
     }
 }

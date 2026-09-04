@@ -246,6 +246,60 @@ impl Vm {
                 }
             }
 
+            // ── P7 内存管理 ──
+            Instr::Retain => {
+                if let Some(Value::Ref(h)) = self.frames[top].stack.last().cloned() {
+                    self.heap.inc_ref(h);
+                }
+            }
+            Instr::Release => {
+                if let Some(Value::Ref(h)) = self.frames[top].stack.last().cloned() {
+                    self.heap.dec_ref(h);
+                }
+            }
+            Instr::WeakRef => {
+                let v = self.pop(top)?;
+                match v {
+                    Value::Ref(h) => {
+                        // 弱引用：创建一个 Weak 值，不增加引用计数
+                        self.frames[top].stack.push(Value::Weak(h));
+                    }
+                    _ => {
+                        self.frames[top].stack.push(Value::Null);
+                    }
+                }
+            }
+            Instr::WeakGet => {
+                let v = self.pop(top)?;
+                match v {
+                    Value::Weak(h) => {
+                        // 尝试升级：若对象仍存活则转为强引用
+                        let alive = self.heap.is_alive(h);
+                        if alive {
+                            self.heap.inc_ref(h);
+                            self.frames[top].stack.push(Value::Ref(h));
+                        } else {
+                            self.frames[top].stack.push(Value::Null);
+                        }
+                    }
+                    _ => {
+                        self.frames[top].stack.push(Value::Null);
+                    }
+                }
+            }
+            Instr::BoxAlloc => {
+                let v = self.pop(top)?;
+                // 将值分配到堆上：创建堆对象并存储值
+                let h = self.heap.alloc_box_value(v);
+                self.frames[top].stack.push(Value::Ref(h));
+            }
+            Instr::DeferBegin => {
+                // 标记 defer 区域开始：VM 端无需特殊处理，编译期已通过 DeferEnd 注入清理代码
+            }
+            Instr::DeferEnd => {
+                // 标记 defer 区域结束
+            }
+
             // ── FFI（C ABI）──
             Instr::CallC(idx) => {
                 // 当前字节码未单独携带 C 函数表，按原生索引查注册表处理
@@ -290,7 +344,9 @@ impl Vm {
                 }
             }
             _ => {
-                return Err(VmError::Runtime("method call on non-object value".to_string()));
+                return Err(VmError::Runtime(
+                    "method call on non-object value".to_string(),
+                ));
             }
         }
         Ok(())
@@ -319,9 +375,10 @@ impl Vm {
             return Err(VmError::Runtime(format!("invalid coroutine id {}", co_id)));
         }
         // 从协程中恢复帧栈
-        let frames = self.coroutines.restore_frames(co_id).ok_or_else(|| {
-            VmError::Runtime(format!("coroutine #{} not found", co_id))
-        })?;
+        let frames = self
+            .coroutines
+            .restore_frames(co_id)
+            .ok_or_else(|| VmError::Runtime(format!("coroutine #{} not found", co_id)))?;
         self.frames = frames;
         // 将栈顶入参压入当前帧的操作数栈
         // （ResumeCoroutine 指令之前已压入参数）
@@ -331,7 +388,10 @@ impl Vm {
     /// 用户函数调用（含 JIT 原生派发）
     fn do_call(&mut self, top: usize, idx: usize, _from_jit: bool) -> Result<(), VmError> {
         if idx >= self.module.funcs.len() {
-            return Err(VmError::Runtime(format!("call to undefined function #{}", idx)));
+            return Err(VmError::Runtime(format!(
+                "call to undefined function #{}",
+                idx
+            )));
         }
         let param_count = self.module.funcs[idx].param_count as usize;
         let args = self.pop_n(top, param_count)?;
@@ -342,10 +402,16 @@ impl Vm {
         #[cfg(feature = "jit")]
         if self.opts.jit {
             self.maybe_jit_compile(idx);
-            let compiled = self.jit.as_ref().map(|j| j.is_compiled(idx)).unwrap_or(false);
+            let compiled = self
+                .jit
+                .as_ref()
+                .map(|j| j.is_compiled(idx))
+                .unwrap_or(false);
             if compiled {
-                let jargs: Vec<crate::vm::jit::JitValue> =
-                    args.iter().map(crate::vm::jit::JitValue::from_value).collect();
+                let jargs: Vec<crate::vm::jit::JitValue> = args
+                    .iter()
+                    .map(crate::vm::jit::JitValue::from_value)
+                    .collect();
                 if let Some(ret) = self.jit.as_ref().and_then(|j| j.call(idx, &jargs)) {
                     self.frames[top].stack.push(ret.to_value());
                     return Ok(());

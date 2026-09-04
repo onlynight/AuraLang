@@ -13,12 +13,12 @@
 use std::process::exit;
 
 use aura_compiler::codegen::{
-    compile_source, disassemble, read_auc, to_bytes, write_auc, SerializeError,
+    SerializeError, compile_source, disassemble, read_auc, to_bytes, write_auc,
 };
-use aura_compiler::vm::{Vm, VmOptions};
 use aura_compiler::lexer::Lexer;
 use aura_compiler::parser::Parser;
 use aura_compiler::sema::analyze_source;
+use aura_compiler::vm::{Vm, VmOptions};
 
 #[cfg(feature = "llvm")]
 use aura_compiler::codegen::aot::{AotOptions, OptimizationLevel, TargetTriple};
@@ -40,6 +40,7 @@ fn main() {
         "tokens" => cmd_tokens(rest),
         "ast" => cmd_ast(rest),
         "fmt" => cmd_fmt(rest),
+        "leak-check" => cmd_leak_check(rest),
         "--help" | "-h" | "help" => print_usage(),
         other => {
             eprintln!("未知子命令: {}", other);
@@ -65,7 +66,8 @@ fn print_usage() {
   aura disasm <file.auc> [--source <f.aura>]    反汇编 .auc 为可读汇编\n\
   aura tokens <file.aura>                       输出词法分析\n\
   aura ast <file.aura>                          输出 AST\n\
-  aura fmt <file.aura>                          代码格式化（预留）\n"
+  aura fmt <file.aura>                          代码格式化（预留）\n\
+  aura leak-check <file.aura>                    P7: 内存泄漏检测（ARC 分析）\n"
     );
 }
 
@@ -82,7 +84,8 @@ fn extract_opt(args: &[String], name: &str) -> Option<String> {
 }
 
 fn first_positional<'a>(args: &'a [String], skip: &'a str) -> Option<&'a String> {
-    args.iter().find(|a| a.as_str() != skip && !a.starts_with("--"))
+    args.iter()
+        .find(|a| a.as_str() != skip && !a.starts_with("--"))
 }
 
 fn cmd_build(args: &[String]) {
@@ -166,7 +169,9 @@ fn cmd_build_aot(args: &[String]) {
             Some(tt) => tt,
             None => {
                 eprintln!("错误: 不支持的目标三元组: {}", t);
-                eprintln!("支持格式: x86_64-pc-windows-msvc / aarch64-unknown-linux-gnu / armv7-unknown-linux-gnueabihf");
+                eprintln!(
+                    "支持格式: x86_64-pc-windows-msvc / aarch64-unknown-linux-gnu / armv7-unknown-linux-gnueabihf"
+                );
                 exit(1);
             }
         },
@@ -303,11 +308,9 @@ fn finish_executable(
         "o"
     });
 
-    link_to_object(ll_path, &obj_path, options)
-        .map_err(|e| e.to_string())?;
+    link_to_object(ll_path, &obj_path, options).map_err(|e| e.to_string())?;
 
-    link_to_executable(&obj_path, exe_path, options)
-        .map_err(|e| e.to_string())?;
+    link_to_executable(&obj_path, exe_path, options).map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -515,4 +518,81 @@ fn cmd_ast(args: &[String]) {
 fn cmd_fmt(_args: &[String]) {
     eprintln!("`aura fmt` 尚未实现");
     exit(1);
+}
+
+/// P7.9: 内存泄漏检测命令
+fn cmd_leak_check(args: &[String]) {
+    let input = match first_positional(args, "--source") {
+        Some(p) => p,
+        None => {
+            eprintln!("错误: 缺少输入文件");
+            exit(1);
+        }
+    };
+    let source = match std::fs::read_to_string(input) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("错误: 无法读取 {}: {}", input, e);
+            exit(1);
+        }
+    };
+
+    use aura_compiler::codegen::hir::desugar_program;
+    use aura_compiler::codegen::mir::lower_program;
+
+    let mut lexer = Lexer::new(&source);
+    let tokens = lexer.tokenize();
+    let mut parser = Parser::new(tokens);
+    let program = parser.parse_program();
+
+    if !parser.errors().is_empty() {
+        for e in parser.errors() {
+            eprintln!("[语法] {}", e.message);
+        }
+        exit(1);
+    }
+
+    let hir = desugar_program(&program);
+    let (mut mir_funcs, _ctx) = lower_program(&hir);
+
+    // 运行完整 ARC 分析
+    let result = aura_compiler::codegen::arc::run_arc_analysis(&mut mir_funcs);
+
+    println!("=== ARC 分析报告 ===");
+    println!("{}", result.summary());
+    println!();
+
+    if let Some((name, info)) = result.escape_info.iter().next() {
+        println!("--- 逃逸分析: {} ---", name);
+        println!("  逃逸分配: {}", info.escaping_allocs.len());
+        println!("  非逃逸分配: {}", info.non_escaping_allocs.len());
+    }
+
+    println!();
+    println!("--- ARC 插入统计 ---");
+    println!("  Retain 插入: {}", result.insertion_stats.retains);
+    println!("  Release 插入: {}", result.insertion_stats.releases);
+    println!();
+    println!("--- ARC 优化统计 ---");
+    println!(
+        "  消除 Retain: {}",
+        result.optimization_stats.eliminated_retains
+    );
+    println!(
+        "  消除 Release: {}",
+        result.optimization_stats.eliminated_releases
+    );
+
+    println!();
+    if result.leak_report.is_clean() {
+        println!("✅ 内存泄漏检测: 无泄漏");
+    } else {
+        println!(
+            "⚠️  内存泄漏检测: 发现 {} 个潜在泄漏",
+            result.leak_report.leaked_allocs
+        );
+        for d in &result.leak_report.details {
+            println!("  - [{}] {}", d.function, d.description);
+        }
+    }
 }

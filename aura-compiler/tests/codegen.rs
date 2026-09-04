@@ -1,8 +1,6 @@
 //! P4 字节码编译器集成测试
 
-use aura_compiler::codegen::{
-    compile_source, disassemble, from_bytes, to_bytes,
-};
+use aura_compiler::codegen::{compile_source, disassemble, from_bytes, to_bytes};
 
 /// 编译 → 序列化 → 反序列化 往返一致性
 #[test]

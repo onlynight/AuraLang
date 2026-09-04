@@ -107,7 +107,13 @@ fn is_scalar(ty: &str) -> bool {
 /// 将标识符中 LLVM IR 不允许的字符替换为下划线
 pub fn sanitizellvm(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -160,10 +166,7 @@ mod tests {
     #[test]
     fn test_map_struct_named() {
         let tm = TypeMapper::new(true);
-        assert_eq!(
-            tm.map(&HirType::Named("Player".into())),
-            "%struct.Player"
-        );
+        assert_eq!(tm.map(&HirType::Named("Player".into())), "%struct.Player");
     }
 
     #[test]

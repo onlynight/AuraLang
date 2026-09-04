@@ -22,23 +22,24 @@ pub mod opcode;
 pub mod opt;
 pub mod serialize;
 
+// P7 内存管理
+pub mod arc;
+
 // AOT（LLVM）后端（P6）
 #[cfg(feature = "llvm")]
 pub mod aot;
 
 pub use disasm::disassemble;
 pub use emit::{emit_module, find_const};
-pub use hir::{desugar_program, HirProgram};
-pub use mir::{lower_program, MirFunction};
+pub use hir::{HirProgram, desugar_program};
+pub use mir::{MirFunction, lower_program};
 pub use mono::mono_hir;
 pub use opcode::{BytecodeFunction, BytecodeModule, BytecodeNative, Const, OpCode};
 pub use opt::{dce_mir, escape_mir, fold_hir, inline_hir, licm_mir};
-pub use serialize::{from_bytes, read_auc, to_bytes, write_auc, SerializeError};
+pub use serialize::{SerializeError, from_bytes, read_auc, to_bytes, write_auc};
 
 #[cfg(feature = "llvm")]
-pub use aot::{
-    aot_compile, AotCodeGenerator, AotError, AotOptions, AotOutput, OutputFormat,
-};
+pub use aot::{AotCodeGenerator, AotError, AotOptions, AotOutput, OutputFormat, aot_compile};
 
 use crate::ast::Program;
 
@@ -95,7 +96,7 @@ pub fn compile(program: &Program, opts: &CodeGenOptions) -> BytecodeModule {
     fold_hir(&mut hir);
 
     // 4. HIR → MIR（基本块 + CFG）
-    let (mir_funcs, ctx) = lower_program(&hir);
+    let (mut mir_funcs, ctx) = lower_program(&hir);
 
     // 5. MIR 优化：死代码消除 + 循环不变量外提（+ 逃逸分析作为分析）
     // 注意：`dce_mir` 与 `licm_mir` 当前均存在 CFG 损坏缺陷（入口块假设、preheader 改写 If
@@ -104,6 +105,11 @@ pub fn compile(program: &Program, opts: &CodeGenOptions) -> BytecodeModule {
         // dce_mir(&mut mir_funcs);   // TODO(P5): 修复 CFG 损坏后启用
         // licm_mir(&mut mir_funcs);  // TODO(P5): 修复 CFG 损坏后启用
         let _escape = escape_mir(&mir_funcs); // 分析：标注未逃逸分配
+    }
+
+    // 5.5 P7: ARC 分析（逃逸分析 + 自动插入 + 优化 + 泄漏检测）
+    if opts.optimize {
+        let _arc_result = arc::run_arc_analysis(&mut mir_funcs);
     }
 
     // 6. MIR → 字节码发射
@@ -119,7 +125,10 @@ pub fn compile_source(source: &str) -> Result<BytecodeModule, String> {
     // 词法
     let mut lexer = Lexer::new(source);
     let tokens = lexer.tokenize();
-    let lex_err = lexer.errors().first().map(|e| format!("lex error: {}", e.message));
+    let lex_err = lexer
+        .errors()
+        .first()
+        .map(|e| format!("lex error: {}", e.message));
     if let Some(m) = lex_err {
         return Err(m);
     }

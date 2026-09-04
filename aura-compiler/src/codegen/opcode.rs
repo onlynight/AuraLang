@@ -136,6 +136,22 @@ pub enum OpCode {
     /// 显式释放堆对象（触发 drop 回调，置槽为空）
     DropRef,
 
+    // ── P7 内存管理 ──
+    /// 保留引用计数（P7.2）：对栈顶引用值 +1
+    Retain,
+    /// 释放引用计数（P7.2）：对栈顶引用值 -1
+    Release,
+    /// 创建弱引用（P7.3）：栈顶引用值 → 弱引用（不增加计数）
+    WeakRef,
+    /// 从弱引用升级（P7.3）：栈顶弱引用 → 强引用（若未释放则 +1）
+    WeakGet,
+    /// 显式堆分配（P7.5）：栈顶值分配到堆上并返回引用
+    BoxAlloc,
+    /// defer 清理块开始（P7.4）：标记 defer 区域起始
+    DeferBegin,
+    /// defer 清理块结束（P7.4）：标记 defer 区域结束
+    DeferEnd,
+
     /// 终止整个程序（顶层入口返回时）
     Halt,
 }
@@ -197,6 +213,13 @@ impl OpCode {
             OpCode::NewCoroutine(_) => 51,
             OpCode::ResumeCoroutine => 52,
             OpCode::DropRef => 53,
+            OpCode::Retain => 54,
+            OpCode::Release => 55,
+            OpCode::WeakRef => 56,
+            OpCode::WeakGet => 57,
+            OpCode::BoxAlloc => 58,
+            OpCode::DeferBegin => 59,
+            OpCode::DeferEnd => 60,
             OpCode::Halt => 37,
         }
     }
@@ -205,9 +228,9 @@ impl OpCode {
     pub fn operand_size(byte: u8) -> usize {
         match byte {
             0 | 1 | 2 | 30 | 32 | 33 => 2, // u16 操作数
-            23 | 24 | 25 => 4,            // i32 偏移
-            26 | 27 | 36 => 2,            // u16 函数/原生索引
-            40 | 41 | 51 => 2,            // CallMethod/CallCtor/NewCoroutine u16 索引
+            23 | 24 | 25 => 4,             // i32 偏移
+            26 | 27 | 36 => 2,             // u16 函数/原生索引
+            40 | 41 | 51 => 2,             // CallMethod/CallCtor/NewCoroutine u16 索引
             _ => 0,
         }
     }
@@ -268,6 +291,13 @@ impl OpCode {
             51 => OpCode::NewCoroutine(0),
             52 => OpCode::ResumeCoroutine,
             53 => OpCode::DropRef,
+            54 => OpCode::Retain,
+            55 => OpCode::Release,
+            56 => OpCode::WeakRef,
+            57 => OpCode::WeakGet,
+            58 => OpCode::BoxAlloc,
+            59 => OpCode::DeferBegin,
+            60 => OpCode::DeferEnd,
             _ => return None,
         })
     }
@@ -352,6 +382,13 @@ impl fmt::Display for OpCode {
             OpCode::NewCoroutine(i) => write!(f, "NEW_COROUTINE {}", i),
             OpCode::ResumeCoroutine => write!(f, "RESUME_COROUTINE"),
             OpCode::DropRef => write!(f, "DROP_REF"),
+            OpCode::Retain => write!(f, "RETAIN"),
+            OpCode::Release => write!(f, "RELEASE"),
+            OpCode::WeakRef => write!(f, "WEAK_REF"),
+            OpCode::WeakGet => write!(f, "WEAK_GET"),
+            OpCode::BoxAlloc => write!(f, "BOX_ALLOC"),
+            OpCode::DeferBegin => write!(f, "DEFER_BEGIN"),
+            OpCode::DeferEnd => write!(f, "DEFER_END"),
             OpCode::Halt => write!(f, "HALT"),
         }
     }

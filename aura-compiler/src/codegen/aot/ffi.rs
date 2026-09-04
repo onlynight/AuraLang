@@ -5,9 +5,9 @@
 //! Aura 的 `extern "c" "libname" { ... }` 声明会生成 LLVM 外部函数声明（ExternalLinkage）。
 //! 生成的 LLVM IR 中，这些函数以 `declare ... @name(...)` 形式出现，链接时由目标平台的库解析。
 
-use crate::codegen::hir::HirFunction;
-use crate::codegen::aot::types::TypeMapper;
 use crate::codegen::aot::error::AotError;
+use crate::codegen::aot::types::TypeMapper;
+use crate::codegen::hir::HirFunction;
 
 /// FFI 声明生成器
 pub struct FfiGenerator<'a> {
@@ -30,13 +30,20 @@ impl<'a> FfiGenerator<'a> {
 
     fn generate_extern_function(&self, func: &HirFunction) -> String {
         let ret_ty = self.type_mapper.map(
-            func.ret.as_ref().unwrap_or(&crate::codegen::hir::HirType::Named("Unit".into())),
+            func.ret
+                .as_ref()
+                .unwrap_or(&crate::codegen::hir::HirType::Named("Unit".into())),
         );
         let ret_str = if ret_ty.is_empty() { "void" } else { &ret_ty };
         let params: Vec<String> = func
             .params
             .iter()
-            .map(|p| self.type_mapper.map(p.ty.as_ref().unwrap_or(&crate::codegen::hir::HirType::Named("Int".into()))))
+            .map(|p| {
+                self.type_mapper.map(
+                    p.ty.as_ref()
+                        .unwrap_or(&crate::codegen::hir::HirType::Named("Int".into())),
+                )
+            })
             .collect();
         let params_str = if params.is_empty() {
             "void".to_string()
@@ -71,9 +78,18 @@ mod tests {
         let func = HirFunction {
             name: "DrawCircle".into(),
             params: vec![
-                HirParam { name: "x".into(), ty: Some(HirType::Named("Int".into())) },
-                HirParam { name: "y".into(), ty: Some(HirType::Named("Int".into())) },
-                HirParam { name: "r".into(), ty: Some(HirType::Named("Float".into())) },
+                HirParam {
+                    name: "x".into(),
+                    ty: Some(HirType::Named("Int".into())),
+                },
+                HirParam {
+                    name: "y".into(),
+                    ty: Some(HirType::Named("Int".into())),
+                },
+                HirParam {
+                    name: "r".into(),
+                    ty: Some(HirType::Named("Float".into())),
+                },
             ],
             ret: Some(HirType::Named("Unit".into())),
             body: crate::codegen::hir::HirBlock { stmts: vec![] },

@@ -36,3 +36,7 @@ llvm = ["thiserror"]
 
 [dev-dependencies]
 insta = { version = "1", features = ["yaml"] }
+
+[[example]]
+name = "aot_bench"
+required-features = ["llvm"]

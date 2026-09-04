@@ -8,7 +8,7 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use aura_compiler::codegen::compile_source;
-use aura_compiler::vm::{Vm, VmOptions, Value};
+use aura_compiler::vm::{Value, Vm, VmOptions};
 
 fn bench_fib() {
     let src = r#"
@@ -27,7 +27,10 @@ fn bench_fib() {
         vm.reset_for_reuse();
     }
     let elapsed = start.elapsed();
-    println!("fib(20) x100: {:.3} ms/op", elapsed.as_secs_f64() * 1000.0 / 100.0);
+    println!(
+        "fib(20) x100: {:.3} ms/op",
+        elapsed.as_secs_f64() * 1000.0 / 100.0
+    );
 }
 
 fn bench_sum_loop() {
@@ -52,7 +55,10 @@ fn bench_sum_loop() {
         vm.reset_for_reuse();
     }
     let elapsed = start.elapsed();
-    println!("sum(10000) x100: {:.3} ms/op", elapsed.as_secs_f64() * 1000.0 / 100.0);
+    println!(
+        "sum(10000) x100: {:.3} ms/op",
+        elapsed.as_secs_f64() * 1000.0 / 100.0
+    );
     assert_eq!(total, 100 * 49_995_000);
 }
 
@@ -73,7 +79,10 @@ fn bench_recursive_count() {
         vm.reset_for_reuse();
     }
     let elapsed = start.elapsed();
-    println!("count(100) x100: {:.3} ms/op", elapsed.as_secs_f64() * 1000.0 / 100.0);
+    println!(
+        "count(100) x100: {:.3} ms/op",
+        elapsed.as_secs_f64() * 1000.0 / 100.0
+    );
 }
 
 fn bench_factorial() {
@@ -93,7 +102,10 @@ fn bench_factorial() {
         vm.reset_for_reuse();
     }
     let elapsed = start.elapsed();
-    println!("fact(20) x100: {:.3} ms/op", elapsed.as_secs_f64() * 1000.0 / 100.0);
+    println!(
+        "fact(20) x100: {:.3} ms/op",
+        elapsed.as_secs_f64() * 1000.0 / 100.0
+    );
 }
 
 /// 运行所有基准测试

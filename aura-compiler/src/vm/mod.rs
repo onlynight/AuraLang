@@ -15,22 +15,22 @@
 //!   阈值的（叶子整数）函数由 Cranelift 编译为原生代码并缓存，后续调用直接派发到
 //!   原生入口（`5.12`）；编译失败则永久回退解释器（`5.13`）。
 
-pub mod native;
-pub mod heap;
-pub mod value;
-pub mod interp;
 pub mod coroutine;
 pub mod dynamic_ffi;
+pub mod heap;
+pub mod interp;
 #[cfg(feature = "jit")]
 pub mod jit;
 #[cfg(feature = "jit")]
 pub mod jit_opt;
+pub mod native;
+pub mod value;
 
+pub use coroutine::{CoroutineScheduler, CoroutineState};
+pub use dynamic_ffi::DynamicLoader;
 pub use heap::Heap;
 pub use native::NativeRegistry;
 pub use value::Value;
-pub use coroutine::{CoroutineScheduler, CoroutineState};
-pub use dynamic_ffi::DynamicLoader;
 
 use std::collections::HashMap;
 
@@ -152,6 +152,22 @@ pub enum Instr {
 
     // ── ARC 生命周期（5.10） ──
     DropRef,
+
+    // ── P7 内存管理 ──
+    /// 保留引用计数 +1（P7.2）
+    Retain,
+    /// 释放引用计数 -1（P7.2）
+    Release,
+    /// 创建弱引用（P7.3）
+    WeakRef,
+    /// 从弱引用升级（P7.3）
+    WeakGet,
+    /// 显式堆分配（P7.5）
+    BoxAlloc,
+    /// defer 清理块开始（P7.4）
+    DeferBegin,
+    /// defer 清理块结束（P7.4）
+    DeferEnd,
 
     Halt,
 }
@@ -332,18 +348,26 @@ fn decode_function(f: &BytecodeFunction) -> Result<DecodedFunction, VmError> {
             }
             crate::codegen::opcode::OpCode::ResumeCoroutine => instrs.push(Instr::ResumeCoroutine),
             crate::codegen::opcode::OpCode::DropRef => instrs.push(Instr::DropRef),
+            crate::codegen::opcode::OpCode::Retain => instrs.push(Instr::Retain),
+            crate::codegen::opcode::OpCode::Release => instrs.push(Instr::Release),
+            crate::codegen::opcode::OpCode::WeakRef => instrs.push(Instr::WeakRef),
+            crate::codegen::opcode::OpCode::WeakGet => instrs.push(Instr::WeakGet),
+            crate::codegen::opcode::OpCode::BoxAlloc => instrs.push(Instr::BoxAlloc),
+            crate::codegen::opcode::OpCode::DeferBegin => instrs.push(Instr::DeferBegin),
+            crate::codegen::opcode::OpCode::DeferEnd => instrs.push(Instr::DeferEnd),
             crate::codegen::opcode::OpCode::Halt => instrs.push(Instr::Halt),
         }
     }
 
     // 将跳转的「字节偏移」解析为「指令索引」
-    let offset_to_idx: HashMap<usize, usize> = starts.iter().enumerate().map(|(i, s)| (*s, i)).collect();
+    let offset_to_idx: HashMap<usize, usize> =
+        starts.iter().enumerate().map(|(i, s)| (*s, i)).collect();
     for instr in instrs.iter_mut() {
         match instr {
             Instr::Jump(off) | Instr::JumpIfTrue(off) | Instr::JumpIfFalse(off) => {
-                let idx = *offset_to_idx
-                    .get(off)
-                    .ok_or_else(|| VmError::Load(format!("jump target {} not at instruction boundary", off)))?;
+                let idx = *offset_to_idx.get(off).ok_or_else(|| {
+                    VmError::Load(format!("jump target {} not at instruction boundary", off))
+                })?;
                 *instr = match instr {
                     Instr::Jump(_) => Instr::Jump(idx),
                     Instr::JumpIfTrue(_) => Instr::JumpIfTrue(idx),
@@ -562,16 +586,8 @@ impl Vm {
         let n = self.module.funcs.len();
         (0..n)
             .map(|i| {
-                let compiled = self
-                    .jit
-                    .as_ref()
-                    .map(|j| j.is_compiled(i))
-                    .unwrap_or(false);
-                let skipped = self
-                    .jit
-                    .as_ref()
-                    .map(|j| j.is_skipped(i))
-                    .unwrap_or(false);
+                let compiled = self.jit.as_ref().map(|j| j.is_compiled(i)).unwrap_or(false);
+                let skipped = self.jit.as_ref().map(|j| j.is_skipped(i)).unwrap_or(false);
                 (compiled, skipped)
             })
             .collect()

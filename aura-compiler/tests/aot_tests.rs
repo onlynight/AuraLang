@@ -1,3 +1,5 @@
+#![cfg(feature = "llvm")]
+
 //! AOT（LLVM）后端集成测试
 //!
 //! 覆盖：
@@ -11,7 +13,7 @@
 //! 通过 `AURA_LLVM_HOME` 环境变量存在判断。
 
 use aura_compiler::codegen::aot::{
-    aot_compile, AotOptions, AotCodeGenerator, OptimizationLevel, TargetTriple,
+    AotCodeGenerator, AotOptions, OptimizationLevel, TargetTriple, aot_compile,
 };
 use aura_compiler::codegen::hir::desugar_program;
 use aura_compiler::lexer::Lexer;
@@ -52,9 +54,7 @@ fn aot_ir_function_call() {
 
 #[test]
 fn aot_ir_if_control_flow() {
-    let ir = gen_ir(
-        "fun main(): Int { var x = 5\nif (x > 3) { return 1 }\nreturn 0 }",
-    );
+    let ir = gen_ir("fun main(): Int { var x = 5\nif (x > 3) { return 1 }\nreturn 0 }");
     assert!(ir.contains("icmp"), "应包含整数比较");
     assert!(ir.contains("br i1"), "应包含条件分支");
 }
@@ -96,9 +96,18 @@ fn aot_ir_runtime_decls() {
 
 #[test]
 fn aot_target_triples() {
-    assert_eq!(TargetTriple::windows_x86_64().to_string(), "x86_64-pc-windows-msvc");
-    assert_eq!(TargetTriple::linux_aarch64().to_string(), "aarch64-unknown-linux-gnu");
-    assert_eq!(TargetTriple::linux_armv7().to_string(), "armv7-unknown-linux-gnueabihf");
+    assert_eq!(
+        TargetTriple::windows_x86_64().to_string(),
+        "x86_64-pc-windows-msvc"
+    );
+    assert_eq!(
+        TargetTriple::linux_aarch64().to_string(),
+        "aarch64-unknown-linux-gnu"
+    );
+    assert_eq!(
+        TargetTriple::linux_armv7().to_string(),
+        "armv7-unknown-linux-gnueabihf"
+    );
 }
 
 #[test]
@@ -149,7 +158,8 @@ fn aot_full_pipeline_when_llvm_available() {
         return;
     }
 
-    let src = "fun add(a: Int, b: Int): Int { return a + b }\nfun main(): Int { return add(20, 22) }";
+    let src =
+        "fun add(a: Int, b: Int): Int { return a + b }\nfun main(): Int { return add(20, 22) }";
     let tmp = std::env::temp_dir().join("aura_aot_full");
     std::fs::create_dir_all(&tmp).unwrap();
 
@@ -171,15 +181,22 @@ fn aot_full_pipeline_when_llvm_available() {
 
     // 3. lld-link → .exe
     let exe_path = tmp.join("main.exe");
-    let link = aura_compiler::codegen::aot::linker::link_to_executable(&o_path, &exe_path, &options);
+    let link =
+        aura_compiler::codegen::aot::linker::link_to_executable(&o_path, &exe_path, &options);
     assert!(link.is_ok(), "链接应成功: {:?}", link.err());
 
     // 4. 运行并验证结果
     #[cfg(target_os = "windows")]
     {
-        let output = std::process::Command::new(&exe_path).output().expect("运行应成功");
+        let output = std::process::Command::new(&exe_path)
+            .output()
+            .expect("运行应成功");
         let code = output.status.code().unwrap_or(-1);
-        assert_eq!(code, 42, "AOT 运行结果应为 42（add(20,22)），实际: {}", code);
+        assert_eq!(
+            code, 42,
+            "AOT 运行结果应为 42（add(20,22)），实际: {}",
+            code
+        );
     }
 }
 
@@ -221,14 +238,18 @@ fn aot_string_global_at_module_level() {
     // 必须出现在函数之外（模块顶层）：检查 define 之前/之后位置
     // 简化断言：@str_data 定义行不在函数体内（其后紧跟的指令不是 alloca 等）
     let lines: Vec<&str> = ir.lines().collect();
-    let has_global_line = lines.iter().any(|l| {
-        l.contains("@str_data.") && l.contains("private constant")
-    });
+    let has_global_line = lines
+        .iter()
+        .any(|l| l.contains("@str_data.") && l.contains("private constant"));
     assert!(has_global_line, "应有模块级字符串常量定义: {}", ir);
 
     // 函数体内只应引用（getelementptr），不应重复定义
     let def_count = ir.matches("@str_data.").count();
-    assert_eq!(def_count, 2, "@str_data 应定义一次、引用一次（实际 {}）", def_count);
+    assert_eq!(
+        def_count, 2,
+        "@str_data 应定义一次、引用一次（实际 {}）",
+        def_count
+    );
 }
 
 /// 回归：DWARF 元数据必须是真实 LLVM 元数据（§9.5），

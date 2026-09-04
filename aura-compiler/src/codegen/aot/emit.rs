@@ -20,12 +20,12 @@
 
 use std::collections::HashMap;
 
-use crate::codegen::aot::dwarf::{emit_debug_metadata, emit_subprogram, DebugInfo};
+use crate::codegen::aot::dwarf::{DebugInfo, emit_debug_metadata, emit_subprogram};
 use crate::codegen::aot::error::AotError;
 use crate::codegen::aot::ffi::FfiGenerator;
 use crate::codegen::aot::optimize::OptimizationLevel;
 use crate::codegen::aot::runtime::generate_runtime_declarations;
-use crate::codegen::aot::types::{sanitizellvm, TypeMapper};
+use crate::codegen::aot::types::{TypeMapper, sanitizellvm};
 use crate::codegen::hir::{
     HirBinOp, HirBlock, HirExpr, HirFunction, HirProgram, HirStmt, HirType, HirUnOp,
 };
@@ -180,16 +180,8 @@ impl EmitCtx {
             if !self.declared_structs.insert(llvm_name.clone()) {
                 continue;
             }
-            let fields: Vec<String> = st
-                .fields
-                .iter()
-                .map(|(_, ty)| self.llvm_type(ty))
-                .collect();
-            s.push_str(&format!(
-                "{} = type {{{}}}\n",
-                llvm_name,
-                fields.join(", ")
-            ));
+            let fields: Vec<String> = st.fields.iter().map(|(_, ty)| self.llvm_type(ty)).collect();
+            s.push_str(&format!("{} = type {{{}}}\n", llvm_name, fields.join(", ")));
         }
         self.sections.push(s);
     }
@@ -211,7 +203,8 @@ impl EmitCtx {
         if !self.link_runtime {
             return;
         }
-        self.sections.push(generate_runtime_declarations(&self.type_mapper));
+        self.sections
+            .push(generate_runtime_declarations(&self.type_mapper));
     }
 }
 
@@ -255,12 +248,8 @@ pub fn emit_program(codegen: &AotCodeGenerator, program: &HirProgram) -> Result<
             }
             let idx = ctx.subprogram_index;
             ctx.subprogram_index += 1;
-            let (_mid, loc_id, text) = emit_subprogram(
-                ctx.debug_info.as_ref().unwrap(),
-                func,
-                1,
-                idx,
-            );
+            let (_mid, loc_id, text) =
+                emit_subprogram(ctx.debug_info.as_ref().unwrap(), func, 1, idx);
             ctx.func_dbg_ids.insert(func.name.clone(), loc_id);
             ctx.subprogram_meta.push(text);
         }
@@ -333,18 +322,18 @@ fn emit_function(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErr
         .as_ref()
         .map(|t| ctx.llvm_type(t))
         .unwrap_or_else(|| "i32".to_string());
-    let ret_str = if ret_ty.is_empty() { "void".to_string() } else { ret_ty };
+    let ret_str = if ret_ty.is_empty() {
+        "void".to_string()
+    } else {
+        ret_ty
+    };
 
     // 参数类型
     let params: Vec<(String, String)> = func
         .params
         .iter()
         .map(|p| {
-            let ty = ctx.llvm_type(
-                p.ty
-                    .as_ref()
-                    .unwrap_or(&HirType::Named("Int".into())),
-            );
+            let ty = ctx.llvm_type(p.ty.as_ref().unwrap_or(&HirType::Named("Int".into())));
             (p.name.clone(), ty)
         })
         .collect();
@@ -382,7 +371,10 @@ fn emit_function(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErr
             cur.body.push(format!("{} = alloca {}", var_name, ty));
             cur.body.push(format!(
                 "store {} %arg.{} , {}* {}",
-                ty, sanitizellvm(name), ty, var_name
+                ty,
+                sanitizellvm(name),
+                ty,
+                var_name
             ));
         }
         ctx.declare_var(name, var_name.clone(), ty.clone());
@@ -460,7 +452,10 @@ impl FuncBlocks {
 
     /// 检查最后一个基本块是否有终止符
     fn has_terminator(&self) -> bool {
-        self.blocks.last().map(|bb| bb.terminator.is_some()).unwrap_or(false)
+        self.blocks
+            .last()
+            .map(|bb| bb.terminator.is_some())
+            .unwrap_or(false)
     }
 
     /// 为最后一个基本块设置终止符
@@ -512,16 +507,8 @@ fn emit_statement(
     stmt: &HirStmt,
 ) -> Result<(), AotError> {
     match stmt {
-        HirStmt::Val {
-            name,
-            ty,
-            init,
-        } => emit_variable_decl(ctx, blocks, name, ty, init)?,
-        HirStmt::Var {
-            name,
-            ty,
-            init,
-        } => emit_variable_decl(ctx, blocks, name, ty, init)?,
+        HirStmt::Val { name, ty, init } => emit_variable_decl(ctx, blocks, name, ty, init)?,
+        HirStmt::Var { name, ty, init } => emit_variable_decl(ctx, blocks, name, ty, init)?,
         HirStmt::Assign { target, value } => emit_assign(ctx, blocks, target, value)?,
         HirStmt::Expr(e) => {
             let _ = emit_expr_val(ctx, blocks, e)?;
@@ -656,7 +643,8 @@ fn emit_index_assign(
     // 简化：直接 store 到临时变量
     let _ = (_ctx, _container, _index);
     let cur = blocks.last_mut();
-    cur.body.push(format!("; store index {} {}", val_ty, val_ir));
+    cur.body
+        .push(format!("; store index {} {}", val_ty, val_ir));
     Ok(())
 }
 
@@ -798,7 +786,9 @@ fn emit_literal(
             cur.body.push(format!("{} = fadd float 0.0, {}", name, v));
             Ok((name, "float".to_string()))
         }
-        crate::ast::Literal::Bool(v) => Ok((format!("{}", if *v { 1 } else { 0 }), "i1".to_string())),
+        crate::ast::Literal::Bool(v) => {
+            Ok((format!("{}", if *v { 1 } else { 0 }), "i1".to_string()))
+        }
         crate::ast::Literal::Null => Ok(("null".to_string(), "i8*".to_string())),
         crate::ast::Literal::String(s) => emit_string_literal(ctx, blocks, s),
         crate::ast::Literal::Char(c) => {
@@ -888,42 +878,67 @@ fn emit_binary(
     match op {
         HirBinOp::Add => {
             if l_ty.starts_with("float") || l_ty == "double" {
-                let op = if l_ty == "double" { "fadd double" } else { "fadd float" };
-                cur.body.push(format!("{} = {} {} {}, {}", tmp, op, l_ir, l_ty, r_ir));
+                let op = if l_ty == "double" {
+                    "fadd double"
+                } else {
+                    "fadd float"
+                };
+                cur.body
+                    .push(format!("{} = {} {} {}, {}", tmp, op, l_ir, l_ty, r_ir));
             } else {
-                cur.body.push(format!("{} = add {} {}, {}", tmp, l_ty, l_ir, r_ir));
+                cur.body
+                    .push(format!("{} = add {} {}, {}", tmp, l_ty, l_ir, r_ir));
             }
             Ok((tmp, l_ty))
         }
         HirBinOp::Sub => {
             if l_ty.starts_with("float") || l_ty == "double" {
-                let op = if l_ty == "double" { "fsub double" } else { "fsub float" };
-                cur.body.push(format!("{} = {} {} {}, {}", tmp, op, l_ir, l_ty, r_ir));
+                let op = if l_ty == "double" {
+                    "fsub double"
+                } else {
+                    "fsub float"
+                };
+                cur.body
+                    .push(format!("{} = {} {} {}, {}", tmp, op, l_ir, l_ty, r_ir));
             } else {
-                cur.body.push(format!("{} = sub {} {}, {}", tmp, l_ty, l_ir, r_ir));
+                cur.body
+                    .push(format!("{} = sub {} {}, {}", tmp, l_ty, l_ir, r_ir));
             }
             Ok((tmp, l_ty))
         }
         HirBinOp::Mul => {
             if l_ty.starts_with("float") || l_ty == "double" {
-                let op = if l_ty == "double" { "fmul double" } else { "fmul float" };
-                cur.body.push(format!("{} = {} {} {}, {}", tmp, op, l_ir, l_ty, r_ir));
+                let op = if l_ty == "double" {
+                    "fmul double"
+                } else {
+                    "fmul float"
+                };
+                cur.body
+                    .push(format!("{} = {} {} {}, {}", tmp, op, l_ir, l_ty, r_ir));
             } else {
-                cur.body.push(format!("{} = mul {} {}, {}", tmp, l_ty, l_ir, r_ir));
+                cur.body
+                    .push(format!("{} = mul {} {}, {}", tmp, l_ty, l_ir, r_ir));
             }
             Ok((tmp, l_ty))
         }
         HirBinOp::Div => {
             if l_ty.starts_with("float") || l_ty == "double" {
-                let op = if l_ty == "double" { "fdiv double" } else { "fdiv float" };
-                cur.body.push(format!("{} = {} {} {}, {}", tmp, op, l_ir, l_ty, r_ir));
+                let op = if l_ty == "double" {
+                    "fdiv double"
+                } else {
+                    "fdiv float"
+                };
+                cur.body
+                    .push(format!("{} = {} {} {}, {}", tmp, op, l_ir, l_ty, r_ir));
             } else {
-                cur.body.push(format!("{} = sdiv {} {}, {}", tmp, l_ty, l_ir, r_ir));
+                cur.body
+                    .push(format!("{} = sdiv {} {}, {}", tmp, l_ty, l_ir, r_ir));
             }
             Ok((tmp, l_ty))
         }
         HirBinOp::Rem => {
-            cur.body.push(format!("{} = srem {} {}, {}", tmp, l_ty, l_ir, r_ir));
+            cur.body
+                .push(format!("{} = srem {} {}, {}", tmp, l_ty, l_ir, r_ir));
             Ok((tmp, l_ty))
         }
         HirBinOp::Eq | HirBinOp::Ne | HirBinOp::Lt | HirBinOp::Gt | HirBinOp::Le | HirBinOp::Ge => {
@@ -946,7 +961,8 @@ fn emit_binary(
         }
         HirBinOp::And | HirBinOp::Or => {
             let op = if *op == HirBinOp::And { "and" } else { "or" };
-            cur.body.push(format!("{} = {} i1 {}, {}", tmp, op, l_ir, r_ir));
+            cur.body
+                .push(format!("{} = {} i1 {}, {}", tmp, op, l_ir, r_ir));
             Ok((tmp, "i1".to_string()))
         }
         HirBinOp::BitAnd | HirBinOp::BitOr | HirBinOp::BitXor => {
@@ -956,12 +972,14 @@ fn emit_binary(
                 HirBinOp::BitXor => "xor",
                 _ => unreachable!(),
             };
-            cur.body.push(format!("{} = {} {} {}, {}", tmp, op, l_ty, l_ir, r_ir));
+            cur.body
+                .push(format!("{} = {} {} {}, {}", tmp, op, l_ty, l_ir, r_ir));
             Ok((tmp, l_ty))
         }
         HirBinOp::Shl | HirBinOp::Shr => {
             let op = if *op == HirBinOp::Shl { "shl" } else { "ashr" };
-            cur.body.push(format!("{} = {} {} {}, {}", tmp, op, l_ty, l_ir, r_ir));
+            cur.body
+                .push(format!("{} = {} {} {}, {}", tmp, op, l_ty, l_ir, r_ir));
             Ok((tmp, l_ty))
         }
         _ => Ok((l_ir, l_ty)),
@@ -980,7 +998,8 @@ fn emit_unary(
 
     match op {
         HirUnOp::Minus => {
-            cur.body.push(format!("{} = sub {} {}, {}", tmp, v_ty, 0, v_ir));
+            cur.body
+                .push(format!("{} = sub {} {}, {}", tmp, v_ty, 0, v_ir));
             Ok((tmp, v_ty))
         }
         HirUnOp::Not => {
@@ -1011,7 +1030,10 @@ fn emit_call(
 
     cur.body.push(format!(
         "{} = call {} @{}({})",
-        tmp, ret_ty, callee, args_str.join(", ")
+        tmp,
+        ret_ty,
+        callee,
+        args_str.join(", ")
     ));
     Ok((tmp, ret_ty))
 }
@@ -1027,10 +1049,8 @@ fn emit_member_access(
     let gep = ctx.fresh_var();
     let tmp = ctx.fresh_var();
     let cur = blocks.last_mut();
-    cur.body.push(format!(
-        "{} = getelementptr i8, i8* {}, i64 0",
-        gep, obj_ir
-    ));
+    cur.body
+        .push(format!("{} = getelementptr i8, i8* {}, i64 0", gep, obj_ir));
     cur.body.push(format!("{} = load i32, i32* {}", tmp, gep));
     Ok((tmp, "i32".to_string()))
 }
@@ -1101,7 +1121,8 @@ fn emit_if_expr(
     let then_phi = ctx.fresh_var();
     {
         let cur = blocks.last_mut();
-        cur.body.push(format!("{} = add {} {}, 0", then_phi, then_ty, then_ir));
+        cur.body
+            .push(format!("{} = add {} {}, 0", then_phi, then_ty, then_ir));
         cur.terminator = Some(format!("br label %{}", merge_name));
     }
 
@@ -1111,7 +1132,8 @@ fn emit_if_expr(
     let else_phi = ctx.fresh_var();
     {
         let cur = blocks.last_mut();
-        cur.body.push(format!("{} = add {} {}, 0", else_phi, else_ty, else_ir));
+        cur.body
+            .push(format!("{} = add {} {}, 0", else_phi, else_ty, else_ir));
         cur.terminator = Some(format!("br label %{}", merge_name));
     }
 
@@ -1151,11 +1173,7 @@ fn emit_block_expr(
                 }
                 HirStmt::Return(Some(e)) => {
                     let (v, t) = emit_expr_val(ctx, blocks, e)?;
-                    blocks.set_terminator(&format!(
-                        "ret {} {}",
-                        sanitize_ty_for_ret(&t),
-                        v
-                    ));
+                    blocks.set_terminator(&format!("ret {} {}", sanitize_ty_for_ret(&t), v));
                     ctx.exit_scope();
                     return Ok((v, t));
                 }
@@ -1194,7 +1212,12 @@ fn zero_value(ty: &str) -> &str {
 fn synthesize_main(funcs: &[HirFunction]) -> HirFunction {
     let call_target = funcs
         .iter()
-        .find(|f| f.ret.as_ref().map(|t| matches!(t, HirType::Named(n) if n == "Int")).unwrap_or(false))
+        .find(|f| {
+            f.ret
+                .as_ref()
+                .map(|t| matches!(t, HirType::Named(n) if n == "Int"))
+                .unwrap_or(false)
+        })
         .map(|f| f.name.clone())
         .unwrap_or_else(|| "println".to_string());
 

@@ -16,9 +16,9 @@
 
 use std::path::Path;
 
+use crate::ast::Literal;
 use crate::codegen::aot::error::AotError;
 use crate::codegen::hir::{HirBinOp, HirExpr, HirFunction, HirProgram, HirStmt, HirType, HirUnOp};
-use crate::ast::Literal;
 
 /// C 类型映射
 fn map_type(ty: &HirType) -> &str {
@@ -62,11 +62,7 @@ pub fn generate_c_code(program: &HirProgram) -> Result<String, AotError> {
 
     // FFI 外部声明
     for func in &program.natives {
-        let ret = func
-            .ret
-            .as_ref()
-            .map(|t| map_type(t))
-            .unwrap_or("void");
+        let ret = func.ret.as_ref().map(|t| map_type(t)).unwrap_or("void");
         let params: Vec<String> = func
             .params
             .iter()
@@ -104,11 +100,7 @@ pub fn generate_c_code(program: &HirProgram) -> Result<String, AotError> {
 }
 
 fn generate_function(func: &HirFunction) -> String {
-    let ret = func
-        .ret
-        .as_ref()
-        .map(|t| map_type(t))
-        .unwrap_or("int");
+    let ret = func.ret.as_ref().map(|t| map_type(t)).unwrap_or("int");
 
     let params: Vec<String> = func
         .params
@@ -141,15 +133,8 @@ fn emit_c_block(s: &mut String, block: &crate::codegen::hir::HirBlock, indent: u
 fn emit_c_stmt(s: &mut String, stmt: &HirStmt, indent: usize) {
     let pad = "    ".repeat(indent);
     match stmt {
-        HirStmt::Val {
-            name,
-            ty,
-            init,
-        } => {
-            let c_ty = ty
-                .as_ref()
-                .map(|t| map_type(t))
-                .unwrap_or("int32_t");
+        HirStmt::Val { name, ty, init } => {
+            let c_ty = ty.as_ref().map(|t| map_type(t)).unwrap_or("int32_t");
             s.push_str(&format!("{}{} {}", pad, c_ty, sanitize_c(name)));
             if let Some(init) = init {
                 s.push_str(" = ");
@@ -157,15 +142,8 @@ fn emit_c_stmt(s: &mut String, stmt: &HirStmt, indent: usize) {
             }
             s.push_str(";\n");
         }
-        HirStmt::Var {
-            name,
-            ty,
-            init,
-        } => {
-            let c_ty = ty
-                .as_ref()
-                .map(|t| map_type(t))
-                .unwrap_or("int32_t");
+        HirStmt::Var { name, ty, init } => {
+            let c_ty = ty.as_ref().map(|t| map_type(t)).unwrap_or("int32_t");
             s.push_str(&format!("{}{} {}", pad, c_ty, sanitize_c(name)));
             if let Some(init) = init {
                 s.push_str(" = ");
@@ -248,11 +226,14 @@ fn emit_c_expr(s: &mut String, expr: &HirExpr) {
         HirExpr::Call { callee, args } => {
             s.push_str(&sanitize_c(callee));
             s.push('(');
-            let args_str: Vec<String> = args.iter().map(|a| {
-                let mut buf = String::new();
-                emit_c_expr(&mut buf, a);
-                buf
-            }).collect();
+            let args_str: Vec<String> = args
+                .iter()
+                .map(|a| {
+                    let mut buf = String::new();
+                    emit_c_expr(&mut buf, a);
+                    buf
+                })
+                .collect();
             s.push_str(&args_str.join(", "));
             s.push(')');
         }
@@ -274,11 +255,14 @@ fn emit_c_expr(s: &mut String, expr: &HirExpr) {
                 sanitize_c(type_name)
             ));
             if !args.is_empty() {
-                let args_str: Vec<String> = args.iter().map(|a| {
-                    let mut buf = String::new();
-                    emit_c_expr(&mut buf, a);
-                    buf
-                }).collect();
+                let args_str: Vec<String> = args
+                    .iter()
+                    .map(|a| {
+                        let mut buf = String::new();
+                        emit_c_expr(&mut buf, a);
+                        buf
+                    })
+                    .collect();
                 s.push_str(&format!(", {{{}}}", args_str.join(", ")));
             }
         }
@@ -320,7 +304,10 @@ fn emit_c_literal(s: &mut String, lit: &Literal) {
     match lit {
         Literal::Int(v) => s.push_str(&format!("{}", v)),
         Literal::Float(v) => s.push_str(&format!("{}f", v)),
-        Literal::String(v) => s.push_str(&format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""))),
+        Literal::String(v) => s.push_str(&format!(
+            "\"{}\"",
+            v.replace('\\', "\\\\").replace('"', "\\\"")
+        )),
         Literal::Bool(v) => s.push_str(if *v { "1" } else { "0" }),
         Literal::Null => s.push_str("NULL"),
         Literal::Char(c) => s.push_str(&format!("'{}'", c)),
@@ -372,10 +359,7 @@ fn sanitize_c(s: &str) -> String {
 }
 
 /// 编译 C 代码为可执行文件（调用 gcc/clang/cl）
-pub fn compile_c_to_exe(
-    c_source: &str,
-    output_path: &Path,
-) -> Result<(), AotError> {
+pub fn compile_c_to_exe(c_source: &str, output_path: &Path) -> Result<(), AotError> {
     use std::process::Command;
 
     let tmp_c = output_path.with_extension("c");

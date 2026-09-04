@@ -21,7 +21,10 @@ pub fn disassemble(module: &BytecodeModule) -> String {
     if !module.natives.is_empty() {
         out.push_str("\n; === natives ===\n");
         for (i, n) in module.natives.iter().enumerate() {
-            out.push_str(&format!("  N{:>4}  {} ({} param(s))\n", i, n.name, n.param_count));
+            out.push_str(&format!(
+                "  N{:>4}  {} ({} param(s))\n",
+                i, n.name, n.param_count
+            ));
         }
     }
 
@@ -42,7 +45,10 @@ pub fn disassemble(module: &BytecodeModule) -> String {
     out
 }
 
-fn disassemble_function(module: &BytecodeModule, f: &crate::codegen::opcode::BytecodeFunction) -> String {
+fn disassemble_function(
+    module: &BytecodeModule,
+    f: &crate::codegen::opcode::BytecodeFunction,
+) -> String {
     let mut out = String::new();
     let code = &f.code;
     let mut pos = 0usize;
@@ -64,7 +70,11 @@ fn disassemble_function(module: &BytecodeModule, f: &crate::codegen::opcode::Byt
             &[][..]
         };
 
-        let mut line = format!("{:>6}  {}", start, opcode_display(module, &op, operand_bytes));
+        let mut line = format!(
+            "{:>6}  {}",
+            start,
+            opcode_display(module, &op, operand_bytes)
+        );
 
         // 处理操作数偏移（让 Jump 显示目标地址更易读）
         if let OpCode::Jump(o) | OpCode::JumpIfTrue(o) | OpCode::JumpIfFalse(o) = op {

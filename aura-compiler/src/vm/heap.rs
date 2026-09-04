@@ -77,7 +77,11 @@ impl Heap {
     }
 
     /// 分配一个带虚方法表的对象（5.6）
-    pub fn alloc_object_with_vtable(&mut self, type_tag: u16, vtable: HashMap<u16, usize>) -> usize {
+    pub fn alloc_object_with_vtable(
+        &mut self,
+        type_tag: u16,
+        vtable: HashMap<u16, usize>,
+    ) -> usize {
         self.alloc(HeapData::Object {
             type_tag,
             fields: HashMap::new(),
@@ -179,7 +183,9 @@ impl Heap {
     /// 读取对象字段
     pub fn get_field(&self, handle: usize, field: u16) -> Value {
         match self.slots.get(handle).and_then(|s| s.data.as_ref()) {
-            Some(HeapData::Object { fields, .. }) => fields.get(&field).cloned().unwrap_or(Value::Null),
+            Some(HeapData::Object { fields, .. }) => {
+                fields.get(&field).cloned().unwrap_or(Value::Null)
+            }
             _ => Value::Null,
         }
     }
@@ -276,26 +282,53 @@ impl Heap {
         }
     }
 
+    /// 分配一个包装任意值的堆对象（P7.5 box 显式堆分配）
+    pub fn alloc_box_value(&mut self, value: Value) -> usize {
+        let mut fields = HashMap::new();
+        // 使用固定字段名 "value" 存储
+        fields.insert(field_hash("value"), value);
+        self.alloc(HeapData::Object {
+            type_tag: type_hash("Box"),
+            fields,
+            vtable: None,
+        })
+    }
+
+    /// 判断堆槽是否仍存活（P7.3 弱引用升级）
+    pub fn is_alive(&self, handle: usize) -> bool {
+        self.slots
+            .get(handle)
+            .map(|s| s.data.is_some())
+            .unwrap_or(false)
+    }
+
     /// 当前存活对象数量（诊断用）
     pub fn live_count(&self) -> usize {
         self.slots.iter().filter(|s| s.data.is_some()).count()
     }
 }
 
+/// 字段名 FNV 哈希（与 emit.rs 一致）
+fn field_hash(name: &str) -> u16 {
+    let mut h: u32 = 2166136261;
+    for b in name.bytes() {
+        h ^= b as u32;
+        h = h.wrapping_mul(16777619);
+    }
+    (h % 65535) as u16
+}
+
+/// 类型名 FNV 哈希（与 emit.rs 一致）
+fn type_hash(name: &str) -> u16 {
+    field_hash(name)
+}
+
 /// 取堆对象中一个代表性值（用于 drop 回调）
 fn last_heap_value(data: &HeapData) -> Value {
     match data {
-        HeapData::Object { fields, .. } => {
-            fields.values().next().cloned().unwrap_or(Value::Null)
-        }
-        HeapData::Array(elems) => {
-            elems.last().cloned().unwrap_or(Value::Null)
-        }
-        HeapData::List(elems) => {
-            elems.last().cloned().unwrap_or(Value::Null)
-        }
-        HeapData::Map(map) => {
-            map.values().next().cloned().unwrap_or(Value::Null)
-        }
+        HeapData::Object { fields, .. } => fields.values().next().cloned().unwrap_or(Value::Null),
+        HeapData::Array(elems) => elems.last().cloned().unwrap_or(Value::Null),
+        HeapData::List(elems) => elems.last().cloned().unwrap_or(Value::Null),
+        HeapData::Map(map) => map.values().next().cloned().unwrap_or(Value::Null),
     }
 }

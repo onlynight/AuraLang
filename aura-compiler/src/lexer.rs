@@ -69,6 +69,13 @@ const KEYWORDS: &[(&str, TokenKind)] = &[
     ("data", TokenKind::Data),
     ("await", TokenKind::Await),
     ("to", TokenKind::To),
+    // P7 内存管理关键字
+    ("box", TokenKind::Box),
+    ("weak", TokenKind::Weak),
+    ("malloc", TokenKind::Malloc),
+    ("free", TokenKind::Free),
+    ("retain", TokenKind::Retain),
+    ("release", TokenKind::Release),
     // 基本类型关键字
     ("Int", TokenKind::Ident),
     ("Long", TokenKind::Ident),

@@ -10,8 +10,8 @@
 //! - `ResumeCoroutine` 恢复指定协程，将栈顶值作为入参
 //! - 已终止的协程保留最后返回值供 `ResumeCoroutine` 读取一次
 
-use crate::vm::value::Value;
 use crate::vm::Frame;
+use crate::vm::value::Value;
 
 /// 协程生命周期状态
 #[derive(Debug, Clone, PartialEq)]
@@ -150,12 +150,15 @@ impl CoroutineScheduler {
 
     /// 获取协程的终止返回值（读取一次）
     pub fn take_done_value(&mut self, id: usize) -> Option<Value> {
-        self.coroutines.get_mut(id).and_then(|c| c.as_mut()).and_then(|co| {
-            if let CoroutineState::Done(v) = &co.state {
-                Some(v.clone())
-            } else {
-                None
-            }
-        })
+        self.coroutines
+            .get_mut(id)
+            .and_then(|c| c.as_mut())
+            .and_then(|co| {
+                if let CoroutineState::Done(v) = &co.state {
+                    Some(v.clone())
+                } else {
+                    None
+                }
+            })
     }
 }

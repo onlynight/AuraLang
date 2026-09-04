@@ -158,12 +158,16 @@ impl<'a> Reader<'a> {
 
     fn i64(&mut self) -> Result<i64, SerializeError> {
         let b = self.take(8)?;
-        Ok(i64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
+        Ok(i64::from_le_bytes([
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+        ]))
     }
 
     fn f64(&mut self) -> Result<f64, SerializeError> {
         let b = self.take(8)?;
-        Ok(f64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
+        Ok(f64::from_le_bytes([
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+        ]))
     }
 
     fn str(&mut self) -> Result<String, SerializeError> {

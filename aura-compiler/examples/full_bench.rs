@@ -4,8 +4,9 @@
 //!   VM + JIT: `cargo run --release --features jit -p aura-compiler --example full_bench`
 //!   AOT 需要: 设置 AURA_LLVM_HOME 并加 --features "llvm,jit"
 
-use std::time::Instant;
+#[cfg(feature = "llvm")]
 use std::path::Path;
+use std::time::Instant;
 
 use aura_compiler::codegen::compile_source;
 use aura_compiler::vm::{Vm, VmOptions};
@@ -118,17 +119,28 @@ fn aot_inprocess_bench(src: &str, iters: usize, expected: i64) -> Option<f64> {
 
     // 验证结果（返回值为 N * expected）
     let raw = out.status.code().unwrap_or(-1);
-    let code = if raw < 0 { raw as u32 as i64 } else { raw as i64 };
+    let code = if raw < 0 {
+        raw as u32 as i64
+    } else {
+        raw as i64
+    };
     let expected_total = expected * (iters as i64);
     if code != expected_total {
-        eprintln!("AOT inprocess 结果不一致: 期望 {} 实际 {}", expected_total, code);
+        eprintln!(
+            "AOT inprocess 结果不一致: 期望 {} 实际 {}",
+            expected_total, code
+        );
         return None;
     }
 
     // 纯执行时间 = 总时间 - 进程启动时间
     let exec_dur = total_dur - startup_time;
     if exec_dur <= 0.0 {
-        eprintln!("执行时间异常: total={:.4}ms, startup={:.4}ms", total_dur * 1000.0, startup_time * 1000.0);
+        eprintln!(
+            "执行时间异常: total={:.4}ms, startup={:.4}ms",
+            total_dur * 1000.0,
+            startup_time * 1000.0
+        );
         return None;
     }
 
@@ -141,8 +153,8 @@ fn aot_inprocess_bench(src: &str, iters: usize, expected: i64) -> Option<f64> {
 #[cfg(feature = "llvm")]
 fn build_aot_exe(src: &str, llvm_home: &str, bin: &Path, name: &str) -> Option<std::path::PathBuf> {
     use aura_compiler::codegen::aot::{AotCodeGenerator, AotOptions};
-    use std::process::Command;
     use std::path::Path;
+    use std::process::Command;
 
     let codegen = AotCodeGenerator::new(AotOptions::default());
     let mut lexer = aura_compiler::lexer::Lexer::new(src);
@@ -166,7 +178,13 @@ fn build_aot_exe(src: &str, llvm_home: &str, bin: &Path, name: &str) -> Option<s
     };
     std::fs::write(&ll, &ir).ok()?;
 
-    let llc = Path::new(llvm_home).join("bin").join(if cfg!(target_os = "windows") { "llc.exe" } else { "llc" });
+    let llc = Path::new(llvm_home)
+        .join("bin")
+        .join(if cfg!(target_os = "windows") {
+            "llc.exe"
+        } else {
+            "llc"
+        });
     let out = Command::new(&llc)
         .arg(&ll)
         .arg("-o")
@@ -175,7 +193,9 @@ fn build_aot_exe(src: &str, llvm_home: &str, bin: &Path, name: &str) -> Option<s
         .arg("-filetype=obj")
         .output()
         .ok()?;
-    if !out.status.success() { return None; }
+    if !out.status.success() {
+        return None;
+    }
 
     let mut linker = if cfg!(target_os = "windows") {
         let mut c = Command::new(Path::new(llvm_home).join("bin").join("lld-link.exe"));
@@ -193,7 +213,9 @@ fn build_aot_exe(src: &str, llvm_home: &str, bin: &Path, name: &str) -> Option<s
         Ok(o) => o,
         Err(_) => return None,
     };
-    if !out.status.success() { return None; }
+    if !out.status.success() {
+        return None;
+    }
 
     Some(exe)
 }
@@ -220,7 +242,10 @@ fn jit_bench(src: &str, iters: usize, expected: i64) -> f64 {
     let module = compile_source(src).unwrap();
     let mut vm = Vm::new(
         &module,
-        VmOptions { jit: true, ..Default::default() },
+        VmOptions {
+            jit: true,
+            ..Default::default()
+        },
     )
     .unwrap();
     // 预热：首次运行触发 JIT 编译
@@ -245,8 +270,8 @@ fn jit_bench(_src: &str, _iters: usize, _expected: i64) -> Option<f64> {
 #[cfg(feature = "llvm")]
 fn aot_bench(src: &str, iters: usize, expected: i64) -> Option<f64> {
     use aura_compiler::codegen::aot::{AotCodeGenerator, AotOptions};
-    use std::process::Command;
     use std::path::Path;
+    use std::process::Command;
 
     let llvm_home = match std::env::var("AURA_LLVM_HOME") {
         Ok(v) => v,
@@ -276,7 +301,11 @@ fn aot_bench(src: &str, iters: usize, expected: i64) -> Option<f64> {
     };
     std::fs::write(&ll, &ir).ok()?;
 
-    let llc = bin.join(if cfg!(target_os = "windows") { "llc.exe" } else { "llc" });
+    let llc = bin.join(if cfg!(target_os = "windows") {
+        "llc.exe"
+    } else {
+        "llc"
+    });
     let out = Command::new(&llc)
         .arg(&ll)
         .arg("-o")
@@ -285,7 +314,9 @@ fn aot_bench(src: &str, iters: usize, expected: i64) -> Option<f64> {
         .arg("-filetype=obj")
         .output()
         .ok()?;
-    if !out.status.success() { return None; }
+    if !out.status.success() {
+        return None;
+    }
 
     let mut linker = if cfg!(target_os = "windows") {
         let mut c = Command::new(bin.join("lld-link.exe"));
@@ -303,13 +334,19 @@ fn aot_bench(src: &str, iters: usize, expected: i64) -> Option<f64> {
         Ok(o) => o,
         Err(_) => return None,
     };
-    if !out.status.success() { return None; }
+    if !out.status.success() {
+        return None;
+    }
 
     let start = Instant::now();
     for _ in 0..iters {
         let out = Command::new(&exe).output().ok()?;
         let raw = out.status.code().unwrap_or(-1);
-        let code = if raw < 0 { raw as u32 as i64 } else { raw as i64 };
+        let code = if raw < 0 {
+            raw as u32 as i64
+        } else {
+            raw as i64
+        };
         assert_eq!(code, expected);
     }
     let dur = start.elapsed().as_secs_f64() / iters as f64;
@@ -322,26 +359,32 @@ fn aot_bench(_src: &str, _iters: usize, _expected: i64) -> Option<f64> {
     None
 }
 
-fn print_bench(
-    _name: &str,
-    vm: f64,
-    jit: Option<f64>,
-    aot: Option<f64>,
-    aot_inproc: Option<f64>,
-) {
+fn print_bench(_name: &str, vm: f64, jit: Option<f64>, aot: Option<f64>, aot_inproc: Option<f64>) {
     println!("  VM(字节码解释器):  {:.3} ms/op", vm * 1000.0);
     if let Some(j) = jit {
-        println!("  JIT(Cranelift):    {:.3} ms/op ({:.1}x vs VM)", j * 1000.0, vm / j);
+        println!(
+            "  JIT(Cranelift):    {:.3} ms/op ({:.1}x vs VM)",
+            j * 1000.0,
+            vm / j
+        );
     } else {
         println!("  JIT: 未启用 jit feature");
     }
     if let Some(a) = aot {
-        println!("  AOT(独立进程):    {:.3} ms/op ({:.1}x vs VM) [含进程启动开销]", a * 1000.0, vm / a);
+        println!(
+            "  AOT(独立进程):    {:.3} ms/op ({:.1}x vs VM) [含进程启动开销]",
+            a * 1000.0,
+            vm / a
+        );
     } else {
         println!("  AOT(独立进程):    LLVM 未安装");
     }
     if let Some(a) = aot_inproc {
-        println!("  AOT(进程内循环):  {:.3} ms/op ({:.1}x vs VM) [不含进程启动]", a * 1000.0, vm / a);
+        println!(
+            "  AOT(进程内循环):  {:.3} ms/op ({:.1}x vs VM) [不含进程启动]",
+            a * 1000.0,
+            vm / a
+        );
         if let Some(j) = jit {
             println!("  ─── JIT vs AOT(进程内): {:.2}x ───", j / a);
         }
@@ -361,9 +404,13 @@ fn main() {
     let vm_fib = vm_bench(FIB_SRC, 10, FIB_EXPECTED);
     let jit_fib = {
         #[cfg(feature = "jit")]
-        { Some(jit_bench(FIB_SRC, 10, FIB_EXPECTED)) }
+        {
+            Some(jit_bench(FIB_SRC, 10, FIB_EXPECTED))
+        }
         #[cfg(not(feature = "jit"))]
-        { None }
+        {
+            None
+        }
     };
     let aot_fib = aot_bench(FIB_SRC, 50, FIB_EXPECTED);
     let aot_fib_inproc = aot_inprocess_bench(FIB_SRC, 10, FIB_EXPECTED);
@@ -375,9 +422,13 @@ fn main() {
     let vm_sum = vm_bench(SUM_SRC, 10, SUM_EXPECTED);
     let jit_sum = {
         #[cfg(feature = "jit")]
-        { Some(jit_bench(SUM_SRC, 10, SUM_EXPECTED)) }
+        {
+            Some(jit_bench(SUM_SRC, 10, SUM_EXPECTED))
+        }
         #[cfg(not(feature = "jit"))]
-        { None }
+        {
+            None
+        }
     };
     let aot_sum = aot_bench(SUM_SRC, 50, SUM_EXPECTED);
     // sum 值太大，用 1 次迭代避免 i32 溢出

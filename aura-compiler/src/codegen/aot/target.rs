@@ -126,12 +126,7 @@ pub struct TargetTriple {
 
 impl TargetTriple {
     /// 构造三元组
-    pub fn new(
-        arch: Architecture,
-        vendor: Vendor,
-        os: OperatingSystem,
-        abi: Abi,
-    ) -> Self {
+    pub fn new(arch: Architecture, vendor: Vendor, os: OperatingSystem, abi: Abi) -> Self {
         Self {
             arch,
             vendor,
@@ -144,7 +139,12 @@ impl TargetTriple {
     pub fn to_string(&self) -> String {
         let abi_str = self.abi.as_str();
         if abi_str.is_empty() {
-            format!("{}-{}-{}", self.arch.as_str(), self.vendor.as_str(), self.os.as_str())
+            format!(
+                "{}-{}-{}",
+                self.arch.as_str(),
+                self.vendor.as_str(),
+                self.os.as_str()
+            )
         } else {
             format!(
                 "{}-{}-{}-{}",
@@ -208,7 +208,12 @@ impl TargetTriple {
         } else {
             (Vendor::Unknown, OperatingSystem::Linux, Abi::Gnu)
         };
-        Self { arch, vendor, os, abi }
+        Self {
+            arch,
+            vendor,
+            os,
+            abi,
+        }
     }
 
     /// Windows x86_64 MSVC

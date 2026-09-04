@@ -36,7 +36,9 @@ fn main() {
     } else if cfg!(feature = "llvm") {
         println!("cargo:warning=Aura: llvm feature 已启用但未检测到 LLVM 安装路径");
         println!("cargo:warning=Aura: 请设置 AURA_LLVM_HOME 或 LLVM_CONFIG 环境变量");
-        println!("cargo:warning=Aura: 例如 AURA_LLVM_HOME=D:/DevTools/LLVM/clang+llvm-23.1.0-x86_64-pc-windows-msvc");
+        println!(
+            "cargo:warning=Aura: 例如 AURA_LLVM_HOME=D:/DevTools/LLVM/clang+llvm-23.1.0-x86_64-pc-windows-msvc"
+        );
     }
 
     // 常规构建指令：为不同目标输出库搜索路径（llvm-sys 也会做这些，这里仅提示）
@@ -72,10 +74,7 @@ fn detect_llvm_home() -> Option<PathBuf> {
 
     // 3. 常见系统路径（Windows）
     if cfg!(target_os = "windows") {
-        let candidates = [
-            r"C:\Program Files\LLVM",
-            r"C:\Program Files (x86)\LLVM",
-        ];
+        let candidates = [r"C:\Program Files\LLVM", r"C:\Program Files (x86)\LLVM"];
         for c in &candidates {
             if Path::new(c).exists() {
                 return Some(PathBuf::from(c));
@@ -91,10 +90,8 @@ fn detect_llvm_home() -> Option<PathBuf> {
                     let name_str = name.to_string_lossy();
                     if name_str.starts_with("clang+llvm-") {
                         if let Some(rest) = name_str.strip_prefix("clang+llvm-") {
-                            if let Some(major) = rest
-                                .split('.')
-                                .next()
-                                .and_then(|s| s.parse::<u32>().ok())
+                            if let Some(major) =
+                                rest.split('.').next().and_then(|s| s.parse::<u32>().ok())
                             {
                                 versions.push((major, entry.path()));
                             }

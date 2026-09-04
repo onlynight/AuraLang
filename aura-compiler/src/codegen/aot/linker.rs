@@ -15,9 +15,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use super::AotOptions;
 use super::error::AotError;
 use super::target::TargetTriple;
-use super::AotOptions;
 
 /// 调用外部 LLVM 工具的错误
 #[derive(Debug)]
@@ -49,7 +49,11 @@ fn find_tool<'a>(name: &str, options: &'a AotOptions) -> Option<PathBuf> {
         let path = home.join("bin").join(format!(
             "{}{}",
             name,
-            if cfg!(target_os = "windows") { ".exe" } else { "" }
+            if cfg!(target_os = "windows") {
+                ".exe"
+            } else {
+                ""
+            }
         ));
         if path.exists() {
             return Some(path);
@@ -58,13 +62,15 @@ fn find_tool<'a>(name: &str, options: &'a AotOptions) -> Option<PathBuf> {
 
     // 2. 环境变量
     if let Ok(home) = std::env::var("AURA_LLVM_HOME") {
-        let path = PathBuf::from(home)
-            .join("bin")
-            .join(format!(
-                "{}{}",
-                name,
-                if cfg!(target_os = "windows") { ".exe" } else { "" }
-            ));
+        let path = PathBuf::from(home).join("bin").join(format!(
+            "{}{}",
+            name,
+            if cfg!(target_os = "windows") {
+                ".exe"
+            } else {
+                ""
+            }
+        ));
         if path.exists() {
             return Some(path);
         }
@@ -97,10 +103,7 @@ fn find_tool<'a>(name: &str, options: &'a AotOptions) -> Option<PathBuf> {
 }
 
 /// 构建通用的 LLVM 工具命令
-fn build_command(
-    tool: &str,
-    options: &AotOptions,
-) -> Result<Command, AotError> {
+fn build_command(tool: &str, options: &AotOptions) -> Result<Command, AotError> {
     let tool_path = find_tool(tool, options).ok_or_else(|| {
         AotError::ToolError(format!(
             "找不到 LLVM 工具 '{}'，请设置 AURA_LLVM_HOME 或将 LLVM bin 加入 PATH",
@@ -169,7 +172,8 @@ pub fn link_to_executable(
             // 回退 lld-link（不提供 __chkstk，仅适用于小栈帧程序）
             let tool_path = find_tool("lld-link", options).ok_or_else(|| {
                 AotError::ToolError(
-                    "找不到 clang 或 lld-link，请设置 AURA_LLVM_HOME 或将 LLVM bin 加入 PATH".to_string(),
+                    "找不到 clang 或 lld-link，请设置 AURA_LLVM_HOME 或将 LLVM bin 加入 PATH"
+                        .to_string(),
                 )
             })?;
             let mut cmd = Command::new(tool_path);
@@ -195,9 +199,9 @@ pub fn link_to_executable(
 
 /// 执行命令并报告结果
 fn run_and_report(cmd: &mut Command, tool_name: &str) -> Result<(), AotError> {
-    let output = cmd.output().map_err(|e| {
-        AotError::ToolError(format!("无法启动 {}: {}", tool_name, e))
-    })?;
+    let output = cmd
+        .output()
+        .map_err(|e| AotError::ToolError(format!("无法启动 {}: {}", tool_name, e)))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();

@@ -15,18 +15,6 @@ const FIB_SRC: &str = r#"
     fun main(): Int { return fib(25) }
 "#;
 
-const SUM_SRC: &str = r#"
-    fun main(): Int {
-        var s = 0
-        var i = 0
-        while (i < 60000) {
-            s = s + i
-            i = i + 1
-        }
-        return s
-    }
-"#;
-
 fn vm_bench(src: &str, iters: usize, expected: i64) -> f64 {
     let module = compile_source(src).unwrap();
     let mut vm = Vm::new(&module, VmOptions::default()).unwrap();

@@ -112,13 +112,15 @@ fn collect_call_arities(
     }
 }
 
-fn collect_expr(e: &HirExpr, generic: &HashMap<String, usize>, out: &mut HashMap<String, HashSet<usize>>) {
+fn collect_expr(
+    e: &HirExpr,
+    generic: &HashMap<String, usize>,
+    out: &mut HashMap<String, HashSet<usize>>,
+) {
     match e {
         HirExpr::Call { callee, args } => {
             if generic.contains_key(callee) {
-                out.entry(callee.clone())
-                    .or_default()
-                    .insert(args.len());
+                out.entry(callee.clone()).or_default().insert(args.len());
             }
             for a in args {
                 collect_expr(a, generic, out);
