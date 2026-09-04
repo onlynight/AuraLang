@@ -131,6 +131,7 @@ pub enum UnOp {
     Decrement,
     AddrOf,
     Dereference,
+    NotNull,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -172,6 +173,11 @@ pub enum Expr {
     Call {
         callee: Box<Expr>,
         args: Vec<Expr>,
+        span: Span,
+    },
+    NamedArg {
+        name: String,
+        value: Box<Expr>,
         span: Span,
     },
     MemberAccess {
@@ -535,6 +541,8 @@ pub struct SelectBranch {
 pub struct Program {
     pub imports: Vec<ImportDecl>,
     pub declarations: Vec<Decl>,
+    /// 顶层语句（脚本模式：无 main 时，顶层语句会被自动包装为隐式 main）
+    pub top_level_statements: Vec<Stmt>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -573,6 +581,7 @@ impl Expr {
             | Expr::Binary { span: s, .. }
             | Expr::Unary { span: s, .. }
             | Expr::Call { span: s, .. }
+            | Expr::NamedArg { span: s, .. }
             | Expr::MemberAccess { span: s, .. }
             | Expr::SafeAccess { span: s, .. }
             | Expr::Index { span: s, .. }

@@ -36,6 +36,7 @@ impl Parser {
     pub fn parse_program(&mut self) -> Program {
         let mut imports = Vec::new();
         let mut declarations = Vec::new();
+        let mut top_level_statements = Vec::new();
 
         while !self.is_at_end() {
             match self.current().kind {
@@ -46,13 +47,13 @@ impl Parser {
                 _ => {
                     if let Ok(decl) = self.parse_declaration() {
                         declarations.push(decl);
-                    } else {
+                    } else if self.current().kind == TokenKind::Error {
                         // 消费错误 Token，继续解析
-                        if self.current().kind == TokenKind::Error {
-                            self.advance();
-                        } else {
-                            break;
-                        }
+                        self.advance();
+                    } else {
+                        // 顶层语句（脚本模式）：表达式语句、val/var/lateinit 声明等
+                        let stmt = self.parse_statement();
+                        top_level_statements.push(stmt);
                     }
                 }
             }
@@ -61,6 +62,7 @@ impl Parser {
         Program {
             imports,
             declarations,
+            top_level_statements,
         }
     }
 
@@ -375,7 +377,8 @@ impl Parser {
 
     fn parse_param(&mut self) -> Param {
         let start = self.current().span;
-        let is_vararg = self.check(TokenKind::TripleDotOp);
+        let is_vararg = self.check(TokenKind::TripleDotOp)
+            || (self.current().kind == TokenKind::Ident && self.current().literal == "vararg");
         if is_vararg {
             self.advance();
         }
@@ -1321,6 +1324,7 @@ impl Parser {
                 | TokenKind::For
                 | TokenKind::While
                 | TokenKind::Do
+                | TokenKind::Try
         )
     }
 
@@ -1605,6 +1609,9 @@ impl Parser {
         if self.check(TokenKind::Do) {
             return self.parse_do_while_expression(start);
         }
+        if self.check(TokenKind::Try) {
+            return self.parse_try_expression(start);
+        }
         if self.check(TokenKind::Throw) {
             self.advance();
             let value = self.parse_expression(0);
@@ -1675,6 +1682,13 @@ impl Parser {
             return expr;
         }
 
+        // 标签 + 循环：outer@ for / outer@ while / outer@ do
+        if self.current().kind == TokenKind::Ident && self.peek(1) == TokenKind::At {
+            self.advance(); // 标签名
+            self.advance(); // @
+            return self.parse_expression(0);
+        }
+
         // 标识符 / 关键字作为表达式
         let tok = self.advance();
         let mut expr = Expr::Ident(tok.literal.clone(), tok.span);
@@ -1686,10 +1700,32 @@ impl Parser {
                     self.advance();
                     let mut args = Vec::new();
                     if !self.check(TokenKind::RParen) {
-                        args.push(self.parse_expression(0));
+                        // 检查是否是命名参数：name = expr
+                        if self.current().kind == TokenKind::Ident && self.peek(1) == TokenKind::Assign {
+                            let name = self.advance().literal.clone();
+                            self.advance(); // =
+                            args.push(Expr::NamedArg {
+                                name,
+                                value: Box::new(self.parse_expression(0)),
+                                span: self.current().span,
+                            });
+                        } else {
+                            args.push(self.parse_expression(0));
+                        }
                         while self.check(TokenKind::Comma) {
                             self.advance();
-                            args.push(self.parse_expression(0));
+                            // 检查是否是命名参数：name = expr
+                            if self.current().kind == TokenKind::Ident && self.peek(1) == TokenKind::Assign {
+                                let name = self.advance().literal.clone();
+                                self.advance(); // =
+                                args.push(Expr::NamedArg {
+                                    name,
+                                    value: Box::new(self.parse_expression(0)),
+                                    span: self.current().span,
+                                });
+                            } else {
+                                args.push(self.parse_expression(0));
+                            }
                         }
                     }
                     self.expect(TokenKind::RParen);
@@ -1734,11 +1770,26 @@ impl Parser {
                 }
                 TokenKind::LBracket => {
                     self.advance();
-                    let index = self.parse_expression(0);
-                    self.expect(TokenKind::RBracket);
-                    expr = Expr::Index {
-                        container: Box::new(expr),
-                        index: Box::new(index),
+                    // 空索引 `Int[]` 作为数组构造器类型（后续可接调用）
+                    if self.check(TokenKind::RBracket) {
+                        self.advance();
+                        // 不创建 Index 节点，保留原表达式（如 Int[]）
+                    } else {
+                        let index = self.parse_expression(0);
+                        self.expect(TokenKind::RBracket);
+                        expr = Expr::Index {
+                            container: Box::new(expr),
+                            index: Box::new(index),
+                            span: Span::merge(&start, &self.current().span),
+                        };
+                    }
+                }
+                TokenKind::DoubleBang => {
+                    // 非空断言：a!!
+                    self.advance();
+                    expr = Expr::Unary {
+                        op: UnOp::NotNull,
+                        operand: Box::new(expr),
                         span: Span::merge(&start, &self.current().span),
                     };
                 }
@@ -1753,7 +1804,15 @@ impl Parser {
         // 启发式：如果当前是标识符或 val/var，且后面跟冒号或箭头，则可能是 lambda
         if self.current().kind == TokenKind::Ident {
             let peek1 = self.peek(1);
-            return peek1 == TokenKind::Colon || peek1 == TokenKind::Arrow;
+            // 单参数 lambda: `x -> expr` 或 `x: Type -> expr`
+            if peek1 == TokenKind::Colon || peek1 == TokenKind::Arrow {
+                return true;
+            }
+            // 括号参数 lambda: `(x) -> expr` 或 `(x: Type) -> expr`
+            if peek1 == TokenKind::RParen {
+                let peek2 = self.peek(2);
+                return peek2 == TokenKind::Arrow;
+            }
         }
         false
     }
@@ -1765,6 +1824,10 @@ impl Parser {
         while self.check(TokenKind::Comma) {
             self.advance();
             params.push(self.parse_param());
+        }
+        // 处理括号参数 lambda: `(x) -> expr`
+        if self.check(TokenKind::RParen) {
+            self.advance();
         }
         self.expect(TokenKind::Arrow);
         let body = self.parse_expression(0);
@@ -1861,6 +1924,52 @@ impl Parser {
         }
     }
 
+    /// try { ... } catch (e: Type) { ... } finally { ... }
+    fn parse_try_expression(&mut self, start: Span) -> Expr {
+        self.advance(); // try
+        let block = self.parse_block();
+
+        let mut catches = Vec::new();
+        while self.check(TokenKind::Catch) {
+            self.advance(); // catch
+            self.expect(TokenKind::LParen);
+            let variable = self.advance().literal.clone();
+            let type_name = if self.check(TokenKind::Colon) {
+                self.advance();
+                let ty = self.parse_type();
+                match ty {
+                    Type::Named { name, .. } => name,
+                    Type::Generic { name, .. } => name,
+                    _ => "Any".to_string(),
+                }
+            } else {
+                "Any".to_string()
+            };
+            self.expect(TokenKind::RParen);
+            let body = self.parse_block();
+            catches.push(CatchClause {
+                variable,
+                type_name,
+                body: Box::new(body),
+                span: Span::merge(&start, &self.current().span),
+            });
+        }
+
+        let finally = if self.check(TokenKind::Finally) {
+            self.advance(); // finally
+            Some(Box::new(self.parse_block()))
+        } else {
+            None
+        };
+
+        Expr::Try {
+            block: Box::new(block),
+            catches,
+            finally,
+            span: Span::merge(&start, &self.current().span),
+        }
+    }
+
     /// when (subject) { pattern -> body ... }
     fn parse_when_expression(&mut self, start: Span) -> Expr {
         self.advance(); // when
@@ -1911,6 +2020,7 @@ impl Parser {
 
             // 守卫：is X && cond -> ...  或 pattern && cond -> ...
             let guard = if self.check(TokenKind::AndAnd) || self.check(TokenKind::OrOr) {
+                self.advance(); // 消费 && 或 ||
                 let guard_expr = self.parse_expression(0);
                 Some(Box::new(guard_expr))
             } else {

@@ -723,6 +723,10 @@ impl Checker {
             Expr::Binary { op, lhs, rhs, span } => self.check_binary(*op, lhs, rhs, *span),
             Expr::Unary { op, operand, span } => self.check_unary(*op, operand, *span),
             Expr::Call { callee, args, span } => self.check_call(callee, args, *span),
+            Expr::NamedArg { value, span, .. } => {
+                let _ = self.check_expr(value);
+                Ty::Any
+            }
             Expr::MemberAccess { object, name, span } => self.check_member(object, name, *span),
             Expr::SafeAccess { object, name, span } => {
                 let obj_ty = self.check_expr(object);
@@ -1193,6 +1197,13 @@ impl Checker {
                 Ty::Pointer(inner) => *inner,
                 _ => {
                     self.report(span, format!("cannot dereference '{}'", ot.name()));
+                    Ty::Error
+                }
+            },
+            UnOp::NotNull => match ot {
+                Ty::Nullable(inner) => *inner,
+                _ => {
+                    self.report(span, format!("'!!' requires nullable operand, got '{}'", ot.name()));
                     Ty::Error
                 }
             },

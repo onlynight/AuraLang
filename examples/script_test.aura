@@ -1,0 +1,4 @@
+// 脚本模式测试：无 main 函数，只有顶层语句
+println("Hello from script mode!")
+val x = 42
+println("x = " + x.toString())

@@ -46,7 +46,18 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
         });
     }
 
-    let entry = fn_index.get("main").copied().unwrap_or(0);
+    // Entry 逻辑（脚本模式支持）：
+    // 1. 有 main 函数 → 使用其索引（兼容模式）
+    // 2. 无 main 但有函数 → 使用第一个函数索引（兼容行为）
+    // 3. 无任何函数 → 报错
+    let entry = if let Some(idx) = fn_index.get("main") {
+        *idx  // 兼容模式：有 main 函数
+    } else if !mir_funcs.is_empty() {
+        0  // 兼容行为：无 main 但有函数，执行第一个
+    } else {
+        // 无任何函数（无 main 且无顶层语句），由 VM 报错
+        0
+    };
 
     // P8.1: 合并 FFI 常量到常量池
     let mut consts = ctx.consts.clone();

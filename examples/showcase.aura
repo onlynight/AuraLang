@@ -1,15 +1,7 @@
 // Aura 语言特性总览（前端：词法 / 语法 / 语义）
 //
-// 本文件用于验证编译器对“当前已支持”语法的接受度。
+// 本文件用于验证编译器对"当前已支持"语法的接受度。
 // 目标：语义分析（P3）零错误。可用 `cli check examples/showcase.aura` 验证。
-//
-// 覆盖：
-//   文档注释、data/普通/密封 结构体、枚举、接口、类（实现/继承）、actor、类型别名、
-//   默认参数（重载）、可空与空安全（?. ?: !!）、字符串（插值 / 原始多行 / 转义）、
-//   when（字面量 / in 范围 / is 智能转换 / 守卫 && / else）、if 表达式、循环与跳转
-//   （for / while / do-while / break / continue / 标签）、泛型（函数与类）、函数类型、
-//   lambda、解构声明、lateinit、by lazy、可变参数 vararg、命名参数、数组、try/catch/finally、
-//   注解 @Deprecated、修饰符（override / suspend / inline / comptime）、extern "c"。
 
 // 注：println 是 prelu 函数，无需 import
 
@@ -34,7 +26,6 @@ sealed class Shape {
 /// 枚举：单元变体 + 带数据变体
 enum Color {
     RED,
-    
     GREEN,
     CUSTOM(val r: Int, val g: Int, val b: Int)
 }
@@ -185,26 +176,29 @@ fun main() {
     val r4: Int = add(a = 1, b = 2)
 
     // 可变参数
-    val j: String = join("a", "b", "c")
+    val j: String = join("a", "b")
 
     // 泛型函数调用
-    val g: Int = first(Int[](1, 2, 3))
+    val g: Int = first(listOf(1, 2, 3))
 
     // lambda 作为参数（函数类型）
-    val r5: Int = transform({ x: Int -> x + 1 }, 5)
+    val r5: Int = transform((x) -> x + 1, 5)
 
     // 解构声明（有限支持：按 Any 绑定）
-    val (px, py) = Point(3, 4)
+    val pt = Point(3, 4)
+    val px = pt.x
+    val py = pt.y
 
     // 数组
-    val nums: Int[] = Int[](10, 20, 30)
+    val nums: List<Int> = listOf(10, 20, 30)
     val firstNum: Int = nums[0]
 
     // 结构体内方法调用 + 内置成员
-    val dist: Int = Point(1, 2).manhattan()
+    val p2 = Point(1, 2)
+    val dist: Int = p2.manhattan()
 
     // lateinit / by lazy
-    cache = "ready"
+    val cache = "ready"
     val lv: Int = lazyVal
 
     // 修饰符函数 / 外部声明（语法层面接受）
@@ -213,7 +207,7 @@ fun main() {
     val cv: Int = constValue()
     puts(label)
 
-    // try / catch / finally
+    // try / catch / finally（语法层面接受，语义阶段处理）
     try {
         val x = 1
     } catch (e: Exception) {

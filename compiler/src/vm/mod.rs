@@ -69,7 +69,7 @@ pub enum VmError {
     /// 运行时错误（如调用不存在的函数、栈下溢）
     Runtime(String),
     /// 入口函数缺失
-    NoEntry,
+    NoEntry(String),
 }
 
 impl std::fmt::Display for VmError {
@@ -77,7 +77,7 @@ impl std::fmt::Display for VmError {
         match self {
             VmError::Load(m) => write!(f, "load error: {}", m),
             VmError::Runtime(m) => write!(f, "runtime error: {}", m),
-            VmError::NoEntry => write!(f, "no entry function (main)"),
+            VmError::NoEntry(m) => write!(f, "no entry function: {}", m),
         }
     }
 }
@@ -524,7 +524,12 @@ impl Vm {
     pub fn run(&mut self) -> Result<Value, VmError> {
         let entry = self.module.entry as usize;
         if entry >= self.module.funcs.len() {
-            return Err(VmError::NoEntry);
+            return Err(VmError::NoEntry(format!(
+                "no entry function (module has {} functions, entry={}, max={})",
+                self.module.funcs.len(),
+                entry,
+                self.module.funcs.len().saturating_sub(1)
+            )));
         }
 
         // P10: 设置并发运行时 VM 引用（供原生函数访问 Actor/Channel 状态）

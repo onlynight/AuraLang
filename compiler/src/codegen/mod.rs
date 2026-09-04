@@ -31,7 +31,7 @@ pub mod aot;
 
 pub use disasm::disassemble;
 pub use emit::{emit_module, find_const};
-pub use hir::{HirProgram, desugar_program};
+pub use hir::{HirProgram, desugar_program, synthesize_main_if_missing};
 pub use mir::{MirFunction, lower_program};
 pub use mono::mono_hir;
 pub use opcode::{BytecodeFunction, BytecodeModule, BytecodeNative, Const, OpCode};
@@ -93,7 +93,10 @@ pub fn compile(program: &Program, opts: &CodeGenOptions) -> BytecodeModule {
     // 1. AST → HIR（去语法糖）
     let mut hir = desugar_program(program);
 
-    // 2. 泛型单态化（HIR）
+    // 2. 脚本模式：合成隐式 main（若无 main 但有顶层语句）
+    let _synthesized = synthesize_main_if_missing(&mut hir);
+
+    // 3. 泛型单态化（HIR）
     mono_hir(&mut hir);
 
     // 3. HIR 优化：内联展开 + 常量折叠

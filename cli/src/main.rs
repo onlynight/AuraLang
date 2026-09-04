@@ -42,6 +42,8 @@ fn main() {
         "fmt" => cmd_fmt(rest),
         "leak-check" => cmd_leak_check(rest),
         "doc" => cmd_doc(rest),
+        "eval" => cmd_eval(rest),
+        "repl" => cmd_repl(rest),
         "--help" | "-h" | "help" => print_usage(),
         other => {
             eprintln!("未知子命令: {}", other);
@@ -69,7 +71,9 @@ fn print_usage() {
   aura ast <file.aura>                          输出 AST\n\
   aura fmt <file.aura>                          代码格式化（预留）\n\
   aura leak-check <file.aura>                    P7: 内存泄漏检测（ARC 分析）\n\
-  aura doc [--output <dir>]                       生成标准库 API 文档（Markdown + HTML）\n"
+  aura doc [--output <dir>]                       生成标准库 API 文档（Markdown + HTML）\n\
+  aura eval [--expr <code>]                      执行代码片段（类 node -e）\n\
+  aura repl                                     交互式 REPL（类 python -i）\n"
     );
 }
 
@@ -661,5 +665,173 @@ fn cmd_doc(args: &[String]) {
         eprintln!("警告: 无法写入 HTML 文档 {}: {}", html_path.display(), e);
     } else {
         println!("  ✓ HTML 文档: {}", html_path.display());
+    }
+}
+
+/// `aura eval` — 执行代码片段（类 node -e / python -c）
+///
+/// 用法：
+///   aura eval --expr "println('hello')"
+///   echo "println('hello')" | aura eval
+fn cmd_eval(args: &[String]) {
+    use std::io::{self, Read};
+
+    let code = extract_opt(args, "--expr")
+        .or_else(|| first_positional(args, "--expr").map(|s| s.clone()));
+
+    let code = match code {
+        Some(c) => c,
+        None => {
+            // 从 stdin 读取
+            let mut input = String::new();
+            match io::stdin().read_to_string(&mut input) {
+                Ok(_) => input,
+                Err(e) => {
+                    eprintln!("错误: 无法读取 stdin: {}", e);
+                    exit(1);
+                }
+            }
+        }
+    };
+
+    if code.trim().is_empty() {
+        eprintln!("错误: 代码为空");
+        exit(1);
+    }
+
+    let module = match compile_source(&code) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("编译失败:\n{}", e);
+            exit(1);
+        }
+    };
+
+    let opts = VmOptions::default();
+    let mut vm = match Vm::new(&module, opts) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("VM 初始化失败: {}", e);
+            exit(1);
+        }
+    };
+
+    match vm.run() {
+        Ok(result) => {
+            if !matches!(result, compiler::vm::Value::Null) {
+                println!("{}", result);
+            }
+        }
+        Err(e) => {
+            eprintln!("运行时错误: {}", e);
+            exit(1);
+        }
+    }
+}
+
+/// `aura repl` — 交互式 REPL（类 python -i / node -i）
+///
+/// 多行输入支持：当行末为 `{`、`,`、`(` 等时自动续行。
+fn cmd_repl(_args: &[String]) {
+    use std::io::{self, BufRead, Write};
+
+    let stdin = io::stdin();
+    let mut lines = stdin.lock().lines();
+
+    let mut buffer = String::new();
+    let mut depth: i32 = 0;
+
+    println!("Aura REPL — 输入代码按回车执行，多行以 {{ 或 ( 续行。退出：exit 或 Ctrl+D");
+
+    loop {
+        let prompt = if buffer.is_empty() { ">>> " } else { "... " };
+        eprint!("{}", prompt);
+        io::stdout().flush().ok();
+
+        let line = match lines.next() {
+            Some(Ok(l)) => l,
+            Some(Err(e)) => {
+                eprintln!("读取输入失败: {}", e);
+                break;
+            }
+            None => {
+                // EOF (Ctrl+D)
+                println!("\n再见!");
+                break;
+            }
+        };
+
+        let trimmed = line.trim();
+
+        // 退出命令
+        if trimmed == "exit" || trimmed == "quit" {
+            println!("再见!");
+            break;
+        }
+
+        // 空白输入
+        if trimmed.is_empty() {
+            if !buffer.is_empty() {
+                // 提交之前累积的代码
+                let code = std::mem::take(&mut buffer);
+                depth = 0;
+                repl_eval(&code);
+            }
+            continue;
+        }
+
+        // 跟踪括号深度
+        for ch in trimmed.chars() {
+            match ch {
+                '{' | '(' | '[' => depth += 1,
+                '}' | ')' | ']' => depth -= 1,
+                _ => {}
+            }
+        }
+
+        // 续行（括号未闭合或行尾为续行符）
+        if depth > 0 || trimmed.ends_with(',') || trimmed.ends_with('.') {
+            buffer.push_str(&line);
+            buffer.push('\n');
+            continue;
+        }
+
+        // 单行：直接执行
+        buffer.push_str(&line);
+        let code = std::mem::take(&mut buffer);
+        depth = 0;
+        repl_eval(&code);
+    }
+}
+
+/// REPL 辅助：编译并执行一段代码，打印结果
+fn repl_eval(code: &str) {
+    let code = code.trim();
+    if code.is_empty() {
+        return;
+    }
+
+    match compile_source(code) {
+        Ok(module) => {
+            let opts = VmOptions::default();
+            match Vm::new(&module, opts) {
+                Ok(mut vm) => match vm.run() {
+                    Ok(result) => {
+                        if !matches!(result, compiler::vm::Value::Null) {
+                            println!("{}", result);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("运行时错误: {}", e);
+                    }
+                },
+                Err(e) => {
+                    eprintln!("VM 初始化失败: {}", e);
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("编译失败:\n{}", e);
+        }
     }
 }

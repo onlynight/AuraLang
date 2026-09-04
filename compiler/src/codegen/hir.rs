@@ -270,6 +270,8 @@ pub struct HirProgram {
     pub natives: Vec<HirFunction>,
     /// FFI 常量（P8.1）：extern 块中的 `val` 声明
     pub constants: Vec<(String, Const)>,
+    /// 顶层语句（脚本模式：无 main 时，顶层语句会被包装为隐式 main）
+    pub top_level_statements: Option<HirBlock>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -282,6 +284,13 @@ pub fn desugar_program(program: &Program) -> HirProgram {
     let mut structs = Vec::new();
     let mut natives = Vec::new();
     let mut constants = Vec::new();
+    let mut top_level_stmts = Vec::new();
+
+    // 收集顶层语句（脚本模式）
+    for stmt in &program.top_level_statements {
+        let hir_stmt = desugar_stmt(stmt);
+        top_level_stmts.push(hir_stmt);
+    }
 
     for decl in &program.declarations {
         match decl {
@@ -748,6 +757,11 @@ pub fn desugar_program(program: &Program) -> HirProgram {
         structs,
         natives,
         constants,
+        top_level_statements: if top_level_stmts.is_empty() {
+            None
+        } else {
+            Some(HirBlock { stmts: top_level_stmts })
+        },
     }
 }
 
@@ -1108,6 +1122,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                 args: args.iter().map(desugar_expr).collect(),
             }
         }
+        Expr::NamedArg { value, .. } => desugar_expr(value),
         Expr::MemberAccess { object, name, .. } => HirExpr::Member {
             object: Box::new(desugar_expr(object)),
             name: name.clone(),
@@ -1260,6 +1275,46 @@ fn desugar_when(subject: &Option<Box<Expr>>, arms: &[WhenArm]) -> HirExpr {
         });
     }
     result.unwrap_or(HirExpr::Lit(Literal::Null))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 脚本模式：隐式 main 合成
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 若程序没有 main 函数，合成一个
+/// 将顶层语句包装为隐式 main 函数体
+///
+/// 返回：true 表示合成了隐式 main，false 表示已有 main 或无顶层语句
+pub fn synthesize_main_if_missing(hir: &mut HirProgram) -> bool {
+    // 1. 检查是否已有 main 函数
+    if hir.functions.iter().any(|f| f.name == "main") {
+        return false; // 已有 main，不处理（兼容模式）
+    }
+
+    // 2. 获取顶层语句
+    let body = hir.top_level_statements.take();
+
+    match body {
+        Some(block) if !block.stmts.is_empty() => {
+            // 3. 合成 main 函数
+            let main_func = HirFunction {
+                name: "main".into(),
+                params: vec![],
+                ret: Some(HirType::Named("Unit".into())),
+                body: block,
+                is_native: false,
+                type_params: vec![],
+            };
+
+            // 4. 插入到 functions 开头（确保 entry=0 指向 main）
+            hir.functions.insert(0, main_func);
+            true
+        }
+        _ => {
+            // 无顶层语句，无需合成
+            false
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
