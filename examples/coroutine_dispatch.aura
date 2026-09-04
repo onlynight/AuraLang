@@ -1,0 +1,54 @@
+// ════════════════════════════════════════════════════════════
+// 协程调度演示 — Coroutine Spawn / Await / Suspend
+// ════════════════════════════════════════════════════════════
+
+fun main() {
+    // ── 1. 基础协程创建 ──
+    val co1 = aura.concurrent.spawn(42)
+    println("协程1: " + co1.toString())
+
+    // ── 2. 多协程并发 ──
+    val a = aura.concurrent.spawn(10)
+    val b = aura.concurrent.spawn(20)
+    val c = aura.concurrent.spawn(30)
+    val sum = a + b + c
+    println("多协程求和: " + sum.toString())
+
+    // ── 3. 协程累加器 ──
+    var total = 0
+    total = total + aura.concurrent.spawn(1)
+    total = total + aura.concurrent.spawn(2)
+    total = total + aura.concurrent.spawn(3)
+    total = total + aura.concurrent.spawn(4)
+    total = total + aura.concurrent.spawn(5)
+    println("协程累加器: " + total.toString())
+
+    // ── 4. suspend 函数 ──
+    val computed = compute(100)
+    println("suspend 函数: " + computed.toString())
+
+    // ── 5. async 函数 ──
+    val status = fetchData("http://example.com")
+    println("async 函数状态码: " + status.toString())
+
+    // ── 6. 嵌套协程 ──
+    val nested = multiSpawn()
+    println("嵌套协程: " + nested.toString())
+}
+
+suspend fun compute(n: Int): Int {
+    val result = await n
+    return result
+}
+
+async fun fetchData(url: String): Int {
+    return 200
+}
+
+fun multiSpawn(): Int {
+    var s = 0
+    for (i in 0..5) {
+        s = s + aura.concurrent.spawn(i)
+    }
+    return s
+}

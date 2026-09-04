@@ -76,7 +76,28 @@ fn find_tool<'a>(name: &str, options: &'a AotOptions) -> Option<PathBuf> {
         }
     }
 
-    // 3. PATH
+    // 3. 项目默认 LLVM 路径（按优先级排列）
+    const DEFAULT_LLVM_PATHS: &[&str] = &[
+        r"D:\DevTools\LLVM\clang+llvm-23.1.0-x86_64-pc-windows-msvc",
+        r"C:\LLVM",
+        r"C:\Program Files\LLVM",
+    ];
+    for home in DEFAULT_LLVM_PATHS {
+        let path = PathBuf::from(home).join("bin").join(format!(
+            "{}{}",
+            name,
+            if cfg!(target_os = "windows") {
+                ".exe"
+            } else {
+                ""
+            }
+        ));
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    // 4. PATH
     if let Ok(output) = Command::new("where").arg(name).output() {
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);

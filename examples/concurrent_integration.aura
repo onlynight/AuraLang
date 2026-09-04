@@ -1,0 +1,74 @@
+// ════════════════════════════════════════════════════════════
+// 并发集成演示 — Coroutine + Actor + Channel + Select 全特性
+// ════════════════════════════════════════════════════════════
+
+fun main() {
+    // ── 1. 微服务 Actor 架构 ──
+    val authService = aura.concurrent.spawnActor("AuthService")
+    val userService = aura.concurrent.spawnActor("UserService")
+    val productService = aura.concurrent.spawnActor("ProductService")
+    aura.concurrent.send(authService, "LOGIN")
+    aura.concurrent.send(userService, "CREATE_USER")
+    aura.concurrent.send(productService, "LIST_PRODUCTS")
+    println("微服务: auth=" + authService.toString() + ", user=" + userService.toString() + ", product=" + productService.toString())
+
+    // ── 2. 消息总线 ──
+    val bus = aura.concurrent.newChannel(0)
+    aura.concurrent.channelSend(bus, "ORDER_CREATED")
+    aura.concurrent.channelSend(bus, "PAYMENT_PROCESSED")
+    aura.concurrent.channelSend(bus, "SHIPPING_SCHEDULED")
+    val msg1 = aura.concurrent.channelRecv(bus)
+    val msg2 = aura.concurrent.channelRecv(bus)
+    val msg3 = aura.concurrent.channelRecv(bus)
+    println("消息总线: " + msg1.toString() + ", " + msg2.toString() + ", " + msg3.toString())
+
+    // ── 3. 协程 + Channel 协作 ──
+    val co1 = aura.concurrent.spawn(1)
+    val co2 = aura.concurrent.spawn(2)
+    val coCh = aura.concurrent.newChannel(0)
+    aura.concurrent.channelSend(coCh, co1)
+    aura.concurrent.channelSend(coCh, co2)
+    val coResult = aura.concurrent.channelRecv(coCh)
+    println("协程+Channel: " + coResult.toString())
+
+    // ── 4. Actor + Channel 管道 ──
+    val input = aura.concurrent.spawnActor("InputHandler")
+    val processor = aura.concurrent.spawnActor("Processor")
+    val outputCh = aura.concurrent.newChannel(0)
+    aura.concurrent.send(input, "RAW_DATA")
+    aura.concurrent.channelSend(outputCh, "PROCESSED")
+    val pipelineResult = aura.concurrent.channelRecv(outputCh)
+    println("Actor+Channel管道: " + pipelineResult.toString())
+
+    // ── 5. 完整微服务场景 ──
+    val apiGateway = aura.concurrent.spawnActor("APIGateway")
+    val authCh = aura.concurrent.newChannel(0)
+    val userCh = aura.concurrent.newChannel(0)
+    aura.concurrent.channelSend(authCh, "AUTH_OK")
+    aura.concurrent.channelSend(userCh, "USER_123")
+    val selectResult = aura.concurrent.select(authCh, userCh)
+    println("完整微服务: gateway=" + apiGateway.toString() + ", select=" + selectResult.toString())
+
+    // ── 6. 监督 + 存活检查 ──
+    val master = aura.concurrent.spawnActor("Master")
+    val worker1 = aura.concurrent.spawnActor("Worker1")
+    val worker2 = aura.concurrent.spawnActor("Worker2")
+    aura.concurrent.supervise(master, worker1)
+    aura.concurrent.supervise(master, worker2)
+    val w1Alive = aura.concurrent.actorAlive(worker1)
+    val w2Alive = aura.concurrent.actorAlive(worker2)
+    println("监督+存活: master=" + master.toString() + ", w1=" + w1Alive.toString() + ", w2=" + w2Alive.toString())
+
+    // ── 7. 多级 Channel 管道 ──
+    val stage1 = aura.concurrent.newChannel(0)
+    val stage2 = aura.concurrent.newChannel(0)
+    val stage3 = aura.concurrent.newChannel(0)
+    aura.concurrent.channelSend(stage1, 100)
+    aura.concurrent.channelSend(stage2, 200)
+    aura.concurrent.channelSend(stage3, 300)
+    val s1 = aura.concurrent.channelRecv(stage1)
+    val s2 = aura.concurrent.channelRecv(stage2)
+    val s3 = aura.concurrent.channelRecv(stage3)
+    val total = s1 + s2 + s3
+    println("多级管道: " + total.toString())
+}

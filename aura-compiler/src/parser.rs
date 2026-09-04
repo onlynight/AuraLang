@@ -539,6 +539,10 @@ impl Parser {
             self.advance();
             mods.push(FnModifier::Suspend);
         }
+        if self.check(TokenKind::Async) {
+            self.advance();
+            mods.push(FnModifier::Async);
+        }
         if self.check(TokenKind::Inline) {
             self.advance();
             mods.push(FnModifier::Inline);
@@ -554,10 +558,11 @@ impl Parser {
         mods
     }
 
-    /// 当前 token 是否为函数修饰符（可出现在 `fun` 之前，如 `override fun` / `suspend fun`）
+    /// 当前 token 是否为函数修饰符（可出现在 `fun` 之前，如 `override fun` / `suspend fun` / `async fun`）
     fn is_method_modifier_token(&self) -> bool {
         self.check(TokenKind::Override)
             || self.check(TokenKind::Suspend)
+            || self.check(TokenKind::Async)
             || self.check(TokenKind::Inline)
             || self.check(TokenKind::Comptime)
     }

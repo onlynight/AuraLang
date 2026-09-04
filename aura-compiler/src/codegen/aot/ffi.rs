@@ -46,7 +46,7 @@ impl<'a> FfiGenerator<'a> {
             })
             .collect();
         let params_str = if params.is_empty() {
-            "void".to_string()
+            String::new()
         } else {
             params.join(", ")
         };

@@ -289,6 +289,11 @@ pub enum Expr {
         expr: Box<Expr>,
         span: Span,
     },
+    /// select 多路复用（P10.9）：多个 `Channel.receive()` 分支 + 可选 default
+    Select {
+        branches: Vec<SelectBranch>,
+        span: Span,
+    },
     Block(Vec<Stmt>, Span),
     // TODO: spread operator, string interpolation nodes, etc.
 }
@@ -353,6 +358,7 @@ pub struct FnDecl {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FnModifier {
     Suspend,
+    Async,
     Inline,
     Override,
     Comptime,
@@ -514,6 +520,15 @@ pub struct CatchClause {
     pub span: Span,
 }
 
+/// select 分支（P10.9）：模式（如 `ch.receive()`）+ 绑定变量 + 块
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectBranch {
+    pub pattern: Expr,
+    pub bind_var: Option<String>,
+    pub body: Box<Expr>,
+    pub span: Span,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 程序根节点
 #[derive(Debug, Clone, PartialEq)]
@@ -582,6 +597,7 @@ impl Expr {
             | Expr::AssertNonNull { span: s, .. }
             | Expr::Defer { span: s, .. }
             | Expr::Await { span: s, .. }
+            | Expr::Select { span: s, .. }
             | Expr::Block(_, s) => *s,
         }
     }

@@ -204,6 +204,8 @@ fn instr_size(instr: &crate::codegen::mir::MirInstr) -> usize {
         DeferBegin => 1,
         // DeferEnd：DeferEnd(1) = 1
         DeferEnd => 1,
+        // Yield：Yield(1) = 1
+        Yield => 1,
     }
 }
 
@@ -367,6 +369,9 @@ fn emit_instr(
         }
         DeferEnd => {
             OpCode::DeferEnd.write(code);
+        }
+        Yield => {
+            OpCode::Yield.write(code);
         }
     }
 }

@@ -69,6 +69,9 @@ const KEYWORDS: &[(&str, TokenKind)] = &[
     ("data", TokenKind::Data),
     ("await", TokenKind::Await),
     ("to", TokenKind::To),
+    // P10 并发运行时关键字（async 和 select 保留为关键字；spawn/send/ask/channel 作为普通标识符）
+    ("async", TokenKind::Async),
+    ("select", TokenKind::Select),
     // P7 内存管理关键字
     ("box", TokenKind::Box),
     ("weak", TokenKind::Weak),

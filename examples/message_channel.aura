@@ -1,0 +1,66 @@
+// ════════════════════════════════════════════════════════════
+// Channel 类型演示 — 有界/无界通道、Send/Recv/TryRecv
+// ════════════════════════════════════════════════════════════
+
+fun main() {
+    // ── 1. 创建无界 Channel ──
+    val ch1 = aura.concurrent.newChannel(0)
+    println("无界 Channel ID: " + ch1.toString())
+
+    // ── 2. 创建有界 Channel ──
+    val ch2 = aura.concurrent.newChannel(10)
+    println("有界 Channel(容量10) ID: " + ch2.toString())
+
+    // ── 3. 发送与接收 ──
+    aura.concurrent.channelSend(ch1, 42)
+    val received = aura.concurrent.channelRecv(ch1)
+    println("Channel 收发: " + received.toString())
+
+    // ── 4. 多值顺序 ──
+    aura.concurrent.channelSend(ch1, 1)
+    aura.concurrent.channelSend(ch1, 2)
+    aura.concurrent.channelSend(ch1, 3)
+    val a = aura.concurrent.channelRecv(ch1)
+    val b = aura.concurrent.channelRecv(ch1)
+    val c = aura.concurrent.channelRecv(ch1)
+    val sum1 = a + b + c
+    println("多值顺序: " + sum1.toString())
+
+    // ── 5. 生产者/消费者模式 ──
+    val producer = aura.concurrent.newChannel(0)
+    aura.concurrent.channelSend(producer, 100)
+    aura.concurrent.channelSend(producer, 200)
+    aura.concurrent.channelSend(producer, 300)
+    val consumer1 = aura.concurrent.channelRecv(producer)
+    val consumer2 = aura.concurrent.channelRecv(producer)
+    val consumer3 = aura.concurrent.channelRecv(producer)
+    val sum2 = consumer1 + consumer2 + consumer3
+    println("生产者-消费者: " + sum2.toString())
+
+    // ── 6. TryRecv（非阻塞） ──
+    val emptyCh = aura.concurrent.newChannel(0)
+    val tryResult = aura.concurrent.channelTryRecv(emptyCh)
+    println("TryRecv 空通道: " + tryResult.toString())
+
+    // ── 7. TryRecv（有值） ──
+    aura.concurrent.channelSend(emptyCh, 99)
+    val tryResult2 = aura.concurrent.channelTryRecv(emptyCh)
+    println("TryRecv 有值: " + tryResult2.toString())
+
+    // ── 8. 有界通道 ──
+    val boundedCh = aura.concurrent.newChannel(5)
+    aura.concurrent.channelSend(boundedCh, 10)
+    aura.concurrent.channelSend(boundedCh, 20)
+    aura.concurrent.channelSend(boundedCh, 30)
+    val bv1 = aura.concurrent.channelRecv(boundedCh)
+    val bv2 = aura.concurrent.channelRecv(boundedCh)
+    val bv3 = aura.concurrent.channelRecv(boundedCh)
+    val sum3 = bv1 + bv2 + bv3
+    println("有界通道: " + sum3.toString())
+
+    // ── 9. Channel 字符串传递 ──
+    val strCh = aura.concurrent.newChannel(0)
+    aura.concurrent.channelSend(strCh, "Hello, Channel!")
+    val strVal = aura.concurrent.channelRecv(strCh)
+    println("字符串通道: " + strVal.toString())
+}

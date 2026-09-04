@@ -74,6 +74,8 @@ impl TypeMapper {
             // P8.5 / P8.6: FFI 类型 → 不透明指针
             "CString" | "CStr" | "Handle" => "i8*".to_string(),
             "Color" => "{ i8, i8, i8, i8 }".to_string(),
+            // 运行时类型 → 不透明指针（堆对象）
+            "List" | "Map" | "Set" | "Value" | "Iterator" | "Closure" => "i8*".to_string(),
             // 函数类型 → 函数指针
             _ if name.starts_with('(') => "ptr".to_string(),
             _ => {

@@ -537,6 +537,10 @@ fn emit_statement(
         HirStmt::Block(b) => {
             emit_block(ctx, blocks, b)?;
         }
+        HirStmt::Defer(b) => {
+            // P7.4: defer 简化处理 — 立即执行块（与 Block 一致）
+            emit_block(ctx, blocks, b)?;
+        }
     }
     Ok(())
 }
@@ -765,6 +769,18 @@ fn emit_expr_val(
             else_e,
         } => emit_if_expr(ctx, blocks, cond, then_e, else_e),
         HirExpr::Block(block) => emit_block_expr(ctx, blocks, block),
+        HirExpr::Box(inner) => {
+            // P7.5: 堆分配 — AOT 直接透传值（堆管理由运行时处理）
+            emit_expr_val(ctx, blocks, inner)
+        }
+        HirExpr::WeakRef(inner) => {
+            // P7.3: 弱引用 — 求值内部表达式
+            emit_expr_val(ctx, blocks, inner)
+        }
+        HirExpr::Await(inner) => {
+            // P10.1: await — 直接返回内部值（非协程上下文 no-op）
+            emit_expr_val(ctx, blocks, inner)
+        }
     }
 }
 

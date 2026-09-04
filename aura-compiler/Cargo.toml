@@ -49,3 +49,7 @@ insta = { version = "1", features = ["yaml"] }
 [[example]]
 name = "aot_bench"
 required-features = ["llvm"]
+
+[[bench]]
+name = "p10_benchmarks"
+harness = false

@@ -572,6 +572,10 @@ fn both_int(a: &Value, b: &Value) -> bool {
 }
 
 fn bin_add(a: Value, b: Value) -> Value {
+    // 字符串拼接：任一操作数为字符串时执行拼接
+    if matches!(a, Value::Str(_)) || matches!(b, Value::Str(_)) {
+        return Value::str_(&format!("{}{}", a, b));
+    }
     if both_int(&a, &b) {
         Value::Int(a.as_int().wrapping_add(b.as_int()))
     } else {

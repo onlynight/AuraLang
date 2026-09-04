@@ -53,6 +53,18 @@ impl NativeRegistry {
         r.register("makeCallback", native_make_callback);
         // P9: 标准库
         crate::std::register_all(&mut r);
+        // P10: 并发运行时
+        r.register("aura.concurrent.spawn", native_spawn);
+        r.register("aura.concurrent.send", native_send);
+        r.register("aura.concurrent.ask", native_ask);
+        r.register("aura.concurrent.newChannel", native_new_channel);
+        r.register("aura.concurrent.channelSend", native_channel_send);
+        r.register("aura.concurrent.channelRecv", native_channel_recv);
+        r.register("aura.concurrent.channelTryRecv", native_channel_try_recv);
+        r.register("aura.concurrent.select", native_select);
+        r.register("aura.concurrent.spawnActor", native_spawn_actor);
+        r.register("aura.concurrent.supervise", native_supervise);
+        r.register("aura.concurrent.actorAlive", native_actor_alive);
         r
     }
 
@@ -266,4 +278,192 @@ fn native_make_callback(_args: &[Value]) -> Value {
     // makeCallback 由 MakeCallback 指令处理（见 mir.rs / emit.rs）
     // 此处作为占位：如果通过 CallNative 调用，返回无效回调 ID
     Value::Ptr(0)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P10 并发运行时 — 原生函数（Actor / Channel / Select / Spawn）
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 原生函数通过 thread-local 指针访问 VM 实例的 Actor/Channel 运行时状态。
+// VM 在 `run()` 开始时设置此指针，结束时清除。
+
+use std::sync::atomic::{AtomicPtr, Ordering};
+
+thread_local! {
+    /// VM 实例指针（供原生函数访问 Actor/Channel 运行时）
+    static VM_REF: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+}
+
+/// 设置当前 VM 实例（在 `Vm::run()` 开始时调用）
+pub fn set_vm_ref(vm: *mut ()) {
+    VM_REF.with(|r| r.store(vm, Ordering::SeqCst));
+}
+
+/// 清除当前 VM 实例引用（在 `Vm::run()` 结束时调用）
+pub fn clear_vm_ref() {
+    VM_REF.with(|r| r.store(std::ptr::null_mut(), Ordering::SeqCst));
+}
+
+/// 获取当前 VM 实例指针
+fn get_vm_ref() -> Option<*mut crate::vm::Vm> {
+    VM_REF.with(|r| {
+        let p = r.load(Ordering::SeqCst);
+        if p.is_null() { None } else { Some(p as *mut crate::vm::Vm) }
+    })
+}
+
+/// spawn(expr) → Int：创建新协程（P10.1）
+///
+/// 将表达式作为协程入口，创建新协程并返回协程 ID。
+fn native_spawn(args: &[Value]) -> Value {
+    // spawn 的实际创建由 VM 协程调度器处理
+    // 此处返回占位 ID（0 = 主线程）
+    match args.first() {
+        Some(v) => Value::Int(v.as_int()),
+        None => Value::Int(0),
+    }
+}
+
+/// send(actorId, msg) → Unit：向 Actor 发送消息（P10.6）
+fn native_send(args: &[Value]) -> Value {
+    if args.len() >= 2 {
+        let actor_id = args[0].as_int() as usize;
+        let msg = args[1].clone();
+        if let Some(vm_ptr) = get_vm_ref() {
+            unsafe {
+                (*vm_ptr).actors.send(actor_id, msg);
+            }
+        }
+    }
+    Value::Null
+}
+
+/// ask(actorId, msg) → Any：向 Actor 请求响应（P10.6）
+fn native_ask(args: &[Value]) -> Value {
+    if args.len() >= 2 {
+        let actor_id = args[0].as_int() as usize;
+        let msg = args[1].clone();
+        if let Some(vm_ptr) = get_vm_ref() {
+            unsafe {
+                return (*vm_ptr).actors.ask(actor_id, msg);
+            }
+        }
+    }
+    Value::Null
+}
+
+/// newChannel(bound) → Int：创建 Channel（P10.8）
+///
+/// `bound`: 容量上限，0 表示无界
+fn native_new_channel(args: &[Value]) -> Value {
+    let bound = args.first().map(|v| v.as_int() as usize).unwrap_or(0);
+    if let Some(vm_ptr) = get_vm_ref() {
+        unsafe {
+            let id = (*vm_ptr).channels.new_channel(bound);
+            return Value::Int(id as i64);
+        }
+    }
+    Value::Int(0)
+}
+
+/// channelSend(ch, val) → Unit：向 Channel 发送值（P10.8）
+fn native_channel_send(args: &[Value]) -> Value {
+    if args.len() >= 2 {
+        let ch_id = args[0].as_int() as usize;
+        let val = args[1].clone();
+        if let Some(vm_ptr) = get_vm_ref() {
+            unsafe {
+                (*vm_ptr).channels.send(ch_id, val);
+            }
+        }
+    }
+    Value::Null
+}
+
+/// channelRecv(ch) → Any：从 Channel 接收值（阻塞语义，P10.8）
+fn native_channel_recv(args: &[Value]) -> Value {
+    if args.len() >= 1 {
+        let ch_id = args[0].as_int() as usize;
+        if let Some(vm_ptr) = get_vm_ref() {
+            unsafe {
+                return (*vm_ptr).channels.recv(ch_id);
+            }
+        }
+    }
+    Value::Null
+}
+
+/// channelTryRecv(ch) → Any：尝试从 Channel 接收值（非阻塞，P10.8）
+fn native_channel_try_recv(args: &[Value]) -> Value {
+    if args.len() >= 1 {
+        let ch_id = args[0].as_int() as usize;
+        if let Some(vm_ptr) = get_vm_ref() {
+            unsafe {
+                return (*vm_ptr).channels.try_recv(ch_id);
+            }
+        }
+    }
+    Value::Null
+}
+
+/// __select(ch1, ch2) → Any：select 多路复用（P10.9）
+///
+/// 检查所有通道，返回第一个有值的通道的值。
+/// 若所有通道均为空，返回 `Null`。
+fn native_select(args: &[Value]) -> Value {
+    if let Some(vm_ptr) = get_vm_ref() {
+        unsafe {
+            let vm = &mut *vm_ptr;
+            // 遍历所有通道，找到第一个有值的
+            for arg in args {
+                let ch_id = arg.as_int() as usize;
+                if ch_id == 0 {
+                    continue;
+                }
+                if !vm.channels.is_empty(ch_id) {
+                    return vm.channels.recv(ch_id);
+                }
+            }
+        }
+    }
+    Value::Null
+}
+
+/// __spawnActor(name) → Int：创建 Actor 实例（P10.4）
+fn native_spawn_actor(args: &[Value]) -> Value {
+    let name = args.first().map(|v| v.to_string()).unwrap_or_else(|| "unnamed".to_string());
+    if let Some(vm_ptr) = get_vm_ref() {
+        unsafe {
+            let id = (*vm_ptr).actors.spawn(&name);
+            return Value::Int(id as i64);
+        }
+    }
+    Value::Int(0)
+}
+
+/// __supervise(parent, child) → Unit：建立监督关系（P10.7）
+fn native_supervise(args: &[Value]) -> Value {
+    if args.len() >= 2 {
+        let parent_id = args[0].as_int() as usize;
+        let child_id = args[1].as_int() as usize;
+        if let Some(vm_ptr) = get_vm_ref() {
+            unsafe {
+                (*vm_ptr).actors.supervise(parent_id, child_id);
+            }
+        }
+    }
+    Value::Null
+}
+
+/// __actorAlive(id) → Boolean：检查 Actor 是否存活（P10.7）
+fn native_actor_alive(args: &[Value]) -> Value {
+    if args.len() >= 1 {
+        let id = args[0].as_int() as usize;
+        if let Some(vm_ptr) = get_vm_ref() {
+            unsafe {
+                return Value::Bool((*vm_ptr).actors.is_alive(id));
+            }
+        }
+    }
+    Value::Bool(false)
 }

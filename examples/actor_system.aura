@@ -1,0 +1,67 @@
+// ════════════════════════════════════════════════════════════
+// Actor 模型演示 — Actor 创建 / 消息传递 / 监督树
+// ════════════════════════════════════════════════════════════
+
+// ── 8. Actor 声明语法 ──
+actor WindowManager {
+    fun createWindow(): Int {
+        return 1
+    }
+    fun focusWindow(): Int {
+        return 2
+    }
+}
+
+fun main() {
+    // ── 1. 创建 Actor 实例 ──
+    val worker1 = aura.concurrent.spawnActor("Worker-1")
+    println("Actor Worker-1 ID: " + worker1.toString())
+
+    // ── 2. 创建多个 Actor ──
+    val w1 = aura.concurrent.spawnActor("Renderer")
+    val w2 = aura.concurrent.spawnActor("Loader")
+    val w3 = aura.concurrent.spawnActor("Network")
+    val sum = w1 + w2 + w3
+    println("多 Actor 总计: " + sum.toString())
+
+    // ── 3. 向 Actor 发送消息 ──
+    aura.concurrent.send(worker1, "任务A")
+    aura.concurrent.send(worker1, "任务B")
+    aura.concurrent.send(worker1, "任务C")
+    println("已发送 3 条消息到 Worker-1")
+
+    // ── 4. 请求响应 ──
+    aura.concurrent.send(worker1, "请求数据")
+    val response = aura.concurrent.ask(worker1, "请求数据")
+    println("Actor 响应: " + response.toString())
+
+    // ── 5. Actor 存活检查 ──
+    val alive = aura.concurrent.actorAlive(worker1)
+    println("Worker-1 存活: " + alive.toString())
+
+    // ── 6. 建立监督关系 ──
+    val parent = aura.concurrent.spawnActor("Supervisor")
+    val child1 = aura.concurrent.spawnActor("Child-1")
+    val child2 = aura.concurrent.spawnActor("Child-2")
+    aura.concurrent.supervise(parent, child1)
+    aura.concurrent.supervise(parent, child2)
+    val children = child1 + child2
+    println("监督树: parent=" + parent.toString() + ", children=" + children.toString())
+
+    // ── 7. 监督后检查子 Actor ──
+    val childAlive = aura.concurrent.actorAlive(child1)
+    println("Child-1 存活(监督后): " + childAlive.toString())
+
+    // ── 9. 多层监督树 ──
+    val top = aura.concurrent.spawnActor("Root")
+    val mid1 = aura.concurrent.spawnActor("Middle-1")
+    val mid2 = aura.concurrent.spawnActor("Middle-2")
+    val leaf1 = aura.concurrent.spawnActor("Leaf-1")
+    val leaf2 = aura.concurrent.spawnActor("Leaf-2")
+    aura.concurrent.supervise(top, mid1)
+    aura.concurrent.supervise(top, mid2)
+    aura.concurrent.supervise(mid1, leaf1)
+    aura.concurrent.supervise(mid2, leaf2)
+    val treeSum = top + mid1 + mid2 + leaf1 + leaf2
+    println("多层监督树: " + treeSum.toString())
+}

@@ -73,6 +73,8 @@ pub enum MirInstr {
     DeferBegin,
     /// defer 清理块结束标记（P7.4）
     DeferEnd,
+    /// 协程挂起点（P10.1）：`await` 挂起当前协程
+    Yield,
 }
 
 /// 基本块终结指令（控制流）
@@ -576,6 +578,11 @@ impl MirBuilder {
                 let dst = self.alloc_reg();
                 self.emit(MirInstr::WeakRef { dst, src });
                 dst
+            }
+            HirExpr::Await(inner) => {
+                // P10.1: await — 直接返回内部表达式结果
+                // 协程挂起语义由 Yield 指令处理（在非协程上下文中 await 等同 no-op）
+                self.lower_expr(inner, ctx)
             }
         }
     }

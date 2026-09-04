@@ -207,6 +207,12 @@ fn emit_c_stmt(s: &mut String, stmt: &HirStmt, indent: usize) {
             emit_c_block(s, b, indent + 1);
             s.push_str(&format!("{}}}\n", pad));
         }
+        HirStmt::Defer(b) => {
+            // P7.4: defer 简化处理 — 立即执行块
+            s.push_str(&format!("{}{{\n", pad));
+            emit_c_block(s, b, indent + 1);
+            s.push_str(&format!("{}}}\n", pad));
+        }
     }
 }
 
@@ -300,6 +306,18 @@ fn emit_c_expr(s: &mut String, expr: &HirExpr) {
                 }
             }
             s.push('}');
+        }
+        HirExpr::Box(inner) => {
+            // P7.5: 堆分配 — AOT 直接透传值
+            emit_c_expr(s, inner)
+        }
+        HirExpr::WeakRef(inner) => {
+            // P7.3: 弱引用 — 求值内部表达式
+            emit_c_expr(s, inner)
+        }
+        HirExpr::Await(inner) => {
+            // P10.1: await — 直接返回内部值
+            emit_c_expr(s, inner)
         }
     }
 }

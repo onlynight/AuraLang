@@ -60,6 +60,13 @@ pub enum TokenKind {
     Data,
     To,
     Await,
+    // P10 并发运行时关键字
+    Async,
+    Select,
+    Channel,
+    Spawn,
+    Send,
+    Ask,
     // P7 内存管理关键字
     Box,
     Weak,
@@ -202,6 +209,12 @@ impl TokenKind {
                 | TokenKind::Import
                 | TokenKind::Lazy
                 | TokenKind::Lateinit
+                | TokenKind::Async
+                | TokenKind::Select
+                | TokenKind::Channel
+                | TokenKind::Spawn
+                | TokenKind::Send
+                | TokenKind::Ask
                 | TokenKind::Box
                 | TokenKind::Weak
                 | TokenKind::Malloc

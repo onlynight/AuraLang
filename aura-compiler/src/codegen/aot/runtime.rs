@@ -74,7 +74,7 @@ pub fn generate_runtime_declarations(_type_mapper: &TypeMapper) -> String {
     for fn_decl in RUNTIME_FUNCTIONS {
         let params_str: Vec<&str> = fn_decl.params.iter().map(|(_, ty)| *ty).collect();
         let params_str = if params_str.is_empty() {
-            "void".to_string()
+            String::new()
         } else {
             params_str.join(", ")
         };

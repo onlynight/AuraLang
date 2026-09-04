@@ -100,6 +100,36 @@ impl Checker {
             builtin_span,
         );
 
+        // P10: 并发运行时内置函数（aura.concurrent.* 命名空间）
+        for (name, params, ret) in [
+            ("aura.concurrent.spawn", vec![("expr", Ty::Any)], Ty::Int),
+            ("aura.concurrent.send", vec![("actor", Ty::Int), ("msg", Ty::Any)], Ty::Unit),
+            ("aura.concurrent.ask", vec![("actor", Ty::Int), ("msg", Ty::Any)], Ty::Any),
+            ("aura.concurrent.newChannel", vec![("bound", Ty::Int)], Ty::Int),
+            ("aura.concurrent.channelSend", vec![("ch", Ty::Int), ("val", Ty::Any)], Ty::Unit),
+            ("aura.concurrent.channelRecv", vec![("ch", Ty::Int)], Ty::Any),
+            ("aura.concurrent.channelTryRecv", vec![("ch", Ty::Int)], Ty::Any),
+            ("aura.concurrent.select", vec![("ch1", Ty::Int), ("ch2", Ty::Int)], Ty::Any),
+            ("aura.concurrent.spawnActor", vec![("name", Ty::String)], Ty::Int),
+            ("aura.concurrent.supervise", vec![("parent", Ty::Int), ("child", Ty::Int)], Ty::Unit),
+            ("aura.concurrent.actorAlive", vec![("id", Ty::Int)], Ty::Boolean),
+        ] {
+            let _ = symbols.insert_function(
+                name,
+                params
+                    .into_iter()
+                    .map(|(pn, pt)| ParamSym {
+                        name: pn.into(),
+                        ty: pt,
+                        has_default: false,
+                    })
+                    .collect(),
+                ret,
+                Visibility::Public,
+                builtin_span,
+            );
+        }
+
         let mut var_env = Vec::new();
         var_env.push(HashMap::new());
 
@@ -861,6 +891,14 @@ impl Checker {
                 Ty::Unit
             }
             Expr::Await { expr, .. } => self.check_expr(expr),
+            Expr::Select { branches, .. } => {
+                // select 多路复用：检查所有分支的 pattern 表达式
+                for branch in branches {
+                    self.check_expr(&branch.pattern);
+                    self.check_expr(branch.body.as_ref());
+                }
+                Ty::Any
+            }
         }
     }
 
@@ -1096,7 +1134,27 @@ impl Checker {
         }
     }
 
+    /// 从成员访问链中提取完整点分函数名（如 `aura.concurrent.spawn`）
+    fn extract_dotted_name(expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Ident(name, _) => Some(name.clone()),
+            Expr::MemberAccess { object, name, .. } => {
+                let obj_name = Self::extract_dotted_name(object)?;
+                Some(format!("{}.{}", obj_name, name))
+            }
+            _ => None,
+        }
+    }
+
     fn check_call(&mut self, callee: &Expr, args: &[Expr], span: Span) -> Ty {
+        // 先尝试完整点分函数名解析（支持 aura.concurrent.spawn 等）
+        if let Some(full_name) = Self::extract_dotted_name(callee) {
+            if let Some(fns) = self.symbols.lookup_function(&full_name) {
+                let cloned: Vec<Symbol> = fns.clone();
+                return self.check_call_args(&cloned, args, span);
+            }
+        }
+
         // 方法调用：obj.method(...)
         if let Expr::MemberAccess { object, name, .. } = callee {
             let _obj_ty = self.check_expr(object);

@@ -181,6 +181,8 @@ pub enum HirExpr {
     Box(Box<HirExpr>),
     /// 弱引用（P7.3）：`weak(ref)` 创建不增加引用计数的弱引用
     WeakRef(Box<HirExpr>),
+    /// await 挂起点（P10.1）：`await expr` 在 suspend 函数中挂起协程
+    Await(Box<HirExpr>),
 }
 
 impl HirExpr {
@@ -444,6 +446,157 @@ pub fn desugar_program(program: &Program) -> HirProgram {
                 ty: Some(HirType::Named("Any".into())),
             }],
             ret: Some(HirType::Named("Unit".into())),
+            body: HirBlock { stmts: vec![] },
+            is_native: true,
+            type_params: vec![],
+        });
+    }
+
+    // ── P10: 并发运行时原生函数（aura.concurrent.* 命名空间）──
+    // aura.concurrent.spawn(expr) — 创建新协程/Actor
+    if !natives.iter().any(|n| n.name == "aura.concurrent.spawn") {
+        natives.push(HirFunction {
+            name: "aura.concurrent.spawn".into(),
+            params: vec![HirParam {
+                name: "expr".into(),
+                ty: Some(HirType::Named("Any".into())),
+            }],
+            ret: Some(HirType::Named("Int".into())),
+            body: HirBlock { stmts: vec![] },
+            is_native: true,
+            type_params: vec![],
+        });
+    }
+    // aura.concurrent.send(actor, msg) — 向 Actor 发送消息
+    if !natives.iter().any(|n| n.name == "aura.concurrent.send") {
+        natives.push(HirFunction {
+            name: "aura.concurrent.send".into(),
+            params: vec![
+                HirParam { name: "actor".into(), ty: Some(HirType::Named("Int".into())) },
+                HirParam { name: "msg".into(), ty: Some(HirType::Named("Any".into())) },
+            ],
+            ret: Some(HirType::Named("Unit".into())),
+            body: HirBlock { stmts: vec![] },
+            is_native: true,
+            type_params: vec![],
+        });
+    }
+    // aura.concurrent.ask(actor, msg) — 向 Actor 请求响应
+    if !natives.iter().any(|n| n.name == "aura.concurrent.ask") {
+        natives.push(HirFunction {
+            name: "aura.concurrent.ask".into(),
+            params: vec![
+                HirParam { name: "actor".into(), ty: Some(HirType::Named("Int".into())) },
+                HirParam { name: "msg".into(), ty: Some(HirType::Named("Any".into())) },
+            ],
+            ret: Some(HirType::Named("Any".into())),
+            body: HirBlock { stmts: vec![] },
+            is_native: true,
+            type_params: vec![],
+        });
+    }
+    // aura.concurrent.newChannel(bound) — 创建 Channel
+    if !natives.iter().any(|n| n.name == "aura.concurrent.newChannel") {
+        natives.push(HirFunction {
+            name: "aura.concurrent.newChannel".into(),
+            params: vec![
+                HirParam { name: "bound".into(), ty: Some(HirType::Named("Int".into())) },
+            ],
+            ret: Some(HirType::Named("Int".into())),
+            body: HirBlock { stmts: vec![] },
+            is_native: true,
+            type_params: vec![],
+        });
+    }
+    // aura.concurrent.channelSend(ch, val) — 发送值到 Channel
+    if !natives.iter().any(|n| n.name == "aura.concurrent.channelSend") {
+        natives.push(HirFunction {
+            name: "aura.concurrent.channelSend".into(),
+            params: vec![
+                HirParam { name: "ch".into(), ty: Some(HirType::Named("Int".into())) },
+                HirParam { name: "val".into(), ty: Some(HirType::Named("Any".into())) },
+            ],
+            ret: Some(HirType::Named("Unit".into())),
+            body: HirBlock { stmts: vec![] },
+            is_native: true,
+            type_params: vec![],
+        });
+    }
+    // aura.concurrent.channelRecv(ch) — 从 Channel 接收值（阻塞）
+    if !natives.iter().any(|n| n.name == "aura.concurrent.channelRecv") {
+        natives.push(HirFunction {
+            name: "aura.concurrent.channelRecv".into(),
+            params: vec![
+                HirParam { name: "ch".into(), ty: Some(HirType::Named("Int".into())) },
+            ],
+            ret: Some(HirType::Named("Any".into())),
+            body: HirBlock { stmts: vec![] },
+            is_native: true,
+            type_params: vec![],
+        });
+    }
+    // aura.concurrent.channelTryRecv(ch) — 从 Channel 接收值（非阻塞）
+    if !natives.iter().any(|n| n.name == "aura.concurrent.channelTryRecv") {
+        natives.push(HirFunction {
+            name: "aura.concurrent.channelTryRecv".into(),
+            params: vec![
+                HirParam { name: "ch".into(), ty: Some(HirType::Named("Int".into())) },
+            ],
+            ret: Some(HirType::Named("Any".into())),
+            body: HirBlock { stmts: vec![] },
+            is_native: true,
+            type_params: vec![],
+        });
+    }
+    // aura.concurrent.select(ch1, ch2) — select 多路复用（最多 2 通道）
+    if !natives.iter().any(|n| n.name == "aura.concurrent.select") {
+        natives.push(HirFunction {
+            name: "aura.concurrent.select".into(),
+            params: vec![
+                HirParam { name: "ch1".into(), ty: Some(HirType::Named("Int".into())) },
+                HirParam { name: "ch2".into(), ty: Some(HirType::Named("Int".into())) },
+            ],
+            ret: Some(HirType::Named("Any".into())),
+            body: HirBlock { stmts: vec![] },
+            is_native: true,
+            type_params: vec![],
+        });
+    }
+    // aura.concurrent.spawnActor(name) — 创建 Actor 实例（返回 actor ID）
+    if !natives.iter().any(|n| n.name == "aura.concurrent.spawnActor") {
+        natives.push(HirFunction {
+            name: "aura.concurrent.spawnActor".into(),
+            params: vec![
+                HirParam { name: "name".into(), ty: Some(HirType::Named("String".into())) },
+            ],
+            ret: Some(HirType::Named("Int".into())),
+            body: HirBlock { stmts: vec![] },
+            is_native: true,
+            type_params: vec![],
+        });
+    }
+    // aura.concurrent.supervise(parent, child) — 建立监督关系
+    if !natives.iter().any(|n| n.name == "aura.concurrent.supervise") {
+        natives.push(HirFunction {
+            name: "aura.concurrent.supervise".into(),
+            params: vec![
+                HirParam { name: "parent".into(), ty: Some(HirType::Named("Int".into())) },
+                HirParam { name: "child".into(), ty: Some(HirType::Named("Int".into())) },
+            ],
+            ret: Some(HirType::Named("Unit".into())),
+            body: HirBlock { stmts: vec![] },
+            is_native: true,
+            type_params: vec![],
+        });
+    }
+    // aura.concurrent.actorAlive(id) — 检查 Actor 是否存活
+    if !natives.iter().any(|n| n.name == "aura.concurrent.actorAlive") {
+        natives.push(HirFunction {
+            name: "aura.concurrent.actorAlive".into(),
+            params: vec![
+                HirParam { name: "id".into(), ty: Some(HirType::Named("Int".into())) },
+            ],
+            ret: Some(HirType::Named("Boolean".into())),
             body: HirBlock { stmts: vec![] },
             is_native: true,
             type_params: vec![],
@@ -795,10 +948,9 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                 // 模块调用 `module.method(args)`：降级为 `module.method(args...)`
                 // 与普通方法调用 `obj.method(args)` → `method(obj, args...)` 区分
                 Expr::MemberAccess { object, name, .. } => {
-                    // 检查是否为标准库模块调用
+                    // 检查是否为标准库模块调用（支持嵌套：aura.concurrent.spawn）
                     if let Expr::Ident(module_name, _) = object.as_ref() {
                         if is_std_module(module_name) {
-                            // 标准库模块调用：保留模块前缀（添加 aura. 前缀）
                             let full_module = full_package_name(module_name);
                             return HirExpr::Call {
                                 callee: format!("{}.{}", full_module, name),
@@ -806,13 +958,28 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                             };
                         }
                     }
+                    // 嵌套：aura.concurrent.spawn
+                    if let Expr::MemberAccess { object: inner_obj, name: inner_name, .. } = object.as_ref() {
+                        if let Expr::Ident(module_name, _) = inner_obj.as_ref() {
+                            if is_std_module(&format!("aura.{}", inner_name)) {
+                                let full_module = full_package_name(module_name);
+                                let nested_name = format!("{}.{}", inner_name, name);
+                                return HirExpr::Call {
+                                    callee: format!("{}.{}", full_module, nested_name),
+                                    args: args.iter().map(desugar_expr).collect(),
+                                };
+                            }
+                        }
+                    }
                     // 普通方法调用：降级为 method(obj, args...)
+                    // 如果方法是内置方法，解析为完整原生函数名
+                    let resolved_name = resolve_builtin_method(name).unwrap_or_else(|| name.clone());
                     let mut all_args = vec![desugar_expr(object)];
                     for a in args {
                         all_args.push(desugar_expr(a));
                     }
                     return HirExpr::Call {
-                        callee: name.clone(),
+                        callee: resolved_name,
                         args: all_args,
                     };
                 }
@@ -902,7 +1069,31 @@ fn desugar_expr(e: &Expr) -> HirExpr {
             callee: "__throw".into(),
             args: vec![desugar_expr(value)],
         },
-        Expr::Await { expr, .. } => desugar_expr(expr),
+        Expr::Await { expr, .. } => HirExpr::Await(Box::new(desugar_expr(expr))),
+        // P10.9: select 多路复用 — 降级为 `aura.concurrent.select(ch1, ch2)` 原生函数调用（最多 2 通道）
+        Expr::Select { branches, .. } => {
+            let ch_args: Vec<HirExpr> = branches.iter().take(2).map(|b| {
+                match &b.pattern {
+                    Expr::Call { callee, .. } => {
+                        if let Expr::MemberAccess { object, .. } = callee.as_ref() {
+                            desugar_expr(object)
+                        } else {
+                            desugar_expr(callee)
+                        }
+                    }
+                    _ => desugar_expr(&b.pattern),
+                }
+            }).collect();
+            // 补齐到 2 个参数
+            let mut args = ch_args;
+            while args.len() < 2 {
+                args.push(HirExpr::Lit(Literal::Int(0)));
+            }
+            HirExpr::Call {
+                callee: "aura.concurrent.select".into(),
+                args,
+            }
+        }
         _other => HirExpr::Lit(Literal::Null), // 兜底（Try/Defer 等已在语句层处理）
     }
 }
@@ -957,6 +1148,18 @@ fn desugar_when(subject: &Option<Box<Expr>>, arms: &[WhenArm]) -> HirExpr {
 // P9: 标准库模块检测与原生函数注册
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// 解析内置方法名为完整原生函数名（如 `toString` → `aura.builtin.toString`）
+fn resolve_builtin_method(name: &str) -> Option<String> {
+    for (full_name, _) in std_native_functions() {
+        if let Some(method_name) = full_name.split('.').last() {
+            if method_name == name {
+                return Some(full_name.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// 判断名称是否为已知的标准库模块名（支持 aura. 前缀和短名）
 fn is_std_module(name: &str) -> bool {
     // Kotlin 风格：aura.io, aura.math, ...
@@ -966,6 +1169,7 @@ fn is_std_module(name: &str) -> bool {
             "io" | "math" | "string" | "collections" | "fs" | "net" | "json"
                 | "time" | "test" | "builtin" | "env" | "process" | "random"
                 | "encoding" | "ascii" | "console" | "path" | "assert" | "iter"
+                | "concurrent"
         );
     }
     // 兼容短名：io, math, ...
@@ -979,7 +1183,7 @@ fn is_std_module(name: &str) -> bool {
 
 /// 将模块名转换为完整包名（添加 aura. 前缀）
 fn full_package_name(module: &str) -> String {
-    if module.starts_with("aura.") {
+    if module == "aura" || module.starts_with("aura.") {
         module.to_string()
     } else {
         format!("aura.{}", module)

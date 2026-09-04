@@ -15,6 +15,8 @@
 //!   阈值的（叶子整数）函数由 Cranelift 编译为原生代码并缓存，后续调用直接派发到
 //!   原生入口（`5.12`）；编译失败则永久回退解释器（`5.13`）。
 
+pub mod actor;
+pub mod channel;
 pub mod coroutine;
 pub mod dynamic_ffi;
 pub mod ffi;
@@ -463,6 +465,10 @@ pub struct Vm {
     pub coroutines: CoroutineScheduler,
     /// 回调注册表（P8.7）：Aura 函数 → C 回调蹦床
     pub callbacks: CallbackRegistry,
+    /// Actor 运行时（P10.4）：Actor 实例 → 消息队列
+    pub actors: crate::vm::actor::ActorRuntime,
+    /// Channel 运行时（P10.8）：Channel 实例 → 缓冲区
+    pub channels: crate::vm::channel::ChannelRuntime,
 }
 
 impl Vm {
@@ -486,6 +492,8 @@ impl Vm {
             },
             coroutines: CoroutineScheduler::new(),
             callbacks: CallbackRegistry::new(),
+            actors: crate::vm::actor::ActorRuntime::new(),
+            channels: crate::vm::channel::ChannelRuntime::new(),
         })
     }
 
@@ -505,6 +513,9 @@ impl Vm {
         if entry >= self.module.funcs.len() {
             return Err(VmError::NoEntry);
         }
+
+        // P10: 设置并发运行时 VM 引用（供原生函数访问 Actor/Channel 状态）
+        crate::vm::native::set_vm_ref(self as *mut Self as *mut ());
 
         // P8.7: 设置回调派发闭包（C 蹦床通过 thread-local 派发回 VM）
         {
@@ -549,6 +560,8 @@ impl Vm {
         }
         // P8.7: 清除回调派发闭包
         crate::vm::ffi::clear_dispatcher();
+        // P10: 清除并发运行时 VM 引用
+        crate::vm::native::clear_vm_ref();
         Ok(self.result.take().unwrap_or(Value::Null))
     }
 
@@ -607,6 +620,9 @@ impl Vm {
         self.call_counts.iter_mut().for_each(|c| *c = 0);
         self.result = None;
         self.halt = false;
+        // P10: 重置并发运行时状态
+        self.actors = crate::vm::actor::ActorRuntime::new();
+        self.channels = crate::vm::channel::ChannelRuntime::new();
     }
 
     /// 当前调用帧深度
