@@ -51,6 +51,8 @@ impl NativeRegistry {
         r.register("intToPtr", native_int_to_ptr);
         // P8.7: 回调
         r.register("makeCallback", native_make_callback);
+        // P9: 标准库
+        crate::std::register_all(&mut r);
         r
     }
 

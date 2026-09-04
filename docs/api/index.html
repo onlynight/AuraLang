@@ -1,0 +1,1014 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Aura 标准库文档 — 19 模块，80 函数</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:960px;margin:0 auto;padding:2rem;line-height:1.6;color:#222}
+h1{border-bottom:2px solid #333;padding-bottom:.5rem}h2{color:#0066cc;margin-top:2rem}h3{color:#333}
+code{background:#f4f4f4;padding:2px 6px;border-radius:3px;font-size:.9em}
+table{border-collapse:collapse;width:100%;margin:1rem 0}th,td{border:1px solid #ddd;padding:.5rem;text-align:left}th{background:#f8f8f8}
+pre{background:#f8f8f8;padding:1rem;border-radius:4px;overflow-x:auto}pre code{background:none;padding:0}
+blockquote{border-left:4px solid #0066cc;margin:1rem 0;padding:1rem;background:#f0f8ff}
+hr{border:none;border-top:1px solid #ddd;margin:2rem 0}a{color:#0066cc;text-decoration:none}a:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+<h1>Aura 标准库 API 文档</h1>
+<blockquote>共 19 个模块，80 个函数</blockquote>
+<h2>目录</h2>
+<ul>
+<li><a href="#stdascii">std.ascii</a> — 3 个函数</li>
+<li><a href="#stdassert">std.assert</a> — 1 个函数</li>
+<li><a href="#stdbuiltin">std.builtin</a> — 2 个函数</li>
+<li><a href="#stdcollections">std.collections</a> — 5 个函数</li>
+<li><a href="#stdconsole">std.console</a> — 2 个函数</li>
+<li><a href="#stdencoding">std.encoding</a> — 3 个函数</li>
+<li><a href="#stdenv">std.env</a> — 3 个函数</li>
+<li><a href="#stdfs">std.fs</a> — 7 个函数</li>
+<li><a href="#stdio">std.io</a> — 6 个函数</li>
+<li><a href="#stditer">std.iter</a> — 4 个函数</li>
+<li><a href="#stdjson">std.json</a> — 3 个函数</li>
+<li><a href="#stdmath">std.math</a> — 12 个函数</li>
+<li><a href="#stdnet">std.net</a> — 2 个函数</li>
+<li><a href="#stdpath">std.path</a> — 3 个函数</li>
+<li><a href="#stdprocess">std.process</a> — 2 个函数</li>
+<li><a href="#stdrandom">std.random</a> — 5 个函数</li>
+<li><a href="#stdstring">std.string</a> — 12 个函数</li>
+<li><a href="#stdtest">std.test</a> — 2 个函数</li>
+<li><a href="#stdtime">std.time</a> — 3 个函数</li>
+</ul>
+<hr>
+<h2 id="stdascii">std.ascii</h2>
+<blockquote>函数数: 3 | <a href="index.html">返回目录</a></blockquote>
+<h3 id="isAlpha">ascii.isAlpha</h3>
+<p>判断首字符是否为字母。</p>
+<p><strong>签名:</strong> <code>ascii.isAlpha(text: String): Bool</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>text</code></td><td><code>String</code></td><td>字符串</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Bool</code> — 是字母返回 true</p>
+<p><strong>示例:</strong></p>
+<pre><code>ascii.isAlpha(&quot;A&quot;) // → true</code></pre>
+<hr>
+<h3 id="isDigit">ascii.isDigit</h3>
+<p>判断首字符是否为数字。</p>
+<p><strong>签名:</strong> <code>ascii.isDigit(text: String): Bool</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>text</code></td><td><code>String</code></td><td>字符串</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Bool</code> — 是数字返回 true</p>
+<hr>
+<h3 id="codeAt">ascii.codeAt</h3>
+<p>返回指定位置的字符 Unicode 码点。</p>
+<p><strong>签名:</strong> <code>ascii.codeAt(text: String, index: Int): Int</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>text</code></td><td><code>String</code></td><td>字符串</td></tr>
+<tr><td><code>index</code></td><td><code>Int</code></td><td>字符位置</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Int</code> — 码点值，越界返回 0</p>
+<p><strong>示例:</strong></p>
+<pre><code>ascii.codeAt(&quot;A&quot;, 0) // → 65</code></pre>
+<hr>
+<hr>
+<h2 id="stdassert">std.assert</h2>
+<blockquote>函数数: 1 | <a href="index.html">返回目录</a></blockquote>
+<h3 id="assert">assert.assert</h3>
+<p>通用断言，返回 OK/ASSERTION FAILED。</p>
+<p><strong>签名:</strong> <code>assert.assert(condition: Value, message: String): String</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>condition</code></td><td><code>Value</code></td><td>断言条件</td></tr>
+<tr><td><code>message</code></td><td><code>String</code></td><td>消息（可选）</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>String</code> — &quot;OK: ...&quot; 或 &quot;ASSERTION FAILED: ...&quot;</p>
+<hr>
+<hr>
+<h2 id="stdbuiltin">std.builtin</h2>
+<blockquote>函数数: 2 | <a href="index.html">返回目录</a></blockquote>
+<h3 id="typeof">builtin.typeof</h3>
+<p>返回值的类型名称。</p>
+<p><strong>签名:</strong> <code>builtin.typeof(value: Value): String</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>value</code></td><td><code>Value</code></td><td>待检查的值</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>String</code> — 类型名（Int/Float/Boolean/String/List/Map/Null）</p>
+<p><strong>示例:</strong></p>
+<pre><code>builtin.typeof(42) // → &quot;Int&quot;</code></pre>
+<hr>
+<h3 id="toString">builtin.toString</h3>
+<p>将任意值转换为字符串。</p>
+<p><strong>签名:</strong> <code>builtin.toString(value: Value): String</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>value</code></td><td><code>Value</code></td><td>待转换的值</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>String</code> — 字符串表示</p>
+<hr>
+<hr>
+<h2 id="stdcollections">std.collections</h2>
+<blockquote>函数数: 5 | <a href="index.html">返回目录</a></blockquote>
+<h3 id="listOf">collections.listOf</h3>
+<p>构造不可变列表。</p>
+<p><strong>签名:</strong> <code>collections.listOf(...: Value): List</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>...</code></td><td><code>Value</code></td><td>任意数量元素</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>List</code> — 包含所有参数的列表</p>
+<p><strong>示例:</strong></p>
+<pre><code>val nums = collections.listOf(1, 2, 3)</code></pre>
+<hr>
+<h3 id="mapOf">collections.mapOf</h3>
+<p>构造键值映射（参数成对出现）。</p>
+<p><strong>签名:</strong> <code>collections.mapOf(...: Value): Map</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>...</code></td><td><code>Value</code></td><td>键值对（交替出现）</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Map</code> — 包含所有键值对的映射</p>
+<p><strong>示例:</strong></p>
+<pre><code>val m = collections.mapOf(&quot;name&quot;, &quot;Aura&quot;, &quot;v&quot;, 1)</code></pre>
+<hr>
+<h3 id="setOf">collections.setOf</h3>
+<p>构造集合（自动去重）。</p>
+<p><strong>签名:</strong> <code>collections.setOf(...: Value): List</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>...</code></td><td><code>Value</code></td><td>任意数量元素</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>List</code> — 去重后的元素列表</p>
+<p><strong>示例:</strong></p>
+<pre><code>val s = collections.setOf(1, 2, 1, 3) // → [1, 2, 3]</code></pre>
+<hr>
+<h3 id="emptyList">collections.emptyList</h3>
+<p>构造空列表。</p>
+<p><strong>签名:</strong> <code>collections.emptyList(): List</code></p>
+<p><strong>返回值:</strong> <code>List</code> — 空列表</p>
+<hr>
+<h3 id="listContains">collections.listContains</h3>
+<p>检查列表是否包含指定元素。</p>
+<p><strong>签名:</strong> <code>collections.listContains(list: List, item: Value): Bool</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>list</code></td><td><code>List</code></td><td>源列表</td></tr>
+<tr><td><code>item</code></td><td><code>Value</code></td><td>要查找的元素</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Bool</code> — 包含返回 true</p>
+<hr>
+<hr>
+<h2 id="stdconsole">std.console</h2>
+<blockquote>函数数: 2 | <a href="index.html">返回目录</a></blockquote>
+<h3 id="red">console.red</h3>
+<p>将文本包装为红色 ANSI 颜色代码。</p>
+<p><strong>签名:</strong> <code>console.red(text: String): String</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>text</code></td><td><code>String</code></td><td>文本</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>String</code> — 带颜色代码的字符串</p>
+<p><strong>示例:</strong></p>
+<pre><code>io.println(console.red(&quot;Error!&quot;))</code></pre>
+<hr>
+<h3 id="green">console.green</h3>
+<p>将文本包装为绿色 ANSI 颜色代码。</p>
+<p><strong>签名:</strong> <code>console.green(text: String): String</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>text</code></td><td><code>String</code></td><td>文本</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>String</code> — 带颜色代码的字符串</p>
+<hr>
+<hr>
+<h2 id="stdencoding">std.encoding</h2>
+<blockquote>函数数: 3 | <a href="index.html">返回目录</a></blockquote>
+<h3 id="base64Encode">encoding.base64Encode</h3>
+<p>将字符串编码为 Base64。</p>
+<p><strong>签名:</strong> <code>encoding.base64Encode(text: String): String</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>text</code></td><td><code>String</code></td><td>源字符串</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>String</code> — Base64 编码字符串</p>
+<p><strong>示例:</strong></p>
+<pre><code>encoding.base64Encode(&quot;Hello&quot;)</code></pre>
+<hr>
+<h3 id="base64Decode">encoding.base64Decode</h3>
+<p>将 Base64 字符串解码。</p>
+<p><strong>签名:</strong> <code>encoding.base64Decode(text: String): String</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>text</code></td><td><code>String</code></td><td>Base64 字符串</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>String</code> — 解码后的字符串，失败返回错误信息</p>
+<hr>
+<h3 id="hexEncode">encoding.hexEncode</h3>
+<p>将字符串编码为十六进制。</p>
+<p><strong>签名:</strong> <code>encoding.hexEncode(text: String): String</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>text</code></td><td><code>String</code></td><td>源字符串</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>String</code> — 十六进制字符串</p>
+<p><strong>示例:</strong></p>
+<pre><code>encoding.hexEncode(&quot;Hi&quot;) // → &quot;4869&quot;</code></pre>
+<hr>
+<hr>
+<h2 id="stdenv">std.env</h2>
+<blockquote>函数数: 3 | <a href="index.html">返回目录</a></blockquote>
+<h3 id="get">env.get</h3>
+<p>获取环境变量值。</p>
+<p><strong>签名:</strong> <code>env.get(name: String, default: String): String</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>name</code></td><td><code>String</code></td><td>变量名</td></tr>
+<tr><td><code>default</code></td><td><code>String</code></td><td>不存在时的默认值（可选）</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>String</code> — 变量值或默认值</p>
+<hr>
+<h3 id="has">env.has</h3>
+<p>检查环境变量是否存在。</p>
+<p><strong>签名:</strong> <code>env.has(name: String): Bool</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>name</code></td><td><code>String</code></td><td>变量名</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Bool</code> — 存在返回 true</p>
+<hr>
+<h3 id="platform">env.platform</h3>
+<p>返回当前操作系统名称。</p>
+<p><strong>签名:</strong> <code>env.platform(): String</code></p>
+<p><strong>返回值:</strong> <code>String</code> — &quot;windows&quot; / &quot;linux&quot; / &quot;macos&quot;</p>
+<hr>
+<hr>
+<h2 id="stdfs">std.fs</h2>
+<blockquote>函数数: 7 | <a href="index.html">返回目录</a></blockquote>
+<h3 id="exists">fs.exists</h3>
+<p>检查路径是否存在。</p>
+<p><strong>签名:</strong> <code>fs.exists(path: String): Bool</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>path</code></td><td><code>String</code></td><td>文件/目录路径</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Bool</code> — 存在返回 true</p>
+<hr>
+<h3 id="readText">fs.readText</h3>
+<p>读取文件文本内容。</p>
+<p><strong>签名:</strong> <code>fs.readText(path: String): String</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>path</code></td><td><code>String</code></td><td>文件路径</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>String</code> — 文件内容，失败返回错误信息</p>
+<hr>
+<h3 id="writeText">fs.writeText</h3>
+<p>将文本写入文件。</p>
+<p><strong>签名:</strong> <code>fs.writeText(path: String, content: String): Unit</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>path</code></td><td><code>String</code></td><td>文件路径</td></tr>
+<tr><td><code>content</code></td><td><code>String</code></td><td>文本内容</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Unit</code> — 无返回值，失败返回错误信息</p>
+<hr>
+<h3 id="mkdir">fs.mkdir</h3>
+<p>创建目录。</p>
+<p><strong>签名:</strong> <code>fs.mkdir(path: String): Unit</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>path</code></td><td><code>String</code></td><td>目录路径</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Unit</code> — 无返回值</p>
+<hr>
+<h3 id="mkdirP">fs.mkdirP</h3>
+<p>递归创建目录（包含所有父目录）。</p>
+<p><strong>签名:</strong> <code>fs.mkdirP(path: String): Unit</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>path</code></td><td><code>String</code></td><td>目录路径</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Unit</code> — 无返回值</p>
+<hr>
+<h3 id="listDir">fs.listDir</h3>
+<p>列出目录中的所有条目名称。</p>
+<p><strong>签名:</strong> <code>fs.listDir(path: String): List<String></code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>path</code></td><td><code>String</code></td><td>目录路径</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>List<String></code> — 条目名称列表</p>
+<hr>
+<h3 id="fileSize">fs.fileSize</h3>
+<p>返回文件大小（字节）。</p>
+<p><strong>签名:</strong> <code>fs.fileSize(path: String): Int</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>path</code></td><td><code>String</code></td><td>文件路径</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Int</code> — 字节数，失败返回 -1</p>
+<hr>
+<hr>
+<h2 id="stdio">std.io</h2>
+<blockquote>函数数: 6 | <a href="index.html">返回目录</a></blockquote>
+<h3 id="println">io.println</h3>
+<p>打印一行文本到标准输出，末尾自动追加换行符。</p>
+<p><strong>签名:</strong> <code>io.println(msg: String): Unit</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>msg</code></td><td><code>String</code></td><td>要输出的文本（可多参数拼接）</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Unit</code> — 无返回值</p>
+<p><strong>示例:</strong></p>
+<pre><code>io.println(&quot;Hello, Aura!&quot;)</code></pre>
+<hr>
+<h3 id="print">io.print</h3>
+<p>打印文本到标准输出，不追加换行符。</p>
+<p><strong>签名:</strong> <code>io.print(msg: String): Unit</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>msg</code></td><td><code>String</code></td><td>要输出的文本</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Unit</code> — 无返回值</p>
+<p><strong>示例:</strong></p>
+<pre><code>io.print(&quot;Hello &quot;) // 不换行</code></pre>
+<hr>
+<h3 id="readLine">io.readLine</h3>
+<p>从标准输入读取一行文本。</p>
+<p><strong>签名:</strong> <code>io.readLine(): String</code></p>
+<p><strong>返回值:</strong> <code>String</code> — 读取到的文本（去除尾部换行），无输入时返回 null</p>
+<p><strong>示例:</strong></p>
+<pre><code>val line = io.readLine()</code></pre>
+<hr>
+<h3 id="fileRead">io.fileRead</h3>
+<p>读取文件全部内容为字符串。</p>
+<p><strong>签名:</strong> <code>io.fileRead(path: String): String</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>path</code></td><td><code>String</code></td><td>文件路径</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>String</code> — 文件内容，读取失败返回错误信息</p>
+<p><strong>示例:</strong></p>
+<pre><code>val content = io.fileRead(&quot;data.txt&quot;)</code></pre>
+<hr>
+<h3 id="fileWrite">io.fileWrite</h3>
+<p>将字符串写入文件（覆盖模式）。</p>
+<p><strong>签名:</strong> <code>io.fileWrite(path: String, content: String): Unit</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>path</code></td><td><code>String</code></td><td>目标文件路径</td></tr>
+<tr><td><code>content</code></td><td><code>String</code></td><td>要写入的内容</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Unit</code> — 无返回值，失败时返回错误信息</p>
+<p><strong>示例:</strong></p>
+<pre><code>io.fileWrite(&quot;out.txt&quot;, &quot;Hello&quot;)</code></pre>
+<hr>
+<h3 id="fileExists">io.fileExists</h3>
+<p>检查文件或目录是否存在。</p>
+<p><strong>签名:</strong> <code>io.fileExists(path: String): Bool</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>path</code></td><td><code>String</code></td><td>路径</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Bool</code> — 存在返回 true</p>
+<hr>
+<hr>
+<h2 id="stditer">std.iter</h2>
+<blockquote>函数数: 4 | <a href="index.html">返回目录</a></blockquote>
+<h3 id="sum">iter.sum</h3>
+<p>返回列表中所有元素的和。</p>
+<p><strong>签名:</strong> <code>iter.sum(list: List): Int / Float</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>list</code></td><td><code>List</code></td><td>源列表</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Int / Float</code> — 元素总和</p>
+<p><strong>示例:</strong></p>
+<pre><code>iter.sum(listOf(1, 2, 3)) // → 6</code></pre>
+<hr>
+<h3 id="avg">iter.avg</h3>
+<p>返回列表中所有元素的平均值。</p>
+<p><strong>签名:</strong> <code>iter.avg(list: List): Float</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>list</code></td><td><code>List</code></td><td>源列表</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Float</code> — 平均值</p>
+<hr>
+<h3 id="distinct">iter.distinct</h3>
+<p>返回列表的去重结果（保持顺序）。</p>
+<p><strong>签名:</strong> <code>iter.distinct(list: List): List</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>list</code></td><td><code>List</code></td><td>源列表</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>List</code> — 去重后的列表</p>
+<hr>
+<h3 id="range">iter.range</h3>
+<p>生成闭区间 [from, to] 的整数列表。</p>
+<p><strong>签名:</strong> <code>iter.range(from: Int, to: Int): List</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>from</code></td><td><code>Int</code></td><td>起始值</td></tr>
+<tr><td><code>to</code></td><td><code>Int</code></td><td>结束值</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>List</code> — 整数列表</p>
+<p><strong>示例:</strong></p>
+<pre><code>iter.range(1, 5) // → [1, 2, 3, 4, 5]</code></pre>
+<hr>
+<hr>
+<h2 id="stdjson">std.json</h2>
+<blockquote>函数数: 3 | <a href="index.html">返回目录</a></blockquote>
+<h3 id="parse">json.parse</h3>
+<p>将 JSON 字符串解析为 Aura 值树。</p>
+<p><strong>签名:</strong> <code>json.parse(text: String): Value</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>text</code></td><td><code>String</code></td><td>JSON 字符串</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Value</code> — 解析后的值（Map/List/Int/Float/Bool/String/Null），失败返回错误信息</p>
+<p><strong>示例:</strong></p>
+<pre><code>json.parse(&quot;{\&quot;name\&quot;:\&quot;Aura\&quot;}&quot;)</code></pre>
+<hr>
+<h3 id="stringify">json.stringify</h3>
+<p>将 Aura 值序列化为 JSON 字符串。</p>
+<p><strong>签名:</strong> <code>json.stringify(value: Value, pretty: Bool): String</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>value</code></td><td><code>Value</code></td><td>要序列化的值</td></tr>
+<tr><td><code>pretty</code></td><td><code>Bool</code></td><td>是否美化输出（可选）</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>String</code> — JSON 字符串</p>
+<p><strong>示例:</strong></p>
+<pre><code>json.stringify({name: &quot;Aura&quot;})</code></pre>
+<hr>
+<h3 id="isValid">json.isValid</h3>
+<p>检查字符串是否为合法 JSON。</p>
+<p><strong>签名:</strong> <code>json.isValid(text: String): Bool</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>text</code></td><td><code>String</code></td><td>待检查的字符串</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Bool</code> — 合法返回 true</p>
+<hr>
+<hr>
+<h2 id="stdmath">std.math</h2>
+<blockquote>函数数: 12 | <a href="index.html">返回目录</a></blockquote>
+<h3 id="abs">math.abs</h3>
+<p>返回数值的绝对值。</p>
+<p><strong>签名:</strong> <code>math.abs(x: Int / Float): Int / Float</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>x</code></td><td><code>Int / Float</code></td><td>输入值</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Int / Float</code> — 绝对值</p>
+<p><strong>示例:</strong></p>
+<pre><code>math.abs(-42) // → 42</code></pre>
+<hr>
+<h3 id="min">math.min</h3>
+<p>返回两个整数中的较小值。</p>
+<p><strong>签名:</strong> <code>math.min(a: Int, b: Int): Int</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>a</code></td><td><code>Int</code></td><td>第一个数</td></tr>
+<tr><td><code>b</code></td><td><code>Int</code></td><td>第二个数</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Int</code> — 最小值</p>
+<p><strong>示例:</strong></p>
+<pre><code>math.min(3, 5) // → 3</code></pre>
+<hr>
+<h3 id="max">math.max</h3>
+<p>返回两个整数中的较大值。</p>
+<p><strong>签名:</strong> <code>math.max(a: Int, b: Int): Int</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>a</code></td><td><code>Int</code></td><td>第一个数</td></tr>
+<tr><td><code>b</code></td><td><code>Int</code></td><td>第二个数</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Int</code> — 最大值</p>
+<p><strong>示例:</strong></p>
+<pre><code>math.max(3, 5) // → 5</code></pre>
+<hr>
+<h3 id="sqrt">math.sqrt</h3>
+<p>返回数的平方根。</p>
+<p><strong>签名:</strong> <code>math.sqrt(x: Float): Float</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>x</code></td><td><code>Float</code></td><td>输入值（≥0）</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Float</code> — 平方根</p>
+<p><strong>示例:</strong></p>
+<pre><code>math.sqrt(16.0) // → 4.0</code></pre>
+<hr>
+<h3 id="pow">math.pow</h3>
+<p>返回 base^exp（幂运算）。</p>
+<p><strong>签名:</strong> <code>math.pow(base: Float, exp: Float): Float</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>base</code></td><td><code>Float</code></td><td>底数</td></tr>
+<tr><td><code>exp</code></td><td><code>Float</code></td><td>指数</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Float</code> — 幂运算结果</p>
+<p><strong>示例:</strong></p>
+<pre><code>math.pow(2.0, 10.0) // → 1024.0</code></pre>
+<hr>
+<h3 id="PI">math.PI</h3>
+<p>圆周率 π ≈ 3.141592653589793。</p>
+<p><strong>签名:</strong> <code>math.PI(): Float</code></p>
+<p><strong>返回值:</strong> <code>Float</code> — π 的精确值</p>
+<hr>
+<h3 id="E">math.E</h3>
+<p>自然对数的底 e ≈ 2.718281828459045。</p>
+<p><strong>签名:</strong> <code>math.E(): Float</code></p>
+<p><strong>返回值:</strong> <code>Float</code> — e 的精确值</p>
+<hr>
+<h3 id="sin">math.sin</h3>
+<p>返回角度的正弦值（弧度）。</p>
+<p><strong>签名:</strong> <code>math.sin(angle: Float): Float</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>angle</code></td><td><code>Float</code></td><td>弧度值</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Float</code> — sin(angle)</p>
+<hr>
+<h3 id="cos">math.cos</h3>
+<p>返回角度的余弦值（弧度）。</p>
+<p><strong>签名:</strong> <code>math.cos(angle: Float): Float</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>angle</code></td><td><code>Float</code></td><td>弧度值</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Float</code> — cos(angle)</p>
+<hr>
+<h3 id="log">math.log</h3>
+<p>返回自然对数（以 e 为底）。</p>
+<p><strong>签名:</strong> <code>math.log(x: Float): Float</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>x</code></td><td><code>Float</code></td><td>输入值（&gt;0）</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Float</code> — ln(x)</p>
+<hr>
+<h3 id="ceil">math.ceil</h3>
+<p>向上取整。</p>
+<p><strong>签名:</strong> <code>math.ceil(x: Float): Float</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>x</code></td><td><code>Float</code></td><td>输入值</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Float</code> — ≥ x 的最小整数</p>
+<p><strong>示例:</strong></p>
+<pre><code>math.ceil(1.2) // → 2.0</code></pre>
+<hr>
+<h3 id="floor">math.floor</h3>
+<p>向下取整。</p>
+<p><strong>签名:</strong> <code>math.floor(x: Float): Float</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>x</code></td><td><code>Float</code></td><td>输入值</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Float</code> — ≤ x 的最大整数</p>
+<p><strong>示例:</strong></p>
+<pre><code>math.floor(1.8) // → 1.0</code></pre>
+<hr>
+<hr>
+<h2 id="stdnet">std.net</h2>
+<blockquote>函数数: 2 | <a href="index.html">返回目录</a></blockquote>
+<h3 id="getHostname">net.getHostname</h3>
+<p>返回本机主机名。</p>
+<p><strong>签名:</strong> <code>net.getHostname(): String</code></p>
+<p><strong>返回值:</strong> <code>String</code> — 主机名字符串</p>
+<hr>
+<h3 id="getLocalIp">net.getLocalIp</h3>
+<p>返回本机 IP 地址。</p>
+<p><strong>签名:</strong> <code>net.getLocalIp(): String</code></p>
+<p><strong>返回值:</strong> <code>String</code> — IP 地址字符串</p>
+<hr>
+<hr>
+<h2 id="stdpath">std.path</h2>
+<blockquote>函数数: 3 | <a href="index.html">返回目录</a></blockquote>
+<h3 id="join">path.join</h3>
+<p>拼接多个路径组件。</p>
+<p><strong>签名:</strong> <code>path.join(...: String): String</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>...</code></td><td><code>String</code></td><td>路径组件</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>String</code> — 拼接后的路径</p>
+<p><strong>示例:</strong></p>
+<pre><code>path.join(&quot;dir&quot;, &quot;file.txt&quot;)</code></pre>
+<hr>
+<h3 id="basename">path.basename</h3>
+<p>返回文件名（不含扩展名）。</p>
+<p><strong>签名:</strong> <code>path.basename(path: String): String</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>path</code></td><td><code>String</code></td><td>文件路径</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>String</code> — 文件基名</p>
+<p><strong>示例:</strong></p>
+<pre><code>path.basename(&quot;dir/file.txt&quot;) // → &quot;file&quot;</code></pre>
+<hr>
+<h3 id="extname">path.extname</h3>
+<p>返回文件扩展名（含点）。</p>
+<p><strong>签名:</strong> <code>path.extname(path: String): String</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>path</code></td><td><code>String</code></td><td>文件路径</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>String</code> — 扩展名</p>
+<p><strong>示例:</strong></p>
+<pre><code>path.extname(&quot;file.txt&quot;) // → &quot;.txt&quot;</code></pre>
+<hr>
+<hr>
+<h2 id="stdprocess">std.process</h2>
+<blockquote>函数数: 2 | <a href="index.html">返回目录</a></blockquote>
+<h3 id="pid">process.pid</h3>
+<p>返回当前进程 ID。</p>
+<p><strong>签名:</strong> <code>process.pid(): Int</code></p>
+<p><strong>返回值:</strong> <code>Int</code> — 进程 ID</p>
+<hr>
+<h3 id="args">process.args</h3>
+<p>返回命令行参数列表。</p>
+<p><strong>签名:</strong> <code>process.args(): List<String></code></p>
+<p><strong>返回值:</strong> <code>List<String></code> — 参数列表</p>
+<hr>
+<hr>
+<h2 id="stdrandom">std.random</h2>
+<blockquote>函数数: 5 | <a href="index.html">返回目录</a></blockquote>
+<h3 id="nextInt">random.nextInt</h3>
+<p>返回 64 位随机整数。</p>
+<p><strong>签名:</strong> <code>random.nextInt(): Int</code></p>
+<p><strong>返回值:</strong> <code>Int</code> — 随机 i64 值</p>
+<hr>
+<h3 id="nextFloat">random.nextFloat</h3>
+<p>返回 [0, 1) 区间的随机浮点数。</p>
+<p><strong>签名:</strong> <code>random.nextFloat(): Float</code></p>
+<p><strong>返回值:</strong> <code>Float</code> — 随机 f64 值</p>
+<hr>
+<h3 id="nextIntRange">random.nextIntRange</h3>
+<p>返回 [min, max) 区间的随机整数。</p>
+<p><strong>签名:</strong> <code>random.nextIntRange(min: Int, max: Int): Int</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>min</code></td><td><code>Int</code></td><td>下界（含）</td></tr>
+<tr><td><code>max</code></td><td><code>Int</code></td><td>上界（不含）</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Int</code> — 区间内随机整数</p>
+<p><strong>示例:</strong></p>
+<pre><code>random.nextIntRange(1, 100)</code></pre>
+<hr>
+<h3 id="choice">random.choice</h3>
+<p>从参数列表中随机选择一个元素。</p>
+<p><strong>签名:</strong> <code>random.choice(...: Value): Value</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>...</code></td><td><code>Value</code></td><td>候选元素</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Value</code> — 随机选中的元素</p>
+<p><strong>示例:</strong></p>
+<pre><code>random.choice(1, 2, 3)</code></pre>
+<hr>
+<h3 id="shuffle">random.shuffle</h3>
+<p>返回列表的随机排列。</p>
+<p><strong>签名:</strong> <code>random.shuffle(list: List): List</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>list</code></td><td><code>List</code></td><td>源列表</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>List</code> — 打乱后的列表</p>
+<hr>
+<hr>
+<h2 id="stdstring">std.string</h2>
+<blockquote>函数数: 12 | <a href="index.html">返回目录</a></blockquote>
+<h3 id="contains">string.contains</h3>
+<p>判断字符串是否包含子串。</p>
+<p><strong>签名:</strong> <code>string.contains(text: String, substr: String): Bool</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>text</code></td><td><code>String</code></td><td>源字符串</td></tr>
+<tr><td><code>substr</code></td><td><code>String</code></td><td>子串</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Bool</code> — 包含返回 true</p>
+<p><strong>示例:</strong></p>
+<pre><code>string.contains(&quot;hello&quot;, &quot;ell&quot;) // → true</code></pre>
+<hr>
+<h3 id="startsWith">string.startsWith</h3>
+<p>判断字符串是否以指定前缀开头。</p>
+<p><strong>签名:</strong> <code>string.startsWith(text: String, prefix: String): Bool</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>text</code></td><td><code>String</code></td><td>源字符串</td></tr>
+<tr><td><code>prefix</code></td><td><code>String</code></td><td>前缀</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Bool</code> — 匹配返回 true</p>
+<hr>
+<h3 id="endsWith">string.endsWith</h3>
+<p>判断字符串是否以指定后缀结尾。</p>
+<p><strong>签名:</strong> <code>string.endsWith(text: String, suffix: String): Bool</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>text</code></td><td><code>String</code></td><td>源字符串</td></tr>
+<tr><td><code>suffix</code></td><td><code>String</code></td><td>后缀</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Bool</code> — 匹配返回 true</p>
+<hr>
+<h3 id="split">string.split</h3>
+<p>按分隔符拆分字符串，返回 List。</p>
+<p><strong>签名:</strong> <code>string.split(text: String, sep: String): List<String></code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>text</code></td><td><code>String</code></td><td>源字符串</td></tr>
+<tr><td><code>sep</code></td><td><code>String</code></td><td>分隔符</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>List<String></code> — 拆分后的子串列表</p>
+<p><strong>示例:</strong></p>
+<pre><code>string.split(&quot;a,b,c&quot;, &quot;,&quot;) // → [&quot;a&quot;, &quot;b&quot;, &quot;c&quot;]</code></pre>
+<hr>
+<h3 id="join">string.join</h3>
+<p>将空格分隔的文本合并，用指定分隔符连接。</p>
+<p><strong>签名:</strong> <code>string.join(text: String, sep: String): String</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>text</code></td><td><code>String</code></td><td>源文本（空格分隔）</td></tr>
+<tr><td><code>sep</code></td><td><code>String</code></td><td>分隔符</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>String</code> — 合并后的字符串</p>
+<hr>
+<h3 id="replace">string.replace</h3>
+<p>替换第一个匹配的子串。</p>
+<p><strong>签名:</strong> <code>string.replace(text: String, target: String, replacement: String): String</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>text</code></td><td><code>String</code></td><td>源字符串</td></tr>
+<tr><td><code>target</code></td><td><code>String</code></td><td>要替换的子串</td></tr>
+<tr><td><code>replacement</code></td><td><code>String</code></td><td>替换文本</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>String</code> — 替换后的字符串</p>
+<p><strong>示例:</strong></p>
+<pre><code>string.replace(&quot;hello world&quot;, &quot;world&quot;, &quot;Aura&quot;)</code></pre>
+<hr>
+<h3 id="toUpperCase">string.toUpperCase</h3>
+<p>将所有字母转换为大写。</p>
+<p><strong>签名:</strong> <code>string.toUpperCase(text: String): String</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>text</code></td><td><code>String</code></td><td>源字符串</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>String</code> — 大写字符串</p>
+<p><strong>示例:</strong></p>
+<pre><code>string.toUpperCase(&quot;hello&quot;) // → &quot;HELLO&quot;</code></pre>
+<hr>
+<h3 id="toLowerCase">string.toLowerCase</h3>
+<p>将所有字母转换为小写。</p>
+<p><strong>签名:</strong> <code>string.toLowerCase(text: String): String</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>text</code></td><td><code>String</code></td><td>源字符串</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>String</code> — 小写字符串</p>
+<p><strong>示例:</strong></p>
+<pre><code>string.toLowerCase(&quot;HELLO&quot;) // → &quot;hello&quot;</code></pre>
+<hr>
+<h3 id="length">string.length</h3>
+<p>返回字符串的字符数。</p>
+<p><strong>签名:</strong> <code>string.length(text: String): Int</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>text</code></td><td><code>String</code></td><td>源字符串</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Int</code> — 字符数量</p>
+<hr>
+<h3 id="trim">string.trim</h3>
+<p>去除首尾空白字符。</p>
+<p><strong>签名:</strong> <code>string.trim(text: String): String</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>text</code></td><td><code>String</code></td><td>源字符串</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>String</code> — 修剪后的字符串</p>
+<p><strong>示例:</strong></p>
+<pre><code>string.trim(&quot;  hello  &quot;) // → &quot;hello&quot;</code></pre>
+<hr>
+<h3 id="format">string.format</h3>
+<p>将 `{0}`, `{1}` 等占位符替换为参数值。</p>
+<p><strong>签名:</strong> <code>string.format(template: String, ...: Value): String</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>template</code></td><td><code>String</code></td><td>模板字符串</td></tr>
+<tr><td><code>...</code></td><td><code>Value</code></td><td>任意数量参数</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>String</code> — 格式化后的字符串</p>
+<p><strong>示例:</strong></p>
+<pre><code>string.format(&quot;Hello {0}&quot;, &quot;Aura&quot;) // → &quot;Hello Aura&quot;</code></pre>
+<hr>
+<h3 id="matches">string.matches</h3>
+<p>正则表达式匹配。</p>
+<p><strong>签名:</strong> <code>string.matches(text: String, regex: String): Bool</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>text</code></td><td><code>String</code></td><td>源字符串</td></tr>
+<tr><td><code>regex</code></td><td><code>String</code></td><td>正则表达式</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Bool</code> — 匹配返回 true</p>
+<hr>
+<hr>
+<h2 id="stdtest">std.test</h2>
+<blockquote>函数数: 2 | <a href="index.html">返回目录</a></blockquote>
+<h3 id="assertTrue">test.assertTrue</h3>
+<p>断言条件为 true，返回 PASS/FAIL 字符串。</p>
+<p><strong>签名:</strong> <code>test.assertTrue(condition: Value, message: String): String</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>condition</code></td><td><code>Value</code></td><td>断言条件</td></tr>
+<tr><td><code>message</code></td><td><code>String</code></td><td>断言消息（可选）</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>String</code> — &quot;PASS: ...&quot; 或 &quot;FAIL: ...&quot;</p>
+<p><strong>示例:</strong></p>
+<pre><code>test.assertTrue(true, &quot;all good&quot;)</code></pre>
+<hr>
+<h3 id="assertEq">test.assertEq</h3>
+<p>断言两个值相等。</p>
+<p><strong>签名:</strong> <code>test.assertEq(a: Value, b: Value, message: String): String</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>a</code></td><td><code>Value</code></td><td>实际值</td></tr>
+<tr><td><code>b</code></td><td><code>Value</code></td><td>期望值</td></tr>
+<tr><td><code>message</code></td><td><code>String</code></td><td>消息（可选）</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>String</code> — &quot;PASS: ...&quot; 或 &quot;FAIL: ...&quot;</p>
+<p><strong>示例:</strong></p>
+<pre><code>test.assertEq(42, 42, &quot;answer&quot;)</code></pre>
+<hr>
+<hr>
+<h2 id="stdtime">std.time</h2>
+<blockquote>函数数: 3 | <a href="index.html">返回目录</a></blockquote>
+<h3 id="now">time.now</h3>
+<p>返回当前 Unix 时间戳（秒）。</p>
+<p><strong>签名:</strong> <code>time.now(): Float</code></p>
+<p><strong>返回值:</strong> <code>Float</code> — 自 1970-01-01 以来的秒数</p>
+<hr>
+<h3 id="sleep">time.sleep</h3>
+<p>暂停执行指定秒数。</p>
+<p><strong>签名:</strong> <code>time.sleep(seconds: Float): Unit</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>seconds</code></td><td><code>Float</code></td><td>暂停秒数</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>Unit</code> — 无返回值</p>
+<p><strong>示例:</strong></p>
+<pre><code>time.sleep(1.0)</code></pre>
+<hr>
+<h3 id="toDateString">time.toDateString</h3>
+<p>将时间戳转换为日期字符串（YYYY-MM-DD）。</p>
+<p><strong>签名:</strong> <code>time.toDateString(timestamp: Int): String</code></p>
+<table>
+<thead><tr><th>参数</th><th>类型</th><th>描述</th></tr></thead>
+<tbody>
+<tr><td><code>timestamp</code></td><td><code>Int</code></td><td>Unix 时间戳（秒）</td></tr>
+</tbody>
+</table>
+<p><strong>返回值:</strong> <code>String</code> — 格式化日期</p>
+<p><strong>示例:</strong></p>
+<pre><code>time.toDateString(0) // → &quot;1970-01-01&quot;</code></pre>
+<hr>
+<hr>
+</body>
+</html>

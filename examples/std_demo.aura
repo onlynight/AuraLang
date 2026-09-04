@@ -1,0 +1,114 @@
+// P9 标准库示例 — 演示所有 std 模块的用法
+
+// ════════════════════════════════════════════════════════════
+// std.io — 标准输入输出
+// ════════════════════════════════════════════════════════════
+println("Hello from Aura std.io!")
+print("Hello from Aura std.io (no newline)")
+io.println("print with newline via io.println")
+
+// ════════════════════════════════════════════════════════════
+// std.math — 数学函数
+// ════════════════════════════════════════════════════════════
+println("math.abs(-42) = " + math.abs(-42).toString())
+println("math.min(3, 5) = " + math.min(3, 5).toString())
+println("math.max(3, 5) = " + math.max(3, 5).toString())
+println("math.sqrt(16) = " + math.sqrt(16.0).toString())
+println("math.pow(2, 10) = " + math.pow(2.0, 10.0).toString())
+println("math.PI = " + math.PI().toString())
+println("math.sin(0) = " + math.sin(0.0).toString())
+
+// ════════════════════════════════════════════════════════════
+// std.string — 字符串操作
+// ════════════════════════════════════════════════════════════
+val s = "Hello, Aura World!"
+println("s.toUpperCase() = " + s.toUpperCase())
+println("s.toLowerCase() = " + s.toLowerCase())
+println("s.length() = " + s.length().toString())
+println("s.trim() = " + "  hello  ".trim())
+println("s.split(' ') = " + s.split(" ").join(", "))
+
+// ════════════════════════════════════════════════════════════
+// std.collections — 集合构造
+// ════════════════════════════════════════════════════════════
+val list = listOf(1, 2, 3, 4, 5)
+val map = mapOf("name", "Aura", "version", 1)
+val set = setOf(1, 2, 2, 3, 3, 3)
+
+// ════════════════════════════════════════════════════════════
+// std.json — JSON 解析与序列化
+// ════════════════════════════════════════════════════════════
+val jsonStr = "{\"name\": \"Aura\", \"version\": 1}"
+val parsed = json.parse(jsonStr)
+println("JSON valid: " + json.isValid(jsonStr).toString())
+
+// ════════════════════════════════════════════════════════════
+// std.time — 时间/日期
+// ════════════════════════════════════════════════════════════
+val now = time.now()
+println("Current timestamp: " + now.toString())
+println("Epoch date: " + time.toDateString(0))
+
+// ════════════════════════════════════════════════════════════
+// std.test — 测试断言
+// ════════════════════════════════════════════════════════════
+test.assertTrue(true, "This should pass")
+test.assertEq(42, 42, "Numbers are equal")
+test.assertNotNull(1, "Value is not null")
+
+// ════════════════════════════════════════════════════════════
+// std.builtin — 编译期内建
+// ════════════════════════════════════════════════════════════
+val x = 42
+println("typeof(42) = " + builtin.typeof(x).toString())
+println("builtin.toInt(3.14) = " + builtin.toInt(3.14).toString())
+
+// ════════════════════════════════════════════════════════════
+// std.env — 环境变量
+// ════════════════════════════════════════════════════════════
+println("Platform: " + env.platform())
+println("Home: " + env.home())
+println("Temp: " + env.tmp())
+
+// ════════════════════════════════════════════════════════════
+// std.random — 随机数
+// ════════════════════════════════════════════════════════════
+val rand1 = random.nextIntRange(1, 100)
+val rand2 = random.nextFloat()
+println("Random int: " + rand1.toString())
+println("Random float: " + rand2.toString())
+
+// ════════════════════════════════════════════════════════════
+// std.encoding — 编码/解码
+// ════════════════════════════════════════════════════════════
+val encoded = encoding.base64Encode("Hello Aura")
+val decoded = encoding.base64Decode(encoded)
+println("Base64 roundtrip: " + decoded)
+
+// ════════════════════════════════════════════════════════════
+// std.ascii — 字符工具
+// ════════════════════════════════════════════════════════════
+println("isAlpha('A'): " + ascii.isAlpha("A").toString())
+println("isDigit('5'): " + ascii.isDigit("5").toString())
+println("isUpper('a'): " + ascii.isUpper("a").toString())
+
+// ════════════════════════════════════════════════════════════
+// std.path — 路径操作
+// ════════════════════════════════════════════════════════════
+println("basename: " + path.basename("dir/file.txt"))
+println("extname: " + path.extname("dir/file.txt"))
+
+// ════════════════════════════════════════════════════════════
+// std.iter — 迭代器工具
+// ════════════════════════════════════════════════════════════
+val nums = listOf(1, 2, 3, 4, 5)
+println("sum: " + iter.sum(nums).toString())
+println("avg: " + iter.avg(nums).toString())
+println("min: " + iter.min(nums).toString())
+println("max: " + iter.max(nums).toString())
+
+// ════════════════════════════════════════════════════════════
+// std.net — 网络信息
+// ════════════════════════════════════════════════════════════
+println("Hostname: " + net.getHostname())
+println("Local IP: " + net.getLocalIp())

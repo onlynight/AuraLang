@@ -41,6 +41,7 @@ fn main() {
         "ast" => cmd_ast(rest),
         "fmt" => cmd_fmt(rest),
         "leak-check" => cmd_leak_check(rest),
+        "doc" => cmd_doc(rest),
         "--help" | "-h" | "help" => print_usage(),
         other => {
             eprintln!("未知子命令: {}", other);
@@ -67,7 +68,8 @@ fn print_usage() {
   aura tokens <file.aura>                       输出词法分析\n\
   aura ast <file.aura>                          输出 AST\n\
   aura fmt <file.aura>                          代码格式化（预留）\n\
-  aura leak-check <file.aura>                    P7: 内存泄漏检测（ARC 分析）\n"
+  aura leak-check <file.aura>                    P7: 内存泄漏检测（ARC 分析）\n\
+  aura doc [--output <dir>]                       生成标准库 API 文档（Markdown + HTML）\n"
     );
 }
 
@@ -594,5 +596,70 @@ fn cmd_leak_check(args: &[String]) {
         for d in &result.leak_report.details {
             println!("  - [{}] {}", d.function, d.description);
         }
+    }
+}
+
+/// P9.11: 生成标准库 API 文档
+fn cmd_doc(args: &[String]) {
+    let output_dir = extract_opt(args, "--output")
+        .map(|s| std::path::PathBuf::from(s))
+        .unwrap_or_else(|| std::path::PathBuf::from("docs/api"));
+
+    // 可选：仅生成指定模块
+    let module_filter = extract_opt(args, "--module");
+
+    if let Some(module) = &module_filter {
+        // 仅生成单个模块文档
+        let registry = aura_compiler::docgen::DocRegistry::new().load_all();
+        let docs = registry.by_module(module);
+        if docs.is_empty() {
+            eprintln!("错误: 模块 '{}' 不存在或无文档", module);
+            eprintln!("可用模块:");
+            for m in registry.module_names() {
+                println!("  {}", m);
+            }
+            exit(1);
+        }
+        let content = aura_compiler::docgen::render_module_markdown(&registry, module);
+        std::fs::create_dir_all(&output_dir)
+            .map_err(|e| {
+                eprintln!("错误: 创建输出目录失败: {}", e);
+                exit(1);
+            })
+            .ok();
+        let file_path = output_dir.join(format!("std_{}.md", module));
+        std::fs::write(&file_path, &content)
+            .map_err(|e| {
+                eprintln!("错误: 写入 {} 失败: {}", file_path.display(), e);
+                exit(1);
+            })
+            .ok();
+        println!("✓ 已生成模块文档: {}", file_path.display());
+        println!("  函数数: {}", docs.len());
+        return;
+    }
+
+    // 生成完整文档（Markdown + HTML）
+    match aura_compiler::docgen::generate_docs(&output_dir) {
+        Ok(files) => {
+            println!("✓ 已生成 {} 个文档文件:", files.len());
+            for f in &files {
+                println!("  {}", f.display());
+            }
+        }
+        Err(e) => {
+            eprintln!("错误: 文档生成失败: {}", e);
+            exit(1);
+        }
+    }
+
+    // 同时生成 HTML 版本
+    let registry = aura_compiler::docgen::DocRegistry::new().load_all();
+    let html = aura_compiler::docgen::render_html(&registry);
+    let html_path = output_dir.join("index.html");
+    if let Err(e) = std::fs::write(&html_path, &html) {
+        eprintln!("警告: 无法写入 HTML 文档 {}: {}", html_path.display(), e);
+    } else {
+        println!("  ✓ HTML 文档: {}", html_path.display());
     }
 }

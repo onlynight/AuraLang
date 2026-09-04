@@ -1,7 +1,9 @@
 pub mod ast;
 pub mod codegen;
+pub mod docgen;
 pub mod errors;
 pub mod lexer;
+pub mod std;
 pub mod parser;
 pub mod sema;
 pub mod source_map;

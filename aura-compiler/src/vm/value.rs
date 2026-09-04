@@ -6,6 +6,7 @@
 //! 设计说明：字节码（`opcode.rs`）为栈式模型，因此 `Value` 需在操作数栈上被
 //! 频繁拷贝；所有变体均为 `Copy` 友好的轻量类型（`Str` 用 `Rc<str>` 共享，避免拷贝）。
 
+use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 
@@ -29,6 +30,10 @@ pub enum Value {
     /// 原始指针（C ABI 互操作，P8.6）。`0` = `nullptr`。
     /// 用于 `Pointer<T>` / `CString` / `CStr` / `Handle` 等 FFI 类型。
     Ptr(i64),
+    /// 列表（P9 标准库）
+    List(Vec<Value>),
+    /// 映射（P9 标准库）
+    Map(HashMap<Value, Value>),
 }
 
 impl Value {
@@ -49,6 +54,8 @@ impl Value {
             Value::Weak(_) => false,
             // 非空指针为真，nullptr 为假
             Value::Ptr(p) => *p != 0,
+            Value::List(items) => !items.is_empty(),
+            Value::Map(map) => !map.is_empty(),
         }
     }
 
@@ -117,6 +124,8 @@ impl Value {
             Value::Ref(_) => "Ref",
             Value::Weak(_) => "Weak",
             Value::Ptr(_) => "Pointer",
+            Value::List(_) => "List",
+            Value::Map(_) => "Map",
         }
     }
 }
@@ -130,6 +139,8 @@ impl PartialEq for Value {
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Null, Value::Null) => true,
             (Value::Ref(a), Value::Ref(b)) => a == b,
+            (Value::List(a), Value::List(b)) => a == b,
+            (Value::Map(a), Value::Map(b)) => a == b,
             // 跨数值类型比较（整 / 浮 互通）
             (Value::Int(a), Value::Float(b)) => (*a as f64) == *b,
             (Value::Float(a), Value::Int(b)) => *a == (*b as f64),
@@ -155,6 +166,17 @@ impl std::hash::Hash for Value {
             Value::Ref(h) => h.hash(state),
             Value::Weak(h) => h.hash(state),
             Value::Ptr(p) => p.hash(state),
+            Value::List(items) => {
+                for item in items {
+                    item.hash(state);
+                }
+            }
+            Value::Map(map) => {
+                for (k, v) in map {
+                    k.hash(state);
+                    v.hash(state);
+                }
+            }
         }
     }
 }
@@ -182,6 +204,28 @@ impl fmt::Display for Value {
                 } else {
                     write!(f, "<ptr#{p:x}>")
                 }
+            }
+            Value::List(items) => {
+                write!(f, "[")?;
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", item)?;
+                }
+                write!(f, "]")
+            }
+            Value::Map(map) => {
+                write!(f, "{{")?;
+                let mut first = true;
+                for (k, v) in map {
+                    if !first {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}: {}", k, v)?;
+                    first = false;
+                }
+                write!(f, "}}")
             }
         }
     }

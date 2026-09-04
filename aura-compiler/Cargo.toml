@@ -12,6 +12,15 @@ cranelift-jit = { version = "0.116", optional = true }
 cranelift-module = { version = "0.116", optional = true }
 libloading = { version = "0.8", optional = true }
 
+# 标准库依赖（P9）
+serde_json = "1"
+chrono = "0.4"
+rand = "0.8"
+regex = "1"
+base64 = "0.22"
+hex = "0.4"
+libc = "0.2"
+
 # AOT 编译后端所需的 crate（均通过 llvm feature 启用）：
 # - thiserror：错误处理
 #
