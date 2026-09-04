@@ -7,27 +7,27 @@ use crate::vm::value::Value;
 use std::path::PathBuf;
 
 pub fn register(reg: &mut NativeRegistry) {
-    reg.register("fs.exists", nat_exists);
-    reg.register("fs.isFile", nat_is_file);
-    reg.register("fs.isDirectory", nat_is_directory);
-    reg.register("fs.readText", nat_read_text);
-    reg.register("fs.writeText", nat_write_text);
-    reg.register("fs.readBytes", nat_read_bytes);
-    reg.register("fs.writeBytes", nat_write_bytes);
-    reg.register("fs.delete", nat_delete);
-    reg.register("fs.mkdir", nat_mkdir);
-    reg.register("fs.mkdirP", nat_mkdir_p);
-    reg.register("fs.rename", nat_rename);
-    reg.register("fs.copy", nat_copy);
-    reg.register("fs.listDir", nat_list_dir);
-    reg.register("fs.listFiles", nat_list_files);
-    reg.register("fs.fileSize", nat_file_size);
-    reg.register("fs.lastModified", nat_last_modified);
-    reg.register("fs.absolutePath", nat_absolute_path);
-    reg.register("fs.homeDir", nat_home_dir);
-    reg.register("fs.tempDir", nat_temp_dir);
-    reg.register("fs.currentDir", nat_current_dir);
-    reg.register("fs.walk", nat_walk);
+    reg.register("aura.fs.exists", nat_exists);
+    reg.register("aura.fs.isFile", nat_is_file);
+    reg.register("aura.fs.isDirectory", nat_is_directory);
+    reg.register("aura.fs.readText", nat_read_text);
+    reg.register("aura.fs.writeText", nat_write_text);
+    reg.register("aura.fs.readBytes", nat_read_bytes);
+    reg.register("aura.fs.writeBytes", nat_write_bytes);
+    reg.register("aura.fs.delete", nat_delete);
+    reg.register("aura.fs.mkdir", nat_mkdir);
+    reg.register("aura.fs.mkdirP", nat_mkdir_p);
+    reg.register("aura.fs.rename", nat_rename);
+    reg.register("aura.fs.copy", nat_copy);
+    reg.register("aura.fs.listDir", nat_list_dir);
+    reg.register("aura.fs.listFiles", nat_list_files);
+    reg.register("aura.fs.fileSize", nat_file_size);
+    reg.register("aura.fs.lastModified", nat_last_modified);
+    reg.register("aura.fs.absolutePath", nat_absolute_path);
+    reg.register("aura.fs.homeDir", nat_home_dir);
+    reg.register("aura.fs.tempDir", nat_temp_dir);
+    reg.register("aura.fs.currentDir", nat_current_dir);
+    reg.register("aura.fs.walk", nat_walk);
 }
 
 fn arg0(args: &[Value]) -> String {

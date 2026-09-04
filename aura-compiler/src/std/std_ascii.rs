@@ -6,18 +6,18 @@ use crate::vm::native::NativeRegistry;
 use crate::vm::value::Value;
 
 pub fn register(reg: &mut NativeRegistry) {
-    reg.register("ascii.isAlpha", nat_is_alpha);
-    reg.register("ascii.isDigit", nat_is_digit);
-    reg.register("ascii.isAlphaNumeric", nat_is_alphanumeric);
-    reg.register("ascii.isWhitespace", nat_is_whitespace);
-    reg.register("ascii.isUpper", nat_is_upper);
-    reg.register("ascii.isLower", nat_is_lower);
-    reg.register("ascii.toUpper", nat_to_upper);
-    reg.register("ascii.toLower", nat_to_lower);
-    reg.register("ascii.codeAt", nat_code_at);
-    reg.register("ascii.charAt", nat_char_at);
-    reg.register("ascii.fromCode", nat_from_code);
-    reg.register("ascii.codePointAt", nat_code_point_at);
+    reg.register("aura.ascii.isAlpha", nat_is_alpha);
+    reg.register("aura.ascii.isDigit", nat_is_digit);
+    reg.register("aura.ascii.isAlphaNumeric", nat_is_alphanumeric);
+    reg.register("aura.ascii.isWhitespace", nat_is_whitespace);
+    reg.register("aura.ascii.isUpper", nat_is_upper);
+    reg.register("aura.ascii.isLower", nat_is_lower);
+    reg.register("aura.ascii.toUpper", nat_to_upper);
+    reg.register("aura.ascii.toLower", nat_to_lower);
+    reg.register("aura.ascii.codeAt", nat_code_at);
+    reg.register("aura.ascii.charAt", nat_char_at);
+    reg.register("aura.ascii.fromCode", nat_from_code);
+    reg.register("aura.ascii.codePointAt", nat_code_point_at);
 }
 
 fn s0(args: &[Value]) -> String {

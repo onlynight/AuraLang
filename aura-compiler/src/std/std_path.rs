@@ -6,19 +6,19 @@ use crate::vm::native::NativeRegistry;
 use crate::vm::value::Value;
 
 pub fn register(reg: &mut NativeRegistry) {
-    reg.register("path.join", nat_join);
-    reg.register("path.dirname", nat_dirname);
-    reg.register("path.basename", nat_basename);
-    reg.register("path.extname", nat_extname);
-    reg.register("path.relative", nat_relative);
-    reg.register("path.resolve", nat_resolve);
-    reg.register("path.normalize", nat_normalize);
-    reg.register("path.isAbsolute", nat_is_absolute);
-    reg.register("path.isRelative", nat_is_relative);
-    reg.register("path.split", nat_split);
-    reg.register("path.separators", nat_separators);
-    reg.register("path.fromUnix", nat_from_unix);
-    reg.register("path.fromWindows", nat_from_windows);
+    reg.register("aura.path.join", nat_join);
+    reg.register("aura.path.dirname", nat_dirname);
+    reg.register("aura.path.basename", nat_basename);
+    reg.register("aura.path.extname", nat_extname);
+    reg.register("aura.path.relative", nat_relative);
+    reg.register("aura.path.resolve", nat_resolve);
+    reg.register("aura.path.normalize", nat_normalize);
+    reg.register("aura.path.isAbsolute", nat_is_absolute);
+    reg.register("aura.path.isRelative", nat_is_relative);
+    reg.register("aura.path.split", nat_split);
+    reg.register("aura.path.separators", nat_separators);
+    reg.register("aura.path.fromUnix", nat_from_unix);
+    reg.register("aura.path.fromWindows", nat_from_windows);
 }
 
 fn s0(args: &[Value]) -> String {

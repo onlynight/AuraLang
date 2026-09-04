@@ -6,19 +6,19 @@ use crate::vm::native::NativeRegistry;
 use crate::vm::value::Value;
 
 pub fn register(reg: &mut NativeRegistry) {
-    reg.register("env.get", nat_get);
-    reg.register("env.set", nat_set);
-    reg.register("env.remove", nat_remove);
-    reg.register("env.has", nat_has);
-    reg.register("env.keys", nat_keys);
-    reg.register("env.values", nat_values);
-    reg.register("env.all", nat_all);
-    reg.register("env.home", nat_home);
-    reg.register("env.tmp", nat_tmp);
-    reg.register("env.pwd", nat_pwd);
-    reg.register("env.platform", nat_platform);
-    reg.register("env.os", nat_os);
-    reg.register("env.arch", nat_arch);
+    reg.register("aura.env.get", nat_get);
+    reg.register("aura.env.set", nat_set);
+    reg.register("aura.env.remove", nat_remove);
+    reg.register("aura.env.has", nat_has);
+    reg.register("aura.env.keys", nat_keys);
+    reg.register("aura.env.values", nat_values);
+    reg.register("aura.env.all", nat_all);
+    reg.register("aura.env.home", nat_home);
+    reg.register("aura.env.tmp", nat_tmp);
+    reg.register("aura.env.pwd", nat_pwd);
+    reg.register("aura.env.platform", nat_platform);
+    reg.register("aura.env.os", nat_os);
+    reg.register("aura.env.arch", nat_arch);
 }
 
 /// env.get(name, default) → String

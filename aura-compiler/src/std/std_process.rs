@@ -6,16 +6,16 @@ use crate::vm::native::NativeRegistry;
 use crate::vm::value::Value;
 
 pub fn register(reg: &mut NativeRegistry) {
-    reg.register("process.exit", nat_exit);
-    reg.register("process.exitCode", nat_exit_code);
-    reg.register("process.args", nat_args);
-    reg.register("process.arg", nat_arg);
-    reg.register("process.argCount", nat_arg_count);
-    reg.register("process.pid", nat_pid);
-    reg.register("process.spawn", nat_spawn);
-    reg.register("process.kill", nat_kill);
-    reg.register("process.wait", nat_wait);
-    reg.register("process.exitProcess", nat_exit_process);
+    reg.register("aura.process.exit", nat_exit);
+    reg.register("aura.process.exitCode", nat_exit_code);
+    reg.register("aura.process.args", nat_args);
+    reg.register("aura.process.arg", nat_arg);
+    reg.register("aura.process.argCount", nat_arg_count);
+    reg.register("aura.process.pid", nat_pid);
+    reg.register("aura.process.spawn", nat_spawn);
+    reg.register("aura.process.kill", nat_kill);
+    reg.register("aura.process.wait", nat_wait);
+    reg.register("aura.process.exitProcess", nat_exit_process);
 }
 
 /// process.exit(code) → exits the process

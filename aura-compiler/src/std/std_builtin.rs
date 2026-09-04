@@ -6,22 +6,22 @@ use crate::vm::native::NativeRegistry;
 use crate::vm::value::Value;
 
 pub fn register(reg: &mut NativeRegistry) {
-    reg.register("builtin.typeof", nat_typeof);
-    reg.register("builtin.typeOf", nat_typeof);
-    reg.register("builtin.isNull", nat_is_null);
-    reg.register("builtin.isNotNull", nat_is_not_null);
-    reg.register("builtin.isZero", nat_is_zero);
-    reg.register("builtin.isPositive", nat_is_positive);
-    reg.register("builtin.isNegative", nat_is_negative);
-    reg.register("builtin.toString", nat_to_string);
-    reg.register("builtin.toInt", nat_to_int);
-    reg.register("builtin.toFloat", nat_to_float);
-    reg.register("builtin.toBool", nat_to_bool);
-    reg.register("builtin.sizeOf", nat_size_of);
-    reg.register("builtin.hash", nat_hash);
-    reg.register("builtin.compare", nat_compare);
-    reg.register("builtin.clone", nat_clone);
-    reg.register("builtin.identity", nat_identity);
+    reg.register("aura.builtin.typeof", nat_typeof);
+    reg.register("aura.builtin.typeOf", nat_typeof);
+    reg.register("aura.builtin.isNull", nat_is_null);
+    reg.register("aura.builtin.isNotNull", nat_is_not_null);
+    reg.register("aura.builtin.isZero", nat_is_zero);
+    reg.register("aura.builtin.isPositive", nat_is_positive);
+    reg.register("aura.builtin.isNegative", nat_is_negative);
+    reg.register("aura.builtin.toString", nat_to_string);
+    reg.register("aura.builtin.toInt", nat_to_int);
+    reg.register("aura.builtin.toFloat", nat_to_float);
+    reg.register("aura.builtin.toBool", nat_to_bool);
+    reg.register("aura.builtin.sizeOf", nat_size_of);
+    reg.register("aura.builtin.hash", nat_hash);
+    reg.register("aura.builtin.compare", nat_compare);
+    reg.register("aura.builtin.clone", nat_clone);
+    reg.register("aura.builtin.identity", nat_identity);
 }
 
 /// typeof(value) → String (type name)

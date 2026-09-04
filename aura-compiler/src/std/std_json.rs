@@ -7,16 +7,16 @@ use crate::vm::value::Value;
 use serde_json::Value as JsonValue;
 
 pub fn register(reg: &mut NativeRegistry) {
-    reg.register("json.parse", nat_parse);
-    reg.register("json.stringify", nat_stringify);
-    reg.register("json.isValid", nat_is_valid);
-    reg.register("json.get", nat_get);
-    reg.register("json.set", nat_set);
-    reg.register("json.keys", nat_keys);
-    reg.register("json.values", nat_values);
-    reg.register("json.length", nat_length);
-    reg.register("json.contains", nat_contains);
-    reg.register("json.remove", nat_remove);
+    reg.register("aura.json.parse", nat_parse);
+    reg.register("aura.json.stringify", nat_stringify);
+    reg.register("aura.json.isValid", nat_is_valid);
+    reg.register("aura.json.get", nat_get);
+    reg.register("aura.json.set", nat_set);
+    reg.register("aura.json.keys", nat_keys);
+    reg.register("aura.json.values", nat_values);
+    reg.register("aura.json.length", nat_length);
+    reg.register("aura.json.contains", nat_contains);
+    reg.register("aura.json.remove", nat_remove);
 }
 
 /// json.parse(text) → Value (JSON tree)

@@ -1,114 +1,161 @@
-// P9 标准库示例 — 演示所有 std 模块的用法
+// P9 标准库示例 - 所有标准库函数无需 import，直接使用！
 
 // ════════════════════════════════════════════════════════════
-// std.io — 标准输入输出
+// 数学函数 std.math
 // ════════════════════════════════════════════════════════════
-println("Hello from Aura std.io!")
-print("Hello from Aura std.io (no newline)")
-aura.io.println("print with newline via aura.io.println")
+val abs_val = aura.math.abs(-42)
+val min_val = aura.math.min(3, 5)
+val max_val = aura.math.max(3, 5)
+val sqrt_val = aura.math.sqrt(16.0)
+val pow_val = aura.math.pow(2.0, 10.0)
+val pi = aura.math.PI()
+val e = aura.math.E()
+
+aura.io.println("math.abs(-42) = " + abs_val)
+aura.io.println("math.min(3, 5) = " + min_val)
+aura.io.println("math.max(3, 5) = " + max_val)
+aura.io.println("math.sqrt(16.0) = " + sqrt_val)
+aura.io.println("math.pow(2.0, 10.0) = " + pow_val)
+aura.io.println("math.PI() = " + pi)
+aura.io.println("math.E() = " + e)
 
 // ════════════════════════════════════════════════════════════
-// std.math — 数学函数
+// 字符串函数 std.string
 // ════════════════════════════════════════════════════════════
-println("aura.math.abs(-42) = " + aura.math.abs(-42).toString())
-println("aura.math.min(3, 5) = " + aura.math.min(3, 5).toString())
-println("aura.math.max(3, 5) = " + aura.math.max(3, 5).toString())
-println("aura.math.sqrt(16) = " + aura.math.sqrt(16.0).toString())
-println("aura.math.pow(2, 10) = " + aura.math.pow(2.0, 10.0).toString())
-println("aura.math.PI = " + aura.math.PI().toString())
-println("aura.math.sin(0) = " + aura.math.sin(0.0).toString())
+val hello = "Hello, Aura!"
+val upper = aura.string.toUpperCase(hello)
+val lower = aura.string.toLowerCase(hello)
+val contains = aura.string.contains(hello, "Aura")
+val split_parts = aura.string.split(hello, ",")
+
+aura.io.println("string.toUpperCase() = " + upper)
+aura.io.println("string.toLowerCase() = " + lower)
+aura.io.println("string.contains() = " + contains)
+aura.io.println("string.split() = " + split_parts)
 
 // ════════════════════════════════════════════════════════════
-// std.string — 字符串操作
+// 集合函数 std.collections
 // ════════════════════════════════════════════════════════════
-val s = "Hello, Aura World!"
-println("s.toUpperCase() = " + s.toUpperCase())
-println("s.toLowerCase() = " + s.toLowerCase())
-println("s.length() = " + s.length().toString())
-println("s.trim() = " + "  hello  ".trim())
-println("s.split(' ') = " + s.split(" ").join(", "))
+val list = aura.collections.listOf(1, 2, 3, 4, 5)
+val map = aura.collections.mapOf("name", "Aura", "version", 1)
+
+aura.io.println("collections.listOf() = " + list)
+aura.io.println("collections.mapOf() = " + map)
 
 // ════════════════════════════════════════════════════════════
-// std.collections — 集合构造
+// JSON 函数 std.json
 // ════════════════════════════════════════════════════════════
-val list = listOf(1, 2, 3, 4, 5)
-val map = mapOf("name", "Aura", "version", 1)
-val set = setOf(1, 2, 2, 3, 3, 3)
+val json_str = "{\"name\": \"Aura\", \"version\": 1}"
+val parsed = aura.json.parse(json_str)
+val valid = aura.json.isValid(json_str)
+
+aura.io.println("json.parse() = " + parsed)
+aura.io.println("json.isValid() = " + valid)
 
 // ════════════════════════════════════════════════════════════
-// std.json — JSON 解析与序列化
-// ════════════════════════════════════════════════════════════
-val jsonStr = "{\"name\": \"Aura\", \"version\": 1}"
-val parsed = aura.json.parse(jsonStr)
-println("JSON valid: " + aura.json.isValid(jsonStr).toString())
-
-// ════════════════════════════════════════════════════════════
-// std.time — 时间/日期
+// 时间函数 std.time
 // ════════════════════════════════════════════════════════════
 val now = aura.time.now()
-println("Current timestamp: " + now.toString())
-println("Epoch date: " + aura.time.toDateString(0))
+val date_str = aura.time.toDateString(0)
+
+aura.io.println("time.now() = " + now)
+aura.io.println("time.toDateString(0) = " + date_str)
 
 // ════════════════════════════════════════════════════════════
-// std.test — 测试断言
+// 内建函数 std.builtin
 // ════════════════════════════════════════════════════════════
-aura.test.assertTrue(true, "This should pass")
-aura.test.assertEq(42, 42, "Numbers are equal")
-aura.test.assertNotNull(1, "Value is not null")
+val type_of = aura.builtin.typeof(42)
+val is_null = aura.builtin.isNull(null)
+
+aura.io.println("builtin.typeof(42) = " + type_of)
+aura.io.println("builtin.isNull(null) = " + is_null)
 
 // ════════════════════════════════════════════════════════════
-// std.builtin — 编译期内建
+// 环境函数 std.env
 // ════════════════════════════════════════════════════════════
-val x = 42
-println("typeof(42) = " + aura.builtin.typeof(x).toString())
-println("aura.builtin.toInt(3.14) = " + aura.builtin.toInt(3.14).toString())
+val platform = aura.env.platform()
+val os = aura.env.os()
+val arch = aura.env.arch()
+
+aura.io.println("env.platform() = " + platform)
+aura.io.println("env.os() = " + os)
+aura.io.println("env.arch() = " + arch)
 
 // ════════════════════════════════════════════════════════════
-// std.env — 环境变量
+// 随机数函数 std.random
 // ════════════════════════════════════════════════════════════
-println("Platform: " + aura.env.platform())
-println("Home: " + aura.env.home())
-println("Temp: " + aura.env.tmp())
+val rand_int = aura.random.nextIntRange(1, 100)
+val rand_float = aura.random.nextFloat()
+
+aura.io.println("random.nextIntRange(1, 100) = " + rand_int)
+aura.io.println("random.nextFloat() = " + rand_float)
 
 // ════════════════════════════════════════════════════════════
-// std.random — 随机数
+// 编码函数 std.encoding
 // ════════════════════════════════════════════════════════════
-val rand1 = aura.random.nextIntRange(1, 100)
-val rand2 = aura.random.nextFloat()
-println("Random int: " + rand1.toString())
-println("Random float: " + rand2.toString())
-
-// ════════════════════════════════════════════════════════════
-// std.encoding — 编码/解码
-// ════════════════════════════════════════════════════════════
-val encoded = aura.encoding.base64Encode("Hello Aura")
+val encoded = aura.encoding.base64Encode("Hello")
 val decoded = aura.encoding.base64Decode(encoded)
-println("Base64 roundtrip: " + decoded)
+
+aura.io.println("encoding.base64Encode() = " + encoded)
+aura.io.println("encoding.base64Decode() = " + decoded)
 
 // ════════════════════════════════════════════════════════════
-// std.ascii — 字符工具
+// ASCII 函数 std.ascii
 // ════════════════════════════════════════════════════════════
-println("isAlpha('A'): " + aura.ascii.isAlpha("A").toString())
-println("isDigit('5'): " + aura.ascii.isDigit("5").toString())
-println("isUpper('a'): " + aura.ascii.isUpper("a").toString())
+val is_alpha = aura.ascii.isAlpha("A")
+val is_digit = aura.ascii.isDigit("5")
+val code = aura.ascii.codeAt("A", 0)
+
+aura.io.println("ascii.isAlpha('A') = " + is_alpha)
+aura.io.println("ascii.isDigit('5') = " + is_digit)
+aura.io.println("ascii.codeAt('A', 0) = " + code)
 
 // ════════════════════════════════════════════════════════════
-// std.path — 路径操作
+// 路径函数 std.path
 // ════════════════════════════════════════════════════════════
-println("basename: " + aura.path.basename("dir/file.txt"))
-println("extname: " + aura.path.extname("dir/file.txt"))
+val joined = aura.path.join("dir", "file.txt")
+val basename = aura.path.basename("dir/file.txt")
+val extname = aura.path.extname("dir/file.txt")
+
+aura.io.println("path.join() = " + joined)
+aura.io.println("path.basename() = " + basename)
+aura.io.println("path.extname() = " + extname)
 
 // ════════════════════════════════════════════════════════════
-// std.iter — 迭代器工具
+// 迭代器函数 std.iter
 // ════════════════════════════════════════════════════════════
-val nums = listOf(1, 2, 3, 4, 5)
-println("sum: " + aura.iter.sum(nums).toString())
-println("avg: " + aura.iter.avg(nums).toString())
-println("min: " + aura.iter.min(nums).toString())
-println("max: " + aura.iter.max(nums).toString())
+val nums = aura.collections.listOf(1, 2, 3, 4, 5)
+val sum = aura.iter.sum(nums)
+val avg = aura.iter.avg(nums)
+val min_iter = aura.iter.min(nums)
+val max_iter = aura.iter.max(nums)
+
+aura.io.println("iter.sum() = " + sum)
+aura.io.println("iter.avg() = " + avg)
+aura.io.println("iter.min() = " + min_iter)
+aura.io.println("iter.max() = " + max_iter)
 
 // ════════════════════════════════════════════════════════════
-// std.net — 网络信息
+// 测试函数 std.test
 // ════════════════════════════════════════════════════════════
-println("Hostname: " + aura.net.getHostname())
-println("Local IP: " + aura.net.getLocalIp())
+val assert_result = aura.test.assertEq(42, 42)
+
+aura.io.println("test.assertEq(42, 42) = " + assert_result)
+
+// ════════════════════════════════════════════════════════════
+// 控制台函数 std.console
+// ════════════════════════════════════════════════════════════
+val red_text = aura.console.red("Error")
+val green_text = aura.console.green("Success")
+
+aura.io.println("console.red() = " + red_text)
+aura.io.println("console.green() = " + green_text)
+
+// ════════════════════════════════════════════════════════════
+// 断言函数 std.assert
+// ════════════════════════════════════════════════════════════
+val assert_true = aura.assert.assertTrue(true, "always true")
+
+aura.io.println("assert.assertTrue() = " + assert_true)
+
+aura.io.println("=== 标准库示例完成 ===")

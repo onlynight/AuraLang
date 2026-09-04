@@ -7,16 +7,16 @@ use crate::vm::value::Value;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub fn register(reg: &mut NativeRegistry) {
-    reg.register("time.now", nat_now);
-    reg.register("time.epoch", nat_epoch);
-    reg.register("time.currentTime", nat_current_time);
-    reg.register("time.sleep", nat_sleep);
-    reg.register("time.duration", nat_duration);
-    reg.register("time.toDateString", nat_to_date_string);
-    reg.register("time.toTimeString", nat_to_time_string);
-    reg.register("time.formatDate", nat_format_date);
-    reg.register("time.diff", nat_diff);
-    reg.register("time.parseDate", nat_parse_date);
+    reg.register("aura.time.now", nat_now);
+    reg.register("aura.time.epoch", nat_epoch);
+    reg.register("aura.time.currentTime", nat_current_time);
+    reg.register("aura.time.sleep", nat_sleep);
+    reg.register("aura.time.duration", nat_duration);
+    reg.register("aura.time.toDateString", nat_to_date_string);
+    reg.register("aura.time.toTimeString", nat_to_time_string);
+    reg.register("aura.time.formatDate", nat_format_date);
+    reg.register("aura.time.diff", nat_diff);
+    reg.register("aura.time.parseDate", nat_parse_date);
 }
 
 /// time.now() → Float (seconds since epoch)

@@ -19,7 +19,7 @@ use crate::vm::native::NativeRegistry;
 pub struct StdDoc {
     /// 模块名（如 "math"、"string"、"collections"）
     pub module: &'static str,
-    /// 函数全名（如 "math.abs"）
+    /// 函数全名（如 "aura.math.abs"）
     pub name: &'static str,
     /// 简短描述
     pub summary: &'static str,
@@ -57,27 +57,27 @@ impl DocRegistry {
         // ── std.io ──
         self.docs.push(StdDoc {
             module: "io",
-            name: "io.println",
+            name: "aura.io.println",
             summary: "打印一行文本到标准输出，末尾自动追加换行符。",
             params: &[("msg", "String", "要输出的文本（可多参数拼接）")],
             returns: "Unit",
             returns_desc: "无返回值",
-            example: Some(r#"io.println("Hello, Aura!")"#),
+            example: Some(r#"aura.io.println("Hello, Aura!")"#),
             rust_fn: "std_io::nat_println",
         });
         self.docs.push(StdDoc {
             module: "io",
-            name: "io.print",
+            name: "aura.io.print",
             summary: "打印文本到标准输出，不追加换行符。",
             params: &[("msg", "String", "要输出的文本")],
             returns: "Unit",
             returns_desc: "无返回值",
-            example: Some(r#"io.print("Hello ") // 不换行"#),
+            example: Some(r#"aura.io.print("Hello ") // 不换行"#),
             rust_fn: "std_io::nat_print",
         });
         self.docs.push(StdDoc {
             module: "io",
-            name: "io.readLine",
+            name: "aura.io.readLine",
             summary: "从标准输入读取一行文本。",
             params: &[],
             returns: "String",
@@ -87,7 +87,7 @@ impl DocRegistry {
         });
         self.docs.push(StdDoc {
             module: "io",
-            name: "io.fileRead",
+            name: "aura.io.fileRead",
             summary: "读取文件全部内容为字符串。",
             params: &[("path", "String", "文件路径")],
             returns: "String",
@@ -97,7 +97,7 @@ impl DocRegistry {
         });
         self.docs.push(StdDoc {
             module: "io",
-            name: "io.fileWrite",
+            name: "aura.io.fileWrite",
             summary: "将字符串写入文件（覆盖模式）。",
             params: &[
                 ("path", "String", "目标文件路径"),
@@ -105,12 +105,12 @@ impl DocRegistry {
             ],
             returns: "Unit",
             returns_desc: "无返回值，失败时返回错误信息",
-            example: Some(r#"io.fileWrite("out.txt", "Hello")"#),
+            example: Some(r#"aura.io.fileWrite("out.txt", "Hello")"#),
             rust_fn: "std_io::nat_file_write",
         });
         self.docs.push(StdDoc {
             module: "io",
-            name: "io.fileExists",
+            name: "aura.io.fileExists",
             summary: "检查文件或目录是否存在。",
             params: &[("path", "String", "路径")],
             returns: "Bool",
@@ -122,47 +122,47 @@ impl DocRegistry {
         // ── std.math ──
         self.docs.push(StdDoc {
             module: "math",
-            name: "math.abs",
+            name: "aura.math.abs",
             summary: "返回数值的绝对值。",
             params: &[("x", "Int / Float", "输入值")],
             returns: "Int / Float",
             returns_desc: "绝对值",
-            example: Some(r#"math.abs(-42) // → 42"#),
+            example: Some(r#"aura.math.abs(-42) // → 42"#),
             rust_fn: "std_math::nat_abs",
         });
         self.docs.push(StdDoc {
             module: "math",
-            name: "math.min",
+            name: "aura.math.min",
             summary: "返回两个整数中的较小值。",
             params: &[("a", "Int", "第一个数"), ("b", "Int", "第二个数")],
             returns: "Int",
             returns_desc: "最小值",
-            example: Some(r#"math.min(3, 5) // → 3"#),
+            example: Some(r#"aura.math.min(3, 5) // → 3"#),
             rust_fn: "std_math::nat_min",
         });
         self.docs.push(StdDoc {
             module: "math",
-            name: "math.max",
+            name: "aura.math.max",
             summary: "返回两个整数中的较大值。",
             params: &[("a", "Int", "第一个数"), ("b", "Int", "第二个数")],
             returns: "Int",
             returns_desc: "最大值",
-            example: Some(r#"math.max(3, 5) // → 5"#),
+            example: Some(r#"aura.math.max(3, 5) // → 5"#),
             rust_fn: "std_math::nat_max",
         });
         self.docs.push(StdDoc {
             module: "math",
-            name: "math.sqrt",
+            name: "aura.math.sqrt",
             summary: "返回数的平方根。",
             params: &[("x", "Float", "输入值（≥0）")],
             returns: "Float",
             returns_desc: "平方根",
-            example: Some(r#"math.sqrt(16.0) // → 4.0"#),
+            example: Some(r#"aura.math.sqrt(16.0) // → 4.0"#),
             rust_fn: "std_math::nat_sqrt",
         });
         self.docs.push(StdDoc {
             module: "math",
-            name: "math.pow",
+            name: "aura.math.pow",
             summary: "返回 base^exp（幂运算）。",
             params: &[
                 ("base", "Float", "底数"),
@@ -170,12 +170,12 @@ impl DocRegistry {
             ],
             returns: "Float",
             returns_desc: "幂运算结果",
-            example: Some(r#"math.pow(2.0, 10.0) // → 1024.0"#),
+            example: Some(r#"aura.math.pow(2.0, 10.0) // → 1024.0"#),
             rust_fn: "std_math::nat_pow",
         });
         self.docs.push(StdDoc {
             module: "math",
-            name: "math.PI",
+            name: "aura.math.PI",
             summary: "圆周率 π ≈ 3.141592653589793。",
             params: &[],
             returns: "Float",
@@ -185,7 +185,7 @@ impl DocRegistry {
         });
         self.docs.push(StdDoc {
             module: "math",
-            name: "math.E",
+            name: "aura.math.E",
             summary: "自然对数的底 e ≈ 2.718281828459045。",
             params: &[],
             returns: "Float",
@@ -195,7 +195,7 @@ impl DocRegistry {
         });
         self.docs.push(StdDoc {
             module: "math",
-            name: "math.sin",
+            name: "aura.math.sin",
             summary: "返回角度的正弦值（弧度）。",
             params: &[("angle", "Float", "弧度值")],
             returns: "Float",
@@ -205,7 +205,7 @@ impl DocRegistry {
         });
         self.docs.push(StdDoc {
             module: "math",
-            name: "math.cos",
+            name: "aura.math.cos",
             summary: "返回角度的余弦值（弧度）。",
             params: &[("angle", "Float", "弧度值")],
             returns: "Float",
@@ -215,7 +215,7 @@ impl DocRegistry {
         });
         self.docs.push(StdDoc {
             module: "math",
-            name: "math.log",
+            name: "aura.math.log",
             summary: "返回自然对数（以 e 为底）。",
             params: &[("x", "Float", "输入值（>0）")],
             returns: "Float",
@@ -225,39 +225,39 @@ impl DocRegistry {
         });
         self.docs.push(StdDoc {
             module: "math",
-            name: "math.ceil",
+            name: "aura.math.ceil",
             summary: "向上取整。",
             params: &[("x", "Float", "输入值")],
             returns: "Float",
             returns_desc: "≥ x 的最小整数",
-            example: Some(r#"math.ceil(1.2) // → 2.0"#),
+            example: Some(r#"aura.math.ceil(1.2) // → 2.0"#),
             rust_fn: "std_math::nat_ceil",
         });
         self.docs.push(StdDoc {
             module: "math",
-            name: "math.floor",
+            name: "aura.math.floor",
             summary: "向下取整。",
             params: &[("x", "Float", "输入值")],
             returns: "Float",
             returns_desc: "≤ x 的最大整数",
-            example: Some(r#"math.floor(1.8) // → 1.0"#),
+            example: Some(r#"aura.math.floor(1.8) // → 1.0"#),
             rust_fn: "std_math::nat_floor",
         });
 
         // ── std.string ──
         self.docs.push(StdDoc {
             module: "string",
-            name: "string.contains",
+            name: "aura.string.contains",
             summary: "判断字符串是否包含子串。",
             params: &[("text", "String", "源字符串"), ("substr", "String", "子串")],
             returns: "Bool",
             returns_desc: "包含返回 true",
-            example: Some(r#"string.contains("hello", "ell") // → true"#),
+            example: Some(r#"aura.string.contains("hello", "ell") // → true"#),
             rust_fn: "std_string::nat_contains",
         });
         self.docs.push(StdDoc {
             module: "string",
-            name: "string.startsWith",
+            name: "aura.string.startsWith",
             summary: "判断字符串是否以指定前缀开头。",
             params: &[("text", "String", "源字符串"), ("prefix", "String", "前缀")],
             returns: "Bool",
@@ -267,7 +267,7 @@ impl DocRegistry {
         });
         self.docs.push(StdDoc {
             module: "string",
-            name: "string.endsWith",
+            name: "aura.string.endsWith",
             summary: "判断字符串是否以指定后缀结尾。",
             params: &[("text", "String", "源字符串"), ("suffix", "String", "后缀")],
             returns: "Bool",
@@ -277,17 +277,17 @@ impl DocRegistry {
         });
         self.docs.push(StdDoc {
             module: "string",
-            name: "string.split",
+            name: "aura.string.split",
             summary: "按分隔符拆分字符串，返回 List。",
             params: &[("text", "String", "源字符串"), ("sep", "String", "分隔符")],
             returns: "List<String>",
             returns_desc: "拆分后的子串列表",
-            example: Some(r#"string.split("a,b,c", ",") // → ["a", "b", "c"]"#),
+            example: Some(r#"aura.string.split("a,b,c", ",") // → ["a", "b", "c"]"#),
             rust_fn: "std_string::nat_split",
         });
         self.docs.push(StdDoc {
             module: "string",
-            name: "string.join",
+            name: "aura.string.join",
             summary: "将空格分隔的文本合并，用指定分隔符连接。",
             params: &[("text", "String", "源文本（空格分隔）"), ("sep", "String", "分隔符")],
             returns: "String",
@@ -297,7 +297,7 @@ impl DocRegistry {
         });
         self.docs.push(StdDoc {
             module: "string",
-            name: "string.replace",
+            name: "aura.string.replace",
             summary: "替换第一个匹配的子串。",
             params: &[
                 ("text", "String", "源字符串"),
@@ -306,32 +306,32 @@ impl DocRegistry {
             ],
             returns: "String",
             returns_desc: "替换后的字符串",
-            example: Some(r#"string.replace("hello world", "world", "Aura")"#),
+            example: Some(r#"aura.string.replace("hello world", "world", "Aura")"#),
             rust_fn: "std_string::nat_replace",
         });
         self.docs.push(StdDoc {
             module: "string",
-            name: "string.toUpperCase",
+            name: "aura.string.toUpperCase",
             summary: "将所有字母转换为大写。",
             params: &[("text", "String", "源字符串")],
             returns: "String",
             returns_desc: "大写字符串",
-            example: Some(r#"string.toUpperCase("hello") // → "HELLO""#),
+            example: Some(r#"aura.string.toUpperCase("hello") // → "HELLO""#),
             rust_fn: "std_string::nat_to_upper",
         });
         self.docs.push(StdDoc {
             module: "string",
-            name: "string.toLowerCase",
+            name: "aura.string.toLowerCase",
             summary: "将所有字母转换为小写。",
             params: &[("text", "String", "源字符串")],
             returns: "String",
             returns_desc: "小写字符串",
-            example: Some(r#"string.toLowerCase("HELLO") // → "hello""#),
+            example: Some(r#"aura.string.toLowerCase("HELLO") // → "hello""#),
             rust_fn: "std_string::nat_to_lower",
         });
         self.docs.push(StdDoc {
             module: "string",
-            name: "string.length",
+            name: "aura.string.length",
             summary: "返回字符串的字符数。",
             params: &[("text", "String", "源字符串")],
             returns: "Int",
@@ -341,17 +341,17 @@ impl DocRegistry {
         });
         self.docs.push(StdDoc {
             module: "string",
-            name: "string.trim",
+            name: "aura.string.trim",
             summary: "去除首尾空白字符。",
             params: &[("text", "String", "源字符串")],
             returns: "String",
             returns_desc: "修剪后的字符串",
-            example: Some(r#"string.trim("  hello  ") // → "hello""#),
+            example: Some(r#"aura.string.trim("  hello  ") // → "hello""#),
             rust_fn: "std_string::nat_trim",
         });
         self.docs.push(StdDoc {
             module: "string",
-            name: "string.format",
+            name: "aura.string.format",
             summary: "将 `{0}`, `{1}` 等占位符替换为参数值。",
             params: &[
                 ("template", "String", "模板字符串"),
@@ -359,12 +359,12 @@ impl DocRegistry {
             ],
             returns: "String",
             returns_desc: "格式化后的字符串",
-            example: Some(r#"string.format("Hello {0}", "Aura") // → "Hello Aura""#),
+            example: Some(r#"aura.string.format("Hello {0}", "Aura") // → "Hello Aura""#),
             rust_fn: "std_string::nat_format",
         });
         self.docs.push(StdDoc {
             module: "string",
-            name: "string.matches",
+            name: "aura.string.matches",
             summary: "正则表达式匹配。",
             params: &[
                 ("text", "String", "源字符串"),
@@ -379,7 +379,7 @@ impl DocRegistry {
         // ── std.collections ──
         self.docs.push(StdDoc {
             module: "collections",
-            name: "collections.listOf",
+            name: "aura.collections.listOf",
             summary: "构造不可变列表。",
             params: &[("...", "Value", "任意数量元素")],
             returns: "List",
@@ -389,7 +389,7 @@ impl DocRegistry {
         });
         self.docs.push(StdDoc {
             module: "collections",
-            name: "collections.mapOf",
+            name: "aura.collections.mapOf",
             summary: "构造键值映射（参数成对出现）。",
             params: &[("...", "Value", "键值对（交替出现）")],
             returns: "Map",
@@ -399,7 +399,7 @@ impl DocRegistry {
         });
         self.docs.push(StdDoc {
             module: "collections",
-            name: "collections.setOf",
+            name: "aura.collections.setOf",
             summary: "构造集合（自动去重）。",
             params: &[("...", "Value", "任意数量元素")],
             returns: "List",
@@ -409,7 +409,7 @@ impl DocRegistry {
         });
         self.docs.push(StdDoc {
             module: "collections",
-            name: "collections.emptyList",
+            name: "aura.collections.emptyList",
             summary: "构造空列表。",
             params: &[],
             returns: "List",
@@ -419,7 +419,7 @@ impl DocRegistry {
         });
         self.docs.push(StdDoc {
             module: "collections",
-            name: "collections.listContains",
+            name: "aura.collections.listContains",
             summary: "检查列表是否包含指定元素。",
             params: &[("list", "List", "源列表"), ("item", "Value", "要查找的元素")],
             returns: "Bool",
@@ -431,7 +431,7 @@ impl DocRegistry {
         // ── std.fs ──
         self.docs.push(StdDoc {
             module: "fs",
-            name: "fs.exists",
+            name: "aura.fs.exists",
             summary: "检查路径是否存在。",
             params: &[("path", "String", "文件/目录路径")],
             returns: "Bool",
@@ -441,7 +441,7 @@ impl DocRegistry {
         });
         self.docs.push(StdDoc {
             module: "fs",
-            name: "fs.readText",
+            name: "aura.fs.readText",
             summary: "读取文件文本内容。",
             params: &[("path", "String", "文件路径")],
             returns: "String",
@@ -451,7 +451,7 @@ impl DocRegistry {
         });
         self.docs.push(StdDoc {
             module: "fs",
-            name: "fs.writeText",
+            name: "aura.fs.writeText",
             summary: "将文本写入文件。",
             params: &[
                 ("path", "String", "文件路径"),
@@ -464,7 +464,7 @@ impl DocRegistry {
         });
         self.docs.push(StdDoc {
             module: "fs",
-            name: "fs.mkdir",
+            name: "aura.fs.mkdir",
             summary: "创建目录。",
             params: &[("path", "String", "目录路径")],
             returns: "Unit",
@@ -474,7 +474,7 @@ impl DocRegistry {
         });
         self.docs.push(StdDoc {
             module: "fs",
-            name: "fs.mkdirP",
+            name: "aura.fs.mkdirP",
             summary: "递归创建目录（包含所有父目录）。",
             params: &[("path", "String", "目录路径")],
             returns: "Unit",
@@ -484,7 +484,7 @@ impl DocRegistry {
         });
         self.docs.push(StdDoc {
             module: "fs",
-            name: "fs.listDir",
+            name: "aura.fs.listDir",
             summary: "列出目录中的所有条目名称。",
             params: &[("path", "String", "目录路径")],
             returns: "List<String>",
@@ -494,7 +494,7 @@ impl DocRegistry {
         });
         self.docs.push(StdDoc {
             module: "fs",
-            name: "fs.fileSize",
+            name: "aura.fs.fileSize",
             summary: "返回文件大小（字节）。",
             params: &[("path", "String", "文件路径")],
             returns: "Int",
@@ -506,17 +506,17 @@ impl DocRegistry {
         // ── std.json ──
         self.docs.push(StdDoc {
             module: "json",
-            name: "json.parse",
+            name: "aura.json.parse",
             summary: "将 JSON 字符串解析为 Aura 值树。",
             params: &[("text", "String", "JSON 字符串")],
             returns: "Value",
             returns_desc: "解析后的值（Map/List/Int/Float/Bool/String/Null），失败返回错误信息",
-            example: Some(r#"json.parse("{\"name\":\"Aura\"}")"#),
+            example: Some(r#"aura.json.parse("{\"name\":\"Aura\"}")"#),
             rust_fn: "std_json::nat_parse",
         });
         self.docs.push(StdDoc {
             module: "json",
-            name: "json.stringify",
+            name: "aura.json.stringify",
             summary: "将 Aura 值序列化为 JSON 字符串。",
             params: &[
                 ("value", "Value", "要序列化的值"),
@@ -524,12 +524,12 @@ impl DocRegistry {
             ],
             returns: "String",
             returns_desc: "JSON 字符串",
-            example: Some(r#"json.stringify({name: "Aura"})"#),
+            example: Some(r#"aura.json.stringify({name: "Aura"})"#),
             rust_fn: "std_json::nat_stringify",
         });
         self.docs.push(StdDoc {
             module: "json",
-            name: "json.isValid",
+            name: "aura.json.isValid",
             summary: "检查字符串是否为合法 JSON。",
             params: &[("text", "String", "待检查的字符串")],
             returns: "Bool",
@@ -541,7 +541,7 @@ impl DocRegistry {
         // ── std.time ──
         self.docs.push(StdDoc {
             module: "time",
-            name: "time.now",
+            name: "aura.time.now",
             summary: "返回当前 Unix 时间戳（秒）。",
             params: &[],
             returns: "Float",
@@ -551,29 +551,29 @@ impl DocRegistry {
         });
         self.docs.push(StdDoc {
             module: "time",
-            name: "time.sleep",
+            name: "aura.time.sleep",
             summary: "暂停执行指定秒数。",
             params: &[("seconds", "Float", "暂停秒数")],
             returns: "Unit",
             returns_desc: "无返回值",
-            example: Some(r#"time.sleep(1.0)"#),
+            example: Some(r#"aura.time.sleep(1.0)"#),
             rust_fn: "std_time::nat_sleep",
         });
         self.docs.push(StdDoc {
             module: "time",
-            name: "time.toDateString",
+            name: "aura.time.toDateString",
             summary: "将时间戳转换为日期字符串（YYYY-MM-DD）。",
             params: &[("timestamp", "Int", "Unix 时间戳（秒）")],
             returns: "String",
             returns_desc: "格式化日期",
-            example: Some(r#"time.toDateString(0) // → "1970-01-01""#),
+            example: Some(r#"aura.time.toDateString(0) // → "1970-01-01""#),
             rust_fn: "std_time::nat_to_date_string",
         });
 
         // ── std.test ──
         self.docs.push(StdDoc {
             module: "test",
-            name: "test.assertTrue",
+            name: "aura.test.assertTrue",
             summary: "断言条件为 true，返回 PASS/FAIL 字符串。",
             params: &[
                 ("condition", "Value", "断言条件"),
@@ -581,12 +581,12 @@ impl DocRegistry {
             ],
             returns: "String",
             returns_desc: "\"PASS: ...\" 或 \"FAIL: ...\"",
-            example: Some(r#"test.assertTrue(true, "all good")"#),
+            example: Some(r#"aura.test.assertTrue(true, "all good")"#),
             rust_fn: "std_test::nat_assert_true",
         });
         self.docs.push(StdDoc {
             module: "test",
-            name: "test.assertEq",
+            name: "aura.test.assertEq",
             summary: "断言两个值相等。",
             params: &[
                 ("a", "Value", "实际值"),
@@ -595,24 +595,24 @@ impl DocRegistry {
             ],
             returns: "String",
             returns_desc: "\"PASS: ...\" 或 \"FAIL: ...\"",
-            example: Some(r#"test.assertEq(42, 42, "answer")"#),
+            example: Some(r#"aura.test.assertEq(42, 42, "answer")"#),
             rust_fn: "std_test::nat_assert_eq",
         });
 
         // ── std.builtin ──
         self.docs.push(StdDoc {
             module: "builtin",
-            name: "builtin.typeof",
+            name: "aura.builtin.typeof",
             summary: "返回值的类型名称。",
             params: &[("value", "Value", "待检查的值")],
             returns: "String",
             returns_desc: "类型名（Int/Float/Boolean/String/List/Map/Null）",
-            example: Some(r#"builtin.typeof(42) // → "Int""#),
+            example: Some(r#"aura.builtin.typeof(42) // → "Int""#),
             rust_fn: "std_builtin::nat_typeof",
         });
         self.docs.push(StdDoc {
             module: "builtin",
-            name: "builtin.toString",
+            name: "aura.builtin.toString",
             summary: "将任意值转换为字符串。",
             params: &[("value", "Value", "待转换的值")],
             returns: "String",
@@ -624,7 +624,7 @@ impl DocRegistry {
         // ── std.env ──
         self.docs.push(StdDoc {
             module: "env",
-            name: "env.get",
+            name: "aura.env.get",
             summary: "获取环境变量值。",
             params: &[
                 ("name", "String", "变量名"),
@@ -637,7 +637,7 @@ impl DocRegistry {
         });
         self.docs.push(StdDoc {
             module: "env",
-            name: "env.has",
+            name: "aura.env.has",
             summary: "检查环境变量是否存在。",
             params: &[("name", "String", "变量名")],
             returns: "Bool",
@@ -647,7 +647,7 @@ impl DocRegistry {
         });
         self.docs.push(StdDoc {
             module: "env",
-            name: "env.platform",
+            name: "aura.env.platform",
             summary: "返回当前操作系统名称。",
             params: &[],
             returns: "String",
@@ -659,7 +659,7 @@ impl DocRegistry {
         // ── std.random ──
         self.docs.push(StdDoc {
             module: "random",
-            name: "random.nextInt",
+            name: "aura.random.nextInt",
             summary: "返回 64 位随机整数。",
             params: &[],
             returns: "Int",
@@ -669,7 +669,7 @@ impl DocRegistry {
         });
         self.docs.push(StdDoc {
             module: "random",
-            name: "random.nextFloat",
+            name: "aura.random.nextFloat",
             summary: "返回 [0, 1) 区间的随机浮点数。",
             params: &[],
             returns: "Float",
@@ -679,27 +679,27 @@ impl DocRegistry {
         });
         self.docs.push(StdDoc {
             module: "random",
-            name: "random.nextIntRange",
+            name: "aura.random.nextIntRange",
             summary: "返回 [min, max) 区间的随机整数。",
             params: &[("min", "Int", "下界（含）"), ("max", "Int", "上界（不含）")],
             returns: "Int",
             returns_desc: "区间内随机整数",
-            example: Some(r#"random.nextIntRange(1, 100)"#),
+            example: Some(r#"aura.random.nextIntRange(1, 100)"#),
             rust_fn: "std_random::nat_next_int_range",
         });
         self.docs.push(StdDoc {
             module: "random",
-            name: "random.choice",
+            name: "aura.random.choice",
             summary: "从参数列表中随机选择一个元素。",
             params: &[("...", "Value", "候选元素")],
             returns: "Value",
             returns_desc: "随机选中的元素",
-            example: Some(r#"random.choice(1, 2, 3)"#),
+            example: Some(r#"aura.random.choice(1, 2, 3)"#),
             rust_fn: "std_random::nat_choice",
         });
         self.docs.push(StdDoc {
             module: "random",
-            name: "random.shuffle",
+            name: "aura.random.shuffle",
             summary: "返回列表的随机排列。",
             params: &[("list", "List", "源列表")],
             returns: "List",
@@ -711,17 +711,17 @@ impl DocRegistry {
         // ── std.encoding ──
         self.docs.push(StdDoc {
             module: "encoding",
-            name: "encoding.base64Encode",
+            name: "aura.encoding.base64Encode",
             summary: "将字符串编码为 Base64。",
             params: &[("text", "String", "源字符串")],
             returns: "String",
             returns_desc: "Base64 编码字符串",
-            example: Some(r#"encoding.base64Encode("Hello")"#),
+            example: Some(r#"aura.encoding.base64Encode("Hello")"#),
             rust_fn: "std_encoding::nat_base64_encode",
         });
         self.docs.push(StdDoc {
             module: "encoding",
-            name: "encoding.base64Decode",
+            name: "aura.encoding.base64Decode",
             summary: "将 Base64 字符串解码。",
             params: &[("text", "String", "Base64 字符串")],
             returns: "String",
@@ -731,29 +731,29 @@ impl DocRegistry {
         });
         self.docs.push(StdDoc {
             module: "encoding",
-            name: "encoding.hexEncode",
+            name: "aura.encoding.hexEncode",
             summary: "将字符串编码为十六进制。",
             params: &[("text", "String", "源字符串")],
             returns: "String",
             returns_desc: "十六进制字符串",
-            example: Some(r#"encoding.hexEncode("Hi") // → "4869""#),
+            example: Some(r#"aura.encoding.hexEncode("Hi") // → "4869""#),
             rust_fn: "std_encoding::nat_hex_encode",
         });
 
         // ── std.ascii ──
         self.docs.push(StdDoc {
             module: "ascii",
-            name: "ascii.isAlpha",
+            name: "aura.ascii.isAlpha",
             summary: "判断首字符是否为字母。",
             params: &[("text", "String", "字符串")],
             returns: "Bool",
             returns_desc: "是字母返回 true",
-            example: Some(r#"ascii.isAlpha("A") // → true"#),
+            example: Some(r#"aura.ascii.isAlpha("A") // → true"#),
             rust_fn: "std_ascii::nat_is_alpha",
         });
         self.docs.push(StdDoc {
             module: "ascii",
-            name: "ascii.isDigit",
+            name: "aura.ascii.isDigit",
             summary: "判断首字符是否为数字。",
             params: &[("text", "String", "字符串")],
             returns: "Bool",
@@ -763,7 +763,7 @@ impl DocRegistry {
         });
         self.docs.push(StdDoc {
             module: "ascii",
-            name: "ascii.codeAt",
+            name: "aura.ascii.codeAt",
             summary: "返回指定位置的字符 Unicode 码点。",
             params: &[
                 ("text", "String", "字符串"),
@@ -771,56 +771,56 @@ impl DocRegistry {
             ],
             returns: "Int",
             returns_desc: "码点值，越界返回 0",
-            example: Some(r#"ascii.codeAt("A", 0) // → 65"#),
+            example: Some(r#"aura.ascii.codeAt("A", 0) // → 65"#),
             rust_fn: "std_ascii::nat_code_at",
         });
 
         // ── std.path ──
         self.docs.push(StdDoc {
             module: "path",
-            name: "path.join",
+            name: "aura.path.join",
             summary: "拼接多个路径组件。",
             params: &[("...", "String", "路径组件")],
             returns: "String",
             returns_desc: "拼接后的路径",
-            example: Some(r#"path.join("dir", "file.txt")"#),
+            example: Some(r#"aura.path.join("dir", "file.txt")"#),
             rust_fn: "std_path::nat_join",
         });
         self.docs.push(StdDoc {
             module: "path",
-            name: "path.basename",
+            name: "aura.path.basename",
             summary: "返回文件名（不含扩展名）。",
             params: &[("path", "String", "文件路径")],
             returns: "String",
             returns_desc: "文件基名",
-            example: Some(r#"path.basename("dir/file.txt") // → "file""#),
+            example: Some(r#"aura.path.basename("dir/file.txt") // → "file""#),
             rust_fn: "std_path::nat_basename",
         });
         self.docs.push(StdDoc {
             module: "path",
-            name: "path.extname",
+            name: "aura.path.extname",
             summary: "返回文件扩展名（含点）。",
             params: &[("path", "String", "文件路径")],
             returns: "String",
             returns_desc: "扩展名",
-            example: Some(r#"path.extname("file.txt") // → ".txt""#),
+            example: Some(r#"aura.path.extname("file.txt") // → ".txt""#),
             rust_fn: "std_path::nat_extname",
         });
 
         // ── std.iter ──
         self.docs.push(StdDoc {
             module: "iter",
-            name: "iter.sum",
+            name: "aura.iter.sum",
             summary: "返回列表中所有元素的和。",
             params: &[("list", "List", "源列表")],
             returns: "Int / Float",
             returns_desc: "元素总和",
-            example: Some(r#"iter.sum(listOf(1, 2, 3)) // → 6"#),
+            example: Some(r#"aura.iter.sum(listOf(1, 2, 3)) // → 6"#),
             rust_fn: "std_iter::nat_sum",
         });
         self.docs.push(StdDoc {
             module: "iter",
-            name: "iter.avg",
+            name: "aura.iter.avg",
             summary: "返回列表中所有元素的平均值。",
             params: &[("list", "List", "源列表")],
             returns: "Float",
@@ -830,7 +830,7 @@ impl DocRegistry {
         });
         self.docs.push(StdDoc {
             module: "iter",
-            name: "iter.distinct",
+            name: "aura.iter.distinct",
             summary: "返回列表的去重结果（保持顺序）。",
             params: &[("list", "List", "源列表")],
             returns: "List",
@@ -840,29 +840,29 @@ impl DocRegistry {
         });
         self.docs.push(StdDoc {
             module: "iter",
-            name: "iter.range",
+            name: "aura.iter.range",
             summary: "生成闭区间 [from, to] 的整数列表。",
             params: &[("from", "Int", "起始值"), ("to", "Int", "结束值")],
             returns: "List",
             returns_desc: "整数列表",
-            example: Some(r#"iter.range(1, 5) // → [1, 2, 3, 4, 5]"#),
+            example: Some(r#"aura.iter.range(1, 5) // → [1, 2, 3, 4, 5]"#),
             rust_fn: "std_iter::nat_range",
         });
 
         // ── std.console ──
         self.docs.push(StdDoc {
             module: "console",
-            name: "console.red",
+            name: "aura.console.red",
             summary: "将文本包装为红色 ANSI 颜色代码。",
             params: &[("text", "String", "文本")],
             returns: "String",
             returns_desc: "带颜色代码的字符串",
-            example: Some(r#"io.println(console.red("Error!"))"#),
+            example: Some(r#"aura.io.println(console.red("Error!"))"#),
             rust_fn: "std_console::nat_red",
         });
         self.docs.push(StdDoc {
             module: "console",
-            name: "console.green",
+            name: "aura.console.green",
             summary: "将文本包装为绿色 ANSI 颜色代码。",
             params: &[("text", "String", "文本")],
             returns: "String",
@@ -874,7 +874,7 @@ impl DocRegistry {
         // ── std.process ──
         self.docs.push(StdDoc {
             module: "process",
-            name: "process.pid",
+            name: "aura.process.pid",
             summary: "返回当前进程 ID。",
             params: &[],
             returns: "Int",
@@ -884,7 +884,7 @@ impl DocRegistry {
         });
         self.docs.push(StdDoc {
             module: "process",
-            name: "process.args",
+            name: "aura.process.args",
             summary: "返回命令行参数列表。",
             params: &[],
             returns: "List<String>",
@@ -896,7 +896,7 @@ impl DocRegistry {
         // ── std.net ──
         self.docs.push(StdDoc {
             module: "net",
-            name: "net.getHostname",
+            name: "aura.net.getHostname",
             summary: "返回本机主机名。",
             params: &[],
             returns: "String",
@@ -906,7 +906,7 @@ impl DocRegistry {
         });
         self.docs.push(StdDoc {
             module: "net",
-            name: "net.getLocalIp",
+            name: "aura.net.getLocalIp",
             summary: "返回本机 IP 地址。",
             params: &[],
             returns: "String",
@@ -918,7 +918,7 @@ impl DocRegistry {
         // ── std.assert ──
         self.docs.push(StdDoc {
             module: "assert",
-            name: "assert.assert",
+            name: "aura.assert.assert",
             summary: "通用断言，返回 OK/ASSERTION FAILED。",
             params: &[
                 ("condition", "Value", "断言条件"),
@@ -1303,7 +1303,7 @@ mod tests {
         let md = render_markdown(&registry);
         assert!(md.contains("# Aura 标准库 API 文档"));
         assert!(md.contains("std.math"));
-        assert!(md.contains("math.abs"));
+        assert!(md.contains("aura.math.abs"));
         assert!(md.contains("```aura"));
     }
 
@@ -1314,7 +1314,7 @@ mod tests {
         assert!(html.contains("<!DOCTYPE html>"));
         assert!(html.contains("<title>Aura 标准库"));
         assert!(html.contains("std.math"));
-        assert!(html.contains("math.abs"));
+        assert!(html.contains("aura.math.abs"));
     }
 
     #[test]

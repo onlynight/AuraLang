@@ -7,16 +7,16 @@ use crate::vm::value::Value;
 use std::io::{BufRead, Read, Write};
 
 pub fn register(reg: &mut NativeRegistry) {
-    reg.register("io.println", nat_println);
-    reg.register("io.print", nat_print);
-    reg.register("io.readLine", nat_readline);
-    reg.register("io.readAll", nat_readall);
-    reg.register("io.flush", nat_flush);
-    reg.register("io.fileRead", nat_file_read);
-    reg.register("io.fileWrite", nat_file_write);
-    reg.register("io.fileExists", nat_file_exists);
-    reg.register("io.writeFile", nat_write_file);
-    reg.register("io.readFile", nat_read_file);
+    reg.register("aura.io.println", nat_println);
+    reg.register("aura.io.print", nat_print);
+    reg.register("aura.io.readLine", nat_readline);
+    reg.register("aura.io.readAll", nat_readall);
+    reg.register("aura.io.flush", nat_flush);
+    reg.register("aura.io.fileRead", nat_file_read);
+    reg.register("aura.io.fileWrite", nat_file_write);
+    reg.register("aura.io.fileExists", nat_file_exists);
+    reg.register("aura.io.writeFile", nat_write_file);
+    reg.register("aura.io.readFile", nat_read_file);
 }
 
 fn nat_println(args: &[Value]) -> Value {

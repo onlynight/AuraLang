@@ -8,34 +8,34 @@ use crate::vm::value::Value;
 
 pub fn register(reg: &mut NativeRegistry) {
     // 列表构造
-    reg.register("collections.listOf", nat_list_of);
-    reg.register("collections.mutableListOf", nat_mutable_list_of);
-    reg.register("collections.emptyList", nat_empty_list);
-    reg.register("collections.arrayOf", nat_array_of);
+    reg.register("aura.collections.listOf", nat_list_of);
+    reg.register("aura.collections.mutableListOf", nat_mutable_list_of);
+    reg.register("aura.collections.emptyList", nat_empty_list);
+    reg.register("aura.collections.arrayOf", nat_array_of);
     // 列表操作
-    reg.register("collections.listContains", nat_list_contains);
-    reg.register("collections.listIndexOf", nat_list_index_of);
-    reg.register("collections.listRemove", nat_list_remove);
-    reg.register("collections.listReverse", nat_list_reverse);
-    reg.register("collections.listSort", nat_list_sort);
-    reg.register("collections.listGet", nat_list_get);
-    reg.register("collections.listSet", nat_list_set);
-    reg.register("collections.listInsert", nat_list_insert);
-    reg.register("collections.listSubList", nat_list_sub_list);
+    reg.register("aura.collections.listContains", nat_list_contains);
+    reg.register("aura.collections.listIndexOf", nat_list_index_of);
+    reg.register("aura.collections.listRemove", nat_list_remove);
+    reg.register("aura.collections.listReverse", nat_list_reverse);
+    reg.register("aura.collections.listSort", nat_list_sort);
+    reg.register("aura.collections.listGet", nat_list_get);
+    reg.register("aura.collections.listSet", nat_list_set);
+    reg.register("aura.collections.listInsert", nat_list_insert);
+    reg.register("aura.collections.listSubList", nat_list_sub_list);
     // 映射构造
-    reg.register("collections.mapOf", nat_map_of);
-    reg.register("collections.mutableMapOf", nat_mutable_map_of);
-    reg.register("collections.emptyMap", nat_empty_map);
-    reg.register("collections.mapContains", nat_map_contains);
-    reg.register("collections.mapContainsKey", nat_map_contains_key);
-    reg.register("collections.mapContainsValue", nat_map_contains_value);
-    reg.register("collections.mapRemove", nat_map_remove);
-    reg.register("collections.mapKeys", nat_map_keys);
-    reg.register("collections.mapValues", nat_map_values);
+    reg.register("aura.collections.mapOf", nat_map_of);
+    reg.register("aura.collections.mutableMapOf", nat_mutable_map_of);
+    reg.register("aura.collections.emptyMap", nat_empty_map);
+    reg.register("aura.collections.mapContains", nat_map_contains);
+    reg.register("aura.collections.mapContainsKey", nat_map_contains_key);
+    reg.register("aura.collections.mapContainsValue", nat_map_contains_value);
+    reg.register("aura.collections.mapRemove", nat_map_remove);
+    reg.register("aura.collections.mapKeys", nat_map_keys);
+    reg.register("aura.collections.mapValues", nat_map_values);
     // 集合构造
-    reg.register("collections.setOf", nat_set_of);
-    reg.register("collections.mutableSetOf", nat_mutable_set_of);
-    reg.register("collections.emptySet", nat_empty_set);
+    reg.register("aura.collections.setOf", nat_set_of);
+    reg.register("aura.collections.mutableSetOf", nat_mutable_set_of);
+    reg.register("aura.collections.emptySet", nat_empty_set);
 }
 
 /// listOf(items...) → List

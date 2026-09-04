@@ -1,5 +1,5 @@
 // NovaOS 示例：Aura 语言语法验证
-import std.io.println
+import std.aura.io.println
 
 struct Player(
     val id: Int,

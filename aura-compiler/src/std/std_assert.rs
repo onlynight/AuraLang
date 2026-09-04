@@ -6,14 +6,14 @@ use crate::vm::native::NativeRegistry;
 use crate::vm::value::Value;
 
 pub fn register(reg: &mut NativeRegistry) {
-    reg.register("assert.assert", nat_assert);
-    reg.register("assert.assertTrue", nat_assert_true);
-    reg.register("assert.assertFalse", nat_assert_false);
-    reg.register("assert.assertEq", nat_assert_eq);
-    reg.register("assert.assertNotEq", nat_assert_not_eq);
-    reg.register("assert.assertNotNull", nat_assert_not_null);
-    reg.register("assert.assertNull", nat_assert_null);
-    reg.register("assert.debugAssert", nat_debug_assert);
+    reg.register("aura.assert.assert", nat_assert);
+    reg.register("aura.assert.assertTrue", nat_assert_true);
+    reg.register("aura.assert.assertFalse", nat_assert_false);
+    reg.register("aura.assert.assertEq", nat_assert_eq);
+    reg.register("aura.assert.assertNotEq", nat_assert_not_eq);
+    reg.register("aura.assert.assertNotNull", nat_assert_not_null);
+    reg.register("aura.assert.assertNull", nat_assert_null);
+    reg.register("aura.assert.debugAssert", nat_debug_assert);
 }
 
 fn ok_result(msg: String) -> Value {
