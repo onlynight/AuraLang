@@ -23,6 +23,8 @@ pub mod coroutine;
 pub mod dynamic_ffi;
 #[cfg(feature = "jit")]
 pub mod jit;
+#[cfg(feature = "jit")]
+pub mod jit_opt;
 
 pub use heap::Heap;
 pub use native::NativeRegistry;
