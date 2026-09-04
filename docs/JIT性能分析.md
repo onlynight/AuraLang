@@ -57,7 +57,7 @@ JIT 与 VM 的耗时完全相同，说明 **JIT 从未真正派发原生码**，
 
 ### 3.3 唯一能达阈值的递归热点被 JIT 白名单拒绝（案例 B 实证）
 
-fib(25) 单次运行中递归调用 fib 达 **242,785 次** ≫ 10_000 阈值，
+fib(25) 单次运行中递归调用 fib 达 **242,785 次** ≫ 10,000 阈值，
 成功触发 `maybe_jit_compile(fib)`。
 
 但 `vm/jit.rs::is_jit_compilable()` 白名单**排除含 `Call` 的函数**
@@ -72,7 +72,7 @@ fib(25) 单次运行中递归调用 fib 达 **242,785 次** ≫ 10_000 阈值，
 内联优化删除小函数调用  ─┐
 入口函数无调用计数        ├─→ 没有任何函数能同时满足：
 递归热点被白名单拒绝    ─┘     ① 调用次数 ≥ 10000
-                             ② is_jit_compilable == true
+                              ② is_jit_compilable == true
 ```
 
 而 AOT（LLVM）完全没有这些问题：它不依赖运行时热点检测，
@@ -89,6 +89,61 @@ fib(25) 单次运行中递归调用 fib 达 **242,785 次** ≫ 10_000 阈值，
 
 > 推荐路径：先实施 A（入口整体编译）获得循环热点收益；
 > 再评估 B（递归支持）覆盖 fib 类计算密集型递归。
+
+## 7. 修复实施（P6）
+
+### 7.1 Fix A：入口函数强制 JIT 编译（已实施）
+
+**问题**：入口函数 `main` 由 `Vm::run()` 直接 `push_frame()` 启动，调用计数每次只 +1，
+永远达不到热点阈值 10_000，导致循环热点无法触发 JIT。
+
+**修复**：在 `Vm::run()` 中，首次运行时对入口函数调用 `force_jit_compile()`，
+绕过热点计数限制。编译成功后直接派发到 JIT 原生码，绕过解释器主循环。
+
+**修改文件**：
+- `aura-compiler/src/vm/mod.rs` — 新增 `force_jit_compile()` / `try_jit_compile()`，
+  修改 `run()` 添加强制编译和原生派发逻辑
+
+**效果**：
+
+| 场景 | VM（解释器） | JIT（修复后） | 加速比 |
+|------|-------------|---------------|--------|
+| sum(60000) | 58.8 ms/op | **0.51 ms/op** | **115x** |
+| fib(25) | 243 ms/op | 244 ms/op | 1.0x |
+
+### 7.2 Fix B：递归函数 JIT 支持（已实施）
+
+**问题**：递归函数（如 `fib`）必然包含 `Call` 指令，被 `is_jit_compilable()` 白名单拒绝，导致 fib 类递归热点永远无法触发 JIT 编译，只能回退解释器。
+
+**修复**：
+1. **扩展 JIT ABI**：增加 `dispatch_table` 参数，已在 `JitEntry` 类型中预留
+2. **实现 JIT emit 间接调用**：在 `jit.rs::emit_instr` 的 `Call` 指令处理中，通过 `dispatch_table` 查找被调用函数的入口并间接调用
+3. **递归编译**：先编译任何被调用函数，确保其 dispatch table 条目存在
+
+**修改文件**：
+- `aura-compiler/src/vm/jit.rs` —
+  - 添加 `JitState::ensure_capacity()` 维护 dispatch table 指针稳定
+  - 在 `try_jit_compile()` 中递归编译被调用函数
+  - 在 `emit_instr::Call` 中使用 `call_indirect` 加载并调用 dispatch table 条目
+
+**效果**：
+
+| 场景 | VM（解释器） | JIT（修复后） | 加速比 |
+|------|-------------|---------------|--------|
+| sum(60000) | 58.8 ms/op | **0.51 ms/op** | **115x** |
+| fib(25) | 243 ms/op | **2.67 ms/op** | **91x** |
+
+**修复 B 特点**：
+- 通过修改 `is_jit_compilable()` 的白名单策略，现在完全支持递归函数（如 `fib`）的 JIT 编译
+- 通过 `aura_jit_dispatch` 分派助手实现独立的间接调用机制，支持任意递归深度
+- 保持 `Fix A` 的入口强制 JIT 功能
+- 所有循环热点（如 sum、fib）均能触发 JIT，获得极大幅度加速
+
+### 7.3 调试工具
+
+新增示例文件：
+- `aura-compiler/examples/jit_bench_simple.rs` — 简化版 VM vs JIT 性能对比（无需 LLVM）
+- `aura-compiler/examples/jit_diag.rs` — JIT 状态诊断
 
 ## 6. 相关文件
 

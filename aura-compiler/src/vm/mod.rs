@@ -440,11 +440,37 @@ impl Vm {
     }
 
     /// 执行入口函数，返回其返回值
+    ///
+    /// **JIT 入口派发（Fix A）**：当 `jit` 开启时，入口函数在首次运行时强制
+    /// JIT 编译（忽略调用阈值）。编译成功后直接派发到原生入口，绕过解释器
+    /// 主循环——这解决了「入口函数无调用计数」导致循环热点永远无法触发 JIT 的问题
+    /// （见 docs/JIT性能分析.md §3.2）。
     pub fn run(&mut self) -> Result<Value, VmError> {
         let entry = self.module.entry as usize;
         if entry >= self.module.funcs.len() {
             return Err(VmError::NoEntry);
         }
+
+        #[cfg(feature = "jit")]
+        {
+            if self.opts.jit {
+                // Fix A：入口函数强制 JIT 编译（忽略调用阈值）
+                self.force_jit_compile(entry);
+                if let Some(jit) = self.jit.as_ref() {
+                    if jit.is_compiled(entry) {
+                        // 直接派发入口函数到 JIT 原生码（C ABI：args, out, argc）
+                        let mut out = crate::vm::jit::JitValue::null();
+                        let jargs: Vec<crate::vm::jit::JitValue> = Vec::new();
+                        // Safety: out 指向合法 JitValue 缓冲；entry 已在上面确认编译成功
+                        unsafe {
+                            jit.invoke(entry, jargs.as_ptr(), &mut out, 0);
+                        }
+                        return Ok(out.to_value());
+                    }
+                }
+            }
+        }
+
         self.push_frame(entry, Vec::new())?;
         while !self.frames.is_empty() && !self.halt {
             self.step()?;
@@ -569,9 +595,50 @@ impl Vm {
         if count + 1 < self.opts.hotspot_threshold {
             return;
         }
-        let f = self.module.funcs[idx].clone();
+        self.try_jit_compile(idx);
+    }
+
+    /// 强制 JIT 编译（忽略调用阈值）：入口函数使用此路径，绕过热点计数限制。
+    /// 编译失败则记入 skip 集合，后续回退解释器。
+    #[cfg(feature = "jit")]
+    fn force_jit_compile(&mut self, idx: usize) {
+        let already = self
+            .jit
+            .as_ref()
+            .map(|j| j.is_compiled(idx) || j.is_skipped(idx))
+            .unwrap_or(true);
+        if already {
+            return;
+        }
+        self.try_jit_compile(idx);
+    }
+
+    /// 尝试 JIT 编译函数 `idx`（共享逻辑）：成功则缓存原生入口，失败则记入 skip。
+    #[cfg(feature = "jit")]
+    fn try_jit_compile(&mut self, idx: usize) {
+        // Ensure dispatch table capacity to keep pointer stable
+        if let Some(jit) = self.jit.as_mut() {
+            jit.ensure_capacity(self.module.funcs.len());
+        }
+        // Recursively compile any callee functions so their dispatch entries exist
+        let f_clone = self.module.funcs[idx].clone();
+        for instr in &f_clone.code {
+            if let Instr::Call(ci) = instr {
+                let callee_idx = *ci as usize;
+                // Skip self-recursive calls to avoid infinite recursion
+                if callee_idx != idx {
+                    if let Some(jit) = self.jit.as_ref() {
+                        if !(jit.is_compiled(callee_idx) || jit.is_skipped(callee_idx)) {
+                            self.try_jit_compile(callee_idx);
+                        }
+                    }
+                }
+            }
+        }
+        // Compile the current function
         let consts = self.module.consts.clone();
-        let entry = crate::vm::jit::compile_function(&f, &consts);
+        let funcs = self.module.funcs.clone();
+        let entry = crate::vm::jit::compile_function(idx, &f_clone, &consts, &funcs);
         if let Some(jit) = self.jit.as_mut() {
             match entry {
                 Some(e) => jit.insert(idx, e),

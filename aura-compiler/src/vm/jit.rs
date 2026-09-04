@@ -94,12 +94,25 @@ impl JitValue {
 }
 
 /// 已编译函数的原生入口（C ABI）
-pub type JitEntry = unsafe extern "C" fn(*const JitValue, *mut JitValue, usize);
+///
+/// `dispatch_table` 用于 Fix B：JIT 代码在遇到 `Call` 时从此表查找被调用
+/// 函数的入口并间接调用，从而支持递归函数（如 `fib`）的 JIT 编译。
+///
+/// 注意：dispatch_table 参数使用 `*const ()` 而非 `*const JitEntry`，
+/// 以避免类型别名递归（JitEntry 不能包含自身）。在 dispatch helper 中
+/// 会将其转回 `*const JitEntry` 进行索引。
+pub type JitEntry = unsafe extern "C" fn(*const JitValue, *mut JitValue, usize, *const ());
 
 /// JIT 状态：缓存已编译 / 已跳过编译的函数
 pub struct JitState {
     compiled: HashMap<usize, JitEntry>,
     skipped: HashMap<usize, ()>,
+    /// 分派表：dispatch_table[i] = 函数 i 的 JIT 入口（未编译时为 None）
+    /// 由 JIT 代码在 `Call` 指令处间接查表调用。
+    ///
+    /// 使用 `Option<JitEntry>` 安全表达可能为 null 的函数指针（None 的位模式
+    /// 即 null），与 `*const JitEntry` 可安全互转（Option<fn> 与 fn 布局相同）。
+    dispatch_table: Vec<Option<JitEntry>>,
 }
 
 impl Default for JitState {
@@ -107,11 +120,18 @@ impl Default for JitState {
         JitState {
             compiled: HashMap::new(),
             skipped: HashMap::new(),
+            dispatch_table: Vec::new(),
         }
     }
 }
 
 impl JitState {
+    /// Ensure the dispatch table has at least `len` slots (filled with None) to keep the underlying pointer stable.
+    pub fn ensure_capacity(&mut self, len: usize) {
+        while self.dispatch_table.len() < len {
+            self.dispatch_table.push(None);
+        }
+    }
     pub fn new() -> Self {
         JitState::default()
     }
@@ -122,10 +142,24 @@ impl JitState {
         self.skipped.contains_key(&idx)
     }
     pub fn insert(&mut self, idx: usize, entry: JitEntry) {
+        // 确保分派表足够大
+        while self.dispatch_table.len() <= idx {
+            self.dispatch_table.push(None);
+        }
+        self.dispatch_table[idx] = Some(entry);
         self.compiled.insert(idx, entry);
     }
     pub fn skip(&mut self, idx: usize) {
         self.skipped.insert(idx, ());
+    }
+
+    /// 获取分派表的原始指针（供 JIT 代码在 `Call` 时查表）
+    ///
+    /// `Option<JitEntry>` 与 `JitEntry` 布局相同（None ≡ null），
+    /// 故 `*const Option<JitEntry>` 可直接当作 `*const JitEntry` 使用。
+    /// 返回 `*const ()` 以避免 JitEntry 类型的递归定义。
+    fn dispatch_table_ptr(&self) -> *const () {
+        self.dispatch_table.as_ptr() as *const ()
     }
 
     /// 调用已编译函数（args 为入参，返回其结果）
@@ -136,7 +170,7 @@ impl JitState {
         let mut out = JitValue::null();
         // Safety: out 指向合法的 JitValue 缓冲；args 长度由调用方保证
         // 与编译时函数签名（param_count）一致
-        unsafe { entry(args.as_ptr(), &mut out, args.len()) };
+        unsafe { entry(args.as_ptr(), &mut out, args.len(), self.dispatch_table_ptr()) };
         Some(out)
     }
 
@@ -144,22 +178,59 @@ impl JitState {
     ///
     /// # Safety
     /// 调用方须保证 `args`/`out` 指向合法内存且长度足够。
-    pub unsafe fn invoke(
-        &self,
-        idx: usize,
-        args: *const JitValue,
-        out: *mut JitValue,
-        argc: usize,
-    ) {
+    pub unsafe fn invoke(&self, idx: usize, args: *const JitValue, out: *mut JitValue, argc: usize) {
         if let Some(entry) = self.compiled.get(&idx) {
             // Safety: 调用方已按文档保证指针合法性
-            unsafe { entry(args, out, argc) };
+            unsafe { entry(args, out, argc, self.dispatch_table_ptr()) };
         }
     }
 }
 
-/// 判断函数是否「可 JIT 编译」（叶子整数函数）
-pub fn is_jit_compilable(f: &DecodedFunction, consts: &[Const]) -> bool {
+/// JIT 调用分派助手（Fix B）：由 JIT 代码在 `Call` 指令处调用，
+/// 从 dispatch table 查找被调用函数的入口并间接调用。
+///
+/// 签名：void dispatch(const void* table, usize callee_idx, const JitValue* args, JitValue* out, usize argc)
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aura_jit_dispatch(
+    dispatch_table: *const (),
+    callee_idx: usize,
+    args: *const JitValue,
+    out: *mut JitValue,
+    argc: usize,
+) {
+    let table = dispatch_table as *const Option<JitEntry>;
+    let entry = unsafe { *table.add(callee_idx) };
+    match entry {
+        None => return, // 被调用函数未 JIT 编译（不应发生）
+        Some(f) => unsafe { f(args, out, argc, dispatch_table) },
+    }
+}
+
+/// 判断函数是否「可 JIT 编译」（叶子整数函数 + 递归调用，Fix B）
+///
+/// 原策略（叶子整数函数）仅允许无 `Call` 的函数，导致 `fib` 类递归热点被拒绝。
+/// 新策略允许 `Call` 指令，前提是目标函数本身也可 JIT 编译（递归安全：通过
+/// `in_progress` 集合检测循环调用，自递归返回 true）。
+///
+/// `idx` 是函数在 `funcs` 中的索引，`f` 是对应的函数。
+pub fn is_jit_compilable(idx: usize, _f: &DecodedFunction, consts: &[Const], funcs: &[DecodedFunction]) -> bool {
+    is_jit_compilable_inner(idx, consts, funcs, &mut std::collections::HashSet::new())
+}
+
+fn is_jit_compilable_inner(
+    idx: usize,
+    consts: &[Const],
+    funcs: &[DecodedFunction],
+    in_progress: &mut std::collections::HashSet<usize>,
+) -> bool {
+    if idx >= funcs.len() {
+        return false;
+    }
+    // 递归安全：若已在检查链中（自递归 / 互递归），视为可编译
+    if !in_progress.insert(idx) {
+        return true;
+    }
+    let f = &funcs[idx];
     for instr in &f.code {
         match instr {
             Instr::LoadConst(ci) => {
@@ -187,6 +258,12 @@ pub fn is_jit_compilable(f: &DecodedFunction, consts: &[Const]) -> bool {
             | Instr::JumpIfTrue(_)
             | Instr::JumpIfFalse(_)
             | Instr::Return => {}
+            // Fix B：允许对 JIT 可编译函数的调用（含自递归）
+            Instr::Call(ci) => {
+                if !is_jit_compilable_inner(*ci as usize, consts, funcs, in_progress) {
+                    return false;
+                }
+            }
             _ => return false,
         }
     }
@@ -194,11 +271,20 @@ pub fn is_jit_compilable(f: &DecodedFunction, consts: &[Const]) -> bool {
 }
 
 /// 编译单个函数到原生代码（使用 Cranelift）。返回 `None` 表示放弃（回退解释器）。
-pub fn compile_function(f: &DecodedFunction, consts: &[Const]) -> Option<JitEntry> {
-    if !is_jit_compilable(f, consts) {
+///
+/// `funcs` 用于 Fix B：检查 `Call` 指令的目标函数是否也可 JIT 编译，
+/// 从而支持递归函数（如 `fib`）的编译。
+/// `idx` 是函数在 `funcs` 中的索引。
+pub fn compile_function(
+    idx: usize,
+    f: &DecodedFunction,
+    consts: &[Const],
+    funcs: &[DecodedFunction],
+) -> Option<JitEntry> {
+    if !is_jit_compilable(idx, f, consts, funcs) {
         return None;
     }
-    cranelift_backend::jit_compile_cranelift(f, consts)
+    cranelift_backend::jit_compile_cranelift(f, consts, funcs)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -229,6 +315,7 @@ mod cranelift_backend {
     pub(super) fn jit_compile_cranelift(
         f: &DecodedFunction,
         consts: &[Const],
+        funcs: &[DecodedFunction],
     ) -> Option<JitEntry> {
         // JIT 代码运行在宿主进程内，使用宿主 ISA（通过 JITBuilder::with_flags 配置）
         let builder =
@@ -240,12 +327,14 @@ mod cranelift_backend {
         let ptr_ty = tc.pointer_type();
         let call_conv = tc.default_call_conv;
 
-        // C ABI：void entry(const JitValue* args, JitValue* out, usize argc)
+        // C ABI：void entry(const JitValue* args, JitValue* out, usize argc, const JitEntry* dispatch_table)
+        // dispatch_table 用于 Fix B：JIT 代码在 `Call` 时查表间接调用被编译函数
         let sig = Signature {
             params: vec![
                 AbiParam::new(ptr_ty),
                 AbiParam::new(ptr_ty),
                 AbiParam::new(types::I64),
+                AbiParam::new(ptr_ty),
             ],
             returns: vec![],
             call_conv,
@@ -282,7 +371,7 @@ mod cranelift_backend {
             let mut fbctx = FunctionBuilderContext::new();
             let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
             let entry = fb.create_block();
-            // 为入口块追加与函数签名一致的块参数（args, out, argc）
+            // 为入口块追加与函数签名一致的块参数（args, out, argc, dispatch_table）
             fb.append_block_params_for_function_params(entry);
             blocks.insert(0, entry);
             for &t in targets.iter().skip(1) {
@@ -292,6 +381,19 @@ mod cranelift_backend {
                 }
             }
             fb.switch_to_block(entry);
+
+            // ── 导入 JIT 入口签名（用于 call_indirect）──
+            let jit_entry_sig = Signature {
+                params: vec![
+                    AbiParam::new(ptr_ty),      // args
+                    AbiParam::new(ptr_ty),      // out
+                    AbiParam::new(types::I64),   // argc
+                    AbiParam::new(ptr_ty),      // dispatch_table
+                ],
+                returns: vec![],
+                call_conv,
+            };
+            let jit_entry_sig_ref = fb.import_signature(jit_entry_sig);
 
             // 入口块若无入边（不可能跳回 0）则立即可密封
             if pred_total.get(&0).copied().unwrap_or(0) == 0 {
@@ -323,13 +425,16 @@ mod cranelift_backend {
             let zero_sp = fb.ins().iconst(types::I64, 0);
             fb.def_var(sp, zero_sp);
 
-            // ABI 指针：args / out（argc 暂不使用）
+            // ABI 指针：args / out / dispatch_table（argc 暂不使用）
             let args_ptr = Variable::from_bits(0);
             let out_ptr = Variable::from_bits(1);
+            let dispatch_table = Variable::from_bits(4);
             fb.declare_var(args_ptr, ptr_ty);
             fb.def_var(args_ptr, fb.block_params(entry)[0]);
             fb.declare_var(out_ptr, ptr_ty);
             fb.def_var(out_ptr, fb.block_params(entry)[1]);
+            fb.declare_var(dispatch_table, ptr_ty);
+            fb.def_var(dispatch_table, fb.block_params(entry)[3]);
 
             // 参数按 ABI 布局拷入局部槽 0..param_count
             for i in 0..f.param_count as usize {
@@ -383,6 +488,7 @@ mod cranelift_backend {
                     &mut fb,
                     instr,
                     consts,
+                    funcs,
                     &tag_vars,
                     &payload_vars,
                     &blocks,
@@ -392,6 +498,8 @@ mod cranelift_backend {
                     args_ptr,
                     out_ptr,
                     ptr_ty,
+                    jit_entry_sig_ref,
+                    dispatch_table,
                 );
                 terminated = terminated || term;
 
@@ -490,6 +598,7 @@ mod cranelift_backend {
         fb: &mut FunctionBuilder,
         instr: &Instr,
         consts: &[Const],
+        funcs: &[DecodedFunction],
         tag_vars: &[Variable],
         payload_vars: &[Variable],
         blocks: &HashMap<usize, Block>,
@@ -499,6 +608,8 @@ mod cranelift_backend {
         _args_ptr: Variable,
         out_ptr: Variable,
         ptr_ty: types::Type,
+        jit_entry_sig_ref: cranelift::codegen::ir::SigRef,
+        dispatch_table: Variable,
     ) -> bool {
         let i64_ty = types::I64;
         let zero32 = Offset32::new(0);
@@ -622,6 +733,45 @@ mod cranelift_backend {
                 fb.ins().return_(&[]);
                 true
             }
+            // Fix B：调用 JIT 可编译函数——通过 dispatch table 查入口并间接调用
+            Instr::Call(callee_idx) => {
+                let callee_idx = *callee_idx as usize;
+                let callee = &funcs[callee_idx];
+                let param_count = callee.param_count as i64;
+
+                // 当前 sp 指向槽上方；args 位于 [sp - param_count, sp)
+                let cur_sp = fb.use_var(sp);
+                let args_sp = fb.ins().iadd_imm(cur_sp, -param_count);
+
+                // args_ptr = stack_base + (sp - param_count) * 16
+                let base = fb.ins().stack_addr(ptr_ty, *stack_slot, 0);
+                let args_off = fb.ins().imul_imm(args_sp, VALUE_BYTES);
+                let args_ptr_val = fb.ins().iadd(base, args_off);
+
+                // out_ptr = stack_base + sp * 16（返回值写入此槽）
+                let out_off = fb.ins().imul_imm(cur_sp, VALUE_BYTES);
+                let out_ptr_val = fb.ins().iadd(base, out_off);
+
+                // 从 dispatch table 加载被调用函数的入口地址
+                let dt = fb.use_var(dispatch_table);
+                let entry_off = fb.ins().iconst(types::I64, callee_idx as i64 * 8);
+                let entry_addr = fb.ins().iadd(dt, entry_off);
+                let entry_ptr = fb.ins().load(ptr_ty, MemFlags::new(), entry_addr, zero32);
+
+                // 间接调用：call_indirect(jit_entry_sig, entry_ptr, [args_ptr, out_ptr, argc, dispatch_table])
+                let argc_val = fb.ins().iconst(types::I64, param_count);
+                fb.ins().call_indirect(jit_entry_sig_ref, entry_ptr, &[args_ptr_val, out_ptr_val, argc_val, dt]);
+
+                // 更新 sp：弹出参数（sp -= param_count）
+                fb.def_var(sp, args_sp);
+
+                // 从 out_ptr 读取返回值 [tag, payload] 并压栈
+                let ret_tag = fb.ins().load(i64_ty, MemFlags::new(), out_ptr_val, zero32);
+                let ret_payload = fb.ins().load(i64_ty, MemFlags::new(), out_ptr_val, eight32);
+                push(fb, ret_tag, ret_payload);
+
+                false
+            }
             _ => {
                 // 白名单外指令理论不可达
                 fb.ins().trap(TrapCode::unwrap_user(2));
@@ -664,6 +814,10 @@ mod cranelift_backend {
 }
 
 #[cfg(not(feature = "jit"))]
-fn jit_compile_cranelift(_f: &DecodedFunction, _consts: &[Const]) -> Option<JitEntry> {
+fn jit_compile_cranelift(
+    _f: &DecodedFunction,
+    _consts: &[Const],
+    _funcs: &[DecodedFunction],
+) -> Option<JitEntry> {
     None
 }
