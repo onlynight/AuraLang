@@ -591,6 +591,7 @@ fn create_test_vm() -> Vm {
             code: vec![OpCode::ReturnUnit.byte()],
         }],
         entry: 0,
+        enabled_modules: Vec::new(),
     };
     Vm::new(&module, VmOptions::default()).unwrap()
 }

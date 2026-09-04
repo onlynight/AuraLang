@@ -2,6 +2,8 @@
 // Select 多路复用演示 — Channel 多路复用与竞争
 // ════════════════════════════════════════════════════════════
 
+import aura.concurrent.*
+
 fun main() {
     // ── 1. 第一通道就绪 ──
     val ch1 = aura.concurrent.newChannel(0)

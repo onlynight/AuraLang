@@ -2,6 +2,8 @@
 // Channel 类型演示 — 有界/无界通道、Send/Recv/TryRecv
 // ════════════════════════════════════════════════════════════
 
+import aura.concurrent.*
+
 fun main() {
     // ── 1. 创建无界 Channel ──
     val ch1 = aura.concurrent.newChannel(0)

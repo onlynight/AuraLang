@@ -25,47 +25,154 @@
 //! - std_assert   — 通用断言（assert / debugAssert）
 //! - std_iter     — 迭代器/函数式工具（map / filter / reduce / ...）
 
+pub mod decl;
+
+// Phase 3: std 模块按需编译（#[cfg(feature)] 门控）
+// 默认不编译任何 std 模块，减小二进制体积。
+// 启用方式：cargo build --features "std-math,std-io"
+
+#[cfg(feature = "std-ascii")]
 pub mod std_ascii;
+#[cfg(feature = "std-assert")]
 pub mod std_assert;
+#[cfg(feature = "std-builtin")]
 pub mod std_builtin;
+#[cfg(feature = "std-collections")]
 pub mod std_collections;
+#[cfg(feature = "std-console")]
 pub mod std_console;
+#[cfg(feature = "std-encoding")]
 pub mod std_encoding;
+#[cfg(feature = "std-env")]
 pub mod std_env;
+#[cfg(feature = "std-fs")]
 pub mod std_fs;
+#[cfg(feature = "std-io")]
 pub mod std_io;
+#[cfg(feature = "std-iter")]
 pub mod std_iter;
+#[cfg(feature = "std-json")]
 pub mod std_json;
+#[cfg(feature = "std-math")]
 pub mod std_math;
+#[cfg(feature = "std-net")]
 pub mod std_net;
+#[cfg(feature = "std-path")]
 pub mod std_path;
+#[cfg(feature = "std-process")]
 pub mod std_process;
+#[cfg(feature = "std-random")]
 pub mod std_random;
+#[cfg(feature = "std-string")]
 pub mod std_string;
+#[cfg(feature = "std-test")]
 pub mod std_test;
+#[cfg(feature = "std-time")]
 pub mod std_time;
 
 use crate::vm::native::NativeRegistry;
 
 /// 将所有标准库函数注册到 `NativeRegistry`
+///
+/// 仅注册已启用的模块（由 Cargo feature 控制）。
 pub fn register_all(reg: &mut NativeRegistry) {
+    #[cfg(feature = "std-io")]
     std_io::register(reg);
+    #[cfg(feature = "std-math")]
     std_math::register(reg);
+    #[cfg(feature = "std-string")]
     std_string::register(reg);
+    #[cfg(feature = "std-collections")]
     std_collections::register(reg);
+    #[cfg(feature = "std-fs")]
     std_fs::register(reg);
+    #[cfg(feature = "std-net")]
     std_net::register(reg);
+    #[cfg(feature = "std-json")]
     std_json::register(reg);
+    #[cfg(feature = "std-time")]
     std_time::register(reg);
+    #[cfg(feature = "std-test")]
     std_test::register(reg);
+    #[cfg(feature = "std-builtin")]
     std_builtin::register(reg);
+    #[cfg(feature = "std-env")]
     std_env::register(reg);
+    #[cfg(feature = "std-process")]
     std_process::register(reg);
+    #[cfg(feature = "std-random")]
     std_random::register(reg);
+    #[cfg(feature = "std-encoding")]
     std_encoding::register(reg);
+    #[cfg(feature = "std-ascii")]
     std_ascii::register(reg);
+    #[cfg(feature = "std-console")]
     std_console::register(reg);
+    #[cfg(feature = "std-path")]
     std_path::register(reg);
+    #[cfg(feature = "std-assert")]
     std_assert::register(reg);
+    #[cfg(feature = "std-iter")]
     std_iter::register(reg);
+}
+
+/// 按需注册标准库函数（只注册指定模块）
+///
+/// `modules` 是模块名集合，如 `["math", "io", "string"]`。
+/// 未指定的模块不注册，对应代码不编译进二进制。
+pub fn register_with_modules(reg: &mut NativeRegistry, modules: &[&str]) {
+    for module in modules {
+        match *module {
+            #[cfg(feature = "std-io")]
+            "io" => std_io::register(reg),
+            #[cfg(feature = "std-math")]
+            "math" => std_math::register(reg),
+            #[cfg(feature = "std-string")]
+            "string" => std_string::register(reg),
+            #[cfg(feature = "std-collections")]
+            "collections" => std_collections::register(reg),
+            #[cfg(feature = "std-fs")]
+            "fs" => std_fs::register(reg),
+            #[cfg(feature = "std-net")]
+            "net" => std_net::register(reg),
+            #[cfg(feature = "std-json")]
+            "json" => std_json::register(reg),
+            #[cfg(feature = "std-time")]
+            "time" => std_time::register(reg),
+            #[cfg(feature = "std-test")]
+            "test" => std_test::register(reg),
+            #[cfg(feature = "std-builtin")]
+            "builtin" => std_builtin::register(reg),
+            #[cfg(feature = "std-env")]
+            "env" => std_env::register(reg),
+            #[cfg(feature = "std-process")]
+            "process" => std_process::register(reg),
+            #[cfg(feature = "std-random")]
+            "random" => std_random::register(reg),
+            #[cfg(feature = "std-encoding")]
+            "encoding" => std_encoding::register(reg),
+            #[cfg(feature = "std-ascii")]
+            "ascii" => std_ascii::register(reg),
+            #[cfg(feature = "std-console")]
+            "console" => std_console::register(reg),
+            #[cfg(feature = "std-path")]
+            "path" => std_path::register(reg),
+            #[cfg(feature = "std-assert")]
+            "assert" => std_assert::register(reg),
+            #[cfg(feature = "std-iter")]
+            "iter" => std_iter::register(reg),
+            _ => {} // 未知模块或未启用，跳过
+        }
+    }
+}
+
+/// 从 import 声明路径提取模块名
+///
+/// 例如：`"aura.math"` → `"math"`，`"aura.string"` → `"string"`
+pub fn module_name_from_path(path: &str) -> Option<&str> {
+    if let Some(rest) = path.strip_prefix("aura.") {
+        Some(rest)
+    } else {
+        None
+    }
 }

@@ -1,5 +1,5 @@
 // NovaOS 示例：Aura 语言语法验证
-import std.aura.io.println
+// 注：println 是 prelu 函数，无需 import
 
 struct Player(
     val id: Int,

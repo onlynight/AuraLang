@@ -134,6 +134,8 @@ pub struct LowerCtx {
     const_map: HashMap<ConstKey, usize>,
     pub natives: HashSet<String>,
     pub native_params: HashMap<String, u16>,
+    /// Phase 1: 用户自定义函数名集合（用于区分 CallNative vs Call）
+    pub user_functions: HashSet<String>,
 }
 
 impl LowerCtx {
@@ -143,6 +145,7 @@ impl LowerCtx {
             const_map: HashMap::new(),
             natives: HashSet::new(),
             native_params: HashMap::new(),
+            user_functions: HashSet::new(),
         }
     }
 
@@ -450,7 +453,14 @@ impl MirBuilder {
                 }
                 let argv: Vec<Reg> = args.iter().map(|a| self.lower_expr(a, ctx)).collect();
                 let dst = self.alloc_reg();
-                if ctx.natives.contains(callee.as_str()) {
+                // Phase 1: 优先检查用户自定义函数 — 有同名用户函数则走 Call，否则走 CallNative
+                if ctx.user_functions.contains(callee.as_str()) {
+                    self.emit(MirInstr::Call {
+                        dst: Some(dst),
+                        func: callee.clone(),
+                        args: argv,
+                    });
+                } else if ctx.natives.contains(callee.as_str()) {
                     self.emit(MirInstr::CallNative {
                         dst: Some(dst),
                         func: callee.clone(),
@@ -633,6 +643,8 @@ pub fn lower_program(hir: &HirProgram) -> (Vec<MirFunction>, LowerCtx) {
         if f.is_native {
             continue; // 原生函数没有 body，仅登记签名（已在 natives 中）
         }
+        // Phase 1: 记录用户自定义函数名，供 lower_expr 区分 CallNative vs Call
+        ctx.user_functions.insert(f.name.clone());
         mir_funcs.push(lower_function(f, &mut ctx));
     }
     (mir_funcs, ctx)

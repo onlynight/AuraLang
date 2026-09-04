@@ -54,6 +54,9 @@ pub struct AotOptions {
     pub string_as_struct: bool,
     /// 是否注入 runtime 库声明（默认 true）
     pub link_runtime: bool,
+    /// Phase 4: 是否链接 std C FFI（默认 true）
+    /// 启用后 AOT 生成的可执行文件可调用 aura_println/aura_math_sin 等 C ABI 函数
+    pub link_std_cffi: bool,
     /// LLVM 工具链根目录（覆盖自动探测）
     pub llvm_home: Option<std::path::PathBuf>,
 }
@@ -66,6 +69,7 @@ impl Default for AotOptions {
             debug_info: false,
             string_as_struct: true,
             link_runtime: true,
+            link_std_cffi: true,
             llvm_home: None,
         }
     }

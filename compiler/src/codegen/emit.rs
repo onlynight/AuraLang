@@ -59,6 +59,7 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
         natives,
         functions,
         entry,
+        enabled_modules: Vec::new(), // 由 compile() 填充
     }
 }
 

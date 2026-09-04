@@ -75,11 +75,16 @@ impl From<aot::AotError> for CodegenError {
 pub struct CodeGenOptions {
     /// 是否运行优化通道（默认 true）
     pub optimize: bool,
+    /// Phase 1c: 按需链接 — 启用的 std 模块名
+    pub enabled_modules: Vec<String>,
 }
 
 impl Default for CodeGenOptions {
     fn default() -> Self {
-        CodeGenOptions { optimize: true }
+        CodeGenOptions {
+            optimize: true,
+            enabled_modules: Vec::new(),
+        }
     }
 }
 
@@ -113,7 +118,9 @@ pub fn compile(program: &Program, opts: &CodeGenOptions) -> BytecodeModule {
     }
 
     // 6. MIR → 字节码发射
-    emit_module(&hir, &mir_funcs, &ctx)
+    let mut module = emit_module(&hir, &mir_funcs, &ctx);
+    module.enabled_modules = opts.enabled_modules.clone();
+    module
 }
 
 /// 从源码字符串编译为字节码模块（自动跑前端 + 语义检查）
@@ -159,5 +166,32 @@ pub fn compile_source(source: &str) -> Result<BytecodeModule, String> {
         eprintln!("{}", w);
     }
 
-    Ok(compile(&program, &CodeGenOptions::default()))
+    // Phase 1c: 提取启用的 std 模块（按需链接）
+    let enabled_modules = extract_enabled_modules(&program);
+    let opts = CodeGenOptions {
+        optimize: true,
+        enabled_modules,
+    };
+
+    Ok(compile(&program, &opts))
+}
+
+/// 从 AST 程序提取启用的 std 模块名
+///
+/// 遍历 `program.imports`，解析 `aura.math.*` / `import aura.math` 等语法，
+/// 返回模块名集合（如 `["math", "io"]`）。
+fn extract_enabled_modules(program: &crate::ast::Program) -> Vec<String> {
+    let mut modules = std::collections::HashSet::new();
+
+    for imp in &program.imports {
+        let path = &imp.path;
+        // 检查是否是 aura.* 命名空间
+        if let Some(rest) = path.strip_prefix("aura.") {
+            // 去掉可能的函数名（如 aura.math.sin → math）
+            let module = rest.split('.').next().unwrap_or(rest);
+            modules.insert(module.to_string());
+        }
+    }
+
+    modules.into_iter().collect()
 }

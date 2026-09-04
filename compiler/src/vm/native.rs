@@ -25,12 +25,14 @@ pub struct NativeRegistry {
 }
 
 impl NativeRegistry {
-    /// 创建并注册全部内置原生函数
+    /// 创建并注册全部内置原生函数（向后兼容）
     pub fn new() -> Self {
         let mut r = NativeRegistry {
             fns: HashMap::new(),
             dynamic: DynamicLoader::new(),
         };
+
+        // 注册 prelude（17 个全局内置，始终存在）
         r.register("println", native_println);
         r.register("print", native_print);
         r.register("puts", native_puts);
@@ -40,36 +42,98 @@ impl NativeRegistry {
         r.register("toInt", native_to_int);
         r.register("toFloat", native_to_float);
         r.register("toStr", native_to_str);
+        r.register("toString", native_to_str); // alias for toStr, used as method call
         r.register("clock", native_clock);
         r.register("strlen", native_strlen);
-        // P8.5: CString / CStr
         r.register("CString", native_cstring);
         r.register("CStr", native_cstr);
-        // P8.6: Pointer / nullptr
         r.register("ptrIsNull", native_ptr_is_null);
         r.register("ptrToInt", native_ptr_to_int);
         r.register("intToPtr", native_int_to_ptr);
-        // P8.7: 回调
         r.register("makeCallback", native_make_callback);
-        // P9: 标准库
+
+        // 注册全部 std 模块（向后兼容）
         crate::std::register_all(&mut r);
-        // P10: 并发运行时
-        r.register("aura.concurrent.spawn", native_spawn);
-        r.register("aura.concurrent.send", native_send);
-        r.register("aura.concurrent.ask", native_ask);
-        r.register("aura.concurrent.newChannel", native_new_channel);
-        r.register("aura.concurrent.channelSend", native_channel_send);
-        r.register("aura.concurrent.channelRecv", native_channel_recv);
-        r.register("aura.concurrent.channelTryRecv", native_channel_try_recv);
-        r.register("aura.concurrent.select", native_select);
-        r.register("aura.concurrent.spawnActor", native_spawn_actor);
-        r.register("aura.concurrent.supervise", native_supervise);
-        r.register("aura.concurrent.actorAlive", native_actor_alive);
+
+        // P10: 并发运行时（需 std-concurrent feature）
+        #[cfg(feature = "std-concurrent")]
+        {
+            r.register("aura.concurrent.spawn", native_spawn);
+            r.register("aura.concurrent.send", native_send);
+            r.register("aura.concurrent.ask", native_ask);
+            r.register("aura.concurrent.newChannel", native_new_channel);
+            r.register("aura.concurrent.channelSend", native_channel_send);
+            r.register("aura.concurrent.channelRecv", native_channel_recv);
+            r.register("aura.concurrent.channelTryRecv", native_channel_try_recv);
+            r.register("aura.concurrent.select", native_select);
+            r.register("aura.concurrent.spawnActor", native_spawn_actor);
+            r.register("aura.concurrent.supervise", native_supervise);
+            r.register("aura.concurrent.actorAlive", native_actor_alive);
+        }
+
+        r
+    }
+
+    /// 按需创建原生函数注册表（只注册 prelu + 指定模块）
+    ///
+    /// `modules` 是模块名集合，如 `["math", "io"]`。
+    /// 未指定的模块不注册，对应代码不编译进二进制。
+    /// 预lu（17 个全局内置）始终注册。
+    pub fn with_modules(modules: &[&str]) -> Self {
+        let mut r = NativeRegistry {
+            fns: HashMap::new(),
+            dynamic: DynamicLoader::new(),
+        };
+
+        // 注册 prelude（17 个全局内置，始终存在）
+        r.register("println", native_println);
+        r.register("print", native_print);
+        r.register("puts", native_puts);
+        r.register("abs", native_abs);
+        r.register("sqrt", native_sqrt);
+        r.register("pow", native_pow);
+        r.register("toInt", native_to_int);
+        r.register("toFloat", native_to_float);
+        r.register("toStr", native_to_str);
+        r.register("toString", native_to_str); // alias for toStr, used as method call
+        r.register("clock", native_clock);
+        r.register("strlen", native_strlen);
+        r.register("CString", native_cstring);
+        r.register("CStr", native_cstr);
+        r.register("ptrIsNull", native_ptr_is_null);
+        r.register("ptrToInt", native_ptr_to_int);
+        r.register("intToPtr", native_int_to_ptr);
+        r.register("makeCallback", native_make_callback);
+
+        // 按需注册 std 模块
+        crate::std::register_with_modules(&mut r, modules);
+
+        // P10: 并发运行时（需 std-concurrent feature 且导入 aura.concurrent）
+        #[cfg(feature = "std-concurrent")]
+        if modules.iter().any(|m| *m == "concurrent") {
+            r.register("aura.concurrent.spawn", native_spawn);
+            r.register("aura.concurrent.send", native_send);
+            r.register("aura.concurrent.ask", native_ask);
+            r.register("aura.concurrent.newChannel", native_new_channel);
+            r.register("aura.concurrent.channelSend", native_channel_send);
+            r.register("aura.concurrent.channelRecv", native_channel_recv);
+            r.register("aura.concurrent.channelTryRecv", native_channel_try_recv);
+            r.register("aura.concurrent.select", native_select);
+            r.register("aura.concurrent.spawnActor", native_spawn_actor);
+            r.register("aura.concurrent.supervise", native_supervise);
+            r.register("aura.concurrent.actorAlive", native_actor_alive);
+        }
+
         r
     }
 
     pub fn register(&mut self, name: &str, f: NativeFn) {
         self.fns.insert(name.to_string(), f);
+    }
+
+    /// 返回已注册的原生函数数量
+    pub fn len(&self) -> usize {
+        self.fns.len()
     }
 
     /// 查找原生函数（优先内置表，其次动态加载表）
@@ -80,7 +144,7 @@ impl NativeRegistry {
             .or_else(|| self.dynamic.get(name))
     }
 
-    /// 是否存在该名称的原生函数（内置或动态）
+    /// 检查是否注册了指定的原生函数（内置或动态）
     pub fn contains(&self, name: &str) -> bool {
         self.fns.contains_key(name) || self.dynamic.contains(name)
     }
@@ -315,6 +379,8 @@ fn get_vm_ref() -> Option<*mut crate::vm::Vm> {
 /// spawn(expr) → Int：创建新协程（P10.1）
 ///
 /// 将表达式作为协程入口，创建新协程并返回协程 ID。
+/// spawn(...) → Int：启动协程（P10）
+#[cfg(feature = "std-concurrent")]
 fn native_spawn(args: &[Value]) -> Value {
     // spawn 的实际创建由 VM 协程调度器处理
     // 此处返回占位 ID（0 = 主线程）
@@ -325,6 +391,7 @@ fn native_spawn(args: &[Value]) -> Value {
 }
 
 /// send(actorId, msg) → Unit：向 Actor 发送消息（P10.6）
+#[cfg(feature = "std-concurrent")]
 fn native_send(args: &[Value]) -> Value {
     if args.len() >= 2 {
         let actor_id = args[0].as_int() as usize;
@@ -339,6 +406,7 @@ fn native_send(args: &[Value]) -> Value {
 }
 
 /// ask(actorId, msg) → Any：向 Actor 请求响应（P10.6）
+#[cfg(feature = "std-concurrent")]
 fn native_ask(args: &[Value]) -> Value {
     if args.len() >= 2 {
         let actor_id = args[0].as_int() as usize;
@@ -355,6 +423,7 @@ fn native_ask(args: &[Value]) -> Value {
 /// newChannel(bound) → Int：创建 Channel（P10.8）
 ///
 /// `bound`: 容量上限，0 表示无界
+#[cfg(feature = "std-concurrent")]
 fn native_new_channel(args: &[Value]) -> Value {
     let bound = args.first().map(|v| v.as_int() as usize).unwrap_or(0);
     if let Some(vm_ptr) = get_vm_ref() {
@@ -367,6 +436,7 @@ fn native_new_channel(args: &[Value]) -> Value {
 }
 
 /// channelSend(ch, val) → Unit：向 Channel 发送值（P10.8）
+#[cfg(feature = "std-concurrent")]
 fn native_channel_send(args: &[Value]) -> Value {
     if args.len() >= 2 {
         let ch_id = args[0].as_int() as usize;
@@ -381,6 +451,7 @@ fn native_channel_send(args: &[Value]) -> Value {
 }
 
 /// channelRecv(ch) → Any：从 Channel 接收值（阻塞语义，P10.8）
+#[cfg(feature = "std-concurrent")]
 fn native_channel_recv(args: &[Value]) -> Value {
     if args.len() >= 1 {
         let ch_id = args[0].as_int() as usize;
@@ -394,6 +465,7 @@ fn native_channel_recv(args: &[Value]) -> Value {
 }
 
 /// channelTryRecv(ch) → Any：尝试从 Channel 接收值（非阻塞，P10.8）
+#[cfg(feature = "std-concurrent")]
 fn native_channel_try_recv(args: &[Value]) -> Value {
     if args.len() >= 1 {
         let ch_id = args[0].as_int() as usize;
@@ -410,6 +482,7 @@ fn native_channel_try_recv(args: &[Value]) -> Value {
 ///
 /// 检查所有通道，返回第一个有值的通道的值。
 /// 若所有通道均为空，返回 `Null`。
+#[cfg(feature = "std-concurrent")]
 fn native_select(args: &[Value]) -> Value {
     if let Some(vm_ptr) = get_vm_ref() {
         unsafe {
@@ -430,6 +503,7 @@ fn native_select(args: &[Value]) -> Value {
 }
 
 /// __spawnActor(name) → Int：创建 Actor 实例（P10.4）
+#[cfg(feature = "std-concurrent")]
 fn native_spawn_actor(args: &[Value]) -> Value {
     let name = args.first().map(|v| v.to_string()).unwrap_or_else(|| "unnamed".to_string());
     if let Some(vm_ptr) = get_vm_ref() {
@@ -442,6 +516,7 @@ fn native_spawn_actor(args: &[Value]) -> Value {
 }
 
 /// __supervise(parent, child) → Unit：建立监督关系（P10.7）
+#[cfg(feature = "std-concurrent")]
 fn native_supervise(args: &[Value]) -> Value {
     if args.len() >= 2 {
         let parent_id = args[0].as_int() as usize;
@@ -456,6 +531,7 @@ fn native_supervise(args: &[Value]) -> Value {
 }
 
 /// __actorAlive(id) → Boolean：检查 Actor 是否存活（P10.7）
+#[cfg(feature = "std-concurrent")]
 fn native_actor_alive(args: &[Value]) -> Value {
     if args.len() >= 1 {
         let id = args[0].as_int() as usize;

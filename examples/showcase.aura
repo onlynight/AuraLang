@@ -11,7 +11,7 @@
 //   lambda、解构声明、lateinit、by lazy、可变参数 vararg、命名参数、数组、try/catch/finally、
 //   注解 @Deprecated、修饰符（override / suspend / inline / comptime）、extern "c"。
 
-import std.aura.io.println
+// 注：println 是 prelu 函数，无需 import
 
 /// 文档注释：玩家结构体（data struct + 字段默认值 + 可空字段）
 data struct Player(

@@ -1,5 +1,22 @@
 // P9 标准库示例 — 演示所有 std 模块的用法
 
+// 按需免import 设计：命名空间函数需要 import
+import aura.io.*
+import aura.math.*
+import aura.string.*
+import aura.collections.*
+import aura.json.*
+import aura.time.*
+import aura.test.*
+import aura.builtin.*
+import aura.env.*
+import aura.random.*
+import aura.encoding.*
+import aura.ascii.*
+import aura.path.*
+import aura.iter.*
+import aura.net.*
+
 // ════════════════════════════════════════════════════════════
 // std.io — 标准输入输出
 // ════════════════════════════════════════════════════════════

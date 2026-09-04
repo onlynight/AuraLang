@@ -371,6 +371,124 @@ pub fn desugar_program(program: &Program) -> HirProgram {
         });
     }
 
+    // Phase 1: 注册所有 prelude 函数为原生函数（17 个免import内置）
+    for &name in crate::std::decl::PRELUDE_NAMES {
+        if !natives.iter().any(|n| n.name == name) {
+            // 推断参数和返回类型
+            let (params, ret) = match name {
+                "println" => (
+                    vec![HirParam {
+                        name: "message".into(),
+                        ty: Some(HirType::Named("Any".into())),
+                    }],
+                    Some(HirType::Named("Unit".into())),
+                ),
+                "print" => (
+                    vec![HirParam {
+                        name: "message".into(),
+                        ty: Some(HirType::Named("Any".into())),
+                    }],
+                    Some(HirType::Named("Unit".into())),
+                ),
+                "puts" => (
+                    vec![HirParam {
+                        name: "message".into(),
+                        ty: Some(HirType::Named("String".into())),
+                    }],
+                    Some(HirType::Named("Unit".into())),
+                ),
+                "abs" | "sqrt" | "pow" => (
+                    vec![HirParam {
+                        name: "x".into(),
+                        ty: Some(HirType::Named("Float".into())),
+                    }],
+                    Some(HirType::Named("Float".into())),
+                ),
+                "toInt" => (
+                    vec![HirParam {
+                        name: "x".into(),
+                        ty: Some(HirType::Named("Any".into())),
+                    }],
+                    Some(HirType::Named("Int".into())),
+                ),
+                "toFloat" => (
+                    vec![HirParam {
+                        name: "x".into(),
+                        ty: Some(HirType::Named("Any".into())),
+                    }],
+                    Some(HirType::Named("Float".into())),
+                ),
+                "toStr" => (
+                    vec![HirParam {
+                        name: "x".into(),
+                        ty: Some(HirType::Named("Any".into())),
+                    }],
+                    Some(HirType::Named("String".into())),
+                ),
+                "clock" => (vec![], Some(HirType::Named("Float".into()))),
+                "strlen" => (
+                    vec![HirParam {
+                        name: "s".into(),
+                        ty: Some(HirType::Named("String".into())),
+                    }],
+                    Some(HirType::Named("Int".into())),
+                ),
+                "CString" => (
+                    vec![HirParam {
+                        name: "s".into(),
+                        ty: Some(HirType::Named("String".into())),
+                    }],
+                    Some(HirType::Named("Any".into())),
+                ),
+                "CStr" => (
+                    vec![HirParam {
+                        name: "p".into(),
+                        ty: Some(HirType::Named("Any".into())),
+                    }],
+                    Some(HirType::Named("String".into())),
+                ),
+                "ptrIsNull" => (
+                    vec![HirParam {
+                        name: "p".into(),
+                        ty: Some(HirType::Named("Any".into())),
+                    }],
+                    Some(HirType::Named("Boolean".into())),
+                ),
+                "ptrToInt" => (
+                    vec![HirParam {
+                        name: "p".into(),
+                        ty: Some(HirType::Named("Any".into())),
+                    }],
+                    Some(HirType::Named("Int".into())),
+                ),
+                "intToPtr" => (
+                    vec![HirParam {
+                        name: "i".into(),
+                        ty: Some(HirType::Named("Int".into())),
+                    }],
+                    Some(HirType::Named("Any".into())),
+                ),
+                "makeCallback" => (
+                    vec![HirParam {
+                        name: "fn".into(),
+                        ty: Some(HirType::Named("Any".into())),
+                    }],
+                    Some(HirType::Named("Any".into())),
+                ),
+                _ => (vec![], Some(HirType::Named("Any".into()))),
+            };
+
+            natives.push(HirFunction {
+                name: name.into(),
+                params,
+                ret,
+                body: HirBlock { stmts: vec![] },
+                is_native: true,
+                type_params: vec![],
+            });
+        }
+    }
+
     // P7.6: 注册 malloc/free 为原生函数
     if !natives.iter().any(|n| n.name == "malloc") {
         natives.push(HirFunction {
@@ -1148,8 +1266,13 @@ fn desugar_when(subject: &Option<Box<Expr>>, arms: &[WhenArm]) -> HirExpr {
 // P9: 标准库模块检测与原生函数注册
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 解析内置方法名为完整原生函数名（如 `toString` → `aura.builtin.toString`）
+/// 解析内置方法名为完整原生函数名（如 `toString` → `toString` prelu，或 `aura.builtin.xxx`）
 fn resolve_builtin_method(name: &str) -> Option<String> {
+    // 优先检查 prelu 函数（免import，始终可用）
+    if crate::std::decl::is_prelude(name) {
+        return Some(name.to_string());
+    }
+    // 其次检查 std 命名空间函数
     for (full_name, _) in std_native_functions() {
         if let Some(method_name) = full_name.split('.').last() {
             if method_name == name {

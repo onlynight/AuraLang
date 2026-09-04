@@ -78,6 +78,13 @@ pub fn to_bytes(module: &BytecodeModule) -> Vec<u8> {
 
     // 入口
     buf.extend_from_slice(&module.entry.to_le_bytes());
+
+    // Phase 1c: 启用的 std 模块（按需链接）
+    buf.extend_from_slice(&(module.enabled_modules.len() as u16).to_le_bytes());
+    for m in &module.enabled_modules {
+        write_str(&mut buf, m);
+    }
+
     buf
 }
 
@@ -240,11 +247,19 @@ pub fn from_bytes(bytes: &[u8]) -> Result<BytecodeModule, SerializeError> {
 
     let entry = r.u16()?;
 
+    // Phase 1c: 启用的 std 模块（按需链接）
+    let nmods = r.u16()? as usize;
+    let mut enabled_modules = Vec::with_capacity(nmods);
+    for _ in 0..nmods {
+        enabled_modules.push(r.str()?);
+    }
+
     Ok(BytecodeModule {
         consts,
         natives,
         functions,
         entry,
+        enabled_modules,
     })
 }
 

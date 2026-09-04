@@ -194,7 +194,9 @@ impl Checker {
                     .as_deref()
                     .map(ast_type_to_ty)
                     .unwrap_or(Ty::Unit);
-                if let Err(dup) = self.symbols.insert_function(
+                if crate::std::decl::is_prelude(&f.name) {
+                    self.report(f.span, format!("cannot redefine prelude function '{}'", f.name));
+                } else if let Err(dup) = self.symbols.insert_function(
                     f.name.clone(),
                     params,
                     ret.clone(),
@@ -523,10 +525,73 @@ impl Checker {
                 }
             }
             Decl::Extern(_)
-            | Decl::Import(_)
             | Decl::Annotation(_)
             | Decl::Enum(_)
             | Decl::TypeAlias(_) => {}
+            Decl::Import(imp) => {
+                self.expand_import(imp);
+            }
+        }
+    }
+
+    /// 展开 import 声明到符号表
+    ///
+    /// 支持语法：
+    /// - `import aura.math.*` — 通配：把模块所有函数加到符号表（短名）
+    /// - `import aura.math` — 模块：注册模块名（调用时用 aura.math.sin）
+    /// - `import aura.math.sin` — 精确：只加指定函数（短名）
+    /// - `import aura.math as m` — 别名：用别名注册模块
+    fn expand_import(&mut self, imp: &ImportDecl) {
+        let module_path = if imp.path.ends_with(".*") {
+            imp.path[..imp.path.len() - 2].to_string()
+        } else {
+            imp.path.clone()
+        };
+
+        // 检查是否是 aura.* 命名空间
+        if !module_path.starts_with("aura.") {
+            // 非 std 模块，跳过（未来支持第三方库）
+            return;
+        }
+
+        match &imp.alias {
+            Some(alias) => {
+                // import aura.math as m
+                // 注册别名到符号表，调用时用 m.sin(...)
+                self.symbols.insert_module_alias(alias.clone(), module_path);
+            }
+            None => {
+                if imp.wildcard {
+                    // import aura.math.*
+                    // 把模块所有函数加到符号表（短名）
+                    let short_names = crate::std::decl::module_functions(&module_path);
+                    for short_name in short_names {
+                        // 用完整名注册，调用时用短名
+                        let full_name = format!("{}.", module_path) + &short_name;
+                        let _ = self.symbols.insert_function(
+                            short_name.clone(),
+                            vec![],  // 参数类型未知，用 Any
+                            Ty::Any,
+                            Visibility::Public,
+                            imp.span,
+                        );
+                    }
+                } else if module_path.contains('.') && module_path.split('.').count() == 3 {
+                    // import aura.math.sin — 精确引入函数
+                    let short_name = module_path.split('.').last().unwrap_or("").to_string();
+                    let _ = self.symbols.insert_function(
+                        short_name,
+                        vec![],
+                        Ty::Any,
+                        Visibility::Public,
+                        imp.span,
+                    );
+                } else {
+                    // import aura.math — 模块引用
+                    // 注册模块名，调用时用 aura.math.sin(...)
+                    self.symbols.insert_module(module_path.clone());
+                }
+            }
         }
     }
 
@@ -1153,6 +1218,11 @@ impl Checker {
                 let cloned: Vec<Symbol> = fns.clone();
                 return self.check_call_args(&cloned, args, span);
             }
+            // Phase 1: prelude 函数兜底 — 仅 17 个全局内置免import
+            // 命名空间函数（aura.math.sin 等）需通过 import 引入
+            if crate::std::decl::is_prelude(&full_name) {
+                return Ty::Any;
+            }
         }
 
         // 方法调用：obj.method(...)
@@ -1180,6 +1250,10 @@ impl Checker {
                     self.check_expr(a);
                 }
                 return Ty::Named(name.clone());
+            }
+            // Phase 1: 顶层 prelude 函数兜底（println / abs / sqrt 等）
+            if crate::std::decl::is_prelude(name) {
+                return Ty::Any;
             }
         }
         // 否则作为表达式检查（可能是 lambda 调用等）
@@ -1357,6 +1431,10 @@ impl Checker {
             (Ty::Int, "toString") => Ty::String,
             (Ty::Float, "toInt") => Ty::Int,
             (Ty::Float, "toString") => Ty::String,
+            (Ty::Boolean, "toString") => Ty::String,
+            (Ty::String, "toString") => Ty::String,
+            (Ty::Any, "toString") => Ty::String,
+            (Ty::List(_), "toString") => Ty::String,
             (Ty::List(_), "add") => {
                 for (i, a) in args.iter().enumerate() {
                     let _ = self.check_expr(a);

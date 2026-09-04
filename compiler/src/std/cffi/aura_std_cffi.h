@@ -1,0 +1,164 @@
+/**
+ * Aura std C FFI — 标准库 C ABI 导出
+ *
+ * 供 AOT 编译后端链接使用。每个函数对应 Aura 的 std 函数。
+ *
+ * 使用方式：
+ *   #include "aura_std_cffi.h"
+ *   aura_println("hello");
+ *
+ * 编译：
+ *   clang -c aura_std_cffi.c -o aura_std_cffi.o
+ *   clang main.o aura_std_cffi.o -o main
+ */
+
+#ifndef AURA_STD_CFFI_H
+#define AURA_STD_CFFI_H
+
+#include <stdint.h>
+#include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Prelude（17 个全局内置）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 输出字符串（带换行） */
+void aura_println(const char *s);
+
+/** 输出字符串（不带换行） */
+void aura_print(const char *s);
+
+/** C 风格输出（支持格式化） */
+void aura_puts(const char *s);
+
+/** 绝对值 */
+int64_t aura_abs(int64_t x);
+
+/** 平方根 */
+double aura_sqrt(double x);
+
+/** 幂运算 */
+double aura_pow(double base, double exp);
+
+/** 转整数（截断） */
+int64_t aura_to_int(double x);
+
+/** 转浮点 */
+double aura_to_float(int64_t x);
+
+/** 转字符串（简化：返回数字的字符串表示） */
+const char *aura_to_str(int64_t x);
+
+/** 时钟（微秒） */
+double aura_clock(void);
+
+/** 字符串长度 */
+int64_t aura_strlen(const char *s);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// aura.io — 标准输入输出
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 读取一行 */
+const char *aura_io_readLine(void);
+
+/** 检查文件是否存在 */
+int aura_io_fileExists(const char *path);
+
+/** 读取文件内容 */
+const char *aura_io_fileRead(const char *path);
+
+/** 写入文件 */
+void aura_io_fileWrite(const char *path, const char *content);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// aura.math — 数学函数
+// ─────────────────────────────────────────────────────────────────────────────
+
+double aura_math_sin(double x);
+double aura_math_cos(double x);
+double aura_math_tan(double x);
+double aura_math_asin(double x);
+double aura_math_acos(double x);
+double aura_math_atan(double x);
+double aura_math_log(double x);
+double aura_math_exp(double x);
+
+double aura_math_min(double a, double b);
+double aura_math_max(double a, double b);
+int64_t aura_math_ceil(double x);
+int64_t aura_math_floor(double x);
+
+// 常量
+extern const double aura_math_PI;
+extern const double aura_math_E;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// aura.string — 字符串操作
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 检查是否包含子串 */
+int aura_string_contains(const char *s, const char *sub);
+
+/** 获取字符串长度 */
+int64_t aura_string_length(const char *s);
+
+/** 获取字符码 */
+int64_t aura_string_charCodeAt(const char *s, int64_t idx);
+
+/** 获取字符 */
+const char *aura_string_charAt(const char *s, int64_t idx);
+
+/** 子串 */
+const char *aura_string_substring(const char *s, int64_t start, int64_t end);
+
+/** 转大写 */
+const char *aura_string_toUpperCase(const char *s);
+
+/** 转小写 */
+const char *aura_string_toLowerCase(const char *s);
+
+/** 去除空白 */
+const char *aura_string_trim(const char *s);
+
+/** 检查前缀 */
+int aura_string_startsWith(const char *s, const char *prefix);
+
+/** 检查后缀 */
+int aura_string_endsWith(const char *s, const char *suffix);
+
+/** 替换 */
+const char *aura_string_replace(const char *s, const char *from, const char *to);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// aura.time — 时间
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 当前 Unix 时间戳（秒） */
+int64_t aura_time_epoch(void);
+
+/** 当前 Unix 时间戳（毫秒） */
+int64_t aura_time_epochMillis(void);
+
+/** 格式化为字符串 */
+const char *aura_time_format(int64_t timestamp);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// aura.random — 随机数
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 随机整数 */
+int64_t aura_random_nextInt(void);
+
+/** 随机浮点 [0, 1) */
+double aura_random_nextFloat(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* AURA_STD_CFFI_H */

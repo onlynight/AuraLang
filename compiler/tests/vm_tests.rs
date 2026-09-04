@@ -150,6 +150,7 @@ fn object_field_roundtrip() {
             code,
         }],
         entry: 0,
+        enabled_modules: Vec::new(),
     };
 
     let mut vm = Vm::new(&module, VmOptions::default()).expect("VM 初始化");
@@ -198,6 +199,7 @@ fn array_roundtrip() {
             code,
         }],
         entry: 0,
+        enabled_modules: Vec::new(),
     };
     let mut vm = Vm::new(&module, VmOptions::default()).expect("VM 初始化");
     let result = vm.run().expect("运行应成功");
@@ -313,6 +315,7 @@ fn list_operations() {
             code,
         }],
         entry: 0,
+        enabled_modules: Vec::new(),
     };
     let mut vm = Vm::new(&module, VmOptions::default()).expect("VM 初始化");
     assert_eq!(vm.run().expect("运行应成功"), Value::Int(20));
@@ -348,6 +351,7 @@ fn map_operations() {
             code,
         }],
         entry: 0,
+        enabled_modules: Vec::new(),
     };
     let mut vm = Vm::new(&module, VmOptions::default()).expect("VM 初始化");
     assert_eq!(vm.run().expect("运行应成功"), Value::Int(100));

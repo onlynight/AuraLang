@@ -1331,6 +1331,10 @@ mod tests {
     }
 
     #[test]
+    /// 验证文档注册表与原生函数注册表一致
+    /// 仅在 std-all feature 启用时运行（需要全部 std 模块）
+    #[cfg(feature = "std-all")]
+    #[test]
     fn test_verify_against_registry() {
         let registry = DocRegistry::new().load_all();
         let native_registry = NativeRegistry::new();

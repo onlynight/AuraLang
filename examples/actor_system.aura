@@ -2,6 +2,8 @@
 // Actor 模型演示 — Actor 创建 / 消息传递 / 监督树
 // ════════════════════════════════════════════════════════════
 
+import aura.concurrent.*
+
 // ── 8. Actor 声明语法 ──
 actor WindowManager {
     fun createWindow(): Int {

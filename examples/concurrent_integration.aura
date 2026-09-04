@@ -2,6 +2,8 @@
 // 并发集成演示 — Coroutine + Actor + Channel + Select 全特性
 // ════════════════════════════════════════════════════════════
 
+import aura.concurrent.*
+
 fun main() {
     // ── 1. 微服务 Actor 架构 ──
     val authService = aura.concurrent.spawnActor("AuthService")

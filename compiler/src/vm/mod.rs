@@ -475,9 +475,17 @@ impl Vm {
     /// 从字节码模块创建 VM
     pub fn new(module: &BytecodeModule, opts: VmOptions) -> Result<Self, VmError> {
         let loaded = LoadedModule::from_module(module)?;
+        // Phase 1c: 按需注册 std 模块
+        // 如果 enabled_modules 为空（无 import 声明），使用全量注册（向后兼容）
+        let natives = if module.enabled_modules.is_empty() {
+            NativeRegistry::new()
+        } else {
+            let modules_refs: Vec<&str> = module.enabled_modules.iter().map(|s| s.as_str()).collect();
+            NativeRegistry::with_modules(&modules_refs)
+        };
         Ok(Vm {
             module: loaded,
-            natives: NativeRegistry::new(),
+            natives,
             heap: Heap::new(),
             frames: Vec::new(),
             call_counts: vec![0; module.functions.len()],
@@ -500,6 +508,11 @@ impl Vm {
     /// 注册额外原生函数（供 FFI / 标准库扩展）
     pub fn register_native(&mut self, name: &str, f: native::NativeFn) {
         self.natives.register(name, f);
+    }
+
+    /// 检查是否注册了指定的原生函数
+    pub fn contains_native(&self, name: &str) -> bool {
+        self.natives.contains(name)
     }
 
     /// 执行入口函数，返回其返回值

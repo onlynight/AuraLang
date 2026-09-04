@@ -1,4 +1,22 @@
-// P9 标准库示例 - 所有标准库函数无需 import，直接使用！
+// P9 标准库示例 - 所有标准库函数需 import 后使用！
+
+// 按需免import 设计：命名空间函数需要 import
+import aura.io.*
+import aura.math.*
+import aura.string.*
+import aura.collections.*
+import aura.json.*
+import aura.time.*
+import aura.builtin.*
+import aura.env.*
+import aura.random.*
+import aura.encoding.*
+import aura.ascii.*
+import aura.path.*
+import aura.iter.*
+import aura.test.*
+import aura.console.*
+import aura.assert.*
 
 // ════════════════════════════════════════════════════════════
 // 数学函数 std.math

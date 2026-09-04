@@ -456,4 +456,7 @@ pub struct BytecodeModule {
     pub functions: Vec<BytecodeFunction>,
     /// 入口函数（通常为 `main`）在 `functions` 中的索引
     pub entry: u16,
+    /// Phase 1c: 按需链接 — 启用的 std 模块名（如 ["math", "io"]）
+    /// 运行时 NativeRegistry 只注册这些模块的函数
+    pub enabled_modules: Vec<String>,
 }

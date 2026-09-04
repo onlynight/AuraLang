@@ -211,6 +211,34 @@ impl SymbolTable {
         self.insert(sym)
     }
 
+    /// 注册模块到符号表（用于 `import aura.math`）
+    ///
+    /// 调用时用 `aura.math.sin(...)` 形式。
+    pub fn insert_module(&mut self, module_path: impl Into<String>) {
+        let path = module_path.into();
+        let sym = Symbol::new(
+            path.clone(),
+            SymbolKind::Module,
+            Visibility::Public,
+            Span::single(0, 0, 0),
+        );
+        let _ = self.insert(sym);
+    }
+
+    /// 注册模块别名（用于 `import aura.math as m`）
+    ///
+    /// 调用时用 `m.sin(...)` 形式。
+    pub fn insert_module_alias(&mut self, alias: impl Into<String>, _module_path: impl Into<String>) {
+        let alias_name = alias.into();
+        let sym = Symbol::new(
+            alias_name.clone(),
+            SymbolKind::Module,
+            Visibility::Public,
+            Span::single(0, 0, 0),
+        );
+        let _ = self.insert(sym);
+    }
+
     /// 查找符号（从当前作用域向上）
     pub fn lookup(&self, name: &str) -> Option<&Symbol> {
         let mut scope = self.current_scope;

@@ -32,6 +32,9 @@ libc = "0.2"
 thiserror = { version = "1", optional = true }
 
 [features]
+# 默认：prelu + 并发运行时（常用功能）
+default = ["std-concurrent"]
+
 # 热点 JIT 编译（Cranelift）。默认关闭；启用需 `cargo build --features jit`。
 # 开启后热点（叶子整数）函数被编译为原生码并在调用点直接派发（§7.2 方法级 JIT）。
 jit = ["cranelift", "cranelift-jit", "cranelift-module"]
@@ -42,6 +45,37 @@ dynamic-ffi = ["libloading"]
 # 通过文本 LLVM IR 生成 + 外部 llc/clang 工具链生成 .o / .exe。
 # 支持跨平台目标三元组（x86_64 / aarch64 / armv7 等）与 DWARF 调试元数据。
 llvm = ["thiserror"]
+
+# Phase 3: std 模块按需编译（默认关闭，减小二进制体积）
+# 启用方式：cargo build --features "std-math,std-io"
+std-io = []
+std-math = []
+std-string = []
+std-collections = []
+std-fs = []
+std-net = []
+std-json = []
+std-time = []
+std-test = []
+std-builtin = []
+std-env = []
+std-process = []
+std-random = []
+std-encoding = []
+std-ascii = []
+std-console = []
+std-path = []
+std-assert = []
+std-iter = []
+std-concurrent = []
+
+# 全部 std 模块（方便开发测试）
+std-all = [
+    "std-io", "std-math", "std-string", "std-collections", "std-fs",
+    "std-net", "std-json", "std-time", "std-test", "std-builtin",
+    "std-env", "std-process", "std-random", "std-encoding", "std-ascii",
+    "std-console", "std-path", "std-assert", "std-iter", "std-concurrent",
+]
 
 [build-dependencies]
 toml = "0.8"

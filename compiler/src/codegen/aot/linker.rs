@@ -195,6 +195,12 @@ pub fn link_to_executable(
     exe_path: &Path,
     options: &AotOptions,
 ) -> Result<(), AotError> {
+    // Phase 4: 如果启用 std C FFI，先编译 C FFI 源文件
+    let mut cffi_object_path = None;
+    if options.link_std_cffi {
+        cffi_object_path = Some(compile_std_cffi(options)?);
+    }
+
     #[cfg(target_os = "windows")]
     {
         use super::target::OperatingSystem;
@@ -202,8 +208,11 @@ pub fn link_to_executable(
             // 优先 clang：它链接 MSVC CRT，自动提供 `__chkstk`（大栈帧必需）
             if let Some(clang_path) = find_tool("clang", options) {
                 let mut cmd = Command::new(clang_path);
-                cmd.arg(input_path)
-                    .arg("-o")
+                cmd.arg(input_path);
+                if let Some(ref cffi_obj) = cffi_object_path {
+                    cmd.arg(cffi_obj);
+                }
+                cmd.arg("-o")
                     .arg(exe_path)
                     .arg(options.opt_level.as_llvm_flag());
                 run_and_report(&mut cmd, "clang")?;
@@ -217,8 +226,11 @@ pub fn link_to_executable(
                 )
             })?;
             let mut cmd = Command::new(tool_path);
-            cmd.arg(input_path)
-                .arg(format!("/out:{}", exe_path.display()))
+            cmd.arg(input_path);
+            if let Some(ref cffi_obj) = cffi_object_path {
+                cmd.arg(cffi_obj);
+            }
+            cmd.arg(format!("/out:{}", exe_path.display()))
                 .arg("/entry:main")
                 .arg("/subsystem:console");
             run_and_report(&mut cmd, "lld-link")?;
@@ -228,13 +240,49 @@ pub fn link_to_executable(
 
     // 非 Windows 目标或非 Windows 主机：用 clang
     let mut cmd = build_command("clang", options)?;
-    cmd.arg(input_path)
-        .arg("-o")
+    cmd.arg(input_path);
+    if let Some(ref cffi_obj) = cffi_object_path {
+        cmd.arg(cffi_obj);
+    }
+    cmd.arg("-o")
         .arg(exe_path)
         .arg(options.opt_level.as_llvm_flag());
 
     run_and_report(&mut cmd, "clang")?;
     Ok(())
+}
+
+/// Phase 4: 编译 std C FFI 源文件为目标文件
+///
+/// 编译 `compiler/src/std/cffi/aura_std_cffi.c` 为 `.o`/`.obj` 文件，
+/// 供 AOT 可执行文件链接使用。
+fn compile_std_cffi(options: &AotOptions) -> Result<PathBuf, AotError> {
+    // C FFI 源文件路径
+    let cffi_src = concat!(env!("CARGO_MANIFEST_DIR"), "/src/std/cffi/aura_std_cffi.c");
+    let cffi_header = concat!(env!("CARGO_MANIFEST_DIR"), "/src/std/cffi/aura_std_cffi.h");
+
+    // 输出文件路径（临时文件）
+    let ext = if cfg!(target_os = "windows") { "obj" } else { "o" };
+    let tmp_dir = std::env::temp_dir();
+    let cffi_obj = tmp_dir.join(format!("aura_std_cffi.{}", ext));
+
+    // 找 clang
+    let clang_path = find_tool("clang", options).ok_or_else(|| {
+        AotError::ToolError("找不到 clang，无法编译 std C FFI".to_string())
+    })?;
+
+    // 编译命令
+    let mut cmd = Command::new(clang_path);
+    cmd.arg("-c")
+        .arg(cffi_src)
+        .arg("-o")
+        .arg(&cffi_obj)
+        .arg("-I")
+        .arg(Path::new(cffi_header).parent().unwrap());
+
+    run_and_report(&mut cmd, "clang")?;
+
+    Ok(cffi_obj)
 }
 
 /// 执行命令并报告结果
