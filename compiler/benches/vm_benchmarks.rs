@@ -7,8 +7,8 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use aura_compiler::codegen::compile_source;
-use aura_compiler::vm::{Value, Vm, VmOptions};
+use compiler::codegen::compile_source;
+use compiler::vm::{Value, Vm, VmOptions};
 
 fn bench_fib() {
     let src = r#"

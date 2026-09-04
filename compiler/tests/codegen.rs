@@ -1,6 +1,6 @@
 //! P4 字节码编译器集成测试
 
-use aura_compiler::codegen::{compile_source, disassemble, from_bytes, to_bytes};
+use compiler::codegen::{compile_source, disassemble, from_bytes, to_bytes};
 
 /// 编译 → 序列化 → 反序列化 往返一致性
 #[test]
@@ -21,7 +21,7 @@ fn test_constant_folding() {
         module
             .consts
             .iter()
-            .any(|c| matches!(c, aura_compiler::codegen::opcode::Const::Int(7))),
+            .any(|c| matches!(c, compiler::codegen::opcode::Const::Int(7))),
         "常量折叠后应包含 7"
     );
 }

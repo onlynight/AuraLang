@@ -1,9 +1,9 @@
 //! P10 协程调度演示 — 协程创建、await 挂起、并发执行
 //!
-//! 运行: `cargo run --example p10_coroutine_demo -p aura-compiler`
+//! 运行: `cargo run --example p10_coroutine_demo -p compiler`
 
-use aura_compiler::codegen::compile_source;
-use aura_compiler::vm::{Value, Vm, VmOptions};
+use compiler::codegen::compile_source;
+use compiler::vm::{Value, Vm, VmOptions};
 
 fn run(name: &str, src: &str, expected: Option<Value>) {
     println!("─── {} ──", name);

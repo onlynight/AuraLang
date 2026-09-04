@@ -23,7 +23,7 @@
 ## 仓库结构
 
 ```text
-aura-compiler/            编译器库（前端：lexer / parser / sema）
+compiler/            编译器库（前端：lexer / parser / sema）
   src/lexer.rs            词法分析器（手写，支持插值、原始字符串、文档注释）
   src/token.rs            Token 定义
   src/ast.rs              AST 节点定义
@@ -35,7 +35,7 @@ aura-compiler/            编译器库（前端：lexer / parser / sema）
   tests/sema_tests.rs     语义集成测试
   tests/snapshots.rs      insta 快照测试（Token 流 / AST / 诊断）
   tests/perf_lexer.rs     词法性能基准
-aura-cli/                 命令行工具（tokens / parse / check）
+cli/                 命令行工具（tokens / parse / check）
 examples/                 示例 Aura 源码
 ```
 
@@ -57,9 +57,9 @@ CI 在 `.github/workflows/ci.yml`，包含 `cargo fmt --check`、`cargo clippy -
 ## 命令行用法
 
 ```bash
-cargo run -p aura-cli -- check examples/demo.aura      # 词法 + 语法 + 语义检查
-cargo run -p aura-cli -- tokens examples/demo.aura     # 打印 Token 流
-cargo run -p aura-cli -- parse examples/demo.aura      # 打印 AST
+cargo run -p cli -- check examples/demo.aura      # 词法 + 语法 + 语义检查
+cargo run -p cli -- tokens examples/demo.aura     # 打印 Token 流
+cargo run -p cli -- parse examples/demo.aura      # 打印 AST
 ```
 
 诊断输出带源码片段：
@@ -107,7 +107,7 @@ val raw = """
 """
 ```
 
-更完整的“当前已支持”语法与语义覆盖见 [`examples/showcase.aura`](examples/showcase.aura)；其编译零错误由 [`aura-compiler/tests/examples_test.rs`](aura-compiler/tests/examples_test.rs) 端到端校验。
+更完整的“当前已支持”语法与语义覆盖见 [`examples/showcase.aura`](examples/showcase.aura)；其编译零错误由 [`compiler/tests/examples_test.rs`](compiler/tests/examples_test.rs) 端到端校验。
 
 ## 路线图
 

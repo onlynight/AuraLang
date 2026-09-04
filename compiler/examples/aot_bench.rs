@@ -1,14 +1,14 @@
 //! AOT vs JIT vs VM 性能对比（6.17）
 //!
-//! 运行：`cargo run --release --features "llvm,jit" -p aura-compiler --example aot_bench`
+//! 运行：`cargo run --release --features "llvm,jit" -p compiler --example aot_bench`
 //! 需要设置 AURA_LLVM_HOME 指向 LLVM 安装目录
 
 use std::process::Command;
 use std::time::Instant;
 
-use aura_compiler::codegen::aot::{AotCodeGenerator, AotOptions};
-use aura_compiler::codegen::compile_source;
-use aura_compiler::vm::{Vm, VmOptions};
+use compiler::codegen::aot::{AotCodeGenerator, AotOptions};
+use compiler::codegen::compile_source;
+use compiler::vm::{Vm, VmOptions};
 
 const FIB_SRC: &str = r#"
     fun fib(n: Int): Int {
@@ -102,11 +102,11 @@ fn aot_bench(src: &str, iters: usize, expected: i64) -> Result<f64, String> {
 
     // 生成 LLVM IR
     let codegen = AotCodeGenerator::new(AotOptions::default());
-    let mut lexer = aura_compiler::lexer::Lexer::new(src);
+    let mut lexer = compiler::lexer::Lexer::new(src);
     let tokens = lexer.tokenize();
-    let mut parser = aura_compiler::parser::Parser::new(tokens);
+    let mut parser = compiler::parser::Parser::new(tokens);
     let program = parser.parse_program();
-    let hir = aura_compiler::codegen::hir::desugar_program(&program);
+    let hir = compiler::codegen::hir::desugar_program(&program);
     let ir = codegen.generate_ir(&hir).map_err(|e| e.to_string())?;
 
     let tmp = std::env::temp_dir().join(format!("aura_bench_ex_{}", std::process::id()));
@@ -233,6 +233,6 @@ fn main() {
 #[cfg(not(feature = "llvm"))]
 fn main() {
     eprintln!(
-        "此示例需要 --features llvm，请使用: cargo run --release --features \"llvm,jit\" -p aura-compiler --example aot_bench"
+        "此示例需要 --features llvm，请使用: cargo run --release --features \"llvm,jit\" -p compiler --example aot_bench"
     );
 }

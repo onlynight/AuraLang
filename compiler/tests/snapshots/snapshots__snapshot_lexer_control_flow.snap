@@ -1,5 +1,5 @@
 ---
-source: aura-compiler/tests/snapshots.rs
+source: compiler/tests/snapshots.rs
 expression: "token_dump(\"for (i in 0..10) { if (i % 2 == 0) continue }\")"
 ---
 For("for") @1:1

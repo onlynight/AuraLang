@@ -4,10 +4,10 @@
 //! - `demo.aura`：既有演示示例，应零错误。
 //! - `demo_errors.aura`：应产生预期的诊断（类型不匹配 / 未定义引用 / 空安全 / 参数不匹配）。
 
-use aura_compiler::errors::ErrorSeverity;
-use aura_compiler::sema::analyze_source;
+use compiler::errors::ErrorSeverity;
+use compiler::sema::analyze_source;
 
-/// 读取 workspace 根目录 `examples/` 下的示例文件（CARGO_MANIFEST_DIR 指向 aura-compiler）。
+/// 读取 workspace 根目录 `examples/` 下的示例文件（CARGO_MANIFEST_DIR 指向 compiler）。
 fn example_path(name: &str) -> String {
     format!("{}/../examples/{}", env!("CARGO_MANIFEST_DIR"), name)
 }

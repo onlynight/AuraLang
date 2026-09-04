@@ -1,5 +1,5 @@
 ---
-source: aura-compiler/tests/snapshots.rs
+source: compiler/tests/snapshots.rs
 expression: "sema_dump(\"fun main() {\\n    val x: Int = \\\"oops\\\"\\n    val y = missingVar\\n}\")"
 ---
 Error: type mismatch: cannot initialize 'Int' with 'String' @line 2 col 19-25

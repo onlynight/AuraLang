@@ -1,5 +1,5 @@
 [package]
-name = "aura-cli"
+name = "cli"
 version.workspace = true
 edition.workspace = true
 
@@ -8,8 +8,8 @@ name = "aura"
 path = "src/main.rs"
 
 [dependencies]
-aura-compiler = { path = "../aura-compiler" }
+compiler = { path = "../compiler" }
 
 [features]
-# AOT 编译支持（转发 aura-compiler 的 llvm feature）
-llvm = ["aura-compiler/llvm"]
+# AOT 编译支持（转发 compiler 的 llvm feature）
+llvm = ["compiler/llvm"]

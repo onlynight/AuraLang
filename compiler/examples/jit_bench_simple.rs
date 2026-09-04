@@ -1,11 +1,11 @@
 //! 简化版 VM vs JIT 性能对比（无需 LLVM）
 //!
-//! 运行：`cargo run --release --features jit -p aura-compiler --example jit_bench_simple`
+//! 运行：`cargo run --release --features jit -p compiler --example jit_bench_simple`
 
 use std::time::Instant;
 
-use aura_compiler::codegen::compile_source;
-use aura_compiler::vm::{Vm, VmOptions};
+use compiler::codegen::compile_source;
+use compiler::vm::{Vm, VmOptions};
 
 const FIB_SRC: &str = r#"
     fun fib(n: Int): Int {

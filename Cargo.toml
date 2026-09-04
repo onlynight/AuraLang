@@ -1,7 +1,7 @@
 [workspace]
 members = [
-    "aura-compiler",
-    "aura-cli",
+    "compiler",
+    "cli",
 ]
 resolver = "2"
 
@@ -10,3 +10,21 @@ version = "0.1.0"
 edition = "2024"
 authors = ["Aura Team"]
 license = "MIT"
+
+# ── Aura 编译器外部工具链配置 ──
+# 所有外部工具路径集中在此配置，编译器运行时自动读取。
+# 也可通过环境变量覆盖：AURA_LLVM_HOME 等。
+[workspace.metadata.aura]
+# LLVM 工具链根目录（AOT 编译）。设置后覆盖自动探测。
+llvm-home = "D:/DevTools/LLVM/clang+llvm-23.1.0-x86_64-pc-windows-msvc"
+# 额外 LLVM 搜索路径（按优先级排列，在 llvm-home 未命中时逐个探测）
+llvm-search-paths = [
+    "C:/LLVM",
+    "C:/Program Files/LLVM",
+]
+# C 编译器（C 后端回退时使用）
+c-compiler-windows = "cl.exe"
+c-compiler-unix = "gcc"
+# 交叉编译链接器
+cross-linker-aarch64 = "aarch64-linux-gnu-gcc"
+cross-linker-armv7 = "arm-linux-gnueabihf-gcc"

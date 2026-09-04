@@ -2,8 +2,8 @@
 //!
 //! 验证所有标准库模块的注册与基础功能。
 
-use aura_compiler::vm::native::NativeRegistry;
-use aura_compiler::vm::value::Value;
+use compiler::vm::native::NativeRegistry;
+use compiler::vm::value::Value;
 
 /// 辅助：从注册表中调用原生函数
 fn call(reg: &NativeRegistry, name: &str, args: &[Value]) -> Value {

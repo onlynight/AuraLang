@@ -1,5 +1,5 @@
 ---
-source: aura-compiler/tests/snapshots.rs
+source: compiler/tests/snapshots.rs
 expression: "token_dump(\"val x: Int = 42\")"
 ---
 Val("val") @1:1

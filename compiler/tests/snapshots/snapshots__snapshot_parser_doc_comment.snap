@@ -1,5 +1,5 @@
 ---
-source: aura-compiler/tests/snapshots.rs
+source: compiler/tests/snapshots.rs
 expression: "ast_dump(\"/// A point in 2D space\\nstruct Point(val x: Int)\")"
 ---
 Program {

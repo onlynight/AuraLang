@@ -388,9 +388,11 @@ pub fn compile_c_to_exe(c_source: &str, output_path: &Path) -> Result<(), AotErr
     std::fs::write(&tmp_c, c_source).map_err(|e| AotError::Io(e.to_string()))?;
 
     let compiler = if cfg!(target_os = "windows") {
-        "cl.exe"
+        option_env!("AURA_CONFIG_C_COMPILER_WINDOWS")
+            .unwrap_or("cl.exe")
     } else {
-        "gcc"
+        option_env!("AURA_CONFIG_C_COMPILER_UNIX")
+            .unwrap_or("gcc")
     };
 
     let args: Vec<String> = if cfg!(target_os = "windows") {

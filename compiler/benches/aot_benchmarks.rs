@@ -11,8 +11,8 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use aura_compiler::codegen::compile_source;
-use aura_compiler::vm::{Value, Vm, VmOptions};
+use compiler::codegen::compile_source;
+use compiler::vm::{Value, Vm, VmOptions};
 
 const FIB_SRC: &str = r#"
     fun fib(n: Int): Int {
@@ -82,14 +82,14 @@ fn bench_aot(src: &str, iters: usize, expected: i64) -> Result<f64, String> {
     });
 
     // 生成 LLVM IR
-    let codegen = aura_compiler::codegen::aot::AotCodeGenerator::new(
-        aura_compiler::codegen::aot::AotOptions::default(),
+    let codegen = compiler::codegen::aot::AotCodeGenerator::new(
+        compiler::codegen::aot::AotOptions::default(),
     );
-    let mut lexer = aura_compiler::lexer::Lexer::new(src);
+    let mut lexer = compiler::lexer::Lexer::new(src);
     let tokens = lexer.tokenize();
-    let mut parser = aura_compiler::parser::Parser::new(tokens);
+    let mut parser = compiler::parser::Parser::new(tokens);
     let program = parser.parse_program();
-    let hir = aura_compiler::codegen::hir::desugar_program(&program);
+    let hir = compiler::codegen::hir::desugar_program(&program);
     let ir = codegen.generate_ir(&hir).map_err(|e| e.to_string())?;
 
     let tmp = std::env::temp_dir().join(format!("aura_bench_{}", std::process::id()));

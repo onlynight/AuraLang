@@ -101,7 +101,7 @@ fib(25) 单次运行中递归调用 fib 达 **242,785 次** ≫ 10,000 阈值，
 绕过热点计数限制。编译成功后直接派发到 JIT 原生码，绕过解释器主循环。
 
 **修改文件**：
-- `aura-compiler/src/vm/mod.rs` — 新增 `force_jit_compile()` / `try_jit_compile()`，
+- `compiler/src/vm/mod.rs` — 新增 `force_jit_compile()` / `try_jit_compile()`，
   修改 `run()` 添加强制编译和原生派发逻辑
 
 **效果**：
@@ -121,7 +121,7 @@ fib(25) 单次运行中递归调用 fib 达 **242,785 次** ≫ 10,000 阈值，
 3. **递归编译**：先编译任何被调用函数，确保其 dispatch table 条目存在
 
 **修改文件**：
-- `aura-compiler/src/vm/jit.rs` —
+- `compiler/src/vm/jit.rs` —
   - 添加 `JitState::ensure_capacity()` 维护 dispatch table 指针稳定
   - 在 `try_jit_compile()` 中递归编译被调用函数
   - 在 `emit_instr::Call` 中使用 `call_indirect` 加载并调用 dispatch table 条目
@@ -142,14 +142,14 @@ fib(25) 单次运行中递归调用 fib 达 **242,785 次** ≫ 10,000 阈值，
 ### 7.3 调试工具
 
 新增示例文件：
-- `aura-compiler/examples/jit_bench_simple.rs` — 简化版 VM vs JIT 性能对比（无需 LLVM）
-- `aura-compiler/examples/jit_diag.rs` — JIT 状态诊断
+- `compiler/examples/jit_bench_simple.rs` — 简化版 VM vs JIT 性能对比（无需 LLVM）
+- `compiler/examples/jit_diag.rs` — JIT 状态诊断
 
 ### 7.4 高级优化（P7）
 
 在 Fix A/B 基础上，实施了更高级的字节码优化传递，进一步提升 JIT 性能。
 
-**新增优化传递**（`aura-compiler/src/vm/jit_opt.rs`）：
+**新增优化传递**（`compiler/src/vm/jit_opt.rs`）：
 
 | 优化传递 | 功能 | 效果 |
 |----------|------|------|
@@ -192,8 +192,8 @@ fib(25) 单次运行中递归调用 fib 达 **242,785 次** ≫ 10,000 阈值，
 
 ## 6. 相关文件
 
-- `aura-compiler/src/vm/jit.rs` — Cranelift JIT（白名单、编译、派发）
-- `aura-compiler/src/vm/mod.rs` — 热点计数 / `maybe_jit_compile` / `run`
-- `aura-compiler/src/codegen/opt.rs` — `inline_hir` 内联展开
-- `aura-compiler/examples/jit_diag.rs` — 状态诊断工具
-- `aura-compiler/examples/aot_bench.rs` — 三路性能对比
+- `compiler/src/vm/jit.rs` — Cranelift JIT（白名单、编译、派发）
+- `compiler/src/vm/mod.rs` — 热点计数 / `maybe_jit_compile` / `run`
+- `compiler/src/codegen/opt.rs` — `inline_hir` 内联展开
+- `compiler/examples/jit_diag.rs` — 状态诊断工具
+- `compiler/examples/aot_bench.rs` — 三路性能对比

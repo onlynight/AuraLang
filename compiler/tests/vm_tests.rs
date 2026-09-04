@@ -3,11 +3,11 @@
 //! 覆盖 技术方案 §7.1 的字节码执行：算术 / 控制流 / 函数调用与递归 / 原生调度 /
 //! 对象模型（NewObject / SetField / GetField）/ 数组。
 
-use aura_compiler::codegen::compile_source;
-use aura_compiler::codegen::opcode::{
+use compiler::codegen::compile_source;
+use compiler::codegen::opcode::{
     BytecodeFunction, BytecodeModule, BytecodeNative, Const, OpCode,
 };
-use aura_compiler::vm::{Value, Vm, VmOptions};
+use compiler::vm::{Value, Vm, VmOptions};
 
 /// 编译源码并返回 `main` 的执行结果（要求 main 返回一个可断言的值）
 fn run_main(source: &str) -> Value {
@@ -240,7 +240,7 @@ fn jit_dispatch_matches_interpreter() {
 fn method_dispatch_via_vtable() {
     use std::collections::HashMap;
 
-    let mut heap = aura_compiler::vm::Heap::new();
+    let mut heap = compiler::vm::Heap::new();
 
     // 构建 vtable：method_idx 0 → func 1
     let mut vtable = HashMap::new();
@@ -360,7 +360,7 @@ fn map_operations() {
 /// 协程创建与 Yield 挂起
 #[test]
 fn coroutine_yield_and_resume() {
-    use aura_compiler::vm::CoroutineScheduler;
+    use compiler::vm::CoroutineScheduler;
 
     let mut scheduler = CoroutineScheduler::new();
     assert_eq!(scheduler.active_count(), 0);
@@ -373,7 +373,7 @@ fn coroutine_yield_and_resume() {
     assert_eq!(scheduler.ready_count(), 1);
 
     // 保存帧（模拟 Yield）
-    use aura_compiler::vm::Frame;
+    use compiler::vm::Frame;
     let frames = vec![Frame {
         func: 0,
         ip: 5,
@@ -397,7 +397,7 @@ fn coroutine_yield_and_resume() {
 /// DynamicLoader 基础操作
 #[test]
 fn dynamic_loader_basic() {
-    use aura_compiler::vm::DynamicLoader;
+    use compiler::vm::DynamicLoader;
 
     let mut loader = DynamicLoader::new();
     assert_eq!(loader.len(), 0);
@@ -418,7 +418,7 @@ fn dynamic_loader_basic() {
 /// 动态加载占位（无 dynamic-ffi feature 时应静默成功）
 #[test]
 fn dynamic_loader_load_lib_noop() {
-    use aura_compiler::vm::DynamicLoader;
+    use compiler::vm::DynamicLoader;
 
     let mut loader = DynamicLoader::new();
     // 无 dynamic-ffi 时应返回 Ok（空操作）
@@ -434,7 +434,7 @@ fn dynamic_loader_load_lib_noop() {
 /// ARC 引用计数与回收
 #[test]
 fn arc_reference_counting() {
-    let mut heap = aura_compiler::vm::Heap::new();
+    let mut heap = compiler::vm::Heap::new();
     let h1 = heap.alloc_object(0);
     assert_eq!(heap.live_count(), 1);
 
@@ -456,7 +456,7 @@ fn arc_reference_counting() {
 /// DropRef 显式释放
 #[test]
 fn drop_ref_explicit() {
-    let mut heap = aura_compiler::vm::Heap::new();
+    let mut heap = compiler::vm::Heap::new();
     let h = heap.alloc_object(0);
     heap.set_field(h, 100, Value::Int(99));
     assert_eq!(heap.live_count(), 1);
@@ -477,7 +477,7 @@ fn drop_ref_explicit() {
 #[cfg(feature = "jit")]
 #[test]
 fn jit_compilable_leaf_int() {
-    use aura_compiler::vm::{DecodedFunction, Instr};
+    use compiler::vm::{DecodedFunction, Instr};
 
     let code = vec![
         Instr::LoadConst(0), // Int
@@ -495,14 +495,14 @@ fn jit_compilable_leaf_int() {
         code,
     };
     let consts = vec![Const::Int(1)];
-    assert!(aura_compiler::vm::jit::is_jit_compilable(&f, &consts));
+    assert!(compiler::vm::jit::is_jit_compilable(&f, &consts));
 }
 
 /// JIT 不可编译：含 Call 指令应返回 false
 #[cfg(feature = "jit")]
 #[test]
 fn jit_not_compilable_with_call() {
-    use aura_compiler::vm::{DecodedFunction, Instr};
+    use compiler::vm::{DecodedFunction, Instr};
 
     let code = vec![
         Instr::LoadConst(0),
@@ -517,14 +517,14 @@ fn jit_not_compilable_with_call() {
         code,
     };
     let consts = vec![Const::Int(1)];
-    assert!(!aura_compiler::vm::jit::is_jit_compilable(&f, &consts));
+    assert!(!compiler::vm::jit::is_jit_compilable(&f, &consts));
 }
 
 /// JIT 不可编译：含非常量应返回 false
 #[cfg(feature = "jit")]
 #[test]
 fn jit_not_compilable_non_int_const() {
-    use aura_compiler::vm::{DecodedFunction, Instr};
+    use compiler::vm::{DecodedFunction, Instr};
 
     let code = vec![
         Instr::LoadConst(0), // Float 常量
@@ -538,5 +538,5 @@ fn jit_not_compilable_non_int_const() {
         code,
     };
     let consts = vec![Const::Float(3.14)];
-    assert!(!aura_compiler::vm::jit::is_jit_compilable(&f, &consts));
+    assert!(!compiler::vm::jit::is_jit_compilable(&f, &consts));
 }

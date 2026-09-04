@@ -8,8 +8,8 @@
 //! 更新快照：`INSTA_UPDATE=always cargo test`
 //! 查看差异：`cargo insta review`（需安装 cargo-insta）
 
-use aura_compiler::sema::analyze_source;
-use aura_compiler::{Lexer, Parser, TokenKind};
+use compiler::sema::analyze_source;
+use compiler::{Lexer, Parser, TokenKind};
 
 fn token_dump(src: &str) -> String {
     let mut lexer = Lexer::new(src);

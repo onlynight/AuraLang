@@ -7,8 +7,10 @@
 //!
 //! 工具路径探测：
 //! 1. `AotOptions.llvm_home` 显式指定
-//! 2. 环境变量 `AURA_LLVM_HOME`（由 build.rs 检测设置）
-//! 3. 环境变量 `PATH`（系统 PATH 中的 llc / clang）
+//! 2. 运行时环境变量 `AURA_LLVM_HOME`
+//! 3. 编译时配置（根 Cargo.toml `[workspace.metadata.aura]` 中的 `llvm-home`）
+//! 4. 编译时配置中的 `llvm-search-paths`（按优先级探测）
+//! 5. 环境变量 `PATH`（系统 PATH 中的 llc / clang）
 //!
 //! 交叉编译通过 `-mtriple` 参数传递给 llc / clang。
 
@@ -60,7 +62,7 @@ fn find_tool<'a>(name: &str, options: &'a AotOptions) -> Option<PathBuf> {
         }
     }
 
-    // 2. 环境变量
+    // 2. 运行时环境变量 AURA_LLVM_HOME
     if let Ok(home) = std::env::var("AURA_LLVM_HOME") {
         let path = PathBuf::from(home).join("bin").join(format!(
             "{}{}",
@@ -76,13 +78,8 @@ fn find_tool<'a>(name: &str, options: &'a AotOptions) -> Option<PathBuf> {
         }
     }
 
-    // 3. 项目默认 LLVM 路径（按优先级排列）
-    const DEFAULT_LLVM_PATHS: &[&str] = &[
-        r"D:\DevTools\LLVM\clang+llvm-23.1.0-x86_64-pc-windows-msvc",
-        r"C:\LLVM",
-        r"C:\Program Files\LLVM",
-    ];
-    for home in DEFAULT_LLVM_PATHS {
+    // 3. 编译时配置（来自根 Cargo.toml [workspace.metadata.aura] llvm-home）
+    if let Some(home) = option_env!("AURA_CONFIG_LLVM_HOME") {
         let path = PathBuf::from(home).join("bin").join(format!(
             "{}{}",
             name,
@@ -97,7 +94,29 @@ fn find_tool<'a>(name: &str, options: &'a AotOptions) -> Option<PathBuf> {
         }
     }
 
-    // 4. PATH
+    // 4. 编译时配置中的搜索路径（分号分隔）
+    if let Some(search_paths) = option_env!("AURA_CONFIG_LLVM_SEARCH_PATHS") {
+        for home in search_paths.split(';') {
+            let home = home.trim();
+            if home.is_empty() {
+                continue;
+            }
+            let path = PathBuf::from(home).join("bin").join(format!(
+                "{}{}",
+                name,
+                if cfg!(target_os = "windows") {
+                    ".exe"
+                } else {
+                    ""
+                }
+            ));
+            if path.exists() {
+                return Some(path);
+            }
+        }
+    }
+
+    // 5. PATH
     if let Ok(output) = Command::new("where").arg(name).output() {
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -262,7 +281,10 @@ impl CrossCompilationConfig {
         Self {
             target_triple: TargetTriple::linux_aarch64(),
             sysroot: sysroot.clone(),
-            linker: Some(PathBuf::from("aarch64-linux-gnu-gcc")),
+            linker: Some(PathBuf::from(
+                option_env!("AURA_CONFIG_CROSS_LINKER_AARCH64")
+                    .unwrap_or("aarch64-linux-gnu-gcc"),
+            )),
             c_stdlib: sysroot.as_ref().map(|s| s.join("usr").join("lib")),
         }
     }
@@ -272,7 +294,10 @@ impl CrossCompilationConfig {
         Self {
             target_triple: TargetTriple::linux_armv7(),
             sysroot: sysroot.clone(),
-            linker: Some(PathBuf::from("arm-linux-gnueabihf-gcc")),
+            linker: Some(PathBuf::from(
+                option_env!("AURA_CONFIG_CROSS_LINKER_ARMV7")
+                    .unwrap_or("arm-linux-gnueabihf-gcc"),
+            )),
             c_stdlib: sysroot.as_ref().map(|s| s.join("usr").join("lib")),
         }
     }

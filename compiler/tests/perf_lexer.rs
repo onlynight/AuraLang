@@ -10,7 +10,7 @@
 //! cargo test --release --test perf_lexer -- --nocapture # 校验吞吐率达标
 //! ```
 
-use aura_compiler::{Lexer, TokenKind};
+use compiler::{Lexer, TokenKind};
 use std::time::Instant;
 
 /// 构造近似真实代码的源码（声明、表达式、字符串、注释混合）

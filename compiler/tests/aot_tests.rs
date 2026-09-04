@@ -12,15 +12,15 @@
 //! 完整链路测试（IR → llc → 链接 → 运行）需要 LLVM 工具链可用时才执行，
 //! 通过 `AURA_LLVM_HOME` 环境变量存在判断。
 
-use aura_compiler::codegen::aot::{
+use compiler::codegen::aot::{
     AotCodeGenerator, AotOptions, OptimizationLevel, TargetTriple, aot_compile,
 };
-use aura_compiler::codegen::hir::desugar_program;
-use aura_compiler::lexer::Lexer;
-use aura_compiler::parser::Parser;
+use compiler::codegen::hir::desugar_program;
+use compiler::lexer::Lexer;
+use compiler::parser::Parser;
 
 /// 解析源码为 AST
-fn parse(src: &str) -> aura_compiler::ast::Program {
+fn parse(src: &str) -> compiler::ast::Program {
     let mut lexer = Lexer::new(src);
     let tokens = lexer.tokenize();
     let mut parser = Parser::new(tokens);
@@ -122,7 +122,7 @@ fn aot_c_backend() {
     let src = "fun add(a: Int, b: Int): Int { return a + b }\nfun main(): Int { return add(1, 2) }";
     let program = parse(src);
     let hir = desugar_program(&program);
-    let c = aura_compiler::codegen::aot::c_backend::generate_c_code(&hir).expect("C 生成失败");
+    let c = compiler::codegen::aot::c_backend::generate_c_code(&hir).expect("C 生成失败");
     assert!(c.contains("#include"), "C 代码应包含头文件");
     assert!(c.contains("int32_t"), "C 代码应包含整数类型");
     assert!(c.contains("add"), "C 代码应包含 add 函数");
@@ -176,13 +176,13 @@ fn aot_full_pipeline_when_llvm_available() {
 
     // 2. llc → .o
     let o_path = tmp.join("main.obj");
-    let llc = aura_compiler::codegen::aot::linker::link_to_object(&ll_path, &o_path, &options);
+    let llc = compiler::codegen::aot::linker::link_to_object(&ll_path, &o_path, &options);
     assert!(llc.is_ok(), "llc 编译应成功: {:?}", llc.err());
 
     // 3. lld-link → .exe
     let exe_path = tmp.join("main.exe");
     let link =
-        aura_compiler::codegen::aot::linker::link_to_executable(&o_path, &exe_path, &options);
+        compiler::codegen::aot::linker::link_to_executable(&o_path, &exe_path, &options);
     assert!(link.is_ok(), "链接应成功: {:?}", link.err());
 
     // 4. 运行并验证结果

@@ -2,8 +2,8 @@
 //!
 //! 覆盖 P10.1 - P10.10：协程状态机、Actor 模型、Channel、Select、监督与容错。
 
-use aura_compiler::codegen::compile_source;
-use aura_compiler::vm::{Value, Vm, VmOptions};
+use compiler::codegen::compile_source;
+use compiler::vm::{Value, Vm, VmOptions};
 
 fn run_main(source: &str) -> Value {
     let module = compile_source(source).expect("编译应成功");

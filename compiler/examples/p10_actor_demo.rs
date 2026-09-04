@@ -1,9 +1,9 @@
 //! P10 Actor 模型演示 — Actor 创建、消息传递、监督与容错
 //!
-//! 运行: `cargo run --example p10_actor_demo -p aura-compiler`
+//! 运行: `cargo run --example p10_actor_demo -p compiler`
 
-use aura_compiler::codegen::compile_source;
-use aura_compiler::vm::{Value, Vm, VmOptions};
+use compiler::codegen::compile_source;
+use compiler::vm::{Value, Vm, VmOptions};
 
 fn run(name: &str, src: &str, expected: Option<Value>) {
     println!("─── {} ──", name);

@@ -12,15 +12,15 @@
 //! - 7.9 内存泄漏检测
 //! - 7.10 测试（本文件）
 
-use aura_compiler::codegen::arc::{
+use compiler::codegen::arc::{
     ArcInsertionStats, ArcOptimizationStats, LeakReport, detect_leaks, escape_analysis, insert_arc,
     optimize_arc,
 };
-use aura_compiler::codegen::hir::desugar_program;
-use aura_compiler::codegen::mir::{MirInstr, Terminator, lower_program};
-use aura_compiler::codegen::opcode::OpCode;
-use aura_compiler::codegen::{BytecodeModule, compile_source};
-use aura_compiler::vm::{Vm, VmOptions};
+use compiler::codegen::hir::desugar_program;
+use compiler::codegen::mir::{MirInstr, Terminator, lower_program};
+use compiler::codegen::opcode::OpCode;
+use compiler::codegen::{BytecodeModule, compile_source};
+use compiler::vm::{Vm, VmOptions};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 7.1 逃逸分析测试
@@ -44,7 +44,7 @@ fun main() {
 "#;
     let module = compile_source(src).unwrap();
     let (mir_funcs, _ctx) = lower_program(&desugar_program(
-        &aura_compiler::parser::Parser::new(aura_compiler::lexer::Lexer::new(src).tokenize())
+        &compiler::parser::Parser::new(compiler::lexer::Lexer::new(src).tokenize())
             .parse_program(),
     ));
     let escape = escape_analysis(&mir_funcs);
@@ -130,14 +130,14 @@ fn test_weak_reference_bytecode() {
     let h = vm.heap_mut().alloc_object(1);
     let weak_h = h;
     // 创建弱引用（不增加引用计数）
-    let weak_val = aura_compiler::vm::Value::Weak(weak_h);
+    let weak_val = compiler::vm::Value::Weak(weak_h);
     // 验证弱引用不增加引用计数
     assert_eq!(
         vm.heap_ref().get_field(h, field_hash("x")),
-        aura_compiler::vm::Value::Null
+        compiler::vm::Value::Null
     );
     // 弱引用值存在
-    assert!(matches!(weak_val, aura_compiler::vm::Value::Weak(_)));
+    assert!(matches!(weak_val, compiler::vm::Value::Weak(_)));
 }
 
 /// 测试弱引用升级（WeakGet）
@@ -146,13 +146,13 @@ fn test_weak_get_upgrade() {
     let mut vm = create_test_vm();
     let h = vm.heap_mut().alloc_object(1);
     // 创建弱引用
-    let weak = aura_compiler::vm::Value::Weak(h);
+    let weak = compiler::vm::Value::Weak(h);
     // 对象仍存活，升级应成功
     let alive = vm.heap_ref().is_alive(h);
     assert!(alive);
     // 模拟 WeakGet：检查对象是否存活
     let upgraded = if alive {
-        Some(aura_compiler::vm::Value::Ref(h))
+        Some(compiler::vm::Value::Ref(h))
     } else {
         None
     };
@@ -165,13 +165,13 @@ fn test_weak_get_after_free() {
     let mut vm = create_test_vm();
     let h = vm.heap_mut().alloc_object(1);
     // 创建弱引用
-    let weak = aura_compiler::vm::Value::Weak(h);
+    let weak = compiler::vm::Value::Weak(h);
     // 释放对象
     vm.heap_mut().dec_ref(h);
     // 弱引用应不再能升级
     let alive = vm.heap_ref().is_alive(h);
     assert!(!alive, "释放后对象不应存活");
-    assert!(matches!(weak, aura_compiler::vm::Value::Weak(_)));
+    assert!(matches!(weak, compiler::vm::Value::Weak(_)));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -224,18 +224,18 @@ fn test_box_expression_bytecode() {
     // box 被降级为 Box 表达式 → MirInstr::Box → OpCode::BoxAlloc
     // 通过直接测试 VM 的 BoxAlloc 指令
     let mut vm = create_test_vm();
-    let val = aura_compiler::vm::Value::Int(42);
+    let val = compiler::vm::Value::Int(42);
     let h = vm.heap_mut().alloc_box_value(val);
     // 验证堆对象包含值
     let stored = vm.heap_ref().get_field(h, field_hash("value"));
-    assert_eq!(stored, aura_compiler::vm::Value::Int(42));
+    assert_eq!(stored, compiler::vm::Value::Int(42));
 }
 
 /// 测试 box 分配的引用计数
 #[test]
 fn test_box_reference_counting() {
     let mut vm = create_test_vm();
-    let val = aura_compiler::vm::Value::Int(42);
+    let val = compiler::vm::Value::Int(42);
     let h = vm.heap_mut().alloc_box_value(val);
     // 初始引用计数为 1
     // 增加引用计数
@@ -277,8 +277,8 @@ fun main() {
 #[test]
 fn test_arc_optimization_redundant_pairs() {
     // 构造包含冗余 Retain/Release 对的 MIR 函数
-    use aura_compiler::codegen::hir::HirBinOp;
-    use aura_compiler::codegen::mir::{BasicBlock, MirFunction, MirInstr, Terminator};
+    use compiler::codegen::hir::HirBinOp;
+    use compiler::codegen::mir::{BasicBlock, MirFunction, MirInstr, Terminator};
 
     let mut func = MirFunction {
         name: "test".to_string(),
@@ -316,7 +316,7 @@ fn test_arc_optimization_redundant_pairs() {
 /// 测试 ARC 优化：无冗余时不消除
 #[test]
 fn test_arc_optimization_no_redundant() {
-    use aura_compiler::codegen::mir::{BasicBlock, MirFunction, MirInstr, Terminator};
+    use compiler::codegen::mir::{BasicBlock, MirFunction, MirInstr, Terminator};
 
     let mut func = MirFunction {
         name: "test".to_string(),
@@ -348,7 +348,7 @@ fn test_arc_optimization_no_redundant() {
 /// 测试泄漏检测：无泄漏
 #[test]
 fn test_leak_detection_clean() {
-    use aura_compiler::codegen::mir::{BasicBlock, MirFunction, MirInstr, Terminator};
+    use compiler::codegen::mir::{BasicBlock, MirFunction, MirInstr, Terminator};
 
     let func = MirFunction {
         name: "clean".to_string(),
@@ -374,7 +374,7 @@ fn test_leak_detection_clean() {
 /// 测试泄漏检测：有泄漏
 #[test]
 fn test_leak_detection_leaked() {
-    use aura_compiler::codegen::mir::{BasicBlock, MirFunction, MirInstr, Terminator};
+    use compiler::codegen::mir::{BasicBlock, MirFunction, MirInstr, Terminator};
 
     let func = MirFunction {
         name: "leaked".to_string(),
@@ -476,7 +476,7 @@ fn test_full_memory_management_integration() {
 
     // 5. 弱引用
     let h2 = vm.heap_mut().alloc_object(2);
-    let weak = aura_compiler::vm::Value::Weak(h2);
+    let weak = compiler::vm::Value::Weak(h2);
     assert!(vm.heap_ref().is_alive(h2));
     // 弱引用不增加计数，所以对象仍存活
     vm.heap_mut().dec_ref(h2);
@@ -485,10 +485,10 @@ fn test_full_memory_management_integration() {
     // 6. Box 分配
     let h3 = vm
         .heap_mut()
-        .alloc_box_value(aura_compiler::vm::Value::Int(100));
+        .alloc_box_value(compiler::vm::Value::Int(100));
     assert!(vm.heap_ref().is_alive(h3));
     let val = vm.heap_ref().get_field(h3, field_hash("value"));
-    assert_eq!(val, aura_compiler::vm::Value::Int(100));
+    assert_eq!(val, compiler::vm::Value::Int(100));
 
     // 7. 显式释放
     vm.heap_mut().drop_ref(h3);
@@ -511,12 +511,12 @@ fn test_arc_circular_reference() {
     // 设置 A.next = B（Retain B）
     vm.heap_mut().inc_ref(b);
     vm.heap_mut()
-        .set_field(a, field_hash("next"), aura_compiler::vm::Value::Ref(b));
+        .set_field(a, field_hash("next"), compiler::vm::Value::Ref(b));
 
     // 设置 B.next = A（Retain A）
     vm.heap_mut().inc_ref(a);
     vm.heap_mut()
-        .set_field(b, field_hash("next"), aura_compiler::vm::Value::Ref(a));
+        .set_field(b, field_hash("next"), compiler::vm::Value::Ref(a));
 
     // 释放外部引用
     vm.heap_mut().dec_ref(a); // 计数：1(初始) + 1(B.next) - 1 = 1
@@ -552,7 +552,7 @@ fn test_box_with_arc() {
     // box 创建的对象也有引用计数
     let boxed = vm
         .heap_mut()
-        .alloc_box_value(aura_compiler::vm::Value::Int(42));
+        .alloc_box_value(compiler::vm::Value::Int(42));
     assert!(vm.heap_ref().is_alive(boxed));
 
     // 复制引用（Retain）
@@ -579,11 +579,11 @@ fn create_test_vm() -> Vm {
     // 构造一个最小字节码模块
     let module = BytecodeModule {
         consts: vec![
-            aura_compiler::codegen::opcode::Const::Int(42),
-            aura_compiler::codegen::opcode::Const::Null,
+            compiler::codegen::opcode::Const::Int(42),
+            compiler::codegen::opcode::Const::Null,
         ],
         natives: vec![],
-        functions: vec![aura_compiler::codegen::opcode::BytecodeFunction {
+        functions: vec![compiler::codegen::opcode::BytecodeFunction {
             name: "main".to_string(),
             param_count: 0,
             locals: 2,

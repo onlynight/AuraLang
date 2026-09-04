@@ -1,5 +1,5 @@
 ---
-source: aura-compiler/tests/snapshots.rs
+source: compiler/tests/snapshots.rs
 expression: "token_dump(\"fun add(a: Int, b: Int): Int { return a + b }\")"
 ---
 Fun("fun") @1:1

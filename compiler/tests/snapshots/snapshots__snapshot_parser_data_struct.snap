@@ -1,5 +1,5 @@
 ---
-source: aura-compiler/tests/snapshots.rs
+source: compiler/tests/snapshots.rs
 expression: "ast_dump(\"struct Player(val id: Int, var name: String)\")"
 ---
 Program {

@@ -1,6 +1,6 @@
 //! 测试 sum 的 JIT 编译
-use aura_compiler::codegen::compile_source;
-use aura_compiler::vm::{Vm, VmOptions};
+use compiler::codegen::compile_source;
+use compiler::vm::{Vm, VmOptions};
 
 const SUM_SRC: &str = r#"
     fun main(): Int {

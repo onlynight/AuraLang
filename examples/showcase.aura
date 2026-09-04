@@ -1,7 +1,7 @@
 // Aura 语言特性总览（前端：词法 / 语法 / 语义）
 //
 // 本文件用于验证编译器对“当前已支持”语法的接受度。
-// 目标：语义分析（P3）零错误。可用 `aura-cli check examples/showcase.aura` 验证。
+// 目标：语义分析（P3）零错误。可用 `cli check examples/showcase.aura` 验证。
 //
 // 覆盖：
 //   文档注释、data/普通/密封 结构体、枚举、接口、类（实现/继承）、actor、类型别名、

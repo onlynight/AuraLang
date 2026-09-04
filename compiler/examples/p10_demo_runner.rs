@@ -1,12 +1,12 @@
 //! P10 并发运行时 Demo Runner — 编译并运行 examples/p10_*.aura
 //!
-//! 运行: `cargo run --example p10_demo_runner -p aura-compiler`
+//! 运行: `cargo run --example p10_demo_runner -p compiler`
 
 use std::fs;
 use std::path::Path;
 
-use aura_compiler::codegen::compile_source;
-use aura_compiler::vm::{Value, Vm, VmOptions};
+use compiler::codegen::compile_source;
+use compiler::vm::{Value, Vm, VmOptions};
 
 /// 编译并运行 .aura 源码，返回最终结果
 fn compile_and_run(label: &str, src: &str) -> Result<Value, String> {

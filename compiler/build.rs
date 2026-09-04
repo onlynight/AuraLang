@@ -1,13 +1,16 @@
 //! Aura 编译器构建脚本。
 //!
 //! 职责：
-//! 1. 当启用 `llvm` feature 时，探测本机 LLVM 安装路径，输出 `cargo:rustc-env`
+//! 1. 从项目根目录 `Cargo.toml` 的 `[workspace.metadata.aura]` 读取外部工具链配置
+//! 2. 当启用 `llvm` feature 时，探测本机 LLVM 安装路径，输出 `cargo:rustc-env`
 //!    环境变量，供运行时 `aot` 模块使用。
-//! 2. 探测方式按优先级：
+//! 3. 探测方式按优先级：
+//!    - 配置文件中 `llvm-home` 显式指定
 //!    - 环境变量 `AURA_LLVM_HOME`（显式指定）
 //!    - 环境变量 `LLVM_CONFIG`（指向 llvm-config 二进制）
+//!    - 配置文件中 `llvm-search-paths`（按优先级探测）
 //!    - 常见系统路径（`/usr/lib/llvm-*`, `C:\Program Files\LLVM`, 等）
-//! 3. 输出 LLVM 版本（如果检测到），供编译时检查。
+//! 4. 输出 LLVM 版本（如果检测到），供编译时检查。
 //!
 //! 对应 技术方案 §9.7.2 build.rs。
 
@@ -17,9 +20,44 @@ use std::path::{Path, PathBuf};
 const AURA_LLVM_HOME_ENV: &str = "AURA_LLVM_HOME";
 const LLVM_CONFIG_ENV: &str = "LLVM_CONFIG";
 
+/// 从根 Cargo.toml 读取的 `[workspace.metadata.aura]` 配置
+#[derive(Debug, Default)]
+struct AuraConfig {
+    llvm_home: Option<String>,
+    llvm_search_paths: Vec<String>,
+    c_compiler_windows: Option<String>,
+    c_compiler_unix: Option<String>,
+    cross_linker_aarch64: Option<String>,
+    cross_linker_armv7: Option<String>,
+}
+
 fn main() {
-    // 即使 `llvm` feature 未启用，也可以输出 LLVM 路径信息（作为信息性 cargo:warning）
-    let home = detect_llvm_home();
+    // 读取根 Cargo.toml 中的 Aura 配置
+    let config = read_aura_config();
+
+    // 将配置输出为编译时环境变量，供运行时代码通过 option_env! 读取
+    if let Some(ref home) = config.llvm_home {
+        println!("cargo:rustc-env=AURA_CONFIG_LLVM_HOME={}", home);
+    }
+    if !config.llvm_search_paths.is_empty() {
+        let joined = config.llvm_search_paths.join(";");
+        println!("cargo:rustc-env=AURA_CONFIG_LLVM_SEARCH_PATHS={}", joined);
+    }
+    if let Some(ref c) = config.c_compiler_windows {
+        println!("cargo:rustc-env=AURA_CONFIG_C_COMPILER_WINDOWS={}", c);
+    }
+    if let Some(ref c) = config.c_compiler_unix {
+        println!("cargo:rustc-env=AURA_CONFIG_C_COMPILER_UNIX={}", c);
+    }
+    if let Some(ref c) = config.cross_linker_aarch64 {
+        println!("cargo:rustc-env=AURA_CONFIG_CROSS_LINKER_AARCH64={}", c);
+    }
+    if let Some(ref c) = config.cross_linker_armv7 {
+        println!("cargo:rustc-env=AURA_CONFIG_CROSS_LINKER_ARMV7={}", c);
+    }
+
+    // 探测 LLVM 安装路径
+    let home = detect_llvm_home(&config);
 
     if let Some(ref home) = home {
         println!("cargo:rustc-env=AURA_LLVM_HOME={}", home.display());
@@ -35,21 +73,115 @@ fn main() {
         }
     } else if cfg!(feature = "llvm") {
         println!("cargo:warning=Aura: llvm feature 已启用但未检测到 LLVM 安装路径");
-        println!("cargo:warning=Aura: 请设置 AURA_LLVM_HOME 或 LLVM_CONFIG 环境变量");
-        println!(
-            "cargo:warning=Aura: 例如 AURA_LLVM_HOME=D:/DevTools/LLVM/clang+llvm-23.1.0-x86_64-pc-windows-msvc"
-        );
+        println!("cargo:warning=Aura: 请在 Cargo.toml 的 [workspace.metadata.aura] 中设置 llvm-home");
+        println!("cargo:warning=Aura: 或设置 AURA_LLVM_HOME 环境变量");
     }
 
-    // 常规构建指令：为不同目标输出库搜索路径（llvm-sys 也会做这些，这里仅提示）
+    // 常规构建指令
     println!("cargo:rerun-if-env-changed=AURA_LLVM_HOME");
     println!("cargo:rerun-if-env-changed=LLVM_CONFIG");
     println!("cargo:rerun-if-changed=build.rs");
 }
 
+/// 从根 Cargo.toml 读取 `[workspace.metadata.aura]` 配置
+fn read_aura_config() -> AuraConfig {
+    let manifest_dir = match env::var("CARGO_MANIFEST_DIR") {
+        Ok(d) => PathBuf::from(d),
+        Err(_) => return AuraConfig::default(),
+    };
+
+    // 向上查找 workspace 根目录（包含根 Cargo.toml 且有 [workspace] 节）
+    let workspace_root = find_workspace_root(&manifest_dir);
+    let cargo_toml_path = workspace_root.join("Cargo.toml");
+
+    if !cargo_toml_path.exists() {
+        return AuraConfig::default();
+    }
+
+    let content = match std::fs::read_to_string(&cargo_toml_path) {
+        Ok(c) => c,
+        Err(e) => {
+            println!("cargo:warning=Aura: 无法读取根 Cargo.toml: {}", e);
+            return AuraConfig::default();
+        }
+    };
+
+    let doc: toml::Value = match content.parse() {
+        Ok(d) => d,
+        Err(e) => {
+            println!("cargo:warning=Aura: 无法解析根 Cargo.toml: {}", e);
+            return AuraConfig::default();
+        }
+    };
+
+    // 导航到 [workspace.metadata.aura]
+    let Some(meta) = doc
+        .get("workspace")
+        .and_then(|w| w.get("metadata"))
+        .and_then(|m| m.get("aura"))
+    else {
+        return AuraConfig::default();
+    };
+
+    let string = |key: &str| -> Option<String> {
+        meta.get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    };
+
+    let string_array = |key: &str| -> Vec<String> {
+        meta.get(key)
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    AuraConfig {
+        llvm_home: string("llvm-home"),
+        llvm_search_paths: string_array("llvm-search-paths"),
+        c_compiler_windows: string("c-compiler-windows"),
+        c_compiler_unix: string("c-compiler-unix"),
+        cross_linker_aarch64: string("cross-linker-aarch64"),
+        cross_linker_armv7: string("cross-linker-armv7"),
+    }
+}
+
+/// 向上查找 workspace 根目录
+fn find_workspace_root(manifest_dir: &Path) -> PathBuf {
+    let mut current = manifest_dir.to_path_buf();
+    loop {
+        let candidate = current.join("Cargo.toml");
+        if candidate.exists() {
+            if let Ok(content) = std::fs::read_to_string(&candidate) {
+                if content.contains("[workspace]") {
+                    return current.clone();
+                }
+            }
+        }
+        if let Some(parent) = current.parent() {
+            current = parent.to_path_buf();
+        } else {
+            break;
+        }
+    }
+    manifest_dir.to_path_buf()
+}
+
 /// 探测 LLVM 安装目录，按优先级尝试多种策略。
-fn detect_llvm_home() -> Option<PathBuf> {
-    // 1. 显式环境变量
+fn detect_llvm_home(config: &AuraConfig) -> Option<PathBuf> {
+    // 1. 配置文件中 llvm-home 显式指定
+    if let Some(ref v) = config.llvm_home {
+        let p = PathBuf::from(v);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+
+    // 2. 环境变量
     if let Ok(v) = env::var(AURA_LLVM_HOME_ENV) {
         let p = PathBuf::from(v);
         if p.exists() {
@@ -57,7 +189,7 @@ fn detect_llvm_home() -> Option<PathBuf> {
         }
     }
 
-    // 2. 通过 LLVM_CONFIG 反推
+    // 3. 通过 LLVM_CONFIG 反推
     if let Ok(v) = env::var(LLVM_CONFIG_ENV) {
         if let Some(parent) = PathBuf::from(v).parent() {
             // llvm-config 通常在 bin/ 下，所以 parent 是 bin，再 parent 才是 LLVM_HOME
@@ -72,7 +204,15 @@ fn detect_llvm_home() -> Option<PathBuf> {
         }
     }
 
-    // 3. 常见系统路径（Windows）
+    // 4. 配置文件中的 llvm-search-paths
+    for path_str in &config.llvm_search_paths {
+        let p = PathBuf::from(path_str);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+
+    // 5. 常见系统路径（Windows）
     if cfg!(target_os = "windows") {
         let candidates = [r"C:\Program Files\LLVM", r"C:\Program Files (x86)\LLVM"];
         for c in &candidates {
@@ -106,7 +246,7 @@ fn detect_llvm_home() -> Option<PathBuf> {
         }
     }
 
-    // 4. 常见系统路径（Linux / macOS）
+    // 6. 常见系统路径（Linux / macOS）
     let candidates = [
         "/usr/lib/llvm-17",
         "/usr/lib/llvm-18",

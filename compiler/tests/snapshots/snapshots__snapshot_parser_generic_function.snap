@@ -1,5 +1,5 @@
 ---
-source: aura-compiler/tests/snapshots.rs
+source: compiler/tests/snapshots.rs
 expression: "ast_dump(\"fun <T : Comparable<T>> max(a: T, b: T): T = a\")"
 ---
 Program {

@@ -6,8 +6,8 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use aura_compiler::codegen::compile_source;
-use aura_compiler::vm::{Value, Vm, VmOptions};
+use compiler::codegen::compile_source;
+use compiler::vm::{Value, Vm, VmOptions};
 
 /// 协程创建与调度基准
 fn bench_coroutine_spawn() {

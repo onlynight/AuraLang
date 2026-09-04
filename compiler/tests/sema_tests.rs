@@ -7,10 +7,10 @@
 //! - 类型不匹配错误
 //! - 诊断渲染（SourceMap + 源码片段，P0.6）
 
-use aura_compiler::Span;
-use aura_compiler::errors::{CompileError, ErrorSeverity};
-use aura_compiler::sema::analyze_source;
-use aura_compiler::source_map::SourceMap;
+use compiler::Span;
+use compiler::errors::{CompileError, ErrorSeverity};
+use compiler::sema::analyze_source;
+use compiler::source_map::SourceMap;
 
 fn analyze(src: &str) -> Vec<String> {
     let (_program, result) = analyze_source(src);

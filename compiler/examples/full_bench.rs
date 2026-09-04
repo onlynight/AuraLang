@@ -1,15 +1,15 @@
 //! AOT vs JIT vs VM 完整性能对比基准
 //!
 //! 运行：
-//!   VM + JIT: `cargo run --release --features jit -p aura-compiler --example full_bench`
+//!   VM + JIT: `cargo run --release --features jit -p compiler --example full_bench`
 //!   AOT 需要: 设置 AURA_LLVM_HOME 并加 --features "llvm,jit"
 
 #[cfg(feature = "llvm")]
 use std::path::Path;
 use std::time::Instant;
 
-use aura_compiler::codegen::compile_source;
-use aura_compiler::vm::{Vm, VmOptions};
+use compiler::codegen::compile_source;
+use compiler::vm::{Vm, VmOptions};
 
 const FIB_SRC: &str = r#"
     fun fib(n: Int): Int {
@@ -152,16 +152,16 @@ fn aot_inprocess_bench(src: &str, iters: usize, expected: i64) -> Option<f64> {
 
 #[cfg(feature = "llvm")]
 fn build_aot_exe(src: &str, llvm_home: &str, bin: &Path, name: &str) -> Option<std::path::PathBuf> {
-    use aura_compiler::codegen::aot::{AotCodeGenerator, AotOptions};
+    use compiler::codegen::aot::{AotCodeGenerator, AotOptions};
     use std::path::Path;
     use std::process::Command;
 
     let codegen = AotCodeGenerator::new(AotOptions::default());
-    let mut lexer = aura_compiler::lexer::Lexer::new(src);
+    let mut lexer = compiler::lexer::Lexer::new(src);
     let tokens = lexer.tokenize();
-    let mut parser = aura_compiler::parser::Parser::new(tokens);
+    let mut parser = compiler::parser::Parser::new(tokens);
     let program = parser.parse_program();
-    let hir = aura_compiler::codegen::hir::desugar_program(&program);
+    let hir = compiler::codegen::hir::desugar_program(&program);
     let ir = match codegen.generate_ir(&hir) {
         Ok(ir) => ir,
         Err(_) => return None,
@@ -269,7 +269,7 @@ fn jit_bench(_src: &str, _iters: usize, _expected: i64) -> Option<f64> {
 
 #[cfg(feature = "llvm")]
 fn aot_bench(src: &str, iters: usize, expected: i64) -> Option<f64> {
-    use aura_compiler::codegen::aot::{AotCodeGenerator, AotOptions};
+    use compiler::codegen::aot::{AotCodeGenerator, AotOptions};
     use std::path::Path;
     use std::process::Command;
 
@@ -280,11 +280,11 @@ fn aot_bench(src: &str, iters: usize, expected: i64) -> Option<f64> {
     let bin = Path::new(&llvm_home).join("bin");
 
     let codegen = AotCodeGenerator::new(AotOptions::default());
-    let mut lexer = aura_compiler::lexer::Lexer::new(src);
+    let mut lexer = compiler::lexer::Lexer::new(src);
     let tokens = lexer.tokenize();
-    let mut parser = aura_compiler::parser::Parser::new(tokens);
+    let mut parser = compiler::parser::Parser::new(tokens);
     let program = parser.parse_program();
-    let hir = aura_compiler::codegen::hir::desugar_program(&program);
+    let hir = compiler::codegen::hir::desugar_program(&program);
     let ir = match codegen.generate_ir(&hir) {
         Ok(ir) => ir,
         Err(_) => return None,

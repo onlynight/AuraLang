@@ -1,5 +1,5 @@
 ---
-source: aura-compiler/tests/snapshots.rs
+source: compiler/tests/snapshots.rs
 expression: "sema_dump(\"fun main() {\\n    val s: String? = null\\n    val n = s.length\\n    val m = s + 1\\n}\")"
 ---
 Error: cannot access '.' on nullable 'String?' (use '?.' instead) @line 3 col 14 to line 4 col 8

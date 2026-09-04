@@ -1,5 +1,5 @@
 [package]
-name = "aura-compiler"
+name = "compiler"
 version.workspace = true
 edition.workspace = true
 
@@ -42,6 +42,9 @@ dynamic-ffi = ["libloading"]
 # 通过文本 LLVM IR 生成 + 外部 llc/clang 工具链生成 .o / .exe。
 # 支持跨平台目标三元组（x86_64 / aarch64 / armv7 等）与 DWARF 调试元数据。
 llvm = ["thiserror"]
+
+[build-dependencies]
+toml = "0.8"
 
 [dev-dependencies]
 insta = { version = "1", features = ["yaml"] }

@@ -12,16 +12,16 @@
 
 use std::process::exit;
 
-use aura_compiler::codegen::{
+use compiler::codegen::{
     SerializeError, compile_source, disassemble, read_auc, to_bytes, write_auc,
 };
-use aura_compiler::lexer::Lexer;
-use aura_compiler::parser::Parser;
-use aura_compiler::sema::analyze_source;
-use aura_compiler::vm::{Vm, VmOptions};
+use compiler::lexer::Lexer;
+use compiler::parser::Parser;
+use compiler::sema::analyze_source;
+use compiler::vm::{Vm, VmOptions};
 
 #[cfg(feature = "llvm")]
-use aura_compiler::codegen::aot::{AotOptions, OptimizationLevel, TargetTriple};
+use compiler::codegen::aot::{AotOptions, OptimizationLevel, TargetTriple};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -101,7 +101,7 @@ fn cmd_build(args: &[String]) {
         #[cfg(not(feature = "llvm"))]
         {
             eprintln!("错误: llvm feature 未启用，无法进行 AOT 编译");
-            eprintln!("提示: 使用 `cargo build --features llvm` 重新构建 aura-compiler");
+            eprintln!("提示: 使用 `cargo build --features llvm` 重新构建 compiler");
             exit(1);
         }
     }
@@ -180,7 +180,7 @@ fn cmd_build_aot(args: &[String]) {
         None => TargetTriple::default(),
     };
     let is_windows_target = {
-        use aura_compiler::codegen::aot::OperatingSystem;
+        use compiler::codegen::aot::OperatingSystem;
         target.os == OperatingSystem::Windows
     };
 
@@ -251,8 +251,8 @@ fn cmd_build_aot(args: &[String]) {
         exit(1);
     }
 
-    let hir = aura_compiler::codegen::hir::desugar_program(&program);
-    let codegen = aura_compiler::codegen::aot::AotCodeGenerator::new(options.clone());
+    let hir = compiler::codegen::hir::desugar_program(&program);
+    let codegen = compiler::codegen::aot::AotCodeGenerator::new(options.clone());
     let ir = match codegen.generate_ir(&hir) {
         Ok(ir) => ir,
         Err(e) => {
@@ -301,7 +301,7 @@ fn finish_executable(
     exe_path: &std::path::Path,
     options: &AotOptions,
 ) -> Result<(), String> {
-    use aura_compiler::codegen::aot::linker::{link_to_executable, link_to_object};
+    use compiler::codegen::aot::linker::{link_to_executable, link_to_object};
 
     // 中间对象文件
     let obj_path = ll_path.with_extension(if cfg!(target_os = "windows") {
@@ -404,7 +404,7 @@ fn cmd_run(args: &[String]) {
 
     match vm.run() {
         Ok(result) => {
-            if !matches!(result, aura_compiler::vm::Value::Null) {
+            if !matches!(result, compiler::vm::Value::Null) {
                 println!("{}", result);
             }
         }
@@ -539,8 +539,8 @@ fn cmd_leak_check(args: &[String]) {
         }
     };
 
-    use aura_compiler::codegen::hir::desugar_program;
-    use aura_compiler::codegen::mir::lower_program;
+    use compiler::codegen::hir::desugar_program;
+    use compiler::codegen::mir::lower_program;
 
     let mut lexer = Lexer::new(&source);
     let tokens = lexer.tokenize();
@@ -558,7 +558,7 @@ fn cmd_leak_check(args: &[String]) {
     let (mut mir_funcs, _ctx) = lower_program(&hir);
 
     // 运行完整 ARC 分析
-    let result = aura_compiler::codegen::arc::run_arc_analysis(&mut mir_funcs);
+    let result = compiler::codegen::arc::run_arc_analysis(&mut mir_funcs);
 
     println!("=== ARC 分析报告 ===");
     println!("{}", result.summary());
@@ -610,7 +610,7 @@ fn cmd_doc(args: &[String]) {
 
     if let Some(module) = &module_filter {
         // 仅生成单个模块文档
-        let registry = aura_compiler::docgen::DocRegistry::new().load_all();
+        let registry = compiler::docgen::DocRegistry::new().load_all();
         let docs = registry.by_module(module);
         if docs.is_empty() {
             eprintln!("错误: 模块 '{}' 不存在或无文档", module);
@@ -620,7 +620,7 @@ fn cmd_doc(args: &[String]) {
             }
             exit(1);
         }
-        let content = aura_compiler::docgen::render_module_markdown(&registry, module);
+        let content = compiler::docgen::render_module_markdown(&registry, module);
         std::fs::create_dir_all(&output_dir)
             .map_err(|e| {
                 eprintln!("错误: 创建输出目录失败: {}", e);
@@ -640,7 +640,7 @@ fn cmd_doc(args: &[String]) {
     }
 
     // 生成完整文档（Markdown + HTML）
-    match aura_compiler::docgen::generate_docs(&output_dir) {
+    match compiler::docgen::generate_docs(&output_dir) {
         Ok(files) => {
             println!("✓ 已生成 {} 个文档文件:", files.len());
             for f in &files {
@@ -654,8 +654,8 @@ fn cmd_doc(args: &[String]) {
     }
 
     // 同时生成 HTML 版本
-    let registry = aura_compiler::docgen::DocRegistry::new().load_all();
-    let html = aura_compiler::docgen::render_html(&registry);
+    let registry = compiler::docgen::DocRegistry::new().load_all();
+    let html = compiler::docgen::render_html(&registry);
     let html_path = output_dir.join("index.html");
     if let Err(e) = std::fs::write(&html_path, &html) {
         eprintln!("警告: 无法写入 HTML 文档 {}: {}", html_path.display(), e);

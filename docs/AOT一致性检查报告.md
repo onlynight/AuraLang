@@ -1,6 +1,6 @@
 # AOT 后端与技术方案一致性检查报告
 
-> 日期：2026-09 · 范围：`技术方案.md` 第九章（LLVM 后端深度设计）vs `aura-compiler/src/codegen/aot/`
+> 日期：2026-09 · 范围：`技术方案.md` 第九章（LLVM 后端深度设计）vs `compiler/src/codegen/aot/`
 > 方法：逐节对照 + llc/链接/运行三层验证
 
 ## 一、结论摘要
@@ -101,7 +101,7 @@ lld-link 降级回退。
 
 ```bash
 # 全量测试
-cargo test --features llvm -p aura-compiler
+cargo test --features llvm -p compiler
 
 # 组合回归（递归+while+字符串+大栈帧）
 aura build combo.aura --aot --output combo.exe && combo.exe   # 期望 88

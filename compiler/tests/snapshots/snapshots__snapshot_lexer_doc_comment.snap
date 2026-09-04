@@ -1,5 +1,5 @@
 ---
-source: aura-compiler/tests/snapshots.rs
+source: compiler/tests/snapshots.rs
 expression: "token_dump(\"/// Adds two numbers\\nfun add() {}\")"
 ---
 DocComment("Adds two numbers") @1:1
