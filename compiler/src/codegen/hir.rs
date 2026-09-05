@@ -23,6 +23,11 @@ pub enum HirType {
     Nullable(Box<HirType>),
     /// 原始指针类型（P8.6）：`Pointer<T>` 映射为 C 的 `T*`
     Pointer(Box<HirType>),
+    /// 函数类型（Fix 3）：`(A, B) -> R`
+    Function {
+        params: Box<Vec<HirType>>,
+        return_type: Box<HirType>,
+    },
     /// 未知（由语义阶段兜底）
     Unknown,
 }
@@ -65,6 +70,16 @@ impl HirType {
             Type::Float => HirType::Named("Float".into()),
             Type::String => HirType::Named("String".into()),
             Type::Boolean => HirType::Named("Boolean".into()),
+            // Fix 3: 函数类型
+            Type::Function { params, return_type, .. } => HirType::Function {
+                params: Box::new(
+                    params
+                        .iter()
+                        .map(|p| HirType::from_ast_opt(&p.type_hint).unwrap_or(HirType::Unknown))
+                        .collect(),
+                ),
+                return_type: Box::new(HirType::from_ast_opt(return_type).unwrap_or(HirType::Unknown)),
+            },
             _ => HirType::Named(ty.to_string()),
         }
     }
@@ -183,6 +198,11 @@ pub enum HirExpr {
     WeakRef(Box<HirExpr>),
     /// await 挂起点（P10.1）：`await expr` 在 suspend 函数中挂起协程
     Await(Box<HirExpr>),
+    /// 闭包/lambda（Fix 4）：`fun(x: Int) => x * 2` 或 `fun(x: Int) { return x * 2 }`
+    Lambda {
+        params: Vec<HirParam>,
+        body: HirBlock,
+    },
 }
 
 impl HirExpr {
@@ -262,10 +282,20 @@ pub struct HirStruct {
     pub fields: Vec<(String, HirType)>,
 }
 
+/// HIR 枚举定义（Fix 2 — 补全枚举支持）
+#[derive(Debug, Clone, PartialEq)]
+pub struct HirEnum {
+    pub name: String,
+    /// 变体列表：(变体名, 关联值类型列表)
+    pub variants: Vec<(String, Vec<HirType>)>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct HirProgram {
     pub functions: Vec<HirFunction>,
     pub structs: Vec<HirStruct>,
+    /// 枚举定义（Fix 2）
+    pub enums: Vec<HirEnum>,
     /// 原生函数签名集合（extern "c" / 内置）
     pub natives: Vec<HirFunction>,
     /// FFI 常量（P8.1）：extern 块中的 `val` 声明
@@ -282,6 +312,7 @@ pub struct HirProgram {
 pub fn desugar_program(program: &Program) -> HirProgram {
     let mut functions = Vec::new();
     let mut structs = Vec::new();
+    let mut enums = Vec::new();
     let mut natives = Vec::new();
     let mut constants = Vec::new();
     let mut top_level_stmts = Vec::new();
@@ -353,7 +384,25 @@ pub fn desugar_program(program: &Program) -> HirProgram {
                 }
             }
             Decl::Interface(_) => {}
-            Decl::Enum(_) => {}
+            Decl::Enum(e) => {
+                let variants = e
+                    .variants
+                    .iter()
+                    .map(|v| {
+                        (
+                            v.name.clone(),
+                            v.fields
+                                .iter()
+                                .map(|f| HirType::from_ast_opt(&f.type_hint).unwrap_or(HirType::Unknown))
+                                .collect(),
+                        )
+                    })
+                    .collect();
+                enums.push(HirEnum {
+                    name: e.name.clone(),
+                    variants,
+                });
+            }
             Decl::Actor(a) => {
                 for m in &a.methods {
                     functions.push(desugar_fn(m));
@@ -755,6 +804,7 @@ pub fn desugar_program(program: &Program) -> HirProgram {
     HirProgram {
         functions,
         structs,
+        enums,
         natives,
         constants,
         top_level_statements: if top_level_stmts.is_empty() {
@@ -1193,10 +1243,29 @@ fn desugar_expr(e: &Expr) -> HirExpr {
             Some(v) => desugar_expr(v),
             None => HirExpr::Lit(Literal::Null),
         },
-        Expr::Lambda { .. } | Expr::Closure { .. } => HirExpr::Call {
-            callee: "__lambda".into(),
-            args: vec![],
-        },
+        // Fix 4: Lambda/Closure → HirExpr::Lambda（不再降级为 __lambda 调用）
+        Expr::Lambda { params, body, .. } => {
+            let hir_params = params
+                .iter()
+                .map(|p| HirParam {
+                    name: p.name.clone(),
+                    ty: HirType::from_ast_opt(&p.type_hint),
+                })
+                .collect();
+            let hir_body = desugar_block(body);
+            HirExpr::Lambda { params: hir_params, body: hir_body }
+        }
+        Expr::Closure { params, body, .. } => {
+            let hir_params = params
+                .iter()
+                .map(|p| HirParam {
+                    name: p.name.clone(),
+                    ty: HirType::from_ast_opt(&p.type_hint),
+                })
+                .collect();
+            let hir_body = desugar_block(body);
+            HirExpr::Lambda { params: hir_params, body: hir_body }
+        }
         Expr::Destructure { expr, .. } => desugar_expr(expr),
         Expr::Throw { value, .. } => HirExpr::Call {
             callee: "__throw".into(),

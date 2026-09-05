@@ -594,6 +594,10 @@ impl MirBuilder {
                 // 协程挂起语义由 Yield 指令处理（在非协程上下文中 await 等同 no-op）
                 self.lower_expr(inner, ctx)
             }
+            // Fix 4: Lambda — MIR 层暂不支持，返回空注册器
+            HirExpr::Lambda { .. } => {
+                self.alloc_reg()
+            }
         }
     }
 

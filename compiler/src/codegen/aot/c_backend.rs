@@ -42,6 +42,8 @@ fn map_type(ty: &HirType) -> &str {
         },
         HirType::Nullable(_) => "void*",
         HirType::Pointer(_inner) => "void*", // 简化：所有指针 → void*
+        // Fix 3: 函数类型 → void*（C 后端不支持函数指针类型）
+        HirType::Function { .. } => "void*",
         HirType::Unknown => "void*",
     }
 }
@@ -318,6 +320,10 @@ fn emit_c_expr(s: &mut String, expr: &HirExpr) {
         HirExpr::Await(inner) => {
             // P10.1: await — 直接返回内部值
             emit_c_expr(s, inner)
+        }
+        // Fix 4: Lambda — C 后端暂不支持闭包
+        HirExpr::Lambda { .. } => {
+            s.push_str("(void*)0 /* TODO: lambda */")
         }
     }
 }

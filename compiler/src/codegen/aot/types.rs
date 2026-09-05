@@ -33,6 +33,8 @@ impl TypeMapper {
             HirType::Named(name) => self.map_named(name),
             HirType::Nullable(inner) => self.map_nullable(inner),
             HirType::Pointer(_inner) => "ptr".to_string(), // LLVM 13+ 不透明指针
+            // Fix 3: 函数类型 → 函数指针（不透明指针）
+            HirType::Function { .. } => "ptr".to_string(),
             HirType::Unknown => "i8*".to_string(),
         }
     }

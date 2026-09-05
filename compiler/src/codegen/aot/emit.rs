@@ -64,6 +64,8 @@ pub(crate) struct EmitCtx {
     pub subprogram_index: u32,
     /// 函数名 → DISubprogram 元数据 ID（供 `!dbg !N` 引用）
     pub func_dbg_ids: HashMap<String, u32>,
+    /// 函数名 → LLVM 返回类型字符串（用于 emit_call 推断返回类型）
+    pub func_ret_types: HashMap<String, String>,
 }
 
 /// 变量槽（LLVM 名称 + 类型）
@@ -101,6 +103,7 @@ impl EmitCtx {
             subprogram_meta: Vec::new(),
             subprogram_index: 0,
             func_dbg_ids: HashMap::new(),
+            func_ret_types: HashMap::new(),
         }
     }
 
@@ -271,6 +274,22 @@ pub fn emit_program(codegen: &AotCodeGenerator, program: &HirProgram) -> Result<
         }
         s.push('\n');
         ctx.sections.push(s);
+    }
+
+    // 4.8 预注册函数返回类型映射（供 emit_call 推断返回类型）
+    for func in &program.functions {
+        if let Some(ref ret) = func.ret {
+            ctx.func_ret_types.insert(func.name.clone(), ctx.type_mapper.map(ret));
+        } else {
+            ctx.func_ret_types.insert(func.name.clone(), "void".to_string());
+        }
+    }
+    for native in &program.natives {
+        if let Some(ref ret) = native.ret {
+            ctx.func_ret_types.insert(native.name.clone(), ctx.type_mapper.map(ret));
+        } else {
+            ctx.func_ret_types.insert(native.name.clone(), "void".to_string());
+        }
     }
 
     // 5. 生成所有用户函数（期间收集的全局常量在函数后统一输出）
@@ -781,6 +800,13 @@ fn emit_expr_val(
             // P10.1: await — 直接返回内部值（非协程上下文 no-op）
             emit_expr_val(ctx, blocks, inner)
         }
+        // Fix 4: Lambda — AOT 后端暂不支持，返回空指针
+        HirExpr::Lambda { .. } => {
+            let tmp = ctx.fresh_var();
+            let cur = blocks.last_mut();
+            cur.body.push(format!("{} = alloca ptr", tmp));
+            Ok((tmp, "ptr".to_string()))
+        }
     }
 }
 
@@ -1036,7 +1062,11 @@ fn emit_call(
         .map(|a| emit_expr_val(ctx, blocks, a))
         .collect::<Result<_, _>>()?;
 
-    let ret_ty = "i32".to_string(); // 默认 i32
+    let ret_ty = ctx
+        .func_ret_types
+        .get(callee)
+        .cloned()
+        .unwrap_or_else(|| "i32".to_string());
     let tmp = ctx.fresh_var();
     let cur = blocks.last_mut();
     let args_str: Vec<String> = args_ir
