@@ -145,11 +145,89 @@ pub fn trampoline_ptr() -> i64 {
 // 静态链接：C 函数解析（P8.4）
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 通用 C 函数签名（最多 4 个参数，返回 i64）
+/// C 类型枚举（Fix 7）：用于类型安全的 C 函数调用
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CType {
+    /// 32 位有符号整数
+    Int32,
+    /// 64 位有符号整数
+    Int64,
+    /// 32 位浮点数
+    Float32,
+    /// 64 位浮点数
+    Float64,
+    /// 布尔值（1 字节）
+    Bool,
+    /// 字符（1 字节）
+    Char,
+    /// C 字符串（char*）
+    CString,
+    /// 指针（void*）
+    Ptr,
+    /// 无返回值
+    Void,
+}
+
+impl CType {
+    /// 从字符串解析 C 类型
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "int32" | "int32_t" | "i32" => Some(CType::Int32),
+            "int64" | "int64_t" | "i64" => Some(CType::Int64),
+            "float" | "f32" => Some(CType::Float32),
+            "double" | "f64" => Some(CType::Float64),
+            "bool" | "boolean" => Some(CType::Bool),
+            "char" | "u8" => Some(CType::Char),
+            "cstring" | "string" | "char*" => Some(CType::CString),
+            "ptr" | "pointer" | "void*" => Some(CType::Ptr),
+            "void" | "unit" => Some(CType::Void),
+            _ => None,
+        }
+    }
+
+    /// 将 Aura Value 转换为 i64（C ABI 传递格式）
+    pub fn pack(&self, value: &crate::vm::Value) -> i64 {
+        match (*self, value) {
+            (CType::Int32 | CType::Int64, crate::vm::Value::Int(i)) => *i,
+            (CType::Float32 | CType::Float64, crate::vm::Value::Float(f)) => f.to_bits() as i64,
+            (CType::Bool, crate::vm::Value::Bool(b)) => *b as i64,
+            (CType::Char, crate::vm::Value::Int(c)) => *c,
+            (CType::CString | CType::Ptr, crate::vm::Value::Ptr(p)) => *p,
+            (CType::CString, crate::vm::Value::Str(s)) => s.as_ptr() as i64,
+            _ => 0,
+        }
+    }
+
+    /// 将 i64 结果转换回 Aura Value
+    pub fn unpack(&self, result: i64) -> crate::vm::Value {
+        match self {
+            CType::Int32 | CType::Int64 => crate::vm::Value::Int(result),
+            CType::Float32 => crate::vm::Value::Float(f64::from_bits((result as u32) as u64)),
+            CType::Float64 => crate::vm::Value::Float(f64::from_bits(result as u64)),
+            CType::Bool => crate::vm::Value::Bool(result != 0),
+            CType::Char => crate::vm::Value::Int(result),
+            CType::CString | CType::Ptr => crate::vm::Value::Ptr(result),
+            CType::Void => crate::vm::Value::Null,
+        }
+    }
+}
+
+/// C 函数信息（Fix 7）：存储参数类型和返回类型
+#[derive(Debug, Clone)]
+pub struct CFuncInfo {
+    /// 函数名
+    pub name: String,
+    /// 参数类型列表
+    pub param_types: Vec<CType>,
+    /// 返回类型
+    pub return_type: CType,
+}
+
+/// 通用 C 函数签名（最多 8 个参数，返回 i64）
 ///
 /// 通过 dlsym/GetProcAddress 解析 C 函数符号后，包装为此签名调用。
 /// 参数类型由 `CFuncInfo` 中的类型信息在调用前转换。
-pub type CFuncPtr = unsafe extern "C" fn(i64, i64, i64, i64) -> i64;
+pub type CFuncPtr = unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64) -> i64;
 
 /// 存储解析后的 C 函数指针
 #[cfg(feature = "dynamic-ffi")]

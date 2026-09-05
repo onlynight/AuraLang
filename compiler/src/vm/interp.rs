@@ -527,19 +527,32 @@ impl Vm {
 /// 将参数转换为 `i64` 数组（最多 4 个），调用 C 函数，返回结果。
 /// 成功时返回 `Some(Value)`，失败时返回 `None`。
 fn static_call_c(name: &str, args: &[Value]) -> Option<Value> {
-    use crate::vm::ffi::resolve_static_symbol;
-    use crate::vm::ffi::CFuncPtr;
+    use crate::vm::ffi::{CFuncInfo, CType, resolve_static_symbol, CFuncPtr};
 
     let addr = resolve_static_symbol(name)?;
     let ptr: CFuncPtr = unsafe { std::mem::transmute(addr) };
-    let c_args: [i64; 4] = [
-        args.first().map(|v| v.as_int()).unwrap_or(0),
-        args.get(1).map(|v| v.as_int()).unwrap_or(0),
-        args.get(2).map(|v| v.as_int()).unwrap_or(0),
-        args.get(3).map(|v| v.as_int()).unwrap_or(0),
+
+    // Fix 7: 类型安全调用 — 使用 CType 转换参数和返回值
+    // 默认所有参数和返回值都是 i64
+    let param_types = vec![CType::Int64; args.len().min(8)];
+    let info = CFuncInfo {
+        name: name.to_string(),
+        param_types,
+        return_type: CType::Int64,
+    };
+
+    let c_args: [i64; 8] = [
+        args.first().map(|v| CType::Int64.pack(v)).unwrap_or(0),
+        args.get(1).map(|v| CType::Int64.pack(v)).unwrap_or(0),
+        args.get(2).map(|v| CType::Int64.pack(v)).unwrap_or(0),
+        args.get(3).map(|v| CType::Int64.pack(v)).unwrap_or(0),
+        args.get(4).map(|v| CType::Int64.pack(v)).unwrap_or(0),
+        args.get(5).map(|v| CType::Int64.pack(v)).unwrap_or(0),
+        args.get(6).map(|v| CType::Int64.pack(v)).unwrap_or(0),
+        args.get(7).map(|v| CType::Int64.pack(v)).unwrap_or(0),
     ];
-    let result = unsafe { ptr(c_args[0], c_args[1], c_args[2], c_args[3]) };
-    Some(Value::Int(result))
+    let result = unsafe { ptr(c_args[0], c_args[1], c_args[2], c_args[3], c_args[4], c_args[5], c_args[6], c_args[7]) };
+    Some(CType::Int64.unpack(result))
 }
 
 /// 二元运算：弹出 b、a，计算后压回结果
