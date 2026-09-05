@@ -52,8 +52,8 @@ impl NativeRegistry {
         r.register("intToPtr", native_int_to_ptr);
         r.register("makeCallback", native_make_callback);
 
-        // 注册全部 std 模块（向后兼容）
-        crate::std::register_all(&mut r);
+        // Fix 9: 默认仅加载 prelude，不加载全部 std 模块
+        // 如需加载 std 模块，使用 NativeRegistry::with_modules()
 
         // P10: 并发运行时（需 std-concurrent feature）
         #[cfg(feature = "std-concurrent")]
