@@ -15,6 +15,17 @@ use crate::vm::value::Value;
 /// Actor 实例 ID
 pub type ActorId = usize;
 
+/// 死亡策略（Fix 12）
+#[derive(Debug, Clone, PartialEq)]
+pub enum DeathStrategy {
+    /// 重启 Actor（保留状态）
+    Restart,
+    /// 上报父 Actor（父决定是否处理）
+    Escalate,
+    /// 终止所有子 Actor
+    Terminate,
+}
+
 /// Actor 实例
 #[derive(Debug, Clone)]
 pub struct Actor {
@@ -31,6 +42,10 @@ pub struct Actor {
     pub parent: Option<ActorId>,
     /// 子 Actor ID 列表
     pub children: Vec<ActorId>,
+    /// 死亡策略（Fix 12）
+    pub death_strategy: DeathStrategy,
+    /// 死亡原因（Fix 12）
+    pub death_reason: Option<String>,
 }
 
 /// Actor 运行时管理器
@@ -65,6 +80,8 @@ impl ActorRuntime {
             alive: true,
             parent: None,
             children: Vec::new(),
+            death_strategy: DeathStrategy::Terminate, // 默认策略
+            death_reason: None,
         });
         id
     }
@@ -106,12 +123,48 @@ impl ActorRuntime {
         self.get(id).map(|a| a.alive).unwrap_or(false)
     }
 
-    /// 标记 Actor 死亡
+    /// 标记 Actor 死亡（Fix 12: 传播死亡策略）
     pub fn kill(&mut self, id: ActorId) {
+        self.kill_with_reason(id, None);
+    }
+
+    /// 标记 Actor 死亡并记录原因
+    pub fn kill_with_reason(&mut self, id: ActorId, reason: Option<String>) {
         if let Some(actor) = self.get_mut(id) {
             actor.alive = false;
-            // 通知父 Actor（监督机制）
-            if let Some(parent_id) = actor.parent {
+            actor.death_reason = reason.clone();
+
+            // 传播死亡策略
+            let strategy = actor.death_strategy.clone();
+            let children = actor.children.clone();
+            let parent_id = actor.parent;
+
+            match strategy {
+                DeathStrategy::Terminate => {
+                    // 终止所有子 Actor
+                    for child_id in children {
+                        self.kill_with_reason(child_id, Some(format!("parent {} terminated", id)));
+                    }
+                }
+                DeathStrategy::Escalate => {
+                    // 上报父 Actor（发送死亡消息）
+                    if let Some(parent_id) = parent_id {
+                        if self.is_alive(parent_id) {
+                            let msg = Value::str_(format!("child {} died: {:?}", id, reason));
+                            self.send(parent_id, msg);
+                        }
+                    }
+                }
+                DeathStrategy::Restart => {
+                    // 重启 Actor（保留状态，清除邮箱）
+                    actor.alive = true;
+                    actor.mailbox.clear();
+                    actor.death_reason = None;
+                }
+            }
+
+            // 从父 Actor 的子列表中移除
+            if let Some(parent_id) = parent_id {
                 if let Some(parent) = self.get_mut(parent_id) {
                     parent.children.retain(|&c| c != id);
                 }
@@ -146,6 +199,23 @@ impl ActorRuntime {
         if let Some(actor) = self.get_mut(id) {
             actor.state.insert(key.to_string(), val);
         }
+    }
+
+    /// 设置 Actor 死亡策略（Fix 12）
+    pub fn set_death_strategy(&mut self, id: ActorId, strategy: DeathStrategy) {
+        if let Some(actor) = self.get_mut(id) {
+            actor.death_strategy = strategy;
+        }
+    }
+
+    /// 获取 Actor 死亡策略
+    pub fn get_death_strategy(&self, id: ActorId) -> Option<&DeathStrategy> {
+        self.get(id).map(|a| &a.death_strategy)
+    }
+
+    /// 获取 Actor 死亡原因（Fix 12）
+    pub fn get_death_reason(&self, id: ActorId) -> Option<&String> {
+        self.get(id).and_then(|a| a.death_reason.as_ref())
     }
 
     /// 获取活跃 Actor 数量
