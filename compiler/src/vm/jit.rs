@@ -180,6 +180,9 @@ fn is_jit_compilable_inner(
             | Instr::Gt
             | Instr::Le
             | Instr::Ge
+            // Fix 5: 扩展白名单 — Not（可用 ineg 实现）/ ReturnUnit
+            | Instr::Not
+            | Instr::ReturnUnit
             | Instr::Jump(_)
             | Instr::JumpIfTrue(_)
             | Instr::JumpIfFalse(_)
@@ -474,7 +477,7 @@ mod cranelift_backend {
                     set.insert(*t);
                     set.insert(idx + 1);
                 }
-                Instr::Return => {
+                Instr::Return | Instr::ReturnUnit => {
                     set.insert(idx + 1);
                 }
                 _ => {}
@@ -579,6 +582,16 @@ mod cranelift_backend {
                 push(fb, tag, r);
                 false
             }
+            // Fix 5: Not — 位取反（~x = -x - 1）
+            Instr::Not => {
+                let (_t, p) = pop(fb);
+                let r = fb.ins().ineg(p);
+                let one = fb.ins().iconst(i64_ty, 1);
+                let r = fb.ins().isub(r, one);
+                let tag = fb.ins().iconst(i64_ty, TAG_INT);
+                push(fb, tag, r);
+                false
+            }
             Instr::Eq => cmp_int(fb, &mut pop, &mut push, IntCC::Equal),
             Instr::Ne => cmp_int(fb, &mut pop, &mut push, IntCC::NotEqual),
             Instr::Lt => cmp_int(fb, &mut pop, &mut push, IntCC::SignedLessThan),
@@ -628,6 +641,15 @@ mod cranelift_backend {
                 let out = fb.use_var(out_ptr);
                 fb.ins().store(MemFlags::new(), tag, out, zero32);
                 fb.ins().store(MemFlags::new(), payload, out, eight32);
+                fb.ins().return_(&[]);
+                true
+            }
+            // Fix 5: ReturnUnit — 返回空值
+            Instr::ReturnUnit => {
+                let out = fb.use_var(out_ptr);
+                let null_tag = fb.ins().iconst(i64_ty, 0);
+                fb.ins().store(MemFlags::new(), null_tag, out, zero32);
+                fb.ins().store(MemFlags::new(), null_tag, out, eight32);
                 fb.ins().return_(&[]);
                 true
             }
