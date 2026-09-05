@@ -55,9 +55,6 @@
                     "include": "#for-loop-variable"
                 },
                 {
-                    "include": "#keywords"
-                },
-                {
                     "include": "#annotation-with-args"
                 },
                 {
@@ -95,6 +92,9 @@
                 },
                 {
                     "include": "#variable-declaration"
+                },
+                {
+                    "include": "#keywords"
                 },
                 {
                     "include": "#builtin-types"
@@ -561,9 +561,12 @@
             ]
         },
         "type-annotation": {
-            "match": "(?<![:?]):(?![\\s]*[:?])\\s*([\\w?]+(?:<[^>]+>)?(?:\\s*->\\s*[\\w?]+(?:<[^>]+>)?)?)",
+            "match": "(?<![:?])(:)(?![\\s]*[:?])\\s*([\\w?]+(?:<[^>]+>)?(?:\\s*->\\s*[\\w?]+(?:<[^>]+>)?)?)",
             "captures": {
                 "1": {
+                    "name": "punctuation.separator.type-annotation.aura"
+                },
+                "2": {
                     "name": "entity.name.type.aura"
                 }
             }
@@ -709,7 +712,7 @@
                     "name": "keyword.operator.null-coalesce.aura"
                 },
                 {
-                    "match": "(:?)",
+                    "match": "\\?:",
                     "name": "keyword.operator.elvis.aura"
                 },
                 {
@@ -769,7 +772,7 @@
         },
 
         "enum-variant": {
-            "match": "\\b([A-Z][A-Z0-9_]*)\\b",
+            "match": "\\b([A-Z]\\w*)\\b",
             "name": "entity.name.enum.variant.aura"
         }
     }

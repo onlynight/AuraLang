@@ -1,4 +1,4 @@
-//! Phase 1 §5.2 + §11.4: `.apkg` 读取器
+//! Phase 1 §5.2 + §11.4: `.auz` 读取器
 //!
 //! 职责：
 //! 1. 检测 zstd 魔数（28 B5 2F FD）
@@ -24,7 +24,7 @@ use super::{
 // 文件信息
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// `.apkg` 内单个文件的信息
+/// `.auz` 内单个文件的信息
 #[derive(Debug, Clone)]
 pub struct PackageFileInfo {
     /// 文件路径（tar 内路径，POSIX 风格）
@@ -37,7 +37,7 @@ pub struct PackageFileInfo {
 // 包内容
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 从 `.apkg` 读取的内容
+/// 从 `.auz` 读取的内容
 #[derive(Debug)]
 pub struct PackageContent {
     /// 包清单
@@ -83,12 +83,12 @@ impl PackageContent {
 // 包读取器
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// `.apkg` 包读取器
+/// `.auz` 包读取器
 #[derive(Debug, Default)]
 pub struct PackageReader;
 
 impl PackageReader {
-    /// 从文件路径读取 `.apkg`
+    /// 从文件路径读取 `.auz`
     pub fn from_file(path: &Path) -> Result<PackageContent, ApkgError> {
         let bytes = std::fs::read(path).map_err(|e| {
             ApkgError::Io(format!("无法读取 {}: {}", path.display(), e))
@@ -96,7 +96,7 @@ impl PackageReader {
         Self::from_bytes(&bytes)
     }
 
-    /// 从字节读取 `.apkg`
+    /// 从字节读取 `.auz`
     pub fn from_bytes(bytes: &[u8]) -> Result<PackageContent, ApkgError> {
         // 1. zstd 魔数检测
         Self::check_zstd_magic(bytes)?;
@@ -132,7 +132,7 @@ impl PackageReader {
         })
     }
 
-    /// 验证 `.apkg` 文件完整性（zstd 魔数 + 解压 + 校验和）
+    /// 验证 `.auz` 文件完整性（zstd 魔数 + 解压 + 校验和）
     pub fn verify(path: &Path) -> Result<VerifyResult, ApkgError> {
         let content = Self::from_file(path)?;
         content.verify_checksums()
@@ -144,13 +144,13 @@ impl PackageReader {
     fn check_zstd_magic(bytes: &[u8]) -> Result<(), ApkgError> {
         if bytes.len() < 4 {
             return Err(ApkgError::Format(format!(
-                "文件过小（{} 字节），不是有效的 .apkg",
+                "文件过小（{} 字节），不是有效的 .auz",
                 bytes.len()
             )));
         }
         if &bytes[..4] != &ZSTD_MAGIC {
             return Err(ApkgError::Format(format!(
-                "zstd 魔数不匹配: 期望 {:02X?}，实际 {:02X?}（不是 .apkg 文件）",
+                "zstd 魔数不匹配: 期望 {:02X?}，实际 {:02X?}（不是 .auz 文件）",
                 ZSTD_MAGIC,
                 &bytes[..4]
             )));
@@ -352,8 +352,8 @@ mod tests {
 
     #[test]
     fn test_roundtrip_build_and_read() {
-        use crate::apkg::PackageBuilder;
-        use crate::apkg::PackageBuildOptions;
+        use crate::auz::PackageBuilder;
+        use crate::auz::PackageBuildOptions;
         use crate::codegen::compile_source;
         use crate::package::{PackageKind, PackageManifest, PackageOptions, ResourceConfig};
 
@@ -395,7 +395,7 @@ public fun main() {
         };
         let builder = PackageBuilder::new(&manifest, &module).with_options(options);
 
-        let out_path = std::env::temp_dir().join(format!("aura_test_pkg_{}.apkg", std::process::id()));
+        let out_path = std::env::temp_dir().join(format!("aura_test_pkg_{}.auz", std::process::id()));
         let result = builder.build(&out_path).unwrap();
         assert!(result.size_bytes > 0);
         assert!(result.file_count >= 3); // manifest + checksum + auc
@@ -420,8 +420,8 @@ public fun main() {
 
     #[test]
     fn test_inspect_apkg_file_listing() {
-        use crate::apkg::PackageBuilder;
-        use crate::apkg::PackageBuildOptions;
+        use crate::auz::PackageBuilder;
+        use crate::auz::PackageBuildOptions;
         use crate::codegen::compile_source;
         use crate::package::{PackageKind, PackageManifest, PackageOptions, ResourceConfig};
 
@@ -454,7 +454,7 @@ public fun main() {
             ..Default::default()
         };
         let builder = PackageBuilder::new(&manifest, &module).with_options(options);
-        let out_path = std::env::temp_dir().join(format!("aura_inspect_test_{}.apkg", std::process::id()));
+        let out_path = std::env::temp_dir().join(format!("aura_inspect_test_{}.auz", std::process::id()));
         builder.build(&out_path).unwrap();
 
         let content = PackageReader::from_file(&out_path).unwrap();

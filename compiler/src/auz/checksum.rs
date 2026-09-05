@@ -27,7 +27,7 @@ pub fn compute_file_sha256(path: &Path) -> Result<String, ApkgError> {
 pub struct ChecksumEntry {
     /// SHA-256（小写 hex）
     pub hash: String,
-    /// 文件在 `.apkg` 内的路径（POSIX 风格，如 `META-INF/aura.toml`）
+    /// 文件在 `.auz` 内的路径（POSIX 风格，如 `META-INF/aura.toml`）
     pub path: String,
 }
 
@@ -69,7 +69,7 @@ pub fn parse_checksum_file(content: &str) -> Vec<ChecksumEntry> {
         .collect()
 }
 
-/// 验证 `.apkg` 内某文件内容的 SHA-256 是否与预期匹配
+/// 验证 `.auz` 内某文件内容的 SHA-256 是否与预期匹配
 pub fn verify_bytes(expected_hash: &str, bytes: &[u8]) -> Result<(), ApkgError> {
     let actual = compute_sha256(bytes);
     if !expected_hash.eq_ignore_ascii_case(&actual) {

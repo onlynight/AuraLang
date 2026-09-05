@@ -1,7 +1,7 @@
 ////! Phase 4: 包签名（HMAC-SHA256，设计方案 13.2）
 ////!
 //! 签名流程：
-//! 1. 从 .apkg 读取 META-INF/checksum.sha256 文件
+//! 1. 从 .auz 读取 META-INF/checksum.sha256 文件
 //! 2. 对校验和文件内容计算 HMAC-SHA256
 //! 3. 将签名写入 META-INF/signature.sig
 //! 4. 验证时重新计算 HMAC 并比较

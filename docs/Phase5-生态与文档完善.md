@@ -16,7 +16,7 @@
 
 ## 5.1 包格式规范文档
 
-`.apkg` 包格式定义在 `docs/库导出与包格式设计方案.md` 中，核心要点：
+`.auz` 包格式定义在 `docs/库导出与包格式设计方案.md` 中，核心要点：
 
 | 组件 | 说明 |
 |------|------|
@@ -131,13 +131,13 @@ aura build --lib src/ -o lib/
 aura sig src/ -o lib/
 
 # 打包
-aura package -m aura.toml -o my-lib-1.0.0.apkg
+aura package -m aura.toml -o my-lib-1.0.0.auz
 
 # 验证
-aura verify my-lib-1.0.0.apkg
+aura verify my-lib-1.0.0.auz
 
 # 签名（需要环境变量 AURA_SIGNING_KEY）
-aura sign my-lib-1.0.0.apkg --output my-lib-1.0.0-signed.apkg
+aura sign my-lib-1.0.0.auz --output my-lib-1.0.0-signed.auz
 ```
 
 ---
@@ -257,7 +257,7 @@ link 50 modules:           8.5ms
 | 命令 | 说明 |
 |------|------|
 | `aura build --lib` | 编译库（生成 .auc） |
-| `aura package` | 打包（生成 .apkg） |
+| `aura package` | 打包（生成 .auz） |
 | `aura inspect` | 检查包内容 |
 | `aura verify` | 验证包完整性 |
 | `aura sign` | 签名包 |

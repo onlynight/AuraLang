@@ -1,13 +1,13 @@
-//! Phase 1: `.apkg` 制品格式（tar + zstd 容器）
+//! Phase 1: `.auz` 制品格式（tar + zstd 容器）
 //!
 //! 对应 设计方案 §5（容器格式选型）+ §5.1（目录布局）+ §5.2（魔数与校验）+ §13.1（校验和）。
 //!
-//! 容器：`.apkg` = zstd 压缩的 POSIX ustar 归档。
+//! 容器：`.auz` = zstd 压缩的 POSIX ustar 归档。
 //! - 魔数：28 B5 2F FD（zstd 标准，前 4 字节）
 //! - zstd 内置 xxhash64 校验，解压时自动验证完整性
 //!
 //! 逻辑布局（tar 内路径）：
-//!   foo-1.2.3.apkg/
+//!   foo-1.2.3.auz/
 //!     META-INF/aura.toml           主清单（必需）
 //!     META-INF/checksum.sha256     全包校验和（必需，Phase 1）
 //!     META-INF/signature.sig       HMAC 签名（可选，Phase 4）
@@ -37,7 +37,7 @@ pub use reader::{PackageContent, PackageFileInfo, PackageReader};
 /// zstd 压缩流的魔数（4 字节，小端表示为 0xFD2FB528）
 pub const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 
-/// .apkg 格式版本（Phase 1 = 1）
+/// .auz 格式版本（Phase 1 = 1）
 pub const APKG_FORMAT_VERSION: u32 = 1;
 
 /// zstd 默认压缩级别（设计方案 §5.0.7：level 3，压缩比与速度平衡）
@@ -82,7 +82,7 @@ pub fn path_under(dir: &str, path: &str) -> bool {
 // 错误类型
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// .apkg 格式错误
+/// .auz 格式错误
 #[derive(Debug)]
 pub enum ApkgError {
     /// I/O 错误（读写失败）

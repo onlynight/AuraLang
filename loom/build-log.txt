@@ -1,0 +1,573 @@
+﻿cargo :     Blocking waiting for file lock on package cache
+At line:1 char:150
++ ... w($false); cd D:\Code\AuraLang; cargo check -p aura-loom 2>&1 | Out-F ...
++                                     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Blocking wa...n package cache:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ Downloading crates ...
+  Downloaded ring v0.17.14
+    Blocking waiting for file lock on package cache
+    Checking stable_deref_trait v1.2.1
+    Checking memchr v2.8.3
+    Checking bytes v1.12.1
+    Checking pin-project-lite v0.2.17
+    Checking futures-core v0.3.34
+    Checking windows-sys v0.61.2
+    Checking smallvec v1.16.0
+   Compiling cfg-if v1.0.4
+    Checking futures-sink v0.3.34
+   Compiling syn v3.0.4
+   Compiling syn v2.0.119
+    Checking litemap v0.8.3
+    Checking writeable v0.6.4
+   Compiling getrandom v0.4.3
+    Checking tracing-core v0.1.36
+    Checking utf8_iter v1.0.4
+   Compiling icu_properties_data v2.3.0
+   Compiling jobserver v0.1.35
+   Compiling icu_normalizer_data v2.3.0
+    Checking slab v0.4.12
+   Compiling crossbeam-utils v0.8.22
+    Checking typenum v1.20.1
+   Compiling cc v1.4.5
+    Checking percent-encoding v2.3.2
+    Checking http v1.5.0
+    Checking futures-task v0.3.34
+   Compiling httparse v1.10.1
+    Checking futures-io v0.3.34
+    Checking log v0.4.34
+    Checking tower-service v0.3.3
+    Checking aho-corasick v1.1.5
+    Checking futures-util v0.3.34
+    Checking fnv v1.0.7
+   Compiling native-tls v0.2.18
+    Checking generic-array v0.14.7
+   Compiling windows_x86_64_msvc v0.48.5
+    Checking atomic-waker v1.1.2
+    Checking try-lock v0.2.5
+    Checking want v0.3.1
+    Checking form_urlencoded v1.2.2
+    Checking http-body v1.1.0
+    Checking futures-channel v0.3.34
+    Checking windows-strings v0.5.1
+    Checking windows-result v0.4.1
+   Compiling crossbeam-epoch v0.9.20
+    Checking utf8parse v0.2.2
+    Checking subtle v2.6.1
+    Checking once_cell_polyfill v1.70.2
+    Checking crypto-common v0.1.7
+    Checking block-buffer v0.10.4
+    Checking anstyle v1.0.14
+    Checking anstyle-parse v1.0.0
+    Checking windows-registry v0.6.1
+    Checking windows-sys v0.59.0
+    Checking digest v0.10.7
+    Checking sync_wrapper v1.0.2
+    Checking filetime v0.2.29
+    Checking ipnet v2.12.1
+    Checking is_terminal_polyfill v1.70.2
+   Compiling portable-atomic v1.15.0
+    Checking toml_write v0.1.2
+    Checking colorchoice v1.0.5
+    Checking winnow v0.7.15
+    Checking regex-automata v0.4.18
+    Checking lazy_static v1.5.0
+   Compiling crossbeam-deque v0.8.7
+    Checking tower-layer v0.3.3
+   Compiling compiler v0.1.0 (D:\Code\AuraLang\compiler)
+    Checking windows-targets v0.48.5
+    Checking http-body-util v0.1.5
+   Compiling zstd-sys v2.1.0+zstd.1.5.7
+    Checking bstr v1.13.1
+   Compiling thiserror v2.0.20
+    Checking strsim v0.11.1
+    Checking cpufeatures v0.2.17
+    Checking ryu v1.0.23
+   Compiling heck v0.5.0
+    Checking bitflags v2.13.1
+   Compiling anyhow v1.0.104
+    Checking unicode-width v0.2.2
+    Checking zeroize v1.9.0
+    Checking clap_lex v1.1.0
+    Checking rustls-pki-types v1.15.1
+    Checking console v0.15.11
+warning: compiler@0.1.0: Aura: LLVM 安装路径检测到 -> D:/DevTools/LLVM/clang+llvm-23.1.0-x86_64-pc-windows-msvc
+warning: compiler@0.1.0: Aura: LLVM 版本 -> 23.1.0
+    Checking sha2 v0.10.9
+    Checking serde_json v1.0.151
+    Checking windows-sys v0.48.0
+    Checking sharded-slab v0.1.7
+    Checking tar v0.4.46
+    Checking hmac v0.12.1
+    Checking crossbeam-channel v0.5.16
+    Checking tracing-log v0.2.0
+    Checking thread_local v1.1.10
+    Checking encoding_rs v0.8.35
+    Checking mime v0.3.17
+    Checking number_prefix v0.4.0
+    Checking colored v2.2.0
+    Checking libloading v0.8.9
+    Checking indicatif v0.17.11
+    Checking owo-colors v3.5.0
+    Checking regex v1.13.1
+   Compiling synstructure v0.13.2
+    Checking globset v0.4.20
+   Compiling zerovec-derive v0.11.6
+   Compiling displaydoc v0.2.7
+   Compiling serde_derive v1.0.229
+   Compiling thiserror-impl v2.0.20
+   Compiling clap_derive v4.6.4
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling tracing-attributes v0.1.31
+    Checking socket2 v0.6.5
+    Checking mio v1.2.3
+    Checking winapi-util v0.1.11
+    Checking zerofrom v0.1.8
+    Checking schannel v0.1.29
+    Checking tracing v0.1.44
+    Checking anstyle-query v1.1.5
+    Checking anstyle-wincon v3.0.11
+    Checking yoke v0.8.3
+    Checking same-file v1.0.6
+    Checking nu-ansi-term v0.50.3
+   Compiling zstd-safe v7.3.0
+    Checking anstream v1.0.0
+    Checking walkdir v2.5.0
+    Checking zerovec v0.11.8
+    Checking zerotrie v0.2.5
+    Checking tokio v1.53.1
+    Checking ignore v0.4.33
+    Checking notify v6.1.1
+    Checking tracing-subscriber v0.3.23
+    Checking clap_builder v4.6.6
+    Checking zstd v0.13.3
+    Checking serde v1.0.229
+    Checking tinystr v0.8.4
+    Checking potential_utf v0.1.6
+    Checking icu_collections v2.3.0
+    Checking icu_locale_core v2.3.0
+    Checking toml_datetime v0.6.11
+    Checking serde_spanned v0.6.9
+    Checking serde_urlencoded v0.7.1
+    Checking toml_edit v0.22.27
+    Checking icu_provider v2.3.1
+    Checking clap v4.6.6
+    Checking icu_normalizer v2.3.0
+    Checking icu_properties v2.3.0
+    Checking toml v0.8.23
+    Checking idna_adapter v1.2.2
+    Checking idna v1.1.0
+    Checking tokio-util v0.7.19
+    Checking tower v0.5.3
+    Checking tokio-native-tls v0.3.1
+    Checking url v2.5.8
+    Checking h2 v0.4.19
+warning: use of deprecated function `base64::encode`: Use Engine::encode
+  --> compiler\src\std\std_encoding.rs:22:27
+   |
+22 |     let encoded = base64::encode(data.as_bytes());
+   |                           ^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated function `base64::decode`: Use Engine::decode
+  --> compiler\src\std\std_encoding.rs:29:19
+   |
+29 |     match base64::decode(text.as_bytes()) {
+   |                   ^^^^^^
+
+    Checking tower-http v0.6.11
+warning: unused variable: `symbol`
+   --> compiler\src\linker.rs:129:25
+    |
+129 |             if let Some(symbol) = sig_sym {
+    |                         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_symbol`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+    Checking hyper v1.11.1
+warning: unused variable: `span`
+   --> compiler\src\parser.rs:503:21
+    |
+503 |                 let span = Span::merge(&start, &self.current().span);
+    |                     ^^^^ help: if this is intentional, prefix it with an underscore: `_span`
+
+warning: unused variable: `full_name`
+   --> compiler\src\sema\checker.rs:570:29
+    |
+570 |                         let full_name = format!("{}.", module_path) + &short_name;
+    |                             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_full_name`
+
+warning: unused variable: `span`
+   --> compiler\src\sema\checker.rs:726:37
+    |
+726 |             Expr::NamedArg { value, span, .. } => {
+    |                                     ^^^^ help: try ignoring the field: `span: _`
+
+warning: unused variable: `sym_idx`
+   --> compiler\src\vm\interp.rs:356:42
+    |
+356 |             Instr::CallExternal(mod_idx, sym_idx) => {
+    |                                          ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sy
+m_idx`
+
+warning: unused variable: `info`
+   --> compiler\src\vm\interp.rs:563:9
+    |
+563 |     let info = CFuncInfo {
+    |         ^^^^ help: if this is intentional, prefix it with an underscore: `_info`
+
+warning: function `color_wrapper` is never used
+  --> compiler\src\std\std_console.rs:90:4
+   |
+90 | fn color_wrapper(code: &str) -> impl Fn(&[Value]) -> Value {
+   |    ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `i1` is never used
+  --> compiler\src\std\std_string.rs:58:4
+   |
+58 | fn i1(args: &[Value]) -> i64 {
+   |    ^^
+
+warning: unused `std::sync::MutexGuard` that must be used
+  --> compiler\src\vm\thread_pool.rs:63:29
+   |
+63 | ...                   shutdown_cv.wait(locked).unwrap();
+   |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: if unused the Mutex will immediately unlock
+   = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+help: use `let _ = ...` to ignore the resulting value
+   |
+63 |                             let _ = shutdown_cv.wait(locked).unwrap();
+   |                             +++++++
+
+    Checking hyper-util v0.1.20
+warning: `compiler` (lib) generated 11 warnings (run `cargo fix --lib -p compiler` to apply 6 suggestions)
+    Checking hyper-tls v0.6.0
+    Checking reqwest v0.12.28
+    Checking aura-loom v0.1.0 (D:\Code\AuraLang\loom)
+error: expected item, found `!`
+ --> loom\src\manifest\parse.rs:1:1
+  |
+1 | ![Phase L1/B1.5] aura.toml 解析
+  | ^ expected item
+  |
+  = note: for a full list of items that can appear in modules, see <https://doc.rust-lang.org/reference/items.html>
+
+error: expected item, found `!`
+ --> loom\src\manifest\validate.rs:3:1
+  |
+3 | ![Phase L1/B1.5] schema 校验 + 错误报告
+  | ^ expected item
+  |
+  = note: for a full list of items that can appear in modules, see <https://doc.rust-lang.org/reference/items.html>
+
+error: unknown start of token: \u{ff1a}
+ --> loom\src\task\mod.rs:1:17
+  |
+1 | ![Phase L2] 任务引擎：TaskGraph + 拓扑排序 + 并行调度
+  |                     ^^
+  |
+help: Unicode character '：' (Fullwidth Colon) looks like ':' (Colon), but it is not
+  |
+1 - ![Phase L2] 任务引擎：TaskGraph + 拓扑排序 + 并行调度
+1 + ![Phase L2] 任务引擎:TaskGraph + 拓扑排序 + 并行调度
+  |
+
+error: expected item, found `!`
+ --> loom\src\task\mod.rs:1:1
+  |
+1 | ![Phase L2] 任务引擎：TaskGraph + 拓扑排序 + 并行调度
+  | ^ expected item
+  |
+  = note: for a full list of items that can appear in modules, see <https://doc.rust-lang.org/reference/items.html>
+
+error: unknown start of token: \u{ff1a}
+ --> loom\src\lifecycle\mod.rs:1:19
+  |
+1 | ![Phase L2] 生命周期阶段：clean → resolve → compile → test → package → verify → install → deploy
+  |                         ^^
+  |
+help: Unicode character '：' (Fullwidth Colon) looks like ':' (Colon), but it is not
+  |
+1 - ![Phase L2] 生命周期阶段：clean → resolve → compile → test → package → verify → install → deploy
+1 + ![Phase L2] 生命周期阶段:clean → resolve → compile → test → package → verify → install → deploy
+  |
+
+error: unknown start of token: \u{2192}
+ --> loom\src\lifecycle\mod.rs:1:26
+  |
+1 | ![Phase L2] 生命周期阶段：clean → resolve → compile → test → package → verify → install → deploy
+  |                                 ^
+
+error: unknown start of token: \u{2192}
+ --> loom\src\lifecycle\mod.rs:1:36
+  |
+1 | ![Phase L2] 生命周期阶段：clean → resolve → compile → test → package → verify → install → deploy
+  |                                           ^
+
+error: unknown start of token: \u{2192}
+ --> loom\src\lifecycle\mod.rs:1:46
+  |
+1 | ![Phase L2] 生命周期阶段：clean → resolve → compile → test → package → verify → install → deploy
+  |                                                     ^
+
+error: unknown start of token: \u{2192}
+ --> loom\src\lifecycle\mod.rs:1:53
+  |
+1 | ![Phase L2] 生命周期阶段：clean → resolve → compile → test → package → verify → install → deploy
+  |                                                            ^
+
+error: unknown start of token: \u{2192}
+ --> loom\src\lifecycle\mod.rs:1:63
+  |
+1 | ![Phase L2] 生命周期阶段：clean → resolve → compile → test → package → verify → install → deploy
+  |                                                                      ^
+
+error: unknown start of token: \u{2192}
+ --> loom\src\lifecycle\mod.rs:1:72
+  |
+1 | ![Phase L2] 生命周期阶段：clean → resolve → compile → test → package → verify → install → deploy
+  |                                                                               ^
+
+error: unknown start of token: \u{2192}
+ --> loom\src\lifecycle\mod.rs:1:82
+  |
+1 | ![Phase L2] 生命周期阶段：clean → resolve → compile → test → package → verify → install → deploy
+  |                                                                                         ^
+
+error: expected item, found `!`
+ --> loom\src\lifecycle\mod.rs:1:1
+  |
+1 | ![Phase L2] 生命周期阶段：clean → resolve → compile → test → package → verify → install → deploy
+  | ^ expected item
+  |
+  = note: for a full list of items that can appear in modules, see <https://doc.rust-lang.org/reference/items.html>
+
+error: unknown start of token: \u{ff1a}
+ --> loom\src\sourceset\mod.rs:1:16
+  |
+1 | ![Phase L2] 源码集：main / test / bench + 目录扫描 + import 解析
+  |                   ^^
+  |
+help: Unicode character '：' (Fullwidth Colon) looks like ':' (Colon), but it is not
+  |
+1 - ![Phase L2] 源码集：main / test / bench + 目录扫描 + import 解析
+1 + ![Phase L2] 源码集:main / test / bench + 目录扫描 + import 解析
+  |
+
+error: expected item, found `!`
+ --> loom\src\sourceset\mod.rs:1:1
+  |
+1 | ![Phase L2] 源码集：main / test / bench + 目录扫描 + import 解析
+  | ^ expected item
+  |
+  = note: for a full list of items that can appear in modules, see <https://doc.rust-lang.org/reference/items.html>
+
+error: unknown start of token: \u{ff1a}
+ --> loom\src\dep\mod.rs:1:20
+  |
+1 | ![Phase L1-L6] 依赖管理：版本求解 + 冲突解析 + 锁文件 + BOM
+  |                        ^^
+  |
+help: Unicode character '：' (Fullwidth Colon) looks like ':' (Colon), but it is not
+  |
+1 - ![Phase L1-L6] 依赖管理：版本求解 + 冲突解析 + 锁文件 + BOM
+1 + ![Phase L1-L6] 依赖管理:版本求解 + 冲突解析 + 锁文件 + BOM
+  |
+
+error: expected item, found `!`
+ --> loom\src\dep\mod.rs:1:1
+  |
+1 | ![Phase L1-L6] 依赖管理：版本求解 + 冲突解析 + 锁文件 + BOM
+  | ^ expected item
+  |
+  = note: for a full list of items that can appear in modules, see <https://doc.rust-lang.org/reference/items.html>
+
+error: unknown start of token: \u{ff1a}
+ --> loom\src\cache\mod.rs:1:17
+  |
+1 | ![Phase L3] 构建缓存：本地 + 远程 + fingerprint
+  |                     ^^
+  |
+help: Unicode character '：' (Fullwidth Colon) looks like ':' (Colon), but it is not
+  |
+1 - ![Phase L3] 构建缓存：本地 + 远程 + fingerprint
+1 + ![Phase L3] 构建缓存:本地 + 远程 + fingerprint
+  |
+
+error: expected item, found `!`
+ --> loom\src\cache\mod.rs:1:1
+  |
+1 | ![Phase L3] 构建缓存：本地 + 远程 + fingerprint
+  | ^ expected item
+  |
+  = note: for a full list of items that can appear in modules, see <https://doc.rust-lang.org/reference/items.html>
+
+error: unknown start of token: \u{ff1a}
+ --> loom\src\plugin\mod.rs:1:17
+  |
+1 | ![Phase L4] 插件系统：BuildPlugin trait + 约定插件 + 外部 .so
+  |                     ^^
+  |
+help: Unicode character '：' (Fullwidth Colon) looks like ':' (Colon), but it is not
+  |
+1 - ![Phase L4] 插件系统：BuildPlugin trait + 约定插件 + 外部 .so
+1 + ![Phase L4] 插件系统:BuildPlugin trait + 约定插件 + 外部 .so
+  |
+
+error: expected item, found `!`
+ --> loom\src\plugin\mod.rs:1:1
+  |
+1 | ![Phase L4] 插件系统：BuildPlugin trait + 约定插件 + 外部 .so
+  | ^ expected item
+  |
+  = note: for a full list of items that can appear in modules, see <https://doc.rust-lang.org/reference/items.html>
+
+error: unknown start of token: \u{ff08}
+ --> loom\src\workspace\mod.rs:1:18
+  |
+1 | ![Phase L5] 多项目管理（Workspace）
+  |                       ^^
+  |
+help: Unicode character '（' (Fullwidth Left Parenthesis) looks like '(' (Left Parenthesis), but it is not
+  |
+1 - ![Phase L5] 多项目管理（Workspace）
+1 + ![Phase L5] 多项目管理(Workspace）
+  |
+
+error: unknown start of token: \u{ff09}
+ --> loom\src\workspace\mod.rs:1:28
+  |
+1 | ![Phase L5] 多项目管理（Workspace）
+  |                                  ^^
+  |
+help: Unicode character '）' (Fullwidth Right Parenthesis) looks like ')' (Right Parenthesis), but it is not
+  |
+1 - ![Phase L5] 多项目管理（Workspace）
+1 + ![Phase L5] 多项目管理（Workspace)
+  |
+
+error: expected item, found `!`
+ --> loom\src\workspace\mod.rs:1:1
+  |
+1 | ![Phase L5] 多项目管理（Workspace）
+  | ^ expected item
+  |
+  = note: for a full list of items that can appear in modules, see <https://doc.rust-lang.org/reference/items.html>
+
+error: unknown start of token: \u{ff08}
+ --> loom\src\wrapper\mod.rs:1:18
+  |
+1 | ![Phase L5] 构建包装器（aura-wrapper）
+  |                       ^^
+  |
+help: Unicode character '（' (Fullwidth Left Parenthesis) looks like '(' (Left Parenthesis), but it is not
+  |
+1 - ![Phase L5] 构建包装器（aura-wrapper）
+1 + ![Phase L5] 构建包装器(aura-wrapper）
+  |
+
+error: unknown start of token: \u{ff09}
+ --> loom\src\wrapper\mod.rs:1:31
+  |
+1 | ![Phase L5] 构建包装器（aura-wrapper）
+  |                                     ^^
+  |
+help: Unicode character '）' (Fullwidth Right Parenthesis) looks like ')' (Right Parenthesis), but it is not
+  |
+1 - ![Phase L5] 构建包装器（aura-wrapper）
+1 + ![Phase L5] 构建包装器（aura-wrapper)
+  |
+
+error: expected item, found `!`
+ --> loom\src\wrapper\mod.rs:1:1
+  |
+1 | ![Phase L5] 构建包装器（aura-wrapper）
+  | ^ expected item
+  |
+  = note: for a full list of items that can appear in modules, see <https://doc.rust-lang.org/reference/items.html>
+
+error: unknown start of token: \u{ff1a}
+ --> loom\src\registry\mod.rs:1:17
+  |
+1 | ![Phase L6] 仓库管理：REST API + 本地注册表
+  |                     ^^
+  |
+help: Unicode character '：' (Fullwidth Colon) looks like ':' (Colon), but it is not
+  |
+1 - ![Phase L6] 仓库管理：REST API + 本地注册表
+1 + ![Phase L6] 仓库管理:REST API + 本地注册表
+  |
+
+error: expected item, found `!`
+ --> loom\src\registry\mod.rs:1:1
+  |
+1 | ![Phase L6] 仓库管理：REST API + 本地注册表
+  | ^ expected item
+  |
+  = note: for a full list of items that can appear in modules, see <https://doc.rust-lang.org/reference/items.html>
+
+error: expected item, found `!`
+ --> loom\src\ci\mod.rs:1:1
+  |
+1 | ![Phase L6] CI/CD 集成
+  | ^ expected item
+  |
+  = note: for a full list of items that can appear in modules, see <https://doc.rust-lang.org/reference/items.html>
+
+error: unknown start of token: \u{ff1a}
+ --> loom\src\ide\mod.rs:1:19
+  |
+1 | ![Phase L7] IDE 集成：aura-project.json 导出
+  |                     ^^
+  |
+help: Unicode character '：' (Fullwidth Colon) looks like ':' (Colon), but it is not
+  |
+1 - ![Phase L7] IDE 集成：aura-project.json 导出
+1 + ![Phase L7] IDE 集成:aura-project.json 导出
+  |
+
+error: expected item, found `!`
+ --> loom\src\ide\mod.rs:1:1
+  |
+1 | ![Phase L7] IDE 集成：aura-project.json 导出
+  | ^ expected item
+  |
+  = note: for a full list of items that can appear in modules, see <https://doc.rust-lang.org/reference/items.html>
+
+error: unknown start of token: \u{ff1a}
+ --> loom\src\watch\mod.rs:1:21
+  |
+1 | ![Phase L7] Watch 模式：文件监听 + 增量重编
+  |                       ^^
+  |
+help: Unicode character '：' (Fullwidth Colon) looks like ':' (Colon), but it is not
+  |
+1 - ![Phase L7] Watch 模式：文件监听 + 增量重编
+1 + ![Phase L7] Watch 模式:文件监听 + 增量重编
+  |
+
+error: expected item, found `!`
+ --> loom\src\watch\mod.rs:1:1
+  |
+1 | ![Phase L7] Watch 模式：文件监听 + 增量重编
+  | ^ expected item
+  |
+  = note: for a full list of items that can appear in modules, see <https://doc.rust-lang.org/reference/items.html>
+
+warning: unused imports: `BuildConfigOverride`, `BuildConfig`, and `ProfileConfig`
+  --> loom\src\manifest\priority.rs:13:23
+   |
+13 | use crate::manifest::{BuildConfig, BuildConfigOverride, LoomManifest, ProfileConfig};
+   |                       ^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^                ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `aura-loom` (lib) generated 1 warning
+error: could not compile `aura-loom` (lib) due to 34 previous errors; 1 warning emitted

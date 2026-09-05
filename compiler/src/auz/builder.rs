@@ -1,10 +1,10 @@
-//! Phase 1 §5 + §13.1: `.apkg` 打包器
+//! Phase 1 §5 + §13.1: `.auz` 打包器
 //!
 //! 职责：将 [`PackageManifest`] + [`BytecodeModule`]（+ 可选源码）打包为
-//! `.apkg`（tar + zstd 容器），包含校验和文件。
+//! `.auz`（tar + zstd 容器），包含校验和文件。
 //!
 //! 输出布局（设计方案 §5.1）：
-//!   foo-1.2.3.apkg/
+//!   foo-1.2.3.auz/
 //!     META-INF/aura.toml
 //!     META-INF/checksum.sha256
 //!     lib/name-version/entry.auc
@@ -74,9 +74,9 @@ impl PackageBuildOptions {
 /// 打包结果
 #[derive(Debug)]
 pub struct BuildResult {
-    /// 输出 `.apkg` 文件路径
+    /// 输出 `.auz` 文件路径
     pub path: PathBuf,
-    /// 最终 `.apkg` 文件大小（字节）
+    /// 最终 `.auz` 文件大小（字节）
     pub size_bytes: u64,
     /// 包内文件数量（含清单 + 校验和）
     pub file_count: usize,
@@ -100,7 +100,7 @@ impl BuildResult {
 // 包构建器
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// `.apkg` 包构建器
+/// `.auz` 包构建器
 pub struct PackageBuilder<'a> {
     manifest: &'a PackageManifest,
     module: &'a BytecodeModule,

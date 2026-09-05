@@ -1,4 +1,4 @@
-pub mod apkg;
+pub mod auz;
 pub mod ast;
 pub mod codegen;
 pub mod docgen;

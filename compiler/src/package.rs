@@ -205,7 +205,7 @@ pub enum DependencySource {
     Git(String),
     /// 本地路径
     Path(PathBuf),
-    /// 二进制制品（.apkg）路径（Phase 1 新增）
+    /// 二进制制品（.auz）路径（Phase 1 新增）
     Binary(PathBuf),
 }
 
@@ -300,7 +300,7 @@ pub fn parse_depends(source: &str) -> Vec<Dependency> {
 // 包类型（Phase 1）
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 包类型：决定 `.apkg` 内 `lib/` 和 `native/` 的必需性（设计方案 §9.1.1）
+/// 包类型：决定 `.auz` 内 `lib/` 和 `native/` 的必需性（设计方案 §9.1.1）
 ///
 /// - `Bytecode`：仅字节码（`lib/` 必需，`native/` 不需要）
 /// - `Hybrid`  ：混合（`lib/` + `native/` 都必需，推荐）
@@ -350,7 +350,7 @@ impl std::fmt::Display for PackageKind {
 // 制品选项（Phase 1）
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// `.apkg` 打包选项（设计方案 §9.1 `[package]`）
+/// `.auz` 打包选项（设计方案 §9.1 `[package]`）
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct PackageOptions {
     /// 容器格式：`apkg`（tar+zstd）| `source`（纯源码）
@@ -374,7 +374,7 @@ pub struct PackageOptions {
 }
 
 fn default_pkg_format() -> String {
-    "apkg".to_string()
+    "auz".to_string()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1092,10 +1092,10 @@ impl PackageManager {
                 }
             }
             DependencySource::Binary(path) => {
-                // Phase 1: 从 .apkg 文件的 manifest 读取版本
-                use crate::apkg::PackageReader;
+                // Phase 1: 从 .auz 文件的 manifest 读取版本
+                use crate::auz::PackageReader;
                 let content = PackageReader::from_file(path).map_err(|e| {
-                    PackageError::ParseError(format!("读取 .apkg 失败 {}: {}", path.display(), e))
+                    PackageError::ParseError(format!("读取 .auz 失败 {}: {}", path.display(), e))
                 })?;
                 Version::parse(&content.manifest.version)
             }
@@ -1691,7 +1691,7 @@ compiler-min-version = "0.3.0"
 compiler-max-version = "1.0"
 
 [package]
-format = "apkg"
+format = "auz"
 include-sources = false
 include-native = true
 native-targets = ["x86_64-pc-windows-msvc"]

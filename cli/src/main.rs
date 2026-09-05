@@ -50,7 +50,7 @@ fn main() {
         "publish" => cmd_publish(rest),
         "deps" => cmd_deps(rest),
         "new" => cmd_new(rest),
-        // Phase 1: .apkg 制品格式命令
+        // Phase 1: .auz 制品格式命令
         "package" => cmd_package(rest),
         "inspect" => cmd_inspect(rest),
         "verify" => cmd_verify(rest),
@@ -71,7 +71,7 @@ fn print_usage() {
 \n\
 用法:\n\
   aura build <file.aura> [--output <out>]        编译为字节码 .auc / 原生可执行文件\n\
-  aura build <file.aura> --lib [--output <out>]   打包为 .apkg 库制品（等价于 aura package）\n\
+  aura build <file.aura> --lib [--output <out>]   打包为 .auz 库制品（等价于 aura package）\n\
   aura build <file.aura> --aot [--output <exe>]  AOT 编译为原生可执行文件\n\
     [--target <triple>]   目标三元组（如 aarch64-unknown-linux-gnu）\n\
     [--opt <level>]       优化级别（0/1/2/3/s/z，默认 2）\n\
@@ -92,9 +92,9 @@ fn print_usage() {
   aura publish [--dir <path>]                     P11: 发布包到 Git 仓库\n\
   aura deps [--dir <path>]                        P11: 显示依赖树\n\
   aura new <name> [--dir <path>]                  P11: 创建新包项目\n\
-  aura package <file.aura> [--output <out>]         Phase 1: 打包为 .apkg 制品\n\
-  aura inspect <file.apkg>                         Phase 1: 检查 .apkg 内容\n\
-  aura verify <file.apkg>                          Phase 1: 验证 .apkg 校验和\n\
+  aura package <file.aura> [--output <out>]         Phase 1: 打包为 .auz 制品\n\
+  aura inspect <file.auz>                         Phase 1: 检查 .auz 内容\n\
+  aura verify <file.auz>                          Phase 1: 验证 .auz 校验和\n\
   aura lsp                                        P13: 启动 LSP 服务器（stdio 通信）\n\
   aura fmt <file.aura> [--check]                  P13: 代码格式化\n"
     );
@@ -118,7 +118,7 @@ fn first_positional<'a>(args: &'a [String], skip: &'a str) -> Option<&'a String>
 }
 
 fn cmd_build(args: &[String]) {
-    // Phase 1: --lib 标志 → 打包为 .apkg 库制品（等价于 aura package）
+    // Phase 1: --lib 标志 → 打包为 .auz 库制品（等价于 aura package）
     if args.iter().any(|a| a == "--lib") {
         cmd_package(args);
         return;
@@ -1066,12 +1066,12 @@ fn cmd_new(args: &[String]) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Phase 1: .apkg 制品格式命令
+// Phase 1: .auz 制品格式命令
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Phase 1: `aura package` — 打包为 .apkg 制品
+/// Phase 1: `aura package` — 打包为 .auz 制品
 fn cmd_package(args: &[String]) {
-    use compiler::apkg::{PackageBuilder, PackageBuildOptions};
+    use compiler::auz::{PackageBuilder, PackageBuildOptions};
     use compiler::package::PackageManifest;
 
     // 解析参数
@@ -1080,7 +1080,7 @@ fn cmd_package(args: &[String]) {
         Some(p) => p.clone(),
         None => {
             eprintln!("错误: 缺少输入文件");
-            eprintln!("用法: aura package <file.aura> [--output <out.apkg>] [--sources]");
+            eprintln!("用法: aura package <file.aura> [--output <out.auz>] [--sources]");
             exit(1);
         }
     };
@@ -1125,7 +1125,7 @@ fn cmd_package(args: &[String]) {
     let options = PackageBuildOptions {
         include_sources,
         include_ref_index: true,
-        compression_level: compiler::apkg::DEFAULT_COMPRESSION_LEVEL,
+        compression_level: compiler::auz::DEFAULT_COMPRESSION_LEVEL,
         ..Default::default()
     };
 
@@ -1142,7 +1142,7 @@ fn cmd_package(args: &[String]) {
         .map(|s| std::path::PathBuf::from(s))
         .unwrap_or_else(|| {
             let base = input.trim_end_matches(".aura").trim_end_matches(".AURA");
-            std::path::PathBuf::from(format!("{}.apkg", base))
+            std::path::PathBuf::from(format!("{}.auz", base))
         });
 
     // 执行打包
@@ -1165,15 +1165,15 @@ fn cmd_package(args: &[String]) {
     }
 }
 
-/// Phase 1: `aura inspect` — 检查 .apkg 内容
+/// Phase 1: `aura inspect` — 检查 .auz 内容
 fn cmd_inspect(args: &[String]) {
-    use compiler::apkg::PackageReader;
+    use compiler::auz::PackageReader;
 
     let input = match first_positional(args, "--verbose") {
         Some(p) => p.clone(),
         None => {
             eprintln!("错误: 缺少输入文件");
-            eprintln!("用法: aura inspect <file.apkg>");
+            eprintln!("用法: aura inspect <file.auz>");
             exit(1);
         }
     };
@@ -1182,7 +1182,7 @@ fn cmd_inspect(args: &[String]) {
 
     match PackageReader::from_file(&std::path::PathBuf::from(&input)) {
         Ok(content) => {
-            println!("=== .apkg 包信息 ===");
+            println!("=== .auz 包信息 ===");
             println!("名称:     {}", content.manifest.name);
             println!("版本:     {}", content.manifest.version);
             println!("类型:     {}", content.manifest.kind);
@@ -1233,15 +1233,15 @@ fn cmd_inspect(args: &[String]) {
     }
 }
 
-/// Phase 1: `aura verify` — 验证 .apkg 校验和
+/// Phase 1: `aura verify` — 验证 .auz 校验和
 fn cmd_verify(args: &[String]) {
-    use compiler::apkg::PackageReader;
+    use compiler::auz::PackageReader;
 
     let input = match first_positional(args, "") {
         Some(p) => p.clone(),
         None => {
             eprintln!("错误: 缺少输入文件");
-            eprintln!("用法: aura verify <file.apkg>");
+            eprintln!("用法: aura verify <file.auz>");
             exit(1);
         }
     };

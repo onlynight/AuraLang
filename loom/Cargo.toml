@@ -1,0 +1,66 @@
+[package]
+name = "aura-loom"
+version.workspace = true
+description = "Aura 语言构建系统 — 多文件编译、增量构建、任务 DAG、插件扩展"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "loom"
+path = "src/main.rs"
+
+[lib]
+name = "aura_loom"
+path = "src/lib.rs"
+
+[dependencies]
+# 编译器 SDK（核心依赖）
+compiler = { path = "../compiler", features = ["std-all"] }
+
+# TOML 配置解析
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 文件系统
+walkdir = "2"
+notify = "6"
+ignore = "0.4"
+
+# 缓存
+sha2 = "0.10"
+hex = "0.4"
+
+# HTTP（远程缓存 + 注册表）
+reqwest = { version = "0.12", features = ["blocking"] }
+
+# 插件加载
+libloading = "0.8"
+
+# 命令行
+clap = { version = "4", features = ["derive"] }
+
+# 日志
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# 进度条
+indicatif = "0.17"
+
+# 错误处理
+anyhow = "1"
+thiserror = "2"
+
+# 终端着色
+colored = "2"
+owo-colors = "3"
+
+[features]
+# AOT 编译支持（LLVM 后端）
+llvm = ["compiler/llvm"]
+# JIT 编译支持
+jit = ["compiler/jit"]
+
+[dev-dependencies]
+insta = "1"
+tempfile = "3"
