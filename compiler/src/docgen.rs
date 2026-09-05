@@ -930,6 +930,146 @@ impl DocRegistry {
             rust_fn: "std_assert::nat_assert",
         });
 
+        // ── std.concurrent（Fix 14 补充）──
+        self.docs.push(StdDoc {
+            module: "concurrent",
+            name: "aura.concurrent.spawn",
+            summary: "创建并发任务（协程），立即返回任务句柄。",
+            params: &[("func", "Function", "要执行的函数")],
+            returns: "Int",
+            returns_desc: "任务 ID（协程索引）",
+            example: Some(r#"aura.concurrent.spawn(fun() => { aura.io.println("hello") })"#),
+            rust_fn: "native_spawn",
+        });
+        self.docs.push(StdDoc {
+            module: "concurrent",
+            name: "aura.concurrent.newChannel",
+            summary: "创建无界消息通道。",
+            params: &[],
+            returns: "Ptr",
+            returns_desc: "通道句柄",
+            example: Some(r#"let ch = aura.concurrent.newChannel()"#),
+            rust_fn: "native_new_channel",
+        });
+        self.docs.push(StdDoc {
+            module: "concurrent",
+            name: "aura.concurrent.channelSend",
+            summary: "向通道发送消息（阻塞直到成功）。",
+            params: &[
+                ("ch", "Ptr", "通道句柄"),
+                ("msg", "Value", "要发送的消息"),
+            ],
+            returns: "Unit",
+            returns_desc: "无返回值",
+            example: Some(r#"aura.concurrent.channelSend(ch, "hello")"#),
+            rust_fn: "native_channel_send",
+        });
+        self.docs.push(StdDoc {
+            module: "concurrent",
+            name: "aura.concurrent.channelRecv",
+            summary: "从通道接收消息（阻塞直到有消息）。",
+            params: &[("ch", "Ptr", "通道句柄")],
+            returns: "Value",
+            returns_desc: "接收到的消息，无消息时返回 Null",
+            example: Some(r#"let msg = aura.concurrent.channelRecv(ch)"#),
+            rust_fn: "native_channel_recv",
+        });
+        self.docs.push(StdDoc {
+            module: "concurrent",
+            name: "aura.concurrent.channelTryRecv",
+            summary: "尝试从通道接收消息（非阻塞，空时返回 Null）。",
+            params: &[("ch", "Ptr", "通道句柄")],
+            returns: "Value",
+            returns_desc: "接收到的消息或 Null",
+            example: Some(r#"let msg = aura.concurrent.channelTryRecv(ch)"#),
+            rust_fn: "native_channel_try_recv",
+        });
+        self.docs.push(StdDoc {
+            module: "concurrent",
+            name: "aura.concurrent.spawnActor",
+            summary: "创建 Actor（独立消息处理实体）。",
+            params: &[("name", "String", "Actor 名称")],
+            returns: "Int",
+            returns_desc: "Actor ID",
+            example: Some(r#"let actor = aura.concurrent.spawnActor("worker")"#),
+            rust_fn: "native_spawn_actor",
+        });
+        self.docs.push(StdDoc {
+            module: "concurrent",
+            name: "aura.concurrent.supervise",
+            summary: "建立 Actor 监督关系（父监督子）。",
+            params: &[
+                ("parent", "Int", "父 Actor ID"),
+                ("child", "Int", "子 Actor ID"),
+            ],
+            returns: "Unit",
+            returns_desc: "无返回值",
+            example: Some(r#"aura.concurrent.supervise(parent, child)"#),
+            rust_fn: "native_supervise",
+        });
+
+        // ── std.ffi（Fix 14 补充）──
+        self.docs.push(StdDoc {
+            module: "ffi",
+            name: "aura.ffi.CString",
+            summary: "将 Aura 字符串转换为 C 字符串指针。",
+            params: &[("str", "String", "要转换的字符串")],
+            returns: "Ptr",
+            returns_desc: "C 字符串指针（void*）",
+            example: Some(r#"let ptr = aura.ffi.CString("hello")"#),
+            rust_fn: "native_cstring",
+        });
+        self.docs.push(StdDoc {
+            module: "ffi",
+            name: "aura.ffi.readCStr",
+            summary: "从 C 字符串指针读取 Aura 字符串。",
+            params: &[("ptr", "Ptr", "C 字符串指针")],
+            returns: "String",
+            returns_desc: "读取到的字符串",
+            example: Some(r#"let s = aura.ffi.readCStr(ptr)"#),
+            rust_fn: "native_read_cstr",
+        });
+        self.docs.push(StdDoc {
+            module: "ffi",
+            name: "aura.ffi.ptrToInt",
+            summary: "将指针转换为整数地址。",
+            params: &[("ptr", "Ptr", "要转换的指针")],
+            returns: "Int",
+            returns_desc: "指针的整数地址",
+            example: Some(r#"let addr = aura.ffi.ptrToInt(ptr)"#),
+            rust_fn: "native_ptr_to_int",
+        });
+        self.docs.push(StdDoc {
+            module: "ffi",
+            name: "aura.ffi.intToPtr",
+            summary: "将整数地址转换为指针。",
+            params: &[("addr", "Int", "整数地址")],
+            returns: "Ptr",
+            returns_desc: "指针",
+            example: Some(r#"let ptr = aura.ffi.intToPtr(42)"#),
+            rust_fn: "native_int_to_ptr",
+        });
+        self.docs.push(StdDoc {
+            module: "ffi",
+            name: "aura.ffi.ptrIsNull",
+            summary: "检查指针是否为 nullptr。",
+            params: &[("ptr", "Ptr", "要检查的指针")],
+            returns: "Bool",
+            returns_desc: "true 表示 nullptr",
+            example: Some(r#"let isNull = aura.ffi.ptrIsNull(ptr)"#),
+            rust_fn: "native_ptr_is_null",
+        });
+        self.docs.push(StdDoc {
+            module: "ffi",
+            name: "aura.ffi.makeCallback",
+            summary: "创建 C 回调蹦床（将 Aura 函数包装为 C 回调）。",
+            params: &[("funcName", "String", "Aura 函数名")],
+            returns: "Ptr",
+            returns_desc: "回调蹦床指针（void*）",
+            example: Some(r#"let cb = aura.ffi.makeCallback("myHandler")"#),
+            rust_fn: "native_make_callback",
+        });
+
         self
     }
 
