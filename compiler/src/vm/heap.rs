@@ -54,6 +54,8 @@ pub struct Heap {
     /// C 字符串存储（P8.5）：索引即指针值
     /// Fix 8: Rc<str> → Arc<str>（线程安全）
     c_strings: Vec<std::sync::Arc<str>>,
+    /// Fix 13: 运行时泄漏检测 — 记录所有活跃的分配
+    allocated: Vec<usize>,
 }
 
 impl Default for Heap {
@@ -62,13 +64,49 @@ impl Default for Heap {
             slots: Vec::new(),
             free: Vec::new(),
             c_strings: Vec::new(),
+            allocated: Vec::new(),
         }
     }
 }
 
 impl Heap {
     pub fn new() -> Self {
-        Heap::default()
+        Self::default()
+    }
+
+    /// Fix 13: 获取当前活跃对象数量（用于泄漏检测）
+    pub fn active_count(&self) -> usize {
+        self.allocated.len()
+    }
+
+    /// Fix 13: 获取运行时泄漏报告
+    pub fn leak_report(&self) -> LeakReport {
+        let mut leaked = Vec::new();
+        for &slot_idx in &self.allocated {
+            if let Some(slot) = self.slots.get(slot_idx) {
+                if slot.data.is_some() && slot.rc > 0 {
+                    leaked.push(LeakDetail {
+                        slot_index: slot_idx,
+                        rc: slot.rc,
+                        data_type: describe_heap_data(slot.data.as_ref()),
+                    });
+                }
+            }
+        }
+        LeakReport {
+            total_allocs: self.allocated.len(),
+            active_allocs: self.active_count(),
+            leaked: leaked.len(),
+            details: leaked,
+        }
+    }
+
+    /// Fix 13: 释放所有对象（用于测试/清理）
+    pub fn clear_all(&mut self) {
+        self.slots.clear();
+        self.free.clear();
+        self.c_strings.clear();
+        self.allocated.clear();
     }
 
     /// 分配一个对象，返回句柄
@@ -122,8 +160,9 @@ impl Heap {
         self.c_strings[ptr - 1].to_string()
     }
 
+    /// Fix 13: 内部分配方法（记录到 allocated 列表）
     fn alloc(&mut self, data: HeapData) -> usize {
-        if let Some(h) = self.free.pop() {
+        let h = if let Some(h) = self.free.pop() {
             self.slots[h] = HeapSlot {
                 rc: 1,
                 data: Some(data),
@@ -138,7 +177,10 @@ impl Heap {
                 drop_cb: None,
             });
             h
-        }
+        };
+        // Fix 13: 记录分配
+        self.allocated.push(h);
+        h
     }
 
     /// 注册释放回调（5.10）
@@ -323,6 +365,45 @@ impl Heap {
     /// 当前存活对象数量（诊断用）
     pub fn live_count(&self) -> usize {
         self.slots.iter().filter(|s| s.data.is_some()).count()
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fix 13: 运行时泄漏检测
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 运行时泄漏检测报告
+#[derive(Debug, Clone)]
+pub struct LeakReport {
+    /// 总分配次数
+    pub total_allocs: usize,
+    /// 当前活跃对象数
+    pub active_allocs: usize,
+    /// 泄漏对象数（rc > 0 且未被释放）
+    pub leaked: usize,
+    /// 泄漏详情
+    pub details: Vec<LeakDetail>,
+}
+
+/// 单个泄漏详情
+#[derive(Debug, Clone)]
+pub struct LeakDetail {
+    /// 堆槽索引
+    pub slot_index: usize,
+    /// 当前引用计数
+    pub rc: usize,
+    /// 数据类型描述
+    pub data_type: String,
+}
+
+/// 描述堆数据类型
+fn describe_heap_data(data: Option<&HeapData>) -> String {
+    match data {
+        Some(HeapData::Object { type_tag, .. }) => format!("Object({:#x})", type_tag),
+        Some(HeapData::Array(_)) => "Array".to_string(),
+        Some(HeapData::List(_)) => "List".to_string(),
+        Some(HeapData::Map(_)) => "Map".to_string(),
+        None => "Unknown".to_string(),
     }
 }
 
