@@ -27,6 +27,7 @@ pub mod jit;
 #[cfg(feature = "jit")]
 pub mod jit_opt;
 pub mod native;
+pub mod thread_pool;
 pub mod value;
 
 pub use coroutine::{CoroutineScheduler, CoroutineState};
