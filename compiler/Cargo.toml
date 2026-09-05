@@ -22,6 +22,18 @@ base64 = "0.22"
 hex = "0.4"
 libc = "0.2"
 
+# 包格式（Phase 1）：.apkg 容器 = tar + zstd
+# 归档容器（BurntSushi, 纯 Rust, 无 C 依赖）
+tar = "0.4"
+# 压缩算法（Gankro, libzstd 绑定, 性能最佳）
+zstd = "0.13"
+# 校验和（SHA-256）
+sha2 = "0.10"
+# HMAC 签名（Phase 4）
+hmac = "0.12"
+# Manifest 序列化（原为 build-dep，Phase 1 起运行时也需读写 aura.toml）
+toml = "0.8"
+
 # AOT 编译后端所需的 crate（均通过 llvm feature 启用）：
 # - thiserror：错误处理
 #
@@ -78,6 +90,7 @@ std-all = [
     "std-console", "std-path", "std-assert", "std-iter", "std-concurrent",
 ]
 
+# build.rs 使用 toml 解析根 Cargo.toml（toml 已在 dependencies 中，build-dependencies 继承同版本）
 [build-dependencies]
 toml = "0.8"
 

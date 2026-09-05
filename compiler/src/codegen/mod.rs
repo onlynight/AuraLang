@@ -34,7 +34,10 @@ pub use emit::{emit_module, find_const};
 pub use hir::{HirProgram, desugar_program, synthesize_main_if_missing};
 pub use mir::{MirFunction, lower_program};
 pub use mono::mono_hir;
-pub use opcode::{BytecodeFunction, BytecodeModule, BytecodeNative, Const, OpCode};
+pub use opcode::{
+    BytecodeFunction, BytecodeModule, BytecodeNative, Const, Dependency, ExportSymbol,
+    ImportSymbol, ModuleIdentity, OpCode, SymbolKind,
+};
 pub use opt::{dce_mir, escape_mir, fold_hir, inline_hir, licm_mir};
 pub use serialize::{SerializeError, from_bytes, read_auc, to_bytes, write_auc};
 
@@ -123,6 +126,13 @@ pub fn compile(program: &Program, opts: &CodeGenOptions) -> BytecodeModule {
     // 6. MIR → 字节码发射
     let mut module = emit_module(&hir, &mir_funcs, &ctx);
     module.enabled_modules = opts.enabled_modules.clone();
+
+    // Phase 2: 初始化模块标识与导出表
+    module.module_identity = ModuleIdentity::new(
+        "default",
+        "0.1.0",
+    );
+    module.header_flags = module.compute_header_flags();
     module
 }
 

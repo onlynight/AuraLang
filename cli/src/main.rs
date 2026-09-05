@@ -50,6 +50,10 @@ fn main() {
         "publish" => cmd_publish(rest),
         "deps" => cmd_deps(rest),
         "new" => cmd_new(rest),
+        // Phase 1: .apkg 制品格式命令
+        "package" => cmd_package(rest),
+        "inspect" => cmd_inspect(rest),
+        "verify" => cmd_verify(rest),
         // P13: 工具链命令
         "lsp" => cmd_lsp(rest),
         "--help" | "-h" | "help" => print_usage(),
@@ -67,6 +71,7 @@ fn print_usage() {
 \n\
 用法:\n\
   aura build <file.aura> [--output <out>]        编译为字节码 .auc / 原生可执行文件\n\
+  aura build <file.aura> --lib [--output <out>]   打包为 .apkg 库制品（等价于 aura package）\n\
   aura build <file.aura> --aot [--output <exe>]  AOT 编译为原生可执行文件\n\
     [--target <triple>]   目标三元组（如 aarch64-unknown-linux-gnu）\n\
     [--opt <level>]       优化级别（0/1/2/3/s/z，默认 2）\n\
@@ -87,6 +92,9 @@ fn print_usage() {
   aura publish [--dir <path>]                     P11: 发布包到 Git 仓库\n\
   aura deps [--dir <path>]                        P11: 显示依赖树\n\
   aura new <name> [--dir <path>]                  P11: 创建新包项目\n\
+  aura package <file.aura> [--output <out>]         Phase 1: 打包为 .apkg 制品\n\
+  aura inspect <file.apkg>                         Phase 1: 检查 .apkg 内容\n\
+  aura verify <file.apkg>                          Phase 1: 验证 .apkg 校验和\n\
   aura lsp                                        P13: 启动 LSP 服务器（stdio 通信）\n\
   aura fmt <file.aura> [--check]                  P13: 代码格式化\n"
     );
@@ -110,6 +118,12 @@ fn first_positional<'a>(args: &'a [String], skip: &'a str) -> Option<&'a String>
 }
 
 fn cmd_build(args: &[String]) {
+    // Phase 1: --lib 标志 → 打包为 .apkg 库制品（等价于 aura package）
+    if args.iter().any(|a| a == "--lib") {
+        cmd_package(args);
+        return;
+    }
+
     // AOT 模式（--aot）
     if args.iter().any(|a| a == "--aot") {
         #[cfg(feature = "llvm")]
@@ -1048,6 +1062,236 @@ fn cmd_new(args: &[String]) {
             eprintln!("创建失败: {}", e);
             exit(1);
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 1: .apkg 制品格式命令
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Phase 1: `aura package` — 打包为 .apkg 制品
+fn cmd_package(args: &[String]) {
+    use compiler::apkg::{PackageBuilder, PackageBuildOptions};
+    use compiler::package::PackageManifest;
+
+    // 解析参数
+    let output = extract_opt(args, "--output");
+    let input = match first_positional(args, "--output") {
+        Some(p) => p.clone(),
+        None => {
+            eprintln!("错误: 缺少输入文件");
+            eprintln!("用法: aura package <file.aura> [--output <out.apkg>] [--sources]");
+            exit(1);
+        }
+    };
+
+    let include_sources = args.iter().any(|a| a == "--sources");
+
+    // 读取并编译源码
+    let source = match std::fs::read_to_string(&input) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("错误: 无法读取 {}: {}", input, e);
+            exit(1);
+        }
+    };
+
+    let module = match compile_source(&source) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("编译失败:\n{}", e);
+            exit(1);
+        }
+    };
+
+    // 尝试从项目目录加载 aura.toml，否则生成默认清单
+    let source_path = std::path::Path::new(&input);
+    let project_dir = source_path.parent().unwrap_or(std::path::Path::new("."));
+    let manifest_path = project_dir.join("aura.toml");
+
+    let manifest = if manifest_path.exists() {
+        match PackageManifest::from_toml_file(&manifest_path) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("警告: 无法解析 aura.toml: {}，使用默认清单", e);
+                default_manifest(&input, project_dir)
+            }
+        }
+    } else {
+        default_manifest(&input, project_dir)
+    };
+
+    // 构建打包选项
+    let options = PackageBuildOptions {
+        include_sources,
+        include_ref_index: true,
+        compression_level: compiler::apkg::DEFAULT_COMPRESSION_LEVEL,
+        ..Default::default()
+    };
+
+    // 创建构建器
+    let mut builder = PackageBuilder::new(&manifest, &module).with_options(options);
+
+    // 如果有源码目录，包含源码
+    if include_sources {
+        builder = builder.with_source_dir(project_dir);
+    }
+
+    // 确定输出路径
+    let out_path = output
+        .map(|s| std::path::PathBuf::from(s))
+        .unwrap_or_else(|| {
+            let base = input.trim_end_matches(".aura").trim_end_matches(".AURA");
+            std::path::PathBuf::from(format!("{}.apkg", base))
+        });
+
+    // 执行打包
+    match builder.build(&out_path) {
+        Ok(result) => {
+            println!("{}", result.summary());
+            println!("  包类型: {}", manifest.kind);
+            if manifest.library {
+                println!("  库包: true");
+            }
+            println!("  文件列表:");
+            for entry in &result.checksum_entries {
+                println!("    {}", entry.path);
+            }
+        }
+        Err(e) => {
+            eprintln!("打包失败: {}", e);
+            exit(1);
+        }
+    }
+}
+
+/// Phase 1: `aura inspect` — 检查 .apkg 内容
+fn cmd_inspect(args: &[String]) {
+    use compiler::apkg::PackageReader;
+
+    let input = match first_positional(args, "--verbose") {
+        Some(p) => p.clone(),
+        None => {
+            eprintln!("错误: 缺少输入文件");
+            eprintln!("用法: aura inspect <file.apkg>");
+            exit(1);
+        }
+    };
+
+    let verbose = args.iter().any(|a| a == "--verbose");
+
+    match PackageReader::from_file(&std::path::PathBuf::from(&input)) {
+        Ok(content) => {
+            println!("=== .apkg 包信息 ===");
+            println!("名称:     {}", content.manifest.name);
+            println!("版本:     {}", content.manifest.version);
+            println!("类型:     {}", content.manifest.kind);
+            println!("库包:     {}", content.manifest.library);
+            if let Some(desc) = &content.manifest.description {
+                println!("描述:     {}", desc);
+            }
+            if let Some(license) = &content.manifest.license {
+                println!("许可证:   {}", license);
+            }
+            if let Some(min_ver) = &content.manifest.compiler_min_version {
+                println!("最低编译器: >= {}", min_ver);
+            }
+            if !content.manifest.exports.is_empty() {
+                println!("导出:     {}", content.manifest.exports.join(", "));
+            }
+            println!();
+            println!("=== 文件列表 ({} 个) ===", content.files.len());
+            for (path, data) in &content.files {
+                let size = data.len();
+                println!("  {:6}  {}", size, path);
+            }
+
+            // 字节码模块信息
+            if let Some(module) = &content.module {
+                println!();
+                println!("=== 字节码模块 ===");
+                println!("  函数数:   {}", module.functions.len());
+                println!("  常量数:   {}", module.consts.len());
+                println!("  原生函数: {}", module.natives.len());
+                if !module.enabled_modules.is_empty() {
+                    println!("  启用模块: {}", module.enabled_modules.join(", "));
+                }
+            }
+
+            if verbose {
+                println!();
+                println!("=== 校验和条目 ===");
+                for entry in &content.checksum_entries {
+                    println!("  {}  {}", entry.hash, entry.path);
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("检查失败: {}", e);
+            exit(1);
+        }
+    }
+}
+
+/// Phase 1: `aura verify` — 验证 .apkg 校验和
+fn cmd_verify(args: &[String]) {
+    use compiler::apkg::PackageReader;
+
+    let input = match first_positional(args, "") {
+        Some(p) => p.clone(),
+        None => {
+            eprintln!("错误: 缺少输入文件");
+            eprintln!("用法: aura verify <file.apkg>");
+            exit(1);
+        }
+    };
+
+    match PackageReader::verify(&std::path::PathBuf::from(&input)) {
+        Ok(result) => {
+            println!("{}", result.report());
+            if !result.is_valid() {
+                exit(1);
+            }
+        }
+        Err(e) => {
+            eprintln!("验证失败: {}", e);
+            exit(1);
+        }
+    }
+}
+
+/// 生成默认包清单（当 aura.toml 不存在时）
+fn default_manifest(
+    input: &str,
+    _project_dir: &std::path::Path,
+) -> compiler::package::PackageManifest {
+    use compiler::package::{PackageKind, PackageManifest, PackageOptions, ResourceConfig};
+
+    // 从输入文件名推导包名
+    let file_name = std::path::Path::new(input)
+        .file_name()
+        .map(|s| s.to_string_lossy().replace(".aura", "").replace(".AURA", ""))
+        .unwrap_or_else(|| "app".to_string());
+
+    PackageManifest {
+        schema_version: "1.0".to_string(),
+        name: file_name,
+        version: "0.1.0".to_string(),
+        description: None,
+        authors: vec![],
+        license: None,
+        repository: None,
+        entry: "main.aura".to_string(),
+        dependencies: vec![],
+        dev_dependencies: vec![],
+        exports: vec![],
+        platforms: vec![],
+        library: false,
+        kind: PackageKind::Bytecode,
+        compiler_min_version: Some("0.3.0".to_string()),
+        compiler_max_version: None,
+        package: PackageOptions::default(),
+        resources: ResourceConfig::default(),
     }
 }
 

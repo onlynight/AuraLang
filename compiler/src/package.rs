@@ -205,6 +205,8 @@ pub enum DependencySource {
     Git(String),
     /// 本地路径
     Path(PathBuf),
+    /// 二进制制品（.apkg）路径（Phase 1 新增）
+    Binary(PathBuf),
 }
 
 /// 依赖声明（技术方案 §8.2）
@@ -295,12 +297,101 @@ pub fn parse_depends(source: &str) -> Vec<Dependency> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 包类型（Phase 1）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 包类型：决定 `.apkg` 内 `lib/` 和 `native/` 的必需性（设计方案 §9.1.1）
+///
+/// - `Bytecode`：仅字节码（`lib/` 必需，`native/` 不需要）
+/// - `Hybrid`  ：混合（`lib/` + `native/` 都必需，推荐）
+/// - `Native`  ：仅原生（`native/` 必需，`lib/` 可选）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PackageKind {
+    /// 仅字节码（跨平台、性能不敏感）
+    #[default]
+    Bytecode,
+    /// 混合（字节码 + AOT 原生，推荐）
+    Hybrid,
+    /// 仅原生库（平台锁定、性能敏感）
+    Native,
+}
+
+impl PackageKind {
+    /// 从字符串解析（TOML / CLI 输入）
+    pub fn parse(s: &str) -> Result<PackageKind, PackageError> {
+        match s.trim().to_lowercase().as_str() {
+            "bytecode" | "bc" => Ok(PackageKind::Bytecode),
+            "hybrid" | "mixed" => Ok(PackageKind::Hybrid),
+            "native" | "aot" => Ok(PackageKind::Native),
+            other => Err(PackageError::ParseError(format!(
+                "无效包类型: {}（支持: bytecode, hybrid, native）",
+                other
+            ))),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PackageKind::Bytecode => "bytecode",
+            PackageKind::Hybrid => "hybrid",
+            PackageKind::Native => "native",
+        }
+    }
+}
+
+impl std::fmt::Display for PackageKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 制品选项（Phase 1）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `.apkg` 打包选项（设计方案 §9.1 `[package]`）
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct PackageOptions {
+    /// 容器格式：`apkg`（tar+zstd）| `source`（纯源码）
+    #[serde(default = "default_pkg_format")]
+    pub format: String,
+    /// 是否打包源码附件到 `src/`
+    #[serde(default, rename = "include-sources")]
+    pub include_sources: bool,
+    /// 是否打包文档到 `docs/`
+    #[serde(default, rename = "include-docs")]
+    pub include_docs: bool,
+    /// 是否打包 AOT 原生库到 `native/`（hybrid/native 时必须为 true）
+    #[serde(default, rename = "include-native")]
+    pub include_native: bool,
+    /// AOT 目标三元组列表（如 `["x86_64-pc-windows-msvc"]`）
+    #[serde(default, rename = "native-targets")]
+    pub native_targets: Vec<String>,
+    /// AOT 优化级别（0/1/2/3）
+    #[serde(default, rename = "aot-opt-level")]
+    pub aot_opt_level: u32,
+}
+
+fn default_pkg_format() -> String {
+    "apkg".to_string()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 包清单（包元数据）
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 包清单（aura.toml 或 .aura.toml）
+/// 包清单（`aura.toml` 或 `.aura.toml`）
+///
+/// Phase 1 扩展字段（设计方案 §9.1）：
+/// - `library` / `kind` / `compiler_min_version` / `compiler_max_version`
+/// - `package`：制品选项
+/// - `resources`：资源包含/排除模式
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PackageManifest {
+    /// Manifest 结构版本（与字节码版本独立）
+    #[serde(default = "default_schema_version", rename = "schema-version")]
+    pub schema_version: String,
     /// 包名
     pub name: String,
     /// 版本
@@ -317,25 +408,61 @@ pub struct PackageManifest {
     /// 仓库 URL
     #[serde(default)]
     pub repository: Option<String>,
-    /// 入口文件
+    /// 入口文件（应用必填；库包可省略）
     #[serde(default = "default_entry")]
     pub entry: String,
     /// 依赖
     #[serde(default)]
     pub dependencies: Vec<Dependency>,
     /// 开发依赖
-    #[serde(default)]
+    #[serde(default, rename = "dev-dependencies")]
     pub dev_dependencies: Vec<Dependency>,
-    /// 导出模块列表
+    /// 导出符号 / 模块名列表
     #[serde(default)]
     pub exports: Vec<String>,
-    /// 平台限制
+    /// 平台限制（triple 列表）
     #[serde(default)]
     pub platforms: Vec<String>,
+
+    // ── Phase 1 新增 ──
+
+    /// 是否为库包（无 `entry` 入口）
+    #[serde(default)]
+    pub library: bool,
+    /// 包类型（bytecode / hybrid / native）
+    #[serde(default)]
+    pub kind: PackageKind,
+    /// 最低兼容编译器版本
+    #[serde(default, rename = "compiler-min-version")]
+    pub compiler_min_version: Option<String>,
+    /// 最高兼容编译器版本
+    #[serde(default, rename = "compiler-max-version")]
+    pub compiler_max_version: Option<String>,
+    /// 制品选项（`[package]` 表）
+    #[serde(default)]
+    pub package: PackageOptions,
+    /// 资源包含/排除模式（`[resources]` 表）
+    #[serde(default)]
+    pub resources: ResourceConfig,
+}
+
+fn default_schema_version() -> String {
+    "1.0".to_string()
 }
 
 fn default_entry() -> String {
     "main.aura".to_string()
+}
+
+/// 资源包含/排除配置（设计方案 §9.1 `[resources]`）
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ResourceConfig {
+    /// 包含模式（如 `["**/*.json", "**/*.html"]`）
+    #[serde(default)]
+    pub include: Vec<String>,
+    /// 排除模式（如 `["**/*.test.*"]`）
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 impl PackageManifest {
@@ -347,16 +474,16 @@ impl PackageManifest {
         Self::from_toml(&content)
     }
 
-    /// 从 TOML 字符串解析
+    /// 从 TOML 字符串解析（Phase 1 起改用真正的 TOML 序列化）
     pub fn from_toml(s: &str) -> Result<Self, PackageError> {
-        serde_json::from_str(s).map_err(|e| {
+        toml::from_str(s).map_err(|e| {
             PackageError::ParseError(format!("无法解析包清单: {}", e))
         })
     }
 
     /// 序列化为 TOML
     pub fn to_toml(&self) -> Result<String, PackageError> {
-        serde_json::to_string_pretty(self).map_err(|e| {
+        toml::to_string_pretty(self).map_err(|e| {
             PackageError::ParseError(format!("序列化失败: {}", e))
         })
     }
@@ -367,6 +494,11 @@ impl PackageManifest {
         std::fs::write(path, content).map_err(|e| {
             PackageError::IoError(format!("无法写入 {}: {}", path.display(), e))
         })
+    }
+
+    /// 判断是否为库包（Phase 1）
+    pub fn is_library(&self) -> bool {
+        self.library || self.entry.is_empty()
     }
 }
 
@@ -917,6 +1049,10 @@ impl PackageManager {
                 let rev = git_command(&["rev-parse", "HEAD"], Some(path));
                 rev.output
             }
+            DependencySource::Binary(path) => {
+                // Phase 1: 二进制制品 — 用文件路径作为 rev
+                path.display().to_string()
+            }
         };
 
         // 标记已安装
@@ -954,6 +1090,14 @@ impl PackageManager {
                 } else {
                     git_latest_tag(url, self.config.cache.root())
                 }
+            }
+            DependencySource::Binary(path) => {
+                // Phase 1: 从 .apkg 文件的 manifest 读取版本
+                use crate::apkg::PackageReader;
+                let content = PackageReader::from_file(path).map_err(|e| {
+                    PackageError::ParseError(format!("读取 .apkg 失败 {}: {}", path.display(), e))
+                })?;
+                Version::parse(&content.manifest.version)
             }
         }
     }
@@ -1113,6 +1257,7 @@ impl PackageManager {
 
         // 创建 aura.toml
         let manifest = PackageManifest {
+            schema_version: "1.0".to_string(),
             name: name.to_string(),
             version: "0.1.0".to_string(),
             description: Some(format!("{} 包", name)),
@@ -1124,6 +1269,12 @@ impl PackageManager {
             dev_dependencies: Vec::new(),
             exports: vec!["main".to_string()],
             platforms: vec![],
+            library: false,
+            kind: PackageKind::Bytecode,
+            compiler_min_version: Some("0.3.0".to_string()),
+            compiler_max_version: None,
+            package: PackageOptions::default(),
+            resources: ResourceConfig::default(),
         };
         manifest.write_to_file(&project_path.join("aura.toml"))?;
 
@@ -1332,10 +1483,21 @@ import json
         let tmp = std::env::temp_dir().join(format!("aura_test_install_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&tmp);
 
-        // 创建一个模拟的 aura.toml
+        // 创建一个模拟的 aura.toml（Phase 1 起使用真正的 TOML 格式）
         std::fs::write(
             tmp.join("aura.toml"),
-            r#"{"name":"test-lib","version":"0.1.0","description":null,"authors":[],"license":null,"repository":null,"entry":"main.aura","dependencies":[],"dev_dependencies":[],"exports":[],"platforms":[]}"#,
+            r#"
+schema-version = "1.0"
+name = "test-lib"
+version = "0.1.0"
+entry = "main.aura"
+dependencies = []
+dev_dependencies = []
+exports = []
+platforms = []
+library = false
+kind = "bytecode"
+"#,
         )
         .unwrap();
 
@@ -1493,46 +1655,69 @@ import json
     #[test]
     fn test_manifest_from_toml() {
         let toml = r#"
-            {
-                "name": "test-package",
-                "version": "1.0.0",
-                "description": "A test package",
-                "authors": ["Author"],
-                "license": "MIT",
-                "repository": "https://github.com/test/pkg",
-                "entry": "main.aura",
-                "dependencies": [
-                    {
-                        "name": "dep-a",
-                        "version": {
-                            "GreaterThanEqual": {
-                                "major": 1,
-                                "minor": 0,
-                                "patch": 0,
-                                "prerelease": [],
-                                "build": []
-                            }
-                        },
-                        "source": {
-                            "Git": "https://github.com/test/dep-a"
-                        }
-                    }
-                ],
-                "dev_dependencies": [],
-                "exports": ["main"],
-                "platforms": []
-            }
-        "#;
+schema-version = "1.0"
+name = "test-package"
+version = "1.0.0"
+description = "A test package"
+authors = ["Author"]
+license = "MIT"
+repository = "https://github.com/test/pkg"
+entry = "main.aura"
+library = false
+kind = "bytecode"
+
+[[dependencies]]
+name = "dep-a"
+version = { GreaterThanEqual = { major = 1, minor = 0, patch = 0, prerelease = [], build = [] } }
+source = { Git = "https://github.com/test/dep-a" }
+"#;
 
         let manifest = PackageManifest::from_toml(toml).unwrap();
         assert_eq!(manifest.name, "test-package");
         assert_eq!(manifest.version, "1.0.0");
-        assert_eq!(manifest.dependencies.len(), 1);
+        assert_eq!(manifest.description.as_deref(), Some("A test package"));
+    }
+
+    /// Phase 1: 测试新字段（library/kind/compiler-min-version 等）解析
+    #[test]
+    fn test_manifest_phase1_fields() {
+        let toml = r#"
+schema-version = "1.0"
+name = "aura-json"
+version = "1.2.3"
+library = true
+kind = "hybrid"
+compiler-min-version = "0.3.0"
+compiler-max-version = "1.0"
+
+[package]
+format = "apkg"
+include-sources = false
+include-native = true
+native-targets = ["x86_64-pc-windows-msvc"]
+aot-opt-level = 2
+
+[resources]
+include = ["**/*.json"]
+exclude = ["**/*.test.*"]
+"#;
+
+        let manifest = PackageManifest::from_toml(toml).unwrap();
+        assert!(manifest.library);
+        assert_eq!(manifest.kind, PackageKind::Hybrid);
+        assert_eq!(manifest.compiler_min_version.as_deref(), Some("0.3.0"));
+        assert_eq!(manifest.compiler_max_version.as_deref(), Some("1.0"));
+        assert_eq!(manifest.package.include_sources, false);
+        assert_eq!(manifest.package.include_native, true);
+        assert_eq!(manifest.package.native_targets.len(), 1);
+        assert_eq!(manifest.package.aot_opt_level, 2);
+        assert_eq!(manifest.resources.include.len(), 1);
     }
 
     #[test]
     fn test_manifest_default_entry() {
         let manifest = PackageManifest {
+            schema_version: "1.0".to_string(),
             name: "test".to_string(),
             version: "0.1.0".to_string(),
             description: None,
@@ -1544,8 +1729,16 @@ import json
             dev_dependencies: vec![],
             exports: vec![],
             platforms: vec![],
+            library: false,
+            kind: PackageKind::Bytecode,
+            compiler_min_version: None,
+            compiler_max_version: None,
+            package: PackageOptions::default(),
+            resources: ResourceConfig::default(),
         };
         assert_eq!(manifest.entry, "main.aura");
+        assert!(!manifest.library);
+        assert_eq!(manifest.kind, PackageKind::Bytecode);
     }
 
     // 版本约束格式化测试

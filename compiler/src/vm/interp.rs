@@ -344,6 +344,31 @@ impl Vm {
                 let cb_id = self.callbacks.register(func_idx as usize);
                 self.frames[top].stack.push(Value::Ptr(cb_id as i64));
             }
+            // Phase 2: 跨模块调用
+            Instr::CallExport(sym_idx) => {
+                // 从导出符号表查找函数索引
+                let export = self.module.module.exports.get(sym_idx as usize)
+                    .ok_or_else(|| VmError::Runtime(format!("CallExport: 导出符号 {} 不存在", sym_idx)))?;
+                let func_idx = export.func_idx
+                    .ok_or_else(|| VmError::Runtime(format!("CallExport: 导出符号 {} 没有函数索引", export.name)))?;
+                self.do_call(top, func_idx as usize, false)?;
+            }
+            Instr::CallExternal(mod_idx, sym_idx) => {
+                // 从导入表查找外部模块
+                let import = self.module.module.imports.get(mod_idx as usize)
+                    .ok_or_else(|| VmError::Runtime(format!("CallExternal: 导入模块 {} 不存在", mod_idx)))?;
+                // 在注册表中查找目标模块
+                let target = self.registry.find_export(&import.module, &import.symbol)
+                    .ok_or_else(|| VmError::Runtime(format!(
+                        "CallExternal: 未加载模块 {} 或符号 {} 不存在", import.module, import.symbol
+                    )))?;
+                // 从目标模块的导出索引获取函数索引
+                let (_, func_idx) = target.export_index.get(&import.symbol)
+                    .ok_or_else(|| VmError::Runtime(format!(
+                        "CallExternal: 符号 {} 没有函数索引", import.symbol
+                    )))?;
+                self.do_call(top, *func_idx as usize, false)?;
+            }
         }
         Ok(())
     }

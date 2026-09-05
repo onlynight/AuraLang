@@ -3,7 +3,7 @@
     "information_for_contributors": [
         "This grammar is modeled after the Kotlin VSCode plugin's tmLanguage.json structure",
         "(redhat-developer/vscode-java/language-support/kotlin/kotlin.tmLanguage.json).",
-        "Scope name: 'source.aura' — all scope names use the '.aura' suffix for consistency.",
+        "Scope name: 'source.aura' - all scope names use the '.aura' suffix for consistency.",
         "Declarations use begin/end + beginCaptures/endCaptures for fine-grained highlighting."
     ],
     "name": "Aura",
@@ -357,7 +357,7 @@
             }
         },
         "struct-declaration": {
-            "match": "(?:(data|sealed)\\s+)?(struct)\\s+(\\b\\w+\\b)(?:\\s*(?<GROUP><([^<>]|\\g<GROUP>)+>)?)?",
+            "match": "(?:(data|sealed)\\s+)?(struct)\\s+(\\b\\w+\\b)(?:\\s*<[^>]+>)?",
             "captures": {
                 "1": {
                     "name": "storage.modifier.other.aura"
@@ -367,18 +367,11 @@
                 },
                 "3": {
                     "name": "entity.name.type.struct.aura"
-                },
-                "4": {
-                    "patterns": [
-                        {
-                            "include": "#type-parameter"
-                        }
-                    ]
                 }
             }
         },
         "class-declaration": {
-            "match": "(?:(sealed|data)\\s+)?(class)\\s+(\\b\\w+\\b)(?:\\s*(?<GROUP><([^<>]|\\g<GROUP>)+>)?)?(?:\\s*:\\s*\\b\\w+\\b)?",
+            "match": "(?:(sealed|data)\\s+)?(class)\\s+(\\b\\w+\\b)(?:\\s*<[^>]+>)?(?:\\s*:\\s*(\\b\\w+\\b))?",
             "captures": {
                 "1": {
                     "name": "storage.modifier.other.aura"
@@ -390,13 +383,6 @@
                     "name": "entity.name.type.class.aura"
                 },
                 "4": {
-                    "patterns": [
-                        {
-                            "include": "#type-parameter"
-                        }
-                    ]
-                },
-                "5": {
                     "name": "entity.name.type.superclass.aura"
                 }
             }
@@ -416,7 +402,7 @@
             }
         },
         "interface-declaration": {
-            "match": "(?:(sealed|data)\\s+)?(interface)\\s+(\\b\\w+\\b)(?:\\s*(?<GROUP><([^<>]|\\g<GROUP>)+>)?)?",
+            "match": "(?:(sealed|data)\\s+)?(interface)\\s+(\\b\\w+\\b)(?:\\s*<[^>]+>)?",
             "captures": {
                 "1": {
                     "name": "storage.modifier.other.aura"
@@ -426,13 +412,6 @@
                 },
                 "3": {
                     "name": "entity.name.type.interface.aura"
-                },
-                "4": {
-                    "patterns": [
-                        {
-                            "include": "#type-parameter"
-                        }
-                    ]
                 }
             }
         },
@@ -465,55 +444,30 @@
             }
         },
         "type-alias": {
-            "match": "\\b(typealias)\\s+(\\b\\w+\\b)(?:\\s*(?<GROUP><([^<>]|\\g<GROUP>)+>)?)?",
+            "match": "\\b(typealias)\\s+(\\b\\w+\\b)(?:\\s*<[^>]+>)?",
             "captures": {
                 "1": {
                     "name": "storage.type.alias.aura"
                 },
                 "2": {
                     "name": "entity.name.type.aura"
-                },
-                "3": {
-                    "patterns": [
-                        {
-                            "include": "#type-parameter"
-                        }
-                    ]
                 }
             }
         },
 
         "function-declaration": {
-            "begin": "\\b(fun)\\b\\s*(?<GROUP><([^<>]|\\g<GROUP>)+>)?\\s*(\\b\\w+\\b|`[^`]+`)\\(",
-            "beginCaptures": {
+            "match": "\\b(fun)\\b\\s*(?:<[^>]+>)?\\s*(\\b\\w+\\b|`[^`]+`)",
+            "captures": {
                 "1": {
                     "name": "storage.type.function.aura"
                 },
                 "2": {
-                    "patterns": [
-                        {
-                            "include": "#type-parameter"
-                        }
-                    ]
-                },
-                "3": {
                     "name": "entity.name.function.declaration.aura"
                 }
-            },
-            "end": "\\)",
-            "endCaptures": {
-                "1": {
-                    "name": "keyword.operator.assignment.type.aura"
-                }
-            },
-            "patterns": [
-                {
-                    "include": "#parameter-declaration"
-                }
-            ]
+            }
         },
         "parameter-declaration": {
-            "match": "\\b(\\w+)\\s*(:)\\s*(\\w+(?:\\s*<[^>]+>)?)(\\?)?(,)?",
+            "match": "(\\b\\w+\\b)\\s*(:)\\s*([\\w?]+(?:<[^>]+>)?)(\\?)?(,)?",
             "captures": {
                 "1": {
                     "name": "variable.parameter.aura"
@@ -534,32 +488,18 @@
         },
 
         "constant-declaration": {
-            "match": "\\b(val)\\b\\s*(?<GROUP><([^<>]|\\g<GROUP>)+>)?",
+            "match": "\\b(val)\\b\\s*(?:<[^>]+>)?",
             "captures": {
                 "1": {
                     "name": "storage.type.variable.readonly.aura"
-                },
-                "2": {
-                    "patterns": [
-                        {
-                            "include": "#type-parameter"
-                        }
-                    ]
                 }
             }
         },
         "variable-declaration": {
-            "match": "\\b(var)\\b\\s*(?<GROUP><([^<>]|\\g<GROUP>)+>)?",
+            "match": "\\b(var)\\b\\s*(?:<[^>]+>)?",
             "captures": {
                 "1": {
                     "name": "storage.type.variable.aura"
-                },
-                "2": {
-                    "patterns": [
-                        {
-                            "include": "#type-parameter"
-                        }
-                    ]
                 }
             }
         },
@@ -621,20 +561,16 @@
             ]
         },
         "type-annotation": {
-            "match": "(?<![:?]):\\s*(\\w|\\?|\\s|->|(?<GROUP>[<(]([^<>()\"']|\\g<GROUP>)+[)>]))+",
+            "match": "(?<![:?]):(?![\\s]*[:?])\\s*([\\w?]+(?:<[^>]+>)?(?:\\s*->\\s*[\\w?]+(?:<[^>]+>)?)?)",
             "captures": {
-                "0": {
-                    "patterns": [
-                        {
-                            "include": "#type-parameter"
-                        }
-                    ]
+                "1": {
+                    "name": "entity.name.type.aura"
                 }
             }
         },
 
         "function-call": {
-            "match": "(?:(\\?\\.)|(\\.))?(\\b\\w+\\b|`[^`]+`)\\s*(?<GROUP><([^<>]|\\g<GROUP>)+>)?\\s*(?=\\()",
+            "match": "(?:(\\?\\.)|(\\.))?(\\b\\w+\\b|`[^`]+`)(?:\\s*<[^>]+>)?\\s*(?=\\()",
             "captures": {
                 "1": {
                     "name": "punctuation.accessor.optional.aura"
@@ -644,13 +580,6 @@
                 },
                 "3": {
                     "name": "entity.name.function.call.aura"
-                },
-                "4": {
-                    "patterns": [
-                        {
-                            "include": "#type-parameter"
-                        }
-                    ]
                 }
             }
         },
@@ -682,7 +611,7 @@
             "name": "string.quoted.double.aura"
         },
         "string": {
-            "begin": "(?<!\")\"(?!\")",
+            "begin": "\"(?!\"\"\")",
             "end": "\"",
             "name": "string.quoted.double.aura",
             "patterns": [
@@ -776,7 +705,7 @@
                     "name": "keyword.operator.null-assert.aura"
                 },
                 {
-                    "match": "(??)",
+                    "match": "(\\?\\?)",
                     "name": "keyword.operator.null-coalesce.aura"
                 },
                 {

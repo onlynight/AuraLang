@@ -41,6 +41,99 @@ use std::collections::HashMap;
 
 use crate::codegen::opcode::{BytecodeFunction, BytecodeModule, BytecodeNative, Const};
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 2: 模块注册表
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 已加载模块的记录（Phase 2 ModuleRegistry 用）
+#[derive(Debug, Clone)]
+pub struct RegisteredModule {
+    /// 模块唯一标识（UUID）
+    pub uuid: [u8; 16],
+    /// 模块名称
+    pub name: String,
+    /// 模块版本
+    pub version: String,
+    /// 导出符号索引：name -> (export_idx, func_idx)
+    pub export_index: HashMap<String, (u16, u16)>,
+    /// 字节码模块
+    pub module: BytecodeModule,
+}
+
+impl RegisteredModule {
+    /// 从字节码模块创建已注册模块记录
+    pub fn from_module(module: &BytecodeModule) -> Self {
+        let mut export_index = HashMap::new();
+        for (i, exp) in module.exports.iter().enumerate() {
+            if let Some(func_idx) = exp.func_idx {
+                export_index.insert(exp.name.clone(), (i as u16, func_idx));
+            }
+        }
+        RegisteredModule {
+            uuid: module.module_identity.uuid,
+            name: module.module_identity.name.clone(),
+            version: module.module_identity.version.clone(),
+            export_index,
+            module: module.clone(),
+        }
+    }
+}
+
+/// 模块注册表 — 跟踪所有已加载模块
+#[derive(Debug, Default)]
+pub struct ModuleRegistry {
+    /// UUID -> 已加载模块
+    pub modules: HashMap<[u8; 16], RegisteredModule>,
+    /// 名称 -> UUID
+    pub name_index: HashMap<String, [u8; 16]>,
+}
+
+impl ModuleRegistry {
+    /// 创建空的模块注册表
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 注册模块
+    pub fn register(&mut self, module: &BytecodeModule) -> Result<[u8; 16], String> {
+        let uuid = module.module_identity.uuid;
+        let name = module.module_identity.name.clone();
+        if self.name_index.contains_key(&name) {
+            return Err(format!("模块名称冲突: {}", name));
+        }
+        let loaded = RegisteredModule::from_module(module);
+        self.name_index.insert(name, uuid);
+        self.modules.insert(uuid, loaded);
+        Ok(uuid)
+    }
+
+    /// 按 UUID 查找模块
+    pub fn find_by_uuid(&self, uuid: &[u8; 16]) -> Option<&RegisteredModule> {
+        self.modules.get(uuid)
+    }
+
+    /// 按名称查找模块
+    pub fn find_by_name(&self, name: &str) -> Option<&RegisteredModule> {
+        self.name_index.get(name).and_then(|uuid| self.modules.get(uuid))
+    }
+
+    /// 按名称查找导出符号
+    pub fn find_export(&self, module_name: &str, symbol: &str) -> Option<&RegisteredModule> {
+        self.find_by_name(module_name).and_then(|m| {
+            if m.export_index.contains_key(symbol) {
+                Some(m)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// 列出所有已加载模块
+    pub fn list_modules(&self) -> Vec<&RegisteredModule> {
+        self.modules.values().collect()
+    }
+}
+
 /// VM 配置
 #[derive(Debug, Clone)]
 pub struct VmOptions {
@@ -189,6 +282,12 @@ pub enum Instr {
     IntToPtr,
     /// 创建 C 回调蹦床
     MakeCallback(u16),
+
+    // ── Phase 2: 跨模块调用 ──
+    /// 调用同模块内导出符号
+    CallExport(u16),
+    /// 调用外部模块符号
+    CallExternal(u16, u16),
 }
 
 /// 解码后的函数
@@ -209,6 +308,8 @@ pub struct LoadedModule {
     pub funcs: Vec<DecodedFunction>,
     pub entry: u16,
     native_index: HashMap<String, u16>,
+    /// Phase 2: 原始字节码模块引用（用于访问 exports/imports 表）
+    pub module: BytecodeModule,
 }
 
 impl LoadedModule {
@@ -230,6 +331,7 @@ impl LoadedModule {
             funcs,
             entry: m.entry,
             native_index,
+            module: m.clone(),
         })
     }
 
@@ -385,6 +487,17 @@ fn decode_function(f: &BytecodeFunction) -> Result<DecodedFunction, VmError> {
                 ip += 2;
                 instrs.push(Instr::MakeCallback(v));
             }
+            crate::codegen::opcode::OpCode::CallExport(_) => {
+                let v = u16::from_le_bytes([code[ip], code[ip + 1]]);
+                ip += 2;
+                instrs.push(Instr::CallExport(v));
+            }
+            crate::codegen::opcode::OpCode::CallExternal(_, _) => {
+                let mod_idx = u16::from_le_bytes([code[ip], code[ip + 1]]);
+                let sym_idx = u16::from_le_bytes([code[ip + 2], code[ip + 3]]);
+                ip += 4;
+                instrs.push(Instr::CallExternal(mod_idx, sym_idx));
+            }
         }
     }
 
@@ -470,6 +583,8 @@ pub struct Vm {
     pub actors: crate::vm::actor::ActorRuntime,
     /// Channel 运行时（P10.8）：Channel 实例 → 缓冲区
     pub channels: crate::vm::channel::ChannelRuntime,
+    /// Phase 2: 模块注册表
+    pub registry: ModuleRegistry,
 }
 
 impl Vm {
@@ -503,6 +618,7 @@ impl Vm {
             callbacks: CallbackRegistry::new(),
             actors: crate::vm::actor::ActorRuntime::new(),
             channels: crate::vm::channel::ChannelRuntime::new(),
+            registry: ModuleRegistry::new(),
         })
     }
 

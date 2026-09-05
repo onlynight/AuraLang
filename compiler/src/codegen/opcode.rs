@@ -168,6 +168,12 @@ pub enum OpCode {
     IntToPtr,
     /// 创建 C 回调蹦床（栈顶为函数索引，压入 `Ptr` 回调地址）
     MakeCallback(u16),
+
+    // ── Phase 2: 跨模块调用 ──
+    /// 调用同模块内导出符号，`sym_idx` 为导出符号表索引
+    CallExport(u16),
+    /// 调用外部模块符号，`(mod_idx, sym_idx)` 指向 imports 表
+    CallExternal(u16, u16),
 }
 
 impl OpCode {
@@ -241,6 +247,8 @@ impl OpCode {
             OpCode::PtrToInt => 64,
             OpCode::IntToPtr => 65,
             OpCode::MakeCallback(_) => 66,
+            OpCode::CallExport(_) => 70,
+            OpCode::CallExternal(_, _) => 71,
         }
     }
 
@@ -252,6 +260,8 @@ impl OpCode {
             26 | 27 | 36 => 2,             // u16 函数/原生索引
             40 | 41 | 51 => 2,             // CallMethod/CallCtor/NewCoroutine u16 索引
             66 => 2,                       // MakeCallback u16 函数索引
+            70 => 2,                       // CallExport u16 sym_idx
+            71 => 4,                       // CallExternal u16 mod_idx + u16 sym_idx
             _ => 0,
         }
     }
@@ -325,6 +335,8 @@ impl OpCode {
             64 => OpCode::PtrToInt,
             65 => OpCode::IntToPtr,
             66 => OpCode::MakeCallback(0),
+            70 => OpCode::CallExport(0),
+            71 => OpCode::CallExternal(0, 0),
             _ => return None,
         })
     }
@@ -345,7 +357,12 @@ impl OpCode {
             | OpCode::CallMethod(i)
             | OpCode::CallCtor(i)
             | OpCode::NewCoroutine(i)
-            | OpCode::MakeCallback(i) => buf.extend_from_slice(&i.to_le_bytes()),
+            | OpCode::MakeCallback(i)
+            | OpCode::CallExport(i) => buf.extend_from_slice(&i.to_le_bytes()),
+            OpCode::CallExternal(mod_idx, sym_idx) => {
+                buf.extend_from_slice(&mod_idx.to_le_bytes());
+                buf.extend_from_slice(&sym_idx.to_le_bytes());
+            }
             OpCode::Jump(o) | OpCode::JumpIfTrue(o) | OpCode::JumpIfFalse(o) => {
                 buf.extend_from_slice(&o.to_le_bytes())
             }
@@ -424,6 +441,10 @@ impl fmt::Display for OpCode {
             OpCode::PtrToInt => write!(f, "PTR_TO_INT"),
             OpCode::IntToPtr => write!(f, "INT_TO_PTR"),
             OpCode::MakeCallback(i) => write!(f, "MAKE_CALLBACK {}", i),
+            OpCode::CallExport(i) => write!(f, "CALL_EXPORT {}", i),
+            OpCode::CallExternal(mod_idx, sym_idx) => {
+                write!(f, "CALL_EXTERNAL ({}, {})", mod_idx, sym_idx)
+            }
         }
     }
 }
@@ -449,6 +470,14 @@ pub struct BytecodeFunction {
 }
 
 /// 完整的字节码模块（对应 `.auc` 文件内容）
+///
+/// Phase 2 扩展字段（设计方案 §6.2）：
+/// - `module_identity`：模块标识（UUID + 版本）
+/// - `header_flags`：能力标志位
+/// - `exports` / `imports`：导出/导入符号表
+/// - `dependencies`：显式依赖列表
+/// - `sig_ids`：外部模块签名 ID
+/// - `entry_kind`：入口类型（app/library）
 #[derive(Debug, Clone, PartialEq)]
 pub struct BytecodeModule {
     pub consts: Vec<Const>,
@@ -456,7 +485,182 @@ pub struct BytecodeModule {
     pub functions: Vec<BytecodeFunction>,
     /// 入口函数（通常为 `main`）在 `functions` 中的索引
     pub entry: u16,
-    /// Phase 1c: 按需链接 — 启用的 std 模块名（如 ["math", "io"]）
-    /// 运行时 NativeRegistry 只注册这些模块的函数
+    /// Phase 1c: 按需链接 — 启用的 std 模块名
     pub enabled_modules: Vec<String>,
+
+    // ── Phase 2 新增 ──
+
+    /// 模块标识（UUID + 版本）
+    pub module_identity: ModuleIdentity,
+    /// 能力标志位（有签名/有导出表/有导入表/有 AOT/有依赖）
+    pub header_flags: u32,
+    /// 导出符号表
+    pub exports: Vec<ExportSymbol>,
+    /// 导入符号表
+    pub imports: Vec<ImportSymbol>,
+    /// 显式依赖列表
+    pub dependencies: Vec<Dependency>,
+    /// 外部模块签名 ID
+    pub sig_ids: Vec<String>,
+    /// 入口类型（`app` = 应用入口, `library` = 库入口）
+    pub entry_kind: String,
+}
+
+impl Default for BytecodeModule {
+    fn default() -> Self {
+        BytecodeModule {
+            consts: Vec::new(),
+            natives: Vec::new(),
+            functions: Vec::new(),
+            entry: 0,
+            enabled_modules: Vec::new(),
+            module_identity: ModuleIdentity::default(),
+            header_flags: 0,
+            exports: Vec::new(),
+            imports: Vec::new(),
+            dependencies: Vec::new(),
+            sig_ids: Vec::new(),
+            entry_kind: "app".to_string(),
+        }
+    }
+}
+
+impl BytecodeModule {
+    /// 构建期计算 header_flags
+    pub fn compute_header_flags(&self) -> u32 {
+        let mut flags = 0u32;
+        if !self.exports.is_empty() {
+            flags |= 0b00000010; // 有导出表
+        }
+        if !self.imports.is_empty() {
+            flags |= 0b00000100; // 有导入表
+        }
+        if !self.dependencies.is_empty() {
+            flags |= 0b00010000; // 有依赖
+        }
+        flags
+    }
+
+    /// 检查模块是否标记为库（无 main 入口）
+    pub fn is_library(&self) -> bool {
+        self.entry_kind == "library"
+    }
+
+    /// 查找导出符号索引
+    pub fn find_export_idx(&self, name: &str) -> Option<usize> {
+        self.exports.iter().position(|e| e.name == name)
+    }
+
+    /// 查找导入符号索引
+    pub fn find_import_idx(&self, module: &str, symbol: &str) -> Option<usize> {
+        self.imports
+            .iter()
+            .position(|i| i.module == module && i.symbol == symbol)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 2: 模块标识与符号表
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 模块标识（UUID + 版本）— 设计方案 §6.2.3
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ModuleIdentity {
+    /// 模块唯一标识（UUID v4）
+    pub uuid: [u8; 16],
+    /// 模块语义版本
+    pub version: String,
+    /// 模块名称
+    pub name: String,
+}
+
+impl ModuleIdentity {
+    /// 生成新的模块标识（随机 UUID）
+    pub fn new(name: &str, version: &str) -> Self {
+        let mut uuid = [0u8; 16];
+        // 简单伪随机（生产环境应使用 uuid crate）
+        let seed = name.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+        uuid[0..8].copy_from_slice(&seed.to_le_bytes());
+        uuid[8..16].copy_from_slice(&seed.wrapping_mul(1000003).to_le_bytes());
+        // 设置版本位（UUID v4）
+        uuid[6] = (uuid[6] & 0x0F) | 0x40;
+        uuid[8] = (uuid[8] & 0x3F) | 0x80;
+        ModuleIdentity {
+            uuid,
+            version: version.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    /// 解析 UUID 字符串
+    pub fn uuid_str(&self) -> String {
+        format!(
+            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            self.uuid[0], self.uuid[1], self.uuid[2], self.uuid[3],
+            self.uuid[4], self.uuid[5], self.uuid[6], self.uuid[7],
+            self.uuid[8], self.uuid[9], self.uuid[10], self.uuid[11],
+            self.uuid[12], self.uuid[13], self.uuid[14], self.uuid[15]
+        )
+    }
+}
+
+/// 导出符号 — 设计方案 §6.2.4
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExportSymbol {
+    pub name: String,
+    pub kind: SymbolKind,
+    pub sig_id: String,
+    pub func_idx: Option<u16>,
+    pub type_table_idx: Option<u16>,
+    pub const_idx: Option<u16>,
+}
+
+/// 导入符号 — 设计方案 §6.2.5
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportSymbol {
+    pub name: String,
+    pub kind: SymbolKind,
+    pub module: String,
+    pub symbol: String,
+    pub sig_id: String,
+    pub func_idx: Option<u16>,
+}
+
+/// 显式依赖 — 设计方案 §6.2.6
+#[derive(Debug, Clone, PartialEq)]
+pub struct Dependency {
+    pub module: String,
+    pub uuid: [u8; 16],
+    pub version: String,
+}
+
+/// 符号类型 — 设计方案 §6.2.4
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SymbolKind {
+    #[default]
+    Function,
+    Type,
+    Const,
+    Global,
+}
+
+impl SymbolKind {
+    pub fn to_byte(&self) -> u8 {
+        match self {
+            SymbolKind::Function => 0,
+            SymbolKind::Type => 1,
+            SymbolKind::Const => 2,
+            SymbolKind::Global => 3,
+        }
+    }
+
+    pub fn from_byte(b: u8) -> Self {
+        match b {
+            0 => SymbolKind::Function,
+            1 => SymbolKind::Type,
+            2 => SymbolKind::Const,
+            3 => SymbolKind::Global,
+            _ => SymbolKind::Function,
+        }
+    }
 }

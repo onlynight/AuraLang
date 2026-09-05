@@ -71,6 +71,13 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
         functions,
         entry,
         enabled_modules: Vec::new(), // 由 compile() 填充
+        module_identity: crate::codegen::opcode::ModuleIdentity::default(),
+        header_flags: 0,
+        exports: Vec::new(),
+        imports: Vec::new(),
+        dependencies: Vec::new(),
+        sig_ids: Vec::new(),
+        entry_kind: "app".to_string(),
     }
 }
 
