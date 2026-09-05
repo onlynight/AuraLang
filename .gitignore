@@ -11,3 +11,5 @@ log/
 *.obj
 *.exe
 build/
+.tmp-tmtest/
+output/

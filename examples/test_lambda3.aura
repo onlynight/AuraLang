@@ -1,0 +1,4 @@
+// 简单 Lambda 测试 - 调用
+val f = x -> x * 2
+val result = f(21)
+println(result)

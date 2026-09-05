@@ -142,6 +142,36 @@ impl LoomManifest {
     }
 }
 
+impl Default for LoomManifest {
+    fn default() -> Self {
+        Self {
+            schema_version: default_schema_version(),
+            name: "unnamed".to_string(),
+            version: "0.1.0".to_string(),
+            description: None,
+            authors: Vec::new(),
+            license: None,
+            repository: None,
+            entry: default_entry(),
+            exports: Vec::new(),
+            library: false,
+            dependencies: Vec::new(),
+            compile_dependencies: Vec::new(),
+            runtime_dependencies: Vec::new(),
+            dev_dependencies: Vec::new(),
+            build_dependencies: Vec::new(),
+            build: BuildConfig::default(),
+            plugins: PluginConfig::default(),
+            profiles: HashMap::new(),
+            repositories: RepositoryConfig::default(),
+            workspace: None,
+            resources: ResourceConfig::default(),
+            package: PackageOptions::default(),
+            tasks: Vec::new(),
+        }
+    }
+}
+
 fn default_schema_version() -> String {
     "2.0".to_string()
 }
@@ -385,7 +415,7 @@ impl SourceSetConfig {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// 插件配置
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct PluginConfig {
     /// 标准库插件（自动注册 std 模块）
@@ -412,6 +442,21 @@ pub struct PluginConfig {
     /// 外部插件映射
     #[serde(default)]
     pub external: HashMap<String, ExternalPluginConfig>,
+}
+
+impl Default for PluginConfig {
+    fn default() -> Self {
+        Self {
+            aura_stdlib: true,
+            aura_test_harness: true,
+            aura_doc_gen: false,
+            aura_format: false,
+            aura_aot: false,
+            aura_watch: true,
+            aura_ci: false,
+            external: HashMap::new(),
+        }
+    }
 }
 
 fn default_true() -> bool {

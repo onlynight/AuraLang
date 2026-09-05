@@ -1,4 +1,4 @@
-﻿//! [Phase L2] 任务引擎：TaskGraph + 拓扑排序 + 并行调度
+//! [Phase L2] 任务引擎：TaskGraph + 拓扑排序 + 并行调度
 
 pub mod graph;
 pub mod scheduler;
@@ -100,6 +100,10 @@ impl TaskGraph {
 
     pub fn is_empty(&self) -> bool {
         self.tasks.is_empty()
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.tasks.contains_key(name)
     }
 }
 

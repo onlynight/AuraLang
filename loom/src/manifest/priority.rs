@@ -36,7 +36,7 @@ pub struct CliOverrides {
 }
 
 /// 解析后的最终构建配置
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ResolvedBuildConfig {
     /// 优化级别
     pub opt_level: u8,

@@ -47,6 +47,12 @@ pub enum MirInstr {
         func: String,
         args: Vec<Reg>,
     },
+    /// 调用闭包（Phase 2）：`dst = CallClosure(closure, args...)`
+    CallClosure {
+        dst: Option<Reg>,
+        closure: Reg,
+        args: Vec<Reg>,
+    },
     /// 分配对象（结果写入 `dst`）
     Alloc { dst: Reg, type_name: String },
     /// 读取字段：`dst = obj.name`
@@ -69,6 +75,14 @@ pub enum MirInstr {
     Box { dst: Reg, src: Reg },
     /// 创建 C 回调蹦床（P8.7）：`dst = makeCallback(func_name)`
     MakeCallback { dst: Reg, func: String },
+    /// 创建闭包（Phase 2）：`dst = closure(func_name, captures...)`
+    MakeClosure { dst: Reg, func: String, captures: Vec<(String, Reg)> },
+    /// 构造枚举变体（Phase 3）：`dst = EnumConstruct(enum_name, variant_idx)`
+    EnumConstruct { dst: Reg, enum_name: String, variant_idx: u16 },
+    /// 获取枚举变体索引（Phase 3）：`dst = EnumTag(src)`
+    EnumTag { dst: Reg, src: Reg },
+    /// 创建函数引用（Phase 3）：`dst = MakeFnRef(func_name)`
+    MakeFnRef { dst: Reg, func: String },
     /// defer 清理块开始标记（P7.4）
     DeferBegin,
     /// defer 清理块结束标记（P7.4）
@@ -112,6 +126,27 @@ pub struct MirFunction {
     /// 寄存器（局部变量槽）总数
     pub reg_count: usize,
     pub is_native: bool,
+    /// 闭包表（Phase 2）：函数中创建的闭包
+    pub closures: Vec<MirClosure>,
+}
+
+/// MIR 闭包（Phase 2）
+#[derive(Debug, Clone, PartialEq)]
+pub struct MirClosure {
+    /// 闭包函数名（如 `__lambda_0`）
+    pub name: String,
+    /// 用户参数名
+    pub params: Vec<String>,
+    /// 寄存器总数
+    pub reg_count: usize,
+    /// 捕获变量名
+    pub capture_names: Vec<String>,
+    /// 捕获变量在闭包函数中的参数槽位
+    pub capture_slots: Vec<usize>,
+    /// 闭包体（简化：单块）
+    pub body: Vec<MirInstr>,
+    /// 闭包体终结指令
+    pub term: Terminator,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -136,6 +171,10 @@ pub struct LowerCtx {
     pub native_params: HashMap<String, u16>,
     /// Phase 1: 用户自定义函数名集合（用于区分 CallNative vs Call）
     pub user_functions: HashSet<String>,
+    /// Phase 3: 枚举名集合（用于识别 EnumConstruct）
+    pub enum_names: HashSet<String>,
+    /// Phase 2: 闭包计数器
+    pub next_closure_id: usize,
 }
 
 impl LowerCtx {
@@ -146,6 +185,8 @@ impl LowerCtx {
             natives: HashSet::new(),
             native_params: HashMap::new(),
             user_functions: HashSet::new(),
+            enum_names: HashSet::new(),
+            next_closure_id: 0,
         }
     }
 
@@ -197,6 +238,10 @@ struct MirBuilder {
     next_reg: usize,
     scopes: Vec<HashMap<String, usize>>,
     loop_stack: Vec<(usize, usize)>,
+    /// Phase 2: 闭包表（函数中创建的闭包）
+    closures: Vec<MirClosure>,
+    /// Phase 3: HIR 程序引用（用于枚举变体查找）
+    hir_program: Option<crate::codegen::hir::HirProgram>,
 }
 
 impl MirBuilder {
@@ -211,6 +256,8 @@ impl MirBuilder {
             next_reg: param_count,
             scopes: vec![HashMap::new()],
             loop_stack: vec![],
+            closures: Vec::new(),
+            hir_program: None,
         }
     }
 
@@ -267,6 +314,191 @@ impl MirBuilder {
         if self.scopes.len() > 1 {
             self.scopes.pop();
         }
+    }
+
+    // ── Phase 2: Lambda 降级 ──
+
+    /// 将 HirBlock 中的标识符引用收集为捕获变量列表
+    fn collect_free_vars(expr: &HirExpr, locals: &mut HashSet<String>, out: &mut Vec<String>) {
+        match expr {
+            HirExpr::Var(name) => {
+                if !locals.contains(name) {
+                    if !out.contains(name) {
+                        out.push(name.clone());
+                    }
+                }
+            }
+            HirExpr::Lambda { params, body, .. } => {
+                for p in params {
+                    locals.insert(p.name.clone());
+                }
+                Self::collect_free_vars_in_block(body, locals, out);
+                for p in params {
+                    locals.remove(&p.name);
+                }
+            }
+            HirExpr::Block(b) => Self::collect_free_vars_in_block(b, locals, out),
+            HirExpr::Call { callee: _, args } => {
+                for a in args {
+                    Self::collect_free_vars(a, locals, out);
+                }
+            }
+            HirExpr::Member { object, name: _ } => {
+                Self::collect_free_vars(object, locals, out);
+            }
+            HirExpr::Index { container, index } => {
+                Self::collect_free_vars(container, locals, out);
+                Self::collect_free_vars(index, locals, out);
+            }
+            HirExpr::Binary { op: _, lhs, rhs } => {
+                Self::collect_free_vars(lhs, locals, out);
+                Self::collect_free_vars(rhs, locals, out);
+            }
+            HirExpr::Unary { op: _, operand } => {
+                Self::collect_free_vars(operand, locals, out);
+            }
+            HirExpr::If { cond, then_e, else_e } => {
+                Self::collect_free_vars(cond, locals, out);
+                Self::collect_free_vars(then_e, locals, out);
+                Self::collect_free_vars(else_e, locals, out);
+            }
+            HirExpr::New { type_name: _, args } => {
+                for a in args {
+                    Self::collect_free_vars(a, locals, out);
+                }
+            }
+            HirExpr::Box(inner) | HirExpr::WeakRef(inner) | HirExpr::Await(inner) => {
+                Self::collect_free_vars(inner, locals, out);
+            }
+            HirExpr::Lambda { params: _, body } => {
+                Self::collect_free_vars_in_block(body, locals, out);
+            }
+            _ => {} // Literal, Unit, New, etc. have no free vars
+        }
+    }
+
+    fn collect_free_vars_in_block(block: &HirBlock, locals: &mut HashSet<String>, out: &mut Vec<String>) {
+        for stmt in &block.stmts {
+            match stmt {
+                HirStmt::Val { init, name, .. } | HirStmt::Var { init, name, .. } => {
+                    if let Some(e) = init {
+                        Self::collect_free_vars(e, locals, out);
+                    }
+                    locals.insert(name.clone());
+                }
+                HirStmt::Expr(e) => {
+                    Self::collect_free_vars(e, locals, out);
+                }
+                HirStmt::Return(e) => {
+                    if let Some(v) = e {
+                        Self::collect_free_vars(v, locals, out);
+                    }
+                }
+                HirStmt::If { cond, then_b, else_b } => {
+                    Self::collect_free_vars(cond, locals, out);
+                    Self::collect_free_vars_in_block(then_b, locals, out);
+                    if let Some(eb) = else_b {
+                        Self::collect_free_vars_in_block(eb, locals, out);
+                    }
+                }
+                HirStmt::While { cond, body } => {
+                    Self::collect_free_vars(cond, locals, out);
+                    Self::collect_free_vars_in_block(body, locals, out);
+                }
+                HirStmt::Break => {}
+                HirStmt::Continue => {}
+                HirStmt::Defer(b) => {
+                    Self::collect_free_vars_in_block(b, locals, out);
+                }
+                HirStmt::Assign { target, value } => {
+                    Self::collect_free_vars(target, locals, out);
+                    Self::collect_free_vars(value, locals, out);
+                }
+                HirStmt::Block(b) => {
+                    Self::collect_free_vars_in_block(b, locals, out);
+                }
+            }
+        }
+    }
+
+    /// 将 HIR Lambda 降级为 MakeClosure 指令 + MirClosure
+    fn lower_lambda(&mut self, params: &[HirParam], body: &HirBlock, ctx: &mut LowerCtx) -> Reg {
+        let closure_id = ctx.next_closure_id;
+        ctx.next_closure_id += 1;
+        let closure_name = format!("__lambda_{}", closure_id);
+
+        // 1. 收集 lambda 参数名（作为 locals）
+        let mut locals: HashSet<String> = HashSet::new();
+        for p in params {
+            locals.insert(p.name.clone());
+        }
+
+        // 2. 收集捕获变量（free vars）
+        let mut captures: Vec<String> = Vec::new();
+        Self::collect_free_vars_in_block(body, &mut locals, &mut captures);
+
+        // 3. 为每个捕获变量分配当前函数中的寄存器
+        let capture_regs: Vec<Reg> = captures.iter()
+            .filter_map(|name| self.lookup(name))
+            .collect();
+
+        // 4. 构建闭包函数体
+        let param_slots: Vec<usize> = (0..params.len()).collect();
+        let mut builder = MirBuilder::new(params.len());
+        for (i, p) in params.iter().enumerate() {
+            builder.declare(&p.name, i);
+        }
+
+        // 5. 降级闭包体
+        if !body.stmts.is_empty() {
+            // 检查最后一条语句是否为纯表达式（Lambda 的返回值）
+            if let Some(last_stmt) = body.stmts.last() {
+                if let HirStmt::Expr(e) = last_stmt {
+                    // 降级除最后一条外的所有语句
+                    for s in &body.stmts[..body.stmts.len() - 1] {
+                        builder.lower_stmt(s, ctx);
+                    }
+                    // 降级最后一条表达式并发射 Return
+                    let r = builder.lower_expr(e, ctx);
+                    builder.set_term(Terminator::Return(r));
+                } else {
+                    // 所有语句都不是纯表达式，正常降级
+                    builder.lower_block(body, ctx);
+                }
+            } else {
+                builder.lower_block(body, ctx);
+            }
+        }
+        if !builder.is_closed(builder.current) {
+            builder.set_term(Terminator::ReturnVoid);
+        }
+
+        // 6. 创建 MirClosure
+        let closure = MirClosure {
+            name: closure_name.clone(),
+            params: params.iter().map(|p| p.name.clone()).collect(),
+            reg_count: builder.next_reg,
+            capture_names: captures.clone(),
+            capture_slots: Vec::new(),
+            body: builder.blocks.iter()
+                .flat_map(|b| b.instrs.clone())
+                .collect(),
+            term: builder.blocks.last().map(|b| b.term.clone()).unwrap_or(Terminator::ReturnVoid),
+        };
+        self.closures.push(closure);
+
+        // 7. 发射 MakeClosure 指令
+        let dst = self.alloc_reg();
+        let mut make_captures = Vec::new();
+        for (name, reg) in captures.iter().zip(capture_regs.iter()) {
+            make_captures.push((name.clone(), *reg));
+        }
+        self.emit(MirInstr::MakeClosure {
+            dst,
+            func: closure_name.clone(),
+            captures: make_captures,
+        });
+        dst
     }
 
     // ── 语句降级 ──
@@ -466,6 +698,13 @@ impl MirBuilder {
                         func: callee.clone(),
                         args: argv,
                     });
+                } else if let Some(closure_reg) = self.lookup(callee) {
+                    // Phase 2: 变量调用 — 检测闭包调用，生成 CallClosure 指令
+                    self.emit(MirInstr::CallClosure {
+                        dst: Some(dst),
+                        closure: closure_reg,
+                        args: argv,
+                    });
                 } else {
                     self.emit(MirInstr::Call {
                         dst: Some(dst),
@@ -476,6 +715,27 @@ impl MirBuilder {
                 dst
             }
             HirExpr::Member { object, name } => {
+                // Phase 3: 检测枚举变体引用（EnumName.Variant）
+                if let HirExpr::Var(enum_name) = object.as_ref() {
+                    if ctx.enum_names.contains(enum_name) {
+                        // 查找变体索引
+                        let variant_idx = if let Some(hir_program) = self.hir_program.as_ref() {
+                            hir_program.enums.iter()
+                                .find(|e| &e.name == enum_name)
+                                .and_then(|e| e.variants.iter().position(|(vname, _)| vname == name))
+                                .unwrap_or(0) as u16
+                        } else {
+                            0
+                        };
+                        let dst = self.alloc_reg();
+                        self.emit(MirInstr::EnumConstruct {
+                            dst,
+                            enum_name: enum_name.clone(),
+                            variant_idx,
+                        });
+                        return dst;
+                    }
+                }
                 let obj = self.lower_expr(object, ctx);
                 let dst = self.alloc_reg();
                 self.emit(MirInstr::GetField {
@@ -594,9 +854,9 @@ impl MirBuilder {
                 // 协程挂起语义由 Yield 指令处理（在非协程上下文中 await 等同 no-op）
                 self.lower_expr(inner, ctx)
             }
-            // Fix 4: Lambda — MIR 层暂不支持，返回空注册器
-            HirExpr::Lambda { .. } => {
-                self.alloc_reg()
+            // Phase 2: Lambda — 降级为 MakeClosure 指令
+            HirExpr::Lambda { params, body } => {
+                self.lower_lambda(params, body, ctx)
             }
         }
     }
@@ -614,14 +874,16 @@ impl MirBuilder {
             blocks: self.blocks,
             reg_count: self.next_reg,
             is_native,
+            closures: self.closures,
         }
     }
 }
 
 /// 将单个 HIR 函数降级为 MIR
-pub fn lower_function(f: &HirFunction, ctx: &mut LowerCtx) -> MirFunction {
+pub fn lower_function(f: &HirFunction, ctx: &mut LowerCtx, hir: &HirProgram) -> MirFunction {
     let param_slots: Vec<usize> = (0..f.params.len()).collect();
     let mut builder = MirBuilder::new(f.params.len());
+    builder.hir_program = Some(hir.clone());
     // 声明参数到作用域
     for (i, p) in f.params.iter().enumerate() {
         builder.declare(&p.name, i);
@@ -642,6 +904,10 @@ pub fn lower_program(hir: &HirProgram) -> (Vec<MirFunction>, LowerCtx) {
         let pc = n.params.len() as u16;
         ctx.register_native(&n.name, pc);
     }
+    // Phase 3: 注册枚举名
+    for e in &hir.enums {
+        ctx.enum_names.insert(e.name.clone());
+    }
     let mut mir_funcs = Vec::new();
     for f in &hir.functions {
         if f.is_native {
@@ -649,7 +915,7 @@ pub fn lower_program(hir: &HirProgram) -> (Vec<MirFunction>, LowerCtx) {
         }
         // Phase 1: 记录用户自定义函数名，供 lower_expr 区分 CallNative vs Call
         ctx.user_functions.insert(f.name.clone());
-        mir_funcs.push(lower_function(f, &mut ctx));
+        mir_funcs.push(lower_function(f, &mut ctx, hir));
     }
     (mir_funcs, ctx)
 }

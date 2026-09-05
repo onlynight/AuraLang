@@ -1,0 +1,10 @@
+struct Player {
+    var x: Float = 100f
+    var y: Float = 200f
+}
+
+fun main() {
+    val p = Player()
+    println(p.x)
+    println(p.y)
+}

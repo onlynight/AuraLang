@@ -1,0 +1,8 @@
+// 简单 Lambda 调用测试
+println("Start")
+val f = (x) -> x * 2
+println("Lambda created")
+val result = f(21)
+println("Result:")
+println(result)
+println("End")

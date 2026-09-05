@@ -7,8 +7,8 @@
 //! - 普通块顺序：条件块 → then 块（顺序落入）→ else 块 → merge 块
 
 use crate::codegen::hir::HirProgram;
-use crate::codegen::mir::{LowerCtx, MirFunction, Terminator};
-use crate::codegen::opcode::{BytecodeFunction, BytecodeModule, BytecodeNative, Const, OpCode};
+use crate::codegen::mir::{LowerCtx, MirClosure, MirFunction, MirInstr, Terminator, BasicBlock};
+use crate::codegen::opcode::{BytecodeClosure, BytecodeFunction, BytecodeModule, BytecodeNative, Const, OpCode};
 use std::collections::HashMap;
 
 /// 将 MIR 函数列表发射为字节码模块
@@ -23,7 +23,7 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
         })
         .collect();
 
-    // 用户函数名 -> 索引
+    // 用户函数名 -> 索引（初始版本，后续会根据闭包数量调整）
     let mut fn_index: HashMap<&str, u16> = HashMap::new();
     for (i, f) in mir_funcs.iter().enumerate() {
         fn_index.insert(f.name.as_str(), i as u16);
@@ -35,8 +35,32 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
     }
 
     let mut functions = Vec::new();
+    let mut closures: Vec<BytecodeClosure> = Vec::new();
+    // 闭包名 -> 函数表索引（用于 MakeClosure 查找）
+    let mut closure_fn_index: HashMap<&str, u16> = HashMap::new();
+
+    // 第一遍：注册所有闭包到函数表
     for f in mir_funcs {
-        let code = emit_function(f, &fn_index, &native_index);
+        for closure in &f.closures {
+            let closure_code = emit_closure(closure, &fn_index, &native_index, &closure_fn_index);
+            let fn_idx = functions.len() as u16;
+            closure_fn_index.insert(closure.name.as_str(), fn_idx);
+            functions.push(BytecodeFunction {
+                name: closure.name.clone(),
+                param_count: (closure.params.len() + closure.capture_names.len()) as u16,
+                locals: closure.reg_count as u16,
+                is_native: false,
+                code: closure_code,
+            });
+        }
+    }
+
+    // 第二遍：注册所有用户函数到函数表（调整索引以考虑闭包偏移）
+    for f in mir_funcs {
+        let code = emit_function(f, &fn_index, &native_index, &closure_fn_index);
+        let fn_idx = functions.len() as u16;
+        // 更新 fn_index 以反映实际索引（闭包 + 用户函数）
+        fn_index.insert(f.name.as_str(), fn_idx);
         functions.push(BytecodeFunction {
             name: f.name.clone(),
             param_count: f.param_slots.len() as u16,
@@ -44,6 +68,17 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
             is_native: false,
             code,
         });
+        // 发射闭包记录（用于 MakeClosure 查找参数数量）
+        for closure in &f.closures {
+            let fn_idx = closure_fn_index.get(closure.name.as_str()).copied().unwrap_or(0);
+            closures.push(BytecodeClosure {
+                name: closure.name.clone(),
+                param_count: closure.params.len() as u16,
+                locals: closure.reg_count as u16,
+                capture_count: closure.capture_names.len() as u16,
+                func_idx: fn_idx,
+            });
+        }
     }
 
     // Entry 逻辑（脚本模式支持）：
@@ -69,8 +104,9 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
         consts,
         natives,
         functions,
+        closures,
         entry,
-        enabled_modules: Vec::new(), // 由 compile() 填充
+        enabled_modules: Vec::new(),
         module_identity: crate::codegen::opcode::ModuleIdentity::default(),
         header_flags: 0,
         exports: Vec::new(),
@@ -85,6 +121,7 @@ fn emit_function(
     f: &MirFunction,
     fn_index: &HashMap<&str, u16>,
     native_index: &HashMap<&str, u16>,
+    closure_index: &HashMap<&str, u16>,
 ) -> Vec<u8> {
     // 基本块布局：保证每个 `If` 的 `then` 块紧跟其条件块之后，
     // 这样 `JumpIfFalse(else)` 后自然 fallthrough 到 `then`，与块的物理创建顺序无关。
@@ -107,7 +144,7 @@ fn emit_function(
     for &bid in &order {
         let b = &f.blocks[bid];
         for instr in &b.instrs {
-            emit_instr(&mut code, instr, fn_index, native_index);
+            emit_instr(&mut code, instr, fn_index, native_index, closure_index);
         }
         match &b.term {
             Terminator::Goto(target) => {
@@ -131,6 +168,33 @@ fn emit_function(
             Terminator::ReturnVoid => {
                 OpCode::ReturnUnit.write(&mut code);
             }
+        }
+    }
+    code
+}
+
+/// 发射闭包代码（Phase 2）
+fn emit_closure(
+    closure: &MirClosure,
+    fn_index: &HashMap<&str, u16>,
+    native_index: &HashMap<&str, u16>,
+    closure_index: &HashMap<&str, u16>,
+) -> Vec<u8> {
+    let mut code = Vec::new();
+    for instr in &closure.body {
+        emit_instr(&mut code, instr, fn_index, native_index, closure_index);
+    }
+    // 发射终结指令
+    match &closure.term {
+        Terminator::Return(reg) => {
+            OpCode::LoadVar(*reg as u16).write(&mut code);
+            OpCode::Return.write(&mut code);
+        }
+        Terminator::ReturnVoid => {
+            OpCode::ReturnUnit.write(&mut code);
+        }
+        _ => {
+            OpCode::ReturnUnit.write(&mut code);
         }
     }
     code
@@ -197,6 +261,8 @@ fn instr_size(instr: &crate::codegen::mir::MirInstr) -> usize {
         // Call：每个参数 LoadVar(3) + Call(3) + 可选 StoreVar(3)
         Call { args, dst, .. } => 3 * args.len() + 3 + if dst.is_some() { 3 } else { 0 },
         CallNative { args, dst, .. } => 3 * args.len() + 3 + if dst.is_some() { 3 } else { 0 },
+        // CallClosure：每个参数 LoadVar(3) + LoadVar(closure)(3) + CallClosure(1) + 可选 StoreVar(3)
+        CallClosure { args, dst, .. } => 3 * args.len() + 3 + 1 + if dst.is_some() { 3 } else { 0 },
         // Alloc：NewObject(3) + StoreVar(3) = 6
         Alloc { .. } => 6,
         // GetField：LoadVar(obj) + GetField(3) + StoreVar(3) = 9
@@ -225,6 +291,14 @@ fn instr_size(instr: &crate::codegen::mir::MirInstr) -> usize {
         DeferEnd => 1,
         // Yield：Yield(1) = 1
         Yield => 1,
+        // MakeClosure：闭包（Phase 2，占位符）
+        MakeClosure { .. } => 3,
+        // EnumConstruct：枚举构造（Phase 3）
+        EnumConstruct { .. } => 6,
+        // EnumTag：枚举变体索引（Phase 3）
+        EnumTag { .. } => 7,
+        // MakeFnRef：函数引用（Phase 3）
+        MakeFnRef { .. } => 6,
     }
 }
 
@@ -247,6 +321,7 @@ fn emit_instr(
     instr: &crate::codegen::mir::MirInstr,
     fn_index: &HashMap<&str, u16>,
     native_index: &HashMap<&str, u16>,
+    closure_index: &HashMap<&str, u16>,
 ) {
     use crate::codegen::hir::HirBinOp::*;
     use crate::codegen::mir::MirInstr::*;
@@ -325,6 +400,18 @@ fn emit_instr(
                 OpCode::StoreVar(*d as u16).write(code);
             }
         }
+        // Phase 2: 闭包调用
+        CallClosure { dst, closure, args } => {
+            // 先加载参数，再加载闭包引用（栈顶为闭包）
+            for a in args {
+                OpCode::LoadVar(*a as u16).write(code);
+            }
+            OpCode::LoadVar(*closure as u16).write(code);
+            OpCode::CallClosure.write(code);
+            if let Some(d) = dst {
+                OpCode::StoreVar(*d as u16).write(code);
+            }
+        }
         Alloc { dst, type_name } => {
             let idx = type_index(type_name);
             OpCode::NewObject(idx).write(code);
@@ -391,6 +478,39 @@ fn emit_instr(
         }
         Yield => {
             OpCode::Yield.write(code);
+        }
+        // MakeClosure：闭包创建（Phase 2）
+        MakeClosure { dst, func, captures } => {
+            // 1. 发射捕获值（按序压栈）
+            for (_name, src) in captures {
+                OpCode::LoadVar(*src as u16).write(code);
+            }
+            // 2. 发射 MakeClosure 指令（闭包在 closures 表中的索引）
+            // 需要查找闭包名对应的 closures 表索引
+            // 简化：使用 fn_index 查找（因为闭包函数也在函数表中）
+            let idx = closure_index.get(func.as_str()).copied().unwrap_or(0);
+            OpCode::MakeClosure(idx).write(code);
+            // 3. 将结果存入目标寄存器
+            OpCode::StoreVar(*dst as u16).write(code);
+        }
+        // EnumConstruct：枚举构造（Phase 3）
+        EnumConstruct { dst, enum_name, variant_idx } => {
+            // 使用 EnumConstruct opcode（操作数为变体索引）
+            let _ = enum_name;
+            OpCode::EnumConstruct(*variant_idx).write(code);
+            OpCode::StoreVar(*dst as u16).write(code);
+        }
+        // EnumTag：枚举变体索引（Phase 3）
+        EnumTag { dst, src } => {
+            OpCode::LoadVar(*src as u16).write(code);
+            OpCode::EnumTag.write(code);
+            OpCode::StoreVar(*dst as u16).write(code);
+        }
+        // MakeFnRef：函数引用（Phase 3）
+        MakeFnRef { dst, func } => {
+            let idx = fn_index.get(func.as_str()).copied().unwrap_or(0);
+            OpCode::MakeFnRef(idx).write(code);
+            OpCode::StoreVar(*dst as u16).write(code);
         }
     }
 }

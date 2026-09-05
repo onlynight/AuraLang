@@ -1,0 +1,8 @@
+// 测试结构体字面量语法
+struct Player(val x: Float, val y: Float)
+
+fun main() {
+    val p = Player(100f, 200f)
+    println(p.x)
+    println(p.y)
+}

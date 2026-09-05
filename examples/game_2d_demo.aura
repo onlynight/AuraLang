@@ -1,0 +1,171 @@
+// =============================================================================
+// Aura 游戏示例：2D 平台游戏（Phase 1 验证）
+// =============================================================================
+// 验证 Phase 1 核心特性：
+// - Enum 在 MIR/VM 中支持
+// - Lambda 调用支持
+// - Function 类型在 MIR/VM 支持
+// =============================================================================
+
+// ── 游戏状态枚举 ────────────────────────────────────────────────────────────
+enum GameState {
+    Menu,
+    Playing,
+    Paused,
+    GameOver,
+}
+
+// ── 玩家方向枚举 ────────────────────────────────────────────────────────────
+enum Direction {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+// ── 游戏配置 ────────────────────────────────────────────────────────────────
+val GAME_WIDTH: Int = 800
+val GAME_HEIGHT: Int = 600
+val GRAVITY: Float = 0.5f
+val PLAYER_SPEED: Float = 5f
+val JUMP_FORCE: Float = 12f
+
+// ── 更新游戏状态 ────────────────────────────────────────────────────────────
+fun updateGameState(gameState: GameState) -> GameState {
+    when (gameState) {
+        Menu -> {
+            println("[Menu] 按 Enter 开始游戏")
+            GameState.Playing
+        }
+        Playing -> {
+            gameState
+        }
+        Paused -> {
+            println("[Paused] 按 P 继续")
+            GameState.Playing
+        }
+        GameOver -> {
+            GameState.GameOver
+        }
+    }
+}
+
+// ── 更新物理 ────────────────────────────────────────────────────────────────
+fun updatePhysics(x: Float, y: Float, vx: Float, vy: Float, dt: Float) {
+    x = x + vx * dt
+    y = y + vy * dt
+    vy = vy + GRAVITY * dt
+
+    if (x < 0) {
+        x = 0f
+    }
+    if (x > (GAME_WIDTH - 32)) {
+        x = (GAME_WIDTH - 32).toFloat()
+    }
+    if (y > (GAME_HEIGHT - 32)) {
+        y = (GAME_HEIGHT - 32).toFloat()
+        vy = 0f
+    }
+
+    vx = vx * 0.9f
+}
+
+// ── 渲染函数 ────────────────────────────────────────────────────────────────
+fun render(x: Float, y: Float, score: Int, direction: Direction) {
+    var posStr: String = ""
+    when (direction) {
+        Left -> { posStr = "<" }
+        Right -> { posStr = ">" }
+        Up -> { posStr = "^" }
+        Down -> { posStr = "v" }
+    }
+    println("  位置: (" + x.toInt().toString() + ", " + y.toInt().toString() + ") " + posStr + "  分数: " + score.toString())
+}
+
+// ── 模拟按键输入（循环模式） ────────────────────────────────────────────────
+fun getSimulatedKey(frameCount: Int) -> String {
+    if (frameCount % 6 < 1) {
+        return "w"
+    } else if (frameCount % 6 < 2) {
+        return "a"
+    } else if (frameCount % 6 < 3) {
+        return "d"
+    } else if (frameCount % 6 < 4) {
+        return "p"
+    } else if (frameCount % 6 < 5) {
+        return "q"
+    } else {
+        return ""
+    }
+}
+
+// ── 游戏主逻辑 ──────────────────────────────────────────────────────────────
+fun main() {
+    var x: Float = 100f
+    var y: Float = 200f
+    var vx: Float = 0f
+    var vy: Float = 0f
+    var score: Int = 0
+    var gameState: GameState = GameState.Menu
+    var direction: Direction = Direction.Right
+    var frameCount: Int = 0
+    var running: Boolean = true
+
+    println("=== Aura 2D 游戏示例 ===")
+    println("验证 Phase 1 核心特性")
+    println()
+
+    while (running) {
+        // 模拟按键输入
+        val key = getSimulatedKey(frameCount)
+
+        // 更新按键
+        if (key == "a") {
+            vx = -PLAYER_SPEED
+            direction = Direction.Left
+        } else if (key == "d") {
+            vx = PLAYER_SPEED
+            direction = Direction.Right
+        } else if (key == "w") {
+            vy = -JUMP_FORCE
+            direction = Direction.Up
+        } else if (key == "p") {
+            if (gameState == GameState.Playing) {
+                gameState = GameState.Paused
+            } else if (gameState == GameState.Paused) {
+                gameState = GameState.Playing
+            }
+        } else if (key == "q") {
+            running = false
+        }
+
+        // 更新状态
+        gameState = updateGameState(gameState)
+
+        // 更新物理
+        if (gameState == GameState.Playing) {
+            updatePhysics(x, y, vx, vy, 0.1f)
+            score = score + 1
+        }
+
+        // 渲染
+        render(x, y, score, direction)
+
+        frameCount = frameCount + 1
+
+        // 限制帧率
+        if (frameCount % 60 == 0) {
+            println()
+        }
+
+        // 测试结束条件
+        if (frameCount >= 120) {
+            gameState = GameState.GameOver
+        }
+    }
+
+    println()
+    println("=== 游戏结束 ===")
+    println("最终得分: " + score.toString())
+    println("最终位置: (" + x.toInt().toString() + ", " + y.toInt().toString() + ")")
+}

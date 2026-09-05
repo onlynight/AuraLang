@@ -56,7 +56,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             await formatDocument(currentEditor.document.uri);
         }),
         vscode.commands.registerCommand("aura.showVersion", async () => {
-            vscode.window.showInformationMessage("Aura Language v0.1.0");
+            vscode.window.showInformationMessage("Aura Language v0.1.4");
         })
     );
 
@@ -83,13 +83,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         })
     );
 
-    // 注册文档内容变更回调（用于诊断更新）
-    context.subscriptions.push(
-        vscode.workspace.onDidChangeTextDocument((e) => {
-            if (e.document.languageId !== "aura") return;
-            diagnosticManager.scheduleUpdate(e.document.uri);
-        })
-    );
+    // 注册文档打开/变更回调 —— 实时诊断由 LSP 客户端（拉取模式）负责，
+    // 这里无需手动调度。仅保留显式命令 aura.openDiagnostic。
 
     console.log("[Aura] 扩展激活完成");
 }

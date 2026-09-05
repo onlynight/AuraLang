@@ -724,3 +724,130 @@ fn test_inheritance_via_superclass_interface() {
         errors
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 1: await / suspend 语义测试
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_await_in_non_suspend_function_is_error() {
+    let errors = analyze(
+        r#"
+        fun main() {
+            await foo()
+        }
+        suspend fun foo(): Int = 1
+        "#,
+    );
+    assert!(
+        has_error_containing(&errors, "await can only be used in suspend"),
+        "expected await-in-non-suspend error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_await_in_suspend_function_ok() {
+    let errors = analyze(
+        r#"
+        suspend fun main() {
+            await foo()
+        }
+        suspend fun foo(): Int = 1
+        "#,
+    );
+    assert!(
+        !has_error_containing(&errors, "await can only be used in suspend"),
+        "await in suspend fn should not error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_await_in_async_function_ok() {
+    let errors = analyze(
+        r#"
+        async fun main() {
+            await foo()
+        }
+        suspend fun foo(): Int = 1
+        "#,
+    );
+    assert!(
+        !has_error_containing(&errors, "await can only be used in suspend"),
+        "await in async fn should not error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_calling_suspend_from_non_suspend_is_error() {
+    let errors = analyze(
+        r#"
+        fun main() {
+            foo()
+        }
+        suspend fun foo() {}
+        "#,
+    );
+    assert!(
+        has_error_containing(&errors, "calling suspend function"),
+        "expected suspend-call error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_calling_suspend_from_suspend_ok() {
+    let errors = analyze(
+        r#"
+        suspend fun main() {
+            foo()
+        }
+        suspend fun foo() {}
+        "#,
+    );
+    assert!(
+        !has_error_containing(&errors, "calling suspend function"),
+        "calling suspend from suspend should not error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_await_in_struct_method_non_suspend_is_error() {
+    let errors = analyze(
+        r#"
+        struct Foo {
+            fun bar() {
+                await baz()
+            }
+        }
+        suspend fun baz(): Int = 1
+        "#,
+    );
+    assert!(
+        has_error_containing(&errors, "await can only be used in suspend"),
+        "expected await error in non-suspend struct method, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_await_in_class_method_non_suspend_is_error() {
+    let errors = analyze(
+        r#"
+        class Foo {
+            fun bar() {
+                await baz()
+            }
+        }
+        suspend fun baz(): Int = 1
+        "#,
+    );
+    assert!(
+        has_error_containing(&errors, "await can only be used in suspend"),
+        "expected await error in non-suspend class method, got: {:?}",
+        errors
+    );
+}

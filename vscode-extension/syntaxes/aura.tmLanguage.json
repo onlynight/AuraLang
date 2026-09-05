@@ -64,6 +64,9 @@
                     "include": "#extern-declaration"
                 },
                 {
+                    "include": "#struct-declaration-nobody"
+                },
+                {
                     "include": "#struct-declaration"
                 },
                 {
@@ -100,16 +103,22 @@
                     "include": "#builtin-types"
                 },
                 {
+                    "include": "#std-function-call"
+                },
+                {
+                    "include": "#constant-name"
+                },
+                {
                     "include": "#variable"
                 },
                 {
                     "include": "#object"
                 },
                 {
-                    "include": "#type-annotation"
+                    "include": "#function-call"
                 },
                 {
-                    "include": "#function-call"
+                    "include": "#type-annotation"
                 },
                 {
                     "include": "#property.reference"
@@ -294,7 +303,7 @@
             ]
         },
         "prefix-modifiers": {
-            "match": "\\b(abstract|final|enum|open|annotation|sealed|data|override|lateinit|private|protected|public|internal|inner|noinline|crossinline|vararg|reified|tailrec|operator|infix|inline|external|const|suspend|comptime|value|defer|extern|lazy|box|weak)\\b",
+            "match": "\\b(abstract|final|enum|open|annotation|sealed|data|override|lateinit|private|protected|public|internal|inner|noinline|crossinline|vararg|reified|tailrec|operator|infix|inline|external|const|suspend|comptime|value|defer|extern|lazy|box|weak|async)\\b",
             "name": "storage.modifier.other.aura"
         },
         "postfix-modifiers": {
@@ -346,19 +355,36 @@
         },
 
         "extern-declaration": {
-            "match": "\\b(extern)\\b\\s*(\"[^\"]*\")?",
-            "captures": {
+            "begin": "\\b(extern)\\b\\s*(\"[^\"]*\")\\s*(\"[^\"]*\")?\\s*(\\{)",
+            "beginCaptures": {
                 "1": {
                     "name": "storage.type.extern.aura"
                 },
                 "2": {
                     "name": "string.quoted.double.aura"
+                },
+                "3": {
+                    "name": "string.quoted.double.aura"
+                },
+                "4": {
+                    "name": "punctuation.section.block.begin.aura"
                 }
-            }
+            },
+            "end": "(^\\s*\\})",
+            "endCaptures": {
+                "1": {
+                    "name": "punctuation.section.block.end.aura"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#code"
+                }
+            ]
         },
         "struct-declaration": {
-            "match": "(?:(data|sealed)\\s+)?(struct)\\s+(\\b\\w+\\b)(?:\\s*<[^>]+>)?",
-            "captures": {
+            "begin": "(?:(data|sealed)\\s+)?(struct)\\s+(\\b\\w+\\b)(?:\\s*<[^>]+>)?(?:\\s*\\([^)]*\\))?\\s*(\\{)",
+            "beginCaptures": {
                 "1": {
                     "name": "storage.modifier.other.aura"
                 },
@@ -367,12 +393,89 @@
                 },
                 "3": {
                     "name": "entity.name.type.struct.aura"
+                },
+                "4": {
+                    "name": "punctuation.section.block.begin.aura"
                 }
-            }
+            },
+            "end": "(^\\s*\\})",
+            "endCaptures": {
+                "1": {
+                    "name": "punctuation.section.block.end.aura"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#member-variable"
+                },
+                {
+                    "include": "#code"
+                }
+            ]
+        },
+        "struct-declaration-nobody": {
+            "begin": "(?:(data|sealed)\\s+)?(struct)\\s+(\\b\\w+\\b)(?:\\s*<[^>]+>)?(\\s*\\()",
+            "beginCaptures": {
+                "1": {
+                    "name": "storage.modifier.other.aura"
+                },
+                "2": {
+                    "name": "storage.type.struct.aura"
+                },
+                "3": {
+                    "name": "entity.name.type.struct.aura"
+                },
+                "4": {
+                    "name": "punctuation.section.parameters.begin.aura"
+                }
+            },
+            "end": "(\\))",
+            "endCaptures": {
+                "1": {
+                    "name": "punctuation.section.parameters.end.aura"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#struct-param-property"
+                },
+                {
+                    "include": "#parameter-declaration"
+                },
+                {
+                    "include": "#code"
+                }
+            ]
+        },
+        "struct-param-property": {
+            "patterns": [
+                {
+                    "match": "\\b(val)\\s+(\\w+)",
+                    "captures": {
+                        "1": {
+                            "name": "storage.type.variable.readonly.aura"
+                        },
+                        "2": {
+                            "name": "variable.parameter.aura"
+                        }
+                    }
+                },
+                {
+                    "match": "\\b(var)\\s+(\\w+)",
+                    "captures": {
+                        "1": {
+                            "name": "storage.type.variable.aura"
+                        },
+                        "2": {
+                            "name": "variable.parameter.aura"
+                        }
+                    }
+                }
+            ]
         },
         "class-declaration": {
-            "match": "(?:(sealed|data)\\s+)?(class)\\s+(\\b\\w+\\b)(?:\\s*<[^>]+>)?(?:\\s*:\\s*(\\b\\w+\\b))?",
-            "captures": {
+            "begin": "(?:(sealed|data)\\s+)?(class)\\s+(\\b\\w+\\b)(?:\\s*<[^>]+>)?(?:\\s*:\\s*(\\b\\w+\\b)(\\s*<[^>]+>)?(?:\\s*\\([^)]*\\))?)?\\s*(\\{)",
+            "beginCaptures": {
                 "1": {
                     "name": "storage.modifier.other.aura"
                 },
@@ -384,8 +487,28 @@
                 },
                 "4": {
                     "name": "entity.name.type.superclass.aura"
+                },
+                "5": {
+                    "name": "entity.name.type.aura"
+                },
+                "6": {
+                    "name": "punctuation.section.block.begin.aura"
                 }
-            }
+            },
+            "end": "(^\\s*\\})",
+            "endCaptures": {
+                "1": {
+                    "name": "punctuation.section.block.end.aura"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#member-variable"
+                },
+                {
+                    "include": "#code"
+                }
+            ]
         },
         "enum-declaration": {
             "match": "(?:(sealed|data)\\s+)?(enum)\\s+(\\b\\w+\\b)",
@@ -402,8 +525,8 @@
             }
         },
         "interface-declaration": {
-            "match": "(?:(sealed|data)\\s+)?(interface)\\s+(\\b\\w+\\b)(?:\\s*<[^>]+>)?",
-            "captures": {
+            "begin": "(?:(sealed|data)\\s+)?(interface)\\s+(\\b\\w+\\b)(?:\\s*<[^>]+>)?\\s*(\\{)",
+            "beginCaptures": {
                 "1": {
                     "name": "storage.modifier.other.aura"
                 },
@@ -412,12 +535,29 @@
                 },
                 "3": {
                     "name": "entity.name.type.interface.aura"
+                },
+                "4": {
+                    "name": "punctuation.section.block.begin.aura"
                 }
-            }
+            },
+            "end": "(^\\s*\\})",
+            "endCaptures": {
+                "1": {
+                    "name": "punctuation.section.block.end.aura"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#member-variable"
+                },
+                {
+                    "include": "#code"
+                }
+            ]
         },
         "actor-declaration": {
-            "match": "(?:(sealed|data)\\s+)?(actor)\\s+(\\b\\w+\\b)",
-            "captures": {
+            "begin": "(?:(sealed|data)\\s+)?(actor)\\s+(\\b\\w+\\b)\\s*(\\{)",
+            "beginCaptures": {
                 "1": {
                     "name": "storage.modifier.other.aura"
                 },
@@ -426,12 +566,29 @@
                 },
                 "3": {
                     "name": "entity.name.type.actor.aura"
+                },
+                "4": {
+                    "name": "punctuation.section.block.begin.aura"
                 }
-            }
+            },
+            "end": "(^\\s*\\})",
+            "endCaptures": {
+                "1": {
+                    "name": "punctuation.section.block.end.aura"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#member-variable"
+                },
+                {
+                    "include": "#code"
+                }
+            ]
         },
         "object-declaration": {
-            "match": "(?:(sealed|data)\\s+)?(object)\\s+(\\b\\w+\\b)",
-            "captures": {
+            "begin": "(?:(sealed|data)\\s+)?(object)\\s+(\\b\\w+\\b)\\s*(\\{)",
+            "beginCaptures": {
                 "1": {
                     "name": "storage.modifier.other.aura"
                 },
@@ -440,8 +597,25 @@
                 },
                 "3": {
                     "name": "entity.name.type.object.aura"
+                },
+                "4": {
+                    "name": "punctuation.section.block.begin.aura"
                 }
-            }
+            },
+            "end": "(^\\s*\\})",
+            "endCaptures": {
+                "1": {
+                    "name": "punctuation.section.block.end.aura"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#member-variable"
+                },
+                {
+                    "include": "#code"
+                }
+            ]
         },
         "type-alias": {
             "match": "\\b(typealias)\\s+(\\b\\w+\\b)(?:\\s*<[^>]+>)?",
@@ -456,15 +630,24 @@
         },
 
         "function-declaration": {
-            "match": "\\b(fun)\\b\\s*(?:<[^>]+>)?\\s*(\\b\\w+\\b|`[^`]+`)",
-            "captures": {
+            "begin": "\\b(fun)\\b\\s*(?:<[^>]+>)?\\s*(\\b\\w+\\b|`[^`]+`)(?:<[^>]+>)?(\\s*\\()",
+            "beginCaptures": {
                 "1": {
                     "name": "storage.type.function.aura"
                 },
                 "2": {
                     "name": "entity.name.function.declaration.aura"
                 }
-            }
+            },
+            "end": "(\\))",
+            "patterns": [
+                {
+                    "include": "#parameter-declaration"
+                },
+                {
+                    "include": "#code"
+                }
+            ]
         },
         "parameter-declaration": {
             "match": "(\\b\\w+\\b)\\s*(:)\\s*([\\w?]+(?:<[^>]+>)?)(\\?)?(,)?",
@@ -510,27 +693,38 @@
         },
 
         "for-loop-variable": {
-            "match": "\\b(for)\\s*\\(\\s*(\\w+)(?::\\s*[^)]*?)?\\s+in\\b",
+            "match": "\\b(for)\\s*\\(\\s*(\\w+)(?::\\s*[^)]*?)?\\s+(in)\\b",
             "captures": {
                 "1": {
                     "name": "keyword.control.aura"
                 },
                 "2": {
                     "name": "variable.parameter.aura"
+                },
+                "3": {
+                    "name": "keyword.hard.aura"
                 }
             }
         },
 
+        "constant-name": {
+            "match": "\\b([A-Z][A-Z0-9_]*)(?=\\s*[:=])",
+            "captures": {
+                "1": {
+                    "name": "variable.other.constant.aura"
+                }
+            }
+        },
         "variable": {
             "match": "\\b(\\w+)(?=\\s*[:=])",
             "captures": {
                 "1": {
-                    "name": "variable.other.definition.aura"
+                    "name": "variable.other.readwrite.aura"
                 }
             }
         },
         "object": {
-            "match": "\\b(\\w+)(?=\\.)",
+            "match": "\\b([a-zA-Z]\\w*)(?=\\.)",
             "captures": {
                 "1": {
                     "name": "variable.other.object.aura"
@@ -573,16 +767,62 @@
         },
 
         "function-call": {
-            "match": "(?:(\\?\\.)|(\\.))?(\\b\\w+\\b|`[^`]+`)(?:\\s*<[^>]+>)?\\s*(?=\\()",
-            "captures": {
+            "begin": "((?:(?:\\.|\\?\\.))?)((?!(?:this|super)\\b)(?:(?:\\w+\\.)*\\w+|`[^`]+`))((?:<[^>]+>)?)(\\s*\\()",
+            "beginCaptures": {
                 "1": {
-                    "name": "punctuation.accessor.optional.aura"
+                    "name": "punctuation.accessor.aura"
                 },
                 "2": {
-                    "name": "punctuation.separator.period.aura"
+                    "name": "entity.name.function.call.aura"
                 },
                 "3": {
-                    "name": "entity.name.function.call.aura"
+                    "name": "entity.name.type.aura"
+                }
+            },
+            "end": "\\)",
+            "patterns": [
+                {
+                    "include": "#named-argument"
+                },
+                {
+                    "include": "#string"
+                },
+                {
+                    "include": "#comments"
+                },
+                {
+                    "include": "#code"
+                }
+            ]
+        },
+        "std-function-call": {
+            "begin": "(aura\\.\\w+\\.\\w+)(\\s*\\()",
+            "beginCaptures": {
+                "1": {
+                    "name": "support.function.std.aura"
+                }
+            },
+            "end": "\\)",
+            "patterns": [
+                {
+                    "include": "#named-argument"
+                },
+                {
+                    "include": "#string"
+                },
+                {
+                    "include": "#comments"
+                },
+                {
+                    "include": "#code"
+                }
+            ]
+        },
+        "named-argument": {
+            "match": "\\b(\\w+)(?=\\s*=[^=])",
+            "captures": {
+                "1": {
+                    "name": "variable.parameter.aura"
                 }
             }
         },
@@ -601,9 +841,12 @@
             }
         },
         "method-reference": {
-            "match": "\\??::(\\b\\w+\\b|`[^`]+`)",
+            "match": "(\\??::)(\\b\\w+\\b|`[^`]+`)",
             "captures": {
                 "1": {
+                    "name": "keyword.operator.method-reference.aura"
+                },
+                "2": {
                     "name": "entity.name.function.reference.aura"
                 }
             }
@@ -774,6 +1017,15 @@
         "enum-variant": {
             "match": "\\b([A-Z]\\w*)\\b",
             "name": "entity.name.enum.variant.aura"
+        },
+
+        "member-variable": {
+            "match": "\\b(\\w+)(?=\\s*[:=])",
+            "captures": {
+                "1": {
+                    "name": "variable.field.aura"
+                }
+            }
         }
     }
 }

@@ -321,9 +321,49 @@ fn emit_c_expr(s: &mut String, expr: &HirExpr) {
             // P10.1: await — 直接返回内部值
             emit_c_expr(s, inner)
         }
-        // Fix 4: Lambda — C 后端暂不支持闭包
-        HirExpr::Lambda { .. } => {
-            s.push_str("(void*)0 /* TODO: lambda */")
+        // Phase 5: Lambda — C 后端支持（生成静态函数 + 函数指针）
+        HirExpr::Lambda { params, body } => {
+            // 生成 Lambda 函数名
+            let func_name = format!("__lambda_{}", CBackendCtx::lambda_counter());
+            CBackendCtx::inc_lambda_counter();
+
+            // 收集捕获变量
+            let mut captures: Vec<String> = Vec::new();
+            for stmt in &body.stmts {
+                collect_free_vars_c_in_stmt(stmt, params, &mut captures);
+            }
+
+            // 生成函数声明（用户参数 + 捕获参数）
+            let mut params_strs: Vec<String> = Vec::new();
+            for (i, p) in params.iter().enumerate() {
+                let default_ty = HirType::Named("Int".into());
+                let ty = map_type(p.ty.as_ref().unwrap_or(&default_ty));
+                params_strs.push(format!("{} arg_{}", ty, i));
+            }
+            // 捕获参数作为额外参数
+            for (i, cap) in captures.iter().enumerate() {
+                params_strs.push(format!("void* cap_{}", i));
+            }
+
+            // 生成函数定义
+            let params_str = if params_strs.is_empty() {
+                "void".to_string()
+            } else {
+                params_strs.join(", ")
+            };
+
+            s.push_str(&format!(
+                "static int32_t {}({}) {{\n",
+                func_name, params_str
+            ));
+
+            // 发射函数体（带缩进）
+            emit_c_block(s, body, 1);
+
+            s.push_str("}\n");
+
+            // 返回函数指针
+            s.push_str(&format!("(void*)&{}", func_name));
         }
     }
 }
@@ -488,4 +528,138 @@ mod tests {
         let mut parser = Parser::new(tokens);
         parser.parse_program()
     }
+}
+
+/// Phase 5: C 后端 Lambda 计数器（静态全局）
+static mut LAMBDA_COUNTER: u64 = 0;
+
+struct CBackendCtx;
+
+impl CBackendCtx {
+    fn lambda_counter() -> u64 {
+        unsafe { LAMBDA_COUNTER }
+    }
+
+    fn inc_lambda_counter() {
+        unsafe { LAMBDA_COUNTER += 1 }
+    }
+}
+
+/// Phase 5: 收集 Lambda body 中的自由变量（C 后端）
+fn collect_free_vars_c(
+    expr: &HirExpr,
+    params: &[crate::codegen::hir::HirParam],
+    captures: &mut Vec<String>,
+) {
+    let param_names: std::collections::HashSet<&str> =
+        params.iter().map(|p| p.name.as_str()).collect();
+
+    match expr {
+        HirExpr::Var(name) => {
+            if !param_names.contains(name.as_str())
+                && !captures.contains(name)
+                && !is_builtin_c(name)
+            {
+                captures.push(name.clone());
+            }
+        }
+        HirExpr::Binary { lhs, rhs, .. } => {
+            collect_free_vars_c(lhs, params, captures);
+            collect_free_vars_c(rhs, params, captures);
+        }
+        HirExpr::Unary { operand, .. } => {
+            collect_free_vars_c(operand, params, captures);
+        }
+        HirExpr::Call { callee, args, .. } => {
+            if !is_builtin_c(callee) {
+                collect_free_vars_c(&HirExpr::Var(callee.clone()), params, captures);
+            }
+            for arg in args {
+                collect_free_vars_c(arg, params, captures);
+            }
+        }
+        HirExpr::Member { object, .. } => {
+            collect_free_vars_c(object, params, captures);
+        }
+        HirExpr::Index { container, index, .. } => {
+            collect_free_vars_c(container, params, captures);
+            collect_free_vars_c(index, params, captures);
+        }
+        HirExpr::Block(block) => {
+            for stmt in &block.stmts {
+                collect_free_vars_c_in_stmt(stmt, params, captures);
+            }
+        }
+        HirExpr::Lambda { params: inner_params, body, .. } => {
+            let _ = inner_params;
+            for stmt in &body.stmts {
+                collect_free_vars_c_in_stmt(stmt, params, captures);
+            }
+        }
+        HirExpr::If { cond, then_e, else_e } => {
+            collect_free_vars_c(cond, params, captures);
+            collect_free_vars_c(then_e, params, captures);
+            collect_free_vars_c(else_e, params, captures);
+        }
+        _ => {}
+    }
+}
+
+/// Phase 5: 在语句中收集自由变量（C 后端）
+fn collect_free_vars_c_in_stmt(
+    stmt: &HirStmt,
+    params: &[crate::codegen::hir::HirParam],
+    captures: &mut Vec<String>,
+) {
+    match stmt {
+        HirStmt::Val { init, .. } | HirStmt::Var { init, .. } => {
+            if let Some(e) = init {
+                collect_free_vars_c(e, params, captures);
+            }
+        }
+        HirStmt::Assign { target, value } => {
+            collect_free_vars_c(target, params, captures);
+            collect_free_vars_c(value, params, captures);
+        }
+        HirStmt::Expr(e) => {
+            collect_free_vars_c(e, params, captures);
+        }
+        HirStmt::Return(Some(e)) => {
+            collect_free_vars_c(e, params, captures);
+        }
+        HirStmt::If { cond, then_b, else_b, .. } => {
+            collect_free_vars_c(cond, params, captures);
+            for stmt in &then_b.stmts {
+                collect_free_vars_c_in_stmt(stmt, params, captures);
+            }
+            if let Some(b) = else_b {
+                for stmt in &b.stmts {
+                    collect_free_vars_c_in_stmt(stmt, params, captures);
+                }
+            }
+        }
+        HirStmt::While { cond, body, .. } => {
+            collect_free_vars_c(cond, params, captures);
+            for stmt in &body.stmts {
+                collect_free_vars_c_in_stmt(stmt, params, captures);
+            }
+        }
+        HirStmt::Block(block) => {
+            for stmt in &block.stmts {
+                collect_free_vars_c_in_stmt(stmt, params, captures);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Phase 5: 检查是否为内置函数/变量（C 后端）
+fn is_builtin_c(name: &str) -> bool {
+    matches!(
+        name,
+        "println" | "print" | "puts" | "abs" | "sqrt" | "pow"
+            | "toInt" | "toFloat" | "toStr" | "toString"
+            | "clock" | "strlen" | "malloc" | "free"
+            | "true" | "false" | "null"
+    )
 }

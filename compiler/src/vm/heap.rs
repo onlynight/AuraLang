@@ -34,6 +34,23 @@ pub enum HeapData {
     List(Vec<Value>),
     /// 哈希映射（5.7）：键值对集合
     Map(HashMap<Value, Value>),
+    /// 闭包（Phase 2）：捕获的变量 + 函数体引用
+    Closure {
+        /// 闭包函数名
+        func_name: String,
+        /// 参数数量（用户参数）
+        param_count: u16,
+        /// 局部变量槽总数
+        locals: u16,
+        /// 捕获的值
+        captures: Vec<Value>,
+        /// 闭包函数在函数表中的索引
+        func_idx: usize,
+    },
+    /// 枚举值（Phase 3）：变体索引
+    Enum(u16),
+    /// 函数引用（Phase 3）：函数在函数表中的索引
+    FnRef(usize),
 }
 
 /// 堆槽（含引用计数与回收标记）
@@ -161,7 +178,7 @@ impl Heap {
     }
 
     /// Fix 13: 内部分配方法（记录到 allocated 列表）
-    fn alloc(&mut self, data: HeapData) -> usize {
+    pub fn alloc(&mut self, data: HeapData) -> usize {
         let h = if let Some(h) = self.free.pop() {
             self.slots[h] = HeapSlot {
                 rc: 1,
@@ -248,6 +265,11 @@ impl Heap {
             }
             _ => Value::Null,
         }
+    }
+
+    /// 获取堆数据（可变引用，用于闭包等特殊类型）
+    pub fn get_data_mut(&mut self, handle: usize) -> Option<&mut HeapData> {
+        self.slots.get_mut(handle).and_then(|s| s.data.as_mut())
     }
 
     /// 写入对象字段
@@ -403,6 +425,9 @@ fn describe_heap_data(data: Option<&HeapData>) -> String {
         Some(HeapData::Array(_)) => "Array".to_string(),
         Some(HeapData::List(_)) => "List".to_string(),
         Some(HeapData::Map(_)) => "Map".to_string(),
+        Some(HeapData::Closure { .. }) => "Closure".to_string(),
+        Some(HeapData::Enum(_)) => "Enum".to_string(),
+        Some(HeapData::FnRef(_)) => "FnRef".to_string(),
         None => "Unknown".to_string(),
     }
 }
@@ -429,5 +454,8 @@ fn last_heap_value(data: &HeapData) -> Value {
         HeapData::Array(elems) => elems.last().cloned().unwrap_or(Value::Null),
         HeapData::List(elems) => elems.last().cloned().unwrap_or(Value::Null),
         HeapData::Map(map) => map.values().next().cloned().unwrap_or(Value::Null),
+        HeapData::Closure { .. } => Value::Null,
+        HeapData::Enum(_) => Value::Null,
+        HeapData::FnRef(_) => Value::Null,
     }
 }

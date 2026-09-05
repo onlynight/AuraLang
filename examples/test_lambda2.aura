@@ -1,0 +1,3 @@
+// 简单 Lambda 测试 - 不调用
+val f = x -> x * 2
+println("Lambda created")

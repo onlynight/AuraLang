@@ -45,6 +45,12 @@ pub struct Checker {
     interface_types: HashSet<String>,
     /// 当前正在检查的类型上下文（用于 private 成员访问判断）
     current_type: Option<String>,
+
+    // ── P3.10 增强：suspend 函数追踪（Phase 1 await 语义修正） ──
+    /// 当前是否处于 suspend/async 函数体内
+    is_in_suspend_fn: bool,
+    /// 被标记为 suspend/async 的函数名集合（用于调用检查）
+    suspend_functions: HashSet<String>,
 }
 
 impl Checker {
@@ -146,6 +152,8 @@ impl Checker {
             sealed_types: HashSet::new(),
             interface_types: HashSet::new(),
             current_type: None,
+            is_in_suspend_fn: false,
+            suspend_functions: HashSet::new(),
         }
     }
 
@@ -205,6 +213,10 @@ impl Checker {
                 ) {
                     self.report(f.span, format!("duplicate function '{}'", dup));
                 }
+                // Phase 1: 追踪 suspend/async 函数
+                if f.modifiers.iter().any(|m| matches!(m, FnModifier::Suspend | FnModifier::Async)) {
+                    self.suspend_functions.insert(f.name.clone());
+                }
                 let _ = ret;
             }
             Decl::Struct(s) => {
@@ -235,13 +247,18 @@ impl Checker {
                         .as_deref()
                         .map(ast_type_to_ty)
                         .unwrap_or(Ty::Unit);
+                    let full_name = format!("{}.{}", s.name, m.name);
                     let _ = self.symbols.insert_function(
-                        format!("{}.{}", s.name, m.name),
+                        full_name.clone(),
                         params,
                         ret,
                         m.visibility,
                         m.span,
                     );
+                    // Phase 1: 追踪 suspend 方法
+                    if m.modifiers.iter().any(|mod_| matches!(mod_, FnModifier::Suspend | FnModifier::Async)) {
+                        self.suspend_functions.insert(full_name);
+                    }
                 }
             }
             Decl::Enum(e) => {
@@ -257,6 +274,13 @@ impl Checker {
                     .register_type(c.name.clone(), Ty::Named(c.name.clone()));
                 self.record_generic_bounds(&c.name, &c.type_params);
                 self.record_members(&c.name, &c.fields, &c.methods);
+                // Phase 1: 追踪 suspend 方法
+                for m in &c.methods {
+                    let full_name = format!("{}.{}", c.name, m.name);
+                    if m.modifiers.iter().any(|mod_| matches!(mod_, FnModifier::Suspend | FnModifier::Async)) {
+                        self.suspend_functions.insert(full_name);
+                    }
+                }
                 if c.sealed {
                     self.sealed_types.insert(c.name.clone());
                 }
@@ -272,6 +296,13 @@ impl Checker {
                 self.symbols
                     .register_type(a.name.clone(), Ty::Named(a.name.clone()));
                 self.record_members(&a.name, &a.fields, &a.methods);
+                // Phase 1: 追踪 suspend 方法
+                for m in &a.methods {
+                    let full_name = format!("{}.{}", a.name, m.name);
+                    if m.modifiers.iter().any(|mod_| matches!(mod_, FnModifier::Suspend | FnModifier::Async)) {
+                        self.suspend_functions.insert(full_name);
+                    }
+                }
             }
             Decl::TypeAlias(t) => {
                 let target = ast_type_to_ty(t.aliased_type.as_ref());
@@ -599,6 +630,11 @@ impl Checker {
         self.symbols.enter_scope(true);
         self.var_env.push(HashMap::new());
 
+        // Phase 1: 追踪 suspend 状态
+        let saved_suspend = self.is_in_suspend_fn;
+        self.is_in_suspend_fn = f.modifiers.iter()
+            .any(|m| matches!(m, FnModifier::Suspend | FnModifier::Async));
+
         let saved_ret = self.current_fn_return.take();
         self.current_fn_return = Some(
             f.return_type
@@ -633,6 +669,7 @@ impl Checker {
         }
 
         self.current_fn_return = saved_ret;
+        self.is_in_suspend_fn = saved_suspend;
         self.var_env.pop();
         self.symbols.exit_scope();
     }
@@ -959,7 +996,16 @@ impl Checker {
                 self.check_expr(block);
                 Ty::Unit
             }
-            Expr::Await { expr, .. } => self.check_expr(expr),
+            Expr::Await { expr, span } => {
+                let et = self.check_expr(expr);
+                if !self.is_in_suspend_fn {
+                    self.report(
+                        *span,
+                        "await can only be used in suspend/async functions",
+                    );
+                }
+                et
+            }
             Expr::Select { branches, .. } => {
                 // select 多路复用：检查所有分支的 pattern 表达式
                 for branch in branches {
@@ -1288,6 +1334,17 @@ impl Checker {
         }
         let name = overloads[0].name.clone();
 
+        // Phase 1: 检查从非 suspend 上下文调用 suspend 函数
+        if !self.is_in_suspend_fn && self.suspend_functions.contains(&name) {
+            self.report(
+                span,
+                format!(
+                    "calling suspend function '{}' from non-suspend context",
+                    name
+                ),
+            );
+        }
+
         // 每个实参只检查一次（避免重复诊断与重复副作用）
         let arg_types: Vec<Ty> = args.iter().map(|a| self.check_expr(a)).collect();
 
@@ -1507,7 +1564,12 @@ impl Checker {
                     return t;
                 }
                 // 枚举变体
-                let variant = format!("{}.{}", type_name, name);
+                if let Some(variants) = self.enum_variants.get(type_name) {
+                    if variants.iter().any(|v| v.as_str() == name) {
+                        // 枚举变体访问：返回枚举类型本身
+                        return Ty::Named(type_name.clone());
+                    }
+                }
                 if self.symbols.lookup_type(type_name).is_some() {
                     self.report(
                         span,
@@ -1515,7 +1577,6 @@ impl Checker {
                     );
                     return Ty::Error;
                 }
-                let _ = variant;
                 Ty::Error
             }
             Ty::String => match name {

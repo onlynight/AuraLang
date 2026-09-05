@@ -1,0 +1,7 @@
+// 简单 Lambda 测试 - 带括号，逐步测试
+println("Step 1")
+val f = (x) -> x * 2
+println("Step 2")
+val result = f(21)
+println("Step 3")
+println(result)

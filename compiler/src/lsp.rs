@@ -424,16 +424,23 @@ impl LspHandler {
         Self { engine: IncrementalEngine::new() }
     }
 
+    /// 处理一条 JSON-RPC 消息。
+    /// 仅对带 id 的请求返回响应；通知（notification，无 id）返回 None（协议规范）。
     pub fn handle(&mut self, message: &str) -> Option<LspResponse> {
         let value: serde_json::Value = serde_json::from_str(message).ok()?;
-        let id = value.get("id").cloned().unwrap_or(serde_json::Value::Null);
         let method = value.get("method").and_then(|m| m.as_str())?;
+        let id = value.get("id").cloned();
+
+        // 通知（无 id）不产生响应
+        let id = match id {
+            Some(id) => id,
+            None => return None,
+        };
 
         let result = match method {
             "initialize" => self.handle_initialize(),
-            "initialized" => serde_json::json!({}),
-            "shutdown" => serde_json::json!({}),
-            "exit" => serde_json::json!({}),
+            "shutdown" => serde_json::json!(null),
+            "exit" => serde_json::json!(null),
             "textDocument/didOpen" => self.handle_did_open(&value["params"]),
             "textDocument/didChange" => self.handle_did_change(&value["params"]),
             "textDocument/didClose" => self.handle_did_close(&value["params"]),

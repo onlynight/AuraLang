@@ -1,8 +1,11 @@
 /**
  * 诊断管理器
  *
- * 管理 Aura 编译器的诊断信息，
- * 包括错误、警告、信息和建议。
+ * 管理 Aura 编译器的诊断信息（手动 `aura.openDiagnostic` 命令使用）。
+ * 常规的实时诊断由 LSP 客户端（vscode-languageclient 的拉取诊断）负责，
+ * 本管理器仅用于主动请求并展示一次诊断结果。
+ *
+ * @version 0.1.3
  */
 
 import * as vscode from "vscode";
@@ -23,67 +26,20 @@ interface LspDiagnostic {
  */
 export class DiagnosticManager implements vscode.Disposable {
     private diagnostics: Map<string, LspDiagnostic[]> = new Map();
-    private scheduledUpdates: Map<string, NodeJS.Timeout> = new Map();
+    private collection = vscode.languages.createDiagnosticCollection("aura");
 
     constructor() {
-        // 监听文档打开，自动请求诊断
-        vscode.workspace.onDidOpenTextDocument((doc) => {
-            if (doc.languageId === "aura") {
-                this.scheduleUpdate(doc.uri);
-            }
-        });
-
-        // 监听文档关闭
+        // 文档关闭时清理
         vscode.workspace.onDidCloseTextDocument((doc) => {
             if (doc.languageId === "aura") {
                 this.diagnostics.delete(doc.uri.toString());
+                this.collection.delete(doc.uri);
             }
         });
     }
 
     /**
-     * 调度诊断更新（防抖）
-     */
-    scheduleUpdate(uri: vscode.Uri, delay: number = 300): void {
-        const key = uri.toString();
-
-        // 清除已调度的更新
-        const existing = this.scheduledUpdates.get(key);
-        if (existing) {
-            clearTimeout(existing);
-        }
-
-        // 调度新更新
-        this.scheduledUpdates.set(
-            key,
-            setTimeout(async () => {
-                this.scheduledUpdates.delete(key);
-                await this.requestDiagnostics(uri);
-            }, delay)
-        );
-    }
-
-    /**
-     * 请求诊断
-     */
-    private async requestDiagnostics(uri: vscode.Uri): Promise<void> {
-        const client = await import("./client").then((m) => m.getLSPClient());
-        if (!client) return;
-
-        try {
-            const result = await client.sendRequest(
-                "textDocument/diagnostic",
-                { textDocument: { uri: uri.toString() } }
-            );
-
-            this.updateDiagnostics(uri, result);
-        } catch (err) {
-            console.error("[Aura] 诊断请求失败:", err);
-        }
-    }
-
-    /**
-     * 更新诊断
+     * 更新诊断（单次请求结果）
      */
     updateDiagnostics(uri: vscode.Uri, raw: unknown): void {
         if (!Array.isArray(raw)) return;
@@ -105,9 +61,7 @@ export class DiagnosticManager implements vscode.Disposable {
         this.diagnostics.set(key, raw as LspDiagnostic[]);
 
         // 发布到 VS Code
-        const collection =
-            vscode.languages.createDiagnosticCollection("aura");
-        collection.set(uri, diagnostics);
+        this.collection.set(uri, diagnostics);
     }
 
     /**
@@ -139,10 +93,7 @@ export class DiagnosticManager implements vscode.Disposable {
      * 清理
      */
     dispose(): void {
-        for (const timeout of this.scheduledUpdates.values()) {
-            clearTimeout(timeout);
-        }
-        this.scheduledUpdates.clear();
         this.diagnostics.clear();
+        this.collection.dispose();
     }
 }

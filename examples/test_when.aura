@@ -1,0 +1,18 @@
+enum GameState {
+    Menu,
+    Playing,
+}
+
+fun test() {
+    var gs = GameState.Menu
+    when (gs) {
+        GameState.Menu -> {
+            println("Menu")
+        }
+        GameState.Playing -> {
+            println("Playing")
+        }
+    }
+}
+
+test()

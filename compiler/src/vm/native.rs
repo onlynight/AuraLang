@@ -61,11 +61,13 @@ impl NativeRegistry {
             r.register("aura.concurrent.spawn", native_spawn);
             r.register("aura.concurrent.send", native_send);
             r.register("aura.concurrent.ask", native_ask);
+            r.register("aura.concurrent.reply", native_reply);
             r.register("aura.concurrent.newChannel", native_new_channel);
             r.register("aura.concurrent.channelSend", native_channel_send);
             r.register("aura.concurrent.channelRecv", native_channel_recv);
             r.register("aura.concurrent.channelTryRecv", native_channel_try_recv);
             r.register("aura.concurrent.select", native_select);
+            r.register("aura.concurrent.selectTimeout", native_select_timeout);
             r.register("aura.concurrent.spawnActor", native_spawn_actor);
             r.register("aura.concurrent.supervise", native_supervise);
             r.register("aura.concurrent.actorAlive", native_actor_alive);
@@ -114,11 +116,13 @@ impl NativeRegistry {
             r.register("aura.concurrent.spawn", native_spawn);
             r.register("aura.concurrent.send", native_send);
             r.register("aura.concurrent.ask", native_ask);
+            r.register("aura.concurrent.reply", native_reply);
             r.register("aura.concurrent.newChannel", native_new_channel);
             r.register("aura.concurrent.channelSend", native_channel_send);
             r.register("aura.concurrent.channelRecv", native_channel_recv);
             r.register("aura.concurrent.channelTryRecv", native_channel_try_recv);
             r.register("aura.concurrent.select", native_select);
+            r.register("aura.concurrent.selectTimeout", native_select_timeout);
             r.register("aura.concurrent.spawnActor", native_spawn_actor);
             r.register("aura.concurrent.supervise", native_supervise);
             r.register("aura.concurrent.actorAlive", native_actor_alive);
@@ -420,6 +424,21 @@ fn native_ask(args: &[Value]) -> Value {
     Value::Null
 }
 
+/// reply(requestId, response) → Unit：回复 Actor 请求（Phase 4）
+#[cfg(feature = "std-concurrent")]
+fn native_reply(args: &[Value]) -> Value {
+    if args.len() >= 2 {
+        let request_id = args[0].as_int() as u64;
+        let response = args[1].clone();
+        if let Some(vm_ptr) = get_vm_ref() {
+            unsafe {
+                (*vm_ptr).actors.reply(request_id, response);
+            }
+        }
+    }
+    Value::Null
+}
+
 /// newChannel(bound) → Int：创建 Channel（P10.8）
 ///
 /// `bound`: 容量上限，0 表示无界
@@ -478,10 +497,13 @@ fn native_channel_try_recv(args: &[Value]) -> Value {
     Value::Null
 }
 
-/// __select(ch1, ch2) → Any：select 多路复用（P10.9）
+/// __select(ch1, ch2, ...) → Any：select 多路复用（P10.9）
+///
+/// 阶段 4.11: 基于协程挂起的非轮询实现
 ///
 /// 检查所有通道，返回第一个有值的通道的值。
-/// 若所有通道均为空，返回 `Null`。
+/// 若所有通道均为空，返回 `Null`（非阻塞模式）。
+/// 返回值格式：`[channel_id, value]` 或 `Null`
 #[cfg(feature = "std-concurrent")]
 fn native_select(args: &[Value]) -> Value {
     if let Some(vm_ptr) = get_vm_ref() {
@@ -494,8 +516,64 @@ fn native_select(args: &[Value]) -> Value {
                     continue;
                 }
                 if !vm.channels.is_empty(ch_id) {
-                    return vm.channels.recv(ch_id);
+                    let val = vm.channels.recv(ch_id);
+                    // 返回 [channel_id, value]
+                    return Value::List(vec![
+                        Value::Int(ch_id as i64),
+                        val,
+                    ]);
                 }
+            }
+        }
+    }
+    // 所有通道均为空，返回 Null（非阻塞）
+    Value::Null
+}
+
+/// __selectTimeout(ch1, ch2, ..., timeoutMs) → Any：带超时的 select（阶段 4.11）
+///
+/// 在 `timeoutMs` 毫秒内等待通道消息，超时返回 `Null`。
+#[cfg(feature = "std-concurrent")]
+fn native_select_timeout(args: &[Value]) -> Value {
+    if args.is_empty() {
+        return Value::Null;
+    }
+
+    // 最后一个参数是超时时间（毫秒）
+    let timeout_arg = args.last().unwrap().clone();
+    let timeout_ms = timeout_arg.as_int();
+    let channels = &args[..args.len() - 1];
+
+    if let Some(vm_ptr) = get_vm_ref() {
+        unsafe {
+            let vm = &mut *vm_ptr;
+            let start = std::time::Instant::now();
+            let poll_interval = std::time::Duration::from_millis(1);
+
+            loop {
+                // 遍历所有通道，找到第一个有值的
+                for arg in channels {
+                    let ch_id = arg.as_int() as usize;
+                    if ch_id == 0 {
+                        continue;
+                    }
+                    if !vm.channels.is_empty(ch_id) {
+                        let val = vm.channels.recv(ch_id);
+                        // 返回 [channel_id, value]
+                        return Value::List(vec![
+                            Value::Int(ch_id as i64),
+                            val,
+                        ]);
+                    }
+                }
+
+                // 检查超时
+                if start.elapsed() >= std::time::Duration::from_millis(timeout_ms as u64) {
+                    return Value::Null;
+                }
+
+                // 休眠后重试（让出 CPU）
+                std::thread::sleep(poll_interval);
             }
         }
     }

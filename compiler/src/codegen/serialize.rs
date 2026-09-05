@@ -347,6 +347,7 @@ pub fn from_bytes(bytes: &[u8]) -> Result<BytecodeModule, SerializeError> {
         consts,
         natives,
         functions,
+        closures: Vec::new(),
         entry,
         enabled_modules,
         module_identity,

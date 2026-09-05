@@ -896,19 +896,27 @@ fn emit_expr_val(
             emit_expr_val(ctx, blocks, inner)
         }
         // P3.3: Lambda — 生成静态函数并返回函数指针
+        // Phase 5: 支持捕获变量
         HirExpr::Lambda { params, body } => {
             let func_name = format!("__lambda_{}", ctx.lambda_counter);
             ctx.lambda_counter += 1;
 
-            // 生成参数列表
-            let param_strs: Vec<String> = params
-                .iter()
-                .enumerate()
-                .map(|(i, p)| {
-                    let ty = p.ty.as_ref().map(|t| ctx.llvm_type(t)).unwrap_or_else(|| "i32".to_string());
-                    format!("{} %arg_{}", ty, i)
-                })
-                .collect();
+            // Phase 5: 收集捕获变量（自由变量）
+            let mut captures: Vec<String> = Vec::new();
+            for stmt in &body.stmts {
+                collect_free_vars_in_stmt(stmt, params, &mut captures);
+            }
+
+            // 生成参数列表（用户参数 + 捕获参数）
+            let mut param_strs: Vec<String> = Vec::new();
+            for (i, p) in params.iter().enumerate() {
+                let ty = p.ty.as_ref().map(|t| ctx.llvm_type(t)).unwrap_or_else(|| "i32".to_string());
+                param_strs.push(format!("{} %arg_{}", ty, i));
+            }
+            // 捕获参数作为额外参数
+            for (i, cap) in captures.iter().enumerate() {
+                param_strs.push(format!("ptr %cap_{}", i));
+            }
 
             // 生成函数体
             let mut func_ir = String::new();
@@ -950,6 +958,13 @@ fn emit_expr_val(
                     VarSlot { llvm_name: format!("%arg_{}", i), llvm_ty: ty },
                 );
             }
+            // 注册捕获变量
+            for (i, cap) in captures.iter().enumerate() {
+                sub_ctx.var_scope.last_mut().unwrap().insert(
+                    cap.clone(),
+                    VarSlot { llvm_name: format!("%cap_{}", i), llvm_ty: "ptr".to_string() },
+                );
+            }
 
             // 发射函数体
             let mut fb = FuncBlocks::new();
@@ -977,14 +992,39 @@ fn emit_expr_val(
 
             ctx.lambda_funcs.push(func_ir);
 
-            // 返回函数地址（LLVM 全局值）
-            let addr = ctx.fresh_var();
+            // Phase 5: 返回闭包结构体（函数指针 + 捕获值）
+            let closure_type = format!("{{ ptr, {} x ptr }}", captures.len());
+            let closure_name = ctx.fresh_var();
             let cur = blocks.last_mut();
+
+            // 分配闭包结构体
+            cur.body.push(format!("{} = alloca {}", closure_name, closure_type));
+
+            // 存储函数指针
             cur.body.push(format!(
-                "{} = getelementptr i8, ptr @{}, i64 0",
-                addr, func_name
+                "store ptr @{}, ptr {}[0]",
+                func_name, closure_name
             ));
-            Ok((addr, "ptr".to_string()))
+
+            // 存储捕获值
+            for (i, cap) in captures.iter().enumerate() {
+                // 加载捕获变量的值
+                let cap_addr = ctx.lookup_var(cap).map(|v| v.llvm_name.clone()).unwrap_or_default();
+                if !cap_addr.is_empty() {
+                    cur.body.push(format!(
+                        "store ptr {}, ptr {}[1][{}]",
+                        cap_addr, closure_name, i
+                    ));
+                } else {
+                    // 未找到捕获变量，存储空指针
+                    cur.body.push(format!(
+                        "store ptr null, ptr {}[1][{}]",
+                        closure_name, i
+                    ));
+                }
+            }
+
+            Ok((closure_name, closure_type))
         }
     }
 }
@@ -1517,4 +1557,125 @@ fn synthesize_main(funcs: &[HirFunction]) -> HirFunction {
         is_native: false,
         type_params: vec![],
     }
+}
+
+/// Phase 5: 收集 Lambda body 中的自由变量（捕获变量）
+fn collect_free_vars(
+    expr: &HirExpr,
+    params: &[crate::codegen::hir::HirParam],
+    captures: &mut Vec<String>,
+) {
+    // 构建参数名集合
+    let param_names: std::collections::HashSet<&str> =
+        params.iter().map(|p| p.name.as_str()).collect();
+
+    match expr {
+        HirExpr::Var(name) => {
+            if !param_names.contains(name.as_str())
+                && !captures.contains(name)
+                && !is_builtin(name)
+            {
+                captures.push(name.clone());
+            }
+        }
+        HirExpr::Binary { lhs, rhs, .. } => {
+            collect_free_vars(lhs, params, captures);
+            collect_free_vars(rhs, params, captures);
+        }
+        HirExpr::Unary { operand, .. } => {
+            collect_free_vars(operand, params, captures);
+        }
+        HirExpr::Call { callee, args, .. } => {
+            if !is_builtin(callee) {
+                collect_free_vars(&HirExpr::Var(callee.clone()), params, captures);
+            }
+            for arg in args {
+                collect_free_vars(arg, params, captures);
+            }
+        }
+        HirExpr::Member { object, .. } => {
+            collect_free_vars(object, params, captures);
+        }
+        HirExpr::Index { container, index, .. } => {
+            collect_free_vars(container, params, captures);
+            collect_free_vars(index, params, captures);
+        }
+        HirExpr::Block(block) => {
+            for stmt in &block.stmts {
+                collect_free_vars_in_stmt(stmt, params, captures);
+            }
+        }
+        HirExpr::Lambda { params: inner_params, body, .. } => {
+            // 嵌套 Lambda：用其参数名作为局部变量（简化处理，直接收集）
+            let _ = inner_params;
+            for stmt in &body.stmts {
+                collect_free_vars_in_stmt(stmt, params, captures);
+            }
+        }
+        HirExpr::If { cond, then_e, else_e } => {
+            collect_free_vars(cond, params, captures);
+            collect_free_vars(then_e, params, captures);
+            collect_free_vars(else_e, params, captures);
+        }
+        _ => {}
+    }
+}
+
+/// Phase 5: 在语句中收集自由变量
+fn collect_free_vars_in_stmt(
+    stmt: &HirStmt,
+    params: &[crate::codegen::hir::HirParam],
+    captures: &mut Vec<String>,
+) {
+    match stmt {
+        HirStmt::Val { init, .. } | HirStmt::Var { init, .. } => {
+            if let Some(e) = init {
+                collect_free_vars(e, params, captures);
+            }
+        }
+        HirStmt::Assign { target, value } => {
+            collect_free_vars(target, params, captures);
+            collect_free_vars(value, params, captures);
+        }
+        HirStmt::Expr(e) => {
+            collect_free_vars(e, params, captures);
+        }
+        HirStmt::Return(Some(e)) => {
+            collect_free_vars(e, params, captures);
+        }
+        HirStmt::If { cond, then_b, else_b, .. } => {
+            collect_free_vars(cond, params, captures);
+            for stmt in &then_b.stmts {
+                collect_free_vars_in_stmt(stmt, params, captures);
+            }
+            if let Some(b) = else_b {
+                for stmt in &b.stmts {
+                    collect_free_vars_in_stmt(stmt, params, captures);
+                }
+            }
+        }
+        HirStmt::While { cond, body, .. } => {
+            collect_free_vars(cond, params, captures);
+            for stmt in &body.stmts {
+                collect_free_vars_in_stmt(stmt, params, captures);
+            }
+        }
+        HirStmt::Block(block) => {
+            for stmt in &block.stmts {
+                collect_free_vars_in_stmt(stmt, params, captures);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Phase 5: 检查是否为内置函数/变量
+fn is_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "println" | "print" | "puts" | "abs" | "sqrt" | "pow"
+            | "toInt" | "toFloat" | "toStr" | "toString"
+            | "clock" | "strlen" | "malloc" | "free"
+            | "true" | "false" | "null"
+    )
 }

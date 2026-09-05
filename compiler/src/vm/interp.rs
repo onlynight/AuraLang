@@ -344,6 +344,88 @@ impl Vm {
                 let cb_id = self.callbacks.register(func_idx as usize);
                 self.frames[top].stack.push(Value::Ptr(cb_id as i64));
             }
+            // Phase 2: 闭包
+            Instr::MakeClosure(closure_idx) => {
+                // 先克隆闭包信息，避免借用冲突
+                let closure_info = self.module.module.closures.get(closure_idx as usize)
+                    .ok_or_else(|| VmError::Runtime(format!("MakeClosure: 闭包 {} 不存在", closure_idx)))?;
+                let closure_name = closure_info.name.clone();
+                let param_count = closure_info.param_count;
+                let locals = closure_info.locals;
+                let capture_count = closure_info.capture_count as usize;
+                let func_idx = closure_info.func_idx as usize;
+                // 弹出捕获值（按序）
+                let mut captures = Vec::with_capacity(capture_count);
+                for _ in 0..capture_count {
+                    captures.push(self.pop(top)?);
+                }
+                // 创建闭包对象
+                let heap_data = crate::vm::heap::HeapData::Closure {
+                    func_name: closure_name,
+                    param_count,
+                    locals,
+                    captures,
+                    func_idx,
+                };
+                let ref_id = self.heap.alloc(heap_data);
+                self.frames[top].stack.push(Value::Ref(ref_id));
+            }
+            Instr::CallClosure => {
+                // 栈：参数...、闭包引用（栈顶）
+                // 弹出闭包引用
+                let closure_val = self.frames[top].stack.last().cloned()
+                    .ok_or_else(|| VmError::Runtime("CallClosure: 空栈".to_string()))?;
+                if let Value::Ref(ref_id) = closure_val {
+                    let heap_data = self.heap.get_data_mut(ref_id);
+                    if let Some(crate::vm::heap::HeapData::Closure {
+                        captures, func_idx, ..
+                    }) = heap_data {
+                        let captures = captures.clone();
+                        let func_idx = *func_idx;
+                        // 弹出闭包引用
+                        self.frames[top].stack.pop();
+                        // 获取闭包函数的实际参数数量（捕获 + 用户参数）
+                        let total_param_count = self.module.funcs[func_idx].param_count as usize;
+                        // 弹出用户参数（总数 - 捕获数）
+                        let user_param_count = total_param_count - captures.len();
+                        let mut args = Vec::with_capacity(user_param_count);
+                        for _ in 0..user_param_count {
+                            args.push(self.pop(top)?);
+                        }
+                        args.reverse();
+                        // 将捕获值作为参数前置
+                        let mut all_args = captures;
+                        all_args.extend(args);
+                        // 将参数压回栈（反转，pop_n 会反转回来）
+                        for arg in all_args.iter().rev() {
+                            self.frames[top].stack.push(arg.clone());
+                        }
+                        // 调用函数
+                        self.do_call(top, func_idx, false)?;
+                    }
+                }
+            }
+            // Phase 3: 枚举
+            Instr::EnumConstruct(variant_idx) => {
+                // 将枚举值作为 Int 压栈（变体索引）
+                self.frames[top].stack.push(Value::Int(variant_idx as i64));
+            }
+            Instr::EnumTag => {
+                // 弹出栈顶值，提取变体索引（如果是 Enum 类型）
+                let val = self.pop(top)?;
+                let tag = match val {
+                    Value::Int(i) => i as u16,
+                    _ => 0,
+                };
+                self.frames[top].stack.push(Value::Int(tag as i64));
+            }
+            // Phase 3: 函数引用
+            Instr::MakeFnRef(func_idx) => {
+                // 创建函数引用对象
+                let heap_data = crate::vm::heap::HeapData::FnRef(func_idx as usize);
+                let ref_id = self.heap.alloc(heap_data);
+                self.frames[top].stack.push(Value::Ref(ref_id));
+            }
             // Phase 2: 跨模块调用
             Instr::CallExport(sym_idx) => {
                 // 从导出符号表查找函数索引

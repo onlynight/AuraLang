@@ -282,6 +282,16 @@ pub enum Instr {
     IntToPtr,
     /// 创建 C 回调蹦床
     MakeCallback(u16),
+    /// 创建闭包（Phase 2）
+    MakeClosure(u16),
+    /// 调用闭包（Phase 2）
+    CallClosure,
+    /// 构造枚举变体（Phase 3）
+    EnumConstruct(u16),
+    /// 获取枚举变体索引（Phase 3）
+    EnumTag,
+    /// 创建函数引用（Phase 3）
+    MakeFnRef(u16),
 
     // ── Phase 2: 跨模块调用 ──
     /// 调用同模块内导出符号
@@ -486,6 +496,27 @@ fn decode_function(f: &BytecodeFunction) -> Result<DecodedFunction, VmError> {
                 let v = u16::from_le_bytes([code[ip], code[ip + 1]]);
                 ip += 2;
                 instrs.push(Instr::MakeCallback(v));
+            }
+            crate::codegen::opcode::OpCode::MakeClosure(_) => {
+                let v = u16::from_le_bytes([code[ip], code[ip + 1]]);
+                ip += 2;
+                instrs.push(Instr::MakeClosure(v));
+            }
+            crate::codegen::opcode::OpCode::CallClosure => {
+                instrs.push(Instr::CallClosure);
+            }
+            crate::codegen::opcode::OpCode::EnumConstruct(_) => {
+                let v = u16::from_le_bytes([code[ip], code[ip + 1]]);
+                ip += 2;
+                instrs.push(Instr::EnumConstruct(v));
+            }
+            crate::codegen::opcode::OpCode::EnumTag => {
+                instrs.push(Instr::EnumTag);
+            }
+            crate::codegen::opcode::OpCode::MakeFnRef(_) => {
+                let v = u16::from_le_bytes([code[ip], code[ip + 1]]);
+                ip += 2;
+                instrs.push(Instr::MakeFnRef(v));
             }
             crate::codegen::opcode::OpCode::CallExport(_) => {
                 let v = u16::from_le_bytes([code[ip], code[ip + 1]]);

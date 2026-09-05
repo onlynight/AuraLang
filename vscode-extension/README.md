@@ -30,8 +30,17 @@
 cd vscode-extension
 npm install
 npm run compile
-code --install-extension aura-language-0.1.0.vsix
+code --install-extension aura-language-0.1.4.vsix
 ```
+
+> **LSP 功能要求**：补全、跳转定义、悬停、诊断、格式化由 LSP 服务器提供，
+> 需要可用的 `aura lsp` 可执行文件。扩展会自动查找：
+> 1. 配置项 `aura.serverPath`（绝对路径）
+> 2. 当前工作区内的构建产物（`target/debug/aura`、`target/release/aura`、`bin/aura`）
+> 3. 系统 PATH 中的 `aura` 命令
+>
+> 编译器构建：`cargo build -p aura-cli`（或仓库根目录 `cargo build`），
+> 然后打开仓库作为工作区即可自动连接。
 
 ### 从 VS Code 市场安装
 
@@ -88,6 +97,30 @@ code --install-extension aura-language-0.1.0.vsix
 | 显示诊断 | Ctrl+Shift+D | 显示所有诊断信息 |
 | 重启 LSP | Ctrl+Shift+R | 重启 LSP 服务器 |
 | 显示版本 | Ctrl+Alt+V | 显示服务器版本 |
+
+## 语法高亮配色（内置默认色）
+
+扩展为 `aura` 文件内置了一组默认 token 颜色（仅作用于 Aura 语法，不干扰其它语言与主题）。Aura 语法使用常见的作用域命名（`variable.other.constant`、`variable.other.readwrite`、`support.function` 等），因此开箱即用时，大多数主题（含 VS Code 默认深色主题）都会给出合适的颜色：
+
+| 元素 | 作用域 | 默认观感（VS Code 深色主题） |
+|------|--------|---------|
+| 常量（`val GAME_WIDTH: Int` 等全大写） | `variable.other.constant.aura` | 紫色/亮蓝（主题相关） |
+| 变量 / 属性（`var x`、赋值） | `variable.other.readwrite.aura`、`variable.field.aura` 等 | 亮蓝 |
+| 参数 / 具名参数 / 结构体构造属性 | `variable.parameter.aura` | 橙 |
+| std 库函数（`aura.math.abs(...)` 等） | `support.function.std.aura` | 青绿（与普通函数金黄区分） |
+| 普通函数调用 | `entity.name.function.call.aura` | 跟随主题（默认金黄） |
+
+如需自定义配色，可在 `settings.json` 中覆盖：
+
+```jsonc
+"[aura]": {
+    "editor.tokenColorCustomizations": {
+        "textMateRules": [
+            { "scope": "support.function.std.aura", "settings": { "foreground": "#FF8800" } }
+        ]
+    }
+}
+```
 
 ## 语法高亮示例
 

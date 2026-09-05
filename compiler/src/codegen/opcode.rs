@@ -169,6 +169,19 @@ pub enum OpCode {
     /// 创建 C 回调蹦床（栈顶为函数索引，压入 `Ptr` 回调地址）
     MakeCallback(u16),
 
+    // ── Phase 2: 闭包 ──
+    /// 创建闭包（索引到 `closures` 表），栈顶为捕获值（按序）
+    MakeClosure(u16),
+    /// 调用闭包（栈顶为参数...、其下为闭包引用）
+    CallClosure,
+    // ── Phase 3: 枚举 ──
+    /// 构造枚举变体（操作数为枚举定义索引）
+    EnumConstruct(u16),
+    /// 获取枚举变体索引（栈顶弹出枚举值，压入变体索引）
+    EnumTag,
+    /// 创建函数引用（操作数为函数索引）
+    MakeFnRef(u16),
+
     // ── Phase 2: 跨模块调用 ──
     /// 调用同模块内导出符号，`sym_idx` 为导出符号表索引
     CallExport(u16),
@@ -247,6 +260,11 @@ impl OpCode {
             OpCode::PtrToInt => 64,
             OpCode::IntToPtr => 65,
             OpCode::MakeCallback(_) => 66,
+            OpCode::MakeClosure(_) => 72,
+            OpCode::CallClosure => 73,
+            OpCode::EnumConstruct(_) => 74,
+            OpCode::EnumTag => 75,
+            OpCode::MakeFnRef(_) => 76,
             OpCode::CallExport(_) => 70,
             OpCode::CallExternal(_, _) => 71,
         }
@@ -255,7 +273,7 @@ impl OpCode {
     /// 操作码携带的操作数字节数
     pub fn operand_size(byte: u8) -> usize {
         match byte {
-            0 | 1 | 2 | 30 | 32 | 33 => 2, // u16 操作数
+            0 | 1 | 2 | 30 | 32 | 33 | 72 | 74 | 76 => 2, // u16 操作数
             23 | 24 | 25 => 4,             // i32 偏移
             26 | 27 | 36 => 2,             // u16 函数/原生索引
             40 | 41 | 51 => 2,             // CallMethod/CallCtor/NewCoroutine u16 索引
@@ -335,6 +353,11 @@ impl OpCode {
             64 => OpCode::PtrToInt,
             65 => OpCode::IntToPtr,
             66 => OpCode::MakeCallback(0),
+            72 => OpCode::MakeClosure(0),
+            73 => OpCode::CallClosure,
+            74 => OpCode::EnumConstruct(0),
+            75 => OpCode::EnumTag,
+            76 => OpCode::MakeFnRef(0),
             70 => OpCode::CallExport(0),
             71 => OpCode::CallExternal(0, 0),
             _ => return None,
@@ -358,6 +381,9 @@ impl OpCode {
             | OpCode::CallCtor(i)
             | OpCode::NewCoroutine(i)
             | OpCode::MakeCallback(i)
+            | OpCode::MakeClosure(i)
+            | OpCode::EnumConstruct(i)
+            | OpCode::MakeFnRef(i)
             | OpCode::CallExport(i) => buf.extend_from_slice(&i.to_le_bytes()),
             OpCode::CallExternal(mod_idx, sym_idx) => {
                 buf.extend_from_slice(&mod_idx.to_le_bytes());
@@ -441,6 +467,11 @@ impl fmt::Display for OpCode {
             OpCode::PtrToInt => write!(f, "PTR_TO_INT"),
             OpCode::IntToPtr => write!(f, "INT_TO_PTR"),
             OpCode::MakeCallback(i) => write!(f, "MAKE_CALLBACK {}", i),
+            OpCode::MakeClosure(i) => write!(f, "MAKE_CLOSURE {}", i),
+            OpCode::CallClosure => write!(f, "CALL_CLOSURE"),
+            OpCode::EnumConstruct(i) => write!(f, "ENUM_CONSTRUCT {}", i),
+            OpCode::EnumTag => write!(f, "ENUM_TAG"),
+            OpCode::MakeFnRef(i) => write!(f, "MAKE_FN_REF {}", i),
             OpCode::CallExport(i) => write!(f, "CALL_EXPORT {}", i),
             OpCode::CallExternal(mod_idx, sym_idx) => {
                 write!(f, "CALL_EXTERNAL ({}, {})", mod_idx, sym_idx)
@@ -469,6 +500,17 @@ pub struct BytecodeFunction {
     pub code: Vec<u8>,
 }
 
+/// 闭包记录（Phase 2）
+#[derive(Debug, Clone, PartialEq)]
+pub struct BytecodeClosure {
+    pub name: String,
+    pub param_count: u16,
+    pub locals: u16,
+    pub capture_count: u16,
+    /// 闭包函数在函数表中的索引
+    pub func_idx: u16,
+}
+
 /// 完整的字节码模块（对应 `.auc` 文件内容）
 ///
 /// Phase 2 扩展字段（设计方案 §6.2）：
@@ -483,6 +525,8 @@ pub struct BytecodeModule {
     pub consts: Vec<Const>,
     pub natives: Vec<BytecodeNative>,
     pub functions: Vec<BytecodeFunction>,
+    /// 闭包表（Phase 2）
+    pub closures: Vec<BytecodeClosure>,
     /// 入口函数（通常为 `main`）在 `functions` 中的索引
     pub entry: u16,
     /// Phase 1c: 按需链接 — 启用的 std 模块名
@@ -512,6 +556,7 @@ impl Default for BytecodeModule {
             consts: Vec::new(),
             natives: Vec::new(),
             functions: Vec::new(),
+            closures: Vec::new(),
             entry: 0,
             enabled_modules: Vec::new(),
             module_identity: ModuleIdentity::default(),
