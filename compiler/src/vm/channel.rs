@@ -7,8 +7,10 @@
 //! - 无界 Channel（bound == 0）：`send` 永不阻塞
 //! - `recv` 在通道为空时阻塞
 //! - `tryRecv` 非阻塞，空时返回 `Null`
+//! - `recv_timeout`（Fix 11）：带超时的接收，超时返回 `Null`
 
 use std::collections::VecDeque;
+use std::time::Duration;
 use crate::vm::value::Value;
 
 /// Channel 实例 ID
@@ -100,6 +102,32 @@ impl ChannelRuntime {
     /// 若缓冲区为空或 Channel 不存在，返回 `Null`。
     pub fn try_recv(&mut self, id: ChannelId) -> Value {
         self.recv(id)
+    }
+
+    /// 带超时的接收（Fix 11）
+    ///
+    /// 在 `timeout` 时间内等待消息，超时返回 `Null`。
+    /// 由于当前是单线程协作调度，此方法通过轮询 + 休眠实现超时。
+    pub fn recv_timeout(&mut self, id: ChannelId, timeout: Duration) -> Value {
+        let start = std::time::Instant::now();
+        let poll_interval = Duration::from_millis(1);
+
+        loop {
+            // 尝试立即接收
+            if let Some(ch) = self.get_mut(id) {
+                if let Some(val) = ch.buffer.pop_front() {
+                    return val;
+                }
+            }
+
+            // 检查超时
+            if start.elapsed() >= timeout {
+                return Value::Null;
+            }
+
+            // 休眠后重试（让出 CPU）
+            std::thread::sleep(poll_interval);
+        }
     }
 
     /// 获取 Channel 缓冲区长度
