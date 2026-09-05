@@ -95,9 +95,9 @@ pub fn clear_dispatcher() {
 // C ABI 蹦床函数
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// C 回调蹦床（最多 4 个参数版本）
+/// C 回调蹦床（最多 8 个参数版本）
 ///
-/// 签名：`i64 callback(void* context, i64 a1, i64 a2, i64 a3, i64 a4) -> i64`
+/// 签名：`i64 callback(void* context, i64 a1, i64 a2, ..., i64 a8) -> i64`
 ///
 /// `context` 参数编码回调 ID（由 `Value::Ptr(callback_id)` 提供）。
 /// 蹦床读取回调 ID，查全局注册表，通过派发闭包回调回 Aura VM。
@@ -106,7 +106,7 @@ pub fn clear_dispatcher() {
 ///
 /// 此函数通过 C ABI 暴露，由 C 代码调用。调用者必须保证：
 /// - `context` 参数指向有效的回调 ID
-/// - 参数数量不超过 4 个
+/// - 参数数量不超过 8 个
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn aura_callback_trampoline(
     context: *mut std::ffi::c_void,
@@ -114,9 +114,13 @@ pub unsafe extern "C" fn aura_callback_trampoline(
     a2: i64,
     a3: i64,
     a4: i64,
+    a5: i64,
+    a6: i64,
+    a7: i64,
+    a8: i64,
 ) -> i64 {
     let callback_id = context as usize as i64;
-    let args = [a1, a2, a3, a4];
+    let args = [a1, a2, a3, a4, a5, a6, a7, a8];
 
     CURRENT_DISPATCHER.with(|d| {
         if let Some(dispatcher) = d.borrow().as_ref() {
