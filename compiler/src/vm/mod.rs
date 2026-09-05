@@ -688,6 +688,11 @@ impl Vm {
         self.frames.push(frame);
         // 热点计数
         self.call_counts[func_idx] += 1;
+        // Fix B: push_frame 级热点检测 — 覆盖入口函数和循环调用
+        #[cfg(feature = "jit")]
+        if self.opts.jit {
+            self.maybe_jit_compile(func_idx);
+        }
         Ok(())
     }
 
@@ -729,6 +734,9 @@ impl Vm {
     /// 对累计调用超过 [`VmOptions::hotspot_threshold`] 的函数尝试 Cranelift
     /// 编译并缓存；之后对该函数的 `Call` 直接派发到原生入口（§7.2 方法级 JIT）。
     /// 编译失败（非叶子整数函数等）则记入 skip 集合，永久回退解释器（5.13）。
+    ///
+    /// **Fix B**：在 `push_frame` 中也调用此方法（计数已更新），
+    /// 覆盖入口函数和循环调用等不经过 `do_call` 的路径。
     #[cfg(feature = "jit")]
     fn maybe_jit_compile(&mut self, idx: usize) {
         let already = self
@@ -739,10 +747,8 @@ impl Vm {
         if already {
             return;
         }
-        // 热点阈值：`push_frame` 中的计数在本次调用后才更新，
-        // 故以 `已调用次数 + 1`（本次调用）与阈值比较
         let count = self.call_counts.get(idx).copied().unwrap_or(0);
-        if count + 1 < self.opts.hotspot_threshold {
+        if count < self.opts.hotspot_threshold {
             return;
         }
         self.try_jit_compile(idx);
@@ -792,7 +798,7 @@ impl Vm {
         if let Some(jit) = self.jit.as_mut() {
             match entry {
                 Some(e) => jit.insert(idx, e),
-                None => jit.skip(idx),
+                None => jit.skip(idx, "JIT 白名单不匹配（函数包含非可编译指令）"),
             }
         }
     }

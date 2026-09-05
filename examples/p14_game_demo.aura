@@ -1,0 +1,69 @@
+// 游戏示例：射线库绘图
+// P14.4: 示例项目 — 游戏
+
+// 游戏状态
+var running: Boolean = true
+var score: Int = 0
+var frameCount: Int = 0
+
+struct Player {
+    var x: Float = 400f
+    var y: Float = 300f
+    var speed: Float = 200f
+    var color: String = "red"
+}
+
+val player = Player()
+
+fun init() {
+    println("=== Aura 游戏示例 ===")
+    println("使用 A/D 左右移动，W/S 上下移动")
+    println("按 Q 退出")
+    println()
+}
+
+fun update(dt: Float) {
+    // 模拟键盘输入（实际使用时替换为 raylib 输入）
+    // 这里用计数器模拟移动
+    if (frameCount % 60 < 30) {
+        player.x += player.speed * dt * 0.1
+    } else {
+        player.x -= player.speed * dt * 0.1
+    }
+    
+    // 边界检查
+    if (player.x < 20) player.x = 20f
+    if (player.x > 780) player.x = 780f
+    
+    frameCount++
+    if (frameCount % 120 == 0) {
+        score += 1
+        println("得分: $score")
+    }
+}
+
+fun render() {
+    // 简化渲染输出
+    println("位置: (${player.x.toInt()}, ${player.y.toInt()}) 颜色: ${player.color}")
+}
+
+fun main() {
+    init()
+    
+    var frame = 0
+    while (running && frame < 100) {
+        val dt = 0.016f  // 模拟帧时间
+        
+        // 模拟输入
+        // if (raylib.IsKeyDown(KeyboardKey.Q)) { running = false }
+        
+        update(dt)
+        render()
+        frame++
+    }
+    
+    println()
+    println("=== 游戏结束 ===")
+    println("最终得分: $score")
+    println("运行帧数: $frame")
+}

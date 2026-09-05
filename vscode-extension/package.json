@@ -1,0 +1,191 @@
+{
+  "name": "aura-language",
+  "displayName": "Aura Language",
+  "description": "Aura 语言支持 — NovaOS 的下一代系统级脚本语言 (LSP + 语法高亮 + 智能补全)",
+  "version": "0.1.0",
+  "publisher": "aura-lang",
+  "license": "MIT",
+  "homepage": "https://github.com/aura-lang/auralang",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aura-lang/auralang.git"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Formatters",
+    "Snippets"
+  ],
+  "keywords": [
+    "aura",
+    "novaos",
+    "kotlin",
+    "scripting",
+    "lsp",
+    "game dev"
+  ],
+  "activationEvents": [
+    "onLanguage:aura",
+    "onLanguage:aura-fragment"
+  ],
+  "main": "./out/extension.js",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "aura",
+        "aliases": [
+          "Aura",
+          "aura"
+        ],
+        "extensions": [
+          ".aura"
+        ],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./resources/aura-icon-light.png",
+          "dark": "./resources/aura-icon-dark.png"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "aura",
+        "scopeName": "source.aura",
+        "path": "./syntaxes/aura.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "aura",
+        "path": "./snippets/aura.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "aura.restartLSP",
+        "title": "Aura: 重启 LSP 服务器",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "aura.openDiagnostic",
+        "title": "Aura: 显示诊断信息",
+        "icon": "$(warning)"
+      },
+      {
+        "command": "aura.formatDocument",
+        "title": "Aura: 格式化文档",
+        "icon": "$(format)"
+      },
+      {
+        "command": "aura.showVersion",
+        "title": "Aura: 显示服务器版本",
+        "icon": "$(info)"
+      }
+    ],
+    "configuration": {
+      "title": "Aura",
+      "properties": {
+        "aura.serverPath": {
+          "type": "string",
+          "default": "aura",
+          "description": "Aura LSP 服务器可执行文件路径 (aura lsp)。可以是完整路径或 PATH 中可找到的命令。",
+          "examples": [
+            "aura",
+            "aura lsp",
+            "/usr/local/bin/aura",
+            "C:\\Aura\\aura.exe"
+          ]
+        },
+        "aura.serverArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "传递给 Aura LSP 服务器的额外参数"
+        },
+        "aura.serverEnv": {
+          "type": "object",
+          "default": {},
+          "description": "Aura LSP 服务器的环境变量"
+        },
+        "aura.checkOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "保存时自动检查语法错误"
+        },
+        "aura.formatOnSave": {
+          "type": "boolean",
+          "default": false,
+          "description": "保存时自动格式化"
+        },
+        "aura.diagnosticsEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "是否启用诊断信息推送"
+        },
+        "aura.inlayHints": {
+          "type": "boolean",
+          "default": false,
+          "description": "是否显示参数名称内联提示"
+        }
+      }
+    },
+    "configurationSnippets": [
+      {
+        "scope": "aur",
+        "label": "Aura: LSP 服务器配置",
+        "description": "配置 Aura LSP 服务器路径和参数",
+        "body": {
+          "aura.serverPath": "aura",
+          "aura.serverArgs": [
+            "lsp"
+          ],
+          "aura.checkOnSave": true,
+          "aura.diagnosticsEnabled": true
+        }
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "aura.formatDocument",
+          "when": "resourceLangId == aura",
+          "group": "navigation"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "aura.formatDocument",
+          "when": "resourceLangId == aura",
+          "group": "editing"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js",
+    "vscode:prepublishNPM": "npm run compile"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1",
+    "vscode-jsonrpc": "^8.1.0",
+    "vscode-uri": "^3.0.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.80.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "typescript": "^5.0.0",
+    "@vscode/test-electron": "^2.3.0"
+  }
+}

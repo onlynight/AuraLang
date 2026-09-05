@@ -3,6 +3,8 @@ pub mod codegen;
 pub mod docgen;
 pub mod errors;
 pub mod lexer;
+pub mod lsp;
+pub mod package;
 pub mod std;
 pub mod parser;
 pub mod sema;

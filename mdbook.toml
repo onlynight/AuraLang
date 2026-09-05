@@ -1,0 +1,32 @@
+# mdBook 配置文件
+
+[book]
+title = "Aura 语言官方文档"
+authors = ["Aura Team"]
+description = "Aura 语言 — NovaOS 的下一代系统级脚本语言"
+language = "zh-CN"
+src = "book"
+multilingual = false
+draft = false
+
+[build]
+build-dir = "book/html"
+create-missing = false
+use-default-preprocessor = true
+additional-css = []
+additional-js = []
+
+[rust]
+edition = "2024"
+is_html_root = false
+# 语法高亮主题
+theme = "navy"
+git-repository-url = "https://github.com/aura-lang/auralang"
+
+[serve]
+port = 3000
+address = "127.0.0.1"
+
+[search]
+limit-results = 20
+only-include-title = false

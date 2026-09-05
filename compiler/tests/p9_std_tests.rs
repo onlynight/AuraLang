@@ -1,6 +1,9 @@
 //! P9 — 标准库集成测试
 //!
 //! 验证所有标准库模块的注册与基础功能。
+//! 需要 `std-all` feature 编译（`cargo test --features std-all`）。
+
+#![cfg(feature = "std-all")]
 
 use compiler::vm::native::NativeRegistry;
 use compiler::vm::value::Value;
@@ -11,10 +14,17 @@ fn call(reg: &NativeRegistry, name: &str, args: &[Value]) -> Value {
     fn_ptr(args)
 }
 
+/// 所有 std 模块名（与 register_with_modules 的参数对应）
+const ALL_MODULES: &[&str] = &[
+    "io", "math", "string", "collections", "fs", "json", "time",
+    "test", "builtin", "env", "process", "random", "encoding",
+    "ascii", "console", "path", "assert", "iter", "net", "concurrent",
+];
+
 /// 验证所有标准库函数已注册
 #[test]
 fn test_all_std_functions_registered() {
-    let reg = NativeRegistry::new();
+    let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // std.io
     assert!(reg.contains("aura.io.println"));
@@ -173,7 +183,7 @@ fn test_all_std_functions_registered() {
 
 #[test]
 fn test_std_math() {
-    let reg = NativeRegistry::new();
+    let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // abs
     let result = call(&reg, "aura.math.abs", &[Value::Int(-42)]);
@@ -212,7 +222,7 @@ fn test_std_math() {
 
 #[test]
 fn test_std_string() {
-    let reg = NativeRegistry::new();
+    let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // contains
     let result = call(&reg, "aura.string.contains", &[Value::str_("hello world"), Value::str_("world")]);
@@ -275,7 +285,7 @@ fn test_std_string() {
 
 #[test]
 fn test_std_collections() {
-    let reg = NativeRegistry::new();
+    let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // listOf
     let result = call(&reg, "aura.collections.listOf", &[
@@ -334,7 +344,7 @@ fn test_std_collections() {
 
 #[test]
 fn test_std_json() {
-    let reg = NativeRegistry::new();
+    let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // parse
     let result = call(&reg, "aura.json.parse", &[Value::str_(r#"{"name": "Aura", "version": 1}"#)]);
@@ -379,7 +389,7 @@ fn test_std_json() {
 
 #[test]
 fn test_std_time() {
-    let reg = NativeRegistry::new();
+    let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // now should return a positive timestamp
     let result = call(&reg, "aura.time.now", &[]);
@@ -401,7 +411,7 @@ fn test_std_time() {
 
 #[test]
 fn test_std_test() {
-    let reg = NativeRegistry::new();
+    let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // assertTrue (pass)
     let result = call(&reg, "aura.test.assertTrue", &[Value::Bool(true), Value::str_("test passed")]);
@@ -430,7 +440,7 @@ fn test_std_test() {
 
 #[test]
 fn test_std_builtin() {
-    let reg = NativeRegistry::new();
+    let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // typeof
     let result = call(&reg, "aura.builtin.typeof", &[Value::Int(42)]);
@@ -462,7 +472,7 @@ fn test_std_builtin() {
 
 #[test]
 fn test_std_env() {
-    let reg = NativeRegistry::new();
+    let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // set / get
     call(&reg, "aura.env.set", &[Value::str_("AURA_TEST_VAR"), Value::str_("test_value")]);
@@ -490,7 +500,7 @@ fn test_std_env() {
 
 #[test]
 fn test_std_random() {
-    let reg = NativeRegistry::new();
+    let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // nextInt should return different values
     let r1 = call(&reg, "aura.random.nextInt", &[]);
@@ -519,7 +529,7 @@ fn test_std_random() {
 
 #[test]
 fn test_std_encoding() {
-    let reg = NativeRegistry::new();
+    let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // base64 encode/decode roundtrip
     let original = Value::str_("Hello, Aura!");
@@ -536,7 +546,7 @@ fn test_std_encoding() {
 
 #[test]
 fn test_std_ascii() {
-    let reg = NativeRegistry::new();
+    let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // isAlpha
     let result = call(&reg, "aura.ascii.isAlpha", &[Value::str_("A")]);
@@ -566,7 +576,7 @@ fn test_std_ascii() {
 
 #[test]
 fn test_std_path() {
-    let reg = NativeRegistry::new();
+    let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // join
     let result = call(&reg, "aura.path.join", &[
@@ -601,7 +611,7 @@ fn test_std_path() {
 
 #[test]
 fn test_std_iter() {
-    let reg = NativeRegistry::new();
+    let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // sum
     let list = Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
@@ -680,7 +690,7 @@ fn test_std_iter() {
 
 #[test]
 fn test_std_assert() {
-    let reg = NativeRegistry::new();
+    let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // assert (pass)
     let result = call(&reg, "aura.assert.assert", &[Value::Bool(true), Value::str_("test")]);
@@ -701,7 +711,7 @@ fn test_std_assert() {
 
 #[test]
 fn test_std_fs() {
-    let reg = NativeRegistry::new();
+    let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // exists (non-existent file)
     let result = call(&reg, "aura.fs.exists", &[Value::str_("/nonexistent/path/file.txt")]);
@@ -717,7 +727,7 @@ fn test_std_fs() {
 
 #[test]
 fn test_std_io_basic() {
-    let reg = NativeRegistry::new();
+    let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // fileExists for non-existent file
     let result = call(&reg, "aura.io.fileExists", &[Value::str_("/nonexistent/file.txt")]);
@@ -730,7 +740,7 @@ fn test_std_io_basic() {
 
 #[test]
 fn test_std_net_basic() {
-    let reg = NativeRegistry::new();
+    let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // getHostname should return non-empty
     let result = call(&reg, "aura.net.getHostname", &[]);
@@ -743,7 +753,7 @@ fn test_std_net_basic() {
 
 #[test]
 fn test_std_process_basic() {
-    let reg = NativeRegistry::new();
+    let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // pid should return positive value
     let result = call(&reg, "aura.process.pid", &[]);

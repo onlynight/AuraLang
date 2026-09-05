@@ -1,0 +1,92 @@
+// 工具示例：文件处理器
+// P14.4: 示例项目 — 文件统计工具
+
+struct FileStats {
+    val name: String
+    val size: Int
+    val lines: Int
+    val words: Int
+    val sentences: Int
+}
+
+fun analyzeText(content: String, name: String): FileStats {
+    var lines = 0
+    var words = 0
+    var sentences = 0
+    
+    for (line in content.split("\n")) {
+        lines++
+        for (word in line.split(" ")) {
+            words++
+        }
+        if (line.contains(".")) {
+            sentences++
+        }
+    }
+    
+    return FileStats(
+        name = name,
+        size = content.length,
+        lines = lines,
+        words = words,
+        sentences = sentences
+    )
+}
+
+fun report(stats: FileStats) {
+    println("========================================")
+    println("  文件统计报告")
+    println("========================================")
+    println("文件:     ${stats.name}")
+    println("大小:     ${stats.size} 字节")
+    println("行数:     ${stats.lines}")
+    println("词数:     ${stats.words}")
+    println("句数:     ${stats.sentences}")
+    println("========================================")
+    println()
+}
+
+fun main() {
+    // 示例文本
+    val sampleText = """
+        这是一个 Aura 语言的文件处理器示例。
+        它可以统计文件的基本信息。
+        包括行数、词数和句数。
+        
+        Aura 是 NovaOS 的下一代系统级脚本语言。
+        它提供 C 语言级别的执行效率。
+        同时保持 Python 级别的开发体验。
+    """
+    
+    println("=== Aura 文件处理器 ===")
+    println()
+    
+    // 分析示例文本
+    val stats = analyzeText(sampleText, "sample.txt")
+    report(stats)
+    
+    // 分析多个文件
+    val files = listOf(
+        Pair("hello.aura", "fun main() { println(\"Hello\") }"),
+        Pair("math.aura", "fun add(a: Int, b: Int): Int = a + b"),
+        Pair("loop.aura", "for (i in 0..10) { println(i) }")
+    )
+    
+    println("=== 批量文件分析 ===")
+    println()
+    
+    for ((name, content) in files) {
+        val stats = analyzeText(content, name)
+        report(stats)
+    }
+    
+    // 汇总
+    println("=== 汇总 ===")
+    val totalSize = files.sumBy { it.second.length }
+    val totalLines = files.sumBy { it.second.lines().count() }
+    println("总文件数: ${files.size}")
+    println("总大小: $totalSize 字节")
+    println("总行数: $totalLines")
+    println()
+    println("完成!")
+}

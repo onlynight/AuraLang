@@ -1,0 +1,201 @@
+{
+  "// 函数": {
+    "prefix": "fn",
+    "body": [
+      "fun ${1:name}(${2:params}): ${3:ReturnType} {",
+      "    $0",
+      "}"
+    ],
+    "description": "创建新函数"
+  },
+  "// 单表达式函数": {
+    "prefix": "fn=",
+    "body": [
+      "fun ${1:name}(${2:params}): ${3:ReturnType} = ${4:expression}"
+    ],
+    "description": "创建单表达式函数"
+  },
+  "// 结构体": {
+    "prefix": "struct",
+    "body": [
+      "struct ${1:Name}(",
+      "    val ${2:field1}: ${3:Type},",
+      "    var ${4:field2}: ${5:Type} = ${6:defaultValue}",
+      ")"
+    ],
+    "description": "创建结构体"
+  },
+  "// 枚举": {
+    "prefix": "enum",
+    "body": [
+      "enum ${1:Name} {",
+      "    ${2:VALUE1},",
+      "    ${3:VALUE2},",
+      "    ${4:CUSTOM}(val ${5:name}: ${6:Type})",
+      "}"
+    ],
+    "description": "创建枚举"
+  },
+  "// 接口": {
+    "prefix": "interface",
+    "body": [
+      "interface ${1:Name} {",
+      "    fun ${2:method}(${3:params}): ${4:ReturnType}",
+      "    fun ${5:method2}(${6:params}): ${7:ReturnType} = ${8:defaultImpl}",
+      "}"
+    ],
+    "description": "创建接口"
+  },
+  "// 类": {
+    "prefix": "class",
+    "body": [
+      "class ${1:Name} : ${2:Interface} {",
+      "    override fun ${3:method}(${4:params}): ${5:ReturnType} {",
+      "        $0",
+      "    }",
+      "}"
+    ],
+    "description": "创建类实现接口"
+  },
+  "// 协程函数": {
+    "prefix": "suspend",
+    "body": [
+      "suspend fun ${1:name}(${2:params}): ${3:ReturnType} {",
+      "    $0",
+      "}"
+    ],
+    "description": "创建协程函数"
+  },
+  "// Actor": {
+    "prefix": "actor",
+    "body": [
+      "actor ${1:Name} {",
+      "    private var ${2:state}: ${3:Type} = ${4:default}",
+      "",
+      "    fun start() {",
+      "        $0",
+      "    }",
+      "}"
+    ],
+    "description": "创建 Actor"
+  },
+  "// if-else": {
+    "prefix": "if",
+    "body": [
+      "if (${1:condition}) {",
+      "    $0",
+      "} else {",
+      "    ${2:else}",
+      "}"
+    ],
+    "description": "if-else 语句"
+  },
+  "// when": {
+    "prefix": "when",
+    "body": [
+      "when (${1:value}) {",
+      "    ${2:case1} -> {",
+      "        $0",
+      "    }",
+      "    else -> {",
+      "        ${3:else}",
+      "    }",
+      "}"
+    ],
+    "description": "when 表达式"
+  },
+  "// for 循环": {
+    "prefix": "for",
+    "body": [
+      "for (${1:item} in ${2:iterator}) {",
+      "    $0",
+      "}"
+    ],
+    "description": "for 循环"
+  },
+  "// while 循环": {
+    "prefix": "while",
+    "body": [
+      "while (${1:condition}) {",
+      "    $0",
+      "}"
+    ],
+    "description": "while 循环"
+  },
+  "// try-catch": {
+    "prefix": "try",
+    "body": [
+      "try {",
+      "    $0",
+      "} catch (e: ${1:Exception}) {",
+      "    ${2:handle}",
+      "}"
+    ],
+    "description": "try-catch 异常处理"
+  },
+  "// 泛型函数": {
+    "prefix": "gen",
+    "body": [
+      "fun <${1:T}> ${2:name}(${3:arg}: ${1:T}): ${1:T} {",
+      "    return ${3:arg}",
+      "}"
+    ],
+    "description": "创建泛型函数"
+  },
+  "// Result": {
+    "prefix": "result",
+    "body": [
+      "fun ${1:name}(): Result<${2:Type}, ${3:Error}> {",
+      "    if (${4:success}) {",
+      "        return Result.Success(${5:value})",
+      "    } else {",
+      "        return Result.Error(${6:error})",
+      "    }",
+      "}"
+    ],
+    "description": "Result 错误处理"
+  },
+  "// FFI 声明": {
+    "prefix": "ffi",
+    "body": [
+      "extern \"c\" \"${1:library}\" {",
+      "    fun ${2:functionName}(${3:params}): ${4:ReturnType}",
+      "    val ${5:CONSTANT}: ${6:Type}",
+      "}"
+    ],
+    "description": "FFI 外部函数声明"
+  },
+  "// 依赖声明": {
+    "prefix": "dep",
+    "body": [
+      "// @depends ${1:package} >= ${2:version}"
+    ],
+    "description": "依赖声明注释"
+  },
+  "// main 函数": {
+    "prefix": "main",
+    "body": [
+      "fun main() {",
+      "    println(\"Hello, Aura!\")",
+      "}"
+    ],
+    "description": "主函数入口"
+  },
+  "// 数据类": {
+    "prefix": "data",
+    "body": [
+      "struct ${1:Name}(",
+      "    val ${2:field1}: ${3:Type1},",
+      "    val ${4:field2}: ${5:Type2}",
+      ")"
+    ],
+    "description": "创建数据类（自动生成 toString/equals/hashCode/copy）"
+  },
+  "// 导入": {
+    "prefix": "import",
+    "body": [
+      "import ${1:module} as ${2:alias}"
+    ],
+    "description": "导入模块"
+  }
+}

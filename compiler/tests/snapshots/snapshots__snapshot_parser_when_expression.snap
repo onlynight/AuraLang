@@ -231,4 +231,5 @@ Program {
             },
         ),
     ],
+    top_level_statements: [],
 }

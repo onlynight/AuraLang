@@ -1,0 +1,847 @@
+{
+    "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+    "information_for_contributors": [
+        "This grammar is modeled after the Kotlin VSCode plugin's tmLanguage.json structure",
+        "(redhat-developer/vscode-java/language-support/kotlin/kotlin.tmLanguage.json).",
+        "Scope name: 'source.aura' — all scope names use the '.aura' suffix for consistency.",
+        "Declarations use begin/end + beginCaptures/endCaptures for fine-grained highlighting."
+    ],
+    "name": "Aura",
+    "scopeName": "source.aura",
+    "patterns": [
+        {
+            "include": "#import"
+        },
+        {
+            "include": "#code"
+        }
+    ],
+    "fileTypes": [
+        "aura"
+    ],
+    "repository": {
+        "import": {
+            "begin": "\\b(import)\\b\\s?([\\w+.]*\\w+)?\\s*",
+            "beginCaptures": {
+                "1": {
+                    "name": "storage.type.import.aura"
+                },
+                "2": {
+                    "name": "storage.modifier.import.aura"
+                }
+            },
+            "end": ";|$",
+            "name": "meta.import.aura",
+            "contentName": "entity.name.package.aura",
+            "patterns": [
+                {
+                    "include": "#comments"
+                },
+                {
+                    "include": "#hard-keywords"
+                },
+                {
+                    "match": "\\*",
+                    "name": "variable.language.wildcard.aura"
+                }
+            ]
+        },
+        "code": {
+            "patterns": [
+                {
+                    "include": "#comments"
+                },
+                {
+                    "include": "#for-loop-variable"
+                },
+                {
+                    "include": "#keywords"
+                },
+                {
+                    "include": "#annotation-with-args"
+                },
+                {
+                    "include": "#annotation-simple"
+                },
+                {
+                    "include": "#extern-declaration"
+                },
+                {
+                    "include": "#struct-declaration"
+                },
+                {
+                    "include": "#class-declaration"
+                },
+                {
+                    "include": "#enum-declaration"
+                },
+                {
+                    "include": "#interface-declaration"
+                },
+                {
+                    "include": "#actor-declaration"
+                },
+                {
+                    "include": "#object-declaration"
+                },
+                {
+                    "include": "#type-alias"
+                },
+                {
+                    "include": "#function-declaration"
+                },
+                {
+                    "include": "#constant-declaration"
+                },
+                {
+                    "include": "#variable-declaration"
+                },
+                {
+                    "include": "#builtin-types"
+                },
+                {
+                    "include": "#variable"
+                },
+                {
+                    "include": "#object"
+                },
+                {
+                    "include": "#type-annotation"
+                },
+                {
+                    "include": "#function-call"
+                },
+                {
+                    "include": "#property.reference"
+                },
+                {
+                    "include": "#method-reference"
+                },
+                {
+                    "include": "#string"
+                },
+                {
+                    "include": "#string-empty"
+                },
+                {
+                    "include": "#string-multiline"
+                },
+                {
+                    "include": "#character"
+                },
+                {
+                    "include": "#lambda-arrow"
+                },
+                {
+                    "include": "#operators"
+                },
+                {
+                    "include": "#self-reference"
+                },
+                {
+                    "include": "#label"
+                },
+                {
+                    "include": "#decimal-literal"
+                },
+                {
+                    "include": "#hex-literal"
+                },
+                {
+                    "include": "#binary-literal"
+                },
+                {
+                    "include": "#boolean-literal"
+                },
+                {
+                    "include": "#null-literal"
+                },
+                {
+                    "include": "#enum-variant"
+                },
+                {
+                    "match": ",",
+                    "name": "punctuation.separator.delimiter.aura"
+                },
+                {
+                    "match": ";",
+                    "name": "punctuation.terminator.statement.aura"
+                },
+                {
+                    "match": "\\.",
+                    "name": "punctuation.separator.period.aura"
+                }
+            ]
+        },
+
+        "comments": {
+            "patterns": [
+                {
+                    "include": "#comment-doc-line"
+                },
+                {
+                    "include": "#comment-line"
+                },
+                {
+                    "include": "#comment-javadoc"
+                },
+                {
+                    "include": "#comment-block"
+                }
+            ]
+        },
+        "comment-line": {
+            "begin": "//",
+            "end": "$",
+            "name": "comment.line.double-slash.aura"
+        },
+        "comment-doc-line": {
+            "begin": "///",
+            "end": "$",
+            "name": "comment.line.documentation.aura",
+            "patterns": [
+                {
+                    "match": "@(param|return|throws|see|author|version|since|deprecated|example)\\b",
+                    "name": "keyword.other.documentation.javadoc.aura"
+                },
+                {
+                    "match": "(@param)\\s+(\\S+)",
+                    "captures": {
+                        "1": {
+                            "name": "keyword.other.documentation.javadoc.aura"
+                        },
+                        "2": {
+                            "name": "variable.parameter.aura"
+                        }
+                    }
+                },
+                {
+                    "match": "(@(?:exception|throws))\\s+(\\S+)",
+                    "captures": {
+                        "1": {
+                            "name": "keyword.other.documentation.javadoc.aura"
+                        },
+                        "2": {
+                            "name": "entity.name.type.class.aura"
+                        }
+                    }
+                }
+            ]
+        },
+        "comment-javadoc": {
+            "patterns": [
+                {
+                    "begin": "/\\*\\*",
+                    "end": "\\*/",
+                    "name": "comment.block.javadoc.aura",
+                    "patterns": [
+                        {
+                            "match": "@(author|deprecated|return|see|serial|since|version|param|example|throws)\\b",
+                            "name": "keyword.other.documentation.javadoc.aura"
+                        },
+                        {
+                            "match": "(@param)\\s+(\\S+)",
+                            "captures": {
+                                "1": {
+                                    "name": "keyword.other.documentation.javadoc.aura"
+                                },
+                                "2": {
+                                    "name": "variable.parameter.aura"
+                                }
+                            }
+                        },
+                        {
+                            "match": "(@(?:exception|throws))\\s+(\\S+)",
+                            "captures": {
+                                "1": {
+                                    "name": "keyword.other.documentation.javadoc.aura"
+                                },
+                                "2": {
+                                    "name": "entity.name.type.class.aura"
+                                }
+                            }
+                        }
+                    ]
+                }
+            ]
+        },
+        "comment-block": {
+            "begin": "/\\*(?!\\*)",
+            "end": "\\*/",
+            "name": "comment.block.aura"
+        },
+
+        "keywords": {
+            "patterns": [
+                {
+                    "include": "#prefix-modifiers"
+                },
+                {
+                    "include": "#postfix-modifiers"
+                },
+                {
+                    "include": "#soft-keywords"
+                },
+                {
+                    "include": "#hard-keywords"
+                },
+                {
+                    "include": "#control-keywords"
+                },
+                {
+                    "include": "#map-keywords"
+                }
+            ]
+        },
+        "prefix-modifiers": {
+            "match": "\\b(abstract|final|enum|open|annotation|sealed|data|override|lateinit|private|protected|public|internal|inner|noinline|crossinline|vararg|reified|tailrec|operator|infix|inline|external|const|suspend|comptime|value|defer|extern|lazy|box|weak)\\b",
+            "name": "storage.modifier.other.aura"
+        },
+        "postfix-modifiers": {
+            "match": "\\b(where|by|get|set)\\b",
+            "name": "storage.modifier.other.aura"
+        },
+        "soft-keywords": {
+            "match": "\\b(catch|finally|field|else|then|unit)\\b",
+            "name": "keyword.soft.aura"
+        },
+        "hard-keywords": {
+            "match": "\\b(as|is|in|to|it)\\b",
+            "name": "keyword.hard.aura"
+        },
+        "control-keywords": {
+            "match": "\\b(if|while|do|when|try|throw|break|continue|return|for|select|await)\\b",
+            "name": "keyword.control.aura"
+        },
+        "map-keywords": {
+            "match": "\\b(to)\\b",
+            "name": "keyword.map.aura"
+        },
+
+        "annotation-simple": {
+            "match": "(?<!\\w)@[\\w.]+\\b(?!:|\\()",
+            "name": "entity.name.type.annotation.aura"
+        },
+        "annotation-with-args": {
+            "begin": "(?<!\\w)@([\\w.]+)\\s*(\\()",
+            "beginCaptures": {
+                "1": {
+                    "name": "entity.name.type.annotation.aura"
+                },
+                "2": {
+                    "name": "punctuation.definition.annotation.begin.aura"
+                }
+            },
+            "end": "(\\))",
+            "endCaptures": {
+                "1": {
+                    "name": "punctuation.definition.annotation.end.aura"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#code"
+                }
+            ]
+        },
+
+        "extern-declaration": {
+            "match": "\\b(extern)\\b\\s*(\"[^\"]*\")?",
+            "captures": {
+                "1": {
+                    "name": "storage.type.extern.aura"
+                },
+                "2": {
+                    "name": "string.quoted.double.aura"
+                }
+            }
+        },
+        "struct-declaration": {
+            "match": "(?:(data|sealed)\\s+)?(struct)\\s+(\\b\\w+\\b)(?:\\s*(?<GROUP><([^<>]|\\g<GROUP>)+>)?)?",
+            "captures": {
+                "1": {
+                    "name": "storage.modifier.other.aura"
+                },
+                "2": {
+                    "name": "storage.type.struct.aura"
+                },
+                "3": {
+                    "name": "entity.name.type.struct.aura"
+                },
+                "4": {
+                    "patterns": [
+                        {
+                            "include": "#type-parameter"
+                        }
+                    ]
+                }
+            }
+        },
+        "class-declaration": {
+            "match": "(?:(sealed|data)\\s+)?(class)\\s+(\\b\\w+\\b)(?:\\s*(?<GROUP><([^<>]|\\g<GROUP>)+>)?)?(?:\\s*:\\s*\\b\\w+\\b)?",
+            "captures": {
+                "1": {
+                    "name": "storage.modifier.other.aura"
+                },
+                "2": {
+                    "name": "storage.type.class.aura"
+                },
+                "3": {
+                    "name": "entity.name.type.class.aura"
+                },
+                "4": {
+                    "patterns": [
+                        {
+                            "include": "#type-parameter"
+                        }
+                    ]
+                },
+                "5": {
+                    "name": "entity.name.type.superclass.aura"
+                }
+            }
+        },
+        "enum-declaration": {
+            "match": "(?:(sealed|data)\\s+)?(enum)\\s+(\\b\\w+\\b)",
+            "captures": {
+                "1": {
+                    "name": "storage.modifier.other.aura"
+                },
+                "2": {
+                    "name": "storage.type.enum.aura"
+                },
+                "3": {
+                    "name": "entity.name.type.enum.aura"
+                }
+            }
+        },
+        "interface-declaration": {
+            "match": "(?:(sealed|data)\\s+)?(interface)\\s+(\\b\\w+\\b)(?:\\s*(?<GROUP><([^<>]|\\g<GROUP>)+>)?)?",
+            "captures": {
+                "1": {
+                    "name": "storage.modifier.other.aura"
+                },
+                "2": {
+                    "name": "storage.type.interface.aura"
+                },
+                "3": {
+                    "name": "entity.name.type.interface.aura"
+                },
+                "4": {
+                    "patterns": [
+                        {
+                            "include": "#type-parameter"
+                        }
+                    ]
+                }
+            }
+        },
+        "actor-declaration": {
+            "match": "(?:(sealed|data)\\s+)?(actor)\\s+(\\b\\w+\\b)",
+            "captures": {
+                "1": {
+                    "name": "storage.modifier.other.aura"
+                },
+                "2": {
+                    "name": "storage.type.actor.aura"
+                },
+                "3": {
+                    "name": "entity.name.type.actor.aura"
+                }
+            }
+        },
+        "object-declaration": {
+            "match": "(?:(sealed|data)\\s+)?(object)\\s+(\\b\\w+\\b)",
+            "captures": {
+                "1": {
+                    "name": "storage.modifier.other.aura"
+                },
+                "2": {
+                    "name": "storage.type.object.aura"
+                },
+                "3": {
+                    "name": "entity.name.type.object.aura"
+                }
+            }
+        },
+        "type-alias": {
+            "match": "\\b(typealias)\\s+(\\b\\w+\\b)(?:\\s*(?<GROUP><([^<>]|\\g<GROUP>)+>)?)?",
+            "captures": {
+                "1": {
+                    "name": "storage.type.alias.aura"
+                },
+                "2": {
+                    "name": "entity.name.type.aura"
+                },
+                "3": {
+                    "patterns": [
+                        {
+                            "include": "#type-parameter"
+                        }
+                    ]
+                }
+            }
+        },
+
+        "function-declaration": {
+            "begin": "\\b(fun)\\b\\s*(?<GROUP><([^<>]|\\g<GROUP>)+>)?\\s*(\\b\\w+\\b|`[^`]+`)\\(",
+            "beginCaptures": {
+                "1": {
+                    "name": "storage.type.function.aura"
+                },
+                "2": {
+                    "patterns": [
+                        {
+                            "include": "#type-parameter"
+                        }
+                    ]
+                },
+                "3": {
+                    "name": "entity.name.function.declaration.aura"
+                }
+            },
+            "end": "\\)",
+            "endCaptures": {
+                "1": {
+                    "name": "keyword.operator.assignment.type.aura"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#parameter-declaration"
+                }
+            ]
+        },
+        "parameter-declaration": {
+            "match": "\\b(\\w+)\\s*(:)\\s*(\\w+(?:\\s*<[^>]+>)?)(\\?)?(,)?",
+            "captures": {
+                "1": {
+                    "name": "variable.parameter.aura"
+                },
+                "2": {
+                    "name": "keyword.operator.assignment.type.aura"
+                },
+                "3": {
+                    "name": "entity.name.type.aura"
+                },
+                "4": {
+                    "name": "keyword.operator.optional.aura"
+                },
+                "5": {
+                    "name": "punctuation.separator.delimiter.aura"
+                }
+            }
+        },
+
+        "constant-declaration": {
+            "match": "\\b(val)\\b\\s*(?<GROUP><([^<>]|\\g<GROUP>)+>)?",
+            "captures": {
+                "1": {
+                    "name": "storage.type.variable.readonly.aura"
+                },
+                "2": {
+                    "patterns": [
+                        {
+                            "include": "#type-parameter"
+                        }
+                    ]
+                }
+            }
+        },
+        "variable-declaration": {
+            "match": "\\b(var)\\b\\s*(?<GROUP><([^<>]|\\g<GROUP>)+>)?",
+            "captures": {
+                "1": {
+                    "name": "storage.type.variable.aura"
+                },
+                "2": {
+                    "patterns": [
+                        {
+                            "include": "#type-parameter"
+                        }
+                    ]
+                }
+            }
+        },
+
+        "builtin-types": {
+            "match": "\\b(Int|Long|Short|Byte|Float|Double|Boolean|Char|String|Any|Nothing|Unit|List|Map|Set|Array|MutableList|MutableMap|MutableSet|Result|Optional|Throwable|Exception|Iterable|Iterator|Sequence|Pair|Triple|Comparable|Number|Annotation)\\b",
+            "name": "storage.type.builtin.aura"
+        },
+
+        "for-loop-variable": {
+            "match": "\\b(for)\\s*\\(\\s*(\\w+)(?::\\s*[^)]*?)?\\s+in\\b",
+            "captures": {
+                "1": {
+                    "name": "keyword.control.aura"
+                },
+                "2": {
+                    "name": "variable.parameter.aura"
+                }
+            }
+        },
+
+        "variable": {
+            "match": "\\b(\\w+)(?=\\s*[:=])",
+            "captures": {
+                "1": {
+                    "name": "variable.other.definition.aura"
+                }
+            }
+        },
+        "object": {
+            "match": "\\b(\\w+)(?=\\.)",
+            "captures": {
+                "1": {
+                    "name": "variable.other.object.aura"
+                }
+            }
+        },
+
+        "type-parameter": {
+            "patterns": [
+                {
+                    "match": "(:)?\\s*(\\b\\w+\\b)(\\?)?",
+                    "captures": {
+                        "1": {
+                            "name": "keyword.operator.assignment.aura"
+                        },
+                        "2": {
+                            "name": "entity.name.type.aura"
+                        },
+                        "3": {
+                            "name": "keyword.operator.optional.aura"
+                        }
+                    }
+                },
+                {
+                    "match": "\\b(in|out)\\b",
+                    "name": "storage.modifier.aura"
+                }
+            ]
+        },
+        "type-annotation": {
+            "match": "(?<![:?]):\\s*(\\w|\\?|\\s|->|(?<GROUP>[<(]([^<>()\"']|\\g<GROUP>)+[)>]))+",
+            "captures": {
+                "0": {
+                    "patterns": [
+                        {
+                            "include": "#type-parameter"
+                        }
+                    ]
+                }
+            }
+        },
+
+        "function-call": {
+            "match": "(?:(\\?\\.)|(\\.))?(\\b\\w+\\b|`[^`]+`)\\s*(?<GROUP><([^<>]|\\g<GROUP>)+>)?\\s*(?=\\()",
+            "captures": {
+                "1": {
+                    "name": "punctuation.accessor.optional.aura"
+                },
+                "2": {
+                    "name": "punctuation.separator.period.aura"
+                },
+                "3": {
+                    "name": "entity.name.function.call.aura"
+                },
+                "4": {
+                    "patterns": [
+                        {
+                            "include": "#type-parameter"
+                        }
+                    ]
+                }
+            }
+        },
+        "property.reference": {
+            "match": "(?:(\\?\\.)|(\\.))(\\w+)\\b",
+            "captures": {
+                "1": {
+                    "name": "punctuation.accessor.optional.aura"
+                },
+                "2": {
+                    "name": "punctuation.separator.period.aura"
+                },
+                "3": {
+                    "name": "variable.other.property.aura"
+                }
+            }
+        },
+        "method-reference": {
+            "match": "\\??::(\\b\\w+\\b|`[^`]+`)",
+            "captures": {
+                "1": {
+                    "name": "entity.name.function.reference.aura"
+                }
+            }
+        },
+
+        "string-empty": {
+            "match": "(?<!\")\"\"(?!\")",
+            "name": "string.quoted.double.aura"
+        },
+        "string": {
+            "begin": "(?<!\")\"(?!\")",
+            "end": "\"",
+            "name": "string.quoted.double.aura",
+            "patterns": [
+                {
+                    "match": "\\\\.",
+                    "name": "constant.character.escape.aura"
+                },
+                {
+                    "include": "#string-escape-simple"
+                },
+                {
+                    "include": "#string-escape-bracketed"
+                }
+            ]
+        },
+        "string-multiline": {
+            "begin": "\"\"\"",
+            "end": "\"\"\"",
+            "name": "string.quoted.double.aura"
+        },
+        "string-escape-simple": {
+            "match": "(?<!\\\\)\\$\\w+\\b",
+            "name": "variable.string-escape.aura"
+        },
+        "string-escape-bracketed": {
+            "begin": "(?<!\\\\)(\\$\\{)",
+            "end": "(\\})",
+            "name": "meta.template.expression.aura",
+            "beginCaptures": {
+                "1": {
+                    "name": "punctuation.definition.template-expression.begin.aura"
+                }
+            },
+            "endCaptures": {
+                "1": {
+                    "name": "punctuation.definition.template-expression.end.aura"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#code"
+                }
+            ]
+        },
+        "character": {
+            "begin": "'",
+            "end": "'",
+            "name": "string.quoted.single.aura",
+            "patterns": [
+                {
+                    "match": "\\\\.",
+                    "name": "constant.character.escape.aura"
+                }
+            ]
+        },
+
+        "decimal-literal": {
+            "match": "\\b\\d[\\d_]*(\\.[\\d_]+)?((e|E)\\d+)?(u|U)?(L|F|f|D|d)?\\b",
+            "name": "constant.numeric.decimal.aura"
+        },
+        "hex-literal": {
+            "match": "0(x|X)[A-Fa-f0-9][A-Fa-f0-9_]*(u|U)?(L|F|f|D|d)?",
+            "name": "constant.numeric.hex.aura"
+        },
+        "binary-literal": {
+            "match": "0(b|B)[01][01_]*(u|U)?(L|F|f|D|d)?",
+            "name": "constant.numeric.binary.aura"
+        },
+        "boolean-literal": {
+            "match": "\\b(true|false)\\b",
+            "name": "constant.language.boolean.aura"
+        },
+        "null-literal": {
+            "match": "\\bnull\\b",
+            "name": "constant.language.null.aura"
+        },
+
+        "lambda-arrow": {
+            "match": "->",
+            "name": "storage.type.function.arrow.aura"
+        },
+
+        "operators": {
+            "patterns": [
+                {
+                    "match": "(===?|\\!==?|<=|>=|<|>)",
+                    "name": "keyword.operator.comparison.aura"
+                },
+                {
+                    "match": "(!!)",
+                    "name": "keyword.operator.null-assert.aura"
+                },
+                {
+                    "match": "(??)",
+                    "name": "keyword.operator.null-coalesce.aura"
+                },
+                {
+                    "match": "(:?)",
+                    "name": "keyword.operator.elvis.aura"
+                },
+                {
+                    "match": "([+*/%-]=)",
+                    "name": "keyword.operator.assignment.arithmetic.aura"
+                },
+                {
+                    "match": "([=])",
+                    "name": "keyword.operator.assignment.aura"
+                },
+                {
+                    "match": "([+*/%-])",
+                    "name": "keyword.operator.arithmetic.aura"
+                },
+                {
+                    "match": "(&&|\\|\\|)",
+                    "name": "keyword.operator.logical.aura"
+                },
+                {
+                    "match": "(!)",
+                    "name": "keyword.operator.negation.aura"
+                },
+                {
+                    "match": "(&|\\||\\^|~|<<|>>>|>>)",
+                    "name": "keyword.operator.bitwise.aura"
+                },
+                {
+                    "match": "(--|\\+\\+)",
+                    "name": "keyword.operator.increment-decrement.aura"
+                },
+                {
+                    "match": "(\\.\\.\\.|\\.\\.)",
+                    "name": "keyword.operator.range.aura"
+                },
+                {
+                    "match": "(@)",
+                    "name": "keyword.operator.annotation.aura"
+                },
+                {
+                    "match": "(::)",
+                    "name": "keyword.operator.method-reference.aura"
+                }
+            ]
+        },
+
+        "self-reference": {
+            "match": "\\b(this|super)(@\\w+)?\\b",
+            "name": "variable.language.this.aura"
+        },
+        "label": {
+            "match": "\\b(\\w+)@(?!\\w)",
+            "captures": {
+                "1": {
+                    "name": "entity.name.label.aura"
+                }
+            }
+        },
+
+        "enum-variant": {
+            "match": "\\b([A-Z][A-Z0-9_]*)\\b",
+            "name": "entity.name.enum.variant.aura"
+        }
+    }
+}

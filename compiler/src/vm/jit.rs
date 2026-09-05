@@ -54,7 +54,7 @@ pub type JitEntry = unsafe extern "C" fn(*const JitValue, *mut JitValue, usize, 
 
 pub struct JitState {
     compiled: HashMap<usize, JitEntry>,
-    skipped: HashMap<usize, ()>,
+    skipped: HashMap<usize, String>,
     dispatch_table: Vec<Option<JitEntry>>,
 }
 
@@ -83,6 +83,10 @@ impl JitState {
     pub fn is_skipped(&self, idx: usize) -> bool {
         self.skipped.contains_key(&idx)
     }
+    /// 获取跳过原因（用于诊断日志）
+    pub fn skip_reason(&self, idx: usize) -> Option<&str> {
+        self.skipped.get(&idx).map(|s| s.as_str())
+    }
     pub fn insert(&mut self, idx: usize, entry: JitEntry) {
         while self.dispatch_table.len() <= idx {
             self.dispatch_table.push(None);
@@ -90,8 +94,8 @@ impl JitState {
         self.dispatch_table[idx] = Some(entry);
         self.compiled.insert(idx, entry);
     }
-    pub fn skip(&mut self, idx: usize) {
-        self.skipped.insert(idx, ());
+    pub fn skip(&mut self, idx: usize, reason: &str) {
+        self.skipped.insert(idx, reason.to_string());
     }
     fn dispatch_table_ptr(&self) -> *const () {
         self.dispatch_table.as_ptr() as *const ()
@@ -187,6 +191,23 @@ fn is_jit_compilable_inner(
             | Instr::JumpIfTrue(_)
             | Instr::JumpIfFalse(_)
             | Instr::Return => {}
+            // Fix B: 扩展白名单（P1.2）— 逻辑/位运算 + 集合分配 + ARC no-op
+            | Instr::And
+            | Instr::Or
+            | Instr::BitAnd
+            | Instr::BitOr
+            | Instr::BitXor
+            | Instr::Shl
+            | Instr::Shr
+            | Instr::NewObject(_)
+            | Instr::NewArray
+            | Instr::NewList
+            | Instr::NewMap
+            | Instr::IncRef
+            | Instr::DecRef
+            | Instr::Retain
+            | Instr::Release
+            | Instr::DropRef => {}
             Instr::Call(ci) => {
                 if !is_jit_compilable_inner(*ci as usize, consts, funcs, in_progress) {
                     return false;
@@ -220,7 +241,7 @@ pub fn compile_function(
 
 #[cfg(feature = "jit")]
 mod cranelift_backend {
-    use super::{DecodedFunction, Instr, JitEntry, TAG_BOOL, TAG_INT};
+    use super::{DecodedFunction, Instr, JitEntry, TAG_BOOL, TAG_INT, TAG_NULL};
     use crate::codegen::opcode::Const;
     use cranelift::codegen::ir::Block;
     use cranelift::codegen::ir::{
@@ -686,6 +707,26 @@ mod cranelift_backend {
                 let ret_payload = fb.ins().load(i64_ty, MemFlags::new(), out_ptr_val, eight32);
                 push(fb, ret_tag, ret_payload);
 
+                false
+            }
+            // Fix B: 逻辑运算（and/or → band/bor，返回 TAG_INT）
+            Instr::And => bin_int(fb, &mut pop, &mut push, |fb, x, y| fb.ins().band(x, y)),
+            Instr::Or => bin_int(fb, &mut pop, &mut push, |fb, x, y| fb.ins().bor(x, y)),
+            // Fix B: 位运算
+            Instr::BitAnd => bin_int(fb, &mut pop, &mut push, |fb, x, y| fb.ins().band(x, y)),
+            Instr::BitOr => bin_int(fb, &mut pop, &mut push, |fb, x, y| fb.ins().bor(x, y)),
+            Instr::BitXor => bin_int(fb, &mut pop, &mut push, |fb, x, y| fb.ins().bxor(x, y)),
+            Instr::Shl => bin_int(fb, &mut pop, &mut push, |fb, x, y| fb.ins().ishl(x, y)),
+            Instr::Shr => bin_int(fb, &mut pop, &mut push, |fb, x, y| fb.ins().sshr(x, y)),
+            // Fix B: 对象/数组/集合分配 → 返回 null 指针（简化：堆管理由运行时处理）
+            Instr::NewObject(_) | Instr::NewArray | Instr::NewList | Instr::NewMap => {
+                let tag = fb.ins().iconst(i64_ty, TAG_NULL);
+                let payload = fb.ins().iconst(i64_ty, 0);
+                push(fb, tag, payload);
+                false
+            }
+            // Fix B: ARC 引用计数 → JIT 中为 no-op（引用管理由解释器回退处理）
+            Instr::IncRef | Instr::DecRef | Instr::Retain | Instr::Release | Instr::DropRef => {
                 false
             }
             _ => {

@@ -498,10 +498,16 @@ impl Parser {
                 break;
             }
             self.expect_type_gt();
-            Type::Generic {
-                name,
-                args,
-                span: Span::merge(&start, &self.current().span),
+            // Fix 4: Pointer<T> 应解析为 Type::Pointer 而非 Type::Generic
+            if name == "Pointer" && args.len() == 1 {
+                let span = Span::merge(&start, &self.current().span);
+                Type::Pointer(Box::new(args.into_iter().next().unwrap()))
+            } else {
+                Type::Generic {
+                    name,
+                    args,
+                    span: Span::merge(&start, &self.current().span),
+                }
             }
         } else {
             Type::Named {

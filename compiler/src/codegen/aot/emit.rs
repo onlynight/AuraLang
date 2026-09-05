@@ -29,6 +29,7 @@ use crate::codegen::aot::types::{TypeMapper, sanitizellvm};
 use crate::codegen::hir::{
     HirBinOp, HirBlock, HirExpr, HirFunction, HirProgram, HirStmt, HirType, HirUnOp,
 };
+use crate::codegen::opcode::Const;
 
 use super::AotCodeGenerator;
 
@@ -66,6 +67,14 @@ pub(crate) struct EmitCtx {
     pub func_dbg_ids: HashMap<String, u32>,
     /// 函数名 → LLVM 返回类型字符串（用于 emit_call 推断返回类型）
     pub func_ret_types: HashMap<String, String>,
+    /// P3.2: 枚举变体映射（枚举名 → [(变体名, 变体索引, 关联值数)]）
+    pub enum_variants: HashMap<String, Vec<(String, usize, usize)>>,
+    /// P3.2: 枚举最大关联值字段数（用于 tagged union 结构体）
+    pub enum_max_fields: HashMap<String, usize>,
+    /// P3.3: Lambda 静态函数名计数器
+    pub lambda_counter: u64,
+    /// P3.3: Lambda 生成的函数 IR 片段（模块末尾输出）
+    pub lambda_funcs: Vec<String>,
 }
 
 /// 变量槽（LLVM 名称 + 类型）
@@ -104,6 +113,10 @@ impl EmitCtx {
             subprogram_index: 0,
             func_dbg_ids: HashMap::new(),
             func_ret_types: HashMap::new(),
+            enum_variants: HashMap::new(),
+            enum_max_fields: HashMap::new(),
+            lambda_counter: 0,
+            lambda_funcs: Vec::new(),
         }
     }
 
@@ -186,6 +199,73 @@ impl EmitCtx {
             let fields: Vec<String> = st.fields.iter().map(|(_, ty)| self.llvm_type(ty)).collect();
             s.push_str(&format!("{} = type {{{}}}\n", llvm_name, fields.join(", ")));
         }
+        // P3.2: Enum → tagged union 结构体（tag: i32, 后续字段为关联值）
+        s.push_str("; ---- Enum Type Definitions (tagged union) ----\n");
+        for e in &program.enums {
+            let llvm_name = format!("%struct.{}", sanitizellvm(&e.name));
+            if !self.declared_structs.insert(llvm_name.clone()) {
+                continue;
+            }
+            // 取所有变体中最多的关联值字段数
+            let max_fields = e.variants.iter().map(|(_, fields)| fields.len()).max().unwrap_or(0);
+            let mut fields_str = vec!["i32".to_string()]; // tag
+            for _ in 0..max_fields {
+                fields_str.push("ptr".to_string()); // 关联值用 ptr（堆分配）
+            }
+            s.push_str(&format!("{} = type {{{}}}\n", llvm_name, fields_str.join(", ")));
+            // P3.2: 记录枚举变体映射（用于 emit_member_access 构造 tagged union）
+            let mut variants_info = Vec::new();
+            for (vi, (vname, vfields)) in e.variants.iter().enumerate() {
+                variants_info.push((vname.clone(), vi, vfields.len()));
+            }
+            self.enum_variants.insert(e.name.clone(), variants_info);
+            self.enum_max_fields.insert(e.name.clone(), max_fields);
+        }
+        self.sections.push(s);
+    }
+
+    /// 输出 FFI 常量（extern 块中的 val 声明 → LLVM 全局常量）
+    pub fn emit_ffi_constants(&mut self, program: &HirProgram) {
+        if program.constants.is_empty() {
+            return;
+        }
+        let mut s = String::new();
+        s.push_str("; ---- FFI Constants ----\n");
+        for (name, c) in &program.constants {
+            let llvm_name = format!("@{}", sanitizellvm(name));
+            let (llvm_ty, llvm_val) = match c {
+                Const::Int(i) => {
+                    let ty = "i64";
+                    let v = format!("{}", i);
+                    (ty.to_string(), v)
+                }
+                Const::Float(f) => {
+                    let ty = "double";
+                    let v = format!("{:.1e}", f);
+                    (ty.to_string(), v)
+                }
+                Const::Str(str) => {
+                    let c_str: Vec<u8> = format!("{}\0", str).into_bytes();
+                    let hex_bytes: Vec<String> = c_str.iter().map(|b| format!("c{}", b)).collect();
+                    (
+                        format!("[{} x i8]", c_str.len()),
+                        format!("{{ {} }}", hex_bytes.join(", ")),
+                    )
+                }
+                Const::Bool(b) => {
+                    let ty = "i1";
+                    let v = format!("{}", if *b { 1 } else { 0 });
+                    (ty.to_string(), v)
+                }
+                Const::Null => {
+                    let ty = "ptr";
+                    let v = "null".to_string();
+                    (ty.to_string(), v)
+                }
+            };
+            s.push_str(&format!("{} = global {} {}\n", llvm_name, llvm_ty, llvm_val));
+        }
+        s.push('\n');
         self.sections.push(s);
     }
 
@@ -233,6 +313,9 @@ pub fn emit_program(codegen: &AotCodeGenerator, program: &HirProgram) -> Result<
 
     // 2. 结构体类型定义
     ctx.emit_struct_defs(program);
+
+    // 2.5 FFI 常量（P8.1）：extern 块中的常量声明 → LLVM 全局常量
+    ctx.emit_ffi_constants(program);
 
     // 3. FFI 声明
     ctx.emit_ffi(program);
@@ -308,6 +391,18 @@ pub fn emit_program(codegen: &AotCodeGenerator, program: &HirProgram) -> Result<
         ctx.generated_funcs.insert("main".to_string());
         let func_ir = emit_function(&mut ctx, &main_func)?;
         ctx.sections.push(func_ir);
+    }
+
+    // 6.5 Lambda 静态函数（P3.3）
+    if !ctx.lambda_funcs.is_empty() {
+        let mut s = String::new();
+        s.push_str("; ---- Lambda Functions ----\n");
+        for lf in &ctx.lambda_funcs {
+            s.push_str(lf);
+            s.push('\n');
+        }
+        s.push('\n');
+        ctx.sections.push(s);
     }
 
     // 7. 模块级全局常量（字符串字面量等，§9.2.1 generate_globals）
@@ -800,12 +895,96 @@ fn emit_expr_val(
             // P10.1: await — 直接返回内部值（非协程上下文 no-op）
             emit_expr_val(ctx, blocks, inner)
         }
-        // Fix 4: Lambda — AOT 后端暂不支持，返回空指针
-        HirExpr::Lambda { .. } => {
-            let tmp = ctx.fresh_var();
+        // P3.3: Lambda — 生成静态函数并返回函数指针
+        HirExpr::Lambda { params, body } => {
+            let func_name = format!("__lambda_{}", ctx.lambda_counter);
+            ctx.lambda_counter += 1;
+
+            // 生成参数列表
+            let param_strs: Vec<String> = params
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    let ty = p.ty.as_ref().map(|t| ctx.llvm_type(t)).unwrap_or_else(|| "i32".to_string());
+                    format!("{} %arg_{}", ty, i)
+                })
+                .collect();
+
+            // 生成函数体
+            let mut func_ir = String::new();
+            func_ir.push_str(&format!("define i32 @{}({}) {{\n", func_name, param_strs.join(", ")));
+            func_ir.push_str("entry:\n");
+
+            // 用子上下文发射函数体
+            let mut sub_ctx = EmitCtx {
+                type_mapper: ctx.type_mapper.clone(),
+                target_triple: ctx.target_triple.clone(),
+                _opt_level: ctx._opt_level,
+                _string_as_struct: ctx._string_as_struct,
+                link_runtime: ctx.link_runtime,
+                debug_info: None,
+                declared_structs: std::collections::HashSet::new(),
+                generated_funcs: std::collections::HashSet::new(),
+                sections: Vec::new(),
+                bb_counter: 0,
+                var_counter: 0,
+                const_counter: 0,
+                var_scope: vec![HashMap::new()],
+                globals: Vec::new(),
+                global_const_map: HashMap::new(),
+                subprogram_meta: Vec::new(),
+                subprogram_index: 0,
+                func_dbg_ids: HashMap::new(),
+                func_ret_types: ctx.func_ret_types.clone(),
+                enum_variants: ctx.enum_variants.clone(),
+                enum_max_fields: ctx.enum_max_fields.clone(),
+                lambda_counter: ctx.lambda_counter,
+                lambda_funcs: Vec::new(),
+            };
+
+            // 注册参数
+            for (i, p) in params.iter().enumerate() {
+                let ty = p.ty.as_ref().map(|t| sub_ctx.llvm_type(t)).unwrap_or_else(|| "i32".to_string());
+                sub_ctx.var_scope.last_mut().unwrap().insert(
+                    p.name.clone(),
+                    VarSlot { llvm_name: format!("%arg_{}", i), llvm_ty: ty },
+                );
+            }
+
+            // 发射函数体
+            let mut fb = FuncBlocks::new();
+            fb.add_block_named("entry");
+            let _ = emit_block(&mut sub_ctx, &mut fb, body);
+            if !fb.has_terminator() {
+                fb.set_terminator("ret i32 0");
+            }
+
+            // 收集 IR
+            for blk in fb.blocks.iter() {
+                if blk.name != "entry" {
+                    func_ir.push_str(&format!("{}:\n", blk.name));
+                }
+                for inst in &blk.body {
+                    func_ir.push_str(inst);
+                    func_ir.push('\n');
+                }
+                if let Some(ref term) = blk.terminator {
+                    func_ir.push_str(term);
+                    func_ir.push('\n');
+                }
+            }
+            func_ir.push_str("}\n\n");
+
+            ctx.lambda_funcs.push(func_ir);
+
+            // 返回函数地址（LLVM 全局值）
+            let addr = ctx.fresh_var();
             let cur = blocks.last_mut();
-            cur.body.push(format!("{} = alloca ptr", tmp));
-            Ok((tmp, "ptr".to_string()))
+            cur.body.push(format!(
+                "{} = getelementptr i8, ptr @{}, i64 0",
+                addr, func_name
+            ));
+            Ok((addr, "ptr".to_string()))
         }
     }
 }
@@ -1067,31 +1246,89 @@ fn emit_call(
         .get(callee)
         .cloned()
         .unwrap_or_else(|| "i32".to_string());
-    let tmp = ctx.fresh_var();
     let cur = blocks.last_mut();
     let args_str: Vec<String> = args_ir
         .iter()
         .map(|(v, t)| format!("{} {}", t, v))
         .collect();
 
-    cur.body.push(format!(
-        "{} = call {} @{}({})",
-        tmp,
-        ret_ty,
-        callee,
-        args_str.join(", ")
-    ));
-    Ok((tmp, ret_ty))
+    // 处理 void / 空返回类型：不能赋值给寄存器（LLVM IR 语法限制）
+    if ret_ty.is_empty() || ret_ty == "void" {
+        cur.body.push(format!(
+            "call void @{}({})",
+            callee,
+            args_str.join(", ")
+        ));
+        // 返回一个虚拟 i32 0 值，保持调用者接口兼容
+        Ok(("0".to_string(), "i32".to_string()))
+    } else {
+        let tmp = ctx.fresh_var();
+        cur.body.push(format!(
+            "{} = call {} @{}({})",
+            tmp,
+            ret_ty,
+            callee,
+            args_str.join(", ")
+        ));
+        Ok((tmp, ret_ty))
+    }
 }
 
 fn emit_member_access(
     ctx: &mut EmitCtx,
     blocks: &mut FuncBlocks,
     object: &HirExpr,
-    _name: &str,
+    name: &str,
 ) -> Result<(String, String), AotError> {
+    // P3.2: 枚举变体构造 — Direction.North → tagged union 结构体
+    if let HirExpr::Var(enum_name) = object {
+        // 先提取枚举信息（避免 borrow checker 冲突）
+        let (variant_idx, field_count, max_fields) = {
+            let variants = ctx.enum_variants.get(enum_name);
+            let mf = ctx.enum_max_fields.get(enum_name).copied().unwrap_or(0);
+            if let Some(vs) = variants {
+                if let Some((_, vi, fc)) = vs.iter().find(|(vn, _, _)| vn == name) {
+                    (Some(*vi), *fc, mf)
+                } else {
+                    (None, 0, mf)
+                }
+            } else {
+                (None, 0, mf)
+            }
+        };
+
+        if let Some(variant_idx) = variant_idx {
+            let struct_name = format!("%struct.{}", sanitizellvm(enum_name));
+
+            // 分配 tagged union 结构体
+            let alloc = ctx.fresh_var();
+            let cur = blocks.last_mut();
+            cur.body.push(format!("{} = alloca {}", alloc, struct_name));
+
+            // 设置 tag 字段（变体索引）
+            let tag_ptr = ctx.fresh_var();
+            cur.body.push(format!(
+                "{} = getelementptr {}, {}* {}, i64 0, i32 0",
+                tag_ptr, struct_name, struct_name, alloc
+            ));
+            cur.body.push(format!("store i32 {}, i32* {}", variant_idx, tag_ptr));
+
+            // 设置关联值字段：置零
+            for fi in 0..max_fields {
+                let f_ptr = ctx.fresh_var();
+                cur.body.push(format!(
+                    "{} = getelementptr {}, {}* {}, i64 0, i32 {}",
+                    f_ptr, struct_name, struct_name, alloc, fi + 1
+                ));
+                cur.body.push(format!("store ptr null, ptr* {}", f_ptr));
+            }
+
+            return Ok((alloc.clone(), format!("{}*", struct_name)));
+        }
+    }
+
+    // 普通成员访问：字段偏移为 0
     let (obj_ir, _) = emit_expr_val(ctx, blocks, object)?;
-    // 简化：字段偏移为 0
     let gep = ctx.fresh_var();
     let tmp = ctx.fresh_var();
     let cur = blocks.last_mut();

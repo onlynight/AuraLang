@@ -1,0 +1,101 @@
+// JSON 处理示例
+// P14.4: 示例项目 — JSON 工具
+
+// 简化的 JSON 操作函数
+fun parseJson(text: String): Map<String, Any> {
+    // 简化实现：实际使用 std.json.parse
+    println("解析 JSON: $text")
+    return mapOf()
+}
+
+fun stringify(data: Map<String, Any>): String {
+    // 简化实现：实际使用 std.json.stringify
+    var result = "{"
+    for ((key, value) in data) {
+        result += "\"$key\": $value, "
+    }
+    result = result.trimEnd()
+    if (result.endsWith(",")) {
+        result = result.substring(0, result.length - 1)
+    }
+    result += "}"
+    return result
+}
+
+fun getField(data: Map<String, Any>, field: String): Any? {
+    return data[field]
+}
+
+fun setField(data: MutableMap<String, Any>, field: String, value: Any) {
+    data[field] = value
+}
+
+fun isValidJson(text: String): Boolean {
+    // 简化验证：检查括号匹配
+    val open = text.count { it == '{' }
+    val close = text.count { it == '}' }
+    return open == close
+}
+
+fun main() {
+    println("=== Aura JSON 处理示例 ===")
+    println()
+    
+    // 示例 JSON
+    val jsonText = """
+    {
+        "name": "Alice",
+        "age": 30,
+        "active": true
+    }
+    """
+    
+    // 验证 JSON
+    println("1. JSON 验证")
+    println("   输入: $jsonText")
+    println("   有效: ${isValidJson(jsonText)}")
+    println()
+    
+    // 创建数据
+    println("2. 创建数据")
+    val data = mutableMapOf<String, Any>(
+        "name" to "Alice",
+        "age" to 30,
+        "active" to true
+    )
+    println("   数据: $data")
+    println()
+    
+    // 序列化
+    println("3. 序列化")
+    val json = stringify(data)
+    println("   JSON: $json")
+    println()
+    
+    // 修改数据
+    println("4. 修改数据")
+    setField(data, "age", 31)
+    setField(data, "city", "Beijing")
+    println("   修改后: $data")
+    println("   新 JSON: ${stringify(data)}")
+    println()
+    
+    // 获取字段
+    println("5. 获取字段")
+    val name = getField(data, "name")
+    val age = getField(data, "age")
+    println("   name = $name")
+    println("   age = $age")
+    println()
+    
+    // 无效 JSON 示例
+    println("6. 无效 JSON")
+    val invalidJson = """
+    { "name": "test"
+    """
+    println("   输入: $invalidJson")
+    println("   有效: ${isValidJson(invalidJson)}")
+    println()
+    
+    println("完成!")
+}

@@ -44,6 +44,14 @@ fn main() {
         "doc" => cmd_doc(rest),
         "eval" => cmd_eval(rest),
         "repl" => cmd_repl(rest),
+        // P11: 包管理器命令
+        "install" => cmd_install(rest),
+        "update" => cmd_update(rest),
+        "publish" => cmd_publish(rest),
+        "deps" => cmd_deps(rest),
+        "new" => cmd_new(rest),
+        // P13: 工具链命令
+        "lsp" => cmd_lsp(rest),
         "--help" | "-h" | "help" => print_usage(),
         other => {
             eprintln!("未知子命令: {}", other);
@@ -73,7 +81,14 @@ fn print_usage() {
   aura leak-check <file.aura>                    P7: 内存泄漏检测（ARC 分析）\n\
   aura doc [--output <dir>]                       生成标准库 API 文档（Markdown + HTML）\n\
   aura eval [--expr <code>]                      执行代码片段（类 node -e）\n\
-  aura repl                                     交互式 REPL（类 python -i）\n"
+  aura repl                                     交互式 REPL（类 python -i）\n\
+  aura install [--offline]                        P11: 安装依赖（aura.toml + // @depends）\n\
+  aura update [--all]                             P11: 更新依赖到最新兼容版本\n\
+  aura publish [--dir <path>]                     P11: 发布包到 Git 仓库\n\
+  aura deps [--dir <path>]                        P11: 显示依赖树\n\
+  aura new <name> [--dir <path>]                  P11: 创建新包项目\n\
+  aura lsp                                        P13: 启动 LSP 服务器（stdio 通信）\n\
+  aura fmt <file.aura> [--check]                  P13: 代码格式化\n"
     );
 }
 
@@ -521,9 +536,47 @@ fn cmd_ast(args: &[String]) {
     }
 }
 
-fn cmd_fmt(_args: &[String]) {
-    eprintln!("`aura fmt` 尚未实现");
-    exit(1);
+fn cmd_fmt(args: &[String]) {
+    let check_only = args.iter().any(|a| a == "--check");
+    let input = match first_positional(args, "--check") {
+        Some(p) => p,
+        None => {
+            eprintln!("错误: 缺少输入文件");
+            eprintln!("用法: aura fmt <file.aura> [--check]");
+            exit(1);
+        }
+    };
+
+    let source = match std::fs::read_to_string(input) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("错误: 无法读取 {}: {}", input, e);
+            exit(1);
+        }
+    };
+
+    let formatted = compiler::lsp::format_source(&source);
+
+    if check_only {
+        if formatted != source {
+            println!("{} 需要格式化", input);
+            exit(1);
+        } else {
+            println!("✓ {} 已格式化", input);
+        }
+    } else {
+        std::fs::write(input, &formatted).map_err(|e| {
+            eprintln!("错误: 写入 {} 失败: {}", input, e);
+            exit(1);
+        }).ok();
+        println!("✓ 已格式化 {}", input);
+    }
+}
+
+/// P13.3: `aura lsp` — 启动 LSP 服务器
+fn cmd_lsp(_args: &[String]) {
+    eprintln!("Aura LSP 服务器启动（stdio 模式）");
+    compiler::lsp::run_lsp_server();
 }
 
 /// P7.9: 内存泄漏检测命令
@@ -801,6 +854,200 @@ fn cmd_repl(_args: &[String]) {
         let code = std::mem::take(&mut buffer);
         depth = 0;
         repl_eval(&code);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P11: 包管理器命令
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// P11.4: `aura install` — 安装依赖
+fn cmd_install(args: &[String]) {
+    let offline = args.iter().any(|a| a == "--offline");
+    let dir_opt = extract_opt(args, "--dir");
+    let project_dir = dir_opt
+        .map(|s| std::path::PathBuf::from(s))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+    use compiler::package::{
+        PackageManager, PackageManifest,
+    };
+
+    // 收集所有依赖
+    let mut deps = Vec::new();
+
+    // 从 aura.toml 加载
+    let manifest_path = project_dir.join("aura.toml");
+    if manifest_path.exists() {
+        match PackageManifest::from_toml_file(&manifest_path) {
+            Ok(manifest) => {
+                deps.extend(manifest.dependencies);
+            }
+            Err(e) => {
+                eprintln!("警告: 无法解析 aura.toml: {}", e);
+            }
+        }
+    }
+
+    // 从 .aura 文件中的 // @depends 收集
+    if let Ok(entries) = std::fs::read_dir(&project_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map(|e| e == "aura").unwrap_or(false) {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    deps.extend(compiler::package::parse_depends(&content));
+                }
+            }
+        }
+    }
+
+    if deps.is_empty() {
+        println!("✓ 无依赖需要安装");
+        return;
+    }
+
+    let config = compiler::package::PackageManagerConfig {
+        offline,
+        ..Default::default()
+    };
+    let mut pm = PackageManager::with_config(config);
+
+    println!("正在安装 {} 个依赖...", deps.len());
+    match pm.install(&project_dir, &deps) {
+        Ok(lock) => {
+            println!("✓ 已安装 {} 个依赖", lock.dependencies.len());
+            for entry in &lock.dependencies {
+                println!(
+                    "  ✓ {} v{} (rev: {})",
+                    entry.name,
+                    entry.version,
+                    entry.rev.as_deref().unwrap_or("-")
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("安装失败: {}", e);
+            exit(1);
+        }
+    }
+}
+
+/// P11.5: `aura update` — 更新依赖
+fn cmd_update(args: &[String]) {
+    let all = args.iter().any(|a| a == "--all");
+    let dir_opt = extract_opt(args, "--dir");
+    let project_dir = dir_opt
+        .map(|s| std::path::PathBuf::from(s))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+    use compiler::package::PackageManager;
+
+    let mut pm = PackageManager::new();
+    if let Err(e) = pm.load_project(&project_dir) {
+        eprintln!("加载项目失败: {}", e);
+        exit(1);
+    }
+
+    match pm.update(&project_dir, all) {
+        Ok(updated) => {
+            if updated.is_empty() {
+                println!("✓ 所有依赖已是最新");
+            } else {
+                println!("✓ 已更新 {} 个依赖:", updated.len());
+                for u in &updated {
+                    println!("  {}", u);
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("更新失败: {}", e);
+            exit(1);
+        }
+    }
+}
+
+/// P11.6: `aura publish` — 发布包
+fn cmd_publish(args: &[String]) {
+    let dir_opt = extract_opt(args, "--dir");
+    let package_dir = dir_opt
+        .map(|s| std::path::PathBuf::from(s))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+    use compiler::package::PackageManager;
+
+    let pm = PackageManager::new();
+    match pm.publish(&package_dir) {
+        Ok(msg) => println!("✓ {}", msg),
+        Err(e) => {
+            eprintln!("发布失败: {}", e);
+            exit(1);
+        }
+    }
+}
+
+/// P11.7: `aura deps` — 显示依赖树
+fn cmd_deps(args: &[String]) {
+    let dir_opt = extract_opt(args, "--dir");
+    let project_dir = dir_opt
+        .map(|s| std::path::PathBuf::from(s))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+    let outdated = args.iter().any(|a| a == "--outdated");
+
+    use compiler::package::PackageManager;
+
+    let mut pm = PackageManager::new();
+    if let Err(e) = pm.load_project(&project_dir) {
+        eprintln!("加载项目失败: {}", e);
+        exit(1);
+    }
+
+    match pm.show_deps(&project_dir) {
+        Ok(tree) => {
+            if outdated {
+                println!("=== 过时依赖 ===");
+                // 简化：标记所有依赖
+                println!("运行 aura update --all 来更新所有依赖");
+            }
+            println!("{}", tree);
+        }
+        Err(e) => {
+            eprintln!("显示依赖失败: {}", e);
+            exit(1);
+        }
+    }
+}
+
+/// P11: `aura new` — 创建新包项目
+fn cmd_new(args: &[String]) {
+    let name = match first_positional(args, "--dir") {
+        Some(n) => n.clone(),
+        None => {
+            eprintln!("错误: 缺少包名");
+            eprintln!("用法: aura new <name> [--dir <path>]");
+            exit(1);
+        }
+    };
+
+    let dir_opt = extract_opt(args, "--dir");
+    let parent_dir = dir_opt
+        .map(|s| std::path::PathBuf::from(s))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+    use compiler::package::PackageManager;
+
+    match PackageManager::create_new_package(&name, &parent_dir) {
+        Ok(()) => {
+            println!("✓ 已创建新包项目: {}", parent_dir.join(&name).display());
+            println!("  下一步:");
+            println!("    cd {}", name);
+            println!("    aura run main.aura");
+            println!("    aura publish");
+        }
+        Err(e) => {
+            eprintln!("创建失败: {}", e);
+            exit(1);
+        }
     }
 }
 

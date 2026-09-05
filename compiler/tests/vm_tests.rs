@@ -499,18 +499,19 @@ fn jit_compilable_leaf_int() {
         code,
     };
     let consts = vec![Const::Int(1)];
-    assert!(compiler::vm::jit::is_jit_compilable(&f, &consts));
+    let funcs = vec![f.clone()];
+    assert!(compiler::vm::jit::is_jit_compilable(0, &f, &consts, &funcs));
 }
 
-/// JIT 不可编译：含 Call 指令应返回 false
+/// JIT 不可编译：含 CallNative 指令应返回 false
 #[cfg(feature = "jit")]
 #[test]
-fn jit_not_compilable_with_call() {
+fn jit_not_compilable_with_call_native() {
     use compiler::vm::{DecodedFunction, Instr};
 
     let code = vec![
         Instr::LoadConst(0),
-        Instr::Call(0), // 非叶子调用
+        Instr::CallNative(0), // 非白名单指令
         Instr::Return,
     ];
     let f = DecodedFunction {
@@ -521,7 +522,8 @@ fn jit_not_compilable_with_call() {
         code,
     };
     let consts = vec![Const::Int(1)];
-    assert!(!compiler::vm::jit::is_jit_compilable(&f, &consts));
+    let funcs = vec![f.clone()];
+    assert!(!compiler::vm::jit::is_jit_compilable(0, &f, &consts, &funcs));
 }
 
 /// JIT 不可编译：含非常量应返回 false
@@ -542,5 +544,6 @@ fn jit_not_compilable_non_int_const() {
         code,
     };
     let consts = vec![Const::Float(3.14)];
-    assert!(!compiler::vm::jit::is_jit_compilable(&f, &consts));
+    let funcs = vec![f.clone()];
+    assert!(!compiler::vm::jit::is_jit_compilable(0, &f, &consts, &funcs));
 }

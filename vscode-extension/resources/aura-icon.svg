@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none">
+  <!-- Aura icon: a glowing ring (光环) -->
+  <defs>
+    <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#7C4DFF;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#00E5FF;stop-opacity:1" />
+    </linearGradient>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" style="stop-color:#7C4DFF;stop-opacity:0.3" />
+      <stop offset="100%" style="stop-color:#00E5FF;stop-opacity:0" />
+    </radialGradient>
+  </defs>
+  <!-- Glow background -->
+  <circle cx="12" cy="12" r="11" fill="url(#glow)"/>
+  <!-- Outer ring -->
+  <circle cx="12" cy="12" r="9" stroke="url(#grad)" stroke-width="2" fill="none"/>
+  <!-- Inner ring -->
+  <circle cx="12" cy="12" r="6" stroke="url(#grad)" stroke-width="1.5" fill="none" opacity="0.7"/>
+  <!-- Center dot -->
+  <circle cx="12" cy="12" r="2" fill="url(#grad)"/>
+  <!-- Text "A" -->
+  <text x="12" y="16" text-anchor="middle" font-size="10" font-weight="bold" fill="white" font-family="Arial">A</text>
+</svg>

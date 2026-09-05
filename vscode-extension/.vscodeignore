@@ -1,0 +1,14 @@
+.vscode/**
+src/**
+node_modules/**
+*.map
+*.ts
+!.vscodeignore
+!package.json
+!README.md
+!LICENSE
+!resources/**
+!syntaxes/**
+!snippets/**
+!language-configuration.json
+!out/**

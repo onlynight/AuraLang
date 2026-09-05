@@ -1,0 +1,274 @@
+# Aura Language — VS Code 扩展
+
+> Aura 语言 — NovaOS 的下一代系统级脚本语言
+
+[![VS Marketplace](https://img.shields.io/badge/VS%20Marketplace-Aura-blue)](https://marketplace.visualstudio.com/items?itemName=aura-lang.aura-language)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
+## 功能特性
+
+| 功能 | 状态 | 说明 |
+|------|------|------|
+| 语法高亮 | ✅ | Kotlin 风格 TextMate 语法 — 完整声明高亮（struct/class/enum/interface/actor/object）、修饰符、泛型参数、函数参数、字符串插值、数字字面量、运算符、自引用、标签 |
+| 代码补全 | ✅ | 基于 AST 符号表的智能补全 |
+| 跳转定义 | ✅ | 点击跳转到函数/结构体/枚举定义 |
+| 悬停提示 | ✅ | 显示类型信息、可见性、文档 |
+| 诊断推送 | ✅ | 实时错误/警告/信息推送 |
+| 代码格式化 | ✅ | `aura fmt` 格式化 |
+| 保存检查 | ✅ | 保存时自动检查 |
+| 代码折叠 | ✅ | 按函数体、块折叠 |
+| 代码片段 | ✅ | 20+ 常用模板 |
+| 参数提示 | ✅ | 函数调用参数提示 |
+| 重构 | 🔮 | 重命名、提取方法（待实现） |
+| AI 助手 | 🔮 | Copilot 风格补全（待实现） |
+
+## 安装
+
+### 从源码构建
+
+```bash
+cd vscode-extension
+npm install
+npm run compile
+code --install-extension aura-language-0.1.0.vsix
+```
+
+### 从 VS Code 市场安装
+
+> 搜索 "Aura Language" 并点击安装（待发布）
+
+## 配置
+
+### 基本配置
+
+```jsonc
+{
+    // Aura LSP 服务器路径（可执行文件）
+    "aura.serverPath": "aura",
+
+    // 传递给服务器的额外参数
+    "aura.serverArgs": [],
+
+    // 保存时自动检查
+    "aura.checkOnSave": true,
+
+    // 保存时自动格式化
+    "aura.formatOnSave": false,
+
+    // 启用诊断推送
+    "aura.diagnosticsEnabled": true
+}
+```
+
+### 自定义服务器路径
+
+如果 `aura` 不在 PATH 中，可以指定完整路径：
+
+```jsonc
+{
+    "aura.serverPath": "C:/Aura/aura.exe",
+    "aura.serverArgs": ["lsp"]
+}
+```
+
+或在 Linux/macOS:
+
+```jsonc
+{
+    "aura.serverPath": "/usr/local/bin/aura",
+    "aura.serverArgs": ["lsp"]
+}
+```
+
+## 快捷键
+
+| 命令 | 默认快捷键 | 说明 |
+|------|-----------|------|
+| 格式化文档 | Shift+Alt+F | 格式化当前文件 |
+| 显示诊断 | Ctrl+Shift+D | 显示所有诊断信息 |
+| 重启 LSP | Ctrl+Shift+R | 重启 LSP 服务器 |
+| 显示版本 | Ctrl+Alt+V | 显示服务器版本 |
+
+## 语法高亮示例
+
+```aura
+// 导入
+import aura.concurrent.*
+import aura.std.fs as fs
+
+// 文档注释
+/**
+ * 玩家结构体（data struct + 字段默认值 + 可空字段）
+ * @param id 玩家 ID
+ * @return 无
+ */
+data struct Player(
+    val id: Int,
+    var name: String = "unknown",
+    var health: Int = 100,
+    var tag: String? = null
+)
+
+// 类 + 泛型 + 继承 + 接口实现
+sealed class Shape<T : Number> {
+    fun area(): Float = 0.0f
+}
+class Circle : Shape {
+    override fun area(): Float = 0.0f
+}
+class Dog : Animal(), Pet {
+    override fun name(): String = "dog"
+}
+
+// 接口
+interface Drawable {
+    fun draw(): Unit
+}
+
+// 枚举（单元变体 + 带数据变体）
+enum Color {
+    RED,
+    GREEN,
+    CUSTOM(val r: Int, val g: Int, val b: Int)
+}
+
+// Actor
+actor Scheduler {
+    private var tick: Int = 0
+    fun step() { tick += 1 }
+}
+
+// 类型别名
+typealias Vec2 = Point
+
+// 函数声明（泛型 + 修饰符）
+suspend fun fetch(): Int = 0
+inline fun max(a: Int, b: Int): Int = a
+comptime fun constValue(): Int = 1
+
+// 外部函数声明（FFI）
+extern "c" fun puts(msg: String): Int
+
+// 函数调用（泛型实参）
+val nums: List<Int> = listOf(10, 20, 30)
+val result = when (score) {
+    0 -> "zero"
+    in 1..50 -> "low"
+    in 51..100 -> "high"
+    else -> "extreme"
+}
+
+// 字符串插值
+val message = "Score: ${score * 2}"
+val path = "C:\\tmp\\file.aura"
+
+// 多行原始字符串（无插值）
+val raw = """
+    No interpolation: $var
+    Backslash: \n
+"""
+
+// 空安全操作符
+val safe: Int = n ?: 0
+val len: Int? = p.tag?.length
+val forced: Int = n!!
+
+// 方法引用
+val fn = obj::method
+
+// Lambda
+val transform = (x) -> x + 1
+
+// 标签循环
+outer@ for (a in 0..3) {
+    for (b in 0..3) {
+        if (a == b) break@outer
+    }
+}
+
+// 数字字面量
+val hex = 0xFF
+val binary = 0b1100
+val float = 3.14f
+val long = 1_000_000L
+```
+
+## 代码片段
+
+| 前缀 | 描述 |
+|------|------|
+| `fn` | 函数 |
+| `fn=` | 单表达式函数 |
+| `struct` | 结构体 |
+| `enum` | 枚举 |
+| `interface` | 接口 |
+| `class` | 类 |
+| `suspend` | 协程函数 |
+| `actor` | Actor |
+| `if` | if-else |
+| `when` | when 表达式 |
+| `for` | for 循环 |
+| `while` | while 循环 |
+| `try` | try-catch |
+| `gen` | 泛型函数 |
+| `result` | Result 错误处理 |
+| `ffi` | FFI 声明 |
+| `dep` | 依赖声明 |
+| `main` | main 函数 |
+| `data` | 数据类 |
+| `import` | 导入模块 |
+
+## LSP 协议
+
+Aura LSP 服务器实现以下 LSP 方法：
+
+| 方法 | 说明 |
+|------|------|
+| `initialize` | 初始化握手 |
+| `textDocument/didOpen` | 文档打开 |
+| `textDocument/didChange` | 文档变更（增量） |
+| `textDocument/didClose` | 文档关闭 |
+| `textDocument/completion` | 代码补全 |
+| `textDocument/definition` | 跳转定义 |
+| `textDocument/hover` | 悬停提示 |
+| `textDocument/diagnostic` | 诊断推送 |
+| `textDocument/formatting` | 文档格式化 |
+
+## 开发
+
+```bash
+# 安装依赖
+npm install
+
+# 编译 TypeScript
+npm run compile
+
+# 开发模式
+npm run watch
+
+# 打包 VSIX
+vsce package
+```
+
+## 架构
+
+```
+vscode-extension/
+├── package.json              # 扩展清单
+├── tsconfig.json             # TypeScript 配置
+├── language-configuration.json  # 语言配置（括号、注释等）
+├── src/
+│   ├── extension.ts          # 扩展入口
+│   ├── client.ts             # LSP 客户端
+│   └── diagnostics.ts        # 诊断管理
+├── syntaxes/
+│   └── aura.tmLanguage.json  # TextMate 语法（Kotlin VSCode 插件风格）
+├── snippets/
+│   └── aura.json             # 代码片段
+└── resources/
+    └── aura-icon.png         # 文件图标
+```
+
+## 许可证
+
+MIT License

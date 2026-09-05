@@ -80,6 +80,10 @@ impl HirType {
                 ),
                 return_type: Box::new(HirType::from_ast_opt(return_type).unwrap_or(HirType::Unknown)),
             },
+            // Fix 4: 防御性处理 Type::Generic 中 Pointer<T> 的降级路径
+            Type::Generic { name, args, .. } if name == "Pointer" && args.len() == 1 => {
+                HirType::Pointer(Box::new(HirType::from_ast(&args[0])))
+            }
             _ => HirType::Named(ty.to_string()),
         }
     }
