@@ -52,7 +52,8 @@ pub struct Heap {
     slots: Vec<HeapSlot>,
     free: Vec<usize>,
     /// C 字符串存储（P8.5）：索引即指针值
-    c_strings: Vec<std::rc::Rc<str>>,
+    /// Fix 8: Rc<str> → Arc<str>（线程安全）
+    c_strings: Vec<std::sync::Arc<str>>,
 }
 
 impl Default for Heap {
@@ -109,7 +110,7 @@ impl Heap {
 
     /// 分配一个 C 字符串（P8.5）：返回指针值（索引 + 1，0 = nullptr）
     pub fn alloc_c_string(&mut self, s: String) -> usize {
-        self.c_strings.push(std::rc::Rc::from(s.as_str()));
+        self.c_strings.push(std::sync::Arc::from(s.as_str()));
         self.c_strings.len() // 1-based index，0 = nullptr
     }
 
