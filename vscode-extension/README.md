@@ -34,13 +34,15 @@ code --install-extension aura-language-0.1.6.vsix
 ```
 
 > **LSP 功能要求**：补全、跳转定义、悬停、诊断、格式化由 LSP 服务器提供，
-> 需要可用的 `aura lsp` 可执行文件。扩展会自动查找：
+> 需要可用的 `aura-lsp` 可执行文件。扩展会自动查找：
 > 1. 配置项 `aura.serverPath`（绝对路径）
-> 2. 当前工作区内的构建产物（`target/debug/aura`、`target/release/aura`、`bin/aura`）
-> 3. 系统 PATH 中的 `aura` 命令
+> 2. 当前工作区内的构建产物（`target/debug/aura-lsp`、`target/release/aura-lsp`、`bin/aura-lsp`）
+> 3. 系统 PATH 中的 `aura-lsp` 命令
 >
-> 编译器构建：`cargo build -p aura-cli`（或仓库根目录 `cargo build`），
-> 然后打开仓库作为工作区即可自动连接。
+> 编译器构建：`cargo build -p cli`（或仓库根目录 `cargo build`）会同时产出 `aura.exe` 和 `aura-lsp.exe`。
+> 扩展直接启动 `aura-lsp.exe`，不占用 `aura.exe`，`cargo build` debug profile 可正常覆盖它。
+>
+> 打开仓库作为工作区即可自动连接。
 
 ### 从 VS Code 市场安装
 
@@ -52,8 +54,8 @@ code --install-extension aura-language-0.1.6.vsix
 
 ```jsonc
 {
-    // Aura LSP 服务器路径（可执行文件）
-    "aura.serverPath": "aura",
+    // Aura LSP 服务器路径（可执行文件，直接启动独立二进制）
+    "aura.serverPath": "aura-lsp",
 
     // 传递给服务器的额外参数
     "aura.serverArgs": [],
@@ -71,12 +73,11 @@ code --install-extension aura-language-0.1.6.vsix
 
 ### 自定义服务器路径
 
-如果 `aura` 不在 PATH 中，可以指定完整路径：
+如果 `aura-lsp` 不在 PATH 中，可以指定完整路径：
 
 ```jsonc
 {
-    "aura.serverPath": "C:/Aura/aura.exe",
-    "aura.serverArgs": ["lsp"]
+    "aura.serverPath": "C:/Aura/aura-lsp.exe"
 }
 ```
 
@@ -84,10 +85,14 @@ code --install-extension aura-language-0.1.6.vsix
 
 ```jsonc
 {
-    "aura.serverPath": "/usr/local/bin/aura",
-    "aura.serverArgs": ["lsp"]
+    "aura.serverPath": "/usr/local/bin/aura-lsp"
 }
 ```
+
+> **注意**：`aura-lsp` 是独立二进制，不需要 `lsp` 子命令。
+> 如果你从旧版本升级过来，请把 `aura.serverPath` 从 `"aura"` 改为 `"aura-lsp"`，
+> 并删除 `serverArgs: ["lsp"]`。否则扩展会尝试启动 `aura-lsp.exe lsp`（失败）。
+> 保留旧配置会再次占用 `aura.exe`，导致 `cargo build` debug profile 失败。
 
 ## 快捷键
 

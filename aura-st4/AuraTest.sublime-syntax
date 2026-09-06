@@ -1,0 +1,10 @@
+%YAML 1.2
+---
+name: Aura Test
+scope: source.aura.test
+version: 2
+
+contexts:
+  main:
+    - match: '\b(if|else|while|for)\b'
+      scope: keyword.control.aura

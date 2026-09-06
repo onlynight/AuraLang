@@ -1,0 +1,11 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<snippet>
+    <content><![CDATA[if () {
+    
+} else {
+    
+}]]></content>
+    <tabTrigger>if</tabTrigger>
+    <scope>source.aura</scope>
+    <description>If-else statement</description>
+</snippet>

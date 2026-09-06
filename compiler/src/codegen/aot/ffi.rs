@@ -8,6 +8,7 @@
 use crate::codegen::aot::error::AotError;
 use crate::codegen::aot::types::TypeMapper;
 use crate::codegen::hir::HirFunction;
+use crate::codegen::opcode::FfiAbi;
 
 /// FFI 声明生成器
 pub struct FfiGenerator<'a> {
@@ -46,9 +47,26 @@ impl<'a> FfiGenerator<'a> {
             .collect();
         let params_str = if params.is_empty() { String::new() } else { params.join(", ") };
 
-        // C 调用约定：LLVM IR 中默认就是 ccc，无需显式标注
+        // P8-Rust: 按 ABI 标记生成注释（调用约定均为 C ABI / ccc）
+        let mut comment = String::new();
+        match func.ffi_abi {
+            FfiAbi::Rust => {
+                comment = "; P8-Rust: Rust library (C ABI)\n".to_string();
+                if let Some(ref lib) = func.ffi_lib {
+                    comment.push_str(&format!(";   library: {}\n", lib));
+                }
+            }
+            FfiAbi::C => {
+                if let Some(ref lib) = func.ffi_lib {
+                    comment = format!("; library: {}\n", lib);
+                }
+            }
+            FfiAbi::None => {}
+        }
+
         format!(
-            "declare {ret_str} @{name}({params_str})\n",
+            "{comment}declare {ret_str} @{name}({params_str})\n",
+            comment = comment,
             ret_str = ret_str,
             name = func.name,
             params_str = params_str,
@@ -92,6 +110,8 @@ mod tests {
             },
             is_native: true,
             type_params: vec![],
+            ffi_abi: FfiAbi::None,
+            ffi_lib: None,
         };
         let decls = ffi_gen.generate_declarations(&[func]).unwrap();
         assert_eq!(decls.len(), 1);

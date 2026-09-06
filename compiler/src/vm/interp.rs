@@ -1,4 +1,4 @@
-//! Aura VM 解释器执行循环（直接线程码分派）
+﻿//! Aura VM 解释器执行循环（直接线程码分派）
 //!
 //! 主循环 `step()` 对栈顶帧逐条执行指令。`Call`/`Return` 切换调用帧；
 //! `CallNative`/`CallC` 经原生注册表分发；`NewObject`/`GetField`/`SetField`
@@ -6,6 +6,23 @@
 
 use crate::vm::value::Value;
 use crate::vm::{Instr, Vm, VmError};
+
+// P9: FFI 动态库加载
+#[cfg(windows)]
+use std::ffi::OsStr;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+#[cfg(windows)]
+unsafe extern "system" {
+    fn LoadLibraryW(libname: *const u16) -> usize;
+    fn GetProcAddress(hmodule: usize, procname: *const std::os::raw::c_char) -> usize;
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn dlopen(filename: *const std::os::raw::c_char, flags: i32) -> *mut std::os::raw::c_void;
+    fn dlsym(handle: *mut std::os::raw::c_void, symbol: *const std::os::raw::c_char) -> *mut std::os::raw::c_void;
+}
 
 impl Vm {
     /// 执行一条指令（栈顶帧）
@@ -464,6 +481,8 @@ impl Vm {
                 })?;
                 self.do_call(top, *func_idx as usize, false)?;
             }
+            // Phase 1: AOT 嵌入调用 —— 查 AotRuntime dispatch_table 后直接 call 机器码
+            Instr::CallAot(idx) => self.do_call_aot(top, idx as usize)?,
         }
         Ok(())
     }
@@ -568,7 +587,49 @@ impl Vm {
             }
         }
 
+        // Phase 1: AOT 预编译版本检查（设计文档 §7.2 步骤 2）。
+        // 函数有 AOT 版本时直接派发到机器码，未命中则回退字节码解释。
+        // 与 JIT 派发的区别：AOT 版本在加载期即就绪，无编译成本。
+        if self.aot_runtime.has_entry(idx) {
+            if let Some(ret) = self.try_call_aot(idx, &args) {
+                self.frames[top].stack.push(ret);
+                return Ok(());
+            }
+        }
+
         self.push_frame(idx, args)?;
+        Ok(())
+    }
+
+    /// 尝试通过 AOT 机器码执行函数（Phase 1）
+    ///
+    /// 命中 [`AotRuntime`](crate::vm::aot_runtime::AotRuntime) 分发表则直接 `call`
+    /// 到 mmap 的机器码（共享 JitValue ABI，零 FFI 开销）；未命中则回退
+    /// 字节码解释。返回 `true` 表示已派发 AOT 版本。
+    fn try_call_aot(&mut self, idx: usize, args: &[Value]) -> Option<Value> {
+        let jit_args: Vec<crate::vm::abi::JitValue> =
+            args.iter().map(crate::vm::abi::JitValue::from_value).collect();
+        unsafe { self.aot_runtime.call_func_by_idx(idx, &jit_args) }.map(|v| v.to_value())
+    }
+
+    /// AOT 预编译函数调用（Phase 1）
+    ///
+    /// 从栈上收集参数 → 转换为 JitValue → 查 AOT 分发表直接 `call` 机器码。
+    /// 未命中分发表（无 AOT 版本）时回退字节码解释，保证正确性。
+    fn do_call_aot(&mut self, top: usize, idx: usize) -> Result<(), VmError> {
+        if idx >= self.module.funcs.len() {
+            return Err(VmError::Runtime(format!(
+                "call to undefined function #{}",
+                idx
+            )));
+        }
+        let param_count = self.module.funcs[idx].param_count as usize;
+        let args = self.pop_n(top, param_count)?;
+        if let Some(ret) = self.try_call_aot(idx, &args) {
+            self.frames[top].stack.push(ret);
+        } else {
+            self.push_frame(idx, args)?;
+        }
         Ok(())
     }
 
@@ -583,14 +644,29 @@ impl Vm {
         let native = self.module.natives[idx].clone();
         let param_count = native.param_count as usize;
         let args = self.pop_n(top, param_count)?;
+        
+        eprintln!("[vm] CallNative: {}, params={}", native.name, param_count);
+        
+        // P9: 如果指定了 FFI 库，先加载库
+        if let Some(ref lib_name) = native.ffi_lib {
+            self.ensure_lib_loaded(lib_name);
+        }
+        
+        // P9: 获取库句柄（如果加载了）
+        let lib_handle: Option<usize> = native.ffi_lib.as_ref().and_then(|lib| {
+            #[cfg(windows)]
+            { self.loaded_libs.get(lib).copied() }
+            #[cfg(unix)]
+            { self.loaded_libs.get(lib).map(|h| *h as usize) }
+        });
 
         let result = if let Some(f) = self.natives.get(&native.name) {
             f(&args)
         } else if let Some(f) = self.natives.resolve_c_function(&native.name) {
             f(&args)
         } else {
-            // P8.4: 尝试静态链接 — 直接使用 dlsym 解析 C 函数并调用
-            match static_call_c(&native.name, &args) {
+            // P8.4: 尝试静态链接 — 使用库句柄解析 C 函数
+            match static_call_c_with_lib(&native.name, &args, lib_handle) {
                 Some(v) => v,
                 None => {
                     eprintln!(
@@ -604,6 +680,62 @@ impl Vm {
         };
         self.frames[top].stack.push(result);
         Ok(())
+    }
+    
+    /// P9: 确保动态库已加载
+    #[cfg(windows)]
+    fn ensure_lib_loaded(&mut self, lib_name: &str) {
+        if self.loaded_libs.contains_key(lib_name) {
+            return;
+        }
+        // 尝试多个可能的路径
+        let paths = [
+            lib_name.to_string(),
+            format!("{}.dll", lib_name),
+            format!("D:\\Code\\AuraProjs\\SQLura\\sqlura-driver-rs\\target\\release\\{}.dll", lib_name),
+            format!("D:\\Code\\AuraProjs\\SQLura\\sqlura-driver-rs\\target\\release\\{}", lib_name),
+        ];
+        
+        for path in &paths {
+            let wide: Vec<u16> = std::ffi::OsStr::new(path)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            unsafe {
+                let handle = LoadLibraryW(wide.as_ptr());
+                if handle != 0 {
+                    self.loaded_libs.insert(lib_name.to_string(), handle);
+                    eprintln!("[vm] 已加载库: {} ({})", lib_name, path);
+                    return;
+                }
+            }
+        }
+        eprintln!("[vm] 无法加载库: {}", lib_name);
+    }
+    
+    #[cfg(unix)]
+    fn ensure_lib_loaded(&mut self, lib_name: &str) {
+        if self.loaded_libs.contains_key(lib_name) {
+            return;
+        }
+        let paths = [
+            lib_name.to_string(),
+            format!("lib{}.so", lib_name),
+            format!("D:\\Code\\AuraProjs\\SQLura\\sqlura-driver-rs\\target\\release\\lib{}.so", lib_name),
+        ];
+        
+        for path in &paths {
+            let c_path = std::ffi::CString::new(path.clone()).unwrap();
+            unsafe {
+                let handle = dlopen(c_path.as_ptr(), 2); // RTLD_NOW = 2
+                if !handle.is_null() {
+                    self.loaded_libs.insert(lib_name.to_string(), handle);
+                    eprintln!("[vm] 已加载库: {} ({})", lib_name, path);
+                    return;
+                }
+            }
+        }
+        eprintln!("[vm] 无法加载库: {}", lib_name);
     }
 
     // ── 栈辅助 ──
@@ -641,36 +773,158 @@ impl Vm {
 /// 将参数转换为 `i64` 数组（最多 4 个），调用 C 函数，返回结果。
 /// 成功时返回 `Some(Value)`，失败时返回 `None`。
 fn static_call_c(name: &str, args: &[Value]) -> Option<Value> {
+    static_call_c_with_lib(name, args, None)
+}
+
+/// P9: 使用指定库句柄调用 C 函数
+fn static_call_c_with_lib(name: &str, args: &[Value], lib_handle: Option<usize>) -> Option<Value> {
     use crate::vm::ffi::{CFuncInfo, CFuncPtr, CType, resolve_static_symbol};
-
-    let addr = resolve_static_symbol(name)?;
+    
+    // 如果有库句柄，从库中解析符号
+    let addr = if let Some(handle) = lib_handle {
+        resolve_symbol_in_lib(handle, name)
+    } else {
+        resolve_static_symbol(name)
+    }?;
+    
     let ptr: CFuncPtr = unsafe { std::mem::transmute(addr) };
-
-    // Fix 7: 类型安全调用 — 使用 CType 转换参数和返回值
-    // 默认所有参数和返回值都是 i64
-    let param_types = vec![CType::Int64; args.len().min(8)];
-    let info = CFuncInfo {
-        name: name.to_string(),
-        param_types,
-        return_type: CType::Int64,
+    
+    // P9: 根据函数名确定返回类型和参数类型
+    // SQLura 数据库 API 函数签名
+    let (param_types, return_type) = match name {
+        "sqlura_version" => {
+            (vec![], CType::CString)  // 返回字符串
+        }
+        "sqlura_open" => {
+            (vec![CType::CString], CType::Ptr)  // 参数: path, 返回: handle
+        }
+        "sqlura_close" => {
+            (vec![CType::Ptr], CType::Int64)  // 参数: handle, 返回: int
+        }
+        "sqlura_exec" => {
+            (vec![CType::Ptr, CType::CString], CType::CString)  // 参数: handle, sql, 返回: string
+        }
+        "sqlura_free_string" => {
+            (vec![CType::CString], CType::Void)  // 参数: ptr, 返回: void
+        }
+        "sqlura_error" => {
+            (vec![CType::Ptr], CType::CString)  // 参数: handle, 返回: string
+        }
+        _ => (vec![CType::Int64; args.len().min(8)], CType::Int64),  // 默认
     };
-
+    
+    // P9: 创建 CString 对象保持生命周期
+    let mut c_strings: Vec<std::ffi::CString> = Vec::new();
+    
+    // P9: 根据参数类型打包参数
     let c_args: [i64; 8] = [
-        args.first().map(|v| CType::Int64.pack(v)).unwrap_or(0),
-        args.get(1).map(|v| CType::Int64.pack(v)).unwrap_or(0),
-        args.get(2).map(|v| CType::Int64.pack(v)).unwrap_or(0),
-        args.get(3).map(|v| CType::Int64.pack(v)).unwrap_or(0),
-        args.get(4).map(|v| CType::Int64.pack(v)).unwrap_or(0),
-        args.get(5).map(|v| CType::Int64.pack(v)).unwrap_or(0),
-        args.get(6).map(|v| CType::Int64.pack(v)).unwrap_or(0),
-        args.get(7).map(|v| CType::Int64.pack(v)).unwrap_or(0),
+        args.first().map(|v| {
+            let ty = param_types.first().unwrap_or(&CType::Int64);
+            if *ty == CType::CString {
+                match v {
+                    Value::Str(s) => {
+                        // 创建 CString 并保持生命周期
+                        if let Ok(cs) = std::ffi::CString::new(s.as_ref()) {
+                            let ptr = cs.as_ptr() as i64;
+                            c_strings.push(cs);  // 保持生命周期
+                            ptr
+                        } else {
+                            0
+                        }
+                    }
+                    _ => 0,
+                }
+            } else {
+                ty.pack(v)
+            }
+        }).unwrap_or(0),
+        args.get(1).map(|v| {
+            let ty = param_types.get(1).unwrap_or(&CType::Int64);
+            if *ty == CType::CString {
+                match v {
+                    Value::Str(s) => {
+                        if let Ok(cs) = std::ffi::CString::new(s.as_ref()) {
+                            let ptr = cs.as_ptr() as i64;
+                            c_strings.push(cs);
+                            ptr
+                        } else {
+                            0
+                        }
+                    }
+                    _ => 0,
+                }
+            } else {
+                ty.pack(v)
+            }
+        }).unwrap_or(0),
+        args.get(2).map(|v| {
+            let ty = param_types.get(2).unwrap_or(&CType::Int64);
+            if *ty == CType::CString {
+                match v {
+                    Value::Str(s) => {
+                        if let Ok(cs) = std::ffi::CString::new(s.as_ref()) {
+                            let ptr = cs.as_ptr() as i64;
+                            c_strings.push(cs);
+                            ptr
+                        } else {
+                            0
+                        }
+                    }
+                    _ => 0,
+                }
+            } else {
+                ty.pack(v)
+            }
+        }).unwrap_or(0),
+        args.get(3).map(|v| {
+            let ty = param_types.get(3).unwrap_or(&CType::Int64);
+            if *ty == CType::CString {
+                match v {
+                    Value::Str(s) => {
+                        if let Ok(cs) = std::ffi::CString::new(s.as_ref()) {
+                            let ptr = cs.as_ptr() as i64;
+                            c_strings.push(cs);
+                            ptr
+                        } else {
+                            0
+                        }
+                    }
+                    _ => 0,
+                }
+            } else {
+                ty.pack(v)
+            }
+        }).unwrap_or(0),
+        0, 0, 0, 0,  // 最多 4 个参数
     ];
     let result = unsafe {
         ptr(
             c_args[0], c_args[1], c_args[2], c_args[3], c_args[4], c_args[5], c_args[6], c_args[7],
         )
     };
-    Some(CType::Int64.unpack(result))
+    // c_strings 在此处才被销毁，确保 C 函数调用期间字符串有效
+    eprintln!("[vm] FFI call {}: result={:x}", name, result);
+    Some(return_type.unpack(result))
+}
+
+/// P9: 在指定库中解析符号
+#[cfg(windows)]
+fn resolve_symbol_in_lib(handle: usize, name: &str) -> Option<usize> {
+    // Windows: GetProcAddress 使用 ANSI 字符串（char*）
+    let c_name = std::ffi::CString::new(name).ok()?;
+    unsafe {
+        let ptr = GetProcAddress(handle, c_name.as_ptr());
+        if ptr == 0 { None } else { Some(ptr) }
+    }
+}
+
+#[cfg(unix)]
+fn resolve_symbol_in_lib(handle: usize, name: &str) -> Option<usize> {
+    let c_name = std::ffi::CString::new(name).ok()?;
+    unsafe {
+        let ptr = dlsym(handle as *mut std::os::raw::c_void, c_name.as_ptr());
+        if ptr.is_null() { None } else { Some(ptr as usize) }
+    }
 }
 
 /// 二元运算：弹出 b、a，计算后压回结果

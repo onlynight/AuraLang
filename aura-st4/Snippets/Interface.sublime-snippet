@@ -1,0 +1,10 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<snippet>
+    <content><![CDATA[interface  {
+    fun (): 
+    fun ():  = 
+}]]></content>
+    <tabTrigger>interface</tabTrigger>
+    <scope>source.aura</scope>
+    <description>Create an interface</description>
+</snippet>

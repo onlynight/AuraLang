@@ -1,0 +1,32 @@
+// basics/comptime.aura — 编译时执行
+// ⚠️ comptime fun 在编译时执行，不是运行时
+
+// 编译时常量
+comptime fun VERSION(): Int = 1
+comptime fun MAX_BUFFER_SIZE(): Int = 8192
+comptime fun APP_NAME(): String = "MyApp"
+
+// 编译时字符串插值
+comptime fun greeting(): String = "Hello from version ${VERSION()}"
+
+// 编译时计算
+comptime fun computePi(): Double = 3.14159265
+
+// 运行时函数（对比）
+fun runtimeVersion(): Int = 1  // 运行时计算
+
+fun main() {
+    // comptime 函数可用于编译时场景
+    // 例如：常量比较、条件编译等
+    
+    println("Version: $VERSION")       // 编译时已知
+    println("Buffer: $MAX_BUFFER_SIZE") // 编译时已知
+    
+    // 运行时函数在运行时执行
+    println("Runtime: ${runtimeVersion()}")
+}
+
+// ⚠️ 易错点：
+// ✅ comptime fun VERSION(): Int = 1    ← 编译时执行
+// ❌ fun VERSION() { ... }              ← 运行时，不可用于编译时
+// ❌ compiletime fun ...                ← 拼写错误

@@ -1,0 +1,46 @@
+// ============================================================
+// P8-Rust FFI Demo — extern "rust" 语法验证
+// ============================================================
+// 用法:
+//   aura run examples/p8_rust_ffi_demo.aura                        (VM 模式)
+//   aura check examples/p8_rust_ffi_demo.aura                      (sema 警告)
+//   aura build examples/p8_rust_ffi_demo.aura --aot --format ll    (AOT → LLVM IR)
+//
+// 验证点:
+//   1. extern "rust" 语法解析正确（与 extern "c" 对称）
+//   2. sema 警告: "extern "rust" 块的函数需在 Rust 侧使用 #[no_mangle] extern "C""
+//   3. AOT LLVM IR 包含 "; P8-Rust: Rust library (C ABI)" 注释
+//   4. VM 模式: 未链接 Rust dylib 时返回占位值，不崩溃
+//   5. 链接 Rust dylib 后: 0 开销直接调用（C ABI / ccc）
+//
+// Rust 侧要求（阶段 1 强制）:
+//   #[no_mangle] extern "C" pub fn createPoint(x: i32, y: i32) -> *mut c_void { ... }
+//   #[no_mangle] extern "C" pub fn destroyPoint(p: *mut c_void) { ... }
+// ============================================================
+
+// --- 场景 1: 基本函数调用（Handle 模式） ---
+extern "rust" "mypointlib" {
+    fun createPoint(x: Int, y: Int): Handle
+    fun getPointX(p: Handle): Int
+    fun getPointY(p: Handle): Int
+    fun destroyPoint(p: Handle)
+}
+
+// --- 场景 2: 混合 extern "c" + extern "rust" ---
+extern "c" "raylib" {
+    fun InitWindow(w: Int, h: Int, title: CString)
+    fun CloseWindow()
+}
+
+// --- 主函数 ---
+fun main(): Int {
+    // 创建点对象（未链接 Rust dylib 时返回 null）
+    val p = createPoint(3, 4)
+    
+    // 检查是否为 null（未链接 Rust dylib 时返回 0）
+    if (ptrIsNull(p)) {
+        return 1
+    } else {
+        return 0
+    }
+}

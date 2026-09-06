@@ -1,10 +1,13 @@
 /**
  * Aura LSP 客户端
  *
- * 负责启动 `aura lsp` 进程，通过 JSON-RPC (stdio) 通信，
+ * 负责启动 `aura-lsp` 进程，通过 JSON-RPC (stdio) 通信，
  * 将 LSP 功能暴露给 VS Code。
  *
- * @version 0.1.3
+ * 扩展直接启动独立的 `aura-lsp` 二进制（不再经由 `aura.exe lsp` 中转），
+ * 这样 `target/debug/aura.exe` 不会被 LSP 进程占用，`cargo build` 可正常覆盖。
+ *
+ * @version 0.1.4
  */
 
 import * as vscode from "vscode";
@@ -22,12 +25,16 @@ let client: LanguageClient | undefined;
 let diagManager: DiagnosticManager | undefined;
 
 /**
- * 查找可用的 aura 可执行文件。
+ * 查找可用的 aura-lsp 可执行文件。
+ *
+ * 扩展直接启动独立的 `aura-lsp` 二进制，不再通过 `aura.exe lsp` 中转。
+ * 这样 `target/debug/aura.exe` 就不会被 LSP 进程占用，`cargo build`
+ * debug profile 可以正常覆盖它。
  *
  * 查找顺序：
  * 1. 用户配置的 aura.serverPath（绝对路径或含分隔符的路径，存在则直接用）
  * 2. 打开的工作区内的构建产物：target/debug、target/release、bin 目录
- * 3. 回退到 PATH 中的 `aura` 命令
+ * 3. 回退到 PATH 中的 `aura-lsp` 命令
  */
 async function findServerCommand(
     config: vscode.WorkspaceConfiguration
@@ -35,15 +42,13 @@ async function findServerCommand(
     const fs = await import("fs");
     const path = await import("path");
 
-    const serverPath = config.get<string>("serverPath") || "aura";
+    const serverPath = config.get<string>("serverPath") || "aura-lsp";
     const serverArgs = config.get<string[]>("serverArgs") || [];
-    // 如果 serverPath 已包含 "lsp"，不重复添加
-    const fullArgs = serverPath.includes("lsp")
-        ? serverArgs
-        : ["lsp", ...serverArgs];
+    // aura-lsp 是独立二进制，不需要 "lsp" 子命令中转
+    const fullArgs = serverArgs;
 
     const isWin = process.platform === "win32";
-    const exe = isWin ? "aura.exe" : "aura";
+    const exe = isWin ? "aura-lsp.exe" : "aura-lsp";
 
     // 1. 配置为绝对路径 / 显式带路径
     if (
@@ -60,7 +65,7 @@ async function findServerCommand(
         }
     }
 
-    // 2. 在工作区查找构建产物
+    // 2. 在工作区查找构建产物（aura-lsp 独立二进制）
     for (const folder of vscode.workspace.workspaceFolders || []) {
         const root = folder.uri.fsPath;
         const candidates = [
@@ -72,7 +77,7 @@ async function findServerCommand(
             try {
                 if (fs.existsSync(c)) {
                     console.log(
-                        `[Aura] 使用工作区内的 aura 二进制: ${c}`
+                        `[Aura] 使用工作区内的 aura-lsp 二进制: ${c}`
                     );
                     return { command: c, args: fullArgs };
                 }
@@ -102,7 +107,7 @@ export async function startLSPClient(
     } catch (err) {
         console.error("[Aura] 查找 aura 可执行文件失败:", err);
         vscode.window.showErrorMessage(
-            "Aura: 未找到 aura 可执行文件。请设置 aura.serverPath 或打开包含 target/debug/aura 的工作区。"
+            "Aura: 未找到 aura-lsp 可执行文件。请设置 aura.serverPath 或打开包含 target/debug/aura-lsp 的工作区。"
         );
         return;
     }
@@ -176,7 +181,7 @@ export async function startLSPClient(
                 : "";
         vscode.window.showErrorMessage(
             `Aura LSP 启动失败: ${err} ${hint}`.trim() +
-                " 请检查 aura.serverPath 配置，或打开包含 target/debug/aura 的工作区后重启。"
+                " 请检查 aura.serverPath 配置，或打开包含 target/debug/aura-lsp 的工作区后重启。"
         );
         client = undefined;
     }

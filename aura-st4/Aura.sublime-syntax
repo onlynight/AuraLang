@@ -1,0 +1,1015 @@
+%YAML 1.2
+---
+name: Aura
+scope: source.aura
+version: 2
+
+file_extensions:
+  - aura
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Variables
+# ═══════════════════════════════════════════════════════════════════════════
+
+variables:
+
+  identifier: '\b\w+\b'
+  identifier_with_backticks: '`[^`]+`'
+
+  # ── Keywords ──────────────────────────────────────────────────────────
+
+  prefix_modifiers: '\b(?:abstract|final|enum|open|annotation|sealed|data|override|lateinit|private|protected|public|internal|inner|noinline|crossinline|vararg|reified|tailrec|operator|infix|inline|external|const|suspend|comptime|value|defer|extern|lazy|box|weak|async)\b'
+
+  postfix_modifiers: '\b(?:where|by|get|set)\b'
+
+  soft_keywords: '\b(?:catch|finally|field|else|then|unit)\b'
+
+  hard_keywords: '\b(?:as|is|in|to|it)\b'
+
+  control_keywords: '\b(?:if|while|do|when|try|throw|break|continue|return|for|select|await)\b'
+
+  map_keywords: '\bto\b'
+
+  # ── Builtin types ──────────────────────────────────────────────────────
+
+  builtin_types: '\b(?:Int|Long|Short|Byte|Float|Double|Boolean|Char|String|Any|Nothing|Unit|List|Map|Set|Array|MutableList|MutableMap|MutableSet|Result|Optional|Throwable|Exception|Iterable|Iterator|Sequence|Pair|Triple|Comparable|Number|Annotation)\b'
+
+  # ── Declaration keywords ───────────────────────────────────────────────
+
+  type_alias_kw: '\btypealias\b'
+
+  # ── Operator patterns ──────────────────────────────────────────────────
+
+  comparison_ops: '(?:===?|!==?|<=|>=|<|>)'
+
+  assignment_ops: '(?:[+*/%-]=)'
+
+  arithmetic_ops: '(?:[+*/%-])'
+
+  logical_ops: '(?:&&|\|\|)'
+
+  bitwise_ops: '(?:&|\||\^|~|<<|>>>|>>)'
+
+  inc_dec_ops: '(?:--|\+\+)'
+
+  range_ops: '(?:\.\.\.|\.\.)'
+
+  # ── Numeric literals ───────────────────────────────────────────────────
+
+  digits: '\d'
+  digits_with_underscores: '\d[\d_]*'
+  digits_decimal: '{{digits}}(?:\.(?!\.){{digits}})?'
+
+  decimal_literal: '\b{{digits_decimal}}(?:(?:e|E)[+-]?{{digits}})?(?:[uUlLfFdD])?\b'
+  hex_literal: '\b0[xX][A-Fa-f0-9][A-Fa-f0-9_]*(?:[uUlLfFdD])?\b'
+  binary_literal: '\b0[bB][01][01_]*(?:[uUlLfFdD])?\b'
+  octal_literal: '\b0[oO][0-7][0-7_]*(?:[uUlLfFdD])?\b'
+
+  # ── Type parameter ─────────────────────────────────────────────────────
+
+  type_param_bound: '(?::\s*\b\w+\b)'
+
+  # ── Annotation ─────────────────────────────────────────────────────────
+
+  annotation_name: '(?:[A-Z]\w*|[a-z]\w*)'
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Context
+# ═══════════════════════════════════════════════════════════════════════════
+
+contexts:
+
+  # ── Root ───────────────────────────────────────────────────────────────
+
+  main:
+    - include: imports
+    - include: code
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Imports
+  # ═══════════════════════════════════════════════════════════════════════
+
+  imports:
+    - meta_include_prototype: false
+    - match: '\b(import)\b'
+      scope: storage.type.import.aura
+      captures:
+        1: storage.type.import.aura
+      push: imports-rest
+
+  imports-rest:
+    - meta_include_prototype: false
+    - match: '([A-Za-z_]\w*)(\.)([A-Za-z_]\w*)'
+      captures:
+        1: entity.name.package.aura
+        2: punctuation.separator.period.aura
+        3: entity.name.package.aura
+    - match: '([A-Za-z_]\w*)'
+      scope: entity.name.package.aura
+    - match: '\.'
+      scope: punctuation.separator.period.aura
+    - match: '\*'
+      scope: variable.language.wildcard.aura
+    - match: '\b(as)\b\s+(\w+)'
+      captures:
+        1: keyword.hard.aura
+        2: variable.other.alias.aura
+    - match: ';'
+      scope: punctuation.terminator.statement.aura
+      pop: 1
+    - match: '\b(import)\b'
+      captures:
+        1: storage.type.import.aura
+      push: imports-rest
+    - match: '(?=\w)'
+      set: code
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Code
+  # ═══════════════════════════════════════════════════════════════════════
+
+  code:
+    - include: comments
+    - include: for-loop-variable
+    - include: annotation
+    - include: extern-declaration
+    - include: data-struct-declaration
+    - include: struct-declaration
+    - include: class-declaration
+    - include: enum-declaration
+    - include: interface-declaration
+    - include: actor-declaration
+    - include: object-declaration
+    - include: type-alias
+    - include: function-declaration
+    - include: constant-declaration
+    - include: variable-declaration
+    - include: keywords
+    - include: builtin-types
+    - include: std-function-call
+    - include: constant-name
+    - include: enum-access
+    - include: variable-reference
+    - include: object-reference
+    - include: function-call
+    - include: type-annotation
+    - include: property-reference
+    - include: method-reference
+    - include: string-multiline
+    - include: string
+    - include: string-empty
+    - include: character
+    - include: lambda-arrow
+    - include: operators
+    - include: self-reference
+    - include: label
+    - include: numeric-literals
+    - include: boolean-literal
+    - include: null-literal
+    - include: enum-variant
+    - match: ','
+      scope: punctuation.separator.delimiter.aura
+    - match: ';'
+      scope: punctuation.terminator.statement.aura
+    - match: '\.'
+      scope: punctuation.separator.period.aura
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Comments
+  # ═══════════════════════════════════════════════════════════════════════
+
+  comments:
+    - include: doc-comment-line
+    - include: comment-line
+    - include: javadoc
+    - include: comment-block
+
+  comment-line:
+    - meta_include_prototype: false
+    - match: '//'
+      scope: punctuation.definition.comment.aura
+      push: comment-line-body
+
+  comment-line-body:
+    - meta_scope: comment.line.double-slash.aura
+    - match: '\n'
+      pop: 1
+
+  doc-comment-line:
+    - meta_include_prototype: false
+    - match: '///'
+      scope: punctuation.definition.comment.aura
+      push: doc-comment-line-body
+
+  doc-comment-line-body:
+    - meta_scope: comment.line.documentation.aura
+    - match: '\n'
+      pop: 1
+    - match: '@(param|return|throws|see|author|version|since|deprecated|example)\b'
+      scope: keyword.other.documentation.javadoc.aura
+    - match: '(@param)\s+(\S+)'
+      captures:
+        1: keyword.other.documentation.javadoc.aura
+        2: variable.parameter.aura
+    - match: '(@(exception|throws))\s+(\S+)'
+      captures:
+        1: keyword.other.documentation.javadoc.aura
+        2: entity.name.type.class.aura
+
+  javadoc:
+    - meta_include_prototype: false
+    - match: '/\*\*'
+      scope: punctuation.definition.comment.begin.aura
+      push: javadoc-body
+
+  javadoc-body:
+    - meta_scope: comment.block.javadoc.aura
+    - match: '\*/'
+      scope: punctuation.definition.comment.end.aura
+      pop: 1
+    - match: '@(author|deprecated|return|see|serial|since|version|param|example|throws)\b'
+      scope: keyword.other.documentation.javadoc.aura
+    - match: '(@param)\s+(\S+)'
+      captures:
+        1: keyword.other.documentation.javadoc.aura
+        2: variable.parameter.aura
+    - match: '(@(exception|throws))\s+(\S+)'
+      captures:
+        1: keyword.other.documentation.javadoc.aura
+        2: entity.name.type.class.aura
+
+  comment-block:
+    - meta_include_prototype: false
+    - match: '/\*(?!\*)'
+      scope: punctuation.definition.comment.begin.aura
+      push: comment-block-body
+
+  comment-block-body:
+    - meta_scope: comment.block.aura
+    - match: '\*/'
+      scope: punctuation.definition.comment.end.aura
+      pop: 1
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Keywords
+  # ═══════════════════════════════════════════════════════════════════════
+
+  keywords:
+    - include: prefix-modifiers
+    - include: postfix-modifiers
+    - include: soft-keywords
+    - include: hard-keywords
+    - include: control-keywords
+    - include: map-keywords
+
+  prefix-modifiers:
+    - match: '{{prefix_modifiers}}'
+      scope: storage.modifier.other.aura
+
+  postfix-modifiers:
+    - match: '{{postfix_modifiers}}'
+      scope: storage.modifier.other.aura
+
+  soft-keywords:
+    - match: '{{soft_keywords}}'
+      scope: keyword.soft.aura
+
+  hard-keywords:
+    - match: '{{hard_keywords}}'
+      scope: keyword.hard.aura
+
+  control-keywords:
+    - match: '{{control_keywords}}'
+      scope: keyword.control.aura
+
+  map-keywords:
+    - match: '{{map_keywords}}'
+      scope: keyword.map.aura
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Annotation
+  # ═══════════════════════════════════════════════════════════════════════
+
+  annotation:
+    - meta_include_prototype: false
+    - match: '(?<!\w)@([{\{annotation_name\}{{annotation_name}}\.]+)(?=[^:\(]|$)'
+      captures:
+        1: entity.name.type.annotation.aura
+    - match: '(?<!\w)@([{\{annotation_name\}{{annotation_name}}\.]+)\s*\('
+      captures:
+        1: entity.name.type.annotation.aura
+        2: punctuation.definition.annotation.begin.aura
+      push: annotation-args
+
+  annotation-args:
+    - meta_include_prototype: false
+    - meta_scope: meta.annotation.aura
+    - match: '\)'
+      scope: punctuation.definition.annotation.end.aura
+      pop: 1
+    - include: code
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Extern Declaration (FFI)
+  # ═══════════════════════════════════════════════════════════════════════
+
+  extern-declaration:
+    - meta_include_prototype: false
+    - match: '\b(extern)\b\s*("[^"]*")\s*("[^"]*")?\s*(\{)'
+      captures:
+        1: storage.type.extern.aura
+        2: string.quoted.double.aura
+        3: string.quoted.double.aura
+        4: punctuation.section.block.begin.aura
+      push: extern-body
+
+  extern-body:
+    - meta_include_prototype: false
+    - match: '^\s*(\})'
+      captures:
+        1: punctuation.section.block.end.aura
+      pop: 1
+    - include: code
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Data struct declaration (with constructor params)
+  # ═══════════════════════════════════════════════════════════════════════
+
+  data-struct-declaration:
+    - meta_include_prototype: false
+    - match: '(?:(data)\s+)?(struct)\s+(\b\w+\b)'
+      captures:
+        1: storage.modifier.other.aura
+        2: storage.type.struct.aura
+        3: entity.name.type.struct.aura
+      push: struct-body-block
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Struct declaration
+  # ═══════════════════════════════════════════════════════════════════════
+
+  struct-declaration:
+    - meta_include_prototype: false
+    - match: '(?:(sealed)\s+)?(struct)\s+(\b\w+\b)'
+      captures:
+        1: storage.modifier.other.aura
+        2: storage.type.struct.aura
+        3: entity.name.type.struct.aura
+      push: struct-body-block
+
+  struct-body-block:
+    - meta_include_prototype: false
+    - match: '<[^>]+>'
+      push: type-parameter-list
+    - match: '\('
+      scope: punctuation.section.parameters.begin.aura
+      push: constructor-params
+    - match: '\{'
+      scope: punctuation.section.block.begin.aura
+      push: struct-body
+    - match: '\n'
+      pop: 1
+
+  constructor-params:
+    - meta_include_prototype: false
+    - match: '\)'
+      scope: punctuation.section.parameters.end.aura
+      pop: 1
+    - include: struct-param-property
+    - include: parameter-declaration
+    - include: code
+
+  struct-param-property:
+    - match: '\b(val)\s+(\w+)'
+      captures:
+        1: storage.type.variable.readonly.aura
+        2: variable.parameter.aura
+    - match: '\b(var)\s+(\w+)'
+      captures:
+        1: storage.type.variable.aura
+        2: variable.parameter.aura
+
+  struct-body:
+    - meta_include_prototype: false
+    - match: '^\s*(\})'
+      captures:
+        1: punctuation.section.block.end.aura
+      pop: 1
+    - include: member-variable
+    - include: code
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Class declaration
+  # ═══════════════════════════════════════════════════════════════════════
+
+  class-declaration:
+    - meta_include_prototype: false
+    - match: '(?:(sealed|data)\s+)?(class)\s+(\b\w+\b)'
+      captures:
+        1: storage.modifier.other.aura
+        2: storage.type.class.aura
+        3: entity.name.type.class.aura
+      push: class-body-block
+
+  class-body-block:
+    - meta_include_prototype: false
+    - match: '<[^>]+>'
+      push: type-parameter-list
+    - match: ':\s*(\b\w+\b)(\s*<[^>]+>)?'
+      captures:
+        1: entity.name.type.superclass.aura
+        2: entity.name.type.aura
+      push: class-body-block
+    - match: '\('
+      scope: punctuation.section.parameters.begin.aura
+      push: class-construction-args
+    - match: '\{'
+      scope: punctuation.section.block.begin.aura
+      push: class-body
+    - match: '\n'
+      pop: 1
+
+  class-construction-args:
+    - meta_include_prototype: false
+    - match: '\)'
+      scope: punctuation.section.parameters.end.aura
+      pop: 1
+    - include: code
+
+  class-body:
+    - meta_include_prototype: false
+    - match: '^\s*(\})'
+      captures:
+        1: punctuation.section.block.end.aura
+      pop: 1
+    - include: member-variable
+    - include: code
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Enum declaration
+  # ═══════════════════════════════════════════════════════════════════════
+
+  enum-declaration:
+    - meta_include_prototype: false
+    - match: '(?:(sealed|data)\s+)?(enum)\s+(\b\w+\b)'
+      captures:
+        1: storage.modifier.other.aura
+        2: storage.type.enum.aura
+        3: entity.name.type.enum.aura
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Interface declaration
+  # ═══════════════════════════════════════════════════════════════════════
+
+  interface-declaration:
+    - meta_include_prototype: false
+    - match: '(?:(sealed|data)\s+)?(interface)\s+(\b\w+\b)'
+      captures:
+        1: storage.modifier.other.aura
+        2: storage.type.interface.aura
+        3: entity.name.type.interface.aura
+      push: interface-body
+
+  interface-body:
+    - meta_include_prototype: false
+    - match: '<[^>]+>'
+      push: type-parameter-list
+    - match: '\{'
+      scope: punctuation.section.block.begin.aura
+      push: interface-body-inner
+    - match: '\n'
+      pop: 1
+
+  interface-body-inner:
+    - meta_include_prototype: false
+    - match: '^\s*(\})'
+      captures:
+        1: punctuation.section.block.end.aura
+      pop: 1
+    - include: member-variable
+    - include: code
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Actor declaration
+  # ═══════════════════════════════════════════════════════════════════════
+
+  actor-declaration:
+    - meta_include_prototype: false
+    - match: '(?:(sealed|data)\s+)?(actor)\s+(\b\w+\b)'
+      captures:
+        1: storage.modifier.other.aura
+        2: storage.type.actor.aura
+        3: entity.name.type.actor.aura
+      push: actor-body
+
+  actor-body:
+    - meta_include_prototype: false
+    - match: '\{'
+      scope: punctuation.section.block.begin.aura
+      push: actor-body-inner
+    - match: '\n'
+      pop: 1
+
+  actor-body-inner:
+    - meta_include_prototype: false
+    - match: '^\s*(\})'
+      captures:
+        1: punctuation.section.block.end.aura
+      pop: 1
+    - include: member-variable
+    - include: code
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Object declaration
+  # ═══════════════════════════════════════════════════════════════════════
+
+  object-declaration:
+    - meta_include_prototype: false
+    - match: '(?:(sealed|data)\s+)?(object)\s+(\b\w+\b)'
+      captures:
+        1: storage.modifier.other.aura
+        2: storage.type.object.aura
+        3: entity.name.type.object.aura
+      push: object-body
+
+  object-body:
+    - meta_include_prototype: false
+    - match: '\{'
+      scope: punctuation.section.block.begin.aura
+      push: object-body-inner
+    - match: '\n'
+      pop: 1
+
+  object-body-inner:
+    - meta_include_prototype: false
+    - match: '^\s*(\})'
+      captures:
+        1: punctuation.section.block.end.aura
+      pop: 1
+    - include: member-variable
+    - include: code
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Type alias
+  # ═══════════════════════════════════════════════════════════════════════
+
+  type-alias:
+    - meta_include_prototype: false
+    - match: '\b(typealias)\s+(\b\w+\b)(\s*<[^>]+>)?'
+      captures:
+        1: storage.type.alias.aura
+        2: entity.name.type.alias.aura
+        3: entity.name.type.aura
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Function declaration
+  # ═══════════════════════════════════════════════════════════════════════
+
+  function-declaration:
+    - meta_include_prototype: false
+    - match: '\b(fun)\b\s*(<[^>]+>)?\s*({{identifier}}|{{identifier_with_backticks}})(<[^>]+>)?\s*\('
+      captures:
+        1: storage.type.function.aura
+        2: entity.name.type.aura
+        3: entity.name.function.declaration.aura
+        4: entity.name.type.aura
+      push: function-parameters
+
+  function-parameters:
+    - meta_include_prototype: false
+    - match: '\)'
+      scope: punctuation.section.parameters.end.aura
+      pop: 1
+      set: function-rest
+    - include: parameter-declaration
+
+  function-rest:
+    - meta_include_prototype: false
+    - match: '->'
+      scope: storage.type.function.arrow.aura
+      push: function-rest-ret
+    - match: ':'
+      scope: punctuation.separator.type-annotation.aura
+      push: function-rest-ret
+    - match: '='
+      scope: keyword.operator.assignment.aura
+      push: function-rest-expr
+    - match: '\{'
+      scope: punctuation.section.block.begin.aura
+      push: function-body
+    - match: '\n'
+      pop: 1
+
+  function-rest-ret:
+    - meta_include_prototype: false
+    - match: '\s*([\w?]+(?:<[^>]+>)?(?:\s*->\s*[\w?]+(?:<[^>]+>)?)?)'
+      captures:
+        1: entity.name.type.aura
+    - match: '\n'
+      pop: 2
+
+  function-rest-expr:
+    - meta_include_prototype: false
+    - match: '\n'
+      pop: 1
+    - include: code
+
+  function-body:
+    - meta_include_prototype: false
+    - match: '^\s*(\})'
+      captures:
+        1: punctuation.section.block.end.aura
+      pop: 1
+    - include: code
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Parameter declaration
+  # ═══════════════════════════════════════════════════════════════════════
+
+  parameter-declaration:
+    - meta_include_prototype: false
+    - match: '(\b\w+\b)\s*(:)\s*([\w?]+(?:<[^>]+>)?)(\?)?(,)?'
+      captures:
+        1: variable.parameter.aura
+        2: punctuation.separator.type-annotation.aura
+        3: entity.name.type.aura
+        4: keyword.operator.optional.aura
+        5: punctuation.separator.delimiter.aura
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Variable declarations
+  # ═══════════════════════════════════════════════════════════════════════
+
+  constant-declaration:
+    - meta_include_prototype: false
+    - match: '\b(val)\b\s*(?:<[^>]+>)?'
+      captures:
+        1: storage.type.variable.readonly.aura
+
+  variable-declaration:
+    - meta_include_prototype: false
+    - match: '\b(var)\b\s*(?:<[^>]+>)?'
+      captures:
+        1: storage.type.variable.aura
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Type parameter list (generics)
+  # ═══════════════════════════════════════════════════════════════════════
+
+  type-parameter-list:
+    - meta_include_prototype: false
+    - match: '<'
+      scope: punctuation.section.type.begin.aura
+      push: type-parameter-list-body
+
+  type-parameter-list-body:
+    - meta_scope: meta.type.type-parameters.aura
+    - match: '>'
+      scope: punctuation.section.type.end.aura
+      pop: 1
+    - match: '(\b\w+\b)(\?)?'
+      captures:
+        1: entity.name.type.aura
+        2: keyword.operator.optional.aura
+    - match: '(:)\s*(\b\w+\b)'
+      captures:
+        1: punctuation.separator.type-annotation.aura
+        2: entity.name.type.aura
+    - match: '\b(in|out)\b'
+      scope: storage.modifier.aura
+    - match: ','
+      scope: punctuation.separator.delimiter.aura
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Builtin types
+  # ═══════════════════════════════════════════════════════════════════════
+
+  builtin-types:
+    - meta_include_prototype: false
+    - match: '{{builtin_types}}'
+      scope: storage.type.builtin.aura
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Standard library function calls
+  # ═══════════════════════════════════════════════════════════════════════
+
+  std-function-call:
+    - meta_include_prototype: false
+    - match: '(aura\.\w+\.\w+)\s*\('
+      captures:
+        1: support.function.std.aura
+      push: function-call-body
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Numeric literals
+  # ═══════════════════════════════════════════════════════════════════════
+
+  numeric-literals:
+    - meta_include_prototype: false
+    - include: hex-literal
+    - include: binary-literal
+    - include: octal-literal
+    - include: decimal-literal
+
+  hex-literal:
+    - match: '{{hex_literal}}'
+      scope: constant.numeric.hex.aura
+
+  binary-literal:
+    - match: '{{binary_literal}}'
+      scope: constant.numeric.binary.aura
+
+  octal-literal:
+    - match: '{{octal_literal}}'
+      scope: constant.numeric.octal.aura
+
+  decimal-literal:
+    - match: '{{decimal_literal}}'
+      scope: constant.numeric.decimal.aura
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Boolean / Null literals
+  # ═══════════════════════════════════════════════════════════════════════
+
+  boolean-literal:
+    - match: '\b(true|false)\b'
+      scope: constant.language.boolean.aura
+
+  null-literal:
+    - match: '\bnull\b'
+      scope: constant.language.null.aura
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Operators
+  # ═══════════════════════════════════════════════════════════════════════
+
+  operators:
+    - meta_include_prototype: false
+    - include: comparison-operators
+    - include: null-operators
+    - include: assignment-operators
+    - include: arithmetic-operators
+    - include: logical-operators
+    - include: negation-operator
+    - include: bitwise-operators
+    - include: increment-decrement
+    - include: range-operators
+    - include: annotation-at
+    - include: method-reference-op
+
+  comparison-operators:
+    - match: '{{comparison_ops}}'
+      scope: keyword.operator.comparison.aura
+
+  null-operators:
+    - match: '\!\!'
+      scope: keyword.operator.null-assert.aura
+    - match: '\?\?'
+      scope: keyword.operator.null-coalesce.aura
+    - match: '\?:'
+      scope: keyword.operator.elvis.aura
+
+  assignment-operators:
+    - match: '{{assignment_ops}}'
+      scope: keyword.operator.assignment.arithmetic.aura
+    - match: '='
+      scope: keyword.operator.assignment.aura
+
+  arithmetic-operators:
+    - match: '{{arithmetic_ops}}'
+      scope: keyword.operator.arithmetic.aura
+
+  logical-operators:
+    - match: '{{logical_ops}}'
+      scope: keyword.operator.logical.aura
+
+  negation-operator:
+    - match: '!'
+      scope: keyword.operator.negation.aura
+
+  bitwise-operators:
+    - match: '{{bitwise_ops}}'
+      scope: keyword.operator.bitwise.aura
+
+  increment-decrement:
+    - match: '{{inc_dec_ops}}'
+      scope: keyword.operator.increment-decrement.aura
+
+  range-operators:
+    - match: '{{range_ops}}'
+      scope: keyword.operator.range.aura
+
+  annotation-at:
+    - match: '@'
+      scope: keyword.operator.annotation.aura
+
+  method-reference-op:
+    - match: '::'
+      scope: keyword.operator.method-reference.aura
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Lambda arrow
+  # ═══════════════════════════════════════════════════════════════════════
+
+  lambda-arrow:
+    - match: '->'
+      scope: storage.type.function.arrow.aura
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # String literals
+  # ═══════════════════════════════════════════════════════════════════════
+
+  string-empty:
+    - meta_include_prototype: false
+    - match: '(?<!")""(?!"")'
+      scope: string.quoted.double.aura
+
+  string:
+    - meta_include_prototype: false
+    - match: '"(?!"")'
+      scope: punctuation.definition.string.begin.aura
+      push: string-content
+
+  string-content:
+    - meta_scope: string.quoted.double.aura
+    - match: '"(?!"")'
+      scope: punctuation.definition.string.end.aura
+      pop: 1
+    - match: '\\.'
+      scope: constant.character.escape.aura
+    - include: string-escape-simple
+    - include: string-escape-bracketed
+
+  string-escape-simple:
+    - match: '(?<!\\)\$\w+\b'
+      scope: variable.string-escape.aura
+
+  string-escape-bracketed:
+    - meta_include_prototype: false
+    - match: '(?<!\\)(\$\{)'
+      captures:
+        1: punctuation.definition.template-expression.begin.aura
+      scope: meta.template.expression.aura
+      push: template-expression
+
+  template-expression:
+    - meta_scope: meta.template.expression.aura
+    - match: '(\})'
+      captures:
+        1: punctuation.definition.template-expression.end.aura
+      pop: 1
+    - include: code
+
+  string-multiline:
+    - meta_include_prototype: false
+    - match: '"""'
+      scope: punctuation.definition.string.begin.aura
+      push: string-multiline-content
+
+  string-multiline-content:
+    - meta_scope: string.quoted.double.aura
+    - match: '"""'
+      scope: punctuation.definition.string.end.aura
+      pop: 1
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Character literals
+  # ═══════════════════════════════════════════════════════════════════════
+
+  character:
+    - meta_include_prototype: false
+    - match: "'"
+      scope: punctuation.definition.string.begin.aura
+      push: character-content
+
+  character-content:
+    - meta_scope: string.quoted.single.aura
+    - match: "'"
+      scope: punctuation.definition.string.end.aura
+      pop: 1
+    - match: '\\.'
+      scope: constant.character.escape.aura
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Variable references
+  # ═══════════════════════════════════════════════════════════════════════
+
+  constant-name:
+    - meta_include_prototype: false
+    - match: '\b([A-Z][A-Z0-9_]*)(?=\s*[:=])'
+      captures:
+        1: variable.other.constant.aura
+
+  variable-reference:
+    - meta_include_prototype: false
+    - match: '\b(\w+)(?=\s*[:=])'
+      captures:
+        1: variable.other.readwrite.aura
+
+  object-reference:
+    - meta_include_prototype: false
+    - match: '\b([a-zA-Z]\w*)(?=\.)'
+      captures:
+        1: variable.other.object.aura
+
+  property-reference:
+    - meta_include_prototype: false
+    - match: '(?:(\?\.)|(\.))(\w+)\b'
+      captures:
+        1: punctuation.accessor.optional.aura
+        2: punctuation.separator.period.aura
+        3: variable.other.property.aura
+
+  method-reference:
+    - meta_include_prototype: false
+    - match: '(\??::)(\b\w+\b|`[^`]+`)'
+      captures:
+        1: keyword.operator.method-reference.aura
+        2: entity.name.function.reference.aura
+
+  self-reference:
+    - meta_include_prototype: false
+    - match: '\b(this|super)(@\w+)?\b'
+      scope: variable.language.this.aura
+
+  label:
+    - meta_include_prototype: false
+    - match: '\b(\w+)@(?!\w)'
+      captures:
+        1: entity.name.label.aura
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Enum variant / access
+  # ═══════════════════════════════════════════════════════════════════════
+
+  enum-variant:
+    - meta_include_prototype: false
+    - match: '\b([A-Z]\w*)\b'
+      scope: entity.name.enum.variant.aura
+
+  enum-access:
+    - meta_include_prototype: false
+    - match: '\b([A-Z]\w*)(\.)([A-Z]\w*)(?!\s*\()'
+      captures:
+        1: entity.name.type.aura
+        2: punctuation.separator.period.aura
+        3: entity.name.enum.variant.aura
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Function calls
+  # ═══════════════════════════════════════════════════════════════════════
+
+  function-call:
+    - meta_include_prototype: false
+    - match: '((?:(?:\.|\?\.)?)?)(?:(?:\w+\.)+\w+|`[^`]+`|(\w+))(?:<[^>]+>)?\s*\('
+      captures:
+        1: punctuation.accessor.aura
+        2: entity.name.function.call.aura
+      push: function-call-body
+
+  function-call-body:
+    - meta_include_prototype: false
+    - match: '\)'
+      pop: 1
+    - include: named-argument
+    - include: string
+    - include: comments
+    - include: code
+
+  named-argument:
+    - match: '\b(\w+)(?=\s*=[^=])'
+      captures:
+        1: variable.parameter.aura
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Type annotation
+  # ═══════════════════════════════════════════════════════════════════════
+
+  type-annotation:
+    - meta_include_prototype: false
+    - match: '(?<![:?])(:)(?![\s]*[:?])\s*([\w?]+(?:<[^>]+>)?(?:\s*->\s*[\w?]+(?:<[^>]+>)?)?)'
+      captures:
+        1: punctuation.separator.type-annotation.aura
+        2: entity.name.type.aura
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # For loop variable
+  # ═══════════════════════════════════════════════════════════════════════
+
+  for-loop-variable:
+    - meta_include_prototype: false
+    - match: '\b(for)\s*\(\s*(\w+)(?::\s*[^)]*?)?\s+(in)\b'
+      captures:
+        1: keyword.control.aura
+        2: variable.parameter.aura
+        3: keyword.hard.aura
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Member variable
+  # ═══════════════════════════════════════════════════════════════════════
+
+  member-variable:
+    - meta_include_prototype: false
+    - match: '\b(\w+)(?=\s*[:=])'
+      captures:
+        1: variable.field.aura

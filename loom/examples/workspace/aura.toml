@@ -1,0 +1,94 @@
+schema-version = "2.0"
+name = "workspace"
+version = "0.1.0"
+description = "Workspace 示例：演示多项目管理（monorepo）"
+authors = []
+license = "MIT"
+
+# 根项目本身不作为构建目标（由成员项目构建）
+library = false
+entry = ""
+exports = []
+
+# ── Workspace 配置 ──
+[workspace]
+members = [
+    "libs/core",
+    "libs/utils",
+    "apps/server",
+]
+default-members = [
+    "libs/core",
+    "libs/utils",
+    "apps/server",
+]
+resolver = "2"
+
+# Workspace 级别的依赖管理（BOM）
+[workspace.dependency-management]
+aura-math = "1.0.0"
+aura-io = "1.0.0"
+
+[workspace.build]
+opt-level = 2
+debug = true
+out-dir = "target/build"
+cache-dir = "target/cache"
+parallel = true
+
+# 根项目不需要这些
+dependencies = []
+compile-dependencies = []
+runtime-dependencies = []
+dev-dependencies = []
+build-dependencies = []
+tasks = []
+
+[build]
+opt-level = 2
+debug = true
+out-dir = "target/build"
+cache-dir = "target/cache"
+parallel = true
+
+[build.source-sets.main]
+source-dirs = []
+include = []
+exclude = []
+depends-on = []
+
+[build.alias]
+
+[plugins]
+aura-stdlib = true
+aura-test-harness = false
+aura-doc-gen = false
+aura-format = false
+aura-aot = false
+aura-watch = false
+aura-ci = false
+
+[plugins.external]
+
+[profiles.release]
+activate = false
+
+[profiles.debug]
+activate = true
+
+[repositories]
+central = "https://registry.aura-lang.dev"
+
+[repositories.custom]
+
+[resources]
+include = []
+exclude = []
+
+[package]
+format = "auz"
+include-sources = false
+include-docs = false
+include-native = true
+native-targets = []
+aot-opt-level = 2

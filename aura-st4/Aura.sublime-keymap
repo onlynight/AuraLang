@@ -1,0 +1,35 @@
+[
+    // Format document
+    {
+        "keys": ["ctrl+shift+f"],
+        "command": "aura_format_document",
+        "args": { "engine": "local" },
+        "match_selector": "source.aura"
+    },
+    // Auto indent
+    {
+        "keys": ["ctrl+shift+i"],
+        "command": "aura_auto_indent",
+        "match_selector": "source.aura"
+    },
+    // Symbol outline
+    {
+        "keys": ["ctrl+shift+o"],
+        "command": "show_symbol_list",
+        "args": {
+            "symbols_style": "all",
+            "regex": "\\b(fun|class|struct|enum|interface|actor|object|typealias|val|var)\\s+\\w+"
+        },
+        "match_selector": "source.aura"
+    },
+    // Run
+    {
+        "keys": ["ctrl+b"],
+        "command": "build",
+        "args": {
+            "shell_cmd": "aura run",
+            "file_regex": "^(.+\\.aura):(\\d+)(:\\d+)?:\\s(.*)$"
+        },
+        "match_selector": "source.aura"
+    }
+]

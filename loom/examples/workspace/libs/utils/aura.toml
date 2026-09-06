@@ -1,0 +1,69 @@
+schema-version = "2.0"
+name = "utils"
+version = "0.1.0"
+description = "工具库：提供字符串和集合工具"
+authors = []
+license = "MIT"
+library = true
+entry = "src/lib.aura"
+exports = ["string", "collection"]
+
+dependencies = []
+compile-dependencies = []
+runtime-dependencies = []
+dev-dependencies = []
+build-dependencies = []
+
+tasks = []
+
+[build]
+opt-level = 2
+debug = true
+out-dir = "target/build"
+cache-dir = "target/cache"
+parallel = true
+
+[build.source-sets.main]
+source-dirs = ["src"]
+include = ["**/*.aura"]
+exclude = ["**/*.test.aura", "vendor/**", "target/**"]
+depends-on = []
+
+[build.source-sets.test]
+source-dirs = ["test"]
+include = ["**/*.aura"]
+exclude = []
+depends-on = ["main"]
+
+[build.alias]
+
+[plugins]
+aura-stdlib = true
+aura-test-harness = true
+aura-doc-gen = false
+aura-format = false
+aura-aot = false
+aura-watch = false
+aura-ci = false
+
+[plugins.external]
+
+[profiles.release]
+activate = false
+
+[profiles.debug]
+activate = true
+
+[repositories]
+central = "https://registry.aura-lang.dev"
+
+[resources]
+include = []
+exclude = []
+
+[package]
+format = "auz"
+include-sources = false
+include-docs = false
+include-native = true
+aot-opt-level = 2

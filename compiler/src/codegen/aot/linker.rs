@@ -17,6 +17,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::codegen::opcode::{AuraFuncDesc, FUNC_EXPORT};
+
 use super::AotOptions;
 use super::error::AotError;
 use super::target::TargetTriple;
@@ -332,6 +334,193 @@ impl CrossCompilationConfig {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 1 AOT Blob: 从目标文件提取 .text 段 + 函数描述符
+// (设计文档 §6.2 link_to_blob)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 构造一个 `LlvmToolError`（用于非 LLVM 工具场景，如对象文件解析）
+fn make_tool_error(tool: &str, msg: &str) -> LlvmToolError {
+    LlvmToolError {
+        tool: tool.to_string(),
+        status: std::process::ExitStatus::default(),
+        stderr: msg.to_string(),
+    }
+}
+
+/// 解析对象文件，提取 .text 段原始字节、段起始虚拟地址、以及符号表。
+///
+/// 使用 `object` crate 的 `File::parse` 自动检测 ELF/COFF/PE 格式。
+/// ELF 的 symbol.address() 是绝对虚拟地址，COFF 的是段内偏移。
+fn parse_object_file(
+    bytes: &[u8],
+) -> Result<(Vec<u8>, u64, bool, Vec<(String, u64)>), LlvmToolError> {
+    use object::read::{File, Object, ObjectSection, ObjectSymbol};
+
+    let file = File::parse(bytes).map_err(|e| {
+        make_tool_error("parse_object", &format!("无法解析目标文件: {}", e))
+    })?;
+
+    let is_elf = matches!(file.format(), object::BinaryFormat::Elf);
+
+    // 查找 .text 段
+    let mut text_data: Vec<u8> = Vec::new();
+    let mut text_start: u64 = 0;
+    if let Some(section) = file.section_by_name(".text") {
+        text_data = section
+            .data()
+            .map_err(|e| make_tool_error("parse_object", &format!("读取 .text 段失败: {}", e)))?
+            .to_vec();
+        text_start = section.address();
+    }
+    if text_data.is_empty() {
+        return Err(make_tool_error(
+            "parse_object",
+            "目标文件中未找到 .text 段或段为空",
+        ));
+    }
+
+    // 收集所有已定义符号
+    let mut symbols: Vec<(String, u64)> = Vec::new();
+    for symbol in file.symbols() {
+        if symbol.is_undefined() {
+            continue;
+        }
+        if let Ok(name) = symbol.name() {
+            symbols.push((name.to_string(), symbol.address()));
+        }
+    }
+
+    Ok((text_data, text_start, is_elf, symbols))
+}
+
+/// 从 AOT 包装函数符号名解析元数据
+///
+/// 符号名格式：`aura_aot_<sanitized_name>!<nargs>!<rettag>!<tag0>!<tag1>!...`
+/// 返回：(函数部分, num_args, return_tag, arg_tags)
+fn parse_aot_symbol_name(name: &str) -> Option<(&str, u8, u8, Vec<u8>)> {
+    if !name.starts_with("aura_aot_") {
+        return None;
+    }
+    let parts: Vec<&str> = name.split('!').collect();
+    if parts.len() < 3 {
+        return None; // 至少需要 name!nargs!rettag
+    }
+    // 去掉 `aura_aot_` 前缀，得到 emit::sanitizellvm 处理后的函数名
+    let func_part = &parts[0]["aura_aot_".len()..];
+    let nargs: u8 = parts[1].parse().ok()?;
+    let rettag: u8 = parts[2].parse().ok()?;
+    let arg_tags: Vec<u8> = parts[3..].iter().filter_map(|s| s.parse().ok()).collect();
+    Some((func_part, nargs, rettag, arg_tags))
+}
+
+/// 将参数类型标签列表编码为 AuraFuncDesc.arg_tags (u8)
+///
+/// 每参数 4 bit，最多 2 个参数使用紧凑编码；超过 2 个参数时，
+/// 低 4 bit 存储参数个数（扩展编码标记）。
+fn compute_arg_tags(arg_tags: &[u8]) -> u8 {
+    if arg_tags.len() <= 2 {
+        // 紧凑编码：tag0 在 bit 4-7，tag1 在 bit 0-3
+        let t0 = arg_tags.first().copied().unwrap_or(0) & 0x0F;
+        let t1 = arg_tags.get(1).copied().unwrap_or(0) & 0x0F;
+        (t0 << 4) | t1
+    } else {
+        // 扩展编码标记：低 4 bit = 参数个数
+        (arg_tags.len() as u8) & 0x0F
+    }
+}
+
+/// 将 LLVM 目标文件编译为机器码 blob（不链接，不生成可执行文件）。
+///
+/// 输出：
+/// - `blob_path`：原始 .text 段字节流
+/// - 返回值：`(脱前缀函数名, 描述符)` 向量（每个 `aura_aot_*` 符号一个）
+///
+/// 对应设计文档 §6.2。使用纯 Rust `object` crate 解析 ELF/COFF 目标文件，
+/// 提取 .text 段原始字节和 `aura_aot_*` 包装函数符号，计算入口偏移。
+pub fn link_to_blob(
+    object_path: &Path,
+    blob_path: &Path,
+    _options: &AotOptions,
+) -> LlvmToolResult<Vec<(String, AuraFuncDesc)>> {
+    // 1. 读取目标文件
+    let bytes = std::fs::read(object_path).map_err(|e| {
+        make_tool_error("read_object", &format!("读取目标文件失败: {}", e))
+    })?;
+
+    // 2. 解析目标文件，提取 .text 数据和符号表
+    let (text_data, text_start, is_elf, symbols) = parse_object_file(&bytes)?;
+
+    // 3. 写入 blob 文件
+    std::fs::write(blob_path, &text_data).map_err(|e| {
+        make_tool_error("write_blob", &format!("写入 blob 文件失败: {}", e))
+    })?;
+
+    // 4. 为每个 aura_aot_* 符号生成函数描述符
+    let mut descs = Vec::new();
+    for (name, address) in &symbols {
+        if !name.starts_with("aura_aot_") {
+            continue;
+        }
+
+        // 解析元数据（从符号名中提取函数名/nargs/rettag/arg_tags）
+        let meta = parse_aot_symbol_name(name);
+        let (func_name, nargs, rettag, arg_tags_vec) = match meta {
+            Some((func_name, nargs, rettag, arg_tags)) => {
+                (func_name, nargs, rettag, arg_tags)
+            }
+            None => {
+                // 跳过没有元数据的符号（如纯函数符号，无 `!` 分隔符）
+                continue;
+            }
+        };
+
+        // 计算 entry_offset（相对于 .text 段起始）
+        let offset = if is_elf {
+            if *address >= text_start {
+                address.wrapping_sub(text_start)
+            } else {
+                0 // 无效偏移，后续会报错
+            }
+        } else {
+            // COFF: symbol.address() 已经是段内偏移
+            *address
+        };
+
+        if offset == 0 {
+            return Err(make_tool_error(
+                "link_to_blob",
+                &format!(
+                    "函数 '{}' 的 entry_offset 为 0（address={:#x}, text_start={:#x}），\
+                     请检查该符号是否在 .text 段内",
+                    name, address, text_start
+                ),
+            ));
+        }
+
+        // 编码 arg_tags
+        let arg_tags_u8 = compute_arg_tags(&arg_tags_vec);
+
+        // 创建描述符（name_offset / name_len 由序列化模块填充）
+        let desc = AuraFuncDesc {
+            name_offset: 0,
+            name_len: 0,
+            _pad1: 0,
+            entry_offset: offset,
+            num_args: nargs,
+            arg_tags: arg_tags_u8,
+            return_tag: rettag,
+            flags: FUNC_EXPORT,
+            source_line: 0,
+            source_file_offset: 0,
+            _pad2: 0,
+        };
+        descs.push((func_name.to_string(), desc));
+    }
+
+    Ok(descs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,5 +531,39 @@ mod tests {
         let options = AotOptions::default();
         // 这里仅检查不 panic
         let _ = find_tool("llc", &options);
+    }
+
+    #[test]
+    fn test_parse_aot_symbol_name() {
+        let (func_part, nargs, rettag, tags) =
+            parse_aot_symbol_name("aura_aot_add!2!0!0!0").unwrap();
+        assert_eq!(func_part, "add");
+        assert_eq!(nargs, 2);
+        assert_eq!(rettag, 0);
+        assert_eq!(tags, vec![0, 0]);
+
+        let (_, nargs, rettag, tags) =
+            parse_aot_symbol_name("aura_aot_float_2!2!1!1!1").unwrap();
+        assert_eq!(nargs, 2);
+        assert_eq!(rettag, 1);
+        assert_eq!(tags, vec![1, 1]);
+
+        // 无元数据
+        assert!(parse_aot_symbol_name("aura_aot_nometadata").is_none());
+        assert!(parse_aot_symbol_name("other_symbol").is_none());
+    }
+
+    #[test]
+    fn test_compute_arg_tags() {
+        // 紧凑编码（<=2 参数）
+        assert_eq!(compute_arg_tags(&[0, 0]), 0x00); // Int, Int
+        assert_eq!(compute_arg_tags(&[1, 1]), 0x11); // Float, Float
+        assert_eq!(compute_arg_tags(&[2, 3]), 0x23); // Bool, Unit
+        assert_eq!(compute_arg_tags(&[0]), 0x00); // Int only
+        assert_eq!(compute_arg_tags(&[]), 0x00); // no args
+
+        // 扩展编码标记（>2 参数）
+        assert_eq!(compute_arg_tags(&[0, 0, 0]), 3); // 3 args
+        assert_eq!(compute_arg_tags(&[0, 0, 0, 0]), 4); // 4 args
     }
 }

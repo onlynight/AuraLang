@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<snippet>
+    <content><![CDATA[fun (): Result<, > {
+    if () {
+        return Result.Success()
+    } else {
+        return Result.Error()
+    }
+}]]></content>
+    <tabTrigger>result</tabTrigger>
+    <scope>source.aura</scope>
+    <description>Result error handling</description>
+</snippet>

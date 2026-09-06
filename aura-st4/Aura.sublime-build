@@ -1,0 +1,16 @@
+{
+    "cmd": ["aura", "run", "$file"],
+    "file_regex": "^(.+\\.aura):(\\d+)(:\\d+)?:\\s(.*)$",
+    "shell_cmd": "aura run \"$file\"",
+    "encoding": "UTF-8",
+    "line_regex": "^(.+\\.aura):(\\d+)(:\\d+)?:\\s(.*)$",
+    "windows": {
+        "cmd": ["aura", "run", "$file"]
+    },
+    "linux": {
+        "cmd": ["aura", "run", "$file"]
+    },
+    "mac": {
+        "cmd": ["aura", "run", "$file"]
+    }
+}

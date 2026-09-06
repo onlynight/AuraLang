@@ -1,0 +1,64 @@
+// 2x2 矩阵模块
+//
+// 提供 2x2 矩阵的创建、乘法、行列式等运算。
+
+/// 2x2 矩阵
+struct Matrix2x2 {
+    pub a11: f64
+    pub a12: f64
+    pub a21: f64
+    pub a22: f64
+}
+
+impl Matrix2x2 {
+    /// 创建新矩阵
+    pub fun new(a11: f64, a12: f64, a21: f64, a22: f64) -> Matrix2x2 {
+        return Matrix2x2 {
+            a11: a11,
+            a12: a12,
+            a21: a21,
+            a22: a22,
+        }
+    }
+
+    /// 单位矩阵
+    pub fun identity() -> Matrix2x2 {
+        return Matrix2x2.new(1.0, 0.0, 0.0, 1.0)
+    }
+}
+
+/// 矩阵乘法
+fun matrixMultiply(a: Matrix2x2, b: Matrix2x2) -> Matrix2x2 {
+    return Matrix2x2.new(
+        a.a11 * b.a11 + a.a12 * b.a21,
+        a.a11 * b.a12 + a.a12 * b.a22,
+        a.a21 * b.a11 + a.a22 * b.a21,
+        a.a21 * b.a12 + a.a22 * b.a22,
+    )
+}
+
+/// 行列式
+fun matrixDeterminant(m: Matrix2x2) -> f64 {
+    return m.a11 * m.a22 - m.a12 * m.a21
+}
+
+/// 逆矩阵
+fun matrixInverse(m: Matrix2x2) -> Matrix2x2 {
+    val det = matrixDeterminant(m)
+    if det == 0.0 {
+        // 奇异矩阵，返回单位矩阵
+        return Matrix2x2.identity()
+    }
+    val invDet = 1.0 / det
+    return Matrix2x2.new(
+        m.a22 * invDet,
+        -m.a12 * invDet,
+        -m.a21 * invDet,
+        m.a11 * invDet,
+    )
+}
+
+/// 转置
+fun matrixTranspose(m: Matrix2x2) -> Matrix2x2 {
+    return Matrix2x2.new(m.a11, m.a21, m.a12, m.a22)
+}

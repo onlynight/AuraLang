@@ -356,6 +356,14 @@ impl Checker {
                 self.symbols.register_type(t.name.clone(), target);
             }
             Decl::Extern(e) => {
+                // P8-Rust: extern "rust" 块给出 Rust 侧标注提示
+                if e.abi == "rust" || e.abi == "Rust" {
+                    self.report_warning(
+                        e.span,
+                        "`extern \"rust\"` 块的函数需在 Rust 侧使用 #[no_mangle] extern \"C\"，\
+                         否则 ABI 不稳定，可能导致调用失败",
+                    );
+                }
                 for f in &e.functions {
                     let params = f
                         .params
@@ -593,13 +601,11 @@ impl Checker {
     /// - `import aura.math.*` — 通配：把模块所有函数加到符号表（短名）
     /// - `import aura.math` — 模块：注册模块名（调用时用 aura.math.sin）
     /// - `import aura.math.sin` — 精确：只加指定函数（短名）
+    /// - `import aura.math.sin as s` — 精确引入并别名：用别名调用
     /// - `import aura.math as m` — 别名：用别名注册模块
+    /// - `import aura.math.* as m` — 通配+别名：用别名注册模块
     fn expand_import(&mut self, imp: &ImportDecl) {
-        let module_path = if imp.path.ends_with(".*") {
-            imp.path[..imp.path.len() - 2].to_string()
-        } else {
-            imp.path.clone()
-        };
+        let module_path = imp.path.clone();
 
         // 检查是否是 aura.* 命名空间
         if !module_path.starts_with("aura.") {
@@ -609,7 +615,7 @@ impl Checker {
 
         match &imp.alias {
             Some(alias) => {
-                // import aura.math as m
+                // import aura.math as m / import aura.math.* as m
                 // 注册别名到符号表，调用时用 m.sin(...)
                 self.symbols.insert_module_alias(alias.clone(), module_path);
             }
@@ -619,8 +625,6 @@ impl Checker {
                     // 把模块所有函数加到符号表（短名）
                     let short_names = crate::std::decl::module_functions(&module_path);
                     for short_name in short_names {
-                        // 用完整名注册，调用时用短名
-                        let full_name = format!("{}.", module_path) + &short_name;
                         let _ = self.symbols.insert_function(
                             short_name.clone(),
                             vec![], // 参数类型未知，用 Any
@@ -629,7 +633,7 @@ impl Checker {
                             imp.span,
                         );
                     }
-                } else if module_path.contains('.') && module_path.split('.').count() == 3 {
+                } else if module_path.split('.').count() == 3 {
                     // import aura.math.sin — 精确引入函数
                     let short_name = module_path.split('.').last().unwrap_or("").to_string();
                     let _ = self.symbols.insert_function(

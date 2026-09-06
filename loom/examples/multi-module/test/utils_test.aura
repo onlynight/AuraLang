@@ -1,0 +1,37 @@
+// 多模块测试
+//
+// 测试 utils 模块的工具函数。
+
+import utils.*
+
+fun test_capitalize() {
+    val result = capitalize("hello")
+    aura.test.assertEq(result, "Hello", "capitalize should uppercase first letter")
+
+    val empty = capitalize("")
+    aura.test.assertEq(empty, "", "capitalize of empty string should be empty")
+}
+
+fun test_reverse() {
+    val result = reverse("abc")
+    aura.test.assertEq(result, "cba", "reverse should reverse string")
+
+    val palindrome = reverse("aba")
+    aura.test.assertEq(palindrome, "aba", "reverse of palindrome should be same")
+}
+
+fun test_repeat() {
+    val result = repeat("ab", 3)
+    aura.test.assertEq(result, "ababab", "repeat should repeat string 3 times")
+
+    val zero = repeat("x", 0)
+    aura.test.assertEq(zero, "", "repeat 0 times should be empty")
+}
+
+// 测试入口
+fun test() {
+    test_capitalize()
+    test_reverse()
+    test_repeat()
+    println("All utils tests passed!")
+}

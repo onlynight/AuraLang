@@ -1,0 +1,49 @@
+// 多模块示例：入口文件
+//
+// 演示 import 解析 + 跨模块调用
+//
+// 模块结构：
+//   src/
+//   ├── main.aura      ← 本文件（入口）
+//   ├── utils.aura     ← 工具函数
+//   └── math/
+//       ├── mod.aura    ← 数学模块入口
+//       ├── vector.aura ← 向量运算
+//       └── matrix.aura ← 矩阵运算
+
+import utils.*
+import math.*
+
+fun main() {
+    println("=== 多模块示例 ===")
+    println()
+
+    // 1. 工具函数
+    println("--- utils ---")
+    val name = "AuraLang"
+    println("capitalize('" + name + "') = " + capitalize(name))
+    println("reverse('" + name + "') = " + reverse(name))
+    println()
+
+    // 2. 数学模块 - 向量
+    println("--- math.vector ---")
+    val v1 = Vector2D.new(3.0, 4.0)
+    val v2 = Vector2D.new(1.0, 2.0)
+    val sum = vectorAdd(v1, v2)
+    println("v1 + v2 = (" + sum.x + ", " + sum.y + ")")
+    println("|v1| = " + vectorMagnitude(v1))
+    println()
+
+    // 3. 数学模块 - 矩阵
+    println("--- math.matrix ---")
+    val m1 = Matrix2x2.new(1.0, 2.0, 3.0, 4.0)
+    val m2 = Matrix2x2.new(5.0, 6.0, 7.0, 8.0)
+    val product = matrixMultiply(m1, m2)
+    println("m1 * m2 = [[{0}, {1}], [{2}, {3}]]".format(
+        product.a11, product.a12, product.a21, product.a22
+    ))
+    println("det(m1) = " + matrixDeterminant(m1))
+    println()
+
+    println("=== 完成 ===")
+}

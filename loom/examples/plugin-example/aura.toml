@@ -1,0 +1,92 @@
+schema-version = "2.0"
+name = "plugin-example"
+version = "0.1.0"
+description = "插件示例：演示自定义外部插件开发"
+authors = []
+license = "MIT"
+entry = "src/main.aura"
+exports = ["main"]
+library = false
+
+dependencies = []
+compile-dependencies = []
+runtime-dependencies = []
+dev-dependencies = []
+build-dependencies = []
+
+tasks = []
+
+[build]
+opt-level = 2
+debug = true
+out-dir = "target/build"
+cache-dir = "target/cache"
+cache-remote-shared = false
+emit-signatures = true
+emit-package = false
+parallel = true
+parallel-jobs = 0
+
+[build.source-sets.main]
+source-dirs = ["src"]
+resource-dirs = []
+include = ["**/*.aura"]
+exclude = ["**/*.test.aura", "vendor/**", "target/**"]
+depends-on = []
+
+[build.source-sets.test]
+source-dirs = ["test"]
+resource-dirs = []
+include = ["**/*.aura"]
+exclude = []
+depends-on = ["main"]
+
+[build.alias]
+
+# ── 插件配置 ──
+[plugins]
+aura-stdlib = true
+aura-test-harness = false
+aura-doc-gen = false
+aura-format = false
+aura-aot = false
+aura-watch = false
+aura-ci = false
+
+# 外部插件：编译为 .so/.dll/.dylib 的动态库
+# 路径相对于项目根目录。
+# 首次使用需先编译插件：
+#   cd plugins && cargo build --release
+# Windows: plugins/target/release/custom_plugin.dll
+# Linux:   plugins/target/release/libcustom_plugin.so
+# macOS:   plugins/target/release/libcustom_plugin.dylib
+[plugins.external]
+custom-greeter = { path = "plugins/target/release/custom_plugin.dll", version = "0.1.0" }
+
+[profiles.release]
+activate = false
+
+[profiles.release.build]
+opt-level = 3
+debug = false
+emit-package = true
+
+[profiles.debug]
+activate = true
+
+[repositories]
+central = "https://registry.aura-lang.dev"
+
+[repositories.custom]
+
+[resources]
+include = []
+exclude = []
+
+[package]
+format = "auz"
+include-sources = false
+include-docs = false
+include-native = true
+native-targets = []
+aot-opt-level = 2

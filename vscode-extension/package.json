@@ -90,13 +90,12 @@
       "properties": {
         "aura.serverPath": {
           "type": "string",
-          "default": "aura",
-          "description": "Aura LSP 服务器可执行文件路径 (aura lsp)。可以是完整路径或 PATH 中可找到的命令。",
+          "default": "aura-lsp",
+          "description": "Aura LSP 服务器可执行文件路径 (aura-lsp)。扩展直接启动独立的 LSP 服务器，避免占用 aura.exe 导致 cargo build 失败。可以是完整路径或 PATH 中可找到的命令。",
           "examples": [
-            "aura",
-            "aura lsp",
-            "/usr/local/bin/aura",
-            "C:\\Aura\\aura.exe"
+            "aura-lsp",
+            "/usr/local/bin/aura-lsp",
+            "C:\\Aura\\aura-lsp.exe"
           ]
         },
         "aura.serverArgs": {

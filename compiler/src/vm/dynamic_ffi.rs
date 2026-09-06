@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use crate::codegen::opcode::FfiAbi;
 use crate::vm::value::Value;
 
 /// 动态加载的库实例（保持 Library 存活以防止 dlopen 引用计数归零）
@@ -12,6 +13,8 @@ use crate::vm::value::Value;
 struct LoadedLib {
     path: String,
     lib: libloading::Library,
+    /// P8-Rust: 库的 ABI 类型
+    abi: FfiAbi,
 }
 
 /// 动态 FFI 加载器
@@ -60,7 +63,9 @@ impl DynamicLoader {
     /// 运行时加载动态库（dlopen）
     ///
     /// 无 `dynamic-ffi` feature 时为空操作（返回 Ok）。
-    pub fn load_lib(&mut self, path: &str) -> Result<(), String> {
+    ///
+    /// `abi` 标记库的 ABI 类型（C / Rust），用于元数据追踪。
+    pub fn load_lib(&mut self, path: &str, abi: FfiAbi) -> Result<(), String> {
         #[cfg(feature = "dynamic-ffi")]
         {
             let lib = libloading::Library::new(path)
@@ -68,12 +73,14 @@ impl DynamicLoader {
             self.libs.push(LoadedLib {
                 path: path.to_string(),
                 lib,
+                abi,
             });
             Ok(())
         }
         #[cfg(not(feature = "dynamic-ffi"))]
         {
             let _ = path;
+            let _ = abi;
             Ok(())
         }
     }

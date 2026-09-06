@@ -1,4 +1,4 @@
-////! `.auc` 字节码文件格式：序列化 / 反序列化（Phase 2 重设计，设计方案 §6）
+﻿////! `.auc` 字节码文件格式：序列化 / 反序列化（Phase 2 重设计，设计方案 §6）
 //!//!
 ////! 文件布局（小端）：
 //!//! ```text
@@ -20,14 +20,19 @@
 ////! 常量标签：0=Int(i64) 1=Float(f64) 2=Str(u32 len + bytes) 3=Bool(u8) 4=Null
 
 use crate::codegen::opcode::{
-    BytecodeFunction, BytecodeModule, BytecodeNative, Const, Dependency, ExportSymbol,
-    ImportSymbol, ModuleIdentity, SymbolKind,
+    AucSegment, BytecodeFunction, BytecodeModule, BytecodeNative, Const, Dependency,
+    ExportSymbol, ImportSymbol, ModuleIdentity, SymbolKind,
 };
 use std::fs;
 
 pub const MAGIC: &[u8; 4] = b"AURA";
-/// Phase 2 新格式版本
-pub const VERSION: u16 = 2;
+/// Phase 4 新格式版本（v4: AOT 机器码嵌入 —— 函数级 aot_mode + 段表 + 段数据区）
+///
+/// 向后兼容：
+/// - v3 及更早的 `.auc` 文件仍可被 v4 读取器加载（函数记录中缺少
+///   aot_mode/aot_desc_idx 字段时按 0 处理，段表为空）。
+/// - v3 VM 遇到 v4 文件会因 `version > VERSION` 拒绝加载。
+pub const VERSION: u16 = 4;
 
 #[derive(Debug)]
 pub enum SerializeError {
@@ -79,6 +84,15 @@ pub fn to_bytes(module: &BytecodeModule) -> Vec<u8> {
     for n in &module.natives {
         write_str(&mut buf, &n.name);
         buf.extend_from_slice(&n.param_count.to_le_bytes());
+        // P8-Rust: FFI ABI 标记
+        buf.push(n.ffi_abi as u8);
+        // FFI 库名（可选）
+        if let Some(ref lib) = n.ffi_lib {
+            buf.push(1);
+            write_str(&mut buf, lib);
+        } else {
+            buf.push(0);
+        }
     }
 
     // 函数
@@ -88,6 +102,9 @@ pub fn to_bytes(module: &BytecodeModule) -> Vec<u8> {
         buf.extend_from_slice(&f.param_count.to_le_bytes());
         buf.extend_from_slice(&f.locals.to_le_bytes());
         buf.push(if f.is_native { 1 } else { 0 });
+        // v4: 执行模式 + AOT 描述符索引（设计文档 §3.4）
+        buf.push(f.aot_mode);
+        buf.extend_from_slice(&f.aot_desc_idx.to_le_bytes());
         buf.extend_from_slice(&(f.code.len() as u32).to_le_bytes());
         buf.extend_from_slice(&f.code);
     }
@@ -154,6 +171,17 @@ pub fn to_bytes(module: &BytecodeModule) -> Vec<u8> {
     for m in &module.enabled_modules {
         write_str(&mut buf, m);
     }
+
+    // ── Phase 1 AOT v4: 段表 + 段数据区（设计文档 §3.5）──
+    // 段表紧接在 v3 布局末尾；`offset` 相对段数据区起始（即段表之后）。
+    buf.extend_from_slice(&(module.aot_segments.len() as u16).to_le_bytes());
+    for seg in &module.aot_segments {
+        buf.extend_from_slice(&seg.id.to_le_bytes());
+        buf.extend_from_slice(&seg.offset.to_le_bytes());
+        buf.extend_from_slice(&seg.size.to_le_bytes());
+        buf.extend_from_slice(&seg.flags.to_le_bytes());
+    }
+    buf.extend_from_slice(&module.aot_blob_data);
 
     buf
 }
@@ -250,9 +278,26 @@ pub fn from_bytes(bytes: &[u8]) -> Result<BytecodeModule, SerializeError> {
     for _ in 0..nnatives {
         let name = r.str()?;
         let param_count = r.u16()?;
+        // P8-Rust: FFI ABI 标记
+        let abi_byte = r.u8()?;
+        let ffi_abi = match abi_byte {
+            0 => crate::codegen::opcode::FfiAbi::None,
+            1 => crate::codegen::opcode::FfiAbi::C,
+            2 => crate::codegen::opcode::FfiAbi::Rust,
+            _ => crate::codegen::opcode::FfiAbi::None,
+        };
+        // FFI 库名（可选）
+        let lib_present = r.u8()?;
+        let ffi_lib = if lib_present != 0 {
+            Some(r.str()?)
+        } else {
+            None
+        };
         natives.push(BytecodeNative {
             name,
             param_count,
+            ffi_abi,
+            ffi_lib,
         });
     }
 
@@ -264,6 +309,12 @@ pub fn from_bytes(bytes: &[u8]) -> Result<BytecodeModule, SerializeError> {
         let pc = r.u16()?;
         let locals = r.u16()?;
         let is_native = r.u8()? != 0;
+        // v4: 执行模式 + AOT 描述符索引（v3 文件无此两字段，按 0 处理）
+        let (aot_mode, aot_desc_idx) = if version >= 4 {
+            (r.u8()?, r.u32()?)
+        } else {
+            (0, 0)
+        };
         let code_len = r.u32()? as usize;
         let code = r.take(code_len)?.to_vec();
         functions.push(BytecodeFunction {
@@ -273,6 +324,8 @@ pub fn from_bytes(bytes: &[u8]) -> Result<BytecodeModule, SerializeError> {
             is_native,
             code,
             line_table: None,
+            aot_mode,
+            aot_desc_idx,
         });
     }
 
@@ -349,6 +402,27 @@ pub fn from_bytes(bytes: &[u8]) -> Result<BytecodeModule, SerializeError> {
         enabled_modules.push(r.str()?);
     }
 
+    // ── Phase 1 AOT v4: 段表 + 段数据区 ──
+    // 段表位置紧接 v3 布局末尾。v3 文件中该位置没有数据，
+    // 故仅在 version >= 4 时读取。
+    let (mut aot_segments, mut aot_blob_data) = (Vec::new(), Vec::new());
+    if version >= 4 && r.pos < r.data.len() {
+        let nsegs = r.u16()? as usize;
+        aot_segments = Vec::with_capacity(nsegs);
+        for _ in 0..nsegs {
+            aot_segments.push(AucSegment {
+                id: r.u32()?,
+                offset: r.u32()?,
+                size: r.u32()?,
+                flags: r.u32()?,
+            });
+        }
+        if r.pos < r.data.len() {
+            aot_blob_data = r.data[r.pos..].to_vec();
+            r.pos = r.data.len();
+        }
+    }
+
     Ok(BytecodeModule {
         consts,
         natives,
@@ -363,6 +437,8 @@ pub fn from_bytes(bytes: &[u8]) -> Result<BytecodeModule, SerializeError> {
         dependencies,
         sig_ids,
         entry_kind,
+        aot_segments,
+        aot_blob_data,
     })
 }
 
@@ -517,7 +593,7 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codegen::opcode::{BytecodeFunction, BytecodeNative, Const};
+    use crate::codegen::opcode::{BytecodeFunction, BytecodeNative, Const, FfiAbi};
 
     #[test]
     fn test_roundtrip_basic() {
@@ -530,6 +606,8 @@ mod tests {
                 BytecodeNative {
                     name: "println".to_string(),
                     param_count: 1,
+                    ffi_abi: FfiAbi::None,
+                    ffi_lib: None,
                 },
             ],
             functions: vec![
@@ -542,6 +620,8 @@ mod tests {
                         0, 0, 0, 28,
                     ], // LoadConst(0), Return
                     line_table: None,
+                    aot_mode: 0,
+                    aot_desc_idx: 0,
                 },
             ],
             entry: 0,
@@ -553,6 +633,7 @@ mod tests {
             dependencies: vec![],
             sig_ids: vec![],
             entry_kind: "app".to_string(),
+            ..Default::default()
         };
 
         let bytes = to_bytes(&module);
@@ -579,6 +660,8 @@ mod tests {
                     is_native: false,
                     code: vec![],
                     line_table: None,
+                    aot_mode: 0,
+                    aot_desc_idx: 0,
                 },
             ],
             entry: 0,
@@ -599,6 +682,7 @@ mod tests {
             dependencies: vec![],
             sig_ids: vec![],
             entry_kind: "library".to_string(),
+            ..Default::default()
         };
 
         module.header_flags = module.compute_header_flags();
@@ -640,6 +724,7 @@ mod tests {
             ],
             sig_ids: vec!["sig-001".to_string()],
             entry_kind: "app".to_string(),
+            ..Default::default()
         };
 
         module.header_flags = module.compute_header_flags();
@@ -664,5 +749,168 @@ mod tests {
         bytes.extend_from_slice(&1u32.to_le_bytes()); // header_flags
         bytes.extend_from_slice(&5u16.to_le_bytes()); // version = 5
         assert!(from_bytes(&bytes).is_err());
+    }
+    #[test]
+    fn test_roundtrip_v4_with_aot_segments() {
+        use crate::codegen::opcode::{
+            AuraFuncDesc, AucSegment, HEADER_HAS_MACHINE_CODE, HEADER_AOT_EXPORTS, SEG_DESC_TABLE,
+            SEG_MACHINE, SEG_PROT_EXEC, SEG_PROT_READ,
+        };
+        let desc = AuraFuncDesc {
+            entry_offset: 0x100,
+            num_args: 2,
+            flags: 1,
+            ..AuraFuncDesc::default()
+        };
+        let mut blob: Vec<u8> = vec![0x90u8; 16];
+        let db = unsafe {
+            std::slice::from_raw_parts(&desc as *const AuraFuncDesc as *const u8, AuraFuncDesc::SIZE)
+        };
+        blob.extend_from_slice(db);
+
+        let mut module = BytecodeModule {
+            consts: vec![Const::Int(10)],
+            natives: vec![],
+            functions: vec![
+                BytecodeFunction {
+                    name: "add".to_string(),
+                    param_count: 2,
+                    locals: 2,
+                    is_native: false,
+                    code: vec![1, 0, 1, 0, 1, 0, 77, 0, 0],
+                    line_table: None,
+                    aot_mode: 1,
+                    aot_desc_idx: 1,
+                },
+                BytecodeFunction {
+                    name: "main".to_string(),
+                    param_count: 0,
+                    locals: 1,
+                    is_native: false,
+                    code: vec![0, 0, 28],
+                    line_table: None,
+                    aot_mode: 0,
+                    aot_desc_idx: 0,
+                },
+            ],
+            entry: 1,
+            enabled_modules: vec![],
+            module_identity: ModuleIdentity::new("aot-app", "1.0.0"),
+            header_flags: 0,
+            exports: vec![],
+            imports: vec![],
+            dependencies: vec![],
+            sig_ids: vec![],
+            entry_kind: "app".to_string(),
+            aot_segments: vec![
+                AucSegment {
+                    id: SEG_MACHINE,
+                    offset: 0,
+                    size: 16,
+                    flags: SEG_PROT_READ | SEG_PROT_EXEC,
+                },
+                AucSegment {
+                    id: SEG_DESC_TABLE,
+                    offset: 16,
+                    size: 32,
+                    flags: SEG_PROT_READ,
+                },
+            ],
+            aot_blob_data: blob,
+            ..Default::default()
+        };
+        module.header_flags = module.compute_header_flags();
+        assert!(module.has_aot());
+        assert_ne!(module.header_flags & HEADER_HAS_MACHINE_CODE, 0);
+        assert_ne!(module.header_flags & HEADER_AOT_EXPORTS, 0);
+
+        let bytes = to_bytes(&module);
+        let loaded = from_bytes(&bytes).unwrap();
+        assert_eq!(loaded.consts.len(), 1);
+        assert_eq!(loaded.functions.len(), 2);
+        assert_eq!(loaded.functions[0].name, "add");
+        assert_eq!(loaded.functions[0].aot_mode, 1);
+        assert_eq!(loaded.functions[0].aot_desc_idx, 1);
+        assert_eq!(loaded.functions[1].aot_mode, 0);
+        assert_eq!(loaded.functions[1].aot_desc_idx, 0);
+        assert_eq!(loaded.functions[0].code.len(), 9);
+        assert_eq!(loaded.functions[0].code[6], 77, "CALL_AOT opcode byte survives round-trip");
+        assert_eq!(loaded.entry, 1);
+        assert_eq!(loaded.aot_segments.len(), 2);
+        assert_eq!(loaded.aot_segments[0].id, SEG_MACHINE);
+        assert!(loaded.aot_segments[0].is_exec());
+        assert!(!loaded.aot_segments[1].is_exec());
+        assert_eq!(loaded.aot_segments[1].id, SEG_DESC_TABLE);
+        assert_eq!(loaded.aot_segments[1].offset, 16);
+        assert_eq!(loaded.aot_segments[1].size, 32);
+        assert_eq!(loaded.aot_blob_data.len(), 48);
+        assert!(loaded.has_aot());
+        assert_ne!(loaded.header_flags & HEADER_HAS_MACHINE_CODE, 0);
+        assert_ne!(loaded.header_flags & HEADER_AOT_EXPORTS, 0);
+
+        // 段数据可直接交给 AotModule 消费
+        let idx: Vec<u32> = loaded.functions.iter().map(|f| f.aot_desc_idx).collect();
+        let mut m = crate::vm::aot_runtime::AotModule::load(
+            &loaded.aot_blob_data,
+            &loaded.aot_segments,
+            &idx,
+            1,
+            "roundtrip".to_string(),
+        )
+        .unwrap();
+        assert_eq!(m.func_descriptors.len(), 1);
+        assert_eq!(m.func_descriptors[0].entry_offset, 0x100);
+        assert!(m.find_entry(0).is_some(), "func 0 has AOT entry");
+        assert!(m.find_entry(1).is_none(), "func 1 (main) has no AOT entry");
+        m.unload();
+    }
+    #[test]
+    fn test_roundtrip_v3_backward_compat() {
+        // 手工构造 v3 字节流（无 aot_mode/aot_desc_idx、无段表），
+        // 验证 v4 读取器对 v3 文件向后兼容（设计文档 §3.4）。
+        let mut b: Vec<u8> = Vec::new();
+        b.extend_from_slice(b"AURA");
+        b.extend_from_slice(&3u16.to_le_bytes()); // VERSION 3
+        b.extend_from_slice(&0u32.to_le_bytes()); // header_flags
+        // module_identity: name="", version="", uuid=[0;16]
+        b.extend_from_slice(&0u16.to_le_bytes());
+        b.extend_from_slice(&0u16.to_le_bytes());
+        b.extend_from_slice(&[0u8; 16]);
+        // consts = 0
+        b.extend_from_slice(&0u32.to_le_bytes());
+        // natives = 0
+        b.extend_from_slice(&0u16.to_le_bytes());
+        // functions = 1: main, pc=0, locals=1, native=0, code=[LoadConst(0), Return]
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&4u16.to_le_bytes());
+        b.extend_from_slice(b"main");
+        b.extend_from_slice(&0u16.to_le_bytes()); // param_count
+        b.extend_from_slice(&1u16.to_le_bytes()); // locals
+        b.push(0); // is_native
+        let code = [0u8, 0, 0, 0x1C];
+        b.extend_from_slice(&(code.len() as u32).to_le_bytes());
+        b.extend_from_slice(&code);
+        // entry = 0, entry_kind = "app"
+        b.extend_from_slice(&0u16.to_le_bytes());
+        b.extend_from_slice(&3u16.to_le_bytes());
+        b.extend_from_slice(b"app");
+        // exports=0 imports=0 deps=0 sig_ids=0 enabled=0
+        for _ in 0..5 {
+            b.extend_from_slice(&0u16.to_le_bytes());
+        }
+
+        let m = from_bytes(&b).unwrap();
+        assert_eq!(m.functions.len(), 1);
+        assert_eq!(m.functions[0].name, "main");
+        assert_eq!(m.functions[0].aot_mode, 0, "v3 文件按 aot_mode=0 处理");
+        assert_eq!(m.functions[0].aot_desc_idx, 0);
+        assert_eq!(m.entry_kind, "app");
+        assert!(m.aot_segments.is_empty(), "v3 文件无 AOT 段");
+        assert!(!m.has_aot());
+        // v4 重新序列化后仍可读
+        let v4 = to_bytes(&m);
+        let m2 = from_bytes(&v4).unwrap();
+        assert_eq!(m2.functions[0].name, "main");
+        assert_eq!(m2.functions[0].aot_mode, 0);
     }
 }

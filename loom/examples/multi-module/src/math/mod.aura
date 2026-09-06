@@ -1,0 +1,15 @@
+// 数学模块入口
+//
+// 导出向量和矩阵子模块。
+//
+// 目录结构：
+//   math/
+//   ├── mod.aura    ← 本文件（模块入口，re-export）
+//   ├── vector.aura ← 2D 向量运算
+//   └── matrix.aura ← 2x2 矩阵运算
+
+import math.vector.*
+import math.matrix.*
+
+// 将子模块的符号 re-export 到 math 命名空间
+// 用户只需 import math.* 即可访问所有数学功能。

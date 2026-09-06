@@ -241,15 +241,18 @@ impl Parser {
         // import std.io.println or import std.io.*
         let mut path = String::new();
         path.push_str(&self.advance().literal);
+        let mut wildcard = false;
         while self.check(TokenKind::Dot) {
-            self.advance();
+            self.advance(); // consume .
+            // 检查通配符：import aura.concurrent.*
+            if self.check(TokenKind::Star) {
+                wildcard = true;
+                self.advance(); // consume *
+                break;
+            }
             path.push('.');
             let tok = self.advance();
             path.push_str(&tok.literal);
-        }
-        let wildcard = self.check(TokenKind::Star);
-        if wildcard {
-            self.advance();
         }
         let alias = if self.check(TokenKind::As) {
             self.advance();

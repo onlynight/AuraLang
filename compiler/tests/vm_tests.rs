@@ -1,10 +1,10 @@
-//! Aura VM 集成与单元测试
+﻿//! Aura VM 集成与单元测试
 //!
 //! 覆盖 技术方案 §7.1 的字节码执行：算术 / 控制流 / 函数调用与递归 / 原生调度 /
 //! 对象模型（NewObject / SetField / GetField）/ 数组。
 
 use compiler::codegen::compile_source;
-use compiler::codegen::opcode::{BytecodeFunction, BytecodeModule, BytecodeNative, Const, OpCode};
+use compiler::codegen::opcode::{BytecodeFunction, BytecodeModule, BytecodeNative, Const, FfiAbi, OpCode};
 use compiler::vm::{Value, Vm, VmOptions};
 
 /// 编译源码并返回 `main` 的执行结果（要求 main 返回一个可断言的值）
@@ -140,6 +140,8 @@ fn object_field_roundtrip() {
             BytecodeNative {
                 name: "println".to_string(),
                 param_count: 1,
+                ffi_abi: FfiAbi::None,
+                ffi_lib: None,
             },
         ],
         functions: vec![
@@ -150,11 +152,13 @@ fn object_field_roundtrip() {
                 is_native: false,
                 code,
                 line_table: None,
-                line_table: None,
+                aot_mode: 0,
+                aot_desc_idx: 0,
             },
         ],
         entry: 0,
         enabled_modules: Vec::new(),
+        ..Default::default()
     };
 
     let mut vm = Vm::new(&module, VmOptions::default()).expect("VM 初始化");
@@ -207,10 +211,13 @@ fn array_roundtrip() {
                 is_native: false,
                 code,
                 line_table: None,
+                aot_mode: 0,
+                aot_desc_idx: 0,
             },
         ],
         entry: 0,
         enabled_modules: Vec::new(),
+        ..Default::default()
     };
     let mut vm = Vm::new(&module, VmOptions::default()).expect("VM 初始化");
     let result = vm.run().expect("运行应成功");
@@ -330,10 +337,13 @@ fn list_operations() {
                 is_native: false,
                 code,
                 line_table: None,
+                aot_mode: 0,
+                aot_desc_idx: 0,
             },
         ],
         entry: 0,
         enabled_modules: Vec::new(),
+        ..Default::default()
     };
     let mut vm = Vm::new(&module, VmOptions::default()).expect("VM 初始化");
     assert_eq!(vm.run().expect("运行应成功"), Value::Int(20));
@@ -372,10 +382,13 @@ fn map_operations() {
                 is_native: false,
                 code,
                 line_table: None,
+                aot_mode: 0,
+                aot_desc_idx: 0,
             },
         ],
         entry: 0,
         enabled_modules: Vec::new(),
+        ..Default::default()
     };
     let mut vm = Vm::new(&module, VmOptions::default()).expect("VM 初始化");
     assert_eq!(vm.run().expect("运行应成功"), Value::Int(100));
@@ -450,7 +463,7 @@ fn dynamic_loader_load_lib_noop() {
 
     let mut loader = DynamicLoader::new();
     // 无 dynamic-ffi 时应返回 Ok（空操作）
-    let result = loader.load_lib("nonexistent.so");
+    let result = loader.load_lib("nonexistent.so", FfiAbi::None);
     assert!(result.is_ok());
     assert_eq!(loader.len(), 0);
 }

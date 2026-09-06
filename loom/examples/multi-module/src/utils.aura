@@ -1,0 +1,32 @@
+// 工具函数模块
+//
+// 提供字符串和通用工具函数。
+
+/// 首字母大写
+fun capitalize(s: str) -> str {
+    if s.isEmpty() {
+        return s
+    }
+    return s.substring(0, 1).upper() + s.substring(1)
+}
+
+/// 字符串反转
+fun reverse(s: str) -> str {
+    val chars = s.split("")
+    chars.reverse()
+    return chars.join("")
+}
+
+/// 去除首尾空白
+fun trim(s: str) -> str {
+    return s.trim()
+}
+
+/// 重复字符串
+fun repeat(s: str, times: int) -> str {
+    var result = ""
+    for i in 0..times {
+        result = result + s
+    }
+    return result
+}

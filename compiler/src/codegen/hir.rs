@@ -11,8 +11,99 @@
 //! HIR 仍然是结构化、树状的表示，便于后续优化（常量折叠、内联、单态化）。
 
 use crate::ast::*;
-use crate::codegen::opcode::Const;
+use crate::codegen::opcode::{Const, FfiAbi};
 use crate::span::Span;
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 导入解析映射（ImportResolution）
+//
+// 从 ImportDecl 构建，用于在 desugar_expr 中将短名/别名解析为完整原生函数名。
+// 支持：
+// - `import aura.concurrent.*` + `spawn(42)` → `aura.concurrent.spawn(42)`
+// - `import aura.concurrent.spawn` + `spawn(42)` → `aura.concurrent.spawn(42)`
+// - `import aura.concurrent.spawn as s` + `s(42)` → `aura.concurrent.spawn(42)`
+// - `import aura.concurrent as cc` + `cc.spawn(42)` → `aura.concurrent.spawn(42)`
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Default)]
+struct ImportResolution {
+    /// 短名 → 完整原生函数名（通配/精确引入，无别名）
+    /// 例如: "spawn" → "aura.concurrent.spawn"
+    short_to_full: HashMap<String, String>,
+    /// 别名 → 完整原生函数名（精确引入 + 别名）
+    /// 例如: "s" → "aura.concurrent.spawn"
+    alias_to_full: HashMap<String, String>,
+    /// 别名 → 模块名（模块/通配导入 + 别名）
+    /// 例如: "cc" → "aura.concurrent"
+    alias_to_module: HashMap<String, String>,
+}
+
+impl ImportResolution {
+    /// 查找短名映射（如 `spawn` → `aura.concurrent.spawn`）
+    fn resolve_short_name(&self, name: &str) -> Option<&str> {
+        self.short_to_full.get(name).map(|s| s.as_str())
+    }
+    /// 查找别名映射（如 `s` → `aura.concurrent.spawn`）
+    fn resolve_alias(&self, name: &str) -> Option<&str> {
+        self.alias_to_full.get(name).map(|s| s.as_str())
+    }
+    /// 查找模块别名（如 `cc` → `aura.concurrent`）
+    fn resolve_module_alias(&self, name: &str) -> Option<&str> {
+        self.alias_to_module.get(name).map(|s| s.as_str())
+    }
+}
+
+thread_local! {
+    static IMPORT_RESOLUTION: RefCell<Option<ImportResolution>> = RefCell::new(None);
+}
+
+/// 从 ImportDecl 列表构建 ImportResolution
+fn build_import_resolution(imports: &[ImportDecl]) -> ImportResolution {
+    let mut r = ImportResolution::default();
+
+    for imp in imports {
+        let path = &imp.path;
+        // 非 aura.* 命名空间跳过
+        if !path.starts_with("aura.") {
+            continue;
+        }
+
+        // 判断路径深度：aura.xxx = 2（模块），aura.xxx.yyy = 3（函数）
+        let parts: Vec<&str> = path.split('.').collect();
+        let is_function = parts.len() == 3;
+
+        match &imp.alias {
+            Some(alias) if is_function => {
+                // import aura.concurrent.spawn as s → alias "s" → full name
+                r.alias_to_full.insert(alias.clone(), path.clone());
+            }
+            Some(alias) => {
+                // import aura.concurrent as cc / import aura.concurrent.* as cc
+                r.alias_to_module.insert(alias.clone(), path.clone());
+            }
+            None if imp.wildcard => {
+                // import aura.concurrent.* → 所有函数短名 → 完整名
+                let short_names = crate::std::decl::module_functions(path);
+                for sn in short_names {
+                    let full = format!("{}.{}", path, sn);
+                    r.short_to_full.insert(sn, full);
+                }
+            }
+            None if is_function => {
+                // import aura.concurrent.spawn → 短名 spawn → 完整名
+                let short_name = parts.last().unwrap_or(&"").to_string();
+                r.short_to_full.insert(short_name, path.clone());
+            }
+            None => {
+                // import aura.concurrent → 模块引用，无需映射（调用时用完整路径）
+            }
+        }
+    }
+
+    r
+}
 
 /// HIR 类型（降级阶段仅保留最简单的形式：基本类型名 / 命名类型）
 #[derive(Debug, Clone, PartialEq)]
@@ -283,6 +374,10 @@ pub struct HirFunction {
     pub is_native: bool,
     /// 是否为泛型函数（待单态化）
     pub type_params: Vec<String>,
+    /// FFI ABI 标记（仅 `is_native == true` 时有意义）
+    pub ffi_abi: FfiAbi,
+    /// FFI 库名（对应 `extern "<abi>" "<lib>"`）
+    pub ffi_lib: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -319,6 +414,12 @@ pub struct HirProgram {
 
 /// 降级入口
 pub fn desugar_program(program: &Program) -> HirProgram {
+    // 构建导入解析映射（供 desugar_expr 解析短名/别名调用）
+    let resolution = build_import_resolution(&program.imports);
+    IMPORT_RESOLUTION.with(|r| {
+        *r.borrow_mut() = Some(resolution);
+    });
+
     let mut functions = Vec::new();
     let mut structs = Vec::new();
     let mut enums = Vec::new();
@@ -349,6 +450,11 @@ pub fn desugar_program(program: &Program) -> HirProgram {
                     .collect(),
             }),
             Decl::Extern(e) => {
+                // P8-Rust: 根据 abi 字符串确定 FFI ABI 类型
+                let abi = match e.abi.as_str() {
+                    "rust" | "Rust" => FfiAbi::Rust,
+                    _ => FfiAbi::C,
+                };
                 for f in &e.functions {
                     natives.push(HirFunction {
                         name: f.name.clone(),
@@ -366,6 +472,9 @@ pub fn desugar_program(program: &Program) -> HirProgram {
                         },
                         is_native: true,
                         type_params: vec![],
+                        /* ffi fields set below */
+                        ffi_abi: abi,
+                        ffi_lib: e.library.clone(),
                     });
                 }
                 // P8.1: 处理 extern 块中的常量
@@ -446,6 +555,8 @@ pub fn desugar_program(program: &Program) -> HirProgram {
             },
             is_native: true,
             type_params: vec![],
+            ffi_abi: FfiAbi::None,
+            ffi_lib: None,
         });
     }
 
@@ -565,6 +676,8 @@ pub fn desugar_program(program: &Program) -> HirProgram {
                 },
                 is_native: true,
                 type_params: vec![],
+            ffi_abi: FfiAbi::None,
+            ffi_lib: None,
             });
         }
     }
@@ -583,6 +696,8 @@ pub fn desugar_program(program: &Program) -> HirProgram {
             },
             is_native: true,
             type_params: vec![],
+            ffi_abi: FfiAbi::None,
+            ffi_lib: None,
         });
     }
 
@@ -603,6 +718,8 @@ pub fn desugar_program(program: &Program) -> HirProgram {
                 },
                 is_native: true,
                 type_params: vec![],
+            ffi_abi: FfiAbi::None,
+            ffi_lib: None,
             });
         }
     }
@@ -629,6 +746,8 @@ pub fn desugar_program(program: &Program) -> HirProgram {
                 },
                 is_native: true,
                 type_params: vec![],
+            ffi_abi: FfiAbi::None,
+            ffi_lib: None,
             });
         }
     }
@@ -647,6 +766,8 @@ pub fn desugar_program(program: &Program) -> HirProgram {
             },
             is_native: true,
             type_params: vec![],
+            ffi_abi: FfiAbi::None,
+            ffi_lib: None,
         });
     }
     if !natives.iter().any(|n| n.name == "free") {
@@ -662,6 +783,8 @@ pub fn desugar_program(program: &Program) -> HirProgram {
             },
             is_native: true,
             type_params: vec![],
+            ffi_abi: FfiAbi::None,
+            ffi_lib: None,
         });
     }
 
@@ -680,6 +803,8 @@ pub fn desugar_program(program: &Program) -> HirProgram {
             },
             is_native: true,
             type_params: vec![],
+            ffi_abi: FfiAbi::None,
+            ffi_lib: None,
         });
     }
     // aura.concurrent.send(actor, msg) — 向 Actor 发送消息
@@ -702,6 +827,8 @@ pub fn desugar_program(program: &Program) -> HirProgram {
             },
             is_native: true,
             type_params: vec![],
+            ffi_abi: FfiAbi::None,
+            ffi_lib: None,
         });
     }
     // aura.concurrent.ask(actor, msg) — 向 Actor 请求响应
@@ -724,6 +851,8 @@ pub fn desugar_program(program: &Program) -> HirProgram {
             },
             is_native: true,
             type_params: vec![],
+            ffi_abi: FfiAbi::None,
+            ffi_lib: None,
         });
     }
     // aura.concurrent.newChannel(bound) — 创建 Channel
@@ -740,6 +869,8 @@ pub fn desugar_program(program: &Program) -> HirProgram {
             },
             is_native: true,
             type_params: vec![],
+            ffi_abi: FfiAbi::None,
+            ffi_lib: None,
         });
     }
     // aura.concurrent.channelSend(ch, val) — 发送值到 Channel
@@ -762,6 +893,8 @@ pub fn desugar_program(program: &Program) -> HirProgram {
             },
             is_native: true,
             type_params: vec![],
+            ffi_abi: FfiAbi::None,
+            ffi_lib: None,
         });
     }
     // aura.concurrent.channelRecv(ch) — 从 Channel 接收值（阻塞）
@@ -778,6 +911,8 @@ pub fn desugar_program(program: &Program) -> HirProgram {
             },
             is_native: true,
             type_params: vec![],
+            ffi_abi: FfiAbi::None,
+            ffi_lib: None,
         });
     }
     // aura.concurrent.channelTryRecv(ch) — 从 Channel 接收值（非阻塞）
@@ -794,6 +929,8 @@ pub fn desugar_program(program: &Program) -> HirProgram {
             },
             is_native: true,
             type_params: vec![],
+            ffi_abi: FfiAbi::None,
+            ffi_lib: None,
         });
     }
     // aura.concurrent.select(ch1, ch2) — select 多路复用（最多 2 通道）
@@ -816,6 +953,8 @@ pub fn desugar_program(program: &Program) -> HirProgram {
             },
             is_native: true,
             type_params: vec![],
+            ffi_abi: FfiAbi::None,
+            ffi_lib: None,
         });
     }
     // aura.concurrent.spawnActor(name) — 创建 Actor 实例（返回 actor ID）
@@ -832,6 +971,8 @@ pub fn desugar_program(program: &Program) -> HirProgram {
             },
             is_native: true,
             type_params: vec![],
+            ffi_abi: FfiAbi::None,
+            ffi_lib: None,
         });
     }
     // aura.concurrent.supervise(parent, child) — 建立监督关系
@@ -854,6 +995,8 @@ pub fn desugar_program(program: &Program) -> HirProgram {
             },
             is_native: true,
             type_params: vec![],
+            ffi_abi: FfiAbi::None,
+            ffi_lib: None,
         });
     }
     // aura.concurrent.actorAlive(id) — 检查 Actor 是否存活
@@ -870,6 +1013,8 @@ pub fn desugar_program(program: &Program) -> HirProgram {
             },
             is_native: true,
             type_params: vec![],
+            ffi_abi: FfiAbi::None,
+            ffi_lib: None,
         });
     }
 
@@ -894,6 +1039,8 @@ pub fn desugar_program(program: &Program) -> HirProgram {
                 },
                 is_native: true,
                 type_params: vec![],
+            ffi_abi: FfiAbi::None,
+            ffi_lib: None,
             });
         }
     }
@@ -943,6 +1090,8 @@ fn desugar_fn(f: &FnDecl) -> HirFunction {
         body,
         is_native: false,
         type_params: f.type_params.iter().map(|t| t.name.clone()).collect(),
+        ffi_abi: FfiAbi::None,
+        ffi_lib: None,
     }
 }
 
@@ -1224,6 +1373,23 @@ fn desugar_for(pattern: &Expr, iterable: &Expr, body: &Expr) -> HirStmt {
     })
 }
 
+/// 辅助函数：在 thread-local 中查找导入解析，返回克隆的字符串（避免生命周期问题）
+fn lookup_import_short(n: &str) -> Option<String> {
+    IMPORT_RESOLUTION.with(|r| {
+        r.borrow().as_ref().and_then(|ir| {
+            ir.resolve_short_name(n)
+                .or_else(|| ir.resolve_alias(n))
+                .map(|s| s.to_string())
+        })
+    })
+}
+
+fn lookup_import_module_alias(n: &str) -> Option<String> {
+    IMPORT_RESOLUTION.with(|r| {
+        r.borrow().as_ref().and_then(|ir| ir.resolve_module_alias(n).map(|s| s.to_string()))
+    })
+}
+
 fn desugar_expr(e: &Expr) -> HirExpr {
     match e {
         Expr::Literal(l, _) => HirExpr::Lit(l.clone()),
@@ -1259,7 +1425,12 @@ fn desugar_expr(e: &Expr) -> HirExpr {
             ..
         } => {
             let callee_name = match callee.as_ref() {
-                Expr::Ident(n, _) => n.clone(),
+                Expr::Ident(n, _) => {
+                    // 检查导入解析：短名/别名 → 完整原生函数名
+                    // import aura.concurrent.* + spawn(42) → aura.concurrent.spawn(42)
+                    // import aura.concurrent.spawn as s + s(42) → aura.concurrent.spawn(42)
+                    lookup_import_short(n).unwrap_or_else(|| n.clone())
+                }
                 // 模块调用 `module.method(args)`：降级为 `module.method(args...)`
                 // 与普通方法调用 `obj.method(args)` → `method(obj, args...)` 区分
                 Expr::MemberAccess {
@@ -1267,8 +1438,15 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     name,
                     ..
                 } => {
-                    // 检查是否为标准库模块调用（支持嵌套：aura.concurrent.spawn）
+                    // 检查模块别名：import aura.concurrent as cc + cc.spawn(42)
                     if let Expr::Ident(module_name, _) = object.as_ref() {
+                        if let Some(am) = lookup_import_module_alias(module_name) {
+                            return HirExpr::Call {
+                                callee: format!("{}.{}", am, name),
+                                args: args.iter().map(desugar_expr).collect(),
+                            };
+                        }
+                        // 检查是否为标准库模块调用（支持嵌套：aura.concurrent.spawn）
                         if is_std_module(module_name) {
                             let full_module = full_package_name(module_name);
                             return HirExpr::Call {
@@ -1285,6 +1463,14 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     } = object.as_ref()
                     {
                         if let Expr::Ident(module_name, _) = inner_obj.as_ref() {
+                            // 检查嵌套模块别名
+                            if let Some(am) = lookup_import_module_alias(module_name) {
+                                let nested_name = format!("{}.{}", inner_name, name);
+                                return HirExpr::Call {
+                                    callee: format!("{}.{}", am, nested_name),
+                                    args: args.iter().map(desugar_expr).collect(),
+                                };
+                            }
                             if is_std_module(&format!("aura.{}", inner_name)) {
                                 let full_module = full_package_name(module_name);
                                 let nested_name = format!("{}.{}", inner_name, name);
@@ -1555,6 +1741,8 @@ pub fn synthesize_main_if_missing(hir: &mut HirProgram) -> bool {
                 body: block,
                 is_native: false,
                 type_params: vec![],
+            ffi_abi: FfiAbi::None,
+            ffi_lib: None,
             };
 
             // 4. 插入到 functions 开头（确保 entry=0 指向 main）

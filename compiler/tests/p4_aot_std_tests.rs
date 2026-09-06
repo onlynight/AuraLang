@@ -5,6 +5,10 @@
 //! 2. std C FFI 源文件存在
 //! 3. AOT 选项包含 link_std_cffi 字段
 
+// 该测试文件直接依赖 compiler 的 llvm feature（codegen::aot），
+// 必须在启用 llvm 时才编译；否则会报 unresolved import。
+#![cfg(feature = "llvm")]
+
 use compiler::codegen::aot::{AotOptions, OutputFormat, aot_compile};
 use std::fs;
 

@@ -1,0 +1,11 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<snippet>
+    <content><![CDATA[enum  {
+    ,
+    ,
+    (val : )
+}]]></content>
+    <tabTrigger>enum</tabTrigger>
+    <scope>source.aura</scope>
+    <description>Create an enum</description>
+</snippet>

@@ -1,0 +1,25 @@
+// concurrency/suspend-async.aura — 协程与异步
+// ⚠️ suspend fun 是协程函数，async/await 用于异步
+suspend fun fetchData(): Int {
+    // 模拟异步 IO
+    return 42
+}
+
+suspend fun fetchMultiple(): List<Int> {
+    val a = await fetchData()
+    val b = await fetchData()
+    val c = await fetchData()
+    return listOf(a, b, c)
+}
+
+fun main() {
+    // 在普通函数中调用 suspend 函数需要 async
+    val results = async {
+        await fetchMultiple()
+    }
+    println("Results: $results")
+}
+
+// ⚠️ 注意 await 不是函数：
+// ✅ await fetchData()
+// ❌ await(fetchData())

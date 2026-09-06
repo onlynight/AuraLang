@@ -1,0 +1,99 @@
+// app/server.aura — 完整应用示例：配置驱动的服务器
+// 综合展示：import, data struct, actor, Result, when, suspend, await
+
+import aura.std.fs as fs
+import aura.std.io as io
+import aura.concurrent
+
+// 配置结构体（带默认值）
+data struct Config(
+    val port: Int = 8080,
+    val host: String = "127.0.0.1",
+    var debug: Boolean = false,
+    val maxConnections: Int = 100
+)
+
+// 服务器 Actor
+actor Server(config: Config) {
+    private var running: Boolean = false
+    private var connections: Int = 0
+    
+    fun start() {
+        println("Server starting on ${config.host}:${config.port}")
+        if (config.debug) {
+            println("Debug mode enabled")
+        }
+        running = true
+    }
+    
+    fun stop() {
+        println("Server stopping...")
+        running = false
+    }
+    
+    fun status(): String {
+        return when (running) {
+            true  -> "running ($connections connections)"
+            false -> "stopped"
+        }
+    }
+    
+    fun handleConnection() {
+        if (connections < config.maxConnections) {
+            connections += 1
+            println("Connection accepted. Total: $connections")
+        } else {
+            println("Max connections reached!")
+        }
+    }
+}
+
+// 结果类型使用示例
+fun loadConfig(path: String): Result<Config, Exception> {
+    if (!fs.exists(path)) {
+        return Result.Error(Exception("Config file not found: $path"))
+    }
+    
+    val content = fs.readText(path)
+    // 假设解析配置...
+    return Result.Success(Config(port = 3000, host = "0.0.0.0"))
+}
+
+// 异步操作示例
+suspend fun waitForShutdown(server: Server) {
+    await io.readAll()  // 阻塞等待输入
+    println("Input received, shutting down...")
+    server.stop()
+}
+
+fun main() {
+    // 加载配置
+    val configResult = loadConfig("config.json")
+    
+    val server = when (configResult) {
+        case Result.Success(config) -> Server(config)
+        case Result.Error(err) -> {
+            println("Failed to load config: ${err.message}")
+            // 使用默认配置
+            Server(Config())
+        }
+    }
+    
+    // 启动服务器
+    server.start()
+    println("Status: ${server.status()}")
+    
+    // 模拟连接
+    server.handleConnection()
+    server.handleConnection()
+    server.handleConnection()
+    
+    println("Final status: ${server.status()}")
+    
+    // 等待关闭
+    async {
+        await waitForShutdown(server)
+    }
+    
+    println("Done")
+}

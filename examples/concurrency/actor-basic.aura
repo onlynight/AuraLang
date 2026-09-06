@@ -1,0 +1,36 @@
+// concurrency/actor-basic.aura — Actor 基础
+actor Counter {
+    private var count: Int = 0
+    
+    fun increment() {
+        count += 1
+    }
+    
+    fun decrement() {
+        count -= 1
+    }
+    
+    fun value(): Int {
+        return count
+    }
+    
+    fun reset() {
+        count = 0
+    }
+}
+
+fun main() {
+    val c = Counter()
+    
+    // Actor 方法调用
+    c.increment()
+    c.increment()
+    c.increment()
+    println("Count: ${c.value()}")
+    
+    c.decrement()
+    println("After decrement: ${c.value()}")
+    
+    c.reset()
+    println("After reset: ${c.value()}")
+}

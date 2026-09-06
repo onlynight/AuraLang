@@ -1,0 +1,71 @@
+// 工具库：字符串和集合工具
+//
+// 提供常用的字符串操作和集合工具函数。
+
+// ── 字符串工具 ──
+
+/// 判断是否为空
+fun isEmpty(s: str) -> bool {
+    return s.length() == 0
+}
+
+/// 转大写
+fun toUpper(s: str) -> str {
+    return s.upper()
+}
+
+/// 转小写
+fun toLower(s: str) -> str {
+    return s.lower()
+}
+
+/// 去除首尾空白
+fun trim(s: str) -> str {
+    return s.trim()
+}
+
+/// 分割字符串
+fun split(s: str, delimiter: str) -> list<str> {
+    return s.split(delimiter)
+}
+
+/// 连接列表
+fun join(list: list<str>, separator: str) -> str {
+    return list.join(separator)
+}
+
+/// 替换
+fun replace(s: str, old: str, new: str) -> str {
+    return s.replace(old, new)
+}
+
+// ── 集合工具 ──
+
+/// 列表映射
+fun map(list: list<int>, fn: fun(int) -> int) -> list<int> {
+    var result = []
+    for item in list {
+        result.push(fn(item))
+    }
+    return result
+}
+
+/// 列表过滤
+fun filter(list: list<int>, predicate: fun(int) -> bool) -> list<int> {
+    var result = []
+    for item in list {
+        if predicate(item) {
+            result.push(item)
+        }
+    }
+    return result
+}
+
+/// 列表求和
+fun sum(list: list<int>) -> int {
+    var total = 0
+    for item in list {
+        total = total + item
+    }
+    return total
+}

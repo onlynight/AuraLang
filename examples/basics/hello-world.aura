@@ -1,0 +1,4 @@
+// basics/hello-world.aura — 最小 Aura 程序
+fun main() {
+    println("Hello, Aura!")
+}

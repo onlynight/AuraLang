@@ -1,0 +1,32 @@
+// 插件示例：主程序
+//
+// 演示自定义插件的使用。
+//
+// 构建流程：
+//   1. loom build 加载插件注册表
+//   2. 插件的 configure() 被调用，注册自定义任务
+//   3. 任务调度器执行插件注册的任务
+//   4. 插件的 execute() 被调用，执行自定义逻辑
+
+fun main() {
+    println("=== 插件示例 ===")
+    println()
+    println("本项目使用自定义外部插件 'custom-greeter'。")
+    println()
+    println("插件配置（aura.toml）：")
+    println("  [plugins.external]")
+    println("  custom-greeter = { path = \"plugins/target/release/custom_plugin.dll\" }")
+    println()
+    println("插件提供的任务：")
+    println("  - greet: 自定义问候")
+    println("  - greet-world: 问候世界")
+    println()
+    println("运行方式：")
+    println("  1. 先编译插件：")
+    println("     cd plugins && cargo build --release")
+    println()
+    println("  2. 然后构建项目：")
+    println("     loom build --dir .")
+    println()
+    println("=== 完成 ===")
+}

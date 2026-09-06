@@ -1,4 +1,4 @@
-//! 字节码指令集与模块结构（对应 技术方案 §7.1）
+﻿//! 字节码指令集与模块结构（对应 技术方案 §7.1）
 //!
 //! 字节码采用 **栈 + 局部变量槽** 模型：
 //! - `LoadConst` / `LoadVar` 将值压入操作数栈
@@ -187,6 +187,14 @@ pub enum OpCode {
     CallExport(u16),
     /// 调用外部模块符号，`(mod_idx, sym_idx)` 指向 imports 表
     CallExternal(u16, u16),
+
+    // ── Phase 1: AOT 嵌入调用（docs/AOT机器码嵌入方案-详细设计.md §7.3）──
+    /// 调用 AOT 预编译的函数，`func_idx` 为函数表索引
+    ///
+    /// 该指令的分派入口与 `CallJit` 完全对称：VM 分发器查询
+    /// [`crate::vm::aot_runtime::AotRuntime`] 的 dispatch_table，命中则直接
+    /// `call` 到 mmap 的机器码（共享 JitValue ABI），否则回退字节码解释。
+    CallAot(u16),
 }
 
 impl OpCode {
@@ -267,13 +275,14 @@ impl OpCode {
             OpCode::MakeFnRef(_) => 76,
             OpCode::CallExport(_) => 70,
             OpCode::CallExternal(_, _) => 71,
+            OpCode::CallAot(_) => 77,
         }
     }
 
     /// 操作码携带的操作数字节数
     pub fn operand_size(byte: u8) -> usize {
         match byte {
-            0 | 1 | 2 | 30 | 32 | 33 | 72 | 74 | 76 => 2, // u16 操作数
+            0 | 1 | 2 | 30 | 32 | 33 | 72 | 74 | 76 | 77 => 2, // u16 操作数
             23 | 24 | 25 => 4,                            // i32 偏移
             26 | 27 | 36 => 2,                            // u16 函数/原生索引
             40 | 41 | 51 => 2, // CallMethod/CallCtor/NewCoroutine u16 索引
@@ -360,6 +369,7 @@ impl OpCode {
             76 => OpCode::MakeFnRef(0),
             70 => OpCode::CallExport(0),
             71 => OpCode::CallExternal(0, 0),
+            77 => OpCode::CallAot(0),
             _ => return None,
         })
     }
@@ -384,7 +394,8 @@ impl OpCode {
             | OpCode::MakeClosure(i)
             | OpCode::EnumConstruct(i)
             | OpCode::MakeFnRef(i)
-            | OpCode::CallExport(i) => buf.extend_from_slice(&i.to_le_bytes()),
+            | OpCode::CallExport(i)
+            | OpCode::CallAot(i) => buf.extend_from_slice(&i.to_le_bytes()),
             OpCode::CallExternal(mod_idx, sym_idx) => {
                 buf.extend_from_slice(&mod_idx.to_le_bytes());
                 buf.extend_from_slice(&sym_idx.to_le_bytes());
@@ -476,8 +487,23 @@ impl fmt::Display for OpCode {
             OpCode::CallExternal(mod_idx, sym_idx) => {
                 write!(f, "CALL_EXTERNAL ({}, {})", mod_idx, sym_idx)
             }
+            OpCode::CallAot(i) => write!(f, "CALL_AOT {}", i),
         }
     }
+}
+
+/// FFI ABI 类型（P8-Rust）
+///
+/// 标记 `extern` 块的目标 ABI。
+/// - `C`：C ABI（`extern "c"`，现状）
+/// - `Rust`：Rust 库标记（`extern "rust"`，调用约定同 C，语义标记）
+/// - `None`：非 FFI 函数
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FfiAbi {
+    #[default]
+    None,   // 非 FFI 函数
+    C,      // C ABI
+    Rust,   // Rust 库（语法标记，调用约定同 C）
 }
 
 /// 原生（内置/FFI）函数签名记录
@@ -485,6 +511,10 @@ impl fmt::Display for OpCode {
 pub struct BytecodeNative {
     pub name: String,
     pub param_count: u16,
+    /// FFI ABI 标记（P8-Rust）：仅 FFI 函数有意义
+    pub ffi_abi: FfiAbi,
+    /// FFI 库名（对应 `extern "<abi>" "<lib>"`）
+    pub ffi_lib: Option<String>,
 }
 
 /// 一个已发射的函数
@@ -504,6 +534,13 @@ pub struct BytecodeFunction {
     /// 仅对非原生函数有效；原生函数为 `None`。
     /// 为 `None` 时断点回退到函数入口。
     pub line_table: Option<Vec<(usize, usize)>>,
+    /// Phase 1 AOT: 执行模式（设计文档 §3.4）
+    /// - `0` = 仅字节码
+    /// - `1` = 仅 AOT 机器码
+    /// - `2` = 混合（Phase 1 不实现混合分派）
+    pub aot_mode: u8,
+    /// Phase 1 AOT: 函数描述符表索引（`aot_mode == 0` 时为 0）
+    pub aot_desc_idx: u32,
 }
 
 impl Default for BytecodeFunction {
@@ -515,6 +552,8 @@ impl Default for BytecodeFunction {
             is_native: false,
             code: Vec::new(),
             line_table: None,
+            aot_mode: 0,
+            aot_desc_idx: 0,
         }
     }
 }
@@ -528,6 +567,141 @@ pub struct BytecodeClosure {
     pub capture_count: u16,
     /// 闭包函数在函数表中的索引
     pub func_idx: u16,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 1: AOT 嵌入 —— 段表 / 函数描述符（docs/AOT机器码嵌入方案-详细设计.md §3.5 §5）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// header_flags 位定义（.auc v4）
+pub const HEADER_HAS_MACHINE_CODE: u32 = 1 << 0;
+pub const HEADER_HAS_DEBUG_INFO: u32 = 1 << 1;
+pub const HEADER_SIGNED: u32 = 1 << 2;
+pub const HEADER_AOT_EXPORTS: u32 = 1 << 3;
+
+/// 段 ID 枚举
+pub const SEG_BYTECODE: u32 = 0;
+pub const SEG_MACHINE: u32 = 1;
+pub const SEG_DESC_TABLE: u32 = 2;
+pub const SEG_DEBUG: u32 = 3;
+pub const SEG_STRING_POOL: u32 = 4;
+pub const SEG_SIGNATURE: u32 = 5;
+
+/// 段内存权限标志
+pub const SEG_PROT_READ: u32 = 1 << 0;
+pub const SEG_PROT_WRITE: u32 = 1 << 1;
+pub const SEG_PROT_EXEC: u32 = 1 << 2;
+pub const SEG_READONLY: u32 = 1 << 3;
+
+/// `.auc` v4 段表条目（16 字节，紧凑对齐）
+///
+/// `offset` 相对于段数据区起始（即段表之后的字节），`size` 为段大小。
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct AucSegment {
+    pub id: u32,
+    pub offset: u32,
+    pub size: u32,
+    pub flags: u32,
+}
+
+impl AucSegment {
+    /// 段 ID 对应的字符串名称（诊断用）
+    pub fn id_name(&self) -> &'static str {
+        match self.id {
+            SEG_BYTECODE => "bytecode",
+            SEG_MACHINE => "machine",
+            SEG_DESC_TABLE => "desc_table",
+            SEG_DEBUG => "debug",
+            SEG_STRING_POOL => "string_pool",
+            SEG_SIGNATURE => "signature",
+            _ => "unknown",
+        }
+    }
+
+    /// 是否可执行（机器码段）
+    pub fn is_exec(&self) -> bool {
+        self.flags & SEG_PROT_EXEC != 0
+    }
+
+    /// 是否只读
+    pub fn is_read(&self) -> bool {
+        self.flags & SEG_PROT_READ != 0
+    }
+
+    /// 是否可写
+    pub fn is_write(&self) -> bool {
+        self.flags & SEG_PROT_WRITE != 0
+    }
+}
+
+/// AOT 函数描述符（C ABI，32 字节，x86-64 / ARM64 对齐一致）
+///
+/// 布局见设计文档 §5.1：
+/// ```text
+/// 0x00 name_offset        u32
+/// 0x04 name_len           u16
+/// 0x06 _pad1              u16   ← u64 对齐填充
+/// 0x08 entry_offset       u64
+/// 0x10 num_args           u8
+/// 0x11 arg_tags           u8
+/// 0x12 return_tag         u8
+/// 0x13 flags              u8
+/// 0x14 source_line        u32
+/// 0x18 source_file_offset u32
+/// 0x1C _pad2              u32   ← 对齐到 32 字节
+/// ```
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AuraFuncDesc {
+    /// 函数名在字符串池中的偏移
+    pub name_offset: u32,
+    /// 函数名长度（不含 null 终止符）
+    pub name_len: u16,
+    /// u64 对齐填充
+    pub _pad1: u16,
+    /// 机器码段内的入口偏移
+    pub entry_offset: u64,
+    /// 参数个数
+    pub num_args: u8,
+    /// 参数类型标签位图（bit-packed，每参数 4 bit）
+    pub arg_tags: u8,
+    /// 返回类型标签
+    pub return_tag: u8,
+    /// 标志位
+    pub flags: u8,
+    /// 源文件行号（0 = 无调试信息）
+    pub source_line: u32,
+    /// 源文件名在字符串池中的偏移（0 = 无调试信息）
+    pub source_file_offset: u32,
+    /// 对齐填充
+    pub _pad2: u32,
+}
+
+// ── AuraFuncDesc.flags 位定义 ──
+pub const FUNC_EXPORT: u8 = 1 << 0;
+pub const FUNC_INIT: u8 = 1 << 1;
+pub const FUNC_FINALIZE: u8 = 1 << 2;
+pub const FUNC_SUSPEND: u8 = 1 << 3;
+pub const FUNC_ASYNC: u8 = 1 << 4;
+pub const FUNC_CONST: u8 = 1 << 5;
+pub const FUNC_THREAD_SAFE: u8 = 1 << 6;
+pub const FUNC_HOT: u8 = 1 << 7;
+
+impl AuraFuncDesc {
+    /// 结构体大小（编译期断言：必须为 32 字节）
+    pub const SIZE: usize = std::mem::size_of::<Self>();
+
+    pub fn is_export(&self) -> bool {
+        self.flags & FUNC_EXPORT != 0
+    }
+
+    pub fn is_init(&self) -> bool {
+        self.flags & FUNC_INIT != 0
+    }
+
+    pub fn is_finalize(&self) -> bool {
+        self.flags & FUNC_FINALIZE != 0
+    }
 }
 
 /// 完整的字节码模块（对应 `.auc` 文件内容）
@@ -566,6 +740,12 @@ pub struct BytecodeModule {
     pub sig_ids: Vec<String>,
     /// 入口类型（`app` = 应用入口, `library` = 库入口）
     pub entry_kind: String,
+
+    // ── Phase 1 AOT 嵌入（设计文档 §3.5）──
+    /// AOT 段表（`.auc` v4；空表示纯字节码模块）
+    pub aot_segments: Vec<AucSegment>,
+    /// 段数据区（各段原始字节拼接，`AucSegment.offset` 相对此处起始）
+    pub aot_blob_data: Vec<u8>,
 }
 
 impl Default for BytecodeModule {
@@ -584,6 +764,8 @@ impl Default for BytecodeModule {
             dependencies: Vec::new(),
             sig_ids: Vec::new(),
             entry_kind: "app".to_string(),
+            aot_segments: Vec::new(),
+            aot_blob_data: Vec::new(),
         }
     }
 }
@@ -601,7 +783,22 @@ impl BytecodeModule {
         if !self.dependencies.is_empty() {
             flags |= 0b00010000; // 有依赖
         }
+        if !self.aot_segments.is_empty() {
+            flags |= HEADER_HAS_MACHINE_CODE; // Phase 1 AOT: 含机器码段
+            if self
+                .functions
+                .iter()
+                .any(|f| f.aot_desc_idx > 0)
+            {
+                flags |= HEADER_AOT_EXPORTS;
+            }
+        }
         flags
+    }
+
+    /// 是否包含 AOT 机器码（`.auc` v4）
+    pub fn has_aot(&self) -> bool {
+        !self.aot_segments.is_empty() && self.aot_blob_data.len() > 0
     }
 
     /// 检查模块是否标记为库（无 main 入口）
@@ -735,5 +932,123 @@ impl SymbolKind {
             3 => SymbolKind::Global,
             _ => SymbolKind::Function,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::mem::offset_of;
+
+    #[test]
+    fn test_call_aot_opcode_byte() {
+        assert_eq!(OpCode::CallAot(0).byte(), 77);
+        assert_eq!(OpCode::CallAot(4095).byte(), 77);
+    }
+
+    #[test]
+    fn test_call_aot_from_byte_and_write() {
+        assert_eq!(OpCode::from_byte(77), Some(OpCode::CallAot(0)));
+        let mut buf = Vec::new();
+        OpCode::CallAot(0x0102).write(&mut buf);
+        assert_eq!(buf, vec![77u8, 0x02, 0x01]);
+    }
+
+    #[test]
+    fn test_call_aot_display() {
+        assert_eq!(format!("{}", OpCode::CallAot(7)), "CALL_AOT 7");
+    }
+
+    #[test]
+    fn test_aura_func_desc_c_layout_matches_design() {
+        // 设计文档 §5.1: 32 字节，各字段偏移固定
+        assert_eq!(AuraFuncDesc::SIZE, 32);
+        assert_eq!(offset_of!(AuraFuncDesc, name_offset), 0x00);
+        assert_eq!(offset_of!(AuraFuncDesc, name_len), 0x04);
+        assert_eq!(offset_of!(AuraFuncDesc, _pad1), 0x06);
+        assert_eq!(offset_of!(AuraFuncDesc, entry_offset), 0x08);
+        assert_eq!(offset_of!(AuraFuncDesc, num_args), 0x10);
+        assert_eq!(offset_of!(AuraFuncDesc, arg_tags), 0x11);
+        assert_eq!(offset_of!(AuraFuncDesc, return_tag), 0x12);
+        assert_eq!(offset_of!(AuraFuncDesc, flags), 0x13);
+        assert_eq!(offset_of!(AuraFuncDesc, source_line), 0x14);
+        assert_eq!(offset_of!(AuraFuncDesc, source_file_offset), 0x18);
+        assert_eq!(offset_of!(AuraFuncDesc, _pad2), 0x1C);
+    }
+
+    #[test]
+    fn test_aura_func_desc_bytes_roundtrip() {
+        let d = AuraFuncDesc {
+            name_offset: 0x40,
+            name_len: 5,
+            entry_offset: 0x100,
+            num_args: 3,
+            arg_tags: 0x23,
+            return_tag: 0,
+            flags: FUNC_EXPORT | FUNC_HOT,
+            source_line: 42,
+            source_file_offset: 0x20,
+            ..AuraFuncDesc::default()
+        };
+        let bytes = unsafe {
+            std::slice::from_raw_parts(&d as *const AuraFuncDesc as *const u8, AuraFuncDesc::SIZE)
+        };
+        let back = unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const AuraFuncDesc) };
+        assert_eq!(back, d);
+    }
+
+    #[test]
+    fn test_segment_ids_and_flags() {
+        let segs = [
+            AucSegment { id: SEG_BYTECODE, offset: 0, size: 0, flags: SEG_PROT_READ },
+            AucSegment { id: SEG_MACHINE, offset: 0, size: 0, flags: SEG_PROT_READ | SEG_PROT_EXEC },
+            AucSegment { id: SEG_DESC_TABLE, offset: 0, size: 0, flags: SEG_PROT_READ },
+            AucSegment { id: SEG_DEBUG, offset: 0, size: 0, flags: SEG_PROT_READ },
+            AucSegment { id: SEG_STRING_POOL, offset: 0, size: 0, flags: SEG_PROT_READ },
+            AucSegment { id: SEG_SIGNATURE, offset: 0, size: 0, flags: SEG_PROT_READ },
+        ];
+        let names: Vec<&str> = segs.iter().map(|s| s.id_name()).collect();
+        assert_eq!(names, vec!["bytecode", "machine", "desc_table", "debug", "string_pool", "signature"]);
+        assert!(!segs[0].is_exec());
+        assert!(segs[1].is_exec());
+        assert!(segs[1].is_read());
+        assert!(!segs[1].is_write());
+        let writable = AucSegment { id: 0, offset: 0, size: 0, flags: SEG_PROT_READ | SEG_PROT_WRITE };
+        assert!(writable.is_write());
+        assert_eq!(AucSegment { id: 99, offset: 0, size: 0, flags: 0 }.id_name(), "unknown");
+    }
+
+    #[test]
+    fn test_header_flags_and_has_aot() {
+        let mut m = BytecodeModule::default();
+        assert_eq!(m.compute_header_flags(), 0);
+        assert!(!m.has_aot());
+        m.aot_segments = vec![AucSegment {
+            id: SEG_MACHINE,
+            offset: 0,
+            size: 256,
+            flags: SEG_PROT_READ | SEG_PROT_EXEC,
+        }];
+        m.aot_blob_data = vec![0u8; 256];
+        assert!(m.has_aot());
+        let flags = m.compute_header_flags();
+        assert_eq!(flags & HEADER_HAS_MACHINE_CODE, HEADER_HAS_MACHINE_CODE);
+        assert_eq!(flags & HEADER_AOT_EXPORTS, 0, "no function has aot_desc_idx yet");
+
+        let mut f = BytecodeFunction::default();
+        f.name = "add".to_string();
+        f.aot_mode = 1;
+        f.aot_desc_idx = 1;
+        m.functions.push(f);
+        let flags2 = m.compute_header_flags();
+        assert_eq!(flags2 & HEADER_AOT_EXPORTS, HEADER_AOT_EXPORTS);
+    }
+
+    #[test]
+    fn test_bytecode_function_aot_fields_default() {
+        let f = BytecodeFunction::default();
+        assert_eq!(f.aot_mode, 0);
+        assert_eq!(f.aot_desc_idx, 0);
+        assert!(f.code.is_empty());
     }
 }

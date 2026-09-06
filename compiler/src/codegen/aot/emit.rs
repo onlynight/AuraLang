@@ -29,7 +29,7 @@ use crate::codegen::aot::types::{TypeMapper, sanitizellvm};
 use crate::codegen::hir::{
     HirBinOp, HirBlock, HirExpr, HirFunction, HirProgram, HirStmt, HirType, HirUnOp,
 };
-use crate::codegen::opcode::Const;
+use crate::codegen::opcode::{Const, FfiAbi};
 
 use super::AotCodeGenerator;
 
@@ -41,6 +41,8 @@ pub(crate) struct EmitCtx {
     pub _string_as_struct: bool,
     pub link_runtime: bool,
     pub debug_info: Option<DebugInfo>,
+    /// Phase 1 AOT Blob 模式：生成 JitValue ABI 包装函数
+    pub blob_mode: bool,
     /// 已声明的结构体类型名集合
     pub declared_structs: std::collections::HashSet<String>,
     /// 已生成的函数名集合
@@ -92,6 +94,7 @@ impl EmitCtx {
         string_as_struct: bool,
         link_runtime: bool,
         debug_info: Option<DebugInfo>,
+        blob_mode: bool,
     ) -> Self {
         Self {
             type_mapper,
@@ -100,6 +103,7 @@ impl EmitCtx {
             _string_as_struct: string_as_struct,
             link_runtime,
             debug_info,
+            blob_mode,
             declared_structs: std::collections::HashSet::new(),
             generated_funcs: std::collections::HashSet::new(),
             sections: Vec::new(),
@@ -304,7 +308,11 @@ impl EmitCtx {
 }
 
 /// 从 HIR 程序生成完整 LLVM IR 文本
-pub fn emit_program(codegen: &AotCodeGenerator, program: &HirProgram) -> Result<String, AotError> {
+pub fn emit_program(
+    codegen: &AotCodeGenerator,
+    program: &HirProgram,
+    blob_mode: bool,
+) -> Result<String, AotError> {
     let debug_info =
         if codegen.options.debug_info { Some(DebugInfo::new("main.aura")) } else { None };
 
@@ -315,6 +323,7 @@ pub fn emit_program(codegen: &AotCodeGenerator, program: &HirProgram) -> Result<
         codegen.options.string_as_struct,
         codegen.options.link_runtime,
         debug_info,
+        blob_mode,
     );
 
     // 1. 模块头
@@ -385,6 +394,7 @@ pub fn emit_program(codegen: &AotCodeGenerator, program: &HirProgram) -> Result<
     }
 
     // 5. 生成所有用户函数（期间收集的全局常量在函数后统一输出）
+    //    blob_mode 下为每个非原生函数生成 JitValue ABI 包装函数
     for func in &program.functions {
         if ctx.generated_funcs.contains(&func.name) {
             continue;
@@ -392,10 +402,18 @@ pub fn emit_program(codegen: &AotCodeGenerator, program: &HirProgram) -> Result<
         ctx.generated_funcs.insert(func.name.clone());
         let func_ir = emit_function(&mut ctx, func)?;
         ctx.sections.push(func_ir);
+
+        // blob_mode: 生成包装函数
+        if blob_mode && !func.is_native {
+            if let Ok(wrapper_ir) = emit_wrapper(&mut ctx, func) {
+                ctx.sections.push(wrapper_ir);
+            }
+            // 注意：包装函数生成失败不中断编译（该函数将被跳过）
+        }
     }
 
-    // 6. 若没有 main 函数，合成一个
-    if !ctx.generated_funcs.contains("main") {
+    // 6. 若没有 main 函数，合成一个（blob_mode 下不需要 main 入口）
+    if !blob_mode && !ctx.generated_funcs.contains("main") {
         let main_func = synthesize_main(&program.functions);
         ctx.generated_funcs.insert("main".to_string());
         let func_ir = emit_function(&mut ctx, &main_func)?;
@@ -466,7 +484,8 @@ fn emit_function(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErr
     }
 
     s.push_str(&format!(
-        "define {} @{}({}) {{\n",
+        "define {}{} @{}({}) {{\n",
+        if ctx.blob_mode { "internal " } else { "" },
         ret_str, func.name, params_str
     ));
 
@@ -969,6 +988,7 @@ fn emit_expr_val(
                 _string_as_struct: ctx._string_as_struct,
                 link_runtime: ctx.link_runtime,
                 debug_info: None,
+                blob_mode: ctx.blob_mode,
                 declared_structs: std::collections::HashSet::new(),
                 generated_funcs: std::collections::HashSet::new(),
                 sections: Vec::new(),
@@ -1085,7 +1105,17 @@ fn emit_literal(
         crate::ast::Literal::Float(v) => {
             let name = ctx.fresh_const("float");
             let cur = blocks.last_mut();
-            cur.body.push(format!("{} = fadd float 0.0, {}", name, v));
+            // LLVM 浮点字面量必须含小数点/指数（Rust 的 {} 会把 2.0 打印成 2）
+            let lit = if v.is_finite()
+                && !format!("{}", v).contains('.')
+                && !format!("{}", v).contains('e')
+                && !format!("{}", v).contains('E')
+            {
+                format!("{}.0", v)
+            } else {
+                format!("{}", v)
+            };
+            cur.body.push(format!("{} = fadd float 0.0, {}", name, lit));
             Ok((name, "float".to_string()))
         }
         crate::ast::Literal::Bool(v) => {
@@ -1181,7 +1211,7 @@ fn emit_binary(
         HirBinOp::Add => {
             if l_ty.starts_with("float") || l_ty == "double" {
                 let op = if l_ty == "double" { "fadd double" } else { "fadd float" };
-                cur.body.push(format!("{} = {} {} {}, {}", tmp, op, l_ir, l_ty, r_ir));
+                cur.body.push(format!("{} = {} {}, {}", tmp, op, l_ir, r_ir));
             } else {
                 cur.body.push(format!("{} = add {} {}, {}", tmp, l_ty, l_ir, r_ir));
             }
@@ -1190,7 +1220,7 @@ fn emit_binary(
         HirBinOp::Sub => {
             if l_ty.starts_with("float") || l_ty == "double" {
                 let op = if l_ty == "double" { "fsub double" } else { "fsub float" };
-                cur.body.push(format!("{} = {} {} {}, {}", tmp, op, l_ir, l_ty, r_ir));
+                cur.body.push(format!("{} = {} {}, {}", tmp, op, l_ir, r_ir));
             } else {
                 cur.body.push(format!("{} = sub {} {}, {}", tmp, l_ty, l_ir, r_ir));
             }
@@ -1199,7 +1229,7 @@ fn emit_binary(
         HirBinOp::Mul => {
             if l_ty.starts_with("float") || l_ty == "double" {
                 let op = if l_ty == "double" { "fmul double" } else { "fmul float" };
-                cur.body.push(format!("{} = {} {} {}, {}", tmp, op, l_ir, l_ty, r_ir));
+                cur.body.push(format!("{} = {} {}, {}", tmp, op, l_ir, r_ir));
             } else {
                 cur.body.push(format!("{} = mul {} {}, {}", tmp, l_ty, l_ir, r_ir));
             }
@@ -1208,7 +1238,7 @@ fn emit_binary(
         HirBinOp::Div => {
             if l_ty.starts_with("float") || l_ty == "double" {
                 let op = if l_ty == "double" { "fdiv double" } else { "fdiv float" };
-                cur.body.push(format!("{} = {} {} {}, {}", tmp, op, l_ir, l_ty, r_ir));
+                cur.body.push(format!("{} = {} {}, {}", tmp, op, l_ir, r_ir));
             } else {
                 cur.body.push(format!("{} = sdiv {} {}, {}", tmp, l_ty, l_ir, r_ir));
             }
@@ -1288,6 +1318,11 @@ fn emit_call(
     callee: &str,
     args: &[HirExpr],
 ) -> Result<(String, String), AotError> {
+    // P9: 检查是否为结构体构造函数
+    if ctx.declared_structs.contains(callee) {
+        return emit_struct_constructor(ctx, blocks, callee, args);
+    }
+    
     let args_ir: Vec<(String, String)> =
         args.iter().map(|a| emit_expr_val(ctx, blocks, a)).collect::<Result<_, _>>()?;
 
@@ -1311,6 +1346,29 @@ fn emit_call(
         ));
         Ok((tmp, ret_ty))
     }
+}
+
+/// P9: 生成结构体构造函数代码
+fn emit_struct_constructor(
+    ctx: &mut EmitCtx,
+    blocks: &mut FuncBlocks,
+    struct_name: &str,
+    args: &[HirExpr],
+) -> Result<(String, String), AotError> {
+    let struct_type = ctx.type_mapper.map(&HirType::Named(struct_name.to_string()));
+    let args_ir: Vec<(String, String)> =
+        args.iter().map(|a| emit_expr_val(ctx, blocks, a)).collect::<Result<_, _>>()?;
+    let cur = blocks.last_mut();
+    let mut struct_val = "undef".to_string();
+    for (i, (val, ty)) in args_ir.iter().enumerate() {
+        let new_val = ctx.fresh_var();
+        cur.body.push(format!(
+            "{} = insertvalue {} {}, {} {}, {}",
+            new_val, struct_type, struct_val, ty, val, i
+        ));
+        struct_val = new_val.clone();
+    }
+    Ok((struct_val, struct_type))
 }
 
 fn emit_member_access(
@@ -1549,6 +1607,8 @@ fn synthesize_main(funcs: &[HirFunction]) -> HirFunction {
         },
         is_native: false,
         type_params: vec![],
+        ffi_abi: FfiAbi::None,
+        ffi_lib: None,
     }
 }
 
@@ -1712,4 +1772,301 @@ fn is_builtin(name: &str) -> bool {
             | "false"
             | "null"
     )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 1 AOT Blob: JitValue ABI 包装函数生成（设计文档 §6.3-§6.5）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// JitValue 标签常量（与 vm/abi.rs 保持一致）
+const TAG_INT: u8 = 0;
+const TAG_FLOAT: u8 = 1;
+const TAG_BOOL: u8 = 2;
+const TAG_NULL: u8 = 3;
+
+/// Phase 1 参数个数上限
+const MAX_AOT_ARGS: usize = 8;
+
+/// 将 Aura HIR 类型映射为 JitValue 标签
+///
+/// Phase 1 仅支持 Int/Float/Bool/Unit（及其别名 Long/Double/Short/Byte 等）。
+fn map_type_to_tag(ty: &HirType) -> Result<u8, AotError> {
+    match ty {
+        HirType::Named(name) => match name.as_str() {
+            "Int" | "Long" | "Short" | "Byte" | "U8" | "Char" => Ok(TAG_INT),
+            "Float" | "Double" => Ok(TAG_FLOAT),
+            "Boolean" | "Bool" => Ok(TAG_BOOL),
+            "Unit" | "Void" | "Nothing" => Ok(TAG_NULL),
+            other => Err(AotError::UnsupportedExpr(format!(
+                "Phase 1 AOT 不支持类型 '{}'（仅支持 Int/Float/Bool/Unit）",
+                other
+            ))),
+        },
+        HirType::Nullable(_) | HirType::Pointer(_) | HirType::Function { .. } => {
+            Err(AotError::UnsupportedExpr(
+                "Phase 1 AOT 不支持复杂类型（仅支持标量类型）".to_string(),
+            ))
+        }
+        HirType::Unknown => Err(AotError::UnsupportedExpr(
+            "Phase 1 AOT 不支持 Unknown 类型".to_string(),
+        )),
+    }
+}
+
+/// 获取 Aura 类型对应的 LLVM 类型字符串
+fn aura_type_to_llvm(ty: &HirType) -> String {
+    match ty {
+        HirType::Named(name) => match name.as_str() {
+            "Int" => "i32".to_string(),
+            "Long" => "i64".to_string(),
+            "Short" => "i16".to_string(),
+            "Byte" | "U8" => "i8".to_string(),
+            "Char" => "i16".to_string(),
+            "Float" => "float".to_string(),
+            "Double" => "double".to_string(),
+            "Boolean" | "Bool" => "i1".to_string(),
+            "Unit" | "Void" | "Nothing" => "void".to_string(),
+            _ => "i32".to_string(), // fallback
+        },
+        _ => "i32".to_string(),
+    }
+}
+
+/// 为 Aura 函数生成 JitValue ABI 包装函数
+///
+/// 包装函数签名：`define internal i64 @aura_aot_<name>!<meta>(i64* %args, i64* %ret, i64 %argc, i64* %ctx)`
+///
+/// 参数布局（JitValue 数组展开为 i64 数组）：
+/// - `args[2*i]` = 参数 i 的 tag
+/// - `args[2*i+1]` = 参数 i 的 payload
+///
+/// 返回值：
+/// - `ret[0]` = 返回值的 tag
+/// - `ret[1]` = 返回值的 payload
+///
+/// 符号名格式：`aura_aot_<sanitized_name>!<nargs>!<rettag>!<tag0>!<tag1>!...`
+fn emit_wrapper(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotError> {
+    // 1. 检查参数个数
+    if func.params.len() > MAX_AOT_ARGS {
+        return Err(AotError::UnsupportedExpr(format!(
+            "函数 '{}' 参数个数 {} 超过上限 {}（Phase 1 限制）",
+            func.name,
+            func.params.len(),
+            MAX_AOT_ARGS
+        )));
+    }
+
+    // 2. 映射参数类型到标签
+    let param_tags: Vec<u8> = func
+        .params
+        .iter()
+        .map(|p| map_type_to_tag(p.ty.as_ref().unwrap_or(&HirType::Named("Int".into()))))
+        .collect::<Result<_, _>>()?;
+
+    // 3. 映射返回类型到标签
+    let ret_tag = match &func.ret {
+        Some(ty) => map_type_to_tag(ty)?,
+        None => TAG_NULL,
+    };
+
+    // 4. 构建包装函数名（含元数据）
+    let func_part = format!("aura_aot_{}", sanitizellvm(&func.name));
+    let mut name_parts = vec![
+        func_part.clone(),
+        param_tags.len().to_string(),
+        ret_tag.to_string(),
+    ];
+    for tag in &param_tags {
+        name_parts.push(tag.to_string());
+    }
+    let wrapper_name = name_parts.join("!");
+
+    // 5. 获取真实函数的 LLVM 返回类型和参数类型
+    let ret_llvm_ty = func
+        .ret
+        .as_ref()
+        .map(|t| ctx.llvm_type(t))
+        .unwrap_or_else(|| "void".to_string());
+
+    let param_llvm_types: Vec<String> = func
+        .params
+        .iter()
+        .map(|p| {
+            ctx.llvm_type(p.ty.as_ref().unwrap_or(&HirType::Named("Int".into())))
+        })
+        .collect();
+
+    // 6. 生成包装函数体
+    let mut s = String::new();
+    s.push_str(&format!(
+        "define internal i64 @\"{}\"(i64* %args, i64* %ret, i64 %argc, i64* %ctx) {{\n",
+        wrapper_name
+    ));
+    s.push_str("entry:\n");
+
+    // 6a. 解包参数
+    let mut call_args: Vec<String> = Vec::new();
+    for (i, (llvm_ty, tag)) in param_llvm_types.iter().zip(param_tags.iter()).enumerate() {
+        let payload_idx = (i * 2 + 1).to_string();
+        let gep_var = format!("%arg{}_gep", i);
+        let load_var = format!("%arg{}_payload", i);
+        let val_var = format!("%arg{}_val", i);
+
+        // 加载 payload: args[2*i+1]
+        s.push_str(&format!(
+            "  {} = getelementptr i64, i64* %args, i64 {}\n",
+            gep_var, payload_idx
+        ));
+        s.push_str(&format!(
+            "  {} = load i64, i64* {}\n",
+            load_var, gep_var
+        ));
+
+        // 根据类型转换 payload
+        match *tag {
+            TAG_INT => {
+                // i64 → target type (trunc/zext)
+                let target_bits = llvm_ty
+                    .trim_start_matches('i')
+                    .parse::<usize>()
+                    .unwrap_or(32);
+                if target_bits < 64 {
+                    s.push_str(&format!(
+                        "  {} = trunc i64 {} to {}\n",
+                        val_var, load_var, llvm_ty
+                    ));
+                } else {
+                    // i64 → i64 (no conversion needed)
+                    s.push_str(&format!("  {} = add i64 {}, 0\n", val_var, load_var));
+                }
+            }
+            TAG_FLOAT => {
+                // i64 → double (bitcast) → float (fptrunc) if needed
+                let bitcast_var = format!("%arg{}_f64", i);
+                s.push_str(&format!(
+                    "  {} = bitcast i64 {} to double\n",
+                    bitcast_var, load_var
+                ));
+                if llvm_ty == "float" {
+                    s.push_str(&format!(
+                        "  {} = fptrunc double {} to float\n",
+                        val_var, bitcast_var
+                    ));
+                } else {
+                    // double → no conversion needed
+                    s.push_str(&format!(
+                        "  {} = fadd double {}, 0.0\n",
+                        val_var, bitcast_var
+                    ));
+                }
+            }
+            TAG_BOOL => {
+                // i64 → i1 (trunc)
+                s.push_str(&format!(
+                    "  {} = trunc i64 {} to i1\n",
+                    val_var, load_var
+                ));
+            }
+            TAG_NULL => {
+                // void: no parameter
+                continue;
+            }
+            _ => unreachable!(),
+        }
+        call_args.push(format!("{} {}", llvm_ty, val_var));
+    }
+
+    // 6b. 调用真实函数
+    let call_var = ctx.fresh_var();
+    let args_str = call_args.join(", ");
+    if ret_llvm_ty == "void" || ret_llvm_ty.is_empty() {
+        s.push_str(&format!(
+            "  call void @{}({})\n",
+            func.name, args_str
+        ));
+    } else {
+        s.push_str(&format!(
+            "  {} = call {} @{}({})\n",
+            call_var, ret_llvm_ty, func.name, args_str
+        ));
+    }
+
+    // 6c. 打包返回值
+    let ret_tag_idx = "0";
+    let ret_payload_idx = "1";
+
+    // 获取 ret tag 地址
+    s.push_str(&format!(
+        "  %ret_tag_addr = getelementptr i64, i64* %ret, i64 {}\n",
+        ret_tag_idx
+    ));
+    s.push_str(&format!(
+        "  %ret_payload_addr = getelementptr i64, i64* %ret, i64 {}\n",
+        ret_payload_idx
+    ));
+
+    // 存储 tag
+    s.push_str(&format!(
+        "  store i64 {}, i64* %ret_tag_addr\n",
+        ret_tag
+    ));
+
+    // 存储 payload
+    match ret_tag {
+        TAG_INT => {
+            // i32/i16/i8 → i64 (zext); i64 → i64 (no conversion)
+            let target_bits = ret_llvm_ty
+                .trim_start_matches('i')
+                .parse::<usize>()
+                .unwrap_or(32);
+            if target_bits < 64 {
+                s.push_str(&format!(
+                    "  %ret_payload = zext {} {} to i64\n",
+                    ret_llvm_ty, call_var
+                ));
+            } else {
+                s.push_str(&format!(
+                    "  %ret_payload = add i64 {}, 0\n",
+                    call_var
+                ));
+            }
+        }
+        TAG_FLOAT => {
+            // float → double (fpext) → i64 (bitcast); double → i64 (bitcast)
+            if ret_llvm_ty == "float" {
+                s.push_str(&format!(
+                    "  %ret_f64 = fpext float {} to double\n",
+                    call_var
+                ));
+                s.push_str(&format!(
+                    "  %ret_payload = bitcast double %ret_f64 to i64\n"
+                ));
+            } else {
+                s.push_str(&format!(
+                    "  %ret_payload = bitcast double {} to i64\n",
+                    call_var
+                ));
+            }
+        }
+        TAG_BOOL => {
+            // i1 → i64 (zext)
+            s.push_str(&format!(
+                "  %ret_payload = zext i1 {} to i64\n",
+                call_var
+            ));
+        }
+        TAG_NULL => {
+            // void: payload = 0
+            s.push_str("  %ret_payload = add i64 0, 0\n");
+        }
+        _ => unreachable!(),
+    }
+
+    s.push_str("  store i64 %ret_payload, i64* %ret_payload_addr\n");
+
+    // 6d. 返回 0
+    s.push_str("  ret i64 0\n");
+    s.push_str("}\n\n");
+
+    Ok(s)
 }

@@ -36,7 +36,7 @@ use crate::codegen::CodegenError;
 use crate::codegen::hir::HirProgram;
 
 pub use error::AotError;
-pub use linker::{LlvmToolError, LlvmToolResult, link_to_executable, link_to_object};
+pub use linker::{LlvmToolError, LlvmToolResult, link_to_blob, link_to_executable, link_to_object};
 pub use optimize::OptimizationLevel;
 pub use target::{AOTargetTriple, Architecture, OperatingSystem, TargetTriple, Vendor};
 pub use types::TypeMapper;
@@ -84,6 +84,12 @@ pub struct AotOutput {
     pub object_path: Option<std::path::PathBuf>,
     /// 生成的可执行文件路径（如果 output_format == Executable）
     pub exe_path: Option<std::path::PathBuf>,
+    /// 生成的机器码 blob 路径（如果 output_format == Blob）
+    pub blob_path: Option<std::path::PathBuf>,
+    /// Blob 格式下提取到的 AOT 函数描述符：`(脱前缀函数名, 描述符)`
+    ///
+    /// 供 [`crate::codegen::aot_embed::embed_aot`] 组装段表使用。
+    pub descriptors: Vec<(String, crate::codegen::opcode::AuraFuncDesc)>,
     /// 生成的 LLVM IR 文本
     pub ir_text: String,
 }
@@ -97,6 +103,8 @@ pub enum OutputFormat {
     Object,
     /// 生成可执行文件（`.exe` / ELF 等）
     Executable,
+    /// 生成机器码 blob（原始 .text 段字节，嵌入 `.auc` 用）
+    Blob,
 }
 
 /// AOT 代码生成器主结构体
@@ -114,9 +122,21 @@ impl AotCodeGenerator {
         }
     }
 
-    /// 从 HIR 程序生成 LLVM IR 文本
+    /// 从 HIR 程序生成 LLVM IR 文本（默认不生成包装函数）
     pub fn generate_ir(&self, program: &HirProgram) -> Result<String, AotError> {
-        emit::emit_program(self, program)
+        emit::emit_program(self, program, false)
+    }
+
+    /// 从 HIR 程序生成 LLVM IR 文本，可选生成 JitValue ABI 包装函数
+    ///
+    /// `blob_mode = true` 时为每个函数生成 JitValue ABI 包装函数
+    /// （设计文档 §6.3-§6.5），用于 `OutputFormat::Blob` 路径。
+    pub fn generate_ir_with_mode(
+        &self,
+        program: &HirProgram,
+        blob_mode: bool,
+    ) -> Result<String, AotError> {
+        emit::emit_program(self, program, blob_mode)
     }
 
     /// 完整 AOT 编译流程：HIR → LLVM IR → 目标文件
@@ -126,7 +146,8 @@ impl AotCodeGenerator {
         output_dir: &Path,
         output_format: OutputFormat,
     ) -> Result<AotOutput, AotError> {
-        let ir = self.generate_ir(program)?;
+        let blob_mode = matches!(output_format, OutputFormat::Blob);
+        let ir = self.generate_ir_with_mode(program, blob_mode)?;
 
         let stem = output_dir
             .file_stem()
@@ -137,6 +158,8 @@ impl AotCodeGenerator {
             ll_path: None,
             object_path: None,
             exe_path: None,
+            blob_path: None,
+            descriptors: Vec::new(),
             ir_text: ir.clone(),
         };
 
@@ -162,7 +185,17 @@ impl AotCodeGenerator {
             return Ok(output);
         }
 
-        // 3. 链接为可执行文件
+        // 3a. Blob 格式：提取 .text 段生成 blob 文件 + 函数描述符
+        if output_format == OutputFormat::Blob {
+            let blob_path = output_dir.join(format!("{}.blob", stem));
+            let descs = link_to_blob(&object_path, &blob_path, &self.options)
+                .map_err(|e| AotError::LinkerFailed(e.to_string()))?;
+            output.blob_path = Some(blob_path);
+            output.descriptors = descs;
+            return Ok(output);
+        }
+
+        // 3b. Executable 格式：链接为可执行文件
         let exe_path = output_dir.join(format!(
             "{}{}",
             stem,
@@ -218,6 +251,8 @@ pub fn aot_compile(
                 OutputFormat::LlvmIr
             } else if output_path.extension().map(|e| e == "o" || e == "obj").unwrap_or(false) {
                 OutputFormat::Object
+            } else if output_path.extension().map(|e| e == "blob").unwrap_or(false) {
+                OutputFormat::Blob
             } else {
                 OutputFormat::Executable
             }
@@ -227,10 +262,13 @@ pub fn aot_compile(
     // 如果用户指定了非默认输出文件名，复制或重命名
     if output.exe_path.as_ref().map(|p| p != output_path).unwrap_or(false)
         || output.object_path.as_ref().map(|p| p != output_path).unwrap_or(false)
+        || output.blob_path.as_ref().map(|p| p != output_path).unwrap_or(false)
     {
         if let Some(ref src) = output.exe_path {
             std::fs::copy(src, output_path).map_err(|e| CodegenError::Aot(e.to_string()))?;
         } else if let Some(ref src) = output.object_path {
+            std::fs::copy(src, output_path).map_err(|e| CodegenError::Aot(e.to_string()))?;
+        } else if let Some(ref src) = output.blob_path {
             std::fs::copy(src, output_path).map_err(|e| CodegenError::Aot(e.to_string()))?;
         }
     }

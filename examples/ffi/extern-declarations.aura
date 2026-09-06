@@ -1,0 +1,32 @@
+// ffi/extern-declarations.aura — 外部函数接口 (FFI)
+// ⚠️ extern "c" 是块声明，不是函数调用
+
+// 形式 1：行内 FFI 声明
+extern "c" fun puts(msg: String): Int
+extern "c" fun malloc(size: Long): Long
+extern "c" fun free(ptr: Long)
+
+// 形式 2：块级 FFI 声明
+extern "c" {
+    fun fopen(path: String, mode: String): Long
+    fun fclose(stream: Long): Int
+    fun fread(buf: Long, size: Long, count: Long, stream: Long): Long
+    val MAX_PATH: Int
+    val VERSION: String
+}
+
+fun main() {
+    // 调用 FFI 函数
+    val ret = puts("Hello from Aura!")
+    println("puts returned: $ret")
+    
+    // 使用常量
+    println("Max path: $MAX_PATH")
+    println("Version: $VERSION")
+}
+
+// ⚠️ 易错点：
+// ❌ extern fun puts(msg: String): Int       ← 缺少语言标记
+// ❌ extern("c") fun puts(...)               ← 不是函数调用
+// ✅ extern "c" fun puts(msg: String): Int
+// ✅ extern "c" { fun puts(...) }            ← 块形式

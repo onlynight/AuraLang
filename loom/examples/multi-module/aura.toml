@@ -1,0 +1,83 @@
+schema-version = "2.0"
+name = "multi-module"
+version = "0.1.0"
+description = "多模块示例：演示多文件编译 + 模块树 + import 解析"
+authors = []
+license = "MIT"
+entry = "src/main.aura"
+exports = ["main", "utils", "math"]
+library = false
+
+dependencies = []
+compile-dependencies = []
+runtime-dependencies = []
+dev-dependencies = []
+build-dependencies = []
+
+tasks = []
+
+[build]
+opt-level = 2
+debug = true
+out-dir = "target/build"
+cache-dir = "target/cache"
+cache-remote-shared = false
+emit-signatures = true
+emit-package = false
+parallel = true
+parallel-jobs = 0
+
+[build.source-sets.main]
+source-dirs = ["src"]
+resource-dirs = []
+include = ["**/*.aura"]
+exclude = ["**/*.test.aura", "vendor/**", "target/**"]
+depends-on = []
+
+[build.source-sets.test]
+source-dirs = ["test"]
+resource-dirs = []
+include = ["**/*.aura"]
+exclude = []
+depends-on = ["main"]
+
+[build.alias]
+
+[plugins]
+aura-stdlib = true
+aura-test-harness = true
+aura-doc-gen = false
+aura-format = false
+aura-aot = false
+aura-watch = false
+aura-ci = false
+
+[plugins.external]
+
+[profiles.release]
+activate = false
+
+[profiles.release.build]
+opt-level = 3
+debug = false
+emit-package = true
+
+[profiles.debug]
+activate = true
+
+[repositories]
+central = "https://registry.aura-lang.dev"
+
+[repositories.custom]
+
+[resources]
+include = []
+exclude = []
+
+[package]
+format = "auz"
+include-sources = false
+include-docs = false
+include-native = true
+native-targets = []
+aot-opt-level = 2

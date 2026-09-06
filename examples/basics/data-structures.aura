@@ -1,0 +1,90 @@
+// basics/data-structures.aura — 数据结构
+// ⚠️ 注意：用 `data struct`，不是 Kotlin 的 `data class`
+
+// 简单结构体
+data struct Point(
+    val x: Double,
+    val y: Double
+)
+
+// 带默认值的结构体
+data struct Player(
+    val id: Int,
+    var name: String = "unknown",
+    var health: Int = 100,
+    var tag: String? = null
+)
+
+// 带字体的结构体（块体）
+data struct Shape {
+    val area: Double = 0.0
+    
+    fun calculate(): Double {
+        return area
+    }
+}
+
+// 密封类
+sealed class Animal {
+    fun name(): String = "unknown"
+}
+
+class Dog : Animal() {
+    override fun name(): String = "dog"
+}
+
+class Cat : Animal() {
+    override fun name(): String = "cat"
+}
+
+// 接口
+interface Drawable {
+    fun draw(): Unit
+    fun color(): String
+}
+
+class Rectangle : Drawable {
+    override fun draw() {
+        println("Drawing rectangle")
+    }
+    override fun color(): String = "red"
+}
+
+// 枚举（可带数据）
+enum Direction {
+    NORTH,
+    SOUTH,
+    EAST,
+    WEST,
+    OFFSET(val dx: Int, val dy: Int)
+}
+
+// 类型别名
+typealias Vec2 = Point
+typealias Handler = (String) -> Unit
+
+// 泛型函数
+fun <T> identity(x: T): T = x
+
+fun <T, U> map(items: List<T>, f: (T) -> U): List<U> = 
+    items.map { f(it) }
+
+fun <reified T> filterList(items: List<Any>): List<T> {
+    return items.filter { it is T }
+}
+
+fun main() {
+    val p = Point(1.0, 2.0)
+    println("Point: (${p.x}, ${p.y})")
+    
+    val player = Player(1, name = "Alice", health = 80)
+    println("Player: ${player.name}, HP: ${player.health}")
+    
+    val dog = Dog()
+    println("Animal says: ${dog.name()}")
+    
+    val d = Direction.OFFSET(1, 2)
+    println("Direction offset: (${d.dx}, ${d.dy})")
+    
+    println("Identity: ${identity(42)}")
+}

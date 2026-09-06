@@ -1,0 +1,64 @@
+// basics/control-flow.aura — 控制流
+fun main() {
+    val score = 75
+    
+    // when 表达式（多路分支，支持范围匹配）
+    val label = when (score) {
+        0          -> "zero"
+        in 1..50   -> "low"
+        in 51..100 -> "high"
+        else       -> "extreme"
+    }
+    println("Label: $label")
+    
+    // if-else（值为表达式）
+    val msg = if (score >= 60) "pass" else "fail"
+    println("Result: $msg")
+    
+    // for 循环（迭代器风格）
+    for (i in 0..4) {
+        println("i = $i")
+    }
+    
+    // 标签循环
+    outer@ for (a in 0..3) {
+        for (b in 0..3) {
+            if (a == b) break@outer
+            println("($a, $b)")
+        }
+    }
+    
+    // while 循环
+    var x = 5
+    while (x > 0) {
+        println("x = $x")
+        x -= 1
+    }
+    
+    // do-while
+    var y = 0
+    do {
+        y += 1
+    } while (y < 3)
+    println("do-while result: $y")
+    
+    // try-catch
+    try {
+        val value = parse("123")
+        println("Parsed: $value")
+    } catch (e: Exception) {
+        println("Error: ${e.message}")
+    }
+    
+    // 返回
+    val result = callWithReturn()
+    println("Returned: $result")
+}
+
+fun parse(text: String): Int {
+    return text.toInt()
+}
+
+fun callWithReturn(): Int {
+    return 42
+}

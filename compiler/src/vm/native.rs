@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::codegen::opcode::FfiAbi;
 use crate::vm::dynamic_ffi::DynamicLoader;
 use crate::vm::value::Value;
 
@@ -199,8 +200,8 @@ impl NativeRegistry {
     }
 
     /// 鍔ㄦ€佸姞杞藉簱锛?.9锛?
-    pub fn load_library(&mut self, path: &str) -> Result<(), String> {
-        self.dynamic.load_lib(path)
+    pub fn load_library(&mut self, path: &str, abi: FfiAbi) -> Result<(), String> {
+        self.dynamic.load_lib(path, abi)
     }
 
     /// 浠庡姩鎬佸姞杞界殑搴撴敞鍐屽嚱鏁?

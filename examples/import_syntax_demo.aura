@@ -1,0 +1,80 @@
+// ════════════════════════════════════════════════════════════════
+// Import 语法完整演示 — 展示所有支持的 import 形式
+// ════════════════════════════════════════════════════════════════
+//
+// 支持的语法：
+//   1. import aura.concurrent.*           — 通配导入（短名调用）
+//   2. import aura.concurrent             — 模块导入（全路径调用）
+//   3. import aura.concurrent.spawn       — 精确导入（短名调用）
+//   4. import aura.concurrent.spawn as s  — 精确导入 + 别名
+//   5. import aura.concurrent as cc       — 模块别名（别名.方法调用）
+//   6. import aura.concurrent.* as cc     — 通配 + 模块别名
+// ════════════════════════════════════════════════════════════════
+
+// ── 语法 1: 通配导入 — 用短名调用 ──
+import aura.concurrent.*
+
+// ── 语法 2: 模块导入 — 用全路径调用 ──
+import aura.concurrent
+
+// ── 语法 3: 精确导入 — 只导入 spawn ──
+import aura.concurrent.spawn
+
+// ── 语法 4: 精确导入 + 别名 — newChannel 别名为 nc ──
+import aura.concurrent.newChannel as nc
+
+// ── 语法 5: 模块别名 — concurrent 别名为 cc ──
+import aura.concurrent as cc
+
+// ── 语法 6: 通配 + 别名 — concurrent.* 别名为 wcc ──
+import aura.concurrent.* as wcc
+
+// ── 语法 7: 不同函数精确导入 + 别名 ──
+import aura.concurrent.spawnActor as sa
+import aura.concurrent.channelSend as cs
+import aura.concurrent.channelRecv as cr
+import aura.concurrent.select
+
+fun main() {
+    // ── 语法 1: 通配导入 + 短名调用 ──
+    val co1 = spawn(42)
+    val ch1 = newChannel(10)
+
+    // ── 语法 2: 模块导入 + 全路径调用 ──
+    val co2 = aura.concurrent.spawn(100)
+
+    // ── 语法 3: 精确导入 + 短名调用 ──
+    val co3 = spawn(200)
+
+    // ── 语法 4: 精确导入 + 别名调用 ──
+    val ch2 = nc(5)
+
+    // ── 语法 5: 模块别名 + 方法调用 ──
+    val co4 = cc.spawn(300)
+    val ch3 = cc.newChannel(0)
+
+    // ── 语法 6: 通配 + 别名 + 方法调用 ──
+    val co5 = wcc.spawn(400)
+
+    // ── 语法 7: 不同函数精确导入 + 别名 ──
+    val actor = sa("worker-1")
+    cs(ch1, "hello")
+    cs(ch1, "world")
+    val msg1 = cr(ch1)
+    val msg2 = cr(ch1)
+
+    // ── 语法 8: 混合使用 — 同一模块的别名 + 模块别名 ──
+    val a1 = cc.spawnActor("master")
+    val a2 = sa("child")
+    cc.supervise(a1, a2)
+
+    // ── 语法 9: select 精确导入 ──
+    val chA = newChannel(0)
+    val chB = newChannel(0)
+    channelSend(chA, 111)
+    channelSend(chB, 222)
+    val sel = select(chA, chB)
+
+    // 全部调用成功，返回一个聚合值证明所有语法正常工作
+    return co1 + co2 + co3 + co4 + co5 + actor + a1 + a2
+}

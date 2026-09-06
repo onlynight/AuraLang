@@ -1,0 +1,32 @@
+// basics/variables.aura — 变量与类型
+fun main() {
+    // 只读变量
+    val immutable = 42
+    val name: String = "Aura"
+    
+    // 可变变量
+    var count: Int = 0
+    count += 1
+    
+    // 类型推断
+    val x = "hello"
+    val y = 3.14
+    
+    // 可空类型
+    var nullable: String? = null
+    nullable = "now set"
+    
+    // Elvis 运算符
+    val safe = nullable ?: "default"
+    
+    // 安全导航
+    val len: Int? = nullable?.length
+    
+    // 非空断言（危险！）
+    val forced: String = nullable!!
+    
+    println("immutable: $immutable")
+    println("count: $count")
+    println("safe: $safe")
+    println("len: $len")
+}

@@ -1,0 +1,65 @@
+// 核心库：数学模块
+//
+// 提供基础数学运算函数。
+
+/// 绝对值
+fun abs(x: f64) -> f64 {
+    if x < 0.0 {
+        return -x
+    }
+    return x
+}
+
+/// 平方
+fun square(x: f64) -> f64 {
+    return x * x
+}
+
+/// 开方
+fun sqrt(x: f64) -> f64 {
+    // 简单实现（Newton 法）
+    if x < 0.0 {
+        return 0.0
+    }
+    if x == 0.0 {
+        return 0.0
+    }
+
+    var guess = x / 2.0
+    for i in 0..20 {
+        guess = (guess + x / guess) / 2.0
+    }
+    return guess
+}
+
+/// 最大值
+fun max(a: f64, b: f64) -> f64 {
+    if a > b {
+        return a
+    }
+    return b
+}
+
+/// 最小值
+fun min(a: f64, b: f64) -> f64 {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+/// 钳位
+fun clamp(x: f64, min: f64, max: f64) -> f64 {
+    if x < min {
+        return min
+    }
+    if x > max {
+        return max
+    }
+    return x
+}
+
+/// 线性插值
+fun lerp(a: f64, b: f64, t: f64) -> f64 {
+    return a + (b - a) * clamp(t, 0.0, 1.0)
+}

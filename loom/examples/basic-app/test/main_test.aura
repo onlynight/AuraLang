@@ -1,0 +1,29 @@
+// 测试文件：演示基本测试
+//
+// loom test 会自动发现 test/ 目录下的 .aura 文件。
+
+fun test_add() {
+    val result = add(3, 4)
+    aura.test.assertEq(result, 7, "3 + 4 should equal 7")
+}
+
+fun test_string_upper() {
+    val text = "hello"
+    val upper = text.upper()
+    aura.test.assertEq(upper, "HELLO", "upper() should uppercase string")
+}
+
+fun test_string_concat() {
+    val a = "foo"
+    val b = "bar"
+    val concat = a + "-" + b
+    aura.test.assertEq(concat, "foo-bar", "string concatenation should work")
+}
+
+// 测试入口
+fun test() {
+    test_add()
+    test_string_upper()
+    test_string_concat()
+    println("All tests passed!")
+}

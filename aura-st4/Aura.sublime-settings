@@ -1,0 +1,54 @@
+{
+    // ════════════════════════════════════════════════════════════════
+    // Aura Language - Sublime Text 4 Plugin Settings
+    // ════════════════════════════════════════════════════════════════
+    //
+    // Copy this file to:
+    //   Packages/User/Aura.sublime-settings
+    // and customize as needed.
+    //
+    // ════════════════════════════════════════════════════════════════
+
+    // ── Formatting ─────────────────────────────────────────────────
+    "auto_format_on_save": false,
+    "format_engine": "local",              // "local" | "lsp" | "cli"
+    "indent_size": 4,
+    "max_line_length": 120,
+    "trailing_comma": true,
+    "remove_trailing_whitespace": true,
+    "ensure_newline_at_eof": true,
+
+    // ── Auto-Indent ────────────────────────────────────────────────
+    "auto_indent_enabled": true,
+    "auto_indent_use_spaces": true,
+
+    // ── Auto-Complete ──────────────────────────────────────────────
+    "auto_complete_trigger_chars": [".", "(", ":", " "],
+    "show_documentation": true,
+    "enable_snippet_completion": true,
+
+    // ── LSP ────────────────────────────────────────────────────────
+    "lsp_enabled": false,
+    "lsp_binary": "aura-lsp",
+    "lsp_debounce_ms": 200,
+
+    // ── Diagnostics ────────────────────────────────────────────────
+    "show_diagnostics": true,
+
+    // ── Hover ──────────────────────────────────────────────────────
+    "hover_delay_ms": 300,
+
+    // ── Bracket Matching ───────────────────────────────────────────
+    "match_brackets": true,
+    "match_brackets_content": true,
+
+    // ── Build ──────────────────────────────────────────────────────
+    "build_system": "Aura.sublime-build",
+    "build_command": "aura run",
+
+    // ── Symbol Outline ─────────────────────────────────────────────
+    "show_symbol_outline": true,
+
+    // ── Debug ──────────────────────────────────────────────────────
+    "debug": false
+}

@@ -1259,49 +1259,65 @@ aura ci --steps clean,resolve,compile,test,package,verify,publish
 aura ci test
 ```
 
-### 14.2 CI 配置（.aura-ci.yml）
+### 14.2 CI 配置（.loom/.aura-ci.yml）
 
 ```yaml
-# .aura-ci.yml（可选：CI 配置文件）
-version: "1.0"
+# .loom/.aura-ci.yml（可选：CI 配置文件，位于 .loom/ 目录，默认加入 .gitignore）
+default-branch: main
 
-# 触发条件
+# 触发条件（CiTrigger 为外部标签枚举，YAML 中使用 !variant 标签）
 triggers:
-  push:
-    branches: ["main", "release/**"]
-  pull_request:
-    branches: ["main"]
+  - !push
+    branch: "main"
+  - !pull-request
+    base-branch: "main"
 
 # 构建环境
 env:
-  AURA_PROFILE: "ci"
-  AURA_CACHE_REMOTE: "https://cache.aura-lang.dev"
+  target:
+    - "x86_64-pc-windows-msvc"
+    - "x86_64-unknown-linux-gnu"
+  compiler: "stable"
+  variables:
+    AURA_PROFILE: "ci"
+    AURA_CACHE_REMOTE: "https://cache.aura-lang.dev"
 
 # 流水线步骤
 steps:
-  - name: "安装依赖"
-    command: "aura resolve"
-    
-  - name: "编译"
-    command: "aura compile"
-    cache: true
-    
-  - name: "测试"
-    command: "aura test"
-    parallel: true
-    
-  - name: "打包"
-    command: "aura package"
-    
-  - name: "发布"
-    command: "aura publish"
-    condition: "on_success"
+  - type: loom
+    command: "resolve"
+    args: []
+  - type: loom
+    command: "build"
+    args: []
+  - type: test
+    timeout: 300
+  - type: loom
+    command: "test"
+    args: []
+  - type: loom
+    command: "package"
+    args: []
+
+# 测试配置
+test:
+  timeout: 300
+  coverage-threshold: 80.0
+  parallel: true
+
+# 发布配置
+publish:
+  registry: "https://registry.aura-lang.dev"
+  token-env: "AURA_REGISTRY_TOKEN"
+  targets:
+    - "stable"
 
 # 通知
 notifications:
   slack:
     webhook: "${SLACK_WEBHOOK_URL}"
-    on_failure: true
+    on-failure: true
+    on-success: false
 ```
 
 ### 14.3 GitHub Actions 集成
@@ -1368,40 +1384,60 @@ jobs:
 ### 15.1 项目模型导出
 
 ```text
-aura ide export
+loom ide export
   │
-  └─ 生成 aura-project.json（IDE 可读的项目模型）
+  └─ 生成 .loom/aura-project.json（IDE 可读的项目模型）
 
-aura-project.json:
+配置文件位于 .loom/ 目录下，默认加入 .gitignore。
+参考示例见 loom/examples/hello/.loom/aura-project.json。
+```
+
+**`.loom/aura-project.json` 实际 schema（schema-version "1.0"）**：
+
+```json
 {
-  "version": 1,
-  "compilerVersion": "0.3.0",
-  "rootDir": "D:/Code/AuraLang/my-app",
-  "sourceSets": {
-    "main": {
-      "sourceDirs": ["src/"],
-      "modules": [
-        { "name": "main", "path": "src/main.aura", "entry": true },
-        { "name": "utils", "path": "src/utils.aura" },
-        { "name": "math", "path": "src/math/mod.aura" },
-        { "name": "math.vector", "path": "src/math/vector.aura" }
-      ]
-    },
-    "test": {
-      "sourceDirs": ["test/"],
-      "modules": [
-        { "name": "test.utils_test", "path": "test/utils_test.aura" }
-      ]
-    }
+  "schema-version": "1.0",
+  "name": "hello",
+  "version": "0.1.0",
+  "root": ".",
+  "entry": "src/main.aura",
+  "source-roots": ["src"],
+  "dependencies": [],
+  "build": {
+    "out-dir": "target/build",
+    "cache-dir": "target/cache",
+    "parallel": 4,
+    "profile": null,
+    "target": null,
+    "opt-level": "2"
   },
-  "dependencies": [
-    { "name": "aura-json", "version": "1.2.3", "path": "~/.aura/cache/..." }
-  ],
-  "tasks": [
-    "clean", "resolve", "compile-main", "compile-test", "run-tests", "package"
-  ]
+  "tasks": [],
+  "plugins": []
 }
 ```
+
+**字段说明**：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `schema-version` | string | 文件格式版本，用于前向兼容 |
+| `name` / `version` | string | 项目名与版本（来自 `aura.toml`） |
+| `root` | string | 项目根目录（绝对路径） |
+| `entry` | string | 入口文件（相对路径） |
+| `source-roots` | string[] | 源码根目录列表 |
+| `dependencies` | object[] | 依赖列表，每项含 `name` / `version` / `config` / `is-local` |
+| `build` | object | 构建配置：`out-dir` / `cache-dir` / `parallel` / `profile` / `target` / `opt-level` |
+| `tasks` | object[] | 任务列表，每项含 `name` / `kind` / `depends-on` / `description?` |
+| `plugins` | object[] | 插件列表，每项含 `name` / `version?` / `kind` / `description?` |
+| `files` | object[]? | 可选文件列表，每项含 `path` / `kind` / `is-source` / `line-count?`；仅当 `--all-files` 启用时输出 |
+
+**设计要点**：
+
+1. **单一配置源**：`.loom/aura-project.json` 由 `aura.toml` 投影生成，不是第二份配置；IDE 只读它，不修改它。
+2. **JSON 而非 TOML**：JSON 是 IDE 生态的通用货币（`tsconfig.json`、`package.json`、rust-analyzer 项目模型均为 JSON），便于 VS Code / Sublime / rust-analyzer 类插件直接消费。
+3. **`.loom/` 目录**：所有 loom 生成的配置文件集中存放，便于 gitignore 和清理。
+4. **`schema-version` 字段**：格式演进时通过版本号做兼容，旧 IDE 可忽略新字段。
+5. **`files` 可选**：大型项目可启用文件索引；默认不输出以保持体积可控。
 
 ### 15.2 VS Code 扩展集成
 
@@ -1623,7 +1659,7 @@ aura wrapper install              # 安装当前项目指定版本
 |------|------|------|
 | B6.1 | 实现注册表协议（HTTP client） | 1d |
 | B6.2 | 实现本地注册表管理 | 0.5d |
-| B6.3 | 实现 `aura ci` 命令 + .aura-ci.yml 解析 | 1.5d |
+| B6.3 | 实现 `aura ci` 命令 + .loom/.aura-ci.yml 解析 | 1.5d |
 | B6.4 | 实现 BOM 版本锁定 | 0.5d |
 | B6.5 | GitHub Actions 集成示例 | 0.5d |
 | B6.6 | 集成测试 | 0.5d |
@@ -1634,7 +1670,7 @@ aura wrapper install              # 安装当前项目指定版本
 
 | 任务 | 内容 | 预估 |
 |------|------|------|
-| B7.1 | 实现 `aura-project.json` 导出 | 1d |
+| B7.1 | 实现 `.loom/aura-project.json` 导出 | 1d |
 | B7.2 | VS Code 扩展任务集成 | 1.5d |
 | B7.3 | `aura --watch` 文件监听 | 1.5d |
 | B7.4 | 编译日志优化（彩色、进度、错误高亮） | 1d |

@@ -1,0 +1,71 @@
+// ============================================================
+// P8-C FFI Demo — extern "c" 语法演示
+// ============================================================
+// 用法:
+//   aura run examples/p8_c_ffi_demo.aura                        (VM 模式)
+//   aura check examples/p8_c_ffi_demo.aura                      (sema 检查)
+//   aura build examples/p8_c_ffi_demo.aura --aot                (AOT 编译)
+//
+// 说明:
+//   1. extern "c" 是 Aura 的 C FFI 语法，调用约定为 C ABI (ccc)
+//   2. AOT 生成的 LLVM IR 使用 declare + ccc 调用约定
+//   3. VM 模式: 未链接 C dylib 时返回占位值，不崩溃
+//   4. 链接 C dylib 后: 0 开销直接调用
+//
+// 本 demo 使用 C 标准库函数（libc）：
+//   - strlen: 计算字符串长度
+//   - puts: 输出字符串
+//   - malloc/free: 内存分配/释放
+// ============================================================
+
+// --- 场景 1: C 标准库函数 ---
+extern "c" {
+    fun strlen(s: String): Int
+    fun puts(s: String): Int
+    fun malloc(size: Long): Handle
+    fun free(p: Handle)
+}
+
+// --- 场景 2: 自定义 C 库 ---
+extern "c" "mylib" {
+    fun myAdd(a: Int, b: Int): Int
+    fun getVersion(): Int
+}
+
+// --- 场景 3: C 回调函数 ---
+extern "c" "callbacklib" {
+    fun registerCallback(cb: Pointer<Int>)
+    fun invokeCallback()
+}
+
+// --- Aura 回调处理函数 ---
+fun handler(a: Int, b: Int, c: Int, d: Int): Int {
+    return a + b + c + d
+}
+
+// --- 主函数 ---
+fun main(): Int {
+    // 1. 字符串长度（未链接时返回 0）
+    val len = strlen("Hello, C FFI!")
+    println("strlen = " + len)
+
+    // 2. 内存分配
+    val ptr = malloc(256)
+    if (!ptrIsNull(ptr)) {
+        println("malloc 成功")
+    } else {
+        println("malloc 返回 null（未链接）")
+    }
+
+    // 3. 自定义 C 库函数
+    val sum = myAdd(3, 4)
+    println("myAdd(3, 4) = " + sum)
+
+    // 4. 回调注册
+    val cb = makeCallback(handler)
+    if (!ptrIsNull(cb)) {
+        println("回调注册成功")
+    }
+
+    return 0
+}

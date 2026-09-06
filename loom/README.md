@@ -18,8 +18,8 @@ Aura 语言构建系统 — 多文件编译、增量构建、任务 DAG、插件
 - ✅ **插件系统**：约定插件 + 显式插件 + 外部 `.so` 插件
 - ✅ **构建包装器**：`aura-wrapper` 可重复构建
 - ✅ **多项目管理**：Workspace 模式，共享缓存
-- ✅ **CI/CD 集成**：`loom ci` + `.aura-ci.yml` + GitHub Actions
-- ✅ **IDE 集成**：`aura-project.json` 导出 + VS Code 任务
+- ✅ **CI/CD 集成**：`loom ci` + `.loom/.aura-ci.yml` + GitHub Actions
+- ✅ **IDE 集成**：`.loom/aura-project.json` 导出 + VS Code 任务
 - ✅ **Watch 模式**：文件监听 + 增量重编
 
 ## 安装

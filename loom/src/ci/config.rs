@@ -1,6 +1,7 @@
-//! [Phase B6.3] .aura-ci.yml 解析 + CI 执行
+//! [Phase B6.3] .loom/.aura-ci.yml 解析 + CI 执行
 //!
 //! 定义 CI/CD 配置文件格式和执行逻辑。
+//! 配置文件位于 `.loom/` 目录下，默认加入 .gitignore。
 //! 对应设计文档 §16 CI/CD 集成。
 
 use crate::error::LoomError;
@@ -8,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// CI 配置文件（.aura-ci.yml）
+/// CI 配置文件（.loom/.aura-ci.yml）
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct CiConfig {
@@ -290,22 +291,23 @@ impl CiConfig {
         }
     }
 
-    /// 获取 CI 配置文件路径（优先 YAML 格式）
+    /// 获取 CI 配置文件路径（优先 YAML 格式，位于 .loom/ 目录）
     pub fn config_path(project_dir: &Path) -> PathBuf {
-        let yaml_path = project_dir.join(".aura-ci.yml");
+        let loom_dir = project_dir.join(".loom");
+        let yaml_path = loom_dir.join(".aura-ci.yml");
         if yaml_path.exists() {
             return yaml_path;
         }
-        let yaml_path2 = project_dir.join(".aura-ci.yaml");
+        let yaml_path2 = loom_dir.join(".aura-ci.yaml");
         if yaml_path2.exists() {
             return yaml_path2;
         }
-        project_dir.join(".aura-ci.json")
+        loom_dir.join(".aura-ci.json")
     }
 
-    /// 获取 CI 配置文件默认写入路径（YAML 格式）
+    /// 获取 CI 配置文件默认写入路径（YAML 格式，位于 .loom/ 目录）
     pub fn default_config_path(project_dir: &Path) -> PathBuf {
-        project_dir.join(".aura-ci.yml")
+        project_dir.join(".loom").join(".aura-ci.yml")
     }
 }
 
@@ -689,7 +691,33 @@ mod tests {
     #[test]
     fn test_ci_config_path() {
         let path = CiConfig::config_path(Path::new("/tmp/project"));
-        assert!(path.to_string_lossy().ends_with(".aura-ci.json"));
+        let s = path.to_string_lossy();
+        assert!(
+            s.contains(".loom") && s.ends_with(".aura-ci.json"),
+            "default path should be under .loom/ with .json fallback, got: {}",
+            s
+        );
+    }
+
+    #[test]
+    fn test_ci_config_example_yaml_parses() {
+        // 验证示例项目的 YAML 配置文件能正确解析
+        let example_path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/examples/hello/.loom/.aura-ci.yml"
+        ));
+        if example_path.exists() {
+            let config = CiConfig::from_file(example_path).unwrap_or_else(|e| {
+                panic!(
+                    "示例 YAML 解析失败 ({}): {}",
+                    example_path.display(),
+                    e
+                )
+            });
+            assert_eq!(config.default_branch, "main");
+            assert!(!config.steps.is_empty());
+            assert!(!config.triggers.is_empty());
+        }
     }
 
     #[test]

@@ -296,6 +296,7 @@ fn test_arc_optimization_redundant_pairs() {
         ],
         reg_count: 2,
         is_native: false,
+        closures: Vec::new(),
     };
 
     let mut funcs = vec![func];
@@ -336,6 +337,7 @@ fn test_arc_optimization_no_redundant() {
         ],
         reg_count: 3,
         is_native: false,
+        closures: Vec::new(),
     };
 
     let mut funcs = vec![func];
@@ -372,6 +374,7 @@ fn test_leak_detection_clean() {
         ],
         reg_count: 2,
         is_native: false,
+        closures: Vec::new(),
     };
 
     let report = detect_leaks(&[func]);
@@ -403,6 +406,7 @@ fn test_leak_detection_leaked() {
         ],
         reg_count: 2,
         is_native: false,
+        closures: Vec::new(),
     };
 
     let report = detect_leaks(&[func]);
@@ -592,10 +596,13 @@ fn create_test_vm() -> Vm {
                 is_native: false,
                 code: vec![OpCode::ReturnUnit.byte()],
                 line_table: None,
+                aot_mode: 0,
+                aot_desc_idx: 0,
             },
         ],
         entry: 0,
         enabled_modules: Vec::new(),
+        ..Default::default()
     };
     Vm::new(&module, VmOptions::default()).unwrap()
 }

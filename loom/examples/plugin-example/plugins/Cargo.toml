@@ -1,0 +1,15 @@
+[package]
+name = "custom-plugin"
+version = "0.1.0"
+edition = "2021"
+description = "自定义 Aura 构建插件示例"
+license = "MIT"
+
+# 独立工作区（排除主 workspace）
+[workspace]
+
+[lib]
+name = "custom_plugin"
+crate-type = ["cdylib"]
+
+[dependencies]

@@ -1,0 +1,49 @@
+// 应用：演示 workspace 成员间依赖
+//
+// 同时使用 core 和 utils 两个库。
+//
+// 模块依赖图：
+//   apps/server
+//     ├── core  (libs/core)
+//     └── utils (libs/utils)
+
+import core.*
+import utils.*
+
+fun main() {
+    println("=== Workspace 示例 ===")
+    println()
+
+    // 1. 使用 core 库的数学函数
+    println("--- core.lib ---")
+    println("abs(-42.0) = " + abs(-42.0))
+    println("square(5.0) = " + square(5.0))
+    println("sqrt(16.0) = " + sqrt(16.0))
+    println("max(3.0, 7.0) = " + max(3.0, 7.0))
+    println("clamp(15.0, 0.0, 10.0) = " + clamp(15.0, 0.0, 10.0))
+    println("lerp(0.0, 100.0, 0.5) = " + lerp(0.0, 100.0, 0.5))
+    println()
+
+    // 2. 使用 utils 库的字符串工具
+    println("--- utils.lib ---")
+    val name = "AuraLang Workspace"
+    println("name = '" + name + "'")
+    println("toUpper = '" + toUpper(name) + "'")
+    println("trim('" + "  hello  " + "') = '" + trim("  hello  ") + "'")
+    println()
+
+    // 3. 使用 utils 库的集合工具
+    println("--- utils.collection ---")
+    val numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    println("numbers = [" + join(numbers.map(|n| n.toString()), ", ") + "]")
+    println("sum(numbers) = " + sum(numbers))
+
+    val evens = filter(numbers, |n| n % 2 == 0)
+    println("evens = [" + join(evens.map(|n| n.toString()), ", ") + "]")
+
+    val doubled = map(numbers, |n| n * 2)
+    println("doubled = [" + join(doubled.map(|n| n.toString()), ", ") + "]")
+    println()
+
+    println("=== 完成 ===")
+}

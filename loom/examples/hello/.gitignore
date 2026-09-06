@@ -1,0 +1,5 @@
+# loom 生成的配置文件（CI 配置、IDE 项目模型等）
+.loom/
+
+# 构建产物
+target/

@@ -1,0 +1,24 @@
+// 最小应用示例：演示基本构建流程
+//
+// 运行：
+//   loom build        # 完整构建（clean → resolve → compile → test）
+//   loom test         # 编译 + 运行测试
+//   loom run          # 编译 + 运行
+
+fun main() {
+    val greeting = "Hello from basic-app!"
+    println(greeting)
+
+    // 演示基本运算
+    val sum = add(1, 2)
+    println("1 + 2 = " + sum)
+
+    // 演示字符串操作
+    val upper = greeting.upper()
+    println(upper)
+}
+
+// 辅助函数
+fun add(a: int, b: int) -> int {
+    return a + b
+}

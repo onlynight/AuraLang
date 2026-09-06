@@ -13,7 +13,7 @@
 use std::process::exit;
 
 use compiler::codegen::{
-    SerializeError, compile_source, disassemble, read_auc, to_bytes, write_auc,
+    BytecodeModule, SerializeError, compile_source, disassemble, read_auc, to_bytes, write_auc,
 };
 use compiler::lexer::Lexer;
 use compiler::parser::Parser;
@@ -73,6 +73,7 @@ fn print_usage() {
 \n\
 用法:\n\
   aura build <file.aura> [--output <out>]        编译为字节码 .auc / 原生可执行文件\n\
+  aura build <file.aura> --aot-embed             编译 .auc v4（嵌入 AOT 机器码，VM 加载时 mmap 执行）\n\
   aura build <file.aura> --lib [--output <out>]   打包为 .auz 库制品（等价于 aura package）\n\
   aura build <file.aura> --aot [--output <exe>]  AOT 编译为原生可执行文件\n\
     [--target <triple>]   目标三元组（如 aarch64-unknown-linux-gnu）\n\
@@ -166,6 +167,23 @@ fn cmd_build(args: &[String]) {
         }
     };
 
+    // Phase 1 AOT: --aot-embed → 编译为 .auc v4 并嵌入 AOT 机器码
+    let embed = args.iter().any(|a| a == "--aot-embed");
+    #[cfg(feature = "llvm")]
+    let module = if embed {
+        embed_into_auc(&source, module)
+    } else {
+        module
+    };
+    #[cfg(not(feature = "llvm"))]
+    let module = {
+        if embed {
+            eprintln!("错误: llvm feature 未启用，无法使用 --aot-embed");
+            exit(1);
+        }
+        module
+    };
+
     let out_path = output.unwrap_or_else(|| default_output(input));
     if let Err(e) = write_auc(&out_path, &module) {
         eprintln!("错误: 写入 {} 失败: {}", out_path, e);
@@ -178,6 +196,52 @@ fn cmd_build(args: &[String]) {
         module.functions.len(),
         module.consts.len()
     );
+}
+
+/// `--aot-embed`：编译为 `.auc` v4 并嵌入 AOT 机器码（Phase 1）
+///
+/// 复用 LLVM AOT 后端：HIR → LLVM IR → 目标文件 → `.text` 机器码 blob，
+/// 由 [`embed_aot`] 组装为段表（SEG_MACHINE + SEG_DESC_TABLE）写回字节码模块。
+/// 失败时回退纯字节码并告警，保证构建不中断。
+#[cfg(feature = "llvm")]
+fn embed_into_auc(source: &str, module: BytecodeModule) -> BytecodeModule {
+    use compiler::codegen::aot_embed::embed_aot;
+    use compiler::codegen::hir::desugar_program;
+
+    // 重新解析得到同源 HIR（AOT IR 生成需要）
+    let mut lexer = Lexer::new(source);
+    let tokens = lexer.tokenize();
+    if let Some(e) = lexer.errors().first() {
+        eprintln!("错误: [词法] {}", e.message);
+        exit(1);
+    }
+    let mut parser = Parser::new(tokens);
+    let program = parser.parse_program();
+    if let Some(e) = parser.errors().first() {
+        eprintln!("错误: [语法] {}", e.message);
+        exit(1);
+    }
+    let hir = desugar_program(&program);
+
+    let options = AotOptions {
+        opt_level: OptimizationLevel::default(),
+        ..Default::default()
+    };
+    let tmp_dir = std::env::temp_dir().join(format!("aura_embed_{}", std::process::id()));
+    match embed_aot(module.clone(), &hir, options, &tmp_dir) {
+        Ok(result) => {
+            println!(
+                "✓ AOT 嵌入: 机器码 {} 字节, {} 个函数描述符",
+                result.machine_size, result.desc_count
+            );
+            result.module
+        }
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            eprintln!("警告: AOT 嵌入失败（{}），回退纯字节码 .auc", e);
+            module
+        }
+    }
 }
 
 /// AOT 编译（LLVM 后端）

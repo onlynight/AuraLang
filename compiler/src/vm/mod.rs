@@ -15,8 +15,10 @@
 //!   阈值的（叶子整数）函数由 Cranelift 编译为原生代码并缓存，后续调用直接派发到
 //!   原生入口（`5.12`）；编译失败则永久回退解释器（`5.13`）。
 
+pub mod abi;
 pub mod actor;
 pub mod actor_process;
+pub mod aot_runtime;
 pub mod channel;
 pub mod channel_tcp;
 pub mod coroutine;
@@ -30,11 +32,13 @@ pub mod ipc;
 pub mod jit;
 #[cfg(feature = "jit")]
 pub mod jit_opt;
+pub mod mmap_util;
 pub mod native;
 pub mod serialize;
 pub mod thread_pool;
 pub mod value;
 
+pub use aot_runtime::AotRuntime;
 pub use coroutine::{CoroutineScheduler, CoroutineState};
 pub use dynamic_ffi::DynamicLoader;
 pub use ffi::{
@@ -301,6 +305,11 @@ pub enum Instr {
     CallExport(u16),
     /// 调用外部模块符号
     CallExternal(u16, u16),
+
+    // ── Phase 1: AOT 嵌入调用 ──
+    /// 调用 AOT 预编译函数（`func_idx` 为函数表索引），经 [`crate::vm::aot_runtime::AotRuntime`]
+    /// dispatch_table 查找到 mmap 的机器码入口，使用共享 JitValue ABI 直接 `call`。
+    CallAot(u16),
 }
 
 /// 解码后的函数
@@ -604,6 +613,14 @@ fn decode_function(f: &BytecodeFunction) -> Result<DecodedFunction, VmError> {
                 ip += 4;
                 instrs.push(Instr::CallExternal(mod_idx, sym_idx));
             }
+            crate::codegen::opcode::OpCode::CallAot(_) => {
+                let v = u16::from_le_bytes([
+                    code[ip],
+                    code[ip + 1],
+                ]);
+                ip += 2;
+                instrs.push(Instr::CallAot(v));
+            }
         }
     }
 
@@ -691,6 +708,13 @@ pub struct Vm {
     pub channels: crate::vm::channel::ChannelRuntime,
     /// Phase 2: 模块注册表
     pub registry: ModuleRegistry,
+    /// Phase 1: AOT 运行时（机器码嵌入模块管理）
+    pub aot_runtime: crate::vm::aot_runtime::AotRuntime,
+    /// P9: 已加载的动态库（库名 → 库句柄）
+    #[cfg(windows)]
+    loaded_libs: std::collections::HashMap<String, usize>,
+    #[cfg(unix)]
+    loaded_libs: std::collections::HashMap<String, *mut std::os::raw::c_void>,
 }
 
 impl Vm {
@@ -706,6 +730,25 @@ impl Vm {
                 module.enabled_modules.iter().map(|s| s.as_str()).collect();
             NativeRegistry::with_modules(&modules_refs)
         };
+        // Phase 1: AOT 机器码嵌入 —— 若 `.auc` 含机器码段则加载到 AotRuntime。
+        // 加载失败不影响 VM 创建：未命中 dispatch_table 的函数回退字节码解释。
+        let mut aot_runtime = crate::vm::aot_runtime::AotRuntime::new();
+        if module.has_aot() {
+            let desc_idx: Vec<u32> = module.functions.iter().map(|f| f.aot_desc_idx).collect();
+            let name = if module.module_identity.name.is_empty() {
+                "aot_module".to_string()
+            } else {
+                module.module_identity.name.clone()
+            };
+            if let Err(e) = aot_runtime.load_module_from(
+                &module.aot_blob_data,
+                &module.aot_segments,
+                &desc_idx,
+                name,
+            ) {
+                eprintln!("[vm] AOT 模块加载失败，回退字节码解释: {}", e);
+            }
+        }
         Ok(Vm {
             module: loaded,
             natives,
@@ -722,6 +765,11 @@ impl Vm {
             actors: crate::vm::actor::ActorRuntime::new(),
             channels: crate::vm::channel::ChannelRuntime::new(),
             registry: ModuleRegistry::new(),
+            aot_runtime,
+            #[cfg(windows)]
+            loaded_libs: std::collections::HashMap::new(),
+            #[cfg(unix)]
+            loaded_libs: std::collections::HashMap::new(),
         })
     }
 

@@ -761,8 +761,14 @@ fn main() -> Result<()> {
 
             if !ci_path.exists() {
                 let default_path = aura_loom::ci::CiConfig::default_config_path(&project_dir);
-                println!("⚠ 未找到 CI 配置 (.aura-ci.yml)");
+                println!("⚠ 未找到 CI 配置 (.loom/.aura-ci.yml)");
                 println!("  使用示例配置生成:");
+
+                // 创建 .loom/ 目录
+                if let Some(parent) = default_path.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| anyhow::anyhow!("创建 .loom/ 目录失败: {}", e))?;
+                }
 
                 let example = aura_loom::ci::CiConfig::example();
                 let yaml = example.to_yaml()?;

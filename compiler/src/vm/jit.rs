@@ -1,56 +1,17 @@
 //! Aura VM Hotspot JIT Compiler (Cranelift)
 use crate::codegen::opcode::Const;
-use crate::vm::value::Value;
 use crate::vm::{DecodedFunction, Instr};
 use std::collections::HashMap;
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct JitValue {
-    pub tag: i64,
-    pub payload: i64,
-}
+// JitValue / 类型标签 / JitEntry 已迁移至 vm::abi（Phase 1: AOT 嵌入共享调用约定）。
+// 此处再导出以保持向后兼容（jit feature 之外的路径引用 crate::vm::jit::* 依然有效）。
+pub use crate::vm::abi::{
+    AotEntry, AotCallContext, JitValue, TAG_ARRAY, TAG_BOOL, TAG_CLOSURE, TAG_CSTRING, TAG_FLOAT,
+    TAG_FUNC, TAG_INT, TAG_LIST, TAG_MAP, TAG_NULL, TAG_OBJ, TAG_PTR, TAG_STR,
+};
 
-pub const TAG_INT: i64 = 0;
-pub const TAG_FLOAT: i64 = 1;
-pub const TAG_BOOL: i64 = 2;
-pub const TAG_NULL: i64 = 3;
-
-impl JitValue {
-    pub fn null() -> Self {
-        JitValue {
-            tag: TAG_NULL,
-            payload: 0,
-        }
-    }
-    pub fn from_value(v: &Value) -> Self {
-        match v {
-            Value::Int(i) => JitValue {
-                tag: TAG_INT,
-                payload: *i,
-            },
-            Value::Float(f) => JitValue {
-                tag: TAG_FLOAT,
-                payload: f.to_bits() as i64,
-            },
-            Value::Bool(b) => JitValue {
-                tag: TAG_BOOL,
-                payload: *b as i64,
-            },
-            _ => JitValue::null(),
-        }
-    }
-    pub fn to_value(self) -> Value {
-        match self.tag {
-            TAG_INT => Value::Int(self.payload),
-            TAG_FLOAT => Value::Float(f64::from_bits(self.payload as u64)),
-            TAG_BOOL => Value::Bool(self.payload != 0),
-            _ => Value::Null,
-        }
-    }
-}
-
-pub type JitEntry = unsafe extern "C" fn(*const JitValue, *mut JitValue, usize, *const ());
+/// JIT 入口 —— 与 AOT 入口同签名（AotEntry 别名）
+pub type JitEntry = AotEntry;
 
 pub struct JitState {
     compiled: HashMap<usize, JitEntry>,

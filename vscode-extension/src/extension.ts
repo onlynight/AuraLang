@@ -2,7 +2,7 @@
  * Aura Language — VS Code 扩展
  *
  * 提供：
- * - LSP 语言服务器连接（aura lsp）
+ * - LSP 语言服务器连接（直接启动独立的 aura-lsp，不再经由 aura.exe 中转）
  * - 代码补全、跳转定义、悬停提示、诊断推送
  * - 代码格式化
  * - 保存时检查

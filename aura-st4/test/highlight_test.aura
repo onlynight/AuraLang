@@ -1,0 +1,144 @@
+// ════════════════════════════════════════════════════════════
+// 语法高亮验证测试文件
+// ════════════════════════════════════════════════════════════
+
+import aura.concurrent.*
+import aura.io
+import aura.math as M
+
+/// 文档注释：玩家结构体
+data struct Player(
+    val id: Int,
+    var name: String = "unknown",
+    var health: Int = 100,
+    var tag: String? = null
+)
+
+/* 块注释 */
+
+// 普通行注释
+var comment: String = "test // not a comment"
+
+@Deprecated
+fun legacyApi(): Int = 0
+
+suspend fun fetch(): Int = 0
+inline fun max(a: Int, b: Int): Int = a
+comptime fun constValue(): Int = 1
+
+extern "c" fun puts(msg: String): Int
+
+fun add(a: Int, b: Int): Int {
+    return a + b
+}
+
+fun greet(name: String): String = "Hello, $name!"
+
+fun power(base: Int, exp: Int = 2): Int = base * exp
+
+fun join(vararg parts: String): String = "joined"
+
+fun <T : Int> first(items: List<T>): T? = null
+
+class Circle : Drawable {
+    val radius: Int = 10
+    override fun draw() {}
+}
+
+enum Color {
+    RED,
+    GREEN,
+    CUSTOM(val r: Int, val g: Int, val b: Int)
+}
+
+interface Drawable {
+    fun draw(): Unit
+}
+
+actor Scheduler {
+    var tick: Int = 0
+    fun step() { tick += 1 }
+}
+
+typealias Vec2 = Pair<Int, Int>
+
+val APP_VERSION: String = "1.0"
+var globalCounter: Int = 0
+lateinit var cache: String
+val lazyVal by lazy { 42 }
+
+fun main() {
+    // 字符串插值
+    val name = "world"
+    val label = "Level: ${100 * 2}"
+    val raw = """No $interpolation here"""
+    
+    // 数值字面量
+    val dec = 42
+    val float = 3.14f
+    val hex = 0xFF
+    val bin = 0b1010
+    val dec2 = 1_000_000
+    
+    // 布尔与空值
+    val flag: Boolean = true
+    val empty: String? = null
+    
+    // if 表达式
+    val status = if (1 > 0) "alive" else "dead"
+    
+    // when 表达式
+    val score = 42
+    val band = when (score) {
+        0 -> "zero"
+        in 1..50 -> "low"
+        else -> "high"
+    }
+    
+    // 控制流
+    var sum = 0
+    for (i in 0..10) {
+        sum += i
+    }
+    
+    // 标签
+    outer@ for (a in 0..3) {
+        for (b in 0..3) {
+            if (a == b) break@outer
+        }
+    }
+    
+    // 空安全
+    var n: Int? = null
+    val safe: Int = n ?: 0
+    val forced: Int = n!!
+    
+    // 函数调用 + 命名参数
+    val r1: Int = add(1, 2)
+    val r2: Int = power(3)
+    val r3: Int = add(a = 1, b = 2)
+    
+    // Lambda
+    val f = { x: Int -> x + 1 }
+    
+    // 标准库
+    val result = aura.math.sqrt(16.0)
+    
+    // this / super
+    val self = this
+    
+    // 方法引用
+    val methodRef = Drawable::draw
+    
+    // 字符
+    val ch: Char = 'A'
+    
+    // 常量名
+    val X = 42
+    
+    // 属性访问
+    val dist = Point(1, 2).manhattan()
+    
+    // 枚举访问
+    val color = Color.RED
+}

@@ -28,6 +28,9 @@ pub mod arc;
 // AOT（LLVM）后端（P6）
 #[cfg(feature = "llvm")]
 pub mod aot;
+// Phase 1 AOT: 机器码嵌入 .auc v4（依赖 LLVM 后端）
+#[cfg(feature = "llvm")]
+pub mod aot_embed;
 
 pub use disasm::disassemble;
 pub use emit::{emit_module, find_const};
@@ -43,6 +46,8 @@ pub use serialize::{SerializeError, from_bytes, read_auc, to_bytes, write_auc};
 
 #[cfg(feature = "llvm")]
 pub use aot::{AotCodeGenerator, AotError, AotOptions, AotOutput, OutputFormat, aot_compile};
+#[cfg(feature = "llvm")]
+pub use aot_embed::{AotEmbedResult, embed_aot};
 
 use crate::ast::Program;
 

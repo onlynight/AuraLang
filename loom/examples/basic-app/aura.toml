@@ -1,0 +1,97 @@
+schema-version = "2.0"
+name = "basic-app"
+version = "0.1.0"
+description = "最小应用示例：演示基本构建流程"
+authors = []
+license = "MIT"
+entry = "src/main.aura"
+exports = ["main"]
+library = false
+
+# 依赖（implementation / compileOnly / runtimeOnly / test / build）
+dependencies = []
+compile-dependencies = []
+runtime-dependencies = []
+dev-dependencies = []
+build-dependencies = []
+
+# 自定义任务
+tasks = []
+
+# ── 构建配置 ──
+[build]
+opt-level = 2
+debug = true
+out-dir = "target/build"
+cache-dir = "target/cache"
+cache-remote-shared = false
+emit-signatures = true
+emit-package = false
+parallel = true
+parallel-jobs = 0
+
+# ── 源码集 ──
+[build.source-sets.main]
+source-dirs = ["src"]
+resource-dirs = []
+include = ["**/*.aura"]
+exclude = [
+    "**/*.test.aura",
+    "vendor/**",
+    "target/**",
+]
+depends-on = []
+
+[build.source-sets.test]
+source-dirs = ["test"]
+resource-dirs = []
+include = ["**/*.aura"]
+exclude = []
+depends-on = ["main"]
+
+# ── 别名 ──
+[build.alias]
+
+# ── 插件 ──
+[plugins]
+aura-stdlib = true
+aura-test-harness = true
+aura-doc-gen = false
+aura-format = false
+aura-aot = false
+aura-watch = false
+aura-ci = false
+
+[plugins.external]
+
+# ── 配置档案 ──
+[profiles.release]
+activate = false
+
+[profiles.release.build]
+opt-level = 3
+debug = false
+emit-package = true
+
+[profiles.debug]
+activate = true
+
+# ── 仓库 ──
+[repositories]
+central = "https://registry.aura-lang.dev"
+
+[repositories.custom]
+
+# ── 资源 ──
+[resources]
+include = []
+exclude = []
+
+# ── 打包 ──
+[package]
+format = "auz"
+include-sources = false
+include-docs = false
+include-native = true
+native-targets = []
+aot-opt-level = 2

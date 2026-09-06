@@ -1,0 +1,10 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<snippet>
+    <content><![CDATA[extern "c" "" {
+    fun (): 
+    val : 
+}]]></content>
+    <tabTrigger>ffi</tabTrigger>
+    <scope>source.aura</scope>
+    <description>FFI external function declaration</description>
+</snippet>

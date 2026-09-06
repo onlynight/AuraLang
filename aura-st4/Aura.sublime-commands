@@ -1,0 +1,40 @@
+[
+    {
+        "caption": "Format Document",
+        "command": "aura_format_document",
+        "args": { "engine": "local" }
+    },
+    {
+        "caption": "Format Document (CLI)",
+        "command": "aura_format_document",
+        "args": { "engine": "cli" }
+    },
+    {
+        "caption": "Auto Indent",
+        "command": "aura_auto_indent"
+    },
+    {
+        "caption": "Run (Aura)",
+        "command": "build",
+        "args": {
+            "select_file_to_build": true,
+            "shell_cmd": "aura run"
+        }
+    },
+    {
+        "caption": "Check (Aura)",
+        "command": "build",
+        "args": {
+            "select_file_to_build": true,
+            "shell_cmd": "aura check"
+        }
+    },
+    {
+        "caption": "Symbol Outline",
+        "command": "show_symbol_list",
+        "args": {
+            "symbols_style": "all",
+            "regex": "\\b(fun|class|struct|enum|interface|actor|object|typealias|val|var)\\s+\\w+"
+        }
+    }
+]

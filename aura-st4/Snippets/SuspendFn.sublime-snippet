@@ -1,0 +1,9 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<snippet>
+    <content><![CDATA[suspend fun ():  {
+    
+}]]></content>
+    <tabTrigger>suspend</tabTrigger>
+    <scope>source.aura</scope>
+    <description>Suspend function (coroutine)</description>
+</snippet>

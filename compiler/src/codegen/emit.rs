@@ -22,6 +22,8 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
         .map(|n| BytecodeNative {
             name: n.name.clone(),
             param_count: n.params.len() as u16,
+            ffi_abi: n.ffi_abi,
+            ffi_lib: n.ffi_lib.clone(),
         })
         .collect();
 
@@ -54,6 +56,8 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
                 is_native: false,
                 code: closure_code,
                 line_table: None,
+                aot_mode: 0,
+                aot_desc_idx: 0,
             });
         }
     }
@@ -71,6 +75,8 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
             is_native: false,
             code,
             line_table: None,
+            aot_mode: 0,
+            aot_desc_idx: 0,
         });
         // 发射闭包记录（用于 MakeClosure 查找参数数量）
         for closure in &f.closures {
@@ -118,6 +124,8 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
         dependencies: Vec::new(),
         sig_ids: Vec::new(),
         entry_kind: "app".to_string(),
+        aot_segments: Vec::new(),
+        aot_blob_data: Vec::new(),
     }
 }
 

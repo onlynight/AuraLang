@@ -1,0 +1,9 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<snippet>
+    <content><![CDATA[fun main() {
+    println("Hello, Aura!")
+}]]></content>
+    <tabTrigger>main</tabTrigger>
+    <scope>source.aura</scope>
+    <description>Main entry point</description>
+</snippet>

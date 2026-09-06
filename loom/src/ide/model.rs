@@ -1,4 +1,4 @@
-//! [Phase B7.1] aura-project.json 导出
+//! [Phase B7.1] .loom/aura-project.json 导出
 //
 //! 为 IDE 提供项目信息 JSON 文件，支持：
 //! - 项目结构识别
@@ -6,6 +6,7 @@
 //! - 任务图可视化
 //! - 依赖关系展示
 //
+//! 配置文件位于 `.loom/` 目录下，默认加入 .gitignore。
 //! 对应设计文档 §17.1 IDE 集成。
 
 use crate::error::LoomError;
@@ -13,7 +14,7 @@ use crate::manifest::LoomManifest;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// IDE 项目文件（aura-project.json）
+/// IDE 项目文件（.loom/aura-project.json）
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct IdeProject {
@@ -206,8 +207,14 @@ impl IdeProject {
         serde_json::to_string_pretty(self).map_err(|e| LoomError::Ide(format!("序列化失败: {}", e)))
     }
 
-    /// 写入文件
+    /// 写入文件（自动创建父目录）
     pub fn write_to(&self, path: &Path) -> Result<(), LoomError> {
+        if let Some(parent) = path.parent() {
+            if !parent.to_string_lossy().is_empty() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| LoomError::Ide(format!("创建目录失败: {}", e)))?;
+            }
+        }
         let json = self.to_json()?;
         std::fs::write(path, json).map_err(|e| LoomError::Ide(format!("写入文件失败: {}", e)))
     }
@@ -230,9 +237,9 @@ impl IdeProject {
         Self::from_json(&content)
     }
 
-    /// 获取 IDE 项目文件默认路径
+    /// 获取 IDE 项目文件默认路径（位于 .loom/ 目录）
     pub fn default_path(project_dir: &Path) -> PathBuf {
-        project_dir.join("aura-project.json")
+        project_dir.join(".loom").join("aura-project.json")
     }
 }
 
@@ -524,7 +531,12 @@ mod tests {
     #[test]
     fn test_ide_project_default_path() {
         let path = IdeProject::default_path(Path::new("/tmp/project"));
-        assert!(path.to_string_lossy().ends_with("aura-project.json"));
+        let s = path.to_string_lossy();
+        assert!(
+            s.ends_with(".loom/aura-project.json") || s.ends_with(".loom\\aura-project.json"),
+            "default path should be under .loom/, got: {}",
+            s
+        );
     }
 
     #[test]

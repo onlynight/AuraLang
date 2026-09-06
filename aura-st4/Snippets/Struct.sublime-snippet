@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<snippet>
+    <content><![CDATA[struct ${1:Name}(
+    val ${2:field1}: ${3:Type},
+    var ${4:field2}: ${5:Type} = ${6:defaultValue}
+)]]></content>
+    <tabTrigger>struct</tabTrigger>
+    <scope>source.aura</scope>
+    <description>Create a struct</description>
+</snippet>

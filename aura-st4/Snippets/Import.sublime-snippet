@@ -1,0 +1,7 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<snippet>
+    <content><![CDATA[import  as ]]></content>
+    <tabTrigger>import</tabTrigger>
+    <scope>source.aura</scope>
+    <description>Import module</description>
+</snippet>
