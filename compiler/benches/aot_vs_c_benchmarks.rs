@@ -99,7 +99,9 @@ fn llc_path() -> std::path::PathBuf {
     let bin = if cfg!(target_os = "windows") { "llc.exe" } else { "llc" };
     if let Some(h) = home {
         let p = std::path::Path::new(&h).join("bin").join(bin);
-        if p.exists() { return p; }
+        if p.exists() {
+            return p;
+        }
     }
     std::path::PathBuf::from(bin)
 }
@@ -109,7 +111,9 @@ fn clang_path() -> std::path::PathBuf {
     let bin = if cfg!(target_os = "windows") { "clang.exe" } else { "clang" };
     if let Some(h) = home {
         let p = std::path::Path::new(&h).join("bin").join(bin);
-        if p.exists() { return p; }
+        if p.exists() {
+            return p;
+        }
     }
     std::path::PathBuf::from(bin)
 }
@@ -119,7 +123,9 @@ fn lld_path() -> std::path::PathBuf {
     let bin = if cfg!(target_os = "windows") { "lld-link.exe" } else { "ld.lld" };
     if let Some(h) = home {
         let p = std::path::Path::new(&h).join("bin").join(bin);
-        if p.exists() { return p; }
+        if p.exists() {
+            return p;
+        }
     }
     std::path::PathBuf::from(bin)
 }
@@ -137,14 +143,13 @@ fn bench_c(c_src: &str, iters: usize, expected: i64, name: &str) -> Result<f64, 
 
     // 编译
     let mut cmd = Command::new(clang_path());
-    cmd.arg(&c_path)
-        .arg("-c")
-        .arg("-o")
-        .arg(&o_path)
-        .arg("-O2");
+    cmd.arg(&c_path).arg("-c").arg("-o").arg(&o_path).arg("-O2");
     let out = cmd.output().map_err(|e| e.to_string())?;
     if !out.status.success() {
-        return Err(format!("clang 编译失败: {}", String::from_utf8_lossy(&out.stderr)));
+        return Err(format!(
+            "clang 编译失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
     }
 
     // 链接
@@ -162,7 +167,10 @@ fn bench_c(c_src: &str, iters: usize, expected: i64, name: &str) -> Result<f64, 
     };
     let out = link_cmd.output().map_err(|e| e.to_string())?;
     if !out.status.success() {
-        return Err(format!("链接失败: {}", String::from_utf8_lossy(&out.stderr)));
+        return Err(format!(
+            "链接失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
     }
 
     // 运行并计时
@@ -207,7 +215,10 @@ fn bench_aot(src: &str, iters: usize, expected: i64, name: &str) -> Result<f64, 
     cmd.arg(&ll_path).arg("-o").arg(&o_path).arg("-O2").arg("-filetype=obj");
     let out = cmd.output().map_err(|e| e.to_string())?;
     if !out.status.success() {
-        return Err(format!("llc 失败: {}", String::from_utf8_lossy(&out.stderr)));
+        return Err(format!(
+            "llc 失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
     }
 
     // 链接
@@ -225,7 +236,10 @@ fn bench_aot(src: &str, iters: usize, expected: i64, name: &str) -> Result<f64, 
     };
     let out = link_cmd.output().map_err(|e| e.to_string())?;
     if !out.status.success() {
-        return Err(format!("链接失败: {}", String::from_utf8_lossy(&out.stderr)));
+        return Err(format!(
+            "链接失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
     }
 
     // 运行并计时
@@ -257,7 +271,11 @@ fn run_fib() {
             let ratio = aot_ms / c_ms;
             println!("  C:   {:.3} ms/op", c_ms);
             println!("  AOT: {:.3} ms/op", aot_ms);
-            println!("  AOT/C 比值: {:.1}% {}", ratio * 100.0, if ratio < 0.9 { "✅ ≥90%" } else { "⚠️ <90%" });
+            println!(
+                "  AOT/C 比值: {:.1}% {}",
+                ratio * 100.0,
+                if ratio < 0.9 { "✅ ≥90%" } else { "⚠️ <90%" }
+            );
         }
         (Ok(c_ms), Err(e)) => println!("  C:   {:.3} ms/op  |  AOT: 跳过 ({})", c_ms, e),
         (Err(e), _) => println!("  C: 跳过 ({})", e),
@@ -277,7 +295,11 @@ fn run_sum() {
             let ratio = aot_ms / c_ms;
             println!("  C:   {:.3} ms/op", c_ms);
             println!("  AOT: {:.3} ms/op", aot_ms);
-            println!("  AOT/C 比值: {:.1}% {}", ratio * 100.0, if ratio < 0.9 { "✅ ≥90%" } else { "⚠️ <90%" });
+            println!(
+                "  AOT/C 比值: {:.1}% {}",
+                ratio * 100.0,
+                if ratio < 0.9 { "✅ ≥90%" } else { "⚠️ <90%" }
+            );
         }
         (Ok(c_ms), Err(e)) => println!("  C:   {:.3} ms/op  |  AOT: 跳过 ({})", c_ms, e),
         (Err(e), _) => println!("  C: 跳过 ({})", e),
@@ -297,7 +319,11 @@ fn run_matmul() {
             let ratio = aot_ms / c_ms;
             println!("  C:   {:.3} ms/op", c_ms);
             println!("  AOT: {:.3} ms/op", aot_ms);
-            println!("  AOT/C 比值: {:.1}% {}", ratio * 100.0, if ratio < 0.9 { "✅ ≥90%" } else { "⚠️ <90%" });
+            println!(
+                "  AOT/C 比值: {:.1}% {}",
+                ratio * 100.0,
+                if ratio < 0.9 { "✅ ≥90%" } else { "⚠️ <90%" }
+            );
         }
         (Ok(c_ms), Err(e)) => println!("  C:   {:.3} ms/op  |  AOT: 跳过 ({})", c_ms, e),
         (Err(e), _) => println!("  C: 跳过 ({})", e),

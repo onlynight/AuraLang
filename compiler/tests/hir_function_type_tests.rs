@@ -6,7 +6,7 @@
 //! 覆盖：基本函数类型、嵌套函数类型、函数类型在参数/返回值中的使用。
 
 use compiler::codegen::aot::types::TypeMapper;
-use compiler::codegen::hir::{desugar_program, HirType};
+use compiler::codegen::hir::{HirType, desugar_program};
 use compiler::lexer::Lexer;
 use compiler::parser::Parser;
 
@@ -30,9 +30,15 @@ fn test_hir_function_type_basic() {
     let apply = hir.functions.iter().find(|f| f.name == "apply").expect("apply 函数存在");
     let param_type = apply.params[0].ty.as_ref().expect("参数类型存在");
     match param_type {
-        HirType::Function { params, return_type } => {
+        HirType::Function {
+            params,
+            return_type,
+        } => {
             assert_eq!(params.len(), 1, "应有 1 个参数");
-            assert!(matches!(return_type.as_ref(), HirType::Named(n) if n == "Int"), "返回类型应为 Int");
+            assert!(
+                matches!(return_type.as_ref(), HirType::Named(n) if n == "Int"),
+                "返回类型应为 Int"
+            );
         }
         other => panic!("期望 Function 类型，实际: {:?}", other),
     }
@@ -40,13 +46,21 @@ fn test_hir_function_type_basic() {
 
 #[test]
 fn test_hir_function_type_multi_param() {
-    let hir = parse_to_hir("fun apply2(f: (Int, String) -> Boolean, x: Int, y: String): Boolean { return f(x, y) }");
+    let hir = parse_to_hir(
+        "fun apply2(f: (Int, String) -> Boolean, x: Int, y: String): Boolean { return f(x, y) }",
+    );
     let apply2 = hir.functions.iter().find(|f| f.name == "apply2").expect("apply2 函数存在");
     let param_type = apply2.params[0].ty.as_ref().expect("参数类型存在");
     match param_type {
-        HirType::Function { params, return_type } => {
+        HirType::Function {
+            params,
+            return_type,
+        } => {
             assert_eq!(params.len(), 2, "应有 2 个参数");
-            assert!(matches!(return_type.as_ref(), HirType::Named(n) if n == "Boolean"), "返回类型应为 Boolean");
+            assert!(
+                matches!(return_type.as_ref(), HirType::Named(n) if n == "Boolean"),
+                "返回类型应为 Boolean"
+            );
         }
         other => panic!("期望 Function 类型，实际: {:?}", other),
     }
@@ -59,10 +73,14 @@ fn test_hir_function_type_multi_param() {
 #[test]
 fn test_hir_function_type_as_return() {
     let hir = parse_to_hir("fun make_adder(x: Int): (Int) -> Int { return fun(y: Int) => x + y }");
-    let make_adder = hir.functions.iter().find(|f| f.name == "make_adder").expect("make_adder 存在");
+    let make_adder =
+        hir.functions.iter().find(|f| f.name == "make_adder").expect("make_adder 存在");
     let ret_type = make_adder.ret.as_ref().expect("返回类型存在");
     match ret_type {
-        HirType::Function { params, return_type } => {
+        HirType::Function {
+            params,
+            return_type,
+        } => {
             assert_eq!(params.len(), 1);
             assert!(matches!(return_type.as_ref(), HirType::Named(n) if n == "Int"));
         }
@@ -76,11 +94,16 @@ fn test_hir_function_type_as_return() {
 
 #[test]
 fn test_hir_nested_function_type() {
-    let hir = parse_to_hir("fun compose(f: (Int) -> Int, g: (Int) -> Int): (Int) -> Int { return fun(x) => f(g(x)) }");
+    let hir = parse_to_hir(
+        "fun compose(f: (Int) -> Int, g: (Int) -> Int): (Int) -> Int { return fun(x) => f(g(x)) }",
+    );
     let compose = hir.functions.iter().find(|f| f.name == "compose").expect("compose 存在");
     let ret_type = compose.ret.as_ref().expect("返回类型存在");
     match ret_type {
-        HirType::Function { params, return_type } => {
+        HirType::Function {
+            params,
+            return_type,
+        } => {
             assert_eq!(params.len(), 1);
             assert!(matches!(return_type.as_ref(), HirType::Named(n) if n == "Int"));
         }
@@ -106,7 +129,10 @@ fn test_llvm_function_type_maps_to_ptr() {
 #[test]
 fn test_llvm_fn_type_signature() {
     let tm = TypeMapper::new(true);
-    let params = vec![HirType::Named("Int".into()), HirType::Named("Float".into())];
+    let params = vec![
+        HirType::Named("Int".into()),
+        HirType::Named("Float".into()),
+    ];
     let ret = HirType::Named("Boolean".into());
     let sig = tm.fn_type(&ret, &params, false);
     assert!(sig.contains("i1"), "返回类型应为 i1");

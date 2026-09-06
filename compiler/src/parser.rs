@@ -97,11 +97,7 @@ impl Parser {
 
     fn peek(&self, offset: usize) -> TokenKind {
         let idx = self.pos + offset;
-        if idx < self.tokens.len() {
-            self.tokens[idx].kind
-        } else {
-            TokenKind::EOF
-        }
+        if idx < self.tokens.len() { self.tokens[idx].kind } else { TokenKind::EOF }
     }
 
     /// 返回当前 token + offset 位置的完整 Token（用于 lookahead）
@@ -150,11 +146,7 @@ impl Parser {
 
     #[allow(dead_code)]
     fn consume(&mut self, expected: TokenKind) -> Result<Token, ()> {
-        if self.current().kind == expected {
-            Ok(self.advance())
-        } else {
-            Err(())
-        }
+        if self.current().kind == expected { Ok(self.advance()) } else { Err(()) }
     }
 
     fn expect(&mut self, expected: TokenKind) -> Token {
@@ -310,11 +302,8 @@ impl Parser {
         self.expect(TokenKind::Fun);
 
         // Kotlin 风格泛型函数：`fun <T : Bound> name(...)`（类型参数在函数名前）
-        let mut type_params = if self.check(TokenKind::Lt) {
-            self.try_parse_type_params()
-        } else {
-            Vec::new()
-        };
+        let mut type_params =
+            if self.check(TokenKind::Lt) { self.try_parse_type_params() } else { Vec::new() };
         let name = self.advance().literal.clone();
         // 兼容 `fun name<T>(...)` 的写法（类型参数在名字后）
         if self.check(TokenKind::Lt) {
@@ -420,14 +409,12 @@ impl Parser {
             TokenKind::GtGt => {
                 let t = self.advance();
                 // 将 ">>" 拆成 ">"（本次闭合） + 合成 ">"（留给外层闭合）
-                self.tokens
-                    .insert(self.pos, Token::new(TokenKind::Gt, ">", t.span));
+                self.tokens.insert(self.pos, Token::new(TokenKind::Gt, ">", t.span));
             }
             TokenKind::GtGtGt => {
                 let t = self.advance();
                 // 将 ">>>" 拆成 ">"（本次闭合） + 合成 ">>"（留给外层继续分裂）
-                self.tokens
-                    .insert(self.pos, Token::new(TokenKind::GtGt, ">>", t.span));
+                self.tokens.insert(self.pos, Token::new(TokenKind::GtGt, ">>", t.span));
             }
             _ => {
                 self.expect(TokenKind::Gt);
@@ -839,7 +826,11 @@ impl Parser {
         if self.check(TokenKind::Lt) {
             self.skip_balanced(
                 TokenKind::Lt,
-                &[TokenKind::Gt, TokenKind::GtGt, TokenKind::GtGtGt],
+                &[
+                    TokenKind::Gt,
+                    TokenKind::GtGt,
+                    TokenKind::GtGtGt,
+                ],
             );
         }
         // 父类构造调用实参：Base(1, 2)
@@ -1299,11 +1290,15 @@ impl Parser {
         }
         if self.check(TokenKind::Break) {
             let t = self.advance();
-            return Stmt::Expr(Expr::Break { span: t.span });
+            return Stmt::Expr(Expr::Break {
+                span: t.span,
+            });
         }
         if self.check(TokenKind::Continue) {
             let t = self.advance();
-            return Stmt::Expr(Expr::Continue { span: t.span });
+            return Stmt::Expr(Expr::Continue {
+                span: t.span,
+            });
         }
         if self.check(TokenKind::LBrace) {
             let blk = self.parse_block();
@@ -1650,7 +1645,9 @@ impl Parser {
             let tok = self.advance();
             if let Ok(n) = tok
                 .literal
-                .trim_end_matches(['f', 'F', 'd', 'D'])
+                .trim_end_matches([
+                    'f', 'F', 'd', 'D',
+                ])
                 .parse::<f64>()
             {
                 return Expr::Literal(Literal::Float(n), tok.span);
@@ -1707,7 +1704,9 @@ impl Parser {
                     let mut args = Vec::new();
                     if !self.check(TokenKind::RParen) {
                         // 检查是否是命名参数：name = expr
-                        if self.current().kind == TokenKind::Ident && self.peek(1) == TokenKind::Assign {
+                        if self.current().kind == TokenKind::Ident
+                            && self.peek(1) == TokenKind::Assign
+                        {
                             let name = self.advance().literal.clone();
                             self.advance(); // =
                             args.push(Expr::NamedArg {
@@ -1721,7 +1720,9 @@ impl Parser {
                         while self.check(TokenKind::Comma) {
                             self.advance();
                             // 检查是否是命名参数：name = expr
-                            if self.current().kind == TokenKind::Ident && self.peek(1) == TokenKind::Assign {
+                            if self.current().kind == TokenKind::Ident
+                                && self.peek(1) == TokenKind::Assign
+                            {
                                 let name = self.advance().literal.clone();
                                 self.advance(); // =
                                 args.push(Expr::NamedArg {
@@ -2537,7 +2538,11 @@ mod tests {
             Decl::Function(f) => {
                 let body = f.body.as_ref().expect("body");
                 if let Expr::Block(stmts, _) = &**body {
-                    if let Stmt::Expr(Expr::Return { value: Some(v), .. }) = &stmts[0] {
+                    if let Stmt::Expr(Expr::Return {
+                        value: Some(v),
+                        ..
+                    }) = &stmts[0]
+                    {
                         if let Expr::When { arms, .. } = &**v {
                             assert_eq!(arms.len(), 3);
                             assert_eq!(arms[0].patterns.len(), 2);
@@ -2595,7 +2600,12 @@ mod tests {
         match &program.declarations[0] {
             Decl::Class(c) => {
                 assert_eq!(c.superclass.as_deref(), Some("Animal"));
-                assert_eq!(c.implementations, vec!["Runnable", "Pet"]);
+                assert_eq!(
+                    c.implementations,
+                    vec![
+                        "Runnable", "Pet"
+                    ]
+                );
             }
             other => panic!("expected class, got {:?}", other),
         }

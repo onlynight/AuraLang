@@ -5,7 +5,7 @@
 //! 验证 Lambda/Closure 不再降级为 __lambda 调用，而是正确降级为 HirExpr::Lambda。
 //! 覆盖：简单 lambda、带参数的 lambda、闭包、lambda 作为返回值。
 
-use compiler::codegen::hir::{desugar_program, HirExpr, HirStmt};
+use compiler::codegen::hir::{HirExpr, HirStmt, desugar_program};
 use compiler::lexer::Lexer;
 use compiler::parser::Parser;
 
@@ -22,10 +22,19 @@ fn parse_to_hir(src: &str) -> compiler::codegen::hir::HirProgram {
 fn find_lambda_recursive(expr: &HirExpr) -> bool {
     match expr {
         HirExpr::Lambda { .. } => true,
-        HirExpr::Binary { lhs, rhs, .. } => find_lambda_recursive(lhs) || find_lambda_recursive(rhs),
+        HirExpr::Binary {
+            lhs, rhs, ..
+        } => find_lambda_recursive(lhs) || find_lambda_recursive(rhs),
         HirExpr::Call { args, .. } => args.iter().any(find_lambda_recursive),
         HirExpr::Block(block) => block.stmts.iter().any(|s| match s {
-            HirStmt::Val { init: Some(e), .. } | HirStmt::Var { init: Some(e), .. } => find_lambda_recursive(e),
+            HirStmt::Val {
+                init: Some(e),
+                ..
+            }
+            | HirStmt::Var {
+                init: Some(e),
+                ..
+            } => find_lambda_recursive(e),
             _ => false,
         }),
         _ => false,
@@ -36,8 +45,14 @@ fn find_lambda_recursive(expr: &HirExpr) -> bool {
 fn find_lambda_in_block(block: &compiler::codegen::hir::HirBlock) -> bool {
     block.stmts.iter().any(|s| match s {
         HirStmt::Expr(e) => find_lambda_recursive(e),
-        HirStmt::Val { init: Some(e), .. } => find_lambda_recursive(e),
-        HirStmt::Var { init: Some(e), .. } => find_lambda_recursive(e),
+        HirStmt::Val {
+            init: Some(e),
+            ..
+        } => find_lambda_recursive(e),
+        HirStmt::Var {
+            init: Some(e),
+            ..
+        } => find_lambda_recursive(e),
         HirStmt::Return(Some(e)) => find_lambda_recursive(e),
         _ => false,
     })
@@ -60,7 +75,10 @@ fn test_hir_lambda_block_body() {
     // (x: Int) -> { return x * 2 } 应降级为 HirExpr::Lambda
     let hir = parse_to_hir("fun main(): Int { var f = (x: Int) -> { return x * 2 }; return 0 }");
     let main = hir.functions.iter().find(|f| f.name == "main").expect("main 存在");
-    assert!(find_lambda_in_block(&main.body), "应包含 Lambda 表达式（块体）");
+    assert!(
+        find_lambda_in_block(&main.body),
+        "应包含 Lambda 表达式（块体）"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -97,9 +115,13 @@ fn test_hir_lambda_params_preserved() {
 #[test]
 fn test_hir_lambda_as_return_value() {
     let hir = parse_to_hir("fun make_adder(x: Int): (Int) -> Int { return (y: Int) -> x + y }");
-    let make_adder = hir.functions.iter().find(|f| f.name == "make_adder").expect("make_adder 存在");
+    let make_adder =
+        hir.functions.iter().find(|f| f.name == "make_adder").expect("make_adder 存在");
     // 函数体应包含 Lambda
-    assert!(find_lambda_in_block(&make_adder.body), "返回语句应包含 Lambda");
+    assert!(
+        find_lambda_in_block(&make_adder.body),
+        "返回语句应包含 Lambda"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -110,7 +132,10 @@ fn test_hir_lambda_as_return_value() {
 fn test_hir_no_lambda() {
     let hir = parse_to_hir("fun main(): Int { return 42 }");
     let main = hir.functions.iter().find(|f| f.name == "main").expect("main 存在");
-    assert!(!find_lambda_in_block(&main.body), "无 lambda 时应不包含 Lambda");
+    assert!(
+        !find_lambda_in_block(&main.body),
+        "无 lambda 时应不包含 Lambda"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

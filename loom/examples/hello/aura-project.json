@@ -1,0 +1,21 @@
+{
+  "schema-version": "1.0",
+  "name": "hello",
+  "version": "0.1.0",
+  "root": ".",
+  "entry": "src/main.aura",
+  "source-roots": [
+    "src"
+  ],
+  "dependencies": [],
+  "build": {
+    "out-dir": "target/build",
+    "cache-dir": "target/cache",
+    "parallel": 4,
+    "profile": null,
+    "target": null,
+    "opt-level": "2"
+  },
+  "tasks": [],
+  "plugins": []
+}

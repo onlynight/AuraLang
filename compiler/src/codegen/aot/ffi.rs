@@ -16,7 +16,9 @@ pub struct FfiGenerator<'a> {
 
 impl<'a> FfiGenerator<'a> {
     pub fn new(type_mapper: &'a TypeMapper) -> Self {
-        Self { type_mapper }
+        Self {
+            type_mapper,
+        }
     }
 
     /// 生成 FFI 函数声明的 LLVM IR 文本
@@ -29,27 +31,20 @@ impl<'a> FfiGenerator<'a> {
     }
 
     fn generate_extern_function(&self, func: &HirFunction) -> String {
-        let ret_ty = self.type_mapper.map(
-            func.ret
-                .as_ref()
-                .unwrap_or(&crate::codegen::hir::HirType::Named("Unit".into())),
-        );
+        let ret_ty = self
+            .type_mapper
+            .map(func.ret.as_ref().unwrap_or(&crate::codegen::hir::HirType::Named("Unit".into())));
         let ret_str = if ret_ty.is_empty() { "void" } else { &ret_ty };
         let params: Vec<String> = func
             .params
             .iter()
             .map(|p| {
                 self.type_mapper.map(
-                    p.ty.as_ref()
-                        .unwrap_or(&crate::codegen::hir::HirType::Named("Int".into())),
+                    p.ty.as_ref().unwrap_or(&crate::codegen::hir::HirType::Named("Int".into())),
                 )
             })
             .collect();
-        let params_str = if params.is_empty() {
-            String::new()
-        } else {
-            params.join(", ")
-        };
+        let params_str = if params.is_empty() { String::new() } else { params.join(", ") };
 
         // C 调用约定：LLVM IR 中默认就是 ccc，无需显式标注
         format!(
@@ -92,7 +87,9 @@ mod tests {
                 },
             ],
             ret: Some(HirType::Named("Unit".into())),
-            body: crate::codegen::hir::HirBlock { stmts: vec![] },
+            body: crate::codegen::hir::HirBlock {
+                stmts: vec![],
+            },
             is_native: true,
             type_params: vec![],
         };

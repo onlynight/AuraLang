@@ -44,7 +44,9 @@ pub struct DocRegistry {
 impl DocRegistry {
     /// 创建空的文档注册表
     pub fn new() -> Self {
-        Self { docs: Vec::new() }
+        Self {
+            docs: Vec::new(),
+        }
     }
 
     /// 添加一个文档条目
@@ -134,7 +136,10 @@ impl DocRegistry {
             module: "math",
             name: "aura.math.min",
             summary: "返回两个整数中的较小值。",
-            params: &[("a", "Int", "第一个数"), ("b", "Int", "第二个数")],
+            params: &[
+                ("a", "Int", "第一个数"),
+                ("b", "Int", "第二个数"),
+            ],
             returns: "Int",
             returns_desc: "最小值",
             example: Some(r#"aura.math.min(3, 5) // → 3"#),
@@ -144,7 +149,10 @@ impl DocRegistry {
             module: "math",
             name: "aura.math.max",
             summary: "返回两个整数中的较大值。",
-            params: &[("a", "Int", "第一个数"), ("b", "Int", "第二个数")],
+            params: &[
+                ("a", "Int", "第一个数"),
+                ("b", "Int", "第二个数"),
+            ],
             returns: "Int",
             returns_desc: "最大值",
             example: Some(r#"aura.math.max(3, 5) // → 5"#),
@@ -249,7 +257,10 @@ impl DocRegistry {
             module: "string",
             name: "aura.string.contains",
             summary: "判断字符串是否包含子串。",
-            params: &[("text", "String", "源字符串"), ("substr", "String", "子串")],
+            params: &[
+                ("text", "String", "源字符串"),
+                ("substr", "String", "子串"),
+            ],
             returns: "Bool",
             returns_desc: "包含返回 true",
             example: Some(r#"aura.string.contains("hello", "ell") // → true"#),
@@ -259,7 +270,10 @@ impl DocRegistry {
             module: "string",
             name: "aura.string.startsWith",
             summary: "判断字符串是否以指定前缀开头。",
-            params: &[("text", "String", "源字符串"), ("prefix", "String", "前缀")],
+            params: &[
+                ("text", "String", "源字符串"),
+                ("prefix", "String", "前缀"),
+            ],
             returns: "Bool",
             returns_desc: "匹配返回 true",
             example: None,
@@ -269,7 +283,10 @@ impl DocRegistry {
             module: "string",
             name: "aura.string.endsWith",
             summary: "判断字符串是否以指定后缀结尾。",
-            params: &[("text", "String", "源字符串"), ("suffix", "String", "后缀")],
+            params: &[
+                ("text", "String", "源字符串"),
+                ("suffix", "String", "后缀"),
+            ],
             returns: "Bool",
             returns_desc: "匹配返回 true",
             example: None,
@@ -279,7 +296,10 @@ impl DocRegistry {
             module: "string",
             name: "aura.string.split",
             summary: "按分隔符拆分字符串，返回 List。",
-            params: &[("text", "String", "源字符串"), ("sep", "String", "分隔符")],
+            params: &[
+                ("text", "String", "源字符串"),
+                ("sep", "String", "分隔符"),
+            ],
             returns: "List<String>",
             returns_desc: "拆分后的子串列表",
             example: Some(r#"aura.string.split("a,b,c", ",") // → ["a", "b", "c"]"#),
@@ -289,7 +309,10 @@ impl DocRegistry {
             module: "string",
             name: "aura.string.join",
             summary: "将空格分隔的文本合并，用指定分隔符连接。",
-            params: &[("text", "String", "源文本（空格分隔）"), ("sep", "String", "分隔符")],
+            params: &[
+                ("text", "String", "源文本（空格分隔）"),
+                ("sep", "String", "分隔符"),
+            ],
             returns: "String",
             returns_desc: "合并后的字符串",
             example: None,
@@ -421,7 +444,10 @@ impl DocRegistry {
             module: "collections",
             name: "aura.collections.listContains",
             summary: "检查列表是否包含指定元素。",
-            params: &[("list", "List", "源列表"), ("item", "Value", "要查找的元素")],
+            params: &[
+                ("list", "List", "源列表"),
+                ("item", "Value", "要查找的元素"),
+            ],
             returns: "Bool",
             returns_desc: "包含返回 true",
             example: None,
@@ -681,7 +707,10 @@ impl DocRegistry {
             module: "random",
             name: "aura.random.nextIntRange",
             summary: "返回 [min, max) 区间的随机整数。",
-            params: &[("min", "Int", "下界（含）"), ("max", "Int", "上界（不含）")],
+            params: &[
+                ("min", "Int", "下界（含）"),
+                ("max", "Int", "上界（不含）"),
+            ],
             returns: "Int",
             returns_desc: "区间内随机整数",
             example: Some(r#"aura.random.nextIntRange(1, 100)"#),
@@ -842,7 +871,10 @@ impl DocRegistry {
             module: "iter",
             name: "aura.iter.range",
             summary: "生成闭区间 [from, to] 的整数列表。",
-            params: &[("from", "Int", "起始值"), ("to", "Int", "结束值")],
+            params: &[
+                ("from", "Int", "起始值"),
+                ("to", "Int", "结束值"),
+            ],
             returns: "List",
             returns_desc: "整数列表",
             example: Some(r#"aura.iter.range(1, 5) // → [1, 2, 3, 4, 5]"#),
@@ -1181,11 +1213,8 @@ fn render_func_doc(out: &mut String, doc: &StdDoc) {
     let params_str = if doc.params.is_empty() {
         String::new()
     } else {
-        let parts: Vec<String> = doc
-            .params
-            .iter()
-            .map(|(name, ty, _)| format!("{}: {}", name, ty))
-            .collect();
+        let parts: Vec<String> =
+            doc.params.iter().map(|(name, ty, _)| format!("{}: {}", name, ty)).collect();
         format!("({})", parts.join(", "))
     };
     out.push_str(&format!(
@@ -1205,7 +1234,10 @@ fn render_func_doc(out: &mut String, doc: &StdDoc) {
     }
 
     // 返回值
-    out.push_str(&format!("#### 返回值\n\n`{}` — {}\n\n", doc.returns, doc.returns_desc));
+    out.push_str(&format!(
+        "#### 返回值\n\n`{}` — {}\n\n",
+        doc.returns, doc.returns_desc
+    ));
 
     // 示例
     if let Some(example) = doc.example {
@@ -1294,9 +1326,7 @@ pub fn render_module_markdown(registry: &DocRegistry, module: &str) -> String {
 pub fn render_html(registry: &DocRegistry) -> String {
     let mut out = String::with_capacity(16384);
 
-    out.push_str(
-        "<!DOCTYPE html>\n<html lang=\"zh-CN\">\n<head>\n<meta charset=\"UTF-8\">\n",
-    );
+    out.push_str("<!DOCTYPE html>\n<html lang=\"zh-CN\">\n<head>\n<meta charset=\"UTF-8\">\n");
     out.push_str(&format!(
         "<title>Aura 标准库文档 — {} 模块，{} 函数</title>\n",
         registry.module_names().len(),
@@ -1382,20 +1412,14 @@ fn format_sign(name: &str, params: &[(&str, &str, &str)], returns: &str) -> Stri
     if params.is_empty() {
         format!("{}(): {}", name, returns)
     } else {
-        let parts: Vec<String> = params
-            .iter()
-            .map(|(n, t, _)| format!("{}: {}", n, t))
-            .collect();
+        let parts: Vec<String> = params.iter().map(|(n, t, _)| format!("{}: {}", n, t)).collect();
         format!("{}({}): {}", name, parts.join(", "), returns)
     }
 }
 
 /// HTML 转义
 fn escape_html(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1491,7 +1515,11 @@ mod tests {
         let tmp = std::env::temp_dir().join("aura_docgen_test");
         let _ = std::fs::remove_dir_all(&tmp);
         let result = generate_docs(&tmp);
-        assert!(result.is_ok(), "generate_docs failed: {}", result.unwrap_err());
+        assert!(
+            result.is_ok(),
+            "generate_docs failed: {}",
+            result.unwrap_err()
+        );
         let files = result.unwrap();
         assert!(files.len() >= 2, "should write at least index + 1 module");
         let index = tmp.join("index.md");

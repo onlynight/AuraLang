@@ -18,10 +18,7 @@ fn test_constant_folding() {
     let src = "fun main() { val x = 1 + 2 * 3\n println(x) }";
     let module = compile_source(src).expect("编译成功");
     assert!(
-        module
-            .consts
-            .iter()
-            .any(|c| matches!(c, compiler::codegen::opcode::Const::Int(7))),
+        module.consts.iter().any(|c| matches!(c, compiler::codegen::opcode::Const::Int(7))),
         "常量折叠后应包含 7"
     );
 }

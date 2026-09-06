@@ -27,9 +27,15 @@ use crate::task::{TaskDefinition, TaskInputs, TaskKind, TaskOutputs};
 pub struct DocGenPlugin;
 
 impl BuildPlugin for DocGenPlugin {
-    fn name(&self) -> &str { "aura-doc-gen" }
-    fn version(&self) -> &str { "1.0.0" }
-    fn kind(&self) -> PluginKind { PluginKind::Explicit }
+    fn name(&self) -> &str {
+        "aura-doc-gen"
+    }
+    fn version(&self) -> &str {
+        "1.0.0"
+    }
+    fn kind(&self) -> PluginKind {
+        PluginKind::Explicit
+    }
     fn description(&self) -> Option<&str> {
         Some("文档生成插件：扫描源码，生成 API 文档（Markdown）")
     }
@@ -59,11 +65,7 @@ impl BuildPlugin for DocGenPlugin {
         Ok(())
     }
 
-    fn execute(
-        &self,
-        task_name: &str,
-        ctx: &PluginContext,
-    ) -> Result<TaskResult, LoomError> {
+    fn execute(&self, task_name: &str, ctx: &PluginContext) -> Result<TaskResult, LoomError> {
         match task_name {
             "doc" => {
                 // 扫描源码文件，生成 Markdown 文档
@@ -100,10 +102,8 @@ impl BuildPlugin for DocGenPlugin {
                 let mut artifacts = Vec::new();
                 for file in &files {
                     let rel = file.strip_prefix(project_dir).unwrap_or(file);
-                    let module_name = file
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("unknown");
+                    let module_name =
+                        file.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
                     doc_content.push_str(&format!("| `{}` | `{}` |\n", module_name, rel.display()));
 
                     // 为每个模块生成单独的文档页面
@@ -119,7 +119,11 @@ impl BuildPlugin for DocGenPlugin {
                 artifacts.push(main_doc_path);
 
                 Ok(TaskResult::ok_with_artifacts(
-                    format!("aura-doc-gen: 生成 {} 个模块文档 → {}", files.len(), out_dir.display()),
+                    format!(
+                        "aura-doc-gen: 生成 {} 个模块文档 → {}",
+                        files.len(),
+                        out_dir.display()
+                    ),
                     artifacts,
                 ))
             }
@@ -171,9 +175,8 @@ fn generate_module_doc(file: &std::path::Path, project_name: &str) -> String {
 
 fn chrono_or_local() -> String {
     // 简单的本地时间字符串（不依赖 chrono crate）
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
+    let now =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
     format!("{}s since epoch", now.as_secs())
 }
 
@@ -188,9 +191,15 @@ fn chrono_or_local() -> String {
 pub struct FormatPlugin;
 
 impl BuildPlugin for FormatPlugin {
-    fn name(&self) -> &str { "aura-format" }
-    fn version(&self) -> &str { "1.0.0" }
-    fn kind(&self) -> PluginKind { PluginKind::Explicit }
+    fn name(&self) -> &str {
+        "aura-format"
+    }
+    fn version(&self) -> &str {
+        "1.0.0"
+    }
+    fn kind(&self) -> PluginKind {
+        PluginKind::Explicit
+    }
     fn description(&self) -> Option<&str> {
         Some("格式化插件：统一源码格式")
     }
@@ -232,11 +241,7 @@ impl BuildPlugin for FormatPlugin {
         Ok(())
     }
 
-    fn execute(
-        &self,
-        task_name: &str,
-        ctx: &PluginContext,
-    ) -> Result<TaskResult, LoomError> {
+    fn execute(&self, task_name: &str, ctx: &PluginContext) -> Result<TaskResult, LoomError> {
         let project_dir = &ctx.project_dir;
         let src_dir = project_dir.join("src");
 
@@ -255,16 +260,18 @@ impl BuildPlugin for FormatPlugin {
             "fmt" => {
                 // 格式化：当前是占位符（实际格式化由 aura-fmt 工具处理）
                 let count = files.len();
-                Ok(TaskResult::ok(
-                    format!("aura-format: 格式化 {} 个文件（占位符，实际格式化待实现）", count),
-                ))
+                Ok(TaskResult::ok(format!(
+                    "aura-format: 格式化 {} 个文件（占位符，实际格式化待实现）",
+                    count
+                )))
             }
             "fmt-check" => {
                 // 检查模式：报告格式不一致的文件
                 let count = files.len();
-                Ok(TaskResult::ok(
-                    format!("aura-format: 检查 {} 个文件格式（占位符，实际检查待实现）", count),
-                ))
+                Ok(TaskResult::ok(format!(
+                    "aura-format: 检查 {} 个文件格式（占位符，实际检查待实现）",
+                    count
+                )))
             }
             _ => Ok(TaskResult::err(format!(
                 "aura-format: 未知任务 '{}'（支持的任务: fmt, fmt-check）",
@@ -286,9 +293,15 @@ impl BuildPlugin for FormatPlugin {
 pub struct AotPlugin;
 
 impl BuildPlugin for AotPlugin {
-    fn name(&self) -> &str { "aura-aot" }
-    fn version(&self) -> &str { "1.0.0" }
-    fn kind(&self) -> PluginKind { PluginKind::Explicit }
+    fn name(&self) -> &str {
+        "aura-aot"
+    }
+    fn version(&self) -> &str {
+        "1.0.0"
+    }
+    fn kind(&self) -> PluginKind {
+        PluginKind::Explicit
+    }
     fn description(&self) -> Option<&str> {
         Some("AOT 编译插件：通过 LLVM 后端编译原生可执行文件")
     }
@@ -318,11 +331,7 @@ impl BuildPlugin for AotPlugin {
         Ok(())
     }
 
-    fn execute(
-        &self,
-        _task_name: &str,
-        _ctx: &PluginContext,
-    ) -> Result<TaskResult, LoomError> {
+    fn execute(&self, _task_name: &str, _ctx: &PluginContext) -> Result<TaskResult, LoomError> {
         Ok(TaskResult::ok(
             "aura-aot: AOT 编译（占位符，需要 llvm feature 和 LLVM 后端实现）",
         ))
@@ -340,9 +349,15 @@ impl BuildPlugin for AotPlugin {
 pub struct CiPlugin;
 
 impl BuildPlugin for CiPlugin {
-    fn name(&self) -> &str { "aura-ci" }
-    fn version(&self) -> &str { "1.0.0" }
-    fn kind(&self) -> PluginKind { PluginKind::Explicit }
+    fn name(&self) -> &str {
+        "aura-ci"
+    }
+    fn version(&self) -> &str {
+        "1.0.0"
+    }
+    fn kind(&self) -> PluginKind {
+        PluginKind::Explicit
+    }
     fn description(&self) -> Option<&str> {
         Some("CI 插件：生成 CI/CD 流水线配置")
     }
@@ -358,7 +373,10 @@ impl BuildPlugin for CiPlugin {
                 name: "ci".to_string(),
                 description: "运行完整 CI 流水线".to_string(),
                 kind: TaskKind::Plugin("ci".to_string()),
-                depends_on: vec!["package".to_string(), "verify".to_string()],
+                depends_on: vec![
+                    "package".to_string(),
+                    "verify".to_string(),
+                ],
                 inputs: TaskInputs::default(),
                 outputs: TaskOutputs::default(),
             };
@@ -369,11 +387,7 @@ impl BuildPlugin for CiPlugin {
         Ok(())
     }
 
-    fn execute(
-        &self,
-        _task_name: &str,
-        _ctx: &PluginContext,
-    ) -> Result<TaskResult, LoomError> {
+    fn execute(&self, _task_name: &str, _ctx: &PluginContext) -> Result<TaskResult, LoomError> {
         Ok(TaskResult::ok(
             "aura-ci: CI 流水线（占位符，Phase B6 实现完整功能）",
         ))
@@ -420,8 +434,8 @@ pub fn explicit_plugins(manifest: &crate::manifest::LoomManifest) -> Vec<Box<dyn
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::parse::default_manifest;
     use crate::manifest::LoomManifest;
+    use crate::manifest::parse::default_manifest;
     use tempfile::TempDir;
 
     #[test]
@@ -492,8 +506,16 @@ mod tests {
         // 创建 src 目录和源码文件
         let src = tmp.path().join("src");
         std::fs::create_dir_all(&src).unwrap();
-        std::fs::write(src.join("main.aura"), "fun main() {\n    println(\"hello\")\n}\n").unwrap();
-        std::fs::write(src.join("utils.aura"), "fun add(a: int, b: int) -> int {\n    a + b\n}\n").unwrap();
+        std::fs::write(
+            src.join("main.aura"),
+            "fun main() {\n    println(\"hello\")\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            src.join("utils.aura"),
+            "fun add(a: int, b: int) -> int {\n    a + b\n}\n",
+        )
+        .unwrap();
 
         let mut ctx = PluginContext::new_default();
         ctx.project_dir = tmp.path().to_path_buf();

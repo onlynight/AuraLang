@@ -9,8 +9,8 @@
 //! - 每个 Actor 可在独立线程执行
 //! - 提供 spawn/join/shutdown 生命周期管理
 
-use std::sync::{Arc, Mutex, Condvar};
 use std::collections::VecDeque;
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
 /// 线程池
@@ -40,7 +40,9 @@ impl ThreadPool {
     /// 创建指定大小的线程池
     pub fn new(size: usize) -> Self {
         let size = size.max(1);
-        let queue = Arc::new(Mutex::new(TaskQueue { tasks: VecDeque::new() }));
+        let queue = Arc::new(Mutex::new(TaskQueue {
+            tasks: VecDeque::new(),
+        }));
         let shutdown = Arc::new(Mutex::new(false));
         let shutdown_cv = Arc::new(Condvar::new());
         let mut workers = Vec::with_capacity(size);
@@ -72,7 +74,9 @@ impl ThreadPool {
                 }
             });
 
-            workers.push(Worker { handle: Some(handle) });
+            workers.push(Worker {
+                handle: Some(handle),
+            });
         }
 
         ThreadPool {
@@ -85,9 +89,7 @@ impl ThreadPool {
 
     /// 获取默认大小的线程池（CPU 核心数）
     pub fn default_pool() -> Self {
-        let cores = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4);
+        let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
         Self::new(cores)
     }
 

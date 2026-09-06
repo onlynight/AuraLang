@@ -161,7 +161,11 @@ impl LocalCache {
     }
 
     /// 存储任务的 fingerprint
-    pub fn store_fingerprint(&mut self, task_name: &str, fingerprint: &str) -> Result<(), LoomError> {
+    pub fn store_fingerprint(
+        &mut self,
+        task_name: &str,
+        fingerprint: &str,
+    ) -> Result<(), LoomError> {
         self.store.fingerprints.insert(task_name.to_string(), fingerprint.to_string());
         self.save()?;
         Ok(())
@@ -249,7 +253,11 @@ impl LocalCache {
     ///
     /// 接收任务名和产物文件列表，复制到 cache/artifacts/{task_name}/ 下，
     /// 并记录元数据到 metadata.json。
-    pub fn store_artifacts(&mut self, task_name: &str, artifacts: &[PathBuf]) -> Result<Vec<ArtifactEntry>, LoomError> {
+    pub fn store_artifacts(
+        &mut self,
+        task_name: &str,
+        artifacts: &[PathBuf],
+    ) -> Result<Vec<ArtifactEntry>, LoomError> {
         let dest_dir = self.ensure_task_artifacts_dir(task_name)?;
         let mut entries = Vec::new();
 
@@ -258,9 +266,9 @@ impl LocalCache {
                 continue;
             }
 
-            let file_name = artifact.file_name()
-                .and_then(|n| n.to_str())
-                .ok_or_else(|| LoomError::Cache(format!("无法获取文件名: {}", artifact.display())))?;
+            let file_name = artifact.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
+                LoomError::Cache(format!("无法获取文件名: {}", artifact.display()))
+            })?;
 
             let dest = dest_dir.join(file_name);
             std::fs::copy(artifact, &dest)?;
@@ -286,7 +294,11 @@ impl LocalCache {
     /// 从缓存恢复产物文件到目标目录
     ///
     /// 返回恢复的文件路径列表。
-    pub fn restore_artifacts(&self, task_name: &str, dest_dir: &Path) -> Result<Vec<PathBuf>, LoomError> {
+    pub fn restore_artifacts(
+        &self,
+        task_name: &str,
+        dest_dir: &Path,
+    ) -> Result<Vec<PathBuf>, LoomError> {
         let src_dir = self.task_artifacts_dir(task_name);
         if !src_dir.exists() {
             return Ok(Vec::new());
@@ -322,9 +334,7 @@ impl LocalCache {
 
     /// 检查任务是否有缓存产物
     pub fn has_artifacts(&self, task_name: &str) -> bool {
-        self.meta_store.tasks.get(task_name)
-            .map(|entries| !entries.is_empty())
-            .unwrap_or(false)
+        self.meta_store.tasks.get(task_name).map(|entries| !entries.is_empty()).unwrap_or(false)
     }
 
     /// 删除任务的缓存产物（同时删除元数据）
@@ -339,7 +349,11 @@ impl LocalCache {
     }
 
     /// 删除指定任务及其所有依赖的缓存（用于 --clean 级联清理）
-    pub fn clear_task_and_dependents(&mut self, task_name: &str, all_tasks: &[String]) -> Result<(), LoomError> {
+    pub fn clear_task_and_dependents(
+        &mut self,
+        task_name: &str,
+        all_tasks: &[String],
+    ) -> Result<(), LoomError> {
         let mut to_clear = vec![task_name.to_string()];
         // 简单实现：清除所有任务缓存（B3.2 可优化为仅清除依赖链）
         let _ = all_tasks;
@@ -359,16 +373,15 @@ impl LocalCache {
 
     /// 计算缓存总大小
     fn compute_total_size(&self) -> u64 {
-        self.meta_store.tasks.values().flat_map(|entries| entries.iter())
-            .map(|e| e.size)
-            .sum()
+        self.meta_store.tasks.values().flat_map(|entries| entries.iter()).map(|e| e.size).sum()
     }
 
     /// 保存 metadata.json
     fn save_metadata(&mut self) -> Result<(), LoomError> {
         self.meta_store.metadata.updated_at = now_timestamp();
         self.meta_store.metadata.task_count = self.meta_store.tasks.len();
-        self.meta_store.metadata.artifact_count = self.meta_store.tasks.values().map(|v| v.len()).sum();
+        self.meta_store.metadata.artifact_count =
+            self.meta_store.tasks.values().map(|v| v.len()).sum();
         self.meta_store.metadata.total_size_bytes = self.compute_total_size();
 
         let content = serde_json::to_string_pretty(&self.meta_store)
@@ -407,14 +420,16 @@ impl LocalCache {
 }
 
 fn sanitize_task_name(name: &str) -> String {
-    name.replace(['/', '\\', ':', ' ', '|', '<', '>', '"', '?', '*'], "_")
+    name.replace(
+        [
+            '/', '\\', ':', ' ', '|', '<', '>', '"', '?', '*',
+        ],
+        "_",
+    )
 }
 
 fn now_timestamp() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
 /// 缓存统计信息
@@ -606,7 +621,14 @@ mod tests {
         let file2 = tmp.path().join("test2.auc");
         std::fs::write(&file2, "artifact content 2").unwrap();
 
-        let entries = cache.store_artifacts("compile-main", &[file1, file2]).unwrap();
+        let entries = cache
+            .store_artifacts(
+                "compile-main",
+                &[
+                    file1, file2,
+                ],
+            )
+            .unwrap();
         assert_eq!(entries.len(), 2);
         assert!(entries[0].path.contains("test1"));
         assert!(entries[1].path.contains("test2"));
@@ -760,7 +782,14 @@ mod tests {
         let file2 = tmp.path().join("test2.auz");
         std::fs::write(&file2, "bbbb").unwrap();
 
-        cache.store_artifacts("compile", &[file1, file2]).unwrap();
+        cache
+            .store_artifacts(
+                "compile",
+                &[
+                    file1, file2,
+                ],
+            )
+            .unwrap();
 
         let stats = cache.stats();
         assert_eq!(stats.artifact_count, 2);

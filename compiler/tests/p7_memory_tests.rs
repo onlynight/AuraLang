@@ -44,8 +44,7 @@ fun main() {
 "#;
     let module = compile_source(src).unwrap();
     let (mir_funcs, _ctx) = lower_program(&desugar_program(
-        &compiler::parser::Parser::new(compiler::lexer::Lexer::new(src).tokenize())
-            .parse_program(),
+        &compiler::parser::Parser::new(compiler::lexer::Lexer::new(src).tokenize()).parse_program(),
     ));
     let escape = escape_analysis(&mir_funcs);
     // "use" 函数：obj 作为参数传入，应被标记为逃逸
@@ -90,10 +89,8 @@ fun main() {
 "#;
     let module = compile_source(src).unwrap();
     // 验证字节码中包含 RETAIN 指令
-    let has_retain = module
-        .functions
-        .iter()
-        .any(|f| f.code.iter().any(|b| *b == OpCode::Retain.byte()));
+    let has_retain =
+        module.functions.iter().any(|f| f.code.iter().any(|b| *b == OpCode::Retain.byte()));
     assert!(has_retain, "函数调用参数应自动插入 Retain 指令");
 }
 
@@ -111,10 +108,8 @@ fun main() {
 }
 "#;
     let module = compile_source(src).unwrap();
-    let has_retain = module
-        .functions
-        .iter()
-        .any(|f| f.code.iter().any(|b| *b == OpCode::Retain.byte()));
+    let has_retain =
+        module.functions.iter().any(|f| f.code.iter().any(|b| *b == OpCode::Retain.byte()));
     assert!(has_retain, "字段赋值应自动插入 Retain 指令");
 }
 
@@ -151,11 +146,7 @@ fn test_weak_get_upgrade() {
     let alive = vm.heap_ref().is_alive(h);
     assert!(alive);
     // 模拟 WeakGet：检查对象是否存活
-    let upgraded = if alive {
-        Some(compiler::vm::Value::Ref(h))
-    } else {
-        None
-    };
+    let upgraded = if alive { Some(compiler::vm::Value::Ref(h)) } else { None };
     assert!(upgraded.is_some());
 }
 
@@ -205,9 +196,7 @@ fun main() {
 "#;
     let module = compile_source(src).unwrap();
     let has_defer = module.functions.iter().any(|f| {
-        f.code
-            .iter()
-            .any(|b| *b == OpCode::DeferBegin.byte() || *b == OpCode::DeferEnd.byte())
+        f.code.iter().any(|b| *b == OpCode::DeferBegin.byte() || *b == OpCode::DeferEnd.byte())
     });
     // 注意：defer 在当前实现中降级为普通块，DEFER_BEGIN/END 仅作为标记
     // 实际执行顺序由编译期保证
@@ -283,23 +272,28 @@ fn test_arc_optimization_redundant_pairs() {
     let mut func = MirFunction {
         name: "test".to_string(),
         param_slots: vec![0],
-        blocks: vec![BasicBlock {
-            id: 0,
-            instrs: vec![
-                // LoadConst 42 → dst
-                MirInstr::LoadConst { dst: 1, ci: 0 },
-                // 冗余对：Retain(1) → Release(1) → 应被消除
-                MirInstr::Retain { src: 1 },
-                MirInstr::Release { src: 1 },
-                // 另一个冗余对
-                MirInstr::Retain { src: 1 },
-                MirInstr::Release { src: 1 },
-                // 连续 Retain（同一寄存器）→ 仅保留第一个
-                MirInstr::Retain { src: 1 },
-                MirInstr::Retain { src: 1 },
-            ],
-            term: Terminator::ReturnVoid,
-        }],
+        blocks: vec![
+            BasicBlock {
+                id: 0,
+                instrs: vec![
+                    // LoadConst 42 → dst
+                    MirInstr::LoadConst {
+                        dst: 1,
+                        ci: 0,
+                    },
+                    // 冗余对：Retain(1) → Release(1) → 应被消除
+                    MirInstr::Retain { src: 1 },
+                    MirInstr::Release { src: 1 },
+                    // 另一个冗余对
+                    MirInstr::Retain { src: 1 },
+                    MirInstr::Release { src: 1 },
+                    // 连续 Retain（同一寄存器）→ 仅保留第一个
+                    MirInstr::Retain { src: 1 },
+                    MirInstr::Retain { src: 1 },
+                ],
+                term: Terminator::ReturnVoid,
+            },
+        ],
         reg_count: 2,
         is_native: false,
     };
@@ -321,17 +315,25 @@ fn test_arc_optimization_no_redundant() {
     let mut func = MirFunction {
         name: "test".to_string(),
         param_slots: vec![],
-        blocks: vec![BasicBlock {
-            id: 0,
-            instrs: vec![
-                MirInstr::LoadConst { dst: 1, ci: 0 },
-                MirInstr::Retain { src: 1 },
-                // 非 ARC 指令重置状态
-                MirInstr::LoadConst { dst: 2, ci: 0 },
-                MirInstr::Retain { src: 2 },
-            ],
-            term: Terminator::ReturnVoid,
-        }],
+        blocks: vec![
+            BasicBlock {
+                id: 0,
+                instrs: vec![
+                    MirInstr::LoadConst {
+                        dst: 1,
+                        ci: 0,
+                    },
+                    MirInstr::Retain { src: 1 },
+                    // 非 ARC 指令重置状态
+                    MirInstr::LoadConst {
+                        dst: 2,
+                        ci: 0,
+                    },
+                    MirInstr::Retain { src: 2 },
+                ],
+                term: Terminator::ReturnVoid,
+            },
+        ],
         reg_count: 3,
         is_native: false,
     };
@@ -353,16 +355,21 @@ fn test_leak_detection_clean() {
     let func = MirFunction {
         name: "clean".to_string(),
         param_slots: vec![],
-        blocks: vec![BasicBlock {
-            id: 0,
-            instrs: vec![
-                // 分配 + Retain + Release（平衡）
-                MirInstr::LoadConst { dst: 1, ci: 0 },
-                MirInstr::Retain { src: 1 },
-                MirInstr::Release { src: 1 },
-            ],
-            term: Terminator::ReturnVoid,
-        }],
+        blocks: vec![
+            BasicBlock {
+                id: 0,
+                instrs: vec![
+                    // 分配 + Retain + Release（平衡）
+                    MirInstr::LoadConst {
+                        dst: 1,
+                        ci: 0,
+                    },
+                    MirInstr::Retain { src: 1 },
+                    MirInstr::Release { src: 1 },
+                ],
+                term: Terminator::ReturnVoid,
+            },
+        ],
         reg_count: 2,
         is_native: false,
     };
@@ -379,16 +386,21 @@ fn test_leak_detection_leaked() {
     let func = MirFunction {
         name: "leaked".to_string(),
         param_slots: vec![],
-        blocks: vec![BasicBlock {
-            id: 0,
-            instrs: vec![
-                // 分配但只 Retain 不 Release
-                MirInstr::LoadConst { dst: 1, ci: 0 },
-                MirInstr::Retain { src: 1 },
-                // 无对应 Release
-            ],
-            term: Terminator::ReturnVoid,
-        }],
+        blocks: vec![
+            BasicBlock {
+                id: 0,
+                instrs: vec![
+                    // 分配但只 Retain 不 Release
+                    MirInstr::LoadConst {
+                        dst: 1,
+                        ci: 0,
+                    },
+                    MirInstr::Retain { src: 1 },
+                    // 无对应 Release
+                ],
+                term: Terminator::ReturnVoid,
+            },
+        ],
         reg_count: 2,
         is_native: false,
     };
@@ -436,12 +448,7 @@ fun main() {
     let total_retains: usize = module
         .functions
         .iter()
-        .map(|f| {
-            f.code
-                .iter()
-                .filter(|b| **b == OpCode::Retain.byte())
-                .count()
-        })
+        .map(|f| f.code.iter().filter(|b| **b == OpCode::Retain.byte()).count())
         .sum();
     assert!(
         total_retains >= 1,
@@ -483,9 +490,7 @@ fn test_full_memory_management_integration() {
     assert!(!vm.heap_ref().is_alive(h2));
 
     // 6. Box 分配
-    let h3 = vm
-        .heap_mut()
-        .alloc_box_value(compiler::vm::Value::Int(100));
+    let h3 = vm.heap_mut().alloc_box_value(compiler::vm::Value::Int(100));
     assert!(vm.heap_ref().is_alive(h3));
     let val = vm.heap_ref().get_field(h3, field_hash("value"));
     assert_eq!(val, compiler::vm::Value::Int(100));
@@ -510,13 +515,11 @@ fn test_arc_circular_reference() {
 
     // 设置 A.next = B（Retain B）
     vm.heap_mut().inc_ref(b);
-    vm.heap_mut()
-        .set_field(a, field_hash("next"), compiler::vm::Value::Ref(b));
+    vm.heap_mut().set_field(a, field_hash("next"), compiler::vm::Value::Ref(b));
 
     // 设置 B.next = A（Retain A）
     vm.heap_mut().inc_ref(a);
-    vm.heap_mut()
-        .set_field(b, field_hash("next"), compiler::vm::Value::Ref(a));
+    vm.heap_mut().set_field(b, field_hash("next"), compiler::vm::Value::Ref(a));
 
     // 释放外部引用
     vm.heap_mut().dec_ref(a); // 计数：1(初始) + 1(B.next) - 1 = 1
@@ -550,9 +553,7 @@ fn test_box_with_arc() {
     let mut vm = create_test_vm();
 
     // box 创建的对象也有引用计数
-    let boxed = vm
-        .heap_mut()
-        .alloc_box_value(compiler::vm::Value::Int(42));
+    let boxed = vm.heap_mut().alloc_box_value(compiler::vm::Value::Int(42));
     assert!(vm.heap_ref().is_alive(boxed));
 
     // 复制引用（Retain）
@@ -583,13 +584,16 @@ fn create_test_vm() -> Vm {
             compiler::codegen::opcode::Const::Null,
         ],
         natives: vec![],
-        functions: vec![compiler::codegen::opcode::BytecodeFunction {
-            name: "main".to_string(),
-            param_count: 0,
-            locals: 2,
-            is_native: false,
-            code: vec![OpCode::ReturnUnit.byte()],
-        }],
+        functions: vec![
+            compiler::codegen::opcode::BytecodeFunction {
+                name: "main".to_string(),
+                param_count: 0,
+                locals: 2,
+                is_native: false,
+                code: vec![OpCode::ReturnUnit.byte()],
+                line_table: None,
+            },
+        ],
         entry: 0,
         enabled_modules: Vec::new(),
     };

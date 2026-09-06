@@ -258,20 +258,12 @@ impl TargetTriple {
 
     /// 获取目标文件扩展名
     pub fn object_ext(&self) -> &'static str {
-        if self.os == OperatingSystem::Windows {
-            "obj"
-        } else {
-            "o"
-        }
+        if self.os == OperatingSystem::Windows { "obj" } else { "o" }
     }
 
     /// 获取可执行文件扩展名
     pub fn exe_ext(&self) -> &'static str {
-        if self.os == OperatingSystem::Windows {
-            "exe"
-        } else {
-            ""
-        }
+        if self.os == OperatingSystem::Windows { "exe" } else { "" }
     }
 }
 

@@ -78,11 +78,7 @@ pub fn generate_c_code(program: &HirProgram) -> Result<String, AotError> {
                 format!("{} {}", ty, sanitize_c(&p.name))
             })
             .collect();
-        let params_str = if params.is_empty() {
-            "void".to_string()
-        } else {
-            params.join(", ")
-        };
+        let params_str = if params.is_empty() { "void".to_string() } else { params.join(", ") };
         s.push_str(&format!("extern {} {}({});\n", ret, func.name, params_str));
     }
     s.push_str("\n");
@@ -117,11 +113,7 @@ fn generate_function(func: &HirFunction) -> String {
             format!("{} {}", ty, sanitize_c(&p.name))
         })
         .collect();
-    let params_str = if params.is_empty() {
-        "void".to_string()
-    } else {
-        params.join(", ")
-    };
+    let params_str = if params.is_empty() { "void".to_string() } else { params.join(", ") };
 
     let mut s = String::new();
     s.push_str(&format!("{} {}({}) {{\n", ret, func.name, params_str));
@@ -139,7 +131,11 @@ fn emit_c_block(s: &mut String, block: &crate::codegen::hir::HirBlock, indent: u
 fn emit_c_stmt(s: &mut String, stmt: &HirStmt, indent: usize) {
     let pad = "    ".repeat(indent);
     match stmt {
-        HirStmt::Val { name, ty, init } => {
+        HirStmt::Val {
+            name,
+            ty,
+            init,
+        } => {
             let c_ty = ty.as_ref().map(|t| map_type(t)).unwrap_or("int32_t");
             s.push_str(&format!("{}{} {}", pad, c_ty, sanitize_c(name)));
             if let Some(init) = init {
@@ -148,7 +144,11 @@ fn emit_c_stmt(s: &mut String, stmt: &HirStmt, indent: usize) {
             }
             s.push_str(";\n");
         }
-        HirStmt::Var { name, ty, init } => {
+        HirStmt::Var {
+            name,
+            ty,
+            init,
+        } => {
             let c_ty = ty.as_ref().map(|t| map_type(t)).unwrap_or("int32_t");
             s.push_str(&format!("{}{} {}", pad, c_ty, sanitize_c(name)));
             if let Some(init) = init {
@@ -157,7 +157,10 @@ fn emit_c_stmt(s: &mut String, stmt: &HirStmt, indent: usize) {
             }
             s.push_str(";\n");
         }
-        HirStmt::Assign { target, value } => {
+        HirStmt::Assign {
+            target,
+            value,
+        } => {
             emit_c_expr(s, target);
             s.push_str(" = ");
             emit_c_expr(s, value);
@@ -222,7 +225,11 @@ fn emit_c_expr(s: &mut String, expr: &HirExpr) {
     match expr {
         HirExpr::Lit(lit) => emit_c_literal(s, lit),
         HirExpr::Var(name) => s.push_str(&sanitize_c(name)),
-        HirExpr::Binary { op, lhs, rhs } => {
+        HirExpr::Binary {
+            op,
+            lhs,
+            rhs,
+        } => {
             s.push('(');
             emit_c_expr(s, lhs);
             s.push_str(" ");
@@ -231,11 +238,17 @@ fn emit_c_expr(s: &mut String, expr: &HirExpr) {
             emit_c_expr(s, rhs);
             s.push(')');
         }
-        HirExpr::Unary { op, operand } => {
+        HirExpr::Unary {
+            op,
+            operand,
+        } => {
             emit_c_unop(s, op);
             emit_c_expr(s, operand);
         }
-        HirExpr::Call { callee, args } => {
+        HirExpr::Call {
+            callee,
+            args,
+        } => {
             s.push_str(&sanitize_c(callee));
             s.push('(');
             let args_str: Vec<String> = args
@@ -249,18 +262,27 @@ fn emit_c_expr(s: &mut String, expr: &HirExpr) {
             s.push_str(&args_str.join(", "));
             s.push(')');
         }
-        HirExpr::Member { object, name } => {
+        HirExpr::Member {
+            object,
+            name,
+        } => {
             emit_c_expr(s, object);
             s.push('.');
             s.push_str(&sanitize_c(name));
         }
-        HirExpr::Index { container, index } => {
+        HirExpr::Index {
+            container,
+            index,
+        } => {
             emit_c_expr(s, container);
             s.push('[');
             emit_c_expr(s, index);
             s.push(']');
         }
-        HirExpr::New { type_name, args } => {
+        HirExpr::New {
+            type_name,
+            args,
+        } => {
             s.push_str(&format!(
                 "({{({}*)malloc(sizeof({}))}})",
                 sanitize_c(type_name),
@@ -322,7 +344,10 @@ fn emit_c_expr(s: &mut String, expr: &HirExpr) {
             emit_c_expr(s, inner)
         }
         // Phase 5: Lambda — C 后端支持（生成静态函数 + 函数指针）
-        HirExpr::Lambda { params, body } => {
+        HirExpr::Lambda {
+            params,
+            body,
+        } => {
             // 生成 Lambda 函数名
             let func_name = format!("__lambda_{}", CBackendCtx::lambda_counter());
             CBackendCtx::inc_lambda_counter();
@@ -346,11 +371,8 @@ fn emit_c_expr(s: &mut String, expr: &HirExpr) {
             }
 
             // 生成函数定义
-            let params_str = if params_strs.is_empty() {
-                "void".to_string()
-            } else {
-                params_strs.join(", ")
-            };
+            let params_str =
+                if params_strs.is_empty() { "void".to_string() } else { params_strs.join(", ") };
 
             s.push_str(&format!(
                 "static int32_t {}({}) {{\n",
@@ -434,11 +456,9 @@ pub fn compile_c_to_exe(c_source: &str, output_path: &Path) -> Result<(), AotErr
     std::fs::write(&tmp_c, c_source).map_err(|e| AotError::Io(e.to_string()))?;
 
     let compiler = if cfg!(target_os = "windows") {
-        option_env!("AURA_CONFIG_C_COMPILER_WINDOWS")
-            .unwrap_or("cl.exe")
+        option_env!("AURA_CONFIG_C_COMPILER_WINDOWS").unwrap_or("cl.exe")
     } else {
-        option_env!("AURA_CONFIG_C_COMPILER_UNIX")
-            .unwrap_or("gcc")
+        option_env!("AURA_CONFIG_C_COMPILER_UNIX").unwrap_or("gcc")
     };
 
     let args: Vec<String> = if cfg!(target_os = "windows") {
@@ -563,14 +583,22 @@ fn collect_free_vars_c(
                 captures.push(name.clone());
             }
         }
-        HirExpr::Binary { lhs, rhs, .. } => {
+        HirExpr::Binary {
+            lhs, rhs, ..
+        } => {
             collect_free_vars_c(lhs, params, captures);
             collect_free_vars_c(rhs, params, captures);
         }
-        HirExpr::Unary { operand, .. } => {
+        HirExpr::Unary {
+            operand, ..
+        } => {
             collect_free_vars_c(operand, params, captures);
         }
-        HirExpr::Call { callee, args, .. } => {
+        HirExpr::Call {
+            callee,
+            args,
+            ..
+        } => {
             if !is_builtin_c(callee) {
                 collect_free_vars_c(&HirExpr::Var(callee.clone()), params, captures);
             }
@@ -581,7 +609,11 @@ fn collect_free_vars_c(
         HirExpr::Member { object, .. } => {
             collect_free_vars_c(object, params, captures);
         }
-        HirExpr::Index { container, index, .. } => {
+        HirExpr::Index {
+            container,
+            index,
+            ..
+        } => {
             collect_free_vars_c(container, params, captures);
             collect_free_vars_c(index, params, captures);
         }
@@ -590,13 +622,21 @@ fn collect_free_vars_c(
                 collect_free_vars_c_in_stmt(stmt, params, captures);
             }
         }
-        HirExpr::Lambda { params: inner_params, body, .. } => {
+        HirExpr::Lambda {
+            params: inner_params,
+            body,
+            ..
+        } => {
             let _ = inner_params;
             for stmt in &body.stmts {
                 collect_free_vars_c_in_stmt(stmt, params, captures);
             }
         }
-        HirExpr::If { cond, then_e, else_e } => {
+        HirExpr::If {
+            cond,
+            then_e,
+            else_e,
+        } => {
             collect_free_vars_c(cond, params, captures);
             collect_free_vars_c(then_e, params, captures);
             collect_free_vars_c(else_e, params, captures);
@@ -617,7 +657,10 @@ fn collect_free_vars_c_in_stmt(
                 collect_free_vars_c(e, params, captures);
             }
         }
-        HirStmt::Assign { target, value } => {
+        HirStmt::Assign {
+            target,
+            value,
+        } => {
             collect_free_vars_c(target, params, captures);
             collect_free_vars_c(value, params, captures);
         }
@@ -627,7 +670,12 @@ fn collect_free_vars_c_in_stmt(
         HirStmt::Return(Some(e)) => {
             collect_free_vars_c(e, params, captures);
         }
-        HirStmt::If { cond, then_b, else_b, .. } => {
+        HirStmt::If {
+            cond,
+            then_b,
+            else_b,
+            ..
+        } => {
             collect_free_vars_c(cond, params, captures);
             for stmt in &then_b.stmts {
                 collect_free_vars_c_in_stmt(stmt, params, captures);
@@ -638,7 +686,9 @@ fn collect_free_vars_c_in_stmt(
                 }
             }
         }
-        HirStmt::While { cond, body, .. } => {
+        HirStmt::While {
+            cond, body, ..
+        } => {
             collect_free_vars_c(cond, params, captures);
             for stmt in &body.stmts {
                 collect_free_vars_c_in_stmt(stmt, params, captures);
@@ -657,9 +707,22 @@ fn collect_free_vars_c_in_stmt(
 fn is_builtin_c(name: &str) -> bool {
     matches!(
         name,
-        "println" | "print" | "puts" | "abs" | "sqrt" | "pow"
-            | "toInt" | "toFloat" | "toStr" | "toString"
-            | "clock" | "strlen" | "malloc" | "free"
-            | "true" | "false" | "null"
+        "println"
+            | "print"
+            | "puts"
+            | "abs"
+            | "sqrt"
+            | "pow"
+            | "toInt"
+            | "toFloat"
+            | "toStr"
+            | "toString"
+            | "clock"
+            | "strlen"
+            | "malloc"
+            | "free"
+            | "true"
+            | "false"
+            | "null"
     )
 }

@@ -230,3 +230,150 @@ impl fmt::Display for Value {
         }
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// serde 序列化（Phase 3: 跨进程 IPC 支持）
+// ─────────────────────────────────────────────────────────────────────────────
+
+impl serde::Serialize for Value {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(2))?;
+        map.serialize_entry(
+            "t",
+            match self {
+                Value::Int(_) => "i",
+                Value::Float(_) => "f",
+                Value::Bool(_) => "b",
+                Value::Str(_) => "s",
+                Value::Null => "n",
+                Value::Ref(_) => "r",
+                Value::Weak(_) => "w",
+                Value::Ptr(_) => "p",
+                Value::List(_) => "l",
+                Value::Map(_) => "m",
+            },
+        )?;
+        let any = self.value_as_any();
+        map.serialize_entry("v", &any)?;
+        map.end()
+    }
+}
+
+impl Value {
+    fn value_as_any(&self) -> ValueAny {
+        match self {
+            Value::Int(i) => ValueAny::Int(*i),
+            Value::Float(f) => ValueAny::Float(*f),
+            Value::Bool(b) => ValueAny::Bool(*b),
+            Value::Str(s) => ValueAny::Str(s.to_string()),
+            Value::Null => ValueAny::Null,
+            Value::Ref(h) => ValueAny::Ref(*h),
+            Value::Weak(h) => ValueAny::Weak(*h),
+            Value::Ptr(p) => ValueAny::Ptr(*p),
+            Value::List(items) => ValueAny::List(items.clone()),
+            Value::Map(map) => ValueAny::Map(map.clone()),
+        }
+    }
+}
+
+/// 中间表示，用于 serde 序列化
+#[derive(serde::Serialize, serde::Deserialize)]
+enum ValueAny {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Str(String),
+    Null,
+    Ref(usize),
+    Weak(usize),
+    Ptr(i64),
+    List(Vec<Value>),
+    Map(HashMap<Value, Value>),
+}
+
+impl<'de> serde::Deserialize<'de> for Value {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct ValueWrapper {
+            t: String,
+            v: ValueAny,
+        }
+        let wrapper = ValueWrapper::deserialize(deserializer)?;
+        Ok(match wrapper.t.as_str() {
+            "i" => Value::Int(wrapper.v.as_int().unwrap_or(0)),
+            "f" => Value::Float(wrapper.v.as_float().unwrap_or(0.0)),
+            "b" => Value::Bool(wrapper.v.as_bool().unwrap_or(false)),
+            "s" => Value::Str(Rc::from(wrapper.v.as_str().unwrap_or_default())),
+            "n" => Value::Null,
+            "r" => Value::Ref(wrapper.v.as_ref().unwrap_or(0)),
+            "w" => Value::Weak(wrapper.v.as_weak().unwrap_or(0)),
+            "p" => Value::Ptr(wrapper.v.as_ptr().unwrap_or(0)),
+            "l" => Value::List(wrapper.v.as_list().unwrap_or_default()),
+            "m" => Value::Map(wrapper.v.as_map().unwrap_or_default()),
+            _ => {
+                return Err(serde::de::Error::custom(format!(
+                    "unknown Value tag: {}",
+                    wrapper.t
+                )));
+            }
+        })
+    }
+}
+
+impl ValueAny {
+    fn as_int(&self) -> Option<i64> {
+        match self {
+            ValueAny::Int(i) => Some(*i),
+            _ => None,
+        }
+    }
+    fn as_float(&self) -> Option<f64> {
+        match self {
+            ValueAny::Float(f) => Some(*f),
+            _ => None,
+        }
+    }
+    fn as_bool(&self) -> Option<bool> {
+        match self {
+            ValueAny::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+    fn as_str(&self) -> Option<&str> {
+        match self {
+            ValueAny::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+    fn as_ref(&self) -> Option<usize> {
+        match self {
+            ValueAny::Ref(h) => Some(*h),
+            _ => None,
+        }
+    }
+    fn as_weak(&self) -> Option<usize> {
+        match self {
+            ValueAny::Weak(h) => Some(*h),
+            _ => None,
+        }
+    }
+    fn as_ptr(&self) -> Option<i64> {
+        match self {
+            ValueAny::Ptr(p) => Some(*p),
+            _ => None,
+        }
+    }
+    fn as_list(&self) -> Option<Vec<Value>> {
+        match self {
+            ValueAny::List(l) => Some(l.clone()),
+            _ => None,
+        }
+    }
+    fn as_map(&self) -> Option<HashMap<Value, Value>> {
+        match self {
+            ValueAny::Map(m) => Some(m.clone()),
+            _ => None,
+        }
+    }
+}

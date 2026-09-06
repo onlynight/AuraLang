@@ -409,10 +409,17 @@ fn test_extern_constants_in_bytecode() {
     "#;
     let module = compile_source(src).expect("编译应成功");
     // 检查常量池是否包含 FFI 常量
-    let has_int_42 = module.consts.iter().any(|c| matches!(c, compiler::codegen::opcode::Const::Int(42)));
-    let has_float_314 = module.consts.iter().any(|c| matches!(c, compiler::codegen::opcode::Const::Float(f) if (*f - 3.14).abs() < 0.001));
-    let has_str_hello = module.consts.iter().any(|c| matches!(c, compiler::codegen::opcode::Const::Str(s) if s == "hello"));
-    let has_bool_true = module.consts.iter().any(|c| matches!(c, compiler::codegen::opcode::Const::Bool(true)));
+    let has_int_42 =
+        module.consts.iter().any(|c| matches!(c, compiler::codegen::opcode::Const::Int(42)));
+    let has_float_314 = module.consts.iter().any(
+        |c| matches!(c, compiler::codegen::opcode::Const::Float(f) if (*f - 3.14).abs() < 0.001),
+    );
+    let has_str_hello = module
+        .consts
+        .iter()
+        .any(|c| matches!(c, compiler::codegen::opcode::Const::Str(s) if s == "hello"));
+    let has_bool_true =
+        module.consts.iter().any(|c| matches!(c, compiler::codegen::opcode::Const::Bool(true)));
 
     assert!(has_int_42, "常量池应包含 Int(42)");
     assert!(has_float_314, "常量池应包含 Float(3.14)");

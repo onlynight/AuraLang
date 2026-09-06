@@ -22,7 +22,10 @@ pub fn validate_manifest(manifest: &LoomManifest) -> Vec<String> {
     if manifest.version.is_empty() {
         errors.push("缺少必填字段: version".to_string());
     } else if !is_valid_version(&manifest.version) {
-        errors.push(format!("无效的版本号: '{}'（需符合 SemVer 格式）", manifest.version));
+        errors.push(format!(
+            "无效的版本号: '{}'（需符合 SemVer 格式）",
+            manifest.version
+        ));
     }
 
     // 3. 入口文件校验（仅应用包需要）
@@ -34,9 +37,7 @@ pub fn validate_manifest(manifest: &LoomManifest) -> Vec<String> {
     if let Some(ref ws) = manifest.workspace {
         // Workspace 根配置不应有 entry
         if !manifest.entry.is_empty() {
-            errors.push(
-                "Workspace 根配置不应指定 entry（entry 应在成员项目配置）".to_string(),
-            );
+            errors.push("Workspace 根配置不应指定 entry（entry 应在成员项目配置）".to_string());
         }
         if ws.members.is_empty() {
             errors.push("[workspace] 必须指定至少一个 members".to_string());
@@ -49,19 +50,11 @@ pub fn validate_manifest(manifest: &LoomManifest) -> Vec<String> {
     }
 
     // 5. Profile 校验
-    let active_profiles: Vec<_> = manifest
-        .profiles
-        .iter()
-        .filter(|(_, p)| p.activate)
-        .collect();
+    let active_profiles: Vec<_> = manifest.profiles.iter().filter(|(_, p)| p.activate).collect();
     if active_profiles.len() > 1 {
         errors.push(format!(
             "最多只能有一个 profile 激活，当前激活: {}",
-            active_profiles
-                .iter()
-                .map(|(n, _)| n.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+            active_profiles.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ")
         ));
     }
 
@@ -76,10 +69,7 @@ pub fn validate_manifest(manifest: &LoomManifest) -> Vec<String> {
         }
         let key = format!("{}:{}", dep.name, dep.config);
         if dep_names.insert(key, true).is_some() {
-            errors.push(format!(
-                "重复依赖: {} ({})",
-                dep.name, dep.config
-            ));
+            errors.push(format!("重复依赖: {} ({})", dep.name, dep.config));
         }
     }
 
@@ -110,9 +100,9 @@ pub fn validate_manifest(manifest: &LoomManifest) -> Vec<String> {
 /// 校验包名是否合法
 fn is_valid_package_name(name: &str) -> bool {
     !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.' || c == '_')
+        && name.chars().all(|c| {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.' || c == '_'
+        })
 }
 
 /// 校验版本号是否合法（简化 SemVer 检查）

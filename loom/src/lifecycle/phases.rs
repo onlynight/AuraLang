@@ -16,12 +16,12 @@ use std::sync::{Arc, Mutex};
 use crate::cache::local::LocalCache;
 use crate::cache::remote::CacheService;
 use crate::error::LoomError;
+use crate::manifest::LoomManifest;
 use crate::manifest::priority::ResolvedBuildConfig;
-use crate::manifest::{LoomManifest};
-use crate::plugin::context::PluginContext;
 use crate::plugin::PluginRegistry;
+use crate::plugin::context::PluginContext;
 use crate::task::scheduler::{Scheduler, SchedulerConfig};
-use crate::task::{TaskDefinition, TaskInputs, TaskKind, TaskOutputs, TaskGraph};
+use crate::task::{TaskDefinition, TaskGraph, TaskInputs, TaskKind, TaskOutputs};
 
 /// 生命周期阶段到任务的映射
 pub fn phase_to_tasks(phase: &str) -> Vec<(&'static str, TaskKind)> {
@@ -36,6 +36,7 @@ pub fn phase_to_tasks(phase: &str) -> Vec<(&'static str, TaskKind)> {
         "test" => vec![("run-tests", TaskKind::Test)],
         "package" => vec![("package", TaskKind::Package)],
         "verify" => vec![("verify", TaskKind::Verify)],
+        "check" => vec![("check", TaskKind::Check)],
         "install" => vec![("install", TaskKind::Install)],
         "deploy" => vec![("publish", TaskKind::Deploy)],
         "run" => vec![("run", TaskKind::Execute)],
@@ -47,7 +48,10 @@ pub fn phase_to_tasks(phase: &str) -> Vec<(&'static str, TaskKind)> {
 /// 构建完整生命周期任务图
 ///
 /// 返回包含所有内置任务的标准任务图。
-pub fn build_standard_task_graph(manifest: &LoomManifest, project_dir: &std::path::Path) -> TaskGraph {
+pub fn build_standard_task_graph(
+    manifest: &LoomManifest,
+    project_dir: &std::path::Path,
+) -> TaskGraph {
     let mut graph = TaskGraph::new();
 
     // 1. clean
@@ -151,7 +155,17 @@ pub fn build_standard_task_graph(manifest: &LoomManifest, project_dir: &std::pat
         outputs: TaskOutputs::default(),
     });
 
-    // 9. install
+    // 9. check
+    graph.add_task(TaskDefinition {
+        name: "check".to_string(),
+        description: "语法/语义检查".to_string(),
+        kind: TaskKind::Check,
+        depends_on: vec!["resolve".to_string()],
+        inputs: TaskInputs::default(),
+        outputs: TaskOutputs::default(),
+    });
+
+    // 10. install
     graph.add_task(TaskDefinition {
         name: "install".to_string(),
         description: "安装到本地注册表".to_string(),
@@ -246,7 +260,10 @@ pub fn build_task_graph_with_plugins(
 }
 
 /// 从 manifest 发现源码集
-fn discover_source_sets(manifest: &LoomManifest, project_dir: &std::path::Path) -> Vec<crate::manifest::SourceSet> {
+fn discover_source_sets(
+    manifest: &LoomManifest,
+    project_dir: &std::path::Path,
+) -> Vec<crate::manifest::SourceSet> {
     let mut sets = Vec::new();
 
     // 从 manifest 配置读取源码集
@@ -270,7 +287,10 @@ fn discover_source_sets(manifest: &LoomManifest, project_dir: &std::path::Path) 
 }
 
 /// 发现源文件
-fn discover_source_files(project_dir: &std::path::Path, source_dir: &str) -> Vec<std::path::PathBuf> {
+fn discover_source_files(
+    project_dir: &std::path::Path,
+    source_dir: &str,
+) -> Vec<std::path::PathBuf> {
     let full_dir = project_dir.join(source_dir);
     if !full_dir.exists() {
         return Vec::new();
@@ -331,7 +351,13 @@ pub fn execute_phase_with_service(
     let root_task = match phase {
         "build" => "install",
         "compile" => "compile-main",
-        "test" => if graph.contains("run-tests") { "run-tests" } else { "compile-main" },
+        "test" => {
+            if graph.contains("run-tests") {
+                "run-tests"
+            } else {
+                "compile-main"
+            }
+        }
         "clean" => "clean",
         "resolve" => "resolve",
         "package" => "package",
@@ -480,9 +506,19 @@ mod tests {
         let manifest = default_manifest("test");
         let tmp = TempDir::new().unwrap();
         let config = Arc::new(ResolvedBuildConfig::default());
-        let scheduler_config = SchedulerConfig { dry_run: true, ..Default::default() };
+        let scheduler_config = SchedulerConfig {
+            dry_run: true,
+            ..Default::default()
+        };
 
-        let result = execute_phase("unknown", &manifest, tmp.path(), config, None, scheduler_config);
+        let result = execute_phase(
+            "unknown",
+            &manifest,
+            tmp.path(),
+            config,
+            None,
+            scheduler_config,
+        );
         assert!(result.is_err());
     }
 
@@ -491,9 +527,19 @@ mod tests {
         let manifest = default_manifest("test");
         let tmp = TempDir::new().unwrap();
         let config = Arc::new(ResolvedBuildConfig::default());
-        let scheduler_config = SchedulerConfig { dry_run: true, ..Default::default() };
+        let scheduler_config = SchedulerConfig {
+            dry_run: true,
+            ..Default::default()
+        };
 
-        let result = execute_phase("clean", &manifest, tmp.path(), config, None, scheduler_config);
+        let result = execute_phase(
+            "clean",
+            &manifest,
+            tmp.path(),
+            config,
+            None,
+            scheduler_config,
+        );
         assert!(result.is_ok());
     }
 
@@ -508,9 +554,19 @@ mod tests {
         std::fs::write(src.join("main.aura"), "fun main() {}").unwrap();
 
         let config = Arc::new(ResolvedBuildConfig::default());
-        let scheduler_config = SchedulerConfig { dry_run: true, ..Default::default() };
+        let scheduler_config = SchedulerConfig {
+            dry_run: true,
+            ..Default::default()
+        };
 
-        let result = execute_phase("build", &manifest, tmp.path(), config, None, scheduler_config);
+        let result = execute_phase(
+            "build",
+            &manifest,
+            tmp.path(),
+            config,
+            None,
+            scheduler_config,
+        );
         assert!(result.is_ok());
     }
 

@@ -1,15 +1,8 @@
-﻿//! [Phase L5] 多项目管理（Workspace）
+//! [Phase B5] 多项目管理（Workspace）
+//!
+//! Workspace 模式允许在单一配置中管理多个项目（类 Cargo workspace）。
+//! 对应设计文档 §14.2。
 
 pub mod members;
 
-/// Workspace 成员信息
-#[derive(Debug, Clone)]
-pub struct WorkspaceMember {
-    /// 相对路径
-    pub path: std::path::PathBuf,
-    /// 是否默认构建
-    pub is_default: bool,
-    /// 包名
-    pub name: String,
-}
-
+pub use members::{MemberSelection, Workspace, WorkspaceMember};

@@ -72,7 +72,9 @@ fn nat_list_contains(args: &[Value]) -> Value {
 fn nat_list_index_of(args: &[Value]) -> Value {
     let item = args.get(1).cloned().unwrap_or(Value::Null);
     match &args[0] {
-        Value::List(items) => Value::Int(items.iter().position(|i| *i == item).map(|p| p as i64).unwrap_or(-1)),
+        Value::List(items) => {
+            Value::Int(items.iter().position(|i| *i == item).map(|p| p as i64).unwrap_or(-1))
+        }
         _ => Value::Int(-1),
     }
 }
@@ -268,8 +270,12 @@ fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => x.cmp(y),
         (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
-        (Value::Int(x), Value::Float(y)) => (*x as f64).partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
-        (Value::Float(x), Value::Int(y)) => x.partial_cmp(&(*y as f64)).unwrap_or(std::cmp::Ordering::Equal),
+        (Value::Int(x), Value::Float(y)) => {
+            (*x as f64).partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+        }
+        (Value::Float(x), Value::Int(y)) => {
+            x.partial_cmp(&(*y as f64)).unwrap_or(std::cmp::Ordering::Equal)
+        }
         (Value::Str(x), Value::Str(y)) => x.cmp(y),
         (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
         (Value::Null, Value::Null) => std::cmp::Ordering::Equal,

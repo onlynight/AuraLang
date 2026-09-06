@@ -208,7 +208,9 @@ pub fn from_bytes(bytes: &[u8]) -> Result<BytecodeModule, SerializeError> {
     if &bytes[..4] != MAGIC {
         return Err(SerializeError::Format("魔数不匹配".to_string()));
     }
-    let version = u16::from_le_bytes([bytes[4], bytes[5]]);
+    let version = u16::from_le_bytes([
+        bytes[4], bytes[5],
+    ]);
     if version > VERSION {
         return Err(SerializeError::Format(format!(
             "不支持的字节码版本: {}",
@@ -248,7 +250,10 @@ pub fn from_bytes(bytes: &[u8]) -> Result<BytecodeModule, SerializeError> {
     for _ in 0..nnatives {
         let name = r.str()?;
         let param_count = r.u16()?;
-        natives.push(BytecodeNative { name, param_count });
+        natives.push(BytecodeNative {
+            name,
+            param_count,
+        });
     }
 
     // 函数
@@ -267,6 +272,7 @@ pub fn from_bytes(bytes: &[u8]) -> Result<BytecodeModule, SerializeError> {
             locals,
             is_native,
             code,
+            line_table: None,
         });
     }
 
@@ -282,11 +288,7 @@ pub fn from_bytes(bytes: &[u8]) -> Result<BytecodeModule, SerializeError> {
         let kind_byte = r.u8()?;
         let sig_id = r.str()?;
         let has_func_idx = r.u8()? != 0;
-        let func_idx = if has_func_idx {
-            Some(r.u16()?)
-        } else {
-            None
-        };
+        let func_idx = if has_func_idx { Some(r.u16()?) } else { None };
         let type_table_idx = Some(r.u16()?);
         let const_idx = Some(r.u16()?);
         exports.push(ExportSymbol {
@@ -326,7 +328,11 @@ pub fn from_bytes(bytes: &[u8]) -> Result<BytecodeModule, SerializeError> {
         let module = r.str()?;
         let uuid = r.bytes(16)?;
         let version = r.str()?;
-        dependencies.push(Dependency { module, uuid, version });
+        dependencies.push(Dependency {
+            module,
+            uuid,
+            version,
+        });
     }
 
     // 外部模块签名 ID
@@ -391,7 +397,10 @@ struct Reader<'a> {
 
 impl<'a> Reader<'a> {
     fn new(data: &'a [u8]) -> Self {
-        Reader { data, pos: 0 }
+        Reader {
+            data,
+            pos: 0,
+        }
     }
 
     fn advance(&mut self, n: usize) -> Result<(), SerializeError> {
@@ -414,7 +423,10 @@ impl<'a> Reader<'a> {
     }
 
     fn u8(&mut self) -> Result<u8, SerializeError> {
-        let b = self.data.get(self.pos).ok_or_else(|| SerializeError::Format("数据越界".to_string()))?;
+        let b = self
+            .data
+            .get(self.pos)
+            .ok_or_else(|| SerializeError::Format("数据越界".to_string()))?;
         self.pos += 1;
         Ok(*b)
     }
@@ -424,7 +436,10 @@ impl<'a> Reader<'a> {
         if end > self.data.len() {
             return Err(SerializeError::Format("数据越界".to_string()));
         }
-        let v = u16::from_le_bytes([self.data[self.pos], self.data[self.pos + 1]]);
+        let v = u16::from_le_bytes([
+            self.data[self.pos],
+            self.data[self.pos + 1],
+        ]);
         self.pos = end;
         Ok(v)
     }
@@ -507,18 +522,28 @@ mod tests {
     #[test]
     fn test_roundtrip_basic() {
         let module = BytecodeModule {
-            consts: vec![Const::Int(42), Const::Str("hello".to_string())],
-            natives: vec![BytecodeNative {
-                name: "println".to_string(),
-                param_count: 1,
-            }],
-            functions: vec![BytecodeFunction {
-                name: "main".to_string(),
-                param_count: 0,
-                locals: 1,
-                is_native: false,
-                code: vec![0, 0, 0, 28], // LoadConst(0), Return
-            }],
+            consts: vec![
+                Const::Int(42),
+                Const::Str("hello".to_string()),
+            ],
+            natives: vec![
+                BytecodeNative {
+                    name: "println".to_string(),
+                    param_count: 1,
+                },
+            ],
+            functions: vec![
+                BytecodeFunction {
+                    name: "main".to_string(),
+                    param_count: 0,
+                    locals: 1,
+                    is_native: false,
+                    code: vec![
+                        0, 0, 0, 28,
+                    ], // LoadConst(0), Return
+                    line_table: None,
+                },
+            ],
             entry: 0,
             enabled_modules: vec!["io".to_string()],
             module_identity: ModuleIdentity::new("test", "1.0.0"),
@@ -546,25 +571,30 @@ mod tests {
         let mut module = BytecodeModule {
             consts: vec![],
             natives: vec![],
-            functions: vec![BytecodeFunction {
-                name: "add".to_string(),
-                param_count: 2,
-                locals: 2,
-                is_native: false,
-                code: vec![],
-            }],
+            functions: vec![
+                BytecodeFunction {
+                    name: "add".to_string(),
+                    param_count: 2,
+                    locals: 2,
+                    is_native: false,
+                    code: vec![],
+                    line_table: None,
+                },
+            ],
             entry: 0,
             enabled_modules: vec![],
             module_identity: ModuleIdentity::new("math-lib", "1.0.0"),
             header_flags: 0,
-            exports: vec![ExportSymbol {
-                name: "add".to_string(),
-                kind: SymbolKind::Function,
-                sig_id: "sig-001".to_string(),
-                func_idx: Some(0),
-                type_table_idx: None,
-                const_idx: None,
-            }],
+            exports: vec![
+                ExportSymbol {
+                    name: "add".to_string(),
+                    kind: SymbolKind::Function,
+                    sig_id: "sig-001".to_string(),
+                    func_idx: Some(0),
+                    type_table_idx: None,
+                    const_idx: None,
+                },
+            ],
             imports: vec![],
             dependencies: vec![],
             sig_ids: vec![],
@@ -591,19 +621,23 @@ mod tests {
             module_identity: ModuleIdentity::new("app", "1.0.0"),
             header_flags: 0,
             exports: vec![],
-            imports: vec![ImportSymbol {
-                name: "add".to_string(),
-                kind: SymbolKind::Function,
-                module: "math-lib".to_string(),
-                symbol: "add".to_string(),
-                sig_id: "sig-001".to_string(),
-                func_idx: Some(0),
-            }],
-            dependencies: vec![Dependency {
-                module: "math-lib".to_string(),
-                uuid: ModuleIdentity::new("math-lib", "1.0.0").uuid,
-                version: "1.0.0".to_string(),
-            }],
+            imports: vec![
+                ImportSymbol {
+                    name: "add".to_string(),
+                    kind: SymbolKind::Function,
+                    module: "math-lib".to_string(),
+                    symbol: "add".to_string(),
+                    sig_id: "sig-001".to_string(),
+                    func_idx: Some(0),
+                },
+            ],
+            dependencies: vec![
+                Dependency {
+                    module: "math-lib".to_string(),
+                    uuid: ModuleIdentity::new("math-lib", "1.0.0").uuid,
+                    version: "1.0.0".to_string(),
+                },
+            ],
             sig_ids: vec!["sig-001".to_string()],
             entry_kind: "app".to_string(),
         };

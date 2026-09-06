@@ -6,8 +6,8 @@
 //! 3. 用户可自由定义与命名空间库同名的函数（不 import 时）
 
 use compiler::codegen::compile_source;
-use compiler::vm::{Vm, VmOptions};
 use compiler::vm::value::Value;
+use compiler::vm::{Vm, VmOptions};
 
 /// 编译并运行源码，返回 main 的返回值
 fn run(src: &str) -> Result<Value, String> {

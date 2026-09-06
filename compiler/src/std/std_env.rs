@@ -59,17 +59,13 @@ fn nat_has(args: &[Value]) -> Value {
 
 /// env.keys() → List of variable names
 fn nat_keys(_args: &[Value]) -> Value {
-    let keys: Vec<Value> = std::env::vars()
-        .map(|(k, _)| Value::str_(k))
-        .collect();
+    let keys: Vec<Value> = std::env::vars().map(|(k, _)| Value::str_(k)).collect();
     Value::List(keys)
 }
 
 /// env.values() → List of values
 fn nat_values(_args: &[Value]) -> Value {
-    let vals: Vec<Value> = std::env::vars()
-        .map(|(_, v)| Value::str_(v))
-        .collect();
+    let vals: Vec<Value> = std::env::vars().map(|(_, v)| Value::str_(v)).collect();
     Value::List(vals)
 }
 

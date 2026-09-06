@@ -34,17 +34,28 @@ fn fold_block(b: &HirBlock) -> HirBlock {
 
 fn fold_stmt(s: &HirStmt) -> HirStmt {
     match s {
-        HirStmt::Val { name, ty, init } => HirStmt::Val {
+        HirStmt::Val {
+            name,
+            ty,
+            init,
+        } => HirStmt::Val {
             name: name.clone(),
             ty: ty.clone(),
             init: init.as_ref().map(fold_expr),
         },
-        HirStmt::Var { name, ty, init } => HirStmt::Var {
+        HirStmt::Var {
+            name,
+            ty,
+            init,
+        } => HirStmt::Var {
             name: name.clone(),
             ty: ty.clone(),
             init: init.as_ref().map(fold_expr),
         },
-        HirStmt::Assign { target, value } => HirStmt::Assign {
+        HirStmt::Assign {
+            target,
+            value,
+        } => HirStmt::Assign {
             target: fold_expr(target),
             value: fold_expr(value),
         },
@@ -85,7 +96,11 @@ fn fold_stmt(s: &HirStmt) -> HirStmt {
 
 fn fold_expr(e: &HirExpr) -> HirExpr {
     match e {
-        HirExpr::Binary { op, lhs, rhs } => {
+        HirExpr::Binary {
+            op,
+            lhs,
+            rhs,
+        } => {
             let l = fold_expr(lhs);
             let r = fold_expr(rhs);
             if let (HirExpr::Lit(a), HirExpr::Lit(b)) = (&l, &r) {
@@ -99,7 +114,10 @@ fn fold_expr(e: &HirExpr) -> HirExpr {
                 rhs: Box::new(r),
             }
         }
-        HirExpr::Unary { op, operand } => {
+        HirExpr::Unary {
+            op,
+            operand,
+        } => {
             let o = fold_expr(operand);
             if let HirExpr::Lit(v) = &o {
                 if let Some(res) = eval_un(*op, v) {
@@ -129,19 +147,31 @@ fn fold_expr(e: &HirExpr) -> HirExpr {
                 else_e: Box::new(fold_expr(else_e)),
             }
         }
-        HirExpr::Call { callee, args } => HirExpr::Call {
+        HirExpr::Call {
+            callee,
+            args,
+        } => HirExpr::Call {
             callee: callee.clone(),
             args: args.iter().map(fold_expr).collect(),
         },
-        HirExpr::Member { object, name } => HirExpr::Member {
+        HirExpr::Member {
+            object,
+            name,
+        } => HirExpr::Member {
             object: Box::new(fold_expr(object)),
             name: name.clone(),
         },
-        HirExpr::Index { container, index } => HirExpr::Index {
+        HirExpr::Index {
+            container,
+            index,
+        } => HirExpr::Index {
             container: Box::new(fold_expr(container)),
             index: Box::new(fold_expr(index)),
         },
-        HirExpr::New { type_name, args } => HirExpr::New {
+        HirExpr::New {
+            type_name,
+            args,
+        } => HirExpr::New {
             type_name: type_name.clone(),
             args: args.iter().map(fold_expr).collect(),
         },
@@ -227,17 +257,21 @@ pub fn inline_hir(hir: &mut HirProgram) {
 fn expr_references(e: &HirExpr, name: &str) -> bool {
     match e {
         HirExpr::Var(n) => n == name,
-        HirExpr::Binary { lhs, rhs, .. } => {
-            expr_references(lhs, name) || expr_references(rhs, name)
-        }
-        HirExpr::Unary { operand, .. } => expr_references(operand, name),
-        HirExpr::Call { callee, args } => {
-            callee == name || args.iter().any(|a| expr_references(a, name))
-        }
+        HirExpr::Binary {
+            lhs, rhs, ..
+        } => expr_references(lhs, name) || expr_references(rhs, name),
+        HirExpr::Unary {
+            operand, ..
+        } => expr_references(operand, name),
+        HirExpr::Call {
+            callee,
+            args,
+        } => callee == name || args.iter().any(|a| expr_references(a, name)),
         HirExpr::Member { object, .. } => expr_references(object, name),
-        HirExpr::Index { container, index } => {
-            expr_references(container, name) || expr_references(index, name)
-        }
+        HirExpr::Index {
+            container,
+            index,
+        } => expr_references(container, name) || expr_references(index, name),
         HirExpr::New { args, .. } => args.iter().any(|a| expr_references(a, name)),
         HirExpr::If {
             cond,
@@ -255,18 +289,15 @@ fn expr_references(e: &HirExpr, name: &str) -> bool {
 
 fn stmt_references(s: &HirStmt, name: &str) -> bool {
     match s {
-        HirStmt::Val { init, .. } | HirStmt::Var { init, .. } => init
-            .as_ref()
-            .map(|e| expr_references(e, name))
-            .unwrap_or(false),
-        HirStmt::Assign { target, value } => {
-            expr_references(target, name) || expr_references(value, name)
+        HirStmt::Val { init, .. } | HirStmt::Var { init, .. } => {
+            init.as_ref().map(|e| expr_references(e, name)).unwrap_or(false)
         }
+        HirStmt::Assign {
+            target,
+            value,
+        } => expr_references(target, name) || expr_references(value, name),
         HirStmt::Expr(e) => expr_references(e, name),
-        HirStmt::Return(v) => v
-            .as_ref()
-            .map(|e| expr_references(e, name))
-            .unwrap_or(false),
+        HirStmt::Return(v) => v.as_ref().map(|e| expr_references(e, name)).unwrap_or(false),
         HirStmt::If {
             cond,
             then_b,
@@ -294,17 +325,28 @@ fn inline_block(b: &HirBlock, cand: &HashMap<String, (Vec<String>, HirExpr)>) ->
 
 fn inline_stmt(s: &HirStmt, cand: &HashMap<String, (Vec<String>, HirExpr)>) -> HirStmt {
     match s {
-        HirStmt::Val { name, ty, init } => HirStmt::Val {
+        HirStmt::Val {
+            name,
+            ty,
+            init,
+        } => HirStmt::Val {
             name: name.clone(),
             ty: ty.clone(),
             init: init.as_ref().map(|e| inline_expr(e, cand)),
         },
-        HirStmt::Var { name, ty, init } => HirStmt::Var {
+        HirStmt::Var {
+            name,
+            ty,
+            init,
+        } => HirStmt::Var {
             name: name.clone(),
             ty: ty.clone(),
             init: init.as_ref().map(|e| inline_expr(e, cand)),
         },
-        HirStmt::Assign { target, value } => HirStmt::Assign {
+        HirStmt::Assign {
+            target,
+            value,
+        } => HirStmt::Assign {
             target: inline_expr(target, cand),
             value: inline_expr(value, cand),
         },
@@ -330,15 +372,15 @@ fn inline_stmt(s: &HirStmt, cand: &HashMap<String, (Vec<String>, HirExpr)>) -> H
 
 fn inline_expr(e: &HirExpr, cand: &HashMap<String, (Vec<String>, HirExpr)>) -> HirExpr {
     match e {
-        HirExpr::Call { callee, args } => {
+        HirExpr::Call {
+            callee,
+            args,
+        } => {
             let new_args: Vec<HirExpr> = args.iter().map(|a| inline_expr(a, cand)).collect();
             if let Some((params, body)) = cand.get(callee) {
                 if params.len() == new_args.len() {
-                    let mapping: Vec<(String, HirExpr)> = params
-                        .iter()
-                        .cloned()
-                        .zip(new_args.iter().cloned())
-                        .collect();
+                    let mapping: Vec<(String, HirExpr)> =
+                        params.iter().cloned().zip(new_args.iter().cloned()).collect();
                     return subst_expr(body, &mapping);
                 }
             }
@@ -347,24 +389,40 @@ fn inline_expr(e: &HirExpr, cand: &HashMap<String, (Vec<String>, HirExpr)>) -> H
                 args: new_args,
             }
         }
-        HirExpr::Binary { op, lhs, rhs } => HirExpr::Binary {
+        HirExpr::Binary {
+            op,
+            lhs,
+            rhs,
+        } => HirExpr::Binary {
             op: *op,
             lhs: Box::new(inline_expr(lhs, cand)),
             rhs: Box::new(inline_expr(rhs, cand)),
         },
-        HirExpr::Unary { op, operand } => HirExpr::Unary {
+        HirExpr::Unary {
+            op,
+            operand,
+        } => HirExpr::Unary {
             op: *op,
             operand: Box::new(inline_expr(operand, cand)),
         },
-        HirExpr::Member { object, name } => HirExpr::Member {
+        HirExpr::Member {
+            object,
+            name,
+        } => HirExpr::Member {
             object: Box::new(inline_expr(object, cand)),
             name: name.clone(),
         },
-        HirExpr::Index { container, index } => HirExpr::Index {
+        HirExpr::Index {
+            container,
+            index,
+        } => HirExpr::Index {
             container: Box::new(inline_expr(container, cand)),
             index: Box::new(inline_expr(index, cand)),
         },
-        HirExpr::New { type_name, args } => HirExpr::New {
+        HirExpr::New {
+            type_name,
+            args,
+        } => HirExpr::New {
             type_name: type_name.clone(),
             args: args.iter().map(|a| inline_expr(a, cand)).collect(),
         },
@@ -393,28 +451,47 @@ fn subst_expr(e: &HirExpr, mapping: &[(String, HirExpr)]) -> HirExpr {
             }
             e.clone()
         }
-        HirExpr::Binary { op, lhs, rhs } => HirExpr::Binary {
+        HirExpr::Binary {
+            op,
+            lhs,
+            rhs,
+        } => HirExpr::Binary {
             op: *op,
             lhs: Box::new(subst_expr(lhs, mapping)),
             rhs: Box::new(subst_expr(rhs, mapping)),
         },
-        HirExpr::Unary { op, operand } => HirExpr::Unary {
+        HirExpr::Unary {
+            op,
+            operand,
+        } => HirExpr::Unary {
             op: *op,
             operand: Box::new(subst_expr(operand, mapping)),
         },
-        HirExpr::Call { callee, args } => HirExpr::Call {
+        HirExpr::Call {
+            callee,
+            args,
+        } => HirExpr::Call {
             callee: callee.clone(),
             args: args.iter().map(|a| subst_expr(a, mapping)).collect(),
         },
-        HirExpr::Member { object, name } => HirExpr::Member {
+        HirExpr::Member {
+            object,
+            name,
+        } => HirExpr::Member {
             object: Box::new(subst_expr(object, mapping)),
             name: name.clone(),
         },
-        HirExpr::Index { container, index } => HirExpr::Index {
+        HirExpr::Index {
+            container,
+            index,
+        } => HirExpr::Index {
             container: Box::new(subst_expr(container, mapping)),
             index: Box::new(subst_expr(index, mapping)),
         },
-        HirExpr::New { type_name, args } => HirExpr::New {
+        HirExpr::New {
+            type_name,
+            args,
+        } => HirExpr::New {
             type_name: type_name.clone(),
             args: args.iter().map(|a| subst_expr(a, mapping)).collect(),
         },
@@ -436,17 +513,28 @@ fn subst_expr(e: &HirExpr, mapping: &[(String, HirExpr)]) -> HirExpr {
 
 fn subst_stmt(s: &HirStmt, mapping: &[(String, HirExpr)]) -> HirStmt {
     match s {
-        HirStmt::Val { name, ty, init } => HirStmt::Val {
+        HirStmt::Val {
+            name,
+            ty,
+            init,
+        } => HirStmt::Val {
             name: name.clone(),
             ty: ty.clone(),
             init: init.as_ref().map(|e| subst_expr(e, mapping)),
         },
-        HirStmt::Var { name, ty, init } => HirStmt::Var {
+        HirStmt::Var {
+            name,
+            ty,
+            init,
+        } => HirStmt::Var {
             name: name.clone(),
             ty: ty.clone(),
             init: init.as_ref().map(|e| subst_expr(e, mapping)),
         },
-        HirStmt::Assign { target, value } => HirStmt::Assign {
+        HirStmt::Assign {
+            target,
+            value,
+        } => HirStmt::Assign {
             target: subst_expr(target, mapping),
             value: subst_expr(value, mapping),
         },
@@ -459,11 +547,7 @@ fn subst_stmt(s: &HirStmt, mapping: &[(String, HirExpr)]) -> HirStmt {
         } => HirStmt::If {
             cond: subst_expr(cond, mapping),
             then_b: HirBlock {
-                stmts: then_b
-                    .stmts
-                    .iter()
-                    .map(|s| subst_stmt(s, mapping))
-                    .collect(),
+                stmts: then_b.stmts.iter().map(|s| subst_stmt(s, mapping)).collect(),
             },
             else_b: else_b.as_ref().map(|b| HirBlock {
                 stmts: b.stmts.iter().map(|s| subst_stmt(s, mapping)).collect(),
@@ -530,7 +614,11 @@ fn reachable(f: &MirFunction) -> HashSet<usize> {
         }
         match &f.blocks[id].term {
             Terminator::Goto(t) => stack.push(*t),
-            Terminator::If { then_b, else_b, .. } => {
+            Terminator::If {
+                then_b,
+                else_b,
+                ..
+            } => {
                 stack.push(*then_b);
                 stack.push(*else_b);
             }
@@ -577,7 +665,9 @@ fn used_regs(f: &MirFunction) -> HashSet<usize> {
     for b in &f.blocks {
         for instr in &b.instrs {
             match instr {
-                MirInstr::BinOp { a, b: rb, .. } => {
+                MirInstr::BinOp {
+                    a, b: rb, ..
+                } => {
                     used.insert(*a);
                     used.insert(*rb);
                 }
@@ -592,7 +682,9 @@ fn used_regs(f: &MirFunction) -> HashSet<usize> {
                 MirInstr::StoreLocal { src, .. } => {
                     used.insert(*src);
                 }
-                MirInstr::SetField { obj, src, .. } => {
+                MirInstr::SetField {
+                    obj, src, ..
+                } => {
                     used.insert(*obj);
                     used.insert(*src);
                 }
@@ -679,7 +771,13 @@ pub fn licm_mir(funcs: &mut [MirFunction]) {
 fn term_succs(t: &Terminator) -> Vec<usize> {
     match t {
         Terminator::Goto(x) => vec![*x],
-        Terminator::If { then_b, else_b, .. } => vec![*then_b, *else_b],
+        Terminator::If {
+            then_b,
+            else_b,
+            ..
+        } => vec![
+            *then_b, *else_b,
+        ],
         _ => vec![],
     }
 }

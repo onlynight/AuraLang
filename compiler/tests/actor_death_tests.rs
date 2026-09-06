@@ -55,7 +55,10 @@ fn test_escalate_notifies_parent() {
     assert!(runtime.is_alive(parent_id), "父 Actor 应存活");
 
     // 父 Actor 邮箱应收到死亡消息
-    assert!(runtime.mailbox_len(parent_id) > 0, "父 Actor 应收到死亡通知");
+    assert!(
+        runtime.mailbox_len(parent_id) > 0,
+        "父 Actor 应收到死亡通知"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

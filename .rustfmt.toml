@@ -1,0 +1,18 @@
+# AuraLang rustfmt 配置
+# 统一格式化风格，确保 CI 与本地格式化结果一致。
+
+# 行宽限制（Rust 默认 100，适度放宽以容纳中文注释）
+max_width = 100
+
+# 使用 4 空格缩进（Rust 默认）
+tab_spaces = 4
+
+# 函数返回类型换行阈值
+fn_call_width = 60
+
+# 使用短形式的 if-else 表达式
+use_small_heuristics = "Max"
+
+# 使用单行 struct 字段
+struct_lit_width = 10
+array_width = 10

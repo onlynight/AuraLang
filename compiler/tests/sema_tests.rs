@@ -24,11 +24,7 @@ fn analyze(src: &str) -> Vec<String> {
 
 fn analyze_raw(src: &str) -> Vec<CompileError> {
     let (_program, result) = analyze_source(src);
-    result
-        .errors
-        .into_iter()
-        .filter(|e| e.severity == ErrorSeverity::Error)
-        .collect()
+    result.errors.into_iter().filter(|e| e.severity == ErrorSeverity::Error).collect()
 }
 
 fn has_error_containing(errors: &[String], needle: &str) -> bool {
@@ -386,11 +382,8 @@ fn test_struct_ok() {
     );
     // 注意：字段访问 p.id 需要对象感知，当前简化版可能不检查字段
     // 但不应出现类型错误
-    let critical = errors
-        .iter()
-        .filter(|e| !e.contains("unresolved member"))
-        .cloned()
-        .collect::<Vec<_>>();
+    let critical =
+        errors.iter().filter(|e| !e.contains("unresolved member")).cloned().collect::<Vec<_>>();
     assert!(
         critical.is_empty(),
         "unexpected critical errors: {:?}",

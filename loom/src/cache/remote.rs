@@ -125,7 +125,10 @@ impl RemoteCache {
             .build()
             .map_err(|e| LoomError::Cache(format!("无法创建 HTTP 客户端: {}", e)))?;
 
-        Ok(Self { config, client })
+        Ok(Self {
+            config,
+            client,
+        })
     }
 
     /// 计算远程缓存键（SHA-256）
@@ -137,7 +140,10 @@ impl RemoteCache {
     ///   + 目标平台
     ///   + 插件版本
     /// )
-    pub fn compute_cache_key(task: &TaskDefinition, config: &ResolvedBuildConfig) -> Result<String, LoomError> {
+    pub fn compute_cache_key(
+        task: &TaskDefinition,
+        config: &ResolvedBuildConfig,
+    ) -> Result<String, LoomError> {
         let fingerprint = Fingerprint::compute(task)?;
         Ok(fingerprint)
     }
@@ -146,7 +152,11 @@ impl RemoteCache {
     ///
     /// HEAD /v1/cache/{key} → 200 (exists) / 404 (not found)
     pub fn lookup(&self, cache_key: &str) -> Result<bool, LoomError> {
-        let url = format!("{}/v1/cache/{}", self.config.url.trim_end_matches('/'), cache_key);
+        let url = format!(
+            "{}/v1/cache/{}",
+            self.config.url.trim_end_matches('/'),
+            cache_key
+        );
 
         for attempt in 0..=self.config.max_retries {
             let request = self.client.head(&url);
@@ -175,10 +185,7 @@ impl RemoteCache {
                         self.wait_before_retry(attempt)?;
                         continue;
                     }
-                    return Err(LoomError::Cache(format!(
-                        "远程缓存查询失败: {}",
-                        e
-                    )));
+                    return Err(LoomError::Cache(format!("远程缓存查询失败: {}", e)));
                 }
             }
         }
@@ -191,8 +198,16 @@ impl RemoteCache {
     /// GET /v1/cache/{key} → 200 + JSON body
     ///
     /// 返回恢复的产物文件路径列表。
-    pub fn download_artifacts(&self, cache_key: &str, dest_dir: &std::path::Path) -> Result<Vec<PathBuf>, LoomError> {
-        let url = format!("{}/v1/cache/{}", self.config.url.trim_end_matches('/'), cache_key);
+    pub fn download_artifacts(
+        &self,
+        cache_key: &str,
+        dest_dir: &std::path::Path,
+    ) -> Result<Vec<PathBuf>, LoomError> {
+        let url = format!(
+            "{}/v1/cache/{}",
+            self.config.url.trim_end_matches('/'),
+            cache_key
+        );
 
         for attempt in 0..=self.config.max_retries {
             let request = self.client.get(&url);
@@ -201,21 +216,24 @@ impl RemoteCache {
             match request.send() {
                 Ok(response) => {
                     if response.status().is_success() {
-                        let body_text = response.text()
-                            .map_err(|e| LoomError::Cache(format!("无法读取远程缓存响应: {}", e)))?;
-                        let body: RemoteCacheResponse = serde_json::from_str(&body_text)
-                            .map_err(|e| LoomError::Cache(format!("无法解析远程缓存响应: {}", e)))?;
+                        let body_text = response.text().map_err(|e| {
+                            LoomError::Cache(format!("无法读取远程缓存响应: {}", e))
+                        })?;
+                        let body: RemoteCacheResponse =
+                            serde_json::from_str(&body_text).map_err(|e| {
+                                LoomError::Cache(format!("无法解析远程缓存响应: {}", e))
+                            })?;
 
                         std::fs::create_dir_all(dest_dir)?;
                         let mut restored = Vec::new();
 
                         for artifact in &body.artifacts {
-                            if self.config.max_artifact_size > 0 && artifact.size > self.config.max_artifact_size {
+                            if self.config.max_artifact_size > 0
+                                && artifact.size > self.config.max_artifact_size
+                            {
                                 return Err(LoomError::Cache(format!(
                                     "远程产物过大 ({} > {}): {}",
-                                    artifact.size,
-                                    self.config.max_artifact_size,
-                                    artifact.name
+                                    artifact.size, self.config.max_artifact_size, artifact.name
                                 )));
                             }
 
@@ -227,9 +245,7 @@ impl RemoteCache {
                             if hash_hex != artifact.hash {
                                 return Err(LoomError::Cache(format!(
                                     "远程产物哈希不匹配: {} (期望 {}, 实际 {})",
-                                    artifact.name,
-                                    artifact.hash,
-                                    hash_hex
+                                    artifact.name, artifact.hash, hash_hex
                                 )));
                             }
 
@@ -243,10 +259,7 @@ impl RemoteCache {
 
                         return Ok(restored);
                     } else if response.status().as_u16() == 404 {
-                        return Err(LoomError::Cache(format!(
-                            "远程缓存未命中: {}",
-                            cache_key
-                        )));
+                        return Err(LoomError::Cache(format!("远程缓存未命中: {}", cache_key)));
                     } else {
                         let status = response.status().as_u16();
                         if attempt < self.config.max_retries {
@@ -264,10 +277,7 @@ impl RemoteCache {
                         self.wait_before_retry(attempt)?;
                         continue;
                     }
-                    return Err(LoomError::Cache(format!(
-                        "远程缓存下载失败: {}",
-                        e
-                    )));
+                    return Err(LoomError::Cache(format!("远程缓存下载失败: {}", e)));
                 }
             }
         }
@@ -278,8 +288,18 @@ impl RemoteCache {
     /// 上传产物到远程缓存
     ///
     /// PUT /v1/cache/{key} → 201 (created) / 200 (updated)
-    pub fn upload_artifacts(&self, cache_key: &str, task_name: &str, artifacts: &[PathBuf], config: &ResolvedBuildConfig) -> Result<(), LoomError> {
-        let url = format!("{}/v1/cache/{}", self.config.url.trim_end_matches('/'), cache_key);
+    pub fn upload_artifacts(
+        &self,
+        cache_key: &str,
+        task_name: &str,
+        artifacts: &[PathBuf],
+        config: &ResolvedBuildConfig,
+    ) -> Result<(), LoomError> {
+        let url = format!(
+            "{}/v1/cache/{}",
+            self.config.url.trim_end_matches('/'),
+            cache_key
+        );
 
         // 构建上传 payload
         let remote_artifacts: Vec<RemoteArtifact> = artifacts
@@ -348,9 +368,7 @@ impl RemoteCache {
                             "远程缓存拒绝写入: 共享模式未启用或权限不足".to_string(),
                         ));
                     } else if status == 413 {
-                        return Err(LoomError::Cache(
-                            "远程缓存产物过大: 服务器拒绝".to_string(),
-                        ));
+                        return Err(LoomError::Cache("远程缓存产物过大: 服务器拒绝".to_string()));
                     } else if attempt < self.config.max_retries {
                         self.wait_before_retry(attempt)?;
                         continue;
@@ -366,10 +384,7 @@ impl RemoteCache {
                         self.wait_before_retry(attempt)?;
                         continue;
                     }
-                    return Err(LoomError::Cache(format!(
-                        "远程缓存上传失败: {}",
-                        e
-                    )));
+                    return Err(LoomError::Cache(format!("远程缓存上传失败: {}", e)));
                 }
             }
         }
@@ -381,7 +396,11 @@ impl RemoteCache {
     ///
     /// DELETE /v1/cache/{key} → 204
     pub fn invalidate(&self, cache_key: &str) -> Result<(), LoomError> {
-        let url = format!("{}/v1/cache/{}", self.config.url.trim_end_matches('/'), cache_key);
+        let url = format!(
+            "{}/v1/cache/{}",
+            self.config.url.trim_end_matches('/'),
+            cache_key
+        );
 
         for attempt in 0..=self.config.max_retries {
             let request = self.client.delete(&url);
@@ -413,10 +432,7 @@ impl RemoteCache {
                         self.wait_before_retry(attempt)?;
                         continue;
                     }
-                    return Err(LoomError::Cache(format!(
-                        "远程缓存失效失败: {}",
-                        e
-                    )));
+                    return Err(LoomError::Cache(format!("远程缓存失效失败: {}", e)));
                 }
             }
         }
@@ -544,15 +560,13 @@ impl CacheService {
     /// 检查任务是否有缓存（本地 → 远程）
     ///
     /// 返回 (是否命中, 缓存来源)
-    pub fn lookup(
-        &mut self,
-        task: &TaskDefinition,
-    ) -> Result<(bool, CacheHitSource), LoomError> {
+    pub fn lookup(&mut self, task: &TaskDefinition) -> Result<(bool, CacheHitSource), LoomError> {
         // 1. 检查本地缓存
         {
-            let cache = self.local.lock().map_err(|e| {
-                LoomError::Cache(format!("本地缓存锁获取失败: {}", e))
-            })?;
+            let cache = self
+                .local
+                .lock()
+                .map_err(|e| LoomError::Cache(format!("本地缓存锁获取失败: {}", e)))?;
 
             if let Ok(fp) = Fingerprint::compute(task) {
                 if cache.is_up_to_date(&task.name, &fp) && cache.has_artifacts(&task.name) {
@@ -586,9 +600,10 @@ impl CacheService {
     ) -> Result<Option<Vec<PathBuf>>, LoomError> {
         // 1. 尝试从本地恢复
         {
-            let cache = self.local.lock().map_err(|e| {
-                LoomError::Cache(format!("本地缓存锁获取失败: {}", e))
-            })?;
+            let cache = self
+                .local
+                .lock()
+                .map_err(|e| LoomError::Cache(format!("本地缓存锁获取失败: {}", e)))?;
 
             if let Ok(fp) = Fingerprint::compute(task) {
                 if cache.is_up_to_date(&task.name, &fp) && cache.has_artifacts(&task.name) {
@@ -609,9 +624,10 @@ impl CacheService {
 
                     // 回写到本地缓存
                     {
-                        let mut cache = self.local.lock().map_err(|e| {
-                            LoomError::Cache(format!("本地缓存锁获取失败: {}", e))
-                        })?;
+                        let mut cache = self
+                            .local
+                            .lock()
+                            .map_err(|e| LoomError::Cache(format!("本地缓存锁获取失败: {}", e)))?;
                         if let Ok(fp) = Fingerprint::compute(task) {
                             let _ = cache.store_fingerprint(&task.name, &fp);
                             let _ = cache.store_artifacts(&task.name, &restored);
@@ -630,16 +646,13 @@ impl CacheService {
     }
 
     /// 存储任务结果到缓存（本地 + 远程）
-    pub fn store(
-        &mut self,
-        task: &TaskDefinition,
-        artifacts: &[PathBuf],
-    ) -> Result<(), LoomError> {
+    pub fn store(&mut self, task: &TaskDefinition, artifacts: &[PathBuf]) -> Result<(), LoomError> {
         // 1. 存储到本地缓存
         {
-            let mut cache = self.local.lock().map_err(|e| {
-                LoomError::Cache(format!("本地缓存锁获取失败: {}", e))
-            })?;
+            let mut cache = self
+                .local
+                .lock()
+                .map_err(|e| LoomError::Cache(format!("本地缓存锁获取失败: {}", e)))?;
 
             if let Ok(fp) = Fingerprint::compute(task) {
                 let _ = cache.store_fingerprint(&task.name, &fp);
@@ -667,9 +680,10 @@ impl CacheService {
     pub fn invalidate(&mut self, task: &TaskDefinition) -> Result<(), LoomError> {
         // 1. 清除本地
         {
-            let mut cache = self.local.lock().map_err(|e| {
-                LoomError::Cache(format!("本地缓存锁获取失败: {}", e))
-            })?;
+            let mut cache = self
+                .local
+                .lock()
+                .map_err(|e| LoomError::Cache(format!("本地缓存锁获取失败: {}", e)))?;
             let _ = cache.remove_task_artifacts(&task.name);
         }
 
@@ -740,17 +754,12 @@ fn encode_base64(data: &[u8]) -> String {
 fn decode_base64(encoded: &str) -> Result<Vec<u8>, LoomError> {
     use base64::Engine;
     let engine = base64::engine::general_purpose::STANDARD;
-    engine.decode(encoded).map_err(|e| {
-        LoomError::Cache(format!("Base64 解码失败: {}", e))
-    })
+    engine.decode(encoded).map_err(|e| LoomError::Cache(format!("Base64 解码失败: {}", e)))
 }
 
 fn now_timestamp() -> u64 {
     use std::time::SystemTime;
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -863,7 +872,9 @@ mod tests {
 
     #[test]
     fn test_base64_binary() {
-        let data = &[0u8, 1, 2, 255, 128, 64];
+        let data = &[
+            0u8, 1, 2, 255, 128, 64,
+        ];
         let encoded = encode_base64(data);
         let decoded = decode_base64(&encoded).unwrap();
         assert_eq!(data, &decoded[..]);
@@ -964,7 +975,12 @@ mod tests {
         std::fs::write(&file2, "data2").unwrap();
         service.store(&task2, &[file2]).unwrap();
 
-        service.invalidate_all(&[task1.clone(), task2.clone()]).unwrap();
+        service
+            .invalidate_all(&[
+                task1.clone(),
+                task2.clone(),
+            ])
+            .unwrap();
 
         let (hit1, _) = service.lookup(&task1).unwrap();
         let (hit2, _) = service.lookup(&task2).unwrap();

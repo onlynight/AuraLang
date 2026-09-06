@@ -199,7 +199,12 @@ fn terminal_size() -> (usize, usize) {
         unsafe {
             use std::io::{self, Read};
             let mut termios = std::mem::zeroed();
-            if libc::ioctl(io::stdin().as_raw_fd(), 0x5413 /* TIOCGWINSZ */, &mut termios) == 0 {
+            if libc::ioctl(
+                io::stdin().as_raw_fd(),
+                0x5413, /* TIOCGWINSZ */
+                &mut termios,
+            ) == 0
+            {
                 (termios.ws_col as usize, termios.ws_row as usize)
             } else {
                 (120, 30)

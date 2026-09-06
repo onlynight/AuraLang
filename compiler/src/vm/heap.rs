@@ -378,10 +378,7 @@ impl Heap {
 
     /// 判断堆槽是否仍存活（P7.3 弱引用升级）
     pub fn is_alive(&self, handle: usize) -> bool {
-        self.slots
-            .get(handle)
-            .map(|s| s.data.is_some())
-            .unwrap_or(false)
+        self.slots.get(handle).map(|s| s.data.is_some()).unwrap_or(false)
     }
 
     /// 当前存活对象数量（诊断用）
@@ -421,7 +418,9 @@ pub struct LeakDetail {
 /// 描述堆数据类型
 fn describe_heap_data(data: Option<&HeapData>) -> String {
     match data {
-        Some(HeapData::Object { type_tag, .. }) => format!("Object({:#x})", type_tag),
+        Some(HeapData::Object {
+            type_tag, ..
+        }) => format!("Object({:#x})", type_tag),
         Some(HeapData::Array(_)) => "Array".to_string(),
         Some(HeapData::List(_)) => "List".to_string(),
         Some(HeapData::Map(_)) => "Map".to_string(),

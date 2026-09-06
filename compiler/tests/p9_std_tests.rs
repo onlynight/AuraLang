@@ -16,9 +16,26 @@ fn call(reg: &NativeRegistry, name: &str, args: &[Value]) -> Value {
 
 /// 所有 std 模块名（与 register_with_modules 的参数对应）
 const ALL_MODULES: &[&str] = &[
-    "io", "math", "string", "collections", "fs", "json", "time",
-    "test", "builtin", "env", "process", "random", "encoding",
-    "ascii", "console", "path", "assert", "iter", "net", "concurrent",
+    "io",
+    "math",
+    "string",
+    "collections",
+    "fs",
+    "json",
+    "time",
+    "test",
+    "builtin",
+    "env",
+    "process",
+    "random",
+    "encoding",
+    "ascii",
+    "console",
+    "path",
+    "assert",
+    "iter",
+    "net",
+    "concurrent",
 ];
 
 /// 验证所有标准库函数已注册
@@ -190,10 +207,24 @@ fn test_std_math() {
     assert_eq!(result, Value::Int(42));
 
     // min / max
-    let result = call(&reg, "aura.math.min", &[Value::Int(3), Value::Int(5)]);
+    let result = call(
+        &reg,
+        "aura.math.min",
+        &[
+            Value::Int(3),
+            Value::Int(5),
+        ],
+    );
     assert_eq!(result, Value::Int(3));
 
-    let result = call(&reg, "aura.math.max", &[Value::Int(3), Value::Int(5)]);
+    let result = call(
+        &reg,
+        "aura.math.max",
+        &[
+            Value::Int(3),
+            Value::Int(5),
+        ],
+    );
     assert_eq!(result, Value::Int(5));
 
     // ceil / floor
@@ -208,7 +239,14 @@ fn test_std_math() {
     assert!((result.as_float() - 4.0).abs() < 1e-10);
 
     // pow
-    let result = call(&reg, "aura.math.pow", &[Value::Float(2.0), Value::Float(3.0)]);
+    let result = call(
+        &reg,
+        "aura.math.pow",
+        &[
+            Value::Float(2.0),
+            Value::Float(3.0),
+        ],
+    );
     assert!((result.as_float() - 8.0).abs() < 1e-10);
 
     // PI
@@ -225,22 +263,57 @@ fn test_std_string() {
     let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // contains
-    let result = call(&reg, "aura.string.contains", &[Value::str_("hello world"), Value::str_("world")]);
+    let result = call(
+        &reg,
+        "aura.string.contains",
+        &[
+            Value::str_("hello world"),
+            Value::str_("world"),
+        ],
+    );
     assert_eq!(result, Value::Bool(true));
 
-    let result = call(&reg, "aura.string.contains", &[Value::str_("hello"), Value::str_("xyz")]);
+    let result = call(
+        &reg,
+        "aura.string.contains",
+        &[
+            Value::str_("hello"),
+            Value::str_("xyz"),
+        ],
+    );
     assert_eq!(result, Value::Bool(false));
 
     // startsWith
-    let result = call(&reg, "aura.string.startsWith", &[Value::str_("hello"), Value::str_("hel")]);
+    let result = call(
+        &reg,
+        "aura.string.startsWith",
+        &[
+            Value::str_("hello"),
+            Value::str_("hel"),
+        ],
+    );
     assert_eq!(result, Value::Bool(true));
 
     // endsWith
-    let result = call(&reg, "aura.string.endsWith", &[Value::str_("hello"), Value::str_("llo")]);
+    let result = call(
+        &reg,
+        "aura.string.endsWith",
+        &[
+            Value::str_("hello"),
+            Value::str_("llo"),
+        ],
+    );
     assert_eq!(result, Value::Bool(true));
 
     // split
-    let result = call(&reg, "aura.string.split", &[Value::str_("hello world"), Value::str_(" ")]);
+    let result = call(
+        &reg,
+        "aura.string.split",
+        &[
+            Value::str_("hello world"),
+            Value::str_(" "),
+        ],
+    );
     match &result {
         Value::List(items) => {
             assert_eq!(items.len(), 2);
@@ -267,19 +340,37 @@ fn test_std_string() {
     assert_eq!(result, Value::str_("hello"));
 
     // format
-    let result = call(&reg, "aura.string.format", &[
-        Value::str_("Hello {0}, you are {1}"),
-        Value::str_("World"),
-        Value::Int(30),
-    ]);
+    let result = call(
+        &reg,
+        "aura.string.format",
+        &[
+            Value::str_("Hello {0}, you are {1}"),
+            Value::str_("World"),
+            Value::Int(30),
+        ],
+    );
     assert_eq!(result, Value::str_("Hello World, you are 30"));
 
     // repeat
-    let result = call(&reg, "aura.string.repeat", &[Value::Int(3), Value::str_("ab")]);
+    let result = call(
+        &reg,
+        "aura.string.repeat",
+        &[
+            Value::Int(3),
+            Value::str_("ab"),
+        ],
+    );
     assert_eq!(result, Value::str_("ababab"));
 
     // indexOf
-    let result = call(&reg, "aura.string.indexOf", &[Value::str_("hello"), Value::str_("l")]);
+    let result = call(
+        &reg,
+        "aura.string.indexOf",
+        &[
+            Value::str_("hello"),
+            Value::str_("l"),
+        ],
+    );
     assert_eq!(result, Value::Int(2));
 }
 
@@ -288,11 +379,15 @@ fn test_std_collections() {
     let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // listOf
-    let result = call(&reg, "aura.collections.listOf", &[
-        Value::Int(1),
-        Value::Int(2),
-        Value::Int(3),
-    ]);
+    let result = call(
+        &reg,
+        "aura.collections.listOf",
+        &[
+            Value::Int(1),
+            Value::Int(2),
+            Value::Int(3),
+        ],
+    );
     match &result {
         Value::List(items) => {
             assert_eq!(items.len(), 3);
@@ -304,12 +399,16 @@ fn test_std_collections() {
     }
 
     // mapOf
-    let result = call(&reg, "aura.collections.mapOf", &[
-        Value::str_("name"),
-        Value::str_("Aura"),
-        Value::str_("version"),
-        Value::Int(1),
-    ]);
+    let result = call(
+        &reg,
+        "aura.collections.mapOf",
+        &[
+            Value::str_("name"),
+            Value::str_("Aura"),
+            Value::str_("version"),
+            Value::Int(1),
+        ],
+    );
     match &result {
         Value::Map(map) => {
             assert_eq!(map.len(), 2);
@@ -320,11 +419,15 @@ fn test_std_collections() {
     }
 
     // setOf (unique)
-    let result = call(&reg, "aura.collections.setOf", &[
-        Value::Int(1),
-        Value::Int(2),
-        Value::Int(1),
-    ]);
+    let result = call(
+        &reg,
+        "aura.collections.setOf",
+        &[
+            Value::Int(1),
+            Value::Int(2),
+            Value::Int(1),
+        ],
+    );
     match &result {
         Value::List(items) => {
             assert_eq!(items.len(), 2);
@@ -347,7 +450,11 @@ fn test_std_json() {
     let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // parse
-    let result = call(&reg, "aura.json.parse", &[Value::str_(r#"{"name": "Aura", "version": 1}"#)]);
+    let result = call(
+        &reg,
+        "aura.json.parse",
+        &[Value::str_(r#"{"name": "Aura", "version": 1}"#)],
+    );
     match &result {
         Value::Map(map) => {
             assert_eq!(map.len(), 2);
@@ -369,7 +476,11 @@ fn test_std_json() {
     assert!(str_result.contains("\"value\""));
 
     // isValid
-    let result = call(&reg, "aura.json.isValid", &[Value::str_(r#"{"valid": true}"#)]);
+    let result = call(
+        &reg,
+        "aura.json.isValid",
+        &[Value::str_(r#"{"valid": true}"#)],
+    );
     assert_eq!(result, Value::Bool(true));
 
     let result = call(&reg, "aura.json.isValid", &[Value::str_("{invalid")]);
@@ -405,7 +516,14 @@ fn test_std_time() {
     assert_eq!(result, Value::str_("00:00:00"));
 
     // diff
-    let result = call(&reg, "aura.time.diff", &[Value::Float(100.0), Value::Float(200.0)]);
+    let result = call(
+        &reg,
+        "aura.time.diff",
+        &[
+            Value::Float(100.0),
+            Value::Float(200.0),
+        ],
+    );
     assert!((result.as_float() - 100.0).abs() < 1e-10);
 }
 
@@ -414,7 +532,14 @@ fn test_std_test() {
     let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // assertTrue (pass)
-    let result = call(&reg, "aura.test.assertTrue", &[Value::Bool(true), Value::str_("test passed")]);
+    let result = call(
+        &reg,
+        "aura.test.assertTrue",
+        &[
+            Value::Bool(true),
+            Value::str_("test passed"),
+        ],
+    );
     assert!(result.as_string().starts_with("PASS"));
 
     // assertFalse (pass)
@@ -422,11 +547,25 @@ fn test_std_test() {
     assert!(result.as_string().starts_with("PASS"));
 
     // assertEq (pass)
-    let result = call(&reg, "aura.test.assertEq", &[Value::Int(42), Value::Int(42)]);
+    let result = call(
+        &reg,
+        "aura.test.assertEq",
+        &[
+            Value::Int(42),
+            Value::Int(42),
+        ],
+    );
     assert!(result.as_string().starts_with("PASS"));
 
     // assertEq (fail)
-    let result = call(&reg, "aura.test.assertEq", &[Value::Int(1), Value::Int(2)]);
+    let result = call(
+        &reg,
+        "aura.test.assertEq",
+        &[
+            Value::Int(1),
+            Value::Int(2),
+        ],
+    );
     assert!(result.as_string().starts_with("FAIL"));
 
     // assertNotNull
@@ -475,7 +614,14 @@ fn test_std_env() {
     let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // set / get
-    call(&reg, "aura.env.set", &[Value::str_("AURA_TEST_VAR"), Value::str_("test_value")]);
+    call(
+        &reg,
+        "aura.env.set",
+        &[
+            Value::str_("AURA_TEST_VAR"),
+            Value::str_("test_value"),
+        ],
+    );
     let result = call(&reg, "aura.env.get", &[Value::str_("AURA_TEST_VAR")]);
     assert_eq!(result, Value::str_("test_value"));
 
@@ -517,12 +663,23 @@ fn test_std_random() {
     let _ = call(&reg, "aura.random.nextBool", &[]);
 
     // nextIntRange
-    let r = call(&reg, "aura.random.nextIntRange", &[Value::Int(10), Value::Int(20)]);
+    let r = call(
+        &reg,
+        "aura.random.nextIntRange",
+        &[
+            Value::Int(10),
+            Value::Int(20),
+        ],
+    );
     let i = r.as_int();
     assert!(i >= 10 && i < 20);
 
     // choice
-    let items: Vec<Value> = vec![Value::Int(1), Value::Int(2), Value::Int(3)];
+    let items: Vec<Value> = vec![
+        Value::Int(1),
+        Value::Int(2),
+        Value::Int(3),
+    ];
     let r = call(&reg, "aura.random.choice", &items);
     assert!(r == Value::Int(1) || r == Value::Int(2) || r == Value::Int(3));
 }
@@ -579,25 +736,41 @@ fn test_std_path() {
     let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // join
-    let result = call(&reg, "aura.path.join", &[
-        Value::str_("dir"),
-        Value::str_("file.txt"),
-    ]);
+    let result = call(
+        &reg,
+        "aura.path.join",
+        &[
+            Value::str_("dir"),
+            Value::str_("file.txt"),
+        ],
+    );
     let joined = result.as_string();
     assert!(joined.contains("dir"));
     assert!(joined.contains("file.txt"));
 
     // dirname
-    let result = call(&reg, "aura.path.dirname", &[Value::str_("/home/user/file.txt")]);
+    let result = call(
+        &reg,
+        "aura.path.dirname",
+        &[Value::str_("/home/user/file.txt")],
+    );
     let dirname = result.as_string();
     assert!(!dirname.is_empty());
 
     // basename
-    let result = call(&reg, "aura.path.basename", &[Value::str_("/home/user/file.txt")]);
+    let result = call(
+        &reg,
+        "aura.path.basename",
+        &[Value::str_("/home/user/file.txt")],
+    );
     assert_eq!(result, Value::str_("file"));
 
     // extname
-    let result = call(&reg, "aura.path.extname", &[Value::str_("/home/user/file.txt")]);
+    let result = call(
+        &reg,
+        "aura.path.extname",
+        &[Value::str_("/home/user/file.txt")],
+    );
     assert_eq!(result, Value::str_(".txt"));
 
     // isAbsolute (use platform-appropriate path)
@@ -614,7 +787,11 @@ fn test_std_iter() {
     let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // sum
-    let list = Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+    let list = Value::List(vec![
+        Value::Int(1),
+        Value::Int(2),
+        Value::Int(3),
+    ]);
     let result = call(&reg, "aura.iter.sum", &[list.clone()]);
     assert_eq!(result, Value::Int(6));
 
@@ -631,7 +808,12 @@ fn test_std_iter() {
     assert_eq!(result, Value::Int(3));
 
     // distinct
-    let list = Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(1), Value::Int(3)]);
+    let list = Value::List(vec![
+        Value::Int(1),
+        Value::Int(2),
+        Value::Int(1),
+        Value::Int(3),
+    ]);
     let result = call(&reg, "aura.iter.distinct", &[list.clone()]);
     match &result {
         Value::List(items) => {
@@ -641,7 +823,14 @@ fn test_std_iter() {
     }
 
     // range
-    let result = call(&reg, "aura.iter.range", &[Value::Int(1), Value::Int(5)]);
+    let result = call(
+        &reg,
+        "aura.iter.range",
+        &[
+            Value::Int(1),
+            Value::Int(5),
+        ],
+    );
     match &result {
         Value::List(items) => {
             assert_eq!(items.len(), 5);
@@ -652,8 +841,21 @@ fn test_std_iter() {
     }
 
     // take
-    let list = Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3), Value::Int(4), Value::Int(5)]);
-    let result = call(&reg, "aura.iter.take", &[list.clone(), Value::Int(3)]);
+    let list = Value::List(vec![
+        Value::Int(1),
+        Value::Int(2),
+        Value::Int(3),
+        Value::Int(4),
+        Value::Int(5),
+    ]);
+    let result = call(
+        &reg,
+        "aura.iter.take",
+        &[
+            list.clone(),
+            Value::Int(3),
+        ],
+    );
     match &result {
         Value::List(items) => {
             assert_eq!(items.len(), 3);
@@ -662,7 +864,14 @@ fn test_std_iter() {
     }
 
     // skip
-    let result = call(&reg, "aura.iter.skip", &[list.clone(), Value::Int(2)]);
+    let result = call(
+        &reg,
+        "aura.iter.skip",
+        &[
+            list.clone(),
+            Value::Int(2),
+        ],
+    );
     match &result {
         Value::List(items) => {
             assert_eq!(items.len(), 3);
@@ -672,8 +881,14 @@ fn test_std_iter() {
     }
 
     // chain
-    let l1 = Value::List(vec![Value::Int(1), Value::Int(2)]);
-    let l2 = Value::List(vec![Value::Int(3), Value::Int(4)]);
+    let l1 = Value::List(vec![
+        Value::Int(1),
+        Value::Int(2),
+    ]);
+    let l2 = Value::List(vec![
+        Value::Int(3),
+        Value::Int(4),
+    ]);
     let result = call(&reg, "aura.iter.chain", &[l1, l2]);
     match &result {
         Value::List(items) => {
@@ -683,7 +898,11 @@ fn test_std_iter() {
     }
 
     // count
-    let list = Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+    let list = Value::List(vec![
+        Value::Int(1),
+        Value::Int(2),
+        Value::Int(3),
+    ]);
     let result = call(&reg, "aura.iter.count", &[list]);
     assert_eq!(result, Value::Int(3));
 }
@@ -693,19 +912,47 @@ fn test_std_assert() {
     let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // assert (pass)
-    let result = call(&reg, "aura.assert.assert", &[Value::Bool(true), Value::str_("test")]);
+    let result = call(
+        &reg,
+        "aura.assert.assert",
+        &[
+            Value::Bool(true),
+            Value::str_("test"),
+        ],
+    );
     assert!(result.as_string().starts_with("OK"));
 
     // assert (fail)
-    let result = call(&reg, "aura.assert.assert", &[Value::Bool(false), Value::str_("test")]);
+    let result = call(
+        &reg,
+        "aura.assert.assert",
+        &[
+            Value::Bool(false),
+            Value::str_("test"),
+        ],
+    );
     assert!(result.as_string().starts_with("ASSERTION FAILED"));
 
     // assertEq (pass)
-    let result = call(&reg, "aura.assert.assertEq", &[Value::Int(1), Value::Int(1)]);
+    let result = call(
+        &reg,
+        "aura.assert.assertEq",
+        &[
+            Value::Int(1),
+            Value::Int(1),
+        ],
+    );
     assert!(result.as_string().starts_with("OK"));
 
     // assertEq (fail)
-    let result = call(&reg, "aura.assert.assertEq", &[Value::Int(1), Value::Int(2)]);
+    let result = call(
+        &reg,
+        "aura.assert.assertEq",
+        &[
+            Value::Int(1),
+            Value::Int(2),
+        ],
+    );
     assert!(result.as_string().starts_with("ASSERTION FAILED"));
 }
 
@@ -714,7 +961,11 @@ fn test_std_fs() {
     let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // exists (non-existent file)
-    let result = call(&reg, "aura.fs.exists", &[Value::str_("/nonexistent/path/file.txt")]);
+    let result = call(
+        &reg,
+        "aura.fs.exists",
+        &[Value::str_("/nonexistent/path/file.txt")],
+    );
     assert_eq!(result, Value::Bool(false));
 
     // isFile / isDirectory for non-existent path
@@ -730,7 +981,11 @@ fn test_std_io_basic() {
     let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // fileExists for non-existent file
-    let result = call(&reg, "aura.io.fileExists", &[Value::str_("/nonexistent/file.txt")]);
+    let result = call(
+        &reg,
+        "aura.io.fileExists",
+        &[Value::str_("/nonexistent/file.txt")],
+    );
     assert_eq!(result, Value::Bool(false));
 
     // fileExists for the project root (should exist)
@@ -776,8 +1031,17 @@ fn test_std_process_basic() {
 #[test]
 fn test_value_list_map() {
     // Verify List and Map variants work correctly
-    let list = Value::List(vec![Value::Int(1), Value::Int(2)]);
-    assert_eq!(list, Value::List(vec![Value::Int(1), Value::Int(2)]));
+    let list = Value::List(vec![
+        Value::Int(1),
+        Value::Int(2),
+    ]);
+    assert_eq!(
+        list,
+        Value::List(vec![
+            Value::Int(1),
+            Value::Int(2)
+        ])
+    );
     assert_eq!(list.type_name(), "List");
     assert!(list.is_truthy());
 

@@ -371,8 +371,7 @@ impl Lexer {
                     // 如果没有找到 */，报错
                     if self.char_pos >= self.chars.len() {
                         let span = self.eof_span();
-                        self.errors
-                            .push(TokenizeError::new("Unterminated block comment", span));
+                        self.errors.push(TokenizeError::new("Unterminated block comment", span));
                     }
                 } else {
                     break;
@@ -487,11 +486,7 @@ impl Lexer {
         // 后缀：L, f, F, d, D, u, U, l
         self.maybe_suffix(&mut buf, &mut has_suffix);
 
-        let kind = if is_float {
-            TokenKind::FloatLiteral
-        } else {
-            TokenKind::IntLiteral
-        };
+        let kind = if is_float { TokenKind::FloatLiteral } else { TokenKind::IntLiteral };
         let span = Span::merge(&start, &self.current_span());
         Token::new(kind, buf, span)
     }
@@ -525,11 +520,7 @@ impl Lexer {
         }
 
         let kind = lookup_keyword(&buf).unwrap_or(TokenKind::Ident);
-        let span = if buf.is_empty() {
-            start
-        } else {
-            Span::merge(&start, &end_span)
-        };
+        let span = if buf.is_empty() { start } else { Span::merge(&start, &end_span) };
         Token::new(kind, buf, span)
     }
 
@@ -552,8 +543,7 @@ impl Lexer {
         loop {
             if self.char_pos >= self.chars.len() {
                 let span = Span::merge(&start, &self.current_span());
-                self.errors
-                    .push(TokenizeError::new("Unterminated raw string literal", span));
+                self.errors.push(TokenizeError::new("Unterminated raw string literal", span));
                 return Token::new(TokenKind::StringLiteral, buf, span);
             }
 
@@ -581,8 +571,7 @@ impl Lexer {
         loop {
             if self.char_pos >= self.chars.len() {
                 let span = self.eof_span();
-                self.errors
-                    .push(TokenizeError::new("Unterminated string literal", span));
+                self.errors.push(TokenizeError::new("Unterminated string literal", span));
                 return Token::new(TokenKind::StringLiteral, buf, span);
             }
 
@@ -1249,11 +1238,7 @@ mod tests {
         let tokens = lexer.tokenize();
         assert_eq!(kind(&tokens[0]), TokenKind::StringLiteral);
         assert_eq!(lexer.errors().len(), 1);
-        assert!(
-            lexer.errors()[0]
-                .message
-                .contains("Unterminated raw string")
-        );
+        assert!(lexer.errors()[0].message.contains("Unterminated raw string"));
     }
 
     #[test]
@@ -1363,11 +1348,8 @@ mod tests {
     fn test_delimiters() {
         let src = "( ) { } [ ] , ; : .";
         let tokens = tokenize(src);
-        let kinds: Vec<TokenKind> = tokens
-            .iter()
-            .filter(|t| t.kind != TokenKind::EOF)
-            .map(|t| t.kind)
-            .collect();
+        let kinds: Vec<TokenKind> =
+            tokens.iter().filter(|t| t.kind != TokenKind::EOF).map(|t| t.kind).collect();
         let expected = vec![
             TokenKind::LParen,
             TokenKind::RParen,

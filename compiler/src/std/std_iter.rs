@@ -53,14 +53,8 @@ fn i0(args: &[Value]) -> i64 {
 
 /// iter.sum(list) → Float
 fn nat_sum(args: &[Value]) -> Value {
-    let sum = get_list(args).map_or(0.0, |items| {
-        items.iter().map(|v| v.as_float()).sum::<f64>()
-    });
-    if sum.fract() == 0.0 {
-        Value::Int(sum as i64)
-    } else {
-        Value::Float(sum)
-    }
+    let sum = get_list(args).map_or(0.0, |items| items.iter().map(|v| v.as_float()).sum::<f64>());
+    if sum.fract() == 0.0 { Value::Int(sum as i64) } else { Value::Float(sum) }
 }
 
 /// iter.avg(list) → Float
@@ -76,12 +70,16 @@ fn nat_avg(args: &[Value]) -> Value {
 
 /// iter.min(list) → Value
 fn nat_min(args: &[Value]) -> Value {
-    get_list(args).and_then(|items| items.iter().min_by(|a, b| compare_values(a, b)).cloned()).unwrap_or(Value::Null)
+    get_list(args)
+        .and_then(|items| items.iter().min_by(|a, b| compare_values(a, b)).cloned())
+        .unwrap_or(Value::Null)
 }
 
 /// iter.max(list) → Value
 fn nat_max(args: &[Value]) -> Value {
-    get_list(args).and_then(|items| items.iter().max_by(|a, b| compare_values(a, b)).cloned()).unwrap_or(Value::Null)
+    get_list(args)
+        .and_then(|items| items.iter().max_by(|a, b| compare_values(a, b)).cloned())
+        .unwrap_or(Value::Null)
 }
 
 /// iter.product(list) → Float
@@ -89,11 +87,7 @@ fn nat_product(args: &[Value]) -> Value {
     let product = get_list(args).map_or(1.0, |items| {
         items.iter().map(|v| v.as_float()).product::<f64>()
     });
-    if product.fract() == 0.0 {
-        Value::Int(product as i64)
-    } else {
-        Value::Float(product)
-    }
+    if product.fract() == 0.0 { Value::Int(product as i64) } else { Value::Float(product) }
 }
 
 /// iter.contains(list, item) → Bool
@@ -186,7 +180,10 @@ fn nat_unzip(args: &[Value]) -> Value {
                     }
                 }
             }
-            Value::List(vec![Value::List(first), Value::List(second)])
+            Value::List(vec![
+                Value::List(first),
+                Value::List(second),
+            ])
         }
         None => Value::List(Vec::new()),
     }
@@ -199,7 +196,12 @@ fn nat_enumerate(args: &[Value]) -> Value {
             let pairs: Vec<Value> = items
                 .iter()
                 .enumerate()
-                .map(|(i, v)| Value::List(vec![Value::Int(i as i64), v.clone()]))
+                .map(|(i, v)| {
+                    Value::List(vec![
+                        Value::Int(i as i64),
+                        v.clone(),
+                    ])
+                })
                 .collect();
             Value::List(pairs)
         }
@@ -241,7 +243,8 @@ fn nat_drop_while(args: &[Value]) -> Value {
     let predicate = args.get(1).cloned().unwrap_or(Value::Null);
     match get_list(args) {
         Some(items) => {
-            let dropped = items.iter().take_while(|item| matches_predicate(item, &predicate)).count();
+            let dropped =
+                items.iter().take_while(|item| matches_predicate(item, &predicate)).count();
             Value::List(items.iter().skip(dropped).cloned().collect())
         }
         None => Value::List(Vec::new()),
@@ -320,7 +323,10 @@ fn nat_partition(args: &[Value]) -> Value {
         }
         None => {}
     }
-    Value::List(vec![Value::List(matches_list), Value::List(non_matches)])
+    Value::List(vec![
+        Value::List(matches_list),
+        Value::List(non_matches),
+    ])
 }
 
 /// iter.fold(list, init, fn) → Value (reduce with initial value)
@@ -372,11 +378,8 @@ fn nat_to_map(args: &[Value]) -> Value {
         Some(items) => {
             for item in items {
                 let key = apply_function(item, &key_fn);
-                let val = if key_fn == value_fn {
-                    item.clone()
-                } else {
-                    apply_function(item, &value_fn)
-                };
+                let val =
+                    if key_fn == value_fn { item.clone() } else { apply_function(item, &value_fn) };
                 map.insert(key, val);
             }
         }
@@ -398,11 +401,7 @@ fn nat_to_list(args: &[Value]) -> Value {
 fn nat_range(args: &[Value]) -> Value {
     let from = i0(args);
     let to = args.get(1).map(|v| v.as_int()).unwrap_or(0);
-    let range: std::ops::RangeInclusive<i64> = if from <= to {
-        from..=to
-    } else {
-        from..=from
-    };
+    let range: std::ops::RangeInclusive<i64> = if from <= to { from..=to } else { from..=from };
     Value::List(range.map(Value::Int).collect())
 }
 
@@ -515,8 +514,12 @@ fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => x.cmp(y),
         (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
-        (Value::Int(x), Value::Float(y)) => (*x as f64).partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
-        (Value::Float(x), Value::Int(y)) => x.partial_cmp(&(*y as f64)).unwrap_or(std::cmp::Ordering::Equal),
+        (Value::Int(x), Value::Float(y)) => {
+            (*x as f64).partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+        }
+        (Value::Float(x), Value::Int(y)) => {
+            x.partial_cmp(&(*y as f64)).unwrap_or(std::cmp::Ordering::Equal)
+        }
         (Value::Str(x), Value::Str(y)) => x.cmp(y),
         (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
         (Value::Null, Value::Null) => std::cmp::Ordering::Equal,

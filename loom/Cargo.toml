@@ -17,10 +17,11 @@ path = "src/lib.rs"
 # 编译器 SDK（核心依赖）
 compiler = { path = "../compiler", features = ["std-all"] }
 
-# TOML 配置解析
+# 配置解析
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 
 # 文件系统
 walkdir = "2"

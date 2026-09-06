@@ -18,9 +18,23 @@ use std::sync::OnceLock;
 
 /// 免import的 prelude 函数名（17 个全局内置）
 pub const PRELUDE_NAMES: &[&str] = &[
-    "println", "print", "puts", "abs", "sqrt", "pow",
-    "toInt", "toFloat", "toStr", "toString", "clock", "strlen",
-    "CString", "CStr", "ptrIsNull", "ptrToInt", "intToPtr",
+    "println",
+    "print",
+    "puts",
+    "abs",
+    "sqrt",
+    "pow",
+    "toInt",
+    "toFloat",
+    "toStr",
+    "toString",
+    "clock",
+    "strlen",
+    "CString",
+    "CStr",
+    "ptrIsNull",
+    "ptrToInt",
+    "intToPtr",
     "makeCallback",
 ];
 
@@ -76,11 +90,7 @@ pub fn module_functions(module_path: &str) -> Vec<String> {
 /// 例如：`module_functions_full("aura.math")` → `["aura.math.sin", "aura.math.cos", ...]`
 pub fn module_functions_full(module_path: &str) -> Vec<&'static str> {
     let prefix = format!("{}.", module_path);
-    all_names()
-        .iter()
-        .filter(|name| name.starts_with(&prefix))
-        .copied()
-        .collect()
+    all_names().iter().filter(|name| name.starts_with(&prefix)).copied().collect()
 }
 
 fn build_all_names() -> HashSet<&'static str> {
@@ -91,254 +101,469 @@ fn build_all_names() -> HashSet<&'static str> {
     // toString / clock / strlen / CString / CStr / ptrIsNull / ptrToInt /
     // intToPtr / makeCallback
     for n in [
-        "println", "print", "puts", "abs", "sqrt", "pow",
-        "toInt", "toFloat", "toStr", "toString", "clock", "strlen",
-        "CString", "CStr", "ptrIsNull", "ptrToInt", "intToPtr",
+        "println",
+        "print",
+        "puts",
+        "abs",
+        "sqrt",
+        "pow",
+        "toInt",
+        "toFloat",
+        "toStr",
+        "toString",
+        "clock",
+        "strlen",
+        "CString",
+        "CStr",
+        "ptrIsNull",
+        "ptrToInt",
+        "intToPtr",
         "makeCallback",
-    ] { s.insert(n); }
+    ] {
+        s.insert(n);
+    }
 
     // ── aura.concurrent.* — 协程 / Actor / Channel（native.rs 注册）──
     for n in [
-        "aura.concurrent.spawn", "aura.concurrent.send",
-        "aura.concurrent.ask", "aura.concurrent.newChannel",
-        "aura.concurrent.channelSend", "aura.concurrent.channelRecv",
-        "aura.concurrent.channelTryRecv", "aura.concurrent.select",
-        "aura.concurrent.spawnActor", "aura.concurrent.supervise",
+        "aura.concurrent.spawn",
+        "aura.concurrent.send",
+        "aura.concurrent.ask",
+        "aura.concurrent.newChannel",
+        "aura.concurrent.channelSend",
+        "aura.concurrent.channelRecv",
+        "aura.concurrent.channelTryRecv",
+        "aura.concurrent.select",
+        "aura.concurrent.spawnActor",
+        "aura.concurrent.supervise",
         "aura.concurrent.actorAlive",
-    ] { s.insert(n); }
+    ] {
+        s.insert(n);
+    }
 
     // ── aura.ascii.* — 字符工具（std_ascii.rs）──
     for n in [
-        "aura.ascii.isAlpha", "aura.ascii.isDigit",
-        "aura.ascii.isAlphaNumeric", "aura.ascii.isWhitespace",
-        "aura.ascii.isUpper", "aura.ascii.isLower",
-        "aura.ascii.toUpper", "aura.ascii.toLower",
-        "aura.ascii.codeAt", "aura.ascii.charAt",
-        "aura.ascii.fromCode", "aura.ascii.codePointAt",
-    ] { s.insert(n); }
+        "aura.ascii.isAlpha",
+        "aura.ascii.isDigit",
+        "aura.ascii.isAlphaNumeric",
+        "aura.ascii.isWhitespace",
+        "aura.ascii.isUpper",
+        "aura.ascii.isLower",
+        "aura.ascii.toUpper",
+        "aura.ascii.toLower",
+        "aura.ascii.codeAt",
+        "aura.ascii.charAt",
+        "aura.ascii.fromCode",
+        "aura.ascii.codePointAt",
+    ] {
+        s.insert(n);
+    }
 
     // ── aura.assert.* — 通用断言（std_assert.rs）──
     for n in [
-        "aura.assert.assert", "aura.assert.assertTrue",
-        "aura.assert.assertFalse", "aura.assert.assertEq",
-        "aura.assert.assertNotEq", "aura.assert.assertNotNull",
-        "aura.assert.assertNull", "aura.assert.debugAssert",
-    ] { s.insert(n); }
+        "aura.assert.assert",
+        "aura.assert.assertTrue",
+        "aura.assert.assertFalse",
+        "aura.assert.assertEq",
+        "aura.assert.assertNotEq",
+        "aura.assert.assertNotNull",
+        "aura.assert.assertNull",
+        "aura.assert.debugAssert",
+    ] {
+        s.insert(n);
+    }
 
     // ── aura.builtin.* — 编译期内置（std_builtin.rs）──
     for n in [
-        "aura.builtin.typeof", "aura.builtin.typeOf",
-        "aura.builtin.isNull", "aura.builtin.isNotNull",
-        "aura.builtin.isZero", "aura.builtin.isPositive",
-        "aura.builtin.isNegative", "aura.builtin.toString",
-        "aura.builtin.toInt", "aura.builtin.toFloat",
-        "aura.builtin.toBool", "aura.builtin.sizeOf",
-        "aura.builtin.hash", "aura.builtin.compare",
-        "aura.builtin.clone", "aura.builtin.identity",
-    ] { s.insert(n); }
+        "aura.builtin.typeof",
+        "aura.builtin.typeOf",
+        "aura.builtin.isNull",
+        "aura.builtin.isNotNull",
+        "aura.builtin.isZero",
+        "aura.builtin.isPositive",
+        "aura.builtin.isNegative",
+        "aura.builtin.toString",
+        "aura.builtin.toInt",
+        "aura.builtin.toFloat",
+        "aura.builtin.toBool",
+        "aura.builtin.sizeOf",
+        "aura.builtin.hash",
+        "aura.builtin.compare",
+        "aura.builtin.clone",
+        "aura.builtin.identity",
+    ] {
+        s.insert(n);
+    }
 
     // ── aura.collections.* — 集合辅助（std_collections.rs）──
     for n in [
-        "aura.collections.listOf", "aura.collections.mutableListOf",
-        "aura.collections.emptyList", "aura.collections.arrayOf",
-        "aura.collections.listContains", "aura.collections.listIndexOf",
-        "aura.collections.listRemove", "aura.collections.listReverse",
-        "aura.collections.listSort", "aura.collections.listGet",
-        "aura.collections.listSet", "aura.collections.listInsert",
+        "aura.collections.listOf",
+        "aura.collections.mutableListOf",
+        "aura.collections.emptyList",
+        "aura.collections.arrayOf",
+        "aura.collections.listContains",
+        "aura.collections.listIndexOf",
+        "aura.collections.listRemove",
+        "aura.collections.listReverse",
+        "aura.collections.listSort",
+        "aura.collections.listGet",
+        "aura.collections.listSet",
+        "aura.collections.listInsert",
         "aura.collections.listSubList",
-        "aura.collections.mapOf", "aura.collections.mutableMapOf",
-        "aura.collections.emptyMap", "aura.collections.mapContains",
-        "aura.collections.mapContainsKey", "aura.collections.mapContainsValue",
-        "aura.collections.mapRemove", "aura.collections.mapKeys",
+        "aura.collections.mapOf",
+        "aura.collections.mutableMapOf",
+        "aura.collections.emptyMap",
+        "aura.collections.mapContains",
+        "aura.collections.mapContainsKey",
+        "aura.collections.mapContainsValue",
+        "aura.collections.mapRemove",
+        "aura.collections.mapKeys",
         "aura.collections.mapValues",
-        "aura.collections.setOf", "aura.collections.mutableSetOf",
+        "aura.collections.setOf",
+        "aura.collections.mutableSetOf",
         "aura.collections.emptySet",
-    ] { s.insert(n); }
+    ] {
+        s.insert(n);
+    }
 
     // ── aura.console.* — 终端控制（std_console.rs）──
     for n in [
         "aura.console.clear",
-        "aura.console.cursorUp", "aura.console.cursorDown",
-        "aura.console.cursorLeft", "aura.console.cursorRight",
-        "aura.console.cursorShow", "aura.console.cursorHide",
+        "aura.console.cursorUp",
+        "aura.console.cursorDown",
+        "aura.console.cursorLeft",
+        "aura.console.cursorRight",
+        "aura.console.cursorShow",
+        "aura.console.cursorHide",
         "aura.console.reset",
-        "aura.console.red", "aura.console.green",
-        "aura.console.yellow", "aura.console.blue",
-        "aura.console.magenta", "aura.console.cyan",
-        "aura.console.white", "aura.console.bold",
-        "aura.console.italic", "aura.console.underline",
-        "aura.console.dim", "aura.console.inverse",
-        "aura.console.size", "aura.console.width",
+        "aura.console.red",
+        "aura.console.green",
+        "aura.console.yellow",
+        "aura.console.blue",
+        "aura.console.magenta",
+        "aura.console.cyan",
+        "aura.console.white",
+        "aura.console.bold",
+        "aura.console.italic",
+        "aura.console.underline",
+        "aura.console.dim",
+        "aura.console.inverse",
+        "aura.console.size",
+        "aura.console.width",
         "aura.console.height",
-    ] { s.insert(n); }
+    ] {
+        s.insert(n);
+    }
 
     // ── aura.encoding.* — 编码/解码（std_encoding.rs）──
     for n in [
-        "aura.encoding.base64Encode", "aura.encoding.base64Decode",
-        "aura.encoding.hexEncode", "aura.encoding.hexDecode",
-        "aura.encoding.urlEncode", "aura.encoding.urlDecode",
-        "aura.encoding.byteToHex", "aura.encoding.hexToByte",
-    ] { s.insert(n); }
+        "aura.encoding.base64Encode",
+        "aura.encoding.base64Decode",
+        "aura.encoding.hexEncode",
+        "aura.encoding.hexDecode",
+        "aura.encoding.urlEncode",
+        "aura.encoding.urlDecode",
+        "aura.encoding.byteToHex",
+        "aura.encoding.hexToByte",
+    ] {
+        s.insert(n);
+    }
 
     // ── aura.env.* — 环境变量（std_env.rs）──
     for n in [
-        "aura.env.get", "aura.env.set", "aura.env.remove",
-        "aura.env.has", "aura.env.keys", "aura.env.values",
-        "aura.env.all", "aura.env.home", "aura.env.tmp",
-        "aura.env.pwd", "aura.env.platform", "aura.env.os",
+        "aura.env.get",
+        "aura.env.set",
+        "aura.env.remove",
+        "aura.env.has",
+        "aura.env.keys",
+        "aura.env.values",
+        "aura.env.all",
+        "aura.env.home",
+        "aura.env.tmp",
+        "aura.env.pwd",
+        "aura.env.platform",
+        "aura.env.os",
         "aura.env.arch",
-    ] { s.insert(n); }
+    ] {
+        s.insert(n);
+    }
 
     // ── aura.fs.* — 文件系统（std_fs.rs）──
     for n in [
-        "aura.fs.exists", "aura.fs.isFile",
-        "aura.fs.isDirectory", "aura.fs.readText",
-        "aura.fs.writeText", "aura.fs.readBytes",
-        "aura.fs.writeBytes", "aura.fs.delete",
-        "aura.fs.mkdir", "aura.fs.mkdirP", "aura.fs.rename",
-        "aura.fs.copy", "aura.fs.listDir", "aura.fs.listFiles",
-        "aura.fs.fileSize", "aura.fs.lastModified",
-        "aura.fs.absolutePath", "aura.fs.homeDir",
-        "aura.fs.tempDir", "aura.fs.currentDir", "aura.fs.walk",
-    ] { s.insert(n); }
+        "aura.fs.exists",
+        "aura.fs.isFile",
+        "aura.fs.isDirectory",
+        "aura.fs.readText",
+        "aura.fs.writeText",
+        "aura.fs.readBytes",
+        "aura.fs.writeBytes",
+        "aura.fs.delete",
+        "aura.fs.mkdir",
+        "aura.fs.mkdirP",
+        "aura.fs.rename",
+        "aura.fs.copy",
+        "aura.fs.listDir",
+        "aura.fs.listFiles",
+        "aura.fs.fileSize",
+        "aura.fs.lastModified",
+        "aura.fs.absolutePath",
+        "aura.fs.homeDir",
+        "aura.fs.tempDir",
+        "aura.fs.currentDir",
+        "aura.fs.walk",
+    ] {
+        s.insert(n);
+    }
 
     // ── aura.io.* — 标准输入输出（std_io.rs）──
     for n in [
-        "aura.io.println", "aura.io.print",
-        "aura.io.readLine", "aura.io.readAll",
-        "aura.io.flush", "aura.io.fileRead",
-        "aura.io.fileWrite", "aura.io.fileExists",
-        "aura.io.writeFile", "aura.io.readFile",
-    ] { s.insert(n); }
+        "aura.io.println",
+        "aura.io.print",
+        "aura.io.readLine",
+        "aura.io.readAll",
+        "aura.io.flush",
+        "aura.io.fileRead",
+        "aura.io.fileWrite",
+        "aura.io.fileExists",
+        "aura.io.writeFile",
+        "aura.io.readFile",
+    ] {
+        s.insert(n);
+    }
 
     // ── aura.iter.* — 迭代器/函数式（std_iter.rs）──
     for n in [
-        "aura.iter.sum", "aura.iter.avg",
-        "aura.iter.min", "aura.iter.max",
-        "aura.iter.product", "aura.iter.contains",
-        "aura.iter.indexOf", "aura.iter.count",
-        "aura.iter.every", "aura.iter.some",
-        "aura.iter.flatMap", "aura.iter.zip",
-        "aura.iter.unzip", "aura.iter.enumerate",
-        "aura.iter.chain", "aura.iter.take",
-        "aura.iter.skip", "aura.iter.dropWhile",
-        "aura.iter.takeWhile", "aura.iter.distinct",
-        "aura.iter.groupBy", "aura.iter.partition",
-        "aura.iter.fold", "aura.iter.scan",
-        "aura.iter.toMap", "aura.iter.toList",
-        "aura.iter.range", "aura.iter.rangeTo",
-        "aura.iter.rangeUntil", "aura.iter.repeatN",
-    ] { s.insert(n); }
+        "aura.iter.sum",
+        "aura.iter.avg",
+        "aura.iter.min",
+        "aura.iter.max",
+        "aura.iter.product",
+        "aura.iter.contains",
+        "aura.iter.indexOf",
+        "aura.iter.count",
+        "aura.iter.every",
+        "aura.iter.some",
+        "aura.iter.flatMap",
+        "aura.iter.zip",
+        "aura.iter.unzip",
+        "aura.iter.enumerate",
+        "aura.iter.chain",
+        "aura.iter.take",
+        "aura.iter.skip",
+        "aura.iter.dropWhile",
+        "aura.iter.takeWhile",
+        "aura.iter.distinct",
+        "aura.iter.groupBy",
+        "aura.iter.partition",
+        "aura.iter.fold",
+        "aura.iter.scan",
+        "aura.iter.toMap",
+        "aura.iter.toList",
+        "aura.iter.range",
+        "aura.iter.rangeTo",
+        "aura.iter.rangeUntil",
+        "aura.iter.repeatN",
+    ] {
+        s.insert(n);
+    }
 
     // ── aura.json.* — JSON 解析与序列化（std_json.rs）──
     for n in [
-        "aura.json.parse", "aura.json.stringify",
-        "aura.json.isValid", "aura.json.get",
-        "aura.json.set", "aura.json.keys",
-        "aura.json.values", "aura.json.length",
-        "aura.json.contains", "aura.json.remove",
-    ] { s.insert(n); }
+        "aura.json.parse",
+        "aura.json.stringify",
+        "aura.json.isValid",
+        "aura.json.get",
+        "aura.json.set",
+        "aura.json.keys",
+        "aura.json.values",
+        "aura.json.length",
+        "aura.json.contains",
+        "aura.json.remove",
+    ] {
+        s.insert(n);
+    }
 
     // ── aura.math.* — 数学函数与常量（std_math.rs）──
     for n in [
-        "aura.math.abs", "aura.math.min", "aura.math.max",
-        "aura.math.ceil", "aura.math.floor",
-        "aura.math.round", "aura.math.trunc",
-        "aura.math.sqrt", "aura.math.cbrt",
-        "aura.math.pow", "aura.math.exp",
-        "aura.math.log", "aura.math.log2",
-        "aura.math.log10", "aura.math.sin",
-        "aura.math.cos", "aura.math.tan",
-        "aura.math.asin", "aura.math.acos",
-        "aura.math.atan", "aura.math.atan2",
-        "aura.math.PI", "aura.math.E",
-        "aura.math.INT_MAX", "aura.math.INT_MIN",
-        "aura.math.FLOAT_MAX", "aura.math.sign",
+        "aura.math.abs",
+        "aura.math.min",
+        "aura.math.max",
+        "aura.math.ceil",
+        "aura.math.floor",
+        "aura.math.round",
+        "aura.math.trunc",
+        "aura.math.sqrt",
+        "aura.math.cbrt",
+        "aura.math.pow",
+        "aura.math.exp",
+        "aura.math.log",
+        "aura.math.log2",
+        "aura.math.log10",
+        "aura.math.sin",
+        "aura.math.cos",
+        "aura.math.tan",
+        "aura.math.asin",
+        "aura.math.acos",
+        "aura.math.atan",
+        "aura.math.atan2",
+        "aura.math.PI",
+        "aura.math.E",
+        "aura.math.INT_MAX",
+        "aura.math.INT_MIN",
+        "aura.math.FLOAT_MAX",
+        "aura.math.sign",
         "aura.math.clamp",
-    ] { s.insert(n); }
+    ] {
+        s.insert(n);
+    }
 
     // ── aura.net.* — 网络 Socket（std_net.rs）──
     for n in [
-        "aura.net.tcpConnect", "aura.net.tcpListen",
-        "aura.net.tcpSend", "aura.net.tcpRecv",
-        "aura.net.tcpClose", "aura.net.udpSend",
-        "aura.net.udpRecv", "aura.net.udpClose",
-        "aura.net.isHostReachable", "aura.net.getHostname",
+        "aura.net.tcpConnect",
+        "aura.net.tcpListen",
+        "aura.net.tcpSend",
+        "aura.net.tcpRecv",
+        "aura.net.tcpClose",
+        "aura.net.udpSend",
+        "aura.net.udpRecv",
+        "aura.net.udpClose",
+        "aura.net.isHostReachable",
+        "aura.net.getHostname",
         "aura.net.getLocalIp",
-    ] { s.insert(n); }
+    ] {
+        s.insert(n);
+    }
 
     // ── aura.path.* — 路径操作（std_path.rs）──
     for n in [
-        "aura.path.join", "aura.path.dirname",
-        "aura.path.basename", "aura.path.extname",
-        "aura.path.relative", "aura.path.resolve",
-        "aura.path.normalize", "aura.path.isAbsolute",
-        "aura.path.isRelative", "aura.path.split",
-        "aura.path.separators", "aura.path.fromUnix",
+        "aura.path.join",
+        "aura.path.dirname",
+        "aura.path.basename",
+        "aura.path.extname",
+        "aura.path.relative",
+        "aura.path.resolve",
+        "aura.path.normalize",
+        "aura.path.isAbsolute",
+        "aura.path.isRelative",
+        "aura.path.split",
+        "aura.path.separators",
+        "aura.path.fromUnix",
         "aura.path.fromWindows",
-    ] { s.insert(n); }
+    ] {
+        s.insert(n);
+    }
 
     // ── aura.process.* — 进程管理（std_process.rs）──
     for n in [
-        "aura.process.exit", "aura.process.exitCode",
-        "aura.process.args", "aura.process.arg",
-        "aura.process.argCount", "aura.process.pid",
-        "aura.process.spawn", "aura.process.kill",
-        "aura.process.wait", "aura.process.exitProcess",
-    ] { s.insert(n); }
+        "aura.process.exit",
+        "aura.process.exitCode",
+        "aura.process.args",
+        "aura.process.arg",
+        "aura.process.argCount",
+        "aura.process.pid",
+        "aura.process.spawn",
+        "aura.process.kill",
+        "aura.process.wait",
+        "aura.process.exitProcess",
+    ] {
+        s.insert(n);
+    }
 
     // ── aura.random.* — 随机数（std_random.rs）──
     for n in [
-        "aura.random.nextInt", "aura.random.nextLong",
-        "aura.random.nextFloat", "aura.random.nextDouble",
-        "aura.random.nextBool", "aura.random.nextIntRange",
-        "aura.random.nextFloatRange", "aura.random.choice",
-        "aura.random.shuffle", "aura.random.seed",
+        "aura.random.nextInt",
+        "aura.random.nextLong",
+        "aura.random.nextFloat",
+        "aura.random.nextDouble",
+        "aura.random.nextBool",
+        "aura.random.nextIntRange",
+        "aura.random.nextFloatRange",
+        "aura.random.choice",
+        "aura.random.shuffle",
+        "aura.random.seed",
         "aura.random.random",
-    ] { s.insert(n); }
+    ] {
+        s.insert(n);
+    }
 
     // ── aura.string.* — 字符串操作（std_string.rs）──
     for n in [
-        "aura.string.contains", "aura.string.startsWith",
-        "aura.string.endsWith", "aura.string.split",
-        "aura.string.join", "aura.string.replace",
-        "aura.string.replaceAll", "aura.string.trim",
-        "aura.string.trimStart", "aura.string.trimEnd",
-        "aura.string.substring", "aura.string.substringBefore",
-        "aura.string.substringAfter", "aura.string.toLowerCase",
-        "aura.string.toUpperCase", "aura.string.length",
-        "aura.string.isEmpty", "aura.string.format",
-        "aura.string.repeat", "aura.string.indexOf",
-        "aura.string.lastIndexOf", "aura.string.padStart",
-        "aura.string.padEnd", "aura.string.escape",
-        "aura.string.unescape", "aura.string.splitLines",
-        "aura.string.joinLines", "aura.string.countChar",
-        "aura.string.first", "aura.string.last",
-        "aura.string.isBlank", "aura.string.matches",
-        "aura.string.containsAny", "aura.string.containsAll",
-    ] { s.insert(n); }
+        "aura.string.contains",
+        "aura.string.startsWith",
+        "aura.string.endsWith",
+        "aura.string.split",
+        "aura.string.join",
+        "aura.string.replace",
+        "aura.string.replaceAll",
+        "aura.string.trim",
+        "aura.string.trimStart",
+        "aura.string.trimEnd",
+        "aura.string.substring",
+        "aura.string.substringBefore",
+        "aura.string.substringAfter",
+        "aura.string.toLowerCase",
+        "aura.string.toUpperCase",
+        "aura.string.length",
+        "aura.string.isEmpty",
+        "aura.string.format",
+        "aura.string.repeat",
+        "aura.string.indexOf",
+        "aura.string.lastIndexOf",
+        "aura.string.padStart",
+        "aura.string.padEnd",
+        "aura.string.escape",
+        "aura.string.unescape",
+        "aura.string.splitLines",
+        "aura.string.joinLines",
+        "aura.string.countChar",
+        "aura.string.first",
+        "aura.string.last",
+        "aura.string.isBlank",
+        "aura.string.matches",
+        "aura.string.containsAny",
+        "aura.string.containsAll",
+    ] {
+        s.insert(n);
+    }
 
     // ── aura.test.* — 测试断言（std_test.rs）──
     for n in [
-        "aura.test.assertTrue", "aura.test.assertFalse",
-        "aura.test.assertEq", "aura.test.assertNotEq",
-        "aura.test.assertNotNull", "aura.test.assertNull",
-        "aura.test.assertContains", "aura.test.assertNotContains",
-        "aura.test.assertThrows", "aura.test.assertGt",
-        "aura.test.assertGte", "aura.test.assertLt",
-        "aura.test.assertLte", "aura.test.assertApprox",
-        "aura.test.assertArrayEq", "aura.test.assertMapEq",
-        "aura.test.pass", "aura.test.fail",
-    ] { s.insert(n); }
+        "aura.test.assertTrue",
+        "aura.test.assertFalse",
+        "aura.test.assertEq",
+        "aura.test.assertNotEq",
+        "aura.test.assertNotNull",
+        "aura.test.assertNull",
+        "aura.test.assertContains",
+        "aura.test.assertNotContains",
+        "aura.test.assertThrows",
+        "aura.test.assertGt",
+        "aura.test.assertGte",
+        "aura.test.assertLt",
+        "aura.test.assertLte",
+        "aura.test.assertApprox",
+        "aura.test.assertArrayEq",
+        "aura.test.assertMapEq",
+        "aura.test.pass",
+        "aura.test.fail",
+    ] {
+        s.insert(n);
+    }
 
     // ── aura.time.* — 时间/日期（std_time.rs）──
     for n in [
-        "aura.time.now", "aura.time.epoch",
-        "aura.time.currentTime", "aura.time.sleep",
-        "aura.time.duration", "aura.time.toDateString",
-        "aura.time.toTimeString", "aura.time.formatDate",
-        "aura.time.diff", "aura.time.parseDate",
-    ] { s.insert(n); }
+        "aura.time.now",
+        "aura.time.epoch",
+        "aura.time.currentTime",
+        "aura.time.sleep",
+        "aura.time.duration",
+        "aura.time.toDateString",
+        "aura.time.toTimeString",
+        "aura.time.formatDate",
+        "aura.time.diff",
+        "aura.time.parseDate",
+    ] {
+        s.insert(n);
+    }
 
     s
 }
@@ -350,7 +575,11 @@ mod tests {
     #[test]
     fn test_all_names_count() {
         let names = all_names();
-        assert!(names.len() >= 300, "expected at least 300 names, got {}", names.len());
+        assert!(
+            names.len() >= 300,
+            "expected at least 300 names, got {}",
+            names.len()
+        );
     }
 
     #[test]

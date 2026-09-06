@@ -1,20 +1,16 @@
-﻿//! [Phase L6] 仓库管理：REST API + 本地注册表
+//! [Phase B6] 仓库管理（Registry）
+//!
+//! 实现中心包注册表 REST API 客户端 + 本地注册表管理。
+//! 对应设计文档 §13 仓库管理。
+//!
+//! 架构：
+//! ```text
+//! RegistryClient ──→ REST API ──→ 远程仓库
+//! LocalRegistry  ──→ 文件系统 ──→ ~/.aura/registry/
+//! ```
 
-pub mod protocol;
+pub mod client;
 pub mod local;
 
-/// 仓库类型
-#[derive(Debug, Clone, Copy)]
-pub enum RepoKind {
-    /// 中心化制品注册表
-    Registry,
-    /// Git 仓库（源码）
-    Git,
-    /// 本地路径（源码）
-    Path,
-    /// 本地 .auz 文件
-    File,
-    /// 本地安装目录
-    Local,
-}
-
+pub use client::{PackageInfo, RegistryClient, SearchResult, VersionInfo};
+pub use local::{CacheEntry, CacheIndex, LocalRegistry, RegistryStats};

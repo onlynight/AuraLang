@@ -36,21 +36,9 @@ impl Span {
         Self {
             start: a.start.min(b.start),
             end: a.end.max(b.end),
-            start_line: if a.start <= b.start {
-                a.start_line
-            } else {
-                b.start_line
-            },
-            start_col: if a.start <= b.start {
-                a.start_col
-            } else {
-                b.start_col
-            },
-            end_line: if a.end >= b.end {
-                a.end_line
-            } else {
-                b.end_line
-            },
+            start_line: if a.start <= b.start { a.start_line } else { b.start_line },
+            start_col: if a.start <= b.start { a.start_col } else { b.start_col },
+            end_line: if a.end >= b.end { a.end_line } else { b.end_line },
             end_col: if a.end >= b.end { a.end_col } else { b.end_col },
         }
     }

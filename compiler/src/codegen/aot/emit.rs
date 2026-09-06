@@ -140,7 +140,13 @@ impl EmitCtx {
 
     pub fn declare_var(&mut self, name: &str, llvm_name: String, llvm_ty: String) {
         if let Some(scope) = self.var_scope.last_mut() {
-            scope.insert(name.to_string(), VarSlot { llvm_name, llvm_ty });
+            scope.insert(
+                name.to_string(),
+                VarSlot {
+                    llvm_name,
+                    llvm_ty,
+                },
+            );
         }
     }
 
@@ -212,7 +218,11 @@ impl EmitCtx {
             for _ in 0..max_fields {
                 fields_str.push("ptr".to_string()); // 关联值用 ptr（堆分配）
             }
-            s.push_str(&format!("{} = type {{{}}}\n", llvm_name, fields_str.join(", ")));
+            s.push_str(&format!(
+                "{} = type {{{}}}\n",
+                llvm_name,
+                fields_str.join(", ")
+            ));
             // P3.2: 记录枚举变体映射（用于 emit_member_access 构造 tagged union）
             let mut variants_info = Vec::new();
             for (vi, (vname, vfields)) in e.variants.iter().enumerate() {
@@ -263,7 +273,10 @@ impl EmitCtx {
                     (ty.to_string(), v)
                 }
             };
-            s.push_str(&format!("{} = global {} {}\n", llvm_name, llvm_ty, llvm_val));
+            s.push_str(&format!(
+                "{} = global {} {}\n",
+                llvm_name, llvm_ty, llvm_val
+            ));
         }
         s.push('\n');
         self.sections.push(s);
@@ -286,18 +299,14 @@ impl EmitCtx {
         if !self.link_runtime {
             return;
         }
-        self.sections
-            .push(generate_runtime_declarations(&self.type_mapper));
+        self.sections.push(generate_runtime_declarations(&self.type_mapper));
     }
 }
 
 /// 从 HIR 程序生成完整 LLVM IR 文本
 pub fn emit_program(codegen: &AotCodeGenerator, program: &HirProgram) -> Result<String, AotError> {
-    let debug_info = if codegen.options.debug_info {
-        Some(DebugInfo::new("main.aura"))
-    } else {
-        None
-    };
+    let debug_info =
+        if codegen.options.debug_info { Some(DebugInfo::new("main.aura")) } else { None };
 
     let mut ctx = EmitCtx::new(
         codegen.type_mapper.clone(),
@@ -431,16 +440,8 @@ fn emit_function(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErr
     let _ = blocks.add_block_named(&entry_name);
 
     // 返回类型
-    let ret_ty = func
-        .ret
-        .as_ref()
-        .map(|t| ctx.llvm_type(t))
-        .unwrap_or_else(|| "i32".to_string());
-    let ret_str = if ret_ty.is_empty() {
-        "void".to_string()
-    } else {
-        ret_ty
-    };
+    let ret_ty = func.ret.as_ref().map(|t| ctx.llvm_type(t)).unwrap_or_else(|| "i32".to_string());
+    let ret_str = if ret_ty.is_empty() { "void".to_string() } else { ret_ty };
 
     // 参数类型
     let params: Vec<(String, String)> = func
@@ -452,10 +453,8 @@ fn emit_function(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErr
         })
         .collect();
 
-    let params_ir: Vec<String> = params
-        .iter()
-        .map(|(name, ty)| format!("{} %arg.{}", ty, sanitizellvm(name)))
-        .collect();
+    let params_ir: Vec<String> =
+        params.iter().map(|(name, ty)| format!("{} %arg.{}", ty, sanitizellvm(name))).collect();
     let params_str = params_ir.join(", ");
 
     // 函数定义头
@@ -548,7 +547,9 @@ struct FuncBlocks {
 
 impl FuncBlocks {
     fn new() -> Self {
-        Self { blocks: Vec::new() }
+        Self {
+            blocks: Vec::new(),
+        }
     }
 
     /// 添加基本块（返回名称）。添加后此块成为当前块。
@@ -566,10 +567,7 @@ impl FuncBlocks {
 
     /// 检查最后一个基本块是否有终止符
     fn has_terminator(&self) -> bool {
-        self.blocks
-            .last()
-            .map(|bb| bb.terminator.is_some())
-            .unwrap_or(false)
+        self.blocks.last().map(|bb| bb.terminator.is_some()).unwrap_or(false)
     }
 
     /// 为最后一个基本块设置终止符
@@ -621,9 +619,20 @@ fn emit_statement(
     stmt: &HirStmt,
 ) -> Result<(), AotError> {
     match stmt {
-        HirStmt::Val { name, ty, init } => emit_variable_decl(ctx, blocks, name, ty, init)?,
-        HirStmt::Var { name, ty, init } => emit_variable_decl(ctx, blocks, name, ty, init)?,
-        HirStmt::Assign { target, value } => emit_assign(ctx, blocks, target, value)?,
+        HirStmt::Val {
+            name,
+            ty,
+            init,
+        } => emit_variable_decl(ctx, blocks, name, ty, init)?,
+        HirStmt::Var {
+            name,
+            ty,
+            init,
+        } => emit_variable_decl(ctx, blocks, name, ty, init)?,
+        HirStmt::Assign {
+            target,
+            value,
+        } => emit_assign(ctx, blocks, target, value)?,
         HirStmt::Expr(e) => {
             let _ = emit_expr_val(ctx, blocks, e)?;
         }
@@ -667,10 +676,7 @@ fn emit_variable_decl(
     ty: &Option<HirType>,
     init: &Option<HirExpr>,
 ) -> Result<(), AotError> {
-    let llvm_ty = ty
-        .as_ref()
-        .map(|t| ctx.llvm_type(t))
-        .unwrap_or_else(|| "i32".to_string());
+    let llvm_ty = ty.as_ref().map(|t| ctx.llvm_type(t)).unwrap_or_else(|| "i32".to_string());
 
     let var_name = ctx.fresh_var();
     {
@@ -710,10 +716,16 @@ fn emit_assign(
                 ));
             }
         }
-        HirExpr::Member { object, name } => {
+        HirExpr::Member {
+            object,
+            name,
+        } => {
             emit_member_assign(ctx, blocks, object, name, val_ir, val_ty)?;
         }
-        HirExpr::Index { container, index } => {
+        HirExpr::Index {
+            container,
+            index,
+        } => {
             emit_index_assign(ctx, blocks, container, index, val_ir, val_ty)?;
         }
         _ => {
@@ -761,8 +773,7 @@ fn emit_index_assign(
     // 简化：直接 store 到临时变量
     let _ = (_ctx, _container, _index);
     let cur = blocks.last_mut();
-    cur.body
-        .push(format!("; store index {} {}", val_ty, val_ir));
+    cur.body.push(format!("; store index {} {}", val_ty, val_ir));
     Ok(())
 }
 
@@ -871,12 +882,31 @@ fn emit_expr_val(
     match expr {
         HirExpr::Lit(lit) => emit_literal(ctx, blocks, lit),
         HirExpr::Var(name) => emit_variable_load(ctx, blocks, name),
-        HirExpr::Binary { op, lhs, rhs } => emit_binary(ctx, blocks, op, lhs, rhs),
-        HirExpr::Unary { op, operand } => emit_unary(ctx, blocks, op, operand),
-        HirExpr::Call { callee, args } => emit_call(ctx, blocks, callee, args),
-        HirExpr::Member { object, name } => emit_member_access(ctx, blocks, object, name),
-        HirExpr::Index { container, index } => emit_index_access(ctx, blocks, container, index),
-        HirExpr::New { type_name, args } => emit_new(ctx, blocks, type_name, args),
+        HirExpr::Binary {
+            op,
+            lhs,
+            rhs,
+        } => emit_binary(ctx, blocks, op, lhs, rhs),
+        HirExpr::Unary {
+            op,
+            operand,
+        } => emit_unary(ctx, blocks, op, operand),
+        HirExpr::Call {
+            callee,
+            args,
+        } => emit_call(ctx, blocks, callee, args),
+        HirExpr::Member {
+            object,
+            name,
+        } => emit_member_access(ctx, blocks, object, name),
+        HirExpr::Index {
+            container,
+            index,
+        } => emit_index_access(ctx, blocks, container, index),
+        HirExpr::New {
+            type_name,
+            args,
+        } => emit_new(ctx, blocks, type_name, args),
         HirExpr::If {
             cond,
             then_e,
@@ -897,7 +927,10 @@ fn emit_expr_val(
         }
         // P3.3: Lambda — 生成静态函数并返回函数指针
         // Phase 5: 支持捕获变量
-        HirExpr::Lambda { params, body } => {
+        HirExpr::Lambda {
+            params,
+            body,
+        } => {
             let func_name = format!("__lambda_{}", ctx.lambda_counter);
             ctx.lambda_counter += 1;
 
@@ -910,7 +943,8 @@ fn emit_expr_val(
             // 生成参数列表（用户参数 + 捕获参数）
             let mut param_strs: Vec<String> = Vec::new();
             for (i, p) in params.iter().enumerate() {
-                let ty = p.ty.as_ref().map(|t| ctx.llvm_type(t)).unwrap_or_else(|| "i32".to_string());
+                let ty =
+                    p.ty.as_ref().map(|t| ctx.llvm_type(t)).unwrap_or_else(|| "i32".to_string());
                 param_strs.push(format!("{} %arg_{}", ty, i));
             }
             // 捕获参数作为额外参数
@@ -920,7 +954,11 @@ fn emit_expr_val(
 
             // 生成函数体
             let mut func_ir = String::new();
-            func_ir.push_str(&format!("define i32 @{}({}) {{\n", func_name, param_strs.join(", ")));
+            func_ir.push_str(&format!(
+                "define i32 @{}({}) {{\n",
+                func_name,
+                param_strs.join(", ")
+            ));
             func_ir.push_str("entry:\n");
 
             // 用子上下文发射函数体
@@ -952,17 +990,26 @@ fn emit_expr_val(
 
             // 注册参数
             for (i, p) in params.iter().enumerate() {
-                let ty = p.ty.as_ref().map(|t| sub_ctx.llvm_type(t)).unwrap_or_else(|| "i32".to_string());
+                let ty =
+                    p.ty.as_ref()
+                        .map(|t| sub_ctx.llvm_type(t))
+                        .unwrap_or_else(|| "i32".to_string());
                 sub_ctx.var_scope.last_mut().unwrap().insert(
                     p.name.clone(),
-                    VarSlot { llvm_name: format!("%arg_{}", i), llvm_ty: ty },
+                    VarSlot {
+                        llvm_name: format!("%arg_{}", i),
+                        llvm_ty: ty,
+                    },
                 );
             }
             // 注册捕获变量
             for (i, cap) in captures.iter().enumerate() {
                 sub_ctx.var_scope.last_mut().unwrap().insert(
                     cap.clone(),
-                    VarSlot { llvm_name: format!("%cap_{}", i), llvm_ty: "ptr".to_string() },
+                    VarSlot {
+                        llvm_name: format!("%cap_{}", i),
+                        llvm_ty: "ptr".to_string(),
+                    },
                 );
             }
 
@@ -1001,10 +1048,7 @@ fn emit_expr_val(
             cur.body.push(format!("{} = alloca {}", closure_name, closure_type));
 
             // 存储函数指针
-            cur.body.push(format!(
-                "store ptr @{}, ptr {}[0]",
-                func_name, closure_name
-            ));
+            cur.body.push(format!("store ptr @{}, ptr {}[0]", func_name, closure_name));
 
             // 存储捕获值
             for (i, cap) in captures.iter().enumerate() {
@@ -1017,10 +1061,7 @@ fn emit_expr_val(
                     ));
                 } else {
                     // 未找到捕获变量，存储空指针
-                    cur.body.push(format!(
-                        "store ptr null, ptr {}[1][{}]",
-                        closure_name, i
-                    ));
+                    cur.body.push(format!("store ptr null, ptr {}[1][{}]", closure_name, i));
                 }
             }
 
@@ -1139,67 +1180,42 @@ fn emit_binary(
     match op {
         HirBinOp::Add => {
             if l_ty.starts_with("float") || l_ty == "double" {
-                let op = if l_ty == "double" {
-                    "fadd double"
-                } else {
-                    "fadd float"
-                };
-                cur.body
-                    .push(format!("{} = {} {} {}, {}", tmp, op, l_ir, l_ty, r_ir));
+                let op = if l_ty == "double" { "fadd double" } else { "fadd float" };
+                cur.body.push(format!("{} = {} {} {}, {}", tmp, op, l_ir, l_ty, r_ir));
             } else {
-                cur.body
-                    .push(format!("{} = add {} {}, {}", tmp, l_ty, l_ir, r_ir));
+                cur.body.push(format!("{} = add {} {}, {}", tmp, l_ty, l_ir, r_ir));
             }
             Ok((tmp, l_ty))
         }
         HirBinOp::Sub => {
             if l_ty.starts_with("float") || l_ty == "double" {
-                let op = if l_ty == "double" {
-                    "fsub double"
-                } else {
-                    "fsub float"
-                };
-                cur.body
-                    .push(format!("{} = {} {} {}, {}", tmp, op, l_ir, l_ty, r_ir));
+                let op = if l_ty == "double" { "fsub double" } else { "fsub float" };
+                cur.body.push(format!("{} = {} {} {}, {}", tmp, op, l_ir, l_ty, r_ir));
             } else {
-                cur.body
-                    .push(format!("{} = sub {} {}, {}", tmp, l_ty, l_ir, r_ir));
+                cur.body.push(format!("{} = sub {} {}, {}", tmp, l_ty, l_ir, r_ir));
             }
             Ok((tmp, l_ty))
         }
         HirBinOp::Mul => {
             if l_ty.starts_with("float") || l_ty == "double" {
-                let op = if l_ty == "double" {
-                    "fmul double"
-                } else {
-                    "fmul float"
-                };
-                cur.body
-                    .push(format!("{} = {} {} {}, {}", tmp, op, l_ir, l_ty, r_ir));
+                let op = if l_ty == "double" { "fmul double" } else { "fmul float" };
+                cur.body.push(format!("{} = {} {} {}, {}", tmp, op, l_ir, l_ty, r_ir));
             } else {
-                cur.body
-                    .push(format!("{} = mul {} {}, {}", tmp, l_ty, l_ir, r_ir));
+                cur.body.push(format!("{} = mul {} {}, {}", tmp, l_ty, l_ir, r_ir));
             }
             Ok((tmp, l_ty))
         }
         HirBinOp::Div => {
             if l_ty.starts_with("float") || l_ty == "double" {
-                let op = if l_ty == "double" {
-                    "fdiv double"
-                } else {
-                    "fdiv float"
-                };
-                cur.body
-                    .push(format!("{} = {} {} {}, {}", tmp, op, l_ir, l_ty, r_ir));
+                let op = if l_ty == "double" { "fdiv double" } else { "fdiv float" };
+                cur.body.push(format!("{} = {} {} {}, {}", tmp, op, l_ir, l_ty, r_ir));
             } else {
-                cur.body
-                    .push(format!("{} = sdiv {} {}, {}", tmp, l_ty, l_ir, r_ir));
+                cur.body.push(format!("{} = sdiv {} {}, {}", tmp, l_ty, l_ir, r_ir));
             }
             Ok((tmp, l_ty))
         }
         HirBinOp::Rem => {
-            cur.body
-                .push(format!("{} = srem {} {}, {}", tmp, l_ty, l_ir, r_ir));
+            cur.body.push(format!("{} = srem {} {}, {}", tmp, l_ty, l_ir, r_ir));
             Ok((tmp, l_ty))
         }
         HirBinOp::Eq | HirBinOp::Ne | HirBinOp::Lt | HirBinOp::Gt | HirBinOp::Le | HirBinOp::Ge => {
@@ -1222,8 +1238,7 @@ fn emit_binary(
         }
         HirBinOp::And | HirBinOp::Or => {
             let op = if *op == HirBinOp::And { "and" } else { "or" };
-            cur.body
-                .push(format!("{} = {} i1 {}, {}", tmp, op, l_ir, r_ir));
+            cur.body.push(format!("{} = {} i1 {}, {}", tmp, op, l_ir, r_ir));
             Ok((tmp, "i1".to_string()))
         }
         HirBinOp::BitAnd | HirBinOp::BitOr | HirBinOp::BitXor => {
@@ -1233,14 +1248,12 @@ fn emit_binary(
                 HirBinOp::BitXor => "xor",
                 _ => unreachable!(),
             };
-            cur.body
-                .push(format!("{} = {} {} {}, {}", tmp, op, l_ty, l_ir, r_ir));
+            cur.body.push(format!("{} = {} {} {}, {}", tmp, op, l_ty, l_ir, r_ir));
             Ok((tmp, l_ty))
         }
         HirBinOp::Shl | HirBinOp::Shr => {
             let op = if *op == HirBinOp::Shl { "shl" } else { "ashr" };
-            cur.body
-                .push(format!("{} = {} {} {}, {}", tmp, op, l_ty, l_ir, r_ir));
+            cur.body.push(format!("{} = {} {} {}, {}", tmp, op, l_ty, l_ir, r_ir));
             Ok((tmp, l_ty))
         }
         _ => Ok((l_ir, l_ty)),
@@ -1259,8 +1272,7 @@ fn emit_unary(
 
     match op {
         HirUnOp::Minus => {
-            cur.body
-                .push(format!("{} = sub {} {}, {}", tmp, v_ty, 0, v_ir));
+            cur.body.push(format!("{} = sub {} {}, {}", tmp, v_ty, 0, v_ir));
             Ok((tmp, v_ty))
         }
         HirUnOp::Not => {
@@ -1276,29 +1288,16 @@ fn emit_call(
     callee: &str,
     args: &[HirExpr],
 ) -> Result<(String, String), AotError> {
-    let args_ir: Vec<(String, String)> = args
-        .iter()
-        .map(|a| emit_expr_val(ctx, blocks, a))
-        .collect::<Result<_, _>>()?;
+    let args_ir: Vec<(String, String)> =
+        args.iter().map(|a| emit_expr_val(ctx, blocks, a)).collect::<Result<_, _>>()?;
 
-    let ret_ty = ctx
-        .func_ret_types
-        .get(callee)
-        .cloned()
-        .unwrap_or_else(|| "i32".to_string());
+    let ret_ty = ctx.func_ret_types.get(callee).cloned().unwrap_or_else(|| "i32".to_string());
     let cur = blocks.last_mut();
-    let args_str: Vec<String> = args_ir
-        .iter()
-        .map(|(v, t)| format!("{} {}", t, v))
-        .collect();
+    let args_str: Vec<String> = args_ir.iter().map(|(v, t)| format!("{} {}", t, v)).collect();
 
     // 处理 void / 空返回类型：不能赋值给寄存器（LLVM IR 语法限制）
     if ret_ty.is_empty() || ret_ty == "void" {
-        cur.body.push(format!(
-            "call void @{}({})",
-            callee,
-            args_str.join(", ")
-        ));
+        cur.body.push(format!("call void @{}({})", callee, args_str.join(", ")));
         // 返回一个虚拟 i32 0 值，保持调用者接口兼容
         Ok(("0".to_string(), "i32".to_string()))
     } else {
@@ -1358,7 +1357,11 @@ fn emit_member_access(
                 let f_ptr = ctx.fresh_var();
                 cur.body.push(format!(
                     "{} = getelementptr {}, {}* {}, i64 0, i32 {}",
-                    f_ptr, struct_name, struct_name, alloc, fi + 1
+                    f_ptr,
+                    struct_name,
+                    struct_name,
+                    alloc,
+                    fi + 1
                 ));
                 cur.body.push(format!("store ptr null, ptr* {}", f_ptr));
             }
@@ -1372,8 +1375,7 @@ fn emit_member_access(
     let gep = ctx.fresh_var();
     let tmp = ctx.fresh_var();
     let cur = blocks.last_mut();
-    cur.body
-        .push(format!("{} = getelementptr i8, i8* {}, i64 0", gep, obj_ir));
+    cur.body.push(format!("{} = getelementptr i8, i8* {}, i64 0", gep, obj_ir));
     cur.body.push(format!("{} = load i32, i32* {}", tmp, gep));
     Ok((tmp, "i32".to_string()))
 }
@@ -1404,10 +1406,8 @@ fn emit_new(
     args: &[HirExpr],
 ) -> Result<(String, String), AotError> {
     // 简化：返回 null 指针
-    let _args_str: Vec<(String, String)> = args
-        .iter()
-        .map(|a| emit_expr_val(ctx, _blocks, a))
-        .collect::<Result<_, _>>()?;
+    let _args_str: Vec<(String, String)> =
+        args.iter().map(|a| emit_expr_val(ctx, _blocks, a)).collect::<Result<_, _>>()?;
     Ok(("null".to_string(), "i8*".to_string()))
 }
 
@@ -1444,8 +1444,7 @@ fn emit_if_expr(
     let then_phi = ctx.fresh_var();
     {
         let cur = blocks.last_mut();
-        cur.body
-            .push(format!("{} = add {} {}, 0", then_phi, then_ty, then_ir));
+        cur.body.push(format!("{} = add {} {}, 0", then_phi, then_ty, then_ir));
         cur.terminator = Some(format!("br label %{}", merge_name));
     }
 
@@ -1455,8 +1454,7 @@ fn emit_if_expr(
     let else_phi = ctx.fresh_var();
     {
         let cur = blocks.last_mut();
-        cur.body
-            .push(format!("{} = add {} {}, 0", else_phi, else_ty, else_ir));
+        cur.body.push(format!("{} = add {} {}, 0", else_phi, else_ty, else_ir));
         cur.terminator = Some(format!("br label %{}", merge_name));
     }
 
@@ -1514,11 +1512,7 @@ fn emit_block_expr(
 }
 
 fn sanitize_ty_for_ret(ty: &str) -> &str {
-    if ty.is_empty() || ty == "void" {
-        "void"
-    } else {
-        ty
-    }
+    if ty.is_empty() || ty == "void" { "void" } else { ty }
 }
 
 fn zero_value(ty: &str) -> &str {
@@ -1536,10 +1530,7 @@ fn synthesize_main(funcs: &[HirFunction]) -> HirFunction {
     let call_target = funcs
         .iter()
         .find(|f| {
-            f.ret
-                .as_ref()
-                .map(|t| matches!(t, HirType::Named(n) if n == "Int"))
-                .unwrap_or(false)
+            f.ret.as_ref().map(|t| matches!(t, HirType::Named(n) if n == "Int")).unwrap_or(false)
         })
         .map(|f| f.name.clone())
         .unwrap_or_else(|| "println".to_string());
@@ -1549,10 +1540,12 @@ fn synthesize_main(funcs: &[HirFunction]) -> HirFunction {
         params: vec![],
         ret: Some(HirType::Named("Int".into())),
         body: HirBlock {
-            stmts: vec![HirStmt::Return(Some(HirExpr::Call {
-                callee: call_target,
-                args: vec![],
-            }))],
+            stmts: vec![
+                HirStmt::Return(Some(HirExpr::Call {
+                    callee: call_target,
+                    args: vec![],
+                })),
+            ],
         },
         is_native: false,
         type_params: vec![],
@@ -1571,21 +1564,27 @@ fn collect_free_vars(
 
     match expr {
         HirExpr::Var(name) => {
-            if !param_names.contains(name.as_str())
-                && !captures.contains(name)
-                && !is_builtin(name)
+            if !param_names.contains(name.as_str()) && !captures.contains(name) && !is_builtin(name)
             {
                 captures.push(name.clone());
             }
         }
-        HirExpr::Binary { lhs, rhs, .. } => {
+        HirExpr::Binary {
+            lhs, rhs, ..
+        } => {
             collect_free_vars(lhs, params, captures);
             collect_free_vars(rhs, params, captures);
         }
-        HirExpr::Unary { operand, .. } => {
+        HirExpr::Unary {
+            operand, ..
+        } => {
             collect_free_vars(operand, params, captures);
         }
-        HirExpr::Call { callee, args, .. } => {
+        HirExpr::Call {
+            callee,
+            args,
+            ..
+        } => {
             if !is_builtin(callee) {
                 collect_free_vars(&HirExpr::Var(callee.clone()), params, captures);
             }
@@ -1596,7 +1595,11 @@ fn collect_free_vars(
         HirExpr::Member { object, .. } => {
             collect_free_vars(object, params, captures);
         }
-        HirExpr::Index { container, index, .. } => {
+        HirExpr::Index {
+            container,
+            index,
+            ..
+        } => {
             collect_free_vars(container, params, captures);
             collect_free_vars(index, params, captures);
         }
@@ -1605,14 +1608,22 @@ fn collect_free_vars(
                 collect_free_vars_in_stmt(stmt, params, captures);
             }
         }
-        HirExpr::Lambda { params: inner_params, body, .. } => {
+        HirExpr::Lambda {
+            params: inner_params,
+            body,
+            ..
+        } => {
             // 嵌套 Lambda：用其参数名作为局部变量（简化处理，直接收集）
             let _ = inner_params;
             for stmt in &body.stmts {
                 collect_free_vars_in_stmt(stmt, params, captures);
             }
         }
-        HirExpr::If { cond, then_e, else_e } => {
+        HirExpr::If {
+            cond,
+            then_e,
+            else_e,
+        } => {
             collect_free_vars(cond, params, captures);
             collect_free_vars(then_e, params, captures);
             collect_free_vars(else_e, params, captures);
@@ -1633,7 +1644,10 @@ fn collect_free_vars_in_stmt(
                 collect_free_vars(e, params, captures);
             }
         }
-        HirStmt::Assign { target, value } => {
+        HirStmt::Assign {
+            target,
+            value,
+        } => {
             collect_free_vars(target, params, captures);
             collect_free_vars(value, params, captures);
         }
@@ -1643,7 +1657,12 @@ fn collect_free_vars_in_stmt(
         HirStmt::Return(Some(e)) => {
             collect_free_vars(e, params, captures);
         }
-        HirStmt::If { cond, then_b, else_b, .. } => {
+        HirStmt::If {
+            cond,
+            then_b,
+            else_b,
+            ..
+        } => {
             collect_free_vars(cond, params, captures);
             for stmt in &then_b.stmts {
                 collect_free_vars_in_stmt(stmt, params, captures);
@@ -1654,7 +1673,9 @@ fn collect_free_vars_in_stmt(
                 }
             }
         }
-        HirStmt::While { cond, body, .. } => {
+        HirStmt::While {
+            cond, body, ..
+        } => {
             collect_free_vars(cond, params, captures);
             for stmt in &body.stmts {
                 collect_free_vars_in_stmt(stmt, params, captures);
@@ -1673,9 +1694,22 @@ fn collect_free_vars_in_stmt(
 fn is_builtin(name: &str) -> bool {
     matches!(
         name,
-        "println" | "print" | "puts" | "abs" | "sqrt" | "pow"
-            | "toInt" | "toFloat" | "toStr" | "toString"
-            | "clock" | "strlen" | "malloc" | "free"
-            | "true" | "false" | "null"
+        "println"
+            | "print"
+            | "puts"
+            | "abs"
+            | "sqrt"
+            | "pow"
+            | "toInt"
+            | "toFloat"
+            | "toStr"
+            | "toString"
+            | "clock"
+            | "strlen"
+            | "malloc"
+            | "free"
+            | "true"
+            | "false"
+            | "null"
     )
 }

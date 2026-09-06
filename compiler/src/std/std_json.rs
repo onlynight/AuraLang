@@ -172,9 +172,10 @@ fn value_to_json(v: &Value) -> JsonValue {
         Value::Bool(b) => JsonValue::Bool(*b),
         Value::Int(i) => JsonValue::Number((*i).into()),
         Value::Float(f) => {
-            let num = serde_json::Number::from_f64(*f).unwrap_or_else(|| serde_json::Number::from(0));
+            let num =
+                serde_json::Number::from_f64(*f).unwrap_or_else(|| serde_json::Number::from(0));
             JsonValue::Number(num)
-        },
+        }
         Value::Str(s) => JsonValue::String(s.to_string()),
         Value::List(items) => JsonValue::Array(items.iter().map(value_to_json).collect()),
         Value::Map(map) => {

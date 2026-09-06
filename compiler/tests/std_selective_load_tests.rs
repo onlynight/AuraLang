@@ -19,8 +19,17 @@ fn test_new_only_loads_prelude() {
     let expected_min = 29; // 18 + 11
     #[cfg(not(feature = "std-concurrent"))]
     let expected_min = 18;
-    assert!(count >= expected_min, "new() 应至少加载 {} 个函数，实际 {}", expected_min, count);
-    assert!(count < 100, "new() 不应加载全部 std 模块（396 个），实际 {}", count);
+    assert!(
+        count >= expected_min,
+        "new() 应至少加载 {} 个函数，实际 {}",
+        expected_min,
+        count
+    );
+    assert!(
+        count < 100,
+        "new() 不应加载全部 std 模块（396 个），实际 {}",
+        count
+    );
 }
 
 #[test]
@@ -55,7 +64,10 @@ fn test_with_modules_loads_math() {
     let count = registry.len();
     // prelude + math 模块（应大于空列表）
     let empty_registry = NativeRegistry::with_modules(&[]);
-    assert!(count > empty_registry.len(), "with_modules(&[\"math\"]) 应加载额外模块");
+    assert!(
+        count > empty_registry.len(),
+        "with_modules(&[\"math\"]) 应加载额外模块"
+    );
     assert!(registry.contains("aura.math.PI"));
 }
 

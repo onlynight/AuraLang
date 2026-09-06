@@ -38,7 +38,7 @@ use crate::plugin::context::PluginContext;
 use crate::plugin::r#trait::BuildPlugin;
 use crate::plugin::{PluginKind, TaskResult};
 use libloading::{Library, Symbol};
-use std::ffi::{c_char, CStr, CString};
+use std::ffi::{CStr, CString, c_char};
 use std::path::{Path, PathBuf};
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -87,11 +87,7 @@ impl AuraPluginInfo {
         if self.description.is_null() {
             return None;
         }
-        unsafe {
-            CStr::from_ptr(self.description)
-                .to_str()
-                .ok()
-        }
+        unsafe { CStr::from_ptr(self.description).to_str().ok() }
     }
 }
 
@@ -113,7 +109,9 @@ pub enum ExternalPluginError {
 impl std::fmt::Display for ExternalPluginError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ExternalPluginError::FileNotFound(path) => write!(f, "插件文件不存在: {}", path.display()),
+            ExternalPluginError::FileNotFound(path) => {
+                write!(f, "插件文件不存在: {}", path.display())
+            }
             ExternalPluginError::LoadError(e) => write!(f, "动态库加载失败: {}", e),
             ExternalPluginError::MissingSymbol(name) => write!(f, "找不到导出函数: {}", name),
             ExternalPluginError::CallError(msg) => write!(f, "插件调用失败: {}", msg),
@@ -200,9 +198,10 @@ impl ExternalPlugin {
         };
 
         let execute_fn: extern "C" fn(*const c_char, *mut c_char, usize) -> i32 = unsafe {
-            let symbol: Symbol<'_, extern "C" fn(*const c_char, *mut c_char, usize) -> i32> = library
-                .get(b"aura_plugin_execute")
-                .map_err(|e| ExternalPluginError::LoadError(e.to_string()))?;
+            let symbol: Symbol<'_, extern "C" fn(*const c_char, *mut c_char, usize) -> i32> =
+                library
+                    .get(b"aura_plugin_execute")
+                    .map_err(|e| ExternalPluginError::LoadError(e.to_string()))?;
             *symbol
         };
 
@@ -239,8 +238,7 @@ impl ExternalPlugin {
         } else {
             Err(ExternalPluginError::CallError(format!(
                 "插件 '{}' configure 返回错误码 {}",
-                self.name,
-                rc
+                self.name, rc
             )))
         }
     }
@@ -265,9 +263,7 @@ impl ExternalPlugin {
         } else {
             Err(ExternalPluginError::CallError(format!(
                 "插件 '{}' execute('{}') 返回错误码 {}",
-                self.name,
-                task_name,
-                rc
+                self.name, task_name, rc
             )))
         }
     }
@@ -295,11 +291,7 @@ impl BuildPlugin for ExternalPlugin {
             .map_err(|e| LoomError::Plugin(format!("外部插件 configure 失败: {}", e)))
     }
 
-    fn execute(
-        &self,
-        task_name: &str,
-        _ctx: &PluginContext,
-    ) -> Result<TaskResult, LoomError> {
+    fn execute(&self, task_name: &str, _ctx: &PluginContext) -> Result<TaskResult, LoomError> {
         // 准备输出缓冲区（2KB）
         let mut buf = vec![0u8; 2048];
 
@@ -331,9 +323,7 @@ pub fn is_plugin_library(path: &Path) -> bool {
 }
 
 /// 加载外部插件（从路径，带扩展名检测）
-pub fn load_external_plugin(
-    path: &Path,
-) -> Result<Box<dyn BuildPlugin>, LoomError> {
+pub fn load_external_plugin(path: &Path) -> Result<Box<dyn BuildPlugin>, LoomError> {
     if !path.exists() {
         return Err(LoomError::Plugin(format!(
             "外部插件文件不存在: {}",

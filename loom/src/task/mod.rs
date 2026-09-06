@@ -1,9 +1,9 @@
 //! [Phase L2] 任务引擎：TaskGraph + 拓扑排序 + 并行调度
 
+pub mod builtin;
+pub mod executor;
 pub mod graph;
 pub mod scheduler;
-pub mod executor;
-pub mod builtin;
 
 use std::collections::HashMap;
 
@@ -39,6 +39,8 @@ pub enum TaskKind {
     Package,
     /// 验证制品
     Verify,
+    /// 语法/语义检查
+    Check,
     /// 安装到本地注册表
     Install,
     /// 发布到远程仓库
@@ -106,4 +108,3 @@ impl TaskGraph {
         self.tasks.contains_key(name)
     }
 }
-

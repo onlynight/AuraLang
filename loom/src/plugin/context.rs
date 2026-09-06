@@ -3,10 +3,10 @@
 //! 插件上下文提供给插件的 API，包含项目配置、源码集、任务列表、构建环境等。
 //! 对应设计文档 §9.1 `PluginContext`。
 
-use crate::manifest::{LoomManifest, SourceSet};
 use crate::manifest::priority::ResolvedBuildConfig;
-use crate::task::TaskDefinition;
+use crate::manifest::{LoomManifest, SourceSet};
 use crate::plugin::BuildEnvironment;
+use crate::task::TaskDefinition;
 use std::path::{Path, PathBuf};
 
 /// 插件上下文
@@ -122,12 +122,15 @@ impl Default for PluginContext {
 impl BuildEnvironment {
     /// 从 ResolvedBuildConfig 和 project_dir 创建构建环境
     pub fn from_build_config(config: &ResolvedBuildConfig, project_dir: &std::path::Path) -> Self {
-        let out_dir = if project_dir.join(&config.out_dir).is_relative() || config.out_dir.starts_with('.') {
-            project_dir.join(&config.out_dir)
-        } else {
-            PathBuf::from(&config.out_dir)
-        };
-        let cache_dir = if project_dir.join(&config.cache_dir).is_relative() || config.cache_dir.starts_with('.') {
+        let out_dir =
+            if project_dir.join(&config.out_dir).is_relative() || config.out_dir.starts_with('.') {
+                project_dir.join(&config.out_dir)
+            } else {
+                PathBuf::from(&config.out_dir)
+            };
+        let cache_dir = if project_dir.join(&config.cache_dir).is_relative()
+            || config.cache_dir.starts_with('.')
+        {
             project_dir.join(&config.cache_dir)
         } else {
             PathBuf::from(&config.cache_dir)

@@ -124,9 +124,8 @@ impl TaskGraph {
                         if !processed.contains(dep_name) && !next_layer_set.contains(dep_name) {
                             // 检查 dep_name 的所有依赖是否都已完成（只看已完成的层）
                             if let Some(task) = self.tasks.get(dep_name) {
-                                let all_deps_done = task.depends_on.iter().all(|d| {
-                                    processed.contains(d)
-                                });
+                                let all_deps_done =
+                                    task.depends_on.iter().all(|d| processed.contains(d));
                                 if all_deps_done {
                                     next_layer.push(dep_name.clone());
                                     next_layer_set.insert(dep_name.clone());
@@ -148,7 +147,10 @@ impl TaskGraph {
             return Err(self.detect_cycle());
         }
 
-        Ok(TopoSortResult { order, layers })
+        Ok(TopoSortResult {
+            order,
+            layers,
+        })
     }
 
     /// 循环依赖检测（DFS）
@@ -269,7 +271,9 @@ impl TaskGraph {
 
         for start in self.tasks.keys() {
             if !visited.contains(start) {
-                if let Some(cycle) = self.dfs_find_cycle(start, &edges, &mut visited, &mut in_stack, &mut stack) {
+                if let Some(cycle) =
+                    self.dfs_find_cycle(start, &edges, &mut visited, &mut in_stack, &mut stack)
+                {
                     return Err(LoomError::Task(format!(
                         "循环依赖检测: 任务存在循环依赖: {}",
                         cycle.join(" → ")
@@ -301,10 +305,7 @@ impl TaskGraph {
 
     /// 获取依赖指定任务的所有任务
     pub fn dependents_of(&self, name: &str) -> Vec<String> {
-        self.build_reverse_edges()
-            .get(name)
-            .cloned()
-            .unwrap_or_default()
+        self.build_reverse_edges().get(name).cloned().unwrap_or_default()
     }
 }
 
@@ -553,7 +554,12 @@ mod tests {
         graph.add_task(make_task("clean", &[]));
         graph.add_task(make_task("fmt", &[]));
         graph.add_task(make_task("compile", &["clean"]));
-        graph.add_task(make_task("package", &["compile", "fmt"]));
+        graph.add_task(make_task(
+            "package",
+            &[
+                "compile", "fmt",
+            ],
+        ));
 
         let result = graph.topological_sort().unwrap();
         // clean and fmt should be in layer 0

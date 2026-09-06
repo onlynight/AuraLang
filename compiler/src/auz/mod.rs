@@ -35,7 +35,9 @@ pub use reader::{PackageContent, PackageFileInfo, PackageReader};
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// zstd 压缩流的魔数（4 字节，小端表示为 0xFD2FB528）
-pub const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+pub const ZSTD_MAGIC: [u8; 4] = [
+    0x28, 0xB5, 0x2F, 0xFD,
+];
 
 /// .auz 格式版本（Phase 1 = 1）
 pub const APKG_FORMAT_VERSION: u32 = 1;

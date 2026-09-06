@@ -73,10 +73,8 @@ fn nat_ends_with(args: &[Value]) -> Value {
 
 fn nat_split(args: &[Value]) -> Value {
     let sep = s1(args);
-    let parts: Vec<Value> = s0(args)
-        .split(sep.as_str())
-        .map(|s| Value::str_(s.to_string()))
-        .collect();
+    let parts: Vec<Value> =
+        s0(args).split(sep.as_str()).map(|s| Value::str_(s.to_string())).collect();
     Value::List(parts)
 }
 
@@ -229,10 +227,7 @@ fn nat_unescape(args: &[Value]) -> Value {
 }
 
 fn nat_split_lines(args: &[Value]) -> Value {
-    let lines: Vec<Value> = s0(args)
-        .lines()
-        .map(|s| Value::str_(s.to_string()))
-        .collect();
+    let lines: Vec<Value> = s0(args).lines().map(|s| Value::str_(s.to_string())).collect();
     Value::List(lines)
 }
 

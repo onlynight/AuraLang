@@ -4,9 +4,7 @@
 //! 对象模型（NewObject / SetField / GetField）/ 数组。
 
 use compiler::codegen::compile_source;
-use compiler::codegen::opcode::{
-    BytecodeFunction, BytecodeModule, BytecodeNative, Const, OpCode,
-};
+use compiler::codegen::opcode::{BytecodeFunction, BytecodeModule, BytecodeNative, Const, OpCode};
 use compiler::vm::{Value, Vm, VmOptions};
 
 /// 编译源码并返回 `main` 的执行结果（要求 main 返回一个可断言的值）
@@ -138,17 +136,23 @@ fn object_field_roundtrip() {
 
     let module = BytecodeModule {
         consts: vec![Const::Int(42)],
-        natives: vec![BytecodeNative {
-            name: "println".to_string(),
-            param_count: 1,
-        }],
-        functions: vec![BytecodeFunction {
-            name: "main".to_string(),
-            param_count: 0,
-            locals: 1,
-            is_native: false,
-            code,
-        }],
+        natives: vec![
+            BytecodeNative {
+                name: "println".to_string(),
+                param_count: 1,
+            },
+        ],
+        functions: vec![
+            BytecodeFunction {
+                name: "main".to_string(),
+                param_count: 0,
+                locals: 1,
+                is_native: false,
+                code,
+                line_table: None,
+                line_table: None,
+            },
+        ],
         entry: 0,
         enabled_modules: Vec::new(),
     };
@@ -189,15 +193,22 @@ fn array_roundtrip() {
     OpCode::Return.write(&mut code);
 
     let module = BytecodeModule {
-        consts: vec![Const::Int(3), Const::Int(99), Const::Int(1)],
+        consts: vec![
+            Const::Int(3),
+            Const::Int(99),
+            Const::Int(1),
+        ],
         natives: vec![],
-        functions: vec![BytecodeFunction {
-            name: "main".to_string(),
-            param_count: 0,
-            locals: 1,
-            is_native: false,
-            code,
-        }],
+        functions: vec![
+            BytecodeFunction {
+                name: "main".to_string(),
+                param_count: 0,
+                locals: 1,
+                is_native: false,
+                code,
+                line_table: None,
+            },
+        ],
         entry: 0,
         enabled_modules: Vec::new(),
     };
@@ -305,15 +316,22 @@ fn list_operations() {
     OpCode::Return.write(&mut code);
 
     let module = BytecodeModule {
-        consts: vec![Const::Int(2), Const::Int(10), Const::Int(20)],
+        consts: vec![
+            Const::Int(2),
+            Const::Int(10),
+            Const::Int(20),
+        ],
         natives: vec![],
-        functions: vec![BytecodeFunction {
-            name: "main".to_string(),
-            param_count: 0,
-            locals: 3,
-            is_native: false,
-            code,
-        }],
+        functions: vec![
+            BytecodeFunction {
+                name: "main".to_string(),
+                param_count: 0,
+                locals: 3,
+                is_native: false,
+                code,
+                line_table: None,
+            },
+        ],
         entry: 0,
         enabled_modules: Vec::new(),
     };
@@ -341,15 +359,21 @@ fn map_operations() {
     OpCode::Return.write(&mut code);
 
     let module = BytecodeModule {
-        consts: vec![Const::Str("k1".to_string()), Const::Int(100)],
+        consts: vec![
+            Const::Str("k1".to_string()),
+            Const::Int(100),
+        ],
         natives: vec![],
-        functions: vec![BytecodeFunction {
-            name: "main".to_string(),
-            param_count: 0,
-            locals: 1,
-            is_native: false,
-            code,
-        }],
+        functions: vec![
+            BytecodeFunction {
+                name: "main".to_string(),
+                param_count: 0,
+                locals: 1,
+                is_native: false,
+                code,
+                line_table: None,
+            },
+        ],
         entry: 0,
         enabled_modules: Vec::new(),
     };
@@ -523,7 +547,9 @@ fn jit_not_compilable_with_call_native() {
     };
     let consts = vec![Const::Int(1)];
     let funcs = vec![f.clone()];
-    assert!(!compiler::vm::jit::is_jit_compilable(0, &f, &consts, &funcs));
+    assert!(!compiler::vm::jit::is_jit_compilable(
+        0, &f, &consts, &funcs
+    ));
 }
 
 /// JIT 不可编译：含非常量应返回 false
@@ -545,5 +571,7 @@ fn jit_not_compilable_non_int_const() {
     };
     let consts = vec![Const::Float(3.14)];
     let funcs = vec![f.clone()];
-    assert!(!compiler::vm::jit::is_jit_compilable(0, &f, &consts, &funcs));
+    assert!(!compiler::vm::jit::is_jit_compilable(
+        0, &f, &consts, &funcs
+    ));
 }

@@ -31,4 +31,13 @@ pub enum LoomError {
 
     #[error("未实现: {0}")]
     Unimplemented(String),
+
+    #[error("注册表错误: {0}")]
+    Registry(String),
+
+    #[error("CI 配置错误: {0}")]
+    Ci(String),
+
+    #[error("IDE 错误: {0}")]
+    Ide(String),
 }

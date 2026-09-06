@@ -11,7 +11,7 @@
 //! - 蹦床使用固定参数列表（最多 4 个 i64 参数），通过 C ABI 传递
 
 use std::cell::RefCell;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// 回调注册表条目：回调 ID → Aura 函数索引
 #[derive(Debug, Clone)]
@@ -68,20 +68,31 @@ impl Default for CallbackRegistry {
 /// 回调派发闭包：接收回调 ID 和参数，返回结果
 ///
 /// 由 VM 在调用 C 函数前设置，蹦床函数通过此闭包派发回 Aura VM。
-pub type CallbackDispatcher =
-    Arc<dyn Fn(i64, &[i64]) -> i64 + Send + Sync>;
+pub type CallbackDispatcher = Arc<dyn Fn(i64, &[i64]) -> i64 + Send + Sync>;
 
 thread_local! {
-    /// 当前活跃的回调派发闭包
+    /// 当前活跃的回调派发闭包（Phase 1: 保留 thread_local 作为 fast path）
     pub static CURRENT_DISPATCHER: RefCell<Option<CallbackDispatcher>> =
         RefCell::new(None);
 }
 
+/// 全局回调派发器栈（Phase 1: thread_local 的跨线程后备）
+///
+/// 使用栈式结构支持嵌套回调派发：
+/// - `set_dispatcher` 同时压栈到 thread_local 和全局栈
+/// - `clear_dispatcher` 同时弹栈
+/// - 蹦床函数 `aura_callback_trampoline` 先查 thread_local，后备查全局栈
+///
+/// 此方案解决了 thread_local 的跨线程限制：
+/// C 回调从非 VM 线程调用时，可通过全局栈找到 dispatcher。
+static DISPATCHER_STACK: Mutex<Vec<CallbackDispatcher>> = Mutex::new(Vec::new());
+
 /// 设置当前回调派发闭包（由 VM 在调用 C 函数前调用）
 pub fn set_dispatcher(dispatcher: Arc<dyn Fn(i64, &[i64]) -> i64 + Send + Sync>) {
     CURRENT_DISPATCHER.with(|d| {
-        *d.borrow_mut() = Some(dispatcher);
+        *d.borrow_mut() = Some(dispatcher.clone());
     });
+    DISPATCHER_STACK.lock().unwrap().push(dispatcher);
 }
 
 /// 清除当前回调派发闭包
@@ -89,6 +100,18 @@ pub fn clear_dispatcher() {
     CURRENT_DISPATCHER.with(|d| {
         *d.borrow_mut() = None;
     });
+    DISPATCHER_STACK.lock().unwrap().pop();
+}
+
+/// 获取当前活跃的回调派发闭包：先查 thread_local（fast path），后备查全局栈
+fn current_dispatcher() -> Option<CallbackDispatcher> {
+    // Fast path: thread_local
+    let local = CURRENT_DISPATCHER.with(|d| d.borrow().clone());
+    if local.is_some() {
+        return local;
+    }
+    // Fallback: global stack (cross-thread C callback)
+    DISPATCHER_STACK.lock().unwrap().last().cloned()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -120,20 +143,17 @@ pub unsafe extern "C" fn aura_callback_trampoline(
     a8: i64,
 ) -> i64 {
     let callback_id = context as usize as i64;
-    let args = [a1, a2, a3, a4, a5, a6, a7, a8];
+    let args = [
+        a1, a2, a3, a4, a5, a6, a7, a8,
+    ];
 
-    CURRENT_DISPATCHER.with(|d| {
-        if let Some(dispatcher) = d.borrow().as_ref() {
-            dispatcher(callback_id, &args)
-        } else {
-            // 无活跃派发器：返回 0（未链接）
-            eprintln!(
-                "[ffi] 回调 #{} 被调用但无活跃派发器，已忽略",
-                callback_id
-            );
-            0
-        }
-    })
+    if let Some(dispatcher) = current_dispatcher() {
+        dispatcher(callback_id, &args)
+    } else {
+        // 无活跃派发器：返回 0（未链接）
+        eprintln!("[ffi] 回调 #{} 被调用但无活跃派发器，已忽略", callback_id);
+        0
+    }
 }
 
 /// 获取蹦床函数指针（用于传递给 C 代码）
@@ -262,11 +282,7 @@ pub fn resolve_static_symbol(name: &str) -> Option<usize> {
         }
         let c_name = CString::new(name).ok()?;
         let ptr = unsafe { dlsym(handle, c_name.as_ptr()) };
-        if ptr.is_null() {
-            None
-        } else {
-            Some(ptr as usize)
-        }
+        if ptr.is_null() { None } else { Some(ptr as usize) }
     }
 
     #[cfg(windows)]
@@ -281,11 +297,7 @@ pub fn resolve_static_symbol(name: &str) -> Option<usize> {
         let wide: Vec<u16> = OsStr::new(name).encode_wide().chain(std::iter::once(0)).collect();
         unsafe {
             let ptr = get_proc_address(handle, wide.as_ptr());
-            if ptr == 0 {
-                None
-            } else {
-                Some(ptr as usize)
-            }
+            if ptr == 0 { None } else { Some(ptr as usize) }
         }
     }
 
@@ -330,10 +342,16 @@ unsafe fn get_proc_address(handle: usize, name: *const u16) -> usize {
 }
 
 #[cfg(unix)]
-unsafe fn dlsym(handle: *mut std::os::raw::c_void, name: *const std::os::raw::c_char) -> *mut std::os::raw::c_void {
+unsafe fn dlsym(
+    handle: *mut std::os::raw::c_void,
+    name: *const std::os::raw::c_char,
+) -> *mut std::os::raw::c_void {
     unsafe {
         unsafe extern "C" {
-            fn dlsym(handle: *mut std::os::raw::c_void, symbol: *const std::os::raw::c_char) -> *mut std::os::raw::c_void;
+            fn dlsym(
+                handle: *mut std::os::raw::c_void,
+                symbol: *const std::os::raw::c_char,
+            ) -> *mut std::os::raw::c_void;
         }
         dlsym(handle, name)
     }

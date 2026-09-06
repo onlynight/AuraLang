@@ -18,8 +18,8 @@ use crate::cache::remote::CacheService;
 use crate::error::LoomError;
 use crate::manifest::priority::ResolvedBuildConfig;
 use crate::plugin::PluginRegistry;
-use crate::task::{TaskDefinition, TaskKind, TaskGraph};
 use crate::task::scheduler::SchedulerConfig;
+use crate::task::{TaskDefinition, TaskGraph, TaskKind};
 
 /// 任务执行结果
 #[derive(Debug, Clone)]
@@ -62,7 +62,11 @@ impl TaskResult {
             executed: false,
             elapsed_ms: 0,
             success: true,
-            message: format!("✓ up-to-date (fingerprint: {}..., 来源: {})", &fingerprint[..8.min(fingerprint.len())], source),
+            message: format!(
+                "✓ up-to-date (fingerprint: {}..., 来源: {})",
+                &fingerprint[..8.min(fingerprint.len())],
+                source
+            ),
             artifacts: Vec::new(),
             cache_hit: true,
             cache_source: source.to_string(),
@@ -219,7 +223,9 @@ impl Executor {
             else if let Some(cache) = &self._cache {
                 let cache_guard = match cache.lock() {
                     Ok(g) => g,
-                    Err(_) => return TaskResult::failure(&task.name, 0, "缓存锁获取失败".to_string()),
+                    Err(_) => {
+                        return TaskResult::failure(&task.name, 0, "缓存锁获取失败".to_string());
+                    }
                 };
                 match Self::check_up_to_date(task, &cache_guard) {
                     Some(fingerprint) => {
@@ -250,7 +256,11 @@ impl Executor {
                             executed: false,
                             elapsed_ms: elapsed,
                             success: true,
-                            message: format!("✓ 从缓存恢复 {} 个文件 (来源: {})", restored.len(), source_str),
+                            message: format!(
+                                "✓ 从缓存恢复 {} 个文件 (来源: {})",
+                                restored.len(),
+                                source_str
+                            ),
                             artifacts: restored,
                             cache_hit: true,
                             cache_source: source_str.to_string(),
@@ -265,14 +275,8 @@ impl Executor {
         match self.dispatch_task(task) {
             Ok((message, artifacts)) => {
                 let elapsed = start.elapsed().as_millis() as u64;
-                let result = TaskResult::success(
-                    &task.name,
-                    elapsed,
-                    message,
-                    artifacts.clone(),
-                    false,
-                    "",
-                );
+                let result =
+                    TaskResult::success(&task.name, elapsed, message, artifacts.clone(), false, "");
 
                 // 4. 更新缓存（B3.4: 存储到本地 + 远程）
                 if self.config.use_cache && !self.config.clean {
@@ -314,6 +318,7 @@ impl Executor {
             TaskKind::Test => builtin::execute_test(task, config),
             TaskKind::Package => builtin::execute_package(task, config),
             TaskKind::Verify => builtin::execute_verify(task, config),
+            TaskKind::Check => builtin::execute_check(task, config),
             TaskKind::Install => builtin::execute_install(task, config),
             TaskKind::Deploy => builtin::execute_deploy(task, config),
             TaskKind::Execute => builtin::execute_execute(task, config),
@@ -365,7 +370,7 @@ mod tests {
     use crate::cache::remote::CacheService;
     use crate::manifest::priority::{CliOverrides, ResolvedBuildConfig};
     use crate::task::scheduler::SchedulerConfig;
-    use crate::task::{TaskDefinition, TaskInputs, TaskKind, TaskOutputs, TaskGraph};
+    use crate::task::{TaskDefinition, TaskGraph, TaskInputs, TaskKind, TaskOutputs};
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
 
@@ -389,7 +394,9 @@ mod tests {
         )
     }
 
-    fn make_executor_with_cache(config: SchedulerConfig) -> (Executor, Arc<Mutex<LocalCache>>, TempDir) {
+    fn make_executor_with_cache(
+        config: SchedulerConfig,
+    ) -> (Executor, Arc<Mutex<LocalCache>>, TempDir) {
         let tmp = TempDir::new().unwrap();
         let cache = Arc::new(Mutex::new(LocalCache::new(tmp.path()).unwrap()));
         let executor = Executor::new(
@@ -401,15 +408,15 @@ mod tests {
         (executor, cache, tmp)
     }
 
-    fn make_executor_with_service(config: SchedulerConfig) -> (Executor, Arc<Mutex<CacheService>>, TempDir) {
+    fn make_executor_with_service(
+        config: SchedulerConfig,
+    ) -> (Executor, Arc<Mutex<CacheService>>, TempDir) {
         let tmp = TempDir::new().unwrap();
         let cache = Arc::new(Mutex::new(LocalCache::new(tmp.path()).unwrap()));
         let build_config = Arc::new(ResolvedBuildConfig::default());
-        let service = Arc::new(Mutex::new(CacheService::new(
-            cache.clone(),
-            None,
-            build_config.clone(),
-        ).unwrap()));
+        let service = Arc::new(Mutex::new(
+            CacheService::new(cache.clone(), None, build_config.clone()).unwrap(),
+        ));
         let executor = Executor::with_cache_service(
             Arc::new(TaskGraph::new()),
             build_config,
@@ -430,7 +437,10 @@ mod tests {
 
     #[test]
     fn test_execute_dry_run() {
-        let config = SchedulerConfig { dry_run: true, ..Default::default() };
+        let config = SchedulerConfig {
+            dry_run: true,
+            ..Default::default()
+        };
         let executor = make_executor(config);
         let task = make_task("clean", TaskKind::Clean);
         let result = executor.execute_task(&task);
@@ -495,7 +505,10 @@ mod tests {
 
     #[test]
     fn test_no_cache_disables_incremental() {
-        let config = SchedulerConfig { use_cache: false, ..Default::default() };
+        let config = SchedulerConfig {
+            use_cache: false,
+            ..Default::default()
+        };
         let (executor, _cache, _tmp) = make_executor_with_cache(config);
         let task = make_task("compile", TaskKind::Compile("main".to_string()));
 
@@ -511,7 +524,10 @@ mod tests {
 
     #[test]
     fn test_cache_incremental() {
-        let config = SchedulerConfig { use_cache: true, ..Default::default() };
+        let config = SchedulerConfig {
+            use_cache: true,
+            ..Default::default()
+        };
         let (executor, _cache, _tmp) = make_executor_with_cache(config);
         let task = make_task("clean", TaskKind::Clean);
 
@@ -531,13 +547,15 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let cache = Arc::new(Mutex::new(LocalCache::new(tmp.path()).unwrap()));
         let build_config = Arc::new(ResolvedBuildConfig::default());
-        let service = Arc::new(Mutex::new(CacheService::new(
-            cache.clone(),
-            None,
-            build_config.clone(),
-        ).unwrap()));
+        let service = Arc::new(Mutex::new(
+            CacheService::new(cache.clone(), None, build_config.clone()).unwrap(),
+        ));
 
-        let config = SchedulerConfig { use_cache: true, clean: true, ..Default::default() };
+        let config = SchedulerConfig {
+            use_cache: true,
+            clean: true,
+            ..Default::default()
+        };
         let executor = Executor::with_cache_service(
             Arc::new(TaskGraph::new()),
             build_config,

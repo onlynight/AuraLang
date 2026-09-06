@@ -56,6 +56,8 @@ fn main() {
         "verify" => cmd_verify(rest),
         // P13: 工具链命令
         "lsp" => cmd_lsp(rest),
+        // P15: 调试器命令
+        "debug" => cmd_debug(rest),
         "--help" | "-h" | "help" => print_usage(),
         other => {
             eprintln!("未知子命令: {}", other);
@@ -96,6 +98,7 @@ fn print_usage() {
   aura inspect <file.auz>                         Phase 1: 检查 .auz 内容\n\
   aura verify <file.auz>                          Phase 1: 验证 .auz 校验和\n\
   aura lsp                                        P13: 启动 LSP 服务器（stdio 通信）\n\
+  aura debug <file.aura>                          P15: 启动调试器（转发到 aura-debug）\n\
   aura fmt <file.aura> [--check]                  P13: 代码格式化\n"
     );
 }
@@ -113,8 +116,7 @@ fn extract_opt(args: &[String], name: &str) -> Option<String> {
 }
 
 fn first_positional<'a>(args: &'a [String], skip: &'a str) -> Option<&'a String> {
-    args.iter()
-        .find(|a| a.as_str() != skip && !a.starts_with("--"))
+    args.iter().find(|a| a.as_str() != skip && !a.starts_with("--"))
 }
 
 fn cmd_build(args: &[String]) {
@@ -248,9 +250,8 @@ fn cmd_build_aot(args: &[String]) {
         options.llvm_home = Some(home.into());
     }
 
-    let out_path = extract_opt(args, "--output")
-        .map(|s| std::path::PathBuf::from(s))
-        .unwrap_or_else(|| {
+    let out_path =
+        extract_opt(args, "--output").map(|s| std::path::PathBuf::from(s)).unwrap_or_else(|| {
             let exe_name = if emit_llvm {
                 format!("{}.ll", default_output_base(input))
             } else {
@@ -337,11 +338,7 @@ fn finish_executable(
     use compiler::codegen::aot::linker::{link_to_executable, link_to_object};
 
     // 中间对象文件
-    let obj_path = ll_path.with_extension(if cfg!(target_os = "windows") {
-        "obj"
-    } else {
-        "o"
-    });
+    let obj_path = ll_path.with_extension(if cfg!(target_os = "windows") { "obj" } else { "o" });
 
     link_to_object(ll_path, &obj_path, options).map_err(|e| e.to_string())?;
 
@@ -579,18 +576,156 @@ fn cmd_fmt(args: &[String]) {
             println!("✓ {} 已格式化", input);
         }
     } else {
-        std::fs::write(input, &formatted).map_err(|e| {
-            eprintln!("错误: 写入 {} 失败: {}", input, e);
-            exit(1);
-        }).ok();
+        std::fs::write(input, &formatted)
+            .map_err(|e| {
+                eprintln!("错误: 写入 {} 失败: {}", input, e);
+                exit(1);
+            })
+            .ok();
         println!("✓ 已格式化 {}", input);
     }
 }
 
 /// P13.3: `aura lsp` — 启动 LSP 服务器
+///
+/// Phase 2: 优先启动独立的 `aura-lsp` 子进程（不加载 VM/AOT/JIT），
+/// 若二进制不存在则回退到进程内运行（向后兼容）。
 fn cmd_lsp(_args: &[String]) {
-    eprintln!("Aura LSP 服务器启动（stdio 模式）");
-    compiler::lsp::run_lsp_server();
+    // 尝试找到 aura-lsp 可执行文件
+    let lsp_bin = find_lsp_binary();
+
+    if let Some(bin_path) = lsp_bin {
+        eprintln!("[aura] 启动独立 LSP 进程: {}", bin_path.display());
+        // 使用子进程方式启动 aura-lsp，stdio 透传
+        let status = std::process::Command::new(&bin_path)
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status()
+            .map_err(|e| {
+                eprintln!("错误: 无法启动 {}: {}", bin_path.display(), e);
+                exit(1);
+            })
+            .unwrap();
+
+        if !status.success() {
+            eprintln!("[aura] LSP 进程异常退出 (code: {:?})", status.code());
+            exit(1);
+        }
+    } else {
+        // 回退：进程内运行 LSP（兼容旧行为）
+        eprintln!("[aura] 未找到 aura-lsp，回退到进程内 LSP 模式");
+        compiler::lsp::run_lsp_server();
+    }
+}
+
+/// 查找 `aura-lsp` 可执行文件
+///
+/// 搜索顺序：
+/// 1. 当前可执行文件所在目录（`aura-lsp.exe` / `aura-lsp`）
+/// 2. PATH 环境变量
+fn find_lsp_binary() -> Option<std::path::PathBuf> {
+    use std::path::{Path, PathBuf};
+
+    let lsp_name = if cfg!(target_os = "windows") { "aura-lsp.exe" } else { "aura-lsp" };
+
+    // 1. 当前可执行文件所在目录
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join(lsp_name);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    // 2. PATH 搜索
+    if let Ok(paths) = std::env::var("PATH") {
+        let path_sep = if cfg!(target_os = "windows") { ";" } else { ":" };
+        for dir in paths.split(path_sep) {
+            let dir_path = Path::new(dir);
+            if !dir_path.is_dir() {
+                continue;
+            }
+            let candidate = PathBuf::from(dir).join(lsp_name);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    None
+}
+
+/// P15: `aura debug` — 转发到独立 `aura-debug` 进程
+///
+/// 搜索顺序：
+/// 1. 当前可执行文件所在目录（`aura-debug.exe` / `aura-debug`）
+/// 2. PATH 环境变量
+/// 3. 回退：显示提示信息
+fn cmd_debug(args: &[String]) {
+    let debug_bin = find_aura_debug_binary();
+
+    match debug_bin {
+        Some(bin_path) => {
+            eprintln!("[aura] 启动调试器: {}", bin_path.display());
+            let status = std::process::Command::new(&bin_path)
+                .args(args)
+                .stdin(std::process::Stdio::inherit())
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit())
+                .status()
+                .map_err(|e| {
+                    eprintln!("错误: 无法启动 {}: {}", bin_path.display(), e);
+                    exit(1);
+                })
+                .unwrap();
+
+            if !status.success() {
+                eprintln!("[aura] 调试器异常退出 (code: {:?})", status.code());
+                exit(1);
+            }
+        }
+        None => {
+            eprintln!("[aura] 未找到 aura-debug，请确保它在 PATH 中");
+            eprintln!("[aura] 或直接运行: aura-debug <file.aura>");
+            exit(1);
+        }
+    }
+}
+
+/// 搜索 `aura-debug` 可执行文件
+fn find_aura_debug_binary() -> Option<std::path::PathBuf> {
+    use std::path::{Path, PathBuf};
+
+    let debug_name = if cfg!(target_os = "windows") { "aura-debug.exe" } else { "aura-debug" };
+
+    // 1. 当前可执行文件所在目录
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join(debug_name);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    // 2. PATH 搜索
+    if let Ok(paths) = std::env::var("PATH") {
+        let path_sep = if cfg!(target_os = "windows") { ";" } else { ":" };
+        for dir in paths.split(path_sep) {
+            let dir_path = Path::new(dir);
+            if !dir_path.is_dir() {
+                continue;
+            }
+            let candidate = PathBuf::from(dir).join(debug_name);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    None
 }
 
 /// P7.9: 内存泄漏检测命令
@@ -743,8 +878,8 @@ fn cmd_doc(args: &[String]) {
 fn cmd_eval(args: &[String]) {
     use std::io::{self, Read};
 
-    let code = extract_opt(args, "--expr")
-        .or_else(|| first_positional(args, "--expr").map(|s| s.clone()));
+    let code =
+        extract_opt(args, "--expr").or_else(|| first_positional(args, "--expr").map(|s| s.clone()));
 
     let code = match code {
         Some(c) => c,
@@ -883,9 +1018,7 @@ fn cmd_install(args: &[String]) {
         .map(|s| std::path::PathBuf::from(s))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
-    use compiler::package::{
-        PackageManager, PackageManifest,
-    };
+    use compiler::package::{PackageManager, PackageManifest};
 
     // 收集所有依赖
     let mut deps = Vec::new();
@@ -1071,7 +1204,7 @@ fn cmd_new(args: &[String]) {
 
 /// Phase 1: `aura package` — 打包为 .auz 制品
 fn cmd_package(args: &[String]) {
-    use compiler::auz::{PackageBuilder, PackageBuildOptions};
+    use compiler::auz::{PackageBuildOptions, PackageBuilder};
     use compiler::package::PackageManifest;
 
     // 解析参数
@@ -1138,12 +1271,10 @@ fn cmd_package(args: &[String]) {
     }
 
     // 确定输出路径
-    let out_path = output
-        .map(|s| std::path::PathBuf::from(s))
-        .unwrap_or_else(|| {
-            let base = input.trim_end_matches(".aura").trim_end_matches(".AURA");
-            std::path::PathBuf::from(format!("{}.auz", base))
-        });
+    let out_path = output.map(|s| std::path::PathBuf::from(s)).unwrap_or_else(|| {
+        let base = input.trim_end_matches(".aura").trim_end_matches(".AURA");
+        std::path::PathBuf::from(format!("{}.auz", base))
+    });
 
     // 执行打包
     match builder.build(&out_path) {

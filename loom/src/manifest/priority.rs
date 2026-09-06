@@ -69,17 +69,15 @@ pub struct ResolvedBuildConfig {
 /// 解析最终构建配置
 ///
 /// 合并顺序：默认值 → 项目配置 → profile 覆盖 → CLI 覆盖
-pub fn resolve_build_config(
-    manifest: &LoomManifest,
-    cli: &CliOverrides,
-) -> ResolvedBuildConfig {
+pub fn resolve_build_config(manifest: &LoomManifest, cli: &CliOverrides) -> ResolvedBuildConfig {
     // 1. 从项目配置开始（BuildConfig 已含默认值）
     let project_build = &manifest.build;
 
     // 2. 应用 profile 覆盖
-    let profile_override = cli.profile.as_deref().and_then(|name| {
-        manifest.profiles.get(name).and_then(|p| p.build.as_ref())
-    });
+    let profile_override = cli
+        .profile
+        .as_deref()
+        .and_then(|name| manifest.profiles.get(name).and_then(|p| p.build.as_ref()));
 
     // 3. 合并
     let opt_level = cli
@@ -87,10 +85,8 @@ pub fn resolve_build_config(
         .or_else(|| profile_override.and_then(|o| o.opt_level))
         .unwrap_or(project_build.opt_level);
 
-    let debug = cli
-        .debug
-        .or_else(|| profile_override.and_then(|o| o.debug))
-        .unwrap_or(project_build.debug);
+    let debug =
+        cli.debug.or_else(|| profile_override.and_then(|o| o.debug)).unwrap_or(project_build.debug);
 
     let target = cli
         .target
@@ -108,19 +104,11 @@ pub fn resolve_build_config(
         .or_else(|| profile_override.and_then(|o| o.parallel))
         .unwrap_or(project_build.parallel);
 
-    let parallel_jobs = cli
-        .parallel_jobs
-        .unwrap_or(project_build.parallel_jobs);
+    let parallel_jobs = cli.parallel_jobs.unwrap_or(project_build.parallel_jobs);
 
-    let out_dir = cli
-        .out_dir
-        .clone()
-        .unwrap_or_else(|| project_build.out_dir.clone());
+    let out_dir = cli.out_dir.clone().unwrap_or_else(|| project_build.out_dir.clone());
 
-    let cache_dir = cli
-        .cache_dir
-        .clone()
-        .unwrap_or_else(|| project_build.cache_dir.clone());
+    let cache_dir = cli.cache_dir.clone().unwrap_or_else(|| project_build.cache_dir.clone());
 
     ResolvedBuildConfig {
         opt_level,

@@ -15,8 +15,8 @@ fn compile_and_run(label: &str, src: &str) -> Result<Value, String> {
     println!("═══════════════════════════════════════════════");
 
     let module = compile_source(src).map_err(|e| format!("编译失败: {}", e))?;
-    let mut vm = Vm::new(&module, VmOptions::default())
-        .map_err(|e| format!("VM 初始化失败: {}", e))?;
+    let mut vm =
+        Vm::new(&module, VmOptions::default()).map_err(|e| format!("VM 初始化失败: {}", e))?;
     let result = vm.run().map_err(|e| format!("运行失败: {}", e))?;
 
     println!("  🎯 最终结果: {}", result);
@@ -64,7 +64,12 @@ fn main() {
     }
 
     println!("\n═══════════════════════════════════════════════");
-    println!("  📊 汇总: {} 通过, {} 失败, 共 {} 个", passed, failed, files.len());
+    println!(
+        "  📊 汇总: {} 通过, {} 失败, 共 {} 个",
+        passed,
+        failed,
+        files.len()
+    );
     if failed == 0 {
         println!("  🎉 所有 P10 Demo 通过!");
     } else {

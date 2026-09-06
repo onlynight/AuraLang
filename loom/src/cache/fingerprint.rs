@@ -44,8 +44,9 @@ impl Fingerprint {
         // 2. 源文件内容哈希
         for file in &task.inputs.files {
             if file.exists() {
-                let content = std::fs::read(file)
-                    .map_err(|e| LoomError::Cache(format!("无法读取文件 {}: {}", file.display(), e)))?;
+                let content = std::fs::read(file).map_err(|e| {
+                    LoomError::Cache(format!("无法读取文件 {}: {}", file.display(), e))
+                })?;
                 let file_hash = hash_bytes(&content);
                 hasher.update(file_hash);
             } else {
@@ -82,6 +83,7 @@ impl Fingerprint {
             TaskKind::Test => "test".to_string(),
             TaskKind::Package => "package".to_string(),
             TaskKind::Verify => "verify".to_string(),
+            TaskKind::Check => "check".to_string(),
             TaskKind::Install => "install".to_string(),
             TaskKind::Deploy => "deploy".to_string(),
             TaskKind::Execute => "execute".to_string(),
@@ -97,11 +99,15 @@ impl Fingerprint {
     pub fn compute_detailed(task: &TaskDefinition) -> Result<Fingerprint, LoomError> {
         let hash = Self::compute(task)?;
         let files = task.inputs.files.iter().map(|f| f.to_string_lossy().to_string()).collect();
-        let options: Vec<(String, String)> = task.inputs.options.iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        let options: Vec<(String, String)> =
+            task.inputs.options.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
-        Ok(Fingerprint { hash, task_name: task.name.clone(), files, options })
+        Ok(Fingerprint {
+            hash,
+            task_name: task.name.clone(),
+            files,
+            options,
+        })
     }
 
     /// 比较两个 fingerprint 是否相同
@@ -135,7 +141,10 @@ pub fn hash_file(path: &Path) -> Result<String, LoomError> {
 }
 
 /// 计算目录中所有文件的哈希（递归）
-pub fn hash_directory(dir: &Path, include_ext: Option<&str>) -> Result<HashMap<String, String>, LoomError> {
+pub fn hash_directory(
+    dir: &Path,
+    include_ext: Option<&str>,
+) -> Result<HashMap<String, String>, LoomError> {
     let mut hashes = HashMap::new();
 
     let walker = walkdir::WalkDir::new(dir).into_iter();
@@ -169,7 +178,12 @@ mod tests {
     use crate::task::{TaskDefinition, TaskInputs, TaskKind, TaskOutputs};
     use std::collections::HashMap;
 
-    fn make_task(name: &str, kind: TaskKind, files: &[&str], options: &[(&str, &str)]) -> TaskDefinition {
+    fn make_task(
+        name: &str,
+        kind: TaskKind,
+        files: &[&str],
+        options: &[(&str, &str)],
+    ) -> TaskDefinition {
         TaskDefinition {
             name: name.to_string(),
             description: format!("test task {}", name),
@@ -186,7 +200,12 @@ mod tests {
 
     #[test]
     fn test_compute_fingerprint_basic() {
-        let task = make_task("compile-main", TaskKind::Compile("main".to_string()), &[], &[("opt", "2")]);
+        let task = make_task(
+            "compile-main",
+            TaskKind::Compile("main".to_string()),
+            &[],
+            &[("opt", "2")],
+        );
         let fp = Fingerprint::compute(&task).unwrap();
         assert_eq!(fp.len(), 64); // SHA-256 = 64 hex chars
     }
@@ -194,7 +213,12 @@ mod tests {
     #[test]
     fn test_fingerprint_deterministic() {
         // Same task should produce same fingerprint
-        let task = make_task("compile-main", TaskKind::Compile("main".to_string()), &[], &[("opt", "2")]);
+        let task = make_task(
+            "compile-main",
+            TaskKind::Compile("main".to_string()),
+            &[],
+            &[("opt", "2")],
+        );
         let fp1 = Fingerprint::compute(&task).unwrap();
         let fp2 = Fingerprint::compute(&task).unwrap();
         assert_eq!(fp1, fp2);
@@ -202,8 +226,18 @@ mod tests {
 
     #[test]
     fn test_fingerprint_changes_with_options() {
-        let task1 = make_task("compile", TaskKind::Compile("main".to_string()), &[], &[("opt", "2")]);
-        let task2 = make_task("compile", TaskKind::Compile("main".to_string()), &[], &[("opt", "3")]);
+        let task1 = make_task(
+            "compile",
+            TaskKind::Compile("main".to_string()),
+            &[],
+            &[("opt", "2")],
+        );
+        let task2 = make_task(
+            "compile",
+            TaskKind::Compile("main".to_string()),
+            &[],
+            &[("opt", "3")],
+        );
         let fp1 = Fingerprint::compute(&task1).unwrap();
         let fp2 = Fingerprint::compute(&task2).unwrap();
         assert_ne!(fp1, fp2);
@@ -219,8 +253,18 @@ mod tests {
         std::fs::write(&file1, "fun main() {}").unwrap();
         std::fs::write(&file2, "fun main() { println(\"different\") }").unwrap();
 
-        let task1 = make_task("compile", TaskKind::Compile("main".to_string()), &[file1.to_str().unwrap()], &[]);
-        let task2 = make_task("compile", TaskKind::Compile("main".to_string()), &[file2.to_str().unwrap()], &[]);
+        let task1 = make_task(
+            "compile",
+            TaskKind::Compile("main".to_string()),
+            &[file1.to_str().unwrap()],
+            &[],
+        );
+        let task2 = make_task(
+            "compile",
+            TaskKind::Compile("main".to_string()),
+            &[file2.to_str().unwrap()],
+            &[],
+        );
 
         let fp1 = Fingerprint::compute(&task1).unwrap();
         let fp2 = Fingerprint::compute(&task2).unwrap();
@@ -253,7 +297,11 @@ mod tests {
             description: String::new(),
             kind: TaskKind::Test,
             depends_on: vec!["compile-main".to_string()],
-            inputs: TaskInputs { files: Vec::new(), options: HashMap::new(), dep_fingerprints: deps1 },
+            inputs: TaskInputs {
+                files: Vec::new(),
+                options: HashMap::new(),
+                dep_fingerprints: deps1,
+            },
             outputs: TaskOutputs::default(),
         };
 
@@ -262,7 +310,11 @@ mod tests {
             description: String::new(),
             kind: TaskKind::Test,
             depends_on: vec!["compile-main".to_string()],
-            inputs: TaskInputs { files: Vec::new(), options: HashMap::new(), dep_fingerprints: deps2 },
+            inputs: TaskInputs {
+                files: Vec::new(),
+                options: HashMap::new(),
+                dep_fingerprints: deps2,
+            },
             outputs: TaskOutputs::default(),
         };
 
@@ -293,7 +345,12 @@ mod tests {
 
     #[test]
     fn test_compute_detailed() {
-        let task = make_task("compile", TaskKind::Compile("main".to_string()), &[], &[("opt", "2")]);
+        let task = make_task(
+            "compile",
+            TaskKind::Compile("main".to_string()),
+            &[],
+            &[("opt", "2")],
+        );
         let fp = Fingerprint::compute_detailed(&task).unwrap();
         assert_eq!(fp.task_name, "compile");
         assert_eq!(fp.options.len(), 1);
@@ -311,8 +368,24 @@ mod tests {
     #[test]
     fn test_options_sorted_deterministic() {
         // Options should be sorted before hashing to ensure determinism
-        let task1 = make_task("compile", TaskKind::Compile("main".to_string()), &[], &[("b", "2"), ("a", "1")]);
-        let task2 = make_task("compile", TaskKind::Compile("main".to_string()), &[], &[("a", "1"), ("b", "2")]);
+        let task1 = make_task(
+            "compile",
+            TaskKind::Compile("main".to_string()),
+            &[],
+            &[
+                ("b", "2"),
+                ("a", "1"),
+            ],
+        );
+        let task2 = make_task(
+            "compile",
+            TaskKind::Compile("main".to_string()),
+            &[],
+            &[
+                ("a", "1"),
+                ("b", "2"),
+            ],
+        );
         let fp1 = Fingerprint::compute(&task1).unwrap();
         let fp2 = Fingerprint::compute(&task2).unwrap();
         assert_eq!(fp1, fp2); // Should be the same since options are sorted

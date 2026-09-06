@@ -3,9 +3,9 @@
 //! 所有构建插件（约定 / 显式 / 外部）均实现此 trait。
 //! 对应设计文档 §9.1。
 
+use super::context::PluginContext;
 use crate::error::LoomError;
 use crate::plugin::{PluginKind, TaskResult};
-use super::context::PluginContext;
 
 /// 构建插件接口
 ///
@@ -56,11 +56,7 @@ pub trait BuildPlugin: Send + Sync {
     /// 执行器查找该任务名对应的插件并调用此方法。
     ///
     /// `task_name` 参数用于插件支持多个任务（如 aura-format 可同时注册 `fmt` 和 `fmt-check`）。
-    fn execute(
-        &self,
-        task_name: &str,
-        ctx: &PluginContext,
-    ) -> Result<TaskResult, LoomError>;
+    fn execute(&self, task_name: &str, ctx: &PluginContext) -> Result<TaskResult, LoomError>;
 }
 
 /// 插件构建器 trait（可选辅助 trait）
@@ -119,11 +115,7 @@ mod tests {
             Ok(())
         }
 
-        fn execute(
-            &self,
-            _task_name: &str,
-            _ctx: &PluginContext,
-        ) -> Result<TaskResult, LoomError> {
+        fn execute(&self, _task_name: &str, _ctx: &PluginContext) -> Result<TaskResult, LoomError> {
             Ok(TaskResult::ok(format!("{} executed", self.name)))
         }
     }
@@ -172,11 +164,21 @@ mod tests {
     struct DescribedPlugin;
 
     impl BuildPlugin for DescribedPlugin {
-        fn name(&self) -> &str { "described-plugin" }
-        fn version(&self) -> &str { "1.0.0" }
-        fn kind(&self) -> PluginKind { PluginKind::Convention }
-        fn description(&self) -> Option<&str> { Some("A plugin with description") }
-        fn configure(&self, _ctx: &mut PluginContext) -> Result<(), LoomError> { Ok(()) }
+        fn name(&self) -> &str {
+            "described-plugin"
+        }
+        fn version(&self) -> &str {
+            "1.0.0"
+        }
+        fn kind(&self) -> PluginKind {
+            PluginKind::Convention
+        }
+        fn description(&self) -> Option<&str> {
+            Some("A plugin with description")
+        }
+        fn configure(&self, _ctx: &mut PluginContext) -> Result<(), LoomError> {
+            Ok(())
+        }
         fn execute(&self, _task_name: &str, _ctx: &PluginContext) -> Result<TaskResult, LoomError> {
             Ok(TaskResult::ok("executed"))
         }

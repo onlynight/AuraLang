@@ -9,8 +9,8 @@
 //! - `ask` 真阻塞等待响应（通过 PendingRequest + 协程调度器实现，Phase 4）
 //! - 监督树：父 Actor 可监督子 Actor，子 Actor 崩溃时通知父 Actor
 
-use std::collections::{HashMap, VecDeque};
 use crate::vm::value::Value;
+use std::collections::{HashMap, VecDeque};
 
 /// Actor 实例 ID
 pub type ActorId = usize;
@@ -150,14 +150,17 @@ impl ActorRuntime {
             .unwrap_or(0);
 
         // 注册待处理请求
-        self.pending_requests.insert(req_id, PendingRequest {
-            request_id: req_id,
-            from_actor: 0, // 主协程
-            target_actor: id,
-            response_coroutine: 0,
-            timeout_ms,
-            created_ms: now_ms,
-        });
+        self.pending_requests.insert(
+            req_id,
+            PendingRequest {
+                request_id: req_id,
+                from_actor: 0, // 主协程
+                target_actor: id,
+                response_coroutine: 0,
+                timeout_ms,
+                created_ms: now_ms,
+            },
+        );
 
         // 发送消息（携带请求 ID）
         let mut wrapped_map = HashMap::new();

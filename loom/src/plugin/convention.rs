@@ -26,9 +26,15 @@ use crate::task::{TaskDefinition, TaskInputs, TaskKind, TaskOutputs};
 pub struct StdlibPlugin;
 
 impl BuildPlugin for StdlibPlugin {
-    fn name(&self) -> &str { "aura-stdlib" }
-    fn version(&self) -> &str { "1.0.0" }
-    fn kind(&self) -> PluginKind { PluginKind::Convention }
+    fn name(&self) -> &str {
+        "aura-stdlib"
+    }
+    fn version(&self) -> &str {
+        "1.0.0"
+    }
+    fn kind(&self) -> PluginKind {
+        PluginKind::Convention
+    }
     fn description(&self) -> Option<&str> {
         Some("标准库插件：自动注册 io/math/string/json 等标准模块")
     }
@@ -53,13 +59,11 @@ impl BuildPlugin for StdlibPlugin {
         Ok(())
     }
 
-    fn execute(
-        &self,
-        _task_name: &str,
-        _ctx: &PluginContext,
-    ) -> Result<TaskResult, LoomError> {
+    fn execute(&self, _task_name: &str, _ctx: &PluginContext) -> Result<TaskResult, LoomError> {
         // 标准库插件不执行任务，仅注册模块
-        Ok(TaskResult::ok("aura-stdlib: 无任务可执行（模块注册在 configure 阶段完成）"))
+        Ok(TaskResult::ok(
+            "aura-stdlib: 无任务可执行（模块注册在 configure 阶段完成）",
+        ))
     }
 }
 
@@ -74,9 +78,15 @@ impl BuildPlugin for StdlibPlugin {
 pub struct TestHarnessPlugin;
 
 impl BuildPlugin for TestHarnessPlugin {
-    fn name(&self) -> &str { "aura-test-harness" }
-    fn version(&self) -> &str { "1.0.0" }
-    fn kind(&self) -> PluginKind { PluginKind::Convention }
+    fn name(&self) -> &str {
+        "aura-test-harness"
+    }
+    fn version(&self) -> &str {
+        "1.0.0"
+    }
+    fn kind(&self) -> PluginKind {
+        PluginKind::Convention
+    }
     fn description(&self) -> Option<&str> {
         Some("测试框架插件：注册 run-tests 任务，注入测试框架")
     }
@@ -86,10 +96,7 @@ impl BuildPlugin for TestHarnessPlugin {
         tracing::info!("aura-test-harness: 测试框架已激活");
 
         // 如果 manifest 没有定义 run-tests 任务，则注册一个
-        let has_run_tests = ctx
-            .tasks
-            .iter()
-            .any(|t| t.name == "run-tests");
+        let has_run_tests = ctx.tasks.iter().any(|t| t.name == "run-tests");
 
         if !has_run_tests {
             let task = TaskDefinition {
@@ -107,11 +114,7 @@ impl BuildPlugin for TestHarnessPlugin {
         Ok(())
     }
 
-    fn execute(
-        &self,
-        _task_name: &str,
-        _ctx: &PluginContext,
-    ) -> Result<TaskResult, LoomError> {
+    fn execute(&self, _task_name: &str, _ctx: &PluginContext) -> Result<TaskResult, LoomError> {
         Ok(TaskResult::ok("aura-test-harness: 测试框架已就绪"))
     }
 }
@@ -127,9 +130,15 @@ impl BuildPlugin for TestHarnessPlugin {
 pub struct WatchPlugin;
 
 impl BuildPlugin for WatchPlugin {
-    fn name(&self) -> &str { "aura-watch" }
-    fn version(&self) -> &str { "1.0.0" }
-    fn kind(&self) -> PluginKind { PluginKind::Convention }
+    fn name(&self) -> &str {
+        "aura-watch"
+    }
+    fn version(&self) -> &str {
+        "1.0.0"
+    }
+    fn kind(&self) -> PluginKind {
+        PluginKind::Convention
+    }
     fn description(&self) -> Option<&str> {
         Some("Watch 模式插件：文件监听 + 增量重编")
     }
@@ -157,12 +166,10 @@ impl BuildPlugin for WatchPlugin {
         Ok(())
     }
 
-    fn execute(
-        &self,
-        _task_name: &str,
-        _ctx: &PluginContext,
-    ) -> Result<TaskResult, LoomError> {
-        Ok(TaskResult::ok("aura-watch: Watch 模式已就绪（Phase B7 实现完整功能）"))
+    fn execute(&self, _task_name: &str, _ctx: &PluginContext) -> Result<TaskResult, LoomError> {
+        Ok(TaskResult::ok(
+            "aura-watch: Watch 模式已就绪（Phase B7 实现完整功能）",
+        ))
     }
 }
 

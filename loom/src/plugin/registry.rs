@@ -19,7 +19,7 @@
 //! 对应设计文档 §9 插件系统整体架构。
 
 use crate::error::LoomError;
-use crate::manifest::{LoomManifest};
+use crate::manifest::LoomManifest;
 use crate::plugin::context::PluginContext;
 use crate::plugin::external::load_external_plugin;
 use crate::plugin::r#trait::BuildPlugin;
@@ -47,10 +47,7 @@ impl PluginRegistry {
     }
 
     /// 从 manifest 加载所有插件（约定 + 显式 + 外部）
-    pub fn from_manifest(
-        manifest: &LoomManifest,
-        project_dir: &Path,
-    ) -> Result<Self, LoomError> {
+    pub fn from_manifest(manifest: &LoomManifest, project_dir: &Path) -> Result<Self, LoomError> {
         let mut registry = Self::new();
 
         // 1. 加载约定插件
@@ -67,7 +64,12 @@ impl PluginRegistry {
         for (name, config) in &manifest.plugins.external {
             let plugin_path = project_dir.join(&config.path);
             let plugin = load_external_plugin(&plugin_path)?;
-            tracing::info!("已加载外部插件: {} v{} ({})", name, plugin.version(), plugin_path.display());
+            tracing::info!(
+                "已加载外部插件: {} v{} ({})",
+                name,
+                plugin.version(),
+                plugin_path.display()
+            );
             registry.register(plugin);
         }
 
@@ -83,12 +85,7 @@ impl PluginRegistry {
         let index = self.plugins.len();
         self.by_name.insert(name.clone(), index);
         self.plugins.push(plugin);
-        tracing::debug!(
-            "注册插件: {} v{} [{}]",
-            name,
-            version,
-            kind
-        );
+        tracing::debug!("注册插件: {} v{} [{}]", name, version, kind);
     }
 
     /// 获取插件数量
@@ -158,18 +155,18 @@ impl PluginRegistry {
         // 策略 2: 遍历所有插件，查找名称相关的插件
         for plugin in &self.plugins {
             let plugin_name = plugin.name();
-            
+
             // 直接包含：plugin_name 包含 task_name（如 "aura-doc-gen" 包含 "doc-gen"）
             if plugin_name.contains(task_name) {
                 return plugin.execute(task_name, ctx);
             }
-            
+
             // 去掉 aura- 前缀后匹配
             let plugin_short = plugin_name.strip_prefix("aura-").unwrap_or(plugin_name);
             if plugin_short == task_name || plugin_short.contains(task_name) {
                 return plugin.execute(task_name, ctx);
             }
-            
+
             // task_name 包含 plugin_short（如 "doc-gen" 包含 "doc"）
             if task_name.contains(plugin_short) {
                 return plugin.execute(task_name, ctx);
@@ -219,8 +216,8 @@ impl std::fmt::Debug for PluginRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::parse::default_manifest;
     use crate::manifest::LoomManifest;
+    use crate::manifest::parse::default_manifest;
     use crate::plugin::context::PluginContext;
     use crate::plugin::r#trait::BuildPlugin;
     use crate::plugin::{PluginKind, TaskResult};
@@ -256,11 +253,7 @@ mod tests {
         fn configure(&self, _ctx: &mut PluginContext) -> Result<(), LoomError> {
             Ok(())
         }
-        fn execute(
-            &self,
-            task_name: &str,
-            _ctx: &PluginContext,
-        ) -> Result<TaskResult, LoomError> {
+        fn execute(&self, task_name: &str, _ctx: &PluginContext) -> Result<TaskResult, LoomError> {
             Ok(TaskResult::ok(format!("{}: {}", self.name, task_name)))
         }
     }
@@ -291,7 +284,10 @@ mod tests {
     #[test]
     fn test_registry_find() {
         let mut registry = PluginRegistry::new();
-        registry.register(Box::new(SimplePlugin::new("test-plugin", PluginKind::Explicit)));
+        registry.register(Box::new(SimplePlugin::new(
+            "test-plugin",
+            PluginKind::Explicit,
+        )));
 
         let found = registry.find("test-plugin");
         assert!(found.is_some());
@@ -307,8 +303,14 @@ mod tests {
     #[test]
     fn test_registry_names() {
         let mut registry = PluginRegistry::new();
-        registry.register(Box::new(SimplePlugin::new("plugin-a", PluginKind::Convention)));
-        registry.register(Box::new(SimplePlugin::new("plugin-b", PluginKind::Explicit)));
+        registry.register(Box::new(SimplePlugin::new(
+            "plugin-a",
+            PluginKind::Convention,
+        )));
+        registry.register(Box::new(SimplePlugin::new(
+            "plugin-b",
+            PluginKind::Explicit,
+        )));
 
         let names = registry.names();
         assert_eq!(names.len(), 2);
@@ -319,8 +321,14 @@ mod tests {
     #[test]
     fn test_registry_configure_all() {
         let mut registry = PluginRegistry::new();
-        registry.register(Box::new(SimplePlugin::new("plugin-a", PluginKind::Convention)));
-        registry.register(Box::new(SimplePlugin::new("plugin-b", PluginKind::Explicit)));
+        registry.register(Box::new(SimplePlugin::new(
+            "plugin-a",
+            PluginKind::Convention,
+        )));
+        registry.register(Box::new(SimplePlugin::new(
+            "plugin-b",
+            PluginKind::Explicit,
+        )));
 
         let mut ctx = PluginContext::new_default();
         assert!(registry.configure_all(&mut ctx).is_ok());
@@ -329,7 +337,10 @@ mod tests {
     #[test]
     fn test_registry_execute_task_direct_match() {
         let mut registry = PluginRegistry::new();
-        registry.register(Box::new(SimplePlugin::new("test-plugin", PluginKind::Explicit)));
+        registry.register(Box::new(SimplePlugin::new(
+            "test-plugin",
+            PluginKind::Explicit,
+        )));
 
         let ctx = PluginContext::new_default();
         let result = registry.execute_task("test-plugin", &ctx).unwrap();
@@ -386,8 +397,14 @@ mod tests {
     #[test]
     fn test_registry_list() {
         let mut registry = PluginRegistry::new();
-        registry.register(Box::new(SimplePlugin::new("plugin-a", PluginKind::Convention)));
-        registry.register(Box::new(SimplePlugin::new("plugin-b", PluginKind::Explicit)));
+        registry.register(Box::new(SimplePlugin::new(
+            "plugin-a",
+            PluginKind::Convention,
+        )));
+        registry.register(Box::new(SimplePlugin::new(
+            "plugin-b",
+            PluginKind::Explicit,
+        )));
 
         let list = registry.list();
         assert_eq!(list.len(), 2);
@@ -548,13 +565,22 @@ aura-format = true
         assert!(registry.len() >= 4); // 3 convention + 2 explicit
 
         // 3. 配置
-        let ctx = PluginContext::new(manifest.clone(), vec![], tmp.path().to_path_buf(), Default::default());
+        let ctx = PluginContext::new(
+            manifest.clone(),
+            vec![],
+            tmp.path().to_path_buf(),
+            Default::default(),
+        );
         let mut ctx = ctx;
         assert!(registry.configure_all(&mut ctx).is_ok());
 
         // 4. 执行插件任务
         let result = registry.execute_task("doc", &ctx).unwrap();
         assert!(result.success);
-        assert!(result.output.contains("doc-gen") || result.output.contains("文档") || result.output.contains("src"));
+        assert!(
+            result.output.contains("doc-gen")
+                || result.output.contains("文档")
+                || result.output.contains("src")
+        );
     }
 }

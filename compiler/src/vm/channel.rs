@@ -9,9 +9,9 @@
 //! - `tryRecv` 非阻塞，空时返回 `Null`
 //! - `recv_timeout`（Fix 11）：带超时的接收，超时返回 `Null`
 
+use crate::vm::value::Value;
 use std::collections::VecDeque;
 use std::time::Duration;
-use crate::vm::value::Value;
 
 /// Channel 实例 ID
 pub type ChannelId = usize;

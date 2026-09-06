@@ -2,18 +2,17 @@
 
 use std::path::Path;
 
+use super::validate;
 use crate::error::LoomError;
 use crate::manifest::{
     BuildConfig, BuildConfigOverride, LoomManifest, PackageOptions, PluginConfig, ProfileConfig,
     RepositoryConfig, ResourceConfig, SourceSetConfig,
 };
-use super::validate;
 
 /// 从文件路径解析 `aura.toml`
 pub fn parse_from_file(path: &Path) -> Result<LoomManifest, LoomError> {
-    let content = std::fs::read_to_string(path).map_err(|e| {
-        LoomError::Config(format!("无法读取 {}: {}", path.display(), e))
-    })?;
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| LoomError::Config(format!("无法读取 {}: {}", path.display(), e)))?;
     parse_from_str(&content)
 }
 
@@ -59,6 +58,9 @@ pub fn default_manifest(name: &str) -> LoomManifest {
         entry: "src/main.aura".to_string(),
         exports: vec!["main".to_string()],
         library: false,
+        kind: "app".to_string(),
+        compiler_min_version: None,
+        compiler_max_version: None,
         dependencies: Vec::new(),
         compile_dependencies: Vec::new(),
         runtime_dependencies: Vec::new(),
@@ -73,7 +75,13 @@ pub fn default_manifest(name: &str) -> LoomManifest {
         },
         plugins: PluginConfig::default(),
         profiles: std::collections::HashMap::from([
-            ("debug".to_string(), ProfileConfig { activate: true, build: None }),
+            (
+                "debug".to_string(),
+                ProfileConfig {
+                    activate: true,
+                    build: None,
+                },
+            ),
             (
                 "release".to_string(),
                 ProfileConfig {
@@ -98,4 +106,3 @@ pub fn default_manifest(name: &str) -> LoomManifest {
         tasks: Vec::new(),
     }
 }
-

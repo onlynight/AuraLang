@@ -309,24 +309,9 @@ pub enum Expr {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     Expr(Expr),
-    Val {
-        name: String,
-        type_hint: Option<Box<Type>>,
-        initializer: Option<Box<Expr>>,
-        span: Span,
-    },
-    Var {
-        name: String,
-        type_hint: Option<Box<Type>>,
-        initializer: Option<Box<Expr>>,
-        span: Span,
-    },
-    Destructure {
-        patterns: Vec<Expr>,
-        expr: Box<Expr>,
-        type_hint: Option<Box<Type>>,
-        span: Span,
-    },
+    Val { name: String, type_hint: Option<Box<Type>>, initializer: Option<Box<Expr>>, span: Span },
+    Var { name: String, type_hint: Option<Box<Type>>, initializer: Option<Box<Expr>>, span: Span },
+    Destructure { patterns: Vec<Expr>, expr: Box<Expr>, type_hint: Option<Box<Type>>, span: Span },
     Block(Vec<Stmt>, Span),
     // Expressions used as statements
 }
@@ -577,36 +562,92 @@ impl Expr {
         match self {
             Expr::Literal(_, s)
             | Expr::Ident(_, s)
-            | Expr::Assign { span: s, .. }
-            | Expr::Binary { span: s, .. }
-            | Expr::Unary { span: s, .. }
-            | Expr::Call { span: s, .. }
-            | Expr::NamedArg { span: s, .. }
-            | Expr::MemberAccess { span: s, .. }
-            | Expr::SafeAccess { span: s, .. }
-            | Expr::Index { span: s, .. }
-            | Expr::Lambda { span: s, .. }
-            | Expr::Closure { span: s, .. }
-            | Expr::If { span: s, .. }
-            | Expr::When { span: s, .. }
-            | Expr::For { span: s, .. }
-            | Expr::While { span: s, .. }
-            | Expr::DoWhile { span: s, .. }
-            | Expr::Return { span: s, .. }
+            | Expr::Assign {
+                span: s, ..
+            }
+            | Expr::Binary {
+                span: s, ..
+            }
+            | Expr::Unary {
+                span: s, ..
+            }
+            | Expr::Call {
+                span: s, ..
+            }
+            | Expr::NamedArg {
+                span: s, ..
+            }
+            | Expr::MemberAccess {
+                span: s, ..
+            }
+            | Expr::SafeAccess {
+                span: s, ..
+            }
+            | Expr::Index {
+                span: s, ..
+            }
+            | Expr::Lambda {
+                span: s, ..
+            }
+            | Expr::Closure {
+                span: s, ..
+            }
+            | Expr::If {
+                span: s, ..
+            }
+            | Expr::When {
+                span: s, ..
+            }
+            | Expr::For {
+                span: s, ..
+            }
+            | Expr::While {
+                span: s, ..
+            }
+            | Expr::DoWhile {
+                span: s, ..
+            }
+            | Expr::Return {
+                span: s, ..
+            }
             | Expr::Break { span: s }
             | Expr::Continue { span: s }
-            | Expr::Throw { span: s, .. }
-            | Expr::Try { span: s, .. }
-            | Expr::New { span: s, .. }
-            | Expr::Destructure { span: s, .. }
-            | Expr::TypeCast { span: s, .. }
-            | Expr::Range { span: s, .. }
-            | Expr::InRange { span: s, .. }
-            | Expr::Elvis { span: s, .. }
-            | Expr::AssertNonNull { span: s, .. }
-            | Expr::Defer { span: s, .. }
-            | Expr::Await { span: s, .. }
-            | Expr::Select { span: s, .. }
+            | Expr::Throw {
+                span: s, ..
+            }
+            | Expr::Try {
+                span: s, ..
+            }
+            | Expr::New {
+                span: s, ..
+            }
+            | Expr::Destructure {
+                span: s, ..
+            }
+            | Expr::TypeCast {
+                span: s, ..
+            }
+            | Expr::Range {
+                span: s, ..
+            }
+            | Expr::InRange {
+                span: s, ..
+            }
+            | Expr::Elvis {
+                span: s, ..
+            }
+            | Expr::AssertNonNull {
+                span: s, ..
+            }
+            | Expr::Defer {
+                span: s, ..
+            }
+            | Expr::Await {
+                span: s, ..
+            }
+            | Expr::Select {
+                span: s, ..
+            }
             | Expr::Block(_, s) => *s,
         }
     }
@@ -616,9 +657,15 @@ impl Stmt {
     pub fn span(&self) -> Span {
         match self {
             Stmt::Expr(e) => e.span(),
-            Stmt::Val { span: s, .. }
-            | Stmt::Var { span: s, .. }
-            | Stmt::Destructure { span: s, .. }
+            Stmt::Val {
+                span: s, ..
+            }
+            | Stmt::Var {
+                span: s, ..
+            }
+            | Stmt::Destructure {
+                span: s, ..
+            }
             | Stmt::Block(_, s) => *s,
         }
     }

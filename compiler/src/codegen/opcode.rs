@@ -274,12 +274,12 @@ impl OpCode {
     pub fn operand_size(byte: u8) -> usize {
         match byte {
             0 | 1 | 2 | 30 | 32 | 33 | 72 | 74 | 76 => 2, // u16 操作数
-            23 | 24 | 25 => 4,             // i32 偏移
-            26 | 27 | 36 => 2,             // u16 函数/原生索引
-            40 | 41 | 51 => 2,             // CallMethod/CallCtor/NewCoroutine u16 索引
-            66 => 2,                       // MakeCallback u16 函数索引
-            70 => 2,                       // CallExport u16 sym_idx
-            71 => 4,                       // CallExternal u16 mod_idx + u16 sym_idx
+            23 | 24 | 25 => 4,                            // i32 偏移
+            26 | 27 | 36 => 2,                            // u16 函数/原生索引
+            40 | 41 | 51 => 2, // CallMethod/CallCtor/NewCoroutine u16 索引
+            66 => 2,           // MakeCallback u16 函数索引
+            70 => 2,           // CallExport u16 sym_idx
+            71 => 4,           // CallExternal u16 mod_idx + u16 sym_idx
             _ => 0,
         }
     }
@@ -498,6 +498,25 @@ pub struct BytecodeFunction {
     pub is_native: bool,
     /// 字节码（仅非原生函数）
     pub code: Vec<u8>,
+    /// Phase 4: 指令索引 → 源码行号映射表
+    ///
+    /// 每个条目 `(instr_index, source_line)` 记录一条指令对应的源码行号。
+    /// 仅对非原生函数有效；原生函数为 `None`。
+    /// 为 `None` 时断点回退到函数入口。
+    pub line_table: Option<Vec<(usize, usize)>>,
+}
+
+impl Default for BytecodeFunction {
+    fn default() -> Self {
+        BytecodeFunction {
+            name: String::new(),
+            param_count: 0,
+            locals: 0,
+            is_native: false,
+            code: Vec::new(),
+            line_table: None,
+        }
+    }
 }
 
 /// 闭包记录（Phase 2）
@@ -533,7 +552,6 @@ pub struct BytecodeModule {
     pub enabled_modules: Vec<String>,
 
     // ── Phase 2 新增 ──
-
     /// 模块标识（UUID + 版本）
     pub module_identity: ModuleIdentity,
     /// 能力标志位（有签名/有导出表/有导入表/有 AOT/有依赖）
@@ -598,9 +616,7 @@ impl BytecodeModule {
 
     /// 查找导入符号索引
     pub fn find_import_idx(&self, module: &str, symbol: &str) -> Option<usize> {
-        self.imports
-            .iter()
-            .position(|i| i.module == module && i.symbol == symbol)
+        self.imports.iter().position(|i| i.module == module && i.symbol == symbol)
     }
 }
 
@@ -641,10 +657,22 @@ impl ModuleIdentity {
     pub fn uuid_str(&self) -> String {
         format!(
             "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            self.uuid[0], self.uuid[1], self.uuid[2], self.uuid[3],
-            self.uuid[4], self.uuid[5], self.uuid[6], self.uuid[7],
-            self.uuid[8], self.uuid[9], self.uuid[10], self.uuid[11],
-            self.uuid[12], self.uuid[13], self.uuid[14], self.uuid[15]
+            self.uuid[0],
+            self.uuid[1],
+            self.uuid[2],
+            self.uuid[3],
+            self.uuid[4],
+            self.uuid[5],
+            self.uuid[6],
+            self.uuid[7],
+            self.uuid[8],
+            self.uuid[9],
+            self.uuid[10],
+            self.uuid[11],
+            self.uuid[12],
+            self.uuid[13],
+            self.uuid[14],
+            self.uuid[15]
         )
     }
 }

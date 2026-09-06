@@ -34,11 +34,7 @@ fn check_syntax_errors(name: &str) -> Vec<String> {
     let tokens = lexer.tokenize();
     let mut parser = compiler::parser::Parser::new(tokens);
     parser.parse_program();
-    parser
-        .errors()
-        .iter()
-        .map(|e| e.message.clone())
-        .collect()
+    parser.errors().iter().map(|e| e.message.clone()).collect()
 }
 
 #[test]

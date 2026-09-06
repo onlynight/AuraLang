@@ -4,8 +4,8 @@
 //!
 //! 验证 CFuncInfo + CType 类型转换机制。
 
-use compiler::vm::ffi::{CFuncInfo, CType};
 use compiler::vm::Value;
+use compiler::vm::ffi::{CFuncInfo, CType};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. CType 解析
@@ -123,7 +123,11 @@ fn test_ctype_void_unpack() {
 fn test_cfunc_info_construction() {
     let info = CFuncInfo {
         name: "myFunc".to_string(),
-        param_types: vec![CType::Int32, CType::Int64, CType::Float64],
+        param_types: vec![
+            CType::Int32,
+            CType::Int64,
+            CType::Float64,
+        ],
         return_type: CType::Bool,
     };
     assert_eq!(info.name, "myFunc");

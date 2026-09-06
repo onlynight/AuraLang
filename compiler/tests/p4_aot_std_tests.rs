@@ -5,7 +5,7 @@
 //! 2. std C FFI 源文件存在
 //! 3. AOT 选项包含 link_std_cffi 字段
 
-use compiler::codegen::aot::{aot_compile, AotOptions, OutputFormat};
+use compiler::codegen::aot::{AotOptions, OutputFormat, aot_compile};
 use std::fs;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -29,11 +29,7 @@ fn test_aot_compile_generates_ir() {
         ..Default::default()
     };
 
-    let output = aot_compile(
-        src,
-        &tmp.join("test.ll"),
-        options,
-    );
+    let output = aot_compile(src, &tmp.join("test.ll"), options);
 
     assert!(output.is_ok(), "AOT 编译应成功: {:?}", output.err());
     if let Ok(out) = output {
@@ -60,18 +56,10 @@ fn test_std_cffi_source_exists() {
     );
 
     let header = cffi_dir.join("aura_std_cffi.h");
-    assert!(
-        header.exists(),
-        "C header 文件应存在: {}",
-        header.display()
-    );
+    assert!(header.exists(), "C header 文件应存在: {}", header.display());
 
     let source = cffi_dir.join("aura_std_cffi.c");
-    assert!(
-        source.exists(),
-        "C source 文件应存在: {}",
-        source.display()
-    );
+    assert!(source.exists(), "C source 文件应存在: {}", source.display());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -81,8 +69,7 @@ fn test_std_cffi_source_exists() {
 #[test]
 fn test_cffi_header_declarations() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let header_path = std::path::Path::new(manifest_dir)
-        .join("src/std/cffi/aura_std_cffi.h");
+    let header_path = std::path::Path::new(manifest_dir).join("src/std/cffi/aura_std_cffi.h");
 
     let content = fs::read_to_string(&header_path).expect("读取 header 文件");
 
@@ -92,22 +79,43 @@ fn test_cffi_header_declarations() {
     assert!(content.contains("aura_abs"), "应包含 aura_abs 声明");
 
     // IO 函数
-    assert!(content.contains("aura_io_readLine"), "应包含 aura_io_readLine 声明");
-    assert!(content.contains("aura_io_fileExists"), "应包含 aura_io_fileExists 声明");
+    assert!(
+        content.contains("aura_io_readLine"),
+        "应包含 aura_io_readLine 声明"
+    );
+    assert!(
+        content.contains("aura_io_fileExists"),
+        "应包含 aura_io_fileExists 声明"
+    );
 
     // Math 函数
-    assert!(content.contains("aura_math_sin"), "应包含 aura_math_sin 声明");
+    assert!(
+        content.contains("aura_math_sin"),
+        "应包含 aura_math_sin 声明"
+    );
     assert!(content.contains("aura_math_PI"), "应包含 aura_math_PI 常量");
 
     // String 函数
-    assert!(content.contains("aura_string_contains"), "应包含 aura_string_contains 声明");
-    assert!(content.contains("aura_string_trim"), "应包含 aura_string_trim 声明");
+    assert!(
+        content.contains("aura_string_contains"),
+        "应包含 aura_string_contains 声明"
+    );
+    assert!(
+        content.contains("aura_string_trim"),
+        "应包含 aura_string_trim 声明"
+    );
 
     // Time 函数
-    assert!(content.contains("aura_time_epoch"), "应包含 aura_time_epoch 声明");
+    assert!(
+        content.contains("aura_time_epoch"),
+        "应包含 aura_time_epoch 声明"
+    );
 
     // Random 函数
-    assert!(content.contains("aura_random_nextInt"), "应包含 aura_random_nextInt 声明");
+    assert!(
+        content.contains("aura_random_nextInt"),
+        "应包含 aura_random_nextInt 声明"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -117,17 +125,31 @@ fn test_cffi_header_declarations() {
 #[test]
 fn test_cffi_source_implementation() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let source_path = std::path::Path::new(manifest_dir)
-        .join("src/std/cffi/aura_std_cffi.c");
+    let source_path = std::path::Path::new(manifest_dir).join("src/std/cffi/aura_std_cffi.c");
 
     let content = fs::read_to_string(&source_path).expect("读取 source 文件");
 
     // 检查关键实现
-    assert!(content.contains("void aura_println"), "应包含 aura_println 实现");
-    assert!(content.contains("double aura_sqrt"), "应包含 aura_sqrt 实现");
-    assert!(content.contains("aura_io_readLine"), "应包含 aura_io_readLine 实现");
-    assert!(content.contains("aura_math_sin"), "应包含 aura_math_sin 实现");
-    assert!(content.contains("aura_string_contains"), "应包含 aura_string_contains 实现");
+    assert!(
+        content.contains("void aura_println"),
+        "应包含 aura_println 实现"
+    );
+    assert!(
+        content.contains("double aura_sqrt"),
+        "应包含 aura_sqrt 实现"
+    );
+    assert!(
+        content.contains("aura_io_readLine"),
+        "应包含 aura_io_readLine 实现"
+    );
+    assert!(
+        content.contains("aura_math_sin"),
+        "应包含 aura_math_sin 实现"
+    );
+    assert!(
+        content.contains("aura_string_contains"),
+        "应包含 aura_string_contains 实现"
+    );
 
     // 检查包含标准头文件
     assert!(content.contains("#include <stdio.h>"), "应包含 stdio.h");
@@ -143,20 +165,14 @@ fn test_cffi_source_implementation() {
 fn test_aot_options_has_link_std_cffi() {
     let options = AotOptions::default();
     // 默认应启用 std C FFI
-    assert!(
-        options.link_std_cffi,
-        "默认应启用 link_std_cffi"
-    );
+    assert!(options.link_std_cffi, "默认应启用 link_std_cffi");
 
     // 可以关闭
     let options_no_cffi = AotOptions {
         link_std_cffi: false,
         ..Default::default()
     };
-    assert!(
-        !options_no_cffi.link_std_cffi,
-        "可以关闭 link_std_cffi"
-    );
+    assert!(!options_no_cffi.link_std_cffi, "可以关闭 link_std_cffi");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -180,11 +196,7 @@ fn test_aot_compile_with_std_calls() {
         ..Default::default()
     };
 
-    let output = aot_compile(
-        src,
-        &tmp.join("test.ll"),
-        options,
-    );
+    let output = aot_compile(src, &tmp.join("test.ll"), options);
 
     assert!(output.is_ok(), "AOT 编译应成功: {:?}", output.err());
     if let Ok(out) = output {

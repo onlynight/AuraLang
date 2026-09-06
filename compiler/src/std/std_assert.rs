@@ -28,33 +28,21 @@ fn fail_result(msg: String) -> Value {
 fn nat_assert(args: &[Value]) -> Value {
     let cond = args.first().map(|v| v.is_truthy()).unwrap_or(false);
     let msg = args.get(1).map(|v| v.as_string()).unwrap_or_else(|| "assert".to_string());
-    if cond {
-        ok_result(msg)
-    } else {
-        fail_result(msg)
-    }
+    if cond { ok_result(msg) } else { fail_result(msg) }
 }
 
 /// assert.assertTrue(condition, message) → PASS or FAIL
 fn nat_assert_true(args: &[Value]) -> Value {
     let cond = args.first().map(|v| v.is_truthy()).unwrap_or(false);
     let msg = args.get(1).map(|v| v.as_string()).unwrap_or_else(|| "assertTrue".to_string());
-    if cond {
-        ok_result(msg)
-    } else {
-        fail_result(msg)
-    }
+    if cond { ok_result(msg) } else { fail_result(msg) }
 }
 
 /// assert.assertFalse(condition, message) → PASS or FAIL
 fn nat_assert_false(args: &[Value]) -> Value {
     let cond = args.first().map(|v| v.is_truthy()).unwrap_or(false);
     let msg = args.get(1).map(|v| v.as_string()).unwrap_or_else(|| "assertFalse".to_string());
-    if !cond {
-        ok_result(msg)
-    } else {
-        fail_result(msg)
-    }
+    if !cond { ok_result(msg) } else { fail_result(msg) }
 }
 
 /// assert.assertEq(a, b, message) → PASS or FAIL
@@ -91,22 +79,14 @@ fn nat_assert_not_eq(args: &[Value]) -> Value {
 fn nat_assert_not_null(args: &[Value]) -> Value {
     let cond = args.first().map(|v| v != &Value::Null).unwrap_or(false);
     let msg = args.get(1).map(|v| v.as_string()).unwrap_or_else(|| "assertNotNull".to_string());
-    if cond {
-        ok_result(msg)
-    } else {
-        fail_result(msg)
-    }
+    if cond { ok_result(msg) } else { fail_result(msg) }
 }
 
 /// assert.assertNull(value, message) → PASS or FAIL
 fn nat_assert_null(args: &[Value]) -> Value {
     let cond = args.first().map(|v| v == &Value::Null).unwrap_or(false);
     let msg = args.get(1).map(|v| v.as_string()).unwrap_or_else(|| "assertNull".to_string());
-    if cond {
-        ok_result(msg)
-    } else {
-        fail_result(msg)
-    }
+    if cond { ok_result(msg) } else { fail_result(msg) }
 }
 
 /// assert.debugAssert(condition, message) → PASS or FAIL (debug only)

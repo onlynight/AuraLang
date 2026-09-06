@@ -93,7 +93,9 @@ pub struct SourceMap {
 
 impl SourceMap {
     pub fn new() -> Self {
-        Self { files: Vec::new() }
+        Self {
+            files: Vec::new(),
+        }
     }
 
     /// 注册一个源文件，返回句柄
@@ -150,11 +152,7 @@ impl SourceMap {
                 (pad, width, '^')
             } else if line == end_line {
                 // 结束行：行首 → end_col
-                let width = span
-                    .end_col
-                    .saturating_sub(1)
-                    .max(1)
-                    .min(text.chars().count());
+                let width = span.end_col.saturating_sub(1).max(1).min(text.chars().count());
                 (0, width, '^')
             } else {
                 // 中间行：整行

@@ -53,7 +53,10 @@ const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
     RuntimeFn {
         name: "aura_string_new",
         ret: "i8*",
-        params: &[("data", "i8*"), ("len", "i64")],
+        params: &[
+            ("data", "i8*"),
+            ("len", "i64"),
+        ],
     },
     RuntimeFn {
         name: "aura_string_len",
@@ -73,11 +76,7 @@ pub fn generate_runtime_declarations(_type_mapper: &TypeMapper) -> String {
     s.push_str("; ---- Aura Runtime Declarations ----\n");
     for fn_decl in RUNTIME_FUNCTIONS {
         let params_str: Vec<&str> = fn_decl.params.iter().map(|(_, ty)| *ty).collect();
-        let params_str = if params_str.is_empty() {
-            String::new()
-        } else {
-            params_str.join(", ")
-        };
+        let params_str = if params_str.is_empty() { String::new() } else { params_str.join(", ") };
         s.push_str(&format!(
             "declare {} @{}({})\n",
             fn_decl.ret, fn_decl.name, params_str

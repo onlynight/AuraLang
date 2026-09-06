@@ -90,11 +90,8 @@ fn nat_write_bytes(args: &[Value]) -> Value {
 
 fn nat_delete(args: &[Value]) -> Value {
     let path = PathBuf::from(arg0(args));
-    let result = if path.is_dir() {
-        std::fs::remove_dir_all(&path)
-    } else {
-        std::fs::remove_file(&path)
-    };
+    let result =
+        if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
     match result {
         Ok(_) => Value::Bool(true),
         Err(e) => Value::str_(format!("Delete error: {}", e)),

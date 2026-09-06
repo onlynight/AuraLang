@@ -347,8 +347,10 @@ impl Vm {
             // Phase 2: 闭包
             Instr::MakeClosure(closure_idx) => {
                 // 先克隆闭包信息，避免借用冲突
-                let closure_info = self.module.module.closures.get(closure_idx as usize)
-                    .ok_or_else(|| VmError::Runtime(format!("MakeClosure: 闭包 {} 不存在", closure_idx)))?;
+                let closure_info =
+                    self.module.module.closures.get(closure_idx as usize).ok_or_else(|| {
+                        VmError::Runtime(format!("MakeClosure: 闭包 {} 不存在", closure_idx))
+                    })?;
                 let closure_name = closure_info.name.clone();
                 let param_count = closure_info.param_count;
                 let locals = closure_info.locals;
@@ -373,13 +375,19 @@ impl Vm {
             Instr::CallClosure => {
                 // 栈：参数...、闭包引用（栈顶）
                 // 弹出闭包引用
-                let closure_val = self.frames[top].stack.last().cloned()
+                let closure_val = self.frames[top]
+                    .stack
+                    .last()
+                    .cloned()
                     .ok_or_else(|| VmError::Runtime("CallClosure: 空栈".to_string()))?;
                 if let Value::Ref(ref_id) = closure_val {
                     let heap_data = self.heap.get_data_mut(ref_id);
                     if let Some(crate::vm::heap::HeapData::Closure {
-                        captures, func_idx, ..
-                    }) = heap_data {
+                        captures,
+                        func_idx,
+                        ..
+                    }) = heap_data
+                    {
                         let captures = captures.clone();
                         let func_idx = *func_idx;
                         // 弹出闭包引用
@@ -429,26 +437,31 @@ impl Vm {
             // Phase 2: 跨模块调用
             Instr::CallExport(sym_idx) => {
                 // 从导出符号表查找函数索引
-                let export = self.module.module.exports.get(sym_idx as usize)
-                    .ok_or_else(|| VmError::Runtime(format!("CallExport: 导出符号 {} 不存在", sym_idx)))?;
-                let func_idx = export.func_idx
-                    .ok_or_else(|| VmError::Runtime(format!("CallExport: 导出符号 {} 没有函数索引", export.name)))?;
+                let export = self.module.module.exports.get(sym_idx as usize).ok_or_else(|| {
+                    VmError::Runtime(format!("CallExport: 导出符号 {} 不存在", sym_idx))
+                })?;
+                let func_idx = export.func_idx.ok_or_else(|| {
+                    VmError::Runtime(format!("CallExport: 导出符号 {} 没有函数索引", export.name))
+                })?;
                 self.do_call(top, func_idx as usize, false)?;
             }
             Instr::CallExternal(mod_idx, sym_idx) => {
                 // 从导入表查找外部模块
-                let import = self.module.module.imports.get(mod_idx as usize)
-                    .ok_or_else(|| VmError::Runtime(format!("CallExternal: 导入模块 {} 不存在", mod_idx)))?;
+                let import = self.module.module.imports.get(mod_idx as usize).ok_or_else(|| {
+                    VmError::Runtime(format!("CallExternal: 导入模块 {} 不存在", mod_idx))
+                })?;
                 // 在注册表中查找目标模块
-                let target = self.registry.find_export(&import.module, &import.symbol)
-                    .ok_or_else(|| VmError::Runtime(format!(
-                        "CallExternal: 未加载模块 {} 或符号 {} 不存在", import.module, import.symbol
-                    )))?;
+                let target =
+                    self.registry.find_export(&import.module, &import.symbol).ok_or_else(|| {
+                        VmError::Runtime(format!(
+                            "CallExternal: 未加载模块 {} 或符号 {} 不存在",
+                            import.module, import.symbol
+                        ))
+                    })?;
                 // 从目标模块的导出索引获取函数索引
-                let (_, func_idx) = target.export_index.get(&import.symbol)
-                    .ok_or_else(|| VmError::Runtime(format!(
-                        "CallExternal: 符号 {} 没有函数索引", import.symbol
-                    )))?;
+                let (_, func_idx) = target.export_index.get(&import.symbol).ok_or_else(|| {
+                    VmError::Runtime(format!("CallExternal: 符号 {} 没有函数索引", import.symbol))
+                })?;
                 self.do_call(top, *func_idx as usize, false)?;
             }
         }
@@ -544,16 +557,10 @@ impl Vm {
         #[cfg(feature = "jit")]
         if self.opts.jit {
             self.maybe_jit_compile(idx);
-            let compiled = self
-                .jit
-                .as_ref()
-                .map(|j| j.is_compiled(idx))
-                .unwrap_or(false);
+            let compiled = self.jit.as_ref().map(|j| j.is_compiled(idx)).unwrap_or(false);
             if compiled {
-                let jargs: Vec<crate::vm::jit::JitValue> = args
-                    .iter()
-                    .map(crate::vm::jit::JitValue::from_value)
-                    .collect();
+                let jargs: Vec<crate::vm::jit::JitValue> =
+                    args.iter().map(crate::vm::jit::JitValue::from_value).collect();
                 if let Some(ret) = self.jit.as_ref().and_then(|j| j.call(idx, &jargs)) {
                     self.frames[top].stack.push(ret.to_value());
                     return Ok(());
@@ -634,7 +641,7 @@ impl Vm {
 /// 将参数转换为 `i64` 数组（最多 4 个），调用 C 函数，返回结果。
 /// 成功时返回 `Some(Value)`，失败时返回 `None`。
 fn static_call_c(name: &str, args: &[Value]) -> Option<Value> {
-    use crate::vm::ffi::{CFuncInfo, CType, resolve_static_symbol, CFuncPtr};
+    use crate::vm::ffi::{CFuncInfo, CFuncPtr, CType, resolve_static_symbol};
 
     let addr = resolve_static_symbol(name)?;
     let ptr: CFuncPtr = unsafe { std::mem::transmute(addr) };
@@ -658,7 +665,11 @@ fn static_call_c(name: &str, args: &[Value]) -> Option<Value> {
         args.get(6).map(|v| CType::Int64.pack(v)).unwrap_or(0),
         args.get(7).map(|v| CType::Int64.pack(v)).unwrap_or(0),
     ];
-    let result = unsafe { ptr(c_args[0], c_args[1], c_args[2], c_args[3], c_args[4], c_args[5], c_args[6], c_args[7]) };
+    let result = unsafe {
+        ptr(
+            c_args[0], c_args[1], c_args[2], c_args[3], c_args[4], c_args[5], c_args[6], c_args[7],
+        )
+    };
     Some(CType::Int64.unpack(result))
 }
 
@@ -722,11 +733,7 @@ fn bin_mul(a: Value, b: Value) -> Value {
 fn bin_div(a: Value, b: Value) -> Value {
     if both_int(&a, &b) {
         let (x, y) = (a.as_int(), b.as_int());
-        if y == 0 {
-            Value::Int(0)
-        } else {
-            Value::Int(x.wrapping_div(y))
-        }
+        if y == 0 { Value::Int(0) } else { Value::Int(x.wrapping_div(y)) }
     } else {
         Value::Float(a.as_float() / b.as_float())
     }
@@ -735,11 +742,7 @@ fn bin_div(a: Value, b: Value) -> Value {
 fn bin_rem(a: Value, b: Value) -> Value {
     if both_int(&a, &b) {
         let (x, y) = (a.as_int(), b.as_int());
-        if y == 0 {
-            Value::Int(0)
-        } else {
-            Value::Int(x.wrapping_rem(y))
-        }
+        if y == 0 { Value::Int(0) } else { Value::Int(x.wrapping_rem(y)) }
     } else {
         Value::Float(a.as_float() % b.as_float())
     }

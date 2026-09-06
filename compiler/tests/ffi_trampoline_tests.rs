@@ -26,7 +26,22 @@ fn test_trampoline_signature() {
     // 此测试仅验证编译通过，运行时测试需通过 C 代码触发
     let ptr = trampoline_ptr();
     // 转换为 8 参数函数指针类型
-    let _func_type = unsafe { std::mem::transmute::<i64, unsafe extern "C" fn(*mut std::ffi::c_void, i64, i64, i64, i64, i64, i64, i64, i64) -> i64>(ptr) };
+    let _func_type = unsafe {
+        std::mem::transmute::<
+            i64,
+            unsafe extern "C" fn(
+                *mut std::ffi::c_void,
+                i64,
+                i64,
+                i64,
+                i64,
+                i64,
+                i64,
+                i64,
+                i64,
+            ) -> i64,
+        >(ptr)
+    };
     // 仅验证类型转换可行，不实际调用
 }
 

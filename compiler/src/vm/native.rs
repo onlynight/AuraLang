@@ -1,11 +1,11 @@
-//! 原生（内置 / FFI）函数调度器
+//! 鍘熺敓锛堝唴缃?/ FFI锛夊嚱鏁拌皟搴﹀櫒
 //!
-//! 对应 技术方案 §7.1 的 `CallNative` / `CallC` 与 §9.3 的 FFI 调度。
+//! 瀵瑰簲 鎶€鏈柟妗?搂7.1 鐨?`CallNative` / `CallC` 涓?搂9.3 鐨?FFI 璋冨害銆?
 //!
-//! 原生函数签名统一为 `fn(&[Value]) -> Value`：参数已从操作数栈按声明顺序弹出，
-//! 返回值压回操作数栈。`println` 等内置函数由 VM 启动时自动注册；`extern "c"`
-//! 声明的函数（如 `puts`）若未在运行时链接，则回退为打印其参数的占位实现，
-//! 保证字节码可继续执行而不崩溃。
+//! 鍘熺敓鍑芥暟绛惧悕缁熶竴涓?`fn(&[Value]) -> Value`锛氬弬鏁板凡浠庢搷浣滄暟鏍堟寜澹版槑椤哄簭寮瑰嚭锛?
+//! 杩斿洖鍊煎帇鍥炴搷浣滄暟鏍堛€俙println` 绛夊唴缃嚱鏁扮敱 VM 鍚姩鏃惰嚜鍔ㄦ敞鍐岋紱`extern "c"`
+//! 澹版槑鐨勫嚱鏁帮紙濡?`puts`锛夎嫢鏈湪杩愯鏃堕摼鎺ワ紝鍒欏洖閫€涓烘墦鍗板叾鍙傛暟鐨勫崰浣嶅疄鐜帮紝
+//! 淇濊瘉瀛楄妭鐮佸彲缁х画鎵ц鑰屼笉宕╂簝銆?
 
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -13,26 +13,26 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::vm::dynamic_ffi::DynamicLoader;
 use crate::vm::value::Value;
 
-/// 原生函数指针类型
+/// 鍘熺敓鍑芥暟鎸囬拡绫诲瀷
 pub type NativeFn = fn(&[Value]) -> Value;
 
-/// 原生函数注册表
+/// 鍘熺敓鍑芥暟娉ㄥ唽琛?
 #[derive(Default)]
 pub struct NativeRegistry {
     fns: HashMap<String, NativeFn>,
-    /// 动态加载器（5.9）：未内置的原生函数从动态库查找
+    /// 鍔ㄦ€佸姞杞藉櫒锛?.9锛夛細鏈唴缃殑鍘熺敓鍑芥暟浠庡姩鎬佸簱鏌ユ壘
     dynamic: DynamicLoader,
 }
 
 impl NativeRegistry {
-    /// 创建并注册全部内置原生函数（向后兼容）
+    /// 鍒涘缓骞舵敞鍐屽叏閮ㄥ唴缃師鐢熷嚱鏁帮紙鍚戝悗鍏煎锛?
     pub fn new() -> Self {
         let mut r = NativeRegistry {
             fns: HashMap::new(),
             dynamic: DynamicLoader::new(),
         };
 
-        // 注册 prelude（17 个全局内置，始终存在）
+        // 娉ㄥ唽 prelude锛?7 涓叏灞€鍐呯疆锛屽缁堝瓨鍦級
         r.register("println", native_println);
         r.register("print", native_print);
         r.register("puts", native_puts);
@@ -52,10 +52,10 @@ impl NativeRegistry {
         r.register("intToPtr", native_int_to_ptr);
         r.register("makeCallback", native_make_callback);
 
-        // Fix 9: 默认仅加载 prelude，不加载全部 std 模块
-        // 如需加载 std 模块，使用 NativeRegistry::with_modules()
+        // Fix 9: 榛樿浠呭姞杞?prelude锛屼笉鍔犺浇鍏ㄩ儴 std 妯″潡
+        // 濡傞渶鍔犺浇 std 妯″潡锛屼娇鐢?NativeRegistry::with_modules()
 
-        // P10: 并发运行时（需 std-concurrent feature）
+        // P10: 骞跺彂杩愯鏃讹紙闇€ std-concurrent feature锛?
         #[cfg(feature = "std-concurrent")]
         {
             r.register("aura.concurrent.spawn", native_spawn);
@@ -71,23 +71,47 @@ impl NativeRegistry {
             r.register("aura.concurrent.spawnActor", native_spawn_actor);
             r.register("aura.concurrent.supervise", native_supervise);
             r.register("aura.concurrent.actorAlive", native_actor_alive);
+
+            // Phase 3: 璺ㄨ繘绋?Actor / Channel
+            r.register(
+                "aura.concurrent.spawnActorProcess",
+                native_spawn_actor_process,
+            );
+            r.register(
+                "aura.concurrent.sendProcessActor",
+                native_send_process_actor,
+            );
+            r.register(
+                "aura.concurrent.recvProcessActor",
+                native_recv_process_actor,
+            );
+            r.register(
+                "aura.concurrent.processActorAlive",
+                native_process_actor_alive,
+            );
+            r.register(
+                "aura.concurrent.killProcessActor",
+                native_kill_process_actor,
+            );
+            r.register("aura.concurrent.newTcpChannel", native_new_tcp_channel);
+            r.register("aura.concurrent.tcpChannelSend", native_tcp_channel_send);
         }
 
         r
     }
 
-    /// 按需创建原生函数注册表（只注册 prelu + 指定模块）
+    /// 鎸夐渶鍒涘缓鍘熺敓鍑芥暟娉ㄥ唽琛紙鍙敞鍐?prelu + 鎸囧畾妯″潡锛?
     ///
-    /// `modules` 是模块名集合，如 `["math", "io"]`。
-    /// 未指定的模块不注册，对应代码不编译进二进制。
-    /// 预lu（17 个全局内置）始终注册。
+    /// `modules` 鏄ā鍧楀悕闆嗗悎锛屽 `["math", "io"]`銆?
+    /// 鏈寚瀹氱殑妯″潡涓嶆敞鍐岋紝瀵瑰簲浠ｇ爜涓嶇紪璇戣繘浜岃繘鍒躲€?
+    /// 棰刲u锛?7 涓叏灞€鍐呯疆锛夊缁堟敞鍐屻€?
     pub fn with_modules(modules: &[&str]) -> Self {
         let mut r = NativeRegistry {
             fns: HashMap::new(),
             dynamic: DynamicLoader::new(),
         };
 
-        // 注册 prelude（17 个全局内置，始终存在）
+        // 娉ㄥ唽 prelude锛?7 涓叏灞€鍐呯疆锛屽缁堝瓨鍦級
         r.register("println", native_println);
         r.register("print", native_print);
         r.register("puts", native_puts);
@@ -107,10 +131,10 @@ impl NativeRegistry {
         r.register("intToPtr", native_int_to_ptr);
         r.register("makeCallback", native_make_callback);
 
-        // 按需注册 std 模块
+        // 鎸夐渶娉ㄥ唽 std 妯″潡
         crate::std::register_with_modules(&mut r, modules);
 
-        // P10: 并发运行时（需 std-concurrent feature 且导入 aura.concurrent）
+        // P10: 骞跺彂杩愯鏃讹紙闇€ std-concurrent feature 涓斿鍏?aura.concurrent锛?
         #[cfg(feature = "std-concurrent")]
         if modules.iter().any(|m| *m == "concurrent") {
             r.register("aura.concurrent.spawn", native_spawn);
@@ -126,6 +150,30 @@ impl NativeRegistry {
             r.register("aura.concurrent.spawnActor", native_spawn_actor);
             r.register("aura.concurrent.supervise", native_supervise);
             r.register("aura.concurrent.actorAlive", native_actor_alive);
+
+            // Phase 3: 璺ㄨ繘绋?Actor / Channel
+            r.register(
+                "aura.concurrent.spawnActorProcess",
+                native_spawn_actor_process,
+            );
+            r.register(
+                "aura.concurrent.sendProcessActor",
+                native_send_process_actor,
+            );
+            r.register(
+                "aura.concurrent.recvProcessActor",
+                native_recv_process_actor,
+            );
+            r.register(
+                "aura.concurrent.processActorAlive",
+                native_process_actor_alive,
+            );
+            r.register(
+                "aura.concurrent.killProcessActor",
+                native_kill_process_actor,
+            );
+            r.register("aura.concurrent.newTcpChannel", native_new_tcp_channel);
+            r.register("aura.concurrent.tcpChannelSend", native_tcp_channel_send);
         }
 
         r
@@ -135,44 +183,41 @@ impl NativeRegistry {
         self.fns.insert(name.to_string(), f);
     }
 
-    /// 返回已注册的原生函数数量
+    /// 杩斿洖宸叉敞鍐岀殑鍘熺敓鍑芥暟鏁伴噺
     pub fn len(&self) -> usize {
         self.fns.len()
     }
 
-    /// 查找原生函数（优先内置表，其次动态加载表）
+    /// 鏌ユ壘鍘熺敓鍑芥暟锛堜紭鍏堝唴缃〃锛屽叾娆″姩鎬佸姞杞借〃锛?
     pub fn get(&self, name: &str) -> Option<NativeFn> {
-        self.fns
-            .get(name)
-            .copied()
-            .or_else(|| self.dynamic.get(name))
+        self.fns.get(name).copied().or_else(|| self.dynamic.get(name))
     }
 
-    /// 检查是否注册了指定的原生函数（内置或动态）
+    /// 妫€鏌ユ槸鍚︽敞鍐屼簡鎸囧畾鐨勫師鐢熷嚱鏁帮紙鍐呯疆鎴栧姩鎬侊級
     pub fn contains(&self, name: &str) -> bool {
         self.fns.contains_key(name) || self.dynamic.contains(name)
     }
 
-    /// 动态加载库（5.9）
+    /// 鍔ㄦ€佸姞杞藉簱锛?.9锛?
     pub fn load_library(&mut self, path: &str) -> Result<(), String> {
         self.dynamic.load_lib(path)
     }
 
-    /// 从动态加载的库注册函数
+    /// 浠庡姩鎬佸姞杞界殑搴撴敞鍐屽嚱鏁?
     pub fn register_dynamic(&mut self, name: &str, f: NativeFn) {
         self.dynamic.register_func(name, f);
     }
 
-    /// 静态链接：从当前进程中解析 C 函数符号并注册（P8.4）
+    /// 闈欐€侀摼鎺ワ細浠庡綋鍓嶈繘绋嬩腑瑙ｆ瀽 C 鍑芥暟绗﹀彿骞舵敞鍐岋紙P8.4锛?
     ///
-    /// 使用 `dlsym(NULL, name)`（Unix）或 `GetProcAddress`（Windows）查找函数。
-    /// 返回 C 函数地址，由调用方直接调用。
+    /// 浣跨敤 `dlsym(NULL, name)`锛圲nix锛夋垨 `GetProcAddress`锛圵indows锛夋煡鎵惧嚱鏁般€?
+    /// 杩斿洖 C 鍑芥暟鍦板潃锛岀敱璋冪敤鏂圭洿鎺ヨ皟鐢ㄣ€?
     pub fn try_static_link(&self, name: &str) -> Option<usize> {
         use crate::vm::ffi::resolve_static_symbol;
         resolve_static_symbol(name)
     }
 
-    /// 尝试解析 C 函数：先查内置表，再查动态表
+    /// 灏濊瘯瑙ｆ瀽 C 鍑芥暟锛氬厛鏌ュ唴缃〃锛屽啀鏌ュ姩鎬佽〃
     pub fn resolve_c_function(&self, name: &str) -> Option<NativeFn> {
         if let Some(f) = self.fns.get(name).copied() {
             return Some(f);
@@ -183,20 +228,20 @@ impl NativeRegistry {
         None
     }
 
-    /// 获取动态加载器的引用
+    /// 鑾峰彇鍔ㄦ€佸姞杞藉櫒鐨勫紩鐢?
     pub fn dynamic_loader(&self) -> &DynamicLoader {
         &self.dynamic
     }
 
-    /// 获取动态加载器的可变引用
+    /// 鑾峰彇鍔ㄦ€佸姞杞藉櫒鐨勫彲鍙樺紩鐢?
     pub fn dynamic_loader_mut(&mut self) -> &mut DynamicLoader {
         &mut self.dynamic
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 内置实现
-// ─────────────────────────────────────────────────────────────────────────────
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// 鍐呯疆瀹炵幇
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 fn native_println(args: &[Value]) -> Value {
     let mut s = String::new();
@@ -216,14 +261,14 @@ fn native_print(args: &[Value]) -> Value {
         s.push_str(&a.to_string());
     }
     print!("{}", s);
-    // 确保即时刷新（无换行时）
+    // 纭繚鍗虫椂鍒锋柊锛堟棤鎹㈣鏃讹級
     use std::io::Write;
     let _ = std::io::stdout().flush();
     Value::Null
 }
 
 fn native_puts(args: &[Value]) -> Value {
-    // C 风格 puts：输出并换行
+    // C 椋庢牸 puts锛氳緭鍑哄苟鎹㈣
     if let Some(a) = args.first() {
         println!("{}", a);
     } else {
@@ -277,10 +322,7 @@ fn native_to_str(args: &[Value]) -> Value {
 
 fn native_clock(args: &[Value]) -> Value {
     let _ = args;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0);
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
     Value::Float(now)
 }
 
@@ -291,30 +333,30 @@ fn native_strlen(args: &[Value]) -> Value {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// P8 FFI 内置函数
-// ─────────────────────────────────────────────────────────────────────────────
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// P8 FFI 鍐呯疆鍑芥暟
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
-/// CString(str) → Ptr：将 Aura 字符串转换为 C 字符串指针（P8.5）
+/// CString(str) 鈫?Ptr锛氬皢 Aura 瀛楃涓茶浆鎹负 C 瀛楃涓叉寚閽堬紙P8.5锛?
 ///
-/// 实际实现：通过 `CString` 指令完成转换，此处作为占位返回 Ptr(0)。
-/// 完整实现需 VM 端支持（见 interp.rs CString 指令）。
+/// 瀹為檯瀹炵幇锛氶€氳繃 `CString` 鎸囦护瀹屾垚杞崲锛屾澶勪綔涓哄崰浣嶈繑鍥?Ptr(0)銆?
+/// 瀹屾暣瀹炵幇闇€ VM 绔敮鎸侊紙瑙?interp.rs CString 鎸囦护锛夈€?
 fn native_cstring(args: &[Value]) -> Value {
     match args.first() {
         Some(Value::Str(_s)) => {
-            // 返回一个非空指针占位（实际 C 字符串由 CString 指令分配）
+            // 杩斿洖涓€涓潪绌烘寚閽堝崰浣嶏紙瀹為檯 C 瀛楃涓茬敱 CString 鎸囦护鍒嗛厤锛?
             Value::Ptr(1)
         }
         _ => Value::Ptr(0),
     }
 }
 
-/// CStr(str) → Ptr：CString 的别名（P8.5）
+/// CStr(str) 鈫?Ptr锛欳String 鐨勫埆鍚嶏紙P8.5锛?
 fn native_cstr(args: &[Value]) -> Value {
     native_cstring(args)
 }
 
-/// ptrIsNull(ptr) → Bool：检查指针是否为 nullptr（P8.6）
+/// ptrIsNull(ptr) 鈫?Bool锛氭鏌ユ寚閽堟槸鍚︿负 nullptr锛圥8.6锛?
 fn native_ptr_is_null(args: &[Value]) -> Value {
     match args.first() {
         Some(v) => Value::Bool(v.is_null_ptr()),
@@ -322,7 +364,7 @@ fn native_ptr_is_null(args: &[Value]) -> Value {
     }
 }
 
-/// ptrToInt(ptr) → Int：将指针转换为整数地址（P8.6）
+/// ptrToInt(ptr) 鈫?Int锛氬皢鎸囬拡杞崲涓烘暣鏁板湴鍧€锛圥8.6锛?
 fn native_ptr_to_int(args: &[Value]) -> Value {
     match args.first() {
         Some(v) => Value::Int(v.as_ptr()),
@@ -330,7 +372,7 @@ fn native_ptr_to_int(args: &[Value]) -> Value {
     }
 }
 
-/// intToPtr(n) → Ptr：将整数地址转换为指针（P8.6）
+/// intToPtr(n) 鈫?Ptr锛氬皢鏁存暟鍦板潃杞崲涓烘寚閽堬紙P8.6锛?
 fn native_int_to_ptr(args: &[Value]) -> Value {
     match args.first() {
         Some(v) => Value::Ptr(v.as_int()),
@@ -338,63 +380,65 @@ fn native_int_to_ptr(args: &[Value]) -> Value {
     }
 }
 
-/// makeCallback(funcName) → Ptr：创建 C 回调蹦床（P8.7）
+/// makeCallback(funcName) 鈫?Ptr锛氬垱寤?C 鍥炶皟韫﹀簥锛圥8.7锛?
 ///
-/// 返回的 Ptr 包含回调 ID，C 代码将其作为函数指针调用时，
-/// 蹦床通过 thread-local 派发回 Aura VM 执行对应函数。
+/// 杩斿洖鐨?Ptr 鍖呭惈鍥炶皟 ID锛孋 浠ｇ爜灏嗗叾浣滀负鍑芥暟鎸囬拡璋冪敤鏃讹紝
+/// 韫﹀簥閫氳繃 thread-local 娲惧彂鍥?Aura VM 鎵ц瀵瑰簲鍑芥暟銆?
 fn native_make_callback(_args: &[Value]) -> Value {
-    // makeCallback 由 MakeCallback 指令处理（见 mir.rs / emit.rs）
-    // 此处作为占位：如果通过 CallNative 调用，返回无效回调 ID
+    // makeCallback 鐢?MakeCallback 鎸囦护澶勭悊锛堣 mir.rs / emit.rs锛?
+    // 姝ゅ浣滀负鍗犱綅锛氬鏋滈€氳繃 CallNative 璋冪敤锛岃繑鍥炴棤鏁堝洖璋?ID
     Value::Ptr(0)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// P10 并发运行时 — 原生函数（Actor / Channel / Select / Spawn）
-// ─────────────────────────────────────────────────────────────────────────────
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// P10 骞跺彂杩愯鏃?鈥?鍘熺敓鍑芥暟锛圓ctor / Channel / Select / Spawn锛?
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 //
-// 原生函数通过 thread-local 指针访问 VM 实例的 Actor/Channel 运行时状态。
-// VM 在 `run()` 开始时设置此指针，结束时清除。
+// 鍘熺敓鍑芥暟閫氳繃 thread-local 鎸囬拡璁块棶 VM 瀹炰緥鐨?Actor/Channel 杩愯鏃剁姸鎬併€?
+// VM 鍦?`run()` 寮€濮嬫椂璁剧疆姝ゆ寚閽堬紝缁撴潫鏃舵竻闄ゃ€?
 
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::Mutex;
 
-thread_local! {
-    /// VM 实例指针（供原生函数访问 Actor/Channel 运行时）
-    static VM_REF: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
-}
-
-/// 设置当前 VM 实例（在 `Vm::run()` 开始时调用）
-pub fn set_vm_ref(vm: *mut ()) {
-    VM_REF.with(|r| r.store(vm, Ordering::SeqCst));
-}
-
-/// 清除当前 VM 实例引用（在 `Vm::run()` 结束时调用）
-pub fn clear_vm_ref() {
-    VM_REF.with(|r| r.store(std::ptr::null_mut(), Ordering::SeqCst));
-}
-
-/// 获取当前 VM 实例指针
-fn get_vm_ref() -> Option<*mut crate::vm::Vm> {
-    VM_REF.with(|r| {
-        let p = r.load(Ordering::SeqCst);
-        if p.is_null() { None } else { Some(p as *mut crate::vm::Vm) }
-    })
-}
-
-/// spawn(expr) → Int：创建新协程（P10.1）
+/// 鍏ㄥ眬 VM 瀹炰緥鏍堬紙Phase 1: 鏇夸唬 thread_local锛?
 ///
-/// 将表达式作为协程入口，创建新协程并返回协程 ID。
-/// spawn(...) → Int：启动协程（P10）
+/// 浣跨敤鏍堝紡缁撴瀯鏀寔宓屽 VM 鎵ц锛?
+/// - `set_vm_ref` 鍘嬫爤
+/// - `clear_vm_ref` 寮规爤锛堜粎褰撴爤椤跺尮閰嶆椂锛?
+/// - `get_vm_ref` 杩斿洖鏍堥《锛堝綋鍓嶆椿璺?VM锛?
+///
+/// 浣跨敤 `usize` 瀛樺偍瑁稿湴鍧€锛屽洜涓?`*mut ()` 涓嶆槸 `Send + Sync`銆?
+static VM_STACK: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+
+/// 璁剧疆褰撳墠 VM 瀹炰緥锛堝湪 `Vm::run()` 寮€濮嬫椂璋冪敤锛屽帇鏍堬級
+pub fn set_vm_ref(vm: *mut ()) {
+    VM_STACK.lock().unwrap().push(vm as usize);
+}
+
+/// 娓呴櫎褰撳墠 VM 瀹炰緥寮曠敤锛堝湪 `Vm::run()` 缁撴潫鏃惰皟鐢紝寮规爤锛?
+pub fn clear_vm_ref() {
+    VM_STACK.lock().unwrap().pop();
+}
+
+/// 鑾峰彇褰撳墠 VM 瀹炰緥鎸囬拡锛堟爤椤讹級
+fn get_vm_ref() -> Option<*mut crate::vm::Vm> {
+    VM_STACK.lock().unwrap().last().copied().map(|addr| addr as *mut crate::vm::Vm)
+}
+
+/// spawn(expr) 鈫?Int锛氬垱寤烘柊鍗忕▼锛圥10.1锛?
+///
+/// 灏嗚〃杈惧紡浣滀负鍗忕▼鍏ュ彛锛屽垱寤烘柊鍗忕▼骞惰繑鍥炲崗绋?ID銆?
+/// spawn(...) 鈫?Int锛氬惎鍔ㄥ崗绋嬶紙P10锛?
 #[cfg(feature = "std-concurrent")]
 fn native_spawn(args: &[Value]) -> Value {
-    // spawn 的实际创建由 VM 协程调度器处理
-    // 此处返回占位 ID（0 = 主线程）
+    // spawn 鐨勫疄闄呭垱寤虹敱 VM 鍗忕▼璋冨害鍣ㄥ鐞?
+    // 姝ゅ杩斿洖鍗犱綅 ID锛? = 涓荤嚎绋嬶級
     match args.first() {
         Some(v) => Value::Int(v.as_int()),
         None => Value::Int(0),
     }
 }
 
-/// send(actorId, msg) → Unit：向 Actor 发送消息（P10.6）
+/// send(actorId, msg) 鈫?Unit锛氬悜 Actor 鍙戦€佹秷鎭紙P10.6锛?
 #[cfg(feature = "std-concurrent")]
 fn native_send(args: &[Value]) -> Value {
     if args.len() >= 2 {
@@ -409,7 +453,7 @@ fn native_send(args: &[Value]) -> Value {
     Value::Null
 }
 
-/// ask(actorId, msg) → Any：向 Actor 请求响应（P10.6）
+/// ask(actorId, msg) 鈫?Any锛氬悜 Actor 璇锋眰鍝嶅簲锛圥10.6锛?
 #[cfg(feature = "std-concurrent")]
 fn native_ask(args: &[Value]) -> Value {
     if args.len() >= 2 {
@@ -424,7 +468,7 @@ fn native_ask(args: &[Value]) -> Value {
     Value::Null
 }
 
-/// reply(requestId, response) → Unit：回复 Actor 请求（Phase 4）
+/// reply(requestId, response) 鈫?Unit锛氬洖澶?Actor 璇锋眰锛圥hase 4锛?
 #[cfg(feature = "std-concurrent")]
 fn native_reply(args: &[Value]) -> Value {
     if args.len() >= 2 {
@@ -439,9 +483,9 @@ fn native_reply(args: &[Value]) -> Value {
     Value::Null
 }
 
-/// newChannel(bound) → Int：创建 Channel（P10.8）
+/// newChannel(bound) 鈫?Int锛氬垱寤?Channel锛圥10.8锛?
 ///
-/// `bound`: 容量上限，0 表示无界
+/// `bound`: 瀹归噺涓婇檺锛? 琛ㄧず鏃犵晫
 #[cfg(feature = "std-concurrent")]
 fn native_new_channel(args: &[Value]) -> Value {
     let bound = args.first().map(|v| v.as_int() as usize).unwrap_or(0);
@@ -454,7 +498,7 @@ fn native_new_channel(args: &[Value]) -> Value {
     Value::Int(0)
 }
 
-/// channelSend(ch, val) → Unit：向 Channel 发送值（P10.8）
+/// channelSend(ch, val) 鈫?Unit锛氬悜 Channel 鍙戦€佸€硷紙P10.8锛?
 #[cfg(feature = "std-concurrent")]
 fn native_channel_send(args: &[Value]) -> Value {
     if args.len() >= 2 {
@@ -469,7 +513,7 @@ fn native_channel_send(args: &[Value]) -> Value {
     Value::Null
 }
 
-/// channelRecv(ch) → Any：从 Channel 接收值（阻塞语义，P10.8）
+/// channelRecv(ch) 鈫?Any锛氫粠 Channel 鎺ユ敹鍊硷紙闃诲璇箟锛孭10.8锛?
 #[cfg(feature = "std-concurrent")]
 fn native_channel_recv(args: &[Value]) -> Value {
     if args.len() >= 1 {
@@ -483,7 +527,7 @@ fn native_channel_recv(args: &[Value]) -> Value {
     Value::Null
 }
 
-/// channelTryRecv(ch) → Any：尝试从 Channel 接收值（非阻塞，P10.8）
+/// channelTryRecv(ch) 鈫?Any锛氬皾璇曚粠 Channel 鎺ユ敹鍊硷紙闈為樆濉烇紝P10.8锛?
 #[cfg(feature = "std-concurrent")]
 fn native_channel_try_recv(args: &[Value]) -> Value {
     if args.len() >= 1 {
@@ -497,19 +541,19 @@ fn native_channel_try_recv(args: &[Value]) -> Value {
     Value::Null
 }
 
-/// __select(ch1, ch2, ...) → Any：select 多路复用（P10.9）
+/// __select(ch1, ch2, ...) 鈫?Any锛歴elect 澶氳矾澶嶇敤锛圥10.9锛?
 ///
-/// 阶段 4.11: 基于协程挂起的非轮询实现
+/// 闃舵 4.11: 鍩轰簬鍗忕▼鎸傝捣鐨勯潪杞瀹炵幇
 ///
-/// 检查所有通道，返回第一个有值的通道的值。
-/// 若所有通道均为空，返回 `Null`（非阻塞模式）。
-/// 返回值格式：`[channel_id, value]` 或 `Null`
+/// 妫€鏌ユ墍鏈夐€氶亾锛岃繑鍥炵涓€涓湁鍊肩殑閫氶亾鐨勫€笺€?
+/// 鑻ユ墍鏈夐€氶亾鍧囦负绌猴紝杩斿洖 `Null`锛堥潪闃诲妯″紡锛夈€?
+/// 杩斿洖鍊兼牸寮忥細`[channel_id, value]` 鎴?`Null`
 #[cfg(feature = "std-concurrent")]
 fn native_select(args: &[Value]) -> Value {
     if let Some(vm_ptr) = get_vm_ref() {
         unsafe {
             let vm = &mut *vm_ptr;
-            // 遍历所有通道，找到第一个有值的
+            // 閬嶅巻鎵€鏈夐€氶亾锛屾壘鍒扮涓€涓湁鍊肩殑
             for arg in args {
                 let ch_id = arg.as_int() as usize;
                 if ch_id == 0 {
@@ -517,7 +561,7 @@ fn native_select(args: &[Value]) -> Value {
                 }
                 if !vm.channels.is_empty(ch_id) {
                     let val = vm.channels.recv(ch_id);
-                    // 返回 [channel_id, value]
+                    // 杩斿洖 [channel_id, value]
                     return Value::List(vec![
                         Value::Int(ch_id as i64),
                         val,
@@ -526,20 +570,20 @@ fn native_select(args: &[Value]) -> Value {
             }
         }
     }
-    // 所有通道均为空，返回 Null（非阻塞）
+    // 鎵€鏈夐€氶亾鍧囦负绌猴紝杩斿洖 Null锛堥潪闃诲锛?
     Value::Null
 }
 
-/// __selectTimeout(ch1, ch2, ..., timeoutMs) → Any：带超时的 select（阶段 4.11）
+/// __selectTimeout(ch1, ch2, ..., timeoutMs) 鈫?Any锛氬甫瓒呮椂鐨?select锛堥樁娈?4.11锛?
 ///
-/// 在 `timeoutMs` 毫秒内等待通道消息，超时返回 `Null`。
+/// 鍦?`timeoutMs` 姣鍐呯瓑寰呴€氶亾娑堟伅锛岃秴鏃惰繑鍥?`Null`銆?
 #[cfg(feature = "std-concurrent")]
 fn native_select_timeout(args: &[Value]) -> Value {
     if args.is_empty() {
         return Value::Null;
     }
 
-    // 最后一个参数是超时时间（毫秒）
+    // 鏈€鍚庝竴涓弬鏁版槸瓒呮椂鏃堕棿锛堟绉掞級
     let timeout_arg = args.last().unwrap().clone();
     let timeout_ms = timeout_arg.as_int();
     let channels = &args[..args.len() - 1];
@@ -551,7 +595,7 @@ fn native_select_timeout(args: &[Value]) -> Value {
             let poll_interval = std::time::Duration::from_millis(1);
 
             loop {
-                // 遍历所有通道，找到第一个有值的
+                // 閬嶅巻鎵€鏈夐€氶亾锛屾壘鍒扮涓€涓湁鍊肩殑
                 for arg in channels {
                     let ch_id = arg.as_int() as usize;
                     if ch_id == 0 {
@@ -559,7 +603,7 @@ fn native_select_timeout(args: &[Value]) -> Value {
                     }
                     if !vm.channels.is_empty(ch_id) {
                         let val = vm.channels.recv(ch_id);
-                        // 返回 [channel_id, value]
+                        // 杩斿洖 [channel_id, value]
                         return Value::List(vec![
                             Value::Int(ch_id as i64),
                             val,
@@ -567,12 +611,12 @@ fn native_select_timeout(args: &[Value]) -> Value {
                     }
                 }
 
-                // 检查超时
+                // 妫€鏌ヨ秴鏃?
                 if start.elapsed() >= std::time::Duration::from_millis(timeout_ms as u64) {
                     return Value::Null;
                 }
 
-                // 休眠后重试（让出 CPU）
+                // 浼戠湢鍚庨噸璇曪紙璁╁嚭 CPU锛?
                 std::thread::sleep(poll_interval);
             }
         }
@@ -580,7 +624,7 @@ fn native_select_timeout(args: &[Value]) -> Value {
     Value::Null
 }
 
-/// __spawnActor(name) → Int：创建 Actor 实例（P10.4）
+/// __spawnActor(name) 鈫?Int锛氬垱寤?Actor 瀹炰緥锛圥10.4锛?
 #[cfg(feature = "std-concurrent")]
 fn native_spawn_actor(args: &[Value]) -> Value {
     let name = args.first().map(|v| v.to_string()).unwrap_or_else(|| "unnamed".to_string());
@@ -593,7 +637,7 @@ fn native_spawn_actor(args: &[Value]) -> Value {
     Value::Int(0)
 }
 
-/// __supervise(parent, child) → Unit：建立监督关系（P10.7）
+/// __supervise(parent, child) 鈫?Unit锛氬缓绔嬬洃鐫ｅ叧绯伙紙P10.7锛?
 #[cfg(feature = "std-concurrent")]
 fn native_supervise(args: &[Value]) -> Value {
     if args.len() >= 2 {
@@ -608,7 +652,7 @@ fn native_supervise(args: &[Value]) -> Value {
     Value::Null
 }
 
-/// __actorAlive(id) → Boolean：检查 Actor 是否存活（P10.7）
+/// __actorAlive(id) 鈫?Boolean锛氭鏌?Actor 鏄惁瀛樻椿锛圥10.7锛?
 #[cfg(feature = "std-concurrent")]
 fn native_actor_alive(args: &[Value]) -> Value {
     if args.len() >= 1 {
@@ -620,4 +664,145 @@ fn native_actor_alive(args: &[Value]) -> Value {
         }
     }
     Value::Bool(false)
+}
+
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// Phase 3: 璺ㄨ繘绋?Actor / Channel 鍘熺敓鍑芥暟
+// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+
+/// __spawnActorProcess(entry, name) 鈫?Map: 璺ㄨ繘绋嬪垱寤?Actor锛圥hase 3锛?
+///
+/// 鍦ㄥ瓙杩涚▼涓惎鍔ㄤ竴涓柊鐨?Actor 瀹炰緥锛岃繑鍥炶繛鎺ヤ俊鎭€?
+/// 褰撳墠涓洪鏋跺疄鐜帮細杩斿洖绔彛鍜屽悕绉般€?
+#[cfg(feature = "std-concurrent")]
+fn native_spawn_actor_process(args: &[Value]) -> Value {
+    use std::collections::HashMap;
+    let entry = args.first().map(|v| v.as_string()).unwrap_or_default();
+    let name = args.get(1).map(|v| v.as_string()).unwrap_or_else(|| "unnamed".to_string());
+
+    if entry.is_empty() {
+        return Value::Null;
+    }
+
+    match crate::vm::actor_process::ProcessActor::spawn(&entry, &name) {
+        Ok((actor, port)) => {
+            // 灏?actor 瀛樺叆鍏ㄥ眬娉ㄥ唽琛?
+            let mut registry = crate::vm::actor_process::PROCESS_ACTORS.lock().unwrap();
+            let id = registry.len() + 1;
+            registry.insert(id, actor);
+            drop(registry);
+
+            let mut map = HashMap::new();
+            map.insert(Value::str_("id"), Value::Int(id as i64));
+            map.insert(Value::str_("port"), Value::Int(port as i64));
+            map.insert(Value::str_("name"), Value::str_(name));
+            map.insert(Value::str_("alive"), Value::Bool(true));
+            Value::Map(map)
+        }
+        Err(e) => {
+            eprintln!("[Phase 3] 璺ㄨ繘绋?Actor 鍚姩澶辫触: {}", e);
+            Value::Null
+        }
+    }
+}
+
+/// __sendProcessActor(id, msg) 鈫?Unit: 鍚戣法杩涚▼ Actor 鍙戦€佹秷鎭紙Phase 3锛?
+#[cfg(feature = "std-concurrent")]
+fn native_send_process_actor(args: &[Value]) -> Value {
+    if args.len() >= 2 {
+        let actor_id = args[0].as_int() as usize;
+        let msg = args[1].clone();
+        let mut registry = crate::vm::actor_process::PROCESS_ACTORS.lock().unwrap();
+        if let Some(actor) = registry.get_mut(&actor_id) {
+            if let Err(e) = actor.send(&msg) {
+                eprintln!("[Phase 3] 璺ㄨ繘绋嬪彂閫佸け璐? {}", e);
+            }
+        }
+    }
+    Value::Null
+}
+
+/// __recvProcessActor(id) 鈫?Any: 浠庤法杩涚▼ Actor 鎺ユ敹鍝嶅簲锛圥hase 3锛?
+#[cfg(feature = "std-concurrent")]
+fn native_recv_process_actor(args: &[Value]) -> Value {
+    if args.len() >= 1 {
+        let actor_id = args[0].as_int() as usize;
+        let mut registry = crate::vm::actor_process::PROCESS_ACTORS.lock().unwrap();
+        if let Some(actor) = registry.get_mut(&actor_id) {
+            match actor.recv() {
+                Ok(Some(val)) => return val,
+                Ok(None) => return Value::Null,
+                Err(e) => {
+                    eprintln!("[Phase 3] 璺ㄨ繘绋嬫帴鏀跺け璐? {}", e);
+                    return Value::Null;
+                }
+            }
+        }
+    }
+    Value::Null
+}
+
+/// __processActorAlive(id) 鈫?Boolean: 妫€鏌ヨ法杩涚▼ Actor 鏄惁瀛樻椿锛圥hase 3锛?
+#[cfg(feature = "std-concurrent")]
+fn native_process_actor_alive(args: &[Value]) -> Value {
+    if args.len() >= 1 {
+        let actor_id = args[0].as_int() as usize;
+        let mut registry = crate::vm::actor_process::PROCESS_ACTORS.lock().unwrap();
+        if let Some(actor) = registry.get_mut(&actor_id) {
+            return Value::Bool(actor.is_alive());
+        }
+    }
+    Value::Bool(false)
+}
+
+/// __killProcessActor(id) 鈫?Unit: 鍏抽棴璺ㄨ繘绋?Actor锛圥hase 3锛?
+#[cfg(feature = "std-concurrent")]
+fn native_kill_process_actor(args: &[Value]) -> Value {
+    if args.len() >= 1 {
+        let actor_id = args[0].as_int() as usize;
+        crate::vm::actor_process::PROCESS_ACTORS.lock().unwrap().remove(&actor_id);
+    }
+    Value::Null
+}
+
+/// __newTcpChannel(port) 鈫?Int: 鍒涘缓璺ㄨ繘绋?Channel锛圥hase 3锛?
+///
+/// `port=0` 鏃惰嚜鍔ㄥ垎閰嶇鍙ｏ紝杩斿洖绔彛鍙枫€?
+#[cfg(feature = "std-concurrent")]
+fn native_new_tcp_channel(args: &[Value]) -> Value {
+    let port = args.first().map(|v| v.as_int() as u16).unwrap_or(0);
+    let result = if port == 0 {
+        crate::vm::channel_tcp::TcpChannelServer::new_any()
+    } else {
+        crate::vm::channel_tcp::TcpChannelServer::new(port).map(|s| (s, port))
+    };
+    match result {
+        Ok((server, actual_port)) => {
+            let mut registry = crate::vm::channel_tcp::TCP_CHANNELS.lock().unwrap();
+            let id = registry.len() + 1;
+            registry.insert(id, server);
+            drop(registry);
+            Value::Int(id as i64)
+        }
+        Err(e) => {
+            eprintln!("[Phase 3] TCP Channel 鍒涘缓澶辫触: {}", e);
+            Value::Int(0)
+        }
+    }
+}
+
+/// __tcpChannelSend(id, val) 鈫?Unit: 鍚戣法杩涚▼ Channel 鍙戦€侊紙Phase 3锛?
+#[cfg(feature = "std-concurrent")]
+fn native_tcp_channel_send(args: &[Value]) -> Value {
+    if args.len() >= 2 {
+        let ch_id = args[0].as_int() as usize;
+        let val = args[1].clone();
+        let mut registry = crate::vm::channel_tcp::TCP_CHANNELS.lock().unwrap();
+        if let Some(server) = registry.get_mut(&ch_id) {
+            // 娉細鏈嶅姟绔渶瑕佽繛鎺ユ墠鑳藉彂閫侊紝褰撳墠绠€鍖栦负鐩存帴鍙戦€?
+            // 瀹為檯浣跨敤闇€閫氳繃瀹㈡埛绔繛鎺ュ彂閫?
+            eprintln!("[Phase 3] TCP Channel 鍙戦€佹殏涓嶆敮鎸侊紙闇€瀹㈡埛绔繛鎺ワ級");
+        }
+    }
+    Value::Null
 }

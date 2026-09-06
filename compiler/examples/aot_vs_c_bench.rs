@@ -126,7 +126,9 @@ fn tool_path(name: &str) -> std::path::PathBuf {
     let bin = if cfg!(target_os = "windows") { format!("{}.exe", name) } else { name.to_string() };
     if let Some(h) = home {
         let p = std::path::Path::new(&h).join("bin").join(&bin);
-        if p.exists() { return p; }
+        if p.exists() {
+            return p;
+        }
     }
     std::path::PathBuf::from(bin)
 }
@@ -141,10 +143,17 @@ fn bench_c(c_src: &str, label: &str) -> Result<f64, String> {
     std::fs::write(&c_path, c_src).unwrap();
 
     let out = Command::new(tool_path("clang"))
-        .arg(&c_path).arg("-o").arg(&exe_path).arg("-O2")
-        .output().map_err(|e| e.to_string())?;
+        .arg(&c_path)
+        .arg("-o")
+        .arg(&exe_path)
+        .arg("-O2")
+        .output()
+        .map_err(|e| e.to_string())?;
     if !out.status.success() {
-        return Err(format!("clang 失败: {}", String::from_utf8_lossy(&out.stderr)));
+        return Err(format!(
+            "clang 失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
     }
 
     let start = Instant::now();
@@ -178,25 +187,44 @@ fn bench_aot(src: &str, label: &str) -> Result<f64, String> {
 
     // llc 编译
     let out = Command::new(tool_path("llc"))
-        .arg(&ll_path).arg("-o").arg(&o_path).arg("-O2").arg("-filetype=obj")
-        .output().map_err(|e| e.to_string())?;
+        .arg(&ll_path)
+        .arg("-o")
+        .arg(&o_path)
+        .arg("-O2")
+        .arg("-filetype=obj")
+        .output()
+        .map_err(|e| e.to_string())?;
     if !out.status.success() {
-        return Err(format!("llc 失败: {}", String::from_utf8_lossy(&out.stderr)));
+        return Err(format!(
+            "llc 失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
     }
 
     // 链接
     let out = if cfg!(target_os = "windows") {
         Command::new(tool_path("clang"))
-            .arg(&o_path).arg("-o").arg(&exe_path)
-            .arg("-Wl,/entry:main").arg("-Wl,/subsystem:console")
-            .output().map_err(|e| e.to_string())?
+            .arg(&o_path)
+            .arg("-o")
+            .arg(&exe_path)
+            .arg("-Wl,/entry:main")
+            .arg("-Wl,/subsystem:console")
+            .output()
+            .map_err(|e| e.to_string())?
     } else {
         Command::new(tool_path("clang"))
-            .arg(&o_path).arg("-o").arg(&exe_path).arg("-O2")
-            .output().map_err(|e| e.to_string())?
+            .arg(&o_path)
+            .arg("-o")
+            .arg(&exe_path)
+            .arg("-O2")
+            .output()
+            .map_err(|e| e.to_string())?
     };
     if !out.status.success() {
-        return Err(format!("链接失败: {}", String::from_utf8_lossy(&out.stderr)));
+        return Err(format!(
+            "链接失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
     }
 
     // 运行一次

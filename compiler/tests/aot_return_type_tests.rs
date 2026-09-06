@@ -32,20 +32,28 @@ fn gen_ir(src: &str) -> String {
 
 #[test]
 fn test_user_func_returns_int() {
-    let ir = gen_ir("fun add(a: Int, b: Int): Int { return a + b }\nfun main(): Int { return add(1, 2) }");
+    let ir = gen_ir(
+        "fun add(a: Int, b: Int): Int { return a + b }\nfun main(): Int { return add(1, 2) }",
+    );
     assert!(ir.contains("call i32 @add"), "add 返回 Int → i32");
 }
 
 #[test]
 fn test_user_func_returns_float() {
-    let ir = gen_ir("fun avg(a: Float, b: Float): Float { return (a + b) / 2.0f }\nfun main(): Float { return avg(1.0f, 3.0f) }");
+    let ir = gen_ir(
+        "fun avg(a: Float, b: Float): Float { return (a + b) / 2.0f }\nfun main(): Float { return avg(1.0f, 3.0f) }",
+    );
     assert!(ir.contains("call float @avg"), "avg 返回 Float → float");
 }
 
 #[test]
 fn test_user_func_returns_bool() {
-    let ir = gen_ir("fun is_even(n: Int): Boolean { return n % 2 == 0 }\nfun main(): Int { return 0 }");
-    assert!(ir.contains("call i1 @is_even") || !ir.contains("call i32 @is_even"), "is_even 返回 Boolean → i1");
+    let ir =
+        gen_ir("fun is_even(n: Int): Boolean { return n % 2 == 0 }\nfun main(): Int { return 0 }");
+    assert!(
+        ir.contains("call i1 @is_even") || !ir.contains("call i32 @is_even"),
+        "is_even 返回 Boolean → i1"
+    );
 }
 
 #[test]
@@ -69,7 +77,10 @@ fn test_native_returns_int() {
         fun main(): Int { return native_add(1, 2) }
     "#,
     );
-    assert!(ir.contains("call i32 @native_add"), "native_add 返回 Int → i32");
+    assert!(
+        ir.contains("call i32 @native_add"),
+        "native_add 返回 Int → i32"
+    );
 }
 
 #[test]
@@ -82,7 +93,10 @@ fn test_native_returns_float() {
         fun main(): Float { return native_sqrt(4.0f) }
     "#,
     );
-    assert!(ir.contains("call float @native_sqrt"), "native_sqrt 返回 Float → float");
+    assert!(
+        ir.contains("call float @native_sqrt"),
+        "native_sqrt 返回 Float → float"
+    );
 }
 
 #[test]
@@ -95,7 +109,10 @@ fn test_native_returns_void() {
         fun main(): Int { native_free(0); return 0 }
     "#,
     );
-    assert!(!ir.contains("call i32 @native_free"), "native_free 返回 Unit → 不应用 i32");
+    assert!(
+        !ir.contains("call i32 @native_free"),
+        "native_free 返回 Unit → 不应用 i32"
+    );
 }
 
 #[test]
@@ -115,7 +132,8 @@ fn test_native_returns_pointer() {
     );
     // 当前行为：Pointer<Int> 未正确映射为 ptr，而是 %struct.__type_
     // 修复后应为：call ptr @native_calloc
-    let call_lines: Vec<&str> = ir.lines().filter(|l| l.contains("native_calloc") && l.contains("call")).collect();
+    let call_lines: Vec<&str> =
+        ir.lines().filter(|l| l.contains("native_calloc") && l.contains("call")).collect();
     assert!(!call_lines.is_empty(), "应包含 native_calloc 的 call 指令");
     // 确认不是 i32（修复前的行为）
     assert!(

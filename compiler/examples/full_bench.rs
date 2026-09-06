@@ -119,11 +119,7 @@ fn aot_inprocess_bench(src: &str, iters: usize, expected: i64) -> Option<f64> {
 
     // 验证结果（返回值为 N * expected）
     let raw = out.status.code().unwrap_or(-1);
-    let code = if raw < 0 {
-        raw as u32 as i64
-    } else {
-        raw as i64
-    };
+    let code = if raw < 0 { raw as u32 as i64 } else { raw as i64 };
     let expected_total = expected * (iters as i64);
     if code != expected_total {
         eprintln!(
@@ -178,13 +174,11 @@ fn build_aot_exe(src: &str, llvm_home: &str, bin: &Path, name: &str) -> Option<s
     };
     std::fs::write(&ll, &ir).ok()?;
 
-    let llc = Path::new(llvm_home)
-        .join("bin")
-        .join(if cfg!(target_os = "windows") {
-            "llc.exe"
-        } else {
-            "llc"
-        });
+    let llc = Path::new(llvm_home).join("bin").join(if cfg!(target_os = "windows") {
+        "llc.exe"
+    } else {
+        "llc"
+    });
     let out = Command::new(&llc)
         .arg(&ll)
         .arg("-o")
@@ -294,18 +288,10 @@ fn aot_bench(src: &str, iters: usize, expected: i64) -> Option<f64> {
     let _ = std::fs::create_dir_all(&tmp);
     let ll = tmp.join("bench.ll");
     let obj = tmp.join("bench.obj");
-    let exe = if cfg!(target_os = "windows") {
-        tmp.join("bench.exe")
-    } else {
-        tmp.join("bench")
-    };
+    let exe = if cfg!(target_os = "windows") { tmp.join("bench.exe") } else { tmp.join("bench") };
     std::fs::write(&ll, &ir).ok()?;
 
-    let llc = bin.join(if cfg!(target_os = "windows") {
-        "llc.exe"
-    } else {
-        "llc"
-    });
+    let llc = bin.join(if cfg!(target_os = "windows") { "llc.exe" } else { "llc" });
     let out = Command::new(&llc)
         .arg(&ll)
         .arg("-o")
@@ -342,11 +328,7 @@ fn aot_bench(src: &str, iters: usize, expected: i64) -> Option<f64> {
     for _ in 0..iters {
         let out = Command::new(&exe).output().ok()?;
         let raw = out.status.code().unwrap_or(-1);
-        let code = if raw < 0 {
-            raw as u32 as i64
-        } else {
-            raw as i64
-        };
+        let code = if raw < 0 { raw as u32 as i64 } else { raw as i64 };
         assert_eq!(code, expected);
     }
     let dur = start.elapsed().as_secs_f64() / iters as f64;

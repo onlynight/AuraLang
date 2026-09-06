@@ -55,9 +55,9 @@ pub struct PackageContent {
 impl PackageContent {
     /// 获取字节码模块（若不存在则返回错误）
     pub fn module(&self) -> Result<&BytecodeModule, ApkgError> {
-        self.module.as_ref().ok_or_else(|| {
-            ApkgError::Format("包内未找到 lib/*.auc 字节码文件".to_string())
-        })
+        self.module
+            .as_ref()
+            .ok_or_else(|| ApkgError::Format("包内未找到 lib/*.auc 字节码文件".to_string()))
     }
 
     /// 获取指定路径的文件内容
@@ -67,10 +67,7 @@ impl PackageContent {
 
     /// 获取源码文件（`src/` 目录下的文件）
     pub fn source_files(&self) -> Vec<(&String, &Vec<u8>)> {
-        self.files
-            .iter()
-            .filter(|(path, _)| super::path_under(SRC_DIR, path.as_str()))
-            .collect()
+        self.files.iter().filter(|(path, _)| super::path_under(SRC_DIR, path.as_str())).collect()
     }
 
     /// 获取 ref/index.json 内容（若存在）
@@ -90,9 +87,8 @@ pub struct PackageReader;
 impl PackageReader {
     /// 从文件路径读取 `.auz`
     pub fn from_file(path: &Path) -> Result<PackageContent, ApkgError> {
-        let bytes = std::fs::read(path).map_err(|e| {
-            ApkgError::Io(format!("无法读取 {}: {}", path.display(), e))
-        })?;
+        let bytes = std::fs::read(path)
+            .map_err(|e| ApkgError::Io(format!("无法读取 {}: {}", path.display(), e)))?;
         Self::from_bytes(&bytes)
     }
 
@@ -113,9 +109,8 @@ impl PackageReader {
             .ok_or_else(|| ApkgError::Manifest(format!("包内缺少 {}", MANIFEST_FILENAME)))?;
         let manifest_toml = std::str::from_utf8(manifest_content)
             .map_err(|e| ApkgError::Manifest(format!("清单编码错误: {}", e)))?;
-        let manifest = PackageManifest::from_toml(manifest_toml).map_err(|e| {
-            ApkgError::Manifest(format!("解析清单失败: {}", e))
-        })?;
+        let manifest = PackageManifest::from_toml(manifest_toml)
+            .map_err(|e| ApkgError::Manifest(format!("解析清单失败: {}", e)))?;
 
         // 5. 加载字节码模块
         let module = Self::load_bytecode_module(&files)?;
@@ -174,9 +169,8 @@ impl PackageReader {
         let mut archive = tar::Archive::new(Cursor::new(tar_bytes));
         let mut files = BTreeMap::new();
 
-        for entry in archive
-            .entries()
-            .map_err(|e| ApkgError::Format(format!("tar 读取失败: {}", e)))?
+        for entry in
+            archive.entries().map_err(|e| ApkgError::Format(format!("tar 读取失败: {}", e)))?
         {
             let mut entry = entry.map_err(|e| ApkgError::Format(format!("tar 条目错误: {}", e)))?;
 
@@ -300,12 +294,10 @@ impl PackageContent {
             }
 
             match self.files.get(&entry.path) {
-                Some(content) => {
-                    match checksum::verify_bytes(&entry.hash, content) {
-                        Ok(()) => verified_count += 1,
-                        Err(e) => failures.push((entry.path.clone(), e.to_string())),
-                    }
-                }
+                Some(content) => match checksum::verify_bytes(&entry.hash, content) {
+                    Ok(()) => verified_count += 1,
+                    Err(e) => failures.push((entry.path.clone(), e.to_string())),
+                },
                 None => {
                     failures.push((entry.path.clone(), "文件不存在".to_string()));
                 }
@@ -334,26 +326,32 @@ mod tests {
 
     #[test]
     fn test_check_zstd_magic_ok() {
-        let bytes = [0x28u8, 0xB5, 0x2F, 0xFD, 0x00, 0x00];
+        let bytes = [
+            0x28u8, 0xB5, 0x2F, 0xFD, 0x00, 0x00,
+        ];
         assert!(PackageReader::check_zstd_magic(&bytes).is_ok());
     }
 
     #[test]
     fn test_check_zstd_magic_fail() {
-        let bytes = [0xDEu8, 0xAD, 0xBE, 0xEF];
+        let bytes = [
+            0xDEu8, 0xAD, 0xBE, 0xEF,
+        ];
         assert!(PackageReader::check_zstd_magic(&bytes).is_err());
     }
 
     #[test]
     fn test_check_zstd_magic_short() {
-        let bytes = [0x28u8, 0xB5];
+        let bytes = [
+            0x28u8, 0xB5,
+        ];
         assert!(PackageReader::check_zstd_magic(&bytes).is_err());
     }
 
     #[test]
     fn test_roundtrip_build_and_read() {
-        use crate::auz::PackageBuilder;
         use crate::auz::PackageBuildOptions;
+        use crate::auz::PackageBuilder;
         use crate::codegen::compile_source;
         use crate::package::{PackageKind, PackageManifest, PackageOptions, ResourceConfig};
 
@@ -395,7 +393,8 @@ public fun main() {
         };
         let builder = PackageBuilder::new(&manifest, &module).with_options(options);
 
-        let out_path = std::env::temp_dir().join(format!("aura_test_pkg_{}.auz", std::process::id()));
+        let out_path =
+            std::env::temp_dir().join(format!("aura_test_pkg_{}.auz", std::process::id()));
         let result = builder.build(&out_path).unwrap();
         assert!(result.size_bytes > 0);
         assert!(result.file_count >= 3); // manifest + checksum + auc
@@ -420,8 +419,8 @@ public fun main() {
 
     #[test]
     fn test_inspect_apkg_file_listing() {
-        use crate::auz::PackageBuilder;
         use crate::auz::PackageBuildOptions;
+        use crate::auz::PackageBuilder;
         use crate::codegen::compile_source;
         use crate::package::{PackageKind, PackageManifest, PackageOptions, ResourceConfig};
 
@@ -454,7 +453,8 @@ public fun main() {
             ..Default::default()
         };
         let builder = PackageBuilder::new(&manifest, &module).with_options(options);
-        let out_path = std::env::temp_dir().join(format!("aura_inspect_test_{}.auz", std::process::id()));
+        let out_path =
+            std::env::temp_dir().join(format!("aura_inspect_test_{}.auz", std::process::id()));
         builder.build(&out_path).unwrap();
 
         let content = PackageReader::from_file(&out_path).unwrap();

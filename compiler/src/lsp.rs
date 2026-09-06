@@ -7,10 +7,10 @@ use std::collections::HashMap;
 use std::io::{self, BufRead, Read, Write};
 
 use crate::ast::*;
+use crate::errors::CompileError;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::span::Span;
-use crate::errors::CompileError;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // LSP 消息类型
@@ -97,9 +97,18 @@ pub struct TextEdit {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SymbolKind {
-    Function, Variable, Constant, Struct, Class,
-    Enum, Interface, TypeAlias, Field, Method,
-    Parameter, Module,
+    Function,
+    Variable,
+    Constant,
+    Struct,
+    Class,
+    Enum,
+    Interface,
+    TypeAlias,
+    Field,
+    Method,
+    Parameter,
+    Module,
 }
 
 impl SymbolKind {
@@ -177,7 +186,11 @@ impl DocumentState {
         for decl in &program.declarations {
             match decl {
                 Decl::Function(f) => {
-                    let ret_type = f.return_type.as_ref().map(|t| self.type_to_string(t)).unwrap_or_else(|| "Unit".to_string());
+                    let ret_type = f
+                        .return_type
+                        .as_ref()
+                        .map(|t| self.type_to_string(t))
+                        .unwrap_or_else(|| "Unit".to_string());
                     self.symbols.insert(
                         f.name.clone(),
                         SymbolInfo {
@@ -203,7 +216,11 @@ impl DocumentState {
                         },
                     );
                     for f in &s.fields {
-                        let ty_str = f.type_hint.as_ref().map(|t| self.type_to_string(t)).unwrap_or_else(|| "Any".to_string());
+                        let ty_str = f
+                            .type_hint
+                            .as_ref()
+                            .map(|t| self.type_to_string(t))
+                            .unwrap_or_else(|| "Any".to_string());
                         self.symbols.insert(
                             f.name.clone(),
                             SymbolInfo {
@@ -293,12 +310,24 @@ impl DocumentState {
             Type::Nullable(t) => format!("{}?", self.type_to_string(t)),
             Type::Pointer(t) => format!("Pointer<{}>", self.type_to_string(t)),
             Type::Array(t) => format!("Array<{}>", self.type_to_string(t)),
-            Type::Function { params, return_type, .. } => {
-                let params_str: Vec<String> = params.iter().map(|p| self.type_to_string(p.type_hint.as_deref().unwrap_or(&Type::Any))).collect();
-                let ret_str = return_type.as_ref().map(|t| self.type_to_string(t)).unwrap_or_else(|| "Unit".to_string());
+            Type::Function {
+                params,
+                return_type,
+                ..
+            } => {
+                let params_str: Vec<String> = params
+                    .iter()
+                    .map(|p| self.type_to_string(p.type_hint.as_deref().unwrap_or(&Type::Any)))
+                    .collect();
+                let ret_str = return_type
+                    .as_ref()
+                    .map(|t| self.type_to_string(t))
+                    .unwrap_or_else(|| "Unit".to_string());
                 format!("({}) -> {}", params_str.join(", "), ret_str)
             }
-            Type::Generic { name, args, .. } => {
+            Type::Generic {
+                name, args, ..
+            } => {
                 let args_str: Vec<String> = args.iter().map(|a| self.type_to_string(a)).collect();
                 format!("{}<{}>", name, args_str.join(", "))
             }
@@ -317,7 +346,9 @@ pub struct DocumentManager {
 
 impl DocumentManager {
     pub fn new() -> Self {
-        Self { documents: HashMap::new() }
+        Self {
+            documents: HashMap::new(),
+        }
     }
 
     pub fn open(&mut self, uri: &str, text: &str, version: i32) -> &DocumentState {
@@ -421,7 +452,9 @@ pub struct LspHandler {
 
 impl LspHandler {
     pub fn new() -> Self {
-        Self { engine: IncrementalEngine::new() }
+        Self {
+            engine: IncrementalEngine::new(),
+        }
     }
 
     /// 处理一条 JSON-RPC 消息。
@@ -501,14 +534,22 @@ impl LspHandler {
     /// 13.5: 代码补全
     fn handle_completion(&self, params: &serde_json::Value) -> serde_json::Value {
         let uri = params["textDocument"]["uri"].as_str().unwrap_or_default();
-        let items: Vec<CompletionItem> = self.engine.docs().get(uri)
-            .map(|doc| doc.symbols.values().map(|s| CompletionItem {
-                label: s.name.clone(),
-                kind: s.kind.to_lsp_kind(),
-                insert_text: None,
-                detail: Some(s.type_str.clone()),
-                documentation: None,
-            }).collect())
+        let items: Vec<CompletionItem> = self
+            .engine
+            .docs()
+            .get(uri)
+            .map(|doc| {
+                doc.symbols
+                    .values()
+                    .map(|s| CompletionItem {
+                        label: s.name.clone(),
+                        kind: s.kind.to_lsp_kind(),
+                        insert_text: None,
+                        detail: Some(s.type_str.clone()),
+                        documentation: None,
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
         serde_json::to_value(&items).unwrap_or_default()
     }
@@ -519,15 +560,24 @@ impl LspHandler {
         let line = params["position"]["line"].as_u64().unwrap_or(0);
 
         let location: Option<Location> = self.engine.docs().get(uri).and_then(|doc| {
-            doc.symbols.values().find(|s| {
-                line as u32 >= s.span.start_line as u32 && line as u32 <= s.span.end_line as u32
-            }).map(|s| Location {
-                uri: uri.to_string(),
-                range: Range {
-                    start: Position { line: s.span.start_line as u32, character: s.span.start_col as u32 },
-                    end: Position { line: s.span.end_line as u32, character: s.span.end_col as u32 },
-                },
-            })
+            doc.symbols
+                .values()
+                .find(|s| {
+                    line as u32 >= s.span.start_line as u32 && line as u32 <= s.span.end_line as u32
+                })
+                .map(|s| Location {
+                    uri: uri.to_string(),
+                    range: Range {
+                        start: Position {
+                            line: s.span.start_line as u32,
+                            character: s.span.start_col as u32,
+                        },
+                        end: Position {
+                            line: s.span.end_line as u32,
+                            character: s.span.end_col as u32,
+                        },
+                    },
+                })
         });
 
         serde_json::to_value(location).unwrap_or_default()
@@ -565,22 +615,34 @@ impl LspHandler {
     fn handle_diagnostic(&self, params: &serde_json::Value) -> serde_json::Value {
         let uri = params["textDocument"]["uri"].as_str().unwrap_or_default();
 
-        let diagnostics: Vec<LspDiagnostic> = self.engine.docs().get(uri)
+        let diagnostics: Vec<LspDiagnostic> = self
+            .engine
+            .docs()
+            .get(uri)
             .map(|doc| {
-                doc.errors.iter().map(|e| LspDiagnostic {
-                    range: Range {
-                        start: Position { line: e.span.start_line as u32, character: e.span.start_col as u32 },
-                        end: Position { line: e.span.end_line as u32, character: e.span.end_col as u32 },
-                    },
-                    severity: match e.severity {
-                        crate::errors::ErrorSeverity::Error => 1,
-                        crate::errors::ErrorSeverity::Warning => 2,
-                        crate::errors::ErrorSeverity::Info => 3,
-                    },
-                    code: None,
-                    source: "aura".to_string(),
-                    message: e.message.clone(),
-                }).collect()
+                doc.errors
+                    .iter()
+                    .map(|e| LspDiagnostic {
+                        range: Range {
+                            start: Position {
+                                line: e.span.start_line as u32,
+                                character: e.span.start_col as u32,
+                            },
+                            end: Position {
+                                line: e.span.end_line as u32,
+                                character: e.span.end_col as u32,
+                            },
+                        },
+                        severity: match e.severity {
+                            crate::errors::ErrorSeverity::Error => 1,
+                            crate::errors::ErrorSeverity::Warning => 2,
+                            crate::errors::ErrorSeverity::Info => 3,
+                        },
+                        code: None,
+                        source: "aura".to_string(),
+                        message: e.message.clone(),
+                    })
+                    .collect()
             })
             .unwrap_or_default();
 
@@ -591,14 +653,23 @@ impl LspHandler {
     fn handle_formatting(&self, params: &serde_json::Value) -> serde_json::Value {
         let uri = params["textDocument"]["uri"].as_str().unwrap_or_default();
 
-        let edits: Vec<TextEdit> = self.engine.docs().get(uri)
+        let edits: Vec<TextEdit> = self
+            .engine
+            .docs()
+            .get(uri)
             .map(|doc| {
                 let formatted = format_source(&doc.text);
                 if formatted != doc.text {
                     vec![TextEdit {
                         range: Range {
-                            start: Position { line: 0, character: 0 },
-                            end: Position { line: doc.text.lines().count() as u32, character: 0 },
+                            start: Position {
+                                line: 0,
+                                character: 0,
+                            },
+                            end: Position {
+                                line: doc.text.lines().count() as u32,
+                                character: 0,
+                            },
                         },
                         new_text: formatted,
                     }]
@@ -718,7 +789,8 @@ mod tests {
     #[test]
     fn test_lsp_handler_initialize() {
         let mut handler = LspHandler::new();
-        let response = handler.handle(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#);
+        let response =
+            handler.handle(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#);
         assert!(response.is_some());
         let resp = response.unwrap();
         assert_eq!(resp.jsonrpc, "2.0");
@@ -762,7 +834,8 @@ mod tests {
         assert!(resp.result.is_array());
         let items = resp.result.as_array().unwrap();
         assert!(!items.is_empty());
-        let labels: Vec<String> = items.iter().map(|i| i["label"].as_str().unwrap().to_string()).collect();
+        let labels: Vec<String> =
+            items.iter().map(|i| i["label"].as_str().unwrap().to_string()).collect();
         assert!(labels.contains(&"add".to_string()));
     }
 
@@ -813,7 +886,8 @@ mod tests {
         let response = handler.handle(r#"{"jsonrpc":"2.0","id":3,"method":"textDocument/completion","params":{"textDocument":{"uri":"file:///test.aura"},"position":{"line":0,"character":0}}}"#);
         let resp = response.unwrap();
         let items = resp.result.as_array().unwrap();
-        let labels: Vec<String> = items.iter().map(|i| i["label"].as_str().unwrap().to_string()).collect();
+        let labels: Vec<String> =
+            items.iter().map(|i| i["label"].as_str().unwrap().to_string()).collect();
         assert!(labels.contains(&"b".to_string()));
         assert!(!labels.contains(&"a".to_string()));
     }
@@ -852,7 +926,11 @@ mod tests {
 
     #[test]
     fn test_document_state_analyze() {
-        let mut state = DocumentState::new("file:///test.aura", "fun add(a: Int, b: Int): Int { return a + b }", 1);
+        let mut state = DocumentState::new(
+            "file:///test.aura",
+            "fun add(a: Int, b: Int): Int { return a + b }",
+            1,
+        );
         state.analyze();
         assert!(state.ast.is_some());
         assert!(state.symbols.contains_key("add"));
@@ -873,7 +951,10 @@ mod tests {
 
     #[test]
     fn test_position_range() {
-        let pos = Position { line: 5, character: 10 };
+        let pos = Position {
+            line: 5,
+            character: 10,
+        };
         assert_eq!(pos.line, 5);
         assert_eq!(pos.character, 10);
     }
@@ -882,8 +963,14 @@ mod tests {
     fn test_text_edit() {
         let edit = TextEdit {
             range: Range {
-                start: Position { line: 0, character: 0 },
-                end: Position { line: 5, character: 0 },
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: 5,
+                    character: 0,
+                },
             },
             new_text: "new content".to_string(),
         };

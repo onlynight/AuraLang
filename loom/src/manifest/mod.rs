@@ -7,8 +7,8 @@
 //! B1.5: 完整解析 + 验证
 
 pub mod parse;
-pub mod validate;
 pub mod priority;
+pub mod validate;
 
 use std::collections::HashMap;
 
@@ -55,6 +55,18 @@ pub struct LoomManifest {
     /// 是否为库包
     #[serde(default)]
     pub library: bool,
+
+    /// 包类型: bytecode | hybrid | native
+    #[serde(default = "default_kind")]
+    pub kind: String,
+
+    /// 最低编译器版本
+    #[serde(default, rename = "compiler-min-version")]
+    pub compiler_min_version: Option<String>,
+
+    /// 最高编译器版本
+    #[serde(default, rename = "compiler-max-version")]
+    pub compiler_max_version: Option<String>,
 
     // ── 依赖（B1.3: 5 种配置分组） ──
     /// 编译 + 运行期依赖（默认）
@@ -124,19 +136,34 @@ impl LoomManifest {
     pub fn all_dependencies(&self) -> Vec<Dependency> {
         let mut deps = Vec::new();
         for d in &self.dependencies {
-            deps.push(Dependency { config: DepConfig::Implementation, ..d.clone() });
+            deps.push(Dependency {
+                config: DepConfig::Implementation,
+                ..d.clone()
+            });
         }
         for d in &self.compile_dependencies {
-            deps.push(Dependency { config: DepConfig::CompileOnly, ..d.clone() });
+            deps.push(Dependency {
+                config: DepConfig::CompileOnly,
+                ..d.clone()
+            });
         }
         for d in &self.runtime_dependencies {
-            deps.push(Dependency { config: DepConfig::RuntimeOnly, ..d.clone() });
+            deps.push(Dependency {
+                config: DepConfig::RuntimeOnly,
+                ..d.clone()
+            });
         }
         for d in &self.dev_dependencies {
-            deps.push(Dependency { config: DepConfig::Test, ..d.clone() });
+            deps.push(Dependency {
+                config: DepConfig::Test,
+                ..d.clone()
+            });
         }
         for d in &self.build_dependencies {
-            deps.push(Dependency { config: DepConfig::Build, ..d.clone() });
+            deps.push(Dependency {
+                config: DepConfig::Build,
+                ..d.clone()
+            });
         }
         deps
     }
@@ -155,6 +182,9 @@ impl Default for LoomManifest {
             entry: default_entry(),
             exports: Vec::new(),
             library: false,
+            kind: default_kind(),
+            compiler_min_version: None,
+            compiler_max_version: None,
             dependencies: Vec::new(),
             compile_dependencies: Vec::new(),
             runtime_dependencies: Vec::new(),
@@ -185,7 +215,7 @@ fn default_entry() -> String {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// 依赖声明
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Dependency {
     /// 包名
@@ -220,7 +250,9 @@ fn default_dep_config() -> DepConfig {
 }
 
 /// 依赖配置类型
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum DepConfig {
     /// 编译 + 运行期（默认）
@@ -279,9 +311,12 @@ pub struct BuildConfig {
     /// 缓存目录
     #[serde(default = "default_cache_dir")]
     pub cache_dir: String,
-    /// 是否启用远程缓存
+    /// 远程缓存 URL
     #[serde(default)]
     pub cache_remote: Option<String>,
+    /// 是否启用远程缓存
+    #[serde(default)]
+    pub cache_remote_enabled: bool,
     /// 远程缓存是否共享
     #[serde(default)]
     pub cache_remote_shared: bool,
@@ -312,6 +347,7 @@ impl Default for BuildConfig {
             out_dir: default_out_dir(),
             cache_dir: default_cache_dir(),
             cache_remote: None,
+            cache_remote_enabled: false,
             cache_remote_shared: false,
             emit_signatures: default_emit_signatures(),
             emit_package: false,
@@ -324,6 +360,10 @@ impl Default for BuildConfig {
 
 fn default_opt_level() -> u8 {
     2
+}
+
+fn default_kind() -> String {
+    "bytecode".to_string()
 }
 
 fn default_debug() -> bool {
@@ -692,17 +732,13 @@ pub struct SourceSet {
 
 impl SourceSet {
     /// 从配置创建源码集（解析相对路径为绝对路径）
-    pub fn from_config(config: &SourceSetConfig, name: &str, project_dir: &std::path::Path) -> Self {
-        let source_dirs = config
-            .source_dirs
-            .iter()
-            .map(|d| project_dir.join(d))
-            .collect();
-        let resource_dirs = config
-            .resource_dirs
-            .iter()
-            .map(|d| project_dir.join(d))
-            .collect();
+    pub fn from_config(
+        config: &SourceSetConfig,
+        name: &str,
+        project_dir: &std::path::Path,
+    ) -> Self {
+        let source_dirs = config.source_dirs.iter().map(|d| project_dir.join(d)).collect();
+        let resource_dirs = config.resource_dirs.iter().map(|d| project_dir.join(d)).collect();
 
         Self {
             name: name.to_string(),
@@ -910,7 +946,10 @@ command = "aura publish --target test-env"
         assert!(!manifest.profiles["release"].activate);
 
         // 仓库
-        assert_eq!(manifest.repositories.central.as_deref(), Some("https://registry.aura-lang.dev"));
+        assert_eq!(
+            manifest.repositories.central.as_deref(),
+            Some("https://registry.aura-lang.dev")
+        );
         assert!(manifest.repositories.publish.is_some());
 
         // Workspace
@@ -977,17 +1016,21 @@ command = "aura publish --target test-env"
 
     #[test]
     fn test_dep_config_serde() {
-        let dep: Dependency = toml::from_str(r#"
+        let dep: Dependency = toml::from_str(
+            r#"
 name = "test-dep"
 version = "^1.0"
 config = "compile-only"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert_eq!(dep.config, DepConfig::CompileOnly);
     }
 
     #[test]
     fn test_all_dependencies_merge() {
-        let manifest: LoomManifest = toml::from_str(r#"
+        let manifest: LoomManifest = toml::from_str(
+            r#"
 name = "test"
 version = "1.0.0"
 
@@ -1010,7 +1053,9 @@ version = "^1.0"
 [[build-dependencies]]
 name = "dep5"
 version = "^1.0"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let all = manifest.all_dependencies();
         assert_eq!(all.len(), 5);
@@ -1074,10 +1119,14 @@ depends-on = ["clean", "package", "publish"]
         let manifest: LoomManifest = toml::from_str(toml_str).unwrap();
         assert_eq!(manifest.tasks.len(), 2);
         assert_eq!(manifest.tasks[0].name, "deploy");
-        assert_eq!(manifest.tasks[0].depends_on, vec!["package", "verify"]);
+        assert_eq!(
+            manifest.tasks[0].depends_on,
+            vec![
+                "package", "verify"
+            ]
+        );
         assert!(manifest.tasks[0].command.is_some());
         assert_eq!(manifest.tasks[1].name, "clean-release");
         assert!(manifest.tasks[1].command.is_none());
     }
 }
-

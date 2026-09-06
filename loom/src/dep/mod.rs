@@ -1,11 +1,11 @@
-﻿//! [Phase L1-L6] 依赖管理：版本求解 + 冲突解析 + 锁文件 + BOM
+//! [Phase L1-L6] 依赖管理：版本求解 + 冲突解析 + 锁文件 + BOM
 
-pub mod resolver;
+pub mod bom;
 pub mod graph;
 pub mod lock;
-pub mod bom;
+pub mod resolver;
 
-use crate::manifest::{Dependency, DepConfig};
+use crate::manifest::{DepConfig, Dependency};
 
 /// 解析后的依赖条目（含配置类型）
 #[derive(Debug, Clone)]
@@ -33,4 +33,3 @@ impl ResolvedDependency {
         }
     }
 }
-

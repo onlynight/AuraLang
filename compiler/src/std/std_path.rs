@@ -110,9 +110,8 @@ fn nat_normalize(args: &[Value]) -> Value {
             }
         }
     }
-    let mut result = root_prefix
-        .map(|p| p.as_os_str().to_string_lossy().to_string())
-        .unwrap_or_default();
+    let mut result =
+        root_prefix.map(|p| p.as_os_str().to_string_lossy().to_string()).unwrap_or_default();
     for part in parts {
         if !result.is_empty() && !result.ends_with(std::path::MAIN_SEPARATOR) {
             result.push(std::path::MAIN_SEPARATOR);
@@ -141,19 +140,15 @@ fn nat_is_relative(args: &[Value]) -> Value {
 fn nat_split(args: &[Value]) -> Value {
     let path_str = s0(args);
     let p = std::path::Path::new(&path_str);
-    let parts: Vec<Value> = p
-        .components()
-        .map(|c| Value::str_(c.as_os_str().to_string_lossy()))
-        .collect();
+    let parts: Vec<Value> =
+        p.components().map(|c| Value::str_(c.as_os_str().to_string_lossy())).collect();
     Value::List(parts)
 }
 
 /// path.separators(path) → Int (count of path separators)
 fn nat_separators(args: &[Value]) -> Value {
     let s = s0(args);
-    Value::Int(
-        s.matches(std::path::MAIN_SEPARATOR).count() as i64,
-    )
+    Value::Int(s.matches(std::path::MAIN_SEPARATOR).count() as i64)
 }
 
 /// path.fromUnix(unixPath) → String (Unix-style path)

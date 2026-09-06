@@ -51,11 +51,7 @@ fn find_tool<'a>(name: &str, options: &'a AotOptions) -> Option<PathBuf> {
         let path = home.join("bin").join(format!(
             "{}{}",
             name,
-            if cfg!(target_os = "windows") {
-                ".exe"
-            } else {
-                ""
-            }
+            if cfg!(target_os = "windows") { ".exe" } else { "" }
         ));
         if path.exists() {
             return Some(path);
@@ -67,11 +63,7 @@ fn find_tool<'a>(name: &str, options: &'a AotOptions) -> Option<PathBuf> {
         let path = PathBuf::from(home).join("bin").join(format!(
             "{}{}",
             name,
-            if cfg!(target_os = "windows") {
-                ".exe"
-            } else {
-                ""
-            }
+            if cfg!(target_os = "windows") { ".exe" } else { "" }
         ));
         if path.exists() {
             return Some(path);
@@ -83,11 +75,7 @@ fn find_tool<'a>(name: &str, options: &'a AotOptions) -> Option<PathBuf> {
         let path = PathBuf::from(home).join("bin").join(format!(
             "{}{}",
             name,
-            if cfg!(target_os = "windows") {
-                ".exe"
-            } else {
-                ""
-            }
+            if cfg!(target_os = "windows") { ".exe" } else { "" }
         ));
         if path.exists() {
             return Some(path);
@@ -104,11 +92,7 @@ fn find_tool<'a>(name: &str, options: &'a AotOptions) -> Option<PathBuf> {
             let path = PathBuf::from(home).join("bin").join(format!(
                 "{}{}",
                 name,
-                if cfg!(target_os = "windows") {
-                    ".exe"
-                } else {
-                    ""
-                }
+                if cfg!(target_os = "windows") { ".exe" } else { "" }
             ));
             if path.exists() {
                 return Some(path);
@@ -176,10 +160,9 @@ pub fn link_to_object(
         .arg(options.opt_level.as_llvm_flag())
         .arg("-filetype=obj");
 
-    // 调试信息
-    if options.debug_info {
-        cmd.arg("-g");
-    }
+    // 调试信息：DWARF 元数据已在 LLVM IR 文本中生成（!DIFile / !DISubprogram），
+    // llc 无需 -g 标志；仅 clang 链接时需要 -g 保留调试信息。
+    // 注意：llc 不支持 -g，传入会导致 "Unknown command line argument" 错误。
 
     run_and_report(&mut cmd, "llc")?;
     Ok(())
@@ -212,9 +195,8 @@ pub fn link_to_executable(
                 if let Some(ref cffi_obj) = cffi_object_path {
                     cmd.arg(cffi_obj);
                 }
-                cmd.arg("-o")
-                    .arg(exe_path)
-                    .arg(options.opt_level.as_llvm_flag());
+                cmd.arg("-o").arg(exe_path).arg(options.opt_level.as_llvm_flag());
+                if options.debug_info { cmd.arg("-g"); }
                 run_and_report(&mut cmd, "clang")?;
                 return Ok(());
             }
@@ -244,9 +226,8 @@ pub fn link_to_executable(
     if let Some(ref cffi_obj) = cffi_object_path {
         cmd.arg(cffi_obj);
     }
-    cmd.arg("-o")
-        .arg(exe_path)
-        .arg(options.opt_level.as_llvm_flag());
+    cmd.arg("-o").arg(exe_path).arg(options.opt_level.as_llvm_flag());
+    if options.debug_info { cmd.arg("-g"); }
 
     run_and_report(&mut cmd, "clang")?;
     Ok(())
@@ -267,9 +248,8 @@ fn compile_std_cffi(options: &AotOptions) -> Result<PathBuf, AotError> {
     let cffi_obj = tmp_dir.join(format!("aura_std_cffi.{}", ext));
 
     // 找 clang
-    let clang_path = find_tool("clang", options).ok_or_else(|| {
-        AotError::ToolError("找不到 clang，无法编译 std C FFI".to_string())
-    })?;
+    let clang_path = find_tool("clang", options)
+        .ok_or_else(|| AotError::ToolError("找不到 clang，无法编译 std C FFI".to_string()))?;
 
     // 编译命令
     let mut cmd = Command::new(clang_path);
@@ -287,9 +267,8 @@ fn compile_std_cffi(options: &AotOptions) -> Result<PathBuf, AotError> {
 
 /// 执行命令并报告结果
 fn run_and_report(cmd: &mut Command, tool_name: &str) -> Result<(), AotError> {
-    let output = cmd
-        .output()
-        .map_err(|e| AotError::ToolError(format!("无法启动 {}: {}", tool_name, e)))?;
+    let output =
+        cmd.output().map_err(|e| AotError::ToolError(format!("无法启动 {}: {}", tool_name, e)))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -330,8 +309,7 @@ impl CrossCompilationConfig {
             target_triple: TargetTriple::linux_aarch64(),
             sysroot: sysroot.clone(),
             linker: Some(PathBuf::from(
-                option_env!("AURA_CONFIG_CROSS_LINKER_AARCH64")
-                    .unwrap_or("aarch64-linux-gnu-gcc"),
+                option_env!("AURA_CONFIG_CROSS_LINKER_AARCH64").unwrap_or("aarch64-linux-gnu-gcc"),
             )),
             c_stdlib: sysroot.as_ref().map(|s| s.join("usr").join("lib")),
         }
@@ -343,8 +321,7 @@ impl CrossCompilationConfig {
             target_triple: TargetTriple::linux_armv7(),
             sysroot: sysroot.clone(),
             linker: Some(PathBuf::from(
-                option_env!("AURA_CONFIG_CROSS_LINKER_ARMV7")
-                    .unwrap_or("arm-linux-gnueabihf-gcc"),
+                option_env!("AURA_CONFIG_CROSS_LINKER_ARMV7").unwrap_or("arm-linux-gnueabihf-gcc"),
             )),
             c_stdlib: sysroot.as_ref().map(|s| s.join("usr").join("lib")),
         }

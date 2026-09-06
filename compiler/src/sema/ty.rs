@@ -111,7 +111,9 @@ impl Ty {
                 "Set" => Ty::List(Box::new(Ty::Any)),
                 other => Ty::Named(other.to_string()),
             },
-            crate::ast::Type::Generic { name, args, .. } => {
+            crate::ast::Type::Generic {
+                name, args, ..
+            } => {
                 let mapped: Vec<Ty> = args.iter().map(Ty::from_ast).collect();
                 match name.as_str() {
                     "List" => Ty::List(Box::new(mapped.first().cloned().unwrap_or(Ty::Any))),
@@ -232,7 +234,10 @@ impl Ty {
             Ty::List(inner) => format!("List<{}>", inner.name()),
             Ty::Map(k, v) => format!("Map<{}, {}>", k.name(), v.name()),
             Ty::Named(n) => n.clone(),
-            Ty::Function { params, ret } => {
+            Ty::Function {
+                params,
+                ret,
+            } => {
                 let ps: Vec<String> = params.iter().map(|p| p.name()).collect();
                 format!("({}) -> {}", ps.join(", "), ret.name())
             }

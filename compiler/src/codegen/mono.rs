@@ -81,7 +81,10 @@ fn collect_call_arities(
                     collect_expr(e, generic, out);
                 }
             }
-            HirStmt::Assign { target, value } => {
+            HirStmt::Assign {
+                target,
+                value,
+            } => {
                 collect_expr(target, generic, out);
                 collect_expr(value, generic, out);
             }
@@ -118,7 +121,10 @@ fn collect_expr(
     out: &mut HashMap<String, HashSet<usize>>,
 ) {
     match e {
-        HirExpr::Call { callee, args } => {
+        HirExpr::Call {
+            callee,
+            args,
+        } => {
             if generic.contains_key(callee) {
                 out.entry(callee.clone()).or_default().insert(args.len());
             }
@@ -126,13 +132,20 @@ fn collect_expr(
                 collect_expr(a, generic, out);
             }
         }
-        HirExpr::Binary { lhs, rhs, .. } => {
+        HirExpr::Binary {
+            lhs, rhs, ..
+        } => {
             collect_expr(lhs, generic, out);
             collect_expr(rhs, generic, out);
         }
-        HirExpr::Unary { operand, .. } => collect_expr(operand, generic, out),
+        HirExpr::Unary {
+            operand, ..
+        } => collect_expr(operand, generic, out),
         HirExpr::Member { object, .. } => collect_expr(object, generic, out),
-        HirExpr::Index { container, index } => {
+        HirExpr::Index {
+            container,
+            index,
+        } => {
             collect_expr(container, generic, out);
             collect_expr(index, generic, out);
         }
@@ -163,7 +176,10 @@ fn rewrite_calls(b: &mut HirBlock, spec_map: &HashMap<(String, usize), String>) 
                     rewrite_expr(e, spec_map);
                 }
             }
-            HirStmt::Assign { target, value } => {
+            HirStmt::Assign {
+                target,
+                value,
+            } => {
                 rewrite_expr(target, spec_map);
                 rewrite_expr(value, spec_map);
             }
@@ -197,7 +213,10 @@ fn rewrite_calls(b: &mut HirBlock, spec_map: &HashMap<(String, usize), String>) 
 fn rewrite_expr(e: &mut HirExpr, spec_map: &HashMap<(String, usize), String>) {
     // 由于需在 Call 节点改写 callee，采用递归 + 就地替换
     match e {
-        HirExpr::Call { callee, args } => {
+        HirExpr::Call {
+            callee,
+            args,
+        } => {
             for a in args.iter_mut() {
                 rewrite_expr(a, spec_map);
             }
@@ -205,13 +224,20 @@ fn rewrite_expr(e: &mut HirExpr, spec_map: &HashMap<(String, usize), String>) {
                 *callee = spec.clone();
             }
         }
-        HirExpr::Binary { lhs, rhs, .. } => {
+        HirExpr::Binary {
+            lhs, rhs, ..
+        } => {
             rewrite_expr(lhs, spec_map);
             rewrite_expr(rhs, spec_map);
         }
-        HirExpr::Unary { operand, .. } => rewrite_expr(operand, spec_map),
+        HirExpr::Unary {
+            operand, ..
+        } => rewrite_expr(operand, spec_map),
         HirExpr::Member { object, .. } => rewrite_expr(object, spec_map),
-        HirExpr::Index { container, index } => {
+        HirExpr::Index {
+            container,
+            index,
+        } => {
             rewrite_expr(container, spec_map);
             rewrite_expr(index, spec_map);
         }

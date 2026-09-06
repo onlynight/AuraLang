@@ -29,7 +29,11 @@ fn make_func(code: Vec<Instr>, param_count: u16) -> DecodedFunction {
 fn test_jit_not_allowed() {
     let consts = vec![Const::Int(1)];
     let mut funcs = vec![make_func(
-        vec![Instr::LoadConst(0), Instr::Not, Instr::Return],
+        vec![
+            Instr::LoadConst(0),
+            Instr::Not,
+            Instr::Return,
+        ],
         0,
     )];
     funcs.push(funcs[0].clone());
@@ -43,7 +47,10 @@ fn test_jit_not_allowed() {
 #[test]
 fn test_jit_return_unit_allowed() {
     let consts = Vec::new();
-    let mut funcs = vec![make_func(vec![Instr::ReturnUnit], 0)];
+    let mut funcs = vec![make_func(
+        vec![Instr::ReturnUnit],
+        0,
+    )];
     funcs.push(funcs[0].clone());
     assert!(is_jit_compilable(0, &funcs[0], &consts, &funcs));
 }
@@ -54,7 +61,10 @@ fn test_jit_return_unit_allowed() {
 
 #[test]
 fn test_jit_arithmetic_still_allowed() {
-    let consts = vec![Const::Int(1), Const::Int(2)];
+    let consts = vec![
+        Const::Int(1),
+        Const::Int(2),
+    ];
     let mut funcs = vec![make_func(
         vec![
             Instr::LoadConst(0),
@@ -70,7 +80,10 @@ fn test_jit_arithmetic_still_allowed() {
 
 #[test]
 fn test_jit_comparison_still_allowed() {
-    let consts = vec![Const::Int(1), Const::Int(2)];
+    let consts = vec![
+        Const::Int(1),
+        Const::Int(2),
+    ];
     let mut funcs = vec![make_func(
         vec![
             Instr::LoadConst(0),
@@ -91,7 +104,10 @@ fn test_jit_comparison_still_allowed() {
 #[test]
 fn test_jit_call_method_still_rejected() {
     let consts = Vec::new();
-    let mut funcs = vec![make_func(vec![Instr::CallMethod(0)], 0)];
+    let mut funcs = vec![make_func(
+        vec![Instr::CallMethod(0)],
+        0,
+    )];
     funcs.push(funcs[0].clone());
     assert!(!is_jit_compilable(0, &funcs[0], &consts, &funcs));
 }
@@ -99,7 +115,13 @@ fn test_jit_call_method_still_rejected() {
 #[test]
 fn test_jit_new_object_still_rejected() {
     let consts = Vec::new();
-    let mut funcs = vec![make_func(vec![Instr::NewObject(0), Instr::Return], 0)];
+    let mut funcs = vec![make_func(
+        vec![
+            Instr::NewObject(0),
+            Instr::Return,
+        ],
+        0,
+    )];
     funcs.push(funcs[0].clone());
     assert!(!is_jit_compilable(0, &funcs[0], &consts, &funcs));
 }
@@ -107,7 +129,10 @@ fn test_jit_new_object_still_rejected() {
 #[test]
 fn test_jit_bitand_still_rejected() {
     // Cranelift 0.116 无 iand 方法，暂不支持
-    let consts = vec![Const::Int(5), Const::Int(3)];
+    let consts = vec![
+        Const::Int(5),
+        Const::Int(3),
+    ];
     let mut funcs = vec![make_func(
         vec![
             Instr::LoadConst(0),
@@ -142,7 +167,10 @@ fn test_jit_mixed_not_and_return_unit() {
 
 #[test]
 fn test_jit_mixed_arithmetic_and_not() {
-    let consts = vec![Const::Int(1), Const::Int(2)];
+    let consts = vec![
+        Const::Int(1),
+        Const::Int(2),
+    ];
     let mut funcs = vec![make_func(
         vec![
             Instr::LoadConst(0),

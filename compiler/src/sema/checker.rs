@@ -109,16 +109,71 @@ impl Checker {
         // P10: 并发运行时内置函数（aura.concurrent.* 命名空间）
         for (name, params, ret) in [
             ("aura.concurrent.spawn", vec![("expr", Ty::Any)], Ty::Int),
-            ("aura.concurrent.send", vec![("actor", Ty::Int), ("msg", Ty::Any)], Ty::Unit),
-            ("aura.concurrent.ask", vec![("actor", Ty::Int), ("msg", Ty::Any)], Ty::Any),
-            ("aura.concurrent.newChannel", vec![("bound", Ty::Int)], Ty::Int),
-            ("aura.concurrent.channelSend", vec![("ch", Ty::Int), ("val", Ty::Any)], Ty::Unit),
-            ("aura.concurrent.channelRecv", vec![("ch", Ty::Int)], Ty::Any),
-            ("aura.concurrent.channelTryRecv", vec![("ch", Ty::Int)], Ty::Any),
-            ("aura.concurrent.select", vec![("ch1", Ty::Int), ("ch2", Ty::Int)], Ty::Any),
-            ("aura.concurrent.spawnActor", vec![("name", Ty::String)], Ty::Int),
-            ("aura.concurrent.supervise", vec![("parent", Ty::Int), ("child", Ty::Int)], Ty::Unit),
-            ("aura.concurrent.actorAlive", vec![("id", Ty::Int)], Ty::Boolean),
+            (
+                "aura.concurrent.send",
+                vec![
+                    ("actor", Ty::Int),
+                    ("msg", Ty::Any),
+                ],
+                Ty::Unit,
+            ),
+            (
+                "aura.concurrent.ask",
+                vec![
+                    ("actor", Ty::Int),
+                    ("msg", Ty::Any),
+                ],
+                Ty::Any,
+            ),
+            (
+                "aura.concurrent.newChannel",
+                vec![("bound", Ty::Int)],
+                Ty::Int,
+            ),
+            (
+                "aura.concurrent.channelSend",
+                vec![
+                    ("ch", Ty::Int),
+                    ("val", Ty::Any),
+                ],
+                Ty::Unit,
+            ),
+            (
+                "aura.concurrent.channelRecv",
+                vec![("ch", Ty::Int)],
+                Ty::Any,
+            ),
+            (
+                "aura.concurrent.channelTryRecv",
+                vec![("ch", Ty::Int)],
+                Ty::Any,
+            ),
+            (
+                "aura.concurrent.select",
+                vec![
+                    ("ch1", Ty::Int),
+                    ("ch2", Ty::Int),
+                ],
+                Ty::Any,
+            ),
+            (
+                "aura.concurrent.spawnActor",
+                vec![("name", Ty::String)],
+                Ty::Int,
+            ),
+            (
+                "aura.concurrent.supervise",
+                vec![
+                    ("parent", Ty::Int),
+                    ("child", Ty::Int),
+                ],
+                Ty::Unit,
+            ),
+            (
+                "aura.concurrent.actorAlive",
+                vec![("id", Ty::Int)],
+                Ty::Boolean,
+            ),
         ] {
             let _ = symbols.insert_function(
                 name,
@@ -189,21 +244,16 @@ impl Checker {
                     .iter()
                     .map(|p| ParamSym {
                         name: p.name.clone(),
-                        ty: p
-                            .type_hint
-                            .as_deref()
-                            .map(ast_type_to_ty)
-                            .unwrap_or(Ty::Any),
+                        ty: p.type_hint.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Any),
                         has_default: p.default_value.is_some(),
                     })
                     .collect();
-                let ret = f
-                    .return_type
-                    .as_deref()
-                    .map(ast_type_to_ty)
-                    .unwrap_or(Ty::Unit);
+                let ret = f.return_type.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Unit);
                 if crate::std::decl::is_prelude(&f.name) {
-                    self.report(f.span, format!("cannot redefine prelude function '{}'", f.name));
+                    self.report(
+                        f.span,
+                        format!("cannot redefine prelude function '{}'", f.name),
+                    );
                 } else if let Err(dup) = self.symbols.insert_function(
                     f.name.clone(),
                     params,
@@ -214,14 +264,14 @@ impl Checker {
                     self.report(f.span, format!("duplicate function '{}'", dup));
                 }
                 // Phase 1: 追踪 suspend/async 函数
-                if f.modifiers.iter().any(|m| matches!(m, FnModifier::Suspend | FnModifier::Async)) {
+                if f.modifiers.iter().any(|m| matches!(m, FnModifier::Suspend | FnModifier::Async))
+                {
                     self.suspend_functions.insert(f.name.clone());
                 }
                 let _ = ret;
             }
             Decl::Struct(s) => {
-                self.symbols
-                    .register_type(s.name.clone(), Ty::Named(s.name.clone()));
+                self.symbols.register_type(s.name.clone(), Ty::Named(s.name.clone()));
                 self.record_generic_bounds(&s.name, &s.type_params);
                 self.record_members(&s.name, &s.fields, &s.methods);
                 if s.sealed {
@@ -234,19 +284,11 @@ impl Checker {
                         .iter()
                         .map(|p| ParamSym {
                             name: p.name.clone(),
-                            ty: p
-                                .type_hint
-                                .as_deref()
-                                .map(ast_type_to_ty)
-                                .unwrap_or(Ty::Any),
+                            ty: p.type_hint.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Any),
                             has_default: p.default_value.is_some(),
                         })
                         .collect();
-                    let ret = m
-                        .return_type
-                        .as_deref()
-                        .map(ast_type_to_ty)
-                        .unwrap_or(Ty::Unit);
+                    let ret = m.return_type.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Unit);
                     let full_name = format!("{}.{}", s.name, m.name);
                     let _ = self.symbols.insert_function(
                         full_name.clone(),
@@ -256,28 +298,32 @@ impl Checker {
                         m.span,
                     );
                     // Phase 1: 追踪 suspend 方法
-                    if m.modifiers.iter().any(|mod_| matches!(mod_, FnModifier::Suspend | FnModifier::Async)) {
+                    if m.modifiers
+                        .iter()
+                        .any(|mod_| matches!(mod_, FnModifier::Suspend | FnModifier::Async))
+                    {
                         self.suspend_functions.insert(full_name);
                     }
                 }
             }
             Decl::Enum(e) => {
-                self.symbols
-                    .register_type(e.name.clone(), Ty::Named(e.name.clone()));
+                self.symbols.register_type(e.name.clone(), Ty::Named(e.name.clone()));
                 self.enum_variants.insert(
                     e.name.clone(),
                     e.variants.iter().map(|v| v.name.clone()).collect(),
                 );
             }
             Decl::Class(c) => {
-                self.symbols
-                    .register_type(c.name.clone(), Ty::Named(c.name.clone()));
+                self.symbols.register_type(c.name.clone(), Ty::Named(c.name.clone()));
                 self.record_generic_bounds(&c.name, &c.type_params);
                 self.record_members(&c.name, &c.fields, &c.methods);
                 // Phase 1: 追踪 suspend 方法
                 for m in &c.methods {
                     let full_name = format!("{}.{}", c.name, m.name);
-                    if m.modifiers.iter().any(|mod_| matches!(mod_, FnModifier::Suspend | FnModifier::Async)) {
+                    if m.modifiers
+                        .iter()
+                        .any(|mod_| matches!(mod_, FnModifier::Suspend | FnModifier::Async))
+                    {
                         self.suspend_functions.insert(full_name);
                     }
                 }
@@ -286,20 +332,21 @@ impl Checker {
                 }
             }
             Decl::Interface(i) => {
-                self.symbols
-                    .register_type(i.name.clone(), Ty::Named(i.name.clone()));
+                self.symbols.register_type(i.name.clone(), Ty::Named(i.name.clone()));
                 self.interface_types.insert(i.name.clone());
                 self.record_generic_bounds(&i.name, &i.type_params);
                 self.record_members(&i.name, &[], &i.methods);
             }
             Decl::Actor(a) => {
-                self.symbols
-                    .register_type(a.name.clone(), Ty::Named(a.name.clone()));
+                self.symbols.register_type(a.name.clone(), Ty::Named(a.name.clone()));
                 self.record_members(&a.name, &a.fields, &a.methods);
                 // Phase 1: 追踪 suspend 方法
                 for m in &a.methods {
                     let full_name = format!("{}.{}", a.name, m.name);
-                    if m.modifiers.iter().any(|mod_| matches!(mod_, FnModifier::Suspend | FnModifier::Async)) {
+                    if m.modifiers
+                        .iter()
+                        .any(|mod_| matches!(mod_, FnModifier::Suspend | FnModifier::Async))
+                    {
                         self.suspend_functions.insert(full_name);
                     }
                 }
@@ -315,19 +362,11 @@ impl Checker {
                         .iter()
                         .map(|p| ParamSym {
                             name: p.name.clone(),
-                            ty: p
-                                .type_hint
-                                .as_deref()
-                                .map(ast_type_to_ty)
-                                .unwrap_or(Ty::Any),
+                            ty: p.type_hint.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Any),
                             has_default: false,
                         })
                         .collect();
-                    let ret = f
-                        .return_type
-                        .as_deref()
-                        .map(ast_type_to_ty)
-                        .unwrap_or(Ty::Unit);
+                    let ret = f.return_type.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Unit);
                     let _ = self.symbols.insert_function(
                         f.name.clone(),
                         params,
@@ -349,26 +388,22 @@ impl Checker {
         }
         let bounds: Vec<Option<Ty>> = params
             .iter()
-            .map(|p| {
-                if p.bounds.is_empty() {
-                    None
-                } else {
-                    Some(ast_type_to_ty(&p.bounds[0]))
-                }
-            })
+            .map(
+                |p| {
+                    if p.bounds.is_empty() { None } else { Some(ast_type_to_ty(&p.bounds[0])) }
+                },
+            )
             .collect();
         self.generic_bounds.insert(name.to_string(), bounds);
     }
 
     fn record_members(&mut self, type_name: &str, fields: &[StructField], methods: &[FnDecl]) {
         for f in fields {
-            self.member_visibility
-                .insert(format!("{}.{}", type_name, f.name), f.visibility);
+            self.member_visibility.insert(format!("{}.{}", type_name, f.name), f.visibility);
         }
         let mut mnames = Vec::new();
         for m in methods {
-            self.member_visibility
-                .insert(format!("{}.{}", type_name, m.name), m.visibility);
+            self.member_visibility.insert(format!("{}.{}", type_name, m.name), m.visibility);
             mnames.push(m.name.clone());
         }
         self.class_methods.insert(type_name.to_string(), mnames);
@@ -376,7 +411,10 @@ impl Checker {
 
     /// 将 AST 类型转换为语义类型，并校验泛型实参是否满足声明约束（P3.7）
     fn check_type(&mut self, ty: &Type) -> Ty {
-        if let Type::Generic { name, args, .. } = ty {
+        if let Type::Generic {
+            name, args, ..
+        } = ty
+        {
             if let Some(bounds) = self.generic_bounds.get(name) {
                 let bounds = bounds.clone();
                 for (i, arg) in args.iter().enumerate() {
@@ -416,11 +454,8 @@ impl Checker {
                 self.current_type = Some(s.name.clone());
                 self.symbols.enter_scope(true);
                 for field in &s.fields {
-                    let ft = field
-                        .type_hint
-                        .as_deref()
-                        .map(|t| self.check_type(t))
-                        .unwrap_or(Ty::Any);
+                    let ft =
+                        field.type_hint.as_deref().map(|t| self.check_type(t)).unwrap_or(Ty::Any);
                     if let Some(def) = &field.default_value {
                         let dt = self.check_expr(def);
                         if !dt.can_assign_to(&ft) {
@@ -448,11 +483,8 @@ impl Checker {
                 self.current_type = Some(c.name.clone());
                 self.symbols.enter_scope(true);
                 for field in &c.fields {
-                    let ft = field
-                        .type_hint
-                        .as_deref()
-                        .map(|t| self.check_type(t))
-                        .unwrap_or(Ty::Any);
+                    let ft =
+                        field.type_hint.as_deref().map(|t| self.check_type(t)).unwrap_or(Ty::Any);
                     let name = format!("{}.{}", c.name, field.name);
                     self.define_var_env(&name, ft, field.is_mutable);
                 }
@@ -463,10 +495,8 @@ impl Checker {
                     .and_then(|sn| self.class_methods.get(sn).cloned())
                     .unwrap_or_default();
                 for m in &c.methods {
-                    let has_override = m
-                        .modifiers
-                        .iter()
-                        .any(|x| matches!(x, FnModifier::Override));
+                    let has_override =
+                        m.modifiers.iter().any(|x| matches!(x, FnModifier::Override));
                     let base_has = super_methods.contains(&m.name);
                     if has_override && !base_has {
                         self.report(
@@ -496,18 +526,16 @@ impl Checker {
                 let own_methods = self.class_methods.get(&c.name).cloned().unwrap_or_default();
                 // 仅当 superclass 是类（而非接口）时，其方法才算“已继承”；
                 // 接口方法是抽象声明，必须由本类自行实现，不能视为已继承。
-                let inherited = if c
-                    .superclass
-                    .as_ref()
-                    .map_or(false, |sn| !self.interface_types.contains(sn))
-                {
-                    c.superclass
-                        .as_ref()
-                        .and_then(|sn| self.class_methods.get(sn).cloned())
-                        .unwrap_or_default()
-                } else {
-                    Vec::new()
-                };
+                let inherited =
+                    if c.superclass.as_ref().map_or(false, |sn| !self.interface_types.contains(sn))
+                    {
+                        c.superclass
+                            .as_ref()
+                            .and_then(|sn| self.class_methods.get(sn).cloned())
+                            .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
                 for iface in &implemented {
                     let iface_methods = self.class_methods.get(iface).cloned().unwrap_or_default();
                     if iface_methods.is_empty() {
@@ -536,11 +564,8 @@ impl Checker {
                 self.current_type = Some(a.name.clone());
                 self.symbols.enter_scope(true);
                 for field in &a.fields {
-                    let ft = field
-                        .type_hint
-                        .as_deref()
-                        .map(|t| self.check_type(t))
-                        .unwrap_or(Ty::Any);
+                    let ft =
+                        field.type_hint.as_deref().map(|t| self.check_type(t)).unwrap_or(Ty::Any);
                     let name = format!("{}.{}", a.name, field.name);
                     self.define_var_env(&name, ft, field.is_mutable);
                 }
@@ -555,10 +580,7 @@ impl Checker {
                     self.check_function_body(m);
                 }
             }
-            Decl::Extern(_)
-            | Decl::Annotation(_)
-            | Decl::Enum(_)
-            | Decl::TypeAlias(_) => {}
+            Decl::Extern(_) | Decl::Annotation(_) | Decl::Enum(_) | Decl::TypeAlias(_) => {}
             Decl::Import(imp) => {
                 self.expand_import(imp);
             }
@@ -601,7 +623,7 @@ impl Checker {
                         let full_name = format!("{}.", module_path) + &short_name;
                         let _ = self.symbols.insert_function(
                             short_name.clone(),
-                            vec![],  // 参数类型未知，用 Any
+                            vec![], // 参数类型未知，用 Any
                             Ty::Any,
                             Visibility::Public,
                             imp.span,
@@ -632,27 +654,21 @@ impl Checker {
 
         // Phase 1: 追踪 suspend 状态
         let saved_suspend = self.is_in_suspend_fn;
-        self.is_in_suspend_fn = f.modifiers.iter()
-            .any(|m| matches!(m, FnModifier::Suspend | FnModifier::Async));
+        self.is_in_suspend_fn =
+            f.modifiers.iter().any(|m| matches!(m, FnModifier::Suspend | FnModifier::Async));
 
         let saved_ret = self.current_fn_return.take();
-        self.current_fn_return = Some(
-            f.return_type
-                .as_deref()
-                .map(|t| self.check_type(t))
-                .unwrap_or(Ty::Unit),
-        );
+        self.current_fn_return =
+            Some(f.return_type.as_deref().map(|t| self.check_type(t)).unwrap_or(Ty::Unit));
 
         // 参数进入作用域
         for p in &f.params {
-            let pt = p
-                .type_hint
-                .as_deref()
-                .map(|t| self.check_type(t))
-                .unwrap_or(Ty::Any);
+            let pt = p.type_hint.as_deref().map(|t| self.check_type(t)).unwrap_or(Ty::Any);
             let _ = self.symbols.insert(Symbol::new(
                 p.name.clone(),
-                SymbolKind::Variable { is_mutable: true },
+                SymbolKind::Variable {
+                    is_mutable: true,
+                },
                 Visibility::Private,
                 p.span,
             ));
@@ -700,7 +716,11 @@ impl Checker {
         }
         // 兜底：函数名
         if let Some(fns) = self.symbols.lookup_function(name) {
-            if let Some(SymbolKind::Function { return_type, .. }) = fns.first().map(|s| &s.kind) {
+            if let Some(SymbolKind::Function {
+                return_type,
+                ..
+            }) = fns.first().map(|s| &s.kind)
+            {
                 return Some(Ty::Function {
                     params: vec![],
                     ret: Box::new(return_type.clone()),
@@ -757,15 +777,40 @@ impl Checker {
                 }
                 target_ty
             }
-            Expr::Binary { op, lhs, rhs, span } => self.check_binary(*op, lhs, rhs, *span),
-            Expr::Unary { op, operand, span } => self.check_unary(*op, operand, *span),
-            Expr::Call { callee, args, span } => self.check_call(callee, args, *span),
-            Expr::NamedArg { value, span, .. } => {
+            Expr::Binary {
+                op,
+                lhs,
+                rhs,
+                span,
+            } => self.check_binary(*op, lhs, rhs, *span),
+            Expr::Unary {
+                op,
+                operand,
+                span,
+            } => self.check_unary(*op, operand, *span),
+            Expr::Call {
+                callee,
+                args,
+                span,
+            } => self.check_call(callee, args, *span),
+            Expr::NamedArg {
+                value,
+                span,
+                ..
+            } => {
                 let _ = self.check_expr(value);
                 Ty::Any
             }
-            Expr::MemberAccess { object, name, span } => self.check_member(object, name, *span),
-            Expr::SafeAccess { object, name, span } => {
+            Expr::MemberAccess {
+                object,
+                name,
+                span,
+            } => self.check_member(object, name, *span),
+            Expr::SafeAccess {
+                object,
+                name,
+                span,
+            } => {
                 let obj_ty = self.check_expr(object);
                 if !obj_ty.is_nullable() {
                     self.report_warning(
@@ -849,8 +894,16 @@ impl Checker {
                     }
                 }
             }
-            Expr::Lambda { params, body, span } => self.check_lambda(params, body, *span),
-            Expr::Closure { params, body, span } => self.check_lambda(params, body, *span),
+            Expr::Lambda {
+                params,
+                body,
+                span,
+            } => self.check_lambda(params, body, *span),
+            Expr::Closure {
+                params,
+                body,
+                span,
+            } => self.check_lambda(params, body, *span),
             Expr::If {
                 condition,
                 then_branch,
@@ -879,7 +932,10 @@ impl Checker {
                 body,
                 span,
             } => self.check_dowhile(condition, body, *span),
-            Expr::Return { value, span } => self.check_return(value, *span),
+            Expr::Return {
+                value,
+                span,
+            } => self.check_return(value, *span),
             Expr::Break { span } => {
                 if self.in_loop_depth == 0 {
                     self.report(*span, "'break' outside of a loop");
@@ -892,7 +948,10 @@ impl Checker {
                 }
                 Ty::Nothing
             }
-            Expr::Throw { value, span } => {
+            Expr::Throw {
+                value,
+                span,
+            } => {
                 let vt = self.check_expr(value);
                 if !vt.is_string() && !vt.can_assign_to(&Ty::Named("Exception".into())) {
                     self.report(*span, format!("cannot throw value of type '{}'", vt.name()));
@@ -932,14 +991,8 @@ impl Checker {
                 inclusive,
                 span,
             } => {
-                let st = start
-                    .as_deref()
-                    .map(|e| self.check_expr(e))
-                    .unwrap_or(Ty::Int);
-                let et = end
-                    .as_deref()
-                    .map(|e| self.check_expr(e))
-                    .unwrap_or(Ty::Int);
+                let st = start.as_deref().map(|e| self.check_expr(e)).unwrap_or(Ty::Int);
+                let et = end.as_deref().map(|e| self.check_expr(e)).unwrap_or(Ty::Int);
                 if !st.is_numeric() && st != Ty::Any {
                     self.report(
                         *span,
@@ -955,7 +1008,10 @@ impl Checker {
                 let _ = inclusive;
                 Ty::Named("IntRange".into())
             }
-            Expr::InRange { range, span } => {
+            Expr::InRange {
+                range,
+                span,
+            } => {
                 let rt = self.check_expr(range);
                 if !rt.name().contains("Range") && rt != Ty::Any {
                     self.report(
@@ -965,7 +1021,11 @@ impl Checker {
                 }
                 Ty::Boolean
             }
-            Expr::Elvis { lhs, rhs, span } => {
+            Expr::Elvis {
+                lhs,
+                rhs,
+                span,
+            } => {
                 let lt = self.check_expr(lhs);
                 let rt = self.check_expr(rhs);
                 if !lt.is_nullable() {
@@ -999,14 +1059,13 @@ impl Checker {
             Expr::Await { expr, span } => {
                 let et = self.check_expr(expr);
                 if !self.is_in_suspend_fn {
-                    self.report(
-                        *span,
-                        "await can only be used in suspend/async functions",
-                    );
+                    self.report(*span, "await can only be used in suspend/async functions");
                 }
                 et
             }
-            Expr::Select { branches, .. } => {
+            Expr::Select {
+                branches, ..
+            } => {
                 // select 多路复用：检查所有分支的 pattern 表达式
                 for branch in branches {
                     self.check_expr(&branch.pattern);
@@ -1249,7 +1308,10 @@ impl Checker {
             UnOp::NotNull => match ot {
                 Ty::Nullable(inner) => *inner,
                 _ => {
-                    self.report(span, format!("'!!' requires nullable operand, got '{}'", ot.name()));
+                    self.report(
+                        span,
+                        format!("'!!' requires nullable operand, got '{}'", ot.name()),
+                    );
                     Ty::Error
                 }
             },
@@ -1260,7 +1322,11 @@ impl Checker {
     fn extract_dotted_name(expr: &Expr) -> Option<String> {
         match expr {
             Expr::Ident(name, _) => Some(name.clone()),
-            Expr::MemberAccess { object, name, .. } => {
+            Expr::MemberAccess {
+                object,
+                name,
+                ..
+            } => {
                 let obj_name = Self::extract_dotted_name(object)?;
                 Some(format!("{}.{}", obj_name, name))
             }
@@ -1283,7 +1349,12 @@ impl Checker {
         }
 
         // 方法调用：obj.method(...)
-        if let Expr::MemberAccess { object, name, .. } = callee {
+        if let Expr::MemberAccess {
+            object,
+            name,
+            ..
+        } = callee
+        {
             let _obj_ty = self.check_expr(object);
             // 查找方法：简单按 "Type.name" 查找
             let mname = format!("{}.{}", _obj_ty.non_null().name(), name);
@@ -1538,10 +1609,7 @@ impl Checker {
         let base = obj_ty.non_null();
         // P3.6：private / protected 成员不可在定义类型之外被访问
         let type_name = base.name().to_string();
-        let private_access = match self
-            .member_visibility
-            .get(&format!("{}.{}", type_name, name))
-        {
+        let private_access = match self.member_visibility.get(&format!("{}.{}", type_name, name)) {
             Some(vis) if *vis != Visibility::Public => {
                 self.current_type.as_deref() != Some(type_name.as_str())
             }
@@ -1622,11 +1690,7 @@ impl Checker {
         self.symbols.enter_scope(true);
         self.var_env.push(HashMap::new());
         for p in params {
-            let pt = p
-                .type_hint
-                .as_deref()
-                .map(ast_type_to_ty)
-                .unwrap_or(Ty::Any);
+            let pt = p.type_hint.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Any);
             self.define_var_env(&p.name, pt, true);
         }
         let body_ty = self.check_expr(body);
@@ -1634,12 +1698,7 @@ impl Checker {
         self.symbols.exit_scope();
         let ptypes: Vec<Ty> = params
             .iter()
-            .map(|p| {
-                p.type_hint
-                    .as_deref()
-                    .map(ast_type_to_ty)
-                    .unwrap_or(Ty::Any)
-            })
+            .map(|p| p.type_hint.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Any))
             .collect();
         Ty::Function {
             params: ptypes,
@@ -1672,10 +1731,7 @@ impl Checker {
     }
 
     fn check_when(&mut self, subject: &Option<Box<Expr>>, arms: &[WhenArm], span: Span) -> Ty {
-        let subject_ty = subject
-            .as_deref()
-            .map(|e| self.check_expr(e))
-            .unwrap_or(Ty::Unit);
+        let subject_ty = subject.as_deref().map(|e| self.check_expr(e)).unwrap_or(Ty::Unit);
 
         // 主体变量名（用于智能转换 / 穷举性检查）
         let subj_name = match subject.as_deref() {
@@ -1703,11 +1759,7 @@ impl Checker {
                     }
                 }
             }
-            if arm
-                .patterns
-                .iter()
-                .any(|p| matches!(p, Expr::Ident(n, _) if n == "else"))
-            {
+            if arm.patterns.iter().any(|p| matches!(p, Expr::Ident(n, _) if n == "else")) {
                 has_else = true;
             }
 
@@ -1768,11 +1820,7 @@ impl Checker {
                         span,
                         format!(
                             "'when' is not exhaustive: missing branch(es) for {}",
-                            missing
-                                .iter()
-                                .map(|s| s.as_str())
-                                .collect::<Vec<_>>()
-                                .join(", ")
+                            missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
                         ),
                     );
                 }

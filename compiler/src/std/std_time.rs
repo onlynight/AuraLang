@@ -21,10 +21,7 @@ pub fn register(reg: &mut NativeRegistry) {
 
 /// time.now() → Float (seconds since epoch)
 fn nat_now(_args: &[Value]) -> Value {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0);
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
     Value::Float(now)
 }
 
@@ -35,10 +32,8 @@ fn nat_epoch(args: &[Value]) -> Value {
 
 /// time.currentTime() → Float (milliseconds since epoch)
 fn nat_current_time(_args: &[Value]) -> Value {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as f64)
-        .unwrap_or(0.0);
+    let now =
+        SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as f64).unwrap_or(0.0);
     Value::Float(now)
 }
 
@@ -108,12 +103,12 @@ fn nat_parse_date(args: &[Value]) -> Value {
             // Try date only
             match chrono::NaiveDateTime::parse_from_str(&text, "%Y-%m-%d %H:%M:%S") {
                 Ok(ndt) => Value::Float(ndt.and_utc().timestamp() as f64),
-                Err(_) => {
-                    match chrono::NaiveDate::parse_from_str(&text, "%Y-%m-%d") {
-                        Ok(nd) => Value::Float(nd.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp() as f64),
-                        Err(_) => Value::str_(format!("Invalid date: {}", text)),
+                Err(_) => match chrono::NaiveDate::parse_from_str(&text, "%Y-%m-%d") {
+                    Ok(nd) => {
+                        Value::Float(nd.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp() as f64)
                     }
-                }
+                    Err(_) => Value::str_(format!("Invalid date: {}", text)),
+                },
             }
         }
     }

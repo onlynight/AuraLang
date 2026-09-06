@@ -29,17 +29,13 @@ pub struct SourceSet {
 
 impl SourceSet {
     /// 从配置创建源码集
-    pub fn from_config(config: &SourceSetConfig, name: &str, project_dir: &std::path::Path) -> Self {
-        let source_dirs = config
-            .source_dirs
-            .iter()
-            .map(|d| project_dir.join(d))
-            .collect();
-        let resource_dirs = config
-            .resource_dirs
-            .iter()
-            .map(|d| project_dir.join(d))
-            .collect();
+    pub fn from_config(
+        config: &SourceSetConfig,
+        name: &str,
+        project_dir: &std::path::Path,
+    ) -> Self {
+        let source_dirs = config.source_dirs.iter().map(|d| project_dir.join(d)).collect();
+        let resource_dirs = config.resource_dirs.iter().map(|d| project_dir.join(d)).collect();
 
         Self {
             name: name.to_string(),
@@ -69,10 +65,7 @@ impl SourceSet {
 
     /// 判断源文件是否属于本源码集
     pub fn contains_file(&self, path: &PathBuf) -> bool {
-        self.source_dirs
-            .iter()
-            .any(|d| path.starts_with(d))
+        self.source_dirs.iter().any(|d| path.starts_with(d))
             && path.extension().map(|e| e == "aura").unwrap_or(false)
     }
 }
-

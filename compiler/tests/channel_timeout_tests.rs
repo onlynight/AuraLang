@@ -6,8 +6,8 @@
 
 use compiler::vm::channel::ChannelRuntime;
 use compiler::vm::value::Value;
-use std::time::Duration;
 use std::thread;
+use std::time::Duration;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. 有消息时立即返回
@@ -80,12 +80,24 @@ fn test_recv_timeout_multiple_messages() {
     runtime.send(ch_id, Value::Int(3));
 
     // 依次接收
-    assert_eq!(runtime.recv_timeout(ch_id, Duration::from_millis(50)), Value::Int(1));
-    assert_eq!(runtime.recv_timeout(ch_id, Duration::from_millis(50)), Value::Int(2));
-    assert_eq!(runtime.recv_timeout(ch_id, Duration::from_millis(50)), Value::Int(3));
+    assert_eq!(
+        runtime.recv_timeout(ch_id, Duration::from_millis(50)),
+        Value::Int(1)
+    );
+    assert_eq!(
+        runtime.recv_timeout(ch_id, Duration::from_millis(50)),
+        Value::Int(2)
+    );
+    assert_eq!(
+        runtime.recv_timeout(ch_id, Duration::from_millis(50)),
+        Value::Int(3)
+    );
 
     // 第四个应超时
-    assert_eq!(runtime.recv_timeout(ch_id, Duration::from_millis(50)), Value::Null);
+    assert_eq!(
+        runtime.recv_timeout(ch_id, Duration::from_millis(50)),
+        Value::Null
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -103,12 +115,24 @@ fn test_recv_timeout_bounded_channel() {
     runtime.send(ch_id, Value::Int(30));
 
     // 接收
-    assert_eq!(runtime.recv_timeout(ch_id, Duration::from_millis(50)), Value::Int(10));
-    assert_eq!(runtime.recv_timeout(ch_id, Duration::from_millis(50)), Value::Int(20));
-    assert_eq!(runtime.recv_timeout(ch_id, Duration::from_millis(50)), Value::Int(30));
+    assert_eq!(
+        runtime.recv_timeout(ch_id, Duration::from_millis(50)),
+        Value::Int(10)
+    );
+    assert_eq!(
+        runtime.recv_timeout(ch_id, Duration::from_millis(50)),
+        Value::Int(20)
+    );
+    assert_eq!(
+        runtime.recv_timeout(ch_id, Duration::from_millis(50)),
+        Value::Int(30)
+    );
 
     // 空通道，超时
-    assert_eq!(runtime.recv_timeout(ch_id, Duration::from_millis(50)), Value::Null);
+    assert_eq!(
+        runtime.recv_timeout(ch_id, Duration::from_millis(50)),
+        Value::Null
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -121,9 +145,15 @@ fn test_recv_timeout_zero() {
     let ch_id = runtime.new_channel(0);
 
     // 零超时，空通道
-    assert_eq!(runtime.recv_timeout(ch_id, Duration::from_millis(0)), Value::Null);
+    assert_eq!(
+        runtime.recv_timeout(ch_id, Duration::from_millis(0)),
+        Value::Null
+    );
 
     // 发送消息后零超时
     runtime.send(ch_id, Value::Int(99));
-    assert_eq!(runtime.recv_timeout(ch_id, Duration::from_millis(0)), Value::Int(99));
+    assert_eq!(
+        runtime.recv_timeout(ch_id, Duration::from_millis(0)),
+        Value::Int(99)
+    );
 }

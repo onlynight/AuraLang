@@ -19,12 +19,12 @@
 //!
 //! 对应设计文档 §9（插件系统）和 §18 Phase B4。
 
-pub mod r#trait;
 pub mod context;
 pub mod convention;
 pub mod explicit;
 pub mod external;
 pub mod registry;
+pub mod r#trait;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 核心类型（与 executor 共享，重导出常用类型）
@@ -81,7 +81,10 @@ impl TaskResult {
     }
 
     /// 创建成功结果（带产物）
-    pub fn ok_with_artifacts(message: impl Into<String>, artifacts: Vec<std::path::PathBuf>) -> Self {
+    pub fn ok_with_artifacts(
+        message: impl Into<String>,
+        artifacts: Vec<std::path::PathBuf>,
+    ) -> Self {
         Self {
             success: true,
             output: message.into(),

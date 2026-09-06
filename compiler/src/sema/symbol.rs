@@ -16,10 +16,7 @@ pub enum SymbolKind {
     /// 变量（val/var/参数/结构体字段）
     Variable { is_mutable: bool },
     /// 函数
-    Function {
-        params: Vec<ParamSym>,
-        return_type: Ty,
-    },
+    Function { params: Vec<ParamSym>, return_type: Ty },
     /// 类型（struct/enum/class/interface/别名）
     Type,
     /// 枚举变体
@@ -111,8 +108,7 @@ impl SymbolTable {
     pub fn enter_scope(&mut self, is_function_scope: bool) {
         let parent = self.current_scope;
         let idx = self.scopes.len();
-        self.scopes
-            .push(Scope::new(Some(parent), is_function_scope));
+        self.scopes.push(Scope::new(Some(parent), is_function_scope));
         self.current_scope = idx;
     }
 
@@ -135,7 +131,9 @@ impl SymbolTable {
             SymbolKind::Function { params, .. } => {
                 if let Some(vec) = self.functions.get(&sym.name) {
                     let dup = vec.iter().any(|existing| match &existing.kind {
-                        SymbolKind::Function { params: ep, .. } => {
+                        SymbolKind::Function {
+                            params: ep, ..
+                        } => {
                             ep.len() == params.len()
                                 && ep.iter().zip(params).all(|(a, b)| a.ty == b.ty)
                         }
@@ -145,30 +143,21 @@ impl SymbolTable {
                         return Err(sym.name.clone());
                     }
                 }
-                self.functions
-                    .entry(sym.name.clone())
-                    .or_default()
-                    .push(sym.clone());
+                self.functions.entry(sym.name.clone()).or_default().push(sym.clone());
                 Ok(())
             }
             _ => {
-                if self.scopes[self.current_scope]
-                    .symbols
-                    .contains_key(&sym.name)
-                {
+                if self.scopes[self.current_scope].symbols.contains_key(&sym.name) {
                     return Err(sym.name.clone());
                 }
                 // 同步到全局索引（typed）
                 if let SymbolKind::Type = &sym.kind {
                     // 类型存入 types 索引（types 索引全局唯一）
                     if self.current_scope == 0 {
-                        self.types
-                            .insert(sym.name.clone(), Ty::Named(sym.name.clone()));
+                        self.types.insert(sym.name.clone(), Ty::Named(sym.name.clone()));
                     }
                 }
-                self.scopes[self.current_scope]
-                    .symbols
-                    .insert(sym.name.clone(), sym);
+                self.scopes[self.current_scope].symbols.insert(sym.name.clone(), sym);
                 Ok(())
             }
         }
@@ -228,7 +217,11 @@ impl SymbolTable {
     /// 注册模块别名（用于 `import aura.math as m`）
     ///
     /// 调用时用 `m.sin(...)` 形式。
-    pub fn insert_module_alias(&mut self, alias: impl Into<String>, _module_path: impl Into<String>) {
+    pub fn insert_module_alias(
+        &mut self,
+        alias: impl Into<String>,
+        _module_path: impl Into<String>,
+    ) {
         let alias_name = alias.into();
         let sym = Symbol::new(
             alias_name.clone(),

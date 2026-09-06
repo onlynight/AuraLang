@@ -55,15 +55,26 @@ impl Version {
         let prerelease = prerelease_part
             .map(|p| p.split('.').map(|x| x.to_string()).collect())
             .unwrap_or_default();
-        let build = build
-            .map(|b| b.split('.').map(|x| x.to_string()).collect())
-            .unwrap_or_default();
+        let build =
+            build.map(|b| b.split('.').map(|x| x.to_string()).collect()).unwrap_or_default();
 
-        Ok(Version { major, minor, patch, prerelease, build })
+        Ok(Version {
+            major,
+            minor,
+            patch,
+            prerelease,
+            build,
+        })
     }
 
     pub fn new(major: u64, minor: u64, patch: u64) -> Self {
-        Self { major, minor, patch, prerelease: vec![], build: vec![] }
+        Self {
+            major,
+            minor,
+            patch,
+            prerelease: vec![],
+            build: vec![],
+        }
     }
 
     /// 比较版本：是否满足约束（返回 true 表示满足）
@@ -75,9 +86,7 @@ impl Version {
             VersionConstraint::LessThan(v) => self < v,
             VersionConstraint::Tilde(v) => {
                 // ~1.0 表示 >=1.0, <2.0
-                self.major == v.major
-                    && self.minor >= v.minor
-                    && self.major < v.major + 1
+                self.major == v.major && self.minor >= v.minor && self.major < v.major + 1
             }
             VersionConstraint::Compatible(v) => {
                 // ^1.0 表示 >=1.0, <2.0
@@ -151,7 +160,9 @@ impl VersionConstraint {
         }
 
         // 检查是否带操作符
-        for op in ["~>", "^", ">=", "<=", ">", "<", "==", "="] {
+        for op in [
+            "~>", "^", ">=", "<=", ">", "<", "==", "=",
+        ] {
             if s.starts_with(op) {
                 let version_str = s.trim_start_matches(op).trim();
                 let version = Version::parse(version_str)?;
@@ -159,7 +170,12 @@ impl VersionConstraint {
                     "~>" => Ok(VersionConstraint::Tilde(version)),
                     "^" => Ok(VersionConstraint::Compatible(version)),
                     ">=" => Ok(VersionConstraint::GreaterThanEqual(version)),
-                    "<=" => Ok(VersionConstraint::LessThan(Version::parse(&format!("{}.{}.{}", version.major, version.minor + 1, 0))?)),
+                    "<=" => Ok(VersionConstraint::LessThan(Version::parse(&format!(
+                        "{}.{}.{}",
+                        version.major,
+                        version.minor + 1,
+                        0
+                    ))?)),
                     ">" => Ok(VersionConstraint::GreaterThan(version)),
                     "<" => Ok(VersionConstraint::LessThan(version)),
                     "==" | "=" => Ok(VersionConstraint::Exact(version)),
@@ -222,7 +238,11 @@ pub struct Dependency {
 
 impl Dependency {
     pub fn new(name: &str, version: VersionConstraint, source: DependencySource) -> Self {
-        Self { name: name.to_string(), version, source }
+        Self {
+            name: name.to_string(),
+            version,
+            source,
+        }
     }
 }
 
@@ -280,7 +300,11 @@ pub fn parse_depends(source: &str) -> Vec<Dependency> {
         // 解析来源
         let source = if !source_part.trim().is_empty() {
             let source_str = source_part.trim();
-            if source_str.starts_with("git@") || source_str.starts_with("https://") || source_str.starts_with("http://") || source_str.starts_with("ssh://") {
+            if source_str.starts_with("git@")
+                || source_str.starts_with("https://")
+                || source_str.starts_with("http://")
+                || source_str.starts_with("ssh://")
+            {
                 DependencySource::Git(source_str.to_string())
             } else {
                 DependencySource::Path(PathBuf::from(source_str))
@@ -425,7 +449,6 @@ pub struct PackageManifest {
     pub platforms: Vec<String>,
 
     // ── Phase 1 新增 ──
-
     /// 是否为库包（无 `entry` 入口）
     #[serde(default)]
     pub library: bool,
@@ -468,32 +491,27 @@ pub struct ResourceConfig {
 impl PackageManifest {
     /// 从 TOML 文件解析包清单
     pub fn from_toml_file(path: &Path) -> Result<Self, PackageError> {
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            PackageError::IoError(format!("无法读取 {}: {}", path.display(), e))
-        })?;
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| PackageError::IoError(format!("无法读取 {}: {}", path.display(), e)))?;
         Self::from_toml(&content)
     }
 
     /// 从 TOML 字符串解析（Phase 1 起改用真正的 TOML 序列化）
     pub fn from_toml(s: &str) -> Result<Self, PackageError> {
-        toml::from_str(s).map_err(|e| {
-            PackageError::ParseError(format!("无法解析包清单: {}", e))
-        })
+        toml::from_str(s).map_err(|e| PackageError::ParseError(format!("无法解析包清单: {}", e)))
     }
 
     /// 序列化为 TOML
     pub fn to_toml(&self) -> Result<String, PackageError> {
-        toml::to_string_pretty(self).map_err(|e| {
-            PackageError::ParseError(format!("序列化失败: {}", e))
-        })
+        toml::to_string_pretty(self)
+            .map_err(|e| PackageError::ParseError(format!("序列化失败: {}", e)))
     }
 
     /// 写入文件
     pub fn write_to_file(&self, path: &Path) -> Result<(), PackageError> {
         let content = self.to_toml()?;
-        std::fs::write(path, content).map_err(|e| {
-            PackageError::IoError(format!("无法写入 {}: {}", path.display(), e))
-        })
+        std::fs::write(path, content)
+            .map_err(|e| PackageError::IoError(format!("无法写入 {}: {}", path.display(), e)))
     }
 
     /// 判断是否为库包（Phase 1）
@@ -538,22 +556,18 @@ impl LockFile {
 
     /// 从文件加载
     pub fn from_file(path: &Path) -> Result<Self, PackageError> {
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            PackageError::IoError(format!("无法读取 {}: {}", path.display(), e))
-        })?;
-        serde_json::from_str(&content).map_err(|e| {
-            PackageError::ParseError(format!("无法解析 {}: {}", path.display(), e))
-        })
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| PackageError::IoError(format!("无法读取 {}: {}", path.display(), e)))?;
+        serde_json::from_str(&content)
+            .map_err(|e| PackageError::ParseError(format!("无法解析 {}: {}", path.display(), e)))
     }
 
     /// 写入文件
     pub fn write_to_file(&self, path: &Path) -> Result<(), PackageError> {
-        let content = serde_json::to_string_pretty(self).map_err(|e| {
-            PackageError::ParseError(format!("序列化锁文件失败: {}", e))
-        })?;
-        std::fs::write(path, content).map_err(|e| {
-            PackageError::IoError(format!("无法写入 {}: {}", path.display(), e))
-        })
+        let content = serde_json::to_string_pretty(self)
+            .map_err(|e| PackageError::ParseError(format!("序列化锁文件失败: {}", e)))?;
+        std::fs::write(path, content)
+            .map_err(|e| PackageError::IoError(format!("无法写入 {}: {}", path.display(), e)))
     }
 
     /// 查找包
@@ -590,7 +604,11 @@ fn git_command(args: &[&str], cwd: Option<&Path>) -> GitResult {
             let stdout = String::from_utf8_lossy(&o.stdout).to_string();
             let stderr = String::from_utf8_lossy(&o.stderr).to_string();
             if o.status.success() {
-                GitResult { success: true, output: stdout.trim().to_string(), error: None }
+                GitResult {
+                    success: true,
+                    output: stdout.trim().to_string(),
+                    error: None,
+                }
             } else {
                 GitResult {
                     success: false,
@@ -611,18 +629,36 @@ fn git_command(args: &[&str], cwd: Option<&Path>) -> GitResult {
 pub fn git_clone(url: &str, dest: &Path) -> Result<String, PackageError> {
     // 检查目录是否已存在
     if dest.exists() {
-        let rev = git_command(&["rev-parse", "HEAD"], Some(dest));
+        let rev = git_command(
+            &[
+                "rev-parse",
+                "HEAD",
+            ],
+            Some(dest),
+        );
         if rev.success {
             return Ok(rev.output);
         }
     }
 
     let result = git_command(
-        &["clone", "--depth", "1", url, dest.to_str().unwrap_or(".")],
+        &[
+            "clone",
+            "--depth",
+            "1",
+            url,
+            dest.to_str().unwrap_or("."),
+        ],
         None,
     );
     if result.success {
-        let rev = git_command(&["rev-parse", "HEAD"], Some(dest));
+        let rev = git_command(
+            &[
+                "rev-parse",
+                "HEAD",
+            ],
+            Some(dest),
+        );
         Ok(rev.output)
     } else {
         Err(PackageError::GitError(format!(
@@ -638,7 +674,10 @@ pub fn git_latest_tag(url: &str, cache_dir: &Path) -> Result<Version, PackageErr
     let cache_path = cache_dir.join("latest_tags");
     let _ = std::fs::create_dir_all(&cache_path);
 
-    let cache_file = cache_path.join(format!("{}.tag", url.replace('/', "_").replace(':', "_").replace(' ', "_")));
+    let cache_file = cache_path.join(format!(
+        "{}.tag",
+        url.replace('/', "_").replace(':', "_").replace(' ', "_")
+    ));
 
     // 检查缓存
     if cache_file.exists() {
@@ -650,15 +689,39 @@ pub fn git_latest_tag(url: &str, cache_dir: &Path) -> Result<Version, PackageErr
     }
 
     // 浅克隆获取标签
-    let temp_dir = cache_path.join(format!("{}_{}", url.replace('/', "_").replace(':', "_").replace(' ', "_"), std::process::id()));
+    let temp_dir = cache_path.join(format!(
+        "{}_{}",
+        url.replace('/', "_").replace(':', "_").replace(' ', "_"),
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&temp_dir);
 
-    let result = git_command(&["clone", "--depth", "1", "--tags", url, temp_dir.to_str().unwrap_or(".")], None);
+    let result = git_command(
+        &[
+            "clone",
+            "--depth",
+            "1",
+            "--tags",
+            url,
+            temp_dir.to_str().unwrap_or("."),
+        ],
+        None,
+    );
     if !result.success {
-        return Err(PackageError::GitError(format!("获取标签失败: {}", result.error.unwrap_or_default())));
+        return Err(PackageError::GitError(format!(
+            "获取标签失败: {}",
+            result.error.unwrap_or_default()
+        )));
     }
 
-    let tag_result = git_command(&["describe", "--tags", "--abbrev=0"], Some(&temp_dir));
+    let tag_result = git_command(
+        &[
+            "describe",
+            "--tags",
+            "--abbrev=0",
+        ],
+        Some(&temp_dir),
+    );
     let _ = std::fs::remove_dir_all(&temp_dir);
 
     if tag_result.success {
@@ -672,7 +735,10 @@ pub fn git_latest_tag(url: &str, cache_dir: &Path) -> Result<Version, PackageErr
             Err(_) => Err(PackageError::InvalidVersion(format!("无效标签: {}", tag))),
         }
     } else {
-        Err(PackageError::GitError(format!("未找到标签: {}", tag_result.error.unwrap_or_default())))
+        Err(PackageError::GitError(format!(
+            "未找到标签: {}",
+            tag_result.error.unwrap_or_default()
+        )))
     }
 }
 
@@ -700,7 +766,9 @@ impl PackageCache {
     /// 从环境变量获取缓存目录
     pub fn from_env() -> Self {
         std::env::var("AURA_CACHE_DIR")
-            .map(|p| Self { root: PathBuf::from(p) })
+            .map(|p| Self {
+                root: PathBuf::from(p),
+            })
             .unwrap_or_else(|_| Self::default_cache())
     }
 
@@ -715,10 +783,7 @@ impl PackageCache {
 
     /// 获取包的版本目录
     pub fn version_dir(&self, name: &str, version: &Version) -> PathBuf {
-        self.root
-            .join("packages")
-            .join(name)
-            .join(version.to_string())
+        self.root.join("packages").join(name).join(version.to_string())
     }
 
     /// 检查包是否已缓存
@@ -729,12 +794,10 @@ impl PackageCache {
     /// 标记包已安装
     pub fn mark_installed(&self, name: &str, version: &Version) -> Result<(), PackageError> {
         let dir = self.version_dir(name, version);
-        std::fs::create_dir_all(&dir).map_err(|e| {
-            PackageError::IoError(format!("无法创建缓存目录: {}", e))
-        })?;
-        std::fs::write(dir.join("installed"), "").map_err(|e| {
-            PackageError::IoError(format!("无法标记安装: {}", e))
-        })
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| PackageError::IoError(format!("无法创建缓存目录: {}", e)))?;
+        std::fs::write(dir.join("installed"), "")
+            .map_err(|e| PackageError::IoError(format!("无法标记安装: {}", e)))
     }
 
     /// 获取缓存统计信息
@@ -752,7 +815,10 @@ impl PackageCache {
                 }
             }
         }
-        CacheStats { package_count: count, total_size: size }
+        CacheStats {
+            package_count: count,
+            total_size: size,
+        }
     }
 
     /// 清理缓存
@@ -760,9 +826,8 @@ impl PackageCache {
         let packages_dir = self.root.join("packages");
         let size = if packages_dir.exists() { dir_size(&packages_dir) } else { 0 };
         if packages_dir.exists() {
-            std::fs::remove_dir_all(&packages_dir).map_err(|e| {
-                PackageError::IoError(format!("无法清理缓存: {}", e))
-            })?;
+            std::fs::remove_dir_all(&packages_dir)
+                .map_err(|e| PackageError::IoError(format!("无法清理缓存: {}", e)))?;
         }
         Ok(size)
     }
@@ -819,7 +884,10 @@ pub struct DependencyGraph {
 
 impl DependencyGraph {
     pub fn new(root: Option<&str>) -> Self {
-        Self { nodes: Vec::new(), root: root.map(|s| s.to_string()) }
+        Self {
+            nodes: Vec::new(),
+            root: root.map(|s| s.to_string()),
+        }
     }
 
     pub fn add_node(&mut self, name: &str, version: Version, deps: Vec<String>) {
@@ -966,7 +1034,11 @@ impl PackageManager {
     }
 
     pub fn with_config(config: PackageManagerConfig) -> Self {
-        Self { config, manifest: None, lock: None }
+        Self {
+            config,
+            manifest: None,
+            lock: None,
+        }
     }
 
     /// 加载项目清单
@@ -995,7 +1067,11 @@ impl PackageManager {
     }
 
     /// 安装依赖（11.4）
-    pub fn install(&mut self, project_dir: &Path, deps: &[Dependency]) -> Result<LockFile, PackageError> {
+    pub fn install(
+        &mut self,
+        project_dir: &Path,
+        deps: &[Dependency],
+    ) -> Result<LockFile, PackageError> {
         let lock_path = project_dir.join(LockFile::FILENAME);
         let mut lock = LockFile {
             version: LockFile::CURRENT_VERSION,
@@ -1039,14 +1115,26 @@ impl PackageManager {
                             dep.name, version
                         )));
                     }
-                    let rev = git_command(&["rev-parse", "HEAD"], Some(&version_dir));
+                    let rev = git_command(
+                        &[
+                            "rev-parse",
+                            "HEAD",
+                        ],
+                        Some(&version_dir),
+                    );
                     rev.output
                 } else {
                     git_clone(url, &version_dir)?
                 }
             }
             DependencySource::Path(path) => {
-                let rev = git_command(&["rev-parse", "HEAD"], Some(path));
+                let rev = git_command(
+                    &[
+                        "rev-parse",
+                        "HEAD",
+                    ],
+                    Some(path),
+                );
                 rev.output
             }
             DependencySource::Binary(path) => {
@@ -1086,7 +1174,9 @@ impl PackageManager {
             DependencySource::Git(url) => {
                 // Git 仓库：获取标签
                 if self.config.offline {
-                    Err(PackageError::CacheError("离线模式下无法获取版本".to_string()))
+                    Err(PackageError::CacheError(
+                        "离线模式下无法获取版本".to_string(),
+                    ))
                 } else {
                     git_latest_tag(url, self.config.cache.root())
                 }
@@ -1103,10 +1193,16 @@ impl PackageManager {
     }
 
     /// 更新依赖（11.5）
-    pub fn update(&mut self, project_dir: &Path, force_all: bool) -> Result<Vec<String>, PackageError> {
-        let manifest = self.manifest.as_ref().ok_or_else(|| {
-            PackageError::ParseError("未找到 aura.toml".to_string())
-        })?.clone();
+    pub fn update(
+        &mut self,
+        project_dir: &Path,
+        force_all: bool,
+    ) -> Result<Vec<String>, PackageError> {
+        let manifest = self
+            .manifest
+            .as_ref()
+            .ok_or_else(|| PackageError::ParseError("未找到 aura.toml".to_string()))?
+            .clone();
 
         let mut updated = Vec::new();
         let mut new_lock = LockFile {
@@ -1155,7 +1251,13 @@ impl PackageManager {
 
         // 创建标签
         let version_str = manifest.version.clone();
-        let result = git_command(&["tag", &format!("v{}", version_str)], Some(package_dir));
+        let result = git_command(
+            &[
+                "tag",
+                &format!("v{}", version_str),
+            ],
+            Some(package_dir),
+        );
         if !result.success {
             return Err(PackageError::GitError(format!(
                 "创建标签失败: {}",
@@ -1164,7 +1266,14 @@ impl PackageManager {
         }
 
         // 推送标签
-        let push_result = git_command(&["push", "origin", &format!("v{}", version_str)], Some(package_dir));
+        let push_result = git_command(
+            &[
+                "push",
+                "origin",
+                &format!("v{}", version_str),
+            ],
+            Some(package_dir),
+        );
         if !push_result.success {
             return Err(PackageError::GitError(format!(
                 "推送标签失败: {}",
@@ -1172,7 +1281,10 @@ impl PackageManager {
             )));
         }
 
-        Ok(format!("已发布 {} v{} 到 {}", manifest.name, version_str, repo))
+        Ok(format!(
+            "已发布 {} v{} 到 {}",
+            manifest.name, version_str, repo
+        ))
     }
 
     /// 显示依赖树（11.7）
@@ -1236,10 +1348,7 @@ impl PackageManager {
         let mut problems = Vec::new();
         for entry in &lock.dependencies {
             if !self.config.cache.is_cached(&entry.name, &entry.version) {
-                problems.push(format!(
-                    "{} v{} 未缓存",
-                    entry.name, entry.version
-                ));
+                problems.push(format!("{} v{} 未缓存", entry.name, entry.version));
             }
         }
 
@@ -1251,9 +1360,8 @@ impl PackageManager {
         let project_path = dir.join(name);
 
         // 创建目录
-        std::fs::create_dir_all(&project_path).map_err(|e| {
-            PackageError::IoError(format!("无法创建目录: {}", e))
-        })?;
+        std::fs::create_dir_all(&project_path)
+            .map_err(|e| PackageError::IoError(format!("无法创建目录: {}", e)))?;
 
         // 创建 aura.toml
         let manifest = PackageManifest {
@@ -1292,15 +1400,13 @@ public fun main() {{
 "#,
             name, name
         );
-        std::fs::write(project_path.join("main.aura"), main_content).map_err(|e| {
-            PackageError::IoError(format!("无法写入 main.aura: {}", e))
-        })?;
+        std::fs::write(project_path.join("main.aura"), main_content)
+            .map_err(|e| PackageError::IoError(format!("无法写入 main.aura: {}", e)))?;
 
         // 创建 .gitignore
         let gitignore = "# 构建产物\n*.auc\n*.exe\n*.o\n*.obj\n*.ll\n\n# 缓存\n.aura-cache/\n\n# 依赖\nvendor/\n";
-        std::fs::write(project_path.join(".gitignore"), gitignore).map_err(|e| {
-            PackageError::IoError(format!("无法写入 .gitignore: {}", e))
-        })?;
+        std::fs::write(project_path.join(".gitignore"), gitignore)
+            .map_err(|e| PackageError::IoError(format!("无法写入 .gitignore: {}", e)))?;
 
         // 初始化 Git 仓库
         let _ = git_command(&["init"], Some(&project_path));
@@ -1383,7 +1489,12 @@ import json
     #[test]
     fn test_version_parse_build() {
         let v = Version::parse("1.2.3+build.123").unwrap();
-        assert_eq!(v.build, vec!["build", "123"]);
+        assert_eq!(
+            v.build,
+            vec![
+                "build", "123"
+            ]
+        );
     }
 
     #[test]
@@ -1641,7 +1752,14 @@ kind = "bytecode"
     #[test]
     fn test_dependency_graph_tree() {
         let mut graph = DependencyGraph::new(Some("app"));
-        graph.add_node("app", Version::new(1, 0, 0), vec!["lib-a".to_string(), "lib-b".to_string()]);
+        graph.add_node(
+            "app",
+            Version::new(1, 0, 0),
+            vec![
+                "lib-a".to_string(),
+                "lib-b".to_string(),
+            ],
+        );
         graph.add_node("lib-a", Version::new(2, 0, 0), vec!["lib-c".to_string()]);
         graph.add_node("lib-b", Version::new(3, 0, 0), vec![]);
         graph.add_node("lib-c", Version::new(1, 0, 0), vec![]);

@@ -6,8 +6,8 @@
 
 use compiler::vm::thread_pool::{AtomicCounter, ThreadPool};
 use std::sync::Arc;
-use std::time::Duration;
 use std::thread;
+use std::time::Duration;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. 线程池创建
@@ -106,7 +106,11 @@ fn test_thread_pool_thread_safe() {
     }
 
     thread::sleep(Duration::from_millis(200));
-    assert_eq!(counter.value(), 100, "应执行 100 个任务（4 线程 × 25 任务）");
+    assert_eq!(
+        counter.value(),
+        100,
+        "应执行 100 个任务（4 线程 × 25 任务）"
+    );
 
     pool.shutdown();
 }

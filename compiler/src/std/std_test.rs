@@ -27,11 +27,7 @@ pub fn register(reg: &mut NativeRegistry) {
 }
 
 fn make_result(ok: bool, msg: String) -> Value {
-    if ok {
-        Value::str_(format!("PASS: {}", msg))
-    } else {
-        Value::str_(format!("FAIL: {}", msg))
-    }
+    if ok { Value::str_(format!("PASS: {}", msg)) } else { Value::str_(format!("FAIL: {}", msg)) }
 }
 
 fn nat_assert_true(args: &[Value]) -> Value {
@@ -43,7 +39,10 @@ fn nat_assert_true(args: &[Value]) -> Value {
 fn nat_assert_false(args: &[Value]) -> Value {
     let cond = args.first().map(|v| v.is_truthy()).unwrap_or(false);
     let msg = args.get(1).map(|v| v.as_string()).unwrap_or_default();
-    make_result(!cond, if msg.is_empty() { "assertFalse".into() } else { msg })
+    make_result(
+        !cond,
+        if msg.is_empty() { "assertFalse".into() } else { msg },
+    )
 }
 
 fn nat_assert_eq(args: &[Value]) -> Value {
@@ -54,11 +53,7 @@ fn nat_assert_eq(args: &[Value]) -> Value {
     let b = args[1].clone();
     let msg = args.get(2).map(|v| v.as_string()).unwrap_or_default();
     let ok = a == b;
-    let detail = if ok {
-        "assertEq".to_string()
-    } else {
-        format!("expected {} but got {}", a, b)
-    };
+    let detail = if ok { "assertEq".to_string() } else { format!("expected {} but got {}", a, b) };
     make_result(ok, if msg.is_empty() { detail } else { msg })
 }
 
@@ -81,7 +76,10 @@ fn nat_assert_not_eq(args: &[Value]) -> Value {
 fn nat_assert_not_null(args: &[Value]) -> Value {
     let cond = args.first().map(|v| v != &Value::Null).unwrap_or(false);
     let msg = args.get(1).map(|v| v.as_string()).unwrap_or_default();
-    make_result(cond, if msg.is_empty() { "assertNotNull".into() } else { msg })
+    make_result(
+        cond,
+        if msg.is_empty() { "assertNotNull".into() } else { msg },
+    )
 }
 
 fn nat_assert_null(args: &[Value]) -> Value {
@@ -135,7 +133,10 @@ fn nat_assert_gt(args: &[Value]) -> Value {
     let a = args[0].as_float();
     let b = args[1].as_float();
     let msg = args.get(2).map(|v| v.as_string()).unwrap_or_default();
-    make_result(a > b, if msg.is_empty() { format!("assertGt: {} > {}", a, b) } else { msg })
+    make_result(
+        a > b,
+        if msg.is_empty() { format!("assertGt: {} > {}", a, b) } else { msg },
+    )
 }
 
 fn nat_assert_gte(args: &[Value]) -> Value {
@@ -145,7 +146,10 @@ fn nat_assert_gte(args: &[Value]) -> Value {
     let a = args[0].as_float();
     let b = args[1].as_float();
     let msg = args.get(2).map(|v| v.as_string()).unwrap_or_default();
-    make_result(a >= b, if msg.is_empty() { format!("assertGte: {} >= {}", a, b) } else { msg })
+    make_result(
+        a >= b,
+        if msg.is_empty() { format!("assertGte: {} >= {}", a, b) } else { msg },
+    )
 }
 
 fn nat_assert_lt(args: &[Value]) -> Value {
@@ -155,7 +159,10 @@ fn nat_assert_lt(args: &[Value]) -> Value {
     let a = args[0].as_float();
     let b = args[1].as_float();
     let msg = args.get(2).map(|v| v.as_string()).unwrap_or_default();
-    make_result(a < b, if msg.is_empty() { format!("assertLt: {} < {}", a, b) } else { msg })
+    make_result(
+        a < b,
+        if msg.is_empty() { format!("assertLt: {} < {}", a, b) } else { msg },
+    )
 }
 
 fn nat_assert_lte(args: &[Value]) -> Value {
@@ -165,7 +172,10 @@ fn nat_assert_lte(args: &[Value]) -> Value {
     let a = args[0].as_float();
     let b = args[1].as_float();
     let msg = args.get(2).map(|v| v.as_string()).unwrap_or_default();
-    make_result(a <= b, if msg.is_empty() { format!("assertLte: {} <= {}", a, b) } else { msg })
+    make_result(
+        a <= b,
+        if msg.is_empty() { format!("assertLte: {} <= {}", a, b) } else { msg },
+    )
 }
 
 fn nat_assert_approx(args: &[Value]) -> Value {
@@ -177,7 +187,14 @@ fn nat_assert_approx(args: &[Value]) -> Value {
     let epsilon = args[2].as_float();
     let msg = args.get(3).map(|v| v.as_string()).unwrap_or_default();
     let ok = (a - b).abs() <= epsilon;
-    make_result(ok, if msg.is_empty() { format!("assertApprox: {} ≈ {} (ε={})", a, b, epsilon) } else { msg })
+    make_result(
+        ok,
+        if msg.is_empty() {
+            format!("assertApprox: {} ≈ {} (ε={})", a, b, epsilon)
+        } else {
+            msg
+        },
+    )
 }
 
 fn nat_assert_array_eq(args: &[Value]) -> Value {
@@ -188,7 +205,10 @@ fn nat_assert_array_eq(args: &[Value]) -> Value {
     let b = &args[1];
     let msg = args.get(2).map(|v| v.as_string()).unwrap_or_default();
     let ok = a == b;
-    make_result(ok, if msg.is_empty() { format!("assertArrayEq: {} == {}", a, b) } else { msg })
+    make_result(
+        ok,
+        if msg.is_empty() { format!("assertArrayEq: {} == {}", a, b) } else { msg },
+    )
 }
 
 fn nat_assert_map_eq(args: &[Value]) -> Value {
@@ -199,7 +219,10 @@ fn nat_assert_map_eq(args: &[Value]) -> Value {
     let b = &args[1];
     let msg = args.get(2).map(|v| v.as_string()).unwrap_or_default();
     let ok = a == b;
-    make_result(ok, if msg.is_empty() { format!("assertMapEq: {} == {}", a, b) } else { msg })
+    make_result(
+        ok,
+        if msg.is_empty() { format!("assertMapEq: {} == {}", a, b) } else { msg },
+    )
 }
 
 fn nat_pass(args: &[Value]) -> Value {

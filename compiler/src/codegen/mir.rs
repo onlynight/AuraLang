@@ -27,32 +27,15 @@ pub enum MirInstr {
     /// 将寄存器 `src` 的值写入局部变量槽 `slot`
     StoreLocal { slot: usize, src: Reg },
     /// 二元运算：`dst = a op b`
-    BinOp {
-        dst: Reg,
-        op: HirBinOp,
-        a: Reg,
-        b: Reg,
-    },
+    BinOp { dst: Reg, op: HirBinOp, a: Reg, b: Reg },
     /// 一元运算：`dst = op a`
     UnOp { dst: Reg, op: HirUnOp, a: Reg },
     /// 调用用户函数（结果写入 `dst`，若无副作用可忽略）
-    Call {
-        dst: Option<Reg>,
-        func: String,
-        args: Vec<Reg>,
-    },
+    Call { dst: Option<Reg>, func: String, args: Vec<Reg> },
     /// 调用原生/内置函数
-    CallNative {
-        dst: Option<Reg>,
-        func: String,
-        args: Vec<Reg>,
-    },
+    CallNative { dst: Option<Reg>, func: String, args: Vec<Reg> },
     /// 调用闭包（Phase 2）：`dst = CallClosure(closure, args...)`
-    CallClosure {
-        dst: Option<Reg>,
-        closure: Reg,
-        args: Vec<Reg>,
-    },
+    CallClosure { dst: Option<Reg>, closure: Reg, args: Vec<Reg> },
     /// 分配对象（结果写入 `dst`）
     Alloc { dst: Reg, type_name: String },
     /// 读取字段：`dst = obj.name`
@@ -97,11 +80,7 @@ pub enum Terminator {
     /// 无条件跳转至块 `0`
     Goto(usize),
     /// 条件跳转：`cond` 为真跳 `then_b`，否则跳 `else_b`
-    If {
-        cond: Reg,
-        then_b: usize,
-        else_b: usize,
-    },
+    If { cond: Reg, then_b: usize, else_b: usize },
     /// 返回寄存器 `0` 的值
     Return(Reg),
     /// 返回 Unit
@@ -247,11 +226,13 @@ struct MirBuilder {
 impl MirBuilder {
     fn new(param_count: usize) -> Self {
         MirBuilder {
-            blocks: vec![BasicBlock {
-                id: 0,
-                instrs: vec![],
-                term: Terminator::Goto(0), // 哨兵：未闭合
-            }],
+            blocks: vec![
+                BasicBlock {
+                    id: 0,
+                    instrs: vec![],
+                    term: Terminator::Goto(0), // 哨兵：未闭合
+                },
+            ],
             current: 0,
             next_reg: param_count,
             scopes: vec![HashMap::new()],
@@ -291,10 +272,7 @@ impl MirBuilder {
     }
 
     fn declare(&mut self, name: &str, slot: Reg) {
-        self.scopes
-            .last_mut()
-            .unwrap()
-            .insert(name.to_string(), slot);
+        self.scopes.last_mut().unwrap().insert(name.to_string(), slot);
     }
 
     fn lookup(&self, name: &str) -> Option<Reg> {
@@ -328,7 +306,11 @@ impl MirBuilder {
                     }
                 }
             }
-            HirExpr::Lambda { params, body, .. } => {
+            HirExpr::Lambda {
+                params,
+                body,
+                ..
+            } => {
                 for p in params {
                     locals.insert(p.name.clone());
                 }
@@ -338,31 +320,54 @@ impl MirBuilder {
                 }
             }
             HirExpr::Block(b) => Self::collect_free_vars_in_block(b, locals, out),
-            HirExpr::Call { callee: _, args } => {
+            HirExpr::Call {
+                callee: _,
+                args,
+            } => {
                 for a in args {
                     Self::collect_free_vars(a, locals, out);
                 }
             }
-            HirExpr::Member { object, name: _ } => {
+            HirExpr::Member {
+                object,
+                name: _,
+            } => {
                 Self::collect_free_vars(object, locals, out);
             }
-            HirExpr::Index { container, index } => {
+            HirExpr::Index {
+                container,
+                index,
+            } => {
                 Self::collect_free_vars(container, locals, out);
                 Self::collect_free_vars(index, locals, out);
             }
-            HirExpr::Binary { op: _, lhs, rhs } => {
+            HirExpr::Binary {
+                op: _,
+                lhs,
+                rhs,
+            } => {
                 Self::collect_free_vars(lhs, locals, out);
                 Self::collect_free_vars(rhs, locals, out);
             }
-            HirExpr::Unary { op: _, operand } => {
+            HirExpr::Unary {
+                op: _,
+                operand,
+            } => {
                 Self::collect_free_vars(operand, locals, out);
             }
-            HirExpr::If { cond, then_e, else_e } => {
+            HirExpr::If {
+                cond,
+                then_e,
+                else_e,
+            } => {
                 Self::collect_free_vars(cond, locals, out);
                 Self::collect_free_vars(then_e, locals, out);
                 Self::collect_free_vars(else_e, locals, out);
             }
-            HirExpr::New { type_name: _, args } => {
+            HirExpr::New {
+                type_name: _,
+                args,
+            } => {
                 for a in args {
                     Self::collect_free_vars(a, locals, out);
                 }
@@ -370,17 +375,29 @@ impl MirBuilder {
             HirExpr::Box(inner) | HirExpr::WeakRef(inner) | HirExpr::Await(inner) => {
                 Self::collect_free_vars(inner, locals, out);
             }
-            HirExpr::Lambda { params: _, body } => {
+            HirExpr::Lambda {
+                params: _,
+                body,
+            } => {
                 Self::collect_free_vars_in_block(body, locals, out);
             }
             _ => {} // Literal, Unit, New, etc. have no free vars
         }
     }
 
-    fn collect_free_vars_in_block(block: &HirBlock, locals: &mut HashSet<String>, out: &mut Vec<String>) {
+    fn collect_free_vars_in_block(
+        block: &HirBlock,
+        locals: &mut HashSet<String>,
+        out: &mut Vec<String>,
+    ) {
         for stmt in &block.stmts {
             match stmt {
-                HirStmt::Val { init, name, .. } | HirStmt::Var { init, name, .. } => {
+                HirStmt::Val {
+                    init, name, ..
+                }
+                | HirStmt::Var {
+                    init, name, ..
+                } => {
                     if let Some(e) = init {
                         Self::collect_free_vars(e, locals, out);
                     }
@@ -394,7 +411,11 @@ impl MirBuilder {
                         Self::collect_free_vars(v, locals, out);
                     }
                 }
-                HirStmt::If { cond, then_b, else_b } => {
+                HirStmt::If {
+                    cond,
+                    then_b,
+                    else_b,
+                } => {
                     Self::collect_free_vars(cond, locals, out);
                     Self::collect_free_vars_in_block(then_b, locals, out);
                     if let Some(eb) = else_b {
@@ -410,7 +431,10 @@ impl MirBuilder {
                 HirStmt::Defer(b) => {
                     Self::collect_free_vars_in_block(b, locals, out);
                 }
-                HirStmt::Assign { target, value } => {
+                HirStmt::Assign {
+                    target,
+                    value,
+                } => {
                     Self::collect_free_vars(target, locals, out);
                     Self::collect_free_vars(value, locals, out);
                 }
@@ -438,9 +462,7 @@ impl MirBuilder {
         Self::collect_free_vars_in_block(body, &mut locals, &mut captures);
 
         // 3. 为每个捕获变量分配当前函数中的寄存器
-        let capture_regs: Vec<Reg> = captures.iter()
-            .filter_map(|name| self.lookup(name))
-            .collect();
+        let capture_regs: Vec<Reg> = captures.iter().filter_map(|name| self.lookup(name)).collect();
 
         // 4. 构建闭包函数体
         let param_slots: Vec<usize> = (0..params.len()).collect();
@@ -480,9 +502,7 @@ impl MirBuilder {
             reg_count: builder.next_reg,
             capture_names: captures.clone(),
             capture_slots: Vec::new(),
-            body: builder.blocks.iter()
-                .flat_map(|b| b.instrs.clone())
-                .collect(),
+            body: builder.blocks.iter().flat_map(|b| b.instrs.clone()).collect(),
             term: builder.blocks.last().map(|b| b.term.clone()).unwrap_or(Terminator::ReturnVoid),
         };
         self.closures.push(closure);
@@ -514,23 +534,40 @@ impl MirBuilder {
 
     fn lower_stmt(&mut self, s: &HirStmt, ctx: &mut LowerCtx) {
         match s {
-            HirStmt::Val { name, init, .. } | HirStmt::Var { name, init, .. } => {
+            HirStmt::Val {
+                name, init, ..
+            }
+            | HirStmt::Var {
+                name, init, ..
+            } => {
                 let reg = self.alloc_reg();
                 if let Some(e) = init {
                     let v = self.lower_expr(e, ctx);
-                    self.emit(MirInstr::StoreLocal { slot: reg, src: v });
+                    self.emit(MirInstr::StoreLocal {
+                        slot: reg,
+                        src: v,
+                    });
                 }
                 self.declare(name, reg);
             }
-            HirStmt::Assign { target, value } => {
+            HirStmt::Assign {
+                target,
+                value,
+            } => {
                 let v = self.lower_expr(value, ctx);
                 match target {
                     HirExpr::Var(n) => {
                         if let Some(slot) = self.lookup(n) {
-                            self.emit(MirInstr::StoreLocal { slot, src: v });
+                            self.emit(MirInstr::StoreLocal {
+                                slot,
+                                src: v,
+                            });
                         }
                     }
-                    HirExpr::Member { object, name } => {
+                    HirExpr::Member {
+                        object,
+                        name,
+                    } => {
                         let obj = self.lower_expr(object, ctx);
                         self.emit(MirInstr::SetField {
                             obj,
@@ -538,7 +575,10 @@ impl MirBuilder {
                             src: v,
                         });
                     }
-                    HirExpr::Index { container, index } => {
+                    HirExpr::Index {
+                        container,
+                        index,
+                    } => {
                         let obj = self.lower_expr(container, ctx);
                         let i = self.lower_expr(index, ctx);
                         self.emit(MirInstr::SetIndex {
@@ -658,20 +698,39 @@ impl MirBuilder {
                 self.emit(MirInstr::LoadLocal { dst, slot });
                 dst
             }
-            HirExpr::Binary { op, lhs, rhs } => {
+            HirExpr::Binary {
+                op,
+                lhs,
+                rhs,
+            } => {
                 let a = self.lower_expr(lhs, ctx);
                 let b = self.lower_expr(rhs, ctx);
                 let dst = self.alloc_reg();
-                self.emit(MirInstr::BinOp { dst, op: *op, a, b });
+                self.emit(MirInstr::BinOp {
+                    dst,
+                    op: *op,
+                    a,
+                    b,
+                });
                 dst
             }
-            HirExpr::Unary { op, operand } => {
+            HirExpr::Unary {
+                op,
+                operand,
+            } => {
                 let a = self.lower_expr(operand, ctx);
                 let dst = self.alloc_reg();
-                self.emit(MirInstr::UnOp { dst, op: *op, a });
+                self.emit(MirInstr::UnOp {
+                    dst,
+                    op: *op,
+                    a,
+                });
                 dst
             }
-            HirExpr::Call { callee, args } => {
+            HirExpr::Call {
+                callee,
+                args,
+            } => {
                 // P8.7: makeCallback 特殊处理 — 生成 MakeCallback 指令
                 if callee == "makeCallback" && args.len() == 1 {
                     if let HirExpr::Var(name) = &args[0] {
@@ -714,15 +773,22 @@ impl MirBuilder {
                 }
                 dst
             }
-            HirExpr::Member { object, name } => {
+            HirExpr::Member {
+                object,
+                name,
+            } => {
                 // Phase 3: 检测枚举变体引用（EnumName.Variant）
                 if let HirExpr::Var(enum_name) = object.as_ref() {
                     if ctx.enum_names.contains(enum_name) {
                         // 查找变体索引
                         let variant_idx = if let Some(hir_program) = self.hir_program.as_ref() {
-                            hir_program.enums.iter()
+                            hir_program
+                                .enums
+                                .iter()
                                 .find(|e| &e.name == enum_name)
-                                .and_then(|e| e.variants.iter().position(|(vname, _)| vname == name))
+                                .and_then(|e| {
+                                    e.variants.iter().position(|(vname, _)| vname == name)
+                                })
                                 .unwrap_or(0) as u16
                         } else {
                             0
@@ -745,7 +811,10 @@ impl MirBuilder {
                 });
                 dst
             }
-            HirExpr::Index { container, index } => {
+            HirExpr::Index {
+                container,
+                index,
+            } => {
                 let c = self.lower_expr(container, ctx);
                 let i = self.lower_expr(index, ctx);
                 let dst = self.alloc_reg();
@@ -756,7 +825,10 @@ impl MirBuilder {
                 });
                 dst
             }
-            HirExpr::New { type_name, args } => {
+            HirExpr::New {
+                type_name,
+                args,
+            } => {
                 let argv: Vec<Reg> = args.iter().map(|a| self.lower_expr(a, ctx)).collect();
                 let dst = self.alloc_reg();
                 self.emit(MirInstr::Alloc {
@@ -789,13 +861,19 @@ impl MirBuilder {
                 let res = self.alloc_reg();
                 self.current = then_id;
                 let tv = self.lower_expr(then_e, ctx);
-                self.emit(MirInstr::StoreLocal { slot: res, src: tv });
+                self.emit(MirInstr::StoreLocal {
+                    slot: res,
+                    src: tv,
+                });
                 if !self.is_closed(then_id) {
                     self.set_term(Terminator::Goto(merge_id));
                 }
                 self.current = else_id;
                 let ev = self.lower_expr(else_e, ctx);
-                self.emit(MirInstr::StoreLocal { slot: res, src: ev });
+                self.emit(MirInstr::StoreLocal {
+                    slot: res,
+                    src: ev,
+                });
                 if !self.is_closed(else_id) {
                     self.set_term(Terminator::Goto(merge_id));
                 }
@@ -855,9 +933,10 @@ impl MirBuilder {
                 self.lower_expr(inner, ctx)
             }
             // Phase 2: Lambda — 降级为 MakeClosure 指令
-            HirExpr::Lambda { params, body } => {
-                self.lower_lambda(params, body, ctx)
-            }
+            HirExpr::Lambda {
+                params,
+                body,
+            } => self.lower_lambda(params, body, ctx),
         }
     }
 

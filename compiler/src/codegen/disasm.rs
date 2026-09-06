@@ -64,11 +64,8 @@ fn disassemble_function(
             }
         };
         let opsize = OpCode::operand_size(byte);
-        let operand_bytes = if pos + 1 + opsize <= code.len() {
-            &code[pos + 1..pos + 1 + opsize]
-        } else {
-            &[][..]
-        };
+        let operand_bytes =
+            if pos + 1 + opsize <= code.len() { &code[pos + 1..pos + 1 + opsize] } else { &[][..] };
 
         let mut line = format!(
             "{:>6}  {}",
@@ -92,14 +89,18 @@ fn disassemble_function(
 fn opcode_display(module: &BytecodeModule, op: &OpCode, operand: &[u8]) -> String {
     let read_u16 = || -> u16 {
         if operand.len() >= 2 {
-            u16::from_le_bytes([operand[0], operand[1]])
+            u16::from_le_bytes([
+                operand[0], operand[1],
+            ])
         } else {
             0
         }
     };
     let read_i32 = || -> i32 {
         if operand.len() >= 4 {
-            i32::from_le_bytes([operand[0], operand[1], operand[2], operand[3]])
+            i32::from_le_bytes([
+                operand[0], operand[1], operand[2], operand[3],
+            ])
         } else {
             0
         }
@@ -109,31 +110,19 @@ fn opcode_display(module: &BytecodeModule, op: &OpCode, operand: &[u8]) -> Strin
         // 注意：op 由 from_byte 还原，操作数携带占位 0，真实操作数须从 operand 字节读取
         OpCode::LoadConst(_) => {
             let i = read_u16();
-            let v = module
-                .consts
-                .get(i as usize)
-                .map(const_display)
-                .unwrap_or_else(|| "?".into());
+            let v = module.consts.get(i as usize).map(const_display).unwrap_or_else(|| "?".into());
             format!("LOAD_CONST {}   ; {}", i, v)
         }
         OpCode::LoadVar(_) => format!("LOAD_VAR {}", read_u16()),
         OpCode::StoreVar(_) => format!("STORE_VAR {}", read_u16()),
         OpCode::Call(_) => {
             let i = read_u16();
-            let name = module
-                .functions
-                .get(i as usize)
-                .map(|f| f.name.as_str())
-                .unwrap_or("?");
+            let name = module.functions.get(i as usize).map(|f| f.name.as_str()).unwrap_or("?");
             format!("CALL {}   ; {}", i, name)
         }
         OpCode::CallNative(_) => {
             let i = read_u16();
-            let name = module
-                .natives
-                .get(i as usize)
-                .map(|n| n.name.as_str())
-                .unwrap_or("?");
+            let name = module.natives.get(i as usize).map(|n| n.name.as_str()).unwrap_or("?");
             format!("CALL_NATIVE {}   ; {}", i, name)
         }
         OpCode::NewObject(_) => format!("NEW_OBJECT {}", read_u16()),

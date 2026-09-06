@@ -16,10 +16,7 @@ pub enum LinkError {
     /// 符号未找到
     SymbolNotFound(String),
     /// 符号冲突
-    SymbolConflict {
-        symbol: String,
-        modules: Vec<String>,
-    },
+    SymbolConflict { symbol: String, modules: Vec<String> },
     /// 模块未找到
     ModuleNotFound(String),
     /// 循环依赖
@@ -30,18 +27,17 @@ impl std::fmt::Display for LinkError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             LinkError::SymbolNotFound(s) => write!(f, "符号未找到: {}", s),
-            LinkError::SymbolConflict { symbol, modules } => write!(
+            LinkError::SymbolConflict {
+                symbol,
+                modules,
+            } => write!(
                 f,
                 "符号冲突: {} 在多个模块中定义: {}",
                 symbol,
                 modules.join(", ")
             ),
             LinkError::ModuleNotFound(m) => write!(f, "模块未找到: {}", m),
-            LinkError::CircularDependency(mods) => write!(
-                f,
-                "循环依赖: {}",
-                mods.join(" -> ")
-            ),
+            LinkError::CircularDependency(mods) => write!(f, "循环依赖: {}", mods.join(" -> ")),
         }
     }
 }
@@ -99,10 +95,7 @@ impl Linker {
 
     /// 加载模块签名
     pub fn load_module(&mut self, sig: &ModuleSig) -> Result<(), LinkError> {
-        self.modules.insert(
-            sig.module_name.clone(),
-            sig.clone(),
-        );
+        self.modules.insert(sig.module_name.clone(), sig.clone());
         Ok(())
     }
 
@@ -114,10 +107,7 @@ impl Linker {
     }
 
     /// 解析导入声明
-    pub fn resolve_imports(
-        &self,
-        import: &ImportSig,
-    ) -> Result<Vec<ResolvedSymbol>, LinkError> {
+    pub fn resolve_imports(&self, import: &ImportSig) -> Result<Vec<ResolvedSymbol>, LinkError> {
         let module_sig = self
             .modules
             .get(&import.module)
@@ -154,26 +144,17 @@ impl Linker {
         for (mod_name, sig) in &self.modules {
             for func in &sig.functions {
                 if func.is_public {
-                    all_symbols
-                        .entry(func.name.clone())
-                        .or_default()
-                        .push(mod_name.clone());
+                    all_symbols.entry(func.name.clone()).or_default().push(mod_name.clone());
                 }
             }
             for type_def in &sig.types {
                 if type_def.is_public {
-                    all_symbols
-                        .entry(type_def.name.clone())
-                        .or_default()
-                        .push(mod_name.clone());
+                    all_symbols.entry(type_def.name.clone()).or_default().push(mod_name.clone());
                 }
             }
             for const_sig in &sig.constants {
                 if const_sig.is_public {
-                    all_symbols
-                        .entry(const_sig.name.clone())
-                        .or_default()
-                        .push(mod_name.clone());
+                    all_symbols.entry(const_sig.name.clone()).or_default().push(mod_name.clone());
                 }
             }
         }
@@ -191,10 +172,7 @@ impl Linker {
                 // 为每个模块的符号生成唯一名
                 for mod_name in modules {
                     let unique_name = format!("{}_{}", mod_name, symbol);
-                    result.renames.insert(
-                        format!("{}_{}", mod_name, symbol),
-                        unique_name.clone(),
-                    );
+                    result.renames.insert(format!("{}_{}", mod_name, symbol), unique_name.clone());
                     result.symbols.insert(
                         format!("{}_{}", mod_name, symbol),
                         ResolvedSymbol {
@@ -226,10 +204,12 @@ impl Linker {
         for (mod_name, sig) in &self.modules {
             for import in &sig.imports {
                 if let Err(e) = self.resolve_imports(import) {
-                    if !result.conflicts.iter().any(|c| matches!(
-                        c,
-                        LinkError::SymbolNotFound(s) if s.contains(mod_name)
-                    )) {
+                    if !result.conflicts.iter().any(|c| {
+                        matches!(
+                            c,
+                            LinkError::SymbolNotFound(s) if s.contains(mod_name)
+                        )
+                    }) {
                         result.conflicts.push(e);
                     }
                 }
@@ -345,10 +325,20 @@ mod tests {
     fn test_linker_no_conflict() {
         let mut linker = Linker::new();
         linker
-            .load_module(&make_module("math", vec!["add", "sub"]))
+            .load_module(&make_module(
+                "math",
+                vec![
+                    "add", "sub",
+                ],
+            ))
             .unwrap();
         linker
-            .load_module(&make_module("string", vec!["concat", "trim"]))
+            .load_module(&make_module(
+                "string",
+                vec![
+                    "concat", "trim",
+                ],
+            ))
             .unwrap();
 
         let result = linker.link_all();
@@ -372,10 +362,12 @@ mod tests {
 
         let import = ImportSig {
             module: "math".to_string(),
-            symbols: vec![crate::signature::ImportSymbolSig {
-                name: "nonexistent".to_string(),
-                kind: SymbolKind::Function,
-            }],
+            symbols: vec![
+                crate::signature::ImportSymbolSig {
+                    name: "nonexistent".to_string(),
+                    kind: SymbolKind::Function,
+                },
+            ],
             aliases: std::collections::BTreeMap::new(),
         };
 
@@ -409,10 +401,12 @@ mod tests {
 
         let import = ImportSig {
             module: "math".to_string(),
-            symbols: vec![crate::signature::ImportSymbolSig {
-                name: "add".to_string(),
-                kind: SymbolKind::Function,
-            }],
+            symbols: vec![
+                crate::signature::ImportSymbolSig {
+                    name: "add".to_string(),
+                    kind: SymbolKind::Function,
+                },
+            ],
             aliases: std::collections::BTreeMap::new(),
         };
 

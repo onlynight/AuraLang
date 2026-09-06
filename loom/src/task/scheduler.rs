@@ -13,7 +13,7 @@ use crate::cache::remote::CacheService;
 use crate::error::LoomError;
 use crate::manifest::priority::ResolvedBuildConfig;
 use crate::plugin::PluginRegistry;
-use crate::task::{TaskGraph};
+use crate::task::TaskGraph;
 use crate::task::executor::{Executor, TaskResult};
 
 /// 调度配置
@@ -50,9 +50,7 @@ impl SchedulerConfig {
     /// 获取实际并行任务数
     pub fn effective_jobs(&self) -> usize {
         if self.max_jobs == 0 {
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(4)
+            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
         } else {
             self.max_jobs as usize
         }
@@ -249,10 +247,7 @@ impl Scheduler {
     fn execute_layer_parallel(&self, layer: &[String], layer_idx: usize, subgraph: &TaskGraph) {
         let max_jobs = self.config.effective_jobs();
 
-        let tasks: Vec<_> = layer
-            .iter()
-            .filter_map(|name| subgraph.get(name).cloned())
-            .collect();
+        let tasks: Vec<_> = layer.iter().filter_map(|name| subgraph.get(name).cloned()).collect();
 
         let mut handles: VecDeque<std::thread::JoinHandle<()>> = VecDeque::new();
 
@@ -301,6 +296,7 @@ fn format_task_kind(kind: &crate::task::TaskKind) -> String {
         crate::task::TaskKind::Test => "test".to_string(),
         crate::task::TaskKind::Package => "package".to_string(),
         crate::task::TaskKind::Verify => "verify".to_string(),
+        crate::task::TaskKind::Check => "check".to_string(),
         crate::task::TaskKind::Install => "install".to_string(),
         crate::task::TaskKind::Deploy => "deploy".to_string(),
         crate::task::TaskKind::Execute => "execute".to_string(),
@@ -312,7 +308,7 @@ fn format_task_kind(kind: &crate::task::TaskKind) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::priority::{ResolvedBuildConfig};
+    use crate::manifest::priority::ResolvedBuildConfig;
     use crate::task::{TaskDefinition, TaskInputs, TaskKind, TaskOutputs};
     use std::sync::Arc;
 
@@ -376,7 +372,10 @@ mod tests {
         graph.add_task(make_task("clean", &[]));
         graph.add_task(make_task("compile", &["clean"]));
 
-        let config = SchedulerConfig { dry_run: true, ..Default::default() };
+        let config = SchedulerConfig {
+            dry_run: true,
+            ..Default::default()
+        };
         let scheduler = Scheduler::new(
             Arc::new(graph),
             Arc::new(ResolvedBuildConfig::default()),
@@ -418,11 +417,17 @@ mod tests {
 
     #[test]
     fn test_scheduler_effective_jobs() {
-        let config = SchedulerConfig { max_jobs: 0, ..Default::default() };
+        let config = SchedulerConfig {
+            max_jobs: 0,
+            ..Default::default()
+        };
         let jobs = config.effective_jobs();
         assert!(jobs >= 1); // Should be at least 1
 
-        let config2 = SchedulerConfig { max_jobs: 4, ..Default::default() };
+        let config2 = SchedulerConfig {
+            max_jobs: 4,
+            ..Default::default()
+        };
         assert_eq!(config2.effective_jobs(), 4);
     }
 
@@ -440,7 +445,13 @@ mod tests {
     #[test]
     fn test_scheduler_format_task_kind() {
         assert_eq!(format_task_kind(&TaskKind::Clean), "clean");
-        assert_eq!(format_task_kind(&TaskKind::Compile("main".to_string())), "compile:main");
-        assert_eq!(format_task_kind(&TaskKind::Plugin("doc-gen".to_string())), "plugin:doc-gen");
+        assert_eq!(
+            format_task_kind(&TaskKind::Compile("main".to_string())),
+            "compile:main"
+        );
+        assert_eq!(
+            format_task_kind(&TaskKind::Plugin("doc-gen".to_string())),
+            "plugin:doc-gen"
+        );
     }
 }

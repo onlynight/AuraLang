@@ -1,5 +1,5 @@
-pub mod auz;
 pub mod ast;
+pub mod auz;
 pub mod codegen;
 pub mod docgen;
 pub mod errors;
@@ -7,13 +7,13 @@ pub mod lexer;
 pub mod linker;
 pub mod lsp;
 pub mod package;
-pub mod signature;
-pub mod signing;
-pub mod std;
 pub mod parser;
 pub mod sema;
+pub mod signature;
+pub mod signing;
 pub mod source_map;
 pub mod span;
+pub mod std;
 pub mod token;
 pub mod vm;
 

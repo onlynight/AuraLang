@@ -7,8 +7,10 @@
 //! - 普通块顺序：条件块 → then 块（顺序落入）→ else 块 → merge 块
 
 use crate::codegen::hir::HirProgram;
-use crate::codegen::mir::{LowerCtx, MirClosure, MirFunction, MirInstr, Terminator, BasicBlock};
-use crate::codegen::opcode::{BytecodeClosure, BytecodeFunction, BytecodeModule, BytecodeNative, Const, OpCode};
+use crate::codegen::mir::{BasicBlock, LowerCtx, MirClosure, MirFunction, MirInstr, Terminator};
+use crate::codegen::opcode::{
+    BytecodeClosure, BytecodeFunction, BytecodeModule, BytecodeNative, Const, OpCode,
+};
 use std::collections::HashMap;
 
 /// 将 MIR 函数列表发射为字节码模块
@@ -51,6 +53,7 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
                 locals: closure.reg_count as u16,
                 is_native: false,
                 code: closure_code,
+                line_table: None,
             });
         }
     }
@@ -67,6 +70,7 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
             locals: f.reg_count as u16,
             is_native: false,
             code,
+            line_table: None,
         });
         // 发射闭包记录（用于 MakeClosure 查找参数数量）
         for closure in &f.closures {
@@ -86,9 +90,9 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
     // 2. 无 main 但有函数 → 使用第一个函数索引（兼容行为）
     // 3. 无任何函数 → 报错
     let entry = if let Some(idx) = fn_index.get("main") {
-        *idx  // 兼容模式：有 main 函数
+        *idx // 兼容模式：有 main 函数
     } else if !mir_funcs.is_empty() {
-        0  // 兼容行为：无 main 但有函数，执行第一个
+        0 // 兼容行为：无 main 但有函数，执行第一个
     } else {
         // 无任何函数（无 main 且无顶层语句），由 VM 报错
         0
@@ -222,7 +226,11 @@ fn layout_blocks(f: &MirFunction) -> Vec<usize> {
             visited[cur] = true;
             order.push(cur);
             match &f.blocks[cur].term {
-                Terminator::If { then_b, else_b, .. } => {
+                Terminator::If {
+                    then_b,
+                    else_b,
+                    ..
+                } => {
                     pending.push(*else_b);
                     cur = *then_b;
                 }
@@ -259,10 +267,16 @@ fn instr_size(instr: &crate::codegen::mir::MirInstr) -> usize {
         // UnOp：LoadVar(a) + op(1) + StoreVar(dst) = 7
         UnOp { .. } => 7,
         // Call：每个参数 LoadVar(3) + Call(3) + 可选 StoreVar(3)
-        Call { args, dst, .. } => 3 * args.len() + 3 + if dst.is_some() { 3 } else { 0 },
-        CallNative { args, dst, .. } => 3 * args.len() + 3 + if dst.is_some() { 3 } else { 0 },
+        Call {
+            args, dst, ..
+        } => 3 * args.len() + 3 + if dst.is_some() { 3 } else { 0 },
+        CallNative {
+            args, dst, ..
+        } => 3 * args.len() + 3 + if dst.is_some() { 3 } else { 0 },
         // CallClosure：每个参数 LoadVar(3) + LoadVar(closure)(3) + CallClosure(1) + 可选 StoreVar(3)
-        CallClosure { args, dst, .. } => 3 * args.len() + 3 + 1 + if dst.is_some() { 3 } else { 0 },
+        CallClosure {
+            args, dst, ..
+        } => 3 * args.len() + 3 + 1 + if dst.is_some() { 3 } else { 0 },
         // Alloc：NewObject(3) + StoreVar(3) = 6
         Alloc { .. } => 6,
         // GetField：LoadVar(obj) + GetField(3) + StoreVar(3) = 9
@@ -338,7 +352,12 @@ fn emit_instr(
             OpCode::LoadVar(*src as u16).write(code);
             OpCode::StoreVar(*slot as u16).write(code);
         }
-        BinOp { dst, op, a, b } => {
+        BinOp {
+            dst,
+            op,
+            a,
+            b,
+        } => {
             if *op == To {
                 // 近似：不发射运算，仅把 b 当作结果
                 OpCode::LoadVar(*b as u16).write(code);
@@ -380,7 +399,11 @@ fn emit_instr(
             .write(code);
             OpCode::StoreVar(*dst as u16).write(code);
         }
-        Call { dst, func, args } => {
+        Call {
+            dst,
+            func,
+            args,
+        } => {
             for a in args {
                 OpCode::LoadVar(*a as u16).write(code);
             }
@@ -390,7 +413,11 @@ fn emit_instr(
                 OpCode::StoreVar(*d as u16).write(code);
             }
         }
-        CallNative { dst, func, args } => {
+        CallNative {
+            dst,
+            func,
+            args,
+        } => {
             for a in args {
                 OpCode::LoadVar(*a as u16).write(code);
             }
@@ -401,7 +428,11 @@ fn emit_instr(
             }
         }
         // Phase 2: 闭包调用
-        CallClosure { dst, closure, args } => {
+        CallClosure {
+            dst,
+            closure,
+            args,
+        } => {
             // 先加载参数，再加载闭包引用（栈顶为闭包）
             for a in args {
                 OpCode::LoadVar(*a as u16).write(code);
@@ -412,30 +443,49 @@ fn emit_instr(
                 OpCode::StoreVar(*d as u16).write(code);
             }
         }
-        Alloc { dst, type_name } => {
+        Alloc {
+            dst,
+            type_name,
+        } => {
             let idx = type_index(type_name);
             OpCode::NewObject(idx).write(code);
             OpCode::StoreVar(*dst as u16).write(code);
         }
-        GetField { dst, obj, field } => {
+        GetField {
+            dst,
+            obj,
+            field,
+        } => {
             OpCode::LoadVar(*obj as u16).write(code);
             let idx = field_index(field);
             OpCode::GetField(idx).write(code);
             OpCode::StoreVar(*dst as u16).write(code);
         }
-        SetField { obj, field, src } => {
+        SetField {
+            obj,
+            field,
+            src,
+        } => {
             OpCode::LoadVar(*src as u16).write(code);
             OpCode::LoadVar(*obj as u16).write(code);
             let idx = field_index(field);
             OpCode::SetField(idx).write(code);
         }
-        GetIndex { dst, obj, idx } => {
+        GetIndex {
+            dst,
+            obj,
+            idx,
+        } => {
             OpCode::LoadVar(*obj as u16).write(code);
             OpCode::LoadVar(*idx as u16).write(code);
             OpCode::GetIndex.write(code);
             OpCode::StoreVar(*dst as u16).write(code);
         }
-        SetIndex { obj, idx, src } => {
+        SetIndex {
+            obj,
+            idx,
+            src,
+        } => {
             // 栈布局：值在下、索引在顶（与 SetField 的「值、对象」顺序一致扩展）
             OpCode::LoadVar(*src as u16).write(code);
             OpCode::LoadVar(*obj as u16).write(code);
@@ -480,7 +530,11 @@ fn emit_instr(
             OpCode::Yield.write(code);
         }
         // MakeClosure：闭包创建（Phase 2）
-        MakeClosure { dst, func, captures } => {
+        MakeClosure {
+            dst,
+            func,
+            captures,
+        } => {
             // 1. 发射捕获值（按序压栈）
             for (_name, src) in captures {
                 OpCode::LoadVar(*src as u16).write(code);
@@ -494,7 +548,11 @@ fn emit_instr(
             OpCode::StoreVar(*dst as u16).write(code);
         }
         // EnumConstruct：枚举构造（Phase 3）
-        EnumConstruct { dst, enum_name, variant_idx } => {
+        EnumConstruct {
+            dst,
+            enum_name,
+            variant_idx,
+        } => {
             // 使用 EnumConstruct opcode（操作数为变体索引）
             let _ = enum_name;
             OpCode::EnumConstruct(*variant_idx).write(code);

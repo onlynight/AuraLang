@@ -50,8 +50,7 @@ impl KeyConfig {
     pub fn from_env() -> Result<Self, SigningError> {
         let hmac_key = std::env::var("AURA_SIGNING_KEY")
             .map_err(|_| SigningError::Key("AURA_SIGNING_KEY 未设置".to_string()))?;
-        let signer = std::env::var("AURA_SIGNER")
-            .unwrap_or_else(|_| "unknown".to_string());
+        let signer = std::env::var("AURA_SIGNER").unwrap_or_else(|_| "unknown".to_string());
         let timestamp = std::env::var("AURA_TIMESTAMP")
             .ok()
             .and_then(|t| t.parse().ok())
@@ -61,7 +60,11 @@ impl KeyConfig {
                     .unwrap()
                     .as_secs()
             });
-        Ok(KeyConfig { hmac_key, signer, timestamp })
+        Ok(KeyConfig {
+            hmac_key,
+            signer,
+            timestamp,
+        })
     }
 
     /// 从密钥文件加载（第一行为 hex 密钥，第二行为签名者）
@@ -74,11 +77,13 @@ impl KeyConfig {
             .ok_or_else(|| SigningError::Key("密钥文件为空".to_string()))?
             .trim()
             .to_string();
-        let signer = lines
-            .next()
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        Ok(KeyConfig { hmac_key, signer, timestamp: 0 })
+        let signer =
+            lines.next().map(|s| s.trim().to_string()).unwrap_or_else(|| "unknown".to_string());
+        Ok(KeyConfig {
+            hmac_key,
+            signer,
+            timestamp: 0,
+        })
     }
 }
 
@@ -97,8 +102,8 @@ impl Signer {
         let key = hex::decode(&self.config.hmac_key)
             .map_err(|e| SigningError::Key(format!("密钥 hex 解码失败: {}", e)))?;
 
-        let mut mac = HmacSha256::new_from_slice(&key)
-            .map_err(|e| SigningError::Key(e.to_string()))?;
+        let mut mac =
+            HmacSha256::new_from_slice(&key).map_err(|e| SigningError::Key(e.to_string()))?;
         mac.update(checksum_content.as_bytes());
         let signature = mac.finalize().into_bytes();
 
@@ -106,10 +111,7 @@ impl Signer {
     }
 
     /// 生成签名文件内容
-    pub fn generate_signature_file(
-        &self,
-        checksum_content: &str,
-    ) -> Result<String, SigningError> {
+    pub fn generate_signature_file(&self, checksum_content: &str) -> Result<String, SigningError> {
         let signature = self.sign(checksum_content)?;
         Ok(format!(
             "{}\n{}\n{}\n",
@@ -123,21 +125,17 @@ pub struct Verifier;
 
 impl Verifier {
     /// 验证签名文件
-    pub fn verify(
-        checksum_content: &str,
-        signature_file: &str,
-    ) -> Result<bool, SigningError> {
+    pub fn verify(checksum_content: &str, signature_file: &str) -> Result<bool, SigningError> {
         let lines: Vec<&str> = signature_file.lines().collect();
         if lines.len() < 3 {
-            return Err(SigningError::Signature(
-                "签名文件格式错误".to_string(),
-            ));
+            return Err(SigningError::Signature("签名文件格式错误".to_string()));
         }
 
         let _signer = lines[0].trim();
-        let _timestamp: u64 = lines[1].trim().parse().map_err(|_| {
-            SigningError::Signature("时间戳格式错误".to_string())
-        })?;
+        let _timestamp: u64 = lines[1]
+            .trim()
+            .parse()
+            .map_err(|_| SigningError::Signature("时间戳格式错误".to_string()))?;
         let signature_hex = lines[2].trim();
 
         // 获取密钥
@@ -146,8 +144,8 @@ impl Verifier {
             .map_err(|e| SigningError::Key(format!("密钥 hex 解码失败: {}", e)))?;
 
         // 重新计算 HMAC
-        let mut mac = HmacSha256::new_from_slice(&key)
-            .map_err(|e| SigningError::Key(e.to_string()))?;
+        let mut mac =
+            HmacSha256::new_from_slice(&key).map_err(|e| SigningError::Key(e.to_string()))?;
         mac.update(checksum_content.as_bytes());
         let expected = hex::encode(mac.finalize().into_bytes());
 
@@ -161,8 +159,8 @@ pub mod signing_utils {
 
     /// 对字节内容计算 HMAC-SHA256
     pub fn hmac_sha256(key: &[u8], data: &[u8]) -> Result<Vec<u8>, SigningError> {
-        let mut mac = HmacSha256::new_from_slice(key)
-            .map_err(|e| SigningError::Key(e.to_string()))?;
+        let mut mac =
+            HmacSha256::new_from_slice(key).map_err(|e| SigningError::Key(e.to_string()))?;
         mac.update(data);
         Ok(mac.finalize().into_bytes().to_vec())
     }

@@ -7,6 +7,14 @@ edition.workspace = true
 name = "aura"
 path = "src/main.rs"
 
+[[bin]]
+name = "aura-lsp"
+path = "src/lsp_main.rs"
+
+[[bin]]
+name = "aura-debug"
+path = "src/debugger_main.rs"
+
 [dependencies]
 compiler = { path = "../compiler" }
 

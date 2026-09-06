@@ -170,9 +170,5 @@ pub fn register_with_modules(reg: &mut NativeRegistry, modules: &[&str]) {
 ///
 /// 例如：`"aura.math"` → `"math"`，`"aura.string"` → `"string"`
 pub fn module_name_from_path(path: &str) -> Option<&str> {
-    if let Some(rest) = path.strip_prefix("aura.") {
-        Some(rest)
-    } else {
-        None
-    }
+    if let Some(rest) = path.strip_prefix("aura.") { Some(rest) } else { None }
 }

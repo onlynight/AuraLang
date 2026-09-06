@@ -20,8 +20,8 @@ use crate::package::PackageManifest;
 
 use super::checksum::{self, ChecksumEntry};
 use super::{
-    ApkgError, DEFAULT_COMPRESSION_LEVEL, LIB_DIR, MANIFEST_FILENAME, REF_INDEX_FILENAME,
-    SRC_DIR, CHECKSUM_FILENAME,
+    ApkgError, CHECKSUM_FILENAME, DEFAULT_COMPRESSION_LEVEL, LIB_DIR, MANIFEST_FILENAME,
+    REF_INDEX_FILENAME, SRC_DIR,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -145,10 +145,14 @@ impl<'a> PackageBuilder<'a> {
         let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
 
         // 1.1 META-INF/aura.toml（主清单）
-        let manifest_toml = self.manifest.to_toml().map_err(|e| {
-            ApkgError::Manifest(format!("序列化清单失败: {}", e))
-        })?;
-        files.insert(MANIFEST_FILENAME.to_string(), manifest_toml.as_bytes().to_vec());
+        let manifest_toml = self
+            .manifest
+            .to_toml()
+            .map_err(|e| ApkgError::Manifest(format!("序列化清单失败: {}", e)))?;
+        files.insert(
+            MANIFEST_FILENAME.to_string(),
+            manifest_toml.as_bytes().to_vec(),
+        );
 
         // 1.2 lib/name-version/entry.auc（字节码）
         let entry_base = self.manifest.entry.trim_end_matches(".aura");
@@ -160,7 +164,10 @@ impl<'a> PackageBuilder<'a> {
         // 1.3 ref/index.json（Phase 1 占位，Phase 3 实现 .sig）
         if self.options.include_ref_index {
             let ref_index = Self::build_ref_index(self.manifest);
-            files.insert(REF_INDEX_FILENAME.to_string(), ref_index.as_bytes().to_vec());
+            files.insert(
+                REF_INDEX_FILENAME.to_string(),
+                ref_index.as_bytes().to_vec(),
+            );
         }
 
         // 1.4 src/ 源码附件（可选）
@@ -213,23 +220,23 @@ impl<'a> PackageBuilder<'a> {
                 header.set_size(content.len() as u64);
                 header.set_mode(0o644);
 
-                builder.append_data(
-                    &mut header,
-                    path.as_str(),
-                    std::io::Cursor::new(content.as_slice()),
-                )
-                .map_err(|e| ApkgError::Build(format!("tar 写入 {} 失败: {}", path, e)))?;
+                builder
+                    .append_data(
+                        &mut header,
+                        path.as_str(),
+                        std::io::Cursor::new(content.as_slice()),
+                    )
+                    .map_err(|e| ApkgError::Build(format!("tar 写入 {} 失败: {}", path, e)))?;
             }
 
-            builder
-                .finish()
-                .map_err(|e| ApkgError::Build(format!("tar 收尾失败: {}", e)))?;
+            builder.finish().map_err(|e| ApkgError::Build(format!("tar 收尾失败: {}", e)))?;
         }
 
         // 5. zstd 压缩
         let mut compressed_buf: Vec<u8> = Vec::new();
-        let mut encoder = zstd::Encoder::new(&mut compressed_buf, self.options.compression_level)
-            .map_err(|e| ApkgError::Compression(format!("创建 zstd 编码器失败: {}", e)))?;
+        let mut encoder =
+            zstd::Encoder::new(&mut compressed_buf, self.options.compression_level)
+                .map_err(|e| ApkgError::Compression(format!("创建 zstd 编码器失败: {}", e)))?;
         encoder
             .write_all(&tar_buf)
             .map_err(|e| ApkgError::Compression(format!("zstd 写入失败: {}", e)))?;
@@ -248,9 +255,8 @@ impl<'a> PackageBuilder<'a> {
         }
 
         // 7. 写入输出文件
-        std::fs::write(output_path, &output_bytes).map_err(|e| {
-            ApkgError::Io(format!("无法写入 {}: {}", output_path.display(), e))
-        })?;
+        std::fs::write(output_path, &output_bytes)
+            .map_err(|e| ApkgError::Io(format!("无法写入 {}: {}", output_path.display(), e)))?;
 
         Ok(BuildResult {
             path: output_path.to_path_buf(),
@@ -281,12 +287,9 @@ impl<'a> PackageBuilder<'a> {
             return Ok(result);
         }
         let base = dir.to_path_buf();
-        Self::walk_dir(
-            &base,
-            &base,
-            &mut result,
-            &|path| path.extension().and_then(|e| e.to_str()).map(|e| e == "aura").unwrap_or(false),
-        )?;
+        Self::walk_dir(&base, &base, &mut result, &|path| {
+            path.extension().and_then(|e| e.to_str()).map(|e| e == "aura").unwrap_or(false)
+        })?;
         Ok(result)
     }
 
@@ -300,10 +303,8 @@ impl<'a> PackageBuilder<'a> {
             return Ok(result);
         }
         let base = dir.to_path_buf();
-        let compiled: Vec<regex::Regex> = patterns
-            .iter()
-            .filter_map(|p| regex::Regex::new(p).ok())
-            .collect();
+        let compiled: Vec<regex::Regex> =
+            patterns.iter().filter_map(|p| regex::Regex::new(p).ok()).collect();
 
         Self::walk_dir(&base, &base, &mut result, &|path| {
             let rel = path.strip_prefix(&base).unwrap_or(path);
@@ -320,17 +321,15 @@ impl<'a> PackageBuilder<'a> {
         result: &mut Vec<(String, Vec<u8>)>,
         filter: &dyn Fn(&Path) -> bool,
     ) -> Result<(), ApkgError> {
-        let entries = std::fs::read_dir(current).map_err(|e| {
-            ApkgError::Io(format!("无法读取目录 {}: {}", current.display(), e))
-        })?;
+        let entries = std::fs::read_dir(current)
+            .map_err(|e| ApkgError::Io(format!("无法读取目录 {}: {}", current.display(), e)))?;
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
                 Self::walk_dir(base, &path, result, filter)?;
             } else if filter(&path) {
-                let content = std::fs::read(&path).map_err(|e| {
-                    ApkgError::Io(format!("无法读取 {}: {}", path.display(), e))
-                })?;
+                let content = std::fs::read(&path)
+                    .map_err(|e| ApkgError::Io(format!("无法读取 {}: {}", path.display(), e)))?;
                 let rel = path.strip_prefix(base).unwrap_or(&path);
                 let rel_str = rel.to_string_lossy().replace('\\', "/");
                 result.push((rel_str, content));

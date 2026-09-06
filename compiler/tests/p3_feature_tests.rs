@@ -153,11 +153,7 @@ fn test_full_registry_size() {
     let reg = NativeRegistry::new();
     // 全量注册应有 300+ 个函数
     let count = reg.len();
-    assert!(
-        count > 300,
-        "全量注册应有 300+ 个函数，实际: {}",
-        count
-    );
+    assert!(count > 300, "全量注册应有 300+ 个函数，实际: {}", count);
 }
 
 #[test]

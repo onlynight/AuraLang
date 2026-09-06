@@ -24,7 +24,9 @@ pub struct TypeMapper {
 impl TypeMapper {
     /// 创建新的类型映射器
     pub fn new(string_as_struct: bool) -> Self {
-        Self { string_as_struct }
+        Self {
+            string_as_struct,
+        }
     }
 
     /// 将 HIR 类型映射为 LLVM IR 类型字符串
@@ -93,11 +95,8 @@ impl TypeMapper {
         let ret_str = self.map(ret);
         let ret_str = if ret_str.is_empty() { "void" } else { &ret_str };
         let params_str: Vec<String> = params.iter().map(|p| self.map(p)).collect();
-        let params_str = if params_str.is_empty() {
-            "void".to_string()
-        } else {
-            params_str.join(", ")
-        };
+        let params_str =
+            if params_str.is_empty() { "void".to_string() } else { params_str.join(", ") };
         if is_vararg {
             format!("{ret_str}( {params_str }, ... )")
         } else {
@@ -116,15 +115,7 @@ fn is_scalar(ty: &str) -> bool {
 
 /// 将标识符中 LLVM IR 不允许的字符替换为下划线
 pub fn sanitizellvm(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
+    s.chars().map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' }).collect()
 }
 
 #[cfg(test)]
@@ -197,7 +188,10 @@ mod tests {
     #[test]
     fn test_fn_type() {
         let tm = TypeMapper::new(true);
-        let params = vec![HirType::Named("Int".into()), HirType::Named("Int".into())];
+        let params = vec![
+            HirType::Named("Int".into()),
+            HirType::Named("Int".into()),
+        ];
         let ret = HirType::Named("Int".into());
         assert_eq!(tm.fn_type(&ret, &params, false), "i32( i32, i32 )");
     }

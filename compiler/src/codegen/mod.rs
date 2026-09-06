@@ -128,10 +128,7 @@ pub fn compile(program: &Program, opts: &CodeGenOptions) -> BytecodeModule {
     module.enabled_modules = opts.enabled_modules.clone();
 
     // Phase 2: 初始化模块标识与导出表
-    module.module_identity = ModuleIdentity::new(
-        "default",
-        "0.1.0",
-    );
+    module.module_identity = ModuleIdentity::new("default", "0.1.0");
     module.header_flags = module.compute_header_flags();
     module
 }
@@ -145,10 +142,7 @@ pub fn compile_source(source: &str) -> Result<BytecodeModule, String> {
     // 词法
     let mut lexer = Lexer::new(source);
     let tokens = lexer.tokenize();
-    let lex_err = lexer
-        .errors()
-        .first()
-        .map(|e| format!("lex error: {}", e.message));
+    let lex_err = lexer.errors().first().map(|e| format!("lex error: {}", e.message));
     if let Some(m) = lex_err {
         return Err(m);
     }

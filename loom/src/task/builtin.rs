@@ -62,14 +62,49 @@ pub fn execute_resolve(
 ) -> Result<(String, Vec<PathBuf>), LoomError> {
     let dir = project_dir(task, config);
     let lock_file = dir.join("aura.lock");
+    let manifest_path = dir.join("aura.toml");
 
-    // 目前 resolve 是一个占位符，后续 Phase B6 会实现完整的依赖解析
-    let deps_count = task.inputs.files.len(); // 使用 files 作为占位符
+    // 加载 manifest 并应用 BOM 版本锁定（manifest 不存在时使用空依赖）
+    let all_deps = if manifest_path.exists() {
+        let manifest = crate::manifest::parse::parse_from_file(&manifest_path)?;
 
-    if lock_file.exists() {
-        Ok((format!("✓ 依赖已解析（{} 个文件）", deps_count), vec![lock_file]))
+        // 应用 BOM 版本锁定
+        let bom = crate::dep::bom::Bom::from_workspace(&manifest.workspace);
+        let raw_deps = manifest.all_dependencies();
+        if bom.is_empty() { raw_deps } else { bom.resolve_dependencies(&raw_deps) }
     } else {
-        Ok((format!("✓ 依赖解析完成（{} 个文件，锁文件不存在）", deps_count), Vec::new()))
+        Vec::new()
+    };
+
+    // 重新读取 manifest 以获取 workspace 信息（用于 BOM 统计）
+    let bom = if manifest_path.exists() {
+        let manifest = crate::manifest::parse::parse_from_file(&manifest_path)?;
+        crate::dep::bom::Bom::from_workspace(&manifest.workspace)
+    } else {
+        crate::dep::bom::Bom::from_workspace(&None)
+    };
+
+    let locked_count = all_deps.iter().filter(|d| bom.has_lock(&d.name)).count();
+
+    // 检查锁文件
+    if lock_file.exists() {
+        Ok((
+            format!(
+                "✓ 依赖已解析（{} 个依赖，{} 个 BOM 锁定，锁文件已存在）",
+                all_deps.len(),
+                locked_count
+            ),
+            vec![lock_file],
+        ))
+    } else {
+        Ok((
+            format!(
+                "✓ 依赖解析完成（{} 个依赖，{} 个 BOM 锁定）",
+                all_deps.len(),
+                locked_count
+            ),
+            Vec::new(),
+        ))
     }
 }
 
@@ -109,12 +144,20 @@ pub fn execute_compile(
                 }
 
                 return Ok((
-                    format!("✓ 编译 {} 源码集: {} 个文件 → {}", source_set, count, out.display()),
+                    format!(
+                        "✓ 编译 {} 源码集: {} 个文件 → {}",
+                        source_set,
+                        count,
+                        out.display()
+                    ),
                     artifacts,
                 ));
             }
         }
-        return Ok((format!("✓ 编译 {} 源码集: 无源文件", source_set), Vec::new()));
+        return Ok((
+            format!("✓ 编译 {} 源码集: 无源文件", source_set),
+            Vec::new(),
+        ));
     }
 
     // 有明确指定的源文件
@@ -135,7 +178,12 @@ pub fn execute_compile(
     }
 
     Ok((
-        format!("✓ 编译 {} 源码集: {} 个文件 → {}", source_set, count, out.display()),
+        format!(
+            "✓ 编译 {} 源码集: {} 个文件 → {}",
+            source_set,
+            count,
+            out.display()
+        ),
         artifacts,
     ))
 }
@@ -195,7 +243,10 @@ pub fn execute_package(
     let out_dir = output_dir(config);
 
     if !config.emit_package {
-        return Ok(("✓ 打包已禁用（emit-package = false）".to_string(), Vec::new()));
+        return Ok((
+            "✓ 打包已禁用（emit-package = false）".to_string(),
+            Vec::new(),
+        ));
     }
 
     let package_dir = out_dir.join("package");
@@ -253,6 +304,42 @@ pub fn execute_verify(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// check
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub fn execute_check(
+    task: &TaskDefinition,
+    config: &ResolvedBuildConfig,
+) -> Result<(String, Vec<PathBuf>), LoomError> {
+    let dir = project_dir(task, config);
+    let manifest_path = dir.join("aura.toml");
+
+    // 检查 aura.toml 是否存在
+    if !manifest_path.exists() {
+        return Ok(("✓ 无 aura.toml，跳过检查".to_string(), Vec::new()));
+    }
+
+    // 解析并验证 manifest
+    let manifest = crate::manifest::parse::parse_from_file(&manifest_path)?;
+    let errors = crate::manifest::validate::validate_manifest(&manifest);
+
+    if errors.is_empty() {
+        Ok((
+            format!(
+                "✓ 语法/语义检查通过（{} 个依赖）",
+                manifest.all_dependencies().len()
+            ),
+            Vec::new(),
+        ))
+    } else {
+        Ok((
+            format!("⚠ 语法/语义检查发现 {} 个问题", errors.len()),
+            Vec::new(),
+        ))
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // install
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -286,7 +373,14 @@ pub fn execute_install(
         }
     }
 
-    Ok((format!("✓ 安装完成: {} 个包 → {}", installed, registry_dir.display()), Vec::new()))
+    Ok((
+        format!(
+            "✓ 安装完成: {} 个包 → {}",
+            installed,
+            registry_dir.display()
+        ),
+        Vec::new(),
+    ))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -317,7 +411,10 @@ pub fn execute_execute(
         return Ok(("✓ 运行（编译产物不存在，占位符）".to_string(), Vec::new()));
     }
 
-    Ok((format!("✓ 运行: {} (占位符)", out_dir.display()), Vec::new()))
+    Ok((
+        format!("✓ 运行: {} (占位符)", out_dir.display()),
+        Vec::new(),
+    ))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -328,7 +425,10 @@ pub fn execute_watch(
     _task: &TaskDefinition,
     _config: &ResolvedBuildConfig,
 ) -> Result<(String, Vec<PathBuf>), LoomError> {
-    Ok(("✓ Watch 模式（占位符，Phase B7 实现）".to_string(), Vec::new()))
+    Ok((
+        "✓ Watch 模式（占位符，Phase B7 实现）".to_string(),
+        Vec::new(),
+    ))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

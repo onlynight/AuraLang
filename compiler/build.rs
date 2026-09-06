@@ -73,7 +73,9 @@ fn main() {
         }
     } else if cfg!(feature = "llvm") {
         println!("cargo:warning=Aura: llvm feature 已启用但未检测到 LLVM 安装路径");
-        println!("cargo:warning=Aura: 请在 Cargo.toml 的 [workspace.metadata.aura] 中设置 llvm-home");
+        println!(
+            "cargo:warning=Aura: 请在 Cargo.toml 的 [workspace.metadata.aura] 中设置 llvm-home"
+        );
         println!("cargo:warning=Aura: 或设置 AURA_LLVM_HOME 环境变量");
     }
 
@@ -115,28 +117,20 @@ fn read_aura_config() -> AuraConfig {
     };
 
     // 导航到 [workspace.metadata.aura]
-    let Some(meta) = doc
-        .get("workspace")
-        .and_then(|w| w.get("metadata"))
-        .and_then(|m| m.get("aura"))
+    let Some(meta) =
+        doc.get("workspace").and_then(|w| w.get("metadata")).and_then(|m| m.get("aura"))
     else {
         return AuraConfig::default();
     };
 
     let string = |key: &str| -> Option<String> {
-        meta.get(key)
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
+        meta.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
     };
 
     let string_array = |key: &str| -> Vec<String> {
         meta.get(key)
             .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
             .unwrap_or_default()
     };
 
@@ -214,7 +208,10 @@ fn detect_llvm_home(config: &AuraConfig) -> Option<PathBuf> {
 
     // 5. 常见系统路径（Windows）
     if cfg!(target_os = "windows") {
-        let candidates = [r"C:\Program Files\LLVM", r"C:\Program Files (x86)\LLVM"];
+        let candidates = [
+            r"C:\Program Files\LLVM",
+            r"C:\Program Files (x86)\LLVM",
+        ];
         for c in &candidates {
             if Path::new(c).exists() {
                 return Some(PathBuf::from(c));
@@ -272,13 +269,9 @@ fn detect_llvm_home(config: &AuraConfig) -> Option<PathBuf> {
 /// 尝试从 LLVM 目录获取版本字符串。
 fn llvm_version(home: &Path) -> Option<String> {
     // 尝试直接读取版本信息（llvm-config 是可靠方式）
-    let llvm_config = home.join("bin").join({
-        if cfg!(target_os = "windows") {
-            "llvm-config.exe"
-        } else {
-            "llvm-config"
-        }
-    });
+    let llvm_config = home
+        .join("bin")
+        .join({ if cfg!(target_os = "windows") { "llvm-config.exe" } else { "llvm-config" } });
     if llvm_config.exists() {
         use std::process::Stdio;
         let mut cmd = std::process::Command::new(&llvm_config);

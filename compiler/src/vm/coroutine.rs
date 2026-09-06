@@ -98,11 +98,7 @@ impl CoroutineScheduler {
 
     /// 获取下一个就绪协程 ID（轮转调度）
     pub fn next_ready(&mut self) -> Option<usize> {
-        if self.ready_queue.is_empty() {
-            None
-        } else {
-            Some(self.ready_queue.remove(0))
-        }
+        if self.ready_queue.is_empty() { None } else { Some(self.ready_queue.remove(0)) }
     }
 
     /// 将协程放回就绪队列
@@ -150,15 +146,8 @@ impl CoroutineScheduler {
 
     /// 获取协程的终止返回值（读取一次）
     pub fn take_done_value(&mut self, id: usize) -> Option<Value> {
-        self.coroutines
-            .get_mut(id)
-            .and_then(|c| c.as_mut())
-            .and_then(|co| {
-                if let CoroutineState::Done(v) = &co.state {
-                    Some(v.clone())
-                } else {
-                    None
-                }
-            })
+        self.coroutines.get_mut(id).and_then(|c| c.as_mut()).and_then(|co| {
+            if let CoroutineState::Done(v) = &co.state { Some(v.clone()) } else { None }
+        })
     }
 }

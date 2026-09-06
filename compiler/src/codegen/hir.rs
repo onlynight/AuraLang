@@ -24,10 +24,7 @@ pub enum HirType {
     /// 原始指针类型（P8.6）：`Pointer<T>` 映射为 C 的 `T*`
     Pointer(Box<HirType>),
     /// 函数类型（Fix 3）：`(A, B) -> R`
-    Function {
-        params: Box<Vec<HirType>>,
-        return_type: Box<HirType>,
-    },
+    Function { params: Box<Vec<HirType>>, return_type: Box<HirType> },
     /// 未知（由语义阶段兜底）
     Unknown,
 }
@@ -71,17 +68,25 @@ impl HirType {
             Type::String => HirType::Named("String".into()),
             Type::Boolean => HirType::Named("Boolean".into()),
             // Fix 3: 函数类型
-            Type::Function { params, return_type, .. } => HirType::Function {
+            Type::Function {
+                params,
+                return_type,
+                ..
+            } => HirType::Function {
                 params: Box::new(
                     params
                         .iter()
                         .map(|p| HirType::from_ast_opt(&p.type_hint).unwrap_or(HirType::Unknown))
                         .collect(),
                 ),
-                return_type: Box::new(HirType::from_ast_opt(return_type).unwrap_or(HirType::Unknown)),
+                return_type: Box::new(
+                    HirType::from_ast_opt(return_type).unwrap_or(HirType::Unknown),
+                ),
             },
             // Fix 4: 防御性处理 Type::Generic 中 Pointer<T> 的降级路径
-            Type::Generic { name, args, .. } if name == "Pointer" && args.len() == 1 => {
+            Type::Generic {
+                name, args, ..
+            } if name == "Pointer" && args.len() == 1 => {
                 HirType::Pointer(Box::new(HirType::from_ast(&args[0])))
             }
             _ => HirType::Named(ty.to_string()),
@@ -356,14 +361,21 @@ pub fn desugar_program(program: &Program) -> HirProgram {
                             })
                             .collect(),
                         ret: HirType::from_ast_opt(&f.return_type),
-                        body: HirBlock { stmts: vec![] },
+                        body: HirBlock {
+                            stmts: vec![],
+                        },
                         is_native: true,
                         type_params: vec![],
                     });
                 }
                 // P8.1: 处理 extern 块中的常量
                 for stmt in &e.constants {
-                    if let Stmt::Val { name, initializer, .. } = stmt {
+                    if let Stmt::Val {
+                        name,
+                        initializer,
+                        ..
+                    } = stmt
+                    {
                         if let Some(init) = initializer {
                             if let Expr::Literal(lit, _) = init.as_ref() {
                                 let c = match lit {
@@ -397,7 +409,9 @@ pub fn desugar_program(program: &Program) -> HirProgram {
                             v.name.clone(),
                             v.fields
                                 .iter()
-                                .map(|f| HirType::from_ast_opt(&f.type_hint).unwrap_or(HirType::Unknown))
+                                .map(|f| {
+                                    HirType::from_ast_opt(&f.type_hint).unwrap_or(HirType::Unknown)
+                                })
                                 .collect(),
                         )
                     })
@@ -427,7 +441,9 @@ pub fn desugar_program(program: &Program) -> HirProgram {
                 ty: Some(HirType::Named("Any".into())),
             }],
             ret: Some(HirType::Named("Unit".into())),
-            body: HirBlock { stmts: vec![] },
+            body: HirBlock {
+                stmts: vec![],
+            },
             is_native: true,
             type_params: vec![],
         });
@@ -544,7 +560,9 @@ pub fn desugar_program(program: &Program) -> HirProgram {
                 name: name.into(),
                 params,
                 ret,
-                body: HirBlock { stmts: vec![] },
+                body: HirBlock {
+                    stmts: vec![],
+                },
                 is_native: true,
                 type_params: vec![],
             });
@@ -560,14 +578,18 @@ pub fn desugar_program(program: &Program) -> HirProgram {
                 ty: Some(HirType::Named("Int".into())),
             }],
             ret: Some(HirType::Named("Any".into())),
-            body: HirBlock { stmts: vec![] },
+            body: HirBlock {
+                stmts: vec![],
+            },
             is_native: true,
             type_params: vec![],
         });
     }
 
     // P8.5: 注册 CString/CStr 为原生函数
-    for &name in &["CString", "CStr"] {
+    for &name in &[
+        "CString", "CStr",
+    ] {
         if !natives.iter().any(|n| n.name == name) {
             natives.push(HirFunction {
                 name: name.into(),
@@ -576,7 +598,9 @@ pub fn desugar_program(program: &Program) -> HirProgram {
                     ty: Some(HirType::Named("String".into())),
                 }],
                 ret: Some(HirType::Pointer(Box::new(HirType::Named("Char".into())))),
-                body: HirBlock { stmts: vec![] },
+                body: HirBlock {
+                    stmts: vec![],
+                },
                 is_native: true,
                 type_params: vec![],
             });
@@ -592,12 +616,17 @@ pub fn desugar_program(program: &Program) -> HirProgram {
         if !natives.iter().any(|n| n.name == name) {
             natives.push(HirFunction {
                 name: name.into(),
-                params: params.iter().map(|&(pn, pt)| HirParam {
-                    name: pn.into(),
-                    ty: Some(HirType::from_ast_str(pt)),
-                }).collect(),
+                params: params
+                    .iter()
+                    .map(|&(pn, pt)| HirParam {
+                        name: pn.into(),
+                        ty: Some(HirType::from_ast_str(pt)),
+                    })
+                    .collect(),
                 ret: Some(HirType::from_ast_str(ret)),
-                body: HirBlock { stmts: vec![] },
+                body: HirBlock {
+                    stmts: vec![],
+                },
                 is_native: true,
                 type_params: vec![],
             });
@@ -613,7 +642,9 @@ pub fn desugar_program(program: &Program) -> HirProgram {
                 ty: Some(HirType::Named("Any".into())),
             }],
             ret: Some(HirType::Pointer(Box::new(HirType::Named("Int".into())))),
-            body: HirBlock { stmts: vec![] },
+            body: HirBlock {
+                stmts: vec![],
+            },
             is_native: true,
             type_params: vec![],
         });
@@ -626,7 +657,9 @@ pub fn desugar_program(program: &Program) -> HirProgram {
                 ty: Some(HirType::Named("Any".into())),
             }],
             ret: Some(HirType::Named("Unit".into())),
-            body: HirBlock { stmts: vec![] },
+            body: HirBlock {
+                stmts: vec![],
+            },
             is_native: true,
             type_params: vec![],
         });
@@ -642,7 +675,9 @@ pub fn desugar_program(program: &Program) -> HirProgram {
                 ty: Some(HirType::Named("Any".into())),
             }],
             ret: Some(HirType::Named("Int".into())),
-            body: HirBlock { stmts: vec![] },
+            body: HirBlock {
+                stmts: vec![],
+            },
             is_native: true,
             type_params: vec![],
         });
@@ -652,11 +687,19 @@ pub fn desugar_program(program: &Program) -> HirProgram {
         natives.push(HirFunction {
             name: "aura.concurrent.send".into(),
             params: vec![
-                HirParam { name: "actor".into(), ty: Some(HirType::Named("Int".into())) },
-                HirParam { name: "msg".into(), ty: Some(HirType::Named("Any".into())) },
+                HirParam {
+                    name: "actor".into(),
+                    ty: Some(HirType::Named("Int".into())),
+                },
+                HirParam {
+                    name: "msg".into(),
+                    ty: Some(HirType::Named("Any".into())),
+                },
             ],
             ret: Some(HirType::Named("Unit".into())),
-            body: HirBlock { stmts: vec![] },
+            body: HirBlock {
+                stmts: vec![],
+            },
             is_native: true,
             type_params: vec![],
         });
@@ -666,11 +709,19 @@ pub fn desugar_program(program: &Program) -> HirProgram {
         natives.push(HirFunction {
             name: "aura.concurrent.ask".into(),
             params: vec![
-                HirParam { name: "actor".into(), ty: Some(HirType::Named("Int".into())) },
-                HirParam { name: "msg".into(), ty: Some(HirType::Named("Any".into())) },
+                HirParam {
+                    name: "actor".into(),
+                    ty: Some(HirType::Named("Int".into())),
+                },
+                HirParam {
+                    name: "msg".into(),
+                    ty: Some(HirType::Named("Any".into())),
+                },
             ],
             ret: Some(HirType::Named("Any".into())),
-            body: HirBlock { stmts: vec![] },
+            body: HirBlock {
+                stmts: vec![],
+            },
             is_native: true,
             type_params: vec![],
         });
@@ -679,11 +730,14 @@ pub fn desugar_program(program: &Program) -> HirProgram {
     if !natives.iter().any(|n| n.name == "aura.concurrent.newChannel") {
         natives.push(HirFunction {
             name: "aura.concurrent.newChannel".into(),
-            params: vec![
-                HirParam { name: "bound".into(), ty: Some(HirType::Named("Int".into())) },
-            ],
+            params: vec![HirParam {
+                name: "bound".into(),
+                ty: Some(HirType::Named("Int".into())),
+            }],
             ret: Some(HirType::Named("Int".into())),
-            body: HirBlock { stmts: vec![] },
+            body: HirBlock {
+                stmts: vec![],
+            },
             is_native: true,
             type_params: vec![],
         });
@@ -693,11 +747,19 @@ pub fn desugar_program(program: &Program) -> HirProgram {
         natives.push(HirFunction {
             name: "aura.concurrent.channelSend".into(),
             params: vec![
-                HirParam { name: "ch".into(), ty: Some(HirType::Named("Int".into())) },
-                HirParam { name: "val".into(), ty: Some(HirType::Named("Any".into())) },
+                HirParam {
+                    name: "ch".into(),
+                    ty: Some(HirType::Named("Int".into())),
+                },
+                HirParam {
+                    name: "val".into(),
+                    ty: Some(HirType::Named("Any".into())),
+                },
             ],
             ret: Some(HirType::Named("Unit".into())),
-            body: HirBlock { stmts: vec![] },
+            body: HirBlock {
+                stmts: vec![],
+            },
             is_native: true,
             type_params: vec![],
         });
@@ -706,11 +768,14 @@ pub fn desugar_program(program: &Program) -> HirProgram {
     if !natives.iter().any(|n| n.name == "aura.concurrent.channelRecv") {
         natives.push(HirFunction {
             name: "aura.concurrent.channelRecv".into(),
-            params: vec![
-                HirParam { name: "ch".into(), ty: Some(HirType::Named("Int".into())) },
-            ],
+            params: vec![HirParam {
+                name: "ch".into(),
+                ty: Some(HirType::Named("Int".into())),
+            }],
             ret: Some(HirType::Named("Any".into())),
-            body: HirBlock { stmts: vec![] },
+            body: HirBlock {
+                stmts: vec![],
+            },
             is_native: true,
             type_params: vec![],
         });
@@ -719,11 +784,14 @@ pub fn desugar_program(program: &Program) -> HirProgram {
     if !natives.iter().any(|n| n.name == "aura.concurrent.channelTryRecv") {
         natives.push(HirFunction {
             name: "aura.concurrent.channelTryRecv".into(),
-            params: vec![
-                HirParam { name: "ch".into(), ty: Some(HirType::Named("Int".into())) },
-            ],
+            params: vec![HirParam {
+                name: "ch".into(),
+                ty: Some(HirType::Named("Int".into())),
+            }],
             ret: Some(HirType::Named("Any".into())),
-            body: HirBlock { stmts: vec![] },
+            body: HirBlock {
+                stmts: vec![],
+            },
             is_native: true,
             type_params: vec![],
         });
@@ -733,11 +801,19 @@ pub fn desugar_program(program: &Program) -> HirProgram {
         natives.push(HirFunction {
             name: "aura.concurrent.select".into(),
             params: vec![
-                HirParam { name: "ch1".into(), ty: Some(HirType::Named("Int".into())) },
-                HirParam { name: "ch2".into(), ty: Some(HirType::Named("Int".into())) },
+                HirParam {
+                    name: "ch1".into(),
+                    ty: Some(HirType::Named("Int".into())),
+                },
+                HirParam {
+                    name: "ch2".into(),
+                    ty: Some(HirType::Named("Int".into())),
+                },
             ],
             ret: Some(HirType::Named("Any".into())),
-            body: HirBlock { stmts: vec![] },
+            body: HirBlock {
+                stmts: vec![],
+            },
             is_native: true,
             type_params: vec![],
         });
@@ -746,11 +822,14 @@ pub fn desugar_program(program: &Program) -> HirProgram {
     if !natives.iter().any(|n| n.name == "aura.concurrent.spawnActor") {
         natives.push(HirFunction {
             name: "aura.concurrent.spawnActor".into(),
-            params: vec![
-                HirParam { name: "name".into(), ty: Some(HirType::Named("String".into())) },
-            ],
+            params: vec![HirParam {
+                name: "name".into(),
+                ty: Some(HirType::Named("String".into())),
+            }],
             ret: Some(HirType::Named("Int".into())),
-            body: HirBlock { stmts: vec![] },
+            body: HirBlock {
+                stmts: vec![],
+            },
             is_native: true,
             type_params: vec![],
         });
@@ -760,11 +839,19 @@ pub fn desugar_program(program: &Program) -> HirProgram {
         natives.push(HirFunction {
             name: "aura.concurrent.supervise".into(),
             params: vec![
-                HirParam { name: "parent".into(), ty: Some(HirType::Named("Int".into())) },
-                HirParam { name: "child".into(), ty: Some(HirType::Named("Int".into())) },
+                HirParam {
+                    name: "parent".into(),
+                    ty: Some(HirType::Named("Int".into())),
+                },
+                HirParam {
+                    name: "child".into(),
+                    ty: Some(HirType::Named("Int".into())),
+                },
             ],
             ret: Some(HirType::Named("Unit".into())),
-            body: HirBlock { stmts: vec![] },
+            body: HirBlock {
+                stmts: vec![],
+            },
             is_native: true,
             type_params: vec![],
         });
@@ -773,11 +860,14 @@ pub fn desugar_program(program: &Program) -> HirProgram {
     if !natives.iter().any(|n| n.name == "aura.concurrent.actorAlive") {
         natives.push(HirFunction {
             name: "aura.concurrent.actorAlive".into(),
-            params: vec![
-                HirParam { name: "id".into(), ty: Some(HirType::Named("Int".into())) },
-            ],
+            params: vec![HirParam {
+                name: "id".into(),
+                ty: Some(HirType::Named("Int".into())),
+            }],
             ret: Some(HirType::Named("Boolean".into())),
-            body: HirBlock { stmts: vec![] },
+            body: HirBlock {
+                stmts: vec![],
+            },
             is_native: true,
             type_params: vec![],
         });
@@ -793,12 +883,15 @@ pub fn desugar_program(program: &Program) -> HirProgram {
                     ty: Some(HirType::Named((*pt).into())),
                 })
                 .collect();
-            let ret = params.iter().any(|(_, pt)| *pt != "Unit").then(|| HirType::Named("Any".into()));
+            let ret =
+                params.iter().any(|(_, pt)| *pt != "Unit").then(|| HirType::Named("Any".into()));
             natives.push(HirFunction {
                 name: name.into(),
                 params: param_defs,
                 ret,
-                body: HirBlock { stmts: vec![] },
+                body: HirBlock {
+                    stmts: vec![],
+                },
                 is_native: true,
                 type_params: vec![],
             });
@@ -814,7 +907,9 @@ pub fn desugar_program(program: &Program) -> HirProgram {
         top_level_statements: if top_level_stmts.is_empty() {
             None
         } else {
-            Some(HirBlock { stmts: top_level_stmts })
+            Some(HirBlock {
+                stmts: top_level_stmts,
+            })
         },
     }
 }
@@ -822,7 +917,9 @@ pub fn desugar_program(program: &Program) -> HirProgram {
 fn desugar_fn(f: &FnDecl) -> HirFunction {
     let mut body = match &f.body {
         Some(b) => desugar_block(b),
-        None => HirBlock { stmts: vec![] },
+        None => HirBlock {
+            stmts: vec![],
+        },
     };
     // 表达式体函数：`fun f() = expr` 被解析为仅含一条表达式语句的块，
     // 需将该表达式作为返回值（Kotlin 语义：块末表达式即返回值）。
@@ -905,7 +1002,11 @@ fn desugar_stmt(s: &Stmt) -> HirStmt {
             ty: HirType::from_ast_opt(type_hint),
             init: initializer.as_ref().map(|e| desugar_expr(e)),
         },
-        Stmt::Destructure { patterns, expr, .. } => {
+        Stmt::Destructure {
+            patterns,
+            expr,
+            ..
+        } => {
             // 近似：仅将首个模式绑定到表达式的值
             let init = desugar_expr(expr);
             if let Some(Expr::Ident(first, _)) = patterns.first() {
@@ -939,13 +1040,17 @@ fn desugar_expr_stmt(e: &Expr) -> HirStmt {
             else_b: else_branch.as_ref().map(|e| desugar_block(e)),
         },
         Expr::While {
-            condition, body, ..
+            condition,
+            body,
+            ..
         } => HirStmt::While {
             cond: desugar_expr(condition),
             body: desugar_block(body),
         },
         Expr::DoWhile {
-            condition, body, ..
+            condition,
+            body,
+            ..
         } => {
             // do-while：body 至少执行一次，降级为 `while(true){ body; if(!cond) break }`
             let mut stmts = desugar_block(body).stmts;
@@ -970,7 +1075,11 @@ fn desugar_expr_stmt(e: &Expr) -> HirStmt {
             body,
             ..
         } => desugar_for(pattern, iterable, body),
-        Expr::Assign { target, value, .. } => HirStmt::Assign {
+        Expr::Assign {
+            target,
+            value,
+            ..
+        } => HirStmt::Assign {
             target: desugar_expr(target),
             value: desugar_expr(value),
         },
@@ -1025,11 +1134,13 @@ fn desugar_for(pattern: &Expr, iterable: &Expr, body: &Expr) -> HirStmt {
             .unwrap_or_else(|| Box::new(Expr::Literal(Literal::Int(0), Span::single(0, 1, 1))));
         let end_e = desugar_expr(&end_box);
         let idx = format!("__for_idx_{}", var_name);
-        let mut body_stmts = vec![HirStmt::Val {
-            name: var_name.clone(),
-            ty: None,
-            init: Some(HirExpr::Var(idx.clone())),
-        }];
+        let mut body_stmts = vec![
+            HirStmt::Val {
+                name: var_name.clone(),
+                ty: None,
+                init: Some(HirExpr::Var(idx.clone())),
+            },
+        ];
         body_stmts.extend(desugar_block(body).stmts);
         body_stmts.push(HirStmt::Assign {
             target: HirExpr::Var(idx.clone()),
@@ -1040,11 +1151,7 @@ fn desugar_for(pattern: &Expr, iterable: &Expr, body: &Expr) -> HirStmt {
             },
         });
         // 循环条件：inclusive ? idx <= end : idx < end
-        let cmp = if *inclusive {
-            HirBinOp::Le
-        } else {
-            HirBinOp::Lt
-        };
+        let cmp = if *inclusive { HirBinOp::Le } else { HirBinOp::Lt };
         return HirStmt::Block(HirBlock {
             stmts: vec![
                 HirStmt::Var {
@@ -1058,7 +1165,9 @@ fn desugar_for(pattern: &Expr, iterable: &Expr, body: &Expr) -> HirStmt {
                         lhs: Box::new(HirExpr::Var(idx.clone())),
                         rhs: Box::new(end_e),
                     },
-                    body: HirBlock { stmts: body_stmts },
+                    body: HirBlock {
+                        stmts: body_stmts,
+                    },
                 },
             ],
         });
@@ -1073,13 +1182,18 @@ fn desugar_for(pattern: &Expr, iterable: &Expr, body: &Expr) -> HirStmt {
     };
     let get_call = HirExpr::Call {
         callee: "__get".into(),
-        args: vec![iter_e, HirExpr::Var(idx.clone())],
+        args: vec![
+            iter_e,
+            HirExpr::Var(idx.clone()),
+        ],
     };
-    let mut body_stmts = vec![HirStmt::Val {
-        name: var_name.clone(),
-        ty: None,
-        init: Some(get_call),
-    }];
+    let mut body_stmts = vec![
+        HirStmt::Val {
+            name: var_name.clone(),
+            ty: None,
+            init: Some(get_call),
+        },
+    ];
     body_stmts.extend(desugar_block(body).stmts);
     body_stmts.push(HirStmt::Assign {
         target: HirExpr::Var(idx.clone()),
@@ -1102,7 +1216,9 @@ fn desugar_for(pattern: &Expr, iterable: &Expr, body: &Expr) -> HirStmt {
                     lhs: Box::new(HirExpr::Var(idx.clone())),
                     rhs: Box::new(len_call),
                 },
-                body: HirBlock { stmts: body_stmts },
+                body: HirBlock {
+                    stmts: body_stmts,
+                },
             },
         ],
     })
@@ -1112,12 +1228,21 @@ fn desugar_expr(e: &Expr) -> HirExpr {
     match e {
         Expr::Literal(l, _) => HirExpr::Lit(l.clone()),
         Expr::Ident(n, _) => HirExpr::Var(n.clone()),
-        Expr::Binary { op, lhs, rhs, .. } => HirExpr::Binary {
+        Expr::Binary {
+            op,
+            lhs,
+            rhs,
+            ..
+        } => HirExpr::Binary {
             op: HirBinOp::from_ast(*op),
             lhs: Box::new(desugar_expr(lhs)),
             rhs: Box::new(desugar_expr(rhs)),
         },
-        Expr::Unary { op, operand, .. } => {
+        Expr::Unary {
+            op,
+            operand,
+            ..
+        } => {
             if *op == UnOp::Increment || *op == UnOp::Decrement {
                 // ++/-- 作为语句语义，这里近似为自身值
                 desugar_expr(operand)
@@ -1128,12 +1253,20 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                 }
             }
         }
-        Expr::Call { callee, args, .. } => {
+        Expr::Call {
+            callee,
+            args,
+            ..
+        } => {
             let callee_name = match callee.as_ref() {
                 Expr::Ident(n, _) => n.clone(),
                 // 模块调用 `module.method(args)`：降级为 `module.method(args...)`
                 // 与普通方法调用 `obj.method(args)` → `method(obj, args...)` 区分
-                Expr::MemberAccess { object, name, .. } => {
+                Expr::MemberAccess {
+                    object,
+                    name,
+                    ..
+                } => {
                     // 检查是否为标准库模块调用（支持嵌套：aura.concurrent.spawn）
                     if let Expr::Ident(module_name, _) = object.as_ref() {
                         if is_std_module(module_name) {
@@ -1145,7 +1278,12 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                         }
                     }
                     // 嵌套：aura.concurrent.spawn
-                    if let Expr::MemberAccess { object: inner_obj, name: inner_name, .. } = object.as_ref() {
+                    if let Expr::MemberAccess {
+                        object: inner_obj,
+                        name: inner_name,
+                        ..
+                    } = object.as_ref()
+                    {
                         if let Expr::Ident(module_name, _) = inner_obj.as_ref() {
                             if is_std_module(&format!("aura.{}", inner_name)) {
                                 let full_module = full_package_name(module_name);
@@ -1159,7 +1297,8 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     }
                     // 普通方法调用：降级为 method(obj, args...)
                     // 如果方法是内置方法，解析为完整原生函数名
-                    let resolved_name = resolve_builtin_method(name).unwrap_or_else(|| name.clone());
+                    let resolved_name =
+                        resolve_builtin_method(name).unwrap_or_else(|| name.clone());
                     let mut all_args = vec![desugar_expr(object)];
                     for a in args {
                         all_args.push(desugar_expr(a));
@@ -1177,11 +1316,19 @@ fn desugar_expr(e: &Expr) -> HirExpr {
             }
         }
         Expr::NamedArg { value, .. } => desugar_expr(value),
-        Expr::MemberAccess { object, name, .. } => HirExpr::Member {
+        Expr::MemberAccess {
+            object,
+            name,
+            ..
+        } => HirExpr::Member {
             object: Box::new(desugar_expr(object)),
             name: name.clone(),
         },
-        Expr::SafeAccess { object, name, .. } => {
+        Expr::SafeAccess {
+            object,
+            name,
+            ..
+        } => {
             // 近似：安全调用降级为普通成员访问（完整空安全留待运行时）
             HirExpr::Member {
                 object: Box::new(desugar_expr(object)),
@@ -1189,13 +1336,17 @@ fn desugar_expr(e: &Expr) -> HirExpr {
             }
         }
         Expr::Index {
-            container, index, ..
+            container,
+            index,
+            ..
         } => HirExpr::Index {
             container: Box::new(desugar_expr(container)),
             index: Box::new(desugar_expr(index)),
         },
         Expr::New {
-            type_name, args, ..
+            type_name,
+            args,
+            ..
         } => {
             // P7.5: box expr → HirExpr::Box
             if type_name == "Box" && args.len() == 1 {
@@ -1223,13 +1374,19 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                 None => HirExpr::Lit(Literal::Null),
             }),
         },
-        Expr::When { subject, arms, .. } => desugar_when(subject, arms),
+        Expr::When {
+            subject,
+            arms,
+            ..
+        } => desugar_when(subject, arms),
         Expr::Block(_stmts, _) => HirExpr::Block(desugar_block(e)),
         Expr::Range { .. } => HirExpr::Call {
             callee: "__range".into(),
             args: vec![],
         },
-        Expr::Elvis { lhs, rhs, .. } => {
+        Expr::Elvis {
+            lhs, rhs, ..
+        } => {
             // `a ?: b` → if (a != null) a else b（用 EQ null 近似）
             HirExpr::If {
                 cond: Box::new(HirExpr::Binary {
@@ -1248,7 +1405,11 @@ fn desugar_expr(e: &Expr) -> HirExpr {
             None => HirExpr::Lit(Literal::Null),
         },
         // Fix 4: Lambda/Closure → HirExpr::Lambda（不再降级为 __lambda 调用）
-        Expr::Lambda { params, body, .. } => {
+        Expr::Lambda {
+            params,
+            body,
+            ..
+        } => {
             let hir_params = params
                 .iter()
                 .map(|p| HirParam {
@@ -1257,9 +1418,16 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                 })
                 .collect();
             let hir_body = desugar_block(body);
-            HirExpr::Lambda { params: hir_params, body: hir_body }
+            HirExpr::Lambda {
+                params: hir_params,
+                body: hir_body,
+            }
         }
-        Expr::Closure { params, body, .. } => {
+        Expr::Closure {
+            params,
+            body,
+            ..
+        } => {
             let hir_params = params
                 .iter()
                 .map(|p| HirParam {
@@ -1268,7 +1436,10 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                 })
                 .collect();
             let hir_body = desugar_block(body);
-            HirExpr::Lambda { params: hir_params, body: hir_body }
+            HirExpr::Lambda {
+                params: hir_params,
+                body: hir_body,
+            }
         }
         Expr::Destructure { expr, .. } => desugar_expr(expr),
         Expr::Throw { value, .. } => HirExpr::Call {
@@ -1277,9 +1448,13 @@ fn desugar_expr(e: &Expr) -> HirExpr {
         },
         Expr::Await { expr, .. } => HirExpr::Await(Box::new(desugar_expr(expr))),
         // P10.9: select 多路复用 — 降级为 `aura.concurrent.select(ch1, ch2)` 原生函数调用（最多 2 通道）
-        Expr::Select { branches, .. } => {
-            let ch_args: Vec<HirExpr> = branches.iter().take(2).map(|b| {
-                match &b.pattern {
+        Expr::Select {
+            branches, ..
+        } => {
+            let ch_args: Vec<HirExpr> = branches
+                .iter()
+                .take(2)
+                .map(|b| match &b.pattern {
                     Expr::Call { callee, .. } => {
                         if let Expr::MemberAccess { object, .. } = callee.as_ref() {
                             desugar_expr(object)
@@ -1288,8 +1463,8 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                         }
                     }
                     _ => desugar_expr(&b.pattern),
-                }
-            }).collect();
+                })
+                .collect();
             // 补齐到 2 个参数
             let mut args = ch_args;
             while args.len() < 2 {
@@ -1325,7 +1500,10 @@ fn desugar_when(subject: &Option<Box<Expr>>, arms: &[WhenArm]) -> HirExpr {
             (Some(s), Some(p)) => {
                 // 字面量/标识符模式 → 相等比较；`is T` → 类型检查内置
                 match p {
-                    Expr::Binary { op: BinOp::To, .. } => HirExpr::Lit(Literal::Bool(true)),
+                    Expr::Binary {
+                        op: BinOp::To,
+                        ..
+                    } => HirExpr::Lit(Literal::Bool(true)),
                     _ => HirExpr::Binary {
                         op: HirBinOp::Eq,
                         lhs: Box::new(desugar_expr(s)),
@@ -1417,18 +1595,48 @@ fn is_std_module(name: &str) -> bool {
     if let Some(mod_name) = name.strip_prefix("aura.") {
         return matches!(
             mod_name,
-            "io" | "math" | "string" | "collections" | "fs" | "net" | "json"
-                | "time" | "test" | "builtin" | "env" | "process" | "random"
-                | "encoding" | "ascii" | "console" | "path" | "assert" | "iter"
+            "io" | "math"
+                | "string"
+                | "collections"
+                | "fs"
+                | "net"
+                | "json"
+                | "time"
+                | "test"
+                | "builtin"
+                | "env"
+                | "process"
+                | "random"
+                | "encoding"
+                | "ascii"
+                | "console"
+                | "path"
+                | "assert"
+                | "iter"
                 | "concurrent"
         );
     }
     // 兼容短名：io, math, ...
     matches!(
         name,
-        "io" | "math" | "string" | "collections" | "fs" | "net" | "json"
-            | "time" | "test" | "builtin" | "env" | "process" | "random"
-            | "encoding" | "ascii" | "console" | "path" | "assert" | "iter"
+        "io" | "math"
+            | "string"
+            | "collections"
+            | "fs"
+            | "net"
+            | "json"
+            | "time"
+            | "test"
+            | "builtin"
+            | "env"
+            | "process"
+            | "random"
+            | "encoding"
+            | "ascii"
+            | "console"
+            | "path"
+            | "assert"
+            | "iter"
     )
 }
 
@@ -1451,21 +1659,51 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
         ("aura.io.readAll", vec![]),
         ("aura.io.flush", vec![]),
         ("aura.io.fileRead", vec![("path", "String")]),
-        ("aura.io.fileWrite", vec![("path", "String"), ("content", "String")]),
-        ("aura.io.writeFile", vec![("path", "String"), ("content", "String")]),
+        (
+            "aura.io.fileWrite",
+            vec![
+                ("path", "String"),
+                ("content", "String"),
+            ],
+        ),
+        (
+            "aura.io.writeFile",
+            vec![
+                ("path", "String"),
+                ("content", "String"),
+            ],
+        ),
         ("aura.io.readFile", vec![("path", "String")]),
         ("aura.io.fileExists", vec![("path", "String")]),
         // ── std.math ──
         ("aura.math.abs", vec![("x", "Float")]),
-        ("aura.math.min", vec![("a", "Int"), ("b", "Int")]),
-        ("aura.math.max", vec![("a", "Int"), ("b", "Int")]),
+        (
+            "aura.math.min",
+            vec![
+                ("a", "Int"),
+                ("b", "Int"),
+            ],
+        ),
+        (
+            "aura.math.max",
+            vec![
+                ("a", "Int"),
+                ("b", "Int"),
+            ],
+        ),
         ("aura.math.ceil", vec![("x", "Float")]),
         ("aura.math.floor", vec![("x", "Float")]),
         ("aura.math.round", vec![("x", "Float")]),
         ("aura.math.trunc", vec![("x", "Float")]),
         ("aura.math.sqrt", vec![("x", "Float")]),
         ("aura.math.cbrt", vec![("x", "Float")]),
-        ("aura.math.pow", vec![("base", "Float"), ("exp", "Float")]),
+        (
+            "aura.math.pow",
+            vec![
+                ("base", "Float"),
+                ("exp", "Float"),
+            ],
+        ),
         ("aura.math.exp", vec![("x", "Float")]),
         ("aura.math.log", vec![("x", "Float")]),
         ("aura.math.log2", vec![("x", "Float")]),
@@ -1476,70 +1714,271 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
         ("aura.math.asin", vec![("x", "Float")]),
         ("aura.math.acos", vec![("x", "Float")]),
         ("aura.math.atan", vec![("x", "Float")]),
-        ("aura.math.atan2", vec![("y", "Float"), ("x", "Float")]),
+        (
+            "aura.math.atan2",
+            vec![
+                ("y", "Float"),
+                ("x", "Float"),
+            ],
+        ),
         ("aura.math.PI", vec![]),
         ("aura.math.E", vec![]),
         ("aura.math.INT_MAX", vec![]),
         ("aura.math.INT_MIN", vec![]),
         ("aura.math.FLOAT_MAX", vec![]),
         ("aura.math.sign", vec![("x", "Float")]),
-        ("aura.math.clamp", vec![("x", "Float"), ("lo", "Float"), ("hi", "Float")]),
+        (
+            "aura.math.clamp",
+            vec![
+                ("x", "Float"),
+                ("lo", "Float"),
+                ("hi", "Float"),
+            ],
+        ),
         // ── std.string ──
-        ("aura.string.contains", vec![("text", "String"), ("substr", "String")]),
-        ("aura.string.startsWith", vec![("text", "String"), ("prefix", "String")]),
-        ("aura.string.endsWith", vec![("text", "String"), ("suffix", "String")]),
-        ("aura.string.split", vec![("text", "String"), ("sep", "String")]),
-        ("aura.string.join", vec![("text", "String"), ("sep", "String")]),
-        ("aura.string.replace", vec![("text", "String"), ("target", "String"), ("replacement", "String")]),
-        ("aura.string.replaceAll", vec![("text", "String"), ("target", "String"), ("replacement", "String")]),
+        (
+            "aura.string.contains",
+            vec![
+                ("text", "String"),
+                ("substr", "String"),
+            ],
+        ),
+        (
+            "aura.string.startsWith",
+            vec![
+                ("text", "String"),
+                ("prefix", "String"),
+            ],
+        ),
+        (
+            "aura.string.endsWith",
+            vec![
+                ("text", "String"),
+                ("suffix", "String"),
+            ],
+        ),
+        (
+            "aura.string.split",
+            vec![
+                ("text", "String"),
+                ("sep", "String"),
+            ],
+        ),
+        (
+            "aura.string.join",
+            vec![
+                ("text", "String"),
+                ("sep", "String"),
+            ],
+        ),
+        (
+            "aura.string.replace",
+            vec![
+                ("text", "String"),
+                ("target", "String"),
+                ("replacement", "String"),
+            ],
+        ),
+        (
+            "aura.string.replaceAll",
+            vec![
+                ("text", "String"),
+                ("target", "String"),
+                ("replacement", "String"),
+            ],
+        ),
         ("aura.string.trim", vec![("text", "String")]),
         ("aura.string.trimStart", vec![("text", "String")]),
         ("aura.string.trimEnd", vec![("text", "String")]),
-        ("aura.string.substring", vec![("text", "String"), ("start", "Int"), ("end", "Int")]),
-        ("aura.string.substringBefore", vec![("text", "String"), ("sep", "String")]),
-        ("aura.string.substringAfter", vec![("text", "String"), ("sep", "String")]),
+        (
+            "aura.string.substring",
+            vec![
+                ("text", "String"),
+                ("start", "Int"),
+                ("end", "Int"),
+            ],
+        ),
+        (
+            "aura.string.substringBefore",
+            vec![
+                ("text", "String"),
+                ("sep", "String"),
+            ],
+        ),
+        (
+            "aura.string.substringAfter",
+            vec![
+                ("text", "String"),
+                ("sep", "String"),
+            ],
+        ),
         ("aura.string.toLowerCase", vec![("text", "String")]),
         ("aura.string.toUpperCase", vec![("text", "String")]),
         ("aura.string.length", vec![("text", "String")]),
         ("aura.string.isEmpty", vec![("text", "String")]),
         ("aura.string.format", vec![("template", "String")]),
-        ("aura.string.repeat", vec![("n", "Int"), ("text", "String")]),
-        ("aura.string.indexOf", vec![("text", "String"), ("substr", "String")]),
-        ("aura.string.lastIndexOf", vec![("text", "String"), ("substr", "String")]),
-        ("aura.string.padStart", vec![("text", "String"), ("length", "Int"), ("pad", "String")]),
-        ("aura.string.padEnd", vec![("text", "String"), ("length", "Int"), ("pad", "String")]),
+        (
+            "aura.string.repeat",
+            vec![
+                ("n", "Int"),
+                ("text", "String"),
+            ],
+        ),
+        (
+            "aura.string.indexOf",
+            vec![
+                ("text", "String"),
+                ("substr", "String"),
+            ],
+        ),
+        (
+            "aura.string.lastIndexOf",
+            vec![
+                ("text", "String"),
+                ("substr", "String"),
+            ],
+        ),
+        (
+            "aura.string.padStart",
+            vec![
+                ("text", "String"),
+                ("length", "Int"),
+                ("pad", "String"),
+            ],
+        ),
+        (
+            "aura.string.padEnd",
+            vec![
+                ("text", "String"),
+                ("length", "Int"),
+                ("pad", "String"),
+            ],
+        ),
         ("aura.string.escape", vec![("text", "String")]),
         ("aura.string.unescape", vec![("text", "String")]),
         ("aura.string.splitLines", vec![("text", "String")]),
         ("aura.string.joinLines", vec![("text", "String")]),
-        ("aura.string.countChar", vec![("text", "String"), ("char", "String")]),
+        (
+            "aura.string.countChar",
+            vec![
+                ("text", "String"),
+                ("char", "String"),
+            ],
+        ),
         ("aura.string.first", vec![("text", "String")]),
         ("aura.string.last", vec![("text", "String")]),
         ("aura.string.isBlank", vec![("text", "String")]),
-        ("aura.string.matches", vec![("text", "String"), ("regex", "String")]),
-        ("aura.string.containsAny", vec![("text", "String"), ("patterns", "String")]),
-        ("aura.string.containsAll", vec![("text", "String"), ("patterns", "String")]),
+        (
+            "aura.string.matches",
+            vec![
+                ("text", "String"),
+                ("regex", "String"),
+            ],
+        ),
+        (
+            "aura.string.containsAny",
+            vec![
+                ("text", "String"),
+                ("patterns", "String"),
+            ],
+        ),
+        (
+            "aura.string.containsAll",
+            vec![
+                ("text", "String"),
+                ("patterns", "String"),
+            ],
+        ),
         // ── std.collections ──
         ("aura.collections.listOf", vec![]),
         ("aura.collections.mutableListOf", vec![]),
         ("aura.collections.emptyList", vec![]),
         ("aura.collections.arrayOf", vec![]),
-        ("aura.collections.listContains", vec![("list", "List"), ("item", "Value")]),
-        ("aura.collections.listIndexOf", vec![("list", "List"), ("item", "Value")]),
-        ("aura.collections.listRemove", vec![("list", "List"), ("item", "Value")]),
+        (
+            "aura.collections.listContains",
+            vec![
+                ("list", "List"),
+                ("item", "Value"),
+            ],
+        ),
+        (
+            "aura.collections.listIndexOf",
+            vec![
+                ("list", "List"),
+                ("item", "Value"),
+            ],
+        ),
+        (
+            "aura.collections.listRemove",
+            vec![
+                ("list", "List"),
+                ("item", "Value"),
+            ],
+        ),
         ("aura.collections.listReverse", vec![("list", "List")]),
         ("aura.collections.listSort", vec![("list", "List")]),
-        ("aura.collections.listGet", vec![("list", "List"), ("index", "Int")]),
-        ("aura.collections.listSet", vec![("list", "List"), ("index", "Int"), ("value", "Value")]),
-        ("aura.collections.listInsert", vec![("list", "List"), ("index", "Int"), ("value", "Value")]),
-        ("aura.collections.listSubList", vec![("list", "List"), ("from", "Int"), ("to", "Int")]),
+        (
+            "aura.collections.listGet",
+            vec![
+                ("list", "List"),
+                ("index", "Int"),
+            ],
+        ),
+        (
+            "aura.collections.listSet",
+            vec![
+                ("list", "List"),
+                ("index", "Int"),
+                ("value", "Value"),
+            ],
+        ),
+        (
+            "aura.collections.listInsert",
+            vec![
+                ("list", "List"),
+                ("index", "Int"),
+                ("value", "Value"),
+            ],
+        ),
+        (
+            "aura.collections.listSubList",
+            vec![
+                ("list", "List"),
+                ("from", "Int"),
+                ("to", "Int"),
+            ],
+        ),
         ("aura.collections.mapOf", vec![]),
         ("aura.collections.mutableMapOf", vec![]),
         ("aura.collections.emptyMap", vec![]),
-        ("aura.collections.mapContains", vec![("map", "Map"), ("value", "Value")]),
-        ("aura.collections.mapContainsKey", vec![("map", "Map"), ("key", "Value")]),
-        ("aura.collections.mapContainsValue", vec![("map", "Map"), ("value", "Value")]),
-        ("aura.collections.mapRemove", vec![("map", "Map"), ("key", "Value")]),
+        (
+            "aura.collections.mapContains",
+            vec![
+                ("map", "Map"),
+                ("value", "Value"),
+            ],
+        ),
+        (
+            "aura.collections.mapContainsKey",
+            vec![
+                ("map", "Map"),
+                ("key", "Value"),
+            ],
+        ),
+        (
+            "aura.collections.mapContainsValue",
+            vec![
+                ("map", "Map"),
+                ("value", "Value"),
+            ],
+        ),
+        (
+            "aura.collections.mapRemove",
+            vec![
+                ("map", "Map"),
+                ("key", "Value"),
+            ],
+        ),
         ("aura.collections.mapKeys", vec![("map", "Map")]),
         ("aura.collections.mapValues", vec![("map", "Map")]),
         ("aura.collections.setOf", vec![]),
@@ -1550,14 +1989,38 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
         ("aura.fs.isFile", vec![("path", "String")]),
         ("aura.fs.isDirectory", vec![("path", "String")]),
         ("aura.fs.readText", vec![("path", "String")]),
-        ("aura.fs.writeText", vec![("path", "String"), ("content", "String")]),
+        (
+            "aura.fs.writeText",
+            vec![
+                ("path", "String"),
+                ("content", "String"),
+            ],
+        ),
         ("aura.fs.readBytes", vec![("path", "String")]),
-        ("aura.fs.writeBytes", vec![("path", "String"), ("data", "List")]),
+        (
+            "aura.fs.writeBytes",
+            vec![
+                ("path", "String"),
+                ("data", "List"),
+            ],
+        ),
         ("aura.fs.delete", vec![("path", "String")]),
         ("aura.fs.mkdir", vec![("path", "String")]),
         ("aura.fs.mkdirP", vec![("path", "String")]),
-        ("aura.fs.rename", vec![("old", "String"), ("new", "String")]),
-        ("aura.fs.copy", vec![("src", "String"), ("dst", "String")]),
+        (
+            "aura.fs.rename",
+            vec![
+                ("old", "String"),
+                ("new", "String"),
+            ],
+        ),
+        (
+            "aura.fs.copy",
+            vec![
+                ("src", "String"),
+                ("dst", "String"),
+            ],
+        ),
         ("aura.fs.listDir", vec![("path", "String")]),
         ("aura.fs.listFiles", vec![("path", "String")]),
         ("aura.fs.fileSize", vec![("path", "String")]),
@@ -1566,14 +2029,39 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
         ("aura.fs.homeDir", vec![]),
         ("aura.fs.tempDir", vec![]),
         ("aura.fs.currentDir", vec![]),
-        ("aura.fs.walk", vec![("root", "String"), ("maxDepth", "Int")]),
+        (
+            "aura.fs.walk",
+            vec![
+                ("root", "String"),
+                ("maxDepth", "Int"),
+            ],
+        ),
         // ── std.net ──
-        ("aura.net.tcpConnect", vec![("host", "String"), ("port", "Int")]),
+        (
+            "aura.net.tcpConnect",
+            vec![
+                ("host", "String"),
+                ("port", "Int"),
+            ],
+        ),
         ("aura.net.tcpListen", vec![("port", "Int")]),
-        ("aura.net.tcpSend", vec![("handle", "Int"), ("message", "String")]),
+        (
+            "aura.net.tcpSend",
+            vec![
+                ("handle", "Int"),
+                ("message", "String"),
+            ],
+        ),
         ("aura.net.tcpRecv", vec![("handle", "Int")]),
         ("aura.net.tcpClose", vec![("handle", "Int")]),
-        ("aura.net.udpSend", vec![("target", "String"), ("port", "Int"), ("message", "String")]),
+        (
+            "aura.net.udpSend",
+            vec![
+                ("target", "String"),
+                ("port", "Int"),
+                ("message", "String"),
+            ],
+        ),
         ("aura.net.udpRecv", vec![("handle", "Int")]),
         ("aura.net.udpClose", vec![("handle", "Int")]),
         ("aura.net.isHostReachable", vec![("host", "String")]),
@@ -1581,15 +2069,46 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
         ("aura.net.getLocalIp", vec![]),
         // ── std.json ──
         ("aura.json.parse", vec![("text", "String")]),
-        ("aura.json.stringify", vec![("value", "Value"), ("pretty", "Bool")]),
+        (
+            "aura.json.stringify",
+            vec![
+                ("value", "Value"),
+                ("pretty", "Bool"),
+            ],
+        ),
         ("aura.json.isValid", vec![("text", "String")]),
-        ("aura.json.get", vec![("obj", "Value"), ("key", "String")]),
-        ("aura.json.set", vec![("obj", "Value"), ("key", "String"), ("value", "Value")]),
+        (
+            "aura.json.get",
+            vec![
+                ("obj", "Value"),
+                ("key", "String"),
+            ],
+        ),
+        (
+            "aura.json.set",
+            vec![
+                ("obj", "Value"),
+                ("key", "String"),
+                ("value", "Value"),
+            ],
+        ),
         ("aura.json.keys", vec![("obj", "Value")]),
         ("aura.json.values", vec![("obj", "Value")]),
         ("aura.json.length", vec![("obj", "Value")]),
-        ("aura.json.contains", vec![("obj", "Value"), ("key", "String")]),
-        ("aura.json.remove", vec![("obj", "Value"), ("key", "String")]),
+        (
+            "aura.json.contains",
+            vec![
+                ("obj", "Value"),
+                ("key", "String"),
+            ],
+        ),
+        (
+            "aura.json.remove",
+            vec![
+                ("obj", "Value"),
+                ("key", "String"),
+            ],
+        ),
         // ── std.time ──
         ("aura.time.now", vec![]),
         ("aura.time.epoch", vec![]),
@@ -1598,26 +2117,140 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
         ("aura.time.duration", vec![("seconds", "Float")]),
         ("aura.time.toDateString", vec![("timestamp", "Int")]),
         ("aura.time.toTimeString", vec![("timestamp", "Int")]),
-        ("aura.time.formatDate", vec![("timestamp", "Int"), ("pattern", "String")]),
-        ("aura.time.diff", vec![("t1", "Float"), ("t2", "Float")]),
+        (
+            "aura.time.formatDate",
+            vec![
+                ("timestamp", "Int"),
+                ("pattern", "String"),
+            ],
+        ),
+        (
+            "aura.time.diff",
+            vec![
+                ("t1", "Float"),
+                ("t2", "Float"),
+            ],
+        ),
         ("aura.time.parseDate", vec![("text", "String")]),
         // ── std.test ──
-        ("aura.test.assertTrue", vec![("condition", "Value"), ("message", "String")]),
-        ("aura.test.assertFalse", vec![("condition", "Value"), ("message", "String")]),
-        ("aura.test.assertEq", vec![("a", "Value"), ("b", "Value"), ("message", "String")]),
-        ("aura.test.assertNotEq", vec![("a", "Value"), ("b", "Value"), ("message", "String")]),
-        ("aura.test.assertNotNull", vec![("value", "Value"), ("message", "String")]),
-        ("aura.test.assertNull", vec![("value", "Value"), ("message", "String")]),
-        ("aura.test.assertContains", vec![("text", "String"), ("substr", "String"), ("message", "String")]),
-        ("aura.test.assertNotContains", vec![("text", "String"), ("substr", "String"), ("message", "String")]),
+        (
+            "aura.test.assertTrue",
+            vec![
+                ("condition", "Value"),
+                ("message", "String"),
+            ],
+        ),
+        (
+            "aura.test.assertFalse",
+            vec![
+                ("condition", "Value"),
+                ("message", "String"),
+            ],
+        ),
+        (
+            "aura.test.assertEq",
+            vec![
+                ("a", "Value"),
+                ("b", "Value"),
+                ("message", "String"),
+            ],
+        ),
+        (
+            "aura.test.assertNotEq",
+            vec![
+                ("a", "Value"),
+                ("b", "Value"),
+                ("message", "String"),
+            ],
+        ),
+        (
+            "aura.test.assertNotNull",
+            vec![
+                ("value", "Value"),
+                ("message", "String"),
+            ],
+        ),
+        (
+            "aura.test.assertNull",
+            vec![
+                ("value", "Value"),
+                ("message", "String"),
+            ],
+        ),
+        (
+            "aura.test.assertContains",
+            vec![
+                ("text", "String"),
+                ("substr", "String"),
+                ("message", "String"),
+            ],
+        ),
+        (
+            "aura.test.assertNotContains",
+            vec![
+                ("text", "String"),
+                ("substr", "String"),
+                ("message", "String"),
+            ],
+        ),
         ("aura.test.assertThrows", vec![]),
-        ("aura.test.assertGt", vec![("a", "Float"), ("b", "Float"), ("message", "String")]),
-        ("aura.test.assertGte", vec![("a", "Float"), ("b", "Float"), ("message", "String")]),
-        ("aura.test.assertLt", vec![("a", "Float"), ("b", "Float"), ("message", "String")]),
-        ("aura.test.assertLte", vec![("a", "Float"), ("b", "Float"), ("message", "String")]),
-        ("aura.test.assertApprox", vec![("a", "Float"), ("b", "Float"), ("epsilon", "Float"), ("message", "String")]),
-        ("aura.test.assertArrayEq", vec![("a", "Value"), ("b", "Value"), ("message", "String")]),
-        ("aura.test.assertMapEq", vec![("a", "Value"), ("b", "Value"), ("message", "String")]),
+        (
+            "aura.test.assertGt",
+            vec![
+                ("a", "Float"),
+                ("b", "Float"),
+                ("message", "String"),
+            ],
+        ),
+        (
+            "aura.test.assertGte",
+            vec![
+                ("a", "Float"),
+                ("b", "Float"),
+                ("message", "String"),
+            ],
+        ),
+        (
+            "aura.test.assertLt",
+            vec![
+                ("a", "Float"),
+                ("b", "Float"),
+                ("message", "String"),
+            ],
+        ),
+        (
+            "aura.test.assertLte",
+            vec![
+                ("a", "Float"),
+                ("b", "Float"),
+                ("message", "String"),
+            ],
+        ),
+        (
+            "aura.test.assertApprox",
+            vec![
+                ("a", "Float"),
+                ("b", "Float"),
+                ("epsilon", "Float"),
+                ("message", "String"),
+            ],
+        ),
+        (
+            "aura.test.assertArrayEq",
+            vec![
+                ("a", "Value"),
+                ("b", "Value"),
+                ("message", "String"),
+            ],
+        ),
+        (
+            "aura.test.assertMapEq",
+            vec![
+                ("a", "Value"),
+                ("b", "Value"),
+                ("message", "String"),
+            ],
+        ),
         ("aura.test.pass", vec![("message", "String")]),
         ("aura.test.fail", vec![("message", "String")]),
         // ── std.builtin ──
@@ -1634,12 +2267,30 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
         ("aura.builtin.toBool", vec![("value", "Value")]),
         ("aura.builtin.sizeOf", vec![("value", "Value")]),
         ("aura.builtin.hash", vec![("value", "Value")]),
-        ("aura.builtin.compare", vec![("a", "Value"), ("b", "Value")]),
+        (
+            "aura.builtin.compare",
+            vec![
+                ("a", "Value"),
+                ("b", "Value"),
+            ],
+        ),
         ("aura.builtin.clone", vec![("value", "Value")]),
         ("aura.builtin.identity", vec![("value", "Value")]),
         // ── std.env ──
-        ("aura.env.get", vec![("name", "String"), ("default", "String")]),
-        ("aura.env.set", vec![("name", "String"), ("value", "String")]),
+        (
+            "aura.env.get",
+            vec![
+                ("name", "String"),
+                ("default", "String"),
+            ],
+        ),
+        (
+            "aura.env.set",
+            vec![
+                ("name", "String"),
+                ("value", "String"),
+            ],
+        ),
         ("aura.env.remove", vec![("name", "String")]),
         ("aura.env.has", vec![("name", "String")]),
         ("aura.env.keys", vec![]),
@@ -1668,8 +2319,20 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
         ("aura.random.nextFloat", vec![]),
         ("aura.random.nextDouble", vec![]),
         ("aura.random.nextBool", vec![]),
-        ("aura.random.nextIntRange", vec![("min", "Int"), ("max", "Int")]),
-        ("aura.random.nextFloatRange", vec![("min", "Float"), ("max", "Float")]),
+        (
+            "aura.random.nextIntRange",
+            vec![
+                ("min", "Int"),
+                ("max", "Int"),
+            ],
+        ),
+        (
+            "aura.random.nextFloatRange",
+            vec![
+                ("min", "Float"),
+                ("max", "Float"),
+            ],
+        ),
         ("aura.random.choice", vec![]),
         ("aura.random.shuffle", vec![("list", "List")]),
         ("aura.random.seed", vec![]),
@@ -1692,10 +2355,28 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
         ("aura.ascii.isLower", vec![("text", "String")]),
         ("aura.ascii.toUpper", vec![("text", "String")]),
         ("aura.ascii.toLower", vec![("text", "String")]),
-        ("aura.ascii.codeAt", vec![("text", "String"), ("index", "Int")]),
-        ("aura.ascii.charAt", vec![("text", "String"), ("index", "Int")]),
+        (
+            "aura.ascii.codeAt",
+            vec![
+                ("text", "String"),
+                ("index", "Int"),
+            ],
+        ),
+        (
+            "aura.ascii.charAt",
+            vec![
+                ("text", "String"),
+                ("index", "Int"),
+            ],
+        ),
         ("aura.ascii.fromCode", vec![("code", "Int")]),
-        ("aura.ascii.codePointAt", vec![("text", "String"), ("index", "Int")]),
+        (
+            "aura.ascii.codePointAt",
+            vec![
+                ("text", "String"),
+                ("index", "Int"),
+            ],
+        ),
         // ── std.console ──
         ("aura.console.clear", vec![]),
         ("aura.console.cursorUp", vec![("n", "Int")]),
@@ -1725,7 +2406,13 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
         ("aura.path.dirname", vec![("path", "String")]),
         ("aura.path.basename", vec![("path", "String")]),
         ("aura.path.extname", vec![("path", "String")]),
-        ("aura.path.relative", vec![("from", "String"), ("to", "String")]),
+        (
+            "aura.path.relative",
+            vec![
+                ("from", "String"),
+                ("to", "String"),
+            ],
+        ),
         ("aura.path.resolve", vec![("path", "String")]),
         ("aura.path.normalize", vec![("path", "String")]),
         ("aura.path.isAbsolute", vec![("path", "String")]),
@@ -1735,44 +2422,205 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
         ("aura.path.fromUnix", vec![("path", "String")]),
         ("aura.path.fromWindows", vec![("path", "String")]),
         // ── std.assert ──
-        ("aura.assert.assert", vec![("condition", "Value"), ("message", "String")]),
-        ("aura.assert.assertTrue", vec![("condition", "Value"), ("message", "String")]),
-        ("aura.assert.assertFalse", vec![("condition", "Value"), ("message", "String")]),
-        ("aura.assert.assertEq", vec![("a", "Value"), ("b", "Value"), ("message", "String")]),
-        ("aura.assert.assertNotEq", vec![("a", "Value"), ("b", "Value"), ("message", "String")]),
-        ("aura.assert.assertNotNull", vec![("value", "Value"), ("message", "String")]),
-        ("aura.assert.assertNull", vec![("value", "Value"), ("message", "String")]),
-        ("aura.assert.debugAssert", vec![("condition", "Value"), ("message", "String")]),
+        (
+            "aura.assert.assert",
+            vec![
+                ("condition", "Value"),
+                ("message", "String"),
+            ],
+        ),
+        (
+            "aura.assert.assertTrue",
+            vec![
+                ("condition", "Value"),
+                ("message", "String"),
+            ],
+        ),
+        (
+            "aura.assert.assertFalse",
+            vec![
+                ("condition", "Value"),
+                ("message", "String"),
+            ],
+        ),
+        (
+            "aura.assert.assertEq",
+            vec![
+                ("a", "Value"),
+                ("b", "Value"),
+                ("message", "String"),
+            ],
+        ),
+        (
+            "aura.assert.assertNotEq",
+            vec![
+                ("a", "Value"),
+                ("b", "Value"),
+                ("message", "String"),
+            ],
+        ),
+        (
+            "aura.assert.assertNotNull",
+            vec![
+                ("value", "Value"),
+                ("message", "String"),
+            ],
+        ),
+        (
+            "aura.assert.assertNull",
+            vec![
+                ("value", "Value"),
+                ("message", "String"),
+            ],
+        ),
+        (
+            "aura.assert.debugAssert",
+            vec![
+                ("condition", "Value"),
+                ("message", "String"),
+            ],
+        ),
         // ── std.iter ──
         ("aura.iter.sum", vec![("list", "List")]),
         ("aura.iter.avg", vec![("list", "List")]),
         ("aura.iter.min", vec![("list", "List")]),
         ("aura.iter.max", vec![("list", "List")]),
         ("aura.iter.product", vec![("list", "List")]),
-        ("aura.iter.contains", vec![("list", "List"), ("item", "Value")]),
-        ("aura.iter.indexOf", vec![("list", "List"), ("item", "Value")]),
+        (
+            "aura.iter.contains",
+            vec![
+                ("list", "List"),
+                ("item", "Value"),
+            ],
+        ),
+        (
+            "aura.iter.indexOf",
+            vec![
+                ("list", "List"),
+                ("item", "Value"),
+            ],
+        ),
         ("aura.iter.count", vec![("list", "List")]),
-        ("aura.iter.every", vec![("list", "List"), ("predicate", "Value")]),
-        ("aura.iter.some", vec![("list", "List"), ("predicate", "Value")]),
-        ("aura.iter.flatMap", vec![("list", "List"), ("fn", "Value")]),
+        (
+            "aura.iter.every",
+            vec![
+                ("list", "List"),
+                ("predicate", "Value"),
+            ],
+        ),
+        (
+            "aura.iter.some",
+            vec![
+                ("list", "List"),
+                ("predicate", "Value"),
+            ],
+        ),
+        (
+            "aura.iter.flatMap",
+            vec![
+                ("list", "List"),
+                ("fn", "Value"),
+            ],
+        ),
         ("aura.iter.zip", vec![]),
         ("aura.iter.unzip", vec![("list", "List")]),
         ("aura.iter.enumerate", vec![("list", "List")]),
         ("aura.iter.chain", vec![]),
-        ("aura.iter.take", vec![("list", "List"), ("n", "Int")]),
-        ("aura.iter.skip", vec![("list", "List"), ("n", "Int")]),
-        ("aura.iter.dropWhile", vec![("list", "List"), ("predicate", "Value")]),
-        ("aura.iter.takeWhile", vec![("list", "List"), ("predicate", "Value")]),
+        (
+            "aura.iter.take",
+            vec![
+                ("list", "List"),
+                ("n", "Int"),
+            ],
+        ),
+        (
+            "aura.iter.skip",
+            vec![
+                ("list", "List"),
+                ("n", "Int"),
+            ],
+        ),
+        (
+            "aura.iter.dropWhile",
+            vec![
+                ("list", "List"),
+                ("predicate", "Value"),
+            ],
+        ),
+        (
+            "aura.iter.takeWhile",
+            vec![
+                ("list", "List"),
+                ("predicate", "Value"),
+            ],
+        ),
         ("aura.iter.distinct", vec![("list", "List")]),
-        ("aura.iter.groupBy", vec![("list", "List"), ("keyFn", "Value")]),
-        ("aura.iter.partition", vec![("list", "List"), ("predicate", "Value")]),
-        ("aura.iter.fold", vec![("list", "List"), ("init", "Value"), ("fn", "Value")]),
-        ("aura.iter.scan", vec![("list", "List"), ("init", "Value"), ("fn", "Value")]),
-        ("aura.iter.toMap", vec![("list", "List"), ("keyFn", "Value"), ("valueFn", "Value")]),
+        (
+            "aura.iter.groupBy",
+            vec![
+                ("list", "List"),
+                ("keyFn", "Value"),
+            ],
+        ),
+        (
+            "aura.iter.partition",
+            vec![
+                ("list", "List"),
+                ("predicate", "Value"),
+            ],
+        ),
+        (
+            "aura.iter.fold",
+            vec![
+                ("list", "List"),
+                ("init", "Value"),
+                ("fn", "Value"),
+            ],
+        ),
+        (
+            "aura.iter.scan",
+            vec![
+                ("list", "List"),
+                ("init", "Value"),
+                ("fn", "Value"),
+            ],
+        ),
+        (
+            "aura.iter.toMap",
+            vec![
+                ("list", "List"),
+                ("keyFn", "Value"),
+                ("valueFn", "Value"),
+            ],
+        ),
         ("aura.iter.toList", vec![("value", "Value")]),
-        ("aura.iter.range", vec![("from", "Int"), ("to", "Int")]),
-        ("aura.iter.rangeTo", vec![("from", "Int"), ("to", "Int")]),
-        ("aura.iter.rangeUntil", vec![("from", "Int"), ("to", "Int")]),
-        ("aura.iter.repeatN", vec![("value", "Value"), ("count", "Int")]),
+        (
+            "aura.iter.range",
+            vec![
+                ("from", "Int"),
+                ("to", "Int"),
+            ],
+        ),
+        (
+            "aura.iter.rangeTo",
+            vec![
+                ("from", "Int"),
+                ("to", "Int"),
+            ],
+        ),
+        (
+            "aura.iter.rangeUntil",
+            vec![
+                ("from", "Int"),
+                ("to", "Int"),
+            ],
+        ),
+        (
+            "aura.iter.repeatN",
+            vec![
+                ("value", "Value"),
+                ("count", "Int"),
+            ],
+        ),
     ]
 }

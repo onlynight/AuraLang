@@ -139,8 +139,12 @@ fn compare_values(a: &Value, b: &Value) -> i32 {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => x.cmp(y) as i32,
         (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).map(|c| c as i32).unwrap_or(0),
-        (Value::Int(x), Value::Float(y)) => (*x as f64).partial_cmp(y).map(|c| c as i32).unwrap_or(0),
-        (Value::Float(x), Value::Int(y)) => x.partial_cmp(&(*y as f64)).map(|c| c as i32).unwrap_or(0),
+        (Value::Int(x), Value::Float(y)) => {
+            (*x as f64).partial_cmp(y).map(|c| c as i32).unwrap_or(0)
+        }
+        (Value::Float(x), Value::Int(y)) => {
+            x.partial_cmp(&(*y as f64)).map(|c| c as i32).unwrap_or(0)
+        }
         (Value::Str(x), Value::Str(y)) => x.cmp(y) as i32,
         (Value::Bool(x), Value::Bool(y)) => x.cmp(y) as i32,
         _ => 0,

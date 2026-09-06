@@ -1692,12 +1692,13 @@ aura wrapper install              # 安装当前项目指定版本
 | `<profiles>` | `[profiles]` |
 | `<repositories>` | `[repositories]` |
 | `<distributionManagement>` | `[repositories.publish]` |
-| `mvn clean` | `aura clean` |
-| `mvn compile` | `aura compile` |
-| `mvn test` | `aura test` |
-| `mvn package` | `aura package` |
-| `mvn install` | `aura install` |
-| `mvn deploy` | `aura publish` |
+| `mvn clean` | `loom clean` |
+| `mvn compile` | `loom compile` |
+| `mvn test` | `loom test` |
+
+> **第四阶段变更**：`mvn package` / `mvn install` / `mvn deploy` 对应的生态层命令
+> （`.auz` 打包 / 本地安装 / 远程发布）已归 `aura` 承担，详见
+> `docs/多进程与CLI架构分析报告.md` §4。
 
 ### 20.2 Gradle build.gradle vs aura.toml
 
@@ -1726,10 +1727,12 @@ aura wrapper install              # 安装当前项目指定版本
 | `[build-dependencies]` | `[build-dependencies]` |
 | `[features]` | `[plugins]` |
 | `[workspace] members` | `[workspace] members` |
-| `cargo build` | `aura build` |
-| `cargo test` | `aura test` |
-| `cargo run` | `aura run` |
-| `cargo publish` | `aura publish` |
+| `cargo build` | `loom build` |
+| `cargo test` | `loom test` |
+| `cargo run` | `loom run` |
+
+> **第四阶段变更**：`cargo publish` 对应的生态层命令已归 `aura publish` 承担。
+> loom 对标 webpack / gradlew（纯构建系统），而非 cargo（构建 + 生态合体）。
 
 ---
 

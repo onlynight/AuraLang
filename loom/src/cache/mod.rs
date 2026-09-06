@@ -12,9 +12,9 @@
 //! B3.4: 缓存上传/下载 + 共享策略
 //! B3.5: --no-cache / --clean 参数
 
+pub mod fingerprint;
 pub mod local;
 pub mod remote;
-pub mod fingerprint;
 
 /// 缓存键
 #[derive(Debug, Clone)]

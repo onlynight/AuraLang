@@ -113,21 +113,11 @@ fn aot_bench(src: &str, iters: usize, expected: i64) -> Result<f64, String> {
     let _ = std::fs::create_dir_all(&tmp);
     let ll = tmp.join("b.ll");
     let obj = tmp.join("b.obj");
-    let exe = if cfg!(target_os = "windows") {
-        tmp.join("b.exe")
-    } else {
-        tmp.join("b")
-    };
+    let exe = if cfg!(target_os = "windows") { tmp.join("b.exe") } else { tmp.join("b") };
     std::fs::write(&ll, &ir).unwrap();
 
     // llc
-    let llc = bin.join({
-        if cfg!(target_os = "windows") {
-            "llc.exe"
-        } else {
-            "llc"
-        }
-    });
+    let llc = bin.join({ if cfg!(target_os = "windows") { "llc.exe" } else { "llc" } });
     let out = Command::new(&llc)
         .arg(&ll)
         .arg("-o")
@@ -163,11 +153,7 @@ fn aot_bench(src: &str, iters: usize, expected: i64) -> Result<f64, String> {
     for _ in 0..iters {
         let out = Command::new(&exe).output().map_err(|e| e.to_string())?;
         let raw = out.status.code().unwrap_or(-1);
-        let code = if raw < 0 {
-            raw as u32 as i64
-        } else {
-            raw as i64
-        };
+        let code = if raw < 0 { raw as u32 as i64 } else { raw as i64 };
         assert_eq!(code, expected, "AOT 结果应为 {}", expected);
     }
     let dur = start.elapsed().as_secs_f64() / iters as f64;

@@ -11,13 +11,13 @@ struct Box {
 }
 
 fun createNode(val: Int) -> Any {
-    val n = new Node()
+    val n = Node()
     n.value = val
     return n
 }
 
 fun process(obj: Any) -> Any {
-    val result = new Node()
+    val result = Node()
     result.value = 100
     return result
 }

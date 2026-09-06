@@ -153,11 +153,7 @@ impl AotCodeGenerator {
         let object_path = output_dir.join(format!(
             "{}.{}",
             stem,
-            if cfg!(target_os = "windows") {
-                "obj"
-            } else {
-                "o"
-            }
+            if cfg!(target_os = "windows") { "obj" } else { "o" }
         ));
         link_to_object(&ll_path, &object_path, &self.options)?;
         output.object_path = Some(object_path.clone());
@@ -170,11 +166,7 @@ impl AotCodeGenerator {
         let exe_path = output_dir.join(format!(
             "{}{}",
             stem,
-            if cfg!(target_os = "windows") {
-                ".exe"
-            } else {
-                ""
-            }
+            if cfg!(target_os = "windows") { ".exe" } else { "" }
         ));
         link_to_executable(&object_path, &exe_path, &self.options)?;
         output.exe_path = Some(exe_path);
@@ -224,11 +216,7 @@ pub fn aot_compile(
         .compile_program(&program, output_path.parent().unwrap_or(Path::new(".")), {
             if output_path.extension().map(|e| e == "ll").unwrap_or(false) {
                 OutputFormat::LlvmIr
-            } else if output_path
-                .extension()
-                .map(|e| e == "o" || e == "obj")
-                .unwrap_or(false)
-            {
+            } else if output_path.extension().map(|e| e == "o" || e == "obj").unwrap_or(false) {
                 OutputFormat::Object
             } else {
                 OutputFormat::Executable
@@ -237,16 +225,8 @@ pub fn aot_compile(
         .map_err(|e| CodegenError::Aot(e.to_string()))?;
 
     // 如果用户指定了非默认输出文件名，复制或重命名
-    if output
-        .exe_path
-        .as_ref()
-        .map(|p| p != output_path)
-        .unwrap_or(false)
-        || output
-            .object_path
-            .as_ref()
-            .map(|p| p != output_path)
-            .unwrap_or(false)
+    if output.exe_path.as_ref().map(|p| p != output_path).unwrap_or(false)
+        || output.object_path.as_ref().map(|p| p != output_path).unwrap_or(false)
     {
         if let Some(ref src) = output.exe_path {
             std::fs::copy(src, output_path).map_err(|e| CodegenError::Aot(e.to_string()))?;

@@ -101,11 +101,7 @@ fn bench_aot(src: &str, iters: usize, expected: i64) -> Result<f64, String> {
 
     // 调用 llc
     let mut cmd = Command::new(llc_path(llvm_home.as_deref()));
-    cmd.arg(&ll_path)
-        .arg("-o")
-        .arg(&o_path)
-        .arg("-O2")
-        .arg("-filetype=obj");
+    cmd.arg(&ll_path).arg("-o").arg(&o_path).arg("-O2").arg("-filetype=obj");
     let out = cmd.output().map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(format!(
@@ -142,9 +138,7 @@ fn bench_aot(src: &str, iters: usize, expected: i64) -> Result<f64, String> {
     // 运行多次并计时
     let start = Instant::now();
     for _ in 0..iters {
-        let out = Command::new(&exe_path)
-            .output()
-            .map_err(|e| e.to_string())?;
+        let out = Command::new(&exe_path).output().map_err(|e| e.to_string())?;
         let code = out.status.code().unwrap_or(-1) as i64;
         // 在 Windows 上，进程退出码是 i32；将负数转回正确值
         let code = if code < 0 { code + 256 } else { code };
@@ -159,13 +153,9 @@ fn bench_aot(src: &str, iters: usize, expected: i64) -> Result<f64, String> {
 #[cfg(feature = "llvm")]
 fn llc_path(home: Option<&str>) -> std::path::PathBuf {
     if let Some(h) = home {
-        let p = std::path::Path::new(h).join("bin").join({
-            if cfg!(target_os = "windows") {
-                "llc.exe"
-            } else {
-                "llc"
-            }
-        });
+        let p = std::path::Path::new(h)
+            .join("bin")
+            .join({ if cfg!(target_os = "windows") { "llc.exe" } else { "llc" } });
         if p.exists() {
             return p;
         }

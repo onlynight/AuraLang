@@ -56,7 +56,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             await formatDocument(currentEditor.document.uri);
         }),
         vscode.commands.registerCommand("aura.showVersion", async () => {
-            vscode.window.showInformationMessage("Aura Language v0.1.4");
+            vscode.window.showInformationMessage("Aura Language v0.1.5");
         })
     );
 

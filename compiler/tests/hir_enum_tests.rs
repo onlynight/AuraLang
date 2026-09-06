@@ -5,7 +5,7 @@
 //! 验证 Decl::Enum 不再被丢弃，而是正确降级为 HirEnum。
 //! 覆盖：简单枚举、带关联值的枚举、枚举变体字段类型。
 
-use compiler::codegen::hir::{desugar_program, HirEnum};
+use compiler::codegen::hir::{HirEnum, desugar_program};
 use compiler::lexer::Lexer;
 use compiler::parser::Parser;
 
@@ -89,7 +89,10 @@ fn test_hir_enum_with_function() {
          fun main(): Int { return 0 }",
     );
     assert_eq!(hir.enums.len(), 1, "应保留枚举");
-    assert!(hir.functions.iter().any(|f| f.name == "main"), "应保留 main 函数");
+    assert!(
+        hir.functions.iter().any(|f| f.name == "main"),
+        "应保留 main 函数"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

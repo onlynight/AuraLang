@@ -16,9 +16,8 @@ pub fn compute_sha256(bytes: &[u8]) -> String {
 
 /// 计算文件的 SHA-256
 pub fn compute_file_sha256(path: &Path) -> Result<String, ApkgError> {
-    let bytes = std::fs::read(path).map_err(|e| {
-        ApkgError::Io(format!("无法读取 {}: {}", path.display(), e))
-    })?;
+    let bytes = std::fs::read(path)
+        .map_err(|e| ApkgError::Io(format!("无法读取 {}: {}", path.display(), e)))?;
     Ok(compute_sha256(&bytes))
 }
 
@@ -63,10 +62,7 @@ pub fn generate_checksum_file(entries: &[ChecksumEntry]) -> String {
 
 /// 解析 `checksum.sha256` 文件内容
 pub fn parse_checksum_file(content: &str) -> Vec<ChecksumEntry> {
-    content
-        .lines()
-        .filter_map(ChecksumEntry::parse_line)
-        .collect()
+    content.lines().filter_map(ChecksumEntry::parse_line).collect()
 }
 
 /// 验证 `.auz` 内某文件内容的 SHA-256 是否与预期匹配
@@ -96,7 +92,10 @@ mod tests {
     #[test]
     fn test_compute_sha256_hello() {
         let hash = compute_sha256(b"hello");
-        assert_eq!(hash, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
+        assert_eq!(
+            hash,
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
     }
 
     #[test]
@@ -106,7 +105,10 @@ mod tests {
             path: "META-INF/aura.toml".to_string(),
         };
         let line = entry.to_line();
-        assert_eq!(line, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824  META-INF/aura.toml");
+        assert_eq!(
+            line,
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824  META-INF/aura.toml"
+        );
 
         let parsed = ChecksumEntry::parse_line(&line);
         assert!(parsed.is_some());

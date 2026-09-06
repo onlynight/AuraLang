@@ -16,23 +16,30 @@
 //!   原生入口（`5.12`）；编译失败则永久回退解释器（`5.13`）。
 
 pub mod actor;
+pub mod actor_process;
 pub mod channel;
+pub mod channel_tcp;
 pub mod coroutine;
+pub mod debugger;
 pub mod dynamic_ffi;
 pub mod ffi;
 pub mod heap;
 pub mod interp;
+pub mod ipc;
 #[cfg(feature = "jit")]
 pub mod jit;
 #[cfg(feature = "jit")]
 pub mod jit_opt;
 pub mod native;
+pub mod serialize;
 pub mod thread_pool;
 pub mod value;
 
 pub use coroutine::{CoroutineScheduler, CoroutineState};
 pub use dynamic_ffi::DynamicLoader;
-pub use ffi::{CallbackRegistry, clear_dispatcher, resolve_static_symbol, set_dispatcher, trampoline_ptr};
+pub use ffi::{
+    CallbackRegistry, clear_dispatcher, resolve_static_symbol, set_dispatcher, trampoline_ptr,
+};
 pub use heap::Heap;
 pub use native::NativeRegistry;
 pub use value::Value;
@@ -120,11 +127,7 @@ impl ModuleRegistry {
     /// 按名称查找导出符号
     pub fn find_export(&self, module_name: &str, symbol: &str) -> Option<&RegisteredModule> {
         self.find_by_name(module_name).and_then(|m| {
-            if m.export_index.contains_key(symbol) {
-                Some(m)
-            } else {
-                None
-            }
+            if m.export_index.contains_key(symbol) { Some(m) } else { None }
         })
     }
 
@@ -366,17 +369,26 @@ fn decode_function(f: &BytecodeFunction) -> Result<DecodedFunction, VmError> {
         ip += 1;
         match op {
             crate::codegen::opcode::OpCode::LoadConst(_) => {
-                let v = u16::from_le_bytes([code[ip], code[ip + 1]]);
+                let v = u16::from_le_bytes([
+                    code[ip],
+                    code[ip + 1],
+                ]);
                 ip += 2;
                 instrs.push(Instr::LoadConst(v));
             }
             crate::codegen::opcode::OpCode::LoadVar(_) => {
-                let v = u16::from_le_bytes([code[ip], code[ip + 1]]);
+                let v = u16::from_le_bytes([
+                    code[ip],
+                    code[ip + 1],
+                ]);
                 ip += 2;
                 instrs.push(Instr::LoadVar(v));
             }
             crate::codegen::opcode::OpCode::StoreVar(_) => {
-                let v = u16::from_le_bytes([code[ip], code[ip + 1]]);
+                let v = u16::from_le_bytes([
+                    code[ip],
+                    code[ip + 1],
+                ]);
                 ip += 2;
                 instrs.push(Instr::StoreVar(v));
             }
@@ -401,46 +413,76 @@ fn decode_function(f: &BytecodeFunction) -> Result<DecodedFunction, VmError> {
             crate::codegen::opcode::OpCode::Le => instrs.push(Instr::Le),
             crate::codegen::opcode::OpCode::Ge => instrs.push(Instr::Ge),
             crate::codegen::opcode::OpCode::Jump(_) => {
-                let off = i32::from_le_bytes([code[ip], code[ip + 1], code[ip + 2], code[ip + 3]]);
+                let off = i32::from_le_bytes([
+                    code[ip],
+                    code[ip + 1],
+                    code[ip + 2],
+                    code[ip + 3],
+                ]);
                 ip += 4;
                 // 暂存字节偏移，稍后解析为指令索引
                 instrs.push(Instr::Jump(off as usize));
             }
             crate::codegen::opcode::OpCode::JumpIfTrue(_) => {
-                let off = i32::from_le_bytes([code[ip], code[ip + 1], code[ip + 2], code[ip + 3]]);
+                let off = i32::from_le_bytes([
+                    code[ip],
+                    code[ip + 1],
+                    code[ip + 2],
+                    code[ip + 3],
+                ]);
                 ip += 4;
                 instrs.push(Instr::JumpIfTrue(off as usize));
             }
             crate::codegen::opcode::OpCode::JumpIfFalse(_) => {
-                let off = i32::from_le_bytes([code[ip], code[ip + 1], code[ip + 2], code[ip + 3]]);
+                let off = i32::from_le_bytes([
+                    code[ip],
+                    code[ip + 1],
+                    code[ip + 2],
+                    code[ip + 3],
+                ]);
                 ip += 4;
                 instrs.push(Instr::JumpIfFalse(off as usize));
             }
             crate::codegen::opcode::OpCode::Call(_) => {
-                let v = u16::from_le_bytes([code[ip], code[ip + 1]]);
+                let v = u16::from_le_bytes([
+                    code[ip],
+                    code[ip + 1],
+                ]);
                 ip += 2;
                 instrs.push(Instr::Call(v));
             }
             crate::codegen::opcode::OpCode::CallNative(_) => {
-                let v = u16::from_le_bytes([code[ip], code[ip + 1]]);
+                let v = u16::from_le_bytes([
+                    code[ip],
+                    code[ip + 1],
+                ]);
                 ip += 2;
                 instrs.push(Instr::CallNative(v));
             }
             crate::codegen::opcode::OpCode::Return => instrs.push(Instr::Return),
             crate::codegen::opcode::OpCode::ReturnUnit => instrs.push(Instr::ReturnUnit),
             crate::codegen::opcode::OpCode::NewObject(_) => {
-                let v = u16::from_le_bytes([code[ip], code[ip + 1]]);
+                let v = u16::from_le_bytes([
+                    code[ip],
+                    code[ip + 1],
+                ]);
                 ip += 2;
                 instrs.push(Instr::NewObject(v));
             }
             crate::codegen::opcode::OpCode::NewArray => instrs.push(Instr::NewArray),
             crate::codegen::opcode::OpCode::GetField(_) => {
-                let v = u16::from_le_bytes([code[ip], code[ip + 1]]);
+                let v = u16::from_le_bytes([
+                    code[ip],
+                    code[ip + 1],
+                ]);
                 ip += 2;
                 instrs.push(Instr::GetField(v));
             }
             crate::codegen::opcode::OpCode::SetField(_) => {
-                let v = u16::from_le_bytes([code[ip], code[ip + 1]]);
+                let v = u16::from_le_bytes([
+                    code[ip],
+                    code[ip + 1],
+                ]);
                 ip += 2;
                 instrs.push(Instr::SetField(v));
             }
@@ -449,17 +491,26 @@ fn decode_function(f: &BytecodeFunction) -> Result<DecodedFunction, VmError> {
             crate::codegen::opcode::OpCode::IncRef => instrs.push(Instr::IncRef),
             crate::codegen::opcode::OpCode::DecRef => instrs.push(Instr::DecRef),
             crate::codegen::opcode::OpCode::CallC(_) => {
-                let v = u16::from_le_bytes([code[ip], code[ip + 1]]);
+                let v = u16::from_le_bytes([
+                    code[ip],
+                    code[ip + 1],
+                ]);
                 ip += 2;
                 instrs.push(Instr::CallC(v));
             }
             crate::codegen::opcode::OpCode::CallMethod(_) => {
-                let v = u16::from_le_bytes([code[ip], code[ip + 1]]);
+                let v = u16::from_le_bytes([
+                    code[ip],
+                    code[ip + 1],
+                ]);
                 ip += 2;
                 instrs.push(Instr::CallMethod(v));
             }
             crate::codegen::opcode::OpCode::CallCtor(_) => {
-                let v = u16::from_le_bytes([code[ip], code[ip + 1]]);
+                let v = u16::from_le_bytes([
+                    code[ip],
+                    code[ip + 1],
+                ]);
                 ip += 2;
                 instrs.push(Instr::CallCtor(v));
             }
@@ -473,7 +524,10 @@ fn decode_function(f: &BytecodeFunction) -> Result<DecodedFunction, VmError> {
             crate::codegen::opcode::OpCode::MapLen => instrs.push(Instr::MapLen),
             crate::codegen::opcode::OpCode::Yield => instrs.push(Instr::Yield),
             crate::codegen::opcode::OpCode::NewCoroutine(_) => {
-                let v = u16::from_le_bytes([code[ip], code[ip + 1]]);
+                let v = u16::from_le_bytes([
+                    code[ip],
+                    code[ip + 1],
+                ]);
                 ip += 2;
                 instrs.push(Instr::NewCoroutine(v));
             }
@@ -493,12 +547,18 @@ fn decode_function(f: &BytecodeFunction) -> Result<DecodedFunction, VmError> {
             crate::codegen::opcode::OpCode::PtrToInt => instrs.push(Instr::PtrToInt),
             crate::codegen::opcode::OpCode::IntToPtr => instrs.push(Instr::IntToPtr),
             crate::codegen::opcode::OpCode::MakeCallback(_) => {
-                let v = u16::from_le_bytes([code[ip], code[ip + 1]]);
+                let v = u16::from_le_bytes([
+                    code[ip],
+                    code[ip + 1],
+                ]);
                 ip += 2;
                 instrs.push(Instr::MakeCallback(v));
             }
             crate::codegen::opcode::OpCode::MakeClosure(_) => {
-                let v = u16::from_le_bytes([code[ip], code[ip + 1]]);
+                let v = u16::from_le_bytes([
+                    code[ip],
+                    code[ip + 1],
+                ]);
                 ip += 2;
                 instrs.push(Instr::MakeClosure(v));
             }
@@ -506,7 +566,10 @@ fn decode_function(f: &BytecodeFunction) -> Result<DecodedFunction, VmError> {
                 instrs.push(Instr::CallClosure);
             }
             crate::codegen::opcode::OpCode::EnumConstruct(_) => {
-                let v = u16::from_le_bytes([code[ip], code[ip + 1]]);
+                let v = u16::from_le_bytes([
+                    code[ip],
+                    code[ip + 1],
+                ]);
                 ip += 2;
                 instrs.push(Instr::EnumConstruct(v));
             }
@@ -514,18 +577,30 @@ fn decode_function(f: &BytecodeFunction) -> Result<DecodedFunction, VmError> {
                 instrs.push(Instr::EnumTag);
             }
             crate::codegen::opcode::OpCode::MakeFnRef(_) => {
-                let v = u16::from_le_bytes([code[ip], code[ip + 1]]);
+                let v = u16::from_le_bytes([
+                    code[ip],
+                    code[ip + 1],
+                ]);
                 ip += 2;
                 instrs.push(Instr::MakeFnRef(v));
             }
             crate::codegen::opcode::OpCode::CallExport(_) => {
-                let v = u16::from_le_bytes([code[ip], code[ip + 1]]);
+                let v = u16::from_le_bytes([
+                    code[ip],
+                    code[ip + 1],
+                ]);
                 ip += 2;
                 instrs.push(Instr::CallExport(v));
             }
             crate::codegen::opcode::OpCode::CallExternal(_, _) => {
-                let mod_idx = u16::from_le_bytes([code[ip], code[ip + 1]]);
-                let sym_idx = u16::from_le_bytes([code[ip + 2], code[ip + 3]]);
+                let mod_idx = u16::from_le_bytes([
+                    code[ip],
+                    code[ip + 1],
+                ]);
+                let sym_idx = u16::from_le_bytes([
+                    code[ip + 2],
+                    code[ip + 3],
+                ]);
                 ip += 4;
                 instrs.push(Instr::CallExternal(mod_idx, sym_idx));
             }
@@ -627,7 +702,8 @@ impl Vm {
         let natives = if module.enabled_modules.is_empty() {
             NativeRegistry::new()
         } else {
-            let modules_refs: Vec<&str> = module.enabled_modules.iter().map(|s| s.as_str()).collect();
+            let modules_refs: Vec<&str> =
+                module.enabled_modules.iter().map(|s| s.as_str()).collect();
             NativeRegistry::with_modules(&modules_refs)
         };
         Ok(Vm {
@@ -640,11 +716,7 @@ impl Vm {
             halt: false,
             opts,
             #[cfg(feature = "jit")]
-            jit: if cfg!(feature = "jit") {
-                Some(crate::vm::jit::JitState::new())
-            } else {
-                None
-            },
+            jit: if cfg!(feature = "jit") { Some(crate::vm::jit::JitState::new()) } else { None },
             coroutines: CoroutineScheduler::new(),
             callbacks: CallbackRegistry::new(),
             actors: crate::vm::actor::ActorRuntime::new(),
@@ -816,6 +888,70 @@ impl Vm {
         &mut self.frames
     }
 
+    pub fn frames(&self) -> &Vec<Frame> {
+        &self.frames
+    }
+
+    // ── 调试器公开接口 ──
+
+    /// 执行是否已停止（`Halt` 或帧栈空）
+    pub fn is_halt(&self) -> bool {
+        self.halt
+    }
+
+    /// 获取入口函数返回值（仅在执行完成后有效）
+    pub fn result(&self) -> Option<Value> {
+        self.result.clone()
+    }
+
+    /// 获取已加载模块的引用（供调试器读取函数表）
+    pub fn module_ref(&self) -> &LoadedModule {
+        &self.module
+    }
+
+    /// 单步执行一条指令（调试器专用，调用方负责检查断点）
+    pub fn debug_step(&mut self) -> Result<(), VmError> {
+        self.step()
+    }
+
+    /// 压入入口调用帧（调试器初始化专用）
+    pub fn debug_push_entry(&mut self) -> Result<(), VmError> {
+        let entry = self.module.entry as usize;
+        if entry >= self.module.funcs.len() {
+            return Err(VmError::NoEntry(format!(
+                "no entry function (module has {} functions, entry={}, max={})",
+                self.module.funcs.len(),
+                entry,
+                self.module.funcs.len().saturating_sub(1)
+            )));
+        }
+        self.push_frame(entry, Vec::new())
+    }
+
+    /// 初始化 VM 分发器（原生函数 + 回调），与 `run()` 中的初始化逻辑一致
+    pub fn debug_setup(&mut self) {
+        crate::vm::native::set_vm_ref(self as *mut Self as *mut ());
+        use crate::vm::ffi::set_dispatcher;
+        use std::sync::atomic::AtomicPtr;
+        let vm_ptr = std::sync::Arc::new(AtomicPtr::new(self as *mut Vm));
+        let vm_ptr_clone = vm_ptr.clone();
+        let dispatcher = std::sync::Arc::new(move |callback_id: i64, args: &[i64]| {
+            use std::sync::atomic::Ordering;
+            let ptr = vm_ptr_clone.load(Ordering::SeqCst);
+            if ptr.is_null() {
+                return 0;
+            }
+            unsafe { (*ptr).call_callback(callback_id, args) }
+        });
+        set_dispatcher(dispatcher);
+    }
+
+    /// 清理 VM 分发器（原生函数 + 回调）
+    pub fn debug_cleanup(&mut self) {
+        crate::vm::ffi::clear_dispatcher();
+        crate::vm::native::clear_vm_ref();
+    }
+
     // ── 内部辅助 ──
 
     fn push_frame(&mut self, func_idx: usize, args: Vec<Value>) -> Result<(), VmError> {
@@ -825,11 +961,8 @@ impl Vm {
                 self.opts.max_call_depth
             )));
         }
-        let current_co = if self.frames.is_empty() {
-            0
-        } else {
-            self.frames.last().unwrap().coroutine_id
-        };
+        let current_co =
+            if self.frames.is_empty() { 0 } else { self.frames.last().unwrap().coroutine_id };
         let mut frame = Frame::new(&self.module.funcs[func_idx], args, current_co);
         frame.func = func_idx;
         self.frames.push(frame);
@@ -877,6 +1010,17 @@ impl Vm {
             .collect()
     }
 
+    /// JIT 跳过原因（仅 jit feature）
+    #[cfg(feature = "jit")]
+    pub fn jit_skip_reason(&self, idx: usize) -> Option<&str> {
+        self.jit.as_ref().and_then(|j| j.skip_reason(idx))
+    }
+
+    #[cfg(not(feature = "jit"))]
+    pub fn jit_skip_reason(&self, _idx: usize) -> Option<&str> {
+        None
+    }
+
     /// 热点编译接缝（5.12）：当 `jit` feature 且 `opts.jit` 开启时，
     /// 对累计调用超过 [`VmOptions::hotspot_threshold`] 的函数尝试 Cranelift
     /// 编译并缓存；之后对该函数的 `Call` 直接派发到原生入口（§7.2 方法级 JIT）。
@@ -886,11 +1030,8 @@ impl Vm {
     /// 覆盖入口函数和循环调用等不经过 `do_call` 的路径。
     #[cfg(feature = "jit")]
     fn maybe_jit_compile(&mut self, idx: usize) {
-        let already = self
-            .jit
-            .as_ref()
-            .map(|j| j.is_compiled(idx) || j.is_skipped(idx))
-            .unwrap_or(true);
+        let already =
+            self.jit.as_ref().map(|j| j.is_compiled(idx) || j.is_skipped(idx)).unwrap_or(true);
         if already {
             return;
         }
@@ -905,11 +1046,8 @@ impl Vm {
     /// 编译失败则记入 skip 集合，后续回退解释器。
     #[cfg(feature = "jit")]
     fn force_jit_compile(&mut self, idx: usize) {
-        let already = self
-            .jit
-            .as_ref()
-            .map(|j| j.is_compiled(idx) || j.is_skipped(idx))
-            .unwrap_or(true);
+        let already =
+            self.jit.as_ref().map(|j| j.is_compiled(idx) || j.is_skipped(idx)).unwrap_or(true);
         if already {
             return;
         }

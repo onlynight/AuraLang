@@ -181,16 +181,13 @@ fn aot_full_pipeline_when_llvm_available() {
 
     // 3. lld-link → .exe
     let exe_path = tmp.join("main.exe");
-    let link =
-        compiler::codegen::aot::linker::link_to_executable(&o_path, &exe_path, &options);
+    let link = compiler::codegen::aot::linker::link_to_executable(&o_path, &exe_path, &options);
     assert!(link.is_ok(), "链接应成功: {:?}", link.err());
 
     // 4. 运行并验证结果
     #[cfg(target_os = "windows")]
     {
-        let output = std::process::Command::new(&exe_path)
-            .output()
-            .expect("运行应成功");
+        let output = std::process::Command::new(&exe_path).output().expect("运行应成功");
         let code = output.status.code().unwrap_or(-1);
         assert_eq!(
             code, 42,
@@ -238,9 +235,8 @@ fn aot_string_global_at_module_level() {
     // 必须出现在函数之外（模块顶层）：检查 define 之前/之后位置
     // 简化断言：@str_data 定义行不在函数体内（其后紧跟的指令不是 alloca 等）
     let lines: Vec<&str> = ir.lines().collect();
-    let has_global_line = lines
-        .iter()
-        .any(|l| l.contains("@str_data.") && l.contains("private constant"));
+    let has_global_line =
+        lines.iter().any(|l| l.contains("@str_data.") && l.contains("private constant"));
     assert!(has_global_line, "应有模块级字符串常量定义: {}", ir);
 
     // 函数体内只应引用（getelementptr），不应重复定义

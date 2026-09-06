@@ -2,19 +2,19 @@
 //!
 //! 端到端测试两级缓存架构（本地 + 远程）、增量构建、缓存失效。
 
-use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use tempfile::TempDir;
 
 use aura_loom::cache::fingerprint::Fingerprint;
 use aura_loom::cache::local::LocalCache;
-use aura_loom::cache::remote::{CacheService, RemoteCacheConfig, CacheHitSource};
+use aura_loom::cache::remote::{CacheHitSource, CacheService, RemoteCacheConfig};
+use aura_loom::lifecycle::phases::build_standard_task_graph;
 use aura_loom::manifest::parse::default_manifest;
 use aura_loom::manifest::priority::ResolvedBuildConfig;
-use aura_loom::lifecycle::phases::build_standard_task_graph;
 use aura_loom::task::scheduler::{Scheduler, SchedulerConfig};
-use aura_loom::task::{TaskDefinition, TaskInputs, TaskKind, TaskOutputs, TaskGraph};
+use aura_loom::task::{TaskDefinition, TaskGraph, TaskInputs, TaskKind, TaskOutputs};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 辅助函数
@@ -24,7 +24,11 @@ fn setup_project(tmp: &TempDir) -> PathBuf {
     let src = tmp.path().join("src");
     std::fs::create_dir_all(&src).unwrap();
     std::fs::write(src.join("main.aura"), "fun main() { println(\"hello\") }").unwrap();
-    std::fs::write(src.join("utils.aura"), "fun add(a: Int, b: Int): Int { a + b }").unwrap();
+    std::fs::write(
+        src.join("utils.aura"),
+        "fun add(a: Int, b: Int): Int { a + b }",
+    )
+    .unwrap();
     tmp.path().to_path_buf()
 }
 
@@ -37,11 +41,7 @@ fn make_cache_service(
     Ok(Arc::new(Mutex::new(service)))
 }
 
-fn make_task_with_files(
-    name: &str,
-    kind: TaskKind,
-    files: &[PathBuf],
-) -> TaskDefinition {
+fn make_task_with_files(name: &str, kind: TaskKind, files: &[PathBuf]) -> TaskDefinition {
     TaskDefinition {
         name: name.to_string(),
         description: format!("test task {}", name),
@@ -76,7 +76,14 @@ fn test_local_cache_artifact_lifecycle() {
     let file2 = tmp.path().join("utils.auc");
     std::fs::write(&file2, "compiled bytecode 2").unwrap();
 
-    let entries = cache.store_artifacts("compile-main", &[file1, file2]).unwrap();
+    let entries = cache
+        .store_artifacts(
+            "compile-main",
+            &[
+                file1, file2,
+            ],
+        )
+        .unwrap();
     assert_eq!(entries.len(), 2);
 
     // 4. 验证缓存状态
@@ -189,7 +196,11 @@ fn test_cache_invalidation_on_source_change() {
     std::fs::write(&src_file, "fun main() { println(\"v1\") }").unwrap();
 
     // 第一次构建：计算 fingerprint 并存储
-    let task1 = make_task_with_files("compile-main", TaskKind::Compile("main".to_string()), &[src_file.clone()]);
+    let task1 = make_task_with_files(
+        "compile-main",
+        TaskKind::Compile("main".to_string()),
+        &[src_file.clone()],
+    );
     let fp1 = Fingerprint::compute(&task1).unwrap();
     cache.store_fingerprint("compile-main", &fp1).unwrap();
 
@@ -204,7 +215,11 @@ fn test_cache_invalidation_on_source_change() {
     std::fs::write(&src_file, "fun main() { println(\"v2\") }").unwrap();
 
     // 第二次构建：fingerprint 应该变化
-    let task2 = make_task_with_files("compile-main", TaskKind::Compile("main".to_string()), &[src_file.clone()]);
+    let task2 = make_task_with_files(
+        "compile-main",
+        TaskKind::Compile("main".to_string()),
+        &[src_file.clone()],
+    );
     let fp2 = Fingerprint::compute(&task2).unwrap();
     assert_ne!(fp1, fp2);
 
@@ -420,7 +435,11 @@ fn test_cache_service_fingerprint_change() {
     let src_file = tmp.path().join("main.aura");
     std::fs::write(&src_file, "fun main() { println(\"v1\") }").unwrap();
 
-    let task_v1 = make_task_with_files("compile-main", TaskKind::Compile("main".to_string()), &[src_file.clone()]);
+    let task_v1 = make_task_with_files(
+        "compile-main",
+        TaskKind::Compile("main".to_string()),
+        &[src_file.clone()],
+    );
 
     // 存储 v1
     let artifact = tmp.path().join("main.auc");
@@ -434,7 +453,11 @@ fn test_cache_service_fingerprint_change() {
     // 修改源文件
     std::fs::write(&src_file, "fun main() { println(\"v2\") }").unwrap();
 
-    let task_v2 = make_task_with_files("compile-main", TaskKind::Compile("main".to_string()), &[src_file.clone()]);
+    let task_v2 = make_task_with_files(
+        "compile-main",
+        TaskKind::Compile("main".to_string()),
+        &[src_file.clone()],
+    );
 
     // v2 应该未命中（fingerprint 变了）
     let (hit, _) = svc.lookup(&task_v2).unwrap();
@@ -455,7 +478,10 @@ fn test_scheduler_no_cache() {
     let build_config = Arc::new(ResolvedBuildConfig::default());
 
     // no-cache 模式
-    let config = SchedulerConfig { use_cache: false, ..Default::default() };
+    let config = SchedulerConfig {
+        use_cache: false,
+        ..Default::default()
+    };
     let scheduler = Scheduler::new(
         Arc::new(graph),
         build_config.clone(),
@@ -485,14 +511,16 @@ fn test_scheduler_clean_mode() {
     // 创建缓存
     let cache_dir = tmp.path().join("target/cache");
     let cache = Arc::new(Mutex::new(LocalCache::new(&cache_dir).unwrap()));
-    let service = Arc::new(Mutex::new(CacheService::new(
-        cache.clone(),
-        None,
-        build_config.clone(),
-    ).unwrap()));
+    let service = Arc::new(Mutex::new(
+        CacheService::new(cache.clone(), None, build_config.clone()).unwrap(),
+    ));
 
     // 第一次：正常构建（缓存命中）
-    let config1 = SchedulerConfig { use_cache: true, clean: false, ..Default::default() };
+    let config1 = SchedulerConfig {
+        use_cache: true,
+        clean: false,
+        ..Default::default()
+    };
     let scheduler1 = Scheduler::with_cache_service(
         Arc::new(build_standard_task_graph(&manifest, &project_dir)),
         build_config.clone(),
@@ -503,7 +531,11 @@ fn test_scheduler_clean_mode() {
     assert!(scheduler1.execute("compile-main").is_ok());
 
     // 第二次：正常构建（应该缓存命中）
-    let config2 = SchedulerConfig { use_cache: true, clean: false, ..Default::default() };
+    let config2 = SchedulerConfig {
+        use_cache: true,
+        clean: false,
+        ..Default::default()
+    };
     let scheduler2 = Scheduler::with_cache_service(
         Arc::new(build_standard_task_graph(&manifest, &project_dir)),
         build_config.clone(),
@@ -516,7 +548,11 @@ fn test_scheduler_clean_mode() {
     assert!(results2.iter().any(|r| r.cache_hit));
 
     // 第三次：clean 模式（应该全部重新执行）
-    let config3 = SchedulerConfig { use_cache: true, clean: true, ..Default::default() };
+    let config3 = SchedulerConfig {
+        use_cache: true,
+        clean: true,
+        ..Default::default()
+    };
     let scheduler3 = Scheduler::with_cache_service(
         Arc::new(build_standard_task_graph(&manifest, &project_dir)),
         build_config.clone(),
@@ -539,14 +575,15 @@ fn test_scheduler_cache_hit_on_second_run() {
 
     let cache_dir = tmp.path().join("target/cache");
     let cache = Arc::new(Mutex::new(LocalCache::new(&cache_dir).unwrap()));
-    let service = Arc::new(Mutex::new(CacheService::new(
-        cache.clone(),
-        None,
-        build_config.clone(),
-    ).unwrap()));
+    let service = Arc::new(Mutex::new(
+        CacheService::new(cache.clone(), None, build_config.clone()).unwrap(),
+    ));
 
     // 第一次构建
-    let config1 = SchedulerConfig { use_cache: true, ..Default::default() };
+    let config1 = SchedulerConfig {
+        use_cache: true,
+        ..Default::default()
+    };
     let scheduler1 = Scheduler::with_cache_service(
         Arc::new(build_standard_task_graph(&manifest, &project_dir)),
         build_config.clone(),
@@ -559,7 +596,10 @@ fn test_scheduler_cache_hit_on_second_run() {
     let hits1 = results1.iter().filter(|r| r.cache_hit).count();
 
     // 第二次构建（应该缓存命中）
-    let config2 = SchedulerConfig { use_cache: true, ..Default::default() };
+    let config2 = SchedulerConfig {
+        use_cache: true,
+        ..Default::default()
+    };
     let scheduler2 = Scheduler::with_cache_service(
         Arc::new(build_standard_task_graph(&manifest, &project_dir)),
         build_config.clone(),
@@ -627,14 +667,15 @@ fn test_full_build_with_cache() {
 
     let cache_dir = tmp.path().join("target/cache");
     let cache = Arc::new(Mutex::new(LocalCache::new(&cache_dir).unwrap()));
-    let service = Arc::new(Mutex::new(CacheService::new(
-        cache.clone(),
-        None,
-        build_config.clone(),
-    ).unwrap()));
+    let service = Arc::new(Mutex::new(
+        CacheService::new(cache.clone(), None, build_config.clone()).unwrap(),
+    ));
 
     // 第一次完整构建（clean → resolve → compile → package → verify → install）
-    let config1 = SchedulerConfig { use_cache: true, ..Default::default() };
+    let config1 = SchedulerConfig {
+        use_cache: true,
+        ..Default::default()
+    };
     let scheduler1 = Scheduler::with_cache_service(
         Arc::new(build_standard_task_graph(&manifest, &project_dir)),
         build_config.clone(),
@@ -649,7 +690,10 @@ fn test_full_build_with_cache() {
     let hits1 = results1.iter().filter(|r| r.cache_hit).count();
 
     // 第二次构建（大部分应该缓存命中）
-    let config2 = SchedulerConfig { use_cache: true, ..Default::default() };
+    let config2 = SchedulerConfig {
+        use_cache: true,
+        ..Default::default()
+    };
     let scheduler2 = Scheduler::with_cache_service(
         Arc::new(build_standard_task_graph(&manifest, &project_dir)),
         build_config.clone(),
@@ -682,14 +726,15 @@ fn test_build_after_source_change() {
 
     let cache_dir = tmp.path().join("target/cache");
     let cache = Arc::new(Mutex::new(LocalCache::new(&cache_dir).unwrap()));
-    let service = Arc::new(Mutex::new(CacheService::new(
-        cache.clone(),
-        None,
-        build_config.clone(),
-    ).unwrap()));
+    let service = Arc::new(Mutex::new(
+        CacheService::new(cache.clone(), None, build_config.clone()).unwrap(),
+    ));
 
     // 第一次构建
-    let config1 = SchedulerConfig { use_cache: true, ..Default::default() };
+    let config1 = SchedulerConfig {
+        use_cache: true,
+        ..Default::default()
+    };
     let scheduler1 = Scheduler::with_cache_service(
         Arc::new(build_standard_task_graph(&manifest, &project_dir)),
         build_config.clone(),
@@ -704,7 +749,10 @@ fn test_build_after_source_change() {
     std::fs::write(&src_file, "fun main() { println(\"modified\") }").unwrap();
 
     // 第二次构建（compile-main 应该重新执行）
-    let config2 = SchedulerConfig { use_cache: true, ..Default::default() };
+    let config2 = SchedulerConfig {
+        use_cache: true,
+        ..Default::default()
+    };
     let scheduler2 = Scheduler::with_cache_service(
         Arc::new(build_standard_task_graph(&manifest, &project_dir)),
         build_config.clone(),
@@ -734,7 +782,10 @@ fn test_no_cache_always_executes() {
 
     // no-cache 模式：每次都应该执行
     for i in 0..3 {
-        let config = SchedulerConfig { use_cache: false, ..Default::default() };
+        let config = SchedulerConfig {
+            use_cache: false,
+            ..Default::default()
+        };
         let scheduler = Scheduler::new(
             Arc::new(build_standard_task_graph(&manifest, &project_dir)),
             build_config.clone(),
@@ -744,7 +795,11 @@ fn test_no_cache_always_executes() {
         assert!(scheduler.execute("clean").is_ok());
 
         let results = scheduler.results();
-        assert!(results.iter().all(|r| !r.cache_hit), "iteration {} should have no cache hits", i);
+        assert!(
+            results.iter().all(|r| !r.cache_hit),
+            "iteration {} should have no cache hits",
+            i
+        );
     }
 }
 

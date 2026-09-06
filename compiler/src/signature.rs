@@ -74,7 +74,10 @@ impl TypeSig {
             TypeSig::Null => "null".to_string(),
             TypeSig::Ref(t) => format!("&{}", t.to_string()),
             TypeSig::Tuple(ts) => {
-                format!("({})", ts.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", "))
+                format!(
+                    "({})",
+                    ts.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", ")
+                )
             }
             TypeSig::Func(params, ret) => {
                 format!(
@@ -90,15 +93,14 @@ impl TypeSig {
                     params.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", ")
                 )
             }
-            TypeSig::UserType { name, type_params } => {
+            TypeSig::UserType {
+                name,
+                type_params,
+            } => {
                 if type_params.is_empty() {
                     name.clone()
                 } else {
-                    format!(
-                        "{}<{}>",
-                        name,
-                        type_params.join(", ")
-                    )
+                    format!("{}<{}>", name, type_params.join(", "))
                 }
             }
         }
@@ -286,11 +288,15 @@ pub fn from_bytes(bytes: &[u8]) -> Result<ModuleSig, SigError> {
     if &bytes[..4] != SIG_MAGIC {
         return Err(SigError::Format("魔数不匹配".to_string()));
     }
-    let version = u16::from_le_bytes([bytes[4], bytes[5]]);
+    let version = u16::from_le_bytes([
+        bytes[4], bytes[5],
+    ]);
     if version != SIG_VERSION {
         return Err(SigError::Format(format!("不支持的签名版本: {}", version)));
     }
-    let json_len = u32::from_le_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]) as usize;
+    let json_len = u32::from_le_bytes([
+        bytes[6], bytes[7], bytes[8], bytes[9],
+    ]) as usize;
     if bytes.len() < 10 + json_len {
         return Err(SigError::Format("数据越界".to_string()));
     }
@@ -322,7 +328,10 @@ mod tests {
         assert_eq!(TypeSig::Ref(Box::new(TypeSig::Int)).to_string(), "&int");
         assert_eq!(
             TypeSig::Func(
-                vec![TypeSig::Int, TypeSig::Str],
+                vec![
+                    TypeSig::Int,
+                    TypeSig::Str
+                ],
                 Box::new(TypeSig::Bool)
             )
             .to_string(),
@@ -339,7 +348,10 @@ mod tests {
             version: SIG_VERSION,
             functions: vec![FuncSig {
                 name: "add".to_string(),
-                params: vec![TypeSig::Int, TypeSig::Int],
+                params: vec![
+                    TypeSig::Int,
+                    TypeSig::Int,
+                ],
                 return_type: TypeSig::Int,
                 is_public: true,
                 type_params: vec![],

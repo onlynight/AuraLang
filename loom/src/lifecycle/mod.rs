@@ -1,4 +1,4 @@
-﻿//! [Phase L2] 生命周期阶段：clean → resolve → compile → test → package → verify → install → deploy
+//! [Phase L2] 生命周期阶段：clean → resolve → compile → test → package → verify → install → deploy
 
 pub mod phases;
 
@@ -30,4 +30,3 @@ impl Phase {
         ]
     }
 }
-

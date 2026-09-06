@@ -264,7 +264,10 @@ mod cranelift_backend {
         // Cranelift optimization flags:
         // - opt_level: "speed" for maximum performance
         // - enable_verifier: false to speed up compilation (no runtime impact)
-        let flags = &[("opt_level", "speed"), ("enable_verifier", "false")];
+        let flags = &[
+            ("opt_level", "speed"),
+            ("enable_verifier", "false"),
+        ];
         let builder = JITBuilder::with_flags(flags, default_libcall_names()).ok()?;
         let mut module = JITModule::new(builder);
         let tc = module.target_config();
@@ -282,9 +285,7 @@ mod cranelift_backend {
             call_conv,
         };
 
-        let func_id = module
-            .declare_function("aura_jit_entry", Linkage::Export, &sig)
-            .ok()?;
+        let func_id = module.declare_function("aura_jit_entry", Linkage::Export, &sig).ok()?;
         let mut ctx = module.make_context();
         ctx.func.signature = sig;
 
@@ -336,9 +337,8 @@ mod cranelift_backend {
                 fb.seal_block(entry);
             }
 
-            let tag_vars: Vec<Variable> = (0..f.locals as usize)
-                .map(|i| Variable::from_bits(100 + i as u32 * 2))
-                .collect();
+            let tag_vars: Vec<Variable> =
+                (0..f.locals as usize).map(|i| Variable::from_bits(100 + i as u32 * 2)).collect();
             let payload_vars: Vec<Variable> = (0..f.locals as usize)
                 .map(|i| Variable::from_bits(100 + i as u32 * 2 + 1))
                 .collect();
@@ -372,12 +372,8 @@ mod cranelift_backend {
                 let off = (i as i64) * VALUE_BYTES;
                 let base = fb.block_params(entry)[0];
                 let addr = fb.ins().iadd_imm(base, off);
-                let tag = fb
-                    .ins()
-                    .load(types::I64, MemFlags::new(), addr, Offset32::new(0));
-                let payload = fb
-                    .ins()
-                    .load(types::I64, MemFlags::new(), addr, Offset32::new(8));
+                let tag = fb.ins().load(types::I64, MemFlags::new(), addr, Offset32::new(0));
+                let payload = fb.ins().load(types::I64, MemFlags::new(), addr, Offset32::new(8));
                 if let Some(tv) = tag_vars.get(i) {
                     fb.def_var(*tv, tag);
                 }
@@ -698,7 +694,12 @@ mod cranelift_backend {
                 fb.ins().call_indirect(
                     jit_entry_sig_ref,
                     entry_ptr,
-                    &[args_ptr_val, out_ptr_val, argc_val, dt],
+                    &[
+                        args_ptr_val,
+                        out_ptr_val,
+                        argc_val,
+                        dt,
+                    ],
                 );
 
                 fb.def_var(sp, args_sp);

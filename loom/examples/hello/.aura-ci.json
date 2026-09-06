@@ -1,0 +1,58 @@
+{
+  "default-branch": "main",
+  "env": {
+    "target": [
+      "x86_64-pc-windows-msvc",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-apple-darwin"
+    ],
+    "compiler": "stable",
+    "variables": {}
+  },
+  "triggers": [
+    {
+      "push": {
+        "branch": "main",
+        "tag": null
+      }
+    },
+    {
+      "pull-request": {
+        "base_branch": "main"
+      }
+    }
+  ],
+  "steps": [
+    {
+      "type": "loom",
+      "command": "resolve",
+      "args": []
+    },
+    {
+      "type": "loom",
+      "command": "build",
+      "args": []
+    },
+    {
+      "type": "test",
+      "timeout": 300
+    },
+    {
+      "type": "loom",
+      "command": "test",
+      "args": []
+    }
+  ],
+  "test": {
+    "timeout": 300,
+    "coverage-threshold": 80.0,
+    "parallel": true
+  },
+  "publish": {
+    "registry": "https://registry.aura-lang.dev",
+    "token-env": "AURA_REGISTRY_TOKEN",
+    "targets": [
+      "stable"
+    ]
+  }
+}

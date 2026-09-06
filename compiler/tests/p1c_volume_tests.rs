@@ -105,11 +105,7 @@ fn test_multiple_imports_only_registers_specified() {
         module.enabled_modules.contains(&"string".to_string()),
         "enabled_modules 应包含 'string'"
     );
-    assert_eq!(
-        module.enabled_modules.len(),
-        2,
-        "应只包含 2 个模块"
-    );
+    assert_eq!(module.enabled_modules.len(), 2, "应只包含 2 个模块");
 
     let vm = Vm::new(&module, VmOptions::default()).expect("VM 创建应成功");
 
@@ -153,7 +149,10 @@ fn test_prelude_always_registered() {
     "#;
     let module2 = compile_source(src2).expect("编译应成功");
     let vm2 = Vm::new(&module2, VmOptions::default()).expect("VM 创建应成功");
-    assert!(vm2.contains_native("abs"), "prelu 'abs' 应始终注册（即使有 import）");
+    assert!(
+        vm2.contains_native("abs"),
+        "prelu 'abs' 应始终注册（即使有 import）"
+    );
     assert!(vm2.contains_native("println"), "prelu 'println' 应始终注册");
 }
 
@@ -177,7 +176,9 @@ fn test_native_registry_with_modules_direct() {
     assert!(!reg_math.contains("aura.io.readLine"));
 
     // 注册 math + io
-    let reg_both = NativeRegistry::with_modules(&["math", "io"]);
+    let reg_both = NativeRegistry::with_modules(&[
+        "math", "io",
+    ]);
     assert!(reg_both.contains("aura.math.sin"));
     assert!(reg_both.contains("aura.io.readLine"));
     assert!(!reg_both.contains("aura.string.contains"));

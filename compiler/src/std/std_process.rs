@@ -31,9 +31,7 @@ fn nat_exit_code(_args: &[Value]) -> Value {
 
 /// process.args() → List of command-line arguments
 fn nat_args(_args: &[Value]) -> Value {
-    let args: Vec<Value> = std::env::args()
-        .map(|a| Value::str_(a))
-        .collect();
+    let args: Vec<Value> = std::env::args().map(|a| Value::str_(a)).collect();
     Value::List(args)
 }
 
@@ -62,15 +60,8 @@ fn nat_spawn(args: &[Value]) -> Value {
         return Value::str_("spawn: no command");
     }
     let cmd = args[0].as_string();
-    let cmd_args: Vec<String> = args
-        .iter()
-        .skip(1)
-        .map(|v| v.as_string())
-        .collect();
-    match std::process::Command::new(&cmd)
-        .args(&cmd_args)
-        .spawn()
-    {
+    let cmd_args: Vec<String> = args.iter().skip(1).map(|v| v.as_string()).collect();
+    match std::process::Command::new(&cmd).args(&cmd_args).spawn() {
         Ok(child) => {
             let pid = child.id() as i64;
             // Store child process ID
@@ -86,11 +77,7 @@ fn nat_kill(args: &[Value]) -> Value {
     #[cfg(unix)]
     {
         unsafe {
-            if libc::kill(pid as i32, 9) == 0 {
-                Value::Bool(true)
-            } else {
-                Value::Bool(false)
-            }
+            if libc::kill(pid as i32, 9) == 0 { Value::Bool(true) } else { Value::Bool(false) }
         }
     }
     #[cfg(windows)]

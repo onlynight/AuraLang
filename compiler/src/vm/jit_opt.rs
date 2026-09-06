@@ -481,27 +481,15 @@ fn adjust_jump_target(instr: &Instr, loop_back: usize, body_len: usize) -> Instr
     match instr {
         Instr::Jump(t) => {
             let target = *t;
-            if target >= loop_back {
-                Instr::Jump(target + body_len)
-            } else {
-                instr.clone()
-            }
+            if target >= loop_back { Instr::Jump(target + body_len) } else { instr.clone() }
         }
         Instr::JumpIfTrue(t) => {
             let target = *t;
-            if target >= loop_back {
-                Instr::JumpIfTrue(target + body_len)
-            } else {
-                instr.clone()
-            }
+            if target >= loop_back { Instr::JumpIfTrue(target + body_len) } else { instr.clone() }
         }
         Instr::JumpIfFalse(t) => {
             let target = *t;
-            if target >= loop_back {
-                Instr::JumpIfFalse(target + body_len)
-            } else {
-                instr.clone()
-            }
+            if target >= loop_back { Instr::JumpIfFalse(target + body_len) } else { instr.clone() }
         }
         _ => instr.clone(),
     }
@@ -512,27 +500,15 @@ fn adjust_jump_target_after(instr: &Instr, loop_back: usize, body_len: usize) ->
     match instr {
         Instr::Jump(t) => {
             let target = *t;
-            if target >= loop_back {
-                Instr::Jump(target + body_len)
-            } else {
-                instr.clone()
-            }
+            if target >= loop_back { Instr::Jump(target + body_len) } else { instr.clone() }
         }
         Instr::JumpIfTrue(t) => {
             let target = *t;
-            if target >= loop_back {
-                Instr::JumpIfTrue(target + body_len)
-            } else {
-                instr.clone()
-            }
+            if target >= loop_back { Instr::JumpIfTrue(target + body_len) } else { instr.clone() }
         }
         Instr::JumpIfFalse(t) => {
             let target = *t;
-            if target >= loop_back {
-                Instr::JumpIfFalse(target + body_len)
-            } else {
-                instr.clone()
-            }
+            if target >= loop_back { Instr::JumpIfFalse(target + body_len) } else { instr.clone() }
         }
         _ => instr.clone(),
     }
@@ -803,7 +779,13 @@ mod tests {
             ],
         };
 
-        let result = optimize_function(&func, &[Const::Int(3), Const::Int(2)]);
+        let result = optimize_function(
+            &func,
+            &[
+                Const::Int(3),
+                Const::Int(2),
+            ],
+        );
 
         // Should be folded to LoadConst of 5
         assert_eq!(result.func.code.len(), 1);
