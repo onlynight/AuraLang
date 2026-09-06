@@ -196,7 +196,9 @@ pub fn link_to_executable(
                     cmd.arg(cffi_obj);
                 }
                 cmd.arg("-o").arg(exe_path).arg(options.opt_level.as_llvm_flag());
-                if options.debug_info { cmd.arg("-g"); }
+                if options.debug_info {
+                    cmd.arg("-g");
+                }
                 run_and_report(&mut cmd, "clang")?;
                 return Ok(());
             }
@@ -227,7 +229,9 @@ pub fn link_to_executable(
         cmd.arg(cffi_obj);
     }
     cmd.arg("-o").arg(exe_path).arg(options.opt_level.as_llvm_flag());
-    if options.debug_info { cmd.arg("-g"); }
+    if options.debug_info {
+        cmd.arg("-g");
+    }
 
     run_and_report(&mut cmd, "clang")?;
     Ok(())

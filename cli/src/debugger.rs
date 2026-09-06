@@ -6,9 +6,7 @@
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
-use compiler::vm::debugger::{
-    BreakpointTarget, DebugMode, DebugSession, StopReason, format_value,
-};
+use compiler::vm::debugger::{BreakpointTarget, DebugMode, DebugSession, StopReason, format_value};
 
 /// 调试器 REPL 主入口
 pub fn run_debugger(session: &mut DebugSession) {
@@ -70,7 +68,10 @@ pub fn run_debugger(session: &mut DebugSession) {
                 match session.run() {
                     Ok(reason) => {
                         match reason {
-                            StopReason::Breakpoint { description, .. } => {
+                            StopReason::Breakpoint {
+                                description,
+                                ..
+                            } => {
                                 println!("\n  断点命中: {}", description);
                             }
                             StopReason::Step { mode } => {
@@ -80,7 +81,10 @@ pub fn run_debugger(session: &mut DebugSession) {
                                 println!("\n  执行完成: {}", format_value(&result));
                                 session.step_mode = compiler::vm::debugger::StepMode::Off;
                             }
-                            StopReason::Error { message, at_func } => {
+                            StopReason::Error {
+                                message,
+                                at_func,
+                            } => {
                                 if let Some(func) = at_func {
                                     eprintln!("\n  运行时错误 [{}]: {}", func, message);
                                 } else {
@@ -106,28 +110,32 @@ pub fn run_debugger(session: &mut DebugSession) {
                 session.continue_execution();
                 // 立即运行
                 match session.run() {
-                    Ok(reason) => {
-                        match reason {
-                            StopReason::Breakpoint { description, .. } => {
-                                println!("\n  断点命中: {}", description);
-                            }
-                            StopReason::Step { mode } => {
-                                println!("\n  单步暂停 ({}):", mode.as_str());
-                            }
-                            StopReason::Completion { result } => {
-                                println!("\n  执行完成: {}", format_value(&result));
-                                session.step_mode = compiler::vm::debugger::StepMode::Off;
-                            }
-                            StopReason::Error { message, at_func } => {
-                                if let Some(func) = at_func {
-                                    eprintln!("\n  运行时错误 [{}]: {}", func, message);
-                                } else {
-                                    eprintln!("\n  运行时错误: {}", message);
-                                }
-                            }
-                            StopReason::JitCompiled { .. } | StopReason::AotCompiled { .. } => {}
+                    Ok(reason) => match reason {
+                        StopReason::Breakpoint {
+                            description,
+                            ..
+                        } => {
+                            println!("\n  断点命中: {}", description);
                         }
-                    }
+                        StopReason::Step { mode } => {
+                            println!("\n  单步暂停 ({}):", mode.as_str());
+                        }
+                        StopReason::Completion { result } => {
+                            println!("\n  执行完成: {}", format_value(&result));
+                            session.step_mode = compiler::vm::debugger::StepMode::Off;
+                        }
+                        StopReason::Error {
+                            message,
+                            at_func,
+                        } => {
+                            if let Some(func) = at_func {
+                                eprintln!("\n  运行时错误 [{}]: {}", func, message);
+                            } else {
+                                eprintln!("\n  运行时错误: {}", message);
+                            }
+                        }
+                        StopReason::JitCompiled { .. } | StopReason::AotCompiled { .. } => {}
+                    },
                     Err(e) => {
                         eprintln!("执行错误: {}", e);
                         session.paused = true;
@@ -147,28 +155,32 @@ pub fn run_debugger(session: &mut DebugSession) {
                 }
                 // 执行一步
                 match session.run() {
-                    Ok(reason) => {
-                        match reason {
-                            StopReason::Breakpoint { description, .. } => {
-                                println!("\n  断点命中: {}", description);
-                            }
-                            StopReason::Step { mode } => {
-                                println!("\n  单步暂停 ({}):", mode.as_str());
-                            }
-                            StopReason::Completion { result } => {
-                                println!("\n  执行完成: {}", format_value(&result));
-                                session.step_mode = compiler::vm::debugger::StepMode::Off;
-                            }
-                            StopReason::Error { message, at_func } => {
-                                if let Some(func) = at_func {
-                                    eprintln!("\n  运行时错误 [{}]: {}", func, message);
-                                } else {
-                                    eprintln!("\n  运行时错误: {}", message);
-                                }
-                            }
-                            StopReason::JitCompiled { .. } | StopReason::AotCompiled { .. } => {}
+                    Ok(reason) => match reason {
+                        StopReason::Breakpoint {
+                            description,
+                            ..
+                        } => {
+                            println!("\n  断点命中: {}", description);
                         }
-                    }
+                        StopReason::Step { mode } => {
+                            println!("\n  单步暂停 ({}):", mode.as_str());
+                        }
+                        StopReason::Completion { result } => {
+                            println!("\n  执行完成: {}", format_value(&result));
+                            session.step_mode = compiler::vm::debugger::StepMode::Off;
+                        }
+                        StopReason::Error {
+                            message,
+                            at_func,
+                        } => {
+                            if let Some(func) = at_func {
+                                eprintln!("\n  运行时错误 [{}]: {}", func, message);
+                            } else {
+                                eprintln!("\n  运行时错误: {}", message);
+                            }
+                        }
+                        StopReason::JitCompiled { .. } | StopReason::AotCompiled { .. } => {}
+                    },
                     Err(e) => {
                         eprintln!("执行错误: {}", e);
                         session.paused = true;
@@ -216,7 +228,9 @@ fn execute_command(session: &mut DebugSession, raw_line: &str) -> CommandResult 
             }
 
             let target = if let Ok(line_num) = args.parse::<usize>() {
-                BreakpointTarget::Line { line: line_num }
+                BreakpointTarget::Line {
+                    line: line_num,
+                }
             } else {
                 BreakpointTarget::Function { name: args }
             };
@@ -250,9 +264,15 @@ fn execute_command(session: &mut DebugSession, raw_line: &str) -> CommandResult 
         "continue" | "c" => CommandResult::Continue,
 
         // ── 单步命令 ──
-        "step" | "s" | "si" => CommandResult::Step { mode: StepMode::In },
-        "next" | "n" | "so" => CommandResult::Step { mode: StepMode::Over },
-        "out" => CommandResult::Step { mode: StepMode::Out },
+        "step" | "s" | "si" => CommandResult::Step {
+            mode: StepMode::In,
+        },
+        "next" | "n" | "so" => CommandResult::Step {
+            mode: StepMode::Over,
+        },
+        "out" => CommandResult::Step {
+            mode: StepMode::Out,
+        },
 
         // ── 调用栈 ──
         "backtrace" | "bt" => {
@@ -300,22 +320,14 @@ fn execute_command(session: &mut DebugSession, raw_line: &str) -> CommandResult 
 
         // ── 局部变量 ──
         "locals" => {
-            let depth = if args.is_empty() {
-                None
-            } else {
-                args.parse::<usize>().ok()
-            };
+            let depth = if args.is_empty() { None } else { args.parse::<usize>().ok() };
             println!("{}", session.show_locals(depth));
             CommandResult::None
         }
 
         // ── 操作数栈 ──
         "stack" => {
-            let depth = if args.is_empty() {
-                None
-            } else {
-                args.parse::<usize>().ok()
-            };
+            let depth = if args.is_empty() { None } else { args.parse::<usize>().ok() };
             println!("{}", session.show_stack(depth));
             CommandResult::None
         }
@@ -402,7 +414,10 @@ fn execute_command(session: &mut DebugSession, raw_line: &str) -> CommandResult 
                         println!("{}", session.show_jit_compiled());
                     }
                     _ => {
-                        println!("  未知 JIT 子命令: {} (可用: state, fallbacks, compiled)", args);
+                        println!(
+                            "  未知 JIT 子命令: {} (可用: state, fallbacks, compiled)",
+                            args
+                        );
                     }
                 }
             }
@@ -420,12 +435,10 @@ fn execute_command(session: &mut DebugSession, raw_line: &str) -> CommandResult 
             } else {
                 #[cfg(feature = "llvm")]
                 match args.as_str() {
-                    "compile" => {
-                        match session.aot_compile() {
-                            Ok(summary) => println!("{}", summary),
-                            Err(e) => eprintln!("  AOT 编译失败: {}", e),
-                        }
-                    }
+                    "compile" => match session.aot_compile() {
+                        Ok(summary) => println!("{}", summary),
+                        Err(e) => eprintln!("  AOT 编译失败: {}", e),
+                    },
                     _ => {}
                 }
                 #[cfg(not(feature = "llvm"))]
@@ -443,7 +456,10 @@ fn execute_command(session: &mut DebugSession, raw_line: &str) -> CommandResult 
                         Err(e) => eprintln!("  启动失败: {}", e),
                     }
                 } else if args != "compile" {
-                    println!("  未知 AOT 子命令: {} (可用: compile, dwarf, launch, path)", args);
+                    println!(
+                        "  未知 AOT 子命令: {} (可用: compile, dwarf, launch, path)",
+                        args
+                    );
                 }
             }
             CommandResult::None
@@ -485,7 +501,10 @@ fn print_banner(session: &DebugSession) {
 fn show_paused_state(session: &DebugSession) {
     if let Some(ref reason) = session.stop_reason {
         match reason {
-            StopReason::Breakpoint { description, .. } => {
+            StopReason::Breakpoint {
+                description,
+                ..
+            } => {
                 print!("\n  断点命中: {}\n", description);
             }
             StopReason::Step { mode } => {
@@ -494,14 +513,20 @@ fn show_paused_state(session: &DebugSession) {
             StopReason::Completion { result } => {
                 print!("\n  执行完成: {}\n", format_value(result));
             }
-            StopReason::Error { message, at_func } => {
+            StopReason::Error {
+                message,
+                at_func,
+            } => {
                 if let Some(func) = at_func {
                     print!("\n  运行时错误 [{}]: {}\n", func, message);
                 } else {
                     print!("\n  运行时错误: {}\n", message);
                 }
             }
-            StopReason::JitCompiled { func_name, success } => {
+            StopReason::JitCompiled {
+                func_name,
+                success,
+            } => {
                 if *success {
                     print!("\n  JIT 编译完成: {}\n", func_name);
                 } else {
@@ -522,9 +547,7 @@ fn show_paused_state(session: &DebugSession) {
     }
 
     // 显示快速操作提示
-    print!(
-        "  (b)reak  (c)ontinue  (s)tep  (n)ext  (l)ist  (h)elp  (q)uit\n\n"
-    );
+    print!("  (b)reak  (c)ontinue  (s)tep  (n)ext  (l)ist  (h)elp  (q)uit\n\n");
 }
 
 /// 显示帮助
