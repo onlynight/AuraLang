@@ -1,118 +1,412 @@
-# Aura 编程语言
+# Aura Programming Language
 
-> 为 NovaOS 从零构建的系统级脚本语言 —— Rust 实现、Kotlin 风格语法、AOT + JIT 混合编译、零开销 FFI、ARC 内存管理。
+> A system-level scripting language for NovaOS — Kotlin-style syntax, Rust implementation, AOT + JIT hybrid compilation, zero-cost FFI, ARC memory management.
+>
+> **中文文档** → [README.zh-CN.md](README.zh-CN.md)
 
-详细设计见 [技术方案.md](技术方案.md)，阶段规划与进度见 [开发规划与实现进度.md](开发规划与实现进度.md)。
-
----
-
-## 当前状态
-
-编译器前端（词法 → 语法 → 语义）已完成并可运行，后端（字节码 / VM / AOT）尚未开始。
-
-| 阶段 | 内容 | 状态 |
-|------|------|------|
-| P0 | 基础设施（workspace、SourceMap、诊断、测试、CI、文档） | ✅ |
-| P1 | 词法分析器 | ✅ |
-| P2 | 语法分析器 + AST | ✅ |
-| P3 | 语义分析（类型推断、空安全、诊断） | ✅ 基础版 |
-| P4+ | 字节码编译 / VM / AOT / 内存管理 / FFI / 标准库 … | ⬜ 未开始 |
+Design docs: [技术方案.md](docs/Aura构建系统设计.md) · [开发规划与实现进度.md](docs/多进程与CLI架构分析报告.md)
 
 ---
 
-## 仓库结构
+## Current Status
+
+The **full toolchain** is implemented and functional — from lexer to AOT-compiled native binaries, with VM, JIT, debugger, LSP, and a complete build system.
+
+| Phase | Component | Status |
+|-------|-----------|--------|
+| P0 | Infrastructure (workspace, SourceMap, diagnostics, CI) | ✅ |
+| P1 | Lexer | ✅ |
+| P2 | Parser + AST | ✅ |
+| P3 | Semantic analysis (types, null-safety, diagnostics) | ✅ |
+| P4 | Bytecode compiler (HIR → MIR → bytecode) | ✅ |
+| P5 | VM (stack-based interpreter) + JIT (Cranelift) | ✅ |
+| P6 | AOT compiler (LLVM IR → native) | ✅ |
+| P7 | Memory management (ARC, leak detection) | ✅ |
+| P8 | FFI (C interop, extern "c", dynamic loading) | ✅ |
+| P9 | Standard library (19 modules, 320+ functions) | ✅ |
+| P10 | Concurrency (Actors, Channels, Coroutines, ThreadPool) | ✅ |
+| P11 | Package management (aura.toml, .auz packages) | ✅ |
+| P12 | IPC (TCP channels, actor processes) | ✅ |
+| P13 | Toolchain (LSP, formatter, VS Code extension) | ✅ |
+| P14 | Examples & integration tests | ✅ |
+| P15 | Debugger (VM / JIT / AOT modes) | ✅ |
+| P16 | Build system (loom) | ✅ |
+
+---
+
+## Repository Structure
 
 ```text
-compiler/            编译器库（前端：lexer / parser / sema）
-  src/lexer.rs            词法分析器（手写，支持插值、原始字符串、文档注释）
-  src/token.rs            Token 定义
-  src/ast.rs              AST 节点定义
-  src/parser.rs           递归下降 + Pratt 优先级解析器
-  src/sema/               语义分析（ty.rs 类型 / symbol.rs 符号表 / checker.rs 检查器）
-  src/source_map.rs       源码映射（字节偏移 ↔ 行列、源码片段渲染）
-  src/errors.rs           诊断错误类型
-  src/span.rs             源码位置
-  tests/sema_tests.rs     语义集成测试
-  tests/snapshots.rs      insta 快照测试（Token 流 / AST / 诊断）
-  tests/perf_lexer.rs     词法性能基准
-cli/                 命令行工具（tokens / parse / check）
-examples/                 示例 Aura 源码
+AuraLang/
+├── Cargo.toml              Workspace root (compiler, cli, loom)
+├── LICENSE                 Apache-2.0
+├── README.md               ← You are here
+├── README.zh-CN.md         中文文档
+│
+├── compiler/               Compiler library (Rust crate)
+│   ├── src/
+│   │   ├── lexer.rs            Lexer (hand-written, string interpolation, raw strings)
+│   │   ├── parser.rs           Recursive-descent + Pratt parser
+│   │   ├── ast.rs              AST node definitions
+│   │   ├── sema/               Semantic analysis (ty, symbol, checker)
+│   │   ├── codegen/
+│   │   │   ├── hir.rs              HIR desugaring
+│   │   │   ├── mir.rs              MIR lowering
+│   │   │   ├── emit.rs             Bytecode emitter
+│   │   │   ├── opt.rs              Optimization passes
+│   │   │   ├── arc.rs              ARC analysis & insertion
+│   │   │   ├── serialize.rs        .auc binary format
+│   │   │   └── aot/                AOT (LLVM) backend
+│   │   │       ├── emit.rs         LLVM IR generation
+│   │   │       ├── linker.rs       llc/clang linking
+│   │   │       ├── target.rs       Cross-platform triples
+│   │   │       ├── dwarf.rs        DWARF debug info
+│   │   │       └── c_backend.rs    C code fallback
+│   │   ├── vm/
+│   │   │   ├── interp.rs           Stack-based interpreter
+│   │   │   ├── jit.rs              Cranelift JIT
+│   │   │   ├── ffi.rs              C FFI (extern "c")
+│   │   │   ├── heap.rs             GC heap + ARC
+│   │   │   ├── value.rs            Runtime values
+│   │   │   ├── actor.rs            Actor runtime
+│   │   │   ├── channel.rs          Message channels
+│   │   │   ├── coroutine.rs        Coroutines & suspend
+│   │   │   ├── thread_pool.rs      ThreadPool
+│   │   │   ├── debugger.rs         Source-level debugger
+│   │   │   └── ...                 IPC, dynamic FFI, native, etc.
+│   │   ├── std/                    Standard library (19 modules)
+│   │   │   ├── decl.rs             Single source of truth for std functions
+│   │   │   ├── std_math.rs         Math (sin, cos, sqrt, pow, ...)
+│   │   │   ├── std_io.rs           I/O (readFile, writeFile, ...)
+│   │   │   ├── std_collections.rs  List, Map, Set operations
+│   │   │   ├── std_concurrent.rs   Actor, Channel, Coroutine APIs
+│   │   │   ├── std_json.rs         JSON parsing & serialization
+│   │   │   ├── std_string.rs       String operations
+│   │   │   ├── std_fs.rs           File system
+│   │   │   ├── std_env.rs          Environment variables
+│   │   │   ├── std_process.rs      Process management
+│   │   │   ├── std_time.rs         Time & dates
+│   │   │   └── ...                 (+8 more modules)
+│   │   ├── auz/                    .auz package format
+│   │   ├── lsp.rs                  LSP server (JSON-RPC over stdio)
+│   │   ├── package.rs              Package manager
+│   │   ├── docgen.rs               API documentation generator
+│   │   └── linker.rs               Module linking
+│   ├── tests/                    Integration tests (40+ test files)
+│   └── examples/                 AOT benchmarks
+│
+├── cli/                    Command-line tool (3 binaries)
+│   └── src/
+│       ├── main.rs             `aura` — 20+ subcommands
+│       ├── lsp_main.rs         `aura-lsp` — standalone LSP server
+│       └── debugger_main.rs    `aura-debug` — source-level debugger
+│
+├── loom/                   Build system (Gradle/Bazel-like)
+│   ├── src/                    manifest, task DAG, cache, plugins, CI/CD
+│   ├── docs/                   Design documents
+│   └── examples/               Example projects
+│
+├── vscode-extension/       VS Code extension (LSP + syntax highlighting)
+│
+├── book/                   User documentation (tutorials, API, migration)
+├── docs/                   Technical design documents
+└── examples/               Aura source examples (36 files)
 ```
 
-## 构建与测试
+---
+
+## Quick Start
+
+### Prerequisites
+
+- Rust 1.75+ (edition 2024)
+- LLVM 17+ (for AOT; optional for VM/JIT mode)
+
+### Build
 
 ```bash
-cargo build --workspace
-cargo test --workspace
+# Full toolchain (VM + JIT + AOT + all std modules)
+cargo build --release --features "llvm,jit,std-all"
 
-# 词法吞吐率基准（release 下断言 > 10 MB/s）
+# Minimal (VM only)
+cargo build --release
+```
+
+### Run
+
+```bash
+# Compile and execute
+aura run examples/showcase.aura
+
+# AOT compile to native executable
+aura build --aot examples/game_2d_demo.aura --target x86_64-pc-windows-msvc
+
+# Interactive REPL
+aura repl
+
+# Evaluate a snippet
+aura eval --expr "println('Hello, Aura!')"
+```
+
+---
+
+## Command-Line Reference
+
+```text
+aura build <file.aura>                          Compile to bytecode (.auc)
+aura build <file.aura> --aot [--target <triple>] AOT compile to native
+aura build <file.aura> --lib                    Package as .auz library
+aura run <file.aura> [--jit]                    Compile + execute (VM or JIT)
+aura check <file.aura>                          Syntax/semantic check only
+aura disasm <file.auc>                          Disassemble bytecode
+aura tokens <file.aura>                         Print token stream
+aura ast <file.aura>                            Print AST
+aura fmt <file.aura> [--check]                  Code formatter
+aura leak-check <file.aura>                     ARC memory leak analysis
+aura doc [--output <dir>]                       Generate std API docs
+aura eval [--expr <code>]                       Execute snippet (like node -e)
+aura repl                                       Interactive REPL
+aura install                                    Install dependencies
+aura update [--all]                             Update dependencies
+aura publish [--dir <path>]                     Publish package
+aura deps                                       Show dependency tree
+aura new <name>                                 Create new project
+aura package <file.aura>                        Package as .auz artifact
+aura inspect <file.auz>                         Inspect .auz contents
+aura verify <file.auz>                          Verify .auz checksum
+aura lsp                                        Start LSP server (stdio)
+aura debug <file.aura>                          Start debugger
+```
+
+Standalone binaries:
+
+```text
+aura-lsp              LSP server (independent process, no VM overhead)
+aura-debug <file.aura> [--mode vm|jit|aot]  Source-level debugger
+```
+
+---
+
+## Language Features
+
+### Variables & Types
+
+```aura
+val x: Int = 42                    // Immutable
+var y: Int = 0                    // Mutable
+lateinit var cache: String         // Lazy init
+val lazyVal by lazy { compute() }  // Lazy evaluation
+
+// Type system
+val list: List<Int> = listOf(1, 2, 3)
+val map: Map<String, Int> = mapOf("a" to 1)
+val opt: Int? = null               // Nullable
+typealias Vec2 = Pair<Int, Int>    // Type alias
+```
+
+### Functions
+
+```aura
+fun add(a: Int, b: Int): Int = a + b        // Expression body
+fun power(base: Int, exp: Int = 2): Int { }  // Default params
+fun join(vararg parts: String): String { }   // Variadic
+fun <T: Number> first(items: List<T>): T? { }// Generic + constraint
+
+// Lambdas
+val f = { x: Int -> x + 1 }
+val mapped = listOf(1,2,3).map { x -> x * 2 }
+```
+
+### Classes & Interfaces
+
+```aura
+data struct Player(val id: Int, var name: String = "unknown", var health: Int = 100)
+struct Point(val x: Int, val y: Int) { fun manhattan(): Int = x + y }
+sealed class Shape { fun area(): Float = 0.0f }
+enum Color { RED, GREEN, CUSTOM(val r: Int, val g: Int, val b: Int) }
+interface Drawable { fun draw(): Unit }
+class Circle : Drawable { override fun draw() {} }
+class Dog : Animal() { override fun name(): String = "dog" }
+actor Scheduler { var tick: Int = 0; fun step() { tick += 1 } }
+```
+
+### Control Flow
+
+```aura
+val status = if (hp > 0) "alive" else "dead"
+
+val band = when (score) {
+    in 90..100 -> "A"
+    in 80..89  -> "B"
+    else       -> "F"
+}
+
+val len = when (val) {
+    is String -> val.length
+    is Int    -> 1
+    else      -> 0
+}
+
+for (i in 0..10) { ... }
+while (cond) { ... }
+do { ... } while (cond)
+break@outer / continue@outer
+```
+
+### Null Safety
+
+```aura
+var n: Int? = null
+val safe: Int = n ?: 0          // Elvis operator
+val tl = p.tag?.length          // Safe call
+val forced: Int = n!!           // Force unwrap
+```
+
+### Concurrency
+
+```aura
+import aura.concurrent.*
+
+// Actors
+val worker = spawnActor("Worker")
+send(worker, "task")
+val reply = ask(worker, "request")
+
+// Coroutines
+val result = spawn(42)
+val computed = await(100)
+
+// Channels
+val ch = channel<Int>()
+ch.send(42)
+val msg = ch.receive()
+```
+
+### FFI
+
+```aura
+extern "c" fun puts(msg: String): Int
+val ret = puts("Hello from C!")
+```
+
+### String Interpolation
+
+```aura
+val name = "world"
+println("Hello, $name!")
+println("Level: ${hp * 2}")
+val raw = """No $interpolation or \n here"""
+```
+
+---
+
+## Standard Library
+
+| Module | Description |
+|--------|-------------|
+| `aura.math` | sin, cos, tan, sqrt, pow, abs, min, max, round, floor, ceil, log, exp, PI, E |
+| `aura.io` | readFile, writeFile, readLine, writeLine, println, print |
+| `aura.collections` | List, Map, Set operations (filter, map, reduce, sort, zip, ...) |
+| `aura.concurrent` | Actor, Channel, Coroutine, spawn, send, ask, supervise, threadPool |
+| `aura.json` | JSON parse, stringify, pretty-print |
+| `aura.string` | String operations (split, join, replace, trim, toUpperCase, ...) |
+| `aura.fs` | File system (exists, remove, mkdir, readDir, copy, move) |
+| `aura.env` | Environment variables (get, set, remove) |
+| `aura.process` | Process management (exec, spawn, exit, arguments) |
+| `aura.time` | Time & dates (now, millis, timestamp, date formatting) |
+| `aura.path` | Path operations (join, normalize, resolve, base, dir, ext) |
+| `aura.console` | Terminal control (clear, cursor, colors, width, height) |
+| `aura.assert` | Assertions (assert, assertEquals, assertThrows) |
+| `aura.test` | Test framework (describe, it, before, after) |
+| `aura.net` | Network (HTTP client, URL, WebSocket) |
+| `aura.random` | Random numbers (nextInt, nextFloat, shuffle) |
+| `aura.encoding` | Encoding (base64, hex, URL encoding) |
+| `aura.ascii` | ASCII operations (isAlpha, isDigit, toUpper, toLower) |
+| `aura.iter` | Iterator operations |
+
+**Prelude** (always available, no import needed): `println`, `print`, `puts`, `abs`, `sqrt`, `pow`, `toInt`, `toFloat`, `toStr`, `toString`, `clock`, `strlen`, `CString`, `CStr`, `ptrIsNull`, `ptrToInt`, `intToPtr`, `makeCallback`
+
+---
+
+## Build System (loom)
+
+The `loom` build system is a Gradle/Bazel-style build tool for Aura projects:
+
+```bash
+loom new my-app          # Create project
+loom build               # Build
+loom test                # Run tests
+loom run                 # Run application
+loom watch               # Watch mode (incremental rebuild)
+loom ci                  # CI/CD integration
+```
+
+Configuration via `aura.toml`:
+
+```toml
+name = "my-app"
+version = "0.1.0"
+entry = "main.aura"
+
+[dependencies]
+"aura-math" = { version = "1.0", rev = "main" }
+```
+
+---
+
+## VS Code Extension
+
+Aura language support for VS Code: LSP integration, syntax highlighting, snippets, formatting.
+
+Install: `aura-language` from VS Code Marketplace, or build from `vscode-extension/`.
+
+---
+
+## Development
+
+```bash
+# Format
+cargo fmt --all
+
+# Lint
+cargo clippy --all-features -- -D warnings
+
+# Test
+cargo test --workspace
 cargo test --release --test perf_lexer -- --nocapture
 
-# 快照测试：更新快照
+# Update snapshots
 INSTA_UPDATE=always cargo test
 ```
 
-CI 在 `.github/workflows/ci.yml`，包含 `cargo fmt --check`、`cargo clippy -D warnings`、`cargo test`（debug + release）与覆盖率采集。
+CI: `.github/workflows/ci.yml` — `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test` (debug + release), coverage.
 
-## 命令行用法
+---
 
-```bash
-cargo run -p cli -- check examples/demo.aura      # 词法 + 语法 + 语义检查
-cargo run -p cli -- tokens examples/demo.aura     # 打印 Token 流
-cargo run -p cli -- parse examples/demo.aura      # 打印 AST
+## Architecture
+
+```
+Source (.aura)
+  │
+  ▼
+Lexer ────► Token stream
+  │
+  ▼
+Parser ───► AST
+  │
+  ▼
+Sema ─────► Typed AST (type inference, null-safety)
+  │
+  ▼
+HIR (desugar) ──► MIR (lowering)
+  │
+  ├──► Bytecode (.auc) ──► VM (interpreter) ──► JIT (Cranelift) ──► Native code
+  │
+  └──► LLVM IR (.ll) ──► llc ──► .o ──► linker ──► Native executable
 ```
 
-诊断输出带源码片段：
+---
 
-```text
-semantic error: type mismatch: cannot initialize 'Int' with 'String'
- --> examples/demo_errors.aura:8:6
-  |
-8 | val bad: Int = "not a number"
-  |     ^^^
-```
+## License
 
-## 已支持的语言特性（前端）
-
-- 变量：`val` / `var` / `lateinit var` / `val x by lazy { ... }` / 解构 `val (a, b) = pair`
-- 函数：默认参数、命名参数、可变参数、表达式体、泛型与约束 `fun <T : Comparable<T>>`
-- 类型：`Int` `Long` `Float` `Double` `Boolean` `Char` `String` `Any` `Unit` `Nothing`、可空 `T?`、数组 `T[]`、函数类型、泛型 `List<T>`、类型别名 `typealias`
-- 声明：`struct` / `data struct` / `sealed struct` / `class` / `data class` / `sealed class` / `interface` / `enum` / `actor` / `extern "c"` / `import`
-- 控制流：`if` 表达式、`when`（分支 / 范围 `in 90..100` / 类型匹配 `is T` / 守卫 `&&`）、`for`、`while`、`do-while`、`break` / `continue`
-- 空安全：`?.`、`?:`（Elvis）、`!!`
-- 字符串：插值 `$name` / `${expr}`、转义序列、原始多行字符串 `"""..."""`
-- 文档注释：`///` 与 `/** */`（收集到 AST 的 `doc` 字段）
-- 注解：`@Deprecated` 等；修饰符：`suspend` / `inline` / `override` / `comptime`
-
-## 示例
-
-```aura
-/// 玩家结构体
-struct Player(val id: Int, var name: String, var health: Int = 100)
-
-fun greet(name: String): String {
-    return "hello $name"
-}
-
-fun grade(score: Int): String {
-    return when (score) {
-        in 90..100 -> "A"
-        in 80..89  -> "B"
-        else       -> "F"
-    }
-}
-
-val raw = """
-原始字符串不做转义，也不做 $ 插值
-"""
-```
-
-更完整的“当前已支持”语法与语义覆盖见 [`examples/showcase.aura`](examples/showcase.aura)；其编译零错误由 [`compiler/tests/examples_test.rs`](compiler/tests/examples_test.rs) 端到端校验。
-
-## 路线图
-
-见 [开发规划与实现进度.md](开发规划与实现进度.md)：P4 字节码编译器 → P5 Aura VM + JIT → P6 AOT（LLVM/inkwell）→ … → P13 工具链与 IDE。
-
-## 许可证
-
-MIT
+[Apache-2.0](LICENSE)

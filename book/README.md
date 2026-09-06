@@ -73,4 +73,4 @@ aura run main.aura
 
 ## 许可证
 
-Aura 采用 [MIT](LICENSE) 许可证。
+Aura 采用 [Apache-2.0](../LICENSE) 许可证。
