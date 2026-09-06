@@ -30,7 +30,7 @@
 cd vscode-extension
 npm install
 npm run compile
-code --install-extension aura-language-0.1.4.vsix
+code --install-extension aura-language-0.1.6.vsix
 ```
 
 > **LSP 功能要求**：补全、跳转定义、悬停、诊断、格式化由 LSP 服务器提供，
@@ -299,7 +299,10 @@ vscode-extension/
 ├── snippets/
 │   └── aura.json             # 代码片段
 └── resources/
-    └── aura-icon.png         # 文件图标
+    ├── aura-icon-dark.png    # 深色主题文件图标 (256×256)
+    ├── aura-icon-light.png   # 浅色主题文件图标 (256×256)
+    ├── aura-icon.png         # 默认图标 (48×48, 深色变体)
+    └── aura-icon.svg         # 源矢量图标 (光环渐变设计)
 ```
 
 ## 许可证
