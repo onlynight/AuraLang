@@ -13,15 +13,21 @@ use compiler::codegen::opcode::{
 use compiler::codegen::serialize;
 use compiler::lexer::Lexer;
 use compiler::parser::Parser;
-use compiler::vm::aot_runtime::{AotRuntime, AOT_MAX_CALL_DEPTH};
+use compiler::vm::aot_runtime::{AOT_MAX_CALL_DEPTH, AotRuntime};
 use compiler::vm::{Value, Vm, VmOptions};
 
 fn llc_available() -> bool {
-    if std::env::var_os("AURA_LLVM_HOME").is_some() { return true; }
+    if std::env::var_os("AURA_LLVM_HOME").is_some() {
+        return true;
+    }
     let paths = std::env::var("PATH").unwrap_or_default();
     for dir in paths.split(';') {
-        if std::path::Path::new(dir).join("llc.exe").is_file() { return true; }
-        if std::path::Path::new(dir).join("llc").is_file() { return true; }
+        if std::path::Path::new(dir).join("llc.exe").is_file() {
+            return true;
+        }
+        if std::path::Path::new(dir).join("llc").is_file() {
+            return true;
+        }
     }
     false
 }
@@ -33,9 +39,13 @@ fn compile_with_aot_embed(source: &str) -> BytecodeModule {
     let mut parser = Parser::new(tokens);
     let program = parser.parse_program();
     let hir = desugar_program(&program);
-    let options = AotOptions { opt_level: OptimizationLevel::default(), ..Default::default() };
+    let options = AotOptions {
+        opt_level: OptimizationLevel::default(),
+        ..Default::default()
+    };
     let work_dir = std::env::temp_dir().join(format!(
-        "aura_aot_sec_{}_{}", std::process::id(),
+        "aura_aot_sec_{}_{}",
+        std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
     ));
     let result = embed_aot(module, &hir, options, &work_dir).expect("AOT embed failed");
@@ -65,12 +75,26 @@ fn test_ed25519_sign_and_verify() {
 
 #[test]
 fn test_hot_reload_module() {
-    let descs1 = vec![AuraFuncDesc { entry_offset: 0x100, num_args: 1, flags: 1, ..AuraFuncDesc::default() }];
+    let descs1 = vec![
+        AuraFuncDesc {
+            entry_offset: 0x100,
+            num_args: 1,
+            flags: 1,
+            ..AuraFuncDesc::default()
+        },
+    ];
     let (data1, segs1) = make_segment_data(256, &descs1);
     let mut rt = AotRuntime::new();
     let id1 = rt.load_module_from(&data1, &segs1, &[1u32], "module_v1".to_string()).unwrap();
     assert_eq!(rt.module_count(), 1);
-    let descs2 = vec![AuraFuncDesc { entry_offset: 0x200, num_args: 2, flags: 1, ..AuraFuncDesc::default() }];
+    let descs2 = vec![
+        AuraFuncDesc {
+            entry_offset: 0x200,
+            num_args: 2,
+            flags: 1,
+            ..AuraFuncDesc::default()
+        },
+    ];
     let (data2, segs2) = make_segment_data(256, &descs2);
     let id2 = rt.hot_reload_module(id1, &data2, &segs2, &[1u32], "module_v2".to_string()).unwrap();
     assert_ne!(id1, id2);
@@ -83,7 +107,12 @@ fn test_hot_reload_module() {
 
 #[test]
 fn test_hot_reload_nonexistent() {
-    let descs = vec![AuraFuncDesc { entry_offset: 0x100, ..AuraFuncDesc::default() }];
+    let descs = vec![
+        AuraFuncDesc {
+            entry_offset: 0x100,
+            ..AuraFuncDesc::default()
+        },
+    ];
     let (data, segs) = make_segment_data(256, &descs);
     let mut rt = AotRuntime::new();
     let err = rt.hot_reload_module(999, &data, &segs, &[1u32], "test".to_string()).unwrap_err();
@@ -101,7 +130,12 @@ fn test_call_depth_limit() {
 
 #[test]
 fn test_entry_cache() {
-    let descs = vec![AuraFuncDesc { entry_offset: 0x100, ..AuraFuncDesc::default() }];
+    let descs = vec![
+        AuraFuncDesc {
+            entry_offset: 0x100,
+            ..AuraFuncDesc::default()
+        },
+    ];
     let (data, segs) = make_segment_data(256, &descs);
     let mut rt = AotRuntime::new();
     let id = rt.load_module_from(&data, &segs, &[1u32], "cache_test".to_string()).unwrap();
@@ -116,8 +150,18 @@ fn test_entry_cache() {
 #[test]
 fn test_module_diagnostics() {
     let descs = vec![
-        AuraFuncDesc { entry_offset: 0x100, num_args: 2, flags: 1, ..AuraFuncDesc::default() },
-        AuraFuncDesc { entry_offset: 0x200, num_args: 1, flags: 1, ..AuraFuncDesc::default() },
+        AuraFuncDesc {
+            entry_offset: 0x100,
+            num_args: 2,
+            flags: 1,
+            ..AuraFuncDesc::default()
+        },
+        AuraFuncDesc {
+            entry_offset: 0x200,
+            num_args: 1,
+            flags: 1,
+            ..AuraFuncDesc::default()
+        },
     ];
     let (data, segs) = make_segment_data(512, &descs);
     let mut rt = AotRuntime::new();
@@ -135,7 +179,10 @@ fn test_module_diagnostics() {
 
 #[test]
 fn test_signed_auc_load() {
-    if !llc_available() { eprintln!("skipped"); return; }
+    if !llc_available() {
+        eprintln!("skipped");
+        return;
+    }
     use compiler::codegen::serialize::Ed25519Keypair;
     let src = r#"
         fun add(a: Int, b: Int): Int { return a + b }
@@ -158,13 +205,30 @@ fn test_signed_auc_load() {
 fn make_segment_data(machine_size: usize, descs: &[AuraFuncDesc]) -> (Vec<u8>, Vec<AucSegment>) {
     let mut data = Vec::new();
     data.resize(machine_size, 0x90);
-    let machine = AucSegment { id: SEG_MACHINE, offset: 0, size: machine_size as u32, flags: SEG_PROT_READ | SEG_PROT_EXEC };
+    let machine = AucSegment {
+        id: SEG_MACHINE,
+        offset: 0,
+        size: machine_size as u32,
+        flags: SEG_PROT_READ | SEG_PROT_EXEC,
+    };
     let mut desc_bytes = Vec::new();
     for d in descs {
-        let slice = unsafe { std::slice::from_raw_parts(d as *const AuraFuncDesc as *const u8, AuraFuncDesc::SIZE) };
+        let slice = unsafe {
+            std::slice::from_raw_parts(d as *const AuraFuncDesc as *const u8, AuraFuncDesc::SIZE)
+        };
         desc_bytes.extend_from_slice(slice);
     }
-    let desc_seg = AucSegment { id: SEG_DESC_TABLE, offset: data.len() as u32, size: desc_bytes.len() as u32, flags: SEG_PROT_READ };
+    let desc_seg = AucSegment {
+        id: SEG_DESC_TABLE,
+        offset: data.len() as u32,
+        size: desc_bytes.len() as u32,
+        flags: SEG_PROT_READ,
+    };
     data.extend_from_slice(&desc_bytes);
-    (data, vec![machine, desc_seg])
+    (
+        data,
+        vec![
+            machine, desc_seg,
+        ],
+    )
 }

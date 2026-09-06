@@ -333,7 +333,8 @@ fun exercise10() {
 | 条件 | `if (cond) { } else { }` |
 | 匹配 | `when (x) { ... }` |
 | 循环 | `for (x in iter) { }` / `while (cond) { }` |
-| 数据类 | `struct Name(val x: Type, ...)` |
+| 值类型 | `value class Name(val x: Type, ...)` |
+| 引用类型 | `class Name { fun method() }` |
 | 枚举 | `enum Name { A, B, C }` |
 | 接口 | `interface Name { fun method() }` |
 | 错误 | `Result<T, E>` / `try { } catch { }` |

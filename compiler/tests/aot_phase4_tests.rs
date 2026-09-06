@@ -4,21 +4,27 @@
 
 #![cfg(feature = "llvm")]
 
-use compiler::codegen::aot::{AotOptions, OutputFormat, OptimizationLevel, AotCodeGenerator};
+use compiler::codegen::aot::{AotCodeGenerator, AotOptions, OptimizationLevel, OutputFormat};
 use compiler::codegen::aot_embed::embed_aot;
-use compiler::codegen::hir::desugar_program;
 use compiler::codegen::compile_source;
+use compiler::codegen::hir::desugar_program;
 use compiler::lexer::Lexer;
 use compiler::parser::Parser;
-use compiler::vm::aot_runtime::{AotRuntime, PluginManager, ModuleDependency};
+use compiler::vm::aot_runtime::{AotRuntime, ModuleDependency, PluginManager};
 use compiler::vm::{Vm, VmOptions};
 
 fn llc_available() -> bool {
-    if std::env::var_os("AURA_LLVM_HOME").is_some() { return true; }
+    if std::env::var_os("AURA_LLVM_HOME").is_some() {
+        return true;
+    }
     let paths = std::env::var("PATH").unwrap_or_default();
     for dir in paths.split(';') {
-        if std::path::Path::new(dir).join("llc.exe").is_file() { return true; }
-        if std::path::Path::new(dir).join("llc").is_file() { return true; }
+        if std::path::Path::new(dir).join("llc.exe").is_file() {
+            return true;
+        }
+        if std::path::Path::new(dir).join("llc").is_file() {
+            return true;
+        }
     }
     false
 }
@@ -27,12 +33,23 @@ fn compile_with_aot_embed(source: &str) -> compiler::codegen::BytecodeModule {
     let module = compile_source(source).expect("字节码编译应成功");
     let mut lexer = Lexer::new(source);
     let tokens = lexer.tokenize();
-    assert!(lexer.errors().is_empty(), "词法错误: {:?}", lexer.errors().first());
+    assert!(
+        lexer.errors().is_empty(),
+        "词法错误: {:?}",
+        lexer.errors().first()
+    );
     let mut parser = Parser::new(tokens);
     let program = parser.parse_program();
-    assert!(parser.errors().is_empty(), "语法错误: {:?}", parser.errors().first());
+    assert!(
+        parser.errors().is_empty(),
+        "语法错误: {:?}",
+        parser.errors().first()
+    );
     let hir = desugar_program(&program);
-    let options = AotOptions { opt_level: OptimizationLevel::default(), ..Default::default() };
+    let options = AotOptions {
+        opt_level: OptimizationLevel::default(),
+        ..Default::default()
+    };
     let work_dir = std::env::temp_dir().join(format!(
         "aura_p4_{}_{}",
         std::process::id(),
@@ -47,7 +64,10 @@ fn compile_with_aot_embed(source: &str) -> compiler::codegen::BytecodeModule {
 
 #[test]
 fn test_shared_library_format() {
-    if !llc_available() { eprintln!("skipped: LLVM 不可用"); return; }
+    if !llc_available() {
+        eprintln!("skipped: LLVM 不可用");
+        return;
+    }
 
     let src = r#"
         fun add(a: Int, b: Int): Int { return a + b }
@@ -79,7 +99,10 @@ fn test_shared_library_format() {
 
 #[test]
 fn test_rust_host_format() {
-    if !llc_available() { eprintln!("skipped: LLVM 不可用"); return; }
+    if !llc_available() {
+        eprintln!("skipped: LLVM 不可用");
+        return;
+    }
 
     // 验证 OutputFormat::RustHost 枚举存在
     let format = OutputFormat::RustHost;
@@ -108,7 +131,10 @@ fn test_cross_module_dependency_registration() {
     // 注册模块依赖
     let dep = ModuleDependency {
         name: "math_lib".to_string(),
-        imports: vec!["sqrt".to_string(), "pow".to_string()],
+        imports: vec![
+            "sqrt".to_string(),
+            "pow".to_string(),
+        ],
         resolved_module_id: None,
     };
     runtime.register_module_dependency(1, dep.clone());
@@ -137,7 +163,10 @@ fn test_cross_module_resolve_no_modules() {
     // 没有已加载模块时，依赖解析应该全部未解决
     let dep = ModuleDependency {
         name: "math_lib".to_string(),
-        imports: vec!["sqrt".to_string(), "pow".to_string()],
+        imports: vec![
+            "sqrt".to_string(),
+            "pow".to_string(),
+        ],
         resolved_module_id: None,
     };
     runtime.register_module_dependency(1, dep);
@@ -192,7 +221,10 @@ fn test_plugin_manager_unload_nonexistent() {
 
 #[test]
 fn test_aot_embed_with_plugin_manager() {
-    if !llc_available() { eprintln!("skipped: LLVM 不可用"); return; }
+    if !llc_available() {
+        eprintln!("skipped: LLVM 不可用");
+        return;
+    }
 
     let src = r#"
         fun add(a: Int, b: Int): Int { return a + b }

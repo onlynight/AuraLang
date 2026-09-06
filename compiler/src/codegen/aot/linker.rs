@@ -536,11 +536,17 @@ pub fn link_to_shared_library(
 
     // 跨平台动态库标志
     #[cfg(target_os = "windows")]
-    { cmd.arg("-shared").arg("-Wl,/DLL"); }
+    {
+        cmd.arg("-shared").arg("-Wl,/DLL");
+    }
     #[cfg(target_os = "macos")]
-    { cmd.arg("-dynamiclib"); }
+    {
+        cmd.arg("-dynamiclib");
+    }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    { cmd.arg("-shared"); }
+    {
+        cmd.arg("-shared");
+    }
 
     cmd.arg(options.opt_level.as_llvm_flag());
     run_and_report(&mut cmd, "clang")?;

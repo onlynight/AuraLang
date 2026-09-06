@@ -243,8 +243,8 @@ end
 ```
 
 ```aura
-// Aura：结构体
-struct Player(
+// Aura：值类型（value class）
+value class Player(
     val id: Int,
     var name: String,
     var health: Int = 100

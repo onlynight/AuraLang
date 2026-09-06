@@ -967,11 +967,21 @@ impl Ed25519Keypair {
     /// 从字节数组恢复密钥对（64 bytes: 32 secret + 32 public）
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, SignatureError> {
         if bytes.len() < 64 {
-            return Err(SignatureError::Format("keypair bytes too short".to_string()));
+            return Err(SignatureError::Format(
+                "keypair bytes too short".to_string(),
+            ));
         }
-        let secret = ed25519_dalek::SigningKey::from_bytes(&bytes[0..32].try_into().map_err(|_| SignatureError::Format("bad secret key length".to_string()))?);
-        let public = ed25519_dalek::VerifyingKey::from_bytes(&bytes[32..64].try_into().map_err(|_| SignatureError::Format("bad public key length".to_string()))?)
-            .map_err(|e| SignatureError::Format(e.to_string()))?;
+        let secret = ed25519_dalek::SigningKey::from_bytes(
+            &bytes[0..32]
+                .try_into()
+                .map_err(|_| SignatureError::Format("bad secret key length".to_string()))?,
+        );
+        let public = ed25519_dalek::VerifyingKey::from_bytes(
+            &bytes[32..64]
+                .try_into()
+                .map_err(|_| SignatureError::Format("bad public key length".to_string()))?,
+        )
+        .map_err(|e| SignatureError::Format(e.to_string()))?;
         Ok(Ed25519Keypair {
             secret_key: secret,
             public_key: public,
@@ -1028,11 +1038,15 @@ pub fn verify_auc_signature(
     }
     let hash = sha2::Sha256::digest(content);
     let pk = ed25519_dalek::VerifyingKey::from_bytes(
-        &public_key_bytes.try_into().map_err(|_| SignatureError::Format("bad key len".to_string()))?,
+        &public_key_bytes
+            .try_into()
+            .map_err(|_| SignatureError::Format("bad key len".to_string()))?,
     )
     .map_err(|e| SignatureError::Format(e.to_string()))?;
     let sig = ed25519_dalek::Signature::from_bytes(
-        &signature_bytes.try_into().map_err(|_| SignatureError::Format("bad sig len".to_string()))?,
+        &signature_bytes
+            .try_into()
+            .map_err(|_| SignatureError::Format("bad sig len".to_string()))?,
     );
     match pk.verify(&hash, &sig) {
         Ok(()) => Ok(true),

@@ -15,11 +15,17 @@ use compiler::parser::Parser;
 use compiler::vm::{Value, Vm, VmOptions};
 
 fn llc_available() -> bool {
-    if std::env::var_os("AURA_LLVM_HOME").is_some() { return true; }
+    if std::env::var_os("AURA_LLVM_HOME").is_some() {
+        return true;
+    }
     let paths = std::env::var("PATH").unwrap_or_default();
     for dir in paths.split(';') {
-        if std::path::Path::new(dir).join("llc.exe").is_file() { return true; }
-        if std::path::Path::new(dir).join("llc").is_file() { return true; }
+        if std::path::Path::new(dir).join("llc.exe").is_file() {
+            return true;
+        }
+        if std::path::Path::new(dir).join("llc").is_file() {
+            return true;
+        }
     }
     false
 }
@@ -27,7 +33,10 @@ fn llc_available() -> bool {
 /// 完整端到端演示：源码 → AOT 嵌入 → 签名 → VM 执行
 #[test]
 fn demo_end_to_end_aot_embed() {
-    if !llc_available() { eprintln!("skipped: LLVM 不可用"); return; }
+    if !llc_available() {
+        eprintln!("skipped: LLVM 不可用");
+        return;
+    }
 
     println!("=== Aura AOT 机器码嵌入演示 ===\n");
 
@@ -53,17 +62,26 @@ fn demo_end_to_end_aot_embed() {
 
     // Step 3: AOT 嵌入
     println!("\nStep 3: AOT 嵌入（LLVM IR → 机器码 blob）...");
-    let options = AotOptions { opt_level: OptimizationLevel::default(), ..Default::default() };
+    let options = AotOptions {
+        opt_level: OptimizationLevel::default(),
+        ..Default::default()
+    };
     let work_dir = std::env::temp_dir().join(format!(
-        "aura_demo_{}_{}", std::process::id(),
+        "aura_demo_{}_{}",
+        std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
     ));
     let result = embed_aot(module, &hir, options, &work_dir).expect("AOT 嵌入失败");
     let _ = std::fs::remove_dir_all(&work_dir);
 
-    println!("  ✓ AOT 嵌入成功: 机器码 {} 字节, {} 个函数描述符",
-        result.machine_size, result.desc_count);
-    println!("  ✓ 段表: {} 个段 (含字符串池)", result.module.aot_segments.len());
+    println!(
+        "  ✓ AOT 嵌入成功: 机器码 {} 字节, {} 个函数描述符",
+        result.machine_size, result.desc_count
+    );
+    println!(
+        "  ✓ 段表: {} 个段 (含字符串池)",
+        result.module.aot_segments.len()
+    );
 
     // Step 4: 基线执行（纯字节码解释）
     println!("\nStep 4: 基线执行（纯字节码解释器）...");
@@ -88,7 +106,10 @@ fn demo_end_to_end_aot_embed() {
     use compiler::codegen::serialize::Ed25519Keypair;
     let keypair = Ed25519Keypair::generate();
     let signed_bytes = serialize::sign_auc(&auc_bytes, &keypair);
-    println!("  签名后大小: {} 字节 (增加 96 字节: 64 签名 + 32 公钥)", signed_bytes.len());
+    println!(
+        "  签名后大小: {} 字节 (增加 96 字节: 64 签名 + 32 公钥)",
+        signed_bytes.len()
+    );
 
     // Step 7: 验证签名
     println!("\nStep 7: 验证签名...");

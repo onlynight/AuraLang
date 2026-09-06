@@ -118,7 +118,8 @@ fn assemble_segments(
     // ── Phase 2.9: 构建字符串池（设计文档 §5.5）──
     // 收集所有唯一函数名
     let mut unique_names: Vec<String> = Vec::new();
-    let mut name_to_idx: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut name_to_idx: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     for (name, _) in descs {
         if !name_to_idx.contains_key(name) {
             name_to_idx.insert(name.clone(), unique_names.len());
@@ -166,7 +167,8 @@ fn assemble_segments(
     }
 
     // 组装段数据区: machine_code (16 对齐) + desc_table + string_pool
-    let mut blob_data = Vec::with_capacity(aligned_machine_size + desc_bytes.len() + string_pool.len());
+    let mut blob_data =
+        Vec::with_capacity(aligned_machine_size + desc_bytes.len() + string_pool.len());
     blob_data.extend_from_slice(machine_code);
     blob_data.resize(aligned_machine_size, 0);
     blob_data.extend_from_slice(&desc_bytes);
@@ -245,7 +247,9 @@ mod tests {
         assert!(!segs[1].is_exec());
         assert_eq!(segs[2].id, SEG_STRING_POOL);
         // 描述符表按原始字节可读回
-        let d0 = unsafe { std::ptr::read_unaligned(blob[expected_machine..].as_ptr() as *const AuraFuncDesc) };
+        let d0 = unsafe {
+            std::ptr::read_unaligned(blob[expected_machine..].as_ptr() as *const AuraFuncDesc)
+        };
         assert_eq!(d0.entry_offset, 0x40);
         assert_eq!(d0.num_args, 2);
         // 描述符的 name_offset 指向字符串池

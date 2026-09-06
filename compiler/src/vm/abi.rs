@@ -106,9 +106,7 @@ impl JitValue {
                 // 实际场景：AOT 函数返回 List 时，VM 会重新包装
                 Value::Null
             }
-            TAG_MAP => {
-                Value::Null
-            }
+            TAG_MAP => Value::Null,
             TAG_STR => {
                 // 字符串指针：需要 VM 堆读取
                 // 实际场景：AOT 返回的字符串指针指向 VM 堆上的 C 字符串

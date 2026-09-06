@@ -351,10 +351,7 @@ impl AotRuntime {
     ) -> Result<u32, String> {
         // 1. 验证旧模块存在
         if !self.modules.contains_key(&old_module_id) {
-            return Err(format!(
-                "hot_reload: module {} not loaded",
-                old_module_id
-            ));
+            return Err(format!("hot_reload: module {} not loaded", old_module_id));
         }
 
         // 2. 卸载旧模块
@@ -369,10 +366,7 @@ impl AotRuntime {
 
     /// 列出所有已加载模块的 ID 和名称
     pub fn list_modules(&self) -> Vec<(u32, &str)> {
-        self.modules
-            .iter()
-            .map(|(&id, m)| (id, m.name.as_str()))
-            .collect()
+        self.modules.iter().map(|(&id, m)| (id, m.name.as_str())).collect()
     }
 
     // ── Phase 3.2: 模块沙箱（设计文档 §3.2）──
@@ -433,9 +427,7 @@ impl AotRuntime {
 
     /// 获取所有模块诊断信息
     pub fn all_diagnostics(&self) -> Vec<ModuleDiagnostics> {
-        self.modules.iter().map(|(&id, _)| {
-            self.module_diagnostics(id).unwrap()
-        }).collect()
+        self.modules.iter().map(|(&id, _)| self.module_diagnostics(id).unwrap()).collect()
     }
 }
 
@@ -443,15 +435,8 @@ impl AotRuntime {
 
 impl AotRuntime {
     /// 注册模块依赖关系
-    pub fn register_module_dependency(
-        &mut self,
-        module_id: u32,
-        dependency: ModuleDependency,
-    ) {
-        self.module_dependencies
-            .entry(module_id)
-            .or_default()
-            .push(dependency);
+    pub fn register_module_dependency(&mut self, module_id: u32, dependency: ModuleDependency) {
+        self.module_dependencies.entry(module_id).or_default().push(dependency);
     }
 
     /// 解析所有模块依赖
@@ -471,10 +456,13 @@ impl AotRuntime {
         for mod_id in module_ids {
             if let Some(deps) = self.module_dependencies.get_mut(&mod_id) {
                 for dep in deps.iter_mut() {
-                    if dep.resolved_module_id.is_some() { continue; }
-                    let dep_module_id = self.modules.iter().find_map(|(&id, m)| {
-                        if m.name == dep.name { Some(id) } else { None }
-                    });
+                    if dep.resolved_module_id.is_some() {
+                        continue;
+                    }
+                    let dep_module_id = self
+                        .modules
+                        .iter()
+                        .find_map(|(&id, m)| if m.name == dep.name { Some(id) } else { None });
                     if let Some(dep_id) = dep_module_id {
                         dep.resolved_module_id = Some(dep_id);
                         for func_name in &dep.imports {
@@ -488,7 +476,9 @@ impl AotRuntime {
                                     },
                                 );
                                 resolved += 1;
-                            } else { unresolved += 1; }
+                            } else {
+                                unresolved += 1;
+                            }
                         }
                     } else {
                         unresolved += dep.imports.len();
@@ -577,7 +567,8 @@ impl PluginManager {
     fn load_plugin_from_path(&self, path: &str) -> Result<PluginInfo, String> {
         // 尝试读取 .auc 文件获取插件元信息
         if path.ends_with(".auc") {
-            let bytes = std::fs::read(path).map_err(|e| format!("读取插件 {} 失败: {}", path, e))?;
+            let bytes =
+                std::fs::read(path).map_err(|e| format!("读取插件 {} 失败: {}", path, e))?;
             let module = crate::codegen::serialize::from_bytes(&bytes)
                 .map_err(|e| format!("解析插件 {} 失败: {}", path, e))?;
 
@@ -613,7 +604,8 @@ impl PluginManager {
         let plugin_idx = self.plugins.iter().position(|p| p.name == plugin_name);
         if let Some(idx) = plugin_idx {
             // 遍历运行时模块找到匹配的模块 ID
-            let module_ids: Vec<u32> = self.runtime.all_diagnostics().iter().map(|d| d.module_id).collect();
+            let module_ids: Vec<u32> =
+                self.runtime.all_diagnostics().iter().map(|d| d.module_id).collect();
             for id in module_ids {
                 if let Some(diag) = self.runtime.module_diagnostics(id) {
                     if diag.name == plugin_name {

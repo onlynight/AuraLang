@@ -149,18 +149,19 @@ fn execute_compile_aot(
 
     // AOT 编译：生成原生可执行文件
     let entry_file = files.iter().find(|f| f.is_file()).unwrap_or(&files[0]);
-    let exe_name = if cfg!(windows) {
-        format!("{}.exe", task.name)
-    } else {
-        task.name.clone()
-    };
+    let exe_name = if cfg!(windows) { format!("{}.exe", task.name) } else { task.name.clone() };
     let exe_path = out.join(&exe_name);
 
     // 占位符：实际编译需要调用 aura build --aot
     std::fs::write(&exe_path, b"AURA-AOT-EXE")?;
 
     Ok((
-        format!("✓ AOT 编译 {} 源码集: {} → {}", source_set, entry_file.display(), exe_path.display()),
+        format!(
+            "✓ AOT 编译 {} 源码集: {} → {}",
+            source_set,
+            entry_file.display(),
+            exe_path.display()
+        ),
         vec![exe_path],
     ))
 }
@@ -172,7 +173,7 @@ fn execute_compile_bytecode(
     config: &ResolvedBuildConfig,
 ) -> Result<(String, Vec<PathBuf>), LoomError> {
     use compiler::codegen::{compile_source, write_auc};
-    
+
     let dir = project_dir(task, config);
     let out_dir = output_dir(config);
     let out = out_dir.join(format!("compile-{}", source_set));
@@ -191,10 +192,10 @@ fn execute_compile_bytecode(
                 let file_name = file.file_name().and_then(|n| n.to_str()).unwrap_or("module");
                 let module_name = file_name.trim_end_matches(".aura");
                 let out_file = out.join(format!("{}.auc", module_name));
-                
+
                 // 读取源码
                 let source = std::fs::read_to_string(file)?;
-                
+
                 // 编译为字节码
                 match compile_source(&source) {
                     Ok(module) => {
@@ -218,7 +219,7 @@ fn execute_compile_bytecode(
                 }
             }
         }
-        
+
         return Ok((
             format!(
                 "✓ 字节码编译 {} 源码集: {} 个文件 → {}",
@@ -241,10 +242,10 @@ fn execute_compile_bytecode(
                 let file_name = file.file_name().and_then(|n| n.to_str()).unwrap_or("module");
                 let module_name = file_name.trim_end_matches(".aura");
                 let out_file = out.join(format!("{}.auc", module_name));
-                
+
                 // 读取源码
                 let source = std::fs::read_to_string(file)?;
-                
+
                 // 编译为字节码
                 match compile_source(&source) {
                     Ok(module) => {
@@ -267,7 +268,7 @@ fn execute_compile_bytecode(
                     }
                 }
             }
-            
+
             return Ok((
                 format!(
                     "✓ 字节码编译 {} 源码集: {} 个文件 → {}",
@@ -279,7 +280,7 @@ fn execute_compile_bytecode(
             ));
         }
     }
-    
+
     Ok((
         format!("✓ 字节码编译 {} 源码集: 无源文件", source_set),
         Vec::new(),
@@ -337,10 +338,10 @@ pub fn execute_package(
     task: &TaskDefinition,
     config: &ResolvedBuildConfig,
 ) -> Result<(String, Vec<PathBuf>), LoomError> {
-    use compiler::auz::{PackageBuilder, PackageBuildOptions};
+    use compiler::auz::{PackageBuildOptions, PackageBuilder};
     use compiler::codegen::read_auc;
     use compiler::package::PackageManifest;
-    
+
     let dir = project_dir(task, config);
     let out_dir = output_dir(config);
 
@@ -362,11 +363,10 @@ pub fn execute_package(
             manifest_path.display()
         )));
     }
-    
+
     let manifest_content = std::fs::read_to_string(&manifest_path)?;
-    let manifest: crate::manifest::LoomManifest =
-        toml::from_str(&manifest_content)
-            .map_err(|e| LoomError::Config(format!("解析 aura.toml 失败: {}", e)))?;
+    let manifest: crate::manifest::LoomManifest = toml::from_str(&manifest_content)
+        .map_err(|e| LoomError::Config(format!("解析 aura.toml 失败: {}", e)))?;
 
     // 构建 PackageManifest（使用 compiler::package::PackageManifest）
     let pkg_manifest = PackageManifest {
@@ -402,7 +402,7 @@ pub fn execute_package(
     // 查找主入口的 .auc 文件
     let entry_base = manifest.entry.trim_end_matches(".aura");
     let auc_path = compile_dir.join(format!("{}.auc", entry_base));
-    
+
     let auc_path = if auc_path.exists() {
         auc_path
     } else {
@@ -414,14 +414,14 @@ pub fn execute_package(
                 auc_files.push(entry.path());
             }
         }
-        
+
         if auc_files.is_empty() {
             return Err(LoomError::Config(format!(
                 "未找到 .auc 字节码文件: {}",
                 compile_dir.display()
             )));
         }
-        
+
         auc_files[0].clone()
     };
 
@@ -443,12 +443,11 @@ pub fn execute_package(
     };
 
     let src_dir = dir.join("src");
-    let builder = PackageBuilder::new(&pkg_manifest, &module)
-        .with_source_dir(&src_dir)
-        .with_options(options);
+    let builder =
+        PackageBuilder::new(&pkg_manifest, &module).with_source_dir(&src_dir).with_options(options);
 
-    let result = builder.build(&package_path)
-        .map_err(|e| LoomError::Config(format!("打包失败: {}", e)))?;
+    let result =
+        builder.build(&package_path).map_err(|e| LoomError::Config(format!("打包失败: {}", e)))?;
 
     Ok((
         format!("✓ 打包完成: {}", result.path.display()),

@@ -408,7 +408,10 @@ pub fn emit_program(
             if let Ok(wrapper_ir) = emit_wrapper(&mut ctx, func) {
                 ctx.sections.push(wrapper_ir);
             } else {
-                eprintln!("warning: AOT wrapper generation failed for function '{}'", func.name);
+                eprintln!(
+                    "warning: AOT wrapper generation failed for function '{}'",
+                    func.name
+                );
             }
         }
     }

@@ -1,4 +1,4 @@
-﻿//! AOT 编译后端（LLVM）
+//! AOT 编译后端（LLVM）
 //!
 //! 对应 `技术方案.md` 第九章。核心思路：
 //!
@@ -298,9 +298,10 @@ pub fn aot_compile(
                 OutputFormat::Object
             } else if output_path.extension().map(|e| e == "blob").unwrap_or(false) {
                 OutputFormat::Blob
-            } else if output_path.extension().map(|e| {
-                e == "so" || e == "dylib" || e == "dll"
-            }).unwrap_or(false)
+            } else if output_path
+                .extension()
+                .map(|e| e == "so" || e == "dylib" || e == "dll")
+                .unwrap_or(false)
             {
                 OutputFormat::SharedLibrary
             } else if output_path.extension().map(|e| e == "rust_host").unwrap_or(false) {
