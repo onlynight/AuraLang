@@ -10,7 +10,7 @@ resolver = "2"
 version = "0.1.0"
 edition = "2024"
 authors = ["Aura Team"]
-license = "MIT"
+license = "Apache-2.0"
 
 # ── Aura 编译器外部工具链配置 ──
 # 所有外部工具路径集中在此配置，编译器运行时自动读取。

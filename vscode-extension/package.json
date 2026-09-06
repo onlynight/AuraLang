@@ -4,7 +4,7 @@
   "description": "Aura 语言支持 — NovaOS 的下一代系统级脚本语言 (LSP + 语法高亮 + 智能补全)",
   "version": "0.1.5",
   "publisher": "aura-lang",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "homepage": "https://github.com/aura-lang/auralang",
   "repository": {
     "type": "git",
