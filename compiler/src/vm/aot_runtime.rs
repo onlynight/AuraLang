@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::os::raw::c_void;
 use std::path::Path;
 
-use crate::codegen::opcode::{AuraFuncDesc, AucSegment, SEG_DESC_TABLE, SEG_MACHINE};
+use crate::codegen::opcode::{AucSegment, AuraFuncDesc, SEG_DESC_TABLE, SEG_MACHINE};
 use crate::vm::abi::{AotCallContext, AotEntry, JitValue};
 use crate::vm::mmap_util::{MappedRegion, MemoryProtection};
 
@@ -63,10 +63,8 @@ impl AotModule {
             ));
         }
 
-        let mut region = MappedRegion::map_anonymous(
-            machine.size as usize,
-            MemoryProtection::read_write(),
-        )?;
+        let mut region =
+            MappedRegion::map_anonymous(machine.size as usize, MemoryProtection::read_write())?;
         let slice = region.as_mut_slice();
         let bytes = &data[machine.offset as usize..][..machine.size as usize];
         slice[..bytes.len()].copy_from_slice(bytes);
@@ -77,8 +75,7 @@ impl AotModule {
 
         let desc_bytes = &data[desc_seg.offset as usize..][..desc_seg.size as usize];
         let descs = Self::parse_segments(desc_bytes)?;
-        let dispatch_table =
-            Self::rebuild_dispatch_table(base, &descs, func_desc_idx);
+        let dispatch_table = Self::rebuild_dispatch_table(base, &descs, func_desc_idx);
 
         Ok(AotModule {
             module_id,
@@ -122,7 +119,7 @@ impl AotModule {
                 continue;
             }
             let off = descs[(di as usize) - 1].entry_offset as usize;
-            if off > 0 && off% 16 == 0 {
+            if off > 0 && off % 16 == 0 {
                 let addr = base + off;
                 let ptr: *const c_void = addr as *const c_void;
                 table[func_idx] =
@@ -229,11 +226,7 @@ impl AotRuntime {
             ..AotCallContext::new()
         };
         let ctx_ptr: *const () = &ctx as *const AotCallContext as *const ();
-        let args_ptr = if args.is_empty() {
-            std::ptr::null()
-        } else {
-            args.as_ptr()
-        };
+        let args_ptr = if args.is_empty() { std::ptr::null() } else { args.as_ptr() };
         entry(args_ptr, &mut ret, args.len(), ctx_ptr);
         Ok(ret)
     }
@@ -277,7 +270,10 @@ impl AotRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codegen::opcode::{AucSegment, AuraFuncDesc, FUNC_EXPORT, SEG_DESC_TABLE, SEG_MACHINE, SEG_PROT_EXEC, SEG_PROT_READ};
+    use crate::codegen::opcode::{
+        AucSegment, AuraFuncDesc, FUNC_EXPORT, SEG_DESC_TABLE, SEG_MACHINE, SEG_PROT_EXEC,
+        SEG_PROT_READ,
+    };
 
     fn expect_err(res: Result<AotModule, String>) -> String {
         match res {
@@ -287,7 +283,10 @@ mod tests {
     }
 
     /// Build a segment data region (machine segment first, then descriptor table)
-    fn make_segment_data(machine_size: usize, descs: &[AuraFuncDesc]) -> (Vec<u8>, Vec<AucSegment>) {
+    fn make_segment_data(
+        machine_size: usize,
+        descs: &[AuraFuncDesc],
+    ) -> (Vec<u8>, Vec<AucSegment>) {
         let mut data = Vec::new();
         data.resize(machine_size, 0x90);
         let machine = AucSegment {
@@ -298,7 +297,12 @@ mod tests {
         };
         let mut desc_bytes = Vec::new();
         for d in descs {
-            let slice = unsafe { std::slice::from_raw_parts(d as *const AuraFuncDesc as *const u8, AuraFuncDesc::SIZE) };
+            let slice = unsafe {
+                std::slice::from_raw_parts(
+                    d as *const AuraFuncDesc as *const u8,
+                    AuraFuncDesc::SIZE,
+                )
+            };
             desc_bytes.extend_from_slice(slice);
         }
         let desc_seg = AucSegment {
@@ -308,7 +312,12 @@ mod tests {
             flags: SEG_PROT_READ,
         };
         data.extend_from_slice(&desc_bytes);
-        (data, vec![machine, desc_seg])
+        (
+            data,
+            vec![
+                machine, desc_seg,
+            ],
+        )
     }
 
     #[test]
@@ -325,19 +334,41 @@ mod tests {
     #[test]
     fn test_load_builds_dispatch_table() {
         let descs = vec![
-            AuraFuncDesc { entry_offset: 0x100, num_args: 1, flags: FUNC_EXPORT, ..AuraFuncDesc::default() },
-            AuraFuncDesc { entry_offset: 0x200, num_args: 2, flags: FUNC_EXPORT, ..AuraFuncDesc::default() },
-            AuraFuncDesc { entry_offset: 4, ..AuraFuncDesc::default() },
+            AuraFuncDesc {
+                entry_offset: 0x100,
+                num_args: 1,
+                flags: FUNC_EXPORT,
+                ..AuraFuncDesc::default()
+            },
+            AuraFuncDesc {
+                entry_offset: 0x200,
+                num_args: 2,
+                flags: FUNC_EXPORT,
+                ..AuraFuncDesc::default()
+            },
+            AuraFuncDesc {
+                entry_offset: 4,
+                ..AuraFuncDesc::default()
+            },
         ];
         let (data, segs) = make_segment_data(512, &descs);
-        let func_desc_idx = vec![1u32, 2, 0, 3];
-        let mut m = AotModule::load(&data, &segs, &func_desc_idx, 7, "unit-test".to_string()).unwrap();
+        let func_desc_idx = vec![
+            1u32, 2, 0, 3,
+        ];
+        let mut m =
+            AotModule::load(&data, &segs, &func_desc_idx, 7, "unit-test".to_string()).unwrap();
         assert!(m.is_loaded());
         assert_eq!(m.func_descriptors.len(), 3);
         assert!(m.find_entry(0).is_some(), "func 0 -> desc #1");
         assert!(m.find_entry(1).is_some(), "func 1 -> desc #2");
-        assert!(m.find_entry(2).is_none(), "func 2 -> desc idx 0 means no AOT");
-        assert!(m.find_entry(3).is_none(), "entry_offset=4 is not 16-byte aligned");
+        assert!(
+            m.find_entry(2).is_none(),
+            "func 2 -> desc idx 0 means no AOT"
+        );
+        assert!(
+            m.find_entry(3).is_none(),
+            "entry_offset=4 is not 16-byte aligned"
+        );
         assert!(m.find_entry(4).is_none(), "index out of range");
         assert!(m.code_base() != 0);
         m.unload();
@@ -348,7 +379,14 @@ mod tests {
 
     #[test]
     fn test_load_rejects_missing_desc_segment() {
-        let segs = vec![AucSegment { id: SEG_MACHINE, offset: 0, size: 256, flags: SEG_PROT_READ | SEG_PROT_EXEC }];
+        let segs = vec![
+            AucSegment {
+                id: SEG_MACHINE,
+                offset: 0,
+                size: 256,
+                flags: SEG_PROT_READ | SEG_PROT_EXEC,
+            },
+        ];
         let data = vec![0u8; 256];
         let err = expect_err(AotModule::load(&data, &segs, &[], 1, "x".to_string()));
         assert!(err.contains("DESC_TABLE"));
@@ -358,8 +396,18 @@ mod tests {
     fn test_load_rejects_empty_machine_size() {
         // 机器码段大小为 0 必须报错
         let segs = vec![
-            AucSegment { id: SEG_MACHINE, offset: 0, size: 0, flags: SEG_PROT_READ | SEG_PROT_EXEC },
-            AucSegment { id: SEG_DESC_TABLE, offset: 0, size: 0, flags: SEG_PROT_READ },
+            AucSegment {
+                id: SEG_MACHINE,
+                offset: 0,
+                size: 0,
+                flags: SEG_PROT_READ | SEG_PROT_EXEC,
+            },
+            AucSegment {
+                id: SEG_DESC_TABLE,
+                offset: 0,
+                size: 0,
+                flags: SEG_PROT_READ,
+            },
         ];
         let err = expect_err(AotModule::load(&[], &segs, &[], 1, "x".to_string()));
         assert!(err.contains("empty"));
@@ -367,7 +415,12 @@ mod tests {
 
     #[test]
     fn test_load_rejects_segment_out_of_range() {
-        let descs = vec![AuraFuncDesc { entry_offset: 0x100, ..AuraFuncDesc::default() }];
+        let descs = vec![
+            AuraFuncDesc {
+                entry_offset: 0x100,
+                ..AuraFuncDesc::default()
+            },
+        ];
         let (data, mut segs) = make_segment_data(256, &descs);
         segs[0].offset = 100;
         let err = expect_err(AotModule::load(&data, &segs, &[1u32], 1, "x".to_string()));
@@ -376,7 +429,12 @@ mod tests {
 
     #[test]
     fn test_runtime_load_unload() {
-        let descs = vec![AuraFuncDesc { entry_offset: 0x100, ..AuraFuncDesc::default() }];
+        let descs = vec![
+            AuraFuncDesc {
+                entry_offset: 0x100,
+                ..AuraFuncDesc::default()
+            },
+        ];
         let (data, segs) = make_segment_data(256, &descs);
         let mut rt = AotRuntime::new();
         assert_eq!(rt.module_count(), 0);

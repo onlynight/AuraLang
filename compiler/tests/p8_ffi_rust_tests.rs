@@ -154,10 +154,8 @@ fn test_extern_rust_constants_in_bytecode() {
         }
     "#;
     let module = compile_source(src).expect("编译应成功");
-    let has_int_42 = module
-        .consts
-        .iter()
-        .any(|c| matches!(c, compiler::codegen::opcode::Const::Int(42)));
+    let has_int_42 =
+        module.consts.iter().any(|c| matches!(c, compiler::codegen::opcode::Const::Int(42)));
     let has_float_314 = module.consts.iter().any(
         |c| matches!(c, compiler::codegen::opcode::Const::Float(f) if (*f - 3.14).abs() < 0.001),
     );
@@ -222,7 +220,11 @@ fn test_hir_ffi_abi_rust() {
     let add_fn = hir.natives.iter().find(|f| f.name == "add").expect("应找到 add");
     assert!(add_fn.is_native, "add 应为原生函数");
     assert_eq!(add_fn.ffi_abi, FfiAbi::Rust, "ffi_abi 应为 Rust");
-    assert_eq!(add_fn.ffi_lib, Some("mylib".to_string()), "ffi_lib 应为 Some(\"mylib\")");
+    assert_eq!(
+        add_fn.ffi_lib,
+        Some("mylib".to_string()),
+        "ffi_lib 应为 Some(\"mylib\")"
+    );
 }
 
 /// extern "c" 块 → HIR 中 ffi_abi = C
@@ -238,7 +240,11 @@ fn test_hir_ffi_abi_c() {
     let add_fn = hir.natives.iter().find(|f| f.name == "add").expect("应找到 add");
     assert!(add_fn.is_native);
     assert_eq!(add_fn.ffi_abi, FfiAbi::C, "ffi_abi 应为 C");
-    assert_eq!(add_fn.ffi_lib, Some("mylib".to_string()), "ffi_lib 应为 Some(\"mylib\")");
+    assert_eq!(
+        add_fn.ffi_lib,
+        Some("mylib".to_string()),
+        "ffi_lib 应为 Some(\"mylib\")"
+    );
 }
 
 /// extern "rust" 无库名 → ffi_lib = None
@@ -281,7 +287,11 @@ fn test_hir_ffi_abi_none_for_builtin() {
     let hir = parse_to_hir(src);
     let println_fn = hir.natives.iter().find(|f| f.name == "println").expect("应找到 println");
     assert!(println_fn.is_native);
-    assert_eq!(println_fn.ffi_abi, FfiAbi::None, "内置函数 ffi_abi 应为 None");
+    assert_eq!(
+        println_fn.ffi_abi,
+        FfiAbi::None,
+        "内置函数 ffi_abi 应为 None"
+    );
     assert_eq!(println_fn.ffi_lib, None);
 }
 
@@ -296,7 +306,11 @@ fn test_hir_ffi_abi_rust_uppercase() {
     "#;
     let hir = parse_to_hir(src);
     let foo_fn = hir.natives.iter().find(|f| f.name == "foo").expect("应找到 foo");
-    assert_eq!(foo_fn.ffi_abi, FfiAbi::Rust, "\"Rust\" 大小写应映射为 FfiAbi::Rust");
+    assert_eq!(
+        foo_fn.ffi_abi,
+        FfiAbi::Rust,
+        "\"Rust\" 大小写应映射为 FfiAbi::Rust"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -323,12 +337,12 @@ fn test_serialization_roundtrip_ffi_abi() {
     let loaded = from_bytes(&bytes).expect("反序列化应成功");
 
     // 验证 FFI ABI 信息保留
-    let add_native = loaded
-        .natives
-        .iter()
-        .find(|n| n.name == "add")
-        .expect("应找到 add 原生函数");
-    assert_eq!(add_native.ffi_abi, FfiAbi::Rust, "序列化后 ffi_abi 应保留为 Rust");
+    let add_native = loaded.natives.iter().find(|n| n.name == "add").expect("应找到 add 原生函数");
+    assert_eq!(
+        add_native.ffi_abi,
+        FfiAbi::Rust,
+        "序列化后 ffi_abi 应保留为 Rust"
+    );
     assert_eq!(
         add_native.ffi_lib,
         Some("mylib".to_string()),
@@ -352,11 +366,7 @@ fn test_serialization_roundtrip_ffi_abi_c() {
     let bytes = to_bytes(&module);
     let loaded = from_bytes(&bytes).expect("反序列化应成功");
 
-    let add_native = loaded
-        .natives
-        .iter()
-        .find(|n| n.name == "add")
-        .expect("应找到 add 原生函数");
+    let add_native = loaded.natives.iter().find(|n| n.name == "add").expect("应找到 add 原生函数");
     assert_eq!(add_native.ffi_abi, FfiAbi::C, "序列化后 ffi_abi 应保留为 C");
 }
 
@@ -380,13 +390,9 @@ fn test_sema_warning_for_extern_rust() {
         .iter()
         .filter(|e| e.severity == compiler::errors::ErrorSeverity::Warning)
         .collect();
-    assert!(
-        !warnings.is_empty(),
-        "extern \"rust\" 块应产生 sema 警告"
-    );
-    let has_ffi_warning = warnings.iter().any(|w| {
-        w.message.contains("#[no_mangle]") && w.message.contains("extern")
-    });
+    assert!(!warnings.is_empty(), "extern \"rust\" 块应产生 sema 警告");
+    let has_ffi_warning =
+        warnings.iter().any(|w| w.message.contains("#[no_mangle]") && w.message.contains("extern"));
     assert!(
         has_ffi_warning,
         "警告应包含 #[no_mangle] extern 提示，实际警告: {:?}",
@@ -412,10 +418,7 @@ fn test_no_sema_warning_for_extern_c() {
                 && e.message.contains("#[no_mangle]")
         })
         .collect();
-    assert!(
-        ffi_warnings.is_empty(),
-        "extern \"c\" 块不应产生 FFI 警告"
-    );
+    assert!(ffi_warnings.is_empty(), "extern \"c\" 块不应产生 FFI 警告");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -426,7 +429,7 @@ fn test_no_sema_warning_for_extern_c() {
 #[cfg(feature = "llvm")]
 #[test]
 fn test_aot_llvm_ir_for_extern_rust() {
-    use compiler::codegen::aot::{aot_compile, AotOptions};
+    use compiler::codegen::aot::{AotOptions, aot_compile};
     use std::path::PathBuf;
 
     let src = r#"
@@ -446,18 +449,9 @@ fn test_aot_llvm_ir_for_extern_rust() {
         Ok(output) => {
             // 验证 LLVM IR 文本包含正确的声明
             let ir = &output.ir_text;
-            assert!(
-                ir.contains("declare"),
-                "LLVM IR 应包含 declare 声明"
-            );
-            assert!(
-                ir.contains("add"),
-                "LLVM IR 应包含 add 函数"
-            );
-            assert!(
-                ir.contains("P8-Rust"),
-                "LLVM IR 应包含 P8-Rust 注释"
-            );
+            assert!(ir.contains("declare"), "LLVM IR 应包含 declare 声明");
+            assert!(ir.contains("add"), "LLVM IR 应包含 add 函数");
+            assert!(ir.contains("P8-Rust"), "LLVM IR 应包含 P8-Rust 注释");
             // 清理临时文件
             let _ = std::fs::remove_file(&output_path);
         }
@@ -471,7 +465,7 @@ fn test_aot_llvm_ir_for_extern_rust() {
 #[cfg(feature = "llvm")]
 #[test]
 fn test_aot_llvm_ir_for_extern_c() {
-    use compiler::codegen::aot::{aot_compile, AotOptions};
+    use compiler::codegen::aot::{AotOptions, aot_compile};
 
     let src = r#"
         extern "c" "mylib" {

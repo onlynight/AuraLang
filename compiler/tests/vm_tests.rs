@@ -1,10 +1,12 @@
-﻿//! Aura VM 集成与单元测试
+//! Aura VM 集成与单元测试
 //!
 //! 覆盖 技术方案 §7.1 的字节码执行：算术 / 控制流 / 函数调用与递归 / 原生调度 /
 //! 对象模型（NewObject / SetField / GetField）/ 数组。
 
 use compiler::codegen::compile_source;
-use compiler::codegen::opcode::{BytecodeFunction, BytecodeModule, BytecodeNative, Const, FfiAbi, OpCode};
+use compiler::codegen::opcode::{
+    BytecodeFunction, BytecodeModule, BytecodeNative, Const, FfiAbi, OpCode,
+};
 use compiler::vm::{Value, Vm, VmOptions};
 
 /// 编译源码并返回 `main` 的执行结果（要求 main 返回一个可断言的值）

@@ -214,7 +214,7 @@ impl CType {
             (CType::Char, crate::vm::Value::Int(c)) => *c,
             // P9: 指针类型 — 支持 Ptr 和 Int（handle 作为 Long 存储）
             (CType::CString | CType::Ptr, crate::vm::Value::Ptr(p)) => *p,
-            (CType::CString | CType::Ptr, crate::vm::Value::Int(i)) => *i,  // handle 作为 Int 传递
+            (CType::CString | CType::Ptr, crate::vm::Value::Int(i)) => *i, // handle 作为 Int 传递
             (CType::CString, crate::vm::Value::Str(s)) => s.as_ptr() as i64,
             _ => 0,
         }
@@ -244,7 +244,7 @@ impl CType {
                     }
                 }
             }
-            CType::Ptr => crate::vm::Value::Int(result),  // P9: 指针作为 Long 返回
+            CType::Ptr => crate::vm::Value::Int(result), // P9: 指针作为 Long 返回
             CType::Void => crate::vm::Value::Null,
         }
     }

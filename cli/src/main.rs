@@ -170,11 +170,7 @@ fn cmd_build(args: &[String]) {
     // Phase 1 AOT: --aot-embed → 编译为 .auc v4 并嵌入 AOT 机器码
     let embed = args.iter().any(|a| a == "--aot-embed");
     #[cfg(feature = "llvm")]
-    let module = if embed {
-        embed_into_auc(&source, module)
-    } else {
-        module
-    };
+    let module = if embed { embed_into_auc(&source, module) } else { module };
     #[cfg(not(feature = "llvm"))]
     let module = {
         if embed {

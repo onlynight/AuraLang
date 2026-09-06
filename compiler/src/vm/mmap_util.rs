@@ -18,19 +18,35 @@ pub struct MemoryProtection {
 
 impl MemoryProtection {
     pub fn read_only() -> Self {
-        Self { read: true, write: false, exec: false }
+        Self {
+            read: true,
+            write: false,
+            exec: false,
+        }
     }
 
     pub fn read_write() -> Self {
-        Self { read: true, write: true, exec: false }
+        Self {
+            read: true,
+            write: true,
+            exec: false,
+        }
     }
 
     pub fn read_exec() -> Self {
-        Self { read: true, write: false, exec: true }
+        Self {
+            read: true,
+            write: false,
+            exec: true,
+        }
     }
 
     pub fn read_write_exec() -> Self {
-        Self { read: true, write: true, exec: true }
+        Self {
+            read: true,
+            write: true,
+            exec: true,
+        }
     }
 }
 
@@ -142,7 +158,10 @@ impl MappedRegion {
 
         let ret = libc::mprotect(self.base as *mut c_void, self.size, prot_flags);
         if ret != 0 {
-            Err(format!("mprotect failed: {}", std::io::Error::last_os_error()))
+            Err(format!(
+                "mprotect failed: {}",
+                std::io::Error::last_os_error()
+            ))
         } else {
             Ok(())
         }
@@ -165,11 +184,7 @@ unsafe extern "system" {
         fl_protection: u32,
     ) -> *mut libc::c_void;
 
-    fn VirtualFree(
-        lp_address: *mut libc::c_void,
-        dw_size: usize,
-        dw_free_type: u32,
-    ) -> bool;
+    fn VirtualFree(lp_address: *mut libc::c_void, dw_size: usize, dw_free_type: u32) -> bool;
 
     fn VirtualProtect(
         lp_address: *mut libc::c_void,
@@ -225,11 +240,7 @@ impl MappedRegion {
             Self::alloc_protection(prot),
             &mut old_prot,
         );
-        if ok {
-            Ok(())
-        } else {
-            Err("VirtualProtect failed".to_string())
-        }
+        if ok { Ok(()) } else { Err("VirtualProtect failed".to_string()) }
     }
 }
 
@@ -266,13 +277,11 @@ mod tests {
             .expect("mmap should succeed");
         // 改为只读
         unsafe {
-            region.protect(MemoryProtection::read_only())
-                .expect("protect should succeed");
+            region.protect(MemoryProtection::read_only()).expect("protect should succeed");
         }
         // 改回可写
         unsafe {
-            region.protect(MemoryProtection::read_write())
-                .expect("protect should succeed");
+            region.protect(MemoryProtection::read_write()).expect("protect should succeed");
         }
         region.as_mut_slice()[0] = 0xFF;
     }

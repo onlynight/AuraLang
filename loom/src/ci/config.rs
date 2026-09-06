@@ -708,11 +708,7 @@ mod tests {
         ));
         if example_path.exists() {
             let config = CiConfig::from_file(example_path).unwrap_or_else(|e| {
-                panic!(
-                    "示例 YAML 解析失败 ({}): {}",
-                    example_path.display(),
-                    e
-                )
+                panic!("示例 YAML 解析失败 ({}): {}", example_path.display(), e)
             });
             assert_eq!(config.default_branch, "main");
             assert!(!config.steps.is_empty());

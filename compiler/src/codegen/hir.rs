@@ -676,8 +676,8 @@ pub fn desugar_program(program: &Program) -> HirProgram {
                 },
                 is_native: true,
                 type_params: vec![],
-            ffi_abi: FfiAbi::None,
-            ffi_lib: None,
+                ffi_abi: FfiAbi::None,
+                ffi_lib: None,
             });
         }
     }
@@ -718,8 +718,8 @@ pub fn desugar_program(program: &Program) -> HirProgram {
                 },
                 is_native: true,
                 type_params: vec![],
-            ffi_abi: FfiAbi::None,
-            ffi_lib: None,
+                ffi_abi: FfiAbi::None,
+                ffi_lib: None,
             });
         }
     }
@@ -746,8 +746,8 @@ pub fn desugar_program(program: &Program) -> HirProgram {
                 },
                 is_native: true,
                 type_params: vec![],
-            ffi_abi: FfiAbi::None,
-            ffi_lib: None,
+                ffi_abi: FfiAbi::None,
+                ffi_lib: None,
             });
         }
     }
@@ -1039,8 +1039,8 @@ pub fn desugar_program(program: &Program) -> HirProgram {
                 },
                 is_native: true,
                 type_params: vec![],
-            ffi_abi: FfiAbi::None,
-            ffi_lib: None,
+                ffi_abi: FfiAbi::None,
+                ffi_lib: None,
             });
         }
     }
@@ -1377,9 +1377,7 @@ fn desugar_for(pattern: &Expr, iterable: &Expr, body: &Expr) -> HirStmt {
 fn lookup_import_short(n: &str) -> Option<String> {
     IMPORT_RESOLUTION.with(|r| {
         r.borrow().as_ref().and_then(|ir| {
-            ir.resolve_short_name(n)
-                .or_else(|| ir.resolve_alias(n))
-                .map(|s| s.to_string())
+            ir.resolve_short_name(n).or_else(|| ir.resolve_alias(n)).map(|s| s.to_string())
         })
     })
 }
@@ -1741,8 +1739,8 @@ pub fn synthesize_main_if_missing(hir: &mut HirProgram) -> bool {
                 body: block,
                 is_native: false,
                 type_params: vec![],
-            ffi_abi: FfiAbi::None,
-            ffi_lib: None,
+                ffi_abi: FfiAbi::None,
+                ffi_lib: None,
             };
 
             // 4. 插入到 functions 开头（确保 entry=0 指向 main）

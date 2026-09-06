@@ -1,4 +1,4 @@
-﻿//! 字节码指令集与模块结构（对应 技术方案 §7.1）
+//! 字节码指令集与模块结构（对应 技术方案 §7.1）
 //!
 //! 字节码采用 **栈 + 局部变量槽** 模型：
 //! - `LoadConst` / `LoadVar` 将值压入操作数栈
@@ -283,8 +283,8 @@ impl OpCode {
     pub fn operand_size(byte: u8) -> usize {
         match byte {
             0 | 1 | 2 | 30 | 32 | 33 | 72 | 74 | 76 | 77 => 2, // u16 操作数
-            23 | 24 | 25 => 4,                            // i32 偏移
-            26 | 27 | 36 => 2,                            // u16 函数/原生索引
+            23 | 24 | 25 => 4,                                 // i32 偏移
+            26 | 27 | 36 => 2,                                 // u16 函数/原生索引
             40 | 41 | 51 => 2, // CallMethod/CallCtor/NewCoroutine u16 索引
             66 => 2,           // MakeCallback u16 函数索引
             70 => 2,           // CallExport u16 sym_idx
@@ -501,9 +501,9 @@ impl fmt::Display for OpCode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FfiAbi {
     #[default]
-    None,   // 非 FFI 函数
-    C,      // C ABI
-    Rust,   // Rust 库（语法标记，调用约定同 C）
+    None, // 非 FFI 函数
+    C,    // C ABI
+    Rust, // Rust 库（语法标记，调用约定同 C）
 }
 
 /// 原生（内置/FFI）函数签名记录
@@ -785,11 +785,7 @@ impl BytecodeModule {
         }
         if !self.aot_segments.is_empty() {
             flags |= HEADER_HAS_MACHINE_CODE; // Phase 1 AOT: 含机器码段
-            if self
-                .functions
-                .iter()
-                .any(|f| f.aot_desc_idx > 0)
-            {
+            if self.functions.iter().any(|f| f.aot_desc_idx > 0) {
                 flags |= HEADER_AOT_EXPORTS;
             }
         }
@@ -951,7 +947,12 @@ mod tests {
         assert_eq!(OpCode::from_byte(77), Some(OpCode::CallAot(0)));
         let mut buf = Vec::new();
         OpCode::CallAot(0x0102).write(&mut buf);
-        assert_eq!(buf, vec![77u8, 0x02, 0x01]);
+        assert_eq!(
+            buf,
+            vec![
+                77u8, 0x02, 0x01
+            ]
+        );
     }
 
     #[test]
@@ -1000,22 +1001,76 @@ mod tests {
     #[test]
     fn test_segment_ids_and_flags() {
         let segs = [
-            AucSegment { id: SEG_BYTECODE, offset: 0, size: 0, flags: SEG_PROT_READ },
-            AucSegment { id: SEG_MACHINE, offset: 0, size: 0, flags: SEG_PROT_READ | SEG_PROT_EXEC },
-            AucSegment { id: SEG_DESC_TABLE, offset: 0, size: 0, flags: SEG_PROT_READ },
-            AucSegment { id: SEG_DEBUG, offset: 0, size: 0, flags: SEG_PROT_READ },
-            AucSegment { id: SEG_STRING_POOL, offset: 0, size: 0, flags: SEG_PROT_READ },
-            AucSegment { id: SEG_SIGNATURE, offset: 0, size: 0, flags: SEG_PROT_READ },
+            AucSegment {
+                id: SEG_BYTECODE,
+                offset: 0,
+                size: 0,
+                flags: SEG_PROT_READ,
+            },
+            AucSegment {
+                id: SEG_MACHINE,
+                offset: 0,
+                size: 0,
+                flags: SEG_PROT_READ | SEG_PROT_EXEC,
+            },
+            AucSegment {
+                id: SEG_DESC_TABLE,
+                offset: 0,
+                size: 0,
+                flags: SEG_PROT_READ,
+            },
+            AucSegment {
+                id: SEG_DEBUG,
+                offset: 0,
+                size: 0,
+                flags: SEG_PROT_READ,
+            },
+            AucSegment {
+                id: SEG_STRING_POOL,
+                offset: 0,
+                size: 0,
+                flags: SEG_PROT_READ,
+            },
+            AucSegment {
+                id: SEG_SIGNATURE,
+                offset: 0,
+                size: 0,
+                flags: SEG_PROT_READ,
+            },
         ];
         let names: Vec<&str> = segs.iter().map(|s| s.id_name()).collect();
-        assert_eq!(names, vec!["bytecode", "machine", "desc_table", "debug", "string_pool", "signature"]);
+        assert_eq!(
+            names,
+            vec![
+                "bytecode",
+                "machine",
+                "desc_table",
+                "debug",
+                "string_pool",
+                "signature"
+            ]
+        );
         assert!(!segs[0].is_exec());
         assert!(segs[1].is_exec());
         assert!(segs[1].is_read());
         assert!(!segs[1].is_write());
-        let writable = AucSegment { id: 0, offset: 0, size: 0, flags: SEG_PROT_READ | SEG_PROT_WRITE };
+        let writable = AucSegment {
+            id: 0,
+            offset: 0,
+            size: 0,
+            flags: SEG_PROT_READ | SEG_PROT_WRITE,
+        };
         assert!(writable.is_write());
-        assert_eq!(AucSegment { id: 99, offset: 0, size: 0, flags: 0 }.id_name(), "unknown");
+        assert_eq!(
+            AucSegment {
+                id: 99,
+                offset: 0,
+                size: 0,
+                flags: 0
+            }
+            .id_name(),
+            "unknown"
+        );
     }
 
     #[test]
@@ -1023,17 +1078,23 @@ mod tests {
         let mut m = BytecodeModule::default();
         assert_eq!(m.compute_header_flags(), 0);
         assert!(!m.has_aot());
-        m.aot_segments = vec![AucSegment {
-            id: SEG_MACHINE,
-            offset: 0,
-            size: 256,
-            flags: SEG_PROT_READ | SEG_PROT_EXEC,
-        }];
+        m.aot_segments = vec![
+            AucSegment {
+                id: SEG_MACHINE,
+                offset: 0,
+                size: 256,
+                flags: SEG_PROT_READ | SEG_PROT_EXEC,
+            },
+        ];
         m.aot_blob_data = vec![0u8; 256];
         assert!(m.has_aot());
         let flags = m.compute_header_flags();
         assert_eq!(flags & HEADER_HAS_MACHINE_CODE, HEADER_HAS_MACHINE_CODE);
-        assert_eq!(flags & HEADER_AOT_EXPORTS, 0, "no function has aot_desc_idx yet");
+        assert_eq!(
+            flags & HEADER_AOT_EXPORTS,
+            0,
+            "no function has aot_desc_idx yet"
+        );
 
         let mut f = BytecodeFunction::default();
         f.name = "add".to_string();

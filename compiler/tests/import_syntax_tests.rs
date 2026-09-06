@@ -52,7 +52,13 @@ fn run(src: &str) -> Result<Value, String> {
 fn test_parser_wildcard_flag() {
     let cases = vec![
         // (label, import_line, expected_path, expected_wildcard, expected_alias)
-        ("wildcard", "import aura.concurrent.*", "aura.concurrent", true, None),
+        (
+            "wildcard",
+            "import aura.concurrent.*",
+            "aura.concurrent",
+            true,
+            None,
+        ),
         (
             "module",
             "import aura.concurrent",
@@ -106,14 +112,11 @@ fn test_parser_wildcard_flag() {
 
     for (label, imp, exp_path, exp_wildcard, exp_alias) in &cases {
         let src = format!("{}\nfun main(): Int {{ return 42 }}\n", imp);
-        let program = compile_only(&src).unwrap_or_else(|e| panic!("[{}] parse failed: {}", label, e));
+        let program =
+            compile_only(&src).unwrap_or_else(|e| panic!("[{}] parse failed: {}", label, e));
         let imp_decl = &program.imports[0];
 
-        assert_eq!(
-            imp_decl.path, *exp_path,
-            "[{}] path mismatch",
-            label
-        );
+        assert_eq!(imp_decl.path, *exp_path, "[{}] path mismatch", label);
         assert_eq!(
             imp_decl.wildcard, *exp_wildcard,
             "[{}] wildcard mismatch",

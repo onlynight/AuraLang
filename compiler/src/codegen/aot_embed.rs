@@ -1,4 +1,4 @@
-﻿//! AOT 机器码嵌入（Phase 1）
+//! AOT 机器码嵌入（Phase 1）
 //!
 //! 将 AOT 编译产物（`.text` 机器码 + 函数描述符）嵌入 [`BytecodeModule`]，
 //! 由 `.auc` v4 段表承载，供 [`AotRuntime`](crate::vm::aot_runtime::AotRuntime)
@@ -15,7 +15,7 @@ use super::aot::types::sanitizellvm;
 use super::aot::{AotCodeGenerator, AotError, AotOptions, OutputFormat};
 use super::hir::HirProgram;
 use super::opcode::{
-    AuraFuncDesc, AucSegment, BytecodeModule, SEG_DESC_TABLE, SEG_MACHINE, SEG_PROT_EXEC,
+    AucSegment, AuraFuncDesc, BytecodeModule, SEG_DESC_TABLE, SEG_MACHINE, SEG_PROT_EXEC,
     SEG_PROT_READ,
 };
 
@@ -49,9 +49,9 @@ pub fn embed_aot(
     // ── 1. AOT 编译：HIR → LLVM IR → .o → 机器码 blob + 描述符 ──
     let generator = AotCodeGenerator::new(options);
     let output = generator.compile(hir, work_dir, OutputFormat::Blob)?;
-    let blob_path = output.blob_path.ok_or_else(|| {
-        AotError::ToolError("AOT 编译未产生 blob 文件".to_string())
-    })?;
+    let blob_path = output
+        .blob_path
+        .ok_or_else(|| AotError::ToolError("AOT 编译未产生 blob 文件".to_string()))?;
 
     let machine_code = std::fs::read(&blob_path).map_err(|e| {
         AotError::Io(format!(
@@ -190,11 +190,7 @@ mod tests {
         assert_eq!(segs[1].size, 64);
         assert!(!segs[1].is_exec());
         // 描述符表按原始字节可读回
-        let d0 = unsafe {
-            std::ptr::read_unaligned(
-                blob[48..].as_ptr() as *const AuraFuncDesc
-            )
-        };
+        let d0 = unsafe { std::ptr::read_unaligned(blob[48..].as_ptr() as *const AuraFuncDesc) };
         assert_eq!(d0.entry_offset, 0x40);
         assert_eq!(d0.num_args, 2);
     }

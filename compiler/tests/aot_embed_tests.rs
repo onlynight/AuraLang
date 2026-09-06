@@ -1,4 +1,4 @@
-﻿//! Phase 1 AOT 机器码嵌入 —— 端到端集成测试（1.14）
+//! Phase 1 AOT 机器码嵌入 —— 端到端集成测试（1.14）
 //!
 //! 设计文档 docs/AOT机器码嵌入方案-详细设计.md §9：
 //! `fun add(a: Int, b: Int): Int` 编译 → AOT 嵌入 `.auc` v4 → VM 加载执行，
@@ -9,8 +9,8 @@
 
 #![cfg(feature = "llvm")]
 
-use compiler::codegen::aot_embed::embed_aot;
 use compiler::codegen::aot::{AotOptions, OptimizationLevel};
+use compiler::codegen::aot_embed::embed_aot;
 use compiler::codegen::hir::desugar_program;
 use compiler::codegen::{BytecodeModule, compile_source};
 use compiler::lexer::Lexer;
@@ -65,10 +65,7 @@ fn compile_with_aot_embed(source: &str) -> BytecodeModule {
     let work_dir = std::env::temp_dir().join(format!(
         "aura_aot_e2e_{}_{}",
         std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
     ));
     let result = embed_aot(module, &hir, options, &work_dir).expect("AOT 嵌入应成功");
     let _ = std::fs::remove_dir_all(&work_dir);
@@ -98,11 +95,8 @@ fn aot_add_matches_interpreter() {
     let embedded = compile_with_aot_embed(src);
     assert!(embedded.has_aot(), "模块应含 AOT 机器码段");
     assert_eq!(embedded.aot_segments.len(), 2);
-    let aot_fns: Vec<&compiler::codegen::opcode::BytecodeFunction> = embedded
-        .functions
-        .iter()
-        .filter(|f| f.aot_desc_idx > 0)
-        .collect();
+    let aot_fns: Vec<&compiler::codegen::opcode::BytecodeFunction> =
+        embedded.functions.iter().filter(|f| f.aot_desc_idx > 0).collect();
     assert!(
         aot_fns.iter().any(|f| f.name == "add"),
         "add 应被标记为 AOT 函数"

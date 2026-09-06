@@ -6,7 +6,7 @@ use std::collections::HashMap;
 // JitValue / 类型标签 / JitEntry 已迁移至 vm::abi（Phase 1: AOT 嵌入共享调用约定）。
 // 此处再导出以保持向后兼容（jit feature 之外的路径引用 crate::vm::jit::* 依然有效）。
 pub use crate::vm::abi::{
-    AotEntry, AotCallContext, JitValue, TAG_ARRAY, TAG_BOOL, TAG_CLOSURE, TAG_CSTRING, TAG_FLOAT,
+    AotCallContext, AotEntry, JitValue, TAG_ARRAY, TAG_BOOL, TAG_CLOSURE, TAG_CSTRING, TAG_FLOAT,
     TAG_FUNC, TAG_INT, TAG_LIST, TAG_MAP, TAG_NULL, TAG_OBJ, TAG_PTR, TAG_STR,
 };
 

@@ -357,9 +357,8 @@ fn parse_object_file(
 ) -> Result<(Vec<u8>, u64, bool, Vec<(String, u64)>), LlvmToolError> {
     use object::read::{File, Object, ObjectSection, ObjectSymbol};
 
-    let file = File::parse(bytes).map_err(|e| {
-        make_tool_error("parse_object", &format!("无法解析目标文件: {}", e))
-    })?;
+    let file = File::parse(bytes)
+        .map_err(|e| make_tool_error("parse_object", &format!("无法解析目标文件: {}", e)))?;
 
     let is_elf = matches!(file.format(), object::BinaryFormat::Elf);
 
@@ -444,17 +443,15 @@ pub fn link_to_blob(
     _options: &AotOptions,
 ) -> LlvmToolResult<Vec<(String, AuraFuncDesc)>> {
     // 1. 读取目标文件
-    let bytes = std::fs::read(object_path).map_err(|e| {
-        make_tool_error("read_object", &format!("读取目标文件失败: {}", e))
-    })?;
+    let bytes = std::fs::read(object_path)
+        .map_err(|e| make_tool_error("read_object", &format!("读取目标文件失败: {}", e)))?;
 
     // 2. 解析目标文件，提取 .text 数据和符号表
     let (text_data, text_start, is_elf, symbols) = parse_object_file(&bytes)?;
 
     // 3. 写入 blob 文件
-    std::fs::write(blob_path, &text_data).map_err(|e| {
-        make_tool_error("write_blob", &format!("写入 blob 文件失败: {}", e))
-    })?;
+    std::fs::write(blob_path, &text_data)
+        .map_err(|e| make_tool_error("write_blob", &format!("写入 blob 文件失败: {}", e)))?;
 
     // 4. 为每个 aura_aot_* 符号生成函数描述符
     let mut descs = Vec::new();
@@ -466,9 +463,7 @@ pub fn link_to_blob(
         // 解析元数据（从符号名中提取函数名/nargs/rettag/arg_tags）
         let meta = parse_aot_symbol_name(name);
         let (func_name, nargs, rettag, arg_tags_vec) = match meta {
-            Some((func_name, nargs, rettag, arg_tags)) => {
-                (func_name, nargs, rettag, arg_tags)
-            }
+            Some((func_name, nargs, rettag, arg_tags)) => (func_name, nargs, rettag, arg_tags),
             None => {
                 // 跳过没有元数据的符号（如纯函数符号，无 `!` 分隔符）
                 continue;
@@ -542,8 +537,7 @@ mod tests {
         assert_eq!(rettag, 0);
         assert_eq!(tags, vec![0, 0]);
 
-        let (_, nargs, rettag, tags) =
-            parse_aot_symbol_name("aura_aot_float_2!2!1!1!1").unwrap();
+        let (_, nargs, rettag, tags) = parse_aot_symbol_name("aura_aot_float_2!2!1!1!1").unwrap();
         assert_eq!(nargs, 2);
         assert_eq!(rettag, 1);
         assert_eq!(tags, vec![1, 1]);

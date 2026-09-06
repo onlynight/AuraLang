@@ -1,4 +1,4 @@
-﻿//! Aura VM 解释器执行循环（直接线程码分派）
+//! Aura VM 解释器执行循环（直接线程码分派）
 //!
 //! 主循环 `step()` 对栈顶帧逐条执行指令。`Call`/`Return` 切换调用帧；
 //! `CallNative`/`CallC` 经原生注册表分发；`NewObject`/`GetField`/`SetField`
@@ -21,7 +21,10 @@ unsafe extern "system" {
 #[cfg(unix)]
 unsafe extern "C" {
     fn dlopen(filename: *const std::os::raw::c_char, flags: i32) -> *mut std::os::raw::c_void;
-    fn dlsym(handle: *mut std::os::raw::c_void, symbol: *const std::os::raw::c_char) -> *mut std::os::raw::c_void;
+    fn dlsym(
+        handle: *mut std::os::raw::c_void,
+        symbol: *const std::os::raw::c_char,
+    ) -> *mut std::os::raw::c_void;
 }
 
 impl Vm {
@@ -644,20 +647,24 @@ impl Vm {
         let native = self.module.natives[idx].clone();
         let param_count = native.param_count as usize;
         let args = self.pop_n(top, param_count)?;
-        
+
         eprintln!("[vm] CallNative: {}, params={}", native.name, param_count);
-        
+
         // P9: 如果指定了 FFI 库，先加载库
         if let Some(ref lib_name) = native.ffi_lib {
             self.ensure_lib_loaded(lib_name);
         }
-        
+
         // P9: 获取库句柄（如果加载了）
         let lib_handle: Option<usize> = native.ffi_lib.as_ref().and_then(|lib| {
             #[cfg(windows)]
-            { self.loaded_libs.get(lib).copied() }
+            {
+                self.loaded_libs.get(lib).copied()
+            }
             #[cfg(unix)]
-            { self.loaded_libs.get(lib).map(|h| *h as usize) }
+            {
+                self.loaded_libs.get(lib).map(|h| *h as usize)
+            }
         });
 
         let result = if let Some(f) = self.natives.get(&native.name) {
@@ -681,7 +688,7 @@ impl Vm {
         self.frames[top].stack.push(result);
         Ok(())
     }
-    
+
     /// P9: 确保动态库已加载
     #[cfg(windows)]
     fn ensure_lib_loaded(&mut self, lib_name: &str) {
@@ -692,15 +699,19 @@ impl Vm {
         let paths = [
             lib_name.to_string(),
             format!("{}.dll", lib_name),
-            format!("D:\\Code\\AuraProjs\\SQLura\\sqlura-driver-rs\\target\\release\\{}.dll", lib_name),
-            format!("D:\\Code\\AuraProjs\\SQLura\\sqlura-driver-rs\\target\\release\\{}", lib_name),
+            format!(
+                "D:\\Code\\AuraProjs\\SQLura\\sqlura-driver-rs\\target\\release\\{}.dll",
+                lib_name
+            ),
+            format!(
+                "D:\\Code\\AuraProjs\\SQLura\\sqlura-driver-rs\\target\\release\\{}",
+                lib_name
+            ),
         ];
-        
+
         for path in &paths {
-            let wide: Vec<u16> = std::ffi::OsStr::new(path)
-                .encode_wide()
-                .chain(std::iter::once(0))
-                .collect();
+            let wide: Vec<u16> =
+                std::ffi::OsStr::new(path).encode_wide().chain(std::iter::once(0)).collect();
             unsafe {
                 let handle = LoadLibraryW(wide.as_ptr());
                 if handle != 0 {
@@ -712,7 +723,7 @@ impl Vm {
         }
         eprintln!("[vm] 无法加载库: {}", lib_name);
     }
-    
+
     #[cfg(unix)]
     fn ensure_lib_loaded(&mut self, lib_name: &str) {
         if self.loaded_libs.contains_key(lib_name) {
@@ -721,9 +732,12 @@ impl Vm {
         let paths = [
             lib_name.to_string(),
             format!("lib{}.so", lib_name),
-            format!("D:\\Code\\AuraProjs\\SQLura\\sqlura-driver-rs\\target\\release\\lib{}.so", lib_name),
+            format!(
+                "D:\\Code\\AuraProjs\\SQLura\\sqlura-driver-rs\\target\\release\\lib{}.so",
+                lib_name
+            ),
         ];
-        
+
         for path in &paths {
             let c_path = std::ffi::CString::new(path.clone()).unwrap();
             unsafe {
@@ -779,123 +793,140 @@ fn static_call_c(name: &str, args: &[Value]) -> Option<Value> {
 /// P9: 使用指定库句柄调用 C 函数
 fn static_call_c_with_lib(name: &str, args: &[Value], lib_handle: Option<usize>) -> Option<Value> {
     use crate::vm::ffi::{CFuncInfo, CFuncPtr, CType, resolve_static_symbol};
-    
+
     // 如果有库句柄，从库中解析符号
     let addr = if let Some(handle) = lib_handle {
         resolve_symbol_in_lib(handle, name)
     } else {
         resolve_static_symbol(name)
     }?;
-    
+
     let ptr: CFuncPtr = unsafe { std::mem::transmute(addr) };
-    
+
     // P9: 根据函数名确定返回类型和参数类型
     // SQLura 数据库 API 函数签名
     let (param_types, return_type) = match name {
         "sqlura_version" => {
-            (vec![], CType::CString)  // 返回字符串
+            (vec![], CType::CString) // 返回字符串
         }
         "sqlura_open" => {
-            (vec![CType::CString], CType::Ptr)  // 参数: path, 返回: handle
+            (vec![CType::CString], CType::Ptr) // 参数: path, 返回: handle
         }
         "sqlura_close" => {
-            (vec![CType::Ptr], CType::Int64)  // 参数: handle, 返回: int
+            (vec![CType::Ptr], CType::Int64) // 参数: handle, 返回: int
         }
         "sqlura_exec" => {
-            (vec![CType::Ptr, CType::CString], CType::CString)  // 参数: handle, sql, 返回: string
+            (
+                vec![
+                    CType::Ptr,
+                    CType::CString,
+                ],
+                CType::CString,
+            ) // 参数: handle, sql, 返回: string
         }
         "sqlura_free_string" => {
-            (vec![CType::CString], CType::Void)  // 参数: ptr, 返回: void
+            (vec![CType::CString], CType::Void) // 参数: ptr, 返回: void
         }
         "sqlura_error" => {
-            (vec![CType::Ptr], CType::CString)  // 参数: handle, 返回: string
+            (vec![CType::Ptr], CType::CString) // 参数: handle, 返回: string
         }
-        _ => (vec![CType::Int64; args.len().min(8)], CType::Int64),  // 默认
+        _ => (vec![CType::Int64; args.len().min(8)], CType::Int64), // 默认
     };
-    
+
     // P9: 创建 CString 对象保持生命周期
     let mut c_strings: Vec<std::ffi::CString> = Vec::new();
-    
+
     // P9: 根据参数类型打包参数
     let c_args: [i64; 8] = [
-        args.first().map(|v| {
-            let ty = param_types.first().unwrap_or(&CType::Int64);
-            if *ty == CType::CString {
-                match v {
-                    Value::Str(s) => {
-                        // 创建 CString 并保持生命周期
-                        if let Ok(cs) = std::ffi::CString::new(s.as_ref()) {
-                            let ptr = cs.as_ptr() as i64;
-                            c_strings.push(cs);  // 保持生命周期
-                            ptr
-                        } else {
-                            0
+        args.first()
+            .map(|v| {
+                let ty = param_types.first().unwrap_or(&CType::Int64);
+                if *ty == CType::CString {
+                    match v {
+                        Value::Str(s) => {
+                            // 创建 CString 并保持生命周期
+                            if let Ok(cs) = std::ffi::CString::new(s.as_ref()) {
+                                let ptr = cs.as_ptr() as i64;
+                                c_strings.push(cs); // 保持生命周期
+                                ptr
+                            } else {
+                                0
+                            }
                         }
+                        _ => 0,
                     }
-                    _ => 0,
+                } else {
+                    ty.pack(v)
                 }
-            } else {
-                ty.pack(v)
-            }
-        }).unwrap_or(0),
-        args.get(1).map(|v| {
-            let ty = param_types.get(1).unwrap_or(&CType::Int64);
-            if *ty == CType::CString {
-                match v {
-                    Value::Str(s) => {
-                        if let Ok(cs) = std::ffi::CString::new(s.as_ref()) {
-                            let ptr = cs.as_ptr() as i64;
-                            c_strings.push(cs);
-                            ptr
-                        } else {
-                            0
+            })
+            .unwrap_or(0),
+        args.get(1)
+            .map(|v| {
+                let ty = param_types.get(1).unwrap_or(&CType::Int64);
+                if *ty == CType::CString {
+                    match v {
+                        Value::Str(s) => {
+                            if let Ok(cs) = std::ffi::CString::new(s.as_ref()) {
+                                let ptr = cs.as_ptr() as i64;
+                                c_strings.push(cs);
+                                ptr
+                            } else {
+                                0
+                            }
                         }
+                        _ => 0,
                     }
-                    _ => 0,
+                } else {
+                    ty.pack(v)
                 }
-            } else {
-                ty.pack(v)
-            }
-        }).unwrap_or(0),
-        args.get(2).map(|v| {
-            let ty = param_types.get(2).unwrap_or(&CType::Int64);
-            if *ty == CType::CString {
-                match v {
-                    Value::Str(s) => {
-                        if let Ok(cs) = std::ffi::CString::new(s.as_ref()) {
-                            let ptr = cs.as_ptr() as i64;
-                            c_strings.push(cs);
-                            ptr
-                        } else {
-                            0
+            })
+            .unwrap_or(0),
+        args.get(2)
+            .map(|v| {
+                let ty = param_types.get(2).unwrap_or(&CType::Int64);
+                if *ty == CType::CString {
+                    match v {
+                        Value::Str(s) => {
+                            if let Ok(cs) = std::ffi::CString::new(s.as_ref()) {
+                                let ptr = cs.as_ptr() as i64;
+                                c_strings.push(cs);
+                                ptr
+                            } else {
+                                0
+                            }
                         }
+                        _ => 0,
                     }
-                    _ => 0,
+                } else {
+                    ty.pack(v)
                 }
-            } else {
-                ty.pack(v)
-            }
-        }).unwrap_or(0),
-        args.get(3).map(|v| {
-            let ty = param_types.get(3).unwrap_or(&CType::Int64);
-            if *ty == CType::CString {
-                match v {
-                    Value::Str(s) => {
-                        if let Ok(cs) = std::ffi::CString::new(s.as_ref()) {
-                            let ptr = cs.as_ptr() as i64;
-                            c_strings.push(cs);
-                            ptr
-                        } else {
-                            0
+            })
+            .unwrap_or(0),
+        args.get(3)
+            .map(|v| {
+                let ty = param_types.get(3).unwrap_or(&CType::Int64);
+                if *ty == CType::CString {
+                    match v {
+                        Value::Str(s) => {
+                            if let Ok(cs) = std::ffi::CString::new(s.as_ref()) {
+                                let ptr = cs.as_ptr() as i64;
+                                c_strings.push(cs);
+                                ptr
+                            } else {
+                                0
+                            }
                         }
+                        _ => 0,
                     }
-                    _ => 0,
+                } else {
+                    ty.pack(v)
                 }
-            } else {
-                ty.pack(v)
-            }
-        }).unwrap_or(0),
-        0, 0, 0, 0,  // 最多 4 个参数
+            })
+            .unwrap_or(0),
+        0,
+        0,
+        0,
+        0, // 最多 4 个参数
     ];
     let result = unsafe {
         ptr(

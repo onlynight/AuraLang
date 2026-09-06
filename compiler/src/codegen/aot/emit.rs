@@ -486,7 +486,9 @@ fn emit_function(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErr
     s.push_str(&format!(
         "define {}{} @{}({}) {{\n",
         if ctx.blob_mode { "internal " } else { "" },
-        ret_str, func.name, params_str
+        ret_str,
+        func.name,
+        params_str
     ));
 
     // Debug 元数据：使用 emit_program 预注册的 DISubprogram ID（`!dbg !N`）
@@ -1322,7 +1324,7 @@ fn emit_call(
     if ctx.declared_structs.contains(callee) {
         return emit_struct_constructor(ctx, blocks, callee, args);
     }
-    
+
     let args_ir: Vec<(String, String)> =
         args.iter().map(|a| emit_expr_val(ctx, blocks, a)).collect::<Result<_, _>>()?;
 
@@ -1802,11 +1804,9 @@ fn map_type_to_tag(ty: &HirType) -> Result<u8, AotError> {
                 other
             ))),
         },
-        HirType::Nullable(_) | HirType::Pointer(_) | HirType::Function { .. } => {
-            Err(AotError::UnsupportedExpr(
-                "Phase 1 AOT 不支持复杂类型（仅支持标量类型）".to_string(),
-            ))
-        }
+        HirType::Nullable(_) | HirType::Pointer(_) | HirType::Function { .. } => Err(
+            AotError::UnsupportedExpr("Phase 1 AOT 不支持复杂类型（仅支持标量类型）".to_string()),
+        ),
         HirType::Unknown => Err(AotError::UnsupportedExpr(
             "Phase 1 AOT 不支持 Unknown 类型".to_string(),
         )),
@@ -1882,18 +1882,13 @@ fn emit_wrapper(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErro
     let wrapper_name = name_parts.join("!");
 
     // 5. 获取真实函数的 LLVM 返回类型和参数类型
-    let ret_llvm_ty = func
-        .ret
-        .as_ref()
-        .map(|t| ctx.llvm_type(t))
-        .unwrap_or_else(|| "void".to_string());
+    let ret_llvm_ty =
+        func.ret.as_ref().map(|t| ctx.llvm_type(t)).unwrap_or_else(|| "void".to_string());
 
     let param_llvm_types: Vec<String> = func
         .params
         .iter()
-        .map(|p| {
-            ctx.llvm_type(p.ty.as_ref().unwrap_or(&HirType::Named("Int".into())))
-        })
+        .map(|p| ctx.llvm_type(p.ty.as_ref().unwrap_or(&HirType::Named("Int".into()))))
         .collect();
 
     // 6. 生成包装函数体
@@ -1917,19 +1912,13 @@ fn emit_wrapper(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErro
             "  {} = getelementptr i64, i64* %args, i64 {}\n",
             gep_var, payload_idx
         ));
-        s.push_str(&format!(
-            "  {} = load i64, i64* {}\n",
-            load_var, gep_var
-        ));
+        s.push_str(&format!("  {} = load i64, i64* {}\n", load_var, gep_var));
 
         // 根据类型转换 payload
         match *tag {
             TAG_INT => {
                 // i64 → target type (trunc/zext)
-                let target_bits = llvm_ty
-                    .trim_start_matches('i')
-                    .parse::<usize>()
-                    .unwrap_or(32);
+                let target_bits = llvm_ty.trim_start_matches('i').parse::<usize>().unwrap_or(32);
                 if target_bits < 64 {
                     s.push_str(&format!(
                         "  {} = trunc i64 {} to {}\n",
@@ -1962,10 +1951,7 @@ fn emit_wrapper(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErro
             }
             TAG_BOOL => {
                 // i64 → i1 (trunc)
-                s.push_str(&format!(
-                    "  {} = trunc i64 {} to i1\n",
-                    val_var, load_var
-                ));
+                s.push_str(&format!("  {} = trunc i64 {} to i1\n", val_var, load_var));
             }
             TAG_NULL => {
                 // void: no parameter
@@ -1980,10 +1966,7 @@ fn emit_wrapper(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErro
     let call_var = ctx.fresh_var();
     let args_str = call_args.join(", ");
     if ret_llvm_ty == "void" || ret_llvm_ty.is_empty() {
-        s.push_str(&format!(
-            "  call void @{}({})\n",
-            func.name, args_str
-        ));
+        s.push_str(&format!("  call void @{}({})\n", func.name, args_str));
     } else {
         s.push_str(&format!(
             "  {} = call {} @{}({})\n",
@@ -2006,29 +1989,20 @@ fn emit_wrapper(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErro
     ));
 
     // 存储 tag
-    s.push_str(&format!(
-        "  store i64 {}, i64* %ret_tag_addr\n",
-        ret_tag
-    ));
+    s.push_str(&format!("  store i64 {}, i64* %ret_tag_addr\n", ret_tag));
 
     // 存储 payload
     match ret_tag {
         TAG_INT => {
             // i32/i16/i8 → i64 (zext); i64 → i64 (no conversion)
-            let target_bits = ret_llvm_ty
-                .trim_start_matches('i')
-                .parse::<usize>()
-                .unwrap_or(32);
+            let target_bits = ret_llvm_ty.trim_start_matches('i').parse::<usize>().unwrap_or(32);
             if target_bits < 64 {
                 s.push_str(&format!(
                     "  %ret_payload = zext {} {} to i64\n",
                     ret_llvm_ty, call_var
                 ));
             } else {
-                s.push_str(&format!(
-                    "  %ret_payload = add i64 {}, 0\n",
-                    call_var
-                ));
+                s.push_str(&format!("  %ret_payload = add i64 {}, 0\n", call_var));
             }
         }
         TAG_FLOAT => {
@@ -2050,10 +2024,7 @@ fn emit_wrapper(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErro
         }
         TAG_BOOL => {
             // i1 → i64 (zext)
-            s.push_str(&format!(
-                "  %ret_payload = zext i1 {} to i64\n",
-                call_var
-            ));
+            s.push_str(&format!("  %ret_payload = zext i1 {} to i64\n", call_var));
         }
         TAG_NULL => {
             // void: payload = 0

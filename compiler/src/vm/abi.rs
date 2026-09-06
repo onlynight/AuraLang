@@ -38,18 +38,39 @@ pub const TAG_CSTRING: i64 = 12;
 impl JitValue {
     /// 空值
     pub fn null() -> Self {
-        JitValue { tag: TAG_NULL, payload: 0 }
+        JitValue {
+            tag: TAG_NULL,
+            payload: 0,
+        }
     }
 
     /// 从 Aura Value 转换为 JitValue
     pub fn from_value(v: &Value) -> Self {
         match v {
-            Value::Int(i) => JitValue { tag: TAG_INT, payload: *i },
-            Value::Float(f) => JitValue { tag: TAG_FLOAT, payload: f.to_bits() as i64 },
-            Value::Bool(b) => JitValue { tag: TAG_BOOL, payload: *b as i64 },
-            Value::Str(s) => JitValue { tag: TAG_STR, payload: s.as_ptr() as i64 },
-            Value::Ptr(p) => JitValue { tag: TAG_PTR, payload: *p },
-            Value::Ref(h) => JitValue { tag: TAG_OBJ, payload: *h as i64 },
+            Value::Int(i) => JitValue {
+                tag: TAG_INT,
+                payload: *i,
+            },
+            Value::Float(f) => JitValue {
+                tag: TAG_FLOAT,
+                payload: f.to_bits() as i64,
+            },
+            Value::Bool(b) => JitValue {
+                tag: TAG_BOOL,
+                payload: *b as i64,
+            },
+            Value::Str(s) => JitValue {
+                tag: TAG_STR,
+                payload: s.as_ptr() as i64,
+            },
+            Value::Ptr(p) => JitValue {
+                tag: TAG_PTR,
+                payload: *p,
+            },
+            Value::Ref(h) => JitValue {
+                tag: TAG_OBJ,
+                payload: *h as i64,
+            },
             _ => JitValue::null(),
         }
     }
@@ -71,12 +92,8 @@ impl JitValue {
 // AotEntry: AOT 机器码入口 (与 JitEntry 签名相同)
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub type AotEntry = unsafe extern "C" fn(
-    args: *const JitValue,
-    ret: *mut JitValue,
-    argc: usize,
-    ctx: *const (),
-);
+pub type AotEntry =
+    unsafe extern "C" fn(args: *const JitValue, ret: *mut JitValue, argc: usize, ctx: *const ());
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AotCallContext: AOT 调用上下文
@@ -105,7 +122,9 @@ impl AotCallContext {
 }
 
 impl Default for AotCallContext {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
