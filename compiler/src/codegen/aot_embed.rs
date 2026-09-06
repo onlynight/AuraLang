@@ -16,7 +16,7 @@ use super::aot::{AotCodeGenerator, AotError, AotOptions, OutputFormat};
 use super::hir::HirProgram;
 use super::opcode::{
     AucSegment, AuraFuncDesc, BytecodeModule, SEG_DESC_TABLE, SEG_MACHINE, SEG_PROT_EXEC,
-    SEG_PROT_READ,
+    SEG_PROT_READ, SEG_STRING_POOL,
 };
 
 /// AOT 嵌入结果
@@ -103,11 +103,11 @@ pub fn embed_aot(
     })
 }
 
-/// 组装段表与段数据区（SEG_MACHINE + SEG_DESC_TABLE）
+/// 组装段表与段数据区（SEG_MACHINE + SEG_DESC_TABLE + SEG_STRING_POOL）
 ///
-/// 返回 `(段表, 段数据区, 机器码大小)`。机器码段被填充到 16 字节对齐，
-/// 描述符表紧随其后 —— 与 [`AotModule::load`](crate::vm::aot_runtime::AotModule::load)
-/// 的解析逻辑严格对应。
+/// 返回 `(段表, 段数据区, 机器码大小)`。
+/// 机器码段被填充到 16 字节对齐，描述符表紧随其后，字符串池在最后。
+/// 字符串池包含函数名（null 终止），描述符的 name_offset/name_len 指向字符串池。
 fn assemble_segments(
     machine_code: &[u8],
     descs: &[(String, AuraFuncDesc)],
@@ -115,18 +115,65 @@ fn assemble_segments(
     let machine_size = machine_code.len();
     let aligned_machine_size = (machine_size + 15) / 16 * 16;
 
-    let mut desc_bytes = Vec::with_capacity(descs.len() * AuraFuncDesc::SIZE);
-    for (_, d) in descs {
+    // ── Phase 2.9: 构建字符串池（设计文档 §5.5）──
+    // 收集所有唯一函数名
+    let mut unique_names: Vec<String> = Vec::new();
+    let mut name_to_idx: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (name, _) in descs {
+        if !name_to_idx.contains_key(name) {
+            name_to_idx.insert(name.clone(), unique_names.len());
+            unique_names.push(name.clone());
+        }
+    }
+
+    // 构建字符串池数据：先偏移表，后数据区
+    let mut string_pool = Vec::new();
+    let offset_table_size = unique_names.len() * 4;
+    string_pool.resize(offset_table_size, 0); // 偏移表占位
+    let data_start = offset_table_size;
+
+    let mut name_offsets: Vec<u32> = Vec::with_capacity(unique_names.len());
+    for (i, name) in unique_names.iter().enumerate() {
+        let offset = data_start + name_offsets.iter().map(|o| *o as usize + 1).sum::<usize>();
+        name_offsets.push(offset as u32);
+        string_pool.extend_from_slice(name.as_bytes());
+        string_pool.push(0); // null 终止
+    }
+
+    // 写入偏移表
+    for (i, off) in name_offsets.iter().enumerate() {
+        let pos = i * 4;
+        string_pool[pos..pos + 4].copy_from_slice(&off.to_le_bytes());
+    }
+
+    // 更新描述符的 name_offset / name_len
+    let mut descs_with_names: Vec<(String, AuraFuncDesc)> = Vec::with_capacity(descs.len());
+    for (name, d) in descs {
+        let idx = *name_to_idx.get(name).unwrap_or(&0);
+        let mut d = *d;
+        d.name_offset = name_offsets[idx];
+        d.name_len = name.len() as u16;
+        descs_with_names.push((name.clone(), d));
+    }
+
+    // 序列化描述符表
+    let mut desc_bytes = Vec::with_capacity(descs_with_names.len() * AuraFuncDesc::SIZE);
+    for (_, d) in &descs_with_names {
         let slice = unsafe {
             std::slice::from_raw_parts(d as *const AuraFuncDesc as *const u8, AuraFuncDesc::SIZE)
         };
         desc_bytes.extend_from_slice(slice);
     }
 
-    let mut blob_data = Vec::with_capacity(aligned_machine_size + desc_bytes.len());
+    // 组装段数据区: machine_code (16 对齐) + desc_table + string_pool
+    let mut blob_data = Vec::with_capacity(aligned_machine_size + desc_bytes.len() + string_pool.len());
     blob_data.extend_from_slice(machine_code);
     blob_data.resize(aligned_machine_size, 0);
     blob_data.extend_from_slice(&desc_bytes);
+    blob_data.extend_from_slice(&string_pool);
+
+    let desc_offset = aligned_machine_size as u32;
+    let pool_offset = desc_offset + desc_bytes.len() as u32;
 
     let segments = vec![
         AucSegment {
@@ -137,8 +184,14 @@ fn assemble_segments(
         },
         AucSegment {
             id: SEG_DESC_TABLE,
-            offset: aligned_machine_size as u32,
+            offset: desc_offset,
             size: desc_bytes.len() as u32,
+            flags: SEG_PROT_READ,
+        },
+        AucSegment {
+            id: SEG_STRING_POOL,
+            offset: pool_offset,
+            size: string_pool.len() as u32,
             flags: SEG_PROT_READ,
         },
     ];
@@ -180,19 +233,23 @@ mod tests {
         let descs = sample_descs();
         let (segs, blob, msize) = assemble_segments(&code, &descs);
         assert_eq!(msize, 48);
-        assert_eq!(blob.len(), 48 + 2 * AuraFuncDesc::SIZE);
-        assert_eq!(segs.len(), 2);
+        // blob = 48 (machine, 16-aligned) + 64 (desc) + string_pool
+        let expected_machine = (48 + 15) / 16 * 16;
+        assert_eq!(segs.len(), 3);
         assert_eq!(segs[0].id, SEG_MACHINE);
         assert_eq!(segs[0].size, 48);
         assert!(segs[0].is_exec());
         assert_eq!(segs[1].id, SEG_DESC_TABLE);
-        assert_eq!(segs[1].offset, 48);
+        assert_eq!(segs[1].offset, expected_machine as u32);
         assert_eq!(segs[1].size, 64);
         assert!(!segs[1].is_exec());
+        assert_eq!(segs[2].id, SEG_STRING_POOL);
         // 描述符表按原始字节可读回
-        let d0 = unsafe { std::ptr::read_unaligned(blob[48..].as_ptr() as *const AuraFuncDesc) };
+        let d0 = unsafe { std::ptr::read_unaligned(blob[expected_machine..].as_ptr() as *const AuraFuncDesc) };
         assert_eq!(d0.entry_offset, 0x40);
         assert_eq!(d0.num_args, 2);
+        // 描述符的 name_offset 指向字符串池
+        assert!(d0.name_offset > 0);
     }
 
     #[test]

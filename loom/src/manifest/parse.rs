@@ -5,8 +5,8 @@ use std::path::Path;
 use super::validate;
 use crate::error::LoomError;
 use crate::manifest::{
-    BuildConfig, BuildConfigOverride, LoomManifest, PackageOptions, PluginConfig, ProfileConfig,
-    RepositoryConfig, ResourceConfig, SourceSetConfig,
+    BuildConfig, BuildConfigOverride, CompileMode, LoomManifest, PackageOptions, PluginConfig,
+    ProfileConfig, RepositoryConfig, ResourceConfig, SourceSetConfig,
 };
 
 /// 从文件路径解析 `aura.toml`
@@ -59,6 +59,7 @@ pub fn default_manifest(name: &str) -> LoomManifest {
         exports: vec!["main".to_string()],
         library: false,
         kind: "app".to_string(),
+        mode: CompileMode::default(),
         compiler_min_version: None,
         compiler_max_version: None,
         dependencies: Vec::new(),

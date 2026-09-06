@@ -71,7 +71,25 @@ impl JitValue {
                 tag: TAG_OBJ,
                 payload: *h as i64,
             },
-            _ => JitValue::null(),
+            Value::Weak(h) => JitValue {
+                tag: TAG_OBJ,
+                payload: *h as i64,
+            },
+            Value::List(items) => JitValue {
+                tag: TAG_LIST,
+                payload: items.as_ptr() as i64,
+            },
+            Value::Map(_map) => JitValue {
+                // Phase 2: HashMap 无 as_ptr()，使用空指针占位
+                // 实际使用中 Map 由 VM 堆管理（NewMap → Value::Ref），
+                // AOT 模式下 Map 参数应为 heap handle (TAG_OBJ)
+                tag: TAG_MAP,
+                payload: 0,
+            },
+            Value::Null => JitValue {
+                tag: TAG_NULL,
+                payload: 0,
+            },
         }
     }
 
@@ -83,6 +101,24 @@ impl JitValue {
             TAG_BOOL => Value::Bool(self.payload != 0),
             TAG_PTR => Value::Ptr(self.payload),
             TAG_OBJ => Value::Ref(self.payload as usize),
+            TAG_LIST => {
+                // List 指针：回退为 Null（完整引用恢复需 VM 堆支持）
+                // 实际场景：AOT 函数返回 List 时，VM 会重新包装
+                Value::Null
+            }
+            TAG_MAP => {
+                Value::Null
+            }
+            TAG_STR => {
+                // 字符串指针：需要 VM 堆读取
+                // 实际场景：AOT 返回的字符串指针指向 VM 堆上的 C 字符串
+                Value::Null
+            }
+            TAG_ARRAY => Value::Null,
+            TAG_CLOSURE => Value::Null,
+            TAG_FUNC => Value::Null,
+            TAG_CSTRING => Value::Ptr(self.payload),
+            TAG_NULL => Value::Null,
             _ => Value::Null,
         }
     }

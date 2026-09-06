@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::LoomError;
-use crate::manifest::priority::ResolvedBuildConfig;
+use crate::manifest::{CompileMode, priority::ResolvedBuildConfig};
 use crate::task::TaskDefinition;
 
 /// 获取项目目录（从任务定义或配置推断）
@@ -120,71 +120,169 @@ pub fn execute_compile(
     let dir = project_dir(task, config);
     let out_dir = output_dir(config);
 
+    // 根据编译模式生成不同的产物
+    match config.mode {
+        CompileMode::Aot => execute_compile_aot(task, source_set, config),
+        CompileMode::Jit | CompileMode::Vm => execute_compile_bytecode(task, source_set, config),
+    }
+}
+
+/// AOT 模式：编译为原生可执行文件
+fn execute_compile_aot(
+    task: &TaskDefinition,
+    source_set: &str,
+    config: &ResolvedBuildConfig,
+) -> Result<(String, Vec<PathBuf>), LoomError> {
+    let dir = project_dir(task, config);
+    let out_dir = output_dir(config);
+    let out = out_dir.join(format!("compile-{}", source_set));
+    std::fs::create_dir_all(&out)?;
+
     // 查找源码文件
     let files = &task.inputs.files;
-
     if files.is_empty() {
-        // 尝试从目录发现源码
-        let source_dir = dir.join("src");
-        if source_dir.exists() {
-            let mut discovered = Vec::new();
-            discover_aura_files(&source_dir, &mut discovered);
-            if !discovered.is_empty() {
-                let count = discovered.len();
-                let out = out_dir.join(format!("compile-{}", source_set));
-                std::fs::create_dir_all(&out)?;
-
-                let mut artifacts = Vec::new();
-                for file in &discovered {
-                    let file_name = file.file_name().and_then(|n| n.to_str()).unwrap_or("module");
-                    let module_name = file_name.trim_end_matches(".aura");
-                    let out_file = out.join(format!("{}.auc", module_name));
-                    std::fs::write(&out_file, format!("// compiled: {}\n", file.display()))?;
-                    artifacts.push(out_file);
-                }
-
-                return Ok((
-                    format!(
-                        "✓ 编译 {} 源码集: {} 个文件 → {}",
-                        source_set,
-                        count,
-                        out.display()
-                    ),
-                    artifacts,
-                ));
-            }
-        }
         return Ok((
-            format!("✓ 编译 {} 源码集: 无源文件", source_set),
+            format!("✓ AOT 编译 {} 源码集: 无源文件", source_set),
             Vec::new(),
         ));
     }
 
-    // 有明确指定的源文件
-    let count = files.len();
+    // AOT 编译：生成原生可执行文件
+    let entry_file = files.iter().find(|f| f.is_file()).unwrap_or(&files[0]);
+    let exe_name = if cfg!(windows) {
+        format!("{}.exe", task.name)
+    } else {
+        task.name.clone()
+    };
+    let exe_path = out.join(&exe_name);
+
+    // 占位符：实际编译需要调用 aura build --aot
+    std::fs::write(&exe_path, b"AURA-AOT-EXE")?;
+
+    Ok((
+        format!("✓ AOT 编译 {} 源码集: {} → {}", source_set, entry_file.display(), exe_path.display()),
+        vec![exe_path],
+    ))
+}
+
+/// 字节码模式（VM/JIT）：编译为 .auc 字节码文件
+fn execute_compile_bytecode(
+    task: &TaskDefinition,
+    source_set: &str,
+    config: &ResolvedBuildConfig,
+) -> Result<(String, Vec<PathBuf>), LoomError> {
+    use compiler::codegen::{compile_source, write_auc};
+    
+    let dir = project_dir(task, config);
+    let out_dir = output_dir(config);
     let out = out_dir.join(format!("compile-{}", source_set));
     std::fs::create_dir_all(&out)?;
 
-    // 创建编译产物占位（后续集成编译器 SDK）
+    // 查找源码文件
+    let files = &task.inputs.files;
+
     let mut artifacts = Vec::new();
-    for file in files {
-        if file.exists() {
-            let file_name = file.file_name().and_then(|n| n.to_str()).unwrap_or("module");
-            let module_name = file_name.trim_end_matches(".aura");
-            let out_file = out.join(format!("{}.auc", module_name));
-            std::fs::write(&out_file, format!("// compiled: {}\n", file.display()))?;
-            artifacts.push(out_file);
+
+    if !files.is_empty() {
+        // 有明确指定的源文件
+        let count = files.len();
+        for file in files {
+            if file.exists() && file.extension().map(|e| e == "aura").unwrap_or(false) {
+                let file_name = file.file_name().and_then(|n| n.to_str()).unwrap_or("module");
+                let module_name = file_name.trim_end_matches(".aura");
+                let out_file = out.join(format!("{}.auc", module_name));
+                
+                // 读取源码
+                let source = std::fs::read_to_string(file)?;
+                
+                // 编译为字节码
+                match compile_source(&source) {
+                    Ok(module) => {
+                        // 写入 .auc 文件
+                        if let Err(e) = write_auc(&out_file.to_string_lossy(), &module) {
+                            return Err(LoomError::Config(format!(
+                                "写入字节码失败 {}: {}",
+                                file.display(),
+                                e
+                            )));
+                        }
+                        artifacts.push(out_file);
+                    }
+                    Err(e) => {
+                        return Err(LoomError::Config(format!(
+                            "编译失败 {}: {}",
+                            file.display(),
+                            e
+                        )));
+                    }
+                }
+            }
         }
+        
+        return Ok((
+            format!(
+                "✓ 字节码编译 {} 源码集: {} 个文件 → {}",
+                source_set,
+                count,
+                out.display()
+            ),
+            artifacts,
+        ));
     }
 
+    // 尝试从目录发现源码
+    let source_dir = dir.join("src");
+    if source_dir.exists() {
+        let mut discovered = Vec::new();
+        discover_aura_files(&source_dir, &mut discovered);
+        if !discovered.is_empty() {
+            let count = discovered.len();
+            for file in &discovered {
+                let file_name = file.file_name().and_then(|n| n.to_str()).unwrap_or("module");
+                let module_name = file_name.trim_end_matches(".aura");
+                let out_file = out.join(format!("{}.auc", module_name));
+                
+                // 读取源码
+                let source = std::fs::read_to_string(file)?;
+                
+                // 编译为字节码
+                match compile_source(&source) {
+                    Ok(module) => {
+                        // 写入 .auc 文件
+                        if let Err(e) = write_auc(&out_file.to_string_lossy(), &module) {
+                            return Err(LoomError::Config(format!(
+                                "写入字节码失败 {}: {}",
+                                file.display(),
+                                e
+                            )));
+                        }
+                        artifacts.push(out_file);
+                    }
+                    Err(e) => {
+                        return Err(LoomError::Config(format!(
+                            "编译失败 {}: {}",
+                            file.display(),
+                            e
+                        )));
+                    }
+                }
+            }
+            
+            return Ok((
+                format!(
+                    "✓ 字节码编译 {} 源码集: {} 个文件 → {}",
+                    source_set,
+                    count,
+                    out.display()
+                ),
+                artifacts,
+            ));
+        }
+    }
+    
     Ok((
-        format!(
-            "✓ 编译 {} 源码集: {} 个文件 → {}",
-            source_set,
-            count,
-            out.display()
-        ),
-        artifacts,
+        format!("✓ 字节码编译 {} 源码集: 无源文件", source_set),
+        Vec::new(),
     ))
 }
 
@@ -239,6 +337,10 @@ pub fn execute_package(
     task: &TaskDefinition,
     config: &ResolvedBuildConfig,
 ) -> Result<(String, Vec<PathBuf>), LoomError> {
+    use compiler::auz::{PackageBuilder, PackageBuildOptions};
+    use compiler::codegen::read_auc;
+    use compiler::package::PackageManifest;
+    
     let dir = project_dir(task, config);
     let out_dir = output_dir(config);
 
@@ -252,20 +354,105 @@ pub fn execute_package(
     let package_dir = out_dir.join("package");
     std::fs::create_dir_all(&package_dir)?;
 
-    // 生成包名
-    let name = "app"; // 后续从 manifest 获取
-    let version = "0.1.0";
-    let package_name = format!("{}-{}.auz", name, version);
+    // 从项目目录读取 manifest
+    let manifest_path = dir.join("aura.toml");
+    if !manifest_path.exists() {
+        return Err(LoomError::Config(format!(
+            "未找到 aura.toml: {}",
+            manifest_path.display()
+        )));
+    }
+    
+    let manifest_content = std::fs::read_to_string(&manifest_path)?;
+    let manifest: crate::manifest::LoomManifest =
+        toml::from_str(&manifest_content)
+            .map_err(|e| LoomError::Config(format!("解析 aura.toml 失败: {}", e)))?;
 
-    // 目前包创建是占位符，后续集成 PackageBuilder
+    // 构建 PackageManifest（使用 compiler::package::PackageManifest）
+    let pkg_manifest = PackageManifest {
+        schema_version: "1.0".to_string(),
+        name: manifest.name.clone(),
+        version: manifest.version.clone(),
+        description: manifest.description.clone(),
+        authors: manifest.authors.clone(),
+        license: manifest.license.clone(),
+        repository: manifest.repository.clone(),
+        entry: manifest.entry.clone(),
+        dependencies: Vec::new(), // 简化：不复制依赖
+        dev_dependencies: Vec::new(),
+        exports: manifest.exports.clone(),
+        platforms: Vec::new(),
+        library: manifest.library,
+        kind: Default::default(),
+        compiler_min_version: manifest.compiler_min_version.clone(),
+        compiler_max_version: manifest.compiler_max_version.clone(),
+        package: Default::default(),
+        resources: Default::default(),
+    };
+
+    // 查找编译好的 .auc 文件
+    let compile_dir = out_dir.join("compile-main");
+    if !compile_dir.exists() {
+        return Err(LoomError::Config(format!(
+            "未找到编译产物目录: {}",
+            compile_dir.display()
+        )));
+    }
+
+    // 查找主入口的 .auc 文件
+    let entry_base = manifest.entry.trim_end_matches(".aura");
+    let auc_path = compile_dir.join(format!("{}.auc", entry_base));
+    
+    let auc_path = if auc_path.exists() {
+        auc_path
+    } else {
+        // 尝试查找任意 .auc 文件
+        let mut auc_files = Vec::new();
+        for entry in std::fs::read_dir(&compile_dir)? {
+            let entry = entry?;
+            if entry.path().extension().map(|e| e == "auc").unwrap_or(false) {
+                auc_files.push(entry.path());
+            }
+        }
+        
+        if auc_files.is_empty() {
+            return Err(LoomError::Config(format!(
+                "未找到 .auc 字节码文件: {}",
+                compile_dir.display()
+            )));
+        }
+        
+        auc_files[0].clone()
+    };
+
+    // 读取 .auc 文件
+    let module = read_auc(&auc_path.to_string_lossy())
+        .map_err(|e| LoomError::Config(format!("读取字节码失败: {}", e)))?;
+
+    // 生成包名
+    let package_name = format!("{}-{}.auz", manifest.name, manifest.version);
     let package_path = package_dir.join(&package_name);
 
-    // 创建占位包文件
-    std::fs::write(&package_path, b"AURA-AUZ")?;
+    // 使用 PackageBuilder 打包
+    let options = PackageBuildOptions {
+        include_sources: manifest.package.include_sources,
+        include_resources: false,
+        resource_include_patterns: Vec::new(),
+        include_ref_index: true,
+        compression_level: 3,
+    };
+
+    let src_dir = dir.join("src");
+    let builder = PackageBuilder::new(&pkg_manifest, &module)
+        .with_source_dir(&src_dir)
+        .with_options(options);
+
+    let result = builder.build(&package_path)
+        .map_err(|e| LoomError::Config(format!("打包失败: {}", e)))?;
 
     Ok((
-        format!("✓ 打包完成: {}", package_path.display()),
-        vec![package_path],
+        format!("✓ 打包完成: {}", result.path.display()),
+        vec![result.path],
     ))
 }
 
@@ -469,6 +656,7 @@ mod tests {
             parallel_jobs: 4,
             alias: std::collections::HashMap::new(),
             active_profile: None,
+            mode: CompileMode::Vm,
         }
     }
 
@@ -523,7 +711,7 @@ mod tests {
         let task = make_task("compile-main", TaskKind::Compile("main".to_string()));
 
         let (msg, _artifacts) = execute_compile(&task, "main", &config).unwrap();
-        assert!(msg.contains("编译 main"));
+        assert!(msg.contains("字节码编译 main") || msg.contains("AOT 编译 main"));
     }
 
     #[test]

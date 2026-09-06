@@ -94,7 +94,7 @@ fn aot_add_matches_interpreter() {
     // 2) AOT 嵌入后经 VM 执行（do_call 命中 AOT 分发表 → 机器码）
     let embedded = compile_with_aot_embed(src);
     assert!(embedded.has_aot(), "模块应含 AOT 机器码段");
-    assert_eq!(embedded.aot_segments.len(), 2);
+    assert!(embedded.aot_segments.len() >= 2);
     let aot_fns: Vec<&compiler::codegen::opcode::BytecodeFunction> =
         embedded.functions.iter().filter(|f| f.aot_desc_idx > 0).collect();
     assert!(

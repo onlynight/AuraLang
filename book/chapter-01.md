@@ -131,10 +131,14 @@ fun exercise3() {
 }
 ```
 
-## 1.4 数据类与结构体
+## 1.4 数据类与值类型
+
+Aura 使用 `value class` 作为值类型（替代 Kotlin 的 `data class`），支持栈分配、值拷贝、FFI 映射。
+`class` 是引用类型（默认），支持继承和多态。
 
 ```aura
-struct Player(
+// 值类型（默认不可变，栈分配）
+value class Player(
     val id: Int,
     var name: String,
     var x: Float,
@@ -144,6 +148,16 @@ struct Player(
 
 val player = Player(1, "Alice", 0f, 0f)
 val copy = player.copy(name = "Bob", health = 50)
+
+// 值数据类（自动生成 toString/equals/hashCode/copy）
+value data class Config(val port: Int = 8080, var debug: Boolean = false)
+
+// 引用类型（继承、多态）
+class Animal { fun name(): String = "animal" }
+class Dog : Animal() { override fun name(): String = "dog" }
+
+// struct 是 value class 的别名（deprecated）
+struct Point(val x: Int, val y: Int)  // 等价于 value class Point(val x: Int, val y: Int)
 ```
 
 ### 练习 1.4

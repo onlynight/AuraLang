@@ -15,6 +15,21 @@ use crate::codegen::opcode::{AucSegment, AuraFuncDesc, SEG_DESC_TABLE, SEG_MACHI
 use crate::vm::abi::{AotCallContext, AotEntry, JitValue};
 use crate::vm::mmap_util::{MappedRegion, MemoryProtection};
 
+/// Phase 3.2: AOT 调用深度上限（设计文档 §3.2）
+pub const AOT_MAX_CALL_DEPTH: u32 = 1024;
+
+/// Phase 3.6: 模块诊断信息（设计文档 §3.6）
+#[derive(Debug, Clone)]
+pub struct ModuleDiagnostics {
+    pub module_id: u32,
+    pub name: String,
+    pub is_loaded: bool,
+    pub code_base: usize,
+    pub func_count: usize,
+    pub dispatch_count: usize,
+    pub entry_offsets: Vec<u64>,
+}
+
 /// A single loaded AOT module
 pub struct AotModule {
     pub module_id: u32,
@@ -145,12 +160,55 @@ impl AotModule {
     pub fn code_base(&self) -> usize {
         self.code_region.as_ref().map(|r| r.base).unwrap_or(0)
     }
+
+    /// Phase 4.3: 解析函数名（从描述符的 name_offset 提取）
+    /// 需要字符串池支持，当前使用默认名称
+    pub fn resolve_func_name(&self, func_idx: usize) -> Option<String> {
+        self.func_descriptors.get(func_idx).and_then(|desc| {
+            if desc.name_len == 0 {
+                None
+            } else {
+                // 描述符中存储了 name_offset 和 name_len
+                // 但字符串池数据在 .auc 文件的 SEG_STRING_POOL 段中
+                // 这里返回默认名称作为占位
+                Some(format!("func_{}", func_idx))
+            }
+        })
+    }
+}
+
+/// Phase 4.3: 模块依赖描述（跨模块调用支持）
+#[derive(Debug, Clone)]
+pub struct ModuleDependency {
+    /// 依赖的模块名称
+    pub name: String,
+    /// 需要从该模块导入的函数名列表
+    pub imports: Vec<String>,
+    /// 依赖模块已加载时的模块 ID（None = 未解析）
+    pub resolved_module_id: Option<u32>,
+}
+
+/// Phase 4.3: 跨模块符号条目
+#[derive(Debug, Clone)]
+pub struct CrossModuleSymbol {
+    /// 函数名
+    pub name: String,
+    /// 所属模块 ID
+    pub module_id: u32,
+    /// 函数在分发表中的索引
+    pub func_idx: usize,
 }
 
 /// AOT runtime: manages multiple AOT modules and a global dispatch table
 pub struct AotRuntime {
     modules: HashMap<u32, AotModule>,
     next_module_id: u32,
+    /// Phase 3.5: AOT 入口查找缓存 (func_idx -> module_id)
+    entry_cache: HashMap<usize, u32>,
+    /// Phase 4.3: 跨模块符号表 (func_name -> CrossModuleSymbol)
+    cross_module_symbols: HashMap<String, CrossModuleSymbol>,
+    /// Phase 4.3: 模块依赖表 (module_id -> dependencies)
+    module_dependencies: HashMap<u32, Vec<ModuleDependency>>,
 }
 
 impl AotRuntime {
@@ -158,6 +216,9 @@ impl AotRuntime {
         AotRuntime {
             modules: HashMap::new(),
             next_module_id: 1,
+            entry_cache: HashMap::new(),
+            cross_module_symbols: HashMap::new(),
+            module_dependencies: HashMap::new(),
         }
     }
 
@@ -219,7 +280,7 @@ impl AotRuntime {
             .find_entry(func_idx)
             .ok_or_else(|| format!("function {} not found in AOT dispatch table", func_idx))?;
         let mut ret = JitValue::null();
-        let ctx = AotCallContext {
+        let mut ctx = AotCallContext {
             module_id,
             func_idx: func_idx as u32,
             call_depth: 1,
@@ -228,6 +289,13 @@ impl AotRuntime {
         let ctx_ptr: *const () = &ctx as *const AotCallContext as *const ();
         let args_ptr = if args.is_empty() { std::ptr::null() } else { args.as_ptr() };
         entry(args_ptr, &mut ret, args.len(), ctx_ptr);
+        // Phase 2.6: 检查异常码（AOT 函数通过 ctx.exception 返回异常状态）
+        if ctx.exception != 0 {
+            return Err(format!(
+                "AOT function '{}' (module={}, func_idx={}) raised exception code {}",
+                module.name, module_id, func_idx, ctx.exception
+            ));
+        }
         Ok(ret)
     }
 
@@ -266,7 +334,347 @@ impl AotRuntime {
     pub fn get_module(&self, module_id: u32) -> Option<&AotModule> {
         self.modules.get(&module_id)
     }
+
+    // ── Phase 3.3: 热重载 API（设计文档 §3.3）──
+
+    /// 热重载模块：卸载旧版本并加载新版本，不重启进程
+    ///
+    /// 返回新的模块 ID。卸载失败时返回错误。
+    /// 调用者负责提供新版本数据。
+    pub fn hot_reload_module(
+        &mut self,
+        old_module_id: u32,
+        new_data: &[u8],
+        segments: &[AucSegment],
+        func_desc_idx: &[u32],
+        name: String,
+    ) -> Result<u32, String> {
+        // 1. 验证旧模块存在
+        if !self.modules.contains_key(&old_module_id) {
+            return Err(format!(
+                "hot_reload: module {} not loaded",
+                old_module_id
+            ));
+        }
+
+        // 2. 卸载旧模块
+        let old = self.modules.remove(&old_module_id);
+        if let Some(mut m) = old {
+            m.unload();
+        }
+
+        // 3. 加载新版本
+        self.load_module_from(new_data, segments, func_desc_idx, name)
+    }
+
+    /// 列出所有已加载模块的 ID 和名称
+    pub fn list_modules(&self) -> Vec<(u32, &str)> {
+        self.modules
+            .iter()
+            .map(|(&id, m)| (id, m.name.as_str()))
+            .collect()
+    }
+
+    // ── Phase 3.2: 模块沙箱（设计文档 §3.2）──
+
+    /// 检查调用深度是否超过限制
+    pub fn check_call_depth(&self, depth: u32) -> bool {
+        depth <= AOT_MAX_CALL_DEPTH
+    }
+
+    /// 当前最大调用深度限制
+    pub fn max_call_depth() -> u32 {
+        AOT_MAX_CALL_DEPTH
+    }
+
+    // ── Phase 3.5: AOT 入口查找缓存（设计文档 §3.5）──
+
+    /// 获取缓存的 AOT 入口（避免每次调用都遍历模块表）
+    pub fn cached_find_entry(&mut self, func_idx: usize) -> Option<(u32, AotEntry)> {
+        // 先查缓存
+        if let Some(&cached_id) = self.entry_cache.get(&func_idx) {
+            if let Some(m) = self.modules.get(&cached_id) {
+                if let Some(entry) = m.find_entry(func_idx) {
+                    return Some((cached_id, entry));
+                }
+            }
+            // 缓存失效，清除
+            self.entry_cache.remove(&func_idx);
+        }
+        // 遍历查找并缓存
+        for (id, m) in &self.modules {
+            if let Some(entry) = m.find_entry(func_idx) {
+                self.entry_cache.insert(func_idx, *id);
+                return Some((*id, entry));
+            }
+        }
+        None
+    }
+
+    /// 清除 AOT 入口缓存（模块卸载/重载后调用）
+    pub fn clear_entry_cache(&mut self) {
+        self.entry_cache.clear();
+    }
+
+    // ── Phase 3.6: 详细错误报告（设计文档 §3.6）──
+
+    /// 获取模块诊断信息
+    pub fn module_diagnostics(&self, module_id: u32) -> Option<ModuleDiagnostics> {
+        self.modules.get(&module_id).map(|m| ModuleDiagnostics {
+            module_id,
+            name: m.name.clone(),
+            is_loaded: m.is_loaded(),
+            code_base: m.code_base(),
+            func_count: m.func_descriptors.len(),
+            dispatch_count: m.dispatch_table.iter().filter(|e| e.is_some()).count(),
+            entry_offsets: m.func_descriptors.iter().map(|d| d.entry_offset).collect(),
+        })
+    }
+
+    /// 获取所有模块诊断信息
+    pub fn all_diagnostics(&self) -> Vec<ModuleDiagnostics> {
+        self.modules.iter().map(|(&id, _)| {
+            self.module_diagnostics(id).unwrap()
+        }).collect()
+    }
 }
+
+// ==================== Phase 4.3: 跨模块调用 ====================
+
+impl AotRuntime {
+    /// 注册模块依赖关系
+    pub fn register_module_dependency(
+        &mut self,
+        module_id: u32,
+        dependency: ModuleDependency,
+    ) {
+        self.module_dependencies
+            .entry(module_id)
+            .or_default()
+            .push(dependency);
+    }
+
+    /// 解析所有模块依赖
+    pub fn resolve_dependencies(&mut self) -> (usize, usize) {
+        let mut resolved = 0;
+        let mut unresolved = 0;
+        let mut available_funcs: HashMap<String, (u32, usize)> = HashMap::new();
+        for (&id, module) in &self.modules {
+            for (idx, desc) in module.func_descriptors.iter().enumerate() {
+                let name = module.resolve_func_name(idx);
+                if let Some(name) = name {
+                    available_funcs.insert(name, (id, idx));
+                }
+            }
+        }
+        let module_ids: Vec<u32> = self.module_dependencies.keys().copied().collect();
+        for mod_id in module_ids {
+            if let Some(deps) = self.module_dependencies.get_mut(&mod_id) {
+                for dep in deps.iter_mut() {
+                    if dep.resolved_module_id.is_some() { continue; }
+                    let dep_module_id = self.modules.iter().find_map(|(&id, m)| {
+                        if m.name == dep.name { Some(id) } else { None }
+                    });
+                    if let Some(dep_id) = dep_module_id {
+                        dep.resolved_module_id = Some(dep_id);
+                        for func_name in &dep.imports {
+                            if let Some(&(src_id, src_idx)) = available_funcs.get(func_name) {
+                                self.cross_module_symbols.insert(
+                                    func_name.clone(),
+                                    CrossModuleSymbol {
+                                        name: func_name.clone(),
+                                        module_id: src_id,
+                                        func_idx: src_idx,
+                                    },
+                                );
+                                resolved += 1;
+                            } else { unresolved += 1; }
+                        }
+                    } else {
+                        unresolved += dep.imports.len();
+                    }
+                }
+            }
+        }
+        (resolved, unresolved)
+    }
+
+    /// 按函数名查找跨模块符号
+    pub fn lookup_cross_module_symbol(&self, func_name: &str) -> Option<&CrossModuleSymbol> {
+        self.cross_module_symbols.get(func_name)
+    }
+
+    /// 获取模块的依赖列表
+    pub fn get_module_dependencies(&self, module_id: u32) -> Option<&[ModuleDependency]> {
+        self.module_dependencies.get(&module_id).map(|v| v.as_slice())
+    }
+
+    /// 获取已解析的跨模块符号数量
+    pub fn cross_module_symbol_count(&self) -> usize {
+        self.cross_module_symbols.len()
+    }
+}
+
+// ==================== Phase 4.5: 插件系统 ====================
+
+/// Phase 4.5: 插件信息
+#[derive(Debug, Clone)]
+pub struct PluginInfo {
+    /// 插件名称
+    pub name: String,
+    /// 插件路径（动态库路径）
+    pub path: String,
+    /// 插件版本
+    pub version: String,
+    /// 插件导出函数数量
+    pub func_count: usize,
+}
+
+/// Phase 4.5: 插件管理器
+///
+/// 管理第三方 AOT 模块的加载、卸载和发现。
+/// 支持通过动态库（`.so`/`.dylib`/`.dll`）加载插件。
+pub struct PluginManager {
+    /// 已加载插件列表
+    plugins: Vec<PluginInfo>,
+    /// 插件加载目录（搜索路径）
+    search_paths: Vec<String>,
+    /// 关联的 AOT 运行时
+    runtime: AotRuntime,
+}
+
+impl PluginManager {
+    /// 创建新的插件管理器
+    pub fn new() -> Self {
+        PluginManager {
+            plugins: Vec::new(),
+            search_paths: Vec::new(),
+            runtime: AotRuntime::new(),
+        }
+    }
+
+    /// 添加插件搜索路径
+    pub fn add_search_path(&mut self, path: String) {
+        self.search_paths.push(path);
+    }
+
+    /// 获取搜索路径列表
+    pub fn search_paths(&self) -> &[String] {
+        &self.search_paths
+    }
+
+    /// 加载插件（从动态库文件）
+    ///
+    /// 支持 `.auc` 文件格式的插件，以及 Tier 2 动态库格式。
+    pub fn load_plugin(&mut self, path: &str) -> Result<u32, String> {
+        let plugin_info = self.load_plugin_from_path(path)?;
+        let module_id = self.runtime.load_module(std::path::Path::new(path))?;
+        self.plugins.push(plugin_info);
+        Ok(module_id)
+    }
+
+    /// 从路径加载插件信息
+    fn load_plugin_from_path(&self, path: &str) -> Result<PluginInfo, String> {
+        // 尝试读取 .auc 文件获取插件元信息
+        if path.ends_with(".auc") {
+            let bytes = std::fs::read(path).map_err(|e| format!("读取插件 {} 失败: {}", path, e))?;
+            let module = crate::codegen::serialize::from_bytes(&bytes)
+                .map_err(|e| format!("解析插件 {} 失败: {}", path, e))?;
+
+            Ok(PluginInfo {
+                name: module.module_identity.name.clone(),
+                path: path.to_string(),
+                version: module.module_identity.version.clone(),
+                func_count: module.functions.len(),
+            })
+        } else {
+            // 动态库路径，提取文件名作为插件名
+            let file_name = std::path::Path::new(path)
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.to_string());
+            let stem = std::path::Path::new(&file_name)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or(file_name);
+
+            Ok(PluginInfo {
+                name: stem,
+                path: path.to_string(),
+                version: String::new(),
+                func_count: 0,
+            })
+        }
+    }
+
+    /// 卸载插件
+    pub fn unload_plugin(&mut self, plugin_name: &str) -> bool {
+        // 找到插件对应的模块 ID 并卸载
+        let plugin_idx = self.plugins.iter().position(|p| p.name == plugin_name);
+        if let Some(idx) = plugin_idx {
+            // 遍历运行时模块找到匹配的模块 ID
+            let module_ids: Vec<u32> = self.runtime.all_diagnostics().iter().map(|d| d.module_id).collect();
+            for id in module_ids {
+                if let Some(diag) = self.runtime.module_diagnostics(id) {
+                    if diag.name == plugin_name {
+                        self.runtime.unload_module(id);
+                        self.plugins.remove(idx);
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// 列出所有已加载插件
+    pub fn list_plugins(&self) -> &[PluginInfo] {
+        &self.plugins
+    }
+
+    /// 获取插件数量
+    pub fn plugin_count(&self) -> usize {
+        self.plugins.len()
+    }
+
+    /// 获取关联的 AOT 运行时（用于调用插件函数）
+    pub fn runtime(&self) -> &AotRuntime {
+        &self.runtime
+    }
+
+    pub fn runtime_mut(&mut self) -> &mut AotRuntime {
+        &mut self.runtime
+    }
+
+    /// 发现插件（扫描搜索路径中的 `.auc` 文件）
+    pub fn discover_plugins(&self) -> Vec<String> {
+        let mut found = Vec::new();
+        for search_path in &self.search_paths {
+            if let Ok(entries) = std::fs::read_dir(search_path) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().map(|e| e == "auc").unwrap_or(false) {
+                        found.push(path.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    /// 加载所有发现的插件
+    pub fn load_all_discovered(&mut self) -> Vec<Result<u32, String>> {
+        let plugins = self.discover_plugins();
+        plugins.iter().map(|p| self.load_plugin(p)).collect()
+    }
+}
+
+impl Default for PluginManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

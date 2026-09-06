@@ -1,4 +1,4 @@
-//! AOT 编译后端（LLVM）
+﻿//! AOT 编译后端（LLVM）
 //!
 //! 对应 `技术方案.md` 第九章。核心思路：
 //!
@@ -36,7 +36,10 @@ use crate::codegen::CodegenError;
 use crate::codegen::hir::HirProgram;
 
 pub use error::AotError;
-pub use linker::{LlvmToolError, LlvmToolResult, link_to_blob, link_to_executable, link_to_object};
+pub use linker::{
+    LlvmToolError, LlvmToolResult, link_to_blob, link_to_executable, link_to_object,
+    link_to_rust_host, link_to_shared_library,
+};
 pub use optimize::OptimizationLevel;
 pub use target::{AOTargetTriple, Architecture, OperatingSystem, TargetTriple, Vendor};
 pub use types::TypeMapper;
@@ -86,6 +89,10 @@ pub struct AotOutput {
     pub exe_path: Option<std::path::PathBuf>,
     /// 生成的机器码 blob 路径（如果 output_format == Blob）
     pub blob_path: Option<std::path::PathBuf>,
+    /// 生成的动态库路径（如果 output_format == SharedLibrary）
+    pub shared_library_path: Option<std::path::PathBuf>,
+    /// 编译期链接产物路径（如果 output_format == RustHost）
+    pub rust_host_path: Option<std::path::PathBuf>,
     /// Blob 格式下提取到的 AOT 函数描述符：`(脱前缀函数名, 描述符)`
     ///
     /// 供 [`crate::codegen::aot_embed::embed_aot`] 组装段表使用。
@@ -105,6 +112,10 @@ pub enum OutputFormat {
     Executable,
     /// 生成机器码 blob（原始 .text 段字节，嵌入 `.auc` 用）
     Blob,
+    /// 生成动态库（Tier 2：`.so` / `.dylib` / `.dll`）
+    SharedLibrary,
+    /// 编译期链接到 Rust 宿主（Tier 4）
+    RustHost,
 }
 
 /// AOT 代码生成器主结构体
@@ -159,6 +170,8 @@ impl AotCodeGenerator {
             object_path: None,
             exe_path: None,
             blob_path: None,
+            shared_library_path: None,
+            rust_host_path: None,
             descriptors: Vec::new(),
             ir_text: ir.clone(),
         };
@@ -195,7 +208,39 @@ impl AotCodeGenerator {
             return Ok(output);
         }
 
-        // 3b. Executable 格式：链接为可执行文件
+        // 3b. SharedLibrary 格式（Tier 2）：生成动态库
+        if output_format == OutputFormat::SharedLibrary {
+            let lib_path = output_dir.join(format!(
+                "{}{}",
+                stem,
+                if cfg!(target_os = "windows") {
+                    ".dll"
+                } else if cfg!(target_os = "macos") {
+                    ".dylib"
+                } else {
+                    ".so"
+                }
+            ));
+            linker::link_to_shared_library(&object_path, &lib_path, &self.options)
+                .map_err(|e| AotError::LinkerFailed(e.to_string()))?;
+            output.shared_library_path = Some(lib_path);
+            return Ok(output);
+        }
+
+        // 3c. RustHost 格式（Tier 4）：编译期链接到 Rust 宿主
+        if output_format == OutputFormat::RustHost {
+            let host_path = output_dir.join(format!(
+                "{}{}",
+                stem,
+                if cfg!(target_os = "windows") { ".exe" } else { "" }
+            ));
+            linker::link_to_rust_host(&object_path, &host_path, &self.options)
+                .map_err(|e| AotError::LinkerFailed(e.to_string()))?;
+            output.rust_host_path = Some(host_path);
+            return Ok(output);
+        }
+
+        // 3d. Executable 格式：链接为可执行文件
         let exe_path = output_dir.join(format!(
             "{}{}",
             stem,
@@ -253,6 +298,13 @@ pub fn aot_compile(
                 OutputFormat::Object
             } else if output_path.extension().map(|e| e == "blob").unwrap_or(false) {
                 OutputFormat::Blob
+            } else if output_path.extension().map(|e| {
+                e == "so" || e == "dylib" || e == "dll"
+            }).unwrap_or(false)
+            {
+                OutputFormat::SharedLibrary
+            } else if output_path.extension().map(|e| e == "rust_host").unwrap_or(false) {
+                OutputFormat::RustHost
             } else {
                 OutputFormat::Executable
             }
@@ -263,12 +315,18 @@ pub fn aot_compile(
     if output.exe_path.as_ref().map(|p| p != output_path).unwrap_or(false)
         || output.object_path.as_ref().map(|p| p != output_path).unwrap_or(false)
         || output.blob_path.as_ref().map(|p| p != output_path).unwrap_or(false)
+        || output.shared_library_path.as_ref().map(|p| p != output_path).unwrap_or(false)
+        || output.rust_host_path.as_ref().map(|p| p != output_path).unwrap_or(false)
     {
         if let Some(ref src) = output.exe_path {
             std::fs::copy(src, output_path).map_err(|e| CodegenError::Aot(e.to_string()))?;
         } else if let Some(ref src) = output.object_path {
             std::fs::copy(src, output_path).map_err(|e| CodegenError::Aot(e.to_string()))?;
         } else if let Some(ref src) = output.blob_path {
+            std::fs::copy(src, output_path).map_err(|e| CodegenError::Aot(e.to_string()))?;
+        } else if let Some(ref src) = output.shared_library_path {
+            std::fs::copy(src, output_path).map_err(|e| CodegenError::Aot(e.to_string()))?;
+        } else if let Some(ref src) = output.rust_host_path {
             std::fs::copy(src, output_path).map_err(|e| CodegenError::Aot(e.to_string()))?;
         }
     }

@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 
-use crate::manifest::LoomManifest;
+use crate::manifest::{CompileMode, LoomManifest};
 
 /// CLI 参数覆盖（从命令行解析）
 #[derive(Debug, Clone, Default)]
@@ -36,7 +36,7 @@ pub struct CliOverrides {
 }
 
 /// 解析后的最终构建配置
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ResolvedBuildConfig {
     /// 优化级别
     pub opt_level: u8,
@@ -64,6 +64,29 @@ pub struct ResolvedBuildConfig {
     pub alias: HashMap<String, String>,
     /// 活跃的 profile 名（如有）
     pub active_profile: Option<String>,
+    /// 编译模式（vm | jit | aot）
+    pub mode: CompileMode,
+}
+
+impl Default for ResolvedBuildConfig {
+    fn default() -> Self {
+        Self {
+            opt_level: 2,
+            debug: true,
+            target: None,
+            out_dir: "target/build".to_string(),
+            cache_dir: "target/cache".to_string(),
+            cache_remote: None,
+            cache_remote_shared: false,
+            emit_signatures: true,
+            emit_package: false,
+            parallel: true,
+            parallel_jobs: 4,
+            alias: HashMap::new(),
+            active_profile: None,
+            mode: CompileMode::default(),
+        }
+    }
 }
 
 /// 解析最终构建配置
@@ -124,6 +147,7 @@ pub fn resolve_build_config(manifest: &LoomManifest, cli: &CliOverrides) -> Reso
         parallel_jobs,
         alias: project_build.alias.clone(),
         active_profile: cli.profile.clone(),
+        mode: manifest.mode,
     }
 }
 

@@ -516,6 +516,72 @@ pub fn link_to_blob(
     Ok(descs)
 }
 
+// ==================== Phase 4: 动态库与编译期链接 ====================
+
+/// Tier 2: 将目标文件链接为动态库（`.so` / `.dylib` / `.dll`）
+///
+/// 动态库模式允许 AOT 编译的模块在运行时通过 `dlopen`/`LoadLibrary` 加载，
+/// 用于插件系统、第三方模块扩展等场景。
+pub fn link_to_shared_library(
+    input_path: &Path,
+    lib_path: &Path,
+    options: &AotOptions,
+) -> Result<(), AotError> {
+    let mut cmd = build_command("clang", options)?;
+    cmd.arg(input_path);
+    if options.debug_info {
+        cmd.arg("-g");
+    }
+    cmd.arg("-o").arg(lib_path);
+
+    // 跨平台动态库标志
+    #[cfg(target_os = "windows")]
+    { cmd.arg("-shared").arg("-Wl,/DLL"); }
+    #[cfg(target_os = "macos")]
+    { cmd.arg("-dynamiclib"); }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    { cmd.arg("-shared"); }
+
+    cmd.arg(options.opt_level.as_llvm_flag());
+    run_and_report(&mut cmd, "clang")?;
+    Ok(())
+}
+
+/// Tier 4: 编译期链接到 Rust 宿主
+///
+/// 将 AOT 目标文件与 Rust 宿主二进制链接，生成单一可执行文件。
+pub fn link_to_rust_host(
+    input_path: &Path,
+    host_path: &Path,
+    options: &AotOptions,
+) -> Result<(), AotError> {
+    let mut cffi_object_path = None;
+    if options.link_std_cffi {
+        cffi_object_path = Some(compile_std_cffi(options)?);
+    }
+
+    let mut cmd = build_command("clang", options)?;
+    cmd.arg(input_path);
+    if let Some(ref cffi_obj) = cffi_object_path {
+        cmd.arg(cffi_obj);
+    }
+    cmd.arg("-o").arg(host_path).arg(options.opt_level.as_llvm_flag());
+    if options.debug_info {
+        cmd.arg("-g");
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use super::target::OperatingSystem;
+        if options.target.os == OperatingSystem::Windows {
+            cmd.arg("-Wl,/subsystem:console");
+        }
+    }
+
+    run_and_report(&mut cmd, "clang")?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

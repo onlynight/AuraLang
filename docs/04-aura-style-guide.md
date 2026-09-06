@@ -92,18 +92,62 @@ fun loadConfig(path: String): Result<Config, Exception> {
 }
 ```
 
-### 4.2 结构体文档
+### 4.2 值类型文档
 ```aura
 /**
  * 玩家数据结构
  */
-data struct Player(
+value data class Player(
     val id: Int,
     var name: String = "unknown"
 )
 ```
 
-## 5. 注释
+## 5. 类型选择
+
+### 5.1 决策原则
+
+**默认用 `class`。** 需要值语义才 `value class`，需要并发才 `actor`。
+
+| 场景 | 用什么 | 理由 |
+|------|--------|------|
+| 纯数据容器（坐标、颜色、配置） | `value class` | 值语义，不可变，无泄漏 |
+| FFI 互操作（映射 C struct） | `value class` | 直接映射，无堆开销 |
+| 游戏物理（向量、矩阵、变换） | `value class` | 性能敏感，值拷贝安全 |
+| 函数返回值（创建临时对象） | `value class` | 无 ARC 泄漏风险 |
+| 需要继承的层级（Animal/Dog/Cat） | `class` | 虚方法派发 |
+| 需要多态（Drawable 引用列表） | `class` | 接口 + 继承 |
+| 需要身份（单例、注册表、观察者） | `class` | 引用相等 |
+| 并发实体（服务器、调度器） | `actor` | 消息传递 |
+| 不确定 | `class` | 最通用，后续按需迁移 |
+
+### 5.2 决策树
+
+```
+需要并发实体（跨线程消息传递、监督树）？
+  ├── 是 → actor
+  └── 否 → 需要值语义（栈分配、值拷贝、FFI 映射 C struct）？
+              ├── 是 → value class
+              └── 否 → class（默认）
+```
+
+### 5.3 修饰符组合规则
+
+| 组合 | 合法 | 说明 |
+|------|------|------|
+| `class` | ✅ | 引用类型，默认 |
+| `value class` | ✅ | 值类型 |
+| `data class` | ✅ | 引用数据类 |
+| `value data class` | ✅ | 值数据类 |
+| `sealed class` | ✅ | 受控引用类型 |
+| `sealed value class` | ✅ | 受控值类型 |
+| `actor` | ✅ | 并发实体（独立关键字） |
+| `value class : Base()` | ❌ | 值类型不支持继承 |
+| `actor class` | ❌ | actor 不是 class 的修饰符 |
+
+> **`struct` 是 `value class` 的别名（deprecated，v2.0 移除）。**
+
+## 6. 注释
 
 ### 5.1 单行注释
 ```aura
@@ -163,7 +207,7 @@ fun testLoadConfig() {
 
 | 陷阱 | 正确 | 错误 |
 |------|------|------|
-| 数据结构体 | `data struct` | `data class` |
+| 数据结构体 | `value class` | `data class` |
 | 并发实体 | `actor` | `class` |
 | 编译时函数 | `comptime fun` | `fun` |
 | FFI | `extern "c"` | `extern` |

@@ -916,3 +916,137 @@ mod tests {
         assert_eq!(m2.functions[0].aot_mode, 0);
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 3.1: Ed25519 签名（设计文档 §3.1）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Ed25519 密钥对
+#[cfg(feature = "llvm")]
+pub struct Ed25519Keypair {
+    pub secret_key: ed25519_dalek::SigningKey,
+    pub public_key: ed25519_dalek::VerifyingKey,
+}
+
+/// Ed25519 签名错误
+#[cfg(feature = "llvm")]
+#[derive(Debug)]
+pub enum SignatureError {
+    Io(String),
+    Format(String),
+    VerificationFailed,
+}
+
+#[cfg(feature = "llvm")]
+impl std::fmt::Display for SignatureError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SignatureError::Io(m) => write!(f, "io error: {}", m),
+            SignatureError::Format(m) => write!(f, "format error: {}", m),
+            SignatureError::VerificationFailed => write!(f, "signature verification failed"),
+        }
+    }
+}
+
+#[cfg(feature = "llvm")]
+impl std::error::Error for SignatureError {}
+
+#[cfg(feature = "llvm")]
+impl Ed25519Keypair {
+    /// 生成新的 Ed25519 密钥对
+    pub fn generate() -> Self {
+        use rand_core::OsRng;
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut OsRng);
+        let verifying_key = signing_key.verifying_key();
+        Ed25519Keypair {
+            secret_key: signing_key,
+            public_key: verifying_key,
+        }
+    }
+
+    /// 从字节数组恢复密钥对（64 bytes: 32 secret + 32 public）
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, SignatureError> {
+        if bytes.len() < 64 {
+            return Err(SignatureError::Format("keypair bytes too short".to_string()));
+        }
+        let secret = ed25519_dalek::SigningKey::from_bytes(&bytes[0..32].try_into().map_err(|_| SignatureError::Format("bad secret key length".to_string()))?);
+        let public = ed25519_dalek::VerifyingKey::from_bytes(&bytes[32..64].try_into().map_err(|_| SignatureError::Format("bad public key length".to_string()))?)
+            .map_err(|e| SignatureError::Format(e.to_string()))?;
+        Ok(Ed25519Keypair {
+            secret_key: secret,
+            public_key: public,
+        })
+    }
+
+    /// 导出密钥对字节（64 bytes）
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(64);
+        out.extend_from_slice(self.secret_key.as_bytes());
+        out.extend_from_slice(self.public_key.as_bytes());
+        out
+    }
+}
+
+/// 对 .auc v4 文件签名（Ed25519）
+///
+/// 签名内容：.auc 文件除签名段（最后 96 bytes: 64 signature + 32 public_key）
+/// 外的所有字节。
+///
+/// 签名格式（追加到 .auc 文件尾部）：
+/// - 64 bytes: Ed25519 签名
+/// - 32 bytes: 签名公钥
+#[cfg(feature = "llvm")]
+pub fn sign_auc(auc_bytes: &[u8], keypair: &Ed25519Keypair) -> Vec<u8> {
+    use ed25519_dalek::Signer;
+    use sha2::Digest;
+    let hash = sha2::Sha256::digest(auc_bytes);
+    let signature = keypair.secret_key.sign(&hash);
+    let mut out = Vec::with_capacity(auc_bytes.len() + 96);
+    out.extend_from_slice(auc_bytes);
+    out.extend_from_slice(signature.to_bytes().as_ref());
+    out.extend_from_slice(keypair.public_key.as_bytes());
+    out
+}
+
+#[cfg(feature = "llvm")]
+pub fn verify_auc_signature(
+    signed_bytes: &[u8],
+    expected_public_key: &[u8; 32],
+) -> Result<bool, SignatureError> {
+    use ed25519_dalek::Verifier;
+    use sha2::Digest;
+    if signed_bytes.len() < 96 {
+        return Err(SignatureError::Format("signed bytes too short".to_string()));
+    }
+    let content = &signed_bytes[..signed_bytes.len() - 96];
+    let sig_start = signed_bytes.len() - 96;
+    let pub_start = signed_bytes.len() - 32;
+    let signature_bytes = &signed_bytes[sig_start..pub_start];
+    let public_key_bytes = &signed_bytes[pub_start..];
+    if public_key_bytes != expected_public_key {
+        return Ok(false);
+    }
+    let hash = sha2::Sha256::digest(content);
+    let pk = ed25519_dalek::VerifyingKey::from_bytes(
+        &public_key_bytes.try_into().map_err(|_| SignatureError::Format("bad key len".to_string()))?,
+    )
+    .map_err(|e| SignatureError::Format(e.to_string()))?;
+    let sig = ed25519_dalek::Signature::from_bytes(
+        &signature_bytes.try_into().map_err(|_| SignatureError::Format("bad sig len".to_string()))?,
+    );
+    match pk.verify(&hash, &sig) {
+        Ok(()) => Ok(true),
+        Err(_) => Ok(false),
+    }
+}
+/// 对 .auc v4 文件签名（便捷入口：从环境变量加载密钥）
+#[cfg(feature = "llvm")]
+pub fn sign_auc_from_env(auc_bytes: &[u8]) -> Result<Vec<u8>, SignatureError> {
+    let key_bytes = std::env::var("AURA_ED25519_KEYPAIR")
+        .map_err(|_| SignatureError::Format("AURA_ED25519_KEYPAIR not set".to_string()))?;
+    let key_hex = key_bytes;
+    let key_bytes = hex::decode(&key_hex)
+        .map_err(|e| SignatureError::Format(format!("key hex decode failed: {}", e)))?;
+    let keypair = Ed25519Keypair::from_bytes(&key_bytes)?;
+    Ok(sign_auc(auc_bytes, &keypair))
+}

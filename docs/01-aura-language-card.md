@@ -10,7 +10,7 @@
 
 Aura 是 **NovaOS 的系统级脚本语言**，Kotlin 风格语法，Rust 实现，支持 AOT + JIT 混合编译、零成本 FFI、ARC 内存管理。
 与 Kotlin 相似：`val`/`var`、`fun`、`when`、泛型、空安全（`?`/`!!`/`?:`）、`suspend` 协程。
-与 Kotlin 不同：**`struct`** 而非 `data class`、`actor` 并发实体、`extern "c"` FFI、`Result<T,E>` 错误处理。
+与 Kotlin 不同：**`value class`**（值类型）而非 `data class`（引用类型）、`actor` 并发实体、`extern "c"` FFI、`Result<T,E>` 错误处理。`struct` 是 `value class` 的别名（deprecated）。
 
 **文件扩展名**：`.aura` | **编译器**：`cargo build --release` → `aura` CLI
 
@@ -49,13 +49,14 @@ fun main() { println("Hello!") }                    // 入口
 
 ### 2.3 数据结构
 ```aura
-// 结构体（两种形式）
-struct Point(val x: Int, val y: Int) {
+// 值类型（两种形式）
+value class Point(val x: Int, val y: Int) {
     fun manhattan(): Int = x + y
 }
-data struct Player(val id: Int, var name: String = "unknown", var health: Int = 100)
+value data class Player(val id: Int, var name: String = "unknown", var health: Int = 100)
+// struct 是 value class 的别名（deprecated）：struct Point(val x: Int, val y: Int)
 
-// 类
+// 引用类型（继承、多态）
 class Circle : Drawable { override fun draw() {} }
 sealed class Shape { fun area(): Float = 0.0f }
 class Dog : Animal() { override fun name(): String = "dog" }
@@ -364,7 +365,7 @@ extern "c" "libc" {
 
 | 陷阱 | ✅ 正确 | ❌ 错误 |
 |------|---------|---------|
-| 数据结构体 | `struct Name(...)` | `data class Name(...)` |
+| 数据结构体 | `value class Name(...)` | `data class Name(...)` |
 | 并发实体 | `actor Name { }` | `class Name { }` |
 | FFI 声明 | `extern "c" fun f()` | `extern fun f()` |
 | FFI 块 | `extern "c" "lib" { }` | `extern("c") { }` |
@@ -384,7 +385,7 @@ import aura.io.*
 import aura.concurrent.*
 import aura.fs.*
 
-data struct Config(val port: Int = 8080, var debug: Boolean = false)
+value data class Config(val port: Int = 8080, var debug: Boolean = false)
 
 actor Server(config: Config) {
     private var running: Boolean = false

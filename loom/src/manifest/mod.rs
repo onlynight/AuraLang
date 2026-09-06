@@ -60,6 +60,10 @@ pub struct LoomManifest {
     #[serde(default = "default_kind")]
     pub kind: String,
 
+    /// 编译模式: vm | jit | aot（根目录仅能配置一种）
+    #[serde(default = "default_mode")]
+    pub mode: CompileMode,
+
     /// 最低编译器版本
     #[serde(default, rename = "compiler-min-version")]
     pub compiler_min_version: Option<String>,
@@ -183,6 +187,7 @@ impl Default for LoomManifest {
             exports: Vec::new(),
             library: false,
             kind: default_kind(),
+            mode: CompileMode::default(),
             compiler_min_version: None,
             compiler_max_version: None,
             dependencies: Vec::new(),
@@ -364,6 +369,40 @@ fn default_opt_level() -> u8 {
 
 fn default_kind() -> String {
     "bytecode".to_string()
+}
+
+fn default_mode() -> CompileMode {
+    CompileMode::Vm
+}
+
+/// 编译模式（根目录仅能配置一种）
+///
+/// - `vm`: 字节码 + VM 解释执行
+/// - `jit`: 字节码 + JIT 编译执行
+/// - `aot`: AOT 编译为原生可执行文件
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CompileMode {
+    /// VM 解释执行（默认）
+    #[default]
+    #[serde(rename = "vm")]
+    Vm,
+    /// JIT 编译执行
+    #[serde(rename = "jit")]
+    Jit,
+    /// AOT 编译为原生可执行文件
+    #[serde(rename = "aot")]
+    Aot,
+}
+
+impl std::fmt::Display for CompileMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CompileMode::Vm => write!(f, "vm"),
+            CompileMode::Jit => write!(f, "jit"),
+            CompileMode::Aot => write!(f, "aot"),
+        }
+    }
 }
 
 fn default_debug() -> bool {

@@ -407,8 +407,9 @@ pub fn emit_program(
         if blob_mode && !func.is_native {
             if let Ok(wrapper_ir) = emit_wrapper(&mut ctx, func) {
                 ctx.sections.push(wrapper_ir);
+            } else {
+                eprintln!("warning: AOT wrapper generation failed for function '{}'", func.name);
             }
-            // 注意：包装函数生成失败不中断编译（该函数将被跳过）
         }
     }
 
@@ -1785,13 +1786,26 @@ const TAG_INT: u8 = 0;
 const TAG_FLOAT: u8 = 1;
 const TAG_BOOL: u8 = 2;
 const TAG_NULL: u8 = 3;
+const TAG_STR: u8 = 4;
+const TAG_PTR: u8 = 5;
+const TAG_OBJ: u8 = 6;
+const TAG_FUNC: u8 = 7;
+const TAG_ARRAY: u8 = 8;
+const TAG_LIST: u8 = 9;
+const TAG_MAP: u8 = 10;
+const TAG_CLOSURE: u8 = 11;
+const TAG_CSTRING: u8 = 12;
 
-/// Phase 1 参数个数上限
+/// Phase 2 参数个数上限（设计文档 §5.3）
 const MAX_AOT_ARGS: usize = 8;
 
-/// 将 Aura HIR 类型映射为 JitValue 标签
+/// 将 Aura HIR 类型映射为 JitValue 标签（Phase 2: 完整类型支持）
 ///
-/// Phase 1 仅支持 Int/Float/Bool/Unit（及其别名 Long/Double/Short/Byte 等）。
+/// 设计文档 §4.4 / §6.4:
+/// - 标量: Int/Float/Bool/Unit → TAG_INT/TAG_FLOAT/TAG_BOOL/TAG_NULL
+/// - 引用: String → TAG_STR, Pointer<T> → TAG_PTR, Array/List/Map → TAG_ARRAY/TAG_LIST/TAG_MAP
+/// - 闭包: Closure → TAG_CLOSURE, Function → TAG_FUNC
+/// - C ABI: CString → TAG_CSTRING
 fn map_type_to_tag(ty: &HirType) -> Result<u8, AotError> {
     match ty {
         HirType::Named(name) => match name.as_str() {
@@ -1799,16 +1813,23 @@ fn map_type_to_tag(ty: &HirType) -> Result<u8, AotError> {
             "Float" | "Double" => Ok(TAG_FLOAT),
             "Boolean" | "Bool" => Ok(TAG_BOOL),
             "Unit" | "Void" | "Nothing" => Ok(TAG_NULL),
+            "String" | "Str" => Ok(TAG_STR),
+            "CString" | "CStr" => Ok(TAG_CSTRING),
+            "List" => Ok(TAG_LIST),
+            "Map" => Ok(TAG_MAP),
+            "Array" => Ok(TAG_ARRAY),
+            "Closure" | "Lambda" => Ok(TAG_CLOSURE),
+            "Any" => Ok(TAG_OBJ), // Any 作为泛化对象指针
             other => Err(AotError::UnsupportedExpr(format!(
-                "Phase 1 AOT 不支持类型 '{}'（仅支持 Int/Float/Bool/Unit）",
+                "AOT 不支持类型 '{}'（已支持: Int/Float/Bool/Unit/String/Pointer/List/Map/Array/Closure）",
                 other
             ))),
         },
-        HirType::Nullable(_) | HirType::Pointer(_) | HirType::Function { .. } => Err(
-            AotError::UnsupportedExpr("Phase 1 AOT 不支持复杂类型（仅支持标量类型）".to_string()),
-        ),
+        HirType::Pointer(_) => Ok(TAG_PTR),
+        HirType::Function { .. } => Ok(TAG_FUNC),
+        HirType::Nullable(inner) => map_type_to_tag(inner),
         HirType::Unknown => Err(AotError::UnsupportedExpr(
-            "Phase 1 AOT 不支持 Unknown 类型".to_string(),
+            "AOT 不支持 Unknown 类型".to_string(),
         )),
     }
 }
@@ -1905,7 +1926,7 @@ fn emit_wrapper(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErro
         let payload_idx = (i * 2 + 1).to_string();
         let gep_var = format!("%arg{}_gep", i);
         let load_var = format!("%arg{}_payload", i);
-        let val_var = format!("%arg{}_val", i);
+        let mut val_var = format!("%arg{}_val", i);
 
         // 加载 payload: args[2*i+1]
         s.push_str(&format!(
@@ -1914,7 +1935,7 @@ fn emit_wrapper(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErro
         ));
         s.push_str(&format!("  {} = load i64, i64* {}\n", load_var, gep_var));
 
-        // 根据类型转换 payload
+        // 根据类型转换 payload（设计文档 §6.4）
         match *tag {
             TAG_INT => {
                 // i64 → target type (trunc/zext)
@@ -1956,6 +1977,29 @@ fn emit_wrapper(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErro
             TAG_NULL => {
                 // void: no parameter
                 continue;
+            }
+            // ── Phase 2: 引用/指针类型 — payload = 指针值 (i64)，inttoptr 转为 LLVM 指针 ──
+            TAG_STR | TAG_PTR | TAG_OBJ | TAG_ARRAY | TAG_LIST | TAG_MAP | TAG_CLOSURE
+            | TAG_CSTRING => {
+                // payload 是 i64 指针值，转为 LLVM 指针类型
+                let inttoptr_var = format!("%arg{}_ptr", i);
+                s.push_str(&format!(
+                    "  {} = inttoptr i64 {} to {}\n",
+                    inttoptr_var, load_var, llvm_ty
+                ));
+                // val_var = inttoptr 后的指针
+                // 注意：这里 val_var 直接赋值为 inttoptr_var
+                val_var = inttoptr_var;
+            }
+            TAG_FUNC => {
+                // 函数索引: payload 是 i64 函数索引
+                // LLVM 中函数类型通过指针表示，这里用 i64 地址
+                let inttoptr_var = format!("%arg{}_ptr", i);
+                s.push_str(&format!(
+                    "  {} = inttoptr i64 {} to {}\n",
+                    inttoptr_var, load_var, llvm_ty
+                ));
+                val_var = inttoptr_var;
             }
             _ => unreachable!(),
         }
@@ -2030,12 +2074,25 @@ fn emit_wrapper(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErro
             // void: payload = 0
             s.push_str("  %ret_payload = add i64 0, 0\n");
         }
+        // ── Phase 2: 引用/指针类型 — ptrtoint 转为 i64 ──
+        TAG_STR | TAG_PTR | TAG_OBJ | TAG_ARRAY | TAG_LIST | TAG_MAP | TAG_CLOSURE
+        | TAG_CSTRING | TAG_FUNC => {
+            // 返回值是指针类型，用 ptrtoint 转为 i64
+            s.push_str(&format!(
+                "  %ret_payload = ptrtoint {} {} to i64\n",
+                ret_llvm_ty, call_var
+            ));
+        }
         _ => unreachable!(),
     }
 
     s.push_str("  store i64 %ret_payload, i64* %ret_payload_addr\n");
 
-    // 6d. 返回 0
+    // 6d. 异常字段初始化（Phase 2.6: 设计文档 §2.6）
+    // 简化实现: VM 端 ctx.exception 已在 AotCallContext::new() 初始化为 0
+    // 包装函数无需显式写入；异常传播机制待 Phase 3 完善
+
+    // 6e. 返回 0（正常完成）
     s.push_str("  ret i64 0\n");
     s.push_str("}\n\n");
 
