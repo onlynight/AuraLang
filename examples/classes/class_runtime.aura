@@ -1,0 +1,119 @@
+// P-K2 综合验证：类运行时 + init/构造函数 + companion + operator + infix + tailrec + 访问器 + 继承
+
+// ① init 块 + 次构造函数
+class Person {
+    var age: Int = 0
+    val name: String = "unknown"
+    var created: Int = 0
+
+    init {
+        created = created + 100
+    }
+
+    constructor(n: String) {
+        println("ctor1")
+    }
+
+    init {
+        created = created + 1
+    }
+}
+
+// ② companion object
+class MathUtil {
+    companion object {
+        val PI: Float = 3.14f
+        fun max(a: Int, b: Int): Int {
+            if (a > b) { return a }
+            return b
+        }
+    }
+}
+
+// ③ operator 重载
+struct Vec2 {
+    var x: Float = 0.0f
+    var y: Float = 0.0f
+
+    operator fun plus(other: Vec2): Vec2 {
+        val r = Vec2()
+        r.x = x + other.x
+        r.y = y + other.y
+        return r
+    }
+}
+
+// ④ infix 函数
+infix fun combo(a: Int, b: Int): Int {
+    return a * 10 + b
+}
+
+// ⑤ tailrec
+tailrec fun fact(n: Int, acc: Int = 1): Int {
+    if (n <= 1) { return acc }
+    return fact(n - 1, n * acc)
+}
+
+// ⑥ 访问器
+class Temperature {
+    var celsius: Float = 0.0f
+        get() = field
+        set(value) {
+            field = value
+        }
+    val doubled: Float
+        get() = celsius * 2.0f
+}
+
+// ⑦ 继承 + open/override
+open class Animal {
+    var legs: Int = 4
+    open fun name(): String {
+        return "animal"
+    }
+}
+
+class Dog : Animal() {
+    override fun name(): String {
+        return "dog"
+    }
+}
+
+fun main() {
+    // 类方法 / 字段
+    val p = Person()
+    println(p.age)
+    println(p.created)
+
+    // companion
+    println(MathUtil.PI)
+    println(MathUtil.max(3, 7))
+
+    // operator
+    val v1 = Vec2()
+    v1.x = 1.0f
+    v1.y = 2.0f
+    val v2 = Vec2()
+    v2.x = 10.0f
+    v2.y = 20.0f
+    val v3 = v1 + v2
+    println(v3.x)
+    println(v3.y)
+
+    // infix
+    println(3 combo 5)
+
+    // tailrec
+    println(fact(10, 1))
+
+    // 访问器
+    val t = Temperature()
+    t.celsius = 21.5f
+    println(t.celsius)
+    println(t.doubled)
+
+    // 继承 + override
+    val a: Animal = Dog()
+    println(a.name())
+    println(a.legs)
+}

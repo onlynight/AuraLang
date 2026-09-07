@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::os::raw::c_void;
 use std::path::Path;
 
-use crate::codegen::opcode::{AucSegment, AuraFuncDesc, SEG_DESC_TABLE, SEG_MACHINE};
+use crate::codegen::opcode::{AucSegment, AuraFuncDesc, FUNC_EXPORT, SEG_DESC_TABLE, SEG_MACHINE};
 use crate::vm::abi::{AotCallContext, AotEntry, JitValue};
 use crate::vm::mmap_util::{MappedRegion, MemoryProtection};
 
@@ -99,6 +99,46 @@ impl AotModule {
             func_descriptors: descs,
             dispatch_table,
         })
+    }
+
+    /// 从动态库导出符号构建 AOT 模块（Tier 2 共享库加载）
+    ///
+    /// 用于 `load_shared_library`：dlopen 后通过 dlsym 获取每个 `aura_aot_*` 符号地址，
+    /// 直接构建分发表（无 mmap，OS 管理内存）。
+    ///
+    /// `symbols`：`(函数名, 入口函数指针, 参数个数, 返回标签, 参数标签编码)`
+    pub fn from_symbols(
+        symbols: Vec<(String, AotEntry, u8, u8, u8)>,
+        module_id: u32,
+        name: String,
+    ) -> Self {
+        let descs: Vec<AuraFuncDesc> = symbols
+            .iter()
+            .map(|(_, _, nargs, ret_tag, arg_tags)| AuraFuncDesc {
+                name_offset: 0,
+                name_len: 0,
+                _pad1: 0,
+                entry_offset: 0, // 共享库模式不使用 entry_offset（绝对地址）
+                num_args: *nargs,
+                arg_tags: *arg_tags,
+                return_tag: *ret_tag,
+                flags: FUNC_EXPORT,
+                source_line: 0,
+                source_file_offset: 0,
+                _pad2: 0,
+            })
+            .collect();
+
+        let dispatch_table: Vec<Option<AotEntry>> =
+            symbols.iter().map(|(_, entry, _, _, _)| Some(*entry)).collect();
+
+        AotModule {
+            module_id,
+            name,
+            code_region: None,
+            func_descriptors: descs,
+            dispatch_table,
+        }
     }
 
     fn parse_segments(data: &[u8]) -> Result<Vec<AuraFuncDesc>, String> {
@@ -209,6 +249,10 @@ pub struct AotRuntime {
     cross_module_symbols: HashMap<String, CrossModuleSymbol>,
     /// Phase 4.3: 模块依赖表 (module_id -> dependencies)
     module_dependencies: HashMap<u32, Vec<ModuleDependency>>,
+    /// Phase 4.5: 共享库句柄表 (module_id -> 动态库引用)
+    /// 使用 `Box<dyn Send + Sync>` 类型擦除，避免 `#[cfg]` 在结构体字段上。
+    /// 仅 `load_shared_library`（`dynamic-ffi` feature）填充此表。
+    shared_lib_handles: HashMap<u32, Box<dyn std::any::Any + Send + Sync>>,
 }
 
 impl AotRuntime {
@@ -219,6 +263,7 @@ impl AotRuntime {
             entry_cache: HashMap::new(),
             cross_module_symbols: HashMap::new(),
             module_dependencies: HashMap::new(),
+            shared_lib_handles: HashMap::new(),
         }
     }
 
@@ -257,11 +302,151 @@ impl AotRuntime {
         Ok(module_id)
     }
 
-    /// Unload a module (unmmap the machine code)
+    /// Phase 4.5: 从动态库加载 AOT 模块（Tier 2 共享库）
+    ///
+    /// dlopen 动态库 → 用 `object` crate 解析符号表 → 枚举 `aura_aot_*` 导出符号
+    /// → dlsym 获取函数地址 → 构建 `AotModule`。
+    /// 动态库句柄存储在 `shared_lib_handles` 中以防止被 OS 卸载。
+    ///
+    /// 需要 `llvm` + `dynamic-ffi` 两个 feature。
+    ///
+    /// 返回模块 ID，调用者可用 `call_func(module_id, func_idx, args)` 调用。
+    /// `func_idx` = 符号在枚举结果中的索引。
+    #[cfg(all(feature = "llvm", feature = "dynamic-ffi"))]
+    pub fn load_shared_library(&mut self, lib_path: &str) -> Result<u32, String> {
+        use object::Object;
+        use object::read::File as ObjectFile;
+
+        // 1. dlopen
+        let lib = unsafe {
+            libloading::Library::new(lib_path)
+                .map_err(|e| format!("dlopen 失败 {}: {}", lib_path, e))?
+        };
+
+        // 2. 用 object crate 解析共享库的导出符号
+        //    PE DLL 使用导出表（export table），不是 COFF 符号表；
+        //    ELF/Mach-O 使用符号表（symbols()）。
+        let bytes =
+            std::fs::read(lib_path).map_err(|e| format!("读取动态库 {} 失败: {}", lib_path, e))?;
+        let file = ObjectFile::parse(&bytes[..])
+            .map_err(|e| format!("解析动态库 {} 失败: {}", lib_path, e))?;
+
+        // 3. 收集所有 aura_aot_* 符号名
+        let mut symbol_names: Vec<String> = Vec::new();
+        match &file {
+            ObjectFile::Pe32(pe_file) => {
+                if let Some(export_table) =
+                    pe_file.export_table().map_err(|e| format!("解析导出表失败: {}", e))?
+                {
+                    for export in
+                        export_table.exports().map_err(|e| format!("读取导出表失败: {}", e))?
+                    {
+                        if let Some(name_bytes) = export.name {
+                            let name = String::from_utf8_lossy(name_bytes).to_string();
+                            if name.starts_with("aura_aot_") {
+                                symbol_names.push(name);
+                            }
+                        }
+                    }
+                }
+            }
+            ObjectFile::Pe64(pe_file) => {
+                if let Some(export_table) =
+                    pe_file.export_table().map_err(|e| format!("解析导出表失败: {}", e))?
+                {
+                    for export in
+                        export_table.exports().map_err(|e| format!("读取导出表失败: {}", e))?
+                    {
+                        if let Some(name_bytes) = export.name {
+                            let name = String::from_utf8_lossy(name_bytes).to_string();
+                            if name.starts_with("aura_aot_") {
+                                symbol_names.push(name);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {
+                // ELF/Mach-O/COFF：通过符号表枚举
+                use object::read::ObjectSymbol;
+                for symbol in file.symbols() {
+                    if symbol.is_undefined() {
+                        continue;
+                    }
+                    if let Ok(name) = symbol.name() {
+                        if name.starts_with("aura_aot_") {
+                            symbol_names.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        if symbol_names.is_empty() {
+            return Err(format!(
+                "动态库 {} 中未找到 aura_aot_* 导出符号（请确认编译时使用 --shared 生成）",
+                lib_path
+            ));
+        }
+
+        // 4. 为每个符号获取函数指针
+        let mut symbols: Vec<(String, AotEntry, u8, u8, u8)> = Vec::new();
+        for name in &symbol_names {
+            // 解析元数据
+            let meta = parse_aot_symbol_name(name);
+            let (_, nargs, ret_tag, arg_tags_vec) = match meta {
+                Some(m) => m,
+                None => continue,
+            };
+            let arg_tags_u8 = compute_arg_tags(&arg_tags_vec);
+
+            // dlsym 获取函数地址
+            let sym = unsafe {
+                lib.get::<fn()>(name.as_bytes())
+                    .map_err(|e| format!("dlsym 失败 {}: {}", name, e))?
+            };
+            // Symbol<T> implements Deref<Target = T>, dereference to get fn() then cast
+            let entry_fn: fn() = unsafe { std::mem::transmute(*sym) };
+            let addr: usize = entry_fn as usize;
+            let entry = unsafe { std::mem::transmute::<usize, AotEntry>(addr) };
+
+            symbols.push((name.clone(), entry, nargs, ret_tag, arg_tags_u8));
+        }
+
+        // 5. 从文件名提取模块名
+        let file_name = std::path::Path::new(lib_path)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| lib_path.to_string());
+        let stem = std::path::Path::new(&file_name)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or(file_name);
+
+        // 6. 构建 AotModule
+        let module_id = self.next_module_id;
+        let aot = AotModule::from_symbols(symbols, module_id, stem.clone());
+        self.modules.insert(module_id, aot);
+
+        // 7. 存储库句柄（防止被 OS 卸载）
+        self.shared_lib_handles.insert(module_id, Box::new(lib));
+
+        self.next_module_id = self.next_module_id.saturating_add(1);
+        Ok(module_id)
+    }
+
+    /// 获取共享库导出的函数数量（Phase 4.5）
+    #[cfg(all(feature = "llvm", feature = "dynamic-ffi"))]
+    pub fn shared_lib_func_count(&self, module_id: u32) -> usize {
+        self.modules.get(&module_id).map(|m| m.func_descriptors.len()).unwrap_or(0)
+    }
+
+    /// Unload a module (unmmap the machine code, drop shared library handle)
     pub fn unload_module(&mut self, module_id: u32) -> bool {
         if let Some(m) = self.modules.get_mut(&module_id) {
             m.unload();
         }
+        self.shared_lib_handles.remove(&module_id);
         self.modules.remove(&module_id).is_some()
     }
 
@@ -505,6 +690,35 @@ impl AotRuntime {
     }
 }
 
+// ==================== Phase 4.5: 共享库符号解析辅助 ====================
+
+/// 从 `aura_aot_<name>!<nargs>!<rettag>!<tag0>!<tag1>!...` 解析元数据
+fn parse_aot_symbol_name(name: &str) -> Option<(String, u8, u8, Vec<u8>)> {
+    if !name.starts_with("aura_aot_") {
+        return None;
+    }
+    let parts: Vec<&str> = name.split('!').collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    let func_part = parts[0]["aura_aot_".len()..].to_string();
+    let nargs: u8 = parts[1].parse().ok()?;
+    let rettag: u8 = parts[2].parse().ok()?;
+    let arg_tags: Vec<u8> = parts[3..].iter().filter_map(|s| s.parse().ok()).collect();
+    Some((func_part, nargs, rettag, arg_tags))
+}
+
+/// 将参数类型标签列表编码为 AuraFuncDesc.arg_tags (u8)
+fn compute_arg_tags(arg_tags: &[u8]) -> u8 {
+    if arg_tags.len() <= 2 {
+        let t0 = arg_tags.first().copied().unwrap_or(0) & 0x0F;
+        let t1 = arg_tags.get(1).copied().unwrap_or(0) & 0x0F;
+        (t0 << 4) | t1
+    } else {
+        (arg_tags.len() as u8) & 0x0F
+    }
+}
+
 // ==================== Phase 4.5: 插件系统 ====================
 
 /// Phase 4.5: 插件信息
@@ -555,8 +769,39 @@ impl PluginManager {
 
     /// 加载插件（从动态库文件）
     ///
-    /// 支持 `.auc` 文件格式的插件，以及 Tier 2 动态库格式。
+    /// 支持 `.auc` 文件格式的插件，以及 Tier 2 动态库格式（`.dll`/`.so`/`.dylib`）。
+    /// 动态库格式需要 `dynamic-ffi` feature。
     pub fn load_plugin(&mut self, path: &str) -> Result<u32, String> {
+        // Phase 4.5: 共享库路径（Tier 2 动态库）
+        if path.ends_with(".dll") || path.ends_with(".so") || path.ends_with(".dylib") {
+            #[cfg(all(feature = "llvm", feature = "dynamic-ffi"))]
+            {
+                let module_id = self.runtime.load_shared_library(path)?;
+                let func_count = self.runtime.shared_lib_func_count(module_id);
+                let stem = std::path::Path::new(path)
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.to_string());
+                let info = PluginInfo {
+                    name: stem,
+                    path: path.to_string(),
+                    version: String::new(),
+                    func_count,
+                };
+                self.plugins.push(info);
+                return Ok(module_id);
+            }
+            #[cfg(not(all(feature = "llvm", feature = "dynamic-ffi")))]
+            {
+                return Err(format!(
+                    "共享库加载需要启用 llvm + dynamic-ffi feature。\n\
+                     请使用: cargo run --features llvm,dynamic-ffi\n\
+                     然后调用 AotRuntime::load_shared_library(\"{}\")。",
+                    path
+                ));
+            }
+        }
+
         let plugin_info = self.load_plugin_from_path(path)?;
         let module_id = self.runtime.load_module(std::path::Path::new(path))?;
         self.plugins.push(plugin_info);
@@ -578,6 +823,20 @@ impl PluginManager {
                 version: module.module_identity.version.clone(),
                 func_count: module.functions.len(),
             })
+        } else if path.ends_with(".dll") || path.ends_with(".so") || path.ends_with(".dylib") {
+            // Phase 4.1: 共享库路径（Tier 2 动态库）。
+            // PluginManager 当前仅支持 .auc 格式的插件加载。
+            // 共享库加载请使用 DynamicLoader（启用 dynamic-ffi feature）：
+            //   DynamicLoader::load_lib(path, FfiAbi::C)
+            // 然后通过 dlsym 获取 aura_aot_* 符号（JitValue ABI 包装函数）。
+            // PluginManager 的完整共享库支持（含符号枚举与 AotModule 构建）留待后续阶段。
+            Err(format!(
+                "共享库加载尚未实现：PluginManager 当前仅支持 .auc 格式。\n\
+                 请使用 DynamicLoader（启用 dynamic-ffi feature）加载动态库：\n\
+                   DynamicLoader::load_lib(\"{}\", FfiAbi::C)\n\
+                 然后通过 dlsym 查找 aura_aot_* 符号（JitValue ABI 包装函数）。",
+                path
+            ))
         } else {
             // 动态库路径，提取文件名作为插件名
             let file_name = std::path::Path::new(path)

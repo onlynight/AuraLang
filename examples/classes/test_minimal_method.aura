@@ -1,0 +1,10 @@
+// 测试：最小方法体
+value class Point(val x: Int, val y: Int) {
+    fun getX(): Int = this.x
+}
+
+fun main() {
+    val p = Point(3, 4)
+    println(p.x)  // 应为 3
+    println(p.getX())  // 应为 3
+}

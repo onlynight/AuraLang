@@ -68,8 +68,10 @@ impl DynamicLoader {
     pub fn load_lib(&mut self, path: &str, abi: FfiAbi) -> Result<(), String> {
         #[cfg(feature = "dynamic-ffi")]
         {
-            let lib = libloading::Library::new(path)
-                .map_err(|e| format!("failed to load {}: {}", path, e))?;
+            let lib = unsafe {
+                libloading::Library::new(path)
+                    .map_err(|e| format!("failed to load {}: {}", path, e))?
+            };
             self.libs.push(LoadedLib {
                 path: path.to_string(),
                 lib,
@@ -99,11 +101,12 @@ impl DynamicLoader {
     /// 从最后一个加载的库中获取原始符号
     pub fn get_symbol<'a, T>(&'a self, name: &str) -> Result<libloading::Symbol<'a, T>, String> {
         let last = self.libs.last().ok_or_else(|| "no library loaded".to_string())?;
-        last.lib.get(name.as_bytes()).map_err(|e| format!("symbol '{}' not found: {}", name, e))
+        let sym = unsafe { last.lib.get(name.as_bytes()) };
+        sym.map_err(|e| format!("symbol '{}' not found: {}", name, e))
     }
 
     /// 获取已加载库的路径
-    pub fn loaded_libs(&self) -> &[String] {
-        &self.libs.iter().map(|l| l.path.clone()).collect::<Vec<_>>()
+    pub fn loaded_libs(&self) -> Vec<String> {
+        self.libs.iter().map(|l| l.path.clone()).collect()
     }
 }

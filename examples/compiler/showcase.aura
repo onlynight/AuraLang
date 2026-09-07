@@ -41,9 +41,9 @@ class Circle : Drawable {
     override fun draw() {}
 }
 
-/// 类继承 + override
-class Animal {
-    fun name(): String = "animal"
+/// 类继承 + override（Kotlin 语义：基类/方法需显式 open）
+open class Animal {
+    open fun name(): String = "animal"
 }
 class Dog : Animal() {
     override fun name(): String = "dog"

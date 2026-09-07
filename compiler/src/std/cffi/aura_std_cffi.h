@@ -23,6 +23,16 @@ extern "C" {
 #endif
 
 // ─────────────────────────────────────────────────────────────────────────────
+// AuraString 结构体（AOT 字符串表示：{ data, len }）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** AOT 字符串结构体：与 LLVM IR 的 { i8*, i64 } 对应 */
+typedef struct {
+    const char *data;
+    int64_t len;
+} AuraString;
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Prelude（17 个全局内置）
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -50,8 +60,11 @@ int64_t aura_to_int(double x);
 /** 转浮点 */
 double aura_to_float(int64_t x);
 
-/** 转字符串（简化：返回数字的字符串表示） */
+/** 转字符串（返回 C 风格字符串） */
 const char *aura_to_str(int64_t x);
+
+/** 转字符串（浮点数，返回 C 风格字符串） */
+const char *aura_to_str_float(double x);
 
 /** 时钟（微秒） */
 double aura_clock(void);
@@ -135,6 +148,16 @@ int aura_string_endsWith(const char *s, const char *suffix);
 const char *aura_string_replace(const char *s, const char *from, const char *to);
 
 // ─────────────────────────────────────────────────────────────────────────────
+// AOT 字符串操作（{ i8*, i64 } 结构体表示）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 字符串拼接（返回 C 风格字符串） */
+const char *aura_string_concat(const char *a, int64_t alen, const char *b, int64_t blen);
+
+/** 字符串转 C 字符串（返回 data 指针） */
+const char *aura_string_data(AuraString s);
+
+// ─────────────────────────────────────────────────────────────────────────────
 // aura.time — 时间
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -156,6 +179,22 @@ int64_t aura_random_nextInt(void);
 
 /** 随机浮点 [0, 1) */
 double aura_random_nextFloat(void);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 短名称包装函数（供 AOT IR 直接调用）
+// ─────────────────────────────────────────────────────────────────────────────
+
+void println(const char *s);
+void print(const char *s);
+int64_t aura_abs_wrapper(int64_t x);
+double aura_sqrt_wrapper(double x);
+double aura_pow_wrapper(double b, double e);
+int64_t toInt(double x);
+double toFloat(int64_t x);
+const char *toString(int64_t x);
+double aura_clock_wrapper(void);
+int64_t aura_strlen_wrapper(const char *s);
+const char *toStringFloat(double x);
 
 #ifdef __cplusplus
 }

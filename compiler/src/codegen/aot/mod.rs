@@ -62,6 +62,10 @@ pub struct AotOptions {
     pub link_std_cffi: bool,
     /// LLVM 工具链根目录（覆盖自动探测）
     pub llvm_home: Option<std::path::PathBuf>,
+    /// 是否生成 C ABI 包装函数（默认 false）
+    /// 启用后为每个函数生成裸 C ABI 包装（`define c i32 @aura_add(i32, i32)`），
+    /// 带 `dllexport`/`visibility("default")`，供外部 C/Python 消费者调用。
+    pub c_abi: bool,
 }
 
 impl Default for AotOptions {
@@ -74,6 +78,7 @@ impl Default for AotOptions {
             link_runtime: true,
             link_std_cffi: true,
             llvm_home: None,
+            c_abi: false,
         }
     }
 }
@@ -141,11 +146,13 @@ impl AotCodeGenerator {
     /// 从 HIR 程序生成 LLVM IR 文本，可选生成 JitValue ABI 包装函数
     ///
     /// `blob_mode = true` 时为每个函数生成 JitValue ABI 包装函数
-    /// （设计文档 §6.3-§6.5），用于 `OutputFormat::Blob` 路径。
+    /// （设计文档 §6.3-§6.5），用户函数标 `internal`，不合成 `main` 入口。
+    /// 用于 `OutputFormat::Blob` 与 `OutputFormat::SharedLibrary`。
     pub fn generate_ir_with_mode(
         &self,
         program: &HirProgram,
         blob_mode: bool,
+        _wrapper_exported: bool,
     ) -> Result<String, AotError> {
         emit::emit_program(self, program, blob_mode)
     }
@@ -157,8 +164,14 @@ impl AotCodeGenerator {
         output_dir: &Path,
         output_format: OutputFormat,
     ) -> Result<AotOutput, AotError> {
-        let blob_mode = matches!(output_format, OutputFormat::Blob);
-        let ir = self.generate_ir_with_mode(program, blob_mode)?;
+        // Blob 与 SharedLibrary 都需要 JitValue ABI 包装函数（blob_mode = true）。
+        // SharedLibrary 需要包装函数以 external linkage 导出，供 dlsym 查找。
+        let blob_mode = matches!(
+            output_format,
+            OutputFormat::Blob | OutputFormat::SharedLibrary
+        );
+        let wrapper_exported = matches!(output_format, OutputFormat::SharedLibrary);
+        let ir = self.generate_ir_with_mode(program, blob_mode, wrapper_exported)?;
 
         let stem = output_dir
             .file_stem()

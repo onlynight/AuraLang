@@ -139,11 +139,11 @@ fn build_command(tool: &str, options: &AotOptions) -> Result<Command, AotError> 
 
     let mut cmd = Command::new(tool_path);
 
-    // 目标三元组：llc 使用 `-mtriple`，clang 使用 `--target`（或 `-target`）
+    // 目标三元组：llc 使用 `-mtriple`，clang 使用 `-target`
     if tool == "llc" {
         cmd.arg("-mtriple").arg(options.target.to_string());
     } else {
-        cmd.arg("--target").arg(options.target.to_string());
+        cmd.arg("-target").arg(options.target.to_string());
     }
 
     Ok(cmd)
@@ -522,13 +522,24 @@ pub fn link_to_blob(
 ///
 /// 动态库模式允许 AOT 编译的模块在运行时通过 `dlopen`/`LoadLibrary` 加载，
 /// 用于插件系统、第三方模块扩展等场景。
+///
+/// 与 `link_to_executable` 保持一致：若 `link_std_cffi = true`，先编译
+/// `aura_std_cffi.c` 为目标文件并一并链接，确保 Aura 代码中调用的
+/// `aura_println` / `aura_malloc` 等 C FFI 符号在动态库内被解析。
 pub fn link_to_shared_library(
     input_path: &Path,
     lib_path: &Path,
     options: &AotOptions,
 ) -> Result<(), AotError> {
+    // Phase 4: 如果启用 std C FFI，先编译 C FFI 源文件（与可执行文件相同）
+    let cffi_object_path =
+        if options.link_std_cffi { Some(compile_std_cffi(options)?) } else { None };
+
     let mut cmd = build_command("clang", options)?;
     cmd.arg(input_path);
+    if let Some(ref cffi_obj) = cffi_object_path {
+        cmd.arg(cffi_obj);
+    }
     if options.debug_info {
         cmd.arg("-g");
     }
@@ -537,7 +548,7 @@ pub fn link_to_shared_library(
     // 跨平台动态库标志
     #[cfg(target_os = "windows")]
     {
-        cmd.arg("-shared").arg("-Wl,/DLL");
+        cmd.arg("-shared").arg("-Wl,/DLL").arg("-fuse-ld=lld").arg("-Wl,--export-all-symbols");
     }
     #[cfg(target_os = "macos")]
     {

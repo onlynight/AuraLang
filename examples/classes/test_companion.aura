@@ -1,0 +1,14 @@
+// 测试 companion object（伴生对象）：类级静态成员容器
+class Math {
+    companion object {
+        val PI: Float = 3.14f
+        fun max(a: Int, b: Int): Int {
+            return if (a > b) a else b
+        }
+    }
+}
+
+fun main() {
+    println(Math.PI)
+    println(Math.max(3, 7))
+}

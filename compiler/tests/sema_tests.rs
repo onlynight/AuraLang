@@ -527,8 +527,8 @@ fn test_override_without_base_method() {
 fn test_override_correct() {
     let errors = analyze(
         r#"
-        class Animal {
-            fun speak() {}
+        open class Animal {
+            open fun speak() {}
         }
         class Dog : Animal() {
             override fun speak() {}
@@ -843,4 +843,305 @@ fn test_await_in_class_method_non_suspend_is_error() {
         "expected await error in non-suspend class method, got: {:?}",
         errors
     );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Kotlin 关键字补全：open / abstract / internal / companion / constructor /
+// init / operator / infix / tailrec / reified / noinline / crossinline
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── open（继承开放性，P0）──
+
+#[test]
+fn test_inherit_from_non_open_class_is_error() {
+    // Kotlin 语义：类默认 final，未标记 open 不可被继承
+    let errors = analyze(
+        r#"
+        class Animal {
+            fun name(): String = "animal"
+        }
+        class Dog : Animal() {
+            fun name(): String = "dog"
+        }
+        "#,
+    );
+    assert!(
+        has_error_containing(&errors, "non-open class"),
+        "expected non-open inheritance error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_inherit_from_open_class_ok() {
+    let errors = analyze(
+        r#"
+        open class Animal {
+            open fun name(): String = "animal"
+        }
+        class Dog : Animal() {
+            override fun name(): String = "dog"
+        }
+        "#,
+    );
+    assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+}
+
+#[test]
+fn test_override_non_open_method_is_error() {
+    let errors = analyze(
+        r#"
+        open class Animal {
+            fun name(): String = "animal"
+        }
+        class Dog : Animal() {
+            override fun name(): String = "dog"
+        }
+        "#,
+    );
+    assert!(
+        has_error_containing(&errors, "not open"),
+        "expected override-non-open error, got: {:?}",
+        errors
+    );
+}
+
+// ── abstract（抽象类 / 抽象方法，P1）──
+
+#[test]
+fn test_abstract_class_with_abstract_method_ok() {
+    let errors = analyze(
+        r#"
+        abstract class Shape {
+            abstract fun area(): Float
+            fun describe(): String = "shape"
+        }
+        class Circle : Shape() {
+            override fun area(): Float = 3.14f
+        }
+        "#,
+    );
+    assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+}
+
+#[test]
+fn test_abstract_method_with_body_is_error() {
+    let errors = analyze(
+        r#"
+        abstract class Shape {
+            abstract fun area(): Float {
+                return 0.0f
+            }
+        }
+        "#,
+    );
+    assert!(
+        has_error_containing(&errors, "cannot have a body"),
+        "expected abstract-with-body error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_abstract_method_outside_abstract_class_is_error() {
+    let errors = analyze(
+        r#"
+        class Shape {
+            abstract fun area(): Float
+        }
+        "#,
+    );
+    assert!(
+        has_error_containing(&errors, "only allowed inside an abstract class"),
+        "expected abstract-outside-abstract-class error, got: {:?}",
+        errors
+    );
+}
+
+// ── internal（模块级可见性，P0）──
+
+#[test]
+fn test_internal_visibility_parses() {
+    let errors = analyze(
+        r#"
+        internal class Helper {
+            internal val tag: String = "helper"
+            internal fun help(): Int = 1
+        }
+        fun main(): Int {
+            val h = Helper()
+            return h.help()
+        }
+        "#,
+    );
+    assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+}
+
+// ── tailrec（尾递归，P2）──
+
+#[test]
+fn test_tailrec_without_recursion_is_error() {
+    let errors = analyze(
+        r#"
+        tailrec fun sum(n: Int): Int {
+            return n + 1
+        }
+        "#,
+    );
+    assert!(
+        has_error_containing(&errors, "no recursive call"),
+        "expected tailrec-without-recursion error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_tailrec_recursive_ok() {
+    let errors = analyze(
+        r#"
+        tailrec fun factorial(n: Int, acc: Int = 1): Int {
+            if (n <= 1) { return acc }
+            return factorial(n - 1, n * acc)
+        }
+        "#,
+    );
+    assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+}
+
+// ── companion / init / constructor（P0/P1）──
+
+#[test]
+fn test_companion_object_ok() {
+    let errors = analyze(
+        r#"
+        class Math {
+            companion object {
+                val PI: Float = 3.14f
+                fun max(a: Int, b: Int): Int {
+                    if (a > b) { return a }
+                    return b
+                }
+            }
+        }
+        "#,
+    );
+    assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+}
+
+#[test]
+fn test_companion_duplicate_is_error() {
+    let errors = analyze(
+        r#"
+        class Math {
+            companion object {
+                val PI: Float = 3.14f
+            }
+            companion object Log {
+                val TAG: String = "math"
+            }
+        }
+        "#,
+    );
+    assert!(
+        has_error_containing(&errors, "only one companion object"),
+        "expected duplicate companion error, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_init_block_and_secondary_constructor_ok() {
+    let errors = analyze(
+        r#"
+        class Person {
+            var age: Int = 0
+            val name: String = "unknown"
+
+            init {
+                println("created")
+            }
+
+            constructor(n: String) {
+                println(n)
+            }
+
+            constructor(n: String, a: Int) : super() {
+                println(n)
+            }
+        }
+        "#,
+    );
+    assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+}
+
+#[test]
+fn test_init_constructor_style_ok() {
+    // Aura 既有惯例：init(params) { ... } 作为构造函数（裸字段名赋值）
+    let errors = analyze(
+        r#"
+        class Circle {
+            val radius: Float
+            init(r: Float) {
+                radius = r
+            }
+        }
+        "#,
+    );
+    assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+}
+
+// ── 属性访问器（get / set / field，P3 软关键字）──
+
+#[test]
+fn test_property_accessors_ok() {
+    let errors = analyze(
+        r#"
+        class Temperature {
+            var celsius: Float = 0.0f
+                get() = field
+                set(value) {
+                    field = value
+                }
+            val fahrenheit: Float
+                get() = celsius * 1.8f + 32.0f
+        }
+        "#,
+    );
+    assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+}
+
+#[test]
+fn test_field_in_setter_type_checked() {
+    let errors = analyze(
+        r#"
+        class Counter {
+            var count: Int = 0
+                set(v) {
+                    field = v
+                }
+        }
+        "#,
+    );
+    assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+}
+
+// ── reified / noinline / crossinline / vararg / out（解析层）──
+
+#[test]
+fn test_generic_modifier_keywords_ok() {
+    let errors = analyze(
+        r#"
+        inline fun <reified T> isInstanceOf(v: T): Boolean {
+            return true
+        }
+        class Box<out E>
+        fun sum(vararg nums: Int): Int {
+            return 0
+        }
+        fun tag(noinline cb: Int): Int {
+            return cb
+        }
+        "#,
+    );
+    assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
 }

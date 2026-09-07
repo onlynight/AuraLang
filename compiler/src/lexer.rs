@@ -67,6 +67,7 @@ const KEYWORDS: &[(&str, TokenKind)] = &[
     ("lazy", TokenKind::Lazy),
     ("lateinit", TokenKind::Lateinit),
     ("data", TokenKind::Data),
+    ("value", TokenKind::Value),
     ("await", TokenKind::Await),
     ("to", TokenKind::To),
     // P10 并发运行时关键字（async 和 select 保留为关键字；spawn/send/ask/channel 作为普通标识符）

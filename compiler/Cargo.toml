@@ -44,7 +44,7 @@ toml = "0.8"
 # - 未来当 inkwell 支持 LLVM 23 后可升级
 thiserror = { version = "1", optional = true }
 # 纯 Rust 目标文件解析（ELF / COFF / PE），用于 AOT blob 提取
-object = { version = "0.36", optional = true }
+object = { version = "0.36", optional = true, features = ["pe"] }
 # Phase 3.1: Ed25519 签名（.auc v4 安全验证）
 ed25519-dalek = { version = "2", optional = true, features = ["rand_core"] }
 rand_core = { version = "0.6", optional = true }
@@ -108,6 +108,22 @@ required-features = ["llvm"]
 
 [[example]]
 name = "aot_vs_c_bench"
+required-features = ["llvm"]
+
+[[example]]
+name = "aot_shared_lib"
+required-features = ["llvm"]
+
+[[example]]
+name = "aot_plugin_load"
+required-features = ["llvm", "dynamic-ffi"]
+
+[[example]]
+name = "aot_c_abi"
+required-features = ["llvm"]
+
+[[example]]
+name = "test_object_parse"
 required-features = ["llvm"]
 
 [[bench]]

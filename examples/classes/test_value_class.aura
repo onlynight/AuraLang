@@ -1,0 +1,32 @@
+// 测试 value class 语法
+value class Point(val x: Int, val y: Int) {
+    fun manhattan(): Int = x + y
+}
+
+value data class Config(val port: Int = 8080, var debug: Boolean = false)
+
+open class Animal {
+    open fun name(): String = "animal"
+}
+
+class Dog : Animal() {
+    override fun name(): String = "dog"
+}
+
+struct Vec2(val x: Float, val y: Float)
+
+fun main() {
+    val p = Point(3, 4)
+    println(p.x)
+    println(p.y)
+    println(p.manhattan())
+
+    val c = Config(port = 3000)
+    println(c.port)
+
+    val d = Dog()
+    println(d.name())
+
+    val v = Vec2(1.0f, 2.0f)
+    println(v.x)
+}

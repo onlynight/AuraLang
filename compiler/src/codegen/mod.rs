@@ -34,7 +34,7 @@ pub mod aot_embed;
 
 pub use disasm::disassemble;
 pub use emit::{emit_module, find_const};
-pub use hir::{HirProgram, desugar_program, synthesize_main_if_missing};
+pub use hir::{HirProgram, desugar_program, desugar_program_with, synthesize_main_if_missing};
 pub use mir::{MirFunction, lower_program};
 pub use mono::mono_hir;
 pub use opcode::{
@@ -98,8 +98,17 @@ impl Default for CodeGenOptions {
 
 /// 从 AST 程序编译为字节码模块
 pub fn compile(program: &Program, opts: &CodeGenOptions) -> BytecodeModule {
+    compile_with_info(program, opts, &crate::sema::info::SemaInfo::default())
+}
+
+/// 从 AST 程序编译为字节码模块（带 sema 类型信息：类方法/运算符/访问器按接收者类型分派）
+pub fn compile_with_info(
+    program: &Program,
+    opts: &CodeGenOptions,
+    info: &crate::sema::info::SemaInfo,
+) -> BytecodeModule {
     // 1. AST → HIR（去语法糖）
-    let mut hir = desugar_program(program);
+    let mut hir = desugar_program_with(program, Some(info));
 
     // 2. 脚本模式：合成隐式 main（若无 main 但有顶层语句）
     let _synthesized = synthesize_main_if_missing(&mut hir);
@@ -185,7 +194,7 @@ pub fn compile_source(source: &str) -> Result<BytecodeModule, String> {
         enabled_modules,
     };
 
-    Ok(compile(&program, &opts))
+    Ok(compile_with_info(&program, &opts, &sema.info))
 }
 
 /// 从 AST 程序提取启用的 std 模块名

@@ -1,0 +1,8 @@
+// 测试 value data class
+value data class Config(val port: Int = 8080, var debug: Boolean = false)
+
+fun main() {
+    val c = Config()
+    println(c.port)
+    println(c.debug)
+}

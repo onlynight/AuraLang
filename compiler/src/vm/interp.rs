@@ -126,7 +126,19 @@ impl Vm {
 
             // ── 对象 / 数组 ──
             Instr::NewObject(type_tag) => {
-                let h = self.heap.alloc_object(type_tag);
+                // P-K2：类对象挂虚方法表（open 方法动态分派）
+                let h = match self.module.module.vtables.iter().find(|vt| vt.type_tag == type_tag) {
+                    Some(vt) => {
+                        let map: std::collections::HashMap<u16, usize> = vt
+                            .slots
+                            .iter()
+                            .enumerate()
+                            .map(|(i, &f)| (i as u16, f as usize))
+                            .collect();
+                        self.heap.alloc_object_with_vtable(type_tag, map)
+                    }
+                    None => self.heap.alloc_object(type_tag),
+                };
                 self.frames[top].stack.push(Value::Ref(h));
             }
             Instr::NewArray => {

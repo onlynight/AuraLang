@@ -80,6 +80,14 @@ impl TypeMapper {
             "Color" => "{ i8, i8, i8, i8 }".to_string(),
             // 运行时类型 → 不透明指针（堆对象）
             "List" | "Map" | "Set" | "Value" | "Iterator" | "Closure" => "i8*".to_string(),
+            // 参数化类型如 List<Int>, Map<String, Int> 等
+            _ if name.starts_with("List<")
+                || name.starts_with("Map<")
+                || name.starts_with("Set<")
+                || name.starts_with("Array<") =>
+            {
+                "i8*".to_string()
+            }
             // 函数类型 → 函数指针
             _ if name.starts_with('(') => "ptr".to_string(),
             _ => {

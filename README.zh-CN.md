@@ -136,10 +136,10 @@ cargo build --release
 
 ```bash
 # 编译并执行
-aura run examples/showcase.aura
+aura run examples/compiler/showcase.aura
 
 # AOT 编译为原生可执行文件
-aura build --aot examples/game_2d_demo.aura --target x86_64-pc-windows-msvc
+aura build --aot examples/games/game_2d_demo.aura --target x86_64-pc-windows-msvc
 
 # 交互式 REPL
 aura repl

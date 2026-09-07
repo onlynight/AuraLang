@@ -72,6 +72,9 @@ pub enum MirInstr {
     DeferEnd,
     /// 协程挂起点（P10.1）：`await` 挂起当前协程
     Yield,
+    /// 虚方法调用（P-K2）：vtable 分派。`args[0]` 为接收者（self），
+    /// 发射时按序压参后额外再压一次接收者（VM 先弹对象）。
+    CallMethod { dst: Option<Reg>, method: String, args: Vec<Reg> },
 }
 
 /// 基本块终结指令（控制流）
@@ -835,13 +838,88 @@ impl MirBuilder {
                     dst,
                     type_name: type_name.clone(),
                 });
-                if !argv.is_empty() {
-                    self.emit(MirInstr::CallNative {
-                        dst: None,
-                        func: "__ctor".into(),
-                        args: argv,
+                // 查找结构体字段名和默认值
+                let (field_names, default_values, synth_ctors) = {
+                    let hp = self.hir_program.as_ref();
+                    hp.and_then(|hp| hp.structs.iter().find(|s| s.name == *type_name))
+                        .map(|s| {
+                            (
+                                s.fields.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
+                                s.default_values.clone(),
+                                s.synth_ctors.clone(),
+                            )
+                        })
+                        .unwrap_or_default()
+                };
+                // P-K2：类合成构造函数（init 块/次构造函数）—— 字段默认值 + __ctorN(self, args...)
+                if let Some(&arity) = synth_ctors.iter().find(|&&a| a == argv.len()) {
+                    // 先填字段默认值（构造函数体可依赖）
+                    for (i, dv) in default_values.iter().enumerate() {
+                        if let Some(field_name) = field_names.get(i) {
+                            if let Some(expr) = dv {
+                                let r = self.lower_expr(&**expr, ctx);
+                                self.emit(MirInstr::SetField {
+                                    obj: dst,
+                                    field: field_name.clone(),
+                                    src: r,
+                                });
+                            }
+                        }
+                    }
+                    let mut cargs = vec![dst];
+                    cargs.extend(argv);
+                    let call_dst = self.alloc_reg();
+                    self.emit(MirInstr::Call {
+                        dst: Some(call_dst),
+                        func: format!("{}.__ctor{}", type_name, arity),
+                        args: cargs,
                     });
+                    return dst;
                 }
+                if !argv.is_empty() {
+                    // 有参数：使用提供的参数
+                    for (i, arg) in argv.iter().enumerate() {
+                        if let Some(field_name) = field_names.get(i) {
+                            self.emit(MirInstr::SetField {
+                                obj: dst,
+                                field: field_name.clone(),
+                                src: *arg,
+                            });
+                        }
+                    }
+                } else {
+                    // 无参数：使用默认值
+                    for (i, dv) in default_values.iter().enumerate() {
+                        if let Some(field_name) = field_names.get(i) {
+                            if let Some(expr) = dv {
+                                let r = self.lower_expr(&**expr, ctx);
+                                self.emit(MirInstr::SetField {
+                                    obj: dst,
+                                    field: field_name.clone(),
+                                    src: r,
+                                });
+                            }
+                        }
+                    }
+                }
+                dst
+            }
+            HirExpr::CallVirtual {
+                recv,
+                name,
+                args,
+            } => {
+                // 栈序：args（含 self）按序压栈，最后再压一次接收者（do_call_method 先弹对象）
+                let mut argv: Vec<Reg> = vec![self.lower_expr(recv, ctx)];
+                for a in args {
+                    argv.push(self.lower_expr(a, ctx));
+                }
+                let dst = self.alloc_reg();
+                self.emit(MirInstr::CallMethod {
+                    dst: Some(dst),
+                    method: name.clone(),
+                    args: argv,
+                });
                 dst
             }
             HirExpr::If {

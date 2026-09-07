@@ -295,6 +295,8 @@ pub enum Expr {
         expr: Box<Expr>,
         span: Span,
     },
+    /// this 引用（对象自身）
+    This(Span),
     /// select 多路复用（P10.9）：多个 `Channel.receive()` 分支 + 可选 default
     Select {
         branches: Vec<SelectBranch>,
@@ -354,6 +356,98 @@ pub enum FnModifier {
     Override,
     Comptime,
     Static,
+    /// 可被子类重写（Kotlin：成员默认 final，需显式 open）
+    Open,
+    /// 抽象方法：无函数体，必须由子类实现
+    Abstract,
+    /// 运算符重载标记（plus/minus/eq 等）
+    Operator,
+    /// 中缀函数：`a between b` 形式调用
+    Infix,
+    /// 尾递归优化标记：编译器校验自递归并优化为循环
+    Tailrec,
+    /// inline 函数中禁止内联的 lambda 参数
+    Noinline,
+    /// inline 函数中允许在非局部上下文调用的 lambda 参数
+    Crossinline,
+    /// 多平台 expect 声明（声明与实现分离）
+    Expect,
+    /// 多平台 actual 实现
+    Actual,
+}
+
+/// 类修饰符（value / data / sealed / final / open / abstract / expect / actual）。
+/// `struct` 解析为 `ClassDecl { modifiers: [Value], ... }`，作为 `value class` 的别名。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ClassModifier {
+    /// 值类型：栈内联、值拷贝、无继承、映射 C struct
+    Value,
+    /// 数据类：自动生成 toString/equals/hashCode/copy
+    Data,
+    /// 受控继承
+    Sealed,
+    /// 不可继承
+    Final,
+    /// 可被继承（Kotlin：类默认 final）
+    Open,
+    /// 抽象类：可包含抽象方法，不能直接实例化
+    Abstract,
+    /// 多平台 expect 声明
+    Expect,
+    /// 多平台 actual 实现
+    Actual,
+}
+
+/// 次构造函数 / init 构造函数（Kotlin `constructor` / `init(params)`）
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConstructorDecl {
+    pub visibility: Visibility,
+    pub params: Vec<Param>,
+    /// 委托调用：`: super(...)` / `: this(...)`（或 Aura 风格 `: Base(...)`，按 super 处理）
+    pub delegation: Option<ConstructorDelegation>,
+    pub body: Option<Box<Expr>>,
+    pub span: Span,
+}
+
+/// 构造函数委托目标
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CtorDelegationTarget {
+    Super,
+    This,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConstructorDelegation {
+    pub target: CtorDelegationTarget,
+    pub args: Vec<Expr>,
+    pub span: Span,
+}
+
+/// 伴生对象（Kotlin `companion object`）：类级静态成员容器
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompanionDecl {
+    /// `companion object Name { ... }` 的可选名称
+    pub name: Option<String>,
+    pub fields: Vec<StructField>,
+    pub methods: Vec<FnDecl>,
+    pub init_blocks: Vec<Expr>,
+    pub span: Span,
+}
+
+/// 属性访问器单条声明（getter / setter）
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccessorDecl {
+    /// setter 参数（getter 恒为 None）
+    pub param: Option<Param>,
+    pub body: Box<Expr>,
+    pub span: Span,
+}
+
+/// 属性访问器集合（Kotlin 软关键字 `get` / `set`；访问器体内可用 `field` 引用底层字段）
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FieldAccessors {
+    pub getter: Option<AccessorDecl>,
+    pub setter: Option<AccessorDecl>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -366,6 +460,12 @@ pub struct StructDecl {
     pub fields: Vec<StructField>,
     pub methods: Vec<FnDecl>,
     pub implementations: Vec<String>, // "TraitName"
+    /// init 块 / init 构造函数体（Kotlin 风格 `init { ... }`）
+    pub init_blocks: Vec<Expr>,
+    /// 次构造函数（`constructor(...)` / `init(...)`）
+    pub constructors: Vec<ConstructorDecl>,
+    /// 伴生对象（`companion object { ... }`）
+    pub companion_objects: Vec<CompanionDecl>,
     pub doc: Option<String>,
     pub span: Span,
 }
@@ -377,6 +477,8 @@ pub struct StructField {
     pub name: String,
     pub type_hint: Option<Box<Type>>,
     pub default_value: Option<Box<Expr>>,
+    /// 属性访问器（Kotlin 软关键字 `get` / `set`）
+    pub accessors: Option<Box<FieldAccessors>>,
     pub span: Span,
 }
 
@@ -392,8 +494,17 @@ pub struct ClassDecl {
     pub fields: Vec<StructField>,
     pub methods: Vec<FnDecl>,
     pub implementations: Vec<String>,
+    /// init 块（Kotlin 风格 `init { ... }`，按声明顺序在构造时执行）
+    pub init_blocks: Vec<Expr>,
+    /// 次构造函数（`constructor(...)`）
+    pub constructors: Vec<ConstructorDecl>,
+    /// 伴生对象（`companion object { ... }`）
+    pub companion_objects: Vec<CompanionDecl>,
     pub doc: Option<String>,
     pub span: Span,
+    /// 类修饰符集合（value / data / sealed / final / open / abstract / expect / actual）。
+    /// 空集合表示普通引用类型（默认 final，需 open/abstract 才可继承）。
+    pub modifiers: Vec<ClassModifier>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -428,6 +539,9 @@ pub struct ActorDecl {
     pub name: String,
     pub fields: Vec<StructField>,
     pub methods: Vec<FnDecl>,
+    pub init_blocks: Vec<Expr>,
+    pub constructors: Vec<ConstructorDecl>,
+    pub companion_objects: Vec<CompanionDecl>,
     pub doc: Option<String>,
     pub span: Span,
 }
@@ -475,6 +589,10 @@ pub struct Param {
     pub type_hint: Option<Box<Type>>,
     pub default_value: Option<Box<Expr>>,
     pub is_vararg: bool,
+    /// inline 函数中禁止内联的 lambda 参数（Kotlin `noinline`）
+    pub is_noinline: bool,
+    /// inline 函数中允许跨内联上下文调用的 lambda 参数（Kotlin `crossinline`）
+    pub is_crossinline: bool,
     pub span: Span,
 }
 
@@ -492,6 +610,8 @@ pub struct TypeParam {
     pub variance: TypeVariance,
     pub bounds: Vec<Type>,
     pub default: Option<Box<Type>>,
+    /// inline 函数中保留类型信息（Kotlin `reified`，配合 `is T` / `as T`）
+    pub reified: bool,
     pub span: Span,
 }
 
@@ -645,6 +765,7 @@ impl Expr {
             | Expr::Await {
                 span: s, ..
             }
+            | Expr::This(s)
             | Expr::Select {
                 span: s, ..
             }

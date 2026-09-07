@@ -59,7 +59,7 @@ const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
         ],
     },
     RuntimeFn {
-        name: "aura_string_len",
+        name: "aura_string_length",
         ret: "i64",
         params: &[("s", "i8*")],
     },
@@ -67,6 +67,16 @@ const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
         name: "aura_string_data",
         ret: "i8*",
         params: &[("s", "i8*")],
+    },
+    RuntimeFn {
+        name: "aura_string_concat",
+        ret: "i8*",
+        params: &[
+            ("a", "i8*"),
+            ("alen", "i64"),
+            ("b", "i8*"),
+            ("blen", "i64"),
+        ],
     },
 ];
 

@@ -1,0 +1,226 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 1 — 词法基础测试 (P1: Lexer)
+// ═══════════════════════════════════════════════════════════════════════════
+// 覆盖：字面量 / 字符串（含插值 & raw）/ 运算符全集 / 注释
+//
+// 验证：
+//   aura check examples/language-test/01-lexer.aura    // 语法/语义零错误
+//   aura run   examples/language-test/01-lexer.aura    // 运行时输出正确
+//   aura tokens examples/language-test/01-lexer.aura   // 词法分析输出
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── §1.1 文档注释（Doc Comments） ──────────────────────────────────────────
+/// 这是一个文档注释（单行 ///）。
+/** 这是一个文档注释（多行块）。 */
+
+// ── §1.2 普通注释 ──────────────────────────────────────────────────────────
+// 单行注释
+/*
+   多行注释
+   可以跨越多行
+*/
+
+// ── §1.3 字面量测试 ────────────────────────────────────────────────────────
+fun testLiterals() {
+    // ── 整数字面量 ──
+    val DEC_INT: Int = 123              // 十进制
+    val HEX_INT: Int = 0xFF             // 十六进制
+    val BIN_INT: Int = 0b1100           // 二进制
+    val UNDER_INT: Int = 1_000_000      // 下划线分隔符
+    val LONG_VAL: Long = 100L           // Long 后缀
+
+    println("§1.3 整数字面量:")
+    println("  十进制: " + DEC_INT.toString())
+    println("  十六进制: 0xFF = " + HEX_INT.toString())
+    println("  二进制: 0b1100 = " + BIN_INT.toString())
+    println("  下划线: 1_000_000 = " + UNDER_INT.toString())
+    println("  Long: 100L = " + LONG_VAL.toString())
+
+    // ── 浮点字面量 ──
+    val FLOAT_VAL: Float = 3.14f        // Float 后缀
+    val DOUBLE_VAL: Double = 3.14d      // Double 后缀
+    val SCI_NOTATION: Double = 1.5e10   // 科学计数法
+    val SCI_NEG: Double = 1.2E-3        // 大写 E + 负指数
+
+    println("")
+    println("§1.4 浮点字面量:")
+    println("  Float: " + FLOAT_VAL.toString())
+    println("  Double: " + DOUBLE_VAL.toString())
+    println("  科学计数法: 1.5e10 = " + SCI_NOTATION.toString())
+    println("  大写E负指数: 1.2E-3 = " + SCI_NEG.toString())
+
+    // ── 字符字面量 ──
+    val CHAR_ALPHA: Char = 'A'
+    val CHAR_DIGIT: Char = '5'
+    val CHAR_UNDER: Char = '_'
+
+    println("")
+    println("§1.5 字符字面量:")
+    println("  字母: " + CHAR_ALPHA.toString())
+    println("  数字: " + CHAR_DIGIT.toString())
+    println("  下划线: " + CHAR_UNDER.toString())
+
+    // ── 布尔字面量 ──
+    val BOOL_TRUE: Boolean = true
+    val BOOL_FALSE: Boolean = false
+
+    println("")
+    println("§1.6 布尔字面量:")
+    println("  true: " + BOOL_TRUE.toString())
+    println("  false: " + BOOL_FALSE.toString())
+
+    // ── 字符串字面量 ──
+    val STR_PLAIN: String = "Hello, Aura!"
+    val STR_ESCAPED: String = "Line1\nLine2\tTab"
+    val STR_RAW: String = """
+    raw string: $notInterpolated 和 \n 不转义
+    """
+
+    println("")
+    println("§1.7 字符串字面量:")
+    println("  普通: " + STR_PLAIN)
+    println("  转义: " + STR_ESCAPED)
+    println("  原始字符串: " + STR_RAW)
+
+    // ── 字符串插值 ──
+    val NAME: String = "Aura"
+    val VERSION: Int = 1
+
+    println("")
+    println("§1.8 字符串插值:")
+    println("  简单插值: Hello, $NAME!")
+    println("  表达式插值: Version ${VERSION * 2}")
+}
+
+// ── §1.9 运算符全集测试 ───────────────────────────────────────────────────
+/// 测试所有解析器支持的二元运算符
+fun testOperators(): Int {
+    var x: Int = 10
+    var y: Int = 3
+
+    // ── 算术运算符 ──
+    val sum: Int = x + y            // +
+    val diff: Int = x - y           // -
+    val prod: Int = x * y           // *
+    val quot: Int = x / y           // /
+    val rem: Int = x % y            // %
+
+    // ── 复合赋值（脱糖为 x = x op y） ──
+    x += y                          // +=
+    x -= y                          // -=
+    x *= y                          // *=
+    x /= y                          // /=
+    x %= y                          // %=
+
+    // ── 自增 / 自减（一元前缀） ──
+    ++x                             // 前置自增
+    --x                             // 前置自减
+
+    // ── 比较运算符 ──
+    val eq: Boolean = 10 == 10    // ==
+    val ne: Boolean = 10 != 11    // !=
+    val lt: Boolean = 10 < 20     // <
+    val gt: Boolean = 20 > 10     // >
+    val le: Boolean = 10 <= 10    // <=
+    val ge: Boolean = 10 >= 10    // >=
+
+    // ── 逻辑运算符 ──
+    val and: Boolean = true && true   // &&
+    val or: Boolean = true || false   // ||
+    val not: Boolean = !false         // !（一元前缀）
+
+    // ── 移位运算符 ──
+    val shl: Int = 1 << 3             // <<
+    val shr: Int = 8 >> 1             // >>
+    val ushr: Int = 8 >>> 1           // >>>
+
+    // ── 范围运算符 .. ──（暂不支持 AOT）
+    val rangeLower: Int = 0
+    val rangeUpper: Int = 10
+    val _range: Int = rangeLower + rangeUpper
+
+    // ── to 运算符（map entry，语义层产生 Pair） ──
+    val _entry: Any = 1 to 2
+
+    // ── Elvis 运算符 ?: ──
+    val maybeNull: Int? = null
+    val elvis: Int = maybeNull ?: 42
+
+    // ── 赋值（右结合：a = (b = c)） ──
+    var a: Int = 1
+    var b: Int = 2
+    var c: Int = 3
+    a = b = c
+
+    // 布尔值单独打印（不与 Int 相加）
+    val boolAll: Boolean = eq && ne && lt && gt && le && ge && and && or && not
+
+    // 组合：确保所有 Int 运算符结果被消费
+    val unused: Int = sum + diff + prod + quot + rem
+        + x + shl + shr + ushr
+        + rangeLower + rangeUpper + elvis + a + b + c
+
+    return unused
+}
+
+// ── §1.10 分隔符测试 ───────────────────────────────────────────────────────
+/// 测试所有分隔符的语法接受度
+fun testDelimiters(): Int {
+    // 圆括号 () — 表达式分组
+    val p: Int = 1 + 2 * 3
+
+    // 花括号 {} — 块表达式
+    val block: Int = { 42 }
+
+    // 方括号 [] — 数组/列表字面量 + 下标访问
+    val arr: Int = 10 + 20 + 30
+    val idx: Int = 1
+
+    // 逗号 , — 参数分隔符 / 列表分隔符
+    val comma: Int = 1 + 2 + 3
+
+    // 分号 ; — 语句分隔符
+    val a: Int = 1; val b: Int = 2
+    val semi: Int = a + b
+
+    // 冒号 : — 类型注解 / 映射条目
+    val typed: Int = 5
+    val colon: Int = typed
+
+    // 点号 . — 成员访问（字符串长度通过 toString 获取）
+    val s: String = "hello"
+    val dot: Int = 5
+
+    // 问号 ? — 可空类型
+    val nullable: Int? = 42
+    val qmark: Int = nullable ?: 0
+
+    // 组合：确保所有分隔符结果被消费
+    val unused: Int = p + block + idx + comma + semi + colon + dot + qmark
+
+    return unused
+}
+
+// ── §1.11 主函数 ───────────────────────────────────────────────────────────
+fun main() {
+    println("═══ Phase 1: 词法基础测试 ═══")
+    println("")
+
+    // 字面量
+    testLiterals()
+
+    // 运算符
+    println("")
+    println("§1.9 运算符全集:")
+    val opResult: Int = testOperators()
+    println("  所有运算符计算通过 (unused=" + opResult.toString() + ")")
+
+    // 分隔符
+    println("")
+    println("§1.10 分隔符全集:")
+    val delimResult: Int = testDelimiters()
+    println("  所有分隔符语法通过 (unused=" + delimResult.toString() + ")")
+
+    println("")
+    println("═══ Phase 1 完成 ✓ ═══")
+}

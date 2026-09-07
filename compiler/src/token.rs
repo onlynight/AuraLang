@@ -58,6 +58,7 @@ pub enum TokenKind {
     Lazy,
     Lateinit,
     Data,
+    Value,
     To,
     Await,
     // P10 并发运行时关键字
@@ -209,6 +210,7 @@ impl TokenKind {
                 | TokenKind::Import
                 | TokenKind::Lazy
                 | TokenKind::Lateinit
+                | TokenKind::Value
                 | TokenKind::Async
                 | TokenKind::Select
                 | TokenKind::Channel

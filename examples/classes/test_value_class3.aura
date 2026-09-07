@@ -1,0 +1,11 @@
+// 测试：value class 带方法（只有一个类型）
+value class Point(val x: Int, val y: Int) {
+    fun manhattan(): Int = this.x + this.y
+}
+
+fun main() {
+    val p = Point(3, 4)
+    println(p.x)
+    println(p.y)
+    println(p.manhattan())
+}

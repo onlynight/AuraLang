@@ -41,6 +41,7 @@ Program {
                             },
                         ],
                         default: None,
+                        reified: false,
                         span: Span {
                             start: 5,
                             end: 23,
@@ -69,6 +70,8 @@ Program {
                         ),
                         default_value: None,
                         is_vararg: false,
+                        is_noinline: false,
+                        is_crossinline: false,
                         span: Span {
                             start: 28,
                             end: 32,
@@ -95,6 +98,8 @@ Program {
                         ),
                         default_value: None,
                         is_vararg: false,
+                        is_noinline: false,
+                        is_crossinline: false,
                         span: Span {
                             start: 34,
                             end: 38,

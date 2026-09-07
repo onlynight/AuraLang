@@ -58,6 +58,8 @@ fn main() {
         "lsp" => cmd_lsp(rest),
         // P15: 调试器命令
         "debug" => cmd_debug(rest),
+        // Phase 4.2: C ABI 头文件生成（Tier 2b）
+        "export-header" => cmd_export_header(rest),
         "--help" | "-h" | "help" => print_usage(),
         other => {
             eprintln!("未知子命令: {}", other);
@@ -80,6 +82,7 @@ fn print_usage() {
     [--opt <level>]       优化级别（0/1/2/3/s/z，默认 2）\n\
     [--emit-llvm]         仅生成 LLVM IR（.ll）\n\
     [--debug]             生成 DWARF 调试信息\n\
+    [--shared]            生成动态库（.so / .dylib / .dll），导出 JitValue ABI 包装函数\n\
   aura run <file.aura>                          编译并执行（依赖 VM）\n\
   aura check <file.aura>                        仅做语法/语义检查\n\
   aura disasm <file.auc> [--source <f.aura>]    反汇编 .auc 为可读汇编\n\
@@ -278,6 +281,10 @@ fn cmd_build_aot(args: &[String]) {
         use compiler::codegen::aot::OperatingSystem;
         target.os == OperatingSystem::Windows
     };
+    let is_macos_target = {
+        use compiler::codegen::aot::OperatingSystem;
+        target.os == OperatingSystem::MacOS
+    };
 
     // 优化级别
     let opt_str = extract_opt(args, "--opt");
@@ -298,10 +305,17 @@ fn cmd_build_aot(args: &[String]) {
     // 调试信息（DWARF 元数据）
     let debug_enabled = args.iter().any(|a| a == "--debug");
 
+    // Phase 4.1: 动态库模式（Tier 2：.so / .dylib / .dll）
+    let shared_flag = args.iter().any(|a| a == "--shared" || a == "--dylib");
+
+    // Phase 4.2: C ABI 包装函数模式（Tier 2b：供外部 C/Python 消费者调用）
+    let c_abi_flag = args.iter().any(|a| a == "--cabi");
+
     let mut options = AotOptions {
         target,
         opt_level,
         debug_info: debug_enabled,
+        c_abi: c_abi_flag,
         ..Default::default()
     };
 
@@ -312,17 +326,36 @@ fn cmd_build_aot(args: &[String]) {
 
     let out_path =
         extract_opt(args, "--output").map(|s| std::path::PathBuf::from(s)).unwrap_or_else(|| {
-            let exe_name = if emit_llvm {
-                format!("{}.ll", default_output_base(input))
-            } else {
+            let base = default_output_base(input);
+            let name = if emit_llvm {
+                format!("{}.ll", base)
+            } else if shared_flag {
                 format!(
-                    "{}{}",
-                    default_output_base(input),
-                    if is_windows_target { ".exe" } else { "" }
+                    "{}.{}",
+                    base,
+                    if is_windows_target {
+                        "dll"
+                    } else if is_macos_target {
+                        "dylib"
+                    } else {
+                        "so"
+                    }
                 )
+            } else {
+                format!("{}{}", base, if is_windows_target { ".exe" } else { "" })
             };
-            std::path::PathBuf::from(exe_name)
+            std::path::PathBuf::from(name)
         });
+
+    // 推断输出格式：--shared 标志或输出扩展名（.so/.dylib/.dll）
+    let is_shared = shared_flag
+        || out_path
+            .extension()
+            .map(|e| {
+                let s = e.to_string_lossy().to_lowercase();
+                s == "so" || s == "dylib" || s == "dll"
+            })
+            .unwrap_or(false);
 
     // 创建输出目录（如有）
     if let Some(dir) = out_path.parent() {
@@ -347,7 +380,9 @@ fn cmd_build_aot(args: &[String]) {
 
     let hir = compiler::codegen::hir::desugar_program(&program);
     let codegen = compiler::codegen::aot::AotCodeGenerator::new(options.clone());
-    let ir = match codegen.generate_ir(&hir) {
+    // Phase 4.1: 动态库模式下生成 JitValue ABI 包装函数（blob_mode = true），
+    // 且包装函数以 external linkage 导出（wrapper_exported = true），供 dlsym 查找。
+    let ir = match codegen.generate_ir_with_mode(&hir, is_shared, is_shared) {
         Ok(ir) => ir,
         Err(e) => {
             eprintln!("错误: AOT IR 生成失败: {}", e);
@@ -375,10 +410,15 @@ fn cmd_build_aot(args: &[String]) {
         exit(1);
     }
 
-    match finish_executable(&ll_path, &out_path, &options) {
+    match if is_shared {
+        finish_shared_library(&ll_path, &out_path, &options)
+    } else {
+        finish_executable(&ll_path, &out_path, &options)
+    } {
         Ok(()) => {
             let _ = std::fs::remove_dir_all(&tmp_dir);
-            println!("✓ AOT 编译完成: {}", out_path.display());
+            let kind = if is_shared { "动态库" } else { "可执行文件" };
+            println!("✓ AOT 编译完成（{}）: {}", kind, out_path.display());
         }
         Err(e) => {
             let _ = std::fs::remove_dir_all(&tmp_dir);
@@ -386,6 +426,27 @@ fn cmd_build_aot(args: &[String]) {
             exit(1);
         }
     }
+}
+
+/// 完成动态库生成（llc + link -shared）
+///
+/// Phase 4.1（Tier 2）：生成 `.so` / `.dylib` / `.dll`，
+/// 包装函数以 external linkage 导出，供 VM 或外部宿主通过 `dlsym` 查找调用。
+#[cfg(feature = "llvm")]
+fn finish_shared_library(
+    ll_path: &std::path::Path,
+    lib_path: &std::path::Path,
+    options: &AotOptions,
+) -> Result<(), String> {
+    use compiler::codegen::aot::linker::{link_to_object, link_to_shared_library};
+
+    // 中间对象文件
+    let obj_path = ll_path.with_extension(if cfg!(target_os = "windows") { "obj" } else { "o" });
+
+    link_to_object(ll_path, &obj_path, options).map_err(|e| e.to_string())?;
+    link_to_shared_library(&obj_path, lib_path, options).map_err(|e| e.to_string())?;
+
+    Ok(())
 }
 
 /// 完成可执行文件生成（llc + link）
@@ -1516,4 +1577,155 @@ fn repl_eval(code: &str) {
             eprintln!("编译失败:\n{}", e);
         }
     }
+}
+
+/// 生成 C ABI 头文件（Tier 2b: 供外部 C/Python 消费者调用）
+///
+/// 用法: `aura export-header <file.aura> --out <name>.h`
+///
+/// 从 HIR 提取所有函数签名，生成对应的 C 头文件声明。
+/// 生成的头文件包含 `aura_c_<name>` 函数原型，与 `--cabi` 生成的包装函数匹配。
+fn cmd_export_header(args: &[String]) {
+    use compiler::codegen::hir::desugar_program;
+
+    let input = match first_positional(args, "--out") {
+        Some(p) => p,
+        None => {
+            eprintln!("错误: 缺少输入文件");
+            eprintln!("用法: aura export-header <file.aura> --out <name>.h");
+            exit(1);
+        }
+    };
+
+    let out_path = match extract_opt(args, "--out") {
+        Some(p) => p,
+        None => {
+            eprintln!("错误: 缺少 --out 参数");
+            eprintln!("用法: aura export-header <file.aura> --out <name>.h");
+            exit(1);
+        }
+    };
+
+    // 读取源文件
+    let source = match std::fs::read_to_string(&input) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("错误: 无法读取 {}: {}", input, e);
+            exit(1);
+        }
+    };
+
+    // 编译到 HIR
+    let mut lexer = Lexer::new(&source);
+    let tokens = lexer.tokenize();
+    if let Some(e) = lexer.errors().first() {
+        eprintln!("词法错误: {}", e.message);
+        exit(1);
+    }
+    let mut parser = Parser::new(tokens);
+    let program = parser.parse_program();
+    if let Some(e) = parser.errors().first() {
+        eprintln!("语法错误: {}", e.message);
+        exit(1);
+    }
+    let hir = desugar_program(&program);
+
+    // 生成 C 头文件
+    let header_content = generate_c_header(&hir, &input);
+
+    // 写入文件
+    if let Err(e) = std::fs::write(&out_path, &header_content) {
+        eprintln!("错误: 无法写入 {}: {}", out_path, e);
+        exit(1);
+    }
+
+    println!("✓ C 头文件生成完成: {}", out_path);
+    println!("  包含 {} 个函数声明", count_functions(&header_content));
+}
+
+/// 从 HIR 生成 C ABI 头文件内容
+fn generate_c_header(hir: &compiler::codegen::hir::HirProgram, source_path: &str) -> String {
+    use compiler::codegen::hir::HirType;
+
+    let guard = sanitize_header_name(source_path);
+    let mut s = String::new();
+
+    // 文件头保护
+    s.push_str(&format!("#ifndef {}\n", guard));
+    s.push_str(&format!("#define {}\n\n", guard));
+
+    s.push_str("// Auto-generated by `aura export-header`\n");
+    s.push_str(&format!("// Source: {}\n\n", source_path));
+
+    // 函数声明
+    for func in &hir.functions {
+        if func.is_native {
+            continue;
+        }
+
+        let c_func_name = format!("aura_c_{}", sanitize_c_name(&func.name));
+        let params_str = func
+            .params
+            .iter()
+            .map(|p| {
+                let default_ty = compiler::codegen::hir::HirType::Named("Int".into());
+                let ty = p.ty.as_ref().unwrap_or(&default_ty);
+                format!("{} {}", aura_type_to_c(ty), sanitize_c_name(&p.name))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let ret_type =
+            func.ret.as_ref().map(|t| aura_type_to_c(t)).unwrap_or_else(|| "void".to_string());
+
+        s.push_str(&format!(
+            "extern \"C\" {} {}({});\n",
+            ret_type, c_func_name, params_str
+        ));
+    }
+
+    s.push_str(&format!("\n#endif /* {} */\n", guard));
+
+    s
+}
+
+/// 将 Aura HIR 类型映射为 C 类型
+fn aura_type_to_c(ty: &compiler::codegen::hir::HirType) -> String {
+    use compiler::codegen::hir::HirType;
+
+    match ty {
+        HirType::Named(name) => match name.as_str() {
+            "Int" | "Long" | "Short" | "Byte" | "U8" | "Char" => "int".to_string(),
+            "Float" | "Double" => "double".to_string(),
+            "Boolean" | "Bool" => "int".to_string(),
+            "Unit" | "Void" | "Nothing" => "void".to_string(),
+            "String" | "Str" => "const char *".to_string(),
+            "CString" | "CStr" => "const char *".to_string(),
+            _ => "void *".to_string(),
+        },
+        HirType::Pointer(_) => "void *".to_string(),
+        _ => "void *".to_string(),
+    }
+}
+
+/// 将文件路径转换为 C 头文件保护宏名
+fn sanitize_header_name(path: &str) -> String {
+    let stem = std::path::Path::new(path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "aura_export".to_string());
+    format!(
+        "AURA_EXPORT_{}_H",
+        stem.to_uppercase().replace('.', "_").replace('-', "_")
+    )
+}
+
+/// 将 Aura 函数名转换为 C 函数名
+fn sanitize_c_name(name: &str) -> String {
+    name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect()
+}
+
+/// 统计头文件中的函数声明数量
+fn count_functions(header: &str) -> usize {
+    header.lines().filter(|l| l.contains("extern \"C\"")).count()
 }

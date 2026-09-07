@@ -9,9 +9,20 @@
 use crate::codegen::hir::HirProgram;
 use crate::codegen::mir::{BasicBlock, LowerCtx, MirClosure, MirFunction, MirInstr, Terminator};
 use crate::codegen::opcode::{
-    BytecodeClosure, BytecodeFunction, BytecodeModule, BytecodeNative, Const, OpCode,
+    BytecodeClosure, BytecodeFunction, BytecodeModule, BytecodeNative, Const, OpCode, VirtualTable,
 };
+use std::cell::RefCell;
 use std::collections::HashMap;
+
+thread_local! {
+    /// 虚方法名 → 槽位（emit_module 构建，单次发射内有效）
+    static METHOD_SLOTS: RefCell<HashMap<String, u16>> = RefCell::new(HashMap::new());
+}
+
+/// 虚方法名 → 槽位编号
+fn method_slot(name: &str) -> u16 {
+    METHOD_SLOTS.with(|m| m.borrow().get(name).copied().unwrap_or(0))
+}
 
 /// 将 MIR 函数列表发射为字节码模块
 pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) -> BytecodeModule {
@@ -104,13 +115,51 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
         0
     };
 
+    // P-K2：虚方法表 —— 全局 open 方法槽位 + 每个类的分派表
+    let mut slot_names: Vec<String> = Vec::new();
+    for s in &hir.structs {
+        for vm in &s.virtual_methods {
+            if !slot_names.contains(vm) {
+                slot_names.push(vm.clone());
+            }
+        }
+    }
+    let mut vtables: Vec<VirtualTable> = Vec::new();
+    for s in hir.structs.iter().filter(|st| st.is_class) {
+        let tag = type_index(&s.name);
+        let mut slots = vec![0u16; slot_names.len()];
+        for (i, mname) in slot_names.iter().enumerate() {
+            // 沿继承链从本类向上查找实现 `Class.method`
+            let mut cur = Some(s.name.clone());
+            while let Some(cn) = cur {
+                if let Some(&fidx) = fn_index.get(format!("{}.{}", cn, mname).as_str()) {
+                    slots[i] = fidx;
+                    break;
+                }
+                cur = hir
+                    .structs
+                    .iter()
+                    .find(|st| st.name == cn)
+                    .and_then(|st| st.superclass.clone());
+            }
+        }
+        vtables.push(VirtualTable {
+            type_tag: tag,
+            slots,
+        });
+    }
+    METHOD_SLOTS.with(|m| {
+        *m.borrow_mut() =
+            slot_names.iter().enumerate().map(|(i, n)| (n.clone(), i as u16)).collect()
+    });
+
     // P8.1: 合并 FFI 常量到常量池
     let mut consts = ctx.consts.clone();
     for (_name, c) in &hir.constants {
         consts.push(c.clone());
     }
 
-    BytecodeModule {
+    let module = BytecodeModule {
         consts,
         natives,
         functions,
@@ -126,7 +175,11 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
         entry_kind: "app".to_string(),
         aot_segments: Vec::new(),
         aot_blob_data: Vec::new(),
-    }
+        vtables,
+    };
+    // 清理 thread_local 槽表
+    METHOD_SLOTS.with(|m| m.borrow_mut().clear());
+    module
 }
 
 fn emit_function(
@@ -321,6 +374,10 @@ fn instr_size(instr: &crate::codegen::mir::MirInstr) -> usize {
         EnumTag { .. } => 7,
         // MakeFnRef：函数引用（Phase 3）
         MakeFnRef { .. } => 6,
+        // CallMethod（P-K2）：每个参数 LoadVar(3) + 接收者再 LoadVar(3) + CallMethod(3) + 可选 StoreVar(3)
+        CallMethod {
+            args, dst, ..
+        } => 3 * args.len() + 3 + 3 + if dst.is_some() { 3 } else { 0 },
     }
 }
 
@@ -447,6 +504,24 @@ fn emit_instr(
             }
             OpCode::LoadVar(*closure as u16).write(code);
             OpCode::CallClosure.write(code);
+            if let Some(d) = dst {
+                OpCode::StoreVar(*d as u16).write(code);
+            }
+        }
+        CallMethod {
+            dst,
+            method,
+            args,
+        } => {
+            // 栈序：args（含 self）按序压栈，最后再压一次接收者（do_call_method 先弹对象）
+            for a in args {
+                OpCode::LoadVar(*a as u16).write(code);
+            }
+            if let Some(recv) = args.first() {
+                OpCode::LoadVar(*recv as u16).write(code);
+            }
+            let slot = method_slot(method);
+            OpCode::CallMethod(slot).write(code);
             if let Some(d) = dst {
                 OpCode::StoreVar(*d as u16).write(code);
             }

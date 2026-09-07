@@ -131,7 +131,7 @@ impl EmitCtx {
     }
 
     pub fn fresh_bb(&mut self, prefix: &str) -> String {
-        let name = format!("bb.{}.{}", prefix, self.bb_counter);
+        let name = format!("bb_{}_{}", prefix, self.bb_counter);
         self.bb_counter += 1;
         name
     }
@@ -292,7 +292,15 @@ impl EmitCtx {
         let ffi_gen = FfiGenerator::new(&self.type_mapper);
         if let Ok(decls) = ffi_gen.generate_declarations(&program.natives) {
             for d in &decls {
-                s.push_str(d);
+                // toString / toStr 原生函数实际返回 C 字符串 (const char*),
+                // 而非结构体 { i8*, i64 }，因此覆盖为 i8*
+                let fixed = if d.contains("@toString(") || d.contains("@toStr(") {
+                    d.replace("{ i8*, i64 } @toString", "i8* @toString")
+                        .replace("{ i8*, i64 } @toStr", "i8* @toStr")
+                } else {
+                    d.clone()
+                };
+                s.push_str(&fixed);
                 s.push('\n');
             }
         }
@@ -387,7 +395,14 @@ pub fn emit_program(
     }
     for native in &program.natives {
         if let Some(ref ret) = native.ret {
-            ctx.func_ret_types.insert(native.name.clone(), ctx.type_mapper.map(ret));
+            // toString / toStr 原生函数实际返回 C 字符串 (const char*),
+            // 而非结构体 { i8*, i64 }，因此覆盖为 i8*
+            let llvm_ty = if native.name == "toString" || native.name == "toStr" {
+                "i8*".to_string()
+            } else {
+                ctx.type_mapper.map(ret)
+            };
+            ctx.func_ret_types.insert(native.name.clone(), llvm_ty);
         } else {
             ctx.func_ret_types.insert(native.name.clone(), "void".to_string());
         }
@@ -712,10 +727,20 @@ fn emit_variable_decl(
     if let Some(init) = init {
         let (val_ir, val_ty) = emit_expr_val(ctx, blocks, init)?;
         let cur = blocks.last_mut();
-        cur.body.push(format!(
-            "store {} {} , {}* {}",
-            val_ty, val_ir, llvm_ty, var_name
-        ));
+        // 如果值类型和目标类型不匹配（如 null 存入可空结构体），需要转换
+        if val_ir == "null" && llvm_ty.starts_with("{ ") && llvm_ty.ends_with(" i1 }") {
+            // null 字面量 → { T 0, i1 true }
+            let null_val = zero_value(&llvm_ty);
+            cur.body.push(format!(
+                "store {} {} , {}* {}",
+                llvm_ty, null_val, llvm_ty, var_name
+            ));
+        } else {
+            cur.body.push(format!(
+                "store {} {} , {}* {}",
+                val_ty, val_ir, llvm_ty, var_name
+            ));
+        }
     }
 
     ctx.declare_var(name, var_name, llvm_ty);
@@ -1143,17 +1168,16 @@ fn emit_string_literal(
 ) -> Result<(String, String), AotError> {
     // 字符串字面量 → 模块级全局常量
     //
-    // LLVM IR 的 `c"..."` 字符串常量**不含**隐式 NUL（实测 LLVM 23）：
-    // `c"hello"` 即 5 字节 `[h,e,l,l,o]`。需要 C 风格 NUL 结尾时须显式追加
-    // `\00`（单个转义 = 1 字节）：`c"hello\00"` 为 6 字节。
-    // 此处保留显式 `\00` 结尾（供 CStr/FFI 使用），数组长度 = s.len() + 1。
+    // LLVM IR 的 `c"..."` 字符串常量使用 C 风格转义序列。
+    // 为避免 \n \t 等被错误解析，使用十六进制转义（\0A = 换行, \09 = 制表符）。
     let escaped = s
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t");
+        .replace('\n', "\\0A")
+        .replace('\r', "\\0D")
+        .replace('\t', "\\09");
     let llvm_str = format!("c\"{}\\00\"", escaped);
+    // 计算实际字节长度：转义序列在 IR 中是单字节
     let byte_len = s.len() + 1;
     let key = format!("[{} x i8] {}", byte_len, llvm_str);
 
@@ -1201,6 +1225,80 @@ fn emit_variable_load(
     }
 }
 
+fn is_string_type(ty: &str) -> bool {
+    ty == "i8*" || ty == "{ i8*, i64 }"
+}
+
+fn is_numeric_type(ty: &str) -> bool {
+    ty.starts_with("i") || ty.starts_with("f") || ty == "double"
+}
+
+/// 检查是否为可空结构体类型 { T, i1 }
+fn is_nullable_struct_type(ty: &str) -> bool {
+    ty.starts_with("{ ") && ty.ends_with(" i1 }")
+}
+
+/// 从可空结构体类型 { T, i1 } 中提取内部类型 T
+fn extract_inner_type(ty: &str) -> String {
+    // ty 格式: "{ T, i1 }"
+    // 去掉 "{ " (2 chars) 和 ", i1 }" (6 chars)
+    ty[2..ty.len() - 6].trim().to_string()
+}
+
+/// 在指定基本块的终止符之前插入指令
+fn insert_before_terminator(blocks: &mut FuncBlocks, bb_name: &str, instr: String) {
+    if let Some(pos) = blocks.blocks.iter().position(|b| b.name == bb_name) {
+        let bb = &mut blocks.blocks[pos];
+        if bb.terminator.is_some() {
+            bb.body.push(instr);
+        } else {
+            bb.body.push(instr);
+        }
+    }
+}
+
+/// 从 LLVM IR 值中提取字符串数据指针和长度
+/// - `i8*` 类型：直接用值作为指针，调用 `aura_string_length` 获取长度
+/// - `{ i8*, i64 }` 类型：提取字段 0（指针）和字段 1（长度）
+fn extract_string_parts(
+    ctx: &mut EmitCtx,
+    blocks: &mut FuncBlocks,
+    val_ir: &str,
+    val_ty: &str,
+) -> (String, String) {
+    if val_ty == "i8*" {
+        let len_var = ctx.fresh_var();
+        let cur = blocks.last_mut();
+        cur.body.push(format!(
+            "{} = call i64 @aura_string_length(i8* {})",
+            len_var, val_ir
+        ));
+        (val_ir.to_string(), len_var)
+    } else if val_ty == "{ i8*, i64 }" {
+        let ptr_var = ctx.fresh_var();
+        let len_var = ctx.fresh_var();
+        let cur = blocks.last_mut();
+        cur.body.push(format!(
+            "{} = extractvalue {{ i8*, i64 }} {}, 0",
+            ptr_var, val_ir
+        ));
+        cur.body.push(format!(
+            "{} = extractvalue {{ i8*, i64 }} {}, 1",
+            len_var, val_ir
+        ));
+        (ptr_var, len_var)
+    } else {
+        // Fallback: treat as i8* with strlen
+        let len_var = ctx.fresh_var();
+        let cur = blocks.last_mut();
+        cur.body.push(format!(
+            "{} = call i64 @aura_string_length(i8* {})",
+            len_var, val_ir
+        ));
+        (val_ir.to_string(), len_var)
+    }
+}
+
 fn emit_binary(
     ctx: &mut EmitCtx,
     blocks: &mut FuncBlocks,
@@ -1209,21 +1307,34 @@ fn emit_binary(
     rhs: &HirExpr,
 ) -> Result<(String, String), AotError> {
     let (l_ir, l_ty) = emit_expr_val(ctx, blocks, lhs)?;
-    let (r_ir, _r_ty) = emit_expr_val(ctx, blocks, rhs)?;
+    let (r_ir, r_ty) = emit_expr_val(ctx, blocks, rhs)?;
     let tmp = ctx.fresh_var();
-    let cur = blocks.last_mut();
 
     match op {
         HirBinOp::Add => {
-            if l_ty.starts_with("float") || l_ty == "double" {
+            // 字符串拼接：左右操作数为字符串类型时调用 aura_string_concat
+            if is_string_type(&l_ty) || is_string_type(&r_ty) {
+                let (l_ptr, l_len) = extract_string_parts(ctx, blocks, &l_ir, &l_ty);
+                let (r_ptr, r_len) = extract_string_parts(ctx, blocks, &r_ir, &r_ty);
+                let cur = blocks.last_mut();
+                cur.body.push(format!(
+                    "{} = call i8* @aura_string_concat(i8* {}, i64 {}, i8* {}, i64 {})",
+                    tmp, l_ptr, l_len, r_ptr, r_len
+                ));
+                Ok((tmp, "i8*".to_string()))
+            } else if l_ty.starts_with("float") || l_ty == "double" {
                 let op = if l_ty == "double" { "fadd double" } else { "fadd float" };
+                let cur = blocks.last_mut();
                 cur.body.push(format!("{} = {} {}, {}", tmp, op, l_ir, r_ir));
+                Ok((tmp, l_ty))
             } else {
+                let cur = blocks.last_mut();
                 cur.body.push(format!("{} = add {} {}, {}", tmp, l_ty, l_ir, r_ir));
+                Ok((tmp, l_ty))
             }
-            Ok((tmp, l_ty))
         }
         HirBinOp::Sub => {
+            let cur = blocks.last_mut();
             if l_ty.starts_with("float") || l_ty == "double" {
                 let op = if l_ty == "double" { "fsub double" } else { "fsub float" };
                 cur.body.push(format!("{} = {} {}, {}", tmp, op, l_ir, r_ir));
@@ -1233,6 +1344,7 @@ fn emit_binary(
             Ok((tmp, l_ty))
         }
         HirBinOp::Mul => {
+            let cur = blocks.last_mut();
             if l_ty.starts_with("float") || l_ty == "double" {
                 let op = if l_ty == "double" { "fmul double" } else { "fmul float" };
                 cur.body.push(format!("{} = {} {}, {}", tmp, op, l_ir, r_ir));
@@ -1242,6 +1354,7 @@ fn emit_binary(
             Ok((tmp, l_ty))
         }
         HirBinOp::Div => {
+            let cur = blocks.last_mut();
             if l_ty.starts_with("float") || l_ty == "double" {
                 let op = if l_ty == "double" { "fdiv double" } else { "fdiv float" };
                 cur.body.push(format!("{} = {} {}, {}", tmp, op, l_ir, r_ir));
@@ -1251,10 +1364,55 @@ fn emit_binary(
             Ok((tmp, l_ty))
         }
         HirBinOp::Rem => {
+            let cur = blocks.last_mut();
             cur.body.push(format!("{} = srem {} {}, {}", tmp, l_ty, l_ir, r_ir));
             Ok((tmp, l_ty))
         }
         HirBinOp::Eq | HirBinOp::Ne | HirBinOp::Lt | HirBinOp::Gt | HirBinOp::Le | HirBinOp::Ge => {
+            // 可空类型与 null 比较：检查 is_null 标志（结构体字段 1）
+            if r_ir == "null" && is_nullable_struct_type(&l_ty) {
+                let null_flag = ctx.fresh_var();
+                let cur = blocks.last_mut();
+                // 提取 is_null 标志（字段 1）
+                cur.body.push(format!(
+                    "{} = extractvalue {{ i32, i1 }} {}, 1",
+                    null_flag, l_ir
+                ));
+                match op {
+                    HirBinOp::Eq => {
+                        cur.body.push(format!("{} = icmp eq i1 {}, true", tmp, null_flag));
+                    }
+                    HirBinOp::Ne => {
+                        cur.body.push(format!("{} = icmp ne i1 {}, true", tmp, null_flag));
+                    }
+                    _ => unreachable!(),
+                }
+                return Ok((tmp, "i1".to_string()));
+            }
+            // 可空类型作为左操作数，右操作数不为 null：也用 is_null 标志判断
+            if is_nullable_struct_type(&l_ty) && r_ir != "null" {
+                let null_flag = ctx.fresh_var();
+                let cur = blocks.last_mut();
+                cur.body.push(format!(
+                    "{} = extractvalue {{ i32, i1 }} {}, 1",
+                    null_flag, l_ir
+                ));
+                // 提取右操作数的 is_null 标志（如果是可空结构体）
+                let r_null_flag = if is_nullable_struct_type(&r_ty) {
+                    let rf = ctx.fresh_var();
+                    cur.body.push(format!("{} = extractvalue {{ i32, i1 }} {}, 1", rf, r_ir));
+                    rf
+                } else {
+                    // 右操作数非可空，视为 false（非 null）
+                    "false".to_string()
+                };
+                let icmp_pred = if *op == HirBinOp::Eq { "eq" } else { "ne" };
+                cur.body.push(format!(
+                    "{} = icmp {} i1 {}, {}",
+                    tmp, icmp_pred, null_flag, r_null_flag
+                ));
+                return Ok((tmp, "i1".to_string()));
+            }
             let (icmp_pred, is_signed) = match op {
                 HirBinOp::Eq => ("eq", true),
                 HirBinOp::Ne => ("ne", true),
@@ -1269,11 +1427,13 @@ fn emit_binary(
             } else {
                 format!("fcmp one {} {}, {}", l_ty, l_ir, r_ir)
             };
+            let cur = blocks.last_mut();
             cur.body.push(format!("{} = {}", tmp, pred));
             Ok((tmp, "i1".to_string()))
         }
         HirBinOp::And | HirBinOp::Or => {
             let op = if *op == HirBinOp::And { "and" } else { "or" };
+            let cur = blocks.last_mut();
             cur.body.push(format!("{} = {} i1 {}, {}", tmp, op, l_ir, r_ir));
             Ok((tmp, "i1".to_string()))
         }
@@ -1284,11 +1444,13 @@ fn emit_binary(
                 HirBinOp::BitXor => "xor",
                 _ => unreachable!(),
             };
+            let cur = blocks.last_mut();
             cur.body.push(format!("{} = {} {} {}, {}", tmp, op, l_ty, l_ir, r_ir));
             Ok((tmp, l_ty))
         }
         HirBinOp::Shl | HirBinOp::Shr => {
             let op = if *op == HirBinOp::Shl { "shl" } else { "ashr" };
+            let cur = blocks.last_mut();
             cur.body.push(format!("{} = {} {} {}, {}", tmp, op, l_ty, l_ir, r_ir));
             Ok((tmp, l_ty))
         }
@@ -1505,32 +1667,80 @@ fn emit_if_expr(
     // Then 块
     let _ = blocks.add_block_named(&then_name);
     let (then_ir, then_ty) = emit_expr_val(ctx, blocks, then_e)?;
-    let then_phi = ctx.fresh_var();
+    // 设置 then 块终止符
     {
         let cur = blocks.last_mut();
-        cur.body.push(format!("{} = add {} {}, 0", then_phi, then_ty, then_ir));
         cur.terminator = Some(format!("br label %{}", merge_name));
     }
 
     // Else 块
     let _ = blocks.add_block_named(&else_name);
     let (else_ir, else_ty) = emit_expr_val(ctx, blocks, else_e)?;
-    let else_phi = ctx.fresh_var();
+    // 设置 else 块终止符
     {
         let cur = blocks.last_mut();
-        cur.body.push(format!("{} = add {} {}, 0", else_phi, else_ty, else_ir));
         cur.terminator = Some(format!("br label %{}", merge_name));
     }
+
+    // 类型协调：如果一边是可空结构体而另一边是普通类型，提取内部值
+    let (phi_type, then_phi_val, else_phi_val) =
+        if is_nullable_struct_type(&then_ty) && !is_nullable_struct_type(&else_ty) {
+            // then 分支是可空结构体，提取内部值
+            let inner_ty = extract_inner_type(&then_ty);
+            let extract_var = ctx.fresh_var();
+            // 插入 extractvalue 到 then 块（在终止符之前）
+            insert_before_terminator(
+                blocks,
+                &then_name,
+                format!("{} = extractvalue {} {}, 0", extract_var, then_ty, then_ir),
+            );
+            (inner_ty, extract_var, else_ir)
+        } else if is_nullable_struct_type(&else_ty) && !is_nullable_struct_type(&then_ty) {
+            // else 分支是可空结构体，提取内部值
+            let inner_ty = extract_inner_type(&else_ty);
+            let extract_var = ctx.fresh_var();
+            insert_before_terminator(
+                blocks,
+                &else_name,
+                format!("{} = extractvalue {} {}, 0", extract_var, else_ty, else_ir),
+            );
+            (inner_ty, then_ir, extract_var)
+        } else {
+            // 类型相同，直接使用
+            let ty = then_ty.clone();
+            let then_val = if is_numeric_type(&ty) {
+                let phi_val = ctx.fresh_var();
+                insert_before_terminator(
+                    blocks,
+                    &then_name,
+                    format!("{} = add {} {}, 0", phi_val, ty, then_ir),
+                );
+                phi_val
+            } else {
+                then_ir
+            };
+            let else_val = if is_numeric_type(&ty) {
+                let phi_val = ctx.fresh_var();
+                insert_before_terminator(
+                    blocks,
+                    &else_name,
+                    format!("{} = add {} {}, 0", phi_val, ty, else_ir),
+                );
+                phi_val
+            } else {
+                else_ir
+            };
+            (ty, then_val, else_val)
+        };
 
     // Merge 块 + PHI 节点
     let _ = blocks.add_block_named(&merge_name);
     let phi_name = ctx.fresh_var();
-    let phi_type = then_ty;
     {
         let cur = blocks.last_mut();
         cur.body.push(format!(
-            "{} = phi {}, [{} %{}], [{} %{}]",
-            phi_name, phi_type, then_phi, then_name, else_phi, else_name
+            "{} = phi {} [{} ,%{}], [{} ,%{}]",
+            phi_name, phi_type, then_phi_val, then_name, else_phi_val, else_name
         ));
     }
 
@@ -1585,6 +1795,33 @@ fn zero_value(ty: &str) -> &str {
         "i8" | "i16" | "i32" | "i64" | "i128" => "0",
         "float" => "0.0",
         "double" => "0.0",
+        _ if ty.starts_with("{ ") && ty.ends_with(" i1 }") => {
+            // 可空结构体 { T, i1 }：值部分为零，is_null 标志为 true
+            // 例如 { i32 0, i1 true }
+            // 提取内部类型
+            let inner = &ty[2..ty.len() - 6]; // 去掉 "{ " 和 ", i1 }"
+            match inner.trim() {
+                "i1" => "{ i1 false, i1 true }",
+                "i8" | "i16" | "i32" | "i64" | "i128" => {
+                    // 需要动态生成，但不能返回引用...
+                    // 用静态字符串
+                    if inner == "i32" {
+                        "{ i32 0, i1 true }"
+                    } else if inner == "i64" {
+                        "{ i64 0, i1 true }"
+                    } else if inner == "i16" {
+                        "{ i16 0, i1 true }"
+                    } else if inner == "i8" {
+                        "{ i8 0, i1 true }"
+                    } else {
+                        "{ i32 0, i1 true }"
+                    }
+                }
+                "float" => "{ float 0.0, i1 true }",
+                "double" => "{ double 0.0, i1 true }",
+                _ => "null",
+            }
+        }
         _ => "null",
     }
 }

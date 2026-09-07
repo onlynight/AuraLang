@@ -30,6 +30,7 @@ Program {
                             },
                         ),
                         default_value: None,
+                        accessors: None,
                         span: Span {
                             start: 37,
                             end: 47,
@@ -42,6 +43,9 @@ Program {
                 ],
                 methods: [],
                 implementations: [],
+                init_blocks: [],
+                constructors: [],
+                companion_objects: [],
                 doc: Some(
                     "A point in 2D space",
                 ),

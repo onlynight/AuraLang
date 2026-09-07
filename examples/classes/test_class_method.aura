@@ -1,0 +1,9 @@
+// 测试普通 class 带方法
+class Animal {
+    fun name(): String = "animal"
+}
+
+fun main() {
+    val a = Animal()
+    println(a.name())
+}

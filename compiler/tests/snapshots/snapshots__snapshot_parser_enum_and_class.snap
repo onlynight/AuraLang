@@ -54,6 +54,8 @@ Program {
                                 ),
                                 default_value: None,
                                 is_vararg: false,
+                                is_noinline: false,
+                                is_crossinline: false,
                                 span: Span {
                                     start: 36,
                                     end: 42,
@@ -126,6 +128,9 @@ Program {
                     },
                 ],
                 implementations: [],
+                init_blocks: [],
+                constructors: [],
+                companion_objects: [],
                 doc: None,
                 span: Span {
                     start: 46,
@@ -135,6 +140,9 @@ Program {
                     end_line: 2,
                     end_col: 42,
                 },
+                modifiers: [
+                    Sealed,
+                ],
             },
         ),
     ],

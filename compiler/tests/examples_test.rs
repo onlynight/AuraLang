@@ -8,8 +8,25 @@ use compiler::errors::ErrorSeverity;
 use compiler::sema::analyze_source;
 
 /// 读取 workspace 根目录 `examples/` 下的示例文件（CARGO_MANIFEST_DIR 指向 compiler）。
+/// 示例文件按子目录组织，路径格式：`examples/<subdir>/<name>.aura`
 fn example_path(name: &str) -> String {
-    format!("{}/../examples/{}", env!("CARGO_MANIFEST_DIR"), name)
+    // 已知示例文件的位置映射
+    let subdir = match name {
+        "showcase.aura" => "compiler",
+        "demo.aura" => "basics",
+        "demo_errors.aura" => "compiler",
+        _ => "",
+    };
+    if subdir.is_empty() {
+        format!("{}/../examples/{}", env!("CARGO_MANIFEST_DIR"), name)
+    } else {
+        format!(
+            "{}/../examples/{}/{}",
+            env!("CARGO_MANIFEST_DIR"),
+            subdir,
+            name
+        )
+    }
 }
 
 /// 分析示例文件，仅返回 Error 级别的诊断消息。

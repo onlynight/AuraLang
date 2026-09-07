@@ -32,7 +32,7 @@ pub const MAGIC: &[u8; 4] = b"AURA";
 /// - v3 及更早的 `.auc` 文件仍可被 v4 读取器加载（函数记录中缺少
 ///   aot_mode/aot_desc_idx 字段时按 0 处理，段表为空）。
 /// - v3 VM 遇到 v4 文件会因 `version > VERSION` 拒绝加载。
-pub const VERSION: u16 = 4;
+pub const VERSION: u16 = 5;
 
 #[derive(Debug)]
 pub enum SerializeError {
@@ -170,6 +170,17 @@ pub fn to_bytes(module: &BytecodeModule) -> Vec<u8> {
     buf.extend_from_slice(&(module.enabled_modules.len() as u16).to_le_bytes());
     for m in &module.enabled_modules {
         write_str(&mut buf, m);
+    }
+
+    // ── v5: 虚方法表（P-K2 open 方法动态分派）──
+    // 必须位于 AOT 段数据区（"剩余字节"）之前
+    buf.extend_from_slice(&(module.vtables.len() as u16).to_le_bytes());
+    for vt in &module.vtables {
+        buf.extend_from_slice(&vt.type_tag.to_le_bytes());
+        buf.extend_from_slice(&(vt.slots.len() as u16).to_le_bytes());
+        for s in &vt.slots {
+            buf.extend_from_slice(&s.to_le_bytes());
+        }
     }
 
     // ── Phase 1 AOT v4: 段表 + 段数据区（设计文档 §3.5）──
@@ -394,6 +405,24 @@ pub fn from_bytes(bytes: &[u8]) -> Result<BytecodeModule, SerializeError> {
         enabled_modules.push(r.str()?);
     }
 
+    // ── v5: 虚方法表（P-K2，位于 AOT 段数据区之前）──
+    let mut vtables = Vec::new();
+    if version >= 5 && r.pos < r.data.len() {
+        let nvt = r.u16()? as usize;
+        for _ in 0..nvt {
+            let type_tag = r.u16()?;
+            let nslots = r.u16()? as usize;
+            let mut slots = Vec::with_capacity(nslots);
+            for _ in 0..nslots {
+                slots.push(r.u16()?);
+            }
+            vtables.push(crate::codegen::opcode::VirtualTable {
+                type_tag,
+                slots,
+            });
+        }
+    }
+
     // ── Phase 1 AOT v4: 段表 + 段数据区 ──
     // 段表位置紧接 v3 布局末尾。v3 文件中该位置没有数据，
     // 故仅在 version >= 4 时读取。
@@ -431,6 +460,7 @@ pub fn from_bytes(bytes: &[u8]) -> Result<BytecodeModule, SerializeError> {
         entry_kind,
         aot_segments,
         aot_blob_data,
+        vtables,
     })
 }
 

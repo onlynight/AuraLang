@@ -14,6 +14,37 @@ pub struct Parser {
     errors: Vec<CompileError>,
     /// 最近收集的文档注释，由随后的声明取走（KDoc：`///` / `/** */`）
     pending_doc: Option<String>,
+    /// 声明前缀的类修饰符（open/abstract/expect/actual 上下文关键字，由预扫描消费）
+    pending_class_mods: Vec<ClassModifier>,
+    /// 声明前缀的函数修饰符（open/abstract/expect/actual 上下文关键字，由预扫描消费）
+    pending_fn_mods: Vec<FnModifier>,
+}
+
+/// 类/结构体/Actor 体成员的解析产物（Kotlin 风格成员全集）
+#[derive(Default)]
+struct ClassMembers {
+    fields: Vec<StructField>,
+    methods: Vec<FnDecl>,
+    /// init 块（`init { ... }`）
+    init_blocks: Vec<Expr>,
+    /// 次构造函数（`constructor(...)` / `init(...)`）
+    constructors: Vec<ConstructorDecl>,
+    /// 伴生对象（`companion object { ... }`）
+    companions: Vec<CompanionDecl>,
+}
+
+/// Kotlin 修饰符上下文关键字：词法上仍是 Ident（保持向后兼容，可用作标识符），
+/// 仅在修饰符语法位置被识别
+fn is_fn_modifier_word(lit: &str) -> bool {
+    matches!(
+        lit,
+        "open" | "abstract" | "operator" | "infix" | "tailrec" | "expect" | "actual"
+    )
+}
+
+/// `object` 关键字 token（兼容词法层 TokenKind::Object）
+fn is_object_token(t: &Token) -> bool {
+    t.kind == TokenKind::Object
 }
 
 impl Parser {
@@ -24,6 +55,8 @@ impl Parser {
             pos: 0,
             errors: Vec::new(),
             pending_doc: None,
+            pending_class_mods: Vec::new(),
+            pending_fn_mods: Vec::new(),
         }
     }
 
@@ -168,6 +201,9 @@ impl Parser {
         // 声明前可能带有文档注释（/// 或 /** */）
         self.collect_doc();
 
+        // 预扫描 open/abstract/expect/actual 上下文关键字前缀（仅落在类型/函数声明上才消费）
+        self.try_parse_modifier_prefix();
+
         if self.check(TokenKind::Import) {
             return Ok(Decl::Import(self.parse_import()));
         }
@@ -193,12 +229,23 @@ impl Parser {
         if self.check(TokenKind::Enum) {
             return Ok(Decl::Enum(self.parse_enum()));
         }
-        // class / data class / sealed class
+        // class / data class / sealed class / value class / value data class / sealed value class
+        // value data class 必须在 value class 之前检查（两者都以 Value 开头）
+        if self.check(TokenKind::Value) && self.peek_ahead(1).kind == TokenKind::Data {
+            return Ok(Decl::Class(self.parse_value_data_class()));
+        }
+        if self.check(TokenKind::Value) && self.peek_ahead(1).kind == TokenKind::Class {
+            return Ok(Decl::Class(self.parse_value_class()));
+        }
         if self.check(TokenKind::Class) {
             return Ok(Decl::Class(self.parse_class()));
         }
         if self.check(TokenKind::Data) && self.peek_ahead(1).kind == TokenKind::Class {
             return Ok(Decl::Class(self.parse_data_class()));
+        }
+        // sealed value class 必须在 sealed class 之前检查（两者都以 Sealed 开头）
+        if self.check(TokenKind::Sealed) && self.peek_ahead(1).kind == TokenKind::Value {
+            return Ok(Decl::Class(self.parse_sealed_value_class()));
         }
         if self.check(TokenKind::Sealed) && self.peek_ahead(1).kind == TokenKind::Class {
             return Ok(Decl::Class(self.parse_sealed_class()));
@@ -369,9 +416,20 @@ impl Parser {
 
     fn parse_param(&mut self) -> Param {
         let start = self.current().span;
+        // vararg：可变参数（`vararg` 后必须跟参数名，避免吞掉同名参数）
         let is_vararg = self.check(TokenKind::TripleDotOp)
-            || (self.current().kind == TokenKind::Ident && self.current().literal == "vararg");
+            || (self.is_kw("vararg") && self.peek_ahead(1).kind == TokenKind::Ident);
         if is_vararg {
+            self.advance();
+        }
+        // noinline / crossinline（Kotlin inline lambda 参数修饰符）
+        let is_noinline = self.is_kw("noinline") && self.peek_ahead(1).kind == TokenKind::Ident;
+        if is_noinline {
+            self.advance();
+        }
+        let is_crossinline =
+            self.is_kw("crossinline") && self.peek_ahead(1).kind == TokenKind::Ident;
+        if is_crossinline {
             self.advance();
         }
 
@@ -395,6 +453,8 @@ impl Parser {
             type_hint,
             default_value,
             is_vararg,
+            is_noinline,
+            is_crossinline,
             span: Span::merge(&start, &self.current().span),
         }
     }
@@ -439,6 +499,8 @@ impl Parser {
                         type_hint: Some(Box::new(self.parse_type())),
                         default_value: None,
                         is_vararg: false,
+                        is_noinline: false,
+                        is_crossinline: false,
                         span: self.current().span,
                     });
                     if self.check(TokenKind::Comma) {
@@ -528,42 +590,84 @@ impl Parser {
             self.advance();
             return Visibility::Private;
         }
+        // internal：模块级可见性（上下文关键字，AST 已有 Visibility::Internal 变体）
+        if self.is_internal_visibility() {
+            self.advance();
+            return Visibility::Internal;
+        }
         // Kotlin 语义：未显式标注时默认 public
         Visibility::Public
     }
 
+    /// 解析函数修饰符（循环解析，修饰符可任意顺序/数量组合，Kotlin 语义）：
+    /// `suspend` / `async` / `inline` / `override` / `comptime`，
+    /// 以及上下文关键字 `open` / `abstract` / `operator` / `infix` / `tailrec` / `expect` / `actual`
     fn try_parse_fn_modifiers(&mut self) -> Vec<FnModifier> {
-        let mut mods = Vec::new();
-        if self.check(TokenKind::Suspend) {
-            self.advance();
-            mods.push(FnModifier::Suspend);
-        }
-        if self.check(TokenKind::Async) {
-            self.advance();
-            mods.push(FnModifier::Async);
-        }
-        if self.check(TokenKind::Inline) {
-            self.advance();
-            mods.push(FnModifier::Inline);
-        }
-        if self.check(TokenKind::Override) {
-            self.advance();
-            mods.push(FnModifier::Override);
-        }
-        if self.check(TokenKind::Comptime) {
-            self.advance();
-            mods.push(FnModifier::Comptime);
+        // 预扫描阶段（parse_declaration）捕获的前缀修饰符
+        let mut mods: Vec<FnModifier> = std::mem::take(&mut self.pending_fn_mods);
+        loop {
+            if self.check(TokenKind::Suspend) {
+                self.advance();
+                mods.push(FnModifier::Suspend);
+                continue;
+            }
+            if self.check(TokenKind::Async) {
+                self.advance();
+                mods.push(FnModifier::Async);
+                continue;
+            }
+            if self.check(TokenKind::Inline) {
+                self.advance();
+                mods.push(FnModifier::Inline);
+                continue;
+            }
+            if self.check(TokenKind::Override) {
+                self.advance();
+                mods.push(FnModifier::Override);
+                continue;
+            }
+            if self.check(TokenKind::Comptime) {
+                self.advance();
+                mods.push(FnModifier::Comptime);
+                continue;
+            }
+            if self.current().kind == TokenKind::Ident
+                && is_fn_modifier_word(&self.current().literal)
+            {
+                let m = match self.current().literal.as_str() {
+                    "open" => FnModifier::Open,
+                    "abstract" => FnModifier::Abstract,
+                    "operator" => FnModifier::Operator,
+                    "infix" => FnModifier::Infix,
+                    "tailrec" => FnModifier::Tailrec,
+                    "expect" => FnModifier::Expect,
+                    _ => FnModifier::Actual,
+                };
+                self.advance();
+                mods.push(m);
+                continue;
+            }
+            break;
         }
         mods
     }
 
-    /// 当前 token 是否为函数修饰符（可出现在 `fun` 之前，如 `override fun` / `suspend fun` / `async fun`）
+    /// 当前 token 是否为函数修饰符（可出现在 `fun` 之前，如 `override fun` / `suspend fun` / `open fun`）
     fn is_method_modifier_token(&self) -> bool {
-        self.check(TokenKind::Override)
-            || self.check(TokenKind::Suspend)
-            || self.check(TokenKind::Async)
-            || self.check(TokenKind::Inline)
-            || self.check(TokenKind::Comptime)
+        if matches!(
+            self.current().kind,
+            TokenKind::Override
+                | TokenKind::Suspend
+                | TokenKind::Async
+                | TokenKind::Inline
+                | TokenKind::Comptime
+        ) {
+            return true;
+        }
+        // 上下文关键字修饰符：`open fun` / `operator fun` 等（下一个 token 必须是 fun）
+        self.current().kind == TokenKind::Ident
+            && is_fn_modifier_word(&self.current().literal)
+            && self.peek_ahead(1).kind == TokenKind::Fun
     }
 
     /// 当前 token 是否为可见性关键字（`public` / `private` / `protected`）
@@ -574,28 +678,280 @@ impl Parser {
         )
     }
 
-    /// 解析类/结构体/接口体中的一个成员（字段或方法），正确处理前导可见性 / 修饰符
-    fn parse_class_member(&mut self, fields: &mut Vec<StructField>, methods: &mut Vec<FnDecl>) {
-        self.collect_doc();
-        if self.check(TokenKind::Val) || self.check(TokenKind::Var) {
-            fields.push(self.parse_struct_field());
+    /// 上下文关键字判断：词法上是 Ident，仅在特定语法位置生效（Kotlin modifier keywords 风格）
+    fn is_kw(&self, kw: &str) -> bool {
+        self.current().kind == TokenKind::Ident && self.current().literal == kw
+    }
+
+    /// `internal` 可见性（上下文关键字）：仅当后随声明起始 token 时才视为可见性修饰符，
+    /// 避免误吞以 `internal` 命名的标识符
+    fn is_internal_visibility(&self) -> bool {
+        self.current().kind == TokenKind::Ident
+            && self.current().literal == "internal"
+            && matches!(
+                self.peek_ahead(1).kind,
+                TokenKind::Val
+                    | TokenKind::Var
+                    | TokenKind::Fun
+                    | TokenKind::Class
+                    | TokenKind::Struct
+                    | TokenKind::Interface
+                    | TokenKind::Enum
+                    | TokenKind::Actor
+            )
+    }
+
+    /// 预扫描声明前缀修饰符（open / abstract / expect / actual，上下文关键字）。
+    /// 仅当这些词最终落在 class/struct/interface（及其 data/sealed/value 组合）或 fun
+    /// 声明之前时才消费，避免误吞以它们命名的顶层标识符（Kotlin 中这些词仍可用作标识符）。
+    fn try_parse_modifier_prefix(&mut self) {
+        let mut i = self.pos;
+        if i < self.tokens.len()
+            && matches!(
+                self.tokens[i].kind,
+                TokenKind::Public | TokenKind::Private | TokenKind::Protected
+            )
+        {
+            i += 1;
+        }
+        let start = i;
+        // 直接映射为 FnModifier（Copy，无借用问题）
+        let mut mods: Vec<FnModifier> = Vec::new();
+        while i < self.tokens.len()
+            && self.tokens[i].kind == TokenKind::Ident
+            && is_fn_modifier_word(&self.tokens[i].literal)
+        {
+            let m = match self.tokens[i].literal.as_str() {
+                "open" => FnModifier::Open,
+                "abstract" => FnModifier::Abstract,
+                "operator" => FnModifier::Operator,
+                "infix" => FnModifier::Infix,
+                "tailrec" => FnModifier::Tailrec,
+                "expect" => FnModifier::Expect,
+                _ => FnModifier::Actual,
+            };
+            mods.push(m);
+            i += 1;
+        }
+        if mods.is_empty() {
             return;
         }
-        if self.check(TokenKind::Fun) || self.is_method_modifier_token() {
-            methods.push(self.parse_fn_decl());
-            return;
-        }
-        if self.is_visibility_token() {
-            // 可见性后跟随 val/var（字段）或 fun（方法）
-            let nxt = self.peek_ahead(1).kind;
-            if nxt == TokenKind::Val || nxt == TokenKind::Var {
-                fields.push(self.parse_struct_field());
-            } else {
-                methods.push(self.parse_fn_decl());
+        let to_class = |m: &FnModifier| -> Option<ClassModifier> {
+            match m {
+                FnModifier::Open => Some(ClassModifier::Open),
+                FnModifier::Abstract => Some(ClassModifier::Abstract),
+                FnModifier::Expect => Some(ClassModifier::Expect),
+                FnModifier::Actual => Some(ClassModifier::Actual),
+                // operator / infix / tailrec 仅适用于函数
+                _ => None,
             }
+        };
+        match self.tokens.get(i).map(|t| &t.kind) {
+            Some(TokenKind::Class)
+            | Some(TokenKind::Struct)
+            | Some(TokenKind::Interface)
+            | Some(TokenKind::Data)
+            | Some(TokenKind::Sealed)
+            | Some(TokenKind::Value) => {
+                for _ in start..i {
+                    self.advance();
+                }
+                self.pending_class_mods = mods.iter().filter_map(to_class).collect();
+            }
+            Some(TokenKind::Fun) => {
+                for _ in start..i {
+                    self.advance();
+                }
+                self.pending_fn_mods = mods;
+            }
+            _ => {}
+        }
+    }
+
+    /// 解析类/结构体/Actor 体中的一个成员（字段 / 方法 / init 块 / 构造函数 / 伴生对象），
+    /// 正确处理前导可见性 / 修饰符
+    fn parse_class_member(&mut self, m: &mut ClassMembers) {
+        self.collect_doc();
+
+        // 直接 val/var 字段
+        if self.check(TokenKind::Val) || self.check(TokenKind::Var) {
+            let f = self.parse_struct_field();
+            m.fields.push(f);
+            return;
+        }
+
+        // 可见性 / 函数修饰符前缀：向前看一位分类成员种类
+        if self.is_visibility_token()
+            || self.is_internal_visibility()
+            || self.is_method_modifier_token()
+        {
+            let k1 = self.peek_ahead(1);
+            let k2 = self.peek_ahead(2);
+            // [可见性] val/var 字段
+            if k1.kind == TokenKind::Val || k1.kind == TokenKind::Var {
+                let f = self.parse_struct_field();
+                m.fields.push(f);
+                return;
+            }
+            // [可见性] fun / 修饰符 fun 方法
+            if k1.kind == TokenKind::Fun
+                || (k1.kind == TokenKind::Ident
+                    && is_fn_modifier_word(&k1.literal)
+                    && k2.kind == TokenKind::Fun)
+            {
+                let f = self.parse_fn_decl();
+                m.methods.push(f);
+                return;
+            }
+            // [可见性] constructor(...) 次构造函数
+            if k1.kind == TokenKind::Ident
+                && k1.literal == "constructor"
+                && k2.kind == TokenKind::LParen
+            {
+                let c = self.parse_constructor();
+                m.constructors.push(c);
+                return;
+            }
+            // [可见性] companion object 伴生对象
+            if k1.kind == TokenKind::Ident && k1.literal == "companion" && is_object_token(&k2) {
+                self.parse_companion_into(m);
+                return;
+            }
+            if self.is_visibility_token() || self.is_internal_visibility() {
+                // 旧行为兜底：可见性后非 val/var 一律按方法解析（由 expect(Fun) 报错）
+                let f = self.parse_fn_decl();
+                m.methods.push(f);
+                return;
+            }
+        }
+
+        // init 块（Kotlin `init { ... }`）
+        if self.is_kw("init") && self.peek_ahead(1).kind == TokenKind::LBrace {
+            self.advance(); // init
+            let block = self.parse_block();
+            m.init_blocks.push(block);
+            return;
+        }
+        // init 构造函数（Aura 既有惯例：`init(params) { ... }`）
+        if self.is_kw("init") && self.peek_ahead(1).kind == TokenKind::LParen {
+            let c = self.parse_constructor();
+            m.constructors.push(c);
+            return;
+        }
+        // 次构造函数（Kotlin `constructor(...)`）
+        if self.is_kw("constructor") && self.peek_ahead(1).kind == TokenKind::LParen {
+            let c = self.parse_constructor();
+            m.constructors.push(c);
+            return;
+        }
+        // 伴生对象（Kotlin `companion object [Name] { ... }`；`object` 是词法关键字）
+        if self.is_kw("companion") && self.peek_ahead(1).kind == TokenKind::Object {
+            self.parse_companion_into(m);
+            return;
+        }
+
+        // 方法（fun 或带修饰符）
+        if self.check(TokenKind::Fun) || self.is_method_modifier_token() {
+            let f = self.parse_fn_decl();
+            m.methods.push(f);
             return;
         }
         self.advance();
+    }
+
+    /// 解析次构造函数 / init 构造函数：
+    /// `[可见性] (constructor|init) (参数) [: super(...)|this(...)|Base(...)] [{ 函数体 }]`
+    fn parse_constructor(&mut self) -> ConstructorDecl {
+        let start = self.current().span;
+        let visibility = self.try_parse_visibility();
+        if self.is_kw("constructor") || self.is_kw("init") {
+            self.advance();
+        }
+        let params = self.parse_params();
+
+        // 委托调用：`: super(x)` / `: this(x)`（Aura 风格 `: Base(x)` 按 super 委托处理）
+        let delegation = if self.check(TokenKind::Colon) {
+            self.advance();
+            let target = if self.check(TokenKind::Super) {
+                self.advance();
+                CtorDelegationTarget::Super
+            } else if self.check(TokenKind::This) {
+                self.advance();
+                CtorDelegationTarget::This
+            } else if self.current().kind == TokenKind::Ident {
+                self.advance();
+                CtorDelegationTarget::Super
+            } else {
+                self.expect(TokenKind::Super);
+                CtorDelegationTarget::Super
+            };
+            let args = self.parse_call_args_exprs();
+            let span = Span::merge(&start, &self.current().span);
+            Some(ConstructorDelegation {
+                target,
+                args,
+                span,
+            })
+        } else {
+            None
+        };
+
+        let body =
+            if self.check(TokenKind::LBrace) { Some(Box::new(self.parse_block())) } else { None };
+
+        ConstructorDecl {
+            visibility,
+            params,
+            delegation,
+            body,
+            span: Span::merge(&start, &self.current().span),
+        }
+    }
+
+    /// 解析伴生对象：`[可见性] companion object [Name] { 成员 }`
+    fn parse_companion_into(&mut self, m: &mut ClassMembers) {
+        let start = self.current().span;
+        let _visibility = self.try_parse_visibility();
+        self.advance(); // companion
+        self.advance(); // object（TokenKind::Object）
+        // 命名伴生对象：companion object Default { ... }
+        let name = if self.check(TokenKind::Ident) && self.peek_ahead(1).kind == TokenKind::LBrace {
+            Some(self.advance().literal.clone())
+        } else {
+            None
+        };
+        let mut members = ClassMembers::default();
+        if self.check(TokenKind::LBrace) {
+            self.advance();
+            while !self.check(TokenKind::RBrace) && !self.is_at_end() {
+                self.parse_class_member(&mut members);
+            }
+            self.expect(TokenKind::RBrace);
+        }
+        m.companions.push(CompanionDecl {
+            name,
+            fields: members.fields,
+            methods: members.methods,
+            init_blocks: members.init_blocks,
+            span: Span::merge(&start, &self.current().span),
+        });
+    }
+
+    /// 解析 `(expr, ...)` 实参列表（构造函数委托用）
+    fn parse_call_args_exprs(&mut self) -> Vec<Expr> {
+        let mut args = Vec::new();
+        if self.check(TokenKind::LParen) {
+            self.advance();
+            while !self.check(TokenKind::RParen) && !self.is_at_end() {
+                args.push(self.parse_expression(0));
+                if !self.check(TokenKind::Comma) {
+                    break;
+                }
+                self.advance();
+            }
+            self.expect(TokenKind::RParen);
+        }
+        args
     }
 
     fn try_parse_type_params(&mut self) -> Vec<TypeParam> {
@@ -616,6 +972,14 @@ impl Parser {
 
     fn parse_type_param(&mut self) -> TypeParam {
         let start = self.current().span;
+
+        // reified：泛型类型具体化（Kotlin `inline fun <reified T>`，上下文关键字）
+        let reified = if self.is_kw("reified") && self.peek_ahead(1).kind == TokenKind::Ident {
+            self.advance();
+            true
+        } else {
+            false
+        };
 
         // 型变修饰符：`out T` / `in T`（Kotlin 声明处型变）
         let variance = if self.check(TokenKind::Ident)
@@ -652,6 +1016,7 @@ impl Parser {
             variance,
             bounds,
             default: None,
+            reified,
             span: Span::merge(&start, &self.current().span),
         }
     }
@@ -671,16 +1036,13 @@ impl Parser {
         let name = self.advance().literal.clone();
         let type_params = self.try_parse_type_params();
 
-        let mut fields = Vec::new();
-        let mut methods = Vec::new();
+        let mut members = ClassMembers::default();
         let mut implementations = Vec::new();
 
         if self.check(TokenKind::LBrace) {
             self.advance();
             while !self.check(TokenKind::RBrace) && !self.is_at_end() {
-                // 成员前可能带有文档注释
-                self.collect_doc();
-                self.parse_class_member(&mut fields, &mut methods);
+                self.parse_class_member(&mut members);
             }
             self.expect(TokenKind::RBrace);
         } else if self.check(TokenKind::LParen) {
@@ -688,14 +1050,15 @@ impl Parser {
             self.advance();
             while !self.check(TokenKind::RParen) && !self.is_at_end() {
                 if self.check(TokenKind::Val) || self.check(TokenKind::Var) {
-                    fields.push(self.parse_struct_field());
+                    members.fields.push(self.parse_struct_field());
                 } else {
-                    fields.push(StructField {
+                    members.fields.push(StructField {
                         visibility: self.try_parse_visibility(),
                         is_mutable: false,
                         name: self.advance().literal.clone(),
                         type_hint: None,
                         default_value: None,
+                        accessors: None,
                         span: Span::single(0, 1, 1),
                     });
                 }
@@ -705,6 +1068,14 @@ impl Parser {
                 self.advance();
             }
             self.expect(TokenKind::RParen);
+            // 构造器参数后可能跟类体：struct Name(ctor) { ... }
+            if self.check(TokenKind::LBrace) {
+                self.advance();
+                while !self.check(TokenKind::RBrace) && !self.is_at_end() {
+                    self.parse_class_member(&mut members);
+                }
+                self.expect(TokenKind::RBrace);
+            }
         }
 
         // 接口实现：`:: TraitName` 或 Kotlin 风格 `: TraitName`
@@ -713,14 +1084,20 @@ impl Parser {
             implementations.push(self.advance().literal.clone());
         }
 
+        // struct 是值类型（隐式 final）：open/abstract 前缀修饰符不适用，仅消费掉
+        let _ = std::mem::take(&mut self.pending_class_mods);
+
         StructDecl {
             visibility,
             sealed,
             name,
             type_params,
-            fields,
-            methods,
+            fields: members.fields,
+            methods: members.methods,
             implementations,
+            init_blocks: members.init_blocks,
+            constructors: members.constructors,
+            companion_objects: members.companions,
             doc: self.take_doc(),
             span: Span::merge(&start, &self.current().span),
         }
@@ -753,14 +1130,71 @@ impl Parser {
             None
         };
 
+        // 属性访问器（Kotlin 软关键字 get / set）
+        let accessors = self.try_parse_field_accessors();
+
         StructField {
             visibility,
             is_mutable,
             name,
             type_hint,
             default_value,
+            accessors,
             span: Span::merge(&start, &self.current().span),
         }
+    }
+
+    /// 解析属性访问器（Kotlin 软关键字 get / set）：
+    /// `val length: Int get() = ...`、`var count: Int set(v) { field = v }`（顺序任意、可只写其一）。
+    /// 访问器体内可用上下文关键字 `field` 引用底层字段。
+    fn try_parse_field_accessors(&mut self) -> Option<Box<FieldAccessors>> {
+        let mut acc = FieldAccessors::default();
+        loop {
+            if self.is_kw("get") && self.peek_ahead(1).kind == TokenKind::LParen {
+                let start = self.current().span;
+                self.advance(); // get
+                self.advance(); // (
+                self.expect(TokenKind::RParen);
+                let body = self.parse_accessor_body();
+                acc.getter = Some(AccessorDecl {
+                    param: None,
+                    body: Box::new(body),
+                    span: Span::merge(&start, &self.current().span),
+                });
+                continue;
+            }
+            if self.is_kw("set") && self.peek_ahead(1).kind == TokenKind::LParen {
+                let start = self.current().span;
+                self.advance(); // set
+                self.advance(); // (
+                let param =
+                    if self.check(TokenKind::RParen) { None } else { Some(self.parse_param()) };
+                self.expect(TokenKind::RParen);
+                let body = self.parse_accessor_body();
+                acc.setter = Some(AccessorDecl {
+                    param,
+                    body: Box::new(body),
+                    span: Span::merge(&start, &self.current().span),
+                });
+                continue;
+            }
+            break;
+        }
+        if acc.getter.is_some() || acc.setter.is_some() { Some(Box::new(acc)) } else { None }
+    }
+
+    /// 访问器体：`= expr` 或 `{ 语句块 }`
+    fn parse_accessor_body(&mut self) -> Expr {
+        if self.check(TokenKind::Assign) {
+            self.advance();
+            return self.parse_expression(0);
+        }
+        if self.check(TokenKind::LBrace) {
+            return self.parse_block();
+        }
+        let span = self.current().span;
+        self.expect(TokenKind::LBrace);
+        Expr::Literal(Literal::Null, span)
     }
 
     #[allow(dead_code)]
@@ -875,16 +1309,13 @@ impl Parser {
 
         let superclass = self.parse_superclass_ref();
 
-        let mut fields = Vec::new();
-        let mut methods = Vec::new();
+        let mut members = ClassMembers::default();
         let mut implementations = Vec::new();
 
         if self.check(TokenKind::LBrace) {
             self.advance();
             while !self.check(TokenKind::RBrace) && !self.is_at_end() {
-                // 成员前可能带有文档注释
-                self.collect_doc();
-                self.parse_class_member(&mut fields, &mut methods);
+                self.parse_class_member(&mut members);
             }
             self.expect(TokenKind::RBrace);
         }
@@ -909,11 +1340,15 @@ impl Parser {
             name,
             type_params,
             superclass,
-            fields,
-            methods,
+            fields: members.fields,
+            methods: members.methods,
             implementations,
+            init_blocks: members.init_blocks,
+            constructors: members.constructors,
+            companion_objects: members.companions,
             doc: self.take_doc(),
             span: Span::merge(&start, &self.current().span),
+            modifiers: std::mem::take(&mut self.pending_class_mods),
         }
     }
 
@@ -927,22 +1362,19 @@ impl Parser {
         let name = self.advance().literal.clone();
         let type_params = self.try_parse_type_params();
 
-        let mut fields = Vec::new();
-        let mut methods = Vec::new();
+        let mut members = ClassMembers::default();
 
         if self.check(TokenKind::LBrace) {
             self.advance();
             while !self.check(TokenKind::RBrace) && !self.is_at_end() {
-                // 成员前可能带有文档注释
-                self.collect_doc();
-                self.parse_class_member(&mut fields, &mut methods);
+                self.parse_class_member(&mut members);
             }
             self.expect(TokenKind::RBrace);
         } else if self.check(TokenKind::LParen) {
             self.advance();
             while !self.check(TokenKind::RParen) && !self.is_at_end() {
                 let f = self.parse_struct_field();
-                fields.push(f);
+                members.fields.push(f);
                 if !self.check(TokenKind::Comma) {
                     break;
                 }
@@ -951,14 +1383,19 @@ impl Parser {
             self.expect(TokenKind::RParen);
         }
 
+        let _ = std::mem::take(&mut self.pending_class_mods);
+
         StructDecl {
             visibility,
             sealed: false,
             name,
             type_params,
-            fields,
-            methods,
+            fields: members.fields,
+            methods: members.methods,
             implementations: Vec::new(),
+            init_blocks: members.init_blocks,
+            constructors: members.constructors,
+            companion_objects: members.companions,
             doc: self.take_doc(),
             span: Span::merge(&start, &self.current().span),
         }
@@ -974,27 +1411,29 @@ impl Parser {
         let name = self.advance().literal.clone();
         let type_params = self.try_parse_type_params();
 
-        let mut fields = Vec::new();
-        let mut methods = Vec::new();
+        let mut members = ClassMembers::default();
 
         if self.check(TokenKind::LBrace) {
             self.advance();
             while !self.check(TokenKind::RBrace) && !self.is_at_end() {
-                // 成员前可能带有文档注释
-                self.collect_doc();
-                self.parse_class_member(&mut fields, &mut methods);
+                self.parse_class_member(&mut members);
             }
             self.expect(TokenKind::RBrace);
         }
+
+        let _ = std::mem::take(&mut self.pending_class_mods);
 
         StructDecl {
             visibility,
             sealed: true,
             name,
             type_params,
-            fields,
-            methods,
+            fields: members.fields,
+            methods: members.methods,
             implementations: Vec::new(),
+            init_blocks: members.init_blocks,
+            constructors: members.constructors,
+            companion_objects: members.companions,
             doc: self.take_doc(),
             span: Span::merge(&start, &self.current().span),
         }
@@ -1012,8 +1451,7 @@ impl Parser {
 
         let mut superclass = self.parse_superclass_ref();
 
-        let mut fields = Vec::new();
-        let mut methods = Vec::new();
+        let mut members = ClassMembers::default();
         let mut implementations = Vec::new();
 
         // 主构造器 data class Foo(val x: Int, val y: Int) { ... }
@@ -1021,7 +1459,7 @@ impl Parser {
             self.advance();
             while !self.check(TokenKind::RParen) && !self.is_at_end() {
                 let f = self.parse_struct_field();
-                fields.push(f);
+                members.fields.push(f);
                 if !self.check(TokenKind::Comma) {
                     break;
                 }
@@ -1052,12 +1490,13 @@ impl Parser {
         if self.check(TokenKind::LBrace) {
             self.advance();
             while !self.check(TokenKind::RBrace) && !self.is_at_end() {
-                // 成员前可能带有文档注释
-                self.collect_doc();
-                self.parse_class_member(&mut fields, &mut methods);
+                self.parse_class_member(&mut members);
             }
             self.expect(TokenKind::RBrace);
         }
+
+        let mut modifiers = std::mem::take(&mut self.pending_class_mods);
+        modifiers.push(ClassModifier::Data);
 
         ClassDecl {
             visibility,
@@ -1065,11 +1504,15 @@ impl Parser {
             name,
             type_params,
             superclass,
-            fields,
-            methods,
+            fields: members.fields,
+            methods: members.methods,
             implementations,
+            init_blocks: members.init_blocks,
+            constructors: members.constructors,
+            companion_objects: members.companions,
             doc: self.take_doc(),
             span: Span::merge(&start, &self.current().span),
+            modifiers,
         }
     }
 
@@ -1085,8 +1528,7 @@ impl Parser {
 
         let superclass = self.parse_superclass_ref();
 
-        let mut fields = Vec::new();
-        let mut methods = Vec::new();
+        let mut members = ClassMembers::default();
         let mut implementations = Vec::new();
 
         // Kotlin 风格：`: Base(), Trait1, Trait2`（父类之后的接口列表）
@@ -1106,12 +1548,13 @@ impl Parser {
         if self.check(TokenKind::LBrace) {
             self.advance();
             while !self.check(TokenKind::RBrace) && !self.is_at_end() {
-                // 成员前可能带有文档注释
-                self.collect_doc();
-                self.parse_class_member(&mut fields, &mut methods);
+                self.parse_class_member(&mut members);
             }
             self.expect(TokenKind::RBrace);
         }
+
+        let mut modifiers = std::mem::take(&mut self.pending_class_mods);
+        modifiers.push(ClassModifier::Sealed);
 
         ClassDecl {
             visibility,
@@ -1119,11 +1562,209 @@ impl Parser {
             name,
             type_params,
             superclass,
-            fields,
-            methods,
+            fields: members.fields,
+            methods: members.methods,
             implementations,
+            init_blocks: members.init_blocks,
+            constructors: members.constructors,
+            companion_objects: members.companions,
             doc: self.take_doc(),
             span: Span::merge(&start, &self.current().span),
+            modifiers,
+        }
+    }
+
+    /// 解析 `value class Name { ... }` 或 `value class Name(ctor)`
+    #[allow(dead_code)]
+    pub fn parse_value_class(&mut self) -> ClassDecl {
+        let start = self.current().span;
+        let visibility = self.try_parse_visibility();
+        self.expect(TokenKind::Value);
+        self.expect(TokenKind::Class);
+        let name = self.advance().literal.clone();
+        let type_params = self.try_parse_type_params();
+        let superclass = self.parse_superclass_ref();
+
+        let mut members = ClassMembers::default();
+        let mut implementations = Vec::new();
+
+        if self.check(TokenKind::LBrace) {
+            self.advance();
+            while !self.check(TokenKind::RBrace) && !self.is_at_end() {
+                self.parse_class_member(&mut members);
+            }
+            self.expect(TokenKind::RBrace);
+        } else if self.check(TokenKind::LParen) {
+            self.advance();
+            while !self.check(TokenKind::RParen) && !self.is_at_end() {
+                let f = self.parse_struct_field();
+                members.fields.push(f);
+                if !self.check(TokenKind::Comma) {
+                    break;
+                }
+                self.advance();
+            }
+            self.expect(TokenKind::RParen);
+            if self.check(TokenKind::LBrace) {
+                self.advance();
+                while !self.check(TokenKind::RBrace) && !self.is_at_end() {
+                    self.parse_class_member(&mut members);
+                }
+                self.expect(TokenKind::RBrace);
+            }
+        }
+
+        if self.check(TokenKind::DoubleColon) || self.check(TokenKind::Colon) {
+            self.advance();
+            implementations.push(self.advance().literal.clone());
+        }
+
+        let mut modifiers = std::mem::take(&mut self.pending_class_mods);
+        modifiers.push(ClassModifier::Value);
+
+        ClassDecl {
+            visibility,
+            sealed: false,
+            name,
+            type_params,
+            superclass,
+            fields: members.fields,
+            methods: members.methods,
+            implementations,
+            init_blocks: members.init_blocks,
+            constructors: members.constructors,
+            companion_objects: members.companions,
+            doc: self.take_doc(),
+            span: Span::merge(&start, &self.current().span),
+            modifiers,
+        }
+    }
+
+    /// 解析 `value data class Name { ... }` 或 `value data class Name(ctor)`
+    #[allow(dead_code)]
+    pub fn parse_value_data_class(&mut self) -> ClassDecl {
+        let start = self.current().span;
+        let visibility = self.try_parse_visibility();
+        self.expect(TokenKind::Value);
+        self.expect(TokenKind::Data);
+        self.expect(TokenKind::Class);
+        let name = self.advance().literal.clone();
+        let type_params = self.try_parse_type_params();
+
+        let mut superclass = self.parse_superclass_ref();
+        let mut members = ClassMembers::default();
+        let mut implementations = Vec::new();
+
+        if self.check(TokenKind::LParen) {
+            self.advance();
+            while !self.check(TokenKind::RParen) && !self.is_at_end() {
+                let f = self.parse_struct_field();
+                members.fields.push(f);
+                if !self.check(TokenKind::Comma) {
+                    break;
+                }
+                self.advance();
+            }
+            self.expect(TokenKind::RParen);
+        }
+
+        if superclass.is_none() {
+            superclass = self.parse_superclass_ref();
+        }
+        if superclass.is_some() {
+            while self.check(TokenKind::Comma) {
+                self.advance();
+                implementations.push(self.advance().literal.clone());
+            }
+        }
+        if self.check(TokenKind::DoubleColon) || self.check(TokenKind::Colon) {
+            self.advance();
+            implementations.push(self.advance().literal.clone());
+        }
+
+        if self.check(TokenKind::LBrace) {
+            self.advance();
+            while !self.check(TokenKind::RBrace) && !self.is_at_end() {
+                self.parse_class_member(&mut members);
+            }
+            self.expect(TokenKind::RBrace);
+        }
+
+        let mut modifiers = std::mem::take(&mut self.pending_class_mods);
+        modifiers.push(ClassModifier::Value);
+        modifiers.push(ClassModifier::Data);
+
+        ClassDecl {
+            visibility,
+            sealed: false,
+            name,
+            type_params,
+            superclass,
+            fields: members.fields,
+            methods: members.methods,
+            implementations,
+            init_blocks: members.init_blocks,
+            constructors: members.constructors,
+            companion_objects: members.companions,
+            doc: self.take_doc(),
+            span: Span::merge(&start, &self.current().span),
+            modifiers,
+        }
+    }
+
+    /// 解析 `sealed value class Name { ... }`
+    #[allow(dead_code)]
+    pub fn parse_sealed_value_class(&mut self) -> ClassDecl {
+        let start = self.current().span;
+        let visibility = self.try_parse_visibility();
+        self.expect(TokenKind::Sealed);
+        self.expect(TokenKind::Value);
+        self.expect(TokenKind::Class);
+        let name = self.advance().literal.clone();
+        let type_params = self.try_parse_type_params();
+        let superclass = self.parse_superclass_ref();
+
+        let mut members = ClassMembers::default();
+        let mut implementations = Vec::new();
+
+        if superclass.is_some() {
+            while self.check(TokenKind::Comma) {
+                self.advance();
+                implementations.push(self.advance().literal.clone());
+            }
+        }
+        if self.check(TokenKind::DoubleColon) || self.check(TokenKind::Colon) {
+            self.advance();
+            implementations.push(self.advance().literal.clone());
+        }
+
+        if self.check(TokenKind::LBrace) {
+            self.advance();
+            while !self.check(TokenKind::RBrace) && !self.is_at_end() {
+                self.parse_class_member(&mut members);
+            }
+            self.expect(TokenKind::RBrace);
+        }
+
+        let mut modifiers = std::mem::take(&mut self.pending_class_mods);
+        modifiers.push(ClassModifier::Sealed);
+        modifiers.push(ClassModifier::Value);
+
+        ClassDecl {
+            visibility,
+            sealed: true,
+            name,
+            type_params,
+            superclass,
+            fields: members.fields,
+            methods: members.methods,
+            implementations,
+            init_blocks: members.init_blocks,
+            constructors: members.constructors,
+            companion_objects: members.companions,
+            doc: self.take_doc(),
+            span: Span::merge(&start, &self.current().span),
+            modifiers,
         }
     }
 
@@ -1164,24 +1805,26 @@ impl Parser {
         self.expect(TokenKind::Actor);
         let name = self.advance().literal.clone();
 
-        let mut fields = Vec::new();
-        let mut methods = Vec::new();
+        let mut members = ClassMembers::default();
 
         if self.check(TokenKind::LBrace) {
             self.advance();
             while !self.check(TokenKind::RBrace) && !self.is_at_end() {
-                // 成员前可能带有文档注释
-                self.collect_doc();
-                self.parse_class_member(&mut fields, &mut methods);
+                self.parse_class_member(&mut members);
             }
             self.expect(TokenKind::RBrace);
         }
 
+        let _ = std::mem::take(&mut self.pending_class_mods);
+
         ActorDecl {
             visibility,
             name,
-            fields,
-            methods,
+            fields: members.fields,
+            methods: members.methods,
+            init_blocks: members.init_blocks,
+            constructors: members.constructors,
+            companion_objects: members.companions,
             doc: self.take_doc(),
             span: Span::merge(&start, &self.current().span),
         }
@@ -1472,6 +2115,13 @@ impl Parser {
         // 非运算符 token（含 EOF、`)`、`}`、关键字）绑定优先级为 0，直接终止，
         // 杜绝 `advance` 在 EOF 处不推进导致的无限循环。
         loop {
+            // 自定义中缀调用（Kotlin `infix fun`）：`lhs name rhs` → Call(name, [lhs, rhs])
+            if self.current().kind == TokenKind::Ident && !self.is_lambda_start() {
+                if let Some(infix) = self.try_parse_infix_call(&lhs, min_bp) {
+                    lhs = infix;
+                    continue;
+                }
+            }
             let next_bp = self.infix_binding_power();
             if next_bp == 0 || next_bp <= min_bp {
                 break;
@@ -1639,10 +2289,26 @@ impl Parser {
         // 字面量
         if self.check(TokenKind::IntLiteral) {
             let tok = self.advance();
-            if let Ok(n) = tok.literal.parse::<i64>() {
-                return Expr::Literal(Literal::Int(n), tok.span);
+            let literal = tok.literal.clone();
+            // 去除下划线分隔符和 Long 后缀
+            let mut cleaned = literal.replace('_', "");
+            // 去除末尾的 L/l 后缀
+            while cleaned.ends_with('L') || cleaned.ends_with('l') {
+                cleaned.pop();
             }
-            return Expr::Literal(Literal::Int(0), tok.span);
+            // 检测进制前缀
+            let n = if let Some(hex_str) =
+                cleaned.strip_prefix("0x").or_else(|| cleaned.strip_prefix("0X"))
+            {
+                i64::from_str_radix(hex_str, 16).unwrap_or(0)
+            } else if let Some(bin_str) =
+                cleaned.strip_prefix("0b").or_else(|| cleaned.strip_prefix("0B"))
+            {
+                i64::from_str_radix(bin_str, 2).unwrap_or(0)
+            } else {
+                cleaned.parse::<i64>().unwrap_or(0)
+            };
+            return Expr::Literal(Literal::Int(n), tok.span);
         }
         if self.check(TokenKind::FloatLiteral) {
             let tok = self.advance();
@@ -1668,38 +2334,36 @@ impl Parser {
         }
         if self.check(TokenKind::BoolLiteral) {
             let tok = self.advance();
-            let b = tok.literal == "true";
-            return Expr::Literal(Literal::Bool(b), tok.span);
+            return Expr::Literal(Literal::Bool(tok.literal == "true"), tok.span);
         }
         if self.check(TokenKind::Null) {
-            self.advance();
-            return Expr::Literal(Literal::Null, self.current().span);
+            let tok = self.advance();
+            return Expr::Literal(Literal::Null, tok.span);
         }
 
-        // 括号表达式 / 调用 / Lambda
+        // 括号表达式 / 括号参数 lambda：`(expr)`、`(x) -> body`、`(x: T) -> body`
         if self.check(TokenKind::LParen) {
-            self.advance();
-            // 检查是否是 Lambda：param: Type -> Expr
-            if self.is_lambda_start() {
-                return self.parse_lambda();
+            if let Some(lambda) = self.try_parse_paren_lambda() {
+                return lambda;
             }
-            let expr = self.parse_expression(0);
+            self.advance(); // (
+            let inner = self.parse_expression(0);
             self.expect(TokenKind::RParen);
-            return expr;
-        }
-
-        // 标签 + 循环：outer@ for / outer@ while / outer@ do
-        if self.current().kind == TokenKind::Ident && self.peek(1) == TokenKind::At {
-            self.advance(); // 标签名
-            self.advance(); // @
-            return self.parse_expression(0);
+            return self.parse_postfix_chain(inner, start);
         }
 
         // 标识符 / 关键字作为表达式
         let tok = self.advance();
-        let mut expr = Expr::Ident(tok.literal.clone(), tok.span);
+        let primary = if tok.kind == TokenKind::This {
+            Expr::This(start)
+        } else {
+            Expr::Ident(tok.literal.clone(), tok.span)
+        };
+        self.parse_postfix_chain(primary, start)
+    }
 
-        // 后缀：调用、成员访问、索引
+    /// 后缀链：调用、成员访问、索引、安全调用、Elvis
+    fn parse_postfix_chain(&mut self, mut expr: Expr, start: Span) -> Expr {
         loop {
             match self.current().kind {
                 TokenKind::LParen => {
@@ -1783,7 +2447,12 @@ impl Parser {
                     // 空索引 `Int[]` 作为数组构造器类型（后续可接调用）
                     if self.check(TokenKind::RBracket) {
                         self.advance();
-                        // 不创建 Index 节点，保留原表达式（如 Int[]）
+                        // 数组类型：Int[] → 构造器调用
+                        expr = Expr::Call {
+                            callee: Box::new(expr),
+                            args: vec![],
+                            span: Span::merge(&start, &self.current().span),
+                        };
                     } else {
                         let index = self.parse_expression(0);
                         self.expect(TokenKind::RBracket);
@@ -1794,20 +2463,68 @@ impl Parser {
                         };
                     }
                 }
-                TokenKind::DoubleBang => {
-                    // 非空断言：a!!
-                    self.advance();
-                    expr = Expr::Unary {
-                        op: UnOp::NotNull,
-                        operand: Box::new(expr),
-                        span: Span::merge(&start, &self.current().span),
-                    };
-                }
                 _ => break,
             }
         }
-
         expr
+    }
+
+    /// 括号参数 lambda 判定：`(params) -> body`（Kotlin 风格）。
+    /// 向前扫描配对 `)`，若其后紧跟 `->` 且括号内容形如参数列表则按 lambda 解析。
+    fn try_parse_paren_lambda(&mut self) -> Option<Expr> {
+        let mut depth = 0usize;
+        let mut i = self.pos;
+        while i < self.tokens.len() {
+            match self.tokens[i].kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        if depth != 0 || i >= self.tokens.len() {
+            return None;
+        }
+        if self.tokens.get(i + 1).map(|t| t.kind) != Some(TokenKind::Arrow) {
+            return None;
+        }
+        // 括号内容必须是参数列表形态（仅名称/类型词法），排除 `(a + b) -> ...` 之类的表达式
+        for t in &self.tokens[self.pos + 1..i] {
+            if !matches!(
+                t.kind,
+                TokenKind::Ident
+                    | TokenKind::Colon
+                    | TokenKind::Comma
+                    | TokenKind::QuestionMark
+                    | TokenKind::Lt
+                    | TokenKind::Gt
+            ) {
+                return None;
+            }
+        }
+        let start = self.current().span;
+        self.advance(); // (
+        let mut params = Vec::new();
+        if !self.check(TokenKind::RParen) {
+            params.push(self.parse_param());
+            while self.check(TokenKind::Comma) {
+                self.advance();
+                params.push(self.parse_param());
+            }
+        }
+        self.expect(TokenKind::RParen);
+        self.expect(TokenKind::Arrow);
+        let body = self.parse_expression(0);
+        Some(Expr::Lambda {
+            params,
+            body: Box::new(body),
+            span: Span::merge(&start, &self.current().span),
+        })
     }
 
     fn is_lambda_start(&self) -> bool {
@@ -1846,6 +2563,58 @@ impl Parser {
             body: Box::new(body),
             span: Span::merge(&start, &self.current().span),
         }
+    }
+
+    /// 自定义中缀调用（Kotlin `infix fun`）：`lhs name rhs` → Call(name, [lhs, rhs])。
+    ///
+    /// 条件：当前 token 是 Ident、与 lhs 同一行（避免跨行误吞语句）、下一 token 能开始
+    /// 一个表达式、min_bp < 4（中缀绑定力与比较运算同级，低于算术）。
+    fn try_parse_infix_call(&mut self, lhs: &Expr, min_bp: u8) -> Option<Expr> {
+        let _ = lhs;
+        if std::env::var("AURA_DEBUG_INFIX").is_ok() {
+            eprintln!(
+                "[infix?] try '{}' peek1={:?} @{}:{}",
+                self.current().literal,
+                self.peek(1),
+                self.current().span.start_line,
+                self.current().span.start_col
+            );
+        }
+        if min_bp >= 4 {
+            return None;
+        }
+        // 中缀名必须与前一已消费 token 同行（span 终点会泄漏到下一行首 token，
+        // 因此不能用 lhs.span().end_line 判断）
+        let prev_line = if self.pos > 0 { self.tokens[self.pos - 1].span.end_line } else { 0 };
+        if prev_line != self.current().span.start_line {
+            return None;
+        }
+        if !matches!(
+            self.peek(1),
+            TokenKind::IntLiteral
+                | TokenKind::FloatLiteral
+                | TokenKind::StringLiteral
+                | TokenKind::CharLiteral
+                | TokenKind::BoolLiteral
+                | TokenKind::Ident
+                | TokenKind::Minus
+                | TokenKind::This
+        ) {
+            return None;
+        }
+        let op_tok = self.advance();
+        let name = op_tok.literal.clone();
+        let start = lhs.span();
+        // rhs 用同级递归：保证 `a f b f c` 左结合、`a f b + c` → `a f (b + c)`
+        let rhs = self.parse_expression(4);
+        Some(Expr::Call {
+            callee: Box::new(Expr::Ident(name, op_tok.span)),
+            args: vec![
+                lhs.clone(),
+                rhs,
+            ],
+            span: Span::merge(&start, &self.current().span),
+        })
     }
 
     fn infix_binding_power(&self) -> u8 {

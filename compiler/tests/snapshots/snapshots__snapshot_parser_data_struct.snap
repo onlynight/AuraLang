@@ -30,6 +30,7 @@ Program {
                             },
                         ),
                         default_value: None,
+                        accessors: None,
                         span: Span {
                             start: 14,
                             end: 25,
@@ -57,6 +58,7 @@ Program {
                             },
                         ),
                         default_value: None,
+                        accessors: None,
                         span: Span {
                             start: 27,
                             end: 43,
@@ -69,6 +71,9 @@ Program {
                 ],
                 methods: [],
                 implementations: [],
+                init_blocks: [],
+                constructors: [],
+                companion_objects: [],
                 doc: None,
                 span: Span {
                     start: 0,

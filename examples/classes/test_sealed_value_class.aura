@@ -1,0 +1,17 @@
+// 测试 sealed value class
+sealed value class Shape {
+    open fun area(): Float
+}
+
+class Circle : Shape() {
+    val radius: Float
+    init(radius: Float) {
+        this.radius = radius
+    }
+    override fun area(): Float = 3.14 * radius * radius
+}
+
+fun main() {
+    val c = Circle(5.0f)
+    println(c.area())
+}

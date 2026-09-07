@@ -1,0 +1,13 @@
+// shared_lib_test.aura — 用于验证 Tier 2 动态库生成的测试文件
+// 编译: aura build shared_lib_test.aura --aot --shared --output shared_lib_test.dll
+
+fun add(a: Int, b: Int): Int = a + b
+
+fun multiply(a: Int, b: Int): Int = a * b
+
+fun fib(n: Int): Int {
+    if (n < 2) {
+        return n
+    }
+    return add(fib(n - 1), fib(n - 2))
+}

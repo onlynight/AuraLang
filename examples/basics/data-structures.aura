@@ -26,7 +26,7 @@ data struct Shape {
 
 // 密封类
 sealed class Animal {
-    fun name(): String = "unknown"
+    open fun name(): String = "unknown"
 }
 
 class Dog : Animal() {

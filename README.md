@@ -136,10 +136,10 @@ cargo build --release
 
 ```bash
 # Compile and execute
-aura run examples/showcase.aura
+aura run examples/compiler/showcase.aura
 
 # AOT compile to native executable
-aura build --aot examples/game_2d_demo.aura --target x86_64-pc-windows-msvc
+aura build --aot examples/games/game_2d_demo.aura --target x86_64-pc-windows-msvc
 
 # Interactive REPL
 aura repl

@@ -1,0 +1,14 @@
+// 测试：value class 带方法 + 另一个类型
+value class Point(val x: Int, val y: Int) {
+    fun manhattan(): Int = x + y
+}
+
+struct Vec2(val x: Float, val y: Float)
+
+fun main() {
+    val p = Point(3, 4)
+    println(p.x)
+    println(p.manhattan())
+    val v = Vec2(1.0f, 2.0f)
+    println(v.x)
+}

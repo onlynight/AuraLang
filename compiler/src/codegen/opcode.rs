@@ -746,6 +746,18 @@ pub struct BytecodeModule {
     pub aot_segments: Vec<AucSegment>,
     /// 段数据区（各段原始字节拼接，`AucSegment.offset` 相对此处起始）
     pub aot_blob_data: Vec<u8>,
+
+    // ── P-K2：虚方法表（v5；open 方法动态分派）──
+    /// 每个类的虚方法表：(类型标签, [槽 i → 函数索引])
+    pub vtables: Vec<VirtualTable>,
+}
+
+/// 类的虚方法表（P-K2）：槽位编号为全局 open 方法序号
+#[derive(Debug, Clone, PartialEq)]
+pub struct VirtualTable {
+    pub type_tag: u16,
+    /// 槽 i → 函数表索引
+    pub slots: Vec<u16>,
 }
 
 impl Default for BytecodeModule {
@@ -766,6 +778,7 @@ impl Default for BytecodeModule {
             entry_kind: "app".to_string(),
             aot_segments: Vec::new(),
             aot_blob_data: Vec::new(),
+            vtables: Vec::new(),
         }
     }
 }

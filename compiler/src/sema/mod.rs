@@ -8,6 +8,7 @@
 //! 设计对应 技术方案 §4 类型系统。
 
 pub mod checker;
+pub mod info;
 pub mod symbol;
 pub mod ty;
 

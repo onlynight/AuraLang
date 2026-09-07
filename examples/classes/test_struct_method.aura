@@ -1,0 +1,11 @@
+// 测试 struct 带方法
+struct Player(val x: Float, val y: Float) {
+    fun manhattan(): Float = this.x + this.y
+}
+
+fun main() {
+    val p = Player(3.0f, 4.0f)
+    println(p.x)
+    println(p.y)
+    println(p.manhattan())
+}

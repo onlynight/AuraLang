@@ -146,6 +146,15 @@ fn snapshot_parser_doc_comment() {
     ));
 }
 
+#[test]
+fn snapshot_parser_kotlin_keywords() {
+    // Kotlin 关键字补全：open / abstract / internal / companion / constructor /
+    // init 块 / operator / infix / tailrec / reified / vararg / out / get / set
+    insta::assert_snapshot!(ast_dump(
+        "open class Animal {\n    open fun speak(): Unit {\n        println(1)\n    }\n}\nabstract class Shape {\n    abstract fun area(): Float\n    init {\n        println(2)\n    }\n    constructor()\n    companion object {\n        val PI: Float = 3.14f\n    }\n}\ninternal class Impl {\n    var x: Int\n        get() = 1\n        set(v) {\n            println(v)\n        }\n}\noperator infix fun Vec.plus(o: Vec): Vec = o\ntailrec fun fact(n: Int): Int = n\nfun <reified T> typeof(v: T): T = v\nfun sum(vararg xs: Int): Int = 0\nclass Box<out E>"
+    ));
+}
+
 // ───────────────────────── 语义快照 ─────────────────────────
 
 #[test]

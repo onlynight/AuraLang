@@ -29,6 +29,8 @@ Program {
                         ),
                         default_value: None,
                         is_vararg: false,
+                        is_noinline: false,
+                        is_crossinline: false,
                         span: Span {
                             start: 10,
                             end: 20,

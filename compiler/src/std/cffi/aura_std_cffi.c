@@ -87,6 +87,12 @@ const char *aura_to_str(int64_t x) {
     return buf;
 }
 
+const char *aura_to_str_float(double x) {
+    static char buf[64];
+    snprintf(buf, sizeof(buf), "%g", x);
+    return buf;
+}
+
 double aura_clock(void) {
 #ifdef _WIN32
     // Windows: 使用 QueryPerformanceCounter
@@ -284,6 +290,31 @@ const char *aura_string_replace(const char *s, const char *from, const char *to)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// AOT 字符串操作（{ i8*, i64 } 结构体表示）
+// ─────────────────────────────────────────────────────────────────────────────
+
+const char *aura_string_concat(const char *a, int64_t alen, const char *b, int64_t blen) {
+    size_t a_len = (size_t)(alen > 0 ? alen : 0);
+    size_t b_len = (size_t)(blen > 0 ? blen : 0);
+    size_t total = a_len + b_len;
+    if (total > 4094) total = 4094;
+
+    static char buf[4096];
+    if (a && a_len > 0) {
+        memcpy(buf, a, a_len);
+    }
+    if (b && b_len > 0) {
+        memcpy(buf + a_len, b, b_len);
+    }
+    buf[total] = '\0';
+    return buf;
+}
+
+const char *aura_string_data(AuraString s) {
+    return s.data ? s.data : "";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // aura.time — 时间
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -362,3 +393,20 @@ double aura_random_nextFloat(void) {
     aura_random_init();
     return (double)rand() / (double)RAND_MAX;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 短名称包装函数（供 AOT IR 直接调用）
+// 注意：避免与标准库函数冲突，使用 aura_ 前缀的内部调用
+// ─────────────────────────────────────────────────────────────────────────────
+
+void println(const char *s) { aura_println(s); }
+void print(const char *s) { aura_print(s); }
+int64_t aura_abs_wrapper(int64_t x) { return x < 0 ? -x : x; }
+double aura_sqrt_wrapper(double x) { return sqrt(x); }
+double aura_pow_wrapper(double b, double e) { return pow(b, e); }
+int64_t toInt(double x) { return (int64_t)x; }
+double toFloat(int64_t x) { return (double)x; }
+const char *toString(int64_t x) { return aura_to_str(x); }
+double aura_clock_wrapper(void) { return (double)clock(); }
+int64_t aura_strlen_wrapper(const char *s) { return (int64_t)strlen(s); }
+const char *toStringFloat(double x) { return aura_to_str_float(x); }

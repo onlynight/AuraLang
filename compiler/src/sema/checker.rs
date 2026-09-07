@@ -9,6 +9,7 @@
 use crate::Span;
 use crate::ast::*;
 use crate::errors::{CompileError, ErrorSeverity};
+use crate::sema::info::SemaInfo;
 use crate::sema::symbol::{ParamSym, Symbol, SymbolKind, SymbolTable, ast_type_to_ty};
 use crate::sema::ty::Ty;
 use std::collections::{HashMap, HashSet};
@@ -17,6 +18,15 @@ use std::collections::{HashMap, HashSet};
 pub struct SemanticResult {
     pub errors: Vec<CompileError>,
     pub symbols: SymbolTable,
+    /// sema → codegen 信息通道（表达式类型等）
+    pub info: SemaInfo,
+}
+
+/// 类的继承相关属性标记（Kotlin：类默认 final，仅 open / abstract / sealed 可被继承）
+#[derive(Debug, Clone, Copy, Default)]
+struct ClassAttrs {
+    is_open: bool,
+    is_abstract: bool,
 }
 
 /// 语义检查器
@@ -43,6 +53,14 @@ pub struct Checker {
     sealed_types: HashSet<String>,
     /// 接口类型集合（用于区分 superclass 是类还是接口）
     interface_types: HashSet<String>,
+    /// 类的继承属性：类名 -> open/abstract 标记（P0 继承开放性检查）
+    class_attrs: HashMap<String, ClassAttrs>,
+    /// 类名 -> 标记为 open 的方法名集合（override 合法性检查）
+    open_methods: HashMap<String, HashSet<String>>,
+    /// 类/结构体名 -> 运算符重载方法名集合（operator fun，P-K2）
+    operator_methods: HashMap<String, HashSet<String>>,
+    /// 类名 -> 父类名（子类赋值兼容检查，P-K2）
+    superclasses: HashMap<String, String>,
     /// 当前正在检查的类型上下文（用于 private 成员访问判断）
     current_type: Option<String>,
 
@@ -51,6 +69,9 @@ pub struct Checker {
     is_in_suspend_fn: bool,
     /// 被标记为 suspend/async 的函数名集合（用于调用检查）
     suspend_functions: HashSet<String>,
+
+    /// sema → codegen 信息通道（表达式类型记录）
+    info: SemaInfo,
 }
 
 impl Checker {
@@ -206,9 +227,14 @@ impl Checker {
             class_methods: HashMap::new(),
             sealed_types: HashSet::new(),
             interface_types: HashSet::new(),
+            class_attrs: HashMap::new(),
+            open_methods: HashMap::new(),
+            operator_methods: HashMap::new(),
+            superclasses: HashMap::new(),
             current_type: None,
             is_in_suspend_fn: false,
             suspend_functions: HashSet::new(),
+            info: SemaInfo::default(),
         }
     }
 
@@ -228,6 +254,7 @@ impl Checker {
         SemanticResult {
             errors: self.errors,
             symbols: self.symbols,
+            info: self.info,
         }
     }
 
@@ -277,6 +304,14 @@ impl Checker {
                 if s.sealed {
                     self.sealed_types.insert(s.name.clone());
                 }
+                // P-K2：struct 运算符重载方法表
+                let mut ops = HashSet::new();
+                for m in &s.methods {
+                    if m.modifiers.iter().any(|x| matches!(x, FnModifier::Operator)) {
+                        ops.insert(m.name.clone());
+                    }
+                }
+                self.operator_methods.insert(s.name.clone(), ops);
                 // 收集 struct 方法（作为函数）
                 for m in &s.methods {
                     let params = m
@@ -317,9 +352,27 @@ impl Checker {
                 self.symbols.register_type(c.name.clone(), Ty::Named(c.name.clone()));
                 self.record_generic_bounds(&c.name, &c.type_params);
                 self.record_members(&c.name, &c.fields, &c.methods);
-                // Phase 1: 追踪 suspend 方法
+                // 收集 class 方法（作为函数）— 与 struct 一致
                 for m in &c.methods {
+                    let params = m
+                        .params
+                        .iter()
+                        .map(|p| ParamSym {
+                            name: p.name.clone(),
+                            ty: p.type_hint.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Any),
+                            has_default: p.default_value.is_some(),
+                        })
+                        .collect();
+                    let ret = m.return_type.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Unit);
                     let full_name = format!("{}.{}", c.name, m.name);
+                    let _ = self.symbols.insert_function(
+                        full_name.clone(),
+                        params,
+                        ret,
+                        m.visibility,
+                        m.span,
+                    );
+                    // Phase 1: 追踪 suspend 方法
                     if m.modifiers
                         .iter()
                         .any(|mod_| matches!(mod_, FnModifier::Suspend | FnModifier::Async))
@@ -329,6 +382,113 @@ impl Checker {
                 }
                 if c.sealed {
                     self.sealed_types.insert(c.name.clone());
+                }
+
+                // P0：open/abstract 类属性（继承开放性检查用）
+                let is_open = c.modifiers.iter().any(|m| matches!(m, ClassModifier::Open));
+                let is_abstract = c.modifiers.iter().any(|m| matches!(m, ClassModifier::Abstract));
+                self.class_attrs.insert(
+                    c.name.clone(),
+                    ClassAttrs {
+                        is_open,
+                        is_abstract,
+                    },
+                );
+                // P0：open/abstract 方法集合（override 合法性检查用；abstract 方法天然可重写）
+                let mut open_set = HashSet::new();
+                for m in &c.methods {
+                    if m.modifiers
+                        .iter()
+                        .any(|x| matches!(x, FnModifier::Open | FnModifier::Abstract))
+                    {
+                        open_set.insert(m.name.clone());
+                    }
+                }
+                self.open_methods.insert(c.name.clone(), open_set);
+                // P-K2：运算符重载方法表 + 继承链
+                let mut ops = HashSet::new();
+                for m in &c.methods {
+                    if m.modifiers.iter().any(|x| matches!(x, FnModifier::Operator)) {
+                        ops.insert(m.name.clone());
+                    }
+                }
+                self.operator_methods.insert(c.name.clone(), ops);
+                if let Some(sc) = &c.superclass {
+                    self.superclasses.insert(c.name.clone(), sc.clone());
+                }
+                // P0/P1：abstract 方法校验（必须位于 abstract 类且无方法体）
+                for m in &c.methods {
+                    if m.modifiers.iter().any(|x| matches!(x, FnModifier::Abstract)) {
+                        if m.body.is_some() {
+                            self.report(
+                                m.span,
+                                format!("abstract function '{}' cannot have a body", m.name),
+                            );
+                        }
+                        if !is_abstract {
+                            self.report(
+                                m.span,
+                                format!(
+                                    "abstract function '{}' is only allowed inside an abstract class",
+                                    m.name
+                                ),
+                            );
+                        }
+                    }
+                }
+                // P1：伴生对象（Kotlin：一个类最多一个 companion object）
+                if c.companion_objects.len() > 1 {
+                    self.report(
+                        c.span,
+                        format!("class '{}' can have only one companion object", c.name),
+                    );
+                }
+                for co in &c.companion_objects {
+                    // 伴生成员并入类成员表（不可重复调用 record_members，其会覆盖 class_methods）
+                    for f in &co.fields {
+                        self.member_visibility
+                            .insert(format!("{}.{}", c.name, f.name), f.visibility);
+                    }
+                    if let Some(set) = self.class_methods.get_mut(&c.name) {
+                        for m in &co.methods {
+                            self.member_visibility
+                                .insert(format!("{}.{}", c.name, m.name), m.visibility);
+                            set.push(m.name.clone());
+                        }
+                    }
+                    // 伴生方法注册为 `Class.method` 函数（可经类名调用）
+                    for m in &co.methods {
+                        let params = m
+                            .params
+                            .iter()
+                            .map(|p| ParamSym {
+                                name: p.name.clone(),
+                                ty: p.type_hint.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Any),
+                                has_default: p.default_value.is_some(),
+                            })
+                            .collect();
+                        let ret = m.return_type.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Unit);
+                        let full_name = format!("{}.{}", c.name, m.name);
+                        let _ = self.symbols.insert_function(
+                            full_name,
+                            params,
+                            ret,
+                            m.visibility,
+                            m.span,
+                        );
+                    }
+                }
+
+                // 修饰符组合校验
+                let has_value = c.modifiers.iter().any(|m| *m == ClassModifier::Value);
+                if has_value && c.superclass.is_some() {
+                    self.report(
+                        c.span,
+                        format!(
+                            "value class '{}' cannot have a superclass: value types have no vtable and cannot participate in inheritance",
+                            c.name
+                        ),
+                    );
                 }
             }
             Decl::Interface(i) => {
@@ -477,11 +637,35 @@ impl Checker {
                             );
                         }
                     }
+                    // 属性访问器（get/set）：`field` 引用底层字段
+                    if let Some(acc) = &field.accessors {
+                        if let Some(g) = &acc.getter {
+                            self.check_accessor(g, ft.clone());
+                        }
+                        if let Some(st) = &acc.setter {
+                            self.check_accessor(st, ft.clone());
+                        }
+                    }
                     let name = format!("{}.{}", s.name, field.name);
                     self.define_var_env(&name, ft, field.is_mutable);
                 }
                 for m in &s.methods {
                     self.check_function_body(m);
+                }
+                // init 块 / 次构造函数 / 伴生对象（struct 与 class 成员模型一致）
+                for b in &s.init_blocks {
+                    self.check_expr(b);
+                }
+                for ctor in &s.constructors {
+                    self.check_constructor(ctor);
+                }
+                for co in &s.companion_objects {
+                    for b in &co.init_blocks {
+                        self.check_expr(b);
+                    }
+                    for m in &co.methods {
+                        self.check_function_body(m);
+                    }
                 }
                 self.symbols.exit_scope();
                 self.current_type = saved_type;
@@ -493,10 +677,45 @@ impl Checker {
                 for field in &c.fields {
                     let ft =
                         field.type_hint.as_deref().map(|t| self.check_type(t)).unwrap_or(Ty::Any);
+                    // 属性访问器（get/set）：`field` 引用底层字段
+                    if let Some(acc) = &field.accessors {
+                        if let Some(g) = &acc.getter {
+                            self.check_accessor(g, ft.clone());
+                        }
+                        if let Some(st) = &acc.setter {
+                            self.check_accessor(st, ft.clone());
+                        }
+                    }
                     let name = format!("{}.{}", c.name, field.name);
                     self.define_var_env(&name, ft, field.is_mutable);
                 }
-                // override 一致性检查（P3.9）
+                // companion 字段登记为 `Class.field`（类名静态访问）
+                for co in &c.companion_objects {
+                    for f in &co.fields {
+                        let ft =
+                            f.type_hint.as_deref().map(|t| self.check_type(t)).unwrap_or(Ty::Any);
+                        let name = format!("{}.{}", c.name, f.name);
+                        self.define_var_env(&name, ft, f.is_mutable);
+                    }
+                }
+                // P0：继承开放性检查（Kotlin：类默认 final，仅 open/abstract/sealed 可被继承；
+                // 接口天然可被实现）
+                if let Some(sn) = &c.superclass {
+                    if !self.interface_types.contains(sn) && !self.sealed_types.contains(sn) {
+                        if let Some(&attrs) = self.class_attrs.get(sn) {
+                            if !attrs.is_open && !attrs.is_abstract {
+                                self.report(
+                                    c.span,
+                                    format!(
+                                        "cannot inherit from non-open class '{}' (mark it 'open' to allow subclassing)",
+                                        sn
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
+                // override 一致性检查（P3.9）+ open 合法性检查（P0）
                 let super_methods: Vec<String> = c
                     .superclass
                     .as_ref()
@@ -506,11 +725,32 @@ impl Checker {
                     let has_override =
                         m.modifiers.iter().any(|x| matches!(x, FnModifier::Override));
                     let base_has = super_methods.contains(&m.name);
+                    // 基类方法是否 open（接口方法天然 open，可被重写）
+                    let base_open = if c
+                        .superclass
+                        .as_ref()
+                        .map_or(false, |sn| self.interface_types.contains(sn))
+                    {
+                        true
+                    } else {
+                        c.superclass
+                            .as_ref()
+                            .and_then(|sn| self.open_methods.get(sn))
+                            .map_or(false, |s| s.contains(&m.name))
+                    };
                     if has_override && !base_has {
                         self.report(
                             m.span,
                             format!(
                                 "'{}' is marked 'override' but no matching method in base class",
+                                m.name
+                            ),
+                        );
+                    } else if has_override && base_has && !base_open {
+                        self.report(
+                            m.span,
+                            format!(
+                                "'{}' in base class is not open; only open or abstract methods can be overridden",
                                 m.name
                             ),
                         );
@@ -559,6 +799,23 @@ impl Checker {
                                 ),
                             );
                         }
+                    }
+                }
+                // P0/P1：init 块（字段已在作用域内，可裸引用成员）
+                for b in &c.init_blocks {
+                    self.check_expr(b);
+                }
+                // P1：次构造函数 / init 构造函数
+                for ctor in &c.constructors {
+                    self.check_constructor(ctor);
+                }
+                // P1：伴生对象成员
+                for co in &c.companion_objects {
+                    for b in &co.init_blocks {
+                        self.check_expr(b);
+                    }
+                    for m in &co.methods {
+                        self.check_function_body(m);
                     }
                 }
                 for m in &c.methods {
@@ -656,6 +913,20 @@ impl Checker {
         self.symbols.enter_scope(true);
         self.var_env.push(HashMap::new());
 
+        // P2：tailrec 校验（Kotlin：标记 tailrec 的函数必须存在自递归调用）
+        if f.modifiers.iter().any(|m| matches!(m, FnModifier::Tailrec)) {
+            let has_recursion = f.body.as_ref().map_or(false, |b| Self::expr_calls(b, &f.name));
+            if !has_recursion {
+                self.report(
+                    f.span,
+                    format!(
+                        "function '{}' is marked 'tailrec' but contains no recursive call",
+                        f.name
+                    ),
+                );
+            }
+        }
+
         // Phase 1: 追踪 suspend 状态
         let saved_suspend = self.is_in_suspend_fn;
         self.is_in_suspend_fn =
@@ -692,6 +963,206 @@ impl Checker {
         self.is_in_suspend_fn = saved_suspend;
         self.var_env.pop();
         self.symbols.exit_scope();
+    }
+
+    /// 检查次构造函数 / init 构造函数体（参数进入作用域，成员可裸引用）
+    fn check_constructor(&mut self, ctor: &ConstructorDecl) {
+        self.symbols.enter_scope(true);
+        self.var_env.push(HashMap::new());
+        for p in &ctor.params {
+            let pt = p.type_hint.as_deref().map(|t| self.check_type(t)).unwrap_or(Ty::Any);
+            let _ = self.symbols.insert(Symbol::new(
+                p.name.clone(),
+                SymbolKind::Variable {
+                    is_mutable: true,
+                },
+                Visibility::Private,
+                p.span,
+            ));
+            self.define_var_env(&p.name, pt, true);
+        }
+        if let Some(d) = &ctor.delegation {
+            for a in &d.args {
+                self.check_expr(a);
+            }
+        }
+        if let Some(body) = &ctor.body {
+            self.check_expr(body);
+        }
+        self.var_env.pop();
+        self.symbols.exit_scope();
+    }
+
+    /// 检查属性访问器体：`field` 上下文关键字绑定为底层字段（Kotlin 软关键字）；
+    /// setter 参数未显式标注类型时继承属性类型（Kotlin 语义）
+    fn check_accessor(&mut self, acc: &AccessorDecl, field_ty: Ty) {
+        self.symbols.enter_scope(true);
+        self.var_env.push(HashMap::new());
+        self.define_var_env("field", field_ty.clone(), true);
+        if let Some(p) = &acc.param {
+            let pt = p.type_hint.as_deref().map(|t| self.check_type(t)).unwrap_or(field_ty.clone());
+            let _ = self.symbols.insert(Symbol::new(
+                p.name.clone(),
+                SymbolKind::Variable {
+                    is_mutable: true,
+                },
+                Visibility::Private,
+                p.span,
+            ));
+            self.define_var_env(&p.name, pt, true);
+        }
+        self.check_expr(&acc.body);
+        self.var_env.pop();
+        self.symbols.exit_scope();
+    }
+
+    /// 递归遍历表达式树，检查是否存在对 `name` 的直接自调用（tailrec 校验用）
+    fn expr_calls(e: &Expr, name: &str) -> bool {
+        match e {
+            Expr::Call {
+                callee,
+                args,
+                ..
+            } => {
+                let direct = matches!(callee.as_ref(), Expr::Ident(n, _) if n == name);
+                direct
+                    || Self::expr_calls(callee, name)
+                    || args.iter().any(|a| Self::expr_calls(a, name))
+            }
+            Expr::Literal(..) | Expr::Ident(..) | Expr::This(_) => false,
+            Expr::Break { .. } | Expr::Continue { .. } => false,
+            Expr::Assign {
+                target,
+                value,
+                ..
+            } => Self::expr_calls(target, name) || Self::expr_calls(value, name),
+            Expr::Binary {
+                lhs, rhs, ..
+            }
+            | Expr::Elvis {
+                lhs, rhs, ..
+            } => Self::expr_calls(lhs, name) || Self::expr_calls(rhs, name),
+            Expr::Unary {
+                operand, ..
+            }
+            | Expr::AssertNonNull {
+                expr: operand,
+                ..
+            }
+            | Expr::Await {
+                expr: operand,
+                ..
+            }
+            | Expr::TypeCast {
+                expr: operand,
+                ..
+            } => Self::expr_calls(operand, name),
+            Expr::NamedArg { value, .. } => Self::expr_calls(value, name),
+            Expr::MemberAccess { object, .. } | Expr::SafeAccess { object, .. } => {
+                Self::expr_calls(object, name)
+            }
+            Expr::Index {
+                container,
+                index,
+                ..
+            } => Self::expr_calls(container, name) || Self::expr_calls(index, name),
+            Expr::Lambda { body, .. } | Expr::Closure { body, .. } => Self::expr_calls(body, name),
+            Expr::If {
+                condition,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::expr_calls(condition, name)
+                    || Self::expr_calls(then_branch, name)
+                    || else_branch.as_ref().is_some_and(|b| Self::expr_calls(b, name))
+            }
+            Expr::When {
+                subject,
+                arms,
+                ..
+            } => {
+                subject.as_ref().is_some_and(|s| Self::expr_calls(s, name))
+                    || arms.iter().any(|a| {
+                        a.patterns.iter().any(|p| Self::expr_calls(p, name))
+                            || a.guard.as_ref().is_some_and(|g| Self::expr_calls(g, name))
+                            || Self::expr_calls(&a.body, name)
+                    })
+            }
+            Expr::For {
+                pattern,
+                iterable,
+                body,
+                ..
+            } => {
+                Self::expr_calls(pattern, name)
+                    || Self::expr_calls(iterable, name)
+                    || Self::expr_calls(body, name)
+            }
+            Expr::While {
+                condition,
+                body,
+                ..
+            }
+            | Expr::DoWhile {
+                condition,
+                body,
+                ..
+            } => Self::expr_calls(condition, name) || Self::expr_calls(body, name),
+            Expr::Return { value, .. } => value.as_ref().is_some_and(|v| Self::expr_calls(v, name)),
+            Expr::Throw { value, .. } => Self::expr_calls(value, name),
+            Expr::Try {
+                block,
+                catches,
+                finally,
+                ..
+            } => {
+                Self::expr_calls(block, name)
+                    || catches.iter().any(|c| Self::expr_calls(&c.body, name))
+                    || finally.as_ref().is_some_and(|f| Self::expr_calls(f, name))
+            }
+            Expr::New { args, .. } => args.iter().any(|a| Self::expr_calls(a, name)),
+            Expr::Destructure {
+                patterns,
+                expr,
+                ..
+            } => patterns.iter().any(|p| Self::expr_calls(p, name)) || Self::expr_calls(expr, name),
+            Expr::Range {
+                start, end, ..
+            } => {
+                start.as_ref().is_some_and(|s| Self::expr_calls(s, name))
+                    || end.as_ref().is_some_and(|e| Self::expr_calls(e, name))
+            }
+            Expr::InRange { range, .. } => Self::expr_calls(range, name),
+            Expr::Defer { block, .. } => Self::expr_calls(block, name),
+            Expr::Select {
+                branches, ..
+            } => branches
+                .iter()
+                .any(|b| Self::expr_calls(&b.pattern, name) || Self::expr_calls(&b.body, name)),
+            Expr::Block(stmts, _) => Self::stmts_calls(stmts, name),
+        }
+    }
+
+    /// 递归遍历语句列表（配合 `expr_calls`）
+    fn stmts_calls(stmts: &[Stmt], name: &str) -> bool {
+        stmts.iter().any(|s| match s {
+            Stmt::Expr(e) => Self::expr_calls(e, name),
+            Stmt::Val {
+                initializer,
+                ..
+            }
+            | Stmt::Var {
+                initializer,
+                ..
+            } => initializer.as_ref().is_some_and(|e| Self::expr_calls(e, name)),
+            Stmt::Destructure {
+                patterns,
+                expr,
+                ..
+            } => patterns.iter().any(|p| Self::expr_calls(p, name)) || Self::expr_calls(expr, name),
+            Stmt::Block(ss, _) => Self::stmts_calls(ss, name),
+        })
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -759,6 +1230,14 @@ impl Checker {
     // ═══════════════════════════════════════════════════════════════════════
 
     pub fn check_expr(&mut self, expr: &Expr) -> Ty {
+        let ty = self.check_expr_impl(expr);
+        // 记录表达式类型（span 键控），供 codegen 降级期做接收者类型分派
+        let sp = expr.span();
+        self.info.expr_types.insert((sp.start, sp.end), ty.name().to_string());
+        ty
+    }
+
+    fn check_expr_impl(&mut self, expr: &Expr) -> Ty {
         match expr {
             Expr::Literal(lit, _) => self.literal_type(lit),
             Expr::Ident(name, span) => self.check_ident(name, *span),
@@ -804,6 +1283,15 @@ impl Checker {
             } => {
                 let _ = self.check_expr(value);
                 Ty::Any
+            }
+            Expr::This(span) => {
+                // this 引用当前类型
+                if let Some(type_name) = &self.current_type {
+                    Ty::Named(type_name.clone())
+                } else {
+                    self.report(*span, "this can only be used inside a class/struct/actor");
+                    Ty::Error
+                }
             }
             Expr::MemberAccess {
                 object,
@@ -1097,6 +1585,13 @@ impl Checker {
         if let Some(t) = self.lookup_var_ty(name) {
             return t;
         }
+        // Fallback: if inside a class/struct/actor, look for class field
+        if let Some(type_name) = &self.current_type {
+            let field_name = format!("{}.{}", type_name, name);
+            if let Some(t) = self.lookup_var_ty(&field_name) {
+                return t;
+            }
+        }
         if let Some(fns) = self.symbols.lookup_function(name) {
             if let Some(sym) = fns.first() {
                 if let SymbolKind::Function {
@@ -1111,8 +1606,70 @@ impl Checker {
                 }
             }
         }
+        // P-K2：类/结构体名引用（companion 访问 `MathUtil.PI` / `MathUtil.max(...)`）
+        if self.symbols.lookup_type(name).is_some() {
+            return Ty::Named(name.to_string());
+        }
         self.report(span, format!("unresolved reference '{}'", name));
         Ty::Error
+    }
+
+    /// 运算符重载解析：操作数类（含继承链）声明了对应 operator fun → 返回其返回类型
+    fn operator_overload_return(&self, op: BinOp, lt: &Ty) -> Option<Ty> {
+        let name = match op {
+            BinOp::Add => "plus",
+            BinOp::Sub => "minus",
+            BinOp::Mul => "times",
+            BinOp::Div => "div",
+            BinOp::Mod => "mod",
+            BinOp::Eq => "eq",
+            BinOp::Ne => "ne",
+            BinOp::Lt => "lt",
+            BinOp::Gt => "gt",
+            BinOp::Le => "le",
+            BinOp::Ge => "ge",
+            _ => return None,
+        };
+        let cls = match lt {
+            Ty::Named(n) => n.clone(),
+            _ => return None,
+        };
+        let mut cur = Some(cls);
+        while let Some(c) = cur {
+            if let Some(set) = self.operator_methods.get(&c) {
+                if set.contains(name) {
+                    let full = format!("{}.{}", c, name);
+                    if let Some(fns) = self.symbols.lookup_function(&full) {
+                        if let Some(sym) = fns.first() {
+                            if let SymbolKind::Function {
+                                return_type,
+                                ..
+                            } = &sym.kind
+                            {
+                                return Some(return_type.clone());
+                            }
+                        }
+                    }
+                    return Some(Ty::Any);
+                }
+                cur = self.superclasses.get(&c).cloned();
+            } else {
+                break;
+            }
+        }
+        None
+    }
+
+    /// 子类 → 祖先类的赋值兼容（沿 superclasses 链）
+    fn is_subclass(&self, sub: &str, sup: &str) -> bool {
+        let mut cur = self.superclasses.get(sub);
+        while let Some(s) = cur {
+            if s == sup {
+                return true;
+            }
+            cur = self.superclasses.get(s);
+        }
+        false
     }
 
     fn check_binary(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr, span: Span) -> Ty {
@@ -1120,6 +1677,11 @@ impl Checker {
         let rt = self.check_expr(rhs);
         if lt == Ty::Error || rt == Ty::Error {
             return Ty::Error;
+        }
+
+        // P-K2：运算符重载（operator fun plus/minus/...）优先于内建数值语义
+        if let Some(ret) = self.operator_overload_return(op, &lt) {
+            return ret;
         }
 
         // 空安全检查：算术/位运算操作数不能是可空
@@ -1572,9 +2134,14 @@ impl Checker {
             (Ty::Int, "toDouble") => Ty::Double,
             (Ty::Int, "toLong") => Ty::Long,
             (Ty::Int, "toString") => Ty::String,
+            (Ty::Long, "toString") => Ty::String,
+            (Ty::Short, "toString") => Ty::String,
+            (Ty::Byte, "toString") => Ty::String,
             (Ty::Float, "toInt") => Ty::Int,
             (Ty::Float, "toString") => Ty::String,
+            (Ty::Double, "toString") => Ty::String,
             (Ty::Boolean, "toString") => Ty::String,
+            (Ty::Char, "toString") => Ty::String,
             (Ty::String, "toString") => Ty::String,
             (Ty::Any, "toString") => Ty::String,
             (Ty::List(_), "toString") => Ty::String,
@@ -2079,7 +2646,10 @@ impl Checker {
             Some(init) => {
                 let t = self.check_expr(init);
                 if declared != Ty::Any {
-                    if !t.can_assign_to(&declared) {
+                    // P-K2：子类实例可赋给祖先类型变量
+                    let subclass_ok = matches!((&t, &declared), (Ty::Named(a), Ty::Named(b))
+                        if a != b && self.is_subclass(a, b));
+                    if !t.can_assign_to(&declared) && !subclass_ok {
                         self.report(
                             init.span(),
                             format!(
@@ -2141,6 +2711,7 @@ pub fn analyze_source(source: &str) -> (Program, SemanticResult) {
     let result2 = SemanticResult {
         errors: errs,
         symbols: result.symbols,
+        info: result.info,
     };
     (program, result2)
 }
