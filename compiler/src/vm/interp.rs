@@ -787,15 +787,8 @@ impl Vm {
         // 尝试多个可能的路径
         let paths = [
             lib_name.to_string(),
+            format!("libs/{}.dll", lib_name),
             format!("{}.dll", lib_name),
-            format!(
-                "D:\\Code\\AuraProjs\\SQLura\\sqlura-driver-rs\\target\\release\\{}.dll",
-                lib_name
-            ),
-            format!(
-                "D:\\Code\\AuraProjs\\SQLura\\sqlura-driver-rs\\target\\release\\{}",
-                lib_name
-            ),
         ];
 
         for path in &paths {
@@ -820,11 +813,8 @@ impl Vm {
         }
         let paths = [
             lib_name.to_string(),
+            format!("libs/lib{}.so", lib_name),
             format!("lib{}.so", lib_name),
-            format!(
-                "D:\\Code\\AuraProjs\\SQLura\\sqlura-driver-rs\\target\\release\\lib{}.so",
-                lib_name
-            ),
         ];
 
         for path in &paths {
@@ -850,15 +840,7 @@ impl Vm {
         let lib_path = if std::path::Path::new(lib_name).exists() {
             lib_name.to_string()
         } else {
-            let paths = [
-                format!("{}.dll", lib_name),
-                format!("lib{}.so", lib_name),
-                format!("lib{}.dylib", lib_name),
-                format!(
-                    "D:\\Code\\AuraProjs\\SQLura\\sqlura-driver-rs\\target\\release\\{}.dll",
-                    lib_name
-                ),
-            ];
+            let paths = Self::candidate_lib_paths(lib_name);
             paths.into_iter().find(|p| std::path::Path::new(p).exists())?
         };
 
@@ -876,6 +858,26 @@ impl Vm {
                 None
             }
         }
+    }
+
+    /// 生成库候选路径列表（平台感知）
+    fn candidate_lib_paths(lib_name: &str) -> Vec<String> {
+        let mut paths = Vec::new();
+        #[cfg(windows)]
+        {
+            paths.push(format!("libs/{}.dll", lib_name));
+            paths.push(format!("{}.dll", lib_name));
+            paths.push(format!("target/build/libs/{}/{}.dll", lib_name, lib_name));
+        }
+        #[cfg(unix)]
+        {
+            paths.push(format!("libs/lib{}.so", lib_name));
+            paths.push(format!("lib{}.so", lib_name));
+            paths.push(format!("libs/lib{}.dylib", lib_name));
+            paths.push(format!("lib{}.dylib", lib_name));
+            paths.push(format!("target/build/libs/{}/lib{}.so", lib_name, lib_name));
+        }
+        paths
     }
 
     /// extern interface: AOT 直调

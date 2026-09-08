@@ -3122,7 +3122,18 @@ fn desugar_when(subject: &Option<Box<Expr>>, arms: &[WhenArm]) -> HirExpr {
                     },
                 }
             }
-            (None, Some(p)) => desugar_expr(p), // 无 subject 时模式即条件
+            (None, Some(p)) => {
+                // 无 subject 时模式即条件；但 `__else__` 是特殊标识符
+                if let Expr::Ident(name, _) = p {
+                    if name == "__else__" {
+                        HirExpr::Lit(Literal::Bool(true))
+                    } else {
+                        desugar_expr(p)
+                    }
+                } else {
+                    desugar_expr(p)
+                }
+            }
             _ => HirExpr::Lit(Literal::Bool(true)),
         };
         let then_e = desugar_block_or_expr(&arm.body);

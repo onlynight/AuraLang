@@ -1939,7 +1939,7 @@ impl Parser {
                 {
                     // 提取返回值字符串
                     if let Some(body) = &fn_decl.body {
-                        if let Expr::String(s) = body.as_ref() {
+                        if let Expr::Literal(Literal::String(s), _) = body.as_ref() {
                             lib_path = Some(s.clone());
                         }
                     }

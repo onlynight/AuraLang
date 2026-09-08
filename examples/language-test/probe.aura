@@ -1,0 +1,10 @@
+fun main() {
+    val score = 75
+    val result = when {
+        score >= 90 -> "Excellent"
+        score >= 70 -> "Good"
+        score >= 50 -> "Pass"
+        else -> "Fail"
+    }
+    println("score: " + result)
+}

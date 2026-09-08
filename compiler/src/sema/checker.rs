@@ -633,7 +633,6 @@ impl Checker {
                 if !has_load_library {
                     self.report(
                         e.span,
-                        ErrorSeverity::Error,
                         format!(
                             "extern interface `{}` 必须包含 `default fun loadLibrary(): String = \"...\"` 方法",
                             e.name
