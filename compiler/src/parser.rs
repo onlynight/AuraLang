@@ -661,13 +661,29 @@ impl Parser {
                 | TokenKind::Async
                 | TokenKind::Inline
                 | TokenKind::Comptime
+                | TokenKind::Public
+                | TokenKind::Private
+                | TokenKind::Protected
         ) {
-            return true;
+            // 可见性关键字后必须跟 fun 或函数修饰符
+            return self.peek_ahead(1).kind == TokenKind::Fun
+                || matches!(
+                    self.peek(1),
+                    TokenKind::Override
+                        | TokenKind::Suspend
+                        | TokenKind::Async
+                        | TokenKind::Inline
+                        | TokenKind::Comptime
+                        | TokenKind::Public
+                        | TokenKind::Private
+                        | TokenKind::Protected
+                );
         }
         // 上下文关键字修饰符：`open fun` / `operator fun` 等（下一个 token 必须是 fun）
         self.current().kind == TokenKind::Ident
             && is_fn_modifier_word(&self.current().literal)
             && self.peek_ahead(1).kind == TokenKind::Fun
+            || self.is_internal_visibility()
     }
 
     /// 当前 token 是否为可见性关键字（`public` / `private` / `protected`）
@@ -1971,12 +1987,7 @@ impl Parser {
                 | TokenKind::Var
                 | TokenKind::Return
                 | TokenKind::Fun
-                | TokenKind::If
                 | TokenKind::Else
-                | TokenKind::For
-                | TokenKind::While
-                | TokenKind::Do
-                | TokenKind::Try
         )
     }
 
@@ -2367,6 +2378,14 @@ impl Parser {
             let inner = self.parse_expression(0);
             self.expect(TokenKind::RParen);
             return self.parse_postfix_chain(inner, start);
+        }
+
+        // 单参数 lambda: `x -> expr` 或 `x: Type -> expr`
+        if self.current().kind == TokenKind::Ident {
+            let peek1 = self.peek(1);
+            if peek1 == TokenKind::Arrow || peek1 == TokenKind::Colon {
+                return self.parse_lambda();
+            }
         }
 
         // 标识符 / 关键字作为表达式

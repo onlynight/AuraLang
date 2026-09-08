@@ -384,7 +384,8 @@ fn cmd_build_aot(args: &[String]) {
     let codegen = compiler::codegen::aot::AotCodeGenerator::new(options.clone());
     // Phase 4.1: 动态库模式下生成 JitValue ABI 包装函数（blob_mode = true），
     // 且包装函数以 external linkage 导出（wrapper_exported = true），供 dlsym 查找。
-    let ir = match codegen.generate_ir_with_mode(&hir, is_shared, is_shared) {
+    // Phase 4.2: --cabi 模式下额外生成裸 C ABI 包装函数。
+    let ir = match codegen.generate_ir_with_mode(&hir, is_shared, is_shared, options.c_abi) {
         Ok(ir) => ir,
         Err(e) => {
             eprintln!("错误: AOT IR 生成失败: {}", e);

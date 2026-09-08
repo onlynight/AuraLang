@@ -93,6 +93,12 @@ pub fn to_bytes(module: &BytecodeModule) -> Vec<u8> {
         } else {
             buf.push(0);
         }
+        // C ABI 类型信息
+        buf.extend_from_slice(&(n.param_types.len() as u16).to_le_bytes());
+        for pt in &n.param_types {
+            buf.push(*pt);
+        }
+        buf.push(n.ret_type);
     }
 
     // 函数
@@ -300,11 +306,20 @@ pub fn from_bytes(bytes: &[u8]) -> Result<BytecodeModule, SerializeError> {
         // FFI 库名（可选）
         let lib_present = r.u8()?;
         let ffi_lib = if lib_present != 0 { Some(r.str()?) } else { None };
+        // C ABI 类型信息
+        let n_types = r.u16()? as usize;
+        let mut param_types = Vec::with_capacity(n_types);
+        for _ in 0..n_types {
+            param_types.push(r.u8()?);
+        }
+        let ret_type = r.u8()?;
         natives.push(BytecodeNative {
             name,
             param_count,
             ffi_abi,
             ffi_lib,
+            param_types,
+            ret_type,
         });
     }
 
@@ -630,6 +645,8 @@ mod tests {
                     param_count: 1,
                     ffi_abi: FfiAbi::None,
                     ffi_lib: None,
+                    param_types: vec![],
+                    ret_type: 6, // void
                 },
             ],
             functions: vec![

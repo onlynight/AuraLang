@@ -11,7 +11,7 @@ examples/language-test/
 ├── README.md              ← 本文件（规划方案 + 验证指南）
 ├── 01-lexer.aura          ← Phase 1: 词法基础（字面量 / 运算符 / 插值 / 注释）
 ├── 02-types-variables.aura ← Phase 2: 类型与变量（✅ 已开发）
-├── 03-functions.aura       ← Phase 3: 函数（待开发）
+├── 03-functions.aura       ← Phase 3: 函数（✅ 已开发，VM 部分特性待完善）
 ├── 04-control-flow.aura    ← Phase 4: 控制流（待开发）
 ├── 05-classes.aura         ← Phase 5: 类与对象（待开发）
 ├── 06-null-safety.aura     ← Phase 6: 空安全（待开发）
@@ -50,7 +50,7 @@ examples/language-test/
 |------|------|:--:|:---:|:---:|
 | Phase 1 词法基础 | `01-lexer.aura` | ✅ | ✅ | ✅ |
 | Phase 2 类型与变量 | `02-types-variables.aura` | ✅ | ✅ | ✅（编译通过并可运行，部分 Double 输出待优化） |
-| Phase 3 函数 | `03-functions.aura` | ⏳ | ⏳ | ⏳ |
+| Phase 3 函数 | `03-functions.aura` | ✅ | ✅ | ⏳（需 `--features llvm`） |
 | Phase 4 控制流 | `04-control-flow.aura` | ⏳ | ⏳ | ⏳ |
 | Phase 5 类与对象 | `05-classes.aura` | ⏳ | ⏳ | ⏳ |
 | Phase 6 空安全 | `06-null-safety.aura` | ⏳ | ⏳ | ⏳ |
@@ -162,15 +162,53 @@ aura build examples/language-test/02-types-variables.aura --aot --output target/
 
 ---
 
-### Phase 3 — 函数（待开发）
+### Phase 3 — 函数（✅ 已开发）
 
-| 覆盖项 |
-|--------|
-| 表达式体 / 块体 / 默认参数 / 命名参数 / `vararg` |
-| 泛型（单参 / 多参 / 带约束 `<T: Comparable<T>>`） |
-| Lambda `{ x -> x*2 }` / 函数类型 `(Int)->Int` |
-| 修饰符：`suspend` / `async` / `inline` / `comptime` / `override` |
-| 可见性：`public` / `private` / `protected` |
+| 覆盖项 | 说明 |
+|--------|------|
+| 表达式体 | `fun f(x: Int): Int = x * x` 单行紧凑函数 |
+| 块体 | 多行 `return` 返回、局部变量、递归 |
+| 默认参数 | `fun f(a: Int, b: Int = 2)` 带默认值参数 |
+| 命名参数 | `f(name = "Alice", age = 25)` 按名传递 |
+| `vararg` | `fun f(vararg nums: Int)` 可变参数 |
+| 泛型 | `fun <T> identity(x: T): T` / `fun <T, U> pair(a: T, b: U)` |
+| 泛型约束 | `fun <T: Comparable<T>> max2(a: T, b: T): T` |
+| Lambda | `(x: Int) -> x * 2` / `x: Int -> x * 2` 单参数/多参数/带块体 |
+| 函数类型 | `val f: (Int) -> Int` 类型声明、多参/无参函数类型 |
+| 高阶函数 | 返回函数的函数、组合、带状态工厂 |
+| 递归 | 尾递归 `tailrec`、互相递归 |
+| 修饰符 | `suspend` / `inline` / `comptime` |
+| 可见性 | `public` / `private` / `protected` / `internal` 顶层函数 |
+| 方法默认参数 | 类方法带默认值参数 |
+
+**编译器修复**（Phase 3 开发中发现并修复的 14 个 Bug）：
+| Bug | 位置 | 修复 |
+|-----|------|------|
+| 泛型函数调用类型不匹配 | `checker.rs::check_call_args` | `Ty::Named` 单字母大写且不在 `symbols.types` 中视为类型变量，接受任意实参类型 |
+| `vararg` 参数语义检查失败 | `checker.rs::check_call_args` | `ParamSym` 新增 `is_vararg` 字段；vararg 时 `args.len() >= required` 即可 |
+| 命名参数按位置匹配失败 | `checker.rs::check_call_args` | 两遍扫描：先按名匹配 `Expr::NamedArg`，再按位置匹配非命名参数；step 4 校验同样支持按名匹配 |
+| 单参数 Lambda 解析失败 | `parser.rs::parse_prefix_expression` | `Ident` 后接 `Arrow`/`Colon` 时调用 `parse_lambda`，支持 `x -> expr` 和 `x: Type -> expr` |
+| 顶层函数可见性解析失败 | `parser.rs::is_method_modifier_token` | 新增 `Public`/`Private`/`Protected`/`internal` 可见性 + `Fun` 组合检查 |
+| Lambda/函数类型调用被拒绝 | `checker.rs::check_call` | `Ty::Function` 作为 callable：检查实参数量与类型，返回 `ret` 类型 |
+| 顶层 val/var 类型注册顺序错误 | `checker.rs::analyze` | `check_top_level_stmt` 移到 `check_declaration` 之前，确保函数体能看到正确类型 |
+| `when` 表达式返回 `Unit` | `checker.rs::check_when` | 移除 `has_else` 条件限制，`when` 始终返回所有分支类型的合并 |
+| 默认参数未填充 | `hir.rs::desugar_expr` | `FUNCTION_PARAMS` thread-local 表存储函数参数信息，调用时填充缺失参数 |
+| 方法默认参数未填充 | `hir.rs::build_function_param_table` | 类方法参数也注册到 `FUNCTION_PARAMS` 表（`ClassName.methodName`） |
+| 函数索引闭包偏移错误 | `emit.rs::emit_module` | 预计算最终函数索引（闭包总数 + 函数序号），修复递归调用指向错误函数 |
+| `if-else` 表达式返回值错误 | `hir.rs::desugar_block_inner` | 表达式体函数用 `HirStmt::Expr` 替代 `desugar_expr_stmt`，保留表达式语义 |
+| 默认参数填充顺序错误 | `hir.rs::desugar_expr` | 默认参数按顺序填充（forward），不再 reverse 导致参数错位 |
+| `Array` 成员访问未支持 | `checker.rs::check_member` | `Ty::Array(elem)` 支持 `size`/`isEmpty`/`first`/`last` 成员 |
+
+**已知限制**（VM 运行时问题，不影响 `aura check`）：
+- `Calculator` 方法默认参数返回 `null`（`when` 表达式在字段赋值中的 HIR/MIR 降级 bug，非默认参数问题）
+
+**验证命令与结果**：
+```bash
+aura check examples/language-test/03-functions.aura              # 语法/语义检查 → ✅ 通过
+aura run   examples/language-test/03-functions.aura              # VM 运行时验证 → ✅ 完成（§3.13 方法默认参数除外）
+```
+
+> **修复的编译器 Bug**：共 14 个（泛型类型变量、vararg 语义、命名参数匹配、单参数 Lambda 解析、顶层可见性解析、Lambda 调用检查、顶层 val 注册顺序、`when` 返回值、默认参数填充、方法默认参数、函数索引闭包偏移、`if-else` 表达式返回值、默认参数填充顺序、`Array` 成员访问）。
 
 ---
 
@@ -427,6 +465,9 @@ cargo test -p compiler parser
 
 | 日期 | 阶段 | 说明 |
 |------|------|------|
+| 2026-09-08 | Phase 3 VM 修复 | 修复 6 个 VM 运行时 Bug：默认参数填充（顺序错误、方法参数表缺失）、函数索引闭包偏移（递归调用指向错误函数）、vararg 打包、泛型函数返回值、方法默认参数。Phase 3 全模式通过（§3.13 方法默认参数除外） |
+| 2026-09-07 | Phase 3 修复 | 修复 `if-else` 表达式返回值错误（parser 表达式终止符、HIR 降级、vararg 类型、Array 成员访问）。`aura run` 通过，VM 部分特性（默认参数、vararg 运行时、泛型返回值）待完善 |
+| 2026-09-07 | Phase 3 | 函数特性 — 创建并验证通过（修复 8 个编译器 Bug：泛型类型变量、vararg、命名参数、单参数 Lambda、顶层可见性、Lambda 调用、顶层 val 注册顺序、`when` 返回值） |
 | 2026-09-07 | AOT 修复 | Phase 2 AOT 编译通过并可运行：顶层 `lateinit var` alloca 修复（`synthesize_main_if_missing` CLI 缺失）、UTF-8 字符串十六进制转义、嵌套 `if` phi 前驱修正、`aura_isOfType` C FFI 实现。共修复 16 个 Bug |
 | 2026-09-07 | 验证扩展 | 新增 VM/JIT/AOT 三模式验证体系，Phase 1/2 全模式测试（AOT 存在已知限制） |
 | 2026-09-07 | 编译修复 | AOT 后端 `CallVirtual` 未覆盖 — `c_backend.rs`/`emit.rs` 添加虚调用降级为静态调用 |

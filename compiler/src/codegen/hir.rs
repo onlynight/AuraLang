@@ -66,6 +66,8 @@ thread_local! {
     static CLASS_CTX: RefCell<Option<ClassCtx>> = const { RefCell::new(None) };
     /// 当前正在降级的访问器属性名（`field` 上下文关键字改写用）
     static ACCESSOR_PROP: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// 函数参数表（函数名 → 参数列表），供默认参数填充和 vararg 打包
+    static FUNCTION_PARAMS: RefCell<HashMap<String, Vec<HirParam>>> = RefCell::new(HashMap::new());
 }
 
 /// 判断名称是否为已知的结构体/类（用于检测构造器调用）
@@ -393,6 +395,48 @@ fn build_class_table(program: &Program) -> HashMap<String, ClassEntry> {
                     }
                 }
                 table.insert(s.name.clone(), e);
+            }
+            _ => {}
+        }
+    }
+    table
+}
+
+/// 从声明列表构建函数参数表（函数名 → 参数列表），供默认参数填充和 vararg 打包
+fn build_function_param_table(program: &Program) -> HashMap<String, Vec<HirParam>> {
+    let mut table: HashMap<String, Vec<HirParam>> = HashMap::new();
+    for decl in &program.declarations {
+        match decl {
+            Decl::Function(f) => {
+                let params: Vec<HirParam> = f
+                    .params
+                    .iter()
+                    .map(|p| HirParam {
+                        name: p.name.clone(),
+                        ty: HirType::from_ast_opt(&p.type_hint),
+                        default_value: p.default_value.as_ref().map(|e| Box::new(desugar_expr(e))),
+                        is_vararg: p.is_vararg,
+                    })
+                    .collect();
+                table.insert(f.name.clone(), params);
+            }
+            Decl::Class(c) => {
+                for m in &c.methods {
+                    let params: Vec<HirParam> = m
+                        .params
+                        .iter()
+                        .map(|p| HirParam {
+                            name: p.name.clone(),
+                            ty: HirType::from_ast_opt(&p.type_hint),
+                            default_value: p
+                                .default_value
+                                .as_ref()
+                                .map(|e| Box::new(desugar_expr(e))),
+                            is_vararg: p.is_vararg,
+                        })
+                        .collect();
+                    table.insert(format!("{}.{}", c.name, m.name), params);
+                }
             }
             _ => {}
         }
@@ -887,6 +931,10 @@ pub struct HirBlock {
 pub struct HirParam {
     pub name: String,
     pub ty: Option<HirType>,
+    /// 默认值表达式（当调用方未提供该参数时使用）
+    pub default_value: Option<Box<HirExpr>>,
+    /// 是否为 vararg 可变参数
+    pub is_vararg: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -970,6 +1018,7 @@ pub fn desugar_program_with(
     SEMA_INFO.with(|s| *s.borrow_mut() = None);
     CLASS_CTX.with(|c| *c.borrow_mut() = None);
     ACCESSOR_PROP.with(|a| *a.borrow_mut() = None);
+    FUNCTION_PARAMS.with(|f| f.borrow_mut().clear());
     result
 }
 
@@ -995,6 +1044,10 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
     TYPE_NAMES.with(|r| {
         *r.borrow_mut() = type_names;
     });
+
+    // 预收集所有函数参数（供默认参数填充和 vararg 打包）
+    let fn_params = build_function_param_table(program);
+    FUNCTION_PARAMS.with(|f| *f.borrow_mut() = fn_params);
 
     let mut functions = Vec::new();
     let mut structs = Vec::new();
@@ -1066,6 +1119,11 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                             .map(|p| HirParam {
                                 name: p.name.clone(),
                                 ty: HirType::from_ast_opt(&p.type_hint),
+                                default_value: p
+                                    .default_value
+                                    .as_ref()
+                                    .map(|e| Box::new(desugar_expr(e))),
+                                is_vararg: p.is_vararg,
                             })
                             .collect(),
                         ret: HirType::from_ast_opt(&f.return_type),
@@ -1243,10 +1301,14 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                     let mut params = vec![HirParam {
                         name: "self".into(),
                         ty: Some(HirType::Named("Any".into())),
+                        default_value: None,
+                        is_vararg: false,
                     }];
                     params.extend(ctor.params.iter().map(|p| HirParam {
                         name: p.name.clone(),
                         ty: HirType::from_ast_opt(&p.type_hint),
+                        default_value: p.default_value.as_ref().map(|e| Box::new(desugar_expr(e))),
+                        is_vararg: p.is_vararg,
                     }));
                     functions.push(HirFunction {
                         name: format!("{}.__ctor{}", c.name, arity),
@@ -1273,6 +1335,8 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                         params: vec![HirParam {
                             name: "self".into(),
                             ty: Some(HirType::Named("Any".into())),
+                            default_value: None,
+                            is_vararg: false,
                         }],
                         ret: Some(HirType::Named("Unit".into())),
                         body: HirBlock {
@@ -1330,6 +1394,8 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             params: vec![HirParam {
                 name: "message".into(),
                 ty: Some(HirType::Named("Any".into())),
+                default_value: None,
+                is_vararg: false,
             }],
             ret: Some(HirType::Named("Unit".into())),
             body: HirBlock {
@@ -1351,6 +1417,8 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                     vec![HirParam {
                         name: "message".into(),
                         ty: Some(HirType::Named("Any".into())),
+                        default_value: None,
+                        is_vararg: false,
                     }],
                     Some(HirType::Named("Unit".into())),
                 ),
@@ -1358,6 +1426,8 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                     vec![HirParam {
                         name: "message".into(),
                         ty: Some(HirType::Named("Any".into())),
+                        default_value: None,
+                        is_vararg: false,
                     }],
                     Some(HirType::Named("Unit".into())),
                 ),
@@ -1365,6 +1435,8 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                     vec![HirParam {
                         name: "message".into(),
                         ty: Some(HirType::Named("String".into())),
+                        default_value: None,
+                        is_vararg: false,
                     }],
                     Some(HirType::Named("Unit".into())),
                 ),
@@ -1372,6 +1444,8 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                     vec![HirParam {
                         name: "x".into(),
                         ty: Some(HirType::Named("Float".into())),
+                        default_value: None,
+                        is_vararg: false,
                     }],
                     Some(HirType::Named("Float".into())),
                 ),
@@ -1379,6 +1453,8 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                     vec![HirParam {
                         name: "x".into(),
                         ty: Some(HirType::Named("Any".into())),
+                        default_value: None,
+                        is_vararg: false,
                     }],
                     Some(HirType::Named("Int".into())),
                 ),
@@ -1386,6 +1462,8 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                     vec![HirParam {
                         name: "x".into(),
                         ty: Some(HirType::Named("Any".into())),
+                        default_value: None,
+                        is_vararg: false,
                     }],
                     Some(HirType::Named("Float".into())),
                 ),
@@ -1393,6 +1471,8 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                     vec![HirParam {
                         name: "x".into(),
                         ty: Some(HirType::Named("Any".into())),
+                        default_value: None,
+                        is_vararg: false,
                     }],
                     Some(HirType::Named("String".into())),
                 ),
@@ -1401,6 +1481,8 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                     vec![HirParam {
                         name: "s".into(),
                         ty: Some(HirType::Named("String".into())),
+                        default_value: None,
+                        is_vararg: false,
                     }],
                     Some(HirType::Named("Int".into())),
                 ),
@@ -1408,6 +1490,8 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                     vec![HirParam {
                         name: "s".into(),
                         ty: Some(HirType::Named("String".into())),
+                        default_value: None,
+                        is_vararg: false,
                     }],
                     Some(HirType::Named("Any".into())),
                 ),
@@ -1415,6 +1499,8 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                     vec![HirParam {
                         name: "p".into(),
                         ty: Some(HirType::Named("Any".into())),
+                        default_value: None,
+                        is_vararg: false,
                     }],
                     Some(HirType::Named("String".into())),
                 ),
@@ -1422,6 +1508,8 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                     vec![HirParam {
                         name: "p".into(),
                         ty: Some(HirType::Named("Any".into())),
+                        default_value: None,
+                        is_vararg: false,
                     }],
                     Some(HirType::Named("Boolean".into())),
                 ),
@@ -1429,6 +1517,8 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                     vec![HirParam {
                         name: "p".into(),
                         ty: Some(HirType::Named("Any".into())),
+                        default_value: None,
+                        is_vararg: false,
                     }],
                     Some(HirType::Named("Int".into())),
                 ),
@@ -1436,6 +1526,8 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                     vec![HirParam {
                         name: "i".into(),
                         ty: Some(HirType::Named("Int".into())),
+                        default_value: None,
+                        is_vararg: false,
                     }],
                     Some(HirType::Named("Any".into())),
                 ),
@@ -1443,6 +1535,8 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                     vec![HirParam {
                         name: "fn".into(),
                         ty: Some(HirType::Named("Any".into())),
+                        default_value: None,
+                        is_vararg: false,
                     }],
                     Some(HirType::Named("Any".into())),
                 ),
@@ -1451,6 +1545,8 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                         .map(|i| HirParam {
                             name: format!("item{}", i).into(),
                             ty: Some(HirType::Named("Value".into())),
+                            default_value: None,
+                            is_vararg: false,
                         })
                         .collect(),
                     Some(HirType::Named("Any".into())),
@@ -1480,6 +1576,8 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             params: vec![HirParam {
                 name: "size".into(),
                 ty: Some(HirType::Named("Int".into())),
+                default_value: None,
+                is_vararg: false,
             }],
             ret: Some(HirType::Named("Any".into())),
             body: HirBlock {
@@ -1502,6 +1600,8 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                 params: vec![HirParam {
                     name: "s".into(),
                     ty: Some(HirType::Named("String".into())),
+                    default_value: None,
+                    is_vararg: false,
                 }],
                 ret: Some(HirType::Pointer(Box::new(HirType::Named("Char".into())))),
                 body: HirBlock {
@@ -1529,6 +1629,8 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                     .map(|&(pn, pt)| HirParam {
                         name: pn.into(),
                         ty: Some(HirType::from_ast_str(pt)),
+                        default_value: None,
+                        is_vararg: false,
                     })
                     .collect(),
                 ret: Some(HirType::from_ast_str(ret)),
@@ -1550,6 +1652,8 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             params: vec![HirParam {
                 name: "f".into(),
                 ty: Some(HirType::Named("Any".into())),
+                default_value: None,
+                is_vararg: false,
             }],
             ret: Some(HirType::Pointer(Box::new(HirType::Named("Int".into())))),
             body: HirBlock {
@@ -1567,6 +1671,8 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             params: vec![HirParam {
                 name: "ptr".into(),
                 ty: Some(HirType::Named("Any".into())),
+                default_value: None,
+                is_vararg: false,
             }],
             ret: Some(HirType::Named("Unit".into())),
             body: HirBlock {
@@ -1587,6 +1693,8 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             params: vec![HirParam {
                 name: "expr".into(),
                 ty: Some(HirType::Named("Any".into())),
+                default_value: None,
+                is_vararg: false,
             }],
             ret: Some(HirType::Named("Int".into())),
             body: HirBlock {
@@ -1606,10 +1714,14 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                 HirParam {
                     name: "actor".into(),
                     ty: Some(HirType::Named("Int".into())),
+                    default_value: None,
+                    is_vararg: false,
                 },
                 HirParam {
                     name: "msg".into(),
                     ty: Some(HirType::Named("Any".into())),
+                    default_value: None,
+                    is_vararg: false,
                 },
             ],
             ret: Some(HirType::Named("Unit".into())),
@@ -1630,10 +1742,14 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                 HirParam {
                     name: "actor".into(),
                     ty: Some(HirType::Named("Int".into())),
+                    default_value: None,
+                    is_vararg: false,
                 },
                 HirParam {
                     name: "msg".into(),
                     ty: Some(HirType::Named("Any".into())),
+                    default_value: None,
+                    is_vararg: false,
                 },
             ],
             ret: Some(HirType::Named("Any".into())),
@@ -1653,6 +1769,8 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             params: vec![HirParam {
                 name: "bound".into(),
                 ty: Some(HirType::Named("Int".into())),
+                default_value: None,
+                is_vararg: false,
             }],
             ret: Some(HirType::Named("Int".into())),
             body: HirBlock {
@@ -1672,10 +1790,14 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                 HirParam {
                     name: "ch".into(),
                     ty: Some(HirType::Named("Int".into())),
+                    default_value: None,
+                    is_vararg: false,
                 },
                 HirParam {
                     name: "val".into(),
                     ty: Some(HirType::Named("Any".into())),
+                    default_value: None,
+                    is_vararg: false,
                 },
             ],
             ret: Some(HirType::Named("Unit".into())),
@@ -1695,6 +1817,8 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             params: vec![HirParam {
                 name: "ch".into(),
                 ty: Some(HirType::Named("Int".into())),
+                default_value: None,
+                is_vararg: false,
             }],
             ret: Some(HirType::Named("Any".into())),
             body: HirBlock {
@@ -1713,6 +1837,8 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             params: vec![HirParam {
                 name: "ch".into(),
                 ty: Some(HirType::Named("Int".into())),
+                default_value: None,
+                is_vararg: false,
             }],
             ret: Some(HirType::Named("Any".into())),
             body: HirBlock {
@@ -1732,10 +1858,14 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                 HirParam {
                     name: "ch1".into(),
                     ty: Some(HirType::Named("Int".into())),
+                    default_value: None,
+                    is_vararg: false,
                 },
                 HirParam {
                     name: "ch2".into(),
                     ty: Some(HirType::Named("Int".into())),
+                    default_value: None,
+                    is_vararg: false,
                 },
             ],
             ret: Some(HirType::Named("Any".into())),
@@ -1755,6 +1885,8 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             params: vec![HirParam {
                 name: "name".into(),
                 ty: Some(HirType::Named("String".into())),
+                default_value: None,
+                is_vararg: false,
             }],
             ret: Some(HirType::Named("Int".into())),
             body: HirBlock {
@@ -1774,10 +1906,14 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                 HirParam {
                     name: "parent".into(),
                     ty: Some(HirType::Named("Int".into())),
+                    default_value: None,
+                    is_vararg: false,
                 },
                 HirParam {
                     name: "child".into(),
                     ty: Some(HirType::Named("Int".into())),
+                    default_value: None,
+                    is_vararg: false,
                 },
             ],
             ret: Some(HirType::Named("Unit".into())),
@@ -1797,6 +1933,8 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             params: vec![HirParam {
                 name: "id".into(),
                 ty: Some(HirType::Named("Int".into())),
+                default_value: None,
+                is_vararg: false,
             }],
             ret: Some(HirType::Named("Boolean".into())),
             body: HirBlock {
@@ -1817,6 +1955,8 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                 .map(|(pn, pt)| HirParam {
                     name: (*pn).into(),
                     ty: Some(HirType::Named((*pt).into())),
+                    default_value: None,
+                    is_vararg: false,
                 })
                 .collect();
             let ret =
@@ -1879,11 +2019,15 @@ fn desugar_fn_with_self(f: &FnDecl, is_method: bool, name_override: Option<Strin
         params.push(HirParam {
             name: "self".to_string(),
             ty: Some(HirType::Named("Any".into())),
+            default_value: None,
+            is_vararg: false,
         });
     }
     params.extend(f.params.iter().map(|p| HirParam {
         name: p.name.clone(),
         ty: HirType::from_ast_opt(&p.type_hint),
+        default_value: p.default_value.as_ref().map(|e| Box::new(desugar_expr(e))),
+        is_vararg: p.is_vararg,
     }));
     let fname = name_override.unwrap_or_else(|| f.name.clone());
     // P2：tailrec 循环化（仅当存在尾自调用时改写，否则保持递归语义）
@@ -1942,6 +2086,8 @@ fn self_hir_param() -> HirParam {
     HirParam {
         name: "self".into(),
         ty: Some(HirType::Named("Any".into())),
+        default_value: None,
+        is_vararg: false,
     }
 }
 
@@ -2023,6 +2169,8 @@ fn synthesize_accessors(class: &str, fields: &[StructField]) -> Vec<HirFunction>
                     HirParam {
                         name: param_name,
                         ty: param_ty,
+                        default_value: None,
+                        is_vararg: false,
                     },
                 ],
                 ret: Some(HirType::Named("Unit".into())),
@@ -2051,7 +2199,7 @@ fn desugar_block_inner(b: &Expr) -> HirBlock {
         Expr::Block(stmts, _) => stmts,
         other => {
             return HirBlock {
-                stmts: vec![desugar_expr_stmt(other)],
+                stmts: vec![HirStmt::Expr(desugar_expr(other))],
             };
         }
     };
@@ -2513,6 +2661,24 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                         for a in args {
                             all_args.push(desugar_expr(a));
                         }
+                        // 默认参数填充
+                        let params_opt = FUNCTION_PARAMS
+                            .with(|f| f.borrow().get(&format!("{}.{}", class, name)).cloned());
+                        if let Some(params) = params_opt {
+                            let required = params
+                                .iter()
+                                .filter(|p| p.default_value.is_none() && !p.is_vararg)
+                                .count();
+                            if all_args.len() < params.len() + 1 && all_args.len() >= required + 1 {
+                                let mut defaults: Vec<HirExpr> = Vec::new();
+                                for i in all_args.len()..params.len() + 1 {
+                                    if let Some(ref dv) = params[i - 1].default_value {
+                                        defaults.push(dv.as_ref().clone());
+                                    }
+                                }
+                                all_args.extend(defaults);
+                            }
+                        }
                         let is_virtual = CLASS_TABLE
                             .with(|t| t.borrow().values().any(|e| e.open_methods.contains(name)));
                         if is_virtual {
@@ -2542,9 +2708,48 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                 }
                 _ => "__call".to_string(),
             };
+            // 默认参数填充 + vararg 打包
+            let mut all_args: Vec<HirExpr> = args.iter().map(desugar_expr).collect();
+            let params_opt = FUNCTION_PARAMS.with(|f| f.borrow().get(&callee_name).cloned());
+            if let Some(params) = params_opt {
+                // 默认参数填充：补充有默认值但未提供的参数
+                let required =
+                    params.iter().filter(|p| p.default_value.is_none() && !p.is_vararg).count();
+                if all_args.len() < params.len() && all_args.len() >= required {
+                    let mut defaults: Vec<HirExpr> = Vec::new();
+                    for i in all_args.len()..params.len() {
+                        if let Some(ref dv) = params[i].default_value {
+                            defaults.push(dv.as_ref().clone());
+                        }
+                    }
+                    all_args.extend(defaults);
+                }
+                // vararg 打包：如果最后一个参数是 vararg 且实参多于声明参数，打包为数组
+                if let Some(last_param) = params.last() {
+                    if last_param.is_vararg {
+                        let named_count = params.len() - 1; // vararg 参数本身不计入命名参数
+                        if all_args.len() > named_count {
+                            let vararg_exprs: Vec<HirExpr> = all_args[named_count..].to_vec();
+                            // 用 listOf(...) 创建数组
+                            let array_expr = HirExpr::Call {
+                                callee: "listOf".to_string(),
+                                args: vararg_exprs,
+                            };
+                            all_args.truncate(named_count);
+                            all_args.push(array_expr);
+                        } else if all_args.len() == named_count {
+                            // 无 vararg 实参：传空数组
+                            all_args.push(HirExpr::Call {
+                                callee: "listOf".to_string(),
+                                args: vec![],
+                            });
+                        }
+                    }
+                }
+            }
             HirExpr::Call {
                 callee: callee_name,
-                args: args.iter().map(desugar_expr).collect(),
+                args: all_args,
             }
         }
         Expr::NamedArg { value, .. } => desugar_expr(value),
@@ -2667,6 +2872,8 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                 .map(|p| HirParam {
                     name: p.name.clone(),
                     ty: HirType::from_ast_opt(&p.type_hint),
+                    default_value: p.default_value.as_ref().map(|e| Box::new(desugar_expr(e))),
+                    is_vararg: p.is_vararg,
                 })
                 .collect();
             // lambda 参数进入局部作用域（屏蔽同名字段）
@@ -2691,6 +2898,8 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                 .map(|p| HirParam {
                     name: p.name.clone(),
                     ty: HirType::from_ast_opt(&p.type_hint),
+                    default_value: p.default_value.as_ref().map(|e| Box::new(desugar_expr(e))),
+                    is_vararg: p.is_vararg,
                 })
                 .collect();
             // lambda 参数进入局部作用域（屏蔽同名字段）

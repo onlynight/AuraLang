@@ -20,8 +20,8 @@
 // ── FFI 声明：通过 extern "C" 声明 C ABI 函数 ──
 // 这些函数由 utils.dll (Aura AOT + --cabi --shared) 导出，
 // 调用约定为 C ABI (ccc)。
-// 未链接 dylib 时返回占位值，不崩溃；链接后 0 开销直接调用。
-extern "C" {
+// 库名 "utils" 对应 utils.dll / utils.so / utils.dylib。
+extern "C" "utils" {
     fun add(a: Int, b: Int): Int
     fun multiply(a: Int, b: Int): Int
     fun factorial(n: Int): Int

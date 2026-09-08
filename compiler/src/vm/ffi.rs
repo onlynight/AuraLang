@@ -223,11 +223,13 @@ impl CType {
     /// 将 i64 结果转换回 Aura Value
     pub fn unpack(&self, result: i64) -> crate::vm::Value {
         match self {
-            CType::Int32 | CType::Int64 => crate::vm::Value::Int(result),
+            // Int32: 只取低 32 位（x86_64 调用约定中 i32 返回值在 RAX 低 32 位）
+            CType::Int32 => crate::vm::Value::Int(result as i32 as i64),
+            CType::Int64 => crate::vm::Value::Int(result),
             CType::Float32 => crate::vm::Value::Float(f64::from_bits((result as u32) as u64)),
             CType::Float64 => crate::vm::Value::Float(f64::from_bits(result as u64)),
             CType::Bool => crate::vm::Value::Bool(result != 0),
-            CType::Char => crate::vm::Value::Int(result),
+            CType::Char => crate::vm::Value::Int(result as i32 as i64),
             // P9: CString 返回值 — 从指针读取字符串内容
             CType::CString => {
                 if result == 0 {

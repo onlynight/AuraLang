@@ -221,6 +221,7 @@ pub enum Instr {
 
     Call(u16),
     CallNative(u16),
+    CallNativeArgs(u16, u16),
     Return,
     ReturnUnit,
 
@@ -467,6 +468,18 @@ fn decode_function(f: &BytecodeFunction) -> Result<DecodedFunction, VmError> {
                 ]);
                 ip += 2;
                 instrs.push(Instr::CallNative(v));
+            }
+            crate::codegen::opcode::OpCode::CallNativeArgs(_, _) => {
+                let idx = u16::from_le_bytes([
+                    code[ip],
+                    code[ip + 1],
+                ]);
+                let argc = u16::from_le_bytes([
+                    code[ip + 2],
+                    code[ip + 3],
+                ]);
+                ip += 4;
+                instrs.push(Instr::CallNativeArgs(idx, argc));
             }
             crate::codegen::opcode::OpCode::Return => instrs.push(Instr::Return),
             crate::codegen::opcode::OpCode::ReturnUnit => instrs.push(Instr::ReturnUnit),

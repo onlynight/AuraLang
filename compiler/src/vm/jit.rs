@@ -151,7 +151,9 @@ fn is_jit_compilable_inner(
             | Instr::Jump(_)
             | Instr::JumpIfTrue(_)
             | Instr::JumpIfFalse(_)
-            | Instr::Return => {}
+            | Instr::Return
+            | Instr::CallNative(_)
+            | Instr::CallNativeArgs(_, _) => {}
             // Fix B: 扩展白名单（P1.2）— 逻辑/位运算 + 集合分配 + ARC no-op
             | Instr::And
             | Instr::Or

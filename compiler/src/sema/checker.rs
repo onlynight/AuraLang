@@ -99,6 +99,7 @@ impl Checker {
                 name: "message".into(),
                 ty: Ty::Any,
                 has_default: false,
+                is_vararg: false,
             }],
             Ty::Unit,
             Visibility::Public,
@@ -110,6 +111,7 @@ impl Checker {
                 name: "message".into(),
                 ty: Ty::Any,
                 has_default: false,
+                is_vararg: false,
             }],
             Ty::Unit,
             Visibility::Public,
@@ -123,6 +125,7 @@ impl Checker {
                     name: format!("item{}", i),
                     ty: Ty::Any,
                     has_default: true,
+                    is_vararg: false,
                 })
                 .collect(),
             Ty::List(Box::new(Ty::Any)),
@@ -207,6 +210,7 @@ impl Checker {
                         name: pn.into(),
                         ty: pt,
                         has_default: false,
+                        is_vararg: false,
                     })
                     .collect(),
                 ret,
@@ -214,6 +218,58 @@ impl Checker {
                 builtin_span,
             );
         }
+
+        // AOT 直调内置函数（Demo 3）
+        let _ = symbols.insert_function(
+            "load_shared_library",
+            vec![ParamSym {
+                name: "path".into(),
+                ty: Ty::String,
+                has_default: false,
+                is_vararg: false,
+            }],
+            Ty::Int,
+            Visibility::Public,
+            builtin_span,
+        );
+        let _ = symbols.insert_function(
+            "call_func",
+            vec![
+                ParamSym {
+                    name: "module_id".into(),
+                    ty: Ty::Int,
+                    has_default: false,
+                    is_vararg: false,
+                },
+                ParamSym {
+                    name: "func_idx".into(),
+                    ty: Ty::Int,
+                    has_default: false,
+                    is_vararg: false,
+                },
+                ParamSym {
+                    name: "args".into(),
+                    ty: Ty::Any,
+                    has_default: false,
+                    is_vararg: false,
+                },
+            ],
+            Ty::Any,
+            Visibility::Public,
+            builtin_span,
+        );
+        let _ = symbols.insert_function(
+            "unload_shared_library",
+            vec![ParamSym {
+                name: "module_id".into(),
+                ty: Ty::Int,
+                has_default: false,
+                is_vararg: false,
+            }],
+            Ty::Unit,
+            Visibility::Public,
+            builtin_span,
+        );
 
         let mut var_env = Vec::new();
         var_env.push(HashMap::new());
@@ -253,13 +309,13 @@ impl Checker {
         for stmt in &program.top_level_statements {
             self.collect_top_level_stmt(stmt);
         }
+        // 第二遍：检查顶层 val/var 初始化器类型（在函数体之前，以便函数体能看到正确类型）
+        for stmt in &program.top_level_statements {
+            self.check_top_level_stmt(stmt);
+        }
         // 第二遍：检查函数体
         for decl in &program.declarations {
             self.check_declaration(decl);
-        }
-        // 第二遍补充：检查顶层 val/var 初始化器类型
-        for stmt in &program.top_level_statements {
-            self.check_top_level_stmt(stmt);
         }
     }
 
@@ -282,10 +338,18 @@ impl Checker {
                 let params = f
                     .params
                     .iter()
-                    .map(|p| ParamSym {
-                        name: p.name.clone(),
-                        ty: p.type_hint.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Any),
-                        has_default: p.default_value.is_some(),
+                    .map(|p| {
+                        let mut ty = p.type_hint.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Any);
+                        // vararg 参数类型为元素类型的数组
+                        if p.is_vararg {
+                            ty = Ty::Array(Box::new(ty));
+                        }
+                        ParamSym {
+                            name: p.name.clone(),
+                            ty,
+                            has_default: p.default_value.is_some(),
+                            is_vararg: p.is_vararg,
+                        }
                     })
                     .collect();
                 let ret = f.return_type.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Unit);
@@ -334,6 +398,7 @@ impl Checker {
                             name: p.name.clone(),
                             ty: p.type_hint.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Any),
                             has_default: p.default_value.is_some(),
+                            is_vararg: p.is_vararg,
                         })
                         .collect();
                     let ret = m.return_type.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Unit);
@@ -374,6 +439,7 @@ impl Checker {
                             name: p.name.clone(),
                             ty: p.type_hint.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Any),
                             has_default: p.default_value.is_some(),
+                            is_vararg: p.is_vararg,
                         })
                         .collect();
                     let ret = m.return_type.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Unit);
@@ -478,6 +544,7 @@ impl Checker {
                                 name: p.name.clone(),
                                 ty: p.type_hint.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Any),
                                 has_default: p.default_value.is_some(),
+                                is_vararg: p.is_vararg,
                             })
                             .collect();
                         let ret = m.return_type.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Unit);
@@ -545,6 +612,7 @@ impl Checker {
                             name: p.name.clone(),
                             ty: p.type_hint.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Any),
                             has_default: false,
+                            is_vararg: p.is_vararg,
                         })
                         .collect();
                     let ret = f.return_type.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Unit);
@@ -960,7 +1028,11 @@ impl Checker {
 
         // 参数进入作用域
         for p in &f.params {
-            let pt = p.type_hint.as_deref().map(|t| self.check_type(t)).unwrap_or(Ty::Any);
+            let mut pt = p.type_hint.as_deref().map(|t| self.check_type(t)).unwrap_or(Ty::Any);
+            // vararg 参数类型为元素类型的数组
+            if p.is_vararg {
+                pt = Ty::Array(Box::new(pt));
+            }
             let _ = self.symbols.insert(Symbol::new(
                 p.name.clone(),
                 SymbolKind::Variable {
@@ -1303,8 +1375,9 @@ impl Checker {
                 span,
                 ..
             } => {
-                let _ = self.check_expr(value);
-                Ty::Any
+                let vt = self.check_expr(value);
+                // NamedArg 的类型是其值表达式的时间类型
+                vt
             }
             Expr::This(span) => {
                 // this 引用当前类型
@@ -1361,6 +1434,15 @@ impl Checker {
                         "first" | "last" => (**elem).clone(),
                         _ => {
                             self.report(*span, format!("unresolved member '{}' on List", name));
+                            Ty::Error
+                        }
+                    },
+                    Ty::Array(elem) => match name.as_str() {
+                        "size" => Ty::Int,
+                        "isEmpty" => Ty::Boolean,
+                        "first" | "last" => (**elem).clone(),
+                        _ => {
+                            self.report(*span, format!("unresolved member '{}' on Array", name));
                             Ty::Error
                         }
                     },
@@ -1974,6 +2056,46 @@ impl Checker {
         }
         // 否则作为表达式检查（可能是 lambda 调用等）
         let callee_ty = self.check_expr(callee);
+        // Lambda/函数类型调用：检查参数类型匹配
+        if let Ty::Function {
+            params,
+            ret,
+        } = &callee_ty
+        {
+            // 检查实参数量
+            if args.len() > params.len() {
+                self.report(
+                    span,
+                    format!(
+                        "too many arguments: expected {}, got {}",
+                        params.len(),
+                        args.len()
+                    ),
+                );
+                return Ty::Error;
+            }
+            // 检查每个实参类型
+            for (i, arg) in args.iter().enumerate() {
+                let at = self.check_expr(arg);
+                if i < params.len() {
+                    let pt = &params[i];
+                    if self.is_type_variable(pt) {
+                        // 类型变量接受任意类型
+                    } else if pt != &Ty::Any && !at.can_assign_to(pt) {
+                        self.report(
+                            arg.span(),
+                            format!(
+                                "argument {} type mismatch: expected '{}', got '{}'",
+                                i + 1,
+                                pt.name(),
+                                at.name()
+                            ),
+                        );
+                    }
+                }
+            }
+            return (**ret).clone();
+        }
         self.report(
             span,
             format!("expression is not callable ('{}')", callee_ty.name()),
@@ -1987,6 +2109,42 @@ impl Checker {
     /// 2. 对可行候选按实参类型匹配度打分：精确匹配 +2，可赋值 +1。
     /// 3. 取最高分；最高分出现多个则报“歧义调用”。
     /// 4. 无可行候选则报“无可匹配的重载”。
+    /// 判断一个类型是否是类型变量（如 `T`、`U`），而非已知具名类型。
+    fn is_type_variable(&self, ty: &Ty) -> bool {
+        if let Ty::Named(name) = ty {
+            if name.chars().count() == 1
+                && name.chars().next().map_or(false, |c| c.is_ascii_uppercase())
+            {
+                // 不在已知类型表中
+                return !self.symbols.types.contains_key(name);
+            }
+        }
+        false
+    }
+
+    /// 检查参数类型是否接受给定实参类型（支持类型变量和 vararg）
+    fn param_accepts(&self, pt: &Ty, at: &Ty, is_vararg: bool) -> bool {
+        if at == pt {
+            return true;
+        }
+        if at.can_assign_to(pt) {
+            return true;
+        }
+        // 类型变量（T, U 等）接受任意类型
+        if self.is_type_variable(pt) {
+            return true;
+        }
+        // vararg 参数接受额外实参
+        if is_vararg {
+            return true;
+        }
+        // Ty::Any 接受任意类型
+        if *pt == Ty::Any {
+            return true;
+        }
+        false
+    }
+
     fn check_call_args(&mut self, overloads: &[Symbol], args: &[Expr], span: Span) -> Ty {
         if overloads.is_empty() {
             return Ty::Error;
@@ -2007,13 +2165,18 @@ impl Checker {
         // 每个实参只检查一次（避免重复诊断与重复副作用）
         let arg_types: Vec<Ty> = args.iter().map(|a| self.check_expr(a)).collect();
 
-        // 1) 按参数数量筛选可行候选
+        // 1) 按参数数量筛选可行候选（支持 vararg：实参数 >= 必选参数数）
         let viable: Vec<&Symbol> = overloads
             .iter()
             .filter(|sym| {
                 if let SymbolKind::Function { params, .. } = &sym.kind {
-                    let required = params.iter().filter(|p| !p.has_default).count();
-                    args.len() >= required && args.len() <= params.len()
+                    let has_vararg = params.last().map_or(false, |p| p.is_vararg);
+                    let required = params.iter().filter(|p| !p.has_default && !p.is_vararg).count();
+                    if has_vararg {
+                        args.len() >= required
+                    } else {
+                        args.len() >= required && args.len() <= params.len()
+                    }
                 } else {
                     false
                 }
@@ -2039,20 +2202,81 @@ impl Checker {
             if let SymbolKind::Function { params, .. } = &sym.kind {
                 let mut score = 0i32;
                 let mut ok = true;
-                for (i, at) in arg_types.iter().enumerate() {
-                    match params.get(i) {
-                        Some(p) => {
-                            if *at == p.ty {
-                                score += 2;
-                            } else if at.can_assign_to(&p.ty) {
-                                score += 1;
-                            } else if p.ty != Ty::Any {
+                // 处理命名参数：先按名匹配
+                let mut matched_params = vec![false; params.len()];
+                let mut named_scores: i32 = 0;
+                let mut remaining_args: Vec<(usize, &Ty)> = Vec::new();
+
+                // 第一遍：处理命名参数
+                for (i, arg) in args.iter().enumerate() {
+                    if let Expr::NamedArg {
+                        name: arg_name,
+                        ..
+                    } = arg
+                    {
+                        if let Some(pi) = params.iter().position(|p| p.name == *arg_name) {
+                            matched_params[pi] = true;
+                            let at = &arg_types[i];
+                            let pt = &params[pi].ty;
+                            if self.param_accepts(pt, at, params[pi].is_vararg) {
+                                if *at == *pt {
+                                    named_scores += 2;
+                                } else {
+                                    named_scores += 1;
+                                }
+                            } else {
                                 ok = false;
                             }
+                        } else {
+                            self.report(
+                                args[i].span(),
+                                format!(
+                                    "unknown named argument '{}' in call to '{}'",
+                                    arg_name, name
+                                ),
+                            );
+                            ok = false;
                         }
-                        None => ok = false,
                     }
                 }
+                score += named_scores;
+
+                // 第二遍：按位置处理非命名参数
+                let mut param_idx = 0;
+                for (i, arg) in args.iter().enumerate() {
+                    if matches!(arg, Expr::NamedArg { .. }) {
+                        continue; // 已在第一遍处理
+                    }
+                    // 找到下一个未匹配的参数
+                    while param_idx < params.len() && matched_params[param_idx] {
+                        param_idx += 1;
+                    }
+                    if param_idx >= params.len() {
+                        // vararg：允许额外参数
+                        if params.last().map_or(false, |p| p.is_vararg) {
+                            // 额外参数计入 vararg 类型
+                            let at = &arg_types[i];
+                            let vararg_param = params.last().unwrap();
+                            if self.param_accepts(&vararg_param.ty, at, true) {
+                                score += 1;
+                            }
+                        } else {
+                            ok = false;
+                            break;
+                        }
+                    } else {
+                        let at = &arg_types[i];
+                        let p = &params[param_idx];
+                        if *at == p.ty {
+                            score += 2;
+                        } else if self.param_accepts(&p.ty, at, p.is_vararg) {
+                            score += 1;
+                        } else {
+                            ok = false;
+                        }
+                    }
+                }
+
                 if ok {
                     if score > best_score {
                         best_score = score;
@@ -2076,7 +2300,8 @@ impl Checker {
                 {
                     for (i, at) in arg_types.iter().enumerate() {
                         let pt = params.get(i).map(|p| p.ty.clone()).unwrap_or(Ty::Any);
-                        if !at.can_assign_to(&pt) && pt != Ty::Any {
+                        let is_vararg = params.get(i).map_or(false, |p| p.is_vararg);
+                        if !self.param_accepts(&pt, at, is_vararg) && pt != Ty::Any {
                             self.report(
                                 args[i].span(),
                                 format!(
@@ -2118,18 +2343,54 @@ impl Checker {
             return_type,
         } = &chosen.kind
         {
-            for (i, at) in arg_types.iter().enumerate() {
-                let pt = params.get(i).map(|p| p.ty.clone()).unwrap_or(Ty::Any);
-                if !at.can_assign_to(&pt) && pt != Ty::Any {
-                    self.report(
-                        args[i].span(),
-                        format!(
-                            "argument {} type mismatch: expected '{}', got '{}'",
-                            i + 1,
-                            pt.name(),
-                            at.name()
-                        ),
-                    );
+            // 按名匹配命名参数，按位置匹配非命名参数
+            let mut matched_params = vec![false; params.len()];
+            for (i, arg) in args.iter().enumerate() {
+                if let Expr::NamedArg {
+                    name: arg_name,
+                    ..
+                } = arg
+                {
+                    if let Some(pi) = params.iter().position(|p| p.name == *arg_name) {
+                        matched_params[pi] = true;
+                        let at = &arg_types[i];
+                        let pt = &params[pi].ty;
+                        if !self.param_accepts(pt, at, params[pi].is_vararg) && *pt != Ty::Any {
+                            self.report(
+                                args[i].span(),
+                                format!(
+                                    "argument '{}' type mismatch: expected '{}', got '{}'",
+                                    arg_name,
+                                    pt.name(),
+                                    at.name()
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+            let mut param_idx = 0;
+            for (i, arg) in args.iter().enumerate() {
+                if matches!(arg, Expr::NamedArg { .. }) {
+                    continue;
+                }
+                while param_idx < params.len() && matched_params[param_idx] {
+                    param_idx += 1;
+                }
+                if param_idx < params.len() {
+                    let at = &arg_types[i];
+                    let p = &params[param_idx];
+                    if !self.param_accepts(&p.ty, at, p.is_vararg) && p.ty != Ty::Any {
+                        self.report(
+                            args[i].span(),
+                            format!(
+                                "argument {} type mismatch: expected '{}', got '{}'",
+                                i + 1,
+                                p.ty.name(),
+                                at.name()
+                            ),
+                        );
+                    }
                 }
             }
             return_type.clone()
@@ -2139,6 +2400,18 @@ impl Checker {
     }
 
     fn check_builtin_method(&mut self, obj_ty: &Ty, name: &str, args: &[Expr], span: Span) -> Ty {
+        // 类型变量（T, U 等）：当作 Any 处理
+        if self.is_type_variable(obj_ty) {
+            return match name {
+                "toString" => Ty::String,
+                "hashCode" => Ty::Int,
+                "equals" => Ty::Boolean,
+                _ => {
+                    // 通用方法：返回 Any
+                    Ty::Any
+                }
+            };
+        }
         // 内置常用方法（简化）
         match (obj_ty, name) {
             (Ty::String, "length") => {
@@ -2219,6 +2492,18 @@ impl Checker {
         }
         match base {
             Ty::Named(type_name) => {
+                // 类型变量（T, U 等）：当作 Any 处理，允许所有方法调用
+                if self.is_type_variable(&Ty::Named(type_name.clone())) {
+                    return match name {
+                        "toString" => Ty::String,
+                        "hashCode" => Ty::Int,
+                        "equals" => Ty::Boolean,
+                        _ => {
+                            // 通用方法：返回 Any
+                            Ty::Any
+                        }
+                    };
+                }
                 // Pair<Int, Int> 等标准库类型的成员（first/second/toString）
                 if type_name == "Pair" {
                     return match name {
@@ -2269,6 +2554,15 @@ impl Checker {
                 "first" | "last" => (**elem).clone(),
                 _ => {
                     self.report(span, format!("unresolved member '{}' on List", name));
+                    Ty::Error
+                }
+            },
+            Ty::Array(elem) => match name {
+                "size" => Ty::Int,
+                "isEmpty" => Ty::Boolean,
+                "first" | "last" => (**elem).clone(),
+                _ => {
+                    self.report(span, format!("unresolved member '{}' on Array", name));
                     Ty::Error
                 }
             },
@@ -2433,9 +2727,9 @@ impl Checker {
             }
         }
 
+        // when 表达式返回所有分支类型的合并（有 else 或无 else 均返回实际类型）
         match result {
-            Some(t) if has_else => t,
-            Some(_) => Ty::Unit,
+            Some(t) => t,
             None => Ty::Unit,
         }
     }
@@ -2775,14 +3069,16 @@ impl Checker {
     fn check_top_level_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Val {
+                name,
                 initializer,
                 type_hint,
-                ..
+                span,
             }
             | Stmt::Var {
+                name,
                 initializer,
                 type_hint,
-                ..
+                span,
             } => {
                 if let Some(init) = initializer {
                     let init_ty = self.check_expr(init);
@@ -2802,6 +3098,9 @@ impl Checker {
                                 );
                             }
                         }
+                        self.define_var_env(name, declared, true);
+                    } else {
+                        self.define_var_env(name, init_ty, true);
                     }
                 }
             }

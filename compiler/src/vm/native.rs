@@ -1,4 +1,4 @@
-//! 鍘熺敓锛堝唴缃?/ FFI锛夊嚱鏁拌皟搴﹀櫒
+﻿//! 鍘熺敓锛堝唴缃?/ FFI锛夊嚱鏁拌皟搴﹀櫒
 //!
 //! 瀵瑰簲 鎶€鏈柟妗?搂7.1 鐨?`CallNative` / `CallC` 涓?搂9.3 鐨?FFI 璋冨害銆?
 //!
@@ -53,9 +53,9 @@ impl NativeRegistry {
         r.register("intToPtr", native_int_to_ptr);
         r.register("makeCallback", native_make_callback);
         r.register("aura_isOfType", native_is_of_type);
-        // listOf — prelude 别名（实际实现在 std_collections.rs）
+        // listOf - prelude alias (implementation in std_collections.rs)
+        #[cfg(feature = "std-collections")]
         r.register("listOf", crate::std::std_collections::nat_list_of);
-
         // Fix 9: 榛樿浠呭姞杞?prelude锛屼笉鍔犺浇鍏ㄩ儴 std 妯″潡
         // 濡傞渶鍔犺浇 std 妯″潡锛屼娇鐢?NativeRegistry::with_modules()
 

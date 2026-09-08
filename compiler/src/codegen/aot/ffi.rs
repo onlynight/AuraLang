@@ -94,14 +94,20 @@ mod tests {
                 HirParam {
                     name: "x".into(),
                     ty: Some(HirType::Named("Int".into())),
+                    default_value: None,
+                    is_vararg: false,
                 },
                 HirParam {
                     name: "y".into(),
                     ty: Some(HirType::Named("Int".into())),
+                    default_value: None,
+                    is_vararg: false,
                 },
                 HirParam {
                     name: "r".into(),
                     ty: Some(HirType::Named("Float".into())),
+                    default_value: None,
+                    is_vararg: false,
                 },
             ],
             ret: Some(HirType::Named("Unit".into())),

@@ -111,8 +111,16 @@ name = "aot_vs_c_bench"
 required-features = ["llvm"]
 
 [[example]]
+name = "build_utils_shared"
+required-features = ["llvm"]
+
+[[example]]
 name = "aot_shared_lib"
 required-features = ["llvm"]
+
+[[example]]
+name = "ffi_demo_plugin_load"
+required-features = ["llvm", "dynamic-ffi"]
 
 [[example]]
 name = "aot_plugin_load"

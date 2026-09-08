@@ -31,6 +31,8 @@ pub struct ParamSym {
     pub name: String,
     pub ty: Ty,
     pub has_default: bool,
+    /// 是否为 vararg 可变参数
+    pub is_vararg: bool,
 }
 
 /// 符号表中的单个条目

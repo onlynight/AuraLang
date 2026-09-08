@@ -140,7 +140,7 @@ impl AotCodeGenerator {
 
     /// 从 HIR 程序生成 LLVM IR 文本（默认不生成包装函数）
     pub fn generate_ir(&self, program: &HirProgram) -> Result<String, AotError> {
-        emit::emit_program(self, program, false)
+        emit::emit_program(self, program, false, false, false)
     }
 
     /// 从 HIR 程序生成 LLVM IR 文本，可选生成 JitValue ABI 包装函数
@@ -152,9 +152,10 @@ impl AotCodeGenerator {
         &self,
         program: &HirProgram,
         blob_mode: bool,
-        _wrapper_exported: bool,
+        wrapper_exported: bool,
+        c_abi: bool,
     ) -> Result<String, AotError> {
-        emit::emit_program(self, program, blob_mode)
+        emit::emit_program(self, program, blob_mode, wrapper_exported, c_abi)
     }
 
     /// 完整 AOT 编译流程：HIR → LLVM IR → 目标文件
@@ -171,7 +172,8 @@ impl AotCodeGenerator {
             OutputFormat::Blob | OutputFormat::SharedLibrary
         );
         let wrapper_exported = matches!(output_format, OutputFormat::SharedLibrary);
-        let ir = self.generate_ir_with_mode(program, blob_mode, wrapper_exported)?;
+        let ir =
+            self.generate_ir_with_mode(program, blob_mode, wrapper_exported, self.options.c_abi)?;
 
         let stem = output_dir
             .file_stem()

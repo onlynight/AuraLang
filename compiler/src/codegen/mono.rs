@@ -51,6 +51,8 @@ pub fn mono_hir(hir: &mut HirProgram) {
                     spec.params.push(HirParam {
                         name: format!("__p{}", spec.params.len()),
                         ty: None,
+                        default_value: None,
+                        is_vararg: false,
                     });
                 }
                 spec_map.insert((name.clone(), arity), spec_name.clone());

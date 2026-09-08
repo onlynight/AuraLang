@@ -116,6 +116,9 @@ impl Vm {
             // ── 函数调用 ──
             Instr::Call(idx) => self.do_call(top, idx as usize, false)?,
             Instr::CallNative(idx) => self.do_call_native(top, idx as usize)?,
+            Instr::CallNativeArgs(idx, argc) => {
+                self.do_call_native_args(top, idx as usize, argc as usize)?
+            }
             Instr::Return => {
                 let v = self.pop(top)?;
                 self.pop_frame(v);
@@ -685,7 +688,70 @@ impl Vm {
             f(&args)
         } else {
             // P8.4: 尝试静态链接 — 使用库句柄解析 C 函数
-            match static_call_c_with_lib(&native.name, &args, lib_handle) {
+            match static_call_c_with_lib(
+                &native.name,
+                &args,
+                lib_handle,
+                &native.param_types,
+                native.ret_type,
+            ) {
+                Some(v) => v,
+                None => {
+                    eprintln!(
+                        "[vm] 未链接的外部函数 `{}`，已忽略调用（参数: {:?}）",
+                        native.name,
+                        args.iter().map(|v| v.to_string()).collect::<Vec<_>>()
+                    );
+                    Value::Int(0)
+                }
+            }
+        };
+        self.frames[top].stack.push(result);
+        Ok(())
+    }
+
+    /// 原生 / FFI 函数调用（带实际参数个数，用于变长函数）
+    fn do_call_native_args(&mut self, top: usize, idx: usize, argc: usize) -> Result<(), VmError> {
+        if idx >= self.module.natives.len() {
+            return Err(VmError::Runtime(format!(
+                "call to undefined native #{}",
+                idx
+            )));
+        }
+        let native = self.module.natives[idx].clone();
+        // 使用实际参数个数而非声明的 param_count
+        let args = self.pop_n(top, argc)?;
+
+        // P9: 如果指定了 FFI 库，先加载库
+        if let Some(ref lib_name) = native.ffi_lib {
+            self.ensure_lib_loaded(lib_name);
+        }
+
+        // P9: 获取库句柄（如果加载了）
+        let lib_handle: Option<usize> = native.ffi_lib.as_ref().and_then(|lib| {
+            #[cfg(windows)]
+            {
+                self.loaded_libs.get(lib).copied()
+            }
+            #[cfg(unix)]
+            {
+                self.loaded_libs.get(lib).map(|h| *h as usize)
+            }
+        });
+
+        let result = if let Some(f) = self.natives.get(&native.name) {
+            f(&args)
+        } else if let Some(f) = self.natives.resolve_c_function(&native.name) {
+            f(&args)
+        } else {
+            // P8.4: 尝试静态链接 — 使用库句柄解析 C 函数
+            match static_call_c_with_lib(
+                &native.name,
+                &args,
+                lib_handle,
+                &native.param_types,
+                native.ret_type,
+            ) {
                 Some(v) => v,
                 None => {
                     eprintln!(
@@ -796,56 +862,99 @@ impl Vm {
     }
 }
 
-/// P8.4: 静态链接 C 函数调用
-///
-/// 使用 `dlsym(NULL, name)` / `GetProcAddress` 解析 C 函数符号，
-/// 将参数转换为 `i64` 数组（最多 4 个），调用 C 函数，返回结果。
-/// 成功时返回 `Some(Value)`，失败时返回 `None`。
+/// P8.4: 静态链接 C 函数调用（无类型信息，回退到硬编码匹配）
 fn static_call_c(name: &str, args: &[Value]) -> Option<Value> {
-    static_call_c_with_lib(name, args, None)
+    static_call_c_with_lib(name, args, None, &[], 6) // ret_type=6 (void) 仅作占位
 }
 
 /// P9: 使用指定库句柄调用 C 函数
-fn static_call_c_with_lib(name: &str, args: &[Value], lib_handle: Option<usize>) -> Option<Value> {
+///
+/// `param_types` 和 `ret_type` 是 CType ID（u8），用于确定参数和返回值的实际类型。
+fn static_call_c_with_lib(
+    name: &str,
+    args: &[Value],
+    lib_handle: Option<usize>,
+    param_types: &[u8],
+    ret_type: u8,
+) -> Option<Value> {
     use crate::vm::ffi::{CFuncInfo, CFuncPtr, CType, resolve_static_symbol};
 
-    // 如果有库句柄，从库中解析符号
+    // 如果有库句柄，从库中解析符号；否则从当前进程解析
+    // 对于 Aura FFI 函数，先尝试原始名称，再尝试 aura_c_ 前缀
     let addr = if let Some(handle) = lib_handle {
-        resolve_symbol_in_lib(handle, name)
+        // 先尝试原始名称（兼容 sqlura_* 等非 Aura 函数）
+        let direct = resolve_symbol_in_lib(handle, name);
+        if direct.is_some() {
+            direct
+        } else {
+            // 尝试 aura_c_ 前缀（Aura C ABI 包装函数）
+            let prefixed = format!("aura_c_{}", name);
+            resolve_symbol_in_lib(handle, &prefixed)
+        }
     } else {
-        resolve_static_symbol(name)
+        let direct = resolve_static_symbol(name);
+        if direct.is_some() {
+            direct
+        } else {
+            let prefixed = format!("aura_c_{}", name);
+            resolve_static_symbol(&prefixed)
+        }
     }?;
 
     let ptr: CFuncPtr = unsafe { std::mem::transmute(addr) };
 
-    // P9: 根据函数名确定返回类型和参数类型
-    // SQLura 数据库 API 函数签名
-    let (param_types, return_type) = match name {
-        "sqlura_version" => {
-            (vec![], CType::CString) // 返回字符串
-        }
-        "sqlura_open" => {
-            (vec![CType::CString], CType::Ptr) // 参数: path, 返回: handle
-        }
-        "sqlura_close" => {
-            (vec![CType::Ptr], CType::Int64) // 参数: handle, 返回: int
-        }
-        "sqlura_exec" => {
-            (
-                vec![
-                    CType::Ptr,
-                    CType::CString,
-                ],
+    // 根据传入的类型信息确定参数类型和返回类型
+    let param_types_c: Vec<CType> = if param_types.is_empty() {
+        // 无类型信息时回退到硬编码匹配（兼容旧版 .auc 文件）
+        match name {
+            "sqlura_version" => vec![],
+            "sqlura_open" => vec![CType::CString],
+            "sqlura_close" => vec![CType::Ptr],
+            "sqlura_exec" => vec![
+                CType::Ptr,
                 CType::CString,
-            ) // 参数: handle, sql, 返回: string
+            ],
+            "sqlura_free_string" => vec![CType::CString],
+            "sqlura_error" => vec![CType::Ptr],
+            _ => vec![CType::Int64; args.len().min(8)],
         }
-        "sqlura_free_string" => {
-            (vec![CType::CString], CType::Void) // 参数: ptr, 返回: void
+    } else {
+        param_types
+            .iter()
+            .map(|&id| match id {
+                0 => CType::Int32,
+                1 => CType::Int64,
+                2 => CType::Float64,
+                3 => CType::Bool,
+                4 => CType::CString,
+                5 => CType::Ptr,
+                _ => CType::Int64,
+            })
+            .collect()
+    };
+
+    let return_type = if param_types.is_empty() {
+        // 无类型信息时回退到硬编码匹配
+        match name {
+            "sqlura_version" => CType::CString,
+            "sqlura_open" => CType::Ptr,
+            "sqlura_close" => CType::Int64,
+            "sqlura_exec" => CType::CString,
+            "sqlura_free_string" => CType::Void,
+            "sqlura_error" => CType::CString,
+            _ => CType::Int64,
         }
-        "sqlura_error" => {
-            (vec![CType::Ptr], CType::CString) // 参数: handle, 返回: string
+    } else {
+        match ret_type {
+            0 => CType::Int32,
+            1 => CType::Int64,
+            2 => CType::Float64,
+            3 => CType::Bool,
+            4 => CType::CString,
+            5 => CType::Ptr,
+            6 => CType::Void,
+            _ => CType::Int64,
         }
-        _ => (vec![CType::Int64; args.len().min(8)], CType::Int64), // 默认
     };
 
     // P9: 创建 CString 对象保持生命周期
@@ -855,7 +964,7 @@ fn static_call_c_with_lib(name: &str, args: &[Value], lib_handle: Option<usize>)
     let c_args: [i64; 8] = [
         args.first()
             .map(|v| {
-                let ty = param_types.first().unwrap_or(&CType::Int64);
+                let ty = param_types_c.first().unwrap_or(&CType::Int64);
                 if *ty == CType::CString {
                     match v {
                         Value::Str(s) => {
@@ -877,7 +986,7 @@ fn static_call_c_with_lib(name: &str, args: &[Value], lib_handle: Option<usize>)
             .unwrap_or(0),
         args.get(1)
             .map(|v| {
-                let ty = param_types.get(1).unwrap_or(&CType::Int64);
+                let ty = param_types_c.get(1).unwrap_or(&CType::Int64);
                 if *ty == CType::CString {
                     match v {
                         Value::Str(s) => {
@@ -898,7 +1007,7 @@ fn static_call_c_with_lib(name: &str, args: &[Value], lib_handle: Option<usize>)
             .unwrap_or(0),
         args.get(2)
             .map(|v| {
-                let ty = param_types.get(2).unwrap_or(&CType::Int64);
+                let ty = param_types_c.get(2).unwrap_or(&CType::Int64);
                 if *ty == CType::CString {
                     match v {
                         Value::Str(s) => {
@@ -919,7 +1028,7 @@ fn static_call_c_with_lib(name: &str, args: &[Value], lib_handle: Option<usize>)
             .unwrap_or(0),
         args.get(3)
             .map(|v| {
-                let ty = param_types.get(3).unwrap_or(&CType::Int64);
+                let ty = param_types_c.get(3).unwrap_or(&CType::Int64);
                 if *ty == CType::CString {
                     match v {
                         Value::Str(s) => {

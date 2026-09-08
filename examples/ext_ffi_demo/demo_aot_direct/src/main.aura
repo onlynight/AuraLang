@@ -29,23 +29,24 @@ fun main() = {
     // 产物路径：target/build/libs/utils/utils.dll（Windows）
     //           target/build/libs/utils/utils.so（Linux）
     //           target/build/libs/utils/utils.dylib（macOS）
-    val result = load_shared_library("target/build/libs/utils/utils.dll")
-    val module_id = result.module_id
+    val module_id = load_shared_library("target/build/libs/utils/utils.dll")
+    println("loaded module_id = " + toString(module_id))
 
     // 通过 call_func 调用函数（func_idx 由运行时符号枚举确定）
-    // func_idx=0: add, func_idx=1: multiply, func_idx=2: factorial, func_idx=3: power
+    // 实际导出顺序（来自 PE export table）：
+    // func_idx=0: add, func_idx=1: factorial, func_idx=2: multiply, func_idx=3: power
 
     val sum = call_func(module_id, 0, listOf(3, 4))
-    println("add(3, 4) = ${sum}")
+    println("add(3, 4) = " + toString(sum))
 
-    val prod = call_func(module_id, 1, listOf(3, 4))
-    println("multiply(3, 4) = ${prod}")
+    val fact = call_func(module_id, 1, listOf(5))
+    println("factorial(5) = " + toString(fact))
 
-    val fact = call_func(module_id, 2, listOf(5))
-    println("factorial(5) = ${fact}")
+    val prod = call_func(module_id, 2, listOf(3, 4))
+    println("multiply(3, 4) = " + toString(prod))
 
     val pw = call_func(module_id, 3, listOf(2, 10))
-    println("power(2, 10) = ${pw}")
+    println("power(2, 10) = " + toString(pw))
 
     // 清理
     unload_shared_library(module_id)

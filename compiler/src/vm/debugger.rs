@@ -1201,6 +1201,7 @@ pub fn format_instr(instr: &crate::vm::Instr) -> String {
         JumpIfFalse(t) => format!("JumpIfFalse({})", t),
         Call(i) => format!("Call({})", i),
         CallNative(i) => format!("CallNative({})", i),
+        CallNativeArgs(i, argc) => format!("CallNativeArgs({}, argc={})", i, argc),
         Return => "Return".into(),
         ReturnUnit => "ReturnUnit".into(),
         NewObject(i) => format!("NewObject({})", i),

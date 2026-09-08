@@ -43,6 +43,10 @@ pub(crate) struct EmitCtx {
     pub debug_info: Option<DebugInfo>,
     /// Phase 1 AOT Blob 模式：生成 JitValue ABI 包装函数
     pub blob_mode: bool,
+    /// SharedLibrary 模式：包装函数以 external dllexport 导出
+    pub wrapper_exported: bool,
+    /// C ABI 包装函数模式：为每个非 native 函数生成裸 C ABI 导出函数
+    pub c_abi: bool,
     /// 已声明的结构体类型名集合
     pub declared_structs: std::collections::HashSet<String>,
     /// 已生成的函数名集合
@@ -99,6 +103,8 @@ impl EmitCtx {
         link_runtime: bool,
         debug_info: Option<DebugInfo>,
         blob_mode: bool,
+        wrapper_exported: bool,
+        c_abi: bool,
     ) -> Self {
         Self {
             type_mapper,
@@ -108,6 +114,8 @@ impl EmitCtx {
             link_runtime,
             debug_info,
             blob_mode,
+            wrapper_exported,
+            c_abi,
             declared_structs: std::collections::HashSet::new(),
             generated_funcs: std::collections::HashSet::new(),
             sections: Vec::new(),
@@ -338,6 +346,8 @@ pub fn emit_program(
     codegen: &AotCodeGenerator,
     program: &HirProgram,
     blob_mode: bool,
+    wrapper_exported: bool,
+    c_abi: bool,
 ) -> Result<String, AotError> {
     let debug_info =
         if codegen.options.debug_info { Some(DebugInfo::new("main.aura")) } else { None };
@@ -350,6 +360,8 @@ pub fn emit_program(
         codegen.options.link_runtime,
         debug_info,
         blob_mode,
+        wrapper_exported,
+        c_abi,
     );
 
     // 1. 模块头
@@ -457,6 +469,29 @@ pub fn emit_program(
             } else {
                 eprintln!(
                     "warning: AOT wrapper generation failed for function '{}'",
+                    func.name
+                );
+            }
+        }
+    }
+
+    // 5.5 C ABI 包装函数（--cabi 标志）：为每个非 native 函数生成裸 C ABI 导出函数
+    if c_abi {
+        for func in &program.functions {
+            if func.is_native {
+                continue;
+            }
+            // C ABI 包装函数名与原始函数名不同，不检查 generated_funcs
+            let wrapper_name = format!("aura_c_{}", sanitizellvm(&func.name));
+            if ctx.generated_funcs.contains(&wrapper_name) {
+                continue;
+            }
+            ctx.generated_funcs.insert(wrapper_name.clone());
+            if let Ok(wrapper_ir) = emit_c_abi_wrapper(&mut ctx, func) {
+                ctx.sections.push(wrapper_ir);
+            } else {
+                eprintln!(
+                    "warning: C ABI wrapper generation failed for function '{}'",
                     func.name
                 );
             }
@@ -1081,6 +1116,8 @@ fn emit_expr_val(
                 link_runtime: ctx.link_runtime,
                 debug_info: None,
                 blob_mode: ctx.blob_mode,
+                wrapper_exported: ctx.wrapper_exported,
+                c_abi: ctx.c_abi,
                 declared_structs: std::collections::HashSet::new(),
                 generated_funcs: std::collections::HashSet::new(),
                 sections: Vec::new(),
@@ -2424,9 +2461,12 @@ fn emit_wrapper(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErro
 
     // 6. 生成包装函数体
     let mut s = String::new();
+    // SharedLibrary 模式：以 external dllexport 导出，供 dlsym/GetProcAddress 查找
+    // Blob 模式：以 internal linkage 生成（仅供 blob 内部分派发）
+    let linkage = if ctx.wrapper_exported { "external dllexport" } else { "internal" };
     s.push_str(&format!(
-        "define internal i64 @\"{}\"(i64* %args, i64* %ret, i64 %argc, i64* %ctx) {{\n",
-        wrapper_name
+        "define {} i64 @\"{}\"(i64* %args, i64* %ret, i64 %argc, i64* %ctx) {{\n",
+        linkage, wrapper_name
     ));
     s.push_str("entry:\n");
 
@@ -2604,6 +2644,85 @@ fn emit_wrapper(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErro
 
     // 6e. 返回 0（正常完成）
     s.push_str("  ret i64 0\n");
+    s.push_str("}\n\n");
+
+    Ok(s)
+}
+
+/// 生成 C ABI 包装函数（裸 C 调用约定，供外部 C/Python 消费者调用）
+///
+/// 当 `--cabi` 标志启用时，为每个非 native 函数生成一个 C ABI 包装函数。
+/// 包装函数名格式：`aura_c_<funcname>`，直接调用原始 Aura 函数。
+///
+/// 示例：
+/// ```llvm
+/// define dso_local dllexport i32 @"aura_c_add"(i32 %a, i32 %b) {
+///   %ret = call i32 @add(i32 %a, i32 %b)
+///   ret i32 %ret
+/// }
+/// ```
+fn emit_c_abi_wrapper(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotError> {
+    // 1. 获取返回类型
+    let ret_llvm_ty =
+        func.ret.as_ref().map(|t| ctx.llvm_type(t)).unwrap_or_else(|| "void".to_string());
+    let ret_str = if ret_llvm_ty.is_empty() { "void".to_string() } else { ret_llvm_ty.clone() };
+
+    // 2. 获取参数类型和名称
+    let params: Vec<(String, String)> = func
+        .params
+        .iter()
+        .map(|p| {
+            let ty = ctx.llvm_type(p.ty.as_ref().unwrap_or(&HirType::Named("Int".into())));
+            (p.name.clone(), ty)
+        })
+        .collect();
+
+    let params_ir: Vec<String> =
+        params.iter().map(|(name, ty)| format!("{} %arg.{}", ty, sanitizellvm(name))).collect();
+    let params_str = params_ir.join(", ");
+
+    // 3. 构建 C ABI 包装函数名
+    let c_wrapper_name = format!("aura_c_{}", sanitizellvm(&func.name));
+
+    // 4. 生成包装函数体
+    let mut s = String::new();
+
+    // Windows: dso_local dllexport; Unix: dso_local visibility("default")
+    let linkage =
+        if ctx.target_triple.contains("windows") { "dso_local dllexport" } else { "dso_local" };
+    let visibility =
+        if ctx.target_triple.contains("windows") { "" } else { " visibility(\"default\")" };
+
+    s.push_str(&format!(
+        "define {}{} {} @\"{}\"({}) {{\n",
+        linkage, visibility, ret_str, c_wrapper_name, params_str
+    ));
+    s.push_str("entry:\n");
+
+    // 5. 调用原始函数
+    let args_str = params
+        .iter()
+        .map(|(name, ty)| format!("{} %arg.{}", ty, sanitizellvm(name)))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let call_var = ctx.fresh_var();
+    if ret_llvm_ty == "void" || ret_llvm_ty.is_empty() {
+        s.push_str(&format!("  call void @{}({})\n", func.name, args_str));
+    } else {
+        s.push_str(&format!(
+            "  {} = call {} @{}({})\n",
+            call_var, ret_llvm_ty, func.name, args_str
+        ));
+    }
+
+    // 6. 返回结果
+    if ret_llvm_ty == "void" || ret_llvm_ty.is_empty() {
+        s.push_str("  ret void\n");
+    } else {
+        s.push_str(&format!("  ret {} {}\n", ret_llvm_ty, call_var));
+    }
+
     s.push_str("}\n\n");
 
     Ok(s)

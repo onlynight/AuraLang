@@ -19,5 +19,5 @@ path = "src/debugger_main.rs"
 compiler = { path = "../compiler" }
 
 [features]
-# AOT 编译支持（转发 compiler 的 llvm feature）
-llvm = ["compiler/llvm"]
+# AOT 编译支持（转发 compiler 的 llvm + dynamic-ffi features）
+llvm = ["compiler/llvm", "compiler/dynamic-ffi", "compiler/std-collections"]

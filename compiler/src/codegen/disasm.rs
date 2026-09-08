@@ -125,6 +125,19 @@ fn opcode_display(module: &BytecodeModule, op: &OpCode, operand: &[u8]) -> Strin
             let name = module.natives.get(i as usize).map(|n| n.name.as_str()).unwrap_or("?");
             format!("CALL_NATIVE {}   ; {}", i, name)
         }
+        OpCode::CallNativeArgs(_, _) => {
+            let i = read_u16();
+            let name = module.natives.get(i as usize).map(|n| n.name.as_str()).unwrap_or("?");
+            // argc is at operand[2..4]
+            let argc = if operand.len() >= 4 {
+                u16::from_le_bytes([
+                    operand[2], operand[3],
+                ])
+            } else {
+                0
+            };
+            format!("CALL_NATIVE_ARGS {} argc={}   ; {}", i, argc, name)
+        }
         OpCode::NewObject(_) => format!("NEW_OBJECT {}", read_u16()),
         OpCode::GetField(_) => format!("GET_FIELD {}", read_u16()),
         OpCode::SetField(_) => format!("SET_FIELD {}", read_u16()),

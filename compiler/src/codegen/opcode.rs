@@ -73,6 +73,8 @@ pub enum OpCode {
     Call(u16),
     /// 调用原生（内置/FFI）函数表中 `idx` 处函数
     CallNative(u16),
+    /// 调用原生函数，带实际参数个数（用于变长函数如 listOf）
+    CallNativeArgs(u16, u16),
     /// 从栈顶弹出返回值并返回
     Return,
     /// 无返回值（Unit）返回
@@ -229,6 +231,7 @@ impl OpCode {
             OpCode::JumpIfFalse(_) => 25,
             OpCode::Call(_) => 26,
             OpCode::CallNative(_) => 27,
+            OpCode::CallNativeArgs(_, _) => 78,
             OpCode::Return => 28,
             OpCode::ReturnUnit => 29,
             OpCode::NewObject(_) => 30,
@@ -285,6 +288,7 @@ impl OpCode {
             0 | 1 | 2 | 30 | 32 | 33 | 72 | 74 | 76 | 77 => 2, // u16 操作数
             23 | 24 | 25 => 4,                                 // i32 偏移
             26 | 27 | 36 => 2,                                 // u16 函数/原生索引
+            78 => 4,                                           // CallNativeArgs: u16 idx + u16 argc
             40 | 41 | 51 => 2, // CallMethod/CallCtor/NewCoroutine u16 索引
             66 => 2,           // MakeCallback u16 函数索引
             70 => 2,           // CallExport u16 sym_idx
@@ -370,6 +374,7 @@ impl OpCode {
             70 => OpCode::CallExport(0),
             71 => OpCode::CallExternal(0, 0),
             77 => OpCode::CallAot(0),
+            78 => OpCode::CallNativeArgs(0, 0),
             _ => return None,
         })
     }
@@ -396,6 +401,10 @@ impl OpCode {
             | OpCode::MakeFnRef(i)
             | OpCode::CallExport(i)
             | OpCode::CallAot(i) => buf.extend_from_slice(&i.to_le_bytes()),
+            OpCode::CallNativeArgs(idx, argc) => {
+                buf.extend_from_slice(&idx.to_le_bytes());
+                buf.extend_from_slice(&argc.to_le_bytes());
+            }
             OpCode::CallExternal(mod_idx, sym_idx) => {
                 buf.extend_from_slice(&mod_idx.to_le_bytes());
                 buf.extend_from_slice(&sym_idx.to_le_bytes());
@@ -439,6 +448,7 @@ impl fmt::Display for OpCode {
             OpCode::JumpIfFalse(o) => write!(f, "JUMP_IF_FALSE {}", o),
             OpCode::Call(i) => write!(f, "CALL {}", i),
             OpCode::CallNative(i) => write!(f, "CALL_NATIVE {}", i),
+            OpCode::CallNativeArgs(i, argc) => write!(f, "CALL_NATIVE_ARGS {} argc={}", i, argc),
             OpCode::Return => write!(f, "RETURN"),
             OpCode::ReturnUnit => write!(f, "RETURN_UNIT"),
             OpCode::NewObject(i) => write!(f, "NEW_OBJECT {}", i),
@@ -515,7 +525,20 @@ pub struct BytecodeNative {
     pub ffi_abi: FfiAbi,
     /// FFI 库名（对应 `extern "<abi>" "<lib>"`）
     pub ffi_lib: Option<String>,
+    /// 参数类型列表（u8 类型 ID，对应 CType）
+    pub param_types: Vec<u8>,
+    /// 返回类型（u8 类型 ID，对应 CType）
+    pub ret_type: u8,
 }
+
+/// 类型 ID 常量（用于 BytecodeNative 的 param_types/ret_type）
+pub const TYPE_ID_I32: u8 = 0;
+pub const TYPE_ID_I64: u8 = 1;
+pub const TYPE_ID_F64: u8 = 2;
+pub const TYPE_ID_BOOL: u8 = 3;
+pub const TYPE_ID_CSTRING: u8 = 4;
+pub const TYPE_ID_PTR: u8 = 5;
+pub const TYPE_ID_VOID: u8 = 6;
 
 /// 一个已发射的函数
 #[derive(Debug, Clone, PartialEq)]

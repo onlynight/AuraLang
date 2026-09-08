@@ -9,7 +9,9 @@
 use crate::codegen::hir::HirProgram;
 use crate::codegen::mir::{BasicBlock, LowerCtx, MirClosure, MirFunction, MirInstr, Terminator};
 use crate::codegen::opcode::{
-    BytecodeClosure, BytecodeFunction, BytecodeModule, BytecodeNative, Const, OpCode, VirtualTable,
+    BytecodeClosure, BytecodeFunction, BytecodeModule, BytecodeNative, Const, OpCode, TYPE_ID_BOOL,
+    TYPE_ID_CSTRING, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_I64, TYPE_ID_PTR, TYPE_ID_VOID,
+    VirtualTable,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -30,18 +32,31 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
     let natives: Vec<BytecodeNative> = hir
         .natives
         .iter()
-        .map(|n| BytecodeNative {
-            name: n.name.clone(),
-            param_count: n.params.len() as u16,
-            ffi_abi: n.ffi_abi,
-            ffi_lib: n.ffi_lib.clone(),
+        .map(|n| {
+            // 映射 HIR 参数类型到 CType ID
+            let param_types: Vec<u8> =
+                n.params.iter().map(|p| hir_type_to_c_type_id(p.ty.as_ref())).collect();
+            // 映射 HIR 返回类型到 CType ID
+            let ret_type =
+                n.ret.as_ref().map(|t| hir_type_to_c_type_id(Some(t))).unwrap_or(TYPE_ID_VOID);
+            BytecodeNative {
+                name: n.name.clone(),
+                param_count: n.params.len() as u16,
+                ffi_abi: n.ffi_abi,
+                ffi_lib: n.ffi_lib.clone(),
+                param_types,
+                ret_type,
+            }
         })
         .collect();
 
-    // 用户函数名 -> 索引（初始版本，后续会根据闭包数量调整）
+    // 用户函数名 -> 索引（预计算最终索引：闭包在前，用户函数在后）
     let mut fn_index: HashMap<&str, u16> = HashMap::new();
+    // 统计所有闭包数量
+    let total_closures: u16 = mir_funcs.iter().map(|f| f.closures.len() as u16).sum();
+    // 用户函数索引 = 闭包总数 + 函数序号
     for (i, f) in mir_funcs.iter().enumerate() {
-        fn_index.insert(f.name.as_str(), i as u16);
+        fn_index.insert(f.name.as_str(), total_closures + i as u16);
     }
     // 原生函数名 -> 索引
     let mut native_index: HashMap<&str, u16> = HashMap::new();
@@ -73,12 +88,10 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
         }
     }
 
-    // 第二遍：注册所有用户函数到函数表（调整索引以考虑闭包偏移）
+    // 第二遍：注册所有用户函数到函数表
     for f in mir_funcs {
         let code = emit_function(f, &fn_index, &native_index, &closure_fn_index);
         let fn_idx = functions.len() as u16;
-        // 更新 fn_index 以反映实际索引（闭包 + 用户函数）
-        fn_index.insert(f.name.as_str(), fn_idx);
         functions.push(BytecodeFunction {
             name: f.name.clone(),
             param_count: f.param_slots.len() as u16,
@@ -487,7 +500,7 @@ fn emit_instr(
                 OpCode::LoadVar(*a as u16).write(code);
             }
             let idx = native_index.get(func.as_str()).copied().unwrap_or(0);
-            OpCode::CallNative(idx).write(code);
+            OpCode::CallNativeArgs(idx, args.len() as u16).write(code);
             if let Some(d) = dst {
                 OpCode::StoreVar(*d as u16).write(code);
             }
@@ -679,4 +692,20 @@ fn field_index(name: &str) -> u16 {
 /// 工具：常量池查找（供优化器/反汇编器复用）
 pub fn find_const<'a>(module: &'a BytecodeModule, idx: usize) -> &'a Const {
     &module.consts[idx]
+}
+
+/// 将 HIR 类型映射到 CType ID（用于 BytecodeNative 的 param_types/ret_type）
+fn hir_type_to_c_type_id(ty: Option<&crate::codegen::hir::HirType>) -> u8 {
+    use crate::codegen::hir::HirType;
+    match ty {
+        Some(HirType::Named(name)) => match name.as_str() {
+            "Int" | "Long" | "Short" | "Byte" | "U8" | "Char" => TYPE_ID_I32,
+            "Float" | "Double" => TYPE_ID_F64,
+            "Boolean" | "Bool" => TYPE_ID_BOOL,
+            "String" | "Str" | "CString" | "CStr" => TYPE_ID_CSTRING,
+            _ => TYPE_ID_I32, // 默认 i32
+        },
+        Some(HirType::Pointer(_)) => TYPE_ID_PTR,
+        _ => TYPE_ID_VOID,
+    }
 }

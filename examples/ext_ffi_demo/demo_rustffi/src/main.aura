@@ -24,7 +24,7 @@
 // ── FFI 声明：通过 extern "C" 声明 C ABI 函数 ──
 // 与 Demo 1 完全相同的调用路径（libloading + dlsym/dllexport）。
 // Rust 侧同样使用 extern "C" 直接消费 aura_c_* 导出，无需额外编译步骤。
-extern "C" {
+extern "C" "utils" {
     fun add(a: Int, b: Int): Int
     fun multiply(a: Int, b: Int): Int
     fun factorial(n: Int): Int
