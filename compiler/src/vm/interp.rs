@@ -131,13 +131,16 @@ impl Vm {
             // ── 对象 / 数组 ──
             Instr::NewObject(type_tag) => {
                 // P-K2：类对象挂虚方法表（open 方法动态分派）
+                const NO_METHOD: u16 = u16::MAX;
                 let h = match self.module.module.vtables.iter().find(|vt| vt.type_tag == type_tag) {
                     Some(vt) => {
                         let map: std::collections::HashMap<u16, usize> = vt
                             .slots
                             .iter()
                             .enumerate()
-                            .map(|(i, &f)| (i as u16, f as usize))
+                            .filter_map(|(i, &f)| {
+                                if f != NO_METHOD { Some((i as u16, f as usize)) } else { None }
+                            })
                             .collect();
                         self.heap.alloc_object_with_vtable(type_tag, map)
                     }
@@ -844,19 +847,27 @@ impl Vm {
             paths.into_iter().find(|p| std::path::Path::new(p).exists())?
         };
 
-        match self.aot_runtime.load_shared_library(&lib_path) {
-            Ok(module_id) => {
-                eprintln!(
-                    "[vm] AOT 接口库已加载: {} ({}) → module_id={}",
-                    lib_name, lib_path, module_id
-                );
-                self.aot_module_map.insert(lib_name.to_string(), module_id);
-                Some(module_id)
+        #[cfg(all(feature = "llvm", feature = "dynamic-ffi"))]
+        {
+            match self.aot_runtime.load_shared_library(&lib_path) {
+                Ok(module_id) => {
+                    eprintln!(
+                        "[vm] AOT 接口库已加载: {} ({}) → module_id={}",
+                        lib_name, lib_path, module_id
+                    );
+                    self.aot_module_map.insert(lib_name.to_string(), module_id);
+                    Some(module_id)
+                }
+                Err(e) => {
+                    eprintln!("[vm] AOT 接口库加载失败: {} ({})", lib_path, e);
+                    None
+                }
             }
-            Err(e) => {
-                eprintln!("[vm] AOT 接口库加载失败: {} ({})", lib_path, e);
-                None
-            }
+        }
+        #[cfg(not(all(feature = "llvm", feature = "dynamic-ffi")))]
+        {
+            eprintln!("[vm] AOT 接口库加载需要 llvm+dynamic-ffi 特性");
+            None
         }
     }
 

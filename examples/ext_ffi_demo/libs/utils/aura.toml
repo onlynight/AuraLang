@@ -7,6 +7,7 @@ license = "MIT"
 entry = "src/lib.aura"
 exports = ["add", "multiply", "factorial", "power"]
 library = true
+mode = "aot"  # AOT 编译为动态库
 
 dependencies = []
 compile-dependencies = []
@@ -21,6 +22,7 @@ debug = true
 out-dir = "target/build"
 cache-dir = "target/cache"
 parallel = true
+ffi-mode = "aot"  # 默认：AOT Aura 直连（JitValue ABI）
 
 [build.source-sets.main]
 source-dirs = ["src"]

@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::LoomError;
-use crate::manifest::{CompileMode, priority::ResolvedBuildConfig};
+use crate::manifest::{CompileMode, FfiMode, priority::ResolvedBuildConfig};
 use crate::task::TaskDefinition;
 
 /// 获取项目目录（从任务定义或配置推断）
@@ -127,12 +127,15 @@ pub fn execute_compile(
     }
 }
 
-/// AOT 模式：编译为原生可执行文件
+/// AOT 模式：编译为原生可执行文件或动态库
+#[cfg(feature = "llvm")]
 fn execute_compile_aot(
     task: &TaskDefinition,
     source_set: &str,
     config: &ResolvedBuildConfig,
 ) -> Result<(String, Vec<PathBuf>), LoomError> {
+    use compiler::codegen::aot::{AotOptions, OptimizationLevel, aot_compile};
+
     let dir = project_dir(task, config);
     let out_dir = output_dir(config);
     let out = out_dir.join(format!("compile-{}", source_set));
@@ -147,17 +150,99 @@ fn execute_compile_aot(
         ));
     }
 
-    // AOT 编译：生成原生可执行文件
+    // 读取源码
+    let entry_file = files.iter().find(|f| f.is_file()).unwrap_or(&files[0]);
+    let source = std::fs::read_to_string(entry_file)
+        .map_err(|e| LoomError::Task(format!("无法读取 {}: {}", entry_file.display(), e)))?;
+
+    // 构建 AOT 选项
+    let opt_level = match config.opt_level {
+        0 => OptimizationLevel::None,
+        1 => OptimizationLevel::Balanced,
+        2 => OptimizationLevel::Aggressive,
+        3 => OptimizationLevel::Extreme,
+        _ => OptimizationLevel::Aggressive,
+    };
+
+    let options = AotOptions {
+        opt_level,
+        debug_info: config.debug,
+        c_abi: config.ffi_mode == FfiMode::Cabi,
+        ..Default::default()
+    };
+
+    // 确定输出路径
+    let (output_path, is_library) = if config.library {
+        // 库：生成动态库，输出到 libs/ 目录
+        let libs_dir = dir.join("libs");
+        std::fs::create_dir_all(&libs_dir)?;
+        let lib_name = if cfg!(windows) {
+            format!("{}.dll", config.name)
+        } else if cfg!(target_os = "macos") {
+            format!("lib{}.dylib", config.name)
+        } else {
+            format!("lib{}.so", config.name)
+        };
+        (libs_dir.join(&lib_name), true)
+    } else {
+        // 应用：生成可执行文件
+        let exe_name =
+            if cfg!(windows) { format!("{}.exe", config.name) } else { config.name.clone() };
+        (out.join(&exe_name), false)
+    };
+
+    // 执行 AOT 编译
+    let _output = aot_compile(&source, &output_path, options)
+        .map_err(|e| LoomError::Task(format!("AOT 编译失败: {}", e)))?;
+
+    let ffi_info = match config.ffi_mode {
+        FfiMode::Aot => "JitValue ABI (aura_aot_*)",
+        FfiMode::Cabi => "C ABI (aura_c_*)",
+    };
+
+    let product_type = if is_library { "动态库" } else { "可执行文件" };
+
+    Ok((
+        format!(
+            "✓ AOT 编译 {} 源码集: {} → {} ({}: {})",
+            source_set,
+            entry_file.display(),
+            output_path.display(),
+            product_type,
+            ffi_info
+        ),
+        vec![output_path],
+    ))
+}
+
+/// AOT 模式（无 LLVM 支持时的降级实现）
+#[cfg(not(feature = "llvm"))]
+fn execute_compile_aot(
+    task: &TaskDefinition,
+    source_set: &str,
+    config: &ResolvedBuildConfig,
+) -> Result<(String, Vec<PathBuf>), LoomError> {
+    let out_dir = output_dir(config);
+    let out = out_dir.join(format!("compile-{}", source_set));
+    std::fs::create_dir_all(&out)?;
+
+    let files = &task.inputs.files;
+    if files.is_empty() {
+        return Ok((
+            format!("✓ AOT 编译 {} 源码集: 无源文件", source_set),
+            Vec::new(),
+        ));
+    }
+
     let entry_file = files.iter().find(|f| f.is_file()).unwrap_or(&files[0]);
     let exe_name = if cfg!(windows) { format!("{}.exe", task.name) } else { task.name.clone() };
     let exe_path = out.join(&exe_name);
 
-    // 占位符：实际编译需要调用 aura build --aot
     std::fs::write(&exe_path, b"AURA-AOT-EXE")?;
 
     Ok((
         format!(
-            "✓ AOT 编译 {} 源码集: {} → {}",
+            "✓ AOT 编译 {} 源码集: {} → {} (占位符: 需启用 llvm feature)",
             source_set,
             entry_file.display(),
             exe_path.display()

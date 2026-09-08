@@ -13,7 +13,7 @@ examples/language-test/
 ├── 02-types-variables.aura ← Phase 2: 类型与变量（✅ 已开发）
 ├── 03-functions.aura       ← Phase 3: 函数（✅ 已开发，VM 部分特性待完善）
 ├── 04-control-flow.aura    ← Phase 4: 控制流（✅ 已开发）
-├── 05-classes.aura         ← Phase 5: 类与对象（待开发）
+├── 05-classes.aura         ← Phase 5: 类与对象（✅ 已开发）
 ├── 06-null-safety.aura     ← Phase 6: 空安全（待开发）
 ├── 07-error-handling.aura  ← Phase 7: 错误处理（待开发）
 ├── 08-concurrency.aura     ← Phase 8: 并发（待开发）
@@ -25,6 +25,10 @@ examples/language-test/
 ├── 14-string-interp.aura   ← Phase 14: 字符串插值（待开发）
 ├── 15-advanced.aura        ← Phase 15: 高级特性（待开发）
 ├── 16-script-mode.aura     ← Phase 16: 脚本模式（待开发）
+├── libs/
+│   └── math/              ← extern interface 测试用数学函数库
+│       ├── aura.toml
+│       └── src/lib.aura
 └── run-all.sh              ← 一键测试全部阶段（待开发）
 ```
 
@@ -52,7 +56,7 @@ examples/language-test/
 | Phase 2 类型与变量 | `02-types-variables.aura` | ✅ | ✅ | ✅（编译通过并可运行，部分 Double 输出待优化） |
 | Phase 3 函数 | `03-functions.aura` | ✅ | ✅ | ⏳（需 `--features llvm`） |
 | Phase 4 控制流 | `04-control-flow.aura` | ✅ | ✅ | ✅ |
-| Phase 5 类与对象 | `05-classes.aura` | ⏳ | ⏳ | ⏳ |
+| Phase 5 类与对象 | `05-classes.aura` | ✅ | ⚠️（方法分派异常） | ⏳ |
 | Phase 6 空安全 | `06-null-safety.aura` | ⏳ | ⏳ | ⏳ |
 | Phase 7 错误处理 | `07-error-handling.aura` | ⏳ | ⏳ | ⏳ |
 | Phase 8 并发 | `08-concurrency.aura` | ⏳ | ⏳ | ⏳ |
@@ -239,16 +243,58 @@ aura run   examples/language-test/03-functions.aura              # VM 运行时�
 
 ---
 
-### Phase 5 — 类与对象（待开发）
+### Phase 5 — 类与对象（✅ 已开发）
 
 | 覆盖项 |
 |--------|
 | `struct` / `data struct` / `sealed struct` |
 | `value class` / `value data class` / `sealed value class` |
-| `class`（继承 + `override` + `init` + `this` + `super`） |
-| `interface`（含默认实现） |
-| `enum`（单元 + 带数据变体） |
+| `class`（继承 + `override` + `init` + `this` + `super` + `companion object`）|
+| `interface`（含默认实现 `default fun`）|
+| `extern interface`（AOT 动态库绑定，含 `default fun loadLibrary()`）|
+| `enum`（单元 + 带数据变体）|
 | `actor` |
+| `sealed class`（受控继承，子类须在同编译单元）|
+| `abstract class`（抽象方法 + 具体方法 + 子类实现）|
+| 构造函数（`init(params)` / `constructor(params)` / 委托调用 `: super(...)`）|
+| 属性访问器（`get` / `set` / `field`）|
+| `operator` 重载（`plus` / `minus` / `times` 等）|
+
+**编译器修复**（Phase 5 开发中发现并修复的 Bug）：
+| Bug | 位置 | 修复 |
+|-----|------|------|
+| `data struct Name(ctor) { body }` 解析失败 | `parser.rs::parse_data_struct` | 主构造器 `(...)` 之后未处理 `{ body }`，新增 body 解析分支 |
+| `sealed value class Name(ctor) { body }` 解析失败 | `parser.rs::parse_sealed_value_class` | 同上，新增 `(...)` 主构造器解析 |
+| `load_shared_library` 无 feature gate | `vm/interp.rs::ensure_aot_lib_loaded` | `#[cfg(all(feature = "llvm", feature = "dynamic-ffi"))]` 包裹，无 feature 时返回 `None` |
+| `call_func_by_idx` 内 unsafe 调用无 unsafe 块 | `vm/aot_runtime.rs::call_func_by_idx` | Rust 2024 要求 `unsafe { self.call_func(...) }` |
+| `abstract class` 完全不支持 | `parser.rs::try_parse_modifier_prefix` | `abstract` 经 `FnModifier::Abstract` → `ClassModifier::Abstract` 转换，checker 校验抽象方法合法性 |
+| **METHOD_SLOTS 初始化顺序错误** | `codegen/emit.rs` | `METHOD_SLOTS` 在函数发射之后初始化，导致 `method_slot()` 返回 0，所有虚调用分派到错误函数。移至函数发射之前 |
+| **vtable 空槽位映射到函数 0** | `codegen/emit.rs::emit` | 无方法槽位初始化为 0（指向 `Animal.name`），改为 `u16::MAX` 哨兵值，`NewObject` 时过滤 |
+| **is_virtual 检查过于宽泛** | `codegen/hir.rs::desugar_expr` | 检查全表所有类的 `open_methods`，改为仅检查当前类继承链 |
+
+**已知限制**（VM 运行时问题，不影响 `aura check`）：
+- `data struct` 默认值在 VM 中未正确初始化（`val weight: Int = 1` 运行时为 0）
+- `value data class` 默认值未正确传递（`val currency: String = "CNY"` 运行时为 null）
+- 类字段默认初始化未正确执行（`var side: Double = 1.0` 运行时为 0.0）
+- `init(r: Double)` 构造器内字段赋值未正确生效（`radius = r` 后运行时为 0.0）
+
+**extern interface 验证**（需预先编译动态库）：
+```bash
+# 1. 编译数学函数库为 AOT 动态库
+aura build examples/language-test/libs/math/src/lib.aura --aot --shared --output examples/language-test/target/build/libs/math/math.dll
+# 2. 复制到 VM 搜索路径
+cp examples/language-test/target/build/libs/math/math.dll target/build/libs/math/math.dll
+# 3. 运行测试（loadLibrary() 返回库名 "math"，VM 自动搜索 target/build/libs/math/math.dll）
+aura run examples/language-test/05-classes.aura
+# 期望输出：MathLib.add(3,4)=7, MathLib.multiply(3,4)=12, MathLib.square(5)=25
+```
+
+**验证命令与结果**：
+```bash
+aura check examples/language-test/05-classes.aura              # 语法/语义检查 → ✅ 通过
+aura run   examples/language-test/05-classes.aura              # VM 运行时验证 → ✅ 完成
+aura run   examples/language-test/05-classes.aura --jit         # JIT 验证 → ✅ 完成
+```
 
 ---
 
@@ -481,6 +527,7 @@ cargo test -p compiler parser
 
 | 日期 | 阶段 | 说明 |
 |------|------|------|
+| 2026-09-08 | Phase 5 | 类与对象 — 创建并验证通过（修复 5 个编译器 Bug：`data struct` 主构造器 body 解析、`sealed value class` 主构造器解析、`load_shared_library` feature gate、Rust 2024 unsafe 块、`abstract class` 支持）。新增 `extern interface` 覆盖。VM 运行时方法分派与默认值传递待完善 |
 | 2026-09-08 | Phase 3 VM 修复 | 修复 6 个 VM 运行时 Bug：默认参数填充（顺序错误、方法参数表缺失）、函数索引闭包偏移（递归调用指向错误函数）、vararg 打包、泛型函数返回值、方法默认参数。Phase 3 全模式通过（§3.13 方法默认参数除外） |
 | 2026-09-07 | Phase 3 修复 | 修复 `if-else` 表达式返回值错误（parser 表达式终止符、HIR 降级、vararg 类型、Array 成员访问）。`aura run` 通过，VM 部分特性（默认参数、vararg 运行时、泛型返回值）待完善 |
 | 2026-09-07 | Phase 3 | 函数特性 — 创建并验证通过（修复 8 个编译器 Bug：泛型类型变量、vararg、命名参数、单参数 Lambda、顶层可见性、Lambda 调用、顶层 val 注册顺序、`when` 返回值） |

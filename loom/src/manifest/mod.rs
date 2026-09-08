@@ -340,6 +340,9 @@ pub struct BuildConfig {
     /// 并行任务数（0 = 自动，CPU 核心数）
     #[serde(default)]
     pub parallel_jobs: u32,
+    /// FFI 模式（库导出方式）：cabi（C ABI）或 aot（AOT Aura 直连）
+    #[serde(default)]
+    pub ffi_mode: FfiMode,
 }
 
 impl Default for BuildConfig {
@@ -359,6 +362,7 @@ impl Default for BuildConfig {
             alias: HashMap::new(),
             parallel: default_parallel(),
             parallel_jobs: 0,
+            ffi_mode: FfiMode::default(),
         }
     }
 }
@@ -401,6 +405,27 @@ impl std::fmt::Display for CompileMode {
             CompileMode::Vm => write!(f, "vm"),
             CompileMode::Jit => write!(f, "jit"),
             CompileMode::Aot => write!(f, "aot"),
+        }
+    }
+}
+
+/// FFI 模式（库导出方式）
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum FfiMode {
+    /// C ABI 导出（供外部 C/Rust 调用）
+    #[serde(rename = "cabi")]
+    Cabi,
+    /// AOT Aura 直连（JitValue ABI，供 extern interface 调用）
+    #[default]
+    #[serde(rename = "aot")]
+    Aot,
+}
+
+impl std::fmt::Display for FfiMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FfiMode::Cabi => write!(f, "cabi"),
+            FfiMode::Aot => write!(f, "aot"),
         }
     }
 }

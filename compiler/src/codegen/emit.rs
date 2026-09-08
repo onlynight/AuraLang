@@ -64,6 +64,46 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
         native_index.insert(n.name.as_str(), i as u16);
     }
 
+    // P-K2：虚方法表 —— 全局 open 方法槽位 + 每个类的分派表
+    // 必须在函数发射之前构建，因为 emit_function 中 method_slot() 依赖 METHOD_SLOTS
+    let mut slot_names: Vec<String> = Vec::new();
+    for s in &hir.structs {
+        for vm in &s.virtual_methods {
+            if !slot_names.contains(vm) {
+                slot_names.push(vm.clone());
+            }
+        }
+    }
+    let mut vtables: Vec<VirtualTable> = Vec::new();
+    const NO_METHOD: u16 = u16::MAX;
+    for s in hir.structs.iter().filter(|st| st.is_class) {
+        let tag = type_index(&s.name);
+        let mut slots = vec![NO_METHOD; slot_names.len()];
+        for (i, mname) in slot_names.iter().enumerate() {
+            // 沿继承链从本类向上查找实现 `Class.method`
+            let mut cur = Some(s.name.clone());
+            while let Some(cn) = cur {
+                if let Some(&fidx) = fn_index.get(format!("{}.{}", cn, mname).as_str()) {
+                    slots[i] = fidx;
+                    break;
+                }
+                cur = hir
+                    .structs
+                    .iter()
+                    .find(|st| st.name == cn)
+                    .and_then(|st| st.superclass.clone());
+            }
+        }
+        vtables.push(VirtualTable {
+            type_tag: tag,
+            slots,
+        });
+    }
+    METHOD_SLOTS.with(|m| {
+        *m.borrow_mut() =
+            slot_names.iter().enumerate().map(|(i, n)| (n.clone(), i as u16)).collect()
+    });
+
     let mut functions = Vec::new();
     let mut closures: Vec<BytecodeClosure> = Vec::new();
     // 闭包名 -> 函数表索引（用于 MakeClosure 查找）
@@ -127,44 +167,6 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
         // 无任何函数（无 main 且无顶层语句），由 VM 报错
         0
     };
-
-    // P-K2：虚方法表 —— 全局 open 方法槽位 + 每个类的分派表
-    let mut slot_names: Vec<String> = Vec::new();
-    for s in &hir.structs {
-        for vm in &s.virtual_methods {
-            if !slot_names.contains(vm) {
-                slot_names.push(vm.clone());
-            }
-        }
-    }
-    let mut vtables: Vec<VirtualTable> = Vec::new();
-    for s in hir.structs.iter().filter(|st| st.is_class) {
-        let tag = type_index(&s.name);
-        let mut slots = vec![0u16; slot_names.len()];
-        for (i, mname) in slot_names.iter().enumerate() {
-            // 沿继承链从本类向上查找实现 `Class.method`
-            let mut cur = Some(s.name.clone());
-            while let Some(cn) = cur {
-                if let Some(&fidx) = fn_index.get(format!("{}.{}", cn, mname).as_str()) {
-                    slots[i] = fidx;
-                    break;
-                }
-                cur = hir
-                    .structs
-                    .iter()
-                    .find(|st| st.name == cn)
-                    .and_then(|st| st.superclass.clone());
-            }
-        }
-        vtables.push(VirtualTable {
-            type_tag: tag,
-            slots,
-        });
-    }
-    METHOD_SLOTS.with(|m| {
-        *m.borrow_mut() =
-            slot_names.iter().enumerate().map(|(i, n)| (n.clone(), i as u16)).collect()
-    });
 
     // P8.1: 合并 FFI 常量到常量池
     let mut consts = ctx.consts.clone();

@@ -2821,8 +2821,21 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                                 all_args.extend(defaults);
                             }
                         }
-                        let is_virtual = CLASS_TABLE
-                            .with(|t| t.borrow().values().any(|e| e.open_methods.contains(name)));
+                        let is_virtual = CLASS_TABLE.with(|t| {
+                            let table = t.borrow();
+                            let mut cur = Some(class.clone());
+                            while let Some(cn) = cur {
+                                if let Some(e) = table.get(&cn) {
+                                    if e.open_methods.contains(name) {
+                                        return true;
+                                    }
+                                    cur = e.superclass.clone();
+                                } else {
+                                    break;
+                                }
+                            }
+                            false
+                        });
                         if is_virtual {
                             return HirExpr::CallVirtual {
                                 recv: Box::new(desugar_expr(object)),

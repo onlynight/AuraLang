@@ -131,7 +131,7 @@ val fn = obj::method
 
 | 类别 | 关键字 |
 |------|--------|
-| **前缀修饰符** | `abstract` `final` `enum` `open` `annotation` `sealed` `data` `override` `lateinit` `private` `protected` `public` `internal` `inner` `noinline` `crossinline` `vararg` `reified` `tailrec` `operator` `infix` `inline` `external` `const` `suspend` `comptime` `value` `defer` `extern` `lazy` `box` `weak` `async` |
+| **前缀修饰符** | `abstract` `final` `enum` `open` `annotation` `sealed` `data` `override` `lateinit` `private` `protected` `public` `internal` `inner` `noinline` `crossinline` `vararg` `reified` `tailrec` `operator` `infix` `inline` `external` `const` `suspend` `comptime` `value` `defer` `extern` `lazy` `box` `weak` `async` `default` |
 | **后置修饰符** | `where` `by` `get` `set` |
 | **软关键字** | `catch` `finally` `field` `else` `then` `unit` |
 | **硬关键字** | `as` `is` `in` `to` `it` |
@@ -323,7 +323,9 @@ select {
 
 ---
 
-## 6. FFI (C 互操作)
+## 6. FFI (C 互操作 + AOT 直调)
+
+### 6.1 C FFI（C ABI 调用）
 
 ```aura
 // 形式 1：行内声明
@@ -344,6 +346,52 @@ extern "c" "libc" {
     fun clock(): Long
 }
 ```
+
+### 6.2 AOT 直调（JitValue ABI）
+
+```aura
+// 声明外部 AOT 接口（库名通过 loadLibrary() 声明）
+extern interface Utils {
+    default fun loadLibrary(): String = "utils"
+    fun add(a: Int, b: Int): Int
+    fun multiply(a: Int, b: Int): Int
+    fun factorial(n: Int): Int
+    fun power(base: Int, exp: Int): Int
+}
+
+// 调用方式：接口名.函数名
+fun main() = {
+    val sum = Utils.add(3, 4)
+    println("sum = " + toString(sum))
+}
+```
+
+### 6.3 独立接口文件 + import 引入
+
+```aura
+// utils_interface.aura（独立文件）
+extern interface Utils {
+    default fun loadLibrary(): String = "utils"
+    fun add(a: Int, b: Int): Int
+}
+
+// main.aura（导入使用）
+import "utils_interface.aura"
+
+fun main() = {
+    val sum = Utils.add(3, 4)
+}
+```
+
+### 6.4 FFI 对比
+
+| | `extern "c"` | `extern interface` |
+|---|---|---|
+| 调用约定 | C ABI | JitValue ABI |
+| 库名声明 | `extern "c" "lib"` | `default fun loadLibrary(): String = "lib"` |
+| 调用方式 | `func(args)` | `Interface.func(args)` |
+| 导出符号 | `aura_c_func` | `aura_aot_func!2!0!0!0` |
+| 编译参数 | `--aot --shared --cabi` | `--aot --shared` |
 
 ---
 

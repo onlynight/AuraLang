@@ -1,0 +1,14 @@
+// libs/math/src/lib.aura — Phase 5 extern interface 测试用的数学函数库
+//
+// 构建命令：
+//   aura build libs/math/src/lib.aura --aot --shared --output target/build/libs/math/math.dll
+//
+
+/// 两数相加
+fun add(a: Int, b: Int): Int = a + b
+
+/// 两数相乘
+fun multiply(a: Int, b: Int): Int = a * b
+
+/// 平方
+fun square(x: Int): Int = x * x

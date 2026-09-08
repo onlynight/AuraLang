@@ -1402,6 +1402,14 @@ impl Parser {
                 self.advance();
             }
             self.expect(TokenKind::RParen);
+            // 主构造器后再跟 body：data struct Foo(val x: Int) { fun bar(): Int = x }
+            if self.check(TokenKind::LBrace) {
+                self.advance();
+                while !self.check(TokenKind::RBrace) && !self.is_at_end() {
+                    self.parse_class_member(&mut members);
+                }
+                self.expect(TokenKind::RBrace);
+            }
         }
 
         let _ = std::mem::take(&mut self.pending_class_mods);
@@ -1733,7 +1741,7 @@ impl Parser {
         }
     }
 
-    /// 解析 `sealed value class Name { ... }`
+    /// 解析 `sealed value class Name { ... }` 或 `sealed value class Name(ctor) { ... }`
     #[allow(dead_code)]
     pub fn parse_sealed_value_class(&mut self) -> ClassDecl {
         let start = self.current().span;
@@ -1747,6 +1755,20 @@ impl Parser {
 
         let mut members = ClassMembers::default();
         let mut implementations = Vec::new();
+
+        // 主构造器：sealed value class Foo(val x: Int) { ... }
+        if self.check(TokenKind::LParen) {
+            self.advance();
+            while !self.check(TokenKind::RParen) && !self.is_at_end() {
+                let f = self.parse_struct_field();
+                members.fields.push(f);
+                if !self.check(TokenKind::Comma) {
+                    break;
+                }
+                self.advance();
+            }
+            self.expect(TokenKind::RParen);
+        }
 
         if superclass.is_some() {
             while self.check(TokenKind::Comma) {

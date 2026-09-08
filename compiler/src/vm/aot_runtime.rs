@@ -521,7 +521,7 @@ impl AotRuntime {
                 None => false,
             };
             if has {
-                return self.call_func(id, func_idx, args).ok();
+                return unsafe { self.call_func(id, func_idx, args) }.ok();
             }
         }
         None

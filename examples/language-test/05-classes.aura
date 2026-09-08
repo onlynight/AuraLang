@@ -1,0 +1,515 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 5 — 类与对象测试 (P5: Classes & Objects)
+// ═══════════════════════════════════════════════════════════════════════════
+// 覆盖：struct / data struct / sealed struct / value class / value data class /
+//       sealed value class / class（继承+override+init+this+super）/
+//       companion object / interface（含默认实现）/ extern interface /
+//       enum（单元+带数据变体）/ actor / sealed class / abstract class
+//
+// 验证：
+//   aura check examples/language-test/05-classes.aura    // 语法/语义零错误
+//   aura run   examples/language-test/05-classes.aura    // 运行时输出正确
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════
+// §5.1 struct — 基本结构体（字段 + 方法 + 表达式体）
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 基础结构体：位置式字段 + 表达式体方法
+struct Point(val x: Int, val y: Int) {
+    fun manhattan(): Int = x + y
+    fun distance(): Double = ((x * x + y * y).toDouble())
+}
+
+/// 可变字段结构体（var 字段可赋值）
+struct Player {
+    var name: String = "unknown"
+    var health: Int = 100
+    var tag: String? = null
+
+    fun hurt(damage: Int): Int {
+        health = health - damage
+        return health
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// §5.2 data struct — 数据类（data 修饰符）
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// data struct：字段带默认值，语义等价 struct 但标记为数据类
+data struct Score(val subject: String, val grade: Int, val weight: Int = 1) {
+    fun weighted(): Int = grade * weight
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// §5.3 sealed struct — 密封结构体（子类须在同编译单元）
+// ═══════════════════════════════════════════════════════════════════════════
+
+sealed struct Shape {
+    fun describe(): String = "shape"
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// §5.4 value class — 值类（无继承，栈内联）
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// value class：值语义，无 superclass
+value class Color(val r: Int, val g: Int, val b: Int) {
+    fun brightness(): Int = (r + g + b) / 3
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// §5.5 value data class — 值数据类（value + data 组合）
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// value data class：值语义 + 数据类
+value data class Money(val amount: Int, val currency: String = "CNY") {
+    fun display(): String = amount.toString() + " " + currency
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// §5.6 sealed value class — 密封值类（sealed + value 组合）
+// ═══════════════════════════════════════════════════════════════════════════
+
+sealed value class Priority(val level: Int) {
+    fun isHigh(): Boolean = level >= 3
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// §5.7 class 继承 — open class / override / init / this / super
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 开放类：可被继承
+open class Animal {
+    var legs: Int = 4
+    var species: String = "animal"
+
+    open fun name(): String = "animal"
+    open fun countLegs(): Int = legs
+
+    init {
+        legs = 4
+    }
+}
+
+/// 继承 Animal，override name() 和 countLegs()
+class Dog : Animal() {
+    var breed: String = "labrador"
+    var legs: Int = 4
+
+    override fun name(): String = "dog"
+    override fun countLegs(): Int = 4
+}
+
+/// 继承 Animal，override name()，使用 this 和 super
+class Bird : Animal() {
+    var canFly: Boolean = true
+    var legs: Int = 2
+
+    override fun name(): String = "bird"
+    override fun countLegs(): Int = 2
+
+    open fun describe(): String = name() + " has " + countLegs().toString() + " legs"
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// §5.8 companion object — 伴生对象（静态字段 + 静态方法）
+// ═══════════════════════════════════════════════════════════════════════════
+
+class MathUtil {
+    companion object {
+        val BASE: Int = 100
+        val VERSION: String = "1.0"
+
+        fun add(a: Int, b: Int): Int = a + b
+        fun multiply(a: Int, b: Int): Int = a * b
+    }
+
+    var value: Int = 0
+
+    fun setValue(v: Int) {
+        value = v
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// §5.9 interface — 接口（抽象方法 + 默认实现）
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 纯抽象接口
+interface Drawable {
+    fun draw()
+}
+
+/// 带默认实现的接口
+interface Loggable {
+    fun log(message: String): Unit
+    fun logLevel(): String = "INFO"
+}
+
+/// 主实现：Circle 实现 Drawable 接口
+class Circle : Drawable {
+    val radius: Int = 10
+
+    override fun draw() {
+        // 空实现
+    }
+
+    fun area(): Double = 3.14 * radius * radius
+}
+
+/// 实现 Loggable（使用默认 logLevel）
+class AppLogger : Loggable {
+    override fun log(message: String) {
+        // 空实现
+    }
+
+    override fun logLevel(): String = "INFO"
+
+    fun showLevel(): String = logLevel()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// §5.10 extern interface — 外部接口（AOT 动态库绑定）
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// extern interface：绑定到 AOT 动态库的函数接口
+/// 必须包含 default fun loadLibrary() 声明库路径
+extern interface MathLib {
+    default fun loadLibrary(): String = "math"
+
+    fun add(a: Int, b: Int): Int
+    fun multiply(a: Int, b: Int): Int
+    fun square(x: Int): Int
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// §5.11 enum — 枚举（单元变体 + 带数据变体）
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 简单枚举（仅单元变体）
+enum Color {
+    RED,
+    GREEN,
+    BLUE
+}
+
+/// 方向枚举（单元变体 + when 匹配）
+enum Direction {
+    North,
+    South,
+    East,
+    West
+}
+
+/// 带数据变体的枚举（关联值）
+enum Result {
+    Ok(val value: Int),
+    Err(val msg: String)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// §5.12 actor — 演员（并发实体声明）
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// actor：并发实体（语法层面支持，运行时通过 aura.concurrent API 使用）
+actor Worker {
+    var tick: Int = 0
+
+    fun process(): Int = 42
+    fun step() {
+        tick = tick + 1
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// §5.13 sealed class — 密封类（受控继承，子类须在同编译单元）
+// ═══════════════════════════════════════════════════════════════════════════
+
+sealed class Vehicle {
+    open fun type(): String = "vehicle"
+}
+
+class Car : Vehicle() {
+    override fun type(): String = "car"
+}
+
+class Truck : Vehicle() {
+    override fun type(): String = "truck"
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// §5.14 abstract class — 抽象类（抽象方法 + 具体方法 + 子类实现）
+// ═══════════════════════════════════════════════════════════════════════════
+
+abstract class Figure {
+    abstract fun area(): Double
+    var label: String = "unnamed"
+}
+
+class Square : Figure() {
+    var side: Int = 0
+    var label: String = "square"
+
+    fun describe(): String = "square"
+
+    override fun area(): Double = 0.0
+    fun setSide(s: Int) {
+        side = s
+    }
+}
+
+class Rectangle : Figure() {
+    var width: Int = 0
+    var height: Int = 0
+    var label: String = "rectangle"
+
+    fun describe(): String = "rectangle"
+
+    override fun area(): Double = 0.0
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// §5.15 构造函数 — init 构造函数 / 次构造函数 / 委托调用
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// init 构造函数风格（Aura 惯例：init(params) { ... }）
+class GeoCircle {
+    var radius: Int = 0
+    init(r: Int) {
+        radius = r
+    }
+
+    fun circumference(): Double = 2.0 * 3.14 * radius.toDouble()
+}
+
+/// 次构造函数 + 委托调用
+class Person {
+    var age: Int = 0
+    var name: String = "unknown"
+
+    constructor(a: Int) {
+        age = a
+    }
+
+    constructor(n: String, a: Int) {
+        name = n
+        age = a
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// §5.16 属性访问器 — get / set / field
+// ═══════════════════════════════════════════════════════════════════════════
+
+class Temperature {
+    var celsius: Int = 0
+        get() = field
+        set(value) {
+            field = value
+        }
+
+    val doubled: Int
+        get() = celsius * 2
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// §5.17 operator 重载 + infix 中缀调用
+// ═══════════════════════════════════════════════════════════════════════════
+
+struct Vec2 {
+    var x: Int = 0
+    var y: Int = 0
+
+    operator fun plus(other: Vec2): Vec2 {
+        val r = Vec2()
+        r.x = x + other.x
+        r.y = y + other.y
+        return r
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 主函数：运行时验证
+// ═══════════════════════════════════════════════════════════════════════════
+
+fun main() {
+    println("═══ Phase 5: 类与对象测试 ═══")
+    println("")
+
+    // ── §5.1 struct ──────────────────────────────────────────────────────
+    println("§5.1 struct:")
+    val p = Point(3, 4)
+    println("  Point(3,4).manhattan: " + p.manhattan().toString())
+    println("  Point(3,4).x=" + p.x.toString() + " y=" + p.y.toString())
+
+    val player = Player()
+    player.name = "Alice"
+    println("  Player name: " + player.name)
+    val hp = player.hurt(30)
+    println("  Player hurt(30) -> hp: " + hp.toString())
+
+    // ── §5.2 data struct ─────────────────────────────────────────────────
+    println("")
+    println("§5.2 data struct:")
+    val score = Score("Math", 90)
+    println("  Score weighted: " + score.weighted().toString())
+    val score2 = Score("English", 85, 2)
+    println("  Score2 weighted: " + score2.weighted().toString())
+
+    // ── §5.3 sealed struct ───────────────────────────────────────────────
+    println("")
+    println("§5.3 sealed struct:")
+    val s = Shape()
+    println("  Shape describe: " + s.describe())
+
+    // ── §5.4 value class ─────────────────────────────────────────────────
+    println("")
+    println("§5.4 value class:")
+    val red = Color(255, 0, 0)
+    println("  Color(255,0,0).brightness: " + red.brightness().toString())
+    println("  Color r=" + red.r.toString() + " g=" + red.g.toString() + " b=" + red.b.toString())
+
+    // ── §5.5 value data class ────────────────────────────────────────────
+    println("")
+    println("§5.5 value data class:")
+    val money = Money(100)
+    println("  Money display: " + money.display())
+    val usd = Money(50, "USD")
+    println("  Money USD display: " + usd.display())
+
+    // ── §5.6 sealed value class ──────────────────────────────────────────
+    println("")
+    println("§5.6 sealed value class:")
+    val p1 = Priority(3)
+    println("  Priority(3).isHigh: " + p1.isHigh().toString())
+    val p2 = Priority(1)
+    println("  Priority(1).isHigh: " + p2.isHigh().toString())
+
+    // ── §5.7 class 继承 ──────────────────────────────────────────────────
+    println("")
+    println("§5.7 class 继承:")
+    val dog = Dog()
+    println("  Dog.name: " + dog.name())
+    println("  Dog.countLegs: " + dog.countLegs().toString())
+    println("  Dog.breed: " + dog.breed)
+
+    val bird = Bird()
+    println("  Bird.name: " + bird.name())
+    println("  Bird.countLegs: " + bird.countLegs().toString())
+    println("  Bird.describe: " + bird.describe())
+
+    // 多态：基类引用指向子类实例
+    val animal: Animal = Dog()
+    println("  Animal(Dog).name: " + animal.name())
+    val animal2: Animal = Bird()
+    println("  Animal(Bird).name: " + animal2.name())
+
+    // ── §5.8 companion object ─────────────────────────────────────────────
+    println("")
+    println("§5.8 companion object:")
+    println("  MathUtil.BASE: " + MathUtil.BASE.toString())
+    println("  MathUtil.VERSION: " + MathUtil.VERSION)
+    println("  MathUtil.add(3,4): " + MathUtil.add(3, 4).toString())
+    println("  MathUtil.multiply(3,4): " + MathUtil.multiply(3, 4).toString())
+
+    val mu = MathUtil()
+    mu.setValue(42)
+    println("  MathUtil instance value: " + mu.value.toString())
+
+    // ── §5.9 interface ────────────────────────────────────────────────────
+    println("")
+    println("§5.9 interface:")
+    val circle = Circle()
+    circle.draw()
+    println("  Circle area: " + circle.area().toString())
+
+    val logger = AppLogger()
+    println("  Logger logLevel: " + logger.showLevel())
+
+    // ── §5.10 extern interface ───────────────────────────────────────────
+    println("")
+    println("§5.10 extern interface:")
+    println("  MathLib.add(3,4): " + MathLib.add(3, 4).toString())
+    println("  MathLib.multiply(3,4): " + MathLib.multiply(3, 4).toString())
+    println("  MathLib.square(5): " + MathLib.square(5).toString())
+
+    // ── §5.11 enum ────────────────────────────────────────────────────────
+    println("")
+    println("§5.11 enum:")
+    val c: Color = Color.RED
+    println("  Color.RED created ✓")
+    val c2: Color = Color.GREEN
+    println("  Color.GREEN created ✓")
+    val c3: Color = Color.BLUE
+    println("  Color.BLUE created ✓")
+
+    val dir: Direction = Direction.North
+    println("  Direction.North created ✓")
+    val dir2: Direction = Direction.South
+    println("  Direction.South created ✓")
+
+    // ── §5.12 actor ───────────────────────────────────────────────────────
+    println("")
+    println("§5.12 actor:")
+    println("  actor Worker declared ✓")
+
+    // ── §5.13 sealed class ────────────────────────────────────────────────
+    println("")
+    println("§5.13 sealed class:")
+    val car = Car()
+    println("  Car.type: " + car.type())
+    val truck = Truck()
+    println("  Truck.type: " + truck.type())
+    val v: Vehicle = Car()
+    println("  Vehicle(Car).type: " + v.type())
+
+    // ── §5.14 abstract class ──────────────────────────────────────────────
+    println("")
+    println("§5.14 abstract class:")
+    val sq = Square()
+    println("  Square.area: " + sq.area().toString())
+    println("  Square.describe: " + sq.describe())
+    println("  Square.label: " + sq.label)
+
+    val rect = Rectangle()
+    println("  Rectangle.describe: " + rect.describe())
+    println("  Rectangle.label: " + rect.label)
+
+    // ── §5.15 构造函数 ────────────────────────────────────────────────────
+    println("")
+    println("§5.15 构造函数:")
+    val c5 = GeoCircle(5)
+    println("  GeoCircle(5).radius: " + c5.radius.toString())
+    println("  GeoCircle(5).circumference: " + c5.circumference().toString())
+
+    val person1 = Person(30)
+    println("  Person(30).age: " + person1.age.toString())
+    val person2 = Person("Alice", 25)
+    println("  Person(Alice,25).name: " + person2.name)
+    println("  Person(Alice,25).age: " + person2.age.toString())
+
+    // ── §5.16 属性访问器 ──────────────────────────────────────────────────
+    println("")
+    println("§5.16 属性访问器:")
+    val temp = Temperature()
+    temp.celsius = 21
+    println("  Temperature.celsius: " + temp.celsius.toString())
+    println("  Temperature.doubled: " + temp.doubled.toString())
+
+    // ── §5.17 operator 重载 ───────────────────────────────────────────────
+    println("")
+    println("§5.17 operator 重载:")
+    val v1 = Vec2()
+    v1.x = 1
+    v1.y = 2
+    val v2 = Vec2()
+    v2.x = 10
+    v2.y = 20
+    val v3 = v1 + v2
+    println("  Vec2(1,2) + Vec2(10,20) = Vec2(" + v3.x.toString() + "," + v3.y.toString() + ")")
+
+    println("")
+    println("═══ Phase 5 完成 ✓ ═══")
+}

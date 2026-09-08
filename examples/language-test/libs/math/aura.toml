@@ -1,17 +1,15 @@
 schema-version = "2.0"
-name = "demo-aot-direct"
+name = "math"
 version = "0.1.0"
-description = "Demo 3: AOT 直调 — Aura 调用 Aura AOT 的 JitValue ABI 产物"
+description = "Phase 5 extern interface 测试用的数学函数库"
 authors = []
 license = "MIT"
-entry = "src/main.aura"
-exports = ["main"]
-library = false
+entry = "src/lib.aura"
+exports = ["add", "multiply", "square"]
+library = true
+mode = "aot"
 
-# 依赖共享库（用于 AOT 编译时被调用的函数）
-dependencies = [
-    { name = "utils", version = "0.1.0" },
-]
+dependencies = []
 compile-dependencies = []
 runtime-dependencies = []
 dev-dependencies = []
@@ -24,7 +22,7 @@ debug = true
 out-dir = "target/build"
 cache-dir = "target/cache"
 parallel = true
-ffi-mode = "aot"  # AOT Aura 直连模式
+ffi-mode = "aot"
 
 [build.source-sets.main]
 source-dirs = ["src"]

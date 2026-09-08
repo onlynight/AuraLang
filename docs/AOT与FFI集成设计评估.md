@@ -581,3 +581,101 @@ AOT 调用是**宿主调用 Aura 代码**，这是另一条方向：
 | `compiler/src/vm/interp.rs` | ⭐⭐⭐ | VM 分发器，需新增 AOT 分支 |
 | `docs/遗留问题与风险分析报告.md` | ⭐⭐ | 遗留问题 #22（i64 装箱）是本设计要规避的 |
 | `docs/jit优化指南.md` | ⭐⭐ | JIT 与 AOT 的关系说明，本设计是其自然延伸 |
+
+---
+
+## 附录 B：已实现的 `extern interface` AOT 直调方案
+
+> **状态**：✅ 已实现（2026-09-08）
+>
+> 本方案采用 **Tier 2 动态库模式**，通过 `extern interface` 关键字声明 AOT 动态库接口，VM 通过 JitValue ABI 直调。
+
+### B.1 语法
+
+```aura
+// 库名通过 default fun loadLibrary() 声明
+extern interface Utils {
+    default fun loadLibrary(): String = "utils"
+    fun add(a: Int, b: Int): Int
+    fun multiply(a: Int, b: Int): Int
+}
+
+// 调用：Utils.add(3, 4)
+```
+
+### B.2 库查找
+
+| 平台 | 查找顺序 |
+|------|---------|
+| Windows | `libs/<name>.dll` → `<name>.dll` → `target/build/libs/<name>/<name>.dll` |
+| Unix | `libs/lib<name>.so` → `lib<name>.so` → `libs/lib<name>.dylib` → `lib<name>.dylib` |
+
+### B.3 函数解析
+
+按**名称**查找（非索引），接口方法顺序可任意调整：
+
+```rust
+// aot_runtime.rs
+func_name_map: HashMap<u32, HashMap<String, usize>>
+
+// VM 调用时
+let func_name = native.name.split('.').last();  // "Utils.add" → "add"
+let func_idx = aot_runtime.lookup_func_idx(module_id, func_name);
+```
+
+### B.4 独立接口文件
+
+`extern interface` 可放在独立 `.aura` 文件中，通过 `import` 引入：
+
+```aura
+// utils_interface.aura
+extern interface Utils {
+    default fun loadLibrary(): String = "utils"
+    fun add(a: Int, b: Int): Int
+}
+
+// main.aura
+import "utils_interface.aura"
+fun main() = { Utils.add(3, 4) }
+```
+
+### B.5 与 FFI 的关系
+
+```
+                    ┌─────────────────────────────────────────┐
+                    │            Aura 源码                     │
+                    │                                         │
+                    │  extern "c" "utils" { ... }             │
+                    │  extern interface Utils { ... }         │
+                    │                                         │
+                    └────────────┬────────────────────────────┘
+                                 │
+                    ┌────────────▼────────────────────────────┐
+                    │           VM 运行时                      │
+                    │                                         │
+                    │  FfiAbi::C  → ensure_lib_loaded         │
+                    │                  → LoadLibraryW          │
+                    │                  → GetProcAddress        │
+                    │                  → C ABI 调用            │
+                    │                                         │
+                    │  FfiAbi::Aura → ensure_aot_lib_loaded   │
+                    │                  → candidate_lib_paths   │
+                    │                  → AotRuntime::load      │
+                    │                  → func_name_map 查找    │
+                    │                  → JitValue ABI 直调     │
+                    └─────────────────────────────────────────┘
+```
+
+### B.6 实现文件
+
+| 文件 | 变更 |
+|------|------|
+| `compiler/src/ast.rs` | `FnModifier::Default` + `ExternInterfaceDecl` |
+| `compiler/src/parser.rs` | `parse_extern_interface`（`loadLibrary` 提取） |
+| `compiler/src/sema/checker.rs` | 校验 `loadLibrary` 必须存在 |
+| `compiler/src/codegen/hir.rs` | 跳过 `loadLibrary`，设置 `FfiAbi::Aura` |
+| `compiler/src/codegen/opcode.rs` | `FfiAbi::Aura` 变体 |
+| `compiler/src/codegen/mod.rs` | `resolve_aura_imports` 预处理 |
+| `compiler/src/vm/aot_runtime.rs` | `func_name_map` + `lookup_func_idx` |
+| `compiler/src/vm/interp.rs` | `call_aot_ffi` + `ensure_aot_lib_loaded` |
+| `cli/src/main.rs` | `cmd_run` / `cmd_build` 集成预处理 |

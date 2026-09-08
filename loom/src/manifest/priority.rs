@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 
-use crate::manifest::{CompileMode, LoomManifest};
+use crate::manifest::{CompileMode, FfiMode, LoomManifest};
 
 /// CLI 参数覆盖（从命令行解析）
 #[derive(Debug, Clone, Default)]
@@ -66,6 +66,12 @@ pub struct ResolvedBuildConfig {
     pub active_profile: Option<String>,
     /// 编译模式（vm | jit | aot）
     pub mode: CompileMode,
+    /// FFI 模式（cabi | aot）
+    pub ffi_mode: FfiMode,
+    /// 是否为库包
+    pub library: bool,
+    /// 包名
+    pub name: String,
 }
 
 impl Default for ResolvedBuildConfig {
@@ -85,6 +91,9 @@ impl Default for ResolvedBuildConfig {
             alias: HashMap::new(),
             active_profile: None,
             mode: CompileMode::default(),
+            ffi_mode: FfiMode::default(),
+            library: false,
+            name: String::new(),
         }
     }
 }
@@ -148,6 +157,9 @@ pub fn resolve_build_config(manifest: &LoomManifest, cli: &CliOverrides) -> Reso
         alias: project_build.alias.clone(),
         active_profile: cli.profile.clone(),
         mode: manifest.mode,
+        ffi_mode: project_build.ffi_mode.clone(),
+        library: manifest.library,
+        name: manifest.name.clone(),
     }
 }
 
