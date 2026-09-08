@@ -1,0 +1,180 @@
+// aura://builtin/String.aura
+// 语言内置类型，不可修改
+
+/// 不可变字符串类型。
+///
+/// - 存储：VM 中为 `Rc<str>`（引用计数共享），AOT 中为 `{ptr, len}` 结构
+/// - 字符串字面量在编译期驻留于常量池
+/// - 支持字符串插值：`"hello ${name}"`
+/// - 字符串不可变——所有修改操作返回新字符串
+///
+/// @see Char, List
+/// @since 0.1
+internal value class String {
+
+    // ── 常量（companion object）──
+
+    companion object {
+        /// 空字符串常量
+        const EMPTY: String = ""
+    }
+
+    // ── 属性 ──
+
+    /// 字符串的字符数量
+    val length: Int
+
+    // ── 构造 ──
+
+    /// 从字符数组构造字符串
+    fun String(chars: Array<Char>): String
+
+    // ── 转换方法 ──
+
+    /// 转换为 32 位整数
+    fun toInt(): Int
+
+    /// 转换为 64 位长整数
+    fun toLong(): Long
+
+    /// 转换为 32 位浮点数
+    fun toFloat(): Float
+
+    /// 转换为 64 位双精度浮点数
+    fun toDouble(): Double
+
+    /// 转换为布尔值（"true" → true, 其他 → false）
+    fun toBoolean(): Boolean
+
+    /// 转换为字符数组
+    fun toCharArray(): Array<Char>
+
+    // ── 比较方法 ──
+
+    /// 比较两个字符串（字典序），返回 -1/0/1
+    fun compareTo(other: String): Int
+
+    /// 检查两个字符串是否相等（内容相等）
+    override fun equals(other: String): Boolean
+
+    /// 检查字符串是否为空
+    fun isEmpty(): Boolean
+
+    /// 检查字符串是否为空白（仅含空白字符或为空）
+    fun isBlank(): Boolean
+
+    // ── 查找方法 ──
+
+    /// 检查是否包含子字符串
+    fun contains(substring: String): Boolean
+
+    /// 检查是否以指定前缀开头
+    fun startsWith(prefix: String): Boolean
+
+    /// 检查是否以指定后缀结尾
+    fun endsWith(suffix: String): Boolean
+
+    /// 查找子字符串的索引（从前往后，未找到返回 -1）
+    fun indexOf(substring: String): Int
+
+    /// 查找子字符串的索引（从后往前，未找到返回 -1）
+    fun lastIndexOf(substring: String): Int
+
+    // ── 大小写转换 ──
+
+    /// 转换为小写
+    fun toLowerCase(): String
+
+    /// 转换为大写
+    fun toUpperCase(): String
+
+    // ── 去除空白 ──
+
+    /// 去除首尾空白
+    fun trim(): String
+
+    /// 去除前导空白
+    fun trimStart(): String
+
+    /// 去除尾部空白
+    fun trimEnd(): String
+
+    // ── 截取方法 ──
+
+    /// 截取子字符串 [from, to)
+    fun substring(from: Int, to: Int): String
+
+    /// 截取子字符串 [from, from+len)
+    fun substring(from: Int, len: Int): String
+
+    /// 截取分隔符之前的部分
+    fun substringBefore(delimiter: String): String
+
+    /// 截取分隔符之后的部分
+    fun substringAfter(delimiter: String): String
+
+    // ── 分割与合并 ──
+
+    /// 按分隔符分割为列表
+    fun split(separator: String): List<String>
+
+    /// 按换行符分割为列表
+    fun splitLines(): List<String>
+
+    /// 用分隔符合并列表为字符串
+    fun join(list: List<String>, separator: String): String
+
+    // ── 替换与格式化 ──
+
+    /// 替换所有匹配的子字符串
+    fun replace(target: String, replacement: String): String
+
+    /// 用正则表达式替换所有匹配
+    fun replaceAll(regex: String, replacement: String): String
+
+    /// 格式化字符串（{0} {1} 占位符）
+    fun format(template: String, vararg args: Any): String
+
+    /// 重复字符串 n 次
+    fun repeat(times: Int): String
+
+    // ── 填充 ──
+
+    /// 左填充到指定长度
+    fun padStart(length: Int, char: Char): String
+
+    /// 右填充到指定长度
+    fun padEnd(length: Int, char: Char): String
+
+    // ── 正则 ──
+
+    /// 检查是否匹配正则表达式
+    fun matches(regex: String): Boolean
+
+    // ── 字符统计 ──
+
+    /// 统计指定字符出现次数
+    fun countChar(char: Char): Int
+
+    /// 返回第一个字符
+    fun first(): Char
+
+    /// 返回最后一个字符
+    fun last(): Char
+
+    // ── 转换 ──
+
+    /// 转义特殊字符
+    fun escape(): String
+
+    /// 反转义转义字符
+    fun unescape(): String
+
+    // ── 包含检查 ──
+
+    /// 检查是否包含指定字符中的任意一个
+    fun containsAny(chars: String): Boolean
+
+    /// 检查是否包含指定字符中的所有
+    fun containsAll(chars: String): Boolean
+}

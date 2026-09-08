@@ -1,0 +1,60 @@
+// aura://stdlib/aura/path/Path.aura
+// 闁哄秴娲ら崳顖涙償閹捐尐渚€宕稿Δ瀣濞戞挸绉磋ぐ鍙夌┍椤旇姤鏆?// 閻庡湱鍋熼獮鍥晬濮濆st 闁告鍠撻弫鎾诲礄閼恒儲娈堕柨娑樻綇ompiler/src/std/std_path.rs闁?
+// (package 声明由编译器自动注入，无需显式声明)
+/// 閻犱警鍨扮欢鐐哄箼瀹ュ嫮绋婃俊顖椻偓铏仴闁?///
+/// 濞达綀娉曢弫銈夊礈瀹ュ浠?import闁?/// ```aura
+/// import aura.path.*
+/// ```
+///
+/// @since 0.1
+internal object Path {
+
+    // 闁冲厜鍋撻柍鍏夊亾 闁瑰嘲鍚嬬敮瀛樼▔鎼粹€崇€婚悷?闁冲厜鍋撻柍鍏夊亾
+
+    /// 闁瑰嘲鍚嬬敮瀵告崉椤栨氨绐為柨娑樼墛閺侇噣骞愭担绋胯闁告瑦锚瀵剟寮敮顔剧闁?
+    fun join(vararg parts: String): String
+
+    /// 闁兼儳鍢茶ぐ鍥╂崉椤栨氨绐為柣銊ュ濞叉媽銇愰弴銏犲姤闁告帒妫庨埀?
+    fun dirname(path: String): String
+
+    /// 闁兼儳鍢茶ぐ鍥╂崉椤栨氨绐為柣銊ュ閺嬪啯绂掔捄鐑樺€抽梺顔哄妼閸ㄥ酣鏁嶉崼婊呯憹闁告凹鍋呮晶璺ㄤ沪閺囩偞鍊抽柨娑橆槶閳?
+    fun basename(path: String): String
+
+    /// 闁兼儳鍢茶ぐ鍥╂崉椤栨氨绐為柣銊ュ婢ц法浠﹂弴鐐村€抽柨娑樼墕閹牓鎮欓惂鍝ョ濠?".txt"闁挎稑顦埀?
+    fun extname(path: String): String
+
+    // 闁冲厜鍋撻柍鍏夊亾 閻犱警鍨扮欢鐐存姜椤掍礁搴?闁冲厜鍋撻柍鍏夊亾
+
+    /// 闁兼儳鍢茶ぐ鍥儎缁嬫鍤犲ù婊冨鐎垫氨鈧鑹鹃悢鈧柛鎴濇濞堟垹鎹勯姘辩獮闁?
+    fun relative(path: String, from: String): String
+
+    /// 閻熸瑱绲鹃悗鑺ョ▔閾忓湱鍗滈悗鐢殿攰閻儳顕ラ崟鈹惧亾?
+    fun resolve(path: String): String
+
+    /// 閻熸瑥瀚€垫牠宕犻弽顒傜唴鐎垫澘瀚哥槐娆撳储婵犳碍鐝?`.` 闁?`..`闁挎稑顦埀?
+    fun normalize(path: String): String
+
+    // 闁冲厜鍋撻柍鍏夊亾 婵☆偀鍋撻柡?闁冲厜鍋撻柍鍏夊亾
+
+    /// 婵☆偀鍋撻柡灞诲劜濡叉悂宕ラ敂鑳缂備焦绻傞顔炬崉椤栨氨绐為柕?
+    fun isAbsolute(path: String): Boolean
+
+    /// 婵☆偀鍋撻柡灞诲劜濡叉悂宕ラ敂鑳闁烩晝顭堥顔炬崉椤栨氨绐為柕?
+    fun isRelative(path: String): Boolean
+
+    // 闁冲厜鍋撻柍鍏夊亾 闁告帒妫楁竟?闁冲厜鍋撻柍鍏夊亾
+
+    /// 闁告帒妫楁竟濠勬崉椤栨氨绐炲☉鎾虫惈閹洭鏌堥妸銉ョ€婚柛鎺擃殙閵嗗啴濡?
+    fun split(path: String): List<String>
+
+    /// 闁兼儳鍢茶ぐ鍥╂崉椤栨氨绐為柛鎺戞濞堁呯箔閿曗偓閻⊙呯箔閿旇儻顩柕?
+    val separators: String
+
+    // 闁冲厜鍋撻柍鍏夊亾 閻犳亽鍔岄柦鈺呭矗?闁冲厜鍋撻柍鍏夊亾
+
+    /// 閻?Unix 濡炲瀛╅悧鍝ユ崉椤栨氨绐為弶鐑嗗墯瀹曞弶绋?Windows 濡炲瀛╅悧鎼佸Υ?
+    fun fromUnix(path: String): String
+
+    /// 閻?Windows 濡炲瀛╅悧鍝ユ崉椤栨氨绐為弶鐑嗗墯瀹曞弶绋?Unix 濡炲瀛╅悧鎼佸Υ?
+    fun fromWindows(path: String): String
+}

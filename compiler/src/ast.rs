@@ -104,6 +104,8 @@ pub enum BinOp {
     UShr,   // >>>
     Assign, // =（赋值，右结合）
     To,     // to（map entry）
+    Is,     // is（类型检查，Phase 2）
+    As,     // as（类型转换，Phase 2）
 }
 
 impl BinOp {
@@ -265,6 +267,8 @@ pub enum Expr {
     TypeCast {
         expr: Box<Expr>,
         type_name: Box<Type>,
+        /// `as?` 安全转换：失败时返回 null 而非抛错
+        safe: bool,
         span: Span,
     },
     Range {
@@ -328,6 +332,8 @@ pub enum Decl {
     Interface(InterfaceDecl),
     Enum(EnumDecl),
     Actor(ActorDecl),
+    /// 单例对象（Kotlin `object`）：全局唯一实例，不可手动实例化
+    Object(ObjectDecl),
     TypeAlias(TypeAliasDecl),
     Extern(ExternDecl),
     ExternInterface(ExternInterfaceDecl),
@@ -434,6 +440,33 @@ pub struct CompanionDecl {
     pub fields: Vec<StructField>,
     pub methods: Vec<FnDecl>,
     pub init_blocks: Vec<Expr>,
+    pub span: Span,
+}
+
+/// 单例对象（Kotlin `object`）：全局唯一实例，不可手动实例化
+///
+/// 语法：`[可见性] object Name [: Parent() | Interface] { 成员 }`
+/// 语义：
+/// - 全局唯一实例（懒初始化，首次访问时创建）
+/// - 不可手动实例化（无 `Name()` 语法）
+/// - 支持继承：`object : Parent()` / `object : Interface`
+/// - 成员通过 `Name.member` 访问
+/// - 隐式继承 `Any` 基类
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObjectDecl {
+    pub visibility: Visibility,
+    pub name: String,
+    /// 父类名（如 `object Foo : Bar()`）
+    pub superclass: Option<String>,
+    /// 实现的接口列表
+    pub implementations: Vec<String>,
+    pub fields: Vec<StructField>,
+    pub methods: Vec<FnDecl>,
+    /// init 块（Kotlin 风格 `init { ... }`）
+    pub init_blocks: Vec<Expr>,
+    /// 类修饰符集合（open / final / sealed / expect / actual）
+    pub modifiers: Vec<ClassModifier>,
+    pub doc: Option<String>,
     pub span: Span,
 }
 

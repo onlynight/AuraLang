@@ -143,6 +143,12 @@ pub fn compile_with_info(
 
     // Phase 2: 初始化模块标识与导出表
     module.module_identity = ModuleIdentity::new("default", "0.1.0");
+
+    // Phase 2: 生成 SourceIndex（从 phantom source 提取符号）
+    if let Some(idx) = generate_source_index_from_phantom() {
+        module.source_index = Some(idx);
+    }
+
     module.header_flags = module.compute_header_flags();
     module
 }
@@ -267,4 +273,59 @@ fn extract_enabled_modules(program: &crate::ast::Program) -> Vec<String> {
     }
 
     modules.into_iter().collect()
+}
+
+/// Phase 2: 从 phantom source 目录生成 SourceIndex
+///
+/// 尝试多个路径查找 phantom-source/ 目录：
+/// 1. `AURA_PHANTOM_SOURCE` 环境变量
+/// 2. `./phantom-source`（相对当前工作目录）
+/// 3. `../phantom-source`（相对 crate 根目录）
+/// 4. `../../phantom-source`（相对 src/codegen 目录）
+///
+/// 如果找不到目录或解析失败，返回 None（SourceIndex 为可选段）。
+fn generate_source_index_from_phantom() -> Option<crate::std::source_index::SourceIndex> {
+    use std::path::PathBuf;
+
+    // 尝试多个路径
+    let candidates = [
+        std::env::var("AURA_PHANTOM_SOURCE").ok().map(PathBuf::from),
+        Some(PathBuf::from("./phantom-source")),
+        Some(PathBuf::from("../phantom-source")),
+        Some(PathBuf::from("./src/codegen/../../phantom-source")),
+        Some(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_default()
+                .join("phantom-source"),
+        ),
+    ];
+
+    for candidate in candidates.into_iter().flatten() {
+        if candidate.is_dir() {
+            match crate::docgen::generate_source_index(&candidate) {
+                Ok(idx) => {
+                    eprintln!(
+                        "[Phase 2] SourceIndex 已生成: {} 类型, {} 函数, {} 常量, {} 变量 (来源: {})",
+                        idx.type_defs.len(),
+                        idx.function_defs.len(),
+                        idx.constant_defs.len(),
+                        idx.variable_defs.len(),
+                        candidate.display()
+                    );
+                    return Some(idx);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[Phase 2] SourceIndex 生成失败 ({}): {}",
+                        candidate.display(),
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    None
 }

@@ -75,6 +75,10 @@ pub enum MirInstr {
     /// 虚方法调用（P-K2）：vtable 分派。`args[0]` 为接收者（self），
     /// 发射时按序压参后额外再压一次接收者（VM 先弹对象）。
     CallMethod { dst: Option<Reg>, method: String, args: Vec<Reg> },
+    /// 类型检查（Phase 2）：`dst = (src is instance of type_id)`
+    InstanceOf { dst: Reg, src: Reg, type_id: u16 },
+    /// 类型转换（Phase 2）：`dst = (src as type_id)`，不匹配则报错
+    CheckCast { dst: Reg, src: Reg, type_id: u16 },
 }
 
 /// 基本块终结指令（控制流）

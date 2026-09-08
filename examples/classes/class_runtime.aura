@@ -1,4 +1,4 @@
-// P-K2 综合验证：类运行时 + init/构造函数 + companion + operator + infix + tailrec + 访问器 + 继承
+// P-K2 综合验证：类运行时 + init/构造函数 + companion + operator + infix + tailrec + 访问器 + 继承 + is/as
 
 // ① init 块 + 次构造函数
 class Person {
@@ -77,6 +77,15 @@ class Dog : Animal() {
     override fun name(): String {
         return "dog"
     }
+    override fun toString(): String {
+        return "Dog(legs=" + legs + ")"
+    }
+}
+
+class Cat : Animal() {
+    override fun name(): String {
+        return "cat"
+    }
 }
 
 fun main() {
@@ -116,4 +125,41 @@ fun main() {
     val a: Animal = Dog()
     println(a.name())
     println(a.legs)
+
+    // ── Phase 4: is 类型检查 ──
+    println("── is 类型检查 ──")
+    val d: Animal = Dog()
+    println("  d is Dog:     " + (d is Dog))
+    println("  d is Animal:  " + (d is Animal))
+    println("  d is Cat:     " + (d is Cat))
+    println("  d is Any:     " + (d is Any))
+    println("  1 is Int:     " + (1 is Int))
+    println("  1 is String:  " + (1 is String))
+    println("  1 is Any:     " + (1 is Any))
+
+    // ── Phase 4: as 类型转换 ──
+    println("── as 类型转换 ──")
+    println("  Float→Int: " + ((3.14f as Int) + 100))
+    println("  Int→String: " + "val=" + (42 as String))
+    println("  Bool→Int: " + (true as Int))
+
+    // ── Phase 4: as? 安全转换（返回 Null）──
+    println("── as? 安全转换 ──")
+    val anyVal: Any = 42
+    val asStr: Any = anyVal as? String
+    println("  Int as? String is Null: " + (asStr == null))
+    val asInt: Any = anyVal as? Int
+    println("  Int as? Int is 42: " + (asInt == 42))
+
+    // ── Phase 4: toString 隐式调用 ──
+    println("── toString 虚方法 ──")
+    val d2 = Dog()
+    println("  d2.toString: " + d2.toString())
+    println("  implicit: " + d2)
+
+    // ── Phase 4: typeOf ──
+    println("── typeOf 反射 ──")
+    println("  Dog typeOf: " + typeOf(d))
+    println("  Int typeOf: " + typeOf(42))
+    println("  String typeOf: " + typeOf("hello"))
 }

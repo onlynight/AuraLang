@@ -48,7 +48,7 @@ fn main() {
     };
 
     let codegen = AotCodeGenerator::new(options);
-    let ir = codegen.generate_ir_with_mode(&hir, false, false).unwrap();
+    let ir = codegen.generate_ir_with_mode(&hir, false, false, false).unwrap();
 
     // 3. 写入 .ll 文件
     let ll_path = work_dir.join("c_abi_test.ll");

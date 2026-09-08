@@ -209,14 +209,14 @@ fn aot_if_statement_merge_block() {
 
     // if 分支不 return → 必须有 merge 标签定义（此前缺失）
     assert!(
-        ir.contains("bb.merge."),
+        ir.contains("bb_merge_"),
         "if 语句应生成 merge 块（got: {})",
         ir
     );
 
     // 有条件分支与 AND merge 引用成对
     let has_br_i1 = ir.contains("br i1");
-    let has_merge = ir.contains("bb.merge.");
+    let has_merge = ir.contains("bb_merge_");
     assert!(has_br_i1 && has_merge, "if 应含条件分支与 merge 块");
 }
 

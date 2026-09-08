@@ -144,6 +144,8 @@ fn object_field_roundtrip() {
                 param_count: 1,
                 ffi_abi: FfiAbi::None,
                 ffi_lib: None,
+                param_types: vec![],
+                ret_type: 0,
             },
         ],
         functions: vec![

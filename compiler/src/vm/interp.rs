@@ -196,6 +196,24 @@ impl Vm {
                 self.do_call(top, idx as usize, false)?;
             }
 
+            // ── 类型检查（Phase 2） ──
+            Instr::InstanceOf(target_id) => {
+                let v = self.pop(top)?;
+                let is_match = self.is_instance_of(&v, target_id);
+                self.frames[top].stack.push(Value::Bool(is_match));
+            }
+            Instr::CheckCast(target_id) => {
+                let v = self.pop(top)?;
+                if self.is_instance_of(&v, target_id) {
+                    self.frames[top].stack.push(v);
+                } else {
+                    return Err(VmError::Runtime(format!(
+                        "CheckCast failed: cannot cast value to class #{}",
+                        target_id
+                    )));
+                }
+            }
+
             // ── 集合类型（5.7） ──
             Instr::NewList => {
                 let cap = self.pop(top)?.as_int().max(0) as usize;
@@ -509,6 +527,156 @@ impl Vm {
         Ok(())
     }
 
+    /// 按类名查找类 ID（Phase 1：编译期分配的递增 ID）
+    fn class_id_by_name(&self, name: &str) -> Option<u16> {
+        self.module.module.classes.iter().position(|c| c.name == name).map(|p| p as u16)
+    }
+
+    /// 按类 ID 取类名
+    fn class_name(&self, type_tag: u16) -> String {
+        self.module
+            .module
+            .classes
+            .get(type_tag as usize)
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| "Any".to_string())
+    }
+
+    /// 运行时类型检查（Phase 4）：沿继承链判断 `value` 是否为 `target_id` 的实例
+    fn is_instance_of(&self, value: &Value, target_id: u16) -> bool {
+        // class ID 0 是内置顶级类 Any：所有值都是它的实例
+        if target_id == 0 {
+            return true;
+        }
+        match value {
+            Value::Ref(h) => {
+                if let Some(crate::vm::heap::HeapData::Object {
+                    type_tag, ..
+                }) = self.heap.get_data(*h)
+                {
+                    let mut cur = Some(*type_tag);
+                    while let Some(id) = cur {
+                        if id == target_id {
+                            return true;
+                        }
+                        if id as usize >= self.module.module.classes.len() {
+                            break;
+                        }
+                        let parent = self.module.module.classes[id as usize].parent_id;
+                        cur = if parent == u16::MAX { None } else { Some(parent) };
+                    }
+                    false
+                } else {
+                    let target = self.class_name(target_id);
+                    value.type_name() == target
+                }
+            }
+            _ => {
+                let target = self.class_name(target_id);
+                value.type_name() == target
+            }
+        }
+    }
+
+    /// 基本类型名匹配（`as?` 对基本类型做严格类型判断，而非数值转换）
+    fn basic_type_matches(value: &Value, target_name: &str) -> bool {
+        let tn = value.type_name();
+        match target_name {
+            "Int" | "Long" | "Int32" | "Int64" => tn == "Int",
+            "Float" | "Double" | "Number" | "Float32" | "Float64" => tn == "Float",
+            "Boolean" | "Bool" => tn == "Boolean",
+            "String" => tn == "String",
+            "Null" => tn == "Null",
+            _ => false,
+        }
+    }
+
+    /// Object 基类原生函数拦截（Phase 4）：`typeOf` / `aura_isOfType` /
+    /// `aura_cast` / `aura_cast_safety` 需要访问堆对象的类标签，故在 VM 层处理。
+    /// 返回 `None` 表示不是被拦截的函数，交由常规原生注册表分派。
+    fn intercept_object_native(
+        &self,
+        name: &str,
+        args: &[Value],
+    ) -> Result<Option<Value>, VmError> {
+        let result = match name {
+            "typeOf" if !args.is_empty() => {
+                let value = &args[0];
+                match value {
+                    Value::Ref(h) => {
+                        if let Some(crate::vm::heap::HeapData::Object {
+                            type_tag, ..
+                        }) = self.heap.get_data(*h)
+                        {
+                            Value::str_(self.class_name(*type_tag))
+                        } else {
+                            Value::str_(value.type_name())
+                        }
+                    }
+                    _ => Value::str_(value.type_name()),
+                }
+            }
+            "aura_isOfType" if args.len() >= 2 => {
+                let target_name = args[1].as_string();
+                match self.class_id_by_name(&target_name) {
+                    Some(id) => Value::Bool(self.is_instance_of(&args[0], id)),
+                    None => Value::Bool(args[0].type_name() == target_name),
+                }
+            }
+            "aura_cast" if args.len() >= 2 => {
+                let target_name = args[1].as_string();
+                match self.class_id_by_name(&target_name) {
+                    Some(id) => {
+                        if self.is_instance_of(&args[0], id) {
+                            args[0].clone()
+                        } else {
+                            return Err(VmError::Runtime(format!(
+                                "as cast failed: cannot cast value to class '{}'",
+                                target_name
+                            )));
+                        }
+                    }
+                    None => {
+                        const BASIC_TYPES: [&str; 9] = [
+                            "Int", "Long", "Float", "Double", "Number", "Boolean", "Bool",
+                            "String", "Null",
+                        ];
+                        if BASIC_TYPES.contains(&target_name.as_str()) {
+                            crate::vm::native::native_cast(args)
+                        } else {
+                            return Err(VmError::Runtime(format!(
+                                "as cast failed: cannot cast value to class '{}'",
+                                target_name
+                            )));
+                        }
+                    }
+                }
+            }
+            "aura_cast_safety" if args.len() >= 2 => {
+                let target_name = args[1].as_string();
+                match self.class_id_by_name(&target_name) {
+                    Some(id) => {
+                        if self.is_instance_of(&args[0], id) {
+                            args[0].clone()
+                        } else {
+                            Value::Null
+                        }
+                    }
+                    // 基本类型：严格判断实际类型，不匹配则返回 null（as? 语义）
+                    None => {
+                        if Self::basic_type_matches(&args[0], &target_name) {
+                            args[0].clone()
+                        } else {
+                            Value::Null
+                        }
+                    }
+                }
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(result))
+    }
+
     /// 虚方法调用（5.6）：从对象 vtable 查找方法并调用
     fn do_call_method(&mut self, top: usize, method_idx: usize) -> Result<(), VmError> {
         let obj = self.pop(top)?;
@@ -590,6 +758,41 @@ impl Vm {
             )));
         }
         let param_count = self.module.funcs[idx].param_count as usize;
+
+        // Phase 2: object 单例拦截（字段读取 + 方法调用）
+        let func_name = self.module.funcs[idx].name.clone();
+        if let Some(dot_pos) = func_name.find('.') {
+            let class_name = func_name[..dot_pos].to_string();
+            let member_name = func_name[dot_pos + 1..].to_string();
+            let singleton_val = self.singletons.get(&class_name).cloned();
+            if let Some(singleton_val) = singleton_val {
+                if let Value::Ref(handle) = singleton_val {
+                    // 判断是字段读取还是方法调用
+                    if param_count == 0 {
+                        // 尝试作为字段读取
+                        if let Some(type_id) = self.class_id_by_name(&class_name) {
+                            let field_names =
+                                self.module.module.classes[type_id as usize].field_names.clone();
+                            if let Some(field_idx) =
+                                field_names.iter().position(|n| n == &member_name)
+                            {
+                                let field_val = self.heap.get_field(handle, field_idx as u16);
+                                self.frames[top].stack.push(field_val);
+                                return Ok(());
+                            }
+                        }
+                    } else {
+                        // 方法调用：传递单例实例作为 self 参数
+                        let args = self.pop_n(top, param_count - 1)?;
+                        let mut all_args = vec![singleton_val];
+                        all_args.extend(args);
+                        self.push_frame(idx, all_args)?;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
         let args = self.pop_n(top, param_count)?;
 
         // 热点检测（5.11）：累计计数超阈值触发 Cranelift 编译（5.12）；
@@ -667,9 +870,9 @@ impl Vm {
         let param_count = native.param_count as usize;
         let args = self.pop_n(top, param_count)?;
 
-        eprintln!("[vm] CallNative: {}, params={}", native.name, param_count);
-
-        let result = if let Some(f) = self.natives.get(&native.name) {
+        let result = if let Some(v) = self.intercept_object_native(&native.name, &args)? {
+            v
+        } else if let Some(f) = self.natives.get(&native.name) {
             f(&args)
         } else if let Some(f) = self.natives.resolve_c_function(&native.name) {
             f(&args)
@@ -747,7 +950,9 @@ impl Vm {
             }
         });
 
-        let result = if let Some(f) = self.natives.get(&native.name) {
+        let result = if let Some(v) = self.intercept_object_native(&native.name, &args)? {
+            v
+        } else if let Some(f) = self.natives.get(&native.name) {
             f(&args)
         } else if let Some(f) = self.natives.resolve_c_function(&native.name) {
             f(&args)

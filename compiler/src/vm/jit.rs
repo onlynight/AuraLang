@@ -208,8 +208,8 @@ mod cranelift_backend {
     use crate::codegen::opcode::Const;
     use cranelift::codegen::ir::Block;
     use cranelift::codegen::ir::{
-        AbiParam, InstBuilder, MemFlags, Signature, StackSlotData, StackSlotKind, TrapCode,
-        Value as IrValue, condcodes::IntCC, immediates::Offset32, types,
+        AbiParam, ExtFuncData, ExternalName, InstBuilder, MemFlags, Signature, StackSlotData,
+        StackSlotKind, TrapCode, Value as IrValue, condcodes::IntCC, immediates::Offset32, types,
     };
     use cranelift::frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
     use cranelift_jit::{JITBuilder, JITModule};
@@ -294,6 +294,25 @@ mod cranelift_backend {
                 call_conv,
             };
             let jit_entry_sig_ref = fb.import_signature(jit_entry_sig);
+
+            // Import the native dispatcher function for CallNativeArgs
+            let native_dispatch_sig = Signature {
+                params: vec![
+                    AbiParam::new(types::I64), // native_idx
+                    AbiParam::new(types::I64), // argc
+                    AbiParam::new(ptr_ty),     // args_ptr
+                    AbiParam::new(ptr_ty),     // out_ptr
+                ],
+                returns: vec![],
+                call_conv,
+            };
+            let native_dispatch_sig_ref = fb.import_signature(native_dispatch_sig);
+            let native_dispatch_data = ExtFuncData {
+                name: ExternalName::testcase("aura_jit_call_native_by_index"),
+                signature: native_dispatch_sig_ref,
+                colocated: false,
+            };
+            let native_dispatch_ref = fb.import_function(native_dispatch_data);
 
             if pred_total.get(&0).copied().unwrap_or(0) == 0 {
                 sealed.insert(0);
@@ -388,6 +407,7 @@ mod cranelift_backend {
                     ptr_ty,
                     jit_entry_sig_ref,
                     dispatch_table,
+                    native_dispatch_ref,
                 );
                 terminated = terminated || term;
 
@@ -499,6 +519,7 @@ mod cranelift_backend {
         ptr_ty: types::Type,
         jit_entry_sig_ref: cranelift::codegen::ir::SigRef,
         dispatch_table: Variable,
+        native_dispatch_entry: cranelift::codegen::ir::FuncRef,
     ) -> bool {
         let i64_ty = types::I64;
         let zero32 = Offset32::new(0);
@@ -672,6 +693,49 @@ mod cranelift_backend {
                 push(fb, ret_tag, ret_payload);
 
                 false
+            }
+            // JIT 原生函数调用：直接调用 C 调度器，不回退到解释器
+            Instr::CallNativeArgs(native_idx, arg_count) => {
+                let native_idx = *native_idx as i64;
+                let param_count = *arg_count as i64;
+
+                let cur_sp = fb.use_var(sp);
+                let args_sp = fb.ins().iadd_imm(cur_sp, -param_count);
+
+                let base = fb.ins().stack_addr(ptr_ty, *stack_slot, 0);
+                let args_off = fb.ins().imul_imm(args_sp, VALUE_BYTES);
+                let args_ptr_val = fb.ins().iadd(base, args_off);
+
+                let out_off = fb.ins().imul_imm(cur_sp, VALUE_BYTES);
+                let out_ptr_val = fb.ins().iadd(base, out_off);
+
+                let argc_val = fb.ins().iconst(types::I64, param_count);
+                let native_idx_val = fb.ins().iconst(types::I64, native_idx);
+
+                // 调用原生调度器
+                fb.ins().call(
+                    native_dispatch_entry,
+                    &[
+                        native_idx_val,
+                        argc_val,
+                        args_ptr_val,
+                        out_ptr_val,
+                    ],
+                );
+
+                fb.def_var(sp, args_sp);
+
+                // 从 out_ptr 加载返回值
+                let ret_tag = fb.ins().load(i64_ty, MemFlags::new(), out_ptr_val, zero32);
+                let ret_payload = fb.ins().load(i64_ty, MemFlags::new(), out_ptr_val, eight32);
+                push(fb, ret_tag, ret_payload);
+
+                false
+            }
+            // CallNative (无参数计数) — 回退到解释器
+            Instr::CallNative(_) => {
+                fb.ins().trap(TrapCode::unwrap_user(2));
+                true
             }
             // Fix B: 逻辑运算（and/or → band/bor，返回 TAG_INT）
             Instr::And => bin_int(fb, &mut pop, &mut push, |fb, x, y| fb.ins().band(x, y)),

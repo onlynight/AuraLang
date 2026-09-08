@@ -75,8 +75,12 @@ pub(crate) struct EmitCtx {
     pub func_dbg_ids: HashMap<String, u32>,
     /// 函数名 → LLVM 返回类型字符串（用于 emit_call 推断返回类型）
     pub func_ret_types: HashMap<String, String>,
-    /// 类名 → (字段名 → LLVM 类型字符串)（用于 emit_member_access 推断字段类型）
-    pub class_field_types: HashMap<String, HashMap<String, String>>,
+    /// 函数名 → LLVM 参数类型列表（用于 emit_call 在调用点做实参类型转换）
+    pub func_param_types: HashMap<String, Vec<String>>,
+    /// 当前正在发射的函数的 LLVM 返回类型（用于 return 语句的类型转换）
+    pub current_ret_ty: String,
+    /// 类名 → (字段名 → (LLVM 类型字符串, 字段索引))（用于 emit_member_access 推断字段类型和索引）
+    pub class_field_types: HashMap<String, HashMap<String, (String, usize)>>,
     /// 类型别名表：别名 → LLVM 类型字符串（用于 AOT 解析 typealias）
     pub type_aliases: HashMap<String, String>,
     /// P3.2: 枚举变体映射（枚举名 → [(变体名, 变体索引, 关联值数)]）
@@ -132,6 +136,8 @@ impl EmitCtx {
             subprogram_index: 0,
             func_dbg_ids: HashMap::new(),
             func_ret_types: HashMap::new(),
+            func_param_types: HashMap::new(),
+            current_ret_ty: String::new(),
             class_field_types: HashMap::new(),
             type_aliases: HashMap::new(),
             enum_variants: HashMap::new(),
@@ -425,12 +431,18 @@ pub fn emit_program(
         } else {
             ctx.func_ret_types.insert(func.name.clone(), "void".to_string());
         }
+        let param_tys: Vec<String> = func
+            .params
+            .iter()
+            .map(|p| p.ty.as_ref().map(|t| ctx.map_type(t)).unwrap_or_else(|| "i32".to_string()))
+            .collect();
+        ctx.func_param_types.insert(func.name.clone(), param_tys);
     }
-    // 预注册类字段类型映射（供 emit_member_access 推断字段类型）
+    // 预注册类字段类型映射（供 emit_member_access 推断字段类型和索引）
     for struct_def in &program.structs {
         let mut field_map = HashMap::new();
-        for (field_name, field_ty) in &struct_def.fields {
-            field_map.insert(field_name.clone(), ctx.map_type(field_ty));
+        for (fi, (field_name, field_ty)) in struct_def.fields.iter().enumerate() {
+            field_map.insert(field_name.clone(), (ctx.map_type(field_ty), fi));
         }
         ctx.class_field_types.insert(struct_def.name.clone(), field_map);
     }
@@ -453,6 +465,19 @@ pub fn emit_program(
         } else {
             ctx.func_ret_types.insert(native.name.clone(), "void".to_string());
         }
+        // 参数类型：toString / toStr 收 C 字符串指针，println 收不透明指针
+        let param_tys: Vec<String> = native
+            .params
+            .iter()
+            .map(|p| {
+                if (native.name == "toString" || native.name == "toStr") && p.name == "x" {
+                    "i8*".to_string()
+                } else {
+                    p.ty.as_ref().map(|t| ctx.map_type(t)).unwrap_or_else(|| "i32".to_string())
+                }
+            })
+            .collect();
+        ctx.func_param_types.insert(native.name.clone(), param_tys);
     }
 
     // 5. 生成所有用户函数（期间收集的全局常量在函数后统一输出）
@@ -549,6 +574,7 @@ fn emit_function(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErr
     // 返回类型：无显式返回类型时默认为 void（Unit 函数）
     let ret_ty = func.ret.as_ref().map(|t| ctx.llvm_type(t)).unwrap_or_else(|| "void".to_string());
     let ret_str = if ret_ty.is_empty() { "void".to_string() } else { ret_ty };
+    ctx.current_ret_ty = ret_str.clone();
 
     // 参数类型
     let params: Vec<(String, String)> = func
@@ -749,8 +775,15 @@ fn emit_statement(
         HirStmt::Return(val) => {
             if let Some(v) = val {
                 let (val_ir, val_ty) = emit_expr_val(ctx, blocks, v)?;
-                let ret_ty = sanitize_ty_for_ret(&val_ty);
-                blocks.set_terminator(&format!("ret {} {}", ret_ty, val_ir));
+                let want = ctx.current_ret_ty.clone();
+                // 返回值类型必须与函数签名的返回类型一致（如 Float 函数里 `return 0.0`）
+                let (val_ir, val_ty) = if want.is_empty() || want == "void" {
+                    (val_ir, sanitize_ty_for_ret(&val_ty).to_string())
+                } else {
+                    let converted = coerce_arg(ctx, blocks, val_ir, &val_ty, &want);
+                    (converted.0, converted.1)
+                };
+                blocks.set_terminator(&format!("ret {} {}", val_ty, val_ir));
             } else {
                 blocks.set_terminator("ret void");
             }
@@ -947,23 +980,70 @@ fn emit_member_assign(
     ctx: &mut EmitCtx,
     _blocks: &mut FuncBlocks,
     object: &HirExpr,
-    _field: &str,
+    field: &str,
     val_ir: String,
     val_ty: String,
 ) -> Result<(), AotError> {
-    // 完整实现需要结构体字段偏移表；这里通过 runtime 简化
-    // 对象被视为 i8*，字段偏移为 0
-    let (obj_ir, _) = emit_expr_val(ctx, _blocks, object)?;
-    {
-        let cur = _blocks.last_mut();
-        cur.body.push(format!(
-            "{} = getelementptr i8, i8* {}, i64 0",
-            ctx.fresh_var(),
-            obj_ir
-        ));
-        // 直接 store（实际应该 store 到 gep 结果）
-        let _ = (val_ir, val_ty);
+    // 字段索引 / 类型表：按字段名在所有已注册类中查找
+    let found = ctx.class_field_types.iter().find_map(|(class, fields)| {
+        fields.get(field).map(|(ty, idx)| (class.clone(), ty.clone(), *idx))
+    });
+
+    // 情形 1：对象是「结构体值的局部变量」→ load / insertvalue / store 回写
+    if let (HirExpr::Var(var_name), Some((class, field_ty, field_idx))) = (object, &found) {
+        let slot = ctx.lookup_var(var_name).cloned();
+        if let Some(slot) = slot {
+            let struct_ty = format!("%struct.{}", sanitizellvm(class));
+            if slot.llvm_ty == struct_ty {
+                let (v, vty) = coerce_arg(ctx, _blocks, val_ir, &val_ty, field_ty);
+                let loaded = ctx.fresh_var();
+                let updated = ctx.fresh_var();
+                let cur = _blocks.last_mut();
+                cur.body.push(format!(
+                    "{} = load {}, {}* {}",
+                    loaded, struct_ty, struct_ty, slot.llvm_name
+                ));
+                cur.body.push(format!(
+                    "{} = insertvalue {} {}, {} {}, {}",
+                    updated, struct_ty, loaded, vty, v, field_idx
+                ));
+                cur.body.push(format!(
+                    "store {} {}, {}* {}",
+                    struct_ty, updated, struct_ty, slot.llvm_name
+                ));
+                return Ok(());
+            }
+        }
     }
+
+    // 情形 2：对象是「指向结构体的指针」→ GEP 取字段地址后 store
+    let (obj_ir, obj_ty) = emit_expr_val(ctx, _blocks, object)?;
+    if let Some((class, field_ty, field_idx)) = found {
+        let struct_ty = format!("%struct.{}", sanitizellvm(&class));
+        if obj_ty.ends_with('*') || obj_ty == "i8*" || obj_ty == "ptr" {
+            let cast = ctx.fresh_var();
+            let gep = ctx.fresh_var();
+            let (v, vty) = coerce_arg(ctx, _blocks, val_ir, &val_ty, &field_ty);
+            let cur = _blocks.last_mut();
+            cur.body.push(format!(
+                "{} = bitcast {} {} to {}*",
+                cast, obj_ty, obj_ir, struct_ty
+            ));
+            cur.body.push(format!(
+                "{} = getelementptr {}, {}* {}, i32 0, i32 {}",
+                gep, struct_ty, struct_ty, cast, field_idx
+            ));
+            cur.body.push(format!("store {} {}, {}* {}", vty, v, vty, gep));
+            return Ok(());
+        }
+    }
+
+    // 其它形态：无法定位字段地址，生成注释避免产生非法 IR
+    let cur = _blocks.last_mut();
+    cur.body.push(format!(
+        "; unsupported member assign .{} = {} {}",
+        field, val_ty, val_ir
+    ));
     Ok(())
 }
 
@@ -1197,6 +1277,8 @@ fn emit_expr_val(
                 subprogram_index: 0,
                 func_dbg_ids: HashMap::new(),
                 func_ret_types: ctx.func_ret_types.clone(),
+                func_param_types: ctx.func_param_types.clone(),
+                current_ret_ty: String::new(),
                 class_field_types: ctx.class_field_types.clone(),
                 type_aliases: ctx.type_aliases.clone(),
                 enum_variants: ctx.enum_variants.clone(),
@@ -1286,10 +1368,36 @@ fn emit_expr_val(
         }
         // CallVirtual — 与 Call 相同路径（AOT 生成静态调用）
         HirExpr::CallVirtual {
-            recv: _,
+            recv,
             name,
             args,
-        } => emit_call(ctx, blocks, name, args),
+        } => {
+            // AOT 生成静态调用：把虚方法名解析为具体的 `Class.method`
+            let mut resolved = name.clone();
+            if !ctx.func_ret_types.contains_key(&resolved) {
+                let recv_class = match recv.as_ref() {
+                    HirExpr::Var(vn) => ctx
+                        .lookup_var(vn)
+                        .and_then(|s| s.llvm_ty.strip_prefix("%struct.").map(|c| c.to_string())),
+                    _ => None,
+                };
+                if let Some(cls) = recv_class {
+                    let cand = format!("{}.{}", cls, name);
+                    if ctx.func_ret_types.contains_key(&cand) {
+                        resolved = cand;
+                    }
+                }
+                if resolved == *name {
+                    let suffix = format!(".{}", name);
+                    if let Some(k) =
+                        ctx.func_ret_types.keys().find(|k| k.ends_with(&suffix)).cloned()
+                    {
+                        resolved = k;
+                    }
+                }
+            }
+            emit_call(ctx, blocks, &resolved, args)
+        }
     }
 }
 
@@ -1487,6 +1595,28 @@ fn extract_string_parts(
             len_var, val_ir
         ));
         (ptr_var, len_var)
+    } else if is_int_ty(val_ty) || is_float_ty(val_ty) {
+        // 非字符串操作数（如 Int 字段参与字符串拼接）：先转成指针交给运行时 toString
+        let as_ptr = ctx.fresh_var();
+        let str_var = ctx.fresh_var();
+        let len_var = ctx.fresh_var();
+        let cur = blocks.last_mut();
+        if is_int_ty(val_ty) {
+            cur.body.push(format!(
+                "{} = inttoptr {} {} to i8*",
+                as_ptr, val_ty, val_ir
+            ));
+        } else {
+            let bits = ctx.fresh_var();
+            cur.body.push(format!("{} = bitcast {} {} to i64", bits, val_ty, val_ir));
+            cur.body.push(format!("{} = inttoptr i64 {} to i8*", as_ptr, bits));
+        }
+        cur.body.push(format!("{} = call i8* @toString(i8* {})", str_var, as_ptr));
+        cur.body.push(format!(
+            "{} = call i64 @aura_string_length(i8* {})",
+            len_var, str_var
+        ));
+        (str_var, len_var)
     } else {
         // Fallback: treat as i8* with strlen
         let len_var = ctx.fresh_var();
@@ -1559,34 +1689,44 @@ fn emit_binary(
             if is_string_type(&l_ty) || is_string_type(&r_ty) {
                 let (l_ptr, l_len) = extract_string_parts(ctx, blocks, &l_ir, &l_ty);
                 let (r_ptr, r_len) = extract_string_parts(ctx, blocks, &r_ir, &r_ty);
+                let concat = ctx.fresh_var();
+                let str_ty = ctx.map_type(&HirType::Named("String".to_string()));
+                // String 在 LLVM IR 中表示为 { 指针, 长度 } 结构体时，需要把
+                // concat 返回的裸指针补上长度字段，否则返回类型与函数签名不符。
+                let (total, s1, s2) = if str_ty.starts_with('{') {
+                    (
+                        Some(ctx.fresh_var()),
+                        Some(ctx.fresh_var()),
+                        Some(ctx.fresh_var()),
+                    )
+                } else {
+                    (None, None, None)
+                };
                 let cur = blocks.last_mut();
                 cur.body.push(format!(
                     "{} = call i8* @aura_string_concat(i8* {}, i64 {}, i8* {}, i64 {})",
-                    tmp, l_ptr, l_len, r_ptr, r_len
+                    concat, l_ptr, l_len, r_ptr, r_len
                 ));
-                Ok((tmp, "i8*".to_string()))
+                if let (Some(total), Some(s1), Some(s2)) = (total, s1, s2) {
+                    cur.body.push(format!("{} = add i64 {}, {}", total, l_len, r_len));
+                    cur.body.push(format!(
+                        "{} = insertvalue {} undef, i8* {}, 0",
+                        s1, str_ty, concat
+                    ));
+                    cur.body.push(format!(
+                        "{} = insertvalue {} {}, i64 {}, 1",
+                        s2, str_ty, s1, total
+                    ));
+                    Ok((s2, str_ty))
+                } else {
+                    Ok((concat, str_ty))
+                }
             } else if is_float {
                 // 混合类型时统一为 double
                 let result_ty =
                     if l_ty == "double" || r_ty == "double" { "double" } else { "float" };
-                // 将另一侧转换为目标浮点类型
-                let (l_conv, r_conv) = if l_ty == r_ty {
-                    (l_ir.clone(), r_ir.clone())
-                } else if r_ty.starts_with("float") || r_ty == "double" {
-                    // 左侧是整数，右侧是浮点 → 左侧转浮点
-                    let l_name = ctx.fresh_var();
-                    let cur = blocks.last_mut();
-                    let src_type = if r_ty == "double" { "double" } else { "float" };
-                    cur.body.push(format!("{} = sitofp i32 {} to {}", l_name, l_ir, src_type));
-                    (l_name, r_ir.clone())
-                } else {
-                    // 左侧是浮点，右侧是整数 → 右侧转浮点
-                    let r_name = ctx.fresh_var();
-                    let cur = blocks.last_mut();
-                    let src_type = if l_ty == "double" { "double" } else { "float" };
-                    cur.body.push(format!("{} = sitofp i32 {} to {}", r_name, r_ir, src_type));
-                    (l_ir.clone(), r_name)
-                };
+                let l_conv = emit_numeric_convert(ctx, blocks, &l_ir, &l_ty, result_ty);
+                let r_conv = emit_numeric_convert(ctx, blocks, &r_ir, &r_ty, result_ty);
                 let op = if result_ty == "double" { "fadd double" } else { "fadd float" };
                 let cur = blocks.last_mut();
                 cur.body.push(format!("{} = {} {}, {}", tmp, op, l_conv, r_conv));
@@ -1602,69 +1742,51 @@ fn emit_binary(
             if is_float {
                 let result_ty =
                     if l_ty == "double" || r_ty == "double" { "double" } else { "float" };
-                let (l_conv, r_conv) = if l_ty == r_ty {
-                    (l_ir.clone(), r_ir.clone())
-                } else if r_ty.starts_with("float") || r_ty == "double" {
-                    let l_name = ctx.fresh_var();
-                    cur.body.push(format!("{} = sitofp i32 {} to {}", l_name, l_ir, result_ty));
-                    (l_name, r_ir.clone())
-                } else {
-                    let r_name = ctx.fresh_var();
-                    cur.body.push(format!("{} = sitofp i32 {} to {}", r_name, r_ir, result_ty));
-                    (l_ir.clone(), r_name)
-                };
+                drop(cur);
+                let l_conv = emit_numeric_convert(ctx, blocks, &l_ir, &l_ty, result_ty);
+                let r_conv = emit_numeric_convert(ctx, blocks, &r_ir, &r_ty, result_ty);
                 let op = if result_ty == "double" { "fsub double" } else { "fsub float" };
+                let cur = blocks.last_mut();
                 cur.body.push(format!("{} = {} {}, {}", tmp, op, l_conv, r_conv));
+                Ok((tmp, result_ty.to_string()))
             } else {
                 cur.body.push(format!("{} = sub {} {}, {}", tmp, l_ty, l_ir, r_ir));
+                Ok((tmp, l_ty))
             }
-            Ok((tmp, l_ty))
         }
         HirBinOp::Mul => {
             let cur = blocks.last_mut();
             if is_float {
                 let result_ty =
                     if l_ty == "double" || r_ty == "double" { "double" } else { "float" };
-                let (l_conv, r_conv) = if l_ty == r_ty {
-                    (l_ir.clone(), r_ir.clone())
-                } else if r_ty.starts_with("float") || r_ty == "double" {
-                    let l_name = ctx.fresh_var();
-                    cur.body.push(format!("{} = sitofp i32 {} to {}", l_name, l_ir, result_ty));
-                    (l_name, r_ir.clone())
-                } else {
-                    let r_name = ctx.fresh_var();
-                    cur.body.push(format!("{} = sitofp i32 {} to {}", r_name, r_ir, result_ty));
-                    (l_ir.clone(), r_name)
-                };
+                drop(cur);
+                let l_conv = emit_numeric_convert(ctx, blocks, &l_ir, &l_ty, result_ty);
+                let r_conv = emit_numeric_convert(ctx, blocks, &r_ir, &r_ty, result_ty);
                 let op = if result_ty == "double" { "fmul double" } else { "fmul float" };
+                let cur = blocks.last_mut();
                 cur.body.push(format!("{} = {} {}, {}", tmp, op, l_conv, r_conv));
+                Ok((tmp, result_ty.to_string()))
             } else {
                 cur.body.push(format!("{} = mul {} {}, {}", tmp, l_ty, l_ir, r_ir));
+                Ok((tmp, l_ty))
             }
-            Ok((tmp, l_ty))
         }
         HirBinOp::Div => {
             let cur = blocks.last_mut();
             if is_float {
                 let result_ty =
                     if l_ty == "double" || r_ty == "double" { "double" } else { "float" };
-                let (l_conv, r_conv) = if l_ty == r_ty {
-                    (l_ir.clone(), r_ir.clone())
-                } else if r_ty.starts_with("float") || r_ty == "double" {
-                    let l_name = ctx.fresh_var();
-                    cur.body.push(format!("{} = sitofp i32 {} to {}", l_name, l_ir, result_ty));
-                    (l_name, r_ir.clone())
-                } else {
-                    let r_name = ctx.fresh_var();
-                    cur.body.push(format!("{} = sitofp i32 {} to {}", r_name, r_ir, result_ty));
-                    (l_ir.clone(), r_name)
-                };
+                drop(cur);
+                let l_conv = emit_numeric_convert(ctx, blocks, &l_ir, &l_ty, result_ty);
+                let r_conv = emit_numeric_convert(ctx, blocks, &r_ir, &r_ty, result_ty);
                 let op = if result_ty == "double" { "fdiv double" } else { "fdiv float" };
+                let cur = blocks.last_mut();
                 cur.body.push(format!("{} = {} {}, {}", tmp, op, l_conv, r_conv));
+                Ok((tmp, result_ty.to_string()))
             } else {
                 cur.body.push(format!("{} = sdiv {} {}, {}", tmp, l_ty, l_ir, r_ir));
+                Ok((tmp, l_ty))
             }
-            Ok((tmp, l_ty))
         }
         HirBinOp::Rem => {
             let cur = blocks.last_mut();
@@ -1736,6 +1858,22 @@ fn emit_binary(
                 HirBinOp::Ge => ("sge", true),
                 _ => unreachable!(),
             };
+            // 数值比较：两侧类型不一致时统一到共同类型（否则生成非法 IR）
+            if is_numeric_type(&l_ty) && is_numeric_type(&r_ty) && l_ty != r_ty {
+                let target = if is_float_ty(&l_ty) || is_float_ty(&r_ty) {
+                    if l_ty == "double" || r_ty == "double" {
+                        "double".to_string()
+                    } else {
+                        "float".to_string()
+                    }
+                } else {
+                    l_ty.clone()
+                };
+                l_ir = emit_numeric_convert(ctx, blocks, &l_ir, &l_ty, &target);
+                r_ir = emit_numeric_convert(ctx, blocks, &r_ir, &r_ty, &target);
+                l_ty = target.clone();
+                r_ty = target;
+            }
             let pred = if is_signed && l_ty.starts_with("i") {
                 format!("icmp {} {} {}, {}", icmp_pred, l_ty, l_ir, r_ir)
             } else if l_ty.starts_with("{ ") {
@@ -1751,7 +1889,16 @@ fn emit_binary(
                 }
                 format!("icmp {} i8* {}, {}", icmp_pred, l_ptr, r_ptr)
             } else {
-                format!("fcmp one {} {}, {}", l_ty, l_ir, r_ir)
+                let fcmp_pred = match op {
+                    HirBinOp::Eq => "oeq",
+                    HirBinOp::Ne => "one",
+                    HirBinOp::Lt => "olt",
+                    HirBinOp::Gt => "ogt",
+                    HirBinOp::Le => "ole",
+                    HirBinOp::Ge => "oge",
+                    _ => "one",
+                };
+                format!("fcmp {} {} {}, {}", fcmp_pred, l_ty, l_ir, r_ir)
             };
             let cur = blocks.last_mut();
             cur.body.push(format!("{} = {}", tmp, pred));
@@ -1852,10 +1999,64 @@ fn emit_call(
         ));
     }
 
+    // aura_cast / aura_cast_safety：AOT 中按静态类型在编译期求值
+    // - 目标为数值基本类型 → 插入数值转换（as 为硬转换，as? 仅在类型匹配时转换）
+    // - 目标为类 / Any / String 等指针语义类型 → 直接透传值
+    if (callee == "aura_cast" || callee == "aura_cast_safety") && args.len() == 2 {
+        let target_type = match &args[1] {
+            HirExpr::Lit(crate::ast::Literal::String(s)) => s.clone(),
+            _ => {
+                return Err(AotError::CodeGenerationFailed(format!(
+                    "{}: second arg must be a string literal",
+                    callee
+                )));
+            }
+        };
+        let (val_ir, val_ty) = emit_expr_val(ctx, blocks, &args[0])?;
+        let target_llvm = ctx.map_type(&HirType::Named(target_type.clone()));
+        let numeric_target = is_int_ty(&target_llvm) || is_float_ty(&target_llvm);
+        if numeric_target {
+            if callee == "aura_cast_safety" && !same_numeric_kind(&val_ty, &target_llvm) {
+                // 类型不匹配：as? 返回「空」值（数值 0）
+                return Ok(("0".to_string(), target_llvm));
+            }
+            let (v, t) = coerce_arg(ctx, blocks, val_ir, &val_ty, &target_llvm);
+            return Ok((v, t));
+        }
+        // 对象 / 字符串 / Any：直接透传（静态类型已知，无需运行时检查）
+        return Ok((val_ir, val_ty));
+    }
+
+    // typeOf：AOT 中由静态类型在编译期折叠为字符串常量
+    if callee == "typeOf" && args.len() == 1 {
+        let (_val_ir, val_ty) = emit_expr_val(ctx, blocks, &args[0])?;
+        let type_name = llvm_ty_to_aura_name(&val_ty).unwrap_or("Any");
+        return emit_literal(
+            ctx,
+            blocks,
+            &crate::ast::Literal::String(type_name.to_string()),
+        );
+    }
+
     let args_ir: Vec<(String, String)> =
         args.iter().map(|a| emit_expr_val(ctx, blocks, a)).collect::<Result<_, _>>()?;
 
     let ret_ty = ctx.func_ret_types.get(callee).cloned().unwrap_or_else(|| "i32".to_string());
+    let param_tys = ctx.func_param_types.get(callee).cloned();
+    // 按被调方声明的参数类型转换实参（LLVM IR 对调用/声明类型一致性要求严格）
+    let args_ir: Vec<(String, String)> = match &param_tys {
+        Some(pts) => {
+            let mut out = Vec::with_capacity(args_ir.len());
+            for (i, (v, t)) in args_ir.into_iter().enumerate() {
+                match pts.get(i) {
+                    Some(want) => out.push(coerce_arg(ctx, blocks, v, &t, want)),
+                    None => out.push((v, t)),
+                }
+            }
+            out
+        }
+        None => args_ir,
+    };
     let cur = blocks.last_mut();
     let args_str: Vec<String> = args_ir.iter().map(|(v, t)| format!("{} {}", t, v)).collect();
 
@@ -1875,6 +2076,200 @@ fn emit_call(
         ));
         Ok((tmp, ret_ty))
     }
+}
+
+/// 判断两个 LLVM 类型是否属于同一「数值类别」（as? 的基本类型匹配语义）
+fn same_numeric_kind(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    (is_int_ty(a) && is_int_ty(b)) || (is_float_ty(a) && is_float_ty(b))
+}
+
+/// 由 LLVM 类型反推 Aura 类型名（供 typeOf 在 AOT 中编译期折叠）
+fn llvm_ty_to_aura_name(t: &str) -> Option<&'static str> {
+    match t {
+        "i32" => Some("Int"),
+        "i64" => Some("Long"),
+        "i16" => Some("Short"),
+        "i8" => Some("Byte"),
+        "float" => Some("Float"),
+        "double" => Some("Double"),
+        "i1" => Some("Boolean"),
+        "i8*" => Some("String"),
+        t if t.starts_with('{') && t.contains("i8*") && t.contains("i64") => Some("String"),
+        _ => None,
+    }
+}
+
+/// 判断 LLVM 类型字符串是否是指针
+fn is_ptr_ty(t: &str) -> bool {
+    t.ends_with('*') || t == "ptr"
+}
+
+/// 判断 LLVM 类型字符串是否为整数（i1/i8/i16/i32/i64…）
+fn is_int_ty(t: &str) -> bool {
+    t.len() >= 2 && t.starts_with('i') && t[1..].chars().all(|c| c.is_ascii_digit())
+}
+
+fn int_bits(t: &str) -> u32 {
+    t[1..].parse().unwrap_or(32)
+}
+
+fn is_float_ty(t: &str) -> bool {
+    t == "float" || t == "double"
+}
+
+/// 将实参值转换为被调方声明的参数类型。
+///
+/// LLVM IR 要求 `call` 的实参类型与 `declare`/`define` 的参数类型完全一致；
+/// Aura 中 `Any` 映射为 `i8*`、`String` 映射为 `{ i8*, i64 }` 或 `i8*`，
+/// 因此调用点必须显式插入 `inttoptr` / `ptrtoint` / `zext` / `trunc` 等转换。
+/// 无法安全转换时原样返回（让后续 llc 报错暴露问题，而不是静默生成错值）。
+fn coerce_arg(
+    ctx: &mut EmitCtx,
+    blocks: &mut FuncBlocks,
+    val: String,
+    from: &str,
+    to: &str,
+) -> (String, String) {
+    if from == to || to.is_empty() || from.is_empty() {
+        return (val, from.to_string());
+    }
+    let mut emit = |body: &mut Vec<String>, line: String| body.push(line);
+    // 字符串结构体 → i8*：取出数据指针
+    if from.starts_with('{') && from.contains("i8*") && to == "i8*" {
+        let t = ctx.fresh_var();
+        emit(
+            &mut blocks.last_mut().body,
+            format!("{} = extractvalue {} {}, 0", t, from, val),
+        );
+        return (t, to.to_string());
+    }
+    // 结构体值 → 指针：栈上分配后取地址（方法调用的 self 参数等）
+    if from.starts_with("%struct.") && is_ptr_ty(to) {
+        let alloca = ctx.fresh_var();
+        let cast = ctx.fresh_var();
+        let body = &mut blocks.last_mut().body;
+        body.push(format!("{} = alloca {}", alloca, from));
+        body.push(format!("store {} {}, {}* {}", from, val, from, alloca));
+        body.push(format!("{} = bitcast {}* {} to {}", cast, from, alloca, to));
+        return (cast, to.to_string());
+    }
+    // i8* → 字符串结构体：用 strlen 补长度
+    if from == "i8*" && to.starts_with('{') && to.contains("i8*") && to.contains("i64") {
+        let len = ctx.fresh_var();
+        let with_len = ctx.fresh_var();
+        let with_ptr = ctx.fresh_var();
+        let body = &mut blocks.last_mut().body;
+        body.push(format!(
+            "{} = call i64 @aura_string_length(i8* {})",
+            len, val
+        ));
+        body.push(format!(
+            "{} = insertvalue {} undef, i8* {}, 0",
+            with_ptr, to, val
+        ));
+        body.push(format!(
+            "{} = insertvalue {} {}, i64 {}, 1",
+            with_len, to, with_ptr, len
+        ));
+        return (with_len, to.to_string());
+    }
+    // 指针 ↔ 整数
+    if is_ptr_ty(to) && is_int_ty(from) {
+        let t = ctx.fresh_var();
+        emit(
+            &mut blocks.last_mut().body,
+            format!("{} = inttoptr {} {} to {}", t, from, val, to),
+        );
+        return (t, to.to_string());
+    }
+    if is_ptr_ty(from) && is_int_ty(to) {
+        let t = ctx.fresh_var();
+        emit(
+            &mut blocks.last_mut().body,
+            format!("{} = ptrtoint {} {} to {}", t, from, val, to),
+        );
+        return (t, to.to_string());
+    }
+    // 整数宽度
+    if is_int_ty(from) && is_int_ty(to) {
+        let (fb, tb) = (int_bits(from), int_bits(to));
+        if fb == tb {
+            return (val, from.to_string());
+        }
+        let t = ctx.fresh_var();
+        let op = if fb < tb { "zext" } else { "trunc" };
+        emit(
+            &mut blocks.last_mut().body,
+            format!("{} = {} {} {} to {}", t, op, from, val, to),
+        );
+        return (t, to.to_string());
+    }
+    // 整数 ↔ 浮点
+    if is_int_ty(from) && is_float_ty(to) {
+        let t = ctx.fresh_var();
+        emit(
+            &mut blocks.last_mut().body,
+            format!("{} = sitofp {} {} to {}", t, from, val, to),
+        );
+        return (t, to.to_string());
+    }
+    if is_float_ty(from) && is_int_ty(to) {
+        let t = ctx.fresh_var();
+        emit(
+            &mut blocks.last_mut().body,
+            format!("{} = fptosi {} {} to {}", t, from, val, to),
+        );
+        return (t, to.to_string());
+    }
+    // 浮点宽度
+    if is_float_ty(from) && is_float_ty(to) && from != to {
+        let t = ctx.fresh_var();
+        let op = if from == "float" { "fpext" } else { "fptrunc" };
+        emit(
+            &mut blocks.last_mut().body,
+            format!("{} = {} {} {} to {}", t, op, from, val, to),
+        );
+        return (t, to.to_string());
+    }
+    (val, from.to_string())
+}
+
+/// 数值类型转换（整数 ↔ 浮点、float ↔ double、整数宽度调整）。
+/// 无法转换时原样返回，交由后续 llc 报错暴露。
+fn emit_numeric_convert(
+    ctx: &mut EmitCtx,
+    blocks: &mut FuncBlocks,
+    val: &str,
+    from: &str,
+    to: &str,
+) -> String {
+    if from == to || from.is_empty() || to.is_empty() {
+        return val.to_string();
+    }
+    let t = ctx.fresh_var();
+    let cur = blocks.last_mut();
+    if is_int_ty(from) && is_float_ty(to) {
+        cur.body.push(format!("{} = sitofp {} {} to {}", t, from, val, to));
+    } else if is_float_ty(from) && is_int_ty(to) {
+        cur.body.push(format!("{} = fptosi {} {} to {}", t, from, val, to));
+    } else if from == "float" && to == "double" {
+        cur.body.push(format!("{} = fpext float {} to double", t, val));
+    } else if from == "double" && to == "float" {
+        cur.body.push(format!("{} = fptrunc double {} to float", t, val));
+    } else if is_int_ty(from) && is_int_ty(to) {
+        let (fb, tb) = (int_bits(from), int_bits(to));
+        if fb == tb {
+            return val.to_string();
+        }
+        let op = if fb < tb { "zext" } else { "trunc" };
+        cur.body.push(format!("{} = {} {} {} to {}", t, op, from, val, to));
+    } else {
+        return val.to_string();
+    }
+    t
 }
 
 /// P9: 生成结构体构造函数代码
@@ -1957,24 +2352,69 @@ fn emit_member_access(
         }
     }
 
-    // 普通成员访问：字段偏移为 0
-    let (obj_ir, _) = emit_expr_val(ctx, blocks, object)?;
-    let gep = ctx.fresh_var();
+    // 普通成员访问：使用 extractvalue 从结构体值中提取字段
+    let (obj_ir, obj_ty) = emit_expr_val(ctx, blocks, object)?;
     let tmp = ctx.fresh_var();
     let cur = blocks.last_mut();
 
-    // 查找字段类型：遍历所有类字段，找到匹配的字段名
-    let field_llvm_ty = ctx
+    // 查找字段类型和索引：遍历所有类字段，找到匹配的字段名
+    let (field_llvm_ty, field_idx) = ctx
         .class_field_types
         .values()
-        .find_map(|fields| fields.get(name).cloned())
-        .unwrap_or_else(|| "i32".to_string());
+        .find_map(|fields| fields.get(name).map(|(ty, idx)| (ty.clone(), *idx)))
+        .unwrap_or_else(|| ("i32".to_string(), 0));
 
-    cur.body.push(format!("{} = getelementptr i8, i8* {}, i64 0", gep, obj_ir));
-    cur.body.push(format!(
-        "{} = load {}, {}* {}",
-        tmp, field_llvm_ty, field_llvm_ty, gep
-    ));
+    // 判断对象是指针还是值
+    let is_pointer = obj_ty.ends_with('*') || obj_ty == "i8*" || obj_ty == "ptr";
+
+    if is_pointer {
+        // 对象是指针：先 load 结构体值，再 extractvalue
+        let gep = ctx.fresh_var();
+        let loaded = ctx.fresh_var();
+        let struct_type = ctx
+            .class_field_types
+            .keys()
+            .find(|k| ctx.class_field_types[*k].contains_key(&name.to_string()))
+            .map(|k| format!("%struct.{}", sanitizellvm(k)))
+            .unwrap_or_else(|| "i8*".to_string());
+
+        if struct_type != "i8*" {
+            // 对象指针可能是 i8*（self 参数等），先 bitcast 到具体结构体指针再 load
+            let cast = ctx.fresh_var();
+            cur.body.push(format!(
+                "{} = bitcast {} {} to {}*",
+                cast, obj_ty, obj_ir, struct_type
+            ));
+            cur.body.push(format!(
+                "{} = load {}, {}* {}",
+                loaded, struct_type, struct_type, cast
+            ));
+            cur.body.push(format!(
+                "{} = extractvalue {} {}, {}",
+                tmp, struct_type, loaded, field_idx
+            ));
+        } else {
+            // 回退到 i8* 方式
+            cur.body.push(format!("{} = getelementptr i8, i8* {}, i64 0", gep, obj_ir));
+            cur.body.push(format!(
+                "{} = load {}, {}* {}",
+                tmp, field_llvm_ty, field_llvm_ty, gep
+            ));
+        }
+    } else {
+        // 对象是结构体值：直接使用 extractvalue
+        let struct_type = ctx
+            .class_field_types
+            .keys()
+            .find(|k| ctx.class_field_types[*k].contains_key(&name.to_string()))
+            .map(|k| format!("%struct.{}", sanitizellvm(k)))
+            .unwrap_or_else(|| obj_ty.clone());
+
+        cur.body.push(format!(
+            "{} = extractvalue {} {}, {}",
+            tmp, struct_type, obj_ir, field_idx
+        ));
+    }
     Ok((tmp, field_llvm_ty))
 }
 
@@ -1999,14 +2439,30 @@ fn emit_index_access(
 
 fn emit_new(
     ctx: &mut EmitCtx,
-    _blocks: &mut FuncBlocks,
-    _type_name: &str,
+    blocks: &mut FuncBlocks,
+    type_name: &str,
     args: &[HirExpr],
 ) -> Result<(String, String), AotError> {
-    // 简化：返回 null 指针
-    let _args_str: Vec<(String, String)> =
-        args.iter().map(|a| emit_expr_val(ctx, _blocks, a)).collect::<Result<_, _>>()?;
-    Ok(("null".to_string(), "i8*".to_string()))
+    // 评估所有构造器参数
+    let arg_values: Vec<(String, String)> =
+        args.iter().map(|a| emit_expr_val(ctx, blocks, a)).collect::<Result<_, _>>()?;
+
+    // 获取结构体类型名
+    let llvm_struct_type = format!("%struct.{}", sanitizellvm(type_name));
+
+    // 使用 insertvalue 构建结构体值（与 emit_struct_constructor 一致）
+    let cur = blocks.last_mut();
+    let mut struct_val = "undef".to_string();
+    for (i, (val, ty)) in arg_values.iter().enumerate() {
+        let new_val = ctx.fresh_var();
+        cur.body.push(format!(
+            "{} = insertvalue {} {}, {} {}, {}",
+            new_val, llvm_struct_type, struct_val, ty, val, i
+        ));
+        struct_val = new_val.clone();
+    }
+
+    Ok((struct_val, llvm_struct_type))
 }
 
 fn emit_if_expr(
@@ -2760,11 +3216,20 @@ fn emit_wrapper(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErro
         // ── Phase 2: 引用/指针类型 — ptrtoint 转为 i64 ──
         TAG_STR | TAG_PTR | TAG_OBJ | TAG_ARRAY | TAG_LIST | TAG_MAP | TAG_CLOSURE
         | TAG_CSTRING | TAG_FUNC => {
-            // 返回值是指针类型，用 ptrtoint 转为 i64
-            s.push_str(&format!(
-                "  %ret_payload = ptrtoint {} {} to i64\n",
-                ret_llvm_ty, call_var
-            ));
+            if ret_llvm_ty.starts_with('{') {
+                // 字符串等以「结构体」表示的值：取第 0 个字段（数据指针）转 i64
+                s.push_str(&format!(
+                    "  %ret_ptr = extractvalue {} {}, 0\n",
+                    ret_llvm_ty, call_var
+                ));
+                s.push_str("  %ret_payload = ptrtoint i8* %ret_ptr to i64\n");
+            } else {
+                // 返回值是指针类型，用 ptrtoint 转为 i64
+                s.push_str(&format!(
+                    "  %ret_payload = ptrtoint {} {} to i64\n",
+                    ret_llvm_ty, call_var
+                ));
+            }
         }
         _ => unreachable!(),
     }

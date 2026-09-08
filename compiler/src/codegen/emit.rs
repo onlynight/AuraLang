@@ -9,9 +9,9 @@
 use crate::codegen::hir::HirProgram;
 use crate::codegen::mir::{BasicBlock, LowerCtx, MirClosure, MirFunction, MirInstr, Terminator};
 use crate::codegen::opcode::{
-    BytecodeClosure, BytecodeFunction, BytecodeModule, BytecodeNative, Const, OpCode, TYPE_ID_BOOL,
-    TYPE_ID_CSTRING, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_I64, TYPE_ID_PTR, TYPE_ID_VOID,
-    VirtualTable,
+    BytecodeClosure, BytecodeFunction, BytecodeModule, BytecodeNative, ClassDef, Const, OpCode,
+    TYPE_ID_BOOL, TYPE_ID_CSTRING, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_I64, TYPE_ID_PTR,
+    TYPE_ID_VOID, VirtualTable,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -66,6 +66,24 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
 
     // P-K2：虚方法表 —— 全局 open 方法槽位 + 每个类的分派表
     // 必须在函数发射之前构建，因为 emit_function 中 method_slot() 依赖 METHOD_SLOTS
+
+    // Phase 1: 类定义表 —— 编译时分配递增类 ID（替代 FNV 哈希）
+    // 0: Any（内置顶级类）
+    let mut classes: Vec<ClassDef> = Vec::new();
+    classes.push(ClassDef::builtin("Any"));
+    // 类名 -> 类 ID 映射
+    let mut class_id_map: HashMap<&str, u16> = HashMap::new();
+    class_id_map.insert("Any", 0);
+    // 为所有类分配递增 ID
+    for s in &hir.structs {
+        if s.is_class {
+            let id = classes.len() as u16;
+            class_id_map.insert(s.name.as_str(), id);
+            classes.push(ClassDef::builtin(&s.name)); // 占位，稍后填充
+        }
+    }
+
+    // 全局 open 方法槽位
     let mut slot_names: Vec<String> = Vec::new();
     for s in &hir.structs {
         for vm in &s.virtual_methods {
@@ -77,7 +95,8 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
     let mut vtables: Vec<VirtualTable> = Vec::new();
     const NO_METHOD: u16 = u16::MAX;
     for s in hir.structs.iter().filter(|st| st.is_class) {
-        let tag = type_index(&s.name);
+        // Phase 1: 使用类 ID（顺序分配）替代 FNV 哈希
+        let tag = class_id_map.get(s.name.as_str()).copied().unwrap_or(0);
         let mut slots = vec![NO_METHOD; slot_names.len()];
         for (i, mname) in slot_names.iter().enumerate() {
             // 沿继承链从本类向上查找实现 `Class.method`
@@ -99,6 +118,27 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
             slots,
         });
     }
+    // Phase 1: 填充类定义（继承链 + vtable 索引）
+    for s in &hir.structs {
+        if !s.is_class {
+            continue;
+        }
+        let cid = class_id_map.get(s.name.as_str()).copied().unwrap_or(0);
+        let parent_id =
+            s.superclass.as_deref().and_then(|sc| class_id_map.get(sc).copied()).unwrap_or(0); // 无显式父类时默认继承 Any（class ID 0）
+        let vtable_idx =
+            vtables.iter().position(|vt| vt.type_tag == cid).map(|p| p as u16).unwrap_or(u16::MAX);
+        classes[cid as usize] = ClassDef {
+            name: s.name.clone(),
+            parent_id,
+            field_count: s.fields.len() as u16,
+            vtable_idx,
+            interfaces: Vec::new(),
+            is_builtin: false,
+            is_singleton: s.is_singleton,
+            field_names: s.fields.iter().map(|f| f.0.clone()).collect(),
+        };
+    }
     METHOD_SLOTS.with(|m| {
         *m.borrow_mut() =
             slot_names.iter().enumerate().map(|(i, n)| (n.clone(), i as u16)).collect()
@@ -112,7 +152,13 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
     // 第一遍：注册所有闭包到函数表
     for f in mir_funcs {
         for closure in &f.closures {
-            let closure_code = emit_closure(closure, &fn_index, &native_index, &closure_fn_index);
+            let closure_code = emit_closure(
+                closure,
+                &fn_index,
+                &native_index,
+                &closure_fn_index,
+                &class_id_map,
+            );
             let fn_idx = functions.len() as u16;
             closure_fn_index.insert(closure.name.as_str(), fn_idx);
             functions.push(BytecodeFunction {
@@ -130,7 +176,13 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
 
     // 第二遍：注册所有用户函数到函数表
     for f in mir_funcs {
-        let code = emit_function(f, &fn_index, &native_index, &closure_fn_index);
+        let code = emit_function(
+            f,
+            &fn_index,
+            &native_index,
+            &closure_fn_index,
+            &class_id_map,
+        );
         let fn_idx = functions.len() as u16;
         functions.push(BytecodeFunction {
             name: f.name.clone(),
@@ -182,7 +234,11 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
         entry,
         enabled_modules: Vec::new(),
         module_identity: crate::codegen::opcode::ModuleIdentity::default(),
-        header_flags: 0,
+        header_flags: if !classes.is_empty() {
+            crate::codegen::opcode::HEADER_HAS_CLASS_DEFS
+        } else {
+            0
+        },
         exports: Vec::new(),
         imports: Vec::new(),
         dependencies: Vec::new(),
@@ -191,6 +247,8 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
         aot_segments: Vec::new(),
         aot_blob_data: Vec::new(),
         vtables,
+        classes,
+        source_index: None,
     };
     // 清理 thread_local 槽表
     METHOD_SLOTS.with(|m| m.borrow_mut().clear());
@@ -202,6 +260,7 @@ fn emit_function(
     fn_index: &HashMap<&str, u16>,
     native_index: &HashMap<&str, u16>,
     closure_index: &HashMap<&str, u16>,
+    class_id_map: &HashMap<&str, u16>,
 ) -> Vec<u8> {
     // 基本块布局：保证每个 `If` 的 `then` 块紧跟其条件块之后，
     // 这样 `JumpIfFalse(else)` 后自然 fallthrough 到 `then`，与块的物理创建顺序无关。
@@ -224,7 +283,14 @@ fn emit_function(
     for &bid in &order {
         let b = &f.blocks[bid];
         for instr in &b.instrs {
-            emit_instr(&mut code, instr, fn_index, native_index, closure_index);
+            emit_instr(
+                &mut code,
+                instr,
+                fn_index,
+                native_index,
+                closure_index,
+                &class_id_map,
+            );
         }
         match &b.term {
             Terminator::Goto(target) => {
@@ -259,10 +325,18 @@ fn emit_closure(
     fn_index: &HashMap<&str, u16>,
     native_index: &HashMap<&str, u16>,
     closure_index: &HashMap<&str, u16>,
+    class_id_map: &HashMap<&str, u16>,
 ) -> Vec<u8> {
     let mut code = Vec::new();
     for instr in &closure.body {
-        emit_instr(&mut code, instr, fn_index, native_index, closure_index);
+        emit_instr(
+            &mut code,
+            instr,
+            fn_index,
+            native_index,
+            closure_index,
+            class_id_map,
+        );
     }
     // 发射终结指令
     match &closure.term {
@@ -332,9 +406,14 @@ fn instr_size(instr: &crate::codegen::mir::MirInstr) -> usize {
         LoadConst { .. } => 6,
         LoadLocal { .. } => 6,
         StoreLocal { .. } => 6,
-        // BinOp：LoadVar(a) + LoadVar(b) + 算术(1) + StoreVar(dst) = 10；`To` 仅 LoadVar(b)+StoreVar = 6
+        // BinOp：LoadVar(a) + LoadVar(b) + 算术(1) + StoreVar(dst) = 10；`To`/`Is`/`As` 仅 LoadVar(b)+StoreVar = 6
         BinOp { op, .. } => {
-            if *op == crate::codegen::hir::HirBinOp::To {
+            if matches!(
+                *op,
+                crate::codegen::hir::HirBinOp::To
+                    | crate::codegen::hir::HirBinOp::Is
+                    | crate::codegen::hir::HirBinOp::As
+            ) {
                 6
             } else {
                 10
@@ -397,6 +476,10 @@ fn instr_size(instr: &crate::codegen::mir::MirInstr) -> usize {
         CallMethod {
             args, dst, ..
         } => 3 * args.len() + 3 + 3 + if dst.is_some() { 3 } else { 0 },
+        // InstanceOf（Phase 2）：LoadVar(src)(3) + InstanceOf(3) + StoreVar(dst)(3) = 9
+        InstanceOf { .. } => 9,
+        // CheckCast（Phase 2）：LoadVar(src)(3) + CheckCast(3) + StoreVar(dst)(3) = 9
+        CheckCast { .. } => 9,
     }
 }
 
@@ -420,6 +503,7 @@ fn emit_instr(
     fn_index: &HashMap<&str, u16>,
     native_index: &HashMap<&str, u16>,
     closure_index: &HashMap<&str, u16>,
+    class_id_map: &HashMap<&str, u16>,
 ) {
     use crate::codegen::hir::HirBinOp::*;
     use crate::codegen::mir::MirInstr::*;
@@ -442,7 +526,7 @@ fn emit_instr(
             a,
             b,
         } => {
-            if *op == To {
+            if matches!(*op, To | Is | As) {
                 // 近似：不发射运算，仅把 b 当作结果
                 OpCode::LoadVar(*b as u16).write(code);
                 OpCode::StoreVar(*dst as u16).write(code);
@@ -470,6 +554,9 @@ fn emit_instr(
                 Shl => OpCode::Shl,
                 Shr => OpCode::Shr,
                 To => OpCode::Add, // 不会到达
+                // Phase 2: is/as 在 HIR 层已降级，不会到达此处
+                Is => OpCode::Eq,  // 回退
+                As => OpCode::Add, // 回退
             };
             oc.write(code);
             OpCode::StoreVar(*dst as u16).write(code);
@@ -545,11 +632,33 @@ fn emit_instr(
                 OpCode::StoreVar(*d as u16).write(code);
             }
         }
+        InstanceOf {
+            dst,
+            src,
+            type_id,
+        } => {
+            OpCode::LoadVar(*src as u16).write(code);
+            OpCode::InstanceOf(*type_id).write(code);
+            OpCode::StoreVar(*dst as u16).write(code);
+        }
+        CheckCast {
+            dst,
+            src,
+            type_id,
+        } => {
+            OpCode::LoadVar(*src as u16).write(code);
+            OpCode::CheckCast(*type_id).write(code);
+            OpCode::StoreVar(*dst as u16).write(code);
+        }
         Alloc {
             dst,
             type_name,
         } => {
-            let idx = type_index(type_name);
+            // Phase 2: 使用类 ID（顺序分配）替代 FNV 哈希
+            let idx = class_id_map
+                .get(type_name.as_str())
+                .copied()
+                .unwrap_or_else(|| type_index(type_name));
             OpCode::NewObject(idx).write(code);
             OpCode::StoreVar(*dst as u16).write(code);
         }

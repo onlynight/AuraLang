@@ -108,6 +108,13 @@ pub enum OpCode {
     /// 构造器调用：为已分配对象设置字段后返回引用（与 Call 相同语义，但确保对象已被 NewObject 分配）
     CallCtor(u16),
 
+    // ── 类型检查（Phase 2） ──
+    /// 实例类型检查：栈顶为值引用，`type_id` 为目标类 ID，结果 Boolean 压栈
+    /// 沿继承链向上查找，支持子类→父类检查
+    InstanceOf(u16),
+    /// 类型转换：栈顶为值引用，`type_id` 为目标类 ID，匹配则压栈原引用，不匹配则报错
+    CheckCast(u16),
+
     // ── 集合类型（5.7） ──
     /// 分配 List（栈顶为初始长度，结果引用压栈）
     NewList,
@@ -245,6 +252,8 @@ impl OpCode {
             OpCode::CallC(_) => 36,
             OpCode::CallMethod(_) => 40,
             OpCode::CallCtor(_) => 41,
+            OpCode::InstanceOf(_) => 80,
+            OpCode::CheckCast(_) => 81,
             OpCode::NewList => 42,
             OpCode::NewMap => 43,
             OpCode::ListPush => 44,
@@ -289,10 +298,10 @@ impl OpCode {
             23 | 24 | 25 => 4,                                 // i32 偏移
             26 | 27 | 36 => 2,                                 // u16 函数/原生索引
             78 => 4,                                           // CallNativeArgs: u16 idx + u16 argc
-            40 | 41 | 51 => 2, // CallMethod/CallCtor/NewCoroutine u16 索引
-            66 => 2,           // MakeCallback u16 函数索引
-            70 => 2,           // CallExport u16 sym_idx
-            71 => 4,           // CallExternal u16 mod_idx + u16 sym_idx
+            40 | 41 | 51 | 80 | 81 => 2, // CallMethod/CallCtor/NewCoroutine/InstanceOf/CheckCast u16 索引
+            66 => 2,                     // MakeCallback u16 函数索引
+            70 => 2,                     // CallExport u16 sym_idx
+            71 => 4,                     // CallExternal u16 mod_idx + u16 sym_idx
             _ => 0,
         }
     }
@@ -341,6 +350,8 @@ impl OpCode {
             37 => OpCode::Halt,
             40 => OpCode::CallMethod(0),
             41 => OpCode::CallCtor(0),
+            80 => OpCode::InstanceOf(0),
+            81 => OpCode::CheckCast(0),
             42 => OpCode::NewList,
             43 => OpCode::NewMap,
             44 => OpCode::ListPush,
@@ -394,6 +405,8 @@ impl OpCode {
             | OpCode::CallC(i)
             | OpCode::CallMethod(i)
             | OpCode::CallCtor(i)
+            | OpCode::InstanceOf(i)
+            | OpCode::CheckCast(i)
             | OpCode::NewCoroutine(i)
             | OpCode::MakeCallback(i)
             | OpCode::MakeClosure(i)
@@ -462,6 +475,8 @@ impl fmt::Display for OpCode {
             OpCode::CallC(i) => write!(f, "CALL_C {}", i),
             OpCode::CallMethod(i) => write!(f, "CALL_METHOD {}", i),
             OpCode::CallCtor(i) => write!(f, "CALL_CTOR {}", i),
+            OpCode::InstanceOf(i) => write!(f, "INSTANCE_OF {}", i),
+            OpCode::CheckCast(i) => write!(f, "CHECK_CAST {}", i),
             OpCode::NewList => write!(f, "NEW_LIST"),
             OpCode::NewMap => write!(f, "NEW_MAP"),
             OpCode::ListPush => write!(f, "LIST_PUSH"),
@@ -603,6 +618,10 @@ pub const HEADER_HAS_MACHINE_CODE: u32 = 1 << 0;
 pub const HEADER_HAS_DEBUG_INFO: u32 = 1 << 1;
 pub const HEADER_SIGNED: u32 = 1 << 2;
 pub const HEADER_AOT_EXPORTS: u32 = 1 << 3;
+/// Phase 1: 含类定义表（v6）
+pub const HEADER_HAS_CLASS_DEFS: u32 = 1 << 4;
+/// Phase 2: 含源码索引（source_index 段，供 LSP 使用，VM/JIT/AOT 不读取）
+pub const HEADER_HAS_SOURCE_INDEX: u32 = 1 << 5;
 
 /// 段 ID 枚举
 pub const SEG_BYTECODE: u32 = 0;
@@ -729,6 +748,53 @@ impl AuraFuncDesc {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 类定义（Phase 1: 类 ID 系统 + 类层级）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 无父类标记（顶级类型 Any / 根类）
+pub const NO_PARENT: u16 = 0xFFFF;
+
+/// 类的字节码定义（编译时分配递增 ID，替代 FNV 哈希）
+///
+/// 每个类在 `BytecodeModule::classes` 中占一个条目。
+/// `type_id` 是该条目在 `classes` 数组中的索引（0-based）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClassDef {
+    /// 类名（如 "Any", "Animal", "Dog"）
+    pub name: String,
+    /// 父类 ID（`NO_PARENT` = 顶级类型，无父类）
+    pub parent_id: u16,
+    /// 字段数量
+    pub field_count: u16,
+    /// vtable 索引（到 `BytecodeModule::vtables`）
+    pub vtable_idx: u16,
+    /// 实现的接口 ID 列表
+    pub interfaces: Vec<u16>,
+    /// 是否为内置类型（Any）
+    pub is_builtin: bool,
+    /// 是否为单例对象（object 关键字声明）
+    pub is_singleton: bool,
+    /// 字段名列表（按槽位索引顺序）
+    pub field_names: Vec<String>,
+}
+
+impl ClassDef {
+    /// 创建内置类定义（如 Any）
+    pub fn builtin(name: &str) -> Self {
+        ClassDef {
+            name: name.to_string(),
+            parent_id: NO_PARENT,
+            field_count: 0,
+            vtable_idx: u16::MAX,
+            interfaces: Vec::new(),
+            is_builtin: true,
+            is_singleton: false,
+            field_names: Vec::new(),
+        }
+    }
+}
+
 /// 完整的字节码模块（对应 `.auc` 文件内容）
 ///
 /// Phase 2 扩展字段（设计方案 §6.2）：
@@ -775,6 +841,14 @@ pub struct BytecodeModule {
     // ── P-K2：虚方法表（v5；open 方法动态分派）──
     /// 每个类的虚方法表：(类型标签, [槽 i → 函数索引])
     pub vtables: Vec<VirtualTable>,
+
+    // ── Phase 1: 类定义表（v6；类 ID 系统 + 类层级）──
+    /// 类定义表：编译时分配递增类 ID，支持继承链遍历
+    pub classes: Vec<ClassDef>,
+
+    // ── Phase 2: 源码索引（source_index 段；仅供 LSP，VM/JIT/AOT 不读取）──
+    /// 源码索引：描述所有符号到虚拟源码位置的映射
+    pub source_index: Option<crate::std::source_index::SourceIndex>,
 }
 
 /// 类的虚方法表（P-K2）：槽位编号为全局 open 方法序号
@@ -804,6 +878,8 @@ impl Default for BytecodeModule {
             aot_segments: Vec::new(),
             aot_blob_data: Vec::new(),
             vtables: Vec::new(),
+            classes: Vec::new(),
+            source_index: None,
         }
     }
 }
@@ -826,6 +902,12 @@ impl BytecodeModule {
             if self.functions.iter().any(|f| f.aot_desc_idx > 0) {
                 flags |= HEADER_AOT_EXPORTS;
             }
+        }
+        if !self.classes.is_empty() {
+            flags |= HEADER_HAS_CLASS_DEFS; // Phase 1: 含类定义表
+        }
+        if self.source_index.is_some() {
+            flags |= HEADER_HAS_SOURCE_INDEX; // Phase 2: 含源码索引
         }
         flags
     }

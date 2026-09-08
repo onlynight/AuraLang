@@ -571,6 +571,71 @@ impl Checker {
                     );
                 }
             }
+            Decl::Object(o) => {
+                self.symbols.register_type(o.name.clone(), Ty::Named(o.name.clone()));
+                self.record_members(&o.name, &o.fields, &o.methods);
+                // 收集 object 方法（作为函数）— 与 class 一致
+                for m in &o.methods {
+                    let params = m
+                        .params
+                        .iter()
+                        .map(|p| ParamSym {
+                            name: p.name.clone(),
+                            ty: p.type_hint.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Any),
+                            has_default: p.default_value.is_some(),
+                            is_vararg: p.is_vararg,
+                        })
+                        .collect();
+                    let ret = m.return_type.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Unit);
+                    let full_name = format!("{}.{}", o.name, m.name);
+                    let _ = self.symbols.insert_function(
+                        full_name.clone(),
+                        params,
+                        ret,
+                        m.visibility,
+                        m.span,
+                    );
+                    if m.modifiers
+                        .iter()
+                        .any(|mod_| matches!(mod_, FnModifier::Suspend | FnModifier::Async))
+                    {
+                        self.suspend_functions.insert(full_name);
+                    }
+                }
+                // open/abstract 类属性（object 默认 final，需 open 才可继承）
+                let is_open = o.modifiers.iter().any(|m| matches!(m, ClassModifier::Open));
+                let is_abstract = o.modifiers.iter().any(|m| matches!(m, ClassModifier::Abstract));
+                self.class_attrs.insert(
+                    o.name.clone(),
+                    ClassAttrs {
+                        is_open,
+                        is_abstract,
+                    },
+                );
+                // open/abstract 方法集合
+                let mut open_set = HashSet::new();
+                for m in &o.methods {
+                    if m.modifiers
+                        .iter()
+                        .any(|x| matches!(x, FnModifier::Open | FnModifier::Abstract))
+                    {
+                        open_set.insert(m.name.clone());
+                    }
+                }
+                self.open_methods.insert(o.name.clone(), open_set);
+                // 运算符重载方法表
+                let mut ops = HashSet::new();
+                for m in &o.methods {
+                    if m.modifiers.iter().any(|x| matches!(x, FnModifier::Operator)) {
+                        ops.insert(m.name.clone());
+                    }
+                }
+                self.operator_methods.insert(o.name.clone(), ops);
+                // 继承链
+                if let Some(sc) = &o.superclass {
+                    self.superclasses.insert(o.name.clone(), sc.clone());
+                }
+            }
             Decl::Interface(i) => {
                 self.symbols.register_type(i.name.clone(), Ty::Named(i.name.clone()));
                 self.interface_types.insert(i.name.clone());
@@ -684,6 +749,43 @@ impl Checker {
             )
             .collect();
         self.generic_bounds.insert(name.to_string(), bounds);
+    }
+
+    /// 内置基类 `Any`（Object）提供的基类方法名
+    const ANY_BASE_METHODS: [&'static str; 3] = [
+        "toString", "equals", "hashCode",
+    ];
+
+    /// 收集某个类的全部基类方法（沿继承链 + 内置 `Any` 的 Object 基类方法）
+    fn all_base_methods(&self, class: &str) -> Vec<String> {
+        // Any 是顶级基类，不应有自己的基类方法
+        if class == "Any" {
+            return Vec::new();
+        }
+        let mut out: Vec<String> = Self::ANY_BASE_METHODS.iter().map(|s| s.to_string()).collect();
+        let mut cur = self.superclasses.get(class).cloned();
+        while let Some(cn) = cur {
+            if let Some(ms) = self.class_methods.get(&cn) {
+                out.extend(ms.iter().cloned());
+            }
+            cur = self.superclasses.get(&cn).cloned();
+        }
+        out
+    }
+
+    /// 判断基类方法是否为 open（可被重写）：接口方法与 `Any` 的 Object 基类方法天然 open
+    fn base_method_is_open(&self, class: &str, method: &str) -> bool {
+        if Self::ANY_BASE_METHODS.contains(&method) {
+            return true;
+        }
+        let mut cur = self.superclasses.get(class).cloned();
+        while let Some(cn) = cur {
+            if self.open_methods.get(&cn).map_or(false, |s| s.contains(method)) {
+                return true;
+            }
+            cur = self.superclasses.get(&cn).cloned();
+        }
+        false
     }
 
     fn record_members(&mut self, type_name: &str, fields: &[StructField], methods: &[FnDecl]) {
@@ -846,16 +948,13 @@ impl Checker {
                     }
                 }
                 // override 一致性检查（P3.9）+ open 合法性检查（P0）
-                let super_methods: Vec<String> = c
-                    .superclass
-                    .as_ref()
-                    .and_then(|sn| self.class_methods.get(sn).cloned())
-                    .unwrap_or_default();
+                // 沿继承链收集基类方法；内置基类 Any 提供 Object 基类方法
+                let super_methods: Vec<String> = self.all_base_methods(&c.name);
                 for m in &c.methods {
                     let has_override =
                         m.modifiers.iter().any(|x| matches!(x, FnModifier::Override));
                     let base_has = super_methods.contains(&m.name);
-                    // 基类方法是否 open（接口方法天然 open，可被重写）
+                    // 基类方法是否 open（接口方法与 Any 的 Object 基类方法天然 open）
                     let base_open = if c
                         .superclass
                         .as_ref()
@@ -863,10 +962,7 @@ impl Checker {
                     {
                         true
                     } else {
-                        c.superclass
-                            .as_ref()
-                            .and_then(|sn| self.open_methods.get(sn))
-                            .map_or(false, |s| s.contains(&m.name))
+                        self.base_method_is_open(&c.name, &m.name)
                     };
                     if has_override && !base_has {
                         self.report(
@@ -949,6 +1045,98 @@ impl Checker {
                     }
                 }
                 for m in &c.methods {
+                    self.check_function_body(m);
+                }
+                self.symbols.exit_scope();
+                self.current_type = saved_type;
+            }
+            Decl::Object(o) => {
+                let saved_type = self.current_type.take();
+                self.current_type = Some(o.name.clone());
+                self.symbols.enter_scope(true);
+                for field in &o.fields {
+                    let ft =
+                        field.type_hint.as_deref().map(|t| self.check_type(t)).unwrap_or(Ty::Any);
+                    if let Some(acc) = &field.accessors {
+                        if let Some(g) = &acc.getter {
+                            self.check_accessor(g, ft.clone());
+                        }
+                        if let Some(st) = &acc.setter {
+                            self.check_accessor(st, ft.clone());
+                        }
+                    }
+                    let name = format!("{}.{}", o.name, field.name);
+                    self.define_var_env(&name, ft, field.is_mutable);
+                }
+                // 继承开放性检查（object 默认 final，仅 open 可被继承）
+                if let Some(sn) = &o.superclass {
+                    if !self.interface_types.contains(sn) && !self.sealed_types.contains(sn) {
+                        if let Some(&attrs) = self.class_attrs.get(sn) {
+                            if !attrs.is_open && !attrs.is_abstract {
+                                self.report(
+                                    o.span,
+                                    format!(
+                                        "cannot inherit from non-open class/object '{}' (mark it 'open' to allow subclassing)",
+                                        sn
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
+                // override 一致性检查
+                let super_methods: Vec<String> = o
+                    .superclass
+                    .as_ref()
+                    .and_then(|sn| self.class_methods.get(sn).cloned())
+                    .unwrap_or_default();
+                for m in &o.methods {
+                    let has_override =
+                        m.modifiers.iter().any(|x| matches!(x, FnModifier::Override));
+                    let base_has = super_methods.contains(&m.name);
+                    let base_open = if o
+                        .superclass
+                        .as_ref()
+                        .map_or(false, |sn| self.interface_types.contains(sn))
+                    {
+                        true
+                    } else {
+                        o.superclass
+                            .as_ref()
+                            .and_then(|sn| self.open_methods.get(sn))
+                            .map_or(false, |s| s.contains(&m.name))
+                    };
+                    if has_override && !base_has {
+                        self.report(
+                            m.span,
+                            format!(
+                                "'{}' is marked 'override' but no matching method in base class/object",
+                                m.name
+                            ),
+                        );
+                    } else if has_override && base_has && !base_open {
+                        self.report(
+                            m.span,
+                            format!(
+                                "'{}' in base class/object is not open; only open or abstract methods can be overridden",
+                                m.name
+                            ),
+                        );
+                    } else if !has_override && base_has {
+                        self.report_warning(
+                            m.span,
+                            format!(
+                                "'{}' overrides a method in base class/object but is missing the 'override' modifier",
+                                m.name
+                            ),
+                        );
+                    }
+                }
+                // init 块
+                for b in &o.init_blocks {
+                    self.check_expr(b);
+                }
+                for m in &o.methods {
                     self.check_function_body(m);
                 }
                 self.symbols.exit_scope();
@@ -1620,13 +1808,15 @@ impl Checker {
             Expr::TypeCast {
                 expr,
                 type_name,
+                safe,
                 span: _,
             } => {
                 let vt = self.check_expr(expr);
                 let tt = ast_type_to_ty(type_name);
                 // as 转换无运行时检查（简化）
                 let _ = vt;
-                tt
+                // `as?` 失败时返回 null，因此结果类型可空
+                if *safe { Ty::Nullable(Box::new(tt)) } else { tt }
             }
             Expr::Range {
                 start,
@@ -1737,10 +1927,15 @@ impl Checker {
             return t;
         }
         // Fallback: if inside a class/struct/actor, look for class field
+        // （沿继承链查找：子类方法体可以访问祖先类声明的字段）
         if let Some(type_name) = &self.current_type {
-            let field_name = format!("{}.{}", type_name, name);
-            if let Some(t) = self.lookup_var_ty(&field_name) {
-                return t;
+            let mut cur = Some(type_name.clone());
+            while let Some(cn) = cur {
+                let field_name = format!("{}.{}", cn, name);
+                if let Some(t) = self.lookup_var_ty(&field_name) {
+                    return t;
+                }
+                cur = self.superclasses.get(&cn).cloned();
             }
         }
         if let Some(fns) = self.symbols.lookup_function(name) {
@@ -1823,6 +2018,17 @@ impl Checker {
         false
     }
 
+    /// Phase 4: 查找所有直接子类（用于 sealed class when 穷举检查）
+    ///
+    /// 返回以 `parent` 为直接父类的类名列表。
+    fn find_direct_subclasses(&self, parent: &str) -> Vec<String> {
+        self.superclasses
+            .iter()
+            .filter(|(_, sc)| sc.as_str() == parent)
+            .map(|(child, _)| child.clone())
+            .collect()
+    }
+
     fn check_binary(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr, span: Span) -> Ty {
         let lt = self.check_expr(lhs);
         let rt = self.check_expr(rhs);
@@ -1836,11 +2042,15 @@ impl Checker {
         }
 
         // 空安全检查：算术/位运算操作数不能是可空
+        // 注意：`Ty::Any` 表示类型未知（如 prelude 函数返回值），并非「确定可空」，
+        // 不应在此报错；只有显式的 `T?` 才算可空。
+        let lt_nullable = matches!(lt, Ty::Nullable(_));
+        let rt_nullable = matches!(rt, Ty::Nullable(_));
         if op != BinOp::Eq
             && op != BinOp::Ne
             && op != BinOp::And
             && op != BinOp::Or
-            && (lt.is_nullable() || rt.is_nullable())
+            && (lt_nullable || rt_nullable)
         {
             self.report(
                 span,
@@ -1974,12 +2184,21 @@ impl Checker {
                 let _ = rt;
                 Ty::Named("Pair".into())
             }
+            BinOp::Is => {
+                // Phase 2: is 类型检查，返回 Boolean
+                Ty::Boolean
+            }
+            BinOp::As => {
+                // Phase 2: as 类型转换，返回目标类型
+                rt
+            }
         }
     }
 
     fn check_unary(&mut self, op: UnOp, operand: &Expr, span: Span) -> Ty {
         let ot = self.check_expr(operand);
-        if ot.is_nullable() {
+        // 只有显式 `T?` 才算「确定可空」；`Ty::Any`（如 prelude 返回值）表示未知
+        if matches!(ot, Ty::Nullable(_)) {
             self.report(
                 span,
                 format!("cannot apply unary operator on nullable '{}'", ot.name()),
@@ -2700,13 +2919,27 @@ impl Checker {
             if let Some(variants) = &subject_enum {
                 for p in &arm.patterns {
                     if let Expr::Ident(n, _) = p {
-                        if n != "else" && variants.contains(n) {
+                        if n != "else" && n != "__else__" && variants.contains(n) {
                             covered.push(n.clone());
                         }
                     }
                 }
             }
-            if arm.patterns.iter().any(|p| matches!(p, Expr::Ident(n, _) if n == "else")) {
+            // Phase 4: 收集 is T 模式（__is__T → T），用于 sealed class 穷举检查
+            for p in &arm.patterns {
+                if let Expr::Ident(n, _) = p {
+                    if let Some(type_name) = n.strip_prefix("__is__") {
+                        if !covered.contains(&type_name.to_string()) {
+                            covered.push(type_name.to_string());
+                        }
+                    }
+                }
+            }
+            if arm
+                .patterns
+                .iter()
+                .any(|p| matches!(p, Expr::Ident(n, _) if n == "else" || n == "__else__"))
+            {
                 has_else = true;
             }
 
@@ -2715,7 +2948,7 @@ impl Checker {
             if subj_name.is_some() {
                 for p in &arm.patterns {
                     if let Expr::Ident(tname, _) = p {
-                        if tname != "else" {
+                        if tname != "else" && tname != "__else__" {
                             let is_variant =
                                 subject_enum.as_ref().map_or(false, |vs| vs.contains(tname));
                             // 仅当 tname 是已声明的类型时才视为 `is` 智能转换
@@ -2757,7 +2990,9 @@ impl Checker {
             });
         }
 
-        // when 穷举性检查（P3.8）：枚举类型且无 else 时，必须覆盖所有变体
+        // when 穷举性检查（P3.8 + Phase 4）：
+        // 1. 枚举类型且无 else 时，必须覆盖所有变体
+        // 2. sealed class 且无 else 时，必须覆盖所有直接子类（修复遗留问题 #6）
         if !has_else {
             if let Some(variants) = &subject_enum {
                 let missing: Vec<&String> =
@@ -2770,6 +3005,25 @@ impl Checker {
                             missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
                         ),
                     );
+                }
+            }
+            // Phase 4: sealed class 穷举检查（修复遗留问题 #6）
+            // 当 subject 是 sealed class 类型时，检查是否覆盖所有直接子类
+            else if let Ty::Named(subject_name) = &subject_ty {
+                if self.sealed_types.contains(subject_name) {
+                    let subclasses = self.find_direct_subclasses(subject_name);
+                    let missing: Vec<&String> =
+                        subclasses.iter().filter(|sc| !covered.contains(sc)).collect();
+                    if !missing.is_empty() {
+                        self.report(
+                            span,
+                            format!(
+                                "'when' on sealed class '{}' is not exhaustive: missing branch(es) for {}",
+                                subject_name,
+                                missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                            ),
+                        );
+                    }
                 }
             }
         }

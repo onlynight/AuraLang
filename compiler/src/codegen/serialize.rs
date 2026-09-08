@@ -21,7 +21,8 @@
 
 use crate::codegen::opcode::{
     AucSegment, BytecodeFunction, BytecodeModule, BytecodeNative, Const, Dependency, ExportSymbol,
-    ImportSymbol, ModuleIdentity, SymbolKind,
+    HEADER_HAS_CLASS_DEFS, HEADER_HAS_MACHINE_CODE, HEADER_HAS_SOURCE_INDEX, ImportSymbol,
+    ModuleIdentity, SymbolKind,
 };
 use std::fs;
 
@@ -32,7 +33,8 @@ pub const MAGIC: &[u8; 4] = b"AURA";
 /// - v3 及更早的 `.auc` 文件仍可被 v4 读取器加载（函数记录中缺少
 ///   aot_mode/aot_desc_idx 字段时按 0 处理，段表为空）。
 /// - v3 VM 遇到 v4 文件会因 `version > VERSION` 拒绝加载。
-pub const VERSION: u16 = 5;
+/// Phase 1 v6: 类定义表（类 ID 系统 + 类层级 + object 单例）
+pub const VERSION: u16 = 6;
 
 #[derive(Debug)]
 pub enum SerializeError {
@@ -186,6 +188,39 @@ pub fn to_bytes(module: &BytecodeModule) -> Vec<u8> {
         buf.extend_from_slice(&(vt.slots.len() as u16).to_le_bytes());
         for s in &vt.slots {
             buf.extend_from_slice(&s.to_le_bytes());
+        }
+    }
+
+    // ── v6: 类定义表（Phase 1: 类 ID 系统 + 类层级）──
+    // 位于 vtables 之后、AOT 段表之前
+    let has_classes = (module.header_flags & HEADER_HAS_CLASS_DEFS) != 0;
+    if has_classes {
+        buf.extend_from_slice(&(module.classes.len() as u16).to_le_bytes());
+        for cd in &module.classes {
+            write_str(&mut buf, &cd.name);
+            buf.extend_from_slice(&cd.parent_id.to_le_bytes());
+            buf.extend_from_slice(&cd.field_count.to_le_bytes());
+            buf.extend_from_slice(&cd.vtable_idx.to_le_bytes());
+            buf.extend_from_slice(&(cd.interfaces.len() as u16).to_le_bytes());
+            for iface in &cd.interfaces {
+                buf.extend_from_slice(&iface.to_le_bytes());
+            }
+            buf.push(if cd.is_builtin { 1 } else { 0 });
+            buf.push(if cd.is_singleton { 1 } else { 0 });
+            buf.extend_from_slice(&(cd.field_names.len() as u16).to_le_bytes());
+            for fn_ in &cd.field_names {
+                write_str(&mut buf, fn_);
+            }
+        }
+    }
+
+    // ── Phase 2: 源码索引段（HEADER_HAS_SOURCE_INDEX；仅供 LSP）──
+    let has_source_index = (module.header_flags & HEADER_HAS_SOURCE_INDEX) != 0;
+    if has_source_index {
+        if let Some(ref idx) = module.source_index {
+            let json = serde_json::to_vec(idx).unwrap_or_default();
+            buf.extend_from_slice(&(json.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&json);
         }
     }
 
@@ -439,6 +474,51 @@ pub fn from_bytes(bytes: &[u8]) -> Result<BytecodeModule, SerializeError> {
         }
     }
 
+    // ── v6: 类定义表（Phase 1: 类 ID 系统 + 类层级）──
+    let mut classes = Vec::new();
+    if version >= 6 && (header_flags & HEADER_HAS_CLASS_DEFS) != 0 && r.pos < r.data.len() {
+        let nclasses = r.u16()? as usize;
+        for _ in 0..nclasses {
+            let name = r.str()?;
+            let parent_id = r.u16()?;
+            let field_count = r.u16()?;
+            let vtable_idx = r.u16()?;
+            let nifaces = r.u16()? as usize;
+            let mut interfaces = Vec::with_capacity(nifaces);
+            for _ in 0..nifaces {
+                interfaces.push(r.u16()?);
+            }
+            let is_builtin = r.u8()? != 0;
+            let is_singleton = r.u8()? != 0;
+            let nfnames = r.u16()? as usize;
+            let mut field_names = Vec::with_capacity(nfnames);
+            for _ in 0..nfnames {
+                field_names.push(r.str()?);
+            }
+            classes.push(crate::codegen::opcode::ClassDef {
+                name,
+                parent_id,
+                field_count,
+                vtable_idx,
+                interfaces,
+                is_builtin,
+                is_singleton,
+                field_names,
+            });
+        }
+    }
+
+    // ── Phase 2: 源码索引段（HEADER_HAS_SOURCE_INDEX；仅供 LSP）──
+    let mut source_index = None;
+    if version >= 6 && (header_flags & HEADER_HAS_SOURCE_INDEX) != 0 && r.pos < r.data.len() {
+        let slen = r.u32()? as usize;
+        if r.pos + slen <= r.data.len() {
+            let json_bytes = r.data[r.pos..r.pos + slen].to_vec();
+            r.pos += slen;
+            source_index = serde_json::from_slice(&json_bytes).ok();
+        }
+    }
+
     // ── Phase 1 AOT v4: 段表 + 段数据区 ──
     // 段表位置紧接 v3 布局末尾。v3 文件中该位置没有数据，
     // 故仅在 version >= 4 时读取。
@@ -477,6 +557,8 @@ pub fn from_bytes(bytes: &[u8]) -> Result<BytecodeModule, SerializeError> {
         aot_segments,
         aot_blob_data,
         vtables,
+        classes,
+        source_index,
     })
 }
 

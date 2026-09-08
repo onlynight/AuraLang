@@ -1,0 +1,257 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 7 — 错误处理测试 (P7: Error Handling)
+// ═══════════════════════════════════════════════════════════════════════════
+// 覆盖：try/catch/finally / throw 表达式 / Result + 模式匹配
+//
+// 验证：
+//   aura check examples/language-test/07-error-handling.aura
+//   aura run   examples/language-test/07-error-handling.aura
+//   aura run   examples/language-test/07-error-handling.aura --jit
+//   aura build examples/language-test/07-error-handling.aura --aot --output target/test/07-error
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════
+// §7.1 Result 数据类 — 成功/失败双态
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Result：通过 success 标志区分成功/失败
+data class Result(val success: Boolean, val value: Int, val error: String) {
+    fun isOk(): Boolean = success
+    fun isErr(): Boolean = !success
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// §7.2 辅助函数：构造 Result / 安全操作
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 构造 Success Result
+fun successResult(value: Int): Result {
+    return Result(true, value, "")
+}
+
+/// 构造 Failure Result
+fun failureResult(error: String): Result {
+    return Result(false, 0, error)
+}
+
+/// 安全除法：除数为 0 返回 err
+fun safeDivide(a: Int, b: Int): Result {
+    val result: Result = if (b == 0) {
+        failureResult("division by zero")
+    } else {
+        successResult(a / b)
+    }
+    return result
+}
+
+/// 安全平方除法
+fun safeSquareDivide(a: Int, b: Int): Result {
+    val result: Result = if (b == 0) {
+        failureResult("cannot divide by zero")
+    } else {
+        val q: Int = a / b
+        successResult(q * q)
+    }
+    return result
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// §7.3 try / catch / finally 语法覆盖
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 测试 try 块执行（catch 跳过，finally 执行）
+fun testTryOnly() {
+    val x: Int = 0
+    try {
+        x = 100
+        println("  §7.3a try 块执行: x = " + x.toString())
+    } finally {
+        println("  §7.3a finally 块执行 ✓")
+    }
+    println("  §7.3a 结果 x = " + x.toString())
+}
+
+/// 测试 try/catch（catch 体在当前编译器中跳过 — 已知限制）
+fun testTryCatch() {
+    val y: Int = 0
+    try {
+        y = 200
+        println("  §7.3b try 块执行: y = " + y.toString())
+    } catch (e: String) {
+        println("  §7.3b catch 块: " + e)
+    } finally {
+        println("  §7.3b finally 块执行 ✓")
+    }
+    println("  §7.3b 结果 y = " + y.toString())
+}
+
+/// 测试多层嵌套 try/catch/finally
+fun testNestedTry() {
+    val a: Int = 0
+    val b: Int = 0
+    try {
+        a = 10
+        try {
+            b = 20
+            println("  §7.3c 内层 try: a=" + a.toString() + " b=" + b.toString())
+        } finally {
+            println("  §7.3c 内层 finally ✓")
+        }
+    } finally {
+        println("  §7.3c 外层 finally ✓")
+    }
+    println("  §7.3c 结果: a=" + a.toString() + " b=" + b.toString())
+}
+
+/// 测试 throw 表达式（降级为 __throw 原生调用）
+fun testThrow() {
+    val flag: Boolean = false
+    try {
+        println("  §7.3d throw 前执行 ✓")
+        if (flag) {
+            throw "error message"
+        } else {
+            println("  §7.3d throw 未触发（flag=false）✓")
+        }
+    } catch (e: String) {
+        println("  §7.3d catch: " + e)
+    } finally {
+        println("  §7.3d finally ✓")
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// §7.4 Result 模式匹配（when + isOk/isErr 条件）
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 使用 when (无 subject) + isOk/isErr 条件处理 Result
+fun handleResult(r: Result): String {
+    when {
+        r.isOk() -> "Success(" + r.value.toString() + ")"
+        r.isErr() -> "Failure(" + r.error + ")"
+        else -> "Unknown"
+    }
+}
+
+/// 使用 when (无 subject) + isOk/isErr 条件处理 Result (if-else 替代)
+fun handleResultIfElse(r: Result): String {
+    when {
+        r.isOk() -> "Success(" + r.value.toString() + ")"
+        r.isErr() -> "Failure(" + r.error + ")"
+        else -> "Unknown"
+    }
+}
+
+/// 链式 Result 处理
+fun chainResults(a: Int, b: Int): String {
+    val r1: Result = safeDivide(a, b)
+    if (r1.isErr()) {
+        return "Error: " + r1.error
+    }
+    val q: Int = r1.value
+    val r2: Result = safeSquareDivide(q, 1)
+    if (r2.isErr()) {
+        return "Error: " + r2.error
+    }
+    return "Result: " + r2.value.toString()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// §7.5 错误恢复模式
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// 模式 1: 默认值恢复
+fun withDefault(r: Result, default: Int): Int {
+    when {
+        r.isOk() -> r.value
+        else -> default
+    }
+}
+
+/// 模式 3: 短路求值（第一个成功即返回）
+fun firstSuccess(a: Int, b: Int, c: Int): Result {
+    val r1: Result = safeDivide(a, 1)
+    if (r1.isOk()) {
+        return r1
+    }
+    val r2: Result = safeDivide(b, 2)
+    if (r2.isOk()) {
+        return r2
+    }
+    val r3: Result = safeDivide(c, 3)
+    if (r3.isOk()) {
+        return r3
+    }
+    return failureResult("all failed")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 主函数
+// ═══════════════════════════════════════════════════════════════════════════
+
+fun main(): Int {
+    println("═══ Phase 7: 错误处理测试 ═══")
+    println("")
+
+    // ── §7.1 Result 数据类 ────────────────────────────────────────────────
+    println("§7.1 Result 数据类:")
+    val okResult: Result = Result(true, 42, "")
+    println("  Success(42).isOk: " + okResult.isOk().toString())
+    println("  Success(42).isErr: " + okResult.isErr().toString())
+    println("  Success(42).value: " + okResult.value.toString())
+    val errResult: Result = Result(false, 0, "oops")
+    println("  Failure(oops).isOk: " + errResult.isOk().toString())
+    println("  Failure(oops).isErr: " + errResult.isErr().toString())
+    println("  Failure(oops).error: " + errResult.error)
+
+    // ── §7.2 辅助函数 ─────────────────────────────────────────────────────
+    println("")
+    println("§7.2 辅助函数:")
+    val r1 = safeDivide(10, 2)
+    println("  safeDivide(10,2).isOk: " + r1.isOk().toString())
+    println("  safeDivide(10,2).value: " + r1.value.toString())
+    val r2 = safeDivide(10, 0)
+    println("  safeDivide(10,0).isOk: " + r2.isOk().toString())
+    println("  safeDivide(10,0).error: " + r2.error)
+    val r3 = safeSquareDivide(10, 2)
+    println("  safeSquareDivide(10,2).isOk: " + r3.isOk().toString())
+    println("  safeSquareDivide(10,2).value: " + r3.value.toString())
+
+    // ── §7.3 try/catch/finally ───────────────────────────────────────────
+    println("")
+    println("§7.3 try/catch/finally:")
+    testTryOnly()
+    println("")
+    testTryCatch()
+    println("")
+    testNestedTry()
+    println("")
+    testThrow()
+
+    // ── §7.4 Result 模式匹配 ─────────────────────────────────────────────
+    println("")
+    println("§7.4 Result 模式匹配:")
+    val rOk: Result = Result(true, 100, "")
+    val rFail: Result = Result(false, 0, "not found")
+    println("  when(Success): " + handleResult(rOk))
+    println("  when(Failure): " + handleResult(rFail))
+    println("  if-else(Success): " + handleResultIfElse(rOk))
+    println("  if-else(Failure): " + handleResultIfElse(rFail))
+    println("  chain(10,2): " + chainResults(10, 2))
+    println("  chain(10,0): " + chainResults(10, 0))
+
+    // ── §7.5 错误恢复模式 ────────────────────────────────────────────────
+    println("")
+    println("§7.5 错误恢复模式:")
+    println("  withDefault(Success(50),0): " + withDefault(okResult, 0).toString())
+    println("  withDefault(Failure,0): " + withDefault(errResult, 0).toString())
+
+    val fs1: Result = firstSuccess(10, 0, 9)
+    println("  firstSuccess(10,0,9): " + handleResult(fs1))
+    val fs2: Result = firstSuccess(0, 0, 9)
+    println("  firstSuccess(0,0,9): " + handleResult(fs2))
+
+    println("")
+    println("═══ Phase 7 完成 ✓ ═══")
+    return 0
+}

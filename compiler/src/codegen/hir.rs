@@ -70,6 +70,8 @@ thread_local! {
     static FUNCTION_PARAMS: RefCell<HashMap<String, Vec<HirParam>>> = RefCell::new(HashMap::new());
     /// extern interface 名称集合（用于识别接口方法调用）
     static INTERFACE_NAMES: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
+    /// 枚举名 → 变体名列表（供 `when` 中裸变体模式 `RED -> ...` 降级为 `Color.RED`）
+    static ENUM_TABLE: RefCell<HashMap<String, Vec<String>>> = RefCell::new(HashMap::new());
 }
 
 /// 判断名称是否为已知的结构体/类（用于检测构造器调用）
@@ -106,6 +108,8 @@ struct ClassEntry {
     accessors: HashMap<String, (bool, bool)>,
     /// 运算符重载方法名（plus/minus/times/div/mod/eq/lt/gt/le/ge）
     operators: std::collections::HashSet<String>,
+    /// 是否为 object 单例
+    is_singleton: bool,
 }
 
 impl ClassEntry {
@@ -398,6 +402,39 @@ fn build_class_table(program: &Program) -> HashMap<String, ClassEntry> {
                 }
                 table.insert(s.name.clone(), e);
             }
+            Decl::Object(o) => {
+                let mut e = ClassEntry {
+                    superclass: o.superclass.clone(),
+                    is_singleton: true,
+                    ..Default::default()
+                };
+                for f in &o.fields {
+                    e.fields.push(f.name.clone());
+                    let default_ty = Box::new(Type::Named {
+                        name: "Int".into(),
+                        span: f.span,
+                    });
+                    let field_type = f.type_hint.as_ref().unwrap_or(&default_ty);
+                    e.field_types.insert(f.name.clone(), HirType::from_ast(field_type));
+                    if let Some(acc) = &f.accessors {
+                        e.accessors
+                            .insert(f.name.clone(), (acc.getter.is_some(), acc.setter.is_some()));
+                    }
+                }
+                for m in &o.methods {
+                    e.methods.insert(m.name.clone());
+                    if m.modifiers.iter().any(|x| matches!(x, FnModifier::Operator)) {
+                        e.operators.insert(m.name.clone());
+                    }
+                    if m.modifiers
+                        .iter()
+                        .any(|x| matches!(x, FnModifier::Open | FnModifier::Abstract))
+                    {
+                        e.open_methods.insert(m.name.clone());
+                    }
+                }
+                table.insert(o.name.clone(), e);
+            }
             _ => {}
         }
     }
@@ -438,6 +475,24 @@ fn build_function_param_table(program: &Program) -> HashMap<String, Vec<HirParam
                         })
                         .collect();
                     table.insert(format!("{}.{}", c.name, m.name), params);
+                }
+            }
+            Decl::Object(o) => {
+                for m in &o.methods {
+                    let params: Vec<HirParam> = m
+                        .params
+                        .iter()
+                        .map(|p| HirParam {
+                            name: p.name.clone(),
+                            ty: HirType::from_ast_opt(&p.type_hint),
+                            default_value: p
+                                .default_value
+                                .as_ref()
+                                .map(|e| Box::new(desugar_expr(e))),
+                            is_vararg: p.is_vararg,
+                        })
+                        .collect();
+                    table.insert(format!("{}.{}", o.name, m.name), params);
                 }
             }
             _ => {}
@@ -771,6 +826,10 @@ pub enum HirBinOp {
     Shl,
     Shr,
     To,
+    /// 类型检查（Phase 2）：`lhs is Type`
+    Is,
+    /// 类型转换（Phase 2）：`lhs as Type`
+    As,
 }
 
 impl HirBinOp {
@@ -795,6 +854,8 @@ impl HirBinOp {
             BinOp::Shl => HirBinOp::Shl,
             BinOp::Shr => HirBinOp::Shr,
             BinOp::To => HirBinOp::To,
+            BinOp::Is => HirBinOp::Is,
+            BinOp::As => HirBinOp::As,
             BinOp::Assign | BinOp::UShr => HirBinOp::Shr, // 近似
         }
     }
@@ -970,6 +1031,8 @@ pub struct HirStruct {
     pub virtual_methods: Vec<String>,
     /// 是否为引用语义类（class）；struct 为 false
     pub is_class: bool,
+    /// 是否为 object 单例（object 关键字声明）
+    pub is_singleton: bool,
 }
 
 /// HIR 枚举定义（Fix 2 — 补全枚举支持）
@@ -1013,10 +1076,24 @@ pub fn desugar_program_with(
     // 建立类/结构体成员表并挂到 thread_local
     let table = build_class_table(program);
     CLASS_TABLE.with(|t| *t.borrow_mut() = table);
+    // 枚举变体表：供 `when` 裸变体模式（`RED -> ...`）解析为 `Color.RED`
+    let enum_table: HashMap<String, Vec<String>> = program
+        .declarations
+        .iter()
+        .filter_map(|d| match d {
+            Decl::Enum(e) => Some((
+                e.name.clone(),
+                e.variants.iter().map(|v| v.name.clone()).collect(),
+            )),
+            _ => None,
+        })
+        .collect();
+    ENUM_TABLE.with(|t| *t.borrow_mut() = enum_table);
     SEMA_INFO.with(|s| *s.borrow_mut() = info.cloned());
     let result = desugar_program_impl(program);
     // 清理 thread_local，避免跨编译残留
     CLASS_TABLE.with(|t| t.borrow_mut().clear());
+    ENUM_TABLE.with(|t| t.borrow_mut().clear());
     SEMA_INFO.with(|s| *s.borrow_mut() = None);
     CLASS_CTX.with(|c| *c.borrow_mut() = None);
     ACCESSOR_PROP.with(|a| *a.borrow_mut() = None);
@@ -1038,6 +1115,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
         .flat_map(|d| match d {
             Decl::Struct(s) => Some(s.name.clone()),
             Decl::Class(c) => Some(c.name.clone()),
+            Decl::Object(o) => Some(o.name.clone()),
             Decl::Enum(e) => Some(e.name.clone()),
             Decl::Actor(a) => Some(a.name.clone()),
             _ => None,
@@ -1098,6 +1176,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                     superclass: None,
                     virtual_methods: Vec::new(),
                     is_class: false,
+                    is_singleton: false,
                 });
                 // struct 方法：类前缀命名 + 类上下文（裸字段/裸方法改写，修复运行时分派）
                 for m in &s.methods {
@@ -1258,6 +1337,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                         .map(|m| m.name.clone())
                         .collect(),
                     is_class: true,
+                    is_singleton: false,
                 });
                 // 方法：`Class.method` 命名 + 类上下文（裸字段/裸方法改写）
                 for m in &c.methods {
@@ -1387,6 +1467,106 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                 CLASS_CTX.with(|cell| *cell.borrow_mut() = prev_ctor_ctx);
                 functions.extend(synthesize_accessors(&c.name, &c.fields));
             }
+            Decl::Object(o) => {
+                // object 降级为类（is_class=true）+ 单例实例
+                // Phase 1: 基础结构 + 方法降级；单例实例管理在 Phase 2 实现
+                let mut obj_entry = ClassEntry::default();
+                obj_entry.is_singleton = true;
+                for f in &o.fields {
+                    obj_entry.fields.push(f.name.clone());
+                    let default_ty = Box::new(Type::Named {
+                        name: "Int".into(),
+                        span: f.span,
+                    });
+                    let field_type = f.type_hint.as_ref().unwrap_or(&default_ty);
+                    obj_entry.field_types.insert(f.name.clone(), HirType::from_ast(field_type));
+                    if let Some(acc) = &f.accessors {
+                        obj_entry
+                            .accessors
+                            .insert(f.name.clone(), (acc.getter.is_some(), acc.setter.is_some()));
+                    }
+                }
+                for m in &o.methods {
+                    obj_entry.methods.insert(m.name.clone());
+                    if m.modifiers
+                        .iter()
+                        .any(|x| matches!(x, FnModifier::Open | FnModifier::Abstract))
+                    {
+                        obj_entry.open_methods.insert(m.name.clone());
+                    }
+                    if m.modifiers.iter().any(|x| matches!(x, FnModifier::Operator)) {
+                        obj_entry.operators.insert(m.name.clone());
+                    }
+                }
+                if let Some(sc) = &o.superclass {
+                    obj_entry.superclass = Some(sc.clone());
+                }
+                // 注册到 CLASS_TABLE（供方法降级使用）
+                CLASS_TABLE.with(|t| {
+                    t.borrow_mut().insert(o.name.clone(), obj_entry);
+                });
+
+                // 降级为 HirStruct（类）
+                let virtual_methods: Vec<String> = o
+                    .methods
+                    .iter()
+                    .filter(|m| {
+                        m.modifiers
+                            .iter()
+                            .any(|x| matches!(x, FnModifier::Open | FnModifier::Abstract))
+                    })
+                    .map(|m| m.name.clone())
+                    .collect();
+                structs.push(HirStruct {
+                    name: o.name.clone(),
+                    fields: o
+                        .fields
+                        .iter()
+                        .map(|f| {
+                            (
+                                f.name.clone(),
+                                HirType::from_ast_opt(&f.type_hint).unwrap_or(HirType::Unknown),
+                            )
+                        })
+                        .collect(),
+                    default_values: o
+                        .fields
+                        .iter()
+                        .map(|f| f.default_value.as_ref().map(|e| Box::new(desugar_expr(e))))
+                        .collect(),
+                    synth_ctors: Vec::new(),
+                    superclass: o.superclass.clone(),
+                    virtual_methods,
+                    is_class: true,
+                    is_singleton: true,
+                });
+                // 方法降级：object 方法带 self 参数（类上下文）
+                for m in &o.methods {
+                    functions.push(desugar_class_method(m, &o.name, true));
+                }
+                // 字段 → 零参读取函数（单例实例字段访问）
+                for f in &o.fields {
+                    let init = f
+                        .default_value
+                        .as_ref()
+                        .map(|e| desugar_expr(e))
+                        .unwrap_or(HirExpr::Lit(Literal::Null));
+                    functions.push(HirFunction {
+                        name: format!("{}.{}", o.name, f.name),
+                        params: vec![],
+                        ret: HirType::from_ast_opt(&f.type_hint),
+                        body: HirBlock {
+                            stmts: vec![HirStmt::Return(Some(init))],
+                        },
+                        is_native: false,
+                        type_params: vec![],
+                        ffi_abi: FfiAbi::None,
+                        ffi_lib: None,
+                    });
+                }
+                // 属性访问器合成
+                functions.extend(synthesize_accessors(&o.name, &o.fields));
+            }
             Decl::Interface(_) => {}
             Decl::Enum(e) => {
                 let variants = e
@@ -1420,6 +1600,77 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             Decl::Import(_) => {}
             Decl::Annotation(_) => {}
         }
+    }
+
+    // Phase 7: 注册 __throw 为原生函数（throw 表达式降级为 __throw(value) 调用）
+    if !natives.iter().any(|n| n.name == "__throw") {
+        natives.push(HirFunction {
+            name: "__throw".into(),
+            params: vec![HirParam {
+                name: "value".into(),
+                ty: Some(HirType::Named("Any".into())),
+                default_value: None,
+                is_vararg: false,
+            }],
+            ret: Some(HirType::Named("Unit".into())),
+            body: HirBlock {
+                stmts: vec![],
+            },
+            is_native: true,
+            type_params: vec![],
+            ffi_abi: FfiAbi::None,
+            ffi_lib: None,
+        });
+    }
+
+    // 注册 __size 为原生函数（for 循环迭代器支持）
+    if !natives.iter().any(|n| n.name == "__size") {
+        natives.push(HirFunction {
+            name: "__size".into(),
+            params: vec![HirParam {
+                name: "iterable".into(),
+                ty: Some(HirType::Named("Any".into())),
+                default_value: None,
+                is_vararg: false,
+            }],
+            ret: Some(HirType::Named("Int".into())),
+            body: HirBlock {
+                stmts: vec![],
+            },
+            is_native: true,
+            type_params: vec![],
+            ffi_abi: FfiAbi::None,
+            ffi_lib: None,
+        });
+    }
+
+    // 注册 __get 为原生函数（for 循环迭代器支持）
+    if !natives.iter().any(|n| n.name == "__get") {
+        natives.push(HirFunction {
+            name: "__get".into(),
+            params: vec![
+                HirParam {
+                    name: "iterable".into(),
+                    ty: Some(HirType::Named("Any".into())),
+                    default_value: None,
+                    is_vararg: false,
+                },
+                HirParam {
+                    name: "index".into(),
+                    ty: Some(HirType::Named("Int".into())),
+                    default_value: None,
+                    is_vararg: false,
+                },
+            ],
+            ret: Some(HirType::Named("Any".into())),
+            body: HirBlock {
+                stmts: vec![],
+            },
+            is_native: true,
+            type_params: vec![],
+            ffi_abi: FfiAbi::None,
+            ffi_lib: None,
+        });
     }
 
     // 将内置 println 注册为原生函数（若语义分析已声明）
@@ -1584,6 +1835,78 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                             is_vararg: false,
                         })
                         .collect(),
+                    Some(HirType::Named("Any".into())),
+                ),
+                // Phase 4: Any 基类内置方法 + is/as 运行时辅助函数
+                // 必须给出真实签名，否则 AOT 后端会把返回值当作 i8*，
+                // 生成 `icmp ne i8* %x, 0` / `xor i1 %ptr, 1` 之类的非法 IR。
+                "equals" => (
+                    vec![
+                        HirParam {
+                            name: "a".into(),
+                            ty: Some(HirType::Named("Any".into())),
+                            default_value: None,
+                            is_vararg: false,
+                        },
+                        HirParam {
+                            name: "b".into(),
+                            ty: Some(HirType::Named("Any".into())),
+                            default_value: None,
+                            is_vararg: false,
+                        },
+                    ],
+                    Some(HirType::Named("Boolean".into())),
+                ),
+                "hashCode" => (
+                    vec![HirParam {
+                        name: "x".into(),
+                        ty: Some(HirType::Named("Any".into())),
+                        default_value: None,
+                        is_vararg: false,
+                    }],
+                    Some(HirType::Named("Int".into())),
+                ),
+                "typeOf" => (
+                    vec![HirParam {
+                        name: "x".into(),
+                        ty: Some(HirType::Named("Any".into())),
+                        default_value: None,
+                        is_vararg: false,
+                    }],
+                    Some(HirType::Named("String".into())),
+                ),
+                "aura_isOfType" => (
+                    vec![
+                        HirParam {
+                            name: "value".into(),
+                            ty: Some(HirType::Named("Any".into())),
+                            default_value: None,
+                            is_vararg: false,
+                        },
+                        HirParam {
+                            name: "type_name".into(),
+                            ty: Some(HirType::Named("String".into())),
+                            default_value: None,
+                            is_vararg: false,
+                        },
+                    ],
+                    Some(HirType::Named("Boolean".into())),
+                ),
+                "aura_cast" | "aura_cast_safety" => (
+                    vec![
+                        HirParam {
+                            name: "value".into(),
+                            ty: Some(HirType::Named("Any".into())),
+                            default_value: None,
+                            is_vararg: false,
+                        },
+                        HirParam {
+                            name: "type_name".into(),
+                            ty: Some(HirType::Named("String".into())),
+                            default_value: None,
+                            is_vararg: false,
+                        },
+                    ],
                     Some(HirType::Named("Any".into())),
                 ),
                 _ => (vec![], Some(HirType::Named("Any".into()))),
@@ -2664,8 +2987,65 @@ fn is_any_type_name(ty: &str) -> bool {
     ty == "Any"
 }
 
-/// 创建 `toString(expr)` 的 HirExpr::Call
-fn wrap_tostring(expr: HirExpr) -> HirExpr {
+/// 沿继承链查找声明 `toString` 的类（自身优先）。返回类名，用于静态分派。
+fn class_declaring_tostring(type_name: &str) -> Option<String> {
+    let table = CLASS_TABLE.with(|t| t.borrow().clone());
+    let mut cur = Some(type_name.to_string());
+    while let Some(cn) = cur {
+        if let Some(e) = table.get(&cn) {
+            if e.methods.contains("toString") {
+                return Some(cn);
+            }
+            cur = e.superclass.clone();
+        } else {
+            break;
+        }
+    }
+    None
+}
+
+/// 判断 `toString` 是否为虚方法（open/abstract 声明），需要 vtable 动态分派
+fn tostring_is_virtual(class: &str) -> bool {
+    CLASS_TABLE.with(|t| {
+        let table = t.borrow();
+        let mut cur = Some(class.to_string());
+        while let Some(cn) = cur {
+            if let Some(e) = table.get(&cn) {
+                if e.open_methods.contains("toString") {
+                    return true;
+                }
+                cur = e.superclass.clone();
+            } else {
+                break;
+            }
+        }
+        false
+    })
+}
+
+/// 创建 `toString(expr)` 的 HirExpr。
+///
+/// Phase 4：当表达式的静态类型是声明了 `toString` 的类时，走用户实现：
+/// - `open fun toString()` → [`HirExpr::CallVirtual`]（vtable 动态分派）
+/// - 普通 `fun toString()` → 静态调用 `Class.toString(self)`
+/// 否则（基本类型 / `Any` / 无自定义实现）回退到原生 `toString`（默认表示）。
+fn wrap_tostring(expr: HirExpr, ty: &Option<String>) -> HirExpr {
+    if let Some(type_name) = ty.as_deref() {
+        if let Some(class) = class_declaring_tostring(type_name) {
+            if tostring_is_virtual(&class) {
+                return HirExpr::CallVirtual {
+                    recv: Box::new(expr.clone()),
+                    name: "toString".to_string(),
+                    // CallVirtual 约定：args 含接收者（self）作为第一个参数
+                    args: vec![expr],
+                };
+            }
+            return HirExpr::Call {
+                callee: format!("{}.toString", class),
+                args: vec![expr],
+            };
+        }
+    }
     HirExpr::Call {
         callee: "toString".to_string(),
         args: vec![expr],
@@ -2691,13 +3071,13 @@ fn insert_implicit_tostring(
     if lhs_is_str && !rhs_is_str {
         let rhs_is_any = rhs_ty.as_deref().map(is_any_type_name).unwrap_or(false);
         if !rhs_is_any {
-            return (lhs, wrap_tostring(rhs));
+            return (lhs, wrap_tostring(rhs, &rhs_ty));
         }
     }
     if rhs_is_str && !lhs_is_str {
         let lhs_is_any = lhs_ty.as_deref().map(is_any_type_name).unwrap_or(false);
         if !lhs_is_any {
-            return (wrap_tostring(lhs), rhs);
+            return (wrap_tostring(lhs, &lhs_ty), rhs);
         }
     }
     (lhs, rhs)
@@ -2733,6 +3113,50 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     op: HirBinOp::from_ast(*op),
                     lhs: Box::new(lhs_h),
                     rhs: Box::new(rhs_h),
+                };
+            }
+            // Phase 2: is 类型检查 → aura_isOfType(value, "TypeName")
+            if *op == BinOp::Is {
+                let lhs_h = desugar_expr(lhs);
+                let type_name = match **rhs {
+                    Expr::Ident(ref name, _) => name.clone(),
+                    _ => {
+                        return HirExpr::Binary {
+                            op: HirBinOp::from_ast(*op),
+                            lhs: Box::new(lhs_h),
+                            rhs: Box::new(desugar_expr(rhs)),
+                        };
+                    }
+                };
+                return HirExpr::Call {
+                    callee: "aura_isOfType".to_string(),
+                    args: vec![
+                        lhs_h,
+                        HirExpr::Lit(Literal::String(type_name)),
+                    ],
+                };
+            }
+            // Phase 4: as 类型转换 → aura_cast(value, "TypeName")
+            // 对类类型：使用 CheckCast（不匹配则抛异常）
+            // 对基本类型：运行时类型转换（如 Float→Int）
+            if *op == BinOp::As {
+                let lhs_h = desugar_expr(lhs);
+                let type_name = match **rhs {
+                    Expr::Ident(ref name, _) => name.clone(),
+                    _ => {
+                        return HirExpr::Binary {
+                            op: HirBinOp::from_ast(*op),
+                            lhs: Box::new(lhs_h),
+                            rhs: Box::new(desugar_expr(rhs)),
+                        };
+                    }
+                };
+                return HirExpr::Call {
+                    callee: "aura_cast".to_string(),
+                    args: vec![
+                        lhs_h,
+                        HirExpr::Lit(Literal::String(type_name)),
+                    ],
                 };
             }
             HirExpr::Binary {
@@ -2863,8 +3287,12 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     }
                     // 类方法分派：接收者静态类型（含继承链）→ Class.method(self, args)；
                     // open/abstract 方法（可被子类重写）→ CallVirtual 动态分派
-                    if let Some((class, _)) = resolve_method_owner(object, name) {
-                        let mut all_args = vec![desugar_expr(object)];
+                    if let Some((class, entry)) = resolve_method_owner(object, name) {
+                        let mut all_args = vec![];
+                        // object 单例：不传接收者，VM 拦截时自动添加单例实例
+                        if !entry.is_singleton {
+                            all_args.push(desugar_expr(object));
+                        }
                         for a in args {
                             all_args.push(desugar_expr(a));
                         }
@@ -2987,6 +3415,16 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                             args: vec![],
                         };
                     }
+                    // object 单例字段读取：Counter.count → Counter.count()（零参函数，VM 拦截）
+                    let table = CLASS_TABLE.with(|t| t.borrow().clone());
+                    if let Some(entry) = table.get(obj_name) {
+                        if entry.is_singleton && entry.fields.contains(&name.to_string()) {
+                            return HirExpr::Call {
+                                callee: format!("{}.{}", obj_name, name),
+                                args: vec![],
+                            };
+                        }
+                    }
                 }
             }
             // 访问器 getter：obj.prop → Class.prop.get(obj)
@@ -3076,7 +3514,41 @@ fn desugar_expr(e: &Expr) -> HirExpr {
             }
         }
         Expr::AssertNonNull { expr, .. } => desugar_expr(expr),
-        Expr::TypeCast { expr, .. } => desugar_expr(expr),
+        // Phase 4: as 类型转换 → aura_cast(value, "TypeName")
+        // `as?` 安全转换 → aura_cast_safety(value, "TypeName")（失败返回 null）
+        // 对类类型：使用 CheckCast（不匹配则抛异常）
+        // 对基本类型：运行时类型转换（如 Float→Int）
+        Expr::TypeCast {
+            expr,
+            type_name,
+            safe,
+            ..
+        } => {
+            let type_str = match **type_name {
+                crate::ast::Type::Named {
+                    ref name, ..
+                } => name.clone(),
+                crate::ast::Type::Int => "Int".to_string(),
+                crate::ast::Type::Long => "Long".to_string(),
+                crate::ast::Type::Float => "Float".to_string(),
+                crate::ast::Type::Double => "Double".to_string(),
+                crate::ast::Type::Boolean => "Boolean".to_string(),
+                crate::ast::Type::Char => "Char".to_string(),
+                crate::ast::Type::String => "String".to_string(),
+                crate::ast::Type::Any => "Any".to_string(),
+                crate::ast::Type::Unit => "Unit".to_string(),
+                crate::ast::Type::Nothing => "Nothing".to_string(),
+                _ => "<type>".to_string(),
+            };
+            let lhs_h = desugar_expr(expr);
+            HirExpr::Call {
+                callee: if *safe { "aura_cast_safety" } else { "aura_cast" }.to_string(),
+                args: vec![
+                    lhs_h,
+                    HirExpr::Lit(Literal::String(type_str)),
+                ],
+            }
+        }
         Expr::Return { value, .. } => match value {
             Some(v) => desugar_expr(v),
             None => HirExpr::Lit(Literal::Null),
@@ -3209,6 +3681,24 @@ fn desugar_when(subject: &Option<Box<Expr>>, arms: &[WhenArm]) -> HirExpr {
                             ],
                         }
                     }
+                    Expr::Binary {
+                        op: BinOp::Is,
+                        rhs,
+                        ..
+                    } => {
+                        // is T → 调用 aura_isOfType(value, "T")
+                        let type_name = match rhs.as_ref() {
+                            Expr::Literal(crate::ast::Literal::String(s), _) => s.clone(),
+                            _ => "<type>".to_string(),
+                        };
+                        HirExpr::Call {
+                            callee: "aura_isOfType".to_string(),
+                            args: vec![
+                                desugar_expr(s),
+                                HirExpr::Lit(Literal::String(type_name)),
+                            ],
+                        }
+                    }
                     Expr::Ident(name, _) if name == "__else__" => {
                         // else → 默认分支（始终为 true）
                         HirExpr::Lit(Literal::Bool(true))
@@ -3271,11 +3761,32 @@ fn desugar_when(subject: &Option<Box<Expr>>, arms: &[WhenArm]) -> HirExpr {
                             rhs: Box::new(upper),
                         }
                     }
-                    _ => HirExpr::Binary {
-                        op: HirBinOp::Eq,
-                        lhs: Box::new(desugar_expr(s)),
-                        rhs: Box::new(desugar_expr(p)),
-                    },
+                    _ => {
+                        // 裸枚举变体模式（`when (c) { RED -> ... }`）→ `Color.RED`
+                        let enum_variant = match (p, lookup_expr_type(s)) {
+                            (Expr::Ident(vname, _), Some(subject_ty)) => {
+                                let is_enum = ENUM_TABLE.with(|t| {
+                                    t.borrow()
+                                        .get(&subject_ty)
+                                        .map_or(false, |vs| vs.contains(vname))
+                                });
+                                if is_enum { Some((subject_ty, vname.clone())) } else { None }
+                            }
+                            _ => None,
+                        };
+                        let rhs = match enum_variant {
+                            Some((subject_ty, vname)) => HirExpr::Member {
+                                object: Box::new(HirExpr::Var(subject_ty)),
+                                name: vname,
+                            },
+                            None => desugar_expr(p),
+                        };
+                        HirExpr::Binary {
+                            op: HirBinOp::Eq,
+                            lhs: Box::new(desugar_expr(s)),
+                            rhs: Box::new(rhs),
+                        }
+                    }
                 }
             }
             (None, Some(p)) => {

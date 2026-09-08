@@ -267,6 +267,9 @@ fn expr_references(e: &HirExpr, name: &str) -> bool {
             callee,
             args,
         } => callee == name || args.iter().any(|a| expr_references(a, name)),
+        HirExpr::CallVirtual {
+            recv, args, ..
+        } => expr_references(recv, name) || args.iter().any(|a| expr_references(a, name)),
         HirExpr::Member { object, .. } => expr_references(object, name),
         HirExpr::Index {
             container,
@@ -389,6 +392,15 @@ fn inline_expr(e: &HirExpr, cand: &HashMap<String, (Vec<String>, HirExpr)>) -> H
                 args: new_args,
             }
         }
+        HirExpr::CallVirtual {
+            recv,
+            name,
+            args,
+        } => HirExpr::CallVirtual {
+            recv: Box::new(inline_expr(recv, cand)),
+            name: name.clone(),
+            args: args.iter().map(|a| inline_expr(a, cand)).collect(),
+        },
         HirExpr::Binary {
             op,
             lhs,
@@ -472,6 +484,15 @@ fn subst_expr(e: &HirExpr, mapping: &[(String, HirExpr)]) -> HirExpr {
             args,
         } => HirExpr::Call {
             callee: callee.clone(),
+            args: args.iter().map(|a| subst_expr(a, mapping)).collect(),
+        },
+        HirExpr::CallVirtual {
+            recv,
+            name,
+            args,
+        } => HirExpr::CallVirtual {
+            recv: Box::new(subst_expr(recv, mapping)),
+            name: name.clone(),
             args: args.iter().map(|a| subst_expr(a, mapping)).collect(),
         },
         HirExpr::Member {

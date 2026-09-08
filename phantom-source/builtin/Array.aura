@@ -1,0 +1,55 @@
+// aura://builtin/Array.aura
+// 语言内置类型，不可修改
+
+/// 固定大小数组类型 Array<T>。
+///
+/// - 存储：连续内存分配，元素紧密排列
+/// - 字面量：`arrayOf(1, 2, 3)` 或 `Array<Int>(size)`
+/// - 数组是值类型——赋值时复制整个数组
+///
+/// @see List, Map
+/// @since 0.1
+internal value class Array<T> {
+
+    // ── 构造（companion object）──
+
+    companion object {
+        /// 从可变参数创建数组
+        fun arrayOf(vararg items: T): Array<T>
+
+        /// 按大小创建数组（元素初始化为默认值）
+        fun Array<T>(size: Int): Array<T>
+
+        /// 按大小和初始值创建数组
+        fun Array<T>(size: Int, initialValue: T): Array<T>
+    }
+
+    // ── 属性 ──
+
+    /// 数组元素数量
+    val size: Int
+
+    // ── 访问方法 ──
+
+    /// 按下标获取元素
+    fun get(index: Int): T
+
+    /// 按下标设置元素
+    fun set(index: Int, value: T): Unit
+
+    // ── 查找方法 ──
+
+    /// 检查数组是否包含指定元素
+    fun contains(item: T): Boolean
+
+    /// 查找元素的索引（未找到返回 -1）
+    fun indexOf(item: T): Int
+
+    // ── 转换 ──
+
+    /// 转换为列表
+    fun toList(): List<T>
+
+    /// 转换为字符串表示
+    override fun toString(): String
+}

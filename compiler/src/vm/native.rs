@@ -1,4 +1,4 @@
-﻿//! 鍘熺敓锛堝唴缃?/ FFI锛夊嚱鏁拌皟搴﹀櫒
+//! 鍘熺敓锛堝唴缃?/ FFI锛夊嚱鏁拌皟搴﹀櫒
 //!
 //! 瀵瑰簲 鎶€鏈柟妗?搂7.1 鐨?`CallNative` / `CallC` 涓?搂9.3 鐨?FFI 璋冨害銆?
 //!
@@ -53,6 +53,14 @@ impl NativeRegistry {
         r.register("intToPtr", native_int_to_ptr);
         r.register("makeCallback", native_make_callback);
         r.register("aura_isOfType", native_is_of_type);
+        // Phase 4: Any 基类内置方法
+        r.register("equals", native_equals);
+        r.register("hashCode", native_hash_code);
+        r.register("typeOf", native_type_of);
+        r.register("aura_cast", native_cast);
+        r.register("aura_cast_safety", native_cast_safety);
+        r.register("__size", native_size);
+        r.register("__get", native_get);
         // listOf - prelude alias (implementation in std_collections.rs)
         #[cfg(feature = "std-collections")]
         r.register("listOf", crate::std::std_collections::nat_list_of);
@@ -135,6 +143,12 @@ impl NativeRegistry {
         r.register("intToPtr", native_int_to_ptr);
         r.register("makeCallback", native_make_callback);
         r.register("aura_isOfType", native_is_of_type);
+        // Phase 4: Any 基类内置方法
+        r.register("equals", native_equals);
+        r.register("hashCode", native_hash_code);
+        r.register("typeOf", native_type_of);
+        r.register("aura_cast", native_cast);
+        r.register("aura_cast_safety", native_cast_safety);
 
         // 鎸夐渶娉ㄥ唽 std 妯″潡
         crate::std::register_with_modules(&mut r, modules);
@@ -383,6 +397,106 @@ fn native_is_of_type(args: &[Value]) -> Value {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 4: Any 基类内置方法（toString / equals / hashCode / typeOf）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// equals(this, other) → Bool：值相等检查
+///
+/// 对基本类型（Int/Float/Bool/Str）按值比较；
+/// 对堆对象默认身份相等（===），用户可重写 Any.equals 虚方法。
+fn native_equals(args: &[Value]) -> Value {
+    if args.len() >= 2 { Value::Bool(args[0] == args[1]) } else { Value::Bool(false) }
+}
+
+/// hashCode(value) → Int：基于身份的哈希码
+///
+/// 对堆对象基于堆句柄计算；基本类型使用值的哈希。
+/// 用户可重写 Any.hashCode 虚方法。
+fn native_hash_code(args: &[Value]) -> Value {
+    match args.first() {
+        Some(Value::Int(i)) => Value::Int(*i % 2_147_483_647),
+        Some(Value::Float(f)) => Value::Int(f.to_bits() as i64 % 2_147_483_647),
+        Some(Value::Bool(b)) => Value::Int(*b as i64),
+        Some(Value::Str(s)) => {
+            let h = s.bytes().fold(2166136261u32, |acc, b| {
+                (acc ^ b as u32).wrapping_mul(16777619)
+            });
+            Value::Int((h % 2_147_483_647) as i64)
+        }
+        Some(Value::Ref(handle)) => Value::Int((*handle as i64) % 2_147_483_647),
+        _ => Value::Int(0),
+    }
+}
+
+/// typeOf(value) → String：返回运行时类型名（反射）
+///
+/// 对堆对象返回类名（通过 VM 类定义表）；对基本类型返回类型标签。
+/// 替代原 type_name() 的静态字符串返回，支持类层级。
+fn native_type_of(args: &[Value]) -> Value {
+    match args.first() {
+        Some(v) => Value::str_(v.type_name()),
+        None => Value::str_("Any"),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 4: as 类型转换（strict cast + safe cast）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// aura_cast(value, targetTypeName) → Value
+///
+/// 严格类型转换：
+/// - 对类类型：使用 is_instance_of 检查，不匹配则返回 Null（VM 层拦截并抛异常）
+/// - 对基本类型：运行时类型转换（Int/Float/Bool/Str/Null）
+///
+/// 此函数在 interp.rs 中被拦截，使用类层级检查。
+/// 此处的 fallback 实现处理基本类型转换。
+pub fn native_cast(args: &[Value]) -> Value {
+    if args.len() < 2 {
+        return Value::Null;
+    }
+    let value = args[0].clone();
+    let target_type = match &args[1] {
+        Value::Str(s) => s.as_ref().to_string(),
+        _ => return Value::Null,
+    };
+
+    // 基本类型转换
+    match target_type.as_str() {
+        "Int" | "Long" => Value::Int(value.as_int()),
+        "Float" | "Double" | "Number" => Value::Float(value.as_float()),
+        "Boolean" | "Bool" => Value::Bool(value.as_bool()),
+        "String" => Value::str_(value.as_string()),
+        "Null" => {
+            if value.is_null_ptr() || value.type_name() == "Null" {
+                Value::Null
+            } else {
+                Value::Null // 非 Null 值无法转为 Null，返回 Null
+            }
+        }
+        _ => {
+            // 类类型：fallback 为返回原值（VM 层会拦截并做 CheckCast）
+            value
+        }
+    }
+}
+
+/// aura_cast_safety(value, targetTypeName) → Value
+///
+/// 安全类型转换（as?）：
+/// - 对类类型：使用 is_instance_of 检查，不匹配则返回 Null
+/// - 对基本类型：同 aura_cast
+///
+/// 此函数在 interp.rs 中被拦截，使用类层级检查。
+fn native_cast_safety(args: &[Value]) -> Value {
+    if args.len() < 2 {
+        return Value::Null;
+    }
+    // 对于类类型，VM 层会拦截；此处仅处理基本类型
+    native_cast(args)
+}
+
 /// ptrToInt(ptr) 鈫?Int锛氬皢鎸囬拡杞崲涓烘暣鏁板湴鍧€锛圥8.6锛?
 fn native_ptr_to_int(args: &[Value]) -> Value {
     match args.first() {
@@ -581,10 +695,7 @@ fn native_select(args: &[Value]) -> Value {
                 if !vm.channels.is_empty(ch_id) {
                     let val = vm.channels.recv(ch_id);
                     // 杩斿洖 [channel_id, value]
-                    return Value::List(vec![
-                        Value::Int(ch_id as i64),
-                        val,
-                    ]);
+                    return val;
                 }
             }
         }
@@ -824,4 +935,33 @@ fn native_tcp_channel_send(args: &[Value]) -> Value {
         }
     }
     Value::Null
+}
+
+/// __size(iterable) -> Int: return collection length (for loop iterator support)
+fn native_size(args: &[Value]) -> Value {
+    if args.is_empty() {
+        return Value::Int(0);
+    }
+    match &args[0] {
+        Value::List(items) => Value::Int(items.len() as i64),
+        _ => Value::Int(0),
+    }
+}
+
+/// __get(iterable, index) -> Value: return element at index
+fn native_get(args: &[Value]) -> Value {
+    if args.len() < 2 {
+        return Value::Null;
+    }
+    let index = args[1].as_int() as usize;
+    match &args[0] {
+        Value::List(items) => {
+            if index < items.len() {
+                items[index].clone()
+            } else {
+                Value::Null
+            }
+        }
+        _ => Value::Null,
+    }
 }

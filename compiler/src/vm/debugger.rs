@@ -1215,6 +1215,8 @@ pub fn format_instr(instr: &crate::vm::Instr) -> String {
         CallC(i) => format!("CallC({})", i),
         CallMethod(i) => format!("CallMethod({})", i),
         CallCtor(i) => format!("CallCtor({})", i),
+        InstanceOf(i) => format!("InstanceOf({})", i),
+        CheckCast(i) => format!("CheckCast({})", i),
         NewList => "NewList".into(),
         NewMap => "NewMap".into(),
         ListPush => "ListPush".into(),

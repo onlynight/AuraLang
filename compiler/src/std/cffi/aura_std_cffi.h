@@ -199,6 +199,9 @@ const char *toStringFloat(double x);
 /** 类型检查：isOfType(value, typeName) → _Bool */
 _Bool aura_isOfType(const void *value, const AuraString *typeName);
 
+/** throw 表达式（AOT）：打印异常值到 stderr */
+void __throw(const void *value);
+
 #ifdef __cplusplus
 }
 #endif

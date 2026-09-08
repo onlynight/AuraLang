@@ -384,9 +384,18 @@ fn cmd_build_aot(args: &[String]) {
     }
 
     // 语义检查（获取表达式类型信息，供 HIR 隐式 toString 降级使用）
+    // 注意：sema.errors 同时包含 Warning 级别诊断，只有 Error 才应中断编译。
     let (_ast, sema) = compiler::sema::analyze_source(&source);
-    if !sema.errors.is_empty() {
-        for e in &sema.errors {
+    let hard_errors: Vec<_> = sema
+        .errors
+        .iter()
+        .filter(|e| e.severity == compiler::errors::ErrorSeverity::Error)
+        .collect();
+    for w in sema.errors.iter().filter(|e| e.severity != compiler::errors::ErrorSeverity::Error) {
+        eprintln!("警告: [语义] {}", w.message);
+    }
+    if !hard_errors.is_empty() {
+        for e in hard_errors {
             eprintln!("错误: [语义] {}", e.message);
         }
         exit(1);

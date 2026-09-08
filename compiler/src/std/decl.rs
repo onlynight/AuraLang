@@ -16,7 +16,7 @@
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
-/// 免import的 prelude 函数名（17 个全局内置）
+/// 免import的 prelude 函数名（全局内置）
 pub const PRELUDE_NAMES: &[&str] = &[
     "println",
     "print",
@@ -37,6 +37,13 @@ pub const PRELUDE_NAMES: &[&str] = &[
     "intToPtr",
     "makeCallback",
     "listOf",
+    // Phase 4: Any 基类内置方法 + as 类型转换
+    "equals",
+    "hashCode",
+    "typeOf",
+    "aura_isOfType",
+    "aura_cast",
+    "aura_cast_safety",
 ];
 
 /// 全部内置函数名（编译期可见的单一真相源）

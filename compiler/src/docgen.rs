@@ -1288,6 +1288,264 @@ pub fn generate_docs(output_dir: &std::path::Path) -> Result<Vec<std::path::Path
     Ok(written)
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 2: 从 phantom source 生成 SourceIndex
+// ─────────────────────────────────────────────────────────────────────────────
+
+use crate::ast::{ClassDecl, Decl, FnDecl, ObjectDecl, StructField};
+use crate::lexer::Lexer;
+use crate::parser::Parser;
+use crate::std::source_index::{SourceArchive, SourceIndex, SourceLocation};
+
+/// 从 phantom-source/ 目录生成 SourceIndex
+///
+/// 遍历所有 `.aura` 文件，解析 AST，提取符号（类型、函数、常量、变量）
+/// 及其源码位置，构建 SourceIndex。
+///
+/// # 参数
+/// - `phantom_source_dir`: phantom source 根目录路径
+///
+/// # 返回
+/// - `Ok(SourceIndex)`: 生成的源码索引
+/// - `Err(String)`: 错误信息
+pub fn generate_source_index(phantom_source_dir: &std::path::Path) -> Result<SourceIndex, String> {
+    let mut index = SourceIndex::new();
+    index.version = 1;
+
+    // 收集所有 .aura 文件
+    let mut aura_files = Vec::new();
+    collect_aura_files(phantom_source_dir, phantom_source_dir, &mut aura_files)
+        .map_err(|e| format!("扫描 phantom source 目录失败: {}", e))?;
+
+    if aura_files.is_empty() {
+        return Ok(index);
+    }
+
+    for (rel_path, abs_path) in &aura_files {
+        let content = std::fs::read_to_string(abs_path)
+            .map_err(|e| format!("读取 {} 失败: {}", abs_path.display(), e))?;
+
+        // 解析
+        let tokens = Lexer::new(&content).tokenize();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program();
+
+        if !parser.errors().is_empty() {
+            // 解析失败的文件跳过（记录到日志但不中断）
+            eprintln!(
+                "warning: phantom source 解析失败: {} — {}",
+                rel_path,
+                parser.errors().first().map(|e| e.message.clone()).unwrap_or_default()
+            );
+            continue;
+        }
+
+        // 确定 URI
+        let uri = phantom_uri(rel_path);
+
+        // 提取符号
+        for decl in &program.declarations {
+            extract_symbols_from_decl(decl, &uri, &mut index);
+        }
+
+        // 记录文件内容到 source_archive
+        index.source_archive.get_or_insert_with(SourceArchive::new);
+        if let Some(ref mut archive) = index.source_archive {
+            archive.add(rel_path.clone(), content.clone());
+        }
+    }
+
+    Ok(index)
+}
+
+/// 递归收集 .aura 文件
+fn collect_aura_files(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    files: &mut Vec<(String, std::path::PathBuf)>,
+) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir).map_err(|e| e.to_string())?;
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_aura_files(root, &path, files)?;
+        } else if path.extension().map(|e| e == "aura").unwrap_or(false) {
+            let rel = path
+                .strip_prefix(root)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| path.file_name().unwrap().to_string_lossy().to_string());
+            files.push((rel, path));
+        }
+    }
+    Ok(())
+}
+
+/// 将相对路径转换为 aura:// URI
+fn phantom_uri(rel_path: &str) -> String {
+    let path = rel_path.replace('\\', "/");
+    format!("aura:///{}", path)
+}
+
+/// 从 AST 声明提取符号到 SourceIndex
+fn extract_symbols_from_decl(decl: &Decl, uri: &str, index: &mut SourceIndex) {
+    match decl {
+        Decl::Class(class) => extract_class_symbols(class, uri, index),
+        Decl::Object(obj) => extract_object_symbols(obj, uri, index),
+        Decl::Interface(iface) => {
+            // 接口：记录类型定义
+            let line = iface.span.start_line;
+            let col = iface.span.start_col;
+            index.type_defs.insert(
+                iface.name.clone(),
+                SourceLocation::new(
+                    uri.to_string(),
+                    line as u32,
+                    col as u32,
+                    line as u32,
+                    col as u32,
+                ),
+            );
+        }
+        Decl::Enum(enum_decl) => {
+            let line = enum_decl.span.start_line;
+            let col = enum_decl.span.start_col;
+            index.type_defs.insert(
+                enum_decl.name.clone(),
+                SourceLocation::new(
+                    uri.to_string(),
+                    line as u32,
+                    col as u32,
+                    line as u32,
+                    col as u32,
+                ),
+            );
+        }
+        Decl::Function(fn_decl) => {
+            let line = fn_decl.span.start_line;
+            let col = fn_decl.span.start_col;
+            index.function_defs.insert(
+                fn_decl.name.clone(),
+                SourceLocation::new(
+                    uri.to_string(),
+                    line as u32,
+                    col as u32,
+                    line as u32,
+                    col as u32,
+                ),
+            );
+        }
+        Decl::Import(_) => {} // import 不记录
+        _ => {}
+    }
+}
+
+/// 从类声明提取符号
+fn extract_class_symbols(class: &ClassDecl, uri: &str, index: &mut SourceIndex) {
+    let line = class.span.start_line;
+    let col = class.span.start_col;
+    index.type_defs.insert(
+        class.name.clone(),
+        SourceLocation::new(
+            uri.to_string(),
+            line as u32,
+            col as u32,
+            line as u32,
+            col as u32,
+        ),
+    );
+
+    // 字段/属性
+    for field in &class.fields {
+        let fl = field.span.start_line;
+        let fc = field.span.start_col;
+        let var_name = format!("{}.{}", class.name, field.name);
+        index.variable_defs.insert(
+            var_name.clone(),
+            SourceLocation::new(uri.to_string(), fl as u32, fc as u32, fl as u32, fc as u32),
+        );
+        // const 字段同时记录为常量
+        if let Some(ref ty) = field.type_hint {
+            let _ = ty; // 类型信息可用于增强
+        }
+    }
+
+    // 方法
+    for method in &class.methods {
+        let ml = method.span.start_line;
+        let mc = method.span.start_col;
+        let fn_name = format!("{}.{}", class.name, method.name);
+        index.function_defs.insert(
+            fn_name,
+            SourceLocation::new(uri.to_string(), ml as u32, mc as u32, ml as u32, mc as u32),
+        );
+    }
+
+    // companion object 中的常量和方法
+    for companion in &class.companion_objects {
+        for field in &companion.fields {
+            let fl = field.span.start_line;
+            let fc = field.span.start_col;
+            let const_name = format!("{}.{}", class.name, field.name);
+            index.constant_defs.insert(
+                const_name.clone(),
+                SourceLocation::new(uri.to_string(), fl as u32, fc as u32, fl as u32, fc as u32),
+            );
+            index.variable_defs.insert(
+                const_name,
+                SourceLocation::new(uri.to_string(), fl as u32, fc as u32, fl as u32, fc as u32),
+            );
+        }
+        for method in &companion.methods {
+            let ml = method.span.start_line;
+            let mc = method.span.start_col;
+            let fn_name = format!("{}.{}", class.name, method.name);
+            index.function_defs.insert(
+                fn_name,
+                SourceLocation::new(uri.to_string(), ml as u32, mc as u32, ml as u32, mc as u32),
+            );
+        }
+    }
+}
+
+/// 从 object 声明提取符号
+fn extract_object_symbols(obj: &ObjectDecl, uri: &str, index: &mut SourceIndex) {
+    let line = obj.span.start_line;
+    let col = obj.span.start_col;
+    index.type_defs.insert(
+        obj.name.clone(),
+        SourceLocation::new(
+            uri.to_string(),
+            line as u32,
+            col as u32,
+            line as u32,
+            col as u32,
+        ),
+    );
+
+    // 字段/属性
+    for field in &obj.fields {
+        let fl = field.span.start_line;
+        let fc = field.span.start_col;
+        let var_name = format!("{}.{}", obj.name, field.name);
+        index.variable_defs.insert(
+            var_name.clone(),
+            SourceLocation::new(uri.to_string(), fl as u32, fc as u32, fl as u32, fc as u32),
+        );
+    }
+
+    // 方法
+    for method in &obj.methods {
+        let ml = method.span.start_line;
+        let mc = method.span.start_col;
+        let fn_name = format!("{}.{}", obj.name, method.name);
+        index.function_defs.insert(
+            fn_name,
+            SourceLocation::new(uri.to_string(), ml as u32, mc as u32, ml as u32, mc as u32),
+        );
+    }
+}
+
 /// 渲染单个模块的独立 Markdown
 pub fn render_module_markdown(registry: &DocRegistry, module: &str) -> String {
     let docs = registry.by_module(module);

@@ -1,0 +1,185 @@
+// Phase 2/3 Demo: Any 基类 + object 关键字 + is/as 类型检查
+// 验证：类继承、is 检查、as 转换、object 单例
+
+// ── 类继承体系 ──
+open class Animal {
+    val name: String
+    open fun speak(): String { return "..." }
+    fun describe(): String { return "Animal(" + name + ")" }
+}
+
+class Dog : Animal {
+    init(name: String) {
+        this.name = name
+    }
+    override fun speak(): String { return "Woof!" }
+}
+
+class Cat : Animal {
+    init(name: String) {
+        this.name = name
+    }
+    override fun speak(): String { return "Meow!" }
+}
+
+class Goldfish : Animal {
+    init(name: String) {
+        this.name = name
+    }
+    override fun speak(): String { return "Bubble!" }
+}
+
+// ── object 单例 ──
+object Counter {
+    var count: Int = 0
+    fun increment(): Int {
+        count = count + 1
+        return count
+    }
+    fun decrement(): Int {
+        count = count - 1
+        return count
+    }
+    fun reset() {
+        count = 0
+    }
+    fun value(): Int { return count }
+}
+
+// ── 测试函数 ──
+fun test_is_primitives() {
+    val x: Any = 42
+    val y: Any = 3.14
+    val s: Any = "hello"
+    val b: Any = true
+    val n: Any = null
+
+    // is 检查基本类型
+    if (x is Int) { println("42 is Int: true") } else { println("FAIL: 42 should be Int") }
+    if (y is Float) { println("3.14 is Float: true") } else { println("FAIL: 3.14 should be Float") }
+    if (s is String) { println("hello is String: true") } else { println("FAIL: hello should be String") }
+    if (b is Boolean) { println("true is Boolean: true") } else { println("FAIL: true should be Boolean") }
+    if (x is Float) { println("FAIL: 42 should not be Float") } else { println("42 is Float: false") }
+}
+
+fun test_is_class() {
+    val dog: Any = Dog("Buddy")
+    val cat: Any = Cat("Whiskers")
+    val animal: Any = Animal()
+
+    // is 检查类实例（精确匹配）
+    if (dog is Dog) { println("Buddy is Dog: true") } else { println("FAIL: Buddy should be Dog") }
+    if (cat is Cat) { println("Whiskers is Cat: true") } else { println("FAIL: Whiskers should be Cat") }
+
+    // is 检查父类（子类 → 父类）
+    if (dog is Animal) { println("Buddy is Animal: true") } else { println("FAIL: Buddy should be Animal") }
+    if (cat is Animal) { println("Whiskers is Animal: true") } else { println("FAIL: Whiskers should be Animal") }
+
+    // is 检查不匹配
+    if (dog is Cat) { println("FAIL: Buddy should not be Cat") } else { println("Buddy is Cat: false") }
+    if (cat is Dog) { println("FAIL: Whiskers should not be Dog") } else { println("Whiskers is Dog: false") }
+}
+
+fun test_as_cast() {
+    val dog: Any = Dog("Rex")
+    val cat: Any = Cat("Milo")
+
+    // as 转换到父类（向下兼容）
+    val a1: Animal = dog as Animal
+    println("dog as Animal: " + a1.name())
+
+    val a2: Animal = cat as Animal
+    println("cat as Animal: " + a2.name())
+
+    // as 转换到自身
+    val d2: Dog = dog as Dog
+    println("dog as Dog: " + d2.name())
+}
+
+fun test_when_is() {
+    val dog: Any = Dog("Fido")
+    val cat: Any = Cat("Tabby")
+    val num: Any = 100
+
+    // when + is 模式匹配
+    val result = when (dog) {
+        is Dog -> "It's a Dog"
+        is Cat -> "It's a Cat"
+        is Animal -> "It's an Animal"
+        else -> "Unknown"
+    }
+    println("dog when result: " + result)
+
+    val result2 = when (cat) {
+        is Dog -> "It's a Dog"
+        is Cat -> "It's a Cat"
+        is Animal -> "It's an Animal"
+        else -> "Unknown"
+    }
+    println("cat when result: " + result2)
+
+    val result3 = when (num) {
+        is Int -> "It's an Int"
+        is Float -> "It's a Float"
+        else -> "Unknown"
+    }
+    println("num when result: " + result3)
+}
+
+fun test_object_singleton() {
+    // object 单例访问
+    Counter.reset()
+    Counter.increment()
+    Counter.increment()
+    Counter.increment()
+    println("Counter after 3 increments: " + Counter.value())
+
+    Counter.decrement()
+    println("Counter after 1 decrement: " + Counter.value())
+
+    Counter.reset()
+    println("Counter after reset: " + Counter.value())
+}
+
+fun test_polymorphism() {
+    val animals: List<Any> = listOf(Dog("Buddy"), Cat("Whiskers"), Goldfish("Bubbles"))
+
+    for (a in animals) {
+        if (a is Animal) {
+            val animal: Animal = a as Animal
+            println("Animal speaks: " + animal.speak())
+        }
+    }
+}
+
+// ── 主函数 ──
+fun main() {
+    println("=== Phase 2/3 Demo Tests ===")
+    println()
+
+    println("--- Test 1: is for primitives ---")
+    test_is_primitives()
+    println()
+
+    println("--- Test 2: is for class instances ---")
+    test_is_class()
+    println()
+
+    println("--- Test 3: as cast ---")
+    test_as_cast()
+    println()
+
+    println("--- Test 4: when + is pattern matching ---")
+    test_when_is()
+    println()
+
+    println("--- Test 5: object singleton ---")
+    test_object_singleton()
+    println()
+
+    println("--- Test 6: polymorphism with vtable ---")
+    test_polymorphism()
+    println()
+
+    println("=== All tests completed ===")
+}

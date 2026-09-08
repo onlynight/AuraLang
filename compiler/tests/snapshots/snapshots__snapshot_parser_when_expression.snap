@@ -155,7 +155,7 @@ Program {
                                                 WhenArm {
                                                     patterns: [
                                                         Ident(
-                                                            "else",
+                                                            "__else__",
                                                             Span {
                                                                 start: 72,
                                                                 end: 75,

@@ -18,6 +18,11 @@ pub struct Parser {
     pending_class_mods: Vec<ClassModifier>,
     /// 声明前缀的函数修饰符（open/abstract/expect/actual 上下文关键字，由预扫描消费）
     pending_fn_mods: Vec<FnModifier>,
+    /// 预扫描消费的可见性修饰符（由 try_parse_modifier_prefix 设置，声明解析函数取用）
+    pending_visibility: Visibility,
+    /// 抑制 `x -> ...` 形式的 lambda 解析（用于 `when` 分支模式，避免把
+    /// `RED -> "red"` 当成单参数 lambda）
+    suppress_lambda: usize,
 }
 
 /// 类/结构体/Actor 体成员的解析产物（Kotlin 风格成员全集）
@@ -57,6 +62,8 @@ impl Parser {
             pending_doc: None,
             pending_class_mods: Vec::new(),
             pending_fn_mods: Vec::new(),
+            pending_visibility: Visibility::Public,
+            suppress_lambda: 0,
         }
     }
 
@@ -254,6 +261,10 @@ impl Parser {
         if self.check(TokenKind::Sealed) && self.peek_ahead(1).kind == TokenKind::Class {
             return Ok(Decl::Class(self.parse_sealed_class()));
         }
+        // object 单例对象
+        if self.check(TokenKind::Object) {
+            return Ok(Decl::Object(self.parse_object()));
+        }
         // interface
         if self.check(TokenKind::Interface) {
             return Ok(Decl::Interface(self.parse_interface()));
@@ -351,7 +362,7 @@ impl Parser {
     pub fn parse_fn_decl(&mut self) -> FnDecl {
         let start = self.current().span;
 
-        let visibility = self.try_parse_visibility();
+        let visibility = self.take_visibility();
         let modifiers = self.try_parse_fn_modifiers();
         self.expect(TokenKind::Fun);
 
@@ -581,6 +592,18 @@ impl Parser {
         ty
     }
 
+    /// 取用可见性：优先使用预扫描（try_parse_modifier_prefix）消费的结果，
+    /// 否则调用 try_parse_visibility 就地解析
+    fn take_visibility(&mut self) -> Visibility {
+        if self.pending_visibility != Visibility::Public {
+            let vis = self.pending_visibility;
+            self.pending_visibility = Visibility::Public;
+            vis
+        } else {
+            self.try_parse_visibility()
+        }
+    }
+
     fn try_parse_visibility(&mut self) -> Visibility {
         if self.check(TokenKind::Public) {
             self.advance();
@@ -688,7 +711,9 @@ impl Parser {
         self.current().kind == TokenKind::Ident
             && is_fn_modifier_word(&self.current().literal)
             && self.peek_ahead(1).kind == TokenKind::Fun
-            || self.is_internal_visibility()
+            || (self.current().kind == TokenKind::Ident
+                && self.current().literal == "internal"
+                && self.peek_ahead(1).kind == TokenKind::Fun)
     }
 
     /// 当前 token 是否为可见性关键字（`public` / `private` / `protected`）
@@ -707,19 +732,58 @@ impl Parser {
     /// `internal` 可见性（上下文关键字）：仅当后随声明起始 token 时才视为可见性修饰符，
     /// 避免误吞以 `internal` 命名的标识符
     fn is_internal_visibility(&self) -> bool {
-        self.current().kind == TokenKind::Ident
-            && self.current().literal == "internal"
+        if self.current().kind != TokenKind::Ident || self.current().literal != "internal" {
+            return false;
+        }
+        let next = self.peek_ahead(1);
+        matches!(
+            next.kind,
+            TokenKind::Val
+                | TokenKind::Var
+                | TokenKind::Fun
+                | TokenKind::Class
+                | TokenKind::Struct
+                | TokenKind::Interface
+                | TokenKind::Enum
+                | TokenKind::Actor
+                | TokenKind::Value
+                | TokenKind::Object
+                | TokenKind::Typealias
+                | TokenKind::Data
+                | TokenKind::Sealed
+        ) || (next.kind == TokenKind::Ident
             && matches!(
-                self.peek_ahead(1).kind,
-                TokenKind::Val
-                    | TokenKind::Var
-                    | TokenKind::Fun
-                    | TokenKind::Class
-                    | TokenKind::Struct
-                    | TokenKind::Interface
-                    | TokenKind::Enum
-                    | TokenKind::Actor
-            )
+                next.literal.as_str(),
+                "open" | "abstract" | "data" | "sealed"
+            ))
+    }
+
+    /// 判断 `internal` 后的下一个 token 是否为声明起始 token
+    fn is_internal_next_token(tokens: &[Token]) -> bool {
+        if tokens.is_empty() {
+            return false;
+        }
+        let next = &tokens[0];
+        matches!(
+            next.kind,
+            TokenKind::Val
+                | TokenKind::Var
+                | TokenKind::Fun
+                | TokenKind::Class
+                | TokenKind::Struct
+                | TokenKind::Interface
+                | TokenKind::Enum
+                | TokenKind::Actor
+                | TokenKind::Value
+                | TokenKind::Object
+                | TokenKind::Typealias
+                | TokenKind::Data
+                | TokenKind::Sealed
+        ) || (next.kind == TokenKind::Ident
+            && matches!(
+                next.literal.as_str(),
+                "open" | "abstract" | "data" | "sealed"
+            ))
     }
 
     /// 预扫描声明前缀修饰符（open / abstract / expect / actual，上下文关键字）。
@@ -727,12 +791,27 @@ impl Parser {
     /// 声明之前时才消费，避免误吞以它们命名的顶层标识符（Kotlin 中这些词仍可用作标识符）。
     fn try_parse_modifier_prefix(&mut self) {
         let mut i = self.pos;
+        // 检测并消费可见性关键字
+        let mut vis: Visibility = Visibility::Public;
         if i < self.tokens.len()
             && matches!(
                 self.tokens[i].kind,
                 TokenKind::Public | TokenKind::Private | TokenKind::Protected
             )
         {
+            vis = match self.tokens[i].kind {
+                TokenKind::Public => Visibility::Public,
+                TokenKind::Private => Visibility::Private,
+                TokenKind::Protected => Visibility::Protected,
+                _ => unreachable!(),
+            };
+            i += 1;
+        } else if i < self.tokens.len()
+            && self.tokens[i].kind == TokenKind::Ident
+            && self.tokens[i].literal == "internal"
+            && Self::is_internal_next_token(&self.tokens[i + 1..])
+        {
+            vis = Visibility::Internal;
             i += 1;
         }
         let start = i;
@@ -754,6 +833,13 @@ impl Parser {
             mods.push(m);
             i += 1;
         }
+        // 消费可见性关键字（如果存在）
+        if vis != Visibility::Public || start > self.pos {
+            for _ in self.pos..start {
+                self.advance();
+            }
+            self.pending_visibility = vis;
+        }
         if mods.is_empty() {
             return;
         }
@@ -773,7 +859,8 @@ impl Parser {
             | Some(TokenKind::Interface)
             | Some(TokenKind::Data)
             | Some(TokenKind::Sealed)
-            | Some(TokenKind::Value) => {
+            | Some(TokenKind::Value)
+            | Some(TokenKind::Object) => {
                 for _ in start..i {
                     self.advance();
                 }
@@ -794,8 +881,9 @@ impl Parser {
     fn parse_class_member(&mut self, m: &mut ClassMembers) {
         self.collect_doc();
 
-        // 直接 val/var 字段
-        if self.check(TokenKind::Val) || self.check(TokenKind::Var) {
+        // 直接 val/var/const 字段
+        if self.check(TokenKind::Val) || self.check(TokenKind::Var) || self.check(TokenKind::Const)
+        {
             let f = self.parse_struct_field();
             m.fields.push(f);
             return;
@@ -808,8 +896,9 @@ impl Parser {
         {
             let k1 = self.peek_ahead(1);
             let k2 = self.peek_ahead(2);
-            // [可见性] val/var 字段
-            if k1.kind == TokenKind::Val || k1.kind == TokenKind::Var {
+            // [可见性] val/var/const 字段
+            if k1.kind == TokenKind::Val || k1.kind == TokenKind::Var || k1.kind == TokenKind::Const
+            {
                 let f = self.parse_struct_field();
                 m.fields.push(f);
                 return;
@@ -884,7 +973,7 @@ impl Parser {
     /// `[可见性] (constructor|init) (参数) [: super(...)|this(...)|Base(...)] [{ 函数体 }]`
     fn parse_constructor(&mut self) -> ConstructorDecl {
         let start = self.current().span;
-        let visibility = self.try_parse_visibility();
+        let visibility = self.take_visibility();
         if self.is_kw("constructor") || self.is_kw("init") {
             self.advance();
         }
@@ -932,7 +1021,7 @@ impl Parser {
     /// 解析伴生对象：`[可见性] companion object [Name] { 成员 }`
     fn parse_companion_into(&mut self, m: &mut ClassMembers) {
         let start = self.current().span;
-        let _visibility = self.try_parse_visibility();
+        let _visibility = self.take_visibility();
         self.advance(); // companion
         self.advance(); // object（TokenKind::Object）
         // 命名伴生对象：companion object Default { ... }
@@ -1046,7 +1135,7 @@ impl Parser {
     #[allow(dead_code)]
     pub fn parse_struct(&mut self) -> StructDecl {
         let start = self.current().span;
-        let visibility = self.try_parse_visibility();
+        let visibility = self.take_visibility();
 
         let sealed = self.check(TokenKind::Sealed);
         if sealed {
@@ -1074,7 +1163,7 @@ impl Parser {
                     members.fields.push(self.parse_struct_field());
                 } else {
                     members.fields.push(StructField {
-                        visibility: self.try_parse_visibility(),
+                        visibility: self.take_visibility(),
                         is_mutable: false,
                         name: self.advance().literal.clone(),
                         type_hint: None,
@@ -1126,7 +1215,7 @@ impl Parser {
 
     fn parse_struct_field(&mut self) -> StructField {
         let start = self.current().span;
-        let visibility = self.try_parse_visibility();
+        let visibility = self.take_visibility();
 
         let mut is_mutable = false;
         if self.check(TokenKind::Var) {
@@ -1134,6 +1223,10 @@ impl Parser {
             is_mutable = true;
         } else if self.check(TokenKind::Val) {
             self.advance();
+        } else if self.check(TokenKind::Const) {
+            // const 修饰符：常量（不可变），与 val 相同 AST 但语义不同
+            self.advance();
+            is_mutable = false;
         }
 
         let name = self.advance().literal.clone();
@@ -1221,7 +1314,7 @@ impl Parser {
     #[allow(dead_code)]
     pub fn parse_enum(&mut self) -> EnumDecl {
         let start = self.current().span;
-        let visibility = self.try_parse_visibility();
+        let visibility = self.take_visibility();
         self.expect(TokenKind::Enum);
         let name = self.advance().literal.clone();
 
@@ -1323,7 +1416,7 @@ impl Parser {
     #[allow(dead_code)]
     pub fn parse_class(&mut self) -> ClassDecl {
         let start = self.current().span;
-        let visibility = self.try_parse_visibility();
+        let visibility = self.take_visibility();
         self.expect(TokenKind::Class);
         let name = self.advance().literal.clone();
         let type_params = self.try_parse_type_params();
@@ -1373,11 +1466,68 @@ impl Parser {
         }
     }
 
+    /// 解析单例对象：`[可见性] object Name [: Parent() | Trait1, Trait2] { 成员 }`
+    ///
+    /// Kotlin 风格 `object` 声明：全局唯一实例，不可手动实例化。
+    /// 支持继承（`: Parent()`）和接口实现（`: Parent(), Trait1, Trait2`）。
+    #[allow(dead_code)]
+    pub fn parse_object(&mut self) -> ObjectDecl {
+        let start = self.current().span;
+        let visibility = self.take_visibility();
+        self.expect(TokenKind::Object);
+        let name = self.advance().literal.clone();
+        let type_params = self.try_parse_type_params();
+
+        let superclass = self.parse_superclass_ref();
+
+        let mut members = ClassMembers::default();
+        let mut implementations = Vec::new();
+
+        if self.check(TokenKind::LBrace) {
+            self.advance();
+            while !self.check(TokenKind::RBrace) && !self.is_at_end() {
+                self.parse_class_member(&mut members);
+            }
+            self.expect(TokenKind::RBrace);
+        }
+
+        // Kotlin 风格：`: Base(), Trait1, Trait2`（父类之后的接口列表）
+        if superclass.is_some() {
+            while self.check(TokenKind::Comma) {
+                self.advance();
+                implementations.push(self.advance().literal.clone());
+            }
+        }
+
+        // 接口实现：`:: TraitName` 或 Kotlin 风格 `: TraitName`（在 body 之后）
+        if self.check(TokenKind::DoubleColon) || self.check(TokenKind::Colon) {
+            self.advance();
+            implementations.push(self.advance().literal.clone());
+        }
+
+        // 消费预扫描的修饰符（open/abstract/expect/actual）
+        let modifiers = std::mem::take(&mut self.pending_class_mods);
+        let _ = type_params; // 单例暂不支持泛型参数
+
+        ObjectDecl {
+            visibility,
+            name,
+            superclass,
+            implementations,
+            fields: members.fields,
+            methods: members.methods,
+            init_blocks: members.init_blocks,
+            modifiers,
+            doc: self.take_doc(),
+            span: Span::merge(&start, &self.current().span),
+        }
+    }
+
     /// 解析 `data struct Name { ... }`
     #[allow(dead_code)]
     pub fn parse_data_struct(&mut self) -> StructDecl {
         let start = self.current().span;
-        let visibility = self.try_parse_visibility();
+        let visibility = self.take_visibility();
         self.expect(TokenKind::Data);
         self.expect(TokenKind::Struct);
         let name = self.advance().literal.clone();
@@ -1434,7 +1584,7 @@ impl Parser {
     #[allow(dead_code)]
     pub fn parse_sealed_struct(&mut self) -> StructDecl {
         let start = self.current().span;
-        let visibility = self.try_parse_visibility();
+        let visibility = self.take_visibility();
         self.expect(TokenKind::Sealed);
         self.expect(TokenKind::Struct);
         let name = self.advance().literal.clone();
@@ -1472,7 +1622,7 @@ impl Parser {
     #[allow(dead_code)]
     pub fn parse_data_class(&mut self) -> ClassDecl {
         let start = self.current().span;
-        let visibility = self.try_parse_visibility();
+        let visibility = self.take_visibility();
         self.expect(TokenKind::Data);
         self.expect(TokenKind::Class);
         let name = self.advance().literal.clone();
@@ -1549,7 +1699,7 @@ impl Parser {
     #[allow(dead_code)]
     pub fn parse_sealed_class(&mut self) -> ClassDecl {
         let start = self.current().span;
-        let visibility = self.try_parse_visibility();
+        let visibility = self.take_visibility();
         self.expect(TokenKind::Sealed);
         self.expect(TokenKind::Class);
         let name = self.advance().literal.clone();
@@ -1607,7 +1757,7 @@ impl Parser {
     #[allow(dead_code)]
     pub fn parse_value_class(&mut self) -> ClassDecl {
         let start = self.current().span;
-        let visibility = self.try_parse_visibility();
+        let visibility = self.take_visibility();
         self.expect(TokenKind::Value);
         self.expect(TokenKind::Class);
         let name = self.advance().literal.clone();
@@ -1673,7 +1823,7 @@ impl Parser {
     #[allow(dead_code)]
     pub fn parse_value_data_class(&mut self) -> ClassDecl {
         let start = self.current().span;
-        let visibility = self.try_parse_visibility();
+        let visibility = self.take_visibility();
         self.expect(TokenKind::Value);
         self.expect(TokenKind::Data);
         self.expect(TokenKind::Class);
@@ -1745,7 +1895,7 @@ impl Parser {
     #[allow(dead_code)]
     pub fn parse_sealed_value_class(&mut self) -> ClassDecl {
         let start = self.current().span;
-        let visibility = self.try_parse_visibility();
+        let visibility = self.take_visibility();
         self.expect(TokenKind::Sealed);
         self.expect(TokenKind::Value);
         self.expect(TokenKind::Class);
@@ -1814,7 +1964,7 @@ impl Parser {
     #[allow(dead_code)]
     pub fn parse_interface(&mut self) -> InterfaceDecl {
         let start = self.current().span;
-        let visibility = self.try_parse_visibility();
+        let visibility = self.take_visibility();
         self.expect(TokenKind::Interface);
         let name = self.advance().literal.clone();
 
@@ -1844,7 +1994,7 @@ impl Parser {
     #[allow(dead_code)]
     pub fn parse_actor(&mut self) -> ActorDecl {
         let start = self.current().span;
-        let visibility = self.try_parse_visibility();
+        let visibility = self.take_visibility();
         self.expect(TokenKind::Actor);
         let name = self.advance().literal.clone();
 
@@ -1876,7 +2026,7 @@ impl Parser {
     #[allow(dead_code)]
     pub fn parse_type_alias(&mut self) -> TypeAliasDecl {
         let start = self.current().span;
-        let visibility = self.try_parse_visibility();
+        let visibility = self.take_visibility();
         self.expect(TokenKind::Typealias);
         let name = self.advance().literal.clone();
         self.expect(TokenKind::Assign);
@@ -2191,7 +2341,18 @@ impl Parser {
     #[allow(dead_code)]
     pub fn parse_expression(&mut self, min_bp: u8) -> Expr {
         let start = self.current().span;
+
+        // `is` 类型检查：先检查 is 关键字，避免 parse_prefix_expression 将其消费为标识符
+        // 仅在非 when 模式上下文中处理（when 模式由 parse_when_expression 处理）
+        if self.check(TokenKind::Is) {
+            // 回退：is 作为前缀表达式由 parse_prefix_expression 处理（创建 Ident("is")）
+            // 这里不处理，让 parse_prefix_expression 消费它
+        }
+
         let mut lhs = self.parse_prefix_expression();
+
+        // `is` 类型检查由 Pratt 循环处理（TokenKind::Is → BinOp::Is）
+        // 此处不处理，避免在 when 模式中错误消费下一个分支的 is 关键字
 
         // Pratt 循环：左结合运算符用 `bp > min_bp` 判断，RHS 以同优先级递归。
         // 非运算符 token（含 EOF、`)`、`}`、关键字）绑定优先级为 0，直接终止，
@@ -2263,12 +2424,20 @@ impl Parser {
             }
 
             // `as` 类型转换：x as Type → TypeCast
+            // `as?` 安全转换：x as? Type → TypeCast { safe: true }（失败返回 null）
             if self.check(TokenKind::As) {
                 self.advance();
+                let safe = if self.check(TokenKind::QuestionMark) {
+                    self.advance();
+                    true
+                } else {
+                    false
+                };
                 let type_name = self.parse_type();
                 lhs = Expr::TypeCast {
                     expr: Box::new(lhs),
                     type_name: Box::new(type_name),
+                    safe,
                     span: Span::merge(&start, &self.current().span),
                 };
                 continue;
@@ -2447,7 +2616,8 @@ impl Parser {
         }
 
         // 单参数 lambda: `x -> expr` 或 `x: Type -> expr`
-        if self.current().kind == TokenKind::Ident {
+        // （`when` 分支模式中禁用：`RED -> "red"` 的 `->` 是分支分隔符）
+        if self.current().kind == TokenKind::Ident && self.suppress_lambda == 0 {
             let peek1 = self.peek(1);
             if peek1 == TokenKind::Arrow || peek1 == TokenKind::Colon {
                 return self.parse_lambda();
@@ -2638,6 +2808,10 @@ impl Parser {
     }
 
     fn is_lambda_start(&self) -> bool {
+        // `when` 分支模式中 `->` 是分支分隔符，不能当作 lambda 箭头
+        if self.suppress_lambda > 0 {
+            return false;
+        }
         // 启发式：如果当前是标识符或 val/var，且后面跟冒号或箭头，则可能是 lambda
         if self.current().kind == TokenKind::Ident {
             let peek1 = self.peek(1);
@@ -2746,6 +2920,7 @@ impl Parser {
             TokenKind::DoubleDotOp => 8,  // 范围 ..
             TokenKind::To => 2,           // map entry: "a" to 1
             TokenKind::As => 3,           // 类型转换: x as String
+            TokenKind::Is => 3,           // 类型检查: x is String
             _ => 0,
         }
     }
@@ -2783,6 +2958,9 @@ impl Parser {
             TokenKind::LtLt => BinOp::Shl,
             TokenKind::GtGt => BinOp::Shr,
             TokenKind::GtGtGt => BinOp::UShr,
+            TokenKind::To => BinOp::To,
+            TokenKind::As => BinOp::As,
+            TokenKind::Is => BinOp::Is,
             _ => BinOp::Add,
         }
     }
@@ -2880,7 +3058,9 @@ impl Parser {
             let arm_start = self.current().span;
 
             // 模式解析（支持多值分支：`0, 1 -> ...`）
+            // 模式内禁止 lambda 解析：`RED -> "red"` 中的 `->` 是分支分隔符
             let mut patterns = Vec::new();
+            self.suppress_lambda += 1;
             loop {
                 let pattern = if self.check(TokenKind::In) {
                     // in 90..100 -> ...（范围匹配模式）
@@ -2911,6 +3091,7 @@ impl Parser {
                 }
                 break;
             }
+            self.suppress_lambda -= 1;
 
             // 守卫：is X && cond -> ...  或 pattern && cond -> ...
             let guard = if self.check(TokenKind::AndAnd) || self.check(TokenKind::OrOr) {
@@ -2922,7 +3103,8 @@ impl Parser {
             };
 
             self.expect(TokenKind::Arrow);
-            let body = self.parse_expression(0);
+            // 使用较高的 min_bp 避免消费下一个分支的 is 关键字（bp=3）
+            let body = self.parse_expression(3);
 
             arms.push(WhenArm {
                 patterns,
@@ -3314,6 +3496,7 @@ mod tests {
             }
             "#,
         );
+        eprintln!("errors: {:?}", errors);
         assert!(errors.is_empty());
     }
 

@@ -247,6 +247,19 @@ impl DocumentState {
                         },
                     );
                 }
+                Decl::Object(o) => {
+                    self.symbols.insert(
+                        o.name.clone(),
+                        SymbolInfo {
+                            name: o.name.clone(),
+                            kind: SymbolKind::Class,
+                            span: o.span,
+                            type_str: format!("object {}", o.name),
+                            doc: None,
+                            visibility: o.visibility,
+                        },
+                    );
+                }
                 Decl::Enum(e) => {
                     self.symbols.insert(
                         e.name.clone(),

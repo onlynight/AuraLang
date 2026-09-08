@@ -1,0 +1,256 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// Object 基类 + 类层级 综合测试
+// 验证 Phase 4：is/as 类型检查与转换、Object 内置方法、sealed class 穷举
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── ① 堆对象类层级 ──
+open class Animal {
+    var legs: Int = 4
+    open fun name(): String {
+        return "animal"
+    }
+    override fun toString(): String {
+        return "<Animal@legs=" + legs + ">"
+    }
+}
+
+class Dog : Animal() {
+    override fun name(): String {
+        return "dog"
+    }
+    override fun toString(): String {
+        return "Dog(name=" + name() + ", legs=" + legs + ")"
+    }
+}
+
+class Cat : Animal() {
+    override fun name(): String {
+        return "cat"
+    }
+}
+
+// ── ② 基本类型 is 检查 ──
+fun testPrimitiveIs(): Int {
+    // 基本类型 is 检查
+    val r1 = 1 is Int         // true
+    val r2 = 1 is String      // false
+    val r3 = 1 is Any         // true
+    val r4 = "hello" is String // true
+    val r5 = "hello" is Int    // false
+    val r6 = true is Boolean   // true
+    val r7 = 3.14f is Float    // true
+    val r8 = null is Any       // true
+    val r9 = null is Int       // false
+
+    return r1 + (1 - r2) + r3 + r4 + (1 - r5) + r6 + r7 + r8 + (1 - r9)
+    // 所有断言都通过时返回 9
+}
+
+// ── ③ 堆对象 is 检查 ──
+fun testObjectIs(): Int {
+    val d: Animal = Dog()
+
+    // 堆对象 is 检查
+    val r1 = d is Dog       // 自身类 → true
+    val r2 = d is Animal    // 父类 → true
+    val r3 = d is Cat       // 兄弟类 → false
+    val r4 = d is Any       // 顶级类型 → true
+    val r5 = d is Int       // 基本类型 → false
+
+    return r1 + r2 + (1 - r3) + r4 + (1 - r5)
+    // 所有断言都通过时返回 5
+}
+
+// ── ④ as 类型转换 ──
+fun testAsCast(): Int {
+    // 基本类型转换
+    val r1 = (3.14f as Int) + 100  // 3 + 100 = 103
+    val r2 = (true as Int) + 10     // 1 + 10 = 11
+    val r3 = (42 as Float) + 0.5f   // 42.5f
+
+    // Float→Int 截断
+    val r4 = (9.9f as Int) + 0      // 9
+
+    // 返回结果验证
+    return (r1 == 103) + (r2 == 11) + (r4 == 9)
+}
+
+// ── ⑤ as? 安全转换 ──
+fun testAsSafety(): Int {
+    val anyVal: Any = 42
+
+    // Int as? String → Null
+    val asStr: Any = anyVal as? String
+    val r1 = (asStr == null)
+
+    // Int as? Int → 42
+    val asInt: Any = anyVal as? Int
+    val r2 = (asInt == 42)
+
+    // Int as? Animal → Null（类类型不匹配）
+    val asAnimal: Any = anyVal as? Animal
+    val r3 = (asAnimal == null)
+
+    return r1 + r2 + r3
+}
+
+// ── ⑥ toString 虚方法 ──
+fun testToString(): Int {
+    val d = Dog()
+
+    // toString 虚分派（Dog 重写 → "Dog(name=dog, legs=4)"）
+    val s1 = d.toString()
+    val r1 = (s1 == "Dog(name=dog, legs=4)")
+
+    // String + T 隐式 toString
+    val s2 = "prefix: " + d
+    val r2 = (s2 == "prefix: Dog(name=dog, legs=4)")
+
+    // Animal.toString 默认实现（Cat 未重写 → 走 Animal 实现）
+    val a: Animal = Cat()
+    val s3 = a.toString()
+    val r3 = (s3 == "<Animal@legs=4>")
+
+    return r1 + r2 + r3
+}
+
+// ── ⑦ equals / hashCode ──
+fun testEqualsHashCode(): Int {
+    // 基本类型 equals
+    val r1 = (equals(42, 42))
+    val r2 = (!equals(42, 43))
+    val r3 = (equals("hello", "hello"))
+    val r4 = (!equals("hello", "world"))
+
+    // hashCode
+    val r5 = (hashCode(42) != 0)  // 非零哈希
+    val r6 = (hashCode("hello") != 0)
+    val r7 = (hashCode(true) == 1)  // Bool true → 1
+
+    return r1 + r2 + r3 + r4 + r5 + r6 + r7
+}
+
+// ── ⑧ typeOf 反射 ──
+fun testTypeOf(): Int {
+    val d = Dog()
+    val r1 = (typeOf(42) == "Int")
+    val r2 = (typeOf(3.14f) == "Float")
+    val r3 = (typeOf(true) == "Boolean")
+    val r4 = (typeOf("hello") == "String")
+    val r5 = (typeOf(null) == "Null")
+
+    return r1 + r2 + r3 + r4 + r5
+}
+
+// ── ⑨ sealed class when 穷举 ──
+sealed class Shape {
+    open fun area(): Float {
+        return 0.0f
+    }
+}
+
+class Circle : Shape() {
+    var r: Float = 0.0f
+    override fun area(): Float {
+        return 3.14f * r * r
+    }
+}
+
+class Square : Shape() {
+    var side: Float = 0.0f
+    override fun area(): Float {
+        return side * side
+    }
+}
+
+fun testSealedWhen(s: Shape): Float {
+    return when (s) {
+        is Circle -> s.area()
+        is Square -> s.area()
+        // 无 else 分支——编译器验证穷举性 ✅
+    }
+}
+
+fun testSealedClass(): Int {
+    val c = Circle()
+    c.r = 1.0f
+    val s = Square()
+    s.side = 2.0f
+
+    // Circle area ≈ 3.14
+    val r1 = testSealedWhen(c)
+    val r2 = testSealedWhen(s)
+
+    // 验证结果（近似比较）
+    val r3 = (r1 > 3.0f) && (r1 < 3.3f)  // π ≈ 3.14
+    val r4 = (r2 == 4.0f)                 // 2² = 4
+
+    return r3 + r4
+}
+
+// ── ⑩ when 表达式中的 is 模式 ──
+// 注意：分支按书写顺序匹配，更具体的类型（Dog）必须排在父类（Animal）之前
+fun testWhenIsPattern(x: Any): String {
+    return when (x) {
+        is Int -> "int"
+        is Float -> "float"
+        is Boolean -> "bool"
+        is String -> "string"
+        is Dog -> "dog"
+        is Animal -> "animal"
+        else -> "unknown"
+    }
+}
+
+fun testWhenPattern(): Int {
+    val r1 = (testWhenIsPattern(42) == "int")
+    val r2 = (testWhenIsPattern(3.14f) == "float")
+    val r3 = (testWhenIsPattern(true) == "bool")
+    val r4 = (testWhenIsPattern("hello") == "string")
+    val r5 = (testWhenIsPattern(Dog()) == "dog")
+    val r6 = (testWhenIsPattern(Cat()) == "animal")
+
+    return r1 + r2 + r3 + r4 + r5 + r6
+}
+
+// ── 主入口 ──
+fun main(): Int {
+    println("═══════════════════════════════════════")
+    println("  Object 基类 + 类层级 综合测试")
+    println("═══════════════════════════════════════")
+
+    val r1 = testPrimitiveIs()
+    println("  ① 基本类型 is 检查: " + r1 + "/9")
+
+    val r2 = testObjectIs()
+    println("  ② 堆对象 is 检查: " + r2 + "/5")
+
+    val r3 = testAsCast()
+    println("  ③ as 类型转换: " + r3 + "/3")
+
+    val r4 = testAsSafety()
+    println("  ④ as? 安全转换: " + r4 + "/3")
+
+    val r5 = testToString()
+    println("  ⑤ toString 虚方法: " + r5 + "/3")
+
+    val r6 = testEqualsHashCode()
+    println("  ⑥ equals/hashCode: " + r6 + "/7")
+
+    val r7 = testTypeOf()
+    println("  ⑦ typeOf 反射: " + r7 + "/5")
+
+    val r8 = testSealedClass()
+    println("  ⑧ sealed class when: " + r8 + "/2")
+
+    val r9 = testWhenPattern()
+    println("  ⑨ when is 模式: " + r9 + "/6")
+
+    val total = r1 + r2 + r3 + r4 + r5 + r6 + r7 + r8 + r9
+    val maxTotal = 9 + 5 + 3 + 3 + 3 + 7 + 5 + 2 + 6
+    println("═══════════════════════════════════════")
+    println("  总计: " + total + "/" + maxTotal)
+    println("═══════════════════════════════════════")
+
+    return total
+}

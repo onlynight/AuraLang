@@ -422,3 +422,17 @@ _Bool aura_isOfType(const void *value, const AuraString *typeName) {
     size_t len = typeName->len > 0 ? (size_t)typeName->len : 0;
     return strncmp(value_type_name, typeName->data, len) == 0 && value_type_name[len] == '\0';
 }
+
+// __throw(value) → void：打印异常值到 stderr（AOT throw 表达式支持）
+// value: i8* (异常值指针)
+void __throw(const void *value) {
+    if (value) {
+        // 尝试将值视为字符串指针并输出
+        const char *msg = (const char *)value;
+        fprintf(stderr, "[throw] %s\n", msg);
+        fflush(stderr);
+    } else {
+        fprintf(stderr, "[throw] null\n");
+        fflush(stderr);
+    }
+}

@@ -31,6 +31,8 @@ pub mod ipc;
 #[cfg(feature = "jit")]
 pub mod jit;
 #[cfg(feature = "jit")]
+pub mod jit_native;
+#[cfg(feature = "jit")]
 pub mod jit_opt;
 pub mod mmap_util;
 pub mod native;
@@ -240,6 +242,12 @@ pub enum Instr {
     // ── 方法 / 接口调用（5.6） ──
     CallMethod(u16),
     CallCtor(u16),
+
+    // ── 类型检查（Phase 2） ──
+    /// 实例类型检查：栈顶为值，class_id 为目标类 ID，Boolean 结果压栈
+    InstanceOf(u16),
+    /// 类型转换：栈顶为值，class_id 为目标类 ID，匹配则压栈原引用
+    CheckCast(u16),
 
     // ── 集合类型（5.7） ──
     NewList,
@@ -536,6 +544,22 @@ fn decode_function(f: &BytecodeFunction) -> Result<DecodedFunction, VmError> {
                 ip += 2;
                 instrs.push(Instr::CallCtor(v));
             }
+            crate::codegen::opcode::OpCode::InstanceOf(_) => {
+                let v = u16::from_le_bytes([
+                    code[ip],
+                    code[ip + 1],
+                ]);
+                ip += 2;
+                instrs.push(Instr::InstanceOf(v));
+            }
+            crate::codegen::opcode::OpCode::CheckCast(_) => {
+                let v = u16::from_le_bytes([
+                    code[ip],
+                    code[ip + 1],
+                ]);
+                ip += 2;
+                instrs.push(Instr::CheckCast(v));
+            }
             crate::codegen::opcode::OpCode::NewList => instrs.push(Instr::NewList),
             crate::codegen::opcode::OpCode::NewMap => instrs.push(Instr::NewMap),
             crate::codegen::opcode::OpCode::ListPush => instrs.push(Instr::ListPush),
@@ -707,6 +731,8 @@ pub struct Vm {
     call_counts: Vec<u64>,
     /// 入口函数返回值
     result: Option<Value>,
+    /// object 单例实例（类名 → 堆引用）
+    singletons: std::collections::HashMap<String, Value>,
     halt: bool,
     opts: VmOptions,
     #[cfg(feature = "jit")]
@@ -764,13 +790,14 @@ impl Vm {
                 eprintln!("[vm] AOT 模块加载失败，回退字节码解释: {}", e);
             }
         }
-        Ok(Vm {
+        let mut vm = Vm {
             module: loaded,
             natives,
             heap: Heap::new(),
             frames: Vec::new(),
             call_counts: vec![0; module.functions.len()],
             result: None,
+            singletons: std::collections::HashMap::new(),
             halt: false,
             opts,
             #[cfg(feature = "jit")]
@@ -786,7 +813,34 @@ impl Vm {
             loaded_libs: std::collections::HashMap::new(),
             #[cfg(unix)]
             loaded_libs: std::collections::HashMap::new(),
-        })
+        };
+        #[cfg(feature = "jit")]
+        vm.set_global_native_registry();
+        // Phase 2: 创建 object 单例实例
+        vm.create_singletons();
+        Ok(vm)
+    }
+
+    /// 为所有 `is_singleton` 类创建单例实例
+    fn create_singletons(&mut self) {
+        for (type_id, class_def) in self.module.module.classes.iter().enumerate() {
+            if class_def.is_singleton {
+                // 分配堆对象
+                let handle = self.heap.alloc_object(type_id as u16);
+                // 初始化字段默认值
+                for i in 0..class_def.field_count as u16 {
+                    self.heap.set_field(handle, i, Value::Null);
+                }
+                self.singletons.insert(class_def.name.clone(), Value::Ref(handle));
+            }
+        }
+    }
+
+    /// 设置全局 NativeRegistry 指针（JIT 原生调度器使用）
+    #[cfg(feature = "jit")]
+    pub fn set_global_native_registry(&mut self) {
+        crate::vm::jit_native::set_native_registry(&mut self.natives);
+        crate::vm::jit_native::set_natives_ptr(self.module.natives.as_ptr());
     }
 
     /// 注册额外原生函数（供 FFI / 标准库扩展）

@@ -267,6 +267,11 @@ impl Heap {
         }
     }
 
+    /// 获取堆数据（不可变引用）
+    pub fn get_data(&self, handle: usize) -> Option<&HeapData> {
+        self.slots.get(handle).and_then(|s| s.data.as_ref())
+    }
+
     /// 获取堆数据（可变引用，用于闭包等特殊类型）
     pub fn get_data_mut(&mut self, handle: usize) -> Option<&mut HeapData> {
         self.slots.get_mut(handle).and_then(|s| s.data.as_mut())

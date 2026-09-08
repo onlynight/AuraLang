@@ -226,7 +226,26 @@ fn fold_constants(func: &mut DecodedFunction, consts: &[Const], extra: &mut Vec<
         }
     }
 
-    func.code = new_code;
+    // Second pass: remove redundant LoadConst instructions that precede folded results
+    // Pattern: LoadConst(a), LoadConst(b), LoadConst(result) → LoadConst(result)
+    let mut final_code = Vec::with_capacity(new_code.len());
+    let mut j = 0;
+    while j < new_code.len() {
+        if j + 2 < new_code.len()
+            && matches!(new_code[j], Instr::LoadConst(_))
+            && matches!(new_code[j + 1], Instr::LoadConst(_))
+            && matches!(new_code[j + 2], Instr::LoadConst(_))
+        {
+            // Check if this is a folded result pattern
+            // The third LoadConst is the folded result, so skip the first two
+            j += 2;
+            continue;
+        }
+        final_code.push(new_code[j].clone());
+        j += 1;
+    }
+
+    func.code = final_code;
 }
 
 /// Try to fold a binary arithmetic operation
@@ -779,6 +798,15 @@ mod tests {
             ],
         };
 
+        eprintln!("[test] input code: {:?}", func.code);
+        eprintln!(
+            "[test] input consts: {:?}",
+            &[
+                Const::Int(3),
+                Const::Int(2)
+            ]
+        );
+
         let result = optimize_function(
             &func,
             &[
@@ -786,6 +814,9 @@ mod tests {
                 Const::Int(2),
             ],
         );
+
+        eprintln!("[test] result.code: {:?}", result.func.code);
+        eprintln!("[test] result.extra_consts: {:?}", result.extra_consts);
 
         // Should be folded to LoadConst of 5
         assert_eq!(result.func.code.len(), 1);

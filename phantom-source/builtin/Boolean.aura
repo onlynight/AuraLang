@@ -1,0 +1,44 @@
+// aura://builtin/Boolean.aura
+// 语言内置类型，不可修改
+
+/// 布尔类型，只有 `true` 和 `false` 两个值。
+///
+/// - 存储：VM 中内联存储为 bool（`Value::Bool`）
+/// - 字面量：`true` / `false`（关键字）
+///
+/// @see Int, String
+/// @since 0.1
+internal value class Boolean {
+
+    // ── 常量（companion object）──
+
+    companion object {
+        /// true 字面量
+        const TRUE: Boolean = true
+
+        /// false 字面量
+        const FALSE: Boolean = false
+    }
+
+    // ── 转换方法 ──
+
+    /// 转换为字符串表示（"true" / "false"）
+    override fun toString(): String
+
+    /// 转换为整数（true → 1, false → 0）
+    fun toInt(): Int
+
+    // ── 逻辑方法 ──
+
+    /// 逻辑非
+    fun not(): Boolean
+
+    /// 与
+    fun and(other: Boolean): Boolean
+
+    /// 或
+    fun or(other: Boolean): Boolean
+
+    /// 异或
+    fun xor(other: Boolean): Boolean
+}

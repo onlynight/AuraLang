@@ -179,19 +179,13 @@ fn insert_arc_function(f: &mut MirFunction) -> ArcInsertionStats {
         b.instrs = new_instrs;
     }
 
-    // 在每个块结尾插入 Release（简化：对参数槽释放）
-    for b in &mut f.blocks {
-        let mut extra = Vec::new();
-        for i in 0..f.param_slots.len() {
-            extra.push(MirInstr::Release { src: i });
-            stats.releases += 1;
-        }
-        // 仅在非返回块中插入 Release
-        match &b.term {
-            Terminator::Return(_) | Terminator::ReturnVoid => {}
-            _ => b.instrs.extend(extra),
-        }
-    }
+    // 参数槽的 Release 不在此处插入。
+    //
+    // 调用方已经为每个实参插入了一次 `Retain`，被调方若再按块释放参数槽，就会在
+    // 函数体尚未执行完（分支前的中间块）或返回值已被调用方持有（返回块）时把对象
+    // 提前回收，表现为 “no virtual method … for object” 或读到失效句柄。
+    // 该简化实现宁可保留轻微泄漏，也不做不安全的提前释放；真正的
+    // 生命周期回收由 `DropRef` / 显式 release 与 ARC 冗余消除共同负责。
 
     stats
 }

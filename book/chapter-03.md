@@ -360,3 +360,132 @@ aura migrate --convert input.lua --output output.aura
 | 内存分配 | GC 暂停 | ARC 无暂停 | ARC 无暂停 |
 
 > 详见 [性能基准报告](./chapter-04.md)
+
+---
+
+## 3.8 类型系统进阶：Any 基类与类层级
+
+> Phase 4 引入：Any 基类、is/as 类型检查与转换、sealed class 穷举检查
+
+### Any 基类
+
+Aura 采用**分层 Any 模型**：堆对象参与类层级，基本类型保持内联存储（零代价）。
+
+```
+Any (顶级类型 + 运行时基类)
+├── Int / Float / Boolean / String  ← 基本类型（内联，不参与层级）
+├── class Animal : Any()  (隐式继承)
+│   ├── class Dog : Animal()
+│   └── class Cat : Animal()
+├── class Shape : Any()  (sealed, 隐式继承)
+│   ├── class Circle : Shape()
+│   └── class Square : Shape()
+└── value class Vec2                ← 值类型（不参与层级）
+```
+
+Any 基类提供以下虚方法（所有 class 隐式继承）：
+
+| 方法 | 签名 | 默认实现 | 可重写 |
+|------|------|----------|--------|
+| `toString()` | `String` | `"<ClassName@handle>"` | ✅ |
+| `equals(other: Any)` | `Boolean` | 身份相等（`===`） | ✅ |
+| `hashCode()` | `Int` | 基于身份的哈希 | ✅ |
+| `typeOf()` | `String` | 运行时类名 | ❌（反射） |
+
+### is 类型检查
+
+`is` 操作符检查值的运行时类型，支持类层级遍历：
+
+```aura
+open class Animal { }
+class Dog : Animal() { }
+class Cat : Animal() { }
+
+val d: Animal = Dog()
+println(d is Dog)      // true  — 自身类
+println(d is Animal)   // true  — 父类（沿继承链向上查找）
+println(d is Cat)      // false — 兄弟类
+println(d is Any)      // true  — 顶级类型
+println(d is Int)      // false — 基本类型不匹配
+println(1 is Int)      // true  — 基本类型标签匹配
+println(1 is Any)      // true  — 所有值都是 Any
+```
+
+### as 类型转换
+
+`as` 进行严格类型转换，`as?` 进行安全转换（不匹配返回 null）：
+
+```aura
+// 基本类型转换（运行时转换）
+val i: Int = 3.14f as Int      // 3（截断）
+val s: String = 42 as String    // "42"
+val b: Int = true as Int        // 1
+
+// 类类型转换（CheckCast，不匹配则抛异常）
+val a: Animal = Dog()
+val d: Dog = a as Dog           // 成功（is Dog 为 true）
+// val c: Cat = a as Cat        // 运行时异常（不匹配）
+
+// 安全转换（as?，不匹配返回 null）
+val d2: Dog? = a as? Dog        // Dog 实例
+val c2: Cat? = a as? Cat        // null（不匹配）
+```
+
+### toString 隐式调用
+
+String + T 自动调用 T 的 `toString()` 虚方法（参考 Java/Kotlin）：
+
+```aura
+class Vec2 {
+    var x: Int = 0
+    var y: Int = 0
+    override fun toString(): String {
+        return "Vec2(" + x + ", " + y + ")"
+    }
+}
+
+val v = Vec2()
+v.x = 1
+v.y = 2
+
+println("value: " + v)          // "value: Vec2(1, 2)" — 隐式 toString
+println(v.toString())            // "Vec2(1, 2)" — 显式调用
+```
+
+### sealed class when 穷举检查
+
+sealed class 的 when 表达式在编译期检查穷举性——必须覆盖所有直接子类，无需 else 分支：
+
+```aura
+sealed class Shape {
+    open fun area(): Float { return 0.0f }
+}
+class Circle : Shape() {
+    override fun area(): Float { return 3.14f * r * r }
+}
+class Square : Shape() {
+    override fun area(): Float { return side * side }
+}
+
+fun computeArea(s: Shape): Float {
+    return when (s) {
+        is Circle -> s.area()
+        is Square -> s.area()
+        // 无 else 分支——编译器验证穷举性 ✅
+        // 缺少 Circle 或 Square 会报编译错误
+    }
+}
+```
+
+### typeOf 反射
+
+`typeOf()` 返回值的运行时类型名（字符串）：
+
+```aura
+println(typeOf(42))          // "Int"
+println(typeOf(3.14f))       // "Float"
+println(typeOf(true))        // "Boolean"
+println(typeOf("hello"))     // "String"
+println(typeOf(null))        // "Null"
+println(typeOf(Dog()))       // "Dog"（堆对象，通过 VM 类表解析）
+```

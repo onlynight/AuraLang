@@ -10,6 +10,7 @@
 //! - 属性访问器 `get`/`set`/`field`
 //! - open/abstract 继承 + vtable 动态分派（多态）
 //! - `.auc` 序列化 roundtrip 后虚方法表仍生效
+//! - Phase 4: is/as 类型检查与转换、Object 内置方法、sealed class 穷举
 
 use compiler::codegen::{compile_source, from_bytes, to_bytes};
 use compiler::vm::{Value, Vm, VmOptions};
@@ -102,7 +103,6 @@ fn test_secondary_constructor() {
 
 #[test]
 fn test_init_constructor_style() {
-    // Aura 既有惯例：init(params) { ... } 作为构造函数
     let src = r#"
         class Circle {
             val radius: Int = 0
@@ -295,4 +295,348 @@ fn test_vtables_survive_serialization() {
     let mut vm = Vm::new(&loaded, VmOptions::default()).expect("VM 初始化");
     let r = vm.run().expect("运行应成功");
     assert_eq!(r, Value::Int(1));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 4: Object 基类 + 类层级测试
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ① 基本类型 is 检查
+#[test]
+fn test_primitive_is_check() {
+    let src = r#"
+        fun main(): Int {
+            var score = 0
+            if (1 is Int) { score = score + 1 }
+            if (!(1 is String)) { score = score + 1 }
+            if (1 is Any) { score = score + 1 }
+            if ("hello" is String) { score = score + 1 }
+            if (!(42 is Boolean)) { score = score + 1 }
+            return score
+        }
+    "#;
+    assert_eq!(run_main(src), Value::Int(5));
+}
+
+// ② 堆对象 is 检查（类层级）
+#[test]
+fn test_object_is_hierarchy() {
+    let src = r#"
+        open class Animal {
+            open fun name(): String { return "animal" }
+        }
+        class Dog : Animal() {
+            override fun name(): String { return "dog" }
+        }
+        class Cat : Animal() {
+            override fun name(): String { return "cat" }
+        }
+        fun main(): Int {
+            val d: Animal = Dog()
+            var score = 0
+            if (d is Dog) { score = score + 1 }
+            if (d is Animal) { score = score + 1 }
+            if (!(d is Cat)) { score = score + 1 }
+            if (d is Any) { score = score + 1 }
+            if (!(d is Int)) { score = score + 1 }
+            return score
+        }
+    "#;
+    assert_eq!(run_main(src), Value::Int(5));
+}
+
+// ③ as 类型转换（基本类型）
+#[test]
+fn test_as_cast_primitive() {
+    let src = r#"
+        fun main(): Int {
+            val r1 = (3.14f as Int) + 100
+            val r2 = (true as Int) + 10
+            val r3 = (9.9f as Int) + 0
+            if (r1 == 103 && r2 == 11 && r3 == 9) { return 3 }
+            return 0
+        }
+    "#;
+    assert_eq!(run_main(src), Value::Int(3));
+}
+
+// ④ as? 安全转换（原生函数形式）
+#[test]
+fn test_as_safety() {
+    let src = r#"
+        fun main(): Int {
+            val anyVal: Any = 42
+            val asStr: Any = aura_cast_safety(anyVal, "String")
+            val asInt: Any = aura_cast_safety(anyVal, "Int")
+            var score = 0
+            if (asStr == null) { score = score + 1 }
+            if (asInt == 42) { score = score + 1 }
+            return score
+        }
+    "#;
+    assert_eq!(run_main(src), Value::Int(2));
+}
+
+// ④b as? 语法：类类型安全转换
+#[test]
+fn test_as_safe_syntax_class() {
+    let src = r#"
+        open class Animal {
+            open fun name(): String { return "animal" }
+        }
+        class Dog : Animal() {
+            override fun name(): String { return "dog" }
+        }
+        class Cat : Animal() {
+            override fun name(): String { return "cat" }
+        }
+        fun main(): Int {
+            val a: Animal = Dog()
+            val d = a as? Dog
+            val c = a as? Cat
+            var score = 0
+            if (d != null) { score = score + 1 }
+            if (c == null) { score = score + 1 }
+            if (d.name() == "dog") { score = score + 1 }
+            return score
+        }
+    "#;
+    assert_eq!(run_main(src), Value::Int(3));
+}
+
+// ④c as? 语法：基本类型安全转换（不匹配返回 null）
+#[test]
+fn test_as_safe_syntax_primitive() {
+    let src = r#"
+        fun main(): Int {
+            val anyVal: Any = 42
+            val asStr = anyVal as? String
+            val asInt = anyVal as? Int
+            var score = 0
+            if (asStr == null) { score = score + 1 }
+            if (asInt == 42) { score = score + 1 }
+            return score
+        }
+    "#;
+    assert_eq!(run_main(src), Value::Int(2));
+}
+
+// ④d as 硬转换：类型匹配时成功
+#[test]
+fn test_as_hard_cast() {
+    let src = r#"
+        open class Animal {
+            open fun name(): String { return "animal" }
+        }
+        class Dog : Animal() {
+            override fun name(): String { return "dog" }
+        }
+        fun main(): Int {
+            val a: Animal = Dog()
+            val d = a as Dog
+            if (d.name() == "dog") { return 1 }
+            return 0
+        }
+    "#;
+    assert_eq!(run_main(src), Value::Int(1));
+}
+
+// ⑤ toString 虚方法
+#[test]
+fn test_tostring_virtual() {
+    let src = r#"
+        class Vec2 {
+            var x: Int = 0
+            var y: Int = 0
+            fun toString(): String {
+                return "Vec2(" + x + ", " + y + ")"
+            }
+        }
+        fun main(): Int {
+            val v = Vec2()
+            v.x = 1
+            v.y = 2
+            val s = v.toString()
+            if (s != "Vec2(1, 2)") { return 0 }
+            return 1
+        }
+    "#;
+    assert_eq!(run_main(src), Value::Int(1));
+}
+
+// ⑤b 隐式 toString：字符串拼接自动调用用户实现的 toString（静态分派）
+#[test]
+fn test_implicit_tostring_static() {
+    let src = r#"
+        class Vec2 {
+            var x: Int = 0
+            var y: Int = 0
+            fun toString(): String {
+                return "Vec2(" + x + ", " + y + ")"
+            }
+        }
+        fun main(): Int {
+            val v = Vec2()
+            v.x = 1
+            v.y = 2
+            val s = "point = " + v
+            if (s == "point = Vec2(1, 2)") { return 1 }
+            return 0
+        }
+    "#;
+    assert_eq!(run_main(src), Value::Int(1));
+}
+
+// ⑤c 隐式 toString：open toString 经 vtable 动态分派到子类实现
+#[test]
+fn test_implicit_tostring_virtual() {
+    let src = r#"
+        open class Animal {
+            open fun toString(): String { return "animal" }
+        }
+        class Dog : Animal() {
+            override fun toString(): String { return "dog" }
+        }
+        fun describe(a: Animal): String {
+            return "it is " + a
+        }
+        fun main(): Int {
+            val d: Animal = Dog()
+            if (describe(d) == "it is dog") { return 1 }
+            return 0
+        }
+    "#;
+    assert_eq!(run_main(src), Value::Int(1));
+}
+
+// ⑥ equals / hashCode
+#[test]
+fn test_equals_hashcode() {
+    let src = r#"
+        fun main(): Int {
+            var score = 0
+            if (equals(42, 42)) { score = score + 1 }
+            if (!equals(42, 43)) { score = score + 1 }
+            if (equals("hello", "hello")) { score = score + 1 }
+            if (!equals("hello", "world")) { score = score + 1 }
+            if (hashCode(42) != 0) { score = score + 1 }
+            if (hashCode("hello") != 0) { score = score + 1 }
+            return score
+        }
+    "#;
+    assert_eq!(run_main(src), Value::Int(6));
+}
+
+// ⑦ typeOf 反射
+#[test]
+fn test_typeof() {
+    let src = r#"
+        fun main(): Int {
+            var score = 0
+            if (typeOf(42) == "Int") { score = score + 1 }
+            if (typeOf(3.14f) == "Float") { score = score + 1 }
+            if (typeOf(true) == "Boolean") { score = score + 1 }
+            if (typeOf("hello") == "String") { score = score + 1 }
+            if (typeOf(null) == "Null") { score = score + 1 }
+            return score
+        }
+    "#;
+    assert_eq!(run_main(src), Value::Int(5));
+}
+
+// ⑧ when 表达式中的 is 模式
+#[test]
+fn test_when_is_pattern() {
+    let src = r#"
+        open class Animal { }
+        class Dog : Animal() { }
+
+        fun checkType(x: Any): String {
+            return when (x) {
+                is Dog -> "dog"
+                is Animal -> "animal"
+                is Int -> "int"
+                is Float -> "float"
+                is Boolean -> "bool"
+                is String -> "string"
+                else -> "unknown"
+            }
+        }
+
+        fun main(): Int {
+            var score = 0
+            if (checkType(42) == "int") { score = score + 1 }
+            if (checkType(3.14f) == "float") { score = score + 1 }
+            if (checkType(true) == "bool") { score = score + 1 }
+            if (checkType("hello") == "string") { score = score + 1 }
+            if (checkType(Dog()) == "dog") { score = score + 1 }
+            return score
+        }
+    "#;
+    assert_eq!(run_main(src), Value::Int(5));
+}
+
+// ⑨ sealed class when 穷举（编译器应检查穷举性）
+#[test]
+fn test_sealed_class_when_exhaustive() {
+    let src = r#"
+        sealed class Shape {
+            open fun area(): Float { return 0.0f }
+        }
+        class Circle : Shape() {
+            override fun area(): Float { return 1.0f }
+        }
+        class Square : Shape() {
+            override fun area(): Float { return 2.0f }
+        }
+
+        fun computeArea(s: Shape): Float {
+            if (s is Circle) { return s.area() }
+            if (s is Square) { return s.area() }
+            return 0.0f
+        }
+
+        fun main(): Int {
+            val c = Circle()
+            val sq = Square()
+            var score = 0
+            if (computeArea(c) == 1.0f) { score = score + 1 }
+            if (computeArea(sq) == 2.0f) { score = score + 1 }
+            return score
+        }
+    "#;
+    assert_eq!(run_main(src), Value::Int(2));
+}
+
+// ⑩ 多态 + is 组合
+#[test]
+fn test_polymorphism_with_is() {
+    let src = r#"
+        open class Vehicle {
+            open fun drive(): String { return "beep" }
+        }
+        class Car : Vehicle() {
+            override fun drive(): String { return "vroom" }
+        }
+        class Bike : Vehicle() {
+            override fun drive(): String { return "pedal" }
+        }
+
+        fun makeNoise(v: Vehicle): String {
+            if (v is Car) { return "car:" + v.drive() }
+            return "other:" + v.drive()
+        }
+
+        fun main(): Int {
+            val v1: Vehicle = Car()
+            val v2: Vehicle = Bike()
+            val r1 = makeNoise(v1)
+            val r2 = makeNoise(v2)
+            var score = 0
+            if (r1 == "car:vroom") { score = score + 1 }
+            if (r2 == "other:pedal") { score = score + 1 }
+            return score
+        }
+    "#;
+    assert_eq!(run_main(src), Value::Int(2));
 }

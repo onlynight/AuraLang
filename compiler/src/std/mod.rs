@@ -26,6 +26,7 @@
 //! - std_iter     — 迭代器/函数式工具（map / filter / reduce / ...）
 
 pub mod decl;
+pub mod source_index;
 
 // Phase 3: std 模块按需编译（#[cfg(feature)] 门控）
 // 默认不编译任何 std 模块，减小二进制体积。

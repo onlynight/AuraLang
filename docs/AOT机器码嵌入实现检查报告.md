@@ -1,4 +1,4 @@
-﻿# AOT 机器码嵌入 —— Phase 1 实现检查报告
+# AOT 机器码嵌入 —— Phase 1 实现检查报告
 
 > 依据：`docs/AOT机器码嵌入方案-详细设计.md`（§3 段布局 / §4 调用约定 / §5 描述符 /
 > §7 VM 分发 / §8 安全模型 / §9 任务表 / §11 文件清单与不变量）
@@ -161,6 +161,28 @@ HEAD 上同样失败 4 项，与本次改动无关）。
 
 其他已知边界（Phase 1 限定，属设计内延期）：
 - String/闭包/集合等 TAG 可经 ABI 传递但 `to_value` 暂回退 Null（设计 §9 Phase 2 处理）
+
+---
+
+## 7. 后续修复记录（Phase 4 收尾）
+
+本轮在 LLVM 23.1.0（`D:\DevTools\LLVM\clang+llvm-23.1.0-x86_64-pc-windows-msvc`）下实际跑通了
+AOT 链路，修复了此前因 LLVM 未安装而未被执行的 AOT 测试所暴露的 IR 生成缺陷：
+
+| # | 问题 | 修复 |
+|---|------|------|
+| 1 | 预置内置函数（`equals`/`hashCode`/`typeOf`/`aura_*`）签名缺失，返回值被当成 `i8*`，生成 `icmp ne i8* %x, 0` / `xor i1 %ptr, 1` 等非法 IR | `hir.rs` 补齐 prelude 内置函数签名（equals→Boolean、hashCode→Int、typeOf→String 等） |
+| 2 | 调用点实参类型与 `declare` 不一致（`call void @println(i32 …)` vs `declare void @println(i8*)`） | `aot/emit.rs` 新增 `func_param_types` + `coerce_arg`，按声明类型插入 `inttoptr`/`ptrtoint`/`zext`/`trunc`/`sitofp` 等转换 |
+| 3 | 成员访问 `load %struct.X, %var.N*`（把值当指针类型用） | 先 `bitcast` 到 `%struct.X*` 再 `load` |
+| 4 | `extractvalue … i32 0` 索引写成带类型常量 | 改为裸整数字面量 `extractvalue …, 0` |
+| 5 | 字段赋值 `emit_member_assign` 是空实现，且会生成 `getelementptr i8, i8* %struct值` | 实现两种形态：结构体局部变量 `load/insertvalue/store` 回写；指针对象 `bitcast + gep + store` |
+| 6 | 字符串拼接返回裸 `i8*`，而函数签名声明 `{ i8*, i64 }` | 拼接后补齐长度字段构造结构体值；非字符串操作数先经 `@toString` 转换 |
+| 7 | 包装函数对结构体返回值做 `ptrtoint { i8*, i64 }` | 先 `extractvalue` 取第 0 字段再 `ptrtoint` |
+| 8 | 虚调用 `CallVirtual` 直接以裸方法名 `@area` 调用 | 按接收者类型解析为 `Class.method` 后再发静态调用 |
+| 9 | `Float` 字面量恒为 `double`，与 `float` 返回类型/字段类型不符；比较/运算两侧类型不统一 | 新增 `emit_numeric_convert`；return 语句按函数签名转换；比较运算统一类型并修正 `fcmp` 谓词（原恒为 `one`） |
+
+验证：`cargo test --features llvm,jit --test phase4_integration_tests` 19/19 通过（含 AOT 嵌入真机执行）；
+真实 Aura 程序（类 + 虚方法 + 字段赋值 + 浮点运算）经 `aura build --aot` 生成原生 exe 并运行退出码 0。
 
 ---
 

@@ -1,0 +1,43 @@
+// aura://stdlib/aura/assert/Assert.aura
+// 标准库模块，不可修改
+// 实现：Rust 原生函数（compiler/src/std/std_assert.rs）
+// (package 声明由编译器自动注入，无需显式声明)
+/// 通用断言模块。
+///
+/// 使用前需 import：
+/// ```aura
+/// import aura.assert.*
+/// ```
+///
+/// 断言失败时抛出运行时异常并输出消息。与 `aura.test` 的区别：本模块用于生产代码中的前置/后置条件检查，
+/// `aura.test` 用于测试框架中的断言。
+///
+/// @since 0.1
+internal object Assert {
+
+    /// 通用断言——条件为 true 则通过，否则抛出异常。
+    ///
+    /// 返回 "OK: <message>" 表示通过。
+    fun assert(condition: Any, message: String): String
+
+    /// 断言条件为 true。
+    fun assertTrue(condition: Any, message: String): String
+
+    /// 断言条件为 false。
+    fun assertFalse(condition: Any, message: String): String
+
+    /// 断言两个值相等。
+    fun assertEq(a: Any, b: Any, message: String): String
+
+    /// 断言两个值不相等。
+    fun assertNotEq(a: Any, b: Any, message: String): String
+
+    /// 断言值不为 null。
+    fun assertNotNull(value: Any, message: String): String
+
+    /// 断言值为 null。
+    fun assertNull(value: Any, message: String): String
+
+    /// 调试断言（仅在 debug 模式下生效）。
+    fun debugAssert(condition: Any, message: String): String
+}

@@ -1,0 +1,40 @@
+// aura://builtin/Type.aura
+// 语言内置类型，不可修改
+
+/// 运行时类型对象——由 `typeOf()` 返回，用于反射。
+///
+/// 例：
+/// ```aura
+/// val t: Type = Dog().typeOf()
+/// println(t.name)       // "Dog"
+/// println(t.superClass) // "Animal"
+/// ```
+///
+/// @see Any
+/// @since 0.5
+internal value class Type {
+
+    /// 类型名称
+    val name: String
+
+    /// 父类类型（无父类返回 null）
+    val superClass: Type?
+
+    /// 是否为类类型
+    val isClass: Boolean
+
+    /// 是否为接口
+    val isInterface: Boolean
+
+    /// 是否为枚举
+    val isEnum: Boolean
+
+    /// 是否为基本类型
+    val isPrimitive: Boolean
+
+    /// 是否为可空类型
+    val isNullable: Boolean
+
+    /// 检查给定类型是否是本类型的子类或相同类型
+    fun isAssignableFrom(other: Type): Boolean
+}
