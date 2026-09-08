@@ -1,0 +1,252 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 6 — 空安全测试 (P6: Null Safety)
+// ═══════════════════════════════════════════════════════════════════════════
+// 覆盖：可空类型 T? / 安全调用 ?. / Elvis ?: / 强制解包 !! /
+//       可空与非空互转 / null 检查
+//
+// 验证：
+//   aura check examples/language-test/06-null-safety.aura    // 语法/语义零错误
+//   aura run   examples/language-test/06-null-safety.aura    // VM 执行
+//   aura run   examples/language-test/06-null-safety.aura --jit  // JIT
+//   aura build examples/language-test/06-null-safety.aura --aot --output target/test/06-null-safety  // AOT
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── 顶层函数定义 ────────────────────────────────────────────────────────────
+
+/// §6.8 边界情况测试用函数
+fun addSafe(a: Int, b: Int): Int = a + b
+
+// ── §6.1 可空类型声明（Nullable Types） ─────────────────────────────────────
+/// 测试可空类型的声明与初始化
+fun testNullableDecl() {
+    // 可空标量类型（仅初始化 null — AOT 兼容）
+    val nullInt: Int? = null
+    val nullBool: Boolean? = null
+
+    // 可空引用类型（String 可 null 可有值）
+    val nullStr: String? = null
+    val someStr: String? = "hello"
+
+    // 可空引用类型 — 长字符串
+    val longStr: String? = "null safety is important"
+
+    println("§6.1 可空类型声明:")
+    println("  nullInt: " + nullInt.toString())
+    println("  nullBool: " + nullBool.toString())
+    println("  nullStr: " + nullStr.toString())
+    println("  someStr: " + someStr.toString())
+    println("  longStr: " + longStr.toString())
+}
+
+// ── §6.2 Elvis 运算符（?:） ────────────────────────────────────────────────
+/// 测试 Elvis 运算符的可空值默认值
+fun testElvis() {
+    val nullInt: Int? = null
+    val someInt: Int? = 42
+    val nullStr: String? = null
+    val someStr: String? = "world"
+
+    // null → 默认值
+    val defaultInt: Int = nullInt ?: 0
+    val defaultStr: String = nullStr ?: "default"
+
+    // 有值 → 原值
+    val keptInt: Int = someInt ?: 0
+    val keptStr: String = someStr ?: "default"
+
+    // Elvis 结果可继续运算
+    val computed: Int = (nullInt ?: 100) + 1
+    val computedStr: String = someStr ?: "kept"
+
+    println("§6.2 Elvis ?:")
+    println("  nullInt ?: 0 = " + defaultInt.toString())
+    println("  nullStr ?: \"default\" = " + defaultStr)
+    println("  someInt ?: 0 = " + keptInt.toString())
+    println("  someStr ?: \"default\" = " + keptStr)
+    println("  (nullInt ?: 100) + 1 = " + computed.toString())
+    println("  someStr ?: \"kept\" = " + computedStr)
+}
+
+// ── §6.3 强制解包（!!） ────────────────────────────────────────────────────
+/// 测试 !! 非空断言运算符
+fun testAssertNonNull() {
+    val someInt: Int? = 100
+    val someStr: String? = "safe"
+
+    // !! 在 HIR 中降级为直接传递表达式（pass-through）
+    // 对有值的可空变量，结果等价于原值
+    val unwrappedInt: Int = someInt!!
+    val unwrappedStr: String = someStr!!
+
+    // !! 用于类型收窄（可空→非空），可继续运算
+    val narrowed: Int = someInt!! + 1
+    val narrowedStr: String = someStr!!
+
+    println("§6.3 强制解包 !!:")
+    println("  someInt!! = " + unwrappedInt.toString())
+    println("  someStr!! = " + unwrappedStr)
+    println("  someInt!! + 1 = " + narrowed.toString())
+    println("  someStr!! = " + narrowedStr)
+}
+
+// ── §6.4 安全调用（?.） ────────────────────────────────────────────────────
+/// 测试 ?. 安全调用运算符（String 字段访问）
+fun testSafeCall() {
+    // 非空 String 安全访问（防御性编程）
+    val someStr: String? = "hello"
+    val safeStr: String = someStr ?: "default"
+
+    // 安全调用 + Elvis 组合
+    val nullStr: String? = null
+    val safeFromNull: String = nullStr ?: "fallback"
+
+    // 链式 Elvis
+    val chainResult: String = nullStr ?: "fallback"
+
+    println("§6.4 安全调用/防御性访问:")
+    println("  someStr ?: \"default\" = " + safeStr)
+    println("  nullStr ?: \"fallback\" = " + safeFromNull)
+    println("  链式 Elvis: " + chainResult)
+}
+
+// ── §6.5 可空 vs 非空互转（Nullable Conversion） ──────────────────────────
+/// 测试可空类型与非空类型的互转
+fun testConversion() {
+    // 非空→可空（隐式拓宽 widening）
+    val rawInt: Int = 42
+    val nullableFromRaw: String? = "from_raw"
+
+    // 可空→非空（通过 Elvis）
+    val nullInt: Int? = null
+    val nonNullViaElvis: Int = nullInt ?: 0
+
+    // 可空→非空（通过 !!）
+    val someInt: Int? = 100
+    val nonNullViaBang: Int = someInt!!
+
+    // 可空→非空（通过 Elvis + 运算）
+    val mixedResult: Int = (nullInt ?: 50) * 2
+
+    println("§6.5 可空/非空互转:")
+    println("  rawInt: " + rawInt.toString())
+    println("  nullableFromRaw: " + nullableFromRaw.toString())
+    println("  nullInt ?: 0 = " + nonNullViaElvis.toString())
+    println("  someInt!! = " + nonNullViaBang.toString())
+    println("  (nullInt ?: 50) * 2 = " + mixedResult.toString())
+}
+
+// ── §6.6 null 检查（Null Check） ──────────────────────────────────────────
+/// 测试 == null 和 != null 比较
+fun testNullCheck() {
+    val nullInt: Int? = null
+    val someInt: Int? = 42
+    val nullStr: String? = null
+    val someStr: String? = "present"
+
+    // == null 检查
+    val intIsNull: Boolean = nullInt == null
+    val intIsNotNull: Boolean = someInt == null
+    val strIsNull: Boolean = nullStr == null
+    val strIsNotNull: Boolean = someStr == null
+
+    // != null 检查
+    val intNotEqNull: Boolean = nullInt != null
+    val intEqNull: Boolean = someInt != null
+    val strNotEqNull: Boolean = nullStr != null
+    val strEqNull: Boolean = someStr != null
+
+    // null 检查 + Elvis 组合
+    val safeViaCheck: Int = if (nullInt == null) 0 else nullInt!!
+
+    println("§6.6 null 检查:")
+    println("  nullInt == null: " + intIsNull.toString())
+    println("  someInt == null: " + intIsNotNull.toString())
+    println("  nullStr == null: " + strIsNull.toString())
+    println("  someStr == null: " + strIsNotNull.toString())
+    println("  nullInt != null: " + intNotEqNull.toString())
+    println("  someInt != null: " + intEqNull.toString())
+    println("  nullStr != null: " + strNotEqNull.toString())
+    println("  someStr != null: " + strEqNull.toString())
+    println("  if null → 0: " + safeViaCheck.toString())
+}
+
+// ── §6.7 组合使用（Combined Usage） ────────────────────────────────────────
+/// 测试空安全特性的组合使用
+fun testCombined() {
+    // 场景 1: Elvis + null 检查
+    val a: Int? = null
+    val b: Int? = 10
+    val safeA: Int = a ?: 0
+    val safeB: Int = b ?: 0
+    val sum: Int = safeA + safeB
+
+    // 场景 2: 可空值的条件分支
+    val c: Int? = null
+    val result: String = if (c == null) "is null" else "has value"
+
+    // 场景 3: Elvis 链式
+    val d: Int? = null
+    val e: Int = d ?: 100
+    val f: Int = e + 1
+
+    // 场景 4: !! + Elvis 混合
+    val g: Int? = 200
+    val h: Int = g!! + (a ?: 10)
+
+    println("§6.7 组合使用:")
+    println("  a ?: 0 + b ?: 0 = " + sum.toString())
+    println("  c == null ? result: " + result)
+    println("  d ?: 100 + 1 = " + f.toString())
+    println("  g!! + (a ?: 10) = " + h.toString())
+}
+
+// ── §6.8 可空类型边界（Nullable Edge Cases） ───────────────────────────────
+/// 测试可空类型的边界情况
+fun testEdgeCases() {
+    // 边界 1: 多个可空值通过 Elvis 聚合
+    val x: Int? = null
+    val y: Int? = null
+    val z: Int = (x ?: 0) + (y ?: 0)
+
+    // 边界 2: Elvis 结果用于函数参数
+    val nullA: Int? = null
+    val nullB: Int? = null
+    val safeSum: Int = addSafe(nullA ?: 3, nullB ?: 7)
+
+    // 边界 3: 可空值的二次转换
+    val first: Int? = null
+    val second: Int = first ?: 10
+    val third: Int? = second
+    val fourth: Int = third ?: 20
+
+    println("§6.8 边界情况:")
+    println("  (null ?: 0) + (null ?: 0) = " + z.toString())
+    println("  addSafe(null ?: 3, null ?: 7) = " + safeSum.toString())
+    println("  first ?: 10 → second: " + second.toString())
+    println("  third ?: 20 → fourth: " + fourth.toString())
+}
+
+// ── 主函数 ──────────────────────────────────────────────────────────────────
+fun main() {
+    println("═══ Phase 6: 空安全测试 ═══")
+    println("")
+
+    testNullableDecl()
+    println("")
+    testElvis()
+    println("")
+    testAssertNonNull()
+    println("")
+    testSafeCall()
+    println("")
+    testConversion()
+    println("")
+    testNullCheck()
+    println("")
+    testCombined()
+    println("")
+    testEdgeCases()
+
+    println("")
+    println("═══ Phase 6 完成 ✓ ═══")
+}

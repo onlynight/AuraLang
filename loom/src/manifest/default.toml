@@ -1,0 +1,52 @@
+# ============================================================================
+# loom 内置默认 aura.toml 配置
+# ============================================================================
+#
+# 此文件由 loom 编译时嵌入（include_str!），在解析项目 aura.toml 时作为
+# "底层默认值"。项目 aura.toml 中的字段会覆盖此处的默认值。
+#
+# 优先级（从高到低）：
+#   1. CLI 参数（--opt-level / --debug / --profile 等）
+#   2. 激活的 Profile（--profile <name>）
+#   3. 项目 aura.toml（用户编写）
+#   4. 本默认配置（内置）
+#   5. serde 字段级默认（#[serde(default)] / #[serde(default = "default_xxx")]）
+#
+# 项目 aura.toml 只写"与默认不同的字段"即可。
+# 详见 loom/docs/默认配置合并设计.md
+# ============================================================================
+
+schema-version = "2.0"
+name = "unnamed"
+version = "0.1.0"
+
+# ── 源码集（serde 无法提供嵌套表默认，必须在此声明） ──
+[build.source-sets.main]
+source-dirs = ["src"]
+resource-dirs = ["resources"]
+include = ["**/*.aura"]
+exclude = ["**/*.test.aura", "vendor/**", "target/**"]
+depends-on = []
+
+[build.source-sets.test]
+source-dirs = ["test"]
+resource-dirs = ["test/resources"]
+include = ["**/*.aura"]
+exclude = []
+depends-on = ["main"]
+
+# ── Profile 预设（activate 默认 false，由用户/CLI 激活） ──
+[profiles.release]
+activate = false
+
+[profiles.release.build]
+opt-level = 3
+debug = false
+emit-package = true
+
+[profiles.debug]
+activate = false
+
+# ── 默认仓库 ──
+[repositories]
+central = "https://registry.aura-lang.dev"

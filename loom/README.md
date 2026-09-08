@@ -69,6 +69,12 @@ aura-loom/
 │   ├── lib.rs           # 公共 API（供插件调用）
 │   ├── cli/             # CLI 层
 │   ├── manifest/        # 配置层（aura.toml 解析）
+│   │   ├── mod.rs       # LoomManifest 结构体 + serde 默认
+│   │   ├── default.toml # 内置默认配置（include_str! 嵌入）
+│   │   ├── default.rs   # 默认配置 + TOML 深度合并
+│   │   ├── parse.rs     # 解析（合并逻辑）
+│   │   ├── priority.rs  # CLI/Profile 覆盖
+│   │   └── validate.rs  # 配置校验
 │   ├── task/            # 任务引擎
 │   ├── lifecycle/       # 生命周期
 │   ├── sourceset/       # 源码集
@@ -86,6 +92,57 @@ aura-loom/
 ├── examples/            # 示例项目
 └── Cargo.toml
 ```
+
+## 配置优先级
+
+`aura.toml` 支持"内置默认 + 项目覆盖"的合并语义。项目文件只需写"与默认不同的字段"。
+
+### 优先级链（高 → 低）
+
+```
+CLI 参数  >  激活 Profile  >  项目 aura.toml  >  内置默认 aura.toml  >  serde 字段级默认
+```
+
+- **CLI**：`--opt-level`、`--debug`、`--profile` 等
+- **Profile**：`--profile release` 激活后覆盖 build 字段
+- **项目**：用户编写的 `aura.toml`
+- **内置默认**：编译时嵌入的 `src/manifest/default.toml`
+- **serde**：`#[serde(default)]` 字段级兜底
+
+### 最小项目配置
+
+```toml
+# 仅 name/version/description，其余字段全部继承内置默认
+name = "my-app"
+version = "0.1.0"
+description = "My App"
+```
+
+### 部分覆盖示例
+
+```toml
+name = "my-app"
+version = "1.0.0"
+
+# 只改 exclude，其他字段继承默认
+[build.source-sets.main]
+exclude = ["foo"]
+
+# 只改 opt-level，其他字段继承默认
+[profiles.release.build]
+opt-level = 1
+```
+
+### 合并规则
+
+| base | overlay | 结果 |
+|---|---|---|
+| Table | Table | 递归合并，overlay 优先 |
+| Table | 非 Table | overlay 整体替换 |
+| Array | Array | overlay 整体替换（不做元素级合并） |
+| 标量 | 任意 | overlay 整体替换 |
+
+详见 `docs/默认配置合并设计.md`。
 
 ## 开发路线图
 

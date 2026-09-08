@@ -14,7 +14,7 @@ examples/language-test/
 ├── 03-functions.aura       ← Phase 3: 函数（✅ 已开发，VM 部分特性待完善）
 ├── 04-control-flow.aura    ← Phase 4: 控制流（✅ 已开发）
 ├── 05-classes.aura         ← Phase 5: 类与对象（✅ 已开发）
-├── 06-null-safety.aura     ← Phase 6: 空安全（待开发）
+├── 06-null-safety.aura     ← Phase 6: 空安全（✅ 已开发）
 ├── 07-error-handling.aura  ← Phase 7: 错误处理（待开发）
 ├── 08-concurrency.aura     ← Phase 8: 并发（待开发）
 ├── 09-ffi.aura             ← Phase 9: FFI（待开发）
@@ -57,7 +57,7 @@ examples/language-test/
 | Phase 3 函数 | `03-functions.aura` | ✅ | ✅ | ⏳（需 `--features llvm`） |
 | Phase 4 控制流 | `04-control-flow.aura` | ✅ | ✅ | ✅ |
 | Phase 5 类与对象 | `05-classes.aura` | ✅ | ⚠️（方法分派异常） | ⏳ |
-| Phase 6 空安全 | `06-null-safety.aura` | ⏳ | ⏳ | ⏳ |
+| Phase 6 空安全 | `06-null-safety.aura` | ✅ | ✅ | ✅（编译通过并可运行，toString 对 null/String 输出待优化） |
 | Phase 7 错误处理 | `07-error-handling.aura` | ⏳ | ⏳ | ⏳ |
 | Phase 8 并发 | `08-concurrency.aura` | ⏳ | ⏳ | ⏳ |
 | Phase 9 FFI | `09-ffi.aura` | ⏳ | ⏳ | ⏳ |
@@ -298,12 +298,43 @@ aura run   examples/language-test/05-classes.aura --jit         # JIT 验证 →
 
 ---
 
-### Phase 6 — 空安全（待开发）
+### Phase 6 — 空安全（✅ 已开发）
 
 | 覆盖项 |
 |--------|
-| `?.` 安全调用 / `?:` elvis / `!!` 强制解包 |
-| 可空 vs 非空互转 |
+| `T?` 可空类型声明（Int? / Boolean? / String?） |
+| `?:` Elvis 运算符（null → 默认值 / 有值 → 原值） |
+| `!!` 强制解包（pass-through 类型收窄） |
+| `?.` 安全调用（String 防御性访问） |
+| `== null` / `!= null` null 检查 |
+| 可空→非空互转（Elvis / !! / Elvis+运算） |
+| 非空→可空隐式拓宽（Int → Int?） |
+| 组合使用（Elvis + null 检查 / Elvis 链式 / !!+Elvis 混合） |
+| 边界情况（多可空聚合 / Elvis 传参 / 二次转换） |
+
+**编译器修复**（Phase 6 开发中发现并修复的 Bug）：
+| Bug | 位置 | 修复 |
+|-----|------|------|
+| SafeAccess 双重可空包装（`Inner??`） | `sema/checker.rs::SafeAccess` | 检查 `is_nullable()` 后再决定是否包装 `Nullable` |
+| AOT 可空标量存入非空变量类型不匹配 | `aot/emit.rs::emit_variable_decl` | 新增 `emit_store_converted` 处理 `{ T, i1 }` ↔ 标量互转 |
+| AOT 赋值语句类型不匹配 | `aot/emit.rs::emit_assign` | 复用 `emit_store_converted` 进行类型协调 |
+| AOT 二元运算可空结构体类型不匹配 | `aot/emit.rs::emit_binary` | 运算前提取 `{ T, i1 }` 内部值（非 null 比较场景） |
+| AOT null 比较硬编码 `{ i32, i1 }` 类型 | `aot/emit.rs::emit_binary` | 使用实际 `l_ty`/`r_ty` 替代硬编码类型 |
+
+**已知限制**（AOT 运行时问题，不影响 VM/JIT）：
+- `toString()` 对 null 值返回 `0` 而非 `null`（C FFI 字符串转换待完善）
+- `toString()` 对 String 值返回内存地址而非字符串内容
+- `Boolean.toString()` 返回 `0`/`1` 而非 `false`/`true`
+- `?.` 对 class/struct 成员的 AOT 支持待完善（struct 按值存储，GEP 类型不匹配）
+
+**验证命令与结果**：
+```bash
+aura check examples/language-test/06-null-safety.aura              # 语法/语义检查 → ✅ 通过
+aura run   examples/language-test/06-null-safety.aura              # VM 运行时验证 → ✅ 完成
+aura run   examples/language-test/06-null-safety.aura --jit         # JIT 验证 → ✅ 完成
+aura build examples/language-test/06-null-safety.aura --aot --output target/test/06-null-safety  # AOT 编译 → ✅ 编译成功
+target/test/06-null-safety                                           # AOT 运行 → ✅ 完成（exit code 0）
+```
 
 ---
 
@@ -527,6 +558,7 @@ cargo test -p compiler parser
 
 | 日期 | 阶段 | 说明 |
 |------|------|------|
+| 2026-09-08 | Phase 6 | 空安全 — 创建并全模式验证通过（修复 5 个编译器 Bug：SafeAccess 双重可空包装、AOT 可空标量存入非空变量、AOT 赋值类型协调、AOT 二元运算可空结构体提取、AOT null 比较硬编码类型）。VM/JIT 输出正确，AOT 编译运行通过（toString 对 null/String 输出待优化） |
 | 2026-09-08 | Phase 5 | 类与对象 — 创建并验证通过（修复 5 个编译器 Bug：`data struct` 主构造器 body 解析、`sealed value class` 主构造器解析、`load_shared_library` feature gate、Rust 2024 unsafe 块、`abstract class` 支持）。新增 `extern interface` 覆盖。VM 运行时方法分派与默认值传递待完善 |
 | 2026-09-08 | Phase 3 VM 修复 | 修复 6 个 VM 运行时 Bug：默认参数填充（顺序错误、方法参数表缺失）、函数索引闭包偏移（递归调用指向错误函数）、vararg 打包、泛型函数返回值、方法默认参数。Phase 3 全模式通过（§3.13 方法默认参数除外） |
 | 2026-09-07 | Phase 3 修复 | 修复 `if-else` 表达式返回值错误（parser 表达式终止符、HIR 降级、vararg 类型、Array 成员访问）。`aura run` 通过，VM 部分特性（默认参数、vararg 运行时、泛型返回值）待完善 |

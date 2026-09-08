@@ -1,86 +1,12 @@
-schema-version = "2.0"
+# hello 项目配置
+# 未声明的字段使用 loom 内置默认值（见 loom/src/manifest/default.toml）
+# 优先级：CLI > Profile > 本文件 > 内置默认 > serde 字段默认
+
 name = "hello"
 version = "0.1.0"
 description = "Hello World 示例项目"
-authors = []
-license = "MIT"
-repository = "https://github.com/aura-lang/examples.git"
-entry = "src/main.aura"
-exports = ["main"]
-library = false
-dependencies = []
-compile-dependencies = []
-runtime-dependencies = []
-dev-dependencies = []
-build-dependencies = []
-tasks = []
 
-[build]
-opt-level = 2
-debug = true
-out-dir = "target/build"
-cache-dir = "target/cache"
-cache-remote-shared = false
-emit-signatures = true
-emit-package = false
-parallel = true
-parallel-jobs = 0
-
-[build.source-sets.main]
-source-dirs = ["src"]
-resource-dirs = ["resources"]
-include = ["**/*.aura"]
-exclude = [
-    "**/*.test.aura",
-    "vendor/**",
-    "target/**",
-]
-depends-on = []
-
-[build.source-sets.test]
-source-dirs = ["test"]
-resource-dirs = ["test/resources"]
-include = ["**/*.aura"]
-exclude = []
-depends-on = ["main"]
-
-[build.alias]
-
+# 只覆盖与默认不同的字段：禁用 stdlib/test-harness 插件
 [plugins]
 aura-stdlib = false
 aura-test-harness = false
-aura-doc-gen = false
-aura-format = false
-aura-aot = false
-aura-watch = false
-aura-ci = false
-
-[plugins.external]
-
-[profiles.release]
-activate = false
-
-[profiles.release.build]
-opt-level = 3
-debug = false
-emit-package = true
-
-[profiles.debug]
-activate = true
-
-[repositories]
-central = "https://registry.aura-lang.dev"
-
-[repositories.custom]
-
-[resources]
-include = []
-exclude = []
-
-[package]
-format = "auz"
-include-sources = false
-include-docs = false
-include-native = true
-native-targets = []
-aot-opt-level = 2

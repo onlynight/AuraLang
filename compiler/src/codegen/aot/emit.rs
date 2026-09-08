@@ -839,25 +839,69 @@ fn emit_variable_decl(
 
     if let Some(init) = init {
         let (val_ir, val_ty) = emit_expr_val(ctx, blocks, init)?;
-        let cur = blocks.last_mut();
-        // 如果值类型和目标类型不匹配（如 null 存入可空结构体），需要转换
-        if val_ir == "null" && llvm_ty.starts_with("{ ") && llvm_ty.ends_with(" i1 }") {
-            // null 字面量 → { T 0, i1 true }
-            let null_val = zero_value(&llvm_ty);
-            cur.body.push(format!(
-                "store {} {} , {}* {}",
-                llvm_ty, null_val, llvm_ty, var_name
-            ));
-        } else {
-            cur.body.push(format!(
-                "store {} {} , {}* {}",
-                val_ty, val_ir, llvm_ty, var_name
-            ));
-        }
+        emit_store_converted(ctx, blocks, &llvm_ty, &val_ir, &val_ty, &var_name);
     }
 
     ctx.declare_var(name, var_name, llvm_ty);
     Ok(())
+}
+
+/// 将值存储到目标类型中，处理可空结构体 { T, i1 } 的包装/提取
+fn emit_store_converted(
+    ctx: &mut EmitCtx,
+    blocks: &mut FuncBlocks,
+    dst_ty: &str,
+    val_ir: &str,
+    val_ty: &str,
+    var_name: &str,
+) {
+    let cur = blocks.last_mut();
+
+    if is_nullable_struct_type(dst_ty) && val_ty != dst_ty {
+        // 目标类型是可空结构体 { T, i1 }
+        if val_ir == "null" {
+            // null → { T 0, i1 true }
+            let null_val = zero_value(dst_ty);
+            cur.body.push(format!(
+                "store {} {} , {}* {}",
+                dst_ty, null_val, dst_ty, var_name
+            ));
+        } else {
+            // 非 null 值 → 包装为 { T <val>, i1 false }
+            let inner_ty = extract_inner_type(dst_ty);
+            let wrap0 = ctx.fresh_var();
+            let wrap1 = ctx.fresh_var();
+            cur.body.push(format!(
+                "{} = insertvalue {} undef, {} {}, 0",
+                wrap0, dst_ty, inner_ty, val_ir
+            ));
+            cur.body.push(format!(
+                "{} = insertvalue {} {}, i1 false, 1",
+                wrap1, dst_ty, wrap0
+            ));
+            cur.body.push(format!(
+                "store {} {} , {}* {}",
+                dst_ty, wrap1, dst_ty, var_name
+            ));
+        }
+    } else if is_nullable_struct_type(val_ty) && !is_nullable_struct_type(dst_ty) {
+        // 值类型是可空结构体，目标类型不是 → 提取内部值
+        let inner_ty = extract_inner_type(val_ty);
+        let extract_var = ctx.fresh_var();
+        cur.body.push(format!(
+            "{} = extractvalue {} {}, 0",
+            extract_var, val_ty, val_ir
+        ));
+        cur.body.push(format!(
+            "store {} {} , {}* {}",
+            inner_ty, extract_var, dst_ty, var_name
+        ));
+    } else {
+        cur.body.push(format!(
+            "store {} {} , {}* {}",
+            val_ty, val_ir, dst_ty, var_name
+        ));
+    }
 }
 
 /// 生成赋值语句
@@ -872,11 +916,9 @@ fn emit_assign(
     match target {
         HirExpr::Var(name) => {
             if let Some(slot) = ctx.lookup_var(name) {
-                let cur = blocks.last_mut();
-                cur.body.push(format!(
-                    "store {} {} , {}* {}",
-                    val_ty, val_ir, slot.llvm_ty, slot.llvm_name
-                ));
+                let slot_ty = slot.llvm_ty.clone();
+                let slot_name = slot.llvm_name.clone();
+                emit_store_converted(ctx, blocks, &slot_ty, &val_ir, &val_ty, &slot_name);
             }
         }
         HirExpr::Member {
@@ -1464,9 +1506,47 @@ fn emit_binary(
     lhs: &HirExpr,
     rhs: &HirExpr,
 ) -> Result<(String, String), AotError> {
-    let (l_ir, l_ty) = emit_expr_val(ctx, blocks, lhs)?;
-    let (r_ir, r_ty) = emit_expr_val(ctx, blocks, rhs)?;
+    let (mut l_ir, mut l_ty) = emit_expr_val(ctx, blocks, lhs)?;
+    let (mut r_ir, mut r_ty) = emit_expr_val(ctx, blocks, rhs)?;
     let tmp = ctx.fresh_var();
+
+    // 可空结构体提取：如果一侧是 { T, i1 } 而另一侧不是，提取内部值
+    // 但 null 比较由后续专用逻辑处理，不在此处提取
+    if r_ir != "null" && l_ir != "null" {
+        if is_nullable_struct_type(&l_ty) && !is_nullable_struct_type(&r_ty) {
+            let inner_ty = extract_inner_type(&l_ty);
+            let extract_var = ctx.fresh_var();
+            let cur = blocks.last_mut();
+            cur.body.push(format!(
+                "{} = extractvalue {} {}, 0",
+                extract_var, l_ty, l_ir
+            ));
+            l_ir = extract_var;
+            l_ty = inner_ty;
+        } else if is_nullable_struct_type(&r_ty) && !is_nullable_struct_type(&l_ty) {
+            let inner_ty = extract_inner_type(&r_ty);
+            let extract_var = ctx.fresh_var();
+            let cur = blocks.last_mut();
+            cur.body.push(format!(
+                "{} = extractvalue {} {}, 0",
+                extract_var, r_ty, r_ir
+            ));
+            r_ir = extract_var;
+            r_ty = inner_ty;
+        } else if is_nullable_struct_type(&l_ty) && is_nullable_struct_type(&r_ty) {
+            let l_inner = extract_inner_type(&l_ty);
+            let r_inner = extract_inner_type(&r_ty);
+            let l_extract = ctx.fresh_var();
+            let r_extract = ctx.fresh_var();
+            let cur = blocks.last_mut();
+            cur.body.push(format!("{} = extractvalue {} {}, 0", l_extract, l_ty, l_ir));
+            cur.body.push(format!("{} = extractvalue {} {}, 0", r_extract, r_ty, r_ir));
+            l_ir = l_extract;
+            l_ty = l_inner;
+            r_ir = r_extract;
+            r_ty = r_inner;
+        }
+    }
 
     // 混合类型检测：任一侧为浮点类型时使用浮点运算
     let l_is_float = l_ty.starts_with("float") || l_ty == "double";
@@ -1597,10 +1677,7 @@ fn emit_binary(
                 let null_flag = ctx.fresh_var();
                 let cur = blocks.last_mut();
                 // 提取 is_null 标志（字段 1）
-                cur.body.push(format!(
-                    "{} = extractvalue {{ i32, i1 }} {}, 1",
-                    null_flag, l_ir
-                ));
+                cur.body.push(format!("{} = extractvalue {} {}, 1", null_flag, l_ty, l_ir));
                 match op {
                     HirBinOp::Eq => {
                         cur.body.push(format!("{} = icmp eq i1 {}, true", tmp, null_flag));
@@ -1633,14 +1710,11 @@ fn emit_binary(
             if is_nullable_struct_type(&l_ty) && r_ir != "null" {
                 let null_flag = ctx.fresh_var();
                 let cur = blocks.last_mut();
-                cur.body.push(format!(
-                    "{} = extractvalue {{ i32, i1 }} {}, 1",
-                    null_flag, l_ir
-                ));
+                cur.body.push(format!("{} = extractvalue {} {}, 1", null_flag, l_ty, l_ir));
                 // 提取右操作数的 is_null 标志（如果是可空结构体）
                 let r_null_flag = if is_nullable_struct_type(&r_ty) {
                     let rf = ctx.fresh_var();
-                    cur.body.push(format!("{} = extractvalue {{ i32, i1 }} {}, 1", rf, r_ir));
+                    cur.body.push(format!("{} = extractvalue {} {}, 1", rf, r_ty, r_ir));
                     rf
                 } else {
                     // 右操作数非可空，视为 false（非 null）

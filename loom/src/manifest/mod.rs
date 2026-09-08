@@ -6,6 +6,7 @@
 //! B1.4: 配置优先级
 //! B1.5: 完整解析 + 验证
 
+pub mod default;
 pub mod parse;
 pub mod priority;
 pub mod validate;

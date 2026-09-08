@@ -1499,7 +1499,10 @@ impl Checker {
                         Ty::Error
                     }
                 };
-                if member_ty != Ty::Unit && member_ty != Ty::Error {
+                if member_ty.is_nullable() {
+                    // 字段已经是可空类型（含 Any），无需再包装
+                    member_ty
+                } else if member_ty != Ty::Unit && member_ty != Ty::Error {
                     Ty::Nullable(Box::new(member_ty))
                 } else {
                     member_ty

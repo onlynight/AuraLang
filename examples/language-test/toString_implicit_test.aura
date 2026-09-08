@@ -1,0 +1,152 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// toString 隐式拼接测试（参考 Java / Kotlin）
+// 覆盖所有常用数据类型，验证 String + T 无需手写 .toString()
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fun main() {
+    println("═══════════════════════════════════════")
+    println("  toString 隐式拼接 测试用例")
+    println("═══════════════════════════════════════")
+
+    // ── §1 基本数值类型 ──
+    println("── §1 基本数值类型 ──")
+    println("  Int:     " + 42)
+    println("  Long:    " + 100L)
+    println("  Float:   " + 3.14f)
+    println("  Double:  " + 2.718)
+    println("  负 Int:  " + (-7))
+    println("  零值:    " + 0)
+
+    // ── §2 布尔与字符 ──
+    println("── §2 布尔与字符 ──")
+    println("  Boolean: " + true)
+    println("  Boolean: " + false)
+    println("  Char:    " + 'A')
+    println("  Char:    " + '中')
+
+    // ── §3 字符串本身 ──
+    println("── §3 字符串本身 ──")
+    println("  String:  " + "Hello")
+    println("  Empty:   " + "")
+
+    // ── §4 可空类型（!! 解包）──
+    println("── §4 可空类型 ──")
+    val n: Int? = 99
+    println("  Int?:    " + n!!)
+    val s: String? = "ok"
+    println("  String?: " + s!!)
+
+    // ── §5 链式拼接 ──
+    println("── §5 链式拼接 ──")
+    println("  Mixed:   " + 1 + " + " + 2.0 + " + " + true + " = done")
+    println("  Types:   [Int=" + 7 + ", Float=" + 1.5f + ", Bool=" + false + "]")
+
+    // ── §6 函数返回值 ──
+    println("── §6 函数返回值 ──")
+    println("  add(3,4)=" + add(3, 4))
+    println("  square(5)=" + square(5))
+    println("  greet:   " + greet())
+    println("  isEven(7)=" + isEven(7))
+
+    // ── §7 成员访问 ──
+    println("── §7 成员访问 ──")
+    val c = Coords(3, 4)
+    println("  x: " + c.x)
+    println("  y: " + c.y)
+    println("  manhattan: " + c.manhattan())
+
+    // ── §8 条件表达式 ──
+    println("── §8 条件表达式 ──")
+    val score: Int = 85
+    val pass: Boolean = score >= 60
+    println("  pass: " + pass)
+    val grade: String = if (score >= 90) "A" else if (score >= 60) "B" else "C"
+    println("  grade: " + grade)
+
+    // ── §9 手写 .toString() 兼容 ──
+    println("── §9 手写 toString 兼容 ──")
+    val mi = 42
+    val mf = 3.14f
+    val mb = true
+    println("  Manual Int:    " + mi.toString())
+    println("  Manual Float:  " + mf.toString())
+    println("  Manual Bool:   " + mb.toString())
+
+    // ── §10 运算符重载类 ──
+    println("── §10 运算符重载 ──")
+    val v1 = Vec2()
+    v1.x = 1.0f
+    v1.y = 2.0f
+    val v2 = Vec2()
+    v2.x = 3.0f
+    v2.y = 4.0f
+    val v3 = v1 + v2
+    println("  v1+v2: " + v3.toString())
+
+    // ── §11 字符串插值 ──
+    println("── §11 字符串插值 ──")
+    val name = "World"
+    val ver = 2
+    println("  Interp: Hello, $name! Version $ver")
+
+    // ── §12 复合场景 ──
+    println("── §12 复合场景 ──")
+    val total = add(3, 4) + square(2)
+    println("  total: " + total)
+    val report = "name=" + name + " ver=" + ver + " score=" + score + " pass=" + pass
+    println("  report: " + report)
+
+    println("═══════════════════════════════════════")
+    println("  全部用例完成 ✓")
+    println("═══════════════════════════════════════")
+}
+
+// ── 辅助函数 ──
+
+fun add(a: Int, b: Int): Int {
+    return a + b
+}
+
+fun square(n: Int): Int {
+    return n * n
+}
+
+fun greet(): String {
+    return "Hi!"
+}
+
+fun isEven(n: Int): Boolean {
+    return n % 2 == 0
+}
+
+// ── 辅助类 ──
+
+class Coords {
+    var x: Int = 0
+    var y: Int = 0
+
+    constructor(x, y) {
+        this.x = x
+        this.y = y
+    }
+
+    fun manhattan(): Int {
+        return x + y
+    }
+}
+
+struct Vec2 {
+    var x: Float = 0.0f
+    var y: Float = 0.0f
+
+    operator fun plus(other: Vec2): Vec2 {
+        val r = Vec2()
+        r.x = x + other.x
+        r.y = y + other.y
+        return r
+    }
+
+    fun toString(): String {
+        return "Vec2(" + x + ", " + y + ")"
+    }
+}

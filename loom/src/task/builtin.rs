@@ -741,6 +741,7 @@ mod tests {
             alias: std::collections::HashMap::new(),
             active_profile: None,
             mode: CompileMode::Vm,
+            ..Default::default()
         }
     }
 

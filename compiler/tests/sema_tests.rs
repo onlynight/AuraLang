@@ -185,6 +185,123 @@ fn test_string_concat() {
     assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
 }
 
+// ── 隐式 toString 拼接（参考 Java/Kotlin）──
+
+#[test]
+fn test_implicit_tostring_int_plus_string() {
+    let errors = analyze(
+        r#"
+        fun main() {
+            val x: Int = 42
+            val msg: String = "x = " + x
+        }
+        "#,
+    );
+    assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+}
+
+#[test]
+fn test_implicit_tostring_string_plus_int() {
+    let errors = analyze(
+        r#"
+        fun main() {
+            val x: Int = 42
+            val msg: String = x + " is the answer"
+        }
+        "#,
+    );
+    assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+}
+
+#[test]
+fn test_implicit_tostring_float_plus_string() {
+    let errors = analyze(
+        r#"
+        fun main() {
+            val x: Float = 3.14
+            val msg: String = "pi = " + x
+        }
+        "#,
+    );
+    assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+}
+
+#[test]
+fn test_implicit_tostring_bool_plus_string() {
+    let errors = analyze(
+        r#"
+        fun main() {
+            val b: Boolean = true
+            val msg: String = "b = " + b
+        }
+        "#,
+    );
+    assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+}
+
+#[test]
+fn test_implicit_tostring_chained() {
+    let errors = analyze(
+        r#"
+        fun main() {
+            val msg: String = "a=" + 1 + ", b=" + 2.0 + ", c=" + true
+        }
+        "#,
+    );
+    assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+}
+
+#[test]
+fn test_implicit_tostring_char_plus_string() {
+    let errors = analyze(
+        r#"
+        fun main() {
+            val c: Char = 'A'
+            val msg: String = "char = " + c
+        }
+        "#,
+    );
+    assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+}
+
+#[test]
+fn test_implicit_tostring_null_plus_string() {
+    let errors = analyze(
+        r#"
+        fun main() {
+            val n: Int? = null
+            val msg: String = "n = " + n!!
+        }
+        "#,
+    );
+    assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+}
+
+#[test]
+fn test_implicit_tostring_list_plus_string() {
+    let errors = analyze(
+        r#"
+        fun main() {
+            val msg: String = "lst = " + listOf(1, 2, 3)
+        }
+        "#,
+    );
+    assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+}
+
+#[test]
+fn test_manual_tostring_still_works() {
+    let errors = analyze(
+        r#"
+        fun main() {
+            val x: Int = 42
+            val msg: String = "x = " + x.toString()
+        }
+        "#,
+    );
+    assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+}
+
 // ── 类型不匹配 ──
 
 #[test]

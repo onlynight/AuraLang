@@ -339,15 +339,16 @@ fn load_and_execute(dir: &str, phase: &str, args: &BuildArgs) -> Result<()> {
     let project_dir = PathBuf::from(dir);
     let manifest_path = project_dir.join("aura.toml");
 
-    if !manifest_path.exists() {
-        anyhow::bail!(
-            "未找到 {}（请先运行 loom new 或检查目录）",
+    // 1. 解析配置（aura.toml 不存在时回退到内置默认）
+    let manifest = if manifest_path.exists() {
+        parse::parse_from_file(&manifest_path)?
+    } else {
+        eprintln!(
+            "⚠ 未找到 {}（使用内置默认配置，建议运行 `loom new` 生成项目文件）",
             manifest_path.display()
         );
-    }
-
-    // 1. 解析配置
-    let manifest = parse::parse_from_file(&manifest_path)?;
+        parse::parse_from_file(&manifest_path)?
+    };
     println!("项目: {} v{}", manifest.name, manifest.version);
 
     // 2. 解析构建配置（应用 CLI 覆盖 + profile）
@@ -659,10 +660,12 @@ fn main() -> Result<()> {
         }
         Command::CheckConfig { dir } => {
             let manifest_path = PathBuf::from(&dir).join("aura.toml");
-            if !manifest_path.exists() {
-                anyhow::bail!("未找到 {}", manifest_path.display());
-            }
-            let manifest = parse::parse_from_file(&manifest_path)?;
+            let manifest = if manifest_path.exists() {
+                parse::parse_from_file(&manifest_path)?
+            } else {
+                println!("⚠ 未找到 {}（检查内置默认配置）", manifest_path.display());
+                parse::parse_from_file(&manifest_path)?
+            };
             let errors = aura_loom::manifest::validate::validate_manifest(&manifest);
             if errors.is_empty() {
                 println!("✓ 配置校验通过: {}", manifest.name);
@@ -687,10 +690,12 @@ fn main() -> Result<()> {
         } => {
             // 第四阶段：loom new 作为 aura new 的薄别名，
             // 帮助新用户从构建系统入口创建项目。
-            let manifest = parse::default_manifest(&name);
+            //
+            // 生成最小 aura.toml：仅 name/version/description，
+            // 其余字段由 loom 内置默认提供（见 loom/src/manifest/default.toml）。
             let dir = PathBuf::from(&name);
             std::fs::create_dir_all(&dir)?;
-            let toml_str = toml::to_string_pretty(&manifest)?;
+            let toml_str = parse::minimal_toml(&name);
             std::fs::write(dir.join("aura.toml"), toml_str)?;
             std::fs::create_dir_all(dir.join("src"))?;
             std::fs::write(
@@ -703,6 +708,7 @@ fn main() -> Result<()> {
                 "  模板: {}",
                 template.unwrap_or_else(|| "default".to_string())
             );
+            println!("  配置: aura.toml（最小，其余字段使用内置默认）");
             println!("  提示: loom new 等价于 aura new，包生态操作请使用 aura 命令");
             Ok(())
         }

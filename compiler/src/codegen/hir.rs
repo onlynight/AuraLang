@@ -2649,6 +2649,60 @@ fn lookup_import_module_alias(n: &str) -> Option<String> {
     })
 }
 
+/// 查询表达式的静态类型名（来自 sema 信息通道，strip 可空标记）
+fn lookup_expr_type(e: &Expr) -> Option<String> {
+    SEMA_INFO.with(|s| s.borrow().as_ref().and_then(|i| i.expr_type(e)))
+}
+
+/// 判断类型名是否为字符串（含可空形式）
+fn is_string_type_name(ty: &str) -> bool {
+    ty == "String"
+}
+
+/// 判断类型名是否为 Any（隐式转换的兜底类型）
+fn is_any_type_name(ty: &str) -> bool {
+    ty == "Any"
+}
+
+/// 创建 `toString(expr)` 的 HirExpr::Call
+fn wrap_tostring(expr: HirExpr) -> HirExpr {
+    HirExpr::Call {
+        callee: "toString".to_string(),
+        args: vec![expr],
+    }
+}
+
+/// 对 `a + b`（Add）检查是否需要隐式 toString 插入。
+/// 当一侧为 String 而另一侧为非 String（且非 Any）时，将非字符串侧包装为 toString 调用。
+/// 返回可能替换后的 (lhs, rhs)。
+fn insert_implicit_tostring(
+    lhs: HirExpr,
+    rhs: HirExpr,
+    lhs_ast: &Expr,
+    rhs_ast: &Expr,
+) -> (HirExpr, HirExpr) {
+    let lhs_ty = lookup_expr_type(lhs_ast);
+    let rhs_ty = lookup_expr_type(rhs_ast);
+
+    let lhs_is_str = lhs_ty.as_deref().map(is_string_type_name).unwrap_or(false);
+    let rhs_is_str = rhs_ty.as_deref().map(is_string_type_name).unwrap_or(false);
+
+    // 一侧 String + 另一侧非 String 且非 Any → 包装非字符串侧
+    if lhs_is_str && !rhs_is_str {
+        let rhs_is_any = rhs_ty.as_deref().map(is_any_type_name).unwrap_or(false);
+        if !rhs_is_any {
+            return (lhs, wrap_tostring(rhs));
+        }
+    }
+    if rhs_is_str && !lhs_is_str {
+        let lhs_is_any = lhs_ty.as_deref().map(is_any_type_name).unwrap_or(false);
+        if !lhs_is_any {
+            return (wrap_tostring(lhs), rhs);
+        }
+    }
+    (lhs, rhs)
+}
+
 fn desugar_expr(e: &Expr) -> HirExpr {
     match e {
         Expr::Literal(l, _) => HirExpr::Lit(l.clone()),
@@ -2668,6 +2722,17 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                         desugar_expr(lhs),
                         desugar_expr(rhs),
                     ],
+                };
+            }
+            // P-K3：String + T 隐式 toString（参考 Java/Kotlin）
+            if *op == BinOp::Add {
+                let lhs_h = desugar_expr(lhs);
+                let rhs_h = desugar_expr(rhs);
+                let (lhs_h, rhs_h) = insert_implicit_tostring(lhs_h, rhs_h, lhs, rhs);
+                return HirExpr::Binary {
+                    op: HirBinOp::from_ast(*op),
+                    lhs: Box::new(lhs_h),
+                    rhs: Box::new(rhs_h),
                 };
             }
             HirExpr::Binary {

@@ -43,6 +43,8 @@ pub mod workspace;
 pub mod wrapper;
 
 pub use error::LoomError;
-pub use manifest::parse::{default_manifest, parse_from_file, parse_from_str};
-pub use manifest::{DepConfig, Dependency, LoomManifest, SourceSetConfig};
+pub use manifest::parse::{
+    default_manifest, minimal_toml, parse_from_file, parse_from_str, parse_merged,
+};
+pub use manifest::{DepConfig, Dependency, LoomManifest, SourceSetConfig, default};
 pub use task::TaskGraph;

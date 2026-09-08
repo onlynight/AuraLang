@@ -383,7 +383,16 @@ fn cmd_build_aot(args: &[String]) {
         exit(1);
     }
 
-    let mut hir = compiler::codegen::hir::desugar_program(&program);
+    // 语义检查（获取表达式类型信息，供 HIR 隐式 toString 降级使用）
+    let (_ast, sema) = compiler::sema::analyze_source(&source);
+    if !sema.errors.is_empty() {
+        for e in &sema.errors {
+            eprintln!("错误: [语义] {}", e.message);
+        }
+        exit(1);
+    }
+
+    let mut hir = compiler::codegen::hir::desugar_program_with(&program, Some(&sema.info));
     compiler::codegen::hir::synthesize_main_if_missing(&mut hir);
     let codegen = compiler::codegen::aot::AotCodeGenerator::new(options.clone());
     // Phase 4.1: 动态库模式下生成 JitValue ABI 包装函数（blob_mode = true），
