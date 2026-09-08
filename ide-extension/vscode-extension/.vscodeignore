@@ -12,3 +12,4 @@ node_modules/**
 !snippets/**
 !language-configuration.json
 !out/**
+!bin/**

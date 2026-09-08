@@ -18,13 +18,13 @@ variables:
 
   # ── Keywords ──────────────────────────────────────────────────────────
 
-  prefix_modifiers: '\b(?:abstract|final|enum|open|annotation|sealed|data|override|lateinit|private|protected|public|internal|inner|noinline|crossinline|vararg|reified|tailrec|operator|infix|inline|external|const|suspend|comptime|value|defer|extern|lazy|box|weak|async)\b'
+  prefix_modifiers: '\b(?:abstract|final|enum|open|annotation|sealed|data|override|lateinit|private|protected|public|internal|inner|noinline|crossinline|vararg|reified|tailrec|operator|infix|inline|external|const|suspend|comptime|value|defer|extern|lazy|box|weak|async|init|companion|constructor|expect|actual|malloc|free|retain|release)\b'
 
   postfix_modifiers: '\b(?:where|by|get|set)\b'
 
   soft_keywords: '\b(?:catch|finally|field|else|then|unit)\b'
 
-  hard_keywords: '\b(?:as|is|in|to|it)\b'
+  hard_keywords: '\b(?:as|is|in|to|it|typeof)\b'
 
   control_keywords: '\b(?:if|while|do|when|try|throw|break|continue|return|for|select|await)\b'
 
@@ -337,7 +337,7 @@ contexts:
 
   data-struct-declaration:
     - meta_include_prototype: false
-    - match: '(?:(data)\s+)?(struct)\s+(\b\w+\b)'
+    - match: '((?:\w+\s+)*)?(struct)\s+(\b\w+\b)'
       captures:
         1: storage.modifier.other.aura
         2: storage.type.struct.aura
@@ -350,7 +350,7 @@ contexts:
 
   struct-declaration:
     - meta_include_prototype: false
-    - match: '(?:(sealed)\s+)?(struct)\s+(\b\w+\b)'
+    - match: '((?:\w+\s+)*)?(struct)\s+(\b\w+\b)'
       captures:
         1: storage.modifier.other.aura
         2: storage.type.struct.aura
@@ -404,7 +404,7 @@ contexts:
 
   class-declaration:
     - meta_include_prototype: false
-    - match: '(?:(sealed|data)\s+)?(class)\s+(\b\w+\b)'
+    - match: '((?:\w+\s+)*)?(class)\s+(\b\w+\b)'
       captures:
         1: storage.modifier.other.aura
         2: storage.type.class.aura
@@ -451,7 +451,7 @@ contexts:
 
   enum-declaration:
     - meta_include_prototype: false
-    - match: '(?:(sealed|data)\s+)?(enum)\s+(\b\w+\b)'
+    - match: '((?:\w+\s+)*)?(enum)\s+(\b\w+\b)'
       captures:
         1: storage.modifier.other.aura
         2: storage.type.enum.aura
@@ -463,7 +463,7 @@ contexts:
 
   interface-declaration:
     - meta_include_prototype: false
-    - match: '(?:(sealed|data)\s+)?(interface)\s+(\b\w+\b)'
+    - match: '((?:\w+\s+)*)?(interface)\s+(\b\w+\b)'
       captures:
         1: storage.modifier.other.aura
         2: storage.type.interface.aura
@@ -495,7 +495,7 @@ contexts:
 
   actor-declaration:
     - meta_include_prototype: false
-    - match: '(?:(sealed|data)\s+)?(actor)\s+(\b\w+\b)'
+    - match: '((?:\w+\s+)*)?(actor)\s+(\b\w+\b)'
       captures:
         1: storage.modifier.other.aura
         2: storage.type.actor.aura
@@ -525,7 +525,7 @@ contexts:
 
   object-declaration:
     - meta_include_prototype: false
-    - match: '(?:(sealed|data)\s+)?(object)\s+(\b\w+\b)'
+    - match: '((?:\w+\s+)*)?(object)\s+(?:(\b\w+\b)\s*)?'
       captures:
         1: storage.modifier.other.aura
         2: storage.type.object.aura

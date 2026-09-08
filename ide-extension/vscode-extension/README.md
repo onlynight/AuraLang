@@ -30,19 +30,18 @@
 cd vscode-extension
 npm install
 npm run compile
-code --install-extension aura-language-0.1.6.vsix
+code --install-extension aura-language-0.1.9.vsix
 ```
 
-> **LSP 功能要求**：补全、跳转定义、悬停、诊断、格式化由 LSP 服务器提供，
-> 需要可用的 `aura-lsp` 可执行文件。扩展会自动查找：
-> 1. 配置项 `aura.serverPath`（绝对路径）
-> 2. 当前工作区内的构建产物（`target/debug/aura-lsp`、`target/release/aura-lsp`、`bin/aura-lsp`）
-> 3. 系统 PATH 中的 `aura-lsp` 命令
+> **LSP 功能开箱即用**：扩展将 `aura-lsp` 二进制**直接打包**在 `bin/` 下（`bin/aura-lsp.exe` 用于 Windows），无需系统 PATH、无需手动编译 Aura。安装后打开 `.aura` 文件即自动启动 LSP。
 >
-> 编译器构建：`cargo build -p cli`（或仓库根目录 `cargo build`）会同时产出 `aura.exe` 和 `aura-lsp.exe`。
-> 扩展直接启动 `aura-lsp.exe`，不占用 `aura.exe`，`cargo build` debug profile 可正常覆盖它。
+> 解析顺序（高优先级在前）：
+> 1. `aura.serverPath` 显式配置的绝对路径（本地开发自编译版本用）
+> 2. **扩展内置的 `bin/aura-lsp[.exe]`（默认）**
+> 3. 当前工作区内的构建产物（`target/debug`、`target/release`、`bin`）
+> 4. 系统 PATH 中的 `aura-lsp` 命令
 >
-> 打开仓库作为工作区即可自动连接。
+> 扩展直接启动独立的 `aura-lsp` 二进制，不占用 `aura.exe`，`cargo build` debug profile 可正常覆盖它。
 
 ### 从 VS Code 市场安装
 
@@ -54,7 +53,8 @@ code --install-extension aura-language-0.1.6.vsix
 
 ```jsonc
 {
-    // Aura LSP 服务器路径（可执行文件，直接启动独立二进制）
+    // Aura LSP 服务器路径。默认使用扩展内置的 bin/aura-lsp（开箱即用），
+    // 仅在本地开发 Aura 本身时才需要覆盖为绝对路径。
     "aura.serverPath": "aura-lsp",
 
     // 传递给服务器的额外参数
@@ -73,26 +73,27 @@ code --install-extension aura-language-0.1.6.vsix
 
 ### 自定义服务器路径
 
-如果 `aura-lsp` 不在 PATH 中，可以指定完整路径：
+默认无需配置——扩展使用内置的 `bin/aura-lsp`。如需覆盖（例如本地开发 Aura 时使用自编译的 debug 版本），可设置为绝对路径：
 
 ```jsonc
 {
-    "aura.serverPath": "C:/Aura/aura-lsp.exe"
+    "aura.serverPath": "C:/Aura/AuraLang/target/debug/aura-lsp.exe"
 }
 ```
 
-或在 Linux/macOS:
+或 Linux/macOS:
 
 ```jsonc
 {
-    "aura.serverPath": "/usr/local/bin/aura-lsp"
+    "aura.serverPath": "/home/user/aura/target/release/aura-lsp"
 }
 ```
 
-> **注意**：`aura-lsp` 是独立二进制，不需要 `lsp` 子命令。
-> 如果你从旧版本升级过来，请把 `aura.serverPath` 从 `"aura"` 改为 `"aura-lsp"`，
-> 并删除 `serverArgs: ["lsp"]`。否则扩展会尝试启动 `aura-lsp.exe lsp`（失败）。
-> 保留旧配置会再次占用 `aura.exe`，导致 `cargo build` debug profile 失败。
+> **注意**：
+> - `aura-lsp` 是独立二进制，**不需要** `lsp` 子命令。
+> - 如果你从旧版本升级过来，请把 `aura.serverPath` 从 `"aura"` 改为 `"aura-lsp"`（或直接删除该项），并删除 `serverArgs: ["lsp"]`。否则扩展会尝试启动 `aura-lsp.exe lsp`（失败）。
+> - 保留旧配置 `"aura.serverPath": "aura"` 会占用 `aura.exe`，导致 `cargo build` debug profile 失败。
+> - 如果 `aura.serverPath` 未显式设置或仍为默认值 `"aura-lsp"`，扩展会**优先使用内置二进制**，避免误启动 PATH 中的同名程序。
 
 ## 快捷键
 
@@ -297,8 +298,10 @@ vscode-extension/
 ├── language-configuration.json  # 语言配置（括号、注释等）
 ├── src/
 │   ├── extension.ts          # 扩展入口
-│   ├── client.ts             # LSP 客户端
+│   ├── client.ts             # LSP 客户端（解析内置 bin/aura-lsp）
 │   └── diagnostics.ts        # 诊断管理
+├── bin/
+│   └── aura-lsp.exe          # 内置 LSP 二进制（Windows；随 VSIX 打包，开箱即用）
 ├── syntaxes/
 │   └── aura.tmLanguage.json  # TextMate 语法（Kotlin VSCode 插件风格）
 ├── snippets/
@@ -309,6 +312,9 @@ vscode-extension/
     ├── aura-icon.png         # 默认图标 (48×48, 深色变体)
     └── aura-icon.svg         # 源矢量图标 (光环渐变设计)
 ```
+
+> **打包说明**：`bin/aura-lsp.exe` 通过 `.vscodeignore` 的 `!bin/**` 规则被打入 VSIX。
+> 如需在其它平台使用，请从 Aura 仓库交叉编译出对应平台的 `aura-lsp`，放入 `bin/` 后重打包。
 
 ## 许可证
 

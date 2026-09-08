@@ -196,6 +196,9 @@ double aura_clock_wrapper(void);
 int64_t aura_strlen_wrapper(const char *s);
 const char *toStringFloat(double x);
 
+/** 类型检查：isOfType(value, typeName) → _Bool */
+_Bool aura_isOfType(const void *value, const AuraString *typeName);
+
 #ifdef __cplusplus
 }
 #endif

@@ -90,6 +90,8 @@ fn is_type_name(n: &str) -> bool {
 #[derive(Default, Clone)]
 struct ClassEntry {
     fields: Vec<String>,
+    /// 字段名 → 字段类型（用于 AOT 字段访问）
+    field_types: HashMap<String, HirType>,
     methods: std::collections::HashSet<String>,
     /// 声明为 open/abstract 的方法名（虚方法，动态分派）
     open_methods: std::collections::HashSet<String>,
@@ -330,6 +332,12 @@ fn build_class_table(program: &Program) -> HashMap<String, ClassEntry> {
                 };
                 for f in &c.fields {
                     e.fields.push(f.name.clone());
+                    let default_ty = Box::new(Type::Named {
+                        name: "Int".into(),
+                        span: f.span,
+                    });
+                    let field_type = f.type_hint.as_ref().unwrap_or(&default_ty);
+                    e.field_types.insert(f.name.clone(), HirType::from_ast(field_type));
                     if let Some(acc) = &f.accessors {
                         e.accessors
                             .insert(f.name.clone(), (acc.getter.is_some(), acc.setter.is_some()));
@@ -361,6 +369,12 @@ fn build_class_table(program: &Program) -> HashMap<String, ClassEntry> {
                 let mut e = ClassEntry::default();
                 for f in &s.fields {
                     e.fields.push(f.name.clone());
+                    let default_ty = Box::new(Type::Named {
+                        name: "Int".into(),
+                        span: f.span,
+                    });
+                    let field_type = f.type_hint.as_ref().unwrap_or(&default_ty);
+                    e.field_types.insert(f.name.clone(), HirType::from_ast(field_type));
                     if let Some(acc) = &f.accessors {
                         e.accessors
                             .insert(f.name.clone(), (acc.getter.is_some(), acc.setter.is_some()));
@@ -928,6 +942,8 @@ pub struct HirProgram {
     pub constants: Vec<(String, Const)>,
     /// 顶层语句（脚本模式：无 main 时，顶层语句会被包装为隐式 main）
     pub top_level_statements: Option<HirBlock>,
+    /// 类型别名表：别名 → 目标类型（用于 AOT 解析 typealias）
+    pub type_aliases: HashMap<String, HirType>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -986,6 +1002,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
     let mut natives = Vec::new();
     let mut constants = Vec::new();
     let mut top_level_stmts = Vec::new();
+    let mut type_aliases = HashMap::new();
     let ast_classes: std::collections::HashMap<String, &ClassDecl> = program
         .declarations
         .iter()
@@ -1298,7 +1315,9 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                     functions.push(desugar_fn(m));
                 }
             }
-            Decl::TypeAlias(_) => {}
+            Decl::TypeAlias(a) => {
+                type_aliases.insert(a.name.clone(), HirType::from_ast(&a.aliased_type));
+            }
             Decl::Import(_) => {}
             Decl::Annotation(_) => {}
         }
@@ -1425,6 +1444,15 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                         name: "fn".into(),
                         ty: Some(HirType::Named("Any".into())),
                     }],
+                    Some(HirType::Named("Any".into())),
+                ),
+                "listOf" => (
+                    (0..10)
+                        .map(|i| HirParam {
+                            name: format!("item{}", i).into(),
+                            ty: Some(HirType::Named("Value".into())),
+                        })
+                        .collect(),
                     Some(HirType::Named("Any".into())),
                 ),
                 _ => (vec![], Some(HirType::Named("Any".into()))),
@@ -1814,6 +1842,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
         enums,
         natives,
         constants,
+        type_aliases,
         top_level_statements: if top_level_stmts.is_empty() {
             None
         } else {
@@ -2740,6 +2769,21 @@ fn desugar_when(subject: &Option<Box<Expr>>, arms: &[WhenArm]) -> HirExpr {
                         op: BinOp::To,
                         ..
                     } => HirExpr::Lit(Literal::Bool(true)),
+                    Expr::Ident(name, span) if name.starts_with("__is__") => {
+                        // is T → 调用 aura_isOfType(value, "T")
+                        let type_name = &name[6..];
+                        HirExpr::Call {
+                            callee: "aura_isOfType".to_string(),
+                            args: vec![
+                                desugar_expr(s),
+                                HirExpr::Lit(Literal::String(type_name.to_string())),
+                            ],
+                        }
+                    }
+                    Expr::Ident(name, _) if name == "__else__" => {
+                        // else → 默认分支（始终为 true）
+                        HirExpr::Lit(Literal::Bool(true))
+                    }
                     _ => HirExpr::Binary {
                         op: HirBinOp::Eq,
                         lhs: Box::new(desugar_expr(s)),
@@ -2773,31 +2817,34 @@ fn desugar_when(subject: &Option<Box<Expr>>, arms: &[WhenArm]) -> HirExpr {
 ///
 /// 返回：true 表示合成了隐式 main，false 表示已有 main 或无顶层语句
 pub fn synthesize_main_if_missing(hir: &mut HirProgram) -> bool {
-    // 1. 检查是否已有 main 函数
-    if hir.functions.iter().any(|f| f.name == "main") {
-        return false; // 已有 main，不处理（兼容模式）
-    }
-
     // 2. 获取顶层语句
     let body = hir.top_level_statements.take();
 
     match body {
         Some(block) if !block.stmts.is_empty() => {
-            // 3. 合成 main 函数
-            let main_func = HirFunction {
-                name: "main".into(),
-                params: vec![],
-                ret: Some(HirType::Named("Unit".into())),
-                body: block,
-                is_native: false,
-                type_params: vec![],
-                ffi_abi: FfiAbi::None,
-                ffi_lib: None,
-            };
+            // 1. 检查是否已有 main 函数
+            if let Some(main_idx) = hir.functions.iter().position(|f| f.name == "main") {
+                // Bug fix: 已有 main + 顶层语句 → 将顶层语句前置到 main 体首，
+                // 使顶层 val/var 在 main 内可见（此前顶层语句被孤立，运行时值丢失）。
+                hir.functions[main_idx].body.stmts.splice(0..0, block.stmts.into_iter());
+                false
+            } else {
+                // 3. 合成 main 函数
+                let main_func = HirFunction {
+                    name: "main".into(),
+                    params: vec![],
+                    ret: Some(HirType::Named("Unit".into())),
+                    body: block,
+                    is_native: false,
+                    type_params: vec![],
+                    ffi_abi: FfiAbi::None,
+                    ffi_lib: None,
+                };
 
-            // 4. 插入到 functions 开头（确保 entry=0 指向 main）
-            hir.functions.insert(0, main_func);
-            true
+                // 4. 插入到 functions 开头（确保 entry=0 指向 main）
+                hir.functions.insert(0, main_func);
+                true
+            }
         }
         _ => {
             // 无顶层语句，无需合成
@@ -2890,6 +2937,14 @@ fn full_package_name(module: &str) -> String {
 /// 返回所有标准库原生函数的签名信息：(函数全名, [(参数名, 参数类型)])
 fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
     vec![
+        // ── type check ──
+        (
+            "aura_isOfType",
+            vec![
+                ("value", "Any"),
+                ("typeName", "String"),
+            ],
+        ),
         // ── std.io ──
         ("aura.io.println", vec![("msg", "String")]),
         ("aura.io.print", vec![("msg", "String")]),
@@ -3128,7 +3183,37 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
             ],
         ),
         // ── std.collections ──
-        ("aura.collections.listOf", vec![]),
+        // listOf 注册 10 个参数（可变参数），VM 按实际栈深弹出
+        (
+            "listOf",
+            vec![
+                ("item0", "Value"),
+                ("item1", "Value"),
+                ("item2", "Value"),
+                ("item3", "Value"),
+                ("item4", "Value"),
+                ("item5", "Value"),
+                ("item6", "Value"),
+                ("item7", "Value"),
+                ("item8", "Value"),
+                ("item9", "Value"),
+            ],
+        ),
+        (
+            "aura.collections.listOf",
+            vec![
+                ("item0", "Value"),
+                ("item1", "Value"),
+                ("item2", "Value"),
+                ("item3", "Value"),
+                ("item4", "Value"),
+                ("item5", "Value"),
+                ("item6", "Value"),
+                ("item7", "Value"),
+                ("item8", "Value"),
+                ("item9", "Value"),
+            ],
+        ),
         ("aura.collections.mutableListOf", vec![]),
         ("aura.collections.emptyList", vec![]),
         ("aura.collections.arrayOf", vec![]),

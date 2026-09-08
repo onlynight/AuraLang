@@ -1,8 +1,8 @@
 {
   "name": "aura-language",
   "displayName": "Aura Language",
-  "description": "Aura 语言支持 — NovaOS 的下一代系统级脚本语言 (LSP + 语法高亮 + 智能补全)",
-  "version": "0.1.6",
+  "description": "Aura 语言支持 — NovaOS 的下一代系统级脚本语言 (LSP + 语法高亮 + 智能补全)。内置 aura-lsp，开箱即用。",
+  "version": "0.1.9",
   "publisher": "aura-lang",
   "license": "Apache-2.0",
   "homepage": "https://github.com/aura-lang/auralang",
@@ -91,11 +91,11 @@
         "aura.serverPath": {
           "type": "string",
           "default": "aura-lsp",
-          "description": "Aura LSP 服务器可执行文件路径 (aura-lsp)。扩展直接启动独立的 LSP 服务器，避免占用 aura.exe 导致 cargo build 失败。可以是完整路径或 PATH 中可找到的命令。",
+          "description": "Aura LSP 服务器可执行文件路径。默认使用扩展内置的 bin/aura-lsp（开箱即用，无需手动安装）。如需覆盖（例如本地开发自编译版本），请设置为绝对路径或 PATH 中的命令名。",
           "examples": [
-            "aura-lsp",
-            "/usr/local/bin/aura-lsp",
-            "C:\\Aura\\aura-lsp.exe"
+            "C:\\Aura\\build\\aura-lsp.exe",
+            "/home/user/aura/target/release/aura-lsp",
+            "aura-lsp"
           ]
         },
         "aura.serverArgs": {

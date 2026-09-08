@@ -52,6 +52,9 @@ impl NativeRegistry {
         r.register("ptrToInt", native_ptr_to_int);
         r.register("intToPtr", native_int_to_ptr);
         r.register("makeCallback", native_make_callback);
+        r.register("aura_isOfType", native_is_of_type);
+        // listOf — prelude 别名（实际实现在 std_collections.rs）
+        r.register("listOf", crate::std::std_collections::nat_list_of);
 
         // Fix 9: 榛樿浠呭姞杞?prelude锛屼笉鍔犺浇鍏ㄩ儴 std 妯″潡
         // 濡傞渶鍔犺浇 std 妯″潡锛屼娇鐢?NativeRegistry::with_modules()
@@ -131,6 +134,7 @@ impl NativeRegistry {
         r.register("ptrToInt", native_ptr_to_int);
         r.register("intToPtr", native_int_to_ptr);
         r.register("makeCallback", native_make_callback);
+        r.register("aura_isOfType", native_is_of_type);
 
         // 鎸夐渶娉ㄥ唽 std 妯″潡
         crate::std::register_with_modules(&mut r, modules);
@@ -362,6 +366,20 @@ fn native_ptr_is_null(args: &[Value]) -> Value {
     match args.first() {
         Some(v) => Value::Bool(v.is_null_ptr()),
         _ => Value::Bool(true),
+    }
+}
+
+/// aura.isOfType(value, typeName) → Boolean：检查值的运行时类型
+fn native_is_of_type(args: &[Value]) -> Value {
+    if args.len() >= 2 {
+        let value_type = args[0].type_name();
+        let target_type = match &args[1] {
+            Value::Str(s) => &**s,
+            _ => "",
+        };
+        Value::Bool(value_type == target_type)
+    } else {
+        Value::Bool(false)
     }
 }
 

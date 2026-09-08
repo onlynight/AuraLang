@@ -272,8 +272,11 @@ impl AotCodeGenerator {
         output_dir: &Path,
         output_format: OutputFormat,
     ) -> Result<AotOutput, AotError> {
-        use crate::codegen::{desugar_program, fold_hir, inline_hir, mono_hir};
+        use crate::codegen::{
+            desugar_program, fold_hir, inline_hir, mono_hir, synthesize_main_if_missing,
+        };
         let mut hir = desugar_program(program);
+        synthesize_main_if_missing(&mut hir);
         mono_hir(&mut hir);
         inline_hir(&mut hir);
         fold_hir(&mut hir);

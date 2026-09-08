@@ -1,0 +1,50 @@
+// demo_rustffi/src/main.aura — Demo 2: Rust FFI
+//
+// 架构（与 Demo 1 完全相同）：
+//   demo_rustffi/src/main.aura ──extern "C"──→ utils.dll (Aura AOT + --cabi --shared)
+//      │                              │
+//      └── JIT ─── libloading ────────┘
+//
+// 构建命令：
+//   1. loom build --member utils --aot --shared --cabi
+//   2. loom build --member demo-rustffi
+//   3. loom run --member demo-rustffi
+//
+// 区别说明：
+//   Demo 1 强调 C ABI 头文件生成（export-header）和 C 调用约定
+//   Demo 2 强调 Rust 兼容性——同一 DLL 可被 Rust 直接通过 extern "C" 调用
+//   两者使用相同的 utils.dll，只是消费角度不同。
+//
+// 验证标准（与 Demo 1 相同）：
+//   - add(3, 4) → 7
+//   - multiply(3, 4) → 12
+//   - factorial(5) → 120
+//   - power(2, 10) → 1024
+
+// ── FFI 声明：通过 extern "C" 声明 C ABI 函数 ──
+// 与 Demo 1 完全相同的调用路径（libloading + dlsym/dllexport）。
+// Rust 侧同样使用 extern "C" 直接消费 aura_c_* 导出，无需额外编译步骤。
+extern "C" {
+    fun add(a: Int, b: Int): Int
+    fun multiply(a: Int, b: Int): Int
+    fun factorial(n: Int): Int
+    fun power(base: Int, exp: Int): Int
+}
+
+// ── 主函数 ──
+fun main() = {
+    val sum = add(3, 4)
+    println("add(3, 4) = ${sum}")
+
+    val prod = multiply(3, 4)
+    println("multiply(3, 4) = ${prod}")
+
+    val fact = factorial(5)
+    println("factorial(5) = ${fact}")
+
+    val pw = power(2, 10)
+    println("power(2, 10) = ${pw}")
+
+    // 提示：utils.rs 展示了同一 DLL 的 Rust 绑定方式
+    println("参见 utils.rs 了解 Rust 直接调用方式")
+}

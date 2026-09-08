@@ -220,7 +220,8 @@ fn embed_into_auc(source: &str, module: BytecodeModule) -> BytecodeModule {
         eprintln!("错误: [语法] {}", e.message);
         exit(1);
     }
-    let hir = desugar_program(&program);
+    let mut hir = desugar_program(&program);
+    compiler::codegen::hir::synthesize_main_if_missing(&mut hir);
 
     let options = AotOptions {
         opt_level: OptimizationLevel::default(),
@@ -378,7 +379,8 @@ fn cmd_build_aot(args: &[String]) {
         exit(1);
     }
 
-    let hir = compiler::codegen::hir::desugar_program(&program);
+    let mut hir = compiler::codegen::hir::desugar_program(&program);
+    compiler::codegen::hir::synthesize_main_if_missing(&mut hir);
     let codegen = compiler::codegen::aot::AotCodeGenerator::new(options.clone());
     // Phase 4.1: 动态库模式下生成 JitValue ABI 包装函数（blob_mode = true），
     // 且包装函数以 external linkage 导出（wrapper_exported = true），供 dlsym 查找。

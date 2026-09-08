@@ -117,11 +117,14 @@ impl Checker {
         );
         let _ = symbols.insert_function(
             "listOf",
-            vec![ParamSym {
-                name: "items".into(),
-                ty: Ty::Any,
-                has_default: false,
-            }],
+            // 注册 10 个默认参数，使 listOf 接受 0-10 个任意类型参数
+            (0..10)
+                .map(|i| ParamSym {
+                    name: format!("item{}", i),
+                    ty: Ty::Any,
+                    has_default: true,
+                })
+                .collect(),
             Ty::List(Box::new(Ty::Any)),
             Visibility::Public,
             builtin_span,
@@ -244,9 +247,19 @@ impl Checker {
         for decl in &program.declarations {
             self.collect_declaration(decl);
         }
+        // 第一遍补充：顶层 val/var（脚本模式）—— 注册为全局变量
+        // Bug fix: 此前 top_level_statements 完全被 sema 忽略，导致
+        // `val a = 42` + `fun main() { println(a) }` 报 "unresolved reference 'a'"。
+        for stmt in &program.top_level_statements {
+            self.collect_top_level_stmt(stmt);
+        }
         // 第二遍：检查函数体
         for decl in &program.declarations {
             self.check_declaration(decl);
+        }
+        // 第二遍补充：检查顶层 val/var 初始化器类型
+        for stmt in &program.top_level_statements {
+            self.check_top_level_stmt(stmt);
         }
     }
 
@@ -604,7 +617,16 @@ impl Checker {
                 }
             }
         }
-        ast_type_to_ty(ty)
+        let resolved = ast_type_to_ty(ty);
+        // Bug fix: 解析类型别名（typealias）—— Ty::Named("Answer") -> Ty::Int
+        // 此前 check_type 仅做 AST→Ty 转换，从不查询 symbols.types 索引，
+        // 导致 `typealias Answer = Int` 后 `val a: Answer = 42` 误报 type mismatch。
+        match resolved {
+            Ty::Named(ref name) if let Some(target) = self.symbols.lookup_type(name) => {
+                if *target != Ty::Named(name.clone()) { target.clone() } else { resolved }
+            }
+            other => other,
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -2197,6 +2219,19 @@ impl Checker {
         }
         match base {
             Ty::Named(type_name) => {
+                // Pair<Int, Int> 等标准库类型的成员（first/second/toString）
+                if type_name == "Pair" {
+                    return match name {
+                        // Pair 的 first/second 返回类型由泛型实参决定；
+                        // 当前 Ty 系统不保留泛型参数，统一返回 Any
+                        "first" | "second" => Ty::Any,
+                        "toString" => Ty::String,
+                        _ => {
+                            self.report(span, format!("unresolved member '{}' on Pair", name));
+                            Ty::Error
+                        }
+                    };
+                }
                 // struct/enum 字段
                 let field = format!("{}.{}", type_name, name);
                 if let Some(t) = self.lookup_var_ty(&field) {
@@ -2683,6 +2718,117 @@ impl Checker {
 
         self.define_local(name, init_ty.clone());
         init_ty
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 顶层语句处理（脚本模式 val/var/lateinit 注册为全局变量）
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// 第一遍：收集顶层 val/var 声明到全局符号表（允许前向引用）
+    ///
+    /// Bug fix: 此前顶层 `val`/`var` 被归入 `top_level_statements` 而非 `Decl`，
+    /// 导致 sema 完全忽略它们。当程序同时含 `fun main()` 时，main 体内的
+    /// 顶层变量引用报 "unresolved reference"。此方法把顶层 val/var 注册为
+    /// 全局变量符号，使 main 体可以解析到它们。
+    fn collect_top_level_stmt(&mut self, stmt: &Stmt) {
+        match stmt {
+            Stmt::Val {
+                name,
+                type_hint,
+                ..
+            } => {
+                let ty = type_hint.as_deref().map(|t| self.check_type(t)).unwrap_or(Ty::Any);
+                self.define_var_env(name, ty, false);
+            }
+            Stmt::Var {
+                name,
+                type_hint,
+                ..
+            } => {
+                let ty = type_hint.as_deref().map(|t| self.check_type(t)).unwrap_or(Ty::Any);
+                self.define_var_env(name, ty, true);
+            }
+            Stmt::Destructure {
+                patterns,
+                expr,
+                ..
+            } => {
+                let et = self.check_expr(expr);
+                for p in patterns {
+                    if let Expr::Ident(name, _) = p {
+                        self.define_var_env(name, et.clone(), true);
+                    }
+                }
+            }
+            Stmt::Block(stmts, _) => {
+                for s in stmts {
+                    self.collect_top_level_stmt(s);
+                }
+            }
+            Stmt::Expr(_) => {}
+        }
+    }
+
+    /// 第二遍：检查顶层 val/var 初始化器类型
+    ///
+    /// 注意：此方法不重新注册变量（已在 collect 阶段注册），仅检查初始化器类型。
+    fn check_top_level_stmt(&mut self, stmt: &Stmt) {
+        match stmt {
+            Stmt::Val {
+                initializer,
+                type_hint,
+                ..
+            }
+            | Stmt::Var {
+                initializer,
+                type_hint,
+                ..
+            } => {
+                if let Some(init) = initializer {
+                    let init_ty = self.check_expr(init);
+                    if let Some(ty) = type_hint {
+                        let declared = self.check_type(ty);
+                        if !matches!(init_ty, Ty::Any | Ty::Error) {
+                            let subclass_ok = matches!((&init_ty, &declared), (Ty::Named(a), Ty::Named(b))
+                                    if a != b && self.is_subclass(a, b));
+                            if !init_ty.can_assign_to(&declared) && !subclass_ok {
+                                self.report(
+                                    init.span(),
+                                    format!(
+                                        "type mismatch: cannot initialize '{}' with '{}'",
+                                        declared.name(),
+                                        init_ty.name()
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            Stmt::Destructure {
+                patterns,
+                expr,
+                type_hint: _type_hint,
+                span,
+            } => {
+                let et = self.check_expr(expr);
+                for p in patterns {
+                    self.check_expr(p);
+                    if let Expr::Ident(name, _) = p {
+                        self.define_var_env(name, Ty::Any, true);
+                    }
+                }
+                let _ = span;
+            }
+            Stmt::Block(stmts, _) => {
+                for s in stmts {
+                    self.check_top_level_stmt(s);
+                }
+            }
+            Stmt::Expr(e) => {
+                self.check_expr(e);
+            }
+        }
     }
 }
 

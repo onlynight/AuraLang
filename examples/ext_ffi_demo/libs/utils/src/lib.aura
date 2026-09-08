@@ -1,0 +1,32 @@
+// libs/utils/src/lib.aura — 三个 FFI Demo 共用的函数库
+//
+// 本文件定义了 add/multiply/factorial/power 四个纯函数，
+// 无 main 函数。三个 demo 通过不同方式（C ABI / Rust ABI / AOT 直调）
+// 消费这些函数。
+//
+// 构建命令（由调用方执行）：
+//   C FFI / Rust FFI:  loom build --member utils --aot --shared --cabi
+//   AOT 直调:          loom build --member utils --aot --shared
+//
+
+/// 两数相加
+fun add(a: Int, b: Int): Int = a + b
+
+/// 两数相乘
+fun multiply(a: Int, b: Int): Int = a * b
+
+/// 阶乘（递归实现）
+fun factorial(n: Int): Int {
+    if (n <= 1) {
+        return 1
+    }
+    return n * factorial(n - 1)
+}
+
+/// 幂运算（递归实现）
+fun power(base: Int, exp: Int): Int {
+    if (exp <= 0) {
+        return 1
+    }
+    return base * power(base, exp - 1)
+}

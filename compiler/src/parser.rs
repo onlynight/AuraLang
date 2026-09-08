@@ -1913,6 +1913,11 @@ impl Parser {
     }
 
     fn parse_statement(&mut self) -> Stmt {
+        // Bug fix: `;` 作为语句终止符应被跳过，而非解析为 Ident
+        if self.check(TokenKind::Semicolon) {
+            let t = self.advance();
+            return Stmt::Block(Vec::new(), t.span);
+        }
         if self.check(TokenKind::Val) {
             return self.parse_val_stmt();
         }
@@ -2175,6 +2180,18 @@ impl Parser {
                     op: BinOp::To,
                     lhs: Box::new(lhs),
                     rhs: Box::new(rhs),
+                    span: Span::merge(&start, &self.current().span),
+                };
+                continue;
+            }
+
+            // `as` 类型转换：x as Type → TypeCast
+            if self.check(TokenKind::As) {
+                self.advance();
+                let type_name = self.parse_type();
+                lhs = Expr::TypeCast {
+                    expr: Box::new(lhs),
+                    type_name: Box::new(type_name),
                     span: Span::merge(&start, &self.current().span),
                 };
                 continue;
@@ -2463,6 +2480,14 @@ impl Parser {
                         };
                     }
                 }
+                // !! 非空断言运算符（Kotlin 风格：x!! → AssertNonNull）
+                TokenKind::DoubleBang => {
+                    self.advance();
+                    expr = Expr::AssertNonNull {
+                        expr: Box::new(expr),
+                        span: Span::merge(&start, &self.current().span),
+                    };
+                }
                 _ => break,
             }
         }
@@ -2635,6 +2660,7 @@ impl Parser {
             TokenKind::QuestionMark => 8, // Elvis
             TokenKind::DoubleDotOp => 8,  // 范围 ..
             TokenKind::To => 2,           // map entry: "a" to 1
+            TokenKind::As => 3,           // 类型转换: x as String
             _ => 0,
         }
     }
@@ -2784,8 +2810,12 @@ impl Parser {
                     self.advance();
                     let ty = self.parse_type();
                     self.pattern_to_expr(ty, arm_start)
+                } else if self.check(TokenKind::Else) {
+                    // else -> ...（默认分支）
+                    self.advance();
+                    Expr::Ident("__else__".to_string(), arm_start)
                 } else {
-                    // 普通表达式模式（含 else ->）
+                    // 普通表达式模式
                     self.parse_expression(0)
                 };
                 patterns.push(pattern);
@@ -2877,9 +2907,9 @@ impl Parser {
     /// 将 when 分支中的类型模式转为表达式节点（简单起见以类型名作为标识符节点）
     fn pattern_to_expr(&self, ty: Type, start: Span) -> Expr {
         match ty {
-            Type::Named { name, .. } => Expr::Ident(name, start),
-            Type::Generic { name, .. } => Expr::Ident(name, start),
-            _ => Expr::Ident("<type>".to_string(), start),
+            Type::Named { name, .. } => Expr::Ident(format!("__is__{}", name), start),
+            Type::Generic { name, .. } => Expr::Ident(format!("__is__{}", name), start),
+            _ => Expr::Ident("__is__<type>".to_string(), start),
         }
     }
 }

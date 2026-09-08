@@ -387,6 +387,27 @@ fn emit_c_expr(s: &mut String, expr: &HirExpr) {
             // 返回函数指针
             s.push_str(&format!("(void*)&{}", func_name));
         }
+        // CallVirtual — 与 Call 相同路径（AOT 生成静态调用）
+        HirExpr::CallVirtual {
+            recv,
+            name,
+            args,
+        } => {
+            // args[0] 已是接收者，直接生成静态调用
+            let callee = format!("{}.{}", "virtual", sanitize_c(name));
+            s.push_str(&callee);
+            s.push('(');
+            let args_str: Vec<String> = args
+                .iter()
+                .map(|a| {
+                    let mut buf = String::new();
+                    emit_c_expr(&mut buf, a);
+                    buf
+                })
+                .collect();
+            s.push_str(&args_str.join(", "));
+            s.push(')');
+        }
     }
 }
 

@@ -39,7 +39,7 @@ pub fn register(reg: &mut NativeRegistry) {
 }
 
 /// listOf(items...) → List
-fn nat_list_of(args: &[Value]) -> Value {
+pub fn nat_list_of(args: &[Value]) -> Value {
     let items: Vec<Value> = args.iter().cloned().collect();
     Value::List(items)
 }

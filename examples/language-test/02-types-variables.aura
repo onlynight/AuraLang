@@ -1,0 +1,344 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 2 — 类型与变量测试 (P2: Types & Variables)
+// ═══════════════════════════════════════════════════════════════════════════
+// 覆盖：val/var/lateinit/by lazy / 类型推断 / 可空类型 / typealias / is 模式
+//
+// 验证：
+//   aura check examples/language-test/02-types-variables.aura    // 语法/语义零错误
+//   aura run   examples/language-test/02-types-variables.aura    // 运行时输出正确
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── §2.1 val / var 基本声明 ────────────────────────────────────────────────
+/// 测试 val（只读）和 var（可变）的基本用法
+fun testValVar() {
+    // val：不可变绑定
+    val CONSTANT: Int = 42                       // 显式类型
+    val inferred: String = "hello"              // 类型推断
+    var mutable_count: Int = 0                   // var 可变
+    mutable_count += 1                           // var 可赋值
+    mutable_count *= 2                           // 复合赋值
+
+    println("§2.1 val/var:")
+    println("  val CONSTANT: " + CONSTANT.toString())
+    println("  val inferred: " + inferred)
+    println("  var mutable_count (after +1*2): " + mutable_count.toString())
+}
+
+// ── §2.2 类型推断 vs 显式类型 ──────────────────────────────────────────────
+/// 测试类型推断（无 type_hint）和显式类型注解的差异
+fun testInference() {
+    // 类型推断：编译器从初始化器推断类型
+    val a = 42                                   // 推断为 Int
+    val b = 3.14                                 // 推断为 Double
+    val c = "world"                              // 推断为 String
+    val d = true                                 // 推断为 Boolean
+
+    // 显式类型：与初始化器一致
+    val e: Int = 100                             // Int
+    val f: Double = 2.5                          // Double
+    val g: String = "Aura"                       // String
+    val h: Boolean = false                       // Boolean
+
+    // 推断与显式类型互操作
+    val mixed = a + e                            // Int + Int = Int
+    val mixed2 = b * f                           // Double * Double = Double
+
+    println("")
+    println("§2.2 类型推断:")
+    println("  推断 Int: " + a.toString())
+    println("  推断 Double: " + b.toString())
+    println("  推断 String: " + c)
+    println("  推断 Boolean: " + d.toString())
+    println("  显式 Int: " + e.toString())
+    println("  显式 Double: " + f.toString())
+    println("  显式 String: " + g)
+    println("  显式 Boolean: " + h.toString())
+    println("  混合运算 (Int): " + mixed.toString())
+    println("  混合运算 (Double): " + mixed2.toString())
+}
+
+// ── §2.3 可空类型（Nullable Types） ───────────────────────────────────────
+/// 测试可空类型 T? 的声明与初始化
+fun testNullable() {
+    val nullable_int: Int? = null                // 可空 Int
+    val nullable_str: String? = null             // 可空 String
+    val some_int: Int? = 42                      // 可空类型也可有值
+    val some_str: String? = "present"            // 有值的可空类型
+
+    // 非空类型不能赋 null
+    val not_null: Int = 100                      // Int 非空
+
+    // Elvis 运算符 ?: — 可空值的默认值
+    val safe_int: Int = nullable_int ?: 0
+    val safe_str: String = nullable_str ?: "default"
+    val safe_int2: Int = some_int ?: 0
+    val safe_str2: String = some_str ?: "default"
+
+    // 可空值安全访问（通过 Elvis 转换为非空后再使用）
+    val resolved_int: Int = some_int ?: 0
+    val resolved_str: String = some_str ?: ""
+    val computed: Int = resolved_int + 1
+
+    println("")
+    println("§2.3 可空类型:")
+    println("  null Int: " + nullable_int.toString())
+    println("  null String: " + nullable_str.toString())
+    println("  some Int: " + some_int.toString())
+    println("  some String: " + some_str.toString())
+    println("  Elvis (null→0): " + safe_int.toString())
+    println("  Elvis (null→default): " + safe_str)
+    println("  Elvis (some→val): " + safe_int2.toString())
+    println("  Elvis (some→val): " + safe_str2)
+    println("  可空值解包+运算: " + computed.toString())
+    println("  非空值: " + not_null.toString())
+}
+
+// ── §2.4 lateinit var（延迟初始化） ────────────────────────────────────────
+/// 测试 lateinit var 在类内部的延迟初始化
+class LateInitDemo {
+    lateinit var cache: String
+    lateinit var config: Int
+
+    fun setCache(v: String) {
+        this.cache = v
+    }
+
+    fun setConfig(v: Int) {
+        this.config = v
+    }
+
+    fun getCache(): String {
+        return this.cache
+    }
+
+    fun getConfig(): Int {
+        return this.config
+    }
+}
+
+/// 顶层 lateinit var（脚本模式：无 main 时顶层语句包装为隐式 main）
+lateinit var TOP_LEVEL_CACHE: String
+
+fun testLateInit() {
+    val demo = LateInitDemo()
+    demo.setCache("lazy_value")
+    demo.setConfig(100)
+
+    println("")
+    println("§2.4 lateinit var:")
+    println("  类内 cache: " + demo.getCache())
+    println("  类内 config: " + demo.getConfig().toString())
+}
+
+// ── §2.5 val by lazy（惰性初始化） ─────────────────────────────────────────
+/// 测试 val by lazy 的惰性求值
+fun testLazy() {
+    var compute_count: Int = 0
+
+    // by lazy：首次访问时求值，之后缓存结果
+    val lazy_value by lazy {
+        compute_count += 1
+        42
+    }
+
+    // 首次访问触发计算
+    val first = lazy_value
+    val second = lazy_value
+    val third = lazy_value
+
+    println("")
+    println("§2.5 val by lazy:")
+    println("  首次访问: " + first.toString())
+    println("  第二次访问: " + second.toString())
+    println("  第三次访问: " + third.toString())
+    println("  计算次数: " + compute_count.toString())
+    println("  (by lazy 保证只计算 1 次)")
+}
+
+// ── §2.6 typealias（类型别名） ─────────────────────────────────────────────
+/// 测试类型别名的声明与使用
+typealias Answer = Int
+typealias Question = String
+typealias Flag = Boolean
+
+fun testTypeAlias() {
+    // 别名与原始类型互操作
+    val ans: Answer = 42                          // Answer ≡ Int
+    val q: Question = "why"                       // Question ≡ String
+    val flag: Flag = true                          // Flag ≡ Boolean
+
+    // 别名变量可当原始类型使用
+    val raw_int: Int = ans                        // Answer → Int
+    val raw_str: String = q                       // Question → String
+
+    // 多个别名共存
+    val ans2: Answer = 100
+    val q2: Question = "how"
+
+    // 别名在参数/返回值中使用
+    val doubled: Answer = ans * 2
+    val answer_str: Question = ans.toString()
+
+    println("")
+    println("§2.6 typealias:")
+    println("  Answer(≡Int): " + ans.toString())
+    println("  Question(≡String): " + q)
+    println("  Flag(≡Boolean): " + flag.toString())
+    println("  Answer→Int: " + raw_int.toString())
+    println("  Question→String: " + raw_str)
+    println("  Answer2: " + ans2.toString())
+    println("  Question2: " + q2)
+    println("  doubled Answer: " + doubled.toString())
+    println("  Answer→String: " + answer_str)
+}
+
+// ── §2.7 is 模式匹配（when 表达式） ────────────────────────────────────────
+/// 测试 is 类型检查在 when 表达式中的使用
+fun testIsPattern() {
+    // is 模式：类型检查
+    val val_str: Any = "hello"
+    val val_int: Any = 42
+    val val_bool: Any = true
+
+    // when + is：根据实际类型分支
+    val str_len = when (val_str) {
+        is String -> 1
+        is Int -> 0
+        is Boolean -> 0
+        else -> -1
+    }
+
+    val int_check = when (val_int) {
+        is String -> 0
+        is Int -> 100
+        is Boolean -> 0
+        else -> -1
+    }
+
+    val bool_check = when (val_bool) {
+        is String -> 0
+        is Int -> 0
+        is Boolean -> 1
+        else -> -1
+    }
+
+    // 多个 is 分支覆盖所有类型
+    val any_val: Any = 3.14
+    val type_name = when (any_val) {
+        is String -> "String"
+        is Int -> "Int"
+        is Double -> "Double"
+        is Boolean -> "Boolean"
+        else -> "Unknown"
+    }
+
+    println("")
+    println("§2.7 is 模式匹配:")
+    println("  String→1: " + str_len.toString())
+    println("  Int→100: " + int_check.toString())
+    println("  Boolean→1: " + bool_check.toString())
+    println("  Double 类型名: " + type_name)
+}
+
+// ── §2.8 复合类型 ──────────────────────────────────────────────────────────
+/// 测试复合类型（struct）与 to 运算符
+struct Coords(val x: Int, val y: Int) {
+    fun manhattan(): Int = x + y
+}
+
+fun testComplexTypes() {
+    // struct 实例化
+    val c = Coords(1, 2)
+    val c2 = Coords(3, 4)
+
+    // struct 字段访问 + 方法调用
+    val cx = c.x
+    val cy = c.y
+    val dist = c.manhattan()
+
+    // struct 实例互操作
+    val c3 = Coords(c.x + c2.x, c.y + c2.y)
+
+    // to 运算符（构造 Pair，用于 Map entry 等场景）
+    val entry = 1 to 2                           // Pair<Int, Int>
+    val entry2 = "key" to "value"                 // Pair<String, String>
+
+    println("")
+    println("§2.8 复合类型:")
+    println("  Coords(1,2): x=" + cx.toString() + " y=" + cy.toString())
+    println("  Coords manhattan: " + dist.toString())
+    println("  Coords(1+3,2+4): x=" + c3.x.toString() + " y=" + c3.y.toString())
+    println("  to 运算符: Pair(1,2) created ✓")
+    println("  to 运算符: Pair(\"key\",\"value\") created ✓")
+}
+
+// ── §2.9 变量作用域与可见性 ───────────────────────────────────────────────
+/// 测试变量在不同作用域中的可见性
+fun testScope() {
+    // 函数内变量
+    val fn_local: Int = 10
+
+    {
+        // 块内变量（块作用域）
+        val block_local: Int = 20
+        fn_local += block_local
+
+        {
+            // 嵌套块
+            val nested_local: Int = 30
+            fn_local += nested_local
+        }
+    }
+
+    // 函数参数
+    val param_val = testParam(100, 200)
+
+    println("")
+    println("§2.9 变量作用域:")
+    println("  fn_local (after +20+30): " + fn_local.toString())
+    println("  testParam(100,200): " + param_val.toString())
+}
+
+/// 函数参数测试
+fun testParam(a: Int, b: Int): Int {
+    return a + b
+}
+
+// ── §2.10 主函数 ───────────────────────────────────────────────────────────
+fun main() {
+    println("═══ Phase 2: 类型与变量测试 ═══")
+    println("")
+
+    // §2.1 val / var
+    testValVar()
+
+    // §2.2 类型推断
+    testInference()
+
+    // §2.3 可空类型
+    testNullable()
+
+    // §2.4 lateinit
+    testLateInit()
+    // 顶层 lateinit var 赋值（在 main 内直接访问）
+    TOP_LEVEL_CACHE = "top_level_ready"
+    println("  顶层 cache: " + TOP_LEVEL_CACHE.toString())
+
+    // §2.5 by lazy
+    testLazy()
+
+    // §2.6 typealias
+    testTypeAlias()
+
+    // §2.7 is 模式
+    testIsPattern()
+
+    // §2.8 复合类型
+    testComplexTypes()
+
+    // §2.9 作用域
+    testScope()
+
+    println("")
+    println("═══ Phase 2 完成 ✓ ═══")
+}

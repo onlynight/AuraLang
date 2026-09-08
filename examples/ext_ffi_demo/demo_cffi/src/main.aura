@@ -1,0 +1,44 @@
+// demo_cffi/src/main.aura — Demo 1: C FFI
+//
+// 架构：
+//   demo_cffi/src/main.aura ──extern "C"──→ utils.dll (Aura AOT + --cabi --shared)
+//      │                              │
+//      └── JIT ─── libloading ────────┘
+//
+// 构建命令：
+//   1. aura export-header libs/utils/src/lib.aura --out demo_cffi/utils.h
+//   2. loom build --member utils --aot --shared --cabi
+//   3. loom build --member demo-cffi
+//   4. loom run --member demo-cffi
+//
+// 验证标准：
+//   - add(3, 4) → 7
+//   - multiply(3, 4) → 12
+//   - factorial(5) → 120
+//   - power(2, 10) → 1024
+
+// ── FFI 声明：通过 extern "C" 声明 C ABI 函数 ──
+// 这些函数由 utils.dll (Aura AOT + --cabi --shared) 导出，
+// 调用约定为 C ABI (ccc)。
+// 未链接 dylib 时返回占位值，不崩溃；链接后 0 开销直接调用。
+extern "C" {
+    fun add(a: Int, b: Int): Int
+    fun multiply(a: Int, b: Int): Int
+    fun factorial(n: Int): Int
+    fun power(base: Int, exp: Int): Int
+}
+
+// ── 主函数 ──
+fun main() = {
+    val sum = add(3, 4)
+    println("add(3, 4) = ${sum}")
+
+    val prod = multiply(3, 4)
+    println("multiply(3, 4) = ${prod}")
+
+    val fact = factorial(5)
+    println("factorial(5) = ${fact}")
+
+    val pw = power(2, 10)
+    println("power(2, 10) = ${pw}")
+}

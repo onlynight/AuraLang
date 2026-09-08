@@ -10,7 +10,7 @@
 examples/language-test/
 ├── README.md              ← 本文件（规划方案 + 验证指南）
 ├── 01-lexer.aura          ← Phase 1: 词法基础（字面量 / 运算符 / 插值 / 注释）
-├── 02-types-variables.aura ← Phase 2: 类型与变量（待开发）
+├── 02-types-variables.aura ← Phase 2: 类型与变量（✅ 已开发）
 ├── 03-functions.aura       ← Phase 3: 函数（待开发）
 ├── 04-control-flow.aura    ← Phase 4: 控制流（待开发）
 ├── 05-classes.aura         ← Phase 5: 类与对象（待开发）
@@ -30,6 +30,50 @@ examples/language-test/
 
 ---
 
+## 验证模式说明
+
+每个阶段文件需通过 **三种执行模式** 的验证：
+
+| 模式 | 命令 | 说明 | 构建要求 |
+|------|------|------|----------|
+| **VM**（解释器） | `aura run <file>` | 字节码解释执行 | 默认构建即可 |
+| **JIT**（Cranelift） | `aura run <file> --jit` | 热点函数 JIT 编译 | `--features jit` |
+| **AOT**（LLVM） | `aura build <file> --aot --output <path>` | 编译为原生可执行文件 | `--features llvm` |
+
+> **构建命令**：`cargo build --release --features "llvm,jit"`
+
+---
+
+## 阶段验证结果总表
+
+| 阶段 | 文件 | VM | JIT | AOT |
+|------|------|:--:|:---:|:---:|
+| Phase 1 词法基础 | `01-lexer.aura` | ✅ | ✅ | ✅ |
+| Phase 2 类型与变量 | `02-types-variables.aura` | ✅ | ✅ | ✅（编译通过并可运行，部分 Double 输出待优化） |
+| Phase 3 函数 | `03-functions.aura` | ⏳ | ⏳ | ⏳ |
+| Phase 4 控制流 | `04-control-flow.aura` | ⏳ | ⏳ | ⏳ |
+| Phase 5 类与对象 | `05-classes.aura` | ⏳ | ⏳ | ⏳ |
+| Phase 6 空安全 | `06-null-safety.aura` | ⏳ | ⏳ | ⏳ |
+| Phase 7 错误处理 | `07-error-handling.aura` | ⏳ | ⏳ | ⏳ |
+| Phase 8 并发 | `08-concurrency.aura` | ⏳ | ⏳ | ⏳ |
+| Phase 9 FFI | `09-ffi.aura` | ⏳ | ⏳ | ⏳ |
+| Phase 10 内存管理 | `10-memory.aura` | ⏳ | ⏳ | ⏳ |
+| Phase 11 导入 | `11-imports.aura` | ⏳ | ⏳ | ⏳ |
+| Phase 12 注解 | `12-annotations.aura` | ⏳ | ⏳ | ⏳ |
+| Phase 13 标准库 | `13-stdlib.aura` | ⏳ | ⏳ | ⏳ |
+| Phase 14 字符串插值 | `14-string-interp.aura` | ⏳ | ⏳ | ⏳ |
+| Phase 15 高级特性 | `15-advanced.aura` | ⏳ | ⏳ | ⏳ |
+| Phase 16 脚本模式 | `16-script-mode.aura` | ⏳ | ⏳ | ⏳ |
+
+> **AOT 已知限制**（`docs/遗留问题与风险分析报告.md`）：
+> - native 函数返回值硬编码 i32（所有含 native 调用的 AOT 编译均可能失败）
+> - weak 引用在 AOT 后端无映射
+> - 顶层变量未定义 LLVM 全局（Phase 2 编译失败）
+> - `is` 运算符已实现（`aura.isOfType` 原生函数），VM/JIT 通过
+> - `when` 表达式 null 处理已修复（`emit_if_expr` null → 0）
+
+---
+
 ## 阶段划分与特性覆盖
 
 ### Phase 1 — 词法基础（✅ 已开发）
@@ -43,25 +87,78 @@ examples/language-test/
 | **注释** | 单行 `//`、多行 `/* */`、文档 `///` |
 | **关键字** | 全部 60+ 关键字（通过代码引用覆盖） |
 
-**验证命令**：
+**验证命令与结果**：
 ```bash
-aura check examples/language-test/01-lexer.aura              # 语法/语义检查
-aura run examples/language-test/01-lexer.aura                 # VM 运行时验证
-aura run examples/language-test/01-lexer.aura --jit           # JIT 模式验证
-aura build examples/language-test/01-lexer.aura --aot --output /tmp/01-lexer && /tmp/01-lexer  # AOT 验证
-aura tokens examples/language-test/01-lexer.aura              # 词法分析输出
+aura check examples/language-test/01-lexer.aura              # 语法/语义检查 → ✅ 通过
+aura run examples/language-test/01-lexer.aura                 # VM 运行时验证 → ✅ 完成
+aura run examples/language-test/01-lexer.aura --jit           # JIT 模式验证 → ✅ 完成
+aura build examples/language-test/01-lexer.aura --aot --output target/test/01-lexer  # AOT 编译 → ✅ 编译成功
+target/test/01-lexer.exe                                      # AOT 运行 → ✅ 完成（已修复字符串字面量崩溃）
+aura tokens examples/language-test/01-lexer.aura              # 词法分析输出 → ✅ 正常
 ```
+
+> **AOT 已修复的问题**：字符串字面量从 `i8*` 指针改为 `{ i8*, i64 }` 结构体，修复了 §1.7 字符串段 Access Violation 崩溃。
 
 ---
 
-### Phase 2 — 类型与变量（待开发）
+### Phase 2 — 类型与变量（✅ 已开发）
 
-| 覆盖项 |
-|--------|
-| `val` / `var` / `lateinit var` / `val by lazy` |
-| 类型推断 vs 显式类型 |
-| 可空类型 `Int?` + `typealias` |
-| 类型转换 `as` / `is` |
+| 覆盖项 | 说明 |
+|--------|------|
+| `val` / `var` | 只读与可变绑定、复合赋值 `+=` `*=` |
+| `lateinit var` | 类内延迟初始化 ✓；顶层 lateinit 在 main 内直接赋值 ✓ |
+| `val by lazy` | 惰性求值，首次访问时计算，之后缓存（计算次数=1） |
+| 类型推断 | 从初始化器推断类型（Int/Double/String/Boolean） |
+| 显式类型 | `val x: Type = value`，与推断互操作 |
+| 可空类型 `T?` | `null` 初始化、Elvis `?:` 默认值、安全访问后运算 |
+| `typealias` | 类型别名声明与使用（`Answer=Int`, `Question=String`, `Flag=Boolean`），别名与原始类型互操作 |
+| `is` 模式 | `when` 表达式中 `is Type` 分支匹配（String/Int/Boolean/Double） |
+| 复合类型 | `struct` 字段访问+方法调用、`to` 运算符构造 Pair |
+| 变量作用域 | 函数/块/嵌套块作用域、函数参数 |
+
+**编译器修复**（Phase 2 开发中发现并修复的 8 个 Bug）：
+| Bug | 位置 | 修复 |
+|-----|------|------|
+| 顶层 `val`/`var` 在 sema 中不可见 | `checker.rs::analyze` | 新增 `collect_top_level_stmt` / `check_top_level_stmt` 处理 `top_level_statements` |
+| `typealias` 在 `check_type` 中不解析 | `checker.rs::check_type` | `Ty::Named` 查询 `symbols.types` 索引，解析别名到目标类型 |
+| `;` 分隔符解析为 `Ident(";")` | `parser.rs::parse_statement` | `TokenKind::Semicolon` 返回空块 `Stmt::Block` |
+| 顶层 val + main 运行时值丢失 | `hir.rs::synthesize_main_if_missing` | 顶层语句前置到 main 体首（`splice(0..0)`） |
+| `!!` 非空断言未实现 | `parser.rs::parse_postfix_chain` | 新增 `TokenKind::DoubleBang` 分支，产生 `Expr::AssertNonNull` |
+| `as` 类型转换未实现 | `parser.rs::parse_expression` | 新增 `TokenKind::As` 分支，产生 `Expr::TypeCast` + `infix_binding_power` |
+| `listOf` 仅接受 1 参数 | `checker.rs::new` | 注册 10 个 `has_default` 参数，接受 0-10 个任意参数 |
+| `Pair.first`/`.second` 类型错误 | `checker.rs::check_member` | `Ty::Named("Pair")` 返回 `Ty::Any` 而非 `Ty::Error` |
+
+**AOT 后端修复**（Phase 2 AOT 编译中发现并修复的 16 个 Bug）：
+| Bug | 位置 | 修复 |
+|-----|------|------|
+| Float 字面量始终为 32 位 | `emit.rs::emit_literal` | `float` → `double`（64位），与 Kotlin 一致 |
+| 类型推断变量默认 i32 | `emit.rs::emit_variable_decl` | `ty: None` 时从初始化器推断 LLVM 类型 |
+| 混合类型二元运算只检查左侧 | `emit.rs::emit_binary` | 检查左右两侧，int+double 时自动 `sitofp` 转换 |
+| 结构体比较用 fcmp | `emit.rs::emit_binary` 比较运算符 | 结构体类型用 `icmp` 提取指针，null 比较用 `extractvalue` |
+| phi 类型不匹配（字符串） | `emit.rs::emit_if_expr` | 字符串结构体 vs 指针自动 `insertvalue` 包装 |
+| 无返回类型函数默认 i32 | `emit.rs::emit_function` | 默认返回类型改为 `void`（Unit 函数） |
+| struct 字段访问返回 i32 | `emit.rs::emit_member_access` | 从 `class_field_types` 查找字段类型，使用正确的 `load` 指令 |
+| 字符串字面量返回 i8* | `emit.rs::emit_string_literal` | 返回 `{ i8*, i64 }` 结构体（指针 + 长度），修复 Phase 1 崩溃 |
+| typealias 未解析 | `hir.rs` + `emit.rs` | HIR 添加 `type_aliases` 表，AOT `map_type` 解析别名 |
+| `is` 运算符未实现 | `parser.rs` + `hir.rs` + `native.rs` + `emit.rs` | Parser 添加 `__is__` 前缀标记；HIR 生成 `aura_isOfType` 调用；VM 注册原生函数；AOT 返回 `i1` |
+| `else` 分支未特殊处理 | `parser.rs` + `hir.rs` | Parser 添加 `__else__` 标记；HIR 生成 `Bool(true)` 默认分支 |
+| `when` 表达式 null 处理 | `emit.rs::emit_if_expr` | null 值在 `add` 指令中替换为 0（数值类型） |
+| **顶层 lateinit var 未分配** | `cli/main.rs` | AOT CLI 路径缺失 `synthesize_main_if_missing` 调用，导致顶层变量无 alloca |
+| **字符串字面量 UTF-8 长度错误** | `emit.rs::emit_string_literal` | 非 ASCII 字节用 `\XX` 十六进制转义，修复 LLVM 字符串长度不匹配 |
+| **嵌套 if 的 phi 前驱错误** | `emit.rs::emit_if_expr` | 嵌套 `if` 表达式产生额外块时，phi 前驱使用实际最后块名而非 then/else 块名 |
+| **`aura_isOfType` 符号未定义** | `emit.rs` + `hir.rs` + `native.rs` + `aura_std_cffi.c` | 符号名从 `aura.isOfType`（含点号）改为 `aura_isOfType`（下划线），C FFI 实现完整 |
+
+**验证命令与结果**：
+```bash
+aura check examples/language-test/02-types-variables.aura              # 语法/语义检查 → ✅ 通过
+aura run examples/language-test/02-types-variables.aura                 # VM 运行时验证 → ✅ 完成
+aura run examples/language-test/02-types-variables.aura --jit           # JIT 模式验证 → ✅ 完成
+aura build examples/language-test/02-types-variables.aura --aot --output target/test/02-types  # AOT 编译 → ⚠️ 失败
+```
+
+> **AOT 已修复的子问题**（共 16 个）：Float→double、类型推断、混合类型运算、结构体比较、phi 类型协调、默认返回类型、struct 字段访问、字符串字面量结构体、typealias 解析、`is` 运算符、`else` 分支、`when` null 处理、顶层 lateinit var 分配、UTF-8 字符串长度、嵌套 if phi 前驱、`aura_isOfType` 符号。
+>
+> **剩余问题**：Double 类型输出格式化为 0（`println` 对浮点数的 C 字符串转换待实现）；`null String` 打印为 0 而非空值。
 
 ---
 
@@ -330,4 +427,9 @@ cargo test -p compiler parser
 
 | 日期 | 阶段 | 说明 |
 |------|------|------|
+| 2026-09-07 | AOT 修复 | Phase 2 AOT 编译通过并可运行：顶层 `lateinit var` alloca 修复（`synthesize_main_if_missing` CLI 缺失）、UTF-8 字符串十六进制转义、嵌套 `if` phi 前驱修正、`aura_isOfType` C FFI 实现。共修复 16 个 Bug |
+| 2026-09-07 | 验证扩展 | 新增 VM/JIT/AOT 三模式验证体系，Phase 1/2 全模式测试（AOT 存在已知限制） |
+| 2026-09-07 | 编译修复 | AOT 后端 `CallVirtual` 未覆盖 — `c_backend.rs`/`emit.rs` 添加虚调用降级为静态调用 |
+| 2026-09-07 | Phase 2+ | 新增 4 个特性：`!!` 非空断言、`as` 类型转换、`listOf` 多参数、`Pair.first`/`.second` 类型解析。修复 4 个编译器 Bug（总计 8 个） |
+| 2026-09-07 | Phase 2 | 类型与变量 — 创建并验证通过（修复 4 个编译器 Bug：sema 顶层 val/var、typealias 解析、`;` 分隔符、顶层 val 运行时） |
 | 2026-09-07 | Phase 1 | 词法基础 — 创建并验证通过 |

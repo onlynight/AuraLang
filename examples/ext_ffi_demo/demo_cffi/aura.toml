@@ -1,0 +1,69 @@
+schema-version = "2.0"
+name = "demo-cffi"
+version = "0.1.0"
+description = "Demo 1: C FFI — Aura 调用 Aura AOT 的 C ABI 产物"
+authors = []
+license = "MIT"
+entry = "src/main.aura"
+exports = ["main"]
+library = false
+
+# 依赖共享库（用于 AOT 编译时被调用的函数）
+dependencies = [
+    { name = "utils", version = "0.1.0" },
+]
+compile-dependencies = []
+runtime-dependencies = []
+dev-dependencies = []
+build-dependencies = []
+tasks = []
+
+[build]
+opt-level = 2
+debug = true
+out-dir = "target/build"
+cache-dir = "target/cache"
+parallel = true
+
+[build.source-sets.main]
+source-dirs = ["src"]
+resource-dirs = []
+include = ["**/*.aura"]
+exclude = ["**/*.test.aura", "vendor/**", "target/**"]
+depends-on = []
+
+[build.alias]
+
+[plugins]
+aura-stdlib = true
+aura-test-harness = false
+aura-doc-gen = false
+aura-format = false
+aura-aot = true
+aura-watch = false
+aura-ci = false
+
+[plugins.external]
+
+[profiles.release]
+activate = false
+
+[profiles.debug]
+activate = true
+
+[repositories]
+central = "https://registry.aura-lang.dev"
+
+[repositories.custom]
+
+[resources]
+include = []
+exclude = []
+
+[package]
+format = "auz"
+include-sources = false
+include-docs = false
+include-native = true
+native-targets = []
+aot-opt-level = 2

@@ -2,12 +2,12 @@
  * Aura Language — VS Code 扩展
  *
  * 提供：
- * - LSP 语言服务器连接（直接启动独立的 aura-lsp，不再经由 aura.exe 中转）
+ * - LSP 语言服务器连接（启动扩展**自带**的 bin/aura-lsp 二进制，不再经由 aura.exe 中转）
  * - 代码补全、跳转定义、悬停提示、诊断推送
  * - 代码格式化
  * - 保存时检查
  *
- * @version 0.1.0
+ * @version 0.1.9
  * @license MIT
  */
 
@@ -56,7 +56,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             await formatDocument(currentEditor.document.uri);
         }),
         vscode.commands.registerCommand("aura.showVersion", async () => {
-            vscode.window.showInformationMessage("Aura Language v0.1.5");
+            const version = context.extension?.packageJSON?.version ?? "0.1.7";
+            vscode.window.showInformationMessage(`Aura Language v${version}`);
         })
     );
 

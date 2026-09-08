@@ -306,7 +306,7 @@
             ]
         },
         "prefix-modifiers": {
-            "match": "\\b(abstract|final|enum|open|annotation|sealed|data|override|lateinit|private|protected|public|internal|inner|noinline|crossinline|vararg|reified|tailrec|operator|infix|inline|external|const|suspend|comptime|value|defer|extern|lazy|box|weak|async)\\b",
+            "match": "\\b(abstract|final|enum|open|annotation|sealed|data|override|lateinit|private|protected|public|internal|inner|noinline|crossinline|vararg|reified|tailrec|operator|infix|inline|external|const|suspend|comptime|value|defer|extern|lazy|box|weak|async|init|companion|constructor|expect|actual|malloc|free|retain|release)\\b",
             "name": "storage.modifier.other.aura"
         },
         "postfix-modifiers": {
@@ -318,7 +318,7 @@
             "name": "keyword.soft.aura"
         },
         "hard-keywords": {
-            "match": "\\b(as|is|in|to|it)\\b",
+            "match": "\\b(as|is|in|to|it|typeof)\\b",
             "name": "keyword.hard.aura"
         },
         "control-keywords": {
@@ -386,7 +386,7 @@
             ]
         },
         "struct-declaration": {
-            "begin": "(?:(data|sealed)\\s+)?(struct)\\s+(\\b\\w+\\b)(?:\\s*<[^>]+>)?(?:\\s*\\([^)]*\\))?\\s*(\\{)",
+            "begin": "((?:\\w+\\s+)*)?(struct)\\s+(\\b\\w+\\b)(?:\\s*<[^>]+>)?(?:\\s*\\([^)]*\\))?\\s*(\\{)",
             "beginCaptures": {
                 "1": {
                     "name": "storage.modifier.other.aura"
@@ -417,7 +417,7 @@
             ]
         },
         "struct-declaration-nobody": {
-            "begin": "(?:(data|sealed)\\s+)?(struct)\\s+(\\b\\w+\\b)(?:\\s*<[^>]+>)?(\\s*\\()",
+            "begin": "((?:\\w+\\s+)*)?(struct)\\s+(\\b\\w+\\b)(?:\\s*<[^>]+>)?(\\s*\\()",
             "beginCaptures": {
                 "1": {
                     "name": "storage.modifier.other.aura"
@@ -477,7 +477,7 @@
             ]
         },
         "class-declaration": {
-            "begin": "(?:(sealed|data)\\s+)?(class)\\s+(\\b\\w+\\b)(?:\\s*<[^>]+>)?(?:\\s*:\\s*(\\b\\w+\\b)(\\s*<[^>]+>)?(?:\\s*\\([^)]*\\))?)?\\s*(\\{)",
+            "begin": "((?:\\w+\\s+)*)?(class)\\s+(\\b\\w+\\b)(?:\\s*<[^>]+>)?(?:\\s*\\([^)]*\\))?(?:\\s*:\\s*(\\b\\w+\\b)(\\s*<[^>]+>)?(?:\\s*\\([^)]*\\))?)?\\s*(\\{)",
             "beginCaptures": {
                 "1": {
                     "name": "storage.modifier.other.aura"
@@ -514,7 +514,7 @@
             ]
         },
         "enum-declaration": {
-            "match": "(?:(sealed|data)\\s+)?(enum)\\s+(\\b\\w+\\b)",
+            "match": "((?:\\w+\\s+)*)?(enum)\\s+(\\b\\w+\\b)",
             "captures": {
                 "1": {
                     "name": "storage.modifier.other.aura"
@@ -528,7 +528,7 @@
             }
         },
         "interface-declaration": {
-            "begin": "(?:(sealed|data)\\s+)?(interface)\\s+(\\b\\w+\\b)(?:\\s*<[^>]+>)?\\s*(\\{)",
+            "begin": "((?:\\w+\\s+)*)?(interface)\\s+(\\b\\w+\\b)(?:\\s*<[^>]+>)?\\s*(\\{)",
             "beginCaptures": {
                 "1": {
                     "name": "storage.modifier.other.aura"
@@ -559,7 +559,7 @@
             ]
         },
         "actor-declaration": {
-            "begin": "(?:(sealed|data)\\s+)?(actor)\\s+(\\b\\w+\\b)\\s*(\\{)",
+            "begin": "((?:\\w+\\s+)*)?(actor)\\s+(\\b\\w+\\b)\\s*(\\{)",
             "beginCaptures": {
                 "1": {
                     "name": "storage.modifier.other.aura"
@@ -590,7 +590,7 @@
             ]
         },
         "object-declaration": {
-            "begin": "(?:(sealed|data)\\s+)?(object)\\s+(\\b\\w+\\b)\\s*(\\{)",
+            "begin": "((?:\\w+\\s+)*)?(object)\\s+(?:(\\b\\w+\\b)\\s*)?(\\{)",
             "beginCaptures": {
                 "1": {
                     "name": "storage.modifier.other.aura"

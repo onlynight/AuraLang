@@ -780,7 +780,10 @@ impl Vm {
 
     fn pop_n(&mut self, top: usize, n: usize) -> Result<Vec<Value>, VmError> {
         let stack = &mut self.frames[top].stack;
-        if stack.len() < n {
+        // 可变参数函数（如 listOf）：实际参数数可能少于声明的 param_count。
+        // 此时只弹栈实际存在的参数数，避免栈下溢。
+        let actual_n = n.min(stack.len());
+        if actual_n == 0 && n > 0 {
             let func_name = self.module.funcs[self.frames[top].func].name.clone();
             let ip = self.frames[top].ip;
             return Err(VmError::Runtime(format!(
@@ -788,7 +791,7 @@ impl Vm {
                 n, func_name, ip
             )));
         }
-        let start = stack.len() - n;
+        let start = stack.len() - actual_n;
         Ok(stack.split_off(start))
     }
 }

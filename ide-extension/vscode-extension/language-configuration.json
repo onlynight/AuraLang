@@ -36,14 +36,14 @@
     },
     "languageFolding": [
       {
-        "start": "^\\s*(?:\\w+\\s+)*?(?:struct|class|enum|interface|actor|object|actor|sealed|data|extern)\\b.*\\{",
+        "start": "^\\s*(?:\\w+\\s+)*?(?:struct|class|enum|interface|actor|object|sealed|data|extern|init|companion)\\b.*\\{",
         "end": "^\\s*\\}",
         "startsAtFirstColumn": true,
         "nestable": true,
         "exclusive": false,
         "expansion": "none",
         "collapsed": true,
-        "comment": "fold declarations: struct/class/enum/interface/actor/object/extern blocks"
+        "comment": "fold declarations: struct/class/enum/interface/actor/object/extern/init/companion blocks"
       },
       {
         "start": "^\\s*(?:\\w+\\s+)*?(?:if|else|when|for|while|do|try|catch|finally|select)\\b.*\\{",
@@ -56,14 +56,14 @@
         "comment": "fold control flow blocks: if/else/when/for/while/do/try/catch/finally/select"
       },
       {
-        "start": "^\\s*(?:\\w+\\s+)*?fun\\b.*\\{",
+        "start": "^\\s*(?:\\w+\\s+)*?(?:fun|constructor)\\b.*\\{",
         "end": "^\\s*\\}",
         "startsAtFirstColumn": true,
         "nestable": true,
         "exclusive": false,
         "expansion": "none",
         "collapsed": true,
-        "comment": "fold function bodies"
+        "comment": "fold function bodies and constructors"
       }
     ]
   },

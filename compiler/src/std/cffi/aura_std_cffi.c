@@ -410,3 +410,15 @@ const char *toString(int64_t x) { return aura_to_str(x); }
 double aura_clock_wrapper(void) { return (double)clock(); }
 int64_t aura_strlen_wrapper(const char *s) { return (int64_t)strlen(s); }
 const char *toStringFloat(double x) { return aura_to_str_float(x); }
+
+// aura.isOfType(value, typeName) → i1：检查值的运行时类型是否匹配目标类型名
+// value: i8* (值指针), typeName: { i8*, i64 } (类型名字符串结构体)
+// 简化实现：将值指针的第一个 4 字节视为类型标签，与目标类型名比较
+_Bool aura_isOfType(const void *value, const AuraString *typeName) {
+    if (!value || !typeName || !typeName->data) return 0;
+    // 将值视为带类型标签的对象：第一个 8 字节存储类型标签指针
+    const char *value_type_name = *(const char *const *)value;
+    if (!value_type_name) return 0;
+    size_t len = typeName->len > 0 ? (size_t)typeName->len : 0;
+    return strncmp(value_type_name, typeName->data, len) == 0 && value_type_name[len] == '\0';
+}

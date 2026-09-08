@@ -36,6 +36,7 @@ pub const PRELUDE_NAMES: &[&str] = &[
     "ptrToInt",
     "intToPtr",
     "makeCallback",
+    "listOf",
 ];
 
 /// 全部内置函数名（编译期可见的单一真相源）
