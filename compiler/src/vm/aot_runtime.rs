@@ -253,6 +253,8 @@ pub struct AotRuntime {
     /// 使用 `Box<dyn Send + Sync>` 类型擦除，避免 `#[cfg]` 在结构体字段上。
     /// 仅 `load_shared_library`（`dynamic-ffi` feature）填充此表。
     shared_lib_handles: HashMap<u32, Box<dyn std::any::Any + Send + Sync>>,
+    /// extern interface: 函数名 → func_idx 映射 (module_id -> {func_name -> func_idx})
+    func_name_map: HashMap<u32, HashMap<String, usize>>,
 }
 
 impl AotRuntime {
@@ -264,6 +266,7 @@ impl AotRuntime {
             cross_module_symbols: HashMap::new(),
             module_dependencies: HashMap::new(),
             shared_lib_handles: HashMap::new(),
+            func_name_map: HashMap::new(),
         }
     }
 
@@ -425,8 +428,15 @@ impl AotRuntime {
 
         // 6. 构建 AotModule
         let module_id = self.next_module_id;
-        let aot = AotModule::from_symbols(symbols, module_id, stem.clone());
+        let aot = AotModule::from_symbols(symbols.clone(), module_id, stem.clone());
         self.modules.insert(module_id, aot);
+
+        // 6.5 填充函数名 → func_idx 映射（extern interface 支持）
+        for (func_idx, (name, _, _, _, _)) in symbols.iter().enumerate() {
+            if let Some((func_name, _, _, _)) = parse_aot_symbol_name(name) {
+                self.func_name_map.entry(module_id).or_default().insert(func_name, func_idx);
+            }
+        }
 
         // 7. 存储库句柄（防止被 OS 卸载）
         self.shared_lib_handles.insert(module_id, Box::new(lib));
@@ -486,6 +496,11 @@ impl AotRuntime {
 
     pub fn has_module(&self, module_id: u32) -> bool {
         self.modules.contains_key(&module_id)
+    }
+
+    /// 按名称查找函数索引（extern interface 支持）
+    pub fn lookup_func_idx(&self, module_id: u32, func_name: &str) -> Option<usize> {
+        self.func_name_map.get(&module_id)?.get(func_name).copied()
     }
 
     /// Whether any module has an AOT entry for `func_idx`

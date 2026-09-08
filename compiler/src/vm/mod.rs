@@ -723,6 +723,8 @@ pub struct Vm {
     pub registry: ModuleRegistry,
     /// Phase 1: AOT 运行时（机器码嵌入模块管理）
     pub aot_runtime: crate::vm::aot_runtime::AotRuntime,
+    /// extern interface: 已加载的 AOT 模块映射（库名 → module_id）
+    aot_module_map: std::collections::HashMap<String, u32>,
     /// P9: 已加载的动态库（库名 → 库句柄）
     #[cfg(windows)]
     loaded_libs: std::collections::HashMap<String, usize>,
@@ -779,6 +781,7 @@ impl Vm {
             channels: crate::vm::channel::ChannelRuntime::new(),
             registry: ModuleRegistry::new(),
             aot_runtime,
+            aot_module_map: std::collections::HashMap::new(),
             #[cfg(windows)]
             loaded_libs: std::collections::HashMap::new(),
             #[cfg(unix)]

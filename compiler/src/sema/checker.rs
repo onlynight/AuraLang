@@ -625,6 +625,47 @@ impl Checker {
                     );
                 }
             }
+            Decl::ExternInterface(e) => {
+                // extern interface: 校验必须包含 default fun loadLibrary()
+                let has_load_library = e.functions.iter().any(|f| {
+                    f.name == "loadLibrary" && f.modifiers.iter().any(|m| m == &FnModifier::Default)
+                });
+                if !has_load_library {
+                    self.report(
+                        e.span,
+                        ErrorSeverity::Error,
+                        format!(
+                            "extern interface `{}` 必须包含 `default fun loadLibrary(): String = \"...\"` 方法",
+                            e.name
+                        ),
+                    );
+                }
+                // 注册接口函数到符号表
+                for f in &e.functions {
+                    if f.name == "loadLibrary" {
+                        continue; // loadLibrary 是内部方法，不注册为接口函数
+                    }
+                    let qualified_name = format!("{}.{}", e.name, f.name);
+                    let params = f
+                        .params
+                        .iter()
+                        .map(|p| ParamSym {
+                            name: p.name.clone(),
+                            ty: p.type_hint.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Any),
+                            has_default: false,
+                            is_vararg: p.is_vararg,
+                        })
+                        .collect();
+                    let ret = f.return_type.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Unit);
+                    let _ = self.symbols.insert_function(
+                        qualified_name,
+                        params,
+                        ret,
+                        f.visibility,
+                        f.span,
+                    );
+                }
+            }
             _ => {}
         }
     }
@@ -935,7 +976,11 @@ impl Checker {
                     self.check_function_body(m);
                 }
             }
-            Decl::Extern(_) | Decl::Annotation(_) | Decl::Enum(_) | Decl::TypeAlias(_) => {}
+            Decl::Extern(_)
+            | Decl::ExternInterface(_)
+            | Decl::Annotation(_)
+            | Decl::Enum(_)
+            | Decl::TypeAlias(_) => {}
             Decl::Import(imp) => {
                 self.expand_import(imp);
             }

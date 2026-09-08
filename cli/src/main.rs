@@ -161,6 +161,8 @@ fn cmd_build(args: &[String]) {
             exit(1);
         }
     };
+    // 预处理：解析 import "xxx.aura" 语句
+    let source = compiler::codegen::resolve_aura_imports(&source, Some(input));
 
     let module = match compile_source(&source) {
         Ok(m) => m,
@@ -262,6 +264,8 @@ fn cmd_build_aot(args: &[String]) {
             exit(1);
         }
     };
+    // 预处理：解析 import "xxx.aura" 语句
+    let source = compiler::codegen::resolve_aura_imports(&source, Some(input));
 
     // 目标三元组
     let target_str = extract_opt(args, "--target");
@@ -535,6 +539,8 @@ fn cmd_run(args: &[String]) {
                 exit(1);
             }
         };
+        // 预处理：解析 import "xxx.aura" 语句
+        let source = compiler::codegen::resolve_aura_imports(&source, Some(input));
         match compile_source(&source) {
             Ok(m) => m,
             Err(e) => {

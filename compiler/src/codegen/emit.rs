@@ -344,9 +344,11 @@ fn instr_size(instr: &crate::codegen::mir::MirInstr) -> usize {
         Call {
             args, dst, ..
         } => 3 * args.len() + 3 + if dst.is_some() { 3 } else { 0 },
+        // CallNative：每个参数 LoadVar(3) + CallNativeArgs(5) + 可选 StoreVar(3)
+        // 注意：emit_instr 发射的是 OpCode::CallNativeArgs（5字节），而非 CallNative（3字节）
         CallNative {
             args, dst, ..
-        } => 3 * args.len() + 3 + if dst.is_some() { 3 } else { 0 },
+        } => 3 * args.len() + 5 + if dst.is_some() { 3 } else { 0 },
         // CallClosure：每个参数 LoadVar(3) + LoadVar(closure)(3) + CallClosure(1) + 可选 StoreVar(3)
         CallClosure {
             args, dst, ..
@@ -379,8 +381,10 @@ fn instr_size(instr: &crate::codegen::mir::MirInstr) -> usize {
         DeferEnd => 1,
         // Yield：Yield(1) = 1
         Yield => 1,
-        // MakeClosure：闭包（Phase 2，占位符）
-        MakeClosure { .. } => 3,
+        // MakeClosure：捕获参数 LoadVar(3) * n + MakeClosure(3) + StoreVar(3)
+        MakeClosure {
+            captures, ..
+        } => 3 * captures.len() + 3 + 3,
         // EnumConstruct：枚举构造（Phase 3）
         EnumConstruct { .. } => 6,
         // EnumTag：枚举变体索引（Phase 3）

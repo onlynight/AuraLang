@@ -38,7 +38,7 @@ struct ClassMembers {
 fn is_fn_modifier_word(lit: &str) -> bool {
     matches!(
         lit,
-        "open" | "abstract" | "operator" | "infix" | "tailrec" | "expect" | "actual"
+        "open" | "abstract" | "operator" | "infix" | "tailrec" | "expect" | "actual" | "default"
     )
 }
 
@@ -208,6 +208,10 @@ impl Parser {
             return Ok(Decl::Import(self.parse_import()));
         }
         if self.check(TokenKind::Extern) {
+            // 检查是否是 extern interface
+            if self.peek_ahead(1).kind == TokenKind::Interface {
+                return Ok(Decl::ExternInterface(self.parse_extern_interface()));
+            }
             return Ok(Decl::Extern(self.parse_extern()));
         }
         if self.check(TokenKind::At) {
@@ -641,6 +645,7 @@ impl Parser {
                     "infix" => FnModifier::Infix,
                     "tailrec" => FnModifier::Tailrec,
                     "expect" => FnModifier::Expect,
+                    "default" => FnModifier::Default,
                     _ => FnModifier::Actual,
                 };
                 self.advance();
@@ -1909,6 +1914,45 @@ impl Parser {
             library,
             functions,
             constants,
+            span: Span::merge(&start, &self.current().span),
+        }
+    }
+
+    /// 解析 extern interface 声明
+    /// 语法：`extern interface Name { default fun loadLibrary(): String = "path"; fun add(...) }`
+    pub fn parse_extern_interface(&mut self) -> ExternInterfaceDecl {
+        let start = self.current().span;
+        self.expect(TokenKind::Extern); // "extern"
+        self.expect(TokenKind::Interface); // "interface"
+        let name = self.advance().literal.clone(); // 接口名
+
+        // 函数声明块（库路径从 default fun loadLibrary() 提取）
+        let mut functions = Vec::new();
+        let mut lib_path: Option<String> = None;
+        if self.check(TokenKind::LBrace) {
+            self.advance();
+            while !self.check(TokenKind::RBrace) && !self.is_at_end() {
+                let fn_decl = self.parse_fn_decl();
+                // 检查是否是 default fun loadLibrary(): String = "path"
+                if fn_decl.name == "loadLibrary"
+                    && fn_decl.modifiers.iter().any(|m| m == &FnModifier::Default)
+                {
+                    // 提取返回值字符串
+                    if let Some(body) = &fn_decl.body {
+                        if let Expr::String(s) = body.as_ref() {
+                            lib_path = Some(s.clone());
+                        }
+                    }
+                }
+                functions.push(fn_decl);
+            }
+            self.expect(TokenKind::RBrace);
+        }
+
+        ExternInterfaceDecl {
+            name,
+            lib_path,
+            functions,
             span: Span::merge(&start, &self.current().span),
         }
     }

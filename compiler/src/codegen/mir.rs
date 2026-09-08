@@ -622,7 +622,7 @@ impl MirBuilder {
                 self.enter_scope();
                 self.lower_block(then_b, ctx);
                 self.exit_scope();
-                if !self.is_closed(then_id) {
+                if !self.is_closed(self.current) {
                     self.set_term(Terminator::Goto(merge_id));
                 }
                 // else 分支
@@ -632,7 +632,7 @@ impl MirBuilder {
                     self.lower_block(eb, ctx);
                 }
                 self.exit_scope();
-                if !self.is_closed(else_id) {
+                if !self.is_closed(self.current) {
                     self.set_term(Terminator::Goto(merge_id));
                 }
                 self.current = merge_id;
@@ -937,24 +937,28 @@ impl MirBuilder {
                     else_b: else_id,
                 });
                 let res = self.alloc_reg();
+                // then 分支：注意 lower_expr 可能改变 self.current（嵌套 If），
+                // 因此用 self.current 而非 then_id 检查是否已终结
                 self.current = then_id;
                 let tv = self.lower_expr(then_e, ctx);
                 self.emit(MirInstr::StoreLocal {
                     slot: res,
                     src: tv,
                 });
-                if !self.is_closed(then_id) {
+                if !self.is_closed(self.current) {
                     self.set_term(Terminator::Goto(merge_id));
                 }
+                // else 分支：同理
                 self.current = else_id;
                 let ev = self.lower_expr(else_e, ctx);
                 self.emit(MirInstr::StoreLocal {
                     slot: res,
                     src: ev,
                 });
-                if !self.is_closed(else_id) {
+                if !self.is_closed(self.current) {
                     self.set_term(Terminator::Goto(merge_id));
                 }
+                // merge 块：加载分支结果
                 self.current = merge_id;
                 let out = self.alloc_reg();
                 self.emit(MirInstr::LoadLocal {

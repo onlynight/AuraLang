@@ -197,6 +197,58 @@ pub fn compile_source(source: &str) -> Result<BytecodeModule, String> {
     Ok(compile_with_info(&program, &opts, &sema.info))
 }
 
+/// 预处理：解析 `import "path.aura"` 语句，将外部 `.aura` 文件内容内联
+///
+/// 用于支持 `extern interface` 声明放在独立文件中，通过 `import` 引入。
+/// `file_path` 为当前源文件路径（用于解析相对路径），`None` 时无法解析相对导入。
+pub fn resolve_aura_imports(source: &str, file_path: Option<&str>) -> String {
+    let mut result = String::new();
+    let mut base_dir = std::path::PathBuf::from(".");
+    if let Some(fp) = file_path {
+        base_dir =
+            std::path::Path::new(fp).parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
+    }
+
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        // 匹配 import "path" 或 import "path" as alias
+        if let Some(rest) = trimmed.strip_prefix("import ") {
+            let rest = rest.trim();
+            if let Some(path_str) = rest.strip_prefix("\"") {
+                let (path, _suffix) = split_at_quote(path_str);
+                if path.ends_with(".aura") {
+                    let full_path = base_dir.join(path);
+                    if let Ok(content) = std::fs::read_to_string(&full_path) {
+                        // 将导入文件的内容内联（跳过 import 行本身）
+                        let content_lines: Vec<&str> = content.lines().collect();
+                        let mut imported_content = String::new();
+                        for cl in content_lines {
+                            let cl_trimmed = cl.trim_start();
+                            if cl_trimmed.starts_with("import ") {
+                                continue; // 跳过嵌套 import
+                            }
+                            imported_content.push_str(cl);
+                            imported_content.push('\n');
+                        }
+                        result.push_str(&imported_content);
+                        continue; // 跳过原 import 行
+                    } else {
+                        eprintln!("[codegen] 无法读取导入文件: {}", full_path.display());
+                    }
+                }
+            }
+        }
+        result.push_str(line);
+        result.push('\n');
+    }
+    result
+}
+
+/// 从字符串中找到第一个 `"` 的位置，返回 (前缀, 后缀)
+fn split_at_quote(s: &str) -> (&str, &str) {
+    if let Some(pos) = s.find('"') { (&s[..pos], &s[pos + 1..]) } else { (s, "") }
+}
+
 /// 从 AST 程序提取启用的 std 模块名
 ///
 /// 遍历 `program.imports`，解析 `aura.math.*` / `import aura.math` 等语法，

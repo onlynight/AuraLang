@@ -1,53 +1,36 @@
-// demo_aot_direct/src/main.aura — Demo 3: AOT 直调
+// demo_aot_direct/src/main.aura — Demo 3: AOT 直调（extern interface + import）
 //
 // 架构：
-//   demo_aot_direct/src/main.aura ──load_shared_library──→ utils.dll (Aura AOT + --shared)
-//      │                                                │
-//      └── call_func(module_id, 0, [3,4]) ──→ aura_aot_add!2!2!2!2
+//   utils_interface.aura ──extern interface──→ utils.dll (Aura AOT + --shared)
+//        ↑
+//   main.aura ────import "utils_interface.aura"
+//        │
+//        └── Utils.add(3, 4) ──→ aura_aot_add!2!0!0!0
 //
 // 构建命令：
-//   1. loom build --member utils --aot --shared
-//   2. loom build --member demo-aot-direct
-//   3. loom run --member demo-aot-direct
-//
-// 与 Demo 1/2 的关键差异：
-//   - 编译参数：--shared（不带 --cabi），导出 JitValue ABI
-//   - 导出符号：aura_aot_add!2!2!2!2（带类型签名编码）
-//   - 调用声明：不需要 extern "C"，运行时自动发现
-//   - 类型系统：Aura 自动处理，无需手动映射到 C 类型
-//   - 函数索引：运行时枚举（func_idx 由符号扫描确定）
+//   1. aura build libs/utils/src/lib.aura --aot --shared --output target/build/libs/utils/utils.dll
+//   2. aura run demo_aot_direct/src/main.aura
 //
 // 验证标准：
-//   - 加载成功，枚举到 2+ 个导出函数
-//   - call_func(module_id, 0, [3, 4]) → 7
-//   - call_func(module_id, 1, [3, 4]) → 12
-//   - call_func(module_id, 2, [5]) → 120
-//   - call_func(module_id, 3, [2, 10]) → 1024
+//   - Utils.add(3, 4) = 7
+//   - Utils.multiply(3, 4) = 12
+//   - Utils.factorial(5) = 120
+//   - Utils.power(2, 10) = 1024
+
+// 从独立文件导入 extern interface 声明
+import "utils_interface.aura"
 
 fun main() = {
-    // 通过 load_shared_library 加载 Aura AOT 编译的共享库
-    // 产物路径：target/build/libs/utils/utils.dll（Windows）
-    //           target/build/libs/utils/utils.so（Linux）
-    //           target/build/libs/utils/utils.dylib（macOS）
-    val module_id = load_shared_library("target/build/libs/utils/utils.dll")
-    println("loaded module_id = " + toString(module_id))
-
-    // 通过 call_func 调用函数（func_idx 由运行时符号枚举确定）
-    // 实际导出顺序（来自 PE export table）：
-    // func_idx=0: add, func_idx=1: factorial, func_idx=2: multiply, func_idx=3: power
-
-    val sum = call_func(module_id, 0, listOf(3, 4))
+    // 直接调用接口函数
+    val sum = Utils.add(3, 4)
     println("add(3, 4) = " + toString(sum))
 
-    val fact = call_func(module_id, 1, listOf(5))
-    println("factorial(5) = " + toString(fact))
-
-    val prod = call_func(module_id, 2, listOf(3, 4))
+    val prod = Utils.multiply(3, 4)
     println("multiply(3, 4) = " + toString(prod))
 
-    val pw = call_func(module_id, 3, listOf(2, 10))
-    println("power(2, 10) = " + toString(pw))
+    val fact = Utils.factorial(5)
+    println("factorial(5) = " + toString(fact))
 
-    // 清理
-    unload_shared_library(module_id)
+    val pw = Utils.power(2, 10)
+    println("power(2, 10) = " + toString(pw))
 }

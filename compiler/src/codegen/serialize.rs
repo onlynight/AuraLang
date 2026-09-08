@@ -301,6 +301,7 @@ pub fn from_bytes(bytes: &[u8]) -> Result<BytecodeModule, SerializeError> {
             0 => crate::codegen::opcode::FfiAbi::None,
             1 => crate::codegen::opcode::FfiAbi::C,
             2 => crate::codegen::opcode::FfiAbi::Rust,
+            3 => crate::codegen::opcode::FfiAbi::Aura,
             _ => crate::codegen::opcode::FfiAbi::None,
         };
         // FFI 库名（可选）

@@ -330,6 +330,7 @@ pub enum Decl {
     Actor(ActorDecl),
     TypeAlias(TypeAliasDecl),
     Extern(ExternDecl),
+    ExternInterface(ExternInterfaceDecl),
     Import(ImportDecl),
     Annotation(AnnotationDecl),
 }
@@ -374,6 +375,8 @@ pub enum FnModifier {
     Expect,
     /// 多平台 actual 实现
     Actual,
+    /// 默认实现（extern interface 内 loadLibrary 使用）
+    Default,
 }
 
 /// 类修饰符（value / data / sealed / final / open / abstract / expect / actual）。
@@ -563,6 +566,16 @@ pub struct ExternDecl {
     pub functions: Vec<FnDecl>,
     /// FFI 常量（P8.1）：`val NAME: Type` 声明
     pub constants: Vec<Stmt>,
+    pub span: Span,
+}
+
+/// extern interface 声明：绑定到 AOT 动态库的函数接口
+/// 语法：`extern interface Name = "path" { fun add(...) }`
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExternInterfaceDecl {
+    pub name: String,             // 接口名，如 "Utils"
+    pub lib_path: Option<String>, // 库路径，None 时按模块名自动查找
+    pub functions: Vec<FnDecl>,   // 函数声明列表
     pub span: Span,
 }
 

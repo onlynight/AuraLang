@@ -12,7 +12,7 @@ examples/language-test/
 ├── 01-lexer.aura          ← Phase 1: 词法基础（字面量 / 运算符 / 插值 / 注释）
 ├── 02-types-variables.aura ← Phase 2: 类型与变量（✅ 已开发）
 ├── 03-functions.aura       ← Phase 3: 函数（✅ 已开发，VM 部分特性待完善）
-├── 04-control-flow.aura    ← Phase 4: 控制流（待开发）
+├── 04-control-flow.aura    ← Phase 4: 控制流（✅ 已开发）
 ├── 05-classes.aura         ← Phase 5: 类与对象（待开发）
 ├── 06-null-safety.aura     ← Phase 6: 空安全（待开发）
 ├── 07-error-handling.aura  ← Phase 7: 错误处理（待开发）
@@ -51,7 +51,7 @@ examples/language-test/
 | Phase 1 词法基础 | `01-lexer.aura` | ✅ | ✅ | ✅ |
 | Phase 2 类型与变量 | `02-types-variables.aura` | ✅ | ✅ | ✅（编译通过并可运行，部分 Double 输出待优化） |
 | Phase 3 函数 | `03-functions.aura` | ✅ | ✅ | ⏳（需 `--features llvm`） |
-| Phase 4 控制流 | `04-control-flow.aura` | ⏳ | ⏳ | ⏳ |
+| Phase 4 控制流 | `04-control-flow.aura` | ✅ | ✅ | ✅ |
 | Phase 5 类与对象 | `05-classes.aura` | ⏳ | ⏳ | ⏳ |
 | Phase 6 空安全 | `06-null-safety.aura` | ⏳ | ⏳ | ⏳ |
 | Phase 7 错误处理 | `07-error-handling.aura` | ⏳ | ⏳ | ⏳ |
@@ -212,7 +212,7 @@ aura run   examples/language-test/03-functions.aura              # VM 运行时�
 
 ---
 
-### Phase 4 — 控制流（待开发）
+### Phase 4 — 控制流（✅ 已开发）
 
 | 覆盖项 |
 |--------|

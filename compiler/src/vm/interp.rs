@@ -4,6 +4,7 @@
 //! `CallNative`/`CallC` 经原生注册表分发；`NewObject`/`GetField`/`SetField`
 //! 经堆管理器操作对象；`IncRef`/`DecRef` 维护 ARC。
 
+use crate::codegen::opcode::FfiAbi;
 use crate::vm::value::Value;
 use crate::vm::{Instr, Vm, VmError};
 
@@ -665,28 +666,32 @@ impl Vm {
 
         eprintln!("[vm] CallNative: {}, params={}", native.name, param_count);
 
-        // P9: 如果指定了 FFI 库，先加载库
-        if let Some(ref lib_name) = native.ffi_lib {
-            self.ensure_lib_loaded(lib_name);
-        }
-
-        // P9: 获取库句柄（如果加载了）
-        let lib_handle: Option<usize> = native.ffi_lib.as_ref().and_then(|lib| {
-            #[cfg(windows)]
-            {
-                self.loaded_libs.get(lib).copied()
-            }
-            #[cfg(unix)]
-            {
-                self.loaded_libs.get(lib).map(|h| *h as usize)
-            }
-        });
-
         let result = if let Some(f) = self.natives.get(&native.name) {
             f(&args)
         } else if let Some(f) = self.natives.resolve_c_function(&native.name) {
             f(&args)
+        } else if native.ffi_abi == FfiAbi::Aura {
+            // extern interface: AOT 直调
+            self.call_aot_ffi(&native, &args).unwrap_or_else(|| {
+                eprintln!("[vm] AOT 接口调用失败: `{}`", native.name);
+                Value::Int(0)
+            })
         } else {
+            // P9: 如果指定了 FFI 库，先加载库
+            if let Some(ref lib_name) = native.ffi_lib {
+                self.ensure_lib_loaded(lib_name);
+            }
+            // P9: 获取库句柄（如果加载了）
+            let lib_handle: Option<usize> = native.ffi_lib.as_ref().and_then(|lib| {
+                #[cfg(windows)]
+                {
+                    self.loaded_libs.get(lib).copied()
+                }
+                #[cfg(unix)]
+                {
+                    self.loaded_libs.get(lib).map(|h| *h as usize)
+                }
+            });
             // P8.4: 尝试静态链接 — 使用库句柄解析 C 函数
             match static_call_c_with_lib(
                 &native.name,
@@ -743,6 +748,12 @@ impl Vm {
             f(&args)
         } else if let Some(f) = self.natives.resolve_c_function(&native.name) {
             f(&args)
+        } else if native.ffi_abi == FfiAbi::Aura {
+            // extern interface: AOT 直调
+            self.call_aot_ffi(&native, &args).unwrap_or_else(|| {
+                eprintln!("[vm] AOT 接口调用失败: `{}`", native.name);
+                Value::Int(0)
+            })
         } else {
             // P8.4: 尝试静态链接 — 使用库句柄解析 C 函数
             match static_call_c_with_lib(
@@ -828,6 +839,67 @@ impl Vm {
             }
         }
         eprintln!("[vm] 无法加载库: {}", lib_name);
+    }
+
+    /// extern interface: 确保 AOT 库已加载
+    fn ensure_aot_lib_loaded(&mut self, lib_name: &str) -> Option<u32> {
+        if let Some(&id) = self.aot_module_map.get(lib_name) {
+            return Some(id);
+        }
+        // 与 C FFI 一致的库查找逻辑：依次尝试多种路径
+        let lib_path = if std::path::Path::new(lib_name).exists() {
+            lib_name.to_string()
+        } else {
+            let paths = [
+                format!("{}.dll", lib_name),
+                format!("lib{}.so", lib_name),
+                format!("lib{}.dylib", lib_name),
+                format!(
+                    "D:\\Code\\AuraProjs\\SQLura\\sqlura-driver-rs\\target\\release\\{}.dll",
+                    lib_name
+                ),
+            ];
+            paths.into_iter().find(|p| std::path::Path::new(p).exists())?
+        };
+
+        match self.aot_runtime.load_shared_library(&lib_path) {
+            Ok(module_id) => {
+                eprintln!(
+                    "[vm] AOT 接口库已加载: {} ({}) → module_id={}",
+                    lib_name, lib_path, module_id
+                );
+                self.aot_module_map.insert(lib_name.to_string(), module_id);
+                Some(module_id)
+            }
+            Err(e) => {
+                eprintln!("[vm] AOT 接口库加载失败: {} ({})", lib_path, e);
+                None
+            }
+        }
+    }
+
+    /// extern interface: AOT 直调
+    fn call_aot_ffi(
+        &mut self,
+        native: &crate::codegen::opcode::BytecodeNative,
+        args: &[Value],
+    ) -> Option<Value> {
+        let lib_name = native.ffi_lib.as_deref()?;
+        let module_id = self.ensure_aot_lib_loaded(lib_name)?;
+
+        // 从函数名提取实际函数名（"Utils.add" → "add"）
+        let func_name = native.name.split('.').last().unwrap_or(&native.name);
+        let func_idx = self.aot_runtime.lookup_func_idx(module_id, func_name)?;
+
+        eprintln!(
+            "[vm] AOT 接口调用: {} (module={}, func_idx={})",
+            native.name, module_id, func_idx
+        );
+
+        let jit_args: Vec<crate::vm::abi::JitValue> =
+            args.iter().map(crate::vm::abi::JitValue::from_value).collect();
+        unsafe { self.aot_runtime.call_func(module_id, func_idx, &jit_args).ok() }
+            .map(crate::vm::abi::JitValue::to_value)
     }
 
     // ── 栈辅助 ──

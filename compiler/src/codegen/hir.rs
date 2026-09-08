@@ -68,6 +68,8 @@ thread_local! {
     static ACCESSOR_PROP: RefCell<Option<String>> = const { RefCell::new(None) };
     /// 函数参数表（函数名 → 参数列表），供默认参数填充和 vararg 打包
     static FUNCTION_PARAMS: RefCell<HashMap<String, Vec<HirParam>>> = RefCell::new(HashMap::new());
+    /// extern interface 名称集合（用于识别接口方法调用）
+    static INTERFACE_NAMES: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
 }
 
 /// 判断名称是否为已知的结构体/类（用于检测构造器调用）
@@ -1159,6 +1161,39 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                             }
                         }
                     }
+                }
+            }
+            Decl::ExternInterface(e) => {
+                // extern interface: 绑定到 AOT 动态库的函数接口
+                INTERFACE_NAMES.with(|n| n.borrow_mut().insert(e.name.clone()));
+                for f in &e.functions {
+                    if f.name == "loadLibrary" {
+                        continue; // loadLibrary 是内部方法，不生成原生函数
+                    }
+                    natives.push(HirFunction {
+                        name: format!("{}.{}", e.name, f.name),
+                        params: f
+                            .params
+                            .iter()
+                            .map(|p| HirParam {
+                                name: p.name.clone(),
+                                ty: HirType::from_ast_opt(&p.type_hint),
+                                default_value: p
+                                    .default_value
+                                    .as_ref()
+                                    .map(|e| Box::new(desugar_expr(e))),
+                                is_vararg: p.is_vararg,
+                            })
+                            .collect(),
+                        ret: HirType::from_ast_opt(&f.return_type),
+                        body: HirBlock {
+                            stmts: vec![],
+                        },
+                        is_native: true,
+                        type_params: vec![],
+                        ffi_abi: FfiAbi::Aura,
+                        ffi_lib: e.lib_path.clone(),
+                    });
                 }
             }
             // class：保留类型布局（字段），方法展开为独立函数
@@ -2393,6 +2428,8 @@ fn desugar_for(pattern: &Expr, iterable: &Expr, body: &Expr) -> HirStmt {
     };
 
     // 范围：`start..end` 或 `start..<end`
+    // 将自增放在循环体开头，这样 `continue` 跳过后续代码时自增已执行，
+    // 避免 `continue` 跳过尾部自增导致无限循环。
     if let Expr::Range {
         start,
         end,
@@ -2409,7 +2446,41 @@ fn desugar_for(pattern: &Expr, iterable: &Expr, body: &Expr) -> HirStmt {
             .unwrap_or_else(|| Box::new(Expr::Literal(Literal::Int(0), Span::single(0, 1, 1))));
         let end_e = desugar_expr(&end_box);
         let idx = format!("__for_idx_{}", var_name);
+        // 初始值 = start - 1，循环体内先自增再赋值
+        let init_e = HirExpr::Binary {
+            op: HirBinOp::Sub,
+            lhs: Box::new(start_e),
+            rhs: Box::new(HirExpr::Lit(Literal::Int(1))),
+        };
+        // 循环条件：inclusive → idx < end；exclusive → idx < end - 1
+        let cmp = if *inclusive {
+            HirExpr::Binary {
+                op: HirBinOp::Lt,
+                lhs: Box::new(HirExpr::Var(idx.clone())),
+                rhs: Box::new(end_e),
+            }
+        } else {
+            HirExpr::Binary {
+                op: HirBinOp::Lt,
+                lhs: Box::new(HirExpr::Var(idx.clone())),
+                rhs: Box::new(HirExpr::Binary {
+                    op: HirBinOp::Sub,
+                    lhs: Box::new(end_e),
+                    rhs: Box::new(HirExpr::Lit(Literal::Int(1))),
+                }),
+            }
+        };
         let mut body_stmts = vec![
+            // 先自增
+            HirStmt::Assign {
+                target: HirExpr::Var(idx.clone()),
+                value: HirExpr::Binary {
+                    op: HirBinOp::Add,
+                    lhs: Box::new(HirExpr::Var(idx.clone())),
+                    rhs: Box::new(HirExpr::Lit(Literal::Int(1))),
+                },
+            },
+            // 再赋值给循环变量
             HirStmt::Val {
                 name: var_name.clone(),
                 ty: None,
@@ -2417,29 +2488,15 @@ fn desugar_for(pattern: &Expr, iterable: &Expr, body: &Expr) -> HirStmt {
             },
         ];
         body_stmts.extend(desugar_block(body).stmts);
-        body_stmts.push(HirStmt::Assign {
-            target: HirExpr::Var(idx.clone()),
-            value: HirExpr::Binary {
-                op: HirBinOp::Add,
-                lhs: Box::new(HirExpr::Var(idx.clone())),
-                rhs: Box::new(HirExpr::Lit(Literal::Int(1))),
-            },
-        });
-        // 循环条件：inclusive ? idx <= end : idx < end
-        let cmp = if *inclusive { HirBinOp::Le } else { HirBinOp::Lt };
         return HirStmt::Block(HirBlock {
             stmts: vec![
                 HirStmt::Var {
                     name: idx.clone(),
                     ty: None,
-                    init: Some(start_e),
+                    init: Some(init_e),
                 },
                 HirStmt::While {
-                    cond: HirExpr::Binary {
-                        op: cmp,
-                        lhs: Box::new(HirExpr::Var(idx.clone())),
-                        rhs: Box::new(end_e),
-                    },
+                    cond: cmp,
                     body: HirBlock {
                         stmts: body_stmts,
                     },
@@ -2652,6 +2709,13 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                                     args: args.iter().map(desugar_expr).collect(),
                                 };
                             }
+                        }
+                        // extern interface 方法调用：Utils.add(3, 4) → Utils.add(3, 4)
+                        if INTERFACE_NAMES.with(|n| n.borrow().contains(obj_name)) {
+                            return HirExpr::Call {
+                                callee: format!("{}.{}", obj_name, name),
+                                args: args.iter().map(desugar_expr).collect(),
+                            };
                         }
                     }
                     // 类方法分派：接收者静态类型（含继承链）→ Class.method(self, args)；
@@ -2992,6 +3056,64 @@ fn desugar_when(subject: &Option<Box<Expr>>, arms: &[WhenArm]) -> HirExpr {
                     Expr::Ident(name, _) if name == "__else__" => {
                         // else → 默认分支（始终为 true）
                         HirExpr::Lit(Literal::Bool(true))
+                    }
+                    Expr::InRange { range, .. } => {
+                        // in start..end 或 in start..<end → 范围检查
+                        let (start_e, end_e, inclusive) = match range.as_ref() {
+                            Expr::Range {
+                                start,
+                                end,
+                                inclusive,
+                                ..
+                            } => (start.clone(), end.clone(), *inclusive),
+                            _ => (
+                                Some(Box::new(Expr::Literal(
+                                    Literal::Int(0),
+                                    Span::single(0, 1, 1),
+                                ))),
+                                Some(Box::new(Expr::Literal(
+                                    Literal::Int(0),
+                                    Span::single(0, 1, 1),
+                                ))),
+                                true,
+                            ),
+                        };
+                        let start_expr = desugar_expr(
+                            start_e
+                                .as_deref()
+                                .unwrap_or(&Expr::Literal(Literal::Int(0), Span::single(0, 1, 1))),
+                        );
+                        let end_expr = desugar_expr(
+                            end_e
+                                .as_deref()
+                                .unwrap_or(&Expr::Literal(Literal::Int(0), Span::single(0, 1, 1))),
+                        );
+                        let subject_expr = desugar_expr(s);
+                        // start <= subject && subject <= end (inclusive)
+                        // 或 start <= subject && subject < end (exclusive)
+                        let lower = HirExpr::Binary {
+                            op: HirBinOp::Ge,
+                            lhs: Box::new(subject_expr.clone()),
+                            rhs: Box::new(start_expr),
+                        };
+                        let upper = if inclusive {
+                            HirExpr::Binary {
+                                op: HirBinOp::Le,
+                                lhs: Box::new(subject_expr),
+                                rhs: Box::new(end_expr),
+                            }
+                        } else {
+                            HirExpr::Binary {
+                                op: HirBinOp::Lt,
+                                lhs: Box::new(subject_expr),
+                                rhs: Box::new(end_expr),
+                            }
+                        };
+                        HirExpr::Binary {
+                            op: HirBinOp::And,
+                            lhs: Box::new(lower),
+                            rhs: Box::new(upper),
+                        }
                     }
                     _ => HirExpr::Binary {
                         op: HirBinOp::Eq,

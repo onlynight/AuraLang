@@ -61,6 +61,12 @@ impl<'a> FfiGenerator<'a> {
                     comment = format!("; library: {}\n", lib);
                 }
             }
+            FfiAbi::Aura => {
+                comment = "; extern interface: AOT direct call (JitValue ABI)\n".to_string();
+                if let Some(ref lib) = func.ffi_lib {
+                    comment.push_str(&format!(";   library: {}\n", lib));
+                }
+            }
             FfiAbi::None => {}
         }
 

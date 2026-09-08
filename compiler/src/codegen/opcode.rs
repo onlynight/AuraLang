@@ -507,6 +507,7 @@ impl fmt::Display for OpCode {
 /// 标记 `extern` 块的目标 ABI。
 /// - `C`：C ABI（`extern "c"`，现状）
 /// - `Rust`：Rust 库标记（`extern "rust"`，调用约定同 C，语义标记）
+/// - `Aura`：AOT 直调（`extern interface`，JitValue ABI）
 /// - `None`：非 FFI 函数
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FfiAbi {
@@ -514,6 +515,7 @@ pub enum FfiAbi {
     None, // 非 FFI 函数
     C,    // C ABI
     Rust, // Rust 库（语法标记，调用约定同 C）
+    Aura, // AOT 直调（JitValue ABI）
 }
 
 /// 原生（内置/FFI）函数签名记录
