@@ -57,6 +57,8 @@ pub(crate) struct EmitCtx {
     pub bb_counter: u64,
     /// 全局变量计数器
     pub var_counter: u64,
+    /// 循环块栈：(条件块, 结束块)，用于 break/continue
+    pub loop_stack: Vec<(String, String)>,
     /// 全局常量计数器
     pub const_counter: u64,
     /// 当前函数内变量作用域栈
@@ -122,6 +124,7 @@ impl EmitCtx {
             bb_counter: 0,
             var_counter: 0,
             const_counter: 0,
+            loop_stack: Vec::new(),
             var_scope: vec![HashMap::new()],
             globals: Vec::new(),
             global_const_map: HashMap::new(),
@@ -759,10 +762,24 @@ fn emit_statement(
         } => emit_if_stmt(ctx, blocks, cond, then_b, else_b)?,
         HirStmt::While { cond, body } => emit_while_stmt(ctx, blocks, cond, body)?,
         HirStmt::Break => {
-            blocks.set_terminator("; break (simplified)");
+            // 分支到当前循环的结束块
+            if let Some((_, end_name)) = ctx.loop_stack.last() {
+                blocks.set_terminator(&format!("br label %{}", end_name));
+            } else {
+                return Err(AotError::CodeGenerationFailed(
+                    "break outside loop".to_string(),
+                ));
+            }
         }
         HirStmt::Continue => {
-            blocks.set_terminator("; continue (simplified)");
+            // 分支到当前循环的条件块
+            if let Some((cond_name, _)) = ctx.loop_stack.last() {
+                blocks.set_terminator(&format!("br label %{}", cond_name));
+            } else {
+                return Err(AotError::CodeGenerationFailed(
+                    "continue outside loop".to_string(),
+                ));
+            }
         }
         HirStmt::Block(b) => {
             emit_block(ctx, blocks, b)?;
@@ -986,6 +1003,9 @@ fn emit_while_stmt(
     let body_name = ctx.fresh_bb("loop.body");
     let end_name = ctx.fresh_bb("loop.end");
 
+    // 推入循环块栈（用于 break/continue）
+    ctx.loop_stack.push((cond_name.clone(), end_name.clone()));
+
     // 跳转至条件块
     blocks.set_terminator(&format!("br label %{}", cond_name));
 
@@ -1016,6 +1036,9 @@ fn emit_while_stmt(
 
     // 循环结束块
     let _ = blocks.add_block_named(&end_name);
+
+    // 弹出循环块栈
+    ctx.loop_stack.pop();
     Ok(())
 }
 
@@ -1124,6 +1147,7 @@ fn emit_expr_val(
                 bb_counter: 0,
                 var_counter: 0,
                 const_counter: 0,
+                loop_stack: Vec::new(),
                 var_scope: vec![HashMap::new()],
                 globals: Vec::new(),
                 global_const_map: HashMap::new(),
@@ -1717,6 +1741,41 @@ fn emit_call(
     // P9: 检查是否为结构体构造函数
     if ctx.declared_structs.contains(callee) {
         return emit_struct_constructor(ctx, blocks, callee, args);
+    }
+
+    // aura_isOfType: AOT 中值没有运行时类型标签，编译期解析
+    if callee == "aura_isOfType" && args.len() == 2 {
+        let (val_ir, val_ty) = emit_expr_val(ctx, blocks, &args[0])?;
+        let target_type = match &args[1] {
+            crate::codegen::hir::HirExpr::Lit(crate::ast::Literal::String(s)) => s.clone(),
+            _ => {
+                return Err(AotError::CodeGenerationFailed(
+                    "aura_isOfType: second arg must be a string literal".to_string(),
+                ));
+            }
+        };
+
+        // 将 LLVM IR 类型映射回 Aura 类型名
+        let is_match = match val_ty.as_str() {
+            "i32" => target_type == "Int",
+            "i64" => target_type == "Long",
+            "i16" => target_type == "Short" || target_type == "Char",
+            "i8" => target_type == "Byte" || target_type == "U8",
+            "float" => target_type == "Float",
+            "double" => target_type == "Double",
+            "i1" => target_type == "Boolean" || target_type == "Bool",
+            // AuraString 结构体 { i8*, i64 }
+            t if t.starts_with('{') && t.contains("i8*") && t.contains("i64") => {
+                target_type == "String"
+            }
+            "i8*" => target_type == "String",
+            _ => false,
+        };
+
+        return Ok((
+            if is_match { "true".to_string() } else { "false".to_string() },
+            "i1".to_string(),
+        ));
     }
 
     let args_ir: Vec<(String, String)> =

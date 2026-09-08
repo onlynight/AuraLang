@@ -2428,7 +2428,7 @@ fn desugar_for(pattern: &Expr, iterable: &Expr, body: &Expr) -> HirStmt {
     };
 
     // 范围：`start..end` 或 `start..<end`
-    // 将自增放在循环体开头，这样 `continue` 跳过后续代码时自增已执行，
+    // 将自增/自减放在循环体开头，这样 `continue` 跳过后续代码时自增已执行，
     // 避免 `continue` 跳过尾部自增导致无限循环。
     if let Expr::Range {
         start,
@@ -2446,50 +2446,55 @@ fn desugar_for(pattern: &Expr, iterable: &Expr, body: &Expr) -> HirStmt {
             .unwrap_or_else(|| Box::new(Expr::Literal(Literal::Int(0), Span::single(0, 1, 1))));
         let end_e = desugar_expr(&end_box);
         let idx = format!("__for_idx_{}", var_name);
-        // 初始值 = start - 1，循环体内先自增再赋值
-        let init_e = HirExpr::Binary {
-            op: HirBinOp::Sub,
-            lhs: Box::new(start_e),
-            rhs: Box::new(HirExpr::Lit(Literal::Int(1))),
-        };
-        // 循环条件：inclusive → idx < end；exclusive → idx < end - 1
-        let cmp = if *inclusive {
-            HirExpr::Binary {
-                op: HirBinOp::Lt,
-                lhs: Box::new(HirExpr::Var(idx.clone())),
-                rhs: Box::new(end_e),
-            }
-        } else {
-            HirExpr::Binary {
-                op: HirBinOp::Lt,
-                lhs: Box::new(HirExpr::Var(idx.clone())),
-                rhs: Box::new(HirExpr::Binary {
-                    op: HirBinOp::Sub,
-                    lhs: Box::new(end_e),
-                    rhs: Box::new(HirExpr::Lit(Literal::Int(1))),
-                }),
-            }
-        };
-        let mut body_stmts = vec![
-            // 先自增
-            HirStmt::Assign {
-                target: HirExpr::Var(idx.clone()),
-                value: HirExpr::Binary {
-                    op: HirBinOp::Add,
+
+        // 判断是否为倒序范围（start > end）
+        // 在编译期无法比较任意表达式，使用运行时条件：
+        //   if start <= end: 正向循环 (idx++, idx < end)
+        //   else: 反向循环 (idx--, idx >= end)
+        // 用 if-else 包裹整个循环
+
+        // 正向循环体
+        let forward_body = {
+            let init_e = HirExpr::Binary {
+                op: HirBinOp::Sub,
+                lhs: Box::new(start_e.clone()),
+                rhs: Box::new(HirExpr::Lit(Literal::Int(1))),
+            };
+            // 初始值 = start - 1，循环体内先自增再赋值
+            let cmp = if *inclusive {
+                HirExpr::Binary {
+                    op: HirBinOp::Lt,
                     lhs: Box::new(HirExpr::Var(idx.clone())),
-                    rhs: Box::new(HirExpr::Lit(Literal::Int(1))),
+                    rhs: Box::new(end_e.clone()),
+                }
+            } else {
+                HirExpr::Binary {
+                    op: HirBinOp::Lt,
+                    lhs: Box::new(HirExpr::Var(idx.clone())),
+                    rhs: Box::new(HirExpr::Binary {
+                        op: HirBinOp::Sub,
+                        lhs: Box::new(end_e.clone()),
+                        rhs: Box::new(HirExpr::Lit(Literal::Int(1))),
+                    }),
+                }
+            };
+            let mut body_stmts = vec![
+                HirStmt::Assign {
+                    target: HirExpr::Var(idx.clone()),
+                    value: HirExpr::Binary {
+                        op: HirBinOp::Add,
+                        lhs: Box::new(HirExpr::Var(idx.clone())),
+                        rhs: Box::new(HirExpr::Lit(Literal::Int(1))),
+                    },
                 },
-            },
-            // 再赋值给循环变量
-            HirStmt::Val {
-                name: var_name.clone(),
-                ty: None,
-                init: Some(HirExpr::Var(idx.clone())),
-            },
-        ];
-        body_stmts.extend(desugar_block(body).stmts);
-        return HirStmt::Block(HirBlock {
-            stmts: vec![
+                HirStmt::Val {
+                    name: var_name.clone(),
+                    ty: None,
+                    init: Some(HirExpr::Var(idx.clone())),
+                },
+            ];
+            body_stmts.extend(desugar_block(body).stmts.clone());
+            vec![
                 HirStmt::Var {
                     name: idx.clone(),
                     ty: None,
@@ -2501,8 +2506,81 @@ fn desugar_for(pattern: &Expr, iterable: &Expr, body: &Expr) -> HirStmt {
                         stmts: body_stmts,
                     },
                 },
-            ],
-        });
+            ]
+        };
+
+        // 反向循环体
+        let reverse_body = {
+            let init_e = HirExpr::Binary {
+                op: HirBinOp::Add,
+                lhs: Box::new(start_e.clone()),
+                rhs: Box::new(HirExpr::Lit(Literal::Int(1))),
+            };
+            // 初始值 = start + 1，循环体内先自减再赋值
+            let cmp = if *inclusive {
+                HirExpr::Binary {
+                    op: HirBinOp::Gt,
+                    lhs: Box::new(HirExpr::Var(idx.clone())),
+                    rhs: Box::new(end_e.clone()),
+                }
+            } else {
+                HirExpr::Binary {
+                    op: HirBinOp::Gt,
+                    lhs: Box::new(HirExpr::Var(idx.clone())),
+                    rhs: Box::new(HirExpr::Binary {
+                        op: HirBinOp::Add,
+                        lhs: Box::new(end_e.clone()),
+                        rhs: Box::new(HirExpr::Lit(Literal::Int(1))),
+                    }),
+                }
+            };
+            let mut body_stmts = vec![
+                HirStmt::Assign {
+                    target: HirExpr::Var(idx.clone()),
+                    value: HirExpr::Binary {
+                        op: HirBinOp::Sub,
+                        lhs: Box::new(HirExpr::Var(idx.clone())),
+                        rhs: Box::new(HirExpr::Lit(Literal::Int(1))),
+                    },
+                },
+                HirStmt::Val {
+                    name: var_name.clone(),
+                    ty: None,
+                    init: Some(HirExpr::Var(idx.clone())),
+                },
+            ];
+            body_stmts.extend(desugar_block(body).stmts.clone());
+            vec![
+                HirStmt::Var {
+                    name: idx.clone(),
+                    ty: None,
+                    init: Some(init_e),
+                },
+                HirStmt::While {
+                    cond: cmp,
+                    body: HirBlock {
+                        stmts: body_stmts,
+                    },
+                },
+            ]
+        };
+
+        // 条件：start <= end ? 正向 : 反向
+        let condition = HirExpr::Binary {
+            op: HirBinOp::Le,
+            lhs: Box::new(start_e),
+            rhs: Box::new(end_e),
+        };
+
+        return HirStmt::If {
+            cond: condition,
+            then_b: HirBlock {
+                stmts: forward_body,
+            },
+            else_b: Some(HirBlock {
+                stmts: reverse_body,
+            }),
+        };
     }
 
     // 迭代器形式（list/array）：通过内置 `__iter_*` 近似（VM 后续实现）

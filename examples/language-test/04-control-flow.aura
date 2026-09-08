@@ -157,7 +157,12 @@ fun main() {
     }
     println("  sum 1..<5 (exclusive) = " + sum2.toString())
 
-    // 注意：倒序范围（如 5..1）尚未实现，需显式使用 while 循环
+    // 倒序范围
+    var reverseSum: Int = 0
+    for (c in 5..1) {
+        reverseSum = reverseSum + c
+    }
+    println("  sum 5..1 (reverse) = " + reverseSum.toString())
 
     // ── §4.8 while 循环 ───────────────────────────────────────────────────
     println("\n--- §4.8 while loops ---")

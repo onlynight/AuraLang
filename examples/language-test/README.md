@@ -66,11 +66,10 @@ examples/language-test/
 | Phase 16 脚本模式 | `16-script-mode.aura` | ⏳ | ⏳ | ⏳ |
 
 > **AOT 已知限制**（`docs/遗留问题与风险分析报告.md`）：
-> - native 函数返回值硬编码 i32（所有含 native 调用的 AOT 编译均可能失败）
-> - weak 引用在 AOT 后端无映射
-> - 顶层变量未定义 LLVM 全局（Phase 2 编译失败）
-> - `is` 运算符已实现（`aura.isOfType` 原生函数），VM/JIT 通过
-> - `when` 表达式 null 处理已修复（`emit_if_expr` null → 0）
+> - `Any` 类型 `is` 检查在 AOT 中返回 `String`（类型擦除为 `i8*`，无法区分实际类型）
+> - 标签循环 `break@label` / `continue@label` 尚未实现（AST 无 label 字段）
+> - 嵌套函数不支持（需使用顶层函数）
+> - `Boolean.toString()` 返回 `0`/`1` 而非 `false`/`true`（C FFI 仅支持 Int/Double）
 
 ---
 
@@ -216,10 +215,27 @@ aura run   examples/language-test/03-functions.aura              # VM 运行时�
 
 | 覆盖项 |
 |--------|
-| `if-else`（作为表达式） |
-| `when`（字面量 / `in range` / `is` 智能转换 / `else` / 守卫 `&&`） |
-| `for` / `while` / `do-while` |
-| 标签循环 + `break@label` / `continue@label` |
+| `if-else`（作为表达式和语句，含 else-if 链） |
+| `when`（字面量 / 条件表达式 / `in range` / `is` 智能转换 / `else`） |
+| `for`（含范围、独占范围 `..<`、倒序范围） |
+| `while` / `do-while` |
+| `break` / `continue`（含组合、嵌套循环、死循环+break） |
+| 嵌套循环（乘法表、因子对、嵌套 break） |
+| 循环中 `return`（顶层辅助函数） |
+
+**编译器修复**（Phase 4 开发中发现并修复的 Bug）：
+| Bug | 位置 | 修复 |
+|-----|------|------|
+| `CallNative` 指令大小计算错误 | `emit.rs::instr_size` | 3→5 字节，修复 `block_offsets` 偏差 |
+| `MakeClosure` 指令大小错误 | `emit.rs::instr_size` | `3*captures+6` |
+| 嵌套 `HirExpr::If` 块终结器错误 | `mir.rs::lower_expr` | `is_closed(self.current)` 替代 `is_closed(then_id/else_id)` |
+| `HirStmt::If` 块终结器错误 | `mir.rs::lower_stmt` | 同上，修复 else-if 链 |
+| `desugar_for` 中 `continue` 跳过自增 | `hir.rs::desugar_for` | 自增移至循环体开头 |
+| `desugar_when` 中 `__else__` 泄漏 | `hir.rs::desugar_when` | `(None, Some(p))` 分支识别 `__else__` |
+| `when in range` 未降级 | `hir.rs::desugar_when` | 添加 `Expr::InRange` 处理 |
+| AOT `break`/`continue` 非法终止符 | `aot/emit.rs` | 添加循环块栈，`br` 到条件/结束块 |
+| AOT `aura_isOfType` 崩溃 | `aot/emit.rs::emit_call` | 编译期解析，LLVM 类型→Aura 类型名映射 |
+| 倒序范围未实现 | `hir.rs::desugar_for` | if-else 包裹正向/反向循环体 |
 
 ---
 
