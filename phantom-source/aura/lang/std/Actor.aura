@@ -1,0 +1,60 @@
+// aura:///aura/lang/std/Actor.aura
+// Actor 消息驱动并发模型 —— 无状态对象，通过 aura.lang.std.Actor.<fn> 调用。
+// 实现：Rust 原生函数（compiler/src/vm/actor.rs）
+// 架构：运行库，通过 AOT FFI 直连 libc
+//
+// 使用前需 import：
+// ```aura
+// import aura.lang.std.Actor.*   // 短名可用：send, spawnActor, supervise, ...
+// import aura.lang.std.Actor     // 类式调用：Actor.spawnActor("worker")
+// import aura.lang.std.*         // 全部 std 类作为模块别名
+// ```
+//
+// 也包含 ProcessActor 跨进程变体。死亡策略 DeathStrategy 单独存放于 DeathStrategy.aura。
+//
+// 架构说明：
+// - Layer 2（C FFI）：当前通过 Rust native 实现
+// - 未来：通过 `extern "c"` 调用 libc 的线程/消息队列实现
+//
+// @since 0.5
+internal object Actor {
+
+    // ── 消息（通过 libc 消息队列实现）──
+
+    /// 向 Actor 发送消息（异步，不阻塞）
+    fun send(actor: Int, message: Any): Unit
+
+    /// 请求 Actor 回复（阻塞直到收到响应或超时）
+    fun reply(actor: Int, message: Any): Any
+
+    // ── Actor 生命周期（通过 libc 线程实现）──
+
+    /// 启动新 Actor
+    ///
+    /// - 参数：`name` — Actor 名称（用于日志/调试）
+    /// - 返回：Actor ID
+    fun spawnActor(name: String): Int
+
+    /// 建立父子监督关系（子 Actor 死亡时通知父 Actor）
+    fun supervise(parent: Int, child: Int): Unit
+
+    /// 检查 Actor 是否存活
+    fun actorAlive(actor: Int): Boolean
+
+    // ── ProcessActor（跨进程，通过 libc fork/pipe 实现）──
+
+    /// 启动跨进程 Actor
+    fun spawnActorProcess(name: String): Int
+
+    /// 向跨进程 Actor 发送消息
+    fun sendProcessActor(actor: Int, message: Any): Unit
+
+    /// 从跨进程 Actor 接收消息（阻塞）
+    fun recvProcessActor(actor: Int): Any
+
+    /// 检查跨进程 Actor 是否存活
+    fun processActorAlive(actor: Int): Boolean
+
+    /// 杀死跨进程 Actor
+    fun killProcessActor(actor: Int): Unit
+}

@@ -64,6 +64,11 @@ const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
         params: &[("s", "i8*")],
     },
     RuntimeFn {
+        name: "toStringFloat",
+        ret: "i8*",
+        params: &[("x", "double")],
+    },
+    RuntimeFn {
         name: "aura_string_data",
         ret: "i8*",
         params: &[("s", "i8*")],
@@ -103,6 +108,180 @@ pub fn runtime_function_names() -> Vec<&'static str> {
 /// 检查一个函数名是否为 runtime 函数
 pub fn is_runtime_function(name: &str) -> bool {
     RUNTIME_FUNCTIONS.iter().any(|f| f.name == name)
+}
+
+/// 获取 runtime 函数签名（返回类型 + 参数类型列表），供原生函数签名覆盖使用
+pub fn runtime_signature(name: &str) -> Option<(&'static str, Vec<&'static str>)> {
+    RUNTIME_FUNCTIONS
+        .iter()
+        .find(|f| f.name == name)
+        .map(|f| (f.ret, f.params.iter().map(|(_, ty)| *ty).collect()))
+}
+
+/// 将新命名下的 sanitizellvm 结果翻译回旧 C FFI 符号名
+///
+/// 例如：`aura_lang_std_Math_sin` → `aura_math_sin`
+///       `aura_lang_std_IO_readLine` → `aura_io_readLine`
+///       `aura_lang_std_Filesystem_exists` → `aura_fs_exists`
+///       `aura_lang_std_Network_tcpConnect` → `aura_net_tcpConnect`
+///
+/// 若输入不是新命名形式，返回原值（用于兼容旧命名下的 C 符号）。
+fn translate_to_legacy_c(name: &str) -> String {
+    let prefix = "aura_lang_std_";
+    if !name.starts_with(prefix) {
+        return name.to_string();
+    }
+    let rest = &name[prefix.len()..];
+    let parts: Vec<&str> = rest.splitn(2, '_').collect();
+    if parts.len() != 2 {
+        return name.to_string();
+    }
+    let (class, fn_name) = (parts[0], parts[1]);
+    // 类名到 C 前缀的映射（与旧命名一致）
+    let c_prefix = match class {
+        "Math" => "math",
+        "IO" => "io",
+        "Ascii" => "ascii",
+        "Assert" => "assert",
+        "Builtin" => "builtin",
+        "Collections" => "collections",
+        "Console" => "console",
+        "Encoding" => "encoding",
+        "Env" => "env",
+        "FileSystem" => "fs",
+        "Iter" => "iter",
+        "Json" => "json",
+        "Network" => "net",
+        "Path" => "path",
+        "Process" => "process",
+        "Random" => "random",
+        "String" => "string",
+        "Test" => "test",
+        "Time" => "time",
+        "Coroutine" => "concurrent",
+        "Actor" => "concurrent",
+        "Channel" => "concurrent",
+        _ => return name.to_string(),
+    };
+    format!("aura_{}_{}", c_prefix, fn_name)
+}
+
+/// aura_std_cffi.c 中实现的 C FFI 函数签名覆盖
+/// （HIR 侧原生函数的 Any 类型在 AOT 退化为 i8*，这里用真实 C ABI 类型覆盖，
+///  保证调用点、declare 与 C 实现（如 aura_math_sin(double)）三者一致）
+pub fn cffi_signature(name: &str) -> Option<(&'static str, Vec<&'static str>)> {
+    // 将新命名（sanitizellvm 后的 aura_lang_std_Class_fn）翻译回旧 C 符号名（aura_class_fn）
+    let translated = translate_to_legacy_c(name);
+    let name = if translated != name { &translated } else { name };
+
+    const D: &str = "double";
+    const P: &str = "i8*";
+    let (ret, params): (&'static str, &[&str]) = match name {
+        "aura_math_sin" | "aura_math_cos" | "aura_math_tan" | "aura_math_asin"
+        | "aura_math_acos" | "aura_math_atan" | "aura_math_atan2" | "aura_math_log"
+        | "aura_math_log2" | "aura_math_log10" | "aura_math_exp" | "aura_math_sqrt"
+        | "aura_math_cbrt" | "aura_math_round" | "aura_math_trunc" | "aura_math_sign" => (D, &[D]),
+        "aura_math_pow" | "aura_math_min" | "aura_math_max" => (D, &[D, D]),
+        "aura_math_clamp" => (D, &[D, D, D]),
+        "aura_math_ceil" | "aura_math_floor" | "aura_math_abs" => ("i64", &[D]),
+        // aura.string
+        "aura_string_length" => ("i64", &[P]),
+        "aura_string_contains" => ("i1", &[P, P]),
+        "aura_string_toUpperCase"
+        | "aura_string_toLowerCase"
+        | "aura_string_trim"
+        | "aura_string_substring"
+        | "aura_string_replace" => (P, &[P]),
+        "aura_string_startsWith" | "aura_string_endsWith" => ("i1", &[P, P]),
+        // aura.ascii（Char → i16）
+        "aura_ascii_isAlpha"
+        | "aura_ascii_isDigit"
+        | "aura_ascii_isAlphaNumeric"
+        | "aura_ascii_isWhitespace"
+        | "aura_ascii_isUpper"
+        | "aura_ascii_isLower" => ("i1", &["i16"]),
+        "aura_ascii_toUpper" | "aura_ascii_toLower" | "aura_ascii_codeAt" => ("i64", &["i16"]),
+        // aura.collections（快照用 3 参 listOf；元素为 Any→i8*）
+        "aura_collections_listOf" => (P, &[P, P, P]),
+        "aura_collections_listContains" => ("i1", &[P, P]),
+        "aura_collections_listIndexOf" => ("i64", &[P, P]),
+        // aura.collections — 特化集合
+        "aura_collections_arrayListOf" => (
+            P,
+            &[
+                P, P, P, P, P, P, P, P, P, P,
+            ],
+        ),
+        "aura_collections_arrayListSize" => ("i64", &[P]),
+        "aura_collections_linkedListOf" => (
+            P,
+            &[
+                P, P, P, P, P, P, P, P, P, P,
+            ],
+        ),
+        "aura_collections_linkedAddFirst" => (P, &[P, P]),
+        "aura_collections_linkedAddLast" => (P, &[P, P]),
+        "aura_collections_linkedRemoveFirst" => (P, &[P]),
+        "aura_collections_linkedRemoveLast" => (P, &[P]),
+        "aura_collections_hashSetOf" => (
+            P,
+            &[
+                P, P, P, P, P, P, P, P, P, P,
+            ],
+        ),
+        "aura_collections_hashSetContains" => ("i1", &[P, P]),
+        "aura_collections_hashSetAdd" => (P, &[P, P]),
+        "aura_collections_hashSetRemove" => ("i1", &[P, P]),
+        "aura_collections_hashMapOf" => (
+            P,
+            &[
+                P, P, P, P, P, P, P, P, P, P,
+            ],
+        ),
+        "aura_collections_hashMapGet" => (P, &[P, P]),
+        "aura_collections_hashMapPut" => (P, &[P, P, P]),
+        "aura_collections_hashMapRemove" => (P, &[P, P]),
+        "aura_collections_linkedHashMapOf" => (
+            P,
+            &[
+                P, P, P, P, P, P, P, P, P, P,
+            ],
+        ),
+        "aura_collections_linkedHashMapKeys" => (P, &[P]),
+        "aura_collections_linkedHashMapFirstKey" => (P, &[P]),
+        "aura_collections_linkedHashMapLastKey" => (P, &[P]),
+        // aura.time / random
+        "aura_time_epoch" | "aura_time_epochMillis" | "aura_random_nextInt" => ("i64", &[]),
+        // aura.encoding
+        "aura_encoding_base64Encode"
+        | "aura_encoding_base64Decode"
+        | "aura_encoding_hexEncode"
+        | "aura_encoding_hexDecode"
+        | "aura_encoding_urlEncode"
+        | "aura_encoding_urlDecode" => (P, &[P]),
+        // aura.path
+        "aura_path_join" => (P, &[P, P]),
+        "aura_path_basename"
+        | "aura_path_dirname"
+        | "aura_path_extname"
+        | "aura_path_normalize"
+        | "aura_path_resolve" => (P, &[P]),
+        "aura_path_isAbsolute" | "aura_path_isRelative" => ("i1", &[P]),
+        // aura.env
+        "aura_env_platform" | "aura_env_os" | "aura_env_arch" | "aura_env_home"
+        | "aura_env_tmp" | "aura_env_pwd" => (P, &[]),
+        "aura_env_get" => (P, &[P]),
+        "aura_env_has" => ("i1", &[P]),
+        // aura.fs
+        "aura_fs_exists" | "aura_fs_isFile" | "aura_fs_isDirectory" => ("i1", &[P]),
+        "aura_fs_readText" => (P, &[P]),
+        "aura_fs_writeText" => (P, &[P, P]),
+        // aura.io
+        "aura_io_fileExists" => ("i1", &[P]),
+        "aura_io_fileWrite" => ("void", &[P, P]),
+        _ => return None,
+    };
+    Some((ret, params.to_vec()))
 }
 
 #[cfg(test)]

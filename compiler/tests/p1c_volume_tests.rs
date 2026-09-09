@@ -30,12 +30,12 @@ fn test_full_registry_without_imports() {
     // 创建 VM 时使用全量注册（向后兼容）
     let vm = Vm::new(&module, VmOptions::default()).expect("VM 创建应成功");
     assert!(
-        vm.contains_native("aura.math.sin"),
-        "全量注册应包含 aura.math.sin"
+        vm.contains_native("aura.lang.std.Math.sin"),
+        "全量注册应包含 aura.lang.std.Math.sin"
     );
     assert!(
-        vm.contains_native("aura.io.readLine"),
-        "全量注册应包含 aura.io.readLine"
+        vm.contains_native("aura.lang.std.IO.readLine"),
+        "全量注册应包含 aura.lang.std.IO.readLine"
     );
 }
 
@@ -47,7 +47,7 @@ fn test_full_registry_without_imports() {
 #[cfg(feature = "std-all")]
 fn test_partial_registry_with_imports() {
     let src = r#"
-        import aura.math.*
+        import aura.lang.std.Math.*
         fun main(): Float {
             return sin(1.0)
         }
@@ -63,22 +63,22 @@ fn test_partial_registry_with_imports() {
 
     // math 模块应注册
     assert!(
-        vm.contains_native("aura.math.sin"),
-        "import aura.math.* 后应注册 aura.math.sin"
+        vm.contains_native("aura.lang.std.Math.sin"),
+        "import aura.lang.std.Math.* 后应注册 aura.lang.std.Math.sin"
     );
     assert!(
-        vm.contains_native("aura.math.cos"),
-        "import aura.math.* 后应注册 aura.math.cos"
+        vm.contains_native("aura.lang.std.Math.cos"),
+        "import aura.lang.std.Math.* 后应注册 aura.lang.std.Math.cos"
     );
 
     // 未 import 的模块不应注册
     assert!(
-        !vm.contains_native("aura.io.readLine"),
-        "未 import aura.io 时不应注册 aura.io.readLine"
+        !vm.contains_native("aura.lang.std.IO.readLine"),
+        "未 import aura.lang.std.IO 时不应注册 aura.lang.std.IO.readLine"
     );
     assert!(
-        !vm.contains_native("aura.string.contains"),
-        "未 import aura.string 时不应注册 aura.string.contains"
+        !vm.contains_native("aura.lang.std.String.contains"),
+        "未 import aura.lang.std.String 时不应注册 aura.lang.std.String.contains"
     );
 }
 
@@ -90,8 +90,8 @@ fn test_partial_registry_with_imports() {
 #[cfg(feature = "std-all")]
 fn test_multiple_imports_only_registers_specified() {
     let src = r#"
-        import aura.math.*
-        import aura.string.*
+        import aura.lang.std.Math.*
+        import aura.lang.std.String.*
         fun main(): String {
             return toStr(sqrt(16.0))
         }
@@ -110,17 +110,17 @@ fn test_multiple_imports_only_registers_specified() {
     let vm = Vm::new(&module, VmOptions::default()).expect("VM 创建应成功");
 
     // 两个模块都应注册
-    assert!(vm.contains_native("aura.math.sin"));
-    assert!(vm.contains_native("aura.string.contains"));
+    assert!(vm.contains_native("aura.lang.std.Math.sin"));
+    assert!(vm.contains_native("aura.lang.std.String.contains"));
 
     // 其他模块不应注册
     assert!(
-        !vm.contains_native("aura.io.readLine"),
-        "未 import aura.io 时不应注册"
+        !vm.contains_native("aura.lang.std.IO.readLine"),
+        "未 import aura.lang.std.IO 时不应注册"
     );
     assert!(
-        !vm.contains_native("aura.net.connect"),
-        "未 import aura.net 时不应注册"
+        !vm.contains_native("aura.lang.std.Network.connect"),
+        "未 import aura.lang.std.Network 时不应注册"
     );
 }
 
@@ -142,7 +142,7 @@ fn test_prelude_always_registered() {
 
     // 有 import
     let src2 = r#"
-        import aura.math.*
+        import aura.lang.std.Math.*
         fun main(): Float {
             return sin(1.0)
         }
@@ -167,21 +167,21 @@ fn test_native_registry_with_modules_direct() {
     let reg_empty = NativeRegistry::with_modules(&[]);
     assert!(reg_empty.contains("println"));
     assert!(reg_empty.contains("abs"));
-    assert!(!reg_empty.contains("aura.math.sin"));
+    assert!(!reg_empty.contains("aura.lang.std.Math.sin"));
 
     // 只注册 math
     let reg_math = NativeRegistry::with_modules(&["math"]);
-    assert!(reg_math.contains("aura.math.sin"));
-    assert!(reg_math.contains("aura.math.cos"));
-    assert!(!reg_math.contains("aura.io.readLine"));
+    assert!(reg_math.contains("aura.lang.std.Math.sin"));
+    assert!(reg_math.contains("aura.lang.std.Math.cos"));
+    assert!(!reg_math.contains("aura.lang.std.IO.readLine"));
 
     // 注册 math + io
     let reg_both = NativeRegistry::with_modules(&[
         "math", "io",
     ]);
-    assert!(reg_both.contains("aura.math.sin"));
-    assert!(reg_both.contains("aura.io.readLine"));
-    assert!(!reg_both.contains("aura.string.contains"));
+    assert!(reg_both.contains("aura.lang.std.Math.sin"));
+    assert!(reg_both.contains("aura.lang.std.IO.readLine"));
+    assert!(!reg_both.contains("aura.lang.std.String.contains"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -194,14 +194,14 @@ fn test_concurrent_module_on_demand() {
     // 无 import 时并发函数不注册（使用 with_modules）
     let reg_no_concurrent = NativeRegistry::with_modules(&["math"]);
     assert!(
-        !reg_no_concurrent.contains("aura.concurrent.spawn"),
-        "未 import aura.concurrent 时不应注册并发函数"
+        !reg_no_concurrent.contains("aura.lang.std.Coroutine.spawn"),
+        "未 import aura.lang.std.Coroutine 时不应注册并发函数"
     );
 
     // 有 import 时并发函数注册
     let reg_with_concurrent = NativeRegistry::with_modules(&["concurrent"]);
     assert!(
-        reg_with_concurrent.contains("aura.concurrent.spawn"),
-        "import aura.concurrent 后应注册并发函数"
+        reg_with_concurrent.contains("aura.lang.std.Coroutine.spawn"),
+        "import aura.lang.std.Coroutine 后应注册并发函数"
     );
 }

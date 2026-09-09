@@ -1,0 +1,56 @@
+// aura:///aura/lang/std/Ascii.aura
+// 标准库模块，不可修改
+// 实现：Rust 原生函数（compiler/src/std/std_ascii.rs）
+// (package 声明由编译器自动注入，无需显式声明)
+/// 字符判断与转换模块。
+///
+/// 使用前需 import：
+/// ```aura
+/// import aura.ascii.*
+/// ```
+///
+/// @since 0.1
+internal object Ascii {
+
+    // ── 判断 ──
+
+    /// 检查首字符是否为字母。
+    fun isAlpha(text: String): Boolean
+
+    /// 检查首字符是否为数字。
+    fun isDigit(text: String): Boolean
+
+    /// 检查首字符是否为字母或数字。
+    fun isAlphaNumeric(text: String): Boolean
+
+    /// 检查首字符是否为空白字符。
+    fun isWhitespace(text: String): Boolean
+
+    /// 检查首字符是否为大写字母。
+    fun isUpper(text: String): Boolean
+
+    /// 检查首字符是否为小写字母。
+    fun isLower(text: String): Boolean
+
+    // ── 转换 ──
+
+    /// 转换首字符为大写。
+    fun toUpper(text: String): String
+
+    /// 转换首字符为小写。
+    fun toLower(text: String): String
+
+    // ── 码点 ──
+
+    /// 获取位置 index 字符的 Unicode 码点。
+    fun codeAt(text: String, index: Int): Int
+
+    /// 获取位置 index 的字符。
+    fun charAt(text: String, index: Int): String
+
+    /// 从 Unicode 码点创建字符。
+    fun fromCode(code: Int): String
+
+    /// 获取首字符的 Unicode 码点。
+    fun codePointAt(text: String): Int
+}

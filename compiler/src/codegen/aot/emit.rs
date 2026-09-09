@@ -451,6 +451,27 @@ pub fn emit_program(
         ctx.type_aliases.insert(alias_name.clone(), ctx.map_type(alias_ty));
     }
     for native in &program.natives {
+        // 内置 runtime 函数（如 aura.lang.std.String.length → aura_string_length）使用 runtime 签名，
+        // 保证调用点与 emit_runtime 声明类型一致
+        let native_sym = sanitizellvm(&native.name);
+        if let Some((ret, params)) = crate::codegen::aot::runtime::runtime_signature(&native_sym) {
+            ctx.func_ret_types.insert(native.name.clone(), ret.to_string());
+            ctx.func_param_types.insert(
+                native.name.clone(),
+                params.iter().map(|t| t.to_string()).collect(),
+            );
+            continue;
+        }
+        // C FFI 实现函数（aura_math_* 等）：HIR 的 Any 类型退化为 i8*，
+        // 用真实 C ABI 类型覆盖，与 aura_std_cffi.c 中的定义保持一致
+        if let Some((ret, params)) = crate::codegen::aot::runtime::cffi_signature(&native_sym) {
+            ctx.func_ret_types.insert(native.name.clone(), ret.to_string());
+            ctx.func_param_types.insert(
+                native.name.clone(),
+                params.iter().map(|t| t.to_string()).collect(),
+            );
+            continue;
+        }
         if let Some(ref ret) = native.ret {
             // toString / toStr 原生函数实际返回 C 字符串 (const char*),
             // 而非结构体 { i8*, i64 }，因此覆盖为 i8*
@@ -774,16 +795,18 @@ fn emit_statement(
         }
         HirStmt::Return(val) => {
             if let Some(v) = val {
-                let (val_ir, val_ty) = emit_expr_val(ctx, blocks, v)?;
                 let want = ctx.current_ret_ty.clone();
-                // 返回值类型必须与函数签名的返回类型一致（如 Float 函数里 `return 0.0`）
-                let (val_ir, val_ty) = if want.is_empty() || want == "void" {
-                    (val_ir, sanitize_ty_for_ret(&val_ty).to_string())
+                if want.is_empty() || want == "void" {
+                    // void 函数中的 `return expr`（含末尾表达式转 Return）：丢弃值，统一 ret void，
+                    // 避免 define void 与 ret i32 类型不匹配
+                    let _ = emit_expr_val(ctx, blocks, v)?;
+                    blocks.set_terminator("ret void");
                 } else {
+                    let (val_ir, val_ty) = emit_expr_val(ctx, blocks, v)?;
+                    // 返回值类型必须与函数签名的返回类型一致（如 Float 函数里 `return 0.0`）
                     let converted = coerce_arg(ctx, blocks, val_ir, &val_ty, &want);
-                    (converted.0, converted.1)
-                };
-                blocks.set_terminator(&format!("ret {} {}", val_ty, val_ir));
+                    blocks.set_terminator(&format!("ret {} {}", converted.1, converted.0));
+                }
             } else {
                 blocks.set_terminator("ret void");
             }
@@ -1607,9 +1630,17 @@ fn extract_string_parts(
                 as_ptr, val_ty, val_ir
             ));
         } else {
-            let bits = ctx.fresh_var();
-            cur.body.push(format!("{} = bitcast {} {} to i64", bits, val_ty, val_ir));
-            cur.body.push(format!("{} = inttoptr i64 {} to i8*", as_ptr, bits));
+            // 浮点：调用 toStringFloat(double)（bitcast 到指针会打印地址垃圾值）
+            let fvar = ctx.fresh_var();
+            cur.body.push(format!(
+                "{} = call i8* @toStringFloat(double {})",
+                fvar, val_ir
+            ));
+            cur.body.push(format!(
+                "{} = call i64 @aura_string_length(i8* {})",
+                len_var, fvar
+            ));
+            return (fvar, len_var);
         }
         cur.body.push(format!("{} = call i8* @toString(i8* {})", str_var, as_ptr));
         cur.body.push(format!(
@@ -2060,9 +2091,31 @@ fn emit_call(
     let cur = blocks.last_mut();
     let args_str: Vec<String> = args_ir.iter().map(|(v, t)| format!("{} {}", t, v)).collect();
 
+    // toString / toStr 对浮点实参：调用 toStringFloat(double)（C 的 toString 只收 int64）
+    if (callee == "toString" || callee == "toStr") && args_ir.len() == 1 {
+        let (v, t) = &args_ir[0];
+        if t == "double" || t == "float" {
+            let dv = if t == "float" {
+                let ext = ctx.fresh_var();
+                cur.body.push(format!("{} = fpext float {} to double", ext, v));
+                ext
+            } else {
+                v.clone()
+            };
+            let tmp = ctx.fresh_var();
+            cur.body.push(format!("{} = call i8* @toStringFloat(double {})", tmp, dv));
+            return Ok((tmp, "i8*".to_string()));
+        }
+    }
+
+    let callee_sym = sanitizellvm(callee);
     // 处理 void / 空返回类型：不能赋值给寄存器（LLVM IR 语法限制）
     if ret_ty.is_empty() || ret_ty == "void" {
-        cur.body.push(format!("call void @{}({})", callee, args_str.join(", ")));
+        cur.body.push(format!(
+            "call void @{}({})",
+            callee_sym,
+            args_str.join(", ")
+        ));
         // 返回一个虚拟 i32 0 值，保持调用者接口兼容
         Ok(("0".to_string(), "i32".to_string()))
     } else {
@@ -2071,7 +2124,7 @@ fn emit_call(
             "{} = call {} @{}({})",
             tmp,
             ret_ty,
-            callee,
+            callee_sym,
             args_str.join(", ")
         ));
         Ok((tmp, ret_ty))

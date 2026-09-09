@@ -17,17 +17,20 @@ fn handle_to_usize(handle: SocketHandle) -> usize {
 }
 
 pub fn register(reg: &mut NativeRegistry) {
-    reg.register("aura.net.tcpConnect", nat_tcp_connect);
-    reg.register("aura.net.tcpListen", nat_tcp_listen);
-    reg.register("aura.net.tcpSend", nat_tcp_send);
-    reg.register("aura.net.tcpRecv", nat_tcp_recv);
-    reg.register("aura.net.tcpClose", nat_tcp_close);
-    reg.register("aura.net.udpSend", nat_udp_send);
-    reg.register("aura.net.udpRecv", nat_udp_recv);
-    reg.register("aura.net.udpClose", nat_udp_close);
-    reg.register("aura.net.isHostReachable", nat_is_host_reachable);
-    reg.register("aura.net.getHostname", nat_get_hostname);
-    reg.register("aura.net.getLocalIp", nat_get_local_ip);
+    reg.register("aura.lang.std.Network.tcpConnect", nat_tcp_connect);
+    reg.register("aura.lang.std.Network.tcpListen", nat_tcp_listen);
+    reg.register("aura.lang.std.Network.tcpSend", nat_tcp_send);
+    reg.register("aura.lang.std.Network.tcpRecv", nat_tcp_recv);
+    reg.register("aura.lang.std.Network.tcpClose", nat_tcp_close);
+    reg.register("aura.lang.std.Network.udpSend", nat_udp_send);
+    reg.register("aura.lang.std.Network.udpRecv", nat_udp_recv);
+    reg.register("aura.lang.std.Network.udpClose", nat_udp_close);
+    reg.register(
+        "aura.lang.std.Network.isHostReachable",
+        nat_is_host_reachable,
+    );
+    reg.register("aura.lang.std.Network.getHostname", nat_get_hostname);
+    reg.register("aura.lang.std.Network.getLocalIp", nat_get_local_ip);
 }
 
 /// net.tcpConnect(host, port) → handle or error string

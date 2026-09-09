@@ -6,29 +6,29 @@ use crate::vm::native::NativeRegistry;
 use crate::vm::value::Value;
 
 pub fn register(reg: &mut NativeRegistry) {
-    reg.register("aura.console.clear", nat_clear);
-    reg.register("aura.console.cursorUp", nat_cursor_up);
-    reg.register("aura.console.cursorDown", nat_cursor_down);
-    reg.register("aura.console.cursorLeft", nat_cursor_left);
-    reg.register("aura.console.cursorRight", nat_cursor_right);
-    reg.register("aura.console.cursorShow", nat_cursor_show);
-    reg.register("aura.console.cursorHide", nat_cursor_hide);
-    reg.register("aura.console.reset", nat_reset);
-    reg.register("aura.console.red", nat_red);
-    reg.register("aura.console.green", nat_green);
-    reg.register("aura.console.yellow", nat_yellow);
-    reg.register("aura.console.blue", nat_blue);
-    reg.register("aura.console.magenta", nat_magenta);
-    reg.register("aura.console.cyan", nat_cyan);
-    reg.register("aura.console.white", nat_white);
-    reg.register("aura.console.bold", nat_bold);
-    reg.register("aura.console.italic", nat_italic);
-    reg.register("aura.console.underline", nat_underline);
-    reg.register("aura.console.dim", nat_dim);
-    reg.register("aura.console.inverse", nat_inverse);
-    reg.register("aura.console.size", nat_size);
-    reg.register("aura.console.width", nat_width);
-    reg.register("aura.console.height", nat_height);
+    reg.register("aura.lang.std.Console.clear", nat_clear);
+    reg.register("aura.lang.std.Console.cursorUp", nat_cursor_up);
+    reg.register("aura.lang.std.Console.cursorDown", nat_cursor_down);
+    reg.register("aura.lang.std.Console.cursorLeft", nat_cursor_left);
+    reg.register("aura.lang.std.Console.cursorRight", nat_cursor_right);
+    reg.register("aura.lang.std.Console.cursorShow", nat_cursor_show);
+    reg.register("aura.lang.std.Console.cursorHide", nat_cursor_hide);
+    reg.register("aura.lang.std.Console.reset", nat_reset);
+    reg.register("aura.lang.std.Console.red", nat_red);
+    reg.register("aura.lang.std.Console.green", nat_green);
+    reg.register("aura.lang.std.Console.yellow", nat_yellow);
+    reg.register("aura.lang.std.Console.blue", nat_blue);
+    reg.register("aura.lang.std.Console.magenta", nat_magenta);
+    reg.register("aura.lang.std.Console.cyan", nat_cyan);
+    reg.register("aura.lang.std.Console.white", nat_white);
+    reg.register("aura.lang.std.Console.bold", nat_bold);
+    reg.register("aura.lang.std.Console.italic", nat_italic);
+    reg.register("aura.lang.std.Console.underline", nat_underline);
+    reg.register("aura.lang.std.Console.dim", nat_dim);
+    reg.register("aura.lang.std.Console.inverse", nat_inverse);
+    reg.register("aura.lang.std.Console.size", nat_size);
+    reg.register("aura.lang.std.Console.width", nat_width);
+    reg.register("aura.lang.std.Console.height", nat_height);
 }
 
 fn arg0_str(args: &[Value]) -> String {

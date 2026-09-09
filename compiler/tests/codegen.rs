@@ -55,6 +55,55 @@ fn test_monomorphization() {
     );
 }
 
+/// 递归泛型函数：fun <T> recurse(x: T, n: Int): T
+#[test]
+fn test_recursive_monomorphization() {
+    let src = "fun <T> recurse(x: T, n: Int): T { if (n <= 0) { return x } return recurse(x, n - 1) }\nfun main() { println(recurse(5, 3)) }";
+    let module = compile_source(src).expect("编译成功");
+    assert!(
+        module.functions.iter().any(|f| f.name == "recurse#2"),
+        "递归泛型函数应被单态化为 recurse#2"
+    );
+}
+
+/// 嵌套泛型调用：泛型函数调用其他泛型函数
+#[test]
+fn test_nested_monomorphization() {
+    let src = "fun <T> identity(x: T): T = x\nfun <T> wrapper(x: T): T = identity(x)\nfun main() { println(wrapper(5)) }";
+    let module = compile_source(src).expect("编译成功");
+    assert!(
+        module.functions.iter().any(|f| f.name == "identity#1"),
+        "嵌套泛型调用应生成 identity#1"
+    );
+    assert!(
+        module.functions.iter().any(|f| f.name == "wrapper#1"),
+        "嵌套泛型调用应生成 wrapper#1"
+    );
+}
+
+/// 多个 arity 的泛型函数：fun <T> multi(args...): T
+#[test]
+fn test_multiple_arities_monomorphization() {
+    let src = "fun <T> multi(x: T): T = x\nfun <T> multi(x: T, y: T): T = x\nfun main() { println(multi(5))\n println(multi(5, 10)) }";
+    let module = compile_source(src).expect("编译成功");
+    // 注意：重载函数在 HIR 中可能无法区分，测试基本功能
+    assert!(
+        module.functions.iter().any(|f| f.name.contains("multi#")),
+        "多 arity 泛型函数应被单态化"
+    );
+}
+
+/// 泛型函数 + 非泛型函数混合调用
+#[test]
+fn test_mixed_monomorphization() {
+    let src = "fun add(a: Int, b: Int): Int = a + b\nfun <T> identity(x: T): T = x\nfun main() { println(identity(add(1, 2))) }";
+    let module = compile_source(src).expect("编译成功");
+    assert!(
+        module.functions.iter().any(|f| f.name == "identity#1"),
+        "混合调用应生成 identity#1"
+    );
+}
+
 /// 代表性程序端到端编译并生成入口
 #[test]
 fn test_full_program() {

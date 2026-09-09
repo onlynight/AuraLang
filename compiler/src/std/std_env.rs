@@ -6,19 +6,19 @@ use crate::vm::native::NativeRegistry;
 use crate::vm::value::Value;
 
 pub fn register(reg: &mut NativeRegistry) {
-    reg.register("aura.env.get", nat_get);
-    reg.register("aura.env.set", nat_set);
-    reg.register("aura.env.remove", nat_remove);
-    reg.register("aura.env.has", nat_has);
-    reg.register("aura.env.keys", nat_keys);
-    reg.register("aura.env.values", nat_values);
-    reg.register("aura.env.all", nat_all);
-    reg.register("aura.env.home", nat_home);
-    reg.register("aura.env.tmp", nat_tmp);
-    reg.register("aura.env.pwd", nat_pwd);
-    reg.register("aura.env.platform", nat_platform);
-    reg.register("aura.env.os", nat_os);
-    reg.register("aura.env.arch", nat_arch);
+    reg.register("aura.lang.std.Env.get", nat_get);
+    reg.register("aura.lang.std.Env.set", nat_set);
+    reg.register("aura.lang.std.Env.remove", nat_remove);
+    reg.register("aura.lang.std.Env.has", nat_has);
+    reg.register("aura.lang.std.Env.keys", nat_keys);
+    reg.register("aura.lang.std.Env.values", nat_values);
+    reg.register("aura.lang.std.Env.all", nat_all);
+    reg.register("aura.lang.std.Env.home", nat_home);
+    reg.register("aura.lang.std.Env.tmp", nat_tmp);
+    reg.register("aura.lang.std.Env.pwd", nat_pwd);
+    reg.register("aura.lang.std.Env.platform", nat_platform);
+    reg.register("aura.lang.std.Env.os", nat_os);
+    reg.register("aura.lang.std.Env.arch", nat_arch);
 }
 
 /// env.get(name, default) → String

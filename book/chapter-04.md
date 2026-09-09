@@ -159,7 +159,7 @@ fn benchmark_coroutine(c: &mut Criterion) {
     let code = r#"
         fun main() {
             for (i in 0..5) {
-                aura.concurrent.spawn(fun() {
+                aura.lang.std.Coroutine.spawn(fun() {
                     println("coroutine $i")
                 })
             }

@@ -64,49 +64,83 @@ impl NativeRegistry {
         // listOf - prelude alias (implementation in std_collections.rs)
         #[cfg(feature = "std-collections")]
         r.register("listOf", crate::std::std_collections::nat_list_of);
+        // Full-name aliases for prelude (aura.lang.std.<fn>)
+        r.register("aura.lang.std.println", native_println);
+        r.register("aura.lang.std.print", native_print);
+        r.register("aura.lang.std.puts", native_puts);
+        r.register("aura.lang.std.abs", native_abs);
+        r.register("aura.lang.std.sqrt", native_sqrt);
+        r.register("aura.lang.std.pow", native_pow);
+        r.register("aura.lang.std.toInt", native_to_int);
+        r.register("aura.lang.std.toFloat", native_to_float);
+        r.register("aura.lang.std.toStr", native_to_str);
+        r.register("aura.lang.std.toString", native_to_str);
+        r.register("aura.lang.std.clock", native_clock);
+        r.register("aura.lang.std.strlen", native_strlen);
+        r.register("aura.lang.std.CString", native_cstring);
+        r.register("aura.lang.std.CStr", native_cstr);
+        r.register("aura.lang.std.ptrIsNull", native_ptr_is_null);
+        r.register("aura.lang.std.ptrToInt", native_ptr_to_int);
+        r.register("aura.lang.std.intToPtr", native_int_to_ptr);
+        r.register("aura.lang.std.makeCallback", native_make_callback);
+        r.register("aura.lang.std.aura_isOfType", native_is_of_type);
+        r.register("aura.lang.std.equals", native_equals);
+        r.register("aura.lang.std.hashCode", native_hash_code);
+        r.register("aura.lang.std.typeOf", native_type_of);
+        r.register("aura.lang.std.aura_cast", native_cast);
+        r.register("aura.lang.std.aura_cast_safety", native_cast_safety);
         // Fix 9: 榛樿浠呭姞杞?prelude锛屼笉鍔犺浇鍏ㄩ儴 std 妯″潡
         // 濡傞渶鍔犺浇 std 妯″潡锛屼娇鐢?NativeRegistry::with_modules()
 
         // P10: 骞跺彂杩愯鏃讹紙闇€ std-concurrent feature锛?
         #[cfg(feature = "std-concurrent")]
         {
-            r.register("aura.concurrent.spawn", native_spawn);
-            r.register("aura.concurrent.send", native_send);
-            r.register("aura.concurrent.ask", native_ask);
-            r.register("aura.concurrent.reply", native_reply);
-            r.register("aura.concurrent.newChannel", native_new_channel);
-            r.register("aura.concurrent.channelSend", native_channel_send);
-            r.register("aura.concurrent.channelRecv", native_channel_recv);
-            r.register("aura.concurrent.channelTryRecv", native_channel_try_recv);
-            r.register("aura.concurrent.select", native_select);
-            r.register("aura.concurrent.selectTimeout", native_select_timeout);
-            r.register("aura.concurrent.spawnActor", native_spawn_actor);
-            r.register("aura.concurrent.supervise", native_supervise);
-            r.register("aura.concurrent.actorAlive", native_actor_alive);
+            r.register("aura.lang.std.Coroutine.spawn", native_spawn);
+            r.register("aura.lang.std.Actor.send", native_send);
+            r.register("aura.lang.std.Coroutine.ask", native_ask);
+            r.register("aura.lang.std.Actor.reply", native_reply);
+            r.register("aura.lang.std.Channel.newChannel", native_new_channel);
+            r.register("aura.lang.std.Channel.channelSend", native_channel_send);
+            r.register("aura.lang.std.Channel.channelRecv", native_channel_recv);
+            r.register(
+                "aura.lang.std.Channel.channelTryRecv",
+                native_channel_try_recv,
+            );
+            r.register("aura.lang.std.Channel.select", native_select);
+            r.register("aura.lang.std.Channel.selectTimeout", native_select_timeout);
+            r.register("aura.lang.std.Actor.spawnActor", native_spawn_actor);
+            r.register("aura.lang.std.Actor.supervise", native_supervise);
+            r.register("aura.lang.std.Actor.actorAlive", native_actor_alive);
 
             // Phase 3: 璺ㄨ繘绋?Actor / Channel
             r.register(
-                "aura.concurrent.spawnActorProcess",
+                "aura.lang.std.Actor.spawnActorProcess",
                 native_spawn_actor_process,
             );
             r.register(
-                "aura.concurrent.sendProcessActor",
+                "aura.lang.std.Actor.sendProcessActor",
                 native_send_process_actor,
             );
             r.register(
-                "aura.concurrent.recvProcessActor",
+                "aura.lang.std.Actor.recvProcessActor",
                 native_recv_process_actor,
             );
             r.register(
-                "aura.concurrent.processActorAlive",
+                "aura.lang.std.Actor.processActorAlive",
                 native_process_actor_alive,
             );
             r.register(
-                "aura.concurrent.killProcessActor",
+                "aura.lang.std.Actor.killProcessActor",
                 native_kill_process_actor,
             );
-            r.register("aura.concurrent.newTcpChannel", native_new_tcp_channel);
-            r.register("aura.concurrent.tcpChannelSend", native_tcp_channel_send);
+            r.register(
+                "aura.lang.std.Channel.newTcpChannel",
+                native_new_tcp_channel,
+            );
+            r.register(
+                "aura.lang.std.Channel.tcpChannelSend",
+                native_tcp_channel_send,
+            );
         }
 
         r
@@ -150,49 +184,84 @@ impl NativeRegistry {
         r.register("aura_cast", native_cast);
         r.register("aura_cast_safety", native_cast_safety);
 
-        // 鎸夐渶娉ㄥ唽 std 妯″潡
+        // Full-name aliases for prelude (aura.lang.std.<fn>)
+        r.register("aura.lang.std.println", native_println);
+        r.register("aura.lang.std.print", native_print);
+        r.register("aura.lang.std.puts", native_puts);
+        r.register("aura.lang.std.abs", native_abs);
+        r.register("aura.lang.std.sqrt", native_sqrt);
+        r.register("aura.lang.std.pow", native_pow);
+        r.register("aura.lang.std.toInt", native_to_int);
+        r.register("aura.lang.std.toFloat", native_to_float);
+        r.register("aura.lang.std.toStr", native_to_str);
+        r.register("aura.lang.std.toString", native_to_str);
+        r.register("aura.lang.std.clock", native_clock);
+        r.register("aura.lang.std.strlen", native_strlen);
+        r.register("aura.lang.std.CString", native_cstring);
+        r.register("aura.lang.std.CStr", native_cstr);
+        r.register("aura.lang.std.ptrIsNull", native_ptr_is_null);
+        r.register("aura.lang.std.ptrToInt", native_ptr_to_int);
+        r.register("aura.lang.std.intToPtr", native_int_to_ptr);
+        r.register("aura.lang.std.makeCallback", native_make_callback);
+        r.register("aura.lang.std.aura_isOfType", native_is_of_type);
+        r.register("aura.lang.std.equals", native_equals);
+        r.register("aura.lang.std.hashCode", native_hash_code);
+        r.register("aura.lang.std.typeOf", native_type_of);
+        r.register("aura.lang.std.aura_cast", native_cast);
+        r.register("aura.lang.std.aura_cast_safety", native_cast_safety);
+
+        // 按需注册 std 模块
         crate::std::register_with_modules(&mut r, modules);
 
-        // P10: 骞跺彂杩愯鏃讹紙闇€ std-concurrent feature 涓斿鍏?aura.concurrent锛?
+        // P10: concurrent runtime (std-concurrent feature, imports aura.lang.std.{Coroutine,Actor,Channel})
         #[cfg(feature = "std-concurrent")]
         if modules.iter().any(|m| *m == "concurrent") {
-            r.register("aura.concurrent.spawn", native_spawn);
-            r.register("aura.concurrent.send", native_send);
-            r.register("aura.concurrent.ask", native_ask);
-            r.register("aura.concurrent.reply", native_reply);
-            r.register("aura.concurrent.newChannel", native_new_channel);
-            r.register("aura.concurrent.channelSend", native_channel_send);
-            r.register("aura.concurrent.channelRecv", native_channel_recv);
-            r.register("aura.concurrent.channelTryRecv", native_channel_try_recv);
-            r.register("aura.concurrent.select", native_select);
-            r.register("aura.concurrent.selectTimeout", native_select_timeout);
-            r.register("aura.concurrent.spawnActor", native_spawn_actor);
-            r.register("aura.concurrent.supervise", native_supervise);
-            r.register("aura.concurrent.actorAlive", native_actor_alive);
+            r.register("aura.lang.std.Coroutine.spawn", native_spawn);
+            r.register("aura.lang.std.Actor.send", native_send);
+            r.register("aura.lang.std.Coroutine.ask", native_ask);
+            r.register("aura.lang.std.Actor.reply", native_reply);
+            r.register("aura.lang.std.Channel.newChannel", native_new_channel);
+            r.register("aura.lang.std.Channel.channelSend", native_channel_send);
+            r.register("aura.lang.std.Channel.channelRecv", native_channel_recv);
+            r.register(
+                "aura.lang.std.Channel.channelTryRecv",
+                native_channel_try_recv,
+            );
+            r.register("aura.lang.std.Channel.select", native_select);
+            r.register("aura.lang.std.Channel.selectTimeout", native_select_timeout);
+            r.register("aura.lang.std.Actor.spawnActor", native_spawn_actor);
+            r.register("aura.lang.std.Actor.supervise", native_supervise);
+            r.register("aura.lang.std.Actor.actorAlive", native_actor_alive);
 
             // Phase 3: 璺ㄨ繘绋?Actor / Channel
             r.register(
-                "aura.concurrent.spawnActorProcess",
+                "aura.lang.std.Actor.spawnActorProcess",
                 native_spawn_actor_process,
             );
             r.register(
-                "aura.concurrent.sendProcessActor",
+                "aura.lang.std.Actor.sendProcessActor",
                 native_send_process_actor,
             );
             r.register(
-                "aura.concurrent.recvProcessActor",
+                "aura.lang.std.Actor.recvProcessActor",
                 native_recv_process_actor,
             );
             r.register(
-                "aura.concurrent.processActorAlive",
+                "aura.lang.std.Actor.processActorAlive",
                 native_process_actor_alive,
             );
             r.register(
-                "aura.concurrent.killProcessActor",
+                "aura.lang.std.Actor.killProcessActor",
                 native_kill_process_actor,
             );
-            r.register("aura.concurrent.newTcpChannel", native_new_tcp_channel);
-            r.register("aura.concurrent.tcpChannelSend", native_tcp_channel_send);
+            r.register(
+                "aura.lang.std.Channel.newTcpChannel",
+                native_new_tcp_channel,
+            );
+            r.register(
+                "aura.lang.std.Channel.tcpChannelSend",
+                native_tcp_channel_send,
+            );
         }
 
         r

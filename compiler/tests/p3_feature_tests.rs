@@ -15,11 +15,11 @@ use compiler::vm::{Vm, VmOptions};
 fn test_concurrent_registered_with_default_features() {
     let reg = NativeRegistry::new();
     assert!(
-        reg.contains("aura.concurrent.spawn"),
+        reg.contains("aura.lang.std.Coroutine.spawn"),
         "默认 features 应包含并发函数"
     );
     assert!(
-        reg.contains("aura.concurrent.channelSend"),
+        reg.contains("aura.lang.std.Channel.channelSend"),
         "默认 features 应包含并发函数"
     );
 }
@@ -33,11 +33,11 @@ fn test_concurrent_registered_with_default_features() {
 fn test_concurrent_not_registered_without_features() {
     let reg = NativeRegistry::new();
     assert!(
-        !reg.contains("aura.concurrent.spawn"),
+        !reg.contains("aura.lang.std.Coroutine.spawn"),
         "无 std-concurrent feature 时不应注册并发函数"
     );
     assert!(
-        !reg.contains("aura.concurrent.channelSend"),
+        !reg.contains("aura.lang.std.Channel.channelSend"),
         "无 std-concurrent feature 时不应注册并发函数"
     );
 }
@@ -51,12 +51,12 @@ fn test_concurrent_not_registered_without_features() {
 fn test_math_registered_with_feature() {
     let reg = NativeRegistry::new();
     assert!(
-        reg.contains("aura.math.sin"),
-        "std-math feature 应注册 aura.math.sin"
+        reg.contains("aura.lang.std.Math.sin"),
+        "std-math feature 应注册 aura.lang.std.Math.sin"
     );
     assert!(
-        reg.contains("aura.math.cos"),
-        "std-math feature 应注册 aura.math.cos"
+        reg.contains("aura.lang.std.Math.cos"),
+        "std-math feature 应注册 aura.lang.std.Math.cos"
     );
 }
 
@@ -69,12 +69,12 @@ fn test_math_registered_with_feature() {
 fn test_math_not_registered_without_feature() {
     let reg = NativeRegistry::new();
     assert!(
-        !reg.contains("aura.math.sin"),
-        "无 std-math feature 时不应注册 aura.math.sin"
+        !reg.contains("aura.lang.std.Math.sin"),
+        "无 std-math feature 时不应注册 aura.lang.std.Math.sin"
     );
     assert!(
-        !reg.contains("aura.math.cos"),
-        "无 std-math feature 时不应注册 aura.math.cos"
+        !reg.contains("aura.lang.std.Math.cos"),
+        "无 std-math feature 时不应注册 aura.lang.std.Math.cos"
     );
 }
 
@@ -87,12 +87,12 @@ fn test_math_not_registered_without_feature() {
 fn test_io_registered_with_feature() {
     let reg = NativeRegistry::new();
     assert!(
-        reg.contains("aura.io.readLine"),
-        "std-io feature 应注册 aura.io.readLine"
+        reg.contains("aura.lang.std.IO.readLine"),
+        "std-io feature 应注册 aura.lang.std.IO.readLine"
     );
     assert!(
-        reg.contains("aura.io.fileExists"),
-        "std-io feature 应注册 aura.io.fileExists"
+        reg.contains("aura.lang.std.IO.fileExists"),
+        "std-io feature 应注册 aura.lang.std.IO.fileExists"
     );
 }
 
@@ -119,7 +119,7 @@ fn test_prelude_always_registered() {
 fn test_on_demand_registration() {
     // 有 import 时只注册 imported 模块
     let src = r#"
-        import aura.math.*
+        import aura.lang.std.Math.*
         fun main(): Float {
             return sin(1.0)
         }
@@ -137,8 +137,8 @@ fn test_on_demand_registration() {
     #[cfg(feature = "std-math")]
     {
         assert!(
-            vm.contains_native("aura.math.sin"),
-            "import aura.math.* 后应注册 aura.math.sin"
+            vm.contains_native("aura.lang.std.Math.sin"),
+            "import aura.lang.std.Math.* 后应注册 aura.lang.std.Math.sin"
         );
     }
 }

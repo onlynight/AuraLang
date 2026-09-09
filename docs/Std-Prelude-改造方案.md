@@ -24,7 +24,7 @@
 ┌─────────────────────────────────────────────────────────┐
 │                    源码层                                 │
 │  println("hello")          ← 免import（prelude，17个）    │
-│  import aura.math.*        ← 显式引入                     │
+│  import aura.lang.std.Math.*        ← 显式引入                     │
 │  return sin(1.0)           ← import 后可用                │
 └────────────────────┬────────────────────────────────────┘
                      │ 编译期分析
@@ -74,21 +74,21 @@
 
 ```aura
 // 通配：引入模块所有函数到当前作用域
-import aura.math.*
+import aura.lang.std.Math.*
 
 // 模块引用：通过模块名调用
-import aura.math
-// 调用方式：aura.math.sin(1.0)
+import aura.lang.std.Math
+// 调用方式：aura.lang.std.Math.sin(1.0)
 
 // 精确引入：只引入指定函数
-import aura.math.sin
+import aura.lang.std.Math.sin
 
 // 别名：避免命名冲突
-import aura.math as m
+import aura.lang.std.Math as m
 // 调用方式：m.sin(1.0)
 
 // 混合：prelude + 按需
-import aura.math.*
+import aura.lang.std.Math.*
 fun main(): Float {
     println("test")  // prelude，免import
     return sin(1.0)  // 需import
@@ -102,8 +102,8 @@ fun main(): Float {
 | 场景 | 当前 | 按需后 |
 |------|------|--------|
 | `println("hello")` | ~3 MB（全量 std） | ~200 KB（仅 prelude） |
-| `import aura.math.*` | ~3 MB | ~500 KB |
-| `import aura.io.*` + `import aura.math.*` | ~3 MB | ~800 KB |
+| `import aura.lang.std.Math.*` | ~3 MB | ~500 KB |
+| `import aura.lang.std.IO.*` + `import aura.lang.std.Math.*` | ~3 MB | ~800 KB |
 | 全量 import 所有模块 | ~3 MB | ~3 MB（无变化） |
 
 ---
@@ -147,7 +147,7 @@ if is_builtin(&f.name) { report_error() }
 
 // 修复后（只阻止 prelude 名）：
 if is_prelude(&f.name) { report_error() }
-// 用户可以自由定义 fun sin(x: Float)，只要不 import aura.math.*
+// 用户可以自由定义 fun sin(x: Float)，只要不 import aura.lang.std.Math.*
 ```
 
 ### 1d. 改 `mir.rs:lower_expr` 降级前查用户作用域（保留）
@@ -200,10 +200,10 @@ pub struct ImportDecl {
 }
 
 pub enum ImportKind {
-    Wildcard,           // import aura.math.*
-    Module,             // import aura.math
-    Function(String),   // import aura.math.sin
-    Alias(String),      // import aura.math as m
+    Wildcard,           // import aura.lang.std.Math.*
+    Module,             // import aura.lang.std.Math
+    Function(String),   // import aura.lang.std.Math.sin
+    Alias(String),      // import aura.lang.std.Math as m
 }
 ```
 
@@ -221,7 +221,7 @@ fn parse_import(&mut self) -> ImportDecl {
         let alias = self.parse_ident();
         ImportKind::Alias(alias)
     } else if path.len() > 2 {
-        // import aura.math.sin → 函数引入
+        // import aura.lang.std.Math.sin → 函数引入
         ImportKind::Function(path.pop())
     } else {
         ImportKind::Module
@@ -243,7 +243,7 @@ for imp in &program.imports {
             }
         }
         ImportKind::Module => {
-            // 注册模块名到符号表（调用时用 aura.math.sin）
+            // 注册模块名到符号表（调用时用 aura.lang.std.Math.sin）
             self.symbols.insert_module(&imp.module_path);
         }
         ImportKind::Function(fn_name) => {
@@ -260,11 +260,11 @@ for imp in &program.imports {
 
 ### 验收
 
-- `import aura.math.*` + `sin(1.0)` → 通过
+- `import aura.lang.std.Math.*` + `sin(1.0)` → 通过
 - 不import + `sin(1.0)` → 报错 `unresolved identifier`
-- `import aura.math` + `aura.math.sin(1.0)` → 通过
-- `import aura.math.sin` + `sin(1.0)` → 通过
-- `import aura.math as m` + `m.sin(1.0)` → 通过
+- `import aura.lang.std.Math` + `aura.lang.std.Math.sin(1.0)` → 通过
+- `import aura.lang.std.Math.sin` + `sin(1.0)` → 通过
+- `import aura.lang.std.Math as m` + `m.sin(1.0)` → 通过
 
 ---
 
@@ -400,8 +400,8 @@ pub extern "C" fn aura_sqrt(x: f64) -> f64 { x.sqrt() }
 
 ## 风险
 
-1. **Phase 1a 会破坏现有代码**：命名空间函数（`aura.math.sin`）需要 `import`，未 import 的调用会报错。这是设计意图，但需要更新文档和示例。
-2. **Phase 2 的 import 解析**：需要处理嵌套模块（`aura.math.sin`）、别名（`as m`）、通配（`*`）等多种语法，实现复杂度中等。
+1. **Phase 1a 会破坏现有代码**：命名空间函数（`aura.lang.std.Math.sin`）需要 `import`，未 import 的调用会报错。这是设计意图，但需要更新文档和示例。
+2. **Phase 2 的 import 解析**：需要处理嵌套模块（`aura.lang.std.Math.sin`）、别名（`as m`）、通配（`*`）等多种语法，实现复杂度中等。
 3. **Phase 3 的 feature flags**：编译期裁剪需要 `#[cfg(feature = "...")]` 门控每个 std 模块，修改面较大。
 4. **Phase 4 的 C ABI 边界**：Aura `String` 是 `{ptr, len}` 结构，C ABI 侧约定 `const char*`（终止符），需要在转换层处理。
 

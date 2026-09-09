@@ -1,0 +1,77 @@
+// aura:///aura/lang/prelu.aura
+// 免 import 的全局内置函数（17 个）
+
+/// Prelude 函数集——免 import，始终可用。
+///
+/// 这些函数由编译器自动注册到符号表，无需 `import` 声明。
+/// 用户不能重定义这些函数名（编译报错）。
+///
+/// @since 0.2
+internal object Prelude {
+
+    /// 打印一行文本（末尾自动追加换行符）。
+    ///
+    /// 支持多个参数，用空格拼接。
+    /// ```aura
+    /// println("Hello", "World")  // 输出: Hello World
+    /// ```
+    fun println(vararg args: Any): Unit
+
+    /// 打印文本（不追加换行符）。
+    ///
+    /// 支持多个参数，用空格拼接。
+    fun print(vararg args: Any): Unit
+
+    /// C 风格输出（追加换行符）。
+    fun puts(text: String): Unit
+
+    /// 绝对值。
+    ///
+    /// 支持 Int 和 Float 参数，返回同类型。
+    fun abs(x: Any): Any
+
+    /// 平方根。
+    fun sqrt(x: Float): Float
+
+    /// 幂运算。
+    fun pow(base: Float, exp: Float): Float
+
+    /// 转换为 32 位整数。
+    fun toInt(x: Any): Int
+
+    /// 转换为 32 位浮点数。
+    fun toFloat(x: Any): Float
+
+    /// 转换为字符串。
+    fun toStr(x: Any): String
+
+    /// 转换为字符串（同 `toStr`）。
+    fun toString(x: Any): String
+
+    /// 获取当前时钟（Unix 时间戳，秒）。
+    fun clock(): Float
+
+    /// 获取字符串长度。
+    fun strlen(text: String): Int
+
+    /// C 字符串转换（转为 C 兼容的 null 终止字符串）。
+    fun CString(text: String): String
+
+    /// C 字符串转换（`CString` 别名）。
+    fun CStr(text: String): String
+
+    /// 指针判空。
+    fun ptrIsNull(ptr: Any): Boolean
+
+    /// 指针转整数。
+    fun ptrToInt(ptr: Any): Int
+
+    /// 整数转指针。
+    fun intToPtr(value: Int): Any
+
+    /// 创建回调函数（用于 FFI）。
+    fun makeCallback(fn: (Any) -> Any): Any
+
+    /// 创建不可变列表。
+    fun listOf(vararg items: Any): List<Any>
+}

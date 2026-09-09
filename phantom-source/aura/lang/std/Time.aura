@@ -1,0 +1,67 @@
+// aura:///aura/lang/std/Time.aura
+// 标准库模块，不可修改
+// 实现：纯逻辑函数用 Aura 实现，syscall 函数用 Rust native
+// (package 声明由编译器自动注入，无需显式声明)
+/// 时间模块。
+///
+/// 使用前需 import：
+/// ```aura
+/// import aura.time.*
+/// ```
+///
+/// @since 0.1
+internal object Time {
+
+    // ── 时间戳（Rust native 实现）──
+
+    /// 获取当前 Unix 时间戳（秒，浮点数）。
+    val now: Float
+
+    /// 获取当前 Unix 时间戳（秒，整数）。
+    val epoch: Int
+
+    /// 获取当前 Unix 时间戳（毫秒，整数）。
+    val currentTime: Int
+
+    // ── 睡眠（Rust native 实现）──
+
+    /// 睡眠指定秒数。
+    fun sleep(seconds: Float): Unit
+
+    // ── 时间差（纯逻辑，Aura 实现）──
+
+    /// 计算两个时间戳的差值（秒）。
+    fun duration(start: Float, end: Float): Float {
+        return end - start
+    }
+
+    /// 计算两个时间戳的差值（秒）。
+    fun diff(start: Float, end: Float): Float {
+        return end - start
+    }
+
+    // ── 日期格式化（纯逻辑，Aura 实现）──
+
+    /// 将时间戳转换为日期字符串（YYYY-MM-DD）。
+    fun toDateString(timestamp: Int): String {
+        // 简化实现：实际实现需要日期计算逻辑
+        return Math.floor(timestamp / 86400.0f).toInt().toStr()
+    }
+
+    /// 将时间戳转换为时间字符串（HH:MM:SS）。
+    fun toTimeString(timestamp: Int): String {
+        // 简化实现：实际实现需要时间计算逻辑
+        return Math.floor(timestamp / 3600.0f).toInt().toStr()
+    }
+
+    /// 按指定格式格式化时间戳。
+    fun formatDate(timestamp: Int, format: String): String {
+        // 简化实现：实际实现需要格式解析
+        return toDateString(timestamp)
+    }
+
+    // ── 日期解析（Rust native 实现）──
+
+    /// 解析日期字符串为时间戳。
+    fun parseDate(text: String): Int
+}

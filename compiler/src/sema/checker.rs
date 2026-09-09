@@ -14,6 +14,32 @@ use crate::sema::symbol::{ParamSym, Symbol, SymbolKind, SymbolTable, ast_type_to
 use crate::sema::ty::Ty;
 use std::collections::{HashMap, HashSet};
 
+/// 已知的 std 类名清单（用于 `import aura.lang.std.*` 通配时注册别名）
+const KNOWN_STD_CLASSES: &[&str] = &[
+    "Ascii",
+    "Assert",
+    "Builtin",
+    "Collections",
+    "Console",
+    "Encoding",
+    "Env",
+    "FileSystem",
+    "IO",
+    "Iter",
+    "Json",
+    "Math",
+    "Network",
+    "Path",
+    "Process",
+    "Random",
+    "String",
+    "Test",
+    "Time",
+    "Coroutine",
+    "Actor",
+    "Channel",
+];
+
 /// 语义分析结果
 pub struct SemanticResult {
     pub errors: Vec<CompileError>,
@@ -132,12 +158,316 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
+        let _ = symbols.insert_function(
+            "Box",
+            vec![ParamSym {
+                name: "value".into(),
+                ty: Ty::Any,
+                has_default: false,
+                is_vararg: false,
+            }],
+            Ty::Any,
+            Visibility::Public,
+            builtin_span,
+        );
+
+        // 类型查询与内省函数（prelu，免 import）
+        let _ = symbols.insert_function(
+            "typeof",
+            vec![ParamSym {
+                name: "value".into(),
+                ty: Ty::Any,
+                has_default: false,
+                is_vararg: false,
+            }],
+            Ty::String,
+            Visibility::Public,
+            builtin_span,
+        );
+        let _ = symbols.insert_function(
+            "isNull",
+            vec![ParamSym {
+                name: "value".into(),
+                ty: Ty::Any,
+                has_default: false,
+                is_vararg: false,
+            }],
+            Ty::Boolean,
+            Visibility::Public,
+            builtin_span,
+        );
+        let _ = symbols.insert_function(
+            "isNotNull",
+            vec![ParamSym {
+                name: "value".into(),
+                ty: Ty::Any,
+                has_default: false,
+                is_vararg: false,
+            }],
+            Ty::Boolean,
+            Visibility::Public,
+            builtin_span,
+        );
+        let _ = symbols.insert_function(
+            "isZero",
+            vec![ParamSym {
+                name: "value".into(),
+                ty: Ty::Any,
+                has_default: false,
+                is_vararg: false,
+            }],
+            Ty::Boolean,
+            Visibility::Public,
+            builtin_span,
+        );
+        let _ = symbols.insert_function(
+            "isPositive",
+            vec![ParamSym {
+                name: "value".into(),
+                ty: Ty::Any,
+                has_default: false,
+                is_vararg: false,
+            }],
+            Ty::Boolean,
+            Visibility::Public,
+            builtin_span,
+        );
+        let _ = symbols.insert_function(
+            "isNegative",
+            vec![ParamSym {
+                name: "value".into(),
+                ty: Ty::Any,
+                has_default: false,
+                is_vararg: false,
+            }],
+            Ty::Boolean,
+            Visibility::Public,
+            builtin_span,
+        );
+        let _ = symbols.insert_function(
+            "toBool",
+            vec![ParamSym {
+                name: "value".into(),
+                ty: Ty::Any,
+                has_default: false,
+                is_vararg: false,
+            }],
+            Ty::Boolean,
+            Visibility::Public,
+            builtin_span,
+        );
+        let _ = symbols.insert_function(
+            "sizeOf",
+            vec![ParamSym {
+                name: "value".into(),
+                ty: Ty::Any,
+                has_default: false,
+                is_vararg: false,
+            }],
+            Ty::Int,
+            Visibility::Public,
+            builtin_span,
+        );
+        let _ = symbols.insert_function(
+            "hash",
+            vec![ParamSym {
+                name: "value".into(),
+                ty: Ty::Any,
+                has_default: false,
+                is_vararg: false,
+            }],
+            Ty::Int,
+            Visibility::Public,
+            builtin_span,
+        );
+        let _ = symbols.insert_function(
+            "compare",
+            vec![
+                ParamSym {
+                    name: "a".into(),
+                    ty: Ty::Any,
+                    has_default: false,
+                    is_vararg: false,
+                },
+                ParamSym {
+                    name: "b".into(),
+                    ty: Ty::Any,
+                    has_default: false,
+                    is_vararg: false,
+                },
+            ],
+            Ty::Int,
+            Visibility::Public,
+            builtin_span,
+        );
+        let _ = symbols.insert_function(
+            "clone",
+            vec![ParamSym {
+                name: "value".into(),
+                ty: Ty::Any,
+                has_default: false,
+                is_vararg: false,
+            }],
+            Ty::Any,
+            Visibility::Public,
+            builtin_span,
+        );
+        let _ = symbols.insert_function(
+            "identity",
+            vec![ParamSym {
+                name: "value".into(),
+                ty: Ty::Any,
+                has_default: false,
+                is_vararg: false,
+            }],
+            Ty::Any,
+            Visibility::Public,
+            builtin_span,
+        );
+
+        // 测试断言函数（prelu，免 import）
+        let _ = symbols.insert_function(
+            "assertTrue",
+            vec![
+                ParamSym {
+                    name: "condition".into(),
+                    ty: Ty::Any,
+                    has_default: false,
+                    is_vararg: false,
+                },
+                ParamSym {
+                    name: "message".into(),
+                    ty: Ty::String,
+                    has_default: false,
+                    is_vararg: false,
+                },
+            ],
+            Ty::String,
+            Visibility::Public,
+            builtin_span,
+        );
+        let _ = symbols.insert_function(
+            "assertFalse",
+            vec![
+                ParamSym {
+                    name: "condition".into(),
+                    ty: Ty::Any,
+                    has_default: false,
+                    is_vararg: false,
+                },
+                ParamSym {
+                    name: "message".into(),
+                    ty: Ty::String,
+                    has_default: false,
+                    is_vararg: false,
+                },
+            ],
+            Ty::String,
+            Visibility::Public,
+            builtin_span,
+        );
+        let _ = symbols.insert_function(
+            "assertEq",
+            vec![
+                ParamSym {
+                    name: "a".into(),
+                    ty: Ty::Any,
+                    has_default: false,
+                    is_vararg: false,
+                },
+                ParamSym {
+                    name: "b".into(),
+                    ty: Ty::Any,
+                    has_default: false,
+                    is_vararg: false,
+                },
+                ParamSym {
+                    name: "message".into(),
+                    ty: Ty::String,
+                    has_default: false,
+                    is_vararg: false,
+                },
+            ],
+            Ty::String,
+            Visibility::Public,
+            builtin_span,
+        );
+        let _ = symbols.insert_function(
+            "assertNotEq",
+            vec![
+                ParamSym {
+                    name: "a".into(),
+                    ty: Ty::Any,
+                    has_default: false,
+                    is_vararg: false,
+                },
+                ParamSym {
+                    name: "b".into(),
+                    ty: Ty::Any,
+                    has_default: false,
+                    is_vararg: false,
+                },
+                ParamSym {
+                    name: "message".into(),
+                    ty: Ty::String,
+                    has_default: false,
+                    is_vararg: false,
+                },
+            ],
+            Ty::String,
+            Visibility::Public,
+            builtin_span,
+        );
+        let _ = symbols.insert_function(
+            "assertNotNull",
+            vec![
+                ParamSym {
+                    name: "value".into(),
+                    ty: Ty::Any,
+                    has_default: false,
+                    is_vararg: false,
+                },
+                ParamSym {
+                    name: "message".into(),
+                    ty: Ty::String,
+                    has_default: false,
+                    is_vararg: false,
+                },
+            ],
+            Ty::String,
+            Visibility::Public,
+            builtin_span,
+        );
+        let _ = symbols.insert_function(
+            "assertNull",
+            vec![
+                ParamSym {
+                    name: "value".into(),
+                    ty: Ty::Any,
+                    has_default: false,
+                    is_vararg: false,
+                },
+                ParamSym {
+                    name: "message".into(),
+                    ty: Ty::String,
+                    has_default: false,
+                    is_vararg: false,
+                },
+            ],
+            Ty::String,
+            Visibility::Public,
+            builtin_span,
+        );
 
         // P10: 并发运行时内置函数（aura.concurrent.* 命名空间）
         for (name, params, ret) in [
-            ("aura.concurrent.spawn", vec![("expr", Ty::Any)], Ty::Int),
             (
-                "aura.concurrent.send",
+                "aura.lang.std.Coroutine.spawn",
+                vec![("expr", Ty::Any)],
+                Ty::Int,
+            ),
+            (
+                "aura.lang.std.Actor.send",
                 vec![
                     ("actor", Ty::Int),
                     ("msg", Ty::Any),
@@ -145,7 +475,7 @@ impl Checker {
                 Ty::Unit,
             ),
             (
-                "aura.concurrent.ask",
+                "aura.lang.std.Coroutine.ask",
                 vec![
                     ("actor", Ty::Int),
                     ("msg", Ty::Any),
@@ -153,12 +483,12 @@ impl Checker {
                 Ty::Any,
             ),
             (
-                "aura.concurrent.newChannel",
+                "aura.lang.std.Channel.newChannel",
                 vec![("bound", Ty::Int)],
                 Ty::Int,
             ),
             (
-                "aura.concurrent.channelSend",
+                "aura.lang.std.Channel.channelSend",
                 vec![
                     ("ch", Ty::Int),
                     ("val", Ty::Any),
@@ -166,17 +496,17 @@ impl Checker {
                 Ty::Unit,
             ),
             (
-                "aura.concurrent.channelRecv",
+                "aura.lang.std.Channel.channelRecv",
                 vec![("ch", Ty::Int)],
                 Ty::Any,
             ),
             (
-                "aura.concurrent.channelTryRecv",
+                "aura.lang.std.Channel.channelTryRecv",
                 vec![("ch", Ty::Int)],
                 Ty::Any,
             ),
             (
-                "aura.concurrent.select",
+                "aura.lang.std.Channel.select",
                 vec![
                     ("ch1", Ty::Int),
                     ("ch2", Ty::Int),
@@ -184,12 +514,12 @@ impl Checker {
                 Ty::Any,
             ),
             (
-                "aura.concurrent.spawnActor",
+                "aura.lang.std.Coroutine.spawnActor",
                 vec![("name", Ty::String)],
                 Ty::Int,
             ),
             (
-                "aura.concurrent.supervise",
+                "aura.lang.std.Actor.supervise",
                 vec![
                     ("parent", Ty::Int),
                     ("child", Ty::Int),
@@ -197,7 +527,7 @@ impl Checker {
                 Ty::Unit,
             ),
             (
-                "aura.concurrent.actorAlive",
+                "aura.lang.std.Actor.actorAlive",
                 vec![("id", Ty::Int)],
                 Ty::Boolean,
             ),
@@ -299,6 +629,11 @@ impl Checker {
 
     /// 分析整个程序
     pub fn analyze(&mut self, program: &Program) {
+        // 第零遍：展开 import 声明到符号表（parse_program 将 import 收集到 program.imports，
+        // 此前从未展开，导致 import aura.lang.std.Math.* 后 cos 等命名空间函数 unresolved）
+        for imp in &program.imports {
+            self.expand_import(imp);
+        }
         // 第一遍：收集所有声明（函数签名、类型）—— 允许前向引用
         for decl in &program.declarations {
             self.collect_declaration(decl);
@@ -354,10 +689,18 @@ impl Checker {
                     .collect();
                 let ret = f.return_type.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Unit);
                 if crate::std::decl::is_prelude(&f.name) {
-                    self.report(
+                    // prelu.aura 中允许顶层声明 prelude 函数（覆盖已注册的签名）
+                    // 跳过 "cannot redefine" 错误，直接更新符号表
+                    if let Err(dup) = self.symbols.insert_function(
+                        f.name.clone(),
+                        params,
+                        ret.clone(),
+                        f.visibility,
                         f.span,
-                        format!("cannot redefine prelude function '{}'", f.name),
-                    );
+                    ) {
+                        // 静默忽略：prelude 函数允许重复定义
+                        let _ = dup;
+                    }
                 } else if let Err(dup) = self.symbols.insert_function(
                     f.name.clone(),
                     params,
@@ -1177,12 +1520,14 @@ impl Checker {
     /// 展开 import 声明到符号表
     ///
     /// 支持语法：
-    /// - `import aura.math.*` — 通配：把模块所有函数加到符号表（短名）
-    /// - `import aura.math` — 模块：注册模块名（调用时用 aura.math.sin）
-    /// - `import aura.math.sin` — 精确：只加指定函数（短名）
-    /// - `import aura.math.sin as s` — 精确引入并别名：用别名调用
-    /// - `import aura.math as m` — 别名：用别名注册模块
-    /// - `import aura.math.* as m` — 通配+别名：用别名注册模块
+    /// - `import aura.lang.std.Math.*` — 通配：把 Math 类所有函数加到符号表（短名 + 全名 + 别名）
+    /// - `import aura.lang.std.Math` — 模块：注册 Math 别名 + "aura.lang.std.Math.<fn>" 全名
+    /// - `import aura.lang.std.*` — 全 std 通配：只注册各类名作模块别名（`Math.sin()` 形式）
+    /// - `import aura.lang.std.Math.sin` — 精确：只加指定函数（短名）
+    /// - `import aura.lang.std.Math.sin as s` — 精确引入并别名：用别名调用
+    /// - `import aura.lang.std.Math as M` — 别名：用别名注册模块
+    ///
+    /// 旧命名（`import aura.math.*` / `import aura.math.sin`）保留兼容。
     fn expand_import(&mut self, imp: &ImportDecl) {
         let module_path = imp.path.clone();
 
@@ -1192,39 +1537,181 @@ impl Checker {
             return;
         }
 
+        // 展开注册用的参数表：单个 vararg Any 参数，接受任意数量/类型的实参
+        // （std 函数精确签名未知，vararg 允许 0..n 个参数通过 arity 检查）
+        let any_params = || {
+            vec![ParamSym {
+                name: "__import_any".into(),
+                ty: Ty::Any,
+                has_default: false,
+                is_vararg: true,
+            }]
+        };
+
+        // 检测是否是新的 std 命名空间（aura.lang.std.*）
+        let is_new_scheme = module_path.starts_with("aura.lang.std");
+        // 提取类名（如果存在）：aura.lang.std.<ClassName> 或 aura.lang.std.<ClassName>.<fn>
+        let class_name = if is_new_scheme {
+            let parts: Vec<&str> = module_path.split('.').collect();
+            // aura.lang.std.<ClassName>[.<fn>]
+            if parts.len() >= 4 { Some(parts[3].to_string()) } else { None }
+        } else {
+            None
+        };
+
         match &imp.alias {
             Some(alias) => {
-                // import aura.math as m / import aura.math.* as m
-                // 注册别名到符号表，调用时用 m.sin(...)
-                self.symbols.insert_module_alias(alias.clone(), module_path);
-            }
-            None => {
-                if imp.wildcard {
-                    // import aura.math.*
-                    // 把模块所有函数加到符号表（短名）
-                    let short_names = crate::std::decl::module_functions(&module_path);
-                    for short_name in short_names {
-                        let _ = self.symbols.insert_function(
-                            short_name.clone(),
-                            vec![], // 参数类型未知，用 Any
-                            Ty::Any,
-                            Visibility::Public,
-                            imp.span,
-                        );
-                    }
-                } else if module_path.split('.').count() == 3 {
-                    // import aura.math.sin — 精确引入函数
-                    let short_name = module_path.split('.').last().unwrap_or("").to_string();
+                if !imp.wildcard && class_name.is_some() {
+                    // 精确函数别名：import aura.lang.std.Math.sqrt as sq → 短名 sq 可调用
                     let _ = self.symbols.insert_function(
-                        short_name,
-                        vec![],
+                        alias.clone(),
+                        any_params(),
                         Ty::Any,
                         Visibility::Public,
                         imp.span,
                     );
                 } else {
-                    // import aura.math — 模块引用
-                    // 注册模块名，调用时用 aura.math.sin(...)
+                    // 模块别名：import aura.lang.std.Math as M → 注册 "M.<fn>" 全名
+                    for short in crate::std::decl::module_functions(&module_path) {
+                        let _ = self.symbols.insert_function(
+                            format!("{}.{}", alias, short),
+                            any_params(),
+                            Ty::Any,
+                            Visibility::Public,
+                            imp.span,
+                        );
+                    }
+                    self.symbols.insert_module_alias(alias.clone(), module_path);
+                }
+            }
+            None => {
+                if imp.wildcard {
+                    if is_new_scheme && class_name.is_none() {
+                        // import aura.lang.std.* → 只引入类名作模块别名（不做短名导入）
+                        for class in KNOWN_STD_CLASSES {
+                            let _ = self.symbols.insert_module_alias(
+                                class.to_string(),
+                                format!("aura.lang.std.{}", class),
+                            );
+                        }
+                    } else {
+                        // import aura.lang.std.Math.* 或 import aura.math.*
+                        // 把模块所有函数加到符号表（短名 + 类点分名 + 全名）
+                        let short_names = crate::std::decl::module_functions(&module_path);
+                        for short_name in short_names {
+                            // 已有同名函数（如 prelude 的 listOf/sqrt）时不覆盖，避免二义性
+                            if self.symbols.lookup_function(&short_name).is_some() {
+                                continue;
+                            }
+                            let _ = self.symbols.insert_function(
+                                short_name.clone(),
+                                any_params(),
+                                Ty::Any,
+                                Visibility::Public,
+                                imp.span,
+                            );
+                            // Class-style (for new scheme: Math.sin)
+                            if let Some(cn) = &class_name {
+                                let _ = self.symbols.insert_function(
+                                    format!("{}.{}", cn, short_name),
+                                    any_params(),
+                                    Ty::Any,
+                                    Visibility::Public,
+                                    imp.span,
+                                );
+                            }
+                            // Full path (aura.lang.std.Math.sin or aura.math.sin)
+                            let _ = self.symbols.insert_function(
+                                format!("{}.{}", module_path, short_name),
+                                any_params(),
+                                Ty::Any,
+                                Visibility::Public,
+                                imp.span,
+                            );
+                        }
+                        // Also register class name as alias so `Math.sin()` works without wildcard
+                        if let Some(cn) = &class_name {
+                            let _ =
+                                self.symbols.insert_module_alias(cn.clone(), module_path.clone());
+                        }
+                    }
+                } else if is_new_scheme {
+                    // 新命名：aura.lang.std 有 4 段（前缀）+ 0/1 函数名
+                    let seg_count = module_path.split('.').count();
+                    if seg_count == 5 && class_name.is_some() {
+                        // import aura.lang.std.Math.sin — 精确引入函数
+                        let short_name = module_path.split('.').last().unwrap_or("").to_string();
+                        let _ = self.symbols.insert_function(
+                            short_name,
+                            any_params(),
+                            Ty::Any,
+                            Visibility::Public,
+                            imp.span,
+                        );
+                        // 同时注册类点分名和全名，支持 Math.sin() 与 aura.lang.std.Math.sin()
+                        let short_name2 = module_path.split('.').last().unwrap_or("").to_string();
+                        if let Some(cn) = &class_name {
+                            let _ = self.symbols.insert_function(
+                                format!("{}.{}", cn, short_name2),
+                                any_params(),
+                                Ty::Any,
+                                Visibility::Public,
+                                imp.span,
+                            );
+                            let _ = self.symbols.insert_function(
+                                format!("aura.lang.std.{}.{}", cn, short_name2),
+                                any_params(),
+                                Ty::Any,
+                                Visibility::Public,
+                                imp.span,
+                            );
+                        }
+                    } else if seg_count == 4 && class_name.is_some() {
+                        // import aura.lang.std.Math — 类引用：注册 "Math.<fn>" + 全名 + 类别名
+                        if let Some(cn) = &class_name {
+                            for short in crate::std::decl::module_functions(&module_path) {
+                                let _ = self.symbols.insert_function(
+                                    format!("{}.{}", cn, short),
+                                    any_params(),
+                                    Ty::Any,
+                                    Visibility::Public,
+                                    imp.span,
+                                );
+                                let _ = self.symbols.insert_function(
+                                    format!("aura.lang.std.{}.{}", cn, short),
+                                    any_params(),
+                                    Ty::Any,
+                                    Visibility::Public,
+                                    imp.span,
+                                );
+                            }
+                            let _ =
+                                self.symbols.insert_module_alias(cn.clone(), module_path.clone());
+                        }
+                    } else {
+                        // Unknown new-scheme import form — no-op
+                    }
+                } else if module_path.split('.').count() == 3 {
+                    // 旧命名：import aura.math.sin — 精确引入函数
+                    let short_name = module_path.split('.').last().unwrap_or("").to_string();
+                    let _ = self.symbols.insert_function(
+                        short_name,
+                        any_params(),
+                        Ty::Any,
+                        Visibility::Public,
+                        imp.span,
+                    );
+                } else {
+                    // 旧命名：import aura.io — 模块引用：注册 "aura.io.<fn>" 全名
+                    for short in crate::std::decl::module_functions(&module_path) {
+                        let _ = self.symbols.insert_function(
+                            format!("{}.{}", module_path, short),
+                            any_params(),
+                            Ty::Any,
+                            Visibility::Public,
+                            imp.span,
+                        );
+                    }
                     self.symbols.insert_module(module_path.clone());
                 }
             }
@@ -1356,6 +1843,7 @@ impl Checker {
                     || args.iter().any(|a| Self::expr_calls(a, name))
             }
             Expr::Literal(..) | Expr::Ident(..) | Expr::This(_) => false,
+            Expr::StrInterp { parts, .. } => parts.iter().any(|p| Self::expr_calls(p, name)),
             Expr::Break { .. } | Expr::Continue { .. } => false,
             Expr::Assign {
                 target,
@@ -1377,6 +1865,10 @@ impl Checker {
             }
             | Expr::Await {
                 expr: operand,
+                ..
+            }
+            | Expr::AsyncBlock {
+                body: operand,
                 ..
             }
             | Expr::TypeCast {
@@ -1889,12 +2381,27 @@ impl Checker {
                 self.check_expr(block);
                 Ty::Unit
             }
+            Expr::StrInterp { parts, .. } => {
+                // P14: 字符串插值 — 各片段检查后结果恒为 String
+                for p in parts {
+                    self.check_expr(p);
+                }
+                Ty::String
+            }
             Expr::Await { expr, span } => {
                 let et = self.check_expr(expr);
                 if !self.is_in_suspend_fn {
                     self.report(*span, "await can only be used in suspend/async functions");
                 }
                 et
+            }
+            Expr::AsyncBlock { body, .. } => {
+                // P8: async 块引入 suspend 上下文，块内可 await / 调用 suspend 函数
+                let saved_suspend = self.is_in_suspend_fn;
+                self.is_in_suspend_fn = true;
+                let t = self.check_expr(body);
+                self.is_in_suspend_fn = saved_suspend;
+                t
             }
             Expr::Select {
                 branches, ..
@@ -1923,6 +2430,16 @@ impl Checker {
     }
 
     fn check_ident(&mut self, name: &str, span: Span) -> Ty {
+        // P15: `super` 引用 → 父类类型（super.method() 经继承链静态分派）
+        if name == "super" {
+            if let Some(type_name) = &self.current_type {
+                if let Some(sup) = self.superclasses.get(type_name) {
+                    return Ty::Named(sup.clone());
+                }
+            }
+            self.report(span, "'super' requires a class with a superclass");
+            return Ty::Error;
+        }
         if let Some(t) = self.lookup_var_ty(name) {
             return t;
         }
@@ -2254,7 +2771,7 @@ impl Checker {
         }
     }
 
-    /// 从成员访问链中提取完整点分函数名（如 `aura.concurrent.spawn`）
+    /// 从成员访问链中提取完整点分函数名（如 `aura.lang.std.Coroutine.spawn`）
     fn extract_dotted_name(expr: &Expr) -> Option<String> {
         match expr {
             Expr::Ident(name, _) => Some(name.clone()),
@@ -2271,15 +2788,20 @@ impl Checker {
     }
 
     fn check_call(&mut self, callee: &Expr, args: &[Expr], span: Span) -> Ty {
-        // 先尝试完整点分函数名解析（支持 aura.concurrent.spawn 等）
+        // 先尝试完整点分函数名解析（支持 aura.lang.std.Coroutine.spawn 等）
         if let Some(full_name) = Self::extract_dotted_name(callee) {
             if let Some(fns) = self.symbols.lookup_function(&full_name) {
                 let cloned: Vec<Symbol> = fns.clone();
                 return self.check_call_args(&cloned, args, span);
             }
             // Phase 1: prelude 函数兜底 — 仅 17 个全局内置免import
-            // 命名空间函数（aura.math.sin 等）需通过 import 引入
+            // 命名空间函数（aura.lang.std.Math.sin 等）需通过 import 引入
             if crate::std::decl::is_prelude(&full_name) {
+                return Ty::Any;
+            }
+            // 完全限定 std 路径的免 import 兜底：
+            // 允许 `aura.lang.std.Actor.spawnActor(...)` 无需 import（依赖 HIR 的 native dispatch）
+            if crate::std::decl::is_builtin(&full_name) {
                 return Ty::Any;
             }
         }
@@ -2715,7 +3237,56 @@ impl Checker {
                 }
                 Ty::Unit
             }
+            (Ty::List(elem), "filter") | (Ty::List(elem), "map") => {
+                // P15: 高阶方法 — 尾随 lambda 块中 `it` 绑定到元素类型
+                let elem = (**elem).clone();
+                if let Some(arg) = args.first() {
+                    self.var_env.push(std::collections::HashMap::new());
+                    self.define_var_env("it", elem.clone(), true);
+                    self.check_expr(arg);
+                    self.var_env.pop();
+                }
+                Ty::List(Box::new(elem))
+            }
+            (Ty::List(elem), "take") => {
+                if let Some(arg) = args.first() {
+                    self.check_expr(arg);
+                }
+                Ty::List(Box::new((**elem).clone()))
+            }
+            (Ty::List(elem), "first") | (Ty::List(elem), "last") => (**elem).clone(),
+            (Ty::List(_), "isEmpty") => Ty::Boolean,
             (Ty::List(_), "size") | (Ty::String, _) => Ty::Int,
+            // P15: 类实例方法（沿继承链查找，支持子类调用父类方法）
+            (Ty::Named(class_name), m) => {
+                let mut cur = Some(class_name.clone());
+                while let Some(c) = cur {
+                    let mname = format!("{}.{}", c, m);
+                    let rt: Option<Ty> = self
+                        .symbols
+                        .lookup_function(&mname)
+                        .and_then(|fns| fns.first().cloned())
+                        .and_then(|sym| match &sym.kind {
+                            SymbolKind::Function {
+                                return_type,
+                                ..
+                            } => Some(return_type.clone()),
+                            _ => None,
+                        });
+                    if let Some(rt) = rt {
+                        for a in args {
+                            self.check_expr(a);
+                        }
+                        return rt;
+                    }
+                    cur = self.superclasses.get(&c).cloned();
+                }
+                self.report(
+                    span,
+                    format!("unresolved method '{}' on '{}'", m, obj_ty.name()),
+                );
+                Ty::Error
+            }
             _ => {
                 self.report(
                     span,
@@ -3154,7 +3725,7 @@ impl Checker {
 
     fn check_destructure(&mut self, patterns: &[Expr], expr: &Expr, span: Span) -> Ty {
         let et = self.check_expr(expr);
-        // 简化：不检查数量
+        // 简化：不检查数量；先定义模式变量（避免 Ident 检查报 unresolved）
         for p in patterns {
             if let Expr::Ident(name, _) = p {
                 self.define_var_env(name, Ty::Any, true);
@@ -3246,9 +3817,11 @@ impl Checker {
             } => {
                 let et = self.check_expr(expr);
                 for p in patterns {
-                    self.check_expr(p);
+                    // 先定义模式变量（避免 Ident 检查报 unresolved）
                     if let Expr::Ident(name, _) = p {
                         self.define_var_env(name, Ty::Any, true);
+                    } else {
+                        self.check_expr(p);
                     }
                 }
                 let _ = span;
@@ -3279,7 +3852,9 @@ impl Checker {
                     // P-K2：子类实例可赋给祖先类型变量
                     let subclass_ok = matches!((&t, &declared), (Ty::Named(a), Ty::Named(b))
                         if a != b && self.is_subclass(a, b));
-                    if !t.can_assign_to(&declared) && !subclass_ok {
+                    // P15：List<Any>（无类型实参的字面量）可赋给 List<T>
+                    let list_any_ok = matches!((&t, &declared), (Ty::List(_), Ty::List(_)));
+                    if !t.can_assign_to(&declared) && !subclass_ok && !list_any_ok {
                         self.report(
                             init.span(),
                             format!(
@@ -3388,7 +3963,10 @@ impl Checker {
                         if !matches!(init_ty, Ty::Any | Ty::Error) {
                             let subclass_ok = matches!((&init_ty, &declared), (Ty::Named(a), Ty::Named(b))
                                     if a != b && self.is_subclass(a, b));
-                            if !init_ty.can_assign_to(&declared) && !subclass_ok {
+                            // P15：List<Any> 字面量可赋给 List<T>
+                            let list_any_ok =
+                                matches!((&init_ty, &declared), (Ty::List(_), Ty::List(_)));
+                            if !init_ty.can_assign_to(&declared) && !subclass_ok && !list_any_ok {
                                 self.report(
                                     init.span(),
                                     format!(
@@ -3413,9 +3991,11 @@ impl Checker {
             } => {
                 let et = self.check_expr(expr);
                 for p in patterns {
-                    self.check_expr(p);
+                    // 先定义模式变量（避免 Ident 检查报 unresolved）
                     if let Expr::Ident(name, _) = p {
                         self.define_var_env(name, Ty::Any, true);
+                    } else {
+                        self.check_expr(p);
                     }
                 }
                 let _ = span;

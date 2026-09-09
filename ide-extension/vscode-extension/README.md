@@ -113,7 +113,7 @@ code --install-extension aura-language-0.1.9.vsix
 | 常量（`val GAME_WIDTH: Int` 等全大写） | `variable.other.constant.aura` | 紫色/亮蓝（主题相关） |
 | 变量 / 属性（`var x`、赋值） | `variable.other.readwrite.aura`、`variable.field.aura` 等 | 亮蓝 |
 | 参数 / 具名参数 / 结构体构造属性 | `variable.parameter.aura` | 橙 |
-| std 库函数（`aura.math.abs(...)` 等） | `support.function.std.aura` | 青绿（与普通函数金黄区分） |
+| std 库函数（`aura.lang.std.Math.abs(...)` 等） | `support.function.std.aura` | 青绿（与普通函数金黄区分） |
 | 普通函数调用 | `entity.name.function.call.aura` | 跟随主题（默认金黄） |
 
 如需自定义配色，可在 `settings.json` 中覆盖：
@@ -305,7 +305,7 @@ vscode-extension/
 ├── syntaxes/
 │   └── aura.tmLanguage.json  # TextMate 语法（Kotlin VSCode 插件风格）
 ├── snippets/
-│   └── aura.json             # 代码片段
+│   └── aura.lang.std.Json             # 代码片段
 └── resources/
     ├── aura-icon-dark.png    # 深色主题文件图标 (256×256)
     ├── aura-icon-light.png   # 浅色主题文件图标 (256×256)

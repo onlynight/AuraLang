@@ -70,7 +70,7 @@ val raw = """
 ### 3.2 别名
 ```aura
 import aura.std.fs as fs          // 常用模块用别名
-import aura.concurrent            // 无别名直接导入
+import aura.lang.std.{Coroutine,Actor,Channel}            // 无别名直接导入
 ```
 
 ### 3.3 通配符导入（谨慎使用）

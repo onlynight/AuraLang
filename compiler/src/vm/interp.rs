@@ -175,6 +175,11 @@ impl Vm {
                 let obj = self.pop(top)?;
                 let v = match obj {
                     Value::Ref(h) => self.heap.get_index(h, idx_v.as_int().max(0) as usize),
+                    // P15: Value::List（listOf / pairOf 产生的内联列表）直接索引
+                    Value::List(items) => {
+                        let i = idx_v.as_int().max(0) as usize;
+                        items.get(i).cloned().unwrap_or(Value::Null)
+                    }
                     _ => Value::Null,
                 };
                 self.frames[top].stack.push(v);

@@ -204,7 +204,7 @@ impl SymbolTable {
 
     /// 注册模块到符号表（用于 `import aura.math`）
     ///
-    /// 调用时用 `aura.math.sin(...)` 形式。
+    /// 调用时用 `aura.lang.std.Math.sin(...)` 形式。
     pub fn insert_module(&mut self, module_path: impl Into<String>) {
         let path = module_path.into();
         let sym = Symbol::new(

@@ -7,16 +7,16 @@ use crate::vm::value::Value;
 use serde_json::Value as JsonValue;
 
 pub fn register(reg: &mut NativeRegistry) {
-    reg.register("aura.json.parse", nat_parse);
-    reg.register("aura.json.stringify", nat_stringify);
-    reg.register("aura.json.isValid", nat_is_valid);
-    reg.register("aura.json.get", nat_get);
-    reg.register("aura.json.set", nat_set);
-    reg.register("aura.json.keys", nat_keys);
-    reg.register("aura.json.values", nat_values);
-    reg.register("aura.json.length", nat_length);
-    reg.register("aura.json.contains", nat_contains);
-    reg.register("aura.json.remove", nat_remove);
+    reg.register("aura.lang.std.Json.parse", nat_parse);
+    reg.register("aura.lang.std.Json.stringify", nat_stringify);
+    reg.register("aura.lang.std.Json.isValid", nat_is_valid);
+    reg.register("aura.lang.std.Json.get", nat_get);
+    reg.register("aura.lang.std.Json.set", nat_set);
+    reg.register("aura.lang.std.Json.keys", nat_keys);
+    reg.register("aura.lang.std.Json.values", nat_values);
+    reg.register("aura.lang.std.Json.length", nat_length);
+    reg.register("aura.lang.std.Json.contains", nat_contains);
+    reg.register("aura.lang.std.Json.remove", nat_remove);
 }
 
 /// json.parse(text) → Value (JSON tree)

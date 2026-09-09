@@ -169,43 +169,43 @@ val fn = obj::method
 
 ```aura
 // IO
-import aura.io.*
-import aura.fs.*
-import aura.math.*
-import aura.string.*
-import aura.collections.*
-import aura.json.*
+import aura.lang.std.IO.*
+import aura.lang.std.FileSystem.*
+import aura.lang.std.Math.*
+import aura.lang.std.String.*
+import aura.lang.std.Collections.*
+import aura.lang.std.Json.*
 import aura.concurrent.*
-import aura.time.*
-import aura.path.*
-import aura.random.*
-import aura.encoding.*
-import aura.test.*
+import aura.lang.std.Time.*
+import aura.lang.std.Path.*
+import aura.lang.std.Random.*
+import aura.lang.std.Encoding.*
+import aura.lang.std.Test.*
 
 // Prelude (no import needed — call directly)
 println("Hello")
 println("Hello ")
 val line = println()
-val content = aura.io.fileRead("data.txt")
-aura.io.fileWrite("out.txt", "Hello")
+val content = aura.lang.std.IO.fileRead("data.txt")
+aura.lang.std.IO.fileWrite("out.txt", "Hello")
 
 // File operations
-aura.fs.exists("path")
-val text = aura.fs.readText("file.txt")
-aura.fs.writeText("file.txt", "content")
-aura.fs.mkdir("dir")
-aura.fs.mkdirP("nested/dir")
-val files = aura.fs.listDir("dir")
-val size = aura.fs.fileSize("file.txt")
+aura.lang.std.FileSystem.exists("path")
+val text = aura.lang.std.FileSystem.readText("file.txt")
+aura.lang.std.FileSystem.writeText("file.txt", "content")
+aura.lang.std.FileSystem.mkdir("dir")
+aura.lang.std.FileSystem.mkdirP("nested/dir")
+val files = aura.lang.std.FileSystem.listDir("dir")
+val size = aura.lang.std.FileSystem.fileSize("file.txt")
 
 // Math
-aura.math.abs(-42)          // → 42
-aura.math.sqrt(16.0)        // → 4.0
-aura.math.pow(2.0, 10.0)    // → 1024.0
-aura.math.PI / aura.math.E  // constants
-aura.math.sin(x) / aura.math.cos(x) / aura.math.log(x)
-aura.math.ceil(1.2) / aura.math.floor(1.8)
-aura.math.min(3, 5) / aura.math.max(3, 5)
+aura.lang.std.Math.abs(-42)          // → 42
+aura.lang.std.Math.sqrt(16.0)        // → 4.0
+aura.lang.std.Math.pow(2.0, 10.0)    // → 1024.0
+aura.lang.std.Math.PI / aura.lang.std.Math.E  // constants
+aura.lang.std.Math.sin(x) / aura.lang.std.Math.cos(x) / aura.lang.std.Math.log(x)
+aura.lang.std.Math.ceil(1.2) / aura.lang.std.Math.floor(1.8)
+aura.lang.std.Math.min(3, 5) / aura.lang.std.Math.max(3, 5)
 
 // String methods (call on object)
 val s = "hello"
@@ -227,51 +227,51 @@ mapOf("k", "v")
 setOf(1, 2, 1, 3)
 
 // JSON
-import aura.json.*
-val data = aura.json.parse("""{"name":"Aura"}""")
-val out = aura.json.stringify(data)
-aura.json.isValid("...")
+import aura.lang.std.Json.*
+val data = aura.lang.std.Json.parse("""{"name":"Aura"}""")
+val out = aura.lang.std.Json.stringify(data)
+aura.lang.std.Json.isValid("...")
 
 // Concurrency
 import aura.concurrent.*
-val actor = aura.concurrent.spawnActor("Worker")
-aura.concurrent.send(actor, msg)
-val ch = aura.concurrent.newChannel(0)
-aura.concurrent.channelSend(ch, val)
-aura.concurrent.channelRecv(ch)
+val actor = aura.lang.std.Actor.spawnActor("Worker")
+aura.lang.std.Actor.send(actor, msg)
+val ch = aura.lang.std.Channel.newChannel(0)
+aura.lang.std.Channel.channelSend(ch, val)
+aura.lang.std.Channel.channelRecv(ch)
 aura.concurrent.channelClose(ch)
-aura.concurrent.spawn(fn)
+aura.lang.std.Coroutine.spawn(fn)
 
 // Time
-import aura.time.*
-aura.time.now                    // Unix timestamp (seconds)
-aura.time.sleep(1.0)            // pause
-aura.time.toDateString(timestamp)
+import aura.lang.std.Time.*
+aura.lang.std.Time.now                    // Unix timestamp (seconds)
+aura.lang.std.Time.sleep(1.0)            // pause
+aura.lang.std.Time.toDateString(timestamp)
 
 // Path
-import aura.path.*
-aura.path.join("dir", "file.txt")
-aura.path.basename("dir/file.txt")  // → "file"
-aura.path.extname("file.txt")        // → ".txt"
+import aura.lang.std.Path.*
+aura.lang.std.Path.join("dir", "file.txt")
+aura.lang.std.Path.basename("dir/file.txt")  // → "file"
+aura.lang.std.Path.extname("file.txt")        // → ".txt"
 
 // Random
-import aura.random.*
-aura.random.nextInt
-aura.random.nextFloat
-aura.random.nextIntRange(1, 100)
-aura.random.choice(1, 2, 3)
-aura.random.shuffle(list)
+import aura.lang.std.Random.*
+aura.lang.std.Random.nextInt
+aura.lang.std.Random.nextFloat
+aura.lang.std.Random.nextIntRange(1, 100)
+aura.lang.std.Random.choice(1, 2, 3)
+aura.lang.std.Random.shuffle(list)
 
 // Encoding
-import aura.encoding.*
-aura.encoding.base64Encode("Hello")
-aura.encoding.base64Decode("SGVsbG8=")
-aura.encoding.hexEncode("Hi")      // → "4869"
+import aura.lang.std.Encoding.*
+aura.lang.std.Encoding.base64Encode("Hello")
+aura.lang.std.Encoding.base64Decode("SGVsbG8=")
+aura.lang.std.Encoding.hexEncode("Hi")      // → "4869"
 
 // Testing
-import aura.test.*
-aura.test.assertTrue(cond, "msg")
-aura.test.assertEq(a, b, "msg")
+import aura.lang.std.Test.*
+aura.lang.std.Test.assertTrue(cond, "msg")
+aura.lang.std.Test.assertEq(a, b, "msg")
 ```
 
 ### 4.3 Prelude（无需 import）
@@ -429,9 +429,9 @@ fun main() = {
 ## 9. 完整示例
 
 ```aura
-import aura.io.*
+import aura.lang.std.IO.*
 import aura.concurrent.*
-import aura.fs.*
+import aura.lang.std.FileSystem.*
 
 value data class Config(val port: Int = 8080, var debug: Boolean = false)
 

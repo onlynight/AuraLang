@@ -48,9 +48,9 @@ fn test_new_has_prelude_functions() {
 fn test_new_no_std_functions() {
     let registry = NativeRegistry::new();
     // 验证 std 模块函数不存在
-    assert!(!registry.contains("aura.math.PI"));
-    assert!(!registry.contains("aura.io.readFile"));
-    assert!(!registry.contains("aura.fs.exists"));
+    assert!(!registry.contains("aura.lang.std.Math.PI"));
+    assert!(!registry.contains("aura.lang.std.IO.readFile"));
+    assert!(!registry.contains("aura.lang.std.FileSystem.exists"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -68,7 +68,7 @@ fn test_with_modules_loads_math() {
         count > empty_registry.len(),
         "with_modules(&[\"math\"]) 应加载额外模块"
     );
-    assert!(registry.contains("aura.math.PI"));
+    assert!(registry.contains("aura.lang.std.Math.PI"));
 }
 
 #[cfg(not(feature = "std-math"))]
@@ -93,6 +93,6 @@ fn test_with_modules_empty() {
 #[test]
 fn test_concurrent_functions_loaded() {
     let registry = NativeRegistry::new();
-    assert!(registry.contains("aura.concurrent.spawn"));
-    assert!(registry.contains("aura.concurrent.newChannel"));
+    assert!(registry.contains("aura.lang.std.Coroutine.spawn"));
+    assert!(registry.contains("aura.lang.std.Channel.newChannel"));
 }

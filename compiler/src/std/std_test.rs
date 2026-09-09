@@ -6,24 +6,27 @@ use crate::vm::native::NativeRegistry;
 use crate::vm::value::Value;
 
 pub fn register(reg: &mut NativeRegistry) {
-    reg.register("aura.test.assertTrue", nat_assert_true);
-    reg.register("aura.test.assertFalse", nat_assert_false);
-    reg.register("aura.test.assertEq", nat_assert_eq);
-    reg.register("aura.test.assertNotEq", nat_assert_not_eq);
-    reg.register("aura.test.assertNotNull", nat_assert_not_null);
-    reg.register("aura.test.assertNull", nat_assert_null);
-    reg.register("aura.test.assertContains", nat_assert_contains);
-    reg.register("aura.test.assertNotContains", nat_assert_not_contains);
-    reg.register("aura.test.assertThrows", nat_assert_throws);
-    reg.register("aura.test.assertGt", nat_assert_gt);
-    reg.register("aura.test.assertGte", nat_assert_gte);
-    reg.register("aura.test.assertLt", nat_assert_lt);
-    reg.register("aura.test.assertLte", nat_assert_lte);
-    reg.register("aura.test.assertApprox", nat_assert_approx);
-    reg.register("aura.test.assertArrayEq", nat_assert_array_eq);
-    reg.register("aura.test.assertMapEq", nat_assert_map_eq);
-    reg.register("aura.test.pass", nat_pass);
-    reg.register("aura.test.fail", nat_fail);
+    reg.register("aura.lang.std.Test.assertTrue", nat_assert_true);
+    reg.register("aura.lang.std.Test.assertFalse", nat_assert_false);
+    reg.register("aura.lang.std.Test.assertEq", nat_assert_eq);
+    reg.register("aura.lang.std.Test.assertNotEq", nat_assert_not_eq);
+    reg.register("aura.lang.std.Test.assertNotNull", nat_assert_not_null);
+    reg.register("aura.lang.std.Test.assertNull", nat_assert_null);
+    reg.register("aura.lang.std.Test.assertContains", nat_assert_contains);
+    reg.register(
+        "aura.lang.std.Test.assertNotContains",
+        nat_assert_not_contains,
+    );
+    reg.register("aura.lang.std.Test.assertThrows", nat_assert_throws);
+    reg.register("aura.lang.std.Test.assertGt", nat_assert_gt);
+    reg.register("aura.lang.std.Test.assertGte", nat_assert_gte);
+    reg.register("aura.lang.std.Test.assertLt", nat_assert_lt);
+    reg.register("aura.lang.std.Test.assertLte", nat_assert_lte);
+    reg.register("aura.lang.std.Test.assertApprox", nat_assert_approx);
+    reg.register("aura.lang.std.Test.assertArrayEq", nat_assert_array_eq);
+    reg.register("aura.lang.std.Test.assertMapEq", nat_assert_map_eq);
+    reg.register("aura.lang.std.Test.pass", nat_pass);
+    reg.register("aura.lang.std.Test.fail", nat_fail);
 }
 
 fn make_result(ok: bool, msg: String) -> Value {

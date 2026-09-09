@@ -7,16 +7,19 @@ use crate::vm::value::Value;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub fn register(reg: &mut NativeRegistry) {
-    reg.register("aura.time.now", nat_now);
-    reg.register("aura.time.epoch", nat_epoch);
-    reg.register("aura.time.currentTime", nat_current_time);
-    reg.register("aura.time.sleep", nat_sleep);
-    reg.register("aura.time.duration", nat_duration);
-    reg.register("aura.time.toDateString", nat_to_date_string);
-    reg.register("aura.time.toTimeString", nat_to_time_string);
-    reg.register("aura.time.formatDate", nat_format_date);
-    reg.register("aura.time.diff", nat_diff);
-    reg.register("aura.time.parseDate", nat_parse_date);
+    // ── 纯逻辑函数（已上移到 Aura 层，但 VM 仍需 native 实现）──
+    reg.register("aura.lang.std.Time.duration", nat_duration);
+    reg.register("aura.lang.std.Time.diff", nat_diff);
+
+    // ── 时间戳/睡眠/日期解析（Rust native 实现）──
+    reg.register("aura.lang.std.Time.now", nat_now);
+    reg.register("aura.lang.std.Time.epoch", nat_epoch);
+    reg.register("aura.lang.std.Time.currentTime", nat_current_time);
+    reg.register("aura.lang.std.Time.sleep", nat_sleep);
+    reg.register("aura.lang.std.Time.toDateString", nat_to_date_string);
+    reg.register("aura.lang.std.Time.toTimeString", nat_to_time_string);
+    reg.register("aura.lang.std.Time.formatDate", nat_format_date);
+    reg.register("aura.lang.std.Time.parseDate", nat_parse_date);
 }
 
 /// time.now() → Float (seconds since epoch)

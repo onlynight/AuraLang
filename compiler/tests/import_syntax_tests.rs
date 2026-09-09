@@ -4,14 +4,14 @@
 //!
 //! 语法形式                          | 调用形式                  | 状态
 //! ----------------------------------|---------------------------|--------
-//! `import aura.concurrent.*`       | `spawn(42)` (短名)        | ✅
-//! `import aura.concurrent.*`       | `aura.concurrent.spawn(42)` (全路径) | ✅
-//! `import aura.concurrent`         | `aura.concurrent.spawn(42)` (全路径) | ✅
-//! `import aura.concurrent.spawn`   | `spawn(42)` (短名)        | ✅
-//! `import aura.concurrent.spawn`   | `aura.concurrent.spawn(42)` (全路径) | ✅
-//! `import aura.concurrent.spawn as s` | `s(42)` (别名)         | ✅
-//! `import aura.concurrent as cc`   | `cc.spawn(42)` (模块别名) | ✅
-//! `import aura.concurrent.* as cc` | `cc.spawn(42)` (通配+别名)| ✅
+//! `import aura.lang.std.Coroutine.*`       | `spawn(42)` (短名)        | ✅
+//! `import aura.lang.std.Coroutine.*`       | `aura.lang.std.Coroutine.spawn(42)` (全路径) | ✅
+//! `import aura.lang.std.Coroutine`         | `aura.lang.std.Coroutine.spawn(42)` (全路径) | ✅
+//! `import aura.lang.std.Coroutine.spawn`   | `spawn(42)` (短名)        | ✅
+//! `import aura.lang.std.Coroutine.spawn`   | `aura.lang.std.Coroutine.spawn(42)` (全路径) | ✅
+//! `import aura.lang.std.Coroutine.spawn as s` | `s(42)` (别名)         | ✅
+//! `import aura.lang.std.Coroutine as cc`   | `cc.spawn(42)` (模块别名) | ✅
+//! `import aura.lang.std.Coroutine.* as cc` | `cc.spawn(42)` (通配+别名)| ✅
 //!
 //! 也验证多个不同模块的 import 同时使用不冲突。
 
@@ -54,57 +54,57 @@ fn test_parser_wildcard_flag() {
         // (label, import_line, expected_path, expected_wildcard, expected_alias)
         (
             "wildcard",
-            "import aura.concurrent.*",
-            "aura.concurrent",
+            "import aura.lang.std.Coroutine.*",
+            "aura.lang.std.Coroutine",
             true,
             None,
         ),
         (
             "module",
-            "import aura.concurrent",
-            "aura.concurrent",
+            "import aura.lang.std.Coroutine",
+            "aura.lang.std.Coroutine",
             false,
             None,
         ),
         (
             "exact_fn",
-            "import aura.concurrent.spawn",
-            "aura.concurrent.spawn",
+            "import aura.lang.std.Coroutine.spawn",
+            "aura.lang.std.Coroutine.spawn",
             false,
             None,
         ),
         (
             "exact_fn_alias",
-            "import aura.concurrent.spawn as s",
-            "aura.concurrent.spawn",
+            "import aura.lang.std.Coroutine.spawn as s",
+            "aura.lang.std.Coroutine.spawn",
             false,
             Some("s"),
         ),
         (
             "module_alias",
-            "import aura.concurrent as cc",
-            "aura.concurrent",
+            "import aura.lang.std.Coroutine as cc",
+            "aura.lang.std.Coroutine",
             false,
             Some("cc"),
         ),
         (
             "wildcard_alias",
-            "import aura.concurrent.* as cc",
-            "aura.concurrent",
+            "import aura.lang.std.Coroutine.* as cc",
+            "aura.lang.std.Coroutine",
             true,
             Some("cc"),
         ),
         (
             "exact_channel",
-            "import aura.concurrent.newChannel",
-            "aura.concurrent.newChannel",
+            "import aura.lang.std.Channel.newChannel",
+            "aura.lang.std.Channel.newChannel",
             false,
             None,
         ),
         (
             "exact_method",
-            "import aura.concurrent.channelSend",
-            "aura.concurrent.channelSend",
+            "import aura.lang.std.Channel.channelSend",
+            "aura.lang.std.Channel.channelSend",
             false,
             None,
         ),
@@ -137,9 +137,9 @@ fn test_parser_wildcard_flag() {
 
 #[test]
 fn test_wildcard_import_short_call_spawn() {
-    // import aura.concurrent.* + spawn(42)
+    // import aura.lang.std.Coroutine.* + spawn(42)
     let src = r#"
-        import aura.concurrent.*
+        import aura.lang.std.Coroutine.*
         fun main(): Int {
             val co = spawn(42)
             return co
@@ -151,9 +151,9 @@ fn test_wildcard_import_short_call_spawn() {
 
 #[test]
 fn test_wildcard_import_short_call_newChannel() {
-    // import aura.concurrent.* + newChannel(5)
+    // import aura.lang.std.Channel.* + newChannel(5)
     let src = r#"
-        import aura.concurrent.*
+        import aura.lang.std.Channel.*
         fun main(): Int {
             val ch = newChannel(5)
             return ch
@@ -165,9 +165,9 @@ fn test_wildcard_import_short_call_newChannel() {
 
 #[test]
 fn test_wildcard_import_short_call_spawnActor() {
-    // import aura.concurrent.* + spawnActor("test")
+    // import aura.lang.std.Actor.* + spawnActor("test")
     let src = r#"
-        import aura.concurrent.*
+        import aura.lang.std.Actor.*
         fun main(): Int {
             val actor = spawnActor("test")
             return actor
@@ -183,11 +183,11 @@ fn test_wildcard_import_short_call_spawnActor() {
 
 #[test]
 fn test_wildcard_import_full_path_call() {
-    // import aura.concurrent.* + aura.concurrent.spawn(42)
+    // import aura.lang.std.Coroutine.* + aura.lang.std.Coroutine.spawn(42)
     let src = r#"
-        import aura.concurrent.*
+        import aura.lang.std.Coroutine.*
         fun main(): Int {
-            val co = aura.concurrent.spawn(42)
+            val co = aura.lang.std.Coroutine.spawn(42)
             return co
         }
     "#;
@@ -201,11 +201,11 @@ fn test_wildcard_import_full_path_call() {
 
 #[test]
 fn test_module_import_full_path_call() {
-    // import aura.concurrent + aura.concurrent.spawn(42)
+    // import aura.lang.std.Coroutine + aura.lang.std.Coroutine.spawn(42)
     let src = r#"
-        import aura.concurrent
+        import aura.lang.std.Coroutine
         fun main(): Int {
-            val co = aura.concurrent.spawn(42)
+            val co = aura.lang.std.Coroutine.spawn(42)
             return co
         }
     "#;
@@ -219,9 +219,9 @@ fn test_module_import_full_path_call() {
 
 #[test]
 fn test_exact_import_short_call() {
-    // import aura.concurrent.spawn + spawn(42)
+    // import aura.lang.std.Coroutine.spawn + spawn(42)
     let src = r#"
-        import aura.concurrent.spawn
+        import aura.lang.std.Coroutine.spawn
         fun main(): Int {
             val co = spawn(42)
             return co
@@ -233,9 +233,9 @@ fn test_exact_import_short_call() {
 
 #[test]
 fn test_exact_import_short_call_newChannel() {
-    // import aura.concurrent.newChannel + newChannel(0)
+    // import aura.lang.std.Channel.newChannel + newChannel(0)
     let src = r#"
-        import aura.concurrent.newChannel
+        import aura.lang.std.Channel.newChannel
         fun main(): Int {
             val ch = newChannel(0)
             return ch
@@ -251,9 +251,9 @@ fn test_exact_import_short_call_newChannel() {
 
 #[test]
 fn test_exact_import_alias_call() {
-    // import aura.concurrent.spawn as s + s(42)
+    // import aura.lang.std.Coroutine.spawn as s + s(42)
     let src = r#"
-        import aura.concurrent.spawn as s
+        import aura.lang.std.Coroutine.spawn as s
         fun main(): Int {
             val co = s(42)
             return co
@@ -265,9 +265,9 @@ fn test_exact_import_alias_call() {
 
 #[test]
 fn test_exact_import_alias_call_newChannel() {
-    // import aura.concurrent.newChannel as nc + nc(5)
+    // import aura.lang.std.Channel.newChannel as nc + nc(5)
     let src = r#"
-        import aura.concurrent.newChannel as nc
+        import aura.lang.std.Channel.newChannel as nc
         fun main(): Int {
             val ch = nc(5)
             return ch
@@ -283,9 +283,9 @@ fn test_exact_import_alias_call_newChannel() {
 
 #[test]
 fn test_module_alias_call() {
-    // import aura.concurrent as cc + cc.spawn(42)
+    // import aura.lang.std.Coroutine as cc + cc.spawn(42)
     let src = r#"
-        import aura.concurrent as cc
+        import aura.lang.std.Coroutine as cc
         fun main(): Int {
             val co = cc.spawn(42)
             return co
@@ -297,29 +297,29 @@ fn test_module_alias_call() {
 
 #[test]
 fn test_module_alias_call_newChannel() {
-    // import aura.concurrent as cc + cc.newChannel(5)
+    // import aura.lang.std.Channel as ch + ch.newChannel(5)
     let src = r#"
-        import aura.concurrent as cc
+        import aura.lang.std.Channel as ch
         fun main(): Int {
-            val ch = cc.newChannel(5)
-            return ch
+            val c = ch.newChannel(5)
+            return c
         }
     "#;
-    let result = run(src).expect("module alias + cc.newChannel(5) 应成功");
+    let result = run(src).expect("module alias + ch.newChannel(5) 应成功");
     assert!(result.as_int() > 0, "newChannel 应返回正数通道 ID");
 }
 
 #[test]
 fn test_module_alias_call_spawn_actor() {
-    // import aura.concurrent as cc + cc.spawnActor("w")
+    // import aura.lang.std.Actor as a + a.spawnActor("w")
     let src = r#"
-        import aura.concurrent as cc
+        import aura.lang.std.Actor as a
         fun main(): Int {
-            val actor = cc.spawnActor("worker")
+            val actor = a.spawnActor("worker")
             return actor
         }
     "#;
-    let result = run(src).expect("module alias + cc.spawnActor 应成功");
+    let result = run(src).expect("module alias + a.spawnActor 应成功");
     assert!(result.as_int() > 0);
 }
 
@@ -329,9 +329,9 @@ fn test_module_alias_call_spawn_actor() {
 
 #[test]
 fn test_wildcard_alias_call() {
-    // import aura.concurrent.* as cc + cc.spawn(42)
+    // import aura.lang.std.Coroutine.* as cc + cc.spawn(42)
     let src = r#"
-        import aura.concurrent.* as cc
+        import aura.lang.std.Coroutine.* as cc
         fun main(): Int {
             val co = cc.spawn(42)
             return co
@@ -347,11 +347,11 @@ fn test_wildcard_alias_call() {
 
 #[test]
 fn test_multiple_modules_wildcard() {
-    // import aura.concurrent.* + import aura.math.*
+    // import aura.lang.std.Coroutine.* + import aura.lang.std.Math.*
     // 同时用 spawn 和 sin（不同模块的短名不冲突）
     let src = r#"
-        import aura.concurrent.*
-        import aura.math.*
+        import aura.lang.std.Coroutine.*
+        import aura.lang.std.Math.*
         fun main(): Int {
             val co = spawn(42)
             return co
@@ -363,11 +363,11 @@ fn test_multiple_modules_wildcard() {
 
 #[test]
 fn test_multiple_modules_exact_import() {
-    // import aura.concurrent.spawn + import aura.math.sqrt
+    // import aura.lang.std.Coroutine.spawn + import aura.lang.std.Math.sqrt
     // 用 spawn 和 sqrt
     let src = r#"
-        import aura.concurrent.spawn
-        import aura.math.sqrt
+        import aura.lang.std.Coroutine.spawn
+        import aura.lang.std.Math.sqrt
         fun main(): Int {
             val co = spawn(42)
             return co
@@ -383,10 +383,10 @@ fn test_multiple_modules_exact_import() {
 
 #[test]
 fn test_different_module_aliases() {
-    // import aura.concurrent.spawn as cs + import aura.math.sqrt as ms
+    // import aura.lang.std.Coroutine.spawn as cs + import aura.lang.std.Math.sqrt as ms
     let src = r#"
-        import aura.concurrent.spawn as cs
-        import aura.math.sqrt as ms
+        import aura.lang.std.Coroutine.spawn as cs
+        import aura.lang.std.Math.sqrt as ms
         fun main(): Int {
             val co = cs(42)
             return co
@@ -404,8 +404,8 @@ fn test_different_module_aliases() {
 fn test_mixed_alias_forms() {
     // 同一模块的精确别名 + 模块别名
     let src = r#"
-        import aura.concurrent.spawn as s
-        import aura.concurrent as cc
+        import aura.lang.std.Coroutine.spawn as s
+        import aura.lang.std.Coroutine as cc
         fun main(): Int {
             val co1 = s(42)
             val co2 = cc.spawn(100)

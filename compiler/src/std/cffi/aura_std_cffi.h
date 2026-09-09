@@ -181,6 +181,77 @@ int64_t aura_random_nextInt(void);
 double aura_random_nextFloat(void);
 
 // ─────────────────────────────────────────────────────────────────────────────
+// aura.collections — 特化集合（ArrayList / LinkedList / HashSet / HashMap / LinkedHashMap）
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ArrayList
+const void *aura_collections_arrayListOf(const void *a, const void *b, const void *c,
+    const void *d, const void *e, const void *f, const void *g,
+    const void *h, const void *i, const void *j);
+int64_t aura_collections_arrayListSize(const void *list);
+
+// LinkedList
+const void *aura_collections_linkedListOf(const void *a, const void *b, const void *c,
+    const void *d, const void *e, const void *f, const void *g,
+    const void *h, const void *i, const void *j);
+const void *aura_collections_linkedAddFirst(const void *list, const void *value);
+const void *aura_collections_linkedAddLast(const void *list, const void *value);
+const void *aura_collections_linkedRemoveFirst(const void *list);
+const void *aura_collections_linkedRemoveLast(const void *list);
+
+// HashSet
+const void *aura_collections_hashSetOf(const void *a, const void *b, const void *c,
+    const void *d, const void *e, const void *f, const void *g,
+    const void *h, const void *i, const void *j);
+_Bool aura_collections_hashSetContains(const void *set, const void *item);
+const void *aura_collections_hashSetAdd(const void *set, const void *item);
+_Bool aura_collections_hashSetRemove(const void *set, const void *item);
+
+// HashMap
+const void *aura_collections_hashMapOf(const void *k0, const void *v0,
+    const void *k1, const void *v1, const void *k2, const void *v2,
+    const void *k3, const void *v3, const void *k4, const void *v4);
+const void *aura_collections_hashMapGet(const void *map, const void *key);
+const void *aura_collections_hashMapPut(const void *map, const void *key, const void *value);
+const void *aura_collections_hashMapRemove(const void *map, const void *key);
+
+// LinkedHashMap
+const void *aura_collections_linkedHashMapOf(const void *k0, const void *v0,
+    const void *k1, const void *v1, const void *k2, const void *v2,
+    const void *k3, const void *v3, const void *k4, const void *v4);
+const void *aura_collections_linkedHashMapKeys(const void *map);
+const void *aura_collections_linkedHashMapFirstKey(const void *map);
+const void *aura_collections_linkedHashMapLastKey(const void *map);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Runtime 运行时函数（ARC / 内存 / 协程 / 字符串）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** ARC 引用计数 +1（原子操作） */
+void aura_arc_increment(const void *ptr);
+
+/** ARC 引用计数 -1，归零时释放（原子操作） */
+void aura_arc_decrement(const void *ptr);
+
+/** 协程挂起（AOT 下为 no-op，VM 运行时处理） */
+void aura_coroutine_yield(const void *ctx);
+
+/** 堆分配（返回指针） */
+void *aura_malloc(int64_t size);
+
+/** 堆释放 */
+void aura_free(const void *ptr);
+
+/** 创建字符串对象（返回字符串指针） */
+const char *aura_string_new(const char *data, int64_t len);
+
+/** 获取字符串长度 */
+int64_t aura_string_length(const AuraString *s);
+
+/** 获取字符串数据指针 */
+const char *aura_string_data(const AuraString *s);
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 短名称包装函数（供 AOT IR 直接调用）
 // ─────────────────────────────────────────────────────────────────────────────
 

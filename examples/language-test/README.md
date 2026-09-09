@@ -431,7 +431,7 @@ aura build examples/language-test/07-error-handling.aura --aot --output target/t
 
 | 覆盖项 |
 |--------|
-| `aura.math` / `io` / `string` / `collections` / `json` / `time` |
+| `aura.lang.std.Math` / `io` / `string` / `collections` / `json` / `time` |
 | `env` / `random` / `encoding` / `ascii` / `path` / `iter` / `net` / `fs` |
 
 ---

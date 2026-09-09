@@ -7,27 +7,27 @@ use crate::vm::value::Value;
 use std::path::PathBuf;
 
 pub fn register(reg: &mut NativeRegistry) {
-    reg.register("aura.fs.exists", nat_exists);
-    reg.register("aura.fs.isFile", nat_is_file);
-    reg.register("aura.fs.isDirectory", nat_is_directory);
-    reg.register("aura.fs.readText", nat_read_text);
-    reg.register("aura.fs.writeText", nat_write_text);
-    reg.register("aura.fs.readBytes", nat_read_bytes);
-    reg.register("aura.fs.writeBytes", nat_write_bytes);
-    reg.register("aura.fs.delete", nat_delete);
-    reg.register("aura.fs.mkdir", nat_mkdir);
-    reg.register("aura.fs.mkdirP", nat_mkdir_p);
-    reg.register("aura.fs.rename", nat_rename);
-    reg.register("aura.fs.copy", nat_copy);
-    reg.register("aura.fs.listDir", nat_list_dir);
-    reg.register("aura.fs.listFiles", nat_list_files);
-    reg.register("aura.fs.fileSize", nat_file_size);
-    reg.register("aura.fs.lastModified", nat_last_modified);
-    reg.register("aura.fs.absolutePath", nat_absolute_path);
-    reg.register("aura.fs.homeDir", nat_home_dir);
-    reg.register("aura.fs.tempDir", nat_temp_dir);
-    reg.register("aura.fs.currentDir", nat_current_dir);
-    reg.register("aura.fs.walk", nat_walk);
+    reg.register("aura.lang.std.FileSystem.exists", nat_exists);
+    reg.register("aura.lang.std.FileSystem.isFile", nat_is_file);
+    reg.register("aura.lang.std.FileSystem.isDirectory", nat_is_directory);
+    reg.register("aura.lang.std.FileSystem.readText", nat_read_text);
+    reg.register("aura.lang.std.FileSystem.writeText", nat_write_text);
+    reg.register("aura.lang.std.FileSystem.readBytes", nat_read_bytes);
+    reg.register("aura.lang.std.FileSystem.writeBytes", nat_write_bytes);
+    reg.register("aura.lang.std.FileSystem.delete", nat_delete);
+    reg.register("aura.lang.std.FileSystem.mkdir", nat_mkdir);
+    reg.register("aura.lang.std.FileSystem.mkdirP", nat_mkdir_p);
+    reg.register("aura.lang.std.FileSystem.rename", nat_rename);
+    reg.register("aura.lang.std.FileSystem.copy", nat_copy);
+    reg.register("aura.lang.std.FileSystem.listDir", nat_list_dir);
+    reg.register("aura.lang.std.FileSystem.listFiles", nat_list_files);
+    reg.register("aura.lang.std.FileSystem.fileSize", nat_file_size);
+    reg.register("aura.lang.std.FileSystem.lastModified", nat_last_modified);
+    reg.register("aura.lang.std.FileSystem.absolutePath", nat_absolute_path);
+    reg.register("aura.lang.std.FileSystem.homeDir", nat_home_dir);
+    reg.register("aura.lang.std.FileSystem.tempDir", nat_temp_dir);
+    reg.register("aura.lang.std.FileSystem.currentDir", nat_current_dir);
+    reg.register("aura.lang.std.FileSystem.walk", nat_walk);
 }
 
 fn arg0(args: &[Value]) -> String {

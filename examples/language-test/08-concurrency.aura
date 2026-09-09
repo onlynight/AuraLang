@@ -1,0 +1,86 @@
+// ════════════════════════════════════════════════════════════
+// Phase 8 — 并发（P8）
+// suspend/await、async 块、Actor、Channel、select、spawn+await
+// ════════════════════════════════════════════════════════════
+
+import aura.concurrent.*
+
+// ── §8.1 suspend fun + await（P8）──
+suspend fun fetchData(): Int {
+    // 模拟异步 IO
+    return 42
+}
+
+suspend fun fetchSum(): Int {
+    val a = await fetchData()
+    val b = await fetchData()
+    return a + b
+}
+
+// ── §8.2 Actor（P8）──
+fun actorDemo() {
+    val auth = aura.concurrent.spawnActor("AuthService")
+    val user = aura.concurrent.spawnActor("UserService")
+    aura.concurrent.send(auth, "LOGIN")
+    aura.concurrent.send(user, "CREATE_USER")
+
+    // supervise + actorAlive
+    val master = aura.concurrent.spawnActor("Master")
+    val worker = aura.concurrent.spawnActor("Worker")
+    aura.concurrent.supervise(master, worker)
+    val alive = aura.concurrent.actorAlive(worker)
+    val aliveStr = if (alive) { "true" } else { "false" }
+    println("§8.2 Actor: auth=" + auth.toString() + ", user=" + user.toString()
+        + ", alive=" + aliveStr)
+}
+
+// ── §8.3 Channel（P8）──
+fun channelDemo() {
+    val ch = aura.concurrent.newChannel(0)
+    aura.concurrent.channelSend(ch, "ORDER_CREATED")
+    aura.concurrent.channelSend(ch, "PAYMENT_OK")
+    val m1 = aura.concurrent.channelRecv(ch)
+    val m2 = aura.concurrent.channelRecv(ch)
+    // 直接 println（避免对 Any 做 toString：AOT 下输出指针地址）
+    println("§8.3 Channel: ")
+    println(m1)
+    println(" -> ")
+    println(m2)
+}
+
+// ── §8.4 select 多路复用（P8）──
+fun selectDemo() {
+    val chA = aura.concurrent.newChannel(0)
+    val chB = aura.concurrent.newChannel(0)
+    aura.concurrent.channelSend(chA, "FROM_A")
+    aura.concurrent.channelSend(chB, "FROM_B")
+    val first = aura.concurrent.select(chA, chB)
+    println("§8.4 select: ")
+    println(first)
+}
+
+// ── §8.5 协程 spawn + Channel 组合（P8）──
+fun spawnDemo() {
+    val co1 = aura.concurrent.spawn(10)
+    val co2 = aura.concurrent.spawn(20)
+    val ch = aura.concurrent.newChannel(0)
+    aura.concurrent.channelSend(ch, co1)
+    aura.concurrent.channelSend(ch, co2)
+    val got = aura.concurrent.channelRecv(ch)
+    // 注：Any 值经 Channel 往返在 AOT 下退化为不透明指针，此处仅验证收发通路
+    println("§8.5 spawn: co1=" + co1.toString() + ", co2=" + co2.toString()
+        + ", recvDone=" + (got != null).toString())
+}
+
+fun main() {
+    // ── §8.1 suspend/await + async 块 ──
+    val results = async {
+        await fetchSum()
+    }
+    println("§8.1 async+await: " + results.toString())
+
+    actorDemo()
+    channelDemo()
+    selectDemo()
+    spawnDemo()
+}

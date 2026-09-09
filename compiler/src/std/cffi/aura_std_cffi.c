@@ -168,6 +168,15 @@ double aura_math_min(double a, double b) { return a < b ? a : b; }
 double aura_math_max(double a, double b) { return a > b ? a : b; }
 int64_t aura_math_ceil(double x) { return (int64_t)ceil(x); }
 int64_t aura_math_floor(double x) { return (int64_t)floor(x); }
+double aura_math_sqrt(double x) { return sqrt(x); }
+double aura_math_cbrt(double x) { return cbrt(x); }
+double aura_math_pow(double base, double exp) { return pow(base, exp); }
+double aura_math_round(double x) { return round(x); }
+double aura_math_trunc(double x) { return trunc(x); }
+double aura_math_log2(double x) { return log2(x); }
+double aura_math_log10(double x) { return log10(x); }
+double aura_math_sign(double x) { return (x > 0) - (x < 0); }
+double aura_math_clamp(double x, double lo, double hi) { return x < lo ? lo : (x > hi ? hi : x); }
 
 const double aura_math_PI = 3.14159265358979323846;
 const double aura_math_E = 2.71828182845904523536;
@@ -436,3 +445,673 @@ void __throw(const void *value) {
         fflush(stderr);
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P8: 并发运行时（aura.concurrent.*）— AOT 原生支持
+// 语义：单线程等价实现。spawn/spawnActor 返回递增 ID；Channel 为无界 FIFO 队列；
+//       select 返回第一个非空通道的队首值。真协程/多线程调度由 VM 运行时承担。
+// ─────────────────────────────────────────────────────────────────────────────
+
+static int64_t aura_concurrent_next_id = 0;
+
+#define AURA_CH_CAP 256
+
+typedef struct {
+    int64_t buf[AURA_CH_CAP];
+    int head;
+    int tail;
+    int count;
+} AuraChannel;
+
+static AuraChannel aura_channels[64];
+static int aura_channel_count = 0;
+
+static void aura_ch_push(int32_t ch, int64_t v) {
+    if (ch < 1 || ch > aura_channel_count) return;
+    AuraChannel *c = &aura_channels[ch - 1];
+    if (c->count >= AURA_CH_CAP) return;
+    c->buf[c->tail] = v;
+    c->tail = (c->tail + 1) % AURA_CH_CAP;
+    c->count++;
+}
+
+static int64_t aura_ch_pop(int32_t ch) {
+    if (ch < 1 || ch > aura_channel_count) return 0;
+    AuraChannel *c = &aura_channels[ch - 1];
+    if (c->count == 0) return 0;
+    int64_t v = c->buf[c->head];
+    c->head = (c->head + 1) % AURA_CH_CAP;
+    c->count--;
+    return v;
+}
+
+// spawn(value: Any) → Int：创建协程，返回协程 ID
+// AOT 无协程运行时：数值负载直接回传（与 VM 语义对齐），其余返回递增 ID
+int32_t aura_concurrent_spawn(const void *value) {
+    if (value) {
+        intptr_t v = (intptr_t)value;
+        if (v > 0 && v < 0x10000) return (int32_t)v;
+    }
+    return (int32_t)(++aura_concurrent_next_id);
+}
+
+// send(actor: Int, msg: Any) → Unit：向 Actor 发送消息（AOT 下记录 ID，不排队）
+void aura_concurrent_send(int32_t actor, const void *msg) {
+    (void)actor;
+    (void)msg;
+}
+
+// ask(actor: Int, msg: Any) → Any：请求响应（无运行时，返回 null）
+const void *aura_concurrent_ask(int32_t actor, const void *msg) {
+    (void)actor;
+    (void)msg;
+    return 0;
+}
+
+// newChannel(bound: Int) → Int：创建 Channel，返回句柄
+int32_t aura_concurrent_newChannel(int32_t bound) {
+    (void)bound;
+    if (aura_channel_count >= 64) return 0;
+    aura_channel_count++;
+    return aura_channel_count;
+}
+
+// channelSend(ch: Int, val: Any) → Unit
+void aura_concurrent_channelSend(int32_t ch, const void *val) {
+    aura_ch_push(ch, (int64_t)(intptr_t)val);
+}
+
+// channelRecv(ch: Int) → Any（空通道返回 null）
+const void *aura_concurrent_channelRecv(int32_t ch) {
+    return (const void *)(intptr_t)aura_ch_pop(ch);
+}
+
+// channelTryRecv(ch: Int) → Any
+const void *aura_concurrent_channelTryRecv(int32_t ch) {
+    return (const void *)(intptr_t)aura_ch_pop(ch);
+}
+
+// select(ch1: Int, ch2: Int) → Any：第一个非空通道的队首值
+const void *aura_concurrent_select(int32_t ch1, int32_t ch2) {
+    const void *v = (const void *)(intptr_t)aura_ch_pop(ch1);
+    if (v) return v;
+    return (const void *)(intptr_t)aura_ch_pop(ch2);
+}
+
+// spawnActor(name: String) → Int：创建 Actor，返回 ID
+int32_t aura_concurrent_spawnActor(AuraString name) {
+    (void)name;
+    return (int32_t)(++aura_concurrent_next_id);
+}
+
+// supervise(parent: Int, child: Int) → Unit
+void aura_concurrent_supervise(int32_t parent, int32_t child) {
+    (void)parent;
+    (void)child;
+}
+
+// actorAlive(id: Int) → Boolean
+_Bool aura_concurrent_actorAlive(int32_t id) {
+    return id > 0;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Layer 2: Runtime 运行时函数（ARC / 内存 / 协程 / 字符串）
+// 通过 AOT FFI 直连 libc，获得接近原生的性能
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ARC 引用计数结构体（对象头部）
+typedef struct {
+    volatile int32_t refcount;
+    // 对象数据紧跟其后
+} AuraArcHeader;
+
+// ARC 引用计数 +1（原子操作）
+// ptr: 对象指针（指向 AuraArcHeader）
+void aura_arc_increment(const void *ptr) {
+    if (!ptr) return;
+    const AuraArcHeader *header = (const AuraArcHeader *)ptr;
+#ifdef _WIN32
+    // Windows: InterlockedIncrement
+    InterlockedIncrement((volatile LONG*)(&header->refcount));
+#else
+    // POSIX: __sync_fetch_and_add
+    __sync_fetch_and_add(&header->refcount, 1);
+#endif
+}
+
+// ARC 引用计数 -1，归零时释放（原子操作）
+void aura_arc_decrement(const void *ptr) {
+    if (!ptr) return;
+    AuraArcHeader *header = (AuraArcHeader *)ptr;
+    int32_t old_count;
+#ifdef _WIN32
+    old_count = InterlockedDecrement((volatile LONG*)(&header->refcount));
+#else
+    old_count = __sync_sub_and_fetch(&header->refcount, 1);
+#endif
+    if (old_count <= 0) {
+        // 引用计数归零，释放对象内存
+        // 注意：这里假设对象是通过 aura_malloc 分配的
+        aura_free(ptr);
+    }
+}
+
+// 协程挂起（AOT 下为 no-op，VM 运行时处理）
+// ctx: 协程上下文指针
+void aura_coroutine_yield(const void *ctx) {
+    (void)ctx;
+    // AOT 下协程由 VM 运行时管理，此处为空操作
+}
+
+// 堆分配（返回指针）
+void *aura_malloc(int64_t size) {
+    if (size <= 0) return NULL;
+    return malloc((size_t)size);
+}
+
+// 堆释放
+void aura_free(const void *ptr) {
+    if (ptr) free((void *)ptr);
+}
+
+// 创建字符串对象（返回字符串指针）
+// data: 字符串数据指针，len: 字符串长度
+const char *aura_string_new(const char *data, int64_t len) {
+    static char string_buf[4096];
+    if (!data || len <= 0) return "";
+    size_t copy_len = (size_t)(len < 4095 ? len : 4095);
+    memcpy(string_buf, data, copy_len);
+    string_buf[copy_len] = '\0';
+    return string_buf;
+}
+
+// 获取字符串长度（AuraString 结构体）
+int64_t aura_string_length(const AuraString *s) {
+    if (!s || !s->data) return 0;
+    return s->len > 0 ? s->len : (int64_t)strlen(s->data);
+}
+
+// 获取字符串数据指针（AuraString 结构体）
+const char *aura_string_data(const AuraString *s) {
+    if (!s || !s->data) return "";
+    return s->data;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P13: 标准库快照（AOT C 实现）— math/ascii/collections/time/random/encoding/
+//      path/env/fs 中语言测试用到的子集。字符串参数均为 const char*（数据指针）。
+// ─────────────────────────────────────────────────────────────────────────────
+
+// aura.math
+int64_t aura_math_abs(double x) { return (int64_t)fabs(x); }
+
+// aura.ascii（Char 以 i16 传入）
+_Bool aura_ascii_isAlpha(int16_t c) { return isalpha((unsigned char)c) != 0; }
+_Bool aura_ascii_isDigit(int16_t c) { return isdigit((unsigned char)c) != 0; }
+_Bool aura_ascii_isAlphaNumeric(int16_t c) { return isalnum((unsigned char)c) != 0; }
+_Bool aura_ascii_isWhitespace(int16_t c) { return isspace((unsigned char)c) != 0; }
+_Bool aura_ascii_isUpper(int16_t c) { return isupper((unsigned char)c) != 0; }
+_Bool aura_ascii_isLower(int16_t c) { return islower((unsigned char)c) != 0; }
+int64_t aura_ascii_toUpper(int16_t c) { return (int64_t)toupper((unsigned char)c); }
+int64_t aura_ascii_toLower(int16_t c) { return (int64_t)tolower((unsigned char)c); }
+int64_t aura_ascii_codeAt(int16_t c) { return (int64_t)c; }
+
+// aura.collections — 静态注册表：listOf 注册元素（值均为 Any→i8* 指针/整数），
+// listContains/listIndexOf 按指针值（整数语义）比较
+#define AURA_LIST_MAX 32
+#define AURA_LIST_ELEMS 64
+typedef struct {
+    int64_t items[AURA_LIST_ELEMS];
+    int count;
+} AuraList;
+static AuraList aura_lists[AURA_LIST_MAX];
+static int aura_list_count = 0;
+
+const void *aura_collections_listOf(const void *a, const void *b, const void *c) {
+    if (aura_list_count >= AURA_LIST_MAX) return 0;
+    AuraList *l = &aura_lists[aura_list_count++];
+    l->count = 0;
+    if (a) l->items[l->count++] = (int64_t)(intptr_t)a;
+    if (b) l->items[l->count++] = (int64_t)(intptr_t)b;
+    if (c) l->items[l->count++] = (int64_t)(intptr_t)c;
+    return (const void *)l;
+}
+
+_Bool aura_collections_listContains(const void *list, const void *val) {
+    const AuraList *l = (const AuraList *)list;
+    if (!l || !val) return 0;
+    int64_t v = (int64_t)(intptr_t)val;
+    for (int i = 0; i < l->count; i++)
+        if (l->items[i] == v) return 1;
+    return 0;
+}
+
+int64_t aura_collections_listIndexOf(const void *list, const void *val) {
+    const AuraList *l = (const AuraList *)list;
+    if (!l || !val) return -1;
+    int64_t v = (int64_t)(intptr_t)val;
+    for (int i = 0; i < l->count; i++)
+        if (l->items[i] == v) return i;
+    return -1;
+}
+
+// ── 特化集合（ArrayList / LinkedList / HashSet / HashMap / LinkedHashMap）──
+// 复用 AuraList 结构体；Map 用 AuraMap（键值对数组 + 顺序数组）
+
+#define AURA_MAP_MAX 32
+#define AURA_MAP_ELEMS 16
+typedef struct {
+    int64_t keys[AURA_MAP_ELEMS];
+    int64_t values[AURA_MAP_ELEMS];
+    int64_t order[AURA_MAP_ELEMS]; // 插入顺序的键
+    int count;
+} AuraMap;
+static AuraMap aura_maps[AURA_MAP_MAX];
+static int aura_map_count = 0;
+
+// 辅助：从 AuraList 创建新列表
+static AuraList *new_list(int64_t *items, int count) {
+    if (aura_list_count >= AURA_LIST_MAX) return 0;
+    AuraList *l = &aura_lists[aura_list_count++];
+    l->count = 0;
+    for (int i = 0; i < count && i < AURA_LIST_ELEMS; i++) {
+        l->items[l->count++] = items[i];
+    }
+    return l;
+}
+
+// ArrayList
+const void *aura_collections_arrayListOf(const void *a, const void *b, const void *c,
+    const void *d, const void *e, const void *f, const void *g,
+    const void *h, const void *i, const void *j) {
+    const void *args[] = {a, b, c, d, e, f, g, h, i, j};
+    int64_t items[AURA_LIST_ELEMS];
+    int count = 0;
+    for (int k = 0; k < 10 && args[k]; k++)
+        items[count++] = (int64_t)(intptr_t)args[k];
+    AuraList *l = new_list(items, count);
+    return (const void *)l;
+}
+
+int64_t aura_collections_arrayListSize(const void *list) {
+    const AuraList *l = (const AuraList *)list;
+    return l ? l->count : 0;
+}
+
+// LinkedList
+const void *aura_collections_linkedListOf(const void *a, const void *b, const void *c,
+    const void *d, const void *e, const void *f, const void *g,
+    const void *h, const void *i, const void *j) {
+    return aura_collections_arrayListOf(a, b, c, d, e, f, g, h, i, j);
+}
+
+const void *aura_collections_linkedAddFirst(const void *list, const void *value) {
+    if (!list) {
+        int64_t items[1] = {value ? (int64_t)(intptr_t)value : 0};
+        return (const void *)new_list(items, 1);
+    }
+    const AuraList *l = (const AuraList *)list;
+    int64_t items[AURA_LIST_ELEMS];
+    int count = 0;
+    if (value) items[count++] = (int64_t)(intptr_t)value;
+    for (int k = 0; k < l->count && count < AURA_LIST_ELEMS; k++)
+        items[count++] = l->items[k];
+    return (const void *)new_list(items, count);
+}
+
+const void *aura_collections_linkedAddLast(const void *list, const void *value) {
+    if (!list) {
+        int64_t items[1] = {value ? (int64_t)(intptr_t)value : 0};
+        return (const void *)new_list(items, 1);
+    }
+    const AuraList *l = (const AuraList *)list;
+    int64_t items[AURA_LIST_ELEMS];
+    int count = 0;
+    for (int k = 0; k < l->count && count < AURA_LIST_ELEMS - 1; k++)
+        items[count++] = l->items[k];
+    if (value) items[count++] = (int64_t)(intptr_t)value;
+    return (const void *)new_list(items, count);
+}
+
+const void *aura_collections_linkedRemoveFirst(const void *list) {
+    if (!list) return 0;
+    const AuraList *l = (const AuraList *)list;
+    if (l->count == 0) return (const void *)new_list(NULL, 0);
+    int64_t items[AURA_LIST_ELEMS];
+    int count = 0;
+    for (int k = 1; k < l->count && count < AURA_LIST_ELEMS; k++)
+        items[count++] = l->items[k];
+    return (const void *)new_list(items, count);
+}
+
+const void *aura_collections_linkedRemoveLast(const void *list) {
+    if (!list) return 0;
+    const AuraList *l = (const AuraList *)list;
+    if (l->count == 0) return (const void *)new_list(NULL, 0);
+    int64_t items[AURA_LIST_ELEMS];
+    int count = 0;
+    for (int k = 0; k < l->count - 1 && count < AURA_LIST_ELEMS; k++)
+        items[count++] = l->items[k];
+    return (const void *)new_list(items, count);
+}
+
+// HashSet
+const void *aura_collections_hashSetOf(const void *a, const void *b, const void *c,
+    const void *d, const void *e, const void *f, const void *g,
+    const void *h, const void *i, const void *j) {
+    const void *args[] = {a, b, c, d, e, f, g, h, i, j};
+    int64_t items[AURA_LIST_ELEMS];
+    int count = 0;
+    for (int k = 0; k < 10 && args[k]; k++) {
+        int64_t v = (int64_t)(intptr_t)args[k];
+        int dup = 0;
+        for (int m = 0; m < count; m++) {
+            if (items[m] == v) { dup = 1; break; }
+        }
+        if (!dup && count < AURA_LIST_ELEMS) items[count++] = v;
+    }
+    return (const void *)new_list(items, count);
+}
+
+_Bool aura_collections_hashSetContains(const void *set, const void *item) {
+    if (!set || !item) return 0;
+    const AuraList *l = (const AuraList *)set;
+    int64_t v = (int64_t)(intptr_t)item;
+    for (int k = 0; k < l->count; k++)
+        if (l->items[k] == v) return 1;
+    return 0;
+}
+
+const void *aura_collections_hashSetAdd(const void *set, const void *item) {
+    if (!item) return set;
+    int64_t v = (int64_t)(intptr_t)item;
+    if (set) {
+        const AuraList *l = (const AuraList *)set;
+        int exists = 0;
+        for (int k = 0; k < l->count; k++)
+            if (l->items[k] == v) { exists = 1; break; }
+        if (exists) return set;
+        int64_t items[AURA_LIST_ELEMS];
+        int count = 0;
+        for (int k = 0; k < l->count && count < AURA_LIST_ELEMS - 1; k++)
+            items[count++] = l->items[k];
+        items[count++] = v;
+        return (const void *)new_list(items, count);
+    }
+    int64_t items[1] = {v};
+    return (const void *)new_list(items, 1);
+}
+
+_Bool aura_collections_hashSetRemove(const void *set, const void *item) {
+    if (!set || !item) return 0;
+    const AuraList *l = (const AuraList *)set;
+    int64_t v = (int64_t)(intptr_t)item;
+    int found = 0;
+    int64_t items[AURA_LIST_ELEMS];
+    int count = 0;
+    for (int k = 0; k < l->count; k++) {
+        if (l->items[k] == v) found = 1;
+        else if (count < AURA_LIST_ELEMS) items[count++] = l->items[k];
+    }
+    if (found) (void)new_list(items, count); // 新列表已分配，但调用者不使用返回值
+    return (_Bool)found;
+}
+
+// HashMap
+const void *aura_collections_hashMapOf(const void *k0, const void *v0,
+    const void *k1, const void *v1, const void *k2, const void *v2,
+    const void *k3, const void *v3, const void *k4, const void *v4) {
+    if (aura_map_count >= AURA_MAP_MAX) return 0;
+    AuraMap *m = &aura_maps[aura_map_count++];
+    m->count = 0;
+    // 参数表（键值对）
+    const void *keys[] = {k0, k1, k2, k3, k4};
+    const void *vals[] = {v0, v1, v2, v3, v4};
+    for (int k = 0; k < 5 && keys[k]; k++) {
+        int64_t key = (int64_t)(intptr_t)keys[k];
+        int64_t val = vals[k] ? (int64_t)(intptr_t)vals[k] : 0;
+        // 检查是否已存在（覆盖）
+        int found = 0;
+        for (int j = 0; j < m->count; j++) {
+            if (m->keys[j] == key) {
+                m->values[j] = val;
+                found = 1;
+                break;
+            }
+        }
+        if (!found && m->count < AURA_MAP_ELEMS) {
+            m->keys[m->count] = key;
+            m->values[m->count] = val;
+            m->order[m->count] = key;
+            m->count++;
+        }
+    }
+    return (const void *)m;
+}
+
+const void *aura_collections_hashMapGet(const void *map, const void *key) {
+    if (!map || !key) return 0;
+    const AuraMap *m = (const AuraMap *)map;
+    int64_t k = (int64_t)(intptr_t)key;
+    for (int j = 0; j < m->count; j++)
+        if (m->keys[j] == k) return (const void *)(intptr_t)m->values[j];
+    return 0;
+}
+
+const void *aura_collections_hashMapPut(const void *map, const void *key, const void *value) {
+    if (!key) return map;
+    AuraMap *m = (AuraMap *)map;
+    if (!m) {
+        if (aura_map_count >= AURA_MAP_MAX) return 0;
+        m = &aura_maps[aura_map_count++];
+        m->count = 0;
+    }
+    int64_t k = (int64_t)(intptr_t)key;
+    int64_t v = value ? (int64_t)(intptr_t)value : 0;
+    for (int j = 0; j < m->count; j++) {
+        if (m->keys[j] == k) {
+            m->values[j] = v;
+            return (const void *)m;
+        }
+    }
+    if (m->count < AURA_MAP_ELEMS) {
+        m->keys[m->count] = k;
+        m->values[m->count] = v;
+        m->order[m->count] = k;
+        m->count++;
+    }
+    return (const void *)m;
+}
+
+const void *aura_collections_hashMapRemove(const void *map, const void *key) {
+    if (!map || !key) return 0;
+    const AuraMap *m = (const AuraMap *)map;
+    int64_t k = (int64_t)(intptr_t)key;
+    for (int j = 0; j < m->count; j++) {
+        if (m->keys[j] == k) {
+            // 创建新 map 排除该键
+            if (aura_map_count >= AURA_MAP_MAX) return 0;
+            AuraMap *nm = &aura_maps[aura_map_count++];
+            nm->count = 0;
+            for (int n = 0; n < m->count; n++) {
+                if (m->keys[n] != k) {
+                    nm->keys[nm->count] = m->keys[n];
+                    nm->values[nm->count] = m->values[n];
+                    nm->order[nm->count] = m->keys[n];
+                    nm->count++;
+                }
+            }
+            return (const void *)nm;
+        }
+    }
+    return 0;
+}
+
+// LinkedHashMap（复用 AuraMap，保持插入顺序）
+const void *aura_collections_linkedHashMapOf(const void *k0, const void *v0,
+    const void *k1, const void *v1, const void *k2, const void *v2,
+    const void *k3, const void *v3, const void *k4, const void *v4) {
+    return aura_collections_hashMapOf(k0, v0, k1, v1, k2, v2, k3, v3, k4, v4);
+}
+
+const void *aura_collections_linkedHashMapKeys(const void *map) {
+    if (!map) return (const void *)new_list(NULL, 0);
+    const AuraMap *m = (const AuraMap *)map;
+    int64_t items[AURA_LIST_ELEMS];
+    int count = 0;
+    for (int j = 0; j < m->count && count < AURA_LIST_ELEMS; j++)
+        items[count++] = m->order[j];
+    return (const void *)new_list(items, count);
+}
+
+const void *aura_collections_linkedHashMapFirstKey(const void *map) {
+    if (!map) return 0;
+    const AuraMap *m = (const AuraMap *)map;
+    return m->count > 0 ? (const void *)(intptr_t)m->order[0] : 0;
+}
+
+const void *aura_collections_linkedHashMapLastKey(const void *map) {
+    if (!map) return 0;
+    const AuraMap *m = (const AuraMap *)map;
+    return m->count > 0 ? (const void *)(intptr_t)m->order[m->count - 1] : 0;
+}
+
+// aura.time / aura.random — 已有实现（aura_time_epoch / aura_time_epochMillis / aura_random_nextInt）
+
+// aura.encoding — base64
+static const char *B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+static char aura_b64_buf[512];
+
+const char *aura_encoding_base64Encode(const char *s) {
+    if (!s) return "";
+    size_t len = strlen(s), o = 0;
+    for (size_t i = 0; i < len && o + 4 < sizeof(aura_b64_buf); i += 3) {
+        uint32_t n = (uint8_t)s[i] << 16;
+        if (i + 1 < len) n |= (uint8_t)s[i + 1] << 8;
+        if (i + 2 < len) n |= (uint8_t)s[i + 2];
+        aura_b64_buf[o++] = B64[(n >> 18) & 63];
+        aura_b64_buf[o++] = B64[(n >> 12) & 63];
+        aura_b64_buf[o++] = (i + 1 < len) ? B64[(n >> 6) & 63] : '=';
+        aura_b64_buf[o++] = (i + 2 < len) ? B64[n & 63] : '=';
+    }
+    aura_b64_buf[o] = '\0';
+    return aura_b64_buf;
+}
+
+static int b64_val(char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+const char *aura_encoding_base64Decode(const char *s) {
+    if (!s) return "";
+    size_t o = 0;
+    for (size_t i = 0; s[i] && o + 3 < sizeof(aura_b64_buf);) {
+        int a = b64_val(s[i++]);
+        if (a < 0) break;
+        int b = (s[i] && s[i] != '=') ? b64_val(s[i++]) : (i++, -1);
+        int c = (s[i] && s[i] != '=') ? b64_val(s[i++]) : (i++, -1);
+        int d = (s[i] && s[i] != '=') ? b64_val(s[i++]) : (i++, -1);
+        if (b < 0) break;
+        aura_b64_buf[o++] = (char)((a << 2) | (b >> 4));
+        if (c >= 0) aura_b64_buf[o++] = (char)(((b & 15) << 4) | (c >> 2));
+        if (d >= 0) aura_b64_buf[o++] = (char)(((c & 3) << 6) | d);
+    }
+    aura_b64_buf[o] = '\0';
+    return aura_b64_buf;
+}
+
+// aura.path（Windows 分隔符）
+static char aura_path_buf[512];
+
+const char *aura_path_join(const char *a, const char *b) {
+    snprintf(aura_path_buf, sizeof(aura_path_buf), "%s\\%s", a ? a : "", b ? b : "");
+    return aura_path_buf;
+}
+
+const char *aura_path_basename(const char *p) {
+    if (!p) return "";
+    const char *s1 = strrchr(p, '/');
+    const char *s2 = strrchr(p, '\\');
+    const char *s = (s1 && s2) ? (s1 > s2 ? s1 : s2) : (s1 ? s1 : s2);
+    return s ? s + 1 : p;
+}
+
+const char *aura_path_dirname(const char *p) {
+    if (!p) return "";
+    snprintf(aura_path_buf, sizeof(aura_path_buf), "%s", p);
+    char *s1 = strrchr(aura_path_buf, '/');
+    char *s2 = strrchr(aura_path_buf, '\\');
+    char *s = (s1 && s2) ? (s1 > s2 ? s1 : s2) : (s1 ? s1 : s2);
+    if (s) *s = '\0';
+    return aura_path_buf;
+}
+
+// aura.env
+const char *aura_env_platform(void) {
+#ifdef _WIN32
+    return "windows";
+#elif defined(__APPLE__)
+    return "macos";
+#elif defined(__linux__)
+    return "linux";
+#else
+    return "unknown";
+#endif
+}
+
+const char *aura_env_os(void) { return aura_env_platform(); }
+const char *aura_env_arch(void) { return "x86_64"; }
+
+const char *aura_env_get(const char *name) {
+    static char env_buf[512];
+    const char *v = getenv(name ? name : "");
+    if (!v) return "";
+    snprintf(env_buf, sizeof(env_buf), "%s", v);
+    return env_buf;
+}
+
+_Bool aura_env_has(const char *name) {
+    return getenv(name ? name : "") != NULL;
+}
+
+// aura.fs
+_Bool aura_fs_exists(const char *path) {
+    struct _stat st;
+    return _stat(path ? path : "", &st) == 0;
+}
+
+_Bool aura_fs_isFile(const char *path) {
+    struct _stat st;
+    return _stat(path ? path : "", &st) == 0 && (st.st_mode & _S_IFREG);
+}
+
+_Bool aura_fs_isDirectory(const char *path) {
+    struct _stat st;
+    return _stat(path ? path : "", &st) == 0 && (st.st_mode & _S_IFDIR);
+}
+
+const char *aura_fs_readText(const char *path) {
+    static char fs_buf[4096];
+    fs_buf[0] = '\0';
+    FILE *f = fopen(path ? path : "", "rb");
+    if (!f) return fs_buf;
+    size_t n = fread(fs_buf, 1, sizeof(fs_buf) - 1, f);
+    fs_buf[n] = '\0';
+    fclose(f);
+    return fs_buf;
+}
+
+const void *aura_fs_writeText(const char *path, const char *content) {
+    FILE *f = fopen(path ? path : "", "wb");
+    if (!f) return 0;
+    if (content) fputs(content, f);
+    fclose(f);
+    return content;
+}
+

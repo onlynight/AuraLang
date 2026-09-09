@@ -6,19 +6,22 @@ use crate::vm::native::NativeRegistry;
 use crate::vm::value::Value;
 
 pub fn register(reg: &mut NativeRegistry) {
-    reg.register("aura.path.join", nat_join);
-    reg.register("aura.path.dirname", nat_dirname);
-    reg.register("aura.path.basename", nat_basename);
-    reg.register("aura.path.extname", nat_extname);
-    reg.register("aura.path.relative", nat_relative);
-    reg.register("aura.path.resolve", nat_resolve);
-    reg.register("aura.path.normalize", nat_normalize);
-    reg.register("aura.path.isAbsolute", nat_is_absolute);
-    reg.register("aura.path.isRelative", nat_is_relative);
-    reg.register("aura.path.split", nat_split);
-    reg.register("aura.path.separators", nat_separators);
-    reg.register("aura.path.fromUnix", nat_from_unix);
-    reg.register("aura.path.fromWindows", nat_from_windows);
+    // ── 纯逻辑函数（已上移到 Aura 层，但 VM 仍需 native 实现）──
+    reg.register("aura.lang.std.Path.join", nat_join);
+    reg.register("aura.lang.std.Path.dirname", nat_dirname);
+    reg.register("aura.lang.std.Path.basename", nat_basename);
+    reg.register("aura.lang.std.Path.extname", nat_extname);
+    reg.register("aura.lang.std.Path.normalize", nat_normalize);
+    reg.register("aura.lang.std.Path.isAbsolute", nat_is_absolute);
+    reg.register("aura.lang.std.Path.isRelative", nat_is_relative);
+    reg.register("aura.lang.std.Path.split", nat_split);
+    reg.register("aura.lang.std.Path.fromUnix", nat_from_unix);
+    reg.register("aura.lang.std.Path.fromWindows", nat_from_windows);
+
+    // ── 系统相关函数（Rust native 实现）──
+    reg.register("aura.lang.std.Path.relative", nat_relative);
+    reg.register("aura.lang.std.Path.resolve", nat_resolve);
+    reg.register("aura.lang.std.Path.separators", nat_separators);
 }
 
 fn s0(args: &[Value]) -> String {

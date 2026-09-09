@@ -6,34 +6,37 @@ use crate::vm::native::NativeRegistry;
 use crate::vm::value::Value;
 
 pub fn register(reg: &mut NativeRegistry) {
-    reg.register("aura.math.abs", nat_abs);
-    reg.register("aura.math.min", nat_min);
-    reg.register("aura.math.max", nat_max);
-    reg.register("aura.math.ceil", nat_ceil);
-    reg.register("aura.math.floor", nat_floor);
-    reg.register("aura.math.round", nat_round);
-    reg.register("aura.math.trunc", nat_trunc);
-    reg.register("aura.math.sqrt", nat_sqrt);
-    reg.register("aura.math.cbrt", nat_cbrt);
-    reg.register("aura.math.pow", nat_pow);
-    reg.register("aura.math.exp", nat_exp);
-    reg.register("aura.math.log", nat_log);
-    reg.register("aura.math.log2", nat_log2);
-    reg.register("aura.math.log10", nat_log10);
-    reg.register("aura.math.sin", nat_sin);
-    reg.register("aura.math.cos", nat_cos);
-    reg.register("aura.math.tan", nat_tan);
-    reg.register("aura.math.asin", nat_asin);
-    reg.register("aura.math.acos", nat_acos);
-    reg.register("aura.math.atan", nat_atan);
-    reg.register("aura.math.atan2", nat_atan2);
-    reg.register("aura.math.PI", nat_pi);
-    reg.register("aura.math.E", nat_e);
-    reg.register("aura.math.INT_MAX", nat_int_max);
-    reg.register("aura.math.INT_MIN", nat_int_min);
-    reg.register("aura.math.FLOAT_MAX", nat_float_max);
-    reg.register("aura.math.sign", nat_sign);
-    reg.register("aura.math.clamp", nat_clamp);
+    // ── 纯逻辑函数（已上移到 Aura 层，但 VM 仍需 native 实现）──
+    reg.register("aura.lang.std.Math.abs", nat_abs);
+    reg.register("aura.lang.std.Math.min", nat_min);
+    reg.register("aura.lang.std.Math.max", nat_max);
+    reg.register("aura.lang.std.Math.sign", nat_sign);
+    reg.register("aura.lang.std.Math.clamp", nat_clamp);
+
+    // ── libm 函数（Rust native 实现）──
+    reg.register("aura.lang.std.Math.ceil", nat_ceil);
+    reg.register("aura.lang.std.Math.floor", nat_floor);
+    reg.register("aura.lang.std.Math.round", nat_round);
+    reg.register("aura.lang.std.Math.trunc", nat_trunc);
+    reg.register("aura.lang.std.Math.sqrt", nat_sqrt);
+    reg.register("aura.lang.std.Math.cbrt", nat_cbrt);
+    reg.register("aura.lang.std.Math.pow", nat_pow);
+    reg.register("aura.lang.std.Math.exp", nat_exp);
+    reg.register("aura.lang.std.Math.log", nat_log);
+    reg.register("aura.lang.std.Math.log2", nat_log2);
+    reg.register("aura.lang.std.Math.log10", nat_log10);
+    reg.register("aura.lang.std.Math.sin", nat_sin);
+    reg.register("aura.lang.std.Math.cos", nat_cos);
+    reg.register("aura.lang.std.Math.tan", nat_tan);
+    reg.register("aura.lang.std.Math.asin", nat_asin);
+    reg.register("aura.lang.std.Math.acos", nat_acos);
+    reg.register("aura.lang.std.Math.atan", nat_atan);
+    reg.register("aura.lang.std.Math.atan2", nat_atan2);
+    reg.register("aura.lang.std.Math.PI", nat_pi);
+    reg.register("aura.lang.std.Math.E", nat_e);
+    reg.register("aura.lang.std.Math.INT_MAX", nat_int_max);
+    reg.register("aura.lang.std.Math.INT_MIN", nat_int_min);
+    reg.register("aura.lang.std.Math.FLOAT_MAX", nat_float_max);
 }
 
 fn arg0(args: &[Value]) -> f64 {

@@ -1,0 +1,86 @@
+// aura:///aura/lang/std/Test.aura
+// 标准库模块，不可修改
+// 实现：Rust 原生函数（compiler/src/std/std_test.rs）
+// (package 声明由编译器自动注入，无需显式声明)
+/// 测试断言模块。
+///
+/// 使用前需 import：
+/// ```aura
+/// import aura.test.*
+/// ```
+///
+/// @since 0.1
+internal object Test {
+
+    // ── 布尔断言 ──
+
+    /// 断言条件为 true，失败时输出消息。
+    fun assertTrue(condition: Any, message: String): String
+
+    /// 断言条件为 false，失败时输出消息。
+    fun assertFalse(condition: Any, message: String): String
+
+    // ── 相等断言 ──
+
+    /// 断言两个值相等。
+    fun assertEq(a: Any, b: Any, message: String): String
+
+    /// 断言两个值不相等。
+    fun assertNotEq(a: Any, b: Any, message: String): String
+
+    // ── 空值断言 ──
+
+    /// 断言值不为 null。
+    fun assertNotNull(value: Any, message: String): String
+
+    /// 断言值为 null。
+    fun assertNull(value: Any, message: String): String
+
+    // ── 包含断言 ──
+
+    /// 断言字符串/列表包含子字符串/元素。
+    fun assertContains(container: Any, item: Any, message: String): String
+
+    /// 断言字符串/列表不包含子字符串/元素。
+    fun assertNotContains(container: Any, item: Any, message: String): String
+
+    // ── 异常断言 ──
+
+    /// 断言执行代码时抛出异常。
+    fun assertThrows(block: (Any) -> Any, message: String): String
+
+    // ── 比较断言 ──
+
+    /// 断言 a > b。
+    fun assertGt(a: Any, b: Any, message: String): String
+
+    /// 断言 a >= b。
+    fun assertGte(a: Any, b: Any, message: String): String
+
+    /// 断言 a < b。
+    fun assertLt(a: Any, b: Any, message: String): String
+
+    /// 断言 a <= b。
+    fun assertLte(a: Any, b: Any, message: String): String
+
+    // ── 近似断言 ──
+
+    /// 断言两个浮点数近似相等（误差在 delta 范围内）。
+    fun assertApprox(a: Float, b: Float, delta: Float, message: String): String
+
+    // ── 数组/映射断言 ──
+
+    /// 断言两个数组相等。
+    fun assertArrayEq(a: Any, b: Any, message: String): String
+
+    /// 断言两个映射相等。
+    fun assertMapEq(a: Any, b: Any, message: String): String
+
+    // ── 测试控制 ──
+
+    /// 标记测试通过。
+    fun pass(): Unit
+
+    /// 标记测试失败。
+    fun fail(message: String): Unit
+}

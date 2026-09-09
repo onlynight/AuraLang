@@ -1,0 +1,75 @@
+// ════════════════════════════════════════════════════════════
+// Phase 13 — 标准库快照（P13）
+// math / io / string / collections / time / random / encoding /
+// ascii / path / env / fs（net 涉及网络，不在离线快照内）
+// ════════════════════════════════════════════════════════════
+
+import aura.math.*
+import aura.string.*
+import aura.ascii.*
+import aura.collections.*
+import aura.time.*
+import aura.random.*
+import aura.encoding.*
+import aura.path.*
+import aura.env.*
+import aura.fs.*
+import aura.io
+
+fun main() {
+    // ── §13.1 aura.math（P13）──
+    println("§13.1 math: abs=" + abs(-5).toString()
+        + ", min=" + aura.math.min(3.0, 7.0).toString()
+        + ", floor=" + aura.math.floor(3.7).toString())
+
+    // ── §13.2 aura.string（P13）──
+    val s = "Hello, Aura"
+    val contains = if (aura.string.contains(s, "Aura")) { "true" } else { "false" }
+    println("§13.2 string: len=" + aura.string.length(s).toString()
+        + ", upper=" + aura.string.toUpperCase("abc")
+        + ", contains=" + contains)
+
+    // ── §13.3 aura.ascii（P13）──
+    val isA = if (aura.ascii.isAlpha('a')) { "true" } else { "false" }
+    val isD = if (aura.ascii.isDigit('7')) { "true" } else { "false" }
+    println("§13.3 ascii: isAlpha('a')=" + isA
+        + ", isDigit('7')=" + isD
+        + ", toUpper('b')=" + aura.ascii.toUpper('b').toString())
+
+    // ── §13.4 aura.collections（P13）──
+    val list = aura.collections.listOf(3, 1, 2)
+    val hasTwo = if (aura.collections.listContains(list, 2)) { "true" } else { "false" }
+    println("§13.4 collections: contains(2)=" + hasTwo
+        + ", indexOf(1)=" + aura.collections.listIndexOf(list, 1).toString())
+
+    // ── §13.5 aura.time（P13）──
+    val now = aura.time.epoch()
+    println("§13.5 time: epoch=" + now.toString())
+
+    // ── §13.6 aura.random（P13）──
+    val r1 = aura.random.nextInt()
+    val r2 = aura.random.nextInt()
+    println("§13.6 random: nextInt=" + r1.toString() + "," + r2.toString())
+
+    // ── §13.7 aura.encoding（P13）──
+    val enc = aura.encoding.base64Encode("Aura")
+    val dec = aura.encoding.base64Decode(enc)
+    println("§13.7 encoding: base64=" + enc + ", roundtrip=" + dec)
+
+    // ── §13.8 aura.path（P13）──
+    println("§13.8 path: join=" + aura.path.join("a", "b.txt")
+        + ", basename=" + aura.path.basename("dir/file.txt"))
+
+    // ── §13.9 aura.env（P13）──
+    println("§13.9 env: platform=" + aura.env.platform())
+
+    // ── §13.10 aura.fs（P13，最小写读）──
+    aura.fs.writeText("_std_snapshot.txt", "fs-ok")
+    val content = aura.fs.readText("_std_snapshot.txt")
+    val fsExists = if (aura.fs.exists("_std_snapshot.txt")) { "true" } else { "false" }
+    println("§13.10 fs: roundtrip=" + content + ", exists=" + fsExists)
+
+    // ── §13.11 aura.io（P13）──
+    val ioExists = if (aura.io.fileExists("_std_snapshot.txt")) { "true" } else { "false" }
+    println("§13.11 io: fileExists=" + ioExists)
+}

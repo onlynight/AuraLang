@@ -44,158 +44,158 @@ fn test_all_std_functions_registered() {
     let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // std.io
-    assert!(reg.contains("aura.io.println"));
-    assert!(reg.contains("aura.io.print"));
-    assert!(reg.contains("aura.io.readLine"));
-    assert!(reg.contains("aura.io.fileRead"));
-    assert!(reg.contains("aura.io.fileWrite"));
-    assert!(reg.contains("aura.io.fileExists"));
+    assert!(reg.contains("aura.lang.std.IO.println"));
+    assert!(reg.contains("aura.lang.std.IO.print"));
+    assert!(reg.contains("aura.lang.std.IO.readLine"));
+    assert!(reg.contains("aura.lang.std.IO.fileRead"));
+    assert!(reg.contains("aura.lang.std.IO.fileWrite"));
+    assert!(reg.contains("aura.lang.std.IO.fileExists"));
 
     // std.math
-    assert!(reg.contains("aura.math.abs"));
-    assert!(reg.contains("aura.math.min"));
-    assert!(reg.contains("aura.math.max"));
-    assert!(reg.contains("aura.math.sqrt"));
-    assert!(reg.contains("aura.math.pow"));
-    assert!(reg.contains("aura.math.PI"));
-    assert!(reg.contains("aura.math.E"));
-    assert!(reg.contains("aura.math.sin"));
-    assert!(reg.contains("aura.math.cos"));
-    assert!(reg.contains("aura.math.log"));
+    assert!(reg.contains("aura.lang.std.Math.abs"));
+    assert!(reg.contains("aura.lang.std.Math.min"));
+    assert!(reg.contains("aura.lang.std.Math.max"));
+    assert!(reg.contains("aura.lang.std.Math.sqrt"));
+    assert!(reg.contains("aura.lang.std.Math.pow"));
+    assert!(reg.contains("aura.lang.std.Math.PI"));
+    assert!(reg.contains("aura.lang.std.Math.E"));
+    assert!(reg.contains("aura.lang.std.Math.sin"));
+    assert!(reg.contains("aura.lang.std.Math.cos"));
+    assert!(reg.contains("aura.lang.std.Math.log"));
 
     // std.string
-    assert!(reg.contains("aura.string.contains"));
-    assert!(reg.contains("aura.string.startsWith"));
-    assert!(reg.contains("aura.string.endsWith"));
-    assert!(reg.contains("aura.string.split"));
-    assert!(reg.contains("aura.string.join"));
-    assert!(reg.contains("aura.string.replace"));
-    assert!(reg.contains("aura.string.toUpperCase"));
-    assert!(reg.contains("aura.string.toLowerCase"));
-    assert!(reg.contains("aura.string.length"));
-    assert!(reg.contains("aura.string.format"));
-    assert!(reg.contains("aura.string.trim"));
+    assert!(reg.contains("aura.lang.std.String.contains"));
+    assert!(reg.contains("aura.lang.std.String.startsWith"));
+    assert!(reg.contains("aura.lang.std.String.endsWith"));
+    assert!(reg.contains("aura.lang.std.String.split"));
+    assert!(reg.contains("aura.lang.std.String.join"));
+    assert!(reg.contains("aura.lang.std.String.replace"));
+    assert!(reg.contains("aura.lang.std.String.toUpperCase"));
+    assert!(reg.contains("aura.lang.std.String.toLowerCase"));
+    assert!(reg.contains("aura.lang.std.String.length"));
+    assert!(reg.contains("aura.lang.std.String.format"));
+    assert!(reg.contains("aura.lang.std.String.trim"));
 
     // std.collections
-    assert!(reg.contains("aura.collections.listOf"));
-    assert!(reg.contains("aura.collections.mapOf"));
-    assert!(reg.contains("aura.collections.setOf"));
-    assert!(reg.contains("aura.collections.emptyList"));
-    assert!(reg.contains("aura.collections.emptyMap"));
+    assert!(reg.contains("aura.lang.std.Collections.listOf"));
+    assert!(reg.contains("aura.lang.std.Collections.mapOf"));
+    assert!(reg.contains("aura.lang.std.Collections.setOf"));
+    assert!(reg.contains("aura.lang.std.Collections.emptyList"));
+    assert!(reg.contains("aura.lang.std.Collections.emptyMap"));
 
     // std.fs
-    assert!(reg.contains("aura.fs.exists"));
-    assert!(reg.contains("aura.fs.isFile"));
-    assert!(reg.contains("aura.fs.isDirectory"));
-    assert!(reg.contains("aura.fs.readText"));
-    assert!(reg.contains("aura.fs.writeText"));
-    assert!(reg.contains("aura.fs.mkdir"));
-    assert!(reg.contains("aura.fs.mkdirP"));
-    assert!(reg.contains("aura.fs.delete"));
-    assert!(reg.contains("aura.fs.rename"));
-    assert!(reg.contains("aura.fs.listDir"));
-    assert!(reg.contains("aura.fs.fileSize"));
+    assert!(reg.contains("aura.lang.std.FileSystem.exists"));
+    assert!(reg.contains("aura.lang.std.FileSystem.isFile"));
+    assert!(reg.contains("aura.lang.std.FileSystem.isDirectory"));
+    assert!(reg.contains("aura.lang.std.FileSystem.readText"));
+    assert!(reg.contains("aura.lang.std.FileSystem.writeText"));
+    assert!(reg.contains("aura.lang.std.FileSystem.mkdir"));
+    assert!(reg.contains("aura.lang.std.FileSystem.mkdirP"));
+    assert!(reg.contains("aura.lang.std.FileSystem.delete"));
+    assert!(reg.contains("aura.lang.std.FileSystem.rename"));
+    assert!(reg.contains("aura.lang.std.FileSystem.listDir"));
+    assert!(reg.contains("aura.lang.std.FileSystem.fileSize"));
 
     // std.json
-    assert!(reg.contains("aura.json.parse"));
-    assert!(reg.contains("aura.json.stringify"));
-    assert!(reg.contains("aura.json.isValid"));
-    assert!(reg.contains("aura.json.get"));
-    assert!(reg.contains("aura.json.set"));
-    assert!(reg.contains("aura.json.keys"));
-    assert!(reg.contains("aura.json.values"));
+    assert!(reg.contains("aura.lang.std.Json.parse"));
+    assert!(reg.contains("aura.lang.std.Json.stringify"));
+    assert!(reg.contains("aura.lang.std.Json.isValid"));
+    assert!(reg.contains("aura.lang.std.Json.get"));
+    assert!(reg.contains("aura.lang.std.Json.set"));
+    assert!(reg.contains("aura.lang.std.Json.keys"));
+    assert!(reg.contains("aura.lang.std.Json.values"));
 
     // std.time
-    assert!(reg.contains("aura.time.now"));
-    assert!(reg.contains("aura.time.epoch"));
-    assert!(reg.contains("aura.time.sleep"));
-    assert!(reg.contains("aura.time.toDateString"));
-    assert!(reg.contains("aura.time.formatDate"));
+    assert!(reg.contains("aura.lang.std.Time.now"));
+    assert!(reg.contains("aura.lang.std.Time.epoch"));
+    assert!(reg.contains("aura.lang.std.Time.sleep"));
+    assert!(reg.contains("aura.lang.std.Time.toDateString"));
+    assert!(reg.contains("aura.lang.std.Time.formatDate"));
 
     // std.test
-    assert!(reg.contains("aura.test.assertTrue"));
-    assert!(reg.contains("aura.test.assertFalse"));
-    assert!(reg.contains("aura.test.assertEq"));
-    assert!(reg.contains("aura.test.assertNotNull"));
-    assert!(reg.contains("aura.test.assertNull"));
+    assert!(reg.contains("aura.lang.std.Test.assertTrue"));
+    assert!(reg.contains("aura.lang.std.Test.assertFalse"));
+    assert!(reg.contains("aura.lang.std.Test.assertEq"));
+    assert!(reg.contains("aura.lang.std.Test.assertNotNull"));
+    assert!(reg.contains("aura.lang.std.Test.assertNull"));
 
     // std.builtin
-    assert!(reg.contains("aura.builtin.typeof"));
-    assert!(reg.contains("aura.builtin.isNull"));
-    assert!(reg.contains("aura.builtin.toString"));
-    assert!(reg.contains("aura.builtin.toInt"));
-    assert!(reg.contains("aura.builtin.toFloat"));
+    assert!(reg.contains("aura.lang.std.Builtin.typeof"));
+    assert!(reg.contains("aura.lang.std.Builtin.isNull"));
+    assert!(reg.contains("aura.lang.std.Builtin.toString"));
+    assert!(reg.contains("aura.lang.std.Builtin.toInt"));
+    assert!(reg.contains("aura.lang.std.Builtin.toFloat"));
 
     // std.env
-    assert!(reg.contains("aura.env.get"));
-    assert!(reg.contains("aura.env.set"));
-    assert!(reg.contains("aura.env.has"));
-    assert!(reg.contains("aura.env.platform"));
-    assert!(reg.contains("aura.env.home"));
-    assert!(reg.contains("aura.env.pwd"));
+    assert!(reg.contains("aura.lang.std.Env.get"));
+    assert!(reg.contains("aura.lang.std.Env.set"));
+    assert!(reg.contains("aura.lang.std.Env.has"));
+    assert!(reg.contains("aura.lang.std.Env.platform"));
+    assert!(reg.contains("aura.lang.std.Env.home"));
+    assert!(reg.contains("aura.lang.std.Env.pwd"));
 
     // std.process
-    assert!(reg.contains("aura.process.args"));
-    assert!(reg.contains("aura.process.pid"));
-    assert!(reg.contains("aura.process.exitCode"));
+    assert!(reg.contains("aura.lang.std.Process.args"));
+    assert!(reg.contains("aura.lang.std.Process.pid"));
+    assert!(reg.contains("aura.lang.std.Process.exitCode"));
 
     // std.random
-    assert!(reg.contains("aura.random.nextInt"));
-    assert!(reg.contains("aura.random.nextFloat"));
-    assert!(reg.contains("aura.random.nextBool"));
-    assert!(reg.contains("aura.random.choice"));
-    assert!(reg.contains("aura.random.shuffle"));
+    assert!(reg.contains("aura.lang.std.Random.nextInt"));
+    assert!(reg.contains("aura.lang.std.Random.nextFloat"));
+    assert!(reg.contains("aura.lang.std.Random.nextBool"));
+    assert!(reg.contains("aura.lang.std.Random.choice"));
+    assert!(reg.contains("aura.lang.std.Random.shuffle"));
 
     // std.encoding
-    assert!(reg.contains("aura.encoding.base64Encode"));
-    assert!(reg.contains("aura.encoding.base64Decode"));
-    assert!(reg.contains("aura.encoding.hexEncode"));
-    assert!(reg.contains("aura.encoding.hexDecode"));
+    assert!(reg.contains("aura.lang.std.Encoding.base64Encode"));
+    assert!(reg.contains("aura.lang.std.Encoding.base64Decode"));
+    assert!(reg.contains("aura.lang.std.Encoding.hexEncode"));
+    assert!(reg.contains("aura.lang.std.Encoding.hexDecode"));
 
     // std.ascii
-    assert!(reg.contains("aura.ascii.isAlpha"));
-    assert!(reg.contains("aura.ascii.isDigit"));
-    assert!(reg.contains("aura.ascii.isUpper"));
-    assert!(reg.contains("aura.ascii.isLower"));
-    assert!(reg.contains("aura.ascii.toUpper"));
-    assert!(reg.contains("aura.ascii.toLower"));
+    assert!(reg.contains("aura.lang.std.Ascii.isAlpha"));
+    assert!(reg.contains("aura.lang.std.Ascii.isDigit"));
+    assert!(reg.contains("aura.lang.std.Ascii.isUpper"));
+    assert!(reg.contains("aura.lang.std.Ascii.isLower"));
+    assert!(reg.contains("aura.lang.std.Ascii.toUpper"));
+    assert!(reg.contains("aura.lang.std.Ascii.toLower"));
 
     // std.console
-    assert!(reg.contains("aura.console.clear"));
-    assert!(reg.contains("aura.console.red"));
-    assert!(reg.contains("aura.console.green"));
-    assert!(reg.contains("aura.console.size"));
+    assert!(reg.contains("aura.lang.std.Console.clear"));
+    assert!(reg.contains("aura.lang.std.Console.red"));
+    assert!(reg.contains("aura.lang.std.Console.green"));
+    assert!(reg.contains("aura.lang.std.Console.size"));
 
     // std.path
-    assert!(reg.contains("aura.path.join"));
-    assert!(reg.contains("aura.path.dirname"));
-    assert!(reg.contains("aura.path.basename"));
-    assert!(reg.contains("aura.path.extname"));
-    assert!(reg.contains("aura.path.isAbsolute"));
+    assert!(reg.contains("aura.lang.std.Path.join"));
+    assert!(reg.contains("aura.lang.std.Path.dirname"));
+    assert!(reg.contains("aura.lang.std.Path.basename"));
+    assert!(reg.contains("aura.lang.std.Path.extname"));
+    assert!(reg.contains("aura.lang.std.Path.isAbsolute"));
 
     // std.assert
-    assert!(reg.contains("aura.assert.assert"));
-    assert!(reg.contains("aura.assert.assertTrue"));
-    assert!(reg.contains("aura.assert.assertFalse"));
-    assert!(reg.contains("aura.assert.assertEq"));
+    assert!(reg.contains("aura.lang.std.Assert.assert"));
+    assert!(reg.contains("aura.lang.std.Assert.assertTrue"));
+    assert!(reg.contains("aura.lang.std.Assert.assertFalse"));
+    assert!(reg.contains("aura.lang.std.Assert.assertEq"));
 
     // std.iter
-    assert!(reg.contains("aura.iter.sum"));
-    assert!(reg.contains("aura.iter.avg"));
-    assert!(reg.contains("aura.iter.min"));
-    assert!(reg.contains("aura.iter.max"));
-    assert!(reg.contains("aura.iter.distinct"));
-    assert!(reg.contains("aura.iter.range"));
-    assert!(reg.contains("aura.iter.take"));
-    assert!(reg.contains("aura.iter.skip"));
-    assert!(reg.contains("aura.iter.chain"));
-    assert!(reg.contains("aura.iter.flatMap"));
+    assert!(reg.contains("aura.lang.std.Iter.sum"));
+    assert!(reg.contains("aura.lang.std.Iter.avg"));
+    assert!(reg.contains("aura.lang.std.Iter.min"));
+    assert!(reg.contains("aura.lang.std.Iter.max"));
+    assert!(reg.contains("aura.lang.std.Iter.distinct"));
+    assert!(reg.contains("aura.lang.std.Iter.range"));
+    assert!(reg.contains("aura.lang.std.Iter.take"));
+    assert!(reg.contains("aura.lang.std.Iter.skip"));
+    assert!(reg.contains("aura.lang.std.Iter.chain"));
+    assert!(reg.contains("aura.lang.std.Iter.flatMap"));
 
     // std.net
-    assert!(reg.contains("aura.net.tcpConnect"));
-    assert!(reg.contains("aura.net.tcpListen"));
-    assert!(reg.contains("aura.net.getHostname"));
-    assert!(reg.contains("aura.net.getLocalIp"));
+    assert!(reg.contains("aura.lang.std.Network.tcpConnect"));
+    assert!(reg.contains("aura.lang.std.Network.tcpListen"));
+    assert!(reg.contains("aura.lang.std.Network.getHostname"));
+    assert!(reg.contains("aura.lang.std.Network.getLocalIp"));
 }
 
 #[test]
@@ -203,13 +203,13 @@ fn test_std_math() {
     let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // abs
-    let result = call(&reg, "aura.math.abs", &[Value::Int(-42)]);
+    let result = call(&reg, "aura.lang.std.Math.abs", &[Value::Int(-42)]);
     assert_eq!(result, Value::Int(42));
 
     // min / max
     let result = call(
         &reg,
-        "aura.math.min",
+        "aura.lang.std.Math.min",
         &[
             Value::Int(3),
             Value::Int(5),
@@ -219,7 +219,7 @@ fn test_std_math() {
 
     let result = call(
         &reg,
-        "aura.math.max",
+        "aura.lang.std.Math.max",
         &[
             Value::Int(3),
             Value::Int(5),
@@ -228,20 +228,20 @@ fn test_std_math() {
     assert_eq!(result, Value::Int(5));
 
     // ceil / floor
-    let result = call(&reg, "aura.math.ceil", &[Value::Float(1.2)]);
+    let result = call(&reg, "aura.lang.std.Math.ceil", &[Value::Float(1.2)]);
     assert_eq!(result, Value::Float(2.0));
 
-    let result = call(&reg, "aura.math.floor", &[Value::Float(1.8)]);
+    let result = call(&reg, "aura.lang.std.Math.floor", &[Value::Float(1.8)]);
     assert_eq!(result, Value::Float(1.0));
 
     // sqrt
-    let result = call(&reg, "aura.math.sqrt", &[Value::Float(16.0)]);
+    let result = call(&reg, "aura.lang.std.Math.sqrt", &[Value::Float(16.0)]);
     assert!((result.as_float() - 4.0).abs() < 1e-10);
 
     // pow
     let result = call(
         &reg,
-        "aura.math.pow",
+        "aura.lang.std.Math.pow",
         &[
             Value::Float(2.0),
             Value::Float(3.0),
@@ -250,11 +250,11 @@ fn test_std_math() {
     assert!((result.as_float() - 8.0).abs() < 1e-10);
 
     // PI
-    let pi = call(&reg, "aura.math.PI", &[]);
+    let pi = call(&reg, "aura.lang.std.Math.PI", &[]);
     assert!((pi.as_float() - 3.141592653589793).abs() < 1e-10);
 
     // E
-    let e = call(&reg, "aura.math.E", &[]);
+    let e = call(&reg, "aura.lang.std.Math.E", &[]);
     assert!((e.as_float() - 2.718281828459045).abs() < 1e-10);
 }
 
@@ -265,7 +265,7 @@ fn test_std_string() {
     // contains
     let result = call(
         &reg,
-        "aura.string.contains",
+        "aura.lang.std.String.contains",
         &[
             Value::str_("hello world"),
             Value::str_("world"),
@@ -275,7 +275,7 @@ fn test_std_string() {
 
     let result = call(
         &reg,
-        "aura.string.contains",
+        "aura.lang.std.String.contains",
         &[
             Value::str_("hello"),
             Value::str_("xyz"),
@@ -286,7 +286,7 @@ fn test_std_string() {
     // startsWith
     let result = call(
         &reg,
-        "aura.string.startsWith",
+        "aura.lang.std.String.startsWith",
         &[
             Value::str_("hello"),
             Value::str_("hel"),
@@ -297,7 +297,7 @@ fn test_std_string() {
     // endsWith
     let result = call(
         &reg,
-        "aura.string.endsWith",
+        "aura.lang.std.String.endsWith",
         &[
             Value::str_("hello"),
             Value::str_("llo"),
@@ -308,7 +308,7 @@ fn test_std_string() {
     // split
     let result = call(
         &reg,
-        "aura.string.split",
+        "aura.lang.std.String.split",
         &[
             Value::str_("hello world"),
             Value::str_(" "),
@@ -324,25 +324,37 @@ fn test_std_string() {
     }
 
     // toUpperCase
-    let result = call(&reg, "aura.string.toUpperCase", &[Value::str_("hello")]);
+    let result = call(
+        &reg,
+        "aura.lang.std.String.toUpperCase",
+        &[Value::str_("hello")],
+    );
     assert_eq!(result, Value::str_("HELLO"));
 
     // toLowerCase
-    let result = call(&reg, "aura.string.toLowerCase", &[Value::str_("HELLO")]);
+    let result = call(
+        &reg,
+        "aura.lang.std.String.toLowerCase",
+        &[Value::str_("HELLO")],
+    );
     assert_eq!(result, Value::str_("hello"));
 
     // length
-    let result = call(&reg, "aura.string.length", &[Value::str_("hello")]);
+    let result = call(&reg, "aura.lang.std.String.length", &[Value::str_("hello")]);
     assert_eq!(result, Value::Int(5));
 
     // trim
-    let result = call(&reg, "aura.string.trim", &[Value::str_("  hello  ")]);
+    let result = call(
+        &reg,
+        "aura.lang.std.String.trim",
+        &[Value::str_("  hello  ")],
+    );
     assert_eq!(result, Value::str_("hello"));
 
     // format
     let result = call(
         &reg,
-        "aura.string.format",
+        "aura.lang.std.String.format",
         &[
             Value::str_("Hello {0}, you are {1}"),
             Value::str_("World"),
@@ -354,7 +366,7 @@ fn test_std_string() {
     // repeat
     let result = call(
         &reg,
-        "aura.string.repeat",
+        "aura.lang.std.String.repeat",
         &[
             Value::Int(3),
             Value::str_("ab"),
@@ -365,7 +377,7 @@ fn test_std_string() {
     // indexOf
     let result = call(
         &reg,
-        "aura.string.indexOf",
+        "aura.lang.std.String.indexOf",
         &[
             Value::str_("hello"),
             Value::str_("l"),
@@ -381,7 +393,7 @@ fn test_std_collections() {
     // listOf
     let result = call(
         &reg,
-        "aura.collections.listOf",
+        "aura.lang.std.Collections.listOf",
         &[
             Value::Int(1),
             Value::Int(2),
@@ -401,7 +413,7 @@ fn test_std_collections() {
     // mapOf
     let result = call(
         &reg,
-        "aura.collections.mapOf",
+        "aura.lang.std.Collections.mapOf",
         &[
             Value::str_("name"),
             Value::str_("Aura"),
@@ -421,7 +433,7 @@ fn test_std_collections() {
     // setOf (unique)
     let result = call(
         &reg,
-        "aura.collections.setOf",
+        "aura.lang.std.Collections.setOf",
         &[
             Value::Int(1),
             Value::Int(2),
@@ -436,7 +448,7 @@ fn test_std_collections() {
     }
 
     // emptyList
-    let result = call(&reg, "aura.collections.emptyList", &[]);
+    let result = call(&reg, "aura.lang.std.Collections.emptyList", &[]);
     match &result {
         Value::List(items) => {
             assert!(items.is_empty());
@@ -452,7 +464,7 @@ fn test_std_json() {
     // parse
     let result = call(
         &reg,
-        "aura.json.parse",
+        "aura.lang.std.Json.parse",
         &[Value::str_(r#"{"name": "Aura", "version": 1}"#)],
     );
     match &result {
@@ -470,7 +482,7 @@ fn test_std_json() {
         m.insert(Value::str_("key"), Value::str_("value"));
         Value::Map(m)
     };
-    let result = call(&reg, "aura.json.stringify", &[map.clone()]);
+    let result = call(&reg, "aura.lang.std.Json.stringify", &[map.clone()]);
     let str_result = result.as_string();
     assert!(str_result.contains("\"key\""));
     assert!(str_result.contains("\"value\""));
@@ -478,16 +490,24 @@ fn test_std_json() {
     // isValid
     let result = call(
         &reg,
-        "aura.json.isValid",
+        "aura.lang.std.Json.isValid",
         &[Value::str_(r#"{"valid": true}"#)],
     );
     assert_eq!(result, Value::Bool(true));
 
-    let result = call(&reg, "aura.json.isValid", &[Value::str_("{invalid")]);
+    let result = call(
+        &reg,
+        "aura.lang.std.Json.isValid",
+        &[Value::str_("{invalid")],
+    );
     assert_eq!(result, Value::Bool(false));
 
     // parse array
-    let result = call(&reg, "aura.json.parse", &[Value::str_(r#"[1, 2, 3]"#)]);
+    let result = call(
+        &reg,
+        "aura.lang.std.Json.parse",
+        &[Value::str_(r#"[1, 2, 3]"#)],
+    );
     match &result {
         Value::List(items) => {
             assert_eq!(items.len(), 3);
@@ -503,22 +523,22 @@ fn test_std_time() {
     let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // now should return a positive timestamp
-    let result = call(&reg, "aura.time.now", &[]);
+    let result = call(&reg, "aura.lang.std.Time.now", &[]);
     let now = result.as_float();
     assert!(now > 0.0);
 
     // toDateString for epoch
-    let result = call(&reg, "aura.time.toDateString", &[Value::Int(0)]);
+    let result = call(&reg, "aura.lang.std.Time.toDateString", &[Value::Int(0)]);
     assert_eq!(result, Value::str_("1970-01-01"));
 
     // toTimeString for epoch
-    let result = call(&reg, "aura.time.toTimeString", &[Value::Int(0)]);
+    let result = call(&reg, "aura.lang.std.Time.toTimeString", &[Value::Int(0)]);
     assert_eq!(result, Value::str_("00:00:00"));
 
     // diff
     let result = call(
         &reg,
-        "aura.time.diff",
+        "aura.lang.std.Time.diff",
         &[
             Value::Float(100.0),
             Value::Float(200.0),
@@ -534,7 +554,7 @@ fn test_std_test() {
     // assertTrue (pass)
     let result = call(
         &reg,
-        "aura.test.assertTrue",
+        "aura.lang.std.Test.assertTrue",
         &[
             Value::Bool(true),
             Value::str_("test passed"),
@@ -543,13 +563,17 @@ fn test_std_test() {
     assert!(result.as_string().starts_with("PASS"));
 
     // assertFalse (pass)
-    let result = call(&reg, "aura.test.assertFalse", &[Value::Bool(false)]);
+    let result = call(
+        &reg,
+        "aura.lang.std.Test.assertFalse",
+        &[Value::Bool(false)],
+    );
     assert!(result.as_string().starts_with("PASS"));
 
     // assertEq (pass)
     let result = call(
         &reg,
-        "aura.test.assertEq",
+        "aura.lang.std.Test.assertEq",
         &[
             Value::Int(42),
             Value::Int(42),
@@ -560,7 +584,7 @@ fn test_std_test() {
     // assertEq (fail)
     let result = call(
         &reg,
-        "aura.test.assertEq",
+        "aura.lang.std.Test.assertEq",
         &[
             Value::Int(1),
             Value::Int(2),
@@ -569,11 +593,11 @@ fn test_std_test() {
     assert!(result.as_string().starts_with("FAIL"));
 
     // assertNotNull
-    let result = call(&reg, "aura.test.assertNotNull", &[Value::Int(42)]);
+    let result = call(&reg, "aura.lang.std.Test.assertNotNull", &[Value::Int(42)]);
     assert!(result.as_string().starts_with("PASS"));
 
     // assertNull
-    let result = call(&reg, "aura.test.assertNull", &[Value::Null]);
+    let result = call(&reg, "aura.lang.std.Test.assertNull", &[Value::Null]);
     assert!(result.as_string().starts_with("PASS"));
 }
 
@@ -582,30 +606,34 @@ fn test_std_builtin() {
     let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // typeof
-    let result = call(&reg, "aura.builtin.typeof", &[Value::Int(42)]);
+    let result = call(&reg, "aura.lang.std.Builtin.typeof", &[Value::Int(42)]);
     assert_eq!(result, Value::str_("Int"));
 
-    let result = call(&reg, "aura.builtin.typeof", &[Value::Float(3.14)]);
+    let result = call(&reg, "aura.lang.std.Builtin.typeof", &[Value::Float(3.14)]);
     assert_eq!(result, Value::str_("Float"));
 
-    let result = call(&reg, "aura.builtin.typeof", &[Value::Bool(true)]);
+    let result = call(&reg, "aura.lang.std.Builtin.typeof", &[Value::Bool(true)]);
     assert_eq!(result, Value::str_("Boolean"));
 
-    let result = call(&reg, "aura.builtin.typeof", &[Value::str_("hello")]);
+    let result = call(
+        &reg,
+        "aura.lang.std.Builtin.typeof",
+        &[Value::str_("hello")],
+    );
     assert_eq!(result, Value::str_("String"));
 
     // isNull
-    let result = call(&reg, "aura.builtin.isNull", &[Value::Null]);
+    let result = call(&reg, "aura.lang.std.Builtin.isNull", &[Value::Null]);
     assert_eq!(result, Value::Bool(true));
 
-    let result = call(&reg, "aura.builtin.isNull", &[Value::Int(0)]);
+    let result = call(&reg, "aura.lang.std.Builtin.isNull", &[Value::Int(0)]);
     assert_eq!(result, Value::Bool(false));
 
     // isPositive
-    let result = call(&reg, "aura.builtin.isPositive", &[Value::Int(5)]);
+    let result = call(&reg, "aura.lang.std.Builtin.isPositive", &[Value::Int(5)]);
     assert_eq!(result, Value::Bool(true));
 
-    let result = call(&reg, "aura.builtin.isPositive", &[Value::Int(-1)]);
+    let result = call(&reg, "aura.lang.std.Builtin.isPositive", &[Value::Int(-1)]);
     assert_eq!(result, Value::Bool(false));
 }
 
@@ -616,31 +644,47 @@ fn test_std_env() {
     // set / get
     call(
         &reg,
-        "aura.env.set",
+        "aura.lang.std.Env.set",
         &[
             Value::str_("AURA_TEST_VAR"),
             Value::str_("test_value"),
         ],
     );
-    let result = call(&reg, "aura.env.get", &[Value::str_("AURA_TEST_VAR")]);
+    let result = call(
+        &reg,
+        "aura.lang.std.Env.get",
+        &[Value::str_("AURA_TEST_VAR")],
+    );
     assert_eq!(result, Value::str_("test_value"));
 
     // has
-    let result = call(&reg, "aura.env.has", &[Value::str_("AURA_TEST_VAR")]);
+    let result = call(
+        &reg,
+        "aura.lang.std.Env.has",
+        &[Value::str_("AURA_TEST_VAR")],
+    );
     assert_eq!(result, Value::Bool(true));
 
     // remove
-    call(&reg, "aura.env.remove", &[Value::str_("AURA_TEST_VAR")]);
-    let result = call(&reg, "aura.env.has", &[Value::str_("AURA_TEST_VAR")]);
+    call(
+        &reg,
+        "aura.lang.std.Env.remove",
+        &[Value::str_("AURA_TEST_VAR")],
+    );
+    let result = call(
+        &reg,
+        "aura.lang.std.Env.has",
+        &[Value::str_("AURA_TEST_VAR")],
+    );
     assert_eq!(result, Value::Bool(false));
 
     // platform
-    let result = call(&reg, "aura.env.platform", &[]);
+    let result = call(&reg, "aura.lang.std.Env.platform", &[]);
     let platform = result.as_string();
     assert!(!platform.is_empty());
 
     // home
-    let result = call(&reg, "aura.env.home", &[]);
+    let result = call(&reg, "aura.lang.std.Env.home", &[]);
     assert!(result.as_string().len() > 0);
 }
 
@@ -649,23 +693,23 @@ fn test_std_random() {
     let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // nextInt should return different values
-    let r1 = call(&reg, "aura.random.nextInt", &[]);
-    let r2 = call(&reg, "aura.random.nextInt", &[]);
+    let r1 = call(&reg, "aura.lang.std.Random.nextInt", &[]);
+    let r2 = call(&reg, "aura.lang.std.Random.nextInt", &[]);
     // They might theoretically be the same, but very unlikely
     let _ = (r1, r2);
 
     // nextFloat should be in [0, 1)
-    let r = call(&reg, "aura.random.nextFloat", &[]);
+    let r = call(&reg, "aura.lang.std.Random.nextFloat", &[]);
     let f = r.as_float();
     assert!(f >= 0.0 && f < 1.0);
 
     // nextBool
-    let _ = call(&reg, "aura.random.nextBool", &[]);
+    let _ = call(&reg, "aura.lang.std.Random.nextBool", &[]);
 
     // nextIntRange
     let r = call(
         &reg,
-        "aura.random.nextIntRange",
+        "aura.lang.std.Random.nextIntRange",
         &[
             Value::Int(10),
             Value::Int(20),
@@ -680,7 +724,7 @@ fn test_std_random() {
         Value::Int(2),
         Value::Int(3),
     ];
-    let r = call(&reg, "aura.random.choice", &items);
+    let r = call(&reg, "aura.lang.std.Random.choice", &items);
     assert!(r == Value::Int(1) || r == Value::Int(2) || r == Value::Int(3));
 }
 
@@ -690,14 +734,22 @@ fn test_std_encoding() {
 
     // base64 encode/decode roundtrip
     let original = Value::str_("Hello, Aura!");
-    let encoded = call(&reg, "aura.encoding.base64Encode", &[original.clone()]);
-    let decoded = call(&reg, "aura.encoding.base64Decode", &[encoded]);
+    let encoded = call(
+        &reg,
+        "aura.lang.std.Encoding.base64Encode",
+        &[original.clone()],
+    );
+    let decoded = call(&reg, "aura.lang.std.Encoding.base64Decode", &[encoded]);
     assert_eq!(decoded, original);
 
     // hex encode/decode roundtrip
     let original = Value::str_("Hello");
-    let encoded = call(&reg, "aura.encoding.hexEncode", &[original.clone()]);
-    let decoded = call(&reg, "aura.encoding.hexDecode", &[encoded]);
+    let encoded = call(
+        &reg,
+        "aura.lang.std.Encoding.hexEncode",
+        &[original.clone()],
+    );
+    let decoded = call(&reg, "aura.lang.std.Encoding.hexDecode", &[encoded]);
     assert_eq!(decoded, original);
 }
 
@@ -706,28 +758,28 @@ fn test_std_ascii() {
     let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // isAlpha
-    let result = call(&reg, "aura.ascii.isAlpha", &[Value::str_("A")]);
+    let result = call(&reg, "aura.lang.std.Ascii.isAlpha", &[Value::str_("A")]);
     assert_eq!(result, Value::Bool(true));
 
-    let result = call(&reg, "aura.ascii.isAlpha", &[Value::str_("1")]);
+    let result = call(&reg, "aura.lang.std.Ascii.isAlpha", &[Value::str_("1")]);
     assert_eq!(result, Value::Bool(false));
 
     // isDigit
-    let result = call(&reg, "aura.ascii.isDigit", &[Value::str_("5")]);
+    let result = call(&reg, "aura.lang.std.Ascii.isDigit", &[Value::str_("5")]);
     assert_eq!(result, Value::Bool(true));
 
-    let result = call(&reg, "aura.ascii.isDigit", &[Value::str_("a")]);
+    let result = call(&reg, "aura.lang.std.Ascii.isDigit", &[Value::str_("a")]);
     assert_eq!(result, Value::Bool(false));
 
     // isUpper
-    let result = call(&reg, "aura.ascii.isUpper", &[Value::str_("A")]);
+    let result = call(&reg, "aura.lang.std.Ascii.isUpper", &[Value::str_("A")]);
     assert_eq!(result, Value::Bool(true));
 
-    let result = call(&reg, "aura.ascii.isUpper", &[Value::str_("a")]);
+    let result = call(&reg, "aura.lang.std.Ascii.isUpper", &[Value::str_("a")]);
     assert_eq!(result, Value::Bool(false));
 
     // isLower
-    let result = call(&reg, "aura.ascii.isLower", &[Value::str_("a")]);
+    let result = call(&reg, "aura.lang.std.Ascii.isLower", &[Value::str_("a")]);
     assert_eq!(result, Value::Bool(true));
 }
 
@@ -738,7 +790,7 @@ fn test_std_path() {
     // join
     let result = call(
         &reg,
-        "aura.path.join",
+        "aura.lang.std.Path.join",
         &[
             Value::str_("dir"),
             Value::str_("file.txt"),
@@ -751,7 +803,7 @@ fn test_std_path() {
     // dirname
     let result = call(
         &reg,
-        "aura.path.dirname",
+        "aura.lang.std.Path.dirname",
         &[Value::str_("/home/user/file.txt")],
     );
     let dirname = result.as_string();
@@ -760,7 +812,7 @@ fn test_std_path() {
     // basename
     let result = call(
         &reg,
-        "aura.path.basename",
+        "aura.lang.std.Path.basename",
         &[Value::str_("/home/user/file.txt")],
     );
     assert_eq!(result, Value::str_("file"));
@@ -768,7 +820,7 @@ fn test_std_path() {
     // extname
     let result = call(
         &reg,
-        "aura.path.extname",
+        "aura.lang.std.Path.extname",
         &[Value::str_("/home/user/file.txt")],
     );
     assert_eq!(result, Value::str_(".txt"));
@@ -778,7 +830,11 @@ fn test_std_path() {
     let abs_path = "C:\\absolute\\path";
     #[cfg(not(windows))]
     let abs_path = "/absolute/path";
-    let result = call(&reg, "aura.path.isAbsolute", &[Value::str_(abs_path)]);
+    let result = call(
+        &reg,
+        "aura.lang.std.Path.isAbsolute",
+        &[Value::str_(abs_path)],
+    );
     assert_eq!(result, Value::Bool(true));
 }
 
@@ -792,19 +848,19 @@ fn test_std_iter() {
         Value::Int(2),
         Value::Int(3),
     ]);
-    let result = call(&reg, "aura.iter.sum", &[list.clone()]);
+    let result = call(&reg, "aura.lang.std.Iter.sum", &[list.clone()]);
     assert_eq!(result, Value::Int(6));
 
     // avg
-    let result = call(&reg, "aura.iter.avg", &[list.clone()]);
+    let result = call(&reg, "aura.lang.std.Iter.avg", &[list.clone()]);
     assert!((result.as_float() - 2.0).abs() < 1e-10);
 
     // min
-    let result = call(&reg, "aura.iter.min", &[list.clone()]);
+    let result = call(&reg, "aura.lang.std.Iter.min", &[list.clone()]);
     assert_eq!(result, Value::Int(1));
 
     // max
-    let result = call(&reg, "aura.iter.max", &[list.clone()]);
+    let result = call(&reg, "aura.lang.std.Iter.max", &[list.clone()]);
     assert_eq!(result, Value::Int(3));
 
     // distinct
@@ -814,7 +870,7 @@ fn test_std_iter() {
         Value::Int(1),
         Value::Int(3),
     ]);
-    let result = call(&reg, "aura.iter.distinct", &[list.clone()]);
+    let result = call(&reg, "aura.lang.std.Iter.distinct", &[list.clone()]);
     match &result {
         Value::List(items) => {
             assert_eq!(items.len(), 3);
@@ -825,7 +881,7 @@ fn test_std_iter() {
     // range
     let result = call(
         &reg,
-        "aura.iter.range",
+        "aura.lang.std.Iter.range",
         &[
             Value::Int(1),
             Value::Int(5),
@@ -850,7 +906,7 @@ fn test_std_iter() {
     ]);
     let result = call(
         &reg,
-        "aura.iter.take",
+        "aura.lang.std.Iter.take",
         &[
             list.clone(),
             Value::Int(3),
@@ -866,7 +922,7 @@ fn test_std_iter() {
     // skip
     let result = call(
         &reg,
-        "aura.iter.skip",
+        "aura.lang.std.Iter.skip",
         &[
             list.clone(),
             Value::Int(2),
@@ -889,7 +945,7 @@ fn test_std_iter() {
         Value::Int(3),
         Value::Int(4),
     ]);
-    let result = call(&reg, "aura.iter.chain", &[l1, l2]);
+    let result = call(&reg, "aura.lang.std.Iter.chain", &[l1, l2]);
     match &result {
         Value::List(items) => {
             assert_eq!(items.len(), 4);
@@ -903,7 +959,7 @@ fn test_std_iter() {
         Value::Int(2),
         Value::Int(3),
     ]);
-    let result = call(&reg, "aura.iter.count", &[list]);
+    let result = call(&reg, "aura.lang.std.Iter.count", &[list]);
     assert_eq!(result, Value::Int(3));
 }
 
@@ -914,7 +970,7 @@ fn test_std_assert() {
     // assert (pass)
     let result = call(
         &reg,
-        "aura.assert.assert",
+        "aura.lang.std.Assert.assert",
         &[
             Value::Bool(true),
             Value::str_("test"),
@@ -925,7 +981,7 @@ fn test_std_assert() {
     // assert (fail)
     let result = call(
         &reg,
-        "aura.assert.assert",
+        "aura.lang.std.Assert.assert",
         &[
             Value::Bool(false),
             Value::str_("test"),
@@ -936,7 +992,7 @@ fn test_std_assert() {
     // assertEq (pass)
     let result = call(
         &reg,
-        "aura.assert.assertEq",
+        "aura.lang.std.Assert.assertEq",
         &[
             Value::Int(1),
             Value::Int(1),
@@ -947,7 +1003,7 @@ fn test_std_assert() {
     // assertEq (fail)
     let result = call(
         &reg,
-        "aura.assert.assertEq",
+        "aura.lang.std.Assert.assertEq",
         &[
             Value::Int(1),
             Value::Int(2),
@@ -963,16 +1019,24 @@ fn test_std_fs() {
     // exists (non-existent file)
     let result = call(
         &reg,
-        "aura.fs.exists",
+        "aura.lang.std.FileSystem.exists",
         &[Value::str_("/nonexistent/path/file.txt")],
     );
     assert_eq!(result, Value::Bool(false));
 
     // isFile / isDirectory for non-existent path
-    let result = call(&reg, "aura.fs.isFile", &[Value::str_("/nonexistent")]);
+    let result = call(
+        &reg,
+        "aura.lang.std.FileSystem.isFile",
+        &[Value::str_("/nonexistent")],
+    );
     assert_eq!(result, Value::Bool(false));
 
-    let result = call(&reg, "aura.fs.isDirectory", &[Value::str_("/nonexistent")]);
+    let result = call(
+        &reg,
+        "aura.lang.std.FileSystem.isDirectory",
+        &[Value::str_("/nonexistent")],
+    );
     assert_eq!(result, Value::Bool(false));
 }
 
@@ -983,13 +1047,13 @@ fn test_std_io_basic() {
     // fileExists for non-existent file
     let result = call(
         &reg,
-        "aura.io.fileExists",
+        "aura.lang.std.IO.fileExists",
         &[Value::str_("/nonexistent/file.txt")],
     );
     assert_eq!(result, Value::Bool(false));
 
     // fileExists for the project root (should exist)
-    let result = call(&reg, "aura.io.fileExists", &[Value::str_(".")]);
+    let result = call(&reg, "aura.lang.std.IO.fileExists", &[Value::str_(".")]);
     assert_eq!(result, Value::Bool(true));
 }
 
@@ -998,11 +1062,11 @@ fn test_std_net_basic() {
     let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // getHostname should return non-empty
-    let result = call(&reg, "aura.net.getHostname", &[]);
+    let result = call(&reg, "aura.lang.std.Network.getHostname", &[]);
     assert!(result.as_string().len() > 0);
 
     // getLocalIp should return non-empty
-    let result = call(&reg, "aura.net.getLocalIp", &[]);
+    let result = call(&reg, "aura.lang.std.Network.getLocalIp", &[]);
     assert!(result.as_string().len() > 0);
 }
 
@@ -1011,11 +1075,11 @@ fn test_std_process_basic() {
     let reg = NativeRegistry::with_modules(ALL_MODULES);
 
     // pid should return positive value
-    let result = call(&reg, "aura.process.pid", &[]);
+    let result = call(&reg, "aura.lang.std.Process.pid", &[]);
     assert!(result.as_int() > 0);
 
     // args should return non-empty list
-    let result = call(&reg, "aura.process.args", &[]);
+    let result = call(&reg, "aura.lang.std.Process.args", &[]);
     match &result {
         Value::List(items) => {
             assert!(!items.is_empty());
@@ -1024,7 +1088,7 @@ fn test_std_process_basic() {
     }
 
     // exitCode should return 0
-    let result = call(&reg, "aura.process.exitCode", &[]);
+    let result = call(&reg, "aura.lang.std.Process.exitCode", &[]);
     assert_eq!(result, Value::Int(0));
 }
 

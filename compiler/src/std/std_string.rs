@@ -7,40 +7,43 @@ use crate::vm::native::NativeRegistry;
 use crate::vm::value::Value;
 
 pub fn register(reg: &mut NativeRegistry) {
-    reg.register("aura.string.contains", nat_contains);
-    reg.register("aura.string.startsWith", nat_starts_with);
-    reg.register("aura.string.endsWith", nat_ends_with);
-    reg.register("aura.string.split", nat_split);
-    reg.register("aura.string.join", nat_join);
-    reg.register("aura.string.replace", nat_replace);
-    reg.register("aura.string.replaceAll", nat_replace_all);
-    reg.register("aura.string.trim", nat_trim);
-    reg.register("aura.string.trimStart", nat_trim_start);
-    reg.register("aura.string.trimEnd", nat_trim_end);
-    reg.register("aura.string.substring", nat_substring);
-    reg.register("aura.string.substringBefore", nat_substring_before);
-    reg.register("aura.string.substringAfter", nat_substring_after);
-    reg.register("aura.string.toLowerCase", nat_to_lower);
-    reg.register("aura.string.toUpperCase", nat_to_upper);
-    reg.register("aura.string.length", nat_length);
-    reg.register("aura.string.isEmpty", nat_is_empty);
-    reg.register("aura.string.format", nat_format);
-    reg.register("aura.string.repeat", nat_repeat);
-    reg.register("aura.string.indexOf", nat_index_of);
-    reg.register("aura.string.lastIndexOf", nat_last_index_of);
-    reg.register("aura.string.padStart", nat_pad_start);
-    reg.register("aura.string.padEnd", nat_pad_end);
-    reg.register("aura.string.escape", nat_escape);
-    reg.register("aura.string.unescape", nat_unescape);
-    reg.register("aura.string.splitLines", nat_split_lines);
-    reg.register("aura.string.joinLines", nat_join_lines);
-    reg.register("aura.string.countChar", nat_count_char);
-    reg.register("aura.string.first", nat_first);
-    reg.register("aura.string.last", nat_last);
-    reg.register("aura.string.isBlank", nat_is_blank);
-    reg.register("aura.string.matches", nat_matches);
-    reg.register("aura.string.containsAny", nat_contains_any);
-    reg.register("aura.string.containsAll", nat_contains_all);
+    // ── 纯逻辑函数（已上移到 Aura 层，但 VM 仍需 native 实现）──
+    reg.register("aura.lang.std.String.contains", nat_contains);
+    reg.register("aura.lang.std.String.startsWith", nat_starts_with);
+    reg.register("aura.lang.std.String.endsWith", nat_ends_with);
+    reg.register("aura.lang.std.String.split", nat_split);
+    reg.register("aura.lang.std.String.join", nat_join);
+    reg.register("aura.lang.std.String.replace", nat_replace);
+    reg.register("aura.lang.std.String.trim", nat_trim);
+    reg.register("aura.lang.std.String.trimStart", nat_trim_start);
+    reg.register("aura.lang.std.String.trimEnd", nat_trim_end);
+    reg.register("aura.lang.std.String.substring", nat_substring);
+    reg.register("aura.lang.std.String.substringBefore", nat_substring_before);
+    reg.register("aura.lang.std.String.substringAfter", nat_substring_after);
+    reg.register("aura.lang.std.String.toLowerCase", nat_to_lower);
+    reg.register("aura.lang.std.String.toUpperCase", nat_to_upper);
+    reg.register("aura.lang.std.String.length", nat_length);
+    reg.register("aura.lang.std.String.isEmpty", nat_is_empty);
+    reg.register("aura.lang.std.String.repeat", nat_repeat);
+    reg.register("aura.lang.std.String.indexOf", nat_index_of);
+    reg.register("aura.lang.std.String.lastIndexOf", nat_last_index_of);
+    reg.register("aura.lang.std.String.padStart", nat_pad_start);
+    reg.register("aura.lang.std.String.padEnd", nat_pad_end);
+    reg.register("aura.lang.std.String.splitLines", nat_split_lines);
+    reg.register("aura.lang.std.String.joinLines", nat_join_lines);
+    reg.register("aura.lang.std.String.countChar", nat_count_char);
+    reg.register("aura.lang.std.String.first", nat_first);
+    reg.register("aura.lang.std.String.last", nat_last);
+    reg.register("aura.lang.std.String.isBlank", nat_is_blank);
+    reg.register("aura.lang.std.String.containsAny", nat_contains_any);
+    reg.register("aura.lang.std.String.containsAll", nat_contains_all);
+
+    // ── 复杂函数（正则/格式化/转义，Rust native 实现）──
+    reg.register("aura.lang.std.String.replaceAll", nat_replace_all);
+    reg.register("aura.lang.std.String.format", nat_format);
+    reg.register("aura.lang.std.String.escape", nat_escape);
+    reg.register("aura.lang.std.String.unescape", nat_unescape);
+    reg.register("aura.lang.std.String.matches", nat_matches);
 }
 
 fn s0(args: &[Value]) -> String {

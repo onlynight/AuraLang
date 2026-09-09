@@ -5,7 +5,7 @@
 //!
 //! 设计原则（按需免import）：
 //! - **Prelude**（17 个）：免import，始终可用（println/abs/sqrt/...）
-//! - **命名空间库**（320 个）：需 `import` 后才可用（aura.math.sin/...）
+//! - **命名空间库**（320 个）：需 `import` 后才可用（aura.lang.std.Math.sin/...）
 //!
 //! 使用方式：
 //! - `is_prelude(name)` — 判断是否为免import的 prelude 函数
@@ -37,6 +37,37 @@ pub const PRELUDE_NAMES: &[&str] = &[
     "intToPtr",
     "makeCallback",
     "listOf",
+    // 类型查询与内省（prelu，免 import）
+    "typeof",
+    "isNull",
+    "isNotNull",
+    "isZero",
+    "isPositive",
+    "isNegative",
+    "toBool",
+    "sizeOf",
+    "hash",
+    "compare",
+    "clone",
+    "identity",
+    // 测试断言函数（prelu，免 import）
+    "assertTrue",
+    "assertFalse",
+    "assertEq",
+    "assertNotEq",
+    "assertNotNull",
+    "assertNull",
+    "assertContains",
+    "assertNotContains",
+    "assertGt",
+    "assertGte",
+    "assertLt",
+    "assertLte",
+    "assertApprox",
+    "assertArrayEq",
+    "assertMapEq",
+    "pass",
+    "fail",
     // Phase 4: Any 基类内置方法 + as 类型转换
     "equals",
     "hashCode",
@@ -44,6 +75,61 @@ pub const PRELUDE_NAMES: &[&str] = &[
     "aura_isOfType",
     "aura_cast",
     "aura_cast_safety",
+    // ── 全名别名（免 import 也可用）──
+    "aura.lang.std.println",
+    "aura.lang.std.print",
+    "aura.lang.std.puts",
+    "aura.lang.std.abs",
+    "aura.lang.std.sqrt",
+    "aura.lang.std.pow",
+    "aura.lang.std.toInt",
+    "aura.lang.std.toFloat",
+    "aura.lang.std.toStr",
+    "aura.lang.std.toString",
+    "aura.lang.std.clock",
+    "aura.lang.std.strlen",
+    "aura.lang.std.CString",
+    "aura.lang.std.CStr",
+    "aura.lang.std.ptrIsNull",
+    "aura.lang.std.ptrToInt",
+    "aura.lang.std.intToPtr",
+    "aura.lang.std.makeCallback",
+    "aura.lang.std.listOf",
+    "aura.lang.std.typeof",
+    "aura.lang.std.isNull",
+    "aura.lang.std.isNotNull",
+    "aura.lang.std.isZero",
+    "aura.lang.std.isPositive",
+    "aura.lang.std.isNegative",
+    "aura.lang.std.toBool",
+    "aura.lang.std.sizeOf",
+    "aura.lang.std.hash",
+    "aura.lang.std.compare",
+    "aura.lang.std.clone",
+    "aura.lang.std.identity",
+    "aura.lang.std.assertTrue",
+    "aura.lang.std.assertFalse",
+    "aura.lang.std.assertEq",
+    "aura.lang.std.assertNotEq",
+    "aura.lang.std.assertNotNull",
+    "aura.lang.std.assertNull",
+    "aura.lang.std.assertContains",
+    "aura.lang.std.assertNotContains",
+    "aura.lang.std.assertGt",
+    "aura.lang.std.assertGte",
+    "aura.lang.std.assertLt",
+    "aura.lang.std.assertLte",
+    "aura.lang.std.assertApprox",
+    "aura.lang.std.assertArrayEq",
+    "aura.lang.std.assertMapEq",
+    "aura.lang.std.pass",
+    "aura.lang.std.fail",
+    "aura.lang.std.equals",
+    "aura.lang.std.hashCode",
+    "aura.lang.std.typeOf",
+    "aura.lang.std.aura_isOfType",
+    "aura.lang.std.aura_cast",
+    "aura.lang.std.aura_cast_safety",
 ];
 
 /// 全部内置函数名（编译期可见的单一真相源）
@@ -80,8 +166,8 @@ pub fn is_namespaced(name: &str) -> bool {
 
 /// 获取指定模块的所有函数短名（去掉模块前缀）
 ///
-/// 例如：`module_functions("aura.math")` → `["sin", "cos", "tan", ...]`
-/// 用于 `import aura.math.*` 展开到符号表。
+/// 例如：`module_functions("aura.lang.std.Math")` → `["sin", "cos", "tan", ...]`
+/// 用于 `import aura.lang.std.Math.*` 展开到符号表。
 ///
 /// 注：返回短名（不含模块前缀），调用时使用短名。
 pub fn module_functions(module_path: &str) -> Vec<String> {
@@ -95,7 +181,7 @@ pub fn module_functions(module_path: &str) -> Vec<String> {
 
 /// 获取指定模块的所有函数全名（含模块前缀）
 ///
-/// 例如：`module_functions_full("aura.math")` → `["aura.math.sin", "aura.math.cos", ...]`
+/// 例如：`module_functions_full("aura.lang.std.Math")` → `["aura.lang.std.Math.sin", "aura.lang.std.Math.cos", ...]`
 pub fn module_functions_full(module_path: &str) -> Vec<&'static str> {
     let prefix = format!("{}.", module_path);
     all_names().iter().filter(|name| name.starts_with(&prefix)).copied().collect()
@@ -131,444 +217,541 @@ fn build_all_names() -> HashSet<&'static str> {
         s.insert(n);
     }
 
-    // ── aura.concurrent.* — 协程 / Actor / Channel（native.rs 注册）──
+    // ── 顶层内置的全名别名（aura.lang.std.<fn>，用于 import 展开和点分全名调用）──
     for n in [
-        "aura.concurrent.spawn",
-        "aura.concurrent.send",
-        "aura.concurrent.ask",
-        "aura.concurrent.newChannel",
-        "aura.concurrent.channelSend",
-        "aura.concurrent.channelRecv",
-        "aura.concurrent.channelTryRecv",
-        "aura.concurrent.select",
-        "aura.concurrent.spawnActor",
-        "aura.concurrent.supervise",
-        "aura.concurrent.actorAlive",
+        "aura.lang.std.println",
+        "aura.lang.std.print",
+        "aura.lang.std.puts",
+        "aura.lang.std.abs",
+        "aura.lang.std.sqrt",
+        "aura.lang.std.pow",
+        "aura.lang.std.toInt",
+        "aura.lang.std.toFloat",
+        "aura.lang.std.toStr",
+        "aura.lang.std.toString",
+        "aura.lang.std.clock",
+        "aura.lang.std.strlen",
+        "aura.lang.std.CString",
+        "aura.lang.std.CStr",
+        "aura.lang.std.ptrIsNull",
+        "aura.lang.std.ptrToInt",
+        "aura.lang.std.intToPtr",
+        "aura.lang.std.makeCallback",
+        "aura.lang.std.listOf",
+        "aura.lang.std.typeof",
+        "aura.lang.std.isNull",
+        "aura.lang.std.isNotNull",
+        "aura.lang.std.isZero",
+        "aura.lang.std.isPositive",
+        "aura.lang.std.isNegative",
+        "aura.lang.std.toBool",
+        "aura.lang.std.sizeOf",
+        "aura.lang.std.hash",
+        "aura.lang.std.compare",
+        "aura.lang.std.clone",
+        "aura.lang.std.identity",
+        "aura.lang.std.assertTrue",
+        "aura.lang.std.assertFalse",
+        "aura.lang.std.assertEq",
+        "aura.lang.std.assertNotEq",
+        "aura.lang.std.assertNotNull",
+        "aura.lang.std.assertNull",
+        "aura.lang.std.assertContains",
+        "aura.lang.std.assertNotContains",
+        "aura.lang.std.assertGt",
+        "aura.lang.std.assertGte",
+        "aura.lang.std.assertLt",
+        "aura.lang.std.assertLte",
+        "aura.lang.std.assertApprox",
+        "aura.lang.std.assertArrayEq",
+        "aura.lang.std.assertMapEq",
+        "aura.lang.std.pass",
+        "aura.lang.std.fail",
+        "aura.lang.std.equals",
+        "aura.lang.std.hashCode",
+        "aura.lang.std.typeOf",
+        "aura.lang.std.aura_isOfType",
+        "aura.lang.std.aura_cast",
+        "aura.lang.std.aura_cast_safety",
     ] {
         s.insert(n);
     }
 
-    // ── aura.ascii.* — 字符工具（std_ascii.rs）──
+    // ── aura.lang.std.{Coroutine,Actor,Channel}.* — 协程 / Actor / 通道（native.rs 注册）──
     for n in [
-        "aura.ascii.isAlpha",
-        "aura.ascii.isDigit",
-        "aura.ascii.isAlphaNumeric",
-        "aura.ascii.isWhitespace",
-        "aura.ascii.isUpper",
-        "aura.ascii.isLower",
-        "aura.ascii.toUpper",
-        "aura.ascii.toLower",
-        "aura.ascii.codeAt",
-        "aura.ascii.charAt",
-        "aura.ascii.fromCode",
-        "aura.ascii.codePointAt",
+        "aura.lang.std.Coroutine.spawn",
+        "aura.lang.std.Coroutine.ask",
+        "aura.lang.std.Actor.send",
+        "aura.lang.std.Actor.reply",
+        "aura.lang.std.Actor.spawnActor",
+        "aura.lang.std.Actor.supervise",
+        "aura.lang.std.Actor.actorAlive",
+        "aura.lang.std.Actor.spawnActorProcess",
+        "aura.lang.std.Actor.sendProcessActor",
+        "aura.lang.std.Actor.recvProcessActor",
+        "aura.lang.std.Actor.processActorAlive",
+        "aura.lang.std.Actor.killProcessActor",
+        "aura.lang.std.Channel.newChannel",
+        "aura.lang.std.Channel.channelSend",
+        "aura.lang.std.Channel.channelRecv",
+        "aura.lang.std.Channel.channelTryRecv",
+        "aura.lang.std.Channel.select",
+        "aura.lang.std.Channel.selectTimeout",
+        "aura.lang.std.Channel.newTcpChannel",
+        "aura.lang.std.Channel.tcpChannelSend",
     ] {
         s.insert(n);
     }
 
-    // ── aura.assert.* — 通用断言（std_assert.rs）──
+    // ── aura.lang.std.Ascii.* — 字符工具（std_ascii.rs）──
     for n in [
-        "aura.assert.assert",
-        "aura.assert.assertTrue",
-        "aura.assert.assertFalse",
-        "aura.assert.assertEq",
-        "aura.assert.assertNotEq",
-        "aura.assert.assertNotNull",
-        "aura.assert.assertNull",
-        "aura.assert.debugAssert",
+        "aura.lang.std.Ascii.isAlpha",
+        "aura.lang.std.Ascii.isDigit",
+        "aura.lang.std.Ascii.isAlphaNumeric",
+        "aura.lang.std.Ascii.isWhitespace",
+        "aura.lang.std.Ascii.isUpper",
+        "aura.lang.std.Ascii.isLower",
+        "aura.lang.std.Ascii.toUpper",
+        "aura.lang.std.Ascii.toLower",
+        "aura.lang.std.Ascii.codeAt",
+        "aura.lang.std.Ascii.charAt",
+        "aura.lang.std.Ascii.fromCode",
+        "aura.lang.std.Ascii.codePointAt",
     ] {
         s.insert(n);
     }
 
-    // ── aura.builtin.* — 编译期内置（std_builtin.rs）──
+    // ── aura.lang.std.Assert.* — 通用断言（std_assert.rs）──
     for n in [
-        "aura.builtin.typeof",
-        "aura.builtin.typeOf",
-        "aura.builtin.isNull",
-        "aura.builtin.isNotNull",
-        "aura.builtin.isZero",
-        "aura.builtin.isPositive",
-        "aura.builtin.isNegative",
-        "aura.builtin.toString",
-        "aura.builtin.toInt",
-        "aura.builtin.toFloat",
-        "aura.builtin.toBool",
-        "aura.builtin.sizeOf",
-        "aura.builtin.hash",
-        "aura.builtin.compare",
-        "aura.builtin.clone",
-        "aura.builtin.identity",
+        "aura.lang.std.Assert.assert",
+        "aura.lang.std.Assert.assertTrue",
+        "aura.lang.std.Assert.assertFalse",
+        "aura.lang.std.Assert.assertEq",
+        "aura.lang.std.Assert.assertNotEq",
+        "aura.lang.std.Assert.assertNotNull",
+        "aura.lang.std.Assert.assertNull",
+        "aura.lang.std.Assert.debugAssert",
     ] {
         s.insert(n);
     }
 
-    // ── aura.collections.* — 集合辅助（std_collections.rs）──
+    // ── aura.lang.std.Builtin.* — 编译期内置（std_builtin.rs）──
     for n in [
-        "aura.collections.listOf",
-        "aura.collections.mutableListOf",
-        "aura.collections.emptyList",
-        "aura.collections.arrayOf",
-        "aura.collections.listContains",
-        "aura.collections.listIndexOf",
-        "aura.collections.listRemove",
-        "aura.collections.listReverse",
-        "aura.collections.listSort",
-        "aura.collections.listGet",
-        "aura.collections.listSet",
-        "aura.collections.listInsert",
-        "aura.collections.listSubList",
-        "aura.collections.mapOf",
-        "aura.collections.mutableMapOf",
-        "aura.collections.emptyMap",
-        "aura.collections.mapContains",
-        "aura.collections.mapContainsKey",
-        "aura.collections.mapContainsValue",
-        "aura.collections.mapRemove",
-        "aura.collections.mapKeys",
-        "aura.collections.mapValues",
-        "aura.collections.setOf",
-        "aura.collections.mutableSetOf",
-        "aura.collections.emptySet",
+        "aura.lang.std.Builtin.typeof",
+        "aura.lang.std.Builtin.typeOf",
+        "aura.lang.std.Builtin.isNull",
+        "aura.lang.std.Builtin.isNotNull",
+        "aura.lang.std.Builtin.isZero",
+        "aura.lang.std.Builtin.isPositive",
+        "aura.lang.std.Builtin.isNegative",
+        "aura.lang.std.Builtin.toString",
+        "aura.lang.std.Builtin.toInt",
+        "aura.lang.std.Builtin.toFloat",
+        "aura.lang.std.Builtin.toBool",
+        "aura.lang.std.Builtin.sizeOf",
+        "aura.lang.std.Builtin.hash",
+        "aura.lang.std.Builtin.compare",
+        "aura.lang.std.Builtin.clone",
+        "aura.lang.std.Builtin.identity",
     ] {
         s.insert(n);
     }
 
-    // ── aura.console.* — 终端控制（std_console.rs）──
+    // ── aura.lang.std.Collections.* — 集合辅助（std_collections.rs）──
     for n in [
-        "aura.console.clear",
-        "aura.console.cursorUp",
-        "aura.console.cursorDown",
-        "aura.console.cursorLeft",
-        "aura.console.cursorRight",
-        "aura.console.cursorShow",
-        "aura.console.cursorHide",
-        "aura.console.reset",
-        "aura.console.red",
-        "aura.console.green",
-        "aura.console.yellow",
-        "aura.console.blue",
-        "aura.console.magenta",
-        "aura.console.cyan",
-        "aura.console.white",
-        "aura.console.bold",
-        "aura.console.italic",
-        "aura.console.underline",
-        "aura.console.dim",
-        "aura.console.inverse",
-        "aura.console.size",
-        "aura.console.width",
-        "aura.console.height",
+        "aura.lang.std.Collections.listOf",
+        "aura.lang.std.Collections.mutableListOf",
+        "aura.lang.std.Collections.emptyList",
+        "aura.lang.std.Collections.arrayOf",
+        "aura.lang.std.Collections.listContains",
+        "aura.lang.std.Collections.listIndexOf",
+        "aura.lang.std.Collections.listRemove",
+        "aura.lang.std.Collections.listReverse",
+        "aura.lang.std.Collections.listSort",
+        "aura.lang.std.Collections.listGet",
+        "aura.lang.std.Collections.listSet",
+        "aura.lang.std.Collections.listInsert",
+        "aura.lang.std.Collections.listSubList",
+        "aura.lang.std.Collections.listAppend",
+        "aura.lang.std.Collections.listSize",
+        "aura.lang.std.Collections.pairOf",
+        "aura.lang.std.Collections.mapOf",
+        "aura.lang.std.Collections.mutableMapOf",
+        "aura.lang.std.Collections.emptyMap",
+        "aura.lang.std.Collections.mapContains",
+        "aura.lang.std.Collections.mapContainsKey",
+        "aura.lang.std.Collections.mapContainsValue",
+        "aura.lang.std.Collections.mapRemove",
+        "aura.lang.std.Collections.mapKeys",
+        "aura.lang.std.Collections.mapValues",
+        "aura.lang.std.Collections.setOf",
+        "aura.lang.std.Collections.mutableSetOf",
+        "aura.lang.std.Collections.emptySet",
+        // 特化集合构造（分层实现）
+        "aura.lang.std.Collections.arrayListOf",
+        "aura.lang.std.Collections.arrayListSize",
+        "aura.lang.std.Collections.linkedListOf",
+        "aura.lang.std.Collections.linkedAddFirst",
+        "aura.lang.std.Collections.linkedAddLast",
+        "aura.lang.std.Collections.linkedRemoveFirst",
+        "aura.lang.std.Collections.linkedRemoveLast",
+        "aura.lang.std.Collections.hashSetOf",
+        "aura.lang.std.Collections.hashSetContains",
+        "aura.lang.std.Collections.hashSetAdd",
+        "aura.lang.std.Collections.hashSetRemove",
+        "aura.lang.std.Collections.hashMapOf",
+        "aura.lang.std.Collections.hashMapGet",
+        "aura.lang.std.Collections.hashMapPut",
+        "aura.lang.std.Collections.hashMapRemove",
+        "aura.lang.std.Collections.linkedHashMapOf",
+        "aura.lang.std.Collections.linkedHashMapKeys",
+        "aura.lang.std.Collections.linkedHashMapFirstKey",
+        "aura.lang.std.Collections.linkedHashMapLastKey",
     ] {
         s.insert(n);
     }
 
-    // ── aura.encoding.* — 编码/解码（std_encoding.rs）──
+    // ── aura.lang.std.Console.* — 终端控制（std_console.rs）──
     for n in [
-        "aura.encoding.base64Encode",
-        "aura.encoding.base64Decode",
-        "aura.encoding.hexEncode",
-        "aura.encoding.hexDecode",
-        "aura.encoding.urlEncode",
-        "aura.encoding.urlDecode",
-        "aura.encoding.byteToHex",
-        "aura.encoding.hexToByte",
+        "aura.lang.std.Console.clear",
+        "aura.lang.std.Console.cursorUp",
+        "aura.lang.std.Console.cursorDown",
+        "aura.lang.std.Console.cursorLeft",
+        "aura.lang.std.Console.cursorRight",
+        "aura.lang.std.Console.cursorShow",
+        "aura.lang.std.Console.cursorHide",
+        "aura.lang.std.Console.reset",
+        "aura.lang.std.Console.red",
+        "aura.lang.std.Console.green",
+        "aura.lang.std.Console.yellow",
+        "aura.lang.std.Console.blue",
+        "aura.lang.std.Console.magenta",
+        "aura.lang.std.Console.cyan",
+        "aura.lang.std.Console.white",
+        "aura.lang.std.Console.bold",
+        "aura.lang.std.Console.italic",
+        "aura.lang.std.Console.underline",
+        "aura.lang.std.Console.dim",
+        "aura.lang.std.Console.inverse",
+        "aura.lang.std.Console.size",
+        "aura.lang.std.Console.width",
+        "aura.lang.std.Console.height",
     ] {
         s.insert(n);
     }
 
-    // ── aura.env.* — 环境变量（std_env.rs）──
+    // ── aura.lang.std.Encoding.* — 编码/解码（Encoding.aura，纯逻辑函数）──
     for n in [
-        "aura.env.get",
-        "aura.env.set",
-        "aura.env.remove",
-        "aura.env.has",
-        "aura.env.keys",
-        "aura.env.values",
-        "aura.env.all",
-        "aura.env.home",
-        "aura.env.tmp",
-        "aura.env.pwd",
-        "aura.env.platform",
-        "aura.env.os",
-        "aura.env.arch",
+        "aura.lang.std.Encoding.base64Encode",
+        "aura.lang.std.Encoding.base64Decode",
+        "aura.lang.std.Encoding.hexEncode",
+        "aura.lang.std.Encoding.hexDecode",
+        "aura.lang.std.Encoding.urlEncode",
+        "aura.lang.std.Encoding.urlDecode",
+        "aura.lang.std.Encoding.byteToHex",
+        "aura.lang.std.Encoding.hexToByte",
     ] {
         s.insert(n);
     }
 
-    // ── aura.fs.* — 文件系统（std_fs.rs）──
+    // ── aura.lang.std.Env.* — 环境变量（std_env.rs）──
     for n in [
-        "aura.fs.exists",
-        "aura.fs.isFile",
-        "aura.fs.isDirectory",
-        "aura.fs.readText",
-        "aura.fs.writeText",
-        "aura.fs.readBytes",
-        "aura.fs.writeBytes",
-        "aura.fs.delete",
-        "aura.fs.mkdir",
-        "aura.fs.mkdirP",
-        "aura.fs.rename",
-        "aura.fs.copy",
-        "aura.fs.listDir",
-        "aura.fs.listFiles",
-        "aura.fs.fileSize",
-        "aura.fs.lastModified",
-        "aura.fs.absolutePath",
-        "aura.fs.homeDir",
-        "aura.fs.tempDir",
-        "aura.fs.currentDir",
-        "aura.fs.walk",
+        "aura.lang.std.Env.get",
+        "aura.lang.std.Env.set",
+        "aura.lang.std.Env.remove",
+        "aura.lang.std.Env.has",
+        "aura.lang.std.Env.keys",
+        "aura.lang.std.Env.values",
+        "aura.lang.std.Env.all",
+        "aura.lang.std.Env.home",
+        "aura.lang.std.Env.tmp",
+        "aura.lang.std.Env.pwd",
+        "aura.lang.std.Env.platform",
+        "aura.lang.std.Env.os",
+        "aura.lang.std.Env.arch",
     ] {
         s.insert(n);
     }
 
-    // ── aura.io.* — 标准输入输出（std_io.rs）──
+    // ── aura.lang.std.FileSystem.* — 文件系统（std_fs.rs）──
     for n in [
-        "aura.io.println",
-        "aura.io.print",
-        "aura.io.readLine",
-        "aura.io.readAll",
-        "aura.io.flush",
-        "aura.io.fileRead",
-        "aura.io.fileWrite",
-        "aura.io.fileExists",
-        "aura.io.writeFile",
-        "aura.io.readFile",
+        "aura.lang.std.FileSystem.exists",
+        "aura.lang.std.FileSystem.isFile",
+        "aura.lang.std.FileSystem.isDirectory",
+        "aura.lang.std.FileSystem.readText",
+        "aura.lang.std.FileSystem.writeText",
+        "aura.lang.std.FileSystem.readBytes",
+        "aura.lang.std.FileSystem.writeBytes",
+        "aura.lang.std.FileSystem.delete",
+        "aura.lang.std.FileSystem.mkdir",
+        "aura.lang.std.FileSystem.mkdirP",
+        "aura.lang.std.FileSystem.rename",
+        "aura.lang.std.FileSystem.copy",
+        "aura.lang.std.FileSystem.listDir",
+        "aura.lang.std.FileSystem.listFiles",
+        "aura.lang.std.FileSystem.fileSize",
+        "aura.lang.std.FileSystem.lastModified",
+        "aura.lang.std.FileSystem.absolutePath",
+        "aura.lang.std.FileSystem.homeDir",
+        "aura.lang.std.FileSystem.tempDir",
+        "aura.lang.std.FileSystem.currentDir",
+        "aura.lang.std.FileSystem.walk",
     ] {
         s.insert(n);
     }
 
-    // ── aura.iter.* — 迭代器/函数式（std_iter.rs）──
+    // ── aura.lang.std.IO.* — 标准输入输出（std_io.rs）──
     for n in [
-        "aura.iter.sum",
-        "aura.iter.avg",
-        "aura.iter.min",
-        "aura.iter.max",
-        "aura.iter.product",
-        "aura.iter.contains",
-        "aura.iter.indexOf",
-        "aura.iter.count",
-        "aura.iter.every",
-        "aura.iter.some",
-        "aura.iter.flatMap",
-        "aura.iter.zip",
-        "aura.iter.unzip",
-        "aura.iter.enumerate",
-        "aura.iter.chain",
-        "aura.iter.take",
-        "aura.iter.skip",
-        "aura.iter.dropWhile",
-        "aura.iter.takeWhile",
-        "aura.iter.distinct",
-        "aura.iter.groupBy",
-        "aura.iter.partition",
-        "aura.iter.fold",
-        "aura.iter.scan",
-        "aura.iter.toMap",
-        "aura.iter.toList",
-        "aura.iter.range",
-        "aura.iter.rangeTo",
-        "aura.iter.rangeUntil",
-        "aura.iter.repeatN",
+        "aura.lang.std.IO.println",
+        "aura.lang.std.IO.print",
+        "aura.lang.std.IO.readLine",
+        "aura.lang.std.IO.readAll",
+        "aura.lang.std.IO.flush",
+        "aura.lang.std.IO.fileRead",
+        "aura.lang.std.IO.fileWrite",
+        "aura.lang.std.IO.fileExists",
+        "aura.lang.std.IO.writeFile",
+        "aura.lang.std.IO.readFile",
     ] {
         s.insert(n);
     }
 
-    // ── aura.json.* — JSON 解析与序列化（std_json.rs）──
+    // ── aura.lang.std.Iter.* — 迭代器/函数式（std_iter.rs）──
     for n in [
-        "aura.json.parse",
-        "aura.json.stringify",
-        "aura.json.isValid",
-        "aura.json.get",
-        "aura.json.set",
-        "aura.json.keys",
-        "aura.json.values",
-        "aura.json.length",
-        "aura.json.contains",
-        "aura.json.remove",
+        "aura.lang.std.Iter.sum",
+        "aura.lang.std.Iter.avg",
+        "aura.lang.std.Iter.min",
+        "aura.lang.std.Iter.max",
+        "aura.lang.std.Iter.product",
+        "aura.lang.std.Iter.contains",
+        "aura.lang.std.Iter.indexOf",
+        "aura.lang.std.Iter.count",
+        "aura.lang.std.Iter.every",
+        "aura.lang.std.Iter.some",
+        "aura.lang.std.Iter.flatMap",
+        "aura.lang.std.Iter.zip",
+        "aura.lang.std.Iter.unzip",
+        "aura.lang.std.Iter.enumerate",
+        "aura.lang.std.Iter.chain",
+        "aura.lang.std.Iter.take",
+        "aura.lang.std.Iter.skip",
+        "aura.lang.std.Iter.dropWhile",
+        "aura.lang.std.Iter.takeWhile",
+        "aura.lang.std.Iter.distinct",
+        "aura.lang.std.Iter.groupBy",
+        "aura.lang.std.Iter.partition",
+        "aura.lang.std.Iter.fold",
+        "aura.lang.std.Iter.scan",
+        "aura.lang.std.Iter.toMap",
+        "aura.lang.std.Iter.toList",
+        "aura.lang.std.Iter.range",
+        "aura.lang.std.Iter.rangeTo",
+        "aura.lang.std.Iter.rangeUntil",
+        "aura.lang.std.Iter.repeatN",
     ] {
         s.insert(n);
     }
 
-    // ── aura.math.* — 数学函数与常量（std_math.rs）──
+    // ── aura.lang.std.Json.* — JSON 解析与序列化（std_json.rs）──
     for n in [
-        "aura.math.abs",
-        "aura.math.min",
-        "aura.math.max",
-        "aura.math.ceil",
-        "aura.math.floor",
-        "aura.math.round",
-        "aura.math.trunc",
-        "aura.math.sqrt",
-        "aura.math.cbrt",
-        "aura.math.pow",
-        "aura.math.exp",
-        "aura.math.log",
-        "aura.math.log2",
-        "aura.math.log10",
-        "aura.math.sin",
-        "aura.math.cos",
-        "aura.math.tan",
-        "aura.math.asin",
-        "aura.math.acos",
-        "aura.math.atan",
-        "aura.math.atan2",
-        "aura.math.PI",
-        "aura.math.E",
-        "aura.math.INT_MAX",
-        "aura.math.INT_MIN",
-        "aura.math.FLOAT_MAX",
-        "aura.math.sign",
-        "aura.math.clamp",
+        "aura.lang.std.Json.parse",
+        "aura.lang.std.Json.stringify",
+        "aura.lang.std.Json.isValid",
+        "aura.lang.std.Json.get",
+        "aura.lang.std.Json.set",
+        "aura.lang.std.Json.keys",
+        "aura.lang.std.Json.values",
+        "aura.lang.std.Json.length",
+        "aura.lang.std.Json.contains",
+        "aura.lang.std.Json.remove",
     ] {
         s.insert(n);
     }
 
-    // ── aura.net.* — 网络 Socket（std_net.rs）──
+    // ── aura.lang.std.Math.* — 数学函数与常量（std_math.rs + Math.aura）──
+    // 纯逻辑函数（abs/min/max/sign/clamp）已上移到 Math.aura，但保留声明供编译器识别
     for n in [
-        "aura.net.tcpConnect",
-        "aura.net.tcpListen",
-        "aura.net.tcpSend",
-        "aura.net.tcpRecv",
-        "aura.net.tcpClose",
-        "aura.net.udpSend",
-        "aura.net.udpRecv",
-        "aura.net.udpClose",
-        "aura.net.isHostReachable",
-        "aura.net.getHostname",
-        "aura.net.getLocalIp",
+        "aura.lang.std.Math.abs",
+        "aura.lang.std.Math.min",
+        "aura.lang.std.Math.max",
+        "aura.lang.std.Math.ceil",
+        "aura.lang.std.Math.floor",
+        "aura.lang.std.Math.round",
+        "aura.lang.std.Math.trunc",
+        "aura.lang.std.Math.sqrt",
+        "aura.lang.std.Math.cbrt",
+        "aura.lang.std.Math.pow",
+        "aura.lang.std.Math.exp",
+        "aura.lang.std.Math.log",
+        "aura.lang.std.Math.log2",
+        "aura.lang.std.Math.log10",
+        "aura.lang.std.Math.sin",
+        "aura.lang.std.Math.cos",
+        "aura.lang.std.Math.tan",
+        "aura.lang.std.Math.asin",
+        "aura.lang.std.Math.acos",
+        "aura.lang.std.Math.atan",
+        "aura.lang.std.Math.atan2",
+        "aura.lang.std.Math.PI",
+        "aura.lang.std.Math.E",
+        "aura.lang.std.Math.INT_MAX",
+        "aura.lang.std.Math.INT_MIN",
+        "aura.lang.std.Math.FLOAT_MAX",
+        "aura.lang.std.Math.sign",
+        "aura.lang.std.Math.clamp",
     ] {
         s.insert(n);
     }
 
-    // ── aura.path.* — 路径操作（std_path.rs）──
+    // ── aura.lang.std.Network.* — 网络 Socket（std_net.rs）──
     for n in [
-        "aura.path.join",
-        "aura.path.dirname",
-        "aura.path.basename",
-        "aura.path.extname",
-        "aura.path.relative",
-        "aura.path.resolve",
-        "aura.path.normalize",
-        "aura.path.isAbsolute",
-        "aura.path.isRelative",
-        "aura.path.split",
-        "aura.path.separators",
-        "aura.path.fromUnix",
-        "aura.path.fromWindows",
+        "aura.lang.std.Network.tcpConnect",
+        "aura.lang.std.Network.tcpListen",
+        "aura.lang.std.Network.tcpSend",
+        "aura.lang.std.Network.tcpRecv",
+        "aura.lang.std.Network.tcpClose",
+        "aura.lang.std.Network.udpSend",
+        "aura.lang.std.Network.udpRecv",
+        "aura.lang.std.Network.udpClose",
+        "aura.lang.std.Network.isHostReachable",
+        "aura.lang.std.Network.getHostname",
+        "aura.lang.std.Network.getLocalIp",
     ] {
         s.insert(n);
     }
 
-    // ── aura.process.* — 进程管理（std_process.rs）──
+    // ── aura.lang.std.Path.* — 路径操作（std_path.rs + Path.aura）──
+    // 纯逻辑函数（join/dirname/basename/extname/normalize/isAbsolute/isRelative/split/fromUnix/fromWindows）已上移到 Path.aura，但保留声明
     for n in [
-        "aura.process.exit",
-        "aura.process.exitCode",
-        "aura.process.args",
-        "aura.process.arg",
-        "aura.process.argCount",
-        "aura.process.pid",
-        "aura.process.spawn",
-        "aura.process.kill",
-        "aura.process.wait",
-        "aura.process.exitProcess",
+        "aura.lang.std.Path.join",
+        "aura.lang.std.Path.dirname",
+        "aura.lang.std.Path.basename",
+        "aura.lang.std.Path.extname",
+        "aura.lang.std.Path.relative",
+        "aura.lang.std.Path.resolve",
+        "aura.lang.std.Path.normalize",
+        "aura.lang.std.Path.isAbsolute",
+        "aura.lang.std.Path.isRelative",
+        "aura.lang.std.Path.split",
+        "aura.lang.std.Path.separators",
+        "aura.lang.std.Path.fromUnix",
+        "aura.lang.std.Path.fromWindows",
     ] {
         s.insert(n);
     }
 
-    // ── aura.random.* — 随机数（std_random.rs）──
+    // ── aura.lang.std.Process.* — 进程管理（std_process.rs）──
     for n in [
-        "aura.random.nextInt",
-        "aura.random.nextLong",
-        "aura.random.nextFloat",
-        "aura.random.nextDouble",
-        "aura.random.nextBool",
-        "aura.random.nextIntRange",
-        "aura.random.nextFloatRange",
-        "aura.random.choice",
-        "aura.random.shuffle",
-        "aura.random.seed",
-        "aura.random.random",
+        "aura.lang.std.Process.exit",
+        "aura.lang.std.Process.exitCode",
+        "aura.lang.std.Process.args",
+        "aura.lang.std.Process.arg",
+        "aura.lang.std.Process.argCount",
+        "aura.lang.std.Process.pid",
+        "aura.lang.std.Process.spawn",
+        "aura.lang.std.Process.kill",
+        "aura.lang.std.Process.wait",
+        "aura.lang.std.Process.exitProcess",
     ] {
         s.insert(n);
     }
 
-    // ── aura.string.* — 字符串操作（std_string.rs）──
+    // ── aura.lang.std.Random.* — 随机数（std_random.rs）──
     for n in [
-        "aura.string.contains",
-        "aura.string.startsWith",
-        "aura.string.endsWith",
-        "aura.string.split",
-        "aura.string.join",
-        "aura.string.replace",
-        "aura.string.replaceAll",
-        "aura.string.trim",
-        "aura.string.trimStart",
-        "aura.string.trimEnd",
-        "aura.string.substring",
-        "aura.string.substringBefore",
-        "aura.string.substringAfter",
-        "aura.string.toLowerCase",
-        "aura.string.toUpperCase",
-        "aura.string.length",
-        "aura.string.isEmpty",
-        "aura.string.format",
-        "aura.string.repeat",
-        "aura.string.indexOf",
-        "aura.string.lastIndexOf",
-        "aura.string.padStart",
-        "aura.string.padEnd",
-        "aura.string.escape",
-        "aura.string.unescape",
-        "aura.string.splitLines",
-        "aura.string.joinLines",
-        "aura.string.countChar",
-        "aura.string.first",
-        "aura.string.last",
-        "aura.string.isBlank",
-        "aura.string.matches",
-        "aura.string.containsAny",
-        "aura.string.containsAll",
+        "aura.lang.std.Random.nextInt",
+        "aura.lang.std.Random.nextLong",
+        "aura.lang.std.Random.nextFloat",
+        "aura.lang.std.Random.nextDouble",
+        "aura.lang.std.Random.nextBool",
+        "aura.lang.std.Random.nextIntRange",
+        "aura.lang.std.Random.nextFloatRange",
+        "aura.lang.std.Random.choice",
+        "aura.lang.std.Random.shuffle",
+        "aura.lang.std.Random.seed",
+        "aura.lang.std.Random.random",
     ] {
         s.insert(n);
     }
 
-    // ── aura.test.* — 测试断言（std_test.rs）──
+    // ── aura.lang.std.String.* — 字符串操作（std_string.rs + String.aura）──
+    // 纯逻辑函数已上移到 String.aura，但保留声明供编译器识别
     for n in [
-        "aura.test.assertTrue",
-        "aura.test.assertFalse",
-        "aura.test.assertEq",
-        "aura.test.assertNotEq",
-        "aura.test.assertNotNull",
-        "aura.test.assertNull",
-        "aura.test.assertContains",
-        "aura.test.assertNotContains",
-        "aura.test.assertThrows",
-        "aura.test.assertGt",
-        "aura.test.assertGte",
-        "aura.test.assertLt",
-        "aura.test.assertLte",
-        "aura.test.assertApprox",
-        "aura.test.assertArrayEq",
-        "aura.test.assertMapEq",
-        "aura.test.pass",
-        "aura.test.fail",
+        "aura.lang.std.String.contains",
+        "aura.lang.std.String.startsWith",
+        "aura.lang.std.String.endsWith",
+        "aura.lang.std.String.split",
+        "aura.lang.std.String.join",
+        "aura.lang.std.String.replace",
+        "aura.lang.std.String.replaceAll",
+        "aura.lang.std.String.trim",
+        "aura.lang.std.String.trimStart",
+        "aura.lang.std.String.trimEnd",
+        "aura.lang.std.String.substring",
+        "aura.lang.std.String.substringBefore",
+        "aura.lang.std.String.substringAfter",
+        "aura.lang.std.String.toLowerCase",
+        "aura.lang.std.String.toUpperCase",
+        "aura.lang.std.String.length",
+        "aura.lang.std.String.isEmpty",
+        "aura.lang.std.String.format",
+        "aura.lang.std.String.repeat",
+        "aura.lang.std.String.indexOf",
+        "aura.lang.std.String.lastIndexOf",
+        "aura.lang.std.String.padStart",
+        "aura.lang.std.String.padEnd",
+        "aura.lang.std.String.escape",
+        "aura.lang.std.String.unescape",
+        "aura.lang.std.String.splitLines",
+        "aura.lang.std.String.joinLines",
+        "aura.lang.std.String.countChar",
+        "aura.lang.std.String.first",
+        "aura.lang.std.String.last",
+        "aura.lang.std.String.isBlank",
+        "aura.lang.std.String.matches",
+        "aura.lang.std.String.containsAny",
+        "aura.lang.std.String.containsAll",
     ] {
         s.insert(n);
     }
 
-    // ── aura.time.* — 时间/日期（std_time.rs）──
+    // ── aura.lang.std.Test.* — 测试断言（std_test.rs）──
     for n in [
-        "aura.time.now",
-        "aura.time.epoch",
-        "aura.time.currentTime",
-        "aura.time.sleep",
-        "aura.time.duration",
-        "aura.time.toDateString",
-        "aura.time.toTimeString",
-        "aura.time.formatDate",
-        "aura.time.diff",
-        "aura.time.parseDate",
+        "aura.lang.std.Test.assertTrue",
+        "aura.lang.std.Test.assertFalse",
+        "aura.lang.std.Test.assertEq",
+        "aura.lang.std.Test.assertNotEq",
+        "aura.lang.std.Test.assertNotNull",
+        "aura.lang.std.Test.assertNull",
+        "aura.lang.std.Test.assertContains",
+        "aura.lang.std.Test.assertNotContains",
+        "aura.lang.std.Test.assertThrows",
+        "aura.lang.std.Test.assertGt",
+        "aura.lang.std.Test.assertGte",
+        "aura.lang.std.Test.assertLt",
+        "aura.lang.std.Test.assertLte",
+        "aura.lang.std.Test.assertApprox",
+        "aura.lang.std.Test.assertArrayEq",
+        "aura.lang.std.Test.assertMapEq",
+        "aura.lang.std.Test.pass",
+        "aura.lang.std.Test.fail",
+    ] {
+        s.insert(n);
+    }
+
+    // ── aura.lang.std.Time.* — 时间/日期（std_time.rs）──
+    // ── aura.lang.std.Time.* — 时间模块（std_time.rs + Time.aura）──
+    // 纯逻辑函数（duration/diff）已上移到 Time.aura，但保留声明供编译器识别
+    for n in [
+        "aura.lang.std.Time.now",
+        "aura.lang.std.Time.epoch",
+        "aura.lang.std.Time.currentTime",
+        "aura.lang.std.Time.sleep",
+        "aura.lang.std.Time.duration",
+        "aura.lang.std.Time.toDateString",
+        "aura.lang.std.Time.toTimeString",
+        "aura.lang.std.Time.formatDate",
+        "aura.lang.std.Time.diff",
+        "aura.lang.std.Time.parseDate",
     ] {
         s.insert(n);
     }
@@ -593,8 +776,10 @@ mod tests {
     #[test]
     fn test_is_builtin_basic() {
         assert!(is_builtin("println"));
-        assert!(is_builtin("aura.math.sin"));
-        assert!(is_builtin("aura.concurrent.spawn"));
+        assert!(is_builtin("aura.lang.std.Math.sin"));
+        assert!(is_builtin("aura.lang.std.Coroutine.spawn"));
+        assert!(is_builtin("aura.lang.std.Actor.send"));
+        assert!(is_builtin("aura.lang.std.Channel.newChannel"));
         assert!(!is_builtin("myFunction"));
         assert!(!is_builtin(""));
     }
@@ -603,25 +788,27 @@ mod tests {
     fn test_all_modules_represented() {
         let names = all_names();
         // 每个命名空间至少有 1 个函数
-        assert!(names.iter().any(|n| n.starts_with("aura.ascii.")));
-        assert!(names.iter().any(|n| n.starts_with("aura.assert.")));
-        assert!(names.iter().any(|n| n.starts_with("aura.builtin.")));
-        assert!(names.iter().any(|n| n.starts_with("aura.collections.")));
-        assert!(names.iter().any(|n| n.starts_with("aura.console.")));
-        assert!(names.iter().any(|n| n.starts_with("aura.encoding.")));
-        assert!(names.iter().any(|n| n.starts_with("aura.env.")));
-        assert!(names.iter().any(|n| n.starts_with("aura.fs.")));
-        assert!(names.iter().any(|n| n.starts_with("aura.io.")));
-        assert!(names.iter().any(|n| n.starts_with("aura.iter.")));
-        assert!(names.iter().any(|n| n.starts_with("aura.json.")));
-        assert!(names.iter().any(|n| n.starts_with("aura.math.")));
-        assert!(names.iter().any(|n| n.starts_with("aura.net.")));
-        assert!(names.iter().any(|n| n.starts_with("aura.path.")));
-        assert!(names.iter().any(|n| n.starts_with("aura.process.")));
-        assert!(names.iter().any(|n| n.starts_with("aura.random.")));
-        assert!(names.iter().any(|n| n.starts_with("aura.string.")));
-        assert!(names.iter().any(|n| n.starts_with("aura.test.")));
-        assert!(names.iter().any(|n| n.starts_with("aura.time.")));
-        assert!(names.iter().any(|n| n.starts_with("aura.concurrent.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.std.Ascii.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.std.Assert.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.std.Builtin.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.std.Collections.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.std.Console.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.std.Encoding.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.std.Env.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.std.FileSystem.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.std.IO.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.std.Iter.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.std.Json.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.std.Math.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.std.Network.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.std.Path.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.std.Process.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.std.Random.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.std.String.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.std.Test.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.std.Time.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.std.Coroutine.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.std.Actor.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.std.Channel.")));
     }
 }

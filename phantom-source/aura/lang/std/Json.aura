@@ -1,0 +1,58 @@
+// aura:///aura/lang/std/Json.aura
+// 标准库模块，不可修改
+// 实现：Rust 原生函数（compiler/src/std/std_json.rs）
+// (package 声明由编译器自动注入，无需显式声明)
+/// JSON 解析与序列化模块。
+///
+/// 使用前需 import：
+/// ```aura
+/// import aura.json.*
+/// ```
+///
+/// @since 0.1
+internal object Json {
+
+    // ── 解析 ──
+
+    /// 解析 JSON 字符串为 Aura 值（Map/List/String/Int/Float/Boolean/Null）。
+    fun parse(text: String): Any
+
+    // ── 序列化 ──
+
+    /// 将 Aura 值序列化为 JSON 字符串。
+    ///
+    /// @param pretty 是否格式化输出（缩进换行）
+    fun stringify(value: Any, pretty: Boolean): String
+
+    // ── 验证 ──
+
+    /// 检查字符串是否为合法 JSON。
+    fun isValid(text: String): Boolean
+
+    // ── 访问 ──
+
+    /// 获取 JSON 对象指定键的值。
+    fun get(obj: Any, key: String): Any
+
+    /// 设置 JSON 对象指定键的值。
+    fun set(obj: Any, key: String, value: Any): Unit
+
+    // ── 遍历 ──
+
+    /// 获取 JSON 对象的所有键。
+    fun keys(obj: Any): List<String>
+
+    /// 获取 JSON 对象的所有值。
+    fun values(obj: Any): List<Any>
+
+    /// 获取 JSON 数组/对象的元素数量。
+    fun length(obj: Any): Int
+
+    // ── 操作 ──
+
+    /// 检查 JSON 对象是否包含指定键。
+    fun contains(obj: Any, key: String): Boolean
+
+    /// 移除 JSON 对象指定键。
+    fun remove(obj: Any, key: String): Unit
+}

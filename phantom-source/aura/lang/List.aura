@@ -1,0 +1,175 @@
+// aura:///aura/lang/List.aura
+// 语言内置类型，不可修改
+
+/// 有序列表类型 List<T>。
+///
+/// - 存储：VM 中为 `Value::List(Vec<Value>)`，AOT 中为动态数组
+/// - 支持泛型：`List<Int>`, `List<String>`, `List<Any>`
+/// - 字面量：`listOf(1, 2, 3)` 或 `listOf()`
+/// - 可变列表：使用 `mutableListOf(1, 2, 3)`
+///
+/// @see Map, Array, Set
+/// @since 0.1
+internal value class List<T> {
+
+    // ── 构造（companion object）──
+
+    companion object {
+        /// 从可变参数创建不可变列表
+        fun listOf(vararg items: T): List<T>
+
+        /// 从可变参数创建可变列表
+        fun mutableListOf(vararg items: T): List<T>
+
+        /// 创建空列表
+        fun emptyList(): List<T>
+    }
+
+    // ── 属性 ──
+
+    /// 列表元素数量
+    val size: Int
+
+    // ── 访问方法 ──
+
+    /// 按下标获取元素
+    fun get(index: Int): T
+
+    /// 按下标设置元素（可变列表）
+    fun set(index: Int, value: T): Unit
+
+    /// 获取第一个元素
+    fun first(): T
+
+    /// 获取最后一个元素
+    fun last(): T
+
+    // ── 查找方法 ──
+
+    /// 检查列表是否包含指定元素
+    fun contains(item: T): Boolean
+
+    /// 查找元素的索引（未找到返回 -1）
+    fun indexOf(item: T): Int
+
+    /// 查找元素的最后一个索引（未找到返回 -1）
+    fun lastIndexOf(item: T): Int
+
+    // ── 修改方法（可变列表）──
+
+    /// 在末尾添加元素
+    fun add(item: T): Unit
+
+    /// 在指定位置插入元素
+    fun insert(index: Int, item: T): Unit
+
+    /// 移除指定位置的元素
+    fun remove(index: Int): T
+
+    /// 移除指定元素
+    fun removeItem(item: T): Boolean
+
+    /// 清空列表
+    fun clear(): Unit
+
+    // ── 截取方法 ──
+
+    /// 截取子列表 [from, to)
+    fun subList(from: Int, to: Int): List<T>
+
+    // ── 排序与反转 ──
+
+    /// 排序
+    fun sort(): List<T>
+
+    /// 反转
+    fun reverse(): List<T>
+
+    // ── 聚合方法 ──
+
+    /// 计算所有元素的和
+    fun sum(): Int
+
+    /// 计算所有元素的平均值
+    fun avg(): Float
+
+    /// 获取最小值
+    fun min(): T
+
+    /// 获取最大值
+    fun max(): T
+
+    /// 计算所有元素的积
+    fun product(): Int
+
+    // ── 过滤与转换 ──
+
+    /// 按条件过滤
+    fun filter(predicate: (T) -> Boolean): List<T>
+
+    /// 转换每个元素
+    fun map(transform: (T) -> Any): List<Any>
+
+    /// 扁平化映射
+    fun flatMap(transform: (T) -> List<Any>): List<Any>
+
+    /// 获取所有不同元素
+    fun distinct(): List<T>
+
+    // ── 折半与扫描 ──
+
+    /// 折半归约
+    fun fold(initial: Any, accumulator: (Any, T) -> Any): Any
+
+    /// 扫描（运行累计）
+    fun scan(initial: Any, accumulator: (Any, T) -> Any): List<Any>
+
+    // ── 分区与分组 ──
+
+    /// 按条件分区为两个列表
+    fun partition(predicate: (T) -> Boolean): List<List<T>>
+
+    /// 按分组键分组
+    fun groupBy(keySelector: (T) -> Any): Map<Any, List<T>>
+
+    // ── 配对与枚举 ──
+
+    /// 枚举（索引 + 元素）
+    fun enumerate(): List<Any>
+
+    /// 与另一个列表配对
+    fun zip(other: List<Any>): List<Any>
+
+    /// 解配对
+    fun unzip(): List<List<T>>
+
+    // ── 范围操作 ──
+
+    /// 取前 n 个元素
+    fun take(n: Int): List<T>
+
+    /// 跳过前 n 个元素
+    fun skip(n: Int): List<T>
+
+    /// 取满足条件的元素（从头开始，遇到不满足即停止）
+    fun takeWhile(predicate: (T) -> Boolean): List<T>
+
+    /// 跳过满足条件的元素（从头开始，遇到不满足即停止）
+    fun dropWhile(predicate: (T) -> Boolean): List<T>
+
+    // ── 全量检查 ──
+
+    /// 检查是否所有元素都满足条件
+    fun every(predicate: (T) -> Boolean): Boolean
+
+    /// 检查是否存在满足条件的元素
+    fun some(predicate: (T) -> Boolean): Boolean
+
+    // ── 转换 ──
+
+    /// 转换为 Map
+    fun toMap(): Map<Any, Any>
+
+    /// 转换为字符串（逗号分隔）
+    override fun toString(): String
+}

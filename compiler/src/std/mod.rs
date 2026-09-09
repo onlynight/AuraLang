@@ -169,7 +169,39 @@ pub fn register_with_modules(reg: &mut NativeRegistry, modules: &[&str]) {
 
 /// 从 import 声明路径提取模块名
 ///
-/// 例如：`"aura.math"` → `"math"`，`"aura.string"` → `"string"`
+/// 例如：`"aura.lang.std.Math"` → `"math"`，`"aura.lang.std.IO"` → `"io"`
+///
+/// 兼容旧命名（`"aura.math"` → `"math"`）以支持渐进迁移。
 pub fn module_name_from_path(path: &str) -> Option<&str> {
+    // New scheme: aura.lang.std.<ClassName>
+    if let Some(rest) = path.strip_prefix("aura.lang.std.") {
+        // Convert PascalCase to lowercase module name
+        return match rest {
+            "Math" => Some("math"),
+            "IO" => Some("io"),
+            "Ascii" => Some("ascii"),
+            "Assert" => Some("assert"),
+            "Builtin" => Some("builtin"),
+            "Collections" => Some("collections"),
+            "Console" => Some("console"),
+            "Encoding" => Some("encoding"),
+            "Env" => Some("env"),
+            "FileSystem" => Some("fs"),
+            "Iter" => Some("iter"),
+            "Json" => Some("json"),
+            "Network" => Some("net"),
+            "Path" => Some("path"),
+            "Process" => Some("process"),
+            "Random" => Some("random"),
+            "String" => Some("string"),
+            "Test" => Some("test"),
+            "Time" => Some("time"),
+            "Coroutine" => Some("concurrent"),
+            "Actor" => Some("concurrent"),
+            "Channel" => Some("concurrent"),
+            _ => None,
+        };
+    }
+    // Old scheme (kept for backwards compatibility during migration)
     if let Some(rest) = path.strip_prefix("aura.") { Some(rest) } else { None }
 }

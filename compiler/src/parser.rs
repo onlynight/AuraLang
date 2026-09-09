@@ -2210,6 +2210,36 @@ impl Parser {
     fn parse_val_stmt(&mut self) -> Stmt {
         let start = self.current().span;
         self.advance(); // val
+
+        // P15: 解构 `val (a, b) = expr`（需在读取 name 前判断）
+        if self.check(TokenKind::LParen) {
+            self.advance();
+            let mut patterns = Vec::new();
+            while !self.check(TokenKind::RParen) && !self.is_at_end() {
+                let p = self.parse_expression(0);
+                patterns.push(p);
+                if !self.check(TokenKind::Comma) {
+                    break;
+                }
+                self.advance();
+            }
+            self.expect(TokenKind::RParen);
+            self.expect(TokenKind::Assign);
+            let initializer = self.parse_expression(0);
+            let type_hint = if self.check(TokenKind::Colon) {
+                self.advance();
+                Some(Box::new(self.parse_type()))
+            } else {
+                None
+            };
+            return Stmt::Destructure {
+                patterns,
+                expr: Box::new(initializer),
+                type_hint,
+                span: Span::merge(&start, &self.current().span),
+            };
+        }
+
         let name = self.advance().literal.clone();
 
         // val x by lazy { ... } 惰性初始化
@@ -2537,11 +2567,27 @@ impl Parser {
                 span: Span::merge(&start, &self.current().span),
             };
         }
+        if self.check(TokenKind::Defer) && self.peek(1) == TokenKind::LBrace {
+            self.advance();
+            let block = self.parse_block();
+            return Expr::Defer {
+                block: Box::new(block),
+                span: Span::merge(&start, &self.current().span),
+            };
+        }
         if self.check(TokenKind::Await) {
             self.advance();
             let expr = self.parse_expression(0);
             return Expr::Await {
                 expr: Box::new(expr),
+                span: Span::merge(&start, &self.current().span),
+            };
+        }
+        if self.check(TokenKind::Async) && self.peek(1) == TokenKind::LBrace {
+            self.advance();
+            let body = self.parse_block();
+            return Expr::AsyncBlock {
+                body: Box::new(body),
                 span: Span::merge(&start, &self.current().span),
             };
         }
@@ -2586,9 +2632,58 @@ impl Parser {
             }
             return Expr::Literal(Literal::Float(0.0), tok.span);
         }
-        if self.check(TokenKind::StringLiteral) {
-            let tok = self.advance();
-            return Expr::Literal(Literal::String(tok.literal.clone()), tok.span);
+        if self.check(TokenKind::StringLiteral) || self.check(TokenKind::StringInterpStart) {
+            // P14: 字符串插值重建 —— StringLiteral / StringInterpStart 交替序列
+            let start_span = self.current().span;
+            let mut parts: Vec<Expr> = Vec::new();
+            if self.check(TokenKind::StringLiteral) {
+                let tok = self.advance();
+                if !tok.literal.is_empty() {
+                    parts.push(Expr::Literal(
+                        Literal::String(tok.literal.clone()),
+                        tok.span,
+                    ));
+                }
+            }
+            while self.check(TokenKind::StringInterpStart) {
+                let interp = self.advance();
+                let text = interp.literal.clone();
+                let part = if let Some(inner) =
+                    text.strip_prefix("${").and_then(|s| s.strip_suffix('}'))
+                {
+                    // ${expr} 表达式插值：对 expr 文本子解析
+                    sub_parse_expression(inner, interp.span)
+                } else if let Some(name) = text.strip_prefix('$') {
+                    // $var 简单插值
+                    Expr::Ident(name.to_string(), interp.span)
+                } else {
+                    Expr::Literal(Literal::String(text), interp.span)
+                };
+                parts.push(part);
+                // 插值片段之间可能跟着下一段字面量
+                if self.check(TokenKind::StringLiteral) {
+                    let lit = self.advance();
+                    if !lit.literal.is_empty() {
+                        parts.push(Expr::Literal(
+                            Literal::String(lit.literal.clone()),
+                            lit.span,
+                        ));
+                    }
+                }
+            }
+            if parts.is_empty() {
+                parts.push(Expr::Literal(Literal::String(String::new()), start_span));
+            }
+            if parts.len() == 1 {
+                if let Expr::Literal(Literal::String(_), _) = &parts[0] {
+                    return parts.into_iter().next().unwrap();
+                }
+            }
+            let span = Span::merge(&start_span, &self.current().span);
+            return Expr::StrInterp {
+                parts,
+                span,
+            };
         }
         if self.check(TokenKind::CharLiteral) {
             let tok = self.advance();
@@ -2689,6 +2784,15 @@ impl Parser {
                         name,
                         span: Span::merge(&start, &self.current().span),
                     };
+                    // P15: Kotlin 尾随 lambda —— `list.filter { it > 2 }` 无括号调用
+                    if self.check(TokenKind::LBrace) {
+                        let blk = self.parse_expression(0);
+                        expr = Expr::Call {
+                            callee: Box::new(expr),
+                            args: vec![blk],
+                            span: Span::merge(&start, &self.current().span),
+                        };
+                    }
                 }
                 TokenKind::QuestionMark => {
                     self.advance();
@@ -3181,6 +3285,14 @@ impl Parser {
     }
 }
 
+/// 对 `${expr}` 内的文本进行子词法/语法解析（P14 字符串插值表达式）
+fn sub_parse_expression(src: &str, _span: Span) -> Expr {
+    let mut lexer = crate::lexer::Lexer::new(src);
+    let tokens = lexer.tokenize();
+    let mut p = Parser::new(tokens);
+    p.parse_expression(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3569,6 +3681,50 @@ mod tests {
             Decl::Function(f) => assert_eq!(f.doc, None),
             other => panic!("expected function declaration, got {:?}", other),
         }
+    }
+
+    /// 多行注释 /* ... */ 在声明、语句、表达式中均应被透明跳过
+    #[test]
+    fn test_plain_block_comments_are_skipped() {
+        let (program, errors) = parse_program(
+            r#"
+            /* header comment */
+            fun add(a: Int, b: Int): Int {
+                /* inline comment */
+                return a /* trailing */ + b
+            }
+            /* tail comment */
+            "#,
+        );
+        assert!(errors.is_empty(), "errors: {:?}", errors);
+        assert_eq!(program.declarations.len(), 1);
+        match &program.declarations[0] {
+            Decl::Function(f) => assert_eq!(f.name, "add"),
+            other => panic!("expected function declaration, got {:?}", other),
+        }
+    }
+
+    /// 多行注释可出现在文件末尾而不误报 unterminated
+    #[test]
+    fn test_block_comment_at_file_end() {
+        let (_, errors) = parse_program("val x = 1 /* final comment */");
+        assert!(errors.is_empty(), "errors: {:?}", errors);
+    }
+
+    /// 连续多个多行注释之间夹带代码
+    #[test]
+    fn test_multiple_block_comments_separated_by_code() {
+        let (program, errors) = parse_program("/* a */ val x = 1 /* b */ val y = 2 /* c */");
+        assert!(errors.is_empty(), "errors: {:?}", errors);
+        assert_eq!(program.top_level_statements.len(), 2);
+    }
+
+    /// 空的多行注释 /**/ 不应影响解析
+    #[test]
+    fn test_empty_block_comment() {
+        let (program, errors) = parse_program("val x = 1 /**/ val y = 2");
+        assert!(errors.is_empty(), "errors: {:?}", errors);
+        assert_eq!(program.top_level_statements.len(), 2);
     }
 
     #[test]

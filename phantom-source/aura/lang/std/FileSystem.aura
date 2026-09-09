@@ -1,0 +1,102 @@
+// aura:///aura/lang/std/FileSystem.aura
+// 标准库模块，不可修改
+// 实现：Rust 原生函数（compiler/src/std/std_fs.rs）
+// 架构：syscall-邻近模块，未来通过 extern "c" 直连 libc
+// (package 声明由编译器自动注入，无需显式声明)
+/// 文件系统操作模块。
+///
+/// 使用前需 import：
+/// ```aura
+/// import aura.fs.*
+/// ```
+///
+/// 架构说明：
+/// - Layer 2（C FFI）：当前通过 Rust native 实现
+/// - 未来：通过 `extern "c" "libc"` 直连 fopen/fread/fwrite/close 等 syscall
+///
+/// @since 0.1
+internal object FileSystem {
+
+    // ── 检查（通过 libc stat() 实现）──
+
+    /// 检查路径是否存在。
+    /// 未来实现：`extern "c" "libc" fun stat(path: String, statbuf: Pointer): Int`
+    fun exists(path: String): Boolean
+
+    /// 检查路径是否为文件。
+    fun isFile(path: String): Boolean
+
+    /// 检查路径是否为目录。
+    fun isDirectory(path: String): Boolean
+
+    // ── 读取（通过 libc fopen/fread/fclose 实现）──
+
+    /// 读取文本文件。
+    /// 未来实现：`extern "c" "libc" fun fopen(path: String, mode: String): Pointer`
+    fun readText(path: String): String
+
+    /// 读取二进制文件。
+    fun readBytes(path: String): Array<Byte>
+
+    // ── 写入（通过 libc fopen/fwrite/fclose 实现）──
+
+    /// 写入文本文件。
+    fun writeText(path: String, content: String): Unit
+
+    /// 写入二进制文件。
+    fun writeBytes(path: String, bytes: Array<Byte>): Unit
+
+    // ── 删除（通过 libc remove() 实现）──
+
+    /// 删除文件。
+    fun delete(path: String): Unit
+
+    // ── 目录（通过 libc mkdir() 实现）──
+
+    /// 创建目录。
+    fun mkdir(path: String): Unit
+
+    /// 递归创建目录（含父目录）。
+    fun mkdirP(path: String): Unit
+
+    /// 重命名文件/目录。
+    fun rename(oldPath: String, newPath: String): Unit
+
+    /// 复制文件/目录。
+    fun copy(source: String, target: String): Unit
+
+    // ── 列表（通过 libc opendir/readdir 实现）──
+
+    /// 列出目录内容（含子目录）。
+    fun listDir(path: String): List<String>
+
+    /// 列出目录中的文件（不含子目录）。
+    fun listFiles(path: String): List<String>
+
+    // ── 信息（通过 libc stat() 实现）──
+
+    /// 获取文件大小。
+    fun fileSize(path: String): Int
+
+    /// 获取文件最后修改时间（Unix 时间戳）。
+    fun lastModified(path: String): Float
+
+    // ── 路径（通过 libc getcwd() 实现）──
+
+    /// 获取绝对路径。
+    fun absolutePath(path: String): String
+
+    /// 用户主目录。
+    val homeDir: String
+
+    /// 临时目录。
+    val tempDir: String
+
+    /// 当前工作目录。
+    val currentDir: String
+
+    // ── 遍历 ──
+
+    /// 递归遍历目录树。
+    fun walk(path: String): List<String>
+}

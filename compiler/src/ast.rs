@@ -299,6 +299,16 @@ pub enum Expr {
         expr: Box<Expr>,
         span: Span,
     },
+    /// async 块（P8）：`async { body }` — 引入 suspend 上下文，值为 body 的值
+    AsyncBlock {
+        body: Box<Expr>,
+        span: Span,
+    },
+    /// 字符串插值（P14）：`"a $b ${c + 1}"` — parts 为字面量片段与被插值表达式交替
+    StrInterp {
+        parts: Vec<Expr>,
+        span: Span,
+    },
     /// this 引用（对象自身）
     This(Span),
     /// select 多路复用（P10.9）：多个 `Channel.receive()` 分支 + 可选 default
@@ -728,6 +738,12 @@ impl Expr {
         match self {
             Expr::Literal(_, s)
             | Expr::Ident(_, s)
+            | Expr::AsyncBlock {
+                span: s, ..
+            }
+            | Expr::StrInterp {
+                span: s, ..
+            }
             | Expr::Assign {
                 span: s, ..
             }

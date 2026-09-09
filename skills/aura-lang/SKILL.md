@@ -285,7 +285,7 @@ if (result.success) { use(result.data) }
 else { handleError(result.error) }
 
 // ❌ DO NOT: import
-// import aura.io.*
+// import aura.lang.std.IO.*
 
 // ✅ DO: only prelude functions
 println("Hello")

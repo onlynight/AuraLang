@@ -6,14 +6,15 @@ use crate::vm::native::NativeRegistry;
 use crate::vm::value::Value;
 
 pub fn register(reg: &mut NativeRegistry) {
-    reg.register("aura.encoding.base64Encode", nat_base64_encode);
-    reg.register("aura.encoding.base64Decode", nat_base64_decode);
-    reg.register("aura.encoding.hexEncode", nat_hex_encode);
-    reg.register("aura.encoding.hexDecode", nat_hex_decode);
-    reg.register("aura.encoding.urlEncode", nat_url_encode);
-    reg.register("aura.encoding.urlDecode", nat_url_decode);
-    reg.register("aura.encoding.byteToHex", nat_byte_to_hex);
-    reg.register("aura.encoding.hexToByte", nat_hex_to_byte);
+    // ── 纯逻辑函数（已上移到 Aura 层，但 VM 仍需 native 实现）──
+    reg.register("aura.lang.std.Encoding.base64Encode", nat_base64_encode);
+    reg.register("aura.lang.std.Encoding.base64Decode", nat_base64_decode);
+    reg.register("aura.lang.std.Encoding.hexEncode", nat_hex_encode);
+    reg.register("aura.lang.std.Encoding.hexDecode", nat_hex_decode);
+    reg.register("aura.lang.std.Encoding.urlEncode", nat_url_encode);
+    reg.register("aura.lang.std.Encoding.urlDecode", nat_url_decode);
+    reg.register("aura.lang.std.Encoding.byteToHex", nat_byte_to_hex);
+    reg.register("aura.lang.std.Encoding.hexToByte", nat_hex_to_byte);
 }
 
 /// encoding.base64Encode(data) → String

@@ -446,7 +446,10 @@ fn cmd_build_aot(args: &[String]) {
             println!("✓ AOT 编译完成（{}）: {}", kind, out_path.display());
         }
         Err(e) => {
-            let _ = std::fs::remove_dir_all(&tmp_dir);
+            // 调试：设置 AURA_KEEP_AOT_TMP=1 保留临时 IR 便于定位 llc 错误
+            if std::env::var("AURA_KEEP_AOT_TMP").is_err() {
+                let _ = std::fs::remove_dir_all(&tmp_dir);
+            }
             eprintln!("错误: AOT 编译失败: {}", e);
             exit(1);
         }

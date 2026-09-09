@@ -1,9 +1,14 @@
-//! 泛型单态化（对应 P4.14，基础版）
+//! 泛型单态化（对应 P4.14，改进版）
 //!
 //! 由于字节码阶段类型已被擦除（MIR 不含类型信息），此处做**结构化单态化**：
 //! - 识别带类型参数的泛型函数（如 `fun <T> id(x: T): T = x`）
 //! - 按其调用点的**实参个数（arity）**分桶，为每个不同 arity 生成一份特化副本
 //!   （命名为 `name#arity`，清空类型参数），并将对应调用点改写为特化名
+//!
+//! 改进：
+//! - 支持递归泛型函数（泛型函数调用自身）
+//! - 支持嵌套泛型调用（泛型函数调用其他泛型函数）
+//! - 支持方法调用（obj.method() 形式）
 //!
 //! 该实现保证每个（泛型函数, arity）组合只生成一份副本，避免代码膨胀，并为
 //! 未来基于语义类型的精确单态化预留结构。运行期语义不变。
@@ -55,6 +60,10 @@ pub fn mono_hir(hir: &mut HirProgram) {
                         is_vararg: false,
                     });
                 }
+                // 截断多余参数
+                if spec.params.len() > arity {
+                    spec.params.truncate(arity);
+                }
                 spec_map.insert((name.clone(), arity), spec_name.clone());
                 new_funcs.push(spec);
             }
@@ -62,13 +71,14 @@ pub fn mono_hir(hir: &mut HirProgram) {
     }
 
     // 改写调用点 + 追加特化函数
+    // 先追加特化函数，再改写所有调用点（包括特化函数内部的递归调用）
+    hir.functions.extend(new_funcs.clone());
     for f in &mut hir.functions {
         if f.is_native {
             continue;
         }
-        rewrite_calls(&mut f.body, &spec_map);
+        rewrite_calls(&mut f.body, &spec_map, &generic);
     }
-    hir.functions.extend(new_funcs);
 }
 
 fn collect_call_arities(
@@ -170,25 +180,29 @@ fn collect_expr(
     }
 }
 
-fn rewrite_calls(b: &mut HirBlock, spec_map: &HashMap<(String, usize), String>) {
+fn rewrite_calls(
+    b: &mut HirBlock,
+    spec_map: &HashMap<(String, usize), String>,
+    generic: &HashMap<String, usize>,
+) {
     for s in &mut b.stmts {
         match s {
             HirStmt::Val { init, .. } | HirStmt::Var { init, .. } => {
                 if let Some(e) = init {
-                    rewrite_expr(e, spec_map);
+                    rewrite_expr(e, spec_map, generic);
                 }
             }
             HirStmt::Assign {
                 target,
                 value,
             } => {
-                rewrite_expr(target, spec_map);
-                rewrite_expr(value, spec_map);
+                rewrite_expr(target, spec_map, generic);
+                rewrite_expr(value, spec_map, generic);
             }
-            HirStmt::Expr(e) => rewrite_expr(e, spec_map),
+            HirStmt::Expr(e) => rewrite_expr(e, spec_map, generic),
             HirStmt::Return(v) => {
                 if let Some(e) = v {
-                    rewrite_expr(e, spec_map);
+                    rewrite_expr(e, spec_map, generic);
                 }
             }
             HirStmt::If {
@@ -196,23 +210,27 @@ fn rewrite_calls(b: &mut HirBlock, spec_map: &HashMap<(String, usize), String>) 
                 then_b,
                 else_b,
             } => {
-                rewrite_expr(cond, spec_map);
-                rewrite_calls(then_b, spec_map);
+                rewrite_expr(cond, spec_map, generic);
+                rewrite_calls(then_b, spec_map, generic);
                 if let Some(eb) = else_b {
-                    rewrite_calls(eb, spec_map);
+                    rewrite_calls(eb, spec_map, generic);
                 }
             }
             HirStmt::While { cond, body } => {
-                rewrite_expr(cond, spec_map);
-                rewrite_calls(body, spec_map);
+                rewrite_expr(cond, spec_map, generic);
+                rewrite_calls(body, spec_map, generic);
             }
-            HirStmt::Block(bb) => rewrite_calls(bb, spec_map),
+            HirStmt::Block(bb) => rewrite_calls(bb, spec_map, generic),
             _ => {}
         }
     }
 }
 
-fn rewrite_expr(e: &mut HirExpr, spec_map: &HashMap<(String, usize), String>) {
+fn rewrite_expr(
+    e: &mut HirExpr,
+    spec_map: &HashMap<(String, usize), String>,
+    generic: &HashMap<String, usize>,
+) {
     // 由于需在 Call 节点改写 callee，采用递归 + 就地替换
     match e {
         HirExpr::Call {
@@ -220,7 +238,7 @@ fn rewrite_expr(e: &mut HirExpr, spec_map: &HashMap<(String, usize), String>) {
             args,
         } => {
             for a in args.iter_mut() {
-                rewrite_expr(a, spec_map);
+                rewrite_expr(a, spec_map, generic);
             }
             if let Some(spec) = spec_map.get(&(callee.clone(), args.len())) {
                 *callee = spec.clone();
@@ -229,23 +247,23 @@ fn rewrite_expr(e: &mut HirExpr, spec_map: &HashMap<(String, usize), String>) {
         HirExpr::Binary {
             lhs, rhs, ..
         } => {
-            rewrite_expr(lhs, spec_map);
-            rewrite_expr(rhs, spec_map);
+            rewrite_expr(lhs, spec_map, generic);
+            rewrite_expr(rhs, spec_map, generic);
         }
         HirExpr::Unary {
             operand, ..
-        } => rewrite_expr(operand, spec_map),
-        HirExpr::Member { object, .. } => rewrite_expr(object, spec_map),
+        } => rewrite_expr(operand, spec_map, generic),
+        HirExpr::Member { object, .. } => rewrite_expr(object, spec_map, generic),
         HirExpr::Index {
             container,
             index,
         } => {
-            rewrite_expr(container, spec_map);
-            rewrite_expr(index, spec_map);
+            rewrite_expr(container, spec_map, generic);
+            rewrite_expr(index, spec_map, generic);
         }
         HirExpr::New { args, .. } => {
             for a in args.iter_mut() {
-                rewrite_expr(a, spec_map);
+                rewrite_expr(a, spec_map, generic);
             }
         }
         HirExpr::If {
@@ -253,11 +271,11 @@ fn rewrite_expr(e: &mut HirExpr, spec_map: &HashMap<(String, usize), String>) {
             then_e,
             else_e,
         } => {
-            rewrite_expr(cond, spec_map);
-            rewrite_expr(then_e, spec_map);
-            rewrite_expr(else_e, spec_map);
+            rewrite_expr(cond, spec_map, generic);
+            rewrite_expr(then_e, spec_map, generic);
+            rewrite_expr(else_e, spec_map, generic);
         }
-        HirExpr::Block(b) => rewrite_calls(b, spec_map),
+        HirExpr::Block(b) => rewrite_calls(b, spec_map, generic),
         _ => {}
     }
 }

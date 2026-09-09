@@ -1,0 +1,354 @@
+// aura:///aura/lang/std/String.aura
+// 标准库模块，不可修改
+// 实现：纯逻辑函数用 Aura 实现，复杂函数用 Rust native
+// (package 声明由编译器自动注入，无需显式声明)
+/// 字符串工具模块。
+///
+/// 使用前需 import：
+/// ```aura
+/// import aura.string.*
+/// ```
+///
+/// 部分方法也在 `String` 类中可用（免 import）：`contains`, `split`
+/// 本模块提供更丰富的字符串操作。
+///
+/// @since 0.1
+internal object StringUtils {
+
+    // ── 检查（纯逻辑，Aura 实现）──
+
+    /// 检查字符串是否包含子字符串。
+    fun contains(text: String, substring: String): Boolean {
+        return indexOf(text, substring) >= 0
+    }
+
+    /// 检查字符串是否以指定前缀开头。
+    fun startsWith(text: String, prefix: String): Boolean {
+        if prefix.length > text.length then return false
+        if prefix.length == 0 then return true
+        return text.substring(0, prefix.length) == prefix
+    }
+
+    /// 检查字符串是否以指定后缀结尾。
+    fun endsWith(text: String, suffix: String): Boolean {
+        if suffix.length > text.length then return false
+        if suffix.length == 0 then return true
+        return text.substring(text.length - suffix.length, text.length) == suffix
+    }
+
+    // ── 分割与连接（纯逻辑，Aura 实现）──
+
+    /// 按分隔符分割字符串。
+    fun split(text: String, separator: String): List<String> {
+        var result: List<String> = Collections.emptyList()
+        if text == "" then {
+            result.add("")
+            return result
+        }
+        var start: Int = 0
+        var i: Int = 0
+        while i <= text.length - separator.length {
+            if text.substring(i, i + separator.length) == separator then {
+                result.add(text.substring(start, i))
+                start = i + separator.length
+                i = start
+            } else {
+                i = i + 1
+            }
+        }
+        result.add(text.substring(start, text.length))
+        return result
+    }
+
+    /// 用分隔符连接列表。
+    fun join(list: List<String>, separator: String): String {
+        var result: String = ""
+        var i: Int = 0
+        while i < list.size {
+            if i > 0 then result = result + separator
+            result = result + list[i]
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 按行分割字符串。
+    fun splitLines(text: String): List<String> {
+        return split(text, "\n")
+    }
+
+    /// 用换行符连接列表。
+    fun joinLines(list: List<String>): String {
+        return join(list, "\n")
+    }
+
+    // ── 替换（纯逻辑，Aura 实现）──
+
+    /// 替换所有匹配的子字符串。
+    fun replace(text: String, target: String, replacement: String): String {
+        var result: String = ""
+        var i: Int = 0
+        while i < text.length {
+            if i <= text.length - target.length and text.substring(i, i + target.length) == target then {
+                result = result + replacement
+                i = i + target.length
+            } else {
+                result = result + text[i]
+                i = i + 1
+            }
+        }
+        return result
+    }
+
+    // ── 大小写（纯逻辑，Aura 实现）──
+
+    /// 转换为小写。
+    fun toLowerCase(text: String): String {
+        var result: String = ""
+        var i: Int = 0
+        while i < text.length {
+            var c: String = text[i]
+            if c >= "A" and c <= "Z" then {
+                result = result + String.fromCharCode(c.charCodeAt(0) + 32)
+            } else {
+                result = result + c
+            }
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 转换为大写。
+    fun toUpperCase(text: String): String {
+        var result: String = ""
+        var i: Int = 0
+        while i < text.length {
+            var c: String = text[i]
+            if c >= "a" and c <= "z" then {
+                result = result + String.fromCharCode(c.charCodeAt(0) - 32)
+            } else {
+                result = result + c
+            }
+            i = i + 1
+        }
+        return result
+    }
+
+    // ── 修剪（纯逻辑，Aura 实现）──
+
+    /// 修剪首尾空白。
+    fun trim(text: String): String {
+        var start: Int = 0
+        var end: Int = text.length
+        while start < end and text[start] == " " { start = start + 1 }
+        while end > start and text[end - 1] == " " { end = end - 1 }
+        return text.substring(start, end)
+    }
+
+    /// 修剪开头空白。
+    fun trimStart(text: String): String {
+        var start: Int = 0
+        while start < text.length and text[start] == " " { start = start + 1 }
+        return text.substring(start, text.length)
+    }
+
+    /// 修剪结尾空白。
+    fun trimEnd(text: String): String {
+        var end: Int = text.length
+        while end > 0 and text[end - 1] == " " { end = end - 1 }
+        return text.substring(0, end)
+    }
+
+    // ── 子字符串（纯逻辑，Aura 实现）──
+
+    /// 获取子字符串 [from, to)。
+    fun substring(text: String, from: Int, to: Int): String {
+        if from < 0 then from = 0
+        if to > text.length then to = text.length
+        if from >= to then return ""
+        var result: String = ""
+        var i: Int = from
+        while i < to {
+            result = result + text[i]
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 获取分隔符前的子字符串。
+    fun substringBefore(text: String, delimiter: String): String {
+        var idx: Int = indexOf(text, delimiter)
+        if idx == -1 then return text
+        return text.substring(0, idx)
+    }
+
+    /// 获取分隔符后的子字符串。
+    fun substringAfter(text: String, delimiter: String): String {
+        var idx: Int = indexOf(text, delimiter)
+        if idx == -1 then return ""
+        return text.substring(idx + delimiter.length, text.length)
+    }
+
+    // ── 信息（纯逻辑，Aura 实现）──
+
+    /// 获取字符串长度。
+    fun length(text: String): Int {
+        return text.length
+    }
+
+    /// 检查是否为空字符串。
+    fun isEmpty(text: String): Boolean {
+        return text.length == 0
+    }
+
+    /// 检查是否为空白字符串。
+    fun isBlank(text: String): Boolean {
+        var i: Int = 0
+        while i < text.length {
+            if text[i] != " " then return false
+            i = i + 1
+        }
+        return true
+    }
+
+    // ── 查找（纯逻辑，Aura 实现）──
+
+    /// 查找子字符串首次出现的索引（未找到返回 -1）。
+    fun indexOf(text: String, substring: String): Int {
+        if substring.length == 0 then return 0
+        if substring.length > text.length then return -1
+        var i: Int = 0
+        while i <= text.length - substring.length {
+            var found: Boolean = true
+            var j: Int = 0
+            while j < substring.length {
+                if text[i + j] != substring[j] then { found = false; break }
+                j = j + 1
+            }
+            if found then return i
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// 查找子字符串最后出现的索引（未找到返回 -1）。
+    fun lastIndexOf(text: String, substring: String): Int {
+        if substring.length == 0 then return text.length
+        if substring.length > text.length then return -1
+        var i: Int = text.length - substring.length
+        while i >= 0 {
+            var found: Boolean = true
+            var j: Int = 0
+            while j < substring.length {
+                if text[i + j] != substring[j] then { found = false; break }
+                j = j + 1
+            }
+            if found then return i
+            i = i - 1
+        }
+        return -1
+    }
+
+    // ── 填充（纯逻辑，Aura 实现）──
+
+    /// 在开头填充字符至指定长度。
+    fun padStart(text: String, length: Int, char: String): String {
+        if text.length >= length then return text
+        var padding: String = ""
+        var i: Int = 0
+        while i < length - text.length {
+            padding = padding + char
+            i = i + 1
+        }
+        return padding + text
+    }
+
+    /// 在结尾填充字符至指定长度。
+    fun padEnd(text: String, length: Int, char: String): String {
+        if text.length >= length then return text
+        var padding: String = ""
+        var i: Int = 0
+        while i < length - text.length {
+            padding = padding + char
+            i = i + 1
+        }
+        return text + padding
+    }
+
+    // ── 重复（纯逻辑，Aura 实现）──
+
+    /// 重复字符串 n 次。
+    fun repeat(text: String, times: Int): String {
+        var result: String = ""
+        var i: Int = 0
+        while i < times {
+            result = result + text
+            i = i + 1
+        }
+        return result
+    }
+
+    // ── 字符统计（纯逻辑，Aura 实现）──
+
+    /// 统计字符出现次数。
+    fun countChar(text: String, char: String): Int {
+        var count: Int = 0
+        var i: Int = 0
+        while i < text.length {
+            if text[i] == char then count = count + 1
+            i = i + 1
+        }
+        return count
+    }
+
+    /// 获取首字符。
+    fun first(text: String): String {
+        if text.length == 0 then return ""
+        return text.substring(0, 1)
+    }
+
+    /// 获取末字符。
+    fun last(text: String): String {
+        if text.length == 0 then return ""
+        return text.substring(text.length - 1, text.length)
+    }
+
+    // ── 包含检查（纯逻辑，Aura 实现）──
+
+    /// 检查字符串是否包含任一指定字符。
+    fun containsAny(text: String, chars: String): Boolean {
+        var i: Int = 0
+        while i < chars.length {
+            if indexOf(text, chars[i]) >= 0 then return true
+            i = i + 1
+        }
+        return false
+    }
+
+    /// 检查字符串是否包含所有指定字符。
+    fun containsAll(text: String, chars: String): Boolean {
+        var i: Int = 0
+        while i < chars.length {
+            if indexOf(text, chars[i]) < 0 then return false
+            i = i + 1
+        }
+        return true
+    }
+
+    // ── 正则与转义（Rust native 实现）──
+
+    /// 正则替换所有匹配项。
+    fun replaceAll(text: String, regex: String, replacement: String): String
+
+    /// 格式化字符串（{0} {1} 占位符）。
+    fun format(template: String, vararg args: Any): String
+
+    /// 转义特殊字符。
+    fun escape(text: String): String
+
+    /// 反转义特殊字符。
+    fun unescape(text: String): String
+
+    /// 检查是否匹配正则表达式。
+    fun matches(text: String, regex: String): Boolean
+}

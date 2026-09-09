@@ -519,10 +519,10 @@ impl Repl {
 #### 5.2.1 当前 import 语法
 
 ```aura
-import aura.io.*           // 通配引入
-import aura.math as m      // 别名引入
-import aura.math.sin       // 精确引入
-import aura.math           // 模块引用
+import aura.lang.std.IO.*           // 通配引入
+import aura.lang.std.Math as m      // 别名引入
+import aura.lang.std.Math.sin       // 精确引入
+import aura.lang.std.Math           // 模块引用
 ```
 
 #### 5.2.2 扩展：顶层语句 import
@@ -534,7 +534,7 @@ val pi = 3.14
 
 // 文件 b.aura
 import "./a.aura"          // 导入本地文件
-import "aura.math.*"       // 导入内置模块
+import "aura.lang.std.Math.*"       // 导入内置模块
 
 println(add(1, 2))        // 调用导入的函数
 println(pi)               // 使用导入的常量

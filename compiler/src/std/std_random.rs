@@ -7,17 +7,17 @@ use crate::vm::value::Value;
 use rand::Rng;
 
 pub fn register(reg: &mut NativeRegistry) {
-    reg.register("aura.random.nextInt", nat_next_int);
-    reg.register("aura.random.nextLong", nat_next_long);
-    reg.register("aura.random.nextFloat", nat_next_float);
-    reg.register("aura.random.nextDouble", nat_next_double);
-    reg.register("aura.random.nextBool", nat_next_bool);
-    reg.register("aura.random.nextIntRange", nat_next_int_range);
-    reg.register("aura.random.nextFloatRange", nat_next_float_range);
-    reg.register("aura.random.choice", nat_choice);
-    reg.register("aura.random.shuffle", nat_shuffle);
-    reg.register("aura.random.seed", nat_seed);
-    reg.register("aura.random.random", nat_random);
+    reg.register("aura.lang.std.Random.nextInt", nat_next_int);
+    reg.register("aura.lang.std.Random.nextLong", nat_next_long);
+    reg.register("aura.lang.std.Random.nextFloat", nat_next_float);
+    reg.register("aura.lang.std.Random.nextDouble", nat_next_double);
+    reg.register("aura.lang.std.Random.nextBool", nat_next_bool);
+    reg.register("aura.lang.std.Random.nextIntRange", nat_next_int_range);
+    reg.register("aura.lang.std.Random.nextFloatRange", nat_next_float_range);
+    reg.register("aura.lang.std.Random.choice", nat_choice);
+    reg.register("aura.lang.std.Random.shuffle", nat_shuffle);
+    reg.register("aura.lang.std.Random.seed", nat_seed);
+    reg.register("aura.lang.std.Random.random", nat_random);
 }
 
 /// 获取全局随机数生成器

@@ -6,22 +6,36 @@ use crate::vm::native::NativeRegistry;
 use crate::vm::value::Value;
 
 pub fn register(reg: &mut NativeRegistry) {
-    reg.register("aura.builtin.typeof", nat_typeof);
-    reg.register("aura.builtin.typeOf", nat_typeof);
-    reg.register("aura.builtin.isNull", nat_is_null);
-    reg.register("aura.builtin.isNotNull", nat_is_not_null);
-    reg.register("aura.builtin.isZero", nat_is_zero);
-    reg.register("aura.builtin.isPositive", nat_is_positive);
-    reg.register("aura.builtin.isNegative", nat_is_negative);
-    reg.register("aura.builtin.toString", nat_to_string);
-    reg.register("aura.builtin.toInt", nat_to_int);
-    reg.register("aura.builtin.toFloat", nat_to_float);
-    reg.register("aura.builtin.toBool", nat_to_bool);
-    reg.register("aura.builtin.sizeOf", nat_size_of);
-    reg.register("aura.builtin.hash", nat_hash);
-    reg.register("aura.builtin.compare", nat_compare);
-    reg.register("aura.builtin.clone", nat_clone);
-    reg.register("aura.builtin.identity", nat_identity);
+    // ── 类型查询（Layer 1，不能上移）──
+    reg.register("aura.lang.std.Builtin.typeof", nat_typeof);
+    reg.register("aura.lang.std.Builtin.typeOf", nat_typeof);
+
+    // ── 空值检查（Layer 1，不能上移）──
+    reg.register("aura.lang.std.Builtin.isNull", nat_is_null);
+    reg.register("aura.lang.std.Builtin.isNotNull", nat_is_not_null);
+
+    // ── 数值检查（Layer 1，不能上移）──
+    reg.register("aura.lang.std.Builtin.isZero", nat_is_zero);
+    reg.register("aura.lang.std.Builtin.isPositive", nat_is_positive);
+    reg.register("aura.lang.std.Builtin.isNegative", nat_is_negative);
+
+    // ── 类型转换（Layer 1 核心虚方法，不能上移）──
+    // toString 是 Any 核心虚方法，保留在 Rust
+    reg.register("aura.lang.std.Builtin.toString", nat_to_string);
+
+    // ── 类型转换（Layer 1 扩展方法，已上移到 Aura，但 VM 仍需 native 实现）──
+    reg.register("aura.lang.std.Builtin.toInt", nat_to_int);
+    reg.register("aura.lang.std.Builtin.toFloat", nat_to_float);
+    reg.register("aura.lang.std.Builtin.toBool", nat_to_bool);
+
+    // ── 大小与哈希（Layer 1，不能上移）──
+    reg.register("aura.lang.std.Builtin.sizeOf", nat_size_of);
+    reg.register("aura.lang.std.Builtin.hash", nat_hash);
+
+    // ── 比较与克隆（Layer 1，不能上移）──
+    reg.register("aura.lang.std.Builtin.compare", nat_compare);
+    reg.register("aura.lang.std.Builtin.clone", nat_clone);
+    reg.register("aura.lang.std.Builtin.identity", nat_identity);
 }
 
 /// typeof(value) → String (type name)

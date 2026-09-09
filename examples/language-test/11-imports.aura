@@ -1,0 +1,38 @@
+// ════════════════════════════════════════════════════════════
+// Phase 11 — 导入（P11）
+// 通配 import module.*、模块 import module、精确 import module.fn、
+// 别名 import module.fn as alias / import module as alias
+// ════════════════════════════════════════════════════════════
+
+import aura.math.*
+import aura.io
+import aura.math.sqrt as sq
+import aura.concurrent as cc
+
+fun main() {
+    // ── §11.1 通配导入：短名直接可用（P11）──
+    val r = sqrt(16.0)
+    println("§11.1 通配 sqrt(16)=" + r.toString())
+
+    val c = cos(0.0)
+    println("§11.1 通配 cos(0)=" + c.toString())
+
+    // ── §11.2 模块导入：模块名限定调用（P11）──
+    val ok = aura.io.fileExists("README.md")
+    println("§11.2 模块 io.fileExists=" + ok.toString())
+
+    // ── §11.3 精确导入 + 别名（P11）──
+    val s = sq(9.0)
+    println("§11.3 别名 sq(9)=" + s.toString())
+
+    // ── §11.4 模块别名（P11）──
+    val ch = cc.newChannel(0)
+    cc.channelSend(ch, "via-alias")
+    val msg = cc.channelRecv(ch)
+    println("§11.4 别名 cc.newChannel=" + ch.toString() + ", recv=")
+    println(msg)
+
+    // ── §11.5 导入组合使用（P11）──
+    val m = aura.math.max(3.0, 7.0)
+    println("§11.5 组合 aura.math.max(3,7)=" + m.toString())
+}

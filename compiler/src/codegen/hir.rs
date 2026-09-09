@@ -21,19 +21,19 @@ use std::collections::HashMap;
 //
 // 从 ImportDecl 构建，用于在 desugar_expr 中将短名/别名解析为完整原生函数名。
 // 支持：
-// - `import aura.concurrent.*` + `spawn(42)` → `aura.concurrent.spawn(42)`
-// - `import aura.concurrent.spawn` + `spawn(42)` → `aura.concurrent.spawn(42)`
-// - `import aura.concurrent.spawn as s` + `s(42)` → `aura.concurrent.spawn(42)`
-// - `import aura.concurrent as cc` + `cc.spawn(42)` → `aura.concurrent.spawn(42)`
+// - `import aura.concurrent.*` + `spawn(42)` → `aura.lang.std.Coroutine.spawn(42)`
+// - `import aura.lang.std.Coroutine.spawn` + `spawn(42)` → `aura.lang.std.Coroutine.spawn(42)`
+// - `import aura.lang.std.Coroutine.spawn as s` + `s(42)` → `aura.lang.std.Coroutine.spawn(42)`
+// - `import aura.concurrent as cc` + `cc.spawn(42)` → `aura.lang.std.Coroutine.spawn(42)`
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Default)]
 struct ImportResolution {
     /// 短名 → 完整原生函数名（通配/精确引入，无别名）
-    /// 例如: "spawn" → "aura.concurrent.spawn"
+    /// 例如: "spawn" → "aura.lang.std.Coroutine.spawn"
     short_to_full: HashMap<String, String>,
     /// 别名 → 完整原生函数名（精确引入 + 别名）
-    /// 例如: "s" → "aura.concurrent.spawn"
+    /// 例如: "s" → "aura.lang.std.Coroutine.spawn"
     alias_to_full: HashMap<String, String>,
     /// 别名 → 模块名（模块/通配导入 + 别名）
     /// 例如: "cc" → "aura.concurrent"
@@ -41,11 +41,11 @@ struct ImportResolution {
 }
 
 impl ImportResolution {
-    /// 查找短名映射（如 `spawn` → `aura.concurrent.spawn`）
+    /// 查找短名映射（如 `spawn` → `aura.lang.std.Coroutine.spawn`）
     fn resolve_short_name(&self, name: &str) -> Option<&str> {
         self.short_to_full.get(name).map(|s| s.as_str())
     }
-    /// 查找别名映射（如 `s` → `aura.concurrent.spawn`）
+    /// 查找别名映射（如 `s` → `aura.lang.std.Coroutine.spawn`）
     fn resolve_alias(&self, name: &str) -> Option<&str> {
         self.alias_to_full.get(name).map(|s| s.as_str())
     }
@@ -682,34 +682,73 @@ fn build_import_resolution(imports: &[ImportDecl]) -> ImportResolution {
             continue;
         }
 
-        // 判断路径深度：aura.xxx = 2（模块），aura.xxx.yyy = 3（函数）
         let parts: Vec<&str> = path.split('.').collect();
-        let is_function = parts.len() == 3;
+        let is_new_scheme = path.starts_with("aura.lang.std");
+        // 新命名下：class = 4 段，function = 5 段
+        // 旧命名下：module = 2 段，function = 3 段
+        let is_function = if is_new_scheme { parts.len() == 5 } else { parts.len() == 3 };
+        // 新命名下的 class 段数（4 段，如 aura.lang.std.Coroutine）
+        let is_class = is_new_scheme && parts.len() == 4;
+        // 提取类名（如果有）
+        let class_name =
+            if is_new_scheme && parts.len() >= 4 { Some(parts[3].to_string()) } else { None };
 
         match &imp.alias {
             Some(alias) if is_function => {
-                // import aura.concurrent.spawn as s → alias "s" → full name
+                // import aura.lang.std.Coroutine.spawn as s → alias "s" → full name
                 r.alias_to_full.insert(alias.clone(), path.clone());
             }
-            Some(alias) => {
-                // import aura.concurrent as cc / import aura.concurrent.* as cc
+            Some(alias) if is_new_scheme && class_name.is_some() && !imp.wildcard => {
+                // import aura.lang.std.Coroutine as cc → alias → module path
                 r.alias_to_module.insert(alias.clone(), path.clone());
             }
-            None if imp.wildcard => {
-                // import aura.concurrent.* → 所有函数短名 → 完整名
+            Some(alias) if imp.wildcard => {
+                // import aura.lang.std.Coroutine.* as cc → alias → module path
+                // 同时注册短名供通配调用使用
                 let short_names = crate::std::decl::module_functions(path);
                 for sn in short_names {
                     let full = format!("{}.{}", path, sn);
                     r.short_to_full.insert(sn, full);
                 }
+                r.alias_to_module.insert(alias.clone(), path.clone());
+            }
+            Some(alias) => {
+                // 旧命名：import aura.concurrent as cc
+                r.alias_to_module.insert(alias.clone(), path.clone());
+            }
+            None if imp.wildcard => {
+                // import aura.lang.std.Coroutine.* → 所有函数短名 → 完整名
+                // 同时：新命名下注册 "Coroutine.spawn" 形式供 check_call 使用
+                let short_names = crate::std::decl::module_functions(path);
+                for sn in short_names {
+                    let full = format!("{}.{}", path, sn);
+                    r.short_to_full.insert(sn.clone(), full.clone());
+                    // Class-name style: "Coroutine.spawn"
+                    if let Some(cn) = &class_name {
+                        r.short_to_full.insert(format!("{}.{}", cn, sn), full);
+                    }
+                }
+            }
+            None if is_new_scheme && class_name.is_some() && is_class => {
+                // import aura.lang.std.Coroutine → 类引用
+                // 同时注册：
+                // 1) "Coroutine.spawn" 形式（用户常用）
+                // 2) "aura.lang.std.Coroutine.spawn" 完整形式
+                let short_names = crate::std::decl::module_functions(path);
+                if let Some(cn) = &class_name {
+                    for sn in short_names {
+                        let full = format!("{}.{}", path, sn);
+                        r.short_to_full.insert(format!("{}.{}", cn, sn), full);
+                    }
+                }
             }
             None if is_function => {
-                // import aura.concurrent.spawn → 短名 spawn → 完整名
+                // import aura.lang.std.Coroutine.spawn → 短名 spawn → 完整名
                 let short_name = parts.last().unwrap_or(&"").to_string();
                 r.short_to_full.insert(short_name, path.clone());
             }
             None => {
-                // import aura.concurrent → 模块引用，无需映射（调用时用完整路径）
+                // 旧命名：import aura.concurrent → 模块引用，无需映射（调用时用完整路径）
             }
         }
     }
@@ -2044,10 +2083,10 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
     }
 
     // ── P10: 并发运行时原生函数（aura.concurrent.* 命名空间）──
-    // aura.concurrent.spawn(expr) — 创建新协程/Actor
-    if !natives.iter().any(|n| n.name == "aura.concurrent.spawn") {
+    // aura.lang.std.Coroutine.spawn(expr) — 创建新协程/Actor
+    if !natives.iter().any(|n| n.name == "aura.lang.std.Coroutine.spawn") {
         natives.push(HirFunction {
-            name: "aura.concurrent.spawn".into(),
+            name: "aura.lang.std.Coroutine.spawn".into(),
             params: vec![HirParam {
                 name: "expr".into(),
                 ty: Some(HirType::Named("Any".into())),
@@ -2064,10 +2103,10 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             ffi_lib: None,
         });
     }
-    // aura.concurrent.send(actor, msg) — 向 Actor 发送消息
-    if !natives.iter().any(|n| n.name == "aura.concurrent.send") {
+    // aura.lang.std.Actor.send(actor, msg) — 向 Actor 发送消息
+    if !natives.iter().any(|n| n.name == "aura.lang.std.Actor.send") {
         natives.push(HirFunction {
-            name: "aura.concurrent.send".into(),
+            name: "aura.lang.std.Actor.send".into(),
             params: vec![
                 HirParam {
                     name: "actor".into(),
@@ -2092,10 +2131,10 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             ffi_lib: None,
         });
     }
-    // aura.concurrent.ask(actor, msg) — 向 Actor 请求响应
-    if !natives.iter().any(|n| n.name == "aura.concurrent.ask") {
+    // aura.lang.std.Coroutine.ask(actor, msg) — 向 Actor 请求响应
+    if !natives.iter().any(|n| n.name == "aura.lang.std.Coroutine.ask") {
         natives.push(HirFunction {
-            name: "aura.concurrent.ask".into(),
+            name: "aura.lang.std.Coroutine.ask".into(),
             params: vec![
                 HirParam {
                     name: "actor".into(),
@@ -2120,10 +2159,10 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             ffi_lib: None,
         });
     }
-    // aura.concurrent.newChannel(bound) — 创建 Channel
-    if !natives.iter().any(|n| n.name == "aura.concurrent.newChannel") {
+    // aura.lang.std.Channel.newChannel(bound) — 创建 Channel
+    if !natives.iter().any(|n| n.name == "aura.lang.std.Channel.newChannel") {
         natives.push(HirFunction {
-            name: "aura.concurrent.newChannel".into(),
+            name: "aura.lang.std.Channel.newChannel".into(),
             params: vec![HirParam {
                 name: "bound".into(),
                 ty: Some(HirType::Named("Int".into())),
@@ -2140,10 +2179,10 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             ffi_lib: None,
         });
     }
-    // aura.concurrent.channelSend(ch, val) — 发送值到 Channel
-    if !natives.iter().any(|n| n.name == "aura.concurrent.channelSend") {
+    // aura.lang.std.Channel.channelSend(ch, val) — 发送值到 Channel
+    if !natives.iter().any(|n| n.name == "aura.lang.std.Channel.channelSend") {
         natives.push(HirFunction {
-            name: "aura.concurrent.channelSend".into(),
+            name: "aura.lang.std.Channel.channelSend".into(),
             params: vec![
                 HirParam {
                     name: "ch".into(),
@@ -2168,10 +2207,10 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             ffi_lib: None,
         });
     }
-    // aura.concurrent.channelRecv(ch) — 从 Channel 接收值（阻塞）
-    if !natives.iter().any(|n| n.name == "aura.concurrent.channelRecv") {
+    // aura.lang.std.Channel.channelRecv(ch) — 从 Channel 接收值（阻塞）
+    if !natives.iter().any(|n| n.name == "aura.lang.std.Channel.channelRecv") {
         natives.push(HirFunction {
-            name: "aura.concurrent.channelRecv".into(),
+            name: "aura.lang.std.Channel.channelRecv".into(),
             params: vec![HirParam {
                 name: "ch".into(),
                 ty: Some(HirType::Named("Int".into())),
@@ -2188,10 +2227,10 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             ffi_lib: None,
         });
     }
-    // aura.concurrent.channelTryRecv(ch) — 从 Channel 接收值（非阻塞）
-    if !natives.iter().any(|n| n.name == "aura.concurrent.channelTryRecv") {
+    // aura.lang.std.Channel.channelTryRecv(ch) — 从 Channel 接收值（非阻塞）
+    if !natives.iter().any(|n| n.name == "aura.lang.std.Channel.channelTryRecv") {
         natives.push(HirFunction {
-            name: "aura.concurrent.channelTryRecv".into(),
+            name: "aura.lang.std.Channel.channelTryRecv".into(),
             params: vec![HirParam {
                 name: "ch".into(),
                 ty: Some(HirType::Named("Int".into())),
@@ -2208,10 +2247,10 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             ffi_lib: None,
         });
     }
-    // aura.concurrent.select(ch1, ch2) — select 多路复用（最多 2 通道）
-    if !natives.iter().any(|n| n.name == "aura.concurrent.select") {
+    // aura.lang.std.Channel.select(ch1, ch2) — select 多路复用（最多 2 通道）
+    if !natives.iter().any(|n| n.name == "aura.lang.std.Channel.select") {
         natives.push(HirFunction {
-            name: "aura.concurrent.select".into(),
+            name: "aura.lang.std.Channel.select".into(),
             params: vec![
                 HirParam {
                     name: "ch1".into(),
@@ -2236,10 +2275,10 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             ffi_lib: None,
         });
     }
-    // aura.concurrent.spawnActor(name) — 创建 Actor 实例（返回 actor ID）
-    if !natives.iter().any(|n| n.name == "aura.concurrent.spawnActor") {
+    // aura.lang.std.Coroutine.spawnActor(name) — 创建 Actor 实例（返回 actor ID）
+    if !natives.iter().any(|n| n.name == "aura.lang.std.Coroutine.spawnActor") {
         natives.push(HirFunction {
-            name: "aura.concurrent.spawnActor".into(),
+            name: "aura.lang.std.Coroutine.spawnActor".into(),
             params: vec![HirParam {
                 name: "name".into(),
                 ty: Some(HirType::Named("String".into())),
@@ -2256,10 +2295,10 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             ffi_lib: None,
         });
     }
-    // aura.concurrent.supervise(parent, child) — 建立监督关系
-    if !natives.iter().any(|n| n.name == "aura.concurrent.supervise") {
+    // aura.lang.std.Actor.supervise(parent, child) — 建立监督关系
+    if !natives.iter().any(|n| n.name == "aura.lang.std.Actor.supervise") {
         natives.push(HirFunction {
-            name: "aura.concurrent.supervise".into(),
+            name: "aura.lang.std.Actor.supervise".into(),
             params: vec![
                 HirParam {
                     name: "parent".into(),
@@ -2284,10 +2323,10 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             ffi_lib: None,
         });
     }
-    // aura.concurrent.actorAlive(id) — 检查 Actor 是否存活
-    if !natives.iter().any(|n| n.name == "aura.concurrent.actorAlive") {
+    // aura.lang.std.Actor.actorAlive(id) — 检查 Actor 是否存活
+    if !natives.iter().any(|n| n.name == "aura.lang.std.Actor.actorAlive") {
         natives.push(HirFunction {
-            name: "aura.concurrent.actorAlive".into(),
+            name: "aura.lang.std.Actor.actorAlive".into(),
             params: vec![HirParam {
                 name: "id".into(),
                 ty: Some(HirType::Named("Int".into())),
@@ -2618,17 +2657,29 @@ fn desugar_stmt(s: &Stmt) -> HirStmt {
             expr,
             ..
         } => {
-            // 近似：仅将首个模式绑定到表达式的值
-            let init = desugar_expr(expr);
-            if let Some(Expr::Ident(first, _)) = patterns.first() {
+            // P15: 解构声明 `val (a, b) = pair` — pair 为 2 元素 List（pairOf），
+            // 每个模式按索引绑定：a = pair[0], b = pair[1]
+            let tmp = "__destructure_val";
+            let mut stmts = vec![
                 HirStmt::Val {
-                    name: first.clone(),
+                    name: tmp.into(),
                     ty: None,
-                    init: Some(init),
+                    init: Some(desugar_expr(expr)),
+                },
+            ];
+            for (i, p) in patterns.iter().enumerate() {
+                if let Expr::Ident(name, _) = p {
+                    stmts.push(HirStmt::Val {
+                        name: name.clone(),
+                        ty: None,
+                        init: Some(HirExpr::Index {
+                            container: Box::new(HirExpr::Var(tmp.to_string())),
+                            index: Box::new(HirExpr::Lit(Literal::Int(i as i64))),
+                        }),
+                    });
                 }
-            } else {
-                HirStmt::Expr(init)
             }
+            HirStmt::Block(HirBlock { stmts })
         }
         Stmt::Block(inner, _) => HirStmt::Block(desugar_block(&Expr::Block(
             inner.clone(),
@@ -2972,6 +3023,24 @@ fn lookup_import_module_alias(n: &str) -> Option<String> {
     })
 }
 
+/// 从成员访问链中提取完整点分名（如 `aura.lang.std.Coroutine` → "aura.lang.std.Coroutine"）
+///
+/// 用于将 `aura.lang.std.Coroutine.spawn(42)` 等深层嵌套表达式还原为完整原生函数名。
+fn extract_dotted_name(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Ident(name, _) => Some(name.clone()),
+        Expr::MemberAccess {
+            object,
+            name,
+            ..
+        } => {
+            let obj_name = extract_dotted_name(object)?;
+            Some(format!("{}.{}", obj_name, name))
+        }
+        _ => None,
+    }
+}
+
 /// 查询表达式的静态类型名（来自 sema 信息通道，strip 可空标记）
 fn lookup_expr_type(e: &Expr) -> Option<String> {
     SEMA_INFO.with(|s| s.borrow().as_ref().and_then(|i| i.expr_type(e)))
@@ -3021,6 +3090,171 @@ fn tostring_is_virtual(class: &str) -> bool {
         }
         false
     })
+}
+
+/// P15: List 高阶方法（filter/map/take）降级为内联 while 循环。
+///
+/// `nums.filter { it > 2 }` ≈
+/// ```text
+/// val __hof_src = nums
+/// val __hof_out = aura.lang.std.Collections.emptyList()
+/// var __hof_i = 0
+/// while (__hof_i < aura.lang.std.Collections.listSize(__hof_src)) {
+///     val it = __hof_src[__hof_i]
+///     if (pred) __hof_out = aura.lang.std.Collections.listAppend(__hof_out, <elem>)
+///     __hof_i = __hof_i + 1
+/// }
+/// __hof_out
+/// ```
+fn desugar_list_hof(name: &str, object: &Expr, args: &[Expr]) -> HirExpr {
+    let src = desugar_expr(object);
+    let out = "__hof_out";
+    let idx = "__hof_i";
+
+    // lambda 块体（`{ it... }`）→ 值表达式
+    let body_expr: Option<HirExpr> = args.first().map(|arg| match arg {
+        Expr::Block(_, _) => HirExpr::Block(desugar_block_inner(arg)),
+        other => desugar_expr(other),
+    });
+
+    let call = |callee: &str, args: Vec<HirExpr>| HirExpr::Call {
+        callee: callee.to_string(),
+        args,
+    };
+    let var = |n: &str| HirExpr::Var(n.to_string());
+
+    let mut stmts: Vec<HirStmt> = vec![
+        HirStmt::Val {
+            name: "__hof_src".into(),
+            ty: None,
+            init: Some(src),
+        },
+        HirStmt::Val {
+            name: out.into(),
+            ty: None,
+            init: Some(call("aura.lang.std.Collections.emptyList", vec![])),
+        },
+        HirStmt::Var {
+            name: idx.into(),
+            ty: None,
+            init: Some(HirExpr::Lit(crate::ast::Literal::Int(0))),
+        },
+    ];
+
+    if name == "take" {
+        // take(n)：取前 n 个元素
+        let n = args.first().map(desugar_expr).unwrap_or(HirExpr::Lit(crate::ast::Literal::Int(0)));
+        stmts.push(HirStmt::Val {
+            name: "__hof_n".into(),
+            ty: None,
+            init: Some(n),
+        });
+        let cond = HirExpr::Binary {
+            op: HirBinOp::Lt,
+            lhs: Box::new(var(idx)),
+            rhs: Box::new(var("__hof_n")),
+        };
+        let body = HirBlock {
+            stmts: vec![
+                HirStmt::Assign {
+                    target: var(out),
+                    value: call(
+                        "aura.lang.std.Collections.listAppend",
+                        vec![
+                            var(out),
+                            HirExpr::Index {
+                                container: Box::new(var("__hof_src")),
+                                index: Box::new(var(idx)),
+                            },
+                        ],
+                    ),
+                },
+                HirStmt::Assign {
+                    target: var(idx),
+                    value: HirExpr::Binary {
+                        op: HirBinOp::Add,
+                        lhs: Box::new(var(idx)),
+                        rhs: Box::new(HirExpr::Lit(crate::ast::Literal::Int(1))),
+                    },
+                },
+            ],
+        };
+        stmts.push(HirStmt::While { cond, body });
+    } else {
+        // filter/map：条件谓词 + 追加
+        let pred = body_expr.unwrap_or(HirExpr::Lit(crate::ast::Literal::Bool(true)));
+        let elem_val: HirExpr = if name == "map" { pred.clone() } else { var("it") };
+        let cond = HirExpr::Binary {
+            op: HirBinOp::Lt,
+            lhs: Box::new(var(idx)),
+            rhs: Box::new(call(
+                "aura.lang.std.Collections.listSize",
+                vec![var(
+                    "__hof_src",
+                )],
+            )),
+        };
+        let mut body_stmts: Vec<HirStmt> = vec![
+            HirStmt::Val {
+                name: "it".into(),
+                ty: None,
+                init: Some(HirExpr::Index {
+                    container: Box::new(var("__hof_src")),
+                    index: Box::new(var(idx)),
+                }),
+            },
+        ];
+        if name == "filter" {
+            // 谓词为块体：先求值（可能带副作用），再按真值追加
+            body_stmts.push(HirStmt::If {
+                cond: pred,
+                then_b: HirBlock {
+                    stmts: vec![
+                        HirStmt::Assign {
+                            target: var(out),
+                            value: call(
+                                "aura.lang.std.Collections.listAppend",
+                                vec![
+                                    var(out),
+                                    var("it"),
+                                ],
+                            ),
+                        },
+                    ],
+                },
+                else_b: None,
+            });
+        } else {
+            body_stmts.push(HirStmt::Assign {
+                target: var(out),
+                value: call(
+                    "aura.lang.std.Collections.listAppend",
+                    vec![
+                        var(out),
+                        elem_val,
+                    ],
+                ),
+            });
+        }
+        body_stmts.push(HirStmt::Assign {
+            target: var(idx),
+            value: HirExpr::Binary {
+                op: HirBinOp::Add,
+                lhs: Box::new(var(idx)),
+                rhs: Box::new(HirExpr::Lit(crate::ast::Literal::Int(1))),
+            },
+        });
+        stmts.push(HirStmt::While {
+            cond,
+            body: HirBlock {
+                stmts: body_stmts,
+            },
+        });
+    }
+
+    // 块值 = 结果列表
+    stmts.push(HirStmt::Expr(var(out)));
+    HirExpr::Block(HirBlock { stmts })
 }
 
 /// 创建 `toString(expr)` 的 HirExpr。
@@ -3098,6 +3332,16 @@ fn desugar_expr(e: &Expr) -> HirExpr {
             if let Some(callee) = operator_method_for(*op, lhs) {
                 return HirExpr::Call {
                     callee,
+                    args: vec![
+                        desugar_expr(lhs),
+                        desugar_expr(rhs),
+                    ],
+                };
+            }
+            // P15: `a to b` → aura.lang.std.Collections.pairOf(a, b)（运行时 2 元素 List）
+            if *op == BinOp::To {
+                return HirExpr::Call {
+                    callee: "aura.lang.std.Collections.pairOf".to_string(),
                     args: vec![
                         desugar_expr(lhs),
                         desugar_expr(rhs),
@@ -3185,6 +3429,12 @@ fn desugar_expr(e: &Expr) -> HirExpr {
             args,
             ..
         } => {
+            // P10.6: Box(value) 装箱 → HirExpr::Box
+            if let Expr::Ident(n, _) = callee.as_ref() {
+                if n == "Box" && args.len() == 1 {
+                    return HirExpr::Box(Box::new(desugar_expr(&args[0])));
+                }
+            }
             // 构造器调用检测：Type(args) → HirExpr::New
             if let Expr::Ident(n, _) = callee.as_ref() {
                 if is_type_name(n) {
@@ -3213,8 +3463,8 @@ fn desugar_expr(e: &Expr) -> HirExpr {
             let callee_name = match callee.as_ref() {
                 Expr::Ident(n, _) => {
                     // 检查导入解析：短名/别名 → 完整原生函数名
-                    // import aura.concurrent.* + spawn(42) → aura.concurrent.spawn(42)
-                    // import aura.concurrent.spawn as s + s(42) → aura.concurrent.spawn(42)
+                    // import aura.concurrent.* + spawn(42) → aura.lang.std.Coroutine.spawn(42)
+                    // import aura.lang.std.Coroutine.spawn as s + s(42) → aura.lang.std.Coroutine.spawn(42)
                     lookup_import_short(n).unwrap_or_else(|| n.clone())
                 }
                 // 模块调用 `module.method(args)`：降级为 `module.method(args...)`
@@ -3224,6 +3474,14 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     name,
                     ..
                 } => {
+                    // P15: List 高阶方法（filter/map/take）→ 内联循环块
+                    if matches!(name.as_str(), "filter" | "map" | "take") {
+                        if let Some(ty) = lookup_expr_type(object) {
+                            if ty.starts_with("List") {
+                                return desugar_list_hof(name, object, args);
+                            }
+                        }
+                    }
                     // 检查模块别名：import aura.concurrent as cc + cc.spawn(42)
                     if let Expr::Ident(module_name, _) = object.as_ref() {
                         if let Some(am) = lookup_import_module_alias(module_name) {
@@ -3232,7 +3490,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                                 args: args.iter().map(desugar_expr).collect(),
                             };
                         }
-                        // 检查是否为标准库模块调用（支持嵌套：aura.concurrent.spawn）
+                        // 检查是否为标准库模块调用（支持嵌套：aura.lang.std.Coroutine.spawn）
                         if is_std_module(module_name) {
                             let full_module = full_package_name(module_name);
                             return HirExpr::Call {
@@ -3241,7 +3499,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                             };
                         }
                     }
-                    // 嵌套：aura.concurrent.spawn
+                    // 嵌套：aura.lang.std.Coroutine.spawn
                     if let Expr::MemberAccess {
                         object: inner_obj,
                         name: inner_name,
@@ -3281,6 +3539,18 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                         if INTERFACE_NAMES.with(|n| n.borrow().contains(obj_name)) {
                             return HirExpr::Call {
                                 callee: format!("{}.{}", obj_name, name),
+                                args: args.iter().map(desugar_expr).collect(),
+                            };
+                        }
+                    }
+                    // 深层嵌套 std 调用兜底：
+                    // aura.lang.std.Coroutine.spawn(42) → callee "aura.lang.std.Coroutine.spawn"
+                    // 前面所有分支都没命中时，若 object 是纯点分链（MemberAccess），直接拼接完整名
+                    // 注意：简单标识符（如 c）不应走此路径，应交给 resolve_method_owner 处理
+                    if let Expr::MemberAccess { .. } = object.as_ref() {
+                        if let Some(obj_path) = extract_dotted_name(object) {
+                            return HirExpr::Call {
+                                callee: format!("{}.{}", obj_path, name),
                                 args: args.iter().map(desugar_expr).collect(),
                             };
                         }
@@ -3406,6 +3676,52 @@ fn desugar_expr(e: &Expr) -> HirExpr {
             name,
             ..
         } => {
+            // P15: List 内建成员 → native 调用（VM 的 GetField 不支持 Value::List）
+            if let Some(ty) = lookup_expr_type(object) {
+                if ty.starts_with("List") {
+                    match name.as_str() {
+                        "size" | "length" => {
+                            return HirExpr::Call {
+                                callee: "aura.lang.std.Collections.listSize".into(),
+                                args: vec![desugar_expr(object)],
+                            };
+                        }
+                        "first" => {
+                            return HirExpr::Index {
+                                container: Box::new(desugar_expr(object)),
+                                index: Box::new(HirExpr::Lit(crate::ast::Literal::Int(0))),
+                            };
+                        }
+                        "last" => {
+                            let obj = desugar_expr(object);
+                            let size = HirExpr::Call {
+                                callee: "aura.lang.std.Collections.listSize".into(),
+                                args: vec![obj.clone()],
+                            };
+                            return HirExpr::Index {
+                                container: Box::new(obj),
+                                index: Box::new(HirExpr::Binary {
+                                    op: HirBinOp::Sub,
+                                    lhs: Box::new(size),
+                                    rhs: Box::new(HirExpr::Lit(crate::ast::Literal::Int(1))),
+                                }),
+                            };
+                        }
+                        "isEmpty" => {
+                            let size = HirExpr::Call {
+                                callee: "aura.lang.std.Collections.listSize".into(),
+                                args: vec![desugar_expr(object)],
+                            };
+                            return HirExpr::Binary {
+                                op: HirBinOp::Eq,
+                                lhs: Box::new(size),
+                                rhs: Box::new(HirExpr::Lit(crate::ast::Literal::Int(0))),
+                            };
+                        }
+                        _ => {}
+                    }
+                }
+            }
             // companion 字段读取：C.f → Class.f()（零参函数）
             if let Expr::Ident(obj_name, _) = object.as_ref() {
                 if is_type_name(obj_name) {
@@ -3612,8 +3928,36 @@ fn desugar_expr(e: &Expr) -> HirExpr {
             args: vec![desugar_expr(value)],
         },
         Expr::Await { expr, .. } => HirExpr::Await(Box::new(desugar_expr(expr))),
+        // P14: 字符串插值 — 降级为 String 字面量与 toString 包裹片段的 Add 链
+        Expr::StrInterp { parts, .. } => {
+            let mut hir_parts: Vec<HirExpr> = Vec::new();
+            for p in parts {
+                let h = desugar_expr(p);
+                let is_str = matches!(p, Expr::Literal(crate::ast::Literal::String(_), _))
+                    || lookup_expr_type(p).as_deref().map(is_string_type_name).unwrap_or(false);
+                if is_str {
+                    hir_parts.push(h);
+                } else {
+                    hir_parts.push(wrap_tostring(h, &lookup_expr_type(p)));
+                }
+            }
+            match hir_parts.len() {
+                0 => HirExpr::Lit(crate::ast::Literal::String(String::new())),
+                1 => hir_parts.into_iter().next().unwrap(),
+                _ => {
+                    let first = hir_parts.remove(0);
+                    hir_parts.into_iter().fold(first, |acc, part| HirExpr::Binary {
+                        op: HirBinOp::Add,
+                        lhs: Box::new(acc),
+                        rhs: Box::new(part),
+                    })
+                }
+            }
+        }
+        // P8: async 块 — 直接求值块体（值为块体值）
+        Expr::AsyncBlock { body, .. } => desugar_expr(body),
         Expr::This(_) => HirExpr::Var("self".to_string()),
-        // P10.9: select 多路复用 — 降级为 `aura.concurrent.select(ch1, ch2)` 原生函数调用（最多 2 通道）
+        // P10.9: select 多路复用 — 降级为 `aura.lang.std.Channel.select(ch1, ch2)` 原生函数调用（最多 2 通道）
         Expr::Select {
             branches, ..
         } => {
@@ -3637,7 +3981,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                 args.push(HirExpr::Lit(Literal::Int(0)));
             }
             HirExpr::Call {
-                callee: "aura.concurrent.select".into(),
+                callee: "aura.lang.std.Channel.select".into(),
                 args,
             }
         }
@@ -3866,7 +4210,7 @@ pub fn synthesize_main_if_missing(hir: &mut HirProgram) -> bool {
 // P9: 标准库模块检测与原生函数注册
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 解析内置方法名为完整原生函数名（如 `toString` → `toString` prelu，或 `aura.builtin.xxx`）
+/// 解析内置方法名为完整原生函数名（如 `toString` → `toString` prelu，或 `aura.lang.std.Builtin.xxx`）
 fn resolve_builtin_method(name: &str) -> Option<String> {
     // 优先检查 prelu 函数（免import，始终可用）
     if crate::std::decl::is_prelude(name) {
@@ -3955,82 +4299,82 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
             ],
         ),
         // ── std.io ──
-        ("aura.io.println", vec![("msg", "String")]),
-        ("aura.io.print", vec![("msg", "String")]),
-        ("aura.io.readLine", vec![]),
-        ("aura.io.readAll", vec![]),
-        ("aura.io.flush", vec![]),
-        ("aura.io.fileRead", vec![("path", "String")]),
+        ("aura.lang.std.IO.println", vec![("msg", "String")]),
+        ("aura.lang.std.IO.print", vec![("msg", "String")]),
+        ("aura.lang.std.IO.readLine", vec![]),
+        ("aura.lang.std.IO.readAll", vec![]),
+        ("aura.lang.std.IO.flush", vec![]),
+        ("aura.lang.std.IO.fileRead", vec![("path", "String")]),
         (
-            "aura.io.fileWrite",
+            "aura.lang.std.IO.fileWrite",
             vec![
                 ("path", "String"),
                 ("content", "String"),
             ],
         ),
         (
-            "aura.io.writeFile",
+            "aura.lang.std.IO.writeFile",
             vec![
                 ("path", "String"),
                 ("content", "String"),
             ],
         ),
-        ("aura.io.readFile", vec![("path", "String")]),
-        ("aura.io.fileExists", vec![("path", "String")]),
+        ("aura.lang.std.IO.readFile", vec![("path", "String")]),
+        ("aura.lang.std.IO.fileExists", vec![("path", "String")]),
         // ── std.math ──
-        ("aura.math.abs", vec![("x", "Float")]),
+        ("aura.lang.std.Math.abs", vec![("x", "Float")]),
         (
-            "aura.math.min",
+            "aura.lang.std.Math.min",
             vec![
                 ("a", "Int"),
                 ("b", "Int"),
             ],
         ),
         (
-            "aura.math.max",
+            "aura.lang.std.Math.max",
             vec![
                 ("a", "Int"),
                 ("b", "Int"),
             ],
         ),
-        ("aura.math.ceil", vec![("x", "Float")]),
-        ("aura.math.floor", vec![("x", "Float")]),
-        ("aura.math.round", vec![("x", "Float")]),
-        ("aura.math.trunc", vec![("x", "Float")]),
-        ("aura.math.sqrt", vec![("x", "Float")]),
-        ("aura.math.cbrt", vec![("x", "Float")]),
+        ("aura.lang.std.Math.ceil", vec![("x", "Float")]),
+        ("aura.lang.std.Math.floor", vec![("x", "Float")]),
+        ("aura.lang.std.Math.round", vec![("x", "Float")]),
+        ("aura.lang.std.Math.trunc", vec![("x", "Float")]),
+        ("aura.lang.std.Math.sqrt", vec![("x", "Float")]),
+        ("aura.lang.std.Math.cbrt", vec![("x", "Float")]),
         (
-            "aura.math.pow",
+            "aura.lang.std.Math.pow",
             vec![
                 ("base", "Float"),
                 ("exp", "Float"),
             ],
         ),
-        ("aura.math.exp", vec![("x", "Float")]),
-        ("aura.math.log", vec![("x", "Float")]),
-        ("aura.math.log2", vec![("x", "Float")]),
-        ("aura.math.log10", vec![("x", "Float")]),
-        ("aura.math.sin", vec![("x", "Float")]),
-        ("aura.math.cos", vec![("x", "Float")]),
-        ("aura.math.tan", vec![("x", "Float")]),
-        ("aura.math.asin", vec![("x", "Float")]),
-        ("aura.math.acos", vec![("x", "Float")]),
-        ("aura.math.atan", vec![("x", "Float")]),
+        ("aura.lang.std.Math.exp", vec![("x", "Float")]),
+        ("aura.lang.std.Math.log", vec![("x", "Float")]),
+        ("aura.lang.std.Math.log2", vec![("x", "Float")]),
+        ("aura.lang.std.Math.log10", vec![("x", "Float")]),
+        ("aura.lang.std.Math.sin", vec![("x", "Float")]),
+        ("aura.lang.std.Math.cos", vec![("x", "Float")]),
+        ("aura.lang.std.Math.tan", vec![("x", "Float")]),
+        ("aura.lang.std.Math.asin", vec![("x", "Float")]),
+        ("aura.lang.std.Math.acos", vec![("x", "Float")]),
+        ("aura.lang.std.Math.atan", vec![("x", "Float")]),
         (
-            "aura.math.atan2",
+            "aura.lang.std.Math.atan2",
             vec![
                 ("y", "Float"),
                 ("x", "Float"),
             ],
         ),
-        ("aura.math.PI", vec![]),
-        ("aura.math.E", vec![]),
-        ("aura.math.INT_MAX", vec![]),
-        ("aura.math.INT_MIN", vec![]),
-        ("aura.math.FLOAT_MAX", vec![]),
-        ("aura.math.sign", vec![("x", "Float")]),
+        ("aura.lang.std.Math.PI", vec![]),
+        ("aura.lang.std.Math.E", vec![]),
+        ("aura.lang.std.Math.INT_MAX", vec![]),
+        ("aura.lang.std.Math.INT_MIN", vec![]),
+        ("aura.lang.std.Math.FLOAT_MAX", vec![]),
+        ("aura.lang.std.Math.sign", vec![("x", "Float")]),
         (
-            "aura.math.clamp",
+            "aura.lang.std.Math.clamp",
             vec![
                 ("x", "Float"),
                 ("lo", "Float"),
@@ -4039,42 +4383,42 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
         ),
         // ── std.string ──
         (
-            "aura.string.contains",
+            "aura.lang.std.String.contains",
             vec![
                 ("text", "String"),
                 ("substr", "String"),
             ],
         ),
         (
-            "aura.string.startsWith",
+            "aura.lang.std.String.startsWith",
             vec![
                 ("text", "String"),
                 ("prefix", "String"),
             ],
         ),
         (
-            "aura.string.endsWith",
+            "aura.lang.std.String.endsWith",
             vec![
                 ("text", "String"),
                 ("suffix", "String"),
             ],
         ),
         (
-            "aura.string.split",
+            "aura.lang.std.String.split",
             vec![
                 ("text", "String"),
                 ("sep", "String"),
             ],
         ),
         (
-            "aura.string.join",
+            "aura.lang.std.String.join",
             vec![
                 ("text", "String"),
                 ("sep", "String"),
             ],
         ),
         (
-            "aura.string.replace",
+            "aura.lang.std.String.replace",
             vec![
                 ("text", "String"),
                 ("target", "String"),
@@ -4082,18 +4426,18 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
             ],
         ),
         (
-            "aura.string.replaceAll",
+            "aura.lang.std.String.replaceAll",
             vec![
                 ("text", "String"),
                 ("target", "String"),
                 ("replacement", "String"),
             ],
         ),
-        ("aura.string.trim", vec![("text", "String")]),
-        ("aura.string.trimStart", vec![("text", "String")]),
-        ("aura.string.trimEnd", vec![("text", "String")]),
+        ("aura.lang.std.String.trim", vec![("text", "String")]),
+        ("aura.lang.std.String.trimStart", vec![("text", "String")]),
+        ("aura.lang.std.String.trimEnd", vec![("text", "String")]),
         (
-            "aura.string.substring",
+            "aura.lang.std.String.substring",
             vec![
                 ("text", "String"),
                 ("start", "Int"),
@@ -4101,47 +4445,47 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
             ],
         ),
         (
-            "aura.string.substringBefore",
+            "aura.lang.std.String.substringBefore",
             vec![
                 ("text", "String"),
                 ("sep", "String"),
             ],
         ),
         (
-            "aura.string.substringAfter",
+            "aura.lang.std.String.substringAfter",
             vec![
                 ("text", "String"),
                 ("sep", "String"),
             ],
         ),
-        ("aura.string.toLowerCase", vec![("text", "String")]),
-        ("aura.string.toUpperCase", vec![("text", "String")]),
-        ("aura.string.length", vec![("text", "String")]),
-        ("aura.string.isEmpty", vec![("text", "String")]),
-        ("aura.string.format", vec![("template", "String")]),
+        ("aura.lang.std.String.toLowerCase", vec![("text", "String")]),
+        ("aura.lang.std.String.toUpperCase", vec![("text", "String")]),
+        ("aura.lang.std.String.length", vec![("text", "String")]),
+        ("aura.lang.std.String.isEmpty", vec![("text", "String")]),
+        ("aura.lang.std.String.format", vec![("template", "String")]),
         (
-            "aura.string.repeat",
+            "aura.lang.std.String.repeat",
             vec![
                 ("n", "Int"),
                 ("text", "String"),
             ],
         ),
         (
-            "aura.string.indexOf",
+            "aura.lang.std.String.indexOf",
             vec![
                 ("text", "String"),
                 ("substr", "String"),
             ],
         ),
         (
-            "aura.string.lastIndexOf",
+            "aura.lang.std.String.lastIndexOf",
             vec![
                 ("text", "String"),
                 ("substr", "String"),
             ],
         ),
         (
-            "aura.string.padStart",
+            "aura.lang.std.String.padStart",
             vec![
                 ("text", "String"),
                 ("length", "Int"),
@@ -4149,43 +4493,43 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
             ],
         ),
         (
-            "aura.string.padEnd",
+            "aura.lang.std.String.padEnd",
             vec![
                 ("text", "String"),
                 ("length", "Int"),
                 ("pad", "String"),
             ],
         ),
-        ("aura.string.escape", vec![("text", "String")]),
-        ("aura.string.unescape", vec![("text", "String")]),
-        ("aura.string.splitLines", vec![("text", "String")]),
-        ("aura.string.joinLines", vec![("text", "String")]),
+        ("aura.lang.std.String.escape", vec![("text", "String")]),
+        ("aura.lang.std.String.unescape", vec![("text", "String")]),
+        ("aura.lang.std.String.splitLines", vec![("text", "String")]),
+        ("aura.lang.std.String.joinLines", vec![("text", "String")]),
         (
-            "aura.string.countChar",
+            "aura.lang.std.String.countChar",
             vec![
                 ("text", "String"),
                 ("char", "String"),
             ],
         ),
-        ("aura.string.first", vec![("text", "String")]),
-        ("aura.string.last", vec![("text", "String")]),
-        ("aura.string.isBlank", vec![("text", "String")]),
+        ("aura.lang.std.String.first", vec![("text", "String")]),
+        ("aura.lang.std.String.last", vec![("text", "String")]),
+        ("aura.lang.std.String.isBlank", vec![("text", "String")]),
         (
-            "aura.string.matches",
+            "aura.lang.std.String.matches",
             vec![
                 ("text", "String"),
                 ("regex", "String"),
             ],
         ),
         (
-            "aura.string.containsAny",
+            "aura.lang.std.String.containsAny",
             vec![
                 ("text", "String"),
                 ("patterns", "String"),
             ],
         ),
         (
-            "aura.string.containsAll",
+            "aura.lang.std.String.containsAll",
             vec![
                 ("text", "String"),
                 ("patterns", "String"),
@@ -4209,7 +4553,7 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
             ],
         ),
         (
-            "aura.collections.listOf",
+            "aura.lang.std.Collections.listOf",
             vec![
                 ("item0", "Value"),
                 ("item1", "Value"),
@@ -4223,49 +4567,44 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
                 ("item9", "Value"),
             ],
         ),
-        ("aura.collections.mutableListOf", vec![]),
-        ("aura.collections.emptyList", vec![]),
-        ("aura.collections.arrayOf", vec![]),
+        ("aura.lang.std.Collections.mutableListOf", vec![]),
+        ("aura.lang.std.Collections.emptyList", vec![]),
+        ("aura.lang.std.Collections.arrayOf", vec![]),
         (
-            "aura.collections.listContains",
+            "aura.lang.std.Collections.listContains",
             vec![
                 ("list", "List"),
                 ("item", "Value"),
             ],
         ),
         (
-            "aura.collections.listIndexOf",
+            "aura.lang.std.Collections.listIndexOf",
             vec![
                 ("list", "List"),
                 ("item", "Value"),
             ],
         ),
         (
-            "aura.collections.listRemove",
+            "aura.lang.std.Collections.listRemove",
             vec![
                 ("list", "List"),
                 ("item", "Value"),
             ],
         ),
-        ("aura.collections.listReverse", vec![("list", "List")]),
-        ("aura.collections.listSort", vec![("list", "List")]),
         (
-            "aura.collections.listGet",
+            "aura.lang.std.Collections.listReverse",
+            vec![("list", "List")],
+        ),
+        ("aura.lang.std.Collections.listSort", vec![("list", "List")]),
+        (
+            "aura.lang.std.Collections.listGet",
             vec![
                 ("list", "List"),
                 ("index", "Int"),
             ],
         ),
         (
-            "aura.collections.listSet",
-            vec![
-                ("list", "List"),
-                ("index", "Int"),
-                ("value", "Value"),
-            ],
-        ),
-        (
-            "aura.collections.listInsert",
+            "aura.lang.std.Collections.listSet",
             vec![
                 ("list", "List"),
                 ("index", "Int"),
@@ -4273,96 +4612,298 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
             ],
         ),
         (
-            "aura.collections.listSubList",
+            "aura.lang.std.Collections.listInsert",
+            vec![
+                ("list", "List"),
+                ("index", "Int"),
+                ("value", "Value"),
+            ],
+        ),
+        (
+            "aura.lang.std.Collections.listSubList",
             vec![
                 ("list", "List"),
                 ("from", "Int"),
                 ("to", "Int"),
             ],
         ),
-        ("aura.collections.mapOf", vec![]),
-        ("aura.collections.mutableMapOf", vec![]),
-        ("aura.collections.emptyMap", vec![]),
+        // P15: 迭代器辅助 + Pair
         (
-            "aura.collections.mapContains",
+            "aura.lang.std.Collections.listAppend",
+            vec![
+                ("list", "List"),
+                ("value", "Value"),
+            ],
+        ),
+        ("aura.lang.std.Collections.listSize", vec![("list", "List")]),
+        (
+            "aura.lang.std.Collections.pairOf",
+            vec![
+                ("a", "Any"),
+                ("b", "Any"),
+            ],
+        ),
+        ("aura.lang.std.Collections.mapOf", vec![]),
+        ("aura.lang.std.Collections.mutableMapOf", vec![]),
+        ("aura.lang.std.Collections.emptyMap", vec![]),
+        (
+            "aura.lang.std.Collections.mapContains",
             vec![
                 ("map", "Map"),
                 ("value", "Value"),
             ],
         ),
         (
-            "aura.collections.mapContainsKey",
+            "aura.lang.std.Collections.mapContainsKey",
             vec![
                 ("map", "Map"),
                 ("key", "Value"),
             ],
         ),
         (
-            "aura.collections.mapContainsValue",
+            "aura.lang.std.Collections.mapContainsValue",
             vec![
                 ("map", "Map"),
                 ("value", "Value"),
             ],
         ),
         (
-            "aura.collections.mapRemove",
+            "aura.lang.std.Collections.mapRemove",
             vec![
                 ("map", "Map"),
                 ("key", "Value"),
             ],
         ),
-        ("aura.collections.mapKeys", vec![("map", "Map")]),
-        ("aura.collections.mapValues", vec![("map", "Map")]),
-        ("aura.collections.setOf", vec![]),
-        ("aura.collections.mutableSetOf", vec![]),
-        ("aura.collections.emptySet", vec![]),
+        ("aura.lang.std.Collections.mapKeys", vec![("map", "Map")]),
+        ("aura.lang.std.Collections.mapValues", vec![("map", "Map")]),
+        ("aura.lang.std.Collections.setOf", vec![]),
+        ("aura.lang.std.Collections.mutableSetOf", vec![]),
+        ("aura.lang.std.Collections.emptySet", vec![]),
+        // ── 特化集合构造（分层实现：ArrayList / LinkedList / HashSet / HashMap / LinkedHashMap）──
+        (
+            "aura.lang.std.Collections.arrayListOf",
+            vec![
+                ("item0", "Value"),
+                ("item1", "Value"),
+                ("item2", "Value"),
+                ("item3", "Value"),
+                ("item4", "Value"),
+                ("item5", "Value"),
+                ("item6", "Value"),
+                ("item7", "Value"),
+                ("item8", "Value"),
+                ("item9", "Value"),
+            ],
+        ),
+        (
+            "aura.lang.std.Collections.arrayListSize",
+            vec![("list", "List")],
+        ),
+        (
+            "aura.lang.std.Collections.linkedListOf",
+            vec![
+                ("item0", "Value"),
+                ("item1", "Value"),
+                ("item2", "Value"),
+                ("item3", "Value"),
+                ("item4", "Value"),
+                ("item5", "Value"),
+                ("item6", "Value"),
+                ("item7", "Value"),
+                ("item8", "Value"),
+                ("item9", "Value"),
+            ],
+        ),
+        (
+            "aura.lang.std.Collections.linkedAddFirst",
+            vec![
+                ("list", "List"),
+                ("value", "Value"),
+            ],
+        ),
+        (
+            "aura.lang.std.Collections.linkedAddLast",
+            vec![
+                ("list", "List"),
+                ("value", "Value"),
+            ],
+        ),
+        (
+            "aura.lang.std.Collections.linkedRemoveFirst",
+            vec![("list", "List")],
+        ),
+        (
+            "aura.lang.std.Collections.linkedRemoveLast",
+            vec![("list", "List")],
+        ),
+        (
+            "aura.lang.std.Collections.hashSetOf",
+            vec![
+                ("item0", "Value"),
+                ("item1", "Value"),
+                ("item2", "Value"),
+                ("item3", "Value"),
+                ("item4", "Value"),
+                ("item5", "Value"),
+                ("item6", "Value"),
+                ("item7", "Value"),
+                ("item8", "Value"),
+                ("item9", "Value"),
+            ],
+        ),
+        (
+            "aura.lang.std.Collections.hashSetContains",
+            vec![
+                ("set", "List"),
+                ("item", "Value"),
+            ],
+        ),
+        (
+            "aura.lang.std.Collections.hashSetAdd",
+            vec![
+                ("set", "List"),
+                ("item", "Value"),
+            ],
+        ),
+        (
+            "aura.lang.std.Collections.hashSetRemove",
+            vec![
+                ("set", "List"),
+                ("item", "Value"),
+            ],
+        ),
+        (
+            "aura.lang.std.Collections.hashMapOf",
+            vec![
+                ("k0", "Value"),
+                ("v0", "Value"),
+                ("k1", "Value"),
+                ("v1", "Value"),
+                ("k2", "Value"),
+                ("v2", "Value"),
+                ("k3", "Value"),
+                ("v3", "Value"),
+                ("k4", "Value"),
+                ("v4", "Value"),
+            ],
+        ),
+        (
+            "aura.lang.std.Collections.hashMapGet",
+            vec![
+                ("map", "Map"),
+                ("key", "Value"),
+            ],
+        ),
+        (
+            "aura.lang.std.Collections.hashMapPut",
+            vec![
+                ("map", "Map"),
+                ("key", "Value"),
+                ("value", "Value"),
+            ],
+        ),
+        (
+            "aura.lang.std.Collections.hashMapRemove",
+            vec![
+                ("map", "Map"),
+                ("key", "Value"),
+            ],
+        ),
+        (
+            "aura.lang.std.Collections.linkedHashMapOf",
+            vec![
+                ("k0", "Value"),
+                ("v0", "Value"),
+                ("k1", "Value"),
+                ("v1", "Value"),
+                ("k2", "Value"),
+                ("v2", "Value"),
+                ("k3", "Value"),
+                ("v3", "Value"),
+                ("k4", "Value"),
+                ("v4", "Value"),
+            ],
+        ),
+        (
+            "aura.lang.std.Collections.linkedHashMapKeys",
+            vec![("map", "Map")],
+        ),
+        (
+            "aura.lang.std.Collections.linkedHashMapFirstKey",
+            vec![("map", "Map")],
+        ),
+        (
+            "aura.lang.std.Collections.linkedHashMapLastKey",
+            vec![("map", "Map")],
+        ),
         // ── std.fs ──
-        ("aura.fs.exists", vec![("path", "String")]),
-        ("aura.fs.isFile", vec![("path", "String")]),
-        ("aura.fs.isDirectory", vec![("path", "String")]),
-        ("aura.fs.readText", vec![("path", "String")]),
+        ("aura.lang.std.FileSystem.exists", vec![("path", "String")]),
+        ("aura.lang.std.FileSystem.isFile", vec![("path", "String")]),
         (
-            "aura.fs.writeText",
+            "aura.lang.std.FileSystem.isDirectory",
+            vec![("path", "String")],
+        ),
+        (
+            "aura.lang.std.FileSystem.readText",
+            vec![("path", "String")],
+        ),
+        (
+            "aura.lang.std.FileSystem.writeText",
             vec![
                 ("path", "String"),
                 ("content", "String"),
             ],
         ),
-        ("aura.fs.readBytes", vec![("path", "String")]),
         (
-            "aura.fs.writeBytes",
+            "aura.lang.std.FileSystem.readBytes",
+            vec![("path", "String")],
+        ),
+        (
+            "aura.lang.std.FileSystem.writeBytes",
             vec![
                 ("path", "String"),
                 ("data", "List"),
             ],
         ),
-        ("aura.fs.delete", vec![("path", "String")]),
-        ("aura.fs.mkdir", vec![("path", "String")]),
-        ("aura.fs.mkdirP", vec![("path", "String")]),
+        ("aura.lang.std.FileSystem.delete", vec![("path", "String")]),
+        ("aura.lang.std.FileSystem.mkdir", vec![("path", "String")]),
+        ("aura.lang.std.FileSystem.mkdirP", vec![("path", "String")]),
         (
-            "aura.fs.rename",
+            "aura.lang.std.FileSystem.rename",
             vec![
                 ("old", "String"),
                 ("new", "String"),
             ],
         ),
         (
-            "aura.fs.copy",
+            "aura.lang.std.FileSystem.copy",
             vec![
                 ("src", "String"),
                 ("dst", "String"),
             ],
         ),
-        ("aura.fs.listDir", vec![("path", "String")]),
-        ("aura.fs.listFiles", vec![("path", "String")]),
-        ("aura.fs.fileSize", vec![("path", "String")]),
-        ("aura.fs.lastModified", vec![("path", "String")]),
-        ("aura.fs.absolutePath", vec![("path", "String")]),
-        ("aura.fs.homeDir", vec![]),
-        ("aura.fs.tempDir", vec![]),
-        ("aura.fs.currentDir", vec![]),
+        ("aura.lang.std.FileSystem.listDir", vec![("path", "String")]),
         (
-            "aura.fs.walk",
+            "aura.lang.std.FileSystem.listFiles",
+            vec![("path", "String")],
+        ),
+        (
+            "aura.lang.std.FileSystem.fileSize",
+            vec![("path", "String")],
+        ),
+        (
+            "aura.lang.std.FileSystem.lastModified",
+            vec![("path", "String")],
+        ),
+        (
+            "aura.lang.std.FileSystem.absolutePath",
+            vec![("path", "String")],
+        ),
+        ("aura.lang.std.FileSystem.homeDir", vec![]),
+        ("aura.lang.std.FileSystem.tempDir", vec![]),
+        ("aura.lang.std.FileSystem.currentDir", vec![]),
+        (
+            "aura.lang.std.FileSystem.walk",
             vec![
                 ("root", "String"),
                 ("maxDepth", "Int"),
@@ -4370,117 +4911,126 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
         ),
         // ── std.net ──
         (
-            "aura.net.tcpConnect",
+            "aura.lang.std.Network.tcpConnect",
             vec![
                 ("host", "String"),
                 ("port", "Int"),
             ],
         ),
-        ("aura.net.tcpListen", vec![("port", "Int")]),
+        ("aura.lang.std.Network.tcpListen", vec![("port", "Int")]),
         (
-            "aura.net.tcpSend",
+            "aura.lang.std.Network.tcpSend",
             vec![
                 ("handle", "Int"),
                 ("message", "String"),
             ],
         ),
-        ("aura.net.tcpRecv", vec![("handle", "Int")]),
-        ("aura.net.tcpClose", vec![("handle", "Int")]),
+        ("aura.lang.std.Network.tcpRecv", vec![("handle", "Int")]),
+        ("aura.lang.std.Network.tcpClose", vec![("handle", "Int")]),
         (
-            "aura.net.udpSend",
+            "aura.lang.std.Network.udpSend",
             vec![
                 ("target", "String"),
                 ("port", "Int"),
                 ("message", "String"),
             ],
         ),
-        ("aura.net.udpRecv", vec![("handle", "Int")]),
-        ("aura.net.udpClose", vec![("handle", "Int")]),
-        ("aura.net.isHostReachable", vec![("host", "String")]),
-        ("aura.net.getHostname", vec![]),
-        ("aura.net.getLocalIp", vec![]),
-        // ── std.json ──
-        ("aura.json.parse", vec![("text", "String")]),
+        ("aura.lang.std.Network.udpRecv", vec![("handle", "Int")]),
+        ("aura.lang.std.Network.udpClose", vec![("handle", "Int")]),
         (
-            "aura.json.stringify",
+            "aura.lang.std.Network.isHostReachable",
+            vec![("host", "String")],
+        ),
+        ("aura.lang.std.Network.getHostname", vec![]),
+        ("aura.lang.std.Network.getLocalIp", vec![]),
+        // ── std.json ──
+        ("aura.lang.std.Json.parse", vec![("text", "String")]),
+        (
+            "aura.lang.std.Json.stringify",
             vec![
                 ("value", "Value"),
                 ("pretty", "Bool"),
             ],
         ),
-        ("aura.json.isValid", vec![("text", "String")]),
+        ("aura.lang.std.Json.isValid", vec![("text", "String")]),
         (
-            "aura.json.get",
+            "aura.lang.std.Json.get",
             vec![
                 ("obj", "Value"),
                 ("key", "String"),
             ],
         ),
         (
-            "aura.json.set",
+            "aura.lang.std.Json.set",
             vec![
                 ("obj", "Value"),
                 ("key", "String"),
                 ("value", "Value"),
             ],
         ),
-        ("aura.json.keys", vec![("obj", "Value")]),
-        ("aura.json.values", vec![("obj", "Value")]),
-        ("aura.json.length", vec![("obj", "Value")]),
+        ("aura.lang.std.Json.keys", vec![("obj", "Value")]),
+        ("aura.lang.std.Json.values", vec![("obj", "Value")]),
+        ("aura.lang.std.Json.length", vec![("obj", "Value")]),
         (
-            "aura.json.contains",
+            "aura.lang.std.Json.contains",
             vec![
                 ("obj", "Value"),
                 ("key", "String"),
             ],
         ),
         (
-            "aura.json.remove",
+            "aura.lang.std.Json.remove",
             vec![
                 ("obj", "Value"),
                 ("key", "String"),
             ],
         ),
         // ── std.time ──
-        ("aura.time.now", vec![]),
-        ("aura.time.epoch", vec![]),
-        ("aura.time.currentTime", vec![]),
-        ("aura.time.sleep", vec![("seconds", "Float")]),
-        ("aura.time.duration", vec![("seconds", "Float")]),
-        ("aura.time.toDateString", vec![("timestamp", "Int")]),
-        ("aura.time.toTimeString", vec![("timestamp", "Int")]),
+        ("aura.lang.std.Time.now", vec![]),
+        ("aura.lang.std.Time.epoch", vec![]),
+        ("aura.lang.std.Time.currentTime", vec![]),
+        ("aura.lang.std.Time.sleep", vec![("seconds", "Float")]),
+        ("aura.lang.std.Time.duration", vec![("seconds", "Float")]),
         (
-            "aura.time.formatDate",
+            "aura.lang.std.Time.toDateString",
+            vec![("timestamp", "Int")],
+        ),
+        (
+            "aura.lang.std.Time.toTimeString",
+            vec![("timestamp", "Int")],
+        ),
+        (
+            "aura.lang.std.Time.formatDate",
             vec![
                 ("timestamp", "Int"),
                 ("pattern", "String"),
             ],
         ),
         (
-            "aura.time.diff",
+            "aura.lang.std.Time.diff",
             vec![
                 ("t1", "Float"),
                 ("t2", "Float"),
             ],
         ),
-        ("aura.time.parseDate", vec![("text", "String")]),
+        ("aura.lang.std.Time.parseDate", vec![("text", "String")]),
         // ── std.test ──
         (
-            "aura.test.assertTrue",
+            "aura.lang.std.Test.assertTrue",
             vec![
                 ("condition", "Value"),
                 ("message", "String"),
             ],
         ),
         (
-            "aura.test.assertFalse",
+            "aura.lang.std.Test.assertFalse",
             vec![
                 ("condition", "Value"),
                 ("message", "String"),
             ],
         ),
         (
-            "aura.test.assertEq",
+            "aura.lang.std.Test.assertEq",
             vec![
                 ("a", "Value"),
                 ("b", "Value"),
@@ -4488,7 +5038,7 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
             ],
         ),
         (
-            "aura.test.assertNotEq",
+            "aura.lang.std.Test.assertNotEq",
             vec![
                 ("a", "Value"),
                 ("b", "Value"),
@@ -4496,21 +5046,21 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
             ],
         ),
         (
-            "aura.test.assertNotNull",
+            "aura.lang.std.Test.assertNotNull",
             vec![
                 ("value", "Value"),
                 ("message", "String"),
             ],
         ),
         (
-            "aura.test.assertNull",
+            "aura.lang.std.Test.assertNull",
             vec![
                 ("value", "Value"),
                 ("message", "String"),
             ],
         ),
         (
-            "aura.test.assertContains",
+            "aura.lang.std.Test.assertContains",
             vec![
                 ("text", "String"),
                 ("substr", "String"),
@@ -4518,16 +5068,16 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
             ],
         ),
         (
-            "aura.test.assertNotContains",
+            "aura.lang.std.Test.assertNotContains",
             vec![
                 ("text", "String"),
                 ("substr", "String"),
                 ("message", "String"),
             ],
         ),
-        ("aura.test.assertThrows", vec![]),
+        ("aura.lang.std.Test.assertThrows", vec![]),
         (
-            "aura.test.assertGt",
+            "aura.lang.std.Test.assertGt",
             vec![
                 ("a", "Float"),
                 ("b", "Float"),
@@ -4535,7 +5085,7 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
             ],
         ),
         (
-            "aura.test.assertGte",
+            "aura.lang.std.Test.assertGte",
             vec![
                 ("a", "Float"),
                 ("b", "Float"),
@@ -4543,7 +5093,7 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
             ],
         ),
         (
-            "aura.test.assertLt",
+            "aura.lang.std.Test.assertLt",
             vec![
                 ("a", "Float"),
                 ("b", "Float"),
@@ -4551,7 +5101,7 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
             ],
         ),
         (
-            "aura.test.assertLte",
+            "aura.lang.std.Test.assertLte",
             vec![
                 ("a", "Float"),
                 ("b", "Float"),
@@ -4559,7 +5109,7 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
             ],
         ),
         (
-            "aura.test.assertApprox",
+            "aura.lang.std.Test.assertApprox",
             vec![
                 ("a", "Float"),
                 ("b", "Float"),
@@ -4568,7 +5118,7 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
             ],
         ),
         (
-            "aura.test.assertArrayEq",
+            "aura.lang.std.Test.assertArrayEq",
             vec![
                 ("a", "Value"),
                 ("b", "Value"),
@@ -4576,207 +5126,216 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
             ],
         ),
         (
-            "aura.test.assertMapEq",
+            "aura.lang.std.Test.assertMapEq",
             vec![
                 ("a", "Value"),
                 ("b", "Value"),
                 ("message", "String"),
             ],
         ),
-        ("aura.test.pass", vec![("message", "String")]),
-        ("aura.test.fail", vec![("message", "String")]),
+        ("aura.lang.std.Test.pass", vec![("message", "String")]),
+        ("aura.lang.std.Test.fail", vec![("message", "String")]),
         // ── std.builtin ──
-        ("aura.builtin.typeof", vec![("value", "Value")]),
-        ("aura.builtin.typeOf", vec![("value", "Value")]),
-        ("aura.builtin.isNull", vec![("value", "Value")]),
-        ("aura.builtin.isNotNull", vec![("value", "Value")]),
-        ("aura.builtin.isZero", vec![("value", "Value")]),
-        ("aura.builtin.isPositive", vec![("value", "Value")]),
-        ("aura.builtin.isNegative", vec![("value", "Value")]),
-        ("aura.builtin.toString", vec![("value", "Value")]),
-        ("aura.builtin.toInt", vec![("value", "Value")]),
-        ("aura.builtin.toFloat", vec![("value", "Value")]),
-        ("aura.builtin.toBool", vec![("value", "Value")]),
-        ("aura.builtin.sizeOf", vec![("value", "Value")]),
-        ("aura.builtin.hash", vec![("value", "Value")]),
+        ("aura.lang.std.Builtin.typeof", vec![("value", "Value")]),
+        ("aura.lang.std.Builtin.typeOf", vec![("value", "Value")]),
+        ("aura.lang.std.Builtin.isNull", vec![("value", "Value")]),
+        ("aura.lang.std.Builtin.isNotNull", vec![("value", "Value")]),
+        ("aura.lang.std.Builtin.isZero", vec![("value", "Value")]),
+        ("aura.lang.std.Builtin.isPositive", vec![("value", "Value")]),
+        ("aura.lang.std.Builtin.isNegative", vec![("value", "Value")]),
+        ("aura.lang.std.Builtin.toString", vec![("value", "Value")]),
+        ("aura.lang.std.Builtin.toInt", vec![("value", "Value")]),
+        ("aura.lang.std.Builtin.toFloat", vec![("value", "Value")]),
+        ("aura.lang.std.Builtin.toBool", vec![("value", "Value")]),
+        ("aura.lang.std.Builtin.sizeOf", vec![("value", "Value")]),
+        ("aura.lang.std.Builtin.hash", vec![("value", "Value")]),
         (
-            "aura.builtin.compare",
+            "aura.lang.std.Builtin.compare",
             vec![
                 ("a", "Value"),
                 ("b", "Value"),
             ],
         ),
-        ("aura.builtin.clone", vec![("value", "Value")]),
-        ("aura.builtin.identity", vec![("value", "Value")]),
+        ("aura.lang.std.Builtin.clone", vec![("value", "Value")]),
+        ("aura.lang.std.Builtin.identity", vec![("value", "Value")]),
         // ── std.env ──
         (
-            "aura.env.get",
+            "aura.lang.std.Env.get",
             vec![
                 ("name", "String"),
                 ("default", "String"),
             ],
         ),
         (
-            "aura.env.set",
+            "aura.lang.std.Env.set",
             vec![
                 ("name", "String"),
                 ("value", "String"),
             ],
         ),
-        ("aura.env.remove", vec![("name", "String")]),
-        ("aura.env.has", vec![("name", "String")]),
-        ("aura.env.keys", vec![]),
-        ("aura.env.values", vec![]),
-        ("aura.env.all", vec![]),
-        ("aura.env.home", vec![]),
-        ("aura.env.tmp", vec![]),
-        ("aura.env.pwd", vec![]),
-        ("aura.env.platform", vec![]),
-        ("aura.env.os", vec![]),
-        ("aura.env.arch", vec![]),
+        ("aura.lang.std.Env.remove", vec![("name", "String")]),
+        ("aura.lang.std.Env.has", vec![("name", "String")]),
+        ("aura.lang.std.Env.keys", vec![]),
+        ("aura.lang.std.Env.values", vec![]),
+        ("aura.lang.std.Env.all", vec![]),
+        ("aura.lang.std.Env.home", vec![]),
+        ("aura.lang.std.Env.tmp", vec![]),
+        ("aura.lang.std.Env.pwd", vec![]),
+        ("aura.lang.std.Env.platform", vec![]),
+        ("aura.lang.std.Env.os", vec![]),
+        ("aura.lang.std.Env.arch", vec![]),
         // ── std.process ──
-        ("aura.process.exit", vec![("code", "Int")]),
-        ("aura.process.exitCode", vec![]),
-        ("aura.process.args", vec![]),
-        ("aura.process.arg", vec![("index", "Int")]),
-        ("aura.process.argCount", vec![]),
-        ("aura.process.pid", vec![]),
-        ("aura.process.spawn", vec![("command", "String")]),
-        ("aura.process.kill", vec![("pid", "Int")]),
-        ("aura.process.wait", vec![("pid", "Int")]),
-        ("aura.process.exitProcess", vec![("code", "Int")]),
+        ("aura.lang.std.Process.exit", vec![("code", "Int")]),
+        ("aura.lang.std.Process.exitCode", vec![]),
+        ("aura.lang.std.Process.args", vec![]),
+        ("aura.lang.std.Process.arg", vec![("index", "Int")]),
+        ("aura.lang.std.Process.argCount", vec![]),
+        ("aura.lang.std.Process.pid", vec![]),
+        ("aura.lang.std.Process.spawn", vec![("command", "String")]),
+        ("aura.lang.std.Process.kill", vec![("pid", "Int")]),
+        ("aura.lang.std.Process.wait", vec![("pid", "Int")]),
+        ("aura.lang.std.Process.exitProcess", vec![("code", "Int")]),
         // ── std.random ──
-        ("aura.random.nextInt", vec![]),
-        ("aura.random.nextLong", vec![]),
-        ("aura.random.nextFloat", vec![]),
-        ("aura.random.nextDouble", vec![]),
-        ("aura.random.nextBool", vec![]),
+        ("aura.lang.std.Random.nextInt", vec![]),
+        ("aura.lang.std.Random.nextLong", vec![]),
+        ("aura.lang.std.Random.nextFloat", vec![]),
+        ("aura.lang.std.Random.nextDouble", vec![]),
+        ("aura.lang.std.Random.nextBool", vec![]),
         (
-            "aura.random.nextIntRange",
+            "aura.lang.std.Random.nextIntRange",
             vec![
                 ("min", "Int"),
                 ("max", "Int"),
             ],
         ),
         (
-            "aura.random.nextFloatRange",
+            "aura.lang.std.Random.nextFloatRange",
             vec![
                 ("min", "Float"),
                 ("max", "Float"),
             ],
         ),
-        ("aura.random.choice", vec![]),
-        ("aura.random.shuffle", vec![("list", "List")]),
-        ("aura.random.seed", vec![]),
-        ("aura.random.random", vec![]),
+        ("aura.lang.std.Random.choice", vec![]),
+        ("aura.lang.std.Random.shuffle", vec![("list", "List")]),
+        ("aura.lang.std.Random.seed", vec![]),
+        ("aura.lang.std.Random.random", vec![]),
         // ── std.encoding ──
-        ("aura.encoding.base64Encode", vec![("text", "String")]),
-        ("aura.encoding.base64Decode", vec![("text", "String")]),
-        ("aura.encoding.hexEncode", vec![("text", "String")]),
-        ("aura.encoding.hexDecode", vec![("text", "String")]),
-        ("aura.encoding.urlEncode", vec![("text", "String")]),
-        ("aura.encoding.urlDecode", vec![("text", "String")]),
-        ("aura.encoding.byteToHex", vec![("byte", "Int")]),
-        ("aura.encoding.hexToByte", vec![("hex", "String")]),
+        (
+            "aura.lang.std.Encoding.base64Encode",
+            vec![("text", "String")],
+        ),
+        (
+            "aura.lang.std.Encoding.base64Decode",
+            vec![("text", "String")],
+        ),
+        ("aura.lang.std.Encoding.hexEncode", vec![("text", "String")]),
+        ("aura.lang.std.Encoding.hexDecode", vec![("text", "String")]),
+        ("aura.lang.std.Encoding.urlEncode", vec![("text", "String")]),
+        ("aura.lang.std.Encoding.urlDecode", vec![("text", "String")]),
+        ("aura.lang.std.Encoding.byteToHex", vec![("byte", "Int")]),
+        ("aura.lang.std.Encoding.hexToByte", vec![("hex", "String")]),
         // ── std.ascii ──
-        ("aura.ascii.isAlpha", vec![("text", "String")]),
-        ("aura.ascii.isDigit", vec![("text", "String")]),
-        ("aura.ascii.isAlphaNumeric", vec![("text", "String")]),
-        ("aura.ascii.isWhitespace", vec![("text", "String")]),
-        ("aura.ascii.isUpper", vec![("text", "String")]),
-        ("aura.ascii.isLower", vec![("text", "String")]),
-        ("aura.ascii.toUpper", vec![("text", "String")]),
-        ("aura.ascii.toLower", vec![("text", "String")]),
+        ("aura.lang.std.Ascii.isAlpha", vec![("text", "String")]),
+        ("aura.lang.std.Ascii.isDigit", vec![("text", "String")]),
         (
-            "aura.ascii.codeAt",
+            "aura.lang.std.Ascii.isAlphaNumeric",
+            vec![("text", "String")],
+        ),
+        ("aura.lang.std.Ascii.isWhitespace", vec![("text", "String")]),
+        ("aura.lang.std.Ascii.isUpper", vec![("text", "String")]),
+        ("aura.lang.std.Ascii.isLower", vec![("text", "String")]),
+        ("aura.lang.std.Ascii.toUpper", vec![("text", "String")]),
+        ("aura.lang.std.Ascii.toLower", vec![("text", "String")]),
+        (
+            "aura.lang.std.Ascii.codeAt",
             vec![
                 ("text", "String"),
                 ("index", "Int"),
             ],
         ),
         (
-            "aura.ascii.charAt",
+            "aura.lang.std.Ascii.charAt",
             vec![
                 ("text", "String"),
                 ("index", "Int"),
             ],
         ),
-        ("aura.ascii.fromCode", vec![("code", "Int")]),
+        ("aura.lang.std.Ascii.fromCode", vec![("code", "Int")]),
         (
-            "aura.ascii.codePointAt",
+            "aura.lang.std.Ascii.codePointAt",
             vec![
                 ("text", "String"),
                 ("index", "Int"),
             ],
         ),
         // ── std.console ──
-        ("aura.console.clear", vec![]),
-        ("aura.console.cursorUp", vec![("n", "Int")]),
-        ("aura.console.cursorDown", vec![("n", "Int")]),
-        ("aura.console.cursorLeft", vec![("n", "Int")]),
-        ("aura.console.cursorRight", vec![("n", "Int")]),
-        ("aura.console.cursorShow", vec![]),
-        ("aura.console.cursorHide", vec![]),
-        ("aura.console.reset", vec![]),
-        ("aura.console.red", vec![("text", "String")]),
-        ("aura.console.green", vec![("text", "String")]),
-        ("aura.console.yellow", vec![("text", "String")]),
-        ("aura.console.blue", vec![("text", "String")]),
-        ("aura.console.magenta", vec![("text", "String")]),
-        ("aura.console.cyan", vec![("text", "String")]),
-        ("aura.console.white", vec![("text", "String")]),
-        ("aura.console.bold", vec![("text", "String")]),
-        ("aura.console.italic", vec![("text", "String")]),
-        ("aura.console.underline", vec![("text", "String")]),
-        ("aura.console.dim", vec![("text", "String")]),
-        ("aura.console.inverse", vec![("text", "String")]),
-        ("aura.console.size", vec![]),
-        ("aura.console.width", vec![]),
-        ("aura.console.height", vec![]),
+        ("aura.lang.std.Console.clear", vec![]),
+        ("aura.lang.std.Console.cursorUp", vec![("n", "Int")]),
+        ("aura.lang.std.Console.cursorDown", vec![("n", "Int")]),
+        ("aura.lang.std.Console.cursorLeft", vec![("n", "Int")]),
+        ("aura.lang.std.Console.cursorRight", vec![("n", "Int")]),
+        ("aura.lang.std.Console.cursorShow", vec![]),
+        ("aura.lang.std.Console.cursorHide", vec![]),
+        ("aura.lang.std.Console.reset", vec![]),
+        ("aura.lang.std.Console.red", vec![("text", "String")]),
+        ("aura.lang.std.Console.green", vec![("text", "String")]),
+        ("aura.lang.std.Console.yellow", vec![("text", "String")]),
+        ("aura.lang.std.Console.blue", vec![("text", "String")]),
+        ("aura.lang.std.Console.magenta", vec![("text", "String")]),
+        ("aura.lang.std.Console.cyan", vec![("text", "String")]),
+        ("aura.lang.std.Console.white", vec![("text", "String")]),
+        ("aura.lang.std.Console.bold", vec![("text", "String")]),
+        ("aura.lang.std.Console.italic", vec![("text", "String")]),
+        ("aura.lang.std.Console.underline", vec![("text", "String")]),
+        ("aura.lang.std.Console.dim", vec![("text", "String")]),
+        ("aura.lang.std.Console.inverse", vec![("text", "String")]),
+        ("aura.lang.std.Console.size", vec![]),
+        ("aura.lang.std.Console.width", vec![]),
+        ("aura.lang.std.Console.height", vec![]),
         // ── std.path ──
-        ("aura.path.join", vec![]),
-        ("aura.path.dirname", vec![("path", "String")]),
-        ("aura.path.basename", vec![("path", "String")]),
-        ("aura.path.extname", vec![("path", "String")]),
+        ("aura.lang.std.Path.join", vec![]),
+        ("aura.lang.std.Path.dirname", vec![("path", "String")]),
+        ("aura.lang.std.Path.basename", vec![("path", "String")]),
+        ("aura.lang.std.Path.extname", vec![("path", "String")]),
         (
-            "aura.path.relative",
+            "aura.lang.std.Path.relative",
             vec![
                 ("from", "String"),
                 ("to", "String"),
             ],
         ),
-        ("aura.path.resolve", vec![("path", "String")]),
-        ("aura.path.normalize", vec![("path", "String")]),
-        ("aura.path.isAbsolute", vec![("path", "String")]),
-        ("aura.path.isRelative", vec![("path", "String")]),
-        ("aura.path.split", vec![("path", "String")]),
-        ("aura.path.separators", vec![("path", "String")]),
-        ("aura.path.fromUnix", vec![("path", "String")]),
-        ("aura.path.fromWindows", vec![("path", "String")]),
+        ("aura.lang.std.Path.resolve", vec![("path", "String")]),
+        ("aura.lang.std.Path.normalize", vec![("path", "String")]),
+        ("aura.lang.std.Path.isAbsolute", vec![("path", "String")]),
+        ("aura.lang.std.Path.isRelative", vec![("path", "String")]),
+        ("aura.lang.std.Path.split", vec![("path", "String")]),
+        ("aura.lang.std.Path.separators", vec![("path", "String")]),
+        ("aura.lang.std.Path.fromUnix", vec![("path", "String")]),
+        ("aura.lang.std.Path.fromWindows", vec![("path", "String")]),
         // ── std.assert ──
         (
-            "aura.assert.assert",
+            "aura.lang.std.Assert.assert",
             vec![
                 ("condition", "Value"),
                 ("message", "String"),
             ],
         ),
         (
-            "aura.assert.assertTrue",
+            "aura.lang.std.Assert.assertTrue",
             vec![
                 ("condition", "Value"),
                 ("message", "String"),
             ],
         ),
         (
-            "aura.assert.assertFalse",
+            "aura.lang.std.Assert.assertFalse",
             vec![
                 ("condition", "Value"),
                 ("message", "String"),
             ],
         ),
         (
-            "aura.assert.assertEq",
+            "aura.lang.std.Assert.assertEq",
             vec![
                 ("a", "Value"),
                 ("b", "Value"),
@@ -4784,7 +5343,7 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
             ],
         ),
         (
-            "aura.assert.assertNotEq",
+            "aura.lang.std.Assert.assertNotEq",
             vec![
                 ("a", "Value"),
                 ("b", "Value"),
@@ -4792,117 +5351,117 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
             ],
         ),
         (
-            "aura.assert.assertNotNull",
+            "aura.lang.std.Assert.assertNotNull",
             vec![
                 ("value", "Value"),
                 ("message", "String"),
             ],
         ),
         (
-            "aura.assert.assertNull",
+            "aura.lang.std.Assert.assertNull",
             vec![
                 ("value", "Value"),
                 ("message", "String"),
             ],
         ),
         (
-            "aura.assert.debugAssert",
+            "aura.lang.std.Assert.debugAssert",
             vec![
                 ("condition", "Value"),
                 ("message", "String"),
             ],
         ),
         // ── std.iter ──
-        ("aura.iter.sum", vec![("list", "List")]),
-        ("aura.iter.avg", vec![("list", "List")]),
-        ("aura.iter.min", vec![("list", "List")]),
-        ("aura.iter.max", vec![("list", "List")]),
-        ("aura.iter.product", vec![("list", "List")]),
+        ("aura.lang.std.Iter.sum", vec![("list", "List")]),
+        ("aura.lang.std.Iter.avg", vec![("list", "List")]),
+        ("aura.lang.std.Iter.min", vec![("list", "List")]),
+        ("aura.lang.std.Iter.max", vec![("list", "List")]),
+        ("aura.lang.std.Iter.product", vec![("list", "List")]),
         (
-            "aura.iter.contains",
+            "aura.lang.std.Iter.contains",
             vec![
                 ("list", "List"),
                 ("item", "Value"),
             ],
         ),
         (
-            "aura.iter.indexOf",
+            "aura.lang.std.Iter.indexOf",
             vec![
                 ("list", "List"),
                 ("item", "Value"),
             ],
         ),
-        ("aura.iter.count", vec![("list", "List")]),
+        ("aura.lang.std.Iter.count", vec![("list", "List")]),
         (
-            "aura.iter.every",
+            "aura.lang.std.Iter.every",
             vec![
                 ("list", "List"),
                 ("predicate", "Value"),
             ],
         ),
         (
-            "aura.iter.some",
+            "aura.lang.std.Iter.some",
             vec![
                 ("list", "List"),
                 ("predicate", "Value"),
             ],
         ),
         (
-            "aura.iter.flatMap",
+            "aura.lang.std.Iter.flatMap",
             vec![
                 ("list", "List"),
                 ("fn", "Value"),
             ],
         ),
-        ("aura.iter.zip", vec![]),
-        ("aura.iter.unzip", vec![("list", "List")]),
-        ("aura.iter.enumerate", vec![("list", "List")]),
-        ("aura.iter.chain", vec![]),
+        ("aura.lang.std.Iter.zip", vec![]),
+        ("aura.lang.std.Iter.unzip", vec![("list", "List")]),
+        ("aura.lang.std.Iter.enumerate", vec![("list", "List")]),
+        ("aura.lang.std.Iter.chain", vec![]),
         (
-            "aura.iter.take",
+            "aura.lang.std.Iter.take",
             vec![
                 ("list", "List"),
                 ("n", "Int"),
             ],
         ),
         (
-            "aura.iter.skip",
+            "aura.lang.std.Iter.skip",
             vec![
                 ("list", "List"),
                 ("n", "Int"),
             ],
         ),
         (
-            "aura.iter.dropWhile",
+            "aura.lang.std.Iter.dropWhile",
             vec![
                 ("list", "List"),
                 ("predicate", "Value"),
             ],
         ),
         (
-            "aura.iter.takeWhile",
+            "aura.lang.std.Iter.takeWhile",
             vec![
                 ("list", "List"),
                 ("predicate", "Value"),
             ],
         ),
-        ("aura.iter.distinct", vec![("list", "List")]),
+        ("aura.lang.std.Iter.distinct", vec![("list", "List")]),
         (
-            "aura.iter.groupBy",
+            "aura.lang.std.Iter.groupBy",
             vec![
                 ("list", "List"),
                 ("keyFn", "Value"),
             ],
         ),
         (
-            "aura.iter.partition",
+            "aura.lang.std.Iter.partition",
             vec![
                 ("list", "List"),
                 ("predicate", "Value"),
             ],
         ),
         (
-            "aura.iter.fold",
+            "aura.lang.std.Iter.fold",
             vec![
                 ("list", "List"),
                 ("init", "Value"),
@@ -4910,7 +5469,7 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
             ],
         ),
         (
-            "aura.iter.scan",
+            "aura.lang.std.Iter.scan",
             vec![
                 ("list", "List"),
                 ("init", "Value"),
@@ -4918,37 +5477,37 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
             ],
         ),
         (
-            "aura.iter.toMap",
+            "aura.lang.std.Iter.toMap",
             vec![
                 ("list", "List"),
                 ("keyFn", "Value"),
                 ("valueFn", "Value"),
             ],
         ),
-        ("aura.iter.toList", vec![("value", "Value")]),
+        ("aura.lang.std.Iter.toList", vec![("value", "Value")]),
         (
-            "aura.iter.range",
+            "aura.lang.std.Iter.range",
             vec![
                 ("from", "Int"),
                 ("to", "Int"),
             ],
         ),
         (
-            "aura.iter.rangeTo",
+            "aura.lang.std.Iter.rangeTo",
             vec![
                 ("from", "Int"),
                 ("to", "Int"),
             ],
         ),
         (
-            "aura.iter.rangeUntil",
+            "aura.lang.std.Iter.rangeUntil",
             vec![
                 ("from", "Int"),
                 ("to", "Int"),
             ],
         ),
         (
-            "aura.iter.repeatN",
+            "aura.lang.std.Iter.repeatN",
             vec![
                 ("value", "Value"),
                 ("count", "Int"),

@@ -257,16 +257,55 @@ fn split_at_quote(s: &str) -> (&str, &str) {
 
 /// 从 AST 程序提取启用的 std 模块名
 ///
-/// 遍历 `program.imports`，解析 `aura.math.*` / `import aura.math` 等语法，
-/// 返回模块名集合（如 `["math", "io"]`）。
+/// 遍历 `program.imports`，解析 `import` 声明，返回模块名集合（如 `["math", "io"]`）。
+///
+/// 新命名（`aura.lang.std.<ClassName>`）：
+/// - `aura.lang.std.Coroutine.*` → `["concurrent"]`（Coroutine/Actor/Channel 共用一个模块键）
+/// - `aura.lang.std.Math.*`     → `["math"]`
+/// - `aura.lang.std.FileSystem` → `["fs"]`
+/// - `aura.lang.std.Network`    → `["net"]`
+///
+/// 旧命名（`aura.<module>` / `aura.<module>.<fn>`）保留兼容。
 fn extract_enabled_modules(program: &crate::ast::Program) -> Vec<String> {
-    let mut modules = std::collections::HashSet::new();
+    use std::collections::HashSet;
+    let mut modules = HashSet::new();
 
     for imp in &program.imports {
         let path = &imp.path;
-        // 检查是否是 aura.* 命名空间
-        if let Some(rest) = path.strip_prefix("aura.") {
-            // 去掉可能的函数名（如 aura.math.sin → math）
+        if let Some(rest) = path.strip_prefix("aura.lang.std.") {
+            // 新命名：路径形如 aura.lang.std.<ClassName>[.<fn>]
+            let class = rest.split('.').next().unwrap_or(rest);
+            let mod_name: &str = match class {
+                "Coroutine" | "Actor" | "Channel" => "concurrent",
+                "FileSystem" => "fs",
+                "Network" => "net",
+                "Math" => "math",
+                "IO" => "io",
+                "Ascii" => "ascii",
+                "Assert" => "assert",
+                "Builtin" => "builtin",
+                "Collections" => "collections",
+                "Console" => "console",
+                "Encoding" => "encoding",
+                "Env" => "env",
+                "Iter" => "iter",
+                "Json" => "json",
+                "Path" => "path",
+                "Process" => "process",
+                "Random" => "random",
+                "String" => "string",
+                "Test" => "test",
+                "Time" => "time",
+                _ => "",
+            };
+            let owned = if mod_name.is_empty() {
+                class.to_ascii_lowercase()
+            } else {
+                String::from(mod_name)
+            };
+            modules.insert(owned);
+        } else if let Some(rest) = path.strip_prefix("aura.") {
+            // 旧命名：路径形如 aura.<module>[.<fn>]
             let module = rest.split('.').next().unwrap_or(rest);
             modules.insert(module.to_string());
         }

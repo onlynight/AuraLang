@@ -1,0 +1,50 @@
+// ════════════════════════════════════════════════════════════
+// Phase 15 — 高级特性（P15）
+// 解构声明 val (a, b) = pair、迭代器 filter/map/take、this / super
+// ════════════════════════════════════════════════════════════
+
+import aura.collections.*
+
+// ── §15.3 this / super（P15，结合 P5 类体系）──
+open class Animal {
+    open fun name(): String {
+        return "Animal"
+    }
+
+    fun describe(): String {
+        return "This is " + this.name()
+    }
+}
+
+class Dog : Animal() {
+    override fun name(): String {
+        // super 引用父类实现
+        return super.name() + "/Dog"
+    }
+}
+
+fun main() {
+    // ── §15.1 解构声明（P15）──
+    val pair = 3 to 4
+    val (a, b) = pair
+    println("§15.1 解构: a=" + a.toString() + ", b=" + b.toString())
+
+    // ── §15.2 迭代器链 filter / map / take（P15）──
+    val nums: List<Int> = listOf(1, 2, 3, 4, 5, 6)
+    val evens: List<Int> = nums.filter { it % 2 == 0 }
+    println("§15.2 filter 偶数个数=" + evens.size.toString())
+
+    val doubled: List<Int> = evens.map { it * 10 }
+    println("§15.2 map 个数=" + doubled.size.toString())
+
+    val taken: List<Int> = nums.take(2)
+    println("§15.2 take(2) 个数=" + taken.size.toString())
+
+    // 链式：filter + map
+    val chained: List<Int> = nums.filter { it > 2 }.map { it * 100 }
+    println("§15.2 链式个数=" + chained.size.toString())
+
+    // ── §15.3 this / super ──
+    val d = Dog()
+    println("§15.3 this/super: " + d.describe())
+}

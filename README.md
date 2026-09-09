@@ -302,29 +302,34 @@ val raw = """No $interpolation or \n here"""
 
 ## Standard Library
 
+All standard library modules are under the `aura.lang.std` package.
+
 | Module | Description |
 |--------|-------------|
-| `aura.math` | sin, cos, tan, sqrt, pow, abs, min, max, round, floor, ceil, log, exp, PI, E |
-| `aura.io` | readFile, writeFile, readLine, writeLine, println, print |
-| `aura.collections` | List, Map, Set operations (filter, map, reduce, sort, zip, ...) |
-| `aura.concurrent` | Actor, Channel, Coroutine, spawn, send, ask, supervise, threadPool |
-| `aura.json` | JSON parse, stringify, pretty-print |
-| `aura.string` | String operations (split, join, replace, trim, toUpperCase, ...) |
-| `aura.fs` | File system (exists, remove, mkdir, readDir, copy, move) |
-| `aura.env` | Environment variables (get, set, remove) |
-| `aura.process` | Process management (exec, spawn, exit, arguments) |
-| `aura.time` | Time & dates (now, millis, timestamp, date formatting) |
-| `aura.path` | Path operations (join, normalize, resolve, base, dir, ext) |
-| `aura.console` | Terminal control (clear, cursor, colors, width, height) |
-| `aura.assert` | Assertions (assert, assertEquals, assertThrows) |
-| `aura.test` | Test framework (describe, it, before, after) |
-| `aura.net` | Network (HTTP client, URL, WebSocket) |
-| `aura.random` | Random numbers (nextInt, nextFloat, shuffle) |
-| `aura.encoding` | Encoding (base64, hex, URL encoding) |
-| `aura.ascii` | ASCII operations (isAlpha, isDigit, toUpper, toLower) |
-| `aura.iter` | Iterator operations |
+| `aura.lang.std.math` | sin, cos, tan, sqrt, pow, abs, min, max, round, floor, ceil, log, exp, PI, E |
+| `aura.lang.std.io` | readFile, writeFile, readLine, writeLine, println, print |
+| `aura.lang.std.collections` | List, Map, Set operations (filter, map, reduce, sort, zip, ...) |
+| `aura.lang.std.concurrent` | Actor, Channel, Coroutine, spawn, send, ask, supervise, threadPool |
+| `aura.lang.std.json` | JSON parse, stringify, pretty-print |
+| `aura.lang.std.string` | String operations (split, join, replace, trim, toUpperCase, ...) |
+| `aura.lang.std.fs` | File system (exists, remove, mkdir, readDir, copy, move) |
+| `aura.lang.std.env` | Environment variables (get, set, remove) |
+| `aura.lang.std.process` | Process management (exec, spawn, exit, arguments) |
+| `aura.lang.std.time` | Time & dates (now, millis, timestamp, date formatting) |
+| `aura.lang.std.path` | Path operations (join, normalize, resolve, base, dir, ext) |
+| `aura.lang.std.console` | Terminal control (clear, cursor, colors, width, height) |
+| `aura.lang.std.assert` | Assertions (assert, assertEquals, assertThrows) |
+| `aura.lang.std.test` | Test framework (describe, it, before, after) |
+| `aura.lang.std.net` | Network (HTTP client, URL, WebSocket) |
+| `aura.lang.std.random` | Random numbers (nextInt, nextFloat, shuffle) |
+| `aura.lang.std.encoding` | Encoding (base64, hex, URL encoding) |
+| `aura.lang.std.ascii` | ASCII operations (isAlpha, isDigit, toUpper, toLower) |
+| `aura.lang.std.iter` | Iterator operations |
+| `aura.lang.std.builtin` | Built-in utilities (typeof, typeOf, isNull, isNotNull, ...) |
 
-**Prelude** (always available, no import needed): `println`, `print`, `puts`, `abs`, `sqrt`, `pow`, `toInt`, `toFloat`, `toStr`, `toString`, `clock`, `strlen`, `CString`, `CStr`, `ptrIsNull`, `ptrToInt`, `intToPtr`, `makeCallback`
+**Prelude** (always available, no import needed): `println`, `print`, `puts`, `abs`, `sqrt`, `pow`, `toInt`, `toFloat`, `toStr`, `toString`, `clock`, `strlen`, `CString`, `CStr`, `ptrIsNull`, `ptrToInt`, `intToPtr`, `makeCallback`, `listOf`, `assertTrue`, `assertFalse`, `assertEq`, `assertNotEq`, `assertNotNull`, `assertNull`, `assertContains`, `assertNotContains`, `assertGt`, `assertGte`, `assertLt`, `assertLte`, `assertApprox`, `assertArrayEq`, `assertMapEq`, `pass`, `fail`
+
+**Phantom Source** (phantom-source/aura/lang/): IDE-facing type declarations for `Any`, `Int`, `String`, `List`, `Map`, `Actor`, `Channel`, `Coroutine`, `Box`, `Weak`, `DeathStrategy`, `ProcessActor`, `IntRange`, etc.
 
 ---
 

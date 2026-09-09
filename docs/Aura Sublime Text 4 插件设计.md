@@ -1226,7 +1226,7 @@ async def format_via_cli(view):
 | 关键字 | 输入匹配 | 所有保留字 |
 | 内置类型 | 输入匹配 | Int/Long/String/... |
 | 当前文件符号 | 输入匹配 | 当前文档的类/函数/变量 |
-| 标准库 | 输入匹配 | aura.math.* / aura.io.* 等 |
+| 标准库 | 输入匹配 | aura.lang.std.Math.* / aura.lang.std.IO.* 等 |
 | LSP 语义补全 | 输入匹配 | aura-lsp completionProvider |
 | 代码片段 | Tab 插入 | `fun` → 函数模板等 |
 | 导入提示 | 输入 | 自动添加 import 语句 |
@@ -1297,24 +1297,24 @@ class AuraCompletionProvider(sublime.CompletionProvider):
     ]
     
     STD_MODULES = [
-        ('aura.math', 'support.function.std.aura', '数学函数'),
-        ('aura.io', 'support.function.std.aura', 'I/O 函数'),
-        ('aura.collections', 'support.function.std.aura', '集合操作'),
-        ('aura.concurrent', 'support.function.std.aura', '并发 API'),
-        ('aura.json', 'support.function.std.aura', 'JSON 解析'),
-        ('aura.string', 'support.function.std.aura', '字符串操作'),
-        ('aura.fs', 'support.function.std.aura', '文件系统'),
-        ('aura.env', 'support.function.std.aura', '环境变量'),
-        ('aura.time', 'support.function.std.aura', '时间与日期'),
-        ('aura.path', 'support.function.std.aura', '路径操作'),
-        ('aura.net', 'support.function.std.aura', '网络'),
-        ('aura.random', 'support.function.std.aura', '随机数'),
-        ('aura.encoding', 'support.function.std.aura', '编码'),
-        ('aura.console', 'support.function.std.aura', '终端控制'),
-        ('aura.assert', 'support.function.std.aura', '断言'),
-        ('aura.test', 'support.function.std.aura', '测试框架'),
-        ('aura.ascii', 'support.function.std.aura', 'ASCII 操作'),
-        ('aura.iter', 'support.function.std.aura', '迭代器'),
+        ('aura.lang.std.Math', 'support.function.std.aura', '数学函数'),
+        ('aura.lang.std.IO', 'support.function.std.aura', 'I/O 函数'),
+        ('aura.lang.std.Collections', 'support.function.std.aura', '集合操作'),
+        ('aura.lang.std.{Coroutine,Actor,Channel}', 'support.function.std.aura', '并发 API'),
+        ('aura.lang.std.Json', 'support.function.std.aura', 'JSON 解析'),
+        ('aura.lang.std.String', 'support.function.std.aura', '字符串操作'),
+        ('aura.lang.std.FileSystem', 'support.function.std.aura', '文件系统'),
+        ('aura.lang.std.Env', 'support.function.std.aura', '环境变量'),
+        ('aura.lang.std.Time', 'support.function.std.aura', '时间与日期'),
+        ('aura.lang.std.Path', 'support.function.std.aura', '路径操作'),
+        ('aura.lang.std.Network', 'support.function.std.aura', '网络'),
+        ('aura.lang.std.Random', 'support.function.std.aura', '随机数'),
+        ('aura.lang.std.Encoding', 'support.function.std.aura', '编码'),
+        ('aura.lang.std.Console', 'support.function.std.aura', '终端控制'),
+        ('aura.lang.std.Assert', 'support.function.std.aura', '断言'),
+        ('aura.lang.std.Test', 'support.function.std.aura', '测试框架'),
+        ('aura.lang.std.Ascii', 'support.function.std.aura', 'ASCII 操作'),
+        ('aura.lang.std.Iter', 'support.function.std.aura', '迭代器'),
     ]
     
     def __init__(self, view):
@@ -2413,7 +2413,7 @@ class AuraFormatterTest(unittest.TestCase):
 | 悬停 | LSP hover | LSP + scope 推断 | ST4 增强 |
 | 格式化 | LSP documentFormattingProvider | 本地 + LSP + CLI | ST4 三层方案 |
 | 诊断 | LSP diagnostic | 区域高亮 + 面板 | ST4 增强 |
-| 片段 | aura.json | .sublime-snippet XML | 格式不同，内容一致 |
+| 片段 | aura.lang.std.Json | .sublime-snippet XML | 格式不同，内容一致 |
 | 构建 | task.json | .sublime-build | 格式不同 |
 | 键映射 | keybindings.json | .sublime-keymap | 格式不同 |
 

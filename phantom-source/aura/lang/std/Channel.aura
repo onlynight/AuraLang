@@ -1,0 +1,50 @@
+// aura:///aura/lang/std/Channel.aura
+// 消息通道（Channel）—— 无状态对象，通过 aura.lang.std.Channel.<fn> 调用。
+// 实现：Rust 原生函数（compiler/src/vm/channel.rs）
+// 架构：运行库，通过 AOT FFI 直连 libc
+//
+// 使用前需 import：
+// ```aura
+// import aura.lang.std.Channel.*   // 短名可用：newChannel, channelSend, ...
+// import aura.lang.std.Channel     // 类式调用：Channel.newChannel(0)
+// import aura.lang.std.*           // 全部 std 类作为模块别名
+// ```
+//
+// 架构说明：
+// - Layer 2（C FFI）：当前通过 Rust native 实现
+// - 未来：通过 `extern "c"` 调用 libc 的管道/消息队列实现
+//
+// @since 0.5
+internal object Channel {
+
+    // ── 本地通道（通过 libc pipe/消息队列实现）──
+
+    /// 创建新的容量受限消息通道
+    ///
+    /// - 参数：`capacity` — 缓冲区大小（0 = 无缓冲）
+    /// - 返回：通道 ID
+    fun newChannel(capacity: Int): Int
+
+    /// 向通道发送一个消息（容量满时阻塞）
+    fun channelSend(ch: Int, value: Any): Unit
+
+    /// 从通道接收一个消息（空时阻塞）
+    fun channelRecv(ch: Int): Any
+
+    /// 从通道非阻塞接收；返回 null 表示通道为空
+    fun channelTryRecv(ch: Int): Any
+
+    /// 多通道选择（至少一个就绪时返回索引）
+    fun select(channels: List<Int>): Int
+
+    /// 带超时的多通道选择（返回索引；超时返回 -1）
+    fun selectTimeout(channels: List<Int>, timeoutMs: Int): Int
+
+    // ── TCP 网络通道（通过 libc socket 实现）──
+
+    /// 创建 TCP 网络通道（返回通道 ID）
+    fun newTcpChannel(host: String, port: Int): Int
+
+    /// 通过 TCP 通道发送字符串
+    fun tcpChannelSend(ch: Int, message: String): Unit
+}

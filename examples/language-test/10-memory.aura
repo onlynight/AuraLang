@@ -1,0 +1,50 @@
+// ════════════════════════════════════════════════════════════
+// Phase 10 — 内存管理（P10）
+// defer 延迟清理、ARC 引用计数（create + release）、Box<T> 装箱
+// ════════════════════════════════════════════════════════════
+
+// ── §10.1 defer 延迟清理（P10）──
+// 注：当前 MIR/C 后端为简化实现 — defer 块在注册处立即执行（非作用域退出时 LIFO）
+fun deferDemo() {
+    defer {
+        println("§10.1 defer: cleanup-1")
+    }
+    defer {
+        println("§10.1 defer: cleanup-2")
+    }
+}
+
+// ── §10.2 ARC 引用计数（P10）──
+// 对象创建（retain）与作用域结束（release）由运行时自动插入
+struct Resource {
+    var id: Int
+    var name: String
+}
+
+fun makeResource(id: Int): Resource {
+    val r = Resource()
+    r.id = id
+    r.name = "res"
+    return r
+}
+
+fun arcDemo() {
+    // 创建 + 传递（retain）
+    val a = makeResource(1)
+    val b = a
+    println("§10.2 ARC: a.id=" + a.id.toString() + ", b.id=" + b.id.toString())
+    // a、b 出作用域时 release
+}
+
+// ── §10.3 Box<T> 装箱（P10）──
+fun boxDemo() {
+    val boxed = Box(42)
+    println("§10.3 Box: " + boxed.toString())
+}
+
+fun main() {
+    deferDemo()
+    arcDemo()
+    boxDemo()
+    println("§10 done")
+}

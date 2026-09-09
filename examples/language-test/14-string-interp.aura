@@ -1,0 +1,33 @@
+// ════════════════════════════════════════════════════════════
+// Phase 14 — 字符串插值（P14）
+// $var 简单插值 / ${expr} 表达式插值 / raw string
+// ════════════════════════════════════════════════════════════
+
+import aura.string.*
+
+fun main() {
+    val name = "Aura"
+    val version = 1
+    val pi = 3.14
+    val flag = true
+
+    // ── §14.1 $var 简单插值（P14）──
+    println("§14.1 简单插值: $name v$version")
+
+    // ── §14.2 ${expr} 表达式插值（P14）──
+    // 注：String 成员 .length 在 VM 中暂以 aura.string.length 函数替代
+    println("§14.2 表达式插值: ${aura.string.length(name)} chars, ${version + 1}, ${pi * 2}")
+
+    // ── §14.3 插值与转义（P14）──
+    // 注：\$ 转义当前未支持（lexer 报 Invalid escape sequence），用拼接表达字面量
+    println("§14.3 转义: " + "$" + "name 字面量, 换行\n下一行\t制表")
+
+    // ── §14.4 条件/调用表达式插值（P14）──
+    val status = if (flag) { "on" } else { "off" }
+    val slen = aura.string.length(name)
+    println("§14.4 组合: status=$status, len=${slen}, next=${version + 1}")
+
+    // ── §14.5 raw string（P14）──
+    val raw = """C:\path\to\file\no-escape $name ${version}"""
+    println("§14.5 raw: " + raw)
+}

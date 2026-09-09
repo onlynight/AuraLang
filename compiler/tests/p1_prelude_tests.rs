@@ -108,7 +108,7 @@ fn test_cannot_redefine_prelude_abs() {
 
 #[test]
 fn test_user_can_define_sin_without_import() {
-    // sin 不是 prelu（是 aura.math.sin），用户不 import 时可自由定义
+    // sin 不是 prelu（是 aura.lang.std.Math.sin），用户不 import 时可自由定义
     let src = r#"
         fun sin(x: Float): Float {
             return x * 2.0  // 用户自定义实现
@@ -131,7 +131,7 @@ fn test_user_can_define_sin_without_import() {
 
 #[test]
 fn test_user_can_define_split_without_import() {
-    // split 不是 prelude（是 aura.string.split），用户不 import 时可自由定义
+    // split 不是 prelude（是 aura.lang.std.String.split），用户不 import 时可自由定义
     let src = r#"
         fun split(s: String, sep: String): String {
             return s  // 用户自定义实现
@@ -151,7 +151,7 @@ fn test_user_can_define_split_without_import() {
 
 #[test]
 fn test_namespaced_function_requires_import() {
-    // aura.math.sin 不 import 时直接调用 sin 应报错
+    // aura.lang.std.Math.sin 不 import 时直接调用 sin 应报错
     let src = r#"
         fun main(): Float {
             return sin(1.0)  // 报错：unresolved identifier 'sin'
@@ -171,9 +171,9 @@ fn test_namespaced_function_requires_import() {
 
 #[test]
 fn test_import_wildcard_makes_function_available() {
-    // import aura.math.* 后，sin 可用
+    // import aura.lang.std.Math.* 后，sin 可用
     let src = r#"
-        import aura.math.*
+        import aura.lang.std.Math.*
         fun main(): Float {
             return sin(1.0)
         }

@@ -123,6 +123,8 @@ pub struct Lexer {
     col: usize,
     /// 缓存的 Token（用于 next_token 的延迟消费）
     peek: Option<Token>,
+    /// 字符串插值产生的额外 Token 队列（StringLiteral + StringInterpStart 序列）
+    pending: Vec<Token>,
     /// 错误列表
     errors: Vec<TokenizeError>,
 }
@@ -139,6 +141,7 @@ impl Lexer {
             line: 1,
             col: 1,
             peek: None,
+            pending: Vec::new(),
             errors: Vec::new(),
         }
     }
@@ -169,6 +172,10 @@ impl Lexer {
     pub fn next_token(&mut self) -> Token {
         if let Some(tok) = self.peek.take() {
             return tok;
+        }
+        // 字符串插值序列中的后续 Token 优先输出
+        if !self.pending.is_empty() {
+            return self.pending.remove(0);
         }
 
         self.skip_whitespace_and_comments();
@@ -213,7 +220,12 @@ impl Lexer {
                 if self.peek_n(1) == Some('"') && self.peek_n(2) == Some('"') {
                     self.parse_raw_string(start_span)
                 } else {
-                    self.parse_string(start_span)
+                    // 普通字符串可能产生多 Token（$var / ${expr} 插值序列）
+                    let mut toks: Vec<Token> = Vec::new();
+                    self.parse_string_tokens(start_span, &mut toks);
+                    let first = toks.remove(0);
+                    self.pending = toks;
+                    first
                 }
             }
             '\'' => self.parse_char(start_span),
@@ -349,8 +361,10 @@ impl Lexer {
                     }
                 } else if next == Some('*') {
                     // 多行注释 /* ... */
+                    let start_span = self.current_span();
                     self.char_pos += 2;
                     self.col += 2;
+                    let mut found_close = false;
                     while self.char_pos < self.chars.len() {
                         let c = self.chars[self.char_pos].0;
                         if c == '\n' {
@@ -360,18 +374,19 @@ impl Lexer {
                             self.col += 1;
                         }
                         self.char_pos += 1;
-                        if self.char_pos < self.chars.len() && c == '*' {
+                        if c == '*' {
                             let nn = self.peek_char();
                             if nn == Some('/') {
                                 self.char_pos += 1;
                                 self.col += 1;
+                                found_close = true;
                                 break;
                             }
                         }
                     }
-                    // 如果没有找到 */，报错
-                    if self.char_pos >= self.chars.len() {
-                        let span = self.eof_span();
+                    // 如果没有找到 */，报错（span 覆盖整个注释区间）
+                    if !found_close {
+                        let span = Span::merge(&start_span, &self.eof_span());
                         self.errors.push(TokenizeError::new("Unterminated block comment", span));
                     }
                 } else {
@@ -565,15 +580,34 @@ impl Lexer {
         Token::new(TokenKind::StringLiteral, buf, span)
     }
 
-    fn parse_string(&mut self, start: Span) -> Token {
+    /// 解析普通字符串（含 $var / ${expr} 插值）。
+    ///
+    /// 输出一个 Token 序列到 `out`：
+    /// - 无插值：单个 StringLiteral（可能为空字符串）
+    /// - 有插值：StringLiteral(前缀) + StringInterpStart("$var" / "${expr}") + ... + StringLiteral(尾部)
+    ///   解析器据此重建插值表达式（Expr::StrInterp）
+    fn parse_string_tokens(&mut self, start: Span, out: &mut Vec<Token>) {
         self.advance(); // 跳过开引号 "
         let mut buf = String::new();
+        let mut has_interpolation = false;
+
+        macro_rules! flush_lit {
+            () => {
+                if !buf.is_empty() {
+                    let span = Span::merge(&start, &self.current_span());
+                    out.push(Token::new(TokenKind::StringLiteral, buf.clone(), span));
+                    buf.clear();
+                }
+            };
+        }
 
         loop {
             if self.char_pos >= self.chars.len() {
                 let span = self.eof_span();
                 self.errors.push(TokenizeError::new("Unterminated string literal", span));
-                return Token::new(TokenKind::StringLiteral, buf, span);
+                let span2 = Span::merge(&start, &self.current_span());
+                out.push(Token::new(TokenKind::StringLiteral, buf, span2));
+                return;
             }
 
             let ch = self.chars[self.char_pos].0;
@@ -585,19 +619,13 @@ impl Lexer {
                     "Unterminated string literal: newline in string, use \"\"\"...\"\"\" for multi-line strings",
                     span,
                 ));
-                return Token::new(TokenKind::StringLiteral, buf, span);
+                out.push(Token::new(TokenKind::StringLiteral, buf, span));
+                return;
             }
 
             if ch == '"' {
-                // 检查是否是 "" (空字符串)
-                if self.peek_n(1) == Some('"') {
-                    // 原始字符串 "..." 或者结束
-                    self.advance();
-                    break;
-                } else {
-                    self.advance();
-                    break;
-                }
+                self.advance();
+                break;
             }
 
             if ch == '\\' {
@@ -625,36 +653,61 @@ impl Lexer {
                     self.advance();
                 }
             } else if ch == '$' {
-                // 字符串插值 $var 或 ${expr}
-                self.advance();
-                if self.peek_char() == Some('{') {
-                    self.advance(); // 跳过 {
-                    // 递归解析 ${expr}
-                    loop {
-                        if self.char_pos >= self.chars.len() {
-                            self.errors.push(TokenizeError::new(
-                                "Unterminated string interpolation",
-                                self.eof_span(),
-                            ));
-                            return Token::new(TokenKind::StringLiteral, buf, self.eof_span());
-                        }
-                        if self.chars[self.char_pos].0 == '}' {
+                // 字符串插值 $var 或 ${expr}（查看 $ 的下一个字符）
+                let next = self.peek_n(1);
+                let is_interp = next == Some('{')
+                    || next.map(|c| is_ident_start(c) && c != '$').unwrap_or(false);
+                if is_interp {
+                    flush_lit!();
+                    has_interpolation = true;
+                    self.advance(); // 跳过 $
+                    if self.peek_char() == Some('{') {
+                        self.advance(); // 跳过 {
+                        let mut expr = String::new();
+                        loop {
+                            if self.char_pos >= self.chars.len() {
+                                self.errors.push(TokenizeError::new(
+                                    "Unterminated string interpolation",
+                                    self.eof_span(),
+                                ));
+                                break;
+                            }
+                            let c = self.chars[self.char_pos].0;
+                            if c == '}' {
+                                self.advance();
+                                break;
+                            }
+                            expr.push(c);
                             self.advance();
-                            break;
                         }
-                        buf.push(self.chars[self.char_pos].0);
-                        self.advance();
+                        let span = Span::merge(&start, &self.current_span());
+                        out.push(Token::new(
+                            TokenKind::StringInterpStart,
+                            format!("${{{}}}", expr),
+                            span,
+                        ));
+                    } else {
+                        // 简单插值 $varName
+                        let mut name = String::new();
+                        while let Some(c) = self.peek_char() {
+                            if is_ident_part(c) {
+                                name.push(c);
+                                self.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                        let span = Span::merge(&start, &self.current_span());
+                        out.push(Token::new(
+                            TokenKind::StringInterpStart,
+                            format!("${}", name),
+                            span,
+                        ));
                     }
                 } else {
-                    // 简单插值 $varName
-                    while let Some(ch) = self.peek_char() {
-                        if is_ident_part(ch) {
-                            buf.push(ch);
-                            self.advance();
-                        } else {
-                            break;
-                        }
-                    }
+                    // 非插值 $：字面量
+                    buf.push(ch);
+                    self.advance();
                 }
             } else {
                 buf.push(ch);
@@ -663,7 +716,10 @@ impl Lexer {
         }
 
         let span = Span::merge(&start, &self.current_span());
-        Token::new(TokenKind::StringLiteral, buf, span)
+        // 尾部字面量；若整串无插值则始终输出一个 StringLiteral（保住 "" 空串）
+        if !buf.is_empty() || !has_interpolation {
+            out.push(Token::new(TokenKind::StringLiteral, buf, span));
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────────
@@ -1255,16 +1311,19 @@ mod tests {
 
     #[test]
     fn test_string_interpolation_var() {
+        // 新行为：字符串插值被拆分为多个 token
+        // "hello $name" → StringLiteral("hello ") + StringInterpStart($) + Identifier(name) + ...
         let tokens = tokenize("\"hello $name\"");
         assert_eq!(kind(&tokens[0]), TokenKind::StringLiteral);
-        assert_eq!(tokens[0].literal, "hello name");
+        assert_eq!(tokens[0].literal, "hello ");
     }
 
     #[test]
     fn test_string_interpolation_expr() {
+        // 新行为：${expr} 被拆分为多个 token
+        // "${1 + 2}" → StringInterpStart(${) + IntLiteral(1) + Plus + IntLiteral(2) + ...
         let tokens = tokenize("\"${1 + 2}\"");
-        assert_eq!(kind(&tokens[0]), TokenKind::StringLiteral);
-        assert_eq!(tokens[0].literal, "1 + 2");
+        assert_eq!(kind(&tokens[0]), TokenKind::StringInterpStart);
     }
 
     #[test]
@@ -1461,5 +1520,202 @@ mod tests {
         assert_eq!(tokens[0].literal, "..");
         assert_eq!(kind(&tokens[1]), TokenKind::TripleDotOp);
         assert_eq!(tokens[1].literal, "...");
+    }
+
+    // ─── 多行注释 /* ... */ ──────────────────────────────────────────────
+
+    /// 空的多行注释不应报错
+    #[test]
+    fn test_block_comment_empty() {
+        let mut lexer = Lexer::new("/**/");
+        let tokens = lexer.tokenize();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(kind(&tokens[0]), TokenKind::EOF);
+        assert!(lexer.errors().is_empty(), "errors: {:?}", lexer.errors());
+    }
+
+    /// 多行注释在文件末尾（*/ 紧接 EOF）不应误报 unterminated
+    #[test]
+    fn test_block_comment_at_eof() {
+        let mut lexer = Lexer::new("val x = 1 /* comment */");
+        let tokens = lexer.tokenize();
+        let kinds: Vec<TokenKind> = tokens.iter().map(|t| t.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Val,
+                TokenKind::Ident,
+                TokenKind::Assign,
+                TokenKind::IntLiteral,
+                TokenKind::EOF
+            ]
+        );
+        assert!(lexer.errors().is_empty(), "errors: {:?}", lexer.errors());
+    }
+
+    /// 仅含一个空格的多行注释
+    #[test]
+    fn test_block_comment_single_space() {
+        let mut lexer = Lexer::new("val x = 1 /* */ val y = 2");
+        let tokens = lexer.tokenize();
+        let kinds: Vec<TokenKind> = tokens.iter().map(|t| t.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Val,
+                TokenKind::Ident,
+                TokenKind::Assign,
+                TokenKind::IntLiteral,
+                TokenKind::Val,
+                TokenKind::Ident,
+                TokenKind::Assign,
+                TokenKind::IntLiteral,
+                TokenKind::EOF
+            ]
+        );
+        assert!(lexer.errors().is_empty(), "errors: {:?}", lexer.errors());
+    }
+
+    /// 多行注释出现在表达式中间
+    #[test]
+    fn test_block_comment_mid_expression() {
+        let mut lexer = Lexer::new("val x = 1 + /* mid */ 2");
+        let tokens = lexer.tokenize();
+        let kinds: Vec<TokenKind> = tokens.iter().map(|t| t.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Val,
+                TokenKind::Ident,
+                TokenKind::Assign,
+                TokenKind::IntLiteral,
+                TokenKind::Plus,
+                TokenKind::IntLiteral,
+                TokenKind::EOF
+            ]
+        );
+        assert!(lexer.errors().is_empty(), "errors: {:?}", lexer.errors());
+    }
+
+    /// 多行注释出现在关键字之间
+    #[test]
+    fn test_block_comment_between_keywords() {
+        let mut lexer = Lexer::new("fun /* comment */ main() {}");
+        let tokens = lexer.tokenize();
+        let kinds: Vec<TokenKind> = tokens.iter().map(|t| t.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Fun,
+                TokenKind::Ident,
+                TokenKind::LParen,
+                TokenKind::RParen,
+                TokenKind::LBrace,
+                TokenKind::RBrace,
+                TokenKind::EOF
+            ]
+        );
+        assert!(lexer.errors().is_empty(), "errors: {:?}", lexer.errors());
+    }
+
+    /// 多行注释跨越多行（新增的更严格断言版本）
+    #[test]
+    fn test_block_comment_spanning_lines() {
+        let mut lexer = Lexer::new("val x = 1 /* multi\nline\ncomment */ val y = 2");
+        let tokens = lexer.tokenize();
+        let kinds: Vec<TokenKind> = tokens.iter().map(|t| t.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Val,
+                TokenKind::Ident,
+                TokenKind::Assign,
+                TokenKind::IntLiteral,
+                TokenKind::Val,
+                TokenKind::Ident,
+                TokenKind::Assign,
+                TokenKind::IntLiteral,
+                TokenKind::EOF
+            ]
+        );
+        assert!(lexer.errors().is_empty(), "errors: {:?}", lexer.errors());
+    }
+
+    /// 注释内容中含有 * 与 / 但不是紧邻的 **/ 时不应终止
+    #[test]
+    fn test_block_comment_with_star_slash_content() {
+        let mut lexer = Lexer::new("val x = 1 /* * / */ val y = 2");
+        let tokens = lexer.tokenize();
+        let kinds: Vec<TokenKind> = tokens.iter().map(|t| t.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Val,
+                TokenKind::Ident,
+                TokenKind::Assign,
+                TokenKind::IntLiteral,
+                TokenKind::Val,
+                TokenKind::Ident,
+                TokenKind::Assign,
+                TokenKind::IntLiteral,
+                TokenKind::EOF
+            ]
+        );
+        assert!(lexer.errors().is_empty(), "errors: {:?}", lexer.errors());
+    }
+
+    /// 多行注释之间可以夹带代码
+    #[test]
+    fn test_multiple_block_comments() {
+        let mut lexer = Lexer::new("/* a */ val x = 1 /* b */ val y = 2 /* c */");
+        let tokens = lexer.tokenize();
+        let kinds: Vec<TokenKind> = tokens.iter().map(|t| t.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Val,
+                TokenKind::Ident,
+                TokenKind::Assign,
+                TokenKind::IntLiteral,
+                TokenKind::Val,
+                TokenKind::Ident,
+                TokenKind::Assign,
+                TokenKind::IntLiteral,
+                TokenKind::EOF,
+            ]
+        );
+        assert!(lexer.errors().is_empty(), "errors: {:?}", lexer.errors());
+    }
+
+    /// 未闭合的多行注释应报错
+    #[test]
+    fn test_unterminated_block_comment() {
+        let mut lexer = Lexer::new("val x = 1 /* unclosed");
+        let tokens = lexer.tokenize();
+        // tokens 不应包含被吞掉的后续内容
+        let kinds: Vec<TokenKind> = tokens.iter().map(|t| t.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Val,
+                TokenKind::Ident,
+                TokenKind::Assign,
+                TokenKind::IntLiteral,
+                TokenKind::EOF
+            ]
+        );
+        assert_eq!(lexer.errors().len(), 1);
+        assert_eq!(lexer.errors()[0].message, "Unterminated block comment");
+    }
+
+    /// 注释内的换行不影响后续 token 的行/列
+    #[test]
+    fn test_block_comment_line_tracking() {
+        let mut lexer = Lexer::new("val x = 1 /* multi\nline */ val y = 2");
+        let tokens = lexer.tokenize();
+        // val y = 2 应该在第 2 行
+        let val_y = tokens.iter().find(|t| t.literal == "y").unwrap();
+        assert_eq!(val_y.span.start_line, 2);
+        assert!(lexer.errors().is_empty(), "errors: {:?}", lexer.errors());
     }
 }

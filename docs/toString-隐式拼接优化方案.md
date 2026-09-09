@@ -29,7 +29,7 @@
 
 **位置**：`compiler/src/codegen/hir.rs` 中 `desugar_expr` 的 `Expr::Binary` 分支（~2673 行）。
 
-在生成 `HirExpr::Binary` 前，检测 `op == BinOp::Add` 且左右类型**非双数值**。若一侧为 `Ty::String` 而另一侧非 `String`，把非字符串侧包装为 `HirExpr::Call { callee: "aura.builtin.toString", args: [原值] }`。
+在生成 `HirExpr::Binary` 前，检测 `op == BinOp::Add` 且左右类型**非双数值**。若一侧为 `Ty::String` 而另一侧非 `String`，把非字符串侧包装为 `HirExpr::Call { callee: "aura.lang.std.Builtin.toString", args: [原值] }`。
 
 ```rust
 // 伪代码

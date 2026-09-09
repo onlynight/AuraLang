@@ -225,8 +225,8 @@ v4.0 核心修复：
 | 创建探查任务 | 模型创建"探查语法边界"任务 | 加入行为指令：直接写代码，不探查 |
 | 不检查语法 | 无验证流程 | 强制 `aura check` 验证步骤 |
 | 不知道能力 | 缺少实际示例 | 增加 7 个完整可运行示例 |
-| Import 语法错 | `import std.io as io` | 修正为 `import aura.io.*` |
-| API 调用方式错 | `io.println()` | 修正为 `println()` (prelude) 和 `aura.io.println()` (模块) |
+| Import 语法错 | `import std.io as io` | 修正为 `import aura.lang.std.IO.*` |
+| API 调用方式错 | `io.println()` | 修正为 `println()` (prelude) 和 `aura.lang.std.IO.println()` (模块) |
 
 v2.0 的语言卡片（`docs/01-aura-language-card.md`）仍是核心知识源，
 v4.0 将其封装为 DSH 原生 Skill，并修正所有语法错误。

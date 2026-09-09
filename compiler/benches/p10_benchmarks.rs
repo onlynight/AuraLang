@@ -13,11 +13,11 @@ use compiler::vm::{Value, Vm, VmOptions};
 fn bench_coroutine_spawn() {
     let src = r#"
         fun main(): Int {
-            val co1 = aura.concurrent.spawn(1)
-            val co2 = aura.concurrent.spawn(2)
-            val co3 = aura.concurrent.spawn(3)
-            val co4 = aura.concurrent.spawn(4)
-            val co5 = aura.concurrent.spawn(5)
+            val co1 = aura.lang.std.Coroutine.spawn(1)
+            val co2 = aura.lang.std.Coroutine.spawn(2)
+            val co3 = aura.lang.std.Coroutine.spawn(3)
+            val co4 = aura.lang.std.Coroutine.spawn(4)
+            val co5 = aura.lang.std.Coroutine.spawn(5)
             return co1 + co2 + co3 + co4 + co5
         }
     "#;
@@ -40,12 +40,12 @@ fn bench_coroutine_spawn() {
 fn bench_actor_message_passing() {
     let src = r#"
         fun main(): Int {
-            val actor = aura.concurrent.spawnActor("worker")
-            aura.concurrent.send(actor, 1)
-            aura.concurrent.send(actor, 2)
-            aura.concurrent.send(actor, 3)
-            aura.concurrent.send(actor, 4)
-            aura.concurrent.send(actor, 5)
+            val actor = aura.lang.std.Coroutine.spawnActor("worker")
+            aura.lang.std.Actor.send(actor, 1)
+            aura.lang.std.Actor.send(actor, 2)
+            aura.lang.std.Actor.send(actor, 3)
+            aura.lang.std.Actor.send(actor, 4)
+            aura.lang.std.Actor.send(actor, 5)
             return actor
         }
     "#;
@@ -68,17 +68,17 @@ fn bench_actor_message_passing() {
 fn bench_channel_operations() {
     let src = r#"
         fun main(): Int {
-            val ch = aura.concurrent.newChannel(0)
-            aura.concurrent.channelSend(ch, 1)
-            aura.concurrent.channelSend(ch, 2)
-            aura.concurrent.channelSend(ch, 3)
-            aura.concurrent.channelSend(ch, 4)
-            aura.concurrent.channelSend(ch, 5)
-            val a = aura.concurrent.channelRecv(ch)
-            val b = aura.concurrent.channelRecv(ch)
-            val c = aura.concurrent.channelRecv(ch)
-            val d = aura.concurrent.channelRecv(ch)
-            val e = aura.concurrent.channelRecv(ch)
+            val ch = aura.lang.std.Channel.newChannel(0)
+            aura.lang.std.Channel.channelSend(ch, 1)
+            aura.lang.std.Channel.channelSend(ch, 2)
+            aura.lang.std.Channel.channelSend(ch, 3)
+            aura.lang.std.Channel.channelSend(ch, 4)
+            aura.lang.std.Channel.channelSend(ch, 5)
+            val a = aura.lang.std.Channel.channelRecv(ch)
+            val b = aura.lang.std.Channel.channelRecv(ch)
+            val c = aura.lang.std.Channel.channelRecv(ch)
+            val d = aura.lang.std.Channel.channelRecv(ch)
+            val e = aura.lang.std.Channel.channelRecv(ch)
             return a + b + c + d + e
         }
     "#;
@@ -101,11 +101,11 @@ fn bench_channel_operations() {
 fn bench_select_multiplexing() {
     let src = r#"
         fun main(): Int {
-            val ch1 = aura.concurrent.newChannel(0)
-            val ch2 = aura.concurrent.newChannel(0)
-            aura.concurrent.channelSend(ch1, 100)
-            aura.concurrent.channelSend(ch2, 200)
-            val r1 = aura.concurrent.select(ch1, ch2)
+            val ch1 = aura.lang.std.Channel.newChannel(0)
+            val ch2 = aura.lang.std.Channel.newChannel(0)
+            aura.lang.std.Channel.channelSend(ch1, 100)
+            aura.lang.std.Channel.channelSend(ch2, 200)
+            val r1 = aura.lang.std.Channel.select(ch1, ch2)
             return r1
         }
     "#;
@@ -128,15 +128,15 @@ fn bench_select_multiplexing() {
 fn bench_supervision_tree() {
     let src = r#"
         fun main(): Int {
-            val parent = aura.concurrent.spawnActor("parent")
-            val c1 = aura.concurrent.spawnActor("c1")
-            val c2 = aura.concurrent.spawnActor("c2")
-            val c3 = aura.concurrent.spawnActor("c3")
-            val c4 = aura.concurrent.spawnActor("c4")
-            aura.concurrent.supervise(parent, c1)
-            aura.concurrent.supervise(parent, c2)
-            aura.concurrent.supervise(parent, c3)
-            aura.concurrent.supervise(parent, c4)
+            val parent = aura.lang.std.Coroutine.spawnActor("parent")
+            val c1 = aura.lang.std.Coroutine.spawnActor("c1")
+            val c2 = aura.lang.std.Coroutine.spawnActor("c2")
+            val c3 = aura.lang.std.Coroutine.spawnActor("c3")
+            val c4 = aura.lang.std.Coroutine.spawnActor("c4")
+            aura.lang.std.Actor.supervise(parent, c1)
+            aura.lang.std.Actor.supervise(parent, c2)
+            aura.lang.std.Actor.supervise(parent, c3)
+            aura.lang.std.Actor.supervise(parent, c4)
             return parent
         }
     "#;
@@ -159,14 +159,14 @@ fn bench_supervision_tree() {
 fn bench_integrated_scenario() {
     let src = r#"
         fun main(): Int {
-            val actor = aura.concurrent.spawnActor("integrator")
-            val ch1 = aura.concurrent.newChannel(0)
-            val ch2 = aura.concurrent.newChannel(0)
-            aura.concurrent.channelSend(ch1, 100)
-            aura.concurrent.channelSend(ch2, 200)
-            val result = aura.concurrent.select(ch1, ch2)
-            aura.concurrent.send(actor, result)
-            val co = aura.concurrent.spawn(5)
+            val actor = aura.lang.std.Coroutine.spawnActor("integrator")
+            val ch1 = aura.lang.std.Channel.newChannel(0)
+            val ch2 = aura.lang.std.Channel.newChannel(0)
+            aura.lang.std.Channel.channelSend(ch1, 100)
+            aura.lang.std.Channel.channelSend(ch2, 200)
+            val result = aura.lang.std.Channel.select(ch1, ch2)
+            aura.lang.std.Actor.send(actor, result)
+            val co = aura.lang.std.Coroutine.spawn(5)
             return result + co
         }
     "#;

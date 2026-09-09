@@ -86,7 +86,7 @@ fn handle_definition(&self, params: &serde_json::Value) -> serde_json::Value {
 // decl.rs:97-570
 fn build_all_names() -> HashSet<&'static str> {
     let mut s = HashSet::new();
-    for n in ["aura.math.abs", "aura.math.sin", ...] {
+    for n in ["aura.lang.std.Math.abs", "aura.lang.std.Math.sin", ...] {
         s.insert(n);
     }
     s  // 338 个名字
@@ -102,7 +102,7 @@ fn build_all_names() -> HashSet<&'static str> {
 ```rust
 // std_math.rs
 pub fn register(reg: &mut NativeRegistry) {
-    reg.register("aura.math.sin", |args: &[Value]| -> Value {
+    reg.register("aura.lang.std.Math.sin", |args: &[Value]| -> Value {
         Value::Float(args[0].as_float().sin())
     });
     // ... 29 个函数
@@ -221,8 +221,8 @@ pub struct StdDoc {
 │                                                                       │
 │   SourceIndex（编译产物）                                              │
 │   ├── type_defs: { "Int" → { uri, line_range } }                     │
-│   ├── function_defs: { "aura.math.sin" → { uri, line_range } }       │
-│   ├── module_defs: { "aura.math" → { uri, file_path } }              │
+│   ├── function_defs: { "aura.lang.std.Math.sin" → { uri, line_range } }       │
+│   ├── module_defs: { "aura.lang.std.Math" → { uri, file_path } }              │
 │   └── source_archive: 可选，内嵌 phantom source 文本                  │
 │                                                                       │
 │   .auc 字节码新增段（可选）                                            │
@@ -622,13 +622,13 @@ internal value class String {
 // 标准库模块，不可修改
 // 实现：Rust 原生函数（compiler/src/std/std_math.rs）
 
-package aura.math
+package aura.lang.std.Math
 
 /// 数学函数与常量模块。
 ///
 /// 使用前需 import：
 /// ```aura
-/// import aura.math.*
+/// import aura.lang.std.Math.*
 /// ```
 ///
 /// 部分函数也在 prelude 中可用（免 import）：`abs`, `sqrt`, `pow`
@@ -834,11 +834,11 @@ pub struct SourceIndex {
     pub type_defs: HashMap<String, SourceLocation>,
 
     /// 函数定义映射：函数全名 → 源码位置
-    /// 例：{"aura.math.sin" → {uri: "aura://stdlib/aura/math/Math.aura", line: 85, col: 4}}
+    /// 例：{"aura.lang.std.Math.sin" → {uri: "aura://stdlib/aura/math/Math.aura", line: 85, col: 4}}
     pub function_defs: HashMap<String, SourceLocation>,
 
     /// 模块定义映射：模块路径 → 源码文件
-    /// 例：{"aura.math" → {uri: "aura://stdlib/aura/math/Math.aura", file_path: "math/Math.aura"}}
+    /// 例：{"aura.lang.std.Math" → {uri: "aura://stdlib/aura/math/Math.aura", file_path: "math/Math.aura"}}
     pub module_defs: HashMap<String, SourceLocation>,
 
     /// 常量定义映射：常量全名 → 源码位置
@@ -1153,7 +1153,7 @@ fn handle_definition(&self, params: &serde_json::Value) -> serde_json::Value {
 {
   "method": "textDocument/didOpen",
   "result": {
-    "text": "// aura://stdlib/aura/math/Math.aura\n// 标准库模块，不可修改\n\npackage aura.math\n\n...",
+    "text": "// aura://stdlib/aura/math/Math.aura\n// 标准库模块，不可修改\n\npackage aura.lang.std.Math\n\n...",
     "readOnly": true,
     "languageId": "aura"
   }
@@ -1612,25 +1612,25 @@ Std-Prelude-改造方案.md 规划：
 
 | 模块 | 文件 | 函数数 | 行数 |
 |------|------|-------|------|
-| `aura.math` | `Math.aura` | 30 | ~180 |
-| `aura.string` | `String.aura` | 40 | ~200 |
-| `aura.io` | `IO.aura` | 11 | ~100 |
-| `aura.collections` | `Collections.aura` | 30 | ~180 |
-| `aura.fs` | `FileSystem.aura` | 22 | ~150 |
-| `aura.net` | `Network.aura` | 11 | ~100 |
-| `aura.json` | `Json.aura` | 11 | ~100 |
-| `aura.time` | `Time.aura` | 10 | ~100 |
-| `aura.test` | `Test.aura` | 20 | ~150 |
-| `aura.builtin` | `Builtin.aura` | 16 | ~120 |
-| `aura.env` | `Env.aura` | 14 | ~100 |
-| `aura.process` | `Process.aura` | 10 | ~100 |
-| `aura.random` | `Random.aura` | 11 | ~100 |
-| `aura.encoding` | `Encoding.aura` | 8 | ~80 |
-| `aura.ascii` | `Ascii.aura` | 13 | ~100 |
-| `aura.console` | `Console.aura` | 25 | ~150 |
-| `aura.path` | `Path.aura` | 13 | ~100 |
-| `aura.assert` | `Assert.aura` | 8 | ~80 |
-| `aura.iter` | `Iter.aura` | 30 | ~200 |
+| `aura.lang.std.Math` | `Math.aura` | 30 | ~180 |
+| `aura.lang.std.String` | `String.aura` | 40 | ~200 |
+| `aura.lang.std.IO` | `IO.aura` | 11 | ~100 |
+| `aura.lang.std.Collections` | `Collections.aura` | 30 | ~180 |
+| `aura.lang.std.FileSystem` | `FileSystem.aura` | 22 | ~150 |
+| `aura.lang.std.Network` | `Network.aura` | 11 | ~100 |
+| `aura.lang.std.Json` | `Json.aura` | 11 | ~100 |
+| `aura.lang.std.Time` | `Time.aura` | 10 | ~100 |
+| `aura.lang.std.Test` | `Test.aura` | 20 | ~150 |
+| `aura.lang.std.Builtin` | `Builtin.aura` | 16 | ~120 |
+| `aura.lang.std.Env` | `Env.aura` | 14 | ~100 |
+| `aura.lang.std.Process` | `Process.aura` | 10 | ~100 |
+| `aura.lang.std.Random` | `Random.aura` | 11 | ~100 |
+| `aura.lang.std.Encoding` | `Encoding.aura` | 8 | ~80 |
+| `aura.lang.std.Ascii` | `Ascii.aura` | 13 | ~100 |
+| `aura.lang.std.Console` | `Console.aura` | 25 | ~150 |
+| `aura.lang.std.Path` | `Path.aura` | 13 | ~100 |
+| `aura.lang.std.Assert` | `Assert.aura` | 8 | ~80 |
+| `aura.lang.std.Iter` | `Iter.aura` | 30 | ~200 |
 
 ### 附录 C：SourceIndex 示例
 
@@ -1646,16 +1646,16 @@ Std-Prelude-改造方案.md 规划：
   },
   "function_defs": {
     "println": { "uri": "aura://builtin/prelu.aura", "line": 14, "col": 4, "end_line": 15, "end_col": 1 },
-    "aura.math.sin": { "uri": "aura://stdlib/aura/math/Math.aura", "line": 84, "col": 4, "end_line": 85, "end_col": 1 },
-    "aura.math.cos": { "uri": "aura://stdlib/aura/math/Math.aura", "line": 88, "col": 4, "end_line": 89, "end_col": 1 },
-    "aura.string.contains": { "uri": "aura://stdlib/aura/string/String.aura", "line": 45, "col": 4, "end_line": 46, "end_col": 1 }
+    "aura.lang.std.Math.sin": { "uri": "aura://stdlib/aura/math/Math.aura", "line": 84, "col": 4, "end_line": 85, "end_col": 1 },
+    "aura.lang.std.Math.cos": { "uri": "aura://stdlib/aura/math/Math.aura", "line": 88, "col": 4, "end_line": 89, "end_col": 1 },
+    "aura.lang.std.String.contains": { "uri": "aura://stdlib/aura/string/String.aura", "line": 45, "col": 4, "end_line": 46, "end_col": 1 }
   },
   "module_defs": {
-    "aura.math": { "uri": "aura://stdlib/aura/math/Math.aura", "line": 1, "col": 0, "end_line": 1, "end_col": 0 },
-    "aura.string": { "uri": "aura://stdlib/aura/string/String.aura", "line": 1, "col": 0, "end_line": 1, "end_col": 0 }
+    "aura.lang.std.Math": { "uri": "aura://stdlib/aura/math/Math.aura", "line": 1, "col": 0, "end_line": 1, "end_col": 0 },
+    "aura.lang.std.String": { "uri": "aura://stdlib/aura/string/String.aura", "line": 1, "col": 0, "end_line": 1, "end_col": 0 }
   },
   "constant_defs": {
-    "aura.math.PI": { "uri": "aura://stdlib/aura/math/Math.aura", "line": 16, "col": 4, "end_line": 16, "end_col": 35 }
+    "aura.lang.std.Math.PI": { "uri": "aura://stdlib/aura/math/Math.aura", "line": 16, "col": 4, "end_line": 16, "end_col": 35 }
   }
 }
 ```
@@ -1734,7 +1734,7 @@ Std-Prelude-改造方案.md 规划：
 // 响应
 {
   "result": {
-    "text": "// aura://stdlib/aura/math/Math.aura\n// 标准库模块，不可修改\n\npackage aura.math\n\n/// 数学函数与常量模块。\n///\n/// @since 0.1\ninternal object Math {\n\n    /// 圆周率 π\n    static val PI: Float = 3.14159265f\n\n    /// 自然常数 e\n    static val E: Float = 2.71828182f\n\n    // ... 其他函数\n}\n",
+    "text": "// aura://stdlib/aura/math/Math.aura\n// 标准库模块，不可修改\n\npackage aura.lang.std.Math\n\n/// 数学函数与常量模块。\n///\n/// @since 0.1\ninternal object Math {\n\n    /// 圆周率 π\n    static val PI: Float = 3.14159265f\n\n    /// 自然常数 e\n    static val E: Float = 2.71828182f\n\n    // ... 其他函数\n}\n",
     "readOnly": true,
     "languageId": "aura"
   }

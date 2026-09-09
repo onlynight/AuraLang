@@ -15,3 +15,5 @@ build/
 output/
 __pycache__/
 libs/
+.migration*/
+.mimocode/

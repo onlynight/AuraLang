@@ -1,0 +1,36 @@
+// ════════════════════════════════════════════════════════════
+// Phase 12 — 注解与 Comptime（P12）
+// @Annotation 注解声明与应用、comptime fun
+// ════════════════════════════════════════════════════════════
+
+// ── §12.1 @Annotation 注解声明与应用（P12）──
+// 语法：`@Name(args)` 独立注解声明，置于被标注函数之前（编译期记录，运行时忽略）
+@Deprecated("use fastRoute instead")
+fun slowRoute(): Int {
+    return 1
+}
+
+fun fastRoute(): Int {
+    return 2
+}
+
+// ── §12.2 comptime fun（P12）──
+// 编译期函数：当前实现按普通函数执行（编译期求值待实现）
+comptime fun compileTimeSquare(n: Int): Int {
+    return n * n
+}
+
+comptime fun compileTimeAdd(a: Int, b: Int): Int {
+    return a + b
+}
+
+fun main() {
+    // ── §12.1 注解应用 ──
+    println("§12.1 @Deprecated: slowRoute=" + slowRoute().toString()
+        + ", fastRoute=" + fastRoute().toString())
+
+    // ── §12.2 comptime 调用 ──
+    val a = compileTimeSquare(7)
+    val b = compileTimeAdd(3, 4)
+    println("§12.2 comptime: square(7)=" + a.toString() + ", add(3,4)=" + b.toString())
+}

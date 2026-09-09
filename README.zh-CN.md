@@ -302,29 +302,34 @@ val raw = """不做 $interpolation，不做 \n 转义"""
 
 ## 标准库
 
+所有标准库模块位于 `aura.lang.std` 包下。
+
 | 模块 | 说明 |
 |------|------|
-| `aura.math` | 数学函数（sin, cos, tan, sqrt, pow, abs, min, max, round, floor, ceil, log, exp, PI, E） |
-| `aura.io` | 输入输出（readFile, writeFile, readLine, writeLine, println, print） |
-| `aura.collections` | 集合操作（List, Map, Set — filter, map, reduce, sort, zip 等） |
-| `aura.concurrent` | 并发（Actor, Channel, Coroutine, spawn, send, ask, supervise, threadPool） |
-| `aura.json` | JSON 解析与序列化 |
-| `aura.string` | 字符串操作（split, join, replace, trim, toUpperCase 等） |
-| `aura.fs` | 文件系统（exists, remove, mkdir, readDir, copy, move） |
-| `aura.env` | 环境变量（get, set, remove） |
-| `aura.process` | 进程管理（exec, spawn, exit, arguments） |
-| `aura.time` | 时间日期（now, millis, timestamp, date formatting） |
-| `aura.path` | 路径操作（join, normalize, resolve, base, dir, ext） |
-| `aura.console` | 终端控制（clear, cursor, colors, width, height） |
-| `aura.assert` | 断言（assert, assertEquals, assertThrows） |
-| `aura.test` | 测试框架（describe, it, before, after） |
-| `aura.net` | 网络（HTTP 客户端、URL、WebSocket） |
-| `aura.random` | 随机数（nextInt, nextFloat, shuffle） |
-| `aura.encoding` | 编码（base64, hex, URL 编码） |
-| `aura.ascii` | ASCII 操作（isAlpha, isDigit, toUpper, toLower） |
-| `aura.iter` | 迭代器操作 |
+| `aura.lang.std.math` | 数学函数（sin, cos, tan, sqrt, pow, abs, min, max, round, floor, ceil, log, exp, PI, E） |
+| `aura.lang.std.io` | 输入输出（readFile, writeFile, readLine, writeLine, println, print） |
+| `aura.lang.std.collections` | 集合操作（List, Map, Set — filter, map, reduce, sort, zip 等） |
+| `aura.lang.std.concurrent` | 并发（Actor, Channel, Coroutine, spawn, send, ask, supervise, threadPool） |
+| `aura.lang.std.json` | JSON 解析与序列化 |
+| `aura.lang.std.string` | 字符串操作（split, join, replace, trim, toUpperCase 等） |
+| `aura.lang.std.fs` | 文件系统（exists, remove, mkdir, readDir, copy, move） |
+| `aura.lang.std.env` | 环境变量（get, set, remove） |
+| `aura.lang.std.process` | 进程管理（exec, spawn, exit, arguments） |
+| `aura.lang.std.time` | 时间日期（now, millis, timestamp, date formatting） |
+| `aura.lang.std.path` | 路径操作（join, normalize, resolve, base, dir, ext） |
+| `aura.lang.std.console` | 终端控制（clear, cursor, colors, width, height） |
+| `aura.lang.std.assert` | 断言（assert, assertEquals, assertThrows） |
+| `aura.lang.std.test` | 测试框架（describe, it, before, after） |
+| `aura.lang.std.net` | 网络（HTTP 客户端、URL、WebSocket） |
+| `aura.lang.std.random` | 随机数（nextInt, nextFloat, shuffle） |
+| `aura.lang.std.encoding` | 编码（base64, hex, URL 编码） |
+| `aura.lang.std.ascii` | ASCII 操作（isAlpha, isDigit, toUpper, toLower） |
+| `aura.lang.std.iter` | 迭代器操作 |
+| `aura.lang.std.builtin` | 内置工具（typeof, typeOf, isNull, isNotNull, ...） |
 
-**Prelude**（免 import，始终可用）：`println`, `print`, `puts`, `abs`, `sqrt`, `pow`, `toInt`, `toFloat`, `toStr`, `toString`, `clock`, `strlen`, `CString`, `CStr`, `ptrIsNull`, `ptrToInt`, `intToPtr`, `makeCallback`
+**Prelude**（免 import，始终可用）：`println`, `print`, `puts`, `abs`, `sqrt`, `pow`, `toInt`, `toFloat`, `toStr`, `toString`, `clock`, `strlen`, `CString`, `CStr`, `ptrIsNull`, `ptrToInt`, `intToPtr`, `makeCallback`, `listOf`, `assertTrue`, `assertFalse`, `assertEq`, `assertNotEq`, `assertNotNull`, `assertNull`, `assertContains`, `assertNotContains`, `assertGt`, `assertGte`, `assertLt`, `assertLte`, `assertApprox`, `assertArrayEq`, `assertMapEq`, `pass`, `fail`
+
+**Phantom Source**（phantom-source/aura/lang/）：IDE 可见的类型声明，包括 `Any`, `Int`, `String`, `List`, `Map`, `Actor`, `Channel`, `Coroutine`, `Box`, `Weak`, `DeathStrategy`, `ProcessActor`, `IntRange` 等。
 
 ---
 
