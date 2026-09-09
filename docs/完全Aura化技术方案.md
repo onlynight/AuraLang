@@ -29,7 +29,7 @@ Aura 语言当前标准库采用混合架构：
 - **Layer 3（Aura 源码）**：纯逻辑模块（Math/String/Path 等）
 
 **问题**：
-- phantom-source 目录仅用于 IDE SourceIndex 生成，不参与编译
+- core 目录仅用于 IDE SourceIndex 生成，不参与编译
 - Rust native 实现与 Aura 源码存在双层漂移
 - "上移"只是文档名义，未实现真正的代码迁移
 
@@ -40,7 +40,7 @@ Aura 语言当前标准库采用混合架构：
 | G1 | 标准库完全 Aura 化 | 纯逻辑模块 100% Aura 实现 |
 | G2 | 三态执行模式 | VM/JIT/AOT 全部支持 |
 | G3 | AOT 直连 FFI | 所有模式消除函数指针间接调用 |
-| G4 | 单一真相源 | phantom-source 是真实源码 |
+| G4 | 单一真相源 | core 是真实源码 |
 | G5 | 性能最优 | AOT 直连消除间接调用开销 |
 
 ### 1.3 核心原则
@@ -48,18 +48,18 @@ Aura 语言当前标准库采用混合架构：
 1. **AOT 直连优先**：默认 FFI 方式选择 AOT 直连，消除函数指针间接调用
 2. **三态一致性**：VM/JIT/AOT 三态模式语义一致
 3. **渐进式迁移**：保留 Rust native 作为降级方案
-4. **单一真相源**：phantom-source 是标准库唯一源码
+4. **单一真相源**：core 是标准库唯一源码
 
 ---
 
 ## 2. 当前架构问题
 
-### 2.1 phantom-source 不参与编译
+### 2.1 core 不参与编译
 
 ```
 当前架构：
 ┌─────────────────────────────────────────────────────────────────┐
-│ phantom-source/*.aura  ──→  SourceIndex 生成（仅用于 IDE）      │
+│ core/*.aura  ──→  SourceIndex 生成（仅用于 IDE）      │
 │                         ✗ 不参与编译                            │
 │                         ✗ 不参与运行时                          │
 │                                                                  │
@@ -75,7 +75,7 @@ Aura 语言当前标准库采用混合架构：
 
 | 层级 | 文件 | 状态 |
 |------|------|------|
-| 文档层 | `phantom-source/*.aura` | ❌ 不参与编译 |
+| 文档层 | `core/*.aura` | ❌ 不参与编译 |
 | 实现层 | `compiler/src/std/std_*.rs` | ✅ 实际运行时实现 |
 | FFI 层 | `compiler/src/std/cffi/aura_std_cffi.c` | ✅ AOT 实际调用 |
 
@@ -165,7 +165,7 @@ Aura 语言当前标准库采用混合架构：
 │  构建流程                                                                │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
 │  │ 1. 预编译标准库（bootstrap 阶段）                                 │   │
-│  │    phantom-source/*.aura  ──→  .auc 字节码                      │   │
+│  │    core/*.aura  ──→  .auc 字节码                      │   │
 │  │    aura_std_cffi.c       ──→  .a 静态库                          │   │
 │  │                                                                  │   │
 │  │ 2. 应用编译时链接标准库                                          │   │
@@ -592,14 +592,14 @@ fn test_memory() {
 
 ### Phase 2: loom aura-stdlib 插件改造（第 3-4 周）
 
-**目标**：让 loom 构建系统实际编译 phantom-source 文件，支持三态模式 + AOT 直连。
+**目标**：让 loom 构建系统实际编译 core 文件，支持三态模式 + AOT 直连。
 
 **开发内容**：
 
 ```
 ├── loom/src/plugin/convention.rs
 │   └── StdlibPlugin 改造
-│       ├── 扫描 phantom-source 目录
+│       ├── 扫描 core 目录
 │       ├── 编译 .aura 为 .auc（VM/JIT 模式）
 │       ├── 编译 .auc 为机器代码（AOT 模式）
 │       ├── 编译 aura_std_cffi.c 为 .a
@@ -607,7 +607,7 @@ fn test_memory() {
 │       └── 注册到构建上下文
 │
 ├── loom/src/task/compile_stdlib.rs  # 新增
-│   ├── 编译 phantom-source/*.aura
+│   ├── 编译 core/*.aura
 │   ├── 编译 aura_std_cffi.c 为 .a
 │   ├── 打包为标准库制品
 │   └── 支持三态模式 + AOT 直连
@@ -623,7 +623,7 @@ fn test_memory() {
 ```rust
 // loom/src/plugin/convention.rs
 pub struct StdlibPlugin {
-    phantom_source_dir: PathBuf,
+    core_dir: PathBuf,
     output_dir: PathBuf,
     execution_mode: ExecutionMode,  // Vm | Jit | Aot
     ffi_mode: FfiMode,              // Aot | Cffi | Rustffi（默认 Aot）
@@ -633,8 +633,8 @@ impl BuildPlugin for StdlibPlugin {
     fn configure(&self, ctx: &mut PluginContext) -> Result<(), LoomError> {
         ctx.activate_plugin("aura-stdlib");
         
-        // 1. 扫描 phantom-source 目录
-        let aura_files = scan_aura_files(&self.phantom_source_dir)?;
+        // 1. 扫描 core 目录
+        let aura_files = scan_aura_files(&self.core_dir)?;
         
         // 2. 编译每个 .aura 文件为 .auc（VM/JIT 模式）
         for file in &aura_files {
@@ -679,7 +679,7 @@ impl BuildPlugin for StdlibPlugin {
 - 运行库函数：AOT 直连内联
 
 **验收标准**：
-- [x] aura-stdlib 插件能扫描 phantom-source 目录
+- [x] aura-stdlib 插件能扫描 core 目录
 - [x] 能编译 .aura 文件为 .auc
 - [x] 能编译 .auc 为机器代码（AOT 模式）
 - [x] 能编译 aura_std_cffi.c 为静态库
@@ -993,7 +993,7 @@ fn test_ffi_aot_direct_aot() {
 │   ├── std_time.rs         # 修改：仅保留 syscall 函数
 │   └── std_collections.rs  # 修改：仅保留复杂数据结构
 │
-└── phantom-source/aura/lang/std/
+└── core/aura/lang/std/
     ├── Math.aura           # 完整 Aura 实现
     ├── String.aura         # 完整 Aura 实现
     ├── Path.aura           # 完整 Aura 实现
@@ -1629,7 +1629,7 @@ criterion_main!(benches);
 │   └── loom/src/package/                # 标准库打包分发
 │
 ├── 标准库
-│   ├── phantom-source/aura/lang/std/    # 标准库 Aura 源码
+│   ├── core/aura/lang/std/    # 标准库 Aura 源码
 │   │   ├── Math.aura
 │   │   ├── String.aura
 │   │   ├── Path.aura
@@ -1685,7 +1685,7 @@ Week 1-2:   Phase 1 - Bootstrap 最小引导层
 
 Week 3-4:   Phase 2 - loom aura-stdlib 插件改造
           ─────────────────────────────────
-          ├── 扫描 phantom-source 目录
+          ├── 扫描 core 目录
           ├── 编译 .aura 为 .auc（VM/JIT）
           ├── 编译 .auc 为机器代码（AOT）
           ├── 编译 C FFI 库（AOT 直连）

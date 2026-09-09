@@ -37,6 +37,7 @@ pub mod manifest;
 pub mod plugin;
 pub mod registry;
 pub mod sourceset;
+pub mod stdlib;
 pub mod task;
 pub mod watch;
 pub mod workspace;

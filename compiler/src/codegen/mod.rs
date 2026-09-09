@@ -314,31 +314,38 @@ fn extract_enabled_modules(program: &crate::ast::Program) -> Vec<String> {
     modules.into_iter().collect()
 }
 
-/// Phase 2: 从 phantom source 目录生成 SourceIndex
+/// Phase 2: 从 core 目录生成 SourceIndex
 ///
-/// 尝试多个路径查找 phantom-source/ 目录：
-/// 1. `AURA_PHANTOM_SOURCE` 环境变量
-/// 2. `./phantom-source`（相对当前工作目录）
-/// 3. `../phantom-source`（相对 crate 根目录）
-/// 4. `../../phantom-source`（相对 src/codegen 目录）
+/// 尝试多个路径查找 core/ 目录（原 phantom-source/，已重命名）：
+/// 1. `AURA_CORE_SOURCE` 环境变量（新）
+/// 2. `AURA_PHANTOM_SOURCE` 环境变量（旧，向后兼容）
+/// 3. `./core`（相对当前工作目录）
+/// 4. `../core`（相对 crate 根目录）
+/// 5. `../../core`（相对 src/codegen 目录）
+/// 6. `./phantom-source`（向后兼容）
+/// 7. `../phantom-source`（向后兼容）
 ///
 /// 如果找不到目录或解析失败，返回 None（SourceIndex 为可选段）。
 fn generate_source_index_from_phantom() -> Option<crate::std::source_index::SourceIndex> {
     use std::path::PathBuf;
 
-    // 尝试多个路径
+    // 尝试多个路径（新名优先，旧名向后兼容）
     let candidates = [
+        std::env::var("AURA_CORE_SOURCE").ok().map(PathBuf::from),
         std::env::var("AURA_PHANTOM_SOURCE").ok().map(PathBuf::from),
-        Some(PathBuf::from("./phantom-source")),
-        Some(PathBuf::from("../phantom-source")),
-        Some(PathBuf::from("./src/codegen/../../phantom-source")),
+        Some(PathBuf::from("./core")),
+        Some(PathBuf::from("../core")),
+        Some(PathBuf::from("./src/codegen/../../core")),
         Some(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .parent()
                 .map(|p| p.to_path_buf())
                 .unwrap_or_default()
-                .join("phantom-source"),
+                .join("core"),
         ),
+        // 向后兼容：旧名 phantom-source
+        Some(PathBuf::from("./phantom-source")),
+        Some(PathBuf::from("../phantom-source")),
     ];
 
     for candidate in candidates.into_iter().flatten() {

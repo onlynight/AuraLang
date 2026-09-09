@@ -29,9 +29,9 @@ CI（`.github/workflows/ci.yml`）在 Linux / Windows / macOS 上执行 `fmt --c
 1. **格式化**：统一使用 `cargo fmt`（不要手工调整缩进）。
 2. **Lint**：`clippy` 不允许 warning；确需豁免时用 `#[allow(...)]` 并写明原因。
 3. **命名**：类型 / 枚举用 `UpperCamelCase`，函数 / 变量用 `snake_case`，常量用 `SCREAMING_SNAKE_CASE`。
-4. **注释**：公共 API 使用 `///` 文档注释说明“做什么”与“为什么”，避免复述代码。
-5. **错误信息**：所有诊断必须携带 `Span`，消息面向用户（说明期望与实际），例如
-   `type mismatch: cannot initialize 'Int' with 'String'`。
+4. **注释**：公共 API 使用 `///` 文档注释说明“做什么”与“为什么”，避免复述代码。代码注释可使用中文或英文，团队内统一风格即可。
+5. **错误信息**：所有诊断必须携带 `Span`，消息面向用户（说明期望与实际），**统一使用英文**，例如
+   `type mismatch: cannot initialize 'Int' with 'String'`。运行时错误（`Err(String)`）、日志输出、CLI 提示信息同样使用英文。
 6. **模块职责**：
    - `lexer.rs` 只做字符 → Token，不构造 AST
    - `parser.rs` 只做 Token → AST，不做类型判断

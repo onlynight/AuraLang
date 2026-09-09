@@ -1,6 +1,7 @@
 //! [Phase L2] 任务引擎：TaskGraph + 拓扑排序 + 并行调度
 
 pub mod builtin;
+pub mod compile_stdlib;
 pub mod executor;
 pub mod graph;
 pub mod scheduler;
