@@ -1,0 +1,101 @@
+// aura:///aura/lang/collection/Collections.aura
+// 集合工具模块
+// 实现：Rust 原生函数（compiler/src/std/std_collections.rs）
+// (package 声明由编译器自动注入，无需显式声明)
+/// 集合工具模块。
+///
+/// 使用前需 import：
+/// ```aura
+/// import aura.collections.*
+/// ```
+///
+/// @since 0.1
+internal object Collections {
+
+    // ── List 创建 ──
+
+    /// 创建不可变列表。
+    fun listOf(items: Any): List<Any>
+
+    /// 创建可变列表。
+    fun mutableListOf(vararg items: Any): List<Any>
+
+    /// 空列表。
+    val emptyList: List<Any>
+
+    // ── List 操作 ──
+
+    /// 检查列表是否包含指定元素。
+    fun listContains(list: List<Any>, item: Any): Boolean
+
+    /// 查找元素在列表中的索引（未找到返回 -1）。
+    fun listIndexOf(list: List<Any>, item: Any): Int
+
+    /// 移除指定索引处的元素。
+    fun listRemove(list: List<Any>, index: Int): Any
+
+    /// 反转列表。
+    fun listReverse(list: List<Any>): List<Any>
+
+    /// 排序列表。
+    fun listSort(list: List<Any>): List<Any>
+
+    /// 获取指定索引处的元素。
+    fun listGet(list: List<Any>, index: Int): Any
+
+    /// 设置指定索引处的元素。
+    fun listSet(list: List<Any>, index: Int, value: Any): Unit
+
+    /// 在指定索引处插入元素。
+    fun listInsert(list: List<Any>, index: Int, item: Any): Unit
+
+    /// 获取子列表 [from, to)。
+    fun listSubList(list: List<Any>, from: Int, to: Int): List<Any>
+
+    // ── Map 创建 ──
+
+    /// 创建不可变映射。
+    fun mapOf(vararg pairs: Any): Map<Any, Any>
+
+    /// 创建可变映射。
+    fun mutableMapOf(vararg pairs: Any): Map<Any, Any>
+
+    /// 空映射。
+    val emptyMap: Map<Any, Any>
+
+    // ── Map 操作 ──
+
+    /// 检查映射是否包含指定值。
+    fun mapContains(map: Map<Any, Any>, value: Any): Boolean
+
+    /// 检查映射是否包含指定键。
+    fun mapContainsKey(map: Map<Any, Any>, key: Any): Boolean
+
+    /// 检查映射是否包含指定值。
+    fun mapContainsValue(map: Map<Any, Any>, value: Any): Boolean
+
+    /// 移除指定键并返回其值。
+    fun mapRemove(map: Map<Any, Any>, key: Any): Any?
+
+    /// 获取所有键。
+    fun mapKeys(map: Map<Any, Any>): List<Any>
+
+    /// 获取所有值。
+    fun mapValues(map: Map<Any, Any>): List<Any>
+
+    // ── Set 创建 ──
+
+    /// 创建不可变集合。
+    fun setOf(vararg items: Any): List<Any>
+
+    /// 创建可变集合。
+    fun mutableSetOf(vararg items: Any): List<Any>
+
+    /// 空集合。
+    val emptySet: List<Any>
+
+    // ── Array 创建 ──
+
+    /// 创建数组。
+    fun arrayOf(vararg items: Any): Array<Any>
+}

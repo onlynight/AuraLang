@@ -1,0 +1,29 @@
+fun main() {
+    println("Hello, World!")
+    print("Hello")
+    print(" World!\n")
+    
+    val x: Int = 10
+    println("x =", x)
+    
+    val list = listOf(1, 2, 3, 4, 5)
+    println("list.size =", list.size)
+    
+    val arr = arrayOf(1, 2, 3)
+    println("arr.size =", arr.size)
+    
+    println("min(3, 5) =", min(3, 5))
+    println("max(3, 5) =", max(3, 5))
+    
+    println("abs(-5) =", abs(-5))
+    println("sqrt(16.0) =", sqrt(16.0f))
+    println("pow(2.0, 3.0) =", pow(2.0f, 3.0f))
+    
+    println("toInt('123') =", toInt("123"))
+    println("toFloat('3.14') =", toFloat("3.14"))
+    println("toStr(42) =", toStr(42))
+    println("strlen('hello') =", strlen("hello"))
+    
+    val clock: Float = clock()
+    println("clock() =", clock)
+}

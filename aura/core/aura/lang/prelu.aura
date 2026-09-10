@@ -1,0 +1,183 @@
+// aura:///aura/lang/prelu.aura
+// 免 import 的全局内置函数（21 个）
+//
+// 这些函数由编译器自动注册到符号表，无需 `import` 声明。
+// 用户不能重定义这些函数名（编译报错）。
+//
+// @since 0.2
+
+import aura.lang.std.IO
+import aura.lang.std.Math
+import aura.lang.std.Time
+import aura.lang.std.Builtin
+import aura.lang.collection.ArrayList
+import aura.lang.collection.Array
+import aura.lang.collection.List
+
+/// 打印一行文本（末尾自动追加换行符）。
+///
+/// 支持多个参数，用空格拼接。
+/// ```aura
+/// println("Hello", "World")  // 输出: Hello World
+/// ```
+fun println(vararg args: Any): Unit {
+    var sb: String = ""
+    var i: Int = 0
+    while (i < args.size) {
+        if (i > 0) {
+            sb = sb + " "
+        }
+        sb = sb + toStr(args[i])
+        i = i + 1
+    }
+    sb = sb + "\n"
+    IO.println(sb)
+}
+
+/// 打印文本（不追加换行符）。
+///
+/// 支持多个参数，用空格拼接。
+fun print(vararg args: Any): Unit {
+    var sb: String = ""
+    var i: Int = 0
+    while (i < args.size) {
+        if (i > 0) {
+            sb = sb + " "
+        }
+        sb = sb + toStr(args[i])
+        i = i + 1
+    }
+    IO.print(sb)
+}
+
+/// C 风格输出（追加换行符）。
+fun puts(text: String): Unit {
+    IO.println(text)
+}
+
+/// 绝对值。
+///
+/// 支持 Int 和 Float 参数，返回同类型。
+fun abs(x: Any): Any {
+    if (x is Int) {
+        val n: Int = x as Int
+        if (n < 0) return 0 - n
+        return n
+    }
+    val f: Float = x as Float
+    if (f < 0.0f) return 0.0f - f
+    return f
+}
+
+/// 平方根。
+fun sqrt(x: Float): Float {
+    return Math.sqrt(x)
+}
+
+/// 幂运算。
+fun pow(base: Float, exp: Float): Float {
+    return Math.pow(base, exp)
+}
+
+/// 转换为 32 位整数。
+fun toInt(x: Any): Int {
+    if (x is Int) return x as Int
+    if (x is Float) return (x as Float) as Int
+    if (x is String) return (x as String).toInt()
+    return 0
+}
+
+/// 转换为 32 位浮点数。
+fun toFloat(x: Any): Float {
+    if (x is Float) return x as Float
+    if (x is Int) return (x as Int) as Float
+    if (x is String) return (x as String).toFloat()
+    return 0.0f
+}
+
+/// 转换为字符串。
+fun toStr(x: Any): String {
+    if (x is String) return x as String
+    if (x is Int) return (x as Int).toString()
+    if (x is Float) return (x as Float).toString()
+    if (x is Boolean) return (x as Boolean).toString()
+    return "null"
+}
+
+/// 转换为字符串（同 `toStr`）。
+fun toString(x: Any): String {
+    return toStr(x)
+}
+
+/// 获取当前时钟（Unix 时间戳，秒）。
+fun clock(): Float {
+    return Time.clock()
+}
+
+/// 获取字符串长度。
+fun strlen(text: String): Int {
+    return text.length
+}
+
+/// C 字符串转换（转为 C 兼容的 null 终止字符串）。
+fun CString(text: String): String {
+    return Builtin.cstr(text)
+}
+
+/// C 字符串转换（`CString` 别名）。
+fun CStr(text: String): String {
+    return CString(text)
+}
+
+/// 指针判空。
+fun ptrIsNull(ptr: Any): Boolean {
+    return Builtin.ptrIsNull(ptr)
+}
+
+/// 指针转整数。
+fun ptrToInt(ptr: Any): Int {
+    return Builtin.ptrToInt(ptr)
+}
+
+/// 整数转指针。
+fun intToPtr(value: Int): Any {
+    return Builtin.intToPtr(value)
+}
+
+/// 创建回调函数（用于 FFI）。
+fun makeCallback(fn: (Any) -> Any): Any {
+    return Builtin.makeCallback(fn)
+}
+
+/// 创建不可变列表。
+fun listOf(vararg items: Any): List<Any> {
+    return ArrayList<Any>(items)
+}
+
+/// 创建可变列表。
+fun mutableListOf(vararg items: Any): List<Any> {
+    return ArrayList<Any>(items)
+}
+
+/// 创建数组。
+fun arrayOf(vararg items: Any): Array<Any> {
+    var arr = arrayOf<Any>()
+    var i: Int = 0
+    while (i < items.size) {
+        arr[i] = items[i]
+        i = i + 1
+    }
+    return arr
+}
+
+/// 取最小值。
+fun min(a: Int, b: Int): Int {
+    if (a < b) return a
+    return b
+}
+
+/// 取最大值。
+fun max(a: Int, b: Int): Int {
+    if (a > b) return a
+    return b
+}

@@ -1967,6 +1967,7 @@ impl Parser {
         let visibility = self.take_visibility();
         self.expect(TokenKind::Interface);
         let name = self.advance().literal.clone();
+        let type_params = self.try_parse_type_params();
 
         let mut methods = Vec::new();
         if self.check(TokenKind::LBrace) {
@@ -1984,7 +1985,7 @@ impl Parser {
         InterfaceDecl {
             visibility,
             name,
-            type_params: Vec::new(),
+            type_params,
             methods,
             doc: self.take_doc(),
             span: Span::merge(&start, &self.current().span),
@@ -2723,6 +2724,8 @@ impl Parser {
         let tok = self.advance();
         let primary = if tok.kind == TokenKind::This {
             Expr::This(start)
+        } else if tok.kind == TokenKind::Super {
+            Expr::Super(start)
         } else {
             Expr::Ident(tok.literal.clone(), tok.span)
         };
@@ -2838,6 +2841,32 @@ impl Parser {
                             span: Span::merge(&start, &self.current().span),
                         };
                     }
+                }
+                // 泛型函数调用：`arrayOf<Char>()` 或 `foo<T>(...)`
+                TokenKind::Lt => {
+                    // 判断是否为泛型类型参数（而非小于运算符）
+                    // 启发式：`<` 后跟标识符且再后跟 `>` 或 `,` 视为类型参数
+                    if self.check(TokenKind::Lt) && self.peek_ahead(1).kind == TokenKind::Ident {
+                        let a1 = self.peek_ahead(2);
+                        if a1.kind == TokenKind::Gt || a1.kind == TokenKind::Comma {
+                            // 泛型函数调用：解析类型参数
+                            self.advance(); // <
+                            // 解析类型参数列表（使用 parse_type 而非 parse_expression）
+                            loop {
+                                // 解析类型参数（丢弃，语义分析阶段处理）
+                                self.parse_type();
+                                if !self.check(TokenKind::Comma) {
+                                    break;
+                                }
+                                self.advance();
+                            }
+                            self.expect(TokenKind::Gt);
+                            // 继续解析调用（如果有 `(`）
+                            continue;
+                        }
+                    }
+                    // 不是泛型调用，退出循环
+                    break;
                 }
                 // !! 非空断言运算符（Kotlin 风格：x!! → AssertNonNull）
                 TokenKind::DoubleBang => {

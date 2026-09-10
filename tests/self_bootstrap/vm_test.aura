@@ -1,0 +1,643 @@
+// ════════════════════════════════════════════════════════════
+// VM 自举验证测试 — 行为一致性验证
+// ════════════════════════════════════════════════════════════
+// 验证：
+//   vm.exe   run tests/self_bootstrap/vm_test.aura  > output1.txt
+//   vm2.exe  run tests/self_bootstrap/vm_test.aura  > output2.txt
+//   diff output1.txt output2.txt   →  应无差异
+// ════════════════════════════════════════════════════════════
+
+// ── 辅助函数 ───────────────────────────────────────────────
+
+fun assert(condition: Boolean) {
+    if (!condition) {
+        throw "Assertion failed"
+    }
+}
+
+fun max2(a: Int, b: Int): Int {
+    if (a > b) {
+        return a
+    }
+    return b
+}
+
+fun min2(a: Int, b: Int): Int {
+    if (a < b) {
+        return a
+    }
+    return b
+}
+
+fun fact(n: Int): Int {
+    if (n <= 1) {
+        return 1
+    }
+    return n * fact(n - 1)
+}
+
+fun fib(n: Int): Int {
+    if (n <= 0) {
+        return 0
+    }
+    if (n == 1) {
+        return 1
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+
+fun classify(n: Int): String {
+    if (n < 0) {
+        return "negative"
+    }
+    if (n == 0) {
+        return "zero"
+    }
+    return "positive"
+}
+
+fun safeDivide(a: Int, b: Int): Int {
+    if (b == 0) {
+        return 0
+    }
+    return a / b
+}
+
+struct Point(val x: Int, val y: Int)
+
+struct Coords(val x: Int, val y: Int) {
+    fun manhattan(): Int = x + y
+}
+
+// ════════════════════════════════════════════════════════════
+// 主函数
+// ════════════════════════════════════════════════════════════
+
+fun main() {
+    println("===================================================")
+    println("  VM Bootstrap Verification Test")
+    println("===================================================")
+    println("")
+
+    var passed: Int = 0
+    var total: Int = 0
+
+    // ── 测试 1: 简单计算 ─────────────────────────────────────
+    total = total + 1
+    println("--- 测试 1: 简单计算 ---")
+    try {
+        val r1: Int = 1 + 2
+        assert(r1 == 3)
+        val r1s: String = r1.toString()
+        println("  加法: 1 + 2 = " + r1s)
+
+        val r2: Int = 10 - 4
+        assert(r2 == 6)
+        val r2s: String = r2.toString()
+        println("  减法: 10 - 4 = " + r2s)
+
+        val r3: Int = 3 * 7
+        assert(r3 == 21)
+        val r3s: String = r3.toString()
+        println("  乘法: 3 * 7 = " + r3s)
+
+        val r4: Int = 20 / 4
+        assert(r4 == 5)
+        val r4s: String = r4.toString()
+        println("  除法: 20 / 4 = " + r4s)
+
+        val r5: Int = 17 % 5
+        assert(r5 == 2)
+        val r5s: String = r5.toString()
+        println("  取模: 17 % 5 = " + r5s)
+
+        val r6: Int = 2 + 3 * 4
+        assert(r6 == 14)
+        val r6s: String = r6.toString()
+        println("  混合: 2 + 3 * 4 = " + r6s)
+        passed = passed + 1
+    } catch (e1: String) {
+        println("  FAIL: " + e1)
+    }
+    println("")
+
+    // ── 测试 2: 函数调用 ─────────────────────────────────────
+    total = total + 1
+    println("--- 测试 2: 函数调用 ---")
+    try {
+        val f1: Int = fact(5)
+        assert(f1 == 120)
+        val f1s: String = f1.toString()
+        println("  fact(5) = " + f1s)
+
+        val f2: Int = fact(10)
+        assert(f2 == 3628800)
+        val f2s: String = f2.toString()
+        println("  fact(10) = " + f2s)
+
+        val f3: Int = fib(10)
+        assert(f3 == 55)
+        val f3s: String = f3.toString()
+        println("  fib(10) = " + f3s)
+
+        val f4: Int = fib(15)
+        assert(f4 == 610)
+        val f4s: String = f4.toString()
+        println("  fib(15) = " + f4s)
+        passed = passed + 1
+    } catch (e2: String) {
+        println("  FAIL: " + e2)
+    }
+    println("")
+
+    // ── 测试 3: 递归函数 ─────────────────────────────────────
+    total = total + 1
+    println("--- 测试 3: 递归函数 ---")
+    try {
+        assert(fact(0) == 1)
+        assert(fact(1) == 1)
+        assert(fact(2) == 2)
+        assert(fact(3) == 6)
+        assert(fact(4) == 24)
+        assert(fact(5) == 120)
+        assert(fact(6) == 720)
+        assert(fact(7) == 5040)
+        assert(fact(8) == 40320)
+        assert(fact(9) == 362880)
+        println("  阶乘: 0..9 全部通过")
+
+        assert(fib(0) == 0)
+        assert(fib(1) == 1)
+        assert(fib(2) == 1)
+        assert(fib(3) == 2)
+        assert(fib(4) == 3)
+        assert(fib(5) == 5)
+        assert(fib(6) == 8)
+        assert(fib(7) == 13)
+        assert(fib(8) == 21)
+        assert(fib(9) == 34)
+        assert(fib(10) == 55)
+        println("  斐波那契: 0..10 全部通过")
+        passed = passed + 1
+    } catch (e3: String) {
+        println("  FAIL: " + e3)
+    }
+    println("")
+
+    // ── 测试 4: 字符串操作 ───────────────────────────────────
+    total = total + 1
+    println("--- 测试 4: 字符串操作 ---")
+    try {
+        val s4: String = "Hello" + " " + "World"
+        assert(s4 == "Hello World")
+        println("  拼接: " + s4)
+
+        val n42: Int = 42
+        val numStr: String = n42.toString()
+        assert(numStr == "42")
+        println("  数字转字符串: " + numStr)
+
+        val name: String = "Aura"
+        val version: Int = 1
+        val versionS: String = version.toString()
+        val msg: String = "Hello, " + name + "! Version: " + versionS
+        assert(msg == "Hello, Aura! Version: 1")
+        println("  插值: " + msg)
+
+        val abc: String = "abc"
+        assert(abc.length() == 3)
+        val emptyS: String = ""
+        assert(emptyS.length() == 0)
+        val greeting: String = "Hello, Aura!"
+        assert(greeting.length() == 12)
+        println("  长度: abc=3, empty=0, greeting=12")
+        passed = passed + 1
+    } catch (e4: String) {
+        println("  FAIL: " + e4)
+    }
+    println("")
+
+    // ── 测试 5: 列表操作 ─────────────────────────────────────
+    total = total + 1
+    println("--- 测试 5: 列表操作 ---")
+    try {
+        val list1 = listOf(42)
+        assert(list1.size == 1)
+        assert(list1[0] == 42)
+        val listSize: String = list1.size.toString()
+        val listVal: String = list1[0].toString()
+        println("  单元素列表: size=" + listSize + " [0]=" + listVal)
+
+        var listTotal: Int = 0
+        for (i in 0..4) {
+            val tempList = listOf(i)
+            listTotal = listTotal + tempList.size
+        }
+        assert(listTotal == 5)
+        val listTotS: String = listTotal.toString()
+        println("  循环构建: 5 个列表，总元素=" + listTotS)
+        passed = passed + 1
+    } catch (e5: String) {
+        println("  FAIL: " + e5)
+    }
+    println("")
+
+    // ── 测试 6: 条件表达式 ───────────────────────────────────
+    total = total + 1
+    println("--- 测试 6: 条件表达式 ---")
+    try {
+        assert(max2(5, 3) == 5)
+        assert(max2(3, 5) == 5)
+        assert(max2(5, 5) == 5)
+        val max53: Int = max2(5, 3)
+        val max35: Int = max2(3, 5)
+        val max53s: String = max53.toString()
+        val max35s: String = max35.toString()
+        println("  max2: " + max53s + " " + max35s)
+
+        assert(min2(5, 3) == 3)
+        assert(min2(3, 5) == 3)
+        val min53: Int = min2(5, 3)
+        val min35: Int = min2(3, 5)
+        val min53s: String = min53.toString()
+        val min35s: String = min35.toString()
+        println("  min2: " + min53s + " " + min35s)
+
+        val x6: Int = 7
+        val label: String = if (x6 > 0) { "positive" } else { "non-positive" }
+        assert(label == "positive")
+        val x6s: String = x6.toString()
+        println("  三元: x=" + x6s + " -> " + label)
+
+        assert(classify(-1) == "negative")
+        assert(classify(0) == "zero")
+        assert(classify(1) == "positive")
+        val clNeg: String = classify(-1)
+        val clZero: String = classify(0)
+        val clPos: String = classify(1)
+        println("  分类: " + clNeg + " / " + clZero + " / " + clPos)
+        passed = passed + 1
+    } catch (e6: String) {
+        println("  FAIL: " + e6)
+    }
+    println("")
+
+    // ── 测试 7: for 循环 ─────────────────────────────────────
+    total = total + 1
+    println("--- 测试 7: for 循环 ---")
+    try {
+        var sum1: Int = 0
+        for (i1 in 0..9) {
+            sum1 = sum1 + i1
+        }
+        assert(sum1 == 45)
+        val sum1s: String = sum1.toString()
+        println("  范围迭代: 0..9 求和 = " + sum1s)
+
+        var cnt1: Int = 0
+        for (i2 in 0..4) {
+            cnt1 = cnt1 + 1
+        }
+        assert(cnt1 == 5)
+        val cnt1s: String = cnt1.toString()
+        println("  计数: " + cnt1s)
+
+        var prod1: Int = 1
+        for (i3 in 1..5) {
+            prod1 = prod1 * i3
+        }
+        assert(prod1 == 120)
+        val prod1s: String = prod1.toString()
+        println("  累乘: 1..5 积 = " + prod1s)
+
+        var matSum: Int = 0
+        for (r1 in 0..2) {
+            for (c1 in 0..2) {
+                matSum = matSum + (r1 * 3 + c1)
+            }
+        }
+        assert(matSum == 36)
+        val matSums: String = matSum.toString()
+        println("  嵌套: 3x3 矩阵和 = " + matSums)
+
+        var brkSum: Int = 0
+        for (i4 in 1..10) {
+            if (i4 == 5) {
+                break
+            }
+            brkSum = brkSum + i4
+        }
+        assert(brkSum == 10)
+        val brkSums: String = brkSum.toString()
+        println("  break: 1..10 (break@5) = " + brkSums)
+
+        var oddSum: Int = 0
+        for (i5 in 1..10) {
+            if (i5 % 2 == 0) {
+                continue
+            }
+            oddSum = oddSum + i5
+        }
+        assert(oddSum == 25)
+        val oddSums: String = oddSum.toString()
+        println("  continue: 1..10 奇数和 = " + oddSums)
+        passed = passed + 1
+    } catch (e7: String) {
+        println("  FAIL: " + e7)
+    }
+    println("")
+
+    // ── 测试 8: while 循环 ───────────────────────────────────
+    total = total + 1
+    println("--- 测试 8: while 循环 ---")
+    try {
+        var wCnt: Int = 0
+        while (wCnt < 5) {
+            wCnt = wCnt + 1
+        }
+        assert(wCnt == 5)
+        val wCnts: String = wCnt.toString()
+        println("  计数: " + wCnts)
+
+        var wX: Int = 10
+        while (wX > 0) {
+            wX = wX - 1
+        }
+        assert(wX == 0)
+        val wXs: String = wX.toString()
+        println("  递减: " + wXs)
+
+        var wY: Int = 0
+        do {
+            wY = wY + 1
+        } while (wY < 3)
+        assert(wY == 3)
+        val wYs: String = wY.toString()
+        println("  do-while: " + wYs)
+
+        var wOnce: Int = 0
+        do {
+            wOnce = wOnce + 1
+        } while (false)
+        assert(wOnce == 1)
+        val wOnces: String = wOnce.toString()
+        println("  do-while(false): " + wOnces)
+
+        var wZ: Int = 0
+        while (true) {
+            wZ = wZ + 1
+            if (wZ == 7) {
+                break
+            }
+        }
+        assert(wZ == 7)
+        val wZs: String = wZ.toString()
+        println("  无限+break: " + wZs)
+
+        var wTot: Int = 0
+        var wN: Int = 1
+        while (wN <= 10) {
+            wTot = wTot + wN
+            wN = wN + 1
+        }
+        assert(wTot == 55)
+        val wTots: String = wTot.toString()
+        println("  累加: 1..10 和 = " + wTots)
+        passed = passed + 1
+    } catch (e8: String) {
+        println("  FAIL: " + e8)
+    }
+    println("")
+
+    // ── 测试 9: 变量作用域 ───────────────────────────────────
+    total = total + 1
+    println("--- 测试 9: 变量作用域 ---")
+    try {
+        val outer: Int = 10
+        {
+            val inner: Int = 20
+            assert(outer + inner == 30)
+        }
+        assert(outer == 10)
+        val outerS: String = outer.toString()
+        println("  块作用域: outer=" + outerS)
+        passed = passed + 1
+    } catch (e9: String) {
+        println("  FAIL: " + e9)
+    }
+    println("")
+
+    // ── 测试 10: 错误处理 ────────────────────────────────────
+    total = total + 1
+    println("--- 测试 10: 错误处理 ---")
+    try {
+        var tResult: Int = 0
+        try {
+            tResult = 100
+        } finally {
+            // finally 执行
+        }
+        assert(tResult == 100)
+        val tResS: String = tResult.toString()
+        println("  try-finally: result=" + tResS)
+
+        var caught: Boolean = false
+        try {
+            throw "test error"
+        } catch (e) {
+            caught = true
+            println("  Caught: " + e)
+        }
+        assert(caught)
+        println("  try-catch: 捕获成功")
+
+        assert(safeDivide(10, 2) == 5)
+        assert(safeDivide(10, 0) == 0)
+        val sd1: Int = safeDivide(10, 2)
+        val sd2: Int = safeDivide(10, 0)
+        val sd1s: String = sd1.toString()
+        val sd2s: String = sd2.toString()
+        println("  安全除法: 10/2=" + sd1s + " 10/0=" + sd2s)
+        passed = passed + 1
+    } catch (e10: String) {
+        println("  FAIL: " + e10)
+    }
+    println("")
+
+    // ── 测试 11: 字符串比较 ──────────────────────────────────
+    total = total + 1
+    println("--- 测试 11: 字符串比较 ---")
+    try {
+        val strA: String = "hello"
+        val strB: String = "hello"
+        assert(strA == strB)
+        println("  相等: hello == hello")
+
+        val strC: String = "world"
+        assert(strA != strC)
+        println("  不等: hello != world")
+
+        val strD: String = ""
+        assert(strA != strD)
+        assert(strD == "")
+        println("  空串: hello != empty")
+        passed = passed + 1
+    } catch (e11: String) {
+        println("  FAIL: " + e11)
+    }
+    println("")
+
+    // ── 测试 12: when 表达式 ──────────────────────────────────
+    total = total + 1
+    println("--- 测试 12: when 表达式 ---")
+    try {
+        val score: Int = 75
+        val scoreResult: String = when {
+            score >= 90 -> "Excellent"
+            score >= 70 -> "Good"
+            score >= 50 -> "Pass"
+            else -> "Fail"
+        }
+        assert(scoreResult == "Good")
+        val scoreS: String = score.toString()
+        println("  条件when: score=" + scoreS + " -> " + scoreResult)
+
+        val day: Int = 3
+        val dayName: String = when (day) {
+            1 -> "Monday"
+            2 -> "Tuesday"
+            3 -> "Wednesday"
+            4 -> "Thursday"
+            5 -> "Friday"
+            6 -> "Saturday"
+            7 -> "Sunday"
+            else -> "Invalid"
+        }
+        assert(dayName == "Wednesday")
+        val dayS: String = day.toString()
+        println("  主体when: day=" + dayS + " -> " + dayName)
+
+        val temp: Int = 35
+        val weather: String = when (temp) {
+            in 0..15 -> "Cold"
+            in 16..25 -> "Cool"
+            in 26..35 -> "Warm"
+            else -> "Extreme"
+        }
+        assert(weather == "Warm")
+        val tempS: String = temp.toString()
+        println("  范围when: temp=" + tempS + " -> " + weather)
+        passed = passed + 1
+    } catch (e12: String) {
+        println("  FAIL: " + e12)
+    }
+    println("")
+
+    // ── 测试 13: 可空类型 ─────────────────────────────────────
+    total = total + 1
+    println("--- 测试 13: 可空类型 ---")
+    try {
+        val n13: Int? = null
+        val safe13: Int = n13 ?: 0
+        assert(safe13 == 0)
+        val safe13s: String = safe13.toString()
+        println("  可空Int -> Elvis: " + safe13s)
+
+        val some13: Int? = 42
+        val safe13b: Int = some13 ?: 0
+        assert(safe13b == 42)
+        val safe13bs: String = safe13b.toString()
+        println("  有值可空Int -> Elvis: " + safe13bs)
+
+        val ns13: String? = null
+        val safeStr: String = ns13 ?: "default"
+        assert(safeStr == "default")
+        println("  可空String -> Elvis: " + safeStr)
+
+        val someStr: String? = "present"
+        val safeStr2: String = someStr ?: "default"
+        assert(safeStr2 == "present")
+        println("  有值可空String -> Elvis: " + safeStr2)
+        passed = passed + 1
+    } catch (e13: String) {
+        println("  FAIL: " + e13)
+    }
+    println("")
+
+    // ── 测试 14: 结构体 ──────────────────────────────────────
+    total = total + 1
+    println("--- 测试 14: 结构体 ---")
+    try {
+        val p1 = Point(1, 2)
+        val p2 = Point(3, 4)
+        assert(p1.x == 1 && p1.y == 2)
+        assert(p2.x == 3 && p2.y == 4)
+        val p1x: String = p1.x.toString()
+        val p1y: String = p1.y.toString()
+        println("  结构体: Point(" + p1x + ", " + p1y + ")")
+
+        val co1 = Coords(3, 4)
+        assert(co1.manhattan() == 7)
+        val manS: String = co1.manhattan().toString()
+        println("  结构体方法: manhattan=" + manS)
+        passed = passed + 1
+    } catch (e14: String) {
+        println("  FAIL: " + e14)
+    }
+    println("")
+
+    // ── 测试 15: 综合测试 ─────────────────────────────────────
+    total = total + 1
+    println("--- 测试 15: 综合测试 ---")
+    try {
+        var compResult: Int = 0
+        for (i15 in 0..99) {
+            compResult = compResult + i15 * 2 - i15 / 3 + (i15 % 5)
+        }
+        val compResS: String = compResult.toString()
+        println("  综合运算(0..99): " + compResS)
+
+        var compCnt: Int = 0
+        for (i16 in 0..4) {
+            for (j16 in 0..4) {
+                compCnt = compCnt + 1
+            }
+        }
+        assert(compCnt == 25)
+        val compCntS: String = compCnt.toString()
+        println("  双重循环: 5x5 = " + compCntS)
+
+        var evenTotal: Int = 0
+        var oddTotal: Int = 0
+        for (i17 in 0..9) {
+            if (i17 % 2 == 0) {
+                evenTotal = evenTotal + i17
+            } else {
+                oddTotal = oddTotal + i17
+            }
+        }
+        assert(evenTotal == 20)
+        assert(oddTotal == 25)
+        val evenS: String = evenTotal.toString()
+        val oddS: String = oddTotal.toString()
+        println("  条件累加: 偶数=" + evenS + " 奇数=" + oddS)
+        passed = passed + 1
+    } catch (e15: String) {
+        println("  FAIL: " + e15)
+    }
+    println("")
+
+    // ── 总结 ──────────────────────────────────────────────────
+    val passedS: String = passed.toString()
+    val totalS: String = total.toString()
+    println("===================================================")
+    println("  测试结果: " + passedS + "/" + totalS + " 通过")
+    if (passed == total) {
+        println("  全部通过！VM 行为一致性验证成功")
+    } else {
+        val failCnt: Int = total - passed
+        val failS: String = failCnt.toString()
+        println("  失败: " + failS + " 个")
+    }
+    println("===================================================")
+}

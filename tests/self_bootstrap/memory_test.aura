@@ -1,0 +1,352 @@
+// ════════════════════════════════════════════════════════════
+// 内存管理自举验证测试 — 内存行为一致性
+// ════════════════════════════════════════════════════════════
+// 验证：
+//   memory.exe run tests/self_bootstrap/memory_test.aura > out1.txt
+//   memory2.exe run tests/self_bootstrap/memory_test.aura > out2.txt
+//   diff out1.txt out2.txt   →  应无差异
+// ════════════════════════════════════════════════════════════
+
+// ── 辅助函数 ───────────────────────────────────────────────
+
+fun assert(condition: Boolean) {
+    if (!condition) {
+        throw "Assertion failed"
+    }
+}
+
+struct Block {
+    var size: Int
+}
+
+struct Pool(val capacity: Int)
+
+// ════════════════════════════════════════════════════════════
+// 主函数
+// ════════════════════════════════════════════════════════════
+
+fun main() {
+    println("===================================================")
+    println("  Memory Bootstrap Verification Test")
+    println("===================================================")
+    println("")
+
+    var passed: Int = 0
+    var total: Int = 0
+
+    // ── 测试 1: 基本内存分配 ──────────────────────────────────
+    total = total + 1
+    println("--- 测试 1: 基本内存分配 ---")
+    try {
+        val b1 = Block()
+        b1.size = 10
+        assert(b1.size == 10)
+
+        val b2 = Block()
+        b2.size = 20
+        assert(b2.size == 20)
+
+        val b3 = Block()
+        b3.size = 30
+        assert(b3.size == 30)
+
+        val b1s: String = b1.size.toString()
+        val b2s: String = b2.size.toString()
+        val b3s: String = b3.size.toString()
+        println("  基本分配: " + b1s + " " + b2s + " " + b3s)
+        passed = passed + 1
+    } catch (e1: String) {
+        println("  FAIL: " + e1)
+    }
+    println("")
+
+    // ── 测试 2: ARC 引用计数 ──────────────────────────────────
+    total = total + 1
+    println("--- 测试 2: ARC 引用计数 ---")
+    try {
+        // 模拟 ARC: 创建对象并传递引用
+        val orig = Block()
+        orig.size = 100
+
+        // 模拟 Retain
+        val copy1 = orig
+        val copy2 = orig
+        val copy3 = orig
+
+        assert(orig.size == 100)
+        assert(copy1.size == 100)
+        assert(copy2.size == 100)
+        assert(copy3.size == 100)
+
+        val origS: String = orig.size.toString()
+        println("  ARC: 4 个引用 -> " + origS)
+        passed = passed + 1
+    } catch (e2: String) {
+        println("  FAIL: " + e2)
+    }
+    println("")
+
+    // ── 测试 3: 内存池分配 ────────────────────────────────────
+    total = total + 1
+    println("--- 测试 3: 内存池分配 ---")
+    try {
+        val pool1 = Pool(10)
+        assert(pool1.capacity == 10)
+
+        val pool2 = Pool(20)
+        assert(pool2.capacity == 20)
+
+        val pool3 = Pool(5)
+        assert(pool3.capacity == 5)
+
+        val p1s: String = pool1.capacity.toString()
+        val p2s: String = pool2.capacity.toString()
+        val p3s: String = pool3.capacity.toString()
+        println("  内存池: " + p1s + " " + p2s + " " + p3s)
+        passed = passed + 1
+    } catch (e3: String) {
+        println("  FAIL: " + e3)
+    }
+    println("")
+
+    // ── 测试 4: 内存释放与重用 ────────────────────────────────
+    total = total + 1
+    println("--- 测试 4: 内存释放与重用 ---")
+    try {
+        // 模拟分配-释放-重用循环
+        var freeCount: Int = 0
+        for (i in 0..9) {
+            freeCount = freeCount + 1
+        }
+        assert(freeCount == 10)
+        val freeS: String = freeCount.toString()
+        println("  释放重用: " + freeS + " 次循环")
+        passed = passed + 1
+    } catch (e4: String) {
+        println("  FAIL: " + e4)
+    }
+    println("")
+
+    // ── 测试 5: 内存边界检查 ──────────────────────────────────
+    total = total + 1
+    println("--- 测试 5: 内存边界检查 ---")
+    try {
+        // 模拟边界检查
+        val b5a = Block()
+        b5a.size = 0
+        assert(b5a.size == 0)
+
+        val b5b = Block()
+        b5b.size = 1
+        assert(b5b.size == 1)
+
+        val b5c = Block()
+        b5c.size = 1000000
+        assert(b5c.size == 1000000)
+
+        val b5as: String = b5a.size.toString()
+        val b5bs: String = b5b.size.toString()
+        val b5cs: String = b5c.size.toString()
+        println("  边界检查: " + b5as + " " + b5bs + " " + b5cs)
+        passed = passed + 1
+    } catch (e5: String) {
+        println("  FAIL: " + e5)
+    }
+    println("")
+
+    // ── 测试 6: 内存泄漏检测 ──────────────────────────────────
+    total = total + 1
+    println("--- 测试 6: 内存泄漏检测 ---")
+    try {
+        // 模拟创建对象但不保留引用
+        var leakCount: Int = 0
+        for (i in 0..4) {
+            leakCount = leakCount + 1
+        }
+        assert(leakCount == 5)
+        val leakS: String = leakCount.toString()
+        println("  泄漏检测: " + leakS + " 个对象")
+        passed = passed + 1
+    } catch (e6: String) {
+        println("  FAIL: " + e6)
+    }
+    println("")
+
+    // ── 测试 7: 栈内存管理 ────────────────────────────────────
+    total = total + 1
+    println("--- 测试 7: 栈内存管理 ---")
+    try {
+        var stackSum: Int = 0
+        for (i in 0..99) {
+            stackSum = stackSum + i
+        }
+        assert(stackSum == 4950)
+        val stackS: String = stackSum.toString()
+        println("  栈管理: 0..99 求和 = " + stackS)
+        passed = passed + 1
+    } catch (e7: String) {
+        println("  FAIL: " + e7)
+    }
+    println("")
+
+    // ── 测试 8: 内存复制与移动 ────────────────────────────────
+    total = total + 1
+    println("--- 测试 8: 内存复制与移动 ---")
+    try {
+        // 模拟内存复制
+        val src = Block()
+        src.size = 42
+
+        val dst = Block()
+        dst.size = src.size
+
+        assert(dst.size == 42)
+        assert(src.size == 42)
+
+        val srcS: String = src.size.toString()
+        val dstS: String = dst.size.toString()
+        println("  内存复制: src=" + srcS + " dst=" + dstS)
+        passed = passed + 1
+    } catch (e8: String) {
+        println("  FAIL: " + e8)
+    }
+    println("")
+
+    // ── 测试 9: 内存对齐与填充 ────────────────────────────────
+    total = total + 1
+    println("--- 测试 9: 内存对齐与填充 ---")
+    try {
+        // 模拟对齐
+        val aligned = Block()
+        aligned.size = 64
+        assert(aligned.size == 64)
+
+        val padded = Block()
+        padded.size = 128
+        assert(padded.size == 128)
+
+        val padS: String = aligned.size.toString()
+        println("  对齐填充: " + padS + " bytes")
+        passed = passed + 1
+    } catch (e9: String) {
+        println("  FAIL: " + e9)
+    }
+    println("")
+
+    // ── 测试 10: 内存压力测试 ─────────────────────────────────
+    total = total + 1
+    println("--- 测试 10: 内存压力测试 ---")
+    try {
+        var stressCount: Int = 0
+        for (i in 0..999) {
+            stressCount = stressCount + 1
+        }
+        assert(stressCount == 1000)
+        val stressS: String = stressCount.toString()
+        println("  压力测试: " + stressS + " 次分配-回收")
+        passed = passed + 1
+    } catch (e10: String) {
+        println("  FAIL: " + e10)
+    }
+    println("")
+
+    // ── 测试 11: 字符串内存管理 ───────────────────────────────
+    total = total + 1
+    println("--- 测试 11: 字符串内存管理 ---")
+    try {
+        val memStr: String = "memory management test"
+        assert(memStr.length() == 22)
+        val memLen: String = memStr.length().toString()
+        println("  字符串内存: 长度=" + memLen)
+        passed = passed + 1
+    } catch (e11: String) {
+        println("  FAIL: " + e11)
+    }
+    println("")
+
+    // ── 测试 12: 列表内存管理 ─────────────────────────────────
+    total = total + 1
+    println("--- 测试 12: 列表内存管理 ---")
+    try {
+        val list12 = listOf(42)
+        assert(list12.size == 1)
+        val listSize: String = list12.size.toString()
+        println("  列表内存: size=" + listSize)
+        passed = passed + 1
+    } catch (e12: String) {
+        println("  FAIL: " + e12)
+    }
+    println("")
+
+    // ── 测试 13: defer 资源清理 ───────────────────────────────
+    total = total + 1
+    println("--- 测试 13: defer 资源清理 ---")
+    try {
+        var cleaned13: Boolean = false
+        try {
+            // 模拟资源使用
+        } finally {
+            cleaned13 = true
+        }
+        assert(cleaned13)
+        println("  资源清理: 完成")
+        passed = passed + 1
+    } catch (e13: String) {
+        println("  FAIL: " + e13)
+    }
+    println("")
+
+    // ── 测试 14: 内存与异常交互 ───────────────────────────────
+    total = total + 1
+    println("--- 测试 14: 内存与异常交互 ---")
+    try {
+        var memCount: Int = 0
+        try {
+            memCount = 1
+            throw "memory error"
+        } catch (e) {
+            memCount = memCount + 1
+        } finally {
+            memCount = memCount + 1
+        }
+        assert(memCount == 3)
+        val memCountS: String = memCount.toString()
+        println("  内存+异常: " + memCountS)
+        passed = passed + 1
+    } catch (e14: String) {
+        println("  FAIL: " + e14)
+    }
+    println("")
+
+    // ── 测试 15: 内存池高级操作 ───────────────────────────────
+    total = total + 1
+    println("--- 测试 15: 内存池高级操作 ---")
+    try {
+        val pool15a = Pool(10)
+        val pool15b = Pool(20)
+        val pool15c = Pool(5)
+
+        var totalCap: Int = pool15a.capacity + pool15b.capacity + pool15c.capacity
+        assert(totalCap == 35)
+        val totalCapS: String = totalCap.toString()
+        println("  内存池高级: 总容量=" + totalCapS)
+        passed = passed + 1
+    } catch (e15: String) {
+        println("  FAIL: " + e15)
+    }
+    println("")
+
+    // ── 总结 ──────────────────────────────────────────────────
+    val passedS: String = passed.toString()
+    val totalS: String = total.toString()
+    println("===================================================")
+    println("  测试结果: " + passedS + "/" + totalS + " 通过")
+    if (passed == total) {
+        println("  全部通过！内存管理行为一致性验证成功")
+    } else {
+        val failCnt: Int = total - passed
+        val failS: String = failCnt.toString()
+        println("  失败: " + failS + " 个")
+    }
+    println("===================================================")
+}

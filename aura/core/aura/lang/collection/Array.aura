@@ -1,0 +1,26 @@
+// aura:///aura/lang/collection/Array.aura
+// 集合包：固定大小数组接口
+
+/// 固定大小数组接口 Array<T>。
+interface Array<T> {
+    /// 数组元素数量
+    fun getSize(): Int
+
+    /// 按下标获取元素
+    fun get(index: Int): T
+
+    /// 按下标设置元素
+    fun set(index: Int, value: T): Unit
+
+    /// 检查数组是否包含指定元素
+    fun contains(item: T): Boolean
+
+    /// 查找元素的索引（未找到返回 -1）
+    fun indexOf(item: T): Int
+
+    /// 转换为列表
+    fun toList(): List<T>
+
+    /// 转换为字符串表示
+    fun toString(): String
+}

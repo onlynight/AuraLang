@@ -231,7 +231,17 @@ struct MirBuilder {
 }
 
 impl MirBuilder {
-    fn new(param_count: usize) -> Self {
+    /// 创建 MIR 构建器。
+    ///
+    /// `first_free_reg` 是**第一个可用的临时槽编号**，必须避让参数槽，
+    /// 否则第一个临时值会覆盖最后一个参数（历史 bug：`&&` 取值错误、
+    /// `x as Int` 改写形参本身，均由此产生）。
+    ///
+    /// 槽位约定（与 `Frame::new` 一致）：
+    /// - 顶层函数：参数占 `1..=param_count`（槽 0 保留给函数指针），
+    ///   因此传入 `param_count + 1`；
+    /// - 闭包：参数占 `0..param_count`，因此传入 `param_count`。
+    fn new(first_free_reg: usize) -> Self {
         MirBuilder {
             blocks: vec![
                 BasicBlock {
@@ -241,7 +251,7 @@ impl MirBuilder {
                 },
             ],
             current: 0,
-            next_reg: param_count,
+            next_reg: first_free_reg,
             scopes: vec![HashMap::new()],
             loop_stack: vec![],
             closures: Vec::new(),
@@ -1046,12 +1056,14 @@ impl MirBuilder {
 
 /// 将单个 HIR 函数降级为 MIR
 pub fn lower_function(f: &HirFunction, ctx: &mut LowerCtx, hir: &HirProgram) -> MirFunction {
-    let param_slots: Vec<usize> = (0..f.params.len()).collect();
-    let mut builder = MirBuilder::new(f.params.len());
+    // 参数槽位从 1 开始（0 是函数指针）
+    let param_slots: Vec<usize> = (1..=f.params.len()).collect();
+    // 首个临时槽必须从参数槽之后开始，否则会覆盖最后一个参数
+    let mut builder = MirBuilder::new(f.params.len() + 1);
     builder.hir_program = Some(hir.clone());
-    // 声明参数到作用域
+    // 声明参数到作用域（slot 从 1 开始）
     for (i, p) in f.params.iter().enumerate() {
-        builder.declare(&p.name, i);
+        builder.declare(&p.name, i + 1);
     }
     if !f.is_native && !f.body.stmts.is_empty() {
         builder.lower_block(&f.body, ctx);

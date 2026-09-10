@@ -1,0 +1,11 @@
+fun testBody(): Int {
+    var result: Int = 0
+    var i: Int = 0
+    while (i < 10) {
+        if (i > 5) {
+            result = result + i
+        }
+        i = i + 1
+    }
+    return result
+}

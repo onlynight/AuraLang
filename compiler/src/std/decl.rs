@@ -37,6 +37,10 @@ pub const PRELUDE_NAMES: &[&str] = &[
     "intToPtr",
     "makeCallback",
     "listOf",
+    "mutableListOf",
+    "arrayOf",
+    "min",
+    "max",
     // 类型查询与内省（prelu，免 import）
     "typeof",
     "isNull",

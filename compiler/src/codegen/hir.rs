@@ -696,7 +696,10 @@ fn build_import_resolution(imports: &[ImportDecl]) -> ImportResolution {
         match &imp.alias {
             Some(alias) if is_function => {
                 // import aura.lang.std.Coroutine.spawn as s → alias "s" → full name
-                r.alias_to_full.insert(alias.clone(), path.clone());
+                // For short paths like aura.math.sqrt, resolve module → class name
+                let resolved_path =
+                    if is_new_scheme { path.clone() } else { resolve_function_path(path) };
+                r.alias_to_full.insert(alias.clone(), resolved_path);
             }
             Some(alias) if is_new_scheme && class_name.is_some() && !imp.wildcard => {
                 // import aura.lang.std.Coroutine as cc → alias → module path
@@ -705,12 +708,15 @@ fn build_import_resolution(imports: &[ImportDecl]) -> ImportResolution {
             Some(alias) if imp.wildcard => {
                 // import aura.lang.std.Coroutine.* as cc → alias → module path
                 // 同时注册短名供通配调用使用
-                let short_names = crate::std::decl::module_functions(path);
+                let resolved_path = std_module_to_class_name(path)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| path.clone());
+                let short_names = crate::std::decl::module_functions(&resolved_path);
                 for sn in short_names {
-                    let full = format!("{}.{}", path, sn);
+                    let full = format!("{}.{}", resolved_path, sn);
                     r.short_to_full.insert(sn, full);
                 }
-                r.alias_to_module.insert(alias.clone(), path.clone());
+                r.alias_to_module.insert(alias.clone(), resolved_path);
             }
             Some(alias) => {
                 // 旧命名：import aura.concurrent as cc
@@ -719,9 +725,12 @@ fn build_import_resolution(imports: &[ImportDecl]) -> ImportResolution {
             None if imp.wildcard => {
                 // import aura.lang.std.Coroutine.* → 所有函数短名 → 完整名
                 // 同时：新命名下注册 "Coroutine.spawn" 形式供 check_call 使用
-                let short_names = crate::std::decl::module_functions(path);
+                let resolved_path = std_module_to_class_name(path)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| path.clone());
+                let short_names = crate::std::decl::module_functions(&resolved_path);
                 for sn in short_names {
-                    let full = format!("{}.{}", path, sn);
+                    let full = format!("{}.{}", resolved_path, sn);
                     r.short_to_full.insert(sn.clone(), full.clone());
                     // Class-name style: "Coroutine.spawn"
                     if let Some(cn) = &class_name {
@@ -2394,6 +2403,27 @@ fn desugar_fn(f: &FnDecl) -> HirFunction {
     desugar_fn_with_self(f, false, None)
 }
 
+/// 取 `if` 语句分支块所能提供的值表达式。
+///
+/// - 单条 `expr` 语句 → 该表达式
+/// - 单条 `return expr` → 该表达式
+/// - 多语句块 → 原样包装为 `HirExpr::Block`（保持既有近似语义）
+/// - 其他情况（空块、无值 `return`、赋值、循环等）→ `None`，表示该分支无法
+///   作为值使用，调用方必须放弃「`if` 语句 → 返回表达式」的改写。
+fn branch_value_of(b: &HirBlock) -> Option<HirExpr> {
+    if b.stmts.is_empty() {
+        return None;
+    }
+    if b.stmts.len() > 1 {
+        return Some(HirExpr::Block(b.clone()));
+    }
+    match &b.stmts[0] {
+        HirStmt::Expr(e) => Some(e.clone()),
+        HirStmt::Return(Some(e)) => Some(e.clone()),
+        _ => None,
+    }
+}
+
 /// 降级函数，可选添加隐式 self 参数（方法需要）；`name_override` 供类方法使用
 fn desugar_fn_with_self(f: &FnDecl, is_method: bool, name_override: Option<String>) -> HirFunction {
     let mut body = match &f.body {
@@ -2405,9 +2435,38 @@ fn desugar_fn_with_self(f: &FnDecl, is_method: bool, name_override: Option<Strin
     // 表达式体函数：`fun f() = expr` 被解析为仅含一条表达式语句的块，
     // 需将该表达式作为返回值（Kotlin 语义：块末表达式即返回值）。
     if body.stmts.len() == 1 {
+        // 处理单条表达式语句
         if let HirStmt::Expr(e) = &body.stmts[0] {
             let e = e.clone();
             body.stmts = vec![HirStmt::Return(Some(e))];
+        }
+        // 处理单条 if 语句（作为表达式使用时，转换为 Return）
+        else if let HirStmt::If {
+            cond,
+            then_b,
+            else_b,
+        } = &body.stmts[0]
+        {
+            let cond = cond.clone();
+            let then_e = branch_value_of(then_b);
+            let else_e = match else_b {
+                Some(b) => branch_value_of(b),
+                // 无 else 分支：保持原有近似语义（条件不成立时返回 null）
+                None => Some(HirExpr::Lit(Literal::Null)),
+            };
+            // 仅当两个分支都能提供值时才转换为 Return(If)。
+            // 否则保留原 if 语句逐条执行——历史上这里把
+            // `if (c) { return a } else { return b }` 的分支误判为 null，
+            // 导致函数返回 null（vm_tests::if_else_expression 失败）。
+            if let (Some(then_e), Some(else_e)) = (then_e, else_e) {
+                body.stmts = vec![
+                    HirStmt::Return(Some(HirExpr::If {
+                        cond: Box::new(cond),
+                        then_e: Box::new(then_e),
+                        else_e: Box::new(else_e),
+                    })),
+                ];
+            }
         }
     }
     let mut params: Vec<HirParam> = Vec::new();
@@ -3474,6 +3533,36 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     name,
                     ..
                 } => {
+                    // super.name() → 父类方法直接调用（绕过虚分派）
+                    if matches!(object.as_ref(), Expr::Super(_)) {
+                        let mut all_args = vec![HirExpr::Var("self".to_string())];
+                        for a in args {
+                            all_args.push(desugar_expr(a));
+                        }
+                        let table = CLASS_TABLE.with(|t| t.borrow().clone());
+                        let current_class =
+                            CLASS_CTX.with(|c| c.borrow().clone()).map(|ctx| ctx.class);
+                        if let Some(ref class_name) = current_class {
+                            if let Some(entry) = table.get(class_name) {
+                                if let Some(parent) = entry.superclass.clone() {
+                                    if let Some(parent_entry) = table.get(&parent) {
+                                        if parent_entry.methods.contains(name) {
+                                            return HirExpr::Call {
+                                                callee: format!("{}.{}", parent, name),
+                                                args: all_args,
+                                            };
+                                        }
+                                    }
+                                }
+                            }
+                            // 回退：找不到父类方法时，降级为当前类方法调用
+                            return HirExpr::Call {
+                                callee: format!("{}.{}", class_name, name),
+                                args: all_args,
+                            };
+                        }
+                        // 无类上下文时，回退为普通方法调用
+                    }
                     // P15: List 高阶方法（filter/map/take）→ 内联循环块
                     if matches!(name.as_str(), "filter" | "map" | "take") {
                         if let Some(ty) = lookup_expr_type(object) {
@@ -3485,16 +3574,19 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     // 检查模块别名：import aura.concurrent as cc + cc.spawn(42)
                     if let Expr::Ident(module_name, _) = object.as_ref() {
                         if let Some(am) = lookup_import_module_alias(module_name) {
+                            let resolved = resolve_function_path(&format!("{}.{}", am, name));
                             return HirExpr::Call {
-                                callee: format!("{}.{}", am, name),
+                                callee: resolved,
                                 args: args.iter().map(desugar_expr).collect(),
                             };
                         }
                         // 检查是否为标准库模块调用（支持嵌套：aura.lang.std.Coroutine.spawn）
                         if is_std_module(module_name) {
-                            let full_module = full_package_name(module_name);
+                            let class_name = std_module_to_class_name(module_name)
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| full_package_name(module_name));
                             return HirExpr::Call {
-                                callee: format!("{}.{}", full_module, name),
+                                callee: format!("{}.{}", class_name, name),
                                 args: args.iter().map(desugar_expr).collect(),
                             };
                         }
@@ -3516,10 +3608,11 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                                 };
                             }
                             if is_std_module(&format!("aura.{}", inner_name)) {
-                                let full_module = full_package_name(module_name);
-                                let nested_name = format!("{}.{}", inner_name, name);
+                                let class_name =
+                                    std_module_to_class_name(&format!("aura.{}", inner_name))
+                                        .unwrap_or("aura.lang.std.Builtin");
                                 return HirExpr::Call {
-                                    callee: format!("{}.{}", full_module, nested_name),
+                                    callee: format!("{}.{}", class_name, name),
                                     args: args.iter().map(desugar_expr).collect(),
                                 };
                             }
@@ -3957,6 +4050,8 @@ fn desugar_expr(e: &Expr) -> HirExpr {
         // P8: async 块 — 直接求值块体（值为块体值）
         Expr::AsyncBlock { body, .. } => desugar_expr(body),
         Expr::This(_) => HirExpr::Var("self".to_string()),
+        // super 引用：作为独立表达式时降级为 self（不应单独使用）
+        Expr::Super(_) => HirExpr::Var("self".to_string()),
         // P10.9: select 多路复用 — 降级为 `aura.lang.std.Channel.select(ch1, ch2)` 原生函数调用（最多 2 通道）
         Expr::Select {
             branches, ..
@@ -4285,6 +4380,62 @@ fn full_package_name(module: &str) -> String {
     } else {
         format!("aura.{}", module)
     }
+}
+
+/// 将短模块名映射到完整原生函数类名（如 `aura.string` → `aura.lang.std.String`）
+fn std_module_to_class_name(module: &str) -> Option<&'static str> {
+    let mod_name = module.strip_prefix("aura.").unwrap_or(module);
+    Some(match mod_name {
+        "string" => "aura.lang.std.String",
+        "math" => "aura.lang.std.Math",
+        "io" => "aura.lang.std.IO",
+        "collections" => "aura.lang.std.Collections",
+        "fs" => "aura.lang.std.FileSystem",
+        "net" => "aura.lang.std.Network",
+        "json" => "aura.lang.std.Json",
+        "time" => "aura.lang.std.Time",
+        "test" => "aura.lang.std.Test",
+        "builtin" => "aura.lang.std.Builtin",
+        "env" => "aura.lang.std.Env",
+        "process" => "aura.lang.std.Process",
+        "random" => "aura.lang.std.Random",
+        "encoding" => "aura.lang.std.Encoding",
+        "ascii" => "aura.lang.std.Ascii",
+        "console" => "aura.lang.std.Console",
+        "path" => "aura.lang.std.Path",
+        "assert" => "aura.lang.std.Assert",
+        "iter" => "aura.lang.std.Iter",
+        "concurrent" => "aura.lang.std.Coroutine",
+        _ => return None,
+    })
+}
+
+/// 将短函数路径解析为完整原生函数名（如 `aura.math.sqrt` → `aura.lang.std.Math.sqrt`）
+fn resolve_function_path(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("aura.") {
+        let parts: Vec<&str> = rest.splitn(2, '.').collect();
+        if parts.len() == 2 {
+            let module = parts[0];
+            let func = parts[1];
+            // 并发模块特殊处理：newChannel/channelSend/channelRecv → Channel 类
+            if module == "concurrent" {
+                let channel_class = match func {
+                    "newChannel" | "channelSend" | "channelRecv" | "channelTryRecv" | "select"
+                    | "selectTimeout" | "newTcpChannel" | "tcpChannelSend" => {
+                        "aura.lang.std.Channel"
+                    }
+                    "spawnActor" | "supervise" | "actorAlive" | "send" | "spawnActorProcess"
+                    | "processActorAlive" | "killProcessActor" => "aura.lang.std.Actor",
+                    _ => "aura.lang.std.Coroutine",
+                };
+                return format!("{}.{}", channel_class, func);
+            }
+            if let Some(class_name) = std_module_to_class_name(&format!("aura.{}", module)) {
+                return format!("{}.{}", class_name, func);
+            }
+        }
+    }
+    path.to_string()
 }
 
 /// 返回所有标准库原生函数的签名信息：(函数全名, [(参数名, 参数类型)])

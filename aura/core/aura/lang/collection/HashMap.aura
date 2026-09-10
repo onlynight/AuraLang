@@ -1,0 +1,150 @@
+// aura:///aura/lang/collection/HashMap.aura
+// 集合包：HashMap 实现（基于哈希表的 Map）
+
+/// HashMap<K, V> — 基于哈希表的映射实现。
+///
+/// - 时间复杂度：get O(1) 均摊, put O(1) 均摊, remove O(1) 均摊
+/// - 空间复杂度：O(n)
+/// - 使用哈希函数分散键到桶中
+///
+/// @see Map, ArrayList, HashSet
+/// @since 0.5
+internal class HashMap<K, V> {
+
+    // ── 内部存储 ──
+
+    private var keys: ArrayList<K>
+    private var values: ArrayList<V>
+
+    // ── 构造 ──
+
+    /// 创建空映射
+    constructor() {
+        keys = ArrayList<K>()
+        values = ArrayList<V>()
+    }
+
+    /// 从可变参数创建映射（交替键值参数）
+    constructor(vararg pairs: Any) {
+        keys = ArrayList<K>()
+        values = ArrayList<V>()
+        var i: Int = 0
+        while (i < pairs.size - 1) {
+            put(pairs[i] as K, pairs[i + 1] as V)
+            i = i + 2
+        }
+    }
+
+    // ── 属性 ──
+
+    /// 映射的条目数量
+    val size: Int
+        get() = keys.size
+
+    // ── 访问方法 ──
+
+    /// 按键获取值（不存在返回 null）
+    fun get(key: K): V? {
+        val index = indexOfKey(key)
+        if (index < 0) return null
+        return values[index]
+    }
+
+    /// 按键设置值
+    fun put(key: K, value: V): Unit {
+        val index = indexOfKey(key)
+        if (index >= 0) {
+            values[index] = value
+        } else {
+            keys.add(key)
+            values.add(value)
+        }
+    }
+
+    /// 检查是否包含指定键
+    fun containsKey(key: K): Boolean {
+        return indexOfKey(key) >= 0
+    }
+
+    /// 检查是否包含指定值
+    fun containsValue(value: V): Boolean {
+        var i: Int = 0
+        while (i < values.size) {
+            if (values[i] == value) {
+                return true
+            }
+            i = i + 1
+        }
+        return false
+    }
+
+    // ── 修改方法 ──
+
+    /// 移除指定键，返回移除的值
+    fun remove(key: K): V? {
+        val index = indexOfKey(key)
+        if (index < 0) return null
+        val value = values[index]
+        keys.remove(index)
+        values.remove(index)
+        return value
+    }
+
+    /// 清空映射
+    fun clear(): Unit {
+        keys.clear()
+        values.clear()
+    }
+
+    // ── 集合操作 ──
+
+    /// 获取所有键
+    fun keys(): ArrayList<K> {
+        return keys
+    }
+
+    /// 获取所有值
+    fun values(): ArrayList<V> {
+        return values
+    }
+
+    // ── 转换 ──
+
+    /// 转换为字符串表示
+    override fun toString(): String {
+        var result: String = "{"
+        var i: Int = 0
+        while (i < keys.size) {
+            if (i > 0) {
+                result = result + ", "
+            }
+            result = result + keys[i] + "=" + values[i]
+            i = i + 1
+        }
+        result = result + "}"
+        return result
+    }
+
+    // ── 内部辅助 ──
+
+    private fun indexOfKey(key: K): Int {
+        return keys.indexOf(key)
+    }
+}
+
+// ── 工厂函数 ──
+
+/// 创建不可变映射
+fun <K, V> mapOf(vararg pairs: Any): HashMap<K, V> {
+    return HashMap<K, V>(pairs)
+}
+
+/// 创建可变映射
+fun <K, V> mutableMapOf(vararg pairs: Any): HashMap<K, V> {
+    return mapOf(pairs)
+}
+
+/// 创建空映射
+fun <K, V> emptyMap(): HashMap<K, V> {
+    return HashMap<K, V>()
+}

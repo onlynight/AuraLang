@@ -44,6 +44,8 @@ fn main() {
         "doc" => cmd_doc(rest),
         "eval" => cmd_eval(rest),
         "repl" => cmd_repl(rest),
+        // Phase 3: 标准库预编译
+        "stdlib-compile" => cmd_stdlib_compile(rest),
         // P11: 包管理器命令
         "install" => cmd_install(rest),
         "update" => cmd_update(rest),
@@ -83,7 +85,7 @@ fn print_usage() {
     [--emit-llvm]         仅生成 LLVM IR（.ll）\n\
     [--debug]             生成 DWARF 调试信息\n\
     [--shared]            生成动态库（.so / .dylib / .dll），导出 JitValue ABI 包装函数\n\
-  aura run <file.aura>                          编译并执行（依赖 VM）\n\
+  aura run <file.aura> [--stdlib-dir <dir>]      编译并执行（可选加载标准库 .auc）\n\
   aura check <file.aura>                        仅做语法/语义检查\n\
   aura disasm <file.auc> [--source <f.aura>]    反汇编 .auc 为可读汇编\n\
   aura tokens <file.aura>                       输出词法分析\n\
@@ -103,7 +105,8 @@ fn print_usage() {
   aura verify <file.auz>                          Phase 1: 验证 .auz 校验和\n\
   aura lsp                                        P13: 启动 LSP 服务器（stdio 通信）\n\
   aura debug <file.aura>                          P15: 启动调试器（转发到 aura-debug）\n\
-  aura fmt <file.aura> [--check]                  P13: 代码格式化\n"
+  aura fmt <file.aura> [--check]                  P13: 代码格式化\n\
+  aura stdlib-compile <core-dir> [--output <dir>] Phase 3: 预编译标准库 .aura → .auc\n"
     );
 }
 
@@ -533,7 +536,25 @@ fn cmd_disasm(args: &[String]) {
 
 fn cmd_run(args: &[String]) {
     let use_jit = args.iter().any(|a| a == "--jit");
-    let input = first_positional(args, "--jit").or_else(|| first_positional(args, "--output"));
+    let stdlib_dir = extract_opt(args, "--stdlib-dir");
+
+    // 查找第一个非标志参数作为输入文件（跳过 --stdlib-dir 的值）
+    let input = {
+        let mut iter = args.iter();
+        let mut found: Option<&String> = None;
+        while let Some(arg) = iter.next() {
+            if arg.starts_with("--") {
+                // 跳过 --stdlib-dir <value>
+                if arg == "--stdlib-dir" {
+                    iter.next(); // 跳过值
+                }
+            } else {
+                found = Some(arg);
+                break;
+            }
+        }
+        found
+    };
 
     let input = match input {
         Some(p) => p,
@@ -583,6 +604,19 @@ fn cmd_run(args: &[String]) {
         }
     };
 
+    // Phase 3: 加载标准库 .auc 文件（aura-compiled stdlib fallback）
+    if let Some(ref stdlib_path) = stdlib_dir {
+        let stdlib_p = std::path::Path::new(stdlib_path);
+        match vm.load_stdlib_dir(stdlib_p) {
+            Ok(count) => {
+                eprintln!("[run] 标准库加载: {} 个 Aura 编译函数就绪", count);
+            }
+            Err(e) => {
+                eprintln!("[run] 标准库加载失败（继续无标准库运行）: {}", e);
+            }
+        }
+    }
+
     match vm.run() {
         Ok(result) => {
             if !matches!(result, compiler::vm::Value::Null) {
@@ -594,6 +628,128 @@ fn cmd_run(args: &[String]) {
             exit(1);
         }
     }
+}
+
+/// Phase 3: 预编译标准库 .aura 文件为 .auc 字节码
+///
+/// 扫描 `core/aura/lang/std/` 目录下的所有 `.aura` 文件，
+/// 编译为 `.auc` 字节码文件，输出到指定目录。
+///
+/// 用法：
+///   aura stdlib-compile <core-dir> [--output <out-dir>]
+fn cmd_stdlib_compile(args: &[String]) {
+    use compiler::codegen::write_auc;
+
+    let output = extract_opt(args, "--output");
+    let input = match first_positional(args, "--output") {
+        Some(p) => p,
+        None => {
+            eprintln!("用法: aura stdlib-compile <core-dir> [--output <out-dir>]");
+            exit(1);
+        }
+    };
+
+    let core_dir = std::path::Path::new(input);
+    if !core_dir.exists() {
+        eprintln!("错误: 标准库目录不存在: {}", core_dir.display());
+        exit(1);
+    }
+
+    let out_dir = output.unwrap_or_else(|| "std-auc".to_string());
+    let out_path = std::path::Path::new(&out_dir);
+
+    if let Err(e) = std::fs::create_dir_all(out_path) {
+        eprintln!("错误: 无法创建输出目录 {}: {}", out_path.display(), e);
+        exit(1);
+    }
+
+    let mut success = 0;
+    let mut failed = 0;
+
+    // 递归扫描 .aura 文件
+    let aura_files = scan_aura_files_recursive(core_dir, core_dir).unwrap_or_default();
+    eprintln!("[stdlib-compile] 找到 {} 个 .aura 文件", aura_files.len());
+
+    for (rel_path, abs_path) in &aura_files {
+        let source = match std::fs::read_to_string(abs_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[stdlib-compile] 无法读取 {}: {}", rel_path.display(), e);
+                failed += 1;
+                continue;
+            }
+        };
+
+        // 预处理 import 语句
+        let source =
+            compiler::codegen::resolve_aura_imports(&source, Some(abs_path.to_str().unwrap_or("")));
+
+        match compiler::codegen::compile_source(&source) {
+            Ok(module) => {
+                let rel_str = rel_path.to_string_lossy();
+                let out_name = rel_str.strip_suffix(".aura").unwrap_or(&rel_str);
+                let out_file = out_path.join(format!("{}.auc", out_name));
+                let out_dir_for_file = out_file.parent().unwrap_or(out_path).to_path_buf();
+                if let Err(e) = std::fs::create_dir_all(&out_dir_for_file) {
+                    eprintln!(
+                        "[stdlib-compile] 无法创建目录 {}: {}",
+                        out_dir_for_file.display(),
+                        e
+                    );
+                    failed += 1;
+                    continue;
+                }
+                match write_auc(&out_file.to_string_lossy(), &module) {
+                    Ok(_) => {
+                        eprintln!(
+                            "[stdlib-compile] ✓ {} → {}",
+                            rel_path.display(),
+                            out_file.display()
+                        );
+                        success += 1;
+                    }
+                    Err(e) => {
+                        eprintln!("[stdlib-compile] 写入失败 {}: {}", out_file.display(), e);
+                        failed += 1;
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("[stdlib-compile] ✗ {} 编译失败: {}", rel_path.display(), e);
+                failed += 1;
+            }
+        }
+    }
+
+    eprintln!(
+        "[stdlib-compile] 完成: {} 成功, {} 失败 → {}",
+        success,
+        failed,
+        out_path.display()
+    );
+
+    if success == 0 {
+        eprintln!("[stdlib-compile] 警告: 没有成功编译任何文件");
+    }
+}
+
+/// 递归扫描目录下的 .aura 文件
+fn scan_aura_files_recursive(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+) -> std::io::Result<Vec<(std::path::PathBuf, std::path::PathBuf)>> {
+    let mut results = Vec::new();
+    let entries = std::fs::read_dir(dir)?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            results.extend(scan_aura_files_recursive(root, &path)?);
+        } else if path.extension().map(|e| e == "aura").unwrap_or(false) {
+            let rel = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+            results.push((rel, path));
+        }
+    }
+    Ok(results)
 }
 
 fn cmd_check(args: &[String]) {

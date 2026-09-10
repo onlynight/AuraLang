@@ -984,6 +984,32 @@ impl Checker {
                 self.interface_types.insert(i.name.clone());
                 self.record_generic_bounds(&i.name, &i.type_params);
                 self.record_members(&i.name, &[], &i.methods);
+                // Bug fix: 将接口方法注册到符号表（与 class/struct 一致）
+                // 此前仅调用 record_members 记录方法名，但没有通过 insert_function
+                // 将 `Interface.method` 符号注册进 self.symbols，导致方法分派
+                // 时 lookup_function("Shape.area") 找不到，报
+                // "unresolved method 'area' on 'Shape'"。
+                for m in &i.methods {
+                    let params = m
+                        .params
+                        .iter()
+                        .map(|p| ParamSym {
+                            name: p.name.clone(),
+                            ty: p.type_hint.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Any),
+                            has_default: p.default_value.is_some(),
+                            is_vararg: p.is_vararg,
+                        })
+                        .collect();
+                    let ret = m.return_type.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Unit);
+                    let full_name = format!("{}.{}", i.name, m.name);
+                    let _ = self.symbols.insert_function(
+                        full_name.clone(),
+                        params,
+                        ret,
+                        m.visibility,
+                        m.span,
+                    );
+                }
             }
             Decl::Actor(a) => {
                 self.symbols.register_type(a.name.clone(), Ty::Named(a.name.clone()));
@@ -1842,7 +1868,7 @@ impl Checker {
                     || Self::expr_calls(callee, name)
                     || args.iter().any(|a| Self::expr_calls(a, name))
             }
-            Expr::Literal(..) | Expr::Ident(..) | Expr::This(_) => false,
+            Expr::Literal(..) | Expr::Ident(..) | Expr::This(_) | Expr::Super(_) => false,
             Expr::StrInterp { parts, .. } => parts.iter().any(|p| Self::expr_calls(p, name)),
             Expr::Break { .. } | Expr::Continue { .. } => false,
             Expr::Assign {
@@ -2109,6 +2135,15 @@ impl Checker {
                     Ty::Named(type_name.clone())
                 } else {
                     self.report(*span, "this can only be used inside a class/struct/actor");
+                    Ty::Error
+                }
+            }
+            Expr::Super(span) => {
+                // super 引用父类类型（语义分析阶段返回当前类型，实际解析在 HIR 阶段）
+                if let Some(type_name) = &self.current_type {
+                    Ty::Named(type_name.clone())
+                } else {
+                    self.report(*span, "super can only be used inside a class/struct/actor");
                     Ty::Error
                 }
             }

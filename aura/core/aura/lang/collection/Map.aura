@@ -1,0 +1,26 @@
+// aura:///aura/lang/collection/Map.aura
+// 集合包：键值映射接口
+
+/// 键值映射接口 Map<K, V>。
+interface Map<K, V> {
+    /// 映射的条目数量
+    fun getSize(): Int
+
+    /// 按键获取值（不存在返回 null）
+    fun get(key: K): V
+
+    /// 检查是否包含指定键
+    fun containsKey(key: K): Boolean
+
+    /// 检查是否包含指定值
+    fun containsValue(value: V): Boolean
+
+    /// 获取所有键
+    fun keys(): List<K>
+
+    /// 获取所有值
+    fun values(): List<V>
+
+    /// 转换为字符串表示
+    fun toString(): String
+}

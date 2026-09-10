@@ -1,0 +1,19 @@
+internal value class String {
+    companion object {
+        const EMPTY: String = ""
+    }
+    
+    val length: Int
+    
+    fun toInt(): Int {
+        return 42
+    }
+    
+    fun toLong(): Long {
+        return 42
+    }
+    
+    fun toFloat(): Float {
+        return 42.0f
+    }
+}

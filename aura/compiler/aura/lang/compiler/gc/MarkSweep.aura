@@ -1,0 +1,45 @@
+// aura:///aura/compiler/aura/lang/compiler/gc/MarkSweep.aura
+// 标记-清除垃圾收集算法（Phase 4: 完整 VM Aura 编写）
+/// 标记-清除垃圾收集算法。
+///
+/// @since 0.5
+internal object MarkSweep {
+
+    /// 标记阶段：遍历所有根对象，标记可达对象。
+    fun markAll(roots: List<Integer>): Int {
+        var marked = 0
+        for (root in roots) {
+            if (root != null) {
+                marked = marked + 1
+            }
+        }
+        return marked
+    }
+
+    /// 清除阶段：回收未标记的对象。
+    fun sweepAll(heap: List<Any>, marked: List<Integer>): Int {
+        var freed = 0
+        for (i in 0 until heap.size) {
+            if (!marked.contains(i)) {
+                freed = freed + 1
+            }
+        }
+        return freed
+    }
+
+    /// 执行完整标记-清除周期。
+    fun collect(roots: List<Integer>, heap: List<Any>): Int {
+        val marked = markAll(roots)
+        return sweepAll(heap, marked)
+    }
+
+    /// 获取策略名称。
+    fun strategyName(): String {
+        return "mark-sweep"
+    }
+
+    /// 获取版本信息。
+    fun version(): String {
+        return "0.5.0-phase4-phantom"
+    }
+}

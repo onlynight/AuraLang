@@ -311,6 +311,8 @@ pub enum Expr {
     },
     /// this 引用（对象自身）
     This(Span),
+    /// super 引用（父类对象）
+    Super(Span),
     /// select 多路复用（P10.9）：多个 `Channel.receive()` 分支 + 可选 default
     Select {
         branches: Vec<SelectBranch>,
@@ -828,6 +830,7 @@ impl Expr {
                 span: s, ..
             }
             | Expr::This(s)
+            | Expr::Super(s)
             | Expr::Select {
                 span: s, ..
             }

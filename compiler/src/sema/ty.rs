@@ -106,9 +106,6 @@ impl Ty {
                 "Any" => Ty::Any,
                 "Nothing" => Ty::Nothing,
                 "Unit" => Ty::Unit,
-                "List" => Ty::List(Box::new(Ty::Any)),
-                "Map" => Ty::Map(Box::new(Ty::Any), Box::new(Ty::Any)),
-                "Set" => Ty::List(Box::new(Ty::Any)),
                 other => Ty::Named(other.to_string()),
             },
             crate::ast::Type::Generic {
@@ -116,14 +113,7 @@ impl Ty {
             } => {
                 let mapped: Vec<Ty> = args.iter().map(Ty::from_ast).collect();
                 match name.as_str() {
-                    "List" => Ty::List(Box::new(mapped.first().cloned().unwrap_or(Ty::Any))),
-                    "Set" => Ty::List(Box::new(mapped.first().cloned().unwrap_or(Ty::Any))),
-                    "Map" => Ty::Map(
-                        Box::new(mapped.first().cloned().unwrap_or(Ty::Any)),
-                        Box::new(mapped.get(1).cloned().unwrap_or(Ty::Any)),
-                    ),
                     "Pointer" => Ty::Pointer(Box::new(mapped.first().cloned().unwrap_or(Ty::Any))),
-                    "Array" => Ty::Array(Box::new(mapped.first().cloned().unwrap_or(Ty::Any))),
                     _ => Ty::Named(name.clone()),
                 }
             }

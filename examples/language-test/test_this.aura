@@ -1,0 +1,14 @@
+open class Animal {
+    open fun name(): String {
+        return "Animal"
+    }
+
+    fun describe(): String {
+        return "This is " + this.name()
+    }
+}
+
+fun main() {
+    val a = Animal()
+    println("this only: " + a.describe())
+}

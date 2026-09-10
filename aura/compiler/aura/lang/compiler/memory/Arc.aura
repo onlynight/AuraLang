@@ -1,0 +1,37 @@
+// aura:///aura/compiler/aura/lang/compiler/memory/Arc.aura
+// 引用计数（Phase 4: 完整 VM Aura 编写）
+/// ARC 智能指针。
+///
+/// @since 0.5
+internal object Arc {
+
+    /// 创建 ARC 包装对象。
+    fun wrap(value: Any): Map<String, Any> {
+        val arc: Map<String, Any> = Collections.mutableMapOf()
+        arc["value"] = value
+        arc["count"] = 1
+        return arc
+    }
+
+    /// 增加引用计数。
+    fun retain(arc: Map<String, Any>): Unit {
+        arc["count"] = (arc["count"] as Int) + 1
+    }
+
+    /// 减少引用计数。
+    fun release(arc: Map<String, Any>): Boolean {
+        val count = (arc["count"] as Int) - 1
+        arc["count"] = count
+        return count <= 0
+    }
+
+    /// 获取引用计数。
+    fun count(arc: Map<String, Any>): Int {
+        return arc["count"] as Int
+    }
+
+    /// 获取版本信息。
+    fun version(): String {
+        return "0.5.0-phase4-phantom"
+    }
+}

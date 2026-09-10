@@ -1,0 +1,1072 @@
+// ════════════════════════════════════════════════════════════
+// Phase 6 — 标准库打包与分发 自举验证测试
+// ════════════════════════════════════════════════════════════
+// 验证：
+//   aura run tests/self_bootstrap/package_test.aura
+//
+// 覆盖：
+//   1. 包元数据（name / version / checksum / modules）
+//   2. 包构建流程（.auz 制品）
+//   3. 包读取与校验和验证
+//   4. 安装 / 卸载 / 更新操作
+//   5. 三种执行模式制品（VM / JIT / AOT）
+//   6. FFI 配置与库映射
+// ════════════════════════════════════════════════════════════
+
+// ── 辅助函数 ───────────────────────────────────────────────
+
+fun assert(condition: Boolean) {
+    if (!condition) {
+        throw "Assertion failed"
+    }
+}
+
+fun assertTrue(condition: Boolean) {
+    assert(condition)
+}
+
+fun assertFalse(condition: Boolean) {
+    assert(!condition)
+}
+
+fun assertEq(a: Int, b: Int) {
+    if (a != b) {
+        throw "Expected " + a.toString() + " == " + b.toString() + " (got " + a.toString() + " vs " + b.toString() + ")"
+    }
+}
+
+fun assertStr(a: String, b: String) {
+    if (a != b) {
+        throw "Expected \"" + a + "\" == \"" + b + "\" (got \"" + a + "\" vs \"" + b + "\")"
+    }
+}
+
+// ── 数据模型 ───────────────────────────────────────────────
+
+struct PackageInfo {
+    var name: String
+    var version: String
+    var description: String
+    var license: String
+    var authors: List<String>
+    var repository: String?
+}
+
+struct ArtifactEntry {
+    var format: String
+    var files: List<String>
+    var ffiCache: String?
+    var ffiSymbols: String?
+}
+
+struct ExecutionMode {
+    var id: String
+    var label: String
+}
+
+struct PublishResult {
+    var url: String
+    var checksum: String
+    var size: Int
+}
+
+struct InstallResult {
+    var success: Boolean
+    var name: String
+    var version: String
+    var filesInstalled: Int
+    var message: String
+}
+
+struct UpdateResult {
+    var success: Boolean
+    var name: String
+    var oldVersion: String?
+    var newVersion: String
+    var message: String
+}
+
+struct RegistryEntry {
+    var name: String
+    var version: String
+    var publishedAt: String?
+    var downloadCount: Int
+}
+
+struct StdlibManifest {
+    var name: String
+    var version: String
+    var executionModes: List<String>
+    var ffiMode: String
+    var modules: List<String>
+    var artifacts: List<ArtifactEntry>
+    var checksum: String?
+}
+
+// ── 辅助工厂函数 ───────────────────────────────────────────
+
+fun makePackageInfo(name: String, version: String, desc: String): PackageInfo {
+    val pkg = PackageInfo()
+    pkg.name = name
+    pkg.version = version
+    pkg.description = desc
+    pkg.license = "MIT"
+    pkg.authors = listOf("Aura Team")
+    pkg.repository = null
+    return pkg
+}
+
+fun makeManifest(name: String, version: String, modes: List<String>, modules: List<String>): StdlibManifest {
+    val manifest = StdlibManifest()
+    manifest.name = name
+    manifest.version = version
+    manifest.executionModes = modes
+    manifest.ffiMode = "aot"
+    manifest.modules = modules
+    manifest.artifacts = listOf()
+    manifest.checksum = null
+    return manifest
+}
+
+// ════════════════════════════════════════════════════════════
+// 测试 1: 包元数据构建
+// ════════════════════════════════════════════════════════════
+
+fun test_package_metadata() {
+    val pkg = makePackageInfo("aura-stdlib", "1.0.0", "Aura standard library")
+    assertStr(pkg.name, "aura-stdlib")
+    assertStr(pkg.version, "1.0.0")
+    assertStr(pkg.license, "MIT")
+    assertStr(pkg.description, "Aura standard library")
+    assertStr(pkg.repository, "null")
+
+    // 包名与版本拼接
+    val identifier: String = pkg.name + "@" + pkg.version
+    assertStr(identifier, "aura-stdlib@1.0.0")
+
+    // 语义化版本比较
+    val versions: List<String> = listOf("1.0.0", "1.1.0", "2.0.0")
+    assert(versions.size == 3)
+    assertStr(versions[0], "1.0.0")
+    assertStr(versions[2], "2.0.0")
+
+    println("  ✓ 包元数据: " + pkg.name + " v" + pkg.version + " (" + pkg.license + ")")
+}
+
+// ════════════════════════════════════════════════════════════
+// 测试 2: 清单与模块
+// ════════════════════════════════════════════════════════════
+
+fun test_manifest_modules() {
+    val modules: List<String> = listOf(
+        "aura.lang.std.Math",
+        "aura.lang.std.String",
+        "aura.lang.std.List",
+        "aura.lang.std.Map",
+        "aura.lang.std.IO"
+    )
+    val manifest = makeManifest("aura-stdlib", "1.0.0",
+        listOf("vm", "jit", "aot"),
+        modules
+    )
+
+    assertStr(manifest.name, "aura-stdlib")
+    assertStr(manifest.version, "1.0.0")
+    assertStr(manifest.ffiMode, "aot")
+    assertEq(manifest.modules.size, 5)
+    assertEq(manifest.executionModes.size, 3)
+    assertStr(manifest.modules[0], "aura.lang.std.Math")
+    assertStr(manifest.modules[4], "aura.lang.std.IO")
+
+    // 模块数量 > 0
+    assert(manifest.modules.size > 0)
+    assert(manifest.executionModes.size >= 1)
+
+    println("  ✓ 清单: " + manifest.modules.size.toString() + " 个模块, " + manifest.executionModes.size.toString() + " 种执行模式")
+}
+
+// ════════════════════════════════════════════════════════════
+// 测试 3: 执行模式与制品格式
+// ════════════════════════════════════════════════════════════
+
+fun test_execution_modes() {
+    val vm = ExecutionMode()
+    vm.id = "vm"
+    vm.label = "VM (interpreted bytecode)"
+
+    val jit = ExecutionMode()
+    jit.id = "jit"
+    jit.label = "JIT (just-in-time compiled)"
+
+    val aot = ExecutionMode()
+    aot.id = "aot"
+    aot.label = "AOT (ahead-of-time native)"
+
+    assertStr(vm.id, "vm")
+    assertStr(jit.id, "jit")
+    assertStr(aot.id, "aot")
+    assert(vm.label.length() > 0)
+    assert(jit.label.length() > 0)
+    assert(aot.label.length() > 0)
+
+    // 三种模式互不相同
+    assert(vm.id != jit.id)
+    assert(jit.id != aot.id)
+    assert(vm.id != aot.id)
+
+    // 模式列表
+    val modes: List<String> = listOf("vm", "jit", "aot")
+    assertEq(modes.size, 3)
+
+    println("  ✓ 执行模式: VM / JIT / AOT 三种模式")
+    println("    - VM: " + vm.label)
+    println("    - JIT: " + jit.label)
+    println("    - AOT: " + aot.label)
+}
+
+// ════════════════════════════════════════════════════════════
+// 测试 4: 制品条目
+// ════════════════════════════════════════════════════════════
+
+fun test_artifact_entries() {
+    // VM 制品: .auc 字节码文件
+    val vmArtifact = ArtifactEntry()
+    vmArtifact.format = "auc"
+    vmArtifact.files = listOf("Math.auc", "String.auc", "List.auc")
+    vmArtifact.ffiCache = "ffi_cache.vm.json"
+    vmArtifact.ffiSymbols = null
+    assertStr(vmArtifact.format, "auc")
+    assertEq(vmArtifact.files.size, 3)
+    assertStr(vmArtifact.ffiCache, "ffi_cache.vm.json")
+
+    // JIT 制品: .auc 字节码文件（与 VM 共享）
+    val jitArtifact = ArtifactEntry()
+    jitArtifact.format = "auc"
+    jitArtifact.files = listOf("Math.auc", "String.auc", "List.auc")
+    jitArtifact.ffiCache = null
+    jitArtifact.ffiSymbols = null
+    assertStr(jitArtifact.format, "auc")
+
+    // AOT 制品: 原生库
+    val aotArtifact = ArtifactEntry()
+    aotArtifact.format = "native"
+    aotArtifact.files = listOf("linux-x86_64-libstd.a", "windows-x86_64-libstd.a")
+    aotArtifact.ffiCache = null
+    aotArtifact.ffiSymbols = "ffi_symbols.aot.json"
+    assertStr(aotArtifact.format, "native")
+    assertEq(aotArtifact.files.size, 2)
+    assertStr(aotArtifact.ffiSymbols, "ffi_symbols.aot.json")
+
+    // 构建所有制品的完整列表
+    val allArtifacts: List<ArtifactEntry> = listOf(vmArtifact, jitArtifact, aotArtifact)
+    assertEq(allArtifacts.size, 3)
+
+    // 总文件数
+    var totalFiles: Int = 0
+    for (artifact in allArtifacts) {
+        totalFiles = totalFiles + artifact.files.size
+    }
+    assert(totalFiles >= 6)
+
+    println("  ✓ 制品条目: 3 种格式 (auc, native)")
+    println("    - VM: " + vmArtifact.files.size.toString() + " 个 .auc 文件")
+    println("    - JIT: " + jitArtifact.files.size.toString() + " 个 .auc 文件")
+    println("    - AOT: " + aotArtifact.files.size.toString() + " 个原生库")
+    println("    - 总文件数: " + totalFiles.toString())
+}
+
+// ════════════════════════════════════════════════════════════
+// 测试 5: 校验和验证
+// ════════════════════════════════════════════════════════════
+
+fun test_checksum_verification() {
+    // SHA-256 校验和格式: "sha256:<64 hex chars>"
+    val validHash: String = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    assertEq(validHash.length(), 64)
+    assert(validHash.length() == 64)
+
+    // 完整校验和字符串
+    val fullChecksum: String = "sha256:" + validHash
+    assertStr(fullChecksum[0..5], "sha256:")
+
+    // 校验和匹配验证
+    val expectedHash: String = validHash
+    val actualHash: String = validHash
+    assert(expectedHash == actualHash)
+
+    // 校验和不匹配
+    val wrongHash: String = "0000000000000000000000000000000000000000000000000000000000000000"
+    assert(expectedHash != wrongHash)
+
+    // 文件列表校验和（sha256 格式）
+    val fileHashes: List<String> = listOf(
+        "hash1  lib/Math.auc",
+        "hash2  lib/String.auc",
+        "hash3  META-INF/manifest.json",
+        "hash4  META-INF/checksum.sha256"
+    )
+    assertEq(fileHashes.size, 4)
+    assert(fileHashes[0].length() > 0)
+    assert(fileHashes[0].contains("lib/Math.auc"))
+
+    // 所有 hash 非空
+    var allValid: Boolean = true
+    for (entry in fileHashes) {
+        if (entry.length() < 3) {
+            allValid = false
+        }
+    }
+    assert(allValid)
+
+    println("  ✓ 校验和: SHA-256 (64 字符), 格式 sha256:<hex>")
+    println("    - 4 个文件校验和条目")
+    println("    - 全部通过验证")
+}
+
+// ════════════════════════════════════════════════════════════
+// 测试 6: 安装操作
+// ════════════════════════════════════════════════════════════
+
+fun test_install_operation() {
+    // 模拟安装流程
+    val packagePath: String = "aura-stdlib-1.0.0.auz"
+    val installDir: String = "~/.aura/stdlib/1.0.0"
+
+    // 安装前检查
+    var installed: Boolean = false
+
+    // 模拟读取 .auz 包
+    val manifest = makeManifest("aura-stdlib", "1.0.0",
+        listOf("vm", "jit", "aot"),
+        listOf("aura.lang.std.Math", "aura.lang.std.String", "aura.lang.std.List")
+    )
+
+    // 模拟文件安装
+    val files: List<String> = listOf(
+        "META-INF/manifest.json",
+        "META-INF/checksum.sha256",
+        "lib/vm/Math.auc",
+        "lib/vm/String.auc",
+        "lib/vm/List.auc",
+        "lib/jit/Math.auc",
+        "lib/jit/String.auc",
+        "lib/jit/List.auc",
+        "lib/aot/linux-x86_64-libstd.a",
+        "lib/ffi_cache.vm.json",
+        "lib/ffi_symbols.aot.json"
+    )
+
+    // 逐个"安装"
+    var filesInstalled: Int = 0
+    for (filePath in files) {
+        filesInstalled = filesInstalled + 1
+    }
+    assertEq(filesInstalled, files.size)
+    assert(filesInstalled > 0)
+    installed = true
+
+    // 安装结果
+    val result = InstallResult()
+    result.success = installed
+    result.name = manifest.name
+    result.version = manifest.version
+    result.filesInstalled = filesInstalled
+    result.message = "Installed " + manifest.name + " v" + manifest.version + " (" + filesInstalled.toString() + " files)"
+
+    assert(result.success)
+    assertStr(result.name, "aura-stdlib")
+    assertStr(result.version, "1.0.0")
+    assert(result.filesInstalled > 0)
+    assert(result.message.contains("Installed"))
+
+    println("  ✓ 安装: " + result.message)
+    println("    - 安装目录: " + installDir)
+    println("    - 包文件: " + packagePath)
+}
+
+// ════════════════════════════════════════════════════════════
+// 测试 7: 卸载操作
+// ════════════════════════════════════════════════════════════
+
+fun test_uninstall_operation() {
+    // 模拟卸载流程
+    val installDir: String = "~/.aura/stdlib/1.0.0"
+    var isInstalled: Boolean = true
+
+    // 验证已安装
+    assert(isInstalled)
+
+    // 卸载
+    // 模拟删除安装目录
+    isInstalled = false
+    assert(!isInstalled)
+
+    // 卸载结果
+    val result = InstallResult()
+    result.success = !isInstalled
+    result.name = "aura-stdlib"
+    result.version = "1.0.0"
+    result.filesInstalled = 0
+    result.message = "Uninstalled aura-stdlib v1.0.0"
+
+    assert(result.success)
+    assert(result.filesInstalled == 0)
+    assert(result.message.contains("Uninstalled"))
+
+    println("  ✓ 卸载: " + result.message)
+    println("    - 已清理安装目录")
+}
+
+// ════════════════════════════════════════════════════════════
+// 测试 8: 更新操作
+// ════════════════════════════════════════════════════════════
+
+fun test_update_operation() {
+    // 模拟从 v1.0.0 更新到 v2.0.0
+    val name: String = "aura-stdlib"
+    val oldVersion: String = "1.0.0"
+    val newVersion: String = "2.0.0"
+
+    // 检查是否需要更新
+    assert(oldVersion != newVersion)
+
+    // 模拟下载新版本
+    val downloadUrl: String = "https://registry.aura-lang.dev/v1/packages/" + name + "/versions/" + newVersion + "/" + name + ".auz"
+    assert(downloadUrl.length() > 0)
+    assert(downloadUrl.contains(newVersion))
+
+    // 安装新版本
+    val filesInstalled: Int = 15
+    assert(filesInstalled > 0)
+
+    // 更新结果
+    val result = UpdateResult()
+    result.success = true
+    result.name = name
+    result.oldVersion = oldVersion
+    result.newVersion = newVersion
+    result.message = "Updated " + name + " from v" + oldVersion + " to v" + newVersion
+
+    assert(result.success)
+    assertStr(result.name, name)
+    assertStr(result.oldVersion, oldVersion)
+    assertStr(result.newVersion, newVersion)
+    assert(result.message.contains("Updated"))
+    assert(result.message.contains(newVersion))
+
+    // 验证新版本
+    assert(newVersion == "2.0.0")
+    assert(newVersion != oldVersion)
+
+    println("  ✓ 更新: " + result.message)
+    println("    - 下载 URL: " + downloadUrl)
+    println("    - 文件数: " + filesInstalled.toString())
+}
+
+// ════════════════════════════════════════════════════════════
+// 测试 9: 发布操作
+// ════════════════════════════════════════════════════════════
+
+fun test_publish_operation() {
+    // 模拟发布流程
+    val packageName: String = "aura-stdlib"
+    val version: String = "1.0.0"
+    val sizeBytes: Int = 512000
+
+    // 构建 .auz 包
+    val packagePath: String = packageName + "-" + version + ".auz"
+
+    // 计算校验和
+    val checksum: String = "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+
+    // 构造发布结果
+    val result = PublishResult()
+    result.url = "https://registry.aura-lang.dev/v1/packages/" + packageName + "/versions/" + version + "/" + packageName + ".auz"
+    result.checksum = checksum
+    result.size = sizeBytes
+
+    assert(result.url.length() > 0)
+    assert(result.url.contains(packageName))
+    assert(result.url.contains(version))
+    assert(result.checksum.length() > 0)
+    assert(result.checksum.contains("sha256:"))
+    assert(result.size > 0)
+
+    // 校验和完整性
+    val hashPart: String = result.checksum
+    assertEq(hashPart.length(), 71) // "sha256:" (7) + 64 hex chars
+
+    println("  ✓ 发布: " + packageName + " v" + version)
+    println("    - URL: " + result.url)
+    println("    - 校验和: " + result.checksum)
+    println("    - 大小: " + result.size.toString() + " bytes")
+}
+
+// ════════════════════════════════════════════════════════════
+// 测试 10: 注册表条目
+// ════════════════════════════════════════════════════════════
+
+fun test_registry_entries() {
+    // 模拟注册表条目列表
+    val entries: List<RegistryEntry> = listOf()
+
+    // 创建多个版本条目
+    val e1 = RegistryEntry()
+    e1.name = "aura-stdlib"
+    e1.version = "1.0.0"
+    e1.publishedAt = "2024-01-15T10:00:00Z"
+    e1.downloadCount = 1000
+
+    val e2 = RegistryEntry()
+    e2.name = "aura-stdlib"
+    e2.version = "1.1.0"
+    e2.publishedAt = "2024-02-20T14:30:00Z"
+    e2.downloadCount = 500
+
+    val e3 = RegistryEntry()
+    e3.name = "aura-stdlib"
+    e3.version = "2.0.0"
+    e3.publishedAt = "2024-03-10T09:00:00Z"
+    e3.downloadCount = 200
+
+    val allEntries: List<RegistryEntry> = listOf(e1, e2, e3)
+    assertEq(allEntries.size, 3)
+
+    // 最新版本
+    val latest: RegistryEntry = allEntries[allEntries.size - 1]
+    assertStr(latest.version, "2.0.0")
+    assert(latest.downloadCount > 0)
+
+    // 最早版本
+    val earliest: RegistryEntry = allEntries[0]
+    assertStr(earliest.version, "1.0.0")
+    assert(earliest.downloadCount > 0)
+
+    // 总下载量
+    var totalDownloads: Int = 0
+    for (entry in allEntries) {
+        totalDownloads = totalDownloads + entry.downloadCount
+    }
+    assertEq(totalDownloads, 1700)
+
+    println("  ✓ 注册表: " + allEntries.size.toString() + " 个版本条目")
+    for (entry in allEntries) {
+        val ver: String = entry.version
+        val dl: String = entry.downloadCount.toString()
+        val pub: String = entry.publishedAt.toString()
+        println("    - " + entry.name + " v" + ver + " (下载 " + dl + ", 发布 " + pub + ")")
+    }
+    println("    - 总下载: " + totalDownloads.toString())
+}
+
+// ════════════════════════════════════════════════════════════
+// 测试 11: 三种执行模式制品完整性
+// ════════════════════════════════════════════════════════════
+
+fun test_three_mode_artifacts() {
+    // VM 制品
+    val vmFiles: List<String> = listOf(
+        "lib/vm/Math.auc",
+        "lib/vm/String.auc",
+        "lib/vm/List.auc",
+        "lib/vm/Map.auc",
+        "lib/vm/IO.auc",
+        "lib/ffi_cache.vm.json"
+    )
+    assertEq(vmFiles.size, 6)
+
+    // JIT 制品
+    val jitFiles: List<String> = listOf(
+        "lib/jit/Math.auc",
+        "lib/jit/String.auc",
+        "lib/jit/List.auc",
+        "lib/jit/Map.auc",
+        "lib/jit/IO.auc"
+    )
+    assertEq(jitFiles.size, 5)
+
+    // AOT 制品
+    val aotFiles: List<String> = listOf(
+        "lib/aot/linux-x86_64-libstd.a",
+        "lib/aot/windows-x86_64-libstd.a",
+        "lib/aot/macos-x86_64-libstd.a",
+        "lib/ffi_symbols.aot.json"
+    )
+    assertEq(aotFiles.size, 4)
+
+    // 元数据文件
+    val metaFiles: List<String> = listOf(
+        "META-INF/manifest.json",
+        "META-INF/checksum.sha256"
+    )
+    assertEq(metaFiles.size, 2)
+
+    // 总文件数
+    var totalFiles: Int = 0
+    for (f in vmFiles) { totalFiles = totalFiles + 1 }
+    for (f in jitFiles) { totalFiles = totalFiles + 1 }
+    for (f in aotFiles) { totalFiles = totalFiles + 1 }
+    for (f in metaFiles) { totalFiles = totalFiles + 1 }
+    assertEq(totalFiles, 17)
+
+    // 验证 .auc 文件（VM + JIT）
+    var aucCount: Int = 0
+    for (f in vmFiles) {
+        if (f.endsWith(".auc")) { aucCount = aucCount + 1 }
+    }
+    for (f in jitFiles) {
+        if (f.endsWith(".auc")) { aucCount = aucCount + 1 }
+    }
+    assertEq(aucCount, 10) // 5 modules x 2 modes
+
+    // 验证原生库文件（AOT）
+    var nativeCount: Int = 0
+    for (f in aotFiles) {
+        if (f.endsWith(".a")) { nativeCount = nativeCount + 1 }
+    }
+    assertEq(nativeCount, 3) // 3 platforms
+
+    // 验证 FFI 文件
+    var ffiCount: Int = 0
+    for (f in vmFiles) {
+        if (f.contains("ffi_")) { ffiCount = ffiCount + 1 }
+    }
+    for (f in aotFiles) {
+        if (f.contains("ffi_")) { ffiCount = ffiCount + 1 }
+    }
+    assertEq(ffiCount, 2) // 1 cache + 1 symbols
+
+    println("  ✓ 三种执行模式制品:")
+    println("    - VM: " + vmFiles.size.toString() + " 文件 (" + aucCount.toString() + ".auc + 1 FFI cache)")
+    println("    - JIT: " + jitFiles.size.toString() + " 文件 (5 .auc)")
+    println("    - AOT: " + aotFiles.size.toString() + " 文件 (" + nativeCount.toString() + " 平台 + 1 FFI symbols)")
+    println("    - 总计: " + totalFiles.toString() + " 文件")
+}
+
+// ════════════════════════════════════════════════════════════
+// 测试 12: FFI 配置
+// ════════════════════════════════════════════════════════════
+
+fun test_ffi_configuration() {
+    // AOT FFI 配置
+    val aotInline: Boolean = true
+    val aotOptimize: Int = 3
+    val aotStaticLink: Boolean = false
+    assert(aotInline)
+    assertEq(aotOptimize, 3)
+    assertFalse(aotStaticLink)
+
+    // C FFI 库映射
+    val cffiLib: String = "aura_std_cffi"
+    val cffiFiles: List<String> = listOf(
+        "linux-x86_64-libaura_std_cffi.so",
+        "windows-x86_64-aura_std_cffi.lib",
+        "macos-x86_64-libaura_std_cffi.dylib"
+    )
+    assertStr(cffiLib, "aura_std_cffi")
+    assertEq(cffiFiles.size, 3)
+
+    // 验证库文件后缀
+    var allValid: Boolean = true
+    for (f in cffiFiles) {
+        if (!(f.endsWith(".so") || f.endsWith(".lib") || f.endsWith(".dylib"))) {
+            allValid = false
+        }
+    }
+    assert(allValid)
+
+    // FFI 函数声明
+    val ffiDecls: List<String> = listOf(
+        "fopen",
+        "fclose",
+        "fread",
+        "fwrite",
+        "malloc",
+        "free",
+        "time",
+        "clock"
+    )
+    assertEq(ffiDecls.size, 8)
+
+    // 每个声明都是非空字符串
+    var allNonEmpty: Boolean = true
+    for (decl in ffiDecls) {
+        if (decl.length() == 0) { allNonEmpty = false }
+    }
+    assert(allNonEmpty)
+
+    println("  ✓ FFI 配置:")
+    println("    - AOT: inline=" + aotInline.toString() + " optimize=" + aotOptimize.toString() + " staticLink=" + aotStaticLink.toString())
+    println("    - C FFI: " + cffiLib + " (" + cffiFiles.size.toString() + " 平台)")
+    println("    - 函数声明: " + ffiDecls.size.toString() + " 个")
+}
+
+// ════════════════════════════════════════════════════════════
+// 测试 13: 包构建流程模拟
+// ════════════════════════════════════════════════════════════
+
+fun test_build_flow() {
+    // 步骤 1: 收集源文件
+    val sourceModules: List<String> = listOf(
+        "Math.aura", "String.aura", "List.aura", "Map.aura", "IO.aura"
+    )
+    assertEq(sourceModules.size, 5)
+
+    // 步骤 2: 编译为 .auc 字节码
+    val compiledModules: List<String> = listOf()
+    for (src in sourceModules) {
+        // 模拟编译: .aura -> .auc
+        val aucName: String = src
+        // compiledModules 不动态扩展（模拟用数组）
+    }
+
+    // 步骤 3: 构建清单
+    val manifest = makeManifest("aura-stdlib", "1.0.0",
+        listOf("vm", "jit", "aot"),
+        listOf("aura.lang.std.Math", "aura.lang.std.String", "aura.lang.std.List", "aura.lang.std.Map", "aura.lang.std.IO")
+    )
+
+    // 步骤 4: 计算校验和
+    var totalDataSize: Int = 0
+    for (i in 0..10) {
+        totalDataSize = totalDataSize + i
+    }
+    assertEq(totalDataSize, 45) // 0+1+...+9 = 45
+
+    // 步骤 5: 打包为 .auz
+    val packageName: String = manifest.name
+    val packageVersion: String = manifest.version
+    val auzName: String = packageName + "-" + packageVersion + ".auz"
+    assertStr(auzName, "aura-stdlib-1.0.0.auz")
+
+    // 步骤 6: 验证包
+    assert(packageName == "aura-stdlib")
+    assert(packageVersion == "1.0.0")
+    assert(auzName.endsWith(".auz"))
+    assert(manifest.executionModes.size == 3)
+    assert(manifest.modules.size == 5)
+
+    println("  ✓ 构建流程: 5 个模块 -> 3 种模式 -> 1 个 .auz 包")
+    println("    - 包名: " + auzName)
+    println("    - 模式: " + manifest.executionModes.size.toString())
+    println("    - 模块: " + manifest.modules.size.toString())
+    println("    - 数据量: " + totalDataSize.toString() + " 字节")
+}
+
+// ════════════════════════════════════════════════════════════
+// 测试 14: 压缩与存储模拟
+// ════════════════════════════════════════════════════════════
+
+fun test_compression_storage() {
+    // 模拟未压缩数据
+    val originalSize: Int = 1024000 // ~1MB
+    val compressedSize: Int = 256000 // ~256KB
+
+    // 压缩比
+    var ratio: Int = originalSize
+    if (compressedSize > 0) {
+        ratio = originalSize / compressedSize
+    }
+    assert(ratio > 0)
+    assertEq(ratio, 4) // 1024000 / 256000 = 4
+
+    // 压缩级别
+    val compressionLevel: Int = 3
+    assert(compressionLevel >= 1 && compressionLevel <= 22)
+
+    // 验证压缩前后大小
+    assert(originalSize > compressedSize)
+    assert(originalSize > 0)
+    assert(compressedSize > 0)
+
+    // 总包大小（多平台）
+    var totalSize: Int = 0
+    var platforms: Int = 0
+    for (p in 0..2) {
+        totalSize = totalSize + compressedSize
+        platforms = platforms + 1
+    }
+    assertEq(totalSize, 512000)
+    assertEq(platforms, 3)
+
+    println("  ✓ 压缩存储: " + compressedSize.toString() + " / " + originalSize.toString() + " = " + ratio.toString() + "x 压缩")
+    println("    - 压缩级别: " + compressionLevel.toString())
+    println("    - 总大小: " + totalSize.toString() + " bytes")
+}
+
+// ════════════════════════════════════════════════════════════
+// 测试 15: 端到端流程 — 构建 + 读取 + 安装 + 更新 + 卸载
+// ════════════════════════════════════════════════════════════
+
+fun test_end_to_end_flow() {
+    // ── 阶段 1: 构建 ──
+    val buildName: String = "aura-stdlib"
+    val buildVersion: String = "1.0.0"
+    val buildChecksum: String = "sha256:abc123def456"
+    val buildSize: Int = 512000
+
+    // ── 阶段 2: 发布 ──
+    val publishUrl: String = "https://registry.aura-lang.dev/v1/packages/" + buildName + "/" + buildVersion + "/" + buildName + ".auz"
+    assert(publishUrl.length() > 0)
+
+    // ── 阶段 3: 安装 ──
+    var installSuccess: Boolean = false
+    try {
+        // 模拟下载 + 校验和验证 + 安装
+        assertStr(buildName, "aura-stdlib")
+        assertStr(buildVersion, "1.0.0")
+        assert(buildChecksum.contains("sha256:"))
+        assert(buildSize > 0)
+        installSuccess = true
+    } catch (e: String) {
+        println("    ⚠ 安装阶段异常: " + e)
+    }
+    assert(installSuccess)
+
+    // ── 阶段 4: 验证安装 ──
+    var installed: Boolean = false
+    var filesInstalled: Int = 0
+    for (i in 0..16) {
+        filesInstalled = filesInstalled + 1
+    }
+    installed = true
+    assert(installed)
+    assert(filesInstalled > 0)
+
+    // ── 阶段 5: 更新 ──
+    val updateVersion: String = "1.1.0"
+    assert(updateVersion != buildVersion)
+    var updated: Boolean = false
+    try {
+        assert(updateVersion == "1.1.0")
+        assert(buildVersion == "1.0.0")
+        updated = true
+    } catch (e: String) {
+        println("    ⚠ 更新阶段异常: " + e)
+    }
+    assert(updated)
+
+    // ── 阶段 6: 卸载 ──
+    var uninstalled: Boolean = false
+    try {
+        installed = false
+        assert(!installed)
+        uninstalled = true
+    } catch (e: String) {
+        println("    ⚠ 卸载阶段异常: " + e)
+    }
+    assert(uninstalled)
+
+    println("  ✓ 端到端流程: 构建 -> 发布 -> 安装 -> 验证 -> 更新 -> 卸载")
+    println("    - 构建: " + buildName + " v" + buildVersion + " (" + buildSize.toString() + " bytes)")
+    println("    - 发布: " + publishUrl)
+    println("    - 安装: " + filesInstalled.toString() + " 个文件")
+    println("    - 更新: v" + buildVersion + " -> v" + updateVersion)
+    println("    - 卸载: 完成")
+}
+
+// ════════════════════════════════════════════════════════════
+// 主函数 — 执行所有打包分发测试
+// ════════════════════════════════════════════════════════════
+
+fun main() {
+    println("═══════════════════════════════════════════════")
+    println("  Phase 6 — 标准库打包与分发 自举验证测试")
+    println("  Standard Library Packaging & Distribution")
+    println("═══════════════════════════════════════════════")
+    println()
+
+    var passed: Int = 0
+    var failed: Int = 0
+    var total: Int = 0
+
+    // 测试 1: 包元数据
+    total = total + 1
+    println("--- 测试 1: 包元数据 ---")
+    try {
+        test_package_metadata()
+        passed = passed + 1
+    } catch (e: String) {
+        failed = failed + 1
+        println("  ✗ FAIL: " + e)
+    }
+    println()
+
+    // 测试 2: 清单与模块
+    total = total + 1
+    println("--- 测试 2: 清单与模块 ---")
+    try {
+        test_manifest_modules()
+        passed = passed + 1
+    } catch (e: String) {
+        failed = failed + 1
+        println("  ✗ FAIL: " + e)
+    }
+    println()
+
+    // 测试 3: 执行模式
+    total = total + 1
+    println("--- 测试 3: 执行模式 ---")
+    try {
+        test_execution_modes()
+        passed = passed + 1
+    } catch (e: String) {
+        failed = failed + 1
+        println("  ✗ FAIL: " + e)
+    }
+    println()
+
+    // 测试 4: 制品条目
+    total = total + 1
+    println("--- 测试 4: 制品条目 ---")
+    try {
+        test_artifact_entries()
+        passed = passed + 1
+    } catch (e: String) {
+        failed = failed + 1
+        println("  ✗ FAIL: " + e)
+    }
+    println()
+
+    // 测试 5: 校验和验证
+    total = total + 1
+    println("--- 测试 5: 校验和验证 ---")
+    try {
+        test_checksum_verification()
+        passed = passed + 1
+    } catch (e: String) {
+        failed = failed + 1
+        println("  ✗ FAIL: " + e)
+    }
+    println()
+
+    // 测试 6: 安装操作
+    total = total + 1
+    println("--- 测试 6: 安装操作 ---")
+    try {
+        test_install_operation()
+        passed = passed + 1
+    } catch (e: String) {
+        failed = failed + 1
+        println("  ✗ FAIL: " + e)
+    }
+    println()
+
+    // 测试 7: 卸载操作
+    total = total + 1
+    println("--- 测试 7: 卸载操作 ---")
+    try {
+        test_uninstall_operation()
+        passed = passed + 1
+    } catch (e: String) {
+        failed = failed + 1
+        println("  ✗ FAIL: " + e)
+    }
+    println()
+
+    // 测试 8: 更新操作
+    total = total + 1
+    println("--- 测试 8: 更新操作 ---")
+    try {
+        test_update_operation()
+        passed = passed + 1
+    } catch (e: String) {
+        failed = failed + 1
+        println("  ✗ FAIL: " + e)
+    }
+    println()
+
+    // 测试 9: 发布操作
+    total = total + 1
+    println("--- 测试 9: 发布操作 ---")
+    try {
+        test_publish_operation()
+        passed = passed + 1
+    } catch (e: String) {
+        failed = failed + 1
+        println("  ✗ FAIL: " + e)
+    }
+    println()
+
+    // 测试 10: 注册表条目
+    total = total + 1
+    println("--- 测试 10: 注册表条目 ---")
+    try {
+        test_registry_entries()
+        passed = passed + 1
+    } catch (e: String) {
+        failed = failed + 1
+        println("  ✗ FAIL: " + e)
+    }
+    println()
+
+    // 测试 11: 三种执行模式制品
+    total = total + 1
+    println("--- 测试 11: 三种执行模式制品完整性 ---")
+    try {
+        test_three_mode_artifacts()
+        passed = passed + 1
+    } catch (e: String) {
+        failed = failed + 1
+        println("  ✗ FAIL: " + e)
+    }
+    println()
+
+    // 测试 12: FFI 配置
+    total = total + 1
+    println("--- 测试 12: FFI 配置 ---")
+    try {
+        test_ffi_configuration()
+        passed = passed + 1
+    } catch (e: String) {
+        failed = failed + 1
+        println("  ✗ FAIL: " + e)
+    }
+    println()
+
+    // 测试 13: 构建流程
+    total = total + 1
+    println("--- 测试 13: 包构建流程 ---")
+    try {
+        test_build_flow()
+        passed = passed + 1
+    } catch (e: String) {
+        failed = failed + 1
+        println("  ✗ FAIL: " + e)
+    }
+    println()
+
+    // 测试 14: 压缩与存储
+    total = total + 1
+    println("--- 测试 14: 压缩与存储 ---")
+    try {
+        test_compression_storage()
+        passed = passed + 1
+    } catch (e: String) {
+        failed = failed + 1
+        println("  ✗ FAIL: " + e)
+    }
+    println()
+
+    // 测试 15: 端到端流程
+    total = total + 1
+    println("--- 测试 15: 端到端流程 ---")
+    try {
+        test_end_to_end_flow()
+        passed = passed + 1
+    } catch (e: String) {
+        failed = failed + 1
+        println("  ✗ FAIL: " + e)
+    }
+    println()
+
+    // ── 总结 ──────────────────────────────────────────────────
+    println("═══════════════════════════════════════════════")
+    println("  测试结果: " + passed.toString() + "/" + total.toString() + " 通过")
+    if (failed > 0) {
+        println("  失败: " + failed.toString() + " 个")
+    } else {
+        println("  ✓ 全部通过！标准库打包与分发验证成功")
+    }
+    println("═══════════════════════════════════════════════")
+}

@@ -1,0 +1,11 @@
+internal value class MyStr {
+    companion object {
+        fun foo(bar: Int): Int {
+            return bar
+        }
+    }
+    
+    fun baz(): Int {
+        return 42
+    }
+}

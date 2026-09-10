@@ -875,6 +875,48 @@ impl Vm {
         let param_count = native.param_count as usize;
         let args = self.pop_n(top, param_count)?;
 
+        // Phase 3: 优先检查是否有 Aura 编译的标准库函数版本
+        let std_lookup = self.find_stdlib_func(&native.name, param_count);
+        eprintln!(
+            "[vm] stdlib-check: name='{}' params={} → {:?}",
+            native.name, param_count, std_lookup
+        );
+        if let Some((std_func_idx, needs_self)) = std_lookup {
+            eprintln!(
+                "[vm] stdlib-aura: {} → Aura compiled func #{} (self={})",
+                native.name, std_func_idx, needs_self
+            );
+
+            if needs_self {
+                // 注入 singleton 对象作为 self 参数
+                let object_name = self.extract_object_name(&native.name);
+                let self_value = if let Some(obj_name) = object_name {
+                    self.singletons.get(obj_name).cloned().unwrap_or_else(|| {
+                        eprintln!(
+                            "[vm] stdlib-aura: singleton '{}' not found, using Null for {}",
+                            obj_name, native.name
+                        );
+                        Value::Null
+                    })
+                } else {
+                    eprintln!(
+                        "[vm] stdlib-aura: cannot extract object name from {}, using Null",
+                        native.name
+                    );
+                    Value::Null
+                };
+                let mut new_args = Vec::with_capacity(args.len() + 1);
+                new_args.push(self_value);
+                new_args.extend(args);
+                self.push_frame(std_func_idx, new_args)?;
+                return Ok(());
+            } else {
+                // 参数完全匹配，直接调用
+                self.push_frame(std_func_idx, args)?;
+                return Ok(());
+            }
+        }
+
         let result = if let Some(v) = self.intercept_object_native(&native.name, &args)? {
             v
         } else if let Some(f) = self.natives.get(&native.name) {
@@ -937,6 +979,31 @@ impl Vm {
         let native = self.module.natives[idx].clone();
         // 使用实际参数个数而非声明的 param_count
         let args = self.pop_n(top, argc)?;
+
+        // Phase 3: 优先检查是否有 Aura 编译的标准库函数版本
+        if let Some((std_func_idx, needs_self)) = self.find_stdlib_func(&native.name, argc) {
+            eprintln!(
+                "[vm] stdlib-aura: {} (argc={}) → Aura compiled func #{} (self={})",
+                native.name, argc, std_func_idx, needs_self
+            );
+
+            if needs_self {
+                let object_name = self.extract_object_name(&native.name);
+                let self_value = if let Some(obj_name) = object_name {
+                    self.singletons.get(obj_name).cloned().unwrap_or(Value::Null)
+                } else {
+                    Value::Null
+                };
+                let mut new_args = Vec::with_capacity(argc + 1);
+                new_args.push(self_value);
+                new_args.extend(args);
+                self.push_frame(std_func_idx, new_args)?;
+                return Ok(());
+            } else {
+                self.push_frame(std_func_idx, args)?;
+                return Ok(());
+            }
+        }
 
         // P9: 如果指定了 FFI 库，先加载库
         if let Some(ref lib_name) = native.ffi_lib {

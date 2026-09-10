@@ -1,0 +1,30 @@
+// aura:///aura/compiler/aura/lang/compiler/memory/Memory.aura
+// 内存管理（Phase 4: 完整 VM Aura 编写）
+/// 内存管理模块。
+///
+/// @since 0.5
+internal object Memory {
+
+    /// 内存块信息。
+    fun create(size: Int): Map<String, Any> {
+        val block: Map<String, Any> = Collections.mutableMapOf()
+        block["size"] = size
+        block["allocated"] = false
+        return block
+    }
+
+    /// 分配内存块。
+    fun allocate(size: Int): Any {
+        return null
+    }
+
+    /// 释放内存块。
+    fun free(ptr: Any): Unit {
+        return
+    }
+
+    /// 获取版本信息。
+    fun version(): String {
+        return "0.5.0-phase4-phantom"
+    }
+}

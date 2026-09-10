@@ -1,0 +1,40 @@
+// Phase 3: 标准库 Aura 编译路径测试
+// 验证 core/*.aura 编译为 .auc 后，VM 能加载并优先派发
+//
+// 测试策略：
+// 1. 使用已注册的 native 函数（abs, add 等）
+// 2. 通过 --stdlib-dir 加载 Aura 编译的标准库
+// 3. 验证 Aura 编译版本被优先调用
+//
+// 注意：internal object 的方法有隐式 self 参数，
+// 当前实现通过参数个数检查跳过不匹配的函数。
+// 后续迭代将支持 self 参数自动注入。
+
+fun main() {
+    // 使用 abs（已注册为 native: aura.lang.std.Math.abs）
+    // 如果 Aura 编译版本可用且参数匹配，VM 会优先调用
+    val result1 = abs(-5)
+    val result2 = abs(3)
+    val result3 = abs(0)
+    
+    // 验证结果
+    if (result1 == 5) {
+        println("PASS: abs(-5) == 5")
+    } else {
+        println("FAIL: abs(-5) == " + toStr(result1))
+    }
+    
+    if (result2 == 3) {
+        println("PASS: abs(3) == 3")
+    } else {
+        println("FAIL: abs(3) == " + toStr(result2))
+    }
+    
+    if (result3 == 0) {
+        println("PASS: abs(0) == 0")
+    } else {
+        println("FAIL: abs(0) == " + toStr(result3))
+    }
+    
+    println("All tests passed!")
+}

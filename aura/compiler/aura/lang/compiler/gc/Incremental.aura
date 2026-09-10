@@ -1,0 +1,37 @@
+// aura:///aura/compiler/aura/lang/compiler/gc/Incremental.aura
+// 增量 GC 策略（Phase 4: 完整 VM Aura 编写）
+/// 增量 GC 策略。
+///
+/// @since 0.5
+internal object Incremental {
+
+    /// 增量 GC 状态。
+    fun create(): Map<String, Any> {
+        val state: Map<String, Any> = Collections.mutableMapOf()
+        state["phase"] = 0
+        state["progress"] = 0
+        return state
+    }
+
+    /// 执行一个增量步骤。
+    fun step(state: Map<String, Any>): Boolean {
+        val progress = state["progress"] as Int
+        state["progress"] = progress + 1
+        return progress < 100
+    }
+
+    /// 获取进度。
+    fun progress(state: Map<String, Any>): Int {
+        return state["progress"] as Int
+    }
+
+    /// 获取策略名称。
+    fun strategyName(): String {
+        return "incremental"
+    }
+
+    /// 获取版本信息。
+    fun version(): String {
+        return "0.5.0-phase4-phantom"
+    }
+}

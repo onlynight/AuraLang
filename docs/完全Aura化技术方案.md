@@ -165,16 +165,20 @@ Aura 语言当前标准库采用混合架构：
 │  构建流程                                                                │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
 │  │ 1. 预编译标准库（bootstrap 阶段）                                 │   │
-│  │    core/*.aura  ──→  .auc 字节码                      │   │
-│  │    aura_std_cffi.c       ──→  .a 静态库                          │   │
+│  │    core/*.aura  ──→  .auc 字节码（VM/JIT 用）                    │   │
+│  │    core/*.aura  ──→  AOT 编译  ──→  .so/.dll 动态库             │   │
+│  │    aura_std_cffi.c       ──→  .a 静态库（C FFI 用）               │   │
 │  │                                                                  │   │
 │  │ 2. 应用编译时链接标准库                                          │   │
 │  │    main.aura  ──→  加载 std.auc  ──→  链接符号                  │   │
 │  │                                                                  │   │
 │  │ 3. 三态执行                                                      │   │
-│  │    VM 模式:   .auc  ──→  VM 解释执行  ──→  AOT 直连 C 函数      │   │
-│  │    JIT 模式:   .auc  ──→  VM 解释  ──→  JIT 编译  ──→  AOT 直连  │   │
-│  │    AOT 模式:   .auc  ──→  LLVM IR  ──→  机器代码  ──→  AOT 直连  │   │
+│  │    VM 模式:   .auc  ──→  VM 解释  ──→  extern interface 调用    │   │
+│  │                                   AOT 库（.so/.dll）             │   │
+│  │    JIT 模式:   .auc  ──→  JIT 编译  ──→  extern interface 调用  │   │
+│  │                                   AOT 库（.so/.dll）             │   │
+│  │    AOT 模式:   .auc  ──→  LLVM IR  ──→  机器代码                │   │
+│  │                                   直接调用 AOT 库函数            │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -209,214 +213,234 @@ Aura 语言当前标准库采用混合架构：
 
 ### 4.1 AOT 直连定义
 
-**AOT 直连**是指消除函数指针间接调用，直接调用目标函数的技术。
+**AOT 直连**是指通过 `extern interface` 语法，Aura 代码直接调用 Aura AOT 编译的库（AOT 动态库（.so/.dll）），消除函数指针间接调用，实现零开销跨模块调用。
+
+**核心原则：优先使用 `extern interface` 调用 Aura 编译的库，C FFI 仅作为底层系统调用的补充。**
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  FFI 调用方式对比                                                        │
+│  FFI 调用优先级（从高到低）                                                │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                         │
-│  传统 FFI（间接调用）                                                    │
-│  ─────────────────────                                                  │
-│  Aura 字节码  ──→  查找函数指针  ──→  间接调用 C 函数                   │
-│  开销：函数指针查找 + 间接调用 + 参数转换                                 │
+│  1. extern interface（AOT 直连）—— 优先使用                              │
+│  ────────────────────────────────                                        │
+│  Aura 字节码  ──→  直接调用 AOT 编译的 Aura 库函数（JitValue ABI）        │
+│  开销：直接调用 + JitValue ABI 参数传递（零转换）                         │
+│  适用：标准库模块间调用（Math、String、IO 等）                             │
 │                                                                         │
-│  AOT 直连（直接调用）                                                    │
-│  ─────────────────────                                                  │
-│  Aura 字节码  ──→  直接调用 C 函数                                      │
-│  开销：直接调用 + 参数转换（无间接调用）                                  │
+│  2. extern "c"（C FFI）—— 仅用于底层系统调用                              │
+│  ────────────────────────────────                                        │
+│  Aura 字节码  ──→  直接调用 C 函数（libc 等）                             │
+│  开销：直接调用 + C ABI 参数转换                                          │
+│  适用：文件系统、网络、进程等系统级操作                                     │
 │                                                                         │
-│  性能差异：                                                              │
-│  • VM 模式: 消除函数指针查找，预加载函数地址                              │
-│  • JIT 模式: 生成直接调用指令，而非间接调用                               │
-│  • AOT 模式: 生成直接调用指令，LLVM 可进一步优化                          │
+│  3. extern "rust"（Rust native）—— 仅用于 Layer 1 核心运行时              │
+│  ────────────────────────────────                                        │
+│  Aura 字节码  ──→  调用 Rust native 函数                                  │
+│  适用：Any 核心、类型内省、内存管理等不可上移函数                            │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 4.2 VM 模式 AOT 直连
+### 4.2 extern interface 语法（AOT 直连）
+
+`extern interface` 是 AOT 直连的核心语法，用于声明对 Aura AOT 编译库的引用：
+
+```aura
+// 声明外部 Aura 库接口（绑定到 AOT 编译的 AOT 动态库（.so/.dll））
+extern interface Math {
+    default fun loadLibrary(): String = "aura_std_math"
+
+    // 纯逻辑函数（Aura 实现，AOT 编译）
+    fun abs(x: Int): Int
+    fun min(a: Int, b: Int): Int
+    fun max(a: Int, b: Int): Int
+
+    // 数学函数（libm 实现，Rust native 底层）
+    fun sin(x: Float): Float
+    fun cos(x: Float): Float
+    fun sqrt(x: Float): Float
+}
+
+// 使用：直接调用，无间接调用开销
+fun compute(x: Int): Int {
+    return Math.abs(x) + Math.max(x, 10)
+}
+```
+
+### 4.3 VM 模式 AOT 直连
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  VM 模式 AOT 直连                                                        │
+│  VM 模式：extern interface 直调                                           │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                         │
 │  启动阶段:                                                               │
-│  1. 加载标准库 .auc 文件                                                 │
-│  2. 解析 extern "c" 声明，提取 C 函数名称列表                            │
-│  3. 预加载所有 C 函数地址到 VM 的函数表                                  │
-│  4. 建立 Aura 函数名 → C 函数地址的映射                                  │
+│  1. 解析 extern interface 声明，提取库名和函数列表                         │
+│  2. 加载对应的 AOT 动态库（.so/.dll）（通过 libloading/dlopen）                       │
+│  3. 建立 extern interface 函数名 → 库内函数索引的映射                       │
+│  4. 为每个 extern interface 函数分配虚拟函数号                             │
 │                                                                         │
 │  执行阶段:                                                               │
-│  1. VM 遇到 FFI 调用指令                                                 │
-│  2. 从预加载的函数表直接获取函数地址                                      │
-│  3. 直接调用 C 函数（无函数指针查找）                                     │
+│  1. VM 遇到 extern interface 调用指令（CallAura）                          │
+│  2. 通过函数名直接查找库内的函数索引                                       │
+│  3. 使用 JitValue ABI 直接调用目标函数（零参数转换）                        │
 │  4. 返回结果到 VM 栈                                                     │
 │                                                                         │
 │  字节码设计:                                                             │
-│  CALL_Cffi <function_name>  // 直接调用，无间接寻址                      │
+│  CALL_AURA <interface_name> <function_name>  // JitValue ABI 直调       │
 │                                                                         │
 │  性能优化:                                                               │
-│  • 函数地址预加载：启动时一次性加载所有 C 函数地址                        │
-│  • 内联缓存：缓存最近调用的函数地址，加速重复调用                          │
-│  • 零开销调用：消除函数指针查找开销                                       │
+│  • 库预加载：启动时一次性加载所有 extern interface 库                      │
+│  • 内联缓存：缓存最近调用的函数地址，加速重复调用                           │
+│  • 零开销调用：JitValue ABI 无需参数转换                                  │
+│  • 跨模块优化：同一 AOT 库内的函数可被 LLVM 内联                          │
 │                                                                         │
-│  代码示例:                                                               │
-│  // VM 内部实现                                                          │
-│  struct FfiCallSite {                                                   │
-│      function_name: String,                                            │
-│      function_address: usize,  // 预加载的 C 函数地址                    │
-│      call_count: u64,         // 调用计数                               │
+│  VM 内部实现:                                                            │
+│  struct ExternInterfaceRegistry {                                        │
+│      libraries: HashMap<String, usize>,  // 库名 → 库句柄                 │
+│      functions: HashMap<String, (String, u16)>,  // 函数名 → (库名, 索引)│
 │  }                                                                       │
 │                                                                         │
 │  impl Vm {                                                              │
-│      fn call_ffi(&mut self, func_name: &str) -> Value {                │
-│          let call_site = self.ffi_registry.get(func_name).unwrap();     │
-│          let func_addr = call_site.function_address;                    │
-│          // 直接调用，无函数指针查找                                      │
-│          unsafe { call_c_function(func_addr, &self.stack) }            │
+│      fn call_aot_ffi(&mut self, native: &BytecodeNative, args: &[Value])│
+│          -> Option<Value> {                                              │
+│          // 1. 从 extern interface 注册表查找函数                          │
+│          let (lib_name, func_idx) = self.extern_registry.lookup(         │
+│              &native.name)?;                                              │
+│          // 2. 加载库（如果尚未加载）                                      │
+│          self.ensure_lib_loaded(&lib_name);                              │
+│          // 3. 使用 JitValue ABI 直接调用（零参数转换）                    │
+│          self.call_aot_function(lib_name, func_idx, args)                │
 │      }                                                                   │
 │  }                                                                       │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 4.3 JIT 模式 AOT 直连
+### 4.4 JIT 模式 AOT 直连
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  JIT 模式 AOT 直连                                                       │
+│  JIT 模式：extern interface 直调                                          │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                         │
 │  编译阶段:                                                               │
 │  1. JIT 编译 Aura 字节码为机器代码                                       │
-│  2. 遇到 FFI 调用时，生成直接调用指令（call func_name）                  │
-│  3. 生成 PLT（Procedure Linkage Table）条目                              │
-│  4. 符号解析后，补丁更新为实际函数地址                                    │
+│  2. 遇到 extern interface 调用时，生成直接调用指令（JitValue ABI）        │
+│  3. 通过函数指针表查找 AOT 库中的函数入口                                  │
+│  4. 生成 PLT 条目，符号延迟解析                                           │
 │                                                                         │
 │  执行阶段:                                                               │
-│  1. JIT 生成的机器代码直接调用 C 函数                                    │
+│  1. JIT 生成的机器代码直接调用 AOT 库函数                                  │
 │  2. 无间接调用开销                                                       │
-│  3. LLVM 可进一步优化（内联、去虚拟化）                                  │
+│  3. JitValue ABI 参数直接传递（零转换）                                  │
 │                                                                         │
 │  机器代码示例:                                                           │
-│  ; JIT 生成的直接调用                                                    │
-│  call fopen       ; 直接调用，非间接调用                                 │
-│  add rsp, 8       ; 清理栈                                              │
-│                                                                         |
+│  ; JIT 生成的 extern interface 直接调用                                   │
+│  call [Math.add]  ; 直接调用 AOT 库中的 add 函数                         │
+│  add rsp, 8       ; 清理栈                                               │
+│                                                                         │
 │  vs. 传统间接调用                                                        │
-│  mov rax, [rdi]   ; 从函数指针表加载地址                                 │
-│  call rax         ; 间接调用                                            │
+│  mov rax, [rdi]   ; 从函数指针表加载地址                                  │
+│  call rax         ; 间接调用                                             │
 │  add rsp, 8       ; 清理栈                                              │
 │                                                                         │
 │  性能优化:                                                               │
 │  • 直接调用：生成 call func_name 指令                                    │
-│  • 符号延迟解析：启动时生成 PLT 条目，首次调用时解析                       │
-│  • 内联缓存：热点 FFI 调用可内联到调用方                                  │
-│  • 零开销调用：消除间接调用开销                                           │
-│                                                                         │
-│  代码示例:                                                               │
-│  ; JIT 代码生成器                                                        │
-│  pub fn emit_ffi_call(&mut self, func_name: &str) {                   │
-│      // 生成直接调用指令                                                  │
-│      self.emit_call_direct(func_name);                                  │
-│      // 生成 PLT 条目（符号延迟解析）                                     │
-│      self.emit_plt_entry(func_name);                                    │
-│  }                                                                       │
+│  • 符号延迟解析：启动时生成 PLT 条目，首次调用时解析                        │
+│  • JitValue ABI：参数直接传递，无 C ABI 转换开销                         │
+│  • 跨库内联：热点 extern interface 调用可内联到调用方                     │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 4.4 AOT 模式 AOT 直连
+### 4.5 AOT 模式 AOT 直连
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  AOT 模式 AOT 直连                                                       │
+│  AOT 模式：extern interface 直调                                          │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                         │
 │  编译阶段:                                                               │
-│  1. AOT 编译 Aura 字节码为 LLVM IR                                       │
-│  2. 遇到 FFI 调用时，生成直接调用指令（call func_name）                  │
-│  3. LLVM 优化器可进一步优化（内联、去虚拟化、死代码消除）                 │
-│  4. 生成机器代码，链接 libc 库                                           │
+│  1. AOT 编译应用 Aura 字节码为 LLVM IR                                   │
+│  2. 遇到 extern interface 调用时，生成对 AOT 库的直接函数调用              │
+│  3. LLVM 优化器可进一步优化（内联、去虚拟化、死代码消除）                   │
+│  4. 链接 AOT 库的 .o 目标文件或动态库                                     │
 │                                                                         │
 │  LLVM IR 示例:                                                          │
-│  ; AOT 生成的直接调用                                                    │
-│  declare i8* @fopen(i8*, i8*)  ; 声明 libc 函数                          │
+│  ; AOT 生成的 extern interface 直接调用                                   │
+│  declare %jit_value @Math_add(%jit_value, %jit_value)                    │
 │                                                                         │
-│  %fd = call i8* @fopen(                                                │
-│      i8* %path,                                                         │
-│      i8* %mode                                                           │
-│  )                                                                       │
-│  ; LLVM 可内联、优化这个调用                                             │
+│  %result = call %jit_value @Math_add(%jit_value %a, %jit_value %b)      │
+│  ; LLVM 可内联、优化这个调用                                              │
 │                                                                         │
 │  机器代码示例:                                                           │
-│  ; AOT 生成的直接调用                                                    │
-│  fopen:                                                                  │
-│      call fopen@PLT   ; 直接调用（PLT 符号解析）                         │
+│  ; AOT 生成的 extern interface 直接调用                                   │
+│  compute:                                                               │
+│      call Math_add@PLT  ; 直接调用 AOT 库中的 add 函数                   │
 │  add rsp, 8          ; 清理栈                                           │
 │                                                                         │
 │  性能优化:                                                               │
 │  • 直接调用：生成 call func_name 指令                                    │
-│  • LLVM 优化：内联、去虚拟化、死代码消除                                  │
-│  • 静态链接：可选静态链接 libc，消除动态链接开销                           │
-│  • 零开销调用：消除间接调用开销                                           │
-│                                                                         │
-│  代码示例:                                                               │
-│  ; AOT 编译器                                                            │
-│  pub fn emit_ffi_call(&mut self, func_name: &str) {                   │
-│      // 生成 LLVM IR 直接调用                                            │
-│      self.emit_call_direct(func_name);                                  │
-│      // 声明 C 函数原型                                                  │
-│      self.emit_c_function_decl(func_name);                              │
-│  }                                                                       │
+│  • LLVM 优化：跨库内联、去虚拟化、死代码消除                              │
+│  • 静态链接：可静态链接 AOT 库，消除动态链接开销                          │
+│  • JitValue ABI：参数直接传递，无 C ABI 转换开销                         │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 4.5 三态模式 AOT 直连对比
+### 4.6 三态模式 AOT 直连对比
 
 | 维度 | VM 模式 | JIT 模式 | AOT 模式 |
 |------|---------|----------|----------|
-| **调用方式** | 预加载函数地址，直接调用 | 生成直接调用指令 | 生成直接调用指令 |
-| **函数解析** | 启动时预加载 | 首次调用时 PLT 解析 | 编译时符号解析 |
+| **调用方式** | 库预加载 + 函数索引查找 | 生成直接调用指令 | 生成直接调用指令 |
+| **目标** | Aura AOT 库（.so/.dll） | Aura AOT 库（.so/.dll） | Aura AOT 库（.o/.so） |
+| **ABI** | JitValue ABI（零转换） | JitValue ABI（零转换） | JitValue ABI（零转换） |
 | **间接调用** | ❌ 无 | ❌ 无 | ❌ 无 |
-| **调用开销** | 低（无查找） | 低（无间接） | 最低（LLVM 优化） |
-| **优化潜力** | 内联缓存 | 内联、去虚拟化 | 内联、去虚拟化、死代码消除 |
-| **启动开销** | 预加载函数地址 | 无 | 编译时间 |
+| **调用开销** | 低（函数索引查找） | 低（无间接） | 最低（LLVM 跨库优化） |
+| **优化潜力** | 内联缓存 | 跨库内联、去虚拟化 | 跨库内联、去虚拟化、DCE |
+| **启动开销** | 预加载库 | 无 | 编译时间 |
 | **适用场景** | 开发调试 | 桌面应用 | 高性能计算 |
 
-### 4.6 FFI 声明语法
+### 4.7 FFI 声明语法
 
 ```aura
-// C FFI 声明（AOT 直连）
+// ═══════════════════════════════════════════════════════════════
+// 1. extern interface（AOT 直连）—— 优先使用
+// ═══════════════════════════════════════════════════════════════
+// 声明外部 Aura 库接口，绑定到 AOT 编译的 AOT 动态库（.so/.dll）
+extern interface Math {
+    default fun loadLibrary(): String = "aura_std_math"
+    fun abs(x: Int): Int
+    fun min(a: Int, b: Int): Int
+    fun max(a: Int, b: Int): Int
+    fun sin(x: Float): Float
+}
+
+extern interface IO {
+    default fun loadLibrary(): String = "aura_std_io"
+    fun readText(path: String): String
+    fun writeText(path: String, content: String): null
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 2. extern "c"（C FFI）—— 仅用于底层系统调用
+// ═══════════════════════════════════════════════════════════════
+// 直接调用 C 函数（libc 等），仅当 Aura 库无法实现时使用
 extern "c" "libc" fun fopen(path: String, mode: String): Pointer
-extern "c" "libc" fun fread(buf: Pointer, size: Int, count: Int, stream: Pointer): Int
-extern "c" "libc" fun fclose(stream: Pointer): Int
+extern "c" "libc" fun malloc(size: Int): Pointer
+extern "c" "libc" fun free(ptr: Pointer): null
 
-// 自定义 C 库
-extern "c" "mylib" fun my_function(arg: Int): Int
-
-// Rust FFI 声明（Layer 1 函数）
+// ═══════════════════════════════════════════════════════════════
+// 3. extern "rust"（Rust native）—— 仅用于 Layer 1 核心运行时
+// ═══════════════════════════════════════════════════════════════
+// 调用 Rust 实现的不可上移函数
 extern "rust" fun any_toString(value: Any): String
 extern "rust" fun any_equals(a: Any, b: Any): Boolean
-
-// 混合声明（同一模块内）
-fun readText(path: String): String {
-    val fd = fopen(path, "r")  // C FFI，AOT 直连
-    if fd == null then return ""
-    
-    val buf = malloc(1024)      // C FFI，AOT 直连
-    val n = fread(buf, 1, 1024, fd)  // C FFI，AOT 直连
-    fclose(fd)                  // C FFI，AOT 直连
-    
-    val result = bufferToString(buf, n)
-    free(buf)
-    return result
-}
 ```
 
-### 4.7 默认配置
+### 4.8 默认配置
 
 ```toml
 # aura.toml（默认配置）
@@ -425,9 +449,10 @@ execution-mode = "auto"  # vm | jit | aot | auto（默认自动选择）
 ffi-mode = "aot"         # aot | cffi | rustffi（默认 AOT 直连）
 
 [build.ffi.aot]
-inline = true            # 允许内联 C 代码
-optimize = 3             # 优化级别（0-3）
-static-link = false      # 是否静态链接 libc
+# extern interface 配置
+inline = true            # 允许跨库内联
+optimize = 3             # LLVM 优化级别（0-3）
+static-link = false      # 是否静态链接 AOT 库
 
 [build.ffi.cffi]
 lib = "aura_std_cffi"    # C FFI 库名称
@@ -448,45 +473,7 @@ aot = "高性能计算、嵌入式"
 
 # 自动降级策略
 [build.fallback]
-aot-failed = "jit"       # AOT 编译失败降级为 JIT
-jit-failed = "vm"        # JIT 编译失败降级为 VM
-```
-
-### 4.8 执行流程
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│  三态模式执行流程                                                        │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  aura run main.aura  ──→  默认 VM 模式                                  │
-│    ├── 加载标准库 .auc 文件                                              │
-│    ├── 预加载 C 函数地址（AOT 直连）                                    │
-│    ├── VM 解释执行                                                       │
-│    └── FFI 调用：直接调用 C 函数                                         │
-│                                                                         │
-│  aura run --jit main.aura  ──→  JIT 模式                               │
-│    ├── 加载标准库 .auc 文件                                              │
-│    ├── VM 解释执行（启动快）                                             │
-│    ├── 热点检测 → JIT 编译                                               │
-│    └── FFI 调用：生成直接调用指令（AOT 直连）                            │
-│                                                                         │
-│  aura run --aot main.aura  ──→  AOT 模式                               │
-│    ├── AOT 编译标准库 + 应用源码                                         │
-│    ├── 生成 LLVM IR（含直接调用指令）                                    │
-│    ├── 编译为机器代码                                                    │
-│    └── FFI 调用：直接调用 C 函数（AOT 直连）                            │
-│                                                                         │
-│  aura build main.aura  ──→  AOT 编译                                    │
-│    ├── 编译为标准库 .auz 制品                                            │
-│    ├── 含 VM/JIT/AOT 三态制品                                            │
-│    └── 可分发给其他用户                                                   │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
----
-
+ffi-mode = "cffi"        # AOT 编译失败时降级到 C FFI
 ## 5. 开发阶段详细计划
 
 ### Phase 1: Bootstrap 最小引导层（第 1-2 周）
@@ -601,7 +588,7 @@ fn test_memory() {
 │   └── StdlibPlugin 改造
 │       ├── 扫描 core 目录
 │       ├── 编译 .aura 为 .auc（VM/JIT 模式）
-│       ├── 编译 .auc 为机器代码（AOT 模式）
+│       ├── 编译 .auc → LLVM IR → 机器代码（可执行文件/.so）
 │       ├── 编译 aura_std_cffi.c 为 .a
 │       ├── 生成标准库索引
 │       └── 注册到构建上下文
@@ -681,7 +668,7 @@ impl BuildPlugin for StdlibPlugin {
 **验收标准**：
 - [x] aura-stdlib 插件能扫描 core 目录
 - [x] 能编译 .aura 文件为 .auc
-- [x] 能编译 .auc 为机器代码（AOT 模式）
+- [x] 能编译 .auc → LLVM IR → 机器代码（可执行文件/.so）
 - [x] 能编译 aura_std_cffi.c 为静态库
 - [x] 能生成标准库索引
 - [x] 能生成 FFI 函数地址映射
@@ -952,9 +939,9 @@ fn test_ffi_aot_direct_aot() {
 | 空值检查 | value_check.rs | Rust 调用 | Rust 调用 | Rust 调用 |
 | 内存管理 | memory.rs | Rust 调用 | Rust 调用 | Rust 调用 |
 | 运行时 | runtime.rs | Rust 调用 | Rust 调用 | Rust 调用 |
-| FileSystem | std_fs.rs | C FFI（AOT 直连） | C FFI（AOT 直连） | C FFI（AOT 直连） |
-| IO | std_io.rs | C FFI（AOT 直连） | C FFI（AOT 直连） | C FFI（AOT 直连） |
-| Network | std_net.rs | C FFI（AOT 直连） | C FFI（AOT 直连） | C FFI（AOT 直连） |
+| FileSystem | std_fs.rs | C FFI（系统调用） | C FFI（系统调用） | C FFI（系统调用） |
+| IO | std_io.rs | C FFI（系统调用） | C FFI（系统调用） | C FFI（系统调用） |
+| Network | std_net.rs | C FFI（系统调用） | C FFI（系统调用） | C FFI（系统调用） |
 
 **三态执行策略**：
 
@@ -969,9 +956,9 @@ fn test_ffi_aot_direct_aot() {
 │  AOT 模式:   Aura 字节码  ──→  LLVM IR  ──→  机器代码                   │
 │                                                                         │
 │  FileSystem.read(path):                                                │
-│  VM 模式:   C FFI（AOT 直连）  ──→  fopen/fread/fclose                 │
-│  JIT 模式:   C FFI（AOT 直连）  ──→  fopen/fread/fclose                 │
-│  AOT 模式:   C FFI（AOT 直连）  ──→  fopen/fread/fclose                 │
+│  VM 模式:   C FFI（系统调用）  ──→  fopen/fread/fclose                 │
+│  JIT 模式:   C FFI（系统调用）  ──→  fopen/fread/fclose                 │
+│  AOT 模式:   C FFI（系统调用）  ──→  fopen/fread/fclose                 │
 │                                                                         │
 │  Any.toString():                                                       │
 │  VM 模式:   Rust native 调用  ──→  any_core.rs                         │
@@ -1595,7 +1582,7 @@ criterion_main!(benches);
 | 里程碑 | 时间 | 交付物 |
 |--------|------|--------|
 | M1: Bootstrap 完成 | Week 2 | 最小 VM/JIT/AOT 核心 + Layer 1 函数 + FFI AOT 直连支持 |
-| M2: 标准库编译完成 | Week 4 | .auc 文件 + 机器代码 + 标准库索引 + FFI 函数映射 |
+| M2: 标准库编译完成 | Week 4 | .auc 字节码 + AOT 动态库（.so/.dll） + 标准库索引 + FFI 函数映射 |
 | M3: 编译器集成完成 | Week 7 | 三态模式支持 + 标准库链接 + FFI AOT 直连 |
 | M4: Rust native 替换完成 | Week 11 | 7 个模块 Aura 实现（三态模式 + AOT 直连） |
 | M5: FFI AOT 直连完善 | Week 14 | 三态模式 FFI AOT 直连 + 性能优化 |
@@ -1687,7 +1674,7 @@ Week 3-4:   Phase 2 - loom aura-stdlib 插件改造
           ─────────────────────────────────
           ├── 扫描 core 目录
           ├── 编译 .aura 为 .auc（VM/JIT）
-          ├── 编译 .auc 为机器代码（AOT）
+          ├── 编译 .auc → LLVM IR → 机器代码（可执行文件/.so）
           ├── 编译 C FFI 库（AOT 直连）
           └── 生成标准库索引 + FFI 函数映射
 

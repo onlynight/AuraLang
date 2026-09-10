@@ -1,0 +1,8 @@
+﻿aura.exe : 编译失败:
+At line:1 char:150
++ ... e\AuraLang; & "target\release\aura.exe" build "aura\core\aura\lang\Ch ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (编译失败::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+lex error: Unterminated character literal

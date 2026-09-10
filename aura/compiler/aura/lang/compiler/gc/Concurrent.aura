@@ -1,0 +1,42 @@
+// aura:///aura/compiler/aura/lang/compiler/gc/Concurrent.aura
+// 并发 GC 策略（Phase 4: 完整 VM Aura 编写）
+/// 并发 GC 策略。
+///
+/// @since 0.5
+internal object Concurrent {
+
+    /// 并发 GC 状态。
+    fun create(): Map<String, Any> {
+        val state: Map<String, Any> = Collections.mutableMapOf()
+        state["running"] = false
+        state["marked"] = 0
+        state["swept"] = 0
+        return state
+    }
+
+    /// 启动并发 GC。
+    fun start(state: Map<String, Any>): Boolean {
+        state["running"] = true
+        return true
+    }
+
+    /// 停止并发 GC。
+    fun stop(state: Map<String, Any>): Unit {
+        state["running"] = false
+    }
+
+    /// 检查 GC 是否正在运行。
+    fun isRunning(state: Map<String, Any>): Boolean {
+        return state["running"] as Boolean
+    }
+
+    /// 获取策略名称。
+    fun strategyName(): String {
+        return "concurrent"
+    }
+
+    /// 获取版本信息。
+    fun version(): String {
+        return "0.5.0-phase4-phantom"
+    }
+}

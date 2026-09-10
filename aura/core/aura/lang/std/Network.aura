@@ -1,0 +1,61 @@
+// aura:///aura/lang/std/Network.aura
+// 标准库模块，不可修改
+// 实现：syscall 邻近模块。Aura 侧只声明签名，实现位于引导层（Layer 0-A / FFI），
+//       因为网络 socket 必须经由操作系统，无法用纯 Aura 表达
+// (package 声明由编译器自动注入，无需显式声明)
+/// 网络 Socket 操作模块。
+///
+/// 使用前需 import：
+/// ```aura
+/// import aura.net.*
+/// ```
+///
+/// 架构说明：
+/// - Layer 2（C FFI）：当前通过 Rust native 实现
+/// - 未来：通过 `extern "c" "libc"` 直连 socket/bind/connect/send/recv 等 syscall
+///
+/// @since 0.1
+internal object Network {
+
+    // ── TCP 客户端（通过 libc socket/connect/send/recv 实现）──
+
+    /// 连接 TCP 服务器。
+    /// 未来实现：`extern "c" "libc" fun socket(domain: Int, type: Int, protocol: Int): Int`
+    fun tcpConnect(host: String, port: Int): Any
+
+    /// 通过 TCP Socket 发送数据。
+    fun tcpSend(socket: Any, data: String): Int
+
+    /// 通过 TCP Socket 接收数据。
+    fun tcpRecv(socket: Any, bufferSize: Int): String
+
+    /// 关闭 TCP Socket。
+    fun tcpClose(socket: Any): Unit
+
+    // ── TCP 服务器（通过 libc socket/bind/listen/accept 实现）──
+
+    /// 创建 TCP 监听 Socket。
+    fun tcpListen(port: Int): Any
+
+    // ── UDP（通过 libc socket/sendto/recvfrom 实现）──
+
+    /// 通过 UDP 发送数据。
+    fun udpSend(socket: Any, data: String, host: String, port: Int): Int
+
+    /// 通过 UDP 接收数据。
+    fun udpRecv(socket: Any, bufferSize: Int): String
+
+    /// 关闭 UDP Socket。
+    fun udpClose(socket: Any): Unit
+
+    // ── 主机信息（通过 libc gethostname/getaddrinfo 实现）──
+
+    /// 检查主机是否可达。
+    fun isHostReachable(host: String): Boolean
+
+    /// 获取主机名。
+    val getHostname: String
+
+    /// 获取本机 IP 地址。
+    val getLocalIp: String
+}

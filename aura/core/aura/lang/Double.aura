@@ -1,0 +1,169 @@
+// aura:///aura/lang/Double.aura
+// 语言内置类型，不可修改
+
+/// 64 位双精度浮点数类型。
+///
+/// - 范围：约 ±5 × 10⁻³²⁴ 到 ±1.7 × 10³⁰⁸
+/// - 精度：约 15-17 位有效数字
+/// - 存储：VM 中内联存储为 f64（`Value::Float`），AOT 中映射为 `f64`
+///
+/// @see Float, Int, Long
+/// @since 0.1
+internal value class Double {
+
+    // ── 常量（companion object）──
+
+    companion object {
+        /// 双精度浮点数最小正值
+        const MIN_VALUE: Double = 4.9e-324
+
+        /// 双精度浮点数最大值
+        const MAX_VALUE: Double = 1.7976931348623157e308
+
+        /// 正无穷大
+        const POSITIVE_INFINITY: Double = 1.7976931348623157e308
+
+        /// 负无穷大
+        const NEGATIVE_INFINITY: Double = -1.7976931348623157e308
+
+        /// 非数字
+        const NaN: Double = 0.0
+
+        /// 位宽（64 位）
+        const BITS: Int = 64
+
+        /// 圆周率 π
+        const PI: Double = 3.141592653589793
+
+        /// 自然常数 e
+        const E: Double = 2.718281828459045
+
+        /// 从字符串解析为双精度浮点数
+        fun parseDouble(text: String): Double {
+            var result: Float = 0.0f
+            var sign: Int = 1
+            var i: Int = 0
+            if (i < text.length && text[i] == '-') {
+                sign = -1
+                i = i + 1
+            } else if (i < text.length && text[i] == '+') {
+                i = i + 1
+            }
+            var frac: Float = 0.0f
+            var divisor: Float = 1.0f
+            var afterDot = false
+            while (i < text.length) {
+                val c = text[i]
+                if (c == '.') {
+                    afterDot = true
+                    i = i + 1
+                    continue
+                }
+                if (c >= '0' && c <= '9') {
+                    val digit = (c - '0').toFloat()
+                    if (afterDot) {
+                        frac = frac * 10.0f + digit
+                        divisor = divisor * 10.0f
+                    } else {
+                        result = result * 10.0f + digit
+                    }
+                }
+                i = i + 1
+            }
+            return ((result + frac / divisor) * sign.toFloat()) as Double
+        }
+    }
+
+    // ── 转换方法 ──
+
+    /// 转换为 32 位整数（截断小数）
+    fun toInt(): Int {
+        return this as Int
+    }
+
+    /// 转换为 64 位长整数（截断小数）
+    fun toLong(): Long {
+        return this as Long
+    }
+
+    /// 转换为 32 位浮点数
+    fun toFloat(): Float {
+        return this as Float
+    }
+
+    /// 转换为字符串表示
+    override fun toString(): String {
+        return toStr(this)
+    }
+
+    /// 转换为布尔值（非零为 true）
+    fun toBoolean(): Boolean {
+        return this != 0.0
+    }
+
+    // ── 比较方法 ──
+
+    /// 比较两个双精度浮点数，返回 -1/0/1
+    fun compareTo(other: Double): Int {
+        if (this < other) return -1
+        if (this > other) return 1
+        return 0
+    }
+
+    /// 检查两个双精度浮点数是否相等
+    override fun equals(other: Double): Boolean {
+        return this == other
+    }
+
+    // ── 算术方法 ──
+
+    /// 绝对值
+    fun abs(): Double {
+        if (this < 0.0) return -this
+        return this
+    }
+
+    /// 返回两个双精度浮点数中的最大值
+    fun max(other: Double): Double {
+        if (this > other) return this
+        return other
+    }
+
+    /// 返回两个双精度浮点数中的最小值
+    fun min(other: Double): Double {
+        if (this < other) return this
+        return other
+    }
+
+    /// 取余
+    fun mod(other: Double): Double {
+        return this % other
+    }
+
+    /// 四舍五入
+    fun round(): Double {
+        if (this >= 0.0) {
+            return floor(this + 0.5)
+        } else {
+            return ceil(this - 0.5)
+        }
+    }
+
+    /// 向上取整
+    fun ceil(): Double {
+        // Rust native 实现（libm ceil）
+        return this
+    }
+
+    /// 向下取整
+    fun floor(): Double {
+        // Rust native 实现（libm floor）
+        return this
+    }
+
+    /// 截断小数部分
+    fun trunc(): Double {
+        // Rust native 实现（libm trunc）
+        return this
+    }
+}

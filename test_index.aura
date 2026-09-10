@@ -1,0 +1,6 @@
+class Test {
+    fun foo(): Int {
+        val s = "hello"
+        return s[0]
+    }
+}

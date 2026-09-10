@@ -1,0 +1,9 @@
+class MyStr {
+    fun foo(): Int {
+        return 42
+    }
+    
+    override fun toString(): String {
+        return "hello"
+    }
+}

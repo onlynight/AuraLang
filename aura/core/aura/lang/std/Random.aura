@@ -1,0 +1,172 @@
+// aura:///aura/lang/std/Random.aura
+// 标准库模块，不可修改
+// 实现：熵源（时钟/系统随机数）保留 native（Layer 0-A）；
+//       范围随机、选值、洗牌等全部以 Aura 编写（Layer 1）
+// (package 声明由编译器自动注入，无需显式声明)
+/// 随机数生成模块。
+///
+/// 只有"产生一个随机标量"和"设置种子"需要访问系统熵源，属于引导层；
+/// 其余函数（范围映射、随机选择、洗牌、取样）都建立在它们之上，
+/// 由 Aura 实现。
+///
+/// 使用前需 import：
+/// ```aura
+/// import aura.lang.std.Random
+/// ```
+///
+/// @since 0.1
+internal object Random {
+
+    // ── 熵源（native：需要系统时钟 / 随机源）──
+
+    /// 生成 [0, 2^31) 的随机整数。
+    val nextInt: Int
+
+    /// 生成 [0, 2^63) 的随机长整数。
+    val nextLong: Long
+
+    /// 生成 [0.0, 1.0) 的随机浮点数。
+    val nextFloat: Float
+
+    /// 生成 [0.0, 1.0) 的随机双精度浮点数。
+    val nextDouble: Double
+
+    /// 生成随机布尔值（true / false 各约 50%）。
+    val nextBool: Boolean
+
+    /// 设置随机数种子（相同种子产生相同序列）。
+    fun seed(value: Int): Unit
+
+    // ── 范围随机（纯逻辑，Aura 实现）──
+
+    /// 生成 `[min, max)` 范围内的随机整数；区间为空时返回 min。
+    fun nextIntRange(min: Int, max: Int): Int {
+        if (max <= min) {
+            return min
+        }
+        val span: Int = max - min
+        val raw: Int = absInt(nextInt)
+        return min + raw % span
+    }
+
+    /// 生成 `[min, max)` 范围内的随机长整数。
+    fun nextLongRange(min: Long, max: Long): Long {
+        if (max <= min) {
+            return min
+        }
+        val span: Long = max - min
+        return min + absLong(nextLong) % span
+    }
+
+    /// 生成 `[min, max)` 范围内的随机浮点数。
+    fun nextFloatRange(min: Float, max: Float): Float {
+        if (max <= min) {
+            return min
+        }
+        return min + nextFloat * (max - min)
+    }
+
+    /// 生成 `[0, bound)` 范围内的随机整数；bound <= 0 时返回 0。
+    fun nextIntBelow(bound: Int): Int {
+        return nextIntRange(0, bound)
+    }
+
+    // ── 概率（纯逻辑，Aura 实现）──
+
+    /// 以给定概率（0.0 - 1.0）返回 true。
+    fun chance(probability: Float): Boolean {
+        if (probability <= 0.0f) {
+            return false
+        }
+        if (probability >= 1.0f) {
+            return true
+        }
+        return nextFloat < probability
+    }
+
+    // ── 集合操作（纯逻辑，Aura 实现）──
+
+    /// 从列表中随机选择一个元素；列表为空返回 null。
+    fun choice(list: List<Any>): Any {
+        if (list.size == 0) {
+            return null
+        }
+        return list[nextIntRange(0, list.size)]
+    }
+
+    /// 从参数列表中随机选择一个元素；无参数返回 null。
+    fun choiceOf(vararg items: Any): Any {
+        if (items.size == 0) {
+            return null
+        }
+        return items[nextIntRange(0, items.size)]
+    }
+
+    /// 随机打乱列表顺序（返回新列表，不修改入参）。
+    fun shuffle(list: List<Any>): List<Any> {
+        val result: List<Any> = mutableListOf<Any>()
+        var i: Int = 0
+        while (i < list.size) {
+            result.add(list[i])
+            i = i + 1
+        }
+        var j: Int = result.size - 1
+        while (j > 0) {
+            val k: Int = nextIntRange(0, j + 1)
+            val tmp: Any = result[j]
+            result[j] = result[k]
+            result[k] = tmp
+            j = j - 1
+        }
+        return result
+    }
+
+    /// 无放回地抽取 n 个元素；n 超出长度时返回打乱后的整个列表。
+    fun sample(list: List<Any>, count: Int): List<Any> {
+        val shuffled: List<Any> = shuffle(list)
+        if (count >= shuffled.size) {
+            return shuffled
+        }
+        val result: List<Any> = mutableListOf<Any>()
+        var i: Int = 0
+        val limit: Int = if (count > 0) count else 0
+        while (i < limit) {
+            result.add(shuffled[i])
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 随机选取一个下标；长度为 0 时返回 -1。
+    fun nextIndex(list: List<Any>): Int {
+        if (list.size == 0) {
+            return -1
+        }
+        return nextIntRange(0, list.size)
+    }
+
+    // ── 便捷属性（纯逻辑，Aura 实现）──
+
+    /// 随机整数（`nextInt` 的别名，保留以兼容旧代码）。
+    val random: Int {
+        return nextInt
+    }
+
+    // ── 内部工具（纯逻辑，Aura 实现）──
+
+    /// 取整数绝对值（避免依赖 Math 造成循环引用）。
+    private fun absInt(value: Int): Int {
+        if (value < 0) {
+            return 0 - value
+        }
+        return value
+    }
+
+    /// 取长整数绝对值。
+    private fun absLong(value: Long): Long {
+        if (value < 0L) {
+            return 0L - value
+        }
+        return value
+    }
+}

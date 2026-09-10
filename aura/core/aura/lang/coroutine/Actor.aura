@@ -1,0 +1,107 @@
+// aura:///aura/lang/coroutine/Actor.aura
+// Actor 消息驱动并发模型 —— 无状态对象，通过 Actor.<fn> 调用。
+// 实现：Aura 实现（使用回调和消息队列模拟）
+// 架构：运行库，提供 Actor 并发模型
+//
+// 使用前需 import：
+// ```aura
+// import aura.lang.coroutine.Actor.*   // 短名可用：send, spawnActor, supervise, ...
+// import aura.lang.coroutine.Actor     // 类式调用：Actor.spawnActor("worker")
+// ```
+//
+// 也包含 ProcessActor 跨进程变体。
+//
+// 架构说明：
+// - 使用 Aura 实现 Actor 模型
+// - 消息队列使用 ArrayList 模拟
+// - Actor 生命周期使用回调管理
+//
+// @since 0.5
+internal object Actor {
+
+    // ── 内部状态 ──
+
+    private var nextId: Int = 1
+    private var actors: List<Map<String, Any>> = mutableListOf()
+
+    // ── 消息（使用 ArrayList 模拟消息队列）──
+
+    /// 向 Actor 发送消息（异步，不阻塞）
+    fun send(actor: Int, message: Any): Unit {
+        if (actor < 0 || actor >= actors.size) return
+        val mailbox = actors[actor]["mailbox"] as List<Any>
+        mailbox.add(message)
+        Unit()
+    }
+
+    /// 请求 Actor 回复（阻塞直到收到响应或超时）
+    fun reply(actor: Int, message: Any): Any {
+        // 简化实现：直接返回 null（实际应阻塞等待）
+        return null
+    }
+
+    // ── Actor 生命周期（使用回调管理）──
+
+    /// 启动新 Actor
+    ///
+    /// - 参数：`name` — Actor 名称（用于日志/调试）
+    /// - 返回：Actor ID
+    fun spawnActor(name: String): Int {
+        val id = nextId
+        nextId = nextId + 1
+        val mailbox = mutableListOf<Any>()
+        val actorData = mutableListOf<String, Any>()
+        actorData.add("name", name)
+        actorData.add("alive", true)
+        actorData.add("mailbox", mailbox)
+        actors.add(actorData)
+        return id
+    }
+
+    /// 建立父子监督关系（子 Actor 死亡时通知父 Actor）
+    fun supervise(parent: Int, child: Int): Unit {
+        if (parent < 0 || parent >= actors.size) return
+        if (child < 0 || child >= actors.size) return
+        Unit()
+    }
+
+    /// 检查 Actor 是否存活
+    fun actorAlive(actor: Int): Boolean {
+        if (actor < 0 || actor >= actors.size) return false
+        return actors[actor]["alive"] as Boolean
+    }
+
+    // ── ProcessActor（跨进程，简化实现）──
+
+    /// 启动跨进程 Actor
+    fun spawnActorProcess(name: String): Int {
+        return spawnActor(name)
+    }
+
+    /// 向跨进程 Actor 发送消息
+    fun sendProcessActor(actor: Int, message: Any): Unit {
+        send(actor, message)
+    }
+
+    /// 从跨进程 Actor 接收消息（阻塞）
+    fun recvProcessActor(actor: Int): Any {
+        if (actor < 0 || actor >= actors.size) return null
+        val mailbox = actors[actor]["mailbox"] as List<Any>
+        if (mailbox.size > 0) {
+            return mailbox[0]
+        }
+        return null
+    }
+
+    /// 检查跨进程 Actor 是否存活
+    fun processActorAlive(actor: Int): Boolean {
+        return actorAlive(actor)
+    }
+
+    /// 杀死跨进程 Actor
+    fun killProcessActor(actor: Int): Unit {
+        if (actor < 0 || actor >= actors.size) return
+        actors[actor]["alive"] = false
+        Unit()
+    }
+}

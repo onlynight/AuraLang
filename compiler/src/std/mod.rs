@@ -28,6 +28,9 @@
 pub mod decl;
 pub mod source_index;
 
+// Phase 3: 嵌入式标准库（预编译 AOT .auc 嵌入二进制）
+pub mod embedded_stdlib;
+
 // Phase 3: std 模块按需编译（#[cfg(feature)] 门控）
 // 默认不编译任何 std 模块，减小二进制体积。
 // 启用方式：cargo build --features "std-math,std-io"

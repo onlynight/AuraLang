@@ -307,7 +307,7 @@ Phantom Source Tree 是一组**只读的 `.aura` 源码文件**，描述基础�
 #### 4.1.2 目录结构
 
 ```
-phantom-source/
+core/
 ├── builtin/                     ← 基础类型（编译器内建）
 │   ├── Any.aura                 ← 运行时基类/顶级类型
 │   ├── Nothing.aura             ← 底部类型
@@ -1435,7 +1435,7 @@ Std-Prelude-改造方案.md 规划：
 ┌─────────────────────────────────────────────────────────────────────┐
 │ Phase 1: Phantom Source Tree 基础（1 周）                             │
 │                                                                       │
-│ • 创建 phantom-source/ 目录结构                                       │
+│ • 创建 core/ 目录结构                                       │
 │ • 编写 19 个基础类型的 .aura 文件（Int/Float/String/...）              │
 │ • 编写 prelu.aura（17 个免 import 函数）                              │
 │ • 编写 19 个 stdlib 模块的 .aura 文件                                 │
@@ -1443,8 +1443,8 @@ Std-Prelude-改造方案.md 规划：
 │ • 实现 SourceIndex 序列化/反序列化                                    │
 │                                                                       │
 │ 交付物：                                                              │
-│   phantom-source/builtin/*.aura    （19 个基础类型）                    │
-│   phantom-source/stdlib/aura/*/*.aura  （19 个模块）                   │
+│   core/builtin/*.aura    （19 个基础类型）                    │
+│   core/stdlib/aura/*/*.aura  （19 个模块）                   │
 │   compiler/src/std/source_index.rs （SourceIndex 结构体）              │
 │                                                                       │
 │ 验收：                                                                │
@@ -1525,8 +1525,8 @@ Std-Prelude-改造方案.md 规划：
 
 | 文件 | 修改类型 | 预估改动量 | Phase |
 |------|----------|-----------|-------|
-| `phantom-source/builtin/*.aura` | 新增 | ~2000 行 | P1 |
-| `phantom-source/stdlib/aura/*/*.aura` | 新增 | ~4000 行 | P1 |
+| `core/builtin/*.aura` | 新增 | ~2000 行 | P1 |
+| `core/stdlib/aura/*/*.aura` | 新增 | ~4000 行 | P1 |
 | `compiler/src/std/source_index.rs` | 新增 | ~200 行 | P1 |
 | `compiler/src/codegen/serialize.rs` | 修改 | +60 行 | P2 |
 | `compiler/src/docgen.rs` | 修改 | +80 行 | P2, P4 |
@@ -1576,7 +1576,7 @@ Std-Prelude-改造方案.md 规划：
 
 | 特性 | Java | Kotlin | Swift | Rust | Aura（本方案） |
 |------|------|--------|-------|------|---------------|
-| 基础类型有源码？ | ✅ JDK sources | ✅ kotlin stdlib | ✅ Swift stdlib | ✅ core/src | ✅ phantom-source/ |
+| 基础类型有源码？ | ✅ JDK sources | ✅ kotlin stdlib | ✅ Swift stdlib | ✅ core/src | ✅ core/ |
 | 源码随制品分发？ | ✅ `-sources.jar` | ✅ 内嵌 .kt | ✅ 含接口 | ✅ 含源码 | ✅ `.auz` 含 source/ |
 | IDE 可跳转？ | ✅ JDK sources 附加 | ✅ 内建导航 | ✅ SourceKit | ✅ rust-analyzer | ✅ LSP VFS |
 | 源码可修改？ | ❌ 只读 | ❌ 只读 | ❌ 只读 | ❌ 只读 | ❌ 只读 |

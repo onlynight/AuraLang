@@ -1,0 +1,214 @@
+// aura:///aura/lang/std/Console.aura
+// 标准库模块，不可修改
+// 实现：纯逻辑模块，全部以 Aura 编写（ANSI 转义序列生成）
+// (package 声明由编译器自动注入，无需显式声明)
+/// 控制台操作模块（ANSI 转义序列）。
+///
+/// 本模块本身不做任何 IO，只负责生成 ANSI 转义序列字符串；
+/// 需要真正输出时由调用方交给 `aura.lang.std.IO`。
+/// 唯一直接输出的成员是 `clear` / `cursorShow` / `cursorHide`，它们内部调用 `IO.print`。
+///
+/// 使用前需 import：
+/// ```aura
+/// import aura.lang.std.Console
+/// ```
+///
+/// @see IO
+/// @since 0.1
+
+import aura.lang.std.IO
+
+internal object Console {
+
+    // ── 内部常量 ──
+
+    /// ESC 控制字符（0x1B）。
+    private val ESC: String = String.fromCharCode(27)
+
+    /// 默认终端宽度。
+    const DEFAULT_WIDTH: Int = 80
+
+    /// 默认终端高度。
+    const DEFAULT_HEIGHT: Int = 24
+
+    // ── 光标控制（纯逻辑，Aura 实现）──
+
+    /// 清屏并把光标移到左上角。
+    fun clear(): Unit {
+        IO.print(ESC + "[2J" + ESC + "[H")
+    }
+
+    /// 光标上移 n 行。
+    fun cursorUp(lines: Int): String {
+        if (lines <= 0) { return "" }
+        return ESC + "[" + toStr(lines) + "A"
+    }
+
+    /// 光标下移 n 行。
+    fun cursorDown(lines: Int): String {
+        if (lines <= 0) { return "" }
+        return ESC + "[" + toStr(lines) + "B"
+    }
+
+    /// 光标左移 n 列。
+    fun cursorLeft(cols: Int): String {
+        if (cols <= 0) { return "" }
+        return ESC + "[" + toStr(cols) + "D"
+    }
+
+    /// 光标右移 n 列。
+    fun cursorRight(cols: Int): String {
+        if (cols <= 0) { return "" }
+        return ESC + "[" + toStr(cols) + "C"
+    }
+
+    /// 光标移到指定行列（1-based）。
+    fun cursorTo(line: Int, column: Int): String {
+        if (line <= 0 || column <= 0) { return "" }
+        return ESC + "[" + toStr(line) + ";" + toStr(column) + "H"
+    }
+
+    /// 显示光标。
+    fun cursorShow(): Unit {
+        IO.print(ESC + "[?25h")
+    }
+
+    /// 隐藏光标。
+    fun cursorHide(): Unit {
+        IO.print(ESC + "[?25l")
+    }
+
+    // ── 重置（纯逻辑，Aura 实现）──
+
+    /// 重置所有 ANSI 格式。
+    fun reset(): String {
+        return ESC + "[0m"
+    }
+
+    // ── 前景色（纯逻辑，Aura 实现）──
+
+    /// 黑色文本。
+    fun black(text: String): String {
+        return ESC + "[30m" + text + reset()
+    }
+
+    /// 红色文本。
+    fun red(text: String): String {
+        return ESC + "[31m" + text + reset()
+    }
+
+    /// 绿色文本。
+    fun green(text: String): String {
+        return ESC + "[32m" + text + reset()
+    }
+
+    /// 黄色文本。
+    fun yellow(text: String): String {
+        return ESC + "[33m" + text + reset()
+    }
+
+    /// 蓝色文本。
+    fun blue(text: String): String {
+        return ESC + "[34m" + text + reset()
+    }
+
+    /// 紫色文本。
+    fun magenta(text: String): String {
+        return ESC + "[35m" + text + reset()
+    }
+
+    /// 青色文本。
+    fun cyan(text: String): String {
+        return ESC + "[36m" + text + reset()
+    }
+
+    /// 白色文本。
+    fun white(text: String): String {
+        return ESC + "[37m" + text + reset()
+    }
+
+    /// 256 色前景色（0-255）。
+    fun color256(text: String, index: Int): String {
+        if (index < 0 || index > 255) { return text }
+        return ESC + "[38;5;" + toStr(index) + "m" + text + reset()
+    }
+
+    /// 真彩色前景色（RGB，各分量 0-255）。
+    fun rgb(text: String, r: Int, g: Int, b: Int): String {
+        return ESC + "[38;2;" + toStr(r) + ";" + toStr(g) + ";" + toStr(b) + "m" + text + reset()
+    }
+
+    // ── 背景色（纯逻辑，Aura 实现）──
+
+    /// 红色背景。
+    fun onRed(text: String): String {
+        return ESC + "[41m" + text + reset()
+    }
+
+    /// 绿色背景。
+    fun onGreen(text: String): String {
+        return ESC + "[42m" + text + reset()
+    }
+
+    /// 黄色背景。
+    fun onYellow(text: String): String {
+        return ESC + "[43m" + text + reset()
+    }
+
+    /// 蓝色背景。
+    fun onBlue(text: String): String {
+        return ESC + "[44m" + text + reset()
+    }
+
+    // ── 样式（纯逻辑，Aura 实现）──
+
+    /// 粗体文本。
+    fun bold(text: String): String {
+        return ESC + "[1m" + text + reset()
+    }
+
+    /// 斜体文本。
+    fun italic(text: String): String {
+        return ESC + "[3m" + text + reset()
+    }
+
+    /// 下划线文本。
+    fun underline(text: String): String {
+        return ESC + "[4m" + text + reset()
+    }
+
+    /// 暗色文本。
+    fun dim(text: String): String {
+        return ESC + "[2m" + text + reset()
+    }
+
+    /// 反色文本。
+    fun inverse(text: String): String {
+        return ESC + "[7m" + text + reset()
+    }
+
+    /// 删除线文本。
+    fun strikethrough(text: String): String {
+        return ESC + "[9m" + text + reset()
+    }
+
+    // ── 屏幕尺寸（终端尺寸探测为 native；此处给出稳定默认值）──
+
+    /// 屏幕尺寸（[width, height]）。
+    val size: List<Int> {
+        val result: List<Int> = mutableListOf<Int>()
+        result.add(DEFAULT_WIDTH)
+        result.add(DEFAULT_HEIGHT)
+        return result
+    }
+
+    /// 屏幕宽度。
+    val width: Int {
+        return 80
+    }
+
+    /// 屏幕高度。
+    val height: Int {
+        return 24
+    }
+}

@@ -1,0 +1,120 @@
+// aura:///aura/compiler/aura/lang/compiler/vm/Frames.aura
+// 虚拟机栈帧管理（Phase 4: 完整 VM Aura 编写）
+/// 虚拟机栈帧管理。
+///
+/// @since 0.5
+internal object Frames {
+
+    // ── 常量 ──
+
+    /// 默认栈大小（初始值）
+    const DEFAULT_STACK_SIZE: Int = 64
+
+    /// 默认局部变量槽数量
+    const DEFAULT_LOCALS_SIZE: Int = 32
+
+    // ── 栈帧操作 ──
+
+    /// 创建新的栈帧。
+    fun new(arity: Int): Map<String, Any> {
+        val frame: Map<String, Any> = Collections.mutableMapOf()
+        frame["ip"] = 0
+        frame["stack"] = Collections.emptyList()
+        frame["locals"] = Collections.emptyList()
+        frame["upvalues"] = Collections.emptyList()
+        frame["arity"] = arity
+        return frame
+    }
+
+    /// 获取栈帧当前指令指针。
+    fun getIp(frame: Map<String, Any>): Int {
+        return frame["ip"] as Int
+    }
+
+    /// 获取栈帧栈深度。
+    fun stackDepth(frame: Map<String, Any>): Int {
+        return (frame["stack"] as List<Any>).size
+    }
+
+    /// 检查栈是否为空。
+    fun isEmpty(frame: Map<String, Any>): Boolean {
+        return (frame["stack"] as List<Any>).size == 0
+    }
+
+    // ── 栈操作 ──
+
+    /// 压栈一个值。
+    fun push(frame: Map<String, Any>, value: Any): Unit {
+        (frame["stack"] as List<Any>).add(value)
+    }
+
+    /// 弹出栈顶值。
+    fun pop(frame: Map<String, Any>): Any {
+        val stack = frame["stack"] as List<Any>
+        val size = stack.size
+        if (size == 0) {
+            throw Runtime("Stack underflow in frame")
+        }
+        return stack[size - 1]
+    }
+
+    /// 查看栈顶值（不弹出）。
+    fun peek(frame: Map<String, Any>): Any {
+        val stack = frame["stack"] as List<Any>
+        val size = stack.size
+        if (size == 0) {
+            throw Runtime("Stack underflow: peek on empty stack")
+        }
+        return stack[size - 1]
+    }
+
+    // ── 局部变量操作 ──
+
+    /// 获取指定索引的局部变量。
+    fun getLocal(frame: Map<String, Any>, index: Int): Any {
+        val locals = frame["locals"] as List<Any>
+        if (index >= locals.size) {
+            throw Runtime("Local index out of bounds: " + index)
+        }
+        return locals[index]
+    }
+
+    /// 检查局部变量索引是否有效。
+    fun hasLocal(frame: Map<String, Any>, index: Int): Boolean {
+        val locals = frame["locals"] as List<Any>
+        return index < locals.size
+    }
+
+    /// 获取函数参数数量。
+    fun arity(frame: Map<String, Any>): Int {
+        return frame["arity"] as Int
+    }
+
+    // ── 上值（闭包）操作 ──
+
+    /// 获取指定索引的上值。
+    fun getUpvalue(frame: Map<String, Any>, index: Int): Any {
+        val upvalues = frame["upvalues"] as List<Any>
+        if (index >= upvalues.size) {
+            throw Runtime("Upvalue index out of bounds: " + index)
+        }
+        return upvalues[index]
+    }
+
+    /// 获取上值数量。
+    fun upvalueCount(frame: Map<String, Any>): Int {
+        return (frame["upvalues"] as List<Any>).size
+    }
+
+    // ── 帧调试信息 ──
+
+    /// 获取栈帧的调试字符串。
+    fun debugString(frame: Map<String, Any>): String {
+        return "Frames{ip=" + frame["ip"] + ", arity=" + frame["arity"] + "}"
+    }
+
+    /// 检查栈帧是否完整（所有指针和大小有效）。
+    fun isValid(frame: Map<String, Any>): Boolean {
+        return (frame["ip"] as Int) >= 0
+    }
+}

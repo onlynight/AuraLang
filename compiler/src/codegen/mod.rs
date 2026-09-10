@@ -32,6 +32,16 @@ pub mod aot;
 #[cfg(feature = "llvm")]
 pub mod aot_embed;
 
+// Phase 3: 标准库集成
+pub mod execution;
+pub mod ffi_aot;
+pub mod link_stdlib;
+pub mod resolve_stdlib;
+
+// Phase 5: FFI 缓存与优化
+pub mod ffi_cache;
+pub mod ffi_optimize;
+
 pub use disasm::disassemble;
 pub use emit::{emit_module, find_const};
 pub use hir::{HirProgram, desugar_program, desugar_program_with, synthesize_main_if_missing};
@@ -182,7 +192,7 @@ pub fn compile_source(source: &str) -> Result<BytecodeModule, String> {
 
     // 语义：P3 的类型检查存在已知局限（如泛型实例化），因此语义诊断仅作为
     // 警告输出，不阻断代码生成——降级阶段结构化处理，P4 目标是产出合法字节码。
-    let (_ast, sema) = analyze_source(source);
+    let (ast, sema) = analyze_source(source);
     let serrs: Vec<String> = sema
         .errors
         .iter()
@@ -194,13 +204,13 @@ pub fn compile_source(source: &str) -> Result<BytecodeModule, String> {
     }
 
     // Phase 1c: 提取启用的 std 模块（按需链接）
-    let enabled_modules = extract_enabled_modules(&program);
+    let enabled_modules = extract_enabled_modules(&ast);
     let opts = CodeGenOptions {
         optimize: true,
         enabled_modules,
     };
 
-    Ok(compile_with_info(&program, &opts, &sema.info))
+    Ok(compile_with_info(&ast, &opts, &sema.info))
 }
 
 /// 预处理：解析 `import "path.aura"` 语句，将外部 `.aura` 文件内容内联
@@ -374,4 +384,81 @@ fn generate_source_index_from_phantom() -> Option<crate::std::source_index::Sour
     }
 
     None
+}
+
+/// Phase 3: Compile source code with stdlib linking.
+///
+/// This function:
+/// 1. Compiles the application source code into a bytecode module
+/// 2. Loads stdlib .auc files from the specified directory
+/// 3. Links stdlib symbols into the application module
+/// 4. Resolves stdlib function/type/constant references
+/// 5. Configures execution mode (VM/JIT/AOT)
+/// 6. Configures FFI AOT direct calls
+///
+/// # Arguments
+/// * `source` - Application Aura source code
+/// * `stdlib_auc_dir` - Directory containing stdlib .auc files
+/// * `execution_mode` - Target execution mode
+/// * `ffi_mode` - FFI mode (Aot/Cffi/RustFfi)
+///
+/// # Returns
+/// A fully linked `BytecodeModule` ready for execution.
+pub fn compile_source_with_stdlib(
+    source: &str,
+    stdlib_auc_dir: &std::path::Path,
+    execution_mode: ffi_aot::ExecutionMode,
+    ffi_mode: FfiMode,
+) -> Result<BytecodeModule, String> {
+    // 1. Compile application source code
+    let mut module = compile_source(source)?;
+
+    // 2. Link stdlib symbols
+    let link_result = link_stdlib::link_stdlib_symbols(&mut module, stdlib_auc_dir)?;
+    eprintln!(
+        "stdlib linked: {} modules, {} symbols",
+        link_result.modules_linked, link_result.symbols_resolved
+    );
+
+    // 3. Resolve stdlib calls
+    let stdlib_exports: Vec<_> = module.exports.iter().cloned().collect();
+    let resolution_result = resolve_stdlib::resolve_stdlib_calls(&module, &stdlib_exports);
+    eprintln!(
+        "stdlib resolved: {} symbols, {} unresolved",
+        resolution_result.resolved.len(),
+        resolution_result.unresolved.len()
+    );
+
+    // 4. Configure execution mode
+    let exec_config = execution::ExecutionConfig {
+        mode: match execution_mode {
+            ffi_aot::ExecutionMode::Vm => execution::ExecutionMode::Vm,
+            ffi_aot::ExecutionMode::Jit => execution::ExecutionMode::Jit,
+            ffi_aot::ExecutionMode::Aot => execution::ExecutionMode::Aot,
+        },
+        ..Default::default()
+    };
+    let exec_result = execution::configure_execution_mode(&mut module, &exec_config);
+    eprintln!("execution configured: {}", exec_result.mode);
+
+    // 5. Configure FFI AOT direct calls (if AOT mode)
+    if ffi_mode == FfiMode::Aot {
+        let ffi_config = ffi_aot::FfiAotConfig::default();
+        let ffi_result = ffi_aot::configure_ffi_aot_direct(&module, execution_mode, &ffi_config)?;
+        eprintln!(
+            "FFI AOT configured: {} declarations ({})",
+            ffi_result.declarations_configured, ffi_result.execution_mode
+        );
+    }
+
+    Ok(module)
+}
+
+/// FFI mode for Phase 3 compilation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FfiMode {
+    #[default]
+    Aot,
+    Cffi,
+    RustFfi,
 }

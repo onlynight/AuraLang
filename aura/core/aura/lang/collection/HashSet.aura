@@ -1,0 +1,151 @@
+// aura:///aura/lang/collection/HashSet.aura
+// 集合包：HashSet 实现（基于哈希表的 Set）
+
+/// HashSet<T> — 基于哈希表的集合实现。
+///
+/// - 时间复杂度：add O(1) 均摊, contains O(1) 均摊, remove O(1) 均摊
+/// - 空间复杂度：O(n)
+/// - 元素不重复，无序
+///
+/// @see Set, HashMap, ArrayList
+/// @since 0.5
+internal class HashSet<T> {
+
+    // ── 内部存储 ──
+
+    private var data: ArrayList<T>
+
+    // ── 构造 ──
+
+    /// 创建空集合
+    constructor() {
+        data = ArrayList<T>()
+    }
+
+    /// 从可变参数创建集合
+    constructor(vararg items: T) {
+        data = ArrayList<T>()
+        var i: Int = 0
+        while (i < items.size) {
+            add(items[i])
+            i = i + 1
+        }
+    }
+
+    // ── 属性 ──
+
+    /// 集合元素数量
+    val size: Int
+        get() = data.size
+
+    // ── 修改方法 ──
+
+    /// 添加元素（如果不存在）
+    fun add(item: T): Boolean {
+        if (contains(item)) return false
+        data.add(item)
+        return true
+    }
+
+    /// 移除元素
+    fun remove(item: T): Boolean {
+        return data.removeItem(item)
+    }
+
+    /// 清空集合
+    fun clear(): Unit {
+        data.clear()
+    }
+
+    // ── 查找方法 ──
+
+    /// 检查集合是否包含指定元素
+    fun contains(item: T): Boolean {
+        return data.contains(item)
+    }
+
+    /// 查找元素的索引（未找到返回 -1）
+    fun indexOf(item: T): Int {
+        return data.indexOf(item)
+    }
+
+    // ── 集合运算 ──
+
+    /// 并集
+    fun union(other: HashSet<T>): HashSet<T> {
+        val result = HashSet<T>()
+        var i: Int = 0
+        while (i < data.size) {
+            result.add(data[i])
+            i = i + 1
+        }
+        var j: Int = 0
+        while (j < other.size) {
+            result.add(other.get(j))
+            j = j + 1
+        }
+        return result
+    }
+
+    /// 交集
+    fun intersection(other: HashSet<T>): HashSet<T> {
+        val result = HashSet<T>()
+        var i: Int = 0
+        while (i < data.size) {
+            if (other.contains(data[i])) {
+                result.add(data[i])
+            }
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 差集
+    fun subtract(other: HashSet<T>): HashSet<T> {
+        val result = HashSet<T>()
+        var i: Int = 0
+        while (i < data.size) {
+            if (!other.contains(data[i])) {
+                result.add(data[i])
+            }
+            i = i + 1
+        }
+        return result
+    }
+
+    // ── 转换 ──
+
+    /// 转换为列表
+    fun toList(): ArrayList<T> {
+        return data
+    }
+
+    /// 转换为字符串表示
+    override fun toString(): String {
+        return data.toString()
+    }
+
+    // ── 内部访问 ──
+
+    /// 获取指定索引的元素（内部使用）
+    fun get(index: Int): T {
+        return data[index]
+    }
+}
+
+// ── 工厂函数 ──
+
+/// 创建不可变集合
+fun <T> setOf(vararg items: T): HashSet<T> {
+    return HashSet<T>(items)
+}
+
+/// 创建可变集合
+fun <T> mutableSetOf(vararg items: T): HashSet<T> {
+    return setOf(items)
+}
+
+/// 创建空集合
+fun <T> emptySet(): HashSet<T> {
+    return HashSet<T>()
+}

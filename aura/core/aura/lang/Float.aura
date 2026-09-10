@@ -1,0 +1,191 @@
+// aura:///aura/lang/Float.aura
+// 语言内置类型，不可修改
+
+/// 32 位单精度浮点数类型。
+///
+/// - 范围：约 ±1.4 × 10⁻⁴⁵ 到 ±3.4 × 10³⁸
+/// - 精度：约 7 位有效数字
+/// - 存储：VM 中内联存储为 f64（`Value::Float`），AOT 中映射为 `f32`
+/// - 字面量：以 `f` 后缀标识（如 `3.14f`）
+///
+/// @see Double, Int, Long
+/// @since 0.1
+internal value class Float {
+
+    // ── 常量（companion object）──
+
+    companion object {
+        /// 浮点数最小正值
+        const MIN_VALUE: Float = 1.4e-45f
+
+        /// 浮点数最大值
+        const MAX_VALUE: Float = 3.4028235e38f
+
+        /// 正无穷大
+        const POSITIVE_INFINITY: Float = 3.4028235e38f
+
+        /// 负无穷大
+        const NEGATIVE_INFINITY: Float = -3.4028235e38f
+
+        /// 非数字
+        const NaN: Float = 0.0f
+
+        /// 位宽（32 位）
+        const BITS: Int = 32
+
+        /// 圆周率 π
+        const PI: Float = 3.14159265f
+
+        /// 自然常数 e
+        const E: Float = 2.71828182f
+    }
+
+    // ── 转换方法 ──
+
+    /// 转换为 32 位整数（截断小数）
+    fun toInt(): Int {
+        return this as Int
+    }
+
+    /// 转换为 64 位长整数（截断小数）
+    fun toLong(): Long {
+        return this as Long
+    }
+
+    /// 转换为 64 位双精度浮点数
+    fun toDouble(): Double {
+        return this as Double
+    }
+
+    /// 转换为字符串表示
+    override fun toString(): String {
+        return toStr(this)
+    }
+
+    /// 转换为布尔值（非零为 true）
+    fun toBoolean(): Boolean {
+        return this != 0.0f
+    }
+
+    // ── 比较方法 ──
+
+    /// 比较两个浮点数，返回 -1/0/1
+    fun compareTo(other: Float): Int {
+        if (this < other) return -1
+        if (this > other) return 1
+        return 0
+    }
+
+    /// 检查两个浮点数是否相等
+    override fun equals(other: Float): Boolean {
+        return this == other
+    }
+
+    // ── 算术方法 ──
+
+    /// 绝对值
+    fun abs(): Float {
+        if (this < 0.0f) return -this
+        return this
+    }
+
+    /// 返回两个浮点数中的最大值
+    fun max(other: Float): Float {
+        if (this > other) return this
+        return other
+    }
+
+    /// 返回两个浮点数中的最小值
+    fun min(other: Float): Float {
+        if (this < other) return this
+        return other
+    }
+
+    /// 取余
+    fun mod(other: Float): Float {
+        return this % other
+    }
+
+    /// 四舍五入
+    fun round(): Float {
+        if (this >= 0.0f) {
+            return floor(this + 0.5f)
+        } else {
+            return ceil(this - 0.5f)
+        }
+    }
+
+    /// 向上取整
+    fun ceil(): Float {
+        // Rust native 实现（libm ceil）
+        return this
+    }
+
+    /// 向下取整
+    fun floor(): Float {
+        // Rust native 实现（libm floor）
+        return this
+    }
+
+    /// 截断小数部分
+    fun trunc(): Float {
+        // Rust native 实现（libm trunc）
+        return this
+    }
+
+    // ── 数学方法（Rust native 实现）──
+
+    /// 平方根
+    fun sqrt(): Float {
+        // Rust native 实现（libm sqrt）
+        return this
+    }
+
+    /// 立方根
+    fun cbrt(): Float {
+        // Rust native 实现（libm cbrt）
+        return this
+    }
+
+    /// 计算幂
+    fun pow(exp: Float): Float {
+        // Rust native 实现（libm powf）
+        return this
+    }
+
+    /// 自然对数
+    fun log(): Float {
+        // Rust native 实现（libm log）
+        return this
+    }
+
+    /// 以 2 为底的对数
+    fun log2(): Float {
+        // Rust native 实现（libm log2）
+        return this
+    }
+
+    /// 以 10 为底的对数
+    fun log10(): Float {
+        // Rust native 实现（libm log10）
+        return this
+    }
+
+    /// 正弦（弧度）
+    fun sin(): Float {
+        // Rust native 实现（libm sin）
+        return this
+    }
+
+    /// 余弦（弧度）
+    fun cos(): Float {
+        // Rust native 实现（libm cos）
+        return this
+    }
+
+    /// 正切（弧度）
+    fun tan(): Float {
+        // Rust native 实现（libm tan）
+        return this
+    }
+}

@@ -1,0 +1,501 @@
+// aura:///aura/lang/std/Iter.aura
+// 标准库模块，不可修改
+// 实现：纯逻辑模块，全部以 Aura 编写（仅依赖 List / Map 的内置能力）
+// (package 声明由编译器自动注入，无需显式声明)
+/// 迭代器与函数式工具模块。
+///
+/// 所有函数都以 `List<Any>`（或 `Map`）为输入并返回新的集合，
+/// 不修改传入的集合，也不依赖任何 native 实现。
+///
+/// 使用前需 import：
+/// ```aura
+/// import aura.lang.std.Iter
+/// ```
+///
+/// @since 0.1
+
+import aura.lang.std.Collections
+
+internal object Iter {
+
+    // ── 聚合（纯逻辑，Aura 实现）──
+
+    /// 计算所有元素的和（按 Float 累加，空列表返回 0）。
+    fun sum(list: List<Any>): Any {
+        if (list.size == 0) { return 0 }
+        var result: Float = toFloat(list[0])
+        var i: Int = 1
+        while (i < list.size) {
+            result = result + toFloat(list[i])
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 计算所有元素的平均值（空列表返回 0.0）。
+    fun avg(list: List<Any>): Float {
+        if (list.size == 0) { return 0.0f }
+        var total: Float = 0.0f
+        var i: Int = 0
+        while (i < list.size) {
+            total = total + toFloat(list[i])
+            i = i + 1
+        }
+        return total / toFloat(list.size)
+    }
+
+    /// 获取最小值（空列表返回 null）。
+    fun min(list: List<Any>): Any {
+        if (list.size == 0) { return null }
+        var result: Float = toFloat(list[0])
+        var i: Int = 1
+        while (i < list.size) {
+            val v: Float = toFloat(list[i])
+            if (v < result) result = v
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 获取最大值（空列表返回 null）。
+    fun max(list: List<Any>): Any {
+        if (list.size == 0) { return null }
+        var result: Float = toFloat(list[0])
+        var i: Int = 1
+        while (i < list.size) {
+            val v: Float = toFloat(list[i])
+            if (v > result) result = v
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 计算所有元素的积（空列表返回 1）。
+    fun product(list: List<Any>): Any {
+        if (list.size == 0) { return 1 }
+        var result: Float = toFloat(list[0])
+        var i: Int = 1
+        while (i < list.size) {
+            result = result * toFloat(list[i])
+            i = i + 1
+        }
+        return result
+    }
+
+    // ── 查找（纯逻辑，Aura 实现）──
+
+    /// 检查列表是否包含指定元素（按字符串表示比较）。
+    fun contains(list: List<Any>, item: Any): Boolean {
+        return indexOf(list, item) >= 0
+    }
+
+    /// 查找元素的索引（未找到返回 -1）。
+    fun indexOf(list: List<Any>, item: Any): Int {
+        var i: Int = 0
+        while (i < list.size) {
+            if (toStr(list[i]) == toStr(item)) { return i }
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// 查找元素的最后索引（未找到返回 -1）。
+    fun lastIndexOf(list: List<Any>, item: Any): Int {
+        var i: Int = list.size - 1
+        while (i >= 0) {
+            if (toStr(list[i]) == toStr(item)) { return i }
+            i = i - 1
+        }
+        return -1
+    }
+
+    /// 获取元素数量。
+    fun count(list: List<Any>): Int {
+        return list.size
+    }
+
+    /// 统计满足条件的元素个数。
+    fun countWhere(list: List<Any>, predicate: (Any) -> Boolean): Int {
+        var total: Int = 0
+        var i: Int = 0
+        while (i < list.size) {
+            if (predicate(list[i])) total = total + 1
+            i = i + 1
+        }
+        return total
+    }
+
+    // ── 全量检查（纯逻辑，Aura 实现）──
+
+    /// 检查是否所有元素都满足条件（空列表返回 true）。
+    fun every(list: List<Any>, predicate: (Any) -> Boolean): Boolean {
+        var i: Int = 0
+        while (i < list.size) {
+            if (!predicate(list[i])) { return false }
+            i = i + 1
+        }
+        return true
+    }
+
+    /// 检查是否存在满足条件的元素。
+    fun some(list: List<Any>, predicate: (Any) -> Boolean): Boolean {
+        var i: Int = 0
+        while (i < list.size) {
+            if (predicate(list[i])) { return true }
+            i = i + 1
+        }
+        return false
+    }
+
+    /// 检查列表是否为空。
+    fun none(list: List<Any>): Boolean {
+        return list.size == 0
+    }
+
+    // ── 转换（纯逻辑，Aura 实现）──
+
+    /// 映射：把每个元素转换为新值。
+    fun map(list: List<Any>, transform: (Any) -> Any): List<Any> {
+        val result: List<Any> = mutableListOf<Any>()
+        var i: Int = 0
+        while (i < list.size) {
+            result.add(transform(list[i]))
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 过滤：保留满足条件的元素。
+    fun filter(list: List<Any>, predicate: (Any) -> Boolean): List<Any> {
+        val result: List<Any> = mutableListOf<Any>()
+        var i: Int = 0
+        while (i < list.size) {
+            if (predicate(list[i])) result.add(list[i])
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 扁平化映射（每个元素映射为列表，然后合并）。
+    fun flatMap(list: List<Any>, transform: (Any) -> Any): List<Any> {
+        val result: List<Any> = mutableListOf<Any>()
+        var i: Int = 0
+        while (i < list.size) {
+            val raw: Any = transform(list[i])
+            if (raw != null) {
+                val sub: List<Any> = raw as List<Any>
+                var j: Int = 0
+                while (j < sub.size) {
+                    result.add(sub[j])
+                    j = j + 1
+                }
+            }
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 与另一个列表配对（长度为两者较短者）。
+    fun zip(list1: List<Any>, list2: List<Any>): List<Any> {
+        val result: List<Any> = mutableListOf<Any>()
+        val n: Int = if (list1.size < list2.size) list1.size else list2.size
+        var i: Int = 0
+        while (i < n) {
+            val pair: List<Any> = mutableListOf<Any>()
+            pair.add(list1[i])
+            pair.add(list2[i])
+            result.add(pair)
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 解配对（把 `[[a1, b1], [a2, b2]]` 拆成 `[[a1, a2], [b1, b2]]`）。
+    fun unzip(paired: List<Any>): List<Any> {
+        val first: List<Any> = mutableListOf<Any>()
+        val second: List<Any> = mutableListOf<Any>()
+        var i: Int = 0
+        while (i < paired.size) {
+            val pair: List<Any> = paired[i] as List<Any>
+            if (pair.size > 0) first.add(pair[0])
+            if (pair.size > 1) second.add(pair[1])
+            i = i + 1
+        }
+        val result: List<Any> = mutableListOf<Any>()
+        result.add(first)
+        result.add(second)
+        return result
+    }
+
+    /// 枚举（每个元素变为 `[index, element]`）。
+    fun enumerate(list: List<Any>): List<Any> {
+        val result: List<Any> = mutableListOf<Any>()
+        var i: Int = 0
+        while (i < list.size) {
+            val entry: List<Any> = mutableListOf<Any>()
+            entry.add(i)
+            entry.add(list[i])
+            result.add(entry)
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 链接多个列表。
+    fun chain(vararg lists: List<Any>): List<Any> {
+        val result: List<Any> = mutableListOf<Any>()
+        var li: Int = 0
+        while (li < lists.size) {
+            val sub: List<Any> = lists[li]
+            var i: Int = 0
+            while (i < sub.size) {
+                result.add(sub[i])
+                i = i + 1
+            }
+            li = li + 1
+        }
+        return result
+    }
+
+    /// 反转列表。
+    fun reverse(list: List<Any>): List<Any> {
+        val result: List<Any> = mutableListOf<Any>()
+        var i: Int = list.size - 1
+        while (i >= 0) {
+            result.add(list[i])
+            i = i - 1
+        }
+        return result
+    }
+
+    // ── 范围操作（纯逻辑，Aura 实现）──
+
+    /// 取前 n 个元素（n 超出长度时返回整个列表）。
+    fun take(list: List<Any>, n: Int): List<Any> {
+        val result: List<Any> = mutableListOf<Any>()
+        var i: Int = 0
+        val limit: Int = if (n < list.size) n else list.size
+        while (i < limit) {
+            result.add(list[i])
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 跳过前 n 个元素。
+    fun skip(list: List<Any>, n: Int): List<Any> {
+        val result: List<Any> = mutableListOf<Any>()
+        var i: Int = if (n > 0) n else 0
+        while (i < list.size) {
+            result.add(list[i])
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 从头丢弃满足条件的元素，返回剩余部分（保留首个不满足条件的元素及其后全部元素）。
+    fun dropWhile(list: List<Any>, predicate: (Any) -> Boolean): List<Any> {
+        val result: List<Any> = mutableListOf<Any>()
+        var i: Int = 0
+        var dropping: Boolean = true
+        while (i < list.size) {
+            if (dropping && predicate(list[i])) {
+                i = i + 1
+            } else {
+                dropping = false
+                result.add(list[i])
+                i = i + 1
+            }
+        }
+        return result
+    }
+
+    /// 从头取出满足条件的元素，遇到首个不满足条件的元素即停止。
+    fun takeWhile(list: List<Any>, predicate: (Any) -> Boolean): List<Any> {
+        val result: List<Any> = mutableListOf<Any>()
+        var i: Int = 0
+        while (i < list.size) {
+            if (!predicate(list[i])) { break }
+            result.add(list[i])
+            i = i + 1
+        }
+        return result
+    }
+
+    // ── 去重与分组（纯逻辑，Aura 实现）──
+
+    /// 获取所有不同元素（保持首次出现的顺序，按字符串表示去重）。
+    fun distinct(list: List<Any>): List<Any> {
+        val result: List<Any> = mutableListOf<Any>()
+        var i: Int = 0
+        while (i < list.size) {
+            if (indexOf(result, list[i]) < 0) {
+                result.add(list[i])
+            }
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 按分组键分组。
+    fun groupBy(list: List<Any>, keySelector: (Any) -> Any): Map<Any, List<Any>> {
+        val result: Map<Any, List<Any>> = Collections.mutableMapOf()
+        var i: Int = 0
+        while (i < list.size) {
+            val key: Any = keySelector(list[i])
+            val existing: List<Any> = result[key]
+            if (existing == null) {
+                val bucket: List<Any> = mutableListOf<Any>()
+                bucket.add(list[i])
+                result[key] = bucket
+            } else {
+                existing.add(list[i])
+            }
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 按条件分区为 `[满足条件的元素, 不满足条件的元素]`。
+    fun partition(list: List<Any>, predicate: (Any) -> Boolean): List<Any> {
+        val trueList: List<Any> = mutableListOf<Any>()
+        val falseList: List<Any> = mutableListOf<Any>()
+        var i: Int = 0
+        while (i < list.size) {
+            if (predicate(list[i])) {
+                trueList.add(list[i])
+            } else {
+                falseList.add(list[i])
+            }
+            i = i + 1
+        }
+        val result: List<Any> = mutableListOf<Any>()
+        result.add(trueList)
+        result.add(falseList)
+        return result
+    }
+
+    // ── 折叠与扫描（纯逻辑，Aura 实现）──
+
+    /// 折叠归约。
+    fun fold(list: List<Any>, initial: Any, accumulator: (Any, Any) -> Any): Any {
+        var acc: Any = initial
+        var i: Int = 0
+        while (i < list.size) {
+            acc = accumulator(acc, list[i])
+            i = i + 1
+        }
+        return acc
+    }
+
+    /// 折叠归约（`fold` 别名，参数顺序与 `fold` 相同）。
+    fun reduce(list: List<Any>, initial: Any, accumulator: (Any, Any) -> Any): Any {
+        return fold(list, initial, accumulator)
+    }
+
+    /// 扫描（运行累计，结果含初始值，长度为 `list.size + 1`）。
+    fun scan(list: List<Any>, initial: Any, accumulator: (Any, Any) -> Any): List<Any> {
+        val result: List<Any> = mutableListOf<Any>()
+        var acc: Any = initial
+        result.add(acc)
+        var i: Int = 0
+        while (i < list.size) {
+            acc = accumulator(acc, list[i])
+            result.add(acc)
+            i = i + 1
+        }
+        return result
+    }
+
+    // ── 集合转换（纯逻辑，Aura 实现）──
+
+    /// 把 `[[k, v], ...]` 转换为 Map。
+    fun toMap(list: List<Any>): Map<Any, Any> {
+        val result: Map<Any, Any> = Collections.mutableMapOf()
+        var i: Int = 0
+        while (i < list.size) {
+            val pair: List<Any> = list[i] as List<Any>
+            if (pair.size >= 2) {
+                result[pair[0]] = pair[1]
+            }
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 转换为列表（浅拷贝）。
+    fun toList(list: List<Any>): List<Any> {
+        val result: List<Any> = mutableListOf<Any>()
+        var i: Int = 0
+        while (i < list.size) {
+            result.add(list[i])
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 用分隔符连接元素的字符串表示。
+    fun joinToString(list: List<Any>, separator: String): String {
+        var result: String = ""
+        var i: Int = 0
+        while (i < list.size) {
+            if (i > 0) result = result + separator
+            result = result + toStr(list[i])
+            i = i + 1
+        }
+        return result
+    }
+
+    // ── 范围生成（纯逻辑，Aura 实现）──
+
+    /// 生成半开区间 `[from, to)` 的整数列表。
+    fun range(from: Int, to: Int): List<Int> {
+        val result: List<Int> = mutableListOf<Int>()
+        var i: Int = from
+        while (i < to) {
+            result.add(i)
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 生成闭区间 `[from, to]` 的整数列表。
+    fun rangeTo(from: Int, to: Int): List<Int> {
+        return range(from, to + 1)
+    }
+
+    /// 生成半开区间 `[from, to)` 的整数列表（`range` 别名）。
+    fun rangeUntil(from: Int, to: Int): List<Int> {
+        return range(from, to)
+    }
+
+    /// 生成重复 n 次的列表。
+    fun repeatN(item: Any, times: Int): List<Any> {
+        val result: List<Any> = mutableListOf<Any>()
+        var i: Int = 0
+        while (i < times) {
+            result.add(item)
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 生成带步长的半开区间整数列表（步长不能为 0）。
+    fun stepRange(from: Int, to: Int, step: Int): List<Int> {
+        val result: List<Int> = mutableListOf<Int>()
+        if (step == 0) { return result }
+        var i: Int = from
+        if (step > 0) {
+            while (i < to) {
+                result.add(i)
+                i = i + step
+            }
+        } else {
+            while (i > to) {
+                result.add(i)
+                i = i + step
+            }
+        }
+        return result
+    }
+}
