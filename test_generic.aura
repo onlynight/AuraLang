@@ -1,3 +1,0 @@
-fun testGeneric(list: List<Int>): Int {
-    return 42
-}

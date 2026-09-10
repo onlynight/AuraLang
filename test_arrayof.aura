@@ -1,4 +1,0 @@
-fun testArrayof(): Array<Char> {
-    var chars = arrayOf<Char>()
-    return chars
-}

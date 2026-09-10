@@ -1,7 +1,0 @@
-class Test {
-    val x: Int
-    
-    fun foo(): Int {
-        return this.x
-    }
-}

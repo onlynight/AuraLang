@@ -1,3 +1,0 @@
-fun testVararg(vararg args: Any): Int {
-    return 42
-}
