@@ -1,0 +1,211 @@
+// aura:///aura/lang/compiler/test/TestRunner.aura
+// ─────────────────────────────────────────────────────────────
+// Aura 测试框架（纯 Aura 化迁移 · Phase 0）
+//
+// 提供 `TestRunner` 类：用于 Aura 编写的编译器各阶段做单元/集成测试。
+// 设计说明：
+//   * 采用 `class` 实例保存计数状态（VM 中 `object` 可变字段 + 带参方法
+//     存在已知缺陷，因此框架状态必须挂在实例上，而非单例上）。
+//   * 断言失败不抛异常，而是累计到 `failed`，便于一次运行收集全部失败。
+//   * 本文件是纯「库」：不含 `main()`，可被任意测试文件 import（避免 main 冲突）。
+//     可运行的自检入口见同目录 `TestRunnerSelfTest.aura`。
+//
+// 用法：
+//   import "../test/TestRunner.aura"     // 相对路径导入（被内联）
+//   fun main() {
+//       val t = TestRunner()
+//       t.begin("MySuite")
+//       t.assertEq(1 + 1, 2, "addition")
+//       val failures = t.report()        // 0 表示全部通过
+//   }
+// ─────────────────────────────────────────────────────────────
+
+/// Aura 测试运行器。
+class TestRunner {
+
+    /// 通过的断言数。
+    var passed: Int = 0
+
+    /// 失败的断言数。
+    var failed: Int = 0
+
+    /// 已开始的测试组数。
+    var total: Int = 0
+
+    /// 静默模式：为 true 时不打印逐条结果（仍统计）。
+    var quiet: Boolean = false
+
+    /// 当前测试组名。
+    var suite: String = ""
+
+    // ── 生命周期 ──────────────────────────────────────────────
+
+    /// 开始一个测试组。
+    fun begin(name: String) {
+        suite = name
+        total = total + 1
+        if (!quiet) {
+            println("── " + name)
+        }
+    }
+
+    /// 切换静默模式。
+    fun setQuiet(value: Boolean) {
+        quiet = value
+    }
+
+    // ── 断言：布尔 ────────────────────────────────────────────
+
+    /// 断言条件为 true。
+    fun assertTrue(condition: Boolean, message: String) {
+        if (condition) {
+            pass(message)
+        } else {
+            fail(message + " (expected true)")
+        }
+    }
+
+    /// 断言条件为 false。
+    fun assertFalse(condition: Boolean, message: String) {
+        if (!condition) {
+            pass(message)
+        } else {
+            fail(message + " (expected false)")
+        }
+    }
+
+    // ── 断言：相等 ────────────────────────────────────────────
+
+    /// 断言两个值相等（按字符串表示比较）。
+    fun assertEq(a: Any, b: Any, message: String) {
+        if (toStr(a) == toStr(b)) {
+            pass(message)
+        } else {
+            fail(message + ": got " + toStr(a) + ", expected " + toStr(b))
+        }
+    }
+
+    /// 断言两个值不相等。
+    fun assertNotEq(a: Any, b: Any, message: String) {
+        if (toStr(a) != toStr(b)) {
+            pass(message)
+        } else {
+            fail(message + " (values are equal)")
+        }
+    }
+
+    // ── 断言：空值 ────────────────────────────────────────────
+
+    /// 断言值不为 null。
+    ///
+    /// 说明：VM 内置 `isNull` 对 null 判定存在已知缺陷（恒返回 false），
+    /// 因此改用规范化的字符串表示比较（`toStr(null) == "null"`）。
+    fun assertNotNull(value: Any, message: String) {
+        if (toStr(value) != "null") {
+            pass(message)
+        } else {
+            fail(message + " (got null)")
+        }
+    }
+
+    /// 断言值为 null。
+    fun assertNull(value: Any, message: String) {
+        if (toStr(value) == "null") {
+            pass(message)
+        } else {
+            fail(message + " (expected null)")
+        }
+    }
+
+    // ── 断言：数值 ────────────────────────────────────────────
+
+    /// 断言 a > b。
+    fun assertGt(a: Float, b: Float, message: String) {
+        if (a > b) {
+            pass(message)
+        } else {
+            fail(message + ": expected " + toStr(a) + " > " + toStr(b))
+        }
+    }
+
+    /// 断言 a >= b。
+    fun assertGte(a: Float, b: Float, message: String) {
+        if (a >= b) {
+            pass(message)
+        } else {
+            fail(message + ": expected " + toStr(a) + " >= " + toStr(b))
+        }
+    }
+
+    // ── 结果 ──────────────────────────────────────────────────
+
+    /// 打印汇总并返回失败数（0 表示全部通过）。
+    fun report(): Int {
+        println("")
+        println("[" + suite + "] " + toStr(passed) + " passed, " + toStr(failed) + " failed, "
+            + toStr(passed + failed) + " assertions")
+        return failed
+    }
+
+    /// 全部断言是否通过。
+    fun allPassed(): Boolean {
+        return failed == 0
+    }
+
+    /// 当前已通过的断言数。
+    fun passCount(): Int {
+        return passed
+    }
+
+    /// 当前已失败的断言数。
+    fun failCount(): Int {
+        return failed
+    }
+
+    // ── 内部工具 ──────────────────────────────────────────────
+
+    /// 记录一次通过。
+    private fun pass(message: String) {
+        passed = passed + 1
+        if (!quiet) {
+            println("  [ok] " + message)
+        }
+    }
+
+    /// 记录一次失败。
+    private fun fail(message: String) {
+        failed = failed + 1
+        if (!quiet) {
+            println("  [FAIL] " + message)
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// 框架自检：由 TestRunnerSelfTest.aura 驱动（本文件不含 main）
+// ─────────────────────────────────────────────────────────────
+
+/// 运行 TestRunner 自检用例，返回失败数。
+///
+/// 仅使用当前 VM 可靠支持的断言（避免依赖尚未链接的字符串内置方法）。
+fun selfTest(): Int {
+    val t = TestRunner()
+    t.begin("TestRunner/self-test")
+
+    t.assertEq(1 + 1, 2, "int addition")
+    t.assertEq("au" + "ra", "aura", "string concat")
+    t.assertTrue(3 > 2, "3 > 2")
+    t.assertFalse(1 > 2, "!(1 > 2)")
+    t.assertNotEq(1, 2, "1 != 2")
+    t.assertNotNull("x", "non-null literal")
+    t.assertNull(null, "null literal")
+    t.assertGt(5.0, 3.0, "5 > 3")
+    t.assertGte(5.0, 5.0, "5 >= 5")
+
+    // 计数器一致性（自检内部再做一次断言，用同一实例）
+    // 注意：passCount() 在本行调用前应为 9（上方 9 次断言），随后自增。
+    t.assertEq(t.passCount(), 9, "pass counter accumulates")
+    t.assertEq(t.failCount(), 0, "no failures so far")
+
+    return t.report()
+}

@@ -1,0 +1,25 @@
+// aura:///aura/lang/compiler/test/TestRunnerSelfTest.aura
+// ─────────────────────────────────────────────────────────────
+// TestRunner 框架的可运行自检入口（纯 Aura 化迁移 · Phase 0）
+//
+// 运行：
+//   aura run aura/compiler/aura/lang/compiler/test/TestRunnerSelfTest.aura
+//   全部通过时输出 "RESULT: PASS"
+//
+// 说明：框架本体 `TestRunner.aura` 不含 `main()`，以便被任意测试文件
+//       import 时不会产生 main 冲突；本文件是它的可运行驱动。
+// ─────────────────────────────────────────────────────────────
+
+import "TestRunner.aura"
+
+fun main() {
+    println("TestRunner self-test")
+    val failures = selfTest()
+    // 机器可读结论行：CI 以 `grep "RESULT: PASS"` 作为门禁
+    // （VM 当前无法通过 throw/exit 影响进程退出码）
+    if (failures == 0) {
+        println("RESULT: PASS")
+    } else {
+        println("RESULT: FAIL (" + toStr(failures) + ")")
+    }
+}

@@ -1,0 +1,72 @@
+// aura:///aura/lang/compiler/Main.aura
+// ─────────────────────────────────────────────────────────────
+// Aura 编译器入口（纯 Aura 化迁移 · Phase 0）
+//
+// 本文件是「Aura 编写的 Aura 编译器」的入口骨架。
+// 迁移方案：docs/编译器LLVM交互分析与纯Aura化迁移计划.md
+//
+// 约束（方案 §4.2 核心原则）：
+//   - Rust 编译器（compiler/）完全保留、零修改，作为 fallback 与参考实现
+//   - 本目录（aura/compiler/）为独立代码层，二者可并行构建、对比测试
+//
+// Phase 0 只搭建骨架；各阶段在下列目录中逐步落地：
+//   lexer/   Phase 1  词法分析
+//   parser/  Phase 1  语法分析
+//   ast/     Phase 1  抽象语法树
+//   sema/    Phase 2  语义分析
+//   hir/     Phase 2  HIR 生成
+//   mir/     Phase 3  MIR 生成与优化
+//   codegen/ Phase 4  字节码发射
+//   vm/      Phase 4/5 VM 解释器（已有雏形）
+//   aot/     Phase 6  AOT LLVM 后端
+//   test/    Phase 0  测试框架（TestRunner）
+// ─────────────────────────────────────────────────────────────
+
+/// 编译器元信息（静态查询，无可变状态）。
+object CompilerInfo {
+
+    /// 编译器名称。
+    fun name(): String {
+        return "aura-compiler"
+    }
+
+    /// 编译器版本。
+    fun version(): String {
+        return "0.1.0-phase0"
+    }
+
+    /// 当前迁移阶段描述。
+    fun phase(): String {
+        return "Phase 0 / 8：基础设施与工具链准备"
+    }
+}
+
+/// 返回一行编译器版本横幅。
+fun banner(): String {
+    return CompilerInfo.name() + " " + CompilerInfo.version()
+}
+
+/// 编译单个源文件。
+///
+/// Phase 0 仅为占位：返回 `未实现` 标记，供流水线与测试框架接线验证。
+/// 后续阶段将依次接入：
+///   1. Lexer   → `List<Token>`
+///   2. Parser  → `Program`（AST）
+///   3. Sema    → 类型检查结果
+///   4. HIR/MIR → 中间表示
+///   5. Codegen → 字节码 / LLVM IR
+fun compileSource(path: String): String {
+    // TODO(Phase 1): lex + parse
+    // TODO(Phase 2): sema + hir
+    // TODO(Phase 3): mir
+    // TODO(Phase 4): emit
+    // TODO(Phase 6): aot
+    return "unimplemented: " + path
+}
+
+/// 编译器入口。
+fun main() {
+    println(banner())
+    println(CompilerInfo.phase())
+    println("用法: aura-compiler <file.aura>")
+}

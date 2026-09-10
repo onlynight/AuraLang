@@ -1,0 +1,13 @@
+// snapshot case: generic function parsing
+fun identity<T>(value: T): T {
+    return value
+}
+
+fun firstOf<T>(a: T, b: T): T {
+    return a
+}
+
+fun main() {
+    // 仅验证泛型函数声明的解析；泛型调用（单态化）不在 Phase 1 快照范围内
+    println("generic declarations")
+}

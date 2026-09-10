@@ -1,0 +1,20 @@
+// snapshot case: declaration tokens (val / var / fun / class / struct / object)
+val PI: Double = 3.14159
+
+var counter: Int = 0
+
+fun inc(): Int {
+    counter += 1
+    return counter
+}
+
+class Animal {
+    val legs: Int = 4
+    fun name(): String = "animal"
+}
+
+struct Vec2(val x: Float, val y: Float)
+
+object Registry {
+    fun name(): String = "registry"
+}

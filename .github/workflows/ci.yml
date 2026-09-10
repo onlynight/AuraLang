@@ -50,6 +50,44 @@ jobs:
       - name: Test (release — 含词法性能基准断言)
         run: cargo test --workspace --release --verbose
 
+  aura-bootstrap:
+    name: Aura Bootstrap (Phase 0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-aura-bootstrap-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build Rust compiler + CLI (release)
+        run: cargo build --release --workspace
+
+      # Aura 编写的编译器（aura/compiler/）独立构建，与 Rust 编译器互不依赖。
+      - name: Test framework self-test (Aura)
+        run: |
+          ./target/release/aura run aura/compiler/aura/lang/compiler/test/TestRunnerSelfTest.aura | tee /tmp/selftest.log
+          grep -q "RESULT: PASS" /tmp/selftest.log
+
+      - name: Phase 0 verification cases (Aura)
+        run: |
+          ./target/release/aura run tests/phase0_tests.aura | tee /tmp/phase0.log
+          grep -q "RESULT: PASS" /tmp/phase0.log
+
+      - name: Source snapshot check (Rust baseline)
+        run: bash scripts/snapshot.sh
+
+      - name: Build Aura compiler skeleton
+        run: bash scripts/build-aura-compiler.sh
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
