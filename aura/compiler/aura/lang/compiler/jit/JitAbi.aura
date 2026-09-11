@@ -1,0 +1,291 @@
+// aura:///aura/lang/compiler/jit/JitAbi.aura
+package aura.lang.compiler.jit
+// ─────────────────────────────────────────────────────────────
+// JIT ABI 定义 — 纯 Aura 化迁移 · Phase 7 (任务 7.2)
+//
+// 对应 Rust `compiler/src/vm/abi.rs`（`JitValue` / `AotEntry` / `AotCallContext`）。
+//
+// ── 共享调用约定 ──
+//
+//   JitValue = { tag: i64, payload: i64 }   （16 字节，双字段）
+//
+//   入口签名（JitEntry == AotEntry，三者共用）：
+//     void entry(JitValue* args, JitValue* out, usize argc, void* dispatch_table)
+//
+//   VM / JIT / AOT 三路共享该 ABI，任何一路都不得改变语义。
+//   类型标签、载荷编码必须与 Rust 侧逐位一致，否则机器码入口无法互操作。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+
+/// JitValue 类型标签（对应 Rust `TAG_*` 常量）。
+object JitTags {
+    const INT: Int = 0
+    const FLOAT: Int = 1
+    const BOOL: Int = 2
+    const NULL: Int = 3
+    const STR: Int = 4
+    const PTR: Int = 5
+    const OBJ: Int = 6
+    const FUNC: Int = 7
+    const ARRAY: Int = 8
+    const LIST: Int = 9
+    const MAP: Int = 10
+    const CLOSURE: Int = 11
+    const CSTRING: Int = 12
+
+    /// 标签总数。
+    const COUNT: Int = 13
+}
+
+/// 共享调用约定值（tag + payload）。
+class JitValue {
+
+    /// 类型标签。
+    var tag: Int = 3
+
+    /// 值载荷（整数直接存储；浮点为位模式；引用为句柄/指针）。
+    var payload: Int = 0
+
+    init(t: Int, p: Int) {
+        this.tag = t
+        this.payload = p
+    }
+
+    /// 是否为空值。
+    fun isNull(): Boolean {
+        return this.tag == 3
+    }
+
+    /// 是否为标量（Int/Float/Bool/Null）。
+    fun isScalar(): Boolean {
+        return jitIsScalarTag(this.tag)
+    }
+
+    /// 诊断文本。
+    fun text(): String {
+        return jitValueText(this.tag, this.payload)
+    }
+
+    /// ABI 字节大小（与 Rust `size_of::<JitValue>()` 一致）。
+    fun bytes(): Int {
+        return 16
+    }
+}
+
+// ── 构造器（对应 Rust `JitValue::null()` / `from_value`）──
+
+/// 空值。
+fun jitValueNull(): JitValue {
+    return JitValue(3, 0)
+}
+
+/// 整数。
+fun jitValueInt(v: Int): JitValue {
+    return JitValue(0, v)
+}
+
+/// 布尔。
+fun jitValueBool(b: Boolean): JitValue {
+    if (b) {
+        return JitValue(2, 1)
+    }
+    return JitValue(2, 0)
+}
+
+/// 浮点（位模式载荷）。
+fun jitValueFloatBits(bits: Int): JitValue {
+    return JitValue(1, bits)
+}
+
+/// 字符串（载荷为重分配堆上指针/句柄）。
+fun jitValueStr(ptr: Int): JitValue {
+    return JitValue(4, ptr)
+}
+
+/// 指针。
+fun jitValuePtr(p: Int): JitValue {
+    return JitValue(5, p)
+}
+
+/// 对象引用（堆句柄）。
+fun jitValueRef(handle: Int): JitValue {
+    return JitValue(6, handle)
+}
+
+// ── 标签查询 ──
+
+/// 标签名称（对应 Rust 变体名）。
+fun jitTagName(tag: Int): String {
+    if (tag == 0) {
+        return "Int"
+    }
+    if (tag == 1) {
+        return "Float"
+    }
+    if (tag == 2) {
+        return "Bool"
+    }
+    if (tag == 3) {
+        return "Null"
+    }
+    if (tag == 4) {
+        return "Str"
+    }
+    if (tag == 5) {
+        return "Ptr"
+    }
+    if (tag == 6) {
+        return "Obj"
+    }
+    if (tag == 7) {
+        return "Func"
+    }
+    if (tag == 8) {
+        return "Array"
+    }
+    if (tag == 9) {
+        return "List"
+    }
+    if (tag == 10) {
+        return "Map"
+    }
+    if (tag == 11) {
+        return "Closure"
+    }
+    if (tag == 12) {
+        return "CString"
+    }
+    return "Unknown"
+}
+
+/// 标签名反查（未知返回 -1）。
+fun jitTagFromName(name: String): Int {
+    var i: Int = 0
+    while (i < 13) {
+        if (jitTagName(i) == name) {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+/// 是否为标量标签（无需堆访问）。
+fun jitIsScalarTag(tag: Int): Boolean {
+    if (tag == 0) {
+        return true
+    }
+    if (tag == 1) {
+        return true
+    }
+    if (tag == 2) {
+        return true
+    }
+    if (tag == 3) {
+        return true
+    }
+    return false
+}
+
+/// 是否引用堆的标签。
+fun jitIsRefTag(tag: Int): Boolean {
+    if (tag < 4) {
+        return false
+    }
+    if (tag > 12) {
+        return false
+    }
+    return true
+}
+
+/// 带标签的 JitValue 诊断文本。
+fun jitValueText(tag: Int, payload: Int): String {
+    if (tag == 3) {
+        return "Null"
+    }
+    if (tag == 2) {
+        if (payload != 0) {
+            return "Bool(true)"
+        }
+        return "Bool(false)"
+    }
+    if (tag == 4) {
+        return "Str(ptr=" + toStr(payload) + ")"
+    }
+    return jitTagName(tag) + "(" + toStr(payload) + ")"
+}
+
+// ── 入口签名（JitEntry == AotEntry）──
+
+/// 入口函数签名（诊断文本）。
+fun jitEntrySignature(): String {
+    return "void (JitValue* args, JitValue* out, i64 argc, void* dispatch)"
+}
+
+/// 入口参数个数（args/out/argc/dispatch）。
+fun jitEntryParamCount(): Int {
+    return 4
+}
+
+/// 单个 JitValue 的字节数。
+fun jitValueBytes(): Int {
+    return 16
+}
+
+/// JIT 栈槽最大深度（与 Rust `MAX_STACK` 一致）。
+fun jitMaxStack(): Int {
+    return 256
+}
+
+/// 分发表条目字节数（函数指针）。
+fun jitDispatchSlotBytes(): Int {
+    return 8
+}
+
+/// 分发表首参（dispatch table 指针）所在位置。
+fun jitDispatchParamIndex(): Int {
+    return 3
+}
+
+// ── 调用上下文（对应 Rust `AotCallContext`）──
+
+/// AOT / JIT 调用上下文。
+class JitCallContext {
+
+    /// 运行时指针（占位，Aura 侧不可表达裸指针）。
+    var runtime: Int = 0
+
+    /// 模块 id。
+    var moduleId: Int = 0
+
+    /// 函数索引。
+    var funcIdx: Int = 0
+
+    /// 调用深度。
+    var callDepth: Int = 0
+
+    /// 异常标记。
+    var exception: Int = 0
+
+    // 注意：init 形参不可与字段同名（当前 VM 下 `this.f = f` 会退化为自赋值），
+    // 故统一加 `ctx` 前缀。
+    init(ctxModuleId: Int, ctxFuncIdx: Int) {
+        this.runtime = 0
+        this.moduleId = ctxModuleId
+        this.funcIdx = ctxFuncIdx
+        this.callDepth = 0
+        this.exception = 0
+    }
+
+    /// 上下文诊断文本。
+    fun text(): String {
+        return "ctx(m" + toStr(this.moduleId) + ",f" + toStr(this.funcIdx) +
+            ",d" + toStr(this.callDepth) + ",e" + toStr(this.exception) + ")"
+    }
+}
+
+/// 新建调用上下文。
+fun jitCallContext(moduleId: Int, funcIdx: Int): JitCallContext {
+    return JitCallContext(moduleId, funcIdx)
+}

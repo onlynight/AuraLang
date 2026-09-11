@@ -1,0 +1,462 @@
+// aura:///aura/lang/compiler/jit/JitLower.aura
+package aura.lang.compiler.jit
+// ─────────────────────────────────────────────────────────────
+// JIT IR 发射 — 纯 Aura 化迁移 · Phase 7 (任务 7.3)
+//
+// 对应 Rust `compiler/src/vm/jit.rs` 的 `cranelift_backend::jit_compile_cranelift`
+// 与 `emit_instr`（字节码 → Cranelift IR）。
+//
+// ── 输入 ──
+//
+//   解码代码（code）：每行 `<Opcode> [arg]`。
+//   常量池（consts）：行表，每行一个整数字面量（已含优化新增常量）。
+//   函数表（funcs） ：`idx|name|size|native|callees`（用于 Call 的参数个数）。
+//
+// ── 输出（Cranelift 文本 IR，clif）──
+//
+//   function %<name>(i64, i64, i64, i64) {
+//   block0:
+//       ; LoadConst 0 -> 3
+//       v0 = iconst.i64 3
+//       ; LoadVar 0
+//       v1 = load.i64 local_payload[0]
+//       ; Add
+//       v2 = iadd v1, v1
+//       ; Return
+//       store.i64 v2, out_payload
+//       return
+//   }
+//
+// 入口 ABI 与 `JitAbi` 一致：`(args_ptr, out_ptr, argc, dispatch_table)`。
+// 局部变量以 `local_tag[s]` / `local_payload[s]` 表示（与 Rust 的 tag/payload
+// 变量对等价）；运算栈以 `push/pop` 维护 SSA 值名（对应 Rust 的 `stack_slot` +
+// `sp` 变量与 `MAX_STACK` 深度）。
+//
+// ── 交付边界（与 Phase 6 一致）──
+//
+//   纯 Aura 侧交付「IR 文本 + 映射表」（纯函数、可测试）；真正的 Cranelift
+//   代码生成与 `mmap` W^X 装载由引导层（FFI）承担（见 JitRuntime / JitCore）。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+
+/// 字节码 opcode → Cranelift 指令助记符（对应 Rust `emit_instr` 映射）。
+///
+/// 返回空串表示需要多指令展开或特殊处理（由 `JitLower` 逐条发射）。
+fun jitClifOpcode(bcOp: String): String {
+    if (bcOp == "Add") {
+        return "iadd"
+    }
+    if (bcOp == "Sub") {
+        return "isub"
+    }
+    if (bcOp == "Mul") {
+        return "imul"
+    }
+    if (bcOp == "Div") {
+        return "sdiv"
+    }
+    if (bcOp == "Rem") {
+        return "srem"
+    }
+    if (bcOp == "Neg") {
+        return "ineg"
+    }
+    if (bcOp == "Not") {
+        return "bnot"
+    }
+    if (bcOp == "And") {
+        return "band"
+    }
+    if (bcOp == "Or") {
+        return "bor"
+    }
+    if (bcOp == "BitAnd") {
+        return "band"
+    }
+    if (bcOp == "BitOr") {
+        return "bor"
+    }
+    if (bcOp == "BitXor") {
+        return "bxor"
+    }
+    if (bcOp == "Shl") {
+        return "ishl"
+    }
+    if (bcOp == "Shr") {
+        return "sshr"
+    }
+    if (bcOp == "LoadConst") {
+        return "iconst.i64"
+    }
+    if (bcOp == "LoadVar") {
+        return "load.i64"
+    }
+    if (bcOp == "StoreVar") {
+        return "store.i64"
+    }
+    if (bcOp == "Jump") {
+        return "jump"
+    }
+    if (bcOp == "JumpIfTrue") {
+        return "brif"
+    }
+    if (bcOp == "JumpIfFalse") {
+        return "brif"
+    }
+    if (bcOp == "Return") {
+        return "return"
+    }
+    if (bcOp == "ReturnUnit") {
+        return "return"
+    }
+    if (bcOp == "Call") {
+        return "call_indirect"
+    }
+    if (bcOp == "CallNative") {
+        return "call"
+    }
+    if (bcOp == "CallNativeArgs") {
+        return "call"
+    }
+    return ""
+}
+
+/// 比较 opcode → Cranelift 比较条件码（对应 Rust `IntCC`）。
+fun jitClifCondition(bcOp: String): String {
+    if (bcOp == "Eq") {
+        return "eq"
+    }
+    if (bcOp == "Ne") {
+        return "ne"
+    }
+    if (bcOp == "Lt") {
+        return "slt"
+    }
+    if (bcOp == "Gt") {
+        return "sgt"
+    }
+    if (bcOp == "Le") {
+        return "sle"
+    }
+    if (bcOp == "Ge") {
+        return "sge"
+    }
+    return ""
+}
+
+/// 计算块起始目标（行表，对应 Rust `compute_targets`）。
+///
+/// 收集：0；每个跳转的目标与其后续指令；Return/ReturnUnit 的后续指令。
+fun jitComputeTargets(code: String): String {
+    var targets: String = "0\n"
+    val n: Int = jitLineCount(code)
+    var i: Int = 0
+    while (i < n) {
+        val op: String = jitOpcodeOf(jitLineAt(code, i))
+        if (jitIsJumpOp(op)) {
+            val t: Int = jitParseInt(jitArgOf(jitLineAt(code, i)))
+            if (!jitLineHas(targets, toStr(t))) {
+                targets = targets + toStr(t) + "\n"
+            }
+            if (!jitLineHas(targets, toStr(i + 1))) {
+                targets = targets + toStr(i + 1) + "\n"
+            }
+        }
+        if (op == "Return" || op == "ReturnUnit") {
+            if (!jitLineHas(targets, toStr(i + 1))) {
+                targets = targets + toStr(i + 1) + "\n"
+            }
+        }
+        i = i + 1
+    }
+    return targets
+}
+
+/// 块起始数量。
+fun jitLowerBlockCount(code: String): Int {
+    return jitLineCount(jitComputeTargets(code))
+}
+
+/// IR 发射器（维护 SSA 值编号、块命名、运算栈）。
+class JitLower {
+
+    /// 输出文本。
+    var outText: String = ""
+
+    /// SSA 值编号计数器。
+    var valueId: Int = 0
+
+    /// 运算栈（行表：SSA 值名）。
+    var stack: String = ""
+
+    /// 块起始目标集合（行表）。
+    var targets: String = ""
+
+    /// 块名映射（记录表：`idx|blockK`）。
+    var blockMap: String = ""
+
+    /// 块名计数器（block0 为入口，故从 1 开始）。
+    var blockCounter: Int = 1
+
+    /// 当前块是否已终结（用于末尾补齐 `return`）。
+    var terminated: Boolean = false
+
+    init() {
+        this.outText = ""
+        this.valueId = 0
+        this.stack = ""
+        this.targets = ""
+        this.blockMap = ""
+        this.blockCounter = 1
+        this.terminated = false
+    }
+
+    // ── 主入口 ──
+
+    /// 将解码代码降级为 Cranelift 文本 IR。
+    fun lower(fnName: String, code: String, consts: String, funcs: String): String {
+        this.outText = ""
+        this.valueId = 0
+        this.stack = ""
+        this.blockCounter = 1
+        this.targets = jitComputeTargets(code)
+        this.blockMap = ""
+        this.terminated = false
+
+        this.outText = this.outText + "; aura-jit " + jitBackendVersion() + " clif\n"
+        this.outText = this.outText + "function %" + fnName + "(i64, i64, i64, i64) {\n"
+
+        val n: Int = jitLineCount(code)
+        var i: Int = 0
+        while (i < n) {
+            if (jitLineHas(this.targets, toStr(i))) {
+                val label: String = this.blockName(i)
+                this.outText = this.outText + label + ":\n"
+                this.terminated = false
+            }
+            this.terminated = false
+            this.lowerInstr(i, jitLineAt(code, i), consts, funcs)
+            i = i + 1
+        }
+        // 末尾补齐 ReturnUnit（与 Rust「未终结则 return」一致）
+        if (!this.terminated) {
+            this.outText = this.outText + "    return\n"
+        }
+        this.outText = this.outText + "}\n"
+        return this.outText
+    }
+
+    // ── 块命名 ──
+
+    /// 取（或分配）某目标下标的块名。
+    fun blockName(idx: Int): String {
+        if (idx == 0) {
+            return "block0"
+        }
+        if (jitRecordHas(this.blockMap, toStr(idx))) {
+            return jitRecordGet(this.blockMap, toStr(idx))
+        }
+        val name: String = "block" + toStr(this.blockCounter)
+        this.blockCounter = this.blockCounter + 1
+        this.blockMap = jitRecordSet(this.blockMap, toStr(idx), name)
+        return name
+    }
+
+    // ── 运算栈 ──
+
+    /// 分配新的 SSA 值名。
+    fun newValue(): String {
+        val name: String = "v" + toStr(this.valueId)
+        this.valueId = this.valueId + 1
+        return name
+    }
+
+    /// 压栈。
+    fun lowerPush(value: String): Unit {
+        this.stack = this.stack + value + "\n"
+    }
+
+    /// 弹栈（空栈返回 "undef"）。
+    fun lowerPop(): String {
+        val n: Int = jitLineCount(this.stack)
+        if (n == 0) {
+            return "undef"
+        }
+        val value: String = jitLineAt(this.stack, n - 1)
+        var out: String = ""
+        var i: Int = 0
+        while (i < n - 1) {
+            out = out + jitLineAt(this.stack, i) + "\n"
+            i = i + 1
+        }
+        this.stack = out
+        return value
+    }
+
+    /// 发射一行（带缩进）。
+    fun emit(line: String): Unit {
+        this.outText = this.outText + "    " + line + "\n"
+    }
+
+    /// 发射注释。
+    fun emitComment(text: String): Unit {
+        this.outText = this.outText + "    ; " + text + "\n"
+    }
+
+    // ── 单条指令降级 ──
+
+    /// 降级第 idx 条指令（对应 Rust `emit_instr`）。
+    fun lowerInstr(idx: Int, line: String, consts: String, funcs: String): Unit {
+        val op: String = jitOpcodeOf(line)
+        val arg: String = jitArgOf(line)
+        this.emitComment(line)
+
+        if (op == "LoadConst") {
+            val cv: String = jitLineAt(consts, jitParseInt(arg))
+            val v: String = this.newValue()
+            this.emit(v + " = iconst.i64 " + cv)
+            // 同时给出标签（Int）
+            val tag: String = this.newValue()
+            this.emit(tag + " = iconst.i64 0")
+            this.lowerPush(v)
+            return
+        }
+        if (op == "LoadVar") {
+            val pv: String = this.newValue()
+            this.emit(pv + " = load.i64 local_payload[" + arg + "]")
+            val tv: String = this.newValue()
+            this.emit(tv + " = load.i64 local_tag[" + arg + "]")
+            this.lowerPush(pv)
+            return
+        }
+        if (op == "StoreVar") {
+            val pv: String = this.lowerPop()
+            this.emit("store.i64 " + pv + ", local_payload[" + arg + "]")
+            return
+        }
+        if (op == "Pop") {
+            this.lowerPop()
+            this.emitComment("pop")
+            return
+        }
+        if (op == "Dup") {
+            val pv: String = this.lowerPop()
+            this.lowerPush(pv)
+            this.lowerPush(pv)
+            this.emitComment("dup " + pv)
+            return
+        }
+        if (op == "Neg" || op == "Not") {
+            val a: String = this.lowerPop()
+            val v: String = this.newValue()
+            this.emit(v + " = " + jitClifOpcode(op) + " " + a)
+            this.lowerPush(v)
+            return
+        }
+        if (jitIsCompareOp(op)) {
+            val b: String = this.lowerPop()
+            val a: String = this.lowerPop()
+            val v: String = this.newValue()
+            this.emit(v + " = icmp." + jitClifCondition(op) + " " + a + ", " + b)
+            this.lowerPush(v)
+            return
+        }
+        if (jitIsArithOp(op)) {
+            val b: String = this.lowerPop()
+            val a: String = this.lowerPop()
+            val v: String = this.newValue()
+            this.emit(v + " = " + jitClifOpcode(op) + " " + a + ", " + b)
+            this.lowerPush(v)
+            return
+        }
+        if (op == "And" || op == "Or" || op == "BitAnd" || op == "BitOr" ||
+            op == "BitXor" || op == "Shl" || op == "Shr") {
+            val b: String = this.lowerPop()
+            val a: String = this.lowerPop()
+            val v: String = this.newValue()
+            this.emit(v + " = " + jitClifOpcode(op) + " " + a + ", " + b)
+            this.lowerPush(v)
+            return
+        }
+        if (op == "Jump") {
+            this.emit("jump " + this.blockName(jitParseInt(arg)))
+            this.terminated = true
+            return
+        }
+        if (op == "JumpIfTrue") {
+            val c: String = this.lowerPop()
+            val t: String = this.blockName(jitParseInt(arg))
+            val f: String = this.blockName(idx + 1)
+            this.emit("brif " + c + ", " + t + ", " + f)
+            this.terminated = true
+            return
+        }
+        if (op == "JumpIfFalse") {
+            val c: String = this.lowerPop()
+            val t: String = this.blockName(jitParseInt(arg))
+            val f: String = this.blockName(idx + 1)
+            this.emit("brif " + c + ", " + f + ", " + t)
+            this.terminated = true
+            return
+        }
+        if (op == "Return") {
+            val rv: String = this.lowerPop()
+            this.emit("store.i64 " + rv + ", out_payload")
+            this.emit("return")
+            this.terminated = true
+            return
+        }
+        if (op == "ReturnUnit") {
+            this.emit("store.i64 0, out_payload")
+            this.emit("return")
+            this.terminated = true
+            return
+        }
+        if (op == "Call") {
+            val callee: Int = jitParseInt(arg)
+            val argc: Int = jitFuncArity(funcs, callee)
+            var args: String = "dispatch_table"
+            var k: Int = 0
+            while (k < argc) {
+                // 逆序弹出（后进先出），再正序拼接
+                val a: String = this.lowerPop()
+                args = a + ", " + args
+                k = k + 1
+            }
+            val v: String = this.newValue()
+            this.emit(v + " = call_indirect fn" + toStr(callee) + "(" + args + ")")
+            this.lowerPush(v)
+            return
+        }
+        if (op == "CallNative") {
+            this.emit("trap")
+            return
+        }
+        if (op == "CallNativeArgs") {
+            val v: String = this.newValue()
+            this.emit(v + " = call aura_jit_call_native_by_index(" + arg + ", dispatch_table)")
+            this.lowerPush(v)
+            return
+        }
+        if (op == "NewObject" || op == "NewArray" || op == "NewList" || op == "NewMap") {
+            val v: String = this.newValue()
+            this.emit(v + " = iconst.i64 3")
+            this.lowerPush(v)
+            return
+        }
+        if (op == "IncRef" || op == "DecRef" || op == "Retain" || op == "Release" || op == "DropRef") {
+            this.emitComment("arc no-op")
+            return
+        }
+        // 未知/不可编译指令
+        this.emitComment("unsupported: " + op)
+        this.emit("trap")
+    }
+}
+
+/// 顶层入口：解码代码 → Cranelift 文本 IR。
+fun jitLowerFunction(fnName: String, code: String, consts: String, funcs: String): String {
+    val l: JitLower = JitLower()
+    return l.lower(fnName, code, consts, funcs)
+}

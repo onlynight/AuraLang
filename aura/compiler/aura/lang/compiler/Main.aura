@@ -20,6 +20,7 @@ package aura.lang.compiler
 //   codegen/ Phase 4  字节码发射
 //   vm/      Phase 4/5 VM 解释器（已有雏形）
 //   aot/     Phase 6  AOT LLVM 后端
+//   jit/     Phase 7  JIT（Cranelift 原生码）后端
 //   test/    Phase 0  测试框架（TestRunner）
 // ─────────────────────────────────────────────────────────────
 
@@ -44,12 +45,12 @@ object CompilerInfo {
 
     /// 编译器版本。
     fun version(): String {
-        return "0.1.0-phase6"
+        return "0.1.0-phase7"
     }
 
     /// 当前迁移阶段描述。
     fun phase(): String {
-        return "Phase 6 / 8：AOT LLVM 后端（纯 Aura 化）完成"
+        return "Phase 7 / 8：JIT（Cranelift 原生码）后端（纯 Aura 化）完成"
     }
 }
 
@@ -73,6 +74,7 @@ fun compileSource(path: String): String {
     // TODO(Phase 3): mir
     // TODO(Phase 4): emit
     // TODO(Phase 6): aot
+    // TODO(Phase 7): jit（热点编译 / 原生派发）
     return "unimplemented: " + path
 }
 

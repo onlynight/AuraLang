@@ -1,0 +1,403 @@
+// aura:///aura/lang/compiler/jit/JitState.aura
+package aura.lang.compiler.jit
+// ─────────────────────────────────────────────────────────────
+// JIT 状态机 — 纯 Aura 化迁移 · Phase 7 (任务 7.1)
+//
+// 对应 Rust `compiler/src/vm/jit.rs`（`JitState` + `is_jit_compilable`）
+// 与 `compiler/src/vm/mod.rs` 的热点接缝（`maybe_jit_compile` /
+// `force_jit_compile` / `try_jit_compile`）。
+//
+// ── 必须继承的历史结论（docs/JIT性能分析.md）──
+//
+// 旧 JIT「与解释器同速」的四点根因：
+//   ① 编译期内联删除了小函数调用点；
+//   ② 入口函数（main）不参与热点计数；
+//   ③ 递归热点被 `is_jit_compilable()` 白名单拒绝；
+//   ④ 仅靠调用频率的检测对「循环热点」天然失效。
+//
+// Rust 侧已用两条修复收敛：
+//   * Fix A（入口强制编译）：`forceEntry()` 忽略调用阈值，编译入口函数，
+//     使 main 内的循环热点走原生码，覆盖根因 ②④；
+//   * Fix B（递归支持）：白名单纳入 `Call`，并沿调用图递归编译被调用者，
+//     配合 `dispatch_table` + `call_indirect` 支持递归/互递归，覆盖根因 ③。
+//
+// 本模块即为这两条修复的状态机移植：计数、阈值、白名单、递归可达、
+// 编译顺序（被调用者先编译，保证分发表条目存在）。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+
+/// 默认热点阈值（与 Rust `VmOptions::hotspot_threshold` 一致）。
+fun jitDefaultHotspotThreshold(): Int {
+    return 10000
+}
+
+/// 白名单：该指令是否可被 JIT 编译（对应 Rust `is_jit_compilable`）。
+///
+/// Fix B：`Call` 在列（递归函数可编译）；Fix 5：`Not` / `ReturnUnit` 在列。
+fun jitWhitelistOpcode(op: String): Boolean {
+    if (op == "LoadConst") {
+        return true
+    }
+    if (op == "LoadVar") {
+        return true
+    }
+    if (op == "StoreVar") {
+        return true
+    }
+    if (op == "Add") {
+        return true
+    }
+    if (op == "Sub") {
+        return true
+    }
+    if (op == "Mul") {
+        return true
+    }
+    if (op == "Div") {
+        return true
+    }
+    if (op == "Rem") {
+        return true
+    }
+    if (op == "Neg") {
+        return true
+    }
+    if (op == "Not") {
+        return true
+    }
+    if (op == "Eq") {
+        return true
+    }
+    if (op == "Ne") {
+        return true
+    }
+    if (op == "Lt") {
+        return true
+    }
+    if (op == "Gt") {
+        return true
+    }
+    if (op == "Le") {
+        return true
+    }
+    if (op == "Ge") {
+        return true
+    }
+    if (op == "Jump") {
+        return true
+    }
+    if (op == "JumpIfTrue") {
+        return true
+    }
+    if (op == "JumpIfFalse") {
+        return true
+    }
+    if (op == "Return") {
+        return true
+    }
+    if (op == "ReturnUnit") {
+        return true
+    }
+    if (op == "Call") {
+        return true
+    }
+    if (op == "CallNative") {
+        return true
+    }
+    if (op == "CallNativeArgs") {
+        return true
+    }
+    if (op == "And") {
+        return true
+    }
+    if (op == "Or") {
+        return true
+    }
+    if (op == "BitAnd") {
+        return true
+    }
+    if (op == "BitOr") {
+        return true
+    }
+    if (op == "BitXor") {
+        return true
+    }
+    if (op == "Shl") {
+        return true
+    }
+    if (op == "Shr") {
+        return true
+    }
+    if (op == "NewObject") {
+        return true
+    }
+    if (op == "NewArray") {
+        return true
+    }
+    if (op == "NewList") {
+        return true
+    }
+    if (op == "NewMap") {
+        return true
+    }
+    if (op == "IncRef") {
+        return true
+    }
+    if (op == "DecRef") {
+        return true
+    }
+    if (op == "Retain") {
+        return true
+    }
+    if (op == "Release") {
+        return true
+    }
+    if (op == "DropRef") {
+        return true
+    }
+    return false
+}
+
+/// 跳过原因：可编译返回空串，否则返回首个非法指令的说明。
+fun jitSkipReason(code: String): String {
+    val n: Int = jitLineCount(code)
+    var i: Int = 0
+    while (i < n) {
+        val op: String = jitOpcodeOf(jitLineAt(code, i))
+        if (op != "") {
+            if (!jitWhitelistOpcode(op)) {
+                return "JIT 白名单不匹配（函数包含非可编译指令）：" + op
+            }
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+/// 函数代码是否可 JIT 编译。
+fun jitIsCompilable(code: String): Boolean {
+    return jitSkipReason(code) == ""
+}
+
+/// JIT 状态：已编译集合 / 已跳过集合 / 分发表 / 调用计数。
+class JitState {
+
+    /// 已编译函数索引（行表）。
+    var compiled: String = ""
+
+    /// 已跳过函数（记录表：`idx|reason`）。
+    var skipped: String = ""
+
+    /// 分发表（记录表：`idx|entryToken`），entryToken 为原生入口标记。
+    var dispatch: String = ""
+
+    /// 调用计数（记录表：`idx|count`）。
+    var callCounts: String = ""
+
+    /// 热点阈值。
+    var threshold: Int = 10000
+
+    /// 分发表容量（保证指针稳定）。
+    var capacity: Int = 0
+
+    init() {
+        this.compiled = ""
+        this.skipped = ""
+        this.dispatch = ""
+        this.callCounts = ""
+        this.threshold = 10000
+        this.capacity = 0
+    }
+
+    /// 设置阈值。
+    fun setThreshold(t: Int): Unit {
+        this.threshold = t
+    }
+
+    /// 扩容分发表（对应 Rust `ensure_capacity`）。
+    fun ensureCapacity(len: Int): Unit {
+        if (len > this.capacity) {
+            this.capacity = len
+        }
+    }
+
+    /// 是否已编译。
+    fun isCompiled(idx: Int): Boolean {
+        return jitLineHas(this.compiled, toStr(idx))
+    }
+
+    /// 是否已跳过。
+    fun isSkipped(idx: Int): Boolean {
+        return jitRecordHas(this.skipped, toStr(idx))
+    }
+
+    /// 跳过原因（未跳过返回空串）。
+    fun skipReason(idx: Int): String {
+        return jitRecordGet(this.skipped, toStr(idx))
+    }
+
+    /// 记录编译成功（对应 Rust `insert`）：写入分发表与已编译集合。
+    fun insert(idx: Int): Unit {
+        this.ensureCapacity(idx + 1)
+        this.dispatch = jitRecordSet(this.dispatch, toStr(idx), "fn#" + toStr(idx))
+        if (!this.isCompiled(idx)) {
+            this.compiled = this.compiled + toStr(idx) + "\n"
+        }
+    }
+
+    /// 记录跳过（对应 Rust `skip`）。
+    fun skip(idx: Int, reason: String): Unit {
+        this.skipped = jitRecordSet(this.skipped, toStr(idx), reason)
+    }
+
+    /// 分发表条目（未编译返回空串）。
+    fun entryToken(idx: Int): String {
+        return jitRecordGet(this.dispatch, toStr(idx))
+    }
+
+    /// 调用计数。
+    fun callCount(idx: Int): Int {
+        return jitParseInt(jitRecordGet(this.callCounts, toStr(idx)))
+    }
+
+    /// 累加调用计数，返回新值（对应 Rust `call_counts[func_idx] += 1`）。
+    fun incCallCount(idx: Int): Int {
+        val next: Int = this.callCount(idx) + 1
+        this.callCounts = jitRecordSet(this.callCounts, toStr(idx), toStr(next))
+        return next
+    }
+
+    /// 是否达到热点阈值。
+    fun reachThreshold(idx: Int): Boolean {
+        return this.callCount(idx) >= this.threshold
+    }
+
+    /// 已编译数量。
+    fun compiledCount(): Int {
+        return jitLineCount(this.compiled)
+    }
+
+    /// 已跳过数量。
+    fun skippedCount(): Int {
+        return jitLineCount(this.skipped)
+    }
+
+    /// 是否需要尝试编译（未编译、未跳过、且达阈值）——对应 `maybe_jit_compile`。
+    fun shouldCompile(idx: Int): Boolean {
+        if (this.isCompiled(idx)) {
+            return false
+        }
+        if (this.isSkipped(idx)) {
+            return false
+        }
+        return this.reachThreshold(idx)
+    }
+
+    /// 是否可强制编译（未编译且未跳过）——对应 `force_jit_compile`（Fix A）。
+    fun canForce(idx: Int): Boolean {
+        if (this.isCompiled(idx)) {
+            return false
+        }
+        if (this.isSkipped(idx)) {
+            return false
+        }
+        return true
+    }
+
+    /// 诊断：某函数当前派发状态（对应 Rust `jit_state` 释义）。
+    fun stateOf(idx: Int, name: String): String {
+        val count: String = toStr(this.callCount(idx))
+        if (this.isCompiled(idx)) {
+            return "fn#" + toStr(idx) + " " + name + " 调用=" + count + " 已编译(原生码)"
+        }
+        if (this.isSkipped(idx)) {
+            return "fn#" + toStr(idx) + " " + name + " 调用=" + count + " 已跳过(回退解释器)"
+        }
+        return "fn#" + toStr(idx) + " " + name + " 调用=" + count + " 未达阈值(解释器)"
+    }
+
+    /// 诊断整表（funcs 为函数表）。
+    fun diagnose(funcs: String): String {
+        var out: String = ""
+        val n: Int = jitLineCount(funcs)
+        var i: Int = 0
+        while (i < n) {
+            val idx: Int = jitParseInt(jitFieldAt(jitLineAt(funcs, i), 0, "|"))
+            out = out + this.stateOf(idx, jitFuncName(funcs, idx)) + "\n"
+            i = i + 1
+        }
+        return out
+    }
+}
+
+// ── 递归可达 / 编译顺序（Fix B）──
+
+/// 从 idx 沿调用图可达的函数集合（行表，含起点）。
+fun jitReachable(funcs: String, idx: Int): String {
+    val p: JitCompilePlanner = JitCompilePlanner()
+    p.plan(funcs, idx)
+    return p.reached
+}
+
+/// 编译顺序（后序：被调用者先，保证其分发表条目已存在）。
+///
+/// 自递归不导致死循环（进入时先登记 visited）。
+fun jitCompileOrder(funcs: String, idx: Int): String {
+    val p: JitCompilePlanner = JitCompilePlanner()
+    p.plan(funcs, idx)
+    return p.order
+}
+
+/// 编译顺序规划器（带 visited/order 状态以适应递归）。
+class JitCompilePlanner {
+
+    /// 函数表。
+    var funcs: String = ""
+
+    /// 已访问集合（行表）。
+    var visited: String = ""
+
+    /// 后序编译顺序（行表）。
+    var order: String = ""
+
+    /// 可达集合（行表）。
+    var reached: String = ""
+
+    init() {
+        this.funcs = ""
+        this.visited = ""
+        this.order = ""
+        this.reached = ""
+    }
+
+    /// 规划：返回后序编译顺序，`reached` 保存可达集合。
+    fun plan(funcs: String, start: Int): String {
+        this.funcs = funcs
+        this.visited = ""
+        this.order = ""
+        this.reached = ""
+        this.visit(start)
+        return this.order
+    }
+
+    /// 深度优先（后序登记）。
+    private fun visit(idx: Int): Unit {
+        if (jitLineHas(this.visited, toStr(idx))) {
+            return
+        }
+        this.visited = this.visited + toStr(idx) + "\n"
+        this.reached = this.reached + toStr(idx) + "\n"
+        val callees: String = jitFuncCallees(this.funcs, idx)
+        val n: Int = jitCsvCount(callees)
+        var i: Int = 0
+        while (i < n) {
+            val c: String = jitCsvAt(callees, i)
+            if (c != "") {
+                this.visit(jitParseInt(c))
+            }
+            i = i + 1
+        }
+        this.order = this.order + toStr(idx) + "\n"
+    }
+}

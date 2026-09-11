@@ -32,6 +32,7 @@ aura/compiler/
     ├── vm/                                # Phase 4/5 ✅ Vm/VmRunner/Opcodes/Frames/
     │                                      #            FrameManager/TailCall/Closures
     ├── aot/                               # Phase 6 ✅ AOT LLVM 后端（Aura 化）
+    ├── jit/                               # Phase 7 ✅ JIT（Cranelift）Aura 化
     ├── gc/ memory/ runtime/               # 已有 VM 运行时雏形
     └── test/
         ├── TestRunner.aura                # Phase 0  Aura 测试框架
@@ -266,10 +267,76 @@ HIR 采用与 AST 一致的「扁平 arena」表示（`kinds/texts/tys/spans/kid
 > **回退策略**：任何 Phase 6 失败只需删除 `aura/lang/compiler/aot/`，Rust 编译器
 > 的 AOT 后端（`compiler/src/codegen/aot/`）不受影响，始终可用。
 
-## Phase 7 规划（标准库 Aura 化）🔜
+## Phase 7 交付物（JIT / Cranelift 原生码）✅
 
-对应迁移计划 §4.9：将 `compiler/src/std/*.rs` 上移到 `core/aura/lang/std/`，
-使 Aura 源码成为标准库唯一真相源。前置依赖（Phase 6）已就绪。
+对应迁移计划 §4.9：补全「VM 解释器 / JIT 即时编译 / AOT 静态编译」三执行路径中的
+**JIT**，把 Rust 侧 `compiler/src/vm/{jit,jit_opt,abi,aot_runtime}.rs` 与
+`compiler/src/bootstrap/jit_core.rs` 迁移到 `aura/lang/compiler/jit/`。
+
+| # | 任务 | Rust 源 | Aura 目标 | 状态 |
+|---|------|---------|-----------|------|
+| 7.1 | 热点/白名单/递归可达状态机 | `vm/jit.rs` + `vm/mod.rs` | `.../jit/JitState.aura` | ✅ |
+| 7.2 | 共享 ABI（`JitValue` / `AotEntry`） | `vm/abi.rs` | `.../jit/JitAbi.aura` | ✅ |
+| 7.3 | 字节码 → Cranelift IR 文本发射 | `vm/jit.rs`（cranelift_backend） | `.../jit/JitLower.aura` | ✅ |
+| 7.4 | 7 个优化传递 | `vm/jit_opt.rs` | `.../jit/JitOpt.aura` | ✅ |
+| 7.5 | 原生派发 + 解释器回退 | `vm/mod.rs` | `.../jit/JitDispatch.aura` | ✅ |
+| 7.6 | W^X / 描述符表 / Blob 段加载 | `vm/aot_runtime.rs` | `.../jit/JitRuntime.aura` | ✅ |
+| 7.7 | 最小引导 JIT | `bootstrap/jit_core.rs` | `.../jit/JitCore.aura` | ✅ |
+| 7.8 | Phase 7 验证用例 + 差分 | — | `tests/phase7_jit_tests.aura`（12 组 / 177 断言） | ✅ |
+| — | 公共辅助（扁平字符串工具/函数表） | — | `.../jit/JitUtil.aura` | ✅ |
+
+**必须继承的历史结论（`docs/JIT性能分析.md`）**：旧 JIT「与解释器同速」的四点根因
+（内联删调用点、入口不计数、递归被白名单拒绝、循环热点无调用计数）。本 Phase 等价
+继承两条修复：
+
+- **Fix A（入口强制编译）**：`jitForceEntry()` 忽略阈值编译入口函数 → `run()` 直接
+  派发原生入口，循环热点走原生码；
+- **Fix B（递归支持）**：白名单纳入 `Call`，`jitCompileOrder()` 沿调用图**后序**
+  编译被调用者（保证 `dispatch_table` 条目已存在），降级用 `call_indirect fnN(...)`。
+
+**7 个优化传递**（顺序与 Rust 一致）：常量折叠 → 死码消除 → 跳转线程化 → 强度削弱
+（`/2^n`→`sshr`、`%2^n`→`band`、`*2^n`→`ishl`）→ 指令调度 → 函数内联（候选判定）→
+循环展开（2x）。
+
+**设计边界**：纯 Aura 侧交付「IR 文本 + 映射表 + 派发/回退决策」（纯函数、可测试）；
+真正的 Cranelift 代码生成、`mmap` W^X 装载与原生调用由引导层（FFI）承担。
+`JitRuntime` 复用 `.auc v4` 段格式（`SEG_MACHINE` / `SEG_DESC_TABLE`）、`AuraFuncDesc`
+（32 字节）与 `JitValue` ABI，使 JIT 原生码与 AOT Blob 走同一装载路径。
+
+**与 Rust 基线的有意差异**（语义等价且更严格，详见 `JitOpt.aura` 文件头）：
+
+- 常量折叠改为单遍前瞻，不再「折叠任意三个连续 LoadConst」；
+- 强度削弱修正了操作数顺序（Rust 以 `LoadConst shift` 在前会使 `Shl` 移位方向相反）
+  并去掉重复压栈；
+- 函数内联与 Rust 基线一致保持占位，仅额外暴露候选判定。
+
+**验证**：`tests/phase7_jit_tests.aura` 覆盖 ABI / 状态机 / 调用图 / 7 传递 / 派发回退 /
+解释器 / 优化差分 / 段与 W^X / 引导层，12 组 177 断言全部通过（`RESULT: PASS`）。
+其中 `JIT.differential` 用内置解释器对同一程序「优化前 vs 优化后」逐例比对，
+锁定优化不改变语义。
+
+**验证标准对照（迁移计划 §4.9）**：
+
+| 标准 | Aura 侧证据 |
+|------|------------|
+| 热点可达（Fix A/B） | `JIT.dispatch`：`jitForceEntry` 强制编译入口；`JIT.state`：`Call` 在列白名单 |
+| 优化等价（7 传递） | `JIT.opt.fold/passes/pipeline`：逐传递断言；两处有意偏差见上文 |
+| 执行一致（优化差分） | `JIT.differential`：优化前后解释结果逐例一致 |
+| 回退正确 | `JIT.dispatch`：不可编译函数记 skip 且 `jitFallbackReason` 可查 |
+| 递归/互递归 | `JIT.callgraph`：后序编译顺序 + 自递归；`JIT.lower`：`call_indirect fnN(...)` |
+| ABI 兼容（`.auc v4`） | `JIT.runtime`：段校验 / 描述符 32B / 分发表重建（入口 16 对齐）/ W^X |
+
+> **边界说明**：真实机器码生成、`mmap` W^X 执行与「VM/JIT/AOT 三路真机差分」「性能 ≥50x」
+> 需由引导层（Cranelift FFI）承担，纯 Aura 侧以「IR 文本 + 状态机 + 段装载模型」交付；
+> 这与 Phase 6「IR 文本 + 命令构造」的交付边界一致。
+
+> **回退策略**：任何 Phase 7 失败只需删除 `aura/lang/compiler/jit/`，Rust 编译器的
+> JIT（`compiler/src/vm/jit*.rs`）与其余后端不受影响，始终可用。
+
+## Phase 8 规划（标准库 Aura 化）🔜
+
+对应迁移计划 §4.10：将 `compiler/src/std/*.rs` 上移到 `core/aura/lang/std/`，
+使 Aura 源码成为标准库唯一真相源。前置依赖（Phase 6/7）已就绪。
 
 ## Phase 0 交付物
 
@@ -307,11 +374,14 @@ aura run tests/phase5_vm_tests.aura
 # 7) Phase 6 验证用例（AOT LLVM 后端：类型映射 / 目标三元组 / IR 发射）
 aura run tests/phase6_aot_tests.aura
 
-# 8) 构建 Aura 编译器骨架（默认产出 .auc；--aot 产出原生可执行文件）
+# 8) Phase 7 验证用例（JIT：状态机 / 7 优化传递 / Cranelift IR / 派发回退 / 段加载）
+aura run tests/phase7_jit_tests.aura
+
+# 9) 构建 Aura 编译器骨架（默认产出 .auc；--aot 产出原生可执行文件）
 scripts/build-aura-compiler.sh
 scripts/build-aura-compiler.sh --aot
 
-# 9) 源码快照一致性检查
+# 10) 源码快照一致性检查
 scripts/snapshot.sh
 ```
 
@@ -325,6 +395,7 @@ aura run tests\phase2_sema_hir_tests.aura
 aura run tests\phase3_mir_tests.aura
 aura run tests\phase5_vm_tests.aura
 aura run tests\phase6_aot_tests.aura
+aura run tests\phase7_jit_tests.aura
 scripts\build-aura-compiler.ps1
 scripts\snapshot.ps1
 ```

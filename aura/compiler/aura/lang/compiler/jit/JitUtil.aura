@@ -1,0 +1,333 @@
+// aura:///aura/lang/compiler/jit/JitUtil.aura
+package aura.lang.compiler.jit
+// ─────────────────────────────────────────────────────────────
+// JIT 公共辅助 — 纯 Aura 化迁移 · Phase 7
+//
+// 对应 Rust `compiler/src/codegen/aot/mod.rs` 旁路的公共辅助思路，
+// 与 AotUtil.aura 同构：提供扁平字符串（行/列）解析工具，
+// 供 JitState / JitOpt / JitLower / JitDispatch / JitRuntime / JitCore 共用。
+//
+// ── 扁平表示约定 ──
+//
+//   * 行表（lines）   ：每行一项，`\n` 分隔（如指令序列、常量池、标签表）。
+//   * 记录表（record） ：每行 `key|value1|value2...`，用于映射类数据。
+//   * 解码指令（decode）：每行 `<Opcode> [arg1] [arg2]`，对应 Rust `Instr` 枚举。
+//
+// 之所以全部使用扁平字符串，是因为当前 VM 对 `List`/`Map` 的支持仍有
+// 限制（见 README「已知差异」）；Ast/Hir/Mir/AOT 各阶段均采用同一策略。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+
+/// JIT 后端版本（Phase 7）。
+fun jitBackendVersion(): String {
+    return "0.1.0-phase7"
+}
+
+// ── 基础：切片 / 行 / 列 ──
+
+/// 字符串切片（越界自动截断）。
+fun jitSlice(text: String, start: Int, length: Int): String {
+    var result: String = ""
+    var end: Int = start + length
+    if (end > text.length) {
+        end = text.length
+    }
+    var i: Int = start
+    while (i < end) {
+        if (i >= 0) {
+            result = result + toStr(text[i])
+        }
+        i = i + 1
+    }
+    return result
+}
+
+/// 行表行数。
+fun jitLineCount(text: String): Int {
+    var count: Int = 0
+    var i: Int = 0
+    var len: Int = text.length
+    while (i < len) {
+        if (toStr(text[i]) == "\n") {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    if (len > 0 && toStr(text[len - 1]) != "\n") {
+        count = count + 1
+    }
+    return count
+}
+
+/// 取第 index 行（不含行尾）。
+fun jitLineAt(text: String, index: Int): String {
+    return jitFieldAt(text, index, "\n")
+}
+
+/// 取以 sep 分隔的第 index 个字段。
+fun jitFieldAt(text: String, index: Int, sep: String): String {
+    var i: Int = 0
+    var fieldStart: Int = 0
+    var cur: Int = 0
+    var fieldLen: Int = text.length
+    while (i < fieldLen) {
+        val c: String = toStr(text[i])
+        if (c == sep) {
+            if (cur == index) {
+                return jitSlice(text, fieldStart, i - fieldStart)
+            }
+            cur = cur + 1
+            fieldStart = i + 1
+        }
+        i = i + 1
+    }
+    if (cur == index) {
+        return jitSlice(text, fieldStart, fieldLen - fieldStart)
+    }
+    return ""
+}
+
+// ── 数值解析 ──
+
+/// 字符串转整数（支持前导 `-`），非法字符忽略。
+fun jitParseInt(text: String): Int {
+    var total: Int = 0
+    var i: Int = 0
+    var len: Int = text.length
+    var neg: Boolean = false
+    if (len > 0 && toStr(text[0]) == "-") {
+        neg = true
+        i = 1
+    }
+    while (i < len) {
+        val c: String = toStr(text[i])
+        var digit: Int = -1
+        var j: Int = 0
+        while (j < 10) {
+            if (toStr(j) == c) {
+                digit = j
+                break
+            }
+            j = j + 1
+        }
+        if (digit >= 0) {
+            total = total * 10 + digit
+        }
+        i = i + 1
+    }
+    if (neg) {
+        return -total
+    }
+    return total
+}
+
+/// 是否为纯整数字面量（可带符号）。
+fun jitIsIntLiteral(text: String): Boolean {
+    if (text == "") {
+        return false
+    }
+    var i: Int = 0
+    var len: Int = text.length
+    while (i < len) {
+        val c: String = toStr(text[i])
+        if (i == 0 && (c == "-" || c == "+")) {
+            // 符号位，继续
+        } else {
+            var isDigit: Boolean = false
+            var j: Int = 0
+            while (j < 10) {
+                if (toStr(j) == c) {
+                    isDigit = true
+                    break
+                }
+                j = j + 1
+            }
+            if (!isDigit) {
+                return false
+            }
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// ── 记录表 ──
+
+/// 记录表取值：返回首列为 key 的行的第 col 列（默认第 1 列）。
+fun jitRecordGet(map: String, key: String): String {
+    return jitRecordGetCol(map, key, 1)
+}
+
+/// 记录表取值（指定列）。
+fun jitRecordGetCol(map: String, key: String, col: Int): String {
+    val n: Int = jitLineCount(map)
+    var i: Int = 0
+    while (i < n) {
+        val line: String = jitLineAt(map, i)
+        if (jitFieldAt(line, 0, "|") == key) {
+            return jitFieldAt(line, col, "|")
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+/// 记录表是否包含 key。
+fun jitRecordHas(map: String, key: String): Boolean {
+    val n: Int = jitLineCount(map)
+    var i: Int = 0
+    while (i < n) {
+        val line: String = jitLineAt(map, i)
+        if (jitFieldAt(line, 0, "|") == key) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+/// 设置记录表 key → value（存在则替换，否则追加），返回新表。
+fun jitRecordSet(map: String, key: String, value: String): String {
+    var out: String = ""
+    var replaced: Boolean = false
+    val n: Int = jitLineCount(map)
+    var i: Int = 0
+    while (i < n) {
+        val line: String = jitLineAt(map, i)
+        if (jitFieldAt(line, 0, "|") == key) {
+            out = out + key + "|" + value + "\n"
+            replaced = true
+        } else {
+            out = out + line + "\n"
+        }
+        i = i + 1
+    }
+    if (!replaced) {
+        out = out + key + "|" + value + "\n"
+    }
+    return out
+}
+
+/// 行表中与 value 完全相等的行下标（找不到返回 -1）。
+fun jitLineIndex(lines: String, value: String): Int {
+    val n: Int = jitLineCount(lines)
+    var i: Int = 0
+    while (i < n) {
+        if (jitLineAt(lines, i) == value) {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+/// 行表中是否包含 value 行。
+fun jitLineHas(lines: String, value: String): Boolean {
+    return jitLineIndex(lines, value) >= 0
+}
+
+// ── 指令行解析 ──
+
+/// 取指令行的 opcode（首个空格前的内容）。
+fun jitOpcodeOf(line: String): String {
+    var pos: Int = 0
+    var len: Int = line.length
+    while (pos < len) {
+        if (toStr(line[pos]) == " ") {
+            break
+        }
+        pos = pos + 1
+    }
+    return jitSlice(line, 0, pos)
+}
+
+/// 取指令行的第一个参数（opcode 之后的内容，未 trim 尾随）。
+fun jitArgOf(line: String): String {
+    var pos: Int = 0
+    var len: Int = line.length
+    while (pos < len && toStr(line[pos]) != " ") {
+        pos = pos + 1
+    }
+    if (pos >= len) {
+        return ""
+    }
+    return jitSlice(line, pos + 1, len - pos - 1)
+}
+
+// ── 逗号分隔列表 ──
+
+/// 逗号分隔项数。
+fun jitCsvCount(csv: String): Int {
+    if (csv == "") {
+        return 0
+    }
+    return jitCountSub(csv, ",") + 1
+}
+
+/// 取逗号分隔的第 index 项。
+fun jitCsvAt(csv: String, index: Int): String {
+    return jitFieldAt(csv, index, ",")
+}
+
+// ── 函数表（funcs）──
+//
+// 每行格式：`idx|name|size|native|arity|callees`
+//   idx     — 函数索引
+//   name    — 函数名
+//   size    — 指令条数（用于内联判定）
+//   native  — 1 = 原生函数
+//   arity   — 参数个数（对应 Rust `param_count`）
+//   callees — 逗号分隔的被调用函数索引（可为空）
+
+/// 函数表中取指定列。
+fun jitFuncField(funcs: String, idx: Int, col: Int): String {
+    return jitRecordGetCol(funcs, toStr(idx), col)
+}
+
+/// 函数名。
+fun jitFuncName(funcs: String, idx: Int): String {
+    return jitFuncField(funcs, idx, 1)
+}
+
+/// 指令条数。
+fun jitFuncSize(funcs: String, idx: Int): Int {
+    return jitParseInt(jitFuncField(funcs, idx, 2))
+}
+
+/// 是否原生函数。
+fun jitFuncNative(funcs: String, idx: Int): Boolean {
+    return jitFuncField(funcs, idx, 3) == "1"
+}
+
+/// 参数个数（对应 Rust `param_count`）。
+fun jitFuncArity(funcs: String, idx: Int): Int {
+    return jitParseInt(jitFuncField(funcs, idx, 4))
+}
+
+/// 被调用者列表（逗号分隔）。
+fun jitFuncCallees(funcs: String, idx: Int): String {
+    return jitFuncField(funcs, idx, 5)
+}
+
+/// 函数表中是否登记了该索引。
+fun jitFuncExists(funcs: String, idx: Int): Boolean {
+    return jitRecordHas(funcs, toStr(idx))
+}
+
+/// 统计 needle 在 haystack 中出现次数（不重叠）。
+fun jitCountSub(haystack: String, needle: String): Int {
+    var count: Int = 0
+    var i: Int = 0
+    var nlen: Int = needle.length
+    if (nlen == 0) {
+        return 0
+    }
+    while (i + nlen <= haystack.length) {
+        if (jitSlice(haystack, i, nlen) == needle) {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    return count
+}

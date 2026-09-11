@@ -1,0 +1,463 @@
+// aura:///aura/lang/compiler/jit/JitCore.aura
+package aura.lang.compiler.jit
+// ─────────────────────────────────────────────────────────────
+// 最小引导 JIT — 纯 Aura 化迁移 · Phase 7 (任务 7.7)
+//
+// 对应 Rust `compiler/src/bootstrap/jit_core.rs`：
+//   * 热点检测：函数调用次数达到 `hot_threshold` 触发编译；
+//   * 基线编译：把字节码预解码为 `JitUnit` —— 分支重解析为**绝对目标**、
+//     FFI 调用点解析为**内联缓存槽位**（执行时免指令解码、免符号查找）；
+//   * 去优化：不可编译结构（`Call` / `Yield`）或运行期异常前置条件
+//     （除零、栈下溢、FFI 槽失效）返回 `deopt`，由 VM 回退解释器。
+//
+// 机器码后端（Cranelift）位于编译器主 VM（Rust `vm::jit`）；bootstrap 层
+// 保持零外部依赖，`JitUnit` 的预解码形态即未来传给机器码后端的输入。
+//
+// ── 引导层指令（CInsn）──
+//
+//   Const v / LoadLocal s / StoreLocal s / Add / Sub / Mul / Div / Eq / Lt /
+//   Br t / BrIfFalse t / CallFfi slot / Ret
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+
+/// 默认热点阈值（与 Rust `JitConfig::default` 一致）。
+fun jitCoreDefaultThreshold(): Int {
+    return 1000
+}
+
+/// 相对偏移 → 绝对目标（相对「下一条指令」）；非法返回 -1。
+fun jitCoreResolveBranch(ip: Int, off: Int): Int {
+    val target: Int = ip + 1 + off
+    if (target < 0) {
+        return -1
+    }
+    return target
+}
+
+/// JIT 编译单元（单个函数的预解码形态）。
+class JitUnit {
+
+    /// 函数索引。
+    var func: Int = 0
+
+    /// 函数名。
+    var name: String = ""
+
+    /// 参数个数。
+    var params: Int = 0
+
+    /// 局部变量槽数。
+    var locals: Int = 0
+
+    /// 预解码代码（行表）。
+    var code: String = ""
+
+    /// 内联缓存槽位（逗号分隔，去重）。
+    var ffiSlots: String = ""
+
+    init(unitFunc: Int, unitName: String, unitParams: Int, unitLocals: Int, unitCode: String, unitSlots: String) {
+        this.func = unitFunc
+        this.name = unitName
+        this.params = unitParams
+        this.locals = unitLocals
+        this.code = unitCode
+        this.ffiSlots = unitSlots
+    }
+
+    /// 代码行数。
+    fun lineCount(): Int {
+        return jitLineCount(this.code)
+    }
+
+    /// 内联缓存槽位个数。
+    fun slotCount(): Int {
+        return jitCsvCount(this.ffiSlots)
+    }
+}
+
+/// JIT 编译器：热点检测 + 基线编译 + 去优化统计。
+class JitCoreCompiler {
+
+    /// 热点阈值。
+    var hotThreshold: Int = 1000
+
+    /// 编译次数（统计）。
+    var compiles: Int = 0
+
+    /// 去优化次数（统计）。
+    var deopts: Int = 0
+
+    /// 已编译函数索引（行表）。
+    var compiledFuncs: String = ""
+
+    /// 单元代码（行表：`func|预解码指令`）。
+    var unitCodeMap: String = ""
+
+    /// 单元槽位（记录表：`func|slot1,slot2`）。
+    var unitSlotsMap: String = ""
+
+    /// 解码时的待登记槽位（临时）。
+    var pendingSlots: String = ""
+
+    /// 解码是否失败（临时）。
+    var decodeFailed: Boolean = false
+
+    init() {
+        this.hotThreshold = 1000
+        this.compiles = 0
+        this.deopts = 0
+        this.compiledFuncs = ""
+        this.unitCodeMap = ""
+        this.unitSlotsMap = ""
+        this.pendingSlots = ""
+        this.decodeFailed = false
+    }
+
+    /// 设置阈值。
+    fun setThreshold(t: Int): Unit {
+        this.hotThreshold = t
+    }
+
+    /// 是否已编译。
+    fun isCompiled(func: Int): Boolean {
+        return jitLineHas(this.compiledFuncs, toStr(func))
+    }
+
+    /// 已编译单元数。
+    fun compiledCount(): Int {
+        return jitLineCount(this.compiledFuncs)
+    }
+
+    /// 尝试编译函数：仅叶子函数（不含 `Call`/`Yield`）可编译；
+    /// 非叶子函数返回 `false`，调用时走解释器（语义回退）。
+    fun tryCompile(func: Int, name: String, params: Int, locals: Int, code: String): Boolean {
+        if (this.isCompiled(func)) {
+            return true
+        }
+        this.pendingSlots = ""
+        this.decodeFailed = false
+        val decoded: String = this.decode(code)
+        if (this.decodeFailed) {
+            return false
+        }
+        this.compiledFuncs = this.compiledFuncs + toStr(func) + "\n"
+        // 登记单元代码（行表：func|指令）
+        val n: Int = jitLineCount(decoded)
+        var i: Int = 0
+        while (i < n) {
+            this.unitCodeMap = this.unitCodeMap + toStr(func) + "|" + jitLineAt(decoded, i) + "\n"
+            i = i + 1
+        }
+        this.unitSlotsMap = jitRecordSet(this.unitSlotsMap, toStr(func), this.pendingSlots)
+        this.compiles = this.compiles + 1
+        return true
+    }
+
+    /// 取单元代码（行表）。
+    fun unitCodeOf(func: Int): String {
+        var out: String = ""
+        val n: Int = jitLineCount(this.unitCodeMap)
+        var i: Int = 0
+        while (i < n) {
+            val line: String = jitLineAt(this.unitCodeMap, i)
+            if (jitFieldAt(line, 0, "|") == toStr(func)) {
+                out = out + jitFieldAt(line, 1, "|") + "\n"
+            }
+            i = i + 1
+        }
+        return out
+    }
+
+    /// 取内联缓存槽位（逗号分隔）。
+    fun unitSlotsOf(func: Int): String {
+        return jitRecordGet(this.unitSlotsMap, toStr(func))
+    }
+
+    /// 使编译单元失效。
+    fun invalidate(func: Int): Unit {
+        var out: String = ""
+        val n: Int = jitLineCount(this.compiledFuncs)
+        var i: Int = 0
+        while (i < n) {
+            if (jitLineAt(this.compiledFuncs, i) != toStr(func)) {
+                out = out + jitLineAt(this.compiledFuncs, i) + "\n"
+            }
+            i = i + 1
+        }
+        this.compiledFuncs = out
+    }
+
+    // ── 基线编译（解码 + 分支重解析 + FFI 内联缓存绑定）──
+
+    /// 解码字节码：分支 → 绝对目标；`CallFfi` → 槽位登记。
+    ///
+    /// 遇 `Call`/`Yield` 等不支持结构置 `decodeFailed` 并返回空串。
+    fun decode(code: String): String {
+        var out: String = ""
+        val n: Int = jitLineCount(code)
+        var i: Int = 0
+        while (i < n) {
+            val line: String = jitLineAt(code, i)
+            val op: String = jitOpcodeOf(line)
+            val arg: String = jitArgOf(line)
+            if (op == "Const") {
+                out = out + "Const " + arg + "\n"
+            } else if (op == "LoadLocal") {
+                out = out + "LoadLocal " + arg + "\n"
+            } else if (op == "StoreLocal") {
+                out = out + "StoreLocal " + arg + "\n"
+            } else if (op == "Add" || op == "Sub" || op == "Mul" || op == "Div" ||
+                op == "Eq" || op == "Lt") {
+                out = out + op + "\n"
+            } else if (op == "Jump") {
+                val target: Int = jitCoreResolveBranch(i, jitParseInt(arg))
+                if (target < 0) {
+                    this.decodeFailed = true
+                    return ""
+                }
+                out = out + "Br " + toStr(target) + "\n"
+            } else if (op == "JumpIfFalse") {
+                val target: Int = jitCoreResolveBranch(i, jitParseInt(arg))
+                if (target < 0) {
+                    this.decodeFailed = true
+                    return ""
+                }
+                out = out + "BrIfFalse " + toStr(target) + "\n"
+            } else if (op == "CallFfi") {
+                val slot: Int = jitParseInt(arg)
+                if (!jitLineHas(this.pendingSlots, toStr(slot))) {
+                    this.pendingSlots = this.pendingSlots + toStr(slot) + "\n"
+                }
+                out = out + "CallFfi " + toStr(slot) + "\n"
+            } else if (op == "Ret") {
+                out = out + "Ret\n"
+            } else {
+                // Call / Yield / 其他：不可编译 → 去优化回退
+                this.decodeFailed = true
+                return ""
+            }
+            i = i + 1
+        }
+        this.pendingSlots = this.flattenSlots()
+        return out
+    }
+
+    /// 把槽位行表拍平为逗号分隔。
+    fun flattenSlots(): String {
+        var out: String = ""
+        val n: Int = jitLineCount(this.pendingSlots)
+        var i: Int = 0
+        while (i < n) {
+            if (i > 0) {
+                out = out + ","
+            }
+            out = out + jitLineAt(this.pendingSlots, i)
+            i = i + 1
+        }
+        return out
+    }
+
+    /// 执行已编译单元；返回结果文本或 `deopt:<原因>`。
+    fun execute(func: Int, args: String, localCount: Int): String {
+        val r: String = jitCoreExecute(this.unitCodeOf(func), args, localCount)
+        if (jitSlice(r, 0, 5) == "deopt") {
+            this.deopts = this.deopts + 1
+        }
+        return r
+    }
+}
+
+// ── 执行 JIT 单元（直接派发，无指令解码、无符号查找）──
+
+/// 执行预解码单元。
+///
+/// 任何运行期异常前置条件（栈下溢、除零、FFI 槽失效）返回 `deopt`，
+/// 由 VM 回退解释器并产生精确的错误信息。
+fun jitCoreExecute(code: String, args: String, localCount: Int): String {
+    val vm: JitCoreVm = JitCoreVm()
+    return vm.run(code, args, localCount)
+}
+
+/// 最小引导执行器。
+class JitCoreVm {
+
+    /// 局部变量（记录表：`slot|value`）。
+    var locals: String = ""
+
+    /// 运算栈（行表）。
+    var stack: String = ""
+
+    /// 指令指针。
+    var ip: Int = 0
+
+    /// 是否停止。
+    var halt: Boolean = false
+
+    /// 返回值。
+    var result: String = ""
+
+    /// 错误。
+    var error: String = ""
+
+    init() {
+        this.locals = ""
+        this.stack = ""
+        this.ip = 0
+        this.halt = false
+        this.result = ""
+        this.error = ""
+    }
+
+    /// 执行。
+    fun run(code: String, args: String, localCount: Int): String {
+        this.locals = ""
+        this.stack = ""
+        this.ip = 0
+        this.halt = false
+        this.result = ""
+        this.error = ""
+        // 参数写入槽 0..arity
+        val argc: Int = jitCsvCount(args)
+        var i: Int = 0
+        while (i < argc) {
+            val slot: String = jitCsvAt(args, i)
+            if (slot != "") {
+                this.locals = jitRecordSet(this.locals, toStr(i), slot)
+            }
+            i = i + 1
+        }
+        var k: Int = 0
+        while (k < localCount) {
+            if (!jitRecordHas(this.locals, toStr(k))) {
+                this.locals = jitRecordSet(this.locals, toStr(k), "0")
+            }
+            k = k + 1
+        }
+
+        val n: Int = jitLineCount(code)
+        while (!this.halt && this.ip < n) {
+            val line: String = jitLineAt(code, this.ip)
+            this.ip = this.ip + 1
+            this.exec(line)
+        }
+        if (this.error != "") {
+            return "deopt:" + this.error
+        }
+        return this.result
+    }
+
+    /// 压栈。
+    fun push(value: String): Unit {
+        this.stack = this.stack + value + "\n"
+    }
+
+    /// 弹栈。
+    fun pop(): String {
+        val n: Int = jitLineCount(this.stack)
+        if (n == 0) {
+            this.error = "stack-underflow"
+            this.halt = true
+            return "0"
+        }
+        val value: String = jitLineAt(this.stack, n - 1)
+        var out: String = ""
+        var i: Int = 0
+        while (i < n - 1) {
+            out = out + jitLineAt(this.stack, i) + "\n"
+            i = i + 1
+        }
+        this.stack = out
+        return value
+    }
+
+    /// 单指令。
+    fun exec(line: String): Unit {
+        val op: String = jitOpcodeOf(line)
+        val arg: String = jitArgOf(line)
+        if (op == "Const") {
+            this.push(arg)
+            return
+        }
+        if (op == "LoadLocal") {
+            this.push(jitRecordGet(this.locals, arg))
+            return
+        }
+        if (op == "StoreLocal") {
+            this.locals = jitRecordSet(this.locals, arg, this.pop())
+            return
+        }
+        if (op == "Add" || op == "Sub" || op == "Mul" || op == "Div") {
+            val b: Int = jitParseInt(this.pop())
+            val a: Int = jitParseInt(this.pop())
+            this.push(this.arith(op, a, b))
+            return
+        }
+        if (op == "Eq") {
+            val b: Int = jitParseInt(this.pop())
+            val a: Int = jitParseInt(this.pop())
+            if (a == b) {
+                this.push("1")
+            } else {
+                this.push("0")
+            }
+            return
+        }
+        if (op == "Lt") {
+            val b: Int = jitParseInt(this.pop())
+            val a: Int = jitParseInt(this.pop())
+            if (a < b) {
+                this.push("1")
+            } else {
+                this.push("0")
+            }
+            return
+        }
+        if (op == "Br") {
+            this.ip = jitParseInt(arg)
+            return
+        }
+        if (op == "BrIfFalse") {
+            val c: Int = jitParseInt(this.pop())
+            if (c == 0) {
+                this.ip = jitParseInt(arg)
+            }
+            return
+        }
+        if (op == "CallFfi") {
+            // 内联缓存槽位失效 / 未绑定 → 去优化回退
+            this.error = "ffi-slot"
+            this.halt = true
+            return
+        }
+        if (op == "Ret") {
+            this.result = this.pop()
+            this.halt = true
+            return
+        }
+        this.error = "unsupported:" + op
+        this.halt = true
+    }
+
+    /// 整数算术。
+    fun arith(op: String, a: Int, b: Int): String {
+        if (op == "Add") {
+            return toStr(a + b)
+        }
+        if (op == "Sub") {
+            return toStr(a - b)
+        }
+        if (op == "Mul") {
+            return toStr(a * b)
+        }
+        if (op == "Div") {
+            if (b == 0) {
+                this.error = "div-by-zero"
+                this.halt = true
+                return "0"
+            }
+            return toStr(a / b)
+        }
+        return "0"
+    }
+}
