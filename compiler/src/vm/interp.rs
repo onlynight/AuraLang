@@ -6,7 +6,7 @@
 
 use crate::codegen::opcode::FfiAbi;
 use crate::vm::value::Value;
-use crate::vm::{Instr, Vm, VmError};
+use crate::vm::{Handler, Instr, Vm, VmError};
 
 // P9: FFI 动态库加载
 #[cfg(windows)]
@@ -26,6 +26,11 @@ unsafe extern "C" {
         handle: *mut std::os::raw::c_void,
         symbol: *const std::os::raw::c_char,
     ) -> *mut std::os::raw::c_void;
+}
+
+/// 是否为「请求进程退出」的原生函数（`Process.exit` / `Process.exitProcess`）。
+fn is_exit_native(name: &str) -> bool {
+    name.ends_with("Process.exit") || name.ends_with("Process.exitProcess")
 }
 
 impl Vm {
@@ -157,7 +162,8 @@ impl Vm {
                 let obj = self.pop(top)?;
                 let v = match obj {
                     Value::Ref(h) => self.heap.get_field(h, field),
-                    _ => Value::Null,
+                    // 集合 / 字符串的内建成员（`xs.size` / `s.length` / `xs.first` ...）
+                    other => builtin_member(other, field),
                 };
                 self.frames[top].stack.push(v);
             }
@@ -179,6 +185,15 @@ impl Vm {
                     Value::List(items) => {
                         let i = idx_v.as_int().max(0) as usize;
                         items.get(i).cloned().unwrap_or(Value::Null)
+                    }
+                    // 字符串索引：`s[i]` → 单字符字符串（越界返回 null）。
+                    // 语义对齐 sema（`Ty::String` 索引结果为 `Char`，运行时以单字符串表示）。
+                    Value::Str(s) => {
+                        let i = idx_v.as_int().max(0) as usize;
+                        match s.chars().nth(i) {
+                            Some(c) => Value::str_(c.to_string()),
+                            None => Value::Null,
+                        }
                     }
                     _ => Value::Null,
                 };
@@ -360,6 +375,19 @@ impl Vm {
             }
             Instr::DeferEnd => {
                 // 标记 defer 区域结束
+            }
+
+            // ── 异常处理（try/catch）──
+            Instr::PushHandler(handler_ip, slot) => {
+                self.handlers.push(Handler {
+                    frame_index: top,
+                    ip: handler_ip,
+                    stack_len: self.frames[top].stack.len(),
+                    slot,
+                });
+            }
+            Instr::PopHandler => {
+                self.handlers.pop();
             }
 
             // ── FFI（C ABI）──
@@ -782,8 +810,14 @@ impl Vm {
                                 field_names.iter().position(|n| n == &member_name)
                             {
                                 let field_val = self.heap.get_field(handle, field_idx as u16);
-                                self.frames[top].stack.push(field_val);
-                                return Ok(());
+                                // 字段一旦被赋值即以堆值为准；尚未赋值（单例创建时统一置为 Null）
+                                // 时**不返回**，继续走常规调用路径执行 HIR 合成的
+                                // `<Object>.<field>` 零参读取函数，从而返回字段声明的默认值。
+                                // （`create_singletons` 只能把字段置为 Null，VM 侧拿不到默认值。）
+                                if field_val != Value::Null {
+                                    self.frames[top].stack.push(field_val);
+                                    return Ok(());
+                                }
                             }
                         }
                     } else {
@@ -863,6 +897,34 @@ impl Vm {
         Ok(())
     }
 
+    /// 抛出异常：查找最近的异常处理器并展开到它；无处理器则为未捕获异常。
+    ///
+    ///
+    /// 展开步骤（标准栈式异常处理）：
+    /// 1. 从 handler 栈顶弹出最近的处理器；
+    /// 2. 把帧栈截断到处理器所在帧（丢弃其间的调用帧）；
+    /// 3. 把该帧的操作数栈截断回注册时的高度；
+    /// 4. 异常值写入处理器的槽位（`u16::MAX` 表示无落点，退化为压栈）；
+    /// 5. 跳转到处理器入口。
+    fn raise(&mut self, value: Value) -> Result<(), VmError> {
+        while let Some(h) = self.handlers.pop() {
+            // 帧应在注册时存活；`pop_frame` 已清理失效处理器，此处仅作防御性检查
+            if h.frame_index < self.frames.len() {
+                self.frames.truncate(h.frame_index + 1);
+                let frame = &mut self.frames[h.frame_index];
+                frame.stack.truncate(h.stack_len);
+                if h.slot != u16::MAX && (h.slot as usize) < frame.locals.len() {
+                    frame.locals[h.slot as usize] = value;
+                } else {
+                    frame.stack.push(value);
+                }
+                frame.ip = h.ip;
+                return Ok(());
+            }
+        }
+        Err(VmError::Runtime(format!("uncaught exception: {}", value)))
+    }
+
     /// 原生 / FFI 函数调用
     fn do_call_native(&mut self, top: usize, idx: usize) -> Result<(), VmError> {
         if idx >= self.module.natives.len() {
@@ -875,12 +937,28 @@ impl Vm {
         let param_count = native.param_count as usize;
         let args = self.pop_n(top, param_count)?;
 
-        // Phase 3: 优先检查是否有 Aura 编译的标准库函数版本
-        let std_lookup = self.find_stdlib_func(&native.name, param_count);
-        eprintln!(
-            "[vm] stdlib-check: name='{}' params={} → {:?}",
-            native.name, param_count, std_lookup
-        );
+        // `throw expr` 由 HIR 降级为 `__throw(expr)`：在原生派发前拦截，
+        // 展开到最近的异常处理器（`try/catch`），无处理器则报未捕获异常。
+        if native.name == "__throw" {
+            let v = args.into_iter().next().unwrap_or(Value::Null);
+            return self.raise(v);
+        }
+
+        // `Process.exit(code)`：记录退出码并干净地停止 VM（由 CLI 设置进程退出码）。
+        if is_exit_native(&native.name) {
+            let code = crate::std::std_process::last_int_arg(&args).unwrap_or(0) as i32;
+            self.request_exit(code);
+            return Ok(());
+        }
+
+        // Phase 3: Aura 编译的标准库函数版本优先 —— 但若同名**原生函数已注册**则以原生为准。
+        // 原因：同一 API 可能存在两套运行时表示（如 `listOf` 的 Aura 实现返回 ArrayList 类实例，
+        // 原生实现返回 Value::List），混用会导致 `.size` / `[]` 等行为不一致。
+        let std_lookup = if self.natives.contains(&native.name) {
+            None
+        } else {
+            self.find_stdlib_func(&native.name, param_count)
+        };
         if let Some((std_func_idx, needs_self)) = std_lookup {
             eprintln!(
                 "[vm] stdlib-aura: {} → Aura compiled func #{} (self={})",
@@ -980,8 +1058,26 @@ impl Vm {
         // 使用实际参数个数而非声明的 param_count
         let args = self.pop_n(top, argc)?;
 
-        // Phase 3: 优先检查是否有 Aura 编译的标准库函数版本
-        if let Some((std_func_idx, needs_self)) = self.find_stdlib_func(&native.name, argc) {
+        // 同 `do_call_native`：`throw` 走异常展开路径
+        if native.name == "__throw" {
+            let v = args.into_iter().next().unwrap_or(Value::Null);
+            return self.raise(v);
+        }
+
+        // 同 `do_call_native`：`Process.exit(code)` 请求退出
+        if is_exit_native(&native.name) {
+            let code = crate::std::std_process::last_int_arg(&args).unwrap_or(0) as i32;
+            self.request_exit(code);
+            return Ok(());
+        }
+
+        // Phase 3: Aura 编译的标准库函数版本优先（同名原生已注册时以原生为准，见 do_call_native）
+        let args_std_lookup = if self.natives.contains(&native.name) {
+            None
+        } else {
+            self.find_stdlib_func(&native.name, argc)
+        };
+        if let Some((std_func_idx, needs_self)) = args_std_lookup {
             eprintln!(
                 "[vm] stdlib-aura: {} (argc={}) → Aura compiled func #{} (self={})",
                 native.name, argc, std_func_idx, needs_self
@@ -1453,6 +1549,65 @@ where
     let a = vm.pop(top)?;
     vm.frames[top].stack.push(f(a, b));
     Ok(())
+}
+
+/// 集合 / 字符串的内建成员访问（`size` / `length` / `first` / `last` / `isEmpty`）。
+///
+/// 背景：`GetField` 指令只携带字段名的 FNV-1a 哈希（见 `codegen::emit::field_index`），
+/// 且 sema 表达式类型通道对裸标识符不可靠。这里在**运行期**按哈希识别内建成员，
+/// 使 `xs.size` / `s.first` / `m.isEmpty` 等直接可用。
+///
+/// 安全性：`Value::Ref`（类实例）走堆字段路径，不经过本函数，因此类字段语义不受影响；
+/// 只有 List / Map / Str 这三种“无字段”的内联值会被改写，原先一律返回 Null。
+fn builtin_member(obj: Value, field: u16) -> Value {
+    use crate::codegen::emit::field_index;
+    let is_size = field == field_index("size") || field == field_index("length");
+    let is_first = field == field_index("first");
+    let is_last = field == field_index("last");
+    let is_empty = field == field_index("isEmpty");
+
+    match obj {
+        Value::List(items) => {
+            if is_size {
+                return Value::Int(items.len() as i64);
+            }
+            if is_empty {
+                return Value::Bool(items.is_empty());
+            }
+            if is_first {
+                return items.first().cloned().unwrap_or(Value::Null);
+            }
+            if is_last {
+                return items.last().cloned().unwrap_or(Value::Null);
+            }
+            Value::Null
+        }
+        Value::Map(map) => {
+            if is_size {
+                return Value::Int(map.len() as i64);
+            }
+            if is_empty {
+                return Value::Bool(map.is_empty());
+            }
+            Value::Null
+        }
+        Value::Str(s) => {
+            if is_size {
+                return Value::Int(s.chars().count() as i64);
+            }
+            if is_empty {
+                return Value::Bool(s.is_empty());
+            }
+            if is_first {
+                return s.chars().next().map(|c| Value::str_(c.to_string())).unwrap_or(Value::Null);
+            }
+            if is_last {
+                return s.chars().last().map(|c| Value::str_(c.to_string())).unwrap_or(Value::Null);
+            }
+            Value::Null
+        }
+        _ => Value::Null,
+    }
 }
 
 fn const_to_value(c: &crate::codegen::opcode::Const) -> Value {

@@ -2618,20 +2618,20 @@ impl Parser {
             } else {
                 cleaned.parse::<i64>().unwrap_or(0)
             };
-            return Expr::Literal(Literal::Int(n), tok.span);
+            let e = Expr::Literal(Literal::Int(n), tok.span);
+            return self.parse_postfix_chain(e, start);
         }
         if self.check(TokenKind::FloatLiteral) {
             let tok = self.advance();
-            if let Ok(n) = tok
+            let n = tok
                 .literal
                 .trim_end_matches([
                     'f', 'F', 'd', 'D',
                 ])
                 .parse::<f64>()
-            {
-                return Expr::Literal(Literal::Float(n), tok.span);
-            }
-            return Expr::Literal(Literal::Float(0.0), tok.span);
+                .unwrap_or(0.0);
+            let e = Expr::Literal(Literal::Float(n), tok.span);
+            return self.parse_postfix_chain(e, start);
         }
         if self.check(TokenKind::StringLiteral) || self.check(TokenKind::StringInterpStart) {
             // P14: 字符串插值重建 —— StringLiteral / StringInterpStart 交替序列
@@ -2677,27 +2677,32 @@ impl Parser {
             }
             if parts.len() == 1 {
                 if let Expr::Literal(Literal::String(_), _) = &parts[0] {
-                    return parts.into_iter().next().unwrap();
+                    let e = parts.into_iter().next().unwrap();
+                    return self.parse_postfix_chain(e, start);
                 }
             }
             let span = Span::merge(&start_span, &self.current().span);
-            return Expr::StrInterp {
+            let e = Expr::StrInterp {
                 parts,
                 span,
             };
+            return self.parse_postfix_chain(e, start);
         }
         if self.check(TokenKind::CharLiteral) {
             let tok = self.advance();
             let ch = tok.literal.chars().next().unwrap_or('\0');
-            return Expr::Literal(Literal::Char(ch), tok.span);
+            let e = Expr::Literal(Literal::Char(ch), tok.span);
+            return self.parse_postfix_chain(e, start);
         }
         if self.check(TokenKind::BoolLiteral) {
             let tok = self.advance();
-            return Expr::Literal(Literal::Bool(tok.literal == "true"), tok.span);
+            let e = Expr::Literal(Literal::Bool(tok.literal == "true"), tok.span);
+            return self.parse_postfix_chain(e, start);
         }
         if self.check(TokenKind::Null) {
             let tok = self.advance();
-            return Expr::Literal(Literal::Null, tok.span);
+            let e = Expr::Literal(Literal::Null, tok.span);
+            return self.parse_postfix_chain(e, start);
         }
 
         // 括号表达式 / 括号参数 lambda：`(expr)`、`(x) -> body`、`(x: T) -> body`

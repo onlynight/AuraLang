@@ -290,6 +290,7 @@ fn emit_function(
                 native_index,
                 closure_index,
                 &class_id_map,
+                &block_offsets,
             );
         }
         match &b.term {
@@ -328,6 +329,7 @@ fn emit_closure(
     class_id_map: &HashMap<&str, u16>,
 ) -> Vec<u8> {
     let mut code = Vec::new();
+    // 发射闭包指令
     for instr in &closure.body {
         emit_instr(
             &mut code,
@@ -336,6 +338,7 @@ fn emit_closure(
             native_index,
             closure_index,
             class_id_map,
+            &[],
         );
     }
     // 发射终结指令
@@ -480,6 +483,10 @@ fn instr_size(instr: &crate::codegen::mir::MirInstr) -> usize {
         InstanceOf { .. } => 9,
         // CheckCast（Phase 2）：LoadVar(src)(3) + CheckCast(3) + StoreVar(dst)(3) = 9
         CheckCast { .. } => 9,
+        // PushHandler：PUSH_HANDLER(1 + i32) + u16 槽位 = 7
+        PushHandler { .. } => 7,
+        // PopHandler：POP_HANDLER(1) = 1
+        PopHandler => 1,
     }
 }
 
@@ -504,6 +511,7 @@ fn emit_instr(
     native_index: &HashMap<&str, u16>,
     closure_index: &HashMap<&str, u16>,
     class_id_map: &HashMap<&str, u16>,
+    block_offsets: &[usize],
 ) {
     use crate::codegen::hir::HirBinOp::*;
     use crate::codegen::mir::MirInstr::*;
@@ -650,6 +658,17 @@ fn emit_instr(
             OpCode::CheckCast(*type_id).write(code);
             OpCode::StoreVar(*dst as u16).write(code);
         }
+        PushHandler {
+            handler,
+            slot,
+        } => {
+            // 处理器块 id → 绝对字节偏移（与 Jump 同一套跳转目标约定）
+            let off = block_offsets.get(*handler).copied().unwrap_or(0) as i32;
+            OpCode::PushHandler(off, *slot).write(code);
+        }
+        PopHandler => {
+            OpCode::PopHandler.write(code);
+        }
         Alloc {
             dst,
             type_name,
@@ -795,7 +814,11 @@ fn type_index(name: &str) -> u16 {
 }
 
 /// 字段名 -> 字段表索引（简化：字符串哈希）
-fn field_index(name: &str) -> u16 {
+/// 字段名 → 索引（FNV-1a 哈希，`GetField`/`SetField` 指令携带）。
+///
+/// 公开给 VM：集合/字符串的内建成员访问（`size`/`first`/`last`/`isEmpty`）
+/// 通过同一哈希在运行期识别字段名。
+pub fn field_index(name: &str) -> u16 {
     let mut h: u32 = 2166136261;
     for b in name.bytes() {
         h ^= b as u32;

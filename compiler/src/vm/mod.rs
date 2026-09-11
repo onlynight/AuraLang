@@ -321,6 +321,14 @@ pub enum Instr {
     /// 调用 AOT 预编译函数（`func_idx` 为函数表索引），经 [`crate::vm::aot_runtime::AotRuntime`]
     /// dispatch_table 查找到 mmap 的机器码入口，使用共享 JitValue ABI 直接 `call`。
     CallAot(u16),
+
+    // ── 异常处理（try/catch）──
+    /// 注册异常处理器：`(处理器指令索引, 异常值落点槽位)`。
+    ///
+    /// 加载期已把字节偏移解析为指令索引；`u16::MAX` 表示不写入槽位。
+    PushHandler(usize, u16),
+    /// 注销最近的异常处理器
+    PopHandler,
 }
 
 /// 解码后的函数
@@ -660,6 +668,24 @@ fn decode_function(f: &BytecodeFunction) -> Result<DecodedFunction, VmError> {
                 ip += 2;
                 instrs.push(Instr::CallAot(v));
             }
+            crate::codegen::opcode::OpCode::PushHandler(..) => {
+                // 操作数：i32 处理器块字节偏移 + u16 异常值落点槽位。
+                // 注意：`from_byte` 产生的操作数是占位值，真实操作数必须从字节流读取
+                //（此前误用占位 0，导致处理器偏移恒为 0 → 跳到函数开头形成死循环）。
+                let off = i32::from_le_bytes([
+                    code[ip],
+                    code[ip + 1],
+                    code[ip + 2],
+                    code[ip + 3],
+                ]);
+                let slot = u16::from_le_bytes([
+                    code[ip + 4],
+                    code[ip + 5],
+                ]);
+                ip += 6;
+                instrs.push(Instr::PushHandler(off as usize, slot));
+            }
+            crate::codegen::opcode::OpCode::PopHandler => instrs.push(Instr::PopHandler),
         }
     }
 
@@ -678,6 +704,15 @@ fn decode_function(f: &BytecodeFunction) -> Result<DecodedFunction, VmError> {
                     _ => Instr::JumpIfFalse(idx),
                 };
             }
+            Instr::PushHandler(off, slot) => {
+                let idx = *offset_to_idx.get(off).ok_or_else(|| {
+                    VmError::Load(format!(
+                        "handler target {} not at instruction boundary",
+                        off
+                    ))
+                })?;
+                *instr = Instr::PushHandler(idx, *slot);
+            }
             _ => {}
         }
     }
@@ -689,6 +724,19 @@ fn decode_function(f: &BytecodeFunction) -> Result<DecodedFunction, VmError> {
         is_native: f.is_native,
         code: instrs,
     })
+}
+
+/// 异常处理器（`try/catch`）：记录 `PUSH_HANDLER` 注册时的执行状态
+#[derive(Debug, Clone)]
+pub struct Handler {
+    /// 注册该处理器的帧索引（`Vm::frames` 下标）
+    pub frame_index: usize,
+    /// 处理器入口的指令索引
+    pub ip: usize,
+    /// 注册时的操作数栈高度（抛出时把栈截断回此高度）
+    pub stack_len: usize,
+    /// 异常值写入的局部槽位（`u16::MAX` 表示不写入，仅作 finally 中转）
+    pub slot: u16,
 }
 
 /// 调用帧
@@ -711,8 +759,12 @@ impl Frame {
         let mut locals = vec![Value::Null; func.locals as usize];
         let n = func.param_count as usize;
         // 参数从 locals[1] 开始（locals[0] 是函数指针占位）
+        // 注意：形参个数可能大于实际槽位（例如误用 stdlib 中同名的其它 arity 实现），
+        // 此时忽略多余槽位而不是 panic（越界写入会直接终止 VM）。
         for (i, a) in args.into_iter().take(n).enumerate() {
-            locals[i + 1] = a;
+            if i + 1 < locals.len() {
+                locals[i + 1] = a;
+            }
         }
         Frame {
             func: 0,
@@ -736,6 +788,10 @@ pub struct Vm {
     result: Option<Value>,
     /// object 单例实例（类名 → 堆引用）
     singletons: std::collections::HashMap<String, Value>,
+    /// 异常处理器栈（`try/catch`，LIFO）
+    handlers: Vec<Handler>,
+    /// `Process.exit(code)` 请求的退出码（None = 未请求退出）
+    exit_code: Option<i32>,
     halt: bool,
     opts: VmOptions,
     #[cfg(feature = "jit")]
@@ -804,6 +860,8 @@ impl Vm {
             call_counts: vec![0; module.functions.len()],
             result: None,
             singletons: std::collections::HashMap::new(),
+            handlers: Vec::new(),
+            exit_code: None,
             halt: false,
             opts,
             #[cfg(feature = "jit")]
@@ -922,6 +980,37 @@ impl Vm {
             if self.call_counts.len() < new_len {
                 self.call_counts.resize(new_len, 0);
             }
+        }
+    }
+
+    /// 执行 object 单例的字段初始化函数（`<Object>.__singletonInit`）。
+    ///
+    /// `create_singletons` 只能把字段统一置为 `Value::Null`（VM 侧拿不到字段声明的默认值），
+    /// 因此字段默认值由 HIR 合成的初始化函数写入。这里在入口函数执行前逐个调用，
+    /// 使 `object Foo { var n: Int = 5 }` 的 `Foo.n` 初值为 5 而非 null。
+    fn run_singleton_initializers(&mut self) {
+        if self.singletons.is_empty() {
+            return;
+        }
+        let mut inits: Vec<(usize, Value)> = Vec::new();
+        for (name, val) in self.singletons.clone() {
+            let fname = format!("{}.__singletonInit", name);
+            if let Some(idx) = self.module.funcs.iter().position(|f| f.name == fname) {
+                inits.push((idx, val));
+            }
+        }
+        for (idx, self_val) in inits {
+            let saved_halt = self.halt;
+            let saved_result = self.result.take();
+            if self.push_frame(idx, vec![self_val]).is_ok() {
+                while !self.frames.is_empty() && !self.halt {
+                    if self.step().is_err() {
+                        break;
+                    }
+                }
+            }
+            self.halt = saved_halt;
+            self.result = saved_result;
         }
     }
 
@@ -1155,6 +1244,9 @@ impl Vm {
             }
         }
 
+        // object 单例字段默认值初始化（必须在入口函数之前）
+        self.run_singleton_initializers();
+
         self.push_frame(entry, Vec::new())?;
         while !self.frames.is_empty() && !self.halt {
             self.step()?;
@@ -1341,6 +1433,10 @@ impl Vm {
 
     fn pop_frame(&mut self, ret: Value) {
         self.frames.pop();
+        // 帧退出时丢弃其内部注册的异常处理器（处理器不跨帧存活），
+        // 否则外层函数后续抛出的异常会跳到已销毁帧的指令地址。
+        let depth = self.frames.len();
+        self.handlers.retain(|h| h.frame_index < depth);
         if self.frames.is_empty() {
             self.result = Some(ret);
             self.halt = true;
@@ -1348,6 +1444,23 @@ impl Vm {
             let top = self.frames.len() - 1;
             self.frames[top].stack.push(ret);
         }
+    }
+
+    /// `Process.exit(code)` 请求的退出码。
+    ///
+    /// `Some(code)` 表示 Aura 代码显式请求以该码结束；CLI 应据此设置进程退出码
+    /// （`std::process::exit` 的硬终止仅作为非 CLI 场景的回退）。
+    pub fn requested_exit_code(&self) -> Option<i32> {
+        self.exit_code
+    }
+
+    /// 请求退出：清空调用帧、停止执行，并记录退出码（供 `run()` 正常返回）。
+    fn request_exit(&mut self, code: i32) {
+        self.exit_code = Some(code);
+        self.frames.clear();
+        self.handlers.clear();
+        self.result = Some(Value::Null);
+        self.halt = true;
     }
 
     /// 热点检测（5.11）：返回某函数的累计调用次数

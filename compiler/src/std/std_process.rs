@@ -18,10 +18,28 @@ pub fn register(reg: &mut NativeRegistry) {
     reg.register("aura.lang.std.Process.exitProcess", nat_exit_process);
 }
 
-/// process.exit(code) → exits the process
+/// `Process.exit(code)` → 退出进程。
+///
+/// 注意：`Process` 是 object 单例，方法调用会**注入 self 作为第 0 个参数**
+/// （实际 `argc = 1 + 形参个数`）。因此退出码取自**最后一个**数值参数，
+/// 而不是 `args[0]`（此前误取 args[0] 导致退出码恒为 0）。
 fn nat_exit(args: &[Value]) -> Value {
-    let code = args.first().map(|v| v.as_int()).unwrap_or(0) as i32;
+    let code = last_int_arg(args).unwrap_or(0) as i32;
     std::process::exit(code);
+}
+
+/// `nat_exit` 的公开包装（供 prelude 短名别名注册使用）。
+pub fn nat_exit_pub(args: &[Value]) -> Value {
+    nat_exit(args)
+}
+
+/// 取参数列表中最后一个整数（兼容 `Value::Float` 表示的整数）。
+pub(crate) fn last_int_arg(args: &[Value]) -> Option<i64> {
+    args.iter().rev().find_map(|v| match v {
+        Value::Int(n) => Some(*n),
+        Value::Float(f) if f.fract() == 0.0 => Some(*f as i64),
+        _ => None,
+    })
 }
 
 /// process.exitCode() → Int (default 0)

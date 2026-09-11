@@ -213,9 +213,23 @@ pub fn compile_source(source: &str) -> Result<BytecodeModule, String> {
     Ok(compile_with_info(&ast, &opts, &sema.info))
 }
 
-/// 预处理：解析 `import "path.aura"` 语句，将外部 `.aura` 文件内容内联
+/// 自举编译器包根：`aura.lang.compiler` 映射到入口文件所在目录
+/// （即 `aura/lang/compiler/`），用于把「包名 import」解析为相对 `.aura` 文件路径。
 ///
-/// 用于支持 `extern interface` 声明放在独立文件中，通过 `import` 引入。
+/// 包名 import 形如（无引号，与 `aura.lang.std.*` 风格一致）：
+///   import aura.lang.compiler.lexer.Span
+/// 末段为模块文件名（去掉 `.aura`），前段为子包目录；
+/// `aura.lang.compiler.lexer.Span` → `lexer/Span.aura`（相对入口目录）。
+const COMPILER_PKG_ROOT: &str = "aura.lang.compiler.";
+
+/// 预处理：解析 `import` 语句，将外部模块内容内联。
+///
+/// 支持三种形式：
+/// 1. `import "path.aura"`（引号 + 文件路径，相对入口目录）—— 内联文件内容；
+/// 2. `import aura.lang.compiler.<pkg>.<Mod>`（包名，无引号）—— 映射为
+///    `<pkg>/<Mod>.aura` 后内联；
+/// 3. 其余（如 `import aura.lang.std.String`）原样透传，交给 VM 模块系统。
+///
 /// `file_path` 为当前源文件路径（用于解析相对路径），`None` 时无法解析相对导入。
 pub fn resolve_aura_imports(source: &str, file_path: Option<&str>) -> String {
     let mut result = String::new();
@@ -227,32 +241,54 @@ pub fn resolve_aura_imports(source: &str, file_path: Option<&str>) -> String {
 
     for line in source.lines() {
         let trimmed = line.trim_start();
-        // 匹配 import "path" 或 import "path" as alias
+        // 包声明（如 `package aura.lang.compiler.lexer`）由编译器消费，
+        // 不参与 AST；必须在预处理阶段剥离，否则解析器会将其当作非法声明。
+        if trimmed.starts_with("package ") {
+            continue;
+        }
+        // 匹配 `import "path"` 或 `import <pkg>`
         if let Some(rest) = trimmed.strip_prefix("import ") {
             let rest = rest.trim();
-            if let Some(path_str) = rest.strip_prefix("\"") {
+            // 计算需要内联的目标文件路径（若有）
+            let target: Option<std::path::PathBuf> = if let Some(path_str) = rest.strip_prefix("\"")
+            {
                 let (path, _suffix) = split_at_quote(path_str);
                 if path.ends_with(".aura") {
-                    let full_path = base_dir.join(path);
-                    if let Ok(content) = std::fs::read_to_string(&full_path) {
-                        // 将导入文件的内容内联（跳过 import 行本身）
-                        let content_lines: Vec<&str> = content.lines().collect();
-                        let mut imported_content = String::new();
-                        for cl in content_lines {
-                            let cl_trimmed = cl.trim_start();
-                            if cl_trimmed.starts_with("import ") {
-                                continue; // 跳过嵌套 import
-                            }
-                            imported_content.push_str(cl);
-                            imported_content.push('\n');
+                    Some(base_dir.join(path))
+                } else if path.starts_with(COMPILER_PKG_ROOT) {
+                    let rel =
+                        pkg_to_aura_path(path.strip_prefix(COMPILER_PKG_ROOT).unwrap_or(path));
+                    Some(base_dir.join(rel))
+                } else {
+                    None
+                }
+            } else if let Some(pkg) = rest.strip_prefix(COMPILER_PKG_ROOT) {
+                let rel = pkg_to_aura_path(pkg);
+                Some(base_dir.join(rel))
+            } else {
+                None
+            };
+
+            if let Some(full_path) = target {
+                if let Ok(content) = std::fs::read_to_string(&full_path) {
+                    // 将导入文件的内容内联（跳过 import 行本身）
+                    let content_lines: Vec<&str> = content.lines().collect();
+                    let mut imported_content = String::new();
+                    for cl in content_lines {
+                        let cl_trimmed = cl.trim_start();
+                        if cl_trimmed.starts_with("import ") || cl_trimmed.starts_with("package ") {
+                            continue; // 跳过嵌套 import 与 package 声明
                         }
-                        result.push_str(&imported_content);
-                        continue; // 跳过原 import 行
-                    } else {
-                        eprintln!("[codegen] 无法读取导入文件: {}", full_path.display());
+                        imported_content.push_str(cl);
+                        imported_content.push('\n');
                     }
+                    result.push_str(&imported_content);
+                    continue; // 跳过原 import 行
+                } else {
+                    eprintln!("[codegen] 无法读取导入文件: {}", full_path.display());
                 }
             }
+            // 未识别的 import（如 aura.lang.std.*）原样保留，交给 VM 模块系统
         }
         result.push_str(line);
         result.push('\n');
@@ -263,6 +299,20 @@ pub fn resolve_aura_imports(source: &str, file_path: Option<&str>) -> String {
 /// 从字符串中找到第一个 `"` 的位置，返回 (前缀, 后缀)
 fn split_at_quote(s: &str) -> (&str, &str) {
     if let Some(pos) = s.find('"') { (&s[..pos], &s[pos + 1..]) } else { (s, "") }
+}
+
+/// 将包名末段转换为相对 `.aura` 文件路径。
+///
+/// 例：`lexer.Span` → `lexer/Span.aura`；`Parser` → `Parser.aura`。
+/// 前段（若有）按 `.` 拆成目录层级，末段补 `.aura` 后缀。
+fn pkg_to_aura_path(pkg: &str) -> String {
+    let parts: Vec<&str> = pkg.split('.').collect();
+    match parts.split_last() {
+        Some((last, init)) if !init.is_empty() => {
+            format!("{}/{}.aura", init.join("/"), last)
+        }
+        _ => format!("{}.aura", pkg),
+    }
 }
 
 /// 从 AST 程序提取启用的 std 模块名
@@ -282,6 +332,11 @@ fn extract_enabled_modules(program: &crate::ast::Program) -> Vec<String> {
 
     for imp in &program.imports {
         let path = &imp.path;
+        // 自举编译器包内 import（aura.lang.compiler.*）已由 resolve_aura_imports
+        // 内联处理，不映射到任何 std 模块，避免污染启用的模块集合。
+        if path.starts_with("aura.lang.compiler.") {
+            continue;
+        }
         if let Some(rest) = path.strip_prefix("aura.lang.std.") {
             // 新命名：路径形如 aura.lang.std.<ClassName>[.<fn>]
             let class = rest.split('.').next().unwrap_or(rest);

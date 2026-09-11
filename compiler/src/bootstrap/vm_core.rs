@@ -328,9 +328,12 @@ impl FfiCache {
             Box::new(|args| {
                 let s = args.first().ok_or_else(|| Trap::new("strlen: 缺少参数"))?;
                 let s = s.as_str()?;
-                // SAFETY: Rc<str> 内容连续存储，strlen 只读至终止符；
-                // 我们传入的串不含 NUL，因此读取范围恰为字符串内容。
-                Ok(Value::Int(unsafe { strlen(s.as_ptr() as *const i8) } as i64))
+                // 注意：不能直接对 `Rc<str>` 的字节调用 libc `strlen`。
+                // `Rc<str>` 不以 NUL 结尾，`strlen` 会越过串尾继续读到相邻堆内存，
+                // 结果取决于其后恰好何时出现零字节 —— 属未定义行为，曾使
+                // `test_ffi_aot_direct_vm` 间歇得到 6 而非 5。
+                // 这里直接取字节长度，语义与 `strlen` 一致（均按字节计）。
+                Ok(Value::Int(s.len() as i64))
             }),
         );
         // 自定义 C ABI 库函数

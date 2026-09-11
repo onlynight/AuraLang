@@ -72,6 +72,12 @@ pub struct ResolvedBuildConfig {
     pub library: bool,
     /// 包名
     pub name: String,
+    /// 项目根目录（`aura.toml` 所在目录）
+    ///
+    /// 任务据此解析 `aura.toml`、`src/` 等**项目内**路径。此前任务实现里
+    /// `project_dir()` 硬编码为 `"."`，等于始终相对进程 CWD 查找，导致
+    /// 在非项目目录执行（如 `cargo test` 的 CWD 是包目录）时找不到清单。
+    pub project_dir: String,
 }
 
 impl Default for ResolvedBuildConfig {
@@ -94,6 +100,35 @@ impl Default for ResolvedBuildConfig {
             ffi_mode: FfiMode::default(),
             library: false,
             name: String::new(),
+            // 默认取当前目录：真实构建入口会通过 `with_project_dir` 覆盖为清单所在目录
+            project_dir: ".".to_string(),
+        }
+    }
+}
+
+impl ResolvedBuildConfig {
+    /// 设置项目根目录（`aura.toml` 所在目录），返回修改后的配置。
+    pub fn with_project_dir(mut self, dir: impl AsRef<std::path::Path>) -> Self {
+        self.project_dir = dir.as_ref().to_string_lossy().to_string();
+        self
+    }
+}
+
+#[cfg(test)]
+impl ResolvedBuildConfig {
+    /// 测试用例专用：使用**独立临时目录**的配置。
+    ///
+    /// `default()` 的 `out_dir` / `cache_dir` 是相对路径（`target/build`、
+    /// `target/cache`），而 `cargo test` 的 CWD 是包目录 —— 并行执行时多个用例
+    /// 会共用同一目录并互相删除/覆盖（`clean` 任务更是直接 `remove_dir_all`），
+    /// 表现为 scheduler / executor / package 等用例**随机失败**。
+    /// 各用例改用本函数即可获得彼此隔离的输出与缓存目录。
+    pub fn isolated() -> Self {
+        let dir = tempfile::TempDir::new().unwrap().into_path();
+        Self {
+            out_dir: dir.join("build").to_string_lossy().to_string(),
+            cache_dir: dir.join("cache").to_string_lossy().to_string(),
+            ..Default::default()
         }
     }
 }
@@ -160,6 +195,8 @@ pub fn resolve_build_config(manifest: &LoomManifest, cli: &CliOverrides) -> Reso
         ffi_mode: project_build.ffi_mode.clone(),
         library: manifest.library,
         name: manifest.name.clone(),
+        // 项目根不在清单里，交由调用方通过 `with_project_dir` 设置
+        project_dir: ".".to_string(),
     }
 }
 

@@ -1251,5 +1251,7 @@ pub fn format_instr(instr: &crate::vm::Instr) -> String {
         CallExport(i) => format!("CallExport({})", i),
         CallExternal(m, s) => format!("CallExternal({}, {})", m, s),
         CallAot(i) => format!("CallAot({})", i),
+        PushHandler(ip, slot) => format!("PushHandler({}, slot={})", ip, slot),
+        PopHandler => "PopHandler".into(),
     }
 }

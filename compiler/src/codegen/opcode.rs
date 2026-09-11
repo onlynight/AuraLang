@@ -204,6 +204,15 @@ pub enum OpCode {
     /// [`crate::vm::aot_runtime::AotRuntime`] 的 dispatch_table，命中则直接
     /// `call` 到 mmap 的机器码（共享 JitValue ABI），否则回退字节码解释。
     CallAot(u16),
+
+    // ── 异常处理（try/catch）──
+    /// 注册异常处理器：操作数为**处理器块的绝对字节偏移** + 异常值落点槽位。
+    ///
+    /// VM 收到该指令时把 `(当前帧, 目标 ip, 栈高, 槽位)` 压入 handler 栈；`throw`
+    /// 触发时弹出最近的 handler，展开到对应帧、把异常值写入槽位后跳转过去。
+    PushHandler(i32, u16),
+    /// 注销最近的异常处理器（try 块正常结束时执行）。
+    PopHandler,
 }
 
 impl OpCode {
@@ -288,6 +297,8 @@ impl OpCode {
             OpCode::CallExport(_) => 70,
             OpCode::CallExternal(_, _) => 71,
             OpCode::CallAot(_) => 77,
+            OpCode::PushHandler(..) => 82,
+            OpCode::PopHandler => 83,
         }
     }
 
@@ -296,8 +307,12 @@ impl OpCode {
         match byte {
             0 | 1 | 2 | 30 | 32 | 33 | 72 | 74 | 76 | 77 => 2, // u16 操作数
             23 | 24 | 25 => 4,                                 // i32 偏移
-            26 | 27 | 36 => 2,                                 // u16 函数/原生索引
-            78 => 4,                                           // CallNativeArgs: u16 idx + u16 argc
+            82 => 6, // PushHandler: i32 处理器块偏移 + u16 异常值槽位
+            // ⚠ 必须与 `write` 实际写出的操作数字节数一致：解码器用本表
+            // 推进指令游标并构建「字节偏移 → 指令索引」映射，长度不符会导致
+            // 其后所有指令边界错位。
+            26 | 27 | 36 => 2,           // u16 函数/原生索引
+            78 => 4,                     // CallNativeArgs: u16 idx + u16 argc
             40 | 41 | 51 | 80 | 81 => 2, // CallMethod/CallCtor/NewCoroutine/InstanceOf/CheckCast u16 索引
             66 => 2,                     // MakeCallback u16 函数索引
             70 => 2,                     // CallExport u16 sym_idx
@@ -386,6 +401,8 @@ impl OpCode {
             71 => OpCode::CallExternal(0, 0),
             77 => OpCode::CallAot(0),
             78 => OpCode::CallNativeArgs(0, 0),
+            82 => OpCode::PushHandler(0, 0),
+            83 => OpCode::PopHandler,
             _ => return None,
         })
     }
@@ -425,6 +442,10 @@ impl OpCode {
             OpCode::Jump(o) | OpCode::JumpIfTrue(o) | OpCode::JumpIfFalse(o) => {
                 buf.extend_from_slice(&o.to_le_bytes())
             }
+            OpCode::PushHandler(o, slot) => {
+                buf.extend_from_slice(&o.to_le_bytes());
+                buf.extend_from_slice(&slot.to_le_bytes());
+            }
             _ => {}
         }
     }
@@ -459,6 +480,8 @@ impl fmt::Display for OpCode {
             OpCode::Jump(o) => write!(f, "JUMP {}", o),
             OpCode::JumpIfTrue(o) => write!(f, "JUMP_IF_TRUE {}", o),
             OpCode::JumpIfFalse(o) => write!(f, "JUMP_IF_FALSE {}", o),
+            OpCode::PushHandler(o, slot) => write!(f, "PUSH_HANDLER {} slot={}", o, slot),
+            OpCode::PopHandler => write!(f, "POP_HANDLER"),
             OpCode::Call(i) => write!(f, "CALL {}", i),
             OpCode::CallNative(i) => write!(f, "CALL_NATIVE {}", i),
             OpCode::CallNativeArgs(i, argc) => write!(f, "CALL_NATIVE_ARGS {} argc={}", i, argc),
@@ -1055,6 +1078,33 @@ impl SymbolKind {
 mod tests {
     use super::*;
     use std::mem::offset_of;
+
+    /// `operand_size` 必须与 `write` 实际写出的操作数字节数一致。
+    ///
+    /// 原因：`.auc` 解码器用 `operand_size` 推进指令游标并构建
+    /// 「字节偏移 → 指令索引」映射；一旦二者不符，其后**所有指令边界错位**，
+    /// 表现为跳转/异常处理器目标解析错误（曾因 `PushHandler` 少报 2 字节，
+    /// 导致 `try/catch` 在多处理器函数中出现难以定位的行为异常）。
+    #[test]
+    fn test_operand_size_matches_write() {
+        for b in 0u8..=255 {
+            if let Some(op) = OpCode::from_byte(b) {
+                let mut buf = Vec::new();
+                op.write(&mut buf);
+                assert_eq!(
+                    buf.len(),
+                    1 + OpCode::operand_size(b),
+                    "opcode {} ({:?})：write 写出 {} 字节，但 1+operand_size({}) = {}",
+                    b,
+                    op,
+                    buf.len(),
+                    b,
+                    1 + OpCode::operand_size(b)
+                );
+                assert_eq!(op.byte(), b, "opcode {:?} 的 byte() 应回到 {}", op, b);
+            }
+        }
+    }
 
     #[test]
     fn test_call_aot_opcode_byte() {

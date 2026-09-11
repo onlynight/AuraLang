@@ -91,6 +91,17 @@ fn fold_stmt(s: &HirStmt) -> HirStmt {
         HirStmt::Continue => HirStmt::Continue,
         HirStmt::Block(b) => HirStmt::Block(fold_block(b)),
         HirStmt::Defer(b) => HirStmt::Defer(fold_block(b)),
+        HirStmt::Try {
+            body,
+            catch_var,
+            catch_body,
+            finally,
+        } => HirStmt::Try {
+            body: fold_block(body),
+            catch_var: catch_var.clone(),
+            catch_body: fold_block(catch_body),
+            finally: finally.as_ref().map(fold_block),
+        },
     }
 }
 

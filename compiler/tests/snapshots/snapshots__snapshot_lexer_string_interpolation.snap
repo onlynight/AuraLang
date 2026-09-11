@@ -2,5 +2,8 @@
 source: compiler/tests/snapshots.rs
 expression: "token_dump(\"\\\"hello $name, sum = ${a + b}\\\"\")"
 ---
-StringLiteral("hello name, sum = a + b") @1:1
+StringLiteral("hello ") @1:1
+StringInterpStart("$name") @1:1
+StringLiteral(", sum = ") @1:1
+StringInterpStart("${a + b}") @1:1
 EOF

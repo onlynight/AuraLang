@@ -1,4 +1,5 @@
 // aura:///aura/lang/compiler/Main.aura
+package aura.lang.compiler
 // ─────────────────────────────────────────────────────────────
 // Aura 编译器入口（纯 Aura 化迁移 · Phase 0）
 //
@@ -21,6 +22,17 @@
 //   aot/     Phase 6  AOT LLVM 后端
 //   test/    Phase 0  测试框架（TestRunner）
 // ─────────────────────────────────────────────────────────────
+
+// 顶层集中 import（包名形式）：所有子模块按依赖顺序在此一次性声明。
+// 包名 import 形如 import aura.lang.compiler.<pkg>.<Mod>，由 resolve_aura_imports
+// 映射为 <pkg>/<Mod>.aura（相对本文件目录 aura/lang/compiler/）内联。
+// 同包（aura.lang.compiler）下的模块无需互相 import，直接通过扁平命名空间调用。
+import aura.lang.compiler.lexer.Span
+import aura.lang.compiler.lexer.Token
+import aura.lang.compiler.lexer.Lexer
+import aura.lang.compiler.ast.Ast
+import aura.lang.compiler.errors.CompileError
+import aura.lang.compiler.parser.Parser
 
 /// 编译器元信息（静态查询，无可变状态）。
 object CompilerInfo {
@@ -69,4 +81,28 @@ fun main() {
     println(banner())
     println(CompilerInfo.phase())
     println("用法: aura-compiler <file.aura>")
+    // ── 纯 Aura 编写的 Parser 自检（顶层集中 import 已展开所有模块）──
+    val src = "import aura.lang.std.String\n" +
+        "fun add(a: Int, b: Int): Int { return a + b }\n" +
+        "fun main(): Int {\n" +
+        "    val x: Int = 10\n" +
+        "    var i: Int = 0\n" +
+        "    while (i < x) { i = i + 1 }\n" +
+        "    return add(x, i)\n" +
+        "}\n"
+    val p = Parser(src)
+    val root = p.parseProgram()
+    // 注意：VM 缺陷 —— 对「经字段访问得到的对象」调用方法会错乱 this 绑定，
+    // 故先取局部变量再调用（p.ast.kindOf 会返回 0.0）。
+    val ast = p.ast
+    val errs = p.errors
+    println("=== 纯 Aura Parser 自检 ===")
+    println("astCount=" + toStr(ast.count))
+    println("errCount=" + toStr(errs.count))
+    var ei = 0
+    while (ei < errs.count) {
+        println("err" + toStr(ei) + "=" + errs.messageAt(ei))
+        ei = ei + 1
+    }
+    println(ast.dumpNode(root, 0))
 }

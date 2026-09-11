@@ -622,6 +622,12 @@ fn cmd_run(args: &[String]) {
             if !matches!(result, compiler::vm::Value::Null) {
                 println!("{}", result);
             }
+            // `Process.exit(code)` 请求的退出码（未被显式请求时保持 0）
+            if let Some(code) = vm.requested_exit_code() {
+                if code != 0 {
+                    exit(code);
+                }
+            }
         }
         Err(e) => {
             eprintln!("运行时错误: {}", e);

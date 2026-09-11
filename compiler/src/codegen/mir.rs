@@ -79,6 +79,16 @@ pub enum MirInstr {
     InstanceOf { dst: Reg, src: Reg, type_id: u16 },
     /// 类型转换（Phase 2）：`dst = (src as type_id)`，不匹配则报错
     CheckCast { dst: Reg, src: Reg, type_id: u16 },
+
+    // ── 异常处理（try/catch）──
+    /// 注册异常处理器：`handler` 为处理器（catch 体）所在的基本块 id。
+    ///
+    /// 发射时解析为该块的字节偏移（`PushHandler(offset, slot)`）。
+    /// `slot` 为异常值的落点：有 catch 变量时是其槽位；无 catch 子句（仅 finally）时
+    /// 是一个临时槽，供处理器块末尾重抛使用。`u16::MAX` 表示不写入。
+    PushHandler { handler: usize, slot: u16 },
+    /// 注销最近的异常处理器（try 体正常结束时执行）。
+    PopHandler,
 }
 
 /// 基本块终结指令（控制流）
@@ -458,6 +468,21 @@ impl MirBuilder {
                 HirStmt::Block(b) => {
                     Self::collect_free_vars_in_block(b, locals, out);
                 }
+                HirStmt::Try {
+                    body,
+                    catch_var,
+                    catch_body,
+                    finally,
+                } => {
+                    Self::collect_free_vars_in_block(body, locals, out);
+                    if let Some(v) = catch_var {
+                        locals.insert(v.clone());
+                    }
+                    Self::collect_free_vars_in_block(catch_body, locals, out);
+                    if let Some(f) = finally {
+                        Self::collect_free_vars_in_block(f, locals, out);
+                    }
+                }
             }
         }
     }
@@ -697,7 +722,136 @@ impl MirBuilder {
                 self.lower_block(b, ctx);
                 self.exit_scope();
             }
+            HirStmt::Try {
+                body,
+                catch_var,
+                catch_body,
+                finally,
+            } => {
+                self.lower_try(
+                    body,
+                    catch_var.as_deref(),
+                    catch_body,
+                    finally.as_ref(),
+                    ctx,
+                );
+            }
         }
+    }
+
+    /// try/catch/finally 的 MIR 降级。
+    ///
+    /// 结构与发射后的字节码：
+    /// ```text
+    ///   PUSH_HANDLER handler            ; 注册处理器
+    ///   <try 体>
+    ///   POP_HANDLER                     ; 正常结束注销
+    ///   <finally>                       ; 正常路径的 finally
+    ///   GOTO merge
+    /// handler:
+    ///   [catch 体]                      ; 异常值已由 VM 写入 catch 变量槽 / 临时槽
+    ///   <finally>                       ; 异常路径的 finally
+    ///   [异常重抛]                      ; 仅当无 catch 子句（只有 finally）时
+    ///   GOTO merge
+    /// merge:
+    /// ```
+    ///
+    /// 无 catch 且无 finally 时 try 体退化为普通块（异常自然向外传播）。
+    fn lower_try(
+        &mut self,
+        body: &HirBlock,
+        catch_var: Option<&str>,
+        catch_body: &HirBlock,
+        finally: Option<&HirBlock>,
+        ctx: &mut LowerCtx,
+    ) {
+        let has_catch = catch_var.is_some();
+
+        // 无 catch 且无 finally：异常应向外传播，无需注册处理器
+        if !has_catch && finally.is_none() {
+            self.enter_scope();
+            self.lower_block(body, ctx);
+            self.exit_scope();
+            return;
+        }
+
+        let handler_id = self.new_block(); // 处理器入口（VM 跳入点）
+        let body_done = self.new_block(); // 正常路径 finally 入口
+        let handler_done = self.new_block(); // 异常路径 finally 入口
+        let merge_id = self.new_block();
+
+        // 1) 先降级 catch 体以取得 catch 变量槽位（catch 体首个语句是 `Val{catch_var}`）。
+        //    必须在 `exit_scope` 之前读出槽位，作为 PUSH_HANDLER 的落点。
+        let saved_cur = self.current;
+        self.current = handler_id;
+        self.enter_scope();
+        self.lower_block(catch_body, ctx);
+        let catch_slot: u16 = match catch_var {
+            Some(name) => self.lookup(name).map(|r| r as u16).unwrap_or(u16::MAX),
+            None => u16::MAX,
+        };
+        self.exit_scope();
+        // catch 体执行完落到「异常路径 finally」入口。注意：若 catch 体内部产生嵌套
+        // 控制流，`self.current` 已漂移到其合并块，此时只终结该合并块；`handler_id`
+        // 的终结指令由嵌套控制流自身设置（保持入口指令不变）。
+        if !self.is_closed(self.current) {
+            self.set_term(Terminator::Goto(handler_done));
+        }
+
+        // 无 catch 子句：用一个临时槽承接异常值，以便 finally 之后重抛
+        let exc_slot: u16 = if has_catch { catch_slot } else { self.alloc_reg() as u16 };
+
+        // 2) try 体（回到原块，注册处理器）
+        self.current = saved_cur;
+        self.emit(MirInstr::PushHandler {
+            handler: handler_id,
+            slot: exc_slot,
+        });
+        self.enter_scope();
+        self.lower_block(body, ctx);
+        self.exit_scope();
+        self.emit(MirInstr::PopHandler);
+        if !self.is_closed(self.current) {
+            self.set_term(Terminator::Goto(body_done));
+        }
+
+        // 3) 正常路径 finally
+        self.current = body_done;
+        if let Some(f) = finally {
+            self.enter_scope();
+            self.lower_block(f, ctx);
+            self.exit_scope();
+        }
+        if !self.is_closed(self.current) {
+            self.set_term(Terminator::Goto(merge_id));
+        }
+
+        // 4) 异常路径 finally（+ 无 catch 时重抛）
+        self.current = handler_done;
+        if let Some(f) = finally {
+            self.enter_scope();
+            self.lower_block(f, ctx);
+            self.exit_scope();
+        }
+        if !has_catch {
+            // 仅 finally：处理完清理后把异常继续向外抛（此时本处理器已被 VM 弹出，
+            // 因此重抛会命中外层处理器，或最终成为未捕获异常）。
+            let v = self.alloc_reg();
+            self.emit(MirInstr::LoadLocal {
+                dst: v,
+                slot: exc_slot as usize,
+            });
+            self.emit(MirInstr::CallNative {
+                dst: None,
+                func: "__throw".to_string(),
+                args: vec![v],
+            });
+        }
+        if !self.is_closed(self.current) {
+            self.set_term(Terminator::Goto(merge_id));
+        }
+
+        self.current = merge_id;
     }
 
     // ── 表达式降级：返回结果寄存器 ──

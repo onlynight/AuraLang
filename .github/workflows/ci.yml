@@ -82,6 +82,11 @@ jobs:
           ./target/release/aura run tests/phase0_tests.aura | tee /tmp/phase0.log
           grep -q "RESULT: PASS" /tmp/phase0.log
 
+      - name: Phase 1 verification cases (Aura lexer)
+        run: |
+          ./target/release/aura run tests/phase1_lexer_tests.aura | tee /tmp/phase1.log
+          grep -q "RESULT: PASS" /tmp/phase1.log
+
       - name: Source snapshot check (Rust baseline)
         run: bash scripts/snapshot.sh
 

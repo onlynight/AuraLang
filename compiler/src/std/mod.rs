@@ -76,6 +76,25 @@ pub mod std_time;
 
 use crate::vm::native::NativeRegistry;
 
+/// 注册 **prelude 裸名**（免 import 的全局内置函数）。
+///
+/// 编译器把 `isNull(x)` / `listOf(...)` / `min(a, b)` 这类 prelude 调用解析为**裸名**
+/// 原生调用（见 `codegen::hir::resolve_builtin_method` → `is_prelude`）。若 VM 只注册了
+/// 命名空间形式（`aura.lang.std.*`），调用会落入「未链接的外部函数」分支被静默忽略，
+/// 从而产生 `isNull` 恒假、`listOf` 返回 0 等错误行为。
+///
+/// 无论走 `new()` 还是 `with_modules()` 路径都必须调用本函数。
+pub fn register_prelude(reg: &mut NativeRegistry) {
+    #[cfg(feature = "std-builtin")]
+    std_builtin::register_prelude(reg);
+    #[cfg(feature = "std-collections")]
+    std_collections::register_prelude(reg);
+    #[cfg(feature = "std-math")]
+    std_math::register_prelude(reg);
+    #[cfg(feature = "std-test")]
+    std_test::register_prelude(reg);
+}
+
 /// 将所有标准库函数注册到 `NativeRegistry`
 ///
 /// 仅注册已启用的模块（由 Cargo feature 控制）。

@@ -112,13 +112,31 @@ fn nat_trim_end(args: &[Value]) -> Value {
 }
 
 fn nat_substring(args: &[Value]) -> Value {
-    let start = i0(args) as usize;
-    let end = args.get(1).map(|v| v.as_int() as usize).unwrap_or(s0(args).len());
-    let s = s0(args);
-    if start > s.len() || end > s.len() {
+    // 兼容两种参数顺序（方法调用展开为「接收者在前」）：
+    //   (text, start, end)  ← `s.substring(a, b)`
+    //   (start, end, text)  ← 历史静态调用形式
+    let first_is_num = matches!(args.first(), Some(Value::Int(_)) | Some(Value::Float(_)));
+    let (text, start, end_opt) = if first_is_num && args.len() >= 3 {
+        (
+            args.get(2).map(|v| v.as_string()).unwrap_or_default(),
+            i0(args).max(0) as usize,
+            Some(i1(args).max(0) as usize),
+        )
+    } else {
+        (
+            s0(args),
+            args.get(1).map(|v| v.as_int().max(0) as usize).unwrap_or(0),
+            args.get(2).map(|v| v.as_int().max(0) as usize),
+        )
+    };
+
+    // 按字符（而非字节）切片，避免非 ASCII 边界 panic
+    let chars: Vec<char> = text.chars().collect();
+    let end = end_opt.unwrap_or(chars.len());
+    if start > chars.len() || end > chars.len() || start > end {
         return Value::str_("");
     }
-    Value::str_(s[start..end].to_string())
+    Value::str_(chars[start..end].iter().collect::<String>())
 }
 
 fn nat_substring_before(args: &[Value]) -> Value {
@@ -167,8 +185,15 @@ fn nat_format(args: &[Value]) -> Value {
 }
 
 fn nat_repeat(args: &[Value]) -> Value {
-    let n = i0(args) as usize;
-    Value::str_(s1(args).repeat(n))
+    // 兼容两种参数顺序：`text.repeat(n)` 与历史形式 `repeat(n, text)`
+    let first_is_num = matches!(args.first(), Some(Value::Int(_)) | Some(Value::Float(_)));
+    if first_is_num && args.len() >= 2 {
+        let n = i0(args).max(0) as usize;
+        return Value::str_(s1(args).repeat(n));
+    }
+    let s = s0(args);
+    let n = args.get(1).map(|v| v.as_int().max(0) as usize).unwrap_or(0);
+    Value::str_(s.repeat(n))
 }
 
 fn nat_index_of(args: &[Value]) -> Value {
@@ -187,10 +212,23 @@ fn nat_last_index_of(args: &[Value]) -> Value {
     }
 }
 
+/// 解析 padStart/padEnd 的参数：兼容 `text.padStart(len, pad)` 与 `padStart(len, pad, text)`
+fn pad_args(args: &[Value]) -> (String, usize, String) {
+    let first_is_num = matches!(args.first(), Some(Value::Int(_)) | Some(Value::Float(_)));
+    if first_is_num && args.len() >= 3 {
+        let len = i0(args).max(0) as usize;
+        let pad = s1(args);
+        let text = args.get(2).map(|v| v.as_string()).unwrap_or_default();
+        return (text, len, pad);
+    }
+    let text = s0(args);
+    let len = args.get(1).map(|v| v.as_int().max(0) as usize).unwrap_or(0);
+    let pad = args.get(2).map(|v| v.as_string()).unwrap_or_default();
+    (text, len, pad)
+}
+
 fn nat_pad_start(args: &[Value]) -> Value {
-    let len = i0(args) as usize;
-    let pad = args.get(1).map(|v| v.as_string()).unwrap_or_default();
-    let s = s1(args);
+    let (s, len, pad) = pad_args(args);
     let pad_char = if pad.is_empty() { ' ' } else { pad.chars().next().unwrap_or(' ') };
     let pad_len = len.saturating_sub(s.chars().count());
     let padding: String = std::iter::repeat(pad_char).take(pad_len).collect();
@@ -198,9 +236,7 @@ fn nat_pad_start(args: &[Value]) -> Value {
 }
 
 fn nat_pad_end(args: &[Value]) -> Value {
-    let len = i0(args) as usize;
-    let pad = args.get(1).map(|v| v.as_string()).unwrap_or_default();
-    let s = s1(args);
+    let (s, len, pad) = pad_args(args);
     let pad_char = if pad.is_empty() { ' ' } else { pad.chars().next().unwrap_or(' ') };
     let pad_len = len.saturating_sub(s.chars().count());
     let padding: String = std::iter::repeat(pad_char).take(pad_len).collect();

@@ -3555,11 +3555,19 @@ impl Checker {
                 for p in &arm.patterns {
                     if let Expr::Ident(tname, _) = p {
                         if tname != "else" && tname != "__else__" {
+                            // `is T` 模式在 AST 中是 `Ident("__is__T")`（见 parser 的
+                            // `pattern_to_expr`）。必须剥掉 `__is__` 前缀才能拿到真实类型名，
+                            // 否则 `lookup_type` 恒为 None，`is String -> value.length` 这类
+                            // 分支不会被窄化，主体变量仍是 Any 而报成员不存在。
+                            let ty_name = match tname.strip_prefix("__is__") {
+                                Some(rest) => rest.to_string(),
+                                None => tname.clone(),
+                            };
                             let is_variant =
-                                subject_enum.as_ref().map_or(false, |vs| vs.contains(tname));
-                            // 仅当 tname 是已声明的类型时才视为 `is` 智能转换
-                            if !is_variant && self.symbols.lookup_type(tname).is_some() {
-                                narrowed = Some(tname.clone());
+                                subject_enum.as_ref().map_or(false, |vs| vs.contains(&ty_name));
+                            // 仅当 ty_name 是已声明的类型时才视为 `is` 智能转换
+                            if !is_variant && self.symbols.lookup_type(&ty_name).is_some() {
+                                narrowed = Some(ty_name);
                                 break;
                             }
                         }
@@ -3573,7 +3581,9 @@ impl Checker {
             if let (Some(sn), Some(nt)) = (&subj_name, &narrowed) {
                 if let Some(scope) = self.var_env.last_mut() {
                     let present = scope.contains_key(sn);
-                    let prev = scope.insert(sn.clone(), Ty::Named(nt.clone()));
+                    // 用 `Ty::from_name` 而非 `Ty::Named`：基础类型需映射为原始 Ty，
+                    // 否则成员访问走 Named 分支，`value.length` 会被误报为未解析成员。
+                    let prev = scope.insert(sn.clone(), Ty::from_name(nt));
                     if present {
                         had = Some(sn.clone());
                         prev_ty = prev;

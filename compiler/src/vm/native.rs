@@ -33,6 +33,19 @@ impl NativeRegistry {
             dynamic: DynamicLoader::new(),
         };
 
+        // 全量注册所有已启用的 std 模块（std-math / std-string / std-collections …）。
+        //
+        // 关键：本函数承担「全量注册」职责——`Vm::new` 在 `enabled_modules` 为空
+        // （即源码**没有 import**）时走这条路。此前这里只注册了下面那份硬编码的
+        // prelude 子集，并未调用 `std::register_all()`，于是「无 import」的程序
+        // 反而拿不到 `aura.lang.std.String.length`、`aura.lang.std.Math.sin`
+        // 等模块原生函数，调用落入 `do_call_native` 的「未链接的外部函数」兜底分支，
+        // 被**静默忽略并返回 Int(0)**（表现为 `"abc".length() == 0` 这类错值）。
+        //
+        // 放在硬编码 prelude **之前**注册，使下面的核心/基础条目在重名时仍保持优先，
+        // 本调用只补齐缺失的模块函数。
+        crate::std::register_all(&mut r);
+
         // 注册 prelude（17 个全局内置，始终存在）
         r.register("println", native_println);
         r.register("print", native_print);
@@ -61,9 +74,8 @@ impl NativeRegistry {
         r.register("aura_cast_safety", native_cast_safety);
         r.register("__size", native_size);
         r.register("__get", native_get);
-        // listOf - prelude alias (implementation in std_collections.rs)
-        #[cfg(feature = "std-collections")]
-        r.register("listOf", crate::std::std_collections::nat_list_of);
+        // prelude 裸名（isNull / listOf / min / assertEq ...）
+        crate::std::register_prelude(&mut r);
         // Full-name aliases for prelude (aura.lang.std.<fn>)
         r.register("aura.lang.std.println", native_println);
         r.register("aura.lang.std.print", native_print);
@@ -92,56 +104,10 @@ impl NativeRegistry {
         // Fix 9: 默认仅加载 prelude，不加载全部 std 模块
         // 如需加载 std 模块，使用 NativeRegistry::with_modules()
 
-        // P10: 并发运行时（需 std-concurrent feature）
+        // P10: 并发运行时（需 std-concurrent feature）——与 `with_modules` 共用同一实现
         #[cfg(feature = "std-concurrent")]
-        {
-            r.register("aura.lang.std.Coroutine.spawn", native_spawn);
-            r.register("aura.lang.std.Actor.send", native_send);
-            r.register("aura.lang.std.Coroutine.ask", native_ask);
-            r.register("aura.lang.std.Actor.reply", native_reply);
-            r.register("aura.lang.std.Channel.newChannel", native_new_channel);
-            r.register("aura.lang.std.Channel.channelSend", native_channel_send);
-            r.register("aura.lang.std.Channel.channelRecv", native_channel_recv);
-            r.register(
-                "aura.lang.std.Channel.channelTryRecv",
-                native_channel_try_recv,
-            );
-            r.register("aura.lang.std.Channel.select", native_select);
-            r.register("aura.lang.std.Channel.selectTimeout", native_select_timeout);
-            r.register("aura.lang.std.Actor.spawnActor", native_spawn_actor);
-            r.register("aura.lang.std.Actor.supervise", native_supervise);
-            r.register("aura.lang.std.Actor.actorAlive", native_actor_alive);
-
-            // Phase 3: 跨进程 Actor / Channel
-            r.register(
-                "aura.lang.std.Actor.spawnActorProcess",
-                native_spawn_actor_process,
-            );
-            r.register(
-                "aura.lang.std.Actor.sendProcessActor",
-                native_send_process_actor,
-            );
-            r.register(
-                "aura.lang.std.Actor.recvProcessActor",
-                native_recv_process_actor,
-            );
-            r.register(
-                "aura.lang.std.Actor.processActorAlive",
-                native_process_actor_alive,
-            );
-            r.register(
-                "aura.lang.std.Actor.killProcessActor",
-                native_kill_process_actor,
-            );
-            r.register(
-                "aura.lang.std.Channel.newTcpChannel",
-                native_new_tcp_channel,
-            );
-            r.register(
-                "aura.lang.std.Channel.tcpChannelSend",
-                native_tcp_channel_send,
-            );
-        }
+        Self::register_concurrent(&mut r);
+        Self::register_ffi_aliases(&mut r);
 
         r
     }
@@ -184,6 +150,9 @@ impl NativeRegistry {
         r.register("aura_cast", native_cast);
         r.register("aura_cast_safety", native_cast_safety);
 
+        // prelude 裸名（isNull / listOf / min / assertEq ...）
+        crate::std::register_prelude(&mut r);
+
         // Full-name aliases for prelude (aura.lang.std.<fn>)
         r.register("aura.lang.std.println", native_println);
         r.register("aura.lang.std.print", native_print);
@@ -213,58 +182,86 @@ impl NativeRegistry {
         // 按需注册 std 模块
         crate::std::register_with_modules(&mut r, modules);
 
-        // P10: concurrent runtime (std-concurrent feature, imports aura.lang.std.{Coroutine,Actor,Channel})
+        // P10: concurrent runtime（按需：仅当 import 了并发模块时注册）
         #[cfg(feature = "std-concurrent")]
         if modules.iter().any(|m| *m == "concurrent") {
-            r.register("aura.lang.std.Coroutine.spawn", native_spawn);
-            r.register("aura.lang.std.Actor.send", native_send);
-            r.register("aura.lang.std.Coroutine.ask", native_ask);
-            r.register("aura.lang.std.Actor.reply", native_reply);
-            r.register("aura.lang.std.Channel.newChannel", native_new_channel);
-            r.register("aura.lang.std.Channel.channelSend", native_channel_send);
-            r.register("aura.lang.std.Channel.channelRecv", native_channel_recv);
-            r.register(
-                "aura.lang.std.Channel.channelTryRecv",
-                native_channel_try_recv,
-            );
-            r.register("aura.lang.std.Channel.select", native_select);
-            r.register("aura.lang.std.Channel.selectTimeout", native_select_timeout);
-            r.register("aura.lang.std.Actor.spawnActor", native_spawn_actor);
-            r.register("aura.lang.std.Actor.supervise", native_supervise);
-            r.register("aura.lang.std.Actor.actorAlive", native_actor_alive);
-
-            // Phase 3: 跨进程 Actor / Channel
-            r.register(
-                "aura.lang.std.Actor.spawnActorProcess",
-                native_spawn_actor_process,
-            );
-            r.register(
-                "aura.lang.std.Actor.sendProcessActor",
-                native_send_process_actor,
-            );
-            r.register(
-                "aura.lang.std.Actor.recvProcessActor",
-                native_recv_process_actor,
-            );
-            r.register(
-                "aura.lang.std.Actor.processActorAlive",
-                native_process_actor_alive,
-            );
-            r.register(
-                "aura.lang.std.Actor.killProcessActor",
-                native_kill_process_actor,
-            );
-            r.register(
-                "aura.lang.std.Channel.newTcpChannel",
-                native_new_tcp_channel,
-            );
-            r.register(
-                "aura.lang.std.Channel.tcpChannelSend",
-                native_tcp_channel_send,
-            );
+            Self::register_concurrent(&mut r);
         }
+        // FFI 别名（aura.ffi.*）属于基础能力，始终可用
+        Self::register_ffi_aliases(&mut r);
 
         r
+    }
+
+    /// 注册并发运行时原生函数（Coroutine / Actor / Channel）。
+    ///
+    /// 抽为共享函数，供「全量注册」([`Self::new`]) 与「按需注册」([`Self::with_modules`])
+    /// 两条路径复用——此前只有按需路径注册它们，导致 `NativeRegistry::new()` 缺少
+    /// `aura.lang.std.Coroutine.spawnActor` 等条目（docgen 的注册表一致性检查因此失败）。
+    #[cfg(feature = "std-concurrent")]
+    fn register_concurrent(r: &mut NativeRegistry) {
+        r.register("aura.lang.std.Coroutine.spawn", native_spawn);
+        r.register("aura.lang.std.Actor.send", native_send);
+        r.register("aura.lang.std.Coroutine.ask", native_ask);
+        r.register("aura.lang.std.Actor.reply", native_reply);
+        r.register("aura.lang.std.Channel.newChannel", native_new_channel);
+        r.register("aura.lang.std.Channel.channelSend", native_channel_send);
+        r.register("aura.lang.std.Channel.channelRecv", native_channel_recv);
+        r.register(
+            "aura.lang.std.Channel.channelTryRecv",
+            native_channel_try_recv,
+        );
+        r.register("aura.lang.std.Channel.select", native_select);
+        r.register("aura.lang.std.Channel.selectTimeout", native_select_timeout);
+        r.register("aura.lang.std.Actor.spawnActor", native_spawn_actor);
+        // HIR 的并发路径解析也会产出 `Coroutine.spawnActor`（见 codegen::hir
+        // 的 `resolve_function_path`），补别名避免同一函数两种名字解析不到。
+        r.register("aura.lang.std.Coroutine.spawnActor", native_spawn_actor);
+        r.register("aura.lang.std.Actor.supervise", native_supervise);
+        r.register("aura.lang.std.Actor.actorAlive", native_actor_alive);
+
+        // Phase 3: 跨进程 Actor / Channel
+        r.register(
+            "aura.lang.std.Actor.spawnActorProcess",
+            native_spawn_actor_process,
+        );
+        r.register(
+            "aura.lang.std.Actor.sendProcessActor",
+            native_send_process_actor,
+        );
+        r.register(
+            "aura.lang.std.Actor.recvProcessActor",
+            native_recv_process_actor,
+        );
+        r.register(
+            "aura.lang.std.Actor.processActorAlive",
+            native_process_actor_alive,
+        );
+        r.register(
+            "aura.lang.std.Actor.killProcessActor",
+            native_kill_process_actor,
+        );
+        r.register(
+            "aura.lang.std.Channel.newTcpChannel",
+            native_new_tcp_channel,
+        );
+        r.register(
+            "aura.lang.std.Channel.tcpChannelSend",
+            native_tcp_channel_send,
+        );
+    }
+
+    /// 注册 `aura.ffi.*` 别名（与 `aura.lang.std.*` 同源）。
+    ///
+    /// FFI 相关内置函数在文档与部分 import 形式下以 `aura.ffi.` 前缀出现，
+    /// 此前只在 `aura.lang.std.*` / 裸名下注册，docgen 的一致性检查会报缺失。
+    fn register_ffi_aliases(r: &mut NativeRegistry) {
+        r.register("aura.ffi.CString", native_cstring);
+        r.register("aura.ffi.readCStr", native_cstr);
+        r.register("aura.ffi.ptrIsNull", native_ptr_is_null);
+        r.register("aura.ffi.ptrToInt", native_ptr_to_int);
+        r.register("aura.ffi.intToPtr", native_int_to_ptr);
+        r.register("aura.ffi.makeCallback", native_make_callback);
     }
 
     pub fn register(&mut self, name: &str, f: NativeFn) {
@@ -599,31 +596,42 @@ fn native_make_callback(_args: &[Value]) -> Value {
 // 原生函数通过 thread-local 指针访问 VM 实例的 Actor/Channel 运行时状态。
 // VM 在 `run()` 开始时设置此指针，结束时清除。
 
-use std::sync::Mutex;
+use std::cell::RefCell;
 
-/// 全局 VM 实例栈（Phase 1: 替代 thread_local）
+/// 当前线程的 VM 实例栈（栈式结构支持嵌套 VM 执行）
 ///
-/// 使用栈式结构支持嵌套 VM 执行。
 /// - `set_vm_ref` 压栈
-/// - `clear_vm_ref` 弹栈（仅当栈顶匹配时）
-/// - `get_vm_ref` 返回栈顶（当前活跃 VM）
+/// - `clear_vm_ref` 弹栈
+/// - `get_vm_ref` 返回栈顶（当前线程上活跃的 VM）
 ///
-/// 使用 `usize` 存储裸地址，因为 `*mut ()` 不是 `Send + Sync`。
-static VM_STACK: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+/// **必须是线程局部**：此前这里是进程全局的 `Mutex<Vec<usize>>`，当多个线程
+/// 各自运行一个 VM 时（典型场景：`cargo test` 并发执行测试用例），后启动的 VM
+/// 会被压到同一栈顶，于是 `get_vm_ref()` 返回**别的线程**的 VM 实例，导致
+/// Actor / Channel 运行时状态串台 —— 表现为并发测试随机失败（且失败数随并发度浮动）。
+/// 改为 `thread_local!` 后各线程互不干扰，嵌套执行语义仍由栈保证。
+thread_local! {
+    static VM_STACK: RefCell<Vec<usize>> = RefCell::new(Vec::new());
+}
 
 /// 设置当前 VM 实例（在 `Vm::run()` 开始时调用，压栈）
+///
+/// 使用 `try_with` 而非 `with`：线程局部存储销毁期间（进程退出路径）调用不会 panic。
 pub fn set_vm_ref(vm: *mut ()) {
-    VM_STACK.lock().unwrap().push(vm as usize);
+    let _ = VM_STACK.try_with(|s| s.borrow_mut().push(vm as usize));
 }
 
 /// 清除当前 VM 实例引用（在 `Vm::run()` 结束时调用，弹栈）
 pub fn clear_vm_ref() {
-    VM_STACK.lock().unwrap().pop();
+    let _ = VM_STACK.try_with(|s| s.borrow_mut().pop());
 }
 
-/// 获取当前 VM 实例指针（栈顶）
+/// 获取当前 VM 实例指针（当前线程栈顶）
 fn get_vm_ref() -> Option<*mut crate::vm::Vm> {
-    VM_STACK.lock().unwrap().last().copied().map(|addr| addr as *mut crate::vm::Vm)
+    VM_STACK
+        .try_with(|s| s.borrow().last().copied())
+        .ok()
+        .flatten()
+        .map(|addr| addr as *mut crate::vm::Vm)
 }
 
 /// spawn(expr) → Int：创建新协程（P10.1）

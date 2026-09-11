@@ -1027,6 +1027,21 @@ pub enum HirStmt {
     Block(HirBlock),
     /// defer 语句（P7.4）：注册的清理块在作用域结束时 LIFO 顺序执行
     Defer(HirBlock),
+    /// try/catch/finally（异常处理）
+    ///
+    /// 降级到 MIR 时：try 体前注册异常处理器（`PushHandler`），体后注销（`PopHandler`）；
+    /// 处理器块由 VM 在 `throw` 时跳入，并把异常值写入 `catch_var` 的槽位。
+    /// `finally` 在正常路径与异常路径各内联一次。
+    Try {
+        /// try 体
+        body: HirBlock,
+        /// catch 变量名（无 catch 子句时为 None，此时异常在 finally 后重新抛出）
+        catch_var: Option<String>,
+        /// catch 体（无 catch 子句时为空块）
+        catch_body: HirBlock,
+        /// finally 体（可选）
+        finally: Option<HirBlock>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1605,6 +1620,43 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                         ret: HirType::from_ast_opt(&f.type_hint),
                         body: HirBlock {
                             stmts: vec![HirStmt::Return(Some(init))],
+                        },
+                        is_native: false,
+                        type_params: vec![],
+                        ffi_abi: FfiAbi::None,
+                        ffi_lib: None,
+                    });
+                }
+                // 单例字段初始化函数：`<Object>.__singletonInit(self)`
+                //
+                // 单例实例由 VM 在启动时创建（`create_singletons`），但那里只能把字段
+                // 统一置为 `Value::Null`，拿不到字段声明的默认值。因此这里合成一个初始化
+                // 函数，由 VM 在入口函数执行前调用，把 `var x: Int = 5` 之类的默认值写入。
+                let mut init_stmts: Vec<HirStmt> = Vec::new();
+                for f in &o.fields {
+                    if let Some(dv) = &f.default_value {
+                        init_stmts.push(HirStmt::Assign {
+                            target: HirExpr::Member {
+                                object: Box::new(HirExpr::Var("self".to_string())),
+                                name: f.name.clone(),
+                            },
+                            value: desugar_expr(dv),
+                        });
+                    }
+                }
+                if !init_stmts.is_empty() {
+                    init_stmts.push(HirStmt::Return(None));
+                    functions.push(HirFunction {
+                        name: format!("{}.__singletonInit", o.name),
+                        params: vec![HirParam {
+                            name: "self".to_string(),
+                            ty: Some(HirType::Named(o.name.clone())),
+                            default_value: None,
+                            is_vararg: false,
+                        }],
+                        ret: None,
+                        body: HirBlock {
+                            stmts: init_stmts,
                         },
                         is_native: false,
                         type_params: vec![],
@@ -2304,6 +2356,31 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             ffi_lib: None,
         });
     }
+    // aura.lang.std.Actor.spawnActor(name) — 与 Coroutine.spawnActor 同一实现。
+    //
+    // 必须**单独注册**：`import aura.lang.std.Actor.*`（或 `as a`）会把短名解析为
+    // **Actor** 前缀（见 `std::decl::module_functions`）。若只注册 Coroutine 前缀，
+    // 该调用就不再是原生调用，而会退化为用户函数调用 → 函数名查不到 → 落到函数索引 0
+    // （即 main）→ **无限递归爆栈**。
+    if !natives.iter().any(|n| n.name == "aura.lang.std.Actor.spawnActor") {
+        natives.push(HirFunction {
+            name: "aura.lang.std.Actor.spawnActor".into(),
+            params: vec![HirParam {
+                name: "name".into(),
+                ty: Some(HirType::Named("String".into())),
+                default_value: None,
+                is_vararg: false,
+            }],
+            ret: Some(HirType::Named("Int".into())),
+            body: HirBlock {
+                stmts: vec![],
+            },
+            is_native: true,
+            type_params: vec![],
+            ffi_abi: FfiAbi::None,
+            ffi_lib: None,
+        });
+    }
     // aura.lang.std.Actor.supervise(parent, child) — 建立监督关系
     if !natives.iter().any(|n| n.name == "aura.lang.std.Actor.supervise") {
         natives.push(HirFunction {
@@ -2832,16 +2909,48 @@ fn desugar_expr_stmt(e: &Expr) -> HirStmt {
         }),
         Expr::Try {
             block,
-            catches: _,
+            catches,
             finally,
             ..
         } => {
-            // 近似：try 块作为普通块执行（catch/finally 在 P4 中暂不建模）
-            let mut stmts = desugar_block(block).stmts;
-            if let Some(f) = finally {
-                stmts.extend(desugar_block(f).stmts);
+            let body = desugar_block(block);
+            // 仅建模首个 catch 子句：Aura 的 `catch (e: Type)` 类型过滤尚未实现，
+            // 因此等价于「catch-all」。多子句时后续子句不可达（已在 README 记录）。
+            let (catch_var, catch_body) = match catches.first() {
+                Some(c) => {
+                    let has_var = !c.variable.is_empty();
+                    // 必须在降级 catch 体之前注册局部名，否则体内裸 `e` 会被当作字段访问
+                    if has_var {
+                        register_local(&c.variable);
+                    }
+                    let mut cb = desugar_block(&c.body);
+                    if has_var {
+                        // 声明 catch 变量：MIR 分配槽位，VM 跳入处理器时把异常值写入该槽
+                        cb.stmts.insert(
+                            0,
+                            HirStmt::Val {
+                                name: c.variable.clone(),
+                                ty: None,
+                                init: None,
+                            },
+                        );
+                    }
+                    (if has_var { Some(c.variable.clone()) } else { None }, cb)
+                }
+                None => (
+                    None,
+                    HirBlock {
+                        stmts: vec![],
+                    },
+                ),
+            };
+            let finally = finally.as_ref().map(|f| desugar_block(f));
+            HirStmt::Try {
+                body,
+                catch_var,
+                catch_body,
+                finally,
             }
-            HirStmt::Block(HirBlock { stmts })
         }
         Expr::Defer { block, .. } => HirStmt::Defer(desugar_block(block)),
         Expr::Await { expr, .. } => HirStmt::Expr(desugar_expr(expr)),

@@ -7,6 +7,21 @@ use crate::vm::native::NativeRegistry;
 use crate::vm::value::Value;
 use std::rc::Rc;
 
+/// 注册集合 prelude 裸名（免 import：`listOf` / `mutableListOf` / `arrayOf`）。
+///
+/// 编译器将裸名 `listOf(...)` 解析为 prelude 调用（见 `codegen::hir::resolve_builtin_method`），
+/// 若 VM 只注册了 `aura.lang.std.Collections.listOf` 则会落入「未链接的外部函数」分支。
+pub fn register_prelude(reg: &mut NativeRegistry) {
+    reg.register("listOf", nat_list_of);
+    reg.register("mutableListOf", nat_mutable_list_of);
+    reg.register("arrayOf", nat_array_of);
+    // HIR 会把 `xs.size` / `xs.length` / `xs.isEmpty` 等成员访问降级为 `Collections.listSize`
+    // （依赖 sema 类型信息）。该函数必须**始终可用**，不能依赖用户 `import Collections`，
+    // 否则降级结果会落入「未链接的外部函数」分支返回 0。
+    reg.register("aura.lang.std.Collections.listSize", nat_list_size);
+    reg.register("aura.lang.std.Collections.listGet", nat_list_get);
+}
+
 pub fn register(reg: &mut NativeRegistry) {
     // 列表构造
     reg.register("aura.lang.std.Collections.listOf", nat_list_of);

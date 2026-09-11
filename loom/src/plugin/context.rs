@@ -188,7 +188,7 @@ mod tests {
         let manifest = default_manifest("my-app");
         let source_sets = vec![SourceSet::main(Path::new("."))];
         let project_dir = PathBuf::from("/tmp/test");
-        let config = ResolvedBuildConfig::default();
+        let config = ResolvedBuildConfig::isolated();
 
         let ctx = PluginContext::new(manifest, source_sets, project_dir.clone(), config);
         assert_eq!(ctx.project_dir, project_dir);

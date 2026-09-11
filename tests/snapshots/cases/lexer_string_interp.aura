@@ -1,0 +1,13 @@
+// snapshot case: string interpolation tokens ($var / ${expr} / escaped $)
+fun greet(name: String, n: Int): String {
+    val simple: String = "hello $name"
+    val braced: String = "n = ${n + 1}"
+    val combo: String = "a $name b ${n} c"
+    val literalDollar: String = "cost: $5"
+    val empty: String = ""
+    return simple + braced + combo + literalDollar + empty
+}
+
+fun main() {
+    println(greet("aura", 1))
+}

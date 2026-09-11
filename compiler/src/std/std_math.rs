@@ -5,6 +5,12 @@
 use crate::vm::native::NativeRegistry;
 use crate::vm::value::Value;
 
+/// 注册数学 prelude 裸名（免 import：`min` / `max`）。
+pub fn register_prelude(reg: &mut NativeRegistry) {
+    reg.register("min", nat_min);
+    reg.register("max", nat_max);
+}
+
 pub fn register(reg: &mut NativeRegistry) {
     // ── 纯逻辑函数（已上移到 Aura 层，但 VM 仍需 native 实现）──
     reg.register("aura.lang.std.Math.abs", nat_abs);

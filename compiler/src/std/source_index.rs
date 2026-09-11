@@ -635,6 +635,11 @@ mod tests {
             ("aura.math", "aura://stdlib/aura/math/Math.aura"),
             ("aura.string", "aura://stdlib/aura/string/String.aura"),
             ("aura.io", "aura://stdlib/aura/io/IO.aura"),
+            (
+                "aura.collections",
+                "aura://stdlib/aura/collections/Collections.aura",
+            ),
+            ("aura.fs", "aura://stdlib/aura/fs/FileSystem.aura"),
         ] {
             index.add_module_def(module, uri, 1, 0, 1, 0);
         }
@@ -644,6 +649,7 @@ mod tests {
         assert!(index.lookup_module("aura.math").is_some());
         assert!(index.lookup("Int").is_some());
         assert!(index.lookup("unknown").is_none());
-        assert!(index.total_count() >= 20); // 17 types + 3 modules
+        // 15 个基础类型（`builtin_type_uri` 支持的全集）+ 5 个 stdlib 模块
+        assert!(index.total_count() >= 20);
     }
 }
