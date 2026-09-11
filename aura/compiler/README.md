@@ -17,7 +17,7 @@
 aura/compiler/
 ├── README.md                              # 本文件
 └── aura/lang/compiler/
-    ├── Main.aura                          # 编译器入口（Phase 0 骨架）
+    ├── Main.aura                          # 编译器入口 + 编译管线（Phase 9）
     ├── lexer/
     │   ├── Span.aura                      # Phase 1 ✅ 源码位置
     │   ├── Token.aura                     # Phase 1 ✅ Token 数据模型 + 关键字表
@@ -33,6 +33,7 @@ aura/compiler/
     │                                      #            FrameManager/TailCall/Closures
     ├── aot/                               # Phase 6 ✅ AOT LLVM 后端（Aura 化）
     ├── jit/                               # Phase 7 ✅ JIT（Cranelift）Aura 化
+    │                                      # Phase 9 ✅ 单一字节码 + 模块级 JIT 入口
     ├── gc/ memory/ runtime/               # 已有 VM 运行时雏形
     └── test/
         ├── TestRunner.aura                # Phase 0  Aura 测试框架
@@ -399,6 +400,127 @@ aura run tests/phase8_stdlib_tests.aura     # 应输出 RESULT: PASS
 aura stdlib-compile aura/core/aura/lang --output build   # 应 45/45 成功
 ```
 
+## Phase 9 交付物（整体编译管线串联）✅
+
+把散落的各阶段模块串成一条**可运行**的完整编译管线，让 Aura 编译器真正
+「编译并执行 Aura 程序」，并补齐 **VM / JIT / AOT 三执行路径**的编译链路：
+
+```
+                        ┌────────────────────────────────────────────────┐
+Lexer → Parser → AST → Sema → HIR → MIR ──┬─→ Codegen(字节码) → VM 解释执行
+                                           ├─→ JIT 适配 → JitCore 单元执行（叶子函数 + 去优化回退）
+                                           └─→ Emit(LLVM IR) → llc → clang → 原生 exe（运行）
+```
+
+### 9.1 交付物
+
+| # | 交付物 | 路径 | 说明 |
+|---|--------|------|------|
+| 9.1 | 编译管线（VM/AOT/JIT 源级入口） | `.../compiler/Main.aura` | 管线由入口文件直接拥有（**无中间驱动层**）：`compile` / `compileAndRun`（VM）、`compileAotSource`（IR+命令）、`aotBuildExeSource`（IR→`llc`→`clang`→exe）、`jitCompileFunction`（JIT）、`compileWith`，另含 5 组自检样例 |
+| 9.2 | 后端模块（只收本阶段输入） | `aot/Aot.aura`、`jit/JitCore.aura` | AOT：`compileAot(hir)`、`aotBuildExeFromHir`、`runBuiltExe`、`aotWinPath`、`llvmHomeDefault`；JIT：`JitLinkResult`、`tryCompileInModule`（JIT 自行定位函数）。后端**不反向依赖前端**，源码→阶段输入的串联由入口完成 |
+| 9.3 | Phase 9 验证用例 | `tests/phase9_compiler_tests.aura` | 9 组 / 35 断言（前端 / 算术 / 变量 / 控制流 / 函数 / 错误 / AOT / JIT / **AOT exe**），`RESULT: PASS` |
+| 9.4 | 原生进程执行 | `compiler/src/std/std_process.rs`（`Process.run`） | 新增同步 shell 执行原生函数（Windows `cmd /C`、Unix `sh -c`），供驱动调用 LLVM 工具链 |
+
+### 9.2 串联期间修复的契约缺口
+
+各阶段此前各自「能跑单测」，但阶段之间的数据契约不一致，串起来即失败。本轮修复：
+
+| 层 | 缺口 | 修复 |
+|----|------|------|
+| HIR | `Parser` 的 `Binary.text` 存的是 **TokenKind 名**（`Plus`/`Star`），MIR 按符号匹配 → 所有二元运算退化为 `ADD` | 新增 `hirNormBinOp` / `hirNormUnOp` 归一化为 `+`/`*`/`==`… |
+| HIR | `lowerCall` 把被调用者也放进 `kids[0]` 且 `text` 留空 → 函数名丢失 | 函数名写入 `HirCall.text`，`kids` 只保留实参 |
+| HIR | `lowerIfStmt` 按 `Expr/Block/If` 过滤子节点 → **条件被丢弃** | 无条件降级条件表达式（任意 kind） |
+| HIR | `lowerAssign` 未写目标名 → `STORE_VAR` 落到无名槽位，循环变量永不更新 | 目标标识符名写入 `HirAssign.text` |
+| MIR | `lowerFunction`/`lowerCall` 期待 `HirParams`/`HirArgs` 包装节点（HIR 从不生成） | 改为读取直接子节点 `HirParam`/实参；`CALL` 节点携带实参个数 |
+| MIR | `if`/`while` 的 `JUMP` 无目标 | 引入 `LABEL` 伪指令 + 唯一标签名，控制流结构化为标签跳转 |
+| Codegen | 常量索引 = `constPool.length`（**字符串长度**）、槽位 = `varTable.length` → 索引错乱 | 改为按「条数」分配；两趟发射：第 1 趟记录 `LABEL→行号`，第 2 趟解析跳转目标 |
+| Codegen | 每函数参数/局部共享全局槽位 | 每个 `MirFunc` 重置槽位命名空间并预分配参数槽 0..n-1 |
+| VM | `setLocal` 追加而非覆盖 → 循环变量读到陈旧值（死循环） | 覆盖式写入 + 按槽位查找 |
+| VM | `CALL` 不跳入函数体、`RETURN` 直接终止 | 调用栈（返回地址 + 保存局部变量块）、参数绑定、返回后把返回值压回调用者栈 |
+| VM | 缺少 `MOD/NEQ/LT/GT/LE/GE/NOT/NEG`、`JUMP` 目标、内置 `println/print` | 补齐算术/比较/跳转/内置调用 |
+| Lexer | 不支持 `\uXXXX` 转义 | 字符串/字符字面量新增 `\uXXXX` 解析 |
+| JIT | `JitCore` 使用**独立引导指令集**，需在驱动层做字节码翻译（中间驱动） | `JitCore` 改为直接消费 **VM 字节码**（`CONST_INT`/`JUMP`/`RETURN`…），删除转换层与 `Const`/`Br`/`CallFfi` 旧词汇；`tryCompileInModule` 由 JIT 自行定位函数体，驱动层不再接触字节码结构 |
+| VM（原生） | 对象单例方法调用注入 `self` 为首参（`argc = 声明参数数 + 1`），使 `FileSystem.writeText(path,content)` 等原生整体错位 | `interp.rs::do_call_native_args`：当 `argc == param_count + 1` 且 `param_count >= 1` 时剥离注入的 `self`（变长原生 `param_count==0` 不受影响） |
+
+### 9.3 三执行后端（VM / JIT / AOT）
+
+| 后端 | 入口 | 产物 / 执行 | 说明 |
+|------|------|-------------|------|
+| **VM** | `Main.aura`：`compile(source)` / `compileAndRun(source)` | 字节码字符串 + Aura `VmRunner` 解释执行 | 完整管线，见 9.2 修复清单 |
+| **JIT** | `Main.aura`：`jitCompileFunction(source, fn, args)`（后端入口 `JitCore.tryCompileInModule`） | **与 VM 同一字节码** → `JitCoreCompiler.tryCompileInModule` 定位函数 + 预解码（常量池索引→字面量、分支绝对行号→单元相对偏移）→ `JitCoreVm` 执行 | 仅**叶子函数**（无 `CALL`）可编译；`CALL`/`CALL_METHOD`/字段访问等 → `deopt` 回退解释器 |
+| **AOT** | `Main.aura`：`compileAotSource(source)` / `aotBuildExeSource(source, module, outDir, llvmHome)`（后端入口 `Aot.compileAot(hir)` / `aotBuildExeFromHir`） | HIR → LLVM IR 文本 + `llc`/`clang` 命令 + C 后端源码；`aotBuildExeFromHir` 进一步落盘 IR、调用 `llc`→`clang` 产出 **原生 exe**，可 `runBuiltExe` 运行 | `compileAot` 为纯函数；`aotBuildExeFromHir` 经 `FileSystem.writeText` + `Process.run` 真正调用工具链 |
+
+> **单一字节码（不再维护两套）**：`JitCore` 直接消费 `Codegen.emit` 的字节码
+> （`CONST_INT`/`LOAD_LOCAL`/`STORE_LOCAL`/`JUMP`/`JUMP_IF_FALSE`/…/`RETURN`；常量用池索引、
+> 分支用绝对行号），**删除**了此前的独立引导指令集（`Const`/`LoadLocal`/`Br`/`CallFfi`/`Ret`）。
+> 预解码只在 `JitCore` 内部做两件必要规范化：常量池索引→字面量、分支绝对行号→单元相对偏移。
+> 模块级入口 `JitCoreCompiler.tryCompileInModule(func, name, bytecode, funcTable, consts)` 由
+> `JitCore` **自行完成函数定位**（按 `funcTable` 切分、跳过 `# func` 注释行、统计槽位），
+> 入口层（`Main.aura` 的 `jitCompileFunction`）**不接触任何字节码结构**，仅「跑管线 → 交给 JIT → 取结果」。
+> 注：`JitLower`/`JitState`/`JitDispatch` 是 Phase 7 对 Rust `vm::jit` 的镜像（面向 Rust VM 字节码名
+> 与 ARC 指令），不属于本编译管线的字节码，未纳入本次统一。
+
+### 9.4 验证命令
+
+```bash
+aura run tests/phase9_compiler_tests.aura        # 应输出 RESULT: PASS
+aura run aura/compiler/aura/lang/compiler/Main.aura   # 打印 VM/AOT/JIT 三条链路的摘要
+```
+
+**VM 样例执行结果**（由 Aura 编译器自行编译并解释执行）：
+
+| 样例 | 源码语义 | 结果 |
+|------|----------|------|
+| 算术 | `2 + 3 * 4` | `14` |
+| while | `0+1+2+3+4` | `10` |
+| if/else | `7 > 10 ? 1 : 2` | `2` |
+| 函数调用 | `add(2, 3)` | `5` |
+| 递归 | `fact(5)` | `120` |
+
+**JIT 链路结果**：
+
+| 目标函数 | 形态 | 结果 |
+|----------|------|------|
+| `square(x) = x*x` | 叶子函数 | `compiled=true, deopt=false, result=25` |
+| `main`（含 `CALL square`） | 非叶子 | `compiled=false, deopt=true`（回退解释器） |
+| `rem(a,b) = a % b` | 含 `MOD` | `deopt=true`（不支持指令） |
+
+**AOT 链路产物**（`aotSrc = fun main(): Int { return 2 + 3 * 4 }`）：
+
+```llvm
+; ModuleID = 'main'
+source_filename = "main"
+target triple = "x86_64-pc-windows-msvc"
+target datalayout = "..."
+
+; ---- Aura Runtime Declarations ----
+declare void @aura_arc_increment(i8*)
+; … 10 条 runtime 声明 …
+
+define i32 @main() {
+entry:
+  %var.0 = mul i32 3, 4
+  %var.1 = add i32 2, %var.0
+  ret i32 %var.1
+}
+```
+
+命令构造：`llc -mtriple x86_64-pc-windows-msvc main.ll -o main.obj -O2 -filetype=obj`
+→ `clang -target x86_64-pc-windows-msvc main.obj -o main.exe -O2`。
+
+### 9.5 边界与后续
+
+- **执行方式**：VM 路径使用 **Aura 编写的 `VmRunner`（字符串字节码解释器）**；
+  JIT 路径使用 **Aura 编写的 `JitCoreVm`**（引导指令集解释执行，非真实机器码）；
+  AOT 路径仅产出 **LLVM IR 文本 + 命令**。`.auc` 二进制序列化、真实机器码/JIT、以及
+  Aura 侧调用 `llc/clang` 链接成 exe 仍是后续工作。
+- **覆盖范围**：标量类型、算术/比较、`val/var`、赋值、`if/else`、`while`、
+  函数（含递归/互递归）、`println/print`。尚未覆盖：`for`、`when`、字符串、
+  列表/集合、类/结构体、闭包、异常。
+- **AOT 说明**：原生 `aura.exe` 输出需 `cargo build -p cli --features llvm` 且本机
+  安装 LLVM（见 `Cargo.toml` 的 `llvm-home`）；Aura 侧的 `aot/Emit.aura` 目前只
+  产出 LLVM IR 文本 + 命令构造，真正的 `llc/clang` 子进程调用与链接尚未接入。
+
 ## Phase 0 交付物
 
 | # | 交付物 | 路径 |
@@ -441,11 +563,17 @@ aura run tests/phase7_jit_tests.aura
 # 9) Phase 8 验证用例（核心库 / 标准库 Aura 化）
 aura run tests/phase8_stdlib_tests.aura
 
-# 10) 构建 Aura 编译器骨架（默认产出 .auc；--aot 产出原生可执行文件）
+# 10) Phase 9 验证用例（整体编译管线串联）
+aura run tests/phase9_compiler_tests.aura
+aura run aura/compiler/aura/lang/compiler/Main.aura
+
+# 11) 构建 Aura 编译器骨架（默认产出 .auc；--aot 产出原生可执行文件）
+#     注意：--aot 需要以 `cargo build -p cli --features llvm` 构建 aura，
+#     且本机安装 LLVM（路径见根 Cargo.toml 的 [workspace.metadata.aura].llvm-home）
 scripts/build-aura-compiler.sh
 scripts/build-aura-compiler.sh --aot
 
-# 11) 源码快照一致性检查
+# 12) 源码快照一致性检查
 scripts/snapshot.sh
 ```
 
@@ -461,6 +589,8 @@ aura run tests\phase5_vm_tests.aura
 aura run tests\phase6_aot_tests.aura
 aura run tests\phase7_jit_tests.aura
 aura run tests\phase8_stdlib_tests.aura
+aura run tests\phase9_compiler_tests.aura
+aura run aura\compiler\aura\lang\compiler\Main.aura
 scripts\build-aura-compiler.ps1
 scripts\snapshot.ps1
 ```

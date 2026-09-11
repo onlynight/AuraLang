@@ -653,6 +653,7 @@ fn build_all_names() -> HashSet<&'static str> {
         "aura.lang.std.Process.argCount",
         "aura.lang.std.Process.pid",
         "aura.lang.std.Process.spawn",
+        "aura.lang.std.Process.run",
         "aura.lang.std.Process.kill",
         "aura.lang.std.Process.wait",
         "aura.lang.std.Process.exitProcess",

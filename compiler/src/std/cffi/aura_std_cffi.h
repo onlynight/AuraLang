@@ -245,11 +245,9 @@ void aura_free(const void *ptr);
 /** 创建字符串对象（返回字符串指针） */
 const char *aura_string_new(const char *data, int64_t len);
 
-/** 获取字符串长度 */
-int64_t aura_string_length(const AuraString *s);
-
-/** 获取字符串数据指针 */
-const char *aura_string_data(const AuraString *s);
+// 注：`aura_string_length` / `aura_string_data` 已在文件前部以 `const char*`
+// 形参形式声明（AOT 发射器按 i8* 指针调用）；此处不再声明 `AuraString*` 版本，
+// 以避免同名函数签名冲突（此前重复声明导致 clang 报 conflicting types）。
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 短名称包装函数（供 AOT IR 直接调用）

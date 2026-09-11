@@ -430,8 +430,8 @@ fun testJitCore(): Int {
     t.assertEq(jitCoreResolveBranch(3, 2), 6, "branch resolve")
     t.assertEq(jitCoreResolveBranch(0, -5), -1, "branch invalid")
 
-    // JitUnit 数据模型
-    val unit = JitUnit(0, "mul", 0, 1, "Const 6\nRet\n", "3,5")
+    // JitUnit 数据模型（保留字段 ffiSlots 只用于 slotCount 计数）
+    val unit = JitUnit(0, "mul", 0, 1, "CONST_INT 6\nRETURN\n", "3,5")
     t.assertEq(unit.lineCount(), 2, "unit line count")
     t.assertEq(unit.slotCount(), 2, "unit slot count")
     t.assertEq(unit.name, "mul", "unit name")
@@ -439,32 +439,37 @@ fun testJitCore(): Int {
     val jc = JitCoreCompiler()
     jc.setThreshold(500)
     t.assertEq(jc.hotThreshold, 500, "threshold set")
-    t.assertTrue(jc.tryCompile(0, "mul", 0, 1, "Const 6\nStoreLocal 0\nLoadLocal 0\nConst 4\nMul\nRet\n"), "compile leaf")
+
+    // 输入即 VM 字节码（CONST_INT 用常量池索引；base = 函数体首行绝对行号）
+    val mulBody = "CONST_INT 0\nSTORE_LOCAL 0\nLOAD_LOCAL 0\nCONST_INT 1\nMUL\nRETURN\n"
+    t.assertTrue(jc.tryCompile(0, "mul", 0, 1, mulBody, 0, "6\n4\n"), "compile leaf")
     t.assertTrue(jc.isCompiled(0), "is compiled")
     t.assertEq(jc.compiledCount(), 1, "compiled count")
     t.assertEq(jc.compiles, 1, "compile stat")
     t.assertEq(jc.execute(0, "", 1), "24", "execute mul")
 
-    // 非叶子函数（含 Call）不可编译 → 回退
-    t.assertFalse(jc.tryCompile(1, "caller", 0, 0, "Call 0\nRet\n"), "reject call")
+    // 非叶子函数（含 CALL）不可编译 → 回退
+    t.assertFalse(jc.tryCompile(1, "caller", 0, 0, "CONST_INT 0\nCALL foo 1\nRETURN\n", 0, "0\n"), "reject call")
     t.assertFalse(jc.isCompiled(1), "caller not compiled")
 
-    // 分支重解析为绝对目标
-    t.assertTrue(jc.tryCompile(4, "br", 0, 1, "Const 1\nStoreLocal 0\nJump 1\nConst 9\nRet\n"), "compile branch")
+    // 分支：绝对目标在预解码时转为单元相对偏移
+    val brBody = "CONST_INT 0\nSTORE_LOCAL 0\nJUMP 3\nCONST_INT 1\nRETURN\n"
+    t.assertTrue(jc.tryCompile(4, "br", 0, 1, brBody, 0, "1\n9\n"), "compile branch")
     val brCode: String = jc.unitCodeOf(4)
-    t.assertTrue(brCode.contains("Br 4"), "absolute branch target")
+    t.assertTrue(brCode.contains("JUMP 0"), "relative branch target")
+    t.assertTrue(brCode.contains("CONST_INT 1"), "pool index resolved to literal")
 
-    // FFI 内联缓存槽位登记
-    t.assertTrue(jc.tryCompile(3, "ffi", 0, 0, "CallFfi 3\nCallFfi 5\nRet\n"), "compile ffi")
-    t.assertEq(jc.unitSlotsOf(3), "3,5", "ffi slots dedup")
-
-    // 去优化：除零 / FFI 槽失效
-    val divZero = "Const 8\nStoreLocal 0\nLoadLocal 0\nConst 0\nDiv\nRet\n"
-    t.assertTrue(jc.tryCompile(2, "div", 0, 1, divZero), "compile div")
+    // 去优化：除零
+    val divBody = "CONST_INT 0\nSTORE_LOCAL 0\nLOAD_LOCAL 0\nCONST_INT 1\nDIV\nRETURN\n"
+    t.assertTrue(jc.tryCompile(2, "div", 0, 1, divBody, 0, "8\n0\n"), "compile div")
     val dz: String = jc.execute(2, "", 1)
     t.assertTrue(jitSlice(dz, 0, 5) == "deopt", "deopt div zero")
-    val ffiRes: String = jc.execute(3, "", 0)
-    t.assertTrue(jitSlice(ffiRes, 0, 5) == "deopt", "deopt ffi slot")
+
+    // 去优化：取模零
+    val modBody = "CONST_INT 0\nSTORE_LOCAL 0\nLOAD_LOCAL 0\nCONST_INT 1\nMOD\nRETURN\n"
+    t.assertTrue(jc.tryCompile(3, "mod", 0, 1, modBody, 0, "8\n0\n"), "compile mod")
+    val mz: String = jc.execute(3, "", 1)
+    t.assertTrue(jitSlice(mz, 0, 5) == "deopt", "deopt mod zero")
     t.assertEq(jc.deopts, 2, "deopt stat")
 
     // 失效

@@ -13,6 +13,7 @@ pub fn register(reg: &mut NativeRegistry) {
     reg.register("aura.lang.std.Process.argCount", nat_arg_count);
     reg.register("aura.lang.std.Process.pid", nat_pid);
     reg.register("aura.lang.std.Process.spawn", nat_spawn);
+    reg.register("aura.lang.std.Process.run", nat_run);
     reg.register("aura.lang.std.Process.kill", nat_kill);
     reg.register("aura.lang.std.Process.wait", nat_wait);
     reg.register("aura.lang.std.Process.exitProcess", nat_exit_process);
@@ -86,6 +87,26 @@ fn nat_spawn(args: &[Value]) -> Value {
             Value::Int(pid)
         }
         Err(e) => Value::str_(format!("spawn error: {}", e)),
+    }
+}
+
+/// `process.run(command)` → Int：以 shell 同步执行命令行并返回退出码。
+///
+/// - Windows 经 `cmd /C`，类 Unix 经 `sh -c`，便于组合多步外部工具调用；
+/// - 阻塞直到命令结束（与异步的 `spawn` 互补）；
+/// - `Process` 为 object 单例，取**最后一个字符串参数**作为命令，规避 self 注入偏移。
+fn nat_run(args: &[Value]) -> Value {
+    let cmd = args.iter().rev().map(|v| v.as_string()).find(|s| !s.is_empty()).unwrap_or_default();
+    if cmd.is_empty() {
+        return Value::Int(-1);
+    }
+    #[cfg(windows)]
+    let status = std::process::Command::new("cmd").arg("/C").arg(&cmd).status();
+    #[cfg(not(windows))]
+    let status = std::process::Command::new("sh").arg("-c").arg(&cmd).status();
+    match status {
+        Ok(s) => Value::Int(s.code().unwrap_or(-1) as i64),
+        Err(_) => Value::Int(-1),
     }
 }
 

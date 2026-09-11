@@ -43,6 +43,12 @@ internal object Process {
     /// 启动新进程。
     fun spawn(command: String): Any
 
+    /// 以 shell 同步执行命令行，返回退出码（阻塞直到结束）。
+    ///
+    /// Windows 经 `cmd /C`、类 Unix 经 `sh -c` 执行，便于组合多步命令。
+    /// 与 `spawn`（异步、不等待）互补，供编译器驱动调用 `llc`/`clang` 等外部工具。
+    fun run(command: String): Int
+
     /// 杀死指定进程。
     fun kill(pid: Int): Unit
 

@@ -580,13 +580,14 @@ fun testHirCall(): Int {
     val callHirId: Int = hir.childOf(rootId, 0)
     t.assertEq(hir.kindOf(callHirId), "HirCall", "Call → HirCall")
 
-    // 检查子节点（被调用者 + 参数）
-    t.assertEq(hir.kindOf(hir.childOf(callHirId, 0)), "HirVar", "callee is HirVar")
-    t.assertEq(hir.textOf(hir.childOf(callHirId, 0)), "foo", "callee name is foo")
-    t.assertEq(hir.kindOf(hir.childOf(callHirId, 1)), "HirLit", "arg1 is HirLit")
-    t.assertEq(hir.textOf(hir.childOf(callHirId, 1)), "1", "arg1 value is 1")
-    t.assertEq(hir.kindOf(hir.childOf(callHirId, 2)), "HirLit", "arg2 is HirLit")
-    t.assertEq(hir.textOf(hir.childOf(callHirId, 2)), "2", "arg2 value is 2")
+    // 检查子节点：调用契约已更新 —— 函数名写入 HirCall.text，
+    // kids 仅含实参（旧实现在 kids[0] 保留被调用者且 text 为空，
+    // 会使 MIR/Codegen 丢失函数名，见 Phase 9 串联修复）。
+    t.assertEq(hir.textOf(callHirId), "foo", "callee name is foo")
+    t.assertEq(hir.kindOf(hir.childOf(callHirId, 0)), "HirLit", "arg1 is HirLit")
+    t.assertEq(hir.textOf(hir.childOf(callHirId, 0)), "1", "arg1 value is 1")
+    t.assertEq(hir.kindOf(hir.childOf(callHirId, 1)), "HirLit", "arg2 is HirLit")
+    t.assertEq(hir.textOf(hir.childOf(callHirId, 1)), "2", "arg2 value is 2")
 
     return t.report()
 }

@@ -218,6 +218,23 @@ fn emit_c_stmt(s: &mut String, stmt: &HirStmt, indent: usize) {
             emit_c_block(s, b, indent + 1);
             s.push_str(&format!("{}}}\n", pad));
         }
+        HirStmt::Try {
+            body,
+            catch_var: _,
+            catch_body: _,
+            finally,
+        } => {
+            // AOT/C 后端暂无异常运行时：按「正常路径」语义发射 try 体，随后执行 finally；
+            // catch 子句在无异常机制时不可达（与解释器路径存在已知差异，见 README）。
+            s.push_str(&format!("{}{{\n", pad));
+            emit_c_block(s, body, indent + 1);
+            s.push_str(&format!("{}}}\n", pad));
+            if let Some(fin) = finally {
+                s.push_str(&format!("{}{{\n", pad));
+                emit_c_block(s, fin, indent + 1);
+                s.push_str(&format!("{}}}\n", pad));
+            }
+        }
     }
 }
 

@@ -206,6 +206,35 @@ class Hir {
 // ─────────────────────────────────────────────────────────────
 
 /// AST → HIR 降级器。
+/// 归一化二元运算符：把词法 TokenKind 名（`Plus`/`Star`…）转为符号（`+`/`*`…）。
+///
+/// 说明：Parser 的 `Binary.text` 存的是 TokenKind 名，而 MIR/Codegen 按符号匹配，
+/// 若不归一化则所有二元运算都会退化为默认的 `ADD`。
+fun hirNormBinOp(op: String): String {
+    if (op == "Plus" || op == "+") { return "+" }
+    if (op == "Minus" || op == "-") { return "-" }
+    if (op == "Star" || op == "*") { return "*" }
+    if (op == "Slash" || op == "/") { return "/" }
+    if (op == "Percent" || op == "%") { return "%" }
+    if (op == "EqEq" || op == "==") { return "==" }
+    if (op == "Neq" || op == "!=") { return "!=" }
+    if (op == "Lt" || op == "<") { return "<" }
+    if (op == "Gt" || op == ">") { return ">" }
+    if (op == "LtEq" || op == "<=") { return "<=" }
+    if (op == "GtEq" || op == ">=") { return ">=" }
+    if (op == "AndAnd" || op == "&&") { return "&&" }
+    if (op == "OrOr" || op == "||") { return "||" }
+    return op
+}
+
+/// 归一化一元运算符：`Minus`→`-`、`Bang`→`!`、`Plus`→`+`。
+fun hirNormUnOp(op: String): String {
+    if (op == "Minus" || op == "-") { return "-" }
+    if (op == "Bang" || op == "!") { return "!" }
+    if (op == "Plus" || op == "+") { return "+" }
+    return op
+}
+
 class HirLowerer {
 
     /// 输入的 AST。
@@ -468,24 +497,39 @@ class HirLowerer {
     }
 
     /// 降级 if 语句。
+    ///
+    /// AST 形状：`If(cond, thenBranch[, elseBranch])`。
+    /// 条件可为任意表达式 kind（Binary/Call/Ident…），必须无条件降级（此前按
+    /// `Expr/Block/If` 过滤，导致条件被丢弃）。
     fun lowerIfStmt(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
         val kids: String = ast.kidsOf(id)
         val kCount: Int = hirKidsCount(kids)
 
         var hirKids: String = hirNoKids()
-        var i: Int = 0
-        while (i < kCount) {
-            val childId: Int = hirKidsAt(kids, i)
-            val childKind: String = ast.kindOf(childId)
-            if (childKind == "Expr" || childKind == "Block" || childKind == "If") {
-                val childHirId: Int = this.lowerBlockOrExpr(ast, childId)
-                if (childHirId >= 0) {
-                    hirKids = hirKidsAdd(hirKids, childHirId)
-                }
+
+        // 条件
+        if (kCount >= 1) {
+            val condHirId: Int = this.lowerExpr(ast, hirKidsAt(kids, 0))
+            if (condHirId >= 0) {
+                hirKids = hirKidsAdd(hirKids, condHirId)
             }
-            i = i + 1
         }
+        // then 分支
+        if (kCount >= 2) {
+            val thenHirId: Int = this.lowerBlockOrExpr(ast, hirKidsAt(kids, 1))
+            if (thenHirId >= 0) {
+                hirKids = hirKidsAdd(hirKids, thenHirId)
+            }
+        }
+        // else 分支（可选）
+        if (kCount >= 3) {
+            val elseHirId: Int = this.lowerBlockOrExpr(ast, hirKidsAt(kids, 2))
+            if (elseHirId >= 0) {
+                hirKids = hirKidsAdd(hirKids, elseHirId)
+            }
+        }
+
         return this.hir.add("HirIf", "", "", sp, hirKids)
     }
 
@@ -592,6 +636,11 @@ class HirLowerer {
             }
 
             // 普通赋值：target = value
+            // 把目标变量名写入 HirAssign.text（MIR 需要据此分配 STORE_VAR 槽位）
+            var targetName: String = ""
+            if (targetKind == "Ident" || targetKind == "This" || targetKind == "Super") {
+                targetName = ast.textOf(targetId)
+            }
             var hirKids: String = hirNoKids()
             var i: Int = 0
             while (i < kCount) {
@@ -602,7 +651,7 @@ class HirLowerer {
                 }
                 i = i + 1
             }
-            return this.hir.add("HirAssign", "", "", sp, hirKids)
+            return this.hir.add("HirAssign", targetName, "", sp, hirKids)
         }
         return -1
     }
@@ -713,7 +762,7 @@ class HirLowerer {
             }
             i = i + 1
         }
-        return this.hir.add("HirBinary", op, "", sp, hirKids)
+        return this.hir.add("HirBinary", hirNormBinOp(op), "", sp, hirKids)
     }
 
     /// 降级一元运算表达式。
@@ -733,7 +782,7 @@ class HirLowerer {
             }
             i = i + 1
         }
-        return this.hir.add("HirUnary", op, "", sp, hirKids)
+        return this.hir.add("HirUnary", hirNormUnOp(op), "", sp, hirKids)
     }
 
     /// 降级函数调用表达式。
@@ -822,8 +871,27 @@ class HirLowerer {
             }
         }
 
+        // 普通调用：kids[0] 是 callee（Ident/This/Super/Member），其余为实参。
+        // 提取被调用函数名写入 HirCall.text（此前留空，导致 MIR/Codegen 丢失函数名）。
+        var calleeName: String = ""
+        var argStart: Int = 0
+        if (kCount > 0) {
+            val calleeId: Int = hirKidsAt(kids, 0)
+            val calleeKind: String = ast.kindOf(calleeId)
+            if (calleeKind == "Ident" || calleeKind == "This" || calleeKind == "Super") {
+                calleeName = ast.textOf(calleeId)
+                argStart = 1
+            } else if (calleeKind == "Member") {
+                // 方法调用：名字取成员名，接收者（对象）作为首个实参保留。
+                calleeName = ast.textOf(calleeId)
+                argStart = 0
+            } else {
+                argStart = 0
+            }
+        }
+
         var hirKids: String = hirNoKids()
-        var i: Int = 0
+        var i: Int = argStart
         while (i < kCount) {
             val childId: Int = hirKidsAt(kids, i)
             val childHirId: Int = this.lowerExpr(ast, childId)
@@ -832,7 +900,7 @@ class HirLowerer {
             }
             i = i + 1
         }
-        return this.hir.add("HirCall", "", "", sp, hirKids)
+        return this.hir.add("HirCall", calleeName, "", sp, hirKids)
     }
 
     /// 降级成员访问表达式。

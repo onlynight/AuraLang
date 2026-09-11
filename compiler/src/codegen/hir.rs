@@ -5602,6 +5602,7 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
         ("aura.lang.std.Process.argCount", vec![]),
         ("aura.lang.std.Process.pid", vec![]),
         ("aura.lang.std.Process.spawn", vec![("command", "String")]),
+        ("aura.lang.std.Process.run", vec![("command", "String")]),
         ("aura.lang.std.Process.kill", vec![("pid", "Int")]),
         ("aura.lang.std.Process.wait", vec![("pid", "Int")]),
         ("aura.lang.std.Process.exitProcess", vec![("code", "Int")]),

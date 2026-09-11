@@ -16,6 +16,8 @@ package aura.lang.compiler.aot
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
+import aura.lang.std.FileSystem
+import aura.lang.std.Process
 import aura.lang.compiler.lexer.Span
 import aura.lang.compiler.hir.Hir
 import aura.lang.compiler.aot.AotUtil
@@ -168,4 +170,155 @@ fun aotCompile(hir: Hir, options: AotOptions): AotResult {
 /// AOT 后端版本。
 fun aotBackendVersion(): String {
     return "0.1.0-phase6"
+}
+
+// ─────────────────────────────────────────────────────────────
+// AOT 产物落盘与原生 exe 产出（Phase 9：接入 LLVM 工具链）
+//
+// 本模块只负责「HIR → LLVM IR →（llc）→ .obj →（clang）→ 原生 exe」这一段；
+// 「源码 → HIR」由调用方（编译器入口 / 验证用例）自行串联，后端不反向依赖前端。
+// ─────────────────────────────────────────────────────────────
+
+/// AOT 链接产物（LLVM IR 文本 + llc/clang 命令 + C 后端源码）。
+class AotLinkResult {
+
+    /// LLVM IR 文本。
+    var llvmIr: String = ""
+
+    /// 目标三元组。
+    var targetTriple: String = ""
+
+    /// 优化参数（`-O2` …）。
+    var optFlag: String = ""
+
+    /// llc 目标文件命令。
+    var objectCommand: String = ""
+
+    /// clang 链接命令。
+    var executableCommand: String = ""
+
+    /// C 后端备选源码。
+    var cSource: String = ""
+
+    /// IR 行数。
+    var irLines: Int = 0
+
+    /// 是否定义了 main。
+    var hasMain: Boolean = false
+}
+
+/// HIR → LLVM IR 文本 + llc/clang 命令 + C 后端源码（纯函数，不触发 IO）。
+fun compileAot(hir: Hir): AotLinkResult {
+    val r: AotLinkResult = AotLinkResult()
+    val opts: AotOptions = defaultAotOptions()
+    val aot: AotResult = aotCompile(hir, opts)
+
+    r.llvmIr = aot.llvmIr
+    r.targetTriple = aot.targetTriple
+    r.optFlag = aot.optFlag
+    r.objectCommand = aot.objectCommand
+    r.executableCommand = aot.executableCommand
+    r.cSource = aot.cSource
+    r.hasMain = aot.hasFunction("main")
+    r.irLines = aot.irLineCount()
+    return r
+}
+
+/// AOT 原生编译结果。
+class AotExeResult {
+
+    /// 是否成功产出 exe。
+    var ok: Boolean = false
+
+    /// IR 文件路径。
+    var llPath: String = ""
+
+    /// 目标文件路径。
+    var objPath: String = ""
+
+    /// 可执行文件路径。
+    var exePath: String = ""
+
+    /// llc 退出码。
+    var llcExit: Int = 0
+
+    /// clang 退出码。
+    var clangExit: Int = 0
+
+    /// 目标三元组。
+    var target: String = ""
+
+    /// 执行 exe 的退出码（-999 表示未运行）。
+    var runExit: Int = -999
+}
+
+/// HIR → IR →（llc）→ .obj →（clang）→ 原生 exe。
+///
+/// 通过 `FileSystem.writeText` 落盘 IR，经 `Process.run` 调用 LLVM 工具链。
+/// `llvmHome` 为 LLVM 根目录（如 `D:/DevTools/LLVM/clang+llvm-23.1.0-...`）。
+fun aotBuildExeFromHir(hir: Hir, moduleName: String, outDir: String, llvmHome: String): AotExeResult {
+    val r: AotExeResult = AotExeResult()
+
+    val a: AotLinkResult = compileAot(hir)
+    val tgt: String = a.targetTriple
+    r.target = tgt
+
+    val llPath: String = outDir + "/" + moduleName + ".ll"
+    val objPath: String = outDir + "/" + moduleName + ".obj"
+    var exePath: String = outDir + "/" + moduleName
+    if (tgt.contains("windows")) {
+        exePath = exePath + ".exe"
+    }
+    r.llPath = llPath
+    r.objPath = objPath
+    r.exePath = exePath
+
+    // 1. 落盘 LLVM IR
+    FileSystem.mkdirP(outDir)
+    FileSystem.writeText(llPath, a.llvmIr)
+
+    // 2. llc：IR → 目标文件
+    val llc: String = toolPreferredPath("llc", llvmHome)
+    val clang: String = toolPreferredPath("clang", llvmHome)
+    val optFlag: String = a.optFlag
+    val llcCmd: String = llc + " -mtriple " + tgt + " " + llPath +
+        " -o " + objPath + " " + optFlag + " -filetype=obj"
+    r.llcExit = Process.run(llcCmd)
+
+    // 3. clang：目标文件 → 可执行文件
+    val clangCmd: String = clang + " -target " + tgt + " " + objPath +
+        " -o " + exePath + " " + optFlag
+    r.clangExit = Process.run(clangCmd)
+
+    r.ok = (r.llcExit == 0) && (r.clangExit == 0)
+    return r
+}
+
+/// 运行已产出的可执行文件，返回其退出码。
+///
+/// 注意：`Process.run` 经 `cmd /C` 执行，`cmd` 会把路径中的 `/` 当作开关分隔符，
+/// 故先把分隔符规范化为反斜杠（`build/a/b.exe` → `build\a\b.exe`）。
+fun runBuiltExe(exePath: String): Int {
+    return Process.run(aotWinPath(exePath))
+}
+
+/// 把路径分隔符 `/` 规范化为 `\`（Windows `cmd` 友好）。
+fun aotWinPath(p: String): String {
+    var out: String = ""
+    var i: Int = 0
+    while (i < p.length) {
+        val c: String = toStr(p[i])
+        if (c == "/") {
+            out = out + "\\"
+        } else {
+            out = out + c
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// 默认 LLVM 工具链根目录（与根 `Cargo.toml` 的 `[workspace.metadata.aura].llvm-home` 一致）。
+fun llvmHomeDefault(): String {
+    return "D:/DevTools/LLVM/clang+llvm-23.1.0-x86_64-pc-windows-msvc"
 }

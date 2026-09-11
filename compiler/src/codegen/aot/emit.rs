@@ -844,6 +844,19 @@ fn emit_statement(
             // P7.4: defer 简化处理 — 立即执行块（与 Block 一致）
             emit_block(ctx, blocks, b)?;
         }
+        HirStmt::Try {
+            body,
+            catch_var: _,
+            catch_body: _,
+            finally,
+        } => {
+            // AOT 后端暂无异常运行时（见 README「已知差异」）：
+            // 按正常路径发射 try 体，随后执行 finally；catch 子句不可达。
+            emit_block(ctx, blocks, body)?;
+            if let Some(fin) = finally {
+                emit_block(ctx, blocks, fin)?;
+            }
+        }
     }
     Ok(())
 }

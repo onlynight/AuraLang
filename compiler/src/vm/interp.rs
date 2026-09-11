@@ -1056,7 +1056,20 @@ impl Vm {
         }
         let native = self.module.natives[idx].clone();
         // 使用实际参数个数而非声明的 param_count
-        let args = self.pop_n(top, argc)?;
+        let mut args = self.pop_n(top, argc)?;
+
+        // 对象单例方法（object 上的 `Class.method(...)`）会在调用点注入 self 作为首参，
+        // 使 `argc = 声明参数个数 + 1`。原生实现按声明签名取值，此处剥离注入的 self，
+        // 否则 `FileSystem.writeText(path, content)` 之类会整体错位（写出到空路径等）。
+        // 注意：变长原生（`println`/`listOf` 等）声明 param_count 为 0，不受此规则影响。
+        let mut eff_argc = argc;
+        if native.param_count as usize >= 1
+            && argc == native.param_count as usize + 1
+            && !args.is_empty()
+        {
+            args.remove(0);
+            eff_argc = argc - 1;
+        }
 
         // 同 `do_call_native`：`throw` 走异常展开路径
         if native.name == "__throw" {
@@ -1075,12 +1088,12 @@ impl Vm {
         let args_std_lookup = if self.natives.contains(&native.name) {
             None
         } else {
-            self.find_stdlib_func(&native.name, argc)
+            self.find_stdlib_func(&native.name, eff_argc)
         };
         if let Some((std_func_idx, needs_self)) = args_std_lookup {
             eprintln!(
                 "[vm] stdlib-aura: {} (argc={}) → Aura compiled func #{} (self={})",
-                native.name, argc, std_func_idx, needs_self
+                native.name, eff_argc, std_func_idx, needs_self
             );
 
             if needs_self {

@@ -37,6 +37,9 @@ class MirLowerer {
     /// 临时变量计数器。
     var tmpCount: Int = 0
 
+    /// 控制流标签计数器。
+    var labelCount: Int = 0
+
     /// 生成一个临时变量名。
     fun genTmp(): String {
         val name: String = "%t" + toStr(this.tmpCount)
@@ -44,10 +47,18 @@ class MirLowerer {
         return name
     }
 
+    /// 生成一个唯一标签名（用于 JUMP 目标解析）。
+    fun newLabel(prefix: String): String {
+        val n: Int = this.labelCount
+        this.labelCount = this.labelCount + 1
+        return "@" + prefix + toStr(n)
+    }
+
     init() {
         this.mir = Mir()
         this.curFnRet = ""
         this.tmpCount = 0
+        this.labelCount = 0
     }
 
     /// 执行降级，返回新的 MIR 根节点 id。
@@ -117,7 +128,17 @@ class MirLowerer {
         while (pi < kCount) {
             val childId: Int = hirKidsAt(kids, pi)
             val childKind: String = src.kindOf(childId)
-            if (childKind == "HirParams") {
+            if (childKind == "HirParam") {
+                // HIR 直接把 HirParam 作为 HirFunction 的直接子节点
+                val paramName: String = src.textOf(childId)
+                if (paramNames == "") {
+                    paramNames = paramName
+                } else {
+                    paramNames = paramNames + "," + paramName
+                }
+                paramCount = paramCount + 1
+            } else if (childKind == "HirParams") {
+                // 兼容带 HirParams 包装节点的 HIR 形态
                 val paramsKids: String = src.kidsOf(childId)
                 val pkCount: Int = hirKidsCount(paramsKids)
                 var j: Int = 0
@@ -136,8 +157,8 @@ class MirLowerer {
             pi = pi + 1
         }
 
-        // 创建 MirFunc 节点
-        val funcId: Int = this.mir.add("MirFunc", name, retTy, sp, mirNoKids())
+        // 创建 MirFunc 节点；text = `name|p1,p2`（Codegen 据 | 拆分出函数名与参数表）
+        val funcId: Int = this.mir.add("MirFunc", name + "|" + paramNames, retTy, sp, mirNoKids())
 
         // 处理函数体（子节点 1 是 Block）
         var bi: Int = 0
@@ -357,7 +378,9 @@ class MirLowerer {
         val kids: String = src.kidsOf(id)
         val kCount: Int = hirKidsCount(kids)
 
-        // 降级参数（子节点 1 及之后是参数列表）
+        // 实参：HIR 未生成 HirArgs 包装节点，直接子节点即为实参。
+        // 依次降级压栈，并把实参个数写入 CALL 节点的 ty（供 Codegen/VM 使用）。
+        var argc: Int = 0
         var i: Int = 0
         while (i < kCount) {
             val childId: Int = hirKidsAt(kids, i)
@@ -369,13 +392,17 @@ class MirLowerer {
                 while (j < ac) {
                     val argId: Int = hirKidsAt(argsKids, j)
                     this.lowerExpr(src, argId)
+                    argc = argc + 1
                     j = j + 1
                 }
+            } else {
+                this.lowerExpr(src, childId)
+                argc = argc + 1
             }
             i = i + 1
         }
 
-        return this.mir.add("CALL", name, "", sp, mirNoKids())
+        return this.mir.add("CALL", name, toStr(argc), sp, mirNoKids())
     }
 
     /// 降级成员访问。
@@ -409,55 +436,70 @@ class MirLowerer {
     }
 
     /// 降级 if 语句。
+    ///
+    /// 结构：`cond; JUMP_IF_FALSE L_else; then; JUMP L_end; LABEL L_else; else; LABEL L_end`
     fun lowerIf(src: Hir, id: Int): Int {
         val sp: Span = src.spanOf(id)
         val kids: String = src.kidsOf(id)
         val kCount: Int = hirKidsCount(kids)
 
-        if (kCount >= 3) {
+        if (kCount >= 2) {
+            val lElse: String = this.newLabel("else")
+            val lEnd: String = this.newLabel("endif")
+
             // 条件表达式
             val condId: Int = hirKidsAt(kids, 0)
             this.lowerExpr(src, condId)
 
-            // JUMP_IF_FALSE（跳转到 else 块或末尾）
-            this.mir.add("JUMP_IF_FALSE", "", "", sp, mirNoKids())
+            // 条件为假 → 跳到 else 块
+            this.mir.add("JUMP_IF_FALSE", lElse, "", sp, mirNoKids())
 
             // then 块
             val thenId: Int = hirKidsAt(kids, 1)
             this.lowerStmt(src, thenId)
 
-            // JUMP（跳过 else 块）
-            this.mir.add("JUMP", "", "", sp, mirNoKids())
+            // 跳过 else 块
+            this.mir.add("JUMP", lEnd, "", sp, mirNoKids())
+            this.mir.add("LABEL", lElse, "", sp, mirNoKids())
 
             // else 块（如果有）
-            if (kCount >= 4) {
+            if (kCount >= 3) {
                 val elseId: Int = hirKidsAt(kids, 2)
                 this.lowerStmt(src, elseId)
             }
+            this.mir.add("LABEL", lEnd, "", sp, mirNoKids())
         }
         return 0
     }
 
     /// 降级 while 循环。
+    ///
+    /// 结构：`LABEL L_start; cond; JUMP_IF_FALSE L_end; body; JUMP L_start; LABEL L_end`
     fun lowerWhile(src: Hir, id: Int): Int {
         val sp: Span = src.spanOf(id)
         val kids: String = src.kidsOf(id)
         val kCount: Int = hirKidsCount(kids)
 
         if (kCount >= 2) {
+            val lStart: String = this.newLabel("while")
+            val lEnd: String = this.newLabel("endwhile")
+
+            this.mir.add("LABEL", lStart, "", sp, mirNoKids())
+
             // 循环条件
             val condId: Int = hirKidsAt(kids, 0)
             this.lowerExpr(src, condId)
 
-            // JUMP_IF_FALSE（退出循环）
-            this.mir.add("JUMP_IF_FALSE", "", "", sp, mirNoKids())
+            // 条件为假 → 退出循环
+            this.mir.add("JUMP_IF_FALSE", lEnd, "", sp, mirNoKids())
 
             // 循环体
             val bodyId: Int = hirKidsAt(kids, 1)
             this.lowerStmt(src, bodyId)
 
-            // JUMP（回到循环条件）
-            this.mir.add("JUMP", "", "", sp, mirNoKids())
+            // 回到循环条件
+            this.mir.add("JUMP", lStart, "", sp, mirNoKids())
+            this.mir.add("LABEL", lEnd, "", sp, mirNoKids())
         }
         return 0
     }

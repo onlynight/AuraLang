@@ -633,6 +633,7 @@ impl Lexer {
                 self.advance();
                 if self.char_pos < self.chars.len() {
                     let esc = self.chars[self.char_pos].0;
+                    let mut hex_extra = 0usize;
                     match esc {
                         'n' => buf.push('\n'),
                         't' => buf.push('\t'),
@@ -647,6 +648,31 @@ impl Lexer {
                         'v' => buf.push('\u{000B}'),
                         // JSON 允许转义斜杠，等价于普通斜杠
                         '/' => buf.push('/'),
+                        // Unicode 转义：\uXXXX（4 位十六进制）
+                        'u' => {
+                            let mut code: u32 = 0;
+                            let mut ok = true;
+                            for k in 1..=4usize {
+                                match self.peek_n(k).and_then(|c| c.to_digit(16)) {
+                                    Some(d) => code = code * 16 + d,
+                                    None => {
+                                        ok = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            if ok {
+                                if let Some(ch) = char::from_u32(code) {
+                                    buf.push(ch);
+                                }
+                                hex_extra = 4;
+                            } else {
+                                self.errors.push(TokenizeError::new(
+                                    "Invalid unicode escape (expected \\uXXXX)".to_string(),
+                                    self.current_span(),
+                                ));
+                            }
+                        }
                         _ => {
                             buf.push('\\');
                             buf.push(esc);
@@ -657,6 +683,9 @@ impl Lexer {
                         }
                     }
                     self.advance();
+                    for _ in 0..hex_extra {
+                        self.advance();
+                    }
                 }
             } else if ch == '$' {
                 // 字符串插值 $var 或 ${expr}（查看 $ 的下一个字符）
@@ -742,6 +771,7 @@ impl Lexer {
                 self.advance();
                 if self.char_pos < self.chars.len() {
                     let esc = self.chars[self.char_pos].0;
+                    let mut hex_extra = 0usize;
                     match esc {
                         'n' => buf.push('\n'),
                         't' => buf.push('\t'),
@@ -756,9 +786,37 @@ impl Lexer {
                         'v' => buf.push('\u{000B}'),
                         // JSON 允许转义斜杠，等价于普通斜杠
                         '/' => buf.push('/'),
+                        // Unicode 转义：\uXXXX（4 位十六进制）
+                        'u' => {
+                            let mut code: u32 = 0;
+                            let mut ok = true;
+                            for k in 1..=4usize {
+                                match self.peek_n(k).and_then(|c| c.to_digit(16)) {
+                                    Some(d) => code = code * 16 + d,
+                                    None => {
+                                        ok = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            if ok {
+                                if let Some(ch) = char::from_u32(code) {
+                                    buf.push(ch);
+                                }
+                                hex_extra = 4;
+                            } else {
+                                self.errors.push(TokenizeError::new(
+                                    "Invalid unicode escape (expected \\uXXXX)".to_string(),
+                                    self.current_span(),
+                                ));
+                            }
+                        }
                         _ => buf.push(esc),
                     }
                     self.advance();
+                    for _ in 0..hex_extra {
+                        self.advance();
+                    }
                 }
             } else {
                 buf.push(ch);
@@ -1277,6 +1335,16 @@ mod tests {
         assert!(lexer.errors().is_empty(), "errors: {:?}", lexer.errors());
         assert_eq!(kind(&tokens[0]), TokenKind::StringLiteral);
         assert_eq!(tokens[0].literal, "a\u{8}b\u{c}c\u{b}d/e");
+    }
+
+    // Phase 9：Unicode 转义 \uXXXX（驱动帧分隔符等场景需要）
+    #[test]
+    fn test_string_with_unicode_escape() {
+        let mut lexer = Lexer::new("\"a\\u0041b\\u0001c\"");
+        let tokens = lexer.tokenize();
+        assert!(lexer.errors().is_empty(), "errors: {:?}", lexer.errors());
+        assert_eq!(kind(&tokens[0]), TokenKind::StringLiteral);
+        assert_eq!(tokens[0].literal, "aAb\u{1}c");
     }
 
     #[test]

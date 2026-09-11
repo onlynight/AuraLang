@@ -626,17 +626,9 @@ const char *aura_string_new(const char *data, int64_t len) {
     return string_buf;
 }
 
-// 获取字符串长度（AuraString 结构体）
-int64_t aura_string_length(const AuraString *s) {
-    if (!s || !s->data) return 0;
-    return s->len > 0 ? s->len : (int64_t)strlen(s->data);
-}
-
-// 获取字符串数据指针（AuraString 结构体）
-const char *aura_string_data(const AuraString *s) {
-    if (!s || !s->data) return "";
-    return s->data;
-}
+// 注：`aura_string_length` / `aura_string_data` 已在文件前部以 `const char*`
+// 形参形式定义（AOT 发射器按 i8* 指针调用）；此处不再定义 `AuraString*` 版本，
+// 以避免同名函数签名冲突（此前重复定义导致 clang 报 conflicting types）。
 
 // ─────────────────────────────────────────────────────────────────────────────
 // P13: 标准库快照（AOT C 实现）— math/ascii/collections/time/random/encoding/

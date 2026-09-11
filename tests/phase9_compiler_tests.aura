@@ -1,0 +1,488 @@
+// ═════════════════════════════════════════════════════════════
+// Phase 9 验证用例：整体编译管线串联（编译并执行 Aura 程序）
+//
+// 覆盖：
+//   1. 前端 Lexer→Parser→AST
+//   2. Sema→HIR→MIR→Codegen（字节码）
+//   3. VM 执行（算术 / 变量 / 赋值 / if / while / 函数调用 / 递归）
+//   4. 编译错误报告（parseErrors）
+//
+// 运行：aura run tests/phase9_compiler_tests.aura
+//   全通过时输出 "RESULT: PASS"
+// ═════════════════════════════════════════════════════════════
+
+import "../aura/compiler/aura/lang/compiler/test/TestRunner.aura"
+
+// 标准库原生（供 AOT 全链路落盘 IR / 调用 LLVM 工具链）
+//
+// 注意：一旦出现任意 `aura.lang.std.*` import，VM 会切换为「按需注册」，
+// 只注册被 import 的模块；因此需显式列出编译器管线自身用到的模块。
+import aura.lang.std.String
+import aura.lang.std.Collections
+import aura.lang.std.Math
+import aura.lang.std.Iter
+import aura.lang.std.FileSystem
+import aura.lang.std.Process
+
+// ── 前端 ──
+import "../aura/compiler/aura/lang/compiler/lexer/Span.aura"
+import "../aura/compiler/aura/lang/compiler/lexer/Token.aura"
+import "../aura/compiler/aura/lang/compiler/lexer/Lexer.aura"
+import "../aura/compiler/aura/lang/compiler/ast/Ast.aura"
+import "../aura/compiler/aura/lang/compiler/errors/CompileError.aura"
+import "../aura/compiler/aura/lang/compiler/parser/Parser.aura"
+
+// ── 中端 ──
+import "../aura/compiler/aura/lang/compiler/sema/Type.aura"
+import "../aura/compiler/aura/lang/compiler/sema/TypeInfo.aura"
+import "../aura/compiler/aura/lang/compiler/sema/SymbolTable.aura"
+import "../aura/compiler/aura/lang/compiler/sema/TypeChecker.aura"
+import "../aura/compiler/aura/lang/compiler/hir/Hir.aura"
+import "../aura/compiler/aura/lang/compiler/hir/Desugar.aura"
+import "../aura/compiler/aura/lang/compiler/hir/Mono.aura"
+import "../aura/compiler/aura/lang/compiler/hir/Inline.aura"
+import "../aura/compiler/aura/lang/compiler/hir/Fold.aura"
+import "../aura/compiler/aura/lang/compiler/mir/Mir.aura"
+import "../aura/compiler/aura/lang/compiler/mir/MirLower.aura"
+import "../aura/compiler/aura/lang/compiler/mir/MirOpt.aura"
+
+// ── 后端 ──
+import "../aura/compiler/aura/lang/compiler/codegen/Codegen.aura"
+import "../aura/compiler/aura/lang/compiler/vm/Opcodes.aura"
+import "../aura/compiler/aura/lang/compiler/vm/Frames.aura"
+import "../aura/compiler/aura/lang/compiler/vm/VmRunner.aura"
+
+// ── AOT 后端 ──
+import "../aura/compiler/aura/lang/compiler/aot/TypeMapper.aura"
+import "../aura/compiler/aura/lang/compiler/aot/AotUtil.aura"
+import "../aura/compiler/aura/lang/compiler/aot/Runtime.aura"
+import "../aura/compiler/aura/lang/compiler/aot/Ffi.aura"
+import "../aura/compiler/aura/lang/compiler/aot/Target.aura"
+import "../aura/compiler/aura/lang/compiler/aot/Optimize.aura"
+import "../aura/compiler/aura/lang/compiler/aot/Emit.aura"
+import "../aura/compiler/aura/lang/compiler/aot/Linker.aura"
+import "../aura/compiler/aura/lang/compiler/aot/CBackend.aura"
+import "../aura/compiler/aura/lang/compiler/aot/Dwarf.aura"
+import "../aura/compiler/aura/lang/compiler/aot/Aot.aura"
+
+// ── JIT 后端 ──
+import "../aura/compiler/aura/lang/compiler/jit/JitUtil.aura"
+import "../aura/compiler/aura/lang/compiler/jit/JitAbi.aura"
+import "../aura/compiler/aura/lang/compiler/jit/JitState.aura"
+import "../aura/compiler/aura/lang/compiler/jit/JitOpt.aura"
+import "../aura/compiler/aura/lang/compiler/jit/JitLower.aura"
+import "../aura/compiler/aura/lang/compiler/jit/JitDispatch.aura"
+import "../aura/compiler/aura/lang/compiler/jit/JitRuntime.aura"
+import "../aura/compiler/aura/lang/compiler/jit/JitCore.aura"
+
+// ═════════════════════════════════════════════════════════════
+// 管线装配（验证用例自带）
+//
+// 编译器入口 `Main.aura` 含 main()、无法被 import，故本用例直接调用各阶段
+// 模块，自行装配 Lexer→Parser→Sema→HIR→MIR→Codegen→VM 管线 —— 验证的正是
+// 各阶段模块自身的接口契约。
+// ═════════════════════════════════════════════════════════════
+
+/// 编译结果（各阶段产物摘要 + 执行结果）。
+class CompileResult {
+    var bytecode: String = ""
+    var constPool: String = ""
+    var funcTable: String = ""
+    var astCount: Int = 0
+    var hirCount: Int = 0
+    var mirCount: Int = 0
+    var parseErrors: Int = 0
+    var result: String = ""
+    var vmError: String = ""
+}
+
+/// source → 字节码 → VM 执行。
+fun compile(source: String): CompileResult {
+    val r = CompileResult()
+    val p = Parser(source)
+    p.parseProgram()
+    r.astCount = p.ast.count
+    r.parseErrors = p.errors.count
+    if (r.parseErrors > 0) {
+        return r
+    }
+    val checker = TypeChecker()
+    checker.tcCheck(p.ast)
+    val hl = HirLowerer()
+    hl.lower(p.ast)
+    r.hirCount = hl.hir.count
+    val ml = MirLowerer()
+    ml.lower(hl.hir)
+    r.mirCount = ml.mir.count
+    val cg = Codegen()
+    val bc = cg.emit(ml.mir)
+    r.bytecode = bc
+    r.constPool = cg.constPoolStr()
+    r.funcTable = cg.funcTableStr()
+    val vm = VmRunner()
+    vm.loadBytecode(r.bytecode, r.constPool, r.funcTable)
+    // 注意：VM 缺陷 —— 把「方法调用结果」直接作为实参会错乱 this，
+    // 故先落到局部变量再转换。
+    val out = vm.run()
+    r.result = toStr(out)
+    r.vmError = vm.getError()
+    return r
+}
+
+/// source → HIR（AOT 路径前半段）。
+fun sourceToHir(source: String): Hir {
+    val p = Parser(source)
+    p.parseProgram()
+    val hl = HirLowerer()
+    hl.lower(p.ast)
+    return hl.hir
+}
+
+/// source → AOT 链接摘要。
+fun compileAotSource(source: String): AotLinkResult {
+    return compileAot(sourceToHir(source))
+}
+
+/// source → 原生 exe。
+fun aotBuildExe(source: String, moduleName: String, outDir: String,
+                llvmHome: String): AotExeResult {
+    return aotBuildExeFromHir(sourceToHir(source), moduleName, outDir, llvmHome)
+}
+
+/// source → JIT 编译指定函数并执行。
+fun jitCompileFunction(source: String, funcName: String, args: String): JitLinkResult {
+    val r = JitLinkResult()
+    r.funcName = funcName
+    val cr = compile(source)
+    val jc = JitCoreCompiler()
+    if (!jc.tryCompileInModule(0, funcName, cr.bytecode, cr.funcTable, cr.constPool)) {
+        r.deopt = true
+        r.reason = "function not found or contains unsupported opcode"
+        return r
+    }
+    r.compiled = true
+    val locals: Int = jc.unitLocalsOf(0)
+    r.locals = locals
+    r.jitCode = jc.unitCodeOf(0)
+    val out: String = jc.execute(0, args, locals)
+    r.result = out
+    if (jitSlice(out, 0, 5) == "deopt") {
+        r.deopt = true
+        r.reason = out
+    }
+    return r
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 1: 前端管线（Lexer→Parser）
+// ═════════════════════════════════════════════════════════════
+
+fun testFrontEnd(): Int {
+    val t = TestRunner()
+    t.begin("pipeline.frontend")
+
+    val r = compile("fun main(): Int {\n    return 42\n}\n")
+    t.assertEq(r.parseErrors, 0, "no parse errors")
+    t.assertTrue(r.astCount > 0, "ast nodes produced")
+    t.assertTrue(r.hirCount > 0, "hir nodes produced")
+    t.assertTrue(r.mirCount > 0, "mir nodes produced")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 2: 算术与常量
+// ═════════════════════════════════════════════════════════════
+
+fun testArithmetic(): Int {
+    val t = TestRunner()
+    t.begin("pipeline.arith")
+
+    val r1 = compile("fun main(): Int {\n    return 2 + 3 * 4\n}\n")
+    t.assertEq(r1.result, "14", "2 + 3 * 4 = 14")
+
+    val r2 = compile("fun main(): Int {\n    return (2 + 3) * 4\n}\n")
+    t.assertEq(r2.result, "20", "(2 + 3) * 4 = 20")
+
+    val r3 = compile("fun main(): Int {\n    return 17 % 5\n}\n")
+    t.assertEq(r3.result, "2", "17 % 5 = 2")
+
+    val r4 = compile("fun main(): Int {\n    return -3 + 10\n}\n")
+    t.assertEq(r4.result, "7", "-3 + 10 = 7")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 3: 变量与赋值
+// ═════════════════════════════════════════════════════════════
+
+fun testVariables(): Int {
+    val t = TestRunner()
+    t.begin("pipeline.vars")
+
+    val r = compile(
+        "fun main(): Int {\n" +
+        "    var x: Int = 10\n" +
+        "    x = x + 5\n" +
+        "    x = x * 2\n" +
+        "    return x\n" +
+        "}\n"
+    )
+    t.assertEq(r.result, "30", "var assignment chain")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 4: 控制流（if / while）
+// ═════════════════════════════════════════════════════════════
+
+fun testControlFlow(): Int {
+    val t = TestRunner()
+    t.begin("pipeline.control")
+
+    // if 走 then
+    val r1 = compile(
+        "fun main(): Int {\n" +
+        "    val n: Int = 20\n" +
+        "    if (n > 10) {\n" +
+        "        return 1\n" +
+        "    }\n" +
+        "    return 2\n" +
+        "}\n"
+    )
+    t.assertEq(r1.result, "1", "if then branch")
+
+    // if 走 else（后续语句）
+    val r2 = compile(
+        "fun main(): Int {\n" +
+        "    val n: Int = 7\n" +
+        "    if (n > 10) {\n" +
+        "        return 1\n" +
+        "    } else {\n" +
+        "        return 2\n" +
+        "    }\n" +
+        "}\n"
+    )
+    t.assertEq(r2.result, "2", "if else branch")
+
+    // while 累加 0..4
+    val r3 = compile(
+        "fun main(): Int {\n" +
+        "    var i: Int = 0\n" +
+        "    var sum: Int = 0\n" +
+        "    while (i < 5) {\n" +
+        "        sum = sum + i\n" +
+        "        i = i + 1\n" +
+        "    }\n" +
+        "    return sum\n" +
+        "}\n"
+    )
+    t.assertEq(r3.result, "10", "while sum 0..4")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 5: 函数与递归
+// ═════════════════════════════════════════════════════════════
+
+fun testFunctions(): Int {
+    val t = TestRunner()
+    t.begin("pipeline.func")
+
+    // 带参函数调用
+    val r1 = compile(
+        "fun add(a: Int, b: Int): Int {\n" +
+        "    return a + b\n" +
+        "}\n" +
+        "fun main(): Int {\n" +
+        "    return add(2, 3)\n" +
+        "}\n"
+    )
+    t.assertEq(r1.result, "5", "add(2, 3) = 5")
+
+    // 递归阶乘
+    val r2 = compile(
+        "fun fact(n: Int): Int {\n" +
+        "    if (n <= 1) {\n" +
+        "        return 1\n" +
+        "    }\n" +
+        "    return n * fact(n - 1)\n" +
+        "}\n" +
+        "fun main(): Int {\n" +
+        "    return fact(5)\n" +
+        "}\n"
+    )
+    t.assertEq(r2.result, "120", "fact(5) = 120")
+
+    // 互递归（偶/奇）
+    val r3 = compile(
+        "fun isEven(n: Int): Int {\n" +
+        "    if (n == 0) {\n" +
+        "        return 1\n" +
+        "    }\n" +
+        "    return isOdd(n - 1)\n" +
+        "}\n" +
+        "fun isOdd(n: Int): Int {\n" +
+        "    if (n == 0) {\n" +
+        "        return 0\n" +
+        "    }\n" +
+        "    return isEven(n - 1)\n" +
+        "}\n" +
+        "fun main(): Int {\n" +
+        "    return isEven(10)\n" +
+        "}\n"
+    )
+    t.assertEq(r3.result, "1", "isEven(10) = 1")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 6: 编译错误报告
+// ═════════════════════════════════════════════════════════════
+
+fun testErrors(): Int {
+    val t = TestRunner()
+    t.begin("pipeline.errors")
+
+    // 缺少右花括号 → 解析错误
+    val r = compile("fun main(): Int {\n    return 1\n")
+    t.assertTrue(r.parseErrors > 0, "missing brace reported")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 7: AOT 编译链路（HIR → LLVM IR 文本 + llc/clang 命令）
+// ═════════════════════════════════════════════════════════════
+
+fun testAotLink(): Int {
+    val t = TestRunner()
+    t.begin("pipeline.aot")
+
+    val a = compileAotSource(
+        "fun main(): Int {\n" +
+        "    return 2 + 3 * 4\n" +
+        "}\n"
+    )
+    t.assertTrue(a.irLines > 0, "aot ir produced")
+    t.assertTrue(a.hasMain, "aot ir defines main")
+
+    // 注意：VM 缺陷 —— 对「经字段访问得到的值」调用方法会错乱 this，
+    // 故先取局部变量再调用 contains。
+    val ir: String = a.llvmIr
+    val objCmd: String = a.objectCommand
+    val exeCmd: String = a.executableCommand
+    val cSrc: String = a.cSource
+    t.assertTrue(ir.contains("define"), "ir has function definition")
+    t.assertTrue(ir.contains("@main"), "ir has @main")
+    t.assertTrue(ir.contains("target triple"), "ir has target triple")
+    t.assertTrue(objCmd.contains("llc"), "llc object command")
+    t.assertTrue(exeCmd.contains("clang"), "clang link command")
+    t.assertTrue(cSrc != "", "c backend source produced")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 8: JIT 编译链路（叶子函数编译执行 / 非叶子去优化）
+// ═════════════════════════════════════════════════════════════
+
+fun testJitLink(): Int {
+    val t = TestRunner()
+    t.begin("pipeline.jit")
+
+    val jitSrc = "fun square(x: Int): Int {\n" +
+        "    return x * x\n" +
+        "}\n" +
+        "fun main(): Int {\n" +
+        "    return square(5)\n" +
+        "}\n"
+
+    // 叶子函数：可编译并执行
+    val j = jitCompileFunction(jitSrc, "square", "5")
+    t.assertTrue(j.compiled, "leaf function compiled")
+    t.assertFalse(j.deopt, "leaf function not deopted")
+    t.assertEq(j.result, "25", "jit square(5) = 25")
+
+    // 非叶子函数（含 CALL）：去优化回退解释器
+    val j2 = jitCompileFunction(jitSrc, "main", "")
+    t.assertFalse(j2.compiled, "non-leaf not compiled")
+    t.assertTrue(j2.deopt, "non-leaf deopted to interpreter")
+
+    // MOD 现已包含在统一字节码中 → 可编译并执行
+    val j3 = jitCompileFunction(
+        "fun rem(a: Int, b: Int): Int {\n    return a % b\n}\n" +
+        "fun main(): Int {\n    return rem(7, 3)\n}\n",
+        "rem",
+        "7,3"
+    )
+    t.assertTrue(j3.compiled, "mod compiled")
+    t.assertEq(j3.result, "1", "jit rem(7,3) = 1")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 9: AOT 原生可执行文件产出（IR → llc → clang → exe → 运行）
+// ═════════════════════════════════════════════════════════════
+
+fun testAotExe(): Int {
+    val t = TestRunner()
+    t.begin("pipeline.aotExe")
+
+    val r = aotBuildExe(
+        "fun main(): Int {\n" +
+        "    return 6 * 7\n" +
+        "}\n",
+        "phase9_aot",
+        "build/phase9-aot",
+        llvmHomeDefault()
+    )
+
+    t.assertTrue(r.llcExit == 0, "llc produced object")
+    t.assertTrue(r.clangExit == 0, "clang linked exe")
+    t.assertTrue(r.ok, "native exe produced")
+
+    var code: Int = -999
+    if (r.ok) {
+        code = runBuiltExe(r.exePath)
+    }
+    t.assertEq(code, 42, "exe exit code = 42")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 主函数
+// ═════════════════════════════════════════════════════════════
+
+fun main() {
+    println("=== Phase 9 Compiler Pipeline Tests ===")
+    println()
+
+    val f1 = testFrontEnd()
+    val f2 = testArithmetic()
+    val f3 = testVariables()
+    val f4 = testControlFlow()
+    val f5 = testFunctions()
+    val f6 = testErrors()
+    val f7 = testAotLink()
+    val f8 = testJitLink()
+    val f9 = testAotExe()
+
+    val totalFailures: Int = f1 + f2 + f3 + f4 + f5 + f6 + f7 + f8 + f9
+
+    println()
+    println("=== Summary ===")
+    println("Total failures: " + toStr(totalFailures))
+
+    if (totalFailures == 0) {
+        println("RESULT: PASS")
+    } else {
+        println("RESULT: FAIL (" + toStr(totalFailures) + ")")
+    }
+}
