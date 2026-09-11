@@ -46,6 +46,16 @@ pub enum MirInstr {
     GetIndex { dst: Reg, obj: Reg, idx: Reg },
     /// 数组元素写入：`obj[idx] = src`
     SetIndex { obj: Reg, idx: Reg, src: Reg },
+    /// 新建**堆列表**：`dst = []`（容量取常量池 `ci` 处的 Int）
+    ///
+    /// 与 native 产出的 `Value::List`（内联、值语义、每次修改整表拷贝）不同，
+    /// 堆列表（`HeapData::List`）支持 `ListPush` 原地追加，摊还 O(1)。
+    /// 这是 Aura 侧实现「可变列表 / 摊还 O(1) 追加」的唯一可行表示。
+    ListNew { dst: Reg, ci: usize },
+    /// 堆列表尾部追加：`obj.push(src)`（原地，摊还 O(1)，无返回值）
+    ListPush { obj: Reg, src: Reg },
+    /// 列表长度：`dst = obj.size`（同时兼容堆列表与内联列表）
+    ListLen { dst: Reg, obj: Reg },
     /// 保留引用计数 +1（P7.2 ARC 自动插入）
     Retain { src: Reg },
     /// 释放引用计数 -1（P7.2 ARC 自动插入）
@@ -912,6 +922,40 @@ impl MirBuilder {
                         });
                         return dst;
                     }
+                }
+                // ── 堆列表内建（Plan A′：把 `mutableListOf` / `.add` / `.size` 降为
+                //    堆列表指令，避免 native 值语义列表每次修改整表拷贝）──
+                if callee == "__list_new" {
+                    // 新建堆列表，容量取元素个数；元素逐个原地追加
+                    let dst = self.alloc_reg();
+                    let ci = ctx.const_idx(&Literal::Int(args.len() as i64));
+                    self.emit(MirInstr::ListNew { dst, ci });
+                    for a in args {
+                        let v = self.lower_expr(a, ctx);
+                        self.emit(MirInstr::ListPush {
+                            obj: dst,
+                            src: v,
+                        });
+                    }
+                    return dst;
+                }
+                if callee == "__list_push" && args.len() == 2 {
+                    let obj = self.lower_expr(&args[0], ctx);
+                    let v = self.lower_expr(&args[1], ctx);
+                    self.emit(MirInstr::ListPush {
+                        obj,
+                        src: v,
+                    });
+                    let dst = self.alloc_reg();
+                    let ci = ctx.null_idx();
+                    self.emit(MirInstr::LoadConst { dst, ci });
+                    return dst;
+                }
+                if callee == "__list_len" && args.len() == 1 {
+                    let obj = self.lower_expr(&args[0], ctx);
+                    let dst = self.alloc_reg();
+                    self.emit(MirInstr::ListLen { dst, obj });
+                    return dst;
                 }
                 let argv: Vec<Reg> = args.iter().map(|a| self.lower_expr(a, ctx)).collect();
                 let dst = self.alloc_reg();

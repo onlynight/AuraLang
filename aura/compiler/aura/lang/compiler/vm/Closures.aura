@@ -102,7 +102,7 @@ class ClosureManager {
                 val line: String = this.sliceStr(lines, lineStart, pos - lineStart)
                 val lineId: Int = cmToInt(this.fieldAt(line, 0, "|", "|", 0))
                 if (!found && lineId == upvalueId) {
-                    result = result + toStr(upvalueId) + "|" + varName + "|" + source + "|" + value + "\n"
+                    result = result + toStr(upvalueId) + "|" + this.upvalueName(upvalueId) + "|" + this.upvalueSource(upvalueId) + "|" + value + "\n"
                     found = true
                 } else {
                     result = result + line + "\n"
@@ -116,7 +116,7 @@ class ClosureManager {
             val line: String = this.sliceStr(lines, lineStart, len - lineStart)
             val lineId: Int = cmToInt(this.fieldAt(line, 0, "|", "|", 0))
             if (!found && lineId == upvalueId) {
-                result = result + toStr(upvalueId) + "|" + varName + "|" + source + "|" + value + "\n"
+                result = result + toStr(upvalueId) + "|" + this.upvalueName(upvalueId) + "|" + this.upvalueSource(upvalueId) + "|" + value + "\n"
             } else {
                 result = result + line + "\n"
             }

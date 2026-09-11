@@ -268,6 +268,41 @@ HIR 采用与 AST 一致的「扁平 arena」表示（`kinds/texts/tys/spans/kid
 > **回退策略**：任何 Phase 6 失败只需删除 `aura/lang/compiler/aot/`，Rust 编译器
 > 的 AOT 后端（`compiler/src/codegen/aot/`）不受影响，始终可用。
 
+## Phase 6.5 交付物（AOT 后端适配与修复）🚧 进行中
+
+对应迁移计划 §4.9：收敛 Aura 侧 AOT 后端（`Emit.aura`）的**表示一致性**与
+**运行库契约**，让「HIR → LLVM IR 文本 → 直连 `llc` → 直连 `clang` → 原生 exe」
+在不经过 Rust AOT 后端的前提下可正确产出并运行机器码。
+
+### 已完成
+
+| # | 任务 | 落地 | 状态 |
+|---|------|------|------|
+| 6.5.1 | 结构体实例统一「指针」表示 + 字段布局 | `Emit.registerStruct`（`%struct.X = type { … }`）+ `emitNewStruct`（alloca + 逐字段初始化）+ `emitStructFieldLoad/Store`（GEP+load/store） | ✅（struct；class 方法仍待 HIR 支持） |
+| 6.5.2 | `ret` 按函数返回类型转换 | `Emit.emitReturn` + `coerceValue`（i32⇄i64 先 sext/trunc） | ✅ |
+| 6.5.3 | 运行库调用点符号层 | `Runtime.preludeTable()`（与 `compiler/src/std/cffi/aura_std_cffi.{c,h}` 同源） | ✅ |
+| 6.5.4 | 运行库补齐（String / 输出 / Math 最小集） | `Runtime.declarationsFrom*` / `callSignature` / `methodCallSymbol` | ✅ |
+| 6.5.5 | 字符串边界统一 | Aura 侧内部 = `i8*`（对齐 C ABI `char*`）：`Hir` 字面量携带 `String` 类型；`Emit` 发射 `@str.N` + `getelementptr`；`.length`→`aura_strlen`；`+`→`aura_string_concat`；`==/!=`→`aura_lang_std_String_equals` | ✅ |
+| 6.5.6 | 整型统一提升 + 浮点比较 | `Emit.commonNumTy` / `coerceValue`；浮点比较走 `fcmp`（`oeq/one/olt/…`） | ✅ |
+| 6.5.7 | std 类型/签名解析 | HIR 字面量与 `val/var` 类型推断；发射器 `stdClassReceiver` 识别 `Math.sin(x)` 等**类静态调用**并解析 `aura_lang_std_<Class>_<method>` 签名与返回类型 | ✅（按需解析；独立签名表可后续补） |
+| 6.5.8 | `llc` 门禁 + 失败保留现场 | `Aot.aotBuildExeFromHir`：stderr 重定向到 `<mod>.llc.log`；失败保留 `.ll`/`.llc.log` 并回读首个错误行 `irError`，不再让 `clang` 掩盖根因 | ✅ |
+| 6.5.9 | 端到端用例 | `tests/phase6_5_aot_tests.aura`（IR 表示 / 调用点符号 / 整型提升 / 控制流 / 字符串 / std 静态调用 / 结构体 / 门禁，共 8 组 44 断言，`RESULT: PASS`） | ✅ |
+
+附带修复（Phase 9 遗留的控制流 IR 缺陷）：`emitIf` / `emitWhile` 未在分支间重置
+终结标志，导致空基本块 `expected instruction opcode`；现按分支分别重置，且两分支
+均终结时发射 `unreachable`，并在终结语句后自动开启死代码块。
+
+### 尚未完成（后续接续点）
+
+| # | 任务 | 现状 | 说明 |
+|---|------|------|------|
+| 6.5.1b | 类方法 / 构造函数方法体 | `HirLowerer.lowerBlock` 丢弃类体内的 `Function` 节点 | 需先让 HIR 保留类方法（可按 `Class.method` 命名下沉为顶层函数），才能分派与自举 |
+| 6.5.7b | 独立 std 函数签名表 | 现为发射器按名/按类解析 | 若需完整重载/参数类型校验，应建集中签名表 |
+| 6.5.10 | Aura 编译器自身 AOT 出 exe | 未打通 | 依赖 6.5.1b / 6.5.7b；当前 Aura 侧发射器覆盖标量 / 字符串 / 结构体 / 控制流 / 函数 |
+
+> **回退策略**：Phase 6.5 未达标时，AOT 视为「实验性后端」，执行路径回退 VM/JIT；
+> 删除 `aura/lang/compiler/aot/` 即完全回退，Rust 编译器不受影响。
+
 ## Phase 7 交付物（JIT / Cranelift 原生码）✅
 
 对应迁移计划 §4.9：补全「VM 解释器 / JIT 即时编译 / AOT 静态编译」三执行路径中的
@@ -557,6 +592,10 @@ aura run tests/phase5_vm_tests.aura
 # 7) Phase 6 验证用例（AOT LLVM 后端：类型映射 / 目标三元组 / IR 发射）
 aura run tests/phase6_aot_tests.aura
 
+# 7.5) Phase 6.5 验证用例（Aura 侧 AOT 端到端：IR → llc → clang → 原生 exe，运行校验）
+#      需要本机安装 LLVM（见根 Cargo.toml 的 [workspace.metadata.aura].llvm-home）
+aura run tests/phase6_5_aot_tests.aura
+
 # 8) Phase 7 验证用例（JIT：状态机 / 7 优化传递 / Cranelift IR / 派发回退 / 段加载）
 aura run tests/phase7_jit_tests.aura
 
@@ -633,11 +672,16 @@ scripts\snapshot.ps1
 >   需先补「std 签名表 + 统一的值/指针表示」，Aura 编译器才可能 AOT 成功。
 >
 > * **两套 AOT 发射器（重要）**：`aura build --aot` 走 **Rust** 后端
->   （`compiler/src/codegen/aot/emit.rs`，本页上述修复所在）；
->   而 `aura/compiler/.../aot/Emit.aura` 是 Phase 6 的 **Aura 侧镜像实现**，
->   能力弱得多（字符串字面量会发射成 `store i32 Hello:World`），
->   `tests/phase9_compiler_tests.aura::testAotExe` 只覆盖 `6*7` 这类无运行库依赖的程序。
->   要产出 `aura-compiler.exe`，短期内应以 Rust 后端为准。
+>   （`compiler/src/codegen/aot/emit.rs`）；
+>   `aura/compiler/.../aot/Emit.aura` 是 **Aura 侧自研发射器**（Phase 6 + Phase 6.5），
+>   自行产出 LLVM IR 并**直连** `llc`/`clang` 生成机器码，不经过 Rust AOT 后端。
+>   经 Phase 6.5 加固后已覆盖：标量（含 i32/i64 提升、浮点 `fcmp`）、字符串
+>   （`i8*` 表示 / 拼接 / 相等 / `.length` / `println`）、结构体（字段布局 /
+>   构造 / 字段读写，实例以指针表示）、std 类静态调用（`Math.sin` …）、
+>   `val/var`、赋值、`if/else`、`while`、函数（含递归 / 用户函数签名与返回类型
+>   对齐）；见 `tests/phase6_5_aot_tests.aura`（端到端编译 → 链接 → 运行校验）。
+>   类方法 / 列表 / 异常仍在推进（见 Phase 6.5「尚未完成」），
+>   因此 `aura-compiler.exe` 的自举目标（6.5.10）依赖后续 6.5.1b / 6.5.7b。
 
 > **门禁判据**：Aura 侧测试以 stdout 末行 `RESULT: PASS` 为准（当前 VM 无法通过
 > `throw` / `exit` 影响进程退出码，CI 用 `grep "RESULT: PASS"` 判定）。

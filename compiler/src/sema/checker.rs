@@ -158,6 +158,28 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
+        // Plan A′：`mutableListOf` / `arrayListOf` 此前没有签名，接收者被推断为
+        // `Ty::Any`，导致 HIR 无法把 `.add` / `.size` 降级为堆列表指令。
+        // 补上与 `listOf` 一致的签名（返回 `List<Any>`），保证类型通道可用。
+        for ctor in [
+            "mutableListOf",
+            "arrayListOf",
+        ] {
+            let _ = symbols.insert_function(
+                ctor,
+                (0..10)
+                    .map(|i| ParamSym {
+                        name: format!("item{}", i),
+                        ty: Ty::Any,
+                        has_default: true,
+                        is_vararg: false,
+                    })
+                    .collect(),
+                Ty::List(Box::new(Ty::Any)),
+                Visibility::Public,
+                builtin_span,
+            );
+        }
         let _ = symbols.insert_function(
             "Box",
             vec![ParamSym {
@@ -3337,6 +3359,20 @@ impl Checker {
             (Ty::String, _) => Ty::Int,
             // P15: 类实例方法（沿继承链查找，支持子类调用父类方法）
             (Ty::Named(class_name), m) => {
+                // Plan A′：内建集合方法。`mutableListOf(...)` 等构造器没有 std 签名表，
+                // sema 会把接收者推断为 `Ty::Named("List")`（而非 `Ty::List(_)`），
+                // 这里先按内建集合处理 `.add/.push/.append`，避免误报 unresolved method。
+                let is_builtin_coll = class_name == "List"
+                    || class_name == "ArrayList"
+                    || class_name == "MutableList"
+                    || class_name == "Array"
+                    || class_name == "Set";
+                if is_builtin_coll && (m == "add" || m == "push" || m == "append") {
+                    for a in args {
+                        self.check_expr(a);
+                    }
+                    return Ty::Unit;
+                }
                 let mut cur = Some(class_name.clone());
                 while let Some(c) = cur {
                     let mname = format!("{}.{}", c, m);

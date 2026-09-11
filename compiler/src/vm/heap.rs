@@ -296,21 +296,31 @@ impl Heap {
         }
     }
 
-    /// 读取数组元素
+    /// 读取数组 / **堆列表**元素
     pub fn get_index(&self, handle: usize, index: usize) -> Value {
         match self.slots.get(handle).and_then(|s| s.data.as_ref()) {
             Some(HeapData::Array(elems)) => elems.get(index).cloned().unwrap_or(Value::Null),
+            // 堆列表（`arrayListOf` / `NEW_LIST`）同样支持下标读取
+            Some(HeapData::List(elems)) => elems.get(index).cloned().unwrap_or(Value::Null),
             _ => Value::Null,
         }
     }
 
-    /// 写入数组元素
+    /// 写入数组 / **堆列表**元素
     pub fn set_index(&mut self, handle: usize, index: usize, value: Value) {
         if let Some(slot) = self.slots.get_mut(handle) {
-            if let Some(HeapData::Array(elems)) = &mut slot.data {
-                if index < elems.len() {
-                    elems[index] = value;
+            match &mut slot.data {
+                Some(HeapData::Array(elems)) => {
+                    if index < elems.len() {
+                        elems[index] = value;
+                    }
                 }
+                Some(HeapData::List(elems)) => {
+                    if index < elems.len() {
+                        elems[index] = value;
+                    }
+                }
+                _ => {}
             }
         }
     }

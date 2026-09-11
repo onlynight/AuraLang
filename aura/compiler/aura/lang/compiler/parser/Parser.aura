@@ -43,14 +43,15 @@ class Parser {
     /// 诊断信息。
     var errors: CompileErrors = CompileErrors()
 
-    /// token 种类序列（每行一项）。
-    var kinds: String = ""
-
-    /// token 字面量序列（每行一项，换行已转义）。
-    var lits: String = ""
-
-    /// token span 序列（每行：`start end sl sc el ec`，空格分隔）。
-    var spans: String = ""
+    /// token 种类索引（由词法器的种类序列一次性 `split` 得到，O(1) 访问）。
+    ///
+    /// 原先以「每行一项的 String」存储，每次 `prsKind/prsLit/prsCurSpan`
+    /// 都要用 `fieldAt` 从字符串头部线性扫描，解析整体因此退化为超线性。
+    /// 现改为按下标 O(1) 访问。
+    ///
+    /// 字面量与 span 不再另存，统一走词法器的 `litAt` / `spanFieldAt`
+    /// （词法器内部为堆列表，O(1) 访问）。
+    var kinds: List<String> = listOf()
 
     /// 构造：词法分析并缓存全部 token。
     init(source: String) {
@@ -60,42 +61,26 @@ class Parser {
         this.pos = 0
         this.ast = Ast()
         this.errors = CompileErrors()
-        this.kinds = ""
-        this.lits = ""
-        this.spans = ""
-        var i: Int = 0
-        while (i < this.n) {
-            val t = this.lx.tokenAt(i)
-            this.kinds = this.kinds + t.kind + "\n"
-            val tl: String = t.literal
-            this.lits = this.lits + tl.replaceAll("\n", "\\n") + "\n"
-            this.spans = this.spans
-                + toStr(t.start) + " " + toStr(t.end) + " "
-                + toStr(t.startLine) + " " + toStr(t.startCol) + " "
-                + toStr(t.endLine) + " " + toStr(t.endCol) + "\n"
-            i = i + 1
-        }
+        // 直接复用词法器的种类列表（堆列表，O(1) 下标），不再切分整串。
+        this.kinds = this.lx.kindList
     }
 
     // ── token 访问 ──
 
-    /// 取第 index 行的文本（内部辅助）。本编译器不支持 list[i]，用 fieldAt 字符扫描。
-    fun prsLineAt(text: String, index: Int): String {
-        return fieldAt(text, index, "\n")
-    }
-
-    /// 第 i 个 token 的种类。
+    /// 第 i 个 token 的种类（越界视为 `EOF`）。
     fun prsKind(i: Int): String {
         if (i >= this.n) {
             return "EOF"
         }
-        return this.prsLineAt(this.kinds, i)
+        if (i < 0 || i >= this.kinds.size) {
+            return ""
+        }
+        return this.kinds[i]
     }
 
-    /// 第 i 个 token 的字面量。
+    /// 第 i 个 token 的字面量（换行已还原）。
     fun prsLit(i: Int): String {
-        val raw: String = this.prsLineAt(this.lits, i)
-        return raw.replaceAll("\\n", "\n")
+        return this.lx.litAt(i)
     }
 
     /// 当前 token 种类。
@@ -114,11 +99,10 @@ class Parser {
         if (p >= this.n) {
             return Span(0, 0, 1, 1, 1, 1)
         }
-        val line: String = fieldAt(this.spans, p, "\n")
         return Span(
-            toIntOf(fieldAt(line, 0, " ")), toIntOf(fieldAt(line, 1, " ")),
-            toIntOf(fieldAt(line, 2, " ")), toIntOf(fieldAt(line, 3, " ")),
-            toIntOf(fieldAt(line, 4, " ")), toIntOf(fieldAt(line, 5, " "))
+            this.lx.spanFieldAt(p, 0), this.lx.spanFieldAt(p, 1),
+            this.lx.spanFieldAt(p, 2), this.lx.spanFieldAt(p, 3),
+            this.lx.spanFieldAt(p, 4), this.lx.spanFieldAt(p, 5)
         )
     }
 
@@ -154,6 +138,38 @@ class Parser {
         return p
     }
 
+    /// 当前 token 是否可作为「名字」使用。
+    ///
+    /// 词法器把 `value` / `data` / `it` 等**软关键字**也映射为独立 TokenKind
+    /// （与 Rust `KEYWORDS` 一致，不可改词法），但它们完全可以当标识符使用
+    /// （如 `val value: String`）。此处统一放行，避免 `期望 Ident，但遇到 Value`
+    /// 这类误报与随后的反同步。
+    fun prsIsNameToken(): Boolean {
+        val k = this.prsCurKind()
+        if (k == "Ident") {
+            return true
+        }
+        return k == "Value" || k == "Data" || k == "Lazy" || k == "Lateinit"
+            || k == "It" || k == "By" || k == "To" || k == "Box" || k == "Weak"
+            || k == "Select" || k == "Async" || k == "Await" || k == "Comptime"
+            || k == "Defer" || k == "Inline" || k == "Const" || k == "Extern"
+    }
+
+    /// 期望一个名字（标识符或软关键字）；不匹配则记录诊断（不消费）。
+    fun prsExpectName(): Boolean {
+        if (this.prsIsNameToken()) {
+            this.prsAdvance()
+            return true
+        }
+        this.errors.pushAt(
+            severityError(),
+            "期望 Ident，但遇到 " + this.prsCurKind(),
+            this.prsCurSpan().start,
+            this.prsCurSpan().end
+        )
+        return false
+    }
+
     /// 期望当前为 k；不匹配则记录诊断（不消费，交由上层恢复）。
     fun prsExpect(k: String): Boolean {
         if (this.prsCheck(k)) {
@@ -175,10 +191,23 @@ class Parser {
     fun parseProgram(): Int {
         var kids = noKids()
         while (!this.prsAtEnd()) {
-            val d = this.parseTopLevel()
-            kids = kidsAdd(kids, d)
+            this.prsSkipDocs()
+            if (!this.prsAtEnd()) {
+                val d = this.parseTopLevel()
+                kids = kidsAdd(kids, d)
+            }
         }
         return this.ast.add("Program", "", "", this.prsCurSpan(), kids)
+    }
+
+    /// 跳过文档注释 token（`///` / `/**...*/`）。
+    ///
+    /// 词法器会为文档注释产出 `DocComment` token（不参与语法结构），
+    /// 若不在语句入口统一跳过，会退化为大量 `意外的 token: DocComment`。
+    fun prsSkipDocs() {
+        while (this.prsCheck("DocComment")) {
+            this.prsAdvance()
+        }
     }
 
     /// 解析一个顶层声明或语句。
@@ -265,14 +294,14 @@ class Parser {
     fun parseFunction(): Int {
         this.prsAdvance() // Fun
         val name: String = this.prsCurLit()
-        this.prsExpect("Ident")
+        this.prsExpectName()
 
         this.prsExpect("LParen")
         var params = noKids()
         if (!this.prsCheck("RParen")) {
             while (true) {
                 val pname: String = this.prsCurLit()
-                this.prsExpect("Ident")
+                this.prsExpectName()
                 var pty: String = ""
                 if (this.prsMatch("Colon")) {
                     pty = this.parseTypeName()
@@ -314,7 +343,7 @@ class Parser {
         val k = this.prsCurKind() // Val / Var
         this.prsAdvance()
         val name: String = this.prsCurLit()
-        this.prsExpect("Ident")
+        this.prsExpectName()
         var ty: String = ""
         if (this.prsMatch("Colon")) {
             ty = this.parseTypeName()
@@ -332,7 +361,7 @@ class Parser {
     fun parseTypeDecl(kindName: String): Int {
         this.prsAdvance()
         val name: String = this.prsCurLit()
-        this.prsExpect("Ident")
+        this.prsExpectName()
         // 泛型参数 <T> 可选
         if (this.prsCheck("Lt")) {
             while (!this.prsCheck("Gt") && !this.prsAtEnd()) {
@@ -357,7 +386,7 @@ class Parser {
     fun parseTypealias(): Int {
         this.prsAdvance() // Typealias
         val name: String = this.prsCurLit()
-        this.prsExpect("Ident")
+        this.prsExpectName()
         var aliased: String = ""
         if (this.prsMatch("Assign")) {
             aliased = this.parseTypeName()
@@ -368,7 +397,7 @@ class Parser {
     /// 解析类型名（含可选泛型参数 `<...>`）。
     fun parseTypeName(): String {
         var name: String = this.prsCurLit()
-        this.prsExpect("Ident")
+        this.prsExpectName()
         if (this.prsCheck("Lt")) {
             name = name + "<"
             this.prsAdvance()
@@ -394,6 +423,26 @@ class Parser {
         val k = this.prsCurKind()
         if (k == "Val" || k == "Var") {
             return this.parseDecl(false)
+        }
+        // 声明类语句（类体成员 / 嵌套声明）：此前这些 token 落到表达式分支，
+        // 产生「意外的 token: Fun」并使整个类体反同步。
+        if (k == "Fun") {
+            return this.parseFunction()
+        }
+        if (k == "Class" || k == "Struct" || k == "Object" || k == "Enum"
+            || k == "Interface") {
+            return this.parseTypeDecl(k)
+        }
+        if (k == "Typealias") {
+            return this.parseTypealias()
+        }
+        if (k == "Import") {
+            return this.parseImport()
+        }
+        // 保险：文档注释（正常由 parseBlock / parseProgram 跳过）
+        if (k == "DocComment") {
+            this.prsAdvance()
+            return this.ast.leaf("Empty", "", this.prsCurSpan())
         }
         if (k == "Return") {
             return this.parseReturn()
@@ -436,7 +485,11 @@ class Parser {
         this.prsExpect("LBrace")
         var kids = noKids()
         while (!this.prsCheck("RBrace") && !this.prsAtEnd()) {
-            kids = kidsAdd(kids, this.parseStatement())
+            // 跳过文档注释后再判断是否已到块尾，避免把 `}` 当作语句吃掉
+            this.prsSkipDocs()
+            if (!this.prsCheck("RBrace") && !this.prsAtEnd()) {
+                kids = kidsAdd(kids, this.parseStatement())
+            }
         }
         this.prsExpect("RBrace")
         return this.ast.add("Block", "", "", this.prsCurSpan(), kids)
@@ -612,7 +665,7 @@ class Parser {
             } else if (k == "Dot") {
                 this.prsAdvance()
                 val member: String = this.prsCurLit()
-                this.prsExpect("Ident")
+                this.prsExpectName()
                 node = this.ast.add("Member", member, "", this.prsCurSpan(), kidsAdd(noKids(), node))
             } else if (k == "LBracket") {
                 this.prsAdvance()
@@ -653,7 +706,8 @@ class Parser {
         if (k == "Null") {
             return this.leafLit("NullLiteral")
         }
-        if (k == "Ident") {
+        // 标识符：软关键字（`value` / `data` / …）同样按标识符处理
+        if (this.prsIsNameToken()) {
             return this.leafLit("Ident")
         }
         if (k == "This") {

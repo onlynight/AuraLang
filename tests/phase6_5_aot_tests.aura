@@ -1,0 +1,335 @@
+// ═════════════════════════════════════════════════════════════
+// Phase 6.5 验证用例：AOT 后端适配与修复（AOT Hardening）
+//
+// 目标（迁移计划 §4.9）：让 Aura 侧 AOT 发射器（Emit.aura）产出**可被
+// LLVM 接受**并**可运行**的机器码，全程不经过 Rust AOT 后端：
+//
+//   HIR → Emit.aura(LLVM IR 文本) → llc（直连）→ clang（直连）→ 原生 exe
+//
+// 覆盖：
+//   1. IR 表示（6.5.5：字符串 = i8*；字符串常量 / getelementptr / 拼接）
+//   2. 运行库调用点符号层（6.5.3 / 6.5.4：String / Math / 输出）
+//   3. 整型提升（6.5.6：i32 / i64 混用）
+//   4. ret 按返回类型转换（6.5.2：i32 → i64）
+//   5. 控制流端到端（while / if）
+//   6. llc 门禁与现场保留（6.5.8：llcLog / irError）
+//
+// 运行：aura run tests/phase6_5_aot_tests.aura
+//   全通过时输出 "RESULT: PASS"
+//   注意：需要本机安装 LLVM（路径见根 Cargo.toml 的 [workspace.metadata.aura].llvm-home）
+// ═════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import aura.lang.std.FileSystem
+import aura.lang.std.Process
+
+import "../aura/compiler/aura/lang/compiler/test/TestRunner.aura"
+
+// ── 前端 ──
+import "../aura/compiler/aura/lang/compiler/lexer/Span.aura"
+import "../aura/compiler/aura/lang/compiler/lexer/Token.aura"
+import "../aura/compiler/aura/lang/compiler/lexer/Lexer.aura"
+import "../aura/compiler/aura/lang/compiler/ast/Ast.aura"
+import "../aura/compiler/aura/lang/compiler/errors/CompileError.aura"
+import "../aura/compiler/aura/lang/compiler/parser/Parser.aura"
+
+// ── 中端 ──
+import "../aura/compiler/aura/lang/compiler/sema/Type.aura"
+import "../aura/compiler/aura/lang/compiler/sema/TypeInfo.aura"
+import "../aura/compiler/aura/lang/compiler/sema/SymbolTable.aura"
+import "../aura/compiler/aura/lang/compiler/sema/TypeChecker.aura"
+import "../aura/compiler/aura/lang/compiler/hir/Hir.aura"
+import "../aura/compiler/aura/lang/compiler/hir/Desugar.aura"
+import "../aura/compiler/aura/lang/compiler/hir/Mono.aura"
+import "../aura/compiler/aura/lang/compiler/hir/Inline.aura"
+import "../aura/compiler/aura/lang/compiler/hir/Fold.aura"
+
+// ── AOT 后端 ──
+import "../aura/compiler/aura/lang/compiler/aot/TypeMapper.aura"
+import "../aura/compiler/aura/lang/compiler/aot/AotUtil.aura"
+import "../aura/compiler/aura/lang/compiler/aot/Runtime.aura"
+import "../aura/compiler/aura/lang/compiler/aot/Ffi.aura"
+import "../aura/compiler/aura/lang/compiler/aot/Target.aura"
+import "../aura/compiler/aura/lang/compiler/aot/Optimize.aura"
+import "../aura/compiler/aura/lang/compiler/aot/Emit.aura"
+import "../aura/compiler/aura/lang/compiler/aot/Linker.aura"
+import "../aura/compiler/aura/lang/compiler/aot/CBackend.aura"
+import "../aura/compiler/aura/lang/compiler/aot/Dwarf.aura"
+import "../aura/compiler/aura/lang/compiler/aot/Aot.aura"
+
+// ═════════════════════════════════════════════════════════════
+// 夹具
+// ═════════════════════════════════════════════════════════════
+
+/// 源码 → HIR（Aura 侧 AOT 前半段）。
+fun p65SourceToHir(source: String): Hir {
+    val p = Parser(source)
+    p.parseProgram()
+    val hl = HirLowerer()
+    hl.lower(p.ast)
+    return hl.hir
+}
+
+/// 源码 → LLVM IR 文本（Aura 侧发射器）。
+fun p65EmitIr(source: String): String {
+    return emitLlvmIr(p65SourceToHir(source), "p65", "x86_64-pc-windows-msvc")
+}
+
+/// 源码 → 原生 exe（Aura 发射 + 直连 llc/clang），返回编译结果。
+fun p65Build(name: String, source: String): AotExeResult {
+    return aotBuildExeFromHir(p65SourceToHir(source), name, "build/aot-p65", llvmHomeDefault())
+}
+
+/// 源码 → 原生 exe 并运行，返回退出码（编译失败返回 -1）。
+fun p65BuildRun(name: String, source: String): Int {
+    val r: AotExeResult = p65Build(name, source)
+    if (!r.ok) {
+        return -1
+    }
+    return runBuiltExe(r.exePath)
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 1：IR 表示（6.5.5 字符串 = i8*）
+// ═════════════════════════════════════════════════════════════
+
+fun testIrRepresentation(): Int {
+    val t = TestRunner()
+    t.begin("p6.5.ir")
+
+    val src = "fun main(): Int {\n" +
+        "    val s = \"Hello\"\n" +
+        "    val t2 = s + \"World\"\n" +
+        "    if (s == \"Hello\") { return t2.length }\n" +
+        "    return 0\n" +
+        "}\n"
+    val ir: String = p65EmitIr(src)
+
+    t.assertTrue(ir.contains("@str.0 = private unnamed_addr constant [6 x i8]"), "string global")
+    t.assertTrue(ir.contains("getelementptr inbounds"), "string literal → i8* gep")
+    t.assertTrue(ir.contains("store i8* %var."), "string stored as i8*")
+    t.assertTrue(ir.contains("@aura_string_concat(i8*"), "string concat call")
+    t.assertTrue(ir.contains("@aura_lang_std_String_equals(i8*"), "string equality call")
+    t.assertTrue(ir.contains("@aura_strlen(i8*"), "string length call")
+    t.assertFalse(ir.contains("store i32 Hello"), "no bare identifier stored")
+    t.assertFalse(ir.contains("{ i8*, i64 }* "), "no struct-string locals")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 2：运行库调用点符号层（6.5.3 / 6.5.4）
+// ═════════════════════════════════════════════════════════════
+
+fun testCallSiteSymbols(): Int {
+    val t = TestRunner()
+    t.begin("p6.5.symbols")
+
+    val decls: String = runtimeDeclarations()
+    t.assertTrue(decls.contains("declare void @aura_println(i8*)"), "println symbol")
+    t.assertTrue(decls.contains("declare i8* @aura_to_str(i64)"), "to_str symbol")
+    t.assertTrue(decls.contains("declare i64 @aura_strlen(i8*)"), "strlen symbol")
+    t.assertTrue(decls.contains("declare i64 @aura_lang_std_String_length(i8*)"), "String.length symbol")
+    t.assertTrue(decls.contains("declare i32 @aura_lang_std_String_equals(i8*, i8*)"), "String.equals symbol")
+
+    // runtime 表计数不受 prelude 影响（Phase 6 契约保持）
+    t.assertEq(runtimeFunctionCount(), 10, "runtime fn count unchanged")
+
+    val sig: String = callSignature("aura_lang_std_String_length")
+    t.assertEq(sig, "i64|i8*", "call signature lookup")
+    t.assertEq(callSignature("aura_println"), "void|i8*", "prelude signature")
+    t.assertEq(methodCallSymbol("length"), "aura_lang_std_String_length", "method symbol map")
+    t.assertEq(methodCallSymbol("nope"), "", "unknown method")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 3：整型提升（6.5.6）与 ret 转换（6.5.2）
+// ═════════════════════════════════════════════════════════════
+
+fun testIntPromotionAndRet(): Int {
+    val t = TestRunner()
+    t.begin("p6.5.int")
+
+    val src = "fun seven(): Long {\n" +
+        "    return 7\n" +
+        "}\n" +
+        "fun mixed(): Long {\n" +
+        "    val a: Long = 10\n" +
+        "    val b: Int = 3\n" +
+        "    return a + b\n" +
+        "}\n" +
+        "fun main(): Int {\n" +
+        "    if (mixed() != 13) { return 1 }\n" +
+        "    if (seven() != 7) { return 2 }\n" +
+        "    return 0\n" +
+        "}\n"
+    val ir: String = p65EmitIr(src)
+    t.assertTrue(ir.contains("sext i32"), "i32 → i64 sext")
+    t.assertTrue(ir.contains("add i64"), "promoted add i64")
+    t.assertFalse(ir.contains("add i32"), "no 32-bit add after promotion")
+
+    val code: Int = p65BuildRun("p65_int", src)
+    t.assertEq(code, 0, "mixed-width program runs")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 4：控制流端到端（while / if）
+// ═════════════════════════════════════════════════════════════
+
+fun testControlFlowEndToEnd(): Int {
+    val t = TestRunner()
+    t.begin("p6.5.control")
+
+    val src = "fun main(): Int {\n" +
+        "    var i = 0\n" +
+        "    var s = 0\n" +
+        "    while (i < 5) {\n" +
+        "        s = s + i\n" +
+        "        i = i + 1\n" +
+        "    }\n" +
+        "    if (s == 10) { return 0 }\n" +
+        "    return 2\n" +
+        "}\n"
+    t.assertEq(p65BuildRun("p65_control", src), 0, "while/if program runs")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 5：字符串运行库端到端（println / 拼接 / length）
+// ═════════════════════════════════════════════════════════════
+
+fun testStringRuntimeEndToEnd(): Int {
+    val t = TestRunner()
+    t.begin("p6.5.string")
+
+    val printSrc = "fun main(): Int {\n" +
+        "    println(\"phase6.5\")\n" +
+        "    print(\"ok\")\n" +
+        "    return 0\n" +
+        "}\n"
+    t.assertEq(p65BuildRun("p65_print", printSrc), 0, "println/print run")
+
+    val concatSrc = "fun main(): Int {\n" +
+        "    val a = \"foo\"\n" +
+        "    val b = \"bar\"\n" +
+        "    val c = a + b\n" +
+        "    return c.length\n" +
+        "}\n"
+    t.assertEq(p65BuildRun("p65_concat", concatSrc), 6, "concat length == 6")
+
+    val cmpSrc = "fun main(): Int {\n" +
+        "    val s = \"Hello\"\n" +
+        "    if (s == \"Hello\") { return 0 }\n" +
+        "    return 3\n" +
+        "}\n"
+    t.assertEq(p65BuildRun("p65_cmp", cmpSrc), 0, "string equality run")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 6：std 类静态调用与浮点比较（6.5.7 / 6.5.6）
+// ═════════════════════════════════════════════════════════════
+
+fun testStdStaticCalls(): Int {
+    val t = TestRunner()
+    t.begin("p6.5.std")
+
+    val src = "fun main(): Int {\n" +
+        "    if (Math.sin(0.0) == 0.0) { return 0 }\n" +
+        "    return 1\n" +
+        "}\n"
+    val ir: String = p65EmitIr(src)
+    t.assertTrue(ir.contains("@aura_lang_std_Math_sin(double"), "static call symbol")
+    t.assertTrue(ir.contains("fcmp oeq double"), "float compare via fcmp")
+    t.assertEq(p65BuildRun("p65_std", src), 0, "Math.sin runs")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 7：结构体布局与实例指针表示（6.5.1）
+// ═════════════════════════════════════════════════════════════
+
+fun testStructLayout(): Int {
+    val t = TestRunner()
+    t.begin("p6.5.struct")
+
+    val src = "struct Point {\n" +
+        "    var x: Int = 1\n" +
+        "    var y: Int = 2\n" +
+        "}\n" +
+        "fun main(): Int {\n" +
+        "    val p = Point(3, 4)\n" +
+        "    p.x = p.x + 10\n" +
+        "    return p.x + p.y\n" +
+        "}\n"
+    val ir: String = p65EmitIr(src)
+    t.assertTrue(ir.contains("%struct.Point = type { i32, i32 }"), "field layout")
+    t.assertTrue(ir.contains("getelementptr inbounds %struct.Point"), "field gep")
+    t.assertTrue(ir.contains("store %struct.Point* %var."), "instance pointer stored")
+
+    // Point(3,4) → p.x=3+10=13, +p.y=4 → 17
+    t.assertEq(p65BuildRun("p65_struct", src), 17, "struct ctor + field read/write")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 7：llc 门禁与现场保留（6.5.8）
+// ═════════════════════════════════════════════════════════════
+
+fun testVerifyGate(): Int {
+    val t = TestRunner()
+    t.begin("p6.5.verify")
+
+    val r: AotExeResult = p65Build("p65_gate",
+        "fun main(): Int {\n    return 1 + 2 * 3\n}\n")
+    t.assertTrue(r.ok, "valid IR builds")
+    t.assertEq(r.llcExit, 0, "llc accepted IR")
+    t.assertEq(r.irError, "", "no llc error")
+    t.assertTrue(r.llcLog != "", "llc log path recorded")
+    t.assertTrue(FileSystem.exists(r.llPath), ".ll retained")
+    t.assertTrue(FileSystem.exists(r.exePath), "exe produced")
+
+    // 非法 IR（返回类型不符）须被 llc 门禁拦下，并保留现场供定位
+    val bad: AotExeResult = p65Build("p65_bad",
+        "fun main(): Int {\n    return \"oops\"\n}\n")
+    t.assertFalse(bad.ok, "invalid IR rejected")
+    t.assertTrue(bad.irError != "", "llc error captured")
+    t.assertTrue(FileSystem.exists(bad.llPath), ".ll kept on failure")
+    t.assertTrue(FileSystem.exists(bad.llcLog), "llc log kept on failure")
+    t.assertEq(bad.clangExit, 0, "clang skipped after llc failure")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 主入口
+// ═════════════════════════════════════════════════════════════
+
+fun main() {
+    var failures: Int = 0
+    failures = failures + testCallSiteSymbols()
+    failures = failures + testIrRepresentation()
+    failures = failures + testIntPromotionAndRet()
+    failures = failures + testControlFlowEndToEnd()
+    failures = failures + testStringRuntimeEndToEnd()
+    failures = failures + testStdStaticCalls()
+    failures = failures + testStructLayout()
+    failures = failures + testVerifyGate()
+
+    println("")
+    println("=== Summary ===")
+    println("Total failures: " + toStr(failures))
+    if (failures == 0) {
+        println("RESULT: PASS")
+    } else {
+        println("RESULT: FAIL")
+    }
+}

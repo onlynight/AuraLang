@@ -62,20 +62,24 @@ fun kidsAt(list: String, index: Int): Int {
 /// 扁平 arena 形式的抽象语法树。
 class Ast {
 
-    /// 节点种类（每行一个）。
-    var kinds: String = ""
+    /// 节点种类（堆列表，逐项追加摊还 O(1)、下标 O(1)）。
+    ///
+    /// 说明：原先用字符串 `+` 逐项拼接（5 条流 × n 次追加 → O(n²)，且每次
+    /// `kindOf/textOf/...` 都要 `fieldAt` 从头线性扫描）。改用堆列表
+    /// （`arrayListOf`）后，节点插入与访问都变为 O(1)。
+    var kinds: List<String> = arrayListOf<String>()
 
-    /// 节点主文本：标识符名 / 字面量文本 / 运算符（每行一个，换行已转义）。
-    var texts: String = ""
+    /// 节点主文本：标识符名 / 字面量文本 / 运算符（堆列表，换行已转义）。
+    var texts: List<String> = arrayListOf<String>()
 
-    /// 节点类型名（每行一个；无类型信息时为空）。
-    var tys: String = ""
+    /// 节点类型名（堆列表；无类型信息时为空串）。
+    var tys: List<String> = arrayListOf<String>()
 
-    /// Span（每行一个：`start end sl sc el ec`，空格分隔）。
-    var spans: String = ""
+    /// Span（堆列表，每项 `start end sl sc el ec`，空格分隔）。
+    var spans: List<String> = arrayListOf<String>()
 
-    /// 子节点 id 列表（每行一个：逗号分隔，可为空行）。
-    var kids: String = ""
+    /// 子节点 id 列表（堆列表，每项为逗号分隔串，可为空串）。
+    var kids: List<String> = arrayListOf<String>()
 
     /// 节点总数。
     var count: Int = 0
@@ -86,7 +90,7 @@ class Ast {
     fun add(kind: String, text: String, ty: String, sp: Span, children: String): Int {
         val id: Int = this.count
         this.count = id + 1
-        this.kinds = this.kinds + kind + "\n"
+        this.kinds.add(kind)
         // 手动转义换行符（避免 replace 在 VM 内类调用时未链接）
         var escaped: String = ""
         var i: Int = 0
@@ -100,12 +104,14 @@ class Ast {
             }
             i = i + 1
         }
-        this.texts = this.texts + escaped + "\n"
-        this.tys = this.tys + ty + "\n"
-        this.spans = this.spans + toStr(sp.start) + " " + toStr(sp.end) + " "
+        this.texts.add(escaped)
+        this.tys.add(ty)
+        this.spans.add(
+            toStr(sp.start) + " " + toStr(sp.end) + " "
             + toStr(sp.startLine) + " " + toStr(sp.startCol) + " "
-            + toStr(sp.endLine) + " " + toStr(sp.endCol) + "\n"
-        this.kids = this.kids + children + "\n"
+            + toStr(sp.endLine) + " " + toStr(sp.endCol)
+        )
+        this.kids.add(children)
         return id
     }
 
@@ -116,14 +122,14 @@ class Ast {
 
     // ── 访问 ──
 
-    /// 第 id 个节点的种类。
+    /// 第 id 个节点的种类（越界返回空串）。
     fun kindOf(id: Int): String {
-        return this.lineAt(this.kinds, id)
+        return astItemAt(this.kinds, id)
     }
 
-    /// 第 id 个节点的主文本。
+    /// 第 id 个节点的主文本（换行已还原）。
     fun textOf(id: Int): String {
-        val raw: String = this.lineAt(this.texts, id)
+        val raw: String = astItemAt(this.texts, id)
         // 手动反转义换行符（避免 replace 在 VM 内类调用时未链接）
         var result: String = ""
         var i: Int = 0
@@ -142,12 +148,12 @@ class Ast {
 
     /// 第 id 个节点的类型名。
     fun tyOf(id: Int): String {
-        return this.lineAt(this.tys, id)
+        return astItemAt(this.tys, id)
     }
 
     /// 第 id 个节点的位置。
     fun spanOf(id: Int): Span {
-        val line: String = fieldAt(this.spans, id, "\n")
+        val line: String = astItemAt(this.spans, id)
         return Span(
             toIntOf(fieldAt(line, 0, " ")), toIntOf(fieldAt(line, 1, " ")),
             toIntOf(fieldAt(line, 2, " ")), toIntOf(fieldAt(line, 3, " ")),
@@ -157,7 +163,7 @@ class Ast {
 
     /// 第 id 个节点的子节点 id 列表（逗号分隔串）。
     fun kidsOf(id: Int): String {
-        return this.lineAt(this.kids, id)
+        return astItemAt(this.kids, id)
     }
 
     /// 第 id 个节点的第 i 个子节点 id（越界返回 -1）。
@@ -217,6 +223,15 @@ class Ast {
     fun lineAt(text: String, index: Int): String {
         return fieldAt(text, index, "\n")
     }
+}
+
+/// 列表安全取项（越界返回空串）；arena 各流（kinds/texts/tys/spans/kids）
+/// 的下标访问统一走此处，O(1)。
+fun astItemAt(items: List<String>, index: Int): String {
+    if (index < 0 || index >= items.size) {
+        return ""
+    }
+    return items[index]
 }
 
 /// 取第 index 个以 sep 分隔的字段。

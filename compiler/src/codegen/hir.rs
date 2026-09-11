@@ -3687,6 +3687,17 @@ fn desugar_expr(e: &Expr) -> HirExpr {
             }
             let callee_name = match callee.as_ref() {
                 Expr::Ident(n, _) => {
+                    // Plan A′：`arrayListOf(...)` 降级为**堆列表**（`HeapData::List`），
+                    // 支持原地摊还 O(1) 追加；`mutableListOf` / `listOf` 仍走 native
+                    // 内联值语义列表（其读取/写入由 `Collections.getAt/set` 承载，
+                    // 改为堆列表会使这些 native 失效）。
+                    // 需要「真可变列表」时请用 `arrayListOf`。
+                    if n == "arrayListOf" {
+                        return HirExpr::Call {
+                            callee: "__list_new".to_string(),
+                            args: args.iter().map(desugar_expr).collect(),
+                        };
+                    }
                     // 检查导入解析：短名/别名 → 完整原生函数名
                     // import aura.concurrent.* + spawn(42) → aura.lang.std.Coroutine.spawn(42)
                     // import aura.lang.std.Coroutine.spawn as s + s(42) → aura.lang.std.Coroutine.spawn(42)
@@ -3772,6 +3783,27 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                                 }
                                 return HirExpr::Call {
                                     callee,
+                                    args: all_args,
+                                };
+                            }
+                        }
+                    }
+                    // add(v) / push(v) / append(v) → 堆列表原地追加（摊还 O(1)）
+                    if name.as_str() == "add"
+                        || name.as_str() == "push"
+                        || name.as_str() == "append"
+                    {
+                        if let Some(ty) = lookup_expr_type(object) {
+                            if ty.starts_with("List")
+                                || ty.starts_with("Array")
+                                || ty.starts_with("Set")
+                            {
+                                let mut all_args = vec![desugar_expr(object)];
+                                for a in args {
+                                    all_args.push(desugar_expr(a));
+                                }
+                                return HirExpr::Call {
+                                    callee: "__list_push".into(),
                                     args: all_args,
                                 };
                             }
@@ -3996,8 +4028,10 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                 if ty.starts_with("List") || ty.starts_with("Array") {
                     match name.as_str() {
                         "size" | "length" | "count" => {
+                            // Plan A′：降为 LIST_LEN，同时兼容堆列表与内联列表
+                            // （`Collections.count` 只认内联 `Value::List`，堆列表会得 0）
                             return HirExpr::Call {
-                                callee: "aura.lang.std.Collections.count".into(),
+                                callee: "__list_len".into(),
                                 args: vec![desugar_expr(object)],
                             };
                         }
@@ -4125,9 +4159,24 @@ fn desugar_expr(e: &Expr) -> HirExpr {
             ..
         } => desugar_when(subject, arms),
         Expr::Block(_stmts, _) => HirExpr::Block(desugar_block(e)),
-        Expr::Range { .. } => HirExpr::Call {
+        Expr::Range {
+            start,
+            end,
+            inclusive,
+            ..
+        } => HirExpr::Call {
             callee: "__range".into(),
-            args: vec![],
+            // 将范围上下界与 inclusive 标志作为实参传入，供 AOT 运行时构造整数区间列表。
+            // 旧实现丢弃了上下界（args: vec![]），导致 `for i in 1..10` 退化为空区间。
+            args: vec![
+                desugar_expr(&start.clone().unwrap_or_else(|| {
+                    Box::new(Expr::Literal(Literal::Int(0), Span::single(0, 1, 1)))
+                })),
+                desugar_expr(&end.clone().unwrap_or_else(|| {
+                    Box::new(Expr::Literal(Literal::Int(0), Span::single(0, 1, 1)))
+                })),
+                HirExpr::Lit(Literal::Int(if *inclusive { 1i64 } else { 0i64 })),
+            ],
         },
         Expr::Elvis {
             lhs, rhs, ..
@@ -4528,6 +4577,12 @@ pub fn synthesize_main_if_missing(hir: &mut HirProgram) -> bool {
 
 /// 解析内置方法名为完整原生函数名（如 `toString` → `toString` prelu，或 `aura.lang.std.Builtin.xxx`）
 fn resolve_builtin_method(name: &str) -> Option<String> {
+    // Plan A′：`arrayListOf(...)` 必须是**堆列表**才能原地追加（native 产出的
+    // `Value::List` 是值语义、每次修改整表拷贝，无法做到摊还 O(1)）。
+    // 降级为合成 callee，由 MIR 层发射 `NEW_LIST` + `LIST_PUSH`。
+    if name == "arrayListOf" {
+        return Some("__list_new".to_string());
+    }
     // 优先检查 prelu 函数（免import，始终可用）
     if crate::std::decl::is_prelude(name) {
         return Some(name.to_string());

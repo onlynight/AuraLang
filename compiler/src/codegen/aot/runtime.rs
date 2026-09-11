@@ -81,6 +81,71 @@ const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
             ("b", "i8*"),
         ],
     },
+    // `s.charAt(i)`：emit.rs 会直接发起 `call i8* @aura_lang_std_String_charAt(i8*, i64)`，
+    // 但该函数此前未在 runtime 表中登记 → llc 报 `@aura_lang_std_String_charAt` 未定义。
+    // C 侧实现见 aura_std_cffi.c 的 aura_lang_std_String_charAt。
+    RuntimeFn {
+        name: "aura_lang_std_String_charAt",
+        ret: "i8*",
+        params: &[
+            ("s", "i8*"),
+            ("idx", "i64"),
+        ],
+    },
+    // ── AOT 直接调用的 C 运行时辅助函数（实现已存在于 aura_std_cffi.c，此前未登记声明）──
+    RuntimeFn {
+        name: "aura_strlen",
+        ret: "i64",
+        params: &[("s", "i8*")],
+    },
+    RuntimeFn {
+        name: "aura_to_str",
+        ret: "i8*",
+        params: &[("x", "i64")],
+    },
+    RuntimeFn {
+        name: "aura_to_str_float",
+        ret: "i8*",
+        params: &[("x", "double")],
+    },
+    // `list.pop()`：emit_call 会把 `pop(list)` 重写到该函数，返回被弹出的元素。
+    RuntimeFn {
+        name: "aura_lang_std_Collections_listPop",
+        ret: "i8*",
+        params: &[("list", "i8*")],
+    },
+    // Map<String, Any> 下标读写（AOT 下 Map 为不透明指针）
+    RuntimeFn {
+        name: "aura_lang_std_Collections_mutableMapOf",
+        ret: "i8*",
+        params: &[],
+    },
+    RuntimeFn {
+        name: "aura_lang_std_Collections_mapGet",
+        ret: "i8*",
+        params: &[
+            ("map", "i8*"),
+            ("key", "i8*"),
+        ],
+    },
+    RuntimeFn {
+        name: "aura_lang_std_Collections_mapSet",
+        ret: "void",
+        params: &[
+            ("map", "i8*"),
+            ("key", "i8*"),
+            ("value", "i8*"),
+        ],
+    },
+    RuntimeFn {
+        name: "aura_lang_std_Collections_listSet",
+        ret: "void",
+        params: &[
+            ("list", "i8*"),
+            ("idx", "i64"),
+            ("value", "i8*"),
+        ],
+    },
     RuntimeFn {
         name: "aura_string_concat",
         ret: "i8*",
@@ -89,6 +154,46 @@ const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
             ("alen", "i64"),
             ("b", "i8*"),
             ("blen", "i64"),
+        ],
+    },
+    // 集合/列表内建（对应 Aura 自举编译器中大量使用的列表/数组操作）。
+    // AOT 下 List/Array 用不透明指针 `i8*`（底层 AuraList 结构，元素以 i64 句柄存储），
+    // 这些内建由 C 运行时 `aura_std_cffi.c` 中的 aura_lang_std_Collections_* 实现。
+    // 调用点（emit_call）会把 `__list_len`/`__size`/`__get`/`__list_push`/`__list_new`/`__range`
+    // 重写到下面这些函数，从而复用同一套 C 实现。
+    RuntimeFn {
+        name: "aura_lang_std_Collections_emptyList",
+        ret: "i8*",
+        params: &[],
+    },
+    RuntimeFn {
+        name: "aura_lang_std_Collections_count",
+        ret: "i64",
+        params: &[("list", "i8*")],
+    },
+    RuntimeFn {
+        name: "aura_lang_std_Collections_getAt",
+        ret: "i8*",
+        params: &[
+            ("list", "i8*"),
+            ("idx", "i64"),
+        ],
+    },
+    RuntimeFn {
+        name: "aura_lang_std_Collections_listAppend",
+        ret: "i8*",
+        params: &[
+            ("list", "i8*"),
+            ("value", "i8*"),
+        ],
+    },
+    RuntimeFn {
+        name: "aura_lang_std_Collections_range",
+        ret: "i8*",
+        params: &[
+            ("start", "i32"),
+            ("end", "i32"),
+            ("inclusive", "i32"),
         ],
     },
 ];
@@ -105,6 +210,21 @@ pub fn generate_runtime_declarations(_type_mapper: &TypeMapper) -> String {
             fn_decl.ret, fn_decl.name, params_str
         ));
     }
+    s
+}
+
+/// 生成运行时内置函数的定义（与声明不同，这些是 LLVM IR 内联实现，无需链接 C 符号）。
+///
+/// 目前包含：
+/// - `Runtime(msg)`：取出 Aura String 结构体的数据指针作为异常值返回，交给
+///   `__throw(i8*)` 打印。原先未在 runtime 表中声明，导致 AOT 生成的
+///   `call i32 @Runtime(...)` 引用未定义符号。
+pub fn runtime_definitions() -> String {
+    let mut s = String::new();
+    s.push_str("; ---- Aura Runtime Definitions ----\n");
+    s.push_str("define i8* @Runtime(i8* %arg.msg) {\n");
+    s.push_str("  ret i8* %arg.msg\n");
+    s.push_str("}\n");
     s
 }
 
@@ -239,6 +359,18 @@ pub fn cffi_signature(name: &str) -> Option<(&'static str, Vec<&'static str>)> {
         "aura_collections_contains" => ("i1", &[P, P]),
         "aura_collections_set" => (
             P,
+            &[
+                P, "i64", P,
+            ],
+        ),
+        // Map<String, Any>
+        "aura_collections_mutableMapOf" | "aura_collections_emptyMap" => (P, &[]),
+        "aura_collections_mapGet" => (P, &[P, P]),
+        "aura_collections_mapSet" => ("void", &[P, P, P]),
+        "aura_collections_mapSize" => ("i64", &[P]),
+        "aura_collections_mapContains" => ("i1", &[P, P]),
+        "aura_collections_listSet" => (
+            "void",
             &[
                 P, "i64", P,
             ],

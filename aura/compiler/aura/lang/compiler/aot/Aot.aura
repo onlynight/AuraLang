@@ -253,6 +253,12 @@ class AotExeResult {
 
     /// 执行 exe 的退出码（-999 表示未运行）。
     var runExit: Int = -999
+
+    /// llc 日志文件路径（Phase 6.5.8：IR 被拒绝时保留现场）。
+    var llcLog: String = ""
+
+    /// llc 报错首行（IR 非法时非空；便于定位首个非法指令）。
+    var irError: String = ""
 }
 
 /// HIR → IR →（llc）→ .obj →（clang）→ 原生 exe。
@@ -281,12 +287,24 @@ fun aotBuildExeFromHir(hir: Hir, moduleName: String, outDir: String, llvmHome: S
     FileSystem.writeText(llPath, a.llvmIr)
 
     // 2. llc：IR → 目标文件
+    //    Phase 6.5.8：llc 自带模块验证；把 stderr 重定向到日志文件，
+    //    失败时保留 .ll 并回读首个错误行（定位首个非法指令，无需重跑）。
     val llc: String = toolPreferredPath("llc", llvmHome)
     val clang: String = toolPreferredPath("clang", llvmHome)
     val optFlag: String = a.optFlag
+    val logPath: String = outDir + "/" + moduleName + ".llc.log"
+    r.llcLog = logPath
     val llcCmd: String = llc + " -mtriple " + tgt + " " + llPath +
-        " -o " + objPath + " " + optFlag + " -filetype=obj"
+        " -o " + objPath + " " + optFlag + " -filetype=obj 2> " + aotWinPath(logPath)
     r.llcExit = Process.run(llcCmd)
+    if (r.llcExit != 0) {
+        if (FileSystem.exists(logPath)) {
+            val log: String = FileSystem.readText(logPath)
+            r.irError = aotLineAt(log, 0)
+        }
+        // IR 非法：保留 .ll + .llc.log，直接返回，避免下游 clang 掩盖根因
+        return r
+    }
 
     // 3. clang：编译 std C 运行库（提供 aura_println / aura_math_* /
     //    aura_lang_std_String_* 等符号；不链接会出现 undefined symbol）

@@ -272,6 +272,8 @@ double aura_pow_wrapper(double b, double e);
 int64_t toInt(double x);
 double toFloat(int64_t x);
 const char *toString(int64_t x);
+/* `toStr`：与 toString 同语义的实现（AOT 调用点按整数句柄传入） */
+const char *toStr(int64_t x);
 double aura_clock_wrapper(void);
 int64_t aura_strlen_wrapper(const char *s);
 const char *toStringFloat(double x);
@@ -325,6 +327,16 @@ const void *aura_lang_std_Collections_listAppend(const void *list, const void *v
 int64_t aura_lang_std_Collections_indexOf(const void *list, const void *value);
 int aura_lang_std_Collections_contains(const void *list, const void *value);
 const void *aura_lang_std_Collections_set(const void *list, int64_t idx, const void *value);
+
+// aura.lang.std.Collections.* — Map<String, Any>（AOT 下 Map 表示为 i8*）
+const void *aura_lang_std_Collections_mutableMapOf(void);
+const void *aura_lang_std_Collections_emptyMap(void);
+void aura_lang_std_Collections_mapSet(const void *map, const char *key, const void *value);
+const void *aura_lang_std_Collections_mapGet(const void *map, const char *key);
+int64_t aura_lang_std_Collections_mapSize(const void *map);
+int aura_lang_std_Collections_mapContains(const void *map, const char *key);
+/** 列表按下标写入（越界则追加） */
+void aura_lang_std_Collections_listSet(const void *list, int64_t idx, const void *value);
 
 // aura.lang.std.FileSystem.*
 int aura_lang_std_FileSystem_exists(const char *path);

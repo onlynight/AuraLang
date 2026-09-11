@@ -447,6 +447,12 @@ fn instr_size(instr: &crate::codegen::mir::MirInstr) -> usize {
         GetIndex { .. } => 10,
         // SetIndex：LoadVar(src) + LoadVar(obj) + LoadVar(idx) + SetIndex(1) = 10
         SetIndex { .. } => 10,
+        // ListNew：LoadConst(3) + NewList(1) + StoreVar(3) = 7
+        ListNew { .. } => 7,
+        // ListPush：LoadVar(src) + LoadVar(obj) + ListPush(1) = 7
+        ListPush { .. } => 7,
+        // ListLen：LoadVar(obj) + ListLen(1) + StoreVar(3) = 7
+        ListLen { .. } => 7,
         // Retain：LoadVar(src) + Retain(1) = 4
         Retain { .. } => 4,
         // Release：LoadVar(src) + Release(1) = 4
@@ -721,6 +727,23 @@ fn emit_instr(
             OpCode::LoadVar(*obj as u16).write(code);
             OpCode::LoadVar(*idx as u16).write(code);
             OpCode::SetIndex.write(code);
+        }
+        ListNew { dst, ci } => {
+            // 栈布局：容量在顶 → NEW_LIST 弹出并压回列表引用
+            OpCode::LoadConst(*ci as u16).write(code);
+            OpCode::NewList.write(code);
+            OpCode::StoreVar(*dst as u16).write(code);
+        }
+        ListPush { obj, src } => {
+            // 栈布局：元素在下、列表引用在顶（interp 先弹 obj 再弹 val）
+            OpCode::LoadVar(*src as u16).write(code);
+            OpCode::LoadVar(*obj as u16).write(code);
+            OpCode::ListPush.write(code);
+        }
+        ListLen { dst, obj } => {
+            OpCode::LoadVar(*obj as u16).write(code);
+            OpCode::ListLen.write(code);
+            OpCode::StoreVar(*dst as u16).write(code);
         }
         Retain { src } => {
             OpCode::LoadVar(*src as u16).write(code);

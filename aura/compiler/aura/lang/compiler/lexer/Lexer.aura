@@ -111,12 +111,41 @@ class Lexer {
     var col: Int = 1
 
     // ── 输出流 ──
+    //
+    // 说明：原先用**字符串 `+` 逐项拼接**（`kinds` / `detailed`），而本 VM 的
+    // 字符串 `+` 是整串拷贝，整体因此退化为 O(n²)。改用堆列表
+    // （`arrayListOf`，摊还 O(1) 追加）后词法分析为线性——这是 Aura 编译器
+    // 自举（1.5 万行）可行的前提。
 
-    /// token 种类序列：每行一个种类名（含结尾 `EOF`）。
-    var kinds: String = ""
+    /// token 种类列表（含结尾 `EOF`）。
+    var kindList: List<String> = arrayListOf<String>()
 
-    /// 详细序列：每个 token 8 行（kind / literal / start / end / sl / sc / el / ec）。
-    var detailed: String = ""
+    /// token 字面量列表（原样保存；列表化后不再需要转义换行）。
+    var litList: List<String> = arrayListOf<String>()
+
+    // token span：6 条并列 Int 列表。
+    //
+    // 原先是「每 token 拼一个 'start end sl sc el ec' 字符串」，即每 token 一次
+    // 字符串 `+`（分配 + 拷贝）。改成并列 Int 列表后，emit 只做纯整数追加，
+    // 大源码（1.5 万行）解析的常数显著下降。
+
+    /// token 起始偏移。
+    var spanStart: List<Int> = arrayListOf<Int>()
+
+    /// token 结束偏移。
+    var spanEnd: List<Int> = arrayListOf<Int>()
+
+    /// token 起始行。
+    var spanStartLine: List<Int> = arrayListOf<Int>()
+
+    /// token 起始列。
+    var spanStartCol: List<Int> = arrayListOf<Int>()
+
+    /// token 结束行。
+    var spanEndLine: List<Int> = arrayListOf<Int>()
+
+    /// token 结束列。
+    var spanEndCol: List<Int> = arrayListOf<Int>()
 
     // ── 当前 token 的起始位置 ──
 
@@ -135,8 +164,14 @@ class Lexer {
         this.pos = 0
         this.line = 1
         this.col = 1
-        this.kinds = ""
-        this.detailed = ""
+        this.kindList = arrayListOf<String>()
+        this.litList = arrayListOf<String>()
+        this.spanStart = arrayListOf<Int>()
+        this.spanEnd = arrayListOf<Int>()
+        this.spanStartLine = arrayListOf<Int>()
+        this.spanStartCol = arrayListOf<Int>()
+        this.spanEndLine = arrayListOf<Int>()
+        this.spanEndCol = arrayListOf<Int>()
         this.tStart = 0
         this.tStartLine = 1
         this.tStartCol = 1
@@ -177,17 +212,16 @@ class Lexer {
         this.tStartCol = this.col
     }
 
-    /// 记录一个 token 到两条输出流。
+    /// 记录一个 token 到输出流（纯列表追加，无字符串构造，摊还 O(1)）。
     fun emit(kind: String, literal: String) {
-        this.kinds = this.kinds + kind + "\n"
-        this.detailed = this.detailed + kind + "\n"
-            + literal.replaceAll("\n", "\\n") + "\n"
-            + toStr(this.tStart) + "\n"
-            + toStr(this.pos) + "\n"
-            + toStr(this.tStartLine) + "\n"
-            + toStr(this.tStartCol) + "\n"
-            + toStr(this.line) + "\n"
-            + toStr(this.col) + "\n"
+        this.kindList.add(kind)
+        this.litList.add(literal)
+        this.spanStart.add(this.tStart)
+        this.spanEnd.add(this.pos)
+        this.spanStartLine.add(this.tStartLine)
+        this.spanStartCol.add(this.tStartCol)
+        this.spanEndLine.add(this.line)
+        this.spanEndCol.add(this.col)
     }
 
     // ── 空白与注释 ──
@@ -802,32 +836,84 @@ class Lexer {
                 this.emit("Error", ch)
             }
         }
-        return this.kinds
+        // 注意：不再在扫描过程中拼接整串（O(n²)）。面向文本的入口
+        // （`tokenizeKinds`）请调用 `kindsText()`。
+        return ""
     }
 
     // ── 结果读取 ──
 
-    /// token 数量（不含结尾行的空串）。
+    /// token 数量（含结尾 `EOF`）。
     fun tokenCount(): Int {
-        return this.detailed.countChar("\n") / 8
+        return this.kindList.size
     }
 
-    /// 以 8 行为一组还原第 index 个 token（含字面量与 span）。
+    /// 种类序列文本（每行一个，末尾带换行；与旧 `kinds` 字段格式一致）。
+    ///
+    /// 按需拼接整串（O(总量)），仅供 `tokenizeKinds` 等文本入口使用；
+    /// 解析器请直接用 `kindList` 下标访问（O(1)）。
+    fun kindsText(): String {
+        var out: String = ""
+        var i: Int = 0
+        val n: Int = this.kindList.size
+        while (i < n) {
+            out = out + this.kindList[i] + "\n"
+            i = i + 1
+        }
+        return out
+    }
+
+    /// 第 index 个 token 的字面量。
+    fun litAt(index: Int): String {
+        if (index < 0 || index >= this.litList.size) {
+            return ""
+        }
+        return this.litList[index]
+    }
+
+    /// 第 index 个 token 的 span 字段（0..5：start / end / sl / sc / el / ec）。
+    fun spanFieldAt(index: Int, field: Int): Int {
+        if (field == 0) {
+            return lxIntAt(this.spanStart, index)
+        }
+        if (field == 1) {
+            return lxIntAt(this.spanEnd, index)
+        }
+        if (field == 2) {
+            return lxIntAt(this.spanStartLine, index)
+        }
+        if (field == 3) {
+            return lxIntAt(this.spanStartCol, index)
+        }
+        if (field == 4) {
+            return lxIntAt(this.spanEndLine, index)
+        }
+        return lxIntAt(this.spanEndCol, index)
+    }
+
+    /// 还原第 index 个 token（含字面量与 span）。
     fun tokenAt(index: Int): Token {
-        val lines: List<String> = this.detailed.split("\n")
-        val base: Int = index * 8
-        var lit: String = lxLine(lines, base + 1)
-        lit = lit.replaceAll("\\n", "\n")
-        val t = Token(lxLine(lines, base), lit)
+        if (index < 0 || index >= this.kindList.size) {
+            return Token("EOF", "")
+        }
+        val t = Token(this.kindList[index], this.litAt(index))
         return t.withSpan(
-            lxToInt(lxLine(lines, base + 2)),
-            lxToInt(lxLine(lines, base + 3)),
-            lxToInt(lxLine(lines, base + 4)),
-            lxToInt(lxLine(lines, base + 5)),
-            lxToInt(lxLine(lines, base + 6)),
-            lxToInt(lxLine(lines, base + 7))
+            this.spanFieldAt(index, 0),
+            this.spanFieldAt(index, 1),
+            this.spanFieldAt(index, 2),
+            this.spanFieldAt(index, 3),
+            this.spanFieldAt(index, 4),
+            this.spanFieldAt(index, 5)
         )
     }
+}
+
+/// Int 列表安全取项（越界返回 0）。
+fun lxIntAt(items: List<Int>, index: Int): Int {
+    if (index < 0 || index >= items.size) {
+        return 0
+    }
+    return items[index]
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -837,7 +923,8 @@ class Lexer {
 /// 词法分析：返回 token 种类序列（每行一个，含结尾 `EOF`，末尾带换行）。
 fun tokenizeKinds(src: String): String {
     val lx = Lexer(src)
-    return lx.scanAll()
+    lx.scanAll()
+    return lx.kindsText()
 }
 
 /// 词法分析：返回 token 种类列表（含结尾 `"EOF"`）。

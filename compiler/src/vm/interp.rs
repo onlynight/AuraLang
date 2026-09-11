@@ -160,10 +160,45 @@ impl Vm {
             }
             Instr::GetField(field) => {
                 let obj = self.pop(top)?;
-                let v = match obj {
-                    Value::Ref(h) => self.heap.get_field(h, field),
+                let v = match &obj {
+                    // 堆对象：类实例按字段查；**堆列表/堆映射**没有字段，
+                    // 退回内建成员（`size`/`length`/`first`/`last`/`isEmpty`）。
+                    // 背景：`mutableListOf(...)` 现为堆列表（`HeapData::List`），
+                    // 而类型通道不总能把 `xs.size` 降级为 `LIST_LEN`。
+                    Value::Ref(h) => {
+                        let is_size = field == crate::codegen::emit::field_index("size")
+                            || field == crate::codegen::emit::field_index("length");
+                        let is_empty = field == crate::codegen::emit::field_index("isEmpty");
+                        let is_first = field == crate::codegen::emit::field_index("first");
+                        let is_last = field == crate::codegen::emit::field_index("last");
+                        match self.heap.get_data(*h) {
+                            Some(crate::vm::heap::HeapData::List(items)) => {
+                                if is_size {
+                                    Value::Int(items.len() as i64)
+                                } else if is_empty {
+                                    Value::Bool(items.is_empty())
+                                } else if is_first {
+                                    items.first().cloned().unwrap_or(Value::Null)
+                                } else if is_last {
+                                    items.last().cloned().unwrap_or(Value::Null)
+                                } else {
+                                    self.heap.get_field(*h, field)
+                                }
+                            }
+                            Some(crate::vm::heap::HeapData::Map(m)) => {
+                                if is_size {
+                                    Value::Int(m.len() as i64)
+                                } else if is_empty {
+                                    Value::Bool(m.is_empty())
+                                } else {
+                                    self.heap.get_field(*h, field)
+                                }
+                            }
+                            _ => self.heap.get_field(*h, field),
+                        }
+                    }
                     // 集合 / 字符串的内建成员（`xs.size` / `s.length` / `xs.first` ...）
-                    other => builtin_member(other, field),
+                    other => builtin_member(other.clone(), field),
                 };
                 self.frames[top].stack.push(v);
             }
@@ -247,8 +282,11 @@ impl Vm {
             Instr::ListPush => {
                 let obj = self.pop(top)?;
                 let val = self.pop(top)?;
-                if let Value::Ref(h) = obj {
-                    self.heap.list_push(h, val);
+                match obj {
+                    Value::Ref(h) => self.heap.list_push(h, val),
+                    // 内联列表（native 产出，值语义）无法原地追加：
+                    // 此前 `.add` 根本无法编译到此处，故保持「不改变原值」不构成回归。
+                    _ => {}
                 }
                 self.frames[top].stack.push(Value::Null);
             }
@@ -262,8 +300,10 @@ impl Vm {
             }
             Instr::ListLen => {
                 let obj = self.pop(top)?;
+                // 同时兼容堆列表（`Value::Ref`）与内联列表（native 产出，如 `split`）
                 let len = match obj {
                     Value::Ref(h) => self.heap.list_len(h),
+                    Value::List(items) => items.len() as i64,
                     _ => 0,
                 };
                 self.frames[top].stack.push(Value::Int(len));

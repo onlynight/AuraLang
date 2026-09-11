@@ -81,6 +81,14 @@ pub(crate) struct EmitCtx {
     pub current_ret_ty: String,
     /// 类名 → (字段名 → (LLVM 类型字符串, 字段索引))（用于 emit_member_access 推断字段类型和索引）
     pub class_field_types: HashMap<String, HashMap<String, (String, usize)>>,
+    /// 当前正在发射的函数所属的类（方法名形如 `Lexer.peek`）；自由函数为 None。
+    /// 用于把 `this` / `self` 的成员访问解析到**当前类**的字段表，
+    /// 避免落入「按字段名全局扫描」的启发式而选到别的类的同名字段。
+    pub current_class: Option<String>,
+    /// 已知（会在模块中 `= type` 定义）的结构体 / 枚举名。
+    /// 引用到未定义结构体时统一退化为 `i8*`，避免出现 unsized 类型
+    ///（`%struct.ClosureManager` 等只在字段中被引用、从未定义）。
+    pub known_structs: std::collections::HashSet<String>,
     /// 类型别名表：别名 → LLVM 类型字符串（用于 AOT 解析 typealias）
     pub type_aliases: HashMap<String, String>,
     /// P3.2: 枚举变体映射（枚举名 → [(变体名, 变体索引, 关联值数)]）
@@ -139,11 +147,25 @@ impl EmitCtx {
             func_param_types: HashMap::new(),
             current_ret_ty: String::new(),
             class_field_types: HashMap::new(),
+            current_class: None,
+            known_structs: std::collections::HashSet::new(),
             type_aliases: HashMap::new(),
             enum_variants: HashMap::new(),
             enum_max_fields: HashMap::new(),
             lambda_counter: 0,
             lambda_funcs: Vec::new(),
+        }
+    }
+
+    /// 类型映射（带「未定义结构体 → `i8*`」降级）。
+    ///
+    /// 与 `map_type` 的区别：若映射结果是 `%struct.X` 而 `X` 不在
+    /// `known_structs` 中（未被定义），返回 `i8*`，避免生成 unsized 类型引用。
+    pub fn llvm_type_checked(&self, ty: &HirType) -> String {
+        let l = self.llvm_type(ty);
+        match l.strip_prefix("%struct.") {
+            Some(name) if !self.known_structs.contains(name) => "i8*".to_string(),
+            _ => l,
         }
     }
 
@@ -234,12 +256,35 @@ impl EmitCtx {
     pub fn emit_struct_defs(&mut self, program: &HirProgram) {
         let mut s = String::new();
         s.push_str("; ---- Structure Type Definitions ----\n");
+        // 已知（会被定义）的结构体 / 枚举名。字段若引用到**未定义**的结构体
+        // （例如某个类的字段类型来自未被 import 的模块），会生成
+        // `%struct.VmRunner = type { …, %struct.FrameManager, … }` —— 而
+        // `%struct.FrameManager` 从未 `= type`，属 unpaged/unsized 类型，
+        // 导致后续 GEP 报 `base element of getelementptr must be sized`。
+        // 这类字段统一退化为不透明指针 `i8*`。
+        let mut known: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for st in &program.structs {
+            known.insert(st.name.clone());
+        }
+        for e in &program.enums {
+            known.insert(e.name.clone());
+        }
         for st in &program.structs {
             let llvm_name = format!("%struct.{}", sanitizellvm(&st.name));
             if !self.declared_structs.insert(llvm_name.clone()) {
                 continue;
             }
-            let fields: Vec<String> = st.fields.iter().map(|(_, ty)| self.llvm_type(ty)).collect();
+            let fields: Vec<String> = st
+                .fields
+                .iter()
+                .map(|(_, ty)| {
+                    let l = self.llvm_type(ty);
+                    match l.strip_prefix("%struct.") {
+                        Some(name) if !known.contains(name) => "i8*".to_string(),
+                        _ => l,
+                    }
+                })
+                .collect();
             s.push_str(&format!("{} = type {{{}}}\n", llvm_name, fields.join(", ")));
         }
         // P3.2: Enum → tagged union 结构体（tag: i32, 后续字段为关联值）
@@ -347,6 +392,7 @@ impl EmitCtx {
             return;
         }
         self.sections.push(generate_runtime_declarations(&self.type_mapper));
+        self.sections.push(crate::codegen::aot::runtime::runtime_definitions());
     }
 }
 
@@ -427,22 +473,45 @@ pub fn emit_program(
     // 4.8 预注册函数返回类型映射（供 emit_call 推断返回类型）
     for func in &program.functions {
         if let Some(ref ret) = func.ret {
-            ctx.func_ret_types.insert(func.name.clone(), ctx.map_type(ret));
+            ctx.func_ret_types.insert(func.name.clone(), ctx.llvm_type_checked(ret));
         } else {
             ctx.func_ret_types.insert(func.name.clone(), "void".to_string());
         }
         let param_tys: Vec<String> = func
             .params
             .iter()
-            .map(|p| p.ty.as_ref().map(|t| ctx.map_type(t)).unwrap_or_else(|| "i32".to_string()))
+            .map(|p| {
+                p.ty.as_ref().map(|t| ctx.llvm_type_checked(t)).unwrap_or_else(|| "i32".to_string())
+            })
             .collect();
         ctx.func_param_types.insert(func.name.clone(), param_tys);
     }
     // 预注册类字段类型映射（供 emit_member_access 推断字段类型和索引）
+    // 已知结构体/枚举名：字段引用到未定义结构体时按 `i8*` 处理，与 emit_struct_defs 保持一致
+    let mut known_structs: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for st in &program.structs {
+        known_structs.insert(st.name.clone());
+    }
+    for e in &program.enums {
+        known_structs.insert(e.name.clone());
+    }
+    ctx.known_structs = known_structs.clone();
     for struct_def in &program.structs {
+        // 与 `emit_struct_defs` 保持一致：同名结构体的 `%struct.X` 布局以**首个定义**为准，
+        // 因此字段表也必须「首个定义优先」。若此处用 insert 覆盖成最后一个定义，
+        // 字段类型/索引会与实际 `%struct.X` 布局不符 → 非法 IR
+        //（如 `'%var.2' defined with type '{ ptr, i64 }' but expected 'i32'`）。
+        if ctx.class_field_types.contains_key(&struct_def.name) {
+            continue;
+        }
         let mut field_map = HashMap::new();
         for (fi, (field_name, field_ty)) in struct_def.fields.iter().enumerate() {
-            field_map.insert(field_name.clone(), (ctx.map_type(field_ty), fi));
+            let l = ctx.map_type(field_ty);
+            let l = match l.strip_prefix("%struct.") {
+                Some(name) if !known_structs.contains(name) => "i8*".to_string(),
+                _ => l,
+            };
+            field_map.insert(field_name.clone(), (l, fi));
         }
         ctx.class_field_types.insert(struct_def.name.clone(), field_map);
     }
@@ -593,16 +662,20 @@ fn emit_function(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErr
     let _ = blocks.add_block_named(&entry_name);
 
     // 返回类型：无显式返回类型时默认为 void（Unit 函数）
-    let ret_ty = func.ret.as_ref().map(|t| ctx.llvm_type(t)).unwrap_or_else(|| "void".to_string());
+    let ret_ty =
+        func.ret.as_ref().map(|t| ctx.llvm_type_checked(t)).unwrap_or_else(|| "void".to_string());
     let ret_str = if ret_ty.is_empty() { "void".to_string() } else { ret_ty };
     ctx.current_ret_ty = ret_str.clone();
+
+    // 方法名形如 `Lexer.peek` → 当前类 `Lexer`（供 `this`/`self` 成员解析）
+    ctx.current_class = func.name.rsplit_once('.').map(|(cls, _)| cls.to_string());
 
     // 参数类型
     let params: Vec<(String, String)> = func
         .params
         .iter()
         .map(|p| {
-            let ty = ctx.llvm_type(p.ty.as_ref().unwrap_or(&HirType::Named("Int".into())));
+            let ty = ctx.llvm_type_checked(p.ty.as_ref().unwrap_or(&HirType::Named("Int".into())));
             (p.name.clone(), ty)
         })
         .collect();
@@ -623,7 +696,7 @@ fn emit_function(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErr
         "define {}{} @{}({}) {{\n",
         if ctx.blob_mode { "internal " } else { "" },
         ret_str,
-        func.name,
+        sanitizellvm(&func.name),
         params_str
     ));
 
@@ -1020,10 +1093,9 @@ fn emit_member_assign(
     val_ir: String,
     val_ty: String,
 ) -> Result<(), AotError> {
-    // 字段索引 / 类型表：按字段名在所有已注册类中查找
-    let found = ctx.class_field_types.iter().find_map(|(class, fields)| {
-        fields.get(field).map(|(ty, idx)| (class.clone(), ty.clone(), *idx))
-    });
+    // 字段索引 / 类型表：优先按对象静态类型解析（this/self → 当前类；变量 → 其声明类），
+    // 再退回按字段名全局扫描
+    let found = resolve_member_field_owner(ctx, object, None, field);
 
     // 情形 1：对象是「结构体值的局部变量」→ load / insertvalue / store 回写
     if let (HirExpr::Var(var_name), Some((class, field_ty, field_idx))) = (object, &found) {
@@ -1084,17 +1156,52 @@ fn emit_member_assign(
 }
 
 fn emit_index_assign(
-    _ctx: &mut EmitCtx,
+    ctx: &mut EmitCtx,
     blocks: &mut FuncBlocks,
-    _container: &HirExpr,
-    _index: &HirExpr,
+    container: &HirExpr,
+    index: &HirExpr,
     val_ir: String,
     val_ty: String,
 ) -> Result<(), AotError> {
-    // 简化：直接 store 到临时变量
-    let _ = (_ctx, _container, _index);
-    let cur = blocks.last_mut();
-    cur.body.push(format!("; store index {} {}", val_ty, val_ir));
+    let (c_ir, c_ty) = emit_expr_val(ctx, blocks, container)?;
+    let (i_ir, i_ty) = emit_expr_val(ctx, blocks, index)?;
+
+    // 容器不是指针时按不透明指针处理（类型信息缺失导致的退化情形）
+    let base = if is_ptr_ty(&c_ty) {
+        c_ir.clone()
+    } else {
+        let p = ctx.fresh_var();
+        let cur = blocks.last_mut();
+        cur.body.push(format!("{} = inttoptr {} {} to i8*", p, c_ty, c_ir));
+        p
+    };
+    // 值按不透明指针存放（Map 值为 `Any` / 列表元素装箱）
+    let (v, _) = coerce_arg(ctx, blocks, val_ir, &val_ty, "i8*");
+
+    if is_string_type(&i_ty) {
+        // `Map<String, Any>`：就地写入
+        let (key, _) = coerce_arg(ctx, blocks, i_ir, &i_ty, "i8*");
+        let cur = blocks.last_mut();
+        cur.body.push(format!(
+            "call void @aura_lang_std_Collections_mapSet(i8* {}, i8* {}, i8* {})",
+            base, key, v
+        ));
+    } else {
+        // 列表按下标写入
+        let idx = if is_int_ty(&i_ty) && i_ty != "i64" {
+            let cast = ctx.fresh_var();
+            let cur = blocks.last_mut();
+            cur.body.push(format!("{} = sext {} {} to i64", cast, i_ty, i_ir));
+            cast
+        } else {
+            i_ir.clone()
+        };
+        let cur = blocks.last_mut();
+        cur.body.push(format!(
+            "call void @aura_lang_std_Collections_listSet(i8* {}, i64 {}, i8* {})",
+            base, idx, v
+        ));
+    }
     Ok(())
 }
 
@@ -1316,6 +1423,8 @@ fn emit_expr_val(
                 func_param_types: ctx.func_param_types.clone(),
                 current_ret_ty: String::new(),
                 class_field_types: ctx.class_field_types.clone(),
+                current_class: None,
+                known_structs: ctx.known_structs.clone(),
                 type_aliases: ctx.type_aliases.clone(),
                 enum_variants: ctx.enum_variants.clone(),
                 enum_max_fields: ctx.enum_max_fields.clone(),
@@ -1573,8 +1682,13 @@ fn is_string_type(ty: &str) -> bool {
     ty == "i8*" || ty == "{ i8*, i64 }"
 }
 
+/// 是否为数值类型（整数 / 浮点）。
+///
+/// 注意：必须排除指针与结构体 —— `i8*` 也以 `i` 开头，旧实现
+/// `starts_with("i")` 会把它误判为数值，进而生成 `add i8* …, 0`
+/// 这类非法 IR（`integer/byte constant must have integer/byte type`）。
 fn is_numeric_type(ty: &str) -> bool {
-    ty.starts_with("i") || ty.starts_with("f") || ty == "double"
+    is_int_ty(ty) || is_float_ty(ty)
 }
 
 /// 检查是否为可空结构体类型 { T, i1 }
@@ -2121,10 +2235,32 @@ fn emit_call(
         );
     }
 
+    // 命名空间调用（如 `Collections.emptyList()`）在 HIR 中会把命名空间名当作
+    // 首个实参传入（`args = [Var("Collections")]`），而对应 FFI 声明是 0 参。
+    // 不剔除会生成 `call i8* @..._emptyList(i32 Collections)` 这类非法 IR
+    //（llc: `expected value token`）。
+    let mut effective_args: Vec<HirExpr> = args.to_vec();
+    if let Some(cls_seg) = callee.split('.').rev().nth(1) {
+        let is_phantom = match effective_args.first() {
+            Some(HirExpr::Var(v)) => {
+                v == cls_seg && !ctx.var_scope.iter().any(|scope| scope.contains_key(v.as_str()))
+            }
+            _ => false,
+        };
+        if is_phantom {
+            effective_args.remove(0);
+        }
+    }
     let args_ir: Vec<(String, String)> =
-        args.iter().map(|a| emit_expr_val(ctx, blocks, a)).collect::<Result<_, _>>()?;
+        effective_args.iter().map(|a| emit_expr_val(ctx, blocks, a)).collect::<Result<_, _>>()?;
 
-    let ret_ty = ctx.func_ret_types.get(callee).cloned().unwrap_or_else(|| "i32".to_string());
+    let ret_ty = if callee == "Runtime" {
+        // 内置异常构造器：返回 String 结构体的数据指针（i8*），直接交给 `__throw`。
+        "i8*".to_string()
+    } else {
+        ctx.func_ret_types.get(callee).cloned().unwrap_or_else(|| "i32".to_string())
+    };
+
     let param_tys = ctx.func_param_types.get(callee).cloned();
     // 按被调方声明的参数类型转换实参（LLVM IR 对调用/声明类型一致性要求严格）
     let args_ir: Vec<(String, String)> = match &param_tys {
@@ -2140,6 +2276,137 @@ fn emit_call(
         }
         None => args_ir,
     };
+
+    // 内置异常构造器 `Runtime(msg)`：Aura 侧 `throw Runtime("...")` 经 HIR 降级为
+    // `__throw(Runtime("..."))`。`msg` 是 String 结构体 `{ i8*, i64 }`，此处取出其
+    // 数据指针（i8*）传给 `@Runtime(i8*)`（见 runtime.rs 的 runtime_definitions），
+    // 再由 `__throw(i8*)` 打印异常。直接在调用点解构，避免匿名结构体作为函数参数。
+    if callee == "Runtime" && args_ir.len() == 1 {
+        let (arg_ir, arg_ty) = &args_ir[0];
+        let ptr = if arg_ty.starts_with('{') && arg_ty.contains("i8*") && arg_ty.contains("i64") {
+            let p = ctx.fresh_var();
+            let cur = blocks.last_mut();
+            cur.body.push(format!("{} = extractvalue {} {}, 0", p, arg_ty, arg_ir));
+            p
+        } else {
+            arg_ir.clone()
+        };
+        let tmp = ctx.fresh_var();
+        let cur = blocks.last_mut();
+        cur.body.push(format!("{} = call i8* @Runtime(i8* {})", tmp, ptr));
+        return Ok((tmp, "i8*".to_string()));
+    }
+
+    // ── 集合/列表内建：映射到已有的 aura_lang_std_Collections_* 运行时 C 实现 ──
+    // AOT 下 List/Array 表示为不透明指针 `i8*`（底层 AuraList，元素以 i64 句柄存储）。
+    // 自举编译器大量使用 list.size / list.push / for x in list / arrayListOf / 1..10 等，
+    // 这些内建在 VM 中以原生函数提供，但 AOT 后端此前未声明，导致链接到未定义符号。
+    if callee == "__list_len" && args_ir.len() == 1 {
+        let (l, _) = &args_ir[0];
+        let c = ctx.fresh_var();
+        let cur = blocks.last_mut();
+        cur.body.push(format!(
+            "{} = call i64 @aura_lang_std_Collections_count(i8* {})",
+            c, l
+        ));
+        let r = ctx.fresh_var();
+        let cur = blocks.last_mut();
+        cur.body.push(format!("{} = trunc i64 {} to i32", r, c));
+        return Ok((r, "i32".to_string()));
+    }
+    if callee == "__size" && args_ir.len() == 1 {
+        let (it, _) = &args_ir[0];
+        let c = ctx.fresh_var();
+        let cur = blocks.last_mut();
+        cur.body.push(format!(
+            "{} = call i64 @aura_lang_std_Collections_count(i8* {})",
+            c, it
+        ));
+        let r = ctx.fresh_var();
+        let cur = blocks.last_mut();
+        cur.body.push(format!("{} = trunc i64 {} to i32", r, c));
+        return Ok((r, "i32".to_string()));
+    }
+    if callee == "__get" && args_ir.len() == 2 {
+        let (it, _) = &args_ir[0];
+        let (idx, idx_ty) = &args_ir[1];
+        let idx_val = if idx_ty == "i32" {
+            let ext = ctx.fresh_var();
+            let cur = blocks.last_mut();
+            cur.body.push(format!("{} = zext i32 {} to i64", ext, idx));
+            ext
+        } else {
+            idx.clone()
+        };
+        let tmp = ctx.fresh_var();
+        let cur = blocks.last_mut();
+        cur.body.push(format!(
+            "{} = call i8* @aura_lang_std_Collections_getAt(i8* {}, i64 {})",
+            tmp, it, idx_val
+        ));
+        return Ok((tmp, "i8*".to_string()));
+    }
+    if callee == "__list_push" && args_ir.len() == 2 {
+        let (l, _) = &args_ir[0];
+        let (e, e_ty) = &args_ir[1];
+        let e_ptr = coerce_val_to_i8ptr(ctx, blocks, e, e_ty);
+        let tmp = ctx.fresh_var();
+        let cur = blocks.last_mut();
+        cur.body.push(format!(
+            "{} = call i8* @aura_lang_std_Collections_listAppend(i8* {}, i8* {})",
+            tmp, l, e_ptr
+        ));
+        return Ok((tmp, "i8*".to_string()));
+    }
+    if callee == "__list_new" {
+        // arrayListOf(a,b,c) → 空列表 + 逐个 append，避免可变参函数声明问题。
+        // 每个元素按值规整为 i8* 再存入（与 collection 运行时约定一致）。
+        let tmp0 = ctx.fresh_var();
+        let cur = blocks.last_mut();
+        cur.body.push(format!(
+            "{} = call i8* @aura_lang_std_Collections_emptyList()",
+            tmp0
+        ));
+        let mut cur_list = tmp0;
+        for (e, e_ty) in &args_ir {
+            let e_ptr = coerce_val_to_i8ptr(ctx, blocks, e, e_ty);
+            let nxt = ctx.fresh_var();
+            let cur = blocks.last_mut();
+            cur.body.push(format!(
+                "{} = call i8* @aura_lang_std_Collections_listAppend(i8* {}, i8* {})",
+                nxt, cur_list, e_ptr
+            ));
+            cur_list = nxt;
+        }
+        return Ok((cur_list, "i8*".to_string()));
+    }
+    // list.pop()：方法名 `pop` 未被 HIR 降级（不像 push → __list_push），
+    // 原样作为普通函数调用发出即产生 `@pop`。此处在 AOT 侧重写到 listPop，
+    // 保持 HIR/字节码路径不变（字节码下 pop 由 VM 原生提供）。
+    if callee == "pop" && args_ir.len() == 1 {
+        let (l, _) = &args_ir[0];
+        let tmp = ctx.fresh_var();
+        let cur = blocks.last_mut();
+        cur.body.push(format!(
+            "{} = call i8* @aura_lang_std_Collections_listPop(i8* {})",
+            tmp, l
+        ));
+        return Ok((tmp, "i8*".to_string()));
+    }
+    if callee == "__range" {
+        // 参数：start(i32), end(i32), inclusive(i32)，由 HIR 在 desugar_expr 中传入。
+        let s = args_ir.get(0).map(|(v, _)| v.clone()).unwrap_or_else(|| "0".to_string());
+        let e = args_ir.get(1).map(|(v, _)| v.clone()).unwrap_or_else(|| "0".to_string());
+        let inc = args_ir.get(2).map(|(v, _)| v.clone()).unwrap_or_else(|| "0".to_string());
+        let tmp = ctx.fresh_var();
+        let cur = blocks.last_mut();
+        cur.body.push(format!(
+            "{} = call i8* @aura_lang_std_Collections_range(i32 {}, i32 {}, i32 {})",
+            tmp, s, e, inc
+        ));
+        return Ok((tmp, "i8*".to_string()));
+    }
+
     let cur = blocks.last_mut();
     let args_str: Vec<String> = args_ir.iter().map(|(v, t)| format!("{} {}", t, v)).collect();
 
@@ -2261,6 +2528,17 @@ fn coerce_arg(
         body.push(format!("{} = bitcast {}* {} to {}", cast, from, alloca, to));
         return (cast, to.to_string());
     }
+    // 指针 → 结构体值：从指针 load 出结构体（如 `return this`，this 为对象指针，
+    // 而函数签名按值返回 `%struct.X`；不转换会生成非法 IR：
+    // `value doesn't match function result type '%struct.X'`）
+    if is_ptr_ty(from) && to.starts_with("%struct.") {
+        let cast = ctx.fresh_var();
+        let loaded = ctx.fresh_var();
+        let body = &mut blocks.last_mut().body;
+        body.push(format!("{} = bitcast {} {} to {}*", cast, from, val, to));
+        body.push(format!("{} = load {}, {}* {}", loaded, to, to, cast));
+        return (loaded, to.to_string());
+    }
     // i8* → 字符串结构体：用 strlen 补长度
     if from == "i8*" && to.starts_with('{') && to.contains("i8*") && to.contains("i64") {
         let len = ctx.fresh_var();
@@ -2339,7 +2617,63 @@ fn coerce_arg(
         );
         return (t, to.to_string());
     }
+    // 指针 → 整数：AOT 中 `Any`（`i8*`）与标量类型互转（装箱/拆箱）。
+    // 缺少这一条时会把 `i8*` 直接塞进 `i32` 字段 → insertvalue 报
+    // `operand and field disagree in type: 'ptr' instead of 'i32'`。
+    if is_ptr_ty(from) && is_int_ty(to) {
+        let t = ctx.fresh_var();
+        emit(
+            &mut blocks.last_mut().body,
+            format!("{} = ptrtoint {} {} to {}", t, from, val, to),
+        );
+        return (t, to.to_string());
+    }
+    // 整数 → 指针
+    if is_int_ty(from) && is_ptr_ty(to) {
+        let t = ctx.fresh_var();
+        emit(
+            &mut blocks.last_mut().body,
+            format!("{} = inttoptr {} {} to {}", t, from, val, to),
+        );
+        return (t, to.to_string());
+    }
     (val, from.to_string())
+}
+
+/// 将任意 AOT 值规整为 `i8*`，用于按值存入 AuraDynList（AOT 下列表元素统一为 i8* 句柄）。
+/// 与 `emit_coerce_to` 的约定保持一致：
+/// - 字符串结构体 `{ ptr, i64 }` → 取出数据指针（字段 0），读取时再按 strlen 重建；
+/// - 整数 → sext 后 inttoptr 存入；指针 → 原样。
+/// 这样 `arrayListOf`/`list.push` 中的元素（含 String）才能与 `aura_lang_std_Collections_*`
+/// 的 `i8*` 形参匹配，并能在 `getAt` 读回时正确还原。
+fn coerce_val_to_i8ptr(
+    ctx: &mut EmitCtx,
+    blocks: &mut FuncBlocks,
+    val: &str,
+    from: &str,
+) -> String {
+    if from == "i8*" || from == "ptr" {
+        return val.to_string();
+    }
+    if from.starts_with('{') {
+        let t = ctx.fresh_var();
+        blocks.last_mut().body.push(format!("{} = extractvalue {} {}, 0", t, from, val));
+        return t;
+    }
+    if from == "i64" {
+        let t = ctx.fresh_var();
+        blocks.last_mut().body.push(format!("{} = inttoptr i64 {} to i8*", t, val));
+        return t;
+    }
+    if from == "i32" {
+        let ext = ctx.fresh_var();
+        blocks.last_mut().body.push(format!("{} = sext i32 {} to i64", ext, val));
+        let t = ctx.fresh_var();
+        blocks.last_mut().body.push(format!("{} = inttoptr i64 {} to i8*", t, ext));
+        return t;
+    }
+    // 其它（如 %struct.*）→ 直接作为 i8*（尽力而为）
+    val.to_string()
 }
 
 /// 数值类型转换（整数 ↔ 浮点、float ↔ double、整数宽度调整）。
@@ -2377,6 +2711,214 @@ fn emit_numeric_convert(
     t
 }
 
+/// 推断 if 表达式两分支的公共 LLVM 类型，使 PHI 节点类型合法。
+///
+/// Aura 是动态类型语言，sema 常将分支类型退化为 `Any`/`i32`，导致两分支类型不一致
+/// （如 `i32` 与 `{ i8*, i64 }` 字符串）。这里按「能安全表示两端」的原则选公共类型：
+/// - 相同类型 → 原类型
+/// - 同为整型 → 较宽者；同为浮点 → double
+/// - 一端/两端为字符串（结构体 `{i8*,i64}` 或裸指针 `i8*`）→ 字符串表示
+/// - 其余（数值 vs 字符串结构体等）→ `i8*`（Any）兜底
+fn common_if_type(t1: &str, t2: &str) -> String {
+    if t1 == t2 {
+        return t1.to_string();
+    }
+    if is_int_ty(t1) && is_int_ty(t2) {
+        return if int_bits(t1) >= int_bits(t2) { t1.to_string() } else { t2.to_string() };
+    }
+    if is_float_ty(t1) && is_float_ty(t2) {
+        return if t1 == "double" { "double".to_string() } else { t2.to_string() };
+    }
+    let s1 = t1.starts_with('{') && t1.contains("i8*");
+    let s2 = t2.starts_with('{') && t2.contains("i8*");
+    if (s1 || t1 == "i8*") && (s2 || t2 == "i8*") {
+        if s1 {
+            return t1.to_string();
+        }
+        if s2 {
+            return t2.to_string();
+        }
+        return "i8*".to_string();
+    }
+    "i8*".to_string()
+}
+
+/// 将值 `val`（类型 `from`）转换为目标类型 `to`，在 `block` 终止符前插入转换指令，
+/// 返回转换后的值名。无法安全转换时尽力返回原值（交由后续 llc 暴露问题）。
+fn emit_coerce_to(
+    ctx: &mut EmitCtx,
+    blocks: &mut FuncBlocks,
+    block: &str,
+    val: &str,
+    from: &str,
+    to: &str,
+) -> String {
+    if from == to {
+        return val.to_string();
+    }
+    // 目标为字符串结构体 { i8*, i64 }
+    if to.starts_with('{') && to.contains("i8*") && to.contains("i64") {
+        if from == "i8*" {
+            let p = ctx.fresh_var();
+            let len = ctx.fresh_var();
+            let s = ctx.fresh_var();
+            insert_before_terminator(
+                blocks,
+                block,
+                format!("{} = call i64 @aura_string_length(i8* {})", len, val),
+            );
+            insert_before_terminator(
+                blocks,
+                block,
+                format!("{} = insertvalue {} undef, i8* {}, 0", p, to, val),
+            );
+            insert_before_terminator(
+                blocks,
+                block,
+                format!("{} = insertvalue {} {}, i64 {}, 1", s, to, p, len),
+            );
+            return s;
+        }
+        // 数值/其它 → 空字符串兜底（首字段 null，长度 0）
+        let p = ctx.fresh_var();
+        let s = ctx.fresh_var();
+        insert_before_terminator(
+            blocks,
+            block,
+            format!("{} = insertvalue {} undef, i8* null, 0", p, to),
+        );
+        insert_before_terminator(
+            blocks,
+            block,
+            format!("{} = insertvalue {} {}, i64 0, 1", s, to, p),
+        );
+        return s;
+    }
+    // 目标为 i8*（Any）：整型 inttoptr，结构体取首字段，指针 bitcast
+    if to == "i8*" {
+        if is_int_ty(from) {
+            let v = ctx.fresh_var();
+            insert_before_terminator(
+                blocks,
+                block,
+                format!("{} = inttoptr {} {} to i8*", v, from, val),
+            );
+            return v;
+        }
+        if from.starts_with('{') {
+            let v = ctx.fresh_var();
+            insert_before_terminator(
+                blocks,
+                block,
+                format!("{} = extractvalue {} {}, 0", v, from, val),
+            );
+            return v;
+        }
+        if from.ends_with('*') {
+            let v = ctx.fresh_var();
+            insert_before_terminator(
+                blocks,
+                block,
+                format!("{} = bitcast {} {} to i8*", v, from, val),
+            );
+            return v;
+        }
+        return val.to_string();
+    }
+    // i8* → 整型：ptrtoint
+    if from == "i8*" && is_int_ty(to) {
+        let v = ctx.fresh_var();
+        insert_before_terminator(
+            blocks,
+            block,
+            format!("{} = ptrtoint i8* {} to {}", v, val, to),
+        );
+        return v;
+    }
+    // 整型互转兜底
+    if is_int_ty(from) && is_int_ty(to) {
+        if int_bits(from) == int_bits(to) {
+            return val.to_string();
+        }
+        let v = ctx.fresh_var();
+        let op = if int_bits(from) < int_bits(to) { "zext" } else { "trunc" };
+        insert_before_terminator(
+            blocks,
+            block,
+            format!("{} = {} {} {} to {}", v, op, from, val, to),
+        );
+        return v;
+    }
+    val.to_string()
+}
+
+/// 若 `type_name` 存在匹配参数个数的合成构造函数 `Class.__ctorN`，则分配实例并调用之，
+/// 返回 `Some((value, type))`；否则 `None`。统一处理「存在默认值字段 / 构造函数按名赋值」的类
+/// （如 Dwarf.DebugInfo 有 subprograms 默认值字段，3 个构造参数对应 4 个字段）。位置式
+/// insertvalue 会按「实参 i → 字段 i」机械映射，在这种类上错位，触发 llc 的
+/// 「insertvalue operand and field disagree」。
+fn try_emit_ctor(
+    ctx: &mut EmitCtx,
+    blocks: &mut FuncBlocks,
+    type_name: &str,
+    args: &[HirExpr],
+    struct_type: &str,
+) -> Result<Option<(String, String)>, AotError> {
+    let ctor_suffix = format!(".__ctor{}", args.len());
+    let ctor_name = ctx
+        .func_param_types
+        .keys()
+        .find(|k| {
+            let s: &str = k;
+            s.ends_with(ctor_suffix.as_str()) && {
+                let base = &s[..s.len() - ctor_suffix.len()];
+                base == type_name || base.ends_with(&format!(".{}", type_name))
+            }
+        })
+        .cloned();
+    let param_tys = ctor_name.as_ref().and_then(|n| ctx.func_param_types.get(n).cloned());
+    if let (Some(ctor_name), Some(param_tys)) = (ctor_name, param_tys) {
+        if param_tys.len() == args.len() + 1 {
+            let cur = blocks.last_mut();
+            let alloc = ctx.fresh_var();
+            cur.body.push(format!("{} = alloca {}", alloc, struct_type));
+            // self 形参类型在 desugar 中是 Any → i8*；按实际类型传参（必要时 bitcast）。
+            let self_ty = &param_tys[0];
+            let self_arg = if self_ty == &format!("{}*", struct_type) {
+                format!("{}* {}", struct_type, alloc)
+            } else {
+                let bc = ctx.fresh_var();
+                cur.body.push(format!(
+                    "{} = bitcast {}* {} to {}",
+                    bc, struct_type, alloc, self_ty
+                ));
+                format!("{} {}", self_ty, bc)
+            };
+            let mut call_args: Vec<String> = vec![self_arg];
+            for (i, a) in args.iter().enumerate() {
+                let (val, ty) = emit_expr_val(ctx, blocks, a)?;
+                let want = &param_tys[i + 1];
+                let (v, _vty) = coerce_arg(ctx, blocks, val, &ty, want);
+                call_args.push(format!("{} {}", want, v));
+            }
+            let cur = blocks.last_mut();
+            cur.body.push(format!(
+                "call void @{}({})",
+                sanitizellvm(&ctor_name),
+                call_args.join(", ")
+            ));
+            let loaded = ctx.fresh_var();
+            let cur = blocks.last_mut();
+            cur.body.push(format!(
+                "{} = load {}, {}* {}",
+                loaded, struct_type, struct_type, alloc
+            ));
+            return Ok(Some((loaded, struct_type.to_string())));
+        }
+    }
+    Ok(None)
+}
+
 /// P9: 生成结构体构造函数代码
 fn emit_struct_constructor(
     ctx: &mut EmitCtx,
@@ -2385,17 +2927,37 @@ fn emit_struct_constructor(
     args: &[HirExpr],
 ) -> Result<(String, String), AotError> {
     let struct_type = ctx.map_type(&HirType::Named(struct_name.to_string()));
+
+    // 优先走合成构造函数 Class.__ctorN（按名赋值各字段，与 struct 定义布局一致），
+    // 可正确处理「存在默认值字段 / 构造函数按名赋值」的类。
+    if let Some((v, t)) = try_emit_ctor(ctx, blocks, struct_name, args, &struct_type)? {
+        return Ok((v, t));
+    }
+
+    // 兜底：位置式 insertvalue（适用于无合成构造函数的纯值结构体 / 枚举变体）
+    let mut field_tys: Vec<(usize, String)> = ctx
+        .class_field_types
+        .get(struct_name)
+        .map(|m| m.values().map(|(ty, idx)| (*idx, ty.clone())).collect())
+        .unwrap_or_default();
+    field_tys.sort_by_key(|(idx, _)| *idx);
+
     let args_ir: Vec<(String, String)> =
         args.iter().map(|a| emit_expr_val(ctx, blocks, a)).collect::<Result<_, _>>()?;
-    let cur = blocks.last_mut();
     let mut struct_val = "undef".to_string();
     for (i, (val, ty)) in args_ir.iter().enumerate() {
+        // 按字段声明类型转换实参（如 `Any`/`i8*` → `i32`）
+        let (v, vty) = match field_tys.iter().find(|(idx, _)| *idx == i) {
+            Some((_, want)) => coerce_arg(ctx, blocks, val.clone(), ty, want),
+            None => (val.clone(), ty.clone()),
+        };
         let new_val = ctx.fresh_var();
+        let cur = blocks.last_mut();
         cur.body.push(format!(
             "{} = insertvalue {} {}, {} {}, {}",
-            new_val, struct_type, struct_val, ty, val, i
+            new_val, struct_type, struct_val, vty, v, i
         ));
-        struct_val = new_val.clone();
+        struct_val = new_val;
     }
     Ok((struct_val, struct_type))
 }
@@ -2497,12 +3059,24 @@ fn emit_member_access(
 
     let cur = blocks.last_mut();
 
-    // 查找字段类型和索引：遍历所有类字段，找到匹配的字段名
-    let (field_llvm_ty, field_idx) = ctx
-        .class_field_types
-        .values()
-        .find_map(|fields| fields.get(name).map(|(ty, idx)| (ty.clone(), *idx)))
+    // 查找字段所在类与字段（类型 + 索引）：优先按对象的**静态类型**解析
+    // （`this`/`self` → 当前类；局部变量 → 其声明类型的类），最后才退回
+    // 「按字段名全局扫描」的启发式（多类含同名字段时会选错）。
+    // 注意：`extractvalue` 的结构体类型必须与字段索引来自**同一个类**，
+    // 否则会生成 `extractvalue %struct.Token …, 1` 这类错类型 IR。
+    let owner = resolve_member_field_owner(ctx, object, Some(&obj_ty), name);
+    let (field_llvm_ty, field_idx) = owner
+        .as_ref()
+        .map(|(_, ty, idx)| (ty.clone(), *idx))
         .unwrap_or_else(|| ("i32".to_string(), 0));
+    // 未定义的结构体按不透明指针处理（避免 unsized 类型）
+    let owner_struct = owner.as_ref().map(|(cls, _, _)| {
+        if ctx.known_structs.contains(cls) {
+            format!("%struct.{}", sanitizellvm(cls))
+        } else {
+            "i8*".to_string()
+        }
+    });
 
     // 判断对象是指针还是值
     let is_pointer = obj_ty.ends_with('*') || obj_ty == "i8*" || obj_ty == "ptr";
@@ -2511,12 +3085,7 @@ fn emit_member_access(
         // 对象是指针：先 load 结构体值，再 extractvalue
         let gep = ctx.fresh_var();
         let loaded = ctx.fresh_var();
-        let struct_type = ctx
-            .class_field_types
-            .keys()
-            .find(|k| ctx.class_field_types[*k].contains_key(&name.to_string()))
-            .map(|k| format!("%struct.{}", sanitizellvm(k)))
-            .unwrap_or_else(|| "i8*".to_string());
+        let struct_type = owner_struct.clone().unwrap_or_else(|| "i8*".to_string());
 
         if struct_type != "i8*" {
             // 对象指针可能是 i8*（self 参数等），先 bitcast 到具体结构体指针再 load
@@ -2542,13 +3111,8 @@ fn emit_member_access(
             ));
         }
     } else {
-        // 对象是结构体值：直接使用 extractvalue
-        let struct_type = ctx
-            .class_field_types
-            .keys()
-            .find(|k| ctx.class_field_types[*k].contains_key(&name.to_string()))
-            .map(|k| format!("%struct.{}", sanitizellvm(k)))
-            .unwrap_or_else(|| obj_ty.clone());
+        // 对象是结构体值：直接使用 extractvalue（结构体类型与字段索引同源）
+        let struct_type = owner_struct.clone().unwrap_or_else(|| obj_ty.clone());
 
         cur.body.push(format!(
             "{} = extractvalue {} {}, {}",
@@ -2556,6 +3120,66 @@ fn emit_member_access(
         ));
     }
     Ok((tmp, field_llvm_ty))
+}
+
+/// 解析成员访问的 `(LLVM 字段类型, 字段索引)`。
+///
+/// 解析优先级：
+/// 1. `this` / `self` → 当前类（`ctx.current_class`）的字段表
+/// 2. 其它变量 → 由其声明类型反推的类（`%struct.X` / `%struct.X*`）
+/// 3. 兜底：按字段名全局扫描（多类存在同名字段时可能选错，故优先级最低）
+/// 解析成员所属的类与字段：`(类名, LLVM 类型, 字段索引)`。
+///
+/// 解析优先级：
+/// 1. **对象的静态 LLVM 类型**（`%struct.X` / `%struct.X*`）——最可靠，如调用/属性返回值
+/// 2. `this` / `self` → 当前类
+/// 3. 变量 → 其声明类型反推的类
+/// 4. 兜底：按字段名全局扫描（`HashMap` 迭代顺序不确定，可能选错类，故优先级最低）
+///
+/// 返回类名是必需的：`extractvalue` / 成员赋值都要用它拼 `%struct.X`，
+/// 必须与字段索引来自同一个类，否则会生成
+/// `'%var.N' defined with type '%struct.Token …' but expected '%struct.Span …'` 这类非法 IR。
+fn resolve_member_field_owner(
+    ctx: &EmitCtx,
+    object: &HirExpr,
+    obj_ty: Option<&str>,
+    name: &str,
+) -> Option<(String, String, usize)> {
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some(t) = obj_ty {
+        if let Some(cls) = struct_name_of_ty(t) {
+            candidates.push(cls);
+        }
+    }
+    if let HirExpr::Var(var) = object {
+        if var == "this" || var == "self" {
+            if let Some(cls) = &ctx.current_class {
+                candidates.push(cls.clone());
+            }
+        } else if let Some(cls) = ctx
+            .var_scope
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(var))
+            .and_then(|slot| struct_name_of_ty(&slot.llvm_ty))
+        {
+            candidates.push(cls);
+        }
+    }
+    for cls in candidates {
+        if let Some((ty, idx)) = ctx.class_field_types.get(&cls).and_then(|m| m.get(name)) {
+            return Some((cls, ty.clone(), *idx));
+        }
+    }
+    ctx.class_field_types.iter().find_map(|(class, fields)| {
+        fields.get(name).map(|(ty, idx)| (class.clone(), ty.clone(), *idx))
+    })
+}
+
+/// 从 LLVM 类型串反推结构体类名：`%struct.Lexer*` / `%struct.Lexer` → `Lexer`
+fn struct_name_of_ty(ty: &str) -> Option<String> {
+    let t = ty.trim_end_matches('*');
+    t.strip_prefix("%struct.").map(|s| s.to_string())
 }
 
 fn emit_index_access(
@@ -2578,6 +3202,25 @@ fn emit_index_access(
     } else {
         i_ir.clone()
     };
+
+    // 情形 M：字符串键 → Map 取值（`frame["ip"]`，`Map<String, Any>`）
+    if is_string_type(&i_ty) {
+        let base = if is_ptr_ty(&c_ty) {
+            c_ir.clone()
+        } else {
+            let p = ctx.fresh_var();
+            let cur = blocks.last_mut();
+            cur.body.push(format!("{} = inttoptr {} {} to i8*", p, c_ty, c_ir));
+            p
+        };
+        let (key, _) = coerce_arg(ctx, blocks, i_ir, &i_ty, "i8*");
+        let cur = blocks.last_mut();
+        cur.body.push(format!(
+            "{} = call i8* @aura_lang_std_Collections_mapGet(i8* {}, i8* {})",
+            tmp, base, key
+        ));
+        return Ok((tmp, "i8*".to_string()));
+    }
 
     // 情形 A：字符串 `{ i8*, i64 }` → charAt(data, idx)，返回「单字符字符串」结构体
     if c_ty.starts_with('{') && c_ty.contains("i8*") && c_ty.contains("i64") {
@@ -2608,6 +3251,21 @@ fn emit_index_access(
         cur.body.push(format!(
             "{} = call i8* @aura_lang_std_Collections_getAt(i8* {}, i64 {})",
             tmp, c_ir, idx_ir
+        ));
+        return Ok((tmp, "i8*".to_string()));
+    }
+
+    // 情形 B2：容器静态类型既不是指针也不是字符串/结构体（典型是类型信息缺失
+    // 退化成的 `i32`）→ 按「动态列表」处理：先 inttoptr 再走 runtime 取值。
+    // 否则会对一个整数值做 GEP（`getelementptr i32, i32* %int_value`）产出非法 IR
+    //（`'%var.N' defined with type 'i32' but expected 'ptr'`）。
+    if !is_ptr_ty(&c_ty) && !c_ty.starts_with('{') {
+        let ptr = ctx.fresh_var();
+        let cur = blocks.last_mut();
+        cur.body.push(format!("{} = inttoptr {} {} to i8*", ptr, c_ty, c_ir));
+        cur.body.push(format!(
+            "{} = call i8* @aura_lang_std_Collections_getAt(i8* {}, i64 {})",
+            tmp, ptr, idx_ir
         ));
         return Ok((tmp, "i8*".to_string()));
     }
@@ -2645,16 +3303,34 @@ fn emit_new(
     // 获取结构体类型名
     let llvm_struct_type = format!("%struct.{}", sanitizellvm(type_name));
 
-    // 使用 insertvalue 构建结构体值（与 emit_struct_constructor 一致）
-    let cur = blocks.last_mut();
+    // 优先走合成构造函数 Class.__ctorN（与 emit_struct_constructor 一致：按名赋值字段，
+    // 正确处理默认值字段 / 构造函数按名赋值）。
+    if let Some((v, t)) = try_emit_ctor(ctx, blocks, type_name, args, &llvm_struct_type)? {
+        return Ok((v, t));
+    }
+
+    // 字段索引 → 声明的 LLVM 类型（实参类型不符时先转换，与 emit_struct_constructor 一致）
+    let mut field_tys: Vec<(usize, String)> = ctx
+        .class_field_types
+        .get(type_name)
+        .map(|m| m.values().map(|(ty, idx)| (*idx, ty.clone())).collect())
+        .unwrap_or_default();
+    field_tys.sort_by_key(|(idx, _)| *idx);
+
+    // 使用 insertvalue 构建结构体值
     let mut struct_val = "undef".to_string();
     for (i, (val, ty)) in arg_values.iter().enumerate() {
+        let (v, vty) = match field_tys.iter().find(|(idx, _)| *idx == i) {
+            Some((_, want)) => coerce_arg(ctx, blocks, val.clone(), ty, want),
+            None => (val.clone(), ty.clone()),
+        };
         let new_val = ctx.fresh_var();
+        let cur = blocks.last_mut();
         cur.body.push(format!(
             "{} = insertvalue {} {}, {} {}, {}",
-            new_val, llvm_struct_type, struct_val, ty, val, i
+            new_val, llvm_struct_type, struct_val, vty, v, i
         ));
-        struct_val = new_val.clone();
+        struct_val = new_val;
     }
 
     Ok((struct_val, llvm_struct_type))
@@ -2795,33 +3471,56 @@ fn emit_if_expr(
             );
             (else_ty.clone(), wrap_var2, else_ir)
         } else {
-            // 类型相同，直接使用
-            let ty = then_ty.clone();
-            let then_val = if is_numeric_type(&ty) {
-                let phi_val = ctx.fresh_var();
-                let then_operand = if then_ir == "null" { "0".to_string() } else { then_ir };
-                insert_before_terminator(
+            if then_ty == else_ty {
+                // 类型相同：数值类型用 add X,0 归一（恒等式，保证 PHI 操作数为寄存器），其余原样
+                let ty = then_ty.clone();
+                let then_val = if is_numeric_type(&ty) {
+                    let phi_val = ctx.fresh_var();
+                    let then_operand = if then_ir == "null" { "0".to_string() } else { then_ir };
+                    insert_before_terminator(
+                        blocks,
+                        &then_actual_block,
+                        format!("{} = add {} {}, 0", phi_val, ty, then_operand),
+                    );
+                    phi_val
+                } else {
+                    then_ir
+                };
+                let else_val = if is_numeric_type(&ty) {
+                    let phi_val = ctx.fresh_var();
+                    let else_operand = if else_ir == "null" { "0".to_string() } else { else_ir };
+                    insert_before_terminator(
+                        blocks,
+                        &else_actual_block,
+                        format!("{} = add {} {}, 0", phi_val, ty, else_operand),
+                    );
+                    phi_val
+                } else {
+                    else_ir
+                };
+                (ty, then_val, else_val)
+            } else {
+                // 类型不同（如 i32 与字符串 { i8*, i64 }）：协调为统一公共类型，
+                // 两分支各 coerce 到该类型，确保 PHI 节点类型合法（值/指针表示统一）。
+                let cty = common_if_type(&then_ty, &else_ty);
+                let then_coerced = emit_coerce_to(
+                    ctx,
                     blocks,
                     &then_actual_block,
-                    format!("{} = add {} {}, 0", phi_val, ty, then_operand),
+                    then_ir.as_str(),
+                    &then_ty,
+                    &cty,
                 );
-                phi_val
-            } else {
-                then_ir
-            };
-            let else_val = if is_numeric_type(&ty) {
-                let phi_val = ctx.fresh_var();
-                let else_operand = if else_ir == "null" { "0".to_string() } else { else_ir };
-                insert_before_terminator(
+                let else_coerced = emit_coerce_to(
+                    ctx,
                     blocks,
                     &else_actual_block,
-                    format!("{} = add {} {}, 0", phi_val, ty, else_operand),
+                    else_ir.as_str(),
+                    &else_ty,
+                    &cty,
                 );
-                phi_val
-            } else {
-                else_ir
-            };
-            (ty, then_val, else_val)
+                (cty, then_coerced, else_coerced)
+            }
         };
 
     // Merge 块 + PHI 节点
@@ -3344,11 +4043,18 @@ fn emit_wrapper(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErro
     let call_var = ctx.fresh_var();
     let args_str = call_args.join(", ");
     if ret_llvm_ty == "void" || ret_llvm_ty.is_empty() {
-        s.push_str(&format!("  call void @{}({})\n", func.name, args_str));
+        s.push_str(&format!(
+            "  call void @{}({})\n",
+            sanitizellvm(&func.name),
+            args_str
+        ));
     } else {
         s.push_str(&format!(
             "  {} = call {} @{}({})\n",
-            call_var, ret_llvm_ty, func.name, args_str
+            call_var,
+            ret_llvm_ty,
+            sanitizellvm(&func.name),
+            args_str
         ));
     }
 
@@ -3501,11 +4207,18 @@ fn emit_c_abi_wrapper(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, A
 
     let call_var = ctx.fresh_var();
     if ret_llvm_ty == "void" || ret_llvm_ty.is_empty() {
-        s.push_str(&format!("  call void @{}({})\n", func.name, args_str));
+        s.push_str(&format!(
+            "  call void @{}({})\n",
+            sanitizellvm(&func.name),
+            args_str
+        ));
     } else {
         s.push_str(&format!(
             "  {} = call {} @{}({})\n",
-            call_var, ret_llvm_ty, func.name, args_str
+            call_var,
+            ret_llvm_ty,
+            sanitizellvm(&func.name),
+            args_str
         ));
     }
 

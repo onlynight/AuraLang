@@ -8,6 +8,7 @@ disasm_full.txt
 log/
 *.auc
 *.ll
+*.o
 *.obj
 *.exe
 build/

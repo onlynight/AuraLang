@@ -361,7 +361,7 @@ class HirLowerer {
     /// 降级 val 声明。
     fun lowerValDecl(ast: Ast, id: Int): Int {
         val name: String = ast.textOf(id)
-        val ty: String = ast.tyOf(id)
+        var ty: String = ast.tyOf(id)
         val sp: Span = ast.spanOf(id)
         val kids: String = ast.kidsOf(id)
         val kCount: Int = hirKidsCount(kids)
@@ -371,6 +371,10 @@ class HirLowerer {
             val initId: Int = hirKidsAt(kids, 0)
             val initHirId: Int = this.lowerExpr(ast, initId)
             hirKids = hirKidsAdd(hirKids, initHirId)
+            // 无显式类型标注时，从初始化表达式推断（Phase 6.5.7）
+            if (ty == "" && initHirId >= 0) {
+                ty = this.hir.tyOf(initHirId)
+            }
         }
         return this.hir.add("HirValDecl", name, ty, sp, hirKids)
     }
@@ -378,7 +382,7 @@ class HirLowerer {
     /// 降级 var 声明。
     fun lowerVarDecl(ast: Ast, id: Int): Int {
         val name: String = ast.textOf(id)
-        val ty: String = ast.tyOf(id)
+        var ty: String = ast.tyOf(id)
         val sp: Span = ast.spanOf(id)
         val kids: String = ast.kidsOf(id)
         val kCount: Int = hirKidsCount(kids)
@@ -388,6 +392,9 @@ class HirLowerer {
             val initId: Int = hirKidsAt(kids, 0)
             val initHirId: Int = this.lowerExpr(ast, initId)
             hirKids = hirKidsAdd(hirKids, initHirId)
+            if (ty == "" && initHirId >= 0) {
+                ty = this.hir.tyOf(initHirId)
+            }
         }
         return this.hir.add("HirVarDecl", name, ty, sp, hirKids)
     }
@@ -677,19 +684,19 @@ class HirLowerer {
         val kids: String = ast.kidsOf(id)
         val kCount: Int = hirKidsCount(kids)
 
-        // 字面量
+        // 字面量（携带类型信息，供 AOT 发射器选择表示；Phase 6.5.5/6.5.7）
         if (kind == "IntLiteral") {
-            return this.hir.leaf("HirLit", text, sp)
+            return this.hir.add("HirLit", text, "Int", sp, hirNoKids())
         } else if (kind == "FloatLiteral" || kind == "DoubleLiteral") {
-            return this.hir.leaf("HirLit", text, sp)
+            return this.hir.add("HirLit", text, "Double", sp, hirNoKids())
         } else if (kind == "StringLiteral") {
-            return this.hir.leaf("HirLit", text, sp)
+            return this.hir.add("HirLit", text, "String", sp, hirNoKids())
         } else if (kind == "BoolLiteral") {
-            return this.hir.leaf("HirLit", text, sp)
+            return this.hir.add("HirLit", text, "Boolean", sp, hirNoKids())
         } else if (kind == "CharLiteral") {
-            return this.hir.leaf("HirLit", text, sp)
+            return this.hir.add("HirLit", text, "Char", sp, hirNoKids())
         } else if (kind == "NullLiteral") {
-            return this.hir.leaf("HirLit", "null", sp)
+            return this.hir.add("HirLit", "null", "Any", sp, hirNoKids())
         }
 
         // 标识符
@@ -753,16 +760,26 @@ class HirLowerer {
         val kCount: Int = hirKidsCount(kids)
 
         var hirKids: String = hirNoKids()
+        var opTy: String = ""
         var i: Int = 0
         while (i < kCount) {
             val childId: Int = hirKidsAt(kids, i)
             val childHirId: Int = this.lowerExpr(ast, childId)
             if (childHirId >= 0) {
                 hirKids = hirKidsAdd(hirKids, childHirId)
+                if (this.hir.tyOf(childHirId) == "String") {
+                    opTy = "String"
+                }
             }
             i = i + 1
         }
-        return this.hir.add("HirBinary", hirNormBinOp(op), "", sp, hirKids)
+        val normOp: String = hirNormBinOp(op)
+        if (normOp != "+" && normOp != "&&" && normOp != "||" &&
+            normOp != "==" && normOp != "!=" && normOp != "<" &&
+            normOp != ">" && normOp != "<=" && normOp != ">=") {
+            opTy = ""
+        }
+        return this.hir.add("HirBinary", normOp, opTy, sp, hirKids)
     }
 
     /// 降级一元运算表达式。
@@ -920,7 +937,11 @@ class HirLowerer {
             }
             i = i + 1
         }
-        return this.hir.add("HirMember", memberName, "", sp, hirKids)
+        var mty: String = ""
+        if (memberName == "length" || memberName == "size") {
+            mty = "Int"
+        }
+        return this.hir.add("HirMember", memberName, mty, sp, hirKids)
     }
 
     /// 降级下标访问表达式。

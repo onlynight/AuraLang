@@ -416,6 +416,9 @@ double aura_pow_wrapper(double b, double e) { return pow(b, e); }
 int64_t toInt(double x) { return (int64_t)x; }
 double toFloat(int64_t x) { return (double)x; }
 const char *toString(int64_t x) { return aura_to_str(x); }
+/* `toStr` 与 `toString` 语义一致：AOT 下调用点会把整数经 inttoptr 打成 i8* 句柄，
+ * 指针与 int64 在 x86-64 上均用整数寄存器传递，故 ABI 兼容，此处直接按整数解释。 */
+const char *toStr(int64_t x) { return aura_to_str(x); }
 double aura_clock_wrapper(void) { return (double)clock(); }
 int64_t aura_strlen_wrapper(const char *s) { return (int64_t)strlen(s); }
 const char *toStringFloat(double x) { return aura_to_str_float(x); }
@@ -1253,6 +1256,106 @@ int aura_lang_std_String_equals(const char *a, const char *b) {
     return strcmp(a, b) == 0 ? 1 : 0;
 }
 
+/* ── 极简字符串键值表（`Map<String, Any>`；AOT 下 Map 表示为 i8*） ── */
+
+static const char *aura_strdup(const char *s) {
+    size_t n = strlen(s);
+    char *out = (char *)malloc(n + 1);
+    if (!out) return "";
+    memcpy(out, s, n + 1);
+    return out;
+}
+
+typedef struct {
+    int64_t len;
+    int64_t cap;
+    const char **keys;
+    const char **vals;
+} AuraDynMap;
+
+static AuraDynMap *aura_map_new(int64_t cap) {
+    AuraDynMap *m = (AuraDynMap *)malloc(sizeof(AuraDynMap));
+    if (!m) return NULL;
+    if (cap < 4) cap = 4;
+    m->len = 0;
+    m->cap = cap;
+    m->keys = (const char **)malloc(sizeof(const char *) * (size_t)cap);
+    m->vals = (const char **)malloc(sizeof(const char *) * (size_t)cap);
+    return m;
+}
+
+const void *aura_lang_std_Collections_mutableMapOf(void) {
+    return (const void *)aura_map_new(8);
+}
+
+const void *aura_lang_std_Collections_emptyMap(void) {
+    return (const void *)aura_map_new(4);
+}
+
+/** 就地写入（Map 为可变堆对象，调用方拿到的是同一指针） */
+void aura_lang_std_Collections_mapSet(const void *map, const char *key, const void *value) {
+    AuraDynMap *m = (AuraDynMap *)map;
+    if (!m || !key) return;
+    const char *v = value ? (const char *)value : "";
+    for (int64_t i = 0; i < m->len; i++) {
+        if (m->keys[i] && strcmp(m->keys[i], key) == 0) {
+            m->vals[i] = v;
+            return;
+        }
+    }
+    if (m->len >= m->cap) {
+        int64_t ncap = m->cap * 2;
+        const char **nk =
+            (const char **)realloc((void *)m->keys, sizeof(const char *) * (size_t)ncap);
+        const char **nv =
+            (const char **)realloc((void *)m->vals, sizeof(const char *) * (size_t)ncap);
+        if (!nk || !nv) return;
+        m->keys = nk;
+        m->vals = nv;
+        m->cap = ncap;
+    }
+    m->keys[m->len] = aura_strdup(key);
+    m->vals[m->len] = v;
+    m->len++;
+}
+
+const void *aura_lang_std_Collections_mapGet(const void *map, const char *key) {
+    const AuraDynMap *m = (const AuraDynMap *)map;
+    if (!m || !key) return "";
+    for (int64_t i = 0; i < m->len; i++) {
+        if (m->keys[i] && strcmp(m->keys[i], key) == 0) {
+            return (const void *)m->vals[i];
+        }
+    }
+    return "";
+}
+
+int64_t aura_lang_std_Collections_mapSize(const void *map) {
+    const AuraDynMap *m = (const AuraDynMap *)map;
+    return m ? m->len : 0;
+}
+
+int aura_lang_std_Collections_mapContains(const void *map, const char *key) {
+    const AuraDynMap *m = (const AuraDynMap *)map;
+    if (!m || !key) return 0;
+    for (int64_t i = 0; i < m->len; i++) {
+        if (m->keys[i] && strcmp(m->keys[i], key) == 0) return 1;
+    }
+    return 0;
+}
+
+/** 列表按下标写入（越界则追加） */
+void aura_lang_std_Collections_listSet(const void *list, int64_t idx, const void *value) {
+    AuraDynList *l = (AuraDynList *)list;
+    if (!l) return;
+    const char *v = value ? (const char *)value : "";
+    if (idx >= 0 && idx < l->len) {
+        l->items[idx] = v;
+    } else {
+        aura_dynlist_push(l, v);
+    }
+}
+
 /* ── aura.lang.std.Collections.* ── */
 
 const void *aura_lang_std_Collections_emptyList(void) {
@@ -1296,6 +1399,43 @@ const void *aura_lang_std_Collections_listAppend(const void *list, const void *v
         l = aura_dynlist_new(4);
     }
     aura_dynlist_push(l, (const char *)value);
+    return (const void *)l;
+}
+
+/** list.pop()：弹出并返回末尾元素（AOT 下列表元素为 i8* 句柄）。
+ *  空列表返回 NULL；返回值经 getAt 的逆转换还原为原类型。 */
+const void *aura_lang_std_Collections_listPop(const void *list) {
+    AuraDynList *l = (AuraDynList *)list;
+    if (!l || l->len <= 0) return (const void *)0;
+    l->len--;
+    return (const void *)l->items[l->len];
+}
+
+/** 构造整数区间列表（对应 Aura `start..end` / `start..<end` / `start..=end`）。
+ *  start/end/inclusive 均为 i32；元素以 i64 句柄（值本身）存入 AuraDynList，
+ *  供 AOT 的 `for i in 1..10` 等循环消费。 */
+const void *aura_lang_std_Collections_range(int32_t start, int32_t end, int32_t inclusive) {
+    AuraDynList *l = aura_dynlist_new(16);
+    if (!l) return NULL;
+    if (start <= end) {
+        int64_t i = start;
+        for (;;) {
+            if (i > (int64_t)end) break;
+            if (i == (int64_t)end && !inclusive) break;
+            aura_dynlist_push(l, (const char *)(intptr_t)i);
+            if (i == (int64_t)end) break;
+            i++;
+        }
+    } else {
+        int64_t i = start;
+        for (;;) {
+            if (i < (int64_t)end) break;
+            if (i == (int64_t)end && !inclusive) break;
+            aura_dynlist_push(l, (const char *)(intptr_t)i);
+            if (i == (int64_t)end) break;
+            i--;
+        }
+    }
     return (const void *)l;
 }
 

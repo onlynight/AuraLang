@@ -232,12 +232,31 @@ const COMPILER_PKG_ROOT: &str = "aura.lang.compiler.";
 ///
 /// `file_path` 为当前源文件路径（用于解析相对路径），`None` 时无法解析相对导入。
 pub fn resolve_aura_imports(source: &str, file_path: Option<&str>) -> String {
+    // `pkg_root`：`aura.lang.compiler` 包根目录（即入口文件所在目录
+    // `aura/lang/compiler/`），包名 import 一律相对它解析。
+    // `base_dir`：当前正在处理的文件的目录，仅用于路径形式 import
+    // （`import "x.aura"`），相对该文件解析。
+    let pkg_root = match file_path {
+        Some(fp) => {
+            std::path::Path::new(fp).parent().unwrap_or(std::path::Path::new(".")).to_path_buf()
+        }
+        None => std::path::PathBuf::from("."),
+    };
+    let mut visited = std::collections::HashSet::new();
+    resolve_aura_imports_rec(source, &pkg_root, &pkg_root, &mut visited)
+}
+
+/// 递归解析 import：除入口文件的顶层 import 外，被内联文件内部的 import
+/// 也必须解析（否则同包内隐式引用的模块不会编译进模块图，导致
+/// `use of undefined value` 链接错误）。同一个文件只内联一次（按规范路径去重），
+/// 避免多路径重复 import 造成的重复定义。
+fn resolve_aura_imports_rec(
+    source: &str,
+    pkg_root: &std::path::Path,
+    base_dir: &std::path::Path,
+    visited: &mut std::collections::HashSet<std::path::PathBuf>,
+) -> String {
     let mut result = String::new();
-    let mut base_dir = std::path::PathBuf::from(".");
-    if let Some(fp) = file_path {
-        base_dir =
-            std::path::Path::new(fp).parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
-    }
 
     for line in source.lines() {
         let trimmed = line.trim_start();
@@ -258,31 +277,31 @@ pub fn resolve_aura_imports(source: &str, file_path: Option<&str>) -> String {
                 } else if path.starts_with(COMPILER_PKG_ROOT) {
                     let rel =
                         pkg_to_aura_path(path.strip_prefix(COMPILER_PKG_ROOT).unwrap_or(path));
-                    Some(base_dir.join(rel))
+                    Some(pkg_root.join(rel))
                 } else {
                     None
                 }
             } else if let Some(pkg) = rest.strip_prefix(COMPILER_PKG_ROOT) {
                 let rel = pkg_to_aura_path(pkg);
-                Some(base_dir.join(rel))
+                Some(pkg_root.join(rel))
             } else {
                 None
             };
 
             if let Some(full_path) = target {
+                // 规范化路径以便跨不同相对写法的去重（如 `./x.aura` 与 `x.aura`）。
+                let canon = std::fs::canonicalize(&full_path).unwrap_or_else(|_| full_path.clone());
+                if visited.contains(&canon) {
+                    continue; // 已内联，跳过避免重复定义
+                }
                 if let Ok(content) = std::fs::read_to_string(&full_path) {
-                    // 将导入文件的内容内联（跳过 import 行本身）
-                    let content_lines: Vec<&str> = content.lines().collect();
-                    let mut imported_content = String::new();
-                    for cl in content_lines {
-                        let cl_trimmed = cl.trim_start();
-                        if cl_trimmed.starts_with("import ") || cl_trimmed.starts_with("package ") {
-                            continue; // 跳过嵌套 import 与 package 声明
-                        }
-                        imported_content.push_str(cl);
-                        imported_content.push('\n');
-                    }
-                    result.push_str(&imported_content);
+                    visited.insert(canon);
+                    // 被导入文件内部的路径 import 相对其自身目录解析；
+                    // 包名 import 永远相对包根，故 pkg_root 透传。
+                    let child_base = full_path.parent().unwrap_or(pkg_root);
+                    let resolved =
+                        resolve_aura_imports_rec(&content, pkg_root, child_base, visited);
+                    result.push_str(&resolved);
                     continue; // 跳过原 import 行
                 } else {
                     eprintln!("[codegen] 无法读取导入文件: {}", full_path.display());
