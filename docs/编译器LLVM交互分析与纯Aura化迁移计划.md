@@ -23,8 +23,9 @@
   - [4.6 Phase 4：VM 字节码发射与解释器 Aura 化](#46-phase-4vm-字节码发射与解释器-aura-化)
   - [4.7 Phase 5：VM 自举（最小引导层保留）](#47-phase-5vm-自举最小引导层保留)
   - [4.8 Phase 6：AOT LLVM 后端 Aura 化](#48-phase-6aot-llvm-后端-aura-化)
-  - [4.9 Phase 7：标准库 Aura 化](#49-phase-7标准库-aura-化)
-  - [4.10 Phase 8：LLVM C API 直连（可选优化）](#410-phase-8llvm-c-api-直连可选优化)
+  - [4.9 Phase 7：JIT 编译（Cranelift 直连机器码）Aura 化](#49-phase-7jit-编译cranelift-直连机器码aura-化)
+  - [4.10 Phase 8：核心库与标准库 Aura 化](#410-phase-8核心库与标准库-aura-化)
+  - [4.11 Phase 9：LLVM C API 直连（可选优化）](#411-phase-9llvm-c-api-直连可选优化)
 - [五、关键技术挑战与解决方案](#五关键技术挑战与解决方案)
 - [六、工作量估算与里程碑](#六工作量估算与里程碑)
 - [七、风险矩阵与回退策略](#七风险矩阵与回退策略)
@@ -40,7 +41,7 @@
 
 ### 核心决策
 
-选择**方案四：分阶段迁移路径**，采用 8 个 Phase 的渐进式迁移策略，每个 Phase 独立可验证、可回退。
+选择**方案四：分阶段迁移路径**，采用 9 个 Phase 的渐进式迁移策略，每个 Phase 独立可验证、可回退。
 
 ### 核心原则：独立代码层 + 保留 Rust 实现
 
@@ -64,8 +65,9 @@
 | **代码组织** | `aura/compiler/` 独立目录 | 与 `compiler/` 并行，互不干扰 |
 | **Rust 编译器** | 完全保留，不修改 | 作为 fallback 和参考实现 |
 | **LLVM 后端方式** | 文本 IR + 外部 `llc`/`clang` 子进程 | 与现有 Rust 实现同构，无需绑定 LLVM C API |
-| **IR 生成入口** | HIR 直发（绕过 MIR） | 与现有实现一致，避免冗余转换 |
-| **MIR 定位** | VM 字节码路径专用 | LLVM 不需要 MIR 这种 CFG |
+| **JIT 后端方式** | Cranelift 进程内原生码（Phase 7） | 无外部工具链、进程内即时编译，补齐 VM 与 AOT 之间的执行档 |
+| **IR 生成入口** | AOT 走 HIR 直发（绕过 MIR） | 与现有实现一致，避免冗余转换 |
+| **MIR 定位** | VM 解释器 / JIT 共用（AOT 不使用 MIR） | Cranelift IR 与 MIR 的寄存器式 CFG 语义接近，可复用降级结果 |
 | **引导层** | 保留最小 Rust 引导层（Layer 0-A） | 解决鸡生蛋问题 |
 | **FFI 方式** | Aura `extern "C"` 调用 C ABI | 已有完整支持 |
 | **构建系统** | 双编译器并行构建 | Rust/Aura 编译器独立构建，互不依赖 |
@@ -75,11 +77,11 @@
 | 指标 | 数值 |
 |------|------|
 | 当前 Rust 编译器规模 | 107 个 .rs 文件，约 43,000 行（`compiler/`） |
-| 已有 Aura 标准库文件 | 55 个 .aura 文件（`aura/` + `core/`） |
-| 需要迁移的 Rust 文件 | 约 40 个核心文件 → `aura/compiler/` |
-| 预计 Aura 代码量 | 约 20,000 行（`aura/compiler/`） |
-| 预计总工期 | 11–13 人月 |
-| Phase 数量 | 8 个（含 2 个可选 Phase） |
+| 已有 Aura 核心库/标准库文件 | 45 个 .aura 文件（`aura/core/aura/lang/`：核心类型 + `collection/` + `coroutine/` + `std/`） |
+| 需要迁移的 Rust 文件 | 约 45 个核心文件 → `aura/compiler/` |
+| 预计 Aura 代码量 | 约 24,000 行（`aura/compiler/`） |
+| 预计总工期 | 12–14 人月 |
+| Phase 数量 | 9 个（含 2 个可选 Phase） |
 | **Rust 编译器** | **完全保留，零修改** |
 | **Aura 编译器目录** | **`aura/compiler/`（独立）** |
 
@@ -209,7 +211,7 @@ pub fn compile_program(&self, program: &crate::ast::Program, ...) -> Result<AotO
 1. **风险可控**：每个 Phase 独立可验证、可回退
 2. **渐进式改进**：每完成一个 Phase 就获得一个可交付成果
 3. **保留 fallback**：Rust 编译器始终可用
-4. **技术路线清晰**：Phase 1–7 用方案一（文本 IR），Phase 8 可选升级到方案二
+4. **技术路线清晰**：Phase 1–8 用方案一（文本 IR），Phase 9 可选升级到方案二
 5. **与现有文档对齐**：符合 `完全Aura化技术方案-final.md` 的分层架构
 
 ### 3.3 方案四的技术路线
@@ -223,9 +225,11 @@ Phase 5: VM 自举（需要最小 Rust 引导层）
     ↓
 Phase 6: AOT LLVM 后端 Aura 化（用方案一：文本 IR + 子进程）
     ↓
-Phase 7: 标准库 Aura 化
+Phase 7: JIT 编译（Cranelift 直连机器码）Aura 化  ← 补全「VM / JIT / AOT」三执行路径
     ↓
-Phase 8: LLVM C API 直连（可选，用方案二）
+Phase 8: 核心库与标准库 Aura 化
+    ↓
+Phase 9: LLVM C API 直连（可选，用方案二）
 ```
 
 ### 3.4 并行开发模型：Rust 与 Aura 编译器共存
@@ -266,11 +270,12 @@ AuraLang/
 │   │   ├── aot/
 │   │   │   └── Emit.aura              # Aura AOT LLVM 后端
 │   │   └── main.aura                  # Aura 编译器入口
-│   └── core/                          # Aura 标准库
-│       └── lang/std/
-│           ├── Math.aura
-│           ├── String.aura
-│           └── ...
+│   └── core/                          # 核心库 / 标准库（Phase 8 唯一真相源）
+│       └── aura/lang/
+│           ├── *.aura                 # 核心类型（Int/String/Boolean/Char/...）
+│           ├── collection/            # Array/ArrayList/List/Map/HashMap/Set/HashSet/...
+│           ├── coroutine/             # Coroutine/Actor
+│           └── std/                   # Math/IO/FileSystem/Json/.../Channel
 │
 ├── cli/                               # CLI（双编译器支持）
 │   └── src/
@@ -346,13 +351,15 @@ Phase 0 (准备) ─────────────────────
     │                              │         │                 │
     │                              └─────────┼→ Phase 4 (VM)  │
     │                                        │        │        │
-    │                                        │        └→ Phase 5 (自举)
-    │                                        │
+    │                                        │        ├→ Phase 5 (自举)
+    │                                        │        │
+    │                                        │        └→ Phase 7 (JIT / Cranelift)
+    │                                        │                 │
     │                                        └──→ Phase 6 (AOT LLVM)
     │                                                │
-    │                                                └──→ Phase 7 (标准库)
+    │                                                └──→ Phase 8 (核心库/标准库)
     │                                                        │
-    │                                                        └──→ Phase 8 (LLVM C API, 可选)
+    │                                                        └──→ Phase 9 (LLVM C API, 可选)
     └──────────────────────────────────────────────────────────┘
 ```
 
@@ -409,10 +416,13 @@ aura/compiler/                      # ← 新增：Aura 编译器独立目录
 ├── codegen/                        # 字节码发射（Phase 4）
 ├── vm/                             # VM 解释器（Phase 5）
 ├── aot/                            # AOT LLVM 后端（Phase 6）
-├── std/                            # 标准库（Phase 7）
+├── jit/                            # JIT 编译器 / Cranelift 后端（Phase 7）
 ├── test/                           # 测试框架
 └── main.aura                       # 编译器入口
 ```
+
+> 注：**核心库/标准库不位于 `aura/compiler/`**，而在 `aura/core/aura/lang/`
+> （核心类型 + `collection/` + `coroutine/` + `std/`，Phase 8 唯一真相源，详见 §4.10）。
 
 #### 与 Rust 编译器的关系
 
@@ -689,7 +699,7 @@ aura/compiler/                      # Aura 编译器（独立开发）
 
 | 风险 | 缓解 |
 |------|------|
-| VM 性能不足 | 热点函数 JIT 编译（Cranelift） |
+| VM 性能不足 | 热点函数 JIT 编译（Cranelift，正式落地于 Phase 7） |
 | 栈溢出 | 限制最大栈深度（256） |
 | 无限循环 | 指令计数器（`MAX_INSTRUCTIONS = 1000000`） |
 
@@ -814,48 +824,191 @@ Layer 0-A: 最小引导层（Rust，不能上移）
 
 ---
 
-### 4.9 Phase 7：标准库 Aura 化
+### 4.9 Phase 7：JIT 编译（Cranelift 直连机器码）Aura 化
 
 #### 目标
 
-将标准库从 Rust 实现上移到 Aura 源码，实现 `core/aura/lang/std/` 作为唯一真相源。
+补全「**VM 解释器 / JIT 即时编译 / AOT 静态编译**」三执行路径中的 **JIT** 路径：把
+Rust 侧已有的 Cranelift JIT（`compiler/src/vm/jit.rs` 及其配套）迁移为纯 Aura 实现，
+使 Aura 编译器自身即可在**进程内**把热点函数编译为原生机器码，无需外部 LLVM 工具链、
+无子进程与启动开销，适用于 REPL、热重载、长驻服务热路径与自举引导层。
+
+> **前情提要（务必继承）**：`docs/JIT性能分析.md` 记录了旧 JIT「与解释器同速（≈1.0x）」的
+> 根因——四点机制互相抵消，热点永远无法触发编译：
+> ① 编译期内联删除了小函数调用；② 入口函数（`main`）不参与热点计数；
+> ③ 递归热点被 `is_jit_compilable()` 白名单拒绝；④ 仅靠调用频率的检测对「循环热点」天然失效。
+> Rust 侧已通过 **Fix A（入口函数强制编译）** 与 **Fix B（递归函数支持：dispatch table +
+> `call_indirect`）** 修复，并叠加 7 个高级字节码优化传递，取得 sum ~109x / fib ~78x。
+> **Aura 化必须等价继承 Fix A/B 与优化传递**，否则会重蹈覆辙。
+
+#### 与 VM / AOT 的分工
+
+| 维度 | VM 解释器（Phase 4/5） | **JIT（Phase 7）** | AOT（Phase 6） |
+|------|----------------------|--------------------|----------------|
+| 中间输入 | 字节码（`.auc`）/ MIR | 字节码 / MIR | HIR |
+| 代码生成 | 无（解释执行） | Cranelift → 原生机器码（进程内） | LLVM IR 文本 → `llc`/`clang` |
+| 外部依赖 | 无 | Cranelift（纯 Rust，可内联/FFI） | LLVM 工具链（~500MB） |
+| 启动开销 | 低 | 低（首次编译热点有延迟） | 高（子进程 + 链接） |
+| 执行性能 | 低 | 高（接近原生） | 高（O2/O3，最优） |
+| 典型场景 | 脚本 / 冷启动 / 调试 | REPL / 热重载 / 长驻热路径 | 产物分发 / 交叉编译 |
+
+三者共享**同一份 MIR / 字节码与 Runtime ABI（`JitValue`）**，任何一路都不得改变语义。
 
 #### 迁移文件清单
 
 | Rust 文件 | 行数 | Aura 目标文件 | 预估 | 优先级 |
 |-----------|------|---------------|------|--------|
-| `compiler/src/std/std_math.rs` | ~30 KB | `core/aura/lang/std/Math.aura` | 2d | P0 |
-| `compiler/src/std/std_string.rs` | ~50 KB | `core/aura/lang/std/String.aura` | 5d | P0 |
-| `compiler/src/std/std_path.rs` | ~20 KB | `core/aura/lang/std/Path.aura` | 2d | P0 |
-| `compiler/src/std/std_encoding.rs` | ~30 KB | `core/aura/lang/std/Encoding.aura` | 3d | P0 |
-| `compiler/src/std/std_time.rs` | ~20 KB | `core/aura/lang/std/Time.aura` | 2d | P1 |
-| `compiler/src/std/std_collections.rs` | ~40 KB | `core/aura/lang/std/Collections.aura` | 4d | P0 |
-| `compiler/src/std/std_io.rs` | ~30 KB | `core/aura/lang/std/IO.aura` | 3d | P1 |
-| `compiler/src/std/std_fs.rs` | ~30 KB | `core/aura/lang/std/FileSystem.aura` | 3d | P1 |
-| `compiler/src/std/std_net.rs` | ~40 KB | `core/aura/lang/std/Network.aura` | 5d | P2 |
-| `compiler/src/std/std_json.rs` | ~30 KB | `core/aura/lang/std/Json.aura` | 4d | P2 |
-| `compiler/src/std/std_assert.rs` | ~10 KB | `core/aura/lang/std/Assert.aura` | 1d | P0 |
-| `compiler/src/std/std_test.rs` | ~15 KB | `core/aura/lang/std/Test.aura` | 2d | P1 |
-| `compiler/src/std/std_iter.rs` | ~20 KB | `core/aura/lang/std/Iter.aura` | 3d | P1 |
-| `compiler/src/std/std_env.rs` | ~10 KB | `core/aura/lang/std/Env.aura` | 1d | P1 |
-| `compiler/src/std/std_process.rs` | ~15 KB | `core/aura/lang/std/Process.aura` | 2d | P1 |
-| `compiler/src/std/std_random.rs` | ~10 KB | `core/aura/lang/std/Random.aura` | 1d | P2 |
-| `compiler/src/std/std_builtin.rs` | ~20 KB | `core/aura/lang/std/Builtin.aura` | 3d | P0 |
-| `compiler/src/std/std_console.rs` | ~10 KB | `core/aura/lang/std/Console.aura` | 1d | P1 |
-| `compiler/src/std/std_ascii.rs` | ~10 KB | `core/aura/lang/std/Ascii.aura` | 1d | P2 |
-| `compiler/src/std/std_path.rs` | ~20 KB | `core/aura/lang/std/Path.aura` | 2d | P0 |
+| `compiler/src/vm/jit.rs`（热点/白名单/编译/派发） | ~807 | `aura/lang/compiler/jit/JitState.aura` | 4d | P0 |
+| `compiler/src/vm/jit.rs`（IR 发射核心） | — | `aura/lang/compiler/jit/JitLower.aura` | 6d | P0 |
+| `compiler/src/vm/jit_opt.rs`（7 优化传递） | — | `aura/lang/compiler/jit/JitOpt.aura` | 4d | P0 |
+| `compiler/src/vm/abi.rs`（`JitValue` / `AotEntry`） | ~210 | `aura/lang/compiler/jit/JitAbi.aura` | 3d | P0 |
+| `compiler/src/vm/mod.rs`（热点计数 / 原生派发 / 回退） | — | `aura/lang/compiler/jit/JitDispatch.aura` | 3d | P0 |
+| `compiler/src/vm/aot_runtime.rs`（W^X 加载 / 描述符表 / Blob） | ~1130 | `aura/lang/compiler/jit/JitRuntime.aura` | 3d | P1 |
+| `compiler/src/bootstrap/jit_core.rs`（最小 JIT 引导） | — | `aura/lang/compiler/jit/JitCore.aura` | 2d | P1 |
 
 #### 迁移策略
 
-1. **纯逻辑模块**（Math、String、Path、Encoding、Time）：直接翻译为 Aura 函数
-2. **FFI 模块**（IO、FileSystem、Network、Process）：使用 `extern "C"` 声明 + Aura 包装
-3. **集合模块**（Collections、Iter）：使用 Aura 的 `List`/`Map`/`Set` 实现
-4. **测试模块**（Assert、Test）：使用 Aura 的异常和断言
+1. **热点与白名单**：以调用计数（`call_counts`）+ 入口强制编译（Fix A）+ 递归可达分析
+   （Fix B，放宽 `is_jit_compilable` 白名单）决定编译时机；被调用者先编译，保证
+   dispatch table 条目存在。
+2. **IR 发射**：把字节码/MIR 逐条映射为 Cranelift IR（`iconst`/`iadd`/`brif`/`call` /
+   `call_indirect` / `load`/`store` stack slot …），沿用现有指令映射表。
+3. **优化传递**：等价实现 7 个传递——常量折叠、死码消除、跳转线程化、强度削弱
+   （`/2^n`→移位、`*2^n`→左移）、指令调度、小函数内联、简单循环展开；优化结果需与
+   字节码语义逐例对齐（差分测试）。
+4. **ABI / 派发**：`JitValue`（tag + payload）作为统一调用约定；`dispatch_table` 走
+   `call_indirect`，实现同速递归与跨函数调用。
+5. **运行时段与回退**：复用 AOT Blob 基础设施（W^X mmap/VirtualAlloc、`AuraFuncDesc`
+   描述符表、`.auc v4` 段格式）；任何不可编译函数**回退解释器**，保证结果一致。
+6. **单一路径真相源**：VM / JIT / AOT 共用 MIR，通过「后端选择器」路由，禁止各自
+   维护不同的语义实现。
 
 #### 关键技术决策
 
 | 决策 | 选择 | 理由 |
 |------|------|------|
+| JIT 输入 | 字节码 / MIR（非 HIR） | 已是寄存器式 CFG，与 Cranelift IR 语义接近，复用 Phase 3/4 |
+| 代码生成 | Cranelift（纯 Rust，经 FFI 内联） | 与 AOT 的 LLVM 解耦，无外部工具链，进程内直接执行 |
+| 热点判定 | 调用计数 + 入口强制 + 递归可达 | 直接继承 Fix A/B，避免「JIT 等于解释器」复发 |
+| 调用约定 | `JitValue` ABI + `dispatch_table` | 与 AOT Blob 兼容，可复用到 `.auc v4` |
+| 优化 | 7 个字节码级传递（与 Rust 等价） | 在 Cranelift 之前削减指令、简化控制流 |
+| 失败处理 | 回退解释器 | JIT 不可编译时仍保证正确性 |
+
+#### 任务清单
+
+| # | 任务 | 预估 | 依赖 |
+|---|------|------|------|
+| 7.1 | 迁移 `jit.rs` 状态机 → `JitState.aura`（计数/阈值/白名单/递归可达） | 4d | 4.6 |
+| 7.2 | 迁移 `abi.rs` → `JitAbi.aura`（`JitValue` / `AotEntry` / dispatch table） | 3d | 7.1 |
+| 7.3 | 迁移 IR 发射 → `JitLower.aura`（算术/控制流/调用/间接调用） | 6d | 7.2 |
+| 7.4 | 迁移 `jit_opt.rs` → `JitOpt.aura`（7 个优化传递） | 4d | 7.3 |
+| 7.5 | 原生派发 + 解释器回退 → `JitDispatch.aura` | 3d | 7.3 |
+| 7.6 | 迁移 `aot_runtime.rs` 段加载 → `JitRuntime.aura`（W^X / 描述符 / Blob） | 3d | 7.2 |
+| 7.7 | 最小引导层 `JitCore.aura` | 2d | 7.3 |
+| 7.8 | 编写 Phase 7 验证用例 + 三路（VM/JIT/AOT）差分对比 | 3d | 7.4–7.7 |
+
+#### 验证标准
+
+- [ ] **热点可达**：入口函数强制编译（Fix A）与递归函数编译（Fix B）均生效，
+  `jit_state()` 不再出现「❄️未达阈值」/「⛔已跳过」的静默回退
+- [ ] **优化等价**：7 个优化传递的产物与 Rust 基线逐例一致（常量折叠/DCE/跳转线程化/
+  强度削弱/指令调度/内联/循环展开）
+- [ ] **执行一致**：同一程序 VM / JIT / AOT 三路结果逐字节一致（含异常与整数溢出语义）
+- [ ] **回退正确**：不可编译函数回退解释器，结果与纯 JIT 一致
+- [ ] **递归/互递归**：fib 等递归热点经 `dispatch_table` + `call_indirect` 正常执行
+- [ ] **ABI 兼容**：`JitValue` 可被 AOT Blob 加载路径复用（`.auc v4` 读取）
+- [ ] **性能**：`sum`/`fib` 相对解释器 ≥ 50x（Rust 基线 109x / 78x 的下限，留回归余量）
+
+#### 风险与缓解
+
+| 风险 | 缓解 |
+|------|------|
+| 热点检测再次失效（历史问题） | 直接继承 Fix A/B；以 `jit_state()` 诊断输出作为门禁断言 |
+| Cranelift IR 与 VM/AOT 语义漂移 | 以 MIR 为单一真相源 + 三路差分测试（VM/JIT/AOT） |
+| 机器码 ABI / 调用约定错误 | `JitValue` ABI 兼容性测试 + C ABI 对照，复用 Phase 6 的 ABI 断言 |
+| Aura 侧 Cranelift FFI 不可用 | 保留 Rust JIT 作为 fallback；本 Phase 可整体回退（见 §7.3） |
+| 维护 VM/JIT/AOT 三套后端成本 | 后端选择器统一路由，共享 MIR/字节码与 Runtime，禁止语义分叉 |
+
+---
+
+### 4.10 Phase 8：核心库与标准库 Aura 化
+
+#### 目标
+
+将标准库与核心库从 Rust 实现上移到 Aura 源码，使 **`aura/core/aura/lang/`** 成为唯一真相源
+（Rust 侧 `compiler/src/std/*.rs` 退化为引导/兼容层）。
+
+目标目录以**当前仓库实际布局**为准，分为四类：
+
+```
+aura/core/aura/lang/
+├── *.aura                       # 核心类型（Any/Boolean/Byte/Char/Double/Float/Function/
+│                                #   Int/Long/Nothing/Short/String/Type/Unit + prelu）
+├── collection/                  # 集合库（Array/ArrayList/Collection/Collections/
+│                                #   HashMap/HashSet/List/Map/Set）
+├── coroutine/                   # 并发（Actor/Coroutine）
+└── std/                         # 标准模块（Ascii/Assert/Builtin/Channel/Console/Encoding/
+                                 #   Env/FileSystem/IO/Iter/Json/Math/Network/Path/Process/
+                                 #   Random/Test/TestHelper/Time）
+```
+
+> **现状说明**：上述 Aura 文件（核心类型、`collection/`、`coroutine/`、`std/`）**已经存在**
+> （见 `build/*.auc` 编译产物）。Phase 8 的工作是**完成 Rust → Aura 的等价迁移、API 对齐与
+> 一致性验证**，而不是从零创建目录。
+
+#### 目录对应关系
+
+| 域 | Rust 源 | Aura 目标目录（当前布局） |
+|----|---------|--------------------------|
+| 核心类型 | `compiler/src/std/std_builtin.rs`、`compiler/src/vm/value.rs` | `aura/core/aura/lang/*.aura`（顶层） |
+| 集合 | `compiler/src/std/std_collections.rs` | `aura/core/aura/lang/collection/*.aura` |
+| 并发 | `compiler/src/vm/native.rs`（`register_concurrent`） | `aura/core/aura/lang/coroutine/*.aura` + `std/Channel.aura` |
+| 标准模块 | `compiler/src/std/std_*.rs` | `aura/core/aura/lang/std/*.aura` |
+
+#### 迁移文件清单
+
+| Rust 文件 | 行数 | Aura 目标文件（当前布局） | 预估 | 优先级 |
+|-----------|------|--------------------------|------|--------|
+| `compiler/src/std/std_builtin.rs` + `vm/value.rs` | ~20 KB | `aura/core/aura/lang/{Any,Boolean,Byte,Char,Double,Float,Function,Int,Long,Nothing,Short,String,Type,Unit}.aura` | 3d | P0 |
+| `compiler/src/std/std_math.rs` | ~30 KB | `aura/core/aura/lang/std/Math.aura` | 2d | P0 |
+| `compiler/src/std/std_string.rs` | ~50 KB | `aura/core/aura/lang/String.aura`（核心类型） | 5d | P0 |
+| `compiler/src/std/std_ascii.rs` | ~10 KB | `aura/core/aura/lang/std/Ascii.aura` | 1d | P2 |
+| `compiler/src/std/std_path.rs` | ~20 KB | `aura/core/aura/lang/std/Path.aura` | 2d | P0 |
+| `compiler/src/std/std_encoding.rs` | ~30 KB | `aura/core/aura/lang/std/Encoding.aura` | 3d | P0 |
+| `compiler/src/std/std_time.rs` | ~20 KB | `aura/core/aura/lang/std/Time.aura` | 2d | P1 |
+| `compiler/src/std/std_collections.rs` | ~40 KB | `aura/core/aura/lang/collection/{Collection,Collections,List,Array,ArrayList,Map,HashMap,Set,HashSet}.aura` | 4d | P0 |
+| `compiler/src/std/std_iter.rs` | ~20 KB | `aura/core/aura/lang/std/Iter.aura` | 3d | P1 |
+| `compiler/src/std/std_io.rs` | ~30 KB | `aura/core/aura/lang/std/IO.aura` | 3d | P1 |
+| `compiler/src/std/std_fs.rs` | ~30 KB | `aura/core/aura/lang/std/FileSystem.aura` | 3d | P1 |
+| `compiler/src/std/std_net.rs` | ~40 KB | `aura/core/aura/lang/std/Network.aura` | 5d | P2 |
+| `compiler/src/std/std_json.rs` | ~30 KB | `aura/core/aura/lang/std/Json.aura` | 4d | P2 |
+| `compiler/src/std/std_assert.rs` | ~10 KB | `aura/core/aura/lang/std/Assert.aura` | 1d | P0 |
+| `compiler/src/std/std_test.rs` | ~15 KB | `aura/core/aura/lang/std/Test.aura` + `aura/core/aura/lang/std/TestHelper.aura` | 2d | P1 |
+| `compiler/src/std/std_env.rs` | ~10 KB | `aura/core/aura/lang/std/Env.aura` | 1d | P1 |
+| `compiler/src/std/std_process.rs` | ~15 KB | `aura/core/aura/lang/std/Process.aura` | 2d | P1 |
+| `compiler/src/std/std_random.rs` | ~10 KB | `aura/core/aura/lang/std/Random.aura` | 1d | P2 |
+| `compiler/src/std/std_console.rs` | ~10 KB | `aura/core/aura/lang/std/Console.aura` | 1d | P1 |
+| `compiler/src/vm/native.rs`（`register_concurrent`） | — | `aura/core/aura/lang/coroutine/{Coroutine,Actor}.aura` + `std/Channel.aura` | 3d | P1 |
+
+#### 迁移策略
+
+1. **核心类型**（`aura/core/aura/lang/*.aura`）：内建方法表（`std_builtin.rs`）与值模型
+   （`vm/value.rs`）上移为顶层 `.aura`，保持运算符/字面量语义与 VM 一致。
+2. **纯逻辑模块**（`std/Math`、`String`、`std/Path`、`std/Encoding`、`std/Time`）：直接翻译为 Aura 函数。
+3. **FFI 模块**（`std/IO`、`std/FileSystem`、`std/Network`、`std/Process`）：`extern "C"` 声明 + Aura 包装。
+4. **集合模块**（`collection/`、`std/Iter`）：以 `List`/`Map`/`Set` 为基础，拆分为
+   `Collection/Collections/Array/ArrayList/Map/HashMap/Set/HashSet` 等独立文件。
+5. **并发模块**（`coroutine/` + `std/Channel`）：`Coroutine`/`Actor`/`Channel` 与
+   `register_concurrent` 对齐（`Coroutine.spawnActor` / `Actor.spawnActor` 等符号名一致）。
+6. **测试模块**（`std/Assert`、`std/Test`、`std/TestHelper`）：使用 Aura 的异常与断言。
+
+#### 关键技术决策
+
+| 决策 | 选择 | 理由 |
+|------|------|------|
+| 核心类型落点 | `aura/core/aura/lang/*.aura`（顶层） | 与语言内建类型一一对应，供 std/collection 复用 |
+| 集合落点 | `aura/core/aura/lang/collection/` | 多实现在同一子目录，避免污染顶层类型 |
+| 并发落点 | `aura/core/aura/lang/coroutine/` + `std/Channel.aura` | 与现有 `coroutine/` 目录一致 |
 | 纯逻辑 | Aura 函数 | 无 FFI 依赖 |
 | FFI 模块 | `extern "C"` + Aura 包装 | 类型安全 |
 | 集合 | Aura 原生类型 | 与语言集成 |
@@ -865,38 +1018,42 @@ Layer 0-A: 最小引导层（Rust，不能上移）
 
 | # | 任务 | 预估 | 依赖 |
 |---|------|------|------|
-| 7.1 | 迁移 `std_math.rs` → `Math.aura` | 2d | 6.12 |
-| 7.2 | 迁移 `std_string.rs` → `String.aura` | 5d | 7.1 |
-| 7.3 | 迁移 `std_path.rs` → `Path.aura` | 2d | 7.1 |
-| 7.4 | 迁移 `std_encoding.rs` → `Encoding.aura` | 3d | 7.2 |
-| 7.5 | 迁移 `std_collections.rs` → `Collections.aura` | 4d | 7.2 |
-| 7.6 | 迁移 `std_builtin.rs` → `Builtin.aura` | 3d | 7.1 |
-| 7.7 | 迁移 `std_assert.rs` → `Assert.aura` | 1d | 7.1 |
-| 7.8 | 迁移 `std_io.rs` → `IO.aura` | 3d | 7.1 |
-| 7.9 | 迁移 `std_fs.rs` → `FileSystem.aura` | 3d | 7.8 |
-| 7.10 | 迁移 `std_time.rs` → `Time.aura` | 2d | 7.1 |
-| 7.11 | 迁移 `std_env.rs` → `Env.aura` | 1d | 7.8 |
-| 7.12 | 迁移 `std_process.rs` → `Process.aura` | 2d | 7.8 |
-| 7.13 | 迁移 `std_iter.rs` → `Iter.aura` | 3d | 7.5 |
-| 7.14 | 迁移 `std_test.rs` → `Test.aura` | 2d | 7.7 |
-| 7.15 | 迁移 `std_net.rs` → `Network.aura` | 5d | 7.8 |
-| 7.16 | 迁移 `std_json.rs` → `Json.aura` | 4d | 7.2 |
-| 7.17 | 迁移 `std_random.rs` → `Random.aura` | 1d | 7.1 |
-| 7.18 | 迁移 `std_console.rs` → `Console.aura` | 1d | 7.8 |
-| 7.19 | 迁移 `std_ascii.rs` → `Ascii.aura` | 1d | 7.2 |
-| 7.20 | 编写 Phase 7 验证用例 | 3d | 7.1–7.19 |
-| 7.21 | 集成测试：标准库 API 对比 | 3d | 7.20 |
+| 8.1 | 核心基础类型校对（`aura/core/aura/lang/*.aura`） | 3d | 6.12 |
+| 8.2 | 迁移 `std_math.rs` → `std/Math.aura` | 2d | 8.1 |
+| 8.3 | 迁移 `std_string.rs` → `String.aura` | 5d | 8.1 |
+| 8.4 | 迁移 `std_ascii.rs` → `std/Ascii.aura` | 1d | 8.3 |
+| 8.5 | 迁移 `std_path.rs` → `std/Path.aura` | 2d | 8.2 |
+| 8.6 | 迁移 `std_encoding.rs` → `std/Encoding.aura` | 3d | 8.3 |
+| 8.7 | 迁移 `std_time.rs` → `std/Time.aura` | 2d | 8.2 |
+| 8.8 | 迁移 `std_collections.rs` → `collection/*.aura` | 4d | 8.1 |
+| 8.9 | 迁移 `std_iter.rs` → `std/Iter.aura` | 3d | 8.8 |
+| 8.10 | 迁移 `std_io.rs` → `std/IO.aura` | 3d | 8.2 |
+| 8.11 | 迁移 `std_fs.rs` → `std/FileSystem.aura` | 3d | 8.10 |
+| 8.12 | 迁移 `std_net.rs` → `std/Network.aura` | 5d | 8.10 |
+| 8.13 | 迁移 `std_json.rs` → `std/Json.aura` | 4d | 8.3 |
+| 8.14 | 迁移 `std_assert.rs` → `std/Assert.aura` | 1d | 8.1 |
+| 8.15 | 迁移 `std_test.rs` → `std/Test.aura` + `std/TestHelper.aura` | 2d | 8.14 |
+| 8.16 | 迁移 `std_env.rs` → `std/Env.aura` | 1d | 8.10 |
+| 8.17 | 迁移 `std_process.rs` → `std/Process.aura` | 2d | 8.10 |
+| 8.18 | 迁移 `std_random.rs` → `std/Random.aura` | 1d | 8.2 |
+| 8.19 | 迁移 `std_console.rs` → `std/Console.aura` | 1d | 8.10 |
+| 8.20 | 迁移 `vm/native.rs` 并发注册 → `coroutine/*` + `std/Channel.aura` | 3d | 8.1 |
+| 8.21 | 编写 Phase 8 验证用例 | 3d | 8.1–8.20 |
+| 8.22 | 集成测试：标准库/核心库 API 对比 | 3d | 8.21 |
 
 #### 验证标准
 
-- [ ] 所有标准库函数在 Aura 中可用
+- [ ] **核心类型**（`aura/core/aura/lang/*.aura`）方法/运算符与 VM 内建行为逐例一致
+- [ ] **集合**（`aura/core/aura/lang/collection/`）各实现 API 与 Rust `std_collections.rs` 一致
+- [ ] **并发**（`coroutine/` + `std/Channel.aura`）符号名与 `register_concurrent` 对齐
+- [ ] **标准模块**（`aura/core/aura/lang/std/`）所有函数在 Aura 中可用
 - [ ] API 签名与 Rust 一致
 - [ ] 测试用例全部通过
 - [ ] FFI 模块正确调用 C 函数
 
 ---
 
-### 4.10 Phase 8：LLVM C API 直连（可选优化）
+### 4.11 Phase 9：LLVM C API 直连（可选优化）
 
 #### 目标
 
@@ -915,11 +1072,11 @@ Layer 0-A: 最小引导层（Rust，不能上移）
 
 | # | 任务 | 预估 | 依赖 |
 |---|------|------|------|
-| 8.1 | 编写 `llvm_bindings.h` | 2d | 7.21 |
-| 8.2 | 编写 `llvm_bindings.c` | 1d | 8.1 |
-| 8.3 | 编写 `llvm_bindings.aura` | 5d | 8.2 |
-| 8.4 | 编写 `llvm_codegen.aura` | 10d | 8.3 |
-| 8.5 | 集成测试：LLVM C API 输出对比 | 3d | 8.4 |
+| 9.1 | 编写 `llvm_bindings.h` | 2d | 8.22 |
+| 9.2 | 编写 `llvm_bindings.c` | 1d | 9.1 |
+| 9.3 | 编写 `llvm_bindings.aura` | 5d | 9.2 |
+| 9.4 | 编写 `llvm_codegen.aura` | 10d | 9.3 |
+| 9.5 | 集成测试：LLVM C API 输出对比 | 3d | 9.4 |
 
 #### 验证标准
 
@@ -1011,9 +1168,10 @@ sb.append(") {\n")
 | Phase 4 | VM 字节码 + 解释器 | 33d | 1.7 |
 | Phase 5 | VM 自举 | 22d | 1.1 |
 | Phase 6 | AOT LLVM 后端 | 39d | 2.0 |
-| Phase 7 | 标准库 | 45d | 2.3 |
-| Phase 8 | LLVM C API（可选） | 21d | 1.1 |
-| **总计** | | **235d** | **12.0** |
+| Phase 7 | JIT（Cranelift） | 25d | 1.3 |
+| Phase 8 | 标准库 + 核心库 | 57d | 2.7 |
+| Phase 9 | LLVM C API（可选） | 21d | 1.1 |
+| **总计** | | **272d** | **13.9** |
 
 ### 6.2 里程碑
 
@@ -1025,8 +1183,9 @@ M3（第 3.8 月末）：Phase 3 完成，MIR/Optimizer 可独立运行
 M4（第 5.5 月末）：Phase 4 完成，VM 字节码发射可用
 M5（第 6.6 月末）：Phase 5 完成，VM 自举成功
 M6（第 8.6 月末）：Phase 6 完成，AOT LLVM 后端可用
-M7（第 10.9 月末）：Phase 7 完成，标准库 Aura 化完成
-M8（第 12.0 月末）：Phase 8 完成，LLVM C API 直连（可选）
+M7（第 9.8 月末）：Phase 7 完成，JIT（Cranelift）可用，VM/JIT/AOT 三路互通
+M8（第 11.9 月末）：Phase 8 完成，核心库/标准库 Aura 化完成
+M9（第 12.9 月末）：Phase 9 完成，LLVM C API 直连（可选）
 ```
 
 ### 6.3 交付物清单
@@ -1039,8 +1198,9 @@ M8（第 12.0 月末）：Phase 8 完成，LLVM C API 直连（可选）
 | M4 | `Emit.aura` + `Interp.aura` | VM 执行测试 |
 | M5 | 最小编译器 + 自举成功 | 编译标准库 |
 | M6 | `Emit.aura`（AOT）+ `Linker.aura` | 可执行文件对比 |
-| M7 | 标准库 `.aura` 文件 | API 对比测试 |
-| M8 | `llvm_bindings.aura` + `llvm_codegen.aura` | 性能对比 |
+| M7 | `JitState.aura` + `JitLower.aura` + `JitOpt.aura` | 三路（VM/JIT/AOT）差分 + 性能对比 |
+| M8 | 核心库/标准库 `.aura` 文件（`aura/core/aura/lang/`） | API 对比测试 |
+| M9 | `llvm_bindings.aura` + `llvm_codegen.aura` | 性能对比 |
 
 ---
 
@@ -1059,6 +1219,9 @@ M8（第 12.0 月末）：Phase 8 完成，LLVM C API 直连（可选）
 | ARC 语义在 LLVM IR 中表达不清 | 中 | 中 | 显式 `Retain`/`Release` 指令 |
 | 闭包捕获在 LLVM IR 中表达不清 | 低 | 高 | 闭包结构体 + 函数指针（已验证） |
 | 最小编译器功能不足 | 中 | 高 | 逐步扩展指令集和语法支持 |
+| **JIT 热点不可达（历史问题复发）** | **中** | **高** | **继承 Fix A（入口强制编译）+ Fix B（递归 `dispatch_table`），以 `jit_state()` 诊断作门禁** |
+| JIT 与 VM/AOT 语义漂移 | 中 | 高 | 以 MIR 为单一真相源 + 三路（VM/JIT/AOT）差分测试 |
+| Aura 侧 Cranelift FFI 不可用 | 中 | 中 | 保留 Rust JIT 作为 fallback；Phase 7 整体可回退 |
 | Phase 间依赖冲突 | 低 | 中 | 每个 Phase 独立可回退 |
 | **迁移过程破坏现有编译** | **极低** | **致命** | **Rust 编译器完全保留，Aura 编译器独立目录，互不干扰** |
 
@@ -1094,19 +1257,20 @@ M8（第 12.0 月末）：Phase 8 完成，LLVM C API 直连（可选）
 2. **自举失败** → 保留 Rust 编译器作为 fallback
 3. **方案一性能不足** → 升级到方案二（LLVM C API）
 4. **泛型单态化失败** → 限制泛型使用范围（仅标量类型）
-5. **Phase 失败** → 删除 `aura/compiler/` 目录，Rust 编译器不受影响
-6. **任何时刻** → `cargo build` 仍然可用（Rust 编译器完全保留）
+5. **JIT 失败/不可编译** → 回退解释器（Phase 4/5）；若 Aura 侧 Cranelift FFI 不可用，再回退 Rust JIT
+6. **Phase 失败** → 删除 `aura/compiler/` 目录，Rust 编译器不受影响
+7. **任何时刻** → `cargo build` 仍然可用（Rust 编译器完全保留）
 
 ### 7.4 Phase 间隔离
 
 每个 Phase 都是独立可回退的，且 **Rust 编译器始终可用**：
 
 ```
-Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3 ──→ Phase 4 ──→ Phase 5 ──→ Phase 6 ──→ Phase 7
-  │            │            │            │            │            │            │            │
-  ↓            ↓            ↓            ↓            ↓            ↓            ↓            ↓
-  fallback     fallback     fallback     fallback     fallback     fallback     fallback     fallback
-  (Rust)       (Rust)       (Rust)       (Rust)       (Rust)       (Rust)       (Rust)       (Rust)
+Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3 ──→ Phase 4 ──→ Phase 5 ──→ Phase 6 ──→ Phase 7 ──→ Phase 8 ──→ Phase 9
+  │            │            │            │            │            │            │            │            │            │
+  ↓            ↓            ↓            ↓            ↓            ↓            ↓            ↓            ↓            ↓
+  fallback     fallback     fallback     fallback     fallback     fallback     fallback     fallback     fallback     fallback
+  (Rust)       (Rust)       (Rust)       (Rust)       (Rust)       (Rust)       (Rust)       (Rust)       (Rust)       (Rust)
 
 注意：fallback 始终是完整的 Rust 编译器，不是上一个 Phase 的 Aura 代码
 ```
@@ -1122,20 +1286,24 @@ Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3 ──→ Phase 4 
 3. **零风险迁移**：迁移过程不会破坏现有编译能力，任何 Phase 失败只需删除 `aura/compiler/` 目录
 4. **优先迁移纯逻辑模块**：Lexer、Parser、Sema、HIR、MIR 最容易 Aura 化
 5. **AOT 后端用方案一**：文本 IR + 子进程，与现有实现同构
-6. **LLVM C API 作为可选优化**：仅在性能不足时考虑
+6. **JIT 补全三执行路径**：Cranelift 进程内原生码，必须继承 Fix A/B 与 7 个优化传递，
+   避免「JIT 等于解释器」复发
+7. **LLVM C API 作为可选优化**：仅在性能不足时考虑
 
 ### 8.2 预期成果
 
-- **完整 Aura 编译器**：约 20,000 行 Aura 代码（`aura/compiler/`）
+- **完整 Aura 编译器**：约 24,000 行 Aura 代码（`aura/compiler/`）
 - **Rust 编译器保留**：约 43,000 行 Rust 代码（`compiler/`），完全不动
-- **标准库 Aura 化**：20+ 模块，全部在 `core/aura/lang/std/` 中
+- **核心库/标准库 Aura 化**：核心类型 + `collection/` + `coroutine/` + `std/` 全部在
+  `aura/core/aura/lang/` 中
 - **自举成功**：Aura 编译器可编译自身
+- **三执行路径**：VM 解释器 / JIT（Cranelift 进程内原生码）/ AOT（LLVM 文本 IR）语义一致、可路由
 - **LLVM 后端可用**：支持 AOT 编译、交叉编译
-- **性能目标**：AOT 性能接近 Rust 实现（>90%）
+- **性能目标**：AOT 性能接近 Rust 实现（>90%）；JIT 循环/递归热点相对解释器 ≥ 50x
 
 ### 8.3 一句话总结
 
-> **采用方案四的分阶段迁移路径，通过 8 个独立可验证的 Phase，在 12 人月内将 Aura 编译器从 Rust 完全迁移到 Aura 语言自身。核心原则是"Aura 编译器独立代码层 + Rust 编译器完全保留"，确保迁移过程零风险。AOT 后端采用文本 IR + 子进程方案（方案一），与现有实现同构，LLVM C API 直连作为可选优化（Phase 8）。**
+> **采用方案四的分阶段迁移路径，通过 9 个独立可验证的 Phase，在约 14 人月内将 Aura 编译器从 Rust 完全迁移到 Aura 语言自身。核心原则是"Aura 编译器独立代码层 + Rust 编译器完全保留"，确保迁移过程零风险。执行后端补齐 VM（Phase 4/5）、JIT（Phase 7，Cranelift 进程内原生码）、AOT（Phase 6，文本 IR + 子进程）三条路径并保持语义一致，LLVM C API 直连作为可选优化（Phase 9）。**
 
 ---
 
@@ -1156,7 +1324,12 @@ Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3 ──→ Phase 4 
 | `compiler/src/bootstrap/aot_core.rs` | 703 | Bootstrap 最小 AOT | Phase 5 |
 | `compiler/src/codegen/mir.rs` | 1087 | MIR 定义 + HIR → MIR | Phase 3 |
 | `compiler/src/codegen/emit.rs` | ~122 KB | MIR → VM 字节码 | Phase 4 |
-| `compiler/src/vm/jit.rs` | ~29 KB | Cranelift JIT | Phase 5 |
+| `compiler/src/vm/jit.rs` | ~29 KB | Cranelift JIT（热点/白名单/编译/派发） | Phase 7 |
+| `compiler/src/vm/jit_opt.rs` | — | JIT 字节码优化（7 个传递） | Phase 7 |
+| `compiler/src/vm/jit_native.rs` | — | JIT 原生码/机器码细节 | Phase 7 |
+| `compiler/src/vm/abi.rs` | ~210 | `JitValue` / `AotEntry` ABI | Phase 7 |
+| `compiler/src/vm/aot_runtime.rs` | ~1130 | W^X 加载 / 描述符表 / Blob 运行时 | Phase 7 |
+| `compiler/src/bootstrap/jit_core.rs` | — | Bootstrap 最小 JIT 引导 | Phase 7 |
 | `compiler/src/codegen/ffi_aot.rs` | ~220 | AOT FFI 直连 | Phase 6 |
 
 ---
@@ -1328,13 +1501,15 @@ Phase 0 (基础设施)
     │       │       │       │
     │       │       │       └──→ Phase 4 (VM Emit/Interp)
     │       │       │               │
-    │       │       │               └──→ Phase 5 (VM 自举)
-    │       │       │                       │
-    │       │       │                       └──→ Phase 6 (AOT LLVM)
-    │       │       │                               │
-    │       │       │                               └──→ Phase 7 (标准库)
-    │       │       │                                       │
-    │       │       │                                       └──→ Phase 8 (LLVM C API, 可选)
+    │       │       │               ├──→ Phase 5 (VM 自举)
+    │       │       │               │       │
+    │       │       │               │       └──→ Phase 6 (AOT LLVM)
+    │       │       │               │               │
+    │       │       │               │               └──→ Phase 8 (核心库/标准库)
+    │       │       │               │                       │
+    │       │       │               │                       └──→ Phase 9 (LLVM C API, 可选)
+    │       │       │               │
+    │       │       │               └──→ Phase 7 (JIT / Cranelift)
     │       │       │
     │       │       └──→ Phase 6 (AOT LLVM, 依赖 Phase 2 的 HIR)
     │       │
@@ -1346,8 +1521,9 @@ Phase 0 (基础设施)
 **关键依赖**：
 - Phase 6 依赖 Phase 1（AST）、Phase 2（HIR）、Phase 0（工具链）
 - Phase 5 依赖 Phase 4（VM）
-- Phase 7 依赖 Phase 6（AOT LLVM）
-- Phase 8 依赖 Phase 7（标准库）
+- Phase 7 依赖 Phase 3（MIR）与 Phase 4（VM / 字节码）——JIT 与 AOT 并列，不互相依赖
+- Phase 8 依赖 Phase 6（AOT）与 Phase 7（JIT）
+- Phase 9 依赖 Phase 8（标准库）
 
 ---
 
@@ -1407,11 +1583,24 @@ Phase 0 (基础设施)
 
 | 用例 | 文件 | 验证内容 |
 |------|------|----------|
-| 7.1 | `tests/std_math.aura` | Math 模块 |
-| 7.2 | `tests/std_string.aura` | String 模块 |
-| 7.3 | `tests/std_collections.aura` | Collections 模块 |
-| 7.4 | `tests/std_io.aura` | IO 模块 |
-| 7.5 | `tests/std_fs.aura` | FileSystem 模块 |
+| 7.1 | `tests/jit_hotness.aura` | 热点检测（入口强制编译 + 递归可达） |
+| 7.2 | `tests/jit_optimize.aura` | 7 个优化传递结果一致 |
+| 7.3 | `tests/jit_dispatch.aura` | `dispatch_table` / `call_indirect` 递归调用 |
+| 7.4 | `tests/jit_fallback.aura` | 不可编译函数回退解释器 |
+| 7.5 | `tests/jit_vs_vm_vs_aot.aura` | 三路（VM/JIT/AOT）结果差分 |
+
+### D.7 Phase 8 验证用例
+
+| 用例 | 文件 | 验证内容 |
+|------|------|----------|
+| 8.1 | `tests/core_types.aura` | 核心类型（`aura/core/aura/lang/*.aura`）方法/运算符 |
+| 8.2 | `tests/std_math.aura` | Math 模块 |
+| 8.3 | `tests/std_string.aura` | String 模块 |
+| 8.4 | `tests/std_collections.aura` | `collection/` 集合实现 |
+| 8.5 | `tests/std_iter.aura` | Iter 模块 |
+| 8.6 | `tests/std_io.aura` | IO 模块 |
+| 8.7 | `tests/std_fs.aura` | FileSystem 模块 |
+| 8.8 | `tests/std_concurrent.aura` | `coroutine/`（Coroutine/Actor）+ `std/Channel` |
 
 ---
 
@@ -1425,4 +1614,7 @@ Phase 0 (基础设施)
 | `docs/标准库上移与AOT直连性能影响分析.md` | AOT 直连性能分析；本文档补充 LLVM 交互机制 |
 | `docs/AOT机器码嵌入方案-详细设计.md` | AOT Blob 嵌入设计；本文档引用其 `link_to_blob` 机制 |
 | `docs/AOT一致性检查报告.md` | AOT 一致性检查；本文档参考其发现的 LLVM IR 生成问题 |
+| `docs/JIT性能分析.md` | JIT 热点不可达根因与 Fix A/B、7 优化传递；本文档 Phase 7 的设计依据 |
+| `docs/jit优化指南.md` | JIT 优化清单；本文档 Phase 7 `JitOpt` 的参照 |
+| `docs/绕过LLVM直生成机器码-可行性评估与技术方案.md` | Cranelift AOT / 直接机器码可行性评估；本文档 Phase 7 的选型参考 |
 | `docs/开发规划与实现进度.md` | 现有开发进度；本文档补充 Aura 化迁移计划 |
