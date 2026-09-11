@@ -22,17 +22,20 @@ aura/compiler/
     │   ├── Span.aura                      # Phase 1 ✅ 源码位置
     │   ├── Token.aura                     # Phase 1 ✅ Token 数据模型 + 关键字表
     │   └── Lexer.aura                     # Phase 1 ✅ 词法分析器
-    ├── parser/                            # Phase 1 ✅ Parser.aura
     ├── ast/                               # Phase 1 ✅ Ast.aura
-    ├── sema/                              # Phase 2  TypeChecker.aura
-    ├── hir/                               # Phase 2  Hir.aura
-    ├── mir/                               # Phase 3  Mir.aura
-    ├── codegen/                           # Phase 4  Emit.aura
-    ├── vm/                                # Phase 4/5 Vm.aura / Opcodes.aura / Frames.aura
-    ├── aot/                               # Phase 6  AOT LLVM 后端
+    ├── parser/                            # Phase 1 ✅ Parser.aura
+    ├── errors/                            # Phase 1 ✅ CompileError.aura
+    ├── sema/                              # Phase 2 ✅ Type/TypeInfo/SymbolTable/TypeChecker
+    ├── hir/                               # Phase 2 ✅ Hir/Desugar/Mono/Inline/Fold
+    ├── mir/                               # Phase 3 ✅ Mir/MirLower/MirOpt
+    ├── codegen/                           # Phase 4 ✅ Codegen.aura（MIR → 字节码）
+    ├── vm/                                # Phase 4/5 ✅ Vm/VmRunner/Opcodes/Frames/
+    │                                      #            FrameManager/TailCall/Closures
+    ├── aot/                               # Phase 6 ✅ AOT LLVM 后端（Aura 化）
     ├── gc/ memory/ runtime/               # 已有 VM 运行时雏形
     └── test/
-        └── TestRunner.aura                # Phase 0  Aura 测试框架
+        ├── TestRunner.aura                # Phase 0  Aura 测试框架
+        └── TestRunnerSelfTest.aura        # Phase 0  自检入口
 ```
 
 ## Phase 1 交付物（前端 Aura 化）
@@ -163,6 +166,111 @@ finally 双路径执行、**跨函数栈展开**、嵌套 try、handler 正常�
 > 注：`loom/src/plugin/context.rs` 的 `new_default()` 属**非测试**公开 API，
 > 保持 `default()` 不变，避免把生产环境的默认输出目录改成临时目录。
 
+## Phase 2 交付物（语义分析 + HIR）✅
+
+| # | 交付物 | 路径 | 状态 |
+|---|--------|------|------|
+| 2.1 | 类型表示 `Type` | `.../sema/Type.aura` | ✅ |
+| 2.2 | 类型信息 `TypeInfo` | `.../sema/TypeInfo.aura` | ✅ |
+| 2.3 | 符号表（作用域链） | `.../sema/SymbolTable.aura` | ✅ |
+| 2.4 | 类型检查器 | `.../sema/TypeChecker.aura` | ✅ |
+| 2.5 | HIR 定义 + AST→HIR 降级 | `.../hir/Hir.aura` | ✅ |
+| 2.6 | 语法糖消解 | `.../hir/Desugar.aura` | ✅ |
+| 2.7 | 泛型单态化 | `.../hir/Mono.aura` | ✅ |
+| 2.8 | 内联优化 | `.../hir/Inline.aura` | ✅ |
+| 2.9 | 常量折叠 | `.../hir/Fold.aura` | ✅ |
+| 2.10 | Phase 2 验证用例 | `tests/phase2_sema_hir_tests.aura`（+ `phase2_*` 最小用例） | ✅ |
+
+HIR 采用与 AST 一致的「扁平 arena」表示（`kinds/texts/tys/spans/kids`
+五条「每行一项」的字符串），以规避当前 VM 对 `List`/`Map` 的若干限制。
+
+## Phase 3 交付物（MIR + 优化）✅
+
+| # | 交付物 | 路径 | 状态 |
+|---|--------|------|------|
+| 3.1 | MIR 定义（TAC/基本块） | `.../mir/Mir.aura` | ✅ |
+| 3.2 | HIR→MIR 降级 | `.../mir/MirLower.aura` | ✅ |
+| 3.3 | MIR 优化（DCE/常量传播） | `.../mir/MirOpt.aura` | ✅ |
+| 3.4 | Phase 3 验证用例 | `tests/phase3_mir_tests.aura` | ✅ |
+
+## Phase 4 交付物（字节码发射 + VM）✅
+
+| # | 交付物 | 路径 | 状态 |
+|---|--------|------|------|
+| 4.1 | MIR→字节码发射器 | `.../codegen/Codegen.aura` | ✅ |
+| 4.2 | 指令集定义 | `.../vm/Opcodes.aura` | ✅ |
+| 4.3 | 栈帧定义 | `.../vm/Frames.aura` | ✅ |
+| 4.4 | VM 解释器 | `.../vm/Vm.aura` | ✅（增强版运行器见 Phase 5） |
+| 4.5 | Phase 3/4 验证用例 | `tests/phase3_mir_tests.aura` | ✅ |
+
+## Phase 5 交付物（VM 增强：闭包 / 尾调用 / 栈帧）✅
+
+| # | 交付物 | 路径 | 状态 |
+|---|--------|------|------|
+| 5.1 | VM 指令执行循环 | `.../vm/VmRunner.aura` | ✅ |
+| 5.2 | 闭包与上值管理 | `.../vm/Closures.aura` | ✅ |
+| 5.3 | 尾调用优化 | `.../vm/TailCall.aura` | ✅ |
+| 5.4 | 栈帧管理（分配/释放/溢出） | `.../vm/FrameManager.aura` | ✅ |
+| 5.5 | Phase 5 验证用例 | `tests/phase5_vm_tests.aura` | ✅ |
+
+**修复记录**：`VmRunner.pop()` 原实现移除栈顶时只截掉末尾 `\n`，被弹出的值仍残留在
+`stack` 字符串中，导致下一次 `push` 拼接出错（如 `42 + 42` 得到 `"4284"`）。
+已改为连同该行值一起移除，`phase5_vm_tests.aura` 由 2 项失败 → **全部通过**。
+
+## Phase 6 交付物（AOT LLVM 后端）✅
+
+对应迁移计划 §4.8，将 Rust `compiler/src/codegen/aot/` 上移到
+`aura/lang/compiler/aot/`（文本 LLVM IR + 外部 `llc`/`clang` 子进程方案，方案一）。
+
+| # | 任务 | Rust 源 | Aura 目标 | 状态 |
+|---|------|---------|-----------|------|
+| 6.1 | 类型映射 | `aot/types.rs` | `.../aot/TypeMapper.aura` | ✅ |
+| 6.2 | 目标三元组 | `aot/target.rs` | `.../aot/Target.aura` | ✅ |
+| 6.3 | Runtime 声明 | `aot/runtime.rs` | `.../aot/Runtime.aura` | ✅ |
+| 6.4 | FFI 声明 | `aot/ffi.rs` | `.../aot/Ffi.aura` | ✅ |
+| 6.5 | 优化级别 | `aot/optimize.rs` | `.../aot/Optimize.aura` | ✅ |
+| 6.6 | LLVM IR 生成 | `aot/emit.rs` | `.../aot/Emit.aura` | ✅ |
+| 6.7 | 目标码生成/链接 | `aot/linker.rs` | `.../aot/Linker.aura` | ✅ |
+| 6.8 | DWARF 调试信息 | `aot/dwarf.rs` | `.../aot/Dwarf.aura` | ✅ |
+| 6.9 | C 后端（备选） | `aot/c_backend.rs` | `.../aot/CBackend.aura` | ✅ |
+| 6.10 | 编排器 + 选项 | `aot/mod.rs` | `.../aot/Aot.aura` | ✅ |
+| 6.11 | 公共辅助 | — | `.../aot/AotUtil.aura` | ✅ |
+| 6.12 | Phase 6 验证用例 | — | `tests/phase6_aot_tests.aura`（14 组 / 141 断言） | ✅ |
+
+**交付内容**：
+
+- **模块头 + 函数定义**：`Emit.aura` 从 HIR 生成 LLVM IR 文本（`target triple` /
+  `target datalayout` / 结构体 / 字符串常量 / runtime 声明 / `define ... { entry: ... }`），
+  局部变量在 entry 块 `alloca`；覆盖字面量、变量、二元/一元、调用、val|var、
+  return、assign、if、while、block。
+- **类型/目标/优化/声明**：`TypeMapper`（Int→i32、String→`{ i8*, i64 }`、用户类型→
+  `%struct.*`、fnType）、`Target`（三元组构造/解析/扩展名）、`Optimize`（`-O0`…`-Oz`）、
+  `Runtime`（10 个 runtime 声明 + 判定/签名）、`Ffi`（声明生成/去重/runtime 跳过/C ABI 覆盖）。
+- **后端**：`Linker`（`llc`/`clang`/`lld-link` 命令构造 + 5 级工具探测说明）、
+  `CBackend`（HIR→C 备选路径）、`Dwarf`（`DICompileUnit`/`DISubprogram` 元数据）、
+  `Aot`（编排器：IR + 命令 + C 源码 → `AotResult`）。
+
+**设计边界**：纯 Aura 侧以「IR 文本生成 + 命令构造」为交付边界（纯函数、可测试）；
+实际的 `llc`/`clang` 子进程调用与产物写盘由引导层（`Process.spawn` / FFI）承担。
+
+**验证**：`tests/phase6_aot_tests.aura` 覆盖上述全部模块，14 组用例全部通过
+（`RESULT: PASS`）。
+
+**修复记录（Phase 6 开发期间暴露的运行时约束）**：
+
+- 经**字段访问得到的对象/字符串再调用方法**会错乱 `this` 绑定（`r.objectCommand.contains(...)`
+  恒假）；需先取局部变量再调用。
+- `String` 字面量中的 `$` 会触发插值（`"$AURA_LLVM_HOME"` 被解析为变量引用），
+  文档化文本需避免裸 `$`。
+
+> **回退策略**：任何 Phase 6 失败只需删除 `aura/lang/compiler/aot/`，Rust 编译器
+> 的 AOT 后端（`compiler/src/codegen/aot/`）不受影响，始终可用。
+
+## Phase 7 规划（标准库 Aura 化）🔜
+
+对应迁移计划 §4.9：将 `compiler/src/std/*.rs` 上移到 `core/aura/lang/std/`，
+使 Aura 源码成为标准库唯一真相源。前置依赖（Phase 6）已就绪。
+
 ## Phase 0 交付物
 
 | # | 交付物 | 路径 |
@@ -187,11 +295,23 @@ aura run tests/phase0_tests.aura
 # 3) Phase 1 验证用例（Lexer / Token / Span）
 aura run tests/phase1_lexer_tests.aura
 
-# 4) 构建 Aura 编译器骨架（默认产出 .auc；--aot 产出原生可执行文件）
+# 4) Phase 2 验证用例（Sema / SymbolTable / Type / HIR）
+aura run tests/phase2_sema_hir_tests.aura
+
+# 5) Phase 3/4 验证用例（MIR / 优化 / 字节码发射）
+aura run tests/phase3_mir_tests.aura
+
+# 6) Phase 5 验证用例（闭包 / 尾调用 / 栈帧 / VM 运行器）
+aura run tests/phase5_vm_tests.aura
+
+# 7) Phase 6 验证用例（AOT LLVM 后端：类型映射 / 目标三元组 / IR 发射）
+aura run tests/phase6_aot_tests.aura
+
+# 8) 构建 Aura 编译器骨架（默认产出 .auc；--aot 产出原生可执行文件）
 scripts/build-aura-compiler.sh
 scripts/build-aura-compiler.sh --aot
 
-# 5) 源码快照一致性检查
+# 9) 源码快照一致性检查
 scripts/snapshot.sh
 ```
 
@@ -201,6 +321,10 @@ Windows（PowerShell）：
 aura run aura\compiler\aura\lang\compiler\test\TestRunnerSelfTest.aura
 aura run tests\phase0_tests.aura
 aura run tests\phase1_lexer_tests.aura
+aura run tests\phase2_sema_hir_tests.aura
+aura run tests\phase3_mir_tests.aura
+aura run tests\phase5_vm_tests.aura
+aura run tests\phase6_aot_tests.aura
 scripts\build-aura-compiler.ps1
 scripts\snapshot.ps1
 ```

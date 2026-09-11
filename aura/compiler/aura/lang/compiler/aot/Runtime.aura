@@ -1,0 +1,134 @@
+// aura:///aura/lang/compiler/aot/Runtime.aura
+package aura.lang.compiler.aot
+// ─────────────────────────────────────────────────────────────
+// Runtime 库链接声明 — 纯 Aura 化迁移 · Phase 6 (任务 6.3)
+//
+// 对应 Rust `compiler/src/codegen/aot/runtime.rs`。
+//
+// Aura runtime 库（`aura-runtime`）通过 C ABI 导出 ARC、GC、协程、
+// 堆分配与字符串操作等函数；AOT 生成代码时自动注入这些外部声明。
+//
+// 表格格式（每行一项）：
+//   name|ret_llvm_type|param_llvm_types(逗号分隔)
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.compiler.aot.AotUtil
+
+/// 全部 runtime 函数声明表。
+fun runtimeTable(): String {
+    return "aura_arc_increment|void|i8*\n" +
+        "aura_arc_decrement|void|i8*\n" +
+        "aura_coroutine_yield|void|i8*\n" +
+        "aura_malloc|i8*|i64\n" +
+        "aura_free|void|i8*\n" +
+        "aura_string_new|i8*|i8*,i64\n" +
+        "aura_string_length|i64|i8*\n" +
+        "toStringFloat|i8*|double\n" +
+        "aura_string_data|i8*|i8*\n" +
+        "aura_string_concat|i8*|i8*,i64,i8*,i64\n"
+}
+
+/// C FFI 实现（aura_std_cffi.c）的真实 ABI 签名表。
+/// 格式：`symbol|ret_llvm_type|param_llvm_types(逗号分隔)`
+fun cffiTable(): String {
+    return "aura_math_sin|double|double\n" +
+        "aura_math_cos|double|double\n" +
+        "aura_math_sqrt|double|double\n" +
+        "aura_math_pow|double|double,double\n" +
+        "aura_math_abs|i64|double\n" +
+        "aura_string_length|i64|i8*\n" +
+        "aura_string_contains|i1|i8*,i8*\n" +
+        "aura_string_toUpperCase|i8*|i8*\n" +
+        "aura_string_toLowerCase|i8*|i8*\n" +
+        "aura_string_trim|i8*|i8*\n" +
+        "aura_string_startsWith|i1|i8*,i8*\n" +
+        "aura_string_endsWith|i1|i8*,i8*\n" +
+        "aura_fs_exists|i1|i8*\n" +
+        "aura_fs_readText|i8*|i8*\n" +
+        "aura_fs_writeText|i8*|i8*,i8*\n" +
+        "aura_io_fileWrite|void|i8*,i8*\n" +
+        "aura_env_platform|i8*|\n" +
+        "aura_env_get|i8*|i8*\n" +
+        "aura_time_epoch|i64|\n" +
+        "aura_random_nextInt|i64|\n"
+}
+
+/// 生成所有 runtime 函数的 LLVM 外部声明。
+fun runtimeDeclarations(): String {
+    val table: String = runtimeTable()
+    var out: String = "; ---- Aura Runtime Declarations ----\n"
+    var n: Int = aotLineCount(table)
+    var i: Int = 0
+    while (i < n) {
+        val line: String = aotLineAt(table, i)
+        val name: String = aotFieldAt(line, 0, "|")
+        val ret: String = aotFieldAt(line, 1, "|")
+        val params: String = aotCsvToSpaced(aotFieldAt(line, 2, "|"))
+        out = out + "declare " + ret + " @" + name + "(" + params + ")\n"
+        i = i + 1
+    }
+    return out
+}
+
+/// 所有 runtime 函数名（换行分隔）。
+fun runtimeFunctionNames(): String {
+    val table: String = runtimeTable()
+    var out: String = ""
+    var n: Int = aotLineCount(table)
+    var i: Int = 0
+    while (i < n) {
+        out = out + aotFieldAt(aotLineAt(table, i), 0, "|") + "\n"
+        i = i + 1
+    }
+    return out
+}
+
+/// runtime 函数个数。
+fun runtimeFunctionCount(): Int {
+    return aotLineCount(runtimeTable())
+}
+
+/// 检查一个符号名是否为 runtime 函数。
+fun isRuntimeFunction(name: String): Boolean {
+    val table: String = runtimeTable()
+    var n: Int = aotLineCount(table)
+    var i: Int = 0
+    while (i < n) {
+        if (aotFieldAt(aotLineAt(table, i), 0, "|") == name) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+/// runtime 函数签名（`ret|paramsSpaced`），非 runtime 函数返回 ""。
+fun runtimeSignature(name: String): String {
+    val table: String = runtimeTable()
+    var n: Int = aotLineCount(table)
+    var i: Int = 0
+    while (i < n) {
+        val line: String = aotLineAt(table, i)
+        if (aotFieldAt(line, 0, "|") == name) {
+            return aotFieldAt(line, 1, "|") + "|" + aotCsvToSpaced(aotFieldAt(line, 2, "|"))
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+/// C FFI 函数签名（`ret|paramsSpaced`），非 C FFI 函数返回 ""。
+fun cffiSignature(name: String): String {
+    val table: String = cffiTable()
+    var n: Int = aotLineCount(table)
+    var i: Int = 0
+    while (i < n) {
+        val line: String = aotLineAt(table, i)
+        if (aotFieldAt(line, 0, "|") == name) {
+            return aotFieldAt(line, 1, "|") + "|" + aotCsvToSpaced(aotFieldAt(line, 2, "|"))
+        }
+        i = i + 1
+    }
+    return ""
+}

@@ -1,0 +1,155 @@
+// aura:///aura/lang/compiler/aot/AotUtil.aura
+package aura.lang.compiler.aot
+// ─────────────────────────────────────────────────────────────
+// AOT 后端公共辅助 — 纯 Aura 化迁移 · Phase 6
+//
+// 提供所有 aot/*.aura 模块共用的字符串解析工具（行/字段/CSV/整数）。
+// 命名统一以 `aot` 前缀，避免与 Ast/Hir/Mir 的同类辅助冲突
+// （它们分别用 ast*/hir*/mir*/ce* 前缀）。
+//
+// 说明：当前 VM 对 `List` 支持不稳定，故一律采用「字符串 + 字符扫描」，
+// 与 Phase 1–5 的实现风格保持一致。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+
+/// 取第 index 个以 sep 分隔的字段（0-based，字符扫描）。
+fun aotFieldAt(text: String, index: Int, sep: String): String {
+    var i: Int = 0
+    var fieldStart: Int = 0
+    var cur: Int = 0
+    var fieldLen: Int = text.length
+    while (i < fieldLen) {
+        if (toStr(text[i]) == sep) {
+            if (cur == index) {
+                return aotSlice(text, fieldStart, i - fieldStart)
+            }
+            cur = cur + 1
+            fieldStart = i + 1
+        }
+        i = i + 1
+    }
+    if (cur == index) {
+        return aotSlice(text, fieldStart, fieldLen - fieldStart)
+    }
+    return ""
+}
+
+/// 字符串切片（越界自动截断）。
+fun aotSlice(text: String, start: Int, length: Int): String {
+    var result: String = ""
+    var end: Int = start + length
+    if (end > text.length) {
+        end = text.length
+    }
+    var i: Int = start
+    while (i < end) {
+        result = result + toStr(text[i])
+        i = i + 1
+    }
+    return result
+}
+
+/// 十进制字符串 → Int（支持前导负号；非法字符忽略）。
+fun aotToInt(text: String): Int {
+    var total: Int = 0
+    var i: Int = 0
+    var len: Int = text.length
+    var neg: Boolean = false
+    if (len > 0 && toStr(text[0]) == "-") {
+        neg = true
+        i = 1
+    }
+    while (i < len) {
+        val c: String = toStr(text[i])
+        var digit: Int = -1
+        var j: Int = 0
+        while (j < 10) {
+            if (toStr(j) == c) {
+                digit = j
+                break
+            }
+            j = j + 1
+        }
+        if (digit >= 0) {
+            total = total * 10 + digit
+        }
+        i = i + 1
+    }
+    if (neg) {
+        return -total
+    }
+    return total
+}
+
+/// 文本行数（末尾无换行时补计一行；空串为 0）。
+fun aotLineCount(text: String): Int {
+    if (text == "") {
+        return 0
+    }
+    var count: Int = 0
+    var i: Int = 0
+    var len: Int = text.length
+    while (i < len) {
+        if (toStr(text[i]) == "\n") {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    if (toStr(text[len - 1]) != "\n") {
+        count = count + 1
+    }
+    return count
+}
+
+/// 取第 index 行（0-based）。
+fun aotLineAt(text: String, index: Int): String {
+    return aotFieldAt(text, index, "\n")
+}
+
+/// CSV 字段数（空串为 0）。
+fun aotCsvCount(csv: String): Int {
+    if (csv == "") {
+        return 0
+    }
+    var count: Int = 1
+    var i: Int = 0
+    while (i < csv.length) {
+        if (toStr(csv[i]) == ",") {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    return count
+}
+
+/// 将 CSV 转为「逗号 + 空格」分隔（LLVM 声明风格），如 `i32,i32` → `i32, i32`。
+fun aotCsvToSpaced(csv: String): String {
+    if (csv == "") {
+        return ""
+    }
+    var out: String = ""
+    var n: Int = aotCsvCount(csv)
+    var i: Int = 0
+    while (i < n) {
+        if (i > 0) {
+            out = out + ", "
+        }
+        out = out + aotFieldAt(csv, i, ",")
+        i = i + 1
+    }
+    return out
+}
+
+/// 判断 name 是否出现在以 sep 分隔的行清单中（如 `seen` 去重集合）。
+fun aotListContains(lines: String, name: String): Boolean {
+    var n: Int = aotLineCount(lines)
+    var i: Int = 0
+    while (i < n) {
+        if (aotLineAt(lines, i) == name) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}

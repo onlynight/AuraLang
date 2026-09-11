@@ -44,12 +44,12 @@ object CompilerInfo {
 
     /// 编译器版本。
     fun version(): String {
-        return "0.1.0-phase4"
+        return "0.1.0-phase6"
     }
 
     /// 当前迁移阶段描述。
     fun phase(): String {
-        return "Phase 4 / 8：MIR + 字节码发射完成，VM 解释器增强中"
+        return "Phase 6 / 8：AOT LLVM 后端（纯 Aura 化）完成"
     }
 }
 

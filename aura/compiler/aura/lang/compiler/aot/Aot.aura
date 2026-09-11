@@ -1,0 +1,171 @@
+// aura:///aura/lang/compiler/aot/Aot.aura
+package aura.lang.compiler.aot
+// ─────────────────────────────────────────────────────────────
+// AOT 后端编排器 — 纯 Aura 化迁移 · Phase 6 (任务 6.10)
+//
+// 对应 Rust `compiler/src/codegen/aot/mod.rs`（AotCodeGenerator + AotOptions）。
+//
+// 编排流程：
+//   1. HIR → LLVM IR 文本           （Emit.aura）
+//   2. 构造 llc / clang 命令         （Linker.aura）
+//   3. 生成 C 后端备选源码           （CBackend.aura）
+//   4. 组装为 AotResult 返回
+//
+// 设计说明：与 Rust 侧一致，IR 生成是纯函数（不触发 IO）；
+// 实际的 llc/clang 子进程调用与产物写盘由引导层承担。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.compiler.lexer.Span
+import aura.lang.compiler.hir.Hir
+import aura.lang.compiler.aot.AotUtil
+import aura.lang.compiler.aot.Target
+import aura.lang.compiler.aot.Optimize
+import aura.lang.compiler.aot.Emit
+import aura.lang.compiler.aot.Linker
+import aura.lang.compiler.aot.CBackend
+
+/// AOT 编译选项。
+class AotOptions {
+
+    /// 目标平台三元组。
+    var target: TargetTriple = targetDefault()
+
+    /// 优化级别。
+    var optLevel: OptimizationLevel = optLevelDefault()
+
+    /// 模块名（同时用作产物文件名前缀）。
+    var moduleName: String = "main"
+
+    /// 是否注入 runtime 声明。
+    var linkRuntime: Boolean = true
+
+    /// 是否发射调试信息。
+    var emitDebug: Boolean = false
+
+    /// LLVM 根目录（可选，优先级最高）。
+    var llvmHome: String = ""
+
+    /// 是否链接标准库 C FFI。
+    var linkStdCffi: Boolean = false
+
+    init(target: TargetTriple, optLevel: OptimizationLevel, moduleName: String) {
+        this.target = target
+        this.optLevel = optLevel
+        this.moduleName = moduleName
+        this.linkRuntime = true
+        this.emitDebug = false
+        this.llvmHome = ""
+        this.linkStdCffi = false
+    }
+}
+
+/// 默认 AOT 选项。
+fun defaultAotOptions(): AotOptions {
+    return AotOptions(targetDefault(), optLevelDefault(), "main")
+}
+
+/// AOT 编译结果。
+class AotResult {
+
+    /// 生成的 LLVM IR 文本。
+    var llvmIr: String = ""
+
+    /// 目标三元组字符串。
+    var targetTriple: String = ""
+
+    /// 优化参数（`-O2` 等）。
+    var optFlag: String = ""
+
+    /// llc 目标文件生成命令。
+    var objectCommand: String = ""
+
+    /// clang 可执行文件链接命令。
+    var executableCommand: String = ""
+
+    /// C 后端备选源码。
+    var cSource: String = ""
+
+    /// 是否成功。
+    var success: Boolean = false
+
+    init(ir: String, triple: String, flag: String, objCmd: String, exeCmd: String, cSrc: String) {
+        this.llvmIr = ir
+        this.targetTriple = triple
+        this.optFlag = flag
+        this.objectCommand = objCmd
+        this.executableCommand = exeCmd
+        this.cSource = cSrc
+        this.success = true
+    }
+
+    /// IR 文本行数。
+    fun irLineCount(): Int {
+        return aotLineCount(this.llvmIr)
+    }
+
+    /// IR 中是否定义了指定函数。
+    fun hasFunction(name: String): Boolean {
+        return this.llvmIr.contains("@" + sanitizeLlvm(name) + "(")
+    }
+}
+
+/// AOT 代码生成器（编排器）。
+class AotCodeGenerator {
+
+    /// 最近一次编译结果。
+    var lastResult: AotResult = emptyAotResult()
+
+    init() {
+        this.lastResult = emptyAotResult()
+    }
+
+    /// HIR → AOT 结果（IR + 命令 + C 源码）。
+    fun compile(hir: Hir, options: AotOptions): AotResult {
+        // 注意：经字段访问得到的对象再调方法会错乱 this 绑定，
+        // 故先取到局部变量再调用。
+        val tgt: TargetTriple = options.target
+        val lvl: OptimizationLevel = options.optLevel
+        val triple: String = tgt.toTriple()
+        val flag: String = lvl.flag()
+
+        val ir: String = emitLlvmIr(hir, options.moduleName, triple)
+
+        val objPath: String = options.moduleName + "." + tgt.objectExt()
+        var exePath: String = options.moduleName
+        val exeExt: String = tgt.exeExt()
+        if (exeExt != "") {
+            exePath = exePath + "." + exeExt
+        }
+        val objCmd: String = llcCommand(options.moduleName + ".ll", objPath, triple, flag)
+        val exeCmd: String = clangCommand(objPath, exePath, triple, flag, options.emitDebug)
+
+        val cSrc: String = emitC(hir, options.moduleName)
+
+        val r: AotResult = AotResult(ir, triple, flag, objCmd, exeCmd, cSrc)
+        this.lastResult = r
+        return r
+    }
+
+    /// 仅生成 LLVM IR（便捷方法）。
+    fun emitIr(hir: Hir, options: AotOptions): String {
+        val tgt: TargetTriple = options.target
+        return emitLlvmIr(hir, options.moduleName, tgt.toTriple())
+    }
+}
+
+/// 空结果占位。
+fun emptyAotResult(): AotResult {
+    return AotResult("", "", "", "", "", "")
+}
+
+/// 顶层入口：HIR → AOT 结果。
+fun aotCompile(hir: Hir, options: AotOptions): AotResult {
+    val gen: AotCodeGenerator = AotCodeGenerator()
+    return gen.compile(hir, options)
+}
+
+/// AOT 后端版本。
+fun aotBackendVersion(): String {
+    return "0.1.0-phase6"
+}

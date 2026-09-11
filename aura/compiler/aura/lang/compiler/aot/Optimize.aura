@@ -1,0 +1,74 @@
+// aura:///aura/lang/compiler/aot/Optimize.aura
+package aura.lang.compiler.aot
+// ─────────────────────────────────────────────────────────────
+// 优化级别配置 — 纯 Aura 化迁移 · Phase 6 (任务 6.5)
+//
+// 对应 Rust `compiler/src/codegen/aot/optimize.rs`。
+//
+// 通过 `llc` / `clang` 的 `-O<N>` 参数选择 LLVM NewPM 优化级别：
+//   None → -O0，Balanced → -O1，Aggressive → -O2（默认），
+//   Extreme → -O3，Size → -Os，SizeExtreme → -Oz
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+
+/// 优化级别（以规范化名称保存）。
+class OptimizationLevel {
+
+    /// 规范化级别名（"None"/"Balanced"/"Aggressive"/"Extreme"/"Size"/"SizeExtreme"）。
+    var name: String = "Aggressive"
+
+    init(n: String) {
+        this.name = n
+    }
+
+    /// 转为 LLVM 命令行参数；未知级别返回 ""。
+    fun flag(): String {
+        if (this.name == "None") { return "-O0" }
+        if (this.name == "Balanced") { return "-O1" }
+        if (this.name == "Aggressive") { return "-O2" }
+        if (this.name == "Extreme") { return "-O3" }
+        if (this.name == "Size") { return "-Os" }
+        if (this.name == "SizeExtreme") { return "-Oz" }
+        return ""
+    }
+
+    /// 此级别是否对调试友好（-O0 / -O1）。
+    fun debugFriendly(): Boolean {
+        return this.name == "None" || this.name == "Balanced"
+    }
+
+    /// 是否为合法级别。
+    fun isValid(): Boolean {
+        return this.flag() != ""
+    }
+}
+
+/// 默认级别：Aggressive（-O2）。
+fun optLevelDefault(): OptimizationLevel {
+    return OptimizationLevel("Aggressive")
+}
+
+/// 从字符串解析（对齐 Rust `OptimizationLevel::from_str`）；
+/// 未识别时返回 isValid()==false 的实例。
+fun optLevelFromStr(s: String): OptimizationLevel {
+    if (s == "0" || s == "O0" || s == "none" || s == "None") {
+        return OptimizationLevel("None")
+    }
+    if (s == "1" || s == "O1" || s == "balanced" || s == "Balanced") {
+        return OptimizationLevel("Balanced")
+    }
+    if (s == "2" || s == "O2" || s == "aggressive" || s == "Aggressive" || s == "default") {
+        return OptimizationLevel("Aggressive")
+    }
+    if (s == "3" || s == "O3" || s == "extreme" || s == "Extreme") {
+        return OptimizationLevel("Extreme")
+    }
+    if (s == "s" || s == "Os" || s == "size" || s == "Size") {
+        return OptimizationLevel("Size")
+    }
+    if (s == "z" || s == "Oz" || s == "size_extreme" || s == "SizeExtreme") {
+        return OptimizationLevel("SizeExtreme")
+    }
+    return OptimizationLevel("")
+}

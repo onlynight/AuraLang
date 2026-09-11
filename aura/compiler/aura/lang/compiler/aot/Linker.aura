@@ -1,0 +1,77 @@
+// aura:///aura/lang/compiler/aot/Linker.aura
+package aura.lang.compiler.aot
+// ─────────────────────────────────────────────────────────────
+// 目标码生成与链接 — 纯 Aura 化迁移 · Phase 6 (任务 6.7)
+//
+// 对应 Rust `compiler/src/codegen/aot/linker.rs`。
+//
+// 通过外部 `llc`（LLVM 静态编译器）与 `clang`（链接器）把生成的
+// LLVM IR 文本编译为目标文件 / 可执行文件。
+//
+// LLVM 工具探测顺序（与 Rust 一致）：
+//   1. AotOptions.llvm_home 显式指定
+//   2. 运行时环境变量 AURA_LLVM_HOME
+//   3. 编译时配置 AURA_CONFIG_LLVM_HOME
+//   4. 编译时配置 AURA_CONFIG_LLVM_SEARCH_PATHS
+//   5. 系统 PATH（where / which）
+//
+// 说明：纯 Aura 侧以「命令构造」为交付边界（便于测试与审计）；实际子进程
+// 调用由引导层（Process.spawn）承担，探测顺序以 `toolSearchHint` 文档化。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.compiler.aot.AotUtil
+
+/// 构造 `llc` 命令：IR → 目标文件。
+fun llcCommand(llPath: String, objPath: String, target: String, optFlag: String): String {
+    return "llc -mtriple " + target + " " + llPath + " -o " + objPath
+        + " " + optFlag + " -filetype=obj"
+}
+
+/// 构造 `clang` 链接命令：目标文件/IR → 可执行文件。
+fun clangCommand(inputPath: String, exePath: String, target: String,
+                 optFlag: String, debug: Boolean): String {
+    var cmd: String = "clang -target " + target + " " + inputPath + " -o " + exePath
+        + " " + optFlag
+    if (debug) {
+        cmd = cmd + " -g"
+    }
+    return cmd
+}
+
+/// 构造 Windows 回退链接命令（`lld-link`）。
+fun lldLinkCommand(inputPath: String, exePath: String): String {
+    return "lld-link " + inputPath + " /out:" + exePath + " /entry:main /subsystem:console"
+}
+
+/// 构造编译 std C FFI 的命令（Phase 4：`link_std_cffi`）。
+fun compileCffiCommand(cSource: String, objPath: String, target: String, optFlag: String): String {
+    return "clang -c -target " + target + " " + cSource + " -o " + objPath + " " + optFlag
+}
+
+/// LLVM 工具探测顺序说明（5 级，与 Rust `find_tool` 对齐）。
+fun toolSearchHint(tool: String): String {
+    var out: String = "search order for " + tool + ":\n"
+    out = out + "  1. AotOptions.llvm_home/bin/" + tool + "\n"
+    out = out + "  2. env AURA_LLVM_HOME/bin/" + tool + "\n"
+    out = out + "  3. env AURA_CONFIG_LLVM_HOME/bin/" + tool + "\n"
+    out = out + "  4. env AURA_CONFIG_LLVM_SEARCH_PATHS/*/bin/" + tool + "\n"
+    out = out + "  5. PATH (" + pathProbeCommand(tool) + ")\n"
+    return out
+}
+
+/// 依平台返回 PATH 探测命令（Windows: where，其余: which）。
+fun pathProbeCommand(tool: String): String {
+    if (targetDefault().os == "Windows") {
+        return "where " + tool
+    }
+    return "which " + tool
+}
+
+/// 给定 llvm_home，返回该工具的首选候选路径（不做文件系统探测）。
+fun toolPreferredPath(tool: String, llvmHome: String): String {
+    if (llvmHome == "") {
+        return tool
+    }
+    return llvmHome + "/bin/" + tool
+}

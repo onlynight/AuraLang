@@ -1,0 +1,762 @@
+// aura:///aura/lang/compiler/aot/Emit.aura
+package aura.lang.compiler.aot
+// ─────────────────────────────────────────────────────────────
+// LLVM IR 文本生成器 — 纯 Aura 化迁移 · Phase 6 (任务 6.6)
+//
+// 对应 Rust `compiler/src/codegen/aot/emit.rs`（3380 行）。
+//
+// 将 HIR 程序生成为 LLVM IR 文本字符串。生成流程：
+//   1. 模块头（target triple / data layout）
+//   2. 全局结构体类型定义（%struct.<Name> = type ...）
+//   3. 字符串常量全局（@str.N）
+//   4. Runtime 库函数声明
+//   5. 用户函数定义（define ...）
+//   6. 可选 DWARF 调试元数据
+//
+// 生成策略（与 Rust 一致）：
+//   - 使用 LLVM 13+ 不透明指针（ptr）
+//   - 局部变量在 entry 基本块 alloca 分配
+//   - 控制流使用条件分支（br）
+//
+// 本版聚焦核心降级（可逐步扩展）：
+//   字面量 / 变量 / 二元 / 一元 / 调用 / val|var 声明 / return /
+//   assign / if / while / block。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.compiler.lexer.Span
+import aura.lang.compiler.hir.Hir
+import aura.lang.compiler.aot.AotUtil
+import aura.lang.compiler.aot.TypeMapper
+import aura.lang.compiler.aot.Runtime
+import aura.lang.compiler.aot.Dwarf
+
+/// LLVM IR 生成器（有状态，单次 `emitProgram` 内复用）。
+class LlvmEmitter {
+
+    /// 目标三元组。
+    var targetTriple: String = "x86_64-pc-windows-msvc"
+
+    /// 模块名。
+    var moduleName: String = "main"
+
+    /// 是否注入 runtime 声明。
+    var linkRuntime: Boolean = true
+
+    /// 是否发射调试元数据。
+    var emitDebug: Boolean = false
+
+    /// 类型映射器。
+    var tm: TypeMapper = TypeMapper()
+
+    // ── 计数器 ──
+
+    var varCount: Int = 0
+    var bbCount: Int = 0
+    var strCount: Int = 0
+
+    // ── 累积输出 ──
+
+    /// 字符串常量全局。
+    var strings: String = ""
+
+    /// 结构体类型定义。
+    var structs: String = ""
+
+    /// 函数定义。
+    var funcs: String = ""
+
+    // ── 当前函数状态 ──
+
+    /// entry 块 alloca 指令。
+    var fAlloca: String = ""
+
+    /// 函数体指令。
+    var fBody: String = ""
+
+    /// 函数局部变量表（`name|addr|llvmTy`，每行一项）。
+    var fVars: String = ""
+
+    /// 当前函数 LLVM 返回类型。
+    var fRetTy: String = "void"
+
+    /// 当前位置是否已终结（ret/br）。
+    var fTerminated: Boolean = false
+
+    init() {
+        this.targetTriple = "x86_64-pc-windows-msvc"
+        this.moduleName = "main"
+        this.linkRuntime = true
+        this.emitDebug = false
+        this.tm = TypeMapper()
+        this.reset()
+    }
+
+    // ── 生命周期 ──
+
+    /// 重置全部累积状态。
+    fun reset() {
+        this.varCount = 0
+        this.bbCount = 0
+        this.strCount = 0
+        this.strings = ""
+        this.structs = ""
+        this.funcs = ""
+        this.fAlloca = ""
+        this.fBody = ""
+        this.fVars = ""
+        this.fRetTy = "void"
+        this.fTerminated = false
+    }
+
+    /// 生成新 SSA 临时变量名。
+    fun freshVar(): String {
+        val name: String = "%var." + toStr(this.varCount)
+        this.varCount = this.varCount + 1
+        return name
+    }
+
+    /// 生成新基本块标签。
+    fun freshBb(prefix: String): String {
+        val name: String = "bb_" + prefix + "_" + toStr(this.bbCount)
+        this.bbCount = this.bbCount + 1
+        return name
+    }
+
+    // ── 顶层入口 ──
+
+    /// 将 HIR 程序生成为完整 LLVM IR 模块文本。
+    fun emitProgram(hir: Hir, moduleName: String, target: String): String {
+        this.reset()
+        this.moduleName = moduleName
+        this.targetTriple = target
+
+        // 1) 结构体类型定义
+        var i: Int = 0
+        while (i < hir.count) {
+            val k: String = hir.kindOf(i)
+            if (k == "HirStruct" || k == "HirClass" || k == "HirObject" || k == "HirEnum") {
+                this.declareStruct(hir.textOf(i))
+            }
+            i = i + 1
+        }
+
+        // 2) 函数定义
+        i = 0
+        while (i < hir.count) {
+            if (hir.kindOf(i) == "HirFunction") {
+                this.funcs = this.funcs + this.emitFunction(hir, i)
+            }
+            i = i + 1
+        }
+
+        // 3) 组装模块
+        var out: String = "; ModuleID = '" + moduleName + "'\n"
+        out = out + "source_filename = \"" + moduleName + "\"\n"
+        out = out + "target triple = \"" + target + "\"\n"
+        out = out + "target datalayout = \"" + dataLayout(target) + "\"\n\n"
+        if (this.structs != "") {
+            out = out + "; ---- Struct Types ----\n" + this.structs + "\n"
+        }
+        if (this.strings != "") {
+            out = out + "; ---- String Constants ----\n" + this.strings + "\n"
+        }
+        if (this.linkRuntime) {
+            out = out + runtimeDeclarations() + "\n"
+        }
+        if (this.emitDebug) {
+            val di: DebugInfo = DebugInfo(moduleName, ".", true)
+            out = out + debugMetadata(di) + debugSubroutineType() + "\n"
+        }
+        out = out + this.funcs
+        return out
+    }
+
+    // ── 结构体 ──
+
+    /// 声明一个用户类型为不透明结构体（字段布局待 HIR 类字段信息接入后展开）。
+    fun declareStruct(name: String) {
+        if (name == "") {
+            return
+        }
+        val sym: String = sanitizeLlvm(name)
+        if (this.structs.contains("%struct." + sym + " = type")) {
+            return
+        }
+        this.structs = this.structs + "%struct." + sym + " = type opaque\n"
+    }
+
+    // ── 函数 ──
+
+    /// 发射单个函数定义。
+    fun emitFunction(hir: Hir, id: Int): String {
+        this.fAlloca = ""
+        this.fBody = ""
+        this.fVars = ""
+        this.fTerminated = false
+
+        val name: String = hir.textOf(id)
+        var retTy: String = "void"
+        if (hir.tyOf(id) != "") {
+            retTy = this.tm.map(hir.tyOf(id))
+        }
+        if (retTy == "") {
+            retTy = "void"
+        }
+        this.fRetTy = retTy
+
+        val kids: String = hir.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+        var paramsIr: String = ""
+        var bodyId: Int = -1
+        var i: Int = 0
+        while (i < kCount) {
+            val cid: Int = hirKidsAt(kids, i)
+            val ck: String = hir.kindOf(cid)
+            if (ck == "HirParam") {
+                var pty: String = "i32"
+                if (hir.tyOf(cid) != "") {
+                    pty = this.tm.map(hir.tyOf(cid))
+                }
+                if (pty == "") {
+                    pty = "i32"
+                }
+                val pname: String = hir.textOf(cid)
+                val psym: String = sanitizeLlvm(pname)
+                if (paramsIr != "") {
+                    paramsIr = paramsIr + ", "
+                }
+                paramsIr = paramsIr + pty + " %arg." + psym
+                val addr: String = "%arg." + psym + ".addr"
+                this.fAlloca = this.fAlloca + "  " + addr + " = alloca " + pty + "\n"
+                this.fBody = this.fBody + "  store " + pty + " %arg." + psym
+                    + ", " + pty + "* " + addr + "\n"
+                this.fVars = this.fVars + pname + "|" + addr + "|" + pty + "\n"
+            } else {
+                bodyId = cid
+            }
+            i = i + 1
+        }
+
+        if (bodyId >= 0) {
+            this.emitBody(hir, bodyId)
+        }
+        if (!this.fTerminated) {
+            if (retTy == "void") {
+                this.fBody = this.fBody + "  ret void\n"
+            } else {
+                this.fBody = this.fBody + "  ret " + retTy + " 0\n"
+            }
+        }
+
+        var out: String = "define " + retTy + " @" + sanitizeLlvm(name) + "(" + paramsIr + ") {\n"
+        out = out + "entry:\n"
+        out = out + this.fAlloca
+        out = out + this.fBody
+        out = out + "}\n\n"
+        return out
+    }
+
+    /// 发射函数体 / 语句块。
+    fun emitBody(hir: Hir, id: Int) {
+        if (hir.kindOf(id) == "HirBlock") {
+            val kids: String = hir.kidsOf(id)
+            val n: Int = hirKidsCount(kids)
+            var i: Int = 0
+            while (i < n) {
+                this.emitStmt(hir, hirKidsAt(kids, i))
+                i = i + 1
+            }
+        } else {
+            this.emitStmt(hir, id)
+        }
+    }
+
+    /// 发射单条语句。
+    fun emitStmt(hir: Hir, id: Int) {
+        if (id < 0 || id >= hir.count) {
+            return
+        }
+        val k: String = hir.kindOf(id)
+        if (k == "HirValDecl" || k == "HirVarDecl") {
+            this.emitDecl(hir, id)
+        } else if (k == "HirReturn") {
+            this.emitReturn(hir, id)
+        } else if (k == "HirAssign") {
+            this.emitAssign(hir, id)
+        } else if (k == "HirIf") {
+            this.emitIf(hir, id)
+        } else if (k == "HirWhile") {
+            this.emitWhile(hir, id)
+        } else if (k == "HirBlock") {
+            this.emitBody(hir, id)
+        } else {
+            // 表达式语句：求值即可（副作用如调用）
+            this.emitExpr(hir, id)
+        }
+    }
+
+    /// 发射 val/var 声明。
+    fun emitDecl(hir: Hir, id: Int) {
+        val name: String = hir.textOf(id)
+        val kids: String = hir.kidsOf(id)
+        var initVal: String = "0"
+        var llvmTy: String = ""
+        if (hirKidsCount(kids) > 0) {
+            val initId: Int = hirKidsAt(kids, 0)
+            initVal = this.emitExpr(hir, initId)
+            llvmTy = this.inferType(hir, initId)
+        }
+        if (hir.tyOf(id) != "") {
+            llvmTy = this.tm.map(hir.tyOf(id))
+        }
+        if (llvmTy == "") {
+            llvmTy = "i32"
+        }
+        val addr: String = this.declareVar(name, llvmTy)
+        this.fBody = this.fBody + "  store " + llvmTy + " " + initVal
+            + ", " + llvmTy + "* " + addr + "\n"
+        this.fTerminated = false
+    }
+
+    /// 发射赋值语句。
+    fun emitAssign(hir: Hir, id: Int) {
+        val kids: String = hir.kidsOf(id)
+        if (hirKidsCount(kids) < 2) {
+            return
+        }
+        val targetId: Int = hirKidsAt(kids, 0)
+        val valueId: Int = hirKidsAt(kids, 1)
+        if (hir.kindOf(targetId) != "HirVar") {
+            return
+        }
+        val name: String = hir.textOf(targetId)
+        val value: String = this.emitExpr(hir, valueId)
+        var ty: String = this.lookupVarTy(name)
+        if (ty == "") {
+            ty = this.inferType(hir, valueId)
+        }
+        val addr: String = this.declareVar(name, ty)
+        this.fBody = this.fBody + "  store " + ty + " " + value
+            + ", " + ty + "* " + addr + "\n"
+        this.fTerminated = false
+    }
+
+    /// 发射 return 语句。
+    fun emitReturn(hir: Hir, id: Int) {
+        val kids: String = hir.kidsOf(id)
+        if (hirKidsCount(kids) > 0) {
+            val vId: Int = hirKidsAt(kids, 0)
+            val v: String = this.emitExpr(hir, vId)
+            var rt: String = this.fRetTy
+            if (rt == "void") {
+                rt = this.inferType(hir, vId)
+            }
+            this.fBody = this.fBody + "  ret " + rt + " " + v + "\n"
+        } else {
+            if (this.fRetTy == "void") {
+                this.fBody = this.fBody + "  ret void\n"
+            } else {
+                this.fBody = this.fBody + "  ret " + this.fRetTy + " 0\n"
+            }
+        }
+        this.fTerminated = true
+    }
+
+    /// 发射 if 语句（HirIf kids = [cond, then, else?]）。
+    fun emitIf(hir: Hir, id: Int) {
+        val kids: String = hir.kidsOf(id)
+        val n: Int = hirKidsCount(kids)
+        if (n < 2) {
+            return
+        }
+        val cond: String = this.emitExpr(hir, hirKidsAt(kids, 0))
+        val thenBb: String = this.freshBb("then")
+        val elseBb: String = this.freshBb("else")
+        val mergeBb: String = this.freshBb("merge")
+        this.fBody = this.fBody + "  br i1 " + cond + ", label %" + thenBb
+            + ", label %" + elseBb + "\n"
+        this.fBody = this.fBody + thenBb + ":\n"
+        this.emitBody(hir, hirKidsAt(kids, 1))
+        if (!this.fTerminated) {
+            this.fBody = this.fBody + "  br label %" + mergeBb + "\n"
+        }
+        this.fBody = this.fBody + elseBb + ":\n"
+        if (n > 2) {
+            this.emitBody(hir, hirKidsAt(kids, 2))
+        }
+        if (!this.fTerminated) {
+            this.fBody = this.fBody + "  br label %" + mergeBb + "\n"
+        }
+        this.fBody = this.fBody + mergeBb + ":\n"
+        this.fTerminated = false
+    }
+
+    /// 发射 while 循环（HirWhile kids = [cond, body]）。
+    fun emitWhile(hir: Hir, id: Int) {
+        val kids: String = hir.kidsOf(id)
+        val n: Int = hirKidsCount(kids)
+        if (n < 2) {
+            return
+        }
+        val condBb: String = this.freshBb("loop.cond")
+        val bodyBb: String = this.freshBb("loop.body")
+        val endBb: String = this.freshBb("loop.end")
+        this.fBody = this.fBody + "  br label %" + condBb + "\n"
+        this.fBody = this.fBody + condBb + ":\n"
+        val cond: String = this.emitExpr(hir, hirKidsAt(kids, 0))
+        this.fBody = this.fBody + "  br i1 " + cond + ", label %" + bodyBb
+            + ", label %" + endBb + "\n"
+        this.fBody = this.fBody + bodyBb + ":\n"
+        this.emitBody(hir, hirKidsAt(kids, 1))
+        if (!this.fTerminated) {
+            this.fBody = this.fBody + "  br label %" + condBb + "\n"
+        }
+        this.fBody = this.fBody + endBb + ":\n"
+        this.fTerminated = false
+    }
+
+    // ── 表达式 ──
+
+    /// 发射表达式，返回 LLVM 值操作数字符串。
+    fun emitExpr(hir: Hir, id: Int): String {
+        if (id < 0 || id >= hir.count) {
+            return "0"
+        }
+        val k: String = hir.kindOf(id)
+        if (k == "HirLit") {
+            return this.emitLit(hir.textOf(id))
+        }
+        if (k == "HirVar") {
+            return this.emitVarLoad(hir.textOf(id))
+        }
+        if (k == "HirBinary") {
+            return this.emitBinary(hir, id)
+        }
+        if (k == "HirUnary") {
+            return this.emitUnary(hir, id)
+        }
+        if (k == "HirCall") {
+            return this.emitCall(hir, id)
+        }
+        if (k == "HirIfExpr") {
+            return this.emitIfValue(hir, id)
+        }
+        // HirMember / HirIndex 等暂降级为 0
+        return "0"
+    }
+
+    /// 发射字面量。
+    fun emitLit(raw: String): String {
+        if (raw == "true" || raw == "false") {
+            return raw
+        }
+        if (raw.startsWith("\"")) {
+            return this.declareString(raw)
+        }
+        return raw
+    }
+
+    /// 发射字符串常量全局并返回其引用。
+    fun declareString(rawQuoted: String): String {
+        val content: String = aotSlice(rawQuoted, 1, rawQuoted.length - 2)
+        val idx: Int = this.strCount
+        this.strCount = idx + 1
+        val n: Int = content.length + 1
+        this.strings = this.strings + "@str." + toStr(idx)
+            + " = private unnamed_addr constant [" + toStr(n) + " x i8] c\""
+            + content + "\\00\"\n"
+        return "@str." + toStr(idx)
+    }
+
+    /// 发射变量读取（load）。
+    fun emitVarLoad(name: String): String {
+        val ty: String = this.lookupVarTy(name)
+        if (ty == "") {
+            return "0"
+        }
+        val addr: String = this.lookupVarAddr(name)
+        val t: String = this.freshVar()
+        this.fBody = this.fBody + "  " + t + " = load " + ty + ", " + ty + "* " + addr + "\n"
+        return t
+    }
+
+    /// 发射二元运算。
+    fun emitBinary(hir: Hir, id: Int): String {
+        val op: String = hir.textOf(id)
+        val kids: String = hir.kidsOf(id)
+        if (hirKidsCount(kids) < 2) {
+            return "0"
+        }
+        val aid: Int = hirKidsAt(kids, 0)
+        val bid: Int = hirKidsAt(kids, 1)
+        val a: String = this.emitExpr(hir, aid)
+        val b: String = this.emitExpr(hir, bid)
+        var opTy: String = this.inferType(hir, aid)
+        val t: String = this.freshVar()
+        if (isCmpOp(op)) {
+            this.fBody = this.fBody + "  " + t + " = icmp " + cmpPred(op)
+                + " " + opTy + " " + a + ", " + b + "\n"
+            return t
+        }
+        if (op == "&&" || op == "||") {
+            opTy = "i1"
+            var instr: String = "and"
+            if (op == "||") {
+                instr = "or"
+            }
+            this.fBody = this.fBody + "  " + t + " = " + instr
+                + " i1 " + a + ", " + b + "\n"
+            return t
+        }
+        this.fBody = this.fBody + "  " + t + " = " + arithInstr(op, opTy)
+            + " " + opTy + " " + a + ", " + b + "\n"
+        return t
+    }
+
+    /// 发射一元运算。
+    fun emitUnary(hir: Hir, id: Int): String {
+        val op: String = hir.textOf(id)
+        val kids: String = hir.kidsOf(id)
+        if (hirKidsCount(kids) < 1) {
+            return "0"
+        }
+        val xId: Int = hirKidsAt(kids, 0)
+        val x: String = this.emitExpr(hir, xId)
+        val ty: String = this.inferType(hir, xId)
+        val t: String = this.freshVar()
+        if (op == "!") {
+            this.fBody = this.fBody + "  " + t + " = xor i1 " + x + ", true\n"
+            return t
+        }
+        if (ty == "float" || ty == "double") {
+            this.fBody = this.fBody + "  " + t + " = fneg " + ty + " " + x + "\n"
+            return t
+        }
+        this.fBody = this.fBody + "  " + t + " = sub " + ty + " 0, " + x + "\n"
+        return t
+    }
+
+    /// 发射函数调用。
+    fun emitCall(hir: Hir, id: Int): String {
+        val kids: String = hir.kidsOf(id)
+        val n: Int = hirKidsCount(kids)
+        var fname: String = hir.textOf(id)
+        var argStart: Int = 0
+        if (fname == "") {
+            if (n == 0) {
+                return "0"
+            }
+            fname = hir.textOf(hirKidsAt(kids, 0))
+            argStart = 1
+        }
+        if (fname == "") {
+            return "0"
+        }
+        val sym: String = sanitizeLlvm(fname)
+
+        var args: String = ""
+        var i: Int = argStart
+        while (i < n) {
+            val aId: Int = hirKidsAt(kids, i)
+            val a: String = this.emitExpr(hir, aId)
+            if (args != "") {
+                args = args + ", "
+            }
+            args = args + this.inferType(hir, aId) + " " + a
+            i = i + 1
+        }
+
+        val sig: String = runtimeSignature(sym)
+        var retTy: String = "i32"
+        if (sig != "") {
+            retTy = aotFieldAt(sig, 0, "|")
+        }
+        if (retTy == "void") {
+            this.fBody = this.fBody + "  call void @" + sym + "(" + args + ")\n"
+            return "0"
+        }
+        val t: String = this.freshVar()
+        this.fBody = this.fBody + "  " + t + " = call " + retTy
+            + " @" + sym + "(" + args + ")\n"
+        return t
+    }
+
+    /// 发射 if 表达式（简化：取 then 分支的值）。
+    fun emitIfValue(hir: Hir, id: Int): String {
+        val kids: String = hir.kidsOf(id)
+        if (hirKidsCount(kids) < 2) {
+            return "0"
+        }
+        return this.emitExpr(hir, hirKidsAt(kids, 1))
+    }
+
+    // ── 类型推断 ──
+
+    /// 推断节点的 LLVM 类型。
+    fun inferType(hir: Hir, id: Int): String {
+        if (id < 0 || id >= hir.count) {
+            return "i32"
+        }
+        val k: String = hir.kindOf(id)
+        if (k == "HirLit") {
+            return inferLitType(hir.textOf(id))
+        }
+        if (k == "HirVar") {
+            val ty: String = this.lookupVarTy(hir.textOf(id))
+            if (ty == "") {
+                return "i32"
+            }
+            return ty
+        }
+        if (k == "HirBinary") {
+            if (isCmpOp(hir.textOf(id)) || hir.textOf(id) == "&&" || hir.textOf(id) == "||") {
+                return "i1"
+            }
+            val kids: String = hir.kidsOf(id)
+            if (hirKidsCount(kids) > 0) {
+                return this.inferType(hir, hirKidsAt(kids, 0))
+            }
+            return "i32"
+        }
+        if (k == "HirUnary") {
+            val kids: String = hir.kidsOf(id)
+            if (hirKidsCount(kids) > 0) {
+                return this.inferType(hir, hirKidsAt(kids, 0))
+            }
+            return "i32"
+        }
+        if (k == "HirCall") {
+            val kids: String = hir.kidsOf(id)
+            var fname: String = hir.textOf(id)
+            if (fname == "" && hirKidsCount(kids) > 0) {
+                fname = hir.textOf(hirKidsAt(kids, 0))
+            }
+            val sig: String = runtimeSignature(sanitizeLlvm(fname))
+            if (sig != "") {
+                return aotFieldAt(sig, 0, "|")
+            }
+            return "i32"
+        }
+        if (hir.tyOf(id) != "") {
+            return this.tm.map(hir.tyOf(id))
+        }
+        return "i32"
+    }
+
+    // ── 局部变量表 ──
+
+    /// 声明局部变量（若未声明则插入 alloca）。
+    fun declareVar(name: String, ty: String): String {
+        val existing: String = this.lookupVarAddr(name)
+        if (existing != "") {
+            return existing
+        }
+        val addr: String = "%" + sanitizeLlvm(name) + ".addr"
+        this.fAlloca = this.fAlloca + "  " + addr + " = alloca " + ty + "\n"
+        this.fVars = this.fVars + name + "|" + addr + "|" + ty + "\n"
+        return addr
+    }
+
+    /// 查询局部变量地址（未声明返回 ""）。
+    fun lookupVarAddr(name: String): String {
+        return this.fvField(name, 1)
+    }
+
+    /// 查询局部变量类型（未声明返回 ""）。
+    fun lookupVarTy(name: String): String {
+        return this.fvField(name, 2)
+    }
+
+    /// 在 fVars 中查找某个变量的指定字段。
+    fun fvField(name: String, col: Int): String {
+        var n: Int = aotLineCount(this.fVars)
+        var i: Int = 0
+        while (i < n) {
+            val line: String = aotLineAt(this.fVars, i)
+            if (aotFieldAt(line, 0, "|") == name) {
+                return aotFieldAt(line, col, "|")
+            }
+            i = i + 1
+        }
+        return ""
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// 顶层辅助
+// ─────────────────────────────────────────────────────────────
+
+/// 顶层入口：HIR → LLVM IR 文本。
+fun emitLlvmIr(hir: Hir, moduleName: String, target: String): String {
+    val e: LlvmEmitter = LlvmEmitter()
+    return e.emitProgram(hir, moduleName, target)
+}
+
+/// 依目标三元组选择 data layout（对齐 Rust `emit_module_header`）。
+fun dataLayout(target: String): String {
+    if (target.startsWith("x86_64")) {
+        return "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128"
+    }
+    if (target.startsWith("aarch64")) {
+        return "e-m:e-i8:8:32-i16:16:32-i32:32:64-i64:64:-n16:32:64-S128"
+    }
+    if (target.startsWith("armv7")) {
+        return "e-m:e-i8:8:32-i16:16:32-i32:32:32-i64:64:-i128:128-n32:64-S128"
+    }
+    return "e-m:e-i64:64-f80:128-n8:16:32:64-S128"
+}
+
+/// 字面量 → LLVM 类型。
+fun inferLitType(raw: String): String {
+    if (raw == "true" || raw == "false") {
+        return "i1"
+    }
+    if (raw.startsWith("\"")) {
+        return "i8*"
+    }
+    if (raw.contains(".")) {
+        return "double"
+    }
+    return "i32"
+}
+
+/// 是否比较运算符。
+fun isCmpOp(op: String): Boolean {
+    if (op == "==" || op == "!=") {
+        return true
+    }
+    if (op == "<" || op == ">" || op == "<=" || op == ">=") {
+        return true
+    }
+    return false
+}
+
+/// 比较运算符 → LLVM icmp 谓词。
+fun cmpPred(op: String): String {
+    if (op == "==") { return "eq" }
+    if (op == "!=") { return "ne" }
+    if (op == "<") { return "slt" }
+    if (op == ">") { return "sgt" }
+    if (op == "<=") { return "sle" }
+    if (op == ">=") { return "sge" }
+    return "eq"
+}
+
+/// 算术运算符 → LLVM 指令名（依操作数类型区分整/浮点）。
+fun arithInstr(op: String, ty: String): String {
+    if (ty == "float" || ty == "double") {
+        if (op == "+") { return "fadd" }
+        if (op == "-") { return "fsub" }
+        if (op == "*") { return "fmul" }
+        if (op == "/") { return "fdiv" }
+        if (op == "%") { return "frem" }
+        return "fadd"
+    }
+    if (op == "+") { return "add" }
+    if (op == "-") { return "sub" }
+    if (op == "*") { return "mul" }
+    if (op == "/") { return "sdiv" }
+    if (op == "%") { return "srem" }
+    return "add"
+}

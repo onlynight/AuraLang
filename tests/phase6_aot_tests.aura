@@ -1,0 +1,499 @@
+// ═════════════════════════════════════════════════════════════
+// Phase 6 验证用例：AOT LLVM 后端（Aura 化）
+//
+// 验证内容：
+//   1. TypeMapper.aura：类型映射 / 可空 / 函数类型 / 符号清洗
+//   2. Target.aura：目标三元组构造 / 解析 / 扩展名
+//   3. Optimize.aura：优化级别 → LLVM 参数
+//   4. Runtime.aura：runtime 声明表 / 判定 / 签名
+//   5. Ffi.aura：FFI 声明生成 / 去重 / runtime 跳过
+//   6. Dwarf.aura：调试元数据
+//   7. Emit.aura：HIR → LLVM IR 文本（函数 / 常量 / 结构体）
+//   8. Linker.aura：llc / clang 命令构造
+//   9. CBackend.aura：HIR → C 源码
+//  10. Aot.aura：编排器（IR + 命令 + C 源码）
+//
+// 运行：aura run tests/phase6_aot_tests.aura
+//   全通过时输出 "RESULT: PASS"
+// ═════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import "../aura/compiler/aura/lang/compiler/test/TestRunner.aura"
+import "../aura/compiler/aura/lang/compiler/lexer/Span.aura"
+import "../aura/compiler/aura/lang/compiler/hir/Hir.aura"
+import "../aura/compiler/aura/lang/compiler/aot/AotUtil.aura"
+import "../aura/compiler/aura/lang/compiler/aot/Target.aura"
+import "../aura/compiler/aura/lang/compiler/aot/Optimize.aura"
+import "../aura/compiler/aura/lang/compiler/aot/TypeMapper.aura"
+import "../aura/compiler/aura/lang/compiler/aot/Runtime.aura"
+import "../aura/compiler/aura/lang/compiler/aot/Ffi.aura"
+import "../aura/compiler/aura/lang/compiler/aot/Dwarf.aura"
+import "../aura/compiler/aura/lang/compiler/aot/Emit.aura"
+import "../aura/compiler/aura/lang/compiler/aot/Linker.aura"
+import "../aura/compiler/aura/lang/compiler/aot/CBackend.aura"
+import "../aura/compiler/aura/lang/compiler/aot/Aot.aura"
+
+// ═════════════════════════════════════════════════════════════
+// 夹具：手工构造 HIR
+// ═════════════════════════════════════════════════════════════
+
+/// `fun add(a: Int, b: Int): Int { return a + b }`
+fun buildAddHir(): Hir {
+    val hir = Hir()
+    val span: Span = Span(0, 100, 1, 1, 1, 100)
+    val pa: Int = hir.add("HirParam", "a", "Int", span, hirNoKids())
+    val pb: Int = hir.add("HirParam", "b", "Int", span, hirNoKids())
+    val va: Int = hir.leaf("HirVar", "a", span)
+    val vb: Int = hir.leaf("HirVar", "b", span)
+    val binKids: String = hirKidsAdd(hirKidsAdd(hirNoKids(), va), vb)
+    val binId: Int = hir.add("HirBinary", "+", "Int", span, binKids)
+    val retId: Int = hir.add("HirReturn", "", "Int", span, hirKidsAdd(hirNoKids(), binId))
+    val blockId: Int = hir.add("HirBlock", "", "", span, hirKidsAdd(hirNoKids(), retId))
+    var fnKids: String = hirKidsAdd(hirNoKids(), pa)
+    fnKids = hirKidsAdd(fnKids, pb)
+    fnKids = hirKidsAdd(fnKids, blockId)
+    val fnId: Int = hir.add("HirFunction", "add", "Int", span, fnKids)
+    val progId: Int = hir.add("HirProgram", "", "", span, hirKidsAdd(hirNoKids(), fnId))
+    hir.rootId = progId
+    return hir
+}
+
+/// struct Player + `fun f() { "hi" }`
+fun buildStructHir(): Hir {
+    val hir = Hir()
+    val span: Span = Span(0, 50, 1, 1, 1, 50)
+    val structId: Int = hir.add("HirStruct", "Player", "", span, hirNoKids())
+    val litId: Int = hir.leaf("HirLit", "\"hi\"", span)
+    val blockId: Int = hir.add("HirBlock", "", "", span, hirKidsAdd(hirNoKids(), litId))
+    val fnId: Int = hir.add("HirFunction", "f", "", span, hirKidsAdd(hirNoKids(), blockId))
+    var progKids: String = hirKidsAdd(hirNoKids(), structId)
+    progKids = hirKidsAdd(progKids, fnId)
+    val progId: Int = hir.add("HirProgram", "", "", span, progKids)
+    hir.rootId = progId
+    return hir
+}
+
+/// 统计 needle 在 haystack 中出现次数。
+fun p6Count(haystack: String, needle: String): Int {
+    var count: Int = 0
+    var i: Int = 0
+    while (i + needle.length <= haystack.length) {
+        if (aotSlice(haystack, i, needle.length) == needle) {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    return count
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 1: TypeMapper.aura
+// ═════════════════════════════════════════════════════════════
+
+fun testTypeMapper(): Int {
+    val t = TestRunner()
+    t.begin("AOT.typeMapper")
+
+    val tm = TypeMapper()
+    t.assertEq(tm.map("Int"), "i32", "Int → i32")
+    t.assertEq(tm.map("Long"), "i64", "Long → i64")
+    t.assertEq(tm.map("Short"), "i16", "Short → i16")
+    t.assertEq(tm.map("Byte"), "i8", "Byte → i8")
+    t.assertEq(tm.map("Float"), "float", "Float → float")
+    t.assertEq(tm.map("Double"), "double", "Double → double")
+    t.assertEq(tm.map("Boolean"), "i1", "Boolean → i1")
+    t.assertEq(tm.map("Char"), "i16", "Char → i16")
+    t.assertEq(tm.map("Unit"), "", "Unit → void")
+    t.assertEq(tm.map("String"), "{ i8*, i64 }", "String → struct")
+    t.assertEq(tm.map("Any"), "i8*", "Any → i8*")
+    t.assertEq(tm.map("Player"), "%struct.Player", "user type → %struct")
+    t.assertEq(tm.map("List<Int>"), "i8*", "List<Int> → i8*")
+    t.assertEq(tm.map("Pointer<Int>"), "ptr", "Pointer → ptr")
+    t.assertEq(tm.map(""), "", "empty → empty")
+
+    t.assertEq(tm.mapNullable("Int"), "{ i32, i1 }", "nullable Int wraps")
+    t.assertEq(tm.mapNullable("String"), "{ i8*, i64 }", "nullable struct kept")
+
+    val tm2 = newTypeMapper(false)
+    t.assertEq(tm2.map("String"), "i8*", "String as ptr")
+
+    t.assertEq(tm.fnType("Int", "Int,Int", false), "i32( i32, i32 )", "fnType")
+    t.assertEq(tm.fnType("Unit", "", false), "void( void )", "fnType void")
+    t.assertEq(tm.fnType("Int", "Int", true), "i32( i32, ... )", "fnType vararg")
+
+    return t.report()
+}
+
+fun testSanitizeLlvm(): Int {
+    val t = TestRunner()
+    t.begin("AOT.sanitize")
+
+    t.assertEq(sanitizeLlvm("my-type"), "my_type", "dash")
+    t.assertEq(sanitizeLlvm("hello.world"), "hello_world", "dot")
+    t.assertEq(sanitizeLlvm("aura.lang.std.Math.sin"), "aura_lang_std_Math_sin", "dotted path")
+    t.assertEq(sanitizeLlvm("ok_name9"), "ok_name9", "keeps valid")
+    t.assertTrue(llvmIsScalar("i32"), "i32 scalar")
+    t.assertTrue(llvmIsScalar("double"), "double scalar")
+    t.assertFalse(llvmIsScalar("ptr"), "ptr not scalar")
+    t.assertFalse(llvmIsScalar("{ i8*, i64 }"), "struct not scalar")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 2: Target.aura
+// ═════════════════════════════════════════════════════════════
+
+fun testTargetTriple(): Int {
+    val t = TestRunner()
+    t.begin("AOT.target")
+
+    val win = targetWindowsX86_64()
+    t.assertTrue(win.isValid(), "windows valid")
+    t.assertEq(win.toTriple(), "x86_64-pc-windows-msvc", "windows triple")
+    t.assertEq(win.objectExt(), "obj", "windows obj ext")
+    t.assertEq(win.exeExt(), "exe", "windows exe ext")
+
+    val la = targetLinuxAarch64()
+    t.assertEq(la.toTriple(), "aarch64-unknown-linux-gnu", "linux aarch64")
+    t.assertEq(la.objectExt(), "o", "linux obj ext")
+    t.assertEq(la.exeExt(), "", "linux exe ext")
+
+    val l7 = targetLinuxArmv7()
+    t.assertEq(l7.toTriple(), "armv7-unknown-linux-gnueabihf", "linux armv7")
+
+    val mac = targetMacosAarch64()
+    t.assertEq(mac.toTriple(), "aarch64-apple-darwin", "macos aarch64")
+
+    return t.report()
+}
+
+fun testTargetParse(): Int {
+    val t = TestRunner()
+    t.begin("AOT.targetParse")
+
+    val p = targetFromTriple("x86_64-pc-windows-msvc")
+    t.assertTrue(p.isValid(), "parsed valid")
+    t.assertEq(p.arch, "X86_64", "arch")
+    t.assertEq(p.vendor, "Pc", "vendor")
+    t.assertEq(p.os, "Windows", "os")
+    t.assertEq(p.abi, "Msvc", "abi")
+    t.assertEq(p.toTriple(), "x86_64-pc-windows-msvc", "roundtrip")
+
+    val p2 = targetFromTriple("aarch64-unknown-linux-gnu")
+    t.assertEq(p2.arch, "Aarch64", "parsed arch 2")
+    t.assertEq(p2.os, "Linux", "parsed os 2")
+
+    val p3 = targetFromTriple("aarch64-apple-darwin")
+    t.assertEq(p3.os, "MacOS", "parsed macos")
+    t.assertEq(p3.abi, "", "abi absent")
+
+    val bad = targetFromTriple("invalid-target")
+    t.assertFalse(bad.isValid(), "invalid triple rejected")
+
+    val d = targetDefault()
+    t.assertTrue(d.isValid(), "default valid")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 3: Optimize.aura
+// ═════════════════════════════════════════════════════════════
+
+fun testOptimize(): Int {
+    val t = TestRunner()
+    t.begin("AOT.optimize")
+
+    t.assertEq(optLevelDefault().flag(), "-O2", "default -O2")
+    t.assertEq(optLevelFromStr("0").flag(), "-O0", "O0")
+    t.assertEq(optLevelFromStr("O1").flag(), "-O1", "O1")
+    t.assertEq(optLevelFromStr("O2").flag(), "-O2", "O2")
+    t.assertEq(optLevelFromStr("O3").flag(), "-O3", "O3")
+    t.assertEq(optLevelFromStr("Os").flag(), "-Os", "Os")
+    t.assertEq(optLevelFromStr("Oz").flag(), "-Oz", "Oz")
+    t.assertEq(optLevelFromStr("2").name, "Aggressive", "parse numeric")
+    t.assertTrue(optLevelFromStr("O1").debugFriendly(), "O1 debug friendly")
+    t.assertFalse(optLevelFromStr("O2").debugFriendly(), "O2 not debug friendly")
+    t.assertFalse(optLevelFromStr("foo").isValid(), "invalid level")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 4: Runtime.aura
+// ═════════════════════════════════════════════════════════════
+
+fun testRuntimeDecls(): Int {
+    val t = TestRunner()
+    t.begin("AOT.runtime")
+
+    val decls: String = runtimeDeclarations()
+    t.assertTrue(decls.contains("; ---- Aura Runtime Declarations ----"), "header")
+    t.assertTrue(decls.contains("declare void @aura_arc_increment(i8*)"), "arc_increment")
+    t.assertTrue(decls.contains("declare i8* @aura_malloc(i64)"), "malloc")
+    t.assertTrue(decls.contains("declare void @aura_free(i8*)"), "free")
+    t.assertTrue(decls.contains("declare i8* @aura_string_concat(i8*, i64, i8*, i64)"), "concat")
+
+    t.assertTrue(isRuntimeFunction("aura_malloc"), "is runtime")
+    t.assertFalse(isRuntimeFunction("main"), "not runtime")
+    t.assertEq(runtimeFunctionCount(), 10, "runtime fn count")
+    t.assertEq(runtimeSignature("toStringFloat"), "i8*|double", "signature")
+    t.assertEq(runtimeSignature("nope"), "", "unknown signature")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 5: Ffi.aura
+// ═════════════════════════════════════════════════════════════
+
+fun testFfiDeclare(): Int {
+    val t = TestRunner()
+    t.begin("AOT.ffi")
+
+    val tm = TypeMapper()
+    val d: String = ffiDeclare("DrawCircle", "Unit", "Int,Int,Float", "", "", tm)
+    t.assertTrue(d.contains("declare void @DrawCircle(i32, i32, float)"), "generic declare")
+
+    // C FFI 真实签名
+    val c: String = ffiDeclare("aura_math_sin", "Double", "Double", "C", "", tm)
+    t.assertEq(c, "declare double @aura_math_sin(double)\n", "cffi signature")
+
+    // runtime 函数跳过
+    t.assertEq(ffiDeclare("aura_malloc", "Any", "Long", "", "", tm), "", "runtime skipped")
+
+    // ABI 注释
+    val r: String = ffiDeclare("my_c_func", "Unit", "", "Rust", "my_lib", tm)
+    t.assertTrue(r.contains("P8-Rust"), "rust abi comment")
+    t.assertTrue(r.contains("library: my_lib"), "rust lib comment")
+
+    // 去重
+    val specs: String = "DrawCircle|Unit|Int,Int,Float||\nDrawCircle|Unit|Int,Int,Float||\n"
+    val gen: String = ffiGenerate(specs, tm)
+    t.assertEq(p6Count(gen, "declare void @DrawCircle"), 1, "dedup")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 6: Dwarf.aura
+// ═════════════════════════════════════════════════════════════
+
+fun testDwarf(): Int {
+    val t = TestRunner()
+    t.begin("AOT.dwarf")
+
+    val di: DebugInfo = debugInfoFromPath("src/main.aura", true)
+    t.assertEq(di.sourceFile, "main.aura", "file name")
+    t.assertEq(di.sourceDir, "src", "dir name")
+    t.assertTrue(di.enabled, "enabled")
+
+    val md: String = debugMetadata(di)
+    t.assertTrue(md.contains("DICompileUnit"), "compile unit")
+    t.assertTrue(md.contains("DIFile"), "di file")
+    t.assertTrue(md.contains("main.aura"), "file in metadata")
+    t.assertTrue(md.contains("!llvm.dbg.cu"), "dbg.cu registry")
+
+    val off: DebugInfo = debugInfoFromPath("x.aura", false)
+    t.assertEq(debugMetadata(off), "", "disabled → empty")
+
+    val sub: String = debugSubprogram("add", 3, 0, true)
+    t.assertTrue(sub.contains("DISubprogram"), "subprogram")
+    t.assertTrue(sub.contains("DILocation"), "location")
+    t.assertTrue(debugSubroutineType().contains("DISubroutineType"), "subroutine type")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 7: Emit.aura
+// ═════════════════════════════════════════════════════════════
+
+fun testEmitFunction(): Int {
+    val t = TestRunner()
+    t.begin("AOT.emit.function")
+
+    val h: Hir = buildAddHir()
+    val ir: String = emitLlvmIr(h, "main", "x86_64-pc-windows-msvc")
+
+    t.assertTrue(ir.contains("target triple = \"x86_64-pc-windows-msvc\""), "target triple")
+    t.assertTrue(ir.contains("target datalayout"), "data layout")
+    t.assertTrue(ir.contains("define i32 @add(i32 %arg.a, i32 %arg.b)"), "define signature")
+    t.assertTrue(ir.contains("entry:"), "entry block")
+    t.assertTrue(ir.contains("alloca i32"), "alloca")
+    t.assertTrue(ir.contains("add i32"), "add instruction")
+    t.assertTrue(ir.contains("ret i32"), "ret")
+    t.assertTrue(ir.contains("declare i8* @aura_malloc(i64)"), "runtime injected")
+
+    return t.report()
+}
+
+fun testEmitStructAndString(): Int {
+    val t = TestRunner()
+    t.begin("AOT.emit.structStr")
+
+    val h: Hir = buildStructHir()
+    val ir: String = emitLlvmIr(h, "main", "x86_64-pc-windows-msvc")
+
+    t.assertTrue(ir.contains("%struct.Player = type opaque"), "struct decl")
+    t.assertTrue(ir.contains("@str.0 = private unnamed_addr constant [3 x i8] c\"hi\\00\""), "string global")
+    t.assertTrue(ir.contains("define void @f()"), "void function")
+    t.assertTrue(ir.contains("ret void"), "void ret")
+
+    return t.report()
+}
+
+fun testDataLayout(): Int {
+    val t = TestRunner()
+    t.begin("AOT.emit.dataLayout")
+
+    t.assertTrue(dataLayout("x86_64-pc-windows-msvc").contains("p270:32:32"), "x86_64 layout")
+    t.assertTrue(dataLayout("aarch64-unknown-linux-gnu").contains("i8:8:32"), "aarch64 layout")
+    t.assertTrue(dataLayout("armv7-unknown-linux-gnueabihf").contains("n32:64"), "armv7 layout")
+
+    t.assertEq(inferLitType("42"), "i32", "int lit")
+    t.assertEq(inferLitType("3.14"), "double", "double lit")
+    t.assertEq(inferLitType("true"), "i1", "bool lit")
+    t.assertEq(inferLitType("\"s\""), "i8*", "string lit")
+
+    t.assertEq(arithInstr("+", "i32"), "add", "int add")
+    t.assertEq(arithInstr("/", "i32"), "sdiv", "int div")
+    t.assertEq(arithInstr("+", "double"), "fadd", "float add")
+    t.assertEq(cmpPred("<"), "slt", "cmp pred")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 8: Linker.aura
+// ═════════════════════════════════════════════════════════════
+
+fun testLinker(): Int {
+    val t = TestRunner()
+    t.begin("AOT.linker")
+
+    val llc: String = llcCommand("main.ll", "main.obj", "x86_64-pc-windows-msvc", "-O2")
+    t.assertTrue(llc.contains("llc -mtriple x86_64-pc-windows-msvc"), "llc triple")
+    t.assertTrue(llc.contains("main.ll"), "llc input")
+    t.assertTrue(llc.contains("-o main.obj"), "llc output")
+    t.assertTrue(llc.contains("-O2"), "llc opt")
+    t.assertTrue(llc.contains("-filetype=obj"), "llc filetype")
+
+    val clang: String = clangCommand("main.obj", "main.exe", "x86_64-pc-windows-msvc", "-O2", true)
+    t.assertTrue(clang.contains("clang -target x86_64-pc-windows-msvc"), "clang target")
+    t.assertTrue(clang.contains("-o main.exe"), "clang output")
+    t.assertTrue(clang.contains("-g"), "clang debug")
+
+    val noDebug: String = clangCommand("main.obj", "main.exe", "x86_64-pc-windows-msvc", "-O2", false)
+    t.assertFalse(noDebug.contains(" -g"), "clang no debug")
+
+    t.assertTrue(lldLinkCommand("main.obj", "main.exe").contains("/entry:main"), "lld-link")
+
+    val hint: String = toolSearchHint("llc")
+    t.assertTrue(hint.contains("AURA_LLVM_HOME"), "hint env")
+    t.assertTrue(hint.contains("AURA_CONFIG_LLVM_HOME"), "hint config")
+    t.assertTrue(hint.contains("1."), "hint ordered")
+    t.assertEq(toolPreferredPath("llc", "/opt/llvm"), "/opt/llvm/bin/llc", "preferred path")
+    t.assertEq(toolPreferredPath("llc", ""), "llc", "no home → bare name")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 9: CBackend.aura
+// ═════════════════════════════════════════════════════════════
+
+fun testCBackend(): Int {
+    val t = TestRunner()
+    t.begin("AOT.cBackend")
+
+    val h: Hir = buildAddHir()
+    val c: String = emitC(h, "main")
+
+    t.assertTrue(c.contains("int add(int a, int b)"), "signature")
+    t.assertTrue(c.contains("return (a + b);"), "expression")
+    t.assertTrue(c.contains("Generated by Aura AOT C backend"), "header")
+
+    t.assertEq(cType("Int"), "int", "c int")
+    t.assertEq(cType("Long"), "long long", "c long")
+    t.assertEq(cType("String"), "const char*", "c string")
+    t.assertEq(cType("Boolean"), "bool", "c bool")
+    t.assertEq(cType("Unit"), "void", "c void")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 10: Aot.aura 编排器
+// ═════════════════════════════════════════════════════════════
+
+fun testAotOrchestrator(): Int {
+    val t = TestRunner()
+    t.begin("AOT.orchestrator")
+
+    val h: Hir = buildAddHir()
+    val opts: AotOptions = AotOptions(targetWindowsX86_64(), optLevelDefault(), "main")
+    val r: AotResult = aotCompile(h, opts)
+
+    t.assertTrue(r.success, "success")
+    t.assertEq(r.targetTriple, "x86_64-pc-windows-msvc", "target")
+    t.assertEq(r.optFlag, "-O2", "opt flag")
+    t.assertTrue(r.hasFunction("add"), "has add")
+    t.assertTrue(r.irLineCount() > 5, "ir lines")
+
+    // 注意：经字段访问得到的 String 再调 .contains 会错乱 this 绑定，故先取局部变量
+    val objCmd: String = r.objectCommand
+    t.assertTrue(objCmd.contains("llc -mtriple x86_64-pc-windows-msvc"), "obj cmd")
+    t.assertTrue(objCmd.contains("-filetype=obj"), "obj filetype")
+    val exeCmd: String = r.executableCommand
+    t.assertTrue(exeCmd.contains("clang -target x86_64-pc-windows-msvc"), "exe cmd")
+    t.assertTrue(exeCmd.contains("main.exe"), "exe name")
+    val csrc: String = r.cSource
+    t.assertTrue(csrc.contains("int add(int a, int b)"), "c source")
+
+    t.assertEq(aotBackendVersion(), "0.1.0-phase6", "version")
+
+    // 便捷 IR 生成
+    val gen: AotCodeGenerator = AotCodeGenerator()
+    val ir: String = gen.emitIr(h, opts)
+    t.assertTrue(ir.contains("define i32 @add"), "emitIr")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 主函数
+// ═════════════════════════════════════════════════════════════
+
+fun main() {
+    println("=== Phase 6 AOT LLVM Backend Tests ===")
+    println()
+
+    val f1 = testTypeMapper()
+    val f2 = testSanitizeLlvm()
+    val f3 = testTargetTriple()
+    val f4 = testTargetParse()
+    val f5 = testOptimize()
+    val f6 = testRuntimeDecls()
+    val f7 = testFfiDeclare()
+    val f8 = testDwarf()
+    val f9 = testEmitFunction()
+    val f10 = testEmitStructAndString()
+    val f11 = testDataLayout()
+    val f12 = testLinker()
+    val f13 = testCBackend()
+    val f14 = testAotOrchestrator()
+
+    val totalFailures: Int = f1 + f2 + f3 + f4 + f5 + f6 + f7 + f8 + f9 + f10 + f11 + f12 + f13 + f14
+
+    println()
+    println("=== Summary ===")
+    println("Total failures: " + toStr(totalFailures))
+
+    if (totalFailures == 0) {
+        println("RESULT: PASS")
+    } else {
+        println("RESULT: FAIL (" + toStr(totalFailures) + ")")
+    }
+}

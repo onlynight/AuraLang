@@ -1,0 +1,139 @@
+// aura:///aura/lang/compiler/aot/TypeMapper.aura
+package aura.lang.compiler.aot
+// ─────────────────────────────────────────────────────────────
+// 类型映射（Aura Type → LLVM IR 类型字符串）— Phase 6 (任务 6.1)
+//
+// 对应 Rust `compiler/src/codegen/aot/types.rs`。
+//
+// 因为采用文本 LLVM IR（而非 inkwell 绑定），映射结果是 `String`，
+// 直接拼入 LLVM IR 文本，避免编译期对 LLVM C API 的依赖。
+//
+// 设计原则：
+//   - 基本类型（Int/Float/Boolean/…）→ 对应 LLVM 标量类型
+//   - String 可配置为 `{ i8*, i64 }`（长度感知）或裸 `i8*`
+//   - 指针 → `ptr`（LLVM 13+ 不透明指针）
+//   - 用户自定义类型 → `%struct.<Name>` 占位符
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+
+/// LLVM IR 标识符允许字符（其余替换为 `_`）。
+fun tmAllowedChars(): String {
+    return "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+}
+
+/// 类型映射器。
+class TypeMapper {
+
+    /// 是否将 `String` 表示为 `{ i8*, i64 }`（长度感知字符串）。
+    var stringAsStruct: Boolean = true
+
+    init() {
+        this.stringAsStruct = true
+    }
+
+    /// 将类型名映射为 LLVM IR 类型字符串。
+    fun map(ty: String): String {
+        if (ty == "") { return "" }
+        if (ty == "Int") { return "i32" }
+        if (ty == "Long") { return "i64" }
+        if (ty == "Short") { return "i16" }
+        if (ty == "Byte" || ty == "U8") { return "i8" }
+        if (ty == "Float") { return "float" }
+        if (ty == "Double") { return "double" }
+        if (ty == "Boolean" || ty == "Bool") { return "i1" }
+        if (ty == "Char") { return "i16" }
+        if (ty == "Unit" || ty == "Void") { return "" }
+        if (ty == "String") {
+            if (this.stringAsStruct) {
+                return "{ i8*, i64 }"
+            }
+            return "i8*"
+        }
+        if (ty == "Any" || ty == "Nothing") { return "i8*" }
+        if (ty == "CString" || ty == "CStr" || ty == "Handle") { return "i8*" }
+        if (ty == "Color") { return "{ i8, i8, i8, i8 }" }
+        if (ty == "List" || ty == "Map" || ty == "Set" || ty == "Value" ||
+            ty == "Iterator" || ty == "Closure") {
+            return "i8*"
+        }
+        if (ty.startsWith("List<") || ty.startsWith("Map<") ||
+            ty.startsWith("Set<") || ty.startsWith("Array<")) {
+            return "i8*"
+        }
+        if (ty.startsWith("Pointer<")) { return "ptr" }
+        if (ty.startsWith("(")) { return "ptr" }
+        // 用户自定义结构体/命名类型占位符
+        return "%struct." + sanitizeLlvm(ty)
+    }
+
+    /// 可空类型映射：标量包装为 `{ <inner>, i1 }`，其余保留内部类型。
+    fun mapNullable(inner: String): String {
+        val innerTy: String = this.map(inner)
+        if (llvmIsScalar(innerTy)) {
+            return "{ " + innerTy + ", i1 }"
+        }
+        return innerTy
+    }
+
+    /// 函数类型描述字符串（供函数指针声明）。
+    fun fnType(ret: String, paramsCsv: String, isVararg: Boolean): String {
+        var retStr: String = this.map(ret)
+        if (retStr == "") {
+            retStr = "void"
+        }
+        var paramsStr: String = "void"
+        if (paramsCsv != "") {
+            paramsStr = ""
+            var n: Int = aotCsvCount(paramsCsv)
+            var i: Int = 0
+            while (i < n) {
+                if (i > 0) {
+                    paramsStr = paramsStr + ", "
+                }
+                paramsStr = paramsStr + this.map(aotFieldAt(paramsCsv, i, ","))
+                i = i + 1
+            }
+        }
+        if (isVararg) {
+            return retStr + "( " + paramsStr + ", ... )"
+        }
+        return retStr + "( " + paramsStr + " )"
+    }
+}
+
+/// 构造函数式入口（对应 Rust `TypeMapper::new(bool)`）。
+fun newTypeMapper(stringAsStruct: Boolean): TypeMapper {
+    val tm = TypeMapper()
+    tm.stringAsStruct = stringAsStruct
+    return tm
+}
+
+/// 将标识符中 LLVM IR 不允许的字符替换为下划线。
+fun sanitizeLlvm(s: String): String {
+    val allowed: String = tmAllowedChars()
+    var out: String = ""
+    var i: Int = 0
+    var len: Int = s.length
+    while (i < len) {
+        val c: String = toStr(s[i])
+        if (allowed.indexOf(c) >= 0) {
+            out = out + c
+        } else {
+            out = out + "_"
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// 判断一个 LLVM 类型字符串是否为标量类型。
+fun llvmIsScalar(ty: String): Boolean {
+    if (ty == "i1" || ty == "i8" || ty == "i16" || ty == "i32" || ty == "i64" || ty == "i128") {
+        return true
+    }
+    if (ty == "float" || ty == "double") {
+        return true
+    }
+    return false
+}
