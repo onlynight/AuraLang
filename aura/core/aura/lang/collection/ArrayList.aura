@@ -35,6 +35,10 @@ internal class ArrayList<T> : List<T> {
         return _size
     }
 
+    /// 列表元素数量（属性形式，`xs.size`）
+    val size: Int
+        get() = _size
+
     // ── 访问方法 ──
 
     /// 按下标获取元素
@@ -132,22 +136,24 @@ internal class ArrayList<T> : List<T> {
     // ── 过滤与转换 ──
 
     /// 按条件过滤
-    fun filter(predicate: Any): List<T> {
+    fun filter(predicate: (T) -> Boolean): List<T> {
         val result = ArrayList<T>()
         var i: Int = 0
         while (i < _size) {
-            result.add(data[i])
+            if (predicate(data[i])) {
+                result.add(data[i])
+            }
             i = i + 1
         }
         return result
     }
 
     /// 转换每个元素
-    fun map(transform: Any): List<Any> {
+    fun map(transform: (T) -> Any): List<Any> {
         val result = ArrayList<Any>()
         var i: Int = 0
         while (i < _size) {
-            result.add(transform)
+            result.add(transform(data[i]))
             i = i + 1
         }
         return result
@@ -169,13 +175,27 @@ internal class ArrayList<T> : List<T> {
     // ── 全量检查 ──
 
     /// 检查是否所有元素都满足条件
-    fun every(predicate: Any): Boolean {
+    fun every(predicate: (T) -> Boolean): Boolean {
+        var i: Int = 0
+        while (i < _size) {
+            if (!predicate(data[i])) {
+                return false
+            }
+            i = i + 1
+        }
         return true
     }
 
     /// 检查是否存在满足条件的元素
-    fun any(predicate: Any): Boolean {
-        return true
+    fun any(predicate: (T) -> Boolean): Boolean {
+        var i: Int = 0
+        while (i < _size) {
+            if (predicate(data[i])) {
+                return true
+            }
+            i = i + 1
+        }
+        return false
     }
 
     // ── 范围操作 ──

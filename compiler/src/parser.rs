@@ -1969,6 +1969,27 @@ impl Parser {
         let name = self.advance().literal.clone();
         let type_params = self.try_parse_type_params();
 
+        // 接口继承：`interface List<T> : Collection<T>` 或 `: A, B`
+        let mut super_types = Vec::new();
+        if let Some(base) = self.parse_superclass_ref() {
+            super_types.push(base);
+            while self.check(TokenKind::Comma) {
+                self.advance();
+                let base_name = self.advance().literal.clone();
+                if self.check(TokenKind::Lt) {
+                    self.skip_balanced(
+                        TokenKind::Lt,
+                        &[
+                            TokenKind::Gt,
+                            TokenKind::GtGt,
+                            TokenKind::GtGtGt,
+                        ],
+                    );
+                }
+                super_types.push(base_name);
+            }
+        }
+
         let mut methods = Vec::new();
         if self.check(TokenKind::LBrace) {
             self.advance();
@@ -1986,6 +2007,7 @@ impl Parser {
             visibility,
             name,
             type_params,
+            super_types,
             methods,
             doc: self.take_doc(),
             span: Span::merge(&start, &self.current().span),
@@ -3540,6 +3562,45 @@ mod tests {
         );
         assert!(errors.is_empty());
         assert_eq!(prog.declarations.len(), 2);
+    }
+
+    // Phase 8：接口继承 `interface List<T> : Collection<T>`（含多父接口 / 泛型实参）
+    #[test]
+    fn test_regression_interface_inheritance() {
+        let (prog, errors) = parse_program(
+            r#"
+            interface Collection<T> {
+                fun count(): Int
+            }
+            interface List<T> : Collection<T> {
+                fun filter(predicate: (T) -> Boolean): List<T>
+            }
+            interface Both : Collection<Int>, Comparable<Int> {
+                fun z(): Int
+            }
+        "#,
+        );
+        assert!(errors.is_empty(), "parse errors: {:?}", errors);
+        assert_eq!(prog.declarations.len(), 3);
+
+        let iface = match &prog.declarations[1] {
+            crate::ast::Decl::Interface(i) => i,
+            other => panic!("expected interface, got {:?}", other),
+        };
+        assert_eq!(iface.name, "List");
+        assert_eq!(iface.super_types, vec!["Collection".to_string()]);
+
+        let multi = match &prog.declarations[2] {
+            crate::ast::Decl::Interface(i) => i,
+            other => panic!("expected interface, got {:?}", other),
+        };
+        assert_eq!(
+            multi.super_types,
+            vec![
+                "Collection".to_string(),
+                "Comparable".to_string()
+            ]
+        );
     }
 
     #[test]

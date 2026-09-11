@@ -560,6 +560,9 @@ pub struct InterfaceDecl {
     pub visibility: Visibility,
     pub name: String,
     pub type_params: Vec<TypeParam>,
+    /// 继承的父接口名（`interface List<T> : Collection<T>` → `["Collection"]`）。
+    /// 多个父接口以逗号分隔；泛型实参仅做跳过，不参与语义检查。
+    pub super_types: Vec<String>,
     pub methods: Vec<FnDecl>,
     pub doc: Option<String>,
     pub span: Span,

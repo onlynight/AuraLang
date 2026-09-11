@@ -333,10 +333,71 @@ HIR 采用与 AST 一致的「扁平 arena」表示（`kinds/texts/tys/spans/kid
 > **回退策略**：任何 Phase 7 失败只需删除 `aura/lang/compiler/jit/`，Rust 编译器的
 > JIT（`compiler/src/vm/jit*.rs`）与其余后端不受影响，始终可用。
 
-## Phase 8 规划（标准库 Aura 化）🔜
+## Phase 8 交付物（核心库与标准库 Aura 化）✅
 
-对应迁移计划 §4.10：将 `compiler/src/std/*.rs` 上移到 `core/aura/lang/std/`，
-使 Aura 源码成为标准库唯一真相源。前置依赖（Phase 6/7）已就绪。
+对应迁移计划 §4.10：`aura/core/aura/lang/**` 是核心类型 / 标准库 / 集合的
+Aura 源码实现，目标是使其成为唯一真相源（替换 `compiler/src/std/*.rs` 的
+纯逻辑部分）。Phase 8 首先补齐「源码可编译 + 逻辑正确 + 可验证」三项前提。
+
+### 8.1 编译器缺口修复（暴露自 Aura 核心库）
+
+| # | 缺口 | 现象 | 修复位置 |
+|---|------|------|----------|
+| 1 | 接口继承无法解析 | `interface List<T> : Collection<T>` 报 `parse error: Expected Arrow, got Colon`，导致 `collection/{List,Array,Set}.aura` 无法编译 | `ast::InterfaceDecl.super_types` + `parser::parse_interface`（复用 `parse_superclass_ref`，支持多父接口 `: A, B` 与泛型实参跳过）+ `sema::checker` 登记继承链 |
+| 2 | 字符串转义缺失 | `Json.aura` 中的 `"\b"` / `"\f"` 报 `lex error: Invalid escape sequence` | `lexer` 字符串/字符字面量新增 `\b` `\f` `\v` `\/` 转义 |
+
+**效果**：`aura stdlib-compile aura/core/aura/lang` 由 **41/45 → 45/45** 全部编译成功。
+
+### 8.2 Aura 标准库实现修复
+
+| 文件 | 缺陷 | 修复 |
+|------|------|------|
+| `collection/ArrayList.aura` | `filter`/`map` 忽略回调、`every`/`any` 恒 `true` | 改为 `(T) -> Boolean` / `(T) -> Any` 函数类型并按元素调用；新增 `size` 属性 |
+| `collection/List.aura` | 接口回调参数为 `Any`，无法调用 | 同步为函数类型签名 |
+| `collection/HashSet.aura` | `remove` 调用不存在的 `ArrayList.removeItem` | 改用 `indexOf` + `remove(index)` |
+| `Float.aura` / `Double.aura` | `ceil`/`floor`/`trunc` 占位 `return this`；`round` 调用不存在的全局 `floor` | 以 `as Int` 截断实现纯 Aura 取整 |
+| `std/TestHelper.aura` | `s.length()` 与 `String.length` 属性不符；缺 `return` | 改为 `s.length` + 显式 `return` |
+
+### 8.3 Phase 8 验证用例
+
+`tests/phase8_stdlib_tests.aura`：通过**相对路径内联** Aura 标准库源码，直接验证
+Aura 实现（而非 Rust native 回退），覆盖：
+
+| 组 | 覆盖 | 断言数 |
+|----|------|--------|
+| `std.math` | abs / square / cube / sign / clamp / powInt / floor / ceil / trunc / round / lerp / mapRange | 15 |
+| `std.ascii` | isAlpha / isDigit / isAlphaNumeric / isWhitespace / isUpper / isLower / toUpper / toLower / upperCaseAll / lowerCaseAll / allAlpha / allDigit | 16 |
+| `std.assert` | Assert.assertApprox + TestHelper（add / multiply / isEven / reverse） | 6 |
+| `std.iter` | sum / avg / product / contains / indexOf / lastIndexOf / count / none | 9 |
+
+合计 **46 断言**，`RESULT: PASS`。
+
+### 8.4 已知限制（Phase 8 遗留，属编译器/VM 层）
+
+以下问题经 Phase 8 验证用例定位，**不是 Aura 源码错误**，需后续在 `compiler/`
+侧解决；在此之前相关模块暂不能作为运行时真相源：
+
+- **native 同名回退拦截**：HIR 会把 `Math.min/max`、`Iter.min/max`、`String.toInt`
+  等调用解析到**同名 native prelude**（如 `min(Int,Int)`、`toInt(Any)`），
+  使 Aura 实现（含重载）被遮蔽，返回错值（`min(3,7) == 0`、`"123".toInt() == 0`）。
+- **`Array<T>` 下标未降级**：`Array<T>` / `ArrayList<T>` 的 `data[i]` 无法索引
+  （`cannot index into 'Array'`），导致 `ArrayList` / `HashMap` / `HashSet`
+  的运行时行为不可靠。
+- **函数类型参数与容器构建**：`Iter` 中带 `(Any)->*` 回调的函数
+  （`countWhere`/`every`/`some`）与内部 `mutableListOf()` 构建后返回的
+  （`map`/`filter`/`reverse`/`take`/`range`）在 VM 中丢失结果。
+- **`String.charCodeAt` / `String.fromCharCode`**：返回异常值，
+  影响 `Ascii.codeAt` / `fromCode` 与 `Encoding` 的实现。
+
+> **回退策略**：任何 Phase 8 失败只需删除新增/修改的 Aura 文件即可；
+> Rust 编译器的 native 标准库实现始终可用，不受影响。
+
+### 8.5 验证命令
+
+```bash
+aura run tests/phase8_stdlib_tests.aura     # 应输出 RESULT: PASS
+aura stdlib-compile aura/core/aura/lang --output build   # 应 45/45 成功
+```
 
 ## Phase 0 交付物
 
@@ -377,11 +438,14 @@ aura run tests/phase6_aot_tests.aura
 # 8) Phase 7 验证用例（JIT：状态机 / 7 优化传递 / Cranelift IR / 派发回退 / 段加载）
 aura run tests/phase7_jit_tests.aura
 
-# 9) 构建 Aura 编译器骨架（默认产出 .auc；--aot 产出原生可执行文件）
+# 9) Phase 8 验证用例（核心库 / 标准库 Aura 化）
+aura run tests/phase8_stdlib_tests.aura
+
+# 10) 构建 Aura 编译器骨架（默认产出 .auc；--aot 产出原生可执行文件）
 scripts/build-aura-compiler.sh
 scripts/build-aura-compiler.sh --aot
 
-# 10) 源码快照一致性检查
+# 11) 源码快照一致性检查
 scripts/snapshot.sh
 ```
 
@@ -396,6 +460,7 @@ aura run tests\phase3_mir_tests.aura
 aura run tests\phase5_vm_tests.aura
 aura run tests\phase6_aot_tests.aura
 aura run tests\phase7_jit_tests.aura
+aura run tests\phase8_stdlib_tests.aura
 scripts\build-aura-compiler.ps1
 scripts\snapshot.ps1
 ```

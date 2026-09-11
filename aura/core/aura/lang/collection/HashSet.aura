@@ -50,7 +50,12 @@ internal class HashSet<T> {
 
     /// 移除元素
     fun remove(item: T): Boolean {
-        return data.removeItem(item)
+        val index = data.indexOf(item)
+        if (index < 0) {
+            return false
+        }
+        data.remove(index)
+        return true
     }
 
     /// 清空集合

@@ -641,6 +641,12 @@ impl Lexer {
                         '\'' => buf.push('\''),
                         '"' => buf.push('"'),
                         '0' => buf.push('\0'),
+                        // JSON/通用转义：退格 / 换页 / 垂直制表
+                        'b' => buf.push('\u{0008}'),
+                        'f' => buf.push('\u{000C}'),
+                        'v' => buf.push('\u{000B}'),
+                        // JSON 允许转义斜杠，等价于普通斜杠
+                        '/' => buf.push('/'),
                         _ => {
                             buf.push('\\');
                             buf.push(esc);
@@ -744,6 +750,12 @@ impl Lexer {
                         '\'' => buf.push('\''),
                         '"' => buf.push('"'),
                         '0' => buf.push('\0'),
+                        // JSON/通用转义：退格 / 换页 / 垂直制表
+                        'b' => buf.push('\u{0008}'),
+                        'f' => buf.push('\u{000C}'),
+                        'v' => buf.push('\u{000B}'),
+                        // JSON 允许转义斜杠，等价于普通斜杠
+                        '/' => buf.push('/'),
                         _ => buf.push(esc),
                     }
                     self.advance();
@@ -1255,6 +1267,16 @@ mod tests {
         let tokens = tokenize("\"hello\\nworld\"");
         assert_eq!(kind(&tokens[0]), TokenKind::StringLiteral);
         assert_eq!(tokens[0].literal, "hello\nworld");
+    }
+
+    // Phase 8：JSON 等场景需要的转义（退格 / 换页 / 垂直制表 / 斜杠）
+    #[test]
+    fn test_string_with_json_escapes() {
+        let mut lexer = Lexer::new("\"a\\bb\\fc\\vd\\/e\"");
+        let tokens = lexer.tokenize();
+        assert!(lexer.errors().is_empty(), "errors: {:?}", lexer.errors());
+        assert_eq!(kind(&tokens[0]), TokenKind::StringLiteral);
+        assert_eq!(tokens[0].literal, "a\u{8}b\u{c}c\u{b}d/e");
     }
 
     #[test]

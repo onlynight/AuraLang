@@ -984,6 +984,11 @@ impl Checker {
                 self.interface_types.insert(i.name.clone());
                 self.record_generic_bounds(&i.name, &i.type_params);
                 self.record_members(&i.name, &[], &i.methods);
+                // 接口继承链：`interface List<T> : Collection<T>`。
+                // 记录后，子接口继承父接口的方法/可赋值关系。
+                for base in &i.super_types {
+                    self.superclasses.insert(i.name.clone(), base.clone());
+                }
                 // Bug fix: 将接口方法注册到符号表（与 class/struct 一致）
                 // 此前仅调用 record_members 记录方法名，但没有通过 insert_function
                 // 将 `Interface.method` 符号注册进 self.symbols，导致方法分派

@@ -1,0 +1,145 @@
+// ═════════════════════════════════════════════════════════════
+// Phase 8 验证用例：核心库与标准库 Aura 化
+//
+// 对应迁移计划 §4.10 与附录 D.7，验证 `aura/core/aura/lang/` 下的
+// Aura 实现（纯逻辑模块）的行为与 API。
+//
+// 运行：aura run tests/phase8_stdlib_tests.aura
+//   全通过时输出 "RESULT: PASS"
+// ═════════════════════════════════════════════════════════════
+
+import "../aura/compiler/aura/lang/compiler/test/TestRunner.aura"
+
+import "../aura/core/aura/lang/std/Math.aura"
+import "../aura/core/aura/lang/std/Ascii.aura"
+import "../aura/core/aura/lang/std/Assert.aura"
+import "../aura/core/aura/lang/std/TestHelper.aura"
+import "../aura/core/aura/lang/std/Iter.aura"
+
+// ═════════════════════════════════════════════════════════════
+// 测试 1: Math（纯 Aura 数学函数）
+// ═════════════════════════════════════════════════════════════
+
+fun testMath(): Int {
+    val t = TestRunner()
+    t.begin("std.math")
+
+    t.assertEq(Math.abs(5), 5, "abs(5)")
+    t.assertEq(Math.square(4), 16, "square")
+    t.assertEq(Math.cube(3), 27, "cube")
+    t.assertEq(Math.sign(-9), -1, "sign(-9)")
+    t.assertEq(Math.sign(0), 0, "sign(0)")
+    t.assertEq(Math.sign(9), 1, "sign(9)")
+    t.assertEq(Math.clamp(10, 0, 5), 5, "clamp high")
+    t.assertEq(Math.clamp(-1, 0, 5), 0, "clamp low")
+    t.assertEq(Math.powInt(2, 10), 1024, "powInt")
+    t.assertEq(Math.floor(2.7f), 2.0, "floor(2.7)")
+    t.assertEq(Math.ceil(2.1f), 3.0, "ceil(2.1)")
+    t.assertEq(Math.trunc(-2.9f), -2.0, "trunc(-2.9)")
+    t.assertEq(Math.round(2.5f), 3.0, "round(2.5)")
+    t.assertEq(Math.lerp(0.0f, 10.0f, 0.5f), 5.0, "lerp")
+    t.assertEq(Math.mapRange(5.0f, 0.0f, 10.0f, 0.0f, 100.0f), 50.0, "mapRange")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 2: Ascii（按设计以「首字符」为操作对象）
+// ═════════════════════════════════════════════════════════════
+
+fun testAscii(): Int {
+    val t = TestRunner()
+    t.begin("std.ascii")
+
+    t.assertTrue(Ascii.isAlpha("abc"), "isAlpha yes")
+    t.assertFalse(Ascii.isAlpha("1ab"), "isAlpha no")
+    t.assertTrue(Ascii.isDigit("123"), "isDigit yes")
+    t.assertFalse(Ascii.isDigit("a12"), "isDigit no")
+    t.assertTrue(Ascii.isAlphaNumeric("a1"), "isAlphaNumeric")
+    t.assertTrue(Ascii.isWhitespace(" x"), "isWhitespace")
+    t.assertTrue(Ascii.isUpper("ABC"), "isUpper")
+    t.assertTrue(Ascii.isLower("abc"), "isLower")
+    t.assertFalse(Ascii.isUpper("abc"), "isUpper no")
+
+    // 首字符转换（其余保持不变）
+    t.assertEq(Ascii.toUpper("abc"), "Abc", "toUpper first char")
+    t.assertEq(Ascii.toLower("ABC"), "aBC", "toLower first char")
+
+    // 全量转换
+    t.assertEq(Ascii.upperCaseAll("aBc"), "ABC", "upperCaseAll")
+    t.assertEq(Ascii.lowerCaseAll("AbC"), "abc", "lowerCaseAll")
+    t.assertTrue(Ascii.allAlpha("abc"), "allAlpha")
+    t.assertFalse(Ascii.allAlpha("ab1"), "allAlpha no")
+    t.assertTrue(Ascii.allDigit("123"), "allDigit")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 3: Assert / TestHelper
+// ═════════════════════════════════════════════════════════════
+
+fun testAssertAndHelper(): Int {
+    val t = TestRunner()
+    t.begin("std.assert")
+
+    t.assertEq(Assert.assertApprox(1.0, 1.001, 0.01, "approx"), "OK: approx", "Assert.assertApprox")
+
+    // TestHelper 顶层函数（无 self，名称唯一）
+    t.assertEq(add(2, 3), 5, "TestHelper.add")
+    t.assertEq(multiply(4, 5), 20, "TestHelper.multiply")
+    t.assertTrue(isEven(4), "TestHelper.isEven")
+    t.assertFalse(isEven(5), "TestHelper.isEven false")
+    t.assertEq(reverse("aura"), "arua", "TestHelper.reverse")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 4: Iter（函数式工具）
+// ═════════════════════════════════════════════════════════════
+
+fun testIter(): Int {
+    val t = TestRunner()
+    t.begin("std.iter")
+
+    val xs = listOf(3, 1, 2, 2)
+
+    t.assertEq(Iter.sum(listOf(1, 2, 3)), 6.0, "sum")
+    t.assertEq(Iter.avg(listOf(2, 4)), 3.0, "avg")
+    t.assertEq(Iter.product(listOf(2, 3, 4)), 24.0, "product")
+    t.assertTrue(Iter.contains(xs, 2), "contains")
+    t.assertFalse(Iter.contains(xs, 9), "contains no")
+    t.assertEq(Iter.indexOf(xs, 2), 2, "indexOf")
+    t.assertEq(Iter.lastIndexOf(xs, 2), 3, "lastIndexOf")
+    t.assertEq(Iter.count(xs), 4, "count")
+    t.assertFalse(Iter.none(xs), "none")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 主函数
+// ═════════════════════════════════════════════════════════════
+
+fun main() {
+    println("=== Phase 8 Core/Std Library Aura-ization Tests ===")
+    println()
+
+    val f1 = testMath()
+    val f2 = testAscii()
+    val f3 = testAssertAndHelper()
+    val f4 = testIter()
+
+    val totalFailures: Int = f1 + f2 + f3 + f4
+
+    println()
+    println("=== Summary ===")
+    println("Total failures: " + toStr(totalFailures))
+
+    if (totalFailures == 0) {
+        println("RESULT: PASS")
+    } else {
+        println("RESULT: FAIL (" + toStr(totalFailures) + ")")
+    }
+}

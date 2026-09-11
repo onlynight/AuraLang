@@ -21,16 +21,16 @@ interface List<T> : Collection<T> {
     fun distinct(): List<T>
 
     /// 按条件过滤
-    fun filter(predicate: Any): List<T>
+    fun filter(predicate: (T) -> Boolean): List<T>
 
     /// 转换每个元素
-    fun map(transform: Any): List<Any>
+    fun map(transform: (T) -> Any): List<Any>
 
     /// 检查是否所有元素都满足条件
-    fun every(predicate: Any): Boolean
+    fun every(predicate: (T) -> Boolean): Boolean
 
     /// 检查是否存在满足条件的元素
-    fun any(predicate: Any): Boolean
+    fun any(predicate: (T) -> Boolean): Boolean
 
     /// 取前 n 个元素
     fun take(n: Int): List<T>

@@ -107,31 +107,36 @@ internal value class Float {
         return this % other
     }
 
-    /// 四舍五入
+    /// 四舍五入（.5 远离零方向进位）
     fun round(): Float {
         if (this >= 0.0f) {
-            return floor(this + 0.5f)
+            return ((this + 0.5f) as Int) as Float
         } else {
-            return ceil(this - 0.5f)
+            return ((this - 0.5f) as Int) as Float
         }
     }
 
-    /// 向上取整
+    /// 向上取整（返回不小于 this 的最小整数）
     fun ceil(): Float {
-        // Rust native 实现（libm ceil）
-        return this
+        val t: Float = (this as Int) as Float
+        if (t < this) {
+            return t + 1.0f
+        }
+        return t
     }
 
-    /// 向下取整
+    /// 向下取整（返回不大于 this 的最大整数）
     fun floor(): Float {
-        // Rust native 实现（libm floor）
-        return this
+        val t: Float = (this as Int) as Float
+        if (t > this) {
+            return t - 1.0f
+        }
+        return t
     }
 
-    /// 截断小数部分
+    /// 截断小数部分（向零取整）
     fun trunc(): Float {
-        // Rust native 实现（libm trunc）
-        return this
+        return (this as Int) as Float
     }
 
     // ── 数学方法（Rust native 实现）──
