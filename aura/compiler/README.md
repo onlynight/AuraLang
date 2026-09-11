@@ -567,9 +567,13 @@ aura run tests/phase8_stdlib_tests.aura
 aura run tests/phase9_compiler_tests.aura
 aura run aura/compiler/aura/lang/compiler/Main.aura
 
-# 11) 构建 Aura 编译器骨架（默认产出 .auc；--aot 产出原生可执行文件）
-#     注意：--aot 需要以 `cargo build -p cli --features llvm` 构建 aura，
-#     且本机安装 LLVM（路径见根 Cargo.toml 的 [workspace.metadata.aura].llvm-home）
+# 11) 构建 Aura 编译器 → 产物集中输出到 build/bin/
+#     build/bin/aura.exe            Rust 最小 bootstrap 编译器（-Aot/--aot 时以
+#                                   `cargo build -p cli --features llvm` 重建）
+#     build/bin/aura-compiler.auc   Aura 编写的编译器（字节码，可 `aura run`）
+#     build/bin/aura-compiler.exe   Aura 编写的编译器（AOT 原生 exe；⚠ 见下方已知限制）
+#     注意：--aot 需要本机安装 LLVM
+#     （路径见根 Cargo.toml 的 [workspace.metadata.aura].llvm-home）
 scripts/build-aura-compiler.sh
 scripts/build-aura-compiler.sh --aot
 
@@ -594,6 +598,46 @@ aura run aura\compiler\aura\lang\compiler\Main.aura
 scripts\build-aura-compiler.ps1
 scripts\snapshot.ps1
 ```
+
+> **build/bin 产物与 AOT 现状**
+>
+> * `build/bin/aura.exe`（bootstrap）与 `build/bin/aura-compiler.auc` 均已可用：
+>   `aura run build/bin/aura-compiler.auc` 会跑通「Aura 编译器自检样例」。
+> * `build/bin/aura-compiler.exe`（把 Aura 编写的编译器 AOT 成原生 exe）**尚未打通**。
+>
+>   已修复的阻塞项（Rust AOT 后端）：
+>   1. `cmd_build_aot` 曾把 P3 语义诊断当致命错误直接 `exit(1)`，现与字节码路径
+>      `compile_source` 一致：只告警、不阻断（`Main.aura` 有 468 条 P3 诊断）。
+>   2. `emit_index_access` 曾生成非法 GEP（i32 索引直塞 i64 槽、`i8*` 基址当
+>      `i32*`），已改为 sext + bitcast，并按容器表示分派：
+>      字符串 → `aura_lang_std_String_charAt`；动态列表 → `..._Collections_getAt`；
+>      整型数组 → GEP。
+>   3. AOT 调用点符号层缺失：发射器把 `aura.lang.std.String.split` 落成 LLVM 符号
+>      `aura_lang_std_String_split`，而 C 运行库只导出 `aura_string_*` 旧名，
+>      导致**除 prelude 外所有 std 调用链接期 undefined symbol**。
+>      现已在 `compiler/src/std/cffi/aura_std_cffi.{c,h}` 增加调用点符号实现
+>      （String / Collections / FileSystem / Process / Math）。
+>   4. 字符串比较曾生成 `icmp i32 …, { i8*, i64 } …` 等非法 IR，现统一走
+>      `aura_lang_std_String_equals` 做内容比较；整型 i32/i64 混用先统一。
+>   5. 字符串 `.length` / `.size` 曾被当作结构体字段 0（数据指针），现取字段 1。
+>
+>   现已可端到端验证（编译 → llc → clang → 运行）：
+>   `tests/aot/string_runtime.aura`、`tests/aot/list_runtime.aura`
+>   （`aura build <file> --aot -o x.exe && x.exe`，退出码 0）。
+>
+>   剩余根因：AOT 依赖 sema 类型信息，而 `compiler/src/std/decl.rs` 只登记
+>   **std 函数名**、没有签名表，因此 `String.split` 等 native 调用在 sema 中退化为
+>   `Any`；再叠加「类对象 = 指针」与「值返回 = 结构体」两种表示混用
+>   （如 `Token.withSpan` 声明返回 `%struct.Token` 却 `ret i8*`），
+>   Aura 编译器自身仍会在这些点产出非法 IR。
+>   需先补「std 签名表 + 统一的值/指针表示」，Aura 编译器才可能 AOT 成功。
+>
+> * **两套 AOT 发射器（重要）**：`aura build --aot` 走 **Rust** 后端
+>   （`compiler/src/codegen/aot/emit.rs`，本页上述修复所在）；
+>   而 `aura/compiler/.../aot/Emit.aura` 是 Phase 6 的 **Aura 侧镜像实现**，
+>   能力弱得多（字符串字面量会发射成 `store i32 Hello:World`），
+>   `tests/phase9_compiler_tests.aura::testAotExe` 只覆盖 `6*7` 这类无运行库依赖的程序。
+>   要产出 `aura-compiler.exe`，短期内应以 Rust 后端为准。
 
 > **门禁判据**：Aura 侧测试以 stdout 末行 `RESULT: PASS` 为准（当前 VM 无法通过
 > `throw` / `exit` 影响进程退出码，CI 用 `grep "RESULT: PASS"` 判定）。

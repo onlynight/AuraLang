@@ -4,7 +4,10 @@
 > **方案选择**：方案四——分阶段迁移路径
 > **约束**：本文仅提供分析与计划，不修改任何代码
 > **分析日期**：2026-09-10
-> **预计执行周期**：约 11–13 人月（单人全职）
+> **预计执行周期**：约 14–15 人月（单人全职）
+>
+> **⚠️ 方案调整（2026-09-11）**：**AOT 路径改为「Aura 侧自研 LLVM IR 生成 + 直连 LLVM 工具链生成机器码」，
+> 跳过（不移植、不调用、不依赖）Rust AOT 后端。** 详见 §4.8「决策变更记录」。
 
 ---
 
@@ -22,10 +25,11 @@
   - [4.5 Phase 3：MIR 生成器与优化器 Aura 化](#45-phase-3mir-生成器与优化器-aura-化)
   - [4.6 Phase 4：VM 字节码发射与解释器 Aura 化](#46-phase-4vm-字节码发射与解释器-aura-化)
   - [4.7 Phase 5：VM 自举（最小引导层保留）](#47-phase-5vm-自举最小引导层保留)
-  - [4.8 Phase 6：AOT LLVM 后端 Aura 化](#48-phase-6aot-llvm-后端-aura-化)
-  - [4.9 Phase 7：JIT 编译（Cranelift 直连机器码）Aura 化](#49-phase-7jit-编译cranelift-直连机器码aura-化)
-  - [4.10 Phase 8：核心库与标准库 Aura 化](#410-phase-8核心库与标准库-aura-化)
-  - [4.11 Phase 9：LLVM C API 直连（可选优化）](#411-phase-9llvm-c-api-直连可选优化)
+  - [4.8 Phase 6：AOT 后端 Aura 自研（自产 IR + 直连 LLVM）](#48-phase-6aot-后端-aura-自研自产-ir--直连-llvm)
+  - [4.9 Phase 6.5：AOT 后端适配与修复（AOT Hardening）](#49-phase-65aot-后端适配与修复aot-hardening)
+  - [4.10 Phase 7：JIT 编译（Cranelift 直连机器码）Aura 化](#410-phase-7jit-编译cranelift-直连机器码aura-化)
+  - [4.11 Phase 8：核心库与标准库 Aura 化](#411-phase-8核心库与标准库-aura-化)
+  - [4.12 Phase 9：LLVM C API 直连（可选优化）](#412-phase-9llvm-c-api-直连可选优化)
 - [五、关键技术挑战与解决方案](#五关键技术挑战与解决方案)
 - [六、工作量估算与里程碑](#六工作量估算与里程碑)
 - [七、风险矩阵与回退策略](#七风险矩阵与回退策略)
@@ -41,7 +45,8 @@
 
 ### 核心决策
 
-选择**方案四：分阶段迁移路径**，采用 9 个 Phase 的渐进式迁移策略，每个 Phase 独立可验证、可回退。
+选择**方案四：分阶段迁移路径**，采用 **10 个 Phase**（Phase 0–9，含 2026-09-11 新增的
+**Phase 6.5：AOT 后端适配与修复**）的渐进式迁移策略，每个 Phase 独立可验证、可回退。
 
 ### 核心原则：独立代码层 + 保留 Rust 实现
 
@@ -57,6 +62,8 @@
 2. **可对比**：同一份源码可同时用 Rust/Aura 编译器编译，输出对比验证
 3. **可回退**：任何 Phase 失败时，只需放弃 Aura 编译器代码，Rust 编译器不受影响
 4. **渐进式**：每个 Phase 独立交付，可随时暂停而不影响主线开发
+5. **AOT 零依赖 Rust 后端**：Aura 化 AOT 自产 LLVM IR 并**直连 LLVM** 生成机器码，
+   不移植、不调用 Rust AOT 后端（`compiler/src/codegen/aot/` 仅作行为参照）
 
 ### 关键技术选择
 
@@ -64,7 +71,8 @@
 |------|------|------|
 | **代码组织** | `aura/compiler/` 独立目录 | 与 `compiler/` 并行，互不干扰 |
 | **Rust 编译器** | 完全保留，不修改 | 作为 fallback 和参考实现 |
-| **LLVM 后端方式** | 文本 IR + 外部 `llc`/`clang` 子进程 | 与现有 Rust 实现同构，无需绑定 LLVM C API |
+| **LLVM 后端方式** | **Aura 侧自研文本 IR + 直连 LLVM**（`llc`/`clang` 子进程） | Aura 自己产出 LLVM IR 并**直接调用 LLVM 生成机器码**，无需绑定 LLVM C API |
+| **Rust AOT 后端** | **不进入 Aura 编译路径**（仅作行为对照） | 跳过 Rust AOT 后端；避免 Aura 化 AOT 被 Rust 实现绑死，只要求**行为等价** |
 | **JIT 后端方式** | Cranelift 进程内原生码（Phase 7） | 无外部工具链、进程内即时编译，补齐 VM 与 AOT 之间的执行档 |
 | **IR 生成入口** | AOT 走 HIR 直发（绕过 MIR） | 与现有实现一致，避免冗余转换 |
 | **MIR 定位** | VM 解释器 / JIT 共用（AOT 不使用 MIR） | Cranelift IR 与 MIR 的寄存器式 CFG 语义接近，可复用降级结果 |
@@ -80,8 +88,8 @@
 | 已有 Aura 核心库/标准库文件 | 45 个 .aura 文件（`aura/core/aura/lang/`：核心类型 + `collection/` + `coroutine/` + `std/`） |
 | 需要迁移的 Rust 文件 | 约 45 个核心文件 → `aura/compiler/` |
 | 预计 Aura 代码量 | 约 24,000 行（`aura/compiler/`） |
-| 预计总工期 | 12–14 人月 |
-| Phase 数量 | 9 个（含 2 个可选 Phase） |
+| 预计总工期 | 14–15 人月 |
+| Phase 数量 | 10 个（含 2 个可选 Phase；其中 Phase 6.5 为 AOT 适配修复阶段） |
 | **Rust 编译器** | **完全保留，零修改** |
 | **Aura 编译器目录** | **`aura/compiler/`（独立）** |
 
@@ -124,11 +132,16 @@
 - **优势**：与 LLVM 版本解耦，跨版本兼容
 - **文件位置**：`compiler/src/codegen/aot/`（共 11 个子模块）
 
-### 1.3 五步式 AOT 流程
+### 1.3 五步式 AOT 流程（Rust 侧现状，仅作背景）
 
 ```
 HIR → emit_program() → LLVM IR 文本 → 写 .ll → llc → .o → clang → .exe
 ```
+
+> **Aura 侧不走这条路**：Aura 化 AOT 自行完成「HIR → LLVM IR 文本」的发射，
+> 并**直接调用 LLVM 工具链**（`llc` → `clang`）产出机器码/可执行文件，
+> **不经过 Rust AOT 后端**（`compiler/src/codegen/aot/`）。该目录对 Aura 侧
+> 仅具有「行为参照」意义，不是迁移源、也不是运行时依赖。详见 §4.8。
 
 ### 1.4 类型映射表（TypeMapper）
 
@@ -201,7 +214,7 @@ pub fn compile_program(&self, program: &crate::ast::Program, ...) -> Result<AotO
 
 | 方案 | 描述 | 开发量 | 性能 | 复杂度 | 推荐度 |
 |------|------|--------|------|--------|--------|
-| 方案一 | 文本 IR + 子进程（Aura 重写） | 中 | 中 | 低 | ⭐⭐⭐⭐ |
+| 方案一 | 文本 IR + 子进程（**Aura 自研 IR 生成，直连 LLVM**） | 中 | 中 | 低 | ⭐⭐⭐⭐ |
 | 方案二 | C FFI 直连 LLVM C API | 高 | 高 | 高 | ⭐⭐⭐ |
 | 方案三 | Aura-to-C 转译（fallback） | 低 | 低 | 低 | ⭐⭐ |
 | **方案四** | **分阶段迁移** | **高** | **高** | **中** | **⭐⭐⭐⭐⭐** |
@@ -211,7 +224,8 @@ pub fn compile_program(&self, program: &crate::ast::Program, ...) -> Result<AotO
 1. **风险可控**：每个 Phase 独立可验证、可回退
 2. **渐进式改进**：每完成一个 Phase 就获得一个可交付成果
 3. **保留 fallback**：Rust 编译器始终可用
-4. **技术路线清晰**：Phase 1–8 用方案一（文本 IR），Phase 9 可选升级到方案二
+4. **技术路线清晰**：Phase 1–8 用方案一（Aura 自研文本 IR + **直连 LLVM** 生成机器码），
+   Phase 9 可选升级到方案二；**AOT 全程跳过 Rust AOT 后端**
 5. **与现有文档对齐**：符合 `完全Aura化技术方案-final.md` 的分层架构
 
 ### 3.3 方案四的技术路线
@@ -223,7 +237,9 @@ Phase 1-4: 前端 + IR 生成器 Aura 化（纯逻辑，无 FFI 依赖）
     ↓
 Phase 5: VM 自举（需要最小 Rust 引导层）
     ↓
-Phase 6: AOT LLVM 后端 Aura 化（用方案一：文本 IR + 子进程）
+Phase 6: AOT 后端 Aura 自研（自产 LLVM IR + 直连 LLVM 生成机器码；跳过 Rust AOT 后端）
+    ↓
+Phase 6.5: AOT 后端适配与修复（表示统一 / 运行库契约 / std 签名表 / IR 门禁）
     ↓
 Phase 7: JIT 编译（Cranelift 直连机器码）Aura 化  ← 补全「VM / JIT / AOT」三执行路径
     ↓
@@ -268,7 +284,7 @@ AuraLang/
 │   │   ├── vm/
 │   │   │   └── Interp.aura            # Aura VM 解释器
 │   │   ├── aot/
-│   │   │   └── Emit.aura              # Aura AOT LLVM 后端
+│   │   │   └── Emit.aura              # Aura 自研 AOT IR 发射器（直连 LLVM）
 │   │   └── main.aura                  # Aura 编译器入口
 │   └── core/                          # 核心库 / 标准库（Phase 8 唯一真相源）
 │       └── aura/lang/
@@ -314,16 +330,20 @@ AuraLang/
 #### 双编译器对比测试
 
 ```bash
-# 用 Rust 编译器编译
-aura --rust-compiler --aot tests/example.aura → output_rust/
+# 用 Rust 编译器编译（参照实现）
+aura --rust-compiler --aot tests/example.aura → output_rust/example.exe
 
-# 用 Aura 编译器编译
-aura-compiler --aot tests/example.aura → output_aura/
+# 用 Aura 编译器编译（自产 IR + 直连 LLVM；不经过 Rust AOT 后端）
+aura-compiler --aot tests/example.aura → output_aura/example.exe
 
-# 对比输出
-diff output_rust/example.ll output_aura/example.ll   # LLVM IR 对比
-diff output_rust/example.o output_aura/example.o     # 目标文件对比
+# 行为差分（等价性判据）：运行输出与退出码一致
+output_rust/example.exe > rust.out ; echo $? > rust.code
+output_aura/example.exe > aura.out ; echo $? > aura.code
+diff rust.out aura.out && diff rust.code aura.code
 ```
+
+> **判据变更**：AOT 的等价性以**运行行为**为准；LLVM IR 文本与目标文件**不再做逐字节比对**
+> （理由见 §4.8 决策变更记录）。VM/JIT 侧仍可做 MIR / 字节码级对比。
 
 #### 关键约束
 
@@ -333,7 +353,7 @@ diff output_rust/example.o output_aura/example.o     # 目标文件对比
 | **Aura 编译器独立目录** | `aura/compiler/` 是新增目录，不影响现有代码 |
 | **构建系统独立** | Rust/Aura 编译器各自独立构建，互不依赖 |
 | **CLI 双模式** | `aura` CLI 支持 `--rust-compiler` 和 `--aura-compiler` 两种模式 |
-| **测试对比** | 每个 Phase 完成后，运行对比测试验证输出一致性 |
+| **测试对比** | 每个 Phase 完成后运行对比测试；**AOT 以「运行行为等价」判定（输出 / 退出码），不做 IR / 目标文件逐字节比对** |
 | **回退简单** | 任何 Phase 失败，只需删除 `aura/compiler/` 目录，Rust 编译器不受影响 |
 
 ---
@@ -357,9 +377,11 @@ Phase 0 (准备) ─────────────────────
     │                                        │                 │
     │                                        └──→ Phase 6 (AOT LLVM)
     │                                                │
-    │                                                └──→ Phase 8 (核心库/标准库)
+    │                                                └──→ Phase 6.5 (AOT 适配与修复)
     │                                                        │
-    │                                                        └──→ Phase 9 (LLVM C API, 可选)
+    │                                                        └──→ Phase 8 (核心库/标准库)
+    │                                                                │
+    │                                                                └──→ Phase 9 (LLVM C API, 可选)
     └──────────────────────────────────────────────────────────┘
 ```
 
@@ -415,14 +437,14 @@ aura/compiler/                      # ← 新增：Aura 编译器独立目录
 ├── mir/                            # MIR 定义与生成（Phase 3）
 ├── codegen/                        # 字节码发射（Phase 4）
 ├── vm/                             # VM 解释器（Phase 5）
-├── aot/                            # AOT LLVM 后端（Phase 6）
+├── aot/                            # AOT 后端：自研 IR + 直连 LLVM（Phase 6）
 ├── jit/                            # JIT 编译器 / Cranelift 后端（Phase 7）
 ├── test/                           # 测试框架
 └── main.aura                       # 编译器入口
 ```
 
 > 注：**核心库/标准库不位于 `aura/compiler/`**，而在 `aura/core/aura/lang/`
-> （核心类型 + `collection/` + `coroutine/` + `std/`，Phase 8 唯一真相源，详见 §4.10）。
+> （核心类型 + `collection/` + `coroutine/` + `std/`，Phase 8 唯一真相源，详见 §4.11）。
 
 #### 与 Rust 编译器的关系
 
@@ -753,78 +775,219 @@ Layer 0-A: 最小引导层（Rust，不能上移）
 
 ---
 
-### 4.8 Phase 6：AOT LLVM 后端 Aura 化
+### 4.8 Phase 6：AOT 后端 Aura 自研（自产 IR + 直连 LLVM）
+
+#### 决策变更记录（2026-09-11）
+
+**原方案**：把 Rust AOT 后端（`compiler/src/codegen/aot/*.rs`）**逐文件迁移**到 Aura，
+并要求 Aura 产物与 Rust 产物「逐字节一致」（IR 文本对比 / exe MD5 对比）。
+
+**新方案（本文档生效版本）**：
+
+> **Aura 化 AOT 跳过 Rust AOT 后端：Aura 自行产出 LLVM IR 文本，
+> 并直接调用 LLVM 工具链（`llc` → `clang`）生成机器码/可执行文件。**
+
+变更理由：
+
+| # | 理由 | 说明 |
+|---|------|------|
+| 1 | **自举要求「脱 Rust」** | AOT 是执行后端；若 Aura 编译器仍需经 Rust AOT 后端才能出机器码，自举不成立 |
+| 2 | **「逐字节一致」是伪目标** | 临时变量命名、指令顺序、常量池布局属实现自由；Rust 后端自身也在演进，锁定文本等价会持续产生无效返工 |
+| 3 | **Rust AOT 后端并非「已完成的标准答案」** | 实测仍有大量缺口（std 调用点符号层缺失导致链接期 undefined symbol、类对象「值/指针」两种表示混用、`ret` 未按返回类型转换等），照抄会把缺陷一并搬过来 |
+| 4 | **Aura 侧已有更合适的形态** | `aura/compiler/.../aot/` 已按功能拆分（TypeMapper/Target/Runtime/Ffi/Optimize/Emit/Linker/CBackend/Dwarf），应按**功能重实现**而非按文件搬运 |
+| 5 | **直连 LLVM 本就不需要 Rust** | 生成机器码只依赖「IR 文本 + `llc`/`clang` 子进程」，Aura 用 `Process.run` 即可直连，中间不需要任何 Rust 代码 |
+
+**新的等价性判据**：由「产物逐字节一致」改为**行为等价**——同一份 Aura 源码分别经
+Aura-AOT 与 Rust-AOT 编译后，**可执行文件的运行输出与退出码一致**（差分测试）。
 
 #### 目标
 
-将 AOT LLVM 后端（HIR → LLVM IR 文本 + 子进程调用）从 Rust 迁移到 Aura。
+在纯 Aura 中实现 AOT 后端：`HIR → LLVM IR 文本 → 直连 LLVM（llc → clang）→ 机器码/可执行文件`。
 
-#### 迁移文件清单
+**边界（明确不做的事）**：
 
-| Rust 文件 | 行数 | Aura 目标文件 | 预估 | 优先级 |
-|-----------|------|---------------|------|--------|
-| `compiler/src/codegen/aot/emit.rs` | 3380 行 | `aura/lang/compiler/aot/Emit.aura` | 10d | P0 |
-| `compiler/src/codegen/aot/types.rs` | 214 行 | `aura/lang/compiler/aot/TypeMapper.aura` | 2d | P0 |
-| `compiler/src/codegen/aot/linker.rs` | 646 行 | `aura/lang/compiler/aot/Linker.aura` | 4d | P0 |
-| `compiler/src/codegen/aot/target.rs` | ~200 行 | `aura/lang/compiler/aot/Target.aura` | 1d | P0 |
-| `compiler/src/codegen/aot/runtime.rs` | ~150 行 | `aura/lang/compiler/aot/Runtime.aura` | 1d | P1 |
-| `compiler/src/codegen/aot/ffi.rs` | ~100 行 | `aura/lang/compiler/aot/Ffi.aura` | 1d | P1 |
-| `compiler/src/codegen/aot/dwarf.rs` | ~100 行 | `aura/lang/compiler/aot/Dwarf.aura` | 1d | P2 |
-| `compiler/src/codegen/aot/optimize.rs` | ~50 行 | `aura/lang/compiler/aot/Optimize.aura` | 0.5d | P1 |
-| `compiler/src/codegen/aot/c_backend.rs` | 749 行 | `aura/lang/compiler/aot/CBackend.aura` | 3d | P2 |
+- ❌ 不调用 Rust AOT 后端（`compiler/src/codegen/aot/`）产出 IR 或目标文件
+- ❌ 不要求 IR 文本与 Rust 逐字节一致
+- ❌ 不把 Rust AOT 后端作为运行期 fallback（fallback 是「Rust 编译器整体」，见 §7.3）
+- ✅ 只要求：Aura 自产 IR 能被 LLVM 接受（`llc -verify` 通过）并生成可运行机器码
 
-#### 迁移策略
+#### 实现范围（按功能，而非按 Rust 文件搬运）
 
-1. **LLVM IR 生成**：使用 `StringBuilder` 拼接 LLVM IR 文本
-2. **类型映射**：将 `TypeMapper` 翻译为 Aura 函数
-3. **子进程调用**：使用 `Process.aura` 的 `exec()` 方法调用 `llc`/`clang`
-4. **工具发现**：使用 `Env.aura` 和 `File.aura` 探测 LLVM 工具
+下表的 Rust 文件**仅作行为参照**（用于确认类型映射、ABI、命令行形状等约定），
+Aura 侧按功能模块独立实现：
+
+| 功能模块 | Aura 目标文件 | Rust 参照 | 预估 |
+|----------|---------------|-----------|------|
+| 类型映射 | `TypeMapper.aura` | `types.rs` | 2d |
+| 目标平台/三元组 | `Target.aura` | `target.rs` | 1d |
+| 运行库 ABI 声明与「调用点符号」 | `Runtime.aura` | `runtime.rs` | 2d |
+| FFI 声明 | `Ffi.aura` | `ffi.rs` | 1d |
+| 优化档 | `Optimize.aura` | `optimize.rs` | 0.5d |
+| **IR 发射器（核心）** | `Emit.aura` | `emit.rs` | 14d |
+| **LLVM 直连（llc/clang 驱动）** | `Linker.aura` | `linker.rs` | 4d |
+| 调试信息 | `Dwarf.aura` | `dwarf.rs` | 1d（P2） |
+| C 后端备选 | `CBackend.aura` | `c_backend.rs` | 3d（P2） |
+
+#### 实现策略（重实现 + 直连，而非搬运）
+
+1. **IR 生成**：Aura 内用字符串拼接产出 LLVM IR 文本（预分配 + 常量池去重）
+2. **类型映射**：按 §1.4 的表在 Aura 中独立实现；`String` 统一为 `{ i8*, i64 }`，
+   `Any`/引用为不透明指针
+3. **表示一致性（新增硬约束）**：**类实例统一为指针表示**；`ret` 必须按函数返回类型
+   做转换（`%struct.X` ⇄ `i8*`）；禁止出现「声明返回结构体却 `ret` 指针」这类非法 IR
+4. **直连 LLVM**：用 `Process.run` 依次调用
+   `llc -mtriple <triple> <mod>.ll -o <mod>.obj -filetype=obj <opt>` →
+   `clang <mod>.obj <aura_std_cffi.obj> -o <exe> <opt>`
+   （链接宿主目标**不加** `-target`，避免 clang 走另一套库/ABI）
+5. **运行库**：AOT 产物所需的 `aura_*` 符号由 C 运行库
+   `compiler/src/std/cffi/aura_std_cffi.{c,h}` 提供；Aura 侧负责编译它并一并链接进产物
+6. **工具发现**：沿用五级探测（§1.5），Aura 侧用 `Env` / `FileSystem` 实现
+7. **失败即显性**：IR 不被 LLVM 接受时直接报错并**保留中间 `.ll`** 便于定位，不静默降级
 
 #### 关键技术决策
 
 | 决策 | 选择 | 理由 |
 |------|------|------|
-| IR 生成 | `StringBuilder` 拼接 | 高效、可控 |
-| 子进程调用 | `Process.exec(argv)` | 与 Rust `Command` 一致 |
-| 工具发现 | 五级探测（同 Rust） | 与 Rust 一致 |
-| 错误处理 | `Result<AotOutput, AotError>` | 与 Rust 一致 |
+| IR 生成 | Aura 字符串拼接（自研） | 不依赖 Rust；可控、可调试 |
+| LLVM 交互方式 | 文本 IR + `llc`/`clang` 子进程（**直连**） | 与 LLVM 版本解耦；无需绑定 LLVM C API |
+| 与 Rust AOT 后端关系 | **零依赖**（仅行为参照） | 保证 Aura 编译器可独立自举 |
+| 等价性判据 | **行为等价**（运行输出/退出码） | 替代「逐字节一致」这一伪目标 |
+| 表示约束 | 类实例 = 指针；`ret` 严格按返回类型转换 | 消除非法 IR 的主要来源 |
+| 运行库 ABI | 调用点符号 `sanitize(aura.lang.std.X.y)` | 与发射器命名同源，避免链接期 undefined symbol |
+| 错误处理 | 显式错误 + 保留中间 `.ll` | 便于定位 IR 问题 |
 
 #### 任务清单
 
 | # | 任务 | 预估 | 依赖 |
 |---|------|------|------|
-| 6.1 | 迁移 `types.rs` → `TypeMapper.aura` | 2d | 2.1 |
-| 6.2 | 迁移 `target.rs` → `Target.aura` | 1d | 6.1 |
-| 6.3 | 迁移 `runtime.rs` → `Runtime.aura` | 1d | 6.1 |
-| 6.4 | 迁移 `ffi.rs` → `Ffi.aura` | 1d | 6.1 |
-| 6.5 | 迁移 `optimize.rs` → `Optimize.aura` | 0.5d | 6.1 |
-| 6.6 | 迁移 `emit.rs` → `Emit.aura` | 10d | 6.1–6.5 |
-| 6.7 | 迁移 `linker.rs` → `Linker.aura` | 4d | 6.6 |
-| 6.8 | 迁移 `dwarf.rs` → `Dwarf.aura` | 1d | 6.6 |
-| 6.9 | 迁移 `c_backend.rs` → `CBackend.aura` | 3d | 6.6 |
-| 6.10 | 编写 Phase 6 验证用例 | 3d | 6.7 |
-| 6.11 | 集成测试：LLVM IR 输出对比 | 3d | 6.10 |
-| 6.12 | 集成测试：可执行文件输出对比 | 3d | 6.11 |
+| 6.1 | 实现 `TypeMapper.aura` | 2d | 2.1 |
+| 6.2 | 实现 `Target.aura` | 1d | 6.1 |
+| 6.3 | 实现 `Runtime.aura`（运行库声明 + 调用点符号） | 2d | 6.1 |
+| 6.4 | 实现 `Ffi.aura` | 1d | 6.1 |
+| 6.5 | 实现 `Optimize.aura` | 0.5d | 6.1 |
+| 6.6 | **实现 `Emit.aura`（HIR → LLVM IR 文本）** | 14d | 6.1–6.5 |
+| 6.7 | **实现 `Linker.aura`（直连 llc/clang + 链接 C 运行库）** | 4d | 6.6 |
+| 6.8 | 表示一致性整改：类实例统一指针、`ret` 类型转换 | 3d | 6.6 |
+| 6.9 | 实现 `Dwarf.aura`（可选） | 1d | 6.6 |
+| 6.10 | 实现 `CBackend.aura`（LLVM 缺失时的备选） | 3d | 6.6 |
+| 6.11 | Phase 6 验证用例（IR 可验证 + exe 可运行） | 3d | 6.7 |
+| 6.12 | 差分测试：Aura-AOT vs Rust-AOT（运行输出/退出码） | 3d | 6.11 |
 
 #### 验证标准
 
-- [ ] `Emit.aura` 生成的 LLVM IR 与 Rust 一致（文本对比）
-- [ ] `Linker.aura` 生成的可执行文件与 Rust 一致（MD5 对比）
-- [ ] 支持所有输出格式（`.ll`、`.o`、`.exe`、`.blob`、`.so`）
+- [ ] `Emit.aura` 产出的 IR 通过 `llc -verify`（无非法 IR）
+- [ ] **`Linker.aura` 可直连 llc/clang 产出可执行文件，且不链接、不调用任何 Rust AOT 产物**
+- [ ] **差分测试（行为等价）**：同一源码经 Aura-AOT 与 Rust-AOT 编译，运行输出与退出码一致
+- [ ] 支持 `.ll` / `.obj` / `.exe` 输出；`.blob` / `.so` 为 P2
 - [ ] 交叉编译支持（`-mtriple`）
-- [ ] C 后端 fallback 可用
+- [ ] C 后端 fallback 可用（LLVM 缺失时）
+- [ ] 标准库/运行库调用（`String.*`、`Collections.*`、`println` 等）链接成功并可运行
 
 #### 风险与缓解
 
 | 风险 | 缓解 |
 |------|------|
-| LLVM IR 文本拼接错误 | 使用 `llc -verify` 验证 IR |
-| 子进程调用失败 | 保留 Rust 编译器作为 fallback |
-| 工具发现失败 | 配置 `AURA_LLVM_HOME` 环境变量 |
+| Aura 侧 IR 发射与 LLVM 契约不符 | 每类指令落地即用 `llc -verify` 回归；保留中间 `.ll` |
+| 表示混用（指针/结构体）产生非法 IR | 6.8 单独立项整改；把「类实例 = 指针」写成硬约束 |
+| 运行库符号缺失（undefined symbol） | 调用点符号层与发射器命名同源；链接阶段全量校验 |
+| 与 Rust 实现行为偏差 | 差分测试（6.12）作门禁；按「行为等价」判定，不做文本比对 |
+| 工具发现失败 | 配置 `AURA_LLVM_HOME` 或根 `Cargo.toml` 的 `llvm-home` |
+
+> **后续阶段**：本节只交付「IR 发射 + 直连 LLVM」的能力骨架；
+> AOT 产物在真实程序上的**表示一致性、运行库契约、sema 类型信息**等系统性问题，
+> 由下一节 **[Phase 6.5：AOT 后端适配与修复](#49-phase-65aot-后端适配与修复aot-hardening)** 专门收敛。
 
 ---
 
-### 4.9 Phase 7：JIT 编译（Cranelift 直连机器码）Aura 化
+### 4.9 Phase 6.5：AOT 后端适配与修复（AOT Hardening）
+
+> **本阶段为 2026-09-11 新增**：Phase 6 只交付「能把 HIR 发射成 LLVM IR」的能力；
+> 实测在真实程序（尤其 **Aura 编译器自身**）上暴露出一批系统性的语义/表示缺陷，
+> 导致产物要么被 `llc` 拒绝、要么链接期 `undefined symbol`、要么运行期语义错误。
+> 本阶段专门用于**适配改造 AOT 后端**，把它从「能发射 IR」推进到「能产出可正确运行的机器码」。
+
+#### 目标
+
+收敛 AOT 后端的**表示一致性与运行库契约**，使 AOT 成为可靠执行后端，
+并为「Aura 编译器自身 AOT 出可执行文件」扫清障碍。
+
+#### 为什么必须单独立项
+
+这些问题**不是单点 bug，而是跨层契约缺陷**，横跨 IR 发射器、类型系统（sema）、
+C 运行库与链接驱动，且在 Phase 6 的「简单程序」验证下不可见：
+
+| # | 缺陷 | 现象 | 归属层 |
+|---|------|------|--------|
+| 1 | 类实例「值 / 指针」两种表示混用 | 同一对象时而 `i8*` 时而 `%struct.X` | IR 发射器 |
+| 2 | `ret` 未按函数返回类型转换 | `define %struct.Token` 却 `ret i8*` → `llc` 报 `value doesn't match function result type` | IR 发射器 |
+| 3 | 运行库「调用点符号」缺失 | 发射 `aura_lang_std_String_split`，C 库只导出 `aura_string_*` → 链接期 undefined symbol | 运行库 ABI |
+| 4 | 运行库覆盖面不足 | `List` 取值/计数/追加、`String.split/indexOf/countChar` 等缺失 | 运行库实现 |
+| 5 | 字符串双表示 | Aura 内 `{ i8*, i64 }` vs C ABI `char*`，跨界未统一转换 | 类型映射 / coerce |
+| 6 | 整型 i32/i64 混用 | `add i32 …, i64 …` → 非法 IR | IR 发射器 |
+| 7 | sema 缺少 std 签名表 | std 调用类型退化为 `Any` → 发射器选错表示 | 语义分析 |
+| 8 | 缺 IR 合法性门禁 | 直到 `llc` 才报错，且错误定位困难 | 工具链 / CI |
+| 9 | 失败不可诊断 | 中间 `.ll` 未保留，无法定位首个非法指令 | 工具链 |
+
+#### 适配改造清单
+
+| 项 | 现状 | 改造目标 |
+|----|------|----------|
+| 类实例表示 | 指针 / 结构体两种并存 | **统一为「类实例 = 指针」**，成员访问、方法调用、返回、传参全链路一致 |
+| 返回类型 | `ret` 直接返回表达式值 | `ret` 前按 `current_ret_ty` 插入转换（`%struct.X` ⇄ `i8*`：`load` / `alloca`+取址） |
+| 运行库符号 | 发射器命名与 C 库命名脱节 | 建立**调用点符号层**（`sanitize(aura.lang.std.X.y)` 为唯一契约），发射器与运行库同源 |
+| 运行库范围 | 仅覆盖部分 String/Math | 按「编译器实际依赖」补齐：String 全量、List（get/size/append/count）、Map 最小可用 |
+| 字符串边界 | 结构体与 `char*` 混用 | 明确边界：**Aura 内部 = `{ i8*, i64 }`，跨 C ABI = `char*`**，仅在调用点做 coerce |
+| 整型提升 | 无统一规则 | 算术 / 比较 / 下标统一提升规则，禁止跨宽度直接运算 |
+| sema 类型信息 | std 调用退化为 `Any` | 补 **std 签名表**（函数名 → 参数/返回类型）；沿用「只告警不阻断」策略 |
+| IR 门禁 | 无 | 每个用例跑 `llc -verify`，纳入 CI；失败保留中间 `.ll` 并打印首个非法指令位置 |
+
+#### 任务清单
+
+| # | 任务 | 预估 | 依赖 |
+|---|------|------|------|
+| 6.5.1 | 统一类实例表示（指针）并完成全链路改造 | 5d | 6.6 |
+| 6.5.2 | `ret` 按返回类型转换 + 单测 | 2d | 6.5.1 |
+| 6.5.3 | 运行库调用点符号层（C 实现 + 头文件） | 3d | 6.3 |
+| 6.5.4 | 运行库补齐（String 全量 + List/Map 最小可用） | 4d | 6.5.3 |
+| 6.5.5 | 字符串双表示的 coerce 规则统一 | 2d | 6.5.1 |
+| 6.5.6 | 整型统一提升（算术 / 比较 / 下标） | 2d | 6.5.1 |
+| 6.5.7 | sema std 签名表 | 4d | 6.4 |
+| 6.5.8 | `llc -verify` 门禁 + 失败保留 `.ll` | 2d | 6.7 |
+| 6.5.9 | 端到端用例：String / List / 类 / 控制流 / 异常 的 AOT 编译与运行 | 3d | 6.5.1–6.5.8 |
+| 6.5.10 | 阶段性目标：Aura 编译器自身 AOT 出可运行 exe（自举前置） | 5d | 6.5.9 |
+
+#### 验证标准
+
+- [ ] AOT 用例集（String / List / 类 / 控制流 / 异常）全部「编译 → 链接 → 运行输出正确」
+- [ ] `llc -verify` 全绿（无非法 IR），并作为 CI 门禁
+- [ ] 同一源码经 Aura-AOT 与 Rust-AOT 编译，**运行输出与退出码一致**（行为差分）
+- [ ] `tests/aot/*` 夹具退出码符合预期
+- [ ] **阶段性目标**：Aura 编译器自身可 AOT 出可运行可执行文件
+- [ ] 失败时可从保留的 `.ll` 定位到首个非法指令，无需重跑
+
+#### 风险与缓解
+
+| 风险 | 缓解 |
+|------|------|
+| 表示整改波及面大（改一处崩一片） | 先建 **IR 差分基线**（改造前后跑同一批用例集），逐项小步提交 |
+| sema 签名表引入新类型错误 | 签名表遵循「只告警不阻断」（沿用 P3 策略），先给类型、后收紧 |
+| 运行库无限膨胀 | 以「调用点符号扫描」驱动补齐——只实现发射器真实引用的符号 |
+| 「自举 exe」目标过重 | 拆为「先能链接 → 再运行正确 → 最后自举」三步，允许阶段性交付 |
+| 与 Rust 后端行为偏差 | 以行为差分测试作门禁；偏差按语义修正，不追求文本一致 |
+
+#### 交付物
+
+| 交付物 | 说明 |
+|--------|------|
+| AOT 表示规范 | 「类实例 = 指针」「字符串边界 = 结构体/`char*`」写入 §4.8 硬约束并落地 |
+| 运行库契约表 | 调用点符号 ↔ C 实现 ↔ ABI 签名 三方一致的清单 |
+| std 签名表 | sema 可见的 std 函数签名（参数 / 返回类型） |
+| AOT 用例集 | `tests/aot/*`：String / List / 类 / 控制流 / 异常 + 行为差分 |
+| CI 门禁 | `llc -verify` + 用例集退出码校验 |
+
+---
+
+### 4.10 Phase 7：JIT 编译（Cranelift 直连机器码）Aura 化
 
 #### 目标
 
@@ -931,7 +1094,7 @@ Rust 侧已有的 Cranelift JIT（`compiler/src/vm/jit.rs` 及其配套）迁移
 
 ---
 
-### 4.10 Phase 8：核心库与标准库 Aura 化
+### 4.11 Phase 8：核心库与标准库 Aura 化
 
 #### 目标
 
@@ -1053,11 +1216,13 @@ aura/core/aura/lang/
 
 ---
 
-### 4.11 Phase 9：LLVM C API 直连（可选优化）
+### 4.12 Phase 9：LLVM C API 直连（可选优化档）
 
 #### 目标
 
-在方案一（文本 IR + 子进程）性能不足时，升级到方案二（C FFI 直连 LLVM C API）。
+AOT 已默认**直连 LLVM**（Phase 6：Aura 自产文本 IR + `llc`/`clang` 子进程）。
+当文本 IR 路径性能不足时，升级到方案二：Aura 经 C FFI 直接调用 LLVM C API，
+在进程内生成机器码（省去 IR 文本落盘与子进程开销）。
 
 #### 新增文件
 
@@ -1167,11 +1332,12 @@ sb.append(") {\n")
 | Phase 3 | MIR + 优化器 | 15d | 0.8 |
 | Phase 4 | VM 字节码 + 解释器 | 33d | 1.7 |
 | Phase 5 | VM 自举 | 22d | 1.1 |
-| Phase 6 | AOT LLVM 后端 | 39d | 2.0 |
+| Phase 6 | AOT 后端（自研 IR + 直连 LLVM） | 38d | 1.9 |
+| **Phase 6.5** | **AOT 后端适配与修复** | **32d** | **1.6** |
 | Phase 7 | JIT（Cranelift） | 25d | 1.3 |
 | Phase 8 | 标准库 + 核心库 | 57d | 2.7 |
 | Phase 9 | LLVM C API（可选） | 21d | 1.1 |
-| **总计** | | **272d** | **13.9** |
+| **总计** | | **303d** | **15.2** |
 
 ### 6.2 里程碑
 
@@ -1182,10 +1348,11 @@ M2（第 3.0 月末）：Phase 2 完成，Sema/HIR 可独立运行
 M3（第 3.8 月末）：Phase 3 完成，MIR/Optimizer 可独立运行
 M4（第 5.5 月末）：Phase 4 完成，VM 字节码发射可用
 M5（第 6.6 月末）：Phase 5 完成，VM 自举成功
-M6（第 8.6 月末）：Phase 6 完成，AOT LLVM 后端可用
-M7（第 9.8 月末）：Phase 7 完成，JIT（Cranelift）可用，VM/JIT/AOT 三路互通
-M8（第 11.9 月末）：Phase 8 完成，核心库/标准库 Aura 化完成
-M9（第 12.9 月末）：Phase 9 完成，LLVM C API 直连（可选）
+M6（第 8.5 月末）：Phase 6 完成，Aura 侧 AOT 可自产 IR 并直连 LLVM 产出可执行文件
+M6.5（第 10.1 月末）：Phase 6.5 完成，AOT 产物可正确运行（含「Aura 编译器自身 AOT 出 exe」）
+M7（第 11.4 月末）：Phase 7 完成，JIT（Cranelift）可用，VM/JIT/AOT 三路互通
+M8（第 13.5 月末）：Phase 8 完成，核心库/标准库 Aura 化完成
+M9（第 14.5 月末）：Phase 9 完成，LLVM C API 直连（可选）
 ```
 
 ### 6.3 交付物清单
@@ -1197,7 +1364,8 @@ M9（第 12.9 月末）：Phase 9 完成，LLVM C API 直连（可选）
 | M3 | `Mir.aura` + `Optimizer.aura` | MIR 输出对比 |
 | M4 | `Emit.aura` + `Interp.aura` | VM 执行测试 |
 | M5 | 最小编译器 + 自举成功 | 编译标准库 |
-| M6 | `Emit.aura`（AOT）+ `Linker.aura` | 可执行文件对比 |
+| M6 | `Emit.aura`（AOT）+ `Linker.aura`（直连 LLVM） | IR 通过 `llc -verify` + 与 Rust-AOT 行为差分 |
+| M6.5 | AOT 适配整改（表示规范 / 运行库契约表 / std 签名表） | AOT 用例集全绿 + `llc -verify` 门禁 + 行为差分 |
 | M7 | `JitState.aura` + `JitLower.aura` + `JitOpt.aura` | 三路（VM/JIT/AOT）差分 + 性能对比 |
 | M8 | 核心库/标准库 `.aura` 文件（`aura/core/aura/lang/`） | API 对比测试 |
 | M9 | `llvm_bindings.aura` + `llvm_codegen.aura` | 性能对比 |
@@ -1218,6 +1386,11 @@ M9（第 12.9 月末）：Phase 9 完成，LLVM C API 直连（可选）
 | 泛型单态化不完整 | 中 | 中 | 分阶段支持（标量 → 引用 → 函数） |
 | ARC 语义在 LLVM IR 中表达不清 | 中 | 中 | 显式 `Retain`/`Release` 指令 |
 | 闭包捕获在 LLVM IR 中表达不清 | 低 | 高 | 闭包结构体 + 函数指针（已验证） |
+| **Aura 侧 IR 发射不符合 LLVM 契约** | 中 | 中 | **Phase 6.5.8**：每类指令落地即跑 `llc -verify` 回归；报错时保留中间 `.ll` |
+| **Aura-AOT 与 Rust-AOT 行为偏差** | 中 | 中 | **Phase 6.5**：差分测试（运行输出/退出码）作门禁；按「行为等价」判定，不做文本比对 |
+| **类实例表示混用 / `ret` 类型不符导致非法 IR** | 高 | 高 | **Phase 6.5.1–6.5.2**：统一「类实例 = 指针」；`ret` 按返回类型转换 |
+| **运行库符号缺失（undefined symbol）** | 中 | 高 | **Phase 6.5.3–6.5.4**：调用点符号层与发射器命名同源；按依赖扫描补齐；链接阶段全量校验 |
+| **sema 缺 std 签名表致类型退化 `Any`** | 中 | 高 | **Phase 6.5.7**：补 std 签名表（只告警不阻断） |
 | 最小编译器功能不足 | 中 | 高 | 逐步扩展指令集和语法支持 |
 | **JIT 热点不可达（历史问题复发）** | **中** | **高** | **继承 Fix A（入口强制编译）+ Fix B（递归 `dispatch_table`），以 `jit_state()` 诊断作门禁** |
 | JIT 与 VM/AOT 语义漂移 | 中 | 高 | 以 MIR 为单一真相源 + 三路（VM/JIT/AOT）差分测试 |
@@ -1253,12 +1426,13 @@ M9（第 12.9 月末）：Phase 9 完成，LLVM C API 直连（可选）
 
 ### 7.3 回退策略
 
-1. **LLVM 不可用** → C 后端（`c_backend.rs` 已实现）
+1. **LLVM 不可用** → C 后端（Phase 6.10 的 `CBackend.aura`；Rust 侧 `c_backend.rs` 仅作参照）
 2. **自举失败** → 保留 Rust 编译器作为 fallback
 3. **方案一性能不足** → 升级到方案二（LLVM C API）
 4. **泛型单态化失败** → 限制泛型使用范围（仅标量类型）
 5. **JIT 失败/不可编译** → 回退解释器（Phase 4/5）；若 Aura 侧 Cranelift FFI 不可用，再回退 Rust JIT
-6. **Phase 失败** → 删除 `aura/compiler/` 目录，Rust 编译器不受影响
+6. **AOT 适配（Phase 6.5）未达标** → AOT 视为「实验性后端」；执行路径回退 VM（Phase 4/5）与 JIT（Phase 7），不阻塞其余 Phase
+7. **Phase 失败** → 删除 `aura/compiler/` 目录，Rust 编译器不受影响
 7. **任何时刻** → `cargo build` 仍然可用（Rust 编译器完全保留）
 
 ### 7.4 Phase 间隔离
@@ -1266,11 +1440,11 @@ M9（第 12.9 月末）：Phase 9 完成，LLVM C API 直连（可选）
 每个 Phase 都是独立可回退的，且 **Rust 编译器始终可用**：
 
 ```
-Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3 ──→ Phase 4 ──→ Phase 5 ──→ Phase 6 ──→ Phase 7 ──→ Phase 8 ──→ Phase 9
-  │            │            │            │            │            │            │            │            │            │
-  ↓            ↓            ↓            ↓            ↓            ↓            ↓            ↓            ↓            ↓
-  fallback     fallback     fallback     fallback     fallback     fallback     fallback     fallback     fallback     fallback
-  (Rust)       (Rust)       (Rust)       (Rust)       (Rust)       (Rust)       (Rust)       (Rust)       (Rust)       (Rust)
+Phase 0 ─→ Phase 1 ─→ Phase 2 ─→ Phase 3 ─→ Phase 4 ─→ Phase 5 ─→ Phase 6 ─→ Phase 6.5 ─→ Phase 7 ─→ Phase 8 ─→ Phase 9
+  │          │          │          │          │          │          │           │           │          │          │
+  ↓          ↓          ↓          ↓          ↓          ↓          ↓           ↓           ↓          ↓          ↓
+  fallback   fallback   fallback   fallback   fallback   fallback   fallback    fallback    fallback   fallback   fallback
+  (Rust)     (Rust)     (Rust)     (Rust)     (Rust)     (Rust)     (Rust)      (Rust)      (Rust)     (Rust)     (Rust)
 
 注意：fallback 始终是完整的 Rust 编译器，不是上一个 Phase 的 Aura 代码
 ```
@@ -1285,7 +1459,8 @@ Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3 ──→ Phase 4 
 2. **并行开发模型**：Aura 编译器作为独立代码层（`aura/compiler/`），Rust 编译器完全保留（`compiler/`）
 3. **零风险迁移**：迁移过程不会破坏现有编译能力，任何 Phase 失败只需删除 `aura/compiler/` 目录
 4. **优先迁移纯逻辑模块**：Lexer、Parser、Sema、HIR、MIR 最容易 Aura 化
-5. **AOT 后端用方案一**：文本 IR + 子进程，与现有实现同构
+5. **AOT 后端用方案一且直连 LLVM**：Aura 自研 IR 生成 + 直接调用 `llc`/`clang` 生成机器码，
+   **跳过并零依赖 Rust AOT 后端**；等价性以行为差分测试判定
 6. **JIT 补全三执行路径**：Cranelift 进程内原生码，必须继承 Fix A/B 与 7 个优化传递，
    避免「JIT 等于解释器」复发
 7. **LLVM C API 作为可选优化**：仅在性能不足时考虑
@@ -1297,13 +1472,13 @@ Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 3 ──→ Phase 4 
 - **核心库/标准库 Aura 化**：核心类型 + `collection/` + `coroutine/` + `std/` 全部在
   `aura/core/aura/lang/` 中
 - **自举成功**：Aura 编译器可编译自身
-- **三执行路径**：VM 解释器 / JIT（Cranelift 进程内原生码）/ AOT（LLVM 文本 IR）语义一致、可路由
-- **LLVM 后端可用**：支持 AOT 编译、交叉编译
+- **三执行路径**：VM 解释器 / JIT（Cranelift 进程内原生码）/ AOT（Aura 自研 LLVM IR + 直连 LLVM）语义一致、可路由
+- **LLVM 后端可用**：Aura 侧自产 IR 并直连 LLVM，支持 AOT 编译、交叉编译（不依赖 Rust AOT 后端）
 - **性能目标**：AOT 性能接近 Rust 实现（>90%）；JIT 循环/递归热点相对解释器 ≥ 50x
 
 ### 8.3 一句话总结
 
-> **采用方案四的分阶段迁移路径，通过 9 个独立可验证的 Phase，在约 14 人月内将 Aura 编译器从 Rust 完全迁移到 Aura 语言自身。核心原则是"Aura 编译器独立代码层 + Rust 编译器完全保留"，确保迁移过程零风险。执行后端补齐 VM（Phase 4/5）、JIT（Phase 7，Cranelift 进程内原生码）、AOT（Phase 6，文本 IR + 子进程）三条路径并保持语义一致，LLVM C API 直连作为可选优化（Phase 9）。**
+> **采用方案四的分阶段迁移路径，通过 10 个独立可验证的 Phase（含 AOT 适配修复阶段 Phase 6.5），在约 15 人月内将 Aura 编译器从 Rust 完全迁移到 Aura 语言自身。核心原则是"Aura 编译器独立代码层 + Rust 编译器完全保留"，确保迁移过程零风险。执行后端补齐 VM（Phase 4/5）、JIT（Phase 7，Cranelift 进程内原生码）、AOT（Phase 6，文本 IR + 子进程）三条路径并保持语义一致（其中 AOT 由 Aura 自产 LLVM IR 并**直连 LLVM 生成机器码**，跳过 Rust AOT 后端），LLVM C API 直连作为可选优化（Phase 9）。**
 
 ---
 
@@ -1505,9 +1680,11 @@ Phase 0 (基础设施)
     │       │       │               │       │
     │       │       │               │       └──→ Phase 6 (AOT LLVM)
     │       │       │               │               │
-    │       │       │               │               └──→ Phase 8 (核心库/标准库)
-    │       │       │               │                       │
-    │       │       │               │                       └──→ Phase 9 (LLVM C API, 可选)
+    │       │       │               │               ├──→ Phase 6.5 (AOT 适配与修复)
+    │       │       │               │               │       │
+    │       │       │               │               │       └──→ Phase 8 (核心库/标准库)
+    │       │       │               │               │               │
+    │       │       │               │               │               └──→ Phase 9 (LLVM C API, 可选)
     │       │       │               │
     │       │       │               └──→ Phase 7 (JIT / Cranelift)
     │       │       │
@@ -1521,8 +1698,9 @@ Phase 0 (基础设施)
 **关键依赖**：
 - Phase 6 依赖 Phase 1（AST）、Phase 2（HIR）、Phase 0（工具链）
 - Phase 5 依赖 Phase 4（VM）
+- **Phase 6.5 依赖 Phase 6（AOT 后端）——AOT 适配与修复阶段，是 AOT 可用的前置门禁**
 - Phase 7 依赖 Phase 3（MIR）与 Phase 4（VM / 字节码）——JIT 与 AOT 并列，不互相依赖
-- Phase 8 依赖 Phase 6（AOT）与 Phase 7（JIT）
+- Phase 8 依赖 Phase 6.5（AOT 可用）与 Phase 7（JIT）
 - Phase 9 依赖 Phase 8（标准库）
 
 ---
@@ -1578,8 +1756,23 @@ Phase 0 (基础设施)
 | 6.3 | `tests/aot_control_flow.aura` | 控制流 AOT 编译 |
 | 6.4 | `tests/aot_ffi.aura` | FFI AOT 编译 |
 | 6.5 | `tests/aot_cross_compile.aura` | 交叉编译 |
+| 6.6 | `tests/aot/direct_llvm.aura` | **直连 LLVM**：Aura 自产 IR → `llc` → `clang` → 可执行文件（全程不依赖 Rust AOT 产物） |
+| 6.7 | `tests/aot/diff_vs_rust_aot.aura` | **行为差分**：同一源码 Aura-AOT vs Rust-AOT，运行输出与退出码一致 |
 
-### D.6 Phase 7 验证用例
+### D.6 Phase 6.5 验证用例（AOT 适配与修复）
+
+| 用例 | 文件 | 验证内容 |
+|------|------|----------|
+| 6.5.1 | `tests/aot/class_pointer.aura` | 类实例统一指针表示：字段读写 / 方法调用 / 返回对象 |
+| 6.5.2 | `tests/aot/ret_type.aura` | `ret` 按函数返回类型转换（`%struct.X` ⇄ `i8*`）无非法 IR |
+| 6.5.3 | `tests/aot/runtime_symbols.aura` | 运行库调用点符号可链接（String / Collections / Process / FileSystem） |
+| 6.5.4 | `tests/aot/string_runtime.aura` | String 全量方法（length/contains/indexOf/countChar/substring/startsWith…） |
+| 6.5.5 | `tests/aot/list_runtime.aura` | `split` → 列表 size / 下标取值 / 内容比较 |
+| 6.5.6 | `tests/aot/mixed_int.aura` | i32/i64 混用（算术 / 比较 / 下标）产出合法 IR |
+| 6.5.7 | `tests/aot/verify_gate.aura` | `llc -verify` 门禁：全量用例无非法 IR |
+| 6.5.8 | `tests/aot/self_compile_exe.aura` | **阶段性目标**：Aura 编译器自身 AOT 出可运行 exe |
+
+### D.7 Phase 7 验证用例
 
 | 用例 | 文件 | 验证内容 |
 |------|------|----------|
@@ -1589,7 +1782,7 @@ Phase 0 (基础设施)
 | 7.4 | `tests/jit_fallback.aura` | 不可编译函数回退解释器 |
 | 7.5 | `tests/jit_vs_vm_vs_aot.aura` | 三路（VM/JIT/AOT）结果差分 |
 
-### D.7 Phase 8 验证用例
+### D.8 Phase 8 验证用例
 
 | 用例 | 文件 | 验证内容 |
 |------|------|----------|

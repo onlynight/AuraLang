@@ -1727,6 +1727,18 @@ fn emit_binary(
     let r_is_float = r_ty.starts_with("float") || r_ty == "double";
     let is_float = l_is_float || r_is_float;
 
+    // 整数类型统一：Aura `Int`(i32) 与 runtime 返回的 i64 混用时，
+    // 直接生成 `add i32, i64` 是非法 IR。统一到**较窄**的整型：
+    // AOT 中 Aura 的 `Int` 即 i32，runtime 的 i64 返回值实际按 Int 使用，
+    // 且结果可直接存回 i32 变量槽（避免后续 store 类型不符）。
+    if !is_float && is_int_ty(&l_ty) && is_int_ty(&r_ty) && l_ty != r_ty {
+        let target = if int_bits(&l_ty) <= int_bits(&r_ty) { l_ty.clone() } else { r_ty.clone() };
+        l_ir = emit_numeric_convert(ctx, blocks, &l_ir, &l_ty, &target);
+        r_ir = emit_numeric_convert(ctx, blocks, &r_ir, &r_ty, &target);
+        l_ty = target.clone();
+        r_ty = target;
+    }
+
     match op {
         HirBinOp::Add => {
             // 字符串拼接：左右操作数为字符串类型时调用 aura_string_concat
@@ -1917,6 +1929,33 @@ fn emit_binary(
                 r_ir = emit_numeric_convert(ctx, blocks, &r_ir, &r_ty, &target);
                 l_ty = target.clone();
                 r_ty = target;
+            }
+            // 字符串内容比较：任一侧是字符串结构体 `{ i8*, i64 }` 时，
+            // 按位/指针比较语义都不对（且与 `i8*` 混用时 `icmp` 直接非法），
+            // 统一降级为 runtime 内容比较 `aura_lang_std_String_equals`。
+            {
+                let is_struct_str =
+                    |t: &str| t.starts_with('{') && t.contains("i8*") && t.contains("i64");
+                let is_str_like = |t: &str| is_struct_str(t) || t == "i8*";
+                if matches!(op, HirBinOp::Eq | HirBinOp::Ne)
+                    && is_str_like(&l_ty)
+                    && is_str_like(&r_ty)
+                    && (is_struct_str(&l_ty) || is_struct_str(&r_ty))
+                {
+                    let (lv, _) = coerce_arg(ctx, blocks, l_ir.clone(), &l_ty, "i8*");
+                    let (rv, _) = coerce_arg(ctx, blocks, r_ir.clone(), &r_ty, "i8*");
+                    let eq = ctx.fresh_var();
+                    let cur = blocks.last_mut();
+                    cur.body.push(format!(
+                        "{} = call i1 @aura_lang_std_String_equals(i8* {}, i8* {})",
+                        eq, lv, rv
+                    ));
+                    if *op == HirBinOp::Eq {
+                        return Ok((eq, "i1".to_string()));
+                    }
+                    cur.body.push(format!("{} = xor i1 {}, 1", tmp, eq));
+                    return Ok((tmp, "i1".to_string()));
+                }
             }
             let pred = if is_signed && l_ty.starts_with("i") {
                 format!("icmp {} {} {}, {}", icmp_pred, l_ty, l_ir, r_ir)
@@ -2421,6 +2460,41 @@ fn emit_member_access(
     // 普通成员访问：使用 extractvalue 从结构体值中提取字段
     let (obj_ir, obj_ty) = emit_expr_val(ctx, blocks, object)?;
     let tmp = ctx.fresh_var();
+
+    // 内建属性：字符串 `{ i8*, i64 }` 的 length / size → 第 1 个字段（len）。
+    // 若不特判，会落入下方「按字段名全局查找」的兜底分支取到字段 0（数据指针）。
+    if obj_ty.starts_with('{') && obj_ty.contains("i8*") && obj_ty.contains("i64") {
+        if name == "length" || name == "size" {
+            let cur = blocks.last_mut();
+            cur.body.push(format!("{} = extractvalue {} {}, 1", tmp, obj_ty, obj_ir));
+            return Ok((tmp, "i64".to_string()));
+        }
+        if name == "isEmpty" {
+            let len = ctx.fresh_var();
+            let cur = blocks.last_mut();
+            cur.body.push(format!("{} = extractvalue {} {}, 1", len, obj_ty, obj_ir));
+            cur.body.push(format!("{} = icmp eq i64 {}, 0", tmp, len));
+            return Ok((tmp, "i1".to_string()));
+        }
+    }
+
+    // 内建属性：动态列表（不透明指针）的 size / length / isEmpty → runtime 计数
+    if obj_ty == "i8*" || obj_ty == "ptr" {
+        if name == "size" || name == "length" || name == "isEmpty" {
+            let cnt = ctx.fresh_var();
+            let cur = blocks.last_mut();
+            cur.body.push(format!(
+                "{} = call i64 @aura_lang_std_Collections_count(i8* {})",
+                cnt, obj_ir
+            ));
+            if name == "isEmpty" {
+                cur.body.push(format!("{} = icmp eq i64 {}, 0", tmp, cnt));
+                return Ok((tmp, "i1".to_string()));
+            }
+            return Ok((cnt, "i64".to_string()));
+        }
+    }
+
     let cur = blocks.last_mut();
 
     // 查找字段类型和索引：遍历所有类字段，找到匹配的字段名
@@ -2490,14 +2564,69 @@ fn emit_index_access(
     container: &HirExpr,
     index: &HirExpr,
 ) -> Result<(String, String), AotError> {
-    let (c_ir, _) = emit_expr_val(ctx, blocks, container)?;
-    let (i_ir, _) = emit_expr_val(ctx, blocks, index)?;
+    let (c_ir, c_ty) = emit_expr_val(ctx, blocks, container)?;
+    let (i_ir, i_ty) = emit_expr_val(ctx, blocks, index)?;
     let gep = ctx.fresh_var();
     let tmp = ctx.fresh_var();
+
+    // 索引统一提升到 i64（GEP / runtime 取值索引槽位都是 i64）
+    let idx_ir = if is_int_ty(&i_ty) && i_ty != "i64" {
+        let cast = ctx.fresh_var();
+        let cur = blocks.last_mut();
+        cur.body.push(format!("{} = sext {} {} to i64", cast, i_ty, i_ir));
+        cast
+    } else {
+        i_ir.clone()
+    };
+
+    // 情形 A：字符串 `{ i8*, i64 }` → charAt(data, idx)，返回「单字符字符串」结构体
+    if c_ty.starts_with('{') && c_ty.contains("i8*") && c_ty.contains("i64") {
+        let data = ctx.fresh_var();
+        let ch = ctx.fresh_var();
+        let r0 = ctx.fresh_var();
+        let r1 = ctx.fresh_var();
+        let cur = blocks.last_mut();
+        cur.body.push(format!("{} = extractvalue {} {}, 0", data, c_ty, c_ir));
+        cur.body.push(format!(
+            "{} = call i8* @aura_lang_std_String_charAt(i8* {}, i64 {})",
+            ch, data, idx_ir
+        ));
+        cur.body.push(format!(
+            "{} = insertvalue {{ i8*, i64 }} undef, i8* {}, 0",
+            r0, ch
+        ));
+        cur.body.push(format!(
+            "{} = insertvalue {{ i8*, i64 }} {}, i64 1, 1",
+            r1, r0
+        ));
+        return Ok((r1, "{ i8*, i64 }".to_string()));
+    }
+
+    // 情形 B：动态列表（不透明指针）→ runtime 取值，元素为不透明指针
+    if c_ty == "i8*" || c_ty == "ptr" {
+        let cur = blocks.last_mut();
+        cur.body.push(format!(
+            "{} = call i8* @aura_lang_std_Collections_getAt(i8* {}, i64 {})",
+            tmp, c_ir, idx_ir
+        ));
+        return Ok((tmp, "i8*".to_string()));
+    }
+
+    // 情形 C：整型数组（`i32*` 等）→ GEP + load。
+    // 基址若不是 `i32*`（如 `i8*`）先 bitcast，保证 GEP 合法。
+    let base_ir = if c_ty == "i32*" || !is_ptr_ty(&c_ty) {
+        c_ir.clone()
+    } else {
+        let cast = ctx.fresh_var();
+        let cur = blocks.last_mut();
+        cur.body.push(format!("{} = bitcast {} {} to i32*", cast, c_ty, c_ir));
+        cast
+    };
+
     let cur = blocks.last_mut();
     cur.body.push(format!(
         "{} = getelementptr i32, i32* {}, i64 {}",
-        gep, c_ir, i_ir
+        gep, base_ir, idx_ir
     ));
     cur.body.push(format!("{} = load i32, i32* {}", tmp, gep));
     Ok((tmp, "i32".to_string()))

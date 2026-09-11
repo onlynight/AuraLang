@@ -1068,6 +1068,331 @@ const char *aura_env_get(const char *name) {
     return env_buf;
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+ * AOT 调用点符号层（sanitize(aura.lang.std.X.y)）
+ *
+ * AOT 发射器把 `aura.lang.std.String.split` 这类调用落成 LLVM 符号
+ * `aura_lang_std_String_split`（见 codegen/aot/emit.rs 的 sanitizellvm）。
+ * 本文件历史上只导出 `aura_string_*` 旧名，导致除 prelude 外的 std 调用
+ * 在链接期全部报 undefined symbol。本节按「调用点符号」导出，
+ * 转发到既有实现或给出实现，使 AOT 产物可以真正链接。
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── 极简动态列表：元素为字符串指针（AOT 下 List<T> 映射为 i8*） ── */
+
+typedef struct {
+    int64_t len;
+    int64_t cap;
+    const char **items;
+} AuraDynList;
+
+static AuraDynList *aura_dynlist_new(int64_t cap) {
+    AuraDynList *l = (AuraDynList *)malloc(sizeof(AuraDynList));
+    if (!l) return NULL;
+    if (cap < 4) cap = 4;
+    l->len = 0;
+    l->cap = cap;
+    l->items = (const char **)malloc(sizeof(const char *) * (size_t)cap);
+    return l;
+}
+
+static void aura_dynlist_push(AuraDynList *l, const char *s) {
+    if (!l) return;
+    if (l->len >= l->cap) {
+        int64_t ncap = l->cap * 2;
+        const char **ni =
+            (const char **)realloc((void *)l->items, sizeof(const char *) * (size_t)ncap);
+        if (!ni) return;
+        l->items = ni;
+        l->cap = ncap;
+    }
+    l->items[l->len++] = s ? s : "";
+}
+
+/** 左闭右开的 substr 到新分配的 C 字符串 */
+static const char *aura_substr_dup(const char *s, size_t n) {
+    char *out = (char *)malloc(n + 1);
+    if (!out) return "";
+    if (s && n > 0) memcpy(out, s, n);
+    out[n] = '\0';
+    return out;
+}
+
+/* ── aura.lang.std.String.* ── */
+
+int64_t aura_lang_std_String_length(const char *s) {
+    return aura_string_length(s);
+}
+
+int aura_lang_std_String_contains(const char *s, const char *sub) {
+    return aura_string_contains(s, sub);
+}
+
+int aura_lang_std_String_startsWith(const char *s, const char *prefix) {
+    return aura_string_startsWith(s, prefix);
+}
+
+int aura_lang_std_String_endsWith(const char *s, const char *suffix) {
+    return aura_string_endsWith(s, suffix);
+}
+
+const char *aura_lang_std_String_substring(const char *s, int64_t start, int64_t end) {
+    return aura_string_substring(s, start, end);
+}
+
+const char *aura_lang_std_String_charAt(const char *s, int64_t idx) {
+    return aura_string_charAt(s, idx);
+}
+
+const char *aura_lang_std_String_trim(const char *s) {
+    return aura_string_trim(s);
+}
+
+const char *aura_lang_std_String_toUpperCase(const char *s) {
+    return aura_string_toUpperCase(s);
+}
+
+const char *aura_lang_std_String_toLowerCase(const char *s) {
+    return aura_string_toLowerCase(s);
+}
+
+const char *aura_lang_std_String_replace(const char *s, const char *from, const char *to) {
+    return aura_string_replace(s, from, to);
+}
+
+/** replaceAll：与 replace 同语义（C 实现已做全量替换） */
+const char *aura_lang_std_String_replaceAll(const char *s, const char *from, const char *to) {
+    return aura_string_replace(s, from, to);
+}
+
+int64_t aura_lang_std_String_indexOf(const char *s, const char *sub) {
+    if (!s || !sub) return -1;
+    const char *p = strstr(s, sub);
+    return p ? (int64_t)(p - s) : -1;
+}
+
+int64_t aura_lang_std_String_lastIndexOf(const char *s, const char *sub) {
+    if (!s || !sub) return -1;
+    size_t sl = strlen(s);
+    size_t bl = strlen(sub);
+    if (bl > sl) return -1;
+    for (size_t i = sl - bl + 1; i > 0; i--) {
+        if (strncmp(s + i - 1, sub, bl) == 0) return (int64_t)(i - 1);
+    }
+    return -1;
+}
+
+int64_t aura_lang_std_String_countChar(const char *s, const char *ch) {
+    if (!s || !ch || !ch[0]) return 0;
+    char c = ch[0];
+    int64_t n = 0;
+    for (const char *p = s; *p; p++) {
+        if (*p == c) n++;
+    }
+    return n;
+}
+
+const char *aura_lang_std_String_substringBefore(const char *s, const char *sep) {
+    if (!s || !sep || !sep[0]) return s ? s : "";
+    const char *p = strstr(s, sep);
+    if (!p) return s;
+    return aura_substr_dup(s, (size_t)(p - s));
+}
+
+const char *aura_lang_std_String_substringAfter(const char *s, const char *sep) {
+    if (!s || !sep || !sep[0]) return "";
+    const char *p = strstr(s, sep);
+    return p ? p + strlen(sep) : "";
+}
+
+const char *aura_lang_std_String_padStart(const char *s, int64_t width, const char *pad) {
+    if (!s) return "";
+    size_t sl = strlen(s);
+    if ((int64_t)sl >= width) return s;
+    size_t pl = pad ? strlen(pad) : 0;
+    if (pl == 0) return s;
+    static char buf[4096];
+    size_t need = (size_t)width;
+    if (need >= sizeof(buf)) need = sizeof(buf) - 1;
+    size_t fill = need - sl;
+    size_t j = 0;
+    while (j < fill) {
+        buf[j] = pad[j % pl];
+        j++;
+    }
+    memcpy(buf + fill, s, sl);
+    buf[need] = '\0';
+    return buf;
+}
+
+/** 按分隔符切分 → AuraDynList（元素为堆分配的 C 字符串） */
+const void *aura_lang_std_String_split(const char *s, const char *sep) {
+    AuraDynList *l = aura_dynlist_new(8);
+    if (!s) {
+        aura_dynlist_push(l, "");
+        return (const void *)l;
+    }
+    if (!sep || !sep[0]) {
+        aura_dynlist_push(l, s);
+        return (const void *)l;
+    }
+    size_t seplen = strlen(sep);
+    const char *start = s;
+    const char *p;
+    while ((p = strstr(start, sep)) != NULL) {
+        aura_dynlist_push(l, aura_substr_dup(start, (size_t)(p - start)));
+        start = p + seplen;
+    }
+    aura_dynlist_push(l, aura_substr_dup(start, strlen(start)));
+    return (const void *)l;
+}
+
+/** 字符串内容相等（AOT 字符串比较统一走这里，避免结构体按位比较） */
+int aura_lang_std_String_equals(const char *a, const char *b) {
+    if (!a || !b) return a == b ? 1 : 0;
+    return strcmp(a, b) == 0 ? 1 : 0;
+}
+
+/* ── aura.lang.std.Collections.* ── */
+
+const void *aura_lang_std_Collections_emptyList(void) {
+    return (const void *)aura_dynlist_new(4);
+}
+
+const void *aura_lang_std_Collections_listOf(const void *a, const void *b, const void *c) {
+    AuraDynList *l = aura_dynlist_new(4);
+    aura_dynlist_push(l, (const char *)a);
+    aura_dynlist_push(l, (const char *)b);
+    aura_dynlist_push(l, (const char *)c);
+    return (const void *)l;
+}
+
+int64_t aura_lang_std_Collections_count(const void *list) {
+    const AuraDynList *l = (const AuraDynList *)list;
+    return l ? l->len : 0;
+}
+
+int64_t aura_lang_std_Collections_listSize(const void *list) {
+    return aura_lang_std_Collections_count(list);
+}
+
+int64_t aura_lang_std_Collections_isEmpty(const void *list) {
+    return aura_lang_std_Collections_count(list) == 0 ? 1 : 0;
+}
+
+const void *aura_lang_std_Collections_getAt(const void *list, int64_t idx) {
+    const AuraDynList *l = (const AuraDynList *)list;
+    if (!l || idx < 0 || idx >= l->len) return "";
+    return (const void *)l->items[idx];
+}
+
+const void *aura_lang_std_Collections_listGet(const void *list, int64_t idx) {
+    return aura_lang_std_Collections_getAt(list, idx);
+}
+
+const void *aura_lang_std_Collections_listAppend(const void *list, const void *value) {
+    AuraDynList *l = (AuraDynList *)list;
+    if (!l) {
+        l = aura_dynlist_new(4);
+    }
+    aura_dynlist_push(l, (const char *)value);
+    return (const void *)l;
+}
+
+int64_t aura_lang_std_Collections_indexOf(const void *list, const void *value) {
+    const AuraDynList *l = (const AuraDynList *)list;
+    const char *v = (const char *)value;
+    if (!l || !v) return -1;
+    for (int64_t i = 0; i < l->len; i++) {
+        const char *it = l->items[i];
+        if (it && strcmp(it, v) == 0) return i;
+    }
+    return -1;
+}
+
+int aura_lang_std_Collections_contains(const void *list, const void *value) {
+    return aura_lang_std_Collections_indexOf(list, value) >= 0 ? 1 : 0;
+}
+
+/** set(list, idx, value)：简化实现——越界为追加 */
+const void *aura_lang_std_Collections_set(const void *list, int64_t idx, const void *value) {
+    AuraDynList *l = (AuraDynList *)list;
+    if (!l) {
+        l = aura_dynlist_new(4);
+    }
+    const char *v = (const char *)value ? (const char *)value : "";
+    if (idx >= 0 && idx < l->len) {
+        l->items[idx] = v;
+    } else {
+        aura_dynlist_push(l, v);
+    }
+    return (const void *)l;
+}
+
+/* ── aura.lang.std.FileSystem.* ── */
+
+int aura_lang_std_FileSystem_exists(const char *path) {
+    return aura_fs_exists(path) ? 1 : 0;
+}
+
+const char *aura_lang_std_FileSystem_readText(const char *path) {
+    return aura_fs_readText(path);
+}
+
+void aura_lang_std_FileSystem_writeText(const char *path, const char *content) {
+    (void)aura_fs_writeText(path, content);
+}
+
+#if defined(_WIN32)
+#include <direct.h>
+#define AURA_MKDIR_ONE(p) _mkdir(p)
+#else
+#define AURA_MKDIR_ONE(p) mkdir((p), 0755)
+#endif
+
+/** 递归创建目录（等价 FileSystem.mkdirP） */
+int aura_lang_std_FileSystem_mkdirP(const char *path) {
+    if (!path || !path[0]) return -1;
+    char buf[1024];
+    size_t n = strlen(path);
+    if (n >= sizeof(buf)) return -1;
+    memcpy(buf, path, n + 1);
+    for (size_t i = 1; i <= n; i++) {
+        if (buf[i] == '/' || buf[i] == '\\' || buf[i] == '\0') {
+            char saved = buf[i];
+            buf[i] = '\0';
+            if (buf[0]) (void)AURA_MKDIR_ONE(buf);
+            buf[i] = saved;
+        }
+    }
+    return 0;
+}
+
+/* ── aura.lang.std.Process.* ── */
+
+/** 同步执行命令，返回退出码（AOT 下用系统 shell） */
+int64_t aura_lang_std_Process_run(const char *cmd) {
+    if (!cmd) return -1;
+    int rc = system(cmd);
+    return (int64_t)rc;
+}
+
+/* ── aura.lang.std.Math.*（转发到 aura_math_* 实现） ── */
+
+double aura_lang_std_Math_sin(double x) { return aura_math_sin(x); }
+double aura_lang_std_Math_cos(double x) { return aura_math_cos(x); }
+double aura_lang_std_Math_tan(double x) { return aura_math_tan(x); }
+double aura_lang_std_Math_asin(double x) { return aura_math_asin(x); }
+double aura_lang_std_Math_acos(double x) { return aura_math_acos(x); }
+double aura_lang_std_Math_atan(double x) { return aura_math_atan(x); }
+double aura_lang_std_Math_log(double x) { return aura_math_log(x); }
+double aura_lang_std_Math_exp(double x) { return aura_math_exp(x); }
+double aura_lang_std_Math_pow(double a, double b) { return aura_math_pow(a, b); }
+double aura_lang_std_Math_min(double a, double b) { return aura_math_min(a, b); }
+double aura_lang_std_Math_max(double a, double b) { return aura_math_max(a, b); }
+int64_t aura_lang_std_Math_ceil(double x) { return aura_math_ceil(x); }
+int64_t aura_lang_std_Math_floor(double x) { return aura_math_floor(x); }
+
 _Bool aura_env_has(const char *name) {
     return getenv(name ? name : "") != NULL;
 }

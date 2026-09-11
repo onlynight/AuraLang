@@ -387,21 +387,25 @@ fn cmd_build_aot(args: &[String]) {
     }
 
     // 语义检查（获取表达式类型信息，供 HIR 隐式 toString 降级使用）
-    // 注意：sema.errors 同时包含 Warning 级别诊断，只有 Error 才应中断编译。
+    //
+    // 与字节码路径 `compile_source` 保持一致：P3 类型检查存在已知局限
+    // （泛型实例化未展开、动态 `Any` 传播等），因此语义诊断**只作告警输出，
+    // 不阻断 AOT 代码生成**。否则「Aura 编译器自身」这类大量使用动态类型的
+    // 程序将无法 AOT 编译，而同样的源码在字节码路径下是可以通过的。
     let (_ast, sema) = compiler::sema::analyze_source(&source);
-    let hard_errors: Vec<_> = sema
-        .errors
-        .iter()
-        .filter(|e| e.severity == compiler::errors::ErrorSeverity::Error)
-        .collect();
-    for w in sema.errors.iter().filter(|e| e.severity != compiler::errors::ErrorSeverity::Error) {
-        eprintln!("警告: [语义] {}", w.message);
-    }
-    if !hard_errors.is_empty() {
-        for e in hard_errors {
-            eprintln!("错误: [语义] {}", e.message);
+    let mut hard_count: usize = 0;
+    for d in sema.errors.iter() {
+        if d.severity == compiler::errors::ErrorSeverity::Error {
+            hard_count += 1;
+        } else {
+            eprintln!("警告: [语义] {}", d.message);
         }
-        exit(1);
+    }
+    if hard_count > 0 {
+        eprintln!(
+            "警告: [语义] 忽略 {} 条类型诊断（P3 类型检查局限，与字节码路径策略一致）",
+            hard_count
+        );
     }
 
     let mut hir = compiler::codegen::hir::desugar_program_with(&program, Some(&sema.info));

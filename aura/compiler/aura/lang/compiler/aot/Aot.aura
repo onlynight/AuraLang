@@ -245,6 +245,9 @@ class AotExeResult {
     /// clang 退出码。
     var clangExit: Int = 0
 
+    /// std C 运行库（aura_std_cffi.c）编译退出码。
+    var cffiExit: Int = 0
+
     /// 目标三元组。
     var target: String = ""
 
@@ -285,12 +288,28 @@ fun aotBuildExeFromHir(hir: Hir, moduleName: String, outDir: String, llvmHome: S
         " -o " + objPath + " " + optFlag + " -filetype=obj"
     r.llcExit = Process.run(llcCmd)
 
-    // 3. clang：目标文件 → 可执行文件
-    val clangCmd: String = clang + " -target " + tgt + " " + objPath +
-        " -o " + exePath + " " + optFlag
+    // 3. clang：编译 std C 运行库（提供 aura_println / aura_math_* /
+    //    aura_lang_std_String_* 等符号；不链接会出现 undefined symbol）
+    val cffiSrc: String = "compiler/src/std/cffi/aura_std_cffi.c"
+    var cffiObj: String = ""
+    if (FileSystem.exists(cffiSrc)) {
+        cffiObj = outDir + "/aura_std_cffi.obj"
+        val cffiCmd: String = clang + " -c " + cffiSrc + " -o " + cffiObj + " -O1"
+        r.cffiExit = Process.run(cffiCmd)
+    }
+
+    // 4. clang：目标文件 + std 运行库 → 可执行文件。
+    //    与 Rust 侧 `link_to_executable` 一致：链接宿主目标**不加** `-target`
+    //    （`-target` 会让 clang 走另一套库/ABI，链接 C 运行库时失败）；
+    //    交叉编译目标三元组已由 llc 的 `-mtriple` 决定。
+    var clangCmd: String = clang + " " + objPath
+    if (cffiObj != "") {
+        clangCmd = clangCmd + " " + cffiObj
+    }
+    clangCmd = clangCmd + " -o " + exePath + " " + optFlag
     r.clangExit = Process.run(clangCmd)
 
-    r.ok = (r.llcExit == 0) && (r.clangExit == 0)
+    r.ok = (r.llcExit == 0) && (r.cffiExit == 0) && (r.clangExit == 0)
     return r
 }
 

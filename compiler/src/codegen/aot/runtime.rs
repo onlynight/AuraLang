@@ -74,6 +74,14 @@ const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
         params: &[("s", "i8*")],
     },
     RuntimeFn {
+        name: "aura_lang_std_String_equals",
+        ret: "i1",
+        params: &[
+            ("a", "i8*"),
+            ("b", "i8*"),
+        ],
+    },
+    RuntimeFn {
         name: "aura_string_concat",
         ret: "i8*",
         params: &[
@@ -187,11 +195,27 @@ pub fn cffi_signature(name: &str) -> Option<(&'static str, Vec<&'static str>)> {
         // aura.string
         "aura_string_length" => ("i64", &[P]),
         "aura_string_contains" => ("i1", &[P, P]),
-        "aura_string_toUpperCase"
-        | "aura_string_toLowerCase"
-        | "aura_string_trim"
-        | "aura_string_substring"
-        | "aura_string_replace" => (P, &[P]),
+        "aura_string_toUpperCase" | "aura_string_toLowerCase" | "aura_string_trim" => (P, &[P]),
+        "aura_string_substring" => (
+            P,
+            &[
+                P, "i64", "i64",
+            ],
+        ),
+        "aura_string_charAt" => (P, &[P, "i64"]),
+        "aura_string_replace" | "aura_string_replaceAll" => (P, &[P, P, P]),
+        "aura_string_padStart" => (
+            P,
+            &[
+                P, "i64", P,
+            ],
+        ),
+        "aura_string_indexOf" | "aura_string_lastIndexOf" | "aura_string_countChar" => {
+            ("i64", &[P, P])
+        }
+        "aura_string_substringBefore" | "aura_string_substringAfter" | "aura_string_split" => {
+            (P, &[P, P])
+        }
         "aura_string_startsWith" | "aura_string_endsWith" => ("i1", &[P, P]),
         // aura.ascii（Char → i16）
         "aura_ascii_isAlpha"
@@ -205,6 +229,20 @@ pub fn cffi_signature(name: &str) -> Option<(&'static str, Vec<&'static str>)> {
         "aura_collections_listOf" => (P, &[P, P, P]),
         "aura_collections_listContains" => ("i1", &[P, P]),
         "aura_collections_listIndexOf" => ("i64", &[P, P]),
+        // aura.collections — AOT 动态列表（调用点符号：sanitize(aura.lang.std.Collections.*)）
+        "aura_collections_emptyList" => (P, &[]),
+        "aura_collections_count" | "aura_collections_listSize" => ("i64", &[P]),
+        "aura_collections_isEmpty" => ("i1", &[P]),
+        "aura_collections_getAt" | "aura_collections_listGet" => (P, &[P, "i64"]),
+        "aura_collections_listAppend" => (P, &[P, P]),
+        "aura_collections_indexOf" => ("i64", &[P, P]),
+        "aura_collections_contains" => ("i1", &[P, P]),
+        "aura_collections_set" => (
+            P,
+            &[
+                P, "i64", P,
+            ],
+        ),
         // aura.collections — 特化集合
         "aura_collections_arrayListOf" => (
             P,
@@ -276,6 +314,9 @@ pub fn cffi_signature(name: &str) -> Option<(&'static str, Vec<&'static str>)> {
         "aura_fs_exists" | "aura_fs_isFile" | "aura_fs_isDirectory" => ("i1", &[P]),
         "aura_fs_readText" => (P, &[P]),
         "aura_fs_writeText" => (P, &[P, P]),
+        "aura_fs_mkdirP" => ("i64", &[P]),
+        // aura.process
+        "aura_process_run" => ("i64", &[P]),
         // aura.io
         "aura_io_fileExists" => ("i1", &[P]),
         "aura_io_fileWrite" => ("void", &[P, P]),

@@ -1,0 +1,37 @@
+// AOT 运行库回归：String 方法（length / contains / indexOf / countChar /
+// substring / startsWith）。全部通过时进程退出码为 0。
+//
+// 验证（Rust AOT 后端）：
+//   aura build tests/aot/string_runtime.aura --aot --output build/aot-bin/string_runtime.exe
+//   build/aot-bin/string_runtime.exe   # 期望输出 "aot.string_runtime ok"，退出码 0
+fun main(): Int {
+    val s = "Hello:World"
+
+    if (s.length != 11) {
+        println("length failed")
+        return 1
+    }
+    if (!s.contains("World")) {
+        println("contains failed")
+        return 2
+    }
+    if (s.indexOf(":") != 5) {
+        println("indexOf failed")
+        return 3
+    }
+    if (s.countChar(":") != 1) {
+        println("countChar failed")
+        return 4
+    }
+    if (s.substring(0, 5) != "Hello") {
+        println("substring failed")
+        return 5
+    }
+    if (!s.startsWith("Hello")) {
+        println("startsWith failed")
+        return 6
+    }
+
+    println("aot.string_runtime ok")
+    return 0
+}
