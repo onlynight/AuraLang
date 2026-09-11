@@ -1,4 +1,5 @@
 // aura:///aura/lang/std/Channel.aura
+package aura.lang.std
 // 消息通道（Channel）—— 无状态对象，通过 aura.lang.std.Channel.<fn> 调用。
 // 实现：运行库成员。Aura 侧只声明签名，实现由 VM / 运行库提供，
 //       因为跨协程队列与 TCP 通道属于运行时设施（Layer 0-B），

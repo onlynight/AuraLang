@@ -1,4 +1,5 @@
 // aura:///aura/lang/std/FileSystem.aura
+package aura.lang.std
 // 标准库模块，不可修改
 // 实现：syscall 邻近模块。Aura 侧只声明签名，实现位于引导层（Layer 0-A / FFI），
 //       因为文件系统必须经由操作系统，无法用纯 Aura 表达

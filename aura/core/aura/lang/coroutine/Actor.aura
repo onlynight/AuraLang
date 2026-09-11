@@ -1,4 +1,5 @@
 // aura:///aura/lang/coroutine/Actor.aura
+package aura.lang.coroutine
 // Actor 消息驱动并发模型 —— 无状态对象，通过 Actor.<fn> 调用。
 // 实现：Aura 实现（使用回调和消息队列模拟）
 // 架构：运行库，提供 Actor 并发模型

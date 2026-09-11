@@ -1,37 +1,30 @@
 // aura:///aura/lang/collection/List.aura
+package aura.lang.collection
 // 集合包：有序列表接口
+//
+// List<T> 继承 Collection<T>，扩展排序、遍历、高阶操作等列表特有能力。
+// `list[i]` 下标访问和 `list.get(i)` 均降级为 Collection.getAt(list, i)。
+
+import aura.lang.collection.Collection
 
 /// 有序列表接口 List<T>。
-interface List<T> {
-    /// 列表元素数量
-    fun getSize(): Int
-
-    /// 按下标获取元素
-    fun get(index: Int): T
-
-    /// 获取第一个元素
-    fun first(): T
-
-    /// 获取最后一个元素
-    fun last(): T
-
-    /// 检查列表是否包含指定元素
-    fun contains(item: T): Boolean
-
-    /// 查找元素的索引（未找到返回 -1）
-    fun indexOf(item: T): Int
-
-    /// 查找元素的最后一个索引（未找到返回 -1）
-    fun lastIndexOf(item: T): Int
+///
+/// - 继承自 Collection<T>，共享 count/getAt/contains/indexOf/isEmpty 等通用操作
+/// - 扩展 filter/map/distinct/every/any/take/skip 等高阶操作
+/// - `list[i]` 语法糖等价于 `list.getAt(i)`
+/// - `list.count` 成员访问等价于 `list.count()`
+///
+/// @see Collection, Array, Set, ArrayList
+/// @since 0.5
+interface List<T> : Collection<T> {
+    /// 获取所有不同元素
+    fun distinct(): List<T>
 
     /// 按条件过滤
     fun filter(predicate: Any): List<T>
 
     /// 转换每个元素
     fun map(transform: Any): List<Any>
-
-    /// 获取所有不同元素
-    fun distinct(): List<T>
 
     /// 检查是否所有元素都满足条件
     fun every(predicate: Any): Boolean
@@ -45,6 +38,6 @@ interface List<T> {
     /// 跳过前 n 个元素
     fun skip(n: Int): List<T>
 
-    /// 转换为字符串（逗号分隔）
-    fun toString(): String
+    /// 查找元素的最后一个索引（未找到返回 -1）
+    fun lastIndexOf(item: T): Int
 }

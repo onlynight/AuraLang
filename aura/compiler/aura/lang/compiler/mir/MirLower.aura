@@ -1,0 +1,501 @@
+// aura:///aura/lang/compiler/mir/MirLower.aura
+package aura.lang.compiler.mir
+// ─────────────────────────────────────────────────────────────
+// HIR → MIR 降级 — 纯 Aura 化迁移 · Phase 3 (任务 3.2)
+//
+// 对应 Rust `compiler/src/codegen/mir.rs` 中的 lowering 部分。
+//
+// 将 HIR 节点树降级为 MIR 基本块 + 指令序列：
+//   * HirLit       → LOAD_INT / LOAD_FLOAT / LOAD_STR / LOAD_BOOL
+//   * HirVar       → LOAD_VAR
+//   * HirBinary    → 对应算术/比较指令
+//   * HirUnary     → 对应一元指令（NEG / NOT）
+//   * HirCall      → CALL
+//   * HirMember    → GET_FIELD
+//   * HirValDecl   → STORE_VAR（初始化表达式 → 赋值指令）
+//   * HirIf        → JUMP_IF_FALSE + 分支块
+//   * HirWhile     → 循环块 + JUMP_IF_FALSE + JUMP
+//   * HirReturn    → RETURN
+//   * HirBlock     → 基本块（指令序列）
+//   * HirFunction  → MirFunc（含 params、blocks）
+//
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.compiler.lexer.Span
+import aura.lang.compiler.hir.Hir
+
+/// HIR → MIR 降级器。
+class MirLowerer {
+
+    /// 输出 MIR。
+    var mir: Mir = Mir()
+
+    /// 当前函数返回类型。
+    var curFnRet: String = ""
+
+    /// 临时变量计数器。
+    var tmpCount: Int = 0
+
+    /// 生成一个临时变量名。
+    fun genTmp(): String {
+        val name: String = "%t" + toStr(this.tmpCount)
+        this.tmpCount = this.tmpCount + 1
+        return name
+    }
+
+    init() {
+        this.mir = Mir()
+        this.curFnRet = ""
+        this.tmpCount = 0
+    }
+
+    /// 执行降级，返回新的 MIR 根节点 id。
+    fun lower(src: Hir): Int {
+        this.mir = Mir()
+        this.tmpCount = 0
+
+        // 查找 Program 根节点
+        val n: Int = src.count
+        var rootIdx: Int = -1
+        var i: Int = 0
+        while (i < n) {
+            if (src.kindOf(i) == "HirProgram") {
+                rootIdx = i
+                break
+            }
+            i = i + 1
+        }
+        if (rootIdx < 0) {
+            rootIdx = 0
+        }
+
+        // 创建 MirProgram 根节点
+        val rootId: Int = this.mir.add("MirProgram", "", "", src.spanOf(rootIdx), mirNoKids())
+
+        // 递归降级子节点
+        val kids: String = src.kidsOf(rootIdx)
+        val kCount: Int = hirKidsCount(kids)
+        var newKids: String = mirNoKids()
+        i = 0
+        while (i < kCount) {
+            val childId: Int = hirKidsAt(kids, i)
+            val childKind: String = src.kindOf(childId)
+            if (childKind == "HirFunction") {
+                val funcId: Int = this.lowerFunction(src, childId)
+                newKids = mirKidsAdd(newKids, funcId)
+            } else {
+                // 其他节点（表达式、语句等）直接降级
+                val childMirId: Int = this.lowerExpr(src, childId)
+                if (childMirId >= 0) {
+                    newKids = mirKidsAdd(newKids, childMirId)
+                }
+            }
+            i = i + 1
+        }
+
+        // 更新根节点的 kids（MIR arena 不直接支持修改，重新添加）
+        // 简化：通过返回值传递 rootId
+        this.mir.rootId = rootId
+        return rootId
+    }
+
+    /// 降级函数声明。
+    fun lowerFunction(src: Hir, id: Int): Int {
+        val name: String = src.textOf(id)
+        val retTy: String = src.tyOf(id)
+        this.curFnRet = retTy
+
+        val sp: Span = src.spanOf(id)
+        val kids: String = src.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+
+        // 收集参数名
+        var paramNames: String = ""
+        var paramCount: Int = 0
+        var pi: Int = 0
+        while (pi < kCount) {
+            val childId: Int = hirKidsAt(kids, pi)
+            val childKind: String = src.kindOf(childId)
+            if (childKind == "HirParams") {
+                val paramsKids: String = src.kidsOf(childId)
+                val pkCount: Int = hirKidsCount(paramsKids)
+                var j: Int = 0
+                while (j < pkCount) {
+                    val paramId: Int = hirKidsAt(paramsKids, j)
+                    val paramName: String = src.textOf(paramId)
+                    if (paramNames == "") {
+                        paramNames = paramName
+                    } else {
+                        paramNames = paramNames + "," + paramName
+                    }
+                    paramCount = paramCount + 1
+                    j = j + 1
+                }
+            }
+            pi = pi + 1
+        }
+
+        // 创建 MirFunc 节点
+        val funcId: Int = this.mir.add("MirFunc", name, retTy, sp, mirNoKids())
+
+        // 处理函数体（子节点 1 是 Block）
+        var bi: Int = 0
+        while (bi < kCount) {
+            val childId: Int = hirKidsAt(kids, bi)
+            val childKind: String = src.kindOf(childId)
+            if (childKind == "HirBlock") {
+                // 降级函数体块为指令序列
+                this.lowerBlock(src, childId)
+                break
+            }
+            bi = bi + 1
+        }
+
+        // 返回类型
+        this.curFnRet = ""
+        return funcId
+    }
+
+    /// 降级块为指令序列。
+    fun lowerBlock(src: Hir, id: Int): Int {
+        val sp: Span = src.spanOf(id)
+        // 创建基本块
+        val blockId: Int = this.mir.add("MirBlock", "", "", sp, mirNoKids())
+
+        val kids: String = src.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+        var i: Int = 0
+        while (i < kCount) {
+            val childId: Int = hirKidsAt(kids, i)
+            this.lowerStmt(src, childId)
+            i = i + 1
+        }
+        return blockId
+    }
+
+    /// 降级语句为指令。
+    fun lowerStmt(src: Hir, id: Int): Int {
+        val kind: String = src.kindOf(id)
+        val text: String = src.textOf(id)
+        val sp: Span = src.spanOf(id)
+
+        if (kind == "HirLit") {
+            return this.lowerLiteral(src, id)
+        }
+        if (kind == "HirVar") {
+            return this.mir.add("LOAD_VAR", text, "", sp, mirNoKids())
+        }
+        if (kind == "HirValDecl" || kind == "HirVarDecl") {
+            return this.lowerValDecl(src, id)
+        }
+        if (kind == "HirReturn") {
+            return this.lowerReturn(src, id)
+        }
+        if (kind == "HirBlock") {
+            return this.lowerBlock(src, id)
+        }
+        if (kind == "HirBinary") {
+            return this.lowerBinary(src, id)
+        }
+        if (kind == "HirUnary") {
+            return this.lowerUnary(src, id)
+        }
+        if (kind == "HirCall") {
+            return this.lowerCall(src, id)
+        }
+        if (kind == "HirMember") {
+            return this.lowerMember(src, id)
+        }
+        if (kind == "HirAssign") {
+            return this.lowerAssign(src, id)
+        }
+        if (kind == "HirIf") {
+            return this.lowerIf(src, id)
+        }
+        if (kind == "HirWhile") {
+            return this.lowerWhile(src, id)
+        }
+        if (kind == "HirExprStmt") {
+            // 表达式语句：降级表达式，然后 POP
+            this.lowerExpr(src, id)
+            return this.mir.add("POP", "", "", sp, mirNoKids())
+        }
+
+        // 默认：NOP
+        return this.mir.add("NOP", kind, "", sp, mirNoKids())
+    }
+
+    /// 降级字面量。
+    fun lowerLiteral(src: Hir, id: Int): Int {
+        val text: String = src.textOf(id)
+        val ty: String = src.tyOf(id)
+        val sp: Span = src.spanOf(id)
+
+        if (ty == "Int" || ty == "Long" || ty == "Byte" || ty == "Short") {
+            return this.mir.add("LOAD_INT", text, ty, sp, mirNoKids())
+        }
+        if (ty == "Float" || ty == "Double") {
+            return this.mir.add("LOAD_FLOAT", text, ty, sp, mirNoKids())
+        }
+        if (ty == "String") {
+            return this.mir.add("LOAD_STR", text, ty, sp, mirNoKids())
+        }
+        if (ty == "Boolean") {
+            return this.mir.add("LOAD_BOOL", text, ty, sp, mirNoKids())
+        }
+        if (text == "null") {
+            return this.mir.add("LOAD_NULL", "", "Any?", sp, mirNoKids())
+        }
+
+        // 默认
+        return this.mir.add("LOAD_INT", text, ty, sp, mirNoKids())
+    }
+
+    /// 降级 val/var 声明。
+    fun lowerValDecl(src: Hir, id: Int): Int {
+        val name: String = src.textOf(id)
+        val ty: String = src.tyOf(id)
+        val sp: Span = src.spanOf(id)
+        val kids: String = src.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+
+        if (kCount > 0) {
+            // 有初始化表达式：降级表达式 → STORE_VAR
+            val initId: Int = hirKidsAt(kids, 0)
+            this.lowerExpr(src, initId)
+            return this.mir.add("STORE_VAR", name, ty, sp, mirNoKids())
+        }
+
+        // 无初始化：声明变量（NOP）
+        return this.mir.add("DECL_VAR", name, ty, sp, mirNoKids())
+    }
+
+    /// 降级 return 语句。
+    fun lowerReturn(src: Hir, id: Int): Int {
+        val sp: Span = src.spanOf(id)
+        val kids: String = src.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+
+        if (kCount > 0) {
+            // 有返回值：降级表达式 → RETURN
+            val valId: Int = hirKidsAt(kids, 0)
+            this.lowerExpr(src, valId)
+        }
+        return this.mir.add("RETURN", "", this.curFnRet, sp, mirNoKids())
+    }
+
+    /// 降级二元运算。
+    fun lowerBinary(src: Hir, id: Int): Int {
+        val op: String = src.textOf(id)
+        val sp: Span = src.spanOf(id)
+        val kids: String = src.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+
+        if (kCount >= 2) {
+            val lhsId: Int = hirKidsAt(kids, 0)
+            val rhsId: Int = hirKidsAt(kids, 1)
+
+            // 降级操作数
+            this.lowerExpr(src, lhsId)
+            this.lowerExpr(src, rhsId)
+
+            // 映射操作符到 MIR opcode
+            val opcode: String = this.mapBinaryOp(op)
+            return this.mir.add(opcode, op, "", sp, mirNoKids())
+        }
+        return this.mir.add("NOP", op, "", sp, mirNoKids())
+    }
+
+    /// 映射二元操作符到 MIR opcode。
+    fun mapBinaryOp(op: String): String {
+        if (op == "+") { return "ADD" }
+        if (op == "-") { return "SUB" }
+        if (op == "*") { return "MUL" }
+        if (op == "/") { return "DIV" }
+        if (op == "%") { return "MOD" }
+        if (op == "==") { return "EQ" }
+        if (op == "!=") { return "NEQ" }
+        if (op == "<") { return "LT" }
+        if (op == ">") { return "GT" }
+        if (op == "<=") { return "LE" }
+        if (op == ">=") { return "GE" }
+        if (op == "&&") { return "AND" }
+        if (op == "||") { return "OR" }
+        return "ADD"
+    }
+
+    /// 降级一元运算。
+    fun lowerUnary(src: Hir, id: Int): Int {
+        val op: String = src.textOf(id)
+        val sp: Span = src.spanOf(id)
+        val kids: String = src.kidsOf(id)
+
+        // 降级操作数
+        if (hirKidsCount(kids) > 0) {
+            val operandId: Int = hirKidsAt(kids, 0)
+            this.lowerExpr(src, operandId)
+        }
+
+        // 映射操作符
+        val opcode: String = this.mapUnaryOp(op)
+        return this.mir.add(opcode, op, "", sp, mirNoKids())
+    }
+
+    /// 映射一元操作符到 MIR opcode。
+    fun mapUnaryOp(op: String): String {
+        if (op == "-") { return "NEG" }
+        if (op == "!") { return "NOT" }
+        if (op == "+") { return "POS" }
+        return "NOP"
+    }
+
+    /// 降级函数调用。
+    fun lowerCall(src: Hir, id: Int): Int {
+        val name: String = src.textOf(id)
+        val sp: Span = src.spanOf(id)
+        val kids: String = src.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+
+        // 降级参数（子节点 1 及之后是参数列表）
+        var i: Int = 0
+        while (i < kCount) {
+            val childId: Int = hirKidsAt(kids, i)
+            val childKind: String = src.kindOf(childId)
+            if (childKind == "HirArgs") {
+                val argsKids: String = src.kidsOf(childId)
+                val ac: Int = hirKidsCount(argsKids)
+                var j: Int = 0
+                while (j < ac) {
+                    val argId: Int = hirKidsAt(argsKids, j)
+                    this.lowerExpr(src, argId)
+                    j = j + 1
+                }
+            }
+            i = i + 1
+        }
+
+        return this.mir.add("CALL", name, "", sp, mirNoKids())
+    }
+
+    /// 降级成员访问。
+    fun lowerMember(src: Hir, id: Int): Int {
+        val text: String = src.textOf(id)
+        val sp: Span = src.spanOf(id)
+        val kids: String = src.kidsOf(id)
+
+        // 降级对象
+        if (hirKidsCount(kids) > 0) {
+            val objId: Int = hirKidsAt(kids, 0)
+            this.lowerExpr(src, objId)
+        }
+        return this.mir.add("GET_FIELD", text, "", sp, mirNoKids())
+    }
+
+    /// 降级赋值。
+    fun lowerAssign(src: Hir, id: Int): Int {
+        val text: String = src.textOf(id)
+        val sp: Span = src.spanOf(id)
+        val kids: String = src.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+
+        if (kCount >= 2) {
+            // 降级值表达式
+            val valId: Int = hirKidsAt(kids, 1)
+            this.lowerExpr(src, valId)
+            return this.mir.add("STORE_VAR", text, "", sp, mirNoKids())
+        }
+        return this.mir.add("NOP", text, "", sp, mirNoKids())
+    }
+
+    /// 降级 if 语句。
+    fun lowerIf(src: Hir, id: Int): Int {
+        val sp: Span = src.spanOf(id)
+        val kids: String = src.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+
+        if (kCount >= 3) {
+            // 条件表达式
+            val condId: Int = hirKidsAt(kids, 0)
+            this.lowerExpr(src, condId)
+
+            // JUMP_IF_FALSE（跳转到 else 块或末尾）
+            this.mir.add("JUMP_IF_FALSE", "", "", sp, mirNoKids())
+
+            // then 块
+            val thenId: Int = hirKidsAt(kids, 1)
+            this.lowerStmt(src, thenId)
+
+            // JUMP（跳过 else 块）
+            this.mir.add("JUMP", "", "", sp, mirNoKids())
+
+            // else 块（如果有）
+            if (kCount >= 4) {
+                val elseId: Int = hirKidsAt(kids, 2)
+                this.lowerStmt(src, elseId)
+            }
+        }
+        return 0
+    }
+
+    /// 降级 while 循环。
+    fun lowerWhile(src: Hir, id: Int): Int {
+        val sp: Span = src.spanOf(id)
+        val kids: String = src.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+
+        if (kCount >= 2) {
+            // 循环条件
+            val condId: Int = hirKidsAt(kids, 0)
+            this.lowerExpr(src, condId)
+
+            // JUMP_IF_FALSE（退出循环）
+            this.mir.add("JUMP_IF_FALSE", "", "", sp, mirNoKids())
+
+            // 循环体
+            val bodyId: Int = hirKidsAt(kids, 1)
+            this.lowerStmt(src, bodyId)
+
+            // JUMP（回到循环条件）
+            this.mir.add("JUMP", "", "", sp, mirNoKids())
+        }
+        return 0
+    }
+
+    /// 降级表达式。
+    fun lowerExpr(src: Hir, id: Int): Int {
+        val kind: String = src.kindOf(id)
+
+        if (kind == "HirLit") {
+            return this.lowerLiteral(src, id)
+        }
+        if (kind == "HirVar" || kind == "Ident") {
+            val name: String = src.textOf(id)
+            return this.mir.add("LOAD_VAR", name, "", src.spanOf(id), mirNoKids())
+        }
+        if (kind == "HirBinary") {
+            return this.lowerBinary(src, id)
+        }
+        if (kind == "HirUnary") {
+            return this.lowerUnary(src, id)
+        }
+        if (kind == "HirCall") {
+            return this.lowerCall(src, id)
+        }
+        if (kind == "HirMember") {
+            return this.lowerMember(src, id)
+        }
+        if (kind == "HirBlock") {
+            return this.lowerBlock(src, id)
+        }
+        if (kind == "HirExprStmt") {
+            val kids: String = src.kidsOf(id)
+            if (hirKidsCount(kids) > 0) {
+                return this.lowerExpr(src, hirKidsAt(kids, 0))
+            }
+        }
+
+        // 默认
+        return this.mir.add("LOAD_INT", "0", "Int", src.spanOf(id), mirNoKids())
+    }
+}

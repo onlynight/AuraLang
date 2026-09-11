@@ -1,4 +1,5 @@
 // aura:///aura/lang/collection/HashMap.aura
+package aura.lang.collection
 // 集合包：HashMap 实现（基于哈希表的 Map）
 
 /// HashMap<K, V> — 基于哈希表的映射实现。

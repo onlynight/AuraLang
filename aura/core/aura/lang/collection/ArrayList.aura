@@ -1,4 +1,5 @@
 // aura:///aura/lang/collection/ArrayList.aura
+package aura.lang.collection
 // 集合包：ArrayList 实现（基于动态数组的 List）
 
 import aura.lang.collection.List

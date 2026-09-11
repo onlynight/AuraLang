@@ -1,4 +1,5 @@
 // aura:///aura/lang/Char.aura
+package aura.lang
 // 语言内置类型，不可修改
 
 /// Unicode 字符类型。

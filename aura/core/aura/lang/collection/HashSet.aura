@@ -1,4 +1,5 @@
 // aura:///aura/lang/collection/HashSet.aura
+package aura.lang.collection
 // 集合包：HashSet 实现（基于哈希表的 Set）
 
 /// HashSet<T> — 基于哈希表的集合实现。

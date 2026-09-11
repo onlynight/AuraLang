@@ -1,4 +1,5 @@
 // aura:///aura/lang/collection/Collections.aura
+package aura.lang.collection
 // 集合工具模块
 // 实现：Rust 原生函数（compiler/src/std/std_collections.rs）
 // (package 声明由编译器自动注入，无需显式声明)

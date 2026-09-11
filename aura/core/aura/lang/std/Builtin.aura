@@ -1,4 +1,5 @@
 // aura:///aura/lang/std/Builtin.aura
+package aura.lang.std
 // 标准库模块，不可修改
 // 实现：类型标签/指针/回调等需要运行时的成员保留 native（Layer 0-A）；
 //       空值判断、数值判断与类型转换全部以 Aura 编写（Layer 1）

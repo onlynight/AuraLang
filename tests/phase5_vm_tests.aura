@@ -1,0 +1,489 @@
+// ═════════════════════════════════════════════════════════════
+// Phase 5 验证用例：VM 增强（闭包、尾调用、栈帧）
+//
+// 验证内容：
+//   1. Closures.aura：上值注册、闭包创建、上值解析
+//   2. TailCall.aura：尾位置检测、递归检测、调用深度
+//   3. FrameManager.aura：帧分配/释放、溢出保护、帧链
+//   4. VmRunner.aura：字节码执行、算术运算、栈操作
+//
+// 运行：aura run tests/phase5_vm_tests.aura
+//   全通过时输出 "RESULT: PASS"
+// ═════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import "../aura/compiler/aura/lang/compiler/test/TestRunner.aura"
+import "../aura/compiler/aura/lang/compiler/vm/Closures.aura"
+import "../aura/compiler/aura/lang/compiler/vm/TailCall.aura"
+import "../aura/compiler/aura/lang/compiler/vm/FrameManager.aura"
+import "../aura/compiler/aura/lang/compiler/vm/VmRunner.aura"
+
+// ═════════════════════════════════════════════════════════════
+// 测试 1: Closures.aura — 闭包与上值管理
+// ═════════════════════════════════════════════════════════════
+
+fun testClosuresRegister(): Int {
+    val t = TestRunner()
+    t.begin("Closures.register")
+
+    val cm = ClosureManager()
+
+    // 注册闭包
+    val id1: Int = cm.registerClosure("f", 2)
+    t.assertEq(id1, 0, "first closure id")
+    t.assertEq(cm.closureCount, 1, "closure count")
+    t.assertEq(cm.closureFuncName(id1), "f", "closure func name")
+    t.assertEq(cm.closureUpvalueCount(id1), 2, "closure upvalue count")
+
+    // 注册第二个闭包
+    val id2: Int = cm.registerClosure("g", 1)
+    t.assertEq(id2, 1, "second closure id")
+    t.assertEq(cm.closureCount, 2, "closure count 2")
+    t.assertEq(cm.closureFuncName(id2), "g", "closure func name g")
+
+    return t.report()
+}
+
+fun testClosuresUpvalues(): Int {
+    val t = TestRunner()
+    t.begin("Closures.upvalues")
+
+    val cm = ClosureManager()
+
+    // 注册上值
+    val uid1: Int = cm.registerUpvalue("x", "local")
+    t.assertEq(uid1, 0, "first upvalue id")
+    t.assertEq(cm.upvalueCount, 1, "upvalue count")
+    t.assertEq(cm.upvalueName(uid1), "x", "upvalue name")
+    t.assertEq(cm.upvalueSource(uid1), "local", "upvalue source")
+
+    // 注册第二个上值
+    val uid2: Int = cm.registerUpvalue("y", "shared")
+    t.assertEq(uid2, 1, "second upvalue id")
+    t.assertEq(cm.upvalueCount, 2, "upvalue count 2")
+
+    return t.report()
+}
+
+fun testClosuresResolve(): Int {
+    val t = TestRunner()
+    t.begin("Closures.resolve")
+
+    val cm = ClosureManager()
+
+    // 创建闭包（自动注册上值）
+    val closure: String = cm.createClosure("f", "x,y,z")
+    t.assertEq(cm.closureCount, 1, "closure count")
+    t.assertEq(cm.upvalueCount, 3, "upvalue count")
+
+    // 验证上值
+    t.assertEq(cm.upvalueName(0), "x", "upvalue 0 name")
+    t.assertEq(cm.upvalueName(1), "y", "upvalue 1 name")
+    t.assertEq(cm.upvalueName(2), "z", "upvalue 2 name")
+
+    return t.report()
+}
+
+fun testClosuresFindOrRegister(): Int {
+    val t = TestRunner()
+    t.begin("Closures.findOrRegister")
+
+    val cm = ClosureManager()
+
+    // 注册上值
+    val uid1: Int = cm.registerUpvalue("x", "shared")
+    t.assertEq(uid1, 0, "upvalue id")
+
+    // 查找已有上值
+    val found: Int = cm.findOrRegisterUpvalue("x")
+    t.assertEq(found, 0, "found existing upvalue")
+
+    // 查找新上值（自动注册）
+    val newUid: Int = cm.findOrRegisterUpvalue("y")
+    t.assertEq(newUid, 1, "new upvalue id")
+    t.assertEq(cm.upvalueCount, 2, "upvalue count")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 2: TailCall.aura — 尾调用优化
+// ═════════════════════════════════════════════════════════════
+
+fun testTailCallPosition(): Int {
+    val t = TestRunner()
+    t.begin("TailCall.position")
+
+    val tc = TailCallOptimizer()
+
+    // 尾位置检测
+    t.assertTrue(tc.isTailPosition("return", "f", 0), "return is tail position")
+    t.assertTrue(tc.isTailPosition("branch", "f", 0), "branch is tail position")
+    t.assertFalse(tc.isTailPosition("expr", "f", 0), "expr is not tail position")
+    t.assertFalse(tc.isTailPosition("assign", "f", 0), "assign is not tail position")
+    t.assertFalse(tc.isTailPosition("cond", "f", 0), "cond is not tail position")
+
+    return t.report()
+}
+
+fun testTailCallRecursion(): Int {
+    val t = TestRunner()
+    t.begin("TailCall.recursion")
+
+    val tc = TailCallOptimizer()
+
+    // 设置当前函数
+    tc.currentFunc = "factorial"
+
+    // 直接递归检测
+    t.assertTrue(tc.isDirectRecursion("factorial"), "direct recursion detected")
+    t.assertFalse(tc.isDirectRecursion("other"), "not direct recursion")
+
+    // 尾递归检测
+    t.assertTrue(tc.isTailRecursion("factorial", "return"), "tail recursion")
+    t.assertFalse(tc.isTailRecursion("factorial", "expr"), "not tail recursion")
+    t.assertFalse(tc.isTailRecursion("other", "return"), "not tail recursion")
+
+    return t.report()
+}
+
+fun testTailCallDepth(): Int {
+    val t = TestRunner()
+    t.begin("TailCall.depth")
+
+    val tc = TailCallOptimizer()
+
+    // 进入调用
+    tc.enterCall("f")
+    t.assertEq(tc.getCallDepth(), 1, "call depth 1")
+
+    tc.enterCall("g")
+    t.assertEq(tc.getCallDepth(), 2, "call depth 2")
+
+    tc.enterCall("h")
+    t.assertEq(tc.getCallDepth(), 3, "call depth 3")
+    t.assertEq(tc.getMaxRecursionDepth(), 3, "max depth 3")
+
+    // 退出调用
+    tc.exitCall()
+    t.assertEq(tc.getCallDepth(), 2, "call depth 2 after exit")
+
+    return t.report()
+}
+
+fun testTailCallRegister(): Int {
+    val t = TestRunner()
+    t.begin("TailCall.register")
+
+    val tc = TailCallOptimizer()
+
+    // 注册尾调用
+    val id1: Int = tc.registerTailCall("f", 10)
+    t.assertEq(id1, 0, "first tail call id")
+    t.assertEq(tc.getTailCallCount(), 1, "tail call count")
+
+    val id2: Int = tc.registerTailCall("g", 20)
+    t.assertEq(id2, 1, "second tail call id")
+    t.assertEq(tc.getTailCallCount(), 2, "tail call count 2")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 3: FrameManager.aura — 栈帧管理
+// ═════════════════════════════════════════════════════════════
+
+fun testFrameAllocate(): Int {
+    val t = TestRunner()
+    t.begin("Frame.allocate")
+
+    val fm = FrameManager()
+
+    // 分配帧
+    val frameId: Int = fm.allocateFrame("main", 3)
+    t.assertEq(frameId, 0, "first frame id")
+    t.assertEq(fm.getFrameCount(), 1, "frame count")
+    t.assertEq(fm.getCallDepth(), 1, "call depth")
+    t.assertEq(fm.frameFuncName(frameId), "main", "frame func name")
+    t.assertEq(fm.frameArity(frameId), 3, "frame arity")
+
+    // 分配第二个帧
+    val frameId2: Int = fm.allocateFrame("f", 1)
+    t.assertEq(frameId2, 1, "second frame id")
+    t.assertEq(fm.getFrameCount(), 2, "frame count 2")
+    t.assertEq(fm.getCallDepth(), 2, "call depth 2")
+
+    return t.report()
+}
+
+fun testFrameDeallocate(): Int {
+    val t = TestRunner()
+    t.begin("Frame.deallocate")
+
+    val fm = FrameManager()
+
+    // 分配帧
+    val frameId: Int = fm.allocateFrame("main", 0)
+    t.assertEq(fm.getCallDepth(), 1, "call depth 1")
+
+    // 释放帧
+    fm.deallocateFrame(frameId)
+    t.assertEq(fm.getCallDepth(), 0, "call depth 0 after dealloc")
+
+    return t.report()
+}
+
+fun testFrameOverflow(): Int {
+    val t = TestRunner()
+    t.begin("Frame.overflow")
+
+    val fm = FrameManager()
+    fm.maxCallDepth = 3  // 设置低阈值
+
+    // 分配帧
+    fm.allocateFrame("f1", 0)
+    fm.allocateFrame("f2", 0)
+    fm.allocateFrame("f3", 0)
+    t.assertEq(fm.getCallDepth(), 3, "call depth 3")
+
+    // 第四帧应该溢出
+    val frameId: Int = fm.allocateFrame("f4", 0)
+    t.assertEq(frameId, -1, "overflow returns -1")
+    t.assertTrue(fm.isStackOverflow(), "stack overflow flag")
+
+    return t.report()
+}
+
+fun testFrameSetIp(): Int {
+    val t = TestRunner()
+    t.begin("Frame.setIp")
+
+    val fm = FrameManager()
+
+    // 分配帧
+    val frameId: Int = fm.allocateFrame("main", 0)
+    t.assertEq(fm.frameIp(frameId), 0, "initial ip")
+
+    // 设置 IP
+    fm.setIp(frameId, 42)
+    t.assertEq(fm.frameIp(frameId), 42, "ip after set")
+
+    return t.report()
+}
+
+fun testFrameUpvalues(): Int {
+    val t = TestRunner()
+    t.begin("Frame.upvalues")
+
+    val fm = FrameManager()
+
+    // 分配帧
+    val frameId: Int = fm.allocateFrame("main", 0)
+
+    // 附加上值
+    fm.attachUpvalues(frameId, "0,1,2")
+    t.assertEq(fm.frameUpvalues(frameId), "0,1,2", "upvalues attached")
+
+    return t.report()
+}
+
+fun testFrameReuse(): Int {
+    val t = TestRunner()
+    t.begin("Frame.reuse")
+
+    val fm = FrameManager()
+
+    // 分配帧
+    val frameId: Int = fm.allocateFrame("main", 3)
+    t.assertEq(fm.frameArity(frameId), 3, "arity 3")
+
+    // 复用帧（尾调用）
+    val ok: Boolean = fm.reuseFrame(frameId, 2)
+    t.assertTrue(ok, "reuse succeeded")
+    t.assertEq(fm.frameArity(frameId), 2, "arity updated to 2")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 4: VmRunner.aura — VM 运行器
+// ═════════════════════════════════════════════════════════════
+
+fun testVmRunnerConst(): Int {
+    val t = TestRunner()
+    t.begin("VmRunner.const")
+
+    val vm = VmRunner()
+    vm.loadBytecode(
+        "CONST_INT 0\n" +
+        "CONST_INT 0\n" +
+        "ADD\n" +
+        "RETURN\n",
+        "42\n",
+        ""
+    )
+    vm.run()
+
+    t.assertEq(toStr(vm.returnValue), "84", "result")
+    t.assertEq(vm.getInstructionCount(), 4, "instr count")
+    t.assertFalse(vm.isRunning(), "not running after return")
+
+    return t.report()
+}
+
+fun testVmRunnerStack(): Int {
+    val t = TestRunner()
+    t.begin("VmRunner.stack")
+
+    val vm = VmRunner()
+
+    // 压栈
+    vm.push("42")
+    t.assertEq(vm.getStackDepth(), 1, "stack depth 1")
+    t.assertEq(vm.peek(), "42", "peek")
+
+    vm.push("58")
+    t.assertEq(vm.getStackDepth(), 2, "stack depth 2")
+    t.assertEq(vm.peek(), "58", "peek 2")
+
+    // 弹栈
+    val val1: String = vm.pop()
+    t.assertEq(val1, "58", "pop 1")
+    t.assertEq(vm.getStackDepth(), 1, "stack depth 1")
+
+    return t.report()
+}
+
+fun testVmRunnerLocal(): Int {
+    val t = TestRunner()
+    t.begin("VmRunner.local")
+
+    val vm = VmRunner()
+
+    // 设置局部变量
+    vm.setLocal(0, "42")
+    vm.setLocal(1, "58")
+
+    // 获取局部变量
+    t.assertEq(vm.getLocal(0), "42", "local 0")
+    t.assertEq(vm.getLocal(1), "58", "local 1")
+
+    return t.report()
+}
+
+fun testVmRunnerGlobal(): Int {
+    val t = TestRunner()
+    t.begin("VmRunner.global")
+
+    val vm = VmRunner()
+
+    // 设置全局变量
+    vm.setGlobal("x", "42")
+    vm.setGlobal("y", "58")
+
+    // 获取全局变量
+    t.assertEq(vm.getGlobal("x"), "42", "global x")
+    t.assertEq(vm.getGlobal("y"), "58", "global y")
+
+    return t.report()
+}
+
+fun testVmRunnerArith(): Int {
+    val t = TestRunner()
+    t.begin("VmRunner.arith")
+
+    val vm = VmRunner()
+
+    // 加法
+    t.assertEq(vm.arithAdd("10", "20"), "30", "add")
+    // 减法
+    t.assertEq(vm.arithSub("10", "20"), "-10", "sub")
+    // 乘法
+    t.assertEq(vm.arithMul("10", "20"), "200", "mul")
+    // 除法
+    t.assertEq(vm.arithDiv("20", "10"), "2", "div")
+
+    return t.report()
+}
+
+fun testVmRunnerClosures(): Int {
+    val t = TestRunner()
+    t.begin("VmRunner.closures")
+
+    val vm = VmRunner()
+
+    // 检查闭包管理器
+    val cm: ClosureManager = vm.getClosures()
+    t.assertEq(cm.closureCount, 0, "initial closure count")
+
+    // 注册闭包
+    val id: Int = cm.registerClosure("f", 2)
+    t.assertEq(cm.closureCount, 1, "closure count after register")
+
+    return t.report()
+}
+
+fun testVmRunnerFullExec(): Int {
+    val t = TestRunner()
+    t.begin("VmRunner.fullExec")
+
+    val vm = VmRunner()
+    vm.loadBytecode(
+        "CONST_INT 0\n" +     // 加载常量 0 (42)
+        "CONST_INT 1\n" +     // 加载常量 1 (100)
+        "ADD\n" +             // 加法
+        "RETURN\n",           // 返回
+        "42\n100\n",          // 常量池
+        ""
+    )
+    vm.run()
+
+    // 42 + 100 = 142
+    t.assertEq(toStr(vm.returnValue), "142", "result")
+    t.assertEq(vm.getInstructionCount(), 4, "instr count")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 主函数
+// ═════════════════════════════════════════════════════════════
+
+fun main() {
+    println("=== Phase 5 VM Enhancement Tests ===")
+    println()
+
+    val f1 = testClosuresRegister()
+    val f2 = testClosuresUpvalues()
+    val f3 = testClosuresResolve()
+    val f4 = testClosuresFindOrRegister()
+    val f5 = testTailCallPosition()
+    val f6 = testTailCallRecursion()
+    val f7 = testTailCallDepth()
+    val f8 = testTailCallRegister()
+    val f9 = testFrameAllocate()
+    val f10 = testFrameDeallocate()
+    val f11 = testFrameOverflow()
+    val f12 = testFrameSetIp()
+    val f13 = testFrameUpvalues()
+    val f14 = testFrameReuse()
+    val f15 = testVmRunnerConst()
+    val f16 = testVmRunnerStack()
+    val f17 = testVmRunnerLocal()
+    val f18 = testVmRunnerGlobal()
+    val f19 = testVmRunnerArith()
+    val f20 = testVmRunnerClosures()
+    val f21 = testVmRunnerFullExec()
+
+    val totalFailures: Int = f1 + f2 + f3 + f4 + f5 + f6 + f7 + f8 + f9 + f10 + f11 + f12 + f13 + f14 + f15 + f16 + f17 + f18 + f19 + f20 + f21
+
+    println()
+    println("=== Summary ===")
+    println("Total failures: " + toStr(totalFailures))
+
+    if (totalFailures == 0) {
+        println("RESULT: PASS")
+    } else {
+        println("RESULT: FAIL (" + toStr(totalFailures) + ")")
+    }
+}

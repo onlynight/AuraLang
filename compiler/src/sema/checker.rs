@@ -2188,18 +2188,22 @@ impl Checker {
                         }
                     },
                     Ty::List(elem) => match name.as_str() {
-                        "size" => Ty::Int,
+                        "size" | "count" => Ty::Int,
                         "isEmpty" => Ty::Boolean,
                         "first" | "last" => (**elem).clone(),
+                        "get" | "getAt" => (**elem).clone(),
+                        "set" => Ty::Unit,
                         _ => {
                             self.report(*span, format!("unresolved member '{}' on List", name));
                             Ty::Error
                         }
                     },
                     Ty::Array(elem) => match name.as_str() {
-                        "size" => Ty::Int,
+                        "size" | "count" => Ty::Int,
                         "isEmpty" => Ty::Boolean,
                         "first" | "last" => (**elem).clone(),
+                        "get" | "getAt" => (**elem).clone(),
+                        "set" => Ty::Unit,
                         _ => {
                             self.report(*span, format!("unresolved member '{}' on Array", name));
                             Ty::Error
@@ -3290,8 +3294,42 @@ impl Checker {
                 Ty::List(Box::new((**elem).clone()))
             }
             (Ty::List(elem), "first") | (Ty::List(elem), "last") => (**elem).clone(),
+            // list.get(i) 与 list[i] 等价，返回元素类型
+            (Ty::List(elem), "get") => {
+                for a in args {
+                    self.check_expr(a);
+                }
+                (**elem).clone()
+            }
+            // Collection 通用方法（List/Array/Set 共享）
+            (Ty::List(elem), "getAt") => {
+                for a in args {
+                    self.check_expr(a);
+                }
+                (**elem).clone()
+            }
+            (Ty::List(_), "count") | (Ty::List(_), "size") => Ty::Int,
             (Ty::List(_), "isEmpty") => Ty::Boolean,
-            (Ty::List(_), "size") | (Ty::String, _) => Ty::Int,
+            (Ty::List(elem), "contains") => {
+                for a in args {
+                    self.check_expr(a);
+                }
+                Ty::Boolean
+            }
+            (Ty::List(_), "indexOf") => {
+                for a in args {
+                    self.check_expr(a);
+                }
+                Ty::Int
+            }
+            // set(i, v) → Unit（下标赋值）
+            (Ty::List(_), "set") => {
+                for a in args {
+                    self.check_expr(a);
+                }
+                Ty::Unit
+            }
+            (Ty::String, _) => Ty::Int,
             // P15: 类实例方法（沿继承链查找，支持子类调用父类方法）
             (Ty::Named(class_name), m) => {
                 let mut cur = Some(class_name.clone());
@@ -3421,18 +3459,23 @@ impl Checker {
                 }
             },
             Ty::List(elem) => match name {
-                "size" => Ty::Int,
+                "size" | "count" => Ty::Int,
                 "isEmpty" => Ty::Boolean,
                 "first" | "last" => (**elem).clone(),
+                // `get` / `getAt` / `set` 作为方法，由 check_call 处理
+                "get" | "getAt" => (**elem).clone(),
+                "set" => Ty::Unit,
                 _ => {
                     self.report(span, format!("unresolved member '{}' on List", name));
                     Ty::Error
                 }
             },
             Ty::Array(elem) => match name {
-                "size" => Ty::Int,
+                "size" | "count" => Ty::Int,
                 "isEmpty" => Ty::Boolean,
                 "first" | "last" => (**elem).clone(),
+                "get" | "getAt" => (**elem).clone(),
+                "set" => Ty::Unit,
                 _ => {
                     self.report(span, format!("unresolved member '{}' on Array", name));
                     Ty::Error

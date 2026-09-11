@@ -1,0 +1,373 @@
+// aura:///aura/lang/compiler/codegen/Codegen.aura
+package aura.lang.compiler.codegen
+// ─────────────────────────────────────────────────────────────
+// 字节码发射器 — 纯 Aura 化迁移 · Phase 4 (任务 4.1)
+//
+// 对应 Rust `compiler/src/codegen/emit.rs`。
+//
+// ── 设计方式 ──
+//
+// 将 MIR 指令序列转换为字节码指令流（opcode + operands）。
+// 字节码以扁平字符串表示（每行一条指令：`opcode arg1 arg2 ...`）。
+//
+// ── 字节码格式 ──
+//
+// 每条指令一行，空格分隔：
+//   opcode         — 操作码名称（如 LOAD_INT, ADD, CALL）
+//   arg1           — 操作数 1（常量值 / 变量名 / 偏移量）
+//   arg2           — 操作数 2（可选）
+//
+// 示例：
+//   LOAD_INT 42
+//   LOAD_INT 58
+//   ADD
+//   STORE_VAR sum
+//   LOAD_VAR sum
+//   RETURN
+//
+// ── 指令映射 ──
+//
+//   MIR LOAD_INT    → CONST_INT <value>
+//   MIR LOAD_FLOAT  → CONST_FLOAT <value>
+//   MIR LOAD_STR    → CONST_STRING <value>
+//   MIR LOAD_BOOL   → CONST_BOOL <value>
+//   MIR LOAD_NULL   → CONST_NULL
+//   MIR LOAD_VAR    → LOAD_LOCAL <name>
+//   MIR STORE_VAR   → STORE_LOCAL <name>
+//   MIR ADD/SUB/... → ADD/SUB/...
+//   MIR CALL        → CALL <name>
+//   MIR RETURN      → RETURN
+//
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.compiler.mir.Mir
+
+/// 字节码发射器。
+class Codegen {
+
+    /// 输入的 MIR。
+    var mir: Mir = Mir()
+
+    /// 输出的字节码（每行一条指令）。
+    var bytecode: String = ""
+
+    /// 当前指令计数。
+    var instrCount: Int = 0
+
+    /// 常量池（扁平字符串：`value\n`）。
+    var constPool: String = ""
+
+    /// 常量池索引映射（value → index，扁平字符串：`value|index\n`）。
+    var constMap: String = ""
+
+    /// 变量表（varName → slot，扁平字符串：`name|slot\n`）。
+    var varTable: String = ""
+
+    /// 函数表（funcName → startOffset，扁平字符串：`name|offset\n`）。
+    var funcTable: String = ""
+
+    init() {
+        this.mir = Mir()
+        this.bytecode = ""
+        this.instrCount = 0
+        this.constPool = ""
+        this.constMap = ""
+        this.varTable = ""
+        this.funcTable = ""
+    }
+
+    /// 执行字节码发射，返回字节码字符串。
+    fun emit(src: Mir): String {
+        this.mir = src
+        this.bytecode = ""
+        this.instrCount = 0
+        this.constPool = ""
+        this.constMap = ""
+        this.varTable = ""
+        this.funcTable = ""
+
+        // 查找 MirProgram 根节点
+        val n: Int = src.count
+        var rootIdx: Int = -1
+        var i: Int = 0
+        while (i < n) {
+            if (src.kindOf(i) == "MirProgram") {
+                rootIdx = i
+                break
+            }
+            i = i + 1
+        }
+        if (rootIdx < 0) {
+            rootIdx = 0
+        }
+
+        // 遍历所有节点（不仅是根树，因为 MIR 是扁平 arena）
+        var ei: Int = 0
+        while (ei < src.count) {
+            this.emitNode(src, ei)
+            ei = ei + 1
+        }
+
+        return this.bytecode
+    }
+
+    /// 发射单个节点（不递归子节点——由外层遍历所有节点）。
+    fun emitNode(src: Mir, id: Int) {
+        val kind: String = src.kindOf(id)
+        val text: String = src.textOf(id)
+        val ty: String = src.tyOf(id)
+
+        if (kind == "MirFunc") {
+            this.emitFunc(src, id)
+        } else if (this.isInstr(kind)) {
+            this.emitInstr(kind, text, ty)
+        }
+        // 非指令节点（MirProgram, MirBlock）不发射指令
+    }
+
+    /// 发射函数（仅发注释，不递归子节点）。
+    fun emitFunc(src: Mir, id: Int) {
+        val name: String = src.textOf(id)
+        val retTy: String = src.tyOf(id)
+
+        // 记录函数起始偏移
+        this.funcTable = this.funcTable + name + "|" + toStr(this.instrCount) + "\n"
+
+        // 发射注释（调试用）
+        this.bytecode = this.bytecode + "# func " + name + ":" + retTy + "\n"
+    }
+
+    /// 发射基本块。
+    fun emitBlock(src: Mir, id: Int) {
+        val kids: String = src.kidsOf(id)
+        val kCount: Int = mirKidsCount(kids)
+
+        var i: Int = 0
+        while (i < kCount) {
+            val childId: Int = mirKidsAt(kids, i)
+            this.emitNode(src, childId)
+            i = i + 1
+        }
+    }
+
+    /// 发射单条指令。
+    fun emitInstr(opcode: String, arg: String, ty: String) {
+        // 映射 MIR opcode 到字节码指令
+        val bcOp: String = this.mapOpcode(opcode)
+
+        if (bcOp == "CONST_INT") {
+            // 常量池去重
+            val idx: Int = this.internConst(arg)
+            this.bytecode = this.bytecode + "CONST_INT " + toStr(idx) + "\n"
+        } else if (bcOp == "CONST_FLOAT") {
+            val idx: Int = this.internConst(arg)
+            this.bytecode = this.bytecode + "CONST_FLOAT " + toStr(idx) + "\n"
+        } else if (bcOp == "CONST_STRING") {
+            val idx: Int = this.internConst(arg)
+            this.bytecode = this.bytecode + "CONST_STRING " + toStr(idx) + "\n"
+        } else if (bcOp == "LOAD_LOCAL" || bcOp == "STORE_LOCAL") {
+            // 变量分配槽位
+            val slot: Int = this.allocVar(arg)
+            this.bytecode = this.bytecode + bcOp + " " + toStr(slot) + "\n"
+        } else if (bcOp == "CALL") {
+            this.bytecode = this.bytecode + "CALL " + arg + "\n"
+        } else if (bcOp == "RETURN") {
+            this.bytecode = this.bytecode + "RETURN\n"
+        } else if (bcOp == "POP") {
+            this.bytecode = this.bytecode + "POP\n"
+        } else if (bcOp == "DUP") {
+            this.bytecode = this.bytecode + "DUP\n"
+        } else {
+            // 无操作数指令（ADD, SUB, MUL, DIV, MOD, EQ, NEQ, LT, GT, LE, GE, JUMP, JUMP_IF_FALSE, etc.）
+            this.bytecode = this.bytecode + bcOp + "\n"
+        }
+
+        this.instrCount = this.instrCount + 1
+    }
+
+    /// 检查是否是指令节点。
+    fun isInstr(kind: String): Boolean {
+        if (kind == "LOAD_INT" || kind == "LOAD_FLOAT" || kind == "LOAD_STR" ||
+            kind == "LOAD_BOOL" || kind == "LOAD_NULL" ||
+            kind == "LOAD_VAR" || kind == "STORE_VAR" ||
+            kind == "POP" || kind == "DUP" ||
+            kind == "ADD" || kind == "SUB" || kind == "MUL" || kind == "DIV" || kind == "MOD" ||
+            kind == "EQ" || kind == "NEQ" || kind == "LT" || kind == "GT" || kind == "LE" || kind == "GE" ||
+            kind == "AND" || kind == "OR" || kind == "NOT" ||
+            kind == "NEG" || kind == "POS" ||
+            kind == "JUMP" || kind == "JUMP_IF_FALSE" || kind == "JUMP_IF_TRUE" ||
+            kind == "RETURN" ||
+            kind == "CALL" || kind == "CALL_METHOD" ||
+            kind == "GET_FIELD" || kind == "SET_FIELD" ||
+            kind == "NEW_OBJECT" ||
+            kind == "DECL_VAR" ||
+            kind == "CAST" || kind == "CHECK_TYPE" ||
+            kind == "PHI" || kind == "LABEL") {
+            return true
+        }
+        return false
+    }
+
+    /// 映射 MIR opcode 到字节码指令。
+    fun mapOpcode(opcode: String): String {
+        if (opcode == "LOAD_INT") { return "CONST_INT" }
+        if (opcode == "LOAD_FLOAT") { return "CONST_FLOAT" }
+        if (opcode == "LOAD_STR") { return "CONST_STRING" }
+        if (opcode == "LOAD_BOOL") { return "CONST_BOOL" }
+        if (opcode == "LOAD_NULL") { return "CONST_NULL" }
+        if (opcode == "LOAD_VAR") { return "LOAD_LOCAL" }
+        if (opcode == "STORE_VAR") { return "STORE_LOCAL" }
+        if (opcode == "CALL_METHOD") { return "CALL_METHOD" }
+        // 算术、比较、控制流指令直接映射
+        return opcode
+    }
+
+    /// 常量池去重，返回索引。
+    fun internConst(value: String): Int {
+        // 查找是否已存在
+        var i: Int = 0
+        var lines: String = this.constMap
+        var pos: Int = 0
+        var len: Int = lines.length
+        var found: Int = -1
+        var lineStart: Int = 0
+        while (pos < len) {
+            val c: String = toStr(lines[pos])
+            if (c == "\n") {
+                // 提取当前行
+                var line: String = ""
+                var j: Int = lineStart
+                while (j < pos) {
+                    line = line + toStr(lines[j])
+                    j = j + 1
+                }
+                // 解析 value|index
+                var foundSep: Boolean = false
+                var val: String = ""
+                var idx: String = ""
+                var k: Int = 0
+                while (k < line.length) {
+                    val ch: String = toStr(line[k])
+                    if (!foundSep && ch == "|") {
+                        foundSep = true
+                    } else if (!foundSep) {
+                        val = val + ch
+                    } else {
+                        idx = idx + ch
+                    }
+                    k = k + 1
+                }
+                if (foundSep && val == value) {
+                    found = this.mirToIntOf2(idx)
+                    break
+                }
+                lineStart = pos + 1
+            }
+            pos = pos + 1
+        }
+        if (found >= 0) {
+            return found
+        }
+
+        // 添加到常量池
+        val idx: Int = this.constPool.length
+        this.constPool = this.constPool + value + "\n"
+        this.constMap = this.constMap + value + "|" + toStr(idx) + "\n"
+        return idx
+    }
+
+    /// 变量槽位分配，返回槽位编号。
+    fun allocVar(name: String): Int {
+        // 查找是否已分配
+        var pos: Int = 0
+        var lines: String = this.varTable
+        var len: Int = lines.length
+        var found: Int = -1
+        var lineStart: Int = 0
+        while (pos < len) {
+            val c: String = toStr(lines[pos])
+            if (c == "\n") {
+                var line: String = ""
+                var j: Int = lineStart
+                while (j < pos) {
+                    line = line + toStr(lines[j])
+                    j = j + 1
+                }
+                var foundSep: Boolean = false
+                var val: String = ""
+                var slot: String = ""
+                var k: Int = 0
+                while (k < line.length) {
+                    val ch: String = toStr(line[k])
+                    if (!foundSep && ch == "|") {
+                        foundSep = true
+                    } else if (!foundSep) {
+                        val = val + ch
+                    } else {
+                        slot = slot + ch
+                    }
+                    k = k + 1
+                }
+                if (foundSep && val == name) {
+                    found = this.mirToIntOf2(slot)
+                    break
+                }
+                lineStart = pos + 1
+            }
+            pos = pos + 1
+        }
+        if (found >= 0) {
+            return found
+        }
+
+        // 分配新槽位
+        val slot: Int = this.varTable.length
+        this.varTable = this.varTable + name + "|" + toStr(slot) + "\n"
+        return slot
+    }
+
+    /// 字符串转整数（本地版本，避免依赖 Mir.aura）。
+    fun mirToIntOf2(text: String): Int {
+        var total: Int = 0
+        var i: Int = 0
+        var len: Int = text.length
+        while (i < len) {
+            val c: String = toStr(text[i])
+            var digit: Int = -1
+            var j: Int = 0
+            while (j < 10) {
+                if (toStr(j) == c) {
+                    digit = j
+                    break
+                }
+                j = j + 1
+            }
+            if (digit >= 0) {
+                total = total * 10 + digit
+            }
+            i = i + 1
+        }
+        return total
+    }
+
+    /// 返回常量池字符串。
+    fun constPoolStr(): String {
+        return this.constPool
+    }
+
+    /// 返回函数表字符串。
+    fun funcTableStr(): String {
+        return this.funcTable
+    }
+
+    /// 返回变量表字符串。
+    fun varTableStr(): String {
+        return this.varTable
+    }
+
+    /// 返回指令计数。
+    fun instrCount2(): Int {
+        return this.instrCount
+    }
+}

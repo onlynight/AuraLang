@@ -1,0 +1,45 @@
+// aura:///aura/lang/collection/Collection.aura
+package aura.lang.collection
+// 集合包：集合基类接口
+//
+// Collection<T> 是 List<T>、Array<T>、Set<T> 的共同基类，
+// 定义了所有集合类型共享的通用操作接口。
+//
+// 编译器中的 `list[i]` 下标访问、`list.count` 等成员访问
+// 会降级为 `Collections.getAt(list, i)` / `Collections.count(list)` 等
+// 原生函数调用（见 compiler/src/codegen/hir.rs）。
+
+/// 集合基类接口 Collection<T>。
+///
+/// - 所有集合（List/Array/Set）的公共父接口
+/// - 提供按下标访问、计数、查找、空检查等通用操作
+/// - `list[i]` 语法糖等价于 `list.getAt(i)`
+/// - `list.count` 成员访问等价于 `list.count()`
+///
+/// @see List, Array, Set, Collections
+/// @since 0.5
+interface Collection<T> {
+    /// 元素数量（等价于 `count()`）
+    fun count(): Int
+
+    /// 按下标获取元素（`list[i]` 语法糖降级为此方法）
+    fun getAt(index: Int): T
+
+    /// 检查集合是否包含指定元素
+    fun contains(item: T): Boolean
+
+    /// 查找元素的索引（未找到返回 -1）
+    fun indexOf(item: T): Int
+
+    /// 检查集合是否为空
+    fun isEmpty(): Boolean
+
+    /// 获取第一个元素
+    fun first(): T
+
+    /// 获取最后一个元素
+    fun last(): T
+
+    /// 转换为字符串表示
+    fun toString(): String
+}

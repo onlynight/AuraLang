@@ -1,4 +1,5 @@
 // aura:///aura/lang/std/Random.aura
+package aura.lang.std
 // 标准库模块，不可修改
 // 实现：熵源（时钟/系统随机数）保留 native（Layer 0-A）；
 //       范围随机、选值、洗牌等全部以 Aura 编写（Layer 1）

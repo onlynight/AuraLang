@@ -1,4 +1,5 @@
 // aura:///aura/lang/prelu.aura
+package aura.lang
 // 免 import 的全局内置函数（21 个）
 //
 // 这些函数由编译器自动注册到符号表，无需 `import` 声明。

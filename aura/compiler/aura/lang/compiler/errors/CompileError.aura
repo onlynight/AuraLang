@@ -42,12 +42,37 @@ class CompileErrors {
     /// 错误数量。
     var count: Int = 0
 
+    init() {
+        this.severities = ""
+        this.messages = ""
+        this.spans = ""
+        this.count = 0
+    }
+
+    /// 获取错误数量。
+    fun errorCount(): Int {
+        return this.count
+    }
+
     /// 追加一个诊断，返回其索引。
     fun push(severity: String, message: String, sp: Span): Int {
         val idx: Int = this.count
         this.count = idx + 1
         this.severities = this.severities + severity + "\n"
-        this.messages = this.messages + message.replaceAll("\n", "\\n") + "\n"
+        // 手动转义换行符（replaceAll 在 VM 内类调用时未链接）
+        var escaped: String = ""
+        var i: Int = 0
+        var len: Int = message.length
+        while (i < len) {
+            val c: String = toStr(message[i])
+            if (c == "\n") {
+                escaped = escaped + "\\n"
+            } else {
+                escaped = escaped + c
+            }
+            i = i + 1
+        }
+        this.messages = this.messages + escaped + "\n"
         this.spans = this.spans + toStr(sp.start) + " " + toStr(sp.end) + " "
             + toStr(sp.startLine) + " " + toStr(sp.startCol) + " "
             + toStr(sp.endLine) + " " + toStr(sp.endCol) + "\n"
@@ -67,7 +92,20 @@ class CompileErrors {
     /// 第 index 个诊断的消息。
     fun messageAt(index: Int): String {
         val raw: String = this.line(this.messages, index)
-        return raw.replaceAll("\\n", "\n")
+        // 手动反转义换行符（replaceAll 在 VM 内类调用时未链接）
+        var result: String = ""
+        var i: Int = 0
+        var len: Int = raw.length
+        while (i < len) {
+            if (i + 1 < len && toStr(raw[i]) == "\\" && toStr(raw[i + 1]) == "n") {
+                result = result + "\n"
+                i = i + 2
+            } else {
+                result = result + toStr(raw[i])
+                i = i + 1
+            }
+        }
+        return result
     }
 
     /// 第 index 个诊断的位置。
@@ -106,9 +144,9 @@ class CompileErrors {
         return out
     }
 
-    /// 取第 index 行（内部辅助）。本编译器不支持 list[i]，用 fieldAt 字符扫描。
+    /// 取第 index 行（内部辅助）。本编译器不支持 list[i]，用 ceFieldAt 字符扫描。
     fun line(text: String, index: Int): String {
-        return fieldAt(text, index, "\n")
+        return ceFieldAt(text, index, "\n")
     }
 }
 
@@ -123,4 +161,39 @@ fun ceToIntOf(text: String): Int {
         i = i + 1
     }
     return total
+}
+
+/// 取第 index 个字段（以 sep 分隔，0-based）。本文件本地实现，避免跨文件依赖。
+fun ceFieldAt(text: String, index: Int, sep: String): String {
+    var i: Int = 0
+    var fieldStart: Int = 0
+    var cur: Int = 0
+    var fieldLen: Int = text.length
+    while (i < fieldLen) {
+        val c: String = toStr(text[i])
+        if (c == sep) {
+            if (cur == index) {
+                var result: String = ""
+                var j: Int = fieldStart
+                while (j < i) {
+                    result = result + toStr(text[j])
+                    j = j + 1
+                }
+                return result
+            }
+            cur = cur + 1
+            fieldStart = i + 1
+        }
+        i = i + 1
+    }
+    if (cur == index) {
+        var result: String = ""
+        var j: Int = fieldStart
+        while (j < fieldLen) {
+            result = result + toStr(text[j])
+            j = j + 1
+        }
+        return result
+    }
+    return ""
 }

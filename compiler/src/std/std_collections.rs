@@ -20,6 +20,16 @@ pub fn register_prelude(reg: &mut NativeRegistry) {
     // 否则降级结果会落入「未链接的外部函数」分支返回 0。
     reg.register("aura.lang.std.Collections.listSize", nat_list_size);
     reg.register("aura.lang.std.Collections.listGet", nat_list_get);
+    // Collection 通用操作（List/Array/Set 共享）
+    reg.register("aura.lang.std.Collections.getAt", nat_get_at);
+    reg.register("aura.lang.std.Collections.count", nat_count);
+    reg.register("aura.lang.std.Collections.isEmpty", nat_is_empty);
+    reg.register(
+        "aura.lang.std.Collections.contains",
+        nat_collection_contains,
+    );
+    reg.register("aura.lang.std.Collections.indexOf", nat_collection_index_of);
+    reg.register("aura.lang.std.Collections.set", nat_set);
 }
 
 pub fn register(reg: &mut NativeRegistry) {
@@ -45,6 +55,16 @@ pub fn register(reg: &mut NativeRegistry) {
     reg.register("aura.lang.std.Collections.listAppend", nat_list_append);
     reg.register("aura.lang.std.Collections.listSize", nat_list_size);
     reg.register("aura.lang.std.Collections.pairOf", nat_pair_of);
+    // Collection 通用操作（List/Array/Set 共享）
+    reg.register("aura.lang.std.Collections.getAt", nat_get_at);
+    reg.register("aura.lang.std.Collections.count", nat_count);
+    reg.register("aura.lang.std.Collections.isEmpty", nat_is_empty);
+    reg.register(
+        "aura.lang.std.Collections.contains",
+        nat_collection_contains,
+    );
+    reg.register("aura.lang.std.Collections.indexOf", nat_collection_index_of);
+    reg.register("aura.lang.std.Collections.set", nat_set);
     // 映射构造
     reg.register("aura.lang.std.Collections.mapOf", nat_map_of);
     reg.register("aura.lang.std.Collections.mutableMapOf", nat_mutable_map_of);
@@ -152,6 +172,72 @@ fn nat_list_size(args: &[Value]) -> Value {
     match &args[0] {
         Value::List(items) => Value::Int(items.len() as i64),
         _ => Value::Int(0),
+    }
+}
+
+// ── Collection 通用操作（List/Array/Set 共享） ──
+// Collection.getAt(collection, index) → Value：按下标获取元素（list[i] 降级为此）
+fn nat_get_at(args: &[Value]) -> Value {
+    let idx = args.get(1).map(|v| v.as_int() as usize).unwrap_or(0);
+    match &args[0] {
+        Value::List(items) => items.get(idx).cloned().unwrap_or(Value::Null),
+        _ => Value::Null,
+    }
+}
+
+// Collection.count(collection) → Int：元素数量（list.count 降级为此）
+fn nat_count(args: &[Value]) -> Value {
+    match &args[0] {
+        Value::List(items) => Value::Int(items.len() as i64),
+        _ => Value::Int(0),
+    }
+}
+
+// Collection.contains(collection, item) → Bool：检查是否包含指定元素
+fn nat_collection_contains(args: &[Value]) -> Value {
+    let item = args.get(1).cloned().unwrap_or(Value::Null);
+    match &args[0] {
+        Value::List(items) => Value::Bool(items.iter().any(|i| *i == item)),
+        _ => Value::Bool(false),
+    }
+}
+
+// Collection.indexOf(collection, item) → Int：查找元素索引（未找到返回 -1）
+fn nat_collection_index_of(args: &[Value]) -> Value {
+    let item = args.get(1).cloned().unwrap_or(Value::Null);
+    match &args[0] {
+        Value::List(items) => {
+            if let Some(i) = items.iter().position(|x| *x == item) {
+                Value::Int(i as i64)
+            } else {
+                Value::Int(-1)
+            }
+        }
+        _ => Value::Int(-1),
+    }
+}
+
+// Collection.isEmpty(collection) → Bool：检查集合是否为空
+fn nat_is_empty(args: &[Value]) -> Value {
+    match &args[0] {
+        Value::List(items) => Value::Bool(items.is_empty()),
+        _ => Value::Bool(true),
+    }
+}
+
+// Collection.set(collection, index, value) → Unit：按下标设置元素（array[i] = v 降级为此）
+fn nat_set(args: &[Value]) -> Value {
+    let idx = args.get(1).map(|v| v.as_int() as usize).unwrap_or(0);
+    let val = args.get(2).cloned().unwrap_or(Value::Null);
+    match &args[0] {
+        Value::List(items) => {
+            let mut new_items = items.clone();
+            if idx < new_items.len() {
+                new_items[idx] = val;
+            }
+            Value::List(new_items)
+        }
+        _ => Value::Null,
     }
 }
 

@@ -1,4 +1,5 @@
 // aura:///aura/lang/collection/Map.aura
+package aura.lang.collection
 // 集合包：键值映射接口
 
 /// 键值映射接口 Map<K, V>。

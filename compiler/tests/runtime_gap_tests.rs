@@ -213,6 +213,108 @@ fn test_list_index() {
     );
 }
 
+/// list.get(i) 与 list[i] 等价，返回相同的元素值
+#[test]
+fn test_list_get() {
+    expect_int(
+        "fun main(): Int { val xs = listOf(4, 5, 6); return xs.get(1) }",
+        5,
+    );
+}
+
+#[test]
+fn test_list_get_first_and_last() {
+    expect_int(
+        "fun main(): Int { val xs = listOf(4, 5, 6); return xs.get(0) }",
+        4,
+    );
+    expect_int(
+        "fun main(): Int { val xs = listOf(4, 5, 6); return xs.get(2) }",
+        6,
+    );
+}
+
+/// list.getAt(i) 与 list[i] 等价（Collection 通用接口）
+#[test]
+fn test_list_getat() {
+    expect_int(
+        "fun main(): Int { val xs = listOf(4, 5, 6); return xs.getAt(1) }",
+        5,
+    );
+}
+
+/// list.count 成员访问（Collection 通用接口）
+#[test]
+fn test_list_count() {
+    expect_int(
+        "fun main(): Int { val xs = listOf(4, 5, 6); return xs.count }",
+        3,
+    );
+}
+
+/// list.size 向后兼容（Collection 通用接口别名）
+#[test]
+fn test_list_size_still_works() {
+    expect_int(
+        "fun main(): Int { val xs = listOf(4, 5, 6); return xs.size }",
+        3,
+    );
+}
+
+/// list.isEmpty 成员访问（Collection 通用接口）
+#[test]
+fn test_list_is_empty_collection() {
+    expect_bool(
+        "fun main(): Boolean { val xs = listOf(1); return xs.isEmpty }",
+        false,
+    );
+}
+
+/// list.contains 方法（Collection 通用接口）
+#[test]
+fn test_list_contains_collection() {
+    expect_bool(
+        "fun main(): Boolean { val xs = listOf(1, 2, 3); return xs.contains(2) }",
+        true,
+    );
+}
+
+/// list.indexOf 方法（Collection 通用接口）
+#[test]
+fn test_list_index_of_collection() {
+    expect_int(
+        "fun main(): Int { val xs = listOf(1, 2, 3); return xs.indexOf(2) }",
+        1,
+    );
+}
+
+/// array[i] = v 下标赋值（等同于 array.set(i, v)）
+#[test]
+fn test_array_subscript_assign() {
+    expect_int(
+        "fun main(): Int { val arr = mutableListOf(10, 20, 30); arr[1] = 99; return arr[1] }",
+        99,
+    );
+}
+
+/// array.set(i, v) 方法赋值
+#[test]
+fn test_array_set_method() {
+    expect_int(
+        "fun main(): Int { val arr = mutableListOf(10, 20, 30); arr.set(1, 99); return arr[1] }",
+        99,
+    );
+}
+
+/// array[i] = v 和 array.set(i, v) 等价
+#[test]
+fn test_array_subscript_assign_equivalence() {
+    expect_int(
+        "fun main(): Int { val a = mutableListOf(1, 2, 3); a[0] = 10; val b = mutableListOf(1, 2, 3); b.set(0, 10); return a[0] + b[0] }",
+        20,
+    );
+}
+
 #[test]
 fn test_string_size_and_length() {
     expect_int(

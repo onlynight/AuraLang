@@ -46,7 +46,8 @@ fun kidsCount(list: String): Int {
     if (list == "") {
         return 0
     }
-    return list.countChar(",") + 1
+    val parts: List<String> = list.split(",")
+    return parts.size
 }
 
 /// 取子节点列表的第 index 个 id。
@@ -86,7 +87,20 @@ class Ast {
         val id: Int = this.count
         this.count = id + 1
         this.kinds = this.kinds + kind + "\n"
-        this.texts = this.texts + text.replaceAll("\n", "\\n") + "\n"
+        // 手动转义换行符（避免 replace 在 VM 内类调用时未链接）
+        var escaped: String = ""
+        var i: Int = 0
+        var len: Int = text.length
+        while (i < len) {
+            val c: String = toStr(text[i])
+            if (c == "\n") {
+                escaped = escaped + "\\n"
+            } else {
+                escaped = escaped + c
+            }
+            i = i + 1
+        }
+        this.texts = this.texts + escaped + "\n"
         this.tys = this.tys + ty + "\n"
         this.spans = this.spans + toStr(sp.start) + " " + toStr(sp.end) + " "
             + toStr(sp.startLine) + " " + toStr(sp.startCol) + " "
@@ -110,7 +124,20 @@ class Ast {
     /// 第 id 个节点的主文本。
     fun textOf(id: Int): String {
         val raw: String = this.lineAt(this.texts, id)
-        return raw.replaceAll("\\n", "\n")
+        // 手动反转义换行符（避免 replace 在 VM 内类调用时未链接）
+        var result: String = ""
+        var i: Int = 0
+        var len: Int = raw.length
+        while (i < len) {
+            if (i + 1 < len && toStr(raw[i]) == "\\" && toStr(raw[i + 1]) == "n") {
+                result = result + "\n"
+                i = i + 2
+            } else {
+                result = result + toStr(raw[i])
+                i = i + 1
+            }
+        }
+        return result
     }
 
     /// 第 id 个节点的类型名。
@@ -193,18 +220,22 @@ class Ast {
 }
 
 /// 取第 index 个以 sep 分隔的字段。
-/// 本编译器不支持 `list[i]` 列表下标，故用字符扫描实现（仅依赖 String 的
-/// charAt / substring / length / indexOf，均为已验证可用操作）。
 fun fieldAt(text: String, index: Int, sep: String): String {
     var i: Int = 0
     var fieldStart: Int = 0
     var cur: Int = 0
-    val n: Int = text.length()
-    while (i < n) {
-        val c: String = toStr(text[i])
+    var fieldLen: Int = text.length
+    while (i < fieldLen) {
+        val c: String = text[i]
         if (c == sep) {
             if (cur == index) {
-                return text.substring(fieldStart, i)
+                var result: String = ""
+                var j: Int = fieldStart
+                while (j < i) {
+                    result = result + text[j]
+                    j = j + 1
+                }
+                return result
             }
             cur = cur + 1
             fieldStart = i + 1
@@ -212,20 +243,72 @@ fun fieldAt(text: String, index: Int, sep: String): String {
         i = i + 1
     }
     if (cur == index) {
-        return text.substring(fieldStart, n)
+        var result: String = ""
+        var j: Int = fieldStart
+        while (j < fieldLen) {
+            result = result + text[j]
+            j = j + 1
+        }
+        return result
     }
     return ""
 }
 
 /// 十进制字符串 → Int（局部实现，避免与 Lexer 内部辅助耦合）。
 fun toIntOf(text: String): Int {
-    val digits: String = "0123456789"
-    val len: Int = text.length()
+    if (text == "") {
+        return 0
+    }
+    val len: Int = text.length
     var total: Int = 0
     var i: Int = 0
+    var neg: Boolean = false
+    // 处理负号
+    if (len > 0 && toStr(text[0]) == "-") {
+        neg = true
+        i = 1
+    }
     while (i < len) {
-        total = total * 10 + digits.indexOf(toStr(text[i]))
+        val c: String = toStr(text[i])
+        // 手动计算数字值（避免 indexOf 在 VM 内类调用时未链接）
+        var digit: Int = -1
+        if (c == "0") {
+            digit = 0
+        }
+        if (c == "1") {
+            digit = 1
+        }
+        if (c == "2") {
+            digit = 2
+        }
+        if (c == "3") {
+            digit = 3
+        }
+        if (c == "4") {
+            digit = 4
+        }
+        if (c == "5") {
+            digit = 5
+        }
+        if (c == "6") {
+            digit = 6
+        }
+        if (c == "7") {
+            digit = 7
+        }
+        if (c == "8") {
+            digit = 8
+        }
+        if (c == "9") {
+            digit = 9
+        }
+        if (digit >= 0) {
+            total = total * 10 + digit
+        }
         i = i + 1
+    }
+    if (neg) {
+        return -total
     }
     return total
 }

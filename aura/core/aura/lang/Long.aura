@@ -1,4 +1,5 @@
 // aura:///aura/lang/Long.aura
+package aura.lang
 // 语言内置类型，不可修改
 
 /// 64 位有符号长整数类型。

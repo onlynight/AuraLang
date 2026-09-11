@@ -1,0 +1,996 @@
+// aura:///aura/lang/compiler/hir/Hir.aura
+package aura.lang.compiler.hir
+// ─────────────────────────────────────────────────────────────
+// HIR（高级中间表示）— 纯 Aura 化迁移 · Phase 2 (任务 2.5)
+//
+// 对应 Rust `compiler/src/codegen/hir.rs`（211 KB / 5777 行）。
+//
+// ── 设计方式（与 Ast.aura 一致）──────────────────────────────
+//
+// HIR 是去除了语法糖的 AST。本版聚焦核心降级：
+//   * 字面量 / 标识符 / 字面量 → HirLit / HirVar
+//   * 一元 / 二元运算 → HirUnary / HirBinary
+//   * 函数调用 → HirCall
+//   * 成员访问 / 下标 → HirMember / HirIndex
+//   * val / var 声明 → HirValDecl / HirVarDecl
+//   * if / while / for 语句 → HirIf / HirWhile / HirFor
+//   * return / break / continue / assign / exprStmt → 对应语句节点
+//   * 块 → HirBlock
+//
+// ── 扁平 arena 表示（与 Ast 一致）───────────────────────────
+//
+//   * 每个 HIR 节点一个整数 id；
+//   * 节点字段分别存在 5 条「每行一项」的 String 中
+//     （kinds / texts / tys / spans / kids）；
+//   * 子节点以逗号分隔的 id 列表存在 `kids` 中。
+//
+// ── 当前覆盖范围（Phase 2 起步，可逐步扩展）──────────────
+//
+// 暂不覆盖的降级（后续扩展）：
+//   - `when` → 嵌套 `if`（本版保留 When 节点）
+//   - `for` → `while` + 索引变量（本版保留 For 节点）
+//   - 字符串插值降级
+//   - 安全调用降级
+//   - Elvis 降级
+//   - 闭包 / lambda 降级
+//   - 类方法分派（sema 类型信息依赖）
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+
+/// HIR 节点表示（扁平 arena，与 Ast.aura 结构一致）。
+class Hir {
+
+    /// 节点种类（每行一个）。
+    var kinds: String = ""
+
+    /// 节点主文本：标识符名 / 字面量文本 / 运算符（每行一个，换行已转义）。
+    var texts: String = ""
+
+    /// 节点类型名（每行一个；无类型信息时为空）。
+    var tys: String = ""
+
+    /// Span（每行一个：`start end sl sc el ec`，空格分隔）。
+    var spans: String = ""
+
+    /// 子节点 id 列表（每行一个：逗号分隔，可为空行）。
+    var kids: String = ""
+
+    /// 节点总数。
+    var count: Int = 0
+
+    /// 根节点 id（由 lower 方法设置）。
+    var rootId: Int = 0
+
+    // ── 构造 ──
+
+    /// 追加一个节点，返回其 id。
+    fun add(kind: String, text: String, ty: String, sp: Span, children: String): Int {
+        val id: Int = this.count
+        this.count = id + 1
+        this.kinds = this.kinds + kind + "\n"
+        // 手动转义换行符（避免 replace 在 VM 内类调用时未链接）
+        var escaped: String = ""
+        var i: Int = 0
+        var len: Int = text.length
+        while (i < len) {
+            val c: String = toStr(text[i])
+            if (c == "\n") {
+                escaped = escaped + "\\n"
+            } else {
+                escaped = escaped + c
+            }
+            i = i + 1
+        }
+        this.texts = this.texts + escaped + "\n"
+        this.tys = this.tys + ty + "\n"
+        this.spans = this.spans + toStr(sp.start) + " " + toStr(sp.end) + " "
+            + toStr(sp.startLine) + " " + toStr(sp.startCol) + " "
+            + toStr(sp.endLine) + " " + toStr(sp.endCol) + "\n"
+        this.kids = this.kids + children + "\n"
+        return id
+    }
+
+    /// 追加一个无类型、无子节点的叶子节点。
+    fun leaf(kind: String, text: String, sp: Span): Int {
+        return this.add(kind, text, "", sp, hirNoKids())
+    }
+
+    // ── 访问 ──
+
+    /// 第 id 个节点的种类。
+    fun kindOf(id: Int): String {
+        return this.lineAt(this.kinds, id)
+    }
+
+    /// 第 id 个节点的主文本。
+    fun textOf(id: Int): String {
+        val raw: String = this.lineAt(this.texts, id)
+        // 手动反转义换行符（避免 replace 在 VM 内类调用时未链接）
+        var result: String = ""
+        var i: Int = 0
+        var len: Int = raw.length
+        while (i < len) {
+            if (i + 1 < len && toStr(raw[i]) == "\\" && toStr(raw[i + 1]) == "n") {
+                result = result + "\n"
+                i = i + 2
+            } else {
+                result = result + toStr(raw[i])
+                i = i + 1
+            }
+        }
+        return result
+    }
+
+    /// 第 id 个节点的类型名。
+    fun tyOf(id: Int): String {
+        return this.lineAt(this.tys, id)
+    }
+
+    /// 第 id 个节点的位置。
+    fun spanOf(id: Int): Span {
+        val line: String = fieldAt(this.spans, id, "\n")
+        return Span(
+            toIntOf(fieldAt(line, 0, " ")), toIntOf(fieldAt(line, 1, " ")),
+            toIntOf(fieldAt(line, 2, " ")), toIntOf(fieldAt(line, 3, " ")),
+            toIntOf(fieldAt(line, 4, " ")), toIntOf(fieldAt(line, 5, " "))
+        )
+    }
+
+    /// 第 id 个节点的子节点 id 列表（逗号分隔串）。
+    fun kidsOf(id: Int): String {
+        return this.lineAt(this.kids, id)
+    }
+
+    /// 第 id 个节点的第 i 个子节点 id（越界返回 -1）。
+    fun childOf(id: Int, i: Int): Int {
+        val k: String = this.kidsOf(id)
+        if (i >= hirKidsCount(k)) {
+            return -1
+        }
+        return hirKidsAt(k, i)
+    }
+
+    // ── 输出 ──
+
+    /// 从根节点开始的缩进文本转储。
+    fun dump(): String {
+        if (this.count == 0) {
+            return "<empty hir>\n"
+        }
+        return this.dumpNode(this.rootId, 0)
+    }
+
+    /// 递归转储单个节点。
+    fun dumpNode(id: Int, depth: Int): String {
+        var line: String = this.indent(depth) + this.kindOf(id)
+        val t: String = this.textOf(id)
+        if (t != "") {
+            line = line + " " + t
+        }
+        val ty: String = this.tyOf(id)
+        if (ty != "") {
+            line = line + " : " + ty
+        }
+        var out: String = line + "\n"
+
+        val k: String = this.kidsOf(id)
+        val n: Int = hirKidsCount(k)
+        var i: Int = 0
+        while (i < n) {
+            out = out + this.dumpNode(hirKidsAt(k, i), depth + 1)
+            i = i + 1
+        }
+        return out
+    }
+
+    /// 生成 depth 级缩进（每级 2 空格）。
+    fun indent(depth: Int): String {
+        var s: String = ""
+        var i: Int = 0
+        while (i < depth) {
+            s = s + "  "
+            i = i + 1
+        }
+        return s
+    }
+
+    /// 取第 index 行（内部辅助）。
+    fun lineAt(text: String, index: Int): String {
+        return hirFieldAt(text, index, "\n")
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// AST → HIR 降级器
+// ─────────────────────────────────────────────────────────────
+
+/// AST → HIR 降级器。
+class HirLowerer {
+
+    /// 输入的 AST。
+    var ast: Ast = Ast()
+
+    /// 输出的 HIR。
+    var hir: Hir = Hir()
+
+    init() {
+        this.ast = Ast()
+        this.hir = Hir()
+    }
+
+    /// 执行降级，返回 HIR 根节点 id。
+    fun lower(program: Ast): Int {
+        this.ast = program
+        this.hir = Hir()
+        // 查找 Program 根节点（可能不在 index 0）
+        val n: Int = program.count
+        var rootIdx: Int = -1
+        var i: Int = 0
+        while (i < n) {
+            if (program.kindOf(i) == "Program") {
+                rootIdx = i
+                break
+            }
+            i = i + 1
+        }
+        if (rootIdx < 0) {
+            rootIdx = 0
+        }
+        // 根节点是 Program，其子节点是顶层声明
+        val rootKids: String = program.kidsOf(rootIdx)
+        val kCount: Int = hirKidsCount(rootKids)
+        var hirKids: String = hirNoKids()
+        i = 0
+        while (i < kCount) {
+            val childId: Int = hirKidsAt(rootKids, i)
+            val childHirId: Int = this.lowerDecl(program, childId)
+            if (childHirId >= 0) {
+                hirKids = hirKidsAdd(hirKids, childHirId)
+            }
+            i = i + 1
+        }
+        val rootHirId: Int = this.hir.add("HirProgram", "", "", program.spanOf(rootIdx), hirKids)
+        this.hir.rootId = rootHirId
+        return rootHirId
+    }
+
+    // ── 声明降级 ──
+
+    /// 降级一个顶层节点。
+    fun lowerDecl(ast: Ast, id: Int): Int {
+        val kind: String = ast.kindOf(id)
+        val text: String = ast.textOf(id)
+        val ty: String = ast.tyOf(id)
+        val sp: Span = ast.spanOf(id)
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+
+        if (kind == "Function") {
+            return this.lowerFunction(ast, id)
+        } else if (kind == "ValDecl") {
+            return this.lowerValDecl(ast, id)
+        } else if (kind == "VarDecl") {
+            return this.lowerVarDecl(ast, id)
+        } else if (kind == "Struct" || kind == "Class" || kind == "Object" || kind == "Enum") {
+            return this.lowerTypeDecl(ast, id)
+        } else if (kind == "Typealias") {
+            // Typealias 在 HIR 中保留为注释性节点
+            return this.hir.leaf("HirTypealias", text, sp)
+        } else {
+            // 其他顶层节点：如果是表达式，降级为 HirExpr
+            // 如果是 Import 等，跳过
+            if (kind == "Import") {
+                return -1
+            }
+            return this.lowerExpr(ast, id)
+        }
+    }
+
+    /// 降级函数声明。
+    fun lowerFunction(ast: Ast, id: Int): Int {
+        val name: String = ast.textOf(id)
+        val retTy: String = ast.tyOf(id)
+        val sp: Span = ast.spanOf(id)
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+
+        var paramsStr: String = ""
+        var bodyId: Int = -1
+
+        // 子节点 0: Params 节点
+        if (kCount > 0) {
+            val paramsNodeId: Int = hirKidsAt(kids, 0)
+            val paramsKids: String = ast.kidsOf(paramsNodeId)
+            val pkCount: Int = hirKidsCount(paramsKids)
+            var pi: Int = 0
+            while (pi < pkCount) {
+                val pId: Int = hirKidsAt(paramsKids, pi)
+                val pName: String = ast.textOf(pId)
+                val pTy: String = ast.tyOf(pId)
+                val pSp: Span = ast.spanOf(pId)
+                val paramId: Int = this.hir.add("HirParam", pName, pTy, pSp, hirNoKids())
+                paramsStr = hirKidsAdd(paramsStr, paramId)
+                pi = pi + 1
+            }
+        }
+
+        // 子节点 1: 函数体（Block 或单个表达式）
+        if (kCount > 1) {
+            val bodyAstId: Int = hirKidsAt(kids, 1)
+            bodyId = this.lowerBlockOrExpr(ast, bodyAstId)
+        }
+
+        // 构造 HirFunction 节点
+        var hirKids: String = paramsStr
+        if (bodyId >= 0) {
+            hirKids = hirKidsAdd(hirKids, bodyId)
+        }
+        return this.hir.add("HirFunction", name, retTy, sp, hirKids)
+    }
+
+    /// 降级 val 声明。
+    fun lowerValDecl(ast: Ast, id: Int): Int {
+        val name: String = ast.textOf(id)
+        val ty: String = ast.tyOf(id)
+        val sp: Span = ast.spanOf(id)
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+
+        var hirKids: String = hirNoKids()
+        if (kCount > 0) {
+            val initId: Int = hirKidsAt(kids, 0)
+            val initHirId: Int = this.lowerExpr(ast, initId)
+            hirKids = hirKidsAdd(hirKids, initHirId)
+        }
+        return this.hir.add("HirValDecl", name, ty, sp, hirKids)
+    }
+
+    /// 降级 var 声明。
+    fun lowerVarDecl(ast: Ast, id: Int): Int {
+        val name: String = ast.textOf(id)
+        val ty: String = ast.tyOf(id)
+        val sp: Span = ast.spanOf(id)
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+
+        var hirKids: String = hirNoKids()
+        if (kCount > 0) {
+            val initId: Int = hirKidsAt(kids, 0)
+            val initHirId: Int = this.lowerExpr(ast, initId)
+            hirKids = hirKidsAdd(hirKids, initHirId)
+        }
+        return this.hir.add("HirVarDecl", name, ty, sp, hirKids)
+    }
+
+    /// 降级类型声明（struct/class/object/enum）。
+    fun lowerTypeDecl(ast: Ast, id: Int): Int {
+        val kind: String = ast.kindOf(id)
+        val name: String = ast.textOf(id)
+        val sp: Span = ast.spanOf(id)
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+
+        var hirKids: String = hirNoKids()
+        if (kCount > 0) {
+            // 类型体的 Block
+            val bodyId: Int = hirKidsAt(kids, 0)
+            val bodyHirId: Int = this.lowerBlockOrExpr(ast, bodyId)
+            if (bodyHirId >= 0) {
+                hirKids = hirKidsAdd(hirKids, bodyHirId)
+            }
+        }
+
+        val hirKind: String = if (kind == "Struct") { "HirStruct" }
+            else if (kind == "Class") { "HirClass" }
+            else if (kind == "Object") { "HirObject" }
+            else { "HirEnum" }
+        return this.hir.add(hirKind, name, "", sp, hirKids)
+    }
+
+    // ── 块/表达式降级 ──
+
+    /// 降级块或表达式（用于函数体等）。
+    fun lowerBlockOrExpr(ast: Ast, id: Int): Int {
+        val kind: String = ast.kindOf(id)
+        if (kind == "Block") {
+            return this.lowerBlock(ast, id)
+        } else {
+            return this.lowerExpr(ast, id)
+        }
+    }
+
+    /// 降级语句块。
+    fun lowerBlock(ast: Ast, id: Int): Int {
+        val sp: Span = ast.spanOf(id)
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+
+        var hirKids: String = hirNoKids()
+        var i: Int = 0
+        while (i < kCount) {
+            val childId: Int = hirKidsAt(kids, i)
+            val childHirId: Int = this.lowerStmt(ast, childId)
+            if (childHirId >= 0) {
+                hirKids = hirKidsAdd(hirKids, childHirId)
+            }
+            i = i + 1
+        }
+        return this.hir.add("HirBlock", "", "", sp, hirKids)
+    }
+
+    // ── 语句降级 ──
+
+    /// 降级语句。
+    fun lowerStmt(ast: Ast, id: Int): Int {
+        val kind: String = ast.kindOf(id)
+        if (kind == "ValDecl") {
+            return this.lowerValDecl(ast, id)
+        } else if (kind == "VarDecl") {
+            return this.lowerVarDecl(ast, id)
+        } else if (kind == "Return") {
+            return this.lowerReturn(ast, id)
+        } else if (kind == "If") {
+            return this.lowerIfStmt(ast, id)
+        } else if (kind == "While") {
+            return this.lowerWhile(ast, id)
+        } else if (kind == "For") {
+            return this.lowerFor(ast, id)
+        } else if (kind == "Block") {
+            return this.lowerBlock(ast, id)
+        } else if (kind == "Assign") {
+            return this.lowerAssign(ast, id)
+        } else if (kind == "Break") {
+            return this.hir.leaf("HirBreak", "", ast.spanOf(id))
+        } else if (kind == "Continue") {
+            return this.hir.leaf("HirContinue", "", ast.spanOf(id))
+        } else if (kind == "ExprStmt") {
+            return this.lowerExprStmt(ast, id)
+        } else {
+            // 其他语句类型（如 Try）暂不处理
+            return -1
+        }
+    }
+
+    /// 降级 return 语句。
+    fun lowerReturn(ast: Ast, id: Int): Int {
+        val sp: Span = ast.spanOf(id)
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+
+        var hirKids: String = hirNoKids()
+        if (kCount > 0) {
+            val valId: Int = hirKidsAt(kids, 0)
+            val valHirId: Int = this.lowerExpr(ast, valId)
+            hirKids = hirKidsAdd(hirKids, valHirId)
+        }
+        return this.hir.add("HirReturn", "", "", sp, hirKids)
+    }
+
+    /// 降级 if 语句。
+    fun lowerIfStmt(ast: Ast, id: Int): Int {
+        val sp: Span = ast.spanOf(id)
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+
+        var hirKids: String = hirNoKids()
+        var i: Int = 0
+        while (i < kCount) {
+            val childId: Int = hirKidsAt(kids, i)
+            val childKind: String = ast.kindOf(childId)
+            if (childKind == "Expr" || childKind == "Block" || childKind == "If") {
+                val childHirId: Int = this.lowerBlockOrExpr(ast, childId)
+                if (childHirId >= 0) {
+                    hirKids = hirKidsAdd(hirKids, childHirId)
+                }
+            }
+            i = i + 1
+        }
+        return this.hir.add("HirIf", "", "", sp, hirKids)
+    }
+
+    /// 降级 while 循环。
+    fun lowerWhile(ast: Ast, id: Int): Int {
+        val sp: Span = ast.spanOf(id)
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+
+        var hirKids: String = hirNoKids()
+        var i: Int = 0
+        while (i < kCount) {
+            val childId: Int = hirKidsAt(kids, i)
+            val childHirId: Int = this.lowerBlockOrExpr(ast, childId)
+            if (childHirId >= 0) {
+                hirKids = hirKidsAdd(hirKids, childHirId)
+            }
+            i = i + 1
+        }
+        return this.hir.add("HirWhile", "", "", sp, hirKids)
+    }
+
+    /// 降级 for 循环。
+    fun lowerFor(ast: Ast, id: Int): Int {
+        val sp: Span = ast.spanOf(id)
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+
+        var hirKids: String = hirNoKids()
+        var i: Int = 0
+        while (i < kCount) {
+            val childId: Int = hirKidsAt(kids, i)
+            val childKind: String = ast.kindOf(childId)
+            if (childKind == "ValDecl" || childKind == "VarDecl") {
+                val childHirId: Int = this.lowerStmt(ast, childId)
+                if (childHirId >= 0) {
+                    hirKids = hirKidsAdd(hirKids, childHirId)
+                }
+            } else {
+                val childHirId: Int = this.lowerBlockOrExpr(ast, childId)
+                if (childHirId >= 0) {
+                    hirKids = hirKidsAdd(hirKids, childHirId)
+                }
+            }
+            i = i + 1
+        }
+        return this.hir.add("HirFor", "", "", sp, hirKids)
+    }
+
+    /// 降级赋值语句。
+    /// array[i] = v → array = Collections.set(array, i, v)
+    /// （Value::List 不可变，set 返回新列表，需回赋到目标变量）
+    fun lowerAssign(ast: Ast, id: Int): Int {
+        val sp: Span = ast.spanOf(id)
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+
+        if (kCount >= 2) {
+            val targetId: Int = hirKidsAt(kids, 0)
+            val valueId: Int = hirKidsAt(kids, 1)
+            val targetKind: String = ast.kindOf(targetId)
+
+            // 下标赋值：array[i] = v → array = Collections.set(array, i, v)
+            if (targetKind == "Index") {
+                val idxKids: String = ast.kidsOf(targetId)
+                val idxKCount: Int = hirKidsCount(idxKids)
+                if (idxKCount >= 2) {
+                    val containerId: Int = hirKidsAt(idxKids, 0)
+                    val indexId: Int = hirKidsAt(idxKids, 1)
+                    val containerKind: String = ast.kindOf(containerId)
+
+                    var hirKids: String = hirNoKids()
+
+                    // set(array, i, v) 调用
+                    var callKids: String = hirNoKids()
+                    val containerHirId: Int = this.lowerExpr(ast, containerId)
+                    val indexHirId: Int = this.lowerExpr(ast, indexId)
+                    val valueHirId: Int = this.lowerExpr(ast, valueId)
+                    if (containerHirId >= 0) {
+                        callKids = hirKidsAdd(callKids, containerHirId)
+                    }
+                    if (indexHirId >= 0) {
+                        callKids = hirKidsAdd(callKids, indexHirId)
+                    }
+                    if (valueHirId >= 0) {
+                        callKids = hirKidsAdd(callKids, valueHirId)
+                    }
+                    val setCallId: Int = this.hir.add("HirCall", "Collections.set", "", sp, callKids)
+
+                    // 如果目标是变量，回赋到该变量
+                    if (containerKind == "Ident") {
+                        // 生成 assign: container = setCall
+                        val containerHir: Int = this.lowerExpr(ast, containerId)
+                        if (containerHir >= 0 && setCallId >= 0) {
+                            val assignKids: String = hirKidsAdd(hirNoKids(), containerHir)
+                            val assignKids2: String = hirKidsAdd(assignKids, setCallId)
+                            return this.hir.add("HirAssign", "", "", sp, assignKids2)
+                        }
+                    }
+
+                    // 非变量目标：仅生成 set 调用
+                    return setCallId
+                }
+            }
+
+            // 普通赋值：target = value
+            var hirKids: String = hirNoKids()
+            var i: Int = 0
+            while (i < kCount) {
+                val childId: Int = hirKidsAt(kids, i)
+                val childHirId: Int = this.lowerExpr(ast, childId)
+                if (childHirId >= 0) {
+                    hirKids = hirKidsAdd(hirKids, childHirId)
+                }
+                i = i + 1
+            }
+            return this.hir.add("HirAssign", "", "", sp, hirKids)
+        }
+        return -1
+    }
+
+    /// 降级表达式语句。
+    fun lowerExprStmt(ast: Ast, id: Int): Int {
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+        if (kCount > 0) {
+            val exprId: Int = hirKidsAt(kids, 0)
+            return this.lowerExpr(ast, exprId)
+        }
+        return -1
+    }
+
+    // ── 表达式降级 ──
+
+    /// 降级表达式。
+    fun lowerExpr(ast: Ast, id: Int): Int {
+        val kind: String = ast.kindOf(id)
+        val text: String = ast.textOf(id)
+        val sp: Span = ast.spanOf(id)
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+
+        // 字面量
+        if (kind == "IntLiteral") {
+            return this.hir.leaf("HirLit", text, sp)
+        } else if (kind == "FloatLiteral" || kind == "DoubleLiteral") {
+            return this.hir.leaf("HirLit", text, sp)
+        } else if (kind == "StringLiteral") {
+            return this.hir.leaf("HirLit", text, sp)
+        } else if (kind == "BoolLiteral") {
+            return this.hir.leaf("HirLit", text, sp)
+        } else if (kind == "CharLiteral") {
+            return this.hir.leaf("HirLit", text, sp)
+        } else if (kind == "NullLiteral") {
+            return this.hir.leaf("HirLit", "null", sp)
+        }
+
+        // 标识符
+        if (kind == "Ident") {
+            return this.hir.leaf("HirVar", text, sp)
+        } else if (kind == "This") {
+            return this.hir.leaf("HirVar", "this", sp)
+        } else if (kind == "Super") {
+            return this.hir.leaf("HirVar", "super", sp)
+        }
+
+        // 二元运算
+        if (kind == "Binary") {
+            return this.lowerBinary(ast, id)
+        }
+
+        // 一元运算
+        if (kind == "Unary") {
+            return this.lowerUnary(ast, id)
+        }
+
+        // 函数调用
+        if (kind == "Call") {
+            return this.lowerCall(ast, id)
+        }
+
+        // 成员访问
+        if (kind == "Member") {
+            return this.lowerMember(ast, id)
+        }
+
+        // 下标访问
+        if (kind == "Index") {
+            return this.lowerIndex(ast, id)
+        }
+
+        // if 表达式
+        if (kind == "If") {
+            return this.lowerIfExpr(ast, id)
+        }
+
+        // 块表达式
+        if (kind == "Block") {
+            return this.lowerBlock(ast, id)
+        }
+
+        // when 表达式（本版保留 When 节点）
+        if (kind == "When") {
+            return this.hir.leaf("HirWhen", "", sp)
+        }
+
+        // 其他类型
+        return this.hir.leaf("HirExpr", kind + ": " + text, sp)
+    }
+
+    /// 降级二元运算表达式。
+    fun lowerBinary(ast: Ast, id: Int): Int {
+        val op: String = ast.textOf(id)
+        val sp: Span = ast.spanOf(id)
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+
+        var hirKids: String = hirNoKids()
+        var i: Int = 0
+        while (i < kCount) {
+            val childId: Int = hirKidsAt(kids, i)
+            val childHirId: Int = this.lowerExpr(ast, childId)
+            if (childHirId >= 0) {
+                hirKids = hirKidsAdd(hirKids, childHirId)
+            }
+            i = i + 1
+        }
+        return this.hir.add("HirBinary", op, "", sp, hirKids)
+    }
+
+    /// 降级一元运算表达式。
+    fun lowerUnary(ast: Ast, id: Int): Int {
+        val op: String = ast.textOf(id)
+        val sp: Span = ast.spanOf(id)
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+
+        var hirKids: String = hirNoKids()
+        var i: Int = 0
+        while (i < kCount) {
+            val childId: Int = hirKidsAt(kids, i)
+            val childHirId: Int = this.lowerExpr(ast, childId)
+            if (childHirId >= 0) {
+                hirKids = hirKidsAdd(hirKids, childHirId)
+            }
+            i = i + 1
+        }
+        return this.hir.add("HirUnary", op, "", sp, hirKids)
+    }
+
+    /// 降级函数调用表达式。
+    fun lowerCall(ast: Ast, id: Int): Int {
+        val sp: Span = ast.spanOf(id)
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+
+        // List/Array/Set.get(i) / getAt(i) → Collections.getAt(collection, i)
+        if (kCount >= 2) {
+            val calleeId: Int = hirKidsAt(kids, 0)
+            if (ast.kindOf(calleeId) == "Member") {
+                val memberName: String = ast.textOf(calleeId)
+                if (memberName == "get" || memberName == "getAt") {
+                    val calleeKids: String = ast.kidsOf(calleeId)
+                    val calleeKCount: Int = hirKidsCount(calleeKids)
+                    if (calleeKCount >= 1) {
+                        var hirKids: String = hirNoKids()
+                        var i: Int = 0
+                        while (i < kCount) {
+                            val childId: Int = hirKidsAt(kids, i)
+                            val childHirId: Int = this.lowerExpr(ast, childId)
+                            if (childHirId >= 0) {
+                                hirKids = hirKidsAdd(hirKids, childHirId)
+                            }
+                            i = i + 1
+                        }
+                        return this.hir.add("HirCall", "Collections.getAt", "", sp, hirKids)
+                    }
+                }
+                // set(i, v) → Collections.set(collection, i, v)
+                if (memberName == "set") {
+                    val calleeKids: String = ast.kidsOf(calleeId)
+                    val calleeKCount: Int = hirKidsCount(calleeKids)
+                    if (calleeKCount >= 1) {
+                        val objId: Int = hirKidsAt(calleeKids, 0)
+                        var hirKids: String = hirNoKids()
+                        var i: Int = 0
+                        while (i < kCount) {
+                            val childId: Int = hirKidsAt(kids, i)
+                            val childHirId: Int = this.lowerExpr(ast, childId)
+                            if (childHirId >= 0) {
+                                hirKids = hirKidsAdd(hirKids, childHirId)
+                            }
+                            i = i + 1
+                        }
+                        return this.hir.add("HirCall", "Collections.set", "", sp, hirKids)
+                    }
+                }
+                // contains(item) → Collections.contains(collection, item)
+                if (memberName == "contains") {
+                    val calleeKids: String = ast.kidsOf(calleeId)
+                    val calleeKCount: Int = hirKidsCount(calleeKids)
+                    if (calleeKCount >= 1) {
+                        var hirKids: String = hirNoKids()
+                        var i: Int = 0
+                        while (i < kCount) {
+                            val childId: Int = hirKidsAt(kids, i)
+                            val childHirId: Int = this.lowerExpr(ast, childId)
+                            if (childHirId >= 0) {
+                                hirKids = hirKidsAdd(hirKids, childHirId)
+                            }
+                            i = i + 1
+                        }
+                        return this.hir.add("HirCall", "Collections.contains", "", sp, hirKids)
+                    }
+                }
+                // indexOf(item) → Collections.indexOf(collection, item)
+                if (memberName == "indexOf") {
+                    val calleeKids: String = ast.kidsOf(calleeId)
+                    val calleeKCount: Int = hirKidsCount(calleeKids)
+                    if (calleeKCount >= 1) {
+                        var hirKids: String = hirNoKids()
+                        var i: Int = 0
+                        while (i < kCount) {
+                            val childId: Int = hirKidsAt(kids, i)
+                            val childHirId: Int = this.lowerExpr(ast, childId)
+                            if (childHirId >= 0) {
+                                hirKids = hirKidsAdd(hirKids, childHirId)
+                            }
+                            i = i + 1
+                        }
+                        return this.hir.add("HirCall", "Collections.indexOf", "", sp, hirKids)
+                    }
+                }
+            }
+        }
+
+        var hirKids: String = hirNoKids()
+        var i: Int = 0
+        while (i < kCount) {
+            val childId: Int = hirKidsAt(kids, i)
+            val childHirId: Int = this.lowerExpr(ast, childId)
+            if (childHirId >= 0) {
+                hirKids = hirKidsAdd(hirKids, childHirId)
+            }
+            i = i + 1
+        }
+        return this.hir.add("HirCall", "", "", sp, hirKids)
+    }
+
+    /// 降级成员访问表达式。
+    fun lowerMember(ast: Ast, id: Int): Int {
+        val memberName: String = ast.textOf(id)
+        val sp: Span = ast.spanOf(id)
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+
+        var hirKids: String = hirNoKids()
+        var i: Int = 0
+        while (i < kCount) {
+            val childId: Int = hirKidsAt(kids, i)
+            val childHirId: Int = this.lowerExpr(ast, childId)
+            if (childHirId >= 0) {
+                hirKids = hirKidsAdd(hirKids, childHirId)
+            }
+            i = i + 1
+        }
+        return this.hir.add("HirMember", memberName, "", sp, hirKids)
+    }
+
+    /// 降级下标访问表达式。
+    fun lowerIndex(ast: Ast, id: Int): Int {
+        val sp: Span = ast.spanOf(id)
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+
+        var hirKids: String = hirNoKids()
+        var i: Int = 0
+        while (i < kCount) {
+            val childId: Int = hirKidsAt(kids, i)
+            val childHirId: Int = this.lowerExpr(ast, childId)
+            if (childHirId >= 0) {
+                hirKids = hirKidsAdd(hirKids, childHirId)
+            }
+            i = i + 1
+        }
+        return this.hir.add("HirIndex", "", "", sp, hirKids)
+    }
+
+    /// 降级 if 表达式。
+    fun lowerIfExpr(ast: Ast, id: Int): Int {
+        val sp: Span = ast.spanOf(id)
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+
+        var hirKids: String = hirNoKids()
+        var i: Int = 0
+        while (i < kCount) {
+            val childId: Int = hirKidsAt(kids, i)
+            val childHirId: Int = this.lowerBlockOrExpr(ast, childId)
+            if (childHirId >= 0) {
+                hirKids = hirKidsAdd(hirKids, childHirId)
+            }
+            i = i + 1
+        }
+        return this.hir.add("HirIfExpr", "", "", sp, hirKids)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// 辅助函数（Hir 专用，避免与 Ast.aura 的导入冲突）
+// ─────────────────────────────────────────────────────────────
+
+/// 空的子节点列表。
+fun hirNoKids(): String {
+    return ""
+}
+
+/// 向子节点列表追加一个 id。
+fun hirKidsAdd(list: String, child: Int): String {
+    if (list == "") {
+        return toStr(child)
+    }
+    return list + "," + toStr(child)
+}
+
+/// 子节点列表的长度。
+fun hirKidsCount(list: String): Int {
+    if (list == "") {
+        return 0
+    }
+    val parts: List<String> = list.split(",")
+    return parts.size
+}
+
+/// 取子节点列表的第 index 个 id。
+fun hirKidsAt(list: String, index: Int): Int {
+    return hirToIntOf(hirFieldAt(list, index, ","))
+}
+
+/// 取第 index 个以 sep 分隔的字段（使用 substringBefore/After）。
+fun hirFieldAt(text: String, index: Int, sep: String): String {
+    var cur: Int = 0
+    var remaining: String = text
+    while (cur < index) {
+        remaining = remaining.substringAfter(sep)
+        cur = cur + 1
+    }
+    return remaining.substringBefore(sep)
+}
+
+/// 十进制字符串 → Int。
+fun hirToIntOf(text: String): Int {
+    if (text == "") {
+        return 0
+    }
+    val len: Int = text.length
+    var total: Int = 0
+    var i: Int = 0
+    var neg: Boolean = false
+    // 处理负号
+    if (len > 0 && toStr(text[0]) == "-") {
+        neg = true
+        i = 1
+    }
+    while (i < len) {
+        val c: String = toStr(text[i])
+        var digit: Int = -1
+        if (c == "0") {
+            digit = 0
+        }
+        if (c == "1") {
+            digit = 1
+        }
+        if (c == "2") {
+            digit = 2
+        }
+        if (c == "3") {
+            digit = 3
+        }
+        if (c == "4") {
+            digit = 4
+        }
+        if (c == "5") {
+            digit = 5
+        }
+        if (c == "6") {
+            digit = 6
+        }
+        if (c == "7") {
+            digit = 7
+        }
+        if (c == "8") {
+            digit = 8
+        }
+        if (c == "9") {
+            digit = 9
+        }
+        if (digit >= 0) {
+            total = total * 10 + digit
+        }
+        i = i + 1
+    }
+    if (neg) {
+        return -total
+    }
+    return total
+}
+

@@ -1,4 +1,5 @@
 // aura:///aura/lang/std/Test.aura
+package aura.lang.std
 // 标准库模块，不可修改
 // 实现：纯逻辑模块，全部以 Aura 编写（断言失败以 Aura 的 throw 抛出字符串）
 // (package 声明由编译器自动注入，无需显式声明)

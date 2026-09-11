@@ -1,0 +1,44 @@
+// Minimal Phase 2 test: Type.aura only
+import aura.lang.std.String
+import "../aura/compiler/aura/lang/compiler/test/TestRunner.aura"
+import "../aura/compiler/aura/lang/compiler/sema/Type.aura"
+
+fun main() {
+    println("=== Phase 2 Type Test ===")
+    
+    val t = TestRunner()
+    t.begin("Type.fromName")
+    t.assertEq(fromName("Int"), "Int", "Int basic")
+    t.assertEq(fromName("String"), "String", "String basic")
+    t.assertEq(fromName("MyType"), "MyType", "unknown → Named")
+    
+    t.begin("Type.queries")
+    t.assertTrue(isNumeric("Int"), "Int is numeric")
+    t.assertTrue(isNumeric("Float"), "Float is numeric")
+    t.assertFalse(isNumeric("String"), "String is not numeric")
+    t.assertTrue(isBoolean("Boolean"), "Boolean is boolean")
+    t.assertTrue(isString("String"), "String is string")
+    t.assertTrue(isNullable("Int?"), "Int? is nullable")
+    t.assertEq(nonNull("Int?"), "Int", "nonNull Int? → Int")
+    
+    t.begin("Type.canAssignTo")
+    t.assertTrue(canAssignTo("Int", "Int"), "Int → Int")
+    t.assertTrue(canAssignTo("Int", "Any"), "Int → Any")
+    t.assertTrue(canAssignTo("Int", "Float"), "Int → Float")
+    t.assertTrue(canAssignTo("Int", "Int?"), "Int → Int?")
+    t.assertFalse(canAssignTo("String", "Int"), "String → Int")
+    
+    t.begin("Type.funcTypes")
+    val fnTy: String = "(Int, String) -> Boolean"
+    t.assertTrue(isFunction(fnTy), "isFunction")
+    t.assertEq(funcParamTypes(fnTy), "Int, String", "funcParamTypes")
+    t.assertEq(funcReturnType(fnTy), "Boolean", "funcReturnType")
+    
+    val failures = t.report()
+    println()
+    if (failures == 0) {
+        println("RESULT: PASS")
+    } else {
+        println("RESULT: FAIL (" + toStr(failures) + ")")
+    }
+}

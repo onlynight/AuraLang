@@ -1,0 +1,291 @@
+// aura:///aura/lang/compiler/sema/Type.aura
+package aura.lang.compiler.sema
+// ─────────────────────────────────────────────────────────────
+// 语义类型表示 — 纯 Aura 化迁移 · Phase 2 (任务 2.1)
+//
+// 对应 Rust `compiler/src/sema/ty.rs` 的 `Ty` 枚举。
+//
+// ── 设计方式（受当前 VM 能力约束）──────────────────────────
+//
+// Rust 侧 `Ty` 是带 Box 的递归枚举。Aura 侧若用类层次 + List 子节点，
+// 会撞上当前 VM 的两个限制：
+//   * `List.add` / `List.append` 不可用；
+//   * 深递归的构造路径尚未充分验证。
+//
+// 因此这里采用**字符串表示**，与 Rust `Ty::name()` 的输出格式一致：
+//   * 基本类型：`"Int"` / `"Long"` / `"Float"` / `"String"` / …
+//   * 可空：`"Int?"`
+//   * 指针：`"Pointer<Int>"`
+//   * 数组：`"Array<Int>"`
+//   * 列表：`"List<Int>"`
+//   * 映射：`"Map<String, Int>"`
+//   * 命名类型：`"Counter"`（用户定义 struct/class/enum）
+//   * 函数类型：`"(Int, String) -> Boolean"`
+//   * 泛型变量：`"T0"` / `"T1"` …
+//   * 错误类型：`"<error>"`
+//
+// 内部操作（is_numeric / can_assign_to / …）通过字符串前缀/后缀判断实现，
+// 避免复杂对象构造。`fromName()` 把基本类型名字符串映射为语义类型，
+// 未知名退化为 `Ty::Named`。
+// ─────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────
+// 类型常量（与 Rust `Ty` 各变体名称对齐）
+// ─────────────────────────────────────────────────────────────
+
+/// 基本类型名列表（用于 `isNumeric` 等判断）。
+fun numericTypeNames(): String {
+    return "Int|Long|Short|Byte|Float|Double"
+}
+
+/// 判断一个类型名字符串是否为基本数字类型。
+fun isNumericName(name: String): Boolean {
+    val parts: List<String> = numericTypeNames().split("|")
+    var i: Int = 0
+    while (i < parts.size) {
+        if (parts[i] == name) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// ─────────────────────────────────────────────────────────────
+// 类型构造与查询
+// ─────────────────────────────────────────────────────────────
+
+/// 从类型名字符串构造语义类型（与 Rust `Ty::from_name` 等价）。
+///
+/// 用于 `is T` 智能转换等场景：必须把 `"String"` 映射为 `Ty::String`，
+/// 而不是 `Ty::Named("String")`——否则后续成员访问走 `Named` 分支，
+/// 拿不到内置成员表。未知类型名退化为 `Ty::Named`。
+fun fromName(name: String): String {
+    if (name == "Int" || name == "Long" || name == "Short" || name == "Byte"
+        || name == "Float" || name == "Double" || name == "Boolean"
+        || name == "Char" || name == "String" || name == "Any"
+        || name == "Unit" || name == "Nothing") {
+        return name
+    }
+    return name
+}
+
+/// 从语法类型（AST 中的类型名/泛型文本）解析为语义类型字符串。
+///
+/// 与 Rust `Ty::from_ast` 等价。参数 `astTy` 是 Ast.aura 中节点的 `ty` 字段文本。
+fun fromAstTy(astTy: String): String {
+    if (astTy == "") {
+        return "Any"
+    }
+    // 基本类型直接通过
+    if (astTy == "Int" || astTy == "Long" || astTy == "Short" || astTy == "Byte"
+        || astTy == "Float" || astTy == "Double" || astTy == "Boolean"
+        || astTy == "Char" || astTy == "String" || astTy == "Any"
+        || astTy == "Unit" || astTy == "Nothing") {
+        return astTy
+    }
+    // 可空后缀：`Int?`
+    if (astTy.endsWith("?")) {
+        val inner: String = astTy.substring(0, astTy.length() - 1)
+        return inner + "?"
+    }
+    // Pointer<T> 泛型
+    if (astTy.startsWith("Pointer<") && astTy.endsWith(">")) {
+        val inner: String = astTy.substring(8, astTy.length() - 1)
+        return "Pointer<" + inner + ">"
+    }
+    // 函数类型：`(A, B) -> R`
+    if (astTy.startsWith("(") && astTy.contains(") ->")) {
+        return astTy
+    }
+    // 泛型类型：`List<Int>`、`Map<String, Int>` 等 → Named
+    if (astTy.contains("<") && astTy.endsWith(">")) {
+        return astTy
+    }
+    // 其他命名类型
+    return astTy
+}
+
+// ─────────────────────────────────────────────────────────────
+// 类型查询
+// ─────────────────────────────────────────────────────────────
+
+/// 可空性判断：此类型是否可能为 null。
+fun isNullable(ty: String): Boolean {
+    return ty.endsWith("?") || ty == "Any"
+}
+
+/// 去除 Nullable 包装（去掉尾部 `?`）。
+fun nonNull(ty: String): String {
+    if (ty.endsWith("?")) {
+        return ty.substring(0, ty.length() - 1)
+    }
+    return ty
+}
+
+/// 是否为数字类型。
+fun isNumeric(ty: String): Boolean {
+    val base: String = nonNull(ty)
+    return isNumericName(base)
+}
+
+/// 是否为整数类型。
+fun isInteger(ty: String): Boolean {
+    val base: String = nonNull(ty)
+    return base == "Int" || base == "Long" || base == "Short" || base == "Byte"
+}
+
+/// 是否为布尔类型。
+fun isBoolean(ty: String): Boolean {
+    val base: String = nonNull(ty)
+    return base == "Boolean"
+}
+
+/// 是否为字符串类型。
+fun isString(ty: String): Boolean {
+    val base: String = nonNull(ty)
+    return base == "String"
+}
+
+/// 是否为单位类型。
+fun isUnit(ty: String): Boolean {
+    val base: String = nonNull(ty)
+    return base == "Unit"
+}
+
+/// 是否为 Any 类型。
+fun isAny(ty: String): Boolean {
+    return nonNull(ty) == "Any"
+}
+
+/// 是否为 Nothing 类型。
+fun isNothing(ty: String): Boolean {
+    return nonNull(ty) == "Nothing"
+}
+
+/// 是否为命名类型（用户定义类型）。
+fun isNamed(ty: String): Boolean {
+    val base: String = nonNull(ty)
+    // 基本类型不算命名类型
+    if (base == "Int" || base == "Long" || base == "Short" || base == "Byte"
+        || base == "Float" || base == "Double" || base == "Boolean"
+        || base == "Char" || base == "String" || base == "Any"
+        || base == "Unit" || base == "Nothing" || base == "<error>") {
+        return false
+    }
+    // Pointer<T> / List<T> / Map<...> 等泛型包装不算命名
+    if (base.startsWith("Pointer<") || base.startsWith("List<")
+        || base.startsWith("Map<") || base.startsWith("Array<")) {
+        return false
+    }
+    // 函数类型不算命名
+    if (base.startsWith("(")) {
+        return false
+    }
+    // 泛型变量 T0/T1 不算命名
+    if (base.startsWith("T") && base.length() > 1) {
+        // 检查是否是 T 后跟数字
+        val rest: String = base.substring(1)
+        val digits: String = "0123456789"
+        var i: Int = 0
+        while (i < rest.length()) {
+            if (digits.indexOf(toStr(rest[i])) < 0) {
+                return false
+            }
+            i = i + 1
+        }
+        if (rest != "") {
+            return false
+        }
+    }
+    return true
+}
+
+/// 是否为函数类型。
+fun isFunction(ty: String): Boolean {
+    return ty.startsWith("(") && ty.contains(") ->")
+}
+
+/// 是否为错误类型。
+fun isError(ty: String): Boolean {
+    return ty == "<error>"
+}
+
+// ─────────────────────────────────────────────────────────────
+// 类型赋值兼容性（简化版）
+// ─────────────────────────────────────────────────────────────
+
+/// 是否能隐式转换为 target（简化版：相同类型、数值间、派生到基类、Any）。
+///
+/// 与 Rust `Ty::can_assign_to` 等价。
+fun canAssignTo(source: String, target: String): Boolean {
+    if (source == target) {
+        return true
+    }
+    if (isAny(target)) {
+        return true
+    }
+    if (isNumeric(source) && isNumeric(target)) {
+        return true
+    }
+    // 非空值可赋给可空类型
+    if (target.endsWith("?")) {
+        return canAssignTo(source, target.substring(0, target.length() - 1))
+    }
+    // 缩小转换：可空 -> 其内部类型
+    if (source.endsWith("?")) {
+        return canAssignTo(source.substring(0, source.length() - 1), target)
+    }
+    // Nothing 可赋给任意类型
+    if (isNothing(source)) {
+        return true
+    }
+    return false
+}
+
+// ─────────────────────────────────────────────────────────────
+// 类型显示
+// ─────────────────────────────────────────────────────────────
+
+/// 类型的人类可读展示（与 Rust `Ty::name` 等价）。
+///
+/// 目前语义类型字符串本身就是展示形式，直接返回。
+fun typeName(ty: String): String {
+    return ty
+}
+
+/// 泛型引用占位（与 Rust `Ty::generic_ref` 等价）。
+fun genericRef(): String {
+    return "<generic>"
+}
+
+// ─────────────────────────────────────────────────────────────
+// 辅助：从函数类型提取参数/返回类型
+// ─────────────────────────────────────────────────────────────
+
+/// 从函数类型字符串 `(A, B) -> R` 中提取参数类型列表（逗号分隔）。
+fun funcParamTypes(ty: String): String {
+    if (!isFunction(ty)) {
+        return ""
+    }
+    // 去掉前导 `(`
+    val rest: String = ty.substring(1)
+    val arrowPos: Int = rest.indexOf(") ->")
+    if (arrowPos < 0) {
+        return ""
+    }
+    return rest.substring(0, arrowPos)
+}
+
+/// 从函数类型字符串 `(A, B) -> R` 中提取返回类型。
+fun funcReturnType(ty: String): String {
+    if (!isFunction(ty)) {
+        return "Unit"
+    }
+    val arrowPos: Int = ty.indexOf(") ->")
+    if (arrowPos < 0) {
+        return "Unit"
+    }
+    // `") ->"` 是 4 个字符，加上后面的空格共 5 个，从第 5 个字符后开始取
+    return ty.substring(arrowPos + 5)
+}

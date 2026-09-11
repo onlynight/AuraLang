@@ -22,8 +22,8 @@ aura/compiler/
     │   ├── Span.aura                      # Phase 1 ✅ 源码位置
     │   ├── Token.aura                     # Phase 1 ✅ Token 数据模型 + 关键字表
     │   └── Lexer.aura                     # Phase 1 ✅ 词法分析器
-    ├── parser/                            # Phase 1 ⏳ Parser.aura
-    ├── ast/                               # Phase 1 ⏳ Ast.aura
+    ├── parser/                            # Phase 1 ✅ Parser.aura
+    ├── ast/                               # Phase 1 ✅ Ast.aura
     ├── sema/                              # Phase 2  TypeChecker.aura
     ├── hir/                               # Phase 2  Hir.aura
     ├── mir/                               # Phase 3  Mir.aura
@@ -42,9 +42,9 @@ aura/compiler/
 | 1.1 | Token 模型（TokenKind 名称表 + 关键字表） | `.../lexer/Token.aura` | ✅ |
 | 1.2 | Span（源码位置 + 合并） | `.../lexer/Span.aura` | ✅ |
 | 1.4 | Lexer（单遍扫描，全部 TokenKind） | `.../lexer/Lexer.aura` | ✅ |
-| 1.5 | AST 定义 | `.../ast/Ast.aura` | ⏳ |
-| 1.6 | Parser（递归下降 + Pratt） | `.../parser/Parser.aura` | ⏳ |
-| 1.7 | CompileError | `.../errors/CompileError.aura` | ⏳ |
+| 1.5 | AST 定义 | `.../ast/Ast.aura` | ✅ |
+| 1.6 | Parser（递归下降 + Pratt） | `.../parser/Parser.aura` | ✅ |
+| 1.7 | CompileError | `.../errors/CompileError.aura` | ✅ |
 | 1.9/1.10 | Phase 1 验证用例 + 与 Rust 输出对比 | `tests/phase1_lexer_tests.aura` | ✅（Lexer 部分） |
 
 **Lexer 验收结论**：4 个快照用例（`tests/snapshots/cases/*.aura`）经 Aura 词法器产出的

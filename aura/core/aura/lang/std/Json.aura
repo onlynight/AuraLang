@@ -1,4 +1,5 @@
 // aura:///aura/lang/std/Json.aura
+package aura.lang.std
 // 标准库模块，不可修改
 // 实现：纯逻辑模块，词法/语法分析与序列化全部以 Aura 编写
 // (package 声明由编译器自动注入，无需显式声明)

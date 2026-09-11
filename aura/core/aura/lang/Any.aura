@@ -1,4 +1,5 @@
 // aura:///aura/lang/Any.aura
+package aura.lang
 // 语言内置类型，不可修改
 
 /// 顶级类型 + 运行时基类——所有类型（包括 null）都可以赋值给 Any。

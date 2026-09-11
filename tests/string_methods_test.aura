@@ -1,0 +1,30 @@
+// Test String methods availability
+import aura.lang.std.String
+
+fun main() {
+    val s: String = "hello"
+    
+    // Test property access
+    println("length property: " + s.length)
+    
+    // Test substring
+    println("substring: " + s.substring(0, 3))
+    
+    // Test contains
+    println("contains: " + s.contains("ell"))
+    
+    // Test startsWith
+    println("startsWith: " + s.startsWith("he"))
+    
+    // Test endsWith
+    println("endsWith: " + s.endsWith("lo"))
+    
+    // Test indexOf
+    println("indexOf: " + s.indexOf("l"))
+    
+    // Test toInt
+    val numStr: String = "123"
+    println("toInt: " + numStr.toInt())
+    
+    println("DONE")
+}

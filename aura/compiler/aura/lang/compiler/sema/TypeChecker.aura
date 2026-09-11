@@ -1,0 +1,738 @@
+// aura:///aura/lang/compiler/sema/TypeChecker.aura
+package aura.lang.compiler.sema
+// ─────────────────────────────────────────────────────────────
+// 语义检查器 — 纯 Aura 化迁移 · Phase 2 (任务 2.4)
+//
+// 对应 Rust `compiler/src/sema/checker.rs`（156 KB / 4088 行）。
+//
+// ── 本版覆盖范围（Phase 2 起步，可逐步扩展）──────────────
+//
+// 单遍遍历 AST：
+//   1. 收集顶层声明到符号表（函数签名、类型定义、全局变量）
+//   2. 检查函数体：推断表达式类型，验证类型匹配
+//   3. 空安全检查（nullable 上的非法操作）
+//   4. 生成诊断错误（带 Span）
+//
+// ── 简化说明 ──
+//
+// Rust 版 checker 涉及大量高级特性（泛型推断、枚举穷举、接口方法检查、
+// 协程追踪等）。本版聚焦核心类型检查，暂不覆盖：
+//   - 泛型单态化（留待 HIR 阶段）
+//   - 枚举 when 穷举性检查
+//   - 接口方法实现检查
+//   - suspend/async 追踪
+//   - 运算符重载解析
+//
+// 后续可按需扩展。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.compiler.ast.Ast
+import aura.lang.compiler.lexer.Span
+import aura.lang.compiler.errors.CompileError
+
+/// 语义检查器。
+class TypeChecker {
+
+    /// 符号表。
+    var st: SymbolTable = SymbolTable()
+
+    /// 诊断错误。
+    var errors: CompileErrors = CompileErrors()
+
+    /// sema → codegen 信息通道。
+    var info: TypeInfo = TypeInfo()
+
+    /// 当前函数返回类型。
+    var curFnRet: String = ""
+
+    /// 当前是否在循环中（break/continue 检查）。
+    var inLoopDepth: Int = 0
+
+    /// 当前作用域内的变量类型环境（扁平字符串：`name|ty\n`）。
+    var varEnv: String = ""
+
+    // ── 辅助 ──
+
+    /// 查找变量类型。返回 "" 表示未找到。
+    fun tcFindVar(name: String): String {
+        var i: Int = 0
+        var len: Int = this.varEnv.length
+        var lineStart: Int = 0
+        while (i < len) {
+            if (toStr(this.varEnv[i]) == "\n") {
+                // 提取当前行
+                var line: String = ""
+                var j: Int = lineStart
+                while (j < i) {
+                    line = line + toStr(this.varEnv[j])
+                    j = j + 1
+                }
+                if (line != "") {
+                    // 解析 name|ty 格式
+                    var nameBuf: String = ""
+                    var tyBuf: String = ""
+                    var foundSep: Boolean = false
+                    var k: Int = 0
+                    while (k < line.length) {
+                        val c: String = toStr(line[k])
+                        if (!foundSep && c == "|") {
+                            foundSep = true
+                        } else if (!foundSep) {
+                            nameBuf = nameBuf + c
+                        } else {
+                            tyBuf = tyBuf + c
+                        }
+                        k = k + 1
+                    }
+                    if (foundSep && nameBuf == name) {
+                        return tyBuf
+                    }
+                }
+                lineStart = i + 1
+            }
+            i = i + 1
+        }
+        return ""
+    }
+
+    /// 声明变量类型。
+    fun tcDeclareVar(name: String, ty: String) {
+        this.varEnv = this.varEnv + name + "|" + ty + "\n"
+    }
+
+    /// 报告错误。
+    fun tcError(msg: String, start: Int, end: Int, sl: Int, sc: Int, el: Int, ec: Int) {
+        this.errors.pushAt("Error", msg, start, end)
+    }
+
+    // ── 入口 ──
+
+    /// 对 AST 执行语义检查（无返回值，结果通过查询方法获取）。
+    fun tcCheck(ast: Ast) {
+        // 1. 收集顶层声明
+        this.tcCollectDecls(ast)
+
+        // 2. 检查函数体
+        this.tcCheckFunctions(ast)
+    }
+
+    /// 获取语义错误列表。
+    fun tcGetErrors(): CompileErrors {
+        return this.errors
+    }
+
+    /// 获取符号表。
+    fun tcGetSymbols(): SymbolTable {
+        return this.st
+    }
+
+    /// 获取 sema → codegen 信息通道。
+    fun tcGetInfo(): TypeInfo {
+        return this.info
+    }
+
+    /// 获取错误数量。
+    fun tcErrorCount(): Int {
+        return this.errors.errorCount()
+    }
+
+    /// 检查是否没有任何错误。
+    fun tcIsOk(): Boolean {
+        return this.errors.isOk()
+    }
+
+    // ── 阶段 1：收集顶层声明 ──
+
+    /// 查找 AST 中的 Program 根节点 id。
+    fun findRoot(ast: Ast): Int {
+        val n: Int = ast.count
+        var i: Int = 0
+        while (i < n) {
+            if (ast.kindOf(i) == "Program") {
+                return i
+            }
+            i = i + 1
+        }
+        return 0
+    }
+
+    /// 遍历 AST 根节点的子节点，收集声明。
+    fun tcCollectDecls(ast: Ast) {
+        // 根节点是 Program，其子节点是顶层声明
+        val rootIdx: Int = this.findRoot(ast)
+        val rootKids: String = ast.kidsOf(rootIdx)
+        val kCount: Int = kidsCount(rootKids)
+        var i: Int = 0
+        while (i < kCount) {
+            val childId: Int = kidsAt(rootKids, i)
+            val kind: String = ast.kindOf(childId)
+            if (kind == "Function") {
+                this.tcCollectFunDecl(ast, childId)
+            } else if (kind == "Struct" || kind == "Class" || kind == "Object") {
+                this.tcCollectTypeDecl(ast, childId)
+            } else if (kind == "Enum") {
+                this.tcCollectEnumDecl(ast, childId)
+            } else if (kind == "ValDecl" || kind == "VarDecl") {
+                this.tcCollectGlobalVar(ast, childId)
+            } else if (kind == "Typealias") {
+                this.tcCollectTypealias(ast, childId)
+            }
+            i = i + 1
+        }
+    }
+
+    /// 收集函数声明。
+    fun tcCollectFunDecl(ast: Ast, id: Int) {
+        val name: String = ast.textOf(id)
+        val ty: String = ast.tyOf(id)
+        this.st.stInsert(name, "Fn", "public", false, "", ty)
+    }
+
+    /// 收集类型声明（struct/class/object）。
+    fun tcCollectTypeDecl(ast: Ast, id: Int) {
+        val name: String = ast.textOf(id)
+        this.st.stInsert(name, "Type", "public", false, "", name)
+    }
+
+    /// 收集枚举声明。
+    fun tcCollectEnumDecl(ast: Ast, id: Int) {
+        val name: String = ast.textOf(id)
+        this.st.stInsert(name, "Type", "public", false, "", name)
+    }
+
+    /// 收集全局变量声明。
+    fun tcCollectGlobalVar(ast: Ast, id: Int) {
+        val name: String = ast.textOf(id)
+        val ty: String = ast.tyOf(id)
+        val mutable: Boolean = ast.kindOf(id) == "VarDecl"
+        this.st.stInsert(name, "Var", "public", mutable, "", ty)
+    }
+
+    /// 收集类型别名。
+    fun tcCollectTypealias(ast: Ast, id: Int) {
+        val name: String = ast.textOf(id)
+        // 取子节点（类型表达式）
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = kidsCount(kids)
+        if (kCount > 0) {
+            val childId: Int = kidsAt(kids, 0)
+            val ty: String = ast.textOf(childId)
+            this.st.stInsert(name, "Type", "public", false, "", ty)
+        } else {
+            this.st.stInsert(name, "Type", "public", false, "", "Any")
+        }
+    }
+
+    // ── 阶段 2：检查函数体 ──
+
+    /// 遍历所有函数声明，检查其体。
+    fun tcCheckFunctions(ast: Ast) {
+        // 根节点是 Program，其子节点是顶层声明
+        val rootIdx: Int = this.findRoot(ast)
+        val rootKids: String = ast.kidsOf(rootIdx)
+        val kCount: Int = kidsCount(rootKids)
+        var i: Int = 0
+        while (i < kCount) {
+            val childId: Int = kidsAt(rootKids, i)
+            val kind: String = ast.kindOf(childId)
+            if (kind == "Function") {
+                this.tcCheckFunction(ast, childId)
+            }
+            i = i + 1
+        }
+    }
+
+    /// 检查单个函数声明。
+    fun tcCheckFunction(ast: Ast, id: Int) {
+        val name: String = ast.textOf(id)
+        val retTy: String = ast.tyOf(id)
+        this.curFnRet = retTy
+
+        // 进入新作用域
+        this.st.stEnterScope(true)
+        this.varEnv = ""
+
+        // 处理参数（子节点 0 是 Params 节点）
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = kidsCount(kids)
+        if (kCount > 0) {
+            val paramsNodeId: Int = kidsAt(kids, 0)
+            val paramsKids: String = ast.kidsOf(paramsNodeId)
+            val pkCount: Int = kidsCount(paramsKids)
+            var pi: Int = 0
+            while (pi < pkCount) {
+                val pId: Int = kidsAt(paramsKids, pi)
+                val paramName: String = ast.textOf(pId)
+                val paramTy: String = ast.tyOf(pId)
+                this.st.stInsert(paramName, "Var", "public", true, "", paramTy)
+                this.tcDeclareVar(paramName, paramTy)
+                pi = pi + 1
+            }
+        }
+
+        // 处理函数体（子节点 1 是 Block 或单个表达式）
+        if (kCount > 1) {
+            val bodyAstId: Int = kidsAt(kids, 1)
+            val bodyKind: String = ast.kindOf(bodyAstId)
+            if (bodyKind == "Block") {
+                this.tcCheckBlock(ast, bodyAstId)
+            }
+            if (bodyKind != "Block") {
+                this.tcCheckExpr(ast, bodyAstId)
+            }
+        }
+
+        // 退出作用域
+        this.st.stExitScope()
+        this.varEnv = ""
+        this.curFnRet = ""
+    }
+
+    // ── 语句检查 ──
+
+    /// 检查块。
+    fun tcCheckBlock(ast: Ast, id: Int) {
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = kidsCount(kids)
+        var i: Int = 0
+        while (i < kCount) {
+            val childId: Int = kidsAt(kids, i)
+            val childKind: String = ast.kindOf(childId)
+            this.tcCheckStmt(ast, childId)
+            i = i + 1
+        }
+    }
+
+    /// 检查语句。
+    fun tcCheckStmt(ast: Ast, id: Int) {
+        val kind: String = ast.kindOf(id)
+        if (kind == "ValDecl") {
+            this.tcCheckValDecl(ast, id)
+        }
+        if (kind == "VarDecl") {
+            this.tcCheckVarDecl(ast, id)
+        }
+        if (kind == "Return") {
+            this.tcCheckReturn(ast, id)
+        }
+        if (kind == "IfStmt") {
+            this.tcCheckIfStmt(ast, id)
+        }
+        if (kind == "WhileStmt") {
+            this.tcCheckWhileStmt(ast, id)
+        }
+        if (kind == "ForStmt") {
+            this.tcCheckForStmt(ast, id)
+        }
+        if (kind == "Block") {
+            this.tcCheckBlock(ast, id)
+        }
+        if (kind == "Assign") {
+            this.tcCheckAssign(ast, id)
+        }
+        if (kind == "Break" || kind == "Continue") {
+            if (this.inLoopDepth == 0) {
+                val sp: Span = ast.spanOf(id)
+                this.tcError("break/continue 不在循环中", sp.start, sp.end,
+                    sp.startLine, sp.startCol, sp.endLine, sp.endCol)
+            }
+        }
+        // 其他语句类型暂不检查
+    }
+
+    /// 检查 val 声明。
+    fun tcCheckValDecl(ast: Ast, id: Int) {
+        val name: String = ast.textOf(id)
+        val ty: String = ast.tyOf(id)
+        if (ty == "") {
+            this.tcError("val 缺少类型注解", ast.spanOf(id).start, ast.spanOf(id).end,
+                ast.spanOf(id).startLine, ast.spanOf(id).startCol,
+                ast.spanOf(id).endLine, ast.spanOf(id).endCol)
+        }
+        this.tcDeclareVar(name, ty)
+
+        // 检查初始化表达式
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = kidsCount(kids)
+        if (kCount > 0) {
+            val initId: Int = kidsAt(kids, 0)
+            val initTy: String = this.tcCheckExpr(ast, initId)
+            if (ty != "" && initTy != "" && initTy != "Any" && !canAssignTo(initTy, ty)) {
+                this.tcError("类型不兼容: 期望 " + ty + ", 实际 " + initTy,
+                    ast.spanOf(initId).start, ast.spanOf(initId).end,
+                    ast.spanOf(initId).startLine, ast.spanOf(initId).startCol,
+                    ast.spanOf(initId).endLine, ast.spanOf(initId).endCol)
+            }
+        }
+    }
+
+    /// 检查 var 声明（与 val 相同，额外允许可变）。
+    fun tcCheckVarDecl(ast: Ast, id: Int) {
+        val name: String = ast.textOf(id)
+        val ty: String = ast.tyOf(id)
+        if (ty == "") {
+            this.tcError("var 缺少类型注解", ast.spanOf(id).start, ast.spanOf(id).end,
+                ast.spanOf(id).startLine, ast.spanOf(id).startCol,
+                ast.spanOf(id).endLine, ast.spanOf(id).endCol)
+        }
+        this.tcDeclareVar(name, ty)
+
+        // 检查初始化表达式
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = kidsCount(kids)
+        if (kCount > 0) {
+            val initId: Int = kidsAt(kids, 0)
+            val initTy: String = this.tcCheckExpr(ast, initId)
+            if (ty != "" && initTy != "" && initTy != "Any" && !canAssignTo(initTy, ty)) {
+                this.tcError("类型不兼容: 期望 " + ty + ", 实际 " + initTy,
+                    ast.spanOf(initId).start, ast.spanOf(initId).end,
+                    ast.spanOf(initId).startLine, ast.spanOf(initId).startCol,
+                    ast.spanOf(initId).endLine, ast.spanOf(initId).endCol)
+            }
+        }
+    }
+
+    /// 检查 return 语句。
+    fun tcCheckReturn(ast: Ast, id: Int) {
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = kidsCount(kids)
+        if (kCount > 0) {
+            val valId: Int = kidsAt(kids, 0)
+            val valTy: String = this.tcCheckExpr(ast, valId)
+            if (this.curFnRet != "" && valTy != "" && !canAssignTo(valTy, this.curFnRet)) {
+                this.tcError("return 类型不兼容: 期望 " + this.curFnRet + ", 实际 " + valTy,
+                    ast.spanOf(valId).start, ast.spanOf(valId).end,
+                    ast.spanOf(valId).startLine, ast.spanOf(valId).startCol,
+                    ast.spanOf(valId).endLine, ast.spanOf(valId).endCol)
+            }
+        }
+    }
+
+    /// 检查 if 语句。
+    fun tcCheckIfStmt(ast: Ast, id: Int) {
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = kidsCount(kids)
+        var i: Int = 0
+        while (i < kCount) {
+            val childId: Int = kidsAt(kids, i)
+            val childKind: String = ast.kindOf(childId)
+            if (childKind == "Expr") {
+                // 条件表达式（第 1 个子节点）
+                if (i == 0) {
+                    val condTy: String = this.tcCheckExpr(ast, childId)
+                    if (condTy != "" && condTy != "Boolean") {
+                        this.tcError("if 条件必须是 Boolean", ast.spanOf(childId).start, ast.spanOf(childId).end,
+                            ast.spanOf(childId).startLine, ast.spanOf(childId).startCol,
+                            ast.spanOf(childId).endLine, ast.spanOf(childId).endCol)
+                    }
+                }
+            } else if (childKind == "Block") {
+                this.tcCheckBlock(ast, childId)
+            }
+            i = i + 1
+        }
+    }
+
+    /// 检查 while 语句。
+    fun tcCheckWhileStmt(ast: Ast, id: Int) {
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = kidsCount(kids)
+        var i: Int = 0
+        while (i < kCount) {
+            val childId: Int = kidsAt(kids, i)
+            val childKind: String = ast.kindOf(childId)
+            if (childKind == "Expr" && i == 0) {
+                val condTy: String = this.tcCheckExpr(ast, childId)
+                if (condTy != "" && condTy != "Boolean") {
+                    this.tcError("while 条件必须是 Boolean", ast.spanOf(childId).start, ast.spanOf(childId).end,
+                        ast.spanOf(childId).startLine, ast.spanOf(childId).startCol,
+                        ast.spanOf(childId).endLine, ast.spanOf(childId).endCol)
+                }
+            } else if (childKind == "Block") {
+                this.inLoopDepth = this.inLoopDepth + 1
+                this.tcCheckBlock(ast, childId)
+                this.inLoopDepth = this.inLoopDepth - 1
+            }
+            i = i + 1
+        }
+    }
+
+    /// 检查 for 语句。
+    fun tcCheckForStmt(ast: Ast, id: Int) {
+        this.inLoopDepth = this.inLoopDepth + 1
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = kidsCount(kids)
+        var i: Int = 0
+        while (i < kCount) {
+            val childId: Int = kidsAt(kids, i)
+            val childKind: String = ast.kindOf(childId)
+            if (childKind == "VarDecl" || childKind == "ValDecl") {
+                this.tcCheckValDecl(ast, childId)
+            } else if (childKind == "Block") {
+                this.tcCheckBlock(ast, childId)
+            }
+            i = i + 1
+        }
+        this.inLoopDepth = this.inLoopDepth - 1
+    }
+
+    /// 检查赋值语句。
+    fun tcCheckAssign(ast: Ast, id: Int) {
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = kidsCount(kids)
+        if (kCount >= 2) {
+            val targetId: Int = kidsAt(kids, 0)
+            val valueId: Int = kidsAt(kids, 1)
+            val valueTy: String = this.tcCheckExpr(ast, valueId)
+            // 简单检查：如果目标是变量名，验证类型兼容
+            if (ast.kindOf(targetId) == "Var") {
+                val targetName: String = ast.textOf(targetId)
+                val targetTy: String = this.tcFindVar(targetName)
+                if (targetTy != "" && valueTy != "" && !canAssignTo(valueTy, targetTy)) {
+                    this.tcError("赋值类型不兼容: 期望 " + targetTy + ", 实际 " + valueTy,
+                        ast.spanOf(valueId).start, ast.spanOf(valueId).end,
+                        ast.spanOf(valueId).startLine, ast.spanOf(valueId).startCol,
+                        ast.spanOf(valueId).endLine, ast.spanOf(valueId).endCol)
+                }
+            }
+        }
+    }
+
+    // ── 表达式检查 ──
+
+    /// 检查表达式，返回其类型。
+    fun tcCheckExpr(ast: Ast, id: Int): String {
+        val kind: String = ast.kindOf(id)
+        val sp: Span = ast.spanOf(id)
+        var ty: String = ""
+
+        if (kind == "IntLiteral") {
+            ty = "Int"
+        }
+        if (kind == "LongLiteral") {
+            ty = "Long"
+        }
+        if (kind == "FloatLiteral") {
+            ty = "Float"
+        }
+        if (kind == "DoubleLiteral") {
+            ty = "Double"
+        }
+        if (kind == "StringLiteral") {
+            ty = "String"
+        }
+        if (kind == "CharLiteral") {
+            ty = "Char"
+        }
+        if (kind == "BoolLiteral") {
+            ty = "Boolean"
+        }
+        if (kind == "NullLiteral") {
+            ty = "Any?"
+        }
+        if (kind == "Var" || kind == "Ident") {
+            val name: String = ast.textOf(id)
+            ty = this.tcFindVar(name)
+            if (ty == "") {
+                val symIdx: Int = this.st.stFind(name)
+                if (symIdx >= 0) {
+                    ty = this.st.stEntryType(symIdx)
+                } else {
+                    ty = "Any"
+                }
+            }
+        }
+        if (kind == "Binary") {
+            ty = this.tcCheckBinary(ast, id)
+        }
+        if (kind == "Unary") {
+            ty = this.tcCheckUnary(ast, id)
+        }
+        if (kind == "Call") {
+            ty = this.tcCheckCall(ast, id)
+        }
+        if (kind == "Member") {
+            ty = this.tcCheckMember(ast, id)
+        }
+        if (kind == "IfExpr") {
+            ty = this.tcCheckIfExpr(ast, id)
+        }
+        if (kind == "Block") {
+            ty = this.tcCheckBlockExpr(ast, id)
+        }
+        if (kind == "Index") {
+            ty = this.tcCheckIndex(ast, id)
+        }
+        if (ty == "") {
+            ty = "Any"
+        }
+
+        // 记录类型信息
+        if (ty != "") {
+            this.info.tiRecord(sp.start, sp.end, ty)
+        }
+
+        return ty
+    }
+
+    /// 检查二元运算表达式。
+    fun tcCheckBinary(ast: Ast, id: Int): String {
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = kidsCount(kids)
+        if (kCount >= 3) {
+            val opId: Int = kidsAt(kids, 0)
+            val op: String = ast.textOf(opId)
+            val lhsId: Int = kidsAt(kids, 1)
+            val rhsId: Int = kidsAt(kids, 2)
+            val lhsTy: String = this.tcCheckExpr(ast, lhsId)
+            val rhsTy: String = this.tcCheckExpr(ast, rhsId)
+
+            // 基本类型检查
+            if (op == "+" || op == "-" || op == "*" || op == "/" || op == "%") {
+                if (isNumeric(lhsTy) && isNumeric(rhsTy)) {
+                    return lhsTy
+                } else if (isString(lhsTy) && isString(rhsTy) && op == "+") {
+                    return "String"
+                } else if (lhsTy != "" && rhsTy != "" && lhsTy != rhsTy && !isNumeric(lhsTy)) {
+                    this.tcError("运算符 " + op + " 类型不兼容: " + lhsTy + " " + op + " " + rhsTy,
+                        ast.spanOf(id).start, ast.spanOf(id).end,
+                        ast.spanOf(id).startLine, ast.spanOf(id).startCol,
+                        ast.spanOf(id).endLine, ast.spanOf(id).endCol)
+                    return "Any"
+                }
+            } else if (op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=") {
+                if (lhsTy == rhsTy || isNumeric(lhsTy) && isNumeric(rhsTy)) {
+                    return "Boolean"
+                }
+                return "Boolean"
+            } else if (op == "&&" || op == "||") {
+                return "Boolean"
+            } else if (op == "is" || op == "as") {
+                return "Boolean"
+            }
+        }
+        return "Any"
+    }
+
+    /// 检查一元运算表达式。
+    fun tcCheckUnary(ast: Ast, id: Int): String {
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = kidsCount(kids)
+        if (kCount >= 2) {
+            val opId: Int = kidsAt(kids, 0)
+            val op: String = ast.textOf(opId)
+            val operandId: Int = kidsAt(kids, 1)
+            val operandTy: String = this.tcCheckExpr(ast, operandId)
+            if (op == "-" && isNumeric(operandTy)) {
+                return operandTy
+            } else if (op == "!" && isBoolean(operandTy)) {
+                return "Boolean"
+            }
+        }
+        return "Any"
+    }
+
+    /// 检查函数调用表达式。
+    fun tcCheckCall(ast: Ast, id: Int): String {
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = kidsCount(kids)
+        if (kCount >= 1) {
+            val calleeId: Int = kidsAt(kids, 0)
+            val calleeName: String = ast.textOf(calleeId)
+
+            // 查找函数签名
+            val fnSig: String = this.st.stFindFunction(calleeName)
+            if (fnSig != "") {
+                val parts: List<String> = fnSig.split("|")
+                if (parts.size >= 2) {
+                    return parts[1]
+                }
+            }
+        }
+        return "Any"
+    }
+
+    /// 检查成员访问表达式。
+    fun tcCheckMember(ast: Ast, id: Int): String {
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = kidsCount(kids)
+        if (kCount >= 2) {
+            val objId: Int = kidsAt(kids, 0)
+            val memberName: String = ast.textOf(kidsAt(kids, 1))
+            val objTy: String = this.tcCheckExpr(ast, objId)
+
+            // 简单成员类型推断
+            if (isString(objTy)) {
+                if (memberName == "length" || memberName == "size") {
+                    return "Int"
+                }
+                if (memberName == "isEmpty") {
+                    return "Boolean"
+                }
+                return "Any"
+            }
+            // List/Array/Set 成员（Collection 通用接口）
+            if (objTy.startsWith("List") || objTy.startsWith("Array") || objTy.startsWith("Set")) {
+                if (memberName == "size" || memberName == "count" || memberName == "length") {
+                    return "Int"
+                }
+                if (memberName == "isEmpty") {
+                    return "Boolean"
+                }
+                if (memberName == "set") {
+                    return "Unit"
+                }
+                // first/last/get/getAt 返回元素类型（当前简化为 Any）
+                return "Any"
+            }
+            // 其他类型暂不检查
+        }
+        return "Any"
+    }
+
+    /// 检查 if 表达式。
+    fun tcCheckIfExpr(ast: Ast, id: Int): String {
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = kidsCount(kids)
+        if (kCount >= 3) {
+            val condId: Int = kidsAt(kids, 0)
+            val thenId: Int = kidsAt(kids, 1)
+            val elseId: Int = kidsAt(kids, 2)
+            this.tcCheckExpr(ast, condId)
+            val thenTy: String = this.tcCheckExpr(ast, thenId)
+            val elseTy: String = this.tcCheckExpr(ast, elseId)
+            if (thenTy != "" && elseTy != "" && thenTy != elseTy && !canAssignTo(thenTy, elseTy)) {
+                return "Any"
+            }
+            return thenTy
+        }
+        return "Any"
+    }
+
+    /// 检查块表达式（返回最后一个表达式的类型）。
+    fun tcCheckBlockExpr(ast: Ast, id: Int): String {
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = kidsCount(kids)
+        if (kCount == 0) {
+            return "Unit"
+        }
+        val lastId: Int = kidsAt(kids, kCount - 1)
+        return this.tcCheckExpr(ast, lastId)
+    }
+
+    /// 检查下标访问表达式。
+    fun tcCheckIndex(ast: Ast, id: Int): String {
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = kidsCount(kids)
+        if (kCount >= 2) {
+            val containerId: Int = kidsAt(kids, 0)
+            val containerTy: String = this.tcCheckExpr(ast, containerId)
+            this.tcCheckExpr(ast, kidsAt(kids, 1))
+            if (isString(containerTy)) {
+                return "Char"
+            }
+        }
+        return "Any"
+    }
+}

@@ -1,4 +1,5 @@
 // aura:///aura/lang/std/Math.aura
+package aura.lang.std
 // 标准库模块，不可修改
 // 实现：取整/符号/夹取等纯逻辑函数用 Aura 实现；
 //       三角、指数、对数、开方等 libm 函数保留 native（Layer 0-A / FFI）

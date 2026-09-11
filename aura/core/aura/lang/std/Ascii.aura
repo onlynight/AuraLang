@@ -1,4 +1,5 @@
 // aura:///aura/lang/std/Ascii.aura
+package aura.lang.std
 // 标准库模块，不可修改
 // 实现：纯逻辑模块，全部以 Aura 编写（判定委托给内置类型 Char 的方法）
 // (package 声明由编译器自动注入，无需显式声明)

@@ -2878,6 +2878,31 @@ fn desugar_expr_stmt(e: &Expr) -> HirStmt {
             value,
             ..
         } => {
+            // 下标赋值：array[i] = v → array = Collections.set(array, i, v)
+            // （Value::List 不可变，set 返回新列表，需回赋到目标变量）
+            if let Expr::Index {
+                container,
+                index,
+                ..
+            } = target.as_ref()
+            {
+                let set_call = HirExpr::Call {
+                    callee: "aura.lang.std.Collections.set".into(),
+                    args: vec![
+                        desugar_expr(container),
+                        desugar_expr(index),
+                        desugar_expr(value),
+                    ],
+                };
+                // 如果目标是变量，回赋到该变量；否则降级为纯表达式
+                if let Expr::Ident(name, _) = container.as_ref() {
+                    return HirStmt::Assign {
+                        target: HirExpr::Var(name.clone()),
+                        value: set_call,
+                    };
+                }
+                return HirStmt::Expr(set_call);
+            }
             // 访问器 setter：obj.prop = v → Class.prop.set(obj, v)
             if let Expr::MemberAccess {
                 object,
@@ -2954,6 +2979,38 @@ fn desugar_expr_stmt(e: &Expr) -> HirStmt {
         }
         Expr::Defer { block, .. } => HirStmt::Defer(desugar_block(block)),
         Expr::Await { expr, .. } => HirStmt::Expr(desugar_expr(expr)),
+        // set(i, v) 语句：arr.set(i, v) → arr = Collections.set(arr, i, v)
+        Expr::Call {
+            callee,
+            args,
+            ..
+        } => {
+            if let Expr::MemberAccess {
+                object,
+                name,
+                ..
+            } = callee.as_ref()
+            {
+                if name.as_str() == "set" {
+                    let mut call_args = vec![desugar_expr(object)];
+                    for a in args {
+                        call_args.push(desugar_expr(a));
+                    }
+                    let set_call = HirExpr::Call {
+                        callee: "aura.lang.std.Collections.set".into(),
+                        args: call_args,
+                    };
+                    if let Expr::Ident(name, _) = object.as_ref() {
+                        return HirStmt::Assign {
+                            target: HirExpr::Var(name.clone()),
+                            value: set_call,
+                        };
+                    }
+                    return HirStmt::Expr(set_call);
+                }
+            }
+            HirStmt::Expr(desugar_expr(e))
+        }
         other => HirStmt::Expr(desugar_expr(other)),
     }
 }
@@ -3680,6 +3737,61 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                             }
                         }
                     }
+                    // List/Array/Set 的 Collection 通用方法调用 → Collections.* 原生函数
+                    if name.as_str() == "get" || name.as_str() == "getAt" {
+                        if let Some(ty) = lookup_expr_type(object) {
+                            if ty.starts_with("List")
+                                || ty.starts_with("Array")
+                                || ty.starts_with("Set")
+                            {
+                                let mut all_args = vec![desugar_expr(object)];
+                                for a in args {
+                                    all_args.push(desugar_expr(a));
+                                }
+                                return HirExpr::Call {
+                                    callee: "aura.lang.std.Collections.getAt".into(),
+                                    args: all_args,
+                                };
+                            }
+                        }
+                    }
+                    if name.as_str() == "contains" || name.as_str() == "indexOf" {
+                        if let Some(ty) = lookup_expr_type(object) {
+                            if ty.starts_with("List")
+                                || ty.starts_with("Array")
+                                || ty.starts_with("Set")
+                            {
+                                let callee = if name.as_str() == "contains" {
+                                    "aura.lang.std.Collections.contains".to_string()
+                                } else {
+                                    "aura.lang.std.Collections.indexOf".to_string()
+                                };
+                                let mut all_args = vec![desugar_expr(object)];
+                                for a in args {
+                                    all_args.push(desugar_expr(a));
+                                }
+                                return HirExpr::Call {
+                                    callee,
+                                    args: all_args,
+                                };
+                            }
+                        }
+                    }
+                    // set(i, v) → Collections.set(collection, i, v)，结果回赋到集合变量
+                    if name.as_str() == "set" {
+                        if let Some(ty) = lookup_expr_type(object) {
+                            if ty.starts_with("List") || ty.starts_with("Array") {
+                                let mut all_args = vec![desugar_expr(object)];
+                                for a in args {
+                                    all_args.push(desugar_expr(a));
+                                }
+                                return HirExpr::Call {
+                                    callee: "aura.lang.std.Collections.set".into(),
+                                    args: all_args,
+                                };
+                            }
+                        }
+                    }
                     // 检查模块别名：import aura.concurrent as cc + cc.spawn(42)
                     if let Expr::Ident(module_name, _) = object.as_ref() {
                         if let Some(am) = lookup_import_module_alias(module_name) {
@@ -3878,46 +3990,46 @@ fn desugar_expr(e: &Expr) -> HirExpr {
             name,
             ..
         } => {
-            // P15: List 内建成员 → native 调用（VM 的 GetField 不支持 Value::List）
+            // P15: List/Array 内建成员 → Collection 通用接口调用
+            // （VM 的 GetField 不支持 Value::List，需降级为原生函数）
             if let Some(ty) = lookup_expr_type(object) {
-                if ty.starts_with("List") {
+                if ty.starts_with("List") || ty.starts_with("Array") {
                     match name.as_str() {
-                        "size" | "length" => {
+                        "size" | "length" | "count" => {
                             return HirExpr::Call {
-                                callee: "aura.lang.std.Collections.listSize".into(),
+                                callee: "aura.lang.std.Collections.count".into(),
                                 args: vec![desugar_expr(object)],
                             };
                         }
                         "first" => {
-                            return HirExpr::Index {
-                                container: Box::new(desugar_expr(object)),
-                                index: Box::new(HirExpr::Lit(crate::ast::Literal::Int(0))),
+                            return HirExpr::Call {
+                                callee: "aura.lang.std.Collections.getAt".into(),
+                                args: vec![
+                                    desugar_expr(object),
+                                    HirExpr::Lit(crate::ast::Literal::Int(0)),
+                                ],
                             };
                         }
                         "last" => {
                             let obj = desugar_expr(object);
-                            let size = HirExpr::Call {
-                                callee: "aura.lang.std.Collections.listSize".into(),
+                            let count = HirExpr::Call {
+                                callee: "aura.lang.std.Collections.count".into(),
                                 args: vec![obj.clone()],
                             };
-                            return HirExpr::Index {
-                                container: Box::new(obj),
-                                index: Box::new(HirExpr::Binary {
-                                    op: HirBinOp::Sub,
-                                    lhs: Box::new(size),
-                                    rhs: Box::new(HirExpr::Lit(crate::ast::Literal::Int(1))),
-                                }),
+                            let idx = HirExpr::Binary {
+                                op: HirBinOp::Sub,
+                                lhs: Box::new(count),
+                                rhs: Box::new(HirExpr::Lit(crate::ast::Literal::Int(1))),
+                            };
+                            return HirExpr::Call {
+                                callee: "aura.lang.std.Collections.getAt".into(),
+                                args: vec![obj, idx],
                             };
                         }
                         "isEmpty" => {
-                            let size = HirExpr::Call {
-                                callee: "aura.lang.std.Collections.listSize".into(),
+                            return HirExpr::Call {
+                                callee: "aura.lang.std.Collections.isEmpty".into(),
                                 args: vec![desugar_expr(object)],
-                            };
-                            return HirExpr::Binary {
-                                op: HirBinOp::Eq,
-                                lhs: Box::new(size),
-                                rhs: Box::new(HirExpr::Lit(crate::ast::Literal::Int(0))),
                             };
                         }
                         _ => {}
@@ -4896,6 +5008,44 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
             ],
         ),
         ("aura.lang.std.Collections.listSize", vec![("list", "List")]),
+        // Collection 通用操作（List/Array/Set 共享）
+        (
+            "aura.lang.std.Collections.getAt",
+            vec![
+                ("collection", "Any"),
+                ("index", "Int"),
+            ],
+        ),
+        (
+            "aura.lang.std.Collections.count",
+            vec![("collection", "Any")],
+        ),
+        (
+            "aura.lang.std.Collections.isEmpty",
+            vec![("collection", "Any")],
+        ),
+        (
+            "aura.lang.std.Collections.contains",
+            vec![
+                ("collection", "Any"),
+                ("item", "Any"),
+            ],
+        ),
+        (
+            "aura.lang.std.Collections.indexOf",
+            vec![
+                ("collection", "Any"),
+                ("item", "Any"),
+            ],
+        ),
+        (
+            "aura.lang.std.Collections.set",
+            vec![
+                ("collection", "Any"),
+                ("index", "Int"),
+                ("value", "Any"),
+            ],
+        ),
         (
             "aura.lang.std.Collections.pairOf",
             vec![

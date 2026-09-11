@@ -1,4 +1,5 @@
 // aura:///aura/lang/coroutine/Coroutine.aura
+package aura.lang.coroutine
 // 协程（轻量子任务）—— 无状态对象，通过 Coroutine.<fn> 调用。
 // 实现：Aura 实现（使用回调和状态管理）
 // 架构：运行库，提供协程并发模型

@@ -1,0 +1,131 @@
+// aura:///aura/lang/compiler/hir/inline.aura
+package aura.lang.compiler.hir
+// ─────────────────────────────────────────────────────────────
+// 内联优化 — 纯 Aura 化迁移 · Phase 2 (任务 2.8)
+//
+// 对应 Rust `compiler/src/codegen/hir.rs` 中的 inline 部分。
+//
+// 函数内联是将小函数的函数体直接替换到调用点，消除函数调用开销。
+// 内联条件：
+//   * 函数体足够小（语句数 < 阈值）
+//   * 无递归调用
+//   * 无外部副作用（简化版：所有函数均可内联）
+//
+// ── 本版覆盖范围 ──
+//
+// 简化版：收集内联候选函数，但不执行实际内联（需要调用图分析）。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+
+/// 内联优化处理。
+class Inline {
+
+    /// 输入的 HIR。
+    var src: Hir = Hir()
+
+    /// 输出的 HIR（内联后的新 HIR）。
+    var dst: Hir = Hir()
+
+    /// 内联候选函数名集合（逗号分隔）。
+    var candidates: String = ""
+
+    /// 内联阈值：函数体最大语句数。
+    var threshold: Int = 10
+
+    init() {
+        this.src = Hir()
+        this.dst = Hir()
+        this.candidates = ""
+        this.threshold = 10
+    }
+
+    /// 执行内联分析，返回新的 HIR 根节点 id。
+    fun inline(src: Hir): Int {
+        this.src = src
+        this.dst = Hir()
+        this.candidates = ""
+
+        // 收集内联候选
+        this.collectCandidates(src)
+
+        // 查找 Program 根节点
+        val n: Int = src.count
+        var rootIdx: Int = -1
+        var i: Int = 0
+        while (i < n) {
+            if (src.kindOf(i) == "HirProgram") {
+                rootIdx = i
+                break
+            }
+            i = i + 1
+        }
+        if (rootIdx < 0) {
+            rootIdx = 0
+        }
+
+        // 简化版：直接复制节点（不执行实际内联）
+        return this.inlineNode(src, rootIdx)
+    }
+
+    /// 收集内联候选函数。
+    fun collectCandidates(src: Hir) {
+        val n: Int = src.count
+        var i: Int = 0
+        while (i < n) {
+            if (src.kindOf(i) == "HirFunction") {
+                val name: String = src.textOf(i)
+                val body: String = src.kidsOf(i)
+                val stmtCount: Int = hirKidsCount(body)
+                if (stmtCount <= this.threshold) {
+                    if (this.candidates == "") {
+                        this.candidates = name
+                    } else {
+                        this.candidates = this.candidates + "," + name
+                    }
+                }
+            }
+            i = i + 1
+        }
+    }
+
+    /// 内联处理单个节点。
+    fun inlineNode(src: Hir, id: Int): Int {
+        val kind: String = src.kindOf(id)
+        val text: String = src.textOf(id)
+        val ty: String = src.tyOf(id)
+        val sp: Span = src.spanOf(id)
+        val kids: String = src.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+
+        // 递归处理子节点
+        var newKids: String = hirNoKids()
+        var i: Int = 0
+        while (i < kCount) {
+            val childId: Int = hirKidsAt(kids, i)
+            val childDstId: Int = this.inlineNode(src, childId)
+            if (childDstId >= 0) {
+                newKids = hirKidsAdd(newKids, childDstId)
+            }
+            i = i + 1
+        }
+
+        // 简化版：直接复制节点
+        return this.dst.add(kind, text, ty, sp, newKids)
+    }
+
+    /// 获取内联后的 HIR。
+    fun getDst(): Hir {
+        return this.dst
+    }
+
+    /// 获取内联候选函数名。
+    fun getCandidates(): String {
+        return this.candidates
+    }
+
+    /// 设置内联阈值。
+    fun setThreshold(value: Int) {
+        this.threshold = value
+    }
+}
