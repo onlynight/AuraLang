@@ -103,9 +103,7 @@ class Mir {
 
     /// 第 id 个节点的 text。
     fun textOf(id: Int): String {
-        println("[dbg] tx0 id=" + toStr(id))
         val raw: String = this.lineAt(this.texts, id)
-        println("[dbg] tx1 raw=[" + raw + "]")
         // 反转义
         var result: String = ""
         var i: Int = 0
@@ -247,7 +245,6 @@ fun mirKidsAt(list: String, index: Int): Int {
 
 /// 取第 index 个以 sep 分隔的字段。
 fun mirFieldAt(text: String, index: Int, sep: String): String {
-    println("[dbg] mfa0 idx=" + toStr(index) + " len=" + toStr(text.length))
     var i: Int = 0
     var fieldStart: Int = 0
     var cur: Int = 0

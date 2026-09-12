@@ -153,3 +153,19 @@ fun aotListContains(lines: String, name: String): Boolean {
     }
     return false
 }
+
+/// 取限定名的最后一段：`Collections.emptyList` → `emptyList`；无 `.` 时原样返回。
+fun aotLastSegment(name: String): String {
+    var start: Int = 0
+    var i: Int = 0
+    while (i < name.length) {
+        if (toStr(name[i]) == ".") {
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if (start == 0) {
+        return name
+    }
+    return aotSlice(name, start, name.length - start)
+}

@@ -87,6 +87,11 @@ fun preludeTable(): String {
         "aura_lang_std_String_toUpperCase|i8*|i8*\n" +
         "aura_lang_std_String_toLowerCase|i8*|i8*\n" +
         "aura_lang_std_String_trim|i8*|i8*\n" +
+        "aura_lang_std_Collections_emptyList|i8*|\n" +
+        "aura_lang_std_Collections_listAppend|i8*|i8*,i8*\n" +
+        "aura_lang_std_Collections_count|i64|i8*\n" +
+        "aura_lang_std_Collections_getAt|i8*|i8*,i64\n" +
+        "aura_lang_std_Collections_listSet|void|i8*,i64,i8*\n" +
         "aura_lang_std_Math_sin|double|double\n" +
         "aura_lang_std_Math_cos|double|double\n" +
         "aura_lang_std_Math_sqrt|double|double\n" +

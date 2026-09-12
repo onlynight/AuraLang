@@ -468,6 +468,9 @@ class HirLowerer {
             return this.lowerValDecl(ast, id)
         } else if (kind == "VarDecl") {
             return this.lowerVarDecl(ast, id)
+        } else if (kind == "Function") {
+            // 类体/嵌套块中的函数声明（类方法）——此前未处理，导致类方法整体丢失
+            return this.lowerFunction(ast, id)
         } else if (kind == "Return") {
             return this.lowerReturn(ast, id)
         } else if (kind == "If") {

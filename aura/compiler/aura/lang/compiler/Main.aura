@@ -149,64 +149,46 @@ fun compile(source: String): CompileResult {
     val r = CompileResult()
 
     // ── 1. 前端：Lexer + Parser ──
-    println("[dbg] P1")
     val p = Parser(source)
-    println("[dbg] P2")
     val root = p.parseProgram()
-    println("[dbg] P3")
     val ast = p.ast
     val errors = p.errors
     r.astCount = ast.count
     r.parseErrors = errors.count
-    println("[dbg] P4 astCount=" + toStr(r.astCount) + " errs=" + toStr(r.parseErrors))
     if (errors.count > 0) {
         return r
     }
 
     // ── 2. 语义分析（Sema）──
-    println("[dbg] S1")
     val checker = TypeChecker()
-    println("[dbg] S1b ctor ok")
     checker.tcCheck(ast)
-    println("[dbg] S2")
     val sErr = checker.tcGetErrors()
     r.semaErrors = sErr.count
 
     // ── 3. AST → HIR ──
-    println("[dbg] H1")
     val hl = HirLowerer()
     val hirRoot = hl.lower(ast)
-    println("[dbg] H2")
     val hir = hl.hir
     r.hirCount = hir.count
-    println("[dbg] H2b hirCount=" + toStr(r.hirCount))
 
     // ── 4. HIR → MIR ──
-    println("[dbg] M1")
     val ml = MirLowerer()
     val mirRoot = ml.lower(hir)
-    println("[dbg] M2")
     val mir = ml.mir
     r.mirCount = mir.count
-    println("[dbg] M2b mirCount=" + toStr(r.mirCount) + " textlen=" + toStr(mir.texts.length)
-        + " kindslen=" + toStr(mir.kinds.length))
 
     // ── 5. MIR → 字节码 ──
-    println("[dbg] C1")
     val cg = Codegen()
     val bc = cg.emit(mir)
-    println("[dbg] C2")
     r.bytecode = bc
     r.constPool = cg.constPoolStr()
     r.funcTable = cg.funcTableStr()
     r.varTable = cg.varTableStr()
 
     // ── 6. VM 执行 ──
-    println("[dbg] V1")
     val vm = VmRunner()
     vm.loadBytecode(r.bytecode, r.constPool, r.funcTable)
     val out = vm.run()
-    println("[dbg] V2")
     r.result = toStr(out)
     r.vmError = vm.getError()
 
@@ -369,7 +351,7 @@ fun cliStem(p: String): String {
 /// CLI 用法说明。
 fun cliUsage(): String {
     return "用法: aura-compiler <input.aura> [-o <output.exe>]\n" +
-        "      aura-compiler                  无参数时运行内置自检样例"
+        "      aura-compiler                  无参数时仅打印本说明（自检见 runSelfTest）"
 }
 
 /// CLI 模式：读取命令行参数 → 读源文件 → AOT 产出原生可执行文件。
@@ -424,12 +406,23 @@ fun runCli(): Unit {
     }
 }
 
-/// 编译器入口：有命令行参数时编译指定源文件；否则运行若干编译管线自检样例。
+/// 编译器入口：有命令行参数时编译指定源文件，否则仅打印用法。
+///
+/// 注意：自检样例**不再**在无参数时自动运行；需要回归自检时显式调用
+/// [`runSelfTest`]（保持 `main` 的产出干净，便于 CLI 与 AOT 自举场景）。
 fun main() {
     if (Process.argCount() >= 2) {
         runCli()
         return
     }
+    println(cliUsage())
+}
+
+/// 编译管线自检：依次运行算术 / 循环 / 分支 / 函数调用 / 递归样例，
+/// 并额外走通 AOT（HIR → LLVM IR → 原生 exe）与 JIT（叶子函数编译执行）链路。
+///
+/// 默认**不**被 `main` 调用；需要验证编译器自身时手动调用本方法。
+fun runSelfTest() {
     println(banner())
     println(CompilerInfo.phase())
 

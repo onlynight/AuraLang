@@ -88,11 +88,9 @@ class Ast {
 
     /// 追加一个节点，返回其 id。
     fun add(kind: String, text: String, ty: String, sp: Span, children: String): Int {
-        println("[dbg] aa1")
         val id: Int = this.count
         this.count = id + 1
         this.kinds.add(kind)
-        println("[dbg] aa2")
         // 手动转义换行符（避免 replace 在 VM 内类调用时未链接）
         var escaped: String = ""
         var i: Int = 0
@@ -106,18 +104,14 @@ class Ast {
             }
             i = i + 1
         }
-        println("[dbg] aa3")
         this.texts.add(escaped)
         this.tys.add(ty)
-        println("[dbg] aa4")
         this.spans.add(
             toStr(sp.start) + " " + toStr(sp.end) + " "
             + toStr(sp.startLine) + " " + toStr(sp.startCol) + " "
             + toStr(sp.endLine) + " " + toStr(sp.endCol)
         )
-        println("[dbg] aa5")
         this.kids.add(children)
-        println("[dbg] aa6")
         return id
     }
 

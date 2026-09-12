@@ -1006,10 +1006,6 @@ fn emit_variable_decl(
     } else if let Some(init_expr) = init {
         // 先发射初始化器获取其类型
         let (val_ir, val_ty) = emit_expr_val(ctx, blocks, init_expr)?;
-        eprintln!(
-            "[DBG emit_variable_decl] name={}, inferred val_ty={}",
-            name, val_ty
-        );
         let var_name = ctx.fresh_var();
         {
             let cur = blocks.last_mut();
@@ -1898,10 +1894,6 @@ fn emit_variable_load(
     name: &str,
 ) -> Result<(String, String), AotError> {
     if let Some(slot) = ctx.lookup_var(name).cloned() {
-        eprintln!(
-            "[DBG emit_variable_load] name={}, llvm_ty={}",
-            name, slot.llvm_ty
-        );
         let tmp = ctx.fresh_var();
         let cur = blocks.last_mut();
         cur.body.push(format!(
@@ -1910,7 +1902,6 @@ fn emit_variable_load(
         ));
         Ok((tmp, slot.llvm_ty))
     } else {
-        eprintln!("[DBG emit_variable_load] name={} NOT FOUND", name);
         // 未声明变量：作为外部引用（可能是函数调用）
         Ok((name.to_string(), "i32".to_string()))
     }
@@ -3595,10 +3586,6 @@ fn emit_member_access(
     // 普通成员访问：使用 extractvalue 从结构体值中提取字段
     let (obj_ir, obj_ty) = emit_expr_val(ctx, blocks, object)?;
     let tmp = ctx.fresh_var();
-    eprintln!(
-        "[DBG emit_member_access] name={}, obj_ir={}, obj_ty={}",
-        name, obj_ir, obj_ty
-    );
 
     // 内建属性：字符串 `{ i8*, i64 }` 的 length / size → 第 1 个字段（len）。
     // 若不特判，会落入下方「按字段名全局查找」的兜底分支取到字段 0（数据指针）。
@@ -3642,7 +3629,6 @@ fn emit_member_access(
     // 注意：`extractvalue` 的结构体类型必须与字段索引来自**同一个类**，
     // 否则会生成 `extractvalue %struct.Token …, 1` 这类错类型 IR。
     let owner = resolve_member_field_owner(ctx, object, Some(&obj_ty), name);
-    eprintln!("[DBG emit_member_access] owner={:?}", owner);
     let (field_llvm_ty, field_idx) = owner
         .as_ref()
         .map(|(_, ty, idx)| (ty.clone(), *idx))
@@ -3655,7 +3641,6 @@ fn emit_member_access(
             "i8*".to_string()
         }
     });
-    eprintln!("[DBG emit_member_access] owner_struct={:?}", owner_struct);
 
     // 判断对象是指针还是值
     let is_pointer = obj_ty.ends_with('*') || obj_ty == "i8*" || obj_ty == "ptr";
@@ -3726,10 +3711,6 @@ fn resolve_member_field_owner(
 ) -> Option<(String, String, usize)> {
     let mut candidates: Vec<String> = Vec::new();
     let mut obj_type_resolved = false;
-    eprintln!(
-        "[DBG resolve_member_field_owner] name={}, obj_ty={:?}, object={:?}",
-        name, obj_ty, object
-    );
     if let Some(t) = obj_ty {
         if let Some(cls) = struct_name_of_ty(t) {
             candidates.push(cls);
@@ -3738,10 +3719,6 @@ fn resolve_member_field_owner(
     }
     if let HirExpr::Var(var) = object {
         if var == "this" || var == "self" {
-            eprintln!(
-                "[DBG resolve_member_field_owner] var={}, current_class={:?}",
-                var, ctx.current_class
-            );
             if let Some(cls) = &ctx.current_class {
                 candidates.push(cls.clone());
                 obj_type_resolved = true;
