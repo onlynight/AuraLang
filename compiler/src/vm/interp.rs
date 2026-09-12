@@ -486,11 +486,12 @@ impl Vm {
                 let locals = closure_info.locals;
                 let capture_count = closure_info.capture_count as usize;
                 let func_idx = closure_info.func_idx as usize;
-                // 弹出捕获值（按序）
+                // 弹出捕获值（按序）：栈顶是最后一个捕获，弹出后需反转为声明顺序
                 let mut captures = Vec::with_capacity(capture_count);
                 for _ in 0..capture_count {
                     captures.push(self.pop(top)?);
                 }
+                captures.reverse();
                 // 创建闭包对象
                 let heap_data = crate::vm::heap::HeapData::Closure {
                     func_name: closure_name,

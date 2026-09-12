@@ -63,8 +63,11 @@ class TypeMapper {
         }
         if (ty.startsWith("Pointer<")) { return "ptr" }
         if (ty.startsWith("(")) { return "ptr" }
-        // 用户自定义结构体/命名类型占位符
-        return "%struct." + sanitizeLlvm(ty)
+        // 用户自定义结构体 / 类：实例统一以**指针**表示（Phase 6.5.1）。
+        // 与 `emitNewStruct`（返回实例指针）、字段访问（gep on `%struct.X*`）、
+        // 以及 `inferType`（构造结果为指针）保持一致；同时满足 Aura 的引用语义
+        //（类实例按引用共享，而非按值拷贝 —— AOT 按值拷贝会丢失字段修改）。
+        return "%struct." + sanitizeLlvm(ty) + "*"
     }
 
     /// 可空类型映射：标量包装为 `{ <inner>, i1 }`，其余保留内部类型。

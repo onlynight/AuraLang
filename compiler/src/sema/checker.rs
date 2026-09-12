@@ -119,7 +119,7 @@ impl Checker {
 
         // 预置内置函数（std 内置，简化版）
         let builtin_span = Span::single(0, 1, 1);
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "println",
             vec![ParamSym {
                 name: "message".into(),
@@ -131,7 +131,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "print",
             vec![ParamSym {
                 name: "message".into(),
@@ -143,7 +143,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "listOf",
             // 注册 10 个默认参数，使 listOf 接受 0-10 个任意类型参数
             (0..10)
@@ -165,7 +165,7 @@ impl Checker {
             "mutableListOf",
             "arrayListOf",
         ] {
-            let _ = symbols.insert_function(
+            let _ = symbols.insert_builtin_function(
                 ctor,
                 (0..10)
                     .map(|i| ParamSym {
@@ -180,7 +180,7 @@ impl Checker {
                 builtin_span,
             );
         }
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "Box",
             vec![ParamSym {
                 name: "value".into(),
@@ -194,7 +194,7 @@ impl Checker {
         );
 
         // 类型查询与内省函数（prelu，免 import）
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "typeof",
             vec![ParamSym {
                 name: "value".into(),
@@ -206,7 +206,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "isNull",
             vec![ParamSym {
                 name: "value".into(),
@@ -218,7 +218,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "isNotNull",
             vec![ParamSym {
                 name: "value".into(),
@@ -230,7 +230,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "isZero",
             vec![ParamSym {
                 name: "value".into(),
@@ -242,7 +242,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "isPositive",
             vec![ParamSym {
                 name: "value".into(),
@@ -254,7 +254,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "isNegative",
             vec![ParamSym {
                 name: "value".into(),
@@ -266,7 +266,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "toBool",
             vec![ParamSym {
                 name: "value".into(),
@@ -278,7 +278,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "sizeOf",
             vec![ParamSym {
                 name: "value".into(),
@@ -290,7 +290,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "hash",
             vec![ParamSym {
                 name: "value".into(),
@@ -302,7 +302,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "compare",
             vec![
                 ParamSym {
@@ -322,7 +322,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "clone",
             vec![ParamSym {
                 name: "value".into(),
@@ -334,7 +334,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "identity",
             vec![ParamSym {
                 name: "value".into(),
@@ -348,7 +348,7 @@ impl Checker {
         );
 
         // 测试断言函数（prelu，免 import）
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "assertTrue",
             vec![
                 ParamSym {
@@ -368,7 +368,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "assertFalse",
             vec![
                 ParamSym {
@@ -388,7 +388,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "assertEq",
             vec![
                 ParamSym {
@@ -414,7 +414,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "assertNotEq",
             vec![
                 ParamSym {
@@ -440,7 +440,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "assertNotNull",
             vec![
                 ParamSym {
@@ -460,7 +460,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "assertNull",
             vec![
                 ParamSym {
@@ -554,7 +554,7 @@ impl Checker {
                 Ty::Boolean,
             ),
         ] {
-            let _ = symbols.insert_function(
+            let _ = symbols.insert_builtin_function(
                 name,
                 params
                     .into_iter()
@@ -572,7 +572,7 @@ impl Checker {
         }
 
         // AOT 直调内置函数（Demo 3）
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "load_shared_library",
             vec![ParamSym {
                 name: "path".into(),
@@ -584,7 +584,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "call_func",
             vec![
                 ParamSym {
@@ -610,7 +610,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "unload_shared_library",
             vec![ParamSym {
                 name: "module_id".into(),
@@ -3004,6 +3004,16 @@ impl Checker {
             return Ty::Error;
         }
         let name = overloads[0].name.clone();
+
+        // 用户定义符号优先于编译器内置（prelude）符号：用户重载/定义同名函数时
+        // 遮蔽内置签名（如用户自定义 `fun <T> identity(x: T): T` 覆盖内置
+        // `identity(Any): Any`），避免无谓的重载歧义。
+        let filtered: Vec<Symbol> = if overloads.iter().any(|s| !s.is_builtin) {
+            overloads.iter().filter(|s| !s.is_builtin).cloned().collect()
+        } else {
+            overloads.to_vec()
+        };
+        let overloads: &[Symbol] = &filtered;
 
         // Phase 1: 检查从非 suspend 上下文调用 suspend 函数
         if !self.is_in_suspend_fn && self.suspend_functions.contains(&name) {

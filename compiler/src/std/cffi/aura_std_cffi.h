@@ -236,11 +236,30 @@ void aura_arc_decrement(const void *ptr);
 /** 协程挂起（AOT 下为 no-op，VM 运行时处理） */
 void aura_coroutine_yield(const void *ctx);
 
-/** 堆分配（返回指针） */
+/** 堆分配（返回指针）；受内存上限管辖 */
 void *aura_malloc(int64_t size);
 
 /** 堆释放 */
 void aura_free(const void *ptr);
+
+// ── 内存上限保护（默认 8 GiB，可用环境变量 AURA_MEM_LIMIT_MB 覆盖） ──────────
+
+/** 设置内存上限（MiB；<=0 表示不限制）。覆盖环境变量。 */
+void aura_mem_set_limit_mb(int64_t mb);
+
+/** 当前存活分配字节数（诊断用）。 */
+int64_t aura_mem_used_bytes(void);
+
+/** 当前生效的内存上限字节数（0 = 不限制；诊断用）。 */
+int64_t aura_mem_limit_bytes(void);
+
+/** 统一分配 / 重分配 / 释放（带上限检查；运行时内部一律走这三个）。 */
+void *aura_mem_alloc(int64_t n);
+void *aura_mem_realloc(void *p, int64_t n);
+void aura_mem_free(void *p);
+
+/** 复制一份以 NUL 结尾的字符串（受内存上限管辖）。 */
+char *aura_mem_strdup(const char *s);
 
 /** 创建字符串对象（返回字符串指针） */
 const char *aura_string_new(const char *data, int64_t len);

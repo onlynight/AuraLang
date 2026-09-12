@@ -26,6 +26,7 @@ import "../aura/compiler/aura/lang/compiler/aot/Target.aura"
 import "../aura/compiler/aura/lang/compiler/aot/Optimize.aura"
 import "../aura/compiler/aura/lang/compiler/aot/TypeMapper.aura"
 import "../aura/compiler/aura/lang/compiler/aot/Runtime.aura"
+import "../aura/compiler/aura/lang/compiler/aot/StdSigs.aura"
 import "../aura/compiler/aura/lang/compiler/aot/Ffi.aura"
 import "../aura/compiler/aura/lang/compiler/aot/Dwarf.aura"
 import "../aura/compiler/aura/lang/compiler/aot/Emit.aura"
@@ -106,7 +107,7 @@ fun testTypeMapper(): Int {
     t.assertEq(tm.map("Unit"), "", "Unit → void")
     t.assertEq(tm.map("String"), "{ i8*, i64 }", "String → struct")
     t.assertEq(tm.map("Any"), "i8*", "Any → i8*")
-    t.assertEq(tm.map("Player"), "%struct.Player", "user type → %struct")
+    t.assertEq(tm.map("Player"), "%struct.Player*", "user type → %struct pointer")
     t.assertEq(tm.map("List<Int>"), "i8*", "List<Int> → i8*")
     t.assertEq(tm.map("Pointer<Int>"), "ptr", "Pointer → ptr")
     t.assertEq(tm.map(""), "", "empty → empty")

@@ -1774,7 +1774,9 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
     }
 
     // 将内置 println 注册为原生函数（若语义分析已声明）
-    if !natives.iter().any(|n| n.name == "println") {
+    if !natives.iter().any(|n| n.name == "println")
+        && !functions.iter().any(|f| f.name == "println")
+    {
         natives.push(HirFunction {
             name: "println".into(),
             params: vec![HirParam {
@@ -1796,6 +1798,12 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
 
     // Phase 1: 注册所有 prelude 函数为原生函数（17 个免import内置）
     for &name in crate::std::decl::PRELUDE_NAMES {
+        // 用户定义函数遮蔽同名 prelude 内置：不得再注册原生符号，
+        // 否则 AOT 会同时生成 `declare @name` 与 `define @name`，llc 报
+        // "invalid redefinition of function"；调用点也会错派到原生签名。
+        if functions.iter().any(|f| f.name == name) {
+            continue;
+        }
         if !natives.iter().any(|n| n.name == name) {
             // 推断参数和返回类型
             let (params, ret) = match name {
@@ -3978,8 +3986,58 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                 }
                 _ => "__call".to_string(),
             };
-            // 默认参数填充 + vararg 打包
-            let mut all_args: Vec<HirExpr> = args.iter().map(desugar_expr).collect();
+            // 命名参数重排：按被调函数声明的形参顺序组织实参。
+            let params_meta = FUNCTION_PARAMS.with(|f| f.borrow().get(&callee_name).cloned());
+            let mut all_args: Vec<HirExpr> =
+                if args.iter().any(|a| matches!(a, Expr::NamedArg { .. })) {
+                    if let Some(params) = &params_meta {
+                        let mut slots: Vec<Option<HirExpr>> = vec![None; params.len()];
+                        let mut next_pos = 0usize;
+                        for a in args {
+                            match a {
+                                Expr::NamedArg {
+                                    name,
+                                    value,
+                                    ..
+                                } => {
+                                    if let Some(pi) = params.iter().position(|p| &p.name == name) {
+                                        slots[pi] = Some(desugar_expr(value));
+                                    } else {
+                                        slots.push(Some(desugar_expr(value)));
+                                    }
+                                }
+                                other => {
+                                    while next_pos < params.len() && slots[next_pos].is_some() {
+                                        next_pos += 1;
+                                    }
+                                    if next_pos < params.len() {
+                                        slots[next_pos] = Some(desugar_expr(other));
+                                        next_pos += 1;
+                                    } else {
+                                        slots.push(Some(desugar_expr(other)));
+                                    }
+                                }
+                            }
+                        }
+                        let last = slots.iter().rposition(|s| s.is_some()).map_or(0, |i| i + 1);
+                        let mut out = Vec::with_capacity(last);
+                        for (i, slot) in slots.into_iter().take(last).enumerate() {
+                            match slot {
+                                Some(e) => out.push(e),
+                                None => {
+                                    if let Some(dv) = &params[i].default_value {
+                                        out.push(dv.as_ref().clone());
+                                    }
+                                }
+                            }
+                        }
+                        out
+                    } else {
+                        args.iter().map(desugar_expr).collect()
+                    }
+                } else {
+                    args.iter().map(desugar_expr).collect()
+                };
             let params_opt = FUNCTION_PARAMS.with(|f| f.borrow().get(&callee_name).cloned());
             if let Some(params) = params_opt {
                 // 默认参数填充：补充有默认值但未提供的参数

@@ -41,20 +41,25 @@ import aura.lang.std.String
 /// HIR 节点表示（扁平 arena，与 Ast.aura 结构一致）。
 class Hir {
 
-    /// 节点种类（每行一个）。
-    var kinds: String = ""
+    /// 节点种类（**堆列表**：追加摊还 O(1)、下标 O(1)）。
+    ///
+    /// 说明：原先用字符串 `+` 逐项拼接（5 条流 × n 次追加 → O(n²)，且每次
+    /// `kindOf/textOf/...` 都要 `fieldAt` 从头线性扫描 → 访问也 O(n)）。
+    /// 合并 ~40 个模块时这是 6.5.10 自举的主要瓶颈，故与 `Ast` 统一改为
+    /// `arrayListOf` 堆列表（Rust 侧 `__list_new`/`__list_push` 原地追加）。
+    var kinds: List<String> = arrayListOf<String>()
 
-    /// 节点主文本：标识符名 / 字面量文本 / 运算符（每行一个，换行已转义）。
-    var texts: String = ""
+    /// 节点主文本：标识符名 / 字面量文本 / 运算符（堆列表，换行已转义）。
+    var texts: List<String> = arrayListOf<String>()
 
-    /// 节点类型名（每行一个；无类型信息时为空）。
-    var tys: String = ""
+    /// 节点类型名（堆列表；无类型信息时为空串）。
+    var tys: List<String> = arrayListOf<String>()
 
-    /// Span（每行一个：`start end sl sc el ec`，空格分隔）。
-    var spans: String = ""
+    /// Span（堆列表，每项 `start end sl sc el ec`，空格分隔）。
+    var spans: List<String> = arrayListOf<String>()
 
-    /// 子节点 id 列表（每行一个：逗号分隔，可为空行）。
-    var kids: String = ""
+    /// 子节点 id 列表（堆列表，每项为逗号分隔串，可为空串）。
+    var kids: List<String> = arrayListOf<String>()
 
     /// 节点总数。
     var count: Int = 0
@@ -65,29 +70,48 @@ class Hir {
     // ── 构造 ──
 
     /// 追加一个节点，返回其 id。
+    ///
+    /// 注意：`id` 取 `kinds.size`、并在追加后回写 `count = kinds.size`。
+    /// 这样即使 `Hir` 实例被**浅拷贝**（Rust AOT 后端对结构体参数/字段按值传递），
+    /// 拷贝与原值仍共享同一组堆列表（`List` = `i8*`），`count` 也能自愈一致；
+    /// 否则标量 `count` 会在拷贝间失步（曾导致原生编译器的 HIR 静默为空）。
     fun add(kind: String, text: String, ty: String, sp: Span, children: String): Int {
-        val id: Int = this.count
-        this.count = id + 1
-        this.kinds = this.kinds + kind + "\n"
-        // 手动转义换行符（避免 replace 在 VM 内类调用时未链接）
-        var escaped: String = ""
-        var i: Int = 0
-        var len: Int = text.length
-        while (i < len) {
-            val c: String = toStr(text[i])
-            if (c == "\n") {
-                escaped = escaped + "\\n"
-            } else {
-                escaped = escaped + c
+        val id: Int = this.kinds.size
+        this.kinds.add(kind)
+        // 手动转义换行符（避免 replace 在 VM 内类调用时未链接）。
+        // 绝大多数 text 不含换行：先单次扫描，无换行则直接复用，
+        // 避免逐字符重建长文本（token 文本可达数千字符）。
+        val tlen: Int = text.length
+        var escaped: String = text
+        var hasNl: Boolean = false
+        var k: Int = 0
+        while (k < tlen) {
+            if (toStr(text[k]) == "\n") {
+                hasNl = true
+                break
             }
-            i = i + 1
+            k = k + 1
         }
-        this.texts = this.texts + escaped + "\n"
-        this.tys = this.tys + ty + "\n"
-        this.spans = this.spans + toStr(sp.start) + " " + toStr(sp.end) + " "
+        if (hasNl) {
+            var buf: String = ""
+            var i: Int = 0
+            while (i < tlen) {
+                if (toStr(text[i]) == "\n") {
+                    buf = buf + "\\n"
+                } else {
+                    buf = buf + toStr(text[i])
+                }
+                i = i + 1
+            }
+            escaped = buf
+        }
+        this.texts.add(escaped)
+        this.tys.add(ty)
+        this.spans.add(toStr(sp.start) + " " + toStr(sp.end) + " "
             + toStr(sp.startLine) + " " + toStr(sp.startCol) + " "
-            + toStr(sp.endLine) + " " + toStr(sp.endCol) + "\n"
-        this.kids = this.kids + children + "\n"
+            + toStr(sp.endLine) + " " + toStr(sp.endCol))
+        this.kids.add(children)
+        this.count = this.kinds.size
         return id
     }
 
@@ -100,12 +124,12 @@ class Hir {
 
     /// 第 id 个节点的种类。
     fun kindOf(id: Int): String {
-        return this.lineAt(this.kinds, id)
+        return hirItemAt(this.kinds, id)
     }
 
     /// 第 id 个节点的主文本。
     fun textOf(id: Int): String {
-        val raw: String = this.lineAt(this.texts, id)
+        val raw: String = hirItemAt(this.texts, id)
         // 手动反转义换行符（避免 replace 在 VM 内类调用时未链接）
         var result: String = ""
         var i: Int = 0
@@ -124,12 +148,12 @@ class Hir {
 
     /// 第 id 个节点的类型名。
     fun tyOf(id: Int): String {
-        return this.lineAt(this.tys, id)
+        return hirItemAt(this.tys, id)
     }
 
     /// 第 id 个节点的位置。
     fun spanOf(id: Int): Span {
-        val line: String = fieldAt(this.spans, id, "\n")
+        val line: String = hirItemAt(this.spans, id)
         return Span(
             toIntOf(fieldAt(line, 0, " ")), toIntOf(fieldAt(line, 1, " ")),
             toIntOf(fieldAt(line, 2, " ")), toIntOf(fieldAt(line, 3, " ")),
@@ -139,7 +163,7 @@ class Hir {
 
     /// 第 id 个节点的子节点 id 列表（逗号分隔串）。
     fun kidsOf(id: Int): String {
-        return this.lineAt(this.kids, id)
+        return hirItemAt(this.kids, id)
     }
 
     /// 第 id 个节点的第 i 个子节点 id（越界返回 -1）。
@@ -286,6 +310,47 @@ class HirLowerer {
         val rootHirId: Int = this.hir.add("HirProgram", "", "", program.spanOf(rootIdx), hirKids)
         this.hir.rootId = rootHirId
         return rootHirId
+    }
+
+    // ── 多模块合并（Phase 6.5.10：把多个 AST 的顶层声明降级进同一 HIR）──
+
+    /// 设置目标 HIR（供模块链接器在多个源文件间共享同一产物）。
+    fun useHir(target: Hir) {
+        this.hir = target
+    }
+
+    /// 把 `program` 的顶层声明降级进当前 HIR，返回声明 id 列表（逗号分隔）。
+    ///
+    /// 与 [`lower`] 的区别：不新建 HIR、不添加 `HirProgram` 根，
+    /// 只产出顶层声明，供模块链接器拼接。
+    fun lowerTopLevel(program: Ast): String {
+        this.ast = program
+        val n: Int = program.count
+        var rootIdx: Int = -1
+        var i: Int = 0
+        while (i < n) {
+            if (program.kindOf(i) == "Program") {
+                rootIdx = i
+                break
+            }
+            i = i + 1
+        }
+        if (rootIdx < 0) {
+            return hirNoKids()
+        }
+        val rootKids: String = program.kidsOf(rootIdx)
+        val kCount: Int = hirKidsCount(rootKids)
+        var out: String = hirNoKids()
+        i = 0
+        while (i < kCount) {
+            val childId: Int = hirKidsAt(rootKids, i)
+            val h: Int = this.lowerDecl(program, childId)
+            if (h >= 0) {
+                out = hirKidsAdd(out, h)
+            }
+            i = i + 1
+        }
+        return out
     }
 
     // ── 声明降级 ──
@@ -471,6 +536,9 @@ class HirLowerer {
         } else if (kind == "Function") {
             // 类体/嵌套块中的函数声明（类方法）——此前未处理，导致类方法整体丢失
             return this.lowerFunction(ast, id)
+        } else if (kind == "InitBlock") {
+            // 构造初始化块 `init { ... }` → 合成 `<Class>.init` 方法体（Phase 6.5.1b）
+            return this.lowerInitBlock(ast, id)
         } else if (kind == "Return") {
             return this.lowerReturn(ast, id)
         } else if (kind == "If") {
@@ -493,6 +561,25 @@ class HirLowerer {
             // 其他语句类型（如 Try）暂不处理
             return -1
         }
+    }
+
+    /// 降级构造初始化块：合成 `HirFunction "init"`（仅带方法体，无 HirParam）。
+    ///
+    /// 类体 Block 的某个子节点若是 InitBlock，则本方法产出 HirFunction，
+    /// 使发射器侧的「方法所属类」扫描能把它识别为 `<Class>.init`；
+    /// AOT 的 `X()` 构造在字段初始化后调用它。
+    fun lowerInitBlock(ast: Ast, id: Int): Int {
+        val sp: Span = ast.spanOf(id)
+        val kids: String = ast.kidsOf(id)
+        var bodyId: Int = -1
+        if (hirKidsCount(kids) > 0) {
+            bodyId = this.lowerBlockOrExpr(ast, hirKidsAt(kids, 0))
+        }
+        var hirKids: String = hirNoKids()
+        if (bodyId >= 0) {
+            hirKids = hirKidsAdd(hirKids, bodyId)
+        }
+        return this.hir.add("HirFunction", "init", "", sp, hirKids)
     }
 
     /// 降级 return 语句。
@@ -856,40 +943,33 @@ class HirLowerer {
                         return this.hir.add("HirCall", "Collections.set", "", sp, hirKids)
                     }
                 }
-                // contains(item) → Collections.contains(collection, item)
-                if (memberName == "contains") {
+                // contains(item) / indexOf(item) → Collections.<m>(collection, item)
+                //
+                // 接收者必须作为 kids[0]：与发射器「接收者在 kids[0]」的约定一致
+                // （`set` 分支已如此）。旧实现把 callee 成员节点整个降级成 kids[0]，
+                // 接收者被埋在其 kids 里，实参整体错位 —— 字符串 `indexOf` 因此
+                // 走列表实现恒返回 -1。
+                if (memberName == "contains" || memberName == "indexOf") {
                     val calleeKids: String = ast.kidsOf(calleeId)
-                    val calleeKCount: Int = hirKidsCount(calleeKids)
-                    if (calleeKCount >= 1) {
+                    if (hirKidsCount(calleeKids) >= 1) {
                         var hirKids: String = hirNoKids()
-                        var i: Int = 0
+                        val recvHirId: Int = this.lowerExpr(ast, hirKidsAt(calleeKids, 0))
+                        if (recvHirId >= 0) {
+                            hirKids = hirKidsAdd(hirKids, recvHirId)
+                        }
+                        var i: Int = 1
                         while (i < kCount) {
-                            val childId: Int = hirKidsAt(kids, i)
-                            val childHirId: Int = this.lowerExpr(ast, childId)
+                            val childHirId: Int = this.lowerExpr(ast, hirKidsAt(kids, i))
                             if (childHirId >= 0) {
                                 hirKids = hirKidsAdd(hirKids, childHirId)
                             }
                             i = i + 1
                         }
-                        return this.hir.add("HirCall", "Collections.contains", "", sp, hirKids)
-                    }
-                }
-                // indexOf(item) → Collections.indexOf(collection, item)
-                if (memberName == "indexOf") {
-                    val calleeKids: String = ast.kidsOf(calleeId)
-                    val calleeKCount: Int = hirKidsCount(calleeKids)
-                    if (calleeKCount >= 1) {
-                        var hirKids: String = hirNoKids()
-                        var i: Int = 0
-                        while (i < kCount) {
-                            val childId: Int = hirKidsAt(kids, i)
-                            val childHirId: Int = this.lowerExpr(ast, childId)
-                            if (childHirId >= 0) {
-                                hirKids = hirKidsAdd(hirKids, childHirId)
-                            }
-                            i = i + 1
+                        var qname: String = "Collections.contains"
+                        if (memberName == "indexOf") {
+                            qname = "Collections.indexOf"
                         }
-                        return this.hir.add("HirCall", "Collections.indexOf", "", sp, hirKids)
+                        return this.hir.add("HirCall", qname, "", sp, hirKids)
                     }
                 }
             }
@@ -1009,6 +1089,15 @@ fun hirNoKids(): String {
     return ""
 }
 
+/// 列表安全取项（越界返回空串）；arena 各流（kinds/texts/tys/spans/kids）
+/// 的下标访问统一走此处，O(1)。
+fun hirItemAt(items: List<String>, index: Int): String {
+    if (index < 0 || index >= items.size) {
+        return ""
+    }
+    return items[index]
+}
+
 /// 向子节点列表追加一个 id。
 fun hirKidsAdd(list: String, child: Int): String {
     if (list == "") {
@@ -1017,13 +1106,21 @@ fun hirKidsAdd(list: String, child: Int): String {
     return list + "," + toStr(child)
 }
 
-/// 子节点列表的长度。
+/// 子节点列表的长度（单次扫描计数；不再 split 分配整张表）。
 fun hirKidsCount(list: String): Int {
     if (list == "") {
         return 0
     }
-    val parts: List<String> = list.split(",")
-    return parts.size
+    var count: Int = 1
+    var i: Int = 0
+    val len: Int = list.length
+    while (i < len) {
+        if (toStr(list[i]) == ",") {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    return count
 }
 
 /// 取子节点列表的第 index 个 id。
@@ -1031,15 +1128,32 @@ fun hirKidsAt(list: String, index: Int): Int {
     return hirToIntOf(hirFieldAt(list, index, ","))
 }
 
-/// 取第 index 个以 sep 分隔的字段（使用 substringBefore/After）。
+/// 取第 index 个以 sep 分隔的字段。
+///
+/// 单次扫描 + 一次切片：旧实现用 `substringAfter` 链，索引 i 的调用要
+/// 分配 i 个「剩余串」，配合无 GC 的 AOT 运行时是平方级内存黑洞。
 fun hirFieldAt(text: String, index: Int, sep: String): String {
-    var cur: Int = 0
-    var remaining: String = text
-    while (cur < index) {
-        remaining = remaining.substringAfter(sep)
-        cur = cur + 1
+    if (index < 0) {
+        return ""
     }
-    return remaining.substringBefore(sep)
+    val len: Int = text.length
+    var cur: Int = 0
+    var start: Int = 0
+    var i: Int = 0
+    while (i < len) {
+        if (toStr(text[i]) == sep) {
+            if (cur == index) {
+                return text.substring(start, i)
+            }
+            cur = cur + 1
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if (cur == index) {
+        return text.substring(start, len)
+    }
+    return ""
 }
 
 /// 十进制字符串 → Int。

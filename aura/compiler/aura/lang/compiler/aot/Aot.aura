@@ -325,6 +325,11 @@ fun aotBuildExeFromHir(hir: Hir, moduleName: String, outDir: String, llvmHome: S
         clangCmd = clangCmd + " " + cffiObj
     }
     clangCmd = clangCmd + " -o " + exePath + " " + optFlag
+    // Windows 目标：COFF 对象经 lld-link 链接时需要显式 `subsystem`
+    // （否则报 `lld-link: error: subsystem must be defined`）。
+    if (tgt.contains("windows")) {
+        clangCmd = clangCmd + " -Wl,/subsystem:console"
+    }
     r.clangExit = Process.run(clangCmd)
 
     r.ok = (r.llcExit == 0) && (r.cffiExit == 0) && (r.clangExit == 0)

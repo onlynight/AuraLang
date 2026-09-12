@@ -286,19 +286,129 @@ HIR 采用与 AST 一致的「扁平 arena」表示（`kinds/texts/tys/spans/kid
 | 6.5.6 | 整型统一提升 + 浮点比较 | `Emit.commonNumTy` / `coerceValue`；浮点比较走 `fcmp`（`oeq/one/olt/…`） | ✅ |
 | 6.5.7 | std 类型/签名解析 | HIR 字面量与 `val/var` 类型推断；发射器 `stdClassReceiver` 识别 `Math.sin(x)` 等**类静态调用**并解析 `aura_lang_std_<Class>_<method>` 签名与返回类型 | ✅（按需解析；独立签名表可后续补） |
 | 6.5.8 | `llc` 门禁 + 失败保留现场 | `Aot.aotBuildExeFromHir`：stderr 重定向到 `<mod>.llc.log`；失败保留 `.ll`/`.llc.log` 并回读首个错误行 `irError`，不再让 `clang` 掩盖根因 | ✅ |
-| 6.5.9 | 端到端用例 | `tests/phase6_5_aot_tests.aura`（IR 表示 / 调用点符号 / 整型提升 / 控制流 / 字符串 / std 静态调用 / 结构体 / 门禁，共 8 组 44 断言，`RESULT: PASS`） | ✅ |
+| 6.5.9 | 端到端用例 | `tests/phase6_5_aot_tests.aura`（IR 表示 / 调用点符号 / 整型提升 / 控制流 / 字符串 / std 静态调用 / std 签名表 / 集合 / 结构体 / 类 / 多模块链接 / 门禁，共 **12 组 80 断言**，`RESULT: PASS`） | ✅ |
+| 6.5.1b | 类方法 / 字段 / 构造函数方法体 | HIR 保留类体内 `Function` 与 `init` 块；发射器以 `Class.method` 限定方法符号、方法内裸字段名改写为 `this.field`、按接收者类型分派同名方法；Parser 支持主构造参数 `class X(val a: T, var b: T)`；`init { … }` 合成 `<Class>.init` 并由构造调用 | ✅ |
+| 6.5.7b | 独立 std 函数签名表 | 新增 `aot/StdSigs.aura`：`stdSignatureTable()`（唯一真相源，与 `aura_std_cffi.c` 导出的 `aura_lang_std_<Class>_<method>` 同源）、`stdSignature` / `stdSymbolFor` / `stdSignatureFor` / `stdSymbolOfQualified`；`Runtime.callSignature` 与 `runtimeDeclarations` 均接入（补齐 `Math.sqrt` 等此前缺失的声明） | ✅ |
+| 6.5.11 | 集合下标 / 遍历 | HIR `HirIndex` 发射（集合 → `Collections.getAt`、字符串 → `String.charAt`）；列表元素类型跟踪（`name\|elemTy`）驱动 Plan A 拆箱（`aura_to_int_any`）；`for-in` 循环变量按元素类型绑定 | ✅ |
+| 6.5.12 | 多模块链接（6.5.10 前置） | 新增 `aot/ModuleLink.aura`：入口文件 + 递归 `import` → 单一 HIR；支持相对文件导入、点分包名（`aura/compiler/`、`aura/core/`、裸路径三根）、`a.*` / `a.{B,C}` 展开、去重与路径规范化；HIR 侧新增 `HirLowerer.lowerTopLevel` / `useHir` 供合并 | ✅ |
 
 附带修复（Phase 9 遗留的控制流 IR 缺陷）：`emitIf` / `emitWhile` 未在分支间重置
 终结标志，导致空基本块 `expected instruction opcode`；现按分支分别重置，且两分支
 均终结时发射 `unreachable`，并在终结语句后自动开启死代码块。
 
+附带修复（6.5.1b 期间暴露）：
+- **std 类静态调用此前从未生效**：HIR 把 `Math.sin(x)` 降级为 `HirCall text="sin"`
+  且 `kids[0]` 是接收者 `HirVar("Math")`，而 `stdClassReceiver` 只认 `HirMember`
+  形态 → 退化到未声明符号 `@sin(i32 0, double 0.0)`（原用例断言只匹配到声明行，属
+  空断言）。现兼容两种 HIR 形态，`Math.sin` 正确发射 `@aura_lang_std_Math_sin`。
+- **无限定/无字段类的构造**：无字段类此前发射 `%struct.X = type opaque` 且不登记，
+  导致 `X()` 走成未声明函数调用；现改为 `{ i8 }` 并纳入 `isStructSym`。
+- **`i8* → 整数` 缺 Plan A 拆箱**：`list[i]` 读回 7 会得到 15；现统一经
+  `aura_to_int_any` 拆箱（与 Rust AOT 后端一致）。
+- **Math 别名缺失**：`aura_std_cffi.c` 补 `Math.sqrt` / `Math.round` / `Math.abs`
+  的 `aura_lang_std_*` 转发（`preludeTable` 早已声明 `Math_sqrt`，此前链接期 undefined）。
+
 ### 尚未完成（后续接续点）
 
 | # | 任务 | 现状 | 说明 |
 |---|------|------|------|
-| 6.5.1b | 类方法 / 构造函数方法体 | `HirLowerer.lowerBlock` 丢弃类体内的 `Function` 节点 | 需先让 HIR 保留类方法（可按 `Class.method` 命名下沉为顶层函数），才能分派与自举 |
-| 6.5.7b | 独立 std 函数签名表 | 现为发射器按名/按类解析 | 若需完整重载/参数类型校验，应建集中签名表 |
-| 6.5.10 | Aura 编译器自身 AOT 出 exe | 未打通 | 依赖 6.5.1b / 6.5.7b；当前 Aura 侧发射器覆盖标量 / 字符串 / 结构体 / 控制流 / 函数 |
+| 6.5.10 | Aura 编译器自身 AOT 出 exe | 前置能力已就位（类 / 集合 / std 签名表 / 多模块链接），**尚未端到端跑通** | 剩余阻塞：① `when` / lambda / 字符串插值 / `try` 在 Aura 侧 HIR 降级仍不完整；② **发射期剩余超线性开销**：`Emit.aura`（15k 节点 / 140 方法）单模块发射仍需数分钟（详见「性能优化」节）；③ std 包名 `aura.lang.std.String` 无对应 `.aura` 文件（其实现由 C 运行库提供），链接器按「不可解析即忽略」处理。 |
+| 6.5.15 | 编译器自身的性能优化（6.5.10 前置） | **HIR arena 已改为堆列表**（与 `Ast` 一致）；**表/变量查找已由 O(len²) 改为单次 `split` 线性扫描** | 合并 48 个模块 / 49876 节点现在可完成（此前无法完成）；小模块发射 8–18x 提速。剩余见「性能优化」节 |
+
+### 性能优化（6.5.15：为 6.5.10 自举扫清吞吐瓶颈）
+
+用「合并编译器全部模块并发射 IR」实测（`clock()` 计时，Windows / release bootstrap）：
+
+| 修前 → 修后 | 规模 | 耗时 |
+|---|---|---|
+| HIR arena（字符串 `+=` → `arrayListOf` 堆列表） | 链接 `Emit.aura`（8 模块） | 修前 >200s 未完成 → **数秒** |
+| 同上 | 链接 `Main.aura`（48 模块 / 49876 节点） | 修前无法完成 → **约 1–2 分钟完成** |
+| 表/变量查找（`aotLineAt` 逐行重扫 → 单次 `split`） | 发射 `TypeMapper`（415 节点 / 758 行 IR） | 7.8 → **0.44 tick**（~18x） |
+| 同上 | 发射 `AotUtil`（651 节点 / 982 行） | 7.5 → **0.45 tick**（~17x） |
+| 同上 | 发射 `Runtime`（1589 节点 / 2790 行） | 14.4 → **1.77 tick**（~8x） |
+
+改动点：
+- `hir/Hir.aura`：5 条 arena 流（kinds/texts/tys/spans/kids）由「五行逐项 `+=` 的 String」改为
+  `List<String>`（`arrayListOf`，Rust 侧 `__list_new`/`__list_push` 原地摊还 O(1) 追加），
+  下标访问经 `hirItemAt` O(1)；与 `Ast` 的既有表示统一。
+- `aot/Emit.aura`：`fvField` / `funcSignatureOf` / `methodOwnerClass` /
+  `structFieldIndex` / `structFieldLineAt` / `structFieldCount` / `isStructSym`
+  改为 `split("\n")` 一次 + 线性扫描（原 `aotLineAt` 每次从头字符扫描 → 单次查询 O(len²)）。
+- `aot/Runtime.aura` / `aot/StdSigs.aura` / `aot/AotUtil.aura`：`tableSignature` /
+  `declarationsFrom*` / `runtimeFunctionNames` / `isRuntimeFunction` / `stdSignature` /
+  `aotListContains` 同样改为 `split` 一次。
+
+> **剩余瓶颈（已定位，结论与最初假设不同）**：`Emit.aura` 的**发射**阶段慢，但**不是**
+> 发射器的累积缓冲（`fBody +=` 之类）造成的：
+>
+> - 分阶段计时（临时插桩）：`CBackend`（5449 节点）`s1_structs=0.04s` / `s2_owner=0.10s` /
+>   `s3_sigs=0.20s` / **`s4_funcs=20.3s`**；语句级计时显示**单条 `HirReturn` 就要 0.4–1.5s**，
+>   连 `fun describe()` 这种 1 条语句的函数也要 1.1s —— 而它的 `fBody` 只有几十字节，
+>   说明瓶颈不在字符串拼接长度。
+> - 调用计数（临时插桩）：整个 CBackend 发射只发生 `inferType=5056` / `fvField=6063` /
+>   `funcSignatureOf=1534` 次 —— 算法层面的查找次数很小，排除 O(n²) 查找。
+> - **VM 基准（`build/probe5/bench.aura`）**：`loop1M = 1.18s`（≈1µs / 次循环迭代）；
+>   `concat 20k = 0.06s`（拼接很快）；**`split 20k（对 20KB 串）= 56.7s`**（每次 `split`
+>   按元素数分配，代价极高）。
+>
+> 因此：**发射期成本本质是「Aura 编译器跑在 Rust 解释器上的执行速度」（≈1µs/op）**，
+> 不是某处 O(n²)。这也解释了「内存一直涨但结果不出」——是 CPU 长时间空转 + 大量瞬时
+> 分配，而非泄漏。
+>
+> **对「6.5.10 自举」的含义**：把发射器缓冲改成 `IrBuf`（方案 A）**不会解决**问题
+> （单条语句就已 0.4s，与缓冲长度无关）。因此改走「**根本路径：让 Aura 编译器以原生进程运行**」，
+> 本轮进展与结论如下。
+>
+> **已修复/打通（本轮）**：
+> 1. `build/bin/aura.exe` 曾是**过期的 bootstrap 二进制**：AOT 出的 exe `argc=0`（argv 注入失效），
+>    且有大量 `[DBG …]` 调试刷屏。重新 `cargo build --release -p cli --features llvm` 后
+>    `argc=3`、无刷屏（纯二进制问题，Rust 源码无需改）。
+> 2. **Aura 侧链接命令缺 Windows `subsystem`**：`Aot.aotBuildExeFromHir` 现对 windows 目标追加
+>    `-Wl,/subsystem:console`，否则 lld-link 报 `subsystem must be defined`（见 `aot/Aot.aura`）。
+> 3. `Main.aura` 新增 `aotBuildExeFile`：CLI 走 `AotModuleLinker`（多模块），使原生编译器能消费
+>    自身 + 48 个依赖模块（原先 `sourceToHir` 只会解析单文件）。
+> 4. 已产出原生载体 `build/bin/aura-compiler-native.exe`（Rust AOT 后端编译 Main.aura）。
+>
+> **剩余阻塞（已逐层定位到 Rust AOT 后端的「值/指针 + String 表示」）**：
+>
+> 关键节点（本轮修复后现状）：
+> - **原生编译器已能正确 AOT 单文件程序**：`build/bin/aura-compiler-native.exe build/probe7/hello.aura -o x.exe`
+>   → `x.exe` 输出 `hello`、退出码 3（此前对 1 行输入也产出 0 个 `define`）。
+> - **多模块（含 Parser 图）**：模块链接与发射完成，但 llc 拒绝：
+>   `'%var.60' defined with type 'i32' but expected '%struct.Span = type {...}'`。
+>   IR 里 `Span(...)` 被发成 `call i32 @Span(...)` 而非 alloca+字段初始化
+>   → 说明 `isStructSym("Span")` 在 AOT 运行时返回了 false（`structs` 里其实有该类型）。
+> - **最小复现 `build/probe7/identity.aura`**（类实例作实参后被改字段）：
+>   VM 返回 `1`，AOT 返回 `0`。对应 IR 为 `@Ctl_bump(i8* %arg.self, %struct.Holder %arg.x)`
+>   —— 接收者是 `i8*` 指针，但**类类型形参按值传递**（`%struct.Holder` 拷贝），
+>   故被调方对字段的修改丢失。
+> - 已确认前端（Lexer/Parser/Ast）在 AOT 下与 VM **逐项一致**；`List<String>` 类字段
+>   （`arrayListOf` + `.add` + `[i]`）在 AOT 下也正确。
+>
+> 本轮针对该根因已落地的最小修复：`Hir.add` 不再自增标量 `count`，而是
+> `count = kinds.size`（**自愈**）——因为 AOT 会把 `Hir` 结构体**浅拷贝**，标量 `count`
+> 会在拷贝间失步，而 `List` 字段是 `i8*` 会共享。这一改动直接让原生编译器从
+> 「0 define」变为「单文件正确 AOT」。
+>
+> **结论 / 下一步工作量（Rust 侧）**：
+> 1. **类类型值必须按引用传递**（字段、形参、构造结果统一为 `i8*`/`%struct.X*`），
+>    而不是 `%struct.X` 值拷贝（见 `identity.aura` 复现；这是 Aura 面向对象语义的硬要求）。
+> 2. **String 表示统一**：AOT 把 `String` 映射为 `{ i8*, i64 }`，而 `String` 方法
+>    （`contains`/`startsWith`/`substringAfter`/`split`…）按 `i8*` 调用点实现
+>    → 在 Aura 编译器这类「重度使用字符串方法」的程序上出现静默错误
+>    （正是 `isStructSym` 失效的成因）。需要统一的 String 表示 + std 签名表。
+>
+> 这两项都是 `compiler/src/codegen/aot/`（Rust）的类型/表示加固，与下文
+> 「剩余根因：AOT 依赖 sema 类型信息、值/指针表示混用」完全一致。
+>
+> **两条可选后续**：
+> 1. 加固 Rust AOT 后端（`compiler/src/codegen/aot/emit.rs` 的值/指针/结构体表示），直到能正确
+>    编译 Main.aura；这是「原生载体 + Aura 侧自举」的必经之路，但属 Rust 侧改动。
+> 2. 或先做短期项（缓存常量表 / 去热路径 `split`）把 VM 路径提速 2–4x，作为过渡（不足以支撑
+>    50k 节点全量自举）。
+| 6.5.13 | AOT `try/catch` | 未实现 | 需在 LLVM IR 层引入 `setjmp/longjmp` 桥（平台 ABI 相关），当前解释器路径行为正确 |
+| 6.5.14 | AOT 闭包 / lambda | 未实现 | HIR 尚未降级 lambda（落到 `HirExpr` 占位），需函数指针 + 环境结构体方案 |
+| 6.5.7c | 把 std 签名表接入 sema | 未接入 | 现仅供 AOT 发射器/声明；sema 仍按名解析（`String.split` 等推断为 `Any`） |
 
 > **回退策略**：Phase 6.5 未达标时，AOT 视为「实验性后端」，执行路径回退 VM/JIT；
 > 删除 `aura/lang/compiler/aot/` 即完全回退，Rust 编译器不受影响。

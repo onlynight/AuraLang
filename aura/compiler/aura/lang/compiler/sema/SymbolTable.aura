@@ -127,7 +127,7 @@ class SymbolTable {
     fun stExitScope() {
         val line: String = this.stLineAt(this.scopes, this.current)
         val parentStr: String = this.stField(line, 0, "|")
-        val parent: Int = toIntOf(parentStr)
+        val parent: Int = symToIntOf(parentStr)
         this.current = parent
     }
 
@@ -159,7 +159,7 @@ class SymbolTable {
         val parentStr: String = this.stField(line, 0, "|")
         val isFn: String = this.stField(line, 1, "|")
         val cntStr: String = this.stField(line, 2, "|")
-        val newCnt: Int = toIntOf(cntStr) + 1
+        val newCnt: Int = symToIntOf(cntStr) + 1
         val oldLine: String = this.stLineAt(this.scopes, this.current)
         val newLine: String = parentStr + "|" + isFn + "|" + toStr(newCnt)
         this.scopes = this.scopes.replace(oldLine, newLine)
@@ -182,7 +182,7 @@ class SymbolTable {
         while (scope >= 0 && guard < 100) {
             val line: String = this.stLineAt(this.scopes, scope)
             val cntStr: String = this.stField(line, 2, "|")
-            val cnt: Int = toIntOf(cntStr)
+            val cnt: Int = symToIntOf(cntStr)
             // 遍历该作用域的所有符号
             var i: Int = 0
             while (i < cnt) {
@@ -197,7 +197,7 @@ class SymbolTable {
                 i = i + 1
             }
             val parentStr: String = this.stField(line, 0, "|")
-            val parent: Int = toIntOf(parentStr)
+            val parent: Int = symToIntOf(parentStr)
             // 初始作用域（scope 0）的 parent 也是 0，此时退出循环
             if (parent == scope) {
                 break
@@ -217,7 +217,7 @@ class SymbolTable {
         while (s < scope) {
             val line: String = this.stLineAt(this.scopes, s)
             val cntStr: String = this.stField(line, 2, "|")
-            start = start + toIntOf(cntStr)
+            start = start + symToIntOf(cntStr)
             s = s + 1
         }
         return start + i
@@ -306,7 +306,7 @@ class SymbolTable {
     fun stCurrentScopeCount(): Int {
         val line: String = this.stLineAt(this.scopes, this.current)
         val cntStr: String = this.stField(line, 2, "|")
-        return toIntOf(cntStr)
+        return symToIntOf(cntStr)
     }
 }
 
@@ -335,7 +335,7 @@ fun stFieldAt(scopes: String, index: Int): String {
 }
 
 /// 十进制字符串 → Int。
-fun toIntOf(text: String): Int {
+fun symToIntOf(text: String): Int {
     val digits: String = "0123456789"
     val len: Int = text.length()
     var total: Int = 0

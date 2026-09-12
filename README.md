@@ -44,9 +44,13 @@ In parallel with the Rust compiler, a **compiler written entirely in Aura** is b
 | P1 | Lexer + Parser + AST | ✅ |
 | P2 | Sema (Type, SymbolTable, TypeInfo, TypeChecker) + HIR (Lower, Desugar, Mono, Inline, Fold) | ✅ |
 | P3 | MIR (IR types, HIR→MIR lowering, DCE/CSE/const-prop optimizations) | ✅ |
-| P4 | Bytecode Codegen (MIR→.auc) + VM interpreter | 🔲 In progress |
-| P5 | VM enhancements (closures, tail-call, stack frames) | 🔲 Not started |
-| P6 | AOT backend (LLVM IR generation) | 🔲 Not started |
+| P4 | Bytecode Codegen (MIR→.auc) + VM interpreter | ✅ |
+| P5 | VM enhancements (closures, tail-call, stack frames) | ✅ |
+| P6 | AOT backend (LLVM IR generation) | ✅ |
+| P6.5 | AOT hardening: classes / std signature table / collections / multi-module link | 🚧 In progress |
+| P7 | JIT (Cranelift) | ✅ |
+| P8 | Core & standard library in Aura | ✅ |
+| P9 | End-to-end compile pipeline (VM / JIT / AOT) | ✅ |
 
 ### Test Results (Phase 0–2)
 
@@ -68,6 +72,9 @@ sema/       Type, SymbolTable, TypeInfo, TypeChecker — Type system & semantic 
 hir/        Hir, Desugar, Mono, Inline, Fold — HIR lowering & optimization passes
 mir/        Mir, MirLower, MirOpt  — MIR IR, HIR→MIR lowering, optimization
 codegen/    Codegen                — MIR → bytecode emission
+vm/         VmRunner/Closures/TailCall/FrameManager — VM interpreter
+aot/        Emit/StdSigs/Runtime/ModuleLink          — LLVM IR emitter, std signature table, multi-module linker
+jit/        JitCore/JitState/JitOpt                  — JIT backend
 errors/     CompileError           — Diagnostic model
 Main.aura                       — Compiler entry skeleton
 ```

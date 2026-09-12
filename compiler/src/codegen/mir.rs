@@ -509,18 +509,26 @@ impl MirBuilder {
             locals.insert(p.name.clone());
         }
 
-        // 2. 收集捕获变量（free vars）
-        let mut captures: Vec<String> = Vec::new();
-        Self::collect_free_vars_in_block(body, &mut locals, &mut captures);
+        // 2. 收集捕获变量（free vars），仅保留父作用域中确实存在的变量
+        let mut raw_captures: Vec<String> = Vec::new();
+        Self::collect_free_vars_in_block(body, &mut locals, &mut raw_captures);
+        let captures: Vec<String> =
+            raw_captures.into_iter().filter(|name| self.lookup(name).is_some()).collect();
 
         // 3. 为每个捕获变量分配当前函数中的寄存器
         let capture_regs: Vec<Reg> = captures.iter().filter_map(|name| self.lookup(name)).collect();
 
-        // 4. 构建闭包函数体
-        let param_slots: Vec<usize> = (0..params.len()).collect();
-        let mut builder = MirBuilder::new(params.len());
+        // 4. 构建闭包函数体。
+        // 槽位约定（与普通函数一致）：槽 0 保留给函数指针，实参从槽 1 开始绑定。
+        // 调用约定：captures 在前、用户参数在后（见 CallClosure 的 all_args 构造），
+        // 因此 captures 占 `1..=C`，用户参数占 `C+1..=C+P`。
+        let cap_count = captures.len();
+        let mut builder = MirBuilder::new(cap_count + params.len() + 1);
+        for (i, name) in captures.iter().enumerate() {
+            builder.declare(name, i + 1);
+        }
         for (i, p) in params.iter().enumerate() {
-            builder.declare(&p.name, i);
+            builder.declare(&p.name, cap_count + i + 1);
         }
 
         // 5. 降级闭包体

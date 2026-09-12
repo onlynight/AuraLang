@@ -49,6 +49,7 @@ import aura.lang.compiler.vm.VmRunner
 import aura.lang.compiler.aot.TypeMapper
 import aura.lang.compiler.aot.AotUtil
 import aura.lang.compiler.aot.Runtime
+import aura.lang.compiler.aot.StdSigs
 import aura.lang.compiler.aot.Ffi
 import aura.lang.compiler.aot.Target
 import aura.lang.compiler.aot.Optimize
@@ -57,6 +58,7 @@ import aura.lang.compiler.aot.Linker
 import aura.lang.compiler.aot.CBackend
 import aura.lang.compiler.aot.Dwarf
 import aura.lang.compiler.aot.Aot
+import aura.lang.compiler.aot.ModuleLink
 
 // JIT 后端
 import aura.lang.compiler.jit.JitUtil
@@ -238,6 +240,19 @@ fun aotBuildExeSource(source: String, moduleName: String, outDir: String,
     return aotBuildExeFromHir(sourceToHir(source), moduleName, outDir, llvmHome)
 }
 
+/// 源**文件**（含其递归 `import` 依赖）→ 原生可执行文件。
+///
+/// 与 [`aotBuildExeSource`] 的区别：先经 `AotModuleLinker` 把入口文件及其
+/// 递归导入合并为单一 HIR（多模块链接，6.5.12），再交给 Aura 侧 AOT 后端。
+/// 这是「Aura 编译器 AOT 自身」（6.5.10）所必需的入口：Main.aura 有 40+ 个
+/// 模块依赖，单文件 `sourceToHir` 无法解析。
+fun aotBuildExeFile(inputPath: String, moduleName: String, outDir: String,
+                    llvmHome: String): AotExeResult {
+    val linker = AotModuleLinker()
+    val hir: Hir = linker.link(inputPath)
+    return aotBuildExeFromHir(hir, moduleName, outDir, llvmHome)
+}
+
 /// 源码 → JIT：就地把指定函数编译为 JIT 单元并执行。
 ///
 /// **与 VM 共享同一字节码**：`JitCore.tryCompileInModule` 直接消费 `Codegen.emit`
@@ -393,8 +408,7 @@ fun runCli(): Unit {
     }
 
     println(banner() + " — AOT 编译 " + inputPath)
-    val source: String = FileSystem.readText(inputPath)
-    val r: AotExeResult = aotBuildExeSource(source, stem, outDir, llvmHomeDefault())
+    val r: AotExeResult = aotBuildExeFile(inputPath, stem, outDir, llvmHomeDefault())
     if (r.ok) {
         println("✓ 已生成可执行文件: " + r.exePath)
     } else {

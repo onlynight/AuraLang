@@ -14,6 +14,7 @@ package aura.lang.compiler.aot
 
 import aura.lang.std.String
 import aura.lang.compiler.aot.AotUtil
+import aura.lang.compiler.aot.StdSigs
 
 /// 全部 runtime 函数声明表。
 fun runtimeTable(): String {
@@ -99,20 +100,41 @@ fun preludeTable(): String {
 }
 
 /// 生成所有 runtime 函数 + 调用点符号的 LLVM 外部声明（去重）。
+///
+/// 声明来源（后者过滤掉前者已声明者）：
+///   1. `runtimeTable()`   Aura runtime 库（ARC/GC/字符串基础）
+///   2. `preludeTable()`   既有调用点符号层（向后兼容）
+///   3. `stdSignatureTable()` 独立 std 签名表（Phase 6.5.7b，完整覆盖）
 fun runtimeDeclarations(): String {
     var out: String = "; ---- Aura Runtime Declarations ----\n"
+    // C 入口用到：把宿主 argc/argv 注入运行时（`Process.arg/argCount` 依赖它）
+    out = out + "declare void @aura_args_set(i32, i8**)\n"
     out = out + declarationsFrom(runtimeTable())
-    out = out + declarationsFromFiltered(preludeTable(), runtimeFunctionNames())
+    val seenR: String = runtimeFunctionNames()
+    out = out + declarationsFromFiltered(preludeTable(), seenR)
+    out = out + declarationsFromFiltered(stdSignatureTable(), seenR + tableNameList(preludeTable()))
+    return out
+}
+
+/// 取一张符号表的全部名字（每行以换行结尾），用于声明去重。
+fun tableNameList(table: String): String {
+    var out: String = ""
+    val lines: List<String> = table.split("\n")
+    var i: Int = 0
+    while (i < lines.size) {
+        out = out + aotFieldAt(lines[i], 0, "|") + "\n"
+        i = i + 1
+    }
     return out
 }
 
 /// 把一张符号表渲染为 `declare` 行集合。
 fun declarationsFrom(table: String): String {
     var out: String = ""
-    var n: Int = aotLineCount(table)
+    val lines: List<String> = table.split("\n")
     var i: Int = 0
-    while (i < n) {
-        val line: String = aotLineAt(table, i)
+    while (i < lines.size) {
+        val line: String = lines[i]
         if (aotFieldAt(line, 0, "|") != "") {
             out = out + declarationLine(line)
         }
@@ -124,10 +146,10 @@ fun declarationsFrom(table: String): String {
 /// 渲染一张符号表，跳过 `seen`（换行分隔的名字清单）中已有的符号。
 fun declarationsFromFiltered(table: String, seen: String): String {
     var out: String = ""
-    var n: Int = aotLineCount(table)
+    val lines: List<String> = table.split("\n")
     var i: Int = 0
-    while (i < n) {
-        val line: String = aotLineAt(table, i)
+    while (i < lines.size) {
+        val line: String = lines[i]
         val name: String = aotFieldAt(line, 0, "|")
         if (name != "" && !aotListContains(seen, name)) {
             out = out + declarationLine(line)
@@ -145,10 +167,17 @@ fun declarationLine(line: String): String {
     return "declare " + ret + " @" + name + "(" + params + ")\n"
 }
 
-/// 调用点符号签名查询（runtime → C FFI → prelude，返回 `ret|paramsSpaced`）。
+/// 调用点符号签名查询（std → runtime → C FFI → prelude，返回 `ret|paramsSpaced`）。
 ///
-/// 发射器统一用本函数决定调用的返回类型与参数形态。
+/// 发射器统一用本函数决定调用的返回类型与参数形态。每个调用点都会查一次，
+/// 所以查询本身必须**零表构建、零切片**：先前实现每次都重建并 `split` 整张表，
+/// 普通调用点（用户函数/方法名）白跑四张表——无 GC 时累积泄漏到数 GB。
 fun callSignature(name: String): String {
+    // std 表：仅 `aura_lang_std_*` 符号可能命中（守卫在最热的路径上快速失败）
+    val std: String = stdSignature(name)
+    if (std != "") {
+        return std
+    }
     val sig: String = runtimeSignature(name)
     if (sig != "") {
         return sig
@@ -161,17 +190,26 @@ fun callSignature(name: String): String {
 }
 
 /// 从任意符号表查询签名（`ret|paramsSpaced`），未命中返回 ""。
+///
+/// 实现为**单次子串扫描**（`startsWith` / `contains` + `substringAfter`）：
+/// 不构建 `List`、不逐行切片，只有常数次字符串分配。
 fun tableSignature(table: String, name: String): String {
-    var n: Int = aotLineCount(table)
-    var i: Int = 0
-    while (i < n) {
-        val line: String = aotLineAt(table, i)
-        if (aotFieldAt(line, 0, "|") == name) {
-            return aotFieldAt(line, 1, "|") + "|" + aotCsvToSpaced(aotFieldAt(line, 2, "|"))
-        }
-        i = i + 1
+    if (name == "") {
+        return ""
     }
-    return ""
+    val needle: String = name + "|"
+    val mid: String = "\n" + needle
+    var rest: String = ""
+    if (table.startsWith(needle)) {
+        rest = table.substringAfter(needle)
+    } else {
+        if (!table.contains(mid)) {
+            return ""
+        }
+        rest = table.substringAfter(mid)
+    }
+    val line: String = rest.substringBefore("\n")
+    return aotFieldAt(line, 0, "|") + "|" + aotCsvToSpaced(aotFieldAt(line, 1, "|"))
 }
 
 /// 方法名 → 调用点符号（bare method call，接收者为第 0 个实参）。
@@ -184,12 +222,21 @@ fun methodCallSymbol(name: String): String {
     if (name == "startsWith") { return "aura_lang_std_String_startsWith" }
     if (name == "endsWith") { return "aura_lang_std_String_endsWith" }
     if (name == "indexOf") { return "aura_lang_std_String_indexOf" }
+    if (name == "lastIndexOf") { return "aura_lang_std_String_lastIndexOf" }
     if (name == "countChar") { return "aura_lang_std_String_countChar" }
     if (name == "substring") { return "aura_lang_std_String_substring" }
+    if (name == "substringBefore") { return "aura_lang_std_String_substringBefore" }
+    if (name == "substringAfter") { return "aura_lang_std_String_substringAfter" }
     if (name == "charAt") { return "aura_lang_std_String_charAt" }
+    if (name == "charCodeAt") { return "aura_lang_std_String_charCodeAt" }
     if (name == "toUpperCase") { return "aura_lang_std_String_toUpperCase" }
     if (name == "toLowerCase") { return "aura_lang_std_String_toLowerCase" }
     if (name == "trim") { return "aura_lang_std_String_trim" }
+    if (name == "replace") { return "aura_lang_std_String_replace" }
+    if (name == "replaceAll") { return "aura_lang_std_String_replaceAll" }
+    if (name == "padStart") { return "aura_lang_std_String_padStart" }
+    if (name == "split") { return "aura_lang_std_String_split" }
+    if (name == "equals") { return "aura_lang_std_String_equals" }
     return ""
 }
 
@@ -197,10 +244,10 @@ fun methodCallSymbol(name: String): String {
 fun runtimeFunctionNames(): String {
     val table: String = runtimeTable()
     var out: String = ""
-    var n: Int = aotLineCount(table)
+    val lines: List<String> = table.split("\n")
     var i: Int = 0
-    while (i < n) {
-        out = out + aotFieldAt(aotLineAt(table, i), 0, "|") + "\n"
+    while (i < lines.size) {
+        out = out + aotFieldAt(lines[i], 0, "|") + "\n"
         i = i + 1
     }
     return out
@@ -214,10 +261,10 @@ fun runtimeFunctionCount(): Int {
 /// 检查一个符号名是否为 runtime 函数。
 fun isRuntimeFunction(name: String): Boolean {
     val table: String = runtimeTable()
-    var n: Int = aotLineCount(table)
+    val lines: List<String> = table.split("\n")
     var i: Int = 0
-    while (i < n) {
-        if (aotFieldAt(aotLineAt(table, i), 0, "|") == name) {
+    while (i < lines.size) {
+        if (aotFieldAt(lines[i], 0, "|") == name) {
             return true
         }
         i = i + 1
@@ -227,30 +274,10 @@ fun isRuntimeFunction(name: String): Boolean {
 
 /// runtime 函数签名（`ret|paramsSpaced`），非 runtime 函数返回 ""。
 fun runtimeSignature(name: String): String {
-    val table: String = runtimeTable()
-    var n: Int = aotLineCount(table)
-    var i: Int = 0
-    while (i < n) {
-        val line: String = aotLineAt(table, i)
-        if (aotFieldAt(line, 0, "|") == name) {
-            return aotFieldAt(line, 1, "|") + "|" + aotCsvToSpaced(aotFieldAt(line, 2, "|"))
-        }
-        i = i + 1
-    }
-    return ""
+    return tableSignature(runtimeTable(), name)
 }
 
 /// C FFI 函数签名（`ret|paramsSpaced`），非 C FFI 函数返回 ""。
 fun cffiSignature(name: String): String {
-    val table: String = cffiTable()
-    var n: Int = aotLineCount(table)
-    var i: Int = 0
-    while (i < n) {
-        val line: String = aotLineAt(table, i)
-        if (aotFieldAt(line, 0, "|") == name) {
-            return aotFieldAt(line, 1, "|") + "|" + aotCsvToSpaced(aotFieldAt(line, 2, "|"))
-        }
-        i = i + 1
-    }
-    return ""
+    return tableSignature(cffiTable(), name)
 }

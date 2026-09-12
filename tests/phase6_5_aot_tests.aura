@@ -48,6 +48,7 @@ import "../aura/compiler/aura/lang/compiler/hir/Fold.aura"
 import "../aura/compiler/aura/lang/compiler/aot/TypeMapper.aura"
 import "../aura/compiler/aura/lang/compiler/aot/AotUtil.aura"
 import "../aura/compiler/aura/lang/compiler/aot/Runtime.aura"
+import "../aura/compiler/aura/lang/compiler/aot/StdSigs.aura"
 import "../aura/compiler/aura/lang/compiler/aot/Ffi.aura"
 import "../aura/compiler/aura/lang/compiler/aot/Target.aura"
 import "../aura/compiler/aura/lang/compiler/aot/Optimize.aura"
@@ -56,6 +57,7 @@ import "../aura/compiler/aura/lang/compiler/aot/Linker.aura"
 import "../aura/compiler/aura/lang/compiler/aot/CBackend.aura"
 import "../aura/compiler/aura/lang/compiler/aot/Dwarf.aura"
 import "../aura/compiler/aura/lang/compiler/aot/Aot.aura"
+import "../aura/compiler/aura/lang/compiler/aot/ModuleLink.aura"
 
 // ═════════════════════════════════════════════════════════════
 // 夹具
@@ -245,9 +247,334 @@ fun testStdStaticCalls(): Int {
         "    return 1\n" +
         "}\n"
     val ir: String = p65EmitIr(src)
-    t.assertTrue(ir.contains("@aura_lang_std_Math_sin(double"), "static call symbol")
+    t.assertTrue(ir.contains("call double @aura_lang_std_Math_sin(double"), "static call symbol")
     t.assertTrue(ir.contains("fcmp oeq double"), "float compare via fcmp")
     t.assertEq(p65BuildRun("p65_std", src), 0, "Math.sin runs")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 7b：独立 std 函数签名表（6.5.7b）
+// ═════════════════════════════════════════════════════════════
+
+fun testStdSignatureTable(): Int {
+    val t = TestRunner()
+    t.begin("p6.5.stdsigs")
+
+    // 表内查询（唯一真相源）
+    t.assertEq(stdSignature("aura_lang_std_Math_sqrt"), "double|double", "Math.sqrt signature")
+    t.assertEq(stdSignature("aura_lang_std_String_split"), "i8*|i8*, i8*", "String.split signature")
+    t.assertEq(stdSignatureFor("FileSystem", "writeText"), "void|i8*, i8*", "FileSystem.writeText")
+    t.assertEq(stdSignatureFor("Collections", "getAt"), "i8*|i8*, i64", "Collections.getAt")
+    t.assertEq(stdSignature("aura_lang_std_NoSuchFn"), "", "unknown std symbol")
+
+    // 符号构造 + callSignature 兜底
+    t.assertEq(stdSymbolFor("Collections", "listAppend"), "aura_lang_std_Collections_listAppend",
+        "qualified symbol")
+    t.assertEq(callSignature("aura_lang_std_String_lastIndexOf"), "i64|i8*, i8*",
+        "callSignature falls back to std table")
+
+    // runtimeDeclarations 覆盖完整表（此前 Math.sqrt 缺失 → 链接期 undefined symbol）
+    val decls: String = runtimeDeclarations()
+    t.assertTrue(decls.contains("declare double @aura_lang_std_Math_sqrt(double)"), "Math.sqrt declared")
+    t.assertTrue(decls.contains("declare i8* @aura_lang_std_String_replace(i8*, i8*, i8*)"),
+        "String.replace declared")
+    t.assertTrue(decls.contains("declare i8* @aura_lang_std_Collections_getAt(i8*, i64)"),
+        "Collections.getAt declared")
+
+    // 端到端：Math.sqrt(16.0) == 4.0
+    val sqrtSrc = "fun main(): Int {\n" +
+        "    if (Math.sqrt(16.0) == 4.0) { return 0 }\n" +
+        "    return 1\n" +
+        "}\n"
+    t.assertEq(p65BuildRun("p65_sqrt", sqrtSrc), 0, "Math.sqrt runs (declaration complete)")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 7c：列表 / 集合取值与遍历（Phase 6.5 覆盖扩展）
+// ═════════════════════════════════════════════════════════════
+
+fun testCollections(): Int {
+    val t = TestRunner()
+    t.begin("p6.5.collections")
+
+    val sizeSrc = "fun main(): Int {\n" +
+        "    val xs = listOf(1, 2, 3)\n" +
+        "    return xs.size\n" +
+        "}\n"
+    t.assertEq(p65BuildRun("p65_list_size", sizeSrc), 3, "listOf + .size")
+
+    val loopSrc = "fun main(): Int {\n" +
+        "    val xs = listOf(1, 2, 3)\n" +
+        "    var s = 0\n" +
+        "    for (x in xs) {\n" +
+        "        s = s + x\n" +
+        "    }\n" +
+        "    return s\n" +
+        "}\n"
+    t.assertEq(p65BuildRun("p65_list_loop", loopSrc), 6, "for-in over Int list (unboxed)")
+
+    val idxSrc = "fun main(): Int {\n" +
+        "    val xs = listOf(10, 20, 30)\n" +
+        "    return xs[1]\n" +
+        "}\n"
+    val irIdx: String = p65EmitIr(idxSrc)
+    t.assertTrue(irIdx.contains("call i8* @aura_lang_std_Collections_getAt"), "index → getAt")
+    t.assertTrue(irIdx.contains("@aura_to_int_any"), "Plan A unbox on index read")
+    t.assertEq(p65BuildRun("p65_list_idx", idxSrc), 20, "list index read")
+
+    // String.split → List<String>，下标 + .length
+    val splitSrc = "fun main(): Int {\n" +
+        "    val parts: List<String> = \"aa,bbb,cc\".split(\",\")\n" +
+        "    val b = parts[1]\n" +
+        "    return b.length\n" +
+        "}\n"
+    t.assertTrue(p65EmitIr(splitSrc).contains("call i8* @aura_lang_std_String_split"), "split symbol")
+    t.assertEq(p65BuildRun("p65_split_idx", splitSrc), 3, "split + index + length")
+
+    // 定长数组：`var a: Int[N]` → `alloca [N x i32]`，下标读写走 gep + load/store。
+    // 注意 HIR 把 `a[i] = v` 降级为 `a = Collections.set(a, i, v)`，发射器须展开
+    // 为元素 store（否则会把 `[N x T]` 当标量整体 store → 非法 IR）。
+    val arrSrc = "fun main(): Int {\n" +
+        "    var nums: Int[6]\n" +
+        "    nums[0] = 7\n" +
+        "    nums[1] = 3\n" +
+        "    return nums[0] + nums[1]\n" +
+        "}\n"
+    val irArr: String = p65EmitIr(arrSrc)
+    t.assertTrue(irArr.contains("alloca [6 x i32]"), "fixed array alloca")
+    t.assertTrue(irArr.contains("getelementptr inbounds [6 x i32]"), "fixed array gep")
+    t.assertEq(p65BuildRun("p65_array", arrSrc), 10, "fixed array read/write")
+
+    // 实参类型来自「带空格 CSV」签名表（`i8*, i64`）时必须插入显式转换：
+    // `length` 返回 i64，存入 Int(i32) 局部后再传给 substring 的 i64 形参。
+    // 此前按 `,` 切出的 " i64" 带前导空格 → intWidth 判为非整数 → 不插 sext，
+    // 生成 `i32` 值传给 `i64` 形参的非法 IR（自举时 llc 报错）。
+    val coerceSrc = "fun main(): Int {\n" +
+        "    val s: String = \"abcd\"\n" +
+        "    val p: Int = s.length\n" +
+        "    val head: String = s.substring(0, p)\n" +
+        "    return head.length\n" +
+        "}\n"
+    val irCoerce: String = p65EmitIr(coerceSrc)
+    t.assertTrue(irCoerce.contains("sext i32"), "spaced-sig arg widened (sext)")
+    t.assertEq(p65BuildRun("p65_coerce", coerceSrc), 4, "arg coercion from spaced sig CSV")
+
+    // 字符串方法不能被 HIR 的 `Collections.xxx` 改写带走（那是列表语义）：
+    // 接收者是字符串时必须选 String 版调用点符号（`Hir.lowerCall` 的
+    // `Collections.*` 分支已把接收者放到 kids[0]，实参不再错位）。
+    val idxOfSrc = "fun main(): Int {\n" +
+        "    val rest: String = \"abc) -> def\"\n" +
+        "    val p: Int = rest.indexOf(\") ->\")\n" +
+        "    if (p < 0) { return 99 }\n" +
+        "    return p\n" +
+        "}\n"
+    t.assertTrue(p65EmitIr(idxOfSrc).contains("@aura_lang_std_String_indexOf"),
+        "String.indexOf symbol (not list variant)")
+    t.assertEq(p65BuildRun("p65_str_indexof", idxOfSrc), 3, "String.indexOf value")
+
+    val containsSrc = "fun main(): Int {\n" +
+        "    val s: String = \"hello world\"\n" +
+        "    if (s.contains(\"world\")) { return 1 }\n" +
+        "    return 0\n" +
+        "}\n"
+    t.assertEq(p65BuildRun("p65_str_contains", containsSrc), 1, "String.contains")
+
+    // 列表 indexOf：元素以 i8* 句柄存放（Plan A 整数标记），
+    // 运行时按句柄类型比较而非无脑 strcmp（否则 `list.indexOf(30)` 解引用整数句柄崩溃）
+    val lidxSrc = "fun main(): Int {\n" +
+        "    val xs = listOf(10, 20, 30)\n" +
+        "    return xs.indexOf(30)\n" +
+        "}\n"
+    t.assertEq(p65BuildRun("p65_list_indexof", lidxSrc), 2, "list indexOf (tagged handle)")
+
+    // `else if` 链被 HIR 降级为表达式形态（HirIfExpr）却出现在语句位置：
+    // 必须按条件语句发射，否则分支永不执行（自举编译器读参数失效的元凶）。
+    val elseIfSrc = "fun main(): Int {\n" +
+        "    var n: Int = 0\n" +
+        "    val a: String = \"x\"\n" +
+        "    if (a == \"-o\") {\n" +
+        "        n = 1\n" +
+        "    } else if (n == 0) {\n" +
+        "        n = 2\n" +
+        "    } else if (n == 3) {\n" +
+        "        n = 5\n" +
+        "    }\n" +
+        "    return n\n" +
+        "}\n"
+    t.assertEq(p65BuildRun("p65_elseif", elseIfSrc), 2, "else-if chain executes")
+
+    // `: Unit` 返回类型：关键字表把 Unit 当硬关键字，类型名解析必须能消费它，
+    // 否则 `fun f(): Unit { ... }` 的整个函数体被跳过（HirFunction 无 kids）。
+    val unitSrc = "class Acc {\n" +
+        "    var total: Int = 0\n" +
+        "    fun add(x: Int): Unit {\n" +
+        "        this.total = this.total + x\n" +
+        "    }\n" +
+        "    fun get(): Int {\n" +
+        "        return this.total\n" +
+        "    }\n" +
+        "}\n" +
+        "fun main(): Int {\n" +
+        "    val a = Acc()\n" +
+        "    a.add(4)\n" +
+        "    a.add(3)\n" +
+        "    return a.get()\n" +
+        "}\n"
+    t.assertEq(p65BuildRun("p65_unit", unitSrc), 7, "Unit-return method body kept")
+
+    // 类静态方法 `Class.method()`（HIR：kids[0] 是类名 HirVar）。
+    // 旧实现落到裸名/表达式分支 → 符号未解析、调用被丢弃（返回值恒 0）。
+    val staticSrc = "class Info {\n" +
+        "    fun name(): String {\n" +
+        "        return \"aura\"\n" +
+        "    }\n" +
+        "    fun size(): Int {\n" +
+        "        return 3\n" +
+        "    }\n" +
+        "}\n" +
+        "fun main(): Int {\n" +
+        "    val s: String = Info.name()\n" +
+        "    if (s != \"aura\") { return 9 }\n" +
+        "    return Info.size()\n" +
+        "}\n"
+    t.assertEq(p65BuildRun("p65_static", staticSrc), 3, "static class method call")
+
+    // 集合字段：`this.items.size` / `this.items[i]` 必须走 count/getAt。
+    // 旧实现只认「局部集合变量」，字段接收者会按字符串处理（strlen/charAt），
+    // 元素个数与元素值全变垃圾 —— 自举编译器 `kindList.size` 因此得到错误
+    // token 数，解析主循环永不结束并持续分配内存。
+    val fieldListSrc = "class Box {\n" +
+        "    var items: List<Int> = listOf(7, 8, 9)\n" +
+        "    fun count(): Int {\n" +
+        "        return this.items.size\n" +
+        "    }\n" +
+        "    fun at(i: Int): Int {\n" +
+        "        return this.items[i]\n" +
+        "    }\n" +
+        "}\n" +
+        "fun main(): Int {\n" +
+        "    val b = Box()\n" +
+        "    if (b.count() != 3) { return 1 }\n" +
+        "    return b.at(1)\n" +
+        "}\n"
+    t.assertEq(p65BuildRun("p65_field_list", fieldListSrc), 8, "list-typed field size/index")
+
+    // 集合参数：`fun f(xs: List<Int>)` 内 `.size` / `xs[i]` 同样按集合处理
+    // （参数此前未登记元素类型 → `items.size` 走 strlen、`items[i]` 走 charAt）。
+    val paramListSrc = "fun total(xs: List<Int>): Int {\n" +
+        "    var sum: Int = 0\n" +
+        "    var i: Int = 0\n" +
+        "    while (i < xs.size) {\n" +
+        "        sum = sum + xs[i]\n" +
+        "        i = i + 1\n" +
+        "    }\n" +
+        "    return sum\n" +
+        "}\n" +
+        "fun main(): Int {\n" +
+        "    return total(listOf(4, 5, 6))\n" +
+        "}\n"
+    t.assertEq(p65BuildRun("p65_param_list", paramListSrc), 15, "list-typed parameter")
+
+    // 值位置的 if 表达式：必须按条件用 phi 选择结果。
+    // 旧实现直接返回 then 的值、忽略条件（分支为块时更是拿到垃圾），
+    // 导致 `val k = if (c) { "A" } else { "B" }` 恒取 then 值。
+    val ifExprSrc = "fun pick(n: Int): String {\n" +
+        "    val kind: String = if (n < 0) { \"neg\" } else { \"pos\" }\n" +
+        "    return kind\n" +
+        "}\n" +
+        "fun num(n: Int): Int {\n" +
+        "    val v: Int = if (n > 0) { 1 } else { 2 }\n" +
+        "    return v\n" +
+        "}\n" +
+        "fun main(): Int {\n" +
+        "    if (pick(-1) != \"neg\") { return 1 }\n" +
+        "    if (pick(3) != \"pos\") { return 2 }\n" +
+        "    if (num(5) != 1) { return 3 }\n" +
+        "    if (num(-5) != 2) { return 4 }\n" +
+        "    return 7\n" +
+        "}\n"
+    t.assertEq(p65BuildRun("p65_ifexpr", ifExprSrc), 7, "if-expression in value position")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 8：类方法 / 字段 / 构造函数（6.5.1b）
+// ═════════════════════════════════════════════════════════════
+
+fun testClassMethods(): Int {
+    val t = TestRunner()
+    t.begin("p6.5.class")
+
+    // 字段布局 + 方法带隐式 self；裸字段名 `n` 必须解析为 `this.n`（而非本地 alloca）
+    val src = "class Counter {\n" +
+        "    var n: Int = 0\n" +
+        "    fun inc(): Int {\n" +
+        "        n = n + 1\n" +
+        "        return n\n" +
+        "    }\n" +
+        "    fun total(step: Int): Int {\n" +
+        "        return n + step\n" +
+        "    }\n" +
+        "}\n" +
+        "fun main(): Int {\n" +
+        "    val c = Counter()\n" +
+        "    c.inc()\n" +
+        "    c.inc()\n" +
+        "    return c.total(10)\n" +
+        "}\n"
+    val ir: String = p65EmitIr(src)
+    t.assertTrue(ir.contains("%struct.Counter = type { i32 }"), "class field layout")
+    t.assertTrue(ir.contains("define i32 @Counter_inc(%struct.Counter* %arg.this)"), "method self param")
+    t.assertTrue(ir.contains("getelementptr inbounds %struct.Counter, %struct.Counter* %var."),
+        "bare field → this.field gep")
+    t.assertFalse(ir.contains("%n.addr = alloca i32"), "field not materialized as local")
+    // inc() 两次（各 1）后 n = 2，total(10) → 12
+    t.assertEq(p65BuildRun("p65_class", src), 12, "class method + field")
+
+    // 不同类的同名方法必须分别限定（Class.method → Class_method）
+    val dup = "class A {\n    fun v(): Int { return 1 }\n}\n" +
+        "class B {\n    fun v(): Int { return 2 }\n}\n" +
+        "fun main(): Int {\n    val a = A()\n    val b = B()\n" +
+        "    return a.v() * 10 + b.v()\n}\n"
+    val irDup: String = p65EmitIr(dup)
+    t.assertTrue(irDup.contains("@A_v("), "A.v qualified")
+    t.assertTrue(irDup.contains("@B_v("), "B.v qualified")
+    t.assertEq(p65BuildRun("p65_class_dup", dup), 12, "same-name methods dispatch by receiver")
+
+    // 主构造函数参数（按位置初始化字段）
+    val ctor = "class Point(val x: Int, var y: Int) {\n" +
+        "    fun sum(): Int { return x + y }\n" +
+        "}\n" +
+        "fun main(): Int {\n" +
+        "    val p = Point(3, 4)\n" +
+        "    p.y = p.y + 10\n" +
+        "    return p.sum()\n" +
+        "}\n"
+    val irCtor: String = p65EmitIr(ctor)
+    t.assertTrue(irCtor.contains("%struct.Point = type { i32, i32 }"), "primary ctor fields")
+    t.assertEq(p65BuildRun("p65_ctor", ctor), 17, "primary constructor + field write")
+
+    // init 初始化块 → 合成 `<Class>.init` 并在构造后调用
+    val initSrc = "class C {\n" +
+        "    var n: Int = 0\n" +
+        "    init {\n" +
+        "        n = 5\n" +
+        "    }\n" +
+        "    fun get(): Int { return n }\n" +
+        "}\n" +
+        "fun main(): Int {\n" +
+        "    val c = C()\n" +
+        "    return c.get()\n" +
+        "}\n"
+    val irInit: String = p65EmitIr(initSrc)
+    t.assertTrue(irInit.contains("define void @C_init(%struct.C* %arg.this)"), "init method synthesized")
+    t.assertTrue(irInit.contains("call void @C_init(%struct.C* "), "ctor calls Class.init")
+    t.assertEq(p65BuildRun("p65_init", initSrc), 5, "init block runs")
 
     return t.report()
 }
@@ -297,14 +624,53 @@ fun testVerifyGate(): Int {
     t.assertTrue(FileSystem.exists(r.llPath), ".ll retained")
     t.assertTrue(FileSystem.exists(r.exePath), "exe produced")
 
-    // 非法 IR（返回类型不符）须被 llc 门禁拦下，并保留现场供定位
+    // 非法 IR（返回类型不符：`Int` 函数返回结构体实例）须被 llc 门禁拦下，
+    // 并保留现场供定位。
+    // 注：`return "oops"` 现已由 coerceValue 合法化为 ptrtoint，不再是非法 IR。
     val bad: AotExeResult = p65Build("p65_bad",
-        "fun main(): Int {\n    return \"oops\"\n}\n")
+        "struct P {\n    var x: Int = 1\n}\n" +
+        "fun main(): Int {\n    val p = P()\n    return p\n}\n")
     t.assertFalse(bad.ok, "invalid IR rejected")
     t.assertTrue(bad.irError != "", "llc error captured")
     t.assertTrue(FileSystem.exists(bad.llPath), ".ll kept on failure")
     t.assertTrue(FileSystem.exists(bad.llcLog), "llc log kept on failure")
     t.assertEq(bad.clangExit, 0, "clang skipped after llc failure")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 9：多模块链接（6.5.10 前置：文件图 → 单一 HIR → AOT）
+// ═════════════════════════════════════════════════════════════
+
+fun testModuleLink(): Int {
+    val t = TestRunner()
+    t.begin("p6.5.modulelink")
+
+    // 点分包名 → 文件路径解析
+    val probe = AotModuleLinker()
+    t.assertEq(probe.resolveOne("aura.lang.compiler.lexer.Span", "."),
+        "aura/compiler/aura/lang/compiler/lexer/Span.aura", "dotted import resolution")
+
+    // 构造双文件夹具（写入 build/，不污染源码树）
+    FileSystem.mkdirP("build/aot-p65/ml/lib")
+    FileSystem.writeText("build/aot-p65/ml/lib/util.aura",
+        "fun add(a: Int, b: Int): Int {\n    return a + b\n}\n")
+    FileSystem.writeText("build/aot-p65/ml/main.aura",
+        "import \"lib/util.aura\"\nfun main(): Int {\n    return add(40, 2)\n}\n")
+
+    val l = AotModuleLinker()
+    val h: Hir = l.link("build/aot-p65/ml/main.aura")
+    t.assertEq(l.loadedCount(), 2, "both modules loaded")
+    t.assertEq(aotLineCount(l.missing), 0, "no missing modules")
+    t.assertTrue(emitLlvmIr(h, "p65_ml", "x86_64-pc-windows-msvc").contains("define i32 @add("),
+        "imported function in merged HIR")
+
+    val r: AotExeResult = aotBuildExeFromHir(h, "p65_ml", "build/aot-p65", llvmHomeDefault())
+    t.assertTrue(r.ok, "linked multi-module program builds")
+    if (r.ok) {
+        t.assertEq(runBuiltExe(r.exePath), 42, "linked multi-module program runs")
+    }
 
     return t.report()
 }
@@ -321,7 +687,11 @@ fun main() {
     failures = failures + testControlFlowEndToEnd()
     failures = failures + testStringRuntimeEndToEnd()
     failures = failures + testStdStaticCalls()
+    failures = failures + testStdSignatureTable()
+    failures = failures + testCollections()
     failures = failures + testStructLayout()
+    failures = failures + testClassMethods()
+    failures = failures + testModuleLink()
     failures = failures + testVerifyGate()
 
     println("")

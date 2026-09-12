@@ -105,6 +105,17 @@ pub(crate) struct EmitCtx {
     /// __ctorN」）：否则未被构造参数或 init 块赋值的字段保持 `undef`，运行期读到
     /// 随机内存，表现为**非确定性**结果（同一二进制每次运行数值都不同）。
     pub class_defaults: HashMap<String, Vec<(usize, String, HirExpr)>>,
+    /// 闭包/函数类型变量的签名：变量名 → (返回 LLVM 类型, 参数 LLVM 类型列表)。
+    /// 用于在调用点对「持有闭包的变量」发射间接调用（`call <ret> %fn(env, args)`）。
+    pub closure_sigs: HashMap<String, (String, Vec<String>)>,
+    /// 函数名 → 返回类型为函数类型时的闭包签名（用于 `val f = makeAdder(5)` 的推断）
+    pub fn_ret_sigs: HashMap<String, Option<(String, Vec<String>)>>,
+    /// 函数名 → 每个形参为函数类型时的闭包签名（用于把 lambda 实参按形参签名发射）
+    pub fn_param_sigs: HashMap<String, Vec<Option<(String, Vec<String>)>>>,
+    /// 当前正在发射的函数的返回类型若为函数类型，其闭包签名
+    pub current_fn_ret_sig: Option<(String, Vec<String>)>,
+    /// 发射 lambda 时使用的期望签名（由变量声明 / 调用实参 / return 设置）
+    pub pending_lambda_sig: Option<(String, Vec<String>)>,
 }
 
 /// 变量槽（LLVM 名称 + 类型）
@@ -161,6 +172,11 @@ impl EmitCtx {
             lambda_counter: 0,
             lambda_funcs: Vec::new(),
             class_defaults: HashMap::new(),
+            closure_sigs: HashMap::new(),
+            fn_ret_sigs: HashMap::new(),
+            fn_param_sigs: HashMap::new(),
+            current_fn_ret_sig: None,
+            pending_lambda_sig: None,
         }
     }
 
@@ -509,6 +525,18 @@ pub fn emit_program(
             })
             .collect();
         ctx.func_param_types.insert(func.name.clone(), param_tys);
+        // 闭包签名：返回类型 / 形参为函数类型时记录，供调用点发射间接调用。
+        let ret_sig =
+            func.ret.as_ref().and_then(as_function_type).and_then(|ft| function_sig_of(&ctx, ft));
+        ctx.fn_ret_sigs.insert(func.name.clone(), ret_sig);
+        let param_sigs: Vec<Option<(String, Vec<String>)>> = func
+            .params
+            .iter()
+            .map(|p| {
+                p.ty.as_ref().and_then(as_function_type).and_then(|ft| function_sig_of(&ctx, ft))
+            })
+            .collect();
+        ctx.fn_param_sigs.insert(func.name.clone(), param_sigs);
     }
     // 预注册类字段类型映射（供 emit_member_access 推断字段类型和索引）
     for struct_def in &program.structs {
@@ -752,6 +780,21 @@ fn emit_function(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErr
         dbg_id = Some(*mid);
     }
 
+    // 闭包上下文：记录当前函数返回类型（若为函数类型）供 `return <lambda>` 使用，
+    // 并把函数类型形参登记为闭包变量（调用点据此发射间接调用）。
+    let cur_ret_sig =
+        func.ret.as_ref().and_then(as_function_type).and_then(|ft| function_sig_of(&*ctx, ft));
+    ctx.current_fn_ret_sig = cur_ret_sig;
+    for (i, p) in func.params.iter().enumerate() {
+        if let Some(sig) =
+            p.ty.as_ref().and_then(as_function_type).and_then(|ft| function_sig_of(&*ctx, ft))
+        {
+            ctx.closure_sigs.insert(p.name.clone(), sig);
+        }
+        // 保留：参数索引与 LLVM 参数名一致（arity 由 HIR 保证）
+        let _ = i;
+    }
+
     // 为参数生成 alloca 并 store
     for (name, ty) in &params {
         let var_name = ctx.fresh_var();
@@ -759,10 +802,10 @@ fn emit_function(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErr
             let cur = blocks.last_mut();
             cur.body.push(format!("{} = alloca {}", var_name, ty));
             cur.body.push(format!(
-                "store {} %arg.{} , {}* {}",
+                "store {} %arg.{} , {} {}",
                 ty,
                 sanitizellvm(name),
-                ty,
+                slot_ptr_ty(ty),
                 var_name
             ));
         }
@@ -919,6 +962,10 @@ fn emit_statement(
         }
         HirStmt::Return(val) => {
             if let Some(v) = val {
+                // 返回类型为函数类型时，为 `return <lambda>` 提供期望签名
+                if let Some(sig) = ctx.current_fn_ret_sig.clone() {
+                    ctx.pending_lambda_sig = Some(sig);
+                }
                 let want = ctx.current_ret_ty.clone();
                 if want.is_empty() || want == "void" {
                     // void 函数中的 `return expr`（含末尾表达式转 Return）：丢弃值，统一 ret void，
@@ -992,6 +1039,19 @@ fn emit_statement(
     Ok(())
 }
 
+/// 把 `alloca` 指令追加到函数**入口块**（`blocks[0]`）。
+///
+/// 为什么必须放进口块：若把 `alloca` 写在当前块，而当前块恰是循环体，
+/// 那么每次迭代都会执行一次 `alloca`——栈空间只增不减，迭代量一大就直接
+/// 栈溢出（`STATUS_STACK_OVERFLOW` / `0xC00000FD`），且已提交的栈页会让
+/// 「内存持续上涨」。入口块支配所有后续块，因此把 `alloca` 提前一定安全。
+fn push_alloca_entry(blocks: &mut FuncBlocks, var_name: &str, ty: &str) {
+    if blocks.blocks.is_empty() {
+        blocks.blocks.push(BasicBlock::new("entry".to_string()));
+    }
+    blocks.blocks[0].body.push(format!("{} = alloca {}", var_name, ty));
+}
+
 /// 生成变量声明
 fn emit_variable_decl(
     ctx: &mut EmitCtx,
@@ -1000,49 +1060,76 @@ fn emit_variable_decl(
     ty: &Option<HirType>,
     init: &Option<HirExpr>,
 ) -> Result<(), AotError> {
+    // 闭包签名推断：
+    // - 显式函数类型标注 `val f: (Int) -> Int = ...`
+    // - 由返回函数类型的调用推断 `val f = makeAdder(5)`
+    let declared_sig =
+        ty.as_ref().and_then(as_function_type).and_then(|ft| function_sig_of(&*ctx, ft));
+    let inferred_sig = if declared_sig.is_none() {
+        match init {
+            Some(HirExpr::Call { callee, .. }) => ctx.fn_ret_sigs.get(callee).cloned().flatten(),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let fn_sig = declared_sig.clone().or_else(|| inferred_sig.clone());
+
     // 当类型未显式标注时，从初始化器推断 LLVM 类型
     let llvm_ty = if let Some(t) = ty {
         ctx.llvm_type(t)
     } else if let Some(init_expr) = init {
         // 先发射初始化器获取其类型
+        if let Some(ref sig) = fn_sig {
+            ctx.pending_lambda_sig = Some(sig.clone());
+        }
         let (val_ir, val_ty) = emit_expr_val(ctx, blocks, init_expr)?;
         let var_name = ctx.fresh_var();
-        {
-            let cur = blocks.last_mut();
-            cur.body.push(format!("{} = alloca {}", var_name, val_ty));
-        }
+        push_alloca_entry(blocks, &var_name, &val_ty);
         let cur = blocks.last_mut();
         // 如果值类型和目标类型不匹配（如 null 存入可空结构体），需要转换
         if val_ir == "null" && val_ty.starts_with("{ ") && val_ty.ends_with(" i1 }") {
             let null_val = zero_value(&val_ty);
             cur.body.push(format!(
-                "store {} {} , {}* {}",
-                val_ty, null_val, val_ty, var_name
+                "store {} {} , {} {}",
+                val_ty,
+                null_val,
+                slot_ptr_ty(&val_ty),
+                var_name
             ));
         } else {
             cur.body.push(format!(
-                "store {} {} , {}* {}",
-                val_ty, val_ir, val_ty, var_name
+                "store {} {} , {} {}",
+                val_ty,
+                val_ir,
+                slot_ptr_ty(&val_ty),
+                var_name
             ));
         }
         ctx.declare_var(name, var_name, val_ty);
+        if let Some(sig) = fn_sig {
+            ctx.closure_sigs.insert(name.to_string(), sig);
+        }
         return Ok(());
     } else {
         "i32".to_string()
     };
 
     let var_name = ctx.fresh_var();
-    {
-        let cur = blocks.last_mut();
-        cur.body.push(format!("{} = alloca {}", var_name, llvm_ty));
-    }
+    push_alloca_entry(blocks, &var_name, &llvm_ty);
 
     if let Some(init) = init {
+        if let Some(ref sig) = fn_sig {
+            ctx.pending_lambda_sig = Some(sig.clone());
+        }
         let (val_ir, val_ty) = emit_expr_val(ctx, blocks, init)?;
         emit_store_converted(ctx, blocks, &llvm_ty, &val_ir, &val_ty, &var_name);
     }
 
     ctx.declare_var(name, var_name, llvm_ty);
+    if let Some(sig) = fn_sig {
+        ctx.closure_sigs.insert(name.to_string(), sig);
+    }
     Ok(())
 }
 
@@ -1114,6 +1201,19 @@ fn emit_store_converted(
     val_ty: &str,
     var_name: &str,
 ) {
+    // 函数指针槽（`ptr`）：LLVM 不透明指针模式下 `ptr` 不能再取 `ptr*`，
+    // 因此 store 的目标类型直接用 `ptr`。
+    if dst_ty == "ptr" {
+        let cur = blocks.last_mut();
+        if is_int_ty(val_ty) {
+            let t = ctx.fresh_var();
+            cur.body.push(format!("{} = inttoptr {} {} to ptr", t, val_ty, val_ir));
+            cur.body.push(format!("store ptr {} , ptr {}", t, var_name));
+        } else {
+            cur.body.push(format!("store ptr {} , ptr {}", val_ir, var_name));
+        }
+        return;
+    }
     if is_nullable_struct_type(dst_ty) && val_ty != dst_ty {
         let cur = blocks.last_mut();
         // 目标类型是可空结构体 { T, i1 }
@@ -1584,8 +1684,11 @@ fn emit_expr_val(
             // P10.1: await — 直接返回内部值（非协程上下文 no-op）
             emit_expr_val(ctx, blocks, inner)
         }
-        // P3.3: Lambda — 生成静态函数并返回函数指针
-        // Phase 5: 支持捕获变量
+        // P3.3: Lambda — 生成静态函数并返回指向闭包环境的指针。
+        //
+        // 闭包 ABI：`define <ret> @__lambda_N(ptr %env, <用户参数...>)`。
+        // 捕获变量存放在堆分配的 env 结构体 `{ ptr fn, T1, T2, ... }` 中，
+        // 函数体内按 GEP 取字段地址后 load（支持 Int/String 等任意值类型）。
         HirExpr::Lambda {
             params,
             body,
@@ -1593,28 +1696,51 @@ fn emit_expr_val(
             let func_name = format!("__lambda_{}", ctx.lambda_counter);
             ctx.lambda_counter += 1;
 
-            // Phase 5: 收集捕获变量（自由变量）
-            let mut captures: Vec<String> = Vec::new();
-            for stmt in &body.stmts {
-                collect_free_vars_in_stmt(stmt, params, &mut captures);
-            }
+            // 期望签名（变量声明 / 调用实参 / return 提供）；缺省返回 i32。
+            let (ret_ty, expected_param_tys) =
+                ctx.pending_lambda_sig.take().unwrap_or_else(|| ("i32".to_string(), Vec::new()));
 
-            // 生成参数列表（用户参数 + 捕获参数）
-            let mut param_strs: Vec<String> = Vec::new();
-            for (i, p) in params.iter().enumerate() {
-                let ty =
-                    p.ty.as_ref().map(|t| ctx.llvm_type(t)).unwrap_or_else(|| "i32".to_string());
+            // 用户参数 LLVM 类型：优先注解，其次期望签名，最后 i32。
+            let user_param_tys: Vec<String> = params
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    p.ty.as_ref()
+                        .map(|t| ctx.llvm_type(t))
+                        .or_else(|| expected_param_tys.get(i).cloned())
+                        .unwrap_or_else(|| "i32".to_string())
+                })
+                .collect();
+
+            // 收集捕获变量（自由变量）及其类型（仅父作用域存在的变量）。
+            let mut raw_captures: Vec<String> = Vec::new();
+            for stmt in &body.stmts {
+                collect_free_vars_in_stmt(stmt, params, &mut raw_captures);
+            }
+            let captures: Vec<(String, String)> = raw_captures
+                .into_iter()
+                .filter_map(|cap| ctx.lookup_var(&cap).cloned().map(|slot| (cap, slot.llvm_ty)))
+                .collect();
+
+            // 闭包 env 结构体字面类型 `{ ptr, T1, T2, ... }`
+            let struct_ty = if captures.is_empty() {
+                "{ ptr }".to_string()
+            } else {
+                format!(
+                    "{{ ptr, {} }}",
+                    captures.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join(", ")
+                )
+            };
+
+            // 函数签名
+            let mut param_strs: Vec<String> = vec!["ptr %env".to_string()];
+            for (i, ty) in user_param_tys.iter().enumerate() {
                 param_strs.push(format!("{} %arg_{}", ty, i));
             }
-            // 捕获参数作为额外参数
-            for (i, cap) in captures.iter().enumerate() {
-                param_strs.push(format!("ptr %cap_{}", i));
-            }
-
-            // 生成函数体
             let mut func_ir = String::new();
             func_ir.push_str(&format!(
-                "define i32 @{}({}) {{\n",
+                "define {} @{}({}) {{\n",
+                ret_ty,
                 func_name,
                 param_strs.join(", ")
             ));
@@ -1634,19 +1760,19 @@ fn emit_expr_val(
                 declared_structs: std::collections::HashSet::new(),
                 generated_funcs: std::collections::HashSet::new(),
                 sections: Vec::new(),
-                bb_counter: 0,
-                var_counter: 0,
-                const_counter: 0,
+                bb_counter: ctx.bb_counter,
+                var_counter: ctx.var_counter,
+                const_counter: ctx.const_counter,
                 loop_stack: Vec::new(),
                 var_scope: vec![HashMap::new()],
                 globals: Vec::new(),
-                global_const_map: HashMap::new(),
+                global_const_map: ctx.global_const_map.clone(),
                 subprogram_meta: Vec::new(),
                 subprogram_index: 0,
                 func_dbg_ids: HashMap::new(),
                 func_ret_types: ctx.func_ret_types.clone(),
                 func_param_types: ctx.func_param_types.clone(),
-                current_ret_ty: String::new(),
+                current_ret_ty: ret_ty.clone(),
                 class_field_types: ctx.class_field_types.clone(),
                 current_class: None,
                 known_structs: ctx.known_structs.clone(),
@@ -1656,39 +1782,78 @@ fn emit_expr_val(
                 lambda_counter: ctx.lambda_counter,
                 lambda_funcs: Vec::new(),
                 class_defaults: ctx.class_defaults.clone(),
+                closure_sigs: ctx.closure_sigs.clone(),
+                fn_ret_sigs: ctx.fn_ret_sigs.clone(),
+                fn_param_sigs: ctx.fn_param_sigs.clone(),
+                current_fn_ret_sig: None,
+                pending_lambda_sig: None,
             };
-
-            // 注册参数
-            for (i, p) in params.iter().enumerate() {
-                let ty =
-                    p.ty.as_ref()
-                        .map(|t| sub_ctx.llvm_type(t))
-                        .unwrap_or_else(|| "i32".to_string());
-                sub_ctx.var_scope.last_mut().unwrap().insert(
-                    p.name.clone(),
-                    VarSlot {
-                        llvm_name: format!("%arg_{}", i),
-                        llvm_ty: ty,
-                    },
-                );
-            }
-            // 注册捕获变量
-            for (i, cap) in captures.iter().enumerate() {
-                sub_ctx.var_scope.last_mut().unwrap().insert(
-                    cap.clone(),
-                    VarSlot {
-                        llvm_name: format!("%cap_{}", i),
-                        llvm_ty: "ptr".to_string(),
-                    },
-                );
-            }
 
             // 发射函数体
             let mut fb = FuncBlocks::new();
             fb.add_block_named("entry");
-            let _ = emit_block(&mut sub_ctx, &mut fb, body);
+
+            // 用户参数：alloca + store（与普通函数一致，供变量 load 使用）
+            for (i, p) in params.iter().enumerate() {
+                let ty = user_param_tys[i].clone();
+                let slot = sub_ctx.fresh_var();
+                {
+                    let cur = fb.blocks.last_mut().unwrap();
+                    cur.body.push(format!("{} = alloca {}", slot, ty));
+                    cur.body.push(format!(
+                        "store {} %arg_{} , {} {}",
+                        ty,
+                        i,
+                        slot_ptr_ty(&ty),
+                        slot
+                    ));
+                }
+                sub_ctx.var_scope.last_mut().unwrap().insert(
+                    p.name.clone(),
+                    VarSlot {
+                        llvm_name: slot,
+                        llvm_ty: ty,
+                    },
+                );
+            }
+
+            // 捕获变量：env 字段地址（GEP），函数体内按类型 load
+            for (i, (cap, cap_ty)) in captures.iter().enumerate() {
+                let addr = sub_ctx.fresh_var();
+                fb.blocks.last_mut().unwrap().body.push(format!(
+                    "{} = getelementptr {}, ptr %env, i32 0, i32 {}",
+                    addr,
+                    struct_ty,
+                    i + 1
+                ));
+                sub_ctx.var_scope.last_mut().unwrap().insert(
+                    cap.clone(),
+                    VarSlot {
+                        llvm_name: addr,
+                        llvm_ty: cap_ty.clone(),
+                    },
+                );
+            }
+
+            // 尾表达式作为返回值（对齐 MIR lower_lambda 的语义）
+            let stmts = &body.stmts;
+            let trailing = match stmts.last() {
+                Some(HirStmt::Expr(e)) => Some(e),
+                _ => None,
+            };
+            if let Some(e) = trailing {
+                let head = HirBlock {
+                    stmts: stmts[..stmts.len() - 1].to_vec(),
+                };
+                let _ = emit_block(&mut sub_ctx, &mut fb, &head);
+                let (v, t) = emit_expr_val(&mut sub_ctx, &mut fb, e)?;
+                let (cv, ct) = coerce_arg(&mut sub_ctx, &mut fb, v, &t, &ret_ty);
+                fb.set_terminator(&format!("ret {} {}", ct, cv));
+            } else {
+                let _ = emit_block(&mut sub_ctx, &mut fb, body);
+            }
             if !fb.has_terminator() {
-                fb.set_terminator("ret i32 0");
+                fb.set_terminator(&format!("ret {} {}", ret_ty, zero_value(&ret_ty)));
             }
 
             // 收集 IR
@@ -1708,34 +1873,48 @@ fn emit_expr_val(
             func_ir.push_str("}\n\n");
 
             ctx.lambda_funcs.push(func_ir);
+            // 合并 lambda 子上下文生成的全局常量（如字符串字面量），
+            // 否则 lambda 体内的 `@str_data.N` 引用不到定义。
+            ctx.globals.extend(sub_ctx.globals.drain(..));
+            for (k, v) in sub_ctx.global_const_map.drain() {
+                ctx.global_const_map.entry(k).or_insert(v);
+            }
+            ctx.const_counter = sub_ctx.const_counter;
+            ctx.bb_counter = sub_ctx.bb_counter;
+            ctx.var_counter = sub_ctx.var_counter;
 
-            // Phase 5: 返回闭包结构体（函数指针 + 捕获值）
-            let closure_type = format!("{{ ptr, {} x ptr }}", captures.len());
+            // 创建闭包 env（堆分配，允许闭包逃逸所在函数），写入函数指针与捕获值。
+            let size_ptr = ctx.fresh_var();
+            let size = ctx.fresh_var();
+            let raw = ctx.fresh_var();
             let closure_name = ctx.fresh_var();
-            let cur = blocks.last_mut();
-
-            // 分配闭包结构体
-            cur.body.push(format!("{} = alloca {}", closure_name, closure_type));
-
-            // 存储函数指针
-            cur.body.push(format!("store ptr @{}, ptr {}[0]", func_name, closure_name));
-
-            // 存储捕获值
-            for (i, cap) in captures.iter().enumerate() {
-                // 加载捕获变量的值
-                let cap_addr = ctx.lookup_var(cap).map(|v| v.llvm_name.clone()).unwrap_or_default();
-                if !cap_addr.is_empty() {
-                    cur.body.push(format!(
-                        "store ptr {}, ptr {}[1][{}]",
-                        cap_addr, closure_name, i
-                    ));
-                } else {
-                    // 未找到捕获变量，存储空指针
-                    cur.body.push(format!("store ptr null, ptr {}[1][{}]", closure_name, i));
-                }
+            {
+                let cur = blocks.last_mut();
+                cur.body.push(format!(
+                    "{} = getelementptr {}, ptr null, i32 1",
+                    size_ptr, struct_ty
+                ));
+                cur.body.push(format!("{} = ptrtoint ptr {} to i64", size, size_ptr));
+                cur.body.push(format!("{} = call i8* @aura_malloc(i64 {})", raw, size));
+                cur.body.push(format!("{} = bitcast i8* {} to ptr", closure_name, raw));
+                // 字段 0 = 函数指针（偏移 0）
+                cur.body.push(format!("store ptr @{}, ptr {}", func_name, closure_name));
+            }
+            for (i, (cap, _cap_ty)) in captures.iter().enumerate() {
+                let (val, vty) = emit_variable_load(ctx, blocks, cap)?;
+                let addr = ctx.fresh_var();
+                let cur = blocks.last_mut();
+                cur.body.push(format!(
+                    "{} = getelementptr {}, ptr {}, i32 0, i32 {}",
+                    addr,
+                    struct_ty,
+                    closure_name,
+                    i + 1
+                ));
+                cur.body.push(format!("store {} {}, ptr {}", vty, val, addr));
             }
 
-            Ok((closure_name, closure_type))
+            Ok((closure_name, "ptr".to_string()))
         }
         // CallVirtual — 与 Call 相同路径（AOT 生成静态调用）
         HirExpr::CallVirtual {
@@ -1897,8 +2076,11 @@ fn emit_variable_load(
         let tmp = ctx.fresh_var();
         let cur = blocks.last_mut();
         cur.body.push(format!(
-            "{} = load {}, {}* {}",
-            tmp, slot.llvm_ty, slot.llvm_ty, slot.llvm_name
+            "{} = load {}, {} {}",
+            tmp,
+            slot.llvm_ty,
+            slot_ptr_ty(&slot.llvm_ty),
+            slot.llvm_name
         ));
         Ok((tmp, slot.llvm_ty))
     } else {
@@ -2473,6 +2655,21 @@ fn receiver_address(
     match recv {
         HirExpr::Var(name) => {
             if let Some(slot) = ctx.lookup_var(name).cloned() {
+                // 槽里存的是「类实例指针」（`%struct.X*`）：必须先 load 出指针值再 bitcast；
+                // 直接 bitcast 槽地址得到的是 `%struct.X**`，会把「指针变量的地址」当对象用。
+                if slot.llvm_ty.ends_with('*') && slot.llvm_ty.starts_with("%struct.") {
+                    let loaded = ctx.fresh_var();
+                    let cast = ctx.fresh_var();
+                    blocks.last_mut().body.push(format!(
+                        "{} = load {}, {}* {}",
+                        loaded, slot.llvm_ty, slot.llvm_ty, slot.llvm_name
+                    ));
+                    blocks.last_mut().body.push(format!(
+                        "{} = bitcast {} {} to {}",
+                        cast, slot.llvm_ty, loaded, want
+                    ));
+                    return Ok(Some((cast, want.to_string())));
+                }
                 if slot.llvm_ty.starts_with("%struct.") {
                     let ptr_ty = format!("{}*", slot.llvm_ty);
                     let cast = ctx.fresh_var();
@@ -2502,13 +2699,44 @@ fn receiver_address(
                 return Ok(None);
             };
             let gep = ctx.fresh_var();
-            let out = ctx.fresh_var();
-            let cur = blocks.last_mut();
-            cur.body.push(format!(
+            blocks.last_mut().body.push(format!(
                 "{} = getelementptr {}, {}* {}, i32 0, i32 {}",
                 gep, struct_ty, struct_ty, base, fidx
             ));
-            cur.body.push(format!(
+            // 字段本身是「类实例指针」（`%struct.X*`，Phase 6.5.1 指针表示）：
+            // 必须先 load 出指针值再 bitcast；直接把字段**地址**当对象用会得到
+            // `%struct.X**`，方法调用将作用于错误地址（如 `this.lx.scanAll()` 静默无效）。
+            if field_ty.ends_with('*') && want.ends_with('*') {
+                let loaded = ctx.fresh_var();
+                let out = ctx.fresh_var();
+                let cur = blocks.last_mut();
+                cur.body.push(format!(
+                    "{} = load {}, {}* {}",
+                    loaded, field_ty, field_ty, gep
+                ));
+                cur.body.push(format!(
+                    "{} = bitcast {} {} to {}",
+                    out, field_ty, loaded, want
+                ));
+                return Ok(Some((out, want.to_string())));
+            }
+            // 值语义字段作接收者：`field_ty` 是**值**（如 String `{ i8*, i64 }`），
+            // 而 `want` 是数据指针 `i8*` 时必须先把字段 load 出来、再取字段 0，
+            // 不能把字段**地址** bitcast 成 `i8*`（否则 String 方法拿到的是结构体
+            // 地址而非数据指针，`contains` 之类会静默返回 false）。
+            if want == "i8*" && field_ty.starts_with("{ i8*, i64") {
+                let loaded = ctx.fresh_var();
+                let out = ctx.fresh_var();
+                let cur = blocks.last_mut();
+                cur.body.push(format!(
+                    "{} = load {}, {}* {}",
+                    loaded, field_ty, field_ty, gep
+                ));
+                cur.body.push(format!("{} = extractvalue {} {}, 0", out, field_ty, loaded));
+                return Ok(Some((out, "i8*".to_string())));
+            }
+            let out = ctx.fresh_var();
+            blocks.last_mut().body.push(format!(
                 "{} = bitcast {}* {} to {}",
                 out, field_ty, gep, want
             ));
@@ -2531,6 +2759,36 @@ fn emit_call(
         let struct_name = format!("%struct.{}", sanitizellvm(callee));
         if ctx.declared_structs.contains(callee) || ctx.declared_structs.contains(&struct_name) {
             return emit_struct_constructor(ctx, blocks, callee, args);
+        }
+    }
+
+    // 函数类型变量 / 闭包的间接调用：`f(args)` 中 f 为持有闭包的局部变量
+    // （函数类型形参，或 `val f: (..)->.. = lambda`）。闭包表示为指向 env 的指针，
+    // 字段 0 = 函数指针（偏移 0），调用约定为 `fn(ptr env, ...args)`。
+    if let Some((ret, param_tys)) = ctx.closure_sigs.get(callee).cloned() {
+        if ctx.lookup_var(callee).is_some() {
+            let (clo, _clo_ty) = emit_variable_load(ctx, blocks, callee)?;
+            let fn_ptr = ctx.fresh_var();
+            blocks.last_mut().body.push(format!("{} = load ptr, ptr {}", fn_ptr, clo));
+            let mut call_args: Vec<String> = vec![format!(
+                "ptr {}",
+                clo
+            )];
+            for (i, a) in args.iter().enumerate() {
+                let (v, t) = emit_expr_val(ctx, blocks, a)?;
+                let want = param_tys.get(i).cloned().unwrap_or_else(|| t.clone());
+                let (cv, ct) = coerce_arg(ctx, blocks, v, &t, &want);
+                call_args.push(format!("{} {}", ct, cv));
+            }
+            let dst = ctx.fresh_var();
+            blocks.last_mut().body.push(format!(
+                "{} = call {} {}({})",
+                dst,
+                ret,
+                fn_ptr,
+                call_args.join(", ")
+            ));
+            return Ok((dst, ret));
         }
     }
 
@@ -2635,6 +2893,7 @@ fn emit_call(
     // 避免影响其它「把结构体局部变量传给指针形参」的场景（如 Any/存进容器等，
     // 传栈槽地址会在作用域结束后悬空）。
     let is_method_call = callee.contains('.');
+    let param_fn_sigs = ctx.fn_param_sigs.get(callee).cloned();
     let mut args_ir: Vec<(String, String)> = Vec::with_capacity(effective_args.len());
     for (i, a) in effective_args.iter().enumerate() {
         let want = param_tys.as_ref().and_then(|p| p.get(i)).cloned();
@@ -2645,6 +2904,10 @@ fn emit_call(
                     continue;
                 }
             }
+        }
+        // 形参为函数类型时，为 lambda 实参提供期望签名
+        if let Some(Some(sig)) = param_fn_sigs.as_ref().and_then(|s| s.get(i)) {
+            ctx.pending_lambda_sig = Some(sig.clone());
         }
         args_ir.push(emit_expr_val(ctx, blocks, a)?);
     }
@@ -2715,14 +2978,24 @@ fn emit_call(
         if matches!(
             bare,
             "listOf" | "mutableListOf" | "arrayListOf" | "emptyList" | "emptyArray"
-        ) && args_ir.is_empty()
-        {
-            let tmp = ctx.fresh_var();
+        ) {
+            // 先建空列表；有元素则逐个 append（vararg 打包 / 字面量列表）。
+            let tmp0 = ctx.fresh_var();
             blocks.last_mut().body.push(format!(
                 "{} = call i8* @aura_lang_std_Collections_emptyList()",
-                tmp
+                tmp0
             ));
-            return Ok((tmp, "i8*".to_string()));
+            let mut cur_list = tmp0;
+            for (e, e_ty) in &args_ir {
+                let e_ptr = coerce_val_to_i8ptr(ctx, blocks, e, e_ty);
+                let nxt = ctx.fresh_var();
+                blocks.last_mut().body.push(format!(
+                    "{} = call i8* @aura_lang_std_Collections_listAppend(i8* {}, i8* {})",
+                    nxt, cur_list, e_ptr
+                ));
+                cur_list = nxt;
+            }
+            return Ok((cur_list, "i8*".to_string()));
         }
     }
 
@@ -2931,6 +3204,36 @@ fn is_ptr_ty(t: &str) -> bool {
     t.ends_with('*') || t == "ptr"
 }
 
+/// 变量槽的指针类型：LLVM 不透明指针模式下 `ptr` 不能再取 `ptr*`（llc 报
+/// "ptr* is invalid - use ptr instead"），因此对 `ptr` 直接返回 `ptr`。
+fn slot_ptr_ty(t: &str) -> String {
+    if t == "ptr" { "ptr".to_string() } else { format!("{}*", t) }
+}
+
+/// 提取函数类型（穿透可空包装）。返回 `None` 表示不是函数类型。
+fn as_function_type(t: &HirType) -> Option<&HirType> {
+    match t {
+        HirType::Function { .. } => Some(t),
+        HirType::Nullable(inner) => as_function_type(inner),
+        _ => None,
+    }
+}
+
+/// 函数类型的 LLVM 签名：(返回类型, 参数类型列表)。
+fn function_sig_of(ctx: &EmitCtx, ft: &HirType) -> Option<(String, Vec<String>)> {
+    if let HirType::Function {
+        params,
+        return_type,
+    } = ft
+    {
+        let r = ctx.map_type(return_type);
+        let ps: Vec<String> = params.iter().map(|p| ctx.map_type(p)).collect();
+        Some((r, ps))
+    } else {
+        None
+    }
+}
+
 /// 判断 LLVM 类型字符串是否为整数（i1/i8/i16/i32/i64…）
 fn is_int_ty(t: &str) -> bool {
     t.len() >= 2 && t.starts_with('i') && t[1..].chars().all(|c| c.is_ascii_digit())
@@ -2974,8 +3277,8 @@ fn coerce_arg(
     if from.starts_with("%struct.") && is_ptr_ty(to) {
         let alloca = ctx.fresh_var();
         let cast = ctx.fresh_var();
+        push_alloca_entry(blocks, &alloca, &from);
         let body = &mut blocks.last_mut().body;
-        body.push(format!("{} = alloca {}", alloca, from));
         body.push(format!("store {} {}, {}* {}", from, val, from, alloca));
         body.push(format!("{} = bitcast {}* {} to {}", cast, from, alloca, to));
         return (cast, to.to_string());
@@ -3429,7 +3732,7 @@ fn try_emit_ctor(
     if let (Some(ctor_name), Some(param_tys)) = (ctor_name, param_tys) {
         if param_tys.len() == args.len() + 1 {
             let alloc = ctx.fresh_var();
-            blocks.last_mut().body.push(format!("{} = alloca {}", alloc, struct_type));
+            push_alloca_entry(blocks, &alloc, &struct_type);
             // 先写字段默认值（init 块/构造参数之外的字段仍须有确定初值）
             emit_field_defaults(ctx, blocks, type_name, struct_type, &alloc)?;
             // self 形参类型在 desugar 中是 Any → i8*；按实际类型传参（必要时 bitcast）。
@@ -3498,7 +3801,7 @@ fn emit_struct_constructor(
     // 保持 undef → 运行期读到随机内存（非确定性）。
     let mut struct_val = if ctx.class_defaults.contains_key(struct_name) {
         let alloc = ctx.fresh_var();
-        blocks.last_mut().body.push(format!("{} = alloca {}", alloc, struct_type));
+        push_alloca_entry(blocks, &alloc, &struct_type);
         emit_field_defaults(ctx, blocks, struct_name, &struct_type, &alloc)?;
         let loaded = ctx.fresh_var();
         blocks.last_mut().body.push(format!(
@@ -3554,8 +3857,8 @@ fn emit_member_access(
 
             // 分配 tagged union 结构体
             let alloc = ctx.fresh_var();
+            push_alloca_entry(blocks, &alloc, &struct_name);
             let cur = blocks.last_mut();
-            cur.body.push(format!("{} = alloca {}", alloc, struct_name));
 
             // 设置 tag 字段（变体索引）
             let tag_ptr = ctx.fresh_var();
@@ -3895,7 +4198,7 @@ fn emit_new(
     // 无合成构造函数时同样要先写字段默认值（见 class_defaults 注释）。
     let mut struct_val = if ctx.class_defaults.contains_key(type_name) {
         let alloc = ctx.fresh_var();
-        blocks.last_mut().body.push(format!("{} = alloca {}", alloc, llvm_struct_type));
+        push_alloca_entry(blocks, &alloc, &llvm_struct_type);
         emit_field_defaults(ctx, blocks, type_name, &llvm_struct_type, &alloc)?;
         let loaded = ctx.fresh_var();
         blocks.last_mut().body.push(format!(
