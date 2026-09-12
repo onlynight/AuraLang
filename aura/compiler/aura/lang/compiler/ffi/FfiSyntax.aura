@@ -1,0 +1,108 @@
+// aura:///aura/lang/compiler/ffi/FfiSyntax.aura
+package aura.lang.compiler.ffi
+// ─────────────────────────────────────────────────────────────
+// FFI 语法定义 — Phase S0
+//
+// 定义 @native / @export / extern object 的语法节点和辅助函数。
+//
+// ── 设计原则 ──
+//   * 与现有 Ast.aura 的扁平 arena 风格一致
+//   * 节点种类用字符串常量，便于解析和发射
+//   * 辅助函数提供创建和查询能力
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+
+// ─────────────────────────────────────────────────────────────
+// 节点种类常量
+// ─────────────────────────────────────────────────────────────
+
+/// extern object 节点（容器，包含多个方法）
+val AST_EXTERN_OBJECT: String = "ExternObject"
+
+/// @native 方法节点（系统调用/编译器内置/内联汇编）
+val AST_NATIVE_METHOD: String = "NativeMethod"
+
+/// @export 方法节点（Aura 实现，导出符号）
+val AST_EXPORT_METHOD: String = "ExportMethod"
+
+// ─────────────────────────────────────────────────────────────
+// @native 类型常量
+// ─────────────────────────────────────────────────────────────
+
+/// 系统调用类型
+val NATIVE_TYPE_SYSCALL: String = "syscall"
+
+/// 编译器内置类型（内存操作等）
+val NATIVE_TYPE_BUILTIN: String = "builtin"
+
+/// 外部库符号类型（libc 等）
+val NATIVE_TYPE_LIBC: String = "libc"
+
+/// 内联汇编类型
+val NATIVE_TYPE_ASM: String = "asm"
+
+// ─────────────────────────────────────────────────────────────
+// 辅助函数
+// ─────────────────────────────────────────────────────────────
+
+/// 判断节点种类是否为 FFI 相关节点。
+fun ffiIsNode(kind: String): Boolean {
+    return kind == AST_EXTERN_OBJECT ||
+           kind == AST_NATIVE_METHOD ||
+           kind == AST_EXPORT_METHOD
+}
+
+/// 从 native 类型字符串解析 syscall 号。
+/// 输入格式：`syscall|N`（N 为 syscall 号）
+/// 返回：N 的整数值，解析失败返回 -1
+fun ffiParseSyscallNum(text: String): Int {
+    if (text != "syscall") {
+        return -1
+    }
+    val num: String = text.substringAfter("|")
+    if (num == "") {
+        return -1
+    }
+    return toIntOf(num)
+}
+
+/// 从 native 类型字符串解析 asm 代码。
+/// 输入格式：`asm|<code>`
+/// 返回：asm 代码字符串，解析失败返回空串
+fun ffiParseAsmCode(text: String): String {
+    if (text != "asm") {
+        return ""
+    }
+    return text.substringAfter("|")
+}
+
+/// 从 native 类型字符串解析 libc 符号名。
+/// 输入格式：`libc|<symbol>`
+/// 返回：符号名字符串，解析失败返回空串
+fun ffiParseLibcSymbol(text: String): String {
+    if (text != "libc") {
+        return ""
+    }
+    return text.substringAfter("|")
+}
+
+/// 生成 native 类型字符串（syscall）。
+fun ffiMakeSyscallText(num: Int): String {
+    return "syscall|" + toStr(num)
+}
+
+/// 生成 native 类型字符串（asm）。
+fun ffiMakeAsmText(code: String): String {
+    return "asm|" + code
+}
+
+/// 生成 native 类型字符串（libc）。
+fun ffiMakeLibcText(symbol: String): String {
+    return "libc|" + symbol
+}
+
+/// 生成 native 类型字符串（builtin）。
+fun ffiMakeBuiltinText(): String {
+    return "builtin"
+}

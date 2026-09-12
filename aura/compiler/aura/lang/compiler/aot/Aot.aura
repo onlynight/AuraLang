@@ -51,6 +51,13 @@ class AotOptions {
     /// 是否链接标准库 C FFI。
     var linkStdCffi: Boolean = false
 
+    /// 是否生成 C 后端备选源码（`emitC`）。
+    ///
+    /// `emitC` 会把整份 HIR 再翻译一遍成 C 文本，开销与 LLVM IR 发射同量级（实测
+    /// 自举时约 40MB）。而实际产物走 llc/clang 的 LLVM 路径，`cSource` 只在测试里被
+    /// 断言；故给「只要 IR + 工具链」的构建入口提供关闭开关（见 `compileAotIrOnly`）。
+    var emitCSource: Boolean = true
+
     init(target: TargetTriple, optLevel: OptimizationLevel, moduleName: String) {
         this.target = target
         this.optLevel = optLevel
@@ -59,6 +66,7 @@ class AotOptions {
         this.emitDebug = false
         this.llvmHome = ""
         this.linkStdCffi = false
+        this.emitCSource = true
     }
 }
 
@@ -142,7 +150,10 @@ class AotCodeGenerator {
         val objCmd: String = llcCommand(options.moduleName + ".ll", objPath, triple, flag)
         val exeCmd: String = clangCommand(objPath, exePath, triple, flag, options.emitDebug)
 
-        val cSrc: String = emitC(hir, options.moduleName)
+        var cSrc: String = ""
+        if (options.emitCSource) {
+            cSrc = emitC(hir, options.moduleName)
+        }
 
         val r: AotResult = AotResult(ir, triple, flag, objCmd, exeCmd, cSrc)
         this.lastResult = r
@@ -208,6 +219,9 @@ class AotLinkResult {
 }
 
 /// HIR → LLVM IR 文本 + llc/clang 命令 + C 后端源码（纯函数，不触发 IO）。
+///
+/// 会同时生成 C 后端备选源码（`cSource`）。若调用方只走 LLVM 工具链，请用
+/// [`compileAotIrOnly`]：省掉整份 HIR 的二次翻译（自举时约 40MB 分配）。
 fun compileAot(hir: Hir): AotLinkResult {
     val r: AotLinkResult = AotLinkResult()
     val opts: AotOptions = defaultAotOptions()
@@ -219,6 +233,27 @@ fun compileAot(hir: Hir): AotLinkResult {
     r.objectCommand = aot.objectCommand
     r.executableCommand = aot.executableCommand
     r.cSource = aot.cSource
+    r.hasMain = aot.hasFunction("main")
+    r.irLines = aot.irLineCount()
+    return r
+}
+
+/// 同 [`compileAot`]，但**不生成 C 后端备选源码**（`cSource` 为空串）。
+///
+/// 供「HIR → IR → llc → clang → exe」的产物构建路径使用：该路径从不读 `cSource`，
+/// 生成它是纯粹的内存浪费（`emitC` 会重新遍历整份 HIR 并拼接 C 文本）。
+fun compileAotIrOnly(hir: Hir): AotLinkResult {
+    val r: AotLinkResult = AotLinkResult()
+    val opts: AotOptions = defaultAotOptions()
+    opts.emitCSource = false
+    val aot: AotResult = aotCompile(hir, opts)
+
+    r.llvmIr = aot.llvmIr
+    r.targetTriple = aot.targetTriple
+    r.optFlag = aot.optFlag
+    r.objectCommand = aot.objectCommand
+    r.executableCommand = aot.executableCommand
+    r.cSource = ""
     r.hasMain = aot.hasFunction("main")
     r.irLines = aot.irLineCount()
     return r
@@ -268,7 +303,7 @@ class AotExeResult {
 fun aotBuildExeFromHir(hir: Hir, moduleName: String, outDir: String, llvmHome: String): AotExeResult {
     val r: AotExeResult = AotExeResult()
 
-    val a: AotLinkResult = compileAot(hir)
+    val a: AotLinkResult = compileAotIrOnly(hir)
     val tgt: String = a.targetTriple
     r.target = tgt
 

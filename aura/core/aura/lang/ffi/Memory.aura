@@ -1,0 +1,25 @@
+// aura:///aura/lang/ffi/Memory.aura
+package aura.lang.ffi
+// ─────────────────────────────────────────────────────────────
+// 内存操作声明 — Phase S1
+//
+// 编译器内置内存操作（直接降低到 LLVM load/store）
+//
+// 使用 extern object 封装，@native 无参数标注编译器内置。
+// ─────────────────────────────────────────────────────────────
+
+// 编译器内置内存操作
+extern object Memory {
+    @native fun read(addr: Long): Byte
+    @native fun read16(addr: Long): Short
+    @native fun read32(addr: Long): Int
+    @native fun read64(addr: Long): Long
+    @native fun write(addr: Long, v: Byte)
+    @native fun write16(addr: Long, v: Short)
+    @native fun write32(addr: Long, v: Int)
+    @native fun write64(addr: Long, v: Long)
+    @native fun copy(dst: Long, src: Long, n: Long)
+    @native fun set(addr: Long, v: Byte, n: Long)
+    @native fun alloc(n: Long): Long
+    @native fun free(addr: Long)
+}

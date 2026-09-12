@@ -1,0 +1,229 @@
+// aura:///aura/lang/compiler/aot/FfiEmit.aura
+package aura.lang.compiler.aot
+// ─────────────────────────────────────────────────────────────
+// FFI IR 发射 — Phase S0
+//
+// 对应 Phase S0 任务：
+//   S0.5: @native(N) → inline asm syscall
+//   S0.6: @native (no args) → load/store
+//   S0.7: @native(asm = "...") → inline asm
+//   S0.8: @export → define external
+//
+// 本文件负责将 FFI 语法节点翻译为 LLVM IR 文本。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.compiler.ffi.FfiSyntax
+import aura.lang.compiler.aot.AotUtil
+import aura.lang.compiler.aot.EmitBuffer
+
+/// 发射 @native(N) 系统调用函数定义。
+///
+/// 生成 LLVM inline asm：
+///   define i64 @name(i32 %fd, i64 %buf, i64 %count) {
+///     %r = call i64 asm sideeffect
+///       "mov $N, %rax\n\tmov $1, %rdi\n\tmov $2, %rsi\n\tmov $3, %rdx\n\tsyscall",
+///       "={rax},r,r,r",
+///       i32 %fd, i64 %buf, i64 %count
+///     ret i64 %r
+///   }
+///
+/// 参数：
+///   name: 函数名
+///   num: syscall 号
+///   retTy: 返回类型（LLVM IR 类型字符串）
+///   params: 参数列表（逗号分隔的 LLVM IR 类型字符串）
+fun ffiEmitSyscall(name: String, num: Int, retTy: String, params: String): String {
+    val sym: String = sanitizeLlvm(name)
+    var out: String = "define " + retTy + " @" + sym + "(" + params + ") {\n"
+    out = out + "  %r = call " + retTy + " asm sideeffect\n"
+    
+    // 构建 asm 字符串
+    var asm: String = "mov $" + toStr(num) + ", %rax\n\t"
+    asm = asm + "mov $1, %rdi\n\t"
+    asm = asm + "mov $2, %rsi\n\t"
+    asm = asm + "mov $3, %rdx\n\t"
+    asm = asm + "syscall"
+    
+    out = out + "    \"" + asm + "\",\n"
+    out = out + "    \"={rax},r,r,r\",\n"
+    
+    // 参数列表
+    var asmParams: String = ""
+    var n: Int = aotCsvCount(params)
+    var i: Int = 0
+    while (i < n) {
+        if (i > 0) {
+            asmParams = asmParams + ", "
+        }
+        asmParams = asmParams + aotFieldAt(params, i, ",")
+        i = i + 1
+    }
+    out = out + "    " + asmParams + "\n"
+    
+    out = out + "  ret " + retTy + " %r\n"
+    out = out + "}\n"
+    
+    return out
+}
+
+/// 发射 @native (builtin) 内存读取函数。
+///
+/// 根据类型生成 load 指令：
+///   define i8 @Memory.read(i64 %addr) {
+///     %r = load i8, ptr %addr
+///     ret i8 %r
+///   }
+fun ffiEmitBuiltinRead(name: String, ty: String): String {
+    val sym: String = sanitizeLlvm(name)
+    var out: String = "define " + ty + " @" + sym + "(i64 %%addr) {\n"
+    out = out + "  %r = load " + ty + ", ptr %%addr\n"
+    out = out + "  ret " + ty + " %r\n"
+    out = out + "}\n"
+    return out
+}
+
+/// 发射 @native (builtin) 内存写入函数。
+///
+/// 生成 store 指令：
+///   define void @Memory.write(i64 %addr, i8 %v) {
+///     store i8 %v, ptr %addr
+///     ret void
+///   }
+fun ffiEmitBuiltinWrite(name: String, ty: String): String {
+    val sym: String = sanitizeLlvm(name)
+    var out: String = "define void @" + sym + "(i64 %%addr, " + ty + " %%v) {\n"
+    out = out + "  store " + ty + " %%v, ptr %%addr\n"
+    out = out + "  ret void\n"
+    out = out + "}\n"
+    return out
+}
+
+/// 发射 @native (builtin) memcpy 函数。
+///
+/// 生成 LLVM memcpy intrinsic：
+///   define void @Memory.copy(i64 %dst, i64 %src, i64 %n) {
+///     call void @llvm.memcpy.p0.p0.i64(ptr %dst, ptr %src, i64 %n, i1 false)
+///     ret void
+///   }
+fun ffiEmitBuiltinMemCopy(name: String): String {
+    val sym: String = sanitizeLlvm(name)
+    var out: String = "define void @" + sym + "(i64 %%dst, i64 %%src, i64 %%n) {\n"
+    out = out + "  call void @llvm.memcpy.p0.p0.i64(ptr %%dst, ptr %%src, i64 %%n, i1 false)\n"
+    out = out + "  ret void\n"
+    out = out + "}\n"
+    return out
+}
+
+/// 发射 @native (builtin) memset 函数。
+///
+/// 生成 LLVM memset intrinsic：
+///   define void @Memory.set(i64 %addr, i8 %v, i64 %n) {
+///     call void @llvm.memset.p0.i64(ptr %addr, i8 %v, i64 %n, i1 false)
+///     ret void
+///   }
+fun ffiEmitBuiltinMemSet(name: String): String {
+    val sym: String = sanitizeLlvm(name)
+    var out: String = "define void @" + sym + "(i64 %%addr, i8 %%v, i64 %%n) {\n"
+    out = out + "  call void @llvm.memset.p0.i64(ptr %%addr, i8 %%v, i64 %%n, i1 false)\n"
+    out = out + "  ret void\n"
+    out = out + "}\n"
+    return out
+}
+
+/// 发射 @native(asm = "...") 内联汇编函数。
+///
+/// 生成 LLVM inline asm：
+///   define i64 @Cpu.rdtsc() {
+///     %r = call i64 asm sideeffect "rdtsc", "={eax},{edx}"
+///     ret i64 %r
+///   }
+fun ffiEmitAsm(name: String, asmCode: String, retTy: String): String {
+    val sym: String = sanitizeLlvm(name)
+    var out: String = "define " + retTy + " @" + sym + "() {\n"
+    out = out + "  %r = call " + retTy + " asm sideeffect\n"
+    out = out + "    \"" + asmCode + "\",\n"
+    out = out + "    \"={eax},{edx}\"\n"
+    out = out + "  ret " + retTy + " %r\n"
+    out = out + "}\n"
+    return out
+}
+
+/// 发射 @export 函数定义（Aura 实现体）。
+///
+/// 生成 LLVM define（带 external linkage）：
+///   define i64 @malloc(i64 %n) {
+///     ; ... Aura 实现体 ...
+///     ret i64 %r
+///   }
+fun ffiEmitExport(name: String, retTy: String, params: String, body: String): String {
+    val sym: String = sanitizeLlvm(name)
+    var out: String = "define " + retTy + " @" + sym + "(" + params + ") {\n"
+    out = out + body
+    out = out + "}\n"
+    return out
+}
+
+/// 批量发射 FFI 函数定义。
+///
+/// specs 每行一个定义：
+///   kind|name|retTy|params|nativeText|body
+///
+/// kind 取值：
+///   - syscall: 系统调用
+///   - builtin: 编译器内置
+///   - asm: 内联汇编
+///   - export: 导出符号
+fun ffiEmitAll(specs: String): String {
+    var out: String = ""
+    var lines: List<String> = specs.split("\n")
+    var i: Int = 0
+    while (i < lines.size) {
+        val line: String = lines[i]
+        if (line != "") {
+            out = out + ffiEmitLine(line)
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// 发射单行 FFI 定义。
+fun ffiEmitLine(line: String): String {
+    // 解析格式：kind|name|retTy|params|nativeText|body
+    var parts: List<String> = line.split("|")
+    if (parts.size < 5) {
+        return ""
+    }
+    
+    val kind: String = parts[0]
+    val name: String = parts[1]
+    val retTy: String = parts[2]
+    val params: String = parts[3]
+    val nativeText: String = parts[4]
+    val body: String = if (parts.size >= 6) parts[5] else ""
+    
+    if (kind == "syscall") {
+        val num: Int = toIntOf(nativeText.substringAfter("|"))
+        return ffiEmitSyscall(name, num, retTy, params)
+    } else if (kind == "builtin") {
+        // 根据函数名判断是 read 还是 write
+        if (name.endsWith(".read")) {
+            return ffiEmitBuiltinRead(name, retTy)
+        } else if (name.endsWith(".write")) {
+            return ffiEmitBuiltinWrite(name, retTy)
+        } else if (name.endsWith(".copy")) {
+            return ffiEmitBuiltinMemCopy(name)
+        } else if (name.endsWith(".set")) {
+            return ffiEmitBuiltinMemSet(name)
+        }
+        return ""
+    } else if (kind == "asm") {
+        val asmCode: String = nativeText.substringAfter("|")
+        return ffiEmitAsm(name, asmCode, retTy)
+    } else if (kind == "export") {
+        return ffiEmitExport(name, retTy, params, body)
+    }
+    
+    return ""
+}

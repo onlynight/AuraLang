@@ -1,0 +1,17 @@
+// aura:///aura/lang/ffi/Cpu.aura
+package aura.lang.ffi
+// ─────────────────────────────────────────────────────────────
+// CPU 级操作声明 — Phase S1
+//
+// CPU 级操作（内联汇编）
+//
+// 使用 extern object 封装，@native(asm = "...") 标注内联汇编。
+// ─────────────────────────────────────────────────────────────
+
+// CPU 级操作（内联汇编）
+extern object Cpu {
+    @native(asm = "rdtsc") fun rdtsc(): Long
+    @native(asm = "mfence") fun memFence()
+    @native(asm = "cpuid") fun cpuid(level: Int): Long
+    @native(asm = "lock xaddq") fun atomicAdd(addr: Long, delta: Long): Long
+}

@@ -1,0 +1,152 @@
+// aura:///tests/phase_s0_syntax_tests.aura
+package tests
+// ─────────────────────────────────────────────────────────────
+// Phase S0 语法测试 — FFI 语法验证
+//
+// 本文件展示 Phase S0 新增语法的预期行为。
+// 在 parser 和 emitter 扩展完成前，本文件无法编译。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.ffi.Syscalls
+import aura.lang.ffi.Memory
+import aura.lang.ffi.Cpu
+
+// ─────────────────────────────────────────────────────────────
+// 测试 1：Syscalls 声明（@native(N)）
+// ─────────────────────────────────────────────────────────────
+
+fun testSyscallDeclaration(): Boolean {
+    // 验证 Syscalls 对象已定义
+    // 调用 sysWrite 写入标准输出
+    val msg: String = "Hello from Syscalls!"
+    val msgAddr: Long = msg as Long
+    val msgLen: Long = msg.length
+    val ret: Long = Syscalls.write(1, msgAddr, msgLen)
+    return ret >= 0
+}
+
+// ─────────────────────────────────────────────────────────────
+// 测试 2：Memory 操作（@native 无参数）
+// ─────────────────────────────────────────────────────────────
+
+fun testMemoryRead(): Boolean {
+    // 分配内存
+    val addr: Long = Memory.alloc(100)
+    if (addr == 0) { return false }
+    
+    // 写入字节
+    Memory.write(addr, 0x42)
+    
+    // 读取字节
+    val v: Byte = Memory.read(addr)
+    
+    // 释放内存
+    Memory.free(addr)
+    
+    return v == 0x42
+}
+
+fun testMemoryRead64(): Boolean {
+    val addr: Long = Memory.alloc(16)
+    if (addr == 0) { return false }
+    
+    // 写入 64 位整数
+    Memory.write64(addr, 0xDEADBEEF)
+    
+    // 读取 64 位整数
+    val v: Long = Memory.read64(addr)
+    
+    Memory.free(addr)
+    
+    return v == 0xDEADBEEF
+}
+
+fun testMemoryCopy(): Boolean {
+    val src: Long = Memory.alloc(32)
+    val dst: Long = Memory.alloc(32)
+    if (src == 0 || dst == 0) { return false }
+    
+    // 写入源数据
+    Memory.write64(src, 0x1234567890ABCDEF)
+    
+    // 复制
+    Memory.copy(dst, src, 8)
+    
+    // 读取目标数据
+    val v: Long = Memory.read64(dst)
+    
+    Memory.free(src)
+    Memory.free(dst)
+    
+    return v == 0x1234567890ABCDEF
+}
+
+// ─────────────────────────────────────────────────────────────
+// 测试 3：Cpu 操作（@native(asm = "...")）
+// ─────────────────────────────────────────────────────────────
+
+fun testCpuRdtsc(): Boolean {
+    val t1: Long = Cpu.rdtsc()
+    val t2: Long = Cpu.rdtsc()
+    // rdtsc 应该返回递增的值
+    return t2 >= t1
+}
+
+fun testCpuMemFence(): Boolean {
+    Cpu.memFence()
+    return true
+}
+
+// ─────────────────────────────────────────────────────────────
+// 测试 4：@export 函数（Aura 实现，导出符号）
+// ─────────────────────────────────────────────────────────────
+
+// 示例：导出一个简单函数
+@export fun auraAdd(a: Long, b: Long): Long {
+    return a + b
+}
+
+@export fun auraSub(a: Long, b: Long): Long {
+    return a - b
+}
+
+// ─────────────────────────────────────────────────────────────
+// 主测试函数
+// ─────────────────────────────────────────────────────────────
+
+fun main() {
+    println("Phase S0 Syntax Tests")
+    println("=====================")
+    
+    // 测试 Syscalls
+    println("Test 1: SyscallDeclaration...")
+    println("  " + (testSyscallDeclaration() ? "PASS" : "FAIL"))
+    
+    // 测试 Memory
+    println("Test 2: MemoryRead...")
+    println("  " + (testMemoryRead() ? "PASS" : "FAIL"))
+    
+    println("Test 3: MemoryRead64...")
+    println("  " + (testMemoryRead64() ? "PASS" : "FAIL"))
+    
+    println("Test 4: MemoryCopy...")
+    println("  " + (testMemoryCopy() ? "PASS" : "FAIL"))
+    
+    // 测试 Cpu
+    println("Test 5: CpuRdtsc...")
+    println("  " + (testCpuRdtsc() ? "PASS" : "FAIL"))
+    
+    println("Test 6: CpuMemFence...")
+    println("  " + (testCpuMemFence() ? "PASS" : "FAIL"))
+    
+    // 测试 @export
+    println("Test 7: Export Functions...")
+    val sum: Long = auraAdd(1, 2)
+    val diff: Long = auraSub(5, 3)
+    println("  auraAdd(1, 2) = " + sum + (sum == 3 ? " PASS" : " FAIL"))
+    println("  auraSub(5, 3) = " + diff + (diff == 2 ? " PASS" : " FAIL"))
+    
+    println("=====================")
+    println("All tests completed.")
+}

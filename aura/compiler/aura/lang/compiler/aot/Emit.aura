@@ -118,6 +118,20 @@ class LlvmEmitter {
     var fGen: Int = 0
     var fGenStr: String = "-1"
 
+    // ── 签名表缓存 ──
+    //
+    // `stdSignatureTable()` / `runtimeTable()` / `cffiTable()` / `preludeTable()` 都是
+    // 由数百段字符串字面量 `+` 拼接而成（Aura 侧字符串拼接**不**做常量折叠），每次
+    // 调用都会重新分配整张表。实测 `HirCall` 类型推断 4668 次未命中吃掉 38MB ——
+    // 正是因为每个方法调用（`.length`/`.contains`/…）都经 `callSignature` 重建了一次
+    // `stdSignatureTable()`（约 9KB）。
+    //
+    // 表内容在单次 `emitProgram` 内恒定，故在此缓存一次，查询只读缓存串。
+    var fStdTable: String = ""
+    var fRtTable: String = ""
+    var fCffiTable: String = ""
+    var fPreTable: String = ""
+
     /// 类型别名表（`Alias|Target`，每行一项；供 `typealias` 解析）。
     var fTypeAliases: String = ""
 
@@ -209,6 +223,11 @@ class LlvmEmitter {
         this.reset()
         this.moduleName = moduleName
         this.targetTriple = target
+        // 签名表只构建一次（见字段注释：每次重建约 9KB，是发射期头号泄漏源）。
+        this.fStdTable = stdSignatureTable()
+        this.fRtTable = runtimeTable()
+        this.fCffiTable = cffiTable()
+        this.fPreTable = preludeTable()
 
         // 0) inferType 记忆化表按节点数预置（查询零分配；必须**先备足**，
         //    否则越界写入会走 listSet 的“追加”路径，破坏与 id 的一一对应）。
@@ -295,7 +314,7 @@ class LlvmEmitter {
             }
             i = i + 1
         }
-        // 3) 组装模块（原生缓冲区：避免对已累积的整串反复 `+` 拷贝）
+        // 4) 组装模块（原生缓冲区：避免对已累积的整串反复 `+` 拷贝）
         val out: EmitBuffer = EmitBuffer()
         out.sbAdd("; ModuleID = '" + moduleName + "'\n")
         out.sbAdd("source_filename = \"" + moduleName + "\"\n")
@@ -2388,7 +2407,7 @@ class LlvmEmitter {
             }
             // 限定名 std 调用：`Collections.getAt` / `Collections.set` → 调用点符号
             val qSym: String = stdSymbolOfQualified(fname)
-            if (!qHandled && qSym != "" && stdSignature(qSym) != "") {
+            if (!qHandled && qSym != "" && this.sigOfStd(qSym) != "") {
                 sym = qSym
             } else {
                 // std 类静态调用（Math.sin / String.fromCharCode…）→ 调用点符号
@@ -2404,7 +2423,7 @@ class LlvmEmitter {
                     }
                 }
             }
-            val sig: String = callSignature(sym)
+            val sig: String = this.callSig(sym)
             if (sig != "") {
                 retTy = aotFieldAt(sig, 0, "|")
                 paramsCsv = aotFieldAt(sig, 1, "|")
@@ -2880,13 +2899,13 @@ class LlvmEmitter {
             }
             // 限定名 std 调用（`Collections.getAt` 等）
             val qSym: String = stdSymbolOfQualified(fname)
-            if (qSym != "" && stdSignature(qSym) != "") {
-                return aotFieldAt(stdSignature(qSym), 0, "|")
+            if (qSym != "" && this.sigOfStd(qSym) != "") {
+                return aotFieldAt(this.sigOfStd(qSym), 0, "|")
             }
             // std 类静态调用（Math.sin 等）
             val stdCls: String = this.stdClassReceiver(hir, kids, hirKidsCount(kids), 0)
             if (stdCls != "") {
-                val ss: String = callSignature("aura_lang_std_" + sanitizeLlvm(stdCls)
+                val ss: String = this.callSig("aura_lang_std_" + sanitizeLlvm(stdCls)
                     + "_" + sanitizeLlvm(fname))
                 if (ss != "") {
                     return aotFieldAt(ss, 0, "|")
@@ -2897,7 +2916,7 @@ class LlvmEmitter {
             if (methodSym != "") {
                 sym = methodSym
             }
-            val sig: String = callSignature(sym)
+            val sig: String = this.callSig(sym)
             if (sig != "") {
                 return aotFieldAt(sig, 0, "|")
             }
@@ -3015,6 +3034,36 @@ class LlvmEmitter {
             }
         }
         return ""
+    }
+
+    /// 从**已缓存**的 std 签名表查询（等价 `stdSignature`，但不再重建表）。
+    fun sigOfStd(name: String): String {
+        if (!name.startsWith("aura_lang_std_")) {
+            return ""
+        }
+        return tableSignature(this.fStdTable, name)
+    }
+
+    /// 从**已缓存**的四张表按 std → runtime → C FFI → prelude 顺序查询调用点签名
+    /// （等价 `callSignature`，但不再重建任何表）。
+    fun callSig(name: String): String {
+        val std: String = this.sigOfStd(name)
+        if (std != "") {
+            return std
+        }
+        if (!name.startsWith("aura_") && name != "toString" && name != "toStr"
+            && name != "toStringFloat") {
+            return ""
+        }
+        val rt: String = tableSignature(this.fRtTable, name)
+        if (rt != "") {
+            return rt
+        }
+        val cf: String = tableSignature(this.fCffiTable, name)
+        if (cf != "") {
+            return cf
+        }
+        return tableSignature(this.fPreTable, name)
     }
 
     /// 查询模块内用户函数签名（未命中返回 ""）。
