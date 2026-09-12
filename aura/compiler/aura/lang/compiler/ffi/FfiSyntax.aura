@@ -3,7 +3,14 @@ package aura.lang.compiler.ffi
 // ─────────────────────────────────────────────────────────────
 // FFI 语法定义 — Phase S0
 //
-// 定义 @native / @export / extern object 的语法节点和辅助函数。
+// 定义 native / export / extern object 的语法节点和辅助函数。
+//
+// ── 语法示例 ──
+//   native(SYS_READ) fun read(fd: Int, buf: Long, count: Long): Long
+//   native fun read(addr: Long): Byte
+//   native(asm = "rdtsc") fun rdtsc(): Long
+//   export fun malloc(n: Long): Long { ... }
+//   extern object Syscalls { ... }
 //
 // ── 设计原则 ──
 //   * 与现有 Ast.aura 的扁平 arena 风格一致

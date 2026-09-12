@@ -1,0 +1,79 @@
+// aura:///aura/lang/native/random/XorShift.aura
+package aura.lang.native.random
+// ─────────────────────────────────────────────────────────────
+// 随机数生成 — Phase S2
+//
+// 实现 XorShift 伪随机数生成器。
+// 无需系统调用，纯 Aura 实现。
+//
+// ── 使用方式 ──
+//   val rng: XorShift = XorShift.seed(12345)
+//   val n: Long = rng.next()
+// ─────────────────────────────────────────────────────────────
+
+/// XorShift 伪随机数生成器
+struct XorShift {
+    var state: Long = 1
+
+    init(seed: Long) {
+        this.state = seed
+        if (this.state == 0) {
+            this.state = 1
+        }
+    }
+
+    /// 生成下一个随机数
+    fun next(): Long {
+        var x: Long = this.state
+        x = x xor (x shl 13)
+        x = x xor (x shr 7)
+        x = x xor (x shl 17)
+        this.state = x
+        return x
+    }
+
+    /// 生成指定范围的随机数 [0, bound)
+    fun nextRange(bound: Long): Long {
+        if (bound <= 0) {
+            return 0
+        }
+        return this.next() % bound
+    }
+
+    /// 生成浮点随机数 [0.0, 1.0)
+    fun nextFloat(): Double {
+        return (this.next() and 0xFFFFFFFFL) / 4294967295.0
+    }
+
+    /// 使用当前时间播种（简化实现）
+    fun seedTime(): XorShift {
+        // 简化：使用固定种子
+        // 实际实现应使用 Clock.now()
+        return XorShift(0x123456789ABCDEF)
+    }
+}
+
+/// 全局随机数生成器（单例）
+object Random {
+    var rng: XorShift = XorShift.seedTime()
+
+    /// 生成下一个随机数
+    fun next(): Long {
+        return rng.next()
+    }
+
+    /// 生成指定范围的随机数
+    fun nextRange(bound: Long): Long {
+        return rng.nextRange(bound)
+    }
+
+    /// 生成浮点随机数
+    fun nextFloat(): Double {
+        return rng.nextFloat()
+    }
+
+    /// 重新播种
+    fun reseed(seed: Long) {
+        rng = XorShift(seed)
+    }
+}

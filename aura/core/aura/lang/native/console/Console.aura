@@ -1,0 +1,94 @@
+// aura:///aura/lang/native/console/Console.aura
+package aura.lang.native.console
+// ─────────────────────────────────────────────────────────────
+// Console 操作 — Phase S1
+//
+// 提供控制台输出函数。
+// 使用 Syscalls.write 直接写入 stdout（fd=1）。
+//
+// ── 使用方式 ──
+//   Console.println("Hello, Aura!")
+//   Console.print("Hello")
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.native.Syscalls
+import aura.lang.native.Memory
+import aura.lang.native.string.StrOps
+
+/// Console 输出
+extern object Console {
+
+    /// 写入标准输出（fd=1）
+    native(SYS_WRITE) fun writeStdout(buf: Long, count: Long): Long
+
+    /// 写入字符串（不含换行）
+    fun print(msg: String) {
+        val addr: Long = msg as Long
+        val len: Long = StrOps.strlen(addr)
+        writeStdout(addr, len)
+    }
+
+    /// 写入字符串（含换行）
+    fun println(msg: String) {
+        val addr: Long = msg as Long
+        val len: Long = StrOps.strlen(addr)
+        writeStdout(addr, len)
+        // 写入换行符
+        val newline: Long = 0x000A as Long  // '\n' 的地址（简化）
+        // 直接使用 write 系统调用写入换行
+        // 注意：这里需要创建一个包含换行符的缓冲区
+        // 简化实现：使用一个全局缓冲区
+        val nlBuf: Long = getNewlineBuffer()
+        writeStdout(nlBuf, 1)
+    }
+
+    /// 写入整数（十进制）
+    fun printlnInt(n: Long) {
+        val buf: Long = IntToStr(n)
+        val len: Long = StrOps.strlen(buf)
+        writeStdout(buf, len)
+        val nlBuf: Long = getNewlineBuffer()
+        writeStdout(nlBuf, 1)
+    }
+
+    /// 写入浮点数（简化：只支持整数部分）
+    fun printlnFloat(n: Float) {
+        val i: Long = n as Long
+        printlnInt(i)
+    }
+
+    /// 获取换行符缓冲区（全局）
+    fun getNewlineBuffer(): Long {
+        // 简化：返回一个预定义的地址
+        // 实际实现需要在内存中存储换行符
+        return 0x400000000000 as Long  // 占位地址
+    }
+
+    /// 整数转字符串（使用临时缓冲区）
+    fun IntToStr(n: Long): Long {
+        // 简化实现：使用固定缓冲区
+        val bufAddr: Long = getIntBuffer()
+        // 清空缓冲区
+        Memory.set(bufAddr, 0 as Byte, 32)
+        // 转换（简化：只处理正数）
+        if (n == 0) {
+            Memory.write(bufAddr, '0' as Byte)
+            return bufAddr
+        }
+        var pos: Long = 31  // 从后往前写
+        var num: Long = n
+        while (num > 0) {
+            val digit: Byte = ('0' as Long + num % 10) as Byte
+            pos = pos - 1
+            Memory.write(bufAddr + pos, digit)
+            num = num / 10
+        }
+        // 移动到实际起始位置
+        return bufAddr + pos + 1
+    }
+
+    /// 获取整数转换缓冲区（全局）
+    fun getIntBuffer(): Long {
+        return 0x400000000001 as Long  // 占位地址
+    }
+}

@@ -28,7 +28,7 @@ fun keywordTable(): String {
         + "\ninline|Inline\nconst|Const\ncomptime|Comptime\ndefer|Defer\nextern|Extern"
         + "\nimport|Import\nlazy|Lazy\nlateinit|Lateinit\ndata|Data\nvalue|Value\nawait|Await"
         + "\nto|To\nasync|Async\nselect|Select\nbox|Box\nweak|Weak\nmalloc|Malloc\nfree|Free"
-        + "\nretain|Retain\nrelease|Release"
+        + "\nretain|Retain\nrelease|Release\nnative|Native\nexport|Export"
         + "\nInt|Ident\nLong|Ident\nShort|Ident\nByte|Ident\nFloat|Ident\nDouble|Ident"
         + "\nBoolean|Ident\nChar|Ident\nString|Ident\nAny|Ident\nNothing|Ident\nUnit|Unit"
         + "\ntrue|BoolLiteral\nfalse|BoolLiteral\nit|Ident\nby|Ident"

@@ -1,0 +1,87 @@
+// aura:///aura/lang/native/file/FileOps.aura
+package aura.lang.native.file
+// ─────────────────────────────────────────────────────────────
+// 文件 I/O 操作 — Phase S2
+//
+// 提供文件读写操作，封装系统调用。
+//
+// ── 使用方式 ──
+//   val fd: Int = FileOps.open("hello.txt", O_WRONLY | O_CREAT)
+//   FileOps.write(fd, msgAddr, msgLen)
+//   FileOps.close(fd)
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.native.Syscalls
+import aura.lang.native.Memory
+
+/// 文件 I/O 操作
+extern object FileOps {
+
+    // ── 系统调用声明 ──
+
+    native(SYS_OPEN) fun open(path: CString, flags: Int): Int
+    native(SYS_CLOSE) fun close(fd: Int): Int
+    native(SYS_READ) fun read(fd: Int, buf: Long, count: Long): Long
+    native(SYS_WRITE) fun write(fd: Int, buf: Long, count: Long): Long
+    native(SYS_LSEEK) fun lseek(fd: Int, off: Long, whence: Int): Long
+    native(SYS_FSTAT) fun fstat(fd: Int, buf: Long): Long
+    native(SYS_UNLINK) fun unlink(path: CString): Int
+
+    // ── 文件操作函数 ──
+
+    /// 打开文件
+    fun openFile(path: String, flags: Int): Int {
+        val addr: Long = path as Long
+        return open(addr, flags)
+    }
+
+    /// 关闭文件
+    fun closeFile(fd: Int): Int {
+        return close(fd)
+    }
+
+    /// 读取文件
+    fun readFile(fd: Int, buf: Long, count: Long): Long {
+        return read(fd, buf, count)
+    }
+
+    /// 写入文件
+    fun writeFile(fd: Int, buf: Long, count: Long): Long {
+        return write(fd, buf, count)
+    }
+
+    /// 移动文件指针
+    fun seekFile(fd: Int, offset: Long, whence: Int): Long {
+        return lseek(fd, offset, whence)
+    }
+
+    /// 获取文件状态
+    fun statFile(fd: Int, buf: Long): Long {
+        return fstat(fd, buf)
+    }
+
+    /// 删除文件
+    fun deleteFile(path: String): Int {
+        val addr: Long = path as Long
+        return unlink(addr)
+    }
+
+    /// 检查文件是否存在
+    fun exists(path: String): Boolean {
+        val addr: Long = path as Long
+        val result: Int = access(addr, F_OK)
+        return result == 0
+    }
+}
+
+// ── 常量定义 ──
+const O_RDONLY: Int = 0
+const O_WRONLY: Int = 1
+const O_RDWR: Int = 2
+const O_CREAT: Int = 0x40
+const O_EXCL: Int = 0x80
+const O_TRUNC: Int = 0x200
+const SEEK_SET: Int = 0
+const SEEK_CUR: Int = 1
+const SEEK_END: Int = 2
+const F_OK: Int = 0

@@ -1,0 +1,9 @@
+// 测试 export fun
+export fun auraAdd(a: Long, b: Long): Long {
+    return a + b
+}
+
+fun main() {
+    val sum: Long = auraAdd(1, 2)
+    println("Sum: " + sum)
+}

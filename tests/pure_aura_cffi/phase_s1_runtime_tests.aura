@@ -1,0 +1,186 @@
+// aura:///tests/pure_aura_cffi/phase_s1_runtime_tests.aura
+package tests
+// ─────────────────────────────────────────────────────────────
+// Phase S1 运行库测试
+//
+// 测试内存分配器、字符串操作、Console 输出。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.native.Runtime
+import aura.lang.native.Syscalls
+import aura.lang.native.Memory
+import aura.lang.native.memory.Allocator
+import aura.lang.native.string.StrOps
+import aura.lang.native.console.Console
+
+// ─────────────────────────────────────────────────────────────
+// 测试 1：内存分配器
+// ─────────────────────────────────────────────────────────────
+
+fun testAllocatorMalloc(): Boolean {
+    // 初始化分配器
+    val ok: Boolean = Allocator.init()
+    if (!ok) {
+        return false
+    }
+    
+    // 分配 100 字节
+    val addr: Long = Allocator.malloc(100)
+    if (addr == 0) {
+        return false
+    }
+    
+    // 检查剩余内存
+    val remaining: Long = Allocator.remaining()
+    if (remaining <= 0) {
+        return false
+    }
+    
+    return true
+}
+
+fun testAllocatorMultiple(): Boolean {
+    // 分配多个块
+    val addr1: Long = Allocator.malloc(50)
+    val addr2: Long = Allocator.malloc(50)
+    val addr3: Long = Allocator.malloc(50)
+    
+    // 检查地址不同
+    if (addr1 == 0 || addr2 == 0 || addr3 == 0) {
+        return false
+    }
+    if (addr1 == addr2 || addr2 == addr3 || addr1 == addr3) {
+        return false
+    }
+    
+    return true
+}
+
+// ─────────────────────────────────────────────────────────────
+// 测试 2：字符串操作
+// ─────────────────────────────────────────────────────────────
+
+fun testStrlen(): Boolean {
+    val s: String = "hello"
+    val n: Long = StrOps.strlen(s as Long)
+    return n == 5
+}
+
+fun testStrcmp(): Boolean {
+    val a: String = "apple"
+    val b: String = "banana"
+    
+    val cmp1: Int = StrOps.strcmp(a as Long, b as Long)
+    if (cmp1 >= 0) {
+        return false
+    }
+    
+    val cmp2: Int = StrOps.strcmp(b as Long, a as Long)
+    if (cmp2 <= 0) {
+        return false
+    }
+    
+    val cmp3: Int = StrOps.strcmp(a as Long, a as Long)
+    if (cmp3 != 0) {
+        return false
+    }
+    
+    return true
+}
+
+fun testStrcpy(): Boolean {
+    val src: String = "hello"
+    val srcAddr: Long = src as Long
+    
+    // 分配目标缓冲区
+    val dstAddr: Long = Allocator.malloc(16)
+    if (dstAddr == 0) {
+        return false
+    }
+    
+    // 复制
+    StrOps.strcpy(dstAddr, srcAddr)
+    
+    // 比较
+    val cmp: Int = StrOps.strcmp(dstAddr, srcAddr)
+    return cmp == 0
+}
+
+fun testStrHash(): Boolean {
+    val s1: String = "hello"
+    val s2: String = "hello"
+    val s3: String = "world"
+    
+    val h1: Long = StrOps.hash(s1 as Long)
+    val h2: Long = StrOps.hash(s2 as Long)
+    val h3: Long = StrOps.hash(s3 as Long)
+    
+    // 相同字符串哈希相同
+    if (h1 != h2) {
+        return false
+    }
+    
+    // 不同字符串哈希不同
+    if (h1 == h3) {
+        return false
+    }
+    
+    return true
+}
+
+// ─────────────────────────────────────────────────────────────
+// 测试 3：Console 输出
+// ─────────────────────────────────────────────────────────────
+
+fun testConsolePrint(): Boolean {
+    Console.print("Hello")
+    Console.print(" World")
+    Console.println("")
+    return true
+}
+
+fun testConsolePrintln(): Boolean {
+    Console.println("Hello, Aura!")
+    Console.println("Phase S1 Runtime Tests")
+    return true
+}
+
+// ─────────────────────────────────────────────────────────────
+// 主测试函数
+// ─────────────────────────────────────────────────────────────
+
+fun main() {
+    println("Phase S1 Runtime Tests")
+    println("======================")
+    
+    // 测试内存分配器
+    println("Test 1: AllocatorMalloc...")
+    println("  " + (testAllocatorMalloc() ? "PASS" : "FAIL"))
+    
+    println("Test 2: AllocatorMultiple...")
+    println("  " + (testAllocatorMultiple() ? "PASS" : "FAIL"))
+    
+    // 测试字符串操作
+    println("Test 3: Strlen...")
+    println("  " + (testStrlen() ? "PASS" : "FAIL"))
+    
+    println("Test 4: Strcmp...")
+    println("  " + (testStrcmp() ? "PASS" : "FAIL"))
+    
+    println("Test 5: Strcpy...")
+    println("  " + (testStrcpy() ? "PASS" : "FAIL"))
+    
+    println("Test 6: StrHash...")
+    println("  " + (testStrHash() ? "PASS" : "FAIL"))
+    
+    // 测试 Console
+    println("Test 7: ConsolePrint...")
+    println("  " + (testConsolePrint() ? "PASS" : "FAIL"))
+    
+    println("Test 8: ConsolePrintln...")
+    println("  " + (testConsolePrintln() ? "PASS" : "FAIL"))
+    
+    println("======================")
+    println("All tests completed.")
+}

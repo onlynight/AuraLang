@@ -1,0 +1,69 @@
+// aura:///aura/lang/native/arch/x86_64_windows/Syscalls.aura
+package aura.lang.native.arch.x86_64_windows
+// ─────────────────────────────────────────────────────────────
+// Windows x86_64 系统调用表 — Phase S3
+//
+// Windows 使用 Nt* 系统调用（通过 syscall 指令或 Zw* 包装）。
+// 这里使用 Windows API 封装（通过 FFI 调用 kernel32.dll）。
+//
+// ── 注意 ──
+// Windows 不直接支持 syscall 指令调用，需要通过：
+//   1. kernel32.dll API（WriteFile, ReadFile 等）
+//   2. Nt* 系统调用（通过 syscall 指令，但需要 Nt* 服务号）
+//
+// 这里使用 FFI 方式调用 kernel32.dll。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.native.Memory
+
+/// Windows x86_64 系统调用
+extern object Syscalls {
+
+    // ── 标准文件描述符 ──
+
+    const STDIN: Int = 0
+    const STDOUT: Int = 1
+    const STDERR: Int = 2
+
+    // ── 文件操作常量 ──
+
+    const O_RDONLY: Int = 0
+    const O_WRONLY: Int = 1
+    const O_RDWR: Int = 2
+    const O_CREAT: Int = 0x40
+    const O_TRUNC: Int = 0x200
+
+    // ── 内存保护常量 ──
+
+    const PROT_NONE: Int = 0
+    const PROT_READ: Int = 1
+    const PROT_WRITE: Int = 2
+    const PROT_EXEC: Int = 4
+
+    // ── 内存映射常量 ──
+
+    const MAP_SHARED: Int = 1
+    const MAP_PRIVATE: Int = 2
+    const MAP_ANONYMOUS: Int = 0x20
+
+    // ── 系统调用声明 ──
+    // 注意：Windows 使用 FFI 方式，不是 syscall 指令
+
+    /// 写入控制台（简化实现）
+    native(asm = "call qword [rip + WriteFile]") fun writeFile(handle: Long, buf: Long, count: Long): Long
+
+    /// 读取控制台（简化实现）
+    native(asm = "call qword [rip + ReadFile]") fun readFile(handle: Long, buf: Long, count: Long): Long
+
+    /// 获取当前时间
+    native(asm = "call qword [rip + GetSystemTimeAsFileTime]") fun getTime(): Long
+
+    /// 退出进程
+    native(asm = "call qword [rip + ExitProcess]") fun exitProcess(code: Int)
+
+    // ── Windows 特定常量 ──
+
+    const INVALID_HANDLE_VALUE: Long = -1
+    const GENERIC_READ: Int = 0x80000000
+    const GENERIC_WRITE: Int = 0x40000000
+}

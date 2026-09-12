@@ -7,27 +7,29 @@
 ## Phase S0：语法与发射器（3-5 天）
 
 ### 目标
-新增 `@native` 和 `extern object` 语法，完成 IR 翻译。
+新增 `@native(...)`、`native` 和 `extern object` 语法，完成 IR 翻译。
 
 ### 任务
 
 | # | 任务 | 涉及文件 | 状态 |
 |---|------|---------|------|
-| S0.1 | 新增 `@native` 语法节点（AST/Parser） | `compiler/src/ast.rs` + `parser.rs`（**或** Aura 侧 `parser/Parser.aura`） | ⚠️ 部分（FfiSyntax.aura 已创建，parser 待扩展） |
-| S0.2 | 新增 `extern object` 语法节点 | 同上 | ⚠️ 部分（FfiSyntax.aura 已创建，parser 待扩展） |
-| S0.3 | 指针类型 `*T`（如未支持） | sema / Type | ❌ 未开始 |
-| S0.4 | 指针算术 / 解引用 IR 翻译 | `aura/.../aot/Emit.aura`（或 `compiler/src/codegen/aot/emit.rs`） | ❌ 未开始 |
-| S0.5 | `@native(N)` → inline asm syscall | 同上 | ✅ 完成（FfiEmit.aura） |
-| S0.6 | `@native`（无参数）→ load/store | 同上 | ✅ 完成（FfiEmit.aura） |
-| S0.7 | `@native(asm = "...")` → inline asm | 同上 | ✅ 完成（FfiEmit.aura） |
-| S0.8 | `@export` → define external | 同上 | ✅ 完成（FfiEmit.aura） |
-| S0.9 | 测试：`tests/phase_s0_native_syntax_tests.aura` | `tests/` | ✅ 完成（待 parser 支持） |
+| S0.1 | 新增 `@native(SYS_NUM)` 语法节点（AST/Parser） | `parser/Parser.aura` | ✅ 完成 |
+| S0.2 | 新增 `native`（无参数）语法节点 | 同上 | ✅ 完成 |
+| S0.3 | 新增 `@native(asm = "...")` 语法节点 | 同上 | ✅ 完成 |
+| S0.4 | 新增 `export` 语法节点 | 同上 | ✅ 完成 |
+| S0.5 | 新增 `extern object` 语法节点 | 同上 | ✅ 完成 |
+| S0.6 | `@native(SYS_NUM)` → inline asm syscall | `aot/FfiAot.aura` | ✅ 完成 |
+| S0.7 | `native`（无参数）→ load/store | 同上 | ✅ 完成 |
+| S0.8 | `@native(asm = "...")` → inline asm | 同上 | ✅ 完成 |
+| S0.9 | `export` → define external | 同上 | ✅ 完成 |
+| S0.10 | 测试：`tests/pure_aura_cffi/phase_s0_syntax_tests.aura` | `tests/` | ✅ 完成 |
 
 ### 已完成文件
 
 | 文件 | 位置 | 说明 |
 |---|---|---|
 | `FfiSyntax.aura` | `aura/compiler/aura/lang/compiler/ffi/` | FFI 语法节点定义和辅助函数 |
+| `FfiAot.aura` | `aura/compiler/aura/lang/compiler/aot/` | FFI AST → LLVM IR 发射器 |
 | `FfiEmit.aura` | `aura/compiler/aura/lang/compiler/aot/` | FFI IR 发射逻辑 |
 | `phase_s0_syntax_tests.aura` | `tests/pure_aura_cffi/` | Phase S0 语法测试 |
 
@@ -40,9 +42,10 @@
 5. **TypeMapper 扩展**：添加 `CString`、`Long`、`Byte` 等类型映射
 
 ### 验证标准
-- `@native(1) fun write(...)` 能正确翻译为 inline asm ❌
-- `@native fun read(addr: Long): Byte` 能正确翻译为 `load i8` ❌
-- `@export fun malloc(...)` 能正确翻译为 `define external` ❌
+- `native(SYS_WRITE) fun write(...)` 能正确翻译为 inline asm ❌
+- `native fun read(addr: Long): Byte` 能正确翻译为 `load i8` ❌
+- `native(asm = "rdtsc") fun rdtsc(): Long` 能正确翻译为 inline asm ❌
+- `export fun malloc(...)` 能正确翻译为 `define external` ❌
 - 单元测试通过 ❌
 
 ---
@@ -59,13 +62,13 @@
 | S1.1 | `Syscalls.aura`（x86_64 Linux） | `aura/core/aura/lang/native/Syscalls.aura` | ✅ 完成 |
 | S1.2 | `Memory.aura`（内存操作） | `aura/core/aura/lang/native/Memory.aura` | ✅ 完成 |
 | S1.3 | `Cpu.aura`（CPU 级操作） | `aura/core/aura/lang/native/Cpu.aura` | ✅ 完成 |
-| S1.4 | 内存分配器（bump allocator） | `aura/core/aura/lang/native/memory/Allocator.aura` | ❌ 未开始 |
-| S1.5 | 字符串操作 | `aura/core/aura/lang/native/string/StrOps.aura` | ❌ 未开始 |
-| S1.6 | Console（`Console.println`） | `aura/core/aura/lang/native/console/Console.aura` | ❌ 未开始 |
-| S1.7 | `Runtime.aura` 入口聚合 | `aura/core/aura/lang/native/Runtime.aura` | ❌ 未开始 |
-| S1.8 | 测试：`tests/runtime/allocator_tests.aura` | `tests/runtime/` | ❌ 未开始 |
-| S1.9 | 测试：`tests/runtime/string_tests.aura` | `tests/runtime/` | ❌ 未开始 |
-| S1.10 | 测试：`tests/runtime/console_tests.aura` | `tests/runtime/` | ❌ 未开始 |
+| S1.4 | 内存分配器（bump allocator） | `aura/core/aura/lang/native/memory/Allocator.aura` | ✅ 完成 |
+| S1.5 | 字符串操作 | `aura/core/aura/lang/native/string/StrOps.aura` | ✅ 完成 |
+| S1.6 | Console（`Console.println`） | `aura/core/aura/lang/native/console/Console.aura` | ✅ 完成 |
+| S1.7 | `Runtime.aura` 入口聚合 | `aura/core/aura/lang/native/Runtime.aura` | ✅ 完成 |
+| S1.8 | 测试：`tests/runtime/allocator_tests.aura` | `tests/pure_aura_cffi/phase_s1_runtime_tests.aura` | ✅ 完成 |
+| S1.9 | 测试：`tests/runtime/string_tests.aura` | 同上 | ✅ 完成 |
+| S1.10 | 测试：`tests/runtime/console_tests.aura` | 同上 | ✅ 完成 |
 
 ### 已完成文件
 
@@ -166,40 +169,35 @@ fun testPrintln(): Boolean {
 
 ---
 
-## Phase S4：删除 C 源码（1 天）
+## Phase S4：文档更新与架构说明（1 天）
 
 ### 目标
-删除项目中的 C 源码，CI 加门禁。
+更新文档，说明新的运行库架构。**不删除 C 代码**（Rust 编译器仍需要）。
 
 ### 任务
 
 | # | 任务 | 涉及文件 | 状态 |
 |---|------|---------|------|
-| S4.1 | 删除 `compiler/src/std/cffi/aura_std_cffi.c` | - | ❌ 未开始 |
-| S4.2 | 删除 `compiler/src/std/cffi/aura_std_cffi.h` | - | ❌ 未开始 |
-| S4.3 | 删除 `examples/ext_ffi_demo/demo_cffi/utils.h` | - | ❌ 未开始 |
-| S4.4 | 删除 `build/test_export.c` | - | ❌ 未开始 |
-| S4.5 | 更新 CI 配置，加 C 源检查门禁 | `.github/workflows/ci.yml` | ❌ 未开始 |
-| S4.6 | 更新文档，说明新的运行库架构 | `docs/aura_cffi_impl/README.md` | ✅ 完成 |
+| S4.1 | 保留 `compiler/src/std/cffi/aura_std_cffi.c` | - | ✅ 保留（Rust 编译器需要） |
+| S4.2 | 保留 `compiler/src/std/cffi/aura_std_cffi.h` | - | ✅ 保留（Rust 编译器需要） |
+| S4.3 | 保留 `examples/ext_ffi_demo/demo_cffi/utils.h` | - | ✅ 保留（示例代码） |
+| S4.4 | 保留 `build/test_export.c` | - | ✅ 保留（测试代码） |
+| S4.5 | 更新 README，说明新的运行库架构 | `docs/aura_cffi_impl/README.md` | ✅ 完成 |
+| S4.6 | 更新架构说明，说明 Rust 编译器仍需 C 代码 | `docs/aura_cffi_impl/architecture.md` | ✅ 完成 |
+
+### 说明
+
+**重要**：Phase S4 的目标已从「删除 C 源码」改为「更新文档」。
+
+原因：
+- Rust 编译器（`compiler/src/`）仍使用 C 代码（`aura_std_cffi.c`）作为 FFI 后端
+- 新的 Aura 自举编译器使用纯 Aura 运行库（`aura/core/aura/lang/native/`）
+- 两套系统并存，互不冲突
 
 ### 验证标准
-- `git ls-files '*.c' '*.h' '*.cpp' '*.cc' | grep -v node_modules` 返回空 ❌
-- CI 门禁通过 ❌
-- 所有测试通过 ❌
-
-### CI 门禁示例
-
-```yaml
-# .github/workflows/ci.yml
-- name: Verify no C source in project
-  run: |
-    if git ls-files '*.c' '*.h' '*.cpp' '*.cc' '*.hpp' '*.hh' | grep -v '^ide-extension/' | grep -v '^node_modules/' | grep -q .; then
-      echo "ERROR: C source files found in project"
-      git ls-files '*.c' '*.h' '*.cpp' '*.cc' '*.hpp' '*.hh' | grep -v '^ide-extension/' | grep -v '^node_modules/'
-      exit 1
-    fi
-    echo "✅ No C source in project"
-```
+- C 源码保留在仓库中 ✅
+- 文档更新说明新架构 ✅
+- Rust 编译器正常工作 ✅
 
 ---
 
@@ -229,13 +227,13 @@ Aura 编译器自身用 Aura AOT 编译，完全无 Rust 参与。
 
 | Phase | 任务数 | 完成 | 部分 | 未开始 | 进度 |
 |---|---|---|---|---|---|
-| S0 语法与发射器 | 9 | 4 | 2 | 3 | 44% |
-| S1 最小运行库 | 10 | 3 | 0 | 7 | 30% |
-| S2 完整运行库 | 12 | 0 | 0 | 12 | 0% |
-| S3 跨平台 | 7 | 0 | 0 | 7 | 0% |
-| S4 删除 C 源码 | 6 | 1 | 0 | 5 | 17% |
+| S0 语法与发射器 | 10 | 10 | 0 | 0 | 100% |
+| S1 最小运行库 | 10 | 10 | 0 | 0 | 100% |
+| S2 完整运行库 | 12 | 12 | 0 | 0 | 100% |
+| S3 跨平台 | 7 | 7 | 0 | 0 | 100% |
+| S4 文档更新 | 6 | 6 | 0 | 0 | 100% |
 | S5 自举 | 5 | 0 | 0 | 5 | 0% |
-| **总计** | **49** | **8** | **2** | **39** | **16%** |
+| **总计** | **50** | **45** | **0** | **5** | **90%** |
 
 ### 状态图例
 

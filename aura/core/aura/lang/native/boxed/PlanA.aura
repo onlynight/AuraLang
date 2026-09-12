@@ -1,0 +1,107 @@
+// aura:///aura/lang/native/boxed/PlanA.aura
+package aura.lang.native.boxed
+// ─────────────────────────────────────────────────────────────
+// Plan A 装箱 — Phase S2
+//
+// 实现 Plan A 装箱语义：
+//   - 小整数直接内联（tagged pointer）
+//   - 对象指针用位标记
+//   - 支持类型转换和装箱/拆箱
+//
+// ── 使用方式 ──
+//   val boxed: Long = PlanA.boxInt(42)
+//   val unboxed: Int = PlanA.unboxInt(boxed)
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.native.Memory
+
+/// Plan A 装箱
+object PlanA {
+
+    // ── 常量 ──
+
+    /// 对象指针标记位（最低位）
+    const PTR_TAG: Long = 1
+    /// 对象指针掩码
+    const PTR_MASK: Long = -2
+
+    /// 小整数最小值
+    const SMALL_INT_MIN: Long = -16
+    /// 小整数最大值
+    const SMALL_INT_MAX: Long = 15
+
+    // ── 装箱函数 ──
+
+    /// 装箱整数（小整数内联，大整数堆分配）
+    fun boxInt(n: Long): Long {
+        if (n >= SMALL_INT_MIN && n <= SMALL_INT_MAX) {
+            // 小整数：内联（tag = 0）
+            return n shl 1
+        }
+        // 大整数：堆分配
+        val addr: Long = Memory.alloc(8)
+        Memory.write64(addr, n)
+        return addr | PTR_TAG
+    }
+
+    /// 拆箱整数
+    fun unboxInt(v: Long): Long {
+        if ((v and PTR_TAG) == 0) {
+            // 小整数：内联
+            return v shr 1
+        }
+        // 大整数：堆分配
+        return Memory.read64(v and PTR_MASK)
+    }
+
+    /// 装箱布尔值
+    fun boxBool(v: Boolean): Long {
+        if (v) {
+            return boxInt(1)
+        }
+        return boxInt(0)
+    }
+
+    /// 拆箱布尔值
+    fun unboxBool(v: Long): Boolean {
+        return unboxInt(v) != 0
+    }
+
+    /// 装箱浮点数
+    fun boxFloat(v: Float): Long {
+        // 简化：将 float 转换为 Long（位模式）
+        // 实际需要 memcpy
+        return boxInt(v as Long)
+    }
+
+    /// 拆箱浮点数
+    fun unboxFloat(v: Long): Float {
+        return unboxInt(v) as Float
+    }
+
+    // ── 类型检查 ──
+
+    /// 检查是否为对象指针
+    fun isObjectPtr(v: Long): Boolean {
+        return (v and PTR_TAG) == PTR_TAG
+    }
+
+    /// 检查是否为小整数
+    fun isSmallInt(v: Long): Boolean {
+        if ((v and PTR_TAG) != 0) {
+            return false
+        }
+        val n: Long = v shr 1
+        return n >= SMALL_INT_MIN && n <= SMALL_INT_MAX
+    }
+
+    /// 获取对象指针（去除标记）
+    fun getObjectPtr(v: Long): Long {
+        return v and PTR_MASK
+    }
+
+    /// 添加对象标记
+    fun addPtrTag(addr: Long): Long {
+        return addr | PTR_TAG
+    }
+}

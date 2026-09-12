@@ -1,0 +1,154 @@
+// aura:///tests/pure_aura_cffi/ffi_emitter_test.aura
+package aura.lang.cffi_test
+
+import aura.lang.std.String
+import aura.lang.compiler.lexer.Span
+import aura.lang.compiler.lexer.Lexer
+import aura.lang.compiler.ast.Ast
+import aura.lang.compiler.parser.Parser
+import aura.lang.compiler.aot.FfiAot
+
+// ─────────────────────────────────────────────────────────────
+// Phase S0 Emitter 测试
+//
+// 测试 FFI AST → LLVM IR 发射器是否正确生成 IR。
+// ─────────────────────────────────────────────────────────────
+
+// 测试源码：包含各种 FFI 声明
+val testSource: String = """
+import aura.lang.std.String
+import aura.lang.native.Syscalls
+import aura.lang.native.Memory
+import aura.lang.native.Cpu
+
+// 系统调用
+extern object Syscalls {
+    native(SYS_READ) fun read(fd: Int, buf: Long, count: Long): Long
+    native(SYS_WRITE) fun write(fd: Int, buf: Long, count: Long): Long
+}
+
+// 内存操作
+extern object Memory {
+    native fun read(addr: Long): Byte
+    native fun write(addr: Long, v: Byte)
+    native fun copy(dst: Long, src: Long, n: Long)
+}
+
+// CPU 操作
+extern object Cpu {
+    native(asm = "rdtsc") fun rdtsc(): Long
+}
+
+// 导出函数
+export fun auraAdd(a: Long, b: Long): Long {
+    return a + b
+}
+"""
+
+// 测试：解析源码并检查 AST
+fun testParse(): String {
+    val parser: Parser = Parser(testSource)
+    val root: Int = parser.parseProgram()
+    val ast: Ast = parser.ast
+    val errors = parser.errors
+    
+    var result: String = "AST nodes: " + toStr(ast.count) + "\n"
+    result = result + "Errors: " + toStr(errors.count) + "\n"
+    
+    // 检查是否有 ExternObject 节点
+    var externCount: Int = 0
+    var nativeCount: Int = 0
+    var exportCount: Int = 0
+    
+    var i: Int = 0
+    while (i < ast.count) {
+        val kind: String = ast.kindOf(i)
+        if (kind == "ExternObject") {
+            externCount = externCount + 1
+            result = result + "ExternObject: " + ast.textOf(i) + "\n"
+        } else if (kind == "NativeMethod") {
+            nativeCount = nativeCount + 1
+        } else if (kind == "ExportMethod") {
+            exportCount = exportCount + 1
+        }
+        i = i + 1
+    }
+    
+    result = result + "ExternObjects: " + toStr(externCount) + "\n"
+    result = result + "NativeMethods: " + toStr(nativeCount) + "\n"
+    result = result + "ExportMethods: " + toStr(exportCount) + "\n"
+    
+    return result
+}
+
+// 测试：生成 LLVM IR
+fun testEmit(): String {
+    val parser: Parser = Parser(testSource)
+    parser.parseProgram()
+    val ast: Ast = parser.ast
+    
+    // 生成 FFI LLVM IR
+    val ir: String = emitFfiLlvmIr(ast)
+    
+    return "LLVM IR:\n" + ir
+}
+
+// 测试：检查生成的 IR 是否包含关键字
+fun testIrContent(): String {
+    val parser: Parser = Parser(testSource)
+    parser.parseProgram()
+    val ast: Ast = parser.ast
+    
+    val ir: String = emitFfiLlvmIr(ast)
+    
+    var result: String = "Checks:\n"
+    
+    // 检查 syscall 函数
+    if (ir.contains("define i64 @read(i32, i64, i64)")) {
+        result = result + "  [PASS] syscall read\n"
+    } else {
+        result = result + "  [FAIL] syscall read\n"
+    }
+    
+    // 检查 builtin 函数
+    if (ir.contains("define i8 @read(i64)")) {
+        result = result + "  [PASS] builtin read\n"
+    } else {
+        result = result + "  [FAIL] builtin read\n"
+    }
+    
+    // 检查 inline asm
+    if (ir.contains("asm sideeffect")) {
+        result = result + "  [PASS] inline asm\n"
+    } else {
+        result = result + "  [FAIL] inline asm\n"
+    }
+    
+    // 检查 export 函数
+    if (ir.contains("define external")) {
+        result = result + "  [PASS] export function\n"
+    } else {
+        result = result + "  [FAIL] export function\n"
+    }
+    
+    return result
+}
+
+// 主函数：运行所有测试
+fun main() {
+    println("=== Phase S0 FFI Emitter Test ===\n")
+    
+    // 测试 1：解析
+    println("Test 1: Parse")
+    println(testParse())
+    
+    // 测试 2：生成 IR
+    println("\nTest 2: Emit IR")
+    println(testEmit())
+    
+    // 测试 3：检查 IR 内容
+    println("\nTest 3: Check IR Content")
+    println(testIrContent())
+    
+    println("\n=== Done ===")
+}

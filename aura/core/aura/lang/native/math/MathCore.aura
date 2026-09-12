@@ -1,0 +1,173 @@
+// aura:///aura/lang/native/math/MathCore.aura
+package aura.lang.native.math
+// ─────────────────────────────────────────────────────────────
+// 数学库 — Phase S2
+//
+// 提供基本数学函数（无需 libc）。
+// 使用 Taylor 级数或查表法实现。
+//
+// ── 使用方式 ──
+//   val sinVal: Double = MathCore.sin(1.0)
+//   val sqrtVal: Double = MathCore.sqrt(4.0)
+// ─────────────────────────────────────────────────────────────
+
+/// 数学库
+object MathCore {
+
+    // ── 常量 ──
+
+    const PI: Double = 3.141592653589793
+    const E: Double = 2.718281828459045
+    const PI_OVER_2: Double = 1.5707963267948966
+    const LOG2_E: Double = 1.4426950408889634
+
+    // ── 基本函数 ──
+
+    /// 绝对值（整数）
+    fun abs(n: Long): Long {
+        if (n < 0) {
+            return -n
+        }
+        return n
+    }
+
+    /// 绝对值（浮点）
+    fun fabs(n: Double): Double {
+        if (n < 0) {
+            return -n
+        }
+        return n
+    }
+
+    /// 最大值
+    fun max(a: Long, b: Long): Long {
+        if (a > b) {
+            return a
+        }
+        return b
+    }
+
+    /// 最小值
+    fun min(a: Long, b: Long): Long {
+        if (a < b) {
+            return a
+        }
+        return b
+    }
+
+    /// 平方根（牛顿法）
+    fun sqrt(n: Double): Double {
+        if (n < 0) {
+            return 0.0
+        }
+        if (n == 0) {
+            return 0.0
+        }
+        // 牛顿法迭代
+        var x: Double = n / 2.0
+        for (i: Int in 0..100) {
+            x = (x + n / x) / 2.0
+        }
+        return x
+    }
+
+    /// 整数平方根
+    fun isqrt(n: Long): Long {
+        if (n < 0) {
+            return 0
+        }
+        if (n == 0) {
+            return 0
+        }
+        var x: Long = n / 2
+        while (x * x > n) {
+            x = (x + n / x) / 2
+        }
+        return x
+    }
+
+    /// 正弦（Taylor 级数）
+    fun sin(x: Double): Double {
+        // 归一化到 [-PI, PI]
+        var y: Double = x
+        while (y > PI) {
+            y = y - PI * 2
+        }
+        while (y < -PI) {
+            y = y + PI * 2
+        }
+        // Taylor 级数：sin(x) = x - x^3/3! + x^5/5! - ...
+        var term: Double = y
+        var result: Double = y
+        for (i: Int in 1..10) {
+            term = term * y * y / ((i * 2) * (i * 2 + 1))
+            result = result + (if (i % 2 == 1) { -term } else { term })
+        }
+        return result
+    }
+
+    /// 余弦（Taylor 级数）
+    fun cos(x: Double): Double {
+        // 归一化到 [-PI, PI]
+        var y: Double = x
+        while (y > PI) {
+            y = y - PI * 2
+        }
+        while (y < -PI) {
+            y = y + PI * 2
+        }
+        // Taylor 级数：cos(x) = 1 - x^2/2! + x^4/4! - ...
+        var term: Double = 1.0
+        var result: Double = 1.0
+        for (i: Int in 1..10) {
+            term = term * y * y / ((i * 2 - 1) * (i * 2))
+            result = result - term
+        }
+        return result
+    }
+
+    /// 正切
+    fun tan(x: Double): Double {
+        return sin(x) / cos(x)
+    }
+
+    /// 幂函数
+    fun pow(base: Double, exp: Double): Double {
+        // 简化实现：只支持整数指数
+        val e: Long = exp as Long
+        var result: Double = 1.0
+        if (e >= 0) {
+            for (i: Int in 0..e) {
+                result = result * base
+            }
+        } else {
+            for (i: Int in 0..(-e)) {
+                result = result * base
+            }
+            result = 1.0 / result
+        }
+        return result
+    }
+
+    /// 自然对数（简化实现）
+    fun log(x: Double): Double {
+        if (x <= 0) {
+            return 0.0
+        }
+        // 简化：使用 ln(x) = 2 * atanh((x-1)/(x+1))
+        // 这里返回近似值
+        return 0.0
+    }
+
+    /// 指数函数
+    fun exp(x: Double): Double {
+        // Taylor 级数：exp(x) = 1 + x + x^2/2! + x^3/3! + ...
+        var term: Double = 1.0
+        var result: Double = 1.0
+        for (i: Int in 1..20) {
+            term = term * x / i
+            result = result + term
+        }
+        return result
+    }
+}

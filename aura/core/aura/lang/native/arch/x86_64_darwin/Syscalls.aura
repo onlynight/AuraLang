@@ -1,0 +1,92 @@
+// aura:///aura/lang/native/arch/x86_64_darwin/Syscalls.aura
+package aura.lang.native.arch.x86_64_darwin
+// ─────────────────────────────────────────────────────────────
+// macOS x86_64 系统调用表 — Phase S3
+//
+// macOS 使用 BSD 系统调用，通过 syscall 指令（int 0x80 或 syscall）。
+// 系统调用号与 Linux 不同。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.native.Memory
+
+/// macOS x86_64 系统调用
+extern object Syscalls {
+
+    // ── 系统调用号 ──
+
+    const SYS_READ: Int = 0
+    const SYS_WRITE: Int = 4
+    const SYS_OPEN: Int = 5
+    const SYS_CLOSE: Int = 6
+    const SYS_STAT: Int = 168
+    const SYS_LSEEK: Int = 7
+    const SYS_MMAP: Int = 197
+    const SYS_MUNMAP: Int = 20
+    const SYS_ACCESS: Int = 3
+    const SYS_UNLINK: Int = 10
+    const SYS_FORK: Int = 2
+    const SYS_EXECVE: Int = 59
+    const SYS_EXIT: Int = 1
+    const SYS_WAIT4: Int = 61
+    const SYS_CLOCK_GETTIME: Int = 201
+    const SYS_GETRANDOM: Int = 286
+    const SYS_GETPID: Int = 20
+
+    // ── 标准文件描述符 ──
+
+    const STDIN: Int = 0
+    const STDOUT: Int = 1
+    const STDERR: Int = 2
+
+    // ── 文件操作常量 ──
+
+    const O_RDONLY: Int = 0
+    const O_WRONLY: Int = 1
+    const O_RDWR: Int = 2
+    const O_CREAT: Int = 0x0200
+    const O_TRUNC: Int = 0x0400
+    const O_EXCL: Int = 0x0800
+
+    // ── 内存保护常量 ──
+
+    const PROT_NONE: Int = 0
+    const PROT_READ: Int = 1
+    const PROT_WRITE: Int = 2
+    const PROT_EXEC: Int = 4
+
+    // ── 内存映射常量 ──
+
+    const MAP_SHARED: Int = 0x0001
+    const MAP_PRIVATE: Int = 0x0002
+    const MAP_ANONYMOUS: Int = 0x1000
+
+    // ── 系统调用声明 ──
+
+    native(SYS_READ) fun read(fd: Int, buf: Long, count: Long): Long
+    native(SYS_WRITE) fun write(fd: Int, buf: Long, count: Long): Long
+    native(SYS_OPEN) fun open(path: CString, flags: Int): Int
+    native(SYS_CLOSE) fun close(fd: Int): Int
+    native(SYS_STAT) fun stat(path: CString, buf: Long): Long
+    native(SYS_LSEEK) fun lseek(fd: Int, off: Long, whence: Int): Long
+    native(SYS_MMAP) fun mmap(addr: Long, len: Long, prot: Int, flags: Int, fd: Int, off: Long): Long
+    native(SYS_MUNMAP) fun munmap(addr: Long, len: Long): Long
+    native(SYS_ACCESS) fun access(path: CString, mode: Int): Int
+    native(SYS_UNLINK) fun unlink(path: CString): Int
+    native(SYS_FORK) fun fork(): Int
+    native(SYS_EXECVE) fun execve(path: CString, args: Long, env: Long): Long
+    native(SYS_EXIT) fun exit(code: Int)
+    native(SYS_WAIT4) fun wait4(pid: Int, status: Long, options: Int, rusage: Long): Int
+    native(SYS_CLOCK_GETTIME) fun clockGettime(clock: Int, ts: Long): Long
+    native(SYS_GETRANDOM) fun getrandom(buf: Long, len: Long, flags: Int): Long
+    native(SYS_GETPID) fun getpid(): Int
+
+    // ── 时钟常量 ──
+
+    const CLOCK_REALTIME: Int = 0
+    const CLOCK_MONOTONIC: Int = 4
+
+    // ── 其他常量 ──
+
+    const INVALID_FD: Int = -1
+    const MAP_FAILED: Long = -1
+}

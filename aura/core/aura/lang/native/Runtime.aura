@@ -1,0 +1,41 @@
+// aura:///aura/lang/native/Runtime.aura
+package aura.lang.native
+// ─────────────────────────────────────────────────────────────
+// Runtime 入口聚合 — Phase S1
+//
+// 聚合所有 native 模块，提供统一的入口。
+//
+// ── 模块列表 ──
+//   - Syscalls: 系统调用
+//   - Memory: 内存操作
+//   - Cpu: CPU 级操作
+//   - Allocator: 内存分配器
+//   - StrOps: 字符串操作
+//   - Console: 控制台输出
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.native.Syscalls
+import aura.lang.native.Memory
+import aura.lang.native.Cpu
+import aura.lang.native.memory.Allocator
+import aura.lang.native.string.StrOps
+import aura.lang.native.console.Console
+
+/// Runtime 入口
+extern object Runtime {
+
+    /// 初始化所有模块
+    fun init(): Boolean {
+        // 初始化内存分配器
+        val ok: Boolean = Allocator.init()
+        if (!ok) {
+            return false
+        }
+        return true
+    }
+
+    /// 获取版本信息
+    fun version(): String {
+        return "Aura Runtime 0.1.0 (Phase S1)"
+    }
+}

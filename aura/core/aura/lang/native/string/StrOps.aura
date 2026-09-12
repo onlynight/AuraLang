@@ -1,0 +1,137 @@
+// aura:///aura/lang/native/string/StrOps.aura
+package aura.lang.native.string
+// ─────────────────────────────────────────────────────────────
+// 字符串操作 — Phase S1
+//
+// 提供基本的字符串操作函数。
+// 所有函数接收 CString（C 风格字符串，以 '\0' 结尾）。
+//
+// ── 使用方式 ──
+//   val n: Long = StrOps.strlen("hello")
+//   val cmp: Int = StrOps.strcmp("hello", "world")
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.native.Memory
+import aura.lang.native.Syscalls
+
+/// 字符串操作
+extern object StrOps {
+
+    /// 计算字符串长度（不含 '\0'）
+    native fun strlen(addr: Long): Long {
+        var n: Long = 0
+        var c: Byte = Memory.read(addr + n)
+        while (c != 0) {
+            n = n + 1
+            c = Memory.read(addr + n)
+        }
+        return n
+    }
+
+    /// 比较两个字符串
+    /// 返回：0 表示相等，<0 表示 a < b，>0 表示 a > b
+    native fun strcmp(a: Long, b: Long): Int {
+        var i: Long = 0
+        while (true) {
+            val ca: Byte = Memory.read(a + i)
+            val cb: Byte = Memory.read(b + i)
+            if (ca == 0 && cb == 0) {
+                return 0
+            }
+            if (ca == 0) {
+                return -1
+            }
+            if (cb == 0) {
+                return 1
+            }
+            if (ca < cb) {
+                return (ca as Long - cb as Long) as Int
+            }
+            if (ca > cb) {
+                return (ca as Long - cb as Long) as Int
+            }
+            i = i + 1
+        }
+    }
+
+    /// 复制字符串
+    native fun strcpy(dst: Long, src: Long): Long {
+        var i: Long = 0
+        while (true) {
+            val c: Byte = Memory.read(src + i)
+            Memory.write(dst + i, c)
+            if (c == 0) {
+                return dst
+            }
+            i = i + 1
+        }
+    }
+
+    /// 复制字符串（限制最大长度）
+    native fun strncpy(dst: Long, src: Long, n: Long): Long {
+        var i: Long = 0
+        while (i < n) {
+            val c: Byte = Memory.read(src + i)
+            Memory.write(dst + i, c)
+            if (c == 0) {
+                // 用 '\0' 填充剩余部分
+                var j: Long = i + 1
+                while (j < n) {
+                    Memory.write(dst + j, 0 as Byte)
+                    j = j + 1
+                }
+                return dst
+            }
+            i = i + 1
+        }
+        // 如果 n 个字符内没有 '\0'，手动添加
+        Memory.write(dst + n, 0 as Byte)
+        return dst
+    }
+
+    /// 将字符串转换为大写
+    native fun strtoupper(addr: Long) {
+        var i: Long = 0
+        while (true) {
+            val c: Byte = Memory.read(addr + i)
+            if (c == 0) {
+                return
+            }
+            // 'a' 到 'z' 转为 'A' 到 'Z'
+            if (c >= 'a' as Byte && c <= 'z' as Byte) {
+                Memory.write(addr + i, (c - 32) as Byte)
+            }
+            i = i + 1
+        }
+    }
+
+    /// 将字符串转换为小写
+    native fun strtolower(addr: Long) {
+        var i: Long = 0
+        while (true) {
+            val c: Byte = Memory.read(addr + i)
+            if (c == 0) {
+                return
+            }
+            // 'A' 到 'Z' 转为 'a' 到 'z'
+            if (c >= 'A' as Byte && c <= 'Z' as Byte) {
+                Memory.write(addr + i, (c + 32) as Byte)
+            }
+            i = i + 1
+        }
+    }
+
+    /// 计算字符串哈希（djb2 算法）
+    native fun hash(addr: Long): Long {
+        var hash: Long = 5381
+        var i: Long = 0
+        while (true) {
+            val c: Byte = Memory.read(addr + i)
+            if (c == 0) {
+                return hash
+            }
+            hash = (hash * 33) + c as Long
+            i = i + 1
+        }
+    }
+}

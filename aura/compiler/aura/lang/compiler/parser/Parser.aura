@@ -78,6 +78,11 @@ class Parser {
         return this.kinds[i]
     }
 
+    /// 前瞻第 k 个 token 的种类（k=0 为当前 token）。
+    fun prsPeek(k: Int): String {
+        return this.prsKind(this.pos + k)
+    }
+
     /// 第 i 个 token 的字面量（换行已还原）。
     fun prsLit(i: Int): String {
         return this.lx.litAt(i)
@@ -256,6 +261,10 @@ class Parser {
         if (k == "Fun") {
             return this.parseFunction()
         }
+        if (k == "At" || k == "Native" || k == "Export") {
+            // @native(...) fun / native fun / export fun
+            return this.parseNativeOrExportFunction()
+        }
         if (k == "Val" || k == "Var") {
             return this.parseDecl(true)
         }
@@ -267,6 +276,15 @@ class Parser {
         }
         if (k == "Object") {
             return this.parseTypeDecl("Object")
+        }
+        if (k == "Extern") {
+            // extern object Name { ... }
+            if (this.prsPeek(1) == "Object") {
+                return this.parseExternObject()
+            }
+            this.errors.pushAt(severityError(), "unexpected token: Extern", this.prsCurSpan().start, this.prsCurSpan().end)
+            this.prsAdvance()
+            return -1
         }
         if (k == "Enum") {
             return this.parseTypeDecl("Enum")
@@ -441,6 +459,116 @@ class Parser {
             kids = kidsAdd(kids, merged)
         }
         return this.ast.add(kindName, name, "", this.prsCurSpan(), kids)
+    }
+
+    /// 解析 extern object 声明：`extern object Name { ... }`
+    fun parseExternObject(): Int {
+        this.prsAdvance() // Extern
+        this.prsExpect("Object")
+        val name: String = this.prsCurLit()
+        this.prsExpectName()
+        
+        var kids = noKids()
+        if (this.prsCheck("LBrace")) {
+            val bodyId = this.parseBlock()
+            val bodyKids: String = this.ast.kidsOf(bodyId)
+            if (bodyKids != "") {
+                val merged = this.ast.add("Block", "", "", this.ast.spanOf(bodyId), bodyKids)
+                kids = kidsAdd(kids, merged)
+            }
+        }
+        return this.ast.add("ExternObject", name, "", this.prsCurSpan(), kids)
+    }
+
+    /// 解析带关键字的函数：`@native(...) fun` / `native fun` / `export fun`
+    fun parseNativeOrExportFunction(): Int {
+        val keyword = this.prsCurKind()
+        
+        if (keyword == "At") {
+            // @native(...) fun - 系统调用或内联汇编
+            return this.parseAnnotatedNativeFunction()
+        } else if (keyword == "Native") {
+            // native fun - 编译器内置（无参数）
+            return this.parseBuiltinNativeFunction()
+        } else if (keyword == "Export") {
+            // export fun - 导出符号
+            this.prsAdvance() // export
+            val funcId = this.parseFunction()
+            var kids = noKids()
+            if (funcId >= 0) {
+                kids = kidsAdd(kids, funcId)
+            }
+            return this.ast.add("ExportMethod", "", "", this.prsCurSpan(), kids)
+        }
+        
+        // 未知关键字
+        this.errors.pushAt(severityError(), "Unknown native/export function", this.prsCurSpan().start, this.prsCurSpan().end)
+        this.prsAdvance()
+        return -1
+    }
+
+    /// 解析 @native(...) fun - 系统调用或内联汇编
+    fun parseAnnotatedNativeFunction(): Int {
+        this.prsAdvance() // @
+        this.prsExpect("Native") // native
+        
+        var metadata: String = "native"
+        
+        // 解析括号内的参数
+        if (this.prsCheck("LParen")) {
+            this.prsAdvance() // (
+            
+            // 检查是 asm 还是 syscall 号
+            if (this.prsCheck("Ident") && this.prsCurLit() == "asm") {
+                // 内联汇编：@native(asm = "rdtsc")
+                this.prsAdvance() // asm
+                this.prsExpect("Assign") // =
+                val code: String = this.prsCurLit()
+                this.prsAdvance() // string literal
+                metadata = "asm|" + code
+            } else {
+                // 系统调用号：@native(SYS_READ)
+                val sysName: String = this.prsCurLit()
+                this.prsAdvance()
+                metadata = "native|" + sysName
+            }
+            
+            this.prsExpect("RParen") // )
+        }
+        
+        // 解析函数
+        val funcId = this.parseFunction()
+        
+        // 创建 NativeMethod 节点
+        var kids = noKids()
+        kids = kidsAdd(kids, this.ast.leaf("NativeInfo", metadata, this.prsCurSpan()))
+        if (funcId >= 0) {
+            kids = kidsAdd(kids, funcId)
+        }
+        return this.ast.add("NativeMethod", "", "", this.prsCurSpan(), kids)
+    }
+
+    /// 解析 native fun - 编译器内置（无参数）
+    fun parseBuiltinNativeFunction(): Int {
+        this.prsAdvance() // native
+        
+        // 解析函数
+        val funcId = this.parseFunction()
+        
+        // 创建 NativeMethod 节点（metadata 为 "native"）
+        var kids = noKids()
+        kids = kidsAdd(kids, this.ast.leaf("NativeInfo", "native", this.prsCurSpan()))
+        if (funcId >= 0) {
+            kids = kidsAdd(kids, funcId)
+        }
+        return this.ast.add("NativeMethod", "", "", this.prsCurSpan(), kids)
+    }
+        } else if (annotation.startsWith("asm|")) {
+            return "NativeMethod"
+        } else if (annotation == "export") {
+            return "ExportMethod"
+        }
+        return "Function"
     }
 
     /// 解析主构造函数参数：`(val a: T, var b: T = init, c: T)`。

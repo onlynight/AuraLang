@@ -1,0 +1,468 @@
+// aura:///aura/lang/compiler/aot/FfiAot.aura
+package aura.lang.compiler.aot
+// ─────────────────────────────────────────────────────────────
+// FFI AST → LLVM IR 发射器 — Phase S0
+//
+// 直接从 AST 节点发射 FFI LLVM IR（绕过 HIR 转换）。
+//
+// 支持节点类型：
+//   - ExternObject: extern object Name { ... }
+//   - NativeMethod: native(...) fun name(...)
+//   - ExportMethod: export fun name(...) { ... }
+//
+// 生成规则：
+//   - native(SYS_NUM) → inline asm syscall
+//   - native (builtin) → load/store/memcpy/memset
+//   - native(asm = "...") → inline asm
+//   - export → define external
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.compiler.lexer.Span
+import aura.lang.compiler.ast.Ast
+import aura.lang.compiler.aot.AotUtil
+import aura.lang.compiler.aot.EmitBuffer
+import aura.lang.compiler.aot.TypeMapper
+
+/// FFI AST → LLVM IR 发射器。
+class FfiAotEmitter {
+
+    /// 类型映射器。
+    var tm: TypeMapper = TypeMapper()
+
+    /// 已声明的符号名（换行分隔，用于去重）。
+    var declared: String = ""
+
+    /// 函数定义缓冲区。
+    var funcParts: EmitBuffer = EmitBuffer()
+
+    /// 声明缓冲区。
+    var declParts: EmitBuffer = EmitBuffer()
+
+    init() {
+        this.tm = TypeMapper()
+        this.declared = ""
+        this.funcParts = EmitBuffer()
+        this.declParts = EmitBuffer()
+    }
+
+    /// 处理整个 AST，生成 FFI LLVM IR。
+    fun emitProgram(ast: Ast): String {
+        var out: String = ""
+        
+        // 遍历所有节点
+        var i: Int = 0
+        while (i < ast.count) {
+            val kind: String = ast.kindOf(i)
+            
+            if (kind == "ExternObject") {
+                this.emitExternObject(ast, i)
+            } else if (kind == "NativeMethod") {
+                this.emitNativeMethod(ast, i)
+            } else if (kind == "ExportMethod") {
+                this.emitExportMethod(ast, i)
+            }
+            
+            i = i + 1
+        }
+        
+        // 合并输出
+        out = this.declParts.sbText() + "\n" + this.funcParts.sbText()
+        return out
+    }
+
+    /// 发射 extern object 节点（仅作为容器，不生成 IR）。
+    fun emitExternObject(ast: Ast, id: Int) {
+        // ExternObject 本身不生成 IR，其子节点（NativeMethod/ExportMethod）会单独处理
+        val name: String = ast.textOf(id)
+        val kids: String = ast.kidsOf(id)
+        
+        // 遍历子节点，发射每个方法
+        var kCount: Int = kidsCount(kids)
+        var j: Int = 0
+        while (j < kCount) {
+            val kidId: Int = kidsAt(kids, j)
+            val kidKind: String = ast.kindOf(kidId)
+            
+            if (kidKind == "NativeMethod") {
+                this.emitNativeMethod(ast, kidId)
+            } else if (kidKind == "ExportMethod") {
+                this.emitExportMethod(ast, kidId)
+            }
+            
+            j = j + 1
+        }
+    }
+
+    /// 发射 native method 节点。
+    fun emitNativeMethod(ast: Ast, id: Int) {
+        val kids: String = ast.kidsOf(id)
+        var kCount: Int = kidsCount(kids)
+        
+        if (kCount < 2) {
+            return
+        }
+        
+        // 第一个子节点是 NativeInfo（包含元数据）
+        val infoId: Int = kidsAt(kids, 0)
+        val metadata: String = ast.textOf(infoId)
+        
+        // 第二个子节点是 Function
+        val funcId: Int = kidsAt(kids, 1)
+        val funcKind: String = ast.kindOf(funcId)
+        
+        if (funcKind != "Function") {
+            return
+        }
+        
+        // 获取函数信息
+        val funcName: String = ast.textOf(funcId)
+        val retTy: String = ast.tyOf(funcId)
+        val funcKids: String = ast.kidsOf(funcId)
+        
+        // 提取参数类型
+        val paramsCsv: String = this.extractParamTypes(ast, funcKids)
+        
+        // 根据 metadata 类型生成不同的 IR
+        if (metadata.startsWith("native|")) {
+            // syscall: native(SYS_READ)
+            val sysNum: String = aotSlice(metadata, 7, metadata.length - 7)
+            this.emitSyscall(funcName, sysNum, retTy, paramsCsv)
+        } else if (metadata == "native") {
+            // builtin memory op: native
+            this.emitBuiltin(funcName, retTy, paramsCsv)
+        } else if (metadata.startsWith("asm|")) {
+            // inline asm: native(asm = "...")
+            val asmCode: String = aotSlice(metadata, 4, metadata.length - 4)
+            this.emitAsm(funcName, asmCode, retTy, paramsCsv)
+        }
+    }
+
+    /// 发射 export method 节点。
+    fun emitExportMethod(ast: Ast, id: Int) {
+        val kids: String = ast.kidsOf(id)
+        var kCount: Int = kidsCount(kids)
+        
+        if (kCount < 1) {
+            return
+        }
+        
+        // 第一个子节点是 Function
+        val funcId: Int = kidsAt(kids, 0)
+        val funcKind: String = ast.kindOf(funcId)
+        
+        if (funcKind != "Function") {
+            return
+        }
+        
+        // 获取函数信息
+        val funcName: String = ast.textOf(funcId)
+        val retTy: String = ast.tyOf(funcId)
+        val funcKids: String = ast.kidsOf(funcId)
+        
+        // 提取参数类型
+        val paramsCsv: String = this.extractParamTypes(ast, funcKids)
+        
+        // 生成 define external
+        this.emitExport(funcName, retTy, paramsCsv, funcKids)
+    }
+
+    /// 提取参数类型列表（逗号分隔）。
+    fun extractParamTypes(ast: Ast, funcKids: String): String {
+        var paramsCsv: String = ""
+        var kCount: Int = kidsCount(funcKids)
+        
+        var j: Int = 0
+        while (j < kCount) {
+            val kidId: Int = kidsAt(funcKids, j)
+            val kidKind: String = ast.kindOf(kidId)
+            
+            if (kidKind == "Params") {
+                // 提取参数列表
+                val paramKids: String = ast.kidsOf(kidId)
+                var pCount: Int = kidsCount(paramKids)
+                var p: Int = 0
+                while (p < pCount) {
+                    val pId: Int = kidsAt(paramKids, p)
+                    if (ast.kindOf(pId) == "Param") {
+                        val pTy: String = ast.tyOf(pId)
+                        if (paramsCsv != "") {
+                            paramsCsv = paramsCsv + ","
+                        }
+                        paramsCsv = paramsCsv + pTy
+                    }
+                    p = p + 1
+                }
+            }
+            
+            j = j + 1
+        }
+        
+        return paramsCsv
+    }
+
+    /// 发射 syscall 函数（inline asm）。
+    fun emitSyscall(name: String, sysNum: String, retTy: String, params: String) {
+        val sym: String = sanitizeLlvm(name)
+        
+        // 检查是否已声明
+        if (this.isDeclared(sym)) {
+            return
+        }
+        
+        // 生成 inline asm
+        val asm: String = "call " + sysNum + "\n\tret"
+        val constraints: String = "ir,ir,ir"
+        
+        val retStr: String = this.tm.map(retTy)
+        val retLlvm: String = if (retStr == "") { "void" } else { retStr }
+        
+        var paramsStr: String = "i64"
+        if (params != "") {
+            paramsStr = ""
+            var n: Int = aotCsvCount(params)
+            var i: Int = 0
+            while (i < n) {
+                if (i > 0) {
+                    paramsStr = paramsStr + ", "
+                }
+                paramsStr = paramsStr + this.tm.map(aotFieldAt(params, i, ","))
+                i = i + 1
+            }
+        }
+        
+        val body: String = "  %ret = call i64 asm sideeffect \"" + asm + "\",\"" + constraints + "\"(" + paramsStr + ")\n"
+        if (retStr == "") {
+            body = body + "  ret void\n"
+        } else {
+            body = body + "  ret " + retStr + " %ret\n"
+        }
+        
+        val func: String = "define " + retLlvm + " @" + sym + "(" + paramsStr + ") {\n" + body + "}\n\n"
+        
+        this.funcParts.sbAdd(func)
+        this.markDeclared(sym)
+    }
+
+    /// 发射 builtin memory 函数。
+    fun emitBuiltin(name: String, retTy: String, params: String) {
+        val sym: String = sanitizeLlvm(name)
+        
+        // 检查是否已声明
+        if (this.isDeclared(sym)) {
+            return
+        }
+        
+        // 根据函数名生成不同的 IR
+        when {
+            name.startsWith("read") -> {
+                // Memory.read(addr: Long): Byte
+                val body: String = "  %v = load i8, i64 %0, align 1\n" + "  ret i8 %v\n"
+                val func: String = "define i8 @" + sym + "(i64 %0) {\n" + body + "}\n\n"
+                this.funcParts.sbAdd(func)
+            }
+            name.startsWith("read16") -> {
+                val body: String = "  %v = load i16, i64 %0, align 2\n" + "  ret i16 %v\n"
+                val func: String = "define i16 @" + sym + "(i64 %0) {\n" + body + "}\n\n"
+                this.funcParts.sbAdd(func)
+            }
+            name.startsWith("read32") -> {
+                val body: String = "  %v = load i32, i64 %0, align 4\n" + "  ret i32 %v\n"
+                val func: String = "define i32 @" + sym + "(i64 %0) {\n" + body + "}\n\n"
+                this.funcParts.sbAdd(func)
+            }
+            name.startsWith("read64") -> {
+                val body: String = "  %v = load i64, i64 %0, align 8\n" + "  ret i64 %v\n"
+                val func: String = "define i64 @" + sym + "(i64 %0) {\n" + body + "}\n\n"
+                this.funcParts.sbAdd(func)
+            }
+            name.startsWith("write") -> {
+                // Memory.write(addr: Long, v: Byte)
+                val body: String = "  store i8 %1, i64 %0, align 1\n" + "  ret void\n"
+                val func: String = "define void @" + sym + "(i64 %0, i8 %1) {\n" + body + "}\n\n"
+                this.funcParts.sbAdd(func)
+            }
+            name == "copy" -> {
+                // Memory.copy(dst: Long, src: Long, n: Long)
+                val body: String = "  call void @llvm.memcpy.p0.p0.i64(i64 %0, i64 %1, i64 %2, i1 false)\n" + "  ret void\n"
+                val func: String = "define void @" + sym + "(i64 %0, i64 %1, i64 %2) {\n" + body + "}\n\n"
+                this.funcParts.sbAdd(func)
+            }
+            name == "set" -> {
+                // Memory.set(addr: Long, v: Byte, n: Long)
+                val body: String = "  call void @llvm.memset.p0.i64(i64 %0, i8 %1, i64 %2, i1 false)\n" + "  ret void\n"
+                val func: String = "define void @" + sym + "(i64 %0, i8 %1, i64 %2) {\n" + body + "}\n\n"
+                this.funcParts.sbAdd(func)
+            }
+            name == "alloc" -> {
+                // Memory.alloc(n: Long): Long
+                val body: String = "  %p = call i64 @__auramalloc(i64 %0)\n" + "  ret i64 %p\n"
+                val func: String = "define i64 @" + sym + "(i64 %0) {\n" + body + "}\n\n"
+                this.funcParts.sbAdd(func)
+            }
+            name == "free" -> {
+                // Memory.free(addr: Long)
+                val body: String = "  call void @__aurafree(i64 %0)\n" + "  ret void\n"
+                val func: String = "define void @" + sym + "(i64 %0) {\n" + body + "}\n\n"
+                this.funcParts.sbAdd(func)
+            }
+        }
+        
+        this.markDeclared(sym)
+    }
+
+    /// 发射 inline asm 函数。
+    fun emitAsm(name: String, asmCode: String, retTy: String, params: String) {
+        val sym: String = sanitizeLlvm(name)
+        
+        // 检查是否已声明
+        if (this.isDeclared(sym)) {
+            return
+        }
+        
+        val retStr: String = this.tm.map(retTy)
+        val retLlvm: String = if (retStr == "") { "void" } else { retStr }
+        
+        var paramsStr: String = "i64"
+        if (params != "") {
+            paramsStr = ""
+            var n: Int = aotCsvCount(params)
+            var i: Int = 0
+            while (i < n) {
+                if (i > 0) {
+                    paramsStr = paramsStr + ", "
+                }
+                paramsStr = paramsStr + this.tm.map(aotFieldAt(params, i, ","))
+                i = i + 1
+            }
+        }
+        
+        val constraints: String = "ir,ir,ir"
+        val body: String = "  %ret = call i64 asm sideeffect \"" + asmCode + "\",\"" + constraints + "\"(" + paramsStr + ")\n"
+        if (retStr == "") {
+            body = body + "  ret void\n"
+        } else {
+            body = body + "  ret " + retStr + " %ret\n"
+        }
+        
+        val func: String = "define " + retLlvm + " @" + sym + "(" + paramsStr + ") {\n" + body + "}\n\n"
+        
+        this.funcParts.sbAdd(func)
+        this.markDeclared(sym)
+    }
+
+    /// 发射 export 函数（define external）。
+    fun emitExport(name: String, retTy: String, params: String, bodyKids: String) {
+        val sym: String = sanitizeLlvm(name)
+        
+        // 检查是否已声明
+        if (this.isDeclared(sym)) {
+            return
+        }
+        
+        val retStr: String = this.tm.map(retTy)
+        val retLlvm: String = if (retStr == "") { "void" } else { retStr }
+        
+        var paramsStr: String = "void"
+        if (params != "") {
+            paramsStr = ""
+            var n: Int = aotCsvCount(params)
+            var i: Int = 0
+            while (i < n) {
+                if (i > 0) {
+                    paramsStr = paramsStr + ", "
+                }
+                paramsStr = paramsStr + this.tm.map(aotFieldAt(params, i, ","))
+                i = i + 1
+            }
+        }
+        
+        // 生成函数定义（简化的 body，实际需要完整的 emit 逻辑）
+        val body: String = "  ret " + (if (retStr == "") { "void" } else { retStr + " undef" }) + "\n"
+        
+        val func: String = "define external " + retLlvm + " @" + sym + "(" + paramsStr + ") {\n" + body + "}\n\n"
+        
+        this.funcParts.sbAdd(func)
+        this.markDeclared(sym)
+    }
+
+    /// 检查符号是否已声明。
+    fun isDeclared(sym: String): Boolean {
+        if (this.declared == "") {
+            return false
+        }
+        val needle: String = "\n" + sym + "\n"
+        return this.declared.contains(needle)
+    }
+
+    /// 标记符号为已声明。
+    fun markDeclared(sym: String) {
+        if (this.declared == "") {
+            this.declared = sym + "\n"
+        } else {
+            this.declared = this.declared + sym + "\n"
+        }
+    }
+}
+
+/// 构造函数式入口。
+fun newFfiAotEmitter(): FfiAotEmitter {
+    return FfiAotEmitter()
+}
+
+/// 便捷入口：从 AST 生成 FFI LLVM IR。
+fun emitFfiLlvmIr(ast: Ast): String {
+    val e: FfiAotEmitter = newFfiAotEmitter()
+    return e.emitProgram(ast)
+}
+
+// ─────────────────────────────────────────────────────────────
+// 辅助函数
+// ─────────────────────────────────────────────────────────────
+
+/// 子节点列表的长度。
+fun kidsCount(list: String): Int {
+    if (list == "") {
+        return 0
+    }
+    val parts: List<String> = list.split(",")
+    return parts.size
+}
+
+/// 取子节点列表的第 index 个 id。
+fun kidsAt(list: String, index: Int): Int {
+    val parts: List<String> = list.split(",")
+    if (index < 0 || index >= parts.size) {
+        return -1
+    }
+    return toIntOf(parts[index])
+}
+
+/// 字符串切片。
+fun aotSlice(s: String, start: Int, len: Int): String {
+    if (start < 0 || start >= s.length) {
+        return ""
+    }
+    if (start + len > s.length) {
+        return s.substring(start)
+    }
+    return s.substring(start, start + len)
+}
+
+/// CSV 分割计数。
+fun aotCsvCount(csv: String): Int {
+    if (csv == "") {
+        return 0
+    }
+    val parts: List<String> = csv.split(",")
+    return parts.size
+}
+
+/// 取 CSV 第 index 项。
+fun aotFieldAt(csv: String, index: Int, sep: String): String {
+    val parts: List<String> = csv.split(sep)
+    if (index < 0 || index >= parts.size) {
+        return ""
+    }
+    return parts[index]
+}

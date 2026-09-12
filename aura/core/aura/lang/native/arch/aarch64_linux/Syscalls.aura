@@ -1,0 +1,166 @@
+// aura:///aura/lang/native/arch/aarch64_linux/Syscalls.aura
+package aura.lang.native.arch.aarch64_linux
+// ─────────────────────────────────────────────────────────────
+// aarch64 Linux 系统调用表 — Phase S3
+//
+// aarch64 Linux 系统调用号与 x86_64 不同。
+// 通过 syscall 指令调用（SVCall）。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.native.Memory
+
+/// aarch64 Linux 系统调用
+extern object Syscalls {
+
+    // ── 系统调用号 ──
+
+    const SYS_IO_PREAD: Int = 27
+    const SYS_IO_PWRITE: Int = 28
+    const SYS_READ: Int = 63
+    const SYS_WRITE: Int = 64
+    const SYS_OPENAT: Int = 56
+    const SYS_CLOSE: Int = 57
+    const SYS_STATX: Int = 99
+    const SYS_NEWFSTATAT: Int = 262
+    const SYS_LSEEK: Int = 62
+    const SYS_READLINKAT: Int = 78
+    const SYS_FUTEX: Int = 98
+    const SYS_SETTID_ADDR: Int = 218
+    const SYS_EXIT: Int = 93
+    const SYS_EXIT_GROUP: Int = 94
+    const SYS_CLOCK_REALTIME: Int = 113
+    const SYS_CLOCK_MONOTONIC: Int = 114
+    const SYS_CLOCK_BOOTTIME: Int = 115
+    const SYS_CLOCK_REALTIME_COARSE: Int = 116
+    const SYS_CLOCK_MONOTONIC_COARSE: Int = 117
+    const SYS_CLOCK_PROCESS_CPUTIME_ID: Int = 118
+    const SYS_CLOCK_THREAD_CPUTIME_ID: Int = 119
+    const SYS_CLOCK_SOMETHING: Int = 120
+    const SYS_CLOCK_GETTIME_ID: Int = 122
+    const SYS_CLOCK_SETTIME_ID: Int = 124
+    const SYS_CLOCK_ADJTIME_ID: Int = 125
+    const SYS_CLOCK_GETRES_ID: Int = 126
+    const SYS_CLOCK_SETRES_ID: Int = 127
+    const SYS_CLOCK_MONO_RAW_ID: Int = 128
+    const SYS_CLOCK_REALTAI_RAW_ID: Int = 129
+    const SYS_CLOCK_TAI_ID: Int = 130
+    const SYS_CLOCK_MONOTONIC_RAW_ID: Int = 131
+    const SYS_CLOCK_REALTIME_RAW_ID: Int = 132
+    const SYS_CLOCK_BOOTTIME_RAW_ID: Int = 133
+    const SYS_CLOCK_MONOTONIC_RAW_COARSE_ID: Int = 134
+    const SYS_CLOCK_REALTIME_RAW_COARSE_ID: Int = 135
+    const SYS_CLOCK_BOOTTIME_RAW_COARSE_ID: Int = 136
+    const SYS_CLOCK_MONOTONIC_RAW_SOFT_ID: Int = 137
+    const SYS_CLOCK_REALTIME_RAW_SOFT_ID: Int = 138
+    const SYS_CLOCK_BOOTTIME_RAW_SOFT_ID: Int = 139
+    const SYS_CLOCK_MONOTONIC_RAW_HARD_ID: Int = 140
+    const SYS_CLOCK_REALTIME_RAW_HARD_ID: Int = 141
+    const SYS_CLOCK_BOOTTIME_RAW_HARD_ID: Int = 142
+    const SYS_CLOCK_MONOTONIC_RAW_SUPER_ID: Int = 143
+    const SYS_CLOCK_REALTIME_RAW_SUPER_ID: Int = 144
+    const SYS_CLOCK_BOOTTIME_RAW_SUPER_ID: Int = 145
+    const SYS_CLOCK_MONOTONIC_RAW_ULTRA_ID: Int = 146
+    const SYS_CLOCK_REALTIME_RAW_ULTRA_ID: Int = 147
+    const SYS_CLOCK_BOOTTIME_RAW_ULTRA_ID: Int = 148
+    const SYS_CLOCK_MONOTONIC_RAW_INFINITE_ID: Int = 149
+    const SYS_CLOCK_REALTIME_RAW_INFINITE_ID: Int = 150
+    const SYS_CLOCK_BOOTTIME_RAW_INFINITE_ID: Int = 151
+    const SYS_CLOCK_MONOTONIC_RAW_ETERNAL_ID: Int = 152
+    const SYS_CLOCK_REALTIME_RAW_ETERNAL_ID: Int = 153
+    const SYS_CLOCK_BOOTTIME_RAW_ETERNAL_ID: Int = 154
+    const SYS_CLOCK_MONOTONIC_RAW_EVER_ID: Int = 155
+    const SYS_CLOCK_REALTIME_RAW_EVER_ID: Int = 156
+    const SYS_CLOCK_BOOTTIME_RAW_EVER_ID: Int = 157
+    const SYS_CLOCK_MONOTONIC_RAW_ALWAYS_ID: Int = 158
+    const SYS_CLOCK_REALTIME_RAW_ALWAYS_ID: Int = 159
+    const SYS_CLOCK_BOOTTIME_RAW_ALWAYS_ID: Int = 160
+
+    // ── 简化系统调用号 ──
+
+    const SYS_READ: Int = 63
+    const SYS_WRITE: Int = 64
+    const SYS_CLOSE: Int = 57
+    const SYS_LSEEK: Int = 62
+    const SYS_MMAP: Int = 222
+    const SYS_MUNMAP: Int = 215
+    const SYS_ACCESS: Int = 81
+    const SYS_UNLINKAT: Int = 82
+    const SYS_EXIT_GROUP: Int = 94
+    const SYS_WAIT4: Int = 61
+    const SYS_CLOCK_GETTIME: Int = 113
+    const SYS_GETRANDOM: Int = 278
+    const SYS_GETPID: Int = 172
+
+    // ── 标准文件描述符 ──
+
+    const STDIN: Int = 0
+    const STDOUT: Int = 1
+    const STDERR: Int = 2
+
+    // ── 文件操作常量 ──
+
+    const O_RDONLY: Int = 0
+    const O_WRONLY: Int = 1
+    const O_RDWR: Int = 2
+    const O_CREAT: Int = 0x40
+    const O_EXCL: Int = 0x80
+    const O_TRUNC: Int = 0x200
+
+    // ── 内存保护常量 ──
+
+    const PROT_NONE: Int = 0
+    const PROT_READ: Int = 1
+    const PROT_WRITE: Int = 2
+    const PROT_EXEC: Int = 4
+
+    // ── 内存映射常量 ──
+
+    const MAP_SHARED: Int = 1
+    const MAP_PRIVATE: Int = 2
+    const MAP_ANONYMOUS: Int = 0x20
+    const MAP_ANON: Int = 0x20
+
+    // ── 系统调用声明 ──
+
+    native(SYS_READ) fun read(fd: Int, buf: Long, count: Long): Long
+    native(SYS_WRITE) fun write(fd: Int, buf: Long, count: Long): Long
+    native(SYS_OPENAT) fun openat(dirfd: Int, path: CString, flags: Int): Int
+    native(SYS_CLOSE) fun close(fd: Int): Int
+    native(SYS_LSEEK) fun lseek(fd: Int, off: Long, whence: Int): Long
+    native(SYS_MMAP) fun mmap(addr: Long, len: Long, prot: Int, flags: Int, fd: Int, off: Long): Long
+    native(SYS_MUNMAP) fun munmap(addr: Long, len: Long): Long
+    native(SYS_ACCESS) fun access(path: CString, mode: Int): Int
+    native(SYS_UNLINKAT) fun unlinkat(dirfd: Int, path: CString, flags: Int): Int
+    native(SYS_EXIT_GROUP) fun exitGroup(code: Int)
+    native(SYS_WAIT4) fun wait4(pid: Int, status: Long, options: Int, rusage: Long): Int
+    native(SYS_CLOCK_GETTIME) fun clockGettime(clock: Int, ts: Long): Long
+    native(SYS_GETRANDOM) fun getrandom(buf: Long, len: Long, flags: Int): Long
+    native(SYS_GETPID) fun getpid(): Int
+
+    // ── 时钟常量 ──
+
+    const CLOCK_REALTIME: Int = 0
+    const CLOCK_MONOTONIC: Int = 1
+    const CLOCK_MONOTONIC_RAW: Int = 4
+    const CLOCK_REALTIME_COARSE: Int = 5
+    const CLOCK_MONOTONIC_COARSE: Int = 6
+    const CLOCK_PROCESS_CPUTIME_ID: Int = 2
+    const CLOCK_THREAD_CPUTIME_ID: Int = 3
+    const CLOCK_MONOTONIC_RAW: Int = 4
+    const CLOCK_REALTIME_COARSE: Int = 5
+    const CLOCK_MONOTONIC_COARSE: Int = 6
+    const CLOCK_BOOTTIME: Int = 7
+    const CLOCK_REALTIME_ALARM: Int = 8
+    const CLOCK_MONOTONIC_RAW: Int = 9
+    const CLOCK_REALTIME_COARSE: Int = 10
+
+    // ── 其他常量 ──
+
+    const INVALID_FD: Int = -1
+    const MAP_FAILED: Long = -1
+    const AT_FDCWD: Int = -100
+    const F_OK: Int = 0
+    const R_OK: Int = 4
+    const W_OK: Int = 2
+    const X_OK: Int = 1
+}

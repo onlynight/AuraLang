@@ -99,15 +99,15 @@ fun testCpuMemFence(): Boolean {
 }
 
 // ─────────────────────────────────────────────────────────────
-// 测试 4：@export 函数（Aura 实现，导出符号）
+// 测试 4：export 函数（Aura 实现，导出符号）
 // ─────────────────────────────────────────────────────────────
 
 // 示例：导出一个简单函数
-@export fun auraAdd(a: Long, b: Long): Long {
+export fun auraAdd(a: Long, b: Long): Long {
     return a + b
 }
 
-@export fun auraSub(a: Long, b: Long): Long {
+export fun auraSub(a: Long, b: Long): Long {
     return a - b
 }
 
