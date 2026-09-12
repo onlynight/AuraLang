@@ -232,6 +232,13 @@ const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
             ("argv", "i8**"),
         ],
     },
+    // 诊断：AOT 运行时「当前存活分配 MiB」（实现见 aura_std_cffi.c）。
+    // 供 Aura 编译器分阶段观测内存增长（`AotUtil.aotMemMB()`）。
+    RuntimeFn {
+        name: "aura_mem_used_mb",
+        ret: "i32",
+        params: &[],
+    },
 ];
 
 /// 生成所有 runtime 函数的 LLVM 外部声明

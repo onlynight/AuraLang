@@ -13,6 +13,19 @@ package aura.lang.compiler.aot
 
 import aura.lang.std.String
 
+// ── 内存诊断（分阶段定位 AOT 运行时内存增长；见 C 运行库 aura_mem_used_mb）──
+
+/// 当前 AOT 运行时存活分配（MiB）。AOT 无 GC，所有分配只增不减，
+/// 该值即「进程累计未释放字节 / 1MiB」。
+fun aotMemMB(): String {
+    return toStr(aura_mem_used_mb())
+}
+
+/// 打印一条带标记的内存观测（形如 `[mem] <tag> = <n> MB`）。
+fun aotMemMark(tag: String) {
+    println("[mem] " + tag + " = " + aotMemMB() + " MB")
+}
+
 /// 取第 index 个以 sep 分隔的字段（0-based，字符扫描）。
 fun aotFieldAt(text: String, index: Int, sep: String): String {
     var i: Int = 0

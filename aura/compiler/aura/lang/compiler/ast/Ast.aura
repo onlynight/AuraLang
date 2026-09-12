@@ -15,7 +15,8 @@ package aura.lang.compiler.ast
 // 因此这里采用**扁平 arena（索引化树）**，与 lexer 的 token 流表示保持一致：
 //
 //   * 每个节点一个整数 id（按创建顺序递增，0 为未使用/哨兵）；
-//   * 节点字段分别存在 5 条「每行一项」的 String 中（kinds / texts / tys / spans / kids）；
+//   * 节点字段分别存在若干条「每项一个」的堆列表中：kinds / texts / tys /
+//     span 的 6 条并列 Int 列表 / kids（逗号分隔 id 串）；
 //   * 子节点以**逗号分隔的 id 列表**存在 `kids` 中（解析时逐个追加成串，创建父节点时给定）。
 //
 // 这样既能在纯 Aura 中构造任意形状的树，又能用索引 O(1) 定位，且 `dump()` 可产出
@@ -75,8 +76,28 @@ class Ast {
     /// 节点类型名（堆列表；无类型信息时为空串）。
     var tys: List<String> = arrayListOf<String>()
 
-    /// Span（堆列表，每项 `start end sl sc el ec`，空格分隔）。
-    var spans: List<String> = arrayListOf<String>()
+    /// Span 分量（6 条**并列 Int 堆列表**）。
+    ///
+    /// 原先每节点拼一个 `"start end sl sc el ec"` 字符串（4 次 `+` 拼接 +
+    /// 6 次 `toStr`）。AOT 运行时没有 GC，按 AST 节点数十万计会产生数百万次
+    /// 小分配，是「链接阶段数百 MB」的主要来源（与 `Lexer` 对 token span 的
+    /// 优化同源）。改为并列 Int 列表后 `add` 只做纯整数追加，零字符串分配。
+    var spanStart: List<Int> = arrayListOf<Int>()
+
+    /// 结束偏移。
+    var spanEnd: List<Int> = arrayListOf<Int>()
+
+    /// 起始行。
+    var spanStartLine: List<Int> = arrayListOf<Int>()
+
+    /// 起始列。
+    var spanStartCol: List<Int> = arrayListOf<Int>()
+
+    /// 结束行。
+    var spanEndLine: List<Int> = arrayListOf<Int>()
+
+    /// 结束列。
+    var spanEndCol: List<Int> = arrayListOf<Int>()
 
     /// 子节点 id 列表（堆列表，每项为逗号分隔串，可为空串）。
     var kids: List<String> = arrayListOf<String>()
@@ -91,26 +112,34 @@ class Ast {
         val id: Int = this.count
         this.count = id + 1
         this.kinds.add(kind)
-        // 手动转义换行符（避免 replace 在 VM 内类调用时未链接）
-        var escaped: String = ""
-        var i: Int = 0
-        var len: Int = text.length
-        while (i < len) {
-            val c: String = toStr(text[i])
-            if (c == "\n") {
-                escaped = escaped + "\\n"
-            } else {
-                escaped = escaped + c
+        // 手动转义换行符（避免 replace 在 VM 内类调用时未链接）。
+        // 绝大多数 text 不含换行：单次 `contains` 判定后直接复用原串，避免
+        // 逐字符重建（token / 字面量文本可达数千字符，逐字符 `+` 在 AOT
+        // 无 GC 下是平方级分配 —— 解析阶段数百 MB 的主要来源之一）。
+        var escaped: String = text
+        if (text.contains("\n")) {
+            var buf: String = ""
+            var i: Int = 0
+            var len: Int = text.length
+            while (i < len) {
+                val c: String = toStr(text[i])
+                if (c == "\n") {
+                    buf = buf + "\\n"
+                } else {
+                    buf = buf + c
+                }
+                i = i + 1
             }
-            i = i + 1
+            escaped = buf
         }
         this.texts.add(escaped)
         this.tys.add(ty)
-        this.spans.add(
-            toStr(sp.start) + " " + toStr(sp.end) + " "
-            + toStr(sp.startLine) + " " + toStr(sp.startCol) + " "
-            + toStr(sp.endLine) + " " + toStr(sp.endCol)
-        )
+        this.spanStart.add(sp.start)
+        this.spanEnd.add(sp.end)
+        this.spanStartLine.add(sp.startLine)
+        this.spanStartCol.add(sp.startCol)
+        this.spanEndLine.add(sp.endLine)
+        this.spanEndCol.add(sp.endCol)
         this.kids.add(children)
         return id
     }
@@ -130,6 +159,11 @@ class Ast {
     /// 第 id 个节点的主文本（换行已还原）。
     fun textOf(id: Int): String {
         val raw: String = astItemAt(this.texts, id)
+        // 绝大多数 text 不含换行转义：单次 `contains` 判定后直接复用原串，
+        // 避免每次访问都逐字符重建（AOT 无 GC，逐字符 `+` 每次调用都分配）。
+        if (!raw.contains("\\")) {
+            return raw
+        }
         // 手动反转义换行符（避免 replace 在 VM 内类调用时未链接）
         var result: String = ""
         var i: Int = 0
@@ -153,11 +187,10 @@ class Ast {
 
     /// 第 id 个节点的位置。
     fun spanOf(id: Int): Span {
-        val line: String = astItemAt(this.spans, id)
         return Span(
-            toIntOf(fieldAt(line, 0, " ")), toIntOf(fieldAt(line, 1, " ")),
-            toIntOf(fieldAt(line, 2, " ")), toIntOf(fieldAt(line, 3, " ")),
-            toIntOf(fieldAt(line, 4, " ")), toIntOf(fieldAt(line, 5, " "))
+            astIntAt(this.spanStart, id), astIntAt(this.spanEnd, id),
+            astIntAt(this.spanStartLine, id), astIntAt(this.spanStartCol, id),
+            astIntAt(this.spanEndLine, id), astIntAt(this.spanEndCol, id)
         )
     }
 
@@ -225,11 +258,19 @@ class Ast {
     }
 }
 
-/// 列表安全取项（越界返回空串）；arena 各流（kinds/texts/tys/spans/kids）
+/// 列表安全取项（越界返回空串）；arena 各流（kinds/texts/tys/kids）
 /// 的下标访问统一走此处，O(1)。
 fun astItemAt(items: List<String>, index: Int): String {
     if (index < 0 || index >= items.size) {
         return ""
+    }
+    return items[index]
+}
+
+/// Int 堆列表安全取项（越界返回 0）；span 的 6 条并列流下标访问统一走此处，O(1)。
+fun astIntAt(items: List<Int>, index: Int): Int {
+    if (index < 0 || index >= items.size) {
+        return 0
     }
     return items[index]
 }

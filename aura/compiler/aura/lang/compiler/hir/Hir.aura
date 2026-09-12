@@ -21,7 +21,7 @@ package aura.lang.compiler.hir
 //
 //   * 每个 HIR 节点一个整数 id；
 //   * 节点字段分别存在 5 条「每行一项」的 String 中
-//     （kinds / texts / tys / spans / kids）；
+//     （kinds / texts / tys / span 的 6 条并列 Int 列表 / kids）；
 //   * 子节点以逗号分隔的 id 列表存在 `kids` 中。
 //
 // ── 当前覆盖范围（Phase 2 起步，可逐步扩展）──────────────
@@ -55,8 +55,27 @@ class Hir {
     /// 节点类型名（堆列表；无类型信息时为空串）。
     var tys: List<String> = arrayListOf<String>()
 
-    /// Span（堆列表，每项 `start end sl sc el ec`，空格分隔）。
-    var spans: List<String> = arrayListOf<String>()
+    /// Span 分量（6 条**并列 Int 堆列表**）。
+    ///
+    /// 原先每节点拼一个 `"start end sl sc el ec"` 字符串（4 次 `+` 拼接 +
+    /// 6 次 `toStr`）。AOT 无 GC，合并 49 模块时按 HIR 节点数万计会产生
+    /// 数百万次小分配——是「链接阶段数百 MB」的主要来源。
+    var spanStart: List<Int> = arrayListOf<Int>()
+
+    /// 结束偏移。
+    var spanEnd: List<Int> = arrayListOf<Int>()
+
+    /// 起始行。
+    var spanStartLine: List<Int> = arrayListOf<Int>()
+
+    /// 起始列。
+    var spanStartCol: List<Int> = arrayListOf<Int>()
+
+    /// 结束行。
+    var spanEndLine: List<Int> = arrayListOf<Int>()
+
+    /// 结束列。
+    var spanEndCol: List<Int> = arrayListOf<Int>()
 
     /// 子节点 id 列表（堆列表，每项为逗号分隔串，可为空串）。
     var kids: List<String> = arrayListOf<String>()
@@ -79,20 +98,11 @@ class Hir {
         val id: Int = this.kinds.size
         this.kinds.add(kind)
         // 手动转义换行符（避免 replace 在 VM 内类调用时未链接）。
-        // 绝大多数 text 不含换行：先单次扫描，无换行则直接复用，
-        // 避免逐字符重建长文本（token 文本可达数千字符）。
-        val tlen: Int = text.length
+        // 绝大多数 text 不含换行：单次 `contains`（C `strstr`，零分配）判定后
+        // 直接复用原串，避免逐字符重建长文本（token 文本可达数千字符）。
         var escaped: String = text
-        var hasNl: Boolean = false
-        var k: Int = 0
-        while (k < tlen) {
-            if (toStr(text[k]) == "\n") {
-                hasNl = true
-                break
-            }
-            k = k + 1
-        }
-        if (hasNl) {
+        if (text.contains("\n")) {
+            val tlen: Int = text.length
             var buf: String = ""
             var i: Int = 0
             while (i < tlen) {
@@ -107,9 +117,12 @@ class Hir {
         }
         this.texts.add(escaped)
         this.tys.add(ty)
-        this.spans.add(toStr(sp.start) + " " + toStr(sp.end) + " "
-            + toStr(sp.startLine) + " " + toStr(sp.startCol) + " "
-            + toStr(sp.endLine) + " " + toStr(sp.endCol))
+        this.spanStart.add(sp.start)
+        this.spanEnd.add(sp.end)
+        this.spanStartLine.add(sp.startLine)
+        this.spanStartCol.add(sp.startCol)
+        this.spanEndLine.add(sp.endLine)
+        this.spanEndCol.add(sp.endCol)
         this.kids.add(children)
         this.count = this.kinds.size
         return id
@@ -130,6 +143,11 @@ class Hir {
     /// 第 id 个节点的主文本。
     fun textOf(id: Int): String {
         val raw: String = hirItemAt(this.texts, id)
+        // 绝大多数 text 不含换行转义：单次 `contains` 判定后直接复用原串，
+        // 避免每次访问都逐字符重建（textOf 是发射期最热访问之一）。
+        if (!raw.contains("\\")) {
+            return raw
+        }
         // 手动反转义换行符（避免 replace 在 VM 内类调用时未链接）
         var result: String = ""
         var i: Int = 0
@@ -153,11 +171,10 @@ class Hir {
 
     /// 第 id 个节点的位置。
     fun spanOf(id: Int): Span {
-        val line: String = hirItemAt(this.spans, id)
         return Span(
-            toIntOf(fieldAt(line, 0, " ")), toIntOf(fieldAt(line, 1, " ")),
-            toIntOf(fieldAt(line, 2, " ")), toIntOf(fieldAt(line, 3, " ")),
-            toIntOf(fieldAt(line, 4, " ")), toIntOf(fieldAt(line, 5, " "))
+            hirIntAt(this.spanStart, id), hirIntAt(this.spanEnd, id),
+            hirIntAt(this.spanStartLine, id), hirIntAt(this.spanStartCol, id),
+            hirIntAt(this.spanEndLine, id), hirIntAt(this.spanEndCol, id)
         )
     }
 
@@ -1089,11 +1106,19 @@ fun hirNoKids(): String {
     return ""
 }
 
-/// 列表安全取项（越界返回空串）；arena 各流（kinds/texts/tys/spans/kids）
+/// 列表安全取项（越界返回空串）；arena 各流（kinds/texts/tys/kids）
 /// 的下标访问统一走此处，O(1)。
 fun hirItemAt(items: List<String>, index: Int): String {
     if (index < 0 || index >= items.size) {
         return ""
+    }
+    return items[index]
+}
+
+/// Int 堆列表安全取项（越界返回 0）；span 的 6 条并列流下标访问统一走此处，O(1)。
+fun hirIntAt(items: List<Int>, index: Int): Int {
+    if (index < 0 || index >= items.size) {
+        return 0
     }
     return items[index]
 }

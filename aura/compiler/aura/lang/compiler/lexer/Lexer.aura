@@ -158,12 +158,21 @@ class Lexer {
     /// 当前 token 起始列。
     var tStartCol: Int = 1
 
+    /// 关键字查询表（每实例构建一次）：`#word|Kind|#word|Kind|...`。
+    ///
+    /// `keywordKind` 旧实现每次调用都重建并 `split` 整张表（~180 个子串），
+    /// 而 `scanIdentifier` 对每个标识符调用一次 —— AOT 无 GC 下每个标识符约
+    /// 产生 200 次永久分配，是解析阶段数百 MB 的最大来源。缓存到实例字段后
+    /// 查询仅一次 `contains` + 两次切片。
+    var kwTable: String = ""
+
     init(source: String) {
         this.src = source
         this.n = source.length()
         this.pos = 0
         this.line = 1
         this.col = 1
+        this.kwTable = keywordSearchTable()
         this.kindList = arrayListOf<String>()
         this.litList = arrayListOf<String>()
         this.spanStart = arrayListOf<Int>()
@@ -317,7 +326,12 @@ class Lexer {
             lit = lit + this.peek(0)
             this.advance()
         }
-        this.emit(keywordKind(lit), lit)
+        this.emit(this.lxKwKind(lit), lit)
+    }
+
+    /// 标识符 → 关键字 TokenKind（零分配；非关键字返回 `"Ident"`）。
+    fun lxKwKind(word: String): String {
+        return keywordLookup(this.kwTable, word)
     }
 
     // ── 数字 ──

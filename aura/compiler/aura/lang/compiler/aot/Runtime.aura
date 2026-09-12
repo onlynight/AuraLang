@@ -178,6 +178,14 @@ fun callSignature(name: String): String {
     if (std != "") {
         return std
     }
+    // runtime / C FFI / prelude 的调用点符号**一律**以 `aura_` 开头，
+    // 例外只有 `toString` / `toStr` / `toStringFloat`。普通调用点（用户函数 /
+    // 方法名）不满足该形态，直接返回，避免为每个调用点重建三张表
+    // （每处约 60 次小分配，AOT 无 GC 时累计可达数百 MB）。
+    if (!name.startsWith("aura_") && name != "toString" && name != "toStr"
+        && name != "toStringFloat") {
+        return ""
+    }
     val sig: String = runtimeSignature(name)
     if (sig != "") {
         return sig

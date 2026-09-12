@@ -75,10 +75,10 @@ class LlvmEmitter {
     // ── 当前函数状态 ──
 
     /// entry 块 alloca 指令。
-    var fAlloca: String = ""
+    var fAlloca: List<String> = arrayListOf<String>()
 
     /// 函数体指令。
-    var fBody: String = ""
+    var fBody: List<String> = arrayListOf<String>()
 
     /// 函数局部变量表（每项 `name|addr|llvmTy`）。
     ///
@@ -140,8 +140,8 @@ class LlvmEmitter {
         this.funcParts = arrayListOf<String>()
         this.structDeclared = ""
         this.structConcrete = ""
-        this.fAlloca = ""
-        this.fBody = ""
+        this.fAlloca = arrayListOf<String>()
+        this.fBody = arrayListOf<String>()
         this.fVarList = arrayListOf<String>()
         this.fSigList = arrayListOf<String>()
         this.fOwnerList = arrayListOf<String>()
@@ -526,15 +526,15 @@ class LlvmEmitter {
         // 尺寸用 LLVM 惯用法 `getelementptr T, T* null, 1` + `ptrtoint` 求得，
         // 无需维护类型大小表。
         val szp: String = this.freshVar()
-        this.fBody = this.fBody + "  " + szp + " = getelementptr inbounds %struct." + sym
-            + ", %struct." + sym + "* null, i32 1\n"
+        this.fBody.add("  " + szp + " = getelementptr inbounds %struct." + sym
+            + ", %struct." + sym + "* null, i32 1\n")
         val szv: String = this.freshVar()
-        this.fBody = this.fBody + "  " + szv + " = ptrtoint %struct." + sym + "* " + szp + " to i64\n"
+        this.fBody.add("  " + szv + " = ptrtoint %struct." + sym + "* " + szp + " to i64\n")
         val rawp: String = this.freshVar()
-        this.fBody = this.fBody + "  " + rawp + " = call i8* @aura_malloc(i64 " + szv + ")\n"
+        this.fBody.add("  " + rawp + " = call i8* @aura_malloc(i64 " + szv + ")\n")
         val ptr: String = this.freshVar()
-        this.fBody = this.fBody + "  " + ptr + " = bitcast i8* " + rawp
-            + " to %struct." + sym + "*\n"
+        this.fBody.add("  " + ptr + " = bitcast i8* " + rawp
+            + " to %struct." + sym + "*\n")
         // 类若有 `init(...)`（主构造函数方法体），构造实参应**转发给 init**，
         // 字段只走各自的默认初始化；否则按位置用实参初始化字段。
         val initSig: String = this.funcSignatureOf(sym + ".init")
@@ -565,9 +565,9 @@ class LlvmEmitter {
                 }
             }
             val fp: String = this.freshVar()
-            this.fBody = this.fBody + "  " + fp + " = getelementptr inbounds %struct."
-                + sym + ", %struct." + sym + "* " + ptr + ", i32 0, i32 " + toStr(idx) + "\n"
-            this.fBody = this.fBody + "  store " + fty + " " + init + ", " + fty + "* " + fp + "\n"
+            this.fBody.add("  " + fp + " = getelementptr inbounds %struct."
+                + sym + ", %struct." + sym + "* " + ptr + ", i32 0, i32 " + toStr(idx) + "\n")
+            this.fBody.add("  store " + fty + " " + init + ", " + fty + "* " + fp + "\n")
             idx = idx + 1
         }
         // 构造初始化块 / 主构造函数：`init(...)` → 调用 `<Class>.init(ptr, 实参...)`
@@ -591,8 +591,8 @@ class LlvmEmitter {
                 ai = ai + 1
                 i = i + 1
             }
-            this.fBody = this.fBody + "  call void @" + sanitizeLlvm(sym + ".init")
-                + "(" + args + ")\n"
+            this.fBody.add("  call void @" + sanitizeLlvm(sym + ".init")
+                + "(" + args + ")\n")
             this.fTerminated = false
         }
         return ptr
@@ -655,8 +655,8 @@ class LlvmEmitter {
 
     /// 发射单个函数定义。
     fun emitFunction(hir: Hir, id: Int): String {
-        this.fAlloca = ""
-        this.fBody = ""
+        this.fAlloca = arrayListOf<String>()
+        this.fBody = arrayListOf<String>()
         this.fVarList = arrayListOf<String>()
         // 集合局部变量表是**每函数**状态：不重置会让前一个函数登记的集合变量
         // 泄漏到后续函数（`isListVar` 误判 → 下标按集合 getAt + 按元素类型解箱，
@@ -690,9 +690,9 @@ class LlvmEmitter {
         if (ownerCls != "") {
             val selfTy: String = "%struct." + sanitizeLlvm(ownerCls) + "*"
             paramsIr = selfTy + " %arg.this"
-            this.fAlloca = this.fAlloca + "  %arg.this.addr = alloca " + selfTy + "\n"
-            this.fBody = this.fBody + "  store " + selfTy + " %arg.this, "
-                + selfTy + "* %arg.this.addr\n"
+            this.fAlloca.add("  %arg.this.addr = alloca " + selfTy + "\n")
+            this.fBody.add("  store " + selfTy + " %arg.this, "
+                + selfTy + "* %arg.this.addr\n")
             this.fVarList.add("this|%arg.this.addr|" + selfTy)
         }
 
@@ -712,9 +712,9 @@ class LlvmEmitter {
                     }
                     paramsIr = paramsIr + pty + " %arg." + psym
                     val addr: String = "%arg." + psym + ".addr"
-                    this.fAlloca = this.fAlloca + "  " + addr + " = alloca " + pty + "\n"
-                    this.fBody = this.fBody + "  store " + pty + " %arg." + psym
-                        + ", " + pty + "* " + addr + "\n"
+                    this.fAlloca.add("  " + addr + " = alloca " + pty + "\n")
+                    this.fBody.add("  store " + pty + " %arg." + psym
+                        + ", " + pty + "* " + addr + "\n")
                     this.fVarList.add(pname + "|" + addr + "|" + pty)
                     // 参数也可能是集合（`fun f(items: List<String>)`）：必须按声明
                     // 类型登记元素类型，否则 `.size` 会被当成字符串长度
@@ -735,9 +735,9 @@ class LlvmEmitter {
         }
         if (!this.fTerminated) {
             if (retTy == "void") {
-                this.fBody = this.fBody + "  ret void\n"
+                this.fBody.add("  ret void\n")
             } else {
-                this.fBody = this.fBody + "  ret " + retTy + " " + defaultValue(retTy) + "\n"
+                this.fBody.add("  ret " + retTy + " " + defaultValue(retTy) + "\n")
             }
         }
 
@@ -750,8 +750,8 @@ class LlvmEmitter {
         if (isEntryMain) {
             out = out + "  call void @aura_args_set(i32 %argc, i8** %argv)\n"
         }
-        out = out + this.fAlloca
-        out = out + this.fBody
+        out = out + joinPieces(this.fAlloca, "")
+        out = out + joinPieces(this.fBody, "")
         out = out + "}\n\n"
         return out
     }
@@ -780,7 +780,7 @@ class LlvmEmitter {
         // 保证每条指令都隶属于带终结符的基本块（否则 llc 报 expected instruction opcode）。
         if (this.fTerminated) {
             val deadBb: String = this.freshBb("dead")
-            this.fBody = this.fBody + deadBb + ":\n"
+            this.fBody.add(deadBb + ":\n")
             this.fTerminated = false
         }
         val k: String = hir.kindOf(id)
@@ -807,13 +807,13 @@ class LlvmEmitter {
         } else if (k == "HirBreak") {
             // break → 跳到当前循环的 end 块（无循环上下文时忽略）
             if (this.loopEnd != "") {
-                this.fBody = this.fBody + "  br label %" + this.loopEnd + "\n"
+                this.fBody.add("  br label %" + this.loopEnd + "\n")
                 this.fTerminated = true
             }
         } else if (k == "HirContinue") {
             // continue → 跳到当前循环的条件/自增块
             if (this.loopCond != "") {
-                this.fBody = this.fBody + "  br label %" + this.loopCond + "\n"
+                this.fBody.add("  br label %" + this.loopCond + "\n")
                 this.fTerminated = true
             }
         } else {
@@ -843,7 +843,7 @@ class LlvmEmitter {
         val list: String = this.emitExpr(hir, iterId)
 
         if (this.fTerminated) {
-            this.fBody = this.fBody + this.freshBb("for.pre") + ":\n"
+            this.fBody.add(this.freshBb("for.pre") + ":\n")
         }
         // 循环变量的元素类型：集合已登记元素类型时用它（Int 列表 → i32，需拆箱）
         var elemTy: String = "i8*"
@@ -854,42 +854,42 @@ class LlvmEmitter {
             }
         }
         val idxAddr: String = this.declareVar("__foridx_" + toStr(id), "i32")
-        this.fBody = this.fBody + "  store i32 0, i32* " + idxAddr + "\n"
+        this.fBody.add("  store i32 0, i32* " + idxAddr + "\n")
         val varAddr: String = this.declareVar(varName, elemTy)
-        this.fBody = this.fBody + "  store " + elemTy + " " + defaultValue(elemTy)
-            + ", " + elemTy + "* " + varAddr + "\n"
+        this.fBody.add("  store " + elemTy + " " + defaultValue(elemTy)
+            + ", " + elemTy + "* " + varAddr + "\n")
 
         val condBb: String = this.freshBb("for.cond")
         val bodyBb: String = this.freshBb("for.body")
         val incrBb: String = this.freshBb("for.incr")
         val endBb: String = this.freshBb("for.end")
-        this.fBody = this.fBody + "  br label %" + condBb + "\n"
+        this.fBody.add("  br label %" + condBb + "\n")
 
         // 条件块：idx < count(list)
-        this.fBody = this.fBody + condBb + ":\n"
+        this.fBody.add(condBb + ":\n")
         val idx: String = this.freshVar()
-        this.fBody = this.fBody + "  " + idx + " = load i32, i32* " + idxAddr + "\n"
+        this.fBody.add("  " + idx + " = load i32, i32* " + idxAddr + "\n")
         val cnt: String = this.freshVar()
-        this.fBody = this.fBody + "  " + cnt
-            + " = call i64 @aura_lang_std_Collections_count(i8* " + list + ")\n"
+        this.fBody.add("  " + cnt
+            + " = call i64 @aura_lang_std_Collections_count(i8* " + list + ")\n")
         val cnt32: String = this.freshVar()
-        this.fBody = this.fBody + "  " + cnt32 + " = trunc i64 " + cnt + " to i32\n"
+        this.fBody.add("  " + cnt32 + " = trunc i64 " + cnt + " to i32\n")
         val cmp: String = this.freshVar()
-        this.fBody = this.fBody + "  " + cmp + " = icmp slt i32 " + idx + ", " + cnt32 + "\n"
-        this.fBody = this.fBody + "  br i1 " + cmp + ", label %" + bodyBb
-            + ", label %" + endBb + "\n"
+        this.fBody.add("  " + cmp + " = icmp slt i32 " + idx + ", " + cnt32 + "\n")
+        this.fBody.add("  br i1 " + cmp + ", label %" + bodyBb
+            + ", label %" + endBb + "\n")
 
         // 循环体块：取出元素 → store 到循环变量 → 执行体
-        this.fBody = this.fBody + bodyBb + ":\n"
+        this.fBody.add(bodyBb + ":\n")
         val idx64: String = this.freshVar()
-        this.fBody = this.fBody + "  " + idx64 + " = sext i32 " + idx + " to i64\n"
+        this.fBody.add("  " + idx64 + " = sext i32 " + idx + " to i64\n")
         val elem: String = this.freshVar()
-        this.fBody = this.fBody + "  " + elem
+        this.fBody.add("  " + elem
             + " = call i8* @aura_lang_std_Collections_getAt(i8* " + list
-            + ", i64 " + idx64 + ")\n"
+            + ", i64 " + idx64 + ")\n")
         val elemCo: String = this.coerceValue(elem, "i8*", elemTy)
-        this.fBody = this.fBody + "  store " + elemTy + " " + elemCo
-            + ", " + elemTy + "* " + varAddr + "\n"
+        this.fBody.add("  store " + elemTy + " " + elemCo
+            + ", " + elemTy + "* " + varAddr + "\n")
         this.fTerminated = false
         // 循环上下文：break → end，continue → incr（自增块，避免跳过自增）
         val savedEnd: String = this.loopEnd
@@ -900,21 +900,21 @@ class LlvmEmitter {
         this.loopEnd = savedEnd
         this.loopCond = savedCond
         if (!this.fTerminated) {
-            this.fBody = this.fBody + "  br label %" + incrBb + "\n"
+            this.fBody.add("  br label %" + incrBb + "\n")
         }
 
         // 自增块：idx++ 后回到条件块（continue 也落到这里）
-        this.fBody = this.fBody + incrBb + ":\n"
+        this.fBody.add(incrBb + ":\n")
         this.fTerminated = false
         val idx2: String = this.freshVar()
-        this.fBody = this.fBody + "  " + idx2 + " = load i32, i32* " + idxAddr + "\n"
+        this.fBody.add("  " + idx2 + " = load i32, i32* " + idxAddr + "\n")
         val idx3: String = this.freshVar()
-        this.fBody = this.fBody + "  " + idx3 + " = add i32 " + idx2 + ", 1\n"
-        this.fBody = this.fBody + "  store i32 " + idx3 + ", i32* " + idxAddr + "\n"
-        this.fBody = this.fBody + "  br label %" + condBb + "\n"
+        this.fBody.add("  " + idx3 + " = add i32 " + idx2 + ", 1\n")
+        this.fBody.add("  store i32 " + idx3 + ", i32* " + idxAddr + "\n")
+        this.fBody.add("  br label %" + condBb + "\n")
 
         // 结束块
-        this.fBody = this.fBody + endBb + ":\n"
+        this.fBody.add(endBb + ":\n")
         this.fTerminated = false
     }
 
@@ -949,8 +949,8 @@ class LlvmEmitter {
         // 初始化表达式类型与声明类型不一致时插入转换（如 i32 → i64）
         val coerced: String = this.coerceValue(initVal, initTy, llvmTy)
         val addr: String = this.declareVar(name, llvmTy)
-        this.fBody = this.fBody + "  store " + llvmTy + " " + coerced
-            + ", " + llvmTy + "* " + addr + "\n"
+        this.fBody.add("  store " + llvmTy + " " + coerced
+            + ", " + llvmTy + "* " + addr + "\n")
         this.fTerminated = false
         // 登记集合类型局部变量：`.size` / `.add` / `for-in` / 下标需按集合语义处理，
         // 并记录元素类型（决定 `list[i]` 读回后是否拆箱）
@@ -1057,8 +1057,8 @@ class LlvmEmitter {
         }
         val coerced: String = this.coerceValue(value, valueTy, ty)
         val addr: String = this.declareVar(name, ty)
-        this.fBody = this.fBody + "  store " + ty + " " + coerced
-            + ", " + ty + "* " + addr + "\n"
+        this.fBody.add("  store " + ty + " " + coerced
+            + ", " + ty + "* " + addr + "\n")
         this.fTerminated = false
     }
 
@@ -1090,10 +1090,10 @@ class LlvmEmitter {
         val v: String = this.coerceValue(v0, vTy, elemTy)
         val addr: String = this.fvField(cn, 1)
         val p: String = this.freshVar()
-        this.fBody = this.fBody + "  " + p + " = getelementptr inbounds " + ct
-            + ", " + ct + "* " + addr + ", i64 0, i64 " + iv + "\n"
-        this.fBody = this.fBody + "  store " + elemTy + " " + v + ", " + elemTy
-            + "* " + p + "\n"
+        this.fBody.add("  " + p + " = getelementptr inbounds " + ct
+            + ", " + ct + "* " + addr + ", i64 0, i64 " + iv + "\n")
+        this.fBody.add("  store " + elemTy + " " + v + ", " + elemTy
+            + "* " + p + "\n")
         this.fTerminated = false
         return true
     }
@@ -1106,18 +1106,18 @@ class LlvmEmitter {
             val vTy: String = this.inferType(hir, vId)
             val v: String = this.emitExpr(hir, vId)
             if (this.fRetTy == "" || this.fRetTy == "void") {
-                this.fBody = this.fBody + "  ret void\n"
+                this.fBody.add("  ret void\n")
                 this.fTerminated = true
                 return
             }
             val coerced: String = this.coerceValue(v, vTy, this.fRetTy)
-            this.fBody = this.fBody + "  ret " + this.fRetTy + " " + coerced + "\n"
+            this.fBody.add("  ret " + this.fRetTy + " " + coerced + "\n")
         } else {
             if (this.fRetTy == "" || this.fRetTy == "void") {
-                this.fBody = this.fBody + "  ret void\n"
+                this.fBody.add("  ret void\n")
             } else {
-                this.fBody = this.fBody + "  ret " + this.fRetTy + " "
-                    + defaultValue(this.fRetTy) + "\n"
+                this.fBody.add("  ret " + this.fRetTy + " "
+                    + defaultValue(this.fRetTy) + "\n")
             }
         }
         this.fTerminated = true
@@ -1137,32 +1137,32 @@ class LlvmEmitter {
         val thenBb: String = this.freshBb("then")
         val elseBb: String = this.freshBb("else")
         val mergeBb: String = this.freshBb("merge")
-        this.fBody = this.fBody + "  br i1 " + cond + ", label %" + thenBb
-            + ", label %" + elseBb + "\n"
+        this.fBody.add("  br i1 " + cond + ", label %" + thenBb
+            + ", label %" + elseBb + "\n")
         // then 分支
-        this.fBody = this.fBody + thenBb + ":\n"
+        this.fBody.add(thenBb + ":\n")
         this.fTerminated = false
         this.emitBody(hir, hirKidsAt(kids, 1))
         val thenFalls: Boolean = !this.fTerminated
         if (thenFalls) {
-            this.fBody = this.fBody + "  br label %" + mergeBb + "\n"
+            this.fBody.add("  br label %" + mergeBb + "\n")
         }
         // else 分支
-        this.fBody = this.fBody + elseBb + ":\n"
+        this.fBody.add(elseBb + ":\n")
         this.fTerminated = false
         if (n > 2) {
             this.emitBody(hir, hirKidsAt(kids, 2))
         }
         val elseFalls: Boolean = !this.fTerminated
         if (elseFalls) {
-            this.fBody = this.fBody + "  br label %" + mergeBb + "\n"
+            this.fBody.add("  br label %" + mergeBb + "\n")
         }
         // 汇合块：若两个分支都已终结则不可达，发射 unreachable 保持 IR 合法
-        this.fBody = this.fBody + mergeBb + ":\n"
+        this.fBody.add(mergeBb + ":\n")
         if (thenFalls || elseFalls) {
             this.fTerminated = false
         } else {
-            this.fBody = this.fBody + "  unreachable\n"
+            this.fBody.add("  unreachable\n")
             this.fTerminated = true
         }
     }
@@ -1177,16 +1177,16 @@ class LlvmEmitter {
         val condBb: String = this.freshBb("loop.cond")
         val bodyBb: String = this.freshBb("loop.body")
         val endBb: String = this.freshBb("loop.end")
-        this.fBody = this.fBody + "  br label %" + condBb + "\n"
-        this.fBody = this.fBody + condBb + ":\n"
+        this.fBody.add("  br label %" + condBb + "\n")
+        this.fBody.add(condBb + ":\n")
         this.fTerminated = false
         val condId: Int = hirKidsAt(kids, 0)
         val condTy: String = this.inferType(hir, condId)
         val condRaw: String = this.emitExpr(hir, condId)
         val cond: String = this.toI1(condRaw, condTy)
-        this.fBody = this.fBody + "  br i1 " + cond + ", label %" + bodyBb
-            + ", label %" + endBb + "\n"
-        this.fBody = this.fBody + bodyBb + ":\n"
+        this.fBody.add("  br i1 " + cond + ", label %" + bodyBb
+            + ", label %" + endBb + "\n")
+        this.fBody.add(bodyBb + ":\n")
         this.fTerminated = false
         // 循环上下文：break → end，continue → cond
         val savedEnd: String = this.loopEnd
@@ -1197,9 +1197,9 @@ class LlvmEmitter {
         this.loopEnd = savedEnd
         this.loopCond = savedCond
         if (!this.fTerminated) {
-            this.fBody = this.fBody + "  br label %" + condBb + "\n"
+            this.fBody.add("  br label %" + condBb + "\n")
         }
-        this.fBody = this.fBody + endBb + ":\n"
+        this.fBody.add(endBb + ":\n")
         this.fTerminated = false
     }
 
@@ -1261,12 +1261,12 @@ class LlvmEmitter {
                 val ivA: String = this.coerceValue(ivA0, iTyA, "i64")
                 val addr: String = this.fvField(cn, 1)
                 val p: String = this.freshVar()
-                this.fBody = this.fBody + "  " + p + " = getelementptr inbounds " + ct
-                    + ", " + ct + "* " + addr + ", i64 0, i64 " + ivA + "\n"
+                this.fBody.add("  " + p + " = getelementptr inbounds " + ct
+                    + ", " + ct + "* " + addr + ", i64 0, i64 " + ivA + "\n")
                 val elemTy: String = llvmElemOfArrayTy(ct)
                 val t: String = this.freshVar()
-                this.fBody = this.fBody + "  " + t + " = load " + elemTy + ", " + elemTy
-                    + "* " + p + "\n"
+                this.fBody.add("  " + t + " = load " + elemTy + ", " + elemTy
+                    + "* " + p + "\n")
                 return t
             }
         }
@@ -1278,15 +1278,15 @@ class LlvmEmitter {
         if (this.isCollectionReceiver(hir, cId)) {
             val elemTy: String = this.receiverElemTy(hir, cId)
             val t: String = this.freshVar()
-            this.fBody = this.fBody + "  " + t
+            this.fBody.add("  " + t
                 + " = call i8* @aura_lang_std_Collections_getAt(i8* " + c
-                + ", i64 " + iv + ")\n"
+                + ", i64 " + iv + ")\n")
             return this.coerceValue(t, "i8*", elemTy)
         }
         // 字符串：charAt（返回单字符字符串 i8*）
         val s: String = this.freshVar()
-        this.fBody = this.fBody + "  " + s
-            + " = call i8* @aura_lang_std_String_charAt(i8* " + c + ", i64 " + iv + ")\n"
+        this.fBody.add("  " + s
+            + " = call i8* @aura_lang_std_String_charAt(i8* " + c + ", i64 " + iv + ")\n")
         return s
     }
 
@@ -1332,9 +1332,9 @@ class LlvmEmitter {
             + " = private unnamed_addr constant [" + toStr(n) + " x i8] c\""
             + escaped + "\\00\"\n")
         val t: String = this.freshVar()
-        this.fBody = this.fBody + "  " + t + " = getelementptr inbounds ["
+        this.fBody.add("  " + t + " = getelementptr inbounds ["
             + toStr(n) + " x i8], [" + toStr(n) + " x i8]* @str."
-            + toStr(idx) + ", i64 0, i64 0\n"
+            + toStr(idx) + ", i64 0, i64 0\n")
         return t
     }
 
@@ -1350,7 +1350,7 @@ class LlvmEmitter {
         }
         val addr: String = this.lookupVarAddr(name)
         val t: String = this.freshVar()
-        this.fBody = this.fBody + "  " + t + " = load " + ty + ", " + ty + "* " + addr + "\n"
+        this.fBody.add("  " + t + " = load " + ty + ", " + ty + "* " + addr + "\n")
         return t
     }
 
@@ -1379,15 +1379,15 @@ class LlvmEmitter {
             if (isNullableStructTy(aTy)) {
                 val innerTy: String = nullableInnerTy(aTy)
                 val iv: String = this.freshVar()
-                this.fBody = this.fBody + "  " + iv + " = extractvalue "
-                    + aTy + " " + a + ", 0\n"
+                this.fBody.add("  " + iv + " = extractvalue "
+                    + aTy + " " + a + ", 0\n")
                 val nv: String = this.freshVar()
-                this.fBody = this.fBody + "  " + nv + " = extractvalue "
-                    + aTy + " " + a + ", 1\n"
+                this.fBody.add("  " + nv + " = extractvalue "
+                    + aTy + " " + a + ", 1\n")
                 val bco: String = this.coerceValue(b, bTy, innerTy)
                 val rv: String = this.freshVar()
-                this.fBody = this.fBody + "  " + rv + " = select i1 " + nv
-                    + ", " + innerTy + " " + bco + ", " + innerTy + " " + iv + "\n"
+                this.fBody.add("  " + rv + " = select i1 " + nv
+                    + ", " + innerTy + " " + bco + ", " + innerTy + " " + iv + "\n")
                 return rv
             }
             // 无可空跟踪（如 String? → i8*）：直接取左值
@@ -1403,23 +1403,23 @@ class LlvmEmitter {
             val a1: String = this.toI1(a, aTy)
             val b1: String = this.toI1(b, bTy)
             val lt: String = this.freshVar()
-            this.fBody = this.fBody + "  " + lt + " = " + instr
-                + " i1 " + a1 + ", " + b1 + "\n"
+            this.fBody.add("  " + lt + " = " + instr
+                + " i1 " + a1 + ", " + b1 + "\n")
             return lt
         }
 
         // 字符串比较 → 内容相等（C 调用点符号）
         if (isCmpOp(op) && aTy == "i8*" && bTy == "i8*") {
             val c: String = this.freshVar()
-            this.fBody = this.fBody + "  " + c + " = call i32 @aura_lang_std_String_equals(i8* "
-                + a + ", i8* " + b + ")\n"
+            this.fBody.add("  " + c + " = call i32 @aura_lang_std_String_equals(i8* "
+                + a + ", i8* " + b + ")\n")
             // equals 返回 1 表示相等：`==` → ne 0；`!=` → eq 0
             var pred: String = "ne"
             if (op == "!=") {
                 pred = "eq"
             }
             val t: String = this.freshVar()
-            this.fBody = this.fBody + "  " + t + " = icmp " + pred + " i32 " + c + ", 0\n"
+            this.fBody.add("  " + t + " = icmp " + pred + " i32 " + c + ", 0\n")
             return t
         }
 
@@ -1438,9 +1438,9 @@ class LlvmEmitter {
             val la: String = this.stringLen(aStr)
             val lb: String = this.stringLen(bStr)
             val t: String = this.freshVar()
-            this.fBody = this.fBody + "  " + t
+            this.fBody.add("  " + t
                 + " = call i8* @aura_string_concat(i8* " + aStr + ", i64 " + la
-                + ", i8* " + bStr + ", i64 " + lb + ")\n"
+                + ", i8* " + bStr + ", i64 " + lb + ")\n")
             return t
         }
 
@@ -1451,11 +1451,11 @@ class LlvmEmitter {
             val b2: String = this.coerceValue(b, bTy, common)
             val t: String = this.freshVar()
             if (common == "float" || common == "double") {
-                this.fBody = this.fBody + "  " + t + " = fcmp " + fcmpPred(op)
-                    + " " + common + " " + a2 + ", " + b2 + "\n"
+                this.fBody.add("  " + t + " = fcmp " + fcmpPred(op)
+                    + " " + common + " " + a2 + ", " + b2 + "\n")
             } else {
-                this.fBody = this.fBody + "  " + t + " = icmp " + cmpPred(op)
-                    + " " + common + " " + a2 + ", " + b2 + "\n"
+                this.fBody.add("  " + t + " = icmp " + cmpPred(op)
+                    + " " + common + " " + a2 + ", " + b2 + "\n")
             }
             return t
         }
@@ -1474,8 +1474,8 @@ class LlvmEmitter {
                     instr = "lshr"
                 }
                 val st: String = this.freshVar()
-                this.fBody = this.fBody + "  " + st + " = " + instr + " "
-                    + shCommon + " " + a3 + ", " + b3 + "\n"
+                this.fBody.add("  " + st + " = " + instr + " "
+                    + shCommon + " " + a3 + ", " + b3 + "\n")
                 return st
             }
             return a
@@ -1490,8 +1490,8 @@ class LlvmEmitter {
         val a2: String = this.coerceValue(a, aTy, common)
         val b2: String = this.coerceValue(b, bTy, common)
         val t: String = this.freshVar()
-        this.fBody = this.fBody + "  " + t + " = " + arithInstr(op, common)
-            + " " + common + " " + a2 + ", " + b2 + "\n"
+        this.fBody.add("  " + t + " = " + arithInstr(op, common)
+            + " " + common + " " + a2 + ", " + b2 + "\n")
         return t
     }
 
@@ -1508,18 +1508,18 @@ class LlvmEmitter {
         val t: String = this.freshVar()
         if (op == "!") {
             val x1: String = this.toI1(x, ty)
-            this.fBody = this.fBody + "  " + t + " = xor i1 " + x1 + ", true\n"
+            this.fBody.add("  " + t + " = xor i1 " + x1 + ", true\n")
             return t
         }
         if (ty == "float" || ty == "double") {
-            this.fBody = this.fBody + "  " + t + " = fneg " + ty + " " + x + "\n"
+            this.fBody.add("  " + t + " = fneg " + ty + " " + x + "\n")
             return t
         }
         if (intWidth(ty) <= 0) {
             // 指针/结构体：无操作数级负号
             return x
         }
-        this.fBody = this.fBody + "  " + t + " = sub " + ty + " 0, " + x + "\n"
+        this.fBody.add("  " + t + " = sub " + ty + " 0, " + x + "\n")
         return t
     }
 
@@ -1544,15 +1544,15 @@ class LlvmEmitter {
             // `isCollectionReceiver`）。
             if (this.isCollectionReceiver(hir, recvId)) {
                 val c: String = this.freshVar()
-                this.fBody = this.fBody + "  " + c
-                    + " = call i64 @aura_lang_std_Collections_count(i8* " + recv + ")\n"
+                this.fBody.add("  " + c
+                    + " = call i64 @aura_lang_std_Collections_count(i8* " + recv + ")\n")
                 val ct: String = this.freshVar()
-                this.fBody = this.fBody + "  " + ct + " = trunc i64 " + c + " to i32\n"
+                this.fBody.add("  " + ct + " = trunc i64 " + c + " to i32\n")
                 return ct
             }
             val n: String = this.stringLen(recv)
             val t: String = this.freshVar()
-            this.fBody = this.fBody + "  " + t + " = trunc i64 " + n + " to i32\n"
+            this.fBody.add("  " + t + " = trunc i64 " + n + " to i32\n")
             return t
         }
         return "0"
@@ -1567,10 +1567,10 @@ class LlvmEmitter {
         val fty: String = aotFieldAt(this.structFieldLineAt(sym, index), 2, "|")
         val recv: String = this.emitExpr(hir, recvId)
         val fp: String = this.freshVar()
-        this.fBody = this.fBody + "  " + fp + " = getelementptr inbounds %struct."
-            + sym + ", %struct." + sym + "* " + recv + ", i32 0, i32 " + toStr(index) + "\n"
+        this.fBody.add("  " + fp + " = getelementptr inbounds %struct."
+            + sym + ", %struct." + sym + "* " + recv + ", i32 0, i32 " + toStr(index) + "\n")
         val t: String = this.freshVar()
-        this.fBody = this.fBody + "  " + t + " = load " + fty + ", " + fty + "* " + fp + "\n"
+        this.fBody.add("  " + t + " = load " + fty + ", " + fty + "* " + fp + "\n")
         return t
     }
 
@@ -1597,9 +1597,9 @@ class LlvmEmitter {
         val coerced: String = this.coerceValue(v, vTy, fty)
         val recv: String = this.emitExpr(hir, recvId)
         val fp: String = this.freshVar()
-        this.fBody = this.fBody + "  " + fp + " = getelementptr inbounds %struct."
-            + sym + ", %struct." + sym + "* " + recv + ", i32 0, i32 " + toStr(index) + "\n"
-        this.fBody = this.fBody + "  store " + fty + " " + coerced + ", " + fty + "* " + fp + "\n"
+        this.fBody.add("  " + fp + " = getelementptr inbounds %struct."
+            + sym + ", %struct." + sym + "* " + recv + ", i32 0, i32 " + toStr(index) + "\n")
+        this.fBody.add("  store " + fty + " " + coerced + ", " + fty + "* " + fp + "\n")
         this.fTerminated = false
         return true
     }
@@ -1643,10 +1643,10 @@ class LlvmEmitter {
         val fty: String = aotFieldAt(this.structFieldLineAt(cs, fi), 2, "|")
         val th: String = this.emitVarLoad("this")
         val fp: String = this.freshVar()
-        this.fBody = this.fBody + "  " + fp + " = getelementptr inbounds %struct."
-            + cs + ", %struct." + cs + "* " + th + ", i32 0, i32 " + toStr(fi) + "\n"
+        this.fBody.add("  " + fp + " = getelementptr inbounds %struct."
+            + cs + ", %struct." + cs + "* " + th + ", i32 0, i32 " + toStr(fi) + "\n")
         val t: String = this.freshVar()
-        this.fBody = this.fBody + "  " + t + " = load " + fty + ", " + fty + "* " + fp + "\n"
+        this.fBody.add("  " + t + " = load " + fty + ", " + fty + "* " + fp + "\n")
         return t
     }
 
@@ -1663,9 +1663,9 @@ class LlvmEmitter {
         val coerced: String = this.coerceValue(v, vTy, fty)
         val th: String = this.emitVarLoad("this")
         val fp: String = this.freshVar()
-        this.fBody = this.fBody + "  " + fp + " = getelementptr inbounds %struct."
-            + cs + ", %struct." + cs + "* " + th + ", i32 0, i32 " + toStr(fi) + "\n"
-        this.fBody = this.fBody + "  store " + fty + " " + coerced + ", " + fty + "* " + fp + "\n"
+        this.fBody.add("  " + fp + " = getelementptr inbounds %struct."
+            + cs + ", %struct." + cs + "* " + th + ", i32 0, i32 " + toStr(fi) + "\n")
+        this.fBody.add("  store " + fty + " " + coerced + ", " + fty + "* " + fp + "\n")
         this.fTerminated = false
         return true
     }
@@ -1673,7 +1673,7 @@ class LlvmEmitter {
     /// 发射字符串长度调用（返回 i64 操作数）。
     fun stringLen(s: String): String {
         val t: String = this.freshVar()
-        this.fBody = this.fBody + "  " + t + " = call i64 @aura_strlen(i8* " + s + ")\n"
+        this.fBody.add("  " + t + " = call i64 @aura_strlen(i8* " + s + ")\n")
         return t
     }
 
@@ -1698,8 +1698,8 @@ class LlvmEmitter {
         // （泛型实参已在解析器消费，HIR 中不出现类型参数）→ 空列表句柄 + 逐个追加。
         if (this.isCollectionCtor(fname)) {
             val empty: String = this.freshVar()
-            this.fBody = this.fBody + "  " + empty
-                + " = call i8* @aura_lang_std_Collections_emptyList()\n"
+            this.fBody.add("  " + empty
+                + " = call i8* @aura_lang_std_Collections_emptyList()\n")
             var cur: String = empty
             var ci: Int = argStart
             while (ci < n) {
@@ -1708,9 +1708,9 @@ class LlvmEmitter {
                 val cv: String = this.emitExpr(hir, cId)
                 val boxed: String = this.boxToPtr(cv, cTy)
                 val nxt: String = this.freshVar()
-                this.fBody = this.fBody + "  " + nxt
+                this.fBody.add("  " + nxt
                     + " = call i8* @aura_lang_std_Collections_listAppend(i8* "
-                    + cur + ", i8* " + boxed + ")\n"
+                    + cur + ", i8* " + boxed + ")\n")
                 cur = nxt
                 ci = ci + 1
             }
@@ -1729,9 +1729,9 @@ class LlvmEmitter {
                     val av: String = this.emitExpr(hir, aId)
                     val boxed: String = this.boxToPtr(av, aTy)
                     val nxt: String = this.freshVar()
-                    this.fBody = this.fBody + "  " + nxt
+                    this.fBody.add("  " + nxt
                         + " = call i8* @aura_lang_std_Collections_listAppend(i8* "
-                        + cur + ", i8* " + boxed + ")\n"
+                        + cur + ", i8* " + boxed + ")\n")
                     cur = nxt
                     ai = ai + 1
                 }
@@ -1763,21 +1763,21 @@ class LlvmEmitter {
             if (fTy == "float" || fTy == "double") {
                 val dv: String = this.coerceValue(fv, fTy, "double")
                 val ft: String = this.freshVar()
-                this.fBody = this.fBody + "  " + ft
-                    + " = call i8* @aura_to_str_float(double " + dv + ")\n"
+                this.fBody.add("  " + ft
+                    + " = call i8* @aura_to_str_float(double " + dv + ")\n")
                 return ft
             }
             if (fTy == "i1") {
                 val bv: String = this.coerceValue(fv, fTy, "i64")
                 val bt: String = this.freshVar()
-                this.fBody = this.fBody + "  " + bt
-                    + " = call i8* @aura_to_str_bool(i64 " + bv + ")\n"
+                this.fBody.add("  " + bt
+                    + " = call i8* @aura_to_str_bool(i64 " + bv + ")\n")
                 return bt
             }
             val iv: String = this.coerceValue(fv, fTy, "i64")
             val it: String = this.freshVar()
-            this.fBody = this.fBody + "  " + it
-                + " = call i8* @aura_to_str(i64 " + iv + ")\n"
+            this.fBody.add("  " + it
+                + " = call i8* @aura_to_str(i64 " + iv + ")\n")
             return it
         }
 
@@ -1937,7 +1937,7 @@ class LlvmEmitter {
         }
 
         if (retTy == "void") {
-            this.fBody = this.fBody + "  call void @" + sym + "(" + args + ")\n"
+            this.fBody.add("  call void @" + sym + "(" + args + ")\n")
             return "0"
         }
         if (retTy == "") {
@@ -1948,8 +1948,8 @@ class LlvmEmitter {
             return "0"
         }
         val t: String = this.freshVar()
-        this.fBody = this.fBody + "  " + t + " = call " + retTy
-            + " @" + sym + "(" + args + ")\n"
+        this.fBody.add("  " + t + " = call " + retTy
+            + " @" + sym + "(" + args + ")\n")
         return t
     }
 
@@ -1966,7 +1966,7 @@ class LlvmEmitter {
             val a: String = this.emitExpr(hir, aId)
             s = this.toStringOperand(a, aTy)
         }
-        this.fBody = this.fBody + "  call void @" + sym + "(i8* " + s + ")\n"
+        this.fBody.add("  call void @" + sym + "(i8* " + s + ")\n")
         return "0"
     }
 
@@ -1977,18 +1977,18 @@ class LlvmEmitter {
         }
         if (ty == "float" || ty == "double") {
             val t: String = this.freshVar()
-            this.fBody = this.fBody + "  " + t + " = call i8* @aura_to_str_float("
-                + ty + " " + v + ")\n"
+            this.fBody.add("  " + t + " = call i8* @aura_to_str_float("
+                + ty + " " + v + ")\n")
             return t
         }
         var i64v: String = v
         if (ty != "i64") {
             val t: String = this.freshVar()
-            this.fBody = this.fBody + "  " + t + " = sext " + ty + " " + v + " to i64\n"
+            this.fBody.add("  " + t + " = sext " + ty + " " + v + " to i64\n")
             i64v = t
         }
         val t2: String = this.freshVar()
-        this.fBody = this.fBody + "  " + t2 + " = call i8* @aura_to_str(i64 " + i64v + ")\n"
+        this.fBody.add("  " + t2 + " = call i8* @aura_to_str(i64 " + i64v + ")\n")
         return t2
     }
 
@@ -2027,36 +2027,36 @@ class LlvmEmitter {
         val thenBb: String = this.freshBb("ifval.then")
         val elseBb: String = this.freshBb("ifval.else")
         val mergeBb: String = this.freshBb("ifval.merge")
-        this.fBody = this.fBody + "  br i1 " + cond + ", label %" + thenBb
-            + ", label %" + elseBb + "\n"
+        this.fBody.add("  br i1 " + cond + ", label %" + thenBb
+            + ", label %" + elseBb + "\n")
 
-        this.fBody = this.fBody + thenBb + ":\n"
+        this.fBody.add(thenBb + ":\n")
         this.fTerminated = false
         val thenVal: String = this.emitBlockValue(hir, thenId, valTy)
         if (!this.fTerminated) {
-            this.fBody = this.fBody + "  store " + valTy + " " + thenVal
-                + ", " + valTy + "* " + slot + "\n"
-            this.fBody = this.fBody + "  br label %" + mergeBb + "\n"
+            this.fBody.add("  store " + valTy + " " + thenVal
+                + ", " + valTy + "* " + slot + "\n")
+            this.fBody.add("  br label %" + mergeBb + "\n")
         }
 
-        this.fBody = this.fBody + elseBb + ":\n"
+        this.fBody.add(elseBb + ":\n")
         this.fTerminated = false
         if (elseId >= 0) {
             val elseVal: String = this.emitBlockValue(hir, elseId, valTy)
             if (!this.fTerminated) {
-                this.fBody = this.fBody + "  store " + valTy + " " + elseVal
-                    + ", " + valTy + "* " + slot + "\n"
+                this.fBody.add("  store " + valTy + " " + elseVal
+                    + ", " + valTy + "* " + slot + "\n")
             }
         }
         if (!this.fTerminated) {
-            this.fBody = this.fBody + "  br label %" + mergeBb + "\n"
+            this.fBody.add("  br label %" + mergeBb + "\n")
         }
 
-        this.fBody = this.fBody + mergeBb + ":\n"
+        this.fBody.add(mergeBb + ":\n")
         this.fTerminated = false
         val res: String = this.freshVar()
-        this.fBody = this.fBody + "  " + res + " = load " + valTy + ", " + valTy
-            + "* " + slot + "\n"
+        this.fBody.add("  " + res + " = load " + valTy + ", " + valTy
+            + "* " + slot + "\n")
         return res
     }
 
@@ -2458,17 +2458,17 @@ class LlvmEmitter {
         }
         if (ty == "i8*" || ty == "ptr" || ty.endsWith("*")) {
             val t: String = this.freshVar()
-            this.fBody = this.fBody + "  " + t + " = icmp ne " + ty + " " + v + ", null\n"
+            this.fBody.add("  " + t + " = icmp ne " + ty + " " + v + ", null\n")
             return t
         }
         if (intWidth(ty) > 0) {
             val t: String = this.freshVar()
-            this.fBody = this.fBody + "  " + t + " = icmp ne " + ty + " " + v + ", 0\n"
+            this.fBody.add("  " + t + " = icmp ne " + ty + " " + v + ", 0\n")
             return t
         }
         if (ty == "float" || ty == "double") {
             val t: String = this.freshVar()
-            this.fBody = this.fBody + "  " + t + " = fcmp one " + ty + " " + v + ", 0.0\n"
+            this.fBody.add("  " + t + " = fcmp one " + ty + " " + v + ", 0.0\n")
             return t
         }
         return v
@@ -2501,8 +2501,8 @@ class LlvmEmitter {
             }
             val inner: String = nullableInnerTy(fromTy)
             val t: String = this.freshVar()
-            this.fBody = this.fBody + "  " + t + " = extractvalue "
-                + fromTy + " " + v + ", 0\n"
+            this.fBody.add("  " + t + " = extractvalue "
+                + fromTy + " " + v + ", 0\n")
             return this.coerceValue(t, inner, toTy)
         }
         if (toTy == "" || fromTy == toTy) {
@@ -2516,27 +2516,27 @@ class LlvmEmitter {
                 if (toTy == "double") {
                     op = "fpext"
                 }
-                this.fBody = this.fBody + "  " + t + " = " + op + " "
-                    + fromTy + " " + v + " to " + toTy + "\n"
+                this.fBody.add("  " + t + " = " + op + " "
+                    + fromTy + " " + v + " to " + toTy + "\n")
                 return t
             }
             if (isFloatTy(fromTy) && intWidth(toTy) > 0) {
                 // 浮点 → 整数：fptosi 到 i64，再按目标宽度截断
                 val i64v: String = this.freshVar()
-                this.fBody = this.fBody + "  " + i64v + " = fptosi "
-                    + fromTy + " " + v + " to i64\n"
+                this.fBody.add("  " + i64v + " = fptosi "
+                    + fromTy + " " + v + " to i64\n")
                 if (toTy == "i64") {
                     return i64v
                 }
                 val t: String = this.freshVar()
-                this.fBody = this.fBody + "  " + t + " = trunc i64 "
-                    + i64v + " to " + toTy + "\n"
+                this.fBody.add("  " + t + " = trunc i64 "
+                    + i64v + " to " + toTy + "\n")
                 return t
             }
             if (intWidth(fromTy) > 0 && isFloatTy(toTy)) {
                 val t: String = this.freshVar()
-                this.fBody = this.fBody + "  " + t + " = sitofp "
-                    + fromTy + " " + v + " to " + toTy + "\n"
+                this.fBody.add("  " + t + " = sitofp "
+                    + fromTy + " " + v + " to " + toTy + "\n")
                 return t
             }
             if (isFloatTy(fromTy) && (toTy == "i8*" || toTy == "ptr")) {
@@ -2544,13 +2544,13 @@ class LlvmEmitter {
                 var dv: String = v
                 if (fromTy == "float") {
                     val ext: String = this.freshVar()
-                    this.fBody = this.fBody + "  " + ext + " = fpext float " + v + " to double\n"
+                    this.fBody.add("  " + ext + " = fpext float " + v + " to double\n")
                     dv = ext
                 }
                 val bits: String = this.freshVar()
                 val pt: String = this.freshVar()
-                this.fBody = this.fBody + "  " + bits + " = bitcast double " + dv + " to i64\n"
-                this.fBody = this.fBody + "  " + pt + " = inttoptr i64 " + bits + " to i8*\n"
+                this.fBody.add("  " + bits + " = bitcast double " + dv + " to i64\n")
+                this.fBody.add("  " + pt + " = inttoptr i64 " + bits + " to i8*\n")
                 return pt
             }
         }
@@ -2560,26 +2560,26 @@ class LlvmEmitter {
         if ((toTy == "i8*" || toTy == "ptr") && fw > 0) {
             val w: String = this.coerceValue(v, fromTy, "i64")
             val t: String = this.freshVar()
-            this.fBody = this.fBody + "  " + t + " = inttoptr i64 " + w + " to i8*\n"
+            this.fBody.add("  " + t + " = inttoptr i64 " + w + " to i8*\n")
             return t
         }
         if ((fromTy == "i8*" || fromTy == "ptr") && tw > 0) {
             val t: String = this.freshVar()
-            this.fBody = this.fBody + "  " + t + " = ptrtoint i8* " + v + " to i64\n"
+            this.fBody.add("  " + t + " = ptrtoint i8* " + v + " to i64\n")
             // Plan A：i8* 槽中的整数是低位标记装箱值（(v<<1)|1）→ 统一拆箱，
             // 否则 `list[i]` 读回 7 会得到 15（与 Rust AOT 后端同一约定）。
             val u: String = this.freshVar()
-            this.fBody = this.fBody + "  " + u + " = call i64 @aura_to_int_any(i64 " + t + ")\n"
+            this.fBody.add("  " + u + " = call i64 @aura_to_int_any(i64 " + t + ")\n")
             return this.coerceValue(u, "i64", toTy)
         }
         if (fw > 0 && tw > 0 && fw != tw) {
             val t: String = this.freshVar()
             if (tw > fw) {
-                this.fBody = this.fBody + "  " + t + " = sext " + fromTy + " " + v
-                    + " to " + toTy + "\n"
+                this.fBody.add("  " + t + " = sext " + fromTy + " " + v
+                    + " to " + toTy + "\n")
             } else {
-                this.fBody = this.fBody + "  " + t + " = trunc " + fromTy + " " + v
-                    + " to " + toTy + "\n"
+                this.fBody.add("  " + t + " = trunc " + fromTy + " " + v
+                    + " to " + toTy + "\n")
             }
             return t
         }
@@ -2589,11 +2589,11 @@ class LlvmEmitter {
     /// 把内部值包装为可空结构体 `{ T, i1 }`（i1=false 表示非空）。
     fun wrapNullable(v: String, inner: String, structTy: String): String {
         val w0: String = this.freshVar()
-        this.fBody = this.fBody + "  " + w0 + " = insertvalue " + structTy
-            + " undef, " + inner + " " + v + ", 0\n"
+        this.fBody.add("  " + w0 + " = insertvalue " + structTy
+            + " undef, " + inner + " " + v + ", 0\n")
         val w1: String = this.freshVar()
-        this.fBody = this.fBody + "  " + w1 + " = insertvalue " + structTy
-            + " " + w0 + ", i1 false, 1\n"
+        this.fBody.add("  " + w1 + " = insertvalue " + structTy
+            + " " + w0 + ", i1 false, 1\n")
         return w1
     }
 
@@ -2631,7 +2631,7 @@ class LlvmEmitter {
             return existing
         }
         val addr: String = "%" + sanitizeLlvm(name) + ".addr"
-        this.fAlloca = this.fAlloca + "  " + addr + " = alloca " + ty + "\n"
+        this.fAlloca.add("  " + addr + " = alloca " + ty + "\n")
         this.fVarList.add(name + "|" + addr + "|" + ty)
         return addr
     }
@@ -2721,18 +2721,18 @@ class LlvmEmitter {
         if (ty == "float" || ty == "double") {
             val dv: String = this.coerceValue(v, ty, "double")
             val t: String = this.freshVar()
-            this.fBody = this.fBody + "  " + t + " = call i8* @aura_to_str_float(double " + dv + ")\n"
+            this.fBody.add("  " + t + " = call i8* @aura_to_str_float(double " + dv + ")\n")
             return t
         }
         if (ty == "i1") {
             val bv: String = this.coerceValue(v, ty, "i64")
             val bt: String = this.freshVar()
-            this.fBody = this.fBody + "  " + bt + " = call i8* @aura_to_str_bool(i64 " + bv + ")\n"
+            this.fBody.add("  " + bt + " = call i8* @aura_to_str_bool(i64 " + bv + ")\n")
             return bt
         }
         val iv: String = this.coerceValue(v, ty, "i64")
         val it: String = this.freshVar()
-        this.fBody = this.fBody + "  " + it + " = call i8* @aura_to_str(i64 " + iv + ")\n"
+        this.fBody.add("  " + it + " = call i8* @aura_to_str(i64 " + iv + ")\n")
         return it
     }
 
@@ -2758,11 +2758,11 @@ class LlvmEmitter {
         }
         val iv: String = this.coerceValue(v, ty, "i64")
         val sh: String = this.freshVar()
-        this.fBody = this.fBody + "  " + sh + " = shl i64 " + iv + ", 1\n"
+        this.fBody.add("  " + sh + " = shl i64 " + iv + ", 1\n")
         val tg: String = this.freshVar()
-        this.fBody = this.fBody + "  " + tg + " = or i64 " + sh + ", 1\n"
+        this.fBody.add("  " + tg + " = or i64 " + sh + ", 1\n")
         val t: String = this.freshVar()
-        this.fBody = this.fBody + "  " + t + " = inttoptr i64 " + tg + " to i8*\n"
+        this.fBody.add("  " + t + " = inttoptr i64 " + tg + " to i8*\n")
         return t
     }
 

@@ -31,21 +31,46 @@ fun keywordTable(): String {
         + "|true|BoolLiteral|false|BoolLiteral|it|Ident|by|Ident"
 }
 
-/// 查询标识符对应的 TokenKind 名称；非关键字返回 `"Ident"`。
+/// 关键字查询表：把 `key|kind|key|kind|...` 规整为 `#key|kind|#key|kind|...`。
 ///
-/// 与 Rust `lookup_keyword` 等价的线性查找（首次命中即返回）。
-fun keywordKind(word: String): String {
-    val table: String = keywordTable()
-    val parts: List<String> = table.split("|")
-    val total: Int = table.countChar("|") + 1
+/// **键前置 `#` 标记**：kind 值本身也是普通单词（`Box` / `Ident` / `Int` …），
+/// 若不加标记，用 `|word|` 做子串搜索会把 kind 值误判为键
+/// （例如查 `Box` 会命中 `|box|Box|` 里的值而返回 `Weak`）。
+/// 本函数只在 `Lexer` 初始化时调用一次，开销可忽略。
+fun keywordSearchTable(): String {
+    val parts: List<String> = keywordTable().split("|")
+    var out: String = ""
     var i: Int = 0
-    while (i + 1 < total) {
-        if (parts[i] == word) {
-            return parts[i + 1]
-        }
+    while (i + 1 < parts.size) {
+        out = out + "#" + parts[i] + "|" + parts[i + 1] + "|"
         i = i + 2
     }
-    return "Ident"
+    return out
+}
+
+/// 查询标识符对应的 TokenKind 名称；非关键字返回 `"Ident"`。
+///
+/// 与 Rust `lookup_keyword` 等价（首次命中即返回）。本函数会重建查询表，
+/// 仅适合冷路径；热路径（`Lexer.scanIdentifier`）请用缓存的表 +
+/// [`keywordLookup`]（见 `Lexer.lxKwKind`）。
+fun keywordKind(word: String): String {
+    return keywordLookup(keywordSearchTable(), word)
+}
+
+/// 在 `#word|Kind|#word|Kind|...` 形态的关键字查询表上查 `word` 的 Kind。
+///
+/// **零 `split`**：单次 `contains` 定位 + 两次切片。旧实现对每次调用都
+/// `split("|")` 出整表（~180 个子串 + 一张 List），AOT 运行时没有 GC，
+/// 每个标识符就产生约 200 次永久分配——解析 600KB 源码吃掉数百 MB 的主因。
+fun keywordLookup(table: String, word: String): String {
+    if (word == "") {
+        return "Ident"
+    }
+    val needle: String = "#" + word + "|"
+    if (!table.contains(needle)) {
+        return "Ident"
+    }
+    return table.substringAfter(needle).substringBefore("|")
 }
 
 /// 是否为关键字词。

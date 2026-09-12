@@ -148,6 +148,11 @@ int64_t aura_mem_used_bytes(void) {
     return g_aura_mem_used;
 }
 
+/// 当前存活分配 MiB（诊断用；返回 i32 便于 AOT 侧以默认 i32 调用约定直接调用）。
+int32_t aura_mem_used_mb(void) {
+    return (int32_t)(g_aura_mem_used / (1024 * 1024));
+}
+
 /// 当前生效的内存上限字节数（0 = 不限制；诊断用）。
 int64_t aura_mem_limit_bytes(void) {
     aura_mem_init();
@@ -253,9 +258,28 @@ static char *aura_dup_n(const char *s, size_t n) {
 }
 
 const char *aura_to_str(int64_t x) {
-    char *buf = (char *)aura_mem_alloc(64);
+    /* 小整数缓存：AOT 运行时没有 GC，而 int→String 是最高频的分配之一
+     * （编译器 IR 发射会产生千万级此类小串）。0..1023 用静态表以完全避免分配。
+     *
+     * 缓存槽按 **16 字节对齐**：Plan A 用「真实指针低位为 0」区分装箱整数
+     * （见 argv 拷贝处的同类注释），若返回非对齐内部指针会被误判为装箱整数。
+     * 槽内容只写一次、此后只读，可安全在多次调用间共享。 */
+    if (x >= 0 && x < 1024) {
+        static char cache[1024][16];
+        static unsigned char ready[1024];
+        if (!ready[x]) {
+            snprintf(cache[x], 16, "%lld", (long long)x);
+            ready[x] = 1;
+        }
+        return cache[x];
+    }
+    /* 其余按实际位数分配（原先固定 64 字节，对绝大多数数字都过度分配）。 */
+    char tmp[24];
+    int n = snprintf(tmp, sizeof(tmp), "%lld", (long long)x);
+    if (n < 0) return "";
+    char *buf = (char *)aura_mem_alloc((int64_t)n + 1);
     if (!buf) return "";
-    snprintf(buf, 64, "%lld", (long long)x);
+    memcpy(buf, tmp, (size_t)n + 1);
     return buf;
 }
 
@@ -382,9 +406,31 @@ int64_t aura_string_charCodeAt(const char *s, int64_t idx) {
     return (unsigned char)s[idx];
 }
 
+/* 单字符字符串缓存（256 个字节值）。
+ *
+ * AOT 发射器把字符串索引 `s[i]` / `.charAt(i)` 落到 `aura_string_charAt`。
+ * 词法器对源码的**每个字符**都会反复调用（`peek` / `advance` / `skipTrivia`），
+ * 若每次 `aura_dup_n(s + idx, 1)` 分配 1 字节串，AOT（无 GC）下解析 600KB
+ * 源码就会产生千万级永久分配 —— 实测「链接阶段 480MB」的主要来源。
+ *
+ * 槽位 16 字节对齐：Plan A 用「真实指针低位为 0」区分装箱整数，
+ * 非对齐的内部指针会被误判（见 argv 拷贝处同类注释）。字符内容只写一次、
+ * 之后只读，可在多次调用间安全共享。
+ */
+static const char *aura_char_cache(unsigned char c) {
+    static char slots[256][16];
+    static unsigned char ready[256];
+    if (!ready[c]) {
+        slots[c][0] = (char)c;
+        slots[c][1] = '\0';
+        ready[c] = 1;
+    }
+    return slots[c];
+}
+
 const char *aura_string_charAt(const char *s, int64_t idx) {
     if (!s || idx < 0 || (size_t)idx >= strlen(s)) return "";
-    return aura_dup_n(s + idx, 1);
+    return aura_char_cache((unsigned char)s[idx]);
 }
 
 const char *aura_string_substring(const char *s, int64_t start, int64_t end) {
