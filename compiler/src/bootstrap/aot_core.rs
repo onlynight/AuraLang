@@ -103,7 +103,7 @@ impl<'m> AotGenerator<'m> {
         let entry_idx = self
             .module
             .function_index(entry)
-            .ok_or_else(|| format!("AOT: 入口函数不存在: {entry}"))?;
+            .ok_or_else(|| format!("AOT: entry function not found: {entry}"))?;
 
         // 1. 内联小函数（内联优化）
         let funcs = self.inline_small_functions();
@@ -140,7 +140,7 @@ impl<'m> AotGenerator<'m> {
                 if let Insn::CallFfi(slot) = insn {
                     let slot = *slot as usize;
                     if self.ffi.entry(slot).is_none() {
-                        return Err(format!("AOT: FFI 槽位未预加载: {slot}"));
+                        return Err(format!("AOT: FFI slot not preloaded: {slot}"));
                     }
                     if !ffi_slots.contains(&slot) {
                         ffi_slots.push(slot);
@@ -287,7 +287,10 @@ impl<'m> AotGenerator<'m> {
             return Ok(t);
         }
         if !visiting.insert(fi) {
-            return Err(format!("AOT: 递归函数不支持类型推断: {}", funcs[fi].name));
+            return Err(format!(
+                "AOT: recursive functions do not support type inference: {}",
+                funcs[fi].name
+            ));
         }
         let def = &funcs[fi];
 
@@ -305,10 +308,12 @@ impl<'m> AotGenerator<'m> {
         let mut ret: Option<ValType> = def.sig.as_ref().map(|s| s.ret);
 
         let local_ty = |ls: &[Option<ValType>], i: usize| -> Result<ValType, String> {
-            ls.get(i)
-                .copied()
-                .flatten()
-                .ok_or_else(|| format!("AOT: 局部变量 {i} 在初始化前使用（函数 {}）", def.name))
+            ls.get(i).copied().flatten().ok_or_else(|| {
+                format!(
+                    "AOT: local variable {i} used before initialization (function {})",
+                    def.name
+                )
+            })
         };
 
         for insn in &def.code {
@@ -316,13 +321,13 @@ impl<'m> AotGenerator<'m> {
                 Insn::Const(v) => stack.push(val_type_of(v)),
                 Insn::LoadLocal(i) => stack.push(local_ty(&locals, *i as usize)?),
                 Insn::StoreLocal(i) => {
-                    let t = stack.pop().ok_or("AOT: StoreLocal 栈下溢")?;
+                    let t = stack.pop().ok_or("AOT: StoreLocal stack underflow")?;
                     let slot = &mut locals[*i as usize];
                     match *slot {
                         None => *slot = Some(t),
                         Some(prev) if prev != t => {
                             return Err(format!(
-                                "AOT: 局部变量 {} 类型冲突 ({prev:?} vs {t:?})，函数 {}",
+                                "AOT: local variable {} type conflict ({prev:?} vs {t:?}), function {}",
                                 i, def.name
                             ));
                         }
@@ -330,18 +335,18 @@ impl<'m> AotGenerator<'m> {
                     }
                 }
                 Insn::Add | Insn::Sub | Insn::Mul | Insn::Div => {
-                    let b = stack.pop().ok_or("AOT: 二元运算栈下溢")?;
-                    let a = stack.pop().ok_or("AOT: 二元运算栈下溢")?;
+                    let b = stack.pop().ok_or("AOT: binary op stack underflow")?;
+                    let a = stack.pop().ok_or("AOT: binary op stack underflow")?;
                     stack.push(bin_type(&a, &b, &def.name)?);
                 }
                 Insn::Eq | Insn::Lt => {
-                    stack.pop().ok_or("AOT: 比较栈下溢")?;
-                    stack.pop().ok_or("AOT: 比较栈下溢")?;
+                    stack.pop().ok_or("AOT: comparison stack underflow")?;
+                    stack.pop().ok_or("AOT: comparison stack underflow")?;
                     stack.push(ValType::I1);
                 }
                 Insn::Jmp(_) => {}
                 Insn::JmpIfFalse(_) => {
-                    stack.pop().ok_or("AOT: 条件跳转栈下溢")?;
+                    stack.pop().ok_or("AOT: conditional jump stack underflow")?;
                 }
                 Insn::Call(c) => {
                     let ct = Self::infer_function(
@@ -353,16 +358,16 @@ impl<'m> AotGenerator<'m> {
                         visiting,
                     )?;
                     for _ in 0..funcs[*c as usize].params {
-                        stack.pop().ok_or("AOT: 调用参数栈下溢")?;
+                        stack.pop().ok_or("AOT: call argument stack underflow")?;
                     }
                     stack.push(ct);
                 }
                 Insn::CallFfi(slot) => {
                     let entry = ffi
                         .entry(*slot as usize)
-                        .ok_or_else(|| format!("AOT: FFI 槽位未预加载: {slot}"))?;
+                        .ok_or_else(|| format!("AOT: FFI slot not preloaded: {slot}"))?;
                     for _ in 0..entry.arity {
-                        stack.pop().ok_or("AOT: FFI 参数栈下溢")?;
+                        stack.pop().ok_or("AOT: FFI argument stack underflow")?;
                     }
                     stack.push(c_to_val(entry.c_ret));
                 }
@@ -372,19 +377,23 @@ impl<'m> AotGenerator<'m> {
                         None => ret = Some(t),
                         Some(prev) if prev != t => {
                             return Err(format!(
-                                "AOT: 返回类型冲突 ({prev:?} vs {t:?})，函数 {}",
+                                "AOT: return type conflict ({prev:?} vs {t:?}), function {}",
                                 def.name
                             ));
                         }
                         _ => {}
                     }
                 }
-                Insn::Yield => return Err("AOT: 协程 Yield 不支持 AOT 编译".to_string()),
+                Insn::Yield => {
+                    return Err(
+                        "AOT: coroutine Yield not supported for AOT compilation".to_string()
+                    );
+                }
             }
         }
 
         visiting.remove(&fi);
-        let t = ret.ok_or_else(|| format!("AOT: 函数 {} 无返回类型", def.name))?;
+        let t = ret.ok_or_else(|| format!("AOT: function {} has no return type", def.name))?;
         ret_types[fi] = Some(t);
         local_types[fi] = locals.into_iter().map(|o| o.unwrap_or(ValType::I64)).collect();
         Ok(t)
@@ -456,12 +465,12 @@ impl<'m> AotGenerator<'m> {
                     stack.push((t, format!("%t{ssa}")));
                 }
                 Insn::StoreLocal(i) => {
-                    let (t, v) = stack.pop().ok_or("AOT: StoreLocal 栈下溢")?;
+                    let (t, v) = stack.pop().ok_or("AOT: StoreLocal stack underflow")?;
                     out.push_str(&format!("  store {} {}, ptr %l{}\n", t.llvm(), v, i));
                 }
                 Insn::Add | Insn::Sub | Insn::Mul | Insn::Div => {
-                    let (bt, bv) = stack.pop().ok_or("AOT: 栈下溢")?;
-                    let (at, av) = stack.pop().ok_or("AOT: 栈下溢")?;
+                    let (bt, bv) = stack.pop().ok_or("AOT: stack underflow")?;
+                    let (at, av) = stack.pop().ok_or("AOT: stack underflow")?;
                     let t = bin_type(&at, &bt, &def.name)?;
                     ssa += 1;
                     let mn = match (insn, t) {
@@ -479,11 +488,11 @@ impl<'m> AotGenerator<'m> {
                     stack.push((t, format!("%t{ssa}")));
                 }
                 Insn::Eq | Insn::Lt => {
-                    let (bt, bv) = stack.pop().ok_or("AOT: 栈下溢")?;
-                    let (at, av) = stack.pop().ok_or("AOT: 栈下溢")?;
+                    let (bt, bv) = stack.pop().ok_or("AOT: stack underflow")?;
+                    let (at, av) = stack.pop().ok_or("AOT: stack underflow")?;
                     if at != bt {
                         return Err(format!(
-                            "AOT: 比较操作数类型不一致 ({at:?} vs {bt:?})，函数 {}",
+                            "AOT: comparison operand type mismatch ({at:?} vs {bt:?}), function {}",
                             def.name
                         ));
                     }
@@ -503,7 +512,7 @@ impl<'m> AotGenerator<'m> {
                     out.push_str(&format!("  br label %bb{t}\n"));
                 }
                 Insn::JmpIfFalse(off) => {
-                    let (_, c) = stack.pop().ok_or("AOT: 条件跳转栈下溢")?;
+                    let (_, c) = stack.pop().ok_or("AOT: conditional jump stack underflow")?;
                     let t = (ip as i64 + 1 + *off as i64) as usize;
                     out.push_str(&format!("  br i1 {c}, label %bb{t}, label {fall}\n"));
                 }
@@ -513,7 +522,7 @@ impl<'m> AotGenerator<'m> {
                     let cret = ret_types[ci].unwrap();
                     let mut args = Vec::new();
                     for i in (0..cdef.params).rev() {
-                        let (t, v) = stack.pop().ok_or("AOT: 调用参数栈下溢")?;
+                        let (t, v) = stack.pop().ok_or("AOT: call argument stack underflow")?;
                         let want = local_types[ci][i];
                         let v = convert(&mut out, &mut ssa, t, want, v);
                         args.push(format!("{} {}", want.llvm(), v));
@@ -533,7 +542,7 @@ impl<'m> AotGenerator<'m> {
                     let e = self.ffi.entry(*slot as usize).unwrap();
                     let mut args = Vec::new();
                     for cp in e.c_params.iter().rev() {
-                        let (t, v) = stack.pop().ok_or("AOT: FFI 参数栈下溢")?;
+                        let (t, v) = stack.pop().ok_or("AOT: FFI argument stack underflow")?;
                         // 转换为 C 形参的真实 LLVM 类型（如 i64 → i32 trunc）
                         let (ty, v) = convert_to_c(&mut out, &mut ssa, t, *cp, v);
                         args.push(format!("{ty} {v}"));
@@ -542,7 +551,7 @@ impl<'m> AotGenerator<'m> {
                     ssa += 1;
                     let raw = format!("%t{ssa}");
                     out.push_str(&format!(
-                        "  %t{ssa} = call {} @{}({}) ; AOT 直连：直接调用 C 符号，无函数指针\n",
+                        "  %t{ssa} = call {} @{}({}) ; AOT direct: call C symbol directly, no function pointer\n",
                         e.c_ret.llvm(),
                         e.name,
                         args.join(", ")
@@ -563,7 +572,7 @@ impl<'m> AotGenerator<'m> {
                         Some((t, v)) => {
                             if t != ret {
                                 return Err(format!(
-                                    "AOT: 返回类型不匹配 ({t:?} vs {ret:?})，函数 {}",
+                                    "AOT: return type mismatch ({t:?} vs {ret:?}), function {}",
                                     def.name
                                 ));
                             }
@@ -573,7 +582,9 @@ impl<'m> AotGenerator<'m> {
                     };
                     out.push_str(&format!("  ret {} {v}\n", ret.llvm()));
                 }
-                Insn::Yield => return Err("AOT: Yield 不支持 AOT 编译".to_string()),
+                Insn::Yield => {
+                    return Err("AOT: Yield not supported for AOT compilation".to_string());
+                }
             }
 
             // 非终止指令需要显式跳转到下一块
@@ -666,7 +677,7 @@ fn bin_type(a: &ValType, b: &ValType, fname: &str) -> Result<ValType, String> {
         (ValType::F64, _) | (_, ValType::F64) => Ok(ValType::F64),
         (ValType::I64, ValType::I64) => Ok(ValType::I64),
         _ => Err(format!(
-            "AOT: 函数 {fname} 二元运算不支持类型组合 ({a:?}, {b:?})"
+            "AOT: function {fname} binary op does not support type combination ({a:?}, {b:?})"
         )),
     }
 }

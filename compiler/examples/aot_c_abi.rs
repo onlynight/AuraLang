@@ -29,13 +29,13 @@ fn main() {
     let mut lexer = Lexer::new(SRC);
     let tokens = lexer.tokenize();
     if let Some(e) = lexer.errors().first() {
-        eprintln!("词法错误: {}", e.message);
+        eprintln!("lex error: {}", e.message);
         return;
     }
     let mut parser = Parser::new(tokens);
     let program = parser.parse_program();
     if let Some(e) = parser.errors().first() {
-        eprintln!("语法错误: {}", e.message);
+        eprintln!("syntax error: {}", e.message);
         return;
     }
     let hir = desugar_program(&program);
@@ -54,32 +54,32 @@ fn main() {
     let ll_path = work_dir.join("c_abi_test.ll");
     std::fs::write(&ll_path, &ir).unwrap();
 
-    println!("✓ LLVM IR 生成完成: {}", ll_path.display());
+    println!("* LLVM IR generated: {}", ll_path.display());
 
     // 4. 检查 IR 中包含 C ABI 包装函数
     let has_c_abi = ir.contains("define c ");
-    println!("  包含 `define c` 函数: {}", has_c_abi);
+    println!("  contains `define c` function: {}", has_c_abi);
 
     // 5. 检查具体的 C ABI 函数名
     let has_add_wrapper = ir.contains("aura_c_add");
     let has_multiply_wrapper = ir.contains("aura_c_multiply");
-    println!("  包含 aura_c_add: {}", has_add_wrapper);
-    println!("  包含 aura_c_multiply: {}", has_multiply_wrapper);
+    println!("  contains aura_c_add: {}", has_add_wrapper);
+    println!("  contains aura_c_multiply: {}", has_multiply_wrapper);
 
     // 6. 检查导出属性
     #[cfg(target_os = "windows")]
     {
         let has_dllexport = ir.contains("dllexport");
-        println!("  包含 dllexport: {}", has_dllexport);
+        println!("  contains dllexport: {}", has_dllexport);
     }
     #[cfg(not(target_os = "windows"))]
     {
         let has_visibility = ir.contains("visibility");
-        println!("  包含 visibility(\"default\"): {}", has_visibility);
+        println!("  Contains visibility(\"default\"): {}", has_visibility);
     }
 
     // 7. 打印 C ABI 函数定义（简化版）
-    println!("\n--- C ABI 包装函数 IR 片段 ---");
+    println!("\n--- C ABI wrapper function IR snippets ---");
     for line in ir.lines() {
         if line.contains("define c ") || line.contains("aura_c_") {
             println!("{}", line);
@@ -91,9 +91,9 @@ fn main() {
 
     // 9. 验证结果
     if has_c_abi && has_add_wrapper && has_multiply_wrapper {
-        println!("\n✓ C ABI 包装函数生成验证通过");
+        println!("\n* C ABI wrapper function generation verification passed");
     } else {
-        eprintln!("\n✗ C ABI 包装函数生成失败");
+        eprintln!("\n* C ABI wrapper function generation failed");
         std::process::exit(1);
     }
 }

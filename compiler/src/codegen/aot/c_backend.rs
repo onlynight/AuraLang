@@ -520,12 +520,12 @@ pub fn compile_c_to_exe(c_source: &str, output_path: &Path) -> Result<(), AotErr
     let output = Command::new(compiler)
         .args(&args)
         .output()
-        .map_err(|e| AotError::ToolError(format!("无法启动 {}: {}", compiler, e)))?;
+        .map_err(|e| AotError::ToolError(format!("failed to start {}: {}", compiler, e)))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         return Err(AotError::LinkerFailed(format!(
-            "{} 失败: {}",
+            "{} failed: {}",
             compiler, stderr
         )));
     }

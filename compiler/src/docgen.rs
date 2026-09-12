@@ -1174,7 +1174,7 @@ pub fn render_markdown(registry: &DocRegistry) -> String {
     out.push_str("---\n\n");
 
     // ── 目录 ──
-    out.push_str("## 目录\n\n");
+    out.push_str("## Table of Contents\n\n");
     for module in registry.module_names() {
         let count = registry.by_module(module).len();
         out.push_str(&format!(
@@ -1267,7 +1267,8 @@ pub fn generate_docs(output_dir: &std::path::Path) -> Result<Vec<std::path::Path
     let registry = DocRegistry::new().load_all();
     let module_names = registry.module_names();
 
-    std::fs::create_dir_all(output_dir).map_err(|e| format!("创建输出目录失败: {}", e))?;
+    std::fs::create_dir_all(output_dir)
+        .map_err(|e| format!("failed to create output directory: {}", e))?;
 
     let mut written = Vec::new();
 
@@ -1276,7 +1277,7 @@ pub fn generate_docs(output_dir: &std::path::Path) -> Result<Vec<std::path::Path
         let content = render_module_markdown(&registry, module);
         let file_path = output_dir.join(format!("std_{}.md", module));
         std::fs::write(&file_path, &content)
-            .map_err(|e| format!("写入 {} 失败: {}", file_path.display(), e))?;
+            .map_err(|e| format!("failed to write {}: {}", file_path.display(), e))?;
         written.push(file_path);
     }
 
@@ -1284,7 +1285,7 @@ pub fn generate_docs(output_dir: &std::path::Path) -> Result<Vec<std::path::Path
     let index_content = render_markdown(&registry);
     let index_path = output_dir.join("index.md");
     std::fs::write(&index_path, &index_content)
-        .map_err(|e| format!("写入 {} 失败: {}", index_path.display(), e))?;
+        .map_err(|e| format!("failed to write {}: {}", index_path.display(), e))?;
     written.push(index_path);
 
     Ok(written)
@@ -1317,7 +1318,7 @@ pub fn generate_source_index(core_dir: &std::path::Path) -> Result<SourceIndex, 
     // 收集所有 .aura 文件
     let mut aura_files = Vec::new();
     collect_aura_files(core_dir, core_dir, &mut aura_files)
-        .map_err(|e| format!("扫描 core 目录失败: {}", e))?;
+        .map_err(|e| format!("failed to scan core directory: {}", e))?;
 
     if aura_files.is_empty() {
         return Ok(index);
@@ -1325,7 +1326,7 @@ pub fn generate_source_index(core_dir: &std::path::Path) -> Result<SourceIndex, 
 
     for (rel_path, abs_path) in &aura_files {
         let content = std::fs::read_to_string(abs_path)
-            .map_err(|e| format!("读取 {} 失败: {}", abs_path.display(), e))?;
+            .map_err(|e| format!("failed to read {}: {}", abs_path.display(), e))?;
 
         // 解析
         let tokens = Lexer::new(&content).tokenize();
@@ -1553,13 +1554,13 @@ pub fn render_module_markdown(registry: &DocRegistry, module: &str) -> String {
     let docs = registry.by_module(module);
     let mut out = String::with_capacity(8192);
 
-    out.push_str(&format!("# std.{} — API 文档\n\n", module));
+    out.push_str(&format!("# std.{} — API Documentation\n\n", module));
     out.push_str(&format!(
-        "> 函数数: {} | [返回目录](index.md)\n\n",
+        "> Functions: {} | [Back to index](index.md)\n\n",
         docs.len()
     ));
 
-    out.push_str("## 目录\n\n");
+    out.push_str("## Table of Contents\n\n");
     for doc in &docs {
         let short_name = doc.name.split('.').nth(1).unwrap_or(doc.name);
         out.push_str(&format!(

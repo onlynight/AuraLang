@@ -325,9 +325,9 @@ impl LeakReport {
 
     pub fn summary(&self) -> String {
         if self.is_clean() {
-            "内存无泄漏".to_string()
+            "No memory leaks".to_string()
         } else {
-            format!("检测到 {} 个内存泄漏", self.leaked_allocs)
+            format!("Detected {} memory leaks", self.leaked_allocs)
         }
     }
 }
@@ -379,7 +379,7 @@ pub fn detect_leaks(funcs: &[MirFunction]) -> LeakReport {
                     function: f.name.clone(),
                     instr_index: reg,
                     description: format!(
-                        "寄存器 {} 有 {} 次 Retain 但仅 {} 次 Release（净增 {}）",
+                        "Register {} has {} Retain(s) but only {} Release(s) (net +{})",
                         reg,
                         retains,
                         releases,
@@ -412,8 +412,8 @@ pub struct ArcAnalysisResult {
 impl ArcAnalysisResult {
     pub fn summary(&self) -> String {
         format!(
-            "ARC 分析完成：{} 个函数，插入 {} 个 Retain / {} 个 Release，\
-             优化消除 {} 个冗余操作，检测到 {} 个潜在泄漏",
+            "ARC analysis complete: {} functions, inserted {} Retain / {} Release, \
+             optimized away {} redundant ops, detected {} potential leaks",
             self.escape_info.len(),
             self.insertion_stats.retains,
             self.insertion_stats.releases,

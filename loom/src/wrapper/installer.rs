@@ -105,7 +105,7 @@ impl WrapperInstaller {
 
         if version.is_empty() {
             return Err(LoomError::Config(
-                "无法从 distribution-url 提取版本号".to_string(),
+                "Failed to extract version from distribution-url".to_string(),
             ));
         }
 
@@ -124,11 +124,11 @@ impl WrapperInstaller {
         }
 
         // 下载新版本
-        tracing::info!("下载 loom {} 到 {}", version, target_dir.display());
+        tracing::info!("Downloading loom {} to {}", version, target_dir.display());
 
         if self.config.distribution_url.is_empty() {
             return Err(LoomError::Config(
-                "distribution-url 为空，无法下载".to_string(),
+                "distribution-url is empty, cannot download".to_string(),
             ));
         }
 
@@ -141,7 +141,7 @@ impl WrapperInstaller {
         let exe_name = executable_name();
         let exe_path = download_dir.join(exe_name.clone());
         std::fs::write(&exe_path, "#!/bin/sh\n# loom placeholder\n")
-            .map_err(|e| LoomError::Config(format!("无法创建可执行文件: {}", e)))?;
+            .map_err(|e| LoomError::Config(format!("Failed to create executable: {}", e)))?;
 
         // 设置可执行权限（Unix）
         #[cfg(unix)]
@@ -172,7 +172,7 @@ impl WrapperInstaller {
         let content =
             crate::wrapper::config::generate_wrapper_config(env!("CARGO_PKG_VERSION"), "stable");
         std::fs::write(path, &content)
-            .map_err(|e| LoomError::Config(format!("无法写入 wrapper 配置: {}", e)))
+            .map_err(|e| LoomError::Config(format!("Failed to write wrapper config: {}", e)))
     }
 
     /// 生成 wrapper 启动脚本
@@ -240,8 +240,8 @@ fn extract_version_from_url(url: &str) -> String {
 fn generate_bash_script(cache_dir: &Path) -> String {
     format!(
         r#"#!/usr/bin/env bash
-# Aura Wrapper - 可重复构建启动脚本
-# 自动生成，请勿手动编辑
+# Aura Wrapper - Reproducible build launcher script
+# Auto-generated, do not edit manually
 
 set -euo pipefail
 
@@ -249,7 +249,7 @@ WRAPPER_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 CACHE_DIR="{cache_dir}"
 CONFIG_FILE="${{WRAPPER_DIR}}/{cfg}"
 
-# 读取配置
+# Read config
 if [ -f "$CONFIG_FILE" ]; then
     DIST_URL=$(grep -oP 'distribution-url\s*=\s*"\K[^"]+' "$CONFIG_FILE" 2>/dev/null || echo "")
     TIMEOUT=$(grep -oP 'timeout\s*=\s*\K\d+' "$CONFIG_FILE" 2>/dev/null || echo "300")
@@ -258,7 +258,7 @@ else
     exit 1
 fi
 
-# 提取版本号
+# Extract version
 VERSION=$(echo "$DIST_URL" | grep -oP 'loom-\K[0-9]+\.[0-9]+\.[0-9]+')
 if [ -z "$VERSION" ]; then
     echo "Error: Cannot extract version from $DIST_URL" >&2
@@ -269,12 +269,12 @@ TARGET_DIR="$CACHE_DIR/$VERSION"
 EXE_NAME="loom"
 EXE_PATH="$TARGET_DIR/$EXE_NAME"
 
-# 检查缓存
+# Check cache
 if [ -x "$EXE_PATH" ]; then
     exec "$EXE_PATH" "$@"
 fi
 
-# 下载
+# Download
 echo "Downloading loom $VERSION..."
 mkdir -p "$CACHE_DIR"
 cd "$CACHE_DIR"
@@ -292,8 +292,8 @@ exec "$EXE_PATH" "$@"
 fn generate_bat_script(cache_dir: &Path) -> String {
     format!(
         r#"%@echo off
-REM Aura Wrapper - 可重复构建启动脚本 (Windows)
-REM 自动生成，请勿手动编辑
+REM Aura Wrapper - Reproducible build launcher script (Windows)
+REM Auto-generated, do not edit manually
 
 setlocal enabledelayedexpansion
 
@@ -305,13 +305,13 @@ if not exist "%CONFIG_FILE%" (
     echo Error: %CONFIG_FILE% not found & exit /b 1
 )
 
-REM 提取 URL 和版本
+REM Extract URL and version
 for /f "tokens=1,* delims==" %%a in ('findstr /n "=" "%CONFIG_FILE%"') do (
     if "%%a" == "1" set DIST_URL=%%b
     if "%%a" == "2" set TIMEOUT=%%b
 )
 
-REM 提取版本号
+REM Extract version number
 for /f "delims=.-" %%v in ("%DIST_URL%") do (
     set VERSION=%%v
     goto :extract_done

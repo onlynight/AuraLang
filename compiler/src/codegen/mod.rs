@@ -72,8 +72,8 @@ pub enum CodegenError {
 impl std::fmt::Display for CodegenError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CodegenError::Aot(s) => write!(f, "AOT 错误: {s}"),
-            CodegenError::Bytecode(s) => write!(f, "字节码发射失败: {s}"),
+            CodegenError::Aot(s) => write!(f, "AOT error: {s}"),
+            CodegenError::Bytecode(s) => write!(f, "Bytecode emission failed: {s}"),
             CodegenError::Other(s) => write!(f, "{s}"),
         }
     }
@@ -304,7 +304,10 @@ fn resolve_aura_imports_rec(
                     result.push_str(&resolved);
                     continue; // 跳过原 import 行
                 } else {
-                    eprintln!("[codegen] 无法读取导入文件: {}", full_path.display());
+                    eprintln!(
+                        "[codegen] failed to read import file: {}",
+                        full_path.display()
+                    );
                 }
             }
             // 未识别的 import（如 aura.lang.std.*）原样保留，交给 VM 模块系统
@@ -437,7 +440,7 @@ fn generate_source_index_from_phantom() -> Option<crate::std::source_index::Sour
             match crate::docgen::generate_source_index(&candidate) {
                 Ok(idx) => {
                     eprintln!(
-                        "[Phase 2] SourceIndex 已生成: {} 类型, {} 函数, {} 常量, {} 变量 (来源: {})",
+                        "[Phase 2] SourceIndex generated: {} types, {} functions, {} constants, {} variables (from: {})",
                         idx.type_defs.len(),
                         idx.function_defs.len(),
                         idx.constant_defs.len(),
@@ -448,7 +451,7 @@ fn generate_source_index_from_phantom() -> Option<crate::std::source_index::Sour
                 }
                 Err(e) => {
                     eprintln!(
-                        "[Phase 2] SourceIndex 生成失败 ({}): {}",
+                        "[Phase 2] SourceIndex generation failed ({}): {}",
                         candidate.display(),
                         e
                     );

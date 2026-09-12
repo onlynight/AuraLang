@@ -85,7 +85,7 @@ impl Value {
         match self {
             Value::Int(n) => Ok(*n),
             other => Err(Trap::new(format!(
-                "类型错误：期望 Int，实际 {}",
+                "type error: expected Int, got {}",
                 other.type_name()
             ))),
         }
@@ -96,7 +96,7 @@ impl Value {
             Value::Float(f) => Ok(*f),
             Value::Int(n) => Ok(*n as f64),
             other => Err(Trap::new(format!(
-                "类型错误：期望 Float，实际 {}",
+                "type error: expected Float, got {}",
                 other.type_name()
             ))),
         }
@@ -106,7 +106,7 @@ impl Value {
         match self {
             Value::Str(s) => Ok(s),
             other => Err(Trap::new(format!(
-                "类型错误：期望 Str，实际 {}",
+                "type error: expected Str, got {}",
                 other.type_name()
             ))),
         }
@@ -285,7 +285,11 @@ impl FfiCache {
         call: FfiCallable,
     ) -> usize {
         let arity = c_params.len();
-        assert_eq!(self.index.get(name), None, "FFI 函数重复注册: {name}");
+        assert_eq!(
+            self.index.get(name),
+            None,
+            "FFI function registered twice: {name}"
+        );
         let slot = self.entries.len();
         self.index.insert(name.to_string(), slot);
         self.entries.push(FfiEntry {
@@ -312,9 +316,9 @@ impl FfiCache {
             vec![CType::I32],
             CType::I32,
             Box::new(|args| {
-                let x = args.first().ok_or_else(|| Trap::new("abs: 缺少参数"))?;
-                let x =
-                    i32::try_from(x.as_int()?).map_err(|_| Trap::new("abs: 参数超出 i32 范围"))?;
+                let x = args.first().ok_or_else(|| Trap::new("abs: missing argument"))?;
+                let x = i32::try_from(x.as_int()?)
+                    .map_err(|_| Trap::new("abs: argument out of i32 range"))?;
                 // SAFETY: abs 是 libc 标准函数，无副作用
                 Ok(Value::Int(unsafe { abs(x) } as i64))
             }),
@@ -326,7 +330,7 @@ impl FfiCache {
             vec![CType::Ptr],
             CType::U64,
             Box::new(|args| {
-                let s = args.first().ok_or_else(|| Trap::new("strlen: 缺少参数"))?;
+                let s = args.first().ok_or_else(|| Trap::new("strlen: missing argument"))?;
                 let s = s.as_str()?;
                 // 注意：不能直接对 `Rc<str>` 的字节调用 libc `strlen`。
                 // `Rc<str>` 不以 NUL 结尾，`strlen` 会越过串尾继续读到相邻堆内存，
@@ -347,12 +351,12 @@ impl FfiCache {
             CType::I32,
             Box::new(|args| {
                 if args.len() != 2 {
-                    return Err(Trap::new("aura_bootstrap_add_i32: 需要 2 个参数"));
+                    return Err(Trap::new("aura_bootstrap_add_i32: requires 2 arguments"));
                 }
                 let a = i32::try_from(args[0].as_int()?)
-                    .map_err(|_| Trap::new("aura_bootstrap_add_i32: 参数溢出"))?;
+                    .map_err(|_| Trap::new("aura_bootstrap_add_i32: argument overflow"))?;
                 let b = i32::try_from(args[1].as_int()?)
-                    .map_err(|_| Trap::new("aura_bootstrap_add_i32: 参数溢出"))?;
+                    .map_err(|_| Trap::new("aura_bootstrap_add_i32: argument overflow"))?;
                 Ok(Value::Int(aura_bootstrap_add_i32(a, b) as i64))
             }),
         );
@@ -379,14 +383,18 @@ impl FfiCache {
     /// 执行期直连调用（按名；等价于先查槽位再 `call_by_slot`，
     /// 槽位表预加载后是 O(1) 索引，无符号解析）。
     pub fn call(&mut self, name: &str, args: &[Value]) -> Result<Value, Trap> {
-        let slot = self.slot(name).ok_or_else(|| Trap::new(format!("FFI 函数未预加载: {name}")))?;
+        let slot = self
+            .slot(name)
+            .ok_or_else(|| Trap::new(format!("FFI function not preloaded: {name}")))?;
         self.call_by_slot(slot, args)
     }
 
     /// **直连路径**：按预加载槽位直接调用（VM `CallFfi` / JIT 内联缓存共用）。
     pub fn call_by_slot(&mut self, slot: usize, args: &[Value]) -> Result<Value, Trap> {
-        let entry =
-            self.entries.get_mut(slot).ok_or_else(|| Trap::new(format!("FFI 槽位无效: {slot}")))?;
+        let entry = self
+            .entries
+            .get_mut(slot)
+            .ok_or_else(|| Trap::new(format!("FFI slot invalid: {slot}")))?;
         entry.calls += 1;
         (entry.call)(args)
     }
@@ -485,12 +493,12 @@ impl<'m> Vm<'m> {
         self.ffi
     }
 
-    /// 压入入口帧（不执行）——协程 API 使用。
+    /// Push entry frame (without executing) — for coroutine API.
     pub fn enter(&mut self, func_name: &str, args: &[Value]) -> Result<(), Trap> {
         let fidx = self
             .module
             .function_index(func_name)
-            .ok_or_else(|| Trap::new(format!("函数不存在: {func_name}")))?;
+            .ok_or_else(|| Trap::new(format!("function not found: {func_name}")))?;
         self.enter_index(fidx, args)
     }
 
@@ -498,7 +506,7 @@ impl<'m> Vm<'m> {
         let def = &self.module.funcs[fidx];
         if args.len() != def.params {
             return Err(Trap::new(format!(
-                "函数 {} 期望 {} 个参数，实际 {} 个",
+                "function {} expected {} arguments, got {}",
                 def.name,
                 def.params,
                 args.len()
@@ -506,7 +514,7 @@ impl<'m> Vm<'m> {
         }
         if def.locals < def.params {
             return Err(Trap::new(format!(
-                "函数 {} 局部变量槽 ({}) 少于参数个数 ({})",
+                "function {} has fewer local variable slots ({}) than argument count ({})",
                 def.name, def.locals, def.params
             )));
         }
@@ -514,15 +522,15 @@ impl<'m> Vm<'m> {
         Ok(())
     }
 
-    /// 调用函数并执行到完成（不支持入口函数 `Yield`；
-    /// 协程请使用 [`Vm::start`] / [`Vm::resume`]）。
+    /// Call a function and run to completion (entry function `Yield` not supported;
+    /// use [`Vm::start`] / [`Vm::resume`] for coroutines).
     pub fn call(&mut self, func_name: &str, args: &[Value]) -> Result<Value, Trap> {
         let fidx = self
             .module
             .function_index(func_name)
-            .ok_or_else(|| Trap::new(format!("函数不存在: {func_name}")))?;
+            .ok_or_else(|| Trap::new(format!("function not found: {func_name}")))?;
         self.call_counts[fidx] += 1;
-        // 入口函数同样参与热点 JIT 直接派发
+        // Entry function also participates in hot-spot JIT direct dispatch
         if let Some(Ok(v)) = self.jit_try_direct(fidx, args) {
             return Ok(v);
         }
@@ -531,7 +539,9 @@ impl<'m> Vm<'m> {
             Step::Done(v) => Ok(v),
             Step::Yielded(_) => {
                 self.frames.pop();
-                Err(Trap::new("coroutine_yield 仅允许在协程入口函数中使用"))
+                Err(Trap::new(
+                    "coroutine_yield only allowed in coroutine entry function",
+                ))
             }
         }
     }
@@ -545,7 +555,7 @@ impl<'m> Vm<'m> {
     /// 恢复协程：`v` 作为 `Yield` 表达式的值交付给协程。
     pub fn resume(&mut self, v: Value) -> Result<Step, Trap> {
         if self.frames.is_empty() {
-            return Err(Trap::new("协程已结束，无法恢复"));
+            return Err(Trap::new("coroutine already finished, cannot resume"));
         }
         self.frames.last_mut().unwrap().stack.push(v);
         self.run()
@@ -608,7 +618,7 @@ impl<'m> Vm<'m> {
             let def = &self.module.funcs[fidx];
             if ip >= def.code.len() {
                 return Err(Trap::new(format!(
-                    "程序计数器越界: {} ip={ip} len={}",
+                    "program counter out of bounds: {} ip={ip} len={}",
                     def.name,
                     def.code.len()
                 )));
@@ -623,20 +633,21 @@ impl<'m> Vm<'m> {
                     let v = self
                         .frames
                         .last()
-                        .ok_or_else(|| Trap::new("LoadLocal: 无活动帧"))?
+                        .ok_or_else(|| Trap::new("LoadLocal: no active frame"))?
                         .locals
                         .get(i as usize)
                         .cloned()
-                        .ok_or_else(|| Trap::new(format!("局部变量槽越界: {i}")))?;
+                        .ok_or_else(|| {
+                            Trap::new(format!("local variable slot out of bounds: {i}"))
+                        })?;
                     self.push(v)?;
                 }
                 Insn::StoreLocal(i) => {
                     let v = self.pop()?;
                     let frame = self.frames.last_mut().unwrap();
-                    let slot = frame
-                        .locals
-                        .get_mut(i as usize)
-                        .ok_or_else(|| Trap::new(format!("局部变量槽越界: {i}")))?;
+                    let slot = frame.locals.get_mut(i as usize).ok_or_else(|| {
+                        Trap::new(format!("local variable slot out of bounds: {i}"))
+                    })?;
                     *slot = v;
                 }
                 Insn::Add => self.binop(BinOp::Add)?,
@@ -683,7 +694,7 @@ impl<'m> Vm<'m> {
                     let arity = self
                         .ffi
                         .entry(slot as usize)
-                        .ok_or_else(|| Trap::new(format!("FFI 槽位无效: {slot}")))?
+                        .ok_or_else(|| Trap::new(format!("FFI slot invalid: {slot}")))?
                         .arity;
                     let args = self.pop_n(arity)?;
                     let v = self.ffi.call_by_slot(slot as usize, &args)?;
@@ -703,32 +714,41 @@ impl<'m> Vm<'m> {
                         let v = self.frames.last_mut().unwrap().stack.pop().unwrap_or(Value::Null);
                         return Ok(Step::Yielded(v));
                     }
-                    return Err(Trap::new("coroutine_yield 仅允许在协程入口函数中使用"));
+                    return Err(Trap::new(
+                        "coroutine_yield is only allowed in coroutine entry functions",
+                    ));
                 }
             }
         }
     }
 
-    // ---- 栈/跳转辅助 ----
+    // ---- stack/jump helpers ----
 
     fn push(&mut self, v: Value) -> Result<(), Trap> {
-        self.frames.last_mut().ok_or_else(|| Trap::new("操作数栈空：无活动帧"))?.stack.push(v);
+        self.frames
+            .last_mut()
+            .ok_or_else(|| Trap::new("operand stack empty: no active frame"))?
+            .stack
+            .push(v);
         Ok(())
     }
 
     fn pop(&mut self) -> Result<Value, Trap> {
         self.frames
             .last_mut()
-            .ok_or_else(|| Trap::new("操作数栈空：无活动帧"))?
+            .ok_or_else(|| Trap::new("operand stack empty: no active frame"))?
             .stack
             .pop()
-            .ok_or_else(|| Trap::new("操作数栈下溢"))
+            .ok_or_else(|| Trap::new("operand stack underflow"))
     }
 
     fn pop_n(&mut self, n: usize) -> Result<Vec<Value>, Trap> {
-        let frame = self.frames.last_mut().ok_or_else(|| Trap::new("操作数栈空：无活动帧"))?;
+        let frame = self
+            .frames
+            .last_mut()
+            .ok_or_else(|| Trap::new("operand stack empty: no active frame"))?;
         if frame.stack.len() < n {
-            return Err(Trap::new("操作数栈下溢"));
+            return Err(Trap::new("operand stack underflow"));
         }
         Ok(frame.stack.split_off(frame.stack.len() - n))
     }
@@ -736,7 +756,7 @@ impl<'m> Vm<'m> {
     fn jump(&mut self, next_ip: usize, off: i32) -> Result<(), Trap> {
         let target = next_ip as i64 + off as i64;
         if target < 0 {
-            return Err(Trap::new(format!("非法跳转目标: {target}")));
+            return Err(Trap::new(format!("illegal jump target: {target}")));
         }
         self.frames.last_mut().unwrap().ip = target as usize;
         Ok(())
@@ -754,7 +774,7 @@ impl<'m> Vm<'m> {
                     BinOp::Mul => x.wrapping_mul(y),
                     BinOp::Div => {
                         if y == 0 {
-                            return Err(Trap::new("整数除零"));
+                            return Err(Trap::new("integer division by zero"));
                         }
                         x.wrapping_div(y)
                     }

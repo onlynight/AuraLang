@@ -114,7 +114,7 @@ impl ModuleRegistry {
         let uuid = module.module_identity.uuid;
         let name = module.module_identity.name.clone();
         if self.name_index.contains_key(&name) {
-            return Err(format!("模块名称冲突: {}", name));
+            return Err(format!("Module name conflict: {}", name));
         }
         let loaded = RegisteredModule::from_module(module);
         self.name_index.insert(name, uuid);
@@ -849,7 +849,10 @@ impl Vm {
                 &desc_idx,
                 name,
             ) {
-                eprintln!("[vm] AOT 模块加载失败，回退字节码解释: {}", e);
+                eprintln!(
+                    "[vm] AOT module load failed, falling back to bytecode interpretation: {}",
+                    e
+                );
             }
         }
         let mut vm = Vm {
@@ -915,11 +918,11 @@ impl Vm {
                             module_name.to_string(),
                         ) {
                             eprintln!(
-                                "[vm] stdlib-aot: {} AOT 加载失败，回退字节码: {}",
+                                "[vm] stdlib-aot: {} AOT load failed, falling back to bytecode: {}",
                                 module_name, e
                             );
                         } else {
-                            eprintln!("[vm] stdlib-aot: {} AOT 机器码已加载", module_name);
+                            eprintln!("[vm] stdlib-aot: {} AOT machine code loaded", module_name);
                         }
                     }
 
@@ -1271,7 +1274,7 @@ impl Vm {
         let func_idx = match self.callbacks.lookup(callback_id) {
             Some(idx) => idx,
             None => {
-                eprintln!("[vm] 回调 #{} 未注册，返回 0", callback_id);
+                eprintln!("[vm] Callback #{} not registered, returning 0", callback_id);
                 return 0;
             }
         };
@@ -1280,7 +1283,10 @@ impl Vm {
         let param_count = if func_idx < self.module.funcs.len() {
             self.module.funcs[func_idx].param_count as usize
         } else {
-            eprintln!("[vm] 回调 #{} 指向无效函数 #{}", callback_id, func_idx);
+            eprintln!(
+                "[vm] Callback #{} points to invalid function #{}",
+                callback_id, func_idx
+            );
             return 0;
         };
 
@@ -1559,7 +1565,10 @@ impl Vm {
         if let Some(jit) = self.jit.as_mut() {
             match entry {
                 Some(e) => jit.insert(idx, e),
-                None => jit.skip(idx, "JIT 白名单不匹配（函数包含非可编译指令）"),
+                None => jit.skip(
+                    idx,
+                    "JIT whitelist mismatch (function contains non-compilable instructions)",
+                ),
             }
         }
     }

@@ -479,7 +479,10 @@ impl Vm {
                 // 先克隆闭包信息，避免借用冲突
                 let closure_info =
                     self.module.module.closures.get(closure_idx as usize).ok_or_else(|| {
-                        VmError::Runtime(format!("MakeClosure: 闭包 {} 不存在", closure_idx))
+                        VmError::Runtime(format!(
+                            "MakeClosure: closure {} does not exist",
+                            closure_idx
+                        ))
                     })?;
                 let closure_name = closure_info.name.clone();
                 let param_count = closure_info.param_count;
@@ -510,7 +513,7 @@ impl Vm {
                     .stack
                     .last()
                     .cloned()
-                    .ok_or_else(|| VmError::Runtime("CallClosure: 空栈".to_string()))?;
+                    .ok_or_else(|| VmError::Runtime("CallClosure: empty stack".to_string()))?;
                 if let Value::Ref(ref_id) = closure_val {
                     let heap_data = self.heap.get_data_mut(ref_id);
                     if let Some(crate::vm::heap::HeapData::Closure {
@@ -569,29 +572,41 @@ impl Vm {
             Instr::CallExport(sym_idx) => {
                 // 从导出符号表查找函数索引
                 let export = self.module.module.exports.get(sym_idx as usize).ok_or_else(|| {
-                    VmError::Runtime(format!("CallExport: 导出符号 {} 不存在", sym_idx))
+                    VmError::Runtime(format!(
+                        "CallExport: export symbol {} does not exist",
+                        sym_idx
+                    ))
                 })?;
                 let func_idx = export.func_idx.ok_or_else(|| {
-                    VmError::Runtime(format!("CallExport: 导出符号 {} 没有函数索引", export.name))
+                    VmError::Runtime(format!(
+                        "CallExport: export symbol {} has no function index",
+                        export.name
+                    ))
                 })?;
                 self.do_call(top, func_idx as usize, false)?;
             }
             Instr::CallExternal(mod_idx, sym_idx) => {
                 // 从导入表查找外部模块
                 let import = self.module.module.imports.get(mod_idx as usize).ok_or_else(|| {
-                    VmError::Runtime(format!("CallExternal: 导入模块 {} 不存在", mod_idx))
+                    VmError::Runtime(format!(
+                        "CallExternal: import module {} does not exist",
+                        mod_idx
+                    ))
                 })?;
                 // 在注册表中查找目标模块
                 let target =
                     self.registry.find_export(&import.module, &import.symbol).ok_or_else(|| {
                         VmError::Runtime(format!(
-                            "CallExternal: 未加载模块 {} 或符号 {} 不存在",
+                            "CallExternal: module {} not loaded or symbol {} does not exist",
                             import.module, import.symbol
                         ))
                     })?;
                 // 从目标模块的导出索引获取函数索引
                 let (_, func_idx) = target.export_index.get(&import.symbol).ok_or_else(|| {
-                    VmError::Runtime(format!("CallExternal: 符号 {} 没有函数索引", import.symbol))
+                    VmError::Runtime(format!(
+                        "CallExternal: symbol {} has no function index",
+                        import.symbol
+                    ))
                 })?;
                 self.do_call(top, *func_idx as usize, false)?;
             }
@@ -1045,7 +1060,7 @@ impl Vm {
         } else if native.ffi_abi == FfiAbi::Aura {
             // extern interface: AOT 直调
             self.call_aot_ffi(&native, &args).unwrap_or_else(|| {
-                eprintln!("[vm] AOT 接口调用失败: `{}`", native.name);
+                eprintln!("[vm] AOT interface call failed: `{}`", native.name);
                 Value::Int(0)
             })
         } else {
@@ -1075,7 +1090,7 @@ impl Vm {
                 Some(v) => v,
                 None => {
                     eprintln!(
-                        "[vm] 未链接的外部函数 `{}`，已忽略调用（参数: {:?}）",
+                        "[vm] Unlinked external function `{}`, call ignored (args: {:?})",
                         native.name,
                         args.iter().map(|v| v.to_string()).collect::<Vec<_>>()
                     );
@@ -1181,7 +1196,7 @@ impl Vm {
         } else if native.ffi_abi == FfiAbi::Aura {
             // extern interface: AOT 直调
             self.call_aot_ffi(&native, &args).unwrap_or_else(|| {
-                eprintln!("[vm] AOT 接口调用失败: `{}`", native.name);
+                eprintln!("[vm] AOT interface call failed: `{}`", native.name);
                 Value::Int(0)
             })
         } else {
@@ -1196,7 +1211,7 @@ impl Vm {
                 Some(v) => v,
                 None => {
                     eprintln!(
-                        "[vm] 未链接的外部函数 `{}`，已忽略调用（参数: {:?}）",
+                        "[vm] Unlinked external function `{}`, call ignored (args: {:?})",
                         native.name,
                         args.iter().map(|v| v.to_string()).collect::<Vec<_>>()
                     );
@@ -1228,12 +1243,12 @@ impl Vm {
                 let handle = LoadLibraryW(wide.as_ptr());
                 if handle != 0 {
                     self.loaded_libs.insert(lib_name.to_string(), handle);
-                    eprintln!("[vm] 已加载库: {} ({})", lib_name, path);
+                    eprintln!("[vm] Loaded library: {} ({})", lib_name, path);
                     return;
                 }
             }
         }
-        eprintln!("[vm] 无法加载库: {}", lib_name);
+        eprintln!("[vm] Cannot load library: {}", lib_name);
     }
 
     #[cfg(unix)]
@@ -1253,12 +1268,12 @@ impl Vm {
                 let handle = dlopen(c_path.as_ptr(), 2); // RTLD_NOW = 2
                 if !handle.is_null() {
                     self.loaded_libs.insert(lib_name.to_string(), handle);
-                    eprintln!("[vm] 已加载库: {} ({})", lib_name, path);
+                    eprintln!("[vm] Loaded library: {} ({})", lib_name, path);
                     return;
                 }
             }
         }
-        eprintln!("[vm] 无法加载库: {}", lib_name);
+        eprintln!("[vm] Cannot load library: {}", lib_name);
     }
 
     /// extern interface: 确保 AOT 库已加载
@@ -1279,21 +1294,24 @@ impl Vm {
             match self.aot_runtime.load_shared_library(&lib_path) {
                 Ok(module_id) => {
                     eprintln!(
-                        "[vm] AOT 接口库已加载: {} ({}) → module_id={}",
+                        "[vm] AOT interface library loaded: {} ({}) → module_id={}",
                         lib_name, lib_path, module_id
                     );
                     self.aot_module_map.insert(lib_name.to_string(), module_id);
                     Some(module_id)
                 }
                 Err(e) => {
-                    eprintln!("[vm] AOT 接口库加载失败: {} ({})", lib_path, e);
+                    eprintln!(
+                        "[vm] AOT interface library load failed: {} ({})",
+                        lib_path, e
+                    );
                     None
                 }
             }
         }
         #[cfg(not(all(feature = "llvm", feature = "dynamic-ffi")))]
         {
-            eprintln!("[vm] AOT 接口库加载需要 llvm+dynamic-ffi 特性");
+            eprintln!("[vm] AOT interface library loading requires llvm+dynamic-ffi feature");
             None
         }
     }
@@ -1332,7 +1350,7 @@ impl Vm {
         let func_idx = self.aot_runtime.lookup_func_idx(module_id, func_name)?;
 
         eprintln!(
-            "[vm] AOT 接口调用: {} (module={}, func_idx={})",
+            "[vm] AOT interface call: {} (module={}, func_idx={})",
             native.name, module_id, func_idx
         );
 

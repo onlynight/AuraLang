@@ -39,21 +39,21 @@ fn llc_available() -> bool {
 
 /// 编译源码 → 嵌入 AOT 机器码 → 返回 `.auc` v4 模块
 fn compile_with_aot_embed(source: &str) -> BytecodeModule {
-    let module = compile_source(source).expect("字节码编译应成功");
+    let module = compile_source(source).expect("bytecode compilation should succeed");
 
     // 重新解析得到同源 HIR（AOT IR 生成需要）
     let mut lexer = Lexer::new(source);
     let tokens = lexer.tokenize();
     assert!(
         lexer.errors().is_empty(),
-        "词法错误: {:?}",
+        "lex error: {:?}",
         lexer.errors().first()
     );
     let mut parser = Parser::new(tokens);
     let program = parser.parse_program();
     assert!(
         parser.errors().is_empty(),
-        "语法错误: {:?}",
+        "syntax error: {:?}",
         parser.errors().first()
     );
     let hir = desugar_program(&program);
@@ -67,7 +67,7 @@ fn compile_with_aot_embed(source: &str) -> BytecodeModule {
         std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
     ));
-    let result = embed_aot(module, &hir, options, &work_dir).expect("AOT 嵌入应成功");
+    let result = embed_aot(module, &hir, options, &work_dir).expect("AOT embedding should succeed");
     let _ = std::fs::remove_dir_all(&work_dir);
     result.module
 }
@@ -76,7 +76,7 @@ fn compile_with_aot_embed(source: &str) -> BytecodeModule {
 #[test]
 fn aot_add_matches_interpreter() {
     if !llc_available() {
-        eprintln!("skipped: LLVM 工具链不可用");
+        eprintln!("skipped: LLVM toolchain not available");
         return;
     }
     let src = r#"
@@ -85,28 +85,37 @@ fn aot_add_matches_interpreter() {
     "#;
 
     // 1) 纯字节码解释基准
-    let plain = compile_source(src).expect("编译应成功");
+    let plain = compile_source(src).expect("compilation should succeed");
     assert!(!plain.has_aot());
-    let mut vm = Vm::new(&plain, VmOptions::default()).expect("VM 初始化");
-    let baseline = vm.run().expect("解释执行应成功");
-    assert_eq!(baseline, Value::Int(42), "基准结果应为 42");
+    let mut vm = Vm::new(&plain, VmOptions::default()).expect("VM initialization");
+    let baseline = vm.run().expect("interpretation should succeed");
+    assert_eq!(baseline, Value::Int(42), "baseline result should be 42");
 
     // 2) AOT 嵌入后经 VM 执行（do_call 命中 AOT 分发表 → 机器码）
     let embedded = compile_with_aot_embed(src);
-    assert!(embedded.has_aot(), "模块应含 AOT 机器码段");
+    assert!(
+        embedded.has_aot(),
+        "module should contain AOT machine code segment"
+    );
     assert!(embedded.aot_segments.len() >= 2);
     let aot_fns: Vec<&compiler::codegen::opcode::BytecodeFunction> =
         embedded.functions.iter().filter(|f| f.aot_desc_idx > 0).collect();
     assert!(
         aot_fns.iter().any(|f| f.name == "add"),
-        "add 应被标记为 AOT 函数"
+        "add should be marked as AOT function"
     );
 
-    let mut vm = Vm::new(&embedded, VmOptions::default()).expect("VM 初始化");
-    assert!(vm.aot_runtime.module_count() > 0, "AOT 模块应已加载");
+    let mut vm = Vm::new(&embedded, VmOptions::default()).expect("VM initialization");
+    assert!(
+        vm.aot_runtime.module_count() > 0,
+        "AOT module should be loaded"
+    );
     assert!(vm.aot_runtime.has_entry(0) || aot_fns.len() > 0);
-    let aot_result = vm.run().expect("AOT 执行应成功");
-    assert_eq!(aot_result, baseline, "AOT 机器码结果必须与解释器一致");
+    let aot_result = vm.run().expect("AOT execution should succeed");
+    assert_eq!(
+        aot_result, baseline,
+        "AOT machine code result must match interpreter"
+    );
     assert_eq!(aot_result, Value::Int(42));
 }
 
@@ -114,45 +123,45 @@ fn aot_add_matches_interpreter() {
 #[test]
 fn aot_float_matches_interpreter() {
     if !llc_available() {
-        eprintln!("skipped: LLVM 工具链不可用");
+        eprintln!("skipped: LLVM toolchain not available");
         return;
     }
     let src = r#"
         fun mul(a: Float, b: Float): Float { return a * b }
         fun main(): Float { return mul(1.5, 2.0) }
     "#;
-    let plain = compile_source(src).expect("编译应成功");
-    let mut vm = Vm::new(&plain, VmOptions::default()).expect("VM 初始化");
-    let baseline = vm.run().expect("解释执行应成功");
+    let plain = compile_source(src).expect("compilation should succeed");
+    let mut vm = Vm::new(&plain, VmOptions::default()).expect("VM initialization");
+    let baseline = vm.run().expect("interpretation should succeed");
     assert_eq!(baseline, Value::Float(3.0));
 
     let embedded = compile_with_aot_embed(src);
     assert!(embedded.has_aot());
-    let mut vm = Vm::new(&embedded, VmOptions::default()).expect("VM 初始化");
-    let r = vm.run().expect("AOT 执行应成功");
-    assert_eq!(r, baseline, "Float AOT 结果必须与解释器一致");
+    let mut vm = Vm::new(&embedded, VmOptions::default()).expect("VM initialization");
+    let r = vm.run().expect("AOT execution should succeed");
+    assert_eq!(r, baseline, "Float AOT result must match interpreter");
 }
 
 /// Bool 函数经 AOT 执行
 #[test]
 fn aot_bool_matches_interpreter() {
     if !llc_available() {
-        eprintln!("skipped: LLVM 工具链不可用");
+        eprintln!("skipped: LLVM toolchain not available");
         return;
     }
     let src = r#"
         fun gt(a: Int, b: Int): Bool { return a > b }
         fun main(): Bool { return gt(7, 3) }
     "#;
-    let plain = compile_source(src).expect("编译应成功");
-    let mut vm = Vm::new(&plain, VmOptions::default()).expect("VM 初始化");
-    let baseline = vm.run().expect("解释执行应成功");
+    let plain = compile_source(src).expect("compilation should succeed");
+    let mut vm = Vm::new(&plain, VmOptions::default()).expect("VM initialization");
+    let baseline = vm.run().expect("interpretation should succeed");
     assert_eq!(baseline, Value::Bool(true));
 
     let embedded = compile_with_aot_embed(src);
     assert!(embedded.has_aot());
-    let mut vm = Vm::new(&embedded, VmOptions::default()).expect("VM 初始化");
-    let r = vm.run().expect("AOT 执行应成功");
+    let mut vm = Vm::new(&embedded, VmOptions::default()).expect("VM initialization");
+    let r = vm.run().expect("AOT execution should succeed");
     assert_eq!(r, baseline);
 }
 
@@ -160,7 +169,7 @@ fn aot_bool_matches_interpreter() {
 #[test]
 fn aot_repeated_calls_match_interpreter() {
     if !llc_available() {
-        eprintln!("skipped: LLVM 工具链不可用");
+        eprintln!("skipped: LLVM toolchain not available");
         return;
     }
     let src = r#"
@@ -171,12 +180,12 @@ fn aot_repeated_calls_match_interpreter() {
             return s
         }
     "#;
-    let plain = compile_source(src).expect("编译应成功");
-    let mut vm = Vm::new(&plain, VmOptions::default()).expect("VM 初始化");
-    let baseline = vm.run().expect("解释执行应成功");
+    let plain = compile_source(src).expect("compilation should succeed");
+    let mut vm = Vm::new(&plain, VmOptions::default()).expect("VM initialization");
+    let baseline = vm.run().expect("interpretation should succeed");
 
     let embedded = compile_with_aot_embed(src);
-    let mut vm = Vm::new(&embedded, VmOptions::default()).expect("VM 初始化");
-    let r = vm.run().expect("AOT 执行应成功");
-    assert_eq!(r, baseline, "循环内 AOT 调用结果必须一致");
+    let mut vm = Vm::new(&embedded, VmOptions::default()).expect("VM initialization");
+    let r = vm.run().expect("AOT execution should succeed");
+    assert_eq!(r, baseline, "AOT call results in loop must be consistent");
 }

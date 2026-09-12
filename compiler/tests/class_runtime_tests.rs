@@ -16,9 +16,9 @@ use compiler::codegen::{compile_source, from_bytes, to_bytes};
 use compiler::vm::{Value, Vm, VmOptions};
 
 fn run_main(source: &str) -> Value {
-    let module = compile_source(source).expect("编译应成功");
-    let mut vm = Vm::new(&module, VmOptions::default()).expect("VM 初始化");
-    vm.run().expect("运行应成功")
+    let module = compile_source(source).expect("compilation should succeed");
+    let mut vm = Vm::new(&module, VmOptions::default()).expect("VM initialization");
+    vm.run().expect("run should succeed")
 }
 
 // ── 类方法 + 裸字段访问 ──
@@ -287,13 +287,13 @@ fn test_vtables_survive_serialization() {
             return 0
         }
     "#;
-    let module = compile_source(src).expect("编译应成功");
-    assert!(!module.vtables.is_empty(), "应生成虚方法表");
+    let module = compile_source(src).expect("compilation should succeed");
+    assert!(!module.vtables.is_empty(), "vtable should be generated");
     let bytes = to_bytes(&module);
-    let loaded = from_bytes(&bytes).expect("反序列化应成功");
+    let loaded = from_bytes(&bytes).expect("deserialization should succeed");
     assert_eq!(loaded.vtables.len(), module.vtables.len());
-    let mut vm = Vm::new(&loaded, VmOptions::default()).expect("VM 初始化");
-    let r = vm.run().expect("运行应成功");
+    let mut vm = Vm::new(&loaded, VmOptions::default()).expect("VM initialization");
+    let r = vm.run().expect("run should succeed");
     assert_eq!(r, Value::Int(1));
 }
 

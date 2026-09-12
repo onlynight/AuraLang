@@ -56,7 +56,10 @@ pub fn register_prelude(reg: &mut NativeRegistry) {
 /// 的场景保留一个安全的兜底实现：不改变控制流，仅输出诊断，避免异常被彻底吞掉。
 fn nat_throw(args: &[Value]) -> Value {
     let v = args.first().cloned().unwrap_or(Value::Null);
-    eprintln!("[vm] throw: {} （异常传播尚未实现，调用被忽略）", v);
+    eprintln!(
+        "[vm] throw: {} (exception propagation not implemented, call ignored)",
+        v
+    );
     Value::Null
 }
 

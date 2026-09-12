@@ -39,7 +39,7 @@ fn jit_bench(src: &str, iters: usize, expected: i64) -> f64 {
     .unwrap();
     // 预热：首次运行触发 JIT 编译
     let r = vm.run().unwrap();
-    assert_eq!(r.as_int(), expected, "JIT 结果不一致");
+    assert_eq!(r.as_int(), expected, "JIT result mismatch");
     vm.reset_for_reuse();
     // 计时
     let start = Instant::now();
@@ -52,15 +52,15 @@ fn jit_bench(src: &str, iters: usize, expected: i64) -> f64 {
 }
 
 fn main() {
-    println!("=== Aura VM vs JIT 性能对比 ===\n");
+    println!("=== Aura VM vs JIT performance benchmark ===\n");
 
     // fib(25) = 75025
     println!("--- fib(25) ---");
     let vm = vm_bench(FIB_SRC, 10, 75025);
-    println!("  VM(字节码解释器): {:.4} ms/op", vm * 1000.0);
+    println!("  VM(bytecode interpreter): {:.4} ms/op", vm * 1000.0);
     let jit = jit_bench(FIB_SRC, 10, 75025);
     println!(
-        "  VM(JIT 热点编译):  {:.4} ms/op (JIT 加速 {:.1}x vs VM)",
+        "  VM(JIT hot compilation):  {:.4} ms/op (JIT speedup {:.1}x vs VM)",
         jit * 1000.0,
         vm / jit
     );

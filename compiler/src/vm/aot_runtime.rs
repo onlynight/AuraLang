@@ -323,26 +323,28 @@ impl AotRuntime {
         // 1. dlopen
         let lib = unsafe {
             libloading::Library::new(lib_path)
-                .map_err(|e| format!("dlopen 失败 {}: {}", lib_path, e))?
+                .map_err(|e| format!("dlopen failed {}: {}", lib_path, e))?
         };
 
         // 2. 用 object crate 解析共享库的导出符号
         //    PE DLL 使用导出表（export table），不是 COFF 符号表；
         //    ELF/Mach-O 使用符号表（symbols()）。
-        let bytes =
-            std::fs::read(lib_path).map_err(|e| format!("读取动态库 {} 失败: {}", lib_path, e))?;
+        let bytes = std::fs::read(lib_path)
+            .map_err(|e| format!("Failed to read shared library {}: {}", lib_path, e))?;
         let file = ObjectFile::parse(&bytes[..])
-            .map_err(|e| format!("解析动态库 {} 失败: {}", lib_path, e))?;
+            .map_err(|e| format!("Failed to parse shared library {}: {}", lib_path, e))?;
 
         // 3. 收集所有 aura_aot_* 符号名
         let mut symbol_names: Vec<String> = Vec::new();
         match &file {
             ObjectFile::Pe32(pe_file) => {
-                if let Some(export_table) =
-                    pe_file.export_table().map_err(|e| format!("解析导出表失败: {}", e))?
+                if let Some(export_table) = pe_file
+                    .export_table()
+                    .map_err(|e| format!("Failed to parse export table: {}", e))?
                 {
-                    for export in
-                        export_table.exports().map_err(|e| format!("读取导出表失败: {}", e))?
+                    for export in export_table
+                        .exports()
+                        .map_err(|e| format!("Failed to read export table: {}", e))?
                     {
                         if let Some(name_bytes) = export.name {
                             let name = String::from_utf8_lossy(name_bytes).to_string();
@@ -354,11 +356,13 @@ impl AotRuntime {
                 }
             }
             ObjectFile::Pe64(pe_file) => {
-                if let Some(export_table) =
-                    pe_file.export_table().map_err(|e| format!("解析导出表失败: {}", e))?
+                if let Some(export_table) = pe_file
+                    .export_table()
+                    .map_err(|e| format!("Failed to parse export table: {}", e))?
                 {
-                    for export in
-                        export_table.exports().map_err(|e| format!("读取导出表失败: {}", e))?
+                    for export in export_table
+                        .exports()
+                        .map_err(|e| format!("Failed to read export table: {}", e))?
                     {
                         if let Some(name_bytes) = export.name {
                             let name = String::from_utf8_lossy(name_bytes).to_string();
@@ -387,7 +391,7 @@ impl AotRuntime {
 
         if symbol_names.is_empty() {
             return Err(format!(
-                "动态库 {} 中未找到 aura_aot_* 导出符号（请确认编译时使用 --shared 生成）",
+                "No aura_aot_* export symbols found in shared library {} (ensure --shared was used during compilation)",
                 lib_path
             ));
         }
@@ -406,7 +410,7 @@ impl AotRuntime {
             // dlsym 获取函数地址
             let sym = unsafe {
                 lib.get::<fn()>(name.as_bytes())
-                    .map_err(|e| format!("dlsym 失败 {}: {}", name, e))?
+                    .map_err(|e| format!("dlsym failed {}: {}", name, e))?
             };
             // Symbol<T> implements Deref<Target = T>, dereference to get fn() then cast
             let entry_fn: fn() = unsafe { std::mem::transmute(*sym) };
@@ -827,10 +831,10 @@ impl PluginManager {
     fn load_plugin_from_path(&self, path: &str) -> Result<PluginInfo, String> {
         // 尝试读取 .auc 文件获取插件元信息
         if path.ends_with(".auc") {
-            let bytes =
-                std::fs::read(path).map_err(|e| format!("读取插件 {} 失败: {}", path, e))?;
+            let bytes = std::fs::read(path)
+                .map_err(|e| format!("Failed to read plugin {}: {}", path, e))?;
             let module = crate::codegen::serialize::from_bytes(&bytes)
-                .map_err(|e| format!("解析插件 {} 失败: {}", path, e))?;
+                .map_err(|e| format!("Failed to parse plugin {}: {}", path, e))?;
 
             Ok(PluginInfo {
                 name: module.module_identity.name.clone(),

@@ -56,10 +56,9 @@ impl Workspace {
     ///
     /// 解析 `[workspace]` 配置，扫描成员目录，读取每个成员的 aura.toml。
     pub fn from_manifest(manifest: &LoomManifest, root_dir: &Path) -> Result<Self, LoomError> {
-        let workspace_config = manifest
-            .workspace
-            .as_ref()
-            .ok_or_else(|| LoomError::Config("aura.toml 缺少 [workspace] 配置".to_string()))?;
+        let workspace_config = manifest.workspace.as_ref().ok_or_else(|| {
+            LoomError::Config("aura.toml missing [workspace] configuration".to_string())
+        })?;
 
         let mut members = Vec::new();
         let mut by_name = HashMap::new();
@@ -70,7 +69,7 @@ impl Workspace {
 
             if !member_manifest_path.exists() {
                 return Err(LoomError::Config(format!(
-                    "Workspace 成员 '{}' 缺少 aura.toml: {}",
+                    "Workspace member '{}' is missing aura.toml: {}",
                     member_path_str,
                     member_manifest_path.display()
                 )));
@@ -253,7 +252,7 @@ impl Workspace {
     /// 验证 workspace 配置有效性
     pub fn validate(&self) -> Result<(), LoomError> {
         if self.members.is_empty() {
-            return Err(LoomError::Config("Workspace 无成员".to_string()));
+            return Err(LoomError::Config("Workspace has no members".to_string()));
         }
 
         // 检查重复名称
@@ -261,7 +260,7 @@ impl Workspace {
         for member in &self.members {
             if !names.insert(member.name.as_str()) {
                 return Err(LoomError::Config(format!(
-                    "Workspace 成员名称重复: {}",
+                    "Duplicate Workspace member name: {}",
                     member.name
                 )));
             }
@@ -274,7 +273,7 @@ impl Workspace {
                     continue;
                 }
                 return Err(LoomError::Config(format!(
-                    "Workspace 成员 '{}' 依赖 '{}'，但该成员不在 workspace 中",
+                    "Workspace member '{}' depends on '{}', but that member is not in the workspace",
                     name, dep
                 )));
             }

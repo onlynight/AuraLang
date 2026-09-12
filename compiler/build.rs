@@ -65,21 +65,19 @@ fn main() {
     if let Some(ref home) = home {
         println!("cargo:rustc-env=AURA_LLVM_HOME={}", home.display());
         println!(
-            "cargo:warning=Aura: LLVM 安装路径检测到 -> {}",
+            "cargo:warning=Aura: LLVM install path detected -> {}",
             home.display()
         );
 
         // 尝试获取版本
         if let Some(version) = llvm_version(home) {
             println!("cargo:rustc-env=AURA_LLVM_VERSION={}", version);
-            println!("cargo:warning=Aura: LLVM 版本 -> {}", version);
+            println!("cargo:warning=Aura: LLVM version -> {}", version);
         }
     } else if cfg!(feature = "llvm") {
-        println!("cargo:warning=Aura: llvm feature 已启用但未检测到 LLVM 安装路径");
-        println!(
-            "cargo:warning=Aura: 请在 Cargo.toml 的 [workspace.metadata.aura] 中设置 llvm-home"
-        );
-        println!("cargo:warning=Aura: 或设置 AURA_LLVM_HOME 环境变量");
+        println!("cargo:warning=Aura: llvm feature enabled but LLVM install path not detected");
+        println!("cargo:warning=Aura: Set llvm-home in Cargo.toml [workspace.metadata.aura]");
+        println!("cargo:warning=Aura: Or set the AURA_LLVM_HOME environment variable");
     }
 
     // 常规构建指令
@@ -118,11 +116,11 @@ fn check_embedded_stdlib() {
 
     if !missing.is_empty() {
         println!(
-            "cargo:warning=Aura: 嵌入式标准库缺少 .auc 文件: {}",
+            "cargo:warning=Aura: Embedded stdlib missing .auc files: {}",
             missing.join(", ")
         );
         println!(
-            "cargo:warning=Aura: 请运行 `aura stdlib-compile aura/core/aura/lang/std --output build` 预编译"
+            "cargo:warning=Aura: Run `aura stdlib-compile aura/core/aura/lang/std --output build` to precompile"
         );
     }
 }
@@ -145,7 +143,7 @@ fn read_aura_config() -> AuraConfig {
     let content = match std::fs::read_to_string(&cargo_toml_path) {
         Ok(c) => c,
         Err(e) => {
-            println!("cargo:warning=Aura: 无法读取根 Cargo.toml: {}", e);
+            println!("cargo:warning=Aura: Cannot read root Cargo.toml: {}", e);
             return AuraConfig::default();
         }
     };
@@ -153,7 +151,7 @@ fn read_aura_config() -> AuraConfig {
     let doc: toml::Value = match content.parse() {
         Ok(d) => d,
         Err(e) => {
-            println!("cargo:warning=Aura: 无法解析根 Cargo.toml: {}", e);
+            println!("cargo:warning=Aura: Cannot parse root Cargo.toml: {}", e);
             return AuraConfig::default();
         }
     };

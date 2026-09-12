@@ -63,7 +63,7 @@ impl TaskResult {
             elapsed_ms: 0,
             success: true,
             message: format!(
-                "✓ up-to-date (fingerprint: {}..., 来源: {})",
+                "✓ up-to-date (fingerprint: {}..., source: {})",
                 &fingerprint[..8.min(fingerprint.len())],
                 source
             ),
@@ -184,12 +184,12 @@ impl Executor {
             if let Some(ref cache_service) = self.cache_service {
                 if let Ok(mut svc) = cache_service.lock() {
                     let _ = svc.invalidate(task);
-                    tracing::info!("--clean: 已清除任务 '{}' 的缓存", task.name);
+                    tracing::info!("--clean: Cleared cache for task '{}'", task.name);
                 }
             } else if let Some(ref cache) = self._cache {
                 if let Ok(mut c) = cache.lock() {
                     let _ = c.clear();
-                    tracing::info!("--clean: 已清除本地缓存");
+                    tracing::info!("--clean: Cleared local cache");
                 }
             }
         }
@@ -214,7 +214,7 @@ impl Executor {
                             // 缓存未命中，需要执行
                         }
                         Err(e) => {
-                            tracing::warn!("缓存查找失败: {}", e);
+                            tracing::warn!("Cache lookup failed: {}", e);
                         }
                     }
                 }
@@ -224,7 +224,11 @@ impl Executor {
                 let cache_guard = match cache.lock() {
                     Ok(g) => g,
                     Err(_) => {
-                        return TaskResult::failure(&task.name, 0, "缓存锁获取失败".to_string());
+                        return TaskResult::failure(
+                            &task.name,
+                            0,
+                            "Cache lock acquisition failed".to_string(),
+                        );
                     }
                 };
                 match Self::check_up_to_date(task, &cache_guard) {
@@ -257,7 +261,7 @@ impl Executor {
                             elapsed_ms: elapsed,
                             success: true,
                             message: format!(
-                                "✓ 从缓存恢复 {} 个文件 (来源: {})",
+                                "✓ Restored {} files from cache (source: {})",
                                 restored.len(),
                                 source_str
                             ),

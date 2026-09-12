@@ -1,14 +1,15 @@
 //! `aura-debug` - Aura language debugger
 //
-// 对标 GDB / LLDB，提供交互式源码级调试：断点、单步、变量检查、调用栈。
-// 支持三种调试模式：VM（解释执行）、JIT（编译跟踪）、AOT（DWARF + 外部调试器）。
+// Modeled after GDB / LLDB, providing interactive source-level debugging: breakpoints,
+// stepping, variable inspection, and call stacks.
+// Supports three debug modes: VM (interpretation), JIT (compiled tracing), AOT (DWARF + external debugger).
 //
-// 用法：
-//   aura-debug <file.aura>                          VM 模式调试（默认）
-//   aura-debug --mode jit <file.aura>            JIT 模式调试
-//   aura-debug --mode aot <file.aura>            AOT 模式调试
-//   aura-debug --mode aot --launch <file.aura>   AOT + 启动外部调试器
-//   aura-debug --help                            显示帮助
+// Usage:
+//   aura-debug <file.aura>                          VM mode debugging (default)
+//   aura-debug --mode jit <file.aura>            JIT mode debugging
+//   aura-debug --mode aot <file.aura>            AOT mode debugging
+//   aura-debug --mode aot --launch <file.aura>   AOT + launch external debugger
+//   aura-debug --help                            Show help
 
 use std::process;
 
@@ -90,14 +91,17 @@ fn main() {
         DebugMode::Aot => {
             let mut session = DebugSession::new(module, &source, &file_name);
             session.mode = DebugMode::Aot;
-            // Phase 3: 自动尝试 AOT 编译
+            // Phase 3: Automatically attempt AOT compilation
             #[cfg(feature = "llvm")]
             match session.aot_compile() {
                 Ok(summary) => eprintln!("{}", summary),
-                Err(e) => eprintln!("AOT 编译失败: {}\n  提示: 确保安装了 LLVM (llc/clang)", e),
+                Err(e) => eprintln!(
+                    "AOT compilation failed: {}\n  Hint: Ensure LLVM is installed (llc/clang)",
+                    e
+                ),
             }
             #[cfg(not(feature = "llvm"))]
-            eprintln!("AOT 模式需要 llvm feature (cargo build --features llvm)");
+            eprintln!("AOT mode requires the llvm feature (cargo build --features llvm)");
             session
         }
     };

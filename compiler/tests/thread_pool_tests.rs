@@ -23,7 +23,10 @@ fn test_thread_pool_new() {
 #[test]
 fn test_thread_pool_default() {
     let mut pool = ThreadPool::default_pool();
-    assert!(pool.size() > 0, "默认线程池大小应大于 0");
+    assert!(
+        pool.size() > 0,
+        "default thread pool size should be greater than 0"
+    );
     pool.shutdown();
 }
 
@@ -46,7 +49,7 @@ fn test_thread_pool_execute() {
 
     // 等待任务完成（简单方式：短暂休眠后检查）
     thread::sleep(Duration::from_millis(100));
-    assert_eq!(counter.value(), 10, "应执行 10 个任务");
+    assert_eq!(counter.value(), 10, "should execute 10 tasks");
 
     pool.shutdown();
 }
@@ -65,7 +68,11 @@ fn test_thread_pool_concurrent_execution() {
     }
 
     thread::sleep(Duration::from_millis(200));
-    assert_eq!(counter.value(), 100, "应执行 100 个任务（线程安全）");
+    assert_eq!(
+        counter.value(),
+        100,
+        "should execute 100 tasks (thread-safe)"
+    );
 
     pool.shutdown();
 }

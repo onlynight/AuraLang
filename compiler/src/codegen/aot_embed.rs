@@ -41,7 +41,7 @@ pub fn embed_aot(
 ) -> Result<AotEmbedResult, AotError> {
     if let Err(e) = std::fs::create_dir_all(work_dir) {
         return Err(AotError::Io(format!(
-            "创建临时目录失败 {}: {}",
+            "failed to create temp directory {}: {}",
             work_dir.display(),
             e
         )));
@@ -49,13 +49,13 @@ pub fn embed_aot(
     // ── 1. AOT 编译：HIR → LLVM IR → .o → 机器码 blob + 描述符 ──
     let generator = AotCodeGenerator::new(options);
     let output = generator.compile(hir, work_dir, OutputFormat::Blob)?;
-    let blob_path = output
-        .blob_path
-        .ok_or_else(|| AotError::ToolError("AOT 编译未产生 blob 文件".to_string()))?;
+    let blob_path = output.blob_path.ok_or_else(|| {
+        AotError::ToolError("AOT compilation did not produce a blob file".to_string())
+    })?;
 
     let machine_code = std::fs::read(&blob_path).map_err(|e| {
         AotError::Io(format!(
-            "读取机器码 blob 失败 {}: {}",
+            "failed to read machine code blob {}: {}",
             blob_path.display(),
             e
         ))
@@ -63,7 +63,9 @@ pub fn embed_aot(
     let descs = output.descriptors;
     let _ = std::fs::remove_dir_all(work_dir);
     if machine_code.is_empty() {
-        return Err(AotError::ToolError("机器码 blob 为空".to_string()));
+        return Err(AotError::ToolError(
+            "machine code blob is empty".to_string(),
+        ));
     }
 
     // ── 2. 按名匹配：为命中包装函数的 BytecodeFunction 置 AOT 标记 ──
@@ -85,7 +87,7 @@ pub fn embed_aot(
     }
     if matched == 0 {
         return Err(AotError::ToolError(
-            "AOT 描述符与字节码函数无匹配（Phase 1 仅支持 Int/Float/Bool/Unit 签名）".to_string(),
+            "no match between AOT descriptors and bytecode functions (Phase 1 only supports Int/Float/Bool/Unit signatures)".to_string(),
         ));
     }
     // ── 3. 组装段表 + 段数据区 ──

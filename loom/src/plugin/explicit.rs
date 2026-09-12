@@ -37,19 +37,19 @@ impl BuildPlugin for DocGenPlugin {
         PluginKind::Explicit
     }
     fn description(&self) -> Option<&str> {
-        Some("文档生成插件：扫描源码，生成 API 文档（Markdown）")
+        Some("Documentation generation plugin: scan sources, generate API docs (Markdown)")
     }
 
     fn configure(&self, ctx: &mut PluginContext) -> Result<(), LoomError> {
         ctx.activate_plugin("aura-doc-gen");
-        tracing::info!("aura-doc-gen: 文档生成插件已激活");
+        tracing::info!("aura-doc-gen: Documentation generation plugin activated");
 
         // 注册 "doc" 任务
         let has_doc = ctx.tasks.iter().any(|t| t.name == "doc");
         if !has_doc {
             let task = TaskDefinition {
                 name: "doc".to_string(),
-                description: "生成 API 文档".to_string(),
+                description: "Generate API documentation".to_string(),
                 kind: TaskKind::Plugin("doc-gen".to_string()),
                 depends_on: vec!["compile-main".to_string()],
                 inputs: TaskInputs::default(),
@@ -59,7 +59,7 @@ impl BuildPlugin for DocGenPlugin {
                 },
             };
             ctx.add_task(task);
-            tracing::info!("  已注册任务: doc (depends on compile-main)");
+            tracing::info!("  Registered task: doc (depends on compile-main)");
         }
 
         Ok(())
@@ -76,27 +76,31 @@ impl BuildPlugin for DocGenPlugin {
                 // 发现源码文件
                 let src_dir = project_dir.join("src");
                 if !src_dir.exists() {
-                    return Ok(TaskResult::ok("aura-doc-gen: 无 src 目录，跳过文档生成"));
+                    return Ok(TaskResult::ok(
+                        "aura-doc-gen: no src directory, skipping doc generation",
+                    ));
                 }
 
                 let mut files = Vec::new();
                 discover_aura_files(&src_dir, &mut files);
 
                 if files.is_empty() {
-                    return Ok(TaskResult::ok("aura-doc-gen: 无源码文件，跳过文档生成"));
+                    return Ok(TaskResult::ok(
+                        "aura-doc-gen: no source files, skipping doc generation",
+                    ));
                 }
 
                 // 生成文档
-                let mut doc_content = String::from("# API 文档\n\n");
+                let mut doc_content = String::from("# API Documentation\n\n");
                 doc_content.push_str(&format!(
-                    "> 项目: {}\n> 版本: {}\n> 生成日期: {}\n\n",
+                    "> Project: {}\n> Version: {}\n> Generated: {}\n\n",
                     ctx.manifest.name,
                     ctx.manifest.version,
                     chrono_or_local()
                 ));
 
-                doc_content.push_str("## 模块列表\n\n");
-                doc_content.push_str("| 模块 | 文件 |\n");
+                doc_content.push_str("## Module List\n\n");
+                doc_content.push_str("| Module | File |\n");
                 doc_content.push_str("|------|------|\n");
 
                 let mut artifacts = Vec::new();
@@ -120,7 +124,7 @@ impl BuildPlugin for DocGenPlugin {
 
                 Ok(TaskResult::ok_with_artifacts(
                     format!(
-                        "aura-doc-gen: 生成 {} 个模块文档 → {}",
+                        "aura-doc-gen: generated {} module docs → {}",
                         files.len(),
                         out_dir.display()
                     ),
@@ -128,7 +132,7 @@ impl BuildPlugin for DocGenPlugin {
                 ))
             }
             _ => Ok(TaskResult::err(format!(
-                "aura-doc-gen: 未知任务 '{}'（支持的任务: doc）",
+                "aura-doc-gen: unknown task '{}' (supported tasks: doc)",
                 task_name
             ))),
         }
@@ -156,12 +160,12 @@ fn generate_module_doc(file: &std::path::Path, project_name: &str) -> String {
 
     let mut doc = String::new();
     doc.push_str(&format!("# `{}`\n\n", module_name));
-    doc.push_str(&format!("> 来源: {}\n\n", rel));
-    doc.push_str(&format!("> 项目: {}\n\n", project_name));
+    doc.push_str(&format!("> Source: {}\n\n", rel));
+    doc.push_str(&format!("> Project: {}\n\n", project_name));
     doc.push_str("---\n\n");
-    doc.push_str("## 概述\n\n");
-    doc.push_str("自动生成，暂无详细文档。\n\n");
-    doc.push_str("## 公开接口\n\n");
+    doc.push_str("## Overview\n\n");
+    doc.push_str("Auto-generated, no detailed documentation yet.\n\n");
+    doc.push_str("## Public Interface\n\n");
 
     // 尝试读取源文件内容，提取函数声明
     if let Ok(content) = std::fs::read_to_string(file) {
@@ -201,26 +205,26 @@ impl BuildPlugin for FormatPlugin {
         PluginKind::Explicit
     }
     fn description(&self) -> Option<&str> {
-        Some("格式化插件：统一源码格式")
+        Some("Formatting plugin: unify source code format")
     }
 
     fn configure(&self, ctx: &mut PluginContext) -> Result<(), LoomError> {
         ctx.activate_plugin("aura-format");
-        tracing::info!("aura-format: 格式化插件已激活");
+        tracing::info!("aura-format: Formatting plugin activated");
 
         // 注册 "fmt" 任务
         let has_fmt = ctx.tasks.iter().any(|t| t.name == "fmt");
         if !has_fmt {
             let task = TaskDefinition {
                 name: "fmt".to_string(),
-                description: "格式化源码".to_string(),
+                description: "Format source code".to_string(),
                 kind: TaskKind::Plugin("fmt".to_string()),
                 depends_on: Vec::new(),
                 inputs: TaskInputs::default(),
                 outputs: TaskOutputs::default(),
             };
             ctx.add_task(task);
-            tracing::info!("  已注册任务: fmt");
+            tracing::info!("  Registered task: fmt");
         }
 
         // 注册 "fmt-check" 任务
@@ -228,14 +232,14 @@ impl BuildPlugin for FormatPlugin {
         if !has_fmt_check {
             let task = TaskDefinition {
                 name: "fmt-check".to_string(),
-                description: "检查源码格式（不修改文件）".to_string(),
+                description: "Check source code format (no file modification)".to_string(),
                 kind: TaskKind::Plugin("fmt-check".to_string()),
                 depends_on: Vec::new(),
                 inputs: TaskInputs::default(),
                 outputs: TaskOutputs::default(),
             };
             ctx.add_task(task);
-            tracing::info!("  已注册任务: fmt-check");
+            tracing::info!("  Registered task: fmt-check");
         }
 
         Ok(())
@@ -246,14 +250,14 @@ impl BuildPlugin for FormatPlugin {
         let src_dir = project_dir.join("src");
 
         if !src_dir.exists() {
-            return Ok(TaskResult::ok("aura-format: 无 src 目录，跳过"));
+            return Ok(TaskResult::ok("aura-format: no src directory, skipping"));
         }
 
         let mut files = Vec::new();
         discover_aura_files(&src_dir, &mut files);
 
         if files.is_empty() {
-            return Ok(TaskResult::ok("aura-format: 无源码文件，跳过"));
+            return Ok(TaskResult::ok("aura-format: no source files, skipping"));
         }
 
         match task_name {
@@ -261,7 +265,7 @@ impl BuildPlugin for FormatPlugin {
                 // 格式化：当前是占位符（实际格式化由 aura-fmt 工具处理）
                 let count = files.len();
                 Ok(TaskResult::ok(format!(
-                    "aura-format: 格式化 {} 个文件（占位符，实际格式化待实现）",
+                    "aura-format: formatted {} files (placeholder, actual formatting pending)",
                     count
                 )))
             }
@@ -269,12 +273,12 @@ impl BuildPlugin for FormatPlugin {
                 // 检查模式：报告格式不一致的文件
                 let count = files.len();
                 Ok(TaskResult::ok(format!(
-                    "aura-format: 检查 {} 个文件格式（占位符，实际检查待实现）",
+                    "aura-format: checked {} files format (placeholder, actual checking pending)",
                     count
                 )))
             }
             _ => Ok(TaskResult::err(format!(
-                "aura-format: 未知任务 '{}'（支持的任务: fmt, fmt-check）",
+                "aura-format: unknown task '{}' (supported tasks: fmt, fmt-check)",
                 task_name
             ))),
         }
@@ -303,19 +307,19 @@ impl BuildPlugin for AotPlugin {
         PluginKind::Explicit
     }
     fn description(&self) -> Option<&str> {
-        Some("AOT 编译插件：通过 LLVM 后端编译原生可执行文件")
+        Some("AOT compilation plugin: compile native executables via LLVM backend")
     }
 
     fn configure(&self, ctx: &mut PluginContext) -> Result<(), LoomError> {
         ctx.activate_plugin("aura-aot");
-        tracing::info!("aura-aot: AOT 编译插件已激活");
+        tracing::info!("aura-aot: AOT compilation plugin activated");
 
         // 注册 "aot" 任务
         let has_aot = ctx.tasks.iter().any(|t| t.name == "aot");
         if !has_aot {
             let task = TaskDefinition {
                 name: "aot".to_string(),
-                description: "AOT 编译为原生可执行文件".to_string(),
+                description: "AOT compile to native executable".to_string(),
                 kind: TaskKind::Plugin("aot".to_string()),
                 depends_on: vec!["compile-main".to_string()],
                 inputs: TaskInputs::default(),
@@ -325,7 +329,7 @@ impl BuildPlugin for AotPlugin {
                 },
             };
             ctx.add_task(task);
-            tracing::info!("  已注册任务: aot (depends on compile-main)");
+            tracing::info!("  Registered task: aot (depends on compile-main)");
         }
 
         Ok(())
@@ -333,7 +337,7 @@ impl BuildPlugin for AotPlugin {
 
     fn execute(&self, _task_name: &str, _ctx: &PluginContext) -> Result<TaskResult, LoomError> {
         Ok(TaskResult::ok(
-            "aura-aot: AOT 编译（占位符，需要 llvm feature 和 LLVM 后端实现）",
+            "aura-aot: AOT compilation (placeholder, requires llvm feature and LLVM backend implementation)",
         ))
     }
 }
@@ -359,19 +363,19 @@ impl BuildPlugin for CiPlugin {
         PluginKind::Explicit
     }
     fn description(&self) -> Option<&str> {
-        Some("CI 插件：生成 CI/CD 流水线配置")
+        Some("CI plugin: generate CI/CD pipeline configuration")
     }
 
     fn configure(&self, ctx: &mut PluginContext) -> Result<(), LoomError> {
         ctx.activate_plugin("aura-ci");
-        tracing::info!("aura-ci: CI 插件已激活");
+        tracing::info!("aura-ci: CI plugin activated");
 
         // 注册 "ci" 任务
         let has_ci = ctx.tasks.iter().any(|t| t.name == "ci");
         if !has_ci {
             let task = TaskDefinition {
                 name: "ci".to_string(),
-                description: "运行完整 CI 流水线".to_string(),
+                description: "Run full CI pipeline".to_string(),
                 kind: TaskKind::Plugin("ci".to_string()),
                 depends_on: vec![
                     "package".to_string(),
@@ -381,7 +385,7 @@ impl BuildPlugin for CiPlugin {
                 outputs: TaskOutputs::default(),
             };
             ctx.add_task(task);
-            tracing::info!("  已注册任务: ci (depends on package, verify)");
+            tracing::info!("  Registered task: ci (depends on package, verify)");
         }
 
         Ok(())
@@ -389,7 +393,7 @@ impl BuildPlugin for CiPlugin {
 
     fn execute(&self, _task_name: &str, _ctx: &PluginContext) -> Result<TaskResult, LoomError> {
         Ok(TaskResult::ok(
-            "aura-ci: CI 流水线（占位符，Phase B6 实现完整功能）",
+            "aura-ci: CI pipeline (placeholder, Phase B6 will implement full functionality)",
         ))
     }
 }
@@ -406,22 +410,22 @@ pub fn explicit_plugins(manifest: &crate::manifest::LoomManifest) -> Vec<Box<dyn
 
     if manifest.plugins.aura_doc_gen {
         plugins.push(Box::new(DocGenPlugin));
-        tracing::debug!("已激活显式插件: aura-doc-gen");
+        tracing::debug!("Activated explicit plugin: aura-doc-gen");
     }
 
     if manifest.plugins.aura_format {
         plugins.push(Box::new(FormatPlugin));
-        tracing::debug!("已激活显式插件: aura-format");
+        tracing::debug!("Activated explicit plugin: aura-format");
     }
 
     if manifest.plugins.aura_aot {
         plugins.push(Box::new(AotPlugin));
-        tracing::debug!("已激活显式插件: aura-aot");
+        tracing::debug!("Activated explicit plugin: aura-aot");
     }
 
     if manifest.plugins.aura_ci {
         plugins.push(Box::new(CiPlugin));
-        tracing::debug!("已激活显式插件: aura-ci");
+        tracing::debug!("Activated explicit plugin: aura-ci");
     }
 
     plugins
@@ -449,7 +453,7 @@ mod tests {
     fn test_doc_gen_plugin_description() {
         let plugin = DocGenPlugin;
         assert!(plugin.description().is_some());
-        assert!(plugin.description().unwrap().contains("文档"));
+        assert!(plugin.description().unwrap().contains("Documentation"));
     }
 
     #[test]
@@ -473,7 +477,7 @@ mod tests {
         let mut ctx = PluginContext::new_default();
         ctx.add_task(TaskDefinition {
             name: "doc".to_string(),
-            description: "已有".to_string(),
+            description: "Existing".to_string(),
             kind: TaskKind::Plugin("doc-gen".to_string()),
             depends_on: vec!["compile-main".to_string()],
             inputs: TaskInputs::default(),
@@ -495,7 +499,7 @@ mod tests {
 
         let result = plugin.execute("doc", &ctx).unwrap();
         assert!(result.success);
-        assert!(result.output.contains("无 src 目录"));
+        assert!(result.output.contains("no src directory"));
     }
 
     #[test]
@@ -523,7 +527,7 @@ mod tests {
 
         let result = plugin.execute("doc", &ctx).unwrap();
         assert!(result.success);
-        assert!(result.output.contains("2 个模块文档"));
+        assert!(result.output.contains("2 module docs"));
 
         // 检查生成的文档
         let docs_dir = tmp.path().join("target/build/docs");
@@ -534,7 +538,7 @@ mod tests {
 
         // 检查文档内容
         let index_content = std::fs::read_to_string(docs_dir.join("index.md")).unwrap();
-        assert!(index_content.contains("API 文档"));
+        assert!(index_content.contains("API Documentation"));
         assert!(index_content.contains("test-project"));
         assert!(index_content.contains("`main`"));
         assert!(index_content.contains("`utils`"));
@@ -546,7 +550,7 @@ mod tests {
         let ctx = PluginContext::new_default();
         let result = plugin.execute("unknown-task", &ctx).unwrap();
         assert!(!result.success);
-        assert!(result.output.contains("未知任务"));
+        assert!(result.output.contains("unknown task"));
     }
 
     #[test]
@@ -581,7 +585,7 @@ mod tests {
 
         let result = plugin.execute("fmt", &ctx).unwrap();
         assert!(result.success);
-        assert!(result.output.contains("格式化"));
+        assert!(result.output.contains("formatted"));
     }
 
     #[test]
@@ -597,7 +601,7 @@ mod tests {
 
         let result = plugin.execute("fmt-check", &ctx).unwrap();
         assert!(result.success);
-        assert!(result.output.contains("检查"));
+        assert!(result.output.contains("checked"));
     }
 
     #[test]
@@ -613,7 +617,7 @@ mod tests {
 
         let result = plugin.execute("unknown", &ctx).unwrap();
         assert!(!result.success);
-        assert!(result.output.contains("未知任务"));
+        assert!(result.output.contains("unknown task"));
     }
 
     #[test]

@@ -85,7 +85,7 @@ object CompilerInfo {
 
     /// 当前迁移阶段描述。
     fun phase(): String {
-        return "Phase 9：整体编译管线串联（Lexer→Parser→HIR→MIR→Codegen→VM）"
+        return "Phase 9: Full compilation pipeline (Lexer→Parser→HIR→MIR→Codegen→VM)"
     }
 }
 
@@ -385,8 +385,8 @@ fun cliStem(p: String): String {
 
 /// CLI 用法说明。
 fun cliUsage(): String {
-    return "用法: aura-compiler <input.aura> [-o <output.exe>] [--mem-trace]\n" +
-        "      aura-compiler                  无参数时仅打印本说明（自检见 runSelfTest）"
+    return "Usage: aura-compiler <input.aura> [-o <output.exe>] [--mem-trace]\n" +
+        "      aura-compiler                  Without arguments, prints this usage only (see runSelfTest for self-test)"
 }
 
 /// CLI 模式：读取命令行参数 → 读源文件 → AOT 产出原生可执行文件。
@@ -419,7 +419,7 @@ fun runCli(): Unit {
         return
     }
     if (!FileSystem.exists(inputPath)) {
-        println("错误: 找不到输入文件: " + inputPath)
+        println("Error: input file not found: " + inputPath)
         return
     }
 
@@ -430,16 +430,16 @@ fun runCli(): Unit {
         stem = cliStem(outputPath)
     }
 
-    println(banner() + " — AOT 编译 " + inputPath)
+    println(banner() + " — AOT compilation " + inputPath)
     val r: AotExeResult = aotBuildExeFileTraced(inputPath, stem, outDir,
         llvmHomeDefault(), trace)
     if (r.ok) {
-        println("✓ 已生成可执行文件: " + r.exePath)
+        println("✓ Executable generated: " + r.exePath)
     } else {
-        println("错误: AOT 编译失败")
+        println("Error: AOT compilation failed")
         println("  llc=" + toStr(r.llcExit) + " clang=" + toStr(r.clangExit))
         if (r.irError != "") {
-            println("  IR 错误: " + r.irError)
+            println("  IR error: " + r.irError)
         }
     }
 }
@@ -464,7 +464,7 @@ fun runSelfTest() {
     println(banner())
     println(CompilerInfo.phase())
 
-    println("=== 样例 1：算术（预期 14）===")
+    println("=== Example 1: Arithmetic (Expected 14) ===")
     println(compileAndRun(
         "fun main() {\n" +
         "    val x: Int = 2 + 3 * 4\n" +
@@ -472,7 +472,7 @@ fun runSelfTest() {
         "}\n"
     ))
 
-    println("=== 样例 2：while 循环（预期 10）===")
+    println("=== Example 2: while loop (Expected 10) ===")
     println(compileAndRun(
         "fun main() {\n" +
         "    var i: Int = 0\n" +
@@ -485,7 +485,7 @@ fun runSelfTest() {
         "}\n"
     ))
 
-    println("=== 样例 3：if/else（预期 2）===")
+    println("=== Example 3: if/else (Expected 2) ===")
     println(compileAndRun(
         "fun main() {\n" +
         "    val n: Int = 7\n" +
@@ -497,7 +497,7 @@ fun runSelfTest() {
         "}\n"
     ))
 
-    println("=== 样例 4：函数调用（预期 5）===")
+    println("=== Example 4: Function call (Expected 5) ===")
     println(compileAndRun(
         "fun add(a: Int, b: Int): Int {\n" +
         "    return a + b\n" +
@@ -507,7 +507,7 @@ fun runSelfTest() {
         "}\n"
     ))
 
-    println("=== 样例 5：递归（预期 120）===")
+    println("=== Example 5: Recursion (Expected 120) ===")
     println(compileAndRun(
         "fun fact(n: Int): Int {\n" +
         "    if (n <= 1) {\n" +
@@ -524,7 +524,7 @@ fun runSelfTest() {
     val aotSrc = "fun main(): Int {\n" +
         "    return 2 + 3 * 4\n" +
         "}\n"
-    println("=== AOT 链路摘要 ===")
+    println("=== AOT pipeline summary ===")
     val aotR = compileAotSource(aotSrc)
     println("target=" + aotR.targetTriple + " opt=" + aotR.optFlag +
         " irLines=" + toStr(aotR.irLines) + " hasMain=" + toStr(aotR.hasMain))
@@ -534,7 +534,7 @@ fun runSelfTest() {
     println(aotR.llvmIr)
 
     // ── AOT 全链路：产出原生 exe 并运行 ──
-    println("=== AOT 原生产出 ===")
+    println("=== AOT native output ===")
     val exeSrc = "fun main(): Int {\n" +
         "    return 6 * 7\n" +
         "}\n"
@@ -548,7 +548,7 @@ fun runSelfTest() {
     }
 
     // ── JIT 链路：叶子函数编译为 JIT 单元并执行 ──
-    println("=== JIT 链路摘要 ===")
+    println("=== JIT pipeline summary ===")
     val jitSrc = "fun square(x: Int): Int {\n" +
         "    return x * x\n" +
         "}\n" +

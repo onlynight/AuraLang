@@ -1061,8 +1061,8 @@ impl Checker {
                 if e.abi == "rust" || e.abi == "Rust" {
                     self.report_warning(
                         e.span,
-                        "`extern \"rust\"` 块的函数需在 Rust 侧使用 #[no_mangle] extern \"C\"，\
-                         否则 ABI 不稳定，可能导致调用失败",
+                        "`extern \"rust\"` functions must use #[no_mangle] extern \"C\" on the Rust side,\
+                         otherwise the ABI is unstable and calls may fail",
                     );
                 }
                 for f in &e.functions {
@@ -1095,7 +1095,7 @@ impl Checker {
                     self.report(
                         e.span,
                         format!(
-                            "extern interface `{}` 必须包含 `default fun loadLibrary(): String = \"...\"` 方法",
+                            "extern interface `{}` must include a `default fun loadLibrary(): String = \"...\"` method",
                             e.name
                         ),
                     );

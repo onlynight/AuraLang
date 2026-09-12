@@ -36,7 +36,10 @@ fn has_error_containing(errors: &[String], needle: &str) -> bool {
 fn test_diagnostic_renders_source_snippet() {
     let src = "fun main() {\n    val x: Int = \"oops\"\n}\n";
     let errors = analyze_raw(src);
-    assert!(!errors.is_empty(), "应当产生至少一个语义错误");
+    assert!(
+        !errors.is_empty(),
+        "should produce at least one semantic error"
+    );
 
     let mut sm = SourceMap::new();
     let file = sm.add_file("main.aura", src);
@@ -53,7 +56,10 @@ fn test_diagnostic_renders_source_snippet() {
         "渲染应含源码片段: {rendered}"
     );
     // 波浪线 / 指示符
-    assert!(rendered.contains('^'), "渲染应含波浪线指示: {rendered}");
+    assert!(
+        rendered.contains('^'),
+        "rendered should contain caret indicator: {rendered}"
+    );
 
     // 渲染出的位置应与错误自身的 span 一致
     let span = &errors[0].span;

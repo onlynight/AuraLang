@@ -6,17 +6,20 @@ use compiler::codegen::{compile_source, disassemble, from_bytes, to_bytes};
 #[test]
 fn test_roundtrip() {
     let src = "fun add(a: Int, b: Int): Int = a + b\nfun main() { println(add(2, 3)) }";
-    let module = compile_source(src).expect("应编译成功");
+    let module = compile_source(src).expect("compilation should succeed");
     let bytes = to_bytes(&module);
-    let back = from_bytes(&bytes).expect("应反序列化成功");
-    assert_eq!(module, back, "往返序列化应一致");
+    let back = from_bytes(&bytes).expect("deserialization should succeed");
+    assert_eq!(
+        module, back,
+        "round-trip serialization should be consistent"
+    );
 }
 
 /// 常量折叠：1 + 2 * 3 折叠为 7（出现在常量池中）
 #[test]
 fn test_constant_folding() {
     let src = "fun main() { val x = 1 + 2 * 3\n println(x) }";
-    let module = compile_source(src).expect("编译成功");
+    let module = compile_source(src).expect("compilation succeeded");
     assert!(
         module.consts.iter().any(|c| matches!(c, compiler::codegen::opcode::Const::Int(7))),
         "常量折叠后应包含 7"
@@ -27,7 +30,7 @@ fn test_constant_folding() {
 #[test]
 fn test_control_flow_codegen() {
     let src = "fun main() { var i = 0\n while (i < 3) { println(i)\n i = i + 1 } }";
-    let module = compile_source(src).expect("编译成功");
+    let module = compile_source(src).expect("compilation succeeded");
     let text = disassemble(&module);
     assert!(
         text.contains("JUMP_IF_FALSE") && text.contains("JUMP"),
@@ -39,7 +42,7 @@ fn test_control_flow_codegen() {
 #[test]
 fn test_call_codegen() {
     let src = "fun add(a: Int, b: Int): Int = a + b\nfun main() { println(add(2, 3)) }";
-    let module = compile_source(src).expect("编译成功");
+    let module = compile_source(src).expect("compilation succeeded");
     let text = disassemble(&module);
     assert!(text.contains("CALL") && text.contains("ADD") && text.contains("RETURN"));
 }
@@ -48,7 +51,7 @@ fn test_call_codegen() {
 #[test]
 fn test_monomorphization() {
     let src = "fun <T> identity(x: T): T = x\nfun main() { println(identity(5)) }";
-    let module = compile_source(src).expect("编译成功");
+    let module = compile_source(src).expect("compilation succeeded");
     assert!(
         module.functions.iter().any(|f| f.name == "identity#1"),
         "泛型函数应被单态化为 identity#1"
@@ -59,7 +62,7 @@ fn test_monomorphization() {
 #[test]
 fn test_recursive_monomorphization() {
     let src = "fun <T> recurse(x: T, n: Int): T { if (n <= 0) { return x } return recurse(x, n - 1) }\nfun main() { println(recurse(5, 3)) }";
-    let module = compile_source(src).expect("编译成功");
+    let module = compile_source(src).expect("compilation succeeded");
     assert!(
         module.functions.iter().any(|f| f.name == "recurse#2"),
         "递归泛型函数应被单态化为 recurse#2"
@@ -70,7 +73,7 @@ fn test_recursive_monomorphization() {
 #[test]
 fn test_nested_monomorphization() {
     let src = "fun <T> identity(x: T): T = x\nfun <T> wrapper(x: T): T = identity(x)\nfun main() { println(wrapper(5)) }";
-    let module = compile_source(src).expect("编译成功");
+    let module = compile_source(src).expect("compilation succeeded");
     assert!(
         module.functions.iter().any(|f| f.name == "identity#1"),
         "嵌套泛型调用应生成 identity#1"
@@ -85,7 +88,7 @@ fn test_nested_monomorphization() {
 #[test]
 fn test_multiple_arities_monomorphization() {
     let src = "fun <T> multi(x: T): T = x\nfun <T> multi(x: T, y: T): T = x\nfun main() { println(multi(5))\n println(multi(5, 10)) }";
-    let module = compile_source(src).expect("编译成功");
+    let module = compile_source(src).expect("compilation succeeded");
     // 注意：重载函数在 HIR 中可能无法区分，测试基本功能
     assert!(
         module.functions.iter().any(|f| f.name.contains("multi#")),
@@ -97,7 +100,7 @@ fn test_multiple_arities_monomorphization() {
 #[test]
 fn test_mixed_monomorphization() {
     let src = "fun add(a: Int, b: Int): Int = a + b\nfun <T> identity(x: T): T = x\nfun main() { println(identity(add(1, 2))) }";
-    let module = compile_source(src).expect("编译成功");
+    let module = compile_source(src).expect("compilation succeeded");
     assert!(
         module.functions.iter().any(|f| f.name == "identity#1"),
         "混合调用应生成 identity#1"
@@ -109,7 +112,7 @@ fn test_mixed_monomorphization() {
 fn test_full_program() {
     let src = "fun add(a: Int, b: Int): Int = a + b\n\
                fun main() { var i = 0\n while (i < 5) { println(add(i, 1))\n i = i + 1 } }";
-    let module = compile_source(src).expect("编译成功");
+    let module = compile_source(src).expect("compilation succeeded");
     assert!(module.entry < module.functions.len() as u16);
     assert_eq!(module.functions[module.entry as usize].name, "main");
 }

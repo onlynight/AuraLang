@@ -24,20 +24,20 @@ fn run(src: &str) -> Result<Value, String> {
 
 /// 断言返回 `Value::Str`
 fn expect_str(src: &str, expected: &str) {
-    let got = run(src).unwrap_or_else(|e| panic!("运行失败: {e}\n源码:\n{src}"));
-    assert_eq!(got, Value::Str(expected.into()), "源码:\n{src}");
+    let got = run(src).unwrap_or_else(|e| panic!("run failed: {e}\nsource:\n{src}"));
+    assert_eq!(got, Value::Str(expected.into()), "source:\n{src}");
 }
 
 /// 断言返回 `Value::Int`
 fn expect_int(src: &str, expected: i64) {
-    let got = run(src).unwrap_or_else(|e| panic!("运行失败: {e}\n源码:\n{src}"));
-    assert_eq!(got, Value::Int(expected), "源码:\n{src}");
+    let got = run(src).unwrap_or_else(|e| panic!("run failed: {e}\nsource:\n{src}"));
+    assert_eq!(got, Value::Int(expected), "source:\n{src}");
 }
 
 /// 断言返回 `Value::Bool`
 fn expect_bool(src: &str, expected: bool) {
-    let got = run(src).unwrap_or_else(|e| panic!("运行失败: {e}\n源码:\n{src}"));
-    assert_eq!(got, Value::Bool(expected), "源码:\n{src}");
+    let got = run(src).unwrap_or_else(|e| panic!("run failed: {e}\nsource:\n{src}"));
+    assert_eq!(got, Value::Bool(expected), "source:\n{src}");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -97,7 +97,7 @@ fn test_string_index_out_of_range_is_null() {
     // 越界返回 null（而非 panic）
     let got =
         run("import aura.lang.std.String\nfun main(): Any { val s: String = \"hi\"; return s[9] }")
-            .expect("运行应成功");
+            .expect("run should succeed");
     assert_eq!(got, Value::Null);
 }
 
@@ -460,7 +460,7 @@ fn test_object_multiple_fields_defaults() {
 
 /// 编译运行并返回 `(返回值, Process.exit 请求的退出码)`。
 fn run_with_exit(src: &str) -> (Value, Option<i32>) {
-    let module = compile_source(src).unwrap_or_else(|e| panic!("编译失败: {e}\n{src}"));
+    let module = compile_source(src).unwrap_or_else(|e| panic!("compilation failed: {e}\n{src}"));
     let mut vm = Vm::new(&module, VmOptions::default()).expect("vm init");
     let v = vm.run().unwrap_or(Value::Null);
     (v, vm.requested_exit_code())
@@ -590,20 +590,27 @@ fn test_uncaught_throw_is_runtime_error() {
 #[test]
 fn test_process_exit_records_code() {
     let (_, code) = run_with_exit("fun main(): Int { Process.exit(3)\n return 0 }");
-    assert_eq!(code, Some(3), "Process.exit(3) 应记录退出码 3");
+    assert_eq!(code, Some(3), "Process.exit(3) should record exit code 3");
 }
 
 #[test]
 fn test_process_exit_zero_is_recorded() {
     let (_, code) = run_with_exit("fun main(): Int { Process.exit(0)\n return 7 }");
-    assert_eq!(code, Some(0), "显式 exit(0) 应记录 0 且不再执行后续语句");
+    assert_eq!(
+        code,
+        Some(0),
+        "explicit exit(0) should record 0 and not execute subsequent statements"
+    );
 }
 
 #[test]
 fn test_no_exit_request_by_default() {
     let (v, code) = run_with_exit("fun main(): Int { return 5 }");
     assert_eq!(v, Value::Int(5));
-    assert_eq!(code, None, "未调用 Process.exit 时不应有退出码请求");
+    assert_eq!(
+        code, None,
+        "no exit code request when Process.exit not called"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -672,12 +679,13 @@ fn test_str_interp_expression_evaluates() {
 /// ——表现为 `"abc".length() == 0` 这类错值。
 #[test]
 fn test_full_registry_without_imports_includes_std_modules() {
-    let module = compile_source("fun main(): Int { return 0 }").expect("编译应成功");
+    let module =
+        compile_source("fun main(): Int { return 0 }").expect("compilation should succeed");
     assert!(
         module.enabled_modules.is_empty(),
         "无 import 时 enabled_modules 应为空"
     );
-    let vm = Vm::new(&module, VmOptions::default()).expect("VM 创建应成功");
+    let vm = Vm::new(&module, VmOptions::default()).expect("VM creation should succeed");
     assert!(
         vm.contains_native("aura.lang.std.String.length"),
         "全量注册应包含 aura.lang.std.String.length"

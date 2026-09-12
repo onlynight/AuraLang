@@ -1402,7 +1402,7 @@ fn emit_assign(
         }
         _ => {
             return Err(AotError::UnsupportedExpr(format!(
-                "不可赋值的左值: {:?}",
+                "not an assignable lvalue: {:?}",
                 target
             )));
         }
@@ -4784,7 +4784,7 @@ fn map_type_to_tag(ty: &HirType) -> Result<u8, AotError> {
             "Closure" | "Lambda" => Ok(TAG_CLOSURE),
             "Any" => Ok(TAG_OBJ), // Any 作为泛化对象指针
             other => Err(AotError::UnsupportedExpr(format!(
-                "AOT 不支持类型 '{}'（已支持: Int/Float/Bool/Unit/String/Pointer/List/Map/Array/Closure）",
+                "AOT does not support type '{}' (supported: Int/Float/Bool/Unit/String/Pointer/List/Map/Array/Closure)",
                 other
             ))),
         },
@@ -4792,7 +4792,7 @@ fn map_type_to_tag(ty: &HirType) -> Result<u8, AotError> {
         HirType::Function { .. } => Ok(TAG_FUNC),
         HirType::Nullable(inner) => map_type_to_tag(inner),
         HirType::Unknown => Err(AotError::UnsupportedExpr(
-            "AOT 不支持 Unknown 类型".to_string(),
+            "AOT does not support Unknown type".to_string(),
         )),
     }
 }
@@ -4833,7 +4833,7 @@ fn emit_wrapper(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErro
     // 1. 检查参数个数
     if func.params.len() > MAX_AOT_ARGS {
         return Err(AotError::UnsupportedExpr(format!(
-            "函数 '{}' 参数个数 {} 超过上限 {}（Phase 1 限制）",
+            "function '{}' has {} parameters, exceeding limit {} (Phase 1 limit)",
             func.name,
             func.params.len(),
             MAX_AOT_ARGS

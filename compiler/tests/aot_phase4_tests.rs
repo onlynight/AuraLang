@@ -30,19 +30,19 @@ fn llc_available() -> bool {
 }
 
 fn compile_with_aot_embed(source: &str) -> compiler::codegen::BytecodeModule {
-    let module = compile_source(source).expect("字节码编译应成功");
+    let module = compile_source(source).expect("bytecode compilation should succeed");
     let mut lexer = Lexer::new(source);
     let tokens = lexer.tokenize();
     assert!(
         lexer.errors().is_empty(),
-        "词法错误: {:?}",
+        "lex error: {:?}",
         lexer.errors().first()
     );
     let mut parser = Parser::new(tokens);
     let program = parser.parse_program();
     assert!(
         parser.errors().is_empty(),
-        "语法错误: {:?}",
+        "syntax error: {:?}",
         parser.errors().first()
     );
     let hir = desugar_program(&program);
@@ -55,7 +55,7 @@ fn compile_with_aot_embed(source: &str) -> compiler::codegen::BytecodeModule {
         std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
     ));
-    let result = embed_aot(module, &hir, options, &work_dir).expect("AOT 嵌入应成功");
+    let result = embed_aot(module, &hir, options, &work_dir).expect("AOT embedding should succeed");
     let _ = std::fs::remove_dir_all(&work_dir);
     result.module
 }
@@ -65,7 +65,7 @@ fn compile_with_aot_embed(source: &str) -> compiler::codegen::BytecodeModule {
 #[test]
 fn test_shared_library_format() {
     if !llc_available() {
-        eprintln!("skipped: LLVM 不可用");
+        eprintln!("skipped: LLVM not available");
         return;
     }
 
@@ -100,7 +100,7 @@ fn test_shared_library_format() {
 #[test]
 fn test_rust_host_format() {
     if !llc_available() {
-        eprintln!("skipped: LLVM 不可用");
+        eprintln!("skipped: LLVM not available");
         return;
     }
 
@@ -222,7 +222,7 @@ fn test_plugin_manager_unload_nonexistent() {
 #[test]
 fn test_aot_embed_with_plugin_manager() {
     if !llc_available() {
-        eprintln!("skipped: LLVM 不可用");
+        eprintln!("skipped: LLVM not available");
         return;
     }
 
@@ -235,8 +235,8 @@ fn test_aot_embed_with_plugin_manager() {
 
     // 使用插件管理器加载
     let mut pm = PluginManager::new();
-    let mut vm = Vm::new(&embedded, VmOptions::default()).expect("VM 初始化失败");
-    let result = vm.run().expect("AOT 执行失败");
+    let mut vm = Vm::new(&embedded, VmOptions::default()).expect("VM initialization failed");
+    let result = vm.run().expect("AOT execution failed");
 
     assert_eq!(result, compiler::vm::Value::Int(70));
     assert_eq!(pm.plugin_count(), 0);

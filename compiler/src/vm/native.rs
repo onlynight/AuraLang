@@ -907,7 +907,7 @@ fn native_spawn_actor_process(args: &[Value]) -> Value {
             Value::Map(map)
         }
         Err(e) => {
-            eprintln!("[Phase 3] 跨进程 Actor 启动失败: {}", e);
+            eprintln!("[Phase 3] Cross-process Actor spawn failed: {}", e);
             Value::Null
         }
     }
@@ -922,7 +922,7 @@ fn native_send_process_actor(args: &[Value]) -> Value {
         let mut registry = crate::vm::actor_process::PROCESS_ACTORS.lock().unwrap();
         if let Some(actor) = registry.get_mut(&actor_id) {
             if let Err(e) = actor.send(&msg) {
-                eprintln!("[Phase 3] 跨进程发送失败: {}", e);
+                eprintln!("[Phase 3] Cross-process send failed: {}", e);
             }
         }
     }
@@ -940,7 +940,7 @@ fn native_recv_process_actor(args: &[Value]) -> Value {
                 Ok(Some(val)) => return val,
                 Ok(None) => return Value::Null,
                 Err(e) => {
-                    eprintln!("[Phase 3] 跨进程接收失败: {}", e);
+                    eprintln!("[Phase 3] Cross-process receive failed: {}", e);
                     return Value::Null;
                 }
             }
@@ -992,7 +992,7 @@ fn native_new_tcp_channel(args: &[Value]) -> Value {
             Value::Int(id as i64)
         }
         Err(e) => {
-            eprintln!("[Phase 3] TCP Channel 创建失败: {}", e);
+            eprintln!("[Phase 3] TCP Channel creation failed: {}", e);
             Value::Int(0)
         }
     }
@@ -1008,7 +1008,7 @@ fn native_tcp_channel_send(args: &[Value]) -> Value {
         if let Some(server) = registry.get_mut(&ch_id) {
             // 注：服务端需要连接才能发送，当前简化为直接发送
             // 实际使用需通过客户端连接发送
-            eprintln!("[Phase 3] TCP Channel 发送暂不支持（需客户端连接）");
+            eprintln!("[Phase 3] TCP Channel send not yet supported (requires client connection)");
         }
     }
     Value::Null

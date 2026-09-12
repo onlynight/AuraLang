@@ -162,7 +162,7 @@ impl RegistryClient {
         let http = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
-            .map_err(|e| LoomError::Registry(format!("创建 HTTP 客户端失败: {}", e)))?;
+            .map_err(|e| LoomError::Registry(format!("Failed to create HTTP client: {}", e)))?;
 
         Ok(Self {
             config: config.resolve_env_vars(),
@@ -190,21 +190,23 @@ impl RegistryClient {
             req = req.header("Authorization", format!("Bearer {}", token));
         }
 
-        let resp =
-            req.send().map_err(|e| LoomError::Registry(format!("请求失败 {}: {}", url, e)))?;
+        let resp = req
+            .send()
+            .map_err(|e| LoomError::Registry(format!("Request failed {}: {}", url, e)))?;
 
         if !resp.status().is_success() {
             return Err(LoomError::Registry(format!(
-                "获取包信息失败: HTTP {} - {}",
+                "Failed to get package info: HTTP {} - {}",
                 resp.status(),
                 resp.text().unwrap_or_default()
             )));
         }
 
-        let text =
-            resp.text().map_err(|e| LoomError::Registry(format!("读取响应体失败: {}", e)))?;
+        let text = resp
+            .text()
+            .map_err(|e| LoomError::Registry(format!("Failed to read response body: {}", e)))?;
         serde_json::from_str(&text)
-            .map_err(|e| LoomError::Registry(format!("解析包信息失败: {}", e)))
+            .map_err(|e| LoomError::Registry(format!("Failed to parse package info: {}", e)))
     }
 
     /// 获取版本详情 + 下载 URL
@@ -223,21 +225,23 @@ impl RegistryClient {
             req = req.header("Authorization", format!("Bearer {}", token));
         }
 
-        let resp =
-            req.send().map_err(|e| LoomError::Registry(format!("请求失败 {}: {}", url, e)))?;
+        let resp = req
+            .send()
+            .map_err(|e| LoomError::Registry(format!("Request failed {}: {}", url, e)))?;
 
         if !resp.status().is_success() {
             return Err(LoomError::Registry(format!(
-                "获取版本信息失败: HTTP {} - {}",
+                "Failed to get version info: HTTP {} - {}",
                 resp.status(),
                 resp.text().unwrap_or_default()
             )));
         }
 
-        let text =
-            resp.text().map_err(|e| LoomError::Registry(format!("读取响应体失败: {}", e)))?;
+        let text = resp
+            .text()
+            .map_err(|e| LoomError::Registry(format!("Failed to read response body: {}", e)))?;
         serde_json::from_str(&text)
-            .map_err(|e| LoomError::Registry(format!("解析版本信息失败: {}", e)))
+            .map_err(|e| LoomError::Registry(format!("Failed to parse version info: {}", e)))
     }
 
     /// 搜索包
@@ -253,20 +257,21 @@ impl RegistryClient {
             .http
             .get(&url)
             .send()
-            .map_err(|e| LoomError::Registry(format!("搜索请求失败: {}", e)))?;
+            .map_err(|e| LoomError::Registry(format!("Search request failed: {}", e)))?;
 
         if !resp.status().is_success() {
             return Err(LoomError::Registry(format!(
-                "搜索失败: HTTP {} - {}",
+                "Search failed: HTTP {} - {}",
                 resp.status(),
                 resp.text().unwrap_or_default()
             )));
         }
 
-        let text =
-            resp.text().map_err(|e| LoomError::Registry(format!("读取响应体失败: {}", e)))?;
+        let text = resp
+            .text()
+            .map_err(|e| LoomError::Registry(format!("Failed to read response body: {}", e)))?;
         serde_json::from_str(&text)
-            .map_err(|e| LoomError::Registry(format!("解析搜索结果失败: {}", e)))
+            .map_err(|e| LoomError::Registry(format!("Failed to parse search results: {}", e)))
     }
 
     /// 发布包
@@ -283,14 +288,13 @@ impl RegistryClient {
             name
         );
 
-        let token = self
-            .config
-            .token
-            .as_ref()
-            .ok_or_else(|| LoomError::Registry("发布需要认证 token".to_string()))?;
+        let token = self.config.token.as_ref().ok_or_else(|| {
+            LoomError::Registry("Publish requires authentication token".to_string())
+        })?;
 
-        let body = serde_json::to_string(request)
-            .map_err(|e| LoomError::Registry(format!("序列化发布请求失败: {}", e)))?;
+        let body = serde_json::to_string(request).map_err(|e| {
+            LoomError::Registry(format!("Failed to serialize publish request: {}", e))
+        })?;
 
         let resp = self
             .http
@@ -299,50 +303,51 @@ impl RegistryClient {
             .header("Content-Type", "application/json")
             .body(body)
             .send()
-            .map_err(|e| LoomError::Registry(format!("发布请求失败: {}", e)))?;
+            .map_err(|e| LoomError::Registry(format!("Publish request failed: {}", e)))?;
 
         if !resp.status().is_success() {
             return Err(LoomError::Registry(format!(
-                "发布失败: HTTP {} - {}",
+                "Publish failed: HTTP {} - {}",
                 resp.status(),
                 resp.text().unwrap_or_default()
             )));
         }
 
-        let text =
-            resp.text().map_err(|e| LoomError::Registry(format!("读取响应体失败: {}", e)))?;
+        let text = resp
+            .text()
+            .map_err(|e| LoomError::Registry(format!("Failed to read response body: {}", e)))?;
         serde_json::from_str(&text)
-            .map_err(|e| LoomError::Registry(format!("解析发布响应失败: {}", e)))
+            .map_err(|e| LoomError::Registry(format!("Failed to parse publish response: {}", e)))
     }
 
     /// 下载包制品
     ///
     /// GET {download_url}
     pub fn download(&self, url: &str, dest: &std::path::Path) -> Result<u64, LoomError> {
-        let resp = self
-            .http
-            .get(url)
-            .send()
-            .map_err(|e| LoomError::Registry(format!("下载请求失败 {}: {}", url, e)))?;
+        let resp =
+            self.http.get(url).send().map_err(|e| {
+                LoomError::Registry(format!("Download request failed {}: {}", url, e))
+            })?;
 
         if !resp.status().is_success() {
             return Err(LoomError::Registry(format!(
-                "下载失败: HTTP {}",
+                "Download failed: HTTP {}",
                 resp.status()
             )));
         }
 
-        let bytes =
-            resp.bytes().map_err(|e| LoomError::Registry(format!("读取响应体失败: {}", e)))?;
+        let bytes = resp
+            .bytes()
+            .map_err(|e| LoomError::Registry(format!("failed to read response body: {}", e)))?;
         let size = bytes.len() as u64;
 
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)
-                .map_err(|e| LoomError::Registry(format!("创建目录失败: {}", e)))?;
+                .map_err(|e| LoomError::Registry(format!("Failed to create directory: {}", e)))?;
         }
 
         std::fs::write(dest, &bytes)
-            .map_err(|e| LoomError::Registry(format!("写入文件失败: {}", e)))?;
+            .map_err(|e| LoomError::Registry(format!("Failed to write file: {}", e)))?;
 
         Ok(size)
     }
@@ -440,7 +445,7 @@ mod tests {
                 }
             ],
             "metadata": {
-                "description": "JSON 解析与序列化",
+                "description": "JSON parsing and serialization",
                 "license": "MIT"
             }
         }"#;

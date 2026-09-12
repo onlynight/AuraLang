@@ -35,7 +35,7 @@ impl std::fmt::Display for LlvmToolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} 执行失败 (exit code {:?}): {}",
+            "{} execution failed (exit code {:?}): {}",
             self.tool, self.status, self.stderr
         )
     }
@@ -132,7 +132,7 @@ fn find_tool<'a>(name: &str, options: &'a AotOptions) -> Option<PathBuf> {
 fn build_command(tool: &str, options: &AotOptions) -> Result<Command, AotError> {
     let tool_path = find_tool(tool, options).ok_or_else(|| {
         AotError::ToolError(format!(
-            "找不到 LLVM 工具 '{}'，请设置 AURA_LLVM_HOME 或将 LLVM bin 加入 PATH",
+            "LLVM tool '{}' not found. Set AURA_LLVM_HOME or add LLVM bin to PATH",
             tool
         ))
     })?;
@@ -207,7 +207,7 @@ pub fn link_to_executable(
             // 回退 lld-link（不提供 __chkstk，仅适用于小栈帧程序）
             let tool_path = find_tool("lld-link", options).ok_or_else(|| {
                 AotError::ToolError(
-                    "找不到 clang 或 lld-link，请设置 AURA_LLVM_HOME 或将 LLVM bin 加入 PATH"
+                    "clang or lld-link not found. Set AURA_LLVM_HOME or add LLVM bin to PATH"
                         .to_string(),
                 )
             })?;
@@ -254,8 +254,9 @@ fn compile_std_cffi(options: &AotOptions) -> Result<PathBuf, AotError> {
     let cffi_obj = tmp_dir.join(format!("aura_std_cffi.{}", ext));
 
     // 找 clang
-    let clang_path = find_tool("clang", options)
-        .ok_or_else(|| AotError::ToolError("找不到 clang，无法编译 std C FFI".to_string()))?;
+    let clang_path = find_tool("clang", options).ok_or_else(|| {
+        AotError::ToolError("clang not found, cannot compile std C FFI".to_string())
+    })?;
 
     // 编译命令
     let mut cmd = Command::new(clang_path);
@@ -273,14 +274,15 @@ fn compile_std_cffi(options: &AotOptions) -> Result<PathBuf, AotError> {
 
 /// 执行命令并报告结果
 fn run_and_report(cmd: &mut Command, tool_name: &str) -> Result<(), AotError> {
-    let output =
-        cmd.output().map_err(|e| AotError::ToolError(format!("无法启动 {}: {}", tool_name, e)))?;
+    let output = cmd
+        .output()
+        .map_err(|e| AotError::ToolError(format!("failed to start {}: {}", tool_name, e)))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         return Err(AotError::LinkerFailed(format!(
-            "{} 失败:\nstdout: {}\nstderr: {}",
+            "{} failed:\nstdout: {}\nstderr: {}",
             tool_name, stdout, stderr
         )));
     }
@@ -357,8 +359,12 @@ fn parse_object_file(
 ) -> Result<(Vec<u8>, u64, bool, Vec<(String, u64)>), LlvmToolError> {
     use object::read::{File, Object, ObjectSection, ObjectSymbol};
 
-    let file = File::parse(bytes)
-        .map_err(|e| make_tool_error("parse_object", &format!("无法解析目标文件: {}", e)))?;
+    let file = File::parse(bytes).map_err(|e| {
+        make_tool_error(
+            "parse_object",
+            &format!("failed to parse object file: {}", e),
+        )
+    })?;
 
     let is_elf = matches!(file.format(), object::BinaryFormat::Elf);
 
@@ -368,14 +374,19 @@ fn parse_object_file(
     if let Some(section) = file.section_by_name(".text") {
         text_data = section
             .data()
-            .map_err(|e| make_tool_error("parse_object", &format!("读取 .text 段失败: {}", e)))?
+            .map_err(|e| {
+                make_tool_error(
+                    "parse_object",
+                    &format!("failed to read .text section: {}", e),
+                )
+            })?
             .to_vec();
         text_start = section.address();
     }
     if text_data.is_empty() {
         return Err(make_tool_error(
             "parse_object",
-            "目标文件中未找到 .text 段或段为空",
+            ".text section not found or empty in object file",
         ));
     }
 
@@ -443,15 +454,16 @@ pub fn link_to_blob(
     _options: &AotOptions,
 ) -> LlvmToolResult<Vec<(String, AuraFuncDesc)>> {
     // 1. 读取目标文件
-    let bytes = std::fs::read(object_path)
-        .map_err(|e| make_tool_error("read_object", &format!("读取目标文件失败: {}", e)))?;
+    let bytes = std::fs::read(object_path).map_err(|e| {
+        make_tool_error("read_object", &format!("failed to read object file: {}", e))
+    })?;
 
     // 2. 解析目标文件，提取 .text 数据和符号表
     let (text_data, text_start, is_elf, symbols) = parse_object_file(&bytes)?;
 
     // 3. 写入 blob 文件
     std::fs::write(blob_path, &text_data)
-        .map_err(|e| make_tool_error("write_blob", &format!("写入 blob 文件失败: {}", e)))?;
+        .map_err(|e| make_tool_error("write_blob", &format!("failed to write blob file: {}", e)))?;
 
     // 4. 为每个 aura_aot_* 符号生成函数描述符
     let mut descs = Vec::new();
@@ -486,8 +498,8 @@ pub fn link_to_blob(
             return Err(make_tool_error(
                 "link_to_blob",
                 &format!(
-                    "函数 '{}' 的 entry_offset 为 0（address={:#x}, text_start={:#x}），\
-                     请检查该符号是否在 .text 段内",
+                    "function '{}' has entry_offset 0 (address={:#x}, text_start={:#x}), \
+                     please check if this symbol is within the .text section",
                     name, address, text_start
                 ),
             ));

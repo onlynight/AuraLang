@@ -168,7 +168,7 @@ impl TaskGraph {
                     self.dfs_find_cycle(start, &edges, &mut visited, &mut in_stack, &mut stack)
                 {
                     return LoomError::Task(format!(
-                        "循环依赖检测: 任务存在循环依赖: {}",
+                        "Cycle detection: task has circular dependency: {}",
                         cycle.join(" → ")
                     ));
                 }
@@ -176,7 +176,7 @@ impl TaskGraph {
         }
 
         // 不应该到达这里
-        LoomError::Task("未知错误: 循环依赖检测失败".to_string())
+        LoomError::Task("Unknown error: cycle detection failed".to_string())
     }
 
     fn dfs_find_cycle(
@@ -215,7 +215,7 @@ impl TaskGraph {
     /// 用于构建从 CLI 命令到任务图的映射。
     pub fn find_reachable(&self, root: &str) -> Result<Vec<String>, LoomError> {
         if !self.tasks.contains_key(root) {
-            return Err(LoomError::Task(format!("任务 '{}' 不存在", root)));
+            return Err(LoomError::Task(format!("Task '{}' does not exist", root)));
         }
 
         let mut visited: HashSet<String> = HashSet::new();
@@ -229,7 +229,7 @@ impl TaskGraph {
                     if !visited.contains(dep) {
                         if !self.tasks.contains_key(dep) {
                             return Err(LoomError::Task(format!(
-                                "任务 '{}' 依赖不存在的任务 '{}'",
+                                "Task '{}' depends on non-existent task '{}'",
                                 name, dep
                             )));
                         }
@@ -256,7 +256,7 @@ impl TaskGraph {
             for dep in &task.depends_on {
                 if !self.tasks.contains_key(dep) {
                     return Err(LoomError::Task(format!(
-                        "任务 '{}' 依赖不存在的任务 '{}'",
+                        "Task '{}' depends on non-existent task '{}'",
                         task.name, dep
                     )));
                 }
@@ -275,7 +275,7 @@ impl TaskGraph {
                     self.dfs_find_cycle(start, &edges, &mut visited, &mut in_stack, &mut stack)
                 {
                     return Err(LoomError::Task(format!(
-                        "循环依赖检测: 任务存在循环依赖: {}",
+                        "Cycle detection: task has circular dependency: {}",
                         cycle.join(" → ")
                     )));
                 }
@@ -406,7 +406,7 @@ mod tests {
         let result = graph.topological_sort();
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("循环依赖"));
+        assert!(err.to_lowercase().contains("circular dependency"));
     }
 
     #[test]
@@ -417,7 +417,7 @@ mod tests {
         let result = graph.validate();
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("不存在的任务"));
+        assert!(err.to_lowercase().contains("non-existent task"));
     }
 
     #[test]

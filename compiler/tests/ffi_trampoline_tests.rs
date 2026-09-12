@@ -13,7 +13,7 @@ use compiler::vm::ffi::trampoline_ptr;
 #[test]
 fn test_trampoline_ptr_nonzero() {
     let ptr = trampoline_ptr();
-    assert_ne!(ptr, 0, "蹦床函数指针不应为 0");
+    assert_ne!(ptr, 0, "trampoline function pointer should not be 0");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -53,5 +53,8 @@ const TRAMPOLINE_MAX_ARGS: usize = 8;
 
 #[test]
 fn test_trampoline_max_args() {
-    assert_eq!(TRAMPOLINE_MAX_ARGS, 8, "蹦床应支持最多 8 个参数");
+    assert_eq!(
+        TRAMPOLINE_MAX_ARGS, 8,
+        "trampoline should support up to 8 arguments"
+    );
 }

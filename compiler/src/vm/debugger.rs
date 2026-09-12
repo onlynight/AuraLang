@@ -793,21 +793,23 @@ impl DebugSession {
     pub fn show_jit_state(&self) -> String {
         let jit_info = match &self.jit_info {
             Some(info) => info,
-            None => return "  (JIT 信息不可用 — 请使用 --mode jit 启动)".to_string(),
+            None => {
+                return "  (JIT info unavailable — please use --mode jit to launch)".to_string();
+            }
         };
 
         let mut out = String::new();
         out.push_str(&format!(
-            "  JIT 编译状态 (共 {} 函数):\n",
+            "  JIT compilation status (total {} functions):\n",
             jit_info.func_states.len()
         ));
         out.push_str(&format!(
-            "    已编译: {}  |  已跳过(回退VM): {}\n",
+            "    Compiled: {}  |  Skipped (VM fallback): {}\n",
             jit_info.total_compile_count, jit_info.fallback_count
         ));
         out.push_str(&format!(
             "  {:>5}  {:<25}  {:>8}  {:>6}  {:>6}\n",
-            "#", "函数", "状态", "调用", "编译"
+            "#", "Function", "Status", "Calls", "Compiled"
         ));
         out.push_str(&format!(
             "  {:>5}  {:<25}  {:>8}  {:>6}  {:>6}\n",
@@ -849,20 +851,25 @@ impl DebugSession {
     pub fn show_jit_fallbacks(&self) -> String {
         let jit_info = match &self.jit_info {
             Some(info) => info,
-            None => return "  (JIT 信息不可用 — 请使用 --mode jit 启动)".to_string(),
+            None => {
+                return "  (JIT info unavailable — please use --mode jit to launch)".to_string();
+            }
         };
 
         let skipped: Vec<_> = jit_info.func_states.iter().filter(|s| s.is_skipped).collect();
         if skipped.is_empty() {
-            return "  (无回退函数 — 所有 JIT 编译成功)".to_string();
+            return "  (No fallback functions — all JIT compilations successful)".to_string();
         }
 
         let mut out = String::new();
-        out.push_str(&format!("  JIT 回退详情 ({} 个函数):\n", skipped.len()));
+        out.push_str(&format!(
+            "  JIT fallback details ({} functions):\n",
+            skipped.len()
+        ));
         for state in skipped {
             let reason = state.skip_reason.clone().unwrap_or_else(|| "unknown".to_string());
             out.push_str(&format!(
-                "    #{}  {}  (调用 {} 次)\n    原因: {}\n",
+                "    #{}  {}  ({} calls)\n    Reason: {}\n",
                 state.func_idx, state.func_name, state.call_count, reason
             ));
         }
@@ -873,19 +880,21 @@ impl DebugSession {
     pub fn show_jit_compiled(&self) -> String {
         let jit_info = match &self.jit_info {
             Some(info) => info,
-            None => return "  (JIT 信息不可用 — 请使用 --mode jit 启动)".to_string(),
+            None => {
+                return "  (JIT info unavailable — please use --mode jit to launch)".to_string();
+            }
         };
 
         let compiled: Vec<_> = jit_info.func_states.iter().filter(|s| s.is_compiled).collect();
         if compiled.is_empty() {
-            return "  (无已编译函数 — JIT 尚未触发)".to_string();
+            return "  (No compiled functions — JIT has not been triggered)".to_string();
         }
 
         let mut out = String::new();
-        out.push_str(&format!("  已 JIT 编译 ({} 个函数):\n", compiled.len()));
+        out.push_str(&format!("  JIT compiled ({} functions):\n", compiled.len()));
         for state in compiled {
             out.push_str(&format!(
-                "    #{}  {}  (调用 {} 次)\n",
+                "    #{}  {}  ({} calls)\n",
                 state.func_idx, state.func_name, state.call_count
             ));
         }
@@ -900,7 +909,7 @@ impl DebugSession {
     #[cfg(feature = "llvm")]
     pub fn aot_compile(&mut self) -> Result<String, String> {
         if self.mode != DebugMode::Aot {
-            return Err("请先切换到 AOT 模式 (mode aot)".to_string());
+            return Err("Please switch to AOT mode first (mode aot)".to_string());
         }
 
         use std::path::Path;
@@ -927,7 +936,7 @@ impl DebugSession {
         // 执行 AOT 编译
         let output = match crate::codegen::aot::aot_compile(&self.source, &exe_path, opts) {
             Ok(output) => output,
-            Err(e) => return Err(format!("AOT 编译失败: {}", e)),
+            Err(e) => return Err(format!("AOT compilation failed: {}", e)),
         };
 
         // 解析 .ll 文件提取 DWARF 函数信息
@@ -948,7 +957,7 @@ impl DebugSession {
         });
 
         let summary = format!(
-            "  AOT 编译完成:\n    LLVM IR: {:?}\n    可执行文件: {:?}\n    DWARF 函数: {} 个",
+            "  AOT compilation complete:\n    LLVM IR: {:?}\n    Executable: {:?}\n    DWARF functions: {}",
             output.ll_path.as_ref().map(|p| p.to_string_lossy().to_string()),
             output.exe_path.as_ref().map(|p| p.to_string_lossy().to_string()),
             dwarf_functions.len()
@@ -1009,23 +1018,23 @@ impl DebugSession {
     pub fn show_aot_dwarf(&self) -> String {
         let aot_info = match &self.aot_info {
             Some(info) => info,
-            None => return "  (AOT 尚未编译 — 请先执行 aot compile)".to_string(),
+            None => return "  (AOT not yet compiled — please run aot compile first)".to_string(),
         };
 
         let mut out = String::new();
-        out.push_str("  AOT DWARF 调试信息:\n");
+        out.push_str("  AOT DWARF debug info:\n");
         if let Some(ref ll) = aot_info.ll_path {
             out.push_str(&format!("    LLVM IR: {}\n", ll.to_string_lossy()));
         }
         if let Some(ref exe) = aot_info.exe_path {
-            out.push_str(&format!("    可执行: {}\n", exe.to_string_lossy()));
+            out.push_str(&format!("    Executable: {}\n", exe.to_string_lossy()));
         }
         out.push_str(&format!(
-            "    支持断点: {}\n",
-            if aot_info.supports_breakpoints { "是" } else { "否" }
+            "    Breakpoints supported: {}\n",
+            if aot_info.supports_breakpoints { "yes" } else { "no" }
         ));
         out.push_str(&format!(
-            "    DWARF 函数 ({} 个):\n",
+            "    DWARF functions ({}):\n",
             aot_info.dwarf_functions.len()
         ));
 
@@ -1043,15 +1052,15 @@ impl DebugSession {
     pub fn show_aot_path(&self) -> String {
         let aot_info = match &self.aot_info {
             Some(info) => info,
-            None => return "  (AOT 尚未编译 — 请先执行 aot compile)".to_string(),
+            None => return "  (AOT not yet compiled — please run aot compile first)".to_string(),
         };
 
         let mut out = String::new();
         if let Some(ref ll) = aot_info.ll_path {
-            out.push_str(&format!("  .ll 文件: {}\n", ll.to_string_lossy()));
+            out.push_str(&format!("  .ll file: {}\n", ll.to_string_lossy()));
         }
         if let Some(ref exe) = aot_info.exe_path {
-            out.push_str(&format!("  可执行文件: {}\n", exe.to_string_lossy()));
+            out.push_str(&format!("  Executable: {}\n", exe.to_string_lossy()));
         }
         out
     }
@@ -1062,8 +1071,8 @@ impl DebugSession {
             let aot_info = self
                 .aot_info
                 .as_ref()
-                .ok_or_else(|| "AOT 尚未编译 — 请先执行 aot compile".to_string())?;
-            aot_info.exe_path.as_ref().ok_or_else(|| "无可执行文件".to_string())?.clone()
+                .ok_or_else(|| "AOT not yet compiled — please run aot compile first".to_string())?;
+            aot_info.exe_path.as_ref().ok_or_else(|| "No executable file".to_string())?.clone()
         };
 
         // 检测可用调试器
@@ -1117,15 +1126,15 @@ impl DebugSession {
                     cmd.arg(&exe_str);
                 }
 
-                cmd.spawn().map_err(|e| format!("无法启动 {}: {}", debugger, e))?;
+                cmd.spawn().map_err(|e| format!("Cannot launch {}: {}", debugger, e))?;
 
                 Ok(format!(
-                    "  已启动外部调试器: {}\n    目标: {}\n    提示: 在调试器中使用 b <函数名> 设置断点，c 继续执行",
+                    "  External debugger launched: {}\n    Target: {}\n    Tip: Use 'b <funcname>' to set breakpoint, 'c' to continue in the debugger",
                     debugger, exe_str
                 ))
             }
             None => Err(
-                "未找到外部调试器 (lldb/gdb/windbg)\n  请安装 LLVM (包含 lldb) 或 GDB 后重试"
+                "External debugger not found (lldb/gdb/windbg)\n  Please install LLVM (with lldb) or GDB and try again"
                     .to_string(),
             ),
         }

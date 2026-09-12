@@ -48,7 +48,7 @@ fn test_leak_report_clean() {
 
     // 泄漏报告应为空
     let report = heap.leak_report();
-    assert_eq!(report.leaked, 0, "无泄漏时 leaked 应为 0");
+    assert_eq!(report.leaked, 0, "leaked should be 0 when no leaks");
 }
 
 #[test]
@@ -61,7 +61,7 @@ fn test_leak_report_with_leaks() {
     heap.alloc_array(3);
 
     let report = heap.leak_report();
-    assert_eq!(report.leaked, 3, "3 个未释放对象应为泄漏");
+    assert_eq!(report.leaked, 3, "3 unreleased objects should be leaks");
     assert_eq!(report.details.len(), 3);
 }
 
@@ -78,8 +78,8 @@ fn test_leak_report_details() {
     // 验证详情包含正确的信息
     let has_object = report.details.iter().any(|d| d.data_type.contains("Object"));
     let has_array = report.details.iter().any(|d| d.data_type.contains("Array"));
-    assert!(has_object, "应包含 Object 类型");
-    assert!(has_array, "应包含 Array 类型");
+    assert!(has_object, "should contain Object type");
+    assert!(has_array, "should contain Array type");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

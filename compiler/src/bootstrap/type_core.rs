@@ -43,8 +43,11 @@ pub fn cast(v: &Value, target: &str) -> Result<Value, Trap> {
                 .trim()
                 .parse::<i64>()
                 .map(Value::Int)
-                .map_err(|_| Trap::new(format!("cast: 无法将 \"{s}\" 转换为 Int"))),
-            _ => Err(Trap::new(format!("cast: {} 无法转换为 Int", v.type_name()))),
+                .map_err(|_| Trap::new(format!("cast: cannot convert \"{s}\" to Int"))),
+            _ => Err(Trap::new(format!(
+                "cast: {} cannot be converted to Int",
+                v.type_name()
+            ))),
         },
         T_FLOAT => match v {
             Value::Float(_) => Ok(v.clone()),
@@ -53,9 +56,9 @@ pub fn cast(v: &Value, target: &str) -> Result<Value, Trap> {
                 .trim()
                 .parse::<f64>()
                 .map(Value::Float)
-                .map_err(|_| Trap::new(format!("cast: 无法将 \"{s}\" 转换为 Float"))),
+                .map_err(|_| Trap::new(format!("cast: cannot convert \"{s}\" to Float"))),
             _ => Err(Trap::new(format!(
-                "cast: {} 无法转换为 Float",
+                "cast: {} cannot be converted to Float",
                 v.type_name()
             ))),
         },
@@ -70,16 +73,16 @@ pub fn cast(v: &Value, target: &str) -> Result<Value, Trap> {
             Value::Str(s) => match s.as_ref() {
                 "true" => Ok(Value::Bool(true)),
                 "false" => Ok(Value::Bool(false)),
-                _ => Err(Trap::new(format!("cast: 无法将 \"{s}\" 转换为 Bool"))),
+                _ => Err(Trap::new(format!("cast: cannot convert \"{s}\" to Bool"))),
             },
-            _ => Err(Trap::new("cast: Pointer 无法转换为 Bool")),
+            _ => Err(Trap::new("cast: Pointer cannot be converted to Bool")),
         },
         T_POINTER => match v {
             Value::Ptr(_) => Ok(v.clone()),
             Value::Int(n) => Ok(Value::Ptr(*n as usize)),
             Value::Null => Ok(Value::Ptr(0)),
             _ => Err(Trap::new(format!(
-                "cast: {} 无法转换为 Pointer",
+                "cast: {} cannot be converted to Pointer",
                 v.type_name()
             ))),
         },
@@ -87,10 +90,12 @@ pub fn cast(v: &Value, target: &str) -> Result<Value, Trap> {
             if matches!(v, Value::Null) {
                 Ok(v.clone())
             } else {
-                Err(Trap::new("cast: 非 Null 值无法转换为 Null"))
+                Err(Trap::new(
+                    "cast: non-Null value cannot be converted to Null",
+                ))
             }
         }
-        other => Err(Trap::new(format!("cast: 未知目标类型 {other}"))),
+        other => Err(Trap::new(format!("cast: unknown target type {other}"))),
     }
 }
 

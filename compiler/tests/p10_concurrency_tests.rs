@@ -6,9 +6,9 @@ use compiler::codegen::compile_source;
 use compiler::vm::{Value, Vm, VmOptions};
 
 fn run_main(source: &str) -> Value {
-    let module = compile_source(source).expect("编译应成功");
-    let mut vm = Vm::new(&module, VmOptions::default()).expect("VM 初始化");
-    vm.run().expect("运行应成功")
+    let module = compile_source(source).expect("compilation should succeed");
+    let mut vm = Vm::new(&module, VmOptions::default()).expect("VM initialization");
+    vm.run().expect("run should succeed")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

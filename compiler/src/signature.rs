@@ -283,22 +283,25 @@ pub fn to_bytes(sig: &ModuleSig) -> Result<Vec<u8>, SigError> {
 /// 从字节反序列化
 pub fn from_bytes(bytes: &[u8]) -> Result<ModuleSig, SigError> {
     if bytes.len() < 8 {
-        return Err(SigError::Format("文件太小".to_string()));
+        return Err(SigError::Format("file too small".to_string()));
     }
     if &bytes[..4] != SIG_MAGIC {
-        return Err(SigError::Format("魔数不匹配".to_string()));
+        return Err(SigError::Format("magic number mismatch".to_string()));
     }
     let version = u16::from_le_bytes([
         bytes[4], bytes[5],
     ]);
     if version != SIG_VERSION {
-        return Err(SigError::Format(format!("不支持的签名版本: {}", version)));
+        return Err(SigError::Format(format!(
+            "unsupported signature version: {}",
+            version
+        )));
     }
     let json_len = u32::from_le_bytes([
         bytes[6], bytes[7], bytes[8], bytes[9],
     ]) as usize;
     if bytes.len() < 10 + json_len {
-        return Err(SigError::Format("数据越界".to_string()));
+        return Err(SigError::Format("data out of bounds".to_string()));
     }
     let json = &bytes[10..10 + json_len];
     serde_json::from_slice(json).map_err(|e| SigError::Parse(e.to_string()))

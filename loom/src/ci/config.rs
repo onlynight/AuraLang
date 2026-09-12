@@ -155,13 +155,13 @@ impl CiConfig {
     pub fn from_file(path: &Path) -> Result<Self, LoomError> {
         if !path.exists() {
             return Err(LoomError::Ci(format!(
-                "CI 配置文件不存在: {}",
+                "CI config file not found: {}",
                 path.display()
             )));
         }
 
         let content = std::fs::read_to_string(path)
-            .map_err(|e| LoomError::Ci(format!("读取 CI 配置文件失败: {}", e)))?;
+            .map_err(|e| LoomError::Ci(format!("Failed to read CI config file: {}", e)))?;
 
         // 根据扩展名选择解析格式
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -181,30 +181,31 @@ impl CiConfig {
     /// 从 YAML 字符串解析
     pub fn from_yaml(content: &str) -> Result<Self, LoomError> {
         serde_yaml::from_str(content)
-            .map_err(|e| LoomError::Ci(format!("解析 YAML CI 配置失败: {}", e)))
+            .map_err(|e| LoomError::Ci(format!("Failed to parse YAML CI config: {}", e)))
     }
 
     /// 从 JSON 字符串解析
     pub fn from_json(content: &str) -> Result<Self, LoomError> {
         serde_json::from_str(content)
-            .map_err(|e| LoomError::Ci(format!("解析 JSON CI 配置失败: {}", e)))
+            .map_err(|e| LoomError::Ci(format!("Failed to parse JSON CI config: {}", e)))
     }
 
     /// 从 TOML 字符串解析（向后兼容）
     pub fn from_toml(content: &str) -> Result<Self, LoomError> {
-        toml::from_str(content).map_err(|e| LoomError::Ci(format!("解析 CI 配置失败: {}", e)))
+        toml::from_str(content)
+            .map_err(|e| LoomError::Ci(format!("Failed to parse CI config: {}", e)))
     }
 
     /// 序列化为 JSON
     pub fn to_json(&self) -> Result<String, LoomError> {
         serde_json::to_string_pretty(self)
-            .map_err(|e| LoomError::Ci(format!("序列化 JSON CI 配置失败: {}", e)))
+            .map_err(|e| LoomError::Ci(format!("Failed to serialize JSON CI config: {}", e)))
     }
 
     /// 序列化为 YAML
     pub fn to_yaml(&self) -> Result<String, LoomError> {
         serde_yaml::to_string(self)
-            .map_err(|e| LoomError::Ci(format!("序列化 YAML CI 配置失败: {}", e)))
+            .map_err(|e| LoomError::Ci(format!("Failed to serialize YAML CI config: {}", e)))
     }
 
     /// 验证 CI 配置
@@ -212,7 +213,7 @@ impl CiConfig {
         let mut warnings = Vec::new();
 
         if self.steps.is_empty() {
-            warnings.push("CI 配置没有步骤定义".to_string());
+            warnings.push("CI config has no step definitions".to_string());
         }
 
         for (i, step) in self.steps.iter().enumerate() {
@@ -221,14 +222,14 @@ impl CiConfig {
                     command, ..
                 } => {
                     if command.trim().is_empty() {
-                        warnings.push(format!("步骤 {} 命令为空", i + 1));
+                        warnings.push(format!("Step {} command is empty", i + 1));
                     }
                 }
                 CiStep::Loom {
                     command, ..
                 } => {
                     if command.trim().is_empty() {
-                        warnings.push(format!("步骤 {} loom 命令为空", i + 1));
+                        warnings.push(format!("Step {} loom command is empty", i + 1));
                     }
                 }
                 _ => {}
@@ -333,13 +334,13 @@ impl CiExecutor {
         let mut result = CiResult::default();
         let mut step_index = 0;
 
-        println!("🚀 CI 开始执行");
-        println!("   项目: {}", self.project_dir.display());
-        println!("   步骤: {} 个", self.config.steps.len());
+        println!("🚀 CI starting execution");
+        println!("   Project: {}", self.project_dir.display());
+        println!("   Steps: {}", self.config.steps.len());
 
         for step in &self.config.steps {
             step_index += 1;
-            println!("\n--- 步骤 {}/{} ---", step_index, self.config.steps.len());
+            println!("\n--- Step {}/{} ---", step_index, self.config.steps.len());
 
             match step {
                 CiStep::Shell {
@@ -372,16 +373,19 @@ impl CiExecutor {
             }
 
             if result.has_failure() {
-                println!("❌ CI 在步骤 {} 失败", step_index);
+                println!("❌ CI failed at step {}", step_index);
                 break;
             }
         }
 
-        println!("\n=== CI 执行结果 ===");
-        println!("   成功: {}", result.success_count);
-        println!("   失败: {}", result.failure_count);
-        println!("   跳过: {}", result.skip_count);
-        println!("   总时间: {:.1}s", result.total_duration().as_secs_f64());
+        println!("\n=== CI execution results ===");
+        println!("   Succeeded: {}", result.success_count);
+        println!("   Failed: {}", result.failure_count);
+        println!("   Skipped: {}", result.skip_count);
+        println!(
+            "   Total time: {:.1}s",
+            result.total_duration().as_secs_f64()
+        );
 
         Ok(result)
     }
@@ -412,17 +416,17 @@ impl CiExecutor {
             ])
             .current_dir(&dir)
             .output()
-            .map_err(|e| LoomError::Ci(format!("执行 shell 命令失败: {}", e)))?;
+            .map_err(|e| LoomError::Ci(format!("Failed to execute shell command: {}", e)))?;
 
         let duration = start.elapsed();
         result.step_durations.push(duration);
 
         if output.status.success() {
-            println!("  ✓ 成功 ({}ms)", duration.as_millis());
+            println!("  ✓ Succeeded ({}ms)", duration.as_millis());
             result.success_count += 1;
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!("  ✗ 失败: {}", stderr);
+            eprintln!("  ✗ Failed: {}", stderr);
             result.failure_count += 1;
         }
 
@@ -455,18 +459,19 @@ impl CiExecutor {
         }
         cmd.current_dir(&self.project_dir);
 
-        let output =
-            cmd.output().map_err(|e| LoomError::Ci(format!("执行 loom 命令失败: {}", e)))?;
+        let output = cmd
+            .output()
+            .map_err(|e| LoomError::Ci(format!("Failed to execute loom command: {}", e)))?;
 
         let duration = start.elapsed();
         result.step_durations.push(duration);
 
         if output.status.success() {
-            println!("  ✓ 成功 ({}ms)", duration.as_millis());
+            println!("  ✓ Succeeded ({}ms)", duration.as_millis());
             result.success_count += 1;
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!("  ✗ 失败: {}", stderr);
+            eprintln!("  ✗ Failed: {}", stderr);
             result.failure_count += 1;
         }
 
@@ -480,7 +485,7 @@ impl CiExecutor {
             return Ok(());
         }
 
-        println!("  Test: 运行测试");
+        println!("  Test: Running tests");
         result.success_count += 1;
         Ok(())
     }
@@ -708,7 +713,11 @@ mod tests {
         ));
         if example_path.exists() {
             let config = CiConfig::from_file(example_path).unwrap_or_else(|e| {
-                panic!("示例 YAML 解析失败 ({}): {}", example_path.display(), e)
+                panic!(
+                    "Example YAML parse failed ({}): {}",
+                    example_path.display(),
+                    e
+                )
             });
             assert_eq!(config.default_branch, "main");
             assert!(!config.steps.is_empty());

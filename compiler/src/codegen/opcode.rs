@@ -1094,14 +1094,14 @@ mod tests {
                 assert_eq!(
                     buf.len(),
                     1 + OpCode::operand_size(b),
-                    "opcode {} ({:?})：write 写出 {} 字节，但 1+operand_size({}) = {}",
+                    "opcode {} ({:?}): write wrote {} bytes, but 1+operand_size({}) = {}",
                     b,
                     op,
                     buf.len(),
                     b,
                     1 + OpCode::operand_size(b)
                 );
-                assert_eq!(op.byte(), b, "opcode {:?} 的 byte() 应回到 {}", op, b);
+                assert_eq!(op.byte(), b, "opcode {:?} byte() should return {}", op, b);
             }
         }
     }

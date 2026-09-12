@@ -21,14 +21,14 @@ fn test_full_registry_without_imports() {
             return 42
         }
     "#;
-    let module = compile_source(src).expect("编译应成功");
+    let module = compile_source(src).expect("compilation should succeed");
     assert!(
         module.enabled_modules.is_empty(),
         "无 import 时 enabled_modules 应为空"
     );
 
     // 创建 VM 时使用全量注册（向后兼容）
-    let vm = Vm::new(&module, VmOptions::default()).expect("VM 创建应成功");
+    let vm = Vm::new(&module, VmOptions::default()).expect("VM creation should succeed");
     assert!(
         vm.contains_native("aura.lang.std.Math.sin"),
         "全量注册应包含 aura.lang.std.Math.sin"
@@ -52,14 +52,14 @@ fn test_partial_registry_with_imports() {
             return sin(1.0)
         }
     "#;
-    let module = compile_source(src).expect("编译应成功");
+    let module = compile_source(src).expect("compilation should succeed");
     assert!(
         module.enabled_modules.contains(&"math".to_string()),
         "enabled_modules 应包含 'math'"
     );
 
     // 创建 VM 时使用按需注册
-    let vm = Vm::new(&module, VmOptions::default()).expect("VM 创建应成功");
+    let vm = Vm::new(&module, VmOptions::default()).expect("VM creation should succeed");
 
     // math 模块应注册
     assert!(
@@ -96,18 +96,22 @@ fn test_multiple_imports_only_registers_specified() {
             return toStr(sqrt(16.0))
         }
     "#;
-    let module = compile_source(src).expect("编译应成功");
+    let module = compile_source(src).expect("compilation should succeed");
     assert!(
         module.enabled_modules.contains(&"math".to_string()),
         "enabled_modules 应包含 'math'"
     );
     assert!(
         module.enabled_modules.contains(&"string".to_string()),
-        "enabled_modules 应包含 'string'"
+        "enabled_modules should contain 'string'"
     );
-    assert_eq!(module.enabled_modules.len(), 2, "应只包含 2 个模块");
+    assert_eq!(
+        module.enabled_modules.len(),
+        2,
+        "should only contain 2 modules"
+    );
 
-    let vm = Vm::new(&module, VmOptions::default()).expect("VM 创建应成功");
+    let vm = Vm::new(&module, VmOptions::default()).expect("VM creation should succeed");
 
     // 两个模块都应注册
     assert!(vm.contains_native("aura.lang.std.Math.sin"));
@@ -136,9 +140,12 @@ fn test_prelude_always_registered() {
             return abs(-5)
         }
     "#;
-    let module1 = compile_source(src1).expect("编译应成功");
-    let vm1 = Vm::new(&module1, VmOptions::default()).expect("VM 创建应成功");
-    assert!(vm1.contains_native("abs"), "prelu 'abs' 应始终注册");
+    let module1 = compile_source(src1).expect("compilation should succeed");
+    let vm1 = Vm::new(&module1, VmOptions::default()).expect("VM creation should succeed");
+    assert!(
+        vm1.contains_native("abs"),
+        "prelu 'abs' should always be registered"
+    );
 
     // 有 import
     let src2 = r#"
@@ -147,13 +154,16 @@ fn test_prelude_always_registered() {
             return sin(1.0)
         }
     "#;
-    let module2 = compile_source(src2).expect("编译应成功");
-    let vm2 = Vm::new(&module2, VmOptions::default()).expect("VM 创建应成功");
+    let module2 = compile_source(src2).expect("compilation should succeed");
+    let vm2 = Vm::new(&module2, VmOptions::default()).expect("VM creation should succeed");
     assert!(
         vm2.contains_native("abs"),
-        "prelu 'abs' 应始终注册（即使有 import）"
+        "prelu 'abs' should always be registered (even with import)"
     );
-    assert!(vm2.contains_native("println"), "prelu 'println' 应始终注册");
+    assert!(
+        vm2.contains_native("println"),
+        "prelu 'println' should always be registered"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

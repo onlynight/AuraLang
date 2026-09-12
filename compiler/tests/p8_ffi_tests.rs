@@ -16,14 +16,14 @@ use compiler::vm::{Value, Vm, VmOptions};
 
 /// 编译源码并执行 main，返回结果
 fn run_main(source: &str) -> Value {
-    let module = compile_source(source).expect("编译应成功");
-    let mut vm = Vm::new(&module, VmOptions::default()).expect("VM 初始化");
-    vm.run().expect("运行应成功")
+    let module = compile_source(source).expect("compilation should succeed");
+    let mut vm = Vm::new(&module, VmOptions::default()).expect("VM initialization");
+    vm.run().expect("run should succeed")
 }
 
 /// 仅编译源码（不执行），用于语法/语义检查
 fn compile_only(source: &str) {
-    compile_source(source).expect("编译应成功");
+    compile_source(source).expect("compilation should succeed");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -407,7 +407,7 @@ fn test_extern_constants_in_bytecode() {
             return 42
         }
     "#;
-    let module = compile_source(src).expect("编译应成功");
+    let module = compile_source(src).expect("compilation should succeed");
     // 检查常量池是否包含 FFI 常量
     let has_int_42 =
         module.consts.iter().any(|c| matches!(c, compiler::codegen::opcode::Const::Int(42)));
@@ -421,10 +421,10 @@ fn test_extern_constants_in_bytecode() {
     let has_bool_true =
         module.consts.iter().any(|c| matches!(c, compiler::codegen::opcode::Const::Bool(true)));
 
-    assert!(has_int_42, "常量池应包含 Int(42)");
-    assert!(has_float_314, "常量池应包含 Float(3.14)");
-    assert!(has_str_hello, "常量池应包含 Str(\"hello\")");
-    assert!(has_bool_true, "常量池应包含 Bool(true)");
+    assert!(has_int_42, "constant pool should contain Int(42)");
+    assert!(has_float_314, "constant pool should contain Float(3.14)");
+    assert!(has_str_hello, "constant pool should contain Str(\"hello\")");
+    assert!(has_bool_true, "constant pool should contain Bool(true)");
 }
 
 /// 8.9: CString 指令执行（VM 端）

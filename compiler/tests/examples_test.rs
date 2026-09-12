@@ -32,7 +32,7 @@ fn example_path(name: &str) -> String {
 /// 分析示例文件，仅返回 Error 级别的诊断消息。
 fn analyze_example(name: &str) -> Vec<String> {
     let src = std::fs::read_to_string(example_path(name))
-        .unwrap_or_else(|e| panic!("无法读取示例文件 {}: {}", name, e));
+        .unwrap_or_else(|e| panic!("cannot read example file {}: {}", name, e));
     let (_program, result) = analyze_source(&src);
     result
         .errors
@@ -46,7 +46,7 @@ fn analyze_example(name: &str) -> Vec<String> {
 /// 用于验证解析器对全部语法的覆盖度。
 fn check_syntax_errors(name: &str) -> Vec<String> {
     let src = std::fs::read_to_string(example_path(name))
-        .unwrap_or_else(|e| panic!("无法读取示例文件 {}: {}", name, e));
+        .unwrap_or_else(|e| panic!("cannot read example file {}: {}", name, e));
     let mut lexer = compiler::lexer::Lexer::new(&src);
     let tokens = lexer.tokenize();
     let mut parser = compiler::parser::Parser::new(tokens);
@@ -67,7 +67,7 @@ fn showcase_compiles_clean() {
     let syntax_errors = check_syntax_errors("showcase.aura");
     assert!(
         syntax_errors.is_empty(),
-        "showcase.aura 应通过语法分析（零语法错误），实际语法诊断：{:?}",
+        "showcase.aura should pass syntax analysis (zero syntax errors), actual: {:?}",
         syntax_errors
     );
 }
@@ -77,7 +77,7 @@ fn demo_compiles_clean() {
     let errors = analyze_example("demo.aura");
     assert!(
         errors.is_empty(),
-        "demo.aura 应通过语义分析（零错误），实际诊断：{:?}",
+        "demo.aura should pass semantic analysis (zero errors), actual: {:?}",
         errors
     );
 }
@@ -87,22 +87,22 @@ fn demo_errors_reports_expected_diagnostics() {
     let errors = analyze_example("demo_errors.aura");
     assert!(
         !errors.is_empty(),
-        "demo_errors.aura 应产生语义诊断，但没有"
+        "demo_errors.aura should produce semantic diagnostics, but got none"
     );
     let joined = errors.join("\n");
     assert!(
         joined.contains("type mismatch"),
-        "应含类型不匹配诊断，实际：{:?}",
+        "should contain type mismatch diagnostic, actual: {:?}",
         errors
     );
     assert!(
         joined.contains("unresolved reference") || joined.contains("not callable"),
-        "应含未定义引用诊断，实际：{:?}",
+        "should contain unresolved reference diagnostic, actual: {:?}",
         errors
     );
     assert!(
         joined.contains("nullable"),
-        "应含空安全诊断，实际：{:?}",
+        "should contain null safety diagnostic, actual: {:?}",
         errors
     );
 }

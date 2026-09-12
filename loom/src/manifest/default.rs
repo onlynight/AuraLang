@@ -22,14 +22,14 @@ pub const DEFAULT_TOML: &str = include_str!("default.toml");
 /// panic on malformed default TOML — 这是编译时嵌入的字符串，
 /// 若解析失败说明源码有问题，应在 CI 阶段暴露。
 pub fn default_value() -> Value {
-    DEFAULT_TOML.parse().expect("内置默认 aura.toml 解析失败")
+    DEFAULT_TOML.parse().expect("built-in default aura.toml parse failed")
 }
 
 /// 反序列化默认 TOML 为 `LoomManifest`。
 ///
 /// 用于 `loom new` 和测试，提供"无任何项目覆盖"的完整默认 Manifest。
 pub fn default_manifest() -> crate::manifest::LoomManifest {
-    Value::try_into(default_value()).expect("内置默认 aura.toml 反序列化失败")
+    Value::try_into(default_value()).expect("built-in default aura.toml deserialization failed")
 }
 
 /// 深度合并两个 TOML 值：`overlay` 优先于 `base`。

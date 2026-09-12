@@ -61,24 +61,24 @@ impl AuraPluginInfo {
     /// 安全读取插件名称
     pub fn name_str(&self) -> Result<&str, LoomError> {
         if self.name.is_null() {
-            return Err(LoomError::Plugin("插件信息中 name 为 null".to_string()));
+            return Err(LoomError::Plugin("Plugin name is null".to_string()));
         }
         unsafe {
             CStr::from_ptr(self.name)
                 .to_str()
-                .map_err(|e| LoomError::Plugin(format!("插件名称编码错误: {}", e)))
+                .map_err(|e| LoomError::Plugin(format!("Plugin name encoding error: {}", e)))
         }
     }
 
     /// 安全读取插件版本
     pub fn version_str(&self) -> Result<&str, LoomError> {
         if self.version.is_null() {
-            return Err(LoomError::Plugin("插件信息中 version 为 null".to_string()));
+            return Err(LoomError::Plugin("Plugin version is null".to_string()));
         }
         unsafe {
             CStr::from_ptr(self.version)
                 .to_str()
-                .map_err(|e| LoomError::Plugin(format!("插件版本编码错误: {}", e)))
+                .map_err(|e| LoomError::Plugin(format!("Plugin version encoding error: {}", e)))
         }
     }
 
@@ -110,12 +110,14 @@ impl std::fmt::Display for ExternalPluginError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ExternalPluginError::FileNotFound(path) => {
-                write!(f, "插件文件不存在: {}", path.display())
+                write!(f, "Plugin file not found: {}", path.display())
             }
-            ExternalPluginError::LoadError(e) => write!(f, "动态库加载失败: {}", e),
-            ExternalPluginError::MissingSymbol(name) => write!(f, "找不到导出函数: {}", name),
-            ExternalPluginError::CallError(msg) => write!(f, "插件调用失败: {}", msg),
-            ExternalPluginError::InvalidInfo(msg) => write!(f, "无效的插件信息: {}", msg),
+            ExternalPluginError::LoadError(e) => write!(f, "Dynamic library load failed: {}", e),
+            ExternalPluginError::MissingSymbol(name) => {
+                write!(f, "Exported function not found: {}", name)
+            }
+            ExternalPluginError::CallError(msg) => write!(f, "Plugin call failed: {}", msg),
+            ExternalPluginError::InvalidInfo(msg) => write!(f, "Invalid plugin info: {}", msg),
         }
     }
 }
@@ -177,7 +179,7 @@ impl ExternalPlugin {
 
         if info.name.is_null() || info.version.is_null() {
             return Err(ExternalPluginError::InvalidInfo(
-                "插件信息中 name 和 version 不能为 null".to_string(),
+                "Plugin info name and version cannot be null".to_string(),
             ));
         }
 
@@ -237,7 +239,7 @@ impl ExternalPlugin {
             Ok(())
         } else {
             Err(ExternalPluginError::CallError(format!(
-                "插件 '{}' configure 返回错误码 {}",
+                "Plugin '{}' configure returned error code {}",
                 self.name, rc
             )))
         }
@@ -249,8 +251,9 @@ impl ExternalPlugin {
         task_name: &str,
         output_buf: &mut [u8],
     ) -> Result<(), ExternalPluginError> {
-        let task_cstr = CString::new(task_name)
-            .map_err(|e| ExternalPluginError::CallError(format!("任务名编码错误: {}", e)))?;
+        let task_cstr = CString::new(task_name).map_err(|e| {
+            ExternalPluginError::CallError(format!("Task name encoding error: {}", e))
+        })?;
 
         let rc = (self.execute_fn)(
             task_cstr.as_ptr(),
@@ -262,7 +265,7 @@ impl ExternalPlugin {
             Ok(())
         } else {
             Err(ExternalPluginError::CallError(format!(
-                "插件 '{}' execute('{}') 返回错误码 {}",
+                "Plugin '{}' execute('{}') returned error code {}",
                 self.name, task_name, rc
             )))
         }
@@ -288,7 +291,7 @@ impl BuildPlugin for ExternalPlugin {
 
     fn configure(&self, _ctx: &mut PluginContext) -> Result<(), LoomError> {
         self.call_configure()
-            .map_err(|e| LoomError::Plugin(format!("外部插件 configure 失败: {}", e)))
+            .map_err(|e| LoomError::Plugin(format!("External plugin configure failed: {}", e)))
     }
 
     fn execute(&self, task_name: &str, _ctx: &PluginContext) -> Result<TaskResult, LoomError> {
@@ -296,14 +299,14 @@ impl BuildPlugin for ExternalPlugin {
         let mut buf = vec![0u8; 2048];
 
         self.call_execute(task_name, &mut buf)
-            .map_err(|e| LoomError::Plugin(format!("外部插件 execute 失败: {}", e)))?;
+            .map_err(|e| LoomError::Plugin(format!("External plugin execute failed: {}", e)))?;
 
         // 从缓冲区提取输出字符串
         let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
         let output = String::from_utf8_lossy(&buf[..end]).to_string();
 
         if output.is_empty() {
-            Ok(TaskResult::ok(format!("插件 '{}' 执行完成", self.name)))
+            Ok(TaskResult::ok(format!("Plugin '{}' executed", self.name)))
         } else {
             Ok(TaskResult::ok(output))
         }
@@ -326,14 +329,14 @@ pub fn is_plugin_library(path: &Path) -> bool {
 pub fn load_external_plugin(path: &Path) -> Result<Box<dyn BuildPlugin>, LoomError> {
     if !path.exists() {
         return Err(LoomError::Plugin(format!(
-            "外部插件文件不存在: {}",
+            "External plugin file not found: {}",
             path.display()
         )));
     }
 
     if !is_plugin_library(path) {
         return Err(LoomError::Plugin(format!(
-            "外部插件文件格式不支持（需要 .so/.dll/.dylib）: {}",
+            "External plugin file format not supported (requires .so/.dll/.dylib): {}",
             path.display()
         )));
     }
@@ -436,7 +439,7 @@ mod tests {
         let result = load_external_plugin(Path::new("/nonexistent/plugin.so"));
         assert!(result.is_err());
         let err = if let Err(e) = result { e.to_string() } else { unreachable!() };
-        assert!(err.contains("不存在"));
+        assert!(err.contains("not found"));
     }
 
     #[test]
@@ -448,34 +451,34 @@ mod tests {
         let result = load_external_plugin(&file);
         assert!(result.is_err());
         let err = if let Err(e) = result { e.to_string() } else { unreachable!() };
-        assert!(err.contains("格式不支持"));
+        assert!(err.contains("not supported"));
     }
 
     #[test]
     fn test_external_plugin_error_display_file_not_found() {
         let err = ExternalPluginError::FileNotFound(PathBuf::from("/test/foo.so"));
-        assert!(err.to_string().contains("不存在"));
+        assert!(err.to_string().contains("not found"));
         assert!(err.to_string().contains("foo.so"));
     }
 
     #[test]
     fn test_external_plugin_error_display_missing_symbol() {
         let err = ExternalPluginError::MissingSymbol("aura_plugin_info".to_string());
-        assert!(err.to_string().contains("找不到导出函数"));
+        assert!(err.to_string().contains("not found"));
         assert!(err.to_string().contains("aura_plugin_info"));
     }
 
     #[test]
     fn test_external_plugin_error_display_call_error() {
-        let err = ExternalPluginError::CallError("返回错误码 1".to_string());
-        assert!(err.to_string().contains("插件调用失败"));
+        let err = ExternalPluginError::CallError("returned error code 1".to_string());
+        assert!(err.to_string().contains("call failed"));
         assert!(err.to_string().contains("1"));
     }
 
     #[test]
     fn test_external_plugin_error_display_invalid_info() {
         let err = ExternalPluginError::InvalidInfo("name 为 null".to_string());
-        assert!(err.to_string().contains("无效的插件信息"));
+        assert!(err.to_string().contains("Invalid plugin info"));
     }
 
     #[test]

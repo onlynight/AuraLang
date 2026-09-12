@@ -151,7 +151,10 @@ pub unsafe extern "C" fn aura_callback_trampoline(
         dispatcher(callback_id, &args)
     } else {
         // 无活跃派发器：返回 0（未链接）
-        eprintln!("[ffi] 回调 #{} 被调用但无活跃派发器，已忽略", callback_id);
+        eprintln!(
+            "[ffi] Callback #{} called but no active dispatcher, ignored",
+            callback_id
+        );
         0
     }
 }

@@ -11,9 +11,9 @@ use compiler::vm::{Value, Vm, VmOptions};
 
 /// 编译源码并返回 `main` 的执行结果（要求 main 返回一个可断言的值）
 fn run_main(source: &str) -> Value {
-    let module = compile_source(source).expect("编译应成功");
-    let mut vm = Vm::new(&module, VmOptions::default()).expect("VM 初始化");
-    vm.run().expect("运行应成功")
+    let module = compile_source(source).expect("compilation should succeed");
+    let mut vm = Vm::new(&module, VmOptions::default()).expect("VM initialization");
+    vm.run().expect("run should succeed")
 }
 
 #[test]
@@ -165,8 +165,8 @@ fn object_field_roundtrip() {
         ..Default::default()
     };
 
-    let mut vm = Vm::new(&module, VmOptions::default()).expect("VM 初始化");
-    let result = vm.run().expect("运行应成功");
+    let mut vm = Vm::new(&module, VmOptions::default()).expect("VM initialization");
+    let result = vm.run().expect("run should succeed");
     assert_eq!(result, Value::Int(42));
     // 运行后堆中无泄漏（对象已释放或存活但对象模型自洽）
     assert_eq!(vm.live_objects(), 1);
@@ -223,8 +223,8 @@ fn array_roundtrip() {
         enabled_modules: Vec::new(),
         ..Default::default()
     };
-    let mut vm = Vm::new(&module, VmOptions::default()).expect("VM 初始化");
-    let result = vm.run().expect("运行应成功");
+    let mut vm = Vm::new(&module, VmOptions::default()).expect("VM initialization");
+    let result = vm.run().expect("run should succeed");
     assert_eq!(result, Value::Int(99));
 }
 
@@ -244,15 +244,15 @@ fn jit_dispatch_matches_interpreter() {
         }
         fun main(): Int { return sum(10) }
     "#;
-    let module = compile_source(src).expect("编译应成功");
+    let module = compile_source(src).expect("compilation should succeed");
     // 阈值设为 1：首次调用即编译为原生码并走原生派发路径
     let opts = VmOptions {
         jit: true,
         hotspot_threshold: 1,
         ..Default::default()
     };
-    let mut vm = Vm::new(&module, opts).expect("VM 初始化");
-    assert_eq!(vm.run().expect("运行应成功"), Value::Int(45));
+    let mut vm = Vm::new(&module, opts).expect("VM initialization");
+    assert_eq!(vm.run().expect("run should succeed"), Value::Int(45));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -349,8 +349,8 @@ fn list_operations() {
         enabled_modules: Vec::new(),
         ..Default::default()
     };
-    let mut vm = Vm::new(&module, VmOptions::default()).expect("VM 初始化");
-    assert_eq!(vm.run().expect("运行应成功"), Value::Int(20));
+    let mut vm = Vm::new(&module, VmOptions::default()).expect("VM initialization");
+    assert_eq!(vm.run().expect("run should succeed"), Value::Int(20));
 }
 
 /// Map 创建、写入、读取、长度
@@ -394,8 +394,8 @@ fn map_operations() {
         enabled_modules: Vec::new(),
         ..Default::default()
     };
-    let mut vm = Vm::new(&module, VmOptions::default()).expect("VM 初始化");
-    assert_eq!(vm.run().expect("运行应成功"), Value::Int(100));
+    let mut vm = Vm::new(&module, VmOptions::default()).expect("VM initialization");
+    assert_eq!(vm.run().expect("run should succeed"), Value::Int(100));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

@@ -21,14 +21,18 @@ use crate::manifest::LoomManifest;
 pub fn parse_merged(project_value: Value) -> Result<LoomManifest, LoomError> {
     let merged = default::merge(default::default_value(), project_value);
     let manifest: LoomManifest = Value::try_into(merged)
-        .map_err(|e| LoomError::Config(format!("Manifest 反序列化错误: {}", e)))?;
+        .map_err(|e| LoomError::Config(format!("Manifest deserialization error: {}", e)))?;
 
     // 验证必填字段（合并后仍检查，以防用户显式设置空值）
     if manifest.name.is_empty() {
-        return Err(LoomError::Config("缺少必填字段: name".to_string()));
+        return Err(LoomError::Config(
+            "Missing required field: name".to_string(),
+        ));
     }
     if manifest.version.is_empty() {
-        return Err(LoomError::Config("缺少必填字段: version".to_string()));
+        return Err(LoomError::Config(
+            "Missing required field: version".to_string(),
+        ));
     }
 
     Ok(manifest)
@@ -45,11 +49,11 @@ pub fn parse_from_file(path: &Path) -> Result<LoomManifest, LoomError> {
     }
 
     let content = std::fs::read_to_string(path)
-        .map_err(|e| LoomError::Config(format!("无法读取 {}: {}", path.display(), e)))?;
+        .map_err(|e| LoomError::Config(format!("Failed to read {}: {}", path.display(), e)))?;
 
     let project_value: Value = content
         .parse()
-        .map_err(|e| LoomError::Config(format!("TOML 解析错误 {}: {}", path.display(), e)))?;
+        .map_err(|e| LoomError::Config(format!("TOML parse error {}: {}", path.display(), e)))?;
 
     parse_merged(project_value)
 }
@@ -59,7 +63,7 @@ pub fn parse_from_file(path: &Path) -> Result<LoomManifest, LoomError> {
 /// 与 [`parse_from_file`] 行为一致，区别是输入为字符串而非文件路径。
 pub fn parse_from_str(s: &str) -> Result<LoomManifest, LoomError> {
     let project_value: Value =
-        s.parse().map_err(|e| LoomError::Config(format!("TOML 解析错误: {}", e)))?;
+        s.parse().map_err(|e| LoomError::Config(format!("TOML parse error: {}", e)))?;
     parse_merged(project_value)
 }
 
@@ -69,7 +73,7 @@ pub fn parse_and_validate(path: &Path) -> Result<LoomManifest, LoomError> {
     let errors = validate::validate_manifest(&manifest);
     if !errors.is_empty() {
         return Err(LoomError::Config(format!(
-            "配置验证失败:\n{}",
+            "Configuration validation failed:\n{}",
             errors.join("\n")
         )));
     }
@@ -83,7 +87,7 @@ pub fn parse_and_validate(path: &Path) -> Result<LoomManifest, LoomError> {
 pub fn default_manifest(name: &str) -> LoomManifest {
     let mut manifest = default::default_manifest();
     manifest.name = name.to_string();
-    manifest.description = Some(format!("{} 项目", name));
+    manifest.description = Some(format!("{} project", name));
     manifest.repository = Some(format!("https://github.com/aura-lang/{}.git", name));
     manifest.exports = vec!["main".to_string()];
     manifest
@@ -94,13 +98,13 @@ pub fn default_manifest(name: &str) -> LoomManifest {
 /// 只写 name/version/description，其余字段全部由内置默认提供。
 pub fn minimal_toml(name: &str) -> String {
     format!(
-        r#"# {} 项目配置
-# 未声明的字段使用 loom 内置默认值（见 loom/src/manifest/default.toml）
-# 优先级：CLI > Profile > 本文件 > 内置默认 > serde 字段默认
+        r#"# {} project config
+# Undeclared fields use loom built-in defaults (see loom/src/manifest/default.toml)
+# Priority: CLI > Profile > this file > built-in defaults > serde field defaults
 
 name = "{}"
 version = "0.1.0"
-description = "{} 项目"
+description = "{} project"
 "#,
         name, name, name
     )
@@ -258,7 +262,7 @@ version = ""
         let m = default_manifest("my-app");
         assert_eq!(m.name, "my-app");
         assert_eq!(m.version, "0.1.0");
-        assert_eq!(m.description.as_deref(), Some("my-app 项目"));
+        assert_eq!(m.description.as_deref(), Some("my-app project"));
         assert_eq!(
             m.repository.as_deref(),
             Some("https://github.com/aura-lang/my-app.git")
@@ -274,7 +278,7 @@ version = ""
         let toml = minimal_toml("hello");
         assert!(toml.contains("name = \"hello\""));
         assert!(toml.contains("version = \"0.1.0\""));
-        assert!(toml.contains("description = \"hello 项目\""));
+        assert!(toml.contains("description = \"hello project\""));
         // 解析后应能反序列化
         let manifest = parse_from_str(&toml).unwrap();
         assert_eq!(manifest.name, "hello");

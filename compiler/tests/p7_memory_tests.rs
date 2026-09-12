@@ -51,7 +51,7 @@ fun main() {
     if let Some(info) = escape.get("use") {
         assert!(
             info.escaping_allocs.is_empty() || info.non_escaping_allocs.is_empty(),
-            "逃逸分析应正确区分逃逸/非逃逸分配"
+            "escape analysis should correctly distinguish escaping/non-escaping allocations"
         );
     }
 }
@@ -91,7 +91,10 @@ fun main() {
     // 验证字节码中包含 RETAIN 指令
     let has_retain =
         module.functions.iter().any(|f| f.code.iter().any(|b| *b == OpCode::Retain.byte()));
-    assert!(has_retain, "函数调用参数应自动插入 Retain 指令");
+    assert!(
+        has_retain,
+        "function call args should auto-insert Retain instruction"
+    );
 }
 
 /// 测试 ARC 自动插入：字段赋值应插入 Retain
@@ -110,7 +113,10 @@ fun main() {
     let module = compile_source(src).unwrap();
     let has_retain =
         module.functions.iter().any(|f| f.code.iter().any(|b| *b == OpCode::Retain.byte()));
-    assert!(has_retain, "字段赋值应自动插入 Retain 指令");
+    assert!(
+        has_retain,
+        "field assignment should auto-insert Retain instruction"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -161,7 +167,7 @@ fn test_weak_get_after_free() {
     vm.heap_mut().dec_ref(h);
     // 弱引用应不再能升级
     let alive = vm.heap_ref().is_alive(h);
-    assert!(!alive, "释放后对象不应存活");
+    assert!(!alive, "object should not be alive after release");
     assert!(matches!(weak, compiler::vm::Value::Weak(_)));
 }
 
@@ -254,8 +260,8 @@ fun main() {
     // 验证 malloc 和 free 在原生函数表中
     let has_malloc = module.natives.iter().any(|n| n.name == "malloc");
     let has_free = module.natives.iter().any(|n| n.name == "free");
-    assert!(has_malloc, "malloc 应注册为原生函数");
-    assert!(has_free, "free 应注册为原生函数");
+    assert!(has_malloc, "malloc should be registered as native function");
+    assert!(has_free, "free should be registered as native function");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -301,7 +307,10 @@ fn test_arc_optimization_redundant_pairs() {
 
     let mut funcs = vec![func];
     let stats = optimize_arc(&mut funcs);
-    assert!(stats.eliminated_retains >= 2, "应消除至少 2 个冗余 Retain");
+    assert!(
+        stats.eliminated_retains >= 2,
+        "should eliminate at least 2 redundant Retains"
+    );
     assert!(
         stats.eliminated_releases >= 2,
         "应消除至少 2 个冗余 Release"
@@ -342,7 +351,10 @@ fn test_arc_optimization_no_redundant() {
 
     let mut funcs = vec![func];
     let stats = optimize_arc(&mut funcs);
-    assert_eq!(stats.eliminated_retains, 0, "无冗余时不应消除");
+    assert_eq!(
+        stats.eliminated_retains, 0,
+        "should not eliminate when no redundancy"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -378,7 +390,10 @@ fn test_leak_detection_clean() {
     };
 
     let report = detect_leaks(&[func]);
-    assert!(report.is_clean(), "Retain/Release 平衡时不应报告泄漏");
+    assert!(
+        report.is_clean(),
+        "should not report leaks when Retain/Release balanced"
+    );
 }
 
 /// 测试泄漏检测：有泄漏
@@ -410,7 +425,10 @@ fn test_leak_detection_leaked() {
     };
 
     let report = detect_leaks(&[func]);
-    assert!(!report.is_clean(), "Retain 无对应 Release 应报告泄漏");
+    assert!(
+        !report.is_clean(),
+        "Retain without corresponding Release should report leak"
+    );
     assert!(report.leaked_allocs >= 1);
 }
 
@@ -503,7 +521,7 @@ fn test_full_memory_management_integration() {
     vm.heap_mut().drop_ref(h3);
     assert!(!vm.heap_ref().is_alive(h3));
 
-    println!("✅ 完整内存管理功能集成测试通过");
+    println!("* Full memory management integration test passed");
 }
 
 /// 测试 ARC 引用计数循环引用场景
@@ -530,10 +548,16 @@ fn test_arc_circular_reference() {
     vm.heap_mut().dec_ref(b); // 计数：1(初始) + 1(A.next) - 1 = 1
 
     // 循环引用导致对象无法回收
-    assert!(vm.heap_ref().is_alive(a), "循环引用导致 A 无法回收");
-    assert!(vm.heap_ref().is_alive(b), "循环引用导致 B 无法回收");
+    assert!(
+        vm.heap_ref().is_alive(a),
+        "circular reference prevents A from being collected"
+    );
+    assert!(
+        vm.heap_ref().is_alive(b),
+        "circular reference prevents B from being collected"
+    );
 
-    println!("✅ 循环引用检测正确（纯 ARC 无法回收循环引用）");
+    println!("* Circular reference detection correct (pure ARC cannot reclaim cyclic references)");
 }
 
 /// 测试 defer 在异常路径的执行
@@ -572,7 +596,7 @@ fn test_box_with_arc() {
     vm.heap_mut().dec_ref(boxed);
     assert!(!vm.heap_ref().is_alive(boxed)); // 已回收
 
-    println!("✅ Box 与 ARC 交互测试通过");
+    println!("* Box and ARC interaction test passed");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

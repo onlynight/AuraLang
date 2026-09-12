@@ -24,8 +24,8 @@ pub enum IpcError {
 impl std::fmt::Display for IpcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            IpcError::Io(e) => write!(f, "IO 错误: {}", e),
-            IpcError::Serialize(e) => write!(f, "序列化错误: {}", e),
+            IpcError::Io(e) => write!(f, "IO error: {}", e),
+            IpcError::Serialize(e) => write!(f, "Serialization error: {}", e),
             IpcError::Other(m) => write!(f, "{}", m),
         }
     }
@@ -66,7 +66,7 @@ impl IpcConnection {
         }
         let len = u32::from_be_bytes(len_buf) as usize;
         if len > 64 * 1024 * 1024 {
-            return Err(IpcError::Other(format!("消息过大: {} 字节", len)));
+            return Err(IpcError::Other(format!("Message too large: {} bytes", len)));
         }
         let mut buf = vec![0u8; len];
         self.stream.read_exact(&mut buf)?;
@@ -92,7 +92,7 @@ impl IpcConnection {
         }
         let len = u32::from_be_bytes(len_buf) as usize;
         if len > 64 * 1024 * 1024 {
-            return Err(IpcError::Other(format!("消息过大: {} 字节", len)));
+            return Err(IpcError::Other(format!("Message too large: {} bytes", len)));
         }
         let mut buf = vec![0u8; len];
         self.stream.read_exact(&mut buf)?;

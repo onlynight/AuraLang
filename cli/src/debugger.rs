@@ -1,47 +1,47 @@
-//! Aura 调试器交互式 REPL
+//! Aura debugger interactive REPL
 //!
-//! 命令：break / continue / step / next / backtrace / list / print / locals
-//!      stack / info / mode / del / help / quit
+//! Commands: break / continue / step / next / backtrace / list / print / locals
+//!           stack / info / mode / del / help / quit
 
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
 use compiler::vm::debugger::{BreakpointTarget, DebugMode, DebugSession, StopReason, format_value};
 
-/// 调试器 REPL 主入口
+/// Debugger REPL main entry
 pub fn run_debugger(session: &mut DebugSession) {
     print_banner(session);
 
-    // 初始化 VM
+    // Initialize VM
     if let Err(e) = session.initialize() {
-        eprintln!("错误: 调试器初始化失败: {}", e);
+        eprintln!("Error: debugger initialization failed: {}", e);
         return;
     }
 
     loop {
-        // 显示当前暂停状态
+        // Display current paused state
         if session.paused {
             show_paused_state(session);
         }
 
-        // 显示 prompt
+        // Display prompt
         let prompt = if session.paused { "> " } else { "  " };
         eprint!("{}", prompt);
         io::stdout().flush().ok();
 
-        // 读取命令
+        // Read command
         let stdin = io::stdin();
         let mut line = String::new();
         match stdin.lock().read_line(&mut line) {
             Ok(0) => {
                 // EOF
-                println!("\n再见!");
+                println!("\nGoodbye!");
                 session.cleanup();
                 return;
             }
             Ok(_) => {}
             Err(e) => {
-                eprintln!("读取输入失败: {}", e);
+                eprintln!("Failed to read input: {}", e);
                 return;
             }
         }
@@ -49,22 +49,22 @@ pub fn run_debugger(session: &mut DebugSession) {
         let cmd = line.trim().to_lowercase();
 
         if cmd.is_empty() {
-            // 空行：如果暂停则重新显示状态
+            // Empty line: if paused, re-display state
             if session.paused {
                 show_paused_state(session);
             }
             continue;
         }
 
-        // 执行命令
+        // Execute command
         match execute_command(session, &line) {
             CommandResult::Exit => {
-                println!("再见!");
+                println!("Goodbye!");
                 session.cleanup();
                 return;
             }
             CommandResult::Run => {
-                // 运行 VM
+                // Run VM
                 match session.run() {
                     Ok(reason) => {
                         match reason {
@@ -72,13 +72,13 @@ pub fn run_debugger(session: &mut DebugSession) {
                                 description,
                                 ..
                             } => {
-                                println!("\n  断点命中: {}", description);
+                                println!("\n  Breakpoint hit: {}", description);
                             }
                             StopReason::Step { mode } => {
-                                println!("\n  单步暂停 ({}):", mode.as_str());
+                                println!("\n  Stepped ({}):", mode.as_str());
                             }
                             StopReason::Completion { result } => {
-                                println!("\n  执行完成: {}", format_value(&result));
+                                println!("\n  Execution complete: {}", format_value(&result));
                                 session.step_mode = compiler::vm::debugger::StepMode::Off;
                             }
                             StopReason::Error {
@@ -86,18 +86,18 @@ pub fn run_debugger(session: &mut DebugSession) {
                                 at_func,
                             } => {
                                 if let Some(func) = at_func {
-                                    eprintln!("\n  运行时错误 [{}]: {}", func, message);
+                                    eprintln!("\n  Runtime error [{}]: {}", func, message);
                                 } else {
-                                    eprintln!("\n  运行时错误: {}", message);
+                                    eprintln!("\n  Runtime error: {}", message);
                                 }
                             }
                             StopReason::JitCompiled { .. } | StopReason::AotCompiled { .. } => {
-                                // 仅 JIT/AOT 模式
+                                // JIT/AOT mode only
                             }
                         }
                     }
                     Err(e) => {
-                        eprintln!("执行错误: {}", e);
+                        eprintln!("Execution error: {}", e);
                         session.paused = true;
                         session.stop_reason = Some(StopReason::Error {
                             message: e.to_string(),
@@ -108,20 +108,20 @@ pub fn run_debugger(session: &mut DebugSession) {
             }
             CommandResult::Continue => {
                 session.continue_execution();
-                // 立即运行
+                // Run immediately
                 match session.run() {
                     Ok(reason) => match reason {
                         StopReason::Breakpoint {
                             description,
                             ..
                         } => {
-                            println!("\n  断点命中: {}", description);
+                            println!("\n  Breakpoint hit: {}", description);
                         }
                         StopReason::Step { mode } => {
-                            println!("\n  单步暂停 ({}):", mode.as_str());
+                            println!("\n  Stepped ({}):", mode.as_str());
                         }
                         StopReason::Completion { result } => {
-                            println!("\n  执行完成: {}", format_value(&result));
+                            println!("\n  Execution complete: {}", format_value(&result));
                             session.step_mode = compiler::vm::debugger::StepMode::Off;
                         }
                         StopReason::Error {
@@ -129,15 +129,15 @@ pub fn run_debugger(session: &mut DebugSession) {
                             at_func,
                         } => {
                             if let Some(func) = at_func {
-                                eprintln!("\n  运行时错误 [{}]: {}", func, message);
+                                eprintln!("\n  Runtime error [{}]: {}", func, message);
                             } else {
-                                eprintln!("\n  运行时错误: {}", message);
+                                eprintln!("\n  Runtime error: {}", message);
                             }
                         }
                         StopReason::JitCompiled { .. } | StopReason::AotCompiled { .. } => {}
                     },
                     Err(e) => {
-                        eprintln!("执行错误: {}", e);
+                        eprintln!("Execution error: {}", e);
                         session.paused = true;
                         session.stop_reason = Some(StopReason::Error {
                             message: e.to_string(),
@@ -153,20 +153,20 @@ pub fn run_debugger(session: &mut DebugSession) {
                     StepMode::Out => session.step_out(),
                     StepMode::Off => {}
                 }
-                // 执行一步
+                // Execute one step
                 match session.run() {
                     Ok(reason) => match reason {
                         StopReason::Breakpoint {
                             description,
                             ..
                         } => {
-                            println!("\n  断点命中: {}", description);
+                            println!("\n  Breakpoint hit: {}", description);
                         }
                         StopReason::Step { mode } => {
-                            println!("\n  单步暂停 ({}):", mode.as_str());
+                            println!("\n  Stepped ({}):", mode.as_str());
                         }
                         StopReason::Completion { result } => {
-                            println!("\n  执行完成: {}", format_value(&result));
+                            println!("\n  Execution complete: {}", format_value(&result));
                             session.step_mode = compiler::vm::debugger::StepMode::Off;
                         }
                         StopReason::Error {
@@ -174,15 +174,15 @@ pub fn run_debugger(session: &mut DebugSession) {
                             at_func,
                         } => {
                             if let Some(func) = at_func {
-                                eprintln!("\n  运行时错误 [{}]: {}", func, message);
+                                eprintln!("\n  Runtime error [{}]: {}", func, message);
                             } else {
-                                eprintln!("\n  运行时错误: {}", message);
+                                eprintln!("\n  Runtime error: {}", message);
                             }
                         }
                         StopReason::JitCompiled { .. } | StopReason::AotCompiled { .. } => {}
                     },
                     Err(e) => {
-                        eprintln!("执行错误: {}", e);
+                        eprintln!("Execution error: {}", e);
                         session.paused = true;
                         session.stop_reason = Some(StopReason::Error {
                             message: e.to_string(),
@@ -196,7 +196,7 @@ pub fn run_debugger(session: &mut DebugSession) {
     }
 }
 
-/// 命令执行结果
+/// Command execution result
 enum CommandResult {
     None,
     Run,
@@ -207,23 +207,23 @@ enum CommandResult {
 
 use compiler::vm::debugger::StepMode;
 
-/// 执行命令
+/// Execute command
 fn execute_command(session: &mut DebugSession, raw_line: &str) -> CommandResult {
     let line = raw_line.trim();
     if line.is_empty() {
         return CommandResult::None;
     }
 
-    // 分割命令和参数
+    // Split command and arguments
     let mut parts = line.splitn(2, char::is_whitespace);
     let cmd = parts.next().unwrap_or("").to_lowercase();
     let args = parts.next().unwrap_or("").trim().to_string();
 
     match cmd.as_str() {
-        // ── 断点命令 ──
+        // ── Breakpoint commands ──
         "break" | "b" => {
             if args.is_empty() {
-                println!("  用法: break <行号|函数名>");
+                println!("  Usage: break <line|function>");
                 return CommandResult::None;
             }
 
@@ -237,33 +237,33 @@ fn execute_command(session: &mut DebugSession, raw_line: &str) -> CommandResult 
 
             match session.set_breakpoint(target) {
                 Ok(id) => {
-                    println!("  断点 #{} 已设置", id);
+                    println!("  Breakpoint #{} set", id);
                 }
                 Err(e) => {
-                    eprintln!("  设置断点失败: {}", e);
+                    eprintln!("  Failed to set breakpoint: {}", e);
                 }
             }
             CommandResult::None
         }
 
-        // ── 删除断点 ──
+        // ── Delete breakpoint ──
         "del" | "d" => {
             if let Ok(id) = args.parse::<usize>() {
                 if session.delete_breakpoint(id) {
-                    println!("  断点 #{} 已删除", id);
+                    println!("  Breakpoint #{} deleted", id);
                 } else {
-                    println!("  断点 #{} 不存在", id);
+                    println!("  Breakpoint #{} does not exist", id);
                 }
             } else {
-                println!("  用法: del <断点ID>");
+                println!("  Usage: del <breakpoint-id>");
             }
             CommandResult::None
         }
 
-        // ── 继续执行 ──
+        // ── Continue execution ──
         "continue" | "c" => CommandResult::Continue,
 
-        // ── 单步命令 ──
+        // ── Step commands ──
         "step" | "s" | "si" => CommandResult::Step {
             mode: StepMode::In,
         },
@@ -274,13 +274,13 @@ fn execute_command(session: &mut DebugSession, raw_line: &str) -> CommandResult 
             mode: StepMode::Out,
         },
 
-        // ── 调用栈 ──
+        // ── Call stack ──
         "backtrace" | "bt" => {
             println!("{}", session.show_backtrace());
             CommandResult::None
         }
 
-        // ── 源码显示 ──
+        // ── Source display ──
         "list" | "l" => {
             let center = if args.is_empty() {
                 session.current_line()
@@ -291,22 +291,22 @@ fn execute_command(session: &mut DebugSession, raw_line: &str) -> CommandResult 
             CommandResult::None
         }
 
-        // ── 打印值 ──
+        // ── Print value ──
         "print" | "p" => {
             if args.is_empty() {
-                println!("  用法: print <表达式>");
+                println!("  Usage: print <expression>");
             } else {
-                // 简化：在栈顶查找值
+                // Simplified: search for value at top of stack
                 if let Some(vm) = session.vm.as_ref() {
                     if let Some(frame) = vm.frames().last() {
                         if let Some(val) = frame.stack.last() {
-                            println!("  栈顶 = {}", format_value(val));
+                            println!("  Stack top = {}", format_value(val));
                         } else if let Some(func_idx) = session.current_func_idx() {
                             if let Some(func) = vm.module_ref().funcs.get(func_idx) {
                                 let last_slot = func.locals as usize - 1;
                                 if last_slot < frame.locals.len() {
                                     println!(
-                                        "  最后局部变量 = {}",
+                                        "  Last local variable = {}",
                                         format_value(&frame.locals[last_slot])
                                     );
                                 }
@@ -318,21 +318,21 @@ fn execute_command(session: &mut DebugSession, raw_line: &str) -> CommandResult 
             CommandResult::None
         }
 
-        // ── 局部变量 ──
+        // ── Local variables ──
         "locals" => {
             let depth = if args.is_empty() { None } else { args.parse::<usize>().ok() };
             println!("{}", session.show_locals(depth));
             CommandResult::None
         }
 
-        // ── 操作数栈 ──
+        // ── Operand stack ──
         "stack" => {
             let depth = if args.is_empty() { None } else { args.parse::<usize>().ok() };
             println!("{}", session.show_stack(depth));
             CommandResult::None
         }
 
-        // ── 信息命令 ──
+        // ── Info commands ──
         "info" => {
             if args.is_empty() || args == "all" {
                 println!("{}", session.show_info());
@@ -341,64 +341,64 @@ fn execute_command(session: &mut DebugSession, raw_line: &str) -> CommandResult 
             } else if args == "breakpoints" || args == "b" {
                 println!("{}", session.list_breakpoints());
             } else if args == "mode" {
-                println!("  当前模式: {}", session.mode.as_str());
+                println!("  Current mode: {}", session.mode.as_str());
             } else if args == "line" {
-                println!("  当前行: {}", session.current_line());
+                println!("  Current line: {}", session.current_line());
                 if let Some(func) = session.current_function() {
-                    println!("  当前函数: {}", func);
+                    println!("  Current function: {}", func);
                 }
             } else {
-                println!("  用法: info [functions|breakpoints|mode|line|all]");
+                println!("  Usage: info [functions|breakpoints|mode|line|all]");
             }
             CommandResult::None
         }
 
-        // ── 模式切换 ──
+        // ── Mode switch ──
         "mode" | "m" => {
             if args.is_empty() {
-                println!("  当前模式: {}", session.mode.as_str());
-                println!("  可用模式: vm, jit, aot");
+                println!("  Current mode: {}", session.mode.as_str());
+                println!("  Available modes: vm, jit, aot");
             } else {
                 match args.as_str() {
                     "vm" => {
                         session.mode = DebugMode::Vm;
-                        println!("  模式切换为: VM");
+                        println!("  Mode switched to: VM");
                     }
                     "jit" => {
                         session.mode = DebugMode::Jit;
-                        println!("  模式切换为: JIT");
+                        println!("  Mode switched to: JIT");
                     }
                     "aot" => {
                         session.mode = DebugMode::Aot;
-                        println!("  模式切换为: AOT");
+                        println!("  Mode switched to: AOT");
                     }
                     _ => {
-                        println!("  未知模式: {}", args);
+                        println!("  Unknown mode: {}", args);
                     }
                 }
             }
             CommandResult::None
         }
 
-        // ── 函数列表 ──
+        // ── Function list ──
         "functions" | "funcs" => {
             println!("{}", session.show_functions());
             CommandResult::None
         }
 
-        // ── 断点列表 ──
+        // ── Breakpoint list ──
         "breakpoints" | "bps" => {
             println!("{}", session.list_breakpoints());
             CommandResult::None
         }
 
-        // ── Phase 2: JIT 命令 ──
+        // ── Phase 2: JIT commands ──
         "jit" => {
             if args.is_empty() {
-                println!("  JIT 子命令: state, fallbacks, compiled");
-                println!("    jit state      显示 JIT 编译状态");
-                println!("    jit fallbacks  显示 JIT 回退详情");
-                println!("    jit compiled   显示已编译函数");
+                println!("  JIT subcommands: state, fallbacks, compiled");
+                println!("    jit state      Show JIT compilation state");
+                println!("    jit fallbacks  Show JIT fallback details");
+                println!("    jit compiled   Show compiled functions");
             } else {
                 match args.as_str() {
                     "state" => {
@@ -415,7 +415,7 @@ fn execute_command(session: &mut DebugSession, raw_line: &str) -> CommandResult 
                     }
                     _ => {
                         println!(
-                            "  未知 JIT 子命令: {} (可用: state, fallbacks, compiled)",
+                            "  Unknown JIT subcommand: {} (available: state, fallbacks, compiled)",
                             args
                         );
                     }
@@ -424,26 +424,28 @@ fn execute_command(session: &mut DebugSession, raw_line: &str) -> CommandResult 
             CommandResult::None
         }
 
-        // ── Phase 3: AOT 命令 ──
+        // ── Phase 3: AOT commands ──
         "aot" => {
             if args.is_empty() {
-                println!("  AOT 子命令: compile, dwarf, launch, path");
-                println!("    aot compile  执行 AOT 编译");
-                println!("    aot dwarf    显示 DWARF 调试信息");
-                println!("    aot launch   启动外部调试器 (lldb/gdb)");
-                println!("    aot path     显示输出路径");
+                println!("  AOT subcommands: compile, dwarf, launch, path");
+                println!("    aot compile  Run AOT compilation");
+                println!("    aot dwarf    Show DWARF debug information");
+                println!("    aot launch   Launch external debugger (lldb/gdb)");
+                println!("    aot path     Show output path");
             } else {
                 #[cfg(feature = "llvm")]
                 match args.as_str() {
                     "compile" => match session.aot_compile() {
                         Ok(summary) => println!("{}", summary),
-                        Err(e) => eprintln!("  AOT 编译失败: {}", e),
+                        Err(e) => eprintln!("  AOT compilation failed: {}", e),
                     },
                     _ => {}
                 }
                 #[cfg(not(feature = "llvm"))]
                 {
-                    println!("  AOT 功能需要 llvm feature (cargo build --features llvm)");
+                    println!(
+                        "  AOT feature requires the llvm feature (cargo build --features llvm)"
+                    );
                 }
 
                 if args == "dwarf" {
@@ -453,11 +455,11 @@ fn execute_command(session: &mut DebugSession, raw_line: &str) -> CommandResult 
                 } else if args == "launch" {
                     match session.aot_launch() {
                         Ok(msg) => println!("{}", msg),
-                        Err(e) => eprintln!("  启动失败: {}", e),
+                        Err(e) => eprintln!("  Launch failed: {}", e),
                     }
                 } else if args != "compile" {
                     println!(
-                        "  未知 AOT 子命令: {} (可用: compile, dwarf, launch, path)",
+                        "  Unknown AOT subcommand: {} (available: compile, dwarf, launch, path)",
                         args
                     );
                 }
@@ -465,30 +467,30 @@ fn execute_command(session: &mut DebugSession, raw_line: &str) -> CommandResult 
             CommandResult::None
         }
 
-        // ── 帮助 ──
+        // ── Help ──
         "help" | "h" | "?" => {
             print_help();
             CommandResult::None
         }
 
-        // ── 退出 ──
+        // ── Exit ──
         "quit" | "q" | "exit" | "e" => CommandResult::Exit,
 
-        // ── 未识别命令 ──
+        // ── Unrecognized command ──
         _ => {
-            println!("  未知命令: {} (输入 help 查看帮助)", cmd);
+            println!("  Unknown command: {} (type 'help' for help)", cmd);
             CommandResult::None
         }
     }
 }
 
-/// 显示启动横幅
+/// Display startup banner
 fn print_banner(session: &DebugSession) {
     println!("═══════════════════════════════════════════════════════════");
-    println!("  Aura 调试器 v0.1");
-    println!("  源码: {}", session.file_name);
+    println!("  Aura Debugger v0.1");
+    println!("  Source: {}", session.file_name);
     println!(
-        "  模式: {}  |  函数: {}  |  断点: {}",
+        "  Mode: {}  |  Functions: {}  |  Breakpoints: {}",
         session.mode.as_str(),
         session.mapping.functions.len(),
         session.breakpoints.len()
@@ -497,7 +499,7 @@ fn print_banner(session: &DebugSession) {
     println!();
 }
 
-/// 显示暂停状态
+/// Display paused state
 fn show_paused_state(session: &DebugSession) {
     if let Some(ref reason) = session.stop_reason {
         match reason {
@@ -505,22 +507,22 @@ fn show_paused_state(session: &DebugSession) {
                 description,
                 ..
             } => {
-                print!("\n  断点命中: {}\n", description);
+                print!("\n  Breakpoint hit: {}\n", description);
             }
             StopReason::Step { mode } => {
-                print!("\n  单步暂停 ({})\n", mode.as_str());
+                print!("\n  Stepped ({})\n", mode.as_str());
             }
             StopReason::Completion { result } => {
-                print!("\n  执行完成: {}\n", format_value(result));
+                print!("\n  Execution complete: {}\n", format_value(result));
             }
             StopReason::Error {
                 message,
                 at_func,
             } => {
                 if let Some(func) = at_func {
-                    print!("\n  运行时错误 [{}]: {}\n", func, message);
+                    print!("\n  Runtime error [{}]: {}\n", func, message);
                 } else {
-                    print!("\n  运行时错误: {}\n", message);
+                    print!("\n  Runtime error: {}\n", message);
                 }
             }
             StopReason::JitCompiled {
@@ -528,71 +530,71 @@ fn show_paused_state(session: &DebugSession) {
                 success,
             } => {
                 if *success {
-                    print!("\n  JIT 编译完成: {}\n", func_name);
+                    print!("\n  JIT compilation complete: {}\n", func_name);
                 } else {
-                    print!("\n  JIT 编译失败: {}\n", func_name);
+                    print!("\n  JIT compilation failed: {}\n", func_name);
                 }
             }
             StopReason::AotCompiled { path } => {
-                print!("\n  AOT 编译完成: {}\n", path);
+                print!("\n  AOT compilation complete: {}\n", path);
             }
         }
     }
 
-    // 显示当前源码上下文
+    // Display current source context
     let line = session.current_line();
     if line > 0 {
         print!("{}", session.show_source(line, 2));
         println!();
     }
 
-    // 显示快速操作提示
+    // Display quick action hints
     print!("  (b)reak  (c)ontinue  (s)tep  (n)ext  (l)ist  (h)elp  (q)uit\n\n");
 }
 
-/// 显示帮助
+/// Display help
 fn print_help() {
     println!("  ┌──────────────────────────────────────────────┐");
-    println!("  │            Aura 调试器命令列表                │");
+    println!("  │          Aura Debugger Commands               │");
     println!("  ├──────────────────────────────────────────────┤");
-    println!("  │  断点                                        │");
-    println!("  │    b/break <行号|函数名>    设置断点          │");
-    println!("  │    d/del <ID>               删除断点          │");
-    println!("  │    info b                   列出断点          │");
+    println!("  │  Breakpoints                                 │");
+    println!("  │    b/break <line|function>    Set breakpoint  │");
+    println!("  │    d/del <ID>               Delete breakpoint │");
+    println!("  │    info b                   List breakpoints  │");
     println!("  │                                              │");
-    println!("  │  执行                                        │");
-    println!("  │    c/continue             继续到下一个断点    │");
-    println!("  │    s/step/si              步入（下一条指令）  │");
-    println!("  │    n/next/so              步过（不进入子函数）│");
-    println!("  │    out                      步出（到函数返回）│");
+    println!("  │  Execution                                   │");
+    println!("  │    c/continue             Continue to next bp │");
+    println!("  │    s/step/si              Step in             │");
+    println!("  │    n/next/so              Step over           │");
+    println!("  │    out                      Step out          │");
     println!("  │                                              │");
-    println!("  │  检查                                        │");
-    println!("  │    bt/backtrace           显示调用栈          │");
-    println!("  │    l/list [行号]           显示源码            │");
-    println!("  │    p/print <表达式>         打印值            │");
-    println!("  │    locals [深度]            显示局部变量       │");
-    println!("  │    stack [深度]             显示操作数栈       │");
-    println!("  │    info                     VM 状态摘要        │");
-    println!("  │    info func                函数列表           │");
-    println!("  │    info line                当前行/函数        │");
-    println!("  │    info mode                当前调试模式       │");
+    println!("  │  Inspection                                  │");
+    println!("  │    bt/backtrace           Show call stack     │");
+    println!("  │    l/list [line]          Show source code    │");
+    println!("  │    p/print <expr>         Print value         │");
+    println!("  │    locals [depth]         Show local variables│");
+    println!("  │    stack [depth]          Show operand stack  │");
+    println!("  │    info                     VM state summary   │");
+    println!("  │    info func                Function list      │");
+    println!("  │    info line                Current line/func  │");
+    println!("  │    info mode                Current debug mode │");
     println!("  │                                              │");
-    println!("  │  模式                                        │");
-    println!("  │    m/mode [vm|jit|aot]      切换调试模式      │");
+    println!("  │  Mode                                        │");
+    println!("  │    m/mode [vm|jit|aot]      Switch debug mode │");
     println!("  │                                              │");
     println!("  │  JIT (Phase 2)                          │");
-    println!("  │    jit state             JIT 编译状态       │");
-    println!("  │    jit fallbacks         JIT 回退详情       │");
-    println!("  │    jit compiled          已编译函数         │");
+    println!("  │    jit state             JIT compilation state│");
+    println!("  │    jit fallbacks         JIT fallback details │");
+    println!("  │    jit compiled          Compiled functions   │");
     println!("  │                                              │");
     println!("  │  AOT (Phase 3)                          │");
-    println!("  │    aot compile           执行 AOT 编译      │");
-    println!("  │    aot dwarf             DWARF 调试信息     │");
-    println!("  │    aot launch            启动外部调试器     │");
-    println!("  │    aot path              显示输出路径       │");
+    println!("  │    aot compile           Run AOT compilation │");
+    println!("  │    aot dwarf             DWARF debug info    │");
+    println!("  │    aot launch            Launch ext. debugger │");
+    println!("  │    aot path              Show output path    │");
     println!("  │                                              │");
-    println!("  │  其他                                        │");
-    println!("  │    h/help/?                 显示帮助          │");
-    println!("  │    q/quit/exit              退出调试器        │");
+    println!("  │  Other                                     │");
+    println!("  │    h/help/?                 Show help          │");
+    println!("  │    q/quit/exit              Exit debugger      │");
     println!("  └──────────────────────────────────────────────┘");
 }

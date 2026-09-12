@@ -66,15 +66,18 @@ fn find_lambda_in_block(block: &compiler::codegen::hir::HirBlock) -> bool {
 fn test_hir_lambda_simple() {
     // (x: Int) -> x * 2 应降级为 HirExpr::Lambda
     let hir = parse_to_hir("fun main(): Int { var f = (x: Int) -> x * 2; return 0 }");
-    let main = hir.functions.iter().find(|f| f.name == "main").expect("main 存在");
-    assert!(find_lambda_in_block(&main.body), "应包含 Lambda 表达式");
+    let main = hir.functions.iter().find(|f| f.name == "main").expect("main exists");
+    assert!(
+        find_lambda_in_block(&main.body),
+        "should contain Lambda expression"
+    );
 }
 
 #[test]
 fn test_hir_lambda_block_body() {
     // (x: Int) -> { return x * 2 } 应降级为 HirExpr::Lambda
     let hir = parse_to_hir("fun main(): Int { var f = (x: Int) -> { return x * 2 }; return 0 }");
-    let main = hir.functions.iter().find(|f| f.name == "main").expect("main 存在");
+    let main = hir.functions.iter().find(|f| f.name == "main").expect("main exists");
     assert!(
         find_lambda_in_block(&main.body),
         "应包含 Lambda 表达式（块体）"
@@ -88,13 +91,13 @@ fn test_hir_lambda_block_body() {
 #[test]
 fn test_hir_lambda_not_lambda_call() {
     let hir = parse_to_hir("fun main(): Int { var f = (x: Int) -> x * 2; return 0 }");
-    let main = hir.functions.iter().find(|f| f.name == "main").expect("main 存在");
+    let main = hir.functions.iter().find(|f| f.name == "main").expect("main exists");
     // 确认 body 中没有 "__lambda" 调用
     let has_lambda_call = main.body.stmts.iter().any(|s| {
         matches!(s, HirStmt::Val { init: Some(HirExpr::Call { callee, .. }), .. }
             if callee == "__lambda")
     });
-    assert!(!has_lambda_call, "不应包含 __lambda 调用");
+    assert!(!has_lambda_call, "should not contain __lambda call");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -104,8 +107,11 @@ fn test_hir_lambda_not_lambda_call() {
 #[test]
 fn test_hir_lambda_params_preserved() {
     let hir = parse_to_hir("fun main(): Int { var f = (x: Int, y: Int) -> x + y; return 0 }");
-    let main = hir.functions.iter().find(|f| f.name == "main").expect("main 存在");
-    assert!(find_lambda_in_block(&main.body), "应包含 Lambda 表达式");
+    let main = hir.functions.iter().find(|f| f.name == "main").expect("main exists");
+    assert!(
+        find_lambda_in_block(&main.body),
+        "should contain Lambda expression"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -116,7 +122,7 @@ fn test_hir_lambda_params_preserved() {
 fn test_hir_lambda_as_return_value() {
     let hir = parse_to_hir("fun make_adder(x: Int): (Int) -> Int { return (y: Int) -> x + y }");
     let make_adder =
-        hir.functions.iter().find(|f| f.name == "make_adder").expect("make_adder 存在");
+        hir.functions.iter().find(|f| f.name == "make_adder").expect("make_adder exists");
     // 函数体应包含 Lambda
     assert!(
         find_lambda_in_block(&make_adder.body),
@@ -131,7 +137,7 @@ fn test_hir_lambda_as_return_value() {
 #[test]
 fn test_hir_no_lambda() {
     let hir = parse_to_hir("fun main(): Int { return 42 }");
-    let main = hir.functions.iter().find(|f| f.name == "main").expect("main 存在");
+    let main = hir.functions.iter().find(|f| f.name == "main").expect("main exists");
     assert!(
         !find_lambda_in_block(&main.body),
         "无 lambda 时应不包含 Lambda"
@@ -149,6 +155,9 @@ fn test_hir_nested_lambda() {
             return (x: Int) -> f(g(x))
         }",
     );
-    let compose = hir.functions.iter().find(|f| f.name == "compose").expect("compose 存在");
-    assert!(find_lambda_in_block(&compose.body), "应包含嵌套 Lambda");
+    let compose = hir.functions.iter().find(|f| f.name == "compose").expect("compose exists");
+    assert!(
+        find_lambda_in_block(&compose.body),
+        "should contain nested Lambda"
+    );
 }

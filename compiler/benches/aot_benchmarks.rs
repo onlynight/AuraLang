@@ -105,7 +105,7 @@ fn bench_aot(src: &str, iters: usize, expected: i64) -> Result<f64, String> {
     let out = cmd.output().map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(format!(
-            "llc 失败: {}",
+            "llc failed: {}",
             String::from_utf8_lossy(&out.stderr)
         ));
     }
@@ -130,7 +130,7 @@ fn bench_aot(src: &str, iters: usize, expected: i64) -> Result<f64, String> {
     let out = link_cmd.output().map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(format!(
-            "链接失败: {}",
+            "linking failed: {}",
             String::from_utf8_lossy(&out.stderr)
         ));
     }
@@ -142,7 +142,7 @@ fn bench_aot(src: &str, iters: usize, expected: i64) -> Result<f64, String> {
         let code = out.status.code().unwrap_or(-1) as i64;
         // 在 Windows 上，进程退出码是 i32；将负数转回正确值
         let code = if code < 0 { code + 256 } else { code };
-        assert_eq!(code, expected, "AOT 运行结果应为 {}", expected);
+        assert_eq!(code, expected, "AOT run result should be {}", expected);
     }
     let elapsed = start.elapsed().as_secs_f64() * 1000.0 / iters as f64;
 
@@ -169,7 +169,7 @@ fn llc_path(home: Option<&str>) -> std::path::PathBuf {
 
 #[cfg(not(feature = "llvm"))]
 fn bench_aot(_src: &str, _iters: usize, _expected: i64) -> Result<f64, String> {
-    Err("未启用 llvm feature".to_string())
+    Err("llvm feature not enabled".to_string())
 }
 
 fn run_fib() {
@@ -190,9 +190,9 @@ fn run_fib() {
         match bench_aot(FIB_SRC, iters, expected) {
             Ok(aot_ms) => {
                 println!("[fib(20)] AOT(native):     {:.3} ms/op", aot_ms);
-                println!("[fib(20)] AOT 加速比:      {:.1}x vs VM", vm_ms / aot_ms);
+                println!("[fib(20)] AOT speedup:      {:.1}x vs VM", vm_ms / aot_ms);
             }
-            Err(e) => println!("[fib(20)] AOT: 跳过 ({})", e),
+            Err(e) => println!("[fib(20)] AOT: skipped ({})", e),
         }
     }
 }
@@ -209,9 +209,9 @@ fn run_sum() {
         match bench_aot(SUM_SRC, iters, expected) {
             Ok(aot_ms) => {
                 println!("[sum(100000)] AOT(native):  {:.3} ms/op", aot_ms);
-                println!("[sum(100000)] AOT 加速比:   {:.1}x vs VM", vm_ms / aot_ms);
+                println!("[sum(100000)] AOT speedup:   {:.1}x vs VM", vm_ms / aot_ms);
             }
-            Err(e) => println!("[sum(100000)] AOT: 跳过 ({})", e),
+            Err(e) => println!("[sum(100000)] AOT: skipped ({})", e),
         }
     }
 }

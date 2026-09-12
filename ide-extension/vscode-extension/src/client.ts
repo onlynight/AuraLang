@@ -73,7 +73,7 @@ async function findServerCommand(
             try {
                 if (fs.existsSync(rawConfig)) {
                     console.log(
-                        `[Aura] 使用用户配置的 aura-lsp 路径: ${rawConfig}`
+                        `[Aura] Using user-configured aura-lsp path: ${rawConfig}`
                     );
                     return { command: rawConfig, args: fullArgs };
                 }
@@ -82,18 +82,18 @@ async function findServerCommand(
             }
             // 路径不存在 —— 提示后继续走内置兜底
             console.warn(
-                `[Aura] 配置的 aura.serverPath 不存在，回退到内置二进制: ${rawConfig}`
+                `[Aura] Configured aura.serverPath does not exist, falling back to bundled binary: ${rawConfig}`
             );
         } else {
             // 简单命令名（如 "aura"、"aura-lsp"）：不是内置二进制的话，
             // 直接跳过，避免误启动 aura.exe 或其它同名程序。
             if (rawConfig === exe || rawConfig === "aura-lsp" || rawConfig === "aura") {
                 console.log(
-                    `[Aura] aura.serverPath="${rawConfig}" 被视为默认值，使用内置二进制`
+                    `[Aura] aura.serverPath="${rawConfig}" is treated as default value, using bundled binary`
                 );
             } else {
                 // 用户指定了别的命令名，交给 PATH 处理
-                console.log(`[Aura] 使用用户指定的命令: ${rawConfig}`);
+                console.log(`[Aura] Using user-specified command: ${rawConfig}`);
                 return { command: rawConfig, args: fullArgs };
             }
         }
@@ -111,11 +111,11 @@ async function findServerCommand(
                     /* ignore */
                 }
             }
-            console.log(`[Aura] 使用内置 aura-lsp: ${bundled}`);
+            console.log(`[Aura] Using bundled aura-lsp: ${bundled}`);
             return { command: bundled, args: fullArgs };
         }
     } catch (err) {
-        console.warn(`[Aura] 检查内置 aura-lsp 失败: ${err}`);
+        console.warn(`[Aura] Failed to check bundled aura-lsp: ${err}`);
     }
 
     // 3. 在工作区查找构建产物（Aura 项目自身开发时使用）
@@ -129,7 +129,7 @@ async function findServerCommand(
         for (const c of candidates) {
             try {
                 if (fs.existsSync(c)) {
-                    console.log(`[Aura] 使用工作区内的 aura-lsp: ${c}`);
+                    console.log(`[Aura] Using workspace aura-lsp: ${c}`);
                     return { command: c, args: fullArgs };
                 }
             } catch {
@@ -139,7 +139,7 @@ async function findServerCommand(
     }
 
     // 4. 回退：让 VS Code 通过 PATH 查找
-    console.warn(`[Aura] 内置 aura-lsp 缺失，尝试 PATH 中的 ${exe}`);
+    console.warn(`[Aura] Bundled aura-lsp missing, trying ${exe} in PATH`);
     return { command: exe, args: fullArgs };
 }
 
@@ -157,9 +157,9 @@ export async function startLSPClient(
     try {
         server = await findServerCommand(config, context.extensionPath);
     } catch (err) {
-        console.error("[Aura] 查找 aura 可执行文件失败:", err);
+        console.error("[Aura] Failed to find aura executable:", err);
         vscode.window.showErrorMessage(
-            "Aura: 未找到 aura-lsp 可执行文件。扩展应自带 bin/aura-lsp；若缺失请检查安装完整性，或设置 aura.serverPath 指向本地构建产物。"
+            "Aura: aura-lsp executable not found. Extension should bundle bin/aura-lsp; if missing, please check installation integrity or set aura.serverPath to a local build artifact."
         );
         return;
     }
@@ -211,34 +211,34 @@ export async function startLSPClient(
     client.onDidChangeState((e) => {
         // vscode-languageclient v9 的 State 枚举：Stopped=1, Running=2, Starting=3
         console.log(
-            `[Aura] LSP 状态变更: state=${e.newState} (${e.newState === State.Starting ? "启动中" : e.newState === State.Running ? "运行中" : "已停止"})`
+            `[Aura] LSP state change: state=${e.newState} (${e.newState === State.Starting ? "Starting" : e.newState === State.Running ? "Running" : "Stopped"})`
         );
         if (e.newState === State.Running) {
             vscode.window.showInformationMessage(
-                `Aura LSP 已连接 (${server.command})`
+                `Aura LSP connected (${server.command})`
             );
         } else if (e.newState === State.Stopped) {
-            console.log("[Aura] LSP 服务器已停止");
+            console.log("[Aura] LSP server stopped");
         }
     });
 
     try {
         await client.start();
     } catch (err) {
-        console.error("[Aura] LSP 客户端启动失败:", err);
+        console.error("[Aura] LSP client startup failed:", err);
         const hint =
             (err as Error)?.message?.includes("ENOENT") ||
             (err as Error)?.message?.includes("spawn")
-                ? `（未找到命令 ${server.command}）`
+                ? `(command not found: ${server.command})`
                 : "";
         vscode.window.showErrorMessage(
-            `Aura LSP 启动失败: ${err} ${hint}`.trim() +
-                " 扩展应自带 bin/aura-lsp；若内置二进制缺失，请重新安装扩展，或设置 aura.serverPath 指向本地构建产物后重试。"
+            `Aura LSP failed to start: ${err} ${hint}`.trim() +
+                " Extension should bundle bin/aura-lsp; if the bundled binary is missing, please reinstall the extension or set aura.serverPath to a local build artifact and retry."
         );
         client = undefined;
     }
 
-    console.log("[Aura] LSP 客户端启动流程完成");
+    console.log("[Aura] LSP client startup complete");
 }
 
 /**
@@ -248,7 +248,7 @@ export async function stopLSPClient(): Promise<void> {
     if (client) {
         await client.stop();
         client = undefined;
-        console.log("[Aura] LSP 客户端已停止");
+        console.log("[Aura] LSP client stopped");
     }
 }
 
@@ -272,10 +272,10 @@ export async function sendDiagnosticRequest(
             "textDocument/diagnostic",
             { textDocument: { uri: uri.toString() } }
         );
-        console.log("[Aura] 诊断请求完成:", result);
+        console.log("[Aura] Diagnostic request completed:", result);
         diagManager.updateDiagnostics(uri, result);
     } catch (err) {
-        console.error("[Aura] 诊断请求失败:", err);
+        console.error("[Aura] Diagnostic request failed:", err);
     }
 }
 
@@ -313,10 +313,10 @@ export async function formatDocument(
                 }
             }
             await vscode.workspace.applyEdit(edit);
-            vscode.window.showInformationMessage("Aura 文档已格式化");
+            vscode.window.showInformationMessage("Aura document formatted");
         }
     } catch (err) {
-        console.error("[Aura] 格式化失败:", err);
-        vscode.window.showErrorMessage(`Aura 格式化失败: ${err}`);
+        console.error("[Aura] Formatting failed:", err);
+        vscode.window.showErrorMessage(`Aura formatting failed: ${err}`);
     }
 }

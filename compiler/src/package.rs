@@ -35,19 +35,22 @@ impl Version {
 
         let parts: Vec<&str> = version_part.split('.').collect();
         if parts.len() < 2 {
-            return Err(PackageError::InvalidVersion(format!("无效版本号: {}", s)));
+            return Err(PackageError::InvalidVersion(format!(
+                "invalid version number: {}",
+                s
+            )));
         }
 
         let major: u64 = parts[0]
             .parse()
-            .map_err(|_| PackageError::InvalidVersion(format!("无效版本号: {}", s)))?;
+            .map_err(|_| PackageError::InvalidVersion(format!("invalid version number: {}", s)))?;
         let minor: u64 = parts[1]
             .parse()
-            .map_err(|_| PackageError::InvalidVersion(format!("无效版本号: {}", s)))?;
+            .map_err(|_| PackageError::InvalidVersion(format!("invalid version number: {}", s)))?;
         let patch: u64 = if parts.len() >= 3 {
-            parts[2]
-                .parse()
-                .map_err(|_| PackageError::InvalidVersion(format!("无效版本号: {}", s)))?
+            parts[2].parse().map_err(|_| {
+                PackageError::InvalidVersion(format!("invalid version number: {}", s))
+            })?
         } else {
             0
         };
@@ -349,7 +352,7 @@ impl PackageKind {
             "hybrid" | "mixed" => Ok(PackageKind::Hybrid),
             "native" | "aot" => Ok(PackageKind::Native),
             other => Err(PackageError::ParseError(format!(
-                "无效包类型: {}（支持: bytecode, hybrid, native）",
+                "invalid package type: {} (supported: bytecode, hybrid, native)",
                 other
             ))),
         }
@@ -492,26 +495,27 @@ impl PackageManifest {
     /// 从 TOML 文件解析包清单
     pub fn from_toml_file(path: &Path) -> Result<Self, PackageError> {
         let content = std::fs::read_to_string(path)
-            .map_err(|e| PackageError::IoError(format!("无法读取 {}: {}", path.display(), e)))?;
+            .map_err(|e| PackageError::IoError(format!("cannot read {}: {}", path.display(), e)))?;
         Self::from_toml(&content)
     }
 
     /// 从 TOML 字符串解析（Phase 1 起改用真正的 TOML 序列化）
     pub fn from_toml(s: &str) -> Result<Self, PackageError> {
-        toml::from_str(s).map_err(|e| PackageError::ParseError(format!("无法解析包清单: {}", e)))
+        toml::from_str(s)
+            .map_err(|e| PackageError::ParseError(format!("cannot parse package manifest: {}", e)))
     }
 
     /// 序列化为 TOML
     pub fn to_toml(&self) -> Result<String, PackageError> {
         toml::to_string_pretty(self)
-            .map_err(|e| PackageError::ParseError(format!("序列化失败: {}", e)))
+            .map_err(|e| PackageError::ParseError(format!("serialization failed: {}", e)))
     }
 
     /// 写入文件
     pub fn write_to_file(&self, path: &Path) -> Result<(), PackageError> {
         let content = self.to_toml()?;
         std::fs::write(path, content)
-            .map_err(|e| PackageError::IoError(format!("无法写入 {}: {}", path.display(), e)))
+            .map_err(|e| PackageError::IoError(format!("cannot write {}: {}", path.display(), e)))
     }
 
     /// 判断是否为库包（Phase 1）
@@ -557,17 +561,19 @@ impl LockFile {
     /// 从文件加载
     pub fn from_file(path: &Path) -> Result<Self, PackageError> {
         let content = std::fs::read_to_string(path)
-            .map_err(|e| PackageError::IoError(format!("无法读取 {}: {}", path.display(), e)))?;
-        serde_json::from_str(&content)
-            .map_err(|e| PackageError::ParseError(format!("无法解析 {}: {}", path.display(), e)))
+            .map_err(|e| PackageError::IoError(format!("cannot read {}: {}", path.display(), e)))?;
+        serde_json::from_str(&content).map_err(|e| {
+            PackageError::ParseError(format!("cannot parse {}: {}", path.display(), e))
+        })
     }
 
     /// 写入文件
     pub fn write_to_file(&self, path: &Path) -> Result<(), PackageError> {
-        let content = serde_json::to_string_pretty(self)
-            .map_err(|e| PackageError::ParseError(format!("序列化锁文件失败: {}", e)))?;
+        let content = serde_json::to_string_pretty(self).map_err(|e| {
+            PackageError::ParseError(format!("failed to serialize lock file: {}", e))
+        })?;
         std::fs::write(path, content)
-            .map_err(|e| PackageError::IoError(format!("无法写入 {}: {}", path.display(), e)))
+            .map_err(|e| PackageError::IoError(format!("cannot write {}: {}", path.display(), e)))
     }
 
     /// 查找包
@@ -662,7 +668,7 @@ pub fn git_clone(url: &str, dest: &Path) -> Result<String, PackageError> {
         Ok(rev.output)
     } else {
         Err(PackageError::GitError(format!(
-            "git clone {} 失败: {}",
+            "git clone {} failed: {}",
             url,
             result.error.unwrap_or_else(|| result.output.clone())
         )))
@@ -709,7 +715,7 @@ pub fn git_latest_tag(url: &str, cache_dir: &Path) -> Result<Version, PackageErr
     );
     if !result.success {
         return Err(PackageError::GitError(format!(
-            "获取标签失败: {}",
+            "failed to get tags: {}",
             result.error.unwrap_or_default()
         )));
     }
@@ -732,11 +738,14 @@ pub fn git_latest_tag(url: &str, cache_dir: &Path) -> Result<Version, PackageErr
                 let _ = std::fs::write(&cache_file, v.to_string());
                 Ok(v)
             }
-            Err(_) => Err(PackageError::InvalidVersion(format!("无效标签: {}", tag))),
+            Err(_) => Err(PackageError::InvalidVersion(format!(
+                "invalid tag: {}",
+                tag
+            ))),
         }
     } else {
         Err(PackageError::GitError(format!(
-            "未找到标签: {}",
+            "tag not found: {}",
             tag_result.error.unwrap_or_default()
         )))
     }
@@ -795,9 +804,9 @@ impl PackageCache {
     pub fn mark_installed(&self, name: &str, version: &Version) -> Result<(), PackageError> {
         let dir = self.version_dir(name, version);
         std::fs::create_dir_all(&dir)
-            .map_err(|e| PackageError::IoError(format!("无法创建缓存目录: {}", e)))?;
+            .map_err(|e| PackageError::IoError(format!("cannot create cache directory: {}", e)))?;
         std::fs::write(dir.join("installed"), "")
-            .map_err(|e| PackageError::IoError(format!("无法标记安装: {}", e)))
+            .map_err(|e| PackageError::IoError(format!("cannot mark as installed: {}", e)))
     }
 
     /// 获取缓存统计信息
@@ -827,7 +836,7 @@ impl PackageCache {
         let size = if packages_dir.exists() { dir_size(&packages_dir) } else { 0 };
         if packages_dir.exists() {
             std::fs::remove_dir_all(&packages_dir)
-                .map_err(|e| PackageError::IoError(format!("无法清理缓存: {}", e)))?;
+                .map_err(|e| PackageError::IoError(format!("cannot clear cache: {}", e)))?;
         }
         Ok(size)
     }
@@ -843,7 +852,7 @@ pub struct CacheStats {
 impl std::fmt::Display for CacheStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let size_mb = self.total_size as f64 / 1024.0 / 1024.0;
-        write!(f, "{} 个包, {:.1} MB", self.package_count, size_mb)
+        write!(f, "{} packages, {:.1} MB", self.package_count, size_mb)
     }
 }
 
@@ -947,7 +956,7 @@ impl DependencyGraph {
             if let Some(prev_version) = seen.get(&node.name) {
                 if prev_version != &node.version {
                     conflicts.push(format!(
-                        "版本冲突: {} 需要 v{} 但已有 v{}",
+                        "version conflict: {} needs v{} but v{} already exists",
                         node.name, node.version, prev_version
                     ));
                 }
@@ -980,15 +989,15 @@ pub enum PackageError {
 impl std::fmt::Display for PackageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PackageError::InvalidVersion(msg) => write!(f, "无效版本: {}", msg),
-            PackageError::ParseError(msg) => write!(f, "解析错误: {}", msg),
-            PackageError::GitError(msg) => write!(f, "Git 错误: {}", msg),
-            PackageError::IoError(msg) => write!(f, "IO 错误: {}", msg),
-            PackageError::NotFound(msg) => write!(f, "未找到: {}", msg),
-            PackageError::Conflict(msg) => write!(f, "冲突: {}", msg),
-            PackageError::LockError(msg) => write!(f, "锁文件错误: {}", msg),
-            PackageError::NetworkError(msg) => write!(f, "网络错误: {}", msg),
-            PackageError::CacheError(msg) => write!(f, "缓存错误: {}", msg),
+            PackageError::InvalidVersion(msg) => write!(f, "Invalid version: {}", msg),
+            PackageError::ParseError(msg) => write!(f, "Parse error: {}", msg),
+            PackageError::GitError(msg) => write!(f, "Git error: {}", msg),
+            PackageError::IoError(msg) => write!(f, "IO error: {}", msg),
+            PackageError::NotFound(msg) => write!(f, "Not found: {}", msg),
+            PackageError::Conflict(msg) => write!(f, "Conflict: {}", msg),
+            PackageError::LockError(msg) => write!(f, "Lockfile error: {}", msg),
+            PackageError::NetworkError(msg) => write!(f, "Network error: {}", msg),
+            PackageError::CacheError(msg) => write!(f, "Cache error: {}", msg),
         }
     }
 }
@@ -1111,7 +1120,7 @@ impl PackageManager {
                     // 离线模式：检查缓存
                     if !self.config.cache.is_cached(&dep.name, &version) {
                         return Err(PackageError::CacheError(format!(
-                            "离线模式下 {} v{} 未缓存",
+                            "{} v{} not cached in offline mode",
                             dep.name, version
                         )));
                     }
@@ -1166,7 +1175,7 @@ impl PackageManager {
                     Version::parse(&manifest.version)
                 } else {
                     Err(PackageError::NotFound(format!(
-                        "本地路径 {} 没有 aura.toml",
+                        "local path {} has no aura.toml",
                         path.display()
                     )))
                 }
@@ -1175,7 +1184,7 @@ impl PackageManager {
                 // Git 仓库：获取标签
                 if self.config.offline {
                     Err(PackageError::CacheError(
-                        "离线模式下无法获取版本".to_string(),
+                        "cannot resolve version in offline mode".to_string(),
                     ))
                 } else {
                     git_latest_tag(url, self.config.cache.root())
@@ -1185,7 +1194,11 @@ impl PackageManager {
                 // Phase 1: 从 .auz 文件的 manifest 读取版本
                 use crate::auz::PackageReader;
                 let content = PackageReader::from_file(path).map_err(|e| {
-                    PackageError::ParseError(format!("读取 .auz 失败 {}: {}", path.display(), e))
+                    PackageError::ParseError(format!(
+                        "failed to read .auz {}: {}",
+                        path.display(),
+                        e
+                    ))
                 })?;
                 Version::parse(&content.manifest.version)
             }
@@ -1201,7 +1214,7 @@ impl PackageManager {
         let manifest = self
             .manifest
             .as_ref()
-            .ok_or_else(|| PackageError::ParseError("未找到 aura.toml".to_string()))?
+            .ok_or_else(|| PackageError::ParseError("aura.toml not found".to_string()))?
             .clone();
 
         let mut updated = Vec::new();
@@ -1221,12 +1234,12 @@ impl PackageManager {
                         new_lock.dependencies.push(entry.clone());
                     } else {
                         let entry = self.resolve_dependency(dep)?;
-                        updated.push(format!("{} (新增) v{}", dep.name, entry.version));
+                        updated.push(format!("{} (new) v{}", dep.name, entry.version));
                         new_lock.dependencies.push(entry);
                     }
                 } else {
                     let entry = self.resolve_dependency(dep)?;
-                    updated.push(format!("{} (新增) v{}", dep.name, entry.version));
+                    updated.push(format!("{} (new) v{}", dep.name, entry.version));
                     new_lock.dependencies.push(entry);
                 }
             }
@@ -1246,7 +1259,7 @@ impl PackageManager {
 
         // 检查仓库配置
         let repo = manifest.repository.ok_or_else(|| {
-            PackageError::ParseError("aura.toml 缺少 repository 字段".to_string())
+            PackageError::ParseError("aura.toml missing repository field".to_string())
         })?;
 
         // 创建标签
@@ -1260,7 +1273,7 @@ impl PackageManager {
         );
         if !result.success {
             return Err(PackageError::GitError(format!(
-                "创建标签失败: {}",
+                "failed to create tag: {}",
                 result.error.unwrap_or_default()
             )));
         }
@@ -1276,13 +1289,13 @@ impl PackageManager {
         );
         if !push_result.success {
             return Err(PackageError::GitError(format!(
-                "推送标签失败: {}",
+                "failed to push tag: {}",
                 push_result.error.unwrap_or_default()
             )));
         }
 
         Ok(format!(
-            "已发布 {} v{} 到 {}",
+            "published {} v{} to {}",
             manifest.name, version_str, repo
         ))
     }
@@ -1291,7 +1304,7 @@ impl PackageManager {
     pub fn show_deps(&self, project_dir: &Path) -> Result<String, PackageError> {
         // 解析源码中的 @depends
         let mut deps = Vec::new();
-        let mut graph = DependencyGraph::new(Some("项目"));
+        let mut graph = DependencyGraph::new(Some("project"));
 
         // 扫描所有 .aura 文件
         let entries = std::fs::read_dir(project_dir);
@@ -1312,7 +1325,7 @@ impl PackageManager {
         }
 
         if deps.is_empty() {
-            return Ok("无依赖".to_string());
+            return Ok("no dependencies".to_string());
         }
 
         // 构建依赖图
@@ -1348,7 +1361,7 @@ impl PackageManager {
         let mut problems = Vec::new();
         for entry in &lock.dependencies {
             if !self.config.cache.is_cached(&entry.name, &entry.version) {
-                problems.push(format!("{} v{} 未缓存", entry.name, entry.version));
+                problems.push(format!("{} v{} not cached", entry.name, entry.version));
             }
         }
 
@@ -1361,14 +1374,14 @@ impl PackageManager {
 
         // 创建目录
         std::fs::create_dir_all(&project_path)
-            .map_err(|e| PackageError::IoError(format!("无法创建目录: {}", e)))?;
+            .map_err(|e| PackageError::IoError(format!("cannot create directory: {}", e)))?;
 
         // 创建 aura.toml
         let manifest = PackageManifest {
             schema_version: "1.0".to_string(),
             name: name.to_string(),
             version: "0.1.0".to_string(),
-            description: Some(format!("{} 包", name)),
+            description: Some(format!("{} package", name)),
             authors: vec![],
             license: Some("MIT".to_string()),
             repository: Some(format!("https://github.com/aura-lang/{}.git", name)),
@@ -1401,12 +1414,12 @@ public fun main() {{
             name, name
         );
         std::fs::write(project_path.join("main.aura"), main_content)
-            .map_err(|e| PackageError::IoError(format!("无法写入 main.aura: {}", e)))?;
+            .map_err(|e| PackageError::IoError(format!("cannot write main.aura: {}", e)))?;
 
         // 创建 .gitignore
-        let gitignore = "# 构建产物\n*.auc\n*.exe\n*.o\n*.obj\n*.ll\n\n# 缓存\n.aura-cache/\n\n# 依赖\nvendor/\n";
+        let gitignore = "# Build artifacts\n*.auc\n*.exe\n*.o\n*.obj\n*.ll\n\n# Cache\n.aura-cache/\n\n# Dependencies\nvendor/\n";
         std::fs::write(project_path.join(".gitignore"), gitignore)
-            .map_err(|e| PackageError::IoError(format!("无法写入 .gitignore: {}", e)))?;
+            .map_err(|e| PackageError::IoError(format!("cannot write .gitignore: {}", e)))?;
 
         // 初始化 Git 仓库
         let _ = git_command(&["init"], Some(&project_path));
@@ -1662,7 +1675,7 @@ kind = "bytecode"
 
         let pm = PackageManager::new();
         let result = pm.show_deps(&tmp).unwrap();
-        assert!(result.contains("无依赖"));
+        assert!(result.contains("no dependencies"));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

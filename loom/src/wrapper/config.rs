@@ -38,13 +38,13 @@ pub fn default_wrapper_cache_dir() -> PathBuf {
 pub fn parse_wrapper_config(path: &Path) -> Result<WrapperConfig, LoomError> {
     if !path.exists() {
         return Err(LoomError::Config(format!(
-            "wrapper 配置文件不存在: {}",
+            "wrapper config file not found: {}",
             path.display()
         )));
     }
 
     let content = std::fs::read_to_string(path)
-        .map_err(|e| LoomError::Config(format!("无法读取 {}: {}", path.display(), e)))?;
+        .map_err(|e| LoomError::Config(format!("Failed to read {}: {}", path.display(), e)))?;
 
     // 尝试 TOML 格式
     if let Ok(toml_config) = content.trim().parse::<toml::Value>() {
@@ -61,7 +61,7 @@ fn parse_toml_config(value: &toml::Value) -> Result<WrapperConfig, LoomError> {
         .get("distribution-url")
         .or_else(|| value.get("distributionUrl"))
         .and_then(|v| v.as_str())
-        .ok_or_else(|| LoomError::Config("wrapper 配置缺少 distribution-url".to_string()))?;
+        .ok_or_else(|| LoomError::Config("wrapper config missing distribution-url".to_string()))?;
 
     let cache_dir = value
         .get("wrapper-cache-dir")
@@ -112,7 +112,9 @@ fn parse_properties_config(content: &str) -> Result<WrapperConfig, LoomError> {
         .or_else(|| config.get("distributionUrl"))
         .cloned()
         .ok_or_else(|| {
-            LoomError::Config("wrapper 配置缺少 distribution-url / distributionUrl".to_string())
+            LoomError::Config(
+                "wrapper config missing distribution-url / distributionUrl".to_string(),
+            )
         })?;
 
     let cache_dir = config

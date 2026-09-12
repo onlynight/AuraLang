@@ -14,27 +14,27 @@ fn compile_and_run(label: &str, src: &str) -> Result<Value, String> {
     println!("  📦 {}", label);
     println!("═══════════════════════════════════════════════");
 
-    let module = compile_source(src).map_err(|e| format!("编译失败: {}", e))?;
-    let mut vm =
-        Vm::new(&module, VmOptions::default()).map_err(|e| format!("VM 初始化失败: {}", e))?;
-    let result = vm.run().map_err(|e| format!("运行失败: {}", e))?;
+    let module = compile_source(src).map_err(|e| format!("compilation failed: {}", e))?;
+    let mut vm = Vm::new(&module, VmOptions::default())
+        .map_err(|e| format!("VM initialization failed: {}", e))?;
+    let result = vm.run().map_err(|e| format!("run failed: {}", e))?;
 
-    println!("  🎯 最终结果: {}", result);
-    println!("  ✅ 执行成功");
+    println!("  Target result: {}", result);
+    println!("  * execution succeeded");
     Ok(result)
 }
 
 /// 运行 .aura 文件
 fn run_aura_file(path: &Path) -> Result<Value, String> {
     let label = path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
-    let src = fs::read_to_string(path).map_err(|e| format!("读取 {} 失败: {}", label, e))?;
+    let src = fs::read_to_string(path).map_err(|e| format!("  failed to read {}: {}", label, e))?;
     compile_and_run(label, &src)
 }
 
 fn main() {
     println!("╔══════════════════════════════════════════════════════════╗");
-    println!("║     P10 并发运行时 Demo Runner                            ║");
-    println!("║     协程 / Actor / Channel / Select 综合演示              ║");
+    println!("║     P10 Concurrency runtime Demo Runner         ║");
+    println!("║     Coroutine / Actor / Channel / Select demo ║");
     println!("╚══════════════════════════════════════════════════════════╝");
 
     let examples_dir = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("examples");
@@ -53,11 +53,11 @@ fn main() {
         let path = examples_dir.join(file);
         match run_aura_file(&path) {
             Ok(_) => {
-                println!("  ✅ {}", file);
+                println!("  * {}", file);
                 passed += 1;
             }
             Err(e) => {
-                println!("  ❌ {}: {}", file, e);
+                println!("  ! {}: {}", file, e);
                 failed += 1;
             }
         }
@@ -65,15 +65,15 @@ fn main() {
 
     println!("\n═══════════════════════════════════════════════");
     println!(
-        "  📊 汇总: {} 通过, {} 失败, 共 {} 个",
+        "  Summary: {} passed, {} failed, {} total",
         passed,
         failed,
         files.len()
     );
     if failed == 0 {
-        println!("  🎉 所有 P10 Demo 通过!");
+        println!("  All P10 Demos passed!");
     } else {
-        println!("  ⚠️  有 {} 个 Demo 失败", failed);
+        println!("  ! {} Demos failed", failed);
     }
     println!("═══════════════════════════════════════════════");
 }

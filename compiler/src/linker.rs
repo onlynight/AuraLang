@@ -26,18 +26,20 @@ pub enum LinkError {
 impl std::fmt::Display for LinkError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LinkError::SymbolNotFound(s) => write!(f, "符号未找到: {}", s),
+            LinkError::SymbolNotFound(s) => write!(f, "symbol not found: {}", s),
             LinkError::SymbolConflict {
                 symbol,
                 modules,
             } => write!(
                 f,
-                "符号冲突: {} 在多个模块中定义: {}",
+                "symbol conflict: {} is defined in multiple modules: {}",
                 symbol,
                 modules.join(", ")
             ),
-            LinkError::ModuleNotFound(m) => write!(f, "模块未找到: {}", m),
-            LinkError::CircularDependency(mods) => write!(f, "循环依赖: {}", mods.join(" -> ")),
+            LinkError::ModuleNotFound(m) => write!(f, "module not found: {}", m),
+            LinkError::CircularDependency(mods) => {
+                write!(f, "circular dependency: {}", mods.join(" -> "))
+            }
         }
     }
 }

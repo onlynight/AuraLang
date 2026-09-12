@@ -30,22 +30,22 @@ for arg in "$@"; do
         --aot) AOT=1 ;;
         --no-bootstrap) NO_BOOTSTRAP=1 ;;
         -h|--help)
-            echo "用法: scripts/build-aura-compiler.sh [--aot] [--no-bootstrap]"
-            echo "  --aot            使用 LLVM 后端产出原生可执行文件（默认产出 .auc 字节码）"
-            echo "  --no-bootstrap   不把 bootstrap aura 二进制拷贝到 build/bin"
+            echo "Usage: scripts/build-aura-compiler.sh [--aot] [--no-bootstrap]"
+            echo "  --aot            Produce native executable via LLVM backend (default: .auc bytecode)"
+            echo "  --no-bootstrap   Do not copy bootstrap aura binary to build/bin"
             echo ""
-            echo "产物（build/bin）：aura.exe、aura-compiler.(auc|exe)"
+            echo "Outputs (build/bin): aura.exe, aura-compiler.(auc|exe)"
             exit 0
             ;;
         *)
-            echo "未知参数: $arg" >&2
+            echo "Unknown argument: $arg" >&2
             exit 1
             ;;
     esac
 done
 
 if [ ! -f "$ENTRY" ]; then
-    echo "[build-aura-compiler] 错误: 找不到编译器入口 $ENTRY" >&2
+    echo "[build-aura-compiler] ERROR: compiler entry not found: $ENTRY" >&2
     exit 1
 fi
 
@@ -64,7 +64,7 @@ find_aura() {
 
 # AOT 需要 LLVM 后端：bootstrap 必须以 `--features llvm` 构建。
 build_bootstrap() {
-    echo "[build-aura-compiler] 构建 Rust bootstrap: cargo build --release -p cli --features llvm"
+    echo "[build-aura-compiler] Building Rust bootstrap: cargo build --release -p cli --features llvm"
     cargo build --release -p cli --features llvm
 }
 
@@ -74,20 +74,20 @@ if [ "$AOT" = "1" ]; then
 else
     AURA="$(find_aura || true)"
     if [ -z "$AURA" ]; then
-        echo "[build-aura-compiler] 未找到 aura 可执行文件，正在用 cargo 构建 Rust 编译器..."
+        echo "[build-aura-compiler] aura executable not found, building Rust compiler via cargo..."
         cargo build --release --manifest-path compiler/Cargo.toml
         AURA="$(find_aura || true)"
     fi
 fi
 
 if [ -z "$AURA" ]; then
-    echo "[build-aura-compiler] 错误: 构建后仍未找到 aura 可执行文件" >&2
+    echo "[build-aura-compiler] ERROR: aura executable still not found after build" >&2
     exit 1
 fi
 
 echo "[build-aura-compiler] Rust bootstrap: $AURA"
-echo "[build-aura-compiler] 入口源码:      $ENTRY"
-echo "[build-aura-compiler] 输出目录:      $OUT_DIR"
+echo "[build-aura-compiler] entry source:      $ENTRY"
+echo "[build-aura-compiler] output dir:      $OUT_DIR"
 
 mkdir -p "$OUT_DIR"
 
@@ -105,12 +105,12 @@ fi
 if [ "$AOT" = "1" ]; then
     OUT="$OUT_DIR/aura-compiler"
     [ -x "$OUT_DIR/aura.exe" ] && OUT="$OUT_DIR/aura-compiler.exe"
-    echo "[build-aura-compiler] 模式: AOT（LLVM） → $OUT"
+    echo "[build-aura-compiler] mode: AOT (LLVM) → $OUT"
     "$AURA" build "$ENTRY" --aot --output "$OUT"
 else
     OUT="$OUT_DIR/aura-compiler.auc"
-    echo "[build-aura-compiler] 模式: 字节码 → $OUT"
+    echo "[build-aura-compiler] mode: bytecode → $OUT"
     "$AURA" build "$ENTRY" --output "$OUT"
 fi
 
-echo "[build-aura-compiler] ✓ 构建完成: $OUT"
+echo "[build-aura-compiler] ✓ Build complete: $OUT"

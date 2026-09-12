@@ -103,12 +103,30 @@ fn test_io_registered_with_feature() {
 #[test]
 fn test_prelude_always_registered() {
     let reg = NativeRegistry::new();
-    assert!(reg.contains("println"), "prelu 'println' 应始终注册");
-    assert!(reg.contains("abs"), "prelu 'abs' 应始终注册");
-    assert!(reg.contains("sqrt"), "prelu 'sqrt' 应始终注册");
-    assert!(reg.contains("toInt"), "prelu 'toInt' 应始终注册");
-    assert!(reg.contains("toFloat"), "prelu 'toFloat' 应始终注册");
-    assert!(reg.contains("toStr"), "prelu 'toStr' 应始终注册");
+    assert!(
+        reg.contains("println"),
+        "prelu 'println' should always be registered"
+    );
+    assert!(
+        reg.contains("abs"),
+        "prelu 'abs' should always be registered"
+    );
+    assert!(
+        reg.contains("sqrt"),
+        "prelu 'sqrt' should always be registered"
+    );
+    assert!(
+        reg.contains("toInt"),
+        "prelu 'toInt' should always be registered"
+    );
+    assert!(
+        reg.contains("toFloat"),
+        "prelu 'toFloat' should always be registered"
+    );
+    assert!(
+        reg.contains("toStr"),
+        "prelu 'toStr' should always be registered"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -124,14 +142,14 @@ fn test_on_demand_registration() {
             return sin(1.0)
         }
     "#;
-    let module = compile_source(src).expect("编译应成功");
+    let module = compile_source(src).expect("compilation should succeed");
     assert!(
         module.enabled_modules.contains(&"math".to_string()),
         "enabled_modules 应包含 'math'"
     );
 
     // 创建 VM 时使用按需注册
-    let vm = Vm::new(&module, VmOptions::default()).expect("VM 创建应成功");
+    let vm = Vm::new(&module, VmOptions::default()).expect("VM creation should succeed");
 
     // 如果 std-math feature 启用，math 模块应注册
     #[cfg(feature = "std-math")]
@@ -153,7 +171,11 @@ fn test_full_registry_size() {
     let reg = NativeRegistry::new();
     // 全量注册应有 300+ 个函数
     let count = reg.len();
-    assert!(count > 300, "全量注册应有 300+ 个函数，实际: {}", count);
+    assert!(
+        count > 300,
+        "full registration should have 300+ functions, actual: {}",
+        count
+    );
 }
 
 #[test]

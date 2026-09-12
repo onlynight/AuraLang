@@ -7,19 +7,19 @@ use compiler::vm::{Value, Vm, VmOptions};
 
 fn run(name: &str, src: &str, expected: Option<Value>) {
     println!("─── {} ──", name);
-    let module = compile_source(src).expect("编译应成功");
-    let mut vm = Vm::new(&module, VmOptions::default()).expect("VM 初始化");
-    let result = vm.run().expect("运行应成功");
-    println!("  结果: {}", result);
+    let module = compile_source(src).expect("compilation should succeed");
+    let mut vm = Vm::new(&module, VmOptions::default()).expect("VM initialization");
+    let result = vm.run().expect("run should succeed");
+    println!("  Result: {}", result);
     if let Some(exp) = expected {
-        assert_eq!(result, exp, "结果不一致");
+        assert_eq!(result, exp, "result mismatch");
     }
-    println!("  ✅ 通过\n");
+    println!("  * passed\n");
 }
 
 fn main() {
     println!("╔══════════════════════════════════════════╗");
-    println!("║   P10 Actor 模型演示                      ║");
+    println!("║   P10 Actor model demo                        ║");
     println!("╚══════════════════════════════════════════╝\n");
 
     // 1. 创建 Actor
@@ -136,5 +136,5 @@ fn main() {
         Some(Value::Int(1)),
     );
 
-    println!("✅ 所有 Actor 演示通过!");
+    println!("* All Actor demos passed!");
 }

@@ -885,7 +885,7 @@ version = "1.0.0"
 schema-version = "2.0"
 name = "my-app"
 version = "1.0.0"
-description = "示例项目"
+description = "Example project"
 authors = ["Alice <alice@example.com>"]
 license = "MIT"
 repository = "https://github.com/user/my-app"
@@ -969,7 +969,7 @@ aura-json = "^1.2"
 
 [[tasks]]
 name = "deploy"
-description = "部署到测试环境"
+description = "Deploy to test environment"
 depends-on = ["package", "verify"]
 command = "aura publish --target test-env"
 "#;
@@ -978,7 +978,7 @@ command = "aura publish --target test-env"
         // 包元数据
         assert_eq!(manifest.name, "my-app");
         assert_eq!(manifest.version, "1.0.0");
-        assert_eq!(manifest.description.as_deref(), Some("示例项目"));
+        assert_eq!(manifest.description.as_deref(), Some("Example project"));
         assert_eq!(manifest.authors.len(), 1);
         assert_eq!(manifest.entry, "src/main.aura");
         assert_eq!(manifest.exports.len(), 2);
@@ -1172,13 +1172,13 @@ version = "1.0.0"
 
 [[tasks]]
 name = "deploy"
-description = "部署到测试环境"
+description = "Deploy to test environment"
 depends-on = ["package", "verify"]
 command = "aura publish --target test-env"
 
 [[tasks]]
 name = "clean-release"
-description = "清理并重新发布"
+description = "Clean and republish"
 depends-on = ["clean", "package", "publish"]
 "#;
         let manifest: LoomManifest = toml::from_str(toml_str).unwrap();

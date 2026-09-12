@@ -369,7 +369,11 @@ fn test_vm_core() {
     );
     // 异常处理：除零产生 Trap 并沿调用链传播
     let err = vm.call("div_zero", &[]).unwrap_err();
-    assert!(err.message.contains("除零"), "实际: {}", err.message);
+    assert!(
+        err.message.contains("division by zero"),
+        "actual: {}",
+        err.message
+    );
     // 参数个数校验
     assert!(vm.call("add", &[Value::Int(1)]).is_err());
     // Trap 之后 VM 仍可继续执行（状态一致）
@@ -417,7 +421,7 @@ fn test_jit_core() {
 
     // 热点检测 + 编译：square 被编译为 JIT 单元
     let jit = vm.jit().unwrap();
-    assert!(jit.compiles >= 1, "热点函数应被编译");
+    assert!(jit.compiles >= 1, "hot function should be compiled");
     let square_idx = module.function_index("square").unwrap();
     assert!(jit.is_compiled(square_idx));
     assert!(jit.unit(square_idx).is_some());
@@ -446,8 +450,16 @@ fn test_jit_core_deopt() {
     vm.enable_jit(1);
 
     let err = vm.call("bad_div", &[Value::Int(9)]).unwrap_err();
-    assert!(err.message.contains("除零"), "实际: {}", err.message);
-    assert_eq!(vm.jit().unwrap().deopts, 1, "应记录一次去优化");
+    assert!(
+        err.message.contains("division by zero"),
+        "actual: {}",
+        err.message
+    );
+    assert_eq!(
+        vm.jit().unwrap().deopts,
+        1,
+        "should record one deoptimization"
+    );
 }
 
 #[test]
@@ -490,12 +502,24 @@ fn test_aot_core() {
     let ir = aot.emit_llvm_ir("main").unwrap();
 
     // FFI AOT 直连：declare + 直接 call（非函数指针）
-    assert!(ir.contains("declare i32 @abs(i32)"), "缺少 abs 声明:\n{ir}");
-    assert!(ir.contains("declare i64 @strlen(ptr)"), "缺少 strlen 声明");
-    assert!(ir.contains("call i32 @abs("), "缺少 abs 直接调用");
-    assert!(ir.contains("call i64 @strlen("), "缺少 strlen 直接调用");
+    assert!(
+        ir.contains("declare i32 @abs(i32)"),
+        "missing abs declaration:\n{ir}"
+    );
+    assert!(
+        ir.contains("declare i64 @strlen(ptr)"),
+        "missing strlen declaration"
+    );
+    assert!(ir.contains("call i32 @abs("), "missing abs direct call");
+    assert!(
+        ir.contains("call i64 @strlen("),
+        "missing strlen direct call"
+    );
     // 消除间接调用
-    assert!(!ir.contains("call ptr"), "存在函数指针间接调用");
+    assert!(
+        !ir.contains("call ptr"),
+        "function pointer indirect call exists"
+    );
 
     // 内联优化：small 已内联进 main，不产生调用
     assert!(
@@ -503,7 +527,7 @@ fn test_aot_core() {
         "small 应被内联"
     );
     // 死代码消除：unused 不可达，不发射
-    assert!(!ir.contains("aura.bs.unused"), "unused 应被 DCE");
+    assert!(!ir.contains("aura.bs.unused"), "unused should be DCE'd");
     // 入口函数存在
     assert!(ir.contains("define i64 @\"aura.bs.main\""));
     // 字符串常量全局
@@ -559,7 +583,7 @@ fn test_aot_core_rejects_yield() {
     ffi.preload_std();
     let aot = AotGenerator::new(&module, &ffi, AotConfig::default());
     let err = aot.emit_llvm_ir("gen").unwrap_err();
-    assert!(err.contains("Yield"), "实际: {err}");
+    assert!(err.contains("Yield"), "actual: {err}");
 }
 
 // ---------------------------------------------------------------------------
@@ -605,12 +629,15 @@ fn test_ffi_aot_direct_jit() {
 
     let jit = vm.jit().unwrap();
     let abs_hot_idx = module.function_index("abs_hot").unwrap();
-    assert!(jit.is_compiled(abs_hot_idx), "热点 FFI 叶子函数应被编译");
+    assert!(
+        jit.is_compiled(abs_hot_idx),
+        "hot FFI leaf function should be compiled"
+    );
     let unit = jit.unit(abs_hot_idx).unwrap();
     assert_eq!(
         unit.ffi_slots,
         vec![abs_slot as usize],
-        "FFI 内联缓存应绑定槽位"
+        "FFI inline cache should bind slot"
     );
     assert_eq!(vm.ffi().entry(abs_slot as usize).unwrap().calls, 50);
 }

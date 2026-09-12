@@ -66,18 +66,18 @@ fn jit_bench(src: &str, iters: usize, expected: i64) -> f64 {
             Ok(r) => {
                 if r.as_int() != expected {
                     first_err = Some(format!(
-                        "JIT 结果不一致: 期望 {} 实际 {} （已知 P5 实验性 JIT 正确性缺陷）",
+                        "JIT result mismatch: expected {} got {} (known P5 experimental JIT correctness defect)",
                         expected, r
                     ));
                 }
             }
             Err(e) => {
-                first_err = Some(format!("JIT 运行错误: {}", e));
+                first_err = Some(format!("JIT run error: {}", e));
             }
         }
     }
     if let Some(err) = first_err {
-        eprintln!("[JIT 不可用] {}", err);
+        eprintln!("[JIT unavailable] {}", err);
         return f64::NAN;
     }
     // 计时：JIT 已生效（或确认回退解释器）
@@ -97,7 +97,7 @@ fn jit_bench(_src: &str, _iters: usize, _expected: i64) -> f64 {
 
 fn aot_bench(src: &str, iters: usize, expected: i64) -> Result<f64, String> {
     let llvm_home =
-        std::env::var("AURA_LLVM_HOME").map_err(|_| "未设置 AURA_LLVM_HOME".to_string())?;
+        std::env::var("AURA_LLVM_HOME").map_err(|_| "AURA_LLVM_HOME not set".to_string())?;
     let bin = std::path::Path::new(&llvm_home).join("bin");
 
     // 生成 LLVM IR
@@ -154,7 +154,7 @@ fn aot_bench(src: &str, iters: usize, expected: i64) -> Result<f64, String> {
         let out = Command::new(&exe).output().map_err(|e| e.to_string())?;
         let raw = out.status.code().unwrap_or(-1);
         let code = if raw < 0 { raw as u32 as i64 } else { raw as i64 };
-        assert_eq!(code, expected, "AOT 结果应为 {}", expected);
+        assert_eq!(code, expected, "AOT result should be {}", expected);
     }
     let dur = start.elapsed().as_secs_f64() / iters as f64;
 
@@ -163,56 +163,56 @@ fn aot_bench(src: &str, iters: usize, expected: i64) -> Result<f64, String> {
 }
 
 fn main() {
-    println!("=== Aura AOT vs JIT vs VM 性能对比基准 (6.17) ===\n");
+    println!("=== Aura AOT vs JIT vs VM performance benchmark (6.17) ===\n");
 
     // fib(25) = 75025
     println!("--- fib(25) ---");
     let vm = vm_bench(FIB_SRC, 10, 75025);
-    println!("  VM(字节码解释器): {:.4} ms/op", vm * 1000.0);
+    println!("  VM(bytecode interpreter): {:.4} ms/op", vm * 1000.0);
     let jit = jit_bench(FIB_SRC, 12, 75025);
     if jit.is_finite() {
         println!(
-            "  VM(JIT 热点编译):  {:.4} ms/op (JIT 加速 {:.1}x vs VM)",
+            "  VM(JIT hot compilation):  {:.4} ms/op (JIT speedup {:.1}x vs VM)",
             jit * 1000.0,
             vm / jit
         );
     } else {
-        println!("  VM(JIT): 未启用 jit feature，跳过");
+        println!("  VM(JIT): jit feature not enabled, skipped");
     }
     match aot_bench(FIB_SRC, 50, 75025) {
         Ok(aot) => {
-            println!("  AOT(LLVM 原生):   {:.4} ms/op", aot * 1000.0);
-            println!("  AOT 加速比:        {:.1}x vs VM", vm / aot);
+            println!("  AOT(LLVM native):   {:.4} ms/op", aot * 1000.0);
+            println!("  AOT speedup:        {:.1}x vs VM", vm / aot);
             if jit.is_finite() {
                 println!("  AOT vs JIT:        {:.1}x", jit / aot);
             }
         }
-        Err(e) => println!("  AOT: 跳过 ({})", e),
+        Err(e) => println!("  AOT: skipped ({})", e),
     }
 
     // sum(60_000) = 1_799_970_000
     println!("\n--- sum(60_000) ---");
     let vm = vm_bench(SUM_SRC, 10, 1_799_970_000i64);
-    println!("  VM(字节码解释器): {:.4} ms/op", vm * 1000.0);
+    println!("  VM(bytecode interpreter): {:.4} ms/op", vm * 1000.0);
     let jit = jit_bench(SUM_SRC, 12, 1_799_970_000i64);
     if jit.is_finite() {
         println!(
-            "  VM(JIT 热点编译):  {:.4} ms/op (JIT 加速 {:.1}x vs VM)",
+            "  VM(JIT hot compilation):  {:.4} ms/op (JIT speedup {:.1}x vs VM)",
             jit * 1000.0,
             vm / jit
         );
     } else {
-        println!("  VM(JIT): 未启用 jit feature，跳过");
+        println!("  VM(JIT): jit feature not enabled, skipped");
     }
     match aot_bench(SUM_SRC, 50, 1_799_970_000i64) {
         Ok(aot) => {
-            println!("  AOT(LLVM 原生):   {:.4} ms/op", aot * 1000.0);
-            println!("  AOT 加速比:        {:.1}x vs VM", vm / aot);
+            println!("  AOT(LLVM native):   {:.4} ms/op", aot * 1000.0);
+            println!("  AOT speedup:        {:.1}x vs VM", vm / aot);
             if jit.is_finite() {
                 println!("  AOT vs JIT:        {:.1}x", jit / aot);
             }
         }
-        Err(e) => println!("  AOT: 跳过 ({})", e),
+        Err(e) => println!("  AOT: skipped ({})", e),
     }
 }
 

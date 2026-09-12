@@ -32,11 +32,11 @@ while [ $# -gt 0 ]; do
             COMPILER="${1:-}"
             ;;
         -h|--help)
-            echo "用法: scripts/snapshot.sh [--update] [--compiler <path>]"
+            echo "Usage: scripts/snapshot.sh [--update] [--compiler <path>]"
             exit 0
             ;;
         *)
-            echo "[snapshot] 未知参数: $1" >&2
+            echo "[snapshot] Unknown argument: $1" >&2
             exit 1
             ;;
     esac
@@ -59,7 +59,7 @@ else
 fi
 
 if [ -z "$AURA" ] || [ ! -x "$AURA" ]; then
-    echo "[snapshot] 错误: 未找到编译器可执行文件（可用 --compiler 指定）" >&2
+    echo "[snapshot] ERROR: compiler executable not found (use --compiler to specify)" >&2
     exit 1
 fi
 
@@ -73,7 +73,7 @@ normalize() {
 }
 
 if [ ! -d "$CASES_DIR" ]; then
-    echo "[snapshot] 错误: 用例目录不存在: $CASES_DIR" >&2
+    echo "[snapshot] ERROR: cases directory not found: $CASES_DIR" >&2
     exit 1
 fi
 
@@ -95,7 +95,7 @@ for case_file in "$CASES_DIR"/*.aura; do
     for kind in tokens ast; do
         rel="$BASE_DIR/$name.$kind.txt"
         if ! actual="$("$AURA" "$kind" "$case_file" 2>/dev/null | normalize)"; then
-            echo "[snapshot] FAIL  $rel ($kind, 编译器出错)"
+            echo "[snapshot] FAIL  $rel ($kind, compiler error)"
             failures=$((failures + 1))
             continue
         fi
@@ -107,7 +107,7 @@ for case_file in "$CASES_DIR"/*.aura; do
         fi
 
         if [ ! -f "$rel" ]; then
-            echo "[snapshot] MISS  $rel (运行 --update)"
+            echo "[snapshot] MISS  $rel (run --update)"
             failures=$((failures + 1))
             continue
         fi
@@ -126,14 +126,14 @@ done
 
 echo ""
 if [ "$UPDATE" = "1" ]; then
-    echo "[snapshot] ✓ 基线已更新"
+    echo "[snapshot] ✓ Baseline updated"
     exit 0
 fi
 
 if [ "$failures" -eq 0 ]; then
-    echo "[snapshot] ✓ OK: $checked 个快照一致"
+    echo "[snapshot] ✓ OK: $checked snapshots match"
     exit 0
 fi
 
-echo "[snapshot] ✗ 失败: $failures 个快照不一致或缺失" >&2
+echo "[snapshot] ✗ Failed: $failures snapshots mismatched or missing" >&2
 exit 1

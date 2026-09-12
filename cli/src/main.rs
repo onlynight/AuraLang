@@ -64,7 +64,7 @@ fn main() {
         "export-header" => cmd_export_header(rest),
         "--help" | "-h" | "help" => print_usage(),
         other => {
-            eprintln!("未知子命令: {}", other);
+            eprintln!("Unknown subcommand: {}", other);
             print_usage();
             exit(1);
         }
@@ -73,40 +73,40 @@ fn main() {
 
 fn print_usage() {
     println!(
-        "Aura 语言工具链\n\
+        "Aura language toolchain\n\
 \n\
-用法:\n\
-  aura build <file.aura> [--output <out>]        编译为字节码 .auc / 原生可执行文件\n\
-  aura build <file.aura> --aot-embed             编译 .auc v4（嵌入 AOT 机器码，VM 加载时 mmap 执行）\n\
-  aura build <file.aura> --lib [--output <out>]   打包为 .auz 库制品（等价于 aura package）\n\
-  aura build <file.aura> --aot [--output <exe>]  AOT 编译为原生可执行文件\n\
-    [--target <triple>]   目标三元组（如 aarch64-unknown-linux-gnu）\n\
-    [--opt <level>]       优化级别（0/1/2/3/s/z，默认 2）\n\
-    [--emit-llvm]         仅生成 LLVM IR（.ll）\n\
-    [--debug]             生成 DWARF 调试信息\n\
-    [--shared]            生成动态库（.so / .dylib / .dll），导出 JitValue ABI 包装函数\n\
-  aura run <file.aura> [--stdlib-dir <dir>]      编译并执行（可选加载标准库 .auc）\n\
-  aura check <file.aura>                        仅做语法/语义检查\n\
-  aura disasm <file.auc> [--source <f.aura>]    反汇编 .auc 为可读汇编\n\
-  aura tokens <file.aura>                       输出词法分析\n\
-  aura ast <file.aura>                          输出 AST\n\
-  aura fmt <file.aura>                          代码格式化（预留）\n\
-  aura leak-check <file.aura>                    P7: 内存泄漏检测（ARC 分析）\n\
-  aura doc [--output <dir>]                       生成标准库 API 文档（Markdown + HTML）\n\
-  aura eval [--expr <code>]                      执行代码片段（类 node -e）\n\
-  aura repl                                     交互式 REPL（类 python -i）\n\
-  aura install [--offline]                        P11: 安装依赖（aura.toml + // @depends）\n\
-  aura update [--all]                             P11: 更新依赖到最新兼容版本\n\
-  aura publish [--dir <path>]                     P11: 发布包到 Git 仓库\n\
-  aura deps [--dir <path>]                        P11: 显示依赖树\n\
-  aura new <name> [--dir <path>]                  P11: 创建新包项目\n\
-  aura package <file.aura> [--output <out>]         Phase 1: 打包为 .auz 制品\n\
-  aura inspect <file.auz>                         Phase 1: 检查 .auz 内容\n\
-  aura verify <file.auz>                          Phase 1: 验证 .auz 校验和\n\
-  aura lsp                                        P13: 启动 LSP 服务器（stdio 通信）\n\
-  aura debug <file.aura>                          P15: 启动调试器（转发到 aura-debug）\n\
-  aura fmt <file.aura> [--check]                  P13: 代码格式化\n\
-  aura stdlib-compile <core-dir> [--output <dir>] Phase 3: 预编译标准库 .aura → .auc\n"
+Usage:\n\
+  aura build <file.aura> [--output <out>]        Compile to bytecode .auc / native executable\n\
+  aura build <file.aura> --aot-embed             Compile .auc v4 (embed AOT machine code, mmap at VM load)\n\
+  aura build <file.aura> --lib [--output <out>]   Package as .auz library artifact (same as aura package)\n\
+  aura build <file.aura> --aot [--output <exe>]  AOT compile to native executable\n\
+    [--target <triple>]   Target triple (e.g. aarch64-unknown-linux-gnu)\n\
+    [--opt <level>]       Optimization level (0/1/2/3/s/z, default 2)\n\
+    [--emit-llvm]         Only generate LLVM IR (.ll)\n\
+    [--debug]             Generate DWARF debug information\n\
+    [--shared]            Generate shared library (.so / .dylib / .dll), export JitValue ABI wrapper\n\
+  aura run <file.aura> [--stdlib-dir <dir>]      Compile and run (optionally load stdlib .auc)\n\
+  aura check <file.aura>                        Syntax/semantic check only\n\
+  aura disasm <file.auc> [--source <f.aura>]    Disassemble .auc to readable assembly\n\
+  aura tokens <file.aura>                       Print lexical analysis\n\
+  aura ast <file.aura>                          Print AST\n\
+  aura fmt <file.aura>                          Code formatting (reserved)\n\
+  aura leak-check <file.aura>                    P7: Memory leak detection (ARC analysis)\n\
+  aura doc [--output <dir>]                       Generate stdlib API docs (Markdown + HTML)\n\
+  aura eval [--expr <code>]                      Execute code snippet (like node -e)\n\
+  aura repl                                     Interactive REPL (like python -i)\n\
+  aura install [--offline]                        P11: Install dependencies (aura.toml + // @depends)\n\
+  aura update [--all]                             P11: Update dependencies to latest compatible version\n\
+  aura publish [--dir <path>]                     P11: Publish package to Git repo\n\
+  aura deps [--dir <path>]                        P11: Show dependency tree\n\
+  aura new <name> [--dir <path>]                  P11: Create new package project\n\
+  aura package <file.aura> [--output <out>]         Phase 1: Package as .auz artifact\n\
+  aura inspect <file.auz>                         Phase 1: Inspect .auz content\n\
+  aura verify <file.auz>                          Phase 1: Verify .auz checksum\n\
+  aura lsp                                        P13: Start LSP server (stdio communication)\n\
+  aura debug <file.aura>                          P15: Start debugger (forward to aura-debug)\n\
+  aura fmt <file.aura> [--check]                  P13: Code formatting\n\
+  aura stdlib-compile <core-dir> [--output <dir>] Phase 3: Pre-compile stdlib .aura → .auc\n"
     );
 }
 
@@ -142,8 +142,8 @@ fn cmd_build(args: &[String]) {
         }
         #[cfg(not(feature = "llvm"))]
         {
-            eprintln!("错误: llvm feature 未启用，无法进行 AOT 编译");
-            eprintln!("提示: 使用 `cargo build --features llvm` 重新构建 compiler");
+            eprintln!("Error: llvm feature is not enabled, AOT compilation is unavailable");
+            eprintln!("Hint: rebuild compiler with `cargo build --features llvm`");
             exit(1);
         }
     }
@@ -152,7 +152,7 @@ fn cmd_build(args: &[String]) {
     let input = match first_positional(args, "--output") {
         Some(p) => p,
         None => {
-            eprintln!("错误: 缺少输入文件");
+            eprintln!("Error: missing input file");
             exit(1);
         }
     };
@@ -160,7 +160,7 @@ fn cmd_build(args: &[String]) {
     let source = match std::fs::read_to_string(input) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("错误: 无法读取 {}: {}", input, e);
+            eprintln!("Error: failed to read {}: {}", input, e);
             exit(1);
         }
     };
@@ -170,7 +170,7 @@ fn cmd_build(args: &[String]) {
     let module = match compile_source(&source) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("编译失败:\n{}", e);
+            eprintln!("Compilation failed:\n{}", e);
             exit(1);
         }
     };
@@ -182,7 +182,7 @@ fn cmd_build(args: &[String]) {
     #[cfg(not(feature = "llvm"))]
     let module = {
         if embed {
-            eprintln!("错误: llvm feature 未启用，无法使用 --aot-embed");
+            eprintln!("Error: llvm feature is not enabled, --aot-embed is unavailable");
             exit(1);
         }
         module
@@ -190,11 +190,11 @@ fn cmd_build(args: &[String]) {
 
     let out_path = output.unwrap_or_else(|| default_output(input));
     if let Err(e) = write_auc(&out_path, &module) {
-        eprintln!("错误: 写入 {} 失败: {}", out_path, e);
+        eprintln!("Error: failed to write {}: {}", out_path, e);
         exit(1);
     }
     println!(
-        "已生成 {} ({} 字节, {} 函数, {} 常量)",
+        "Generated {} ({} bytes, {} functions, {} constants)",
         out_path,
         to_bytes(&module).len(),
         module.functions.len(),
@@ -216,13 +216,13 @@ fn embed_into_auc(source: &str, module: BytecodeModule) -> BytecodeModule {
     let mut lexer = Lexer::new(source);
     let tokens = lexer.tokenize();
     if let Some(e) = lexer.errors().first() {
-        eprintln!("错误: [词法] {}", e.message);
+        eprintln!("Error: [lex] {}", e.message);
         exit(1);
     }
     let mut parser = Parser::new(tokens);
     let program = parser.parse_program();
     if let Some(e) = parser.errors().first() {
-        eprintln!("错误: [语法] {}", e.message);
+        eprintln!("Error: [syntax] {}", e.message);
         exit(1);
     }
     let mut hir = desugar_program(&program);
@@ -236,14 +236,17 @@ fn embed_into_auc(source: &str, module: BytecodeModule) -> BytecodeModule {
     match embed_aot(module.clone(), &hir, options, &tmp_dir) {
         Ok(result) => {
             println!(
-                "✓ AOT 嵌入: 机器码 {} 字节, {} 个函数描述符",
+                "✓ AOT embed: machine code {} bytes, {} function descriptors",
                 result.machine_size, result.desc_count
             );
             result.module
         }
         Err(e) => {
             let _ = std::fs::remove_dir_all(&tmp_dir);
-            eprintln!("警告: AOT 嵌入失败（{}），回退纯字节码 .auc", e);
+            eprintln!(
+                "Warning: AOT embed failed ({}), falling back to pure bytecode .auc",
+                e
+            );
             module
         }
     }
@@ -255,7 +258,7 @@ fn cmd_build_aot(args: &[String]) {
     let input = match first_positional(args, "--aot") {
         Some(p) => p,
         None => {
-            eprintln!("错误: 缺少输入文件");
+            eprintln!("Error: missing input file");
             exit(1);
         }
     };
@@ -263,7 +266,7 @@ fn cmd_build_aot(args: &[String]) {
     let source = match std::fs::read_to_string(input) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("错误: 无法读取 {}: {}", input, e);
+            eprintln!("Error: failed to read {}: {}", input, e);
             exit(1);
         }
     };
@@ -276,9 +279,9 @@ fn cmd_build_aot(args: &[String]) {
         Some(t) => match TargetTriple::from_str(&t) {
             Some(tt) => tt,
             None => {
-                eprintln!("错误: 不支持的目标三元组: {}", t);
+                eprintln!("Error: unsupported target triple: {}", t);
                 eprintln!(
-                    "支持格式: x86_64-pc-windows-msvc / aarch64-unknown-linux-gnu / armv7-unknown-linux-gnueabihf"
+                    "Supported formats: x86_64-pc-windows-msvc / aarch64-unknown-linux-gnu / armv7-unknown-linux-gnueabihf"
                 );
                 exit(1);
             }
@@ -300,7 +303,10 @@ fn cmd_build_aot(args: &[String]) {
         Some(s) => match OptimizationLevel::from_str(&s) {
             Some(l) => l,
             None => {
-                eprintln!("错误: 无效的优化级别: {}（支持 0/1/2/3/s/z）", s);
+                eprintln!(
+                    "Error: invalid optimization level: {} (supported: 0/1/2/3/s/z)",
+                    s
+                );
                 exit(1);
             }
         },
@@ -376,13 +382,13 @@ fn cmd_build_aot(args: &[String]) {
     let mut lexer = Lexer::new(&source);
     let tokens = lexer.tokenize();
     if let Some(e) = lexer.errors().first() {
-        eprintln!("错误: [词法] {}", e.message);
+        eprintln!("Error: [lex] {}", e.message);
         exit(1);
     }
     let mut parser = Parser::new(tokens);
     let program = parser.parse_program();
     if let Some(e) = parser.errors().first() {
-        eprintln!("错误: [语法] {}", e.message);
+        eprintln!("Error: [syntax] {}", e.message);
         exit(1);
     }
 
@@ -398,12 +404,12 @@ fn cmd_build_aot(args: &[String]) {
         if d.severity == compiler::errors::ErrorSeverity::Error {
             hard_count += 1;
         } else {
-            eprintln!("警告: [语义] {}", d.message);
+            eprintln!("Warning: [sema] {}", d.message);
         }
     }
     if hard_count > 0 {
         eprintln!(
-            "警告: [语义] 忽略 {} 条类型诊断（P3 类型检查局限，与字节码路径策略一致）",
+            "Warning: [sema] ignoring {} type diagnostics (P3 type-check limitations, consistent with bytecode path)",
             hard_count
         );
     }
@@ -417,7 +423,7 @@ fn cmd_build_aot(args: &[String]) {
     let ir = match codegen.generate_ir_with_mode(&hir, is_shared, is_shared, options.c_abi) {
         Ok(ir) => ir,
         Err(e) => {
-            eprintln!("错误: AOT IR 生成失败: {}", e);
+            eprintln!("Error: AOT IR generation failed: {}", e);
             exit(1);
         }
     };
@@ -425,10 +431,13 @@ fn cmd_build_aot(args: &[String]) {
     if emit_llvm {
         // 仅输出 LLVM IR
         if let Err(e) = std::fs::write(&out_path, &ir) {
-            eprintln!("错误: 无法写入 {}: {}", out_path.display(), e);
+            eprintln!("Error: failed to write {}: {}", out_path.display(), e);
             exit(1);
         }
-        println!("✓ AOT 编译完成（LLVM IR）: {}", out_path.display());
+        println!(
+            "✓ AOT compilation complete (LLVM IR): {}",
+            out_path.display()
+        );
         return;
     }
 
@@ -438,7 +447,7 @@ fn cmd_build_aot(args: &[String]) {
     let _ = std::fs::create_dir_all(&tmp_dir);
     let ll_path = tmp_dir.join("module.ll");
     if let Err(e) = std::fs::write(&ll_path, &ir) {
-        eprintln!("错误: 无法写入临时 IR: {}", e);
+        eprintln!("Error: failed to write temporary IR: {}", e);
         exit(1);
     }
 
@@ -449,15 +458,19 @@ fn cmd_build_aot(args: &[String]) {
     } {
         Ok(()) => {
             let _ = std::fs::remove_dir_all(&tmp_dir);
-            let kind = if is_shared { "动态库" } else { "可执行文件" };
-            println!("✓ AOT 编译完成（{}）: {}", kind, out_path.display());
+            let kind = if is_shared { "shared library" } else { "executable" };
+            println!(
+                "✓ AOT compilation complete ({}): {}",
+                kind,
+                out_path.display()
+            );
         }
         Err(e) => {
             // 调试：设置 AURA_KEEP_AOT_TMP=1 保留临时 IR 便于定位 llc 错误
             if std::env::var("AURA_KEEP_AOT_TMP").is_err() {
                 let _ = std::fs::remove_dir_all(&tmp_dir);
             }
-            eprintln!("错误: AOT 编译失败: {}", e);
+            eprintln!("Error: AOT compilation failed: {}", e);
             exit(1);
         }
     }
@@ -519,7 +532,7 @@ fn cmd_disasm(args: &[String]) {
     let input = match first_positional(args, "--source") {
         Some(p) => p,
         None => {
-            eprintln!("错误: 缺少输入文件");
+            eprintln!("Error: missing input file");
             exit(1);
         }
     };
@@ -528,11 +541,11 @@ fn cmd_disasm(args: &[String]) {
             println!("{}", disassemble(&module));
         }
         Err(SerializeError::Format(m)) => {
-            eprintln!("反汇编失败（格式错误）: {}", m);
+            eprintln!("Disassembly failed (format error): {}", m);
             exit(1);
         }
         Err(SerializeError::Io(m)) => {
-            eprintln!("反汇编失败（IO 错误）: {}", m);
+            eprintln!("Disassembly failed (IO error): {}", m);
             exit(1);
         }
     }
@@ -563,7 +576,7 @@ fn cmd_run(args: &[String]) {
     let input = match input {
         Some(p) => p,
         None => {
-            eprintln!("错误: 缺少输入文件");
+            eprintln!("Error: missing input file");
             exit(1);
         }
     };
@@ -573,7 +586,7 @@ fn cmd_run(args: &[String]) {
         match read_auc(input) {
             Ok(m) => m,
             Err(e) => {
-                eprintln!("错误: 无法读取字节码 {}: {}", input, e);
+                eprintln!("Error: failed to read bytecode {}: {}", input, e);
                 exit(1);
             }
         }
@@ -581,7 +594,7 @@ fn cmd_run(args: &[String]) {
         let source = match std::fs::read_to_string(input) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("错误: 无法读取 {}: {}", input, e);
+                eprintln!("Error: failed to read {}: {}", input, e);
                 exit(1);
             }
         };
@@ -590,7 +603,7 @@ fn cmd_run(args: &[String]) {
         match compile_source(&source) {
             Ok(m) => m,
             Err(e) => {
-                eprintln!("编译失败:\n{}", e);
+                eprintln!("Compilation failed:\n{}", e);
                 exit(1);
             }
         }
@@ -603,7 +616,7 @@ fn cmd_run(args: &[String]) {
     let mut vm = match Vm::new(&module, opts) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("VM 初始化失败: {}", e);
+            eprintln!("VM initialization failed: {}", e);
             exit(1);
         }
     };
@@ -613,10 +626,16 @@ fn cmd_run(args: &[String]) {
         let stdlib_p = std::path::Path::new(stdlib_path);
         match vm.load_stdlib_dir(stdlib_p) {
             Ok(count) => {
-                eprintln!("[run] 标准库加载: {} 个 Aura 编译函数就绪", count);
+                eprintln!(
+                    "[run] stdlib loaded: {} Aura-compiled functions ready",
+                    count
+                );
             }
             Err(e) => {
-                eprintln!("[run] 标准库加载失败（继续无标准库运行）: {}", e);
+                eprintln!(
+                    "[run] stdlib load failed (continuing without stdlib): {}",
+                    e
+                );
             }
         }
     }
@@ -634,7 +653,7 @@ fn cmd_run(args: &[String]) {
             }
         }
         Err(e) => {
-            eprintln!("运行时错误: {}", e);
+            eprintln!("Runtime error: {}", e);
             exit(1);
         }
     }
@@ -654,14 +673,17 @@ fn cmd_stdlib_compile(args: &[String]) {
     let input = match first_positional(args, "--output") {
         Some(p) => p,
         None => {
-            eprintln!("用法: aura stdlib-compile <core-dir> [--output <out-dir>]");
+            eprintln!("Usage: aura stdlib-compile <core-dir> [--output <out-dir>]");
             exit(1);
         }
     };
 
     let core_dir = std::path::Path::new(input);
     if !core_dir.exists() {
-        eprintln!("错误: 标准库目录不存在: {}", core_dir.display());
+        eprintln!(
+            "Error: stdlib directory does not exist: {}",
+            core_dir.display()
+        );
         exit(1);
     }
 
@@ -669,7 +691,11 @@ fn cmd_stdlib_compile(args: &[String]) {
     let out_path = std::path::Path::new(&out_dir);
 
     if let Err(e) = std::fs::create_dir_all(out_path) {
-        eprintln!("错误: 无法创建输出目录 {}: {}", out_path.display(), e);
+        eprintln!(
+            "Error: failed to create output directory {}: {}",
+            out_path.display(),
+            e
+        );
         exit(1);
     }
 
@@ -678,13 +704,17 @@ fn cmd_stdlib_compile(args: &[String]) {
 
     // 递归扫描 .aura 文件
     let aura_files = scan_aura_files_recursive(core_dir, core_dir).unwrap_or_default();
-    eprintln!("[stdlib-compile] 找到 {} 个 .aura 文件", aura_files.len());
+    eprintln!("[stdlib-compile] found {} .aura files", aura_files.len());
 
     for (rel_path, abs_path) in &aura_files {
         let source = match std::fs::read_to_string(abs_path) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("[stdlib-compile] 无法读取 {}: {}", rel_path.display(), e);
+                eprintln!(
+                    "[stdlib-compile] failed to read {}: {}",
+                    rel_path.display(),
+                    e
+                );
                 failed += 1;
                 continue;
             }
@@ -702,7 +732,7 @@ fn cmd_stdlib_compile(args: &[String]) {
                 let out_dir_for_file = out_file.parent().unwrap_or(out_path).to_path_buf();
                 if let Err(e) = std::fs::create_dir_all(&out_dir_for_file) {
                     eprintln!(
-                        "[stdlib-compile] 无法创建目录 {}: {}",
+                        "[stdlib-compile] failed to create directory {}: {}",
                         out_dir_for_file.display(),
                         e
                     );
@@ -719,27 +749,35 @@ fn cmd_stdlib_compile(args: &[String]) {
                         success += 1;
                     }
                     Err(e) => {
-                        eprintln!("[stdlib-compile] 写入失败 {}: {}", out_file.display(), e);
+                        eprintln!(
+                            "[stdlib-compile] write failed {}: {}",
+                            out_file.display(),
+                            e
+                        );
                         failed += 1;
                     }
                 }
             }
             Err(e) => {
-                eprintln!("[stdlib-compile] ✗ {} 编译失败: {}", rel_path.display(), e);
+                eprintln!(
+                    "[stdlib-compile] ✗ {} compilation failed: {}",
+                    rel_path.display(),
+                    e
+                );
                 failed += 1;
             }
         }
     }
 
     eprintln!(
-        "[stdlib-compile] 完成: {} 成功, {} 失败 → {}",
+        "[stdlib-compile] done: {} succeeded, {} failed → {}",
         success,
         failed,
         out_path.display()
     );
 
     if success == 0 {
-        eprintln!("[stdlib-compile] 警告: 没有成功编译任何文件");
+        eprintln!("[stdlib-compile] Warning: no files were successfully compiled");
     }
 }
 
@@ -766,14 +804,14 @@ fn cmd_check(args: &[String]) {
     let input = match first_positional(args, "--source") {
         Some(p) => p,
         None => {
-            eprintln!("错误: 缺少输入文件");
+            eprintln!("Error: missing input file");
             exit(1);
         }
     };
     let source = match std::fs::read_to_string(input) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("错误: 无法读取 {}: {}", input, e);
+            eprintln!("Error: failed to read {}: {}", input, e);
             exit(1);
         }
     };
@@ -783,27 +821,27 @@ fn cmd_check(args: &[String]) {
     let mut lexer = Lexer::new(&source);
     let tokens = lexer.tokenize();
     for e in lexer.errors() {
-        eprintln!("[词法] {}", e.message);
+        eprintln!("[lex] {}", e.message);
         errs += 1;
     }
     // 语法
     let mut parser = Parser::new(tokens);
     let _program = parser.parse_program();
     for e in parser.errors() {
-        eprintln!("[语法] {}", e.message);
+        eprintln!("[syntax] {}", e.message);
         errs += 1;
     }
     // 语义
     let (_ast, sema) = analyze_source(&source);
     for e in &sema.errors {
-        eprintln!("[语义] {}", e.message);
+        eprintln!("[sema] {}", e.message);
         errs += 1;
     }
 
     if errs == 0 {
-        println!("✓ {} 检查通过", input);
+        println!("✓ {} check passed", input);
     } else {
-        println!("✗ {} 存在 {} 个错误", input, errs);
+        println!("✗ {} has {} errors", input, errs);
         exit(1);
     }
 }
@@ -812,14 +850,14 @@ fn cmd_tokens(args: &[String]) {
     let input = match first_positional(args, "--source") {
         Some(p) => p,
         None => {
-            eprintln!("错误: 缺少输入文件");
+            eprintln!("Error: missing input file");
             exit(1);
         }
     };
     let source = match std::fs::read_to_string(input) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("错误: 无法读取 {}: {}", input, e);
+            eprintln!("Error: failed to read {}: {}", input, e);
             exit(1);
         }
     };
@@ -830,7 +868,7 @@ fn cmd_tokens(args: &[String]) {
     }
     if !lexer.errors().is_empty() {
         for e in lexer.errors() {
-            eprintln!("[词法] {}", e.message);
+            eprintln!("[lex] {}", e.message);
         }
         exit(1);
     }
@@ -840,14 +878,14 @@ fn cmd_ast(args: &[String]) {
     let input = match first_positional(args, "--source") {
         Some(p) => p,
         None => {
-            eprintln!("错误: 缺少输入文件");
+            eprintln!("Error: missing input file");
             exit(1);
         }
     };
     let source = match std::fs::read_to_string(input) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("错误: 无法读取 {}: {}", input, e);
+            eprintln!("Error: failed to read {}: {}", input, e);
             exit(1);
         }
     };
@@ -858,7 +896,7 @@ fn cmd_ast(args: &[String]) {
     println!("{:#?}", program);
     if !parser.errors().is_empty() {
         for e in parser.errors() {
-            eprintln!("[语法] {}", e.message);
+            eprintln!("[syntax] {}", e.message);
         }
         exit(1);
     }
@@ -869,8 +907,8 @@ fn cmd_fmt(args: &[String]) {
     let input = match first_positional(args, "--check") {
         Some(p) => p,
         None => {
-            eprintln!("错误: 缺少输入文件");
-            eprintln!("用法: aura fmt <file.aura> [--check]");
+            eprintln!("Error: missing input file");
+            eprintln!("Usage: aura fmt <file.aura> [--check]");
             exit(1);
         }
     };
@@ -878,7 +916,7 @@ fn cmd_fmt(args: &[String]) {
     let source = match std::fs::read_to_string(input) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("错误: 无法读取 {}: {}", input, e);
+            eprintln!("Error: failed to read {}: {}", input, e);
             exit(1);
         }
     };
@@ -887,19 +925,19 @@ fn cmd_fmt(args: &[String]) {
 
     if check_only {
         if formatted != source {
-            println!("{} 需要格式化", input);
+            println!("{} needs formatting", input);
             exit(1);
         } else {
-            println!("✓ {} 已格式化", input);
+            println!("✓ {} already formatted", input);
         }
     } else {
         std::fs::write(input, &formatted)
             .map_err(|e| {
-                eprintln!("错误: 写入 {} 失败: {}", input, e);
+                eprintln!("Error: failed to write {}: {}", input, e);
                 exit(1);
             })
             .ok();
-        println!("✓ 已格式化 {}", input);
+        println!("✓ Formatted {}", input);
     }
 }
 
@@ -912,7 +950,10 @@ fn cmd_lsp(_args: &[String]) {
     let lsp_bin = find_lsp_binary();
 
     if let Some(bin_path) = lsp_bin {
-        eprintln!("[aura] 启动独立 LSP 进程: {}", bin_path.display());
+        eprintln!(
+            "[aura] Starting standalone LSP process: {}",
+            bin_path.display()
+        );
         // 使用子进程方式启动 aura-lsp，stdio 透传
         let status = std::process::Command::new(&bin_path)
             .stdin(std::process::Stdio::inherit())
@@ -920,18 +961,21 @@ fn cmd_lsp(_args: &[String]) {
             .stderr(std::process::Stdio::inherit())
             .status()
             .map_err(|e| {
-                eprintln!("错误: 无法启动 {}: {}", bin_path.display(), e);
+                eprintln!("Error: failed to start {}: {}", bin_path.display(), e);
                 exit(1);
             })
             .unwrap();
 
         if !status.success() {
-            eprintln!("[aura] LSP 进程异常退出 (code: {:?})", status.code());
+            eprintln!(
+                "[aura] LSP process exited abnormally (code: {:?})",
+                status.code()
+            );
             exit(1);
         }
     } else {
         // 回退：进程内运行 LSP（兼容旧行为）
-        eprintln!("[aura] 未找到 aura-lsp，回退到进程内 LSP 模式");
+        eprintln!("[aura] aura-lsp not found, falling back to in-process LSP mode");
         compiler::lsp::run_lsp_server();
     }
 }
@@ -985,7 +1029,7 @@ fn cmd_debug(args: &[String]) {
 
     match debug_bin {
         Some(bin_path) => {
-            eprintln!("[aura] 启动调试器: {}", bin_path.display());
+            eprintln!("[aura] Starting debugger: {}", bin_path.display());
             let status = std::process::Command::new(&bin_path)
                 .args(args)
                 .stdin(std::process::Stdio::inherit())
@@ -993,19 +1037,22 @@ fn cmd_debug(args: &[String]) {
                 .stderr(std::process::Stdio::inherit())
                 .status()
                 .map_err(|e| {
-                    eprintln!("错误: 无法启动 {}: {}", bin_path.display(), e);
+                    eprintln!("Error: failed to start {}: {}", bin_path.display(), e);
                     exit(1);
                 })
                 .unwrap();
 
             if !status.success() {
-                eprintln!("[aura] 调试器异常退出 (code: {:?})", status.code());
+                eprintln!(
+                    "[aura] Debugger exited abnormally (code: {:?})",
+                    status.code()
+                );
                 exit(1);
             }
         }
         None => {
-            eprintln!("[aura] 未找到 aura-debug，请确保它在 PATH 中");
-            eprintln!("[aura] 或直接运行: aura-debug <file.aura>");
+            eprintln!("[aura] aura-debug not found, ensure it is in PATH");
+            eprintln!("[aura] Or run directly: aura-debug <file.aura>");
             exit(1);
         }
     }
@@ -1050,14 +1097,14 @@ fn cmd_leak_check(args: &[String]) {
     let input = match first_positional(args, "--source") {
         Some(p) => p,
         None => {
-            eprintln!("错误: 缺少输入文件");
+            eprintln!("Error: missing input file");
             exit(1);
         }
     };
     let source = match std::fs::read_to_string(input) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("错误: 无法读取 {}: {}", input, e);
+            eprintln!("Error: failed to read {}: {}", input, e);
             exit(1);
         }
     };
@@ -1072,7 +1119,7 @@ fn cmd_leak_check(args: &[String]) {
 
     if !parser.errors().is_empty() {
         for e in parser.errors() {
-            eprintln!("[语法] {}", e.message);
+            eprintln!("[syntax] {}", e.message);
         }
         exit(1);
     }
@@ -1083,37 +1130,40 @@ fn cmd_leak_check(args: &[String]) {
     // 运行完整 ARC 分析
     let result = compiler::codegen::arc::run_arc_analysis(&mut mir_funcs);
 
-    println!("=== ARC 分析报告 ===");
+    println!("=== ARC Analysis Report ===");
     println!("{}", result.summary());
     println!();
 
     if let Some((name, info)) = result.escape_info.iter().next() {
-        println!("--- 逃逸分析: {} ---", name);
-        println!("  逃逸分配: {}", info.escaping_allocs.len());
-        println!("  非逃逸分配: {}", info.non_escaping_allocs.len());
+        println!("--- Escape Analysis: {} ---", name);
+        println!("  Escaping allocations: {}", info.escaping_allocs.len());
+        println!(
+            "  Non-escaping allocations: {}",
+            info.non_escaping_allocs.len()
+        );
     }
 
     println!();
-    println!("--- ARC 插入统计 ---");
-    println!("  Retain 插入: {}", result.insertion_stats.retains);
-    println!("  Release 插入: {}", result.insertion_stats.releases);
+    println!("--- ARC Insertion Statistics ---");
+    println!("  Retain insertions: {}", result.insertion_stats.retains);
+    println!("  Release insertions: {}", result.insertion_stats.releases);
     println!();
-    println!("--- ARC 优化统计 ---");
+    println!("--- ARC Optimization Statistics ---");
     println!(
-        "  消除 Retain: {}",
+        "  Eliminated retains: {}",
         result.optimization_stats.eliminated_retains
     );
     println!(
-        "  消除 Release: {}",
+        "  Eliminated releases: {}",
         result.optimization_stats.eliminated_releases
     );
 
     println!();
     if result.leak_report.is_clean() {
-        println!("✅ 内存泄漏检测: 无泄漏");
+        println!("✅ Memory leak detection: no leaks");
     } else {
         println!(
-            "⚠️  内存泄漏检测: 发现 {} 个潜在泄漏",
+            "⚠️  Memory leak detection: {} potential leaks found",
             result.leak_report.leaked_allocs
         );
         for d in &result.leak_report.details {
@@ -1136,8 +1186,11 @@ fn cmd_doc(args: &[String]) {
         let registry = compiler::docgen::DocRegistry::new().load_all();
         let docs = registry.by_module(module);
         if docs.is_empty() {
-            eprintln!("错误: 模块 '{}' 不存在或无文档", module);
-            eprintln!("可用模块:");
+            eprintln!(
+                "Error: module '{}' does not exist or has no documentation",
+                module
+            );
+            eprintln!("Available modules:");
             for m in registry.module_names() {
                 println!("  {}", m);
             }
@@ -1146,32 +1199,32 @@ fn cmd_doc(args: &[String]) {
         let content = compiler::docgen::render_module_markdown(&registry, module);
         std::fs::create_dir_all(&output_dir)
             .map_err(|e| {
-                eprintln!("错误: 创建输出目录失败: {}", e);
+                eprintln!("Error: failed to create output directory: {}", e);
                 exit(1);
             })
             .ok();
         let file_path = output_dir.join(format!("std_{}.md", module));
         std::fs::write(&file_path, &content)
             .map_err(|e| {
-                eprintln!("错误: 写入 {} 失败: {}", file_path.display(), e);
+                eprintln!("Error: failed to write {}: {}", file_path.display(), e);
                 exit(1);
             })
             .ok();
-        println!("✓ 已生成模块文档: {}", file_path.display());
-        println!("  函数数: {}", docs.len());
+        println!("✓ Module documentation generated: {}", file_path.display());
+        println!("  Function count: {}", docs.len());
         return;
     }
 
     // 生成完整文档（Markdown + HTML）
     match compiler::docgen::generate_docs(&output_dir) {
         Ok(files) => {
-            println!("✓ 已生成 {} 个文档文件:", files.len());
+            println!("✓ Generated {} documentation files:", files.len());
             for f in &files {
                 println!("  {}", f.display());
             }
         }
         Err(e) => {
-            eprintln!("错误: 文档生成失败: {}", e);
+            eprintln!("Error: documentation generation failed: {}", e);
             exit(1);
         }
     }
@@ -1181,9 +1234,13 @@ fn cmd_doc(args: &[String]) {
     let html = compiler::docgen::render_html(&registry);
     let html_path = output_dir.join("index.html");
     if let Err(e) = std::fs::write(&html_path, &html) {
-        eprintln!("警告: 无法写入 HTML 文档 {}: {}", html_path.display(), e);
+        eprintln!(
+            "Warning: failed to write HTML documentation {}: {}",
+            html_path.display(),
+            e
+        );
     } else {
-        println!("  ✓ HTML 文档: {}", html_path.display());
+        println!("  ✓ HTML documentation: {}", html_path.display());
     }
 }
 
@@ -1206,7 +1263,7 @@ fn cmd_eval(args: &[String]) {
             match io::stdin().read_to_string(&mut input) {
                 Ok(_) => input,
                 Err(e) => {
-                    eprintln!("错误: 无法读取 stdin: {}", e);
+                    eprintln!("Error: failed to read from stdin: {}", e);
                     exit(1);
                 }
             }
@@ -1214,14 +1271,14 @@ fn cmd_eval(args: &[String]) {
     };
 
     if code.trim().is_empty() {
-        eprintln!("错误: 代码为空");
+        eprintln!("Error: empty code");
         exit(1);
     }
 
     let module = match compile_source(&code) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("编译失败:\n{}", e);
+            eprintln!("Compilation failed:\n{}", e);
             exit(1);
         }
     };
@@ -1230,7 +1287,7 @@ fn cmd_eval(args: &[String]) {
     let mut vm = match Vm::new(&module, opts) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("VM 初始化失败: {}", e);
+            eprintln!("VM initialization failed: {}", e);
             exit(1);
         }
     };
@@ -1242,7 +1299,7 @@ fn cmd_eval(args: &[String]) {
             }
         }
         Err(e) => {
-            eprintln!("运行时错误: {}", e);
+            eprintln!("Runtime error: {}", e);
             exit(1);
         }
     }
@@ -1260,7 +1317,9 @@ fn cmd_repl(_args: &[String]) {
     let mut buffer = String::new();
     let mut depth: i32 = 0;
 
-    println!("Aura REPL — 输入代码按回车执行，多行以 {{ 或 ( 续行。退出：exit 或 Ctrl+D");
+    println!(
+        "Aura REPL — Enter code and press Enter to execute. Multi-line continues with {{ or (. Exit: exit or Ctrl+D"
+    );
 
     loop {
         let prompt = if buffer.is_empty() { ">>> " } else { "... " };
@@ -1270,12 +1329,12 @@ fn cmd_repl(_args: &[String]) {
         let line = match lines.next() {
             Some(Ok(l)) => l,
             Some(Err(e)) => {
-                eprintln!("读取输入失败: {}", e);
+                eprintln!("Failed to read input: {}", e);
                 break;
             }
             None => {
                 // EOF (Ctrl+D)
-                println!("\n再见!");
+                println!("\nGoodbye!");
                 break;
             }
         };
@@ -1284,7 +1343,7 @@ fn cmd_repl(_args: &[String]) {
 
         // 退出命令
         if trimmed == "exit" || trimmed == "quit" {
-            println!("再见!");
+            println!("Goodbye!");
             break;
         }
 
@@ -1348,7 +1407,7 @@ fn cmd_install(args: &[String]) {
                 deps.extend(manifest.dependencies);
             }
             Err(e) => {
-                eprintln!("警告: 无法解析 aura.toml: {}", e);
+                eprintln!("Warning: failed to parse aura.toml: {}", e);
             }
         }
     }
@@ -1366,7 +1425,7 @@ fn cmd_install(args: &[String]) {
     }
 
     if deps.is_empty() {
-        println!("✓ 无依赖需要安装");
+        println!("✓ No dependencies to install");
         return;
     }
 
@@ -1376,10 +1435,10 @@ fn cmd_install(args: &[String]) {
     };
     let mut pm = PackageManager::with_config(config);
 
-    println!("正在安装 {} 个依赖...", deps.len());
+    println!("Installing {} dependencies...", deps.len());
     match pm.install(&project_dir, &deps) {
         Ok(lock) => {
-            println!("✓ 已安装 {} 个依赖", lock.dependencies.len());
+            println!("✓ Installed {} dependencies", lock.dependencies.len());
             for entry in &lock.dependencies {
                 println!(
                     "  ✓ {} v{} (rev: {})",
@@ -1390,7 +1449,7 @@ fn cmd_install(args: &[String]) {
             }
         }
         Err(e) => {
-            eprintln!("安装失败: {}", e);
+            eprintln!("Installation failed: {}", e);
             exit(1);
         }
     }
@@ -1408,23 +1467,23 @@ fn cmd_update(args: &[String]) {
 
     let mut pm = PackageManager::new();
     if let Err(e) = pm.load_project(&project_dir) {
-        eprintln!("加载项目失败: {}", e);
+        eprintln!("Failed to load project: {}", e);
         exit(1);
     }
 
     match pm.update(&project_dir, all) {
         Ok(updated) => {
             if updated.is_empty() {
-                println!("✓ 所有依赖已是最新");
+                println!("✓ All dependencies are up to date");
             } else {
-                println!("✓ 已更新 {} 个依赖:", updated.len());
+                println!("✓ Updated {} dependencies:", updated.len());
                 for u in &updated {
                     println!("  {}", u);
                 }
             }
         }
         Err(e) => {
-            eprintln!("更新失败: {}", e);
+            eprintln!("Update failed: {}", e);
             exit(1);
         }
     }
@@ -1443,7 +1502,7 @@ fn cmd_publish(args: &[String]) {
     match pm.publish(&package_dir) {
         Ok(msg) => println!("✓ {}", msg),
         Err(e) => {
-            eprintln!("发布失败: {}", e);
+            eprintln!("Publish failed: {}", e);
             exit(1);
         }
     }
@@ -1462,21 +1521,21 @@ fn cmd_deps(args: &[String]) {
 
     let mut pm = PackageManager::new();
     if let Err(e) = pm.load_project(&project_dir) {
-        eprintln!("加载项目失败: {}", e);
+        eprintln!("Failed to load project: {}", e);
         exit(1);
     }
 
     match pm.show_deps(&project_dir) {
         Ok(tree) => {
             if outdated {
-                println!("=== 过时依赖 ===");
+                println!("=== Outdated Dependencies ===");
                 // 简化：标记所有依赖
-                println!("运行 aura update --all 来更新所有依赖");
+                println!("Run 'aura update --all' to update all dependencies");
             }
             println!("{}", tree);
         }
         Err(e) => {
-            eprintln!("显示依赖失败: {}", e);
+            eprintln!("Failed to display dependencies: {}", e);
             exit(1);
         }
     }
@@ -1487,8 +1546,8 @@ fn cmd_new(args: &[String]) {
     let name = match first_positional(args, "--dir") {
         Some(n) => n.clone(),
         None => {
-            eprintln!("错误: 缺少包名");
-            eprintln!("用法: aura new <name> [--dir <path>]");
+            eprintln!("Error: missing package name");
+            eprintln!("Usage: aura new <name> [--dir <path>]");
             exit(1);
         }
     };
@@ -1502,14 +1561,17 @@ fn cmd_new(args: &[String]) {
 
     match PackageManager::create_new_package(&name, &parent_dir) {
         Ok(()) => {
-            println!("✓ 已创建新包项目: {}", parent_dir.join(&name).display());
-            println!("  下一步:");
+            println!(
+                "✓ Created new package project: {}",
+                parent_dir.join(&name).display()
+            );
+            println!("  Next steps:");
             println!("    cd {}", name);
             println!("    aura run main.aura");
             println!("    aura publish");
         }
         Err(e) => {
-            eprintln!("创建失败: {}", e);
+            eprintln!("Creation failed: {}", e);
             exit(1);
         }
     }
@@ -1529,8 +1591,8 @@ fn cmd_package(args: &[String]) {
     let input = match first_positional(args, "--output") {
         Some(p) => p.clone(),
         None => {
-            eprintln!("错误: 缺少输入文件");
-            eprintln!("用法: aura package <file.aura> [--output <out.auz>] [--sources]");
+            eprintln!("Error: missing input file");
+            eprintln!("Usage: aura package <file.aura> [--output <out.auz>] [--sources]");
             exit(1);
         }
     };
@@ -1541,7 +1603,7 @@ fn cmd_package(args: &[String]) {
     let source = match std::fs::read_to_string(&input) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("错误: 无法读取 {}: {}", input, e);
+            eprintln!("Error: failed to read {}: {}", input, e);
             exit(1);
         }
     };
@@ -1549,7 +1611,7 @@ fn cmd_package(args: &[String]) {
     let module = match compile_source(&source) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("编译失败:\n{}", e);
+            eprintln!("Compilation failed:\n{}", e);
             exit(1);
         }
     };
@@ -1563,7 +1625,10 @@ fn cmd_package(args: &[String]) {
         match PackageManifest::from_toml_file(&manifest_path) {
             Ok(m) => m,
             Err(e) => {
-                eprintln!("警告: 无法解析 aura.toml: {}，使用默认清单", e);
+                eprintln!(
+                    "Warning: failed to parse aura.toml: {}, using default manifest",
+                    e
+                );
                 default_manifest(&input, project_dir)
             }
         }
@@ -1597,17 +1662,17 @@ fn cmd_package(args: &[String]) {
     match builder.build(&out_path) {
         Ok(result) => {
             println!("{}", result.summary());
-            println!("  包类型: {}", manifest.kind);
+            println!("  Package type: {}", manifest.kind);
             if manifest.library {
-                println!("  库包: true");
+                println!("  Library package: true");
             }
-            println!("  文件列表:");
+            println!("  File list:");
             for entry in &result.checksum_entries {
                 println!("    {}", entry.path);
             }
         }
         Err(e) => {
-            eprintln!("打包失败: {}", e);
+            eprintln!("Packaging failed: {}", e);
             exit(1);
         }
     }
@@ -1620,8 +1685,8 @@ fn cmd_inspect(args: &[String]) {
     let input = match first_positional(args, "--verbose") {
         Some(p) => p.clone(),
         None => {
-            eprintln!("错误: 缺少输入文件");
-            eprintln!("用法: aura inspect <file.auz>");
+            eprintln!("Error: missing input file");
+            eprintln!("Usage: aura inspect <file.auz>");
             exit(1);
         }
     };
@@ -1630,25 +1695,25 @@ fn cmd_inspect(args: &[String]) {
 
     match PackageReader::from_file(&std::path::PathBuf::from(&input)) {
         Ok(content) => {
-            println!("=== .auz 包信息 ===");
-            println!("名称:     {}", content.manifest.name);
-            println!("版本:     {}", content.manifest.version);
-            println!("类型:     {}", content.manifest.kind);
-            println!("库包:     {}", content.manifest.library);
+            println!("=== .auz package info ===");
+            println!("Name:     {}", content.manifest.name);
+            println!("Version:  {}", content.manifest.version);
+            println!("Type:     {}", content.manifest.kind);
+            println!("Library:  {}", content.manifest.library);
             if let Some(desc) = &content.manifest.description {
-                println!("描述:     {}", desc);
+                println!("Desc:     {}", desc);
             }
             if let Some(license) = &content.manifest.license {
-                println!("许可证:   {}", license);
+                println!("License:  {}", license);
             }
             if let Some(min_ver) = &content.manifest.compiler_min_version {
-                println!("最低编译器: >= {}", min_ver);
+                println!("Min compiler: >= {}", min_ver);
             }
             if !content.manifest.exports.is_empty() {
-                println!("导出:     {}", content.manifest.exports.join(", "));
+                println!("Exports:  {}", content.manifest.exports.join(", "));
             }
             println!();
-            println!("=== 文件列表 ({} 个) ===", content.files.len());
+            println!("=== File list ({} files) ===", content.files.len());
             for (path, data) in &content.files {
                 let size = data.len();
                 println!("  {:6}  {}", size, path);
@@ -1657,25 +1722,25 @@ fn cmd_inspect(args: &[String]) {
             // 字节码模块信息
             if let Some(module) = &content.module {
                 println!();
-                println!("=== 字节码模块 ===");
-                println!("  函数数:   {}", module.functions.len());
-                println!("  常量数:   {}", module.consts.len());
-                println!("  原生函数: {}", module.natives.len());
+                println!("=== Bytecode module ===");
+                println!("  Functions:  {}", module.functions.len());
+                println!("  Constants:  {}", module.consts.len());
+                println!("  Natives:    {}", module.natives.len());
                 if !module.enabled_modules.is_empty() {
-                    println!("  启用模块: {}", module.enabled_modules.join(", "));
+                    println!("  Enabled modules: {}", module.enabled_modules.join(", "));
                 }
             }
 
             if verbose {
                 println!();
-                println!("=== 校验和条目 ===");
+                println!("=== Checksum entries ===");
                 for entry in &content.checksum_entries {
                     println!("  {}  {}", entry.hash, entry.path);
                 }
             }
         }
         Err(e) => {
-            eprintln!("检查失败: {}", e);
+            eprintln!("Inspection failed: {}", e);
             exit(1);
         }
     }
@@ -1688,8 +1753,8 @@ fn cmd_verify(args: &[String]) {
     let input = match first_positional(args, "") {
         Some(p) => p.clone(),
         None => {
-            eprintln!("错误: 缺少输入文件");
-            eprintln!("用法: aura verify <file.auz>");
+            eprintln!("Error: missing input file");
+            eprintln!("Usage: aura verify <file.auz>");
             exit(1);
         }
     };
@@ -1702,7 +1767,7 @@ fn cmd_verify(args: &[String]) {
             }
         }
         Err(e) => {
-            eprintln!("验证失败: {}", e);
+            eprintln!("Verification failed: {}", e);
             exit(1);
         }
     }
@@ -1761,16 +1826,16 @@ fn repl_eval(code: &str) {
                         }
                     }
                     Err(e) => {
-                        eprintln!("运行时错误: {}", e);
+                        eprintln!("Runtime error: {}", e);
                     }
                 },
                 Err(e) => {
-                    eprintln!("VM 初始化失败: {}", e);
+                    eprintln!("VM initialization failed: {}", e);
                 }
             }
         }
         Err(e) => {
-            eprintln!("编译失败:\n{}", e);
+            eprintln!("Compilation failed:\n{}", e);
         }
     }
 }
@@ -1787,8 +1852,8 @@ fn cmd_export_header(args: &[String]) {
     let input = match first_positional(args, "--out") {
         Some(p) => p,
         None => {
-            eprintln!("错误: 缺少输入文件");
-            eprintln!("用法: aura export-header <file.aura> --out <name>.h");
+            eprintln!("Error: missing input file");
+            eprintln!("Usage: aura export-header <file.aura> --out <name>.h");
             exit(1);
         }
     };
@@ -1796,8 +1861,8 @@ fn cmd_export_header(args: &[String]) {
     let out_path = match extract_opt(args, "--out") {
         Some(p) => p,
         None => {
-            eprintln!("错误: 缺少 --out 参数");
-            eprintln!("用法: aura export-header <file.aura> --out <name>.h");
+            eprintln!("Error: missing --out argument");
+            eprintln!("Usage: aura export-header <file.aura> --out <name>.h");
             exit(1);
         }
     };
@@ -1806,7 +1871,7 @@ fn cmd_export_header(args: &[String]) {
     let source = match std::fs::read_to_string(&input) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("错误: 无法读取 {}: {}", input, e);
+            eprintln!("Error: failed to read {}: {}", input, e);
             exit(1);
         }
     };
@@ -1815,13 +1880,13 @@ fn cmd_export_header(args: &[String]) {
     let mut lexer = Lexer::new(&source);
     let tokens = lexer.tokenize();
     if let Some(e) = lexer.errors().first() {
-        eprintln!("词法错误: {}", e.message);
+        eprintln!("Lex error: {}", e.message);
         exit(1);
     }
     let mut parser = Parser::new(tokens);
     let program = parser.parse_program();
     if let Some(e) = parser.errors().first() {
-        eprintln!("语法错误: {}", e.message);
+        eprintln!("Syntax error: {}", e.message);
         exit(1);
     }
     let hir = desugar_program(&program);
@@ -1831,12 +1896,15 @@ fn cmd_export_header(args: &[String]) {
 
     // 写入文件
     if let Err(e) = std::fs::write(&out_path, &header_content) {
-        eprintln!("错误: 无法写入 {}: {}", out_path, e);
+        eprintln!("Error: failed to write {}: {}", out_path, e);
         exit(1);
     }
 
-    println!("✓ C 头文件生成完成: {}", out_path);
-    println!("  包含 {} 个函数声明", count_functions(&header_content));
+    println!("✓ C header file generation complete: {}", out_path);
+    println!(
+        "  Contains {} function declarations",
+        count_functions(&header_content)
+    );
 }
 
 /// 从 HIR 生成 C ABI 头文件内容
