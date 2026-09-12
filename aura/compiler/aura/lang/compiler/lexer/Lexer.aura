@@ -291,12 +291,11 @@ class Lexer {
         this.advance()
         this.advance()
         this.advance()
-        var lit: String = ""
+        val start: Int = this.pos
         while (this.pos < this.n && this.peek(0) != "\n") {
-            lit = lit + this.peek(0)
             this.advance()
         }
-        this.emit("DocComment", lit)
+        this.emit("DocComment", this.sliceOf(start, this.pos))
     }
 
     /// 块文档注释 `/** ... */`。
@@ -304,28 +303,42 @@ class Lexer {
         this.advance()
         this.advance()
         this.advance()
-        var lit: String = ""
+        val start: Int = this.pos
+        var end: Int = this.pos
         while (this.pos < this.n) {
             if (this.peek(0) == "*" && this.peek(1) == "/") {
+                end = this.pos
                 this.advance()
                 this.advance()
                 break
             }
-            lit = lit + this.peek(0)
             this.advance()
+            end = this.pos
         }
-        this.emit("DocComment", lit)
+        this.emit("DocComment", this.sliceOf(start, end))
     }
 
     // ── 标识符 / 关键字 ──
 
-    /// 扫描标识符或关键字。
+    /// 取源串 `[start, end)` 的一次性切片（避免逐字符 `+` 的平方级分配）。
+    fun sliceOf(start: Int, end: Int): String {
+        if (end <= start) {
+            return ""
+        }
+        return this.src.substring(start, end)
+    }
+
+    /// 从当前游标起消费满足 `pred` 的一类字符后，一次性切出字面量。
+    ///
+    /// 旧实现为 `lit = lit + peek(0)`：长度为 L 的 token 要分配 L 次、
+    /// 累计复制 L(L+1)/2 字节。AOT 无 GC，这些中间串全部永久驻留 ——
+    /// 实测**词法阶段 42MB** 里的主要部分即来自此。
     fun scanIdentifier() {
-        var lit: String = ""
+        val start: Int = this.pos
         while (this.pos < this.n && lxIsIdentPart(this.peek(0))) {
-            lit = lit + this.peek(0)
             this.advance()
         }
+        val lit: String = this.sliceOf(start, this.pos)
         this.emit(this.lxKwKind(lit), lit)
     }
 

@@ -1,5 +1,5 @@
-// aura:///aura/lang/ffi/Memory.aura
-package aura.lang.ffi
+// aura:///aura/lang/native/Memory.aura
+package aura.lang.native
 // ─────────────────────────────────────────────────────────────
 // 内存操作声明 — Phase S1
 //

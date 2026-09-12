@@ -1,5 +1,5 @@
-// aura:///aura/lang/ffi/Syscalls.aura
-package aura.lang.ffi
+// aura:///aura/lang/native/Syscalls.aura
+package aura.lang.native
 // ─────────────────────────────────────────────────────────────
 // 系统调用声明 — Phase S1
 //

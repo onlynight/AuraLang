@@ -8,9 +8,9 @@ package tests
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
-import aura.lang.ffi.Syscalls
-import aura.lang.ffi.Memory
-import aura.lang.ffi.Cpu
+import aura.lang.native.Syscalls
+import aura.lang.native.Memory
+import aura.lang.native.Cpu
 
 // ─────────────────────────────────────────────────────────────
 // 测试 1：Syscalls 声明（@native(N)）
@@ -21,7 +21,7 @@ fun testSyscallDeclaration(): Boolean {
     // 调用 sysWrite 写入标准输出
     val msg: String = "Hello from Syscalls!"
     val msgAddr: Long = msg as Long
-    val msgLen: Long = msg.length
+    val msgLen: Long = msg.length as Long
     val ret: Long = Syscalls.write(1, msgAddr, msgLen)
     return ret >= 0
 }
@@ -36,7 +36,7 @@ fun testMemoryRead(): Boolean {
     if (addr == 0) { return false }
     
     // 写入字节
-    Memory.write(addr, 0x42)
+    Memory.write(addr, 0x42 as Byte)
     
     // 读取字节
     val v: Byte = Memory.read(addr)
@@ -52,7 +52,7 @@ fun testMemoryRead64(): Boolean {
     if (addr == 0) { return false }
     
     // 写入 64 位整数
-    Memory.write64(addr, 0xDEADBEEF)
+    Memory.write64(addr, 0xDEADBEEF as Long)
     
     // 读取 64 位整数
     val v: Long = Memory.read64(addr)
@@ -68,7 +68,7 @@ fun testMemoryCopy(): Boolean {
     if (src == 0 || dst == 0) { return false }
     
     // 写入源数据
-    Memory.write64(src, 0x1234567890ABCDEF)
+    Memory.write64(src, 0x1234567890ABCDEF as Long)
     
     // 复制
     Memory.copy(dst, src, 8)
@@ -79,7 +79,7 @@ fun testMemoryCopy(): Boolean {
     Memory.free(src)
     Memory.free(dst)
     
-    return v == 0x1234567890ABCDEF
+    return v == 0x1234567890ABCDEF as Long
 }
 
 // ─────────────────────────────────────────────────────────────

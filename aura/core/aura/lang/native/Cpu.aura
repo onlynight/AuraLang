@@ -1,5 +1,5 @@
-// aura:///aura/lang/ffi/Cpu.aura
-package aura.lang.ffi
+// aura:///aura/lang/native/Cpu.aura
+package aura.lang.native
 // ─────────────────────────────────────────────────────────────
 // CPU 级操作声明 — Phase S1
 //

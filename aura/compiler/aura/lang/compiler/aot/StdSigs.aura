@@ -146,13 +146,8 @@ fun stdSignatureOfQualified(qualified: String): String {
 }
 
 /// 表内全部符号名（换行分隔，每行以换行结尾）。
+///
+/// 直接复用 [`tableNameList`]（原生缓冲区累积，避免 `out = out + …` 的 O(n²) 拷贝）。
 fun stdSignatureNames(): String {
-    var out: String = ""
-    val lines: List<String> = stdSignatureTable().split("\n")
-    var i: Int = 0
-    while (i < lines.size) {
-        out = out + aotFieldAt(lines[i], 0, "|") + "\n"
-        i = i + 1
-    }
-    return out
+    return tableNameList(stdSignatureTable())
 }

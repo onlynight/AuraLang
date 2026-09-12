@@ -310,7 +310,7 @@ class LlvmEmitter {
         i = 0
         while (i < hir.count) {
             if (hir.kindOf(i) == "HirFunction") {
-                this.funcParts.sbAdd(this.emitFunction(hir, i))
+                this.emitFunction(hir, i)
             }
             i = i + 1
         }
@@ -774,8 +774,8 @@ class LlvmEmitter {
         return fname + "|" + retTy + "|" + params
     }
 
-    /// 发射单个函数定义。
-    fun emitFunction(hir: Hir, id: Int): String {
+    /// 发射单个函数定义，结果**直接追加到** `funcParts`。
+    fun emitFunction(hir: Hir, id: Int) {
         this.fAlloca.sbReset()
         this.fBody.sbReset()
         this.fVarList = arrayListOf<String>()
@@ -892,17 +892,20 @@ class LlvmEmitter {
         if (ownerCls != "") {
             defName = sanitizeLlvm(ownerCls) + "." + name
         }
-        // 用原生缓冲区拼装（fAlloca/fBody 各自零拷贝交出内容后再追加）
-        val out: EmitBuffer = EmitBuffer()
-        out.sbAdd("define " + retTy + " @" + sanitizeLlvm(defName) + "(" + paramsIr + ") {\n")
-        out.sbAdd("entry:\n")
+        // 直接追加进模块级 `funcParts`（**不再经临时 `out` 缓冲**）。
+        //
+        // 旧写法是 `out = 头部 + fAlloca.sbBuild() + fBody.sbBuild()` 再
+        // `funcParts.sbAdd(out.sbBuild())`：同一份函数文本被拷贝 3 次
+        // （fAlloca→out、fBody→out、out→funcParts）。AOT 无 GC，整份 IR 量级
+        // 的中间串会永久驻留；改为直接追加后只剩 2 次。
+        this.funcParts.sbAdd("define " + retTy + " @" + sanitizeLlvm(defName) + "(" + paramsIr + ") {\n")
+        this.funcParts.sbAdd("entry:\n")
         if (isEntryMain) {
-            out.sbAdd("  call void @aura_args_set(i32 %argc, i8** %argv)\n")
+            this.funcParts.sbAdd("  call void @aura_args_set(i32 %argc, i8** %argv)\n")
         }
-        out.sbAdd(this.fAlloca.sbBuild())
-        out.sbAdd(this.fBody.sbBuild())
-        out.sbAdd("}\n\n")
-        return out.sbBuild()
+        this.funcParts.sbAdd(this.fAlloca.sbBuild())
+        this.funcParts.sbAdd(this.fBody.sbBuild())
+        this.funcParts.sbAdd("}\n\n")
     }
 
     /// 发射函数体 / 语句块。

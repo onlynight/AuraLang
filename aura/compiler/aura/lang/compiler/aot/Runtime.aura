@@ -109,57 +109,62 @@ fun preludeTable(): String {
 ///   2. `preludeTable()`   既有调用点符号层（向后兼容）
 ///   3. `stdSignatureTable()` 独立 std 签名表（Phase 6.5.7b，完整覆盖）
 fun runtimeDeclarations(): String {
-    var out: String = "; ---- Aura Runtime Declarations ----\n"
+    // 用原生缓冲区累积：旧实现 `out = out + …` 对数百行声明是 O(n²) 拷贝，
+    // 且 AOT 无 GC 时每一级中间串都永久驻留（整份声明文本量级）。
+    val out: EmitBuffer = EmitBuffer()
+    out.sbAdd("; ---- Aura Runtime Declarations ----\n")
     // C 入口用到：把宿主 argc/argv 注入运行时（`Process.arg/argCount` 依赖它）
-    out = out + "declare void @aura_args_set(i32, i8**)\n"
-    out = out + declarationsFrom(runtimeTable())
+    out.sbAdd("declare void @aura_args_set(i32, i8**)\n")
+    appendDeclarations(out, runtimeTable())
     val seenR: String = runtimeFunctionNames()
-    out = out + declarationsFromFiltered(preludeTable(), seenR)
-    out = out + declarationsFromFiltered(stdSignatureTable(), seenR + tableNameList(preludeTable()))
-    return out
+    appendDeclarationsFiltered(out, preludeTable(), seenR)
+    appendDeclarationsFiltered(out, stdSignatureTable(), seenR + tableNameList(preludeTable()))
+    return out.sbBuild()
 }
 
 /// 取一张符号表的全部名字（每行以换行结尾），用于声明去重。
 fun tableNameList(table: String): String {
-    var out: String = ""
+    val out: EmitBuffer = EmitBuffer()
+    appendNameList(out, table)
+    return out.sbBuild()
+}
+
+/// [`tableNameList`] 的追加式实现（写入既有缓冲区）。
+fun appendNameList(out: EmitBuffer, table: String) {
     val lines: List<String> = table.split("\n")
     var i: Int = 0
     while (i < lines.size) {
-        out = out + aotFieldAt(lines[i], 0, "|") + "\n"
+        out.sbAdd(aotFieldAt(lines[i], 0, "|"))
+        out.sbAdd("\n")
         i = i + 1
     }
-    return out
 }
 
-/// 把一张符号表渲染为 `declare` 行集合。
-fun declarationsFrom(table: String): String {
-    var out: String = ""
+/// 把一张符号表渲染为 `declare` 行，追加到 `out`。
+fun appendDeclarations(out: EmitBuffer, table: String) {
     val lines: List<String> = table.split("\n")
     var i: Int = 0
     while (i < lines.size) {
         val line: String = lines[i]
         if (aotFieldAt(line, 0, "|") != "") {
-            out = out + declarationLine(line)
+            out.sbAdd(declarationLine(line))
         }
         i = i + 1
     }
-    return out
 }
 
-/// 渲染一张符号表，跳过 `seen`（换行分隔的名字清单）中已有的符号。
-fun declarationsFromFiltered(table: String, seen: String): String {
-    var out: String = ""
+/// 渲染一张符号表并追加到 `out`，跳过 `seen`（换行分隔的名字清单）中已有的符号。
+fun appendDeclarationsFiltered(out: EmitBuffer, table: String, seen: String) {
     val lines: List<String> = table.split("\n")
     var i: Int = 0
     while (i < lines.size) {
         val line: String = lines[i]
         val name: String = aotFieldAt(line, 0, "|")
         if (name != "" && !aotListContains(seen, name)) {
-            out = out + declarationLine(line)
+            out.sbAdd(declarationLine(line))
         }
         i = i + 1
     }
-    return out
 }
 
 /// 把一行符号表渲染为 `declare <ret> @<name>(<params>)`。
@@ -253,15 +258,7 @@ fun methodCallSymbol(name: String): String {
 
 /// 所有 runtime 函数名（换行分隔）。
 fun runtimeFunctionNames(): String {
-    val table: String = runtimeTable()
-    var out: String = ""
-    val lines: List<String> = table.split("\n")
-    var i: Int = 0
-    while (i < lines.size) {
-        out = out + aotFieldAt(lines[i], 0, "|") + "\n"
-        i = i + 1
-    }
-    return out
+    return tableNameList(runtimeTable())
 }
 
 /// runtime 函数个数。
@@ -270,17 +267,11 @@ fun runtimeFunctionCount(): Int {
 }
 
 /// 检查一个符号名是否为 runtime 函数。
+///
+/// 复用 `tableSignature` 的「零 split、零表重建」前缀定位：旧实现每次
+/// `split("\n")` 出整张 runtime 表（一行一个子串 + 一张 List）。
 fun isRuntimeFunction(name: String): Boolean {
-    val table: String = runtimeTable()
-    val lines: List<String> = table.split("\n")
-    var i: Int = 0
-    while (i < lines.size) {
-        if (aotFieldAt(lines[i], 0, "|") == name) {
-            return true
-        }
-        i = i + 1
-    }
-    return false
+    return tableSignature(runtimeTable(), name) != ""
 }
 
 /// runtime 函数签名（`ret|paramsSpaced`），非 runtime 函数返回 ""。

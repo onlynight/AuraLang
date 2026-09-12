@@ -12,40 +12,39 @@ package aura.lang.compiler.lexer
 //     需要 `Span` 对象时调用 `span()` 物化。
 // ─────────────────────────────────────────────────────────────
 
-/// 关键字 → TokenKind 名称映射表（`word|Kind` 以 `|` 分隔）。
+/// 关键字 → TokenKind 名称映射表（**每行一条 `word|Kind`**）。
 ///
 /// 顺序与 Rust `KEYWORDS` 保持一致；`Int`/`String` 等基本类型名映射为 `Ident`。
+///
+/// 条目以 `\n` 分隔（而非 `|`）：这样「键」一定出现在行首，用 `\nword|` 即可
+/// **无歧义**定位，无需给键加 `#` 前缀再二次拼接（见 [`keywordSearchTable`]）。
 fun keywordTable(): String {
-    return "val|Val|var|Var|fun|Fun|struct|Struct|class|Class|interface|Interface"
-        + "|enum|Enum|actor|Actor|sealed|Sealed|return|Return|if|If|else|Else|when|When"
-        + "|for|For|in|In|while|While|do|Do|break|Break|continue|Continue|try|Try"
-        + "|catch|Catch|finally|Finally|throw|Throw|is|Is|as|As|public|Public"
-        + "|private|Private|protected|Protected|null|Null|this|This|super|Super"
-        + "|object|Object|unit|Unit|typealias|Typealias|override|Override|suspend|Suspend"
-        + "|inline|Inline|const|Const|comptime|Comptime|defer|Defer|extern|Extern"
-        + "|import|Import|lazy|Lazy|lateinit|Lateinit|data|Data|value|Value|await|Await"
-        + "|to|To|async|Async|select|Select|box|Box|weak|Weak|malloc|Malloc|free|Free"
-        + "|retain|Retain|release|Release"
-        + "|Int|Ident|Long|Ident|Short|Ident|Byte|Ident|Float|Ident|Double|Ident"
-        + "|Boolean|Ident|Char|Ident|String|Ident|Any|Ident|Nothing|Ident|Unit|Unit"
-        + "|true|BoolLiteral|false|BoolLiteral|it|Ident|by|Ident"
+    return "val|Val\nvar|Var\nfun|Fun\nstruct|Struct\nclass|Class\ninterface|Interface"
+        + "\nenum|Enum\nactor|Actor\nsealed|Sealed\nreturn|Return\nif|If\nelse|Else\nwhen|When"
+        + "\nfor|For\nin|In\nwhile|While\ndo|Do\nbreak|Break\ncontinue|Continue\ntry|Try"
+        + "\ncatch|Catch\nfinally|Finally\nthrow|Throw\nis|Is\nas|As\npublic|Public"
+        + "\nprivate|Private\nprotected|Protected\nnull|Null\nthis|This\nsuper|Super"
+        + "\nobject|Object\nunit|Unit\ntypealias|Typealias\noverride|Override\nsuspend|Suspend"
+        + "\ninline|Inline\nconst|Const\ncomptime|Comptime\ndefer|Defer\nextern|Extern"
+        + "\nimport|Import\nlazy|Lazy\nlateinit|Lateinit\ndata|Data\nvalue|Value\nawait|Await"
+        + "\nto|To\nasync|Async\nselect|Select\nbox|Box\nweak|Weak\nmalloc|Malloc\nfree|Free"
+        + "\nretain|Retain\nrelease|Release"
+        + "\nInt|Ident\nLong|Ident\nShort|Ident\nByte|Ident\nFloat|Ident\nDouble|Ident"
+        + "\nBoolean|Ident\nChar|Ident\nString|Ident\nAny|Ident\nNothing|Ident\nUnit|Unit"
+        + "\ntrue|BoolLiteral\nfalse|BoolLiteral\nit|Ident\nby|Ident"
 }
 
-/// 关键字查询表：把 `key|kind|key|kind|...` 规整为 `#key|kind|#key|kind|...`。
+/// 关键字查询表（保留旧入口名；与 [`keywordTable`] 同形）。
 ///
-/// **键前置 `#` 标记**：kind 值本身也是普通单词（`Box` / `Ident` / `Int` …），
-/// 若不加标记，用 `|word|` 做子串搜索会把 kind 值误判为键
-/// （例如查 `Box` 会命中 `|box|Box|` 里的值而返回 `Weak`）。
-/// 本函数只在 `Lexer` 初始化时调用一次，开销可忽略。
+/// 旧实现把 `keywordTable()` 先 `split("|")` 成 ~200 段、再逐项
+/// `out = out + "#" + key + "|" + kind + "|"` 重建整表：每次 `Lexer` 构造
+/// （每个源文件一次，且 `Parser` 的字段初值还会多构造一个哑实例）都要
+/// ~200 次切片 + O(n²) 拼接。实测**词法阶段 `init` 单项即 8.8MB**。
+///
+/// 新格式把条目以 `\n` 分隔，键天然位于行首，`\nword|` 定位即可，无需 `#`
+/// 前缀与二次拼接，故本函数退化为一次转发。
 fun keywordSearchTable(): String {
-    val parts: List<String> = keywordTable().split("|")
-    var out: String = ""
-    var i: Int = 0
-    while (i + 1 < parts.size) {
-        out = out + "#" + parts[i] + "|" + parts[i + 1] + "|"
-        i = i + 2
-    }
-    return out
+    return keywordTable()
 }
 
 /// 查询标识符对应的 TokenKind 名称；非关键字返回 `"Ident"`。
@@ -57,20 +56,26 @@ fun keywordKind(word: String): String {
     return keywordLookup(keywordSearchTable(), word)
 }
 
-/// 在 `#word|Kind|#word|Kind|...` 形态的关键字查询表上查 `word` 的 Kind。
+/// 在 `word|Kind` 逐行排列的关键字查询表上查 `word` 的 Kind。
 ///
-/// **零 `split`**：单次 `contains` 定位 + 两次切片。旧实现对每次调用都
-/// `split("|")` 出整表（~180 个子串 + 一张 List），AOT 运行时没有 GC，
-/// 每个标识符就产生约 200 次永久分配——解析 600KB 源码吃掉数百 MB 的主因。
+/// **零 `split`、零表重建**：`startsWith` / `contains` 定位 + 两次切片。
+/// `\n` 分隔保证 kind 值（`Box`/`Ident`/`Unit` …）不会被误当作键命中。
 fun keywordLookup(table: String, word: String): String {
     if (word == "") {
         return "Ident"
     }
-    val needle: String = "#" + word + "|"
-    if (!table.contains(needle)) {
-        return "Ident"
+    val needle: String = word + "|"
+    var rest: String = ""
+    if (table.startsWith(needle)) {
+        rest = table.substringAfter(needle)
+    } else {
+        val mid: String = "\n" + needle
+        if (!table.contains(mid)) {
+            return "Ident"
+        }
+        rest = table.substringAfter(mid)
     }
-    return table.substringAfter(needle).substringBefore("|")
+    return rest.substringBefore("\n")
 }
 
 /// 是否为关键字词。
