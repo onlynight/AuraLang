@@ -18,10 +18,17 @@ use crate::error::LoomError;
 use crate::manifest::{CompileMode, FfiMode, priority::ResolvedBuildConfig};
 use crate::task::TaskDefinition;
 
-/// 获取项目目录（从任务定义或配置推断）
-fn project_dir(task: &TaskDefinition, config: &ResolvedBuildConfig) -> PathBuf {
-    // 默认使用当前目录，后续可通过 TaskInputs 扩展
-    PathBuf::from(".")
+/// 获取项目目录（`aura.toml` 所在目录）
+///
+/// 取自 [`ResolvedBuildConfig::project_dir`]。此前这里硬编码为 `"."`，
+/// 使 `package` / `compile` / `test` 等任务一律相对**进程 CWD** 解析项目内
+/// 路径，在非项目目录执行时会误报「未找到 aura.toml」。
+fn project_dir(_task: &TaskDefinition, config: &ResolvedBuildConfig) -> PathBuf {
+    if config.project_dir.is_empty() {
+        PathBuf::from(".")
+    } else {
+        PathBuf::from(&config.project_dir)
+    }
 }
 
 /// 获取输出目录
@@ -726,6 +733,11 @@ mod tests {
     use tempfile::TempDir;
 
     fn make_config(out_dir: &Path) -> ResolvedBuildConfig {
+        make_config_with_project(out_dir, ".")
+    }
+
+    /// 构造配置，并显式指定项目根目录（默认为 `"."`）。
+    fn make_config_with_project(out_dir: &Path, project_dir: &str) -> ResolvedBuildConfig {
         ResolvedBuildConfig {
             opt_level: 2,
             debug: true,
@@ -741,6 +753,7 @@ mod tests {
             alias: std::collections::HashMap::new(),
             active_profile: None,
             mode: CompileMode::Vm,
+            project_dir: project_dir.to_string(),
             ..Default::default()
         }
     }
@@ -783,7 +796,7 @@ mod tests {
 
     #[test]
     fn test_execute_resolve() {
-        let config = ResolvedBuildConfig::default();
+        let config = ResolvedBuildConfig::isolated();
         let task = make_task("resolve", TaskKind::Resolve);
 
         let (msg, _artifacts) = execute_resolve(&task, &config).unwrap();
@@ -792,7 +805,7 @@ mod tests {
 
     #[test]
     fn test_execute_compile_empty() {
-        let config = ResolvedBuildConfig::default();
+        let config = ResolvedBuildConfig::isolated();
         let task = make_task("compile-main", TaskKind::Compile("main".to_string()));
 
         let (msg, _artifacts) = execute_compile(&task, "main", &config).unwrap();
@@ -801,7 +814,7 @@ mod tests {
 
     #[test]
     fn test_execute_test_no_test_dir() {
-        let config = ResolvedBuildConfig::default();
+        let config = ResolvedBuildConfig::isolated();
         let task = make_task("test", TaskKind::Test);
 
         let (msg, _artifacts) = execute_test(&task, &config).unwrap();
@@ -810,7 +823,7 @@ mod tests {
 
     #[test]
     fn test_execute_package_disabled() {
-        let config = ResolvedBuildConfig::default();
+        let config = ResolvedBuildConfig::isolated();
         let task = make_task("package", TaskKind::Package);
 
         let (msg, _artifacts) = execute_package(&task, &config).unwrap();
@@ -820,7 +833,26 @@ mod tests {
     #[test]
     fn test_execute_package_enabled() {
         let tmp = TempDir::new().unwrap();
-        let mut config = make_config(tmp.path());
+        let project = tmp.path().join("proj");
+        let out = tmp.path().join("target/build");
+        std::fs::create_dir_all(project.join("src")).unwrap();
+
+        // 项目根下必须有 aura.toml 与源码（package 任务会读取它们）
+        std::fs::write(
+            project.join("aura.toml"),
+            "name = \"demo\"\nversion = \"0.1.0\"\nentry = \"src/main.aura\"\n",
+        )
+        .unwrap();
+        std::fs::write(project.join("src/main.aura"), "fun main() { println(1) }\n").unwrap();
+
+        // package 任务还要求 out_dir/compile-main 下已有编译产物
+        let compile_dir = out.join("compile-main");
+        std::fs::create_dir_all(&compile_dir).unwrap();
+        let module = compiler::codegen::compile_source("fun main() { println(1) }").unwrap();
+        compiler::codegen::write_auc(&compile_dir.join("main.auc").to_string_lossy(), &module)
+            .unwrap();
+
+        let mut config = make_config_with_project(&out, &project.to_string_lossy());
         config.emit_package = true;
         let task = make_task("package", TaskKind::Package);
 
@@ -830,9 +862,30 @@ mod tests {
         assert!(artifacts[0].exists());
     }
 
+    /// 项目根未配置（或不含 aura.toml）时应给出明确的错误，而不是落到进程 CWD
+    #[test]
+    fn test_execute_package_honors_project_dir() {
+        let tmp = TempDir::new().unwrap();
+        let out = tmp.path().join("target/build");
+        // 项目根指向一个没有 aura.toml 的目录
+        let empty_project = tmp.path().join("no-manifest");
+        std::fs::create_dir_all(&empty_project).unwrap();
+
+        let mut config = make_config_with_project(&out, &empty_project.to_string_lossy());
+        config.emit_package = true;
+        let task = make_task("package", TaskKind::Package);
+
+        let err = execute_package(&task, &config).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("未找到 aura.toml") && msg.contains(&*empty_project.to_string_lossy()),
+            "错误应指向配置的项目根，实际: {msg}"
+        );
+    }
+
     #[test]
     fn test_execute_verify_no_package() {
-        let config = ResolvedBuildConfig::default();
+        let config = ResolvedBuildConfig::isolated();
         let task = make_task("verify", TaskKind::Verify);
 
         let (msg, _artifacts) = execute_verify(&task, &config).unwrap();
@@ -841,7 +894,7 @@ mod tests {
 
     #[test]
     fn test_execute_install_no_package() {
-        let config = ResolvedBuildConfig::default();
+        let config = ResolvedBuildConfig::isolated();
         let task = make_task("install", TaskKind::Install);
 
         let (msg, _artifacts) = execute_install(&task, &config).unwrap();
@@ -850,7 +903,7 @@ mod tests {
 
     #[test]
     fn test_execute_deploy() {
-        let config = ResolvedBuildConfig::default();
+        let config = ResolvedBuildConfig::isolated();
         let task = make_task("deploy", TaskKind::Deploy);
 
         let (msg, _artifacts) = execute_deploy(&task, &config).unwrap();
@@ -859,7 +912,7 @@ mod tests {
 
     #[test]
     fn test_execute_execute() {
-        let config = ResolvedBuildConfig::default();
+        let config = ResolvedBuildConfig::isolated();
         let task = make_task("run", TaskKind::Execute);
 
         let (msg, _artifacts) = execute_execute(&task, &config).unwrap();
@@ -868,7 +921,7 @@ mod tests {
 
     #[test]
     fn test_execute_watch() {
-        let config = ResolvedBuildConfig::default();
+        let config = ResolvedBuildConfig::isolated();
         let task = make_task("watch", TaskKind::Watch);
 
         let (msg, _artifacts) = execute_watch(&task, &config).unwrap();
@@ -877,7 +930,7 @@ mod tests {
 
     #[test]
     fn test_execute_plugin() {
-        let config = ResolvedBuildConfig::default();
+        let config = ResolvedBuildConfig::isolated();
         let task = make_task("doc", TaskKind::Plugin("doc-gen".to_string()));
 
         let (msg, _artifacts) = execute_plugin(&task, "doc-gen", &config).unwrap();
@@ -908,7 +961,7 @@ mod tests {
     fn test_output_dir() {
         let config = ResolvedBuildConfig {
             out_dir: "target/build".to_string(),
-            ..ResolvedBuildConfig::default()
+            ..ResolvedBuildConfig::isolated()
         };
         let dir = output_dir(&config);
         assert_eq!(dir, PathBuf::from("target/build"));
@@ -918,7 +971,7 @@ mod tests {
     fn test_cache_dir() {
         let config = ResolvedBuildConfig {
             cache_dir: "target/cache".to_string(),
-            ..ResolvedBuildConfig::default()
+            ..ResolvedBuildConfig::isolated()
         };
         let dir = cache_dir(&config);
         assert_eq!(dir, PathBuf::from("target/cache"));

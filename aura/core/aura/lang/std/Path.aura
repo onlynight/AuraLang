@@ -1,0 +1,210 @@
+// aura:///aura/lang/std/Path.aura
+package aura.lang.std
+// 标准库模块，不可修改
+// 实现：纯逻辑模块，全部以 Aura 编写（不含任何 syscall）
+// (package 声明由编译器自动注入，无需显式声明)
+/// 路径操作模块。
+///
+/// 全部为纯字符串逻辑实现，不访问文件系统；与具体平台的目录分隔符无关，
+/// 统一以 `/` 作为分隔符处理，同时兼容输入中的 `\`。
+///
+/// 使用前需 import：
+/// ```aura
+/// import aura.lang.std.Path
+/// ```
+///
+/// @since 0.1
+internal object Path {
+
+    /// 路径分隔符（标准形式）。
+    const SEPARATOR: String = "/"
+
+    /// 当前目录表示。
+    const CURRENT_DIR: String = "."
+
+    /// 上级目录表示。
+    const PARENT_DIR: String = ".."
+
+    // ── 拼接与分割（纯逻辑，Aura 实现）──
+
+    /// 拼接多个路径片段，自动在片段之间补 `/`。
+    fun join(vararg parts: String): String {
+        var result: String = ""
+        var i: Int = 0
+        while (i < parts.size) {
+            val part: String = parts[i]
+            if (part != "") {
+                if (result == "") {
+                    result = part
+                } else if (result[result.length - 1] == '/') {
+                    result = result + part
+                } else {
+                    result = result + "/" + part
+                }
+            }
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 拼接两个路径片段。
+    fun resolve(base: String, child: String): String {
+        if (isAbsolute(child)) { return child }
+        if (base == "") { return child }
+        return join(base, child)
+    }
+
+    /// 获取目录部分。
+    fun dirname(path: String): String {
+        if (path == "") { return "" }
+        val lastSlash: Int = lastSeparator(path)
+        if (lastSlash < 0) { return CURRENT_DIR }
+        if (lastSlash == 0) { return "/" }
+        return path.substring(0, lastSlash)
+    }
+
+    /// 获取文件名部分（含扩展名）。
+    fun fileName(path: String): String {
+        if (path == "") { return "" }
+        val lastSlash: Int = lastSeparator(path)
+        if (lastSlash < 0) { return path }
+        return path.substring(lastSlash + 1, path.length)
+    }
+
+    /// 获取文件名部分（不含扩展名）。
+    fun basename(path: String): String {
+        val name: String = fileName(path)
+        val lastDot: Int = name.lastIndexOf(".")
+        if (lastDot <= 0) { return name }
+        return name.substring(0, lastDot)
+    }
+
+    /// 获取扩展名（含前导 `.`）；无扩展名返回空字符串。
+    fun extname(path: String): String {
+        val name: String = fileName(path)
+        val lastDot: Int = name.lastIndexOf(".")
+        if (lastDot <= 0) { return "" }
+        return name.substring(lastDot, name.length)
+    }
+
+    /// 获取扩展名（不含前导 `.`）。
+    fun extension(path: String): String {
+        val ext: String = extname(path)
+        if (ext == "") { return "" }
+        return ext.substring(1, ext.length)
+    }
+
+    /// 替换扩展名。
+    fun withExtension(path: String, newExt: String): String {
+        val base: String = dirname(path)
+        val name: String = basename(path)
+        val ext: String = if (newExt == "" || newExt[0] == '.') newExt else "." + newExt
+        if (base == CURRENT_DIR) { return name + ext }
+        return join(base, name + ext)
+    }
+
+    // ── 规范化（纯逻辑，Aura 实现）──
+
+    /// 规范化路径：消除 `.`、折叠 `..`、合并重复分隔符。
+    fun normalize(path: String): String {
+        var segments: List<String> = mutableListOf<String>()
+        val absolute: Boolean = path.startsWith("/")
+        var current: String = ""
+        var i: Int = 0
+        while (i <= path.length) {
+            val isSep: Boolean = i == path.length || path[i] == '/' || path[i] == '\\'
+            if (isSep) {
+                if (current != "" && current != CURRENT_DIR) {
+                    if (current == PARENT_DIR) {
+                        if (segments.size > 0) {
+                            segments = dropLast(segments)
+                        } else if (!absolute) {
+                            segments.add(current)
+                        }
+                    } else {
+                        segments.add(current)
+                    }
+                }
+                current = ""
+            } else {
+                current = current + path[i].toString()
+            }
+            i = i + 1
+        }
+        var result: String = ""
+        var j: Int = 0
+        while (j < segments.size) {
+            if (j > 0) result = result + "/"
+            result = result + segments[j]
+            j = j + 1
+        }
+        if (absolute) { return "/" + result }
+        if (result == "") { return CURRENT_DIR }
+        return result
+    }
+
+    /// 检查是否为绝对路径。
+    fun isAbsolute(path: String): Boolean {
+        return path.startsWith("/") || path.startsWith("\\") || hasDriveLetter(path)
+    }
+
+    /// 检查路径是否为空。
+    fun isEmpty(path: String): Boolean {
+        return path == ""
+    }
+
+    /// 检查路径是否为当前目录或上级目录标记。
+    fun isRelativeDot(path: String): Boolean {
+        return path == CURRENT_DIR || path == PARENT_DIR
+    }
+
+    /// 拆分路径为片段列表。
+    fun split(path: String): List<String> {
+        val result: List<String> = mutableListOf<String>()
+        var current: String = ""
+        var i: Int = 0
+        while (i <= path.length) {
+            val isSep: Boolean = i == path.length || path[i] == '/' || path[i] == '\\'
+            if (isSep) {
+                if (current != "") result.add(current)
+                current = ""
+            } else {
+                current = current + path[i].toString()
+            }
+            i = i + 1
+        }
+        return result
+    }
+
+    // ── 内部工具（纯逻辑，Aura 实现）──
+
+    /// 返回最后一个分隔符的下标；不存在返回 -1。
+    private fun lastSeparator(path: String): Int {
+        var lastSlash: Int = -1
+        var i: Int = 0
+        while (i < path.length) {
+            if (path[i] == '/' || path[i] == '\\') lastSlash = i
+            i = i + 1
+        }
+        return lastSlash
+    }
+
+    /// 返回去掉最后一个元素的列表副本。
+    private fun dropLast(list: List<String>): List<String> {
+        val kept: List<String> = mutableListOf<String>()
+        var i: Int = 0
+        while (i + 1 < list.size) {
+            kept.add(list[i])
+            i = i + 1
+        }
+        return kept
+    }
+
+    /// 检查路径是否以盘符开头（Windows 风格，如 `C:`）。
+    private fun hasDriveLetter(path: String): Boolean {
+        if (path.length < 2) { return false }
+        if (path[1] != ':') { return false }
+        val c: Char = path[0]
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+    }
+}

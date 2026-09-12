@@ -1,0 +1,845 @@
+// ═════════════════════════════════════════════════════════════
+// Phase 2 验证用例：语义分析 + HIR 生成 · Aura 化
+//
+// 验证内容：
+//   1. Type.aura：类型名称解析 / 查询 / 赋值兼容性
+//   2. SymbolTable.aura：作用域管理 / 符号插入与查找
+//   3.TypeInfo.aura：类型信息记录与查询
+//   4. TypeChecker.aura：基础类型检查（val/var/return/if/while）
+//   5. Hir.aura：AST → HIR 降级（字面量/标识符/二元/调用/块）
+//
+// 运行：aura run tests/phase2_sema_hir_tests.aura
+//   全通过时输出 "RESULT: PASS"
+//
+// 注意：`import` 为浅层内联（嵌套 import 会被剥离），因此此处需显式导入全部依赖。
+// ═════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import "../aura/compiler/aura/lang/compiler/test/TestRunner.aura"
+import "../aura/compiler/aura/lang/compiler/lexer/Span.aura"
+import "../aura/compiler/aura/lang/compiler/lexer/Token.aura"
+import "../aura/compiler/aura/lang/compiler/lexer/Lexer.aura"
+import "../aura/compiler/aura/lang/compiler/ast/Ast.aura"
+import "../aura/compiler/aura/lang/compiler/parser/Parser.aura"
+import "../aura/compiler/aura/lang/compiler/errors/CompileError.aura"
+import "../aura/compiler/aura/lang/compiler/sema/Type.aura"
+import "../aura/compiler/aura/lang/compiler/sema/SymbolTable.aura"
+import "../aura/compiler/aura/lang/compiler/sema/TypeInfo.aura"
+import "../aura/compiler/aura/lang/compiler/sema/TypeChecker.aura"
+import "../aura/compiler/aura/lang/compiler/hir/Hir.aura"
+
+// ═════════════════════════════════════════════════════════════
+// 测试 1: Type.aura — 类型名称解析
+// ═════════════════════════════════════════════════════════════
+
+fun testTypeFromName(): Int {
+    val t = TestRunner()
+    t.begin("Type.fromName")
+    t.assertEq(fromName("Int"), "Int", "Int basic")
+    t.assertEq(fromName("String"), "String", "String basic")
+    t.assertEq(fromName("MyType"), "MyType", "unknown → Named")
+    t.assertEq(fromName("Unit"), "Unit", "Unit basic")
+    t.assertEq(fromName("Nothing"), "Nothing", "Nothing basic")
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 2: Type.aura — 类型查询
+// ═════════════════════════════════════════════════════════════
+
+fun testTypeQueries(): Int {
+    val t = TestRunner()
+    t.begin("Type.queries")
+
+    // isNumeric
+    t.assertTrue(isNumeric("Int"), "Int is numeric")
+    t.assertTrue(isNumeric("Float"), "Float is numeric")
+    t.assertTrue(isNumeric("Double"), "Double is numeric")
+    t.assertTrue(isNumeric("Int?"), "Int? is numeric (after nonNull)")
+    t.assertFalse(isNumeric("String"), "String is not numeric")
+    t.assertFalse(isNumeric("Boolean"), "Boolean is not numeric")
+
+    // isInteger
+    t.assertTrue(isInteger("Int"), "Int is integer")
+    t.assertTrue(isInteger("Long"), "Long is integer")
+    t.assertFalse(isInteger("Float"), "Float is not integer")
+
+    // isBoolean
+    t.assertTrue(isBoolean("Boolean"), "Boolean is boolean")
+    t.assertFalse(isBoolean("Int"), "Int is not boolean")
+
+    // isString
+    t.assertTrue(isString("String"), "String is string")
+    t.assertFalse(isString("Int"), "Int is not string")
+
+    // isNullable
+    t.assertTrue(isNullable("Int?"), "Int? is nullable")
+    t.assertTrue(isNullable("Any"), "Any is nullable")
+    t.assertFalse(isNullable("Int"), "Int is not nullable")
+
+    // nonNull
+    t.assertEq(nonNull("Int?"), "Int", "nonNull Int? → Int")
+    t.assertEq(nonNull("Int"), "Int", "nonNull Int → Int")
+
+    // isFunction
+    t.assertTrue(isFunction("(Int, String) -> Boolean"), "function type detected")
+    t.assertFalse(isFunction("Int"), "Int is not function")
+
+    // isNamed
+    t.assertTrue(isNamed("MyClass"), "MyClass is named")
+    t.assertFalse(isNamed("Int"), "Int is not named")
+    t.assertFalse(isNamed("List<Int>"), "List<Int> is not named")
+
+    // isError
+    t.assertTrue(isError("<error>"), "<error> is error type")
+    t.assertFalse(isError("Int"), "Int is not error type")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 3: Type.aura — 赋值兼容性
+// ═════════════════════════════════════════════════════════════
+
+fun testTypeAssignability(): Int {
+    val t = TestRunner()
+    t.begin("Type.canAssignTo")
+
+    // 相同类型
+    t.assertTrue(canAssignTo("Int", "Int"), "Int → Int")
+    t.assertTrue(canAssignTo("String", "String"), "String → String")
+
+    // Any
+    t.assertTrue(canAssignTo("Int", "Any"), "Int → Any")
+    t.assertTrue(canAssignTo("String", "Any"), "String → Any")
+
+    // 数值间
+    t.assertTrue(canAssignTo("Int", "Float"), "Int → Float")
+    t.assertTrue(canAssignTo("Long", "Double"), "Long → Double")
+
+    // 非空 → 可空
+    t.assertTrue(canAssignTo("Int", "Int?"), "Int → Int?")
+    t.assertTrue(canAssignTo("String", "String?"), "String → String?")
+
+    // Nothing
+    t.assertTrue(canAssignTo("Nothing", "Int"), "Nothing → Int")
+    t.assertTrue(canAssignTo("Nothing", "Any"), "Nothing → Any")
+
+    // 不兼容
+    t.assertFalse(canAssignTo("String", "Int"), "String → Int")
+    t.assertFalse(canAssignTo("Boolean", "Int"), "Boolean → Int")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 4: Type.aura — 函数类型解析
+// ═════════════════════════════════════════════════════════════
+
+fun testFuncTypes(): Int {
+    val t = TestRunner()
+    t.begin("Type.funcTypes")
+
+    val fnTy: String = "(Int, String) -> Boolean"
+    t.assertTrue(isFunction(fnTy), "isFunction")
+    t.assertEq(funcParamTypes(fnTy), "Int, String", "funcParamTypes")
+    t.assertEq(funcReturnType(fnTy), "Boolean", "funcReturnType")
+
+    // 非函数类型
+    t.assertEq(funcParamTypes("Int"), "", "funcParamTypes(Int)")
+    t.assertEq(funcReturnType("Int"), "Unit", "funcReturnType(Int)")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 5: SymbolTable.aura — 作用域管理
+// ═════════════════════════════════════════════════════════════
+
+fun testSymbolTableScopes(): Int {
+    val t = TestRunner()
+    t.begin("SymbolTable.scopes")
+
+    val st = SymbolTable()
+    t.assertEq(st.stCurrentScope(), 0, "initial scope = 0")
+
+    // 进入函数作用域
+    val scope1: Int = st.stEnterScope(true)
+    t.assertEq(st.stCurrentScope(), 1, "after enterScope = 1")
+
+    // 进入块作用域
+    val scope2: Int = st.stEnterScope(false)
+    t.assertEq(st.stCurrentScope(), 2, "after enterScope = 2")
+
+    // 退出块作用域
+    st.stExitScope()
+    t.assertEq(st.stCurrentScope(), 1, "after exitScope = 1")
+
+    // 退出函数作用域
+    st.stExitScope()
+    t.assertEq(st.stCurrentScope(), 0, "after exitScope = 0")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 6: SymbolTable.aura — 符号插入与查找
+// ═════════════════════════════════════════════════════════════
+
+fun testSymbolTableInsertFind(): Int {
+    val t = TestRunner()
+    t.begin("SymbolTable.insertFind")
+
+    val st = SymbolTable()
+
+    // 插入变量
+    val idx1: Int = st.stInsert("x", "Var", "public", true, "", "Int")
+    t.assertTrue(idx1 >= 0, "insert x")
+
+    // 查找变量
+    val found1: Int = st.stFind("x")
+    t.assertTrue(found1 >= 0, "find x")
+    t.assertEq(st.stEntryName(found1), "x", "x name")
+    t.assertEq(st.stEntryKind(found1), "Var", "x kind")
+    t.assertEq(st.stEntryType(found1), "Int", "x type")
+
+    // 插入类型
+    val idx2: Int = st.stInsert("MyClass", "Type", "public", false, "", "MyClass")
+    t.assertTrue(idx2 >= 0, "insert MyClass")
+
+    // 查找类型
+    val found2: Int = st.stFind("MyClass")
+    t.assertTrue(found2 >= 0, "find MyClass")
+
+    // 插入函数
+    val idx3: Int = st.stInsert("add", "Fn", "public", false, "Int", "Int")
+    t.assertTrue(idx3 >= 0, "insert add")
+
+    // 查找函数
+    val found3: Int = st.stFind("add")
+    t.assertTrue(found3 >= 0, "find add")
+    t.assertEq(st.stEntryParams(found3), "Int", "add params")
+    t.assertEq(st.stEntryType(found3), "Int", "add ret type")
+
+    // 查找不存在的符号
+    val found4: Int = st.stFind("nonexistent")
+    t.assertEq(found4, -1, "find nonexistent = -1")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 7: SymbolTable.aura — 作用域链查找
+// ═════════════════════════════════════════════════════════════
+
+fun testSymbolTableScopeChain(): Int {
+    val t = TestRunner()
+    t.begin("SymbolTable.scopeChain")
+
+    val st = SymbolTable()
+
+    // 全局作用域插入
+    st.stInsert("globalVar", "Var", "public", true, "", "Int")
+
+    // 进入函数作用域
+    st.stEnterScope(true)
+    st.stInsert("localVar", "Var", "public", true, "", "String")
+
+    // 在当前作用域查找
+    t.assertTrue(st.stFind("localVar") >= 0, "find localVar in inner scope")
+    t.assertTrue(st.stFind("globalVar") >= 0, "find globalVar from inner scope")
+
+    // 查找不存在的
+    t.assertEq(st.stFind("missing"), -1, "find missing = -1")
+
+    // 退出作用域
+    st.stExitScope()
+
+    // 退出后找不到内层变量
+    t.assertEq(st.stFind("localVar"), -1, "find localVar after exit = -1")
+    t.assertTrue(st.stFind("globalVar") >= 0, "find globalVar after exit")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 8: SymbolTable.aura — 全局索引
+// ═════════════════════════════════════════════════════════════
+
+fun testSymbolTableGlobalIndex(): Int {
+    val t = TestRunner()
+    t.begin("SymbolTable.globalIndex")
+
+    val st = SymbolTable()
+
+    // 插入类型到全局索引
+    st.stInsert("Counter", "Type", "public", false, "", "Counter")
+    t.assertEq(st.stFindType("Counter"), "Counter", "findType Counter")
+    t.assertEq(st.stFindType("Missing"), "", "findType Missing")
+
+    // 插入函数到全局索引
+    st.stInsert("main", "Fn", "public", false, "", "Unit")
+    t.assertEq(st.stFindFunction("main"), "Unit", "findFunction main")
+    t.assertEq(st.stFindFunction("Missing"), "", "findFunction Missing")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 9: TypeInfo.aura — 类型信息记录与查询
+// ═════════════════════════════════════════════════════════════
+
+fun testTypeInfo(): Int {
+    val t = TestRunner()
+    t.begin("TypeInfo")
+
+    val info = TypeInfo()
+    t.assertEq(info.tiCount(), 0, "initial count = 0")
+
+    // 记录类型
+    info.tiRecord(10, 20, "Int")
+    info.tiRecord(30, 40, "String?")
+    t.assertEq(info.tiCount(), 2, "count after 2 records")
+
+    // 查询类型
+    t.assertEq(info.tiQuery(10, 20), "Int", "query (10,20)")
+    t.assertEq(info.tiQuery(30, 40), "String", "query (30,40) — nullable stripped")
+    t.assertEq(info.tiQuery(99, 99), "", "query missing = empty")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 10: TypeChecker.aura — 基础类型检查
+// ═════════════════════════════════════════════════════════════
+
+fun testTypeCheckerBasic(): Int {
+    val t = TestRunner()
+    t.begin("TypeChecker.basic")
+
+    // 构造一个简单的 AST
+    val ast = Ast()
+
+    // 添加一个函数声明
+    val funName: String = "test"
+    val funRet: String = "Int"
+    val funSpan: Span = Span(0, 100, 1, 1, 1, 100)
+
+    // 添加参数
+    val paramId: Int = ast.add("Param", "x", "Int", funSpan, noKids())
+
+    // 添加函数体块
+    // val y: Int = 42
+    val valSpan: Span = Span(20, 40, 1, 20, 1, 40)
+    val litId: Int = ast.leaf("IntLiteral", "42", valSpan)
+    val valDeclId: Int = ast.add("ValDecl", "y", "Int", valSpan, kidsAdd(noKids(), litId))
+
+    // return y
+    val returnSpan: Span = Span(50, 70, 1, 50, 1, 70)
+    val varId: Int = ast.leaf("Ident", "y", returnSpan)
+    val returnId: Int = ast.add("Return", "", "", returnSpan, kidsAdd(noKids(), varId))
+
+    // 块
+    val blockSpan: Span = Span(15, 80, 1, 15, 1, 80)
+    val blockId: Int = ast.add("Block", "", "", blockSpan,
+        kidsAdd(kidsAdd(noKids(), valDeclId), returnId))
+
+    // 参数节点
+    val paramsNodeId: Int = ast.add("Params", "", "", funSpan, kidsAdd(noKids(), paramId))
+
+    // 函数节点
+    val funId: Int = ast.add("Function", funName, funRet, funSpan,
+        kidsAdd(kidsAdd(noKids(), paramsNodeId), blockId))
+
+    // 程序根
+    val progId: Int = ast.add("Program", "", "", funSpan, kidsAdd(noKids(), funId))
+
+    // 执行类型检查
+    val checker = TypeChecker()
+    checker.tcCheck(ast)
+
+    // 检查是否有错误
+    t.assertTrue(checker.tcIsOk(), "no errors in basic check")
+
+    // 检查类型信息是否被记录
+    t.assertTrue(checker.tcGetInfo().tiCount() > 0, "type info recorded")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 11: TypeChecker.aura — 类型不兼容检测
+// ═════════════════════════════════════════════════════════════
+
+fun testTypeCheckerMismatch(): Int {
+    val t = TestRunner()
+    t.begin("TypeChecker.mismatch")
+
+    val ast = Ast()
+    val span: Span = Span(0, 100, 1, 1, 1, 100)
+
+    // fun f(): String { return 42 }  ← Int 不能赋给 String
+    val paramNodeId: Int = ast.add("Params", "", "", span, noKids())
+
+    // val x: String = 42  (不兼容)
+    val litSpan: Span = Span(20, 30, 1, 20, 1, 30)
+    val litId: Int = ast.leaf("IntLiteral", "42", litSpan)
+    val valSpan: Span = Span(15, 35, 1, 15, 1, 35)
+    val valDeclId: Int = ast.add("ValDecl", "x", "String", valSpan, kidsAdd(noKids(), litId))
+
+    // return x
+    val retSpan: Span = Span(40, 50, 1, 40, 1, 50)
+    val varId: Int = ast.leaf("Ident", "x", retSpan)
+    val returnId: Int = ast.add("Return", "", "", retSpan, kidsAdd(noKids(), varId))
+
+    // 块
+    val blockSpan: Span = Span(10, 60, 1, 10, 1, 60)
+    val blockId: Int = ast.add("Block", "", "", blockSpan,
+        kidsAdd(kidsAdd(noKids(), valDeclId), returnId))
+
+    // 函数
+    val funId: Int = ast.add("Function", "f", "String", span,
+        kidsAdd(kidsAdd(noKids(), paramNodeId), blockId))
+
+    val progId: Int = ast.add("Program", "", "", span, kidsAdd(noKids(), funId))
+
+    val checker = TypeChecker()
+    checker.tcCheck(ast)
+
+    // 应该有类型不兼容错误
+    t.assertFalse(checker.tcIsOk(), "type mismatch detected")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 12: Hir.aura — 字面量降级
+// ═════════════════════════════════════════════════════════════
+
+fun testHirLiterals(): Int {
+    val t = TestRunner()
+    t.begin("Hir.literals")
+
+    val ast = Ast()
+    val span: Span = Span(0, 50, 1, 1, 1, 50)
+
+    // 1
+    val intId: Int = ast.leaf("IntLiteral", "1", span)
+
+    // "hello"
+    val strId: Int = ast.leaf("StringLiteral", "hello", span)
+
+    // true
+    val boolId: Int = ast.leaf("BoolLiteral", "true", span)
+
+    // 3.14
+    val floatId: Int = ast.leaf("FloatLiteral", "3.14", span)
+
+    // 'a'
+    val charId: Int = ast.leaf("CharLiteral", "'a'", span)
+
+    // null
+    val nullId: Int = ast.leaf("NullLiteral", "null", span)
+
+    // 程序根
+    val progId: Int = ast.add("Program", "", "", span,
+        kidsAdd(kidsAdd(kidsAdd(kidsAdd(kidsAdd(kidsAdd(noKids(), intId), strId), boolId), floatId), charId), nullId))
+
+    // 执行降级
+    val lowerer = HirLowerer()
+    val rootId: Int = lowerer.lower(ast)
+    val hir = lowerer.hir
+
+    // 检查降级结果
+    t.assertTrue(hir.count > 0, "HIR has nodes")
+
+    // 检查字面量节点
+    t.assertEq(hir.kindOf(hir.childOf(rootId, 0)), "HirLit", "int literal → HirLit")
+    t.assertEq(hir.textOf(hir.childOf(rootId, 0)), "1", "int literal value")
+    t.assertEq(hir.kindOf(hir.childOf(rootId, 1)), "HirLit", "string literal → HirLit")
+    t.assertEq(hir.textOf(hir.childOf(rootId, 1)), "hello", "string literal value")
+    t.assertEq(hir.kindOf(hir.childOf(rootId, 2)), "HirLit", "bool literal → HirLit")
+    t.assertEq(hir.textOf(hir.childOf(rootId, 2)), "true", "bool literal value")
+    t.assertEq(hir.kindOf(hir.childOf(rootId, 3)), "HirLit", "float literal → HirLit")
+    t.assertEq(hir.textOf(hir.childOf(rootId, 3)), "3.14", "float literal value")
+    t.assertEq(hir.kindOf(hir.childOf(rootId, 4)), "HirLit", "char literal → HirLit")
+    t.assertEq(hir.textOf(hir.childOf(rootId, 4)), "'a'", "char literal value")
+    t.assertEq(hir.kindOf(hir.childOf(rootId, 5)), "HirLit", "null literal → HirLit")
+    t.assertEq(hir.textOf(hir.childOf(rootId, 5)), "null", "null literal value")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 13: Hir.aura — 标识符降级
+// ═════════════════════════════════════════════════════════════
+
+fun testHirIdentifiers(): Int {
+    val t = TestRunner()
+    t.begin("Hir.identifiers")
+
+    val ast = Ast()
+    val span: Span = Span(0, 50, 1, 1, 1, 50)
+
+    // x
+    val xId: Int = ast.leaf("Ident", "x", span)
+
+    // this
+    val thisId: Int = ast.leaf("This", "this", span)
+
+    // super
+    val superId: Int = ast.leaf("Super", "super", span)
+
+    // 程序根
+    val progId: Int = ast.add("Program", "", "", span,
+        kidsAdd(kidsAdd(kidsAdd(noKids(), xId), thisId), superId))
+
+    // 执行降级
+    val lowerer = HirLowerer()
+    val rootId: Int = lowerer.lower(ast)
+    val hir = lowerer.hir
+
+    // 检查降级结果
+    t.assertEq(hir.kindOf(hir.childOf(rootId, 0)), "HirVar", "x → HirVar")
+    t.assertEq(hir.textOf(hir.childOf(rootId, 0)), "x", "x value")
+    t.assertEq(hir.kindOf(hir.childOf(rootId, 1)), "HirVar", "this → HirVar")
+    t.assertEq(hir.textOf(hir.childOf(rootId, 1)), "this", "this value")
+    t.assertEq(hir.kindOf(hir.childOf(rootId, 2)), "HirVar", "super → HirVar")
+    t.assertEq(hir.textOf(hir.childOf(rootId, 2)), "super", "super value")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 14: Hir.aura — 二元运算降级
+// ═════════════════════════════════════════════════════════════
+
+fun testHirBinary(): Int {
+    val t = TestRunner()
+    t.begin("Hir.binary")
+
+    val ast = Ast()
+    val span: Span = Span(0, 50, 1, 1, 1, 50)
+
+    // 1 + 2
+    val lit1Id: Int = ast.leaf("IntLiteral", "1", span)
+    val lit2Id: Int = ast.leaf("IntLiteral", "2", span)
+    val binSpan: Span = Span(0, 10, 1, 1, 1, 10)
+    val binId: Int = ast.add("Binary", "+", "", binSpan, kidsAdd(kidsAdd(noKids(), lit1Id), lit2Id))
+
+    // 程序根
+    val progId: Int = ast.add("Program", "", "", span, kidsAdd(noKids(), binId))
+
+    // 执行降级
+    val lowerer = HirLowerer()
+    val rootId: Int = lowerer.lower(ast)
+    val hir = lowerer.hir
+
+    // 检查二元运算节点
+    val binHirId: Int = hir.childOf(rootId, 0)
+    t.assertEq(hir.kindOf(binHirId), "HirBinary", "Binary → HirBinary")
+    t.assertEq(hir.textOf(binHirId), "+", "operator is +")
+
+    // 检查子节点
+    t.assertEq(hir.kindOf(hir.childOf(binHirId, 0)), "HirLit", "lhs is HirLit")
+    t.assertEq(hir.textOf(hir.childOf(binHirId, 0)), "1", "lhs value is 1")
+    t.assertEq(hir.kindOf(hir.childOf(binHirId, 1)), "HirLit", "rhs is HirLit")
+    t.assertEq(hir.textOf(hir.childOf(binHirId, 1)), "2", "rhs value is 2")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 15: Hir.aura — 函数调用降级
+// ═════════════════════════════════════════════════════════════
+
+fun testHirCall(): Int {
+    val t = TestRunner()
+    t.begin("Hir.call")
+
+    val ast = Ast()
+    val span: Span = Span(0, 50, 1, 1, 1, 50)
+
+    // foo(1, 2)
+    val fooId: Int = ast.leaf("Ident", "foo", span)
+    val lit1Id: Int = ast.leaf("IntLiteral", "1", span)
+    val lit2Id: Int = ast.leaf("IntLiteral", "2", span)
+    val callSpan: Span = Span(0, 20, 1, 1, 1, 20)
+    val callId: Int = ast.add("Call", "", "", callSpan,
+        kidsAdd(kidsAdd(kidsAdd(noKids(), fooId), lit1Id), lit2Id))
+
+    // 程序根
+    val progId: Int = ast.add("Program", "", "", span, kidsAdd(noKids(), callId))
+
+    // 执行降级
+    val lowerer = HirLowerer()
+    val rootId: Int = lowerer.lower(ast)
+    val hir = lowerer.hir
+
+    // 检查调用节点
+    val callHirId: Int = hir.childOf(rootId, 0)
+    t.assertEq(hir.kindOf(callHirId), "HirCall", "Call → HirCall")
+
+    // 检查子节点：调用契约已更新 —— 函数名写入 HirCall.text，
+    // kids 仅含实参（旧实现在 kids[0] 保留被调用者且 text 为空，
+    // 会使 MIR/Codegen 丢失函数名，见 Phase 9 串联修复）。
+    t.assertEq(hir.textOf(callHirId), "foo", "callee name is foo")
+    t.assertEq(hir.kindOf(hir.childOf(callHirId, 0)), "HirLit", "arg1 is HirLit")
+    t.assertEq(hir.textOf(hir.childOf(callHirId, 0)), "1", "arg1 value is 1")
+    t.assertEq(hir.kindOf(hir.childOf(callHirId, 1)), "HirLit", "arg2 is HirLit")
+    t.assertEq(hir.textOf(hir.childOf(callHirId, 1)), "2", "arg2 value is 2")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 16: Hir.aura — 块和语句降级
+// ═════════════════════════════════════════════════════════════
+
+fun testHirBlockStmts(): Int {
+    val t = TestRunner()
+    t.begin("Hir.blockStmts")
+
+    val ast = Ast()
+    val span: Span = Span(0, 100, 1, 1, 1, 100)
+
+    // { val x: Int = 1; val y: Int = 2; }
+    val lit1Id: Int = ast.leaf("IntLiteral", "1", span)
+    val lit2Id: Int = ast.leaf("IntLiteral", "2", span)
+    val valXId: Int = ast.add("ValDecl", "x", "Int", span, kidsAdd(noKids(), lit1Id))
+    val valYId: Int = ast.add("ValDecl", "y", "Int", span, kidsAdd(noKids(), lit2Id))
+    val blockSpan: Span = Span(0, 50, 1, 1, 1, 50)
+    val blockId: Int = ast.add("Block", "", "", blockSpan, kidsAdd(kidsAdd(noKids(), valXId), valYId))
+
+    // 程序根
+    val progId: Int = ast.add("Program", "", "", span, kidsAdd(noKids(), blockId))
+
+    // 执行降级
+    val lowerer = HirLowerer()
+    val rootId: Int = lowerer.lower(ast)
+    val hir = lowerer.hir
+
+    // 检查块节点
+    val blockHirId: Int = hir.childOf(rootId, 0)
+    t.assertEq(hir.kindOf(blockHirId), "HirBlock", "Block → HirBlock")
+
+    // 检查子节点（语句）
+    t.assertEq(hir.kindOf(hir.childOf(blockHirId, 0)), "HirValDecl", "first stmt is HirValDecl")
+    t.assertEq(hir.textOf(hir.childOf(blockHirId, 0)), "x", "first stmt name is x")
+    t.assertEq(hir.kindOf(hir.childOf(blockHirId, 1)), "HirValDecl", "second stmt is HirValDecl")
+    t.assertEq(hir.textOf(hir.childOf(blockHirId, 1)), "y", "second stmt name is y")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 17: Hir.aura — 函数声明降级
+// ═════════════════════════════════════════════════════════════
+
+fun testHirFunctionDecl(): Int {
+    val t = TestRunner()
+    t.begin("Hir.functionDecl")
+
+    val ast = Ast()
+    val span: Span = Span(0, 100, 1, 1, 1, 100)
+
+    // fun add(a: Int, b: Int): Int { return a + b }
+    val paramAId: Int = ast.add("Param", "a", "Int", span, noKids())
+    val paramBId: Int = ast.add("Param", "b", "Int", span, noKids())
+    val paramsNodeId: Int = ast.add("Params", "", "", span, kidsAdd(kidsAdd(noKids(), paramAId), paramBId))
+
+    // 返回 a + b
+    val aId: Int = ast.leaf("Ident", "a", span)
+    val bId: Int = ast.leaf("Ident", "b", span)
+    val binSpan: Span = Span(10, 20, 1, 10, 1, 20)
+    val binId: Int = ast.add("Binary", "+", "", binSpan, kidsAdd(kidsAdd(noKids(), aId), bId))
+    val returnId: Int = ast.add("Return", "", "", span, kidsAdd(noKids(), binId))
+
+    // 函数体块
+    val blockSpan: Span = Span(25, 50, 1, 25, 1, 50)
+    val blockId: Int = ast.add("Block", "", "", blockSpan, kidsAdd(noKids(), returnId))
+
+    // 函数声明
+    val funSpan: Span = Span(0, 80, 1, 1, 1, 80)
+    val funId: Int = ast.add("Function", "add", "Int", funSpan,
+        kidsAdd(kidsAdd(noKids(), paramsNodeId), blockId))
+
+    // 程序根
+    val progId: Int = ast.add("Program", "", "", span, kidsAdd(noKids(), funId))
+
+    // 执行降级
+    val lowerer = HirLowerer()
+    val rootId: Int = lowerer.lower(ast)
+    val hir = lowerer.hir
+
+    // 检查函数节点
+    val funHirId: Int = hir.childOf(rootId, 0)
+    t.assertEq(hir.kindOf(funHirId), "HirFunction", "Function → HirFunction")
+    t.assertEq(hir.textOf(funHirId), "add", "function name is add")
+    t.assertEq(hir.tyOf(funHirId), "Int", "function ret type is Int")
+
+    // 检查参数节点
+    val paramCount: Int = kidsCount(hir.kidsOf(funHirId))
+    t.assertTrue(paramCount >= 2, "function has params and body")
+
+    // 检查参数
+    t.assertEq(hir.kindOf(hir.childOf(funHirId, 0)), "HirParam", "param 0 is HirParam")
+    t.assertEq(hir.textOf(hir.childOf(funHirId, 0)), "a", "param 0 name is a")
+    t.assertEq(hir.tyOf(hir.childOf(funHirId, 0)), "Int", "param 0 type is Int")
+    t.assertEq(hir.kindOf(hir.childOf(funHirId, 1)), "HirParam", "param 1 is HirParam")
+    t.assertEq(hir.textOf(hir.childOf(funHirId, 1)), "b", "param 1 name is b")
+    t.assertEq(hir.tyOf(hir.childOf(funHirId, 1)), "Int", "param 1 type is Int")
+
+    // 检查函数体
+    t.assertEq(hir.kindOf(hir.childOf(funHirId, 2)), "HirBlock", "body is HirBlock")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 18: Hir.aura — dump 输出
+// ═════════════════════════════════════════════════════════════
+
+fun testHirDump(): Int {
+    val t = TestRunner()
+    t.begin("Hir.dump")
+
+    val ast = Ast()
+    val span: Span = Span(0, 50, 1, 1, 1, 50)
+
+    // 1 + 2
+    val lit1Id: Int = ast.leaf("IntLiteral", "1", span)
+    val lit2Id: Int = ast.leaf("IntLiteral", "2", span)
+    val binSpan: Span = Span(0, 10, 1, 1, 1, 10)
+    val binId: Int = ast.add("Binary", "+", "", binSpan, kidsAdd(kidsAdd(noKids(), lit1Id), lit2Id))
+
+    // 程序根
+    val progId: Int = ast.add("Program", "", "", span, kidsAdd(noKids(), binId))
+
+    // 执行降级
+    val lowerer = HirLowerer()
+    val rootId: Int = lowerer.lower(ast)
+    val hir = lowerer.hir
+
+    // 检查 dump 输出包含关键信息
+    val dumpStr: String = hir.dump()
+    t.assertTrue(dumpStr.contains("HirBinary"), "dump contains HirBinary")
+    t.assertTrue(dumpStr.contains("+"), "dump contains +")
+    t.assertTrue(dumpStr.contains("HirLit"), "dump contains HirLit")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 19: Hir.aura — 成员访问降级
+// ═════════════════════════════════════════════════════════════
+
+fun testHirMember(): Int {
+    val t = TestRunner()
+    t.begin("Hir.member")
+
+    val ast = Ast()
+    val span: Span = Span(0, 50, 1, 1, 1, 50)
+
+    // obj.field
+    val objId: Int = ast.leaf("Ident", "obj", span)
+    val memberSpan: Span = Span(0, 20, 1, 1, 1, 20)
+    val memberId: Int = ast.add("Member", "field", "", memberSpan, kidsAdd(noKids(), objId))
+
+    // 程序根
+    val progId: Int = ast.add("Program", "", "", span, kidsAdd(noKids(), memberId))
+
+    // 执行降级
+    val lowerer = HirLowerer()
+    val rootId: Int = lowerer.lower(ast)
+    val hir = lowerer.hir
+
+    // 检查成员访问节点
+    val memberHirId: Int = hir.childOf(rootId, 0)
+    t.assertEq(hir.kindOf(memberHirId), "HirMember", "Member → HirMember")
+    t.assertEq(hir.textOf(memberHirId), "field", "member name is field")
+
+    // 检查子节点（对象）
+    t.assertEq(hir.kindOf(hir.childOf(memberHirId, 0)), "HirVar", "object is HirVar")
+    t.assertEq(hir.textOf(hir.childOf(memberHirId, 0)), "obj", "object name is obj")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 20: Hir.aura — 一元运算降级
+// ═════════════════════════════════════════════════════════════
+
+fun testHirUnary(): Int {
+    val t = TestRunner()
+    t.begin("Hir.unary")
+
+    val ast = Ast()
+    val span: Span = Span(0, 50, 1, 1, 1, 50)
+
+    // -x
+    val xId: Int = ast.leaf("Ident", "x", span)
+    val unarySpan: Span = Span(0, 10, 1, 1, 1, 10)
+    val unaryId: Int = ast.add("Unary", "-", "", unarySpan, kidsAdd(noKids(), xId))
+
+    // 程序根
+    val progId: Int = ast.add("Program", "", "", span, kidsAdd(noKids(), unaryId))
+
+    // 执行降级
+    val lowerer = HirLowerer()
+    val rootId: Int = lowerer.lower(ast)
+    val hir = lowerer.hir
+
+    // 检查一元运算节点
+    val unaryHirId: Int = hir.childOf(rootId, 0)
+    t.assertEq(hir.kindOf(unaryHirId), "HirUnary", "Unary → HirUnary")
+    t.assertEq(hir.textOf(unaryHirId), "-", "operator is -")
+
+    // 检查子节点
+    t.assertEq(hir.kindOf(hir.childOf(unaryHirId, 0)), "HirVar", "operand is HirVar")
+    t.assertEq(hir.textOf(hir.childOf(unaryHirId, 0)), "x", "operand is x")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 主函数
+// ═════════════════════════════════════════════════════════════
+
+fun main() {
+    println("=== Phase 2 Sema/HIR Tests ===")
+    println()
+
+    val f1 = testTypeFromName()
+    val f2 = testTypeQueries()
+    val f3 = testTypeAssignability()
+    val f4 = testFuncTypes()
+    val f5 = testSymbolTableScopes()
+    val f6 = testSymbolTableInsertFind()
+    val f7 = testSymbolTableScopeChain()
+    val f8 = testSymbolTableGlobalIndex()
+    val f9 = testTypeInfo()
+    val f10 = testTypeCheckerBasic()
+    val f11 = testTypeCheckerMismatch()
+    val f12 = testHirLiterals()
+    val f13 = testHirIdentifiers()
+    val f14 = testHirBinary()
+    val f15 = testHirCall()
+    val f16 = testHirBlockStmts()
+    val f17 = testHirFunctionDecl()
+    val f18 = testHirDump()
+    val f19 = testHirMember()
+    val f20 = testHirUnary()
+
+    val totalFailures: Int = f1 + f2 + f3 + f4 + f5 + f6 + f7 + f8 + f9 + f10 + f11 + f12 + f13 + f14 + f15 + f16 + f17 + f18 + f19 + f20
+
+    println()
+    println("=== Summary ===")
+    println("Total failures: " + toStr(totalFailures))
+
+    if (totalFailures == 0) {
+        println("RESULT: PASS")
+    } else {
+        println("RESULT: FAIL (" + toStr(totalFailures) + ")")
+    }
+}

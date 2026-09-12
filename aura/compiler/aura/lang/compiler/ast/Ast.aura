@@ -1,0 +1,370 @@
+// aura:///aura/lang/compiler/ast/Ast.aura
+package aura.lang.compiler.ast
+// ─────────────────────────────────────────────────────────────
+// AST 定义 — 纯 Aura 化迁移 · Phase 1
+//
+// 对应 Rust `compiler/src/ast.rs`。
+//
+// ── 表示方式（受当前 VM 能力约束的重要设计决策）──────────────
+//
+// Rust 侧是 `enum Expr / enum Decl` 构成的树。Aura 侧若直接用 `sealed class` 层次 +
+// `List<Node>` 子节点，会撞上当前 VM 的两个限制：
+//   * `List.add` / `List.append` 不可用（参数约定不符，曾导致越界 panic）；
+//   * 大量小对象 + 深递归的构造路径尚未充分验证。
+//
+// 因此这里采用**扁平 arena（索引化树）**，与 lexer 的 token 流表示保持一致：
+//
+//   * 每个节点一个整数 id（按创建顺序递增，0 为未使用/哨兵）；
+//   * 节点字段分别存在若干条「每项一个」的堆列表中：kinds / texts / tys /
+//     span 的 6 条并列 Int 列表 / kids（逗号分隔 id 串）；
+//   * 子节点以**逗号分隔的 id 列表**存在 `kids` 中（解析时逐个追加成串，创建父节点时给定）。
+//
+// 这样既能在纯 Aura 中构造任意形状的树，又能用索引 O(1) 定位，且 `dump()` 可产出
+// 稳定的缩进文本，便于与 Rust `aura ast` 输出做结构性对照。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+
+// ─────────────────────────────────────────────────────────────
+// 子节点 id 列表的辅助（以逗号分隔的 String 表示）
+// ─────────────────────────────────────────────────────────────
+
+/// 空的子节点列表。
+fun noKids(): String {
+    return ""
+}
+
+/// 向子节点列表追加一个 id。
+fun kidsAdd(list: String, child: Int): String {
+    if (list == "") {
+        return toStr(child)
+    }
+    return list + "," + toStr(child)
+}
+
+/// 子节点列表的长度。
+fun kidsCount(list: String): Int {
+    if (list == "") {
+        return 0
+    }
+    val parts: List<String> = list.split(",")
+    return parts.size
+}
+
+/// 取子节点列表的第 index 个 id。
+fun kidsAt(list: String, index: Int): Int {
+    return toIntOf(fieldAt(list, index, ","))
+}
+
+// ─────────────────────────────────────────────────────────────
+// AST
+// ─────────────────────────────────────────────────────────────
+
+/// 扁平 arena 形式的抽象语法树。
+class Ast {
+
+    /// 节点种类（堆列表，逐项追加摊还 O(1)、下标 O(1)）。
+    ///
+    /// 说明：原先用字符串 `+` 逐项拼接（5 条流 × n 次追加 → O(n²)，且每次
+    /// `kindOf/textOf/...` 都要 `fieldAt` 从头线性扫描）。改用堆列表
+    /// （`arrayListOf`）后，节点插入与访问都变为 O(1)。
+    var kinds: List<String> = arrayListOf<String>()
+
+    /// 节点主文本：标识符名 / 字面量文本 / 运算符（堆列表，换行已转义）。
+    var texts: List<String> = arrayListOf<String>()
+
+    /// 节点类型名（堆列表；无类型信息时为空串）。
+    var tys: List<String> = arrayListOf<String>()
+
+    /// Span 分量（6 条**并列 Int 堆列表**）。
+    ///
+    /// 原先每节点拼一个 `"start end sl sc el ec"` 字符串（4 次 `+` 拼接 +
+    /// 6 次 `toStr`）。AOT 运行时没有 GC，按 AST 节点数十万计会产生数百万次
+    /// 小分配，是「链接阶段数百 MB」的主要来源（与 `Lexer` 对 token span 的
+    /// 优化同源）。改为并列 Int 列表后 `add` 只做纯整数追加，零字符串分配。
+    var spanStart: List<Int> = arrayListOf<Int>()
+
+    /// 结束偏移。
+    var spanEnd: List<Int> = arrayListOf<Int>()
+
+    /// 起始行。
+    var spanStartLine: List<Int> = arrayListOf<Int>()
+
+    /// 起始列。
+    var spanStartCol: List<Int> = arrayListOf<Int>()
+
+    /// 结束行。
+    var spanEndLine: List<Int> = arrayListOf<Int>()
+
+    /// 结束列。
+    var spanEndCol: List<Int> = arrayListOf<Int>()
+
+    /// 子节点 id 列表（堆列表，每项为逗号分隔串，可为空串）。
+    var kids: List<String> = arrayListOf<String>()
+
+    /// 节点总数。
+    var count: Int = 0
+
+    // ── 构造 ──
+
+    /// 追加一个节点，返回其 id。
+    fun add(kind: String, text: String, ty: String, sp: Span, children: String): Int {
+        val id: Int = this.count
+        this.count = id + 1
+        this.kinds.add(kind)
+        // 手动转义换行符（避免 replace 在 VM 内类调用时未链接）。
+        // 绝大多数 text 不含换行：单次 `contains` 判定后直接复用原串，避免
+        // 逐字符重建（token / 字面量文本可达数千字符，逐字符 `+` 在 AOT
+        // 无 GC 下是平方级分配 —— 解析阶段数百 MB 的主要来源之一）。
+        var escaped: String = text
+        if (text.contains("\n")) {
+            var buf: String = ""
+            var i: Int = 0
+            var len: Int = text.length
+            while (i < len) {
+                val c: String = toStr(text[i])
+                if (c == "\n") {
+                    buf = buf + "\\n"
+                } else {
+                    buf = buf + c
+                }
+                i = i + 1
+            }
+            escaped = buf
+        }
+        this.texts.add(escaped)
+        this.tys.add(ty)
+        this.spanStart.add(sp.start)
+        this.spanEnd.add(sp.end)
+        this.spanStartLine.add(sp.startLine)
+        this.spanStartCol.add(sp.startCol)
+        this.spanEndLine.add(sp.endLine)
+        this.spanEndCol.add(sp.endCol)
+        this.kids.add(children)
+        return id
+    }
+
+    /// 追加一个无类型、无子节点的节点。
+    fun leaf(kind: String, text: String, sp: Span): Int {
+        return this.add(kind, text, "", sp, noKids())
+    }
+
+    // ── 访问 ──
+
+    /// 第 id 个节点的种类（越界返回空串）。
+    fun kindOf(id: Int): String {
+        return astItemAt(this.kinds, id)
+    }
+
+    /// 第 id 个节点的主文本（换行已还原）。
+    fun textOf(id: Int): String {
+        val raw: String = astItemAt(this.texts, id)
+        // 绝大多数 text 不含换行转义：单次 `contains` 判定后直接复用原串，
+        // 避免每次访问都逐字符重建（AOT 无 GC，逐字符 `+` 每次调用都分配）。
+        if (!raw.contains("\\")) {
+            return raw
+        }
+        // 手动反转义换行符（避免 replace 在 VM 内类调用时未链接）
+        var result: String = ""
+        var i: Int = 0
+        var len: Int = raw.length
+        while (i < len) {
+            if (i + 1 < len && toStr(raw[i]) == "\\" && toStr(raw[i + 1]) == "n") {
+                result = result + "\n"
+                i = i + 2
+            } else {
+                result = result + toStr(raw[i])
+                i = i + 1
+            }
+        }
+        return result
+    }
+
+    /// 第 id 个节点的类型名。
+    fun tyOf(id: Int): String {
+        return astItemAt(this.tys, id)
+    }
+
+    /// 第 id 个节点的位置。
+    fun spanOf(id: Int): Span {
+        return Span(
+            astIntAt(this.spanStart, id), astIntAt(this.spanEnd, id),
+            astIntAt(this.spanStartLine, id), astIntAt(this.spanStartCol, id),
+            astIntAt(this.spanEndLine, id), astIntAt(this.spanEndCol, id)
+        )
+    }
+
+    /// 第 id 个节点的子节点 id 列表（逗号分隔串）。
+    fun kidsOf(id: Int): String {
+        return astItemAt(this.kids, id)
+    }
+
+    /// 第 id 个节点的第 i 个子节点 id（越界返回 -1）。
+    fun childOf(id: Int, i: Int): Int {
+        val k: String = this.kidsOf(id)
+        if (i >= kidsCount(k)) {
+            return -1
+        }
+        return kidsAt(k, i)
+    }
+
+    // ── 输出 ──
+
+    /// 从根节点（id 0）开始的缩进文本转储。
+    fun dump(): String {
+        if (this.count == 0) {
+            return "<empty ast>\n"
+        }
+        return this.dumpNode(0, 0)
+    }
+
+    /// 递归转储单个节点。
+    fun dumpNode(id: Int, depth: Int): String {
+        var line: String = this.indent(depth) + this.kindOf(id)
+        val t: String = this.textOf(id)
+        if (t != "") {
+            line = line + " " + t
+        }
+        val ty: String = this.tyOf(id)
+        if (ty != "") {
+            line = line + " : " + ty
+        }
+        var out: String = line + "\n"
+
+        val k: String = this.kidsOf(id)
+        val n: Int = kidsCount(k)
+        var i: Int = 0
+        while (i < n) {
+            out = out + this.dumpNode(kidsAt(k, i), depth + 1)
+            i = i + 1
+        }
+        return out
+    }
+
+    /// 生成 depth 级缩进（每级 2 空格）。
+    fun indent(depth: Int): String {
+        var s: String = ""
+        var i: Int = 0
+        while (i < depth) {
+            s = s + "  "
+            i = i + 1
+        }
+        return s
+    }
+
+    /// 取第 index 行（内部辅助）。本编译器不支持 list[i]，用顶层 fieldAt 字符扫描。
+    fun lineAt(text: String, index: Int): String {
+        return fieldAt(text, index, "\n")
+    }
+}
+
+/// 列表安全取项（越界返回空串）；arena 各流（kinds/texts/tys/kids）
+/// 的下标访问统一走此处，O(1)。
+fun astItemAt(items: List<String>, index: Int): String {
+    if (index < 0 || index >= items.size) {
+        return ""
+    }
+    return items[index]
+}
+
+/// Int 堆列表安全取项（越界返回 0）；span 的 6 条并列流下标访问统一走此处，O(1)。
+fun astIntAt(items: List<Int>, index: Int): Int {
+    if (index < 0 || index >= items.size) {
+        return 0
+    }
+    return items[index]
+}
+
+/// 取第 index 个以 sep 分隔的字段。
+fun fieldAt(text: String, index: Int, sep: String): String {
+    var i: Int = 0
+    var fieldStart: Int = 0
+    var cur: Int = 0
+    var fieldLen: Int = text.length
+    while (i < fieldLen) {
+        val c: String = text[i]
+        if (c == sep) {
+            if (cur == index) {
+                var result: String = ""
+                var j: Int = fieldStart
+                while (j < i) {
+                    result = result + text[j]
+                    j = j + 1
+                }
+                return result
+            }
+            cur = cur + 1
+            fieldStart = i + 1
+        }
+        i = i + 1
+    }
+    if (cur == index) {
+        var result: String = ""
+        var j: Int = fieldStart
+        while (j < fieldLen) {
+            result = result + text[j]
+            j = j + 1
+        }
+        return result
+    }
+    return ""
+}
+
+/// 十进制字符串 → Int（局部实现，避免与 Lexer 内部辅助耦合）。
+fun toIntOf(text: String): Int {
+    if (text == "") {
+        return 0
+    }
+    val len: Int = text.length
+    var total: Int = 0
+    var i: Int = 0
+    var neg: Boolean = false
+    // 处理负号
+    if (len > 0 && toStr(text[0]) == "-") {
+        neg = true
+        i = 1
+    }
+    while (i < len) {
+        val c: String = toStr(text[i])
+        // 手动计算数字值（避免 indexOf 在 VM 内类调用时未链接）
+        var digit: Int = -1
+        if (c == "0") {
+            digit = 0
+        }
+        if (c == "1") {
+            digit = 1
+        }
+        if (c == "2") {
+            digit = 2
+        }
+        if (c == "3") {
+            digit = 3
+        }
+        if (c == "4") {
+            digit = 4
+        }
+        if (c == "5") {
+            digit = 5
+        }
+        if (c == "6") {
+            digit = 6
+        }
+        if (c == "7") {
+            digit = 7
+        }
+        if (c == "8") {
+            digit = 8
+        }
+        if (c == "9") {
+            digit = 9
+        }
+        if (digit >= 0) {
+            total = total * 10 + digit
+        }
+        i = i + 1
+    }
+    if (neg) {
+        return -total
+    }
+    return total
+}

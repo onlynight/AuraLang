@@ -1,0 +1,3237 @@
+// aura:///aura/lang/compiler/aot/Emit.aura
+package aura.lang.compiler.aot
+// ─────────────────────────────────────────────────────────────
+// LLVM IR 文本生成器 — 纯 Aura 化迁移 · Phase 6 (任务 6.6)
+//
+// 对应 Rust `compiler/src/codegen/aot/emit.rs`（3380 行）。
+//
+// 将 HIR 程序生成为 LLVM IR 文本字符串。生成流程：
+//   1. 模块头（target triple / data layout）
+//   2. 全局结构体类型定义（%struct.<Name> = type ...）
+//   3. 字符串常量全局（@str.N）
+//   4. Runtime 库函数声明
+//   5. 用户函数定义（define ...）
+//   6. 可选 DWARF 调试元数据
+//
+// 生成策略（与 Rust 一致）：
+//   - 使用 LLVM 13+ 不透明指针（ptr）
+//   - 局部变量在 entry 基本块 alloca 分配
+//   - 控制流使用条件分支（br）
+//
+// 本版聚焦核心降级（可逐步扩展）：
+//   字面量 / 变量 / 二元 / 一元 / 调用 / val|var 声明 / return /
+//   assign / if / while / block。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.compiler.lexer.Span
+import aura.lang.compiler.hir.Hir
+import aura.lang.compiler.aot.AotUtil
+import aura.lang.compiler.aot.TypeMapper
+import aura.lang.compiler.aot.Runtime
+import aura.lang.compiler.aot.Dwarf
+
+/// LLVM IR 生成器（有状态，单次 `emitProgram` 内复用）。
+class LlvmEmitter {
+
+    /// 目标三元组。
+    var targetTriple: String = "x86_64-pc-windows-msvc"
+
+    /// 模块名。
+    var moduleName: String = "main"
+
+    /// 是否注入 runtime 声明。
+    var linkRuntime: Boolean = true
+
+    /// 是否发射调试元数据。
+    var emitDebug: Boolean = false
+
+    /// 类型映射器。
+    var tm: TypeMapper = TypeMapper()
+
+    // ── 计数器 ──
+
+    var varCount: Int = 0
+    var bbCount: Int = 0
+    var strCount: Int = 0
+
+    // ── 累积输出 ──
+
+    /// 字符串常量全局（分段累积，末尾树形归并）。
+    var stringParts: List<String> = arrayListOf<String>()
+
+    /// 结构体类型定义（分段累积）。
+    var structParts: List<String> = arrayListOf<String>()
+
+    /// 函数定义（分段累积；整份编译器 IR 可达十几 MB，逐段 `+` 是平方级分配）。
+    var funcParts: List<String> = arrayListOf<String>()
+
+    /// 已发射类型定义的符号名（换行分隔，用于重复登记判定）。
+    var structDeclared: String = ""
+
+    /// 已发射**具体布局**（`= type {`）的符号名（换行分隔）。
+    var structConcrete: String = ""
+
+    // ── 当前函数状态 ──
+
+    /// entry 块 alloca 指令。
+    var fAlloca: List<String> = arrayListOf<String>()
+
+    /// 函数体指令。
+    var fBody: List<String> = arrayListOf<String>()
+
+    /// 函数局部变量表（每项 `name|addr|llvmTy`）。
+    ///
+    /// 用 `List` 而非换行串：查询若靠 `split("\n")`，每次查找都要分配整张表，
+    /// 而变量查找是发射期最热路径——AOT 运行时没有 GC，这些临时表会泄漏成 GB。
+    var fVarList: List<String> = arrayListOf<String>()
+
+    /// 模块内用户函数签名表（每项 `name|retTy|paramTy1,paramTy2`）。
+    var fSigList: List<String> = arrayListOf<String>()
+
+    /// 方法所属类表（每项 `fnId|ClassName`；供 `this`/接收者类型解析）。
+    var fOwnerList: List<String> = arrayListOf<String>()
+
+    /// 类型别名表（`Alias|Target`，每行一项；供 `typealias` 解析）。
+    var fTypeAliases: String = ""
+
+    /// 用户结构体字段表（每项 `Sym|field|llvmTy|initLLVM|initExprId`）。
+    var structLines: List<String> = arrayListOf<String>()
+
+    /// 集合（List/Array/Set/Map）局部变量名（换行分隔）。
+    ///
+    /// 发射器内部把 String 与集合统一表示为 `i8*`，`.size` / `.add` / `for-in`
+    /// 必须区分二者：String 用 `aura_strlen`，集合用 `aura_lang_std_Collections_*`。
+    /// 声明处（`val lst = arrayListOf<...>()` 等）登记，使用处按名查询。
+    var fListVars: String = ""
+
+    /// 当前函数 LLVM 返回类型。
+    var fRetTy: String = "void"
+
+    /// 当前方法所属类名（非方法时为空；供裸字段名解析为 `this.field`）。
+    var fCurClass: String = ""
+
+    /// 当前循环的 break / continue 目标标签（Phase 6.5：break/continue 支持）。
+    /// 进入循环时保存外层值、设置内层值，退出时还原（天然支持嵌套）。
+    var loopEnd: String = ""
+    var loopCond: String = ""
+
+    /// 当前位置是否已终结（ret/br）。
+    var fTerminated: Boolean = false
+
+    init() {
+        this.targetTriple = "x86_64-pc-windows-msvc"
+        this.moduleName = "main"
+        this.linkRuntime = true
+        this.emitDebug = false
+        this.tm = TypeMapper()
+        this.reset()
+    }
+
+    // ── 生命周期 ──
+
+    /// 重置全部累积状态。
+    fun reset() {
+        this.varCount = 0
+        this.bbCount = 0
+        this.strCount = 0
+        this.stringParts = arrayListOf<String>()
+        this.structParts = arrayListOf<String>()
+        this.funcParts = arrayListOf<String>()
+        this.structDeclared = ""
+        this.structConcrete = ""
+        this.fAlloca = arrayListOf<String>()
+        this.fBody = arrayListOf<String>()
+        this.fVarList = arrayListOf<String>()
+        this.fSigList = arrayListOf<String>()
+        this.fOwnerList = arrayListOf<String>()
+        this.fTypeAliases = ""
+        this.structLines = arrayListOf<String>()
+        this.fListVars = ""
+        this.fRetTy = "void"
+        this.fCurClass = ""
+        this.loopEnd = ""
+        this.loopCond = ""
+        this.fTerminated = false
+    }
+
+    /// 生成新 SSA 临时变量名。
+    fun freshVar(): String {
+        val name: String = "%var." + toStr(this.varCount)
+        this.varCount = this.varCount + 1
+        return name
+    }
+
+    /// 生成新基本块标签。
+    fun freshBb(prefix: String): String {
+        val name: String = "bb_" + prefix + "_" + toStr(this.bbCount)
+        this.bbCount = this.bbCount + 1
+        return name
+    }
+
+    // ── 顶层入口 ──
+
+    /// 将 HIR 程序生成为完整 LLVM IR 模块文本。
+    fun emitProgram(hir: Hir, moduleName: String, target: String): String {
+        this.reset()
+        this.moduleName = moduleName
+        this.targetTriple = target
+
+        // 1) 结构体类型定义（含字段布局，Phase 6.5.1）
+        var i: Int = 0
+        while (i < hir.count) {
+            val k: String = hir.kindOf(i)
+            if (k == "HirStruct" || k == "HirClass" || k == "HirObject" || k == "HirEnum") {
+                this.registerStruct(hir, i)
+            }
+            i = i + 1
+        }
+
+        // 1.5) 方法所属类表：类体 Block 中的 HirFunction → 该类名（供 this/接收者）
+        i = 0
+        while (i < hir.count) {
+            val ck: String = hir.kindOf(i)
+            if (ck == "HirStruct" || ck == "HirClass" || ck == "HirObject" || ck == "HirEnum") {
+                val clsName: String = hir.textOf(i)
+                val cKids: String = hir.kidsOf(i)
+                val cn: Int = hirKidsCount(cKids)
+                var j: Int = 0
+                while (j < cn) {
+                    val bodyId: Int = hirKidsAt(cKids, j)
+                    if (hir.kindOf(bodyId) == "HirBlock") {
+                        val bk: String = hir.kidsOf(bodyId)
+                        val bn: Int = hirKidsCount(bk)
+                        var m: Int = 0
+                        while (m < bn) {
+                            val mid: Int = hirKidsAt(bk, m)
+                            if (hir.kindOf(mid) == "HirFunction") {
+                                this.fOwnerList.add(toStr(mid) + "|" + clsName)
+                            }
+                            m = m + 1
+                        }
+                    }
+                    j = j + 1
+                }
+            }
+            i = i + 1
+        }
+
+        // 1.6) 类型别名表（`HirTypealias` 文本为 `Name = Target`）
+        i = 0
+        while (i < hir.count) {
+            if (hir.kindOf(i) == "HirTypealias") {
+                val t: String = hir.textOf(i)
+                val eq: Int = aotIndexOfSub(t, " = ")
+                if (eq > 0) {
+                    val an: String = aotSlice(t, 0, eq)
+                    val at: String = aotSlice(t, eq + 3, t.length - eq - 3)
+                    if (an != "" && at != "") {
+                        this.fTypeAliases = this.fTypeAliases + an + "|" + at + "\n"
+                    }
+                }
+            }
+            i = i + 1
+        }
+
+        // 2) 用户函数签名表（调用点返回类型/参数类型对齐，Phase 6.5.1）
+        i = 0
+        while (i < hir.count) {
+            if (hir.kindOf(i) == "HirFunction") {
+                this.fSigList.add(this.functionSignature(hir, i))
+            }
+            i = i + 1
+        }
+
+        // 3) 函数定义
+        i = 0
+        while (i < hir.count) {
+            if (hir.kindOf(i) == "HirFunction") {
+                this.funcParts.add(this.emitFunction(hir, i))
+            }
+            i = i + 1
+        }
+        // 3) 组装模块
+        var out: String = "; ModuleID = '" + moduleName + "'\n"
+        out = out + "source_filename = \"" + moduleName + "\"\n"
+        out = out + "target triple = \"" + target + "\"\n"
+        out = out + "target datalayout = \"" + dataLayout(target) + "\"\n\n"
+        val structIr: String = joinPieces(this.structParts, "")
+        if (structIr != "") {
+            out = out + "; ---- Struct Types ----\n" + structIr + "\n"
+        }
+        val stringIr: String = joinPieces(this.stringParts, "")
+        if (stringIr != "") {
+            out = out + "; ---- String Constants ----\n" + stringIr + "\n"
+        }
+        if (this.linkRuntime) {
+            out = out + runtimeDeclarations() + "\n"
+        }
+        if (this.emitDebug) {
+            val di: DebugInfo = DebugInfo(moduleName, ".", true)
+            out = out + debugMetadata(di) + debugSubroutineType() + "\n"
+        }
+        out = out + joinPieces(this.funcParts, "")
+        return out
+    }
+
+    // ── 结构体（Phase 6.5.1：以指针表示实例 + 真实字段布局）──
+
+    /// 登记一个用户结构体：抽取字段布局（名/类型/默认值），并发射 LLVM 结构体类型。
+    ///
+    /// HIR 形状：`HirStruct(name, kids=[HirBlock(kids=[HirVarDecl/HirValDecl...])])`。
+    fun registerStruct(hir: Hir, id: Int) {
+        val name: String = hir.textOf(id)
+        if (name == "") {
+            return
+        }
+        val sym: String = sanitizeLlvm(name)
+        val kids: String = hir.kidsOf(id)
+        var fieldTys: String = ""
+        if (hirKidsCount(kids) > 0) {
+            val body: Int = hirKidsAt(kids, 0)
+            val bodyKind: String = hir.kindOf(body)
+            var fields: String = ""
+            if (bodyKind == "HirBlock") {
+                fields = hir.kidsOf(body)
+            }
+            val fn: Int = hirKidsCount(fields)
+            var fi: Int = 0
+            while (fi < fn) {
+                val fid: Int = hirKidsAt(fields, fi)
+                val fk: String = hir.kindOf(fid)
+                if (fk == "HirVarDecl" || fk == "HirValDecl") {
+                    val fname: String = hir.textOf(fid)
+                    var lty: String = this.mapTy(hir.tyOf(fid))
+                    if (lty == "" || lty == "void") {
+                        lty = "i32"
+                    }
+                    val init: String = this.fieldDefault(hir, fid, lty)
+                    val initExpr: Int = this.fieldInitExprId(hir, fid)
+                    if (fieldTys != "") {
+                        fieldTys = fieldTys + ", "
+                    }
+                    fieldTys = fieldTys + lty
+                    this.structLines.add(sym + "|" + fname + "|" + lty
+                        + "|" + init + "|" + toStr(initExpr) + "|" + hir.tyOf(fid))
+                }
+                fi = fi + 1
+            }
+        }
+        if (aotListContains(this.structDeclared, sym)) {
+            return
+        }
+        this.structDeclared = this.structDeclared + sym + "\n"
+        if (fieldTys == "") {
+            if (hirKidsCount(kids) == 0) {
+                // 完全无体的前向声明：保持 opaque
+                this.structParts.add("%struct." + sym + " = type opaque\n")
+            } else {
+                // 有体但无字段的类（只有方法 / init）：需可 alloca 的具体类型
+                this.structParts.add("%struct." + sym + " = type { i8 }\n")
+                this.structConcrete = this.structConcrete + sym + "\n"
+            }
+        } else {
+            this.structParts.add("%struct." + sym + " = type { " + fieldTys + " }\n")
+            this.structConcrete = this.structConcrete + sym + "\n"
+        }
+    }
+
+    /// 结构体字段默认值（取 HIR 字面量初始化；否则用类型零值）。
+    fun fieldDefault(hir: Hir, fieldId: Int, lty: String): String {
+        val kids: String = hir.kidsOf(fieldId)
+        if (hirKidsCount(kids) > 0) {
+            val ik: Int = hirKidsAt(kids, 0)
+            if (hir.kindOf(ik) == "HirLit") {
+                val ity: String = hir.tyOf(ik)
+                if (ity != "String" && (ity == "Int" || ity == "Long" ||
+                    ity == "Double" || ity == "Boolean")) {
+                    return hir.textOf(ik)
+                }
+            }
+        }
+        return defaultValue(lty)
+    }
+
+    /// 字段默认值若为**非字面量表达式**（如 `Lexer("")` / `arrayListOf<String>()`），
+    /// 返回其 HIR 节点 id（供构造时求值）；字面量或无初始化返回 -1。
+    fun fieldInitExprId(hir: Hir, fieldId: Int): Int {
+        val kids: String = hir.kidsOf(fieldId)
+        if (hirKidsCount(kids) == 0) {
+            return -1
+        }
+        val ik: Int = hirKidsAt(kids, 0)
+        if (hir.kindOf(ik) == "HirLit") {
+            return -1
+        }
+        return ik
+    }
+
+    /// 结构体内字段序号（0-based，未命中返回 -1）。
+    ///
+    /// 前缀扫描取代 `split("\n")`：后者每次查询都分配整张字段表。
+    fun structFieldIndex(sym: String, field: String): Int {
+        val needle: String = sym + "|"
+        var i: Int = 0
+        var count: Int = 0
+        while (i < this.structLines.size) {
+            val line: String = this.structLines[i]
+            if (line.startsWith(needle)) {
+                if (aotFieldAt(line, 1, "|") == field) {
+                    return count
+                }
+                count = count + 1
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// 字段声明的 **Aura 类型**（结构体表第 6 列；未命中返回 ""）。
+    ///
+    /// LLVM 类型无法区分 `String` 与 `List<T>`（都是 `i8*`），而 `.size`
+    /// 语义不同（字节长度 vs 元素个数），故必须保留声明类型。
+    fun structFieldAuraTy(sym: String, field: String): String {
+        val idx: Int = this.structFieldIndex(sym, field)
+        if (idx < 0) {
+            return ""
+        }
+        return aotFieldAt(this.structFieldLineAt(sym, idx), 5, "|")
+    }
+
+    /// 接收者是否为集合（`List/Map/Set/Array`）——决定 `.size` 取元素个数
+    /// （`Collections_count`）还是字符串字节长度（`aura_strlen`），以及下标
+    /// 访问走 `getAt` 还是 `charAt`。
+    ///
+    /// 旧实现只看「局部变量是否为集合」（`isListVar`），**字段接收者**
+    /// （`this.kindList.size`）会落到字符串分支：`.size` 被算成 `strlen`
+    /// （元素个数变垃圾值）、下标被算成 `charAt`。自举编译器里
+    /// `Parser.n = this.lx.tokenCount()`（= `kindList.size`）因此得到错误
+    /// 的 token 数，`prsAdvance` 把 `pos` 钉在 0，解析主循环永不结束并
+    /// 每轮分配内存（表现为内存无限增长）。
+    fun isCollectionReceiver(hir: Hir, recvId: Int): Boolean {
+        if (hir.kindOf(recvId) == "HirVar") {
+            if (this.isListVar(hir.textOf(recvId))) {
+                return true
+            }
+        }
+        if (hir.kindOf(recvId) == "HirMember") {
+            val mk: String = hir.kidsOf(recvId)
+            if (hirKidsCount(mk) >= 1) {
+                val recvTy: String = this.inferType(hir, hirKidsAt(mk, 0))
+                val sym: String = this.structSymOfPtr(recvTy)
+                if (sym != "") {
+                    val fty: String = this.structFieldAuraTy(sym, hir.textOf(recvId))
+                    if (isCollectionTypeName(this.resolveAlias(fty))) {
+                        return true
+                    }
+                }
+            }
+        }
+        val ty: String = hir.tyOf(recvId)
+        if (ty != "" && isCollectionTypeName(this.resolveAlias(ty))) {
+            return true
+        }
+        return false
+    }
+
+    /// 集合接收者的元素 LLVM 类型（局部变量查登记表、字段查声明类型；
+    /// 未知一律按 `i8*` 句柄处理，避免错误的数值解箱）。
+    fun receiverElemTy(hir: Hir, recvId: Int): String {
+        if (hir.kindOf(recvId) == "HirVar") {
+            if (this.isListVar(hir.textOf(recvId))) {
+                return this.listElemTy(hir.textOf(recvId))
+            }
+        }
+        if (hir.kindOf(recvId) == "HirMember") {
+            val mk: String = hir.kidsOf(recvId)
+            if (hirKidsCount(mk) >= 1) {
+                val recvTy: String = this.inferType(hir, hirKidsAt(mk, 0))
+                val sym: String = this.structSymOfPtr(recvTy)
+                if (sym != "") {
+                    val fty: String = this.structFieldAuraTy(sym, hir.textOf(recvId))
+                    if (isCollectionTypeName(this.resolveAlias(fty))) {
+                        return this.typeArgElemTy(fty)
+                    }
+                }
+            }
+        }
+        return "i8*"
+    }
+
+    /// 结构体第 index 个字段条目（按登记顺序；未命中返回 ""）。
+    fun structFieldLineAt(sym: String, index: Int): String {
+        val needle: String = sym + "|"
+        var i: Int = 0
+        var count: Int = 0
+        while (i < this.structLines.size) {
+            val line: String = this.structLines[i]
+            if (line.startsWith(needle)) {
+                if (count == index) {
+                    return line
+                }
+                count = count + 1
+            }
+            i = i + 1
+        }
+        return ""
+    }
+
+    /// 结构体字段总数。
+    fun structFieldCount(sym: String): Int {
+        val needle: String = sym + "|"
+        var i: Int = 0
+        var count: Int = 0
+        while (i < this.structLines.size) {
+            if (this.structLines[i].startsWith(needle)) {
+                count = count + 1
+            }
+            i = i + 1
+        }
+        return count
+    }
+
+    /// 是否已登记该结构体（仅有具体布局者才可构造；`opaque` 前向声明不算）。
+    fun isStructSym(sym: String): Boolean {
+        // 无字段的类/结构体不会出现在字段表中，但仍已发射具体类型定义
+        if (aotListContains(this.structConcrete, sym)) {
+            return true
+        }
+        val needle: String = sym + "|"
+        var i: Int = 0
+        while (i < this.structLines.size) {
+            if (this.structLines[i].startsWith(needle)) {
+                return true
+            }
+            i = i + 1
+        }
+        return false
+    }
+
+    /// 从 `%struct.X*` 反解结构体符号（非结构体指针返回 ""）。
+    fun structSymOfPtr(ptrTy: String): String {
+        if (!ptrTy.startsWith("%struct.")) {
+            return ""
+        }
+        if (!ptrTy.endsWith("*")) {
+            return ""
+        }
+        return aotSlice(ptrTy, 8, ptrTy.length - 9)
+    }
+
+    /// 发射结构体构造：`Point(1, 2)` → 堆分配 + 字段初始化 + 返回指针。
+    fun emitNewStruct(hir: Hir, kids: String, n: Int, argStart: Int, sym: String): String {
+        // **必须堆分配**：对象常被存进字段 / 返回 / 放进集合。旧实现用
+        // `alloca`（栈临时），函数一返回该地址即失效 → 悬垂指针
+        // （`Parser.lx = Lexer(source)` 正是因此解引用崩溃）。
+        // 尺寸用 LLVM 惯用法 `getelementptr T, T* null, 1` + `ptrtoint` 求得，
+        // 无需维护类型大小表。
+        val szp: String = this.freshVar()
+        this.fBody.add("  " + szp + " = getelementptr inbounds %struct." + sym
+            + ", %struct." + sym + "* null, i32 1\n")
+        val szv: String = this.freshVar()
+        this.fBody.add("  " + szv + " = ptrtoint %struct." + sym + "* " + szp + " to i64\n")
+        val rawp: String = this.freshVar()
+        this.fBody.add("  " + rawp + " = call i8* @aura_malloc(i64 " + szv + ")\n")
+        val ptr: String = this.freshVar()
+        this.fBody.add("  " + ptr + " = bitcast i8* " + rawp
+            + " to %struct." + sym + "*\n")
+        // 类若有 `init(...)`（主构造函数方法体），构造实参应**转发给 init**，
+        // 字段只走各自的默认初始化；否则按位置用实参初始化字段。
+        val initSig: String = this.funcSignatureOf(sym + ".init")
+        val hasInit: Boolean = initSig != ""
+        val fc: Int = this.structFieldCount(sym)
+        var idx: Int = 0
+        while (idx < fc) {
+            val line: String = this.structFieldLineAt(sym, idx)
+            val fty: String = aotFieldAt(line, 2, "|")
+            var init: String = aotFieldAt(line, 3, "|")
+            // 构造实参覆盖默认值（仅当无 `init` 方法体时按位置映射）
+            if (!hasInit && argStart + idx < n) {
+                val aId: Int = hirKidsAt(kids, argStart + idx)
+                val aTy: String = this.inferType(hir, aId)
+                val a: String = this.emitExpr(hir, aId)
+                init = this.coerceValue(a, aTy, fty)
+            } else {
+                // 若字段默认值是**非字面量表达式**（如 `var lexer: Lexer = Lexer("")`），
+                // 必须发射该表达式求值，否则会写成零值（类指针 → null → 后续解引用崩溃）。
+                val col5: String = aotFieldAt(line, 4, "|")
+                if (col5 != "") {
+                    val ie: Int = aotToInt(col5)
+                    if (ie >= 0) {
+                        val eTy: String = this.inferType(hir, ie)
+                        val ev: String = this.emitExpr(hir, ie)
+                        init = this.coerceValue(ev, eTy, fty)
+                    }
+                }
+            }
+            val fp: String = this.freshVar()
+            this.fBody.add("  " + fp + " = getelementptr inbounds %struct."
+                + sym + ", %struct." + sym + "* " + ptr + ", i32 0, i32 " + toStr(idx) + "\n")
+            this.fBody.add("  store " + fty + " " + init + ", " + fty + "* " + fp + "\n")
+            idx = idx + 1
+        }
+        // 构造初始化块 / 主构造函数：`init(...)` → 调用 `<Class>.init(ptr, 实参...)`
+        if (hasInit) {
+            val paramsCsv: String = aotFieldAt(initSig, 2, "|")
+            var args: String = "%struct." + sym + "* " + ptr
+            var i: Int = argStart
+            var ai: Int = 1
+            while (i < n) {
+                val aId: Int = hirKidsAt(kids, i)
+                val aTy: String = this.inferType(hir, aId)
+                val a: String = this.emitExpr(hir, aId)
+                var wantTy: String = aTy
+                if (paramsCsv != "") {
+                    // 签名表里的参数是 `i8*, i64` 这类**带空格**形式，按 `,` 切出来会带前导
+                    // 空格；不 trim 会让 `intWidth(" i64")` 判为非整数 → 跳过 sext/trunc，
+                    // 生成 `i32` 值传给 `i64` 形参的非法 IR。
+                    wantTy = trimSpaces(aotFieldAt(paramsCsv, ai, ","))
+                }
+                args = args + ", " + wantTy + " " + this.coerceValue(a, aTy, wantTy)
+                ai = ai + 1
+                i = i + 1
+            }
+            this.fBody.add("  call void @" + sanitizeLlvm(sym + ".init")
+                + "(" + args + ")\n")
+            this.fTerminated = false
+        }
+        return ptr
+    }
+
+    // ── 函数 ──
+
+    /// 查方法所属类名（非方法返回 ""）。
+    fun methodOwnerClass(fnId: Int): String {
+        val needle: String = toStr(fnId) + "|"
+        var i: Int = 0
+        while (i < this.fOwnerList.size) {
+            val line: String = this.fOwnerList[i]
+            if (line.startsWith(needle)) {
+                return aotFieldAt(line, 1, "|")
+            }
+            i = i + 1
+        }
+        return ""
+    }
+
+    /// 生成用户函数签名条目 `name|retTy|paramTy1,paramTy2`。
+    ///
+    /// 类方法自动带隐式 `self` 形参（`%struct.<Class>*`，接收者由调用点作为第 0 个实参传入）。
+    fun functionSignature(hir: Hir, id: Int): String {
+        var retTy: String = this.mapTy(hir.tyOf(id))
+        if (retTy == "") {
+            retTy = "void"
+        }
+        val kids: String = hir.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+        var params: String = ""
+        val ownerCls: String = this.methodOwnerClass(id)
+        if (ownerCls != "") {
+            params = "%struct." + sanitizeLlvm(ownerCls) + "*"
+        }
+        var i: Int = 0
+        while (i < kCount) {
+            val cid: Int = hirKidsAt(kids, i)
+            if (hir.kindOf(cid) == "HirParam") {
+                var pty: String = this.mapTy(hir.tyOf(cid))
+                if (pty == "") {
+                    pty = "i32"
+                }
+                if (params != "") {
+                    params = params + ","
+                }
+                params = params + pty
+            }
+            i = i + 1
+        }
+        // 方法名以 `Class.method` 限定：避免不同类的同名方法互相覆盖，
+        // 调用点按接收者类型解析（Phase 6.5.1b）。
+        var fname: String = hir.textOf(id)
+        if (ownerCls != "") {
+            fname = sanitizeLlvm(ownerCls) + "." + fname
+        }
+        return fname + "|" + retTy + "|" + params
+    }
+
+    /// 发射单个函数定义。
+    fun emitFunction(hir: Hir, id: Int): String {
+        this.fAlloca = arrayListOf<String>()
+        this.fBody = arrayListOf<String>()
+        this.fVarList = arrayListOf<String>()
+        // 集合局部变量表是**每函数**状态：不重置会让前一个函数登记的集合变量
+        // 泄漏到后续函数（`isListVar` 误判 → 下标按集合 getAt + 按元素类型解箱，
+        // 生成 `i32` 传 `i8*` 形参的非法 IR）。
+        this.fListVars = ""
+        this.fTerminated = false
+
+        val name: String = hir.textOf(id)
+        var retTy: String = this.mapTy(hir.tyOf(id))
+        if (retTy == "") {
+            retTy = "void"
+        }
+        this.fRetTy = retTy
+
+        val kids: String = hir.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+        var paramsIr: String = ""
+        var bodyId: Int = -1
+        var i: Int = 0
+
+        // 类方法：隐式 self 形参（接收者指针），并注册 `this`
+        val ownerCls: String = this.methodOwnerClass(id)
+        this.fCurClass = ownerCls
+        // C 入口：模块级 `main` 使用 `(i32 %argc, i8** %argv)` 签名（与 Rust 后端
+        // 约定一致），入口块最先把宿主 argv 注入运行时——`Process.arg/argCount`
+        // 依赖它，否则 AOT 产物读不到命令行参数（只会打印用法）。
+        val isEntryMain: Boolean = (name == "main" && ownerCls == "")
+        if (isEntryMain) {
+            paramsIr = "i32 %argc, i8** %argv"
+        }
+        if (ownerCls != "") {
+            val selfTy: String = "%struct." + sanitizeLlvm(ownerCls) + "*"
+            paramsIr = selfTy + " %arg.this"
+            this.fAlloca.add("  %arg.this.addr = alloca " + selfTy + "\n")
+            this.fBody.add("  store " + selfTy + " %arg.this, "
+                + selfTy + "* %arg.this.addr\n")
+            this.fVarList.add("this|%arg.this.addr|" + selfTy)
+        }
+
+        while (i < kCount) {
+            val cid: Int = hirKidsAt(kids, i)
+            val ck: String = hir.kindOf(cid)
+            if (ck == "HirParam") {
+                if (!isEntryMain) {
+                    var pty: String = this.mapTy(hir.tyOf(cid))
+                    if (pty == "") {
+                        pty = "i32"
+                    }
+                    val pname: String = hir.textOf(cid)
+                    val psym: String = sanitizeLlvm(pname)
+                    if (paramsIr != "") {
+                        paramsIr = paramsIr + ", "
+                    }
+                    paramsIr = paramsIr + pty + " %arg." + psym
+                    val addr: String = "%arg." + psym + ".addr"
+                    this.fAlloca.add("  " + addr + " = alloca " + pty + "\n")
+                    this.fBody.add("  store " + pty + " %arg." + psym
+                        + ", " + pty + "* " + addr + "\n")
+                    this.fVarList.add(pname + "|" + addr + "|" + pty)
+                    // 参数也可能是集合（`fun f(items: List<String>)`）：必须按声明
+                    // 类型登记元素类型，否则 `.size` 会被当成字符串长度
+                    // （`aura_strlen`）、下标会被当成 `charAt`，集合读取全变成空值。
+                    val pAuraTy: String = hir.tyOf(cid)
+                    if (isCollectionTypeName(this.resolveAlias(pAuraTy))) {
+                        this.markListVarTyped(pname, this.typeArgElemTy(pAuraTy))
+                    }
+                }
+            } else {
+                bodyId = cid
+            }
+            i = i + 1
+        }
+
+        if (bodyId >= 0) {
+            this.emitBody(hir, bodyId)
+        }
+        if (!this.fTerminated) {
+            if (retTy == "void") {
+                this.fBody.add("  ret void\n")
+            } else {
+                this.fBody.add("  ret " + retTy + " " + defaultValue(retTy) + "\n")
+            }
+        }
+
+        var defName: String = name
+        if (ownerCls != "") {
+            defName = sanitizeLlvm(ownerCls) + "." + name
+        }
+        var out: String = "define " + retTy + " @" + sanitizeLlvm(defName) + "(" + paramsIr + ") {\n"
+        out = out + "entry:\n"
+        if (isEntryMain) {
+            out = out + "  call void @aura_args_set(i32 %argc, i8** %argv)\n"
+        }
+        out = out + joinPieces(this.fAlloca, "")
+        out = out + joinPieces(this.fBody, "")
+        out = out + "}\n\n"
+        return out
+    }
+
+    /// 发射函数体 / 语句块。
+    fun emitBody(hir: Hir, id: Int) {
+        if (hir.kindOf(id) == "HirBlock") {
+            val kids: String = hir.kidsOf(id)
+            val n: Int = hirKidsCount(kids)
+            var i: Int = 0
+            while (i < n) {
+                this.emitStmt(hir, hirKidsAt(kids, i))
+                i = i + 1
+            }
+        } else {
+            this.emitStmt(hir, id)
+        }
+    }
+
+    /// 发射单条语句。
+    fun emitStmt(hir: Hir, id: Int) {
+        if (id < 0 || id >= hir.count) {
+            return
+        }
+        // 上一语句已终结（ret/br）后仍有后续语句时，开启一个新的（不可达）基本块，
+        // 保证每条指令都隶属于带终结符的基本块（否则 llc 报 expected instruction opcode）。
+        if (this.fTerminated) {
+            val deadBb: String = this.freshBb("dead")
+            this.fBody.add(deadBb + ":\n")
+            this.fTerminated = false
+        }
+        val k: String = hir.kindOf(id)
+        if (k == "HirValDecl" || k == "HirVarDecl") {
+            this.emitDecl(hir, id)
+        } else if (k == "HirReturn") {
+            this.emitReturn(hir, id)
+        } else if (k == "HirAssign") {
+            this.emitAssign(hir, id)
+        } else if (k == "HirIf") {
+            this.emitIf(hir, id)
+        } else if (k == "HirWhile") {
+            this.emitWhile(hir, id)
+        } else if (k == "HirBlock") {
+            this.emitBody(hir, id)
+        } else if (k == "HirFor") {
+            this.emitFor(hir, id)
+        } else if (k == "HirIfExpr") {
+            // `else if` 链被 HIR 降级为**表达式**形态（`HirIfExpr`
+            // kids=[cond, then(, else)]）却出现在语句位置：按条件语句发射。
+            // 旧实现落到末尾「表达式语句」分支 → 只取 then 值、**完全忽略条件**，
+            // 导致所有 `else if` 分支永不执行（自举编译器读参数就是因此失效）。
+            this.emitIf(hir, id)
+        } else if (k == "HirBreak") {
+            // break → 跳到当前循环的 end 块（无循环上下文时忽略）
+            if (this.loopEnd != "") {
+                this.fBody.add("  br label %" + this.loopEnd + "\n")
+                this.fTerminated = true
+            }
+        } else if (k == "HirContinue") {
+            // continue → 跳到当前循环的条件/自增块
+            if (this.loopCond != "") {
+                this.fBody.add("  br label %" + this.loopCond + "\n")
+                this.fTerminated = true
+            }
+        } else {
+            // 表达式语句：求值即可（副作用如调用）
+            this.emitExpr(hir, id)
+        }
+    }
+
+    /// 发射 `for (x in list)` 语句。
+    ///
+    /// HIR kids = [HirValDecl(循环变量), 可迭代对象, HirBlock(循环体)]。
+    /// 集合以 `i8*` 句柄表示，遍历走 `aura_lang_std_Collections_count` /
+    /// `getAt`（与 Rust AOT 后端同一约定）。
+    fun emitFor(hir: Hir, id: Int) {
+        val kids: String = hir.kidsOf(id)
+        if (hirKidsCount(kids) < 3) {
+            // 形态不完整：至少把循环体发射出来，避免整段丢失
+            if (hirKidsCount(kids) >= 1) {
+                this.emitBody(hir, hirKidsAt(kids, hirKidsCount(kids) - 1))
+            }
+            return
+        }
+        val declId: Int = hirKidsAt(kids, 0)
+        val iterId: Int = hirKidsAt(kids, 1)
+        val bodyId: Int = hirKidsAt(kids, 2)
+        val varName: String = hir.textOf(declId)
+        val list: String = this.emitExpr(hir, iterId)
+
+        if (this.fTerminated) {
+            this.fBody.add(this.freshBb("for.pre") + ":\n")
+        }
+        // 循环变量的元素类型：集合已登记元素类型时用它（Int 列表 → i32，需拆箱）
+        var elemTy: String = "i8*"
+        if (hir.kindOf(iterId) == "HirVar") {
+            val iterName: String = hir.textOf(iterId)
+            if (this.isListVar(iterName)) {
+                elemTy = this.listElemTy(iterName)
+            }
+        }
+        val idxAddr: String = this.declareVar("__foridx_" + toStr(id), "i32")
+        this.fBody.add("  store i32 0, i32* " + idxAddr + "\n")
+        val varAddr: String = this.declareVar(varName, elemTy)
+        this.fBody.add("  store " + elemTy + " " + defaultValue(elemTy)
+            + ", " + elemTy + "* " + varAddr + "\n")
+
+        val condBb: String = this.freshBb("for.cond")
+        val bodyBb: String = this.freshBb("for.body")
+        val incrBb: String = this.freshBb("for.incr")
+        val endBb: String = this.freshBb("for.end")
+        this.fBody.add("  br label %" + condBb + "\n")
+
+        // 条件块：idx < count(list)
+        this.fBody.add(condBb + ":\n")
+        val idx: String = this.freshVar()
+        this.fBody.add("  " + idx + " = load i32, i32* " + idxAddr + "\n")
+        val cnt: String = this.freshVar()
+        this.fBody.add("  " + cnt
+            + " = call i64 @aura_lang_std_Collections_count(i8* " + list + ")\n")
+        val cnt32: String = this.freshVar()
+        this.fBody.add("  " + cnt32 + " = trunc i64 " + cnt + " to i32\n")
+        val cmp: String = this.freshVar()
+        this.fBody.add("  " + cmp + " = icmp slt i32 " + idx + ", " + cnt32 + "\n")
+        this.fBody.add("  br i1 " + cmp + ", label %" + bodyBb
+            + ", label %" + endBb + "\n")
+
+        // 循环体块：取出元素 → store 到循环变量 → 执行体
+        this.fBody.add(bodyBb + ":\n")
+        val idx64: String = this.freshVar()
+        this.fBody.add("  " + idx64 + " = sext i32 " + idx + " to i64\n")
+        val elem: String = this.freshVar()
+        this.fBody.add("  " + elem
+            + " = call i8* @aura_lang_std_Collections_getAt(i8* " + list
+            + ", i64 " + idx64 + ")\n")
+        val elemCo: String = this.coerceValue(elem, "i8*", elemTy)
+        this.fBody.add("  store " + elemTy + " " + elemCo
+            + ", " + elemTy + "* " + varAddr + "\n")
+        this.fTerminated = false
+        // 循环上下文：break → end，continue → incr（自增块，避免跳过自增）
+        val savedEnd: String = this.loopEnd
+        val savedCond: String = this.loopCond
+        this.loopEnd = endBb
+        this.loopCond = incrBb
+        this.emitBody(hir, bodyId)
+        this.loopEnd = savedEnd
+        this.loopCond = savedCond
+        if (!this.fTerminated) {
+            this.fBody.add("  br label %" + incrBb + "\n")
+        }
+
+        // 自增块：idx++ 后回到条件块（continue 也落到这里）
+        this.fBody.add(incrBb + ":\n")
+        this.fTerminated = false
+        val idx2: String = this.freshVar()
+        this.fBody.add("  " + idx2 + " = load i32, i32* " + idxAddr + "\n")
+        val idx3: String = this.freshVar()
+        this.fBody.add("  " + idx3 + " = add i32 " + idx2 + ", 1\n")
+        this.fBody.add("  store i32 " + idx3 + ", i32* " + idxAddr + "\n")
+        this.fBody.add("  br label %" + condBb + "\n")
+
+        // 结束块
+        this.fBody.add(endBb + ":\n")
+        this.fTerminated = false
+    }
+
+    /// 发射 val/var 声明。
+    fun emitDecl(hir: Hir, id: Int) {
+        val name: String = hir.textOf(id)
+        if (name == "") {
+            return
+        }
+        val kids: String = hir.kidsOf(id)
+        var initVal: String = "0"
+        var initTy: String = "i32"
+        if (hirKidsCount(kids) > 0) {
+            val initId: Int = hirKidsAt(kids, 0)
+            initTy = this.inferType(hir, initId)
+            initVal = this.emitExpr(hir, initId)
+        }
+        var llvmTy: String = this.mapTy(hir.tyOf(id))
+        if (llvmTy == "") {
+            llvmTy = initTy
+        }
+        if (llvmTy == "") {
+            llvmTy = "i32"
+        }
+        // 定长数组：只 `alloca [N x T]`，不做整体初始化
+        // （`store [N x T] 0` 不是合法 IR；元素由源码 `a[i] = v` 逐个写入）
+        if (llvmTy.startsWith("[")) {
+            this.declareVar(name, llvmTy)
+            this.fTerminated = false
+            return
+        }
+        // 初始化表达式类型与声明类型不一致时插入转换（如 i32 → i64）
+        val coerced: String = this.coerceValue(initVal, initTy, llvmTy)
+        val addr: String = this.declareVar(name, llvmTy)
+        this.fBody.add("  store " + llvmTy + " " + coerced
+            + ", " + llvmTy + "* " + addr + "\n")
+        this.fTerminated = false
+        // 登记集合类型局部变量：`.size` / `.add` / `for-in` / 下标需按集合语义处理，
+        // 并记录元素类型（决定 `list[i]` 读回后是否拆箱）
+        if (initTy == "i8*" && hirKidsCount(kids) > 0
+            && this.isCollectionCtorCall(hir, hirKidsAt(kids, 0))) {
+            this.markListVarTyped(name, this.collectionElemTy(hir, hirKidsAt(kids, 0)))
+        } else if (isCollectionTypeName(this.resolveAlias(hir.tyOf(id)))) {
+            this.markListVarTyped(name, this.typeArgElemTy(hir.tyOf(id)))
+        }
+    }
+
+    /// 集合构造调用的元素 LLVM 类型（取首个实参类型；无实参默认 `i32`）。
+    fun collectionElemTy(hir: Hir, callId: Int): String {
+        val kids: String = hir.kidsOf(callId)
+        if (hirKidsCount(kids) > 0) {
+            val e: String = this.inferType(hir, hirKidsAt(kids, 0))
+            if (e != "") {
+                return e
+            }
+        }
+        return "i32"
+    }
+
+    /// 从声明类型 `List<T>` / `Map<K,V>` 中提取元素 T 的 LLVM 类型（默认 `i32`）。
+    fun typeArgElemTy(ty: String): String {
+        val lt: Int = aotIndexOfSub(ty, "<")
+        if (lt < 0) {
+            return "i32"
+        }
+        val rest: String = aotSlice(ty, lt + 1, ty.length - lt - 1)
+        val gt: Int = aotIndexOfSub(rest, ">")
+        if (gt < 0) {
+            return "i32"
+        }
+        val inner: String = aotSlice(rest, 0, gt)
+        // Map<K,V>：取 V（值类型）
+        val comma: Int = aotIndexOfSub(inner, ",")
+        var elem: String = inner
+        if (comma >= 0) {
+            elem = aotSlice(inner, comma + 1, inner.length - comma - 1)
+        }
+        val m: String = this.mapTy(trimSpaces(elem))
+        if (m == "" || m == "void") {
+            return "i32"
+        }
+        return m
+    }
+
+    /// 发射赋值语句。
+    fun emitAssign(hir: Hir, id: Int) {
+        val kids: String = hir.kidsOf(id)
+        if (hirKidsCount(kids) < 2) {
+            return
+        }
+        val targetId: Int = hirKidsAt(kids, 0)
+        val valueId: Int = hirKidsAt(kids, 1)
+        // 定长数组元素写入：HIR 把 `a[i] = v` 降级为 `a = Collections.set(a, i, v)`
+        // （接收者 kids[0]、下标 kids[1]、值 kids[2]）。展开为 gep + store；
+        // 否则会把 `[N x T]` 当标量整体 store，生成非法 IR。
+        if (hir.kindOf(valueId) == "HirCall" && hir.textOf(valueId) == "Collections.set") {
+            val sk: String = hir.kidsOf(valueId)
+            if (hirKidsCount(sk) >= 3) {
+                val recvId: Int = hirKidsAt(sk, 0)
+                if (hir.kindOf(recvId) == "HirVar") {
+                    if (this.emitArrayElemStoreVar(hir, hir.textOf(recvId),
+                            hirKidsAt(sk, 1), hirKidsAt(sk, 2))) {
+                        return
+                    }
+                }
+            }
+        }
+        // 结构体字段写入：`p.x = v`
+        if (hir.kindOf(targetId) == "HirMember") {
+            if (this.emitStructFieldStore(hir, targetId, valueId)) {
+                return
+            }
+        }
+        // 定长数组元素写入：`a[i] = v`
+        if (hir.kindOf(targetId) == "HirIndex") {
+            if (this.emitArrayElemStore(hir, targetId, valueId)) {
+                return
+            }
+        }
+        if (hir.kindOf(targetId) != "HirVar") {
+            return
+        }
+        val name: String = hir.textOf(targetId)
+        if (name == "") {
+            return
+        }
+        // 类方法内：裸字段名 → `this.field = v`（Phase 6.5.1b）
+        if (this.lookupVarTy(name) == "" && this.curClassFieldIndex(name) >= 0) {
+            this.emitThisFieldStore(hir, name, valueId)
+            return
+        }
+        val valueTy: String = this.inferType(hir, valueId)
+        val value: String = this.emitExpr(hir, valueId)
+        var ty: String = this.lookupVarTy(name)
+        if (ty == "") {
+            ty = valueTy
+        }
+        if (ty == "") {
+            ty = "i32"
+        }
+        val coerced: String = this.coerceValue(value, valueTy, ty)
+        val addr: String = this.declareVar(name, ty)
+        this.fBody.add("  store " + ty + " " + coerced
+            + ", " + ty + "* " + addr + "\n")
+        this.fTerminated = false
+    }
+
+    /// 定长数组元素写入：`a[i] = v` → gep + store（非定长数组返回 false）。
+    fun emitArrayElemStore(hir: Hir, idxId: Int, valueId: Int): Boolean {
+        val kids: String = hir.kidsOf(idxId)
+        if (hirKidsCount(kids) < 2) {
+            return false
+        }
+        val cId: Int = hirKidsAt(kids, 0)
+        if (hir.kindOf(cId) != "HirVar") {
+            return false
+        }
+        return this.emitArrayElemStoreVar(hir, hir.textOf(cId), hirKidsAt(kids, 1), valueId)
+    }
+
+    /// 定长数组元素写入（按变量名）：`a[i] = v` → gep + store；非数组返回 false。
+    fun emitArrayElemStoreVar(hir: Hir, cn: String, iId: Int, valueId: Int): Boolean {
+        val ct: String = this.lookupVarTy(cn)
+        if (!ct.startsWith("[")) {
+            return false
+        }
+        val elemTy: String = llvmElemOfArrayTy(ct)
+        val iTy: String = this.inferType(hir, iId)
+        val iv0: String = this.emitExpr(hir, iId)
+        val iv: String = this.coerceValue(iv0, iTy, "i64")
+        val vTy: String = this.inferType(hir, valueId)
+        val v0: String = this.emitExpr(hir, valueId)
+        val v: String = this.coerceValue(v0, vTy, elemTy)
+        val addr: String = this.fvField(cn, 1)
+        val p: String = this.freshVar()
+        this.fBody.add("  " + p + " = getelementptr inbounds " + ct
+            + ", " + ct + "* " + addr + ", i64 0, i64 " + iv + "\n")
+        this.fBody.add("  store " + elemTy + " " + v + ", " + elemTy
+            + "* " + p + "\n")
+        this.fTerminated = false
+        return true
+    }
+
+    /// 发射 return 语句（Phase 6.5.2：按函数返回类型转换后再 ret）。
+    fun emitReturn(hir: Hir, id: Int) {
+        val kids: String = hir.kidsOf(id)
+        if (hirKidsCount(kids) > 0) {
+            val vId: Int = hirKidsAt(kids, 0)
+            val vTy: String = this.inferType(hir, vId)
+            val v: String = this.emitExpr(hir, vId)
+            if (this.fRetTy == "" || this.fRetTy == "void") {
+                this.fBody.add("  ret void\n")
+                this.fTerminated = true
+                return
+            }
+            val coerced: String = this.coerceValue(v, vTy, this.fRetTy)
+            this.fBody.add("  ret " + this.fRetTy + " " + coerced + "\n")
+        } else {
+            if (this.fRetTy == "" || this.fRetTy == "void") {
+                this.fBody.add("  ret void\n")
+            } else {
+                this.fBody.add("  ret " + this.fRetTy + " "
+                    + defaultValue(this.fRetTy) + "\n")
+            }
+        }
+        this.fTerminated = true
+    }
+
+    /// 发射 if 语句（HirIf kids = [cond, then, else?]）。
+    fun emitIf(hir: Hir, id: Int) {
+        val kids: String = hir.kidsOf(id)
+        val n: Int = hirKidsCount(kids)
+        if (n < 2) {
+            return
+        }
+        val condId: Int = hirKidsAt(kids, 0)
+        val condTy: String = this.inferType(hir, condId)
+        val condRaw: String = this.emitExpr(hir, condId)
+        val cond: String = this.toI1(condRaw, condTy)
+        val thenBb: String = this.freshBb("then")
+        val elseBb: String = this.freshBb("else")
+        val mergeBb: String = this.freshBb("merge")
+        this.fBody.add("  br i1 " + cond + ", label %" + thenBb
+            + ", label %" + elseBb + "\n")
+        // then 分支
+        this.fBody.add(thenBb + ":\n")
+        this.fTerminated = false
+        this.emitBody(hir, hirKidsAt(kids, 1))
+        val thenFalls: Boolean = !this.fTerminated
+        if (thenFalls) {
+            this.fBody.add("  br label %" + mergeBb + "\n")
+        }
+        // else 分支
+        this.fBody.add(elseBb + ":\n")
+        this.fTerminated = false
+        if (n > 2) {
+            this.emitBody(hir, hirKidsAt(kids, 2))
+        }
+        val elseFalls: Boolean = !this.fTerminated
+        if (elseFalls) {
+            this.fBody.add("  br label %" + mergeBb + "\n")
+        }
+        // 汇合块：若两个分支都已终结则不可达，发射 unreachable 保持 IR 合法
+        this.fBody.add(mergeBb + ":\n")
+        if (thenFalls || elseFalls) {
+            this.fTerminated = false
+        } else {
+            this.fBody.add("  unreachable\n")
+            this.fTerminated = true
+        }
+    }
+
+    /// 发射 while 循环（HirWhile kids = [cond, body]）。
+    fun emitWhile(hir: Hir, id: Int) {
+        val kids: String = hir.kidsOf(id)
+        val n: Int = hirKidsCount(kids)
+        if (n < 2) {
+            return
+        }
+        val condBb: String = this.freshBb("loop.cond")
+        val bodyBb: String = this.freshBb("loop.body")
+        val endBb: String = this.freshBb("loop.end")
+        this.fBody.add("  br label %" + condBb + "\n")
+        this.fBody.add(condBb + ":\n")
+        this.fTerminated = false
+        val condId: Int = hirKidsAt(kids, 0)
+        val condTy: String = this.inferType(hir, condId)
+        val condRaw: String = this.emitExpr(hir, condId)
+        val cond: String = this.toI1(condRaw, condTy)
+        this.fBody.add("  br i1 " + cond + ", label %" + bodyBb
+            + ", label %" + endBb + "\n")
+        this.fBody.add(bodyBb + ":\n")
+        this.fTerminated = false
+        // 循环上下文：break → end，continue → cond
+        val savedEnd: String = this.loopEnd
+        val savedCond: String = this.loopCond
+        this.loopEnd = endBb
+        this.loopCond = condBb
+        this.emitBody(hir, hirKidsAt(kids, 1))
+        this.loopEnd = savedEnd
+        this.loopCond = savedCond
+        if (!this.fTerminated) {
+            this.fBody.add("  br label %" + condBb + "\n")
+        }
+        this.fBody.add(endBb + ":\n")
+        this.fTerminated = false
+    }
+
+    // ── 表达式 ──
+
+    /// 发射表达式，返回 LLVM 值操作数字符串。
+    fun emitExpr(hir: Hir, id: Int): String {
+        if (id < 0 || id >= hir.count) {
+            return "0"
+        }
+        val k: String = hir.kindOf(id)
+        if (k == "HirLit") {
+            return this.emitLit(hir, id)
+        }
+        if (k == "HirVar") {
+            return this.emitVarLoad(hir.textOf(id))
+        }
+        if (k == "HirBinary") {
+            return this.emitBinary(hir, id)
+        }
+        if (k == "HirUnary") {
+            return this.emitUnary(hir, id)
+        }
+        if (k == "HirCall") {
+            return this.emitCall(hir, id)
+        }
+        if (k == "HirMember") {
+            return this.emitMember(hir, id)
+        }
+        if (k == "HirIfExpr") {
+            return this.emitIfValue(hir, id)
+        }
+        if (k == "HirIndex") {
+            return this.emitIndex(hir, id)
+        }
+        // 其余表达式暂降级为 0
+        return "0"
+    }
+
+    /// 发射下标访问 `xs[i]`（Phase 6.5：集合 → getAt；字符串 → charAt）。
+    ///
+    /// HIR kids = [容器, 下标]。集合元素以 Plan A `i8*` 返回，调用方在使用处
+    /// 按元素类型经 `coerceValue` 拆箱（见 `inferType`/`coerceValue`）。
+    fun emitIndex(hir: Hir, id: Int): String {
+        val kids: String = hir.kidsOf(id)
+        if (hirKidsCount(kids) < 2) {
+            return "0"
+        }
+        val cId: Int = hirKidsAt(kids, 0)
+        val iId: Int = hirKidsAt(kids, 1)
+        // 定长数组 `[N x T]`：对局部变量取地址做 gep + load。
+        // 必须先判定，否则下面会按标量把整个数组 load 出来（生成非法 IR）。
+        if (hir.kindOf(cId) == "HirVar") {
+            val cn: String = hir.textOf(cId)
+            val ct: String = this.lookupVarTy(cn)
+            if (ct.startsWith("[")) {
+                val iTyA: String = this.inferType(hir, iId)
+                val ivA0: String = this.emitExpr(hir, iId)
+                val ivA: String = this.coerceValue(ivA0, iTyA, "i64")
+                val addr: String = this.fvField(cn, 1)
+                val p: String = this.freshVar()
+                this.fBody.add("  " + p + " = getelementptr inbounds " + ct
+                    + ", " + ct + "* " + addr + ", i64 0, i64 " + ivA + "\n")
+                val elemTy: String = llvmElemOfArrayTy(ct)
+                val t: String = this.freshVar()
+                this.fBody.add("  " + t + " = load " + elemTy + ", " + elemTy
+                    + "* " + p + "\n")
+                return t
+            }
+        }
+        val c: String = this.emitExpr(hir, cId)
+        val iTy: String = this.inferType(hir, iId)
+        val iv0: String = this.emitExpr(hir, iId)
+        val iv: String = this.coerceValue(iv0, iTy, "i64")
+        // 集合：getAt（返回 Plan A i8* 句柄）→ 按元素类型拆箱（Int 列表 → i32）
+        if (this.isCollectionReceiver(hir, cId)) {
+            val elemTy: String = this.receiverElemTy(hir, cId)
+            val t: String = this.freshVar()
+            this.fBody.add("  " + t
+                + " = call i8* @aura_lang_std_Collections_getAt(i8* " + c
+                + ", i64 " + iv + ")\n")
+            return this.coerceValue(t, "i8*", elemTy)
+        }
+        // 字符串：charAt（返回单字符字符串 i8*）
+        val s: String = this.freshVar()
+        this.fBody.add("  " + s
+            + " = call i8* @aura_lang_std_String_charAt(i8* " + c + ", i64 " + iv + ")\n")
+        return s
+    }
+
+    /// 发射字面量（依 HIR 类型决定表示；字符串统一为 `i8*`）。
+    fun emitLit(hir: Hir, id: Int): String {
+        val raw: String = hir.textOf(id)
+        val ty: String = hir.tyOf(id)
+        if (ty == "Boolean") {
+            if (raw == "true" || raw == "false") {
+                return raw
+            }
+        }
+        if (ty == "String") {
+            return this.declareString(raw)
+        }
+        if (raw == "true" || raw == "false") {
+            return raw
+        }
+        if (raw.startsWith("\"")) {
+            return this.declareString(aotSlice(raw, 1, raw.length - 2))
+        }
+        if (ty == "Char") {
+            return toStr(charCodeOf(raw))
+        }
+        // 数字字面量规范化：LLVM 只接受十进制整数与带 `.`/指数的浮点字面量。
+        // 源码中的 0xFF / 0b1100 / 1_000_000 / 100L / 3.14f 必须转换后写入 IR。
+        if (isNumericLiteral(raw)) {
+            if (isFloatLiteral(raw)) {
+                return normalizeFloatLiteral(raw)
+            }
+            return normalizeNumberLiteral(raw)
+        }
+        return raw
+    }
+
+    /// 发射字符串常量全局并返回可用的 `i8*`（getelementptr 到首字节）。
+    fun declareString(content: String): String {
+        val idx: Int = this.strCount
+        this.strCount = idx + 1
+        val escaped: String = llvmEscape(content)
+        val n: Int = content.length + 1
+        this.stringParts.add("@str." + toStr(idx)
+            + " = private unnamed_addr constant [" + toStr(n) + " x i8] c\""
+            + escaped + "\\00\"\n")
+        val t: String = this.freshVar()
+        this.fBody.add("  " + t + " = getelementptr inbounds ["
+            + toStr(n) + " x i8], [" + toStr(n) + " x i8]* @str."
+            + toStr(idx) + ", i64 0, i64 0\n")
+        return t
+    }
+
+    /// 发射变量读取（load）。
+    fun emitVarLoad(name: String): String {
+        val ty: String = this.lookupVarTy(name)
+        if (ty == "") {
+            // 类方法内：裸字段名 → `this.field`（Phase 6.5.1b）
+            if (this.curClassFieldIndex(name) >= 0) {
+                return this.emitThisFieldLoad(name)
+            }
+            return "0"
+        }
+        val addr: String = this.lookupVarAddr(name)
+        val t: String = this.freshVar()
+        this.fBody.add("  " + t + " = load " + ty + ", " + ty + "* " + addr + "\n")
+        return t
+    }
+
+    /// 发射二元运算（含字符串拼接/比较、整型提升，Phase 6.5.5/6.5.6）。
+    fun emitBinary(hir: Hir, id: Int): String {
+        val op: String = hir.textOf(id)
+        val kids: String = hir.kidsOf(id)
+        if (hirKidsCount(kids) < 2) {
+            return "0"
+        }
+        val aid: Int = hirKidsAt(kids, 0)
+        val bid: Int = hirKidsAt(kids, 1)
+        // 类型转换 `x as T`：解析器把 `as` 当二元运算符，右侧是**类型名**而非值。
+        // 运行期表示不变（String/List/Map/Any 均 i8*，Int/Float 标量），
+        // 直接转发左操作数；右侧不能求值（否则会产生垃圾指令/非法常量）。
+        if (op == "as" || op == "As") {
+            return this.emitExpr(hir, aid)
+        }
+        val aTy: String = this.inferType(hir, aid)
+        val bTy: String = this.inferType(hir, bid)
+        val a: String = this.emitExpr(hir, aid)
+        val b: String = this.emitExpr(hir, bid)
+
+        // Elvis `a ?: b`：可空结构体 `{ T, i1 }` 判空后取内部值或右操作数。
+        if (op == "?:") {
+            if (isNullableStructTy(aTy)) {
+                val innerTy: String = nullableInnerTy(aTy)
+                val iv: String = this.freshVar()
+                this.fBody.add("  " + iv + " = extractvalue "
+                    + aTy + " " + a + ", 0\n")
+                val nv: String = this.freshVar()
+                this.fBody.add("  " + nv + " = extractvalue "
+                    + aTy + " " + a + ", 1\n")
+                val bco: String = this.coerceValue(b, bTy, innerTy)
+                val rv: String = this.freshVar()
+                this.fBody.add("  " + rv + " = select i1 " + nv
+                    + ", " + innerTy + " " + bco + ", " + innerTy + " " + iv + "\n")
+                return rv
+            }
+            // 无可空跟踪（如 String? → i8*）：直接取左值
+            return a
+        }
+
+        // 逻辑运算（i1）：操作数可能来自返回 i32 的谓词调用点，先收敛到 i1
+        if (op == "&&" || op == "||") {
+            var instr: String = "and"
+            if (op == "||") {
+                instr = "or"
+            }
+            val a1: String = this.toI1(a, aTy)
+            val b1: String = this.toI1(b, bTy)
+            val lt: String = this.freshVar()
+            this.fBody.add("  " + lt + " = " + instr
+                + " i1 " + a1 + ", " + b1 + "\n")
+            return lt
+        }
+
+        // 字符串比较 → 内容相等（C 调用点符号）
+        if (isCmpOp(op) && aTy == "i8*" && bTy == "i8*") {
+            val c: String = this.freshVar()
+            this.fBody.add("  " + c + " = call i32 @aura_lang_std_String_equals(i8* "
+                + a + ", i8* " + b + ")\n")
+            // equals 返回 1 表示相等：`==` → ne 0；`!=` → eq 0
+            var pred: String = "ne"
+            if (op == "!=") {
+                pred = "eq"
+            }
+            val t: String = this.freshVar()
+            this.fBody.add("  " + t + " = icmp " + pred + " i32 " + c + ", 0\n")
+            return t
+        }
+
+        // 字符串拼接 → aura_string_concat(a, alen, b, blen)
+        // 非字符串一侧（Int / Float / Bool 等）先经 `aura_to_str*` 转换，
+        // 否则会把裸数值当指针传给 concat。
+        if (op == "+" && (aTy == "i8*" || bTy == "i8*")) {
+            var aStr: String = a
+            var bStr: String = b
+            if (aTy != "i8*") {
+                aStr = this.valueToStr(a, aTy)
+            }
+            if (bTy != "i8*") {
+                bStr = this.valueToStr(b, bTy)
+            }
+            val la: String = this.stringLen(aStr)
+            val lb: String = this.stringLen(bStr)
+            val t: String = this.freshVar()
+            this.fBody.add("  " + t
+                + " = call i8* @aura_string_concat(i8* " + aStr + ", i64 " + la
+                + ", i8* " + bStr + ", i64 " + lb + ")\n")
+            return t
+        }
+
+        // 比较运算（浮点走 fcmp，整型走 icmp）
+        if (isCmpOp(op)) {
+            val common: String = this.commonNumTy(aTy, bTy)
+            val a2: String = this.coerceValue(a, aTy, common)
+            val b2: String = this.coerceValue(b, bTy, common)
+            val t: String = this.freshVar()
+            if (common == "float" || common == "double") {
+                this.fBody.add("  " + t + " = fcmp " + fcmpPred(op)
+                    + " " + common + " " + a2 + ", " + b2 + "\n")
+            } else {
+                this.fBody.add("  " + t + " = icmp " + cmpPred(op)
+                    + " " + common + " " + a2 + ", " + b2 + "\n")
+            }
+            return t
+        }
+
+        // 移位运算 `<<` / `>>`（算术右移）/ `>>>`（逻辑右移）
+        if (op == "<<" || op == ">>" || op == ">>>") {
+            val shCommon: String = this.commonNumTy(aTy, bTy)
+            if (intWidth(shCommon) > 0) {
+                val a3: String = this.coerceValue(a, aTy, shCommon)
+                val b3: String = this.coerceValue(b, bTy, shCommon)
+                var instr: String = "shl"
+                if (op == ">>") {
+                    instr = "ashr"
+                }
+                if (op == ">>>") {
+                    instr = "lshr"
+                }
+                val st: String = this.freshVar()
+                this.fBody.add("  " + st + " = " + instr + " "
+                    + shCommon + " " + a3 + ", " + b3 + "\n")
+                return st
+            }
+            return a
+        }
+
+        // 算术运算（整型统一提升，避免 add i32 …, i64 … 非法 IR）
+        val common: String = this.commonNumTy(aTy, bTy)
+        if (intWidth(common) <= 0 && common != "float" && common != "double") {
+            // 非数值操作数（指针/结构体）：不做算术，返回左操作数兜底
+            return a
+        }
+        val a2: String = this.coerceValue(a, aTy, common)
+        val b2: String = this.coerceValue(b, bTy, common)
+        val t: String = this.freshVar()
+        this.fBody.add("  " + t + " = " + arithInstr(op, common)
+            + " " + common + " " + a2 + ", " + b2 + "\n")
+        return t
+    }
+
+    /// 发射一元运算。
+    fun emitUnary(hir: Hir, id: Int): String {
+        val op: String = hir.textOf(id)
+        val kids: String = hir.kidsOf(id)
+        if (hirKidsCount(kids) < 1) {
+            return "0"
+        }
+        val xId: Int = hirKidsAt(kids, 0)
+        val ty: String = this.inferType(hir, xId)
+        val x: String = this.emitExpr(hir, xId)
+        val t: String = this.freshVar()
+        if (op == "!") {
+            val x1: String = this.toI1(x, ty)
+            this.fBody.add("  " + t + " = xor i1 " + x1 + ", true\n")
+            return t
+        }
+        if (ty == "float" || ty == "double") {
+            this.fBody.add("  " + t + " = fneg " + ty + " " + x + "\n")
+            return t
+        }
+        if (intWidth(ty) <= 0) {
+            // 指针/结构体：无操作数级负号
+            return x
+        }
+        this.fBody.add("  " + t + " = sub " + ty + " 0, " + x + "\n")
+        return t
+    }
+
+    /// 发射成员访问：结构体字段（`p.x`）或字符串 `.length` / `.size`。
+    fun emitMember(hir: Hir, id: Int): String {
+        val member: String = hir.textOf(id)
+        val kids: String = hir.kidsOf(id)
+        if (hirKidsCount(kids) < 1) {
+            return "0"
+        }
+        val recvId: Int = hirKidsAt(kids, 0)
+        val recvTy: String = this.inferType(hir, recvId)
+        val sym: String = this.structSymOfPtr(recvTy)
+        if (sym != "" && this.structFieldIndex(sym, member) >= 0) {
+            return this.emitStructFieldLoad(hir, recvId, sym, member)
+        }
+        val recv: String = this.emitExpr(hir, recvId)
+        if (member == "length" || member == "size") {
+            // 集合：元素个数（`aura_lang_std_Collections_count`）；
+            // 字符串：字节长度（`aura_strlen`）。二者内部表示都是 `i8*`，
+            // 只能靠接收者的**声明类型**区分（含字段接收者，见
+            // `isCollectionReceiver`）。
+            if (this.isCollectionReceiver(hir, recvId)) {
+                val c: String = this.freshVar()
+                this.fBody.add("  " + c
+                    + " = call i64 @aura_lang_std_Collections_count(i8* " + recv + ")\n")
+                val ct: String = this.freshVar()
+                this.fBody.add("  " + ct + " = trunc i64 " + c + " to i32\n")
+                return ct
+            }
+            val n: String = this.stringLen(recv)
+            val t: String = this.freshVar()
+            this.fBody.add("  " + t + " = trunc i64 " + n + " to i32\n")
+            return t
+        }
+        return "0"
+    }
+
+    /// 结构体字段读取：`p.x` → gep + load。
+    fun emitStructFieldLoad(hir: Hir, recvId: Int, sym: String, field: String): String {
+        val index: Int = this.structFieldIndex(sym, field)
+        if (index < 0) {
+            return "0"
+        }
+        val fty: String = aotFieldAt(this.structFieldLineAt(sym, index), 2, "|")
+        val recv: String = this.emitExpr(hir, recvId)
+        val fp: String = this.freshVar()
+        this.fBody.add("  " + fp + " = getelementptr inbounds %struct."
+            + sym + ", %struct." + sym + "* " + recv + ", i32 0, i32 " + toStr(index) + "\n")
+        val t: String = this.freshVar()
+        this.fBody.add("  " + t + " = load " + fty + ", " + fty + "* " + fp + "\n")
+        return t
+    }
+
+    /// 结构体字段写入：`p.x = v` → gep + store。
+    fun emitStructFieldStore(hir: Hir, targetId: Int, valueId: Int): Boolean {
+        val member: String = hir.textOf(targetId)
+        val mk: String = hir.kidsOf(targetId)
+        if (hirKidsCount(mk) < 1) {
+            return false
+        }
+        val recvId: Int = hirKidsAt(mk, 0)
+        val recvTy: String = this.inferType(hir, recvId)
+        val sym: String = this.structSymOfPtr(recvTy)
+        if (sym == "") {
+            return false
+        }
+        val index: Int = this.structFieldIndex(sym, member)
+        if (index < 0) {
+            return false
+        }
+        val fty: String = aotFieldAt(this.structFieldLineAt(sym, index), 2, "|")
+        val vTy: String = this.inferType(hir, valueId)
+        val v: String = this.emitExpr(hir, valueId)
+        val coerced: String = this.coerceValue(v, vTy, fty)
+        val recv: String = this.emitExpr(hir, recvId)
+        val fp: String = this.freshVar()
+        this.fBody.add("  " + fp + " = getelementptr inbounds %struct."
+            + sym + ", %struct." + sym + "* " + recv + ", i32 0, i32 " + toStr(index) + "\n")
+        this.fBody.add("  store " + fty + " " + coerced + ", " + fty + "* " + fp + "\n")
+        this.fTerminated = false
+        return true
+    }
+
+    // ── 类字段（Phase 6.5.1b：方法内裸字段名 → `this.field`）──
+
+    /// 当前方法所属类（sanitize 后），非方法返回 ""。
+    fun curClassSym(): String {
+        if (this.fCurClass == "") {
+            return ""
+        }
+        return sanitizeLlvm(this.fCurClass)
+    }
+
+    /// 当前类字段序号（非字段返回 -1）。
+    fun curClassFieldIndex(field: String): Int {
+        val cs: String = this.curClassSym()
+        if (cs == "") {
+            return -1
+        }
+        return this.structFieldIndex(cs, field)
+    }
+
+    /// 当前类字段 LLVM 类型（非字段返回 ""）。
+    fun curClassFieldTy(field: String): String {
+        val cs: String = this.curClassSym()
+        val fi: Int = this.curClassFieldIndex(field)
+        if (fi < 0) {
+            return ""
+        }
+        return aotFieldAt(this.structFieldLineAt(cs, fi), 2, "|")
+    }
+
+    /// 类方法内读取裸字段名：`n` → `this.n`（gep + load）。
+    fun emitThisFieldLoad(field: String): String {
+        val cs: String = this.curClassSym()
+        val fi: Int = this.curClassFieldIndex(field)
+        if (fi < 0) {
+            return "0"
+        }
+        val fty: String = aotFieldAt(this.structFieldLineAt(cs, fi), 2, "|")
+        val th: String = this.emitVarLoad("this")
+        val fp: String = this.freshVar()
+        this.fBody.add("  " + fp + " = getelementptr inbounds %struct."
+            + cs + ", %struct." + cs + "* " + th + ", i32 0, i32 " + toStr(fi) + "\n")
+        val t: String = this.freshVar()
+        this.fBody.add("  " + t + " = load " + fty + ", " + fty + "* " + fp + "\n")
+        return t
+    }
+
+    /// 类方法内写入裸字段名：`n = v` → `this.n = v`（gep + store）。
+    fun emitThisFieldStore(hir: Hir, field: String, valueId: Int): Boolean {
+        val cs: String = this.curClassSym()
+        val fi: Int = this.curClassFieldIndex(field)
+        if (fi < 0) {
+            return false
+        }
+        val fty: String = aotFieldAt(this.structFieldLineAt(cs, fi), 2, "|")
+        val vTy: String = this.inferType(hir, valueId)
+        val v: String = this.emitExpr(hir, valueId)
+        val coerced: String = this.coerceValue(v, vTy, fty)
+        val th: String = this.emitVarLoad("this")
+        val fp: String = this.freshVar()
+        this.fBody.add("  " + fp + " = getelementptr inbounds %struct."
+            + cs + ", %struct." + cs + "* " + th + ", i32 0, i32 " + toStr(fi) + "\n")
+        this.fBody.add("  store " + fty + " " + coerced + ", " + fty + "* " + fp + "\n")
+        this.fTerminated = false
+        return true
+    }
+
+    /// 发射字符串长度调用（返回 i64 操作数）。
+    fun stringLen(s: String): String {
+        val t: String = this.freshVar()
+        this.fBody.add("  " + t + " = call i64 @aura_strlen(i8* " + s + ")\n")
+        return t
+    }
+
+    /// 发射函数调用。
+    fun emitCall(hir: Hir, id: Int): String {
+        val kids: String = hir.kidsOf(id)
+        val n: Int = hirKidsCount(kids)
+        var fname: String = hir.textOf(id)
+        var argStart: Int = 0
+        if (fname == "") {
+            if (n == 0) {
+                return "0"
+            }
+            fname = hir.textOf(hirKidsAt(kids, 0))
+            argStart = 1
+        }
+        if (fname == "") {
+            return "0"
+        }
+
+        // 集合构造：`arrayListOf<T>()` / `listOf()` / `mutableListOf()` …
+        // （泛型实参已在解析器消费，HIR 中不出现类型参数）→ 空列表句柄 + 逐个追加。
+        if (this.isCollectionCtor(fname)) {
+            val empty: String = this.freshVar()
+            this.fBody.add("  " + empty
+                + " = call i8* @aura_lang_std_Collections_emptyList()\n")
+            var cur: String = empty
+            var ci: Int = argStart
+            while (ci < n) {
+                val cId: Int = hirKidsAt(kids, ci)
+                val cTy: String = this.inferType(hir, cId)
+                val cv: String = this.emitExpr(hir, cId)
+                val boxed: String = this.boxToPtr(cv, cTy)
+                val nxt: String = this.freshVar()
+                this.fBody.add("  " + nxt
+                    + " = call i8* @aura_lang_std_Collections_listAppend(i8* "
+                    + cur + ", i8* " + boxed + ")\n")
+                cur = nxt
+                ci = ci + 1
+            }
+            return cur
+        }
+
+        // 集合方法：`lst.add(x)` → `listAppend`（接收者在 kids[0]，返回列表句柄）。
+        if (fname == "add" && n >= 2) {
+            val rId: Int = hirKidsAt(kids, 0)
+            if (this.inferType(hir, rId) == "i8*") {
+                var cur: String = this.emitExpr(hir, rId)
+                var ai: Int = 1
+                while (ai < n) {
+                    val aId: Int = hirKidsAt(kids, ai)
+                    val aTy: String = this.inferType(hir, aId)
+                    val av: String = this.emitExpr(hir, aId)
+                    val boxed: String = this.boxToPtr(av, aTy)
+                    val nxt: String = this.freshVar()
+                    this.fBody.add("  " + nxt
+                        + " = call i8* @aura_lang_std_Collections_listAppend(i8* "
+                        + cur + ", i8* " + boxed + ")\n")
+                    cur = nxt
+                    ai = ai + 1
+                }
+                return cur
+            }
+        }
+
+        // 结构体构造：`Point(...)` → alloca + 字段初始化（实例以指针表示）
+        val ctorSym: String = sanitizeLlvm(fname)
+        if (this.isStructSym(ctorSym)) {
+            return this.emitNewStruct(hir, kids, n, argStart, ctorSym)
+        }
+
+        // 内置输出：println / print（参数统一转 i8*）
+        if (fname == "println" || fname == "print") {
+            return this.emitPrint(hir, kids, n, argStart, fname == "println")
+        }
+
+        // toString / toStr：C 侧 `toString` 收的是 **Plan A 装箱值**，裸整数必须走
+        // `aura_to_str`（偶数整数若按装箱值解释会被当成指针 → 解引用崩溃）；
+        // 浮点走 `aura_to_str_float`；布尔走 `aura_to_str_bool`；字符串原样返回。
+        if ((fname == "toString" || fname == "toStr") && n == 1) {
+            val fId: Int = hirKidsAt(kids, 0)
+            val fTy: String = this.inferType(hir, fId)
+            val fv: String = this.emitExpr(hir, fId)
+            if (fTy == "i8*") {
+                return fv
+            }
+            if (fTy == "float" || fTy == "double") {
+                val dv: String = this.coerceValue(fv, fTy, "double")
+                val ft: String = this.freshVar()
+                this.fBody.add("  " + ft
+                    + " = call i8* @aura_to_str_float(double " + dv + ")\n")
+                return ft
+            }
+            if (fTy == "i1") {
+                val bv: String = this.coerceValue(fv, fTy, "i64")
+                val bt: String = this.freshVar()
+                this.fBody.add("  " + bt
+                    + " = call i8* @aura_to_str_bool(i64 " + bv + ")\n")
+                return bt
+            }
+            val iv: String = this.coerceValue(fv, fTy, "i64")
+            val it: String = this.freshVar()
+            this.fBody.add("  " + it
+                + " = call i8* @aura_to_str(i64 " + iv + ")\n")
+            return it
+        }
+
+        // 用户函数/方法解析（模块内签名表）
+        var userSig: String = ""
+        var sym: String = sanitizeLlvm(fname)
+        var retTy: String = ""
+        var paramsCsv: String = ""
+        var effArgStart: Int = argStart
+        var prependThis: Boolean = false
+
+        // 1) 类方法**优先**：接收者是类实例指针 → `Class.method`（Phase 6.5.1b）。
+        //    必须先于裸名匹配：源码里 `this.isX(v)` 与顶层自由函数 `isX(v)` 同名
+        //    很常见（如 `MirOptimizer.isFloatLiteral` 与 `isFloatLiteral`），
+        //    若先命中自由函数就会少传一个形参——实参缺类型、生成非法 IR。
+        //    形参数与实参数需一致，避免把「自由函数 + 结构体实参」误判成方法。
+        if (n >= 1) {
+            val recvTy: String = this.inferType(hir, hirKidsAt(kids, 0))
+            val recvSym: String = this.structSymOfPtr(recvTy)
+            if (recvSym != "") {
+                val ms: String = this.funcSignatureOf(recvSym + "." + fname)
+                if (ms != "") {
+                    val pc: String = aotFieldAt(ms, 2, "|")
+                    if (aotCsvCount(pc) == n) {
+                        userSig = ms
+                        sym = sanitizeLlvm(recvSym + "." + fname)
+                    }
+                }
+            }
+        }
+        // 2) 类静态方法：`ClassName.method(...)`
+        //    HIR 把类名降级为 kids[0] 的 `HirVar`（如 `CompilerInfo.name()` →
+        //    `HirCall("name", [HirVar("CompilerInfo"), …])`）。类名不是局部变量，
+        //    故用 `isStructSym` 判定；解析到 `Class.method` 后接收者位传 `null`
+        //    （这类方法通常不用 `this`）。
+        var staticSelfTy: String = ""
+        if (userSig == "" && n >= 1) {
+            val rId0: Int = hirKidsAt(kids, 0)
+            if (hir.kindOf(rId0) == "HirVar") {
+                val rn0: String = hir.textOf(rId0)
+                val cs0: String = sanitizeLlvm(rn0)
+                // std 类（Process/String/Math…）必须留给后面的 std 调用点路径，
+                // 否则会被用户类方法 `Process.arg` 抢占（Aura 包装类 ≠ C 运行时）。
+                if (this.lookupVarTy(rn0) == "" && this.isStructSym(cs0)
+                    && !isStdClassName(rn0)) {
+                    val ms0: String = this.funcSignatureOf(cs0 + "." + fname)
+                    if (ms0 != "") {
+                        userSig = ms0
+                        // 必须净化：函数定义侧是 `sanitizeLlvm(Class.method)`
+                        // （`CompilerInfo_name`），点号会生成不同的符号名。
+                        sym = sanitizeLlvm(cs0 + "." + fname)
+                        staticSelfTy = "%struct." + cs0 + "*"
+                        effArgStart = 1
+                    }
+                }
+            }
+        }
+        // 3) 类体内裸方法名（隐式 this）→ 补 this 为第 0 个实参
+        if (userSig == "" && this.fCurClass != "") {
+            val csym: String = sanitizeLlvm(this.fCurClass)
+            val ms2: String = this.funcSignatureOf(csym + "." + fname)
+            if (ms2 != "") {
+                userSig = ms2
+                sym = sanitizeLlvm(csym + "." + fname)
+                prependThis = true
+            }
+        }
+        // 3) 模块内自由函数（裸名）
+        if (userSig == "") {
+            val fs: String = this.funcSignatureOf(fname)
+            if (fs != "") {
+                userSig = fs
+            }
+        }
+
+        if (userSig != "") {
+            retTy = aotFieldAt(userSig, 1, "|")
+            paramsCsv = aotFieldAt(userSig, 2, "|")
+        } else {
+            // HIR 把 `s.indexOf(x)` / `s.contains(x)` 这类**字符串方法**统一改写成
+            // `Collections.indexOf(s, x)`（列表语义）。接收者是字符串时必须改回
+            // String 版调用点符号——否则字符串 `indexOf` 会走列表实现，恒返回 -1。
+            var qHandled: Boolean = false
+            if (aotIndexOfSub(fname, ".") > 0 && n >= 1) {
+                val recvId: Int = hirKidsAt(kids, 0)
+                var isColl: Boolean = false
+                if (hir.kindOf(recvId) == "HirVar") {
+                    val rn: String = hir.textOf(recvId)
+                    if (this.isListVar(rn) || isCollectionTypeName(hir.tyOf(recvId))) {
+                        isColl = true
+                    }
+                }
+                if (!isColl) {
+                    val m: String = methodCallSymbol(aotLastSegment(fname))
+                    if (m != "") {
+                        sym = m
+                        qHandled = true
+                    }
+                }
+            }
+            // 限定名 std 调用：`Collections.getAt` / `Collections.set` → 调用点符号
+            val qSym: String = stdSymbolOfQualified(fname)
+            if (!qHandled && qSym != "" && stdSignature(qSym) != "") {
+                sym = qSym
+            } else {
+                // std 类静态调用（Math.sin / String.fromCharCode…）→ 调用点符号
+                val stdCls: String = this.stdClassReceiver(hir, kids, n, argStart)
+                if (stdCls != "") {
+                    sym = "aura_lang_std_" + sanitizeLlvm(stdCls) + "_" + sanitizeLlvm(fname)
+                    effArgStart = 1
+                } else {
+                    // 实例方法：裸方法名（接收者在 kids[0]）→ 运行库符号
+                    val methodSym: String = methodCallSymbol(fname)
+                    if (methodSym != "") {
+                        sym = methodSym
+                    }
+                }
+            }
+            val sig: String = callSignature(sym)
+            if (sig != "") {
+                retTy = aotFieldAt(sig, 0, "|")
+                paramsCsv = aotFieldAt(sig, 1, "|")
+            }
+        }
+
+        var args: String = ""
+        var i: Int = effArgStart
+        var ai: Int = 0
+        // 隐式 this：先压入接收者（`this`），实参从参数表第 1 项开始对应
+        if (prependThis) {
+            val thTy: String = this.lookupVarTy("this")
+            val th: String = this.emitVarLoad("this")
+            args = thTy + " " + th
+            ai = 1
+        }
+        // 类静态方法：接收者位传 null（形参表第 0 项是 self）
+        if (staticSelfTy != "") {
+            args = staticSelfTy + " null"
+            ai = 1
+        }
+        while (i < n) {
+            val aId: Int = hirKidsAt(kids, i)
+            val aTy: String = this.inferType(hir, aId)
+            val a: String = this.emitExpr(hir, aId)
+            var wantTy: String = aTy
+            if (paramsCsv != "") {
+                // 同 `emitCall`：参数表是带空格 CSV（`i8*, i64`），必须 trim。
+                wantTy = trimSpaces(aotFieldAt(paramsCsv, ai, ","))
+            }
+            val coerced: String = this.coerceArg(sym, a, aTy, wantTy)
+            if (args != "") {
+                args = args + ", "
+            }
+            args = args + wantTy + " " + coerced
+            ai = ai + 1
+            i = i + 1
+        }
+
+        if (retTy == "void") {
+            this.fBody.add("  call void @" + sym + "(" + args + ")\n")
+            return "0"
+        }
+        if (retTy == "") {
+            // 未解析符号（如 `throw Runtime("…")` 里被当作调用的 `Runtime`，
+            // 或缺失签名的外部类构造）：**不发调用**。否则会生成未定义符号
+            // `@Runtime`，整个模块无法通过 llc（Aura 侧无异常机制，
+            // 这类语句降级为无副作用的表达式即可）。
+            return "0"
+        }
+        val t: String = this.freshVar()
+        this.fBody.add("  " + t + " = call " + retTy
+            + " @" + sym + "(" + args + ")\n")
+        return t
+    }
+
+    /// 发射 println/print 内置调用。
+    fun emitPrint(hir: Hir, kids: String, n: Int, argStart: Int, newline: Boolean): String {
+        var sym: String = "aura_print"
+        if (newline) {
+            sym = "aura_println"
+        }
+        var s: String = "0"
+        if (argStart < n) {
+            val aId: Int = hirKidsAt(kids, argStart)
+            val aTy: String = this.inferType(hir, aId)
+            val a: String = this.emitExpr(hir, aId)
+            s = this.toStringOperand(a, aTy)
+        }
+        this.fBody.add("  call void @" + sym + "(i8* " + s + ")\n")
+        return "0"
+    }
+
+    /// 把任意标量/字符串操作数转成 i8*（供输出）。
+    fun toStringOperand(v: String, ty: String): String {
+        if (ty == "i8*") {
+            return v
+        }
+        if (ty == "float" || ty == "double") {
+            val t: String = this.freshVar()
+            this.fBody.add("  " + t + " = call i8* @aura_to_str_float("
+                + ty + " " + v + ")\n")
+            return t
+        }
+        var i64v: String = v
+        if (ty != "i64") {
+            val t: String = this.freshVar()
+            this.fBody.add("  " + t + " = sext " + ty + " " + v + " to i64\n")
+            i64v = t
+        }
+        val t2: String = this.freshVar()
+        this.fBody.add("  " + t2 + " = call i8* @aura_to_str(i64 " + i64v + ")\n")
+        return t2
+    }
+
+    /// 发射 `if` 表达式（值位置）：按条件分支 + `phi` 选择结果。
+    ///
+    /// 旧实现直接返回 then 分支的值、**完全忽略条件**：`val kind = if (c) "A" else "B"`
+    /// 恒得 then 值；若分支体是块（`if (c) { "A" } else { "B" }`），拿到的是块节点，
+    /// 结果是空/垃圾字符串。自举编译器的 `Parser.parseDecl` 正是
+    /// `val nodeKind = if (k == "Val") { "ValDecl" } else { "VarDecl" }`，
+    /// 于是声明节点的 kind 变成空 → HIR 降级按 kind 匹配不到 → **所有 `val`/`var`
+    /// 声明被静默丢弃**（`self.exe` 编译出的程序里局部变量全变成 0）。
+    fun emitIfValue(hir: Hir, id: Int): String {
+        val kids: String = hir.kidsOf(id)
+        val n: Int = hirKidsCount(kids)
+        if (n < 2) {
+            return "0"
+        }
+        val condId: Int = hirKidsAt(kids, 0)
+        val condTy: String = this.inferType(hir, condId)
+        val cond: String = this.toI1(this.emitExpr(hir, condId), condTy)
+        val thenId: Int = hirKidsAt(kids, 1)
+        var elseId: Int = -1
+        if (n > 2) {
+            elseId = hirKidsAt(kids, 2)
+        }
+        // 结果类型：取 then 分支（块则取块内末语句）的类型
+        var valTy: String = this.inferBlockValueTy(hir, thenId)
+        if (valTy == "" || valTy == "void") {
+            valTy = "i32"
+        }
+        // 结果用**入口块栈槽**承载：分支内部可能再产生基本块（嵌套 if 表达式 /
+        // 循环 / 终结语句触发的 dead 块），此时 phi 的前驱集合与 merge 实际前驱
+        // 不一致，llc 会报 `PHI node entries do not match predecessors`。
+        // 栈槽方案与块结构无关，天然合法。
+        val slot: String = this.declareVar("ifval" + toStr(this.varCount) + "_" + toStr(id), valTy)
+        val thenBb: String = this.freshBb("ifval.then")
+        val elseBb: String = this.freshBb("ifval.else")
+        val mergeBb: String = this.freshBb("ifval.merge")
+        this.fBody.add("  br i1 " + cond + ", label %" + thenBb
+            + ", label %" + elseBb + "\n")
+
+        this.fBody.add(thenBb + ":\n")
+        this.fTerminated = false
+        val thenVal: String = this.emitBlockValue(hir, thenId, valTy)
+        if (!this.fTerminated) {
+            this.fBody.add("  store " + valTy + " " + thenVal
+                + ", " + valTy + "* " + slot + "\n")
+            this.fBody.add("  br label %" + mergeBb + "\n")
+        }
+
+        this.fBody.add(elseBb + ":\n")
+        this.fTerminated = false
+        if (elseId >= 0) {
+            val elseVal: String = this.emitBlockValue(hir, elseId, valTy)
+            if (!this.fTerminated) {
+                this.fBody.add("  store " + valTy + " " + elseVal
+                    + ", " + valTy + "* " + slot + "\n")
+            }
+        }
+        if (!this.fTerminated) {
+            this.fBody.add("  br label %" + mergeBb + "\n")
+        }
+
+        this.fBody.add(mergeBb + ":\n")
+        this.fTerminated = false
+        val res: String = this.freshVar()
+        this.fBody.add("  " + res + " = load " + valTy + ", " + valTy
+            + "* " + slot + "\n")
+        return res
+    }
+
+    /// 块作为**值**时的类型（块内末语句类型；非块按普通节点推断）。
+    fun inferBlockValueTy(hir: Hir, id: Int): String {
+        if (hir.kindOf(id) == "HirBlock") {
+            val kids: String = hir.kidsOf(id)
+            val n: Int = hirKidsCount(kids)
+            if (n == 0) {
+                return "i32"
+            }
+            return this.inferType(hir, hirKidsAt(kids, n - 1))
+        }
+        return this.inferType(hir, id)
+    }
+
+    /// 发射块作为**值**：块内前缀语句按语句发射，末语句求值并按需要类型转换。
+    fun emitBlockValue(hir: Hir, id: Int, wantTy: String): String {
+        if (hir.kindOf(id) != "HirBlock") {
+            val lt: String = this.inferType(hir, id)
+            return this.coerceValue(this.emitExpr(hir, id), lt, wantTy)
+        }
+        val kids: String = hir.kidsOf(id)
+        val n: Int = hirKidsCount(kids)
+        if (n == 0) {
+            return defaultValue(wantTy)
+        }
+        var i: Int = 0
+        while (i + 1 < n) {
+            this.emitStmt(hir, hirKidsAt(kids, i))
+            i = i + 1
+        }
+        val lastId: Int = hirKidsAt(kids, n - 1)
+        val lt: String = this.inferType(hir, lastId)
+        return this.coerceValue(this.emitExpr(hir, lastId), lt, wantTy)
+    }
+
+    // ── 类型推断 ──
+
+    /// 推断节点的 LLVM 类型。
+    fun inferType(hir: Hir, id: Int): String {
+        if (id < 0 || id >= hir.count) {
+            return "i32"
+        }
+        val k: String = hir.kindOf(id)
+        if (k == "HirLit") {
+            val ty: String = hir.tyOf(id)
+            if (ty == "String") {
+                return "i8*"
+            }
+            if (ty == "Boolean") {
+                return "i1"
+            }
+            if (ty != "") {
+                val m: String = this.mapTy(ty)
+                if (m != "") {
+                    return m
+                }
+            }
+            return inferLitType(hir.textOf(id))
+        }
+        if (k == "HirVar") {
+            val ty: String = this.lookupVarTy(hir.textOf(id))
+            if (ty == "") {
+                // 类方法内：裸字段名 → 字段类型（Phase 6.5.1b）
+                val fty: String = this.curClassFieldTy(hir.textOf(id))
+                if (fty != "") {
+                    return fty
+                }
+                return "i32"
+            }
+            return ty
+        }
+        if (k == "HirBinary") {
+            val op: String = hir.textOf(id)
+            // 类型转换 `x as T`：类型 = 左操作数类型（运行期表示不变）
+            if (op == "as" || op == "As") {
+                val ak: String = hir.kidsOf(id)
+                if (hirKidsCount(ak) > 0) {
+                    return this.inferType(hir, hirKidsAt(ak, 0))
+                }
+                return "i32"
+            }
+            if (isCmpOp(op) || op == "&&" || op == "||") {
+                return "i1"
+            }
+            val kids: String = hir.kidsOf(id)
+            if (hirKidsCount(kids) >= 2) {
+                val aTy: String = this.inferType(hir, hirKidsAt(kids, 0))
+                // Elvis 结果类型 = 可空内部类型
+                if (op == "?:") {
+                    if (isNullableStructTy(aTy)) {
+                        return nullableInnerTy(aTy)
+                    }
+                    return aTy
+                }
+                val bTy: String = this.inferType(hir, hirKidsAt(kids, 1))
+                if (op == "+" && (aTy == "i8*" || bTy == "i8*")) {
+                    return "i8*"
+                }
+                return this.commonNumTy(aTy, bTy)
+            }
+            if (hirKidsCount(kids) > 0) {
+                return this.inferType(hir, hirKidsAt(kids, 0))
+            }
+            return "i32"
+        }
+        if (k == "HirUnary") {
+            // 逻辑非产出 `i1`（`xor i1 x, true`）：这里必须如实报告 i1，
+            // 否则消费方（分支条件 / 赋值）会按操作数类型把它当 i32 包装，
+            // 生成 `icmp ne i32 <i1 值>, 0` 这类非法 IR。
+            if (hir.textOf(id) == "!") {
+                return "i1"
+            }
+            val kids: String = hir.kidsOf(id)
+            if (hirKidsCount(kids) > 0) {
+                return this.inferType(hir, hirKidsAt(kids, 0))
+            }
+            return "i32"
+        }
+        if (k == "HirMember") {
+            val member: String = hir.textOf(id)
+            val mk: String = hir.kidsOf(id)
+            if (hirKidsCount(mk) > 0) {
+                val recvTy: String = this.inferType(hir, hirKidsAt(mk, 0))
+                val sym: String = this.structSymOfPtr(recvTy)
+                if (sym != "") {
+                    val fi: Int = this.structFieldIndex(sym, member)
+                    if (fi >= 0) {
+                        return aotFieldAt(this.structFieldLineAt(sym, fi), 2, "|")
+                    }
+                }
+            }
+            return "i32"
+        }
+        if (k == "HirIfExpr") {
+            // 值位置的条件表达式：结果类型 = then 分支（块则取末语句）类型。
+            // 缺此分支会让 `val s: String = if (c) { "A" } else { "B" }`
+            // 走默认 i32，插入错误的 inttoptr 转换。
+            val ik: String = hir.kidsOf(id)
+            if (hirKidsCount(ik) > 1) {
+                val vt: String = this.inferBlockValueTy(hir, hirKidsAt(ik, 1))
+                if (vt != "" && vt != "void") {
+                    return vt
+                }
+            }
+            return "i32"
+        }
+        if (k == "HirIndex") {
+            val kids: String = hir.kidsOf(id)
+            if (hirKidsCount(kids) > 0) {
+                val cId: Int = hirKidsAt(kids, 0)
+                // 集合（含字段接收者 `this.fields[i]`）→ 元素类型
+                if (this.isCollectionReceiver(hir, cId)) {
+                    return this.receiverElemTy(hir, cId)
+                }
+                if (hir.kindOf(cId) == "HirVar") {
+                    val cn: String = hir.textOf(cId)
+                    // 定长数组 `[N x T]` → 元素类型 T
+                    val ct: String = this.lookupVarTy(cn)
+                    if (ct.startsWith("[")) {
+                        return llvmElemOfArrayTy(ct)
+                    }
+                }
+            }
+            // 字符串下标 → 单字符字符串
+            return "i8*"
+        }
+        if (k == "HirCall") {
+            val kids: String = hir.kidsOf(id)
+            var fname: String = hir.textOf(id)
+            if (fname == "" && hirKidsCount(kids) > 0) {
+                fname = hir.textOf(hirKidsAt(kids, 0))
+            }
+            // 集合构造 / 集合方法 → 列表句柄 `i8*`
+            if (this.isCollectionCtor(fname)) {
+                return "i8*"
+            }
+            if (fname == "add" && hirKidsCount(kids) >= 1
+                && this.inferType(hir, hirKidsAt(kids, 0)) == "i8*") {
+                return "i8*"
+            }
+            // 结构体构造 → 指针（Phase 6.5.1）
+            val ctorSym: String = sanitizeLlvm(fname)
+            if (this.isStructSym(ctorSym)) {
+                return "%struct." + ctorSym + "*"
+            }
+            if (fname == "println" || fname == "print") {
+                return "i32"
+            }
+            // 类静态方法 `ClassName.method()`：kids[0] 是类名 `HirVar`
+            // （与 `emitCall` 的解析顺序一致）。
+            if (hirKidsCount(kids) >= 1) {
+                val sId: Int = hirKidsAt(kids, 0)
+                if (hir.kindOf(sId) == "HirVar") {
+                    val sn: String = hir.textOf(sId)
+                    val ss: String = sanitizeLlvm(sn)
+                    if (this.lookupVarTy(sn) == "" && this.isStructSym(ss)
+                        && !isStdClassName(sn)) {
+                        val sm: String = this.funcSignatureOf(ss + "." + fname)
+                        if (sm != "") {
+                            return aotFieldAt(sm, 1, "|")
+                        }
+                    }
+                }
+            }
+            // 类方法**优先**（与 `emitCall` 的解析顺序一致）：`this.isX(v)` 与顶层
+            // 同名自由函数共存时，必须按接收者类型选到方法版本，否则返回类型也会取错。
+            if (hirKidsCount(kids) >= 1) {
+                val recvTy: String = this.inferType(hir, hirKidsAt(kids, 0))
+                val recvSym: String = this.structSymOfPtr(recvTy)
+                if (recvSym != "") {
+                    val ms: String = this.funcSignatureOf(recvSym + "." + fname)
+                    if (ms != "") {
+                        val pc: String = aotFieldAt(ms, 2, "|")
+                        if (aotCsvCount(pc) == hirKidsCount(kids)) {
+                            return aotFieldAt(ms, 1, "|")
+                        }
+                    }
+                }
+            }
+            // 类体内裸方法名（隐式 this）
+            if (this.fCurClass != "") {
+                val ms2: String = this.funcSignatureOf(sanitizeLlvm(this.fCurClass) + "." + fname)
+                if (ms2 != "") {
+                    return aotFieldAt(ms2, 1, "|")
+                }
+            }
+            // 模块内自由函数（裸名）
+            val userSig: String = this.funcSignatureOf(fname)
+            if (userSig != "") {
+                return aotFieldAt(userSig, 1, "|")
+            }
+            // 限定名 std 调用（`Collections.getAt` 等）
+            val qSym: String = stdSymbolOfQualified(fname)
+            if (qSym != "" && stdSignature(qSym) != "") {
+                return aotFieldAt(stdSignature(qSym), 0, "|")
+            }
+            // std 类静态调用（Math.sin 等）
+            val stdCls: String = this.stdClassReceiver(hir, kids, hirKidsCount(kids), 0)
+            if (stdCls != "") {
+                val ss: String = callSignature("aura_lang_std_" + sanitizeLlvm(stdCls)
+                    + "_" + sanitizeLlvm(fname))
+                if (ss != "") {
+                    return aotFieldAt(ss, 0, "|")
+                }
+            }
+            var sym: String = sanitizeLlvm(fname)
+            val methodSym: String = methodCallSymbol(fname)
+            if (methodSym != "") {
+                sym = methodSym
+            }
+            val sig: String = callSignature(sym)
+            if (sig != "") {
+                return aotFieldAt(sig, 0, "|")
+            }
+            return "i32"
+        }
+        if (hir.tyOf(id) != "") {
+            val m: String = this.mapTy(hir.tyOf(id))
+            if (m != "" && m != "void") {
+                return m
+            }
+        }
+        return "i32"
+    }
+
+    // ── 类型映射与转换 ──
+
+    /// 解析类型别名（`typealias Answer = Int` → `Answer` → `Int`），带环保护。
+    fun resolveAlias(ty: String): String {
+        var cur: String = ty
+        var guard: Int = 0
+        while (guard < 8) {
+            val n: Int = aotLineCount(this.fTypeAliases)
+            var found: String = ""
+            var i: Int = 0
+            while (i < n) {
+                val line: String = aotLineAt(this.fTypeAliases, i)
+                if (aotFieldAt(line, 0, "|") == cur) {
+                    found = aotFieldAt(line, 1, "|")
+                }
+                i = i + 1
+            }
+            if (found == "") {
+                return cur
+            }
+            cur = found
+            guard = guard + 1
+        }
+        return cur
+    }
+
+    /// 发射器内部类型映射：String 统一为 `i8*`（对齐 C ABI），其余走 TypeMapper。
+    fun mapTy(ty: String): String {
+        if (ty == "") {
+            return ""
+        }
+        // typealias：先解析别名再映射（否则 `Answer` 会落到 `%struct.Answer` 占位）
+        val resolved: String = this.resolveAlias(ty)
+        if (resolved != ty) {
+            return this.mapTy(resolved)
+        }
+        // 定长数组 `T[N]` → `[N x T']`（可叠加多维；N 须为字面量）
+        val lb: Int = aotIndexOfSub(ty, "[")
+        if (lb > 0 && ty.endsWith("]")) {
+            val elemNamed: String = aotSlice(ty, 0, lb)
+            val dimStr: String = aotSlice(ty, lb + 1, ty.length - lb - 2)
+            val elemTy: String = this.mapTy(elemNamed)
+            val n: Int = aotToInt(dimStr)
+            if (elemTy != "" && n > 0) {
+                return "[" + toStr(n) + " x " + elemTy + "]"
+            }
+        }
+        if (ty == "String") {
+            return "i8*"
+        }
+        // 可空类型 `T?`：标量包装为 `{ T, i1 }`（i1=true 表示 null），
+        // 非标量（如 String? → i8*）沿用内部类型。
+        if (ty.endsWith("?")) {
+            val inner: String = aotSlice(ty, 0, ty.length - 1)
+            val innerTy: String = this.mapTy(inner)
+            if (llvmIsScalar(innerTy)) {
+                return "{ " + innerTy + ", i1 }"
+            }
+            return innerTy
+        }
+        val m: String = this.tm.map(ty)
+        if (m == "void") {
+            return ""
+        }
+        return m
+    }
+
+    /// 判断是否为 std 类静态调用（`Math.sin(x)` 形态）。
+    ///
+    /// HIR 把 `Math.sin(x)` 降级为 `HirCall text="sin"`，kids[0] 是
+    /// `HirMember("sin", [HirVar("Math")])`。若接收者是已知 std 类名，
+    /// 视为「类静态调用」，符号为 `aura_lang_std_<Class>_<method>`。
+    /// 返回类名；非静态调用返回 ""。
+    fun stdClassReceiver(hir: Hir, kids: String, n: Int, argStart: Int): String {
+        if (argStart != 0 || n < 1) {
+            return ""
+        }
+        val calleeId: Int = hirKidsAt(kids, 0)
+        val ck: String = hir.kindOf(calleeId)
+        // 形态 A：kids[0] 直接是接收者（当前 HIR：成员调用把接收者降级为 kids[0]）
+        if (ck == "HirVar") {
+            val nm: String = hir.textOf(calleeId)
+            if (isStdClassName(nm)) {
+                return nm
+            }
+            return ""
+        }
+        // 形态 B（历史）：kids[0] 是 HirMember，其 kids[0] 才是接收者
+        if (ck == "HirMember") {
+            val mk: String = hir.kidsOf(calleeId)
+            if (hirKidsCount(mk) < 1) {
+                return ""
+            }
+            val recvId: Int = hirKidsAt(mk, 0)
+            if (hir.kindOf(recvId) != "HirVar") {
+                return ""
+            }
+            val nm2: String = hir.textOf(recvId)
+            if (isStdClassName(nm2)) {
+                return nm2
+            }
+        }
+        return ""
+    }
+
+    /// 查询模块内用户函数签名（未命中返回 ""）。
+    ///
+    /// 性能：表存为 `List`，用 `startsWith(name + "|")` 前缀匹配。此前的
+    /// `split("\n")` 每次查询都要分配整张签名表——调用点数量是数万级，
+    /// 无 GC 时累计可泄漏到十几 GB（自举"内存一直涨"的主因）。
+    fun funcSignatureOf(name: String): String {
+        val needle: String = name + "|"
+        var i: Int = 0
+        while (i < this.fSigList.size) {
+            val line: String = this.fSigList[i]
+            if (line.startsWith(needle)) {
+                return line
+            }
+            i = i + 1
+        }
+        return ""
+    }
+
+    /// 把任意标量/指针值转换为分支可用的 `i1`（条件上下文）。
+    ///
+    /// 说明：C 运行库的谓词类调用点（`String.contains/startsWith/endsWith` 等）
+    /// 返回 `i32`（与 C 的 `int` 一致），而 LLVM 的 `br` 需要 `i1`；直接使用会导致
+    /// `'%var' defined with type 'i32' but expected 'i1'`，故统一在此收敛。
+    fun toI1(v: String, ty: String): String {
+        if (ty == "i1") {
+            return v
+        }
+        if (ty == "i8*" || ty == "ptr" || ty.endsWith("*")) {
+            val t: String = this.freshVar()
+            this.fBody.add("  " + t + " = icmp ne " + ty + " " + v + ", null\n")
+            return t
+        }
+        if (intWidth(ty) > 0) {
+            val t: String = this.freshVar()
+            this.fBody.add("  " + t + " = icmp ne " + ty + " " + v + ", 0\n")
+            return t
+        }
+        if (ty == "float" || ty == "double") {
+            val t: String = this.freshVar()
+            this.fBody.add("  " + t + " = fcmp one " + ty + " " + v + ", 0.0\n")
+            return t
+        }
+        return v
+    }
+
+    /// 把一个值从 fromTy 转换为 toTy（整型宽度/浮点宽度/整数↔浮点/可空结构体；其余原样返回）。
+    fun coerceValue(v: String, fromTy: String, toTy: String): String {
+        // 防御：调用方可能传入带空格的类型（签名表是 `i8*, i64` 形式），
+        // 否则下面的 `intWidth`/`isFloatTy` 全部失配 → 静默不插入转换指令。
+        val ft: String = trimSpaces(fromTy)
+        val tt: String = trimSpaces(toTy)
+        if (ft != fromTy || tt != toTy) {
+            return this.coerceValue(v, ft, tt)
+        }
+        // 目标为可空结构体 `{ T, i1 }`：null → { zero, true }；非空 → 包装为 { v, false }
+        if (isNullableStructTy(toTy)) {
+            val inner: String = nullableInnerTy(toTy)
+            if (v == "null" || fromTy == "null") {
+                return "{ " + inner + " " + defaultValue(inner) + ", i1 true }"
+            }
+            if (isNullableStructTy(fromTy)) {
+                return v
+            }
+            return this.wrapNullable(this.coerceValue(v, fromTy, inner), inner, toTy)
+        }
+        // 源为可空结构体、目标为非可空：提取内部值
+        if (isNullableStructTy(fromTy) && !isNullableStructTy(toTy)) {
+            if (v == "null") {
+                return defaultValue(toTy)
+            }
+            val inner: String = nullableInnerTy(fromTy)
+            val t: String = this.freshVar()
+            this.fBody.add("  " + t + " = extractvalue "
+                + fromTy + " " + v + ", 0\n")
+            return this.coerceValue(t, inner, toTy)
+        }
+        if (toTy == "" || fromTy == toTy) {
+            return v
+        }
+        // 浮点宽度 / 整数↔浮点
+        if (isFloatTy(fromTy) || isFloatTy(toTy)) {
+            if (isFloatTy(fromTy) && isFloatTy(toTy)) {
+                val t: String = this.freshVar()
+                var op: String = "fptrunc"
+                if (toTy == "double") {
+                    op = "fpext"
+                }
+                this.fBody.add("  " + t + " = " + op + " "
+                    + fromTy + " " + v + " to " + toTy + "\n")
+                return t
+            }
+            if (isFloatTy(fromTy) && intWidth(toTy) > 0) {
+                // 浮点 → 整数：fptosi 到 i64，再按目标宽度截断
+                val i64v: String = this.freshVar()
+                this.fBody.add("  " + i64v + " = fptosi "
+                    + fromTy + " " + v + " to i64\n")
+                if (toTy == "i64") {
+                    return i64v
+                }
+                val t: String = this.freshVar()
+                this.fBody.add("  " + t + " = trunc i64 "
+                    + i64v + " to " + toTy + "\n")
+                return t
+            }
+            if (intWidth(fromTy) > 0 && isFloatTy(toTy)) {
+                val t: String = this.freshVar()
+                this.fBody.add("  " + t + " = sitofp "
+                    + fromTy + " " + v + " to " + toTy + "\n")
+                return t
+            }
+            if (isFloatTy(fromTy) && (toTy == "i8*" || toTy == "ptr")) {
+                // 浮点 → 指针（Any 槽）：按位转换（double 位模式 → inttoptr），保证 IR 合法
+                var dv: String = v
+                if (fromTy == "float") {
+                    val ext: String = this.freshVar()
+                    this.fBody.add("  " + ext + " = fpext float " + v + " to double\n")
+                    dv = ext
+                }
+                val bits: String = this.freshVar()
+                val pt: String = this.freshVar()
+                this.fBody.add("  " + bits + " = bitcast double " + dv + " to i64\n")
+                this.fBody.add("  " + pt + " = inttoptr i64 " + bits + " to i8*\n")
+                return pt
+            }
+        }
+        val fw: Int = intWidth(fromTy)
+        val tw: Int = intWidth(toTy)
+        // 整数 ↔ 指针（Any / i8* 槽）：直接 `store i8* 1` 不是合法 IR，需显式转换。
+        if ((toTy == "i8*" || toTy == "ptr") && fw > 0) {
+            val w: String = this.coerceValue(v, fromTy, "i64")
+            val t: String = this.freshVar()
+            this.fBody.add("  " + t + " = inttoptr i64 " + w + " to i8*\n")
+            return t
+        }
+        if ((fromTy == "i8*" || fromTy == "ptr") && tw > 0) {
+            val t: String = this.freshVar()
+            this.fBody.add("  " + t + " = ptrtoint i8* " + v + " to i64\n")
+            // Plan A：i8* 槽中的整数是低位标记装箱值（(v<<1)|1）→ 统一拆箱，
+            // 否则 `list[i]` 读回 7 会得到 15（与 Rust AOT 后端同一约定）。
+            val u: String = this.freshVar()
+            this.fBody.add("  " + u + " = call i64 @aura_to_int_any(i64 " + t + ")\n")
+            return this.coerceValue(u, "i64", toTy)
+        }
+        if (fw > 0 && tw > 0 && fw != tw) {
+            val t: String = this.freshVar()
+            if (tw > fw) {
+                this.fBody.add("  " + t + " = sext " + fromTy + " " + v
+                    + " to " + toTy + "\n")
+            } else {
+                this.fBody.add("  " + t + " = trunc " + fromTy + " " + v
+                    + " to " + toTy + "\n")
+            }
+            return t
+        }
+        return v
+    }
+
+    /// 把内部值包装为可空结构体 `{ T, i1 }`（i1=false 表示非空）。
+    fun wrapNullable(v: String, inner: String, structTy: String): String {
+        val w0: String = this.freshVar()
+        this.fBody.add("  " + w0 + " = insertvalue " + structTy
+            + " undef, " + inner + " " + v + ", 0\n")
+        val w1: String = this.freshVar()
+        this.fBody.add("  " + w1 + " = insertvalue " + structTy
+            + " " + w0 + ", i1 false, 1\n")
+        return w1
+    }
+
+
+    fun commonNumTy(a: String, b: String): String {
+        if (a == "" || b == "") {
+            return "i32"
+        }
+        if (a == b) {
+            return a
+        }
+        if (a == "double" || b == "double") {
+            return "double"
+        }
+        if (a == "float" || b == "float") {
+            return "float"
+        }
+        val aw: Int = intWidth(a)
+        val bw: Int = intWidth(b)
+        if (aw > 0 && bw > 0) {
+            if (aw >= bw) {
+                return a
+            }
+            return b
+        }
+        return a
+    }
+
+    // ── 局部变量表 ──
+
+    /// 声明局部变量（若未声明则插入 alloca）。
+    fun declareVar(name: String, ty: String): String {
+        val existing: String = this.lookupVarAddr(name)
+        if (existing != "") {
+            return existing
+        }
+        val addr: String = "%" + sanitizeLlvm(name) + ".addr"
+        this.fAlloca.add("  " + addr + " = alloca " + ty + "\n")
+        this.fVarList.add(name + "|" + addr + "|" + ty)
+        return addr
+    }
+
+    /// 查询局部变量地址（未声明返回 ""）。
+    fun lookupVarAddr(name: String): String {
+        return this.fvField(name, 1)
+    }
+
+    /// 查询局部变量类型（未声明返回 ""）。
+    fun lookupVarTy(name: String): String {
+        return this.fvField(name, 2)
+    }
+
+    // ── 集合（List/Array/Set/Map）辅助 ──
+
+    /// 登记一个集合类型的局部变量（默认元素类型 `i32`）。
+    fun markListVar(name: String) {
+        this.markListVarTyped(name, "i32")
+    }
+
+    /// 登记一个集合类型的局部变量，并记录元素 LLVM 类型（`name|elemTy`）。
+    fun markListVarTyped(name: String, elemTy: String) {
+        if (name == "" || this.isListVar(name)) {
+            return
+        }
+        this.fListVars = this.fListVars + name + "|" + elemTy + "\n"
+    }
+
+    /// 该局部变量是否为集合（List/Array/Set/Map）。
+    fun isListVar(name: String): Boolean {
+        var n: Int = aotLineCount(this.fListVars)
+        var i: Int = 0
+        while (i < n) {
+            if (aotFieldAt(aotLineAt(this.fListVars, i), 0, "|") == name) {
+                return true
+            }
+            i = i + 1
+        }
+        return false
+    }
+
+    /// 集合局部变量的元素 LLVM 类型（未登记返回 `i32`）。
+    fun listElemTy(name: String): String {
+        var n: Int = aotLineCount(this.fListVars)
+        var i: Int = 0
+        while (i < n) {
+            val line: String = aotLineAt(this.fListVars, i)
+            if (aotFieldAt(line, 0, "|") == name) {
+                val e: String = aotFieldAt(line, 1, "|")
+                if (e != "") {
+                    return e
+                }
+                return "i32"
+            }
+            i = i + 1
+        }
+        return "i32"
+    }
+
+    /// 集合构造器名（0 参形式返回空列表）。
+    fun isCollectionCtor(name: String): Boolean {
+        val bare: String = aotLastSegment(name)
+        return bare == "arrayListOf" || bare == "mutableListOf" || bare == "listOf"
+            || bare == "emptyList" || bare == "arrayOf" || bare == "mutableSetOf"
+            || bare == "setOf" || bare == "mutableMapOf" || bare == "mapOf"
+    }
+
+    /// 该 HIR 节点是否为集合构造调用（用于类型推断与变量登记）。
+    fun isCollectionCtorCall(hir: Hir, id: Int): Boolean {
+        if (id < 0 || id >= hir.count || hir.kindOf(id) != "HirCall") {
+            return false
+        }
+        val kids: String = hir.kidsOf(id)
+        var fname: String = hir.textOf(id)
+        if (fname == "" && hirKidsCount(kids) > 0) {
+            fname = hir.textOf(hirKidsAt(kids, 0))
+        }
+        return this.isCollectionCtor(fname)
+    }
+
+    /// 把任意值转换为 C 字符串 `i8*`（数值走 `aura_to_str*`，字符串原样）。
+    fun valueToStr(v: String, ty: String): String {
+        if (ty == "i8*" || ty == "ptr") {
+            return v
+        }
+        if (ty == "float" || ty == "double") {
+            val dv: String = this.coerceValue(v, ty, "double")
+            val t: String = this.freshVar()
+            this.fBody.add("  " + t + " = call i8* @aura_to_str_float(double " + dv + ")\n")
+            return t
+        }
+        if (ty == "i1") {
+            val bv: String = this.coerceValue(v, ty, "i64")
+            val bt: String = this.freshVar()
+            this.fBody.add("  " + bt + " = call i8* @aura_to_str_bool(i64 " + bv + ")\n")
+            return bt
+        }
+        val iv: String = this.coerceValue(v, ty, "i64")
+        val it: String = this.freshVar()
+        this.fBody.add("  " + it + " = call i8* @aura_to_str(i64 " + iv + ")\n")
+        return it
+    }
+
+    /// 实参转换：集合调用点（`Collections.*`）的 `i8*` 元素参数需按 Plan A
+    /// **装箱**（整数 → `(v<<1)|1`）。否则 `list.indexOf(30)` 会把裸整数
+    /// 当指针解引用 → 访问违例（0xC0000005）。
+    fun coerceArg(sym: String, v: String, fromTy: String, wantTy: String): String {
+        if (wantTy == "i8*" && sym.startsWith("aura_lang_std_Collections_")
+            && fromTy != "i8*" && fromTy != "ptr" && fromTy != "") {
+            return this.boxToPtr(v, fromTy)
+        }
+        return this.coerceValue(v, fromTy, wantTy)
+    }
+
+    /// 把值装箱为 `i8*` 句柄存入集合（Plan A 低位标记：整数 → `(v<<1)|1`）。
+    fun boxToPtr(v: String, ty: String): String {
+        if (ty == "i8*" || ty == "ptr") {
+            return v
+        }
+        if (ty == "float" || ty == "double") {
+            // 浮点先转字符串（集合元素统一为 i8* 句柄）
+            return this.valueToStr(v, ty)
+        }
+        val iv: String = this.coerceValue(v, ty, "i64")
+        val sh: String = this.freshVar()
+        this.fBody.add("  " + sh + " = shl i64 " + iv + ", 1\n")
+        val tg: String = this.freshVar()
+        this.fBody.add("  " + tg + " = or i64 " + sh + ", 1\n")
+        val t: String = this.freshVar()
+        this.fBody.add("  " + t + " = inttoptr i64 " + tg + " to i8*\n")
+        return t
+    }
+
+    /// 在函数局部变量表中查找某个变量的指定字段。
+    ///
+    /// 前缀匹配、零分配：变量查找是发射期最热路径，`split("\n")` 每次都要
+    /// 分配整张表（无 GC 下泄漏严重，6.5.10 自举时的主要瓶颈之一）。
+    fun fvField(name: String, col: Int): String {
+        val needle: String = name + "|"
+        var i: Int = 0
+        while (i < this.fVarList.size) {
+            val line: String = this.fVarList[i]
+            if (line.startsWith(needle)) {
+                return aotFieldAt(line, col, "|")
+            }
+            i = i + 1
+        }
+        return ""
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// 顶层辅助
+// ─────────────────────────────────────────────────────────────
+
+/// 顶层入口：HIR → LLVM IR 文本。
+fun emitLlvmIr(hir: Hir, moduleName: String, target: String): String {
+    val e: LlvmEmitter = LlvmEmitter()
+    return e.emitProgram(hir, moduleName, target)
+}
+
+/// 依目标三元组选择 data layout（对齐 Rust `emit_module_header`）。
+fun dataLayout(target: String): String {
+    if (target.startsWith("x86_64")) {
+        return "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128"
+    }
+    if (target.startsWith("aarch64")) {
+        return "e-m:e-i8:8:32-i16:16:32-i32:32:64-i64:64:-n16:32:64-S128"
+    }
+    if (target.startsWith("armv7")) {
+        return "e-m:e-i8:8:32-i16:16:32-i32:32:32-i64:64:-i128:128-n32:64-S128"
+    }
+    return "e-m:e-i64:64-f80:128-n8:16:32:64-S128"
+}
+
+/// 是否为已知 std 类名（用于把 `Math.sin(x)` 识别为类静态调用）。
+/// 类型名是否为集合类型（List / Array / Set / Map 及其可变形式）。
+fun isCollectionTypeName(ty: String): Boolean {
+    if (ty == "") {
+        return false
+    }
+    if (ty.startsWith("List") || ty.startsWith("MutableList") || ty.startsWith("Array")
+        || ty.startsWith("Set") || ty.startsWith("MutableSet") || ty.startsWith("Map")
+        || ty.startsWith("MutableMap") || ty.startsWith("Collection")) {
+        return true
+    }
+    return false
+}
+
+/// 字面量 → LLVM 类型。
+fun inferLitType(raw: String): String {
+    if (raw == "true" || raw == "false") {
+        return "i1"
+    }
+    if (raw == "null") {
+        return "i8*"
+    }
+    if (raw.startsWith("\"")) {
+        return "i8*"
+    }
+    // 进制字面量：0xFF / 0b1100（注意其末字符可能是 F，不能当浮点后缀）
+    if (raw.startsWith("0x") || raw.startsWith("0X")
+        || raw.startsWith("0b") || raw.startsWith("0B")) {
+        val hx: String = aotSlice(raw, raw.length - 1, 1)
+        if (hx == "L" || hx == "l") {
+            return "i64"
+        }
+        return "i32"
+    }
+    val last: String = aotSlice(raw, raw.length - 1, 1)
+    if (last == "L" || last == "l") {
+        return "i64"
+    }
+    if (last == "f" || last == "F") {
+        return "float"
+    }
+    if (last == "d" || last == "D") {
+        return "double"
+    }
+    if (raw.contains(".") || raw.contains("e") || raw.contains("E")) {
+        return "double"
+    }
+    return "i32"
+}
+
+/// 是否为数字字面量（首字符为数字，或 `-` 后跟数字）。
+fun isNumericLiteral(raw: String): Boolean {
+    if (raw == "") {
+        return false
+    }
+    val c: Int = charCodeOf(aotSlice(raw, 0, 1))
+    if (c >= 48 && c <= 57) {
+        return true
+    }
+    if (c == 45 && raw.length > 1) {
+        return true
+    }
+    return false
+}
+
+/// 是否为浮点字面量（含小数/指数/浮点后缀；进制字面量恒为整数）。
+fun isFloatLiteral(raw: String): Boolean {
+    if (raw.startsWith("0x") || raw.startsWith("0X")
+        || raw.startsWith("0b") || raw.startsWith("0B")) {
+        return false
+    }
+    if (raw.contains(".") || raw.contains("e") || raw.contains("E")) {
+        return true
+    }
+    val last: String = aotSlice(raw, raw.length - 1, 1)
+    if (last == "f" || last == "F" || last == "d" || last == "D") {
+        return true
+    }
+    return false
+}
+
+/// 去掉下划线分隔符。
+fun stripUnderscores(s: String): String {
+    var out: String = ""
+    var i: Int = 0
+    while (i < s.length) {
+        val c: String = aotSlice(s, i, 1)
+        if (c != "_") {
+            out = out + c
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// 去掉整数/浮点字面量末尾的类型后缀（L/l/U/u/F/f/D/d）。
+fun stripNumberSuffix(s: String): String {
+    var end: Int = s.length
+    while (end > 0) {
+        val c: String = aotSlice(s, end - 1, 1)
+        if (c == "L" || c == "l" || c == "U" || c == "u"
+            || c == "F" || c == "f" || c == "D" || c == "d") {
+            end = end - 1
+        } else {
+            break
+        }
+    }
+    return aotSlice(s, 0, end)
+}
+
+/// 按进制解析数字串（支持 0-9 / a-f / A-F）。
+fun parseRadixDigits(s: String, radix: Int): Int {
+    var v: Int = 0
+    var i: Int = 0
+    while (i < s.length) {
+        val cc: Int = charCodeOf(aotSlice(s, i, 1))
+        var d: Int = -1
+        if (cc >= 48 && cc <= 57) {
+            d = cc - 48
+        } else if (cc >= 97 && cc <= 102) {
+            d = cc - 87
+        } else if (cc >= 65 && cc <= 70) {
+            d = cc - 55
+        }
+        if (d >= 0 && d < radix) {
+            v = v * radix + d
+        }
+        i = i + 1
+    }
+    return v
+}
+
+/// 整数/进制字面量 → 十进制文本（含符号）。
+fun normalizeNumberLiteral(raw: String): String {
+    var neg: Boolean = false
+    var body: String = raw
+    if (body.startsWith("-")) {
+        neg = true
+        body = aotSlice(body, 1, body.length - 1)
+    }
+    val radix: Int = numericRadix(body)
+    if (radix != 10) {
+        // 进制字面量：只允许 L/U 后缀。注意不能剥离尾部的 F/D —— 它们是十六进制数字，
+        // 例如 `0xFF` 若剥掉 F 会变成 `0x`，解析成 0。
+        val digits: String = stripUnderscores(
+            stripLongSuffix(aotSlice(body, 2, body.length - 2))
+        )
+        val out: String = toStr(parseRadixDigits(digits, radix))
+        if (neg) {
+            return "-" + out
+        }
+        return out
+    }
+    val out: String = stripUnderscores(stripNumberSuffix(body))
+    if (neg) {
+        return "-" + out
+    }
+    return out
+}
+
+/// 数字字面量的进制（0x→16，0b→2，否则 10）。
+fun numericRadix(s: String): Int {
+    if (s.startsWith("0x") || s.startsWith("0X")) {
+        return 16
+    }
+    if (s.startsWith("0b") || s.startsWith("0B")) {
+        return 2
+    }
+    return 10
+}
+
+/// 去掉进制字面量的 Long/Unsigned 后缀（L/l/U/u）。
+fun stripLongSuffix(s: String): String {
+    var end: Int = s.length
+    while (end > 0) {
+        val c: String = aotSlice(s, end - 1, 1)
+        if (c == "L" || c == "l" || c == "U" || c == "u") {
+            end = end - 1
+        } else {
+            break
+        }
+    }
+    return aotSlice(s, 0, end)
+}
+
+/// 浮点字面量 → 合法 LLVM 浮点文本（保证尾数含 `.`）。
+fun normalizeFloatLiteral(raw: String): String {
+    val body: String = stripUnderscores(stripNumberSuffix(raw))
+    // 拆分尾数与指数
+    var epos: Int = -1
+    var i: Int = 0
+    while (i < body.length) {
+        val cc: Int = charCodeOf(aotSlice(body, i, 1))
+        if (cc == 101 || cc == 69) {
+            epos = i
+            break
+        }
+        i = i + 1
+    }
+    var mantissa: String = body
+    var expo: String = ""
+    if (epos >= 0) {
+        mantissa = aotSlice(body, 0, epos)
+        expo = aotSlice(body, epos, body.length - epos)
+    }
+    if (!mantissa.contains(".")) {
+        mantissa = mantissa + ".0"
+    }
+    return mantissa + expo
+}
+
+/// 是否比较运算符。
+fun isCmpOp(op: String): Boolean {
+    if (op == "==" || op == "!=") {
+        return true
+    }
+    if (op == "<" || op == ">" || op == "<=" || op == ">=") {
+        return true
+    }
+    return false
+}
+
+/// 比较运算符 → LLVM icmp 谓词。
+fun cmpPred(op: String): String {
+    if (op == "==") { return "eq" }
+    if (op == "!=") { return "ne" }
+    if (op == "<") { return "slt" }
+    if (op == ">") { return "sgt" }
+    if (op == "<=") { return "sle" }
+    if (op == ">=") { return "sge" }
+    return "eq"
+}
+
+/// 比较运算符 → LLVM fcmp 谓词（有序比较）。
+fun fcmpPred(op: String): String {
+    if (op == "==") { return "oeq" }
+    if (op == "!=") { return "one" }
+    if (op == "<") { return "olt" }
+    if (op == ">") { return "ogt" }
+    if (op == "<=") { return "ole" }
+    if (op == ">=") { return "oge" }
+    return "oeq"
+}
+
+/// 算术运算符 → LLVM 指令名（依操作数类型区分整/浮点）。
+fun arithInstr(op: String, ty: String): String {
+    if (ty == "float" || ty == "double") {
+        if (op == "+") { return "fadd" }
+        if (op == "-") { return "fsub" }
+        if (op == "*") { return "fmul" }
+        if (op == "/") { return "fdiv" }
+        if (op == "%") { return "frem" }
+        return "fadd"
+    }
+    if (op == "+") { return "add" }
+    if (op == "-") { return "sub" }
+    if (op == "*") { return "mul" }
+    if (op == "/") { return "sdiv" }
+    if (op == "%") { return "srem" }
+    return "add"
+}
+
+/// LLVM 类型的整型位宽（非整型返回 0）。
+fun intWidth(ty: String): Int {
+    if (ty == "i1") { return 1 }
+    if (ty == "i8") { return 8 }
+    if (ty == "i16") { return 16 }
+    if (ty == "i32") { return 32 }
+    if (ty == "i64") { return 64 }
+    if (ty == "i128") { return 128 }
+    return 0
+}
+
+/// 从 LLVM 定长数组类型 `[N x T]` 提取元素类型 `T`（非数组返回 ""）。
+fun llvmElemOfArrayTy(ty: String): String {
+    if (!ty.startsWith("[")) {
+        return ""
+    }
+    val x: Int = aotIndexOfSub(ty, " x ")
+    if (x < 0 || ty.length < x + 4) {
+        return ""
+    }
+    // 去掉结尾的 `]`
+    return aotSlice(ty, x + 3, ty.length - x - 4)
+}
+
+/// 在 `text` 中查找子串 `sub` 的首个下标（未找到返回 -1）。
+///
+/// 说明：`aotFieldAt` 只支持单字符分隔符，多字符分隔需用本函数。
+fun aotIndexOfSub(text: String, sub: String): Int {
+    val tl: Int = text.length
+    val sl: Int = sub.length
+    if (sl == 0 || sl > tl) {
+        return -1
+    }
+    var i: Int = 0
+    while (i + sl <= tl) {
+        if (aotSlice(text, i, sl) == sub) {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+/// 是否为浮点 LLVM 类型。
+fun isFloatTy(ty: String): Boolean {
+    if (ty == "float" || ty == "double") {
+        return true
+    }
+    return false
+}
+
+/// 是否为可空结构体类型 `{ T, i1 }`（i1 字段表示是否 null）。
+fun isNullableStructTy(ty: String): Boolean {
+    if (ty.startsWith("{ ") && ty.endsWith(" i1 }")) {
+        return true
+    }
+    return false
+}
+
+/// 从可空结构体类型 `{ T, i1 }` 中提取内部类型 `T`。
+fun nullableInnerTy(ty: String): String {
+    // 去掉前缀 "{ "（2 字符）与后缀 ", i1 }"（6 字符）
+    return aotSlice(ty, 2, ty.length - 8)
+}
+
+/// 某 LLVM 类型的零值字面量（用于补齐无显式 return 的路径）。
+fun defaultValue(ty: String): String {
+    if (ty == "float") { return "0.0" }
+    if (ty == "double") { return "0.0" }
+    if (ty == "i1") { return "false" }
+    // 任意指针（含 `%struct.X*` 实例指针）零值为 null
+    if (ty == "i8*" || ty == "ptr" || ty.endsWith("*")) { return "null" }
+    if (ty.startsWith("{ ")) { return "zeroinitializer" }
+    return "0"
+}
+
+/// LLVM IR 字符串常量转义（仅需转义 `\` 与 `"`，其余按字节原样）。
+fun llvmEscape(s: String): String {
+    var out: String = ""
+    var i: Int = 0
+    while (i < s.length) {
+        val c: String = toStr(s[i])
+        if (c == "\\") {
+            out = out + "\\5C"
+        } else if (c == "\"") {
+            out = out + "\\22"
+        } else {
+            out = out + c
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// 字符字面量（`'a'`）→ 字符码。非法输入返回 0。
+fun charCodeOf(raw: String): Int {
+    var body: String = raw
+    if (body.length >= 2 && toStr(body[0]) == "'") {
+        body = aotSlice(body, 1, body.length - 2)
+    }
+    if (body == "") {
+        return 0
+    }
+    return charCodeSingle(toStr(body[0]))
+}
+
+/// 单个字符 → ASCII 码（覆盖数字 / 大小写字母）。
+fun charCodeSingle(c: String): Int {
+    val digits: String = "0123456789"
+    var i: Int = 0
+    while (i < 10) {
+        if (aotSlice(digits, i, 1) == c) {
+            return 48 + i
+        }
+        i = i + 1
+    }
+    val upper: String = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    i = 0
+    while (i < 26) {
+        if (aotSlice(upper, i, 1) == c) {
+            return 65 + i
+        }
+        i = i + 1
+    }
+    val lower: String = "abcdefghijklmnopqrstuvwxyz"
+    i = 0
+    while (i < 26) {
+        if (aotSlice(lower, i, 1) == c) {
+            return 97 + i
+        }
+        i = i + 1
+    }
+    // 标点符号（原先只覆盖数字/字母，`'_'` 等会得到 0）
+    if (c == " ") { return 32 }
+    if (c == "!") { return 33 }
+    if (c == "#") { return 35 }
+    if (c == "%") { return 37 }
+    if (c == "&") { return 38 }
+    if (c == "'") { return 39 }
+    if (c == "(") { return 40 }
+    if (c == ")") { return 41 }
+    if (c == "*") { return 42 }
+    if (c == "+") { return 43 }
+    if (c == ",") { return 44 }
+    if (c == "-") { return 45 }
+    if (c == ".") { return 46 }
+    if (c == "/") { return 47 }
+    if (c == ":") { return 58 }
+    if (c == ";") { return 59 }
+    if (c == "<") { return 60 }
+    if (c == "=") { return 61 }
+    if (c == ">") { return 62 }
+    if (c == "?") { return 63 }
+    if (c == "@") { return 64 }
+    if (c == "[") { return 91 }
+    if (c == "]") { return 93 }
+    if (c == "^") { return 94 }
+    if (c == "_") { return 95 }
+    if (c == "`") { return 96 }
+    if (c == "{") { return 123 }
+    if (c == "|") { return 124 }
+    if (c == "}") { return 125 }
+    if (c == "~") { return 126 }
+    return 0
+}

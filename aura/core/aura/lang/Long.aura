@@ -1,0 +1,197 @@
+// aura:///aura/lang/Long.aura
+package aura.lang
+// 语言内置类型，不可修改
+
+/// 64 位有符号长整数类型。
+///
+/// - 范围：-9,223,372,036,854,775,808 到 9,223,372,036,854,775,807
+/// - 存储：VM 中内联存储为 i64（`Value::Int`），AOT 中映射为 `i64`
+/// - 字面量：以 `L` 或 `l` 后缀标识（如 `42L`）
+///
+/// @see Int, Float, Double
+/// @since 0.1
+internal value class Long {
+
+    // ── 常量（companion object）──
+
+    companion object {
+        /// 64 位长整数最小值
+        const MIN_VALUE: Long = -9223372036854775808L
+
+        /// 64 位长整数最大值
+        const MAX_VALUE: Long = 9223372036854775807L
+
+        /// 位宽（64 位）
+        const BITS: Long = 64
+
+        /// 字节大小（8 字节）
+        const SIZE: Long = 64
+
+        /// 32 位整数最小值
+        const MIN_INT: Int = -2147483648
+
+        /// 32 位整数最大值
+        const MAX_INT: Int = 2147483647
+
+        /// 从字符串解析为长整数
+        fun parseLong(text: String): Long {
+            var result: Int = 0
+            var sign: Int = 1
+            var i: Int = 0
+            if (i < text.length && text[i] == '-') {
+                sign = -1
+                i = i + 1
+            } else if (i < text.length && text[i] == '+') {
+                i = i + 1
+            }
+            while (i < text.length) {
+                val c = text[i]
+                if (c >= '0' && c <= '9') {
+                    result = result * 10 + (c - '0')
+                }
+                i = i + 1
+            }
+            return (result * sign) as Long
+        }
+    }
+
+    // ── 转换方法 ──
+
+    /// 转换为 32 位整数
+    fun toInt(): Int {
+        return this as Int
+    }
+
+    /// 转换为 32 位浮点数
+    fun toFloat(): Float {
+        return this as Float
+    }
+
+    /// 转换为 64 位双精度浮点数
+    fun toDouble(): Double {
+        return this as Double
+    }
+
+    /// 转换为字符串表示
+    override fun toString(): String {
+        return toStr(this)
+    }
+
+    /// 转换为布尔值（非零为 true）
+    fun toBoolean(): Boolean {
+        return this != 0
+    }
+
+    // ── 比较方法 ──
+
+    /// 比较两个长整数，返回 -1/0/1
+    fun compareTo(other: Long): Int {
+        if (this < other) return -1
+        if (this > other) return 1
+        return 0
+    }
+
+    /// 检查两个长整数是否相等
+    override fun equals(other: Long): Boolean {
+        return this == other
+    }
+
+    // ── 算术方法 ──
+
+    /// 绝对值
+    fun abs(): Long {
+        if (this < 0) return -this
+        return this
+    }
+
+    /// 返回两个长整数中的最大值
+    fun max(other: Long): Long {
+        if (this > other) return this
+        return other
+    }
+
+    /// 返回两个长整数中的最小值
+    fun min(other: Long): Long {
+        if (this < other) return this
+        return other
+    }
+
+    /// 取余
+    fun mod(other: Long): Long {
+        return this % other
+    }
+
+    // ── 位操作方法 ──
+
+    /// 按位与
+    fun and(other: Long): Long {
+        return this & other
+    }
+
+    /// 按位或
+    fun or(other: Long): Long {
+        return this | other
+    }
+
+    /// 按位异或
+    fun xor(other: Long): Long {
+        return this ^ other
+    }
+
+    /// 左移
+    fun shl(bits: Int): Long {
+        return this << bits
+    }
+
+    /// 右移（算术右移，保留符号位）
+    fun shr(bits: Int): Long {
+        return this >> bits
+    }
+
+    /// 无符号右移
+    fun ushr(bits: Int): Long {
+        return (this as Long) >>> bits
+    }
+
+    // ── 数学方法 ──
+
+    /// 计算幂
+    fun pow(exp: Long): Long {
+        var result: Long = 1
+        var base: Long = this
+        var e: Long = if (exp < 0) -exp else exp
+        while (e > 0) {
+            if (e % 2 == 1) {
+                result = result * base
+            }
+            base = base * base
+            e = e / 2
+        }
+        if (exp < 0) {
+            return 0  // 负指数返回 0（整数幂）
+        }
+        return result
+    }
+
+    /// 转换为字符串（指定基数）
+    fun toRadixString(radix: Int): String {
+        if (radix < 2 or radix > 36) return ""
+        var value = this
+        if (value == 0) return "0"
+        var result: String = ""
+        var negative = value < 0
+        if (negative) {
+            value = -value
+        }
+        while (value > 0) {
+            var digit = value % radix
+            val c = if (digit < 10) ('0' + digit) else ('a' + (digit - 10))
+            result = c + result
+            value = value / radix
+        }
+        if (negative) {
+            result = "-" + result
+        }
+        return result
+    }
+}

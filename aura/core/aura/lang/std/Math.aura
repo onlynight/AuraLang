@@ -1,0 +1,249 @@
+// aura:///aura/lang/std/Math.aura
+package aura.lang.std
+// 标准库模块，不可修改
+// 实现：取整/符号/夹取等纯逻辑函数用 Aura 实现；
+//       三角、指数、对数、开方等 libm 函数保留 native（Layer 0-A / FFI）
+// (package 声明由编译器自动注入，无需显式声明)
+/// 数学函数与常量模块。
+///
+/// 使用前需 import：
+/// ```aura
+/// import aura.lang.std.Math
+/// ```
+///
+/// 部分函数也在 prelu 中可用（免 import）：`abs`, `sqrt`, `pow`
+///
+/// @since 0.1
+internal object Math {
+
+    // ── 常量 ──
+
+    /// 圆周率 π
+    const PI: Float = 3.14159265f
+
+    /// 自然常数 e
+    const E: Float = 2.71828182f
+
+    /// 32 位整数最大值
+    const INT_MAX: Int = 2147483647
+
+    /// 32 位整数最小值
+    const INT_MIN: Int = -2147483648
+
+    /// 浮点数最大值
+    const FLOAT_MAX: Float = 3.4028235e38f
+
+    // ── 基础运算（纯逻辑，Aura 实现）──
+
+    /// 返回绝对值。
+    ///
+    /// 注意：`abs(INT_MIN)` 溢出为 `INT_MIN` 本身。
+    fun abs(x: Int): Int {
+        if (x < 0) {
+            return 0 - x
+        }
+        return x
+    }
+
+    /// 返回绝对值（浮点数版本）。
+    fun abs(x: Float): Float {
+        if (x < 0.0f) {
+            return 0.0f - x
+        }
+        return x
+    }
+
+    /// 返回最小值。
+    fun min(a: Int, b: Int): Int {
+        if (a < b) {
+            return a
+        }
+        return b
+    }
+
+    /// 返回最小值（浮点数版本）。
+    fun min(a: Float, b: Float): Float {
+        if (a < b) {
+            return a
+        }
+        return b
+    }
+
+    /// 返回最大值。
+    fun max(a: Int, b: Int): Int {
+        if (a > b) {
+            return a
+        }
+        return b
+    }
+
+    /// 返回最大值（浮点数版本）。
+    fun max(a: Float, b: Float): Float {
+        if (a > b) {
+            return a
+        }
+        return b
+    }
+
+    // ── 取整（纯逻辑，Aura 实现）──
+
+    /// 向下取整（返回不超过 x 的最大整数）。
+    fun floor(x: Float): Float {
+        val truncated: Int = x as Int
+        if (x < 0.0f && (truncated as Float) != x) {
+            return (truncated - 1) as Float
+        }
+        return truncated as Float
+    }
+
+    /// 向上取整（返回不小于 x 的最小整数）。
+    fun ceil(x: Float): Float {
+        return 0.0f - floor(0.0f - x)
+    }
+
+    /// 向零取整（直接截断小数部分）。
+    fun trunc(x: Float): Float {
+        return (x as Int) as Float
+    }
+
+    /// 四舍五入（.5 向上取整）。
+    fun round(x: Float): Float {
+        return floor(x + 0.5f)
+    }
+
+    // ── 指数与开方（libm 函数，native 实现）──
+
+    /// 平方根。
+    fun sqrt(x: Float): Float
+
+    /// 立方根。
+    fun cbrt(x: Float): Float
+
+    /// 幂运算 x^y（一般实数幂，依赖 libm）。
+    fun pow(base: Float, exp: Float): Float
+
+    /// e 的 x 次方。
+    fun exp(x: Float): Float
+
+    // ── 对数（libm 函数，native 实现）──
+
+    /// 自然对数。
+    fun log(x: Float): Float
+
+    /// 以 2 为底的对数。
+    fun log2(x: Float): Float
+
+    /// 以 10 为底的对数。
+    fun log10(x: Float): Float
+
+    // ── 三角函数（libm 函数，native 实现）──
+
+    /// 正弦（弧度）。
+    fun sin(x: Float): Float
+
+    /// 余弦（弧度）。
+    fun cos(x: Float): Float
+
+    /// 正切（弧度）。
+    fun tan(x: Float): Float
+
+    /// 反正弦（返回弧度）。
+    fun asin(x: Float): Float
+
+    /// 反余弦（返回弧度）。
+    fun acos(x: Float): Float
+
+    /// 反正切（返回弧度）。
+    fun atan(x: Float): Float
+
+    /// 双参数反正切 atan2(y, x)（返回弧度）。
+    fun atan2(y: Float, x: Float): Float
+
+    // ── 幂与根（纯逻辑，Aura 实现）──
+
+    /// 整数幂运算（指数为负数时返回 0）。
+    fun powInt(base: Int, exp: Int): Int {
+        if (exp < 0) {
+            return 0
+        }
+        var result: Int = 1
+        var b: Int = base
+        var e: Int = exp
+        while (e > 0) {
+            if (e % 2 == 1) {
+                result = result * b
+            }
+            b = b * b
+            e = e / 2
+        }
+        return result
+    }
+
+    /// 平方（纯逻辑，用于替代 `pow(x, 2)` 的常见场景）。
+    fun square(x: Float): Float {
+        return x * x
+    }
+
+    /// 立方。
+    fun cube(x: Float): Float {
+        return x * x * x
+    }
+
+    // ── 辅助（纯逻辑，Aura 实现）──
+
+    /// 符号函数：-1, 0, 1。
+    fun sign(x: Float): Int {
+        if (x > 0.0f) {
+            return 1
+        }
+        if (x < 0.0f) {
+            return -1
+        }
+        return 0
+    }
+
+    /// 限制在 `[lo, hi]` 范围内。
+    fun clamp(x: Float, lo: Float, hi: Float): Float {
+        if (x < lo) {
+            return lo
+        }
+        if (x > hi) {
+            return hi
+        }
+        return x
+    }
+
+    /// 限制在 `[lo, hi]` 范围内（整数版本）。
+    fun clampInt(x: Int, lo: Int, hi: Int): Int {
+        if (x < lo) {
+            return lo
+        }
+        if (x > hi) {
+            return hi
+        }
+        return x
+    }
+
+    /// 线性插值：`a + (b - a) * t`（t 不裁剪）。
+    fun lerp(a: Float, b: Float, t: Float): Float {
+        return a + (b - a) * t
+    }
+
+    /// 把 x 从 `[inMin, inMax]` 映射到 `[outMin, outMax]`。
+    fun mapRange(x: Float, inMin: Float, inMax: Float, outMin: Float, outMax: Float): Float {
+        if (inMax == inMin) {
+            return outMin
+        }
+        return outMin + (x - inMin) * (outMax - outMin) / (inMax - inMin)
+    }
+
+    /// 把角度制转换为弧度制。
+    fun toRadians(degrees: Float): Float {
+        return degrees * PI / 180.0f
+    }
+
+    /// 把弧度制转换为角度制。
+    fun toDegrees(radians: Float): Float {
+        return radians * 180.0f / PI
+    }
+}

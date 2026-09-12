@@ -302,7 +302,7 @@ Program {
         ),
         Class(
             ClassDecl {
-                visibility: Public,
+                visibility: Internal,
                 sealed: false,
                 name: "Impl",
                 type_params: [],
@@ -784,112 +784,74 @@ Program {
     ],
     top_level_statements: [
         Expr(
-            Ident(
-                "internal",
-                Span {
-                    start: 245,
-                    end: 252,
-                    start_line: 16,
-                    start_col: 2,
-                    end_line: 16,
-                    end_col: 9,
-                },
-            ),
-        ),
-        Expr(
-            Ident(
-                "o",
-                Span {
-                    start: 380,
-                    end: 380,
-                    start_line: 23,
-                    start_col: 30,
-                    end_line: 23,
-                    end_col: 30,
-                },
-            ),
-        ),
-        Expr(
-            Ident(
-                ":",
-                Span {
-                    start: 381,
-                    end: 381,
-                    start_line: 23,
-                    start_col: 31,
-                    end_line: 23,
-                    end_col: 31,
-                },
-            ),
-        ),
-        Expr(
-            Ident(
-                "Vec",
-                Span {
-                    start: 383,
-                    end: 385,
-                    start_line: 23,
-                    start_col: 33,
-                    end_line: 23,
-                    end_col: 35,
-                },
-            ),
-        ),
-        Expr(
-            Ident(
-                ")",
-                Span {
-                    start: 386,
-                    end: 386,
-                    start_line: 23,
-                    start_col: 36,
-                    end_line: 23,
-                    end_col: 36,
-                },
-            ),
-        ),
-        Expr(
-            Ident(
-                ":",
-                Span {
-                    start: 387,
-                    end: 387,
-                    start_line: 23,
-                    start_col: 37,
-                    end_line: 23,
-                    end_col: 37,
-                },
-            ),
-        ),
-        Expr(
-            Assign {
-                target: Ident(
-                    "Vec",
-                    Span {
+            Lambda {
+                params: [
+                    Param {
+                        name: "o",
+                        type_hint: Some(
+                            Named {
+                                name: "Vec",
+                                span: Span {
+                                    start: 383,
+                                    end: 386,
+                                    start_line: 23,
+                                    start_col: 33,
+                                    end_line: 23,
+                                    end_col: 36,
+                                },
+                            },
+                        ),
+                        default_value: None,
+                        is_vararg: false,
+                        is_noinline: false,
+                        is_crossinline: false,
+                        span: Span {
+                            start: 380,
+                            end: 386,
+                            start_line: 23,
+                            start_col: 30,
+                            end_line: 23,
+                            end_col: 36,
+                        },
+                    },
+                ],
+                body: Assign {
+                    target: Ident(
+                        "Vec",
+                        Span {
+                            start: 389,
+                            end: 391,
+                            start_line: 23,
+                            start_col: 39,
+                            end_line: 23,
+                            end_col: 41,
+                        },
+                    ),
+                    value: Ident(
+                        "o",
+                        Span {
+                            start: 395,
+                            end: 395,
+                            start_line: 23,
+                            start_col: 45,
+                            end_line: 23,
+                            end_col: 45,
+                        },
+                    ),
+                    span: Span {
                         start: 389,
-                        end: 391,
+                        end: 403,
                         start_line: 23,
                         start_col: 39,
-                        end_line: 23,
-                        end_col: 41,
+                        end_line: 24,
+                        end_col: 8,
                     },
-                ),
-                value: Ident(
-                    "o",
-                    Span {
-                        start: 395,
-                        end: 395,
-                        start_line: 23,
-                        start_col: 45,
-                        end_line: 23,
-                        end_col: 45,
-                    },
-                ),
+                },
                 span: Span {
-                    start: 389,
+                    start: 380,
                     end: 403,
                     start_line: 23,
-                    start_col: 39,
+                    start_col: 30,
                     end_line: 24,
                     end_col: 8,
                 },
@@ -899,3 +861,4 @@ Program {
 }
 error: Expected LParen, got Dot @line 23 col 24-24
 error: Expected RParen, got LParen @line 23 col 29-29
+error: Expected Arrow, got Colon @line 23 col 37-37

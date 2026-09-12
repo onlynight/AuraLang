@@ -388,7 +388,7 @@ mod tests {
     fn make_executor(config: SchedulerConfig) -> Executor {
         Executor::new(
             Arc::new(TaskGraph::new()),
-            Arc::new(ResolvedBuildConfig::default()),
+            Arc::new(ResolvedBuildConfig::isolated()),
             None,
             config,
         )
@@ -401,7 +401,7 @@ mod tests {
         let cache = Arc::new(Mutex::new(LocalCache::new(tmp.path()).unwrap()));
         let executor = Executor::new(
             Arc::new(TaskGraph::new()),
-            Arc::new(ResolvedBuildConfig::default()),
+            Arc::new(ResolvedBuildConfig::isolated()),
             Some(cache.clone()),
             config,
         );
@@ -413,7 +413,7 @@ mod tests {
     ) -> (Executor, Arc<Mutex<CacheService>>, TempDir) {
         let tmp = TempDir::new().unwrap();
         let cache = Arc::new(Mutex::new(LocalCache::new(tmp.path()).unwrap()));
-        let build_config = Arc::new(ResolvedBuildConfig::default());
+        let build_config = Arc::new(ResolvedBuildConfig::isolated());
         let service = Arc::new(Mutex::new(
             CacheService::new(cache.clone(), None, build_config.clone()).unwrap(),
         ));
@@ -546,7 +546,7 @@ mod tests {
     fn test_clean_clears_cache() {
         let tmp = TempDir::new().unwrap();
         let cache = Arc::new(Mutex::new(LocalCache::new(tmp.path()).unwrap()));
-        let build_config = Arc::new(ResolvedBuildConfig::default());
+        let build_config = Arc::new(ResolvedBuildConfig::isolated());
         let service = Arc::new(Mutex::new(
             CacheService::new(cache.clone(), None, build_config.clone()).unwrap(),
         ));

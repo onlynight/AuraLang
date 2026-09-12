@@ -1967,6 +1967,28 @@ impl Parser {
         let visibility = self.take_visibility();
         self.expect(TokenKind::Interface);
         let name = self.advance().literal.clone();
+        let type_params = self.try_parse_type_params();
+
+        // 接口继承：`interface List<T> : Collection<T>` 或 `: A, B`
+        let mut super_types = Vec::new();
+        if let Some(base) = self.parse_superclass_ref() {
+            super_types.push(base);
+            while self.check(TokenKind::Comma) {
+                self.advance();
+                let base_name = self.advance().literal.clone();
+                if self.check(TokenKind::Lt) {
+                    self.skip_balanced(
+                        TokenKind::Lt,
+                        &[
+                            TokenKind::Gt,
+                            TokenKind::GtGt,
+                            TokenKind::GtGtGt,
+                        ],
+                    );
+                }
+                super_types.push(base_name);
+            }
+        }
 
         let mut methods = Vec::new();
         if self.check(TokenKind::LBrace) {
@@ -1984,7 +2006,8 @@ impl Parser {
         InterfaceDecl {
             visibility,
             name,
-            type_params: Vec::new(),
+            type_params,
+            super_types,
             methods,
             doc: self.take_doc(),
             span: Span::merge(&start, &self.current().span),
@@ -2389,7 +2412,11 @@ impl Parser {
         // 杜绝 `advance` 在 EOF 处不推进导致的无限循环。
         loop {
             // 自定义中缀调用（Kotlin `infix fun`）：`lhs name rhs` → Call(name, [lhs, rhs])
-            if self.current().kind == TokenKind::Ident && !self.is_lambda_start() {
+            // 排除单词形式逻辑运算符 `and` / `or`：它们是运算符而非函数名。
+            if self.current().kind == TokenKind::Ident
+                && !self.is_lambda_start()
+                && !matches!(self.current().literal.as_str(), "and" | "or")
+            {
                 if let Some(infix) = self.try_parse_infix_call(&lhs, min_bp) {
                     lhs = infix;
                     continue;
@@ -2617,20 +2644,20 @@ impl Parser {
             } else {
                 cleaned.parse::<i64>().unwrap_or(0)
             };
-            return Expr::Literal(Literal::Int(n), tok.span);
+            let e = Expr::Literal(Literal::Int(n), tok.span);
+            return self.parse_postfix_chain(e, start);
         }
         if self.check(TokenKind::FloatLiteral) {
             let tok = self.advance();
-            if let Ok(n) = tok
+            let n = tok
                 .literal
                 .trim_end_matches([
                     'f', 'F', 'd', 'D',
                 ])
                 .parse::<f64>()
-            {
-                return Expr::Literal(Literal::Float(n), tok.span);
-            }
-            return Expr::Literal(Literal::Float(0.0), tok.span);
+                .unwrap_or(0.0);
+            let e = Expr::Literal(Literal::Float(n), tok.span);
+            return self.parse_postfix_chain(e, start);
         }
         if self.check(TokenKind::StringLiteral) || self.check(TokenKind::StringInterpStart) {
             // P14: 字符串插值重建 —— StringLiteral / StringInterpStart 交替序列
@@ -2676,27 +2703,32 @@ impl Parser {
             }
             if parts.len() == 1 {
                 if let Expr::Literal(Literal::String(_), _) = &parts[0] {
-                    return parts.into_iter().next().unwrap();
+                    let e = parts.into_iter().next().unwrap();
+                    return self.parse_postfix_chain(e, start);
                 }
             }
             let span = Span::merge(&start_span, &self.current().span);
-            return Expr::StrInterp {
+            let e = Expr::StrInterp {
                 parts,
                 span,
             };
+            return self.parse_postfix_chain(e, start);
         }
         if self.check(TokenKind::CharLiteral) {
             let tok = self.advance();
             let ch = tok.literal.chars().next().unwrap_or('\0');
-            return Expr::Literal(Literal::Char(ch), tok.span);
+            let e = Expr::Literal(Literal::Char(ch), tok.span);
+            return self.parse_postfix_chain(e, start);
         }
         if self.check(TokenKind::BoolLiteral) {
             let tok = self.advance();
-            return Expr::Literal(Literal::Bool(tok.literal == "true"), tok.span);
+            let e = Expr::Literal(Literal::Bool(tok.literal == "true"), tok.span);
+            return self.parse_postfix_chain(e, start);
         }
         if self.check(TokenKind::Null) {
             let tok = self.advance();
-            return Expr::Literal(Literal::Null, tok.span);
+            let e = Expr::Literal(Literal::Null, tok.span);
+            return self.parse_postfix_chain(e, start);
         }
 
         // 括号表达式 / 括号参数 lambda：`(expr)`、`(x) -> body`、`(x: T) -> body`
@@ -2723,6 +2755,8 @@ impl Parser {
         let tok = self.advance();
         let primary = if tok.kind == TokenKind::This {
             Expr::This(start)
+        } else if tok.kind == TokenKind::Super {
+            Expr::Super(start)
         } else {
             Expr::Ident(tok.literal.clone(), tok.span)
         };
@@ -2838,6 +2872,32 @@ impl Parser {
                             span: Span::merge(&start, &self.current().span),
                         };
                     }
+                }
+                // 泛型函数调用：`arrayOf<Char>()` 或 `foo<T>(...)`
+                TokenKind::Lt => {
+                    // 判断是否为泛型类型参数（而非小于运算符）
+                    // 启发式：`<` 后跟标识符且再后跟 `>` 或 `,` 视为类型参数
+                    if self.check(TokenKind::Lt) && self.peek_ahead(1).kind == TokenKind::Ident {
+                        let a1 = self.peek_ahead(2);
+                        if a1.kind == TokenKind::Gt || a1.kind == TokenKind::Comma {
+                            // 泛型函数调用：解析类型参数
+                            self.advance(); // <
+                            // 解析类型参数列表（使用 parse_type 而非 parse_expression）
+                            loop {
+                                // 解析类型参数（丢弃，语义分析阶段处理）
+                                self.parse_type();
+                                if !self.check(TokenKind::Comma) {
+                                    break;
+                                }
+                                self.advance();
+                            }
+                            self.expect(TokenKind::Gt);
+                            // 继续解析调用（如果有 `(`）
+                            continue;
+                        }
+                    }
+                    // 不是泛型调用，退出循环
+                    break;
                 }
                 // !! 非空断言运算符（Kotlin 风格：x!! → AssertNonNull）
                 TokenKind::DoubleBang => {
@@ -3006,6 +3066,17 @@ impl Parser {
     }
 
     fn infix_binding_power(&self) -> u8 {
+        // 单词形式的逻辑运算符：`a and b` / `a or b`，与符号形式 `&&` / `||` 等价。
+        // 词法层面没有 And/Or token（它们是 Ident 字面量），必须在此显式识别，
+        // 否则 Pratt 循环会走「标识符中缀调用」分支，把 `and` 解析成函数调用
+        // `Call(and, [lhs, rhs])`，AOT 下即是对未定义符号 `@and` 的调用。
+        if self.current().kind == TokenKind::Ident {
+            match self.current().literal.as_str() {
+                "and" => return 2, // 同 AndAnd
+                "or" => return 1,  // 同 OrOr
+                _ => {}
+            }
+        }
         match self.current().kind {
             TokenKind::Assign => 1,
             TokenKind::PlusEq
@@ -3044,7 +3115,16 @@ impl Parser {
     }
 
     fn parse_infix_operator(&mut self) -> BinOp {
-        match self.advance().kind {
+        let tok = self.advance();
+        // 单词形式的逻辑运算符：`and` / `or`（见 infix_binding_power 中的说明）
+        if tok.kind == TokenKind::Ident {
+            match tok.literal.as_str() {
+                "and" => return BinOp::And,
+                "or" => return BinOp::Or,
+                _ => {}
+            }
+        }
+        match tok.kind {
             TokenKind::Assign => BinOp::Assign,
             TokenKind::Plus => BinOp::Add,
             TokenKind::Minus => BinOp::Sub,
@@ -3073,6 +3153,27 @@ impl Parser {
     // 关键字表达式
     // ─────────────────────────────────────────────────────────────────────────
 
+    /// 解析「语句体 / 表达式体」。
+    ///
+    /// `if (c) return x`、`while (c) return x` 这类**无花括号单行体**是**语句**，
+    /// 必须按语句解析：若直接交给 `parse_expression`，`return` / `break` /
+    /// `continue` / `throw` 这些语句关键字不产生表达式，整个分支会被静默丢弃
+    ///（表现为 `if (x > 0) return -1` 完全不生效，函数继续往下执行）。
+    fn parse_body_expr(&mut self) -> Expr {
+        if self.check(TokenKind::LBrace) {
+            return self.parse_block();
+        }
+        if matches!(
+            self.current().kind,
+            TokenKind::Return | TokenKind::Break | TokenKind::Continue | TokenKind::Throw
+        ) {
+            let start = self.current().span;
+            let stmt = self.parse_statement();
+            return Expr::Block(vec![stmt], Span::merge(&start, &self.current().span));
+        }
+        self.parse_expression(0)
+    }
+
     /// if (cond) thenExpr [else elseExpr]
     fn parse_if_expression(&mut self, start: Span) -> Expr {
         self.advance(); // if
@@ -3080,10 +3181,10 @@ impl Parser {
         let condition = self.parse_expression(0);
         self.expect(TokenKind::RParen);
 
-        let then_branch = self.parse_expression(0);
+        let then_branch = self.parse_body_expr();
         let else_branch = if self.check(TokenKind::Else) {
             self.advance();
-            Some(Box::new(self.parse_expression(0)))
+            Some(Box::new(self.parse_body_expr()))
         } else {
             None
         };
@@ -3234,7 +3335,7 @@ impl Parser {
         self.expect(TokenKind::In);
         let iterable = self.parse_expression(0);
         self.expect(TokenKind::RParen);
-        let body = self.parse_expression(0);
+        let body = self.parse_body_expr();
 
         Expr::For {
             pattern: Box::new(pattern),
@@ -3250,7 +3351,7 @@ impl Parser {
         self.expect(TokenKind::LParen);
         let condition = self.parse_expression(0);
         self.expect(TokenKind::RParen);
-        let body = self.parse_expression(0);
+        let body = self.parse_body_expr();
 
         Expr::While {
             condition: Box::new(condition),
@@ -3506,6 +3607,45 @@ mod tests {
         );
         assert!(errors.is_empty());
         assert_eq!(prog.declarations.len(), 2);
+    }
+
+    // Phase 8：接口继承 `interface List<T> : Collection<T>`（含多父接口 / 泛型实参）
+    #[test]
+    fn test_regression_interface_inheritance() {
+        let (prog, errors) = parse_program(
+            r#"
+            interface Collection<T> {
+                fun count(): Int
+            }
+            interface List<T> : Collection<T> {
+                fun filter(predicate: (T) -> Boolean): List<T>
+            }
+            interface Both : Collection<Int>, Comparable<Int> {
+                fun z(): Int
+            }
+        "#,
+        );
+        assert!(errors.is_empty(), "parse errors: {:?}", errors);
+        assert_eq!(prog.declarations.len(), 3);
+
+        let iface = match &prog.declarations[1] {
+            crate::ast::Decl::Interface(i) => i,
+            other => panic!("expected interface, got {:?}", other),
+        };
+        assert_eq!(iface.name, "List");
+        assert_eq!(iface.super_types, vec!["Collection".to_string()]);
+
+        let multi = match &prog.declarations[2] {
+            crate::ast::Decl::Interface(i) => i,
+            other => panic!("expected interface, got {:?}", other),
+        };
+        assert_eq!(
+            multi.super_types,
+            vec![
+                "Collection".to_string(),
+                "Comparable".to_string()
+            ]
+        );
     }
 
     #[test]

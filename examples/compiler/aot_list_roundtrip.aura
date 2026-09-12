@@ -1,0 +1,56 @@
+// AOT 回归样例：List<String> / List<Int> 元素「写入 → 读出」往返。
+//
+// 覆盖两个曾在 AOT 后端失效的转换（自举编译器 HIR/MIR 计数器因此读到垃圾值）：
+//   1. `i8*` → 字符串结构体 `{ i8*, i64 }`
+//      —— 旧实现只写入 8 字节指针，长度字段保持栈上垃圾值，
+//         表现为 `list[i].length` 变成随机数、拼接读到越界数据。
+//   2. `i8*` → 整数 —— 列表元素是 Plan A 低位标记装箱值 `(v<<1)|1`，
+//      必须经 `aura_to_int_any` 拆箱，否则 `list[i]` 读 7 会得到 15。
+//
+// 预期输出：
+//   [p] size=1
+//   [p] tlen=5
+//   [p] t=[hello]
+//   [p] nsize=1
+//   [p] n=7
+//   [p] count=1
+//   [p] t0len=5
+fun main() {
+    var xs: List<String> = arrayListOf<String>()
+    xs.add("hello")
+    println("[p] size=" + toStr(xs.size))
+    val t: String = xs[0]
+    println("[p] tlen=" + toStr(t.length))
+    println("[p] t=[" + t + "]")
+
+    var ns: List<Int> = arrayListOf<Int>()
+    ns.add(7)
+    println("[p] nsize=" + toStr(ns.size))
+    val n: Int = ns[0]
+    println("[p] n=" + toStr(n))
+
+    // 类内 String 字段 + List 字段的组合（对应 Ast/Hir/Mir 的 arena 形态）
+    val a = Arena()
+    a.leaf("IntLiteral", "hello")
+    println("[p] count=" + toStr(a.count))
+    val t0: String = a.texts[0]
+    println("[p] t0len=" + toStr(t0.length))
+}
+
+class Arena {
+    var kinds: List<String> = arrayListOf<String>()
+    var texts: List<String> = arrayListOf<String>()
+    var count: Int = 0
+
+    fun add(kind: String, text: String, ty: String, children: String): Int {
+        val id: Int = this.count
+        this.count = id + 1
+        this.kinds.add(kind)
+        this.texts.add(text)
+        return id
+    }
+
+    fun leaf(kind: String, text: String): Int {
+        return this.add(kind, text, "", "")
+    }
+}

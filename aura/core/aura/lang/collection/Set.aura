@@ -1,0 +1,29 @@
+// aura:///aura/lang/collection/Set.aura
+package aura.lang.collection
+// 集合包：无序不重复集合接口
+//
+// Set<T> 继承 Collection<T>，扩展 add/remove/clear 等集合特有能力。
+
+import aura.lang.collection.Collection
+
+/// 无序不重复集合接口 Set<T>。
+///
+/// - 继承自 Collection<T>，共享 count/getAt/contains/indexOf/isEmpty 等通用操作
+/// - 扩展 add/remove/clear 等集合特有操作
+/// - 元素不重复，无序
+///
+/// @see Collection, List, HashSet
+/// @since 0.5
+interface Set<T> : Collection<T> {
+    /// 添加元素（如果不存在），返回是否成功添加
+    fun add(item: T): Boolean
+
+    /// 移除元素，返回是否成功移除
+    fun remove(item: T): Boolean
+
+    /// 清空集合
+    fun clear(): Unit
+
+    /// 转换为列表
+    fun toList(): List<T>
+}

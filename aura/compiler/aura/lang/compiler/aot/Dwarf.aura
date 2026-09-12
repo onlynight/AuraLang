@@ -1,0 +1,107 @@
+// aura:///aura/lang/compiler/aot/Dwarf.aura
+package aura.lang.compiler.aot
+// ─────────────────────────────────────────────────────────────
+// DWARF 调试信息（基础）— 纯 Aura 化迁移 · Phase 6 (任务 6.8)
+//
+// 对应 Rust `compiler/src/codegen/aot/dwarf.rs`。
+//
+// LLVM 通过 `!DIFile` / `!DISubprogram` / `!DILocation` 等元数据描述调试信息。
+// 这里提供 Aura 侧的基础元数据（源码文件、函数、行号），插入到生成的 LLVM IR。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+
+/// 调试信息元数据（简化版）。
+class DebugInfo {
+
+    /// 源码文件名。
+    var sourceFile: String = "main.aura"
+
+    /// 源码目录。
+    var sourceDir: String = "."
+
+    /// 函数符号清单（每行一个）。
+    var subprograms: String = ""
+
+    /// 是否启用调试信息。
+    var enabled: Boolean = true
+
+    init(file: String, dir: String, en: Boolean) {
+        this.sourceFile = file
+        this.sourceDir = dir
+        this.subprograms = ""
+        this.enabled = en
+    }
+
+    /// 添加函数符号（去重）。
+    fun addSubprogram(name: String) {
+        if (!aotListContains(this.subprograms, name)) {
+            this.subprograms = this.subprograms + name + "\n"
+        }
+    }
+
+    /// 已登记的函数符号数。
+    fun subprogramCount(): Int {
+        return aotLineCount(this.subprograms)
+    }
+}
+
+/// 从路径构造 DebugInfo（取文件名与目录）。
+///
+/// 手工扫描最后一个 `/` 或 `\`，不依赖 String 辅助方法
+/// （避免内联后符号解析的不确定性）。
+fun debugInfoFromPath(path: String, enabled: Boolean): DebugInfo {
+    var lastSep: Int = -1
+    var i: Int = 0
+    while (i < path.length) {
+        val c: String = toStr(path[i])
+        if (c == "/" || c == "\\") {
+            lastSep = i
+        }
+        i = i + 1
+    }
+    if (lastSep < 0) {
+        return DebugInfo(path, ".", enabled)
+    }
+    val file: String = aotSlice(path, lastSep + 1, path.length - lastSep - 1)
+    val dir: String = aotSlice(path, 0, lastSep)
+    return DebugInfo(file, dir, enabled)
+}
+
+/// 生成 LLVM IR 模块级 debug 元数据段。
+fun debugMetadata(di: DebugInfo): String {
+    if (!di.enabled) {
+        return ""
+    }
+    var s: String = "; ---- Debug Info ----\n"
+    s = s + "!0 = !DIFile(filename: \"" + di.sourceFile + "\", directory: \"" + di.sourceDir + "\")\n"
+    s = s + "!1 = distinct !DICompileUnit(language: DW_LANG_C99, file: !0, "
+    s = s + "isOptimized: false, producer: \"Aura AOT\")\n"
+    s = s + "!llvm.module.flags = !{!2, !3}\n"
+    s = s + "!2 = !{i32 2, !\"Dwarf Version\", i32 4}\n"
+    s = s + "!3 = !{i32 2, !\"Debug Info Version\", i32 3}\n"
+    s = s + "!llvm.dbg.cu = !{!1}\n"
+    return s
+}
+
+/// 生成函数级 DISubprogram + DILocation 元数据实体。
+///
+/// 返回 `"sub_id|loc_id|text"`（text 内换行已保留，由调用方拼接）。
+fun debugSubprogram(name: String, line: Int, index: Int, enabled: Boolean): String {
+    if (!enabled) {
+        return ""
+    }
+    val subId: Int = 10 + index * 2
+    val locId: Int = subId + 1
+    val text: String = "!" + toStr(subId) + " = distinct !DISubprogram(name: \"" + name
+        + "\", linkageName: \"" + name + "\", isOptimized: false, line: " + toStr(line)
+        + ", scope: !0, file: !0, type: !4, spFlags: DISPFlagDefinition, unit: !1)\n"
+        + "!" + toStr(locId) + " = !DILocation(line: " + toStr(line)
+        + ", column: 0, scope: !" + toStr(subId) + ")\n"
+    return toStr(subId) + "|" + toStr(locId) + "|" + text
+}
+
+/// 最小函数类型元数据实体（供 DISubprogram.type 引用）。
+fun debugSubroutineType(): String {
+    return "!4 = !DISubroutineType(types: !5)\n!5 = !{}\n"
+}

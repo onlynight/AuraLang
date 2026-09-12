@@ -1,0 +1,221 @@
+// aura:///aura/lang/compiler/jit/JitRuntime.aura
+package aura.lang.compiler.jit
+// ─────────────────────────────────────────────────────────────
+// JIT 运行时段 — 纯 Aura 化迁移 · Phase 7 (任务 7.6)
+//
+// 对应 Rust `compiler/src/vm/aot_runtime.rs` 的段加载基础设施：
+//   * `AotModule`   —— W^X mmap 机器码段 + 描述符表 + 分发表重建；
+//   * `AotRuntime`  —— 模块注册表 + 函数派发（调用深度上限）。
+//
+// 复用 `.auc v4` 段格式（`SEG_MACHINE` / `SEG_DESC_TABLE`）、
+// `AuraFuncDesc`（32 字节描述符）与 `JitValue` 共享 ABI，使 JIT 原生码
+// 与 AOT Blob 走同一装载路径（迁移计划「单一路径真相源」）。
+//
+// ── W^X 策略 ──
+//
+//   1. `map_anonymous(RW)`  —— 匿名映射可写内存
+//   2. 拷贝机器码段
+//   3. `protect(RX)`        —— 切换为可读可执行（禁止写）
+//
+// 任何环节失败 → 模块不装载，调用回退解释器。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+
+/// `.auc` v4 段 id（与 Rust `SEG_*` 一致）。
+object JitSegments {
+    const BYTECODE: Int = 0
+    const MACHINE: Int = 1
+    const DESC_TABLE: Int = 2
+    const DEBUG: Int = 3
+    const STRING_POOL: Int = 4
+    const SIGNATURE: Int = 5
+}
+
+/// 段名。
+fun jitSegmentName(id: Int): String {
+    if (id == 0) {
+        return "SEG_BYTECODE"
+    }
+    if (id == 1) {
+        return "SEG_MACHINE"
+    }
+    if (id == 2) {
+        return "SEG_DESC_TABLE"
+    }
+    if (id == 3) {
+        return "SEG_DEBUG"
+    }
+    if (id == 4) {
+        return "SEG_STRING_POOL"
+    }
+    if (id == 5) {
+        return "SEG_SIGNATURE"
+    }
+    return "SEG_UNKNOWN"
+}
+
+/// 段表条目字节数（与 Rust `AucSegment` 一致）。
+fun jitSegmentEntryBytes(): Int {
+    return 16
+}
+
+/// 函数描述符字节数（与 Rust `AuraFuncDesc::SIZE` 一致）。
+fun jitFuncDescSize(): Int {
+    return 32
+}
+
+/// AOT / JIT 最大调用深度（与 Rust `AOT_MAX_CALL_DEPTH` 一致）。
+fun jitMaxCallDepth(): Int {
+    return 1024
+}
+
+/// 调用深度是否合法。
+fun jitCallDepthOk(depth: Int): Boolean {
+    return depth < jitMaxCallDepth()
+}
+
+/// `.auc` 魔数。
+fun jitBlobMagic(): String {
+    return "AURA"
+}
+
+/// `.auc` 段格式版本（机器码嵌入自 v4 起）。
+fun jitBlobVersion(): Int {
+    return 4
+}
+
+/// W^X 策略说明。
+fun jitWxPolicy(): String {
+    return "mmap(RW) -> copy -> protect(RX)"
+}
+
+/// W^X 阶段（行表）。
+fun jitMmapStages(): String {
+    return "map-anonymous\ncopy\nprotect-exec\n"
+}
+
+// ── 段表校验（对应 Rust `AotModule::load` 的前置检查）──
+
+/// 段表行数。
+fun jitSegmentCount(segs: String): Int {
+    return jitLineCount(segs)
+}
+
+/// 段表中查某段（返回 `offset|size|flags`，缺失返回空串）。
+fun jitSegmentOf(segs: String, id: Int): String {
+    val n: Int = jitLineCount(segs)
+    var i: Int = 0
+    while (i < n) {
+        val line: String = jitLineAt(segs, i)
+        if (jitParseInt(jitFieldAt(line, 0, "|")) == id) {
+            return jitFieldAt(line, 1, "|") + "|" + jitFieldAt(line, 2, "|") + "|" + jitFieldAt(line, 3, "|")
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+/// 校验段表；合法返回空串，否则返回错误说明（与 Rust 错误文本同构）。
+fun jitValidateSegments(segs: String, dataLen: Int): String {
+    val machine: String = jitSegmentOf(segs, 1)
+    if (machine == "") {
+        return "missing SEG_MACHINE"
+    }
+    val desc: String = jitSegmentOf(segs, 2)
+    if (desc == "") {
+        return "missing SEG_DESC_TABLE"
+    }
+    val mOff: Int = jitParseInt(jitFieldAt(machine, 0, "|"))
+    val mSize: Int = jitParseInt(jitFieldAt(machine, 1, "|"))
+    if (mSize == 0) {
+        return "machine code segment is empty"
+    }
+    if (mOff + mSize > dataLen) {
+        return "machine segment out of range: offset=" + toStr(mOff) +
+            " size=" + toStr(mSize) + " data=" + toStr(dataLen)
+    }
+    val dOff: Int = jitParseInt(jitFieldAt(desc, 0, "|"))
+    val dSize: Int = jitParseInt(jitFieldAt(desc, 1, "|"))
+    if (dOff + dSize > dataLen) {
+        return "descriptor segment out of range: offset=" + toStr(dOff) +
+            " size=" + toStr(dSize) + " data=" + toStr(dataLen)
+    }
+    return ""
+}
+
+/// 描述符个数（描述符段字节数 / 32；不整除返回 -1）。
+fun jitDescriptorCount(descBytes: Int): Int {
+    val step: Int = jitFuncDescSize()
+    if (descBytes < 0) {
+        return -1
+    }
+    if (jitMod2(descBytes) != 0) {
+        // 32 为偶数，descBytes 必须为偶数
+        return -1
+    }
+    var count: Int = 0
+    var remain: Int = descBytes
+    while (remain >= step) {
+        remain = remain - step
+        count = count + 1
+    }
+    if (remain != 0) {
+        return -1
+    }
+    return count
+}
+
+/// 重建分发表（对应 Rust `rebuild_dispatch_table`）。
+///
+/// * `descs`      —— 行表 `entryOffset|flags`（描述符段解析结果）。
+/// * `funcDescIdx`—— 行表，每行一个函数对应的描述符序号（0 = 无）。
+///
+/// 返回行表 `funcIdx|addr`（不可用时 addr 为 `-`）。
+fun jitRebuildDispatch(base: Int, descs: String, funcDescIdx: String): String {
+    var out: String = ""
+    val descCount: Int = jitLineCount(descs)
+    val n: Int = jitLineCount(funcDescIdx)
+    var i: Int = 0
+    while (i < n) {
+        val di: Int = jitParseInt(jitLineAt(funcDescIdx, i))
+        var addr: String = "-"
+        if (di != 0 && di <= descCount) {
+            val off: Int = jitParseInt(jitFieldAt(jitLineAt(descs, di - 1), 0, "|"))
+            if (off > 0 && jitMod16(off) == 0) {
+                addr = toStr(base + off)
+            }
+        }
+        out = out + toStr(i) + "|" + addr + "\n"
+        i = i + 1
+    }
+    return out
+}
+
+/// 取模 16（用于入口偏移对齐检查）。
+fun jitMod16(n: Int): Int {
+    if (n < 0) {
+        return -1
+    }
+    val q: Int = n / 16
+    return n - q * 16
+}
+
+/// 分发表条目是否有效（对应 `find_entry` 的 `Some`）。
+fun jitHasEntry(table: String, funcIdx: Int): Boolean {
+    return jitRecordGet(table, toStr(funcIdx)) != "-"
+}
+
+/// 分发表条目地址文本（无条目返回空串）。
+fun jitEntryAddr(table: String, funcIdx: Int): String {
+    val v: String = jitRecordGet(table, toStr(funcIdx))
+    if (v == "-") {
+        return ""
+    }
+    return v
+}
+
+/// 运行时段版本。
+fun jitRuntimeVersion(): String {
+    return "0.1.0-phase7"
+}

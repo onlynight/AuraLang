@@ -1,0 +1,118 @@
+// ═════════════════════════════════════════════════════════════
+// Phase 0 验证用例（纯 Aura 化迁移）
+//
+// 验证内容：
+//   1. Aura 测试框架 TestRunner 可用（全部断言类别）
+//   2. 框架能正确统计失败（刻意制造失败并核对计数）
+//   3. 语言前置能力（Phase 1 Lexer/Parser 需要覆盖的基础构造）
+//
+// 运行：aura run tests/phase0_tests.aura
+//   全通过时最后输出 "RESULT: PASS"
+// ═════════════════════════════════════════════════════════════
+
+import "../aura/compiler/aura/lang/compiler/test/TestRunner.aura"
+
+// ── 语言前置能力被测函数 ─────────────────────────────────────
+
+fun sumTo(n: Int): Int {
+    var s: Int = 0
+    var i: Int = 1
+    while (i <= n) {
+        s = s + i
+        i = i + 1
+    }
+    return s
+}
+
+fun rangeSum(n: Int): Int {
+    var s: Int = 0
+    for (i in 0..n) {
+        s = s + i
+    }
+    return s
+}
+
+fun whileCount(limit: Int): Int {
+    var c: Int = 0
+    while (c < limit) {
+        c = c + 1
+    }
+    return c
+}
+
+fun classify(n: Int): String {
+    if (n < 0) {
+        return "negative"
+    }
+    if (n == 0) {
+        return "zero"
+    }
+    return "positive"
+}
+
+fun describe(n: Int): String {
+    return when (n) {
+        1 -> "one"
+        2 -> "two"
+        3 -> "three"
+        else -> "many"
+    }
+}
+
+// ── 入口 ─────────────────────────────────────────────────────
+
+fun main() {
+    println("════════ Phase 0 验证用例 ════════")
+    println("")
+
+    // ── 套件 1：测试框架基本能力 ─────────────────────────────
+    val t = TestRunner()
+    t.begin("Phase0/TestRunner")
+    t.assertEq(1 + 1, 2, "integer arithmetic")
+    t.assertEq("au" + "ra", "aura", "string concatenation")
+    t.assertTrue(3 > 2, "boolean true")
+    t.assertFalse(1 > 2, "boolean false")
+    t.assertNotEq(1, 2, "not equal")
+    t.assertNotNull("value", "non-null value")
+    t.assertNull(null, "null value")
+    t.assertGt(5.0, 3.0, "greater than")
+    t.assertGte(5.0, 5.0, "greater or equal")
+
+    // ── 套件 2：失败检测（静默模式，刻意制造 2 个失败）──────
+    val t2 = TestRunner()
+    t2.setQuiet(true)
+    t2.begin("Phase0/failure-detection")
+    t2.assertEq(1, 2, "intentional mismatch")
+    t2.assertTrue(false, "intentional false")
+    t2.assertEq(t2.failCount(), 2, "failure counter accumulates")
+    t2.assertEq(t2.passCount(), 1, "pass counter accumulates")
+
+    // ── 套件 3：语言前置能力 ─────────────────────────────────
+    val t3 = TestRunner()
+    t3.begin("Phase0/language-prereq")
+    t3.assertEq(sumTo(5), 15, "while accumulation")
+    t3.assertEq(rangeSum(4), 10, "for-range accumulation")
+    t3.assertEq(whileCount(4), 4, "while loop count")
+    t3.assertEq(classify(-1), "negative", "if/else negative branch")
+    t3.assertEq(classify(0), "zero", "if/else zero branch")
+    t3.assertEq(classify(7), "positive", "if/else positive branch")
+    t3.assertEq(describe(2), "two", "when expression")
+
+    // ── 汇总 ─────────────────────────────────────────────────
+    val f1 = t.report()
+    val f2 = t2.report()
+    val f3 = t3.report()
+    println("")
+    println("套件 1（框架）失败数:      " + toStr(f1) + " (期望 0)")
+    println("套件 2（失败检测）失败数:   " + toStr(f2) + " (期望 2，为刻意制造)")
+    println("套件 3（语言前置）失败数:   " + toStr(f3) + " (期望 0)")
+    println("")
+
+    // 机器可读结论行：CI 以 `grep "RESULT: PASS"` 作为门禁
+    // （VM 当前无法通过 throw/exit 影响进程退出码）
+    if (f1 == 0 && f2 == 2 && f3 == 0) {
+        println("RESULT: PASS")
+    } else {
+        println("RESULT: FAIL")
+    }
+}

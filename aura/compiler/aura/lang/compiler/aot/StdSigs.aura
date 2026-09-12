@@ -1,0 +1,150 @@
+// aura:///aura/lang/compiler/aot/StdSigs.aura
+package aura.lang.compiler.aot
+// ─────────────────────────────────────────────────────────────
+// 独立 std 函数签名表 — 纯 Aura 化迁移 · Phase 6.5.7b
+//
+// 集中登记「标准库调用点符号」的类型契约：
+//   符号名 | 返回 LLVM 类型 | 参数 LLVM 类型（逗号分隔）
+//
+// 与 `compiler/src/std/cffi/aura_std_cffi.{c,h}` 中导出的
+// `aura_lang_std_<Class>_<method>` **同源**。发射器（Emit.aura）用它：
+//   1. 决定调用点的返回类型与参数形态（`callSignature` 的兜底来源）；
+//   2. 生成 `declare`（`runtimeDeclarations` 追加本表，避免链接期 undefined symbol）；
+//   3. sema / 校验器按 (类, 方法) 查签名。
+//
+// 说明：此前这些签名散落在 `Runtime.preludeTable()` 与 `methodCallSymbol()`
+// 两处、且覆盖不全；本表是唯一真相源（preludeTable 保持向后兼容，不删除）。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.compiler.aot.AotUtil
+
+/// 标准库调用点符号签名表（唯一真相源）。
+fun stdSignatureTable(): String {
+    // ── String ──
+    return "aura_lang_std_String_length|i64|i8*\n" +
+        "aura_lang_std_String_contains|i32|i8*,i8*\n" +
+        "aura_lang_std_String_startsWith|i32|i8*,i8*\n" +
+        "aura_lang_std_String_endsWith|i32|i8*,i8*\n" +
+        "aura_lang_std_String_substring|i8*|i8*,i64,i64\n" +
+        "aura_lang_std_String_charAt|i8*|i8*,i64\n" +
+    "aura_lang_std_String_charCodeAt|i64|i8*,i64\n" +
+        "aura_lang_std_String_trim|i8*|i8*\n" +
+        "aura_lang_std_String_toUpperCase|i8*|i8*\n" +
+        "aura_lang_std_String_toLowerCase|i8*|i8*\n" +
+        "aura_lang_std_String_replace|i8*|i8*,i8*,i8*\n" +
+        "aura_lang_std_String_replaceAll|i8*|i8*,i8*,i8*\n" +
+        "aura_lang_std_String_indexOf|i64|i8*,i8*\n" +
+        "aura_lang_std_String_lastIndexOf|i64|i8*,i8*\n" +
+        "aura_lang_std_String_countChar|i64|i8*,i8*\n" +
+        "aura_lang_std_String_substringBefore|i8*|i8*,i8*\n" +
+        "aura_lang_std_String_substringAfter|i8*|i8*,i8*\n" +
+        "aura_lang_std_String_padStart|i8*|i8*,i64,i8*\n" +
+        "aura_lang_std_String_split|i8*|i8*,i8*\n" +
+        "aura_lang_std_String_equals|i32|i8*,i8*\n" +
+        // ── Collections ──
+        "aura_lang_std_Collections_mutableMapOf|i8*|\n" +
+        "aura_lang_std_Collections_emptyMap|i8*|\n" +
+        "aura_lang_std_Collections_mapSet|void|i8*,i8*,i8*\n" +
+        "aura_lang_std_Collections_mapGet|i8*|i8*,i8*\n" +
+        "aura_lang_std_Collections_mapSize|i64|i8*\n" +
+        "aura_lang_std_Collections_mapContains|i32|i8*,i8*\n" +
+        "aura_lang_std_Collections_listSet|void|i8*,i64,i8*\n" +
+        "aura_lang_std_Collections_emptyList|i8*|\n" +
+        "aura_lang_std_Collections_listOf|i8*|i8*,i8*,i8*\n" +
+        "aura_lang_std_Collections_pairOf|i8*|i8*,i8*\n" +
+        "aura_lang_std_Collections_count|i64|i8*\n" +
+        "aura_lang_std_Collections_listSize|i64|i8*\n" +
+        "aura_lang_std_Collections_isEmpty|i64|i8*\n" +
+        "aura_lang_std_Collections_getAt|i8*|i8*,i64\n" +
+        "aura_lang_std_Collections_listGet|i8*|i8*,i64\n" +
+        "aura_lang_std_Collections_listAppend|i8*|i8*,i8*\n" +
+        "aura_lang_std_Collections_listPop|i8*|i8*\n" +
+        "aura_lang_std_Collections_range|i8*|i32,i32,i32\n" +
+        "aura_lang_std_Collections_indexOf|i64|i8*,i8*\n" +
+        "aura_lang_std_Collections_contains|i32|i8*,i8*\n" +
+        "aura_lang_std_Collections_set|i8*|i8*,i64,i8*\n" +
+        // ── FileSystem ──
+        "aura_lang_std_FileSystem_exists|i32|i8*\n" +
+        "aura_lang_std_FileSystem_readText|i8*|i8*\n" +
+        "aura_lang_std_FileSystem_writeText|void|i8*,i8*\n" +
+        "aura_lang_std_FileSystem_mkdirP|i32|i8*\n" +
+        // ── Process ──
+        "aura_lang_std_Process_run|i64|i8*\n" +
+        "aura_lang_std_Process_argCount|i64|\n" +
+        "aura_lang_std_Process_arg|i8*|i64\n" +
+        "aura_lang_std_Process_args|i8*|\n" +
+        // ── Math ──
+        "aura_lang_std_Math_sin|double|double\n" +
+        "aura_lang_std_Math_cos|double|double\n" +
+        "aura_lang_std_Math_tan|double|double\n" +
+        "aura_lang_std_Math_asin|double|double\n" +
+        "aura_lang_std_Math_acos|double|double\n" +
+        "aura_lang_std_Math_atan|double|double\n" +
+        "aura_lang_std_Math_log|double|double\n" +
+        "aura_lang_std_Math_exp|double|double\n" +
+        "aura_lang_std_Math_sqrt|double|double\n" +
+        "aura_lang_std_Math_pow|double|double,double\n" +
+        "aura_lang_std_Math_min|double|double,double\n" +
+        "aura_lang_std_Math_max|double|double,double\n" +
+        "aura_lang_std_Math_ceil|i64|double\n" +
+        "aura_lang_std_Math_floor|i64|double\n" +
+        "aura_lang_std_Math_round|double|double\n" +
+        "aura_lang_std_Math_abs|i64|double\n"
+}
+
+/// 从 std 签名表查询签名（`ret|paramsSpaced`），未命中返回 ""。
+///
+/// 性能：**先做前缀守卫再构建表**。表内符号一律 `aura_lang_std_` 前缀，
+/// 而发射期绝大多数查询来自普通调用点（用户函数/方法名）——旧实现每次都把
+/// 200 行表重建 + `split` 一遍，无 GC 下累计泄漏数 GB。
+fun stdSignature(name: String): String {
+    if (!name.startsWith("aura_lang_std_")) {
+        return ""
+    }
+    return tableSignature(stdSignatureTable(), name)
+}
+
+/// 构造 (类, 方法) 对应的 std 调用点符号；类名非法返回 ""。
+fun stdSymbolFor(className: String, method: String): String {
+    if (className == "" || method == "") {
+        return ""
+    }
+    if (!isStdClassName(className)) {
+        return ""
+    }
+    return "aura_lang_std_" + sanitizeLlvm(className) + "_" + sanitizeLlvm(method)
+}
+
+/// 按 (类, 方法) 查签名（`ret|paramsSpaced`），未命中返回 ""。
+fun stdSignatureFor(className: String, method: String): String {
+    return stdSignature(stdSymbolFor(className, method))
+}
+
+/// 从「限定名」`Class.method` 解析调用点符号；非 std 类返回 ""。
+fun stdSymbolOfQualified(qualified: String): String {
+    val dot: Int = aotIndexOfSub(qualified, ".")
+    if (dot <= 0) {
+        return ""
+    }
+    val cls: String = aotSlice(qualified, 0, dot)
+    val meth: String = aotSlice(qualified, dot + 1, qualified.length - dot - 1)
+    return stdSymbolFor(cls, meth)
+}
+
+/// 从「限定名」`Class.method` 解析签名；非 std 类或未登记返回 ""。
+fun stdSignatureOfQualified(qualified: String): String {
+    return stdSignature(stdSymbolOfQualified(qualified))
+}
+
+/// 表内全部符号名（换行分隔，每行以换行结尾）。
+fun stdSignatureNames(): String {
+    var out: String = ""
+    val lines: List<String> = stdSignatureTable().split("\n")
+    var i: Int = 0
+    while (i < lines.size) {
+        out = out + aotFieldAt(lines[i], 0, "|") + "\n"
+        i = i + 1
+    }
+    return out
+}

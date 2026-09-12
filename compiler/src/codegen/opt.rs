@@ -91,6 +91,17 @@ fn fold_stmt(s: &HirStmt) -> HirStmt {
         HirStmt::Continue => HirStmt::Continue,
         HirStmt::Block(b) => HirStmt::Block(fold_block(b)),
         HirStmt::Defer(b) => HirStmt::Defer(fold_block(b)),
+        HirStmt::Try {
+            body,
+            catch_var,
+            catch_body,
+            finally,
+        } => HirStmt::Try {
+            body: fold_block(body),
+            catch_var: catch_var.clone(),
+            catch_body: fold_block(catch_body),
+            finally: finally.as_ref().map(fold_block),
+        },
     }
 }
 
@@ -241,6 +252,17 @@ pub fn inline_hir(hir: &mut HirProgram) {
                 continue;
             }
             let params: Vec<String> = f.params.iter().map(|p| p.name.clone()).collect();
+            // 跳过高阶函数（把形参当作函数调用，如 `f(x)`）：
+            // 内联时被调方名无法被实参表达式替换（`subst_expr` 只替换 `Var`），
+            // 强行内联会丢失闭包实参。此类函数保留为普通调用即可。
+            if calls_param_as_callee(&be, &params) {
+                continue;
+            }
+            // 跳过返回/包含 lambda 的函数：形参替换进 lambda 体会改变其捕获集合
+            // （且需处理 lambda 形参遮蔽），内联无法正确完成闭包转换。
+            if contains_lambda(&be) {
+                continue;
+            }
             candidates.insert(f.name.clone(), (params, be));
         }
     }
@@ -251,6 +273,167 @@ pub fn inline_hir(hir: &mut HirProgram) {
         }
         let new_body = inline_block(&f.body, &candidates);
         f.body = new_body;
+    }
+}
+
+/// 表达式树中是否包含 lambda。
+fn contains_lambda(e: &HirExpr) -> bool {
+    match e {
+        HirExpr::Lambda { .. } => true,
+        HirExpr::Call { args, .. } | HirExpr::New { args, .. } => args.iter().any(contains_lambda),
+        HirExpr::CallVirtual {
+            recv, args, ..
+        } => contains_lambda(recv) || args.iter().any(contains_lambda),
+        HirExpr::Binary {
+            lhs, rhs, ..
+        } => contains_lambda(lhs) || contains_lambda(rhs),
+        HirExpr::Unary {
+            operand, ..
+        } => contains_lambda(operand),
+        HirExpr::Member { object, .. } => contains_lambda(object),
+        HirExpr::Index {
+            container,
+            index,
+        } => contains_lambda(container) || contains_lambda(index),
+        HirExpr::If {
+            cond,
+            then_e,
+            else_e,
+        } => contains_lambda(cond) || contains_lambda(then_e) || contains_lambda(else_e),
+        HirExpr::Block(b) => block_contains_lambda(b),
+        HirExpr::Box(i) | HirExpr::WeakRef(i) | HirExpr::Await(i) => contains_lambda(i),
+        _ => false,
+    }
+}
+
+fn block_contains_lambda(b: &HirBlock) -> bool {
+    b.stmts.iter().any(stmt_contains_lambda)
+}
+
+fn stmt_contains_lambda(s: &HirStmt) -> bool {
+    match s {
+        HirStmt::Val { init, .. } | HirStmt::Var { init, .. } => {
+            init.as_ref().map(contains_lambda).unwrap_or(false)
+        }
+        HirStmt::Assign {
+            target,
+            value,
+        } => contains_lambda(target) || contains_lambda(value),
+        HirStmt::Expr(e) => contains_lambda(e),
+        HirStmt::Return(v) => v.as_ref().map(contains_lambda).unwrap_or(false),
+        HirStmt::If {
+            cond,
+            then_b,
+            else_b,
+        } => {
+            contains_lambda(cond)
+                || block_contains_lambda(then_b)
+                || else_b.as_ref().map(|b| block_contains_lambda(b)).unwrap_or(false)
+        }
+        HirStmt::While {
+            cond, body, ..
+        } => contains_lambda(cond) || block_contains_lambda(body),
+        HirStmt::Block(b) | HirStmt::Defer(b) => block_contains_lambda(b),
+        HirStmt::Try {
+            body,
+            catch_body,
+            finally,
+            ..
+        } => {
+            block_contains_lambda(body)
+                || block_contains_lambda(catch_body)
+                || finally.as_ref().map(|b| block_contains_lambda(b)).unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
+/// body 中是否存在「把形参当被调方」的调用（如 `f(x)`，`f` 是形参）。
+fn calls_param_as_callee(e: &HirExpr, params: &[String]) -> bool {
+    match e {
+        HirExpr::Call {
+            callee,
+            args,
+        } => {
+            params.iter().any(|p| p == callee)
+                || args.iter().any(|a| calls_param_as_callee(a, params))
+        }
+        HirExpr::CallVirtual {
+            recv, args, ..
+        } => {
+            calls_param_as_callee(recv, params)
+                || args.iter().any(|a| calls_param_as_callee(a, params))
+        }
+        HirExpr::Binary {
+            lhs, rhs, ..
+        } => calls_param_as_callee(lhs, params) || calls_param_as_callee(rhs, params),
+        HirExpr::Unary {
+            operand, ..
+        } => calls_param_as_callee(operand, params),
+        HirExpr::Member { object, .. } => calls_param_as_callee(object, params),
+        HirExpr::Index {
+            container,
+            index,
+        } => calls_param_as_callee(container, params) || calls_param_as_callee(index, params),
+        HirExpr::New { args, .. } => args.iter().any(|a| calls_param_as_callee(a, params)),
+        HirExpr::If {
+            cond,
+            then_e,
+            else_e,
+        } => {
+            calls_param_as_callee(cond, params)
+                || calls_param_as_callee(then_e, params)
+                || calls_param_as_callee(else_e, params)
+        }
+        HirExpr::Block(b) => block_calls_param_as_callee(b, params),
+        HirExpr::Lambda { body, .. } => block_calls_param_as_callee(body, params),
+        HirExpr::Box(inner) | HirExpr::WeakRef(inner) | HirExpr::Await(inner) => {
+            calls_param_as_callee(inner, params)
+        }
+        _ => false,
+    }
+}
+
+fn block_calls_param_as_callee(b: &HirBlock, params: &[String]) -> bool {
+    b.stmts.iter().any(|s| stmt_calls_param_as_callee(s, params))
+}
+
+fn stmt_calls_param_as_callee(s: &HirStmt, params: &[String]) -> bool {
+    match s {
+        HirStmt::Val { init, .. } | HirStmt::Var { init, .. } => {
+            init.as_ref().map(|e| calls_param_as_callee(e, params)).unwrap_or(false)
+        }
+        HirStmt::Assign {
+            target,
+            value,
+        } => calls_param_as_callee(target, params) || calls_param_as_callee(value, params),
+        HirStmt::Expr(e) => calls_param_as_callee(e, params),
+        HirStmt::Return(v) => v.as_ref().map(|e| calls_param_as_callee(e, params)).unwrap_or(false),
+        HirStmt::If {
+            cond,
+            then_b,
+            else_b,
+        } => {
+            calls_param_as_callee(cond, params)
+                || block_calls_param_as_callee(then_b, params)
+                || else_b.as_ref().map(|b| block_calls_param_as_callee(b, params)).unwrap_or(false)
+        }
+        HirStmt::While {
+            cond, body, ..
+        } => calls_param_as_callee(cond, params) || block_calls_param_as_callee(body, params),
+        HirStmt::Block(b) => block_calls_param_as_callee(b, params),
+        HirStmt::Defer(b) => block_calls_param_as_callee(b, params),
+        HirStmt::Try {
+            body,
+            catch_body,
+            finally,
+            ..
+        } => {
+            block_calls_param_as_callee(body, params)
+                || block_calls_param_as_callee(catch_body, params)
+                || finally.as_ref().map(|b| block_calls_param_as_callee(b, params)).unwrap_or(false)
+        }
+        _ => false,
     }
 }
 

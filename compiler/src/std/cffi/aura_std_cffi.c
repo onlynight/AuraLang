@@ -81,16 +81,223 @@ double aura_to_float(int64_t x) {
     return (double)x;
 }
 
+/* ──────────────────────────────────────────────────────────────
+ * Memory limit guard (backstop for runaway compile/run-time growth)
+ *
+ * 说明（中文）：AOT 运行时的字符串 / 列表 / 映射 / 对象目前**只分配不释放**，
+ * 一旦某处出现「循环里不断分配」，进程就会持续吃内存直至拖垮整个系统。
+ * 这里给所有分配加一个总量闸门：默认上限 8 GiB；外部可用环境变量
+ * `AURA_MEM_LIMIT_MB` 覆盖（单位 MiB；`0` / `off` 表示不限制）。
+ * 超限时打印清晰诊断并 exit(70)，把「系统级假死」降级为「一次可读的失败」。
+ *
+ * AOT 运行时的字符串 / 列表 / 映射 / 对象目前**只分配不释放**，
+ * 一旦某处出现「循环里不断分配」，进程就会持续吃内存直至拖垮整个
+ * 系统（物理内存被占满 → 系统无响应）。这里给所有分配加一个总量闸门：
+ *
+ *   默认上限 8 GiB；外部可用环境变量 `AURA_MEM_LIMIT_MB` 覆盖
+ *   （单位 MiB；`0` / `off` 表示不限制）。
+ *
+ * 超限时打印清晰诊断并 `exit(70)`，把“系统级假死”降级为“一次可读的
+ * 编译失败”。所有 Aura 分配都必须走下面的 `aura_mem_*`（含 `aura_malloc`
+ * 这一公开入口），否则统计会漏。
+ * ────────────────────────────────────────────────────────────── */
+
+/// 默认内存上限（MiB）。
+#define AURA_MEM_DEFAULT_LIMIT_MB 8192
+
+/// 每个分配块的前置头：记录负载大小（16 字节，保证负载 16 字节对齐，
+/// `Plan A` 依赖「真实指针低位为 0」来区分装箱整数）。
+typedef union AuraMemHdr {
+    struct {
+        int64_t size;
+        int64_t pad;
+    } h;
+    long double align_ld;
+    void *align_p;
+} AuraMemHdr;
+
+static int64_t g_aura_mem_limit = -1; /* -1 未初始化；0 = 不限制 */
+static int64_t g_aura_mem_used = 0;   /* 当前存活负载字节数 */
+
+static void aura_mem_init(void) {
+    if (g_aura_mem_limit >= 0) {
+        return;
+    }
+    g_aura_mem_limit = (int64_t)AURA_MEM_DEFAULT_LIMIT_MB * 1024 * 1024;
+    const char *env = getenv("AURA_MEM_LIMIT_MB");
+    if (env && env[0]) {
+        if (strcmp(env, "0") == 0 || strcmp(env, "off") == 0 ||
+            strcmp(env, "unlimited") == 0) {
+            g_aura_mem_limit = 0;
+        } else {
+            long long mb = atoll(env);
+            if (mb > 0) {
+                g_aura_mem_limit = (int64_t)mb * 1024 * 1024;
+            }
+        }
+    }
+}
+
+/// 设置内存上限（MiB，<=0 表示不限制）。供 CLI / 宿主显式覆盖环境变量。
+void aura_mem_set_limit_mb(int64_t mb) {
+    g_aura_mem_limit = (mb > 0) ? mb * 1024 * 1024 : 0;
+}
+
+/// 当前存活分配字节数（诊断用）。
+int64_t aura_mem_used_bytes(void) {
+    return g_aura_mem_used;
+}
+
+/// 当前存活分配 MiB（诊断用；返回 i32 便于 AOT 侧以默认 i32 调用约定直接调用）。
+int32_t aura_mem_used_mb(void) {
+    return (int32_t)(g_aura_mem_used / (1024 * 1024));
+}
+
+/// 当前生效的内存上限字节数（0 = 不限制；诊断用）。
+int64_t aura_mem_limit_bytes(void) {
+    aura_mem_init();
+    return g_aura_mem_limit;
+}
+
+/// 超限诊断 + 中止（退出码 70：与普通编译失败区分）。
+///
+/// 这里刻意用**纯 ASCII**：C 运行时的 stderr 直接写字节，Windows 控制台
+/// 默认代码页会把它当本地编码，中文会显示成乱码。
+static void aura_mem_oom(int64_t need) {
+    fflush(stdout);
+    fprintf(stderr,
+        "[aura] memory limit exceeded: used ~%lld MiB, requesting ~%lld MiB more, "
+        "limit %lld MiB.\n"
+        "[aura] aborted to avoid exhausting physical memory. "
+        "Set AURA_MEM_LIMIT_MB (MiB; 0 or off = unlimited) to change the limit.\n",
+        (long long)(g_aura_mem_used / (1024 * 1024)),
+        (long long)((need / (1024 * 1024)) + 1),
+        (long long)(g_aura_mem_limit / (1024 * 1024)));
+    fflush(stderr);
+    exit(70);
+}
+
+/// 统一分配入口（带上限检查）。
+void *aura_mem_alloc(int64_t n) {
+    aura_mem_init();
+    if (n < 0) {
+        n = 0;
+    }
+    if (g_aura_mem_limit > 0 && g_aura_mem_used + n > g_aura_mem_limit) {
+        aura_mem_oom(n);
+    }
+    AuraMemHdr *h = (AuraMemHdr *)malloc(sizeof(AuraMemHdr) + (size_t)n);
+    if (!h) {
+        aura_mem_oom(n);
+    }
+    h->h.size = n;
+    g_aura_mem_used += n;
+    return (void *)((char *)h + sizeof(AuraMemHdr));
+}
+
+/// 统一重分配入口（带上限检查）。
+void *aura_mem_realloc(void *p, int64_t n) {
+    aura_mem_init();
+    if (!p) {
+        return aura_mem_alloc(n);
+    }
+    if (n < 0) {
+        n = 0;
+    }
+    AuraMemHdr *h = (AuraMemHdr *)((char *)p - sizeof(AuraMemHdr));
+    int64_t old = h->h.size;
+    if (g_aura_mem_limit > 0 && g_aura_mem_used - old + n > g_aura_mem_limit) {
+        aura_mem_oom(n - old);
+    }
+    AuraMemHdr *nh = (AuraMemHdr *)realloc((void *)h, sizeof(AuraMemHdr) + (size_t)n);
+    if (!nh) {
+        aura_mem_oom(n - old);
+    }
+    nh->h.size = n;
+    g_aura_mem_used += (n - old);
+    return (void *)((char *)nh + sizeof(AuraMemHdr));
+}
+
+/// 统一释放入口。
+void aura_mem_free(void *p) {
+    if (!p) {
+        return;
+    }
+    AuraMemHdr *h = (AuraMemHdr *)((char *)p - sizeof(AuraMemHdr));
+    g_aura_mem_used -= h->h.size;
+    if (g_aura_mem_used < 0) {
+        g_aura_mem_used = 0;
+    }
+    free((void *)h);
+}
+
+/// 复制一份以 NUL 结尾的字符串（受内存上限管辖）。
+char *aura_mem_strdup(const char *s) {
+    if (!s) {
+        s = "";
+    }
+    size_t n = strlen(s);
+    char *d = (char *)aura_mem_alloc((int64_t)n + 1);
+    memcpy(d, s, n + 1);
+    return d;
+}
+
+/* 分配一份新的、以 NUL 结尾的字符串副本。
+ *
+ * 为什么不能用共享 static 缓冲：AOT 字符串是「值语义」，返回值可能被调用方
+ * 长期持有（如词法器字段 `src`、解析器缓存的 token 文本）。若返回 static
+ * 缓冲，后续任意一次字符串运算都会就地覆盖此前所有「字符串」的内容，表现为
+ * 字段读出来变成别的文本甚至空串。代价是这些副本不会被释放（AOT 运行时暂无
+ * 字符串 GC）。 */
+static char *aura_dup_n(const char *s, size_t n) {
+    char *out = (char *)aura_mem_alloc((int64_t)n + 1);
+    if (!out) return (char *)"";
+    if (s && n > 0) memcpy(out, s, n);
+    out[n] = '\0';
+    return out;
+}
+
 const char *aura_to_str(int64_t x) {
-    static char buf[64];
-    snprintf(buf, sizeof(buf), "%lld", (long long)x);
+    /* 小整数缓存：AOT 运行时没有 GC，而 int→String 是最高频的分配之一
+     * （编译器 IR 发射会产生千万级此类小串）。0..1023 用静态表以完全避免分配。
+     *
+     * 缓存槽按 **16 字节对齐**：Plan A 用「真实指针低位为 0」区分装箱整数
+     * （见 argv 拷贝处的同类注释），若返回非对齐内部指针会被误判为装箱整数。
+     * 槽内容只写一次、此后只读，可安全在多次调用间共享。 */
+    if (x >= 0 && x < 1024) {
+        static char cache[1024][16];
+        static unsigned char ready[1024];
+        if (!ready[x]) {
+            snprintf(cache[x], 16, "%lld", (long long)x);
+            ready[x] = 1;
+        }
+        return cache[x];
+    }
+    /* 其余按实际位数分配（原先固定 64 字节，对绝大多数数字都过度分配）。 */
+    char tmp[24];
+    int n = snprintf(tmp, sizeof(tmp), "%lld", (long long)x);
+    if (n < 0) return "";
+    char *buf = (char *)aura_mem_alloc((int64_t)n + 1);
+    if (!buf) return "";
+    memcpy(buf, tmp, (size_t)n + 1);
     return buf;
 }
 
 const char *aura_to_str_float(double x) {
-    static char buf[64];
-    snprintf(buf, sizeof(buf), "%g", x);
+    char *buf = (char *)aura_mem_alloc(64);
+    if (!buf) return "";
+    snprintf(buf, 64, "%g", x);
     return buf;
+}
+
+/* `toStr(Boolean)` / `toString(Boolean)` 的专用实现。
+ *
+ * VM 语义：true → "true"，false → "false"。
+ * AOT 下布尔与整数共用 Plan A 的 `i8*` 装箱通道（true 会编码成 -1），
+ * 若直接走 aura_to_str_any 会打印成 "-1"/"0" —— 与 VM 行为不一致。
+ * emit_call 对 `toStr`/`toString` 的 i1 实参改派到这里。 */
+const char *aura_to_str_bool(int64_t v) {
+    return v ? "true" : "false";
 }
 
 double aura_clock(void) {
@@ -199,53 +406,67 @@ int64_t aura_string_charCodeAt(const char *s, int64_t idx) {
     return (unsigned char)s[idx];
 }
 
+/* 单字符字符串缓存（256 个字节值）。
+ *
+ * AOT 发射器把字符串索引 `s[i]` / `.charAt(i)` 落到 `aura_string_charAt`。
+ * 词法器对源码的**每个字符**都会反复调用（`peek` / `advance` / `skipTrivia`），
+ * 若每次 `aura_dup_n(s + idx, 1)` 分配 1 字节串，AOT（无 GC）下解析 600KB
+ * 源码就会产生千万级永久分配 —— 实测「链接阶段 480MB」的主要来源。
+ *
+ * 槽位 16 字节对齐：Plan A 用「真实指针低位为 0」区分装箱整数，
+ * 非对齐的内部指针会被误判（见 argv 拷贝处同类注释）。字符内容只写一次、
+ * 之后只读，可在多次调用间安全共享。
+ */
+static const char *aura_char_cache(unsigned char c) {
+    static char slots[256][16];
+    static unsigned char ready[256];
+    if (!ready[c]) {
+        slots[c][0] = (char)c;
+        slots[c][1] = '\0';
+        ready[c] = 1;
+    }
+    return slots[c];
+}
+
 const char *aura_string_charAt(const char *s, int64_t idx) {
-    static char buf[2] = {0, 0};
     if (!s || idx < 0 || (size_t)idx >= strlen(s)) return "";
-    buf[0] = s[idx];
-    return buf;
+    return aura_char_cache((unsigned char)s[idx]);
 }
 
 const char *aura_string_substring(const char *s, int64_t start, int64_t end) {
-    static char buf[4096];
     if (!s) return "";
     size_t len = strlen(s);
     if (start < 0) start = 0;
     if (end > (int64_t)len) end = len;
     if (start > end) return "";
-    size_t n = (size_t)(end - start);
-    if (n >= sizeof(buf)) n = sizeof(buf) - 1;
-    strncpy(buf, s + start, n);
-    buf[n] = '\0';
-    return buf;
+    return aura_dup_n(s + start, (size_t)(end - start));
 }
 
 const char *aura_string_toUpperCase(const char *s) {
-    static char buf[4096];
     if (!s) return "";
     size_t len = strlen(s);
-    if (len >= sizeof(buf)) len = sizeof(buf) - 1;
+    char *buf = (char *)aura_mem_alloc((int64_t)len + 1);
+    if (!buf) return "";
     for (size_t i = 0; i < len; i++) {
-        buf[i] = toupper((unsigned char)s[i]);
+        buf[i] = (char)toupper((unsigned char)s[i]);
     }
     buf[len] = '\0';
     return buf;
 }
 
 const char *aura_string_toLowerCase(const char *s) {
-    static char buf[4096];
     if (!s) return "";
     size_t len = strlen(s);
-    if (len >= sizeof(buf)) len = sizeof(buf) - 1;
+    char *buf = (char *)aura_mem_alloc((int64_t)len + 1);
+    if (!buf) return "";
     for (size_t i = 0; i < len; i++) {
-        buf[i] = tolower((unsigned char)s[i]);
+        buf[i] = (char)tolower((unsigned char)s[i]);
     }
     buf[len] = '\0';
     return buf;
 }
 
 const char *aura_string_trim(const char *s) {
-    static char buf[4096];
     if (!s) return "";
     size_t len = strlen(s);
     if (len == 0) return "";
@@ -255,11 +476,7 @@ const char *aura_string_trim(const char *s) {
     // 找结束非空白
     size_t end = len;
     while (end > start && isspace((unsigned char)s[end - 1])) end--;
-    size_t n = end - start;
-    if (n >= sizeof(buf)) n = sizeof(buf) - 1;
-    strncpy(buf, s + start, n);
-    buf[n] = '\0';
-    return buf;
+    return aura_dup_n(s + start, end - start);
 }
 
 int aura_string_startsWith(const char *s, const char *prefix) {
@@ -276,7 +493,7 @@ int aura_string_endsWith(const char *s, const char *suffix) {
 }
 
 const char *aura_string_replace(const char *s, const char *from, const char *to) {
-    static char buf[4096];
+    static char buf[65536];
     if (!s || !from) return s ? s : "";
     size_t from_len = strlen(from);
     if (from_len == 0) return s ? s : "";
@@ -295,7 +512,8 @@ const char *aura_string_replace(const char *s, const char *from, const char *to)
         }
     }
     buf[j] = '\0';
-    return buf;
+    // 拷贝到新分配内存返回（static 仅作本次调用的临时缓冲）
+    return aura_dup_n(buf, j);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -305,18 +523,19 @@ const char *aura_string_replace(const char *s, const char *from, const char *to)
 const char *aura_string_concat(const char *a, int64_t alen, const char *b, int64_t blen) {
     size_t a_len = (size_t)(alen > 0 ? alen : 0);
     size_t b_len = (size_t)(blen > 0 ? blen : 0);
-    size_t total = a_len + b_len;
-    if (total > 4094) total = 4094;
 
-    static char buf[4096];
+    // 必须返回新分配内存：同一表达式内的链式拼接（`a + b + c`）会把前一步的
+    // 结果再当作输入，若返回共享 static 缓冲则前后互相覆盖。
+    char *out = (char *)aura_mem_alloc((int64_t)a_len + (int64_t)b_len + 1);
+    if (!out) return "";
     if (a && a_len > 0) {
-        memcpy(buf, a, a_len);
+        memcpy(out, a, a_len);
     }
     if (b && b_len > 0) {
-        memcpy(buf + a_len, b, b_len);
+        memcpy(out + a_len, b, b_len);
     }
-    buf[total] = '\0';
-    return buf;
+    out[a_len + b_len] = '\0';
+    return out;
 }
 
 const char *aura_string_data(AuraString s) {
@@ -415,7 +634,45 @@ double aura_sqrt_wrapper(double x) { return sqrt(x); }
 double aura_pow_wrapper(double b, double e) { return pow(b, e); }
 int64_t toInt(double x) { return (int64_t)x; }
 double toFloat(int64_t x) { return (double)x; }
-const char *toString(int64_t x) { return aura_to_str(x); }
+/* Plan A 助手的前向声明：必须先于 toString 声明，否则 C 会按「隐式声明返回 int」
+   处理，把 64 位指针截断成 32 位，导致返回的字符串指针被破坏。 */
+int64_t aura_to_int_any(uint64_t v);
+const char *aura_to_str_any(uint64_t v);
+
+/* toString 同样按 Plan A 解析：调用点传入的是低位标记的 i8*
+   （带标记的整数 → 十进制串；偶数真实指针 → 原样）。 */
+const char *toString(int64_t x) { return aura_to_str_any((uint64_t)x); }
+
+/* ── Plan A：低位标记（low-bit tagged）的统一值表示 ──
+ * AOT 下列表/Any 只有 64 位槽，整数经 inttoptr 装入后会与真实指针无法区分，
+ * 读回时若误按字符串 strlen 会对非法指针解引用 → 访问违规崩溃。
+ * 约定：
+ *   - 奇数 ((v<<1)|1)  : 装箱的整数 v
+ *   - 偶数             : 真实指针（字符串数据指针等），按指针原义使用
+ * 分配器返回的指针至少 2 字节对齐（实际通常 8/16），故真实指针低位恒为 0。
+ * 这样两个 helper 对「真实指针」的行为与旧代码完全一致（无回归）。 */
+int64_t aura_to_int_any(uint64_t v) {
+    if (v & (uint64_t)1) {
+        /* 带标记的整数：用算术右移恢复符号 */
+        return (int64_t)((int64_t)v >> 1);
+    }
+    /* 偶数：旧语义（raw inttoptr 的值或真实指针），原样返回 */
+    return (int64_t)v;
+}
+
+const char *aura_to_str_any(uint64_t v) {
+    if (v & (uint64_t)1) {
+        return aura_to_str((int64_t)((int64_t)v >> 1));
+    }
+    /* 偶数：真实字符串数据指针 */
+    return (const char *)(uintptr_t)v;
+}
+/* `toStr` 与 `toString` 语义一致：AOT 下调用点会把整数经 inttoptr 打成 i8* 句柄，
+ * 指针与 int64 在 x86-64 上均用整数寄存器传递，故 ABI 兼容，此处直接按整数解释。 */
+/* toStr 接收的是「已按 Plan A 装箱」的 i8*（低位标记），故必须经 aura_to_str_any 解析：
+   带标记的整数 → 十进制串；偶数（真实字符串指针）→ 原样返回。
+   （注：toString 仍保持原始语义，用于调用点现场 inttoptr 的裸整数。） */
+const char *toStr(int64_t x) { return aura_to_str_any((uint64_t)x); }
 double aura_clock_wrapper(void) { return (double)clock(); }
 int64_t aura_strlen_wrapper(const char *s) { return (int64_t)strlen(s); }
 const char *toStringFloat(double x) { return aura_to_str_float(x); }
@@ -604,39 +861,27 @@ void aura_coroutine_yield(const void *ctx) {
     // AOT 下协程由 VM 运行时管理，此处为空操作
 }
 
-// 堆分配（返回指针）
+// 堆分配（返回指针）：统一走带上限检查的分配器
 void *aura_malloc(int64_t size) {
     if (size <= 0) return NULL;
-    return malloc((size_t)size);
+    return aura_mem_alloc(size);
 }
 
-// 堆释放
+// 堆释放：与 aura_malloc 配对
 void aura_free(const void *ptr) {
-    if (ptr) free((void *)ptr);
+    aura_mem_free((void *)ptr);
 }
 
 // 创建字符串对象（返回字符串指针）
 // data: 字符串数据指针，len: 字符串长度
 const char *aura_string_new(const char *data, int64_t len) {
-    static char string_buf[4096];
     if (!data || len <= 0) return "";
-    size_t copy_len = (size_t)(len < 4095 ? len : 4095);
-    memcpy(string_buf, data, copy_len);
-    string_buf[copy_len] = '\0';
-    return string_buf;
+    return aura_dup_n(data, (size_t)len);
 }
 
-// 获取字符串长度（AuraString 结构体）
-int64_t aura_string_length(const AuraString *s) {
-    if (!s || !s->data) return 0;
-    return s->len > 0 ? s->len : (int64_t)strlen(s->data);
-}
-
-// 获取字符串数据指针（AuraString 结构体）
-const char *aura_string_data(const AuraString *s) {
-    if (!s || !s->data) return "";
-    return s->data;
-}
+// 注：`aura_string_length` / `aura_string_data` 已在文件前部以 `const char*`
+// 形参形式定义（AOT 发射器按 i8* 指针调用）；此处不再定义 `AuraString*` 版本，
+// 以避免同名函数签名冲突（此前重复定义导致 clang 报 conflicting types）。
 
 // ─────────────────────────────────────────────────────────────────────────────
 // P13: 标准库快照（AOT C 实现）— math/ascii/collections/time/random/encoding/
@@ -1076,6 +1321,564 @@ const char *aura_env_get(const char *name) {
     return env_buf;
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+ * AOT 调用点符号层（sanitize(aura.lang.std.X.y)）
+ *
+ * AOT 发射器把 `aura.lang.std.String.split` 这类调用落成 LLVM 符号
+ * `aura_lang_std_String_split`（见 codegen/aot/emit.rs 的 sanitizellvm）。
+ * 本文件历史上只导出 `aura_string_*` 旧名，导致除 prelude 外的 std 调用
+ * 在链接期全部报 undefined symbol。本节按「调用点符号」导出，
+ * 转发到既有实现或给出实现，使 AOT 产物可以真正链接。
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── 极简动态列表：元素为字符串指针（AOT 下 List<T> 映射为 i8*） ── */
+
+typedef struct {
+    int64_t len;
+    int64_t cap;
+    const char **items;
+} AuraDynList;
+
+static AuraDynList *aura_dynlist_new(int64_t cap) {
+    AuraDynList *l = (AuraDynList *)aura_mem_alloc((int64_t)sizeof(AuraDynList));
+    if (!l) return NULL;
+    if (cap < 4) cap = 4;
+    l->len = 0;
+    l->cap = cap;
+    l->items = (const char **)aura_mem_alloc((int64_t)sizeof(const char *) * cap);
+    return l;
+}
+
+static void aura_dynlist_push(AuraDynList *l, const char *s) {
+    if (!l) return;
+    if (l->len >= l->cap) {
+        int64_t ncap = l->cap * 2;
+        const char **ni =
+            (const char **)aura_mem_realloc((void *)l->items, (int64_t)sizeof(const char *) * ncap);
+        if (!ni) return;
+        l->items = ni;
+        l->cap = ncap;
+    }
+    l->items[l->len++] = s ? s : "";
+}
+
+/** 左闭右开的 substr 到新分配的 C 字符串 */
+static const char *aura_substr_dup(const char *s, size_t n) {
+    char *out = (char *)aura_mem_alloc((int64_t)n + 1);
+    if (!out) return "";
+    if (s && n > 0) memcpy(out, s, n);
+    out[n] = '\0';
+    return out;
+}
+
+/* ── aura.lang.std.String.* ── */
+
+int64_t aura_lang_std_String_length(const char *s) {
+    return aura_string_length(s);
+}
+
+int aura_lang_std_String_contains(const char *s, const char *sub) {
+    return aura_string_contains(s, sub);
+}
+
+int aura_lang_std_String_startsWith(const char *s, const char *prefix) {
+    return aura_string_startsWith(s, prefix);
+}
+
+int aura_lang_std_String_endsWith(const char *s, const char *suffix) {
+    return aura_string_endsWith(s, suffix);
+}
+
+const char *aura_lang_std_String_substring(const char *s, int64_t start, int64_t end) {
+    return aura_string_substring(s, start, end);
+}
+
+const char *aura_lang_std_String_charAt(const char *s, int64_t idx) {
+    return aura_string_charAt(s, idx);
+}
+
+/**
+ * 字符码点（O(1)：不做 strlen，靠 NUL 判定越界）。
+ *
+ * 与 `aura_string_charCodeAt` 语义一致（越界返回 -1），但去掉了
+ * `strlen(s)`，使 Aura 侧逐字符扫描从 O(n) 降到 O(1)——
+ * 否则 `while (i < s.length) { s[i] ... }` 这类惯用法是 O(n²)。
+ */
+int64_t aura_lang_std_String_charCodeAt(const char *s, int64_t idx) {
+    if (!s || idx < 0) return -1;
+    unsigned char c = (unsigned char)s[idx];
+    if (c == 0) return -1;
+    return (int64_t)c;
+}
+
+const char *aura_lang_std_String_trim(const char *s) {
+    return aura_string_trim(s);
+}
+
+const char *aura_lang_std_String_toUpperCase(const char *s) {
+    return aura_string_toUpperCase(s);
+}
+
+const char *aura_lang_std_String_toLowerCase(const char *s) {
+    return aura_string_toLowerCase(s);
+}
+
+const char *aura_lang_std_String_replace(const char *s, const char *from, const char *to) {
+    return aura_string_replace(s, from, to);
+}
+
+/** replaceAll：与 replace 同语义（C 实现已做全量替换） */
+const char *aura_lang_std_String_replaceAll(const char *s, const char *from, const char *to) {
+    return aura_string_replace(s, from, to);
+}
+
+int64_t aura_lang_std_String_indexOf(const char *s, const char *sub) {
+    if (!s || !sub) return -1;
+    const char *p = strstr(s, sub);
+    return p ? (int64_t)(p - s) : -1;
+}
+
+int64_t aura_lang_std_String_lastIndexOf(const char *s, const char *sub) {
+    if (!s || !sub) return -1;
+    size_t sl = strlen(s);
+    size_t bl = strlen(sub);
+    if (bl > sl) return -1;
+    for (size_t i = sl - bl + 1; i > 0; i--) {
+        if (strncmp(s + i - 1, sub, bl) == 0) return (int64_t)(i - 1);
+    }
+    return -1;
+}
+
+int64_t aura_lang_std_String_countChar(const char *s, const char *ch) {
+    if (!s || !ch || !ch[0]) return 0;
+    char c = ch[0];
+    int64_t n = 0;
+    for (const char *p = s; *p; p++) {
+        if (*p == c) n++;
+    }
+    return n;
+}
+
+const char *aura_lang_std_String_substringBefore(const char *s, const char *sep) {
+    if (!s || !sep || !sep[0]) return s ? s : "";
+    const char *p = strstr(s, sep);
+    if (!p) return s;
+    return aura_substr_dup(s, (size_t)(p - s));
+}
+
+const char *aura_lang_std_String_substringAfter(const char *s, const char *sep) {
+    if (!s || !sep || !sep[0]) return "";
+    const char *p = strstr(s, sep);
+    if (!p) return "";
+    p += strlen(sep);
+    /* 必须返回新分配副本，不能返回 `p`（原串的内部指针）：
+     * Plan A 低位标记方案依赖「真实字符串指针恒为偶数」来区分装箱整数
+     * ((v<<1)|1)。内部指针的地址奇偶性不可控，可能被判成装箱整数，
+     * 导致后续 aura_to_str_any 解出垃圾文本。 */
+    return aura_substr_dup(p, strlen(p));
+}
+
+const char *aura_lang_std_String_padStart(const char *s, int64_t width, const char *pad) {
+    if (!s) return "";
+    size_t sl = strlen(s);
+    if ((int64_t)sl >= width) return s;
+    size_t pl = pad ? strlen(pad) : 0;
+    if (pl == 0) return s;
+    static char buf[4096];
+    size_t need = (size_t)width;
+    if (need >= sizeof(buf)) need = sizeof(buf) - 1;
+    size_t fill = need - sl;
+    size_t j = 0;
+    while (j < fill) {
+        buf[j] = pad[j % pl];
+        j++;
+    }
+    memcpy(buf + fill, s, sl);
+    buf[need] = '\0';
+    return buf;
+}
+
+/** 按分隔符切分 → AuraDynList（元素为堆分配的 C 字符串） */
+const void *aura_lang_std_String_split(const char *s, const char *sep) {
+    AuraDynList *l = aura_dynlist_new(8);
+    if (!s) {
+        aura_dynlist_push(l, "");
+        return (const void *)l;
+    }
+    if (!sep || !sep[0]) {
+        aura_dynlist_push(l, s);
+        return (const void *)l;
+    }
+    size_t seplen = strlen(sep);
+    const char *start = s;
+    const char *p;
+    while ((p = strstr(start, sep)) != NULL) {
+        aura_dynlist_push(l, aura_substr_dup(start, (size_t)(p - start)));
+        start = p + seplen;
+    }
+    aura_dynlist_push(l, aura_substr_dup(start, strlen(start)));
+    return (const void *)l;
+}
+
+/** 字符串内容相等（AOT 字符串比较统一走这里，避免结构体按位比较） */
+int aura_lang_std_String_equals(const char *a, const char *b) {
+    if (!a || !b) return a == b ? 1 : 0;
+    return strcmp(a, b) == 0 ? 1 : 0;
+}
+
+/* ── 极简字符串键值表（`Map<String, Any>`；AOT 下 Map 表示为 i8*） ── */
+
+static const char *aura_strdup(const char *s) {
+    return aura_mem_strdup(s);
+}
+
+typedef struct {
+    int64_t len;
+    int64_t cap;
+    const char **keys;
+    const char **vals;
+} AuraDynMap;
+
+static AuraDynMap *aura_map_new(int64_t cap) {
+    AuraDynMap *m = (AuraDynMap *)aura_mem_alloc((int64_t)sizeof(AuraDynMap));
+    if (!m) return NULL;
+    if (cap < 4) cap = 4;
+    m->len = 0;
+    m->cap = cap;
+    m->keys = (const char **)aura_mem_alloc((int64_t)sizeof(const char *) * cap);
+    m->vals = (const char **)aura_mem_alloc((int64_t)sizeof(const char *) * cap);
+    return m;
+}
+
+const void *aura_lang_std_Collections_mutableMapOf(void) {
+    return (const void *)aura_map_new(8);
+}
+
+const void *aura_lang_std_Collections_emptyMap(void) {
+    return (const void *)aura_map_new(4);
+}
+
+/** 就地写入（Map 为可变堆对象，调用方拿到的是同一指针） */
+void aura_lang_std_Collections_mapSet(const void *map, const char *key, const void *value) {
+    AuraDynMap *m = (AuraDynMap *)map;
+    if (!m || !key) return;
+    const char *v = value ? (const char *)value : "";
+    for (int64_t i = 0; i < m->len; i++) {
+        if (m->keys[i] && strcmp(m->keys[i], key) == 0) {
+            m->vals[i] = v;
+            return;
+        }
+    }
+    if (m->len >= m->cap) {
+        int64_t ncap = m->cap * 2;
+        const char **nk =
+            (const char **)aura_mem_realloc((void *)m->keys, (int64_t)sizeof(const char *) * ncap);
+        const char **nv =
+            (const char **)aura_mem_realloc((void *)m->vals, (int64_t)sizeof(const char *) * ncap);
+        if (!nk || !nv) return;
+        m->keys = nk;
+        m->vals = nv;
+        m->cap = ncap;
+    }
+    m->keys[m->len] = aura_strdup(key);
+    m->vals[m->len] = v;
+    m->len++;
+}
+
+const void *aura_lang_std_Collections_mapGet(const void *map, const char *key) {
+    const AuraDynMap *m = (const AuraDynMap *)map;
+    if (!m || !key) return "";
+    for (int64_t i = 0; i < m->len; i++) {
+        if (m->keys[i] && strcmp(m->keys[i], key) == 0) {
+            return (const void *)m->vals[i];
+        }
+    }
+    return "";
+}
+
+int64_t aura_lang_std_Collections_mapSize(const void *map) {
+    const AuraDynMap *m = (const AuraDynMap *)map;
+    return m ? m->len : 0;
+}
+
+int aura_lang_std_Collections_mapContains(const void *map, const char *key) {
+    const AuraDynMap *m = (const AuraDynMap *)map;
+    if (!m || !key) return 0;
+    for (int64_t i = 0; i < m->len; i++) {
+        if (m->keys[i] && strcmp(m->keys[i], key) == 0) return 1;
+    }
+    return 0;
+}
+
+/** 列表按下标写入（越界则追加） */
+void aura_lang_std_Collections_listSet(const void *list, int64_t idx, const void *value) {
+    AuraDynList *l = (AuraDynList *)list;
+    if (!l) return;
+    const char *v = value ? (const char *)value : "";
+    if (idx >= 0 && idx < l->len) {
+        l->items[idx] = v;
+    } else {
+        aura_dynlist_push(l, v);
+    }
+}
+
+/* ── aura.lang.std.Collections.* ── */
+
+const void *aura_lang_std_Collections_emptyList(void) {
+    return (const void *)aura_dynlist_new(4);
+}
+
+const void *aura_lang_std_Collections_listOf(const void *a, const void *b, const void *c) {
+    AuraDynList *l = aura_dynlist_new(4);
+    aura_dynlist_push(l, (const char *)a);
+    aura_dynlist_push(l, (const char *)b);
+    aura_dynlist_push(l, (const char *)c);
+    return (const void *)l;
+}
+
+/** pairOf(a, b)：`to` 运算符 / Pair 构造。AOT 下 Pair 以 2 元素 AuraDynList 表示
+ *  （与 VM 侧 `nat_pair_of` 的 2 元素 `Value::List` 语义一致），供 `val (x, y) = p`
+ *  解构经 getAt(0)/getAt(1) 取回，保证 AOT 产物链接期不再缺符号。 */
+const void *aura_lang_std_Collections_pairOf(const void *a, const void *b) {
+    AuraDynList *l = aura_dynlist_new(4);
+    aura_dynlist_push(l, (const char *)a);
+    aura_dynlist_push(l, (const char *)b);
+    return (const void *)l;
+}
+
+int64_t aura_lang_std_Collections_count(const void *list) {
+    const AuraDynList *l = (const AuraDynList *)list;
+    return l ? l->len : 0;
+}
+
+int64_t aura_lang_std_Collections_listSize(const void *list) {
+    return aura_lang_std_Collections_count(list);
+}
+
+int64_t aura_lang_std_Collections_isEmpty(const void *list) {
+    return aura_lang_std_Collections_count(list) == 0 ? 1 : 0;
+}
+
+const void *aura_lang_std_Collections_getAt(const void *list, int64_t idx) {
+    const AuraDynList *l = (const AuraDynList *)list;
+    if (!l || idx < 0 || idx >= l->len) return "";
+    return (const void *)l->items[idx];
+}
+
+const void *aura_lang_std_Collections_listGet(const void *list, int64_t idx) {
+    return aura_lang_std_Collections_getAt(list, idx);
+}
+
+const void *aura_lang_std_Collections_listAppend(const void *list, const void *value) {
+    AuraDynList *l = (AuraDynList *)list;
+    if (!l) {
+        l = aura_dynlist_new(4);
+    }
+    aura_dynlist_push(l, (const char *)value);
+    return (const void *)l;
+}
+
+/** list.pop()：弹出并返回末尾元素（AOT 下列表元素为 i8* 句柄）。
+ *  空列表返回 NULL；返回值经 getAt 的逆转换还原为原类型。 */
+const void *aura_lang_std_Collections_listPop(const void *list) {
+    AuraDynList *l = (AuraDynList *)list;
+    if (!l || l->len <= 0) return (const void *)0;
+    l->len--;
+    return (const void *)l->items[l->len];
+}
+
+/** 构造整数区间列表（对应 Aura `start..end` / `start..<end` / `start..=end`）。
+ *  start/end/inclusive 均为 i32；元素以 i64 句柄（值本身）存入 AuraDynList，
+ *  供 AOT 的 `for i in 1..10` 等循环消费。 */
+const void *aura_lang_std_Collections_range(int32_t start, int32_t end, int32_t inclusive) {
+    AuraDynList *l = aura_dynlist_new(16);
+    if (!l) return NULL;
+    if (start <= end) {
+        int64_t i = start;
+        for (;;) {
+            if (i > (int64_t)end) break;
+            if (i == (int64_t)end && !inclusive) break;
+            aura_dynlist_push(l, (const char *)(intptr_t)i);
+            if (i == (int64_t)end) break;
+            i++;
+        }
+    } else {
+        int64_t i = start;
+        for (;;) {
+            if (i < (int64_t)end) break;
+            if (i == (int64_t)end && !inclusive) break;
+            aura_dynlist_push(l, (const char *)(intptr_t)i);
+            if (i == (int64_t)end) break;
+            i--;
+        }
+    }
+    return (const void *)l;
+}
+
+/**
+ * 集合元素句柄相等判定。
+ *
+ * 列表元素统一以 `i8*` 句柄存储（Plan A：整数为低位标记 `(v<<1)|1`）。
+ * 旧实现直接 `strcmp` 比较：元素是整数句柄时会把 `0x3d` 之类当指针解引用，
+ * `list.indexOf(30)` 因此触发访问违例（0xC0000005）。这里按句柄类型分流：
+ * 双方都是标记整数 → 比数值；一方是整数 → 不等；否则按 C 字符串比内容。
+ */
+static int aura_handle_equals(const char *a, const char *b) {
+    if (a == b) return 1;
+    if (!a || !b) return 0;
+    uintptr_t ua = (uintptr_t)a;
+    uintptr_t ub = (uintptr_t)b;
+    int ia = (ua & 1) != 0;
+    int ib = (ub & 1) != 0;
+    if (ia || ib) return ia == ib && ua == ub;
+    return strcmp(a, b) == 0;
+}
+
+int64_t aura_lang_std_Collections_indexOf(const void *list, const void *value) {
+    const AuraDynList *l = (const AuraDynList *)list;
+    const char *v = (const char *)value;
+    if (!l || !v) return -1;
+    for (int64_t i = 0; i < l->len; i++) {
+        const char *it = l->items[i];
+        if (aura_handle_equals(it, v)) return i;
+    }
+    return -1;
+}
+
+int aura_lang_std_Collections_contains(const void *list, const void *value) {
+    return aura_lang_std_Collections_indexOf(list, value) >= 0 ? 1 : 0;
+}
+
+/** set(list, idx, value)：简化实现——越界为追加 */
+const void *aura_lang_std_Collections_set(const void *list, int64_t idx, const void *value) {
+    AuraDynList *l = (AuraDynList *)list;
+    if (!l) {
+        l = aura_dynlist_new(4);
+    }
+    const char *v = (const char *)value ? (const char *)value : "";
+    if (idx >= 0 && idx < l->len) {
+        l->items[idx] = v;
+    } else {
+        aura_dynlist_push(l, v);
+    }
+    return (const void *)l;
+}
+
+/* ── aura.lang.std.FileSystem.* ── */
+
+int aura_lang_std_FileSystem_exists(const char *path) {
+    return aura_fs_exists(path) ? 1 : 0;
+}
+
+const char *aura_lang_std_FileSystem_readText(const char *path) {
+    return aura_fs_readText(path);
+}
+
+void aura_lang_std_FileSystem_writeText(const char *path, const char *content) {
+    (void)aura_fs_writeText(path, content);
+}
+
+#if defined(_WIN32)
+#include <direct.h>
+#define AURA_MKDIR_ONE(p) _mkdir(p)
+#else
+#define AURA_MKDIR_ONE(p) mkdir((p), 0755)
+#endif
+
+/** 递归创建目录（等价 FileSystem.mkdirP） */
+int aura_lang_std_FileSystem_mkdirP(const char *path) {
+    if (!path || !path[0]) return -1;
+    char buf[1024];
+    size_t n = strlen(path);
+    if (n >= sizeof(buf)) return -1;
+    memcpy(buf, path, n + 1);
+    for (size_t i = 1; i <= n; i++) {
+        if (buf[i] == '/' || buf[i] == '\\' || buf[i] == '\0') {
+            char saved = buf[i];
+            buf[i] = '\0';
+            if (buf[0]) (void)AURA_MKDIR_ONE(buf);
+            buf[i] = saved;
+        }
+    }
+    return 0;
+}
+
+/* ── aura.lang.std.Process.* ── */
+
+/** 同步执行命令，返回退出码（AOT 下用系统 shell） */
+int64_t aura_lang_std_Process_run(const char *cmd) {
+    if (!cmd) return -1;
+    int rc = system(cmd);
+    return (int64_t)rc;
+}
+
+/* ── 命令行参数（AOT） ──
+ * AOT 发射的 C 入口 `main` 在函数体最开始调用 `aura_args_set(argc, argv)`，
+ * 把宿主进程的 argv 存入本模块；`Process.arg(i)` / `Process.argCount()` 据此读取。
+ * （VM 侧对应 std_process.rs 的 `std::env::args()`。） */
+static int aura_saved_argc = 0;
+static char **aura_saved_argv = NULL;
+
+void aura_args_set(int argc, char **argv) {
+    aura_saved_argc = argc;
+    aura_saved_argv = argv;
+}
+
+int64_t aura_lang_std_Process_argCount(void) {
+    return (int64_t)aura_saved_argc;
+}
+
+const char *aura_lang_std_Process_arg(int64_t index) {
+    if (index < 0 || index >= (int64_t)aura_saved_argc) return "";
+    if (!aura_saved_argv || !aura_saved_argv[index]) return "";
+    /* 必须返回 malloc 副本：argv[i] 是 OS 命令行缓冲的内部指针，低 bit 奇偶不可控，
+     * 而 Plan A 依赖「真实字符串指针恒为偶数」来区分装箱整数 ((v<<1)|1)。
+     * 返回内部指针会被 aura_to_str_any 误判成装箱整数，打印出地址数字。 */
+    return aura_strdup(aura_saved_argv[index]);
+}
+
+/** 所有 argv 以 '\n' 连接（AOT 下的简化表示；VM 侧返回 List）。 */
+const char *aura_lang_std_Process_args(void) {
+    static char *joined = NULL;
+    size_t total = 1;
+    int i;
+    if (joined) {
+        aura_mem_free(joined);
+        joined = NULL;
+    }
+    if (!aura_saved_argv) return "";
+    for (i = 0; i < aura_saved_argc; i++) {
+        if (aura_saved_argv[i]) total += strlen(aura_saved_argv[i]) + 1;
+    }
+    joined = (char *)aura_mem_alloc((int64_t)total);
+    if (!joined) return "";
+    joined[0] = '\0';
+    for (i = 0; i < aura_saved_argc; i++) {
+        if (i > 0) strcat(joined, "\n");
+        if (aura_saved_argv[i]) strcat(joined, aura_saved_argv[i]);
+    }
+    return joined;
+}
+
+/* ── aura.lang.std.Math.*（转发到 aura_math_* 实现） ── */
+
+double aura_lang_std_Math_sin(double x) { return aura_math_sin(x); }
+double aura_lang_std_Math_cos(double x) { return aura_math_cos(x); }
+double aura_lang_std_Math_tan(double x) { return aura_math_tan(x); }
+double aura_lang_std_Math_asin(double x) { return aura_math_asin(x); }
+double aura_lang_std_Math_acos(double x) { return aura_math_acos(x); }
+double aura_lang_std_Math_atan(double x) { return aura_math_atan(x); }
+double aura_lang_std_Math_log(double x) { return aura_math_log(x); }
+double aura_lang_std_Math_exp(double x) { return aura_math_exp(x); }
+double aura_lang_std_Math_pow(double a, double b) { return aura_math_pow(a, b); }
+double aura_lang_std_Math_min(double a, double b) { return aura_math_min(a, b); }
+double aura_lang_std_Math_max(double a, double b) { return aura_math_max(a, b); }
+int64_t aura_lang_std_Math_ceil(double x) { return aura_math_ceil(x); }
+int64_t aura_lang_std_Math_floor(double x) { return aura_math_floor(x); }
+double aura_lang_std_Math_sqrt(double x) { return aura_math_sqrt(x); }
+double aura_lang_std_Math_round(double x) { return aura_math_round(x); }
+int64_t aura_lang_std_Math_abs(double x) { return aura_math_abs(x); }
+
 _Bool aura_env_has(const char *name) {
     return getenv(name ? name : "") != NULL;
 }
@@ -1097,14 +1900,32 @@ _Bool aura_fs_isDirectory(const char *path) {
 }
 
 const char *aura_fs_readText(const char *path) {
-    static char fs_buf[4096];
-    fs_buf[0] = '\0';
+    /* 动态扩容读取（旧实现用 static 4KB 缓冲，>4KB 的源码会被静默截断，
+     * 导致自举编译器中大文件解析出错）。返回堆分配副本，避免多次读取互相覆盖。 */
     FILE *f = fopen(path ? path : "", "rb");
-    if (!f) return fs_buf;
-    size_t n = fread(fs_buf, 1, sizeof(fs_buf) - 1, f);
-    fs_buf[n] = '\0';
+    size_t cap = 4096, len = 0;
+    char *buf;
+    if (!f) return "";
+    buf = (char *)aura_mem_alloc((int64_t)cap);
+    if (!buf) {
+        fclose(f);
+        return "";
+    }
+    for (;;) {
+        size_t n;
+        if (len + 1 >= cap) {
+            char *nb = (char *)aura_mem_realloc(buf, (int64_t)cap * 2);
+            if (!nb) break;
+            buf = nb;
+            cap *= 2;
+        }
+        n = fread(buf + len, 1, cap - len - 1, f);
+        len += n;
+        if (n == 0) break;
+    }
     fclose(f);
-    return fs_buf;
+    buf[len] = '\0';
+    return buf;
 }
 
 const void *aura_fs_writeText(const char *path, const char *content) {

@@ -1,0 +1,44 @@
+// aura:///aura/compiler/aura/lang/compiler/runtime/GcTrigger.aura
+// GC 触发器（Phase 4: 完整 VM Aura 编写）
+/// GC 触发器。
+///
+/// @since 0.5
+internal object GcTrigger {
+
+    /// GC 触发器状态。
+    fun create(threshold: Int): Map<String, Any> {
+        val trigger: Map<String, Any> = Collections.mutableMapOf()
+        trigger["threshold"] = threshold
+        trigger["current"] = 0
+        trigger["enabled"] = true
+        return trigger
+    }
+
+    /// 检查是否应该触发 GC。
+    fun shouldTrigger(trigger: Map<String, Any>): Boolean {
+        if (!(trigger["enabled"] as Boolean)) return false
+        val current = trigger["current"] as Int
+        val threshold = trigger["threshold"] as Int
+        return current >= threshold
+    }
+
+    /// 增加已分配字节数。
+    fun allocated(trigger: Map<String, Any>, bytes: Int): Unit {
+        trigger["current"] = (trigger["current"] as Int) + bytes
+    }
+
+    /// 减少已分配字节数。
+    fun freed(trigger: Map<String, Any>, bytes: Int): Unit {
+        trigger["current"] = (trigger["current"] as Int) - bytes
+    }
+
+    /// 启用/禁用触发器。
+    fun setEnabled(trigger: Map<String, Any>, enabled: Boolean): Unit {
+        trigger["enabled"] = enabled
+    }
+
+    /// 获取版本信息。
+    fun version(): String {
+        return "0.5.0-phase4-phantom"
+    }
+}

@@ -1,0 +1,291 @@
+// aura:///aura/lang/collection/ArrayList.aura
+package aura.lang.collection
+// 集合包：ArrayList 实现（基于动态数组的 List）
+
+import aura.lang.collection.List
+import aura.lang.collection.Array
+
+/// ArrayList<T> — 基于动态数组的列表实现。
+///
+/// - 时间复杂度：get O(1), add O(1) 均摊, remove O(n)
+/// - 空间复杂度：O(n)
+/// - 随机访问快速，插入删除较慢（需要移动元素）
+///
+/// @see List, LinkedList, HashMap
+/// @since 0.5
+internal class ArrayList<T> : List<T> {
+
+    // ── 内部存储 ──
+
+    private var data: Array<T>
+    private var _size: Int
+
+    // ── 构造 ──
+
+    /// 创建空列表
+    constructor() {
+        data = arrayOf<T>()
+        _size = 0
+    }
+
+    // ── 属性 ──
+
+    /// 列表元素数量
+    override fun getSize(): Int {
+        return _size
+    }
+
+    /// 列表元素数量（属性形式，`xs.size`）
+    val size: Int
+        get() = _size
+
+    // ── 访问方法 ──
+
+    /// 按下标获取元素
+    override fun get(index: Int): T {
+        if (index < 0 || index >= _size) {
+            throw IndexOutOfBounds("index: $index, size: $_size")
+        }
+        return data[index]
+    }
+
+    /// 按下标设置元素
+    fun set(index: Int, value: T): Unit {
+        if (index < 0 || index >= _size) {
+            throw IndexOutOfBounds("index: $index, size: $_size")
+        }
+        data[index] = value
+    }
+
+    /// 获取第一个元素
+    override fun first(): T {
+        if (_size == 0) throw EmptyList()
+        return data[0]
+    }
+
+    /// 获取最后一个元素
+    override fun last(): T {
+        if (_size == 0) throw EmptyList()
+        return data[_size - 1]
+    }
+
+    // ── 修改方法 ──
+
+    /// 在末尾添加元素
+    fun add(item: T): Unit {
+        data = data + item
+        _size = _size + 1
+    }
+
+    /// 移除指定位置的元素
+    fun remove(index: Int): T {
+        if (index < 0 || index >= _size) {
+            throw IndexOutOfBounds("index: $index, size: $_size")
+        }
+        val item = data[index]
+        var newData = arrayOf<T>()
+        var i: Int = 0
+        while (i < _size) {
+            if (i != index) {
+                newData = newData + data[i]
+            }
+            i = i + 1
+        }
+        data = newData
+        _size = _size - 1
+        return item
+    }
+
+    /// 清空列表
+    fun clear(): Unit {
+        data = arrayOf<T>()
+        _size = 0
+    }
+
+    // ── 查找方法 ──
+
+    /// 检查列表是否包含指定元素
+    override fun contains(item: T): Boolean {
+        return indexOf(item) >= 0
+    }
+
+    /// 查找元素的索引（未找到返回 -1）
+    override fun indexOf(item: T): Int {
+        var i: Int = 0
+        while (i < _size) {
+            if (data[i] == item) {
+                return i
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// 查找元素的最后一个索引（未找到返回 -1）
+    fun lastIndexOf(item: T): Int {
+        var i: Int = _size - 1
+        while (i >= 0) {
+            if (data[i] == item) {
+                return i
+            }
+            i = i - 1
+        }
+        return -1
+    }
+
+    // ── 过滤与转换 ──
+
+    /// 按条件过滤
+    fun filter(predicate: (T) -> Boolean): List<T> {
+        val result = ArrayList<T>()
+        var i: Int = 0
+        while (i < _size) {
+            if (predicate(data[i])) {
+                result.add(data[i])
+            }
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 转换每个元素
+    fun map(transform: (T) -> Any): List<Any> {
+        val result = ArrayList<Any>()
+        var i: Int = 0
+        while (i < _size) {
+            result.add(transform(data[i]))
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 获取所有不同元素
+    fun distinct(): List<T> {
+        val result = ArrayList<T>()
+        var i: Int = 0
+        while (i < _size) {
+            if (!result.contains(data[i])) {
+                result.add(data[i])
+            }
+            i = i + 1
+        }
+        return result
+    }
+
+    // ── 全量检查 ──
+
+    /// 检查是否所有元素都满足条件
+    fun every(predicate: (T) -> Boolean): Boolean {
+        var i: Int = 0
+        while (i < _size) {
+            if (!predicate(data[i])) {
+                return false
+            }
+            i = i + 1
+        }
+        return true
+    }
+
+    /// 检查是否存在满足条件的元素
+    fun any(predicate: (T) -> Boolean): Boolean {
+        var i: Int = 0
+        while (i < _size) {
+            if (predicate(data[i])) {
+                return true
+            }
+            i = i + 1
+        }
+        return false
+    }
+
+    // ── 范围操作 ──
+
+    /// 取前 n 个元素
+    fun take(n: Int): List<T> {
+        val count = min(n, _size)
+        val result = ArrayList<T>()
+        var i: Int = 0
+        while (i < count) {
+            result.add(data[i])
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 跳过前 n 个元素
+    fun skip(n: Int): List<T> {
+        var start = min(n, _size)
+        val result = ArrayList<T>()
+        var i: Int = start
+        while (i < _size) {
+            result.add(data[i])
+            i = i + 1
+        }
+        return result
+    }
+
+    // ── 聚合方法 ──
+
+    /// 计算所有元素的 sum
+    fun sum(): Int {
+        var result: Int = 0
+        var i: Int = 0
+        while (i < _size) {
+            result = result + (data[i] as Int)
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 获取最小值
+    fun min(): T {
+        if (_size == 0) throw EmptyList()
+        var result = data[0]
+        var i: Int = 1
+        while (i < _size) {
+            if (data[i] < result) {
+                result = data[i]
+            }
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 获取最大值
+    fun max(): T {
+        if (_size == 0) throw EmptyList()
+        var result = data[0]
+        var i: Int = 1
+        while (i < _size) {
+            if (data[i] > result) {
+                result = data[i]
+            }
+            i = i + 1
+        }
+        return result
+    }
+
+    // ── 转换 ──
+
+    /// 转换为字符串（逗号分隔）
+    override fun toString(): String {
+        var result: String = "["
+        var i: Int = 0
+        while (i < _size) {
+            if (i > 0) {
+                result = result + ", "
+            }
+            result = result + data[i]
+            i = i + 1
+        }
+        result = result + "]"
+        return result
+    }
+
+    // ── 辅助函数 ──
+
+    private fun min(a: Int, b: Int): Int {
+        if (a < b) return a
+        return b
+    }
+}

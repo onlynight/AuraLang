@@ -1,0 +1,203 @@
+// aura:///aura/lang/compiler/aot/Target.aura
+package aura.lang.compiler.aot
+// ─────────────────────────────────────────────────────────────
+// 目标平台三元组 — 纯 Aura 化迁移 · Phase 6 (任务 6.2)
+//
+// 对应 Rust `compiler/src/codegen/aot/target.rs`。
+//
+// LLVM 三元组格式：`<arch>-<vendor>-<os>-<abi>`，例如：
+//   x86_64-pc-windows-msvc
+//   aarch64-unknown-linux-gnu
+//   armv7-unknown-linux-gnueabihf
+//
+// Rust 侧用 `enum Architecture/Vendor/OperatingSystem/Abi` 建模；
+// Aura 侧统一用规范化字符串表示（"X86_64" / "Pc" / ...），
+// 以便测试与序列化。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.compiler.aot.AotUtil
+
+/// 目标三元组（arch / vendor / os / abi 均为规范化字符串）。
+class TargetTriple {
+
+    /// CPU 架构（"X86_64" / "X86" / "Aarch64" / "Armv7" / "Riscv64" / "Loongarch64"）。
+    var arch: String = ""
+
+    /// 厂商（"Pc" / "Apple" / "Unknown"）。
+    var vendor: String = ""
+
+    /// 操作系统（"Windows" / "Linux" / "MacOS" / "FreeBsd"）。
+    var os: String = ""
+
+    /// ABI（"Msvc" / "Gnu" / "Gnueabihf" / "Macabih" / ""）。
+    var abi: String = ""
+
+    init(a: String, v: String, o: String, ab: String) {
+        this.arch = a
+        this.vendor = v
+        this.os = o
+        this.abi = ab
+    }
+
+    /// 三元组是否合法（arch 与 os 均被识别）。
+    fun isValid(): Boolean {
+        return this.arch != "" && this.os != ""
+    }
+
+    /// 转为 LLVM 三元组字符串。
+    fun toTriple(): String {
+        if (this.abi == "") {
+            return archName(this.arch) + "-" + vendorName(this.vendor) + "-" + osName(this.os)
+        }
+        return archName(this.arch) + "-" + vendorName(this.vendor) + "-" + osName(this.os)
+            + "-" + abiName(this.abi)
+    }
+
+    /// 目标文件扩展名（Windows 为 obj，其余为 o）。
+    fun objectExt(): String {
+        if (this.os == "Windows") {
+            return "obj"
+        }
+        return "o"
+    }
+
+    /// 可执行文件扩展名（Windows 为 exe，其余为空）。
+    fun exeExt(): String {
+        if (this.os == "Windows") {
+            return "exe"
+        }
+        return ""
+    }
+}
+
+/// 架构规范化名 → LLVM 名称。
+fun archName(arch: String): String {
+    if (arch == "X86_64") { return "x86_64" }
+    if (arch == "X86") { return "x86" }
+    if (arch == "Aarch64") { return "aarch64" }
+    if (arch == "Armv7") { return "armv7" }
+    if (arch == "Riscv64") { return "riscv64" }
+    if (arch == "Loongarch64") { return "loongarch64" }
+    return arch
+}
+
+/// LLVM 名称 → 架构规范化名（未识别返回 ""）。
+fun archFromName(s: String): String {
+    if (s == "x86_64" || s == "amd64") { return "X86_64" }
+    if (s == "x86" || s == "i686" || s == "i386") { return "X86" }
+    if (s == "aarch64" || s == "arm64") { return "Aarch64" }
+    if (s == "armv7" || s == "arm") { return "Armv7" }
+    if (s == "riscv64") { return "Riscv64" }
+    if (s == "loongarch64") { return "Loongarch64" }
+    return ""
+}
+
+/// 厂商规范化名 → LLVM 名称。
+fun vendorName(vendor: String): String {
+    if (vendor == "Pc") { return "pc" }
+    if (vendor == "Apple") { return "apple" }
+    return "unknown"
+}
+
+/// ABI 规范化名 → LLVM 名称。
+fun abiName(abi: String): String {
+    if (abi == "Msvc") { return "msvc" }
+    if (abi == "Gnu") { return "gnu" }
+    if (abi == "Gnueabihf") { return "gnueabihf" }
+    if (abi == "Macabih") { return "macabih" }
+    return ""
+}
+
+/// OS 规范化名 → LLVM 名称。
+fun osName(os: String): String {
+    if (os == "Windows") { return "windows" }
+    if (os == "Linux") { return "linux" }
+    if (os == "MacOS") { return "darwin" }
+    if (os == "FreeBsd") { return "freebsd" }
+    return os
+}
+
+/// 从 LLVM 三元组字符串解析（非法返回 isValid()==false 的空三元组）。
+fun targetFromTriple(s: String): TargetTriple {
+    val archStr: String = aotFieldAt(s, 0, "-")
+    val vendorStr: String = aotFieldAt(s, 1, "-")
+    val osStr: String = aotFieldAt(s, 2, "-")
+    val abiStr: String = aotFieldAt(s, 3, "-")
+
+    val arch: String = archFromName(archStr)
+    if (arch == "") {
+        return TargetTriple("", "", "", "")
+    }
+    var os: String = ""
+    if (osStr == "windows") { os = "Windows" }
+    if (osStr == "linux") { os = "Linux" }
+    if (osStr == "darwin") { os = "MacOS" }
+    if (osStr == "freebsd") { os = "FreeBsd" }
+    if (os == "") {
+        return TargetTriple("", "", "", "")
+    }
+    var vendor: String = "Unknown"
+    if (vendorStr == "pc") { vendor = "Pc" }
+    if (vendorStr == "apple") { vendor = "Apple" }
+
+    var abi: String = ""
+    if (abiStr == "msvc") { abi = "Msvc" }
+    if (abiStr == "gnu") { abi = "Gnu" }
+    if (abiStr == "gnueabihf") { abi = "Gnueabihf" }
+    if (abiStr == "macabih") { abi = "Macabih" }
+
+    return TargetTriple(arch, vendor, os, abi)
+}
+
+/// Windows x86_64 MSVC。
+fun targetWindowsX86_64(): TargetTriple {
+    return TargetTriple("X86_64", "Pc", "Windows", "Msvc")
+}
+
+/// Linux aarch64（树莓派 4/5）。
+fun targetLinuxAarch64(): TargetTriple {
+    return TargetTriple("Aarch64", "Unknown", "Linux", "Gnu")
+}
+
+/// Linux armv7（树莓派 3 / Zero 2）。
+fun targetLinuxArmv7(): TargetTriple {
+    return TargetTriple("Armv7", "Unknown", "Linux", "Gnueabihf")
+}
+
+/// macOS aarch64。
+fun targetMacosAarch64(): TargetTriple {
+    return TargetTriple("Aarch64", "Apple", "MacOS", "")
+}
+
+/// 主机默认三元组。
+///
+/// 注意：Rust 侧用 `cfg!(target_os)` 在编译期决定；纯 Aura 无法读取编译期
+/// cfg，故此处以本仓库 CI 主机（Windows x86_64）为默认。
+fun targetDefault(): TargetTriple {
+    return targetWindowsX86_64()
+}
+
+/// 根据架构/OS 名称构造（供 AOT 选项使用）。
+fun targetFor(archStr: String, osStr: String): TargetTriple {
+    val arch: String = archFromName(archStr)
+    if (arch == "") {
+        return targetDefault()
+    }
+    var os: String = "Linux"
+    var vendor: String = "Unknown"
+    var abi: String = "Gnu"
+    if (osStr == "windows") {
+        os = "Windows"
+        vendor = "Pc"
+        abi = "Msvc"
+    } else if (osStr == "macos" || osStr == "darwin") {
+        os = "MacOS"
+        vendor = "Apple"
+        abi = ""
+    } else if (osStr == "freebsd") {
+        os = "FreeBsd"
+        abi = ""
+    }
+    return TargetTriple(arch, vendor, os, abi)
+}

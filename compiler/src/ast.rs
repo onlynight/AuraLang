@@ -311,6 +311,8 @@ pub enum Expr {
     },
     /// this 引用（对象自身）
     This(Span),
+    /// super 引用（父类对象）
+    Super(Span),
     /// select 多路复用（P10.9）：多个 `Channel.receive()` 分支 + 可选 default
     Select {
         branches: Vec<SelectBranch>,
@@ -558,6 +560,9 @@ pub struct InterfaceDecl {
     pub visibility: Visibility,
     pub name: String,
     pub type_params: Vec<TypeParam>,
+    /// 继承的父接口名（`interface List<T> : Collection<T>` → `["Collection"]`）。
+    /// 多个父接口以逗号分隔；泛型实参仅做跳过，不参与语义检查。
+    pub super_types: Vec<String>,
     pub methods: Vec<FnDecl>,
     pub doc: Option<String>,
     pub span: Span,
@@ -828,6 +833,7 @@ impl Expr {
                 span: s, ..
             }
             | Expr::This(s)
+            | Expr::Super(s)
             | Expr::Select {
                 span: s, ..
             }

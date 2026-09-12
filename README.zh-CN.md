@@ -34,6 +34,46 @@
 
 ---
 
+## 纯 Aura 编译器迁移进展
+
+与 Rust 编译器并行，正在构建一个**完全用 Aura 语言编写的编译器**（位于 `aura/compiler/aura/lang/compiler/`）。Rust 编译器（`compiler/`）完全保留不修改，作为 fallback 与参考实现。
+
+| 阶段 | 组件 | 状态 |
+|------|------|------|
+| P0 | 基础设施（TestRunner、Main 骨架） | ✅ |
+| P1 | Lexer + Parser + AST | ✅ |
+| P2 | Sema（Type、SymbolTable、TypeInfo、TypeChecker）+ HIR（Lower、Desugar、Mono、Inline、Fold） | ✅ |
+| P3 | MIR（IR 类型、HIR→MIR 降级、DCE/CSE/常量传播优化） | ✅ |
+| P4 | 字节码 Codegen（MIR→.auc）+ VM 解释器 | 🔲 进行中 |
+| P5 | VM 增强（闭包、尾调用、栈帧） | 🔲 未开始 |
+| P6 | AOT 后端（LLVM IR 生成） | 🔲 未开始 |
+
+### 测试结果（Phase 0–2）
+
+```
+tests/phase0_tests.aura           → RESULT: PASS
+tests/phase1_lexer_tests.aura     → RESULT: PASS
+tests/phase2_sema_hir_tests.aura  → RESULT: PASS  (20 个测试组，0 失败)
+tests/phase3_mir_tests.aura       → RESULT: PASS  (11 个测试组，0 失败)
+```
+
+### 主要模块
+
+```
+test/       TestRunner.aura        — 测试框架（自包含）
+lexer/      Span, Token, Lexer     — 词法分析器（支持字符串插值）
+parser/     Parser                 — 递归下降 + Pratt 优先级解析器
+ast/        Ast                    — 扁平 arena AST（kinds/texts/tys/spans/kids）
+sema/       Type, SymbolTable, TypeInfo, TypeChecker — 类型系统与语义分析
+hir/        Hir, Desugar, Mono, Inline, Fold — HIR 降级与优化 passes
+mir/        Mir, MirLower, MirOpt  — MIR IR、HIR→MIR 降级、优化
+codegen/    Codegen                — MIR → 字节码发射
+errors/     CompileError           — 诊断模型
+Main.aura                       — 编译器入口骨架
+```
+
+---
+
 ## 仓库结构
 
 ```text
@@ -329,7 +369,7 @@ val raw = """不做 $interpolation，不做 \n 转义"""
 
 **Prelude**（免 import，始终可用）：`println`, `print`, `puts`, `abs`, `sqrt`, `pow`, `toInt`, `toFloat`, `toStr`, `toString`, `clock`, `strlen`, `CString`, `CStr`, `ptrIsNull`, `ptrToInt`, `intToPtr`, `makeCallback`, `listOf`, `assertTrue`, `assertFalse`, `assertEq`, `assertNotEq`, `assertNotNull`, `assertNull`, `assertContains`, `assertNotContains`, `assertGt`, `assertGte`, `assertLt`, `assertLte`, `assertApprox`, `assertArrayEq`, `assertMapEq`, `pass`, `fail`
 
-**Phantom Source**（phantom-source/aura/lang/）：IDE 可见的类型声明，包括 `Any`, `Int`, `String`, `List`, `Map`, `Actor`, `Channel`, `Coroutine`, `Box`, `Weak`, `DeathStrategy`, `ProcessActor`, `IntRange` 等。
+**Core Source**（core/aura/lang/）：IDE 可见的类型声明，包括 `Any`, `Int`, `String`, `List`, `Map`, `Actor`, `Channel`, `Coroutine`, `Box`, `Weak`, `DeathStrategy`, `ProcessActor`, `IntRange` 等。
 
 ---
 

@@ -5,6 +5,61 @@
 use crate::vm::native::NativeRegistry;
 use crate::vm::value::Value;
 
+/// 注册 prelude 内置函数（**裸名** + `aura.lang.std.*` / `aura.lang.std.Builtin.*` 别名）。
+///
+/// 背景：编译器把 `isNull(x)` 这类 prelude 调用解析为**裸名**原生调用
+/// （见 `codegen::hir::resolve_builtin_method` → `is_prelude`），若 VM 只注册了
+/// `aura.lang.std.Builtin.isNull`，该调用会落入「未链接的外部函数」分支被静默忽略，
+/// 导致 `isNull` 恒为假等错误行为。此处补齐裸名注册。
+pub fn register_prelude(reg: &mut NativeRegistry) {
+    let table: [(&str, fn(&[Value]) -> Value); 12] = [
+        ("typeof", nat_typeof),
+        ("isNull", nat_is_null),
+        ("isNotNull", nat_is_not_null),
+        ("isZero", nat_is_zero),
+        ("isPositive", nat_is_positive),
+        ("isNegative", nat_is_negative),
+        ("toBool", nat_to_bool),
+        ("sizeOf", nat_size_of),
+        ("hash", nat_hash),
+        ("compare", nat_compare),
+        ("clone", nat_clone),
+        ("identity", nat_identity),
+    ];
+    for (name, f) in table {
+        reg.register(name, f);
+        reg.register(&format!("aura.lang.std.{name}"), f);
+        reg.register(&format!("aura.lang.std.Builtin.{name}"), f);
+    }
+
+    // `throw expr` 由 HIR 降级为 `__throw(expr)` 调用。
+    // 此前未注册 → 落入「未链接的外部函数」分支被**静默忽略**（错误被吞掉）。
+    // 注意：VM 目前尚无异常传播（try/catch 的 handler 栈），因此这里不改变控制流，
+    // 仅在 stderr 输出诊断，避免把错误藏起来。完整异常传播见 README 待办。
+    reg.register("__throw", nat_throw);
+
+    // `Process.exit` / `Process.exitProcess` 的短名别名。
+    // 单例对象方法的运行时名解析为 `Process.exit` 形式，而注册表只有
+    // `aura.lang.std.Process.exit`；补别名可让 Aura 代码无需 import 即可退出。
+    for name in [
+        "Process.exit",
+        "Process.exitProcess",
+    ] {
+        reg.register(name, crate::std::std_process::nat_exit_pub);
+    }
+}
+
+/// `__throw(value)` — `throw` 表达式的降级目标。
+///
+/// **解释器路径不会走到这里**：`Vm::do_call_native(_args)` 在原生派发前拦截 `__throw`
+/// 并调用 `Vm::raise()` 做栈展开（`try/catch`）。此处仅为 JIT / AOT 直接调用原生函数
+/// 的场景保留一个安全的兜底实现：不改变控制流，仅输出诊断，避免异常被彻底吞掉。
+fn nat_throw(args: &[Value]) -> Value {
+    let v = args.first().cloned().unwrap_or(Value::Null);
+    eprintln!("[vm] throw: {} （异常传播尚未实现，调用被忽略）", v);
+    Value::Null
+}
+
 pub fn register(reg: &mut NativeRegistry) {
     // ── 类型查询（Layer 1，不能上移）──
     reg.register("aura.lang.std.Builtin.typeof", nat_typeof);

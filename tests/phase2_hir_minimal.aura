@@ -1,0 +1,59 @@
+// Minimal Phase 2 test: Hir only
+import aura.lang.String
+import "../aura/compiler/aura/lang/compiler/test/TestRunner.aura"
+import "../aura/compiler/aura/lang/compiler/lexer/Span.aura"
+import "../aura/compiler/aura/lang/compiler/ast/Ast.aura"
+import "../aura/compiler/aura/lang/compiler/hir/Hir.aura"
+
+fun main() {
+    println("=== Phase 2 Hir Test ===")
+    
+    val t = TestRunner()
+    t.begin("Hir.literals")
+    
+    val ast = Ast()
+    val span: Span = Span(0, 50, 1, 1, 1, 50)
+    
+    // 1
+    val intId: Int = ast.leaf("IntLiteral", "1", span)
+    
+    // 程序根
+    val progId: Int = ast.add("Program", "", "", span, kidsAdd(noKids(), intId))
+    
+    // 执行降级
+    val lowerer = HirLowerer()
+    val rootId = lowerer.lower(ast)
+    val hir = lowerer.hir
+    
+    println("rootId=" + toStr(rootId))
+    println("hir.count=" + toStr(hir.count))
+    
+    // 检查降级结果
+    t.assertTrue(hir.count > 0, "HIR has nodes")
+    
+    // 检查根节点
+    println("ast.count=" + toStr(ast.count))
+    println("ast.kidsOf(0)=" + ast.kidsOf(0))
+    println("kidsCount(ast.kidsOf(0))=" + toStr(kidsCount(ast.kidsOf(0))))
+    
+    val rootKids: String = hir.kidsOf(rootId)
+    println("hir.kidsOf(rootId)=" + rootKids)
+    t.assertTrue(kidsCount(rootKids) > 0, "root has children")
+    
+    if (kidsCount(rootKids) > 0) {
+        val childId: Int = hir.childOf(rootId, 0)
+        println("childId=" + toStr(childId))
+        if (childId >= 0) {
+            t.assertEq(hir.kindOf(childId), "HirLit", "int literal → HirLit")
+            t.assertEq(hir.textOf(childId), "1", "int literal value")
+        }
+    }
+    
+    val failures = t.report()
+    println()
+    if (failures == 0) {
+        println("RESULT: PASS")
+    } else {
+        println("RESULT: FAIL (" + toStr(failures) + ")")
+    }
+}

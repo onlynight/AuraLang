@@ -1,0 +1,1270 @@
+// aura:///aura/lang/compiler/parser/Parser.aura
+package aura.lang.compiler.parser
+// ─────────────────────────────────────────────────────────────
+// 解析器 — 纯 Aura 化迁移 · Phase 1
+//
+// 对应 Rust `compiler/src/parser.rs`（递归下降 + Pratt 优先级）。
+//
+// ── 设计方式（与 Ast.aura 一致）──────────────────────────────
+//   * AST 用扁平 arena（`Ast`）：每个节点一个 id，子节点以逗号分隔的 id 列表表示。
+//   * token 流在构造时一次性缓存到 `kinds` / `lits` / `spans` 三条「每行一项」的 String，
+//     避免 `Lexer.tokenAt` 的 O(n) 重复解析。
+//   * 诊断累积到 `CompileErrors`（每行一条），解析结束后由调用方检查 `errors.isOk()`。
+//
+// ── 命名约定（重要）──────────────────────────────────────────
+//   当前 Aura 编译器使用**扁平（全局）函数命名空间**，所有类的方法名必须全局唯一
+//   （参考 `Lexer.aura` 的 `lx` 前缀约定）。因此本文件所有方法均以 `prs` 前缀，
+//   避免与 `Ast` / `Lexer` / `CompileErrors` 等内联进同一编译单元的同类方法重名。
+//
+// ── 当前覆盖范围（Phase 1 起步，可逐步扩展）────────────────────
+//   声明：import / fun / val / var / struct / class / object / enum / typealias / interface
+//   语句：Block / ValDecl / VarDecl / Return / If / While / For / Try / Break / Continue / Assign / ExprStmt
+//   表达式（Pratt）：字面量、标识符、一元 - !、二元（含 is / as）、调用 ()、成员 .、下标 []、
+//           if 表达式、when、括号
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+
+/// 递归下降 + Pratt 解析器。
+class Parser {
+
+    /// 词法器（构造时已 scanAll）。
+    var lx: Lexer = Lexer("")
+
+    /// token 总数（含结尾 `EOF`）。
+    var n: Int = 0
+
+    /// 当前读取位置。
+    var pos: Int = 0
+
+    /// 构造的 AST（扁平 arena）。
+    var ast: Ast = Ast()
+
+    /// 诊断信息。
+    var errors: CompileErrors = CompileErrors()
+
+    /// token 种类索引（由词法器的种类序列一次性 `split` 得到，O(1) 访问）。
+    ///
+    /// 原先以「每行一项的 String」存储，每次 `prsKind/prsLit/prsCurSpan`
+    /// 都要用 `fieldAt` 从字符串头部线性扫描，解析整体因此退化为超线性。
+    /// 现改为按下标 O(1) 访问。
+    ///
+    /// 字面量与 span 不再另存，统一走词法器的 `litAt` / `spanFieldAt`
+    /// （词法器内部为堆列表，O(1) 访问）。
+    var kinds: List<String> = listOf()
+
+    /// 构造：词法分析并缓存全部 token。
+    init(source: String) {
+        this.lx = Lexer(source)
+        this.lx.scanAll()
+        this.n = this.lx.tokenCount()
+        this.pos = 0
+        this.ast = Ast()
+        this.errors = CompileErrors()
+        // 直接复用词法器的种类列表（堆列表，O(1) 下标），不再切分整串。
+        this.kinds = this.lx.kindList
+    }
+
+    // ── token 访问 ──
+
+    /// 第 i 个 token 的种类（越界视为 `EOF`）。
+    fun prsKind(i: Int): String {
+        if (i >= this.n) {
+            return "EOF"
+        }
+        if (i < 0 || i >= this.kinds.size) {
+            return ""
+        }
+        return this.kinds[i]
+    }
+
+    /// 第 i 个 token 的字面量（换行已还原）。
+    fun prsLit(i: Int): String {
+        return this.lx.litAt(i)
+    }
+
+    /// 当前 token 种类。
+    fun prsCurKind(): String {
+        return this.prsKind(this.pos)
+    }
+
+    /// 当前 token 字面量。
+    fun prsCurLit(): String {
+        return this.prsLit(this.pos)
+    }
+
+    /// 当前 token 的源位置。
+    fun prsCurSpan(): Span {
+        val p = this.pos
+        if (p >= this.n) {
+            return Span(0, 0, 1, 1, 1, 1)
+        }
+        return Span(
+            this.lx.spanFieldAt(p, 0), this.lx.spanFieldAt(p, 1),
+            this.lx.spanFieldAt(p, 2), this.lx.spanFieldAt(p, 3),
+            this.lx.spanFieldAt(p, 4), this.lx.spanFieldAt(p, 5)
+        )
+    }
+
+    // ── 游标推进 ──
+
+    /// 是否到达结尾（EOF）。
+    fun prsAtEnd(): Boolean {
+        return this.prsCurKind() == "EOF"
+    }
+
+    /// 当前是否匹配给定种类。
+    fun prsCheck(k: String): Boolean {
+        return this.prsCurKind() == k
+    }
+
+    /// 若匹配则消费并返回 true。
+    fun prsMatch(k: String): Boolean {
+        if (this.prsCheck(k)) {
+            this.prsAdvance()
+            return true
+        }
+        return false
+    }
+
+    /// 消费当前 token（越界时停在 EOF）。
+    fun prsAdvance(): Int {
+        val p: Int = this.pos
+        if (this.pos < this.n - 1) {
+            this.pos = this.pos + 1
+        } else {
+            this.pos = this.n - 1
+        }
+        return p
+    }
+
+    /// 当前 token 是否可作为「名字」使用。
+    ///
+    /// 词法器把 `value` / `data` / `it` 等**软关键字**也映射为独立 TokenKind
+    /// （与 Rust `KEYWORDS` 一致，不可改词法），但它们完全可以当标识符使用
+    /// （如 `val value: String`）。此处统一放行，避免 `期望 Ident，但遇到 Value`
+    /// 这类误报与随后的反同步。
+    fun prsIsNameToken(): Boolean {
+        val k = this.prsCurKind()
+        if (k == "Ident") {
+            return true
+        }
+        return k == "Value" || k == "Data" || k == "Lazy" || k == "Lateinit"
+            || k == "It" || k == "By" || k == "To" || k == "Box" || k == "Weak"
+            || k == "Select" || k == "Async" || k == "Await" || k == "Comptime"
+            || k == "Defer" || k == "Inline" || k == "Const" || k == "Extern"
+    }
+
+    /// 期望一个名字（标识符或软关键字）；不匹配则记录诊断（不消费）。
+    fun prsExpectName(): Boolean {
+        if (this.prsIsNameToken()) {
+            this.prsAdvance()
+            return true
+        }
+        this.errors.pushAt(
+            severityError(),
+            "期望 Ident，但遇到 " + this.prsCurKind(),
+            this.prsCurSpan().start,
+            this.prsCurSpan().end
+        )
+        return false
+    }
+
+    /// 期望参数名：标识符 / 软关键字，**或硬关键字**。
+    ///
+    /// 源码里存在 `fun mapConstKind(val: String)`（`val` 作参数名）这类写法，
+    /// `prsExpectName` 会判定失败**且不消费令牌**，进而让整个签名反同步——
+    /// 参数类型、返回类型、函数体全部错位（自举时 `mapConstKind` 被发成
+    /// `void(..., i32)` 就是这么来的）。参数位置上只可能是名字，故除分隔符
+    /// 与 EOF 外一律接受。
+    fun prsExpectParamName(): Boolean {
+        val k: String = this.prsCurKind()
+        if (k == "Comma" || k == "RParen" || k == "Colon" || k == "EOF") {
+            this.errors.pushAt(
+                severityError(),
+                "期望参数名，但遇到 " + k,
+                this.prsCurSpan().start,
+                this.prsCurSpan().end
+            )
+            return false
+        }
+        this.prsAdvance()
+        return true
+    }
+
+    /// 消费一个类型名 token（标识符 / 软关键字 / 硬关键字）。
+    ///
+    /// 与 [`prsExpectName`] 的区别：后者只接受标识符与软关键字，遇到
+    /// `Unit` 这类硬关键字会失败且**不消费**，使解析器反同步。
+    /// 分隔符（`,` `)` `<` `{` …）与 EOF 视为失败且不消费。
+    fun prsExpectTypeName(): Boolean {
+        val k: String = this.prsCurKind()
+        if (k == "Comma" || k == "RParen" || k == "Gt" || k == "LBrace" || k == "EOF"
+            || k == "Colon" || k == "QuestionMark" || k == "RBracket" || k == "Semi") {
+            return false
+        }
+        this.prsAdvance()
+        return true
+    }
+
+    /// 期望当前为 k；不匹配则记录诊断（不消费，交由上层恢复）。
+    fun prsExpect(k: String): Boolean {
+        if (this.prsCheck(k)) {
+            this.prsAdvance()
+            return true
+        }
+        this.errors.pushAt(
+            severityError(),
+            "期望 " + k + "，但遇到 " + this.prsCurKind(),
+            this.prsCurSpan().start,
+            this.prsCurSpan().end
+        )
+        return false
+    }
+
+    // ── 顶层 ──
+
+    /// 解析整个程序，返回 Program 节点 id（id 0）。
+    fun parseProgram(): Int {
+        var kids = noKids()
+        while (!this.prsAtEnd()) {
+            this.prsSkipDocs()
+            if (!this.prsAtEnd()) {
+                val d = this.parseTopLevel()
+                kids = kidsAdd(kids, d)
+            }
+        }
+        return this.ast.add("Program", "", "", this.prsCurSpan(), kids)
+    }
+
+    /// 跳过文档注释 token（`///` / `/**...*/`）。
+    ///
+    /// 词法器会为文档注释产出 `DocComment` token（不参与语法结构），
+    /// 若不在语句入口统一跳过，会退化为大量 `意外的 token: DocComment`。
+    fun prsSkipDocs() {
+        while (this.prsCheck("DocComment")) {
+            this.prsAdvance()
+        }
+    }
+
+    /// 解析一个顶层声明或语句。
+    fun parseTopLevel(): Int {
+        val k = this.prsCurKind()
+        if (k == "Import") {
+            return this.parseImport()
+        }
+        if (k == "Fun") {
+            return this.parseFunction()
+        }
+        if (k == "Val" || k == "Var") {
+            return this.parseDecl(true)
+        }
+        if (k == "Struct") {
+            return this.parseTypeDecl("Struct")
+        }
+        if (k == "Class") {
+            return this.parseTypeDecl("Class")
+        }
+        if (k == "Object") {
+            return this.parseTypeDecl("Object")
+        }
+        if (k == "Enum") {
+            return this.parseTypeDecl("Enum")
+        }
+        if (k == "Interface") {
+            return this.parseTypeDecl("Interface")
+        }
+        if (k == "Typealias") {
+            return this.parseTypealias()
+        }
+        // 顶层语句（表达式 / 控制流等）
+        return this.parseStatement()
+    }
+
+    // ── 声明 ──
+
+    /// 解析 import 语句。
+    /// `import a.b.C` / `import a.b.*` / `import a.b.{x, y}` / `import a.b.C as D`
+    fun parseImport(): Int {
+        this.prsAdvance() // Import
+        var name: String = ""
+        while (true) {
+            name = name + this.prsCurLit()
+            this.prsAdvance()
+            if (this.prsCheck("Dot")) {
+                name = name + "."
+                this.prsAdvance()
+                if (this.prsCheck("*")) {
+                    name = name + "*"
+                    this.prsAdvance()
+                    break
+                }
+                if (this.prsCheck("LBrace")) {
+                    name = name + "{"
+                    this.prsAdvance()
+                    while (!this.prsCheck("RBrace") && !this.prsAtEnd()) {
+                        name = name + this.prsCurLit()
+                        this.prsAdvance()
+                        if (this.prsCheck("Comma")) {
+                            name = name + ","
+                            this.prsAdvance()
+                        }
+                    }
+                    this.prsExpect("RBrace")
+                    name = name + "}"
+                    break
+                }
+                continue
+            }
+            break
+        }
+        if (this.prsCheck("as")) {
+            this.prsAdvance()
+            name = name + " as " + this.prsCurLit()
+            this.prsAdvance()
+        }
+        return this.ast.leaf("Import", name, this.prsCurSpan())
+    }
+
+    /// 解析函数声明。
+    /// `fun name(params): RetType { body }` 或 `fun name(params): RetType = expr`
+    fun parseFunction(): Int {
+        this.prsAdvance() // Fun
+        val name: String = this.prsCurLit()
+        this.prsExpectName()
+
+        this.prsExpect("LParen")
+        var params = noKids()
+        if (!this.prsCheck("RParen")) {
+            while (true) {
+                val pname: String = this.prsCurLit()
+                this.prsExpectParamName()
+                var pty: String = ""
+                if (this.prsMatch("Colon")) {
+                    pty = this.parseTypeName()
+                }
+                params = kidsAdd(params, this.ast.add("Param", pname, pty, this.prsCurSpan(), noKids()))
+                if (!this.prsMatch("Comma")) {
+                    break
+                }
+            }
+        }
+        this.prsExpect("RParen")
+
+        var retTy: String = ""
+        if (this.prsMatch("Colon")) {
+            retTy = this.parseTypeName()
+        }
+
+        var bodyKids = noKids()
+        if (this.prsCheck("LBrace")) {
+            bodyKids = kidsAdd(bodyKids, this.parseBlock())
+        } else if (this.prsMatch("Assign")) {
+            bodyKids = kidsAdd(bodyKids, this.parseExpr())
+        }
+
+        val paramsNode = this.ast.add("Params", "", "", this.prsCurSpan(), params)
+        var bodyNode: Int = -1
+        if (kidsCount(bodyKids) > 0) {
+            bodyNode = kidsAt(bodyKids, 0)
+        }
+        var kids = kidsAdd(noKids(), paramsNode)
+        if (bodyNode >= 0) {
+            kids = kidsAdd(kids, bodyNode)
+        }
+        return this.ast.add("Function", name, retTy, this.prsCurSpan(), kids)
+    }
+
+    /// 解析 val / var 声明（顶层或语句内）。
+    fun parseDecl(topLevel: Boolean): Int {
+        val k = this.prsCurKind() // Val / Var
+        this.prsAdvance()
+        val name: String = this.prsCurLit()
+        this.prsExpectName()
+        var ty: String = ""
+        if (this.prsMatch("Colon")) {
+            ty = this.parseTypeName()
+        }
+        var kids = noKids()
+        if (this.prsMatch("Assign")) {
+            kids = kidsAdd(kids, this.parseExpr())
+        }
+        val nodeKind = if (k == "Val") { "ValDecl" } else { "VarDecl" }
+        return this.ast.add(nodeKind, name, ty, this.prsCurSpan(), kids)
+    }
+
+    /// 解析类型声明（struct / class / object / enum / interface）。
+    ///
+    /// 成员以 Block 形式暂存（Phase 2 再细化字段/方法）；
+    /// 主构造函数参数（`class Point(val x: Int, val y: Int)`）被降级为
+    /// 类体开头的 ValDecl/VarDecl 字段，使「按位置构造」与字段布局一致。
+    fun parseTypeDecl(kindName: String): Int {
+        this.prsAdvance()
+        val name: String = this.prsCurLit()
+        this.prsExpectName()
+        // 泛型参数 <T> 可选
+        if (this.prsCheck("Lt")) {
+            while (!this.prsCheck("Gt") && !this.prsAtEnd()) {
+                this.prsAdvance()
+            }
+            this.prsExpect("Gt")
+        }
+        // 主构造函数参数（可选）
+        var ctorFields = noKids()
+        if (this.prsCheck("LParen")) {
+            ctorFields = this.parseCtorParams()
+        }
+        // 可选父类 / 接口（`: Base, Iface`）
+        if (this.prsMatch("Colon")) {
+            while (!this.prsCheck("LBrace") && !this.prsCheck("Semi") && !this.prsAtEnd()) {
+                this.prsAdvance()
+            }
+        }
+        var kids = noKids()
+        if (this.prsCheck("LBrace")) {
+            val bodyId = this.parseBlock()
+            val bodyKids: String = this.ast.kidsOf(bodyId)
+            var combined: String = ctorFields
+            if (bodyKids != "") {
+                if (combined == "") {
+                    combined = bodyKids
+                } else {
+                    combined = combined + "," + bodyKids
+                }
+            }
+            if (combined != "") {
+                val merged = this.ast.add("Block", "", "", this.ast.spanOf(bodyId), combined)
+                kids = kidsAdd(kids, merged)
+            }
+        } else if (ctorFields != "") {
+            val merged = this.ast.add("Block", "", "", this.prsCurSpan(), ctorFields)
+            kids = kidsAdd(kids, merged)
+        }
+        return this.ast.add(kindName, name, "", this.prsCurSpan(), kids)
+    }
+
+    /// 解析主构造函数参数：`(val a: T, var b: T = init, c: T)`。
+    ///
+    /// 每个参数降级为一个字段声明节点（`val`/`var` 关键字缺省按 `val` 处理），
+    /// 返回这些节点组成的 kids 串。
+    fun parseCtorParams(): String {
+        this.prsExpect("LParen")
+        var fields = noKids()
+        if (!this.prsCheck("RParen")) {
+            while (true) {
+                var isVal: Boolean = true
+                if (this.prsCheck("Val")) {
+                    this.prsAdvance()
+                    isVal = true
+                } else if (this.prsCheck("Var")) {
+                    this.prsAdvance()
+                    isVal = false
+                }
+                val pname: String = this.prsCurLit()
+                this.prsExpectName()
+                var pty: String = ""
+                if (this.prsMatch("Colon")) {
+                    pty = this.parseTypeName()
+                }
+                var fkids = noKids()
+                if (this.prsMatch("Assign")) {
+                    fkids = kidsAdd(fkids, this.parseExpr())
+                }
+                var fkind: String = "ValDecl"
+                if (!isVal) {
+                    fkind = "VarDecl"
+                }
+                fields = kidsAdd(fields,
+                    this.ast.add(fkind, pname, pty, this.prsCurSpan(), fkids))
+                if (!this.prsMatch("Comma")) {
+                    break
+                }
+            }
+        }
+        this.prsExpect("RParen")
+        return fields
+    }
+
+    /// 解析 `typealias Name = Type`。
+    fun parseTypealias(): Int {
+        this.prsAdvance() // Typealias
+        val name: String = this.prsCurLit()
+        this.prsExpectName()
+        var aliased: String = ""
+        if (this.prsMatch("Assign")) {
+            aliased = this.parseTypeName()
+        }
+        return this.ast.leaf("Typealias", name + " = " + aliased, this.prsCurSpan())
+    }
+
+    /// 解析类型名（含可选泛型参数 `<...>`）。
+    fun parseTypeName(): String {
+        var name: String = this.prsCurLit()
+        // 类型名位置按「标识符 / 软关键字 / 硬关键字」一律接受：
+        // `Unit` 在关键字表里是**硬关键字**（`unit|Unit`），而 `Int`/`String`
+        // 是 `Ident`。用 `prsExpectName` 会判定失败**且不消费 token**，
+        // 导致 `fun f(): Unit { ... }` 的整个函数体被跳过（HIR 里 HirFunction
+        // 无 kids，生成 `define void @f() { ret void }`）。
+        this.prsExpectTypeName()
+        if (this.prsCheck("Lt")) {
+            name = name + "<"
+            this.prsAdvance()
+            while (!this.prsCheck("Gt") && !this.prsAtEnd()) {
+                name = name + this.prsCurLit()
+                this.prsAdvance()
+            }
+            this.prsExpect("Gt")
+            name = name + ">"
+        }
+        // 后缀 `?`（可空类型）
+        if (this.prsCheck("QuestionMark")) {
+            name = name + "?"
+            this.prsAdvance()
+        }
+        // 后缀 `[N]`（定长数组，可叠加多维：`Int[6]`、`Int[2][3]`）
+        while (this.prsCheck("LBracket")) {
+            this.prsAdvance()
+            var dim: String = ""
+            while (!this.prsCheck("RBracket") && !this.prsAtEnd()) {
+                dim = dim + this.prsCurLit()
+                this.prsAdvance()
+            }
+            this.prsExpect("RBracket")
+            name = name + "[" + dim + "]"
+        }
+        return name
+    }
+
+    // ── 语句 ──
+
+    /// 解析语句。
+    fun parseStatement(): Int {
+        val k = this.prsCurKind()
+        if (k == "Val" || k == "Var") {
+            return this.parseDecl(false)
+        }
+        // 声明类语句（类体成员 / 嵌套声明）：此前这些 token 落到表达式分支，
+        // 产生「意外的 token: Fun」并使整个类体反同步。
+        if (k == "Fun") {
+            return this.parseFunction()
+        }
+        // 构造函数：`init { ... }` / `init(source: String) { ... }`
+        // （`init` 是普通标识符，需看下一个 token 是 `{` 还是 `(`）。
+        // 降级为名为 `init` 的 `Function` 节点（HIR 侧合成 `<Class>.init`）。
+        if (k == "Ident" && this.prsCurLit() == "init"
+            && (this.prsKind(this.pos + 1) == "LBrace"
+                || this.prsKind(this.pos + 1) == "LParen")) {
+            this.prsAdvance() // init
+            var params = noKids()
+            if (this.prsCheck("LParen")) {
+                this.prsAdvance()
+                if (!this.prsCheck("RParen")) {
+                    while (true) {
+                        val pname: String = this.prsCurLit()
+                        this.prsExpectParamName()
+                        var pty: String = ""
+                        if (this.prsMatch("Colon")) {
+                            pty = this.parseTypeName()
+                        }
+                        params = kidsAdd(params,
+                            this.ast.add("Param", pname, pty, this.prsCurSpan(), noKids()))
+                        if (!this.prsMatch("Comma")) {
+                            break
+                        }
+                    }
+                }
+                this.prsExpect("RParen")
+            }
+            var bodyKids = noKids()
+            if (this.prsCheck("LBrace")) {
+                bodyKids = kidsAdd(bodyKids, this.parseBlock())
+            }
+            val paramsNode = this.ast.add("Params", "", "", this.prsCurSpan(), params)
+            var ctorKids = kidsAdd(noKids(), paramsNode)
+            if (kidsCount(bodyKids) > 0) {
+                ctorKids = kidsAdd(ctorKids, kidsAt(bodyKids, 0))
+            }
+            return this.ast.add("Function", "init", "", this.prsCurSpan(), ctorKids)
+        }
+        if (k == "Class" || k == "Struct" || k == "Object" || k == "Enum"
+            || k == "Interface") {
+            return this.parseTypeDecl(k)
+        }
+        if (k == "Typealias") {
+            return this.parseTypealias()
+        }
+        if (k == "Import") {
+            return this.parseImport()
+        }
+        // 保险：文档注释（正常由 parseBlock / parseProgram 跳过）
+        if (k == "DocComment") {
+            this.prsAdvance()
+            return this.ast.leaf("Empty", "", this.prsCurSpan())
+        }
+        if (k == "Return") {
+            return this.parseReturn()
+        }
+        if (k == "If") {
+            return this.parseIf()
+        }
+        if (k == "While") {
+            return this.parseWhile()
+        }
+        if (k == "For") {
+            return this.parseFor()
+        }
+        if (k == "Try") {
+            return this.parseTry()
+        }
+        if (k == "Break") {
+            this.prsAdvance()
+            return this.ast.leaf("Break", "", this.prsCurSpan())
+        }
+        if (k == "Continue") {
+            this.prsAdvance()
+            return this.ast.leaf("Continue", "", this.prsCurSpan())
+        }
+        if (k == "LBrace") {
+            return this.parseBlock()
+        }
+        // 前缀自增/自减 `++x` / `--x` → `x = x + 1` / `x = x - 1`
+        if (k == "DoublePlus" || k == "DoubleMinus") {
+            this.prsAdvance()
+            val operand: Int = this.parseUnary()
+            val one: Int = this.ast.leaf("IntLiteral", "1", this.ast.spanOf(operand))
+            var bop: String = "Plus"
+            if (k == "DoubleMinus") {
+                bop = "Minus"
+            }
+            val incBin: Int = this.ast.add(
+                "Binary",
+                bop,
+                "",
+                this.ast.spanOf(operand),
+                kidsAdd(kidsAdd(noKids(), operand), one)
+            )
+            return this.ast.add(
+                "Assign",
+                "",
+                "",
+                this.ast.spanOf(operand),
+                kidsAdd(kidsAdd(noKids(), operand), incBin)
+            )
+        }
+        // 表达式语句（可能带赋值 / 复合赋值）
+        val e = this.parseExpr()
+        val opK: String = this.prsCurKind()
+        if (opK == "Assign") {
+            this.prsAdvance()
+            val v = this.parseExpr()
+            return this.parseAssignChain(e, v, this.ast.spanOf(e))
+        }
+        if (opK == "PlusEq" || opK == "MinusEq" || opK == "StarEq"
+            || opK == "SlashEq" || opK == "PercentEq") {
+            this.prsAdvance()
+            val v2: Int = this.parseExpr()
+            val cmpBin: Int = this.ast.add(
+                "Binary",
+                compoundAssignOp(opK),
+                "",
+                this.ast.spanOf(e),
+                kidsAdd(kidsAdd(noKids(), e), v2)
+            )
+            return this.ast.add(
+                "Assign",
+                "",
+                "",
+                this.ast.spanOf(e),
+                kidsAdd(kidsAdd(noKids(), e), cmpBin)
+            )
+        }
+        return this.ast.add("ExprStmt", "", "", this.prsCurSpan(), kidsAdd(noKids(), e))
+    }
+
+    /// 解析（右结合）赋值，`t0 = v0 [= v1 [= ...]]`。
+    ///
+    /// 链式赋值 `a = b = c` 脱糖为语句块 `{ b = c; a = b }`（自右向左执行）；
+    /// 单次赋值直接返回 `Assign` 节点。
+    fun parseAssignChain(t0: Int, v0: Int, sp0: Span): Int {
+        var targets: String = kidsAdd(kidsAdd(noKids(), t0), v0)
+        var sp: Span = sp0
+        while (this.prsCurKind() == "Assign") {
+            this.prsAdvance()
+            val t: Int = this.parseExpr()
+            targets = kidsAdd(targets, t)
+            sp = mergeSpan(sp, this.ast.spanOf(t))
+        }
+        val n: Int = kidsCount(targets)
+        var stmts: String = noKids()
+        var i: Int = n - 1
+        while (i >= 1) {
+            val tgt: Int = kidsAt(targets, i - 1)
+            val valId: Int = kidsAt(targets, i)
+            stmts = kidsAdd(
+                stmts,
+                this.ast.add(
+                    "Assign",
+                    "",
+                    "",
+                    this.ast.spanOf(tgt),
+                    kidsAdd(kidsAdd(noKids(), tgt), valId)
+                )
+            )
+            i = i - 1
+        }
+        if (kidsCount(stmts) == 1) {
+            return kidsAt(stmts, 0)
+        }
+        return this.ast.add("Block", "", "", sp, stmts)
+    }
+
+    /// 解析语句块 `{ ... }`。
+    fun parseBlock(): Int {
+        this.prsExpect("LBrace")
+        var kids = noKids()
+        while (!this.prsCheck("RBrace") && !this.prsAtEnd()) {
+            // 跳过文档注释后再判断是否已到块尾，避免把 `}` 当作语句吃掉
+            this.prsSkipDocs()
+            if (!this.prsCheck("RBrace") && !this.prsAtEnd()) {
+                kids = kidsAdd(kids, this.parseStatement())
+            }
+        }
+        this.prsExpect("RBrace")
+        return this.ast.add("Block", "", "", this.prsCurSpan(), kids)
+    }
+
+    /// 解析 return 语句。
+    fun parseReturn(): Int {
+        this.prsAdvance()
+        if (this.prsCheck("LBrace") || this.prsCheck("Semi") || this.prsCheck("RBrace") || this.prsAtEnd()) {
+            return this.ast.leaf("Return", "", this.prsCurSpan())
+        }
+        val e = this.parseExpr()
+        return this.ast.add("Return", "", "", this.prsCurSpan(), kidsAdd(noKids(), e))
+    }
+
+    /// 解析 if / else（语句或表达式形式）。
+    fun parseIf(): Int {
+        this.prsAdvance() // If
+        var cond: Int
+        if (this.prsCheck("LParen")) {
+            this.prsAdvance()
+            cond = this.parseExpr()
+            this.prsExpect("RParen")
+        } else {
+            cond = this.parseExpr()
+        }
+        val thenB = this.parseBranch()
+        var kids = kidsAdd(kidsAdd(noKids(), cond), thenB)
+        if (this.prsCheck("Else")) {
+            this.prsAdvance()
+            var elseB: Int
+            if (this.prsCheck("If")) {
+                elseB = this.parseIf() // else if
+            } else {
+                elseB = this.parseBranch()
+            }
+            kids = kidsAdd(kids, elseB)
+        }
+        return this.ast.add("If", "", "", this.prsCurSpan(), kids)
+    }
+
+    /// then / else 分支：块或单表达式。
+    fun parseBranch(): Int {
+        if (this.prsCheck("LBrace")) {
+            return this.parseBlock()
+        }
+        return this.parseExpr()
+    }
+
+    /// 解析 while 循环。
+    fun parseWhile(): Int {
+        this.prsAdvance() // While
+        var cond: Int
+        if (this.prsCheck("LParen")) {
+            this.prsAdvance()
+            cond = this.parseExpr()
+            this.prsExpect("RParen")
+        } else {
+            cond = this.parseExpr()
+        }
+        val body = this.parseBlock()
+        return this.ast.add("While", "", "", this.prsCurSpan(), kidsAdd(kidsAdd(noKids(), cond), body))
+    }
+
+    /// 解析 for 循环（`for (val i in 0..n) { ... }` 与 `for (x in list) { ... }`）。
+    fun parseFor(): Int {
+        this.prsAdvance() // For
+        this.prsExpect("LParen")
+        var decl: Int
+        if (this.prsCheck("Val") || this.prsCheck("Var")) {
+            decl = this.parseDecl(false)
+        } else {
+            // 无 `val`/`var` 关键字的形态：直接是循环变量名。
+            // 不可复用 parseDecl：它会先把第一个 token 当作 val/var 消费掉，
+            // 于是变量名错位成后面的 `in`（表现为循环体内变量读不到值）。
+            val varName: String = this.prsCurLit()
+            val varSpan: Span = this.prsCurSpan()
+            this.prsExpectName()
+            decl = this.ast.add("ValDecl", varName, "", varSpan, noKids())
+        }
+        this.prsExpect("In")
+        val iterable = this.parseExpr()
+        this.prsExpect("RParen")
+        val body = this.parseBlock()
+        var kids = kidsAdd(kidsAdd(kidsAdd(noKids(), decl), iterable), body)
+        return this.ast.add("For", "", "", this.prsCurSpan(), kids)
+    }
+
+    /// 解析 try / catch / finally。
+    fun parseTry(): Int {
+        this.prsAdvance() // Try
+        val body = this.parseBlock()
+        var kids = kidsAdd(noKids(), body)
+        var catchVar: String = ""
+        if (this.prsCheck("Catch")) {
+            this.prsAdvance()
+            if (this.prsCheck("LParen")) {
+                this.prsAdvance()
+                if (this.prsCheck("Ident")) {
+                    catchVar = this.prsCurLit()
+                    this.prsAdvance()
+                    if (this.prsMatch("Colon")) {
+                        this.parseTypeName()
+                    }
+                }
+                this.prsExpect("RParen")
+            }
+            kids = kidsAdd(kids, this.parseBlock())
+        }
+        if (this.prsCheck("Finally")) {
+            this.prsAdvance()
+            kids = kidsAdd(kids, this.parseBlock())
+        }
+        return this.ast.add("Try", catchVar, "", this.prsCurSpan(), kids)
+    }
+
+    // ── 表达式：Pratt 优先级 ──
+
+    /// 解析表达式入口（最低优先级）。
+    fun parseExpr(): Int {
+        return this.parseBinary(1)
+    }
+
+    /// 二元运算符优先级（0 表示非二元运算符）。
+    fun binPrec(k: String): Int {
+        if (k == "OrOr") { return 1 }
+        if (k == "AndAnd") { return 2 }
+        if (k == "EqEq" || k == "Neq" || k == "Is" || k == "As") { return 3 }
+        if (k == "Lt" || k == "Gt" || k == "LtEq" || k == "GtEq") { return 4 }
+        if (k == "LtLt" || k == "GtGt" || k == "GtGtGt") { return 5 }
+        if (k == "Plus" || k == "Minus") { return 6 }
+        if (k == "Star" || k == "Slash" || k == "Percent") { return 7 }
+        return 0
+    }
+
+    /// 左结合二元表达式解析。
+    fun parseBinary(minPrec: Int): Int {
+        var left = this.parseUnary()
+        while (true) {
+            // Elvis `?:`：由 `QuestionMark` + `Colon` 两个 token 组成，优先级最低、右结合。
+            if (this.prsCurKind() == "QuestionMark" && this.prsKind(this.pos + 1) == "Colon") {
+                if (minPrec > 1) {
+                    break
+                }
+                this.prsAdvance() // `?`
+                this.prsAdvance() // `:`
+                val eRight = this.parseBinary(1)
+                val eSpan = mergeSpan(this.ast.spanOf(left), this.ast.spanOf(eRight))
+                left = this.ast.add(
+                    "Binary",
+                    "ElvisColon",
+                    "",
+                    eSpan,
+                    kidsAdd(kidsAdd(noKids(), left), eRight)
+                )
+                continue
+            }
+            val op = this.prsCurKind()
+            val prec = this.binPrec(op)
+            if (prec == 0 || prec < minPrec) {
+                break
+            }
+            this.prsAdvance()
+            // `x as T` / `x is T`：右侧是**类型名**而非表达式。
+            // 若按表达式解析，`List<Any>` 会被拆成比较运算（`<` / `>`），
+            // 整个表达式退化为垃圾 HIR（自举时 `Frames.pop` 就是这么坏掉的）。
+            if (op == "As" || op == "Is") {
+                val tname: String = this.parseTypeName()
+                val tId: Int = this.ast.leaf("Lit", tname, this.prsCurSpan())
+                val spT = mergeSpan(this.ast.spanOf(left), this.ast.spanOf(tId))
+                left = this.ast.add("Binary", op, "", spT, kidsAdd(kidsAdd(noKids(), left), tId))
+                continue
+            }
+            val right = this.parseBinary(prec + 1)
+            val sp = mergeSpan(this.ast.spanOf(left), this.ast.spanOf(right))
+            left = this.ast.add("Binary", op, "", sp, kidsAdd(kidsAdd(noKids(), left), right))
+        }
+        return left
+    }
+
+    /// 一元表达式（- / ! / +）。
+    fun parseUnary(): Int {
+        val k = this.prsCurKind()
+        if (k == "Minus" || k == "Bang" || k == "Plus") {
+            this.prsAdvance()
+            val operand = this.parseUnary()
+            val sp = mergeSpan(this.prsCurSpan(), this.ast.spanOf(operand))
+            return this.ast.add("Unary", k, "", sp, kidsAdd(noKids(), operand))
+        }
+        return this.parsePostfix()
+    }
+
+    /// 后缀表达式：调用 () / 成员 . / 下标 []。
+    fun parsePostfix(): Int {
+        var node = this.parsePrimary()
+        while (true) {
+            val k = this.prsCurKind()
+            if (k == "LParen") {
+                this.prsAdvance()
+                var args = noKids()
+                args = kidsAdd(args, node) // 被调用者作为首个子节点
+                if (!this.prsCheck("RParen")) {
+                    while (true) {
+                        val a = this.parseExpr()
+                        args = kidsAdd(args, a)
+                        if (!this.prsMatch("Comma")) {
+                            break
+                        }
+                    }
+                }
+                this.prsExpect("RParen")
+                node = this.ast.add("Call", "", "", this.prsCurSpan(), args)
+            } else if (k == "Dot") {
+                this.prsAdvance()
+                val member: String = this.prsCurLit()
+                this.prsExpectName()
+                node = this.ast.add("Member", member, "", this.prsCurSpan(), kidsAdd(noKids(), node))
+            } else if (k == "Lt") {
+                // 泛型实参：`arrayListOf<String>()` / `mutableMapOf<String, Int>()`。
+                // 必须在 postfix 处尝试消费：否则 `<` 会被当成比较运算符，
+                // `arrayListOf<String>()` 被解析为 `arrayListOf < String > ()`，
+                // 生成完全错误的 HIR/IR。仅在确认「尖括号内是类型形态且其后
+                // 紧跟 `(` / `.` / `[`」时消费，`a < b` 仍按比较处理。
+                if (!this.prsTrySkipTypeArgs()) {
+                    break
+                }
+            } else if (k == "LBracket") {
+                this.prsAdvance()
+                val idx = this.parseExpr()
+                this.prsExpect("RBracket")
+                node = this.ast.add(
+                    "Index",
+                    "",
+                    "",
+                    this.prsCurSpan(),
+                    kidsAdd(kidsAdd(noKids(), node), idx)
+                )
+            } else {
+                break
+            }
+        }
+        return node
+    }
+
+    /// 尝试跳过泛型实参 `<T, U<V>>`（返回是否已消费）。
+    ///
+    /// 判定条件（全部满足才消费，否则回退到原位置）：
+    ///   1. 尖括号**配平**（`>>` / `>>>` 折算 2 / 3 层闭合）；
+    ///   2. 括号内只出现类型形态的 token（名字 / `,` / `.` / 嵌套 `<` / `?` / `*`）；
+    ///   3. 闭合 `>` 之后紧跟 `(`、`.` 或 `[`（即确实是「泛型调用 / 泛型成员」）。
+    ///
+    /// 这样 `a < b`、`a < b && c` 等比较表达式不会被误消费。
+    fun prsTrySkipTypeArgs(): Boolean {
+        val save: Int = this.pos
+        if (!this.prsCheck("Lt")) {
+            return false
+        }
+        this.prsAdvance() // <
+        var depth: Int = 1
+        var scanned: Int = 0
+        while (depth > 0) {
+            val k: String = this.prsCurKind()
+            if (k == "Lt") {
+                depth = depth + 1
+            } else if (k == "Gt") {
+                depth = depth - 1
+            } else if (k == "GtGt") {
+                depth = depth - 2
+            } else if (k == "GtGtGt") {
+                depth = depth - 3
+            } else if (this.prsIsTypeArgToken(k)) {
+                // 类型形态 token：继续
+            } else {
+                // 非类型形态（字面量 / 算术运算符 / 语句边界）→ 不是泛型实参
+                this.pos = save
+                return false
+            }
+            this.prsAdvance()
+            scanned = scanned + 1
+            if (scanned > 96) {
+                this.pos = save
+                return false
+            }
+        }
+        val nk: String = this.prsCurKind()
+        if (nk == "LParen" || nk == "Dot" || nk == "LBracket") {
+            return true
+        }
+        this.pos = save
+        return false
+    }
+
+    /// 泛型实参内允许出现的 token 种类（类型形态）。
+    fun prsIsTypeArgToken(k: String): Boolean {
+        if (k == "" || k == "EOF") {
+            return false
+        }
+        if (k == "Comma" || k == "Dot" || k == "QuestionMark" || k == "Star"
+            || k == "In" || k == "Out" || k == "Arrow") {
+            return true
+        }
+        // `String` / `Int` / 软关键字类型名等
+        return this.prsIsNameToken()
+    }
+
+    /// 解析基础表达式（字面量 / 标识符 / 分组 / if / when）。
+    fun parsePrimary(): Int {
+        val k = this.prsCurKind()
+        if (k == "IntLiteral") {
+            return this.leafLit("IntLiteral")
+        }
+        if (k == "FloatLiteral") {
+            return this.leafLit("FloatLiteral")
+        }
+        if (k == "StringLiteral") {
+            val lit: Int = this.leafLit("StringLiteral")
+            // 字符串插值：Lexer 按协议拆成 `StringLiteral` + `StringInterpStart` + …，
+            // 此处重建为 `+` 拼接链（每段插值经 `toString(...)` 转字符串）。
+            if (this.prsCurKind() == "StringInterpStart") {
+                return this.parseStringInterp(lit)
+            }
+            return lit
+        }
+        if (k == "BoolLiteral") {
+            return this.leafLit("BoolLiteral")
+        }
+        if (k == "CharLiteral") {
+            return this.leafLit("CharLiteral")
+        }
+        if (k == "Null") {
+            return this.leafLit("NullLiteral")
+        }
+        // 标识符：软关键字（`value` / `data` / …）同样按标识符处理
+        if (this.prsIsNameToken()) {
+            return this.leafLit("Ident")
+        }
+        if (k == "This") {
+            return this.leafLit("This")
+        }
+        if (k == "Super") {
+            return this.leafLit("Super")
+        }
+        if (k == "LParen") {
+            this.prsAdvance()
+            val e = this.parseExpr()
+            this.prsExpect("RParen")
+            return e
+        }
+        if (k == "If") {
+            return this.parseIf()
+        }
+        if (k == "When") {
+            return this.parseWhen()
+        }
+        // 块表达式 `{ ... }`：单表达式块取值时直接返回该表达式
+        if (k == "LBrace") {
+            val blk: Int = this.parseBlock()
+            if (kidsCount(this.ast.kidsOf(blk)) == 1) {
+                val only: Int = this.ast.childOf(blk, 0)
+                if (this.ast.kindOf(only) == "ExprStmt"
+                    && kidsCount(this.ast.kidsOf(only)) == 1) {
+                    return this.ast.childOf(only, 0)
+                }
+            }
+            return blk
+        }
+        // 未知 token：报错并消费，避免死循环
+        this.errors.pushAt(
+            severityError(),
+            "意外的 token: " + k,
+            this.prsCurSpan().start,
+            this.prsCurSpan().end
+        )
+        val bad = this.ast.leaf("ErrorExpr", this.prsCurLit(), this.prsCurSpan())
+        this.prsAdvance()
+        return bad
+    }
+
+    /// 解析 when 表达式（模式 -> 分支）。
+    fun parseWhen(): Int {
+        this.prsAdvance() // When
+        var subject: Int = -1
+        if (this.prsCheck("LParen")) {
+            this.prsAdvance()
+            subject = this.parseExpr()
+            this.prsExpect("RParen")
+        }
+        this.prsExpect("LBrace")
+        var arms = noKids()
+        while (!this.prsCheck("RBrace") && !this.prsAtEnd()) {
+            val pat = this.parseExpr()
+            this.prsExpect("Arrow")
+            val body = this.parseExpr()
+            arms = kidsAdd(arms, this.ast.add("WhenArm", "", "", this.prsCurSpan(), kidsAdd(kidsAdd(noKids(), pat), body)))
+        }
+        this.prsExpect("RBrace")
+        var kids = noKids()
+        if (subject >= 0) {
+            kids = kidsAdd(kids, subject)
+        }
+        kids = kidsAdd(kids, this.ast.add("WhenArms", "", "", this.prsCurSpan(), arms))
+        return this.ast.add("When", "", "", this.prsCurSpan(), kids)
+    }
+
+    /// 便捷：把当前字面量 token 作为叶子节点消费。
+    fun leafLit(kindName: String): Int {
+        val text: String = this.prsCurLit()
+        val sp = this.prsCurSpan()
+        this.prsAdvance()
+        return this.ast.leaf(kindName, text, sp)
+    }
+
+    /// 重建字符串插值：`left` 为已产出的首段字面量，随后交替出现
+    /// `StringInterpStart` 与中段/尾部 `StringLiteral`，统一拼成 `+` 链。
+    fun parseStringInterp(first: Int): Int {
+        var left: Int = first
+        while (this.prsCurKind() == "StringInterpStart") {
+            val raw: String = this.prsCurLit()
+            val sp: Span = this.prsCurSpan()
+            this.prsAdvance()
+            val part: Int = this.buildInterpPart(raw, sp)
+            val sp1: Span = mergeSpan(this.ast.spanOf(left), this.ast.spanOf(part))
+            left = this.ast.add(
+                "Binary",
+                "Plus",
+                "",
+                sp1,
+                kidsAdd(kidsAdd(noKids(), left), part)
+            )
+            if (this.prsCurKind() == "StringLiteral") {
+                val seg: Int = this.leafLit("StringLiteral")
+                val sp2: Span = mergeSpan(this.ast.spanOf(left), this.ast.spanOf(seg))
+                left = this.ast.add(
+                    "Binary",
+                    "Plus",
+                    "",
+                    sp2,
+                    kidsAdd(kidsAdd(noKids(), left), seg)
+                )
+            }
+        }
+        return left
+    }
+
+    /// 构造单个插值片段：`$name` → `toString(name)`；`${expr}` → `toString(<expr>)`。
+    fun buildInterpPart(raw: String, sp: Span): Int {
+        var exprId: Int = -1
+        // 注意：源码里不能直接写 `"${"`（词法器会当作插值起始），故动态拼接。
+        val dollarBrace: String = "$" + "{"
+        if (raw.startsWith(dollarBrace)) {
+            val inner: String = prsSlice(raw, 2, raw.length - 3)
+            exprId = this.parseInterpExpr(inner, sp)
+        } else if (raw.startsWith("$")) {
+            val name: String = prsSlice(raw, 1, raw.length - 1)
+            exprId = this.ast.leaf("Ident", name, sp)
+        }
+        if (exprId < 0) {
+            exprId = this.ast.leaf("StringLiteral", "", sp)
+        }
+        val callee: Int = this.ast.leaf("Ident", "toString", sp)
+        return this.ast.add(
+            "Call",
+            "",
+            "",
+            sp,
+            kidsAdd(kidsAdd(noKids(), callee), exprId)
+        )
+    }
+
+    /// 用子解析器解析 `${...}` 内部表达式，并把其 AST 子树复制进当前 arena。
+    fun parseInterpExpr(text: String, sp: Span): Int {
+        if (text == "") {
+            return this.ast.leaf("StringLiteral", "", sp)
+        }
+        val sub: Parser = Parser(text)
+        if (sub.n <= 1) {
+            return this.ast.leaf("StringLiteral", "", sp)
+        }
+        val subRoot: Int = sub.parseExpr()
+        if (subRoot < 0) {
+            return this.ast.leaf("StringLiteral", "", sp)
+        }
+        return this.copySubtree(sub.ast, subRoot)
+    }
+
+    /// 把 `src` 子树复制进当前 arena（`this.ast`）。
+    ///
+    /// 注意：必须作为方法写入 `this.ast`，**不能**把目标 Ast 作为参数传入 ——
+    /// 自举 AOT 下类实例参数按值传递，`dst.add` 会写进副本并使返回的 id 在主
+    /// arena 中错位（曾导致整个模块无函数）。
+    fun copySubtree(src: Ast, id: Int): Int {
+        var newKids: String = noKids()
+        var i: Int = 0
+        while (true) {
+            val c: Int = src.childOf(id, i)
+            if (c < 0) {
+                break
+            }
+            newKids = kidsAdd(newKids, this.copySubtree(src, c))
+            i = i + 1
+        }
+        return this.ast.add(src.kindOf(id), src.textOf(id), src.tyOf(id), src.spanOf(id), newKids)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Parser 辅助（自由函数）
+// ─────────────────────────────────────────────────────────────
+
+/// 复合赋值 token → 对应二元运算符 token kind（供 `x += y` 脱糖为 `x = x + y`）。
+fun compoundAssignOp(k: String): String {
+    if (k == "PlusEq") { return "Plus" }
+    if (k == "MinusEq") { return "Minus" }
+    if (k == "StarEq") { return "Star" }
+    if (k == "SlashEq") { return "Slash" }
+    if (k == "PercentEq") { return "Percent" }
+    return "Plus"
+}
+
+/// 子串（start 起 length 长，越界截断）。
+fun prsSlice(text: String, start: Int, length: Int): String {
+    var out: String = ""
+    var i: Int = start
+    val end: Int = start + length
+    while (i < end && i < text.length) {
+        if (i >= 0) {
+            out = out + toStr(text[i])
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// 递归复制 `src` AST 子树到 `dst` arena，返回新节点 id（表达式为树，无共享节点）。
+/// 说明：目标 arena 必须通过方法内的 `this.ast` 写入，故此处已改为 `Parser.copySubtree`。
+
+/// 合并两个 span（用于复合节点）。
+fun mergeSpan(a: Span, b: Span): Span {
+    return Span(a.start, b.end, a.startLine, a.startCol, b.endLine, b.endCol)
+}

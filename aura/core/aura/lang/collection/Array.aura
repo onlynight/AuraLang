@@ -1,0 +1,24 @@
+// aura:///aura/lang/collection/Array.aura
+package aura.lang.collection
+// 集合包：固定大小数组接口
+//
+// Array<T> 继承 Collection<T>，扩展 set 写操作和 toList 转换。
+// `arr[i]` 下标访问和 `arr.get(i)` 均降级为 Collection.getAt(arr, i)。
+
+import aura.lang.collection.Collection
+
+/// 固定大小数组接口 Array<T>。
+///
+/// - 继承自 Collection<T>，共享 count/getAt/contains/indexOf/isEmpty 等通用操作
+/// - 扩展 set(index, value) 写操作和 toList() 转换
+/// - `arr[i]` 语法糖等价于 `arr.getAt(i)`
+///
+/// @see Collection, List, ArrayList
+/// @since 0.5
+interface Array<T> : Collection<T> {
+    /// 按下标设置元素
+    fun set(index: Int, value: T): Unit
+
+    /// 转换为列表
+    fun toList(): List<T>
+}

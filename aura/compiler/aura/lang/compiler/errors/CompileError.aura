@@ -1,0 +1,199 @@
+// aura:///aura/lang/compiler/errors/CompileError.aura
+package aura.lang.compiler.errors
+// ─────────────────────────────────────────────────────────────
+// 编译错误模型 — 纯 Aura 化迁移 · Phase 1
+//
+// 对应 Rust `compiler/src/errors.rs`。
+//
+// 设计说明（受当前 VM 能力约束）：
+//   * 错误以**扁平行式存储**（每行一个错误），与 Ast 的 arena 表示一致；
+//     `List.add` 在当前 VM 中不可靠，故统一用「追加到 String + 解析」。
+//   * `severity` 以字符串表示（"Error" / "Warning"）。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+
+/// 严重级别名称常量。
+fun severityError(): String {
+    return "Error"
+}
+
+/// 严重级别名称常量。
+fun severityWarning(): String {
+    return "Warning"
+}
+
+/// 编译错误收集器。
+///
+/// 用法：
+///   val errs = CompileErrors()
+///   errs.push(severityError(), "Expected LParen, got Ident", span)
+class CompileErrors {
+
+    /// 严重级别（每行一个）。
+    var severities: String = ""
+
+    /// 错误消息（每行一个，换行已转义）。
+    var messages: String = ""
+
+    /// Span 信息（每行一个：`start end sl sc el ec`，空格分隔）。
+    var spans: String = ""
+
+    /// 错误数量。
+    var count: Int = 0
+
+    init() {
+        this.severities = ""
+        this.messages = ""
+        this.spans = ""
+        this.count = 0
+    }
+
+    /// 获取错误数量。
+    fun errorCount(): Int {
+        return this.count
+    }
+
+    /// 追加一个诊断，返回其索引。
+    fun push(severity: String, message: String, sp: Span): Int {
+        val idx: Int = this.count
+        this.count = idx + 1
+        this.severities = this.severities + severity + "\n"
+        // 手动转义换行符（replaceAll 在 VM 内类调用时未链接）
+        var escaped: String = ""
+        var i: Int = 0
+        var len: Int = message.length
+        while (i < len) {
+            val c: String = toStr(message[i])
+            if (c == "\n") {
+                escaped = escaped + "\\n"
+            } else {
+                escaped = escaped + c
+            }
+            i = i + 1
+        }
+        this.messages = this.messages + escaped + "\n"
+        this.spans = this.spans + toStr(sp.start) + " " + toStr(sp.end) + " "
+            + toStr(sp.startLine) + " " + toStr(sp.startCol) + " "
+            + toStr(sp.endLine) + " " + toStr(sp.endCol) + "\n"
+        return idx
+    }
+
+    /// 追加一个仅有偏移量的诊断（无行列信息时退化为 1:1）。
+    fun pushAt(severity: String, message: String, start: Int, end: Int): Int {
+        return this.push(severity, message, Span(start, end, 1, 1, 1, 1))
+    }
+
+    /// 第 index 个诊断的严重级别。
+    fun severityAt(index: Int): String {
+        return this.line(this.severities, index)
+    }
+
+    /// 第 index 个诊断的消息。
+    fun messageAt(index: Int): String {
+        val raw: String = this.line(this.messages, index)
+        // 手动反转义换行符（replaceAll 在 VM 内类调用时未链接）
+        var result: String = ""
+        var i: Int = 0
+        var len: Int = raw.length
+        while (i < len) {
+            if (i + 1 < len && toStr(raw[i]) == "\\" && toStr(raw[i + 1]) == "n") {
+                result = result + "\n"
+                i = i + 2
+            } else {
+                result = result + toStr(raw[i])
+                i = i + 1
+            }
+        }
+        return result
+    }
+
+    /// 第 index 个诊断的位置。
+    fun spanAt(index: Int): Span {
+        val line: String = this.line(this.spans, index)
+        return Span(
+            ceToIntOf(fieldAt(line, 0, " ")), ceToIntOf(fieldAt(line, 1, " ")),
+            ceToIntOf(fieldAt(line, 2, " ")), ceToIntOf(fieldAt(line, 3, " ")),
+            ceToIntOf(fieldAt(line, 4, " ")), ceToIntOf(fieldAt(line, 5, " "))
+        )
+    }
+
+    /// 是否没有任何 Error 级别的诊断。
+    fun isOk(): Boolean {
+        var i: Int = 0
+        while (i < this.count) {
+            if (this.severityAt(i) == severityError()) {
+                return false
+            }
+            i = i + 1
+        }
+        return true
+    }
+
+    /// 按 `Rust` 侧风格渲染全部诊断（每行一条）。
+    fun ceDump(): String {
+        var out: String = ""
+        var i: Int = 0
+        while (i < this.count) {
+            val sp: Span = this.spanAt(i)
+            out = out + "error: " + this.messageAt(i)
+                + " @line " + toStr(sp.startLine) + " col " + toStr(sp.startCol)
+                + "-" + toStr(sp.endCol) + "\n"
+            i = i + 1
+        }
+        return out
+    }
+
+    /// 取第 index 行（内部辅助）。本编译器不支持 list[i]，用 ceFieldAt 字符扫描。
+    fun line(text: String, index: Int): String {
+        return ceFieldAt(text, index, "\n")
+    }
+}
+
+/// 十进制字符串 → Int（局部实现，避免依赖 Lexer 内部辅助，且不与 Ast.aura 的 toIntOf 重名）。
+fun ceToIntOf(text: String): Int {
+    val digits: String = "0123456789"
+    val len: Int = text.length()
+    var total: Int = 0
+    var i: Int = 0
+    while (i < len) {
+        total = total * 10 + digits.indexOf(toStr(text[i]))
+        i = i + 1
+    }
+    return total
+}
+
+/// 取第 index 个字段（以 sep 分隔，0-based）。本文件本地实现，避免跨文件依赖。
+fun ceFieldAt(text: String, index: Int, sep: String): String {
+    var i: Int = 0
+    var fieldStart: Int = 0
+    var cur: Int = 0
+    var fieldLen: Int = text.length
+    while (i < fieldLen) {
+        val c: String = toStr(text[i])
+        if (c == sep) {
+            if (cur == index) {
+                var result: String = ""
+                var j: Int = fieldStart
+                while (j < i) {
+                    result = result + toStr(text[j])
+                    j = j + 1
+                }
+                return result
+            }
+            cur = cur + 1
+            fieldStart = i + 1
+        }
+        i = i + 1
+    }
+    if (cur == index) {
+        var result: String = ""
+        var j: Int = fieldStart
+        while (j < fieldLen) {
+            result = result + toStr(text[j])
+            j = j + 1
+        }
+        return result
+    }
+    return ""
+}

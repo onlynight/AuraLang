@@ -144,6 +144,17 @@ fn opcode_display(module: &BytecodeModule, op: &OpCode, operand: &[u8]) -> Strin
         OpCode::Jump(_) => format!("JUMP {}", read_i32()),
         OpCode::JumpIfTrue(_) => format!("JUMP_IF_TRUE {}", read_i32()),
         OpCode::JumpIfFalse(_) => format!("JUMP_IF_FALSE {}", read_i32()),
+        OpCode::PushHandler(..) => {
+            // 操作数：i32 处理器块字节偏移 + u16 异常值落点槽位
+            let slot = if operand.len() >= 6 {
+                u16::from_le_bytes([
+                    operand[4], operand[5],
+                ])
+            } else {
+                0
+            };
+            format!("PUSH_HANDLER {} slot={}", read_i32(), slot)
+        }
         OpCode::CallC(_) => format!("CALL_C {}", read_u16()),
         other => other.to_string(),
     }

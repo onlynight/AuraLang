@@ -54,7 +54,7 @@ examples/language-test/
 |------|------|:--:|:---:|:---:|
 | Phase 1 词法基础 | `01-lexer.aura` | ✅ | ✅ | ✅ |
 | Phase 2 类型与变量 | `02-types-variables.aura` | ✅ | ✅ | ✅（编译通过并可运行，部分 Double 输出待优化） |
-| Phase 3 函数 | `03-functions.aura` | ✅ | ✅ | ⏳（需 `--features llvm`） |
+| Phase 3 函数 | `03-functions.aura` | ✅ | ⚠️（Cranelift 热点整数函数预存问题） | ✅（AOT 与 VM 输出一致，仅泛型 Boolean 拆分差异） |
 | Phase 4 控制流 | `04-control-flow.aura` | ✅ | ✅ | ✅ |
 | Phase 5 类与对象 | `05-classes.aura` | ✅ | ⚠️（方法分派异常） | ⏳ |
 | Phase 6 空安全 | `06-null-safety.aura` | ✅ | ✅ | ✅（编译通过并可运行，toString 对 null/String 输出待优化） |
@@ -203,15 +203,33 @@ aura build examples/language-test/02-types-variables.aura --aot --output target/
 | `Array` 成员访问未支持 | `checker.rs::check_member` | `Ty::Array(elem)` 支持 `size`/`isEmpty`/`first`/`last` 成员 |
 
 **已知限制**（VM 运行时问题，不影响 `aura check`）：
-- `Calculator` 方法默认参数返回 `null`（`when` 表达式在字段赋值中的 HIR/MIR 降级 bug，非默认参数问题）
+- `Calculator` 方法默认参数返回 `null`（`when` 表达式在字段赋值中的 HIR/MIR 降级 bug，非默认参数问题）——**已修复**（见下）
+- AOT `identity(true)` 输出 `-1`（`Boolean true` 经泛型擦除装箱后与 `Int -1` 无法区分；属 AOT 类型擦除限制）
 
 **验证命令与结果**：
 ```bash
 aura check examples/language-test/03-functions.aura              # 语法/语义检查 → ✅ 通过
-aura run   examples/language-test/03-functions.aura              # VM 运行时验证 → ✅ 完成（§3.13 方法默认参数除外）
+aura run   examples/language-test/03-functions.aura              # VM 运行时验证 → ✅ 完成（全部 §3.1–§3.14）
+aura build examples/language-test/03-functions.aura --aot --output target/test/03-functions  # AOT 编译 → ✅ 成功
+target/test/03-functions                                           # AOT 运行 → ✅ 完成（仅 §3.6 identity(true) 与 VM 不同）
 ```
 
 > **修复的编译器 Bug**：共 14 个（泛型类型变量、vararg 语义、命名参数匹配、单参数 Lambda 解析、顶层可见性解析、Lambda 调用检查、顶层 val 注册顺序、`when` 返回值、默认参数填充、方法默认参数、函数索引闭包偏移、`if-else` 表达式返回值、默认参数填充顺序、`Array` 成员访问）。
+
+**自检 03 阶段新增修复**（VM + AOT 运行时）：
+| Bug | 位置 | 修复 |
+|-----|------|------|
+| 用户定义函数与 prelude 内置重名导致重载歧义（`identity`） | `sema/symbol.rs` + `sema/checker.rs` | 新增 `Symbol.is_builtin`；重载解析时用户定义遮蔽内置 |
+| 用户定义函数遮蔽同名 prelude 原生函数 → AOT 符号重定义 | `codegen/hir.rs` | 注册 prelude 原生函数时跳过已被用户函数占用的名字 |
+| 闭包函数参数槽从 0 起，与 `Frame` 从 `locals[1]` 绑定实参不一致（Lambda 首参恒为 0） | `codegen/mir.rs` + `vm/interp.rs` | 闭包槽位对齐普通函数（槽 0 保留、捕获在前）；`MakeClosure` 弹出捕获值后反转 |
+| 高阶函数内联后丢失闭包实参（`subst_expr` 不替换被调方名） | `codegen/opt.rs` | `inline_hir` 跳过「把形参当被调方」与「含 lambda」的候选 |
+| 命名参数按源码顺序传递（未按形参顺序重排） | `codegen/hir.rs` | Call 降级时按形参顺序重排命名实参 |
+| AOT 函数类型（`ptr`）生成非法 `ptr*` | `codegen/aot/emit.rs` | 新增 `slot_ptr_ty`，`ptr` 槽位不再取 `ptr*` |
+| AOT 闭包结构体类型 `{ ptr, N x ptr }` 语法非法 | `codegen/aot/emit.rs` | 重写为 `{ ptr, [..] }` → 改为堆分配 env `{ ptr, T1, ... }` |
+| AOT 无闭包调用机制（函数类型变量调用链接到未定义符号） | `codegen/aot/emit.rs` | 闭包 env ABI（`fn(ptr env, args)`）+ 调用点间接调用；签名由声明/调用推断 |
+| AOT lambda 无尾表达式返回（恒 `ret i32 0`） | `codegen/aot/emit.rs` | lambda 体尾表达式作为返回值；用户参数 alloca |
+| AOT lambda 内字符串常量未注册全局 | `codegen/aot/emit.rs` | 合并 lambda 子上下文的 globals/常量计数 |
+| AOT `listOf(...)`（vararg 打包产物）链接未定义 | `codegen/aot/emit.rs` | `listOf`/`mutableListOf`/`arrayListOf` 统一降级为空列表 + 逐个 append |
 
 ---
 
@@ -582,6 +600,7 @@ cargo test -p compiler parser
 
 | 日期 | 阶段 | 说明 |
 |------|------|------|
+| 2026-09-12 | Phase 3 自检（VM+AOT） | 修复 11 个编译器/运行时 Bug：内置符号遮蔽、闭包槽位与捕获顺序、高阶函数内联丢参、命名参数重排、AOT `ptr*` 非法类型、AOT 闭包 env ABI 与间接调用、AOT lambda 返回/字符串常量、AOT `listOf` 降级。**VM 与 AOT 输出一致**（§3.1–§3.14 全部正确），仅 `identity(true)` 因 AOT 泛型类型擦除输出 `-1`。JIT 存在预存 Cranelift 热点整数函数问题（`cranelift-module: not implemented`），与本次改动无关 |
 | 2026-09-08 | Phase 7 AOT 修复 | AOT 编译通过（修复 5 个编译器 Bug：`emit_new` 改用 `insertvalue` 构建结构体、`emit_member_access` 改用 `extractvalue` 按字段索引提取、`class_field_types` 增加字段索引、C FFI 新增 `__throw` 实现）。VM/JIT/AOT 全模式编译通过（AOT 运行时输出为空为预存问题） |
 | 2026-09-08 | Phase 7 | 错误处理 — 创建并 VM/JIT 验证通过（修复 2 个编译器 Bug：`__throw` 原生函数未注册、`__throw` VM 运行时未注册）。AOT 编译失败（构造器 `emit_new` 返回 null，与 Phase 5 相同限制） |
 | 2026-09-08 | Phase 6 | 空安全 — 创建并全模式验证通过（修复 5 个编译器 Bug：SafeAccess 双重可空包装、AOT 可空标量存入非空变量、AOT 赋值类型协调、AOT 二元运算可空结构体提取、AOT null 比较硬编码类型）。VM/JIT 输出正确，AOT 编译运行通过（toString 对 null/String 输出待优化） |

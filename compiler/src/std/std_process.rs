@@ -13,15 +13,34 @@ pub fn register(reg: &mut NativeRegistry) {
     reg.register("aura.lang.std.Process.argCount", nat_arg_count);
     reg.register("aura.lang.std.Process.pid", nat_pid);
     reg.register("aura.lang.std.Process.spawn", nat_spawn);
+    reg.register("aura.lang.std.Process.run", nat_run);
     reg.register("aura.lang.std.Process.kill", nat_kill);
     reg.register("aura.lang.std.Process.wait", nat_wait);
     reg.register("aura.lang.std.Process.exitProcess", nat_exit_process);
 }
 
-/// process.exit(code) → exits the process
+/// `Process.exit(code)` → 退出进程。
+///
+/// 注意：`Process` 是 object 单例，方法调用会**注入 self 作为第 0 个参数**
+/// （实际 `argc = 1 + 形参个数`）。因此退出码取自**最后一个**数值参数，
+/// 而不是 `args[0]`（此前误取 args[0] 导致退出码恒为 0）。
 fn nat_exit(args: &[Value]) -> Value {
-    let code = args.first().map(|v| v.as_int()).unwrap_or(0) as i32;
+    let code = last_int_arg(args).unwrap_or(0) as i32;
     std::process::exit(code);
+}
+
+/// `nat_exit` 的公开包装（供 prelude 短名别名注册使用）。
+pub fn nat_exit_pub(args: &[Value]) -> Value {
+    nat_exit(args)
+}
+
+/// 取参数列表中最后一个整数（兼容 `Value::Float` 表示的整数）。
+pub(crate) fn last_int_arg(args: &[Value]) -> Option<i64> {
+    args.iter().rev().find_map(|v| match v {
+        Value::Int(n) => Some(*n),
+        Value::Float(f) if f.fract() == 0.0 => Some(*f as i64),
+        _ => None,
+    })
 }
 
 /// process.exitCode() → Int (default 0)
@@ -68,6 +87,26 @@ fn nat_spawn(args: &[Value]) -> Value {
             Value::Int(pid)
         }
         Err(e) => Value::str_(format!("spawn error: {}", e)),
+    }
+}
+
+/// `process.run(command)` → Int：以 shell 同步执行命令行并返回退出码。
+///
+/// - Windows 经 `cmd /C`，类 Unix 经 `sh -c`，便于组合多步外部工具调用；
+/// - 阻塞直到命令结束（与异步的 `spawn` 互补）；
+/// - `Process` 为 object 单例，取**最后一个字符串参数**作为命令，规避 self 注入偏移。
+fn nat_run(args: &[Value]) -> Value {
+    let cmd = args.iter().rev().map(|v| v.as_string()).find(|s| !s.is_empty()).unwrap_or_default();
+    if cmd.is_empty() {
+        return Value::Int(-1);
+    }
+    #[cfg(windows)]
+    let status = std::process::Command::new("cmd").arg("/C").arg(&cmd).status();
+    #[cfg(not(windows))]
+    let status = std::process::Command::new("sh").arg("-c").arg(&cmd).status();
+    match status {
+        Ok(s) => Value::Int(s.code().unwrap_or(-1) as i64),
+        Err(_) => Value::Int(-1),
     }
 }
 

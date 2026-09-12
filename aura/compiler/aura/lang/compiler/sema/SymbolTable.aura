@@ -1,0 +1,348 @@
+// aura:///aura/lang/compiler/sema/SymbolTable.aura
+package aura.lang.compiler.sema
+// ─────────────────────────────────────────────────────────────
+// 符号表与作用域管理 — 纯 Aura 化迁移 · Phase 2 (任务 2.2)
+//
+// 对应 Rust `compiler/src/sema/symbol.rs` 的 `SymbolTable` / `Scope` / `Symbol`。
+//
+// ── 设计方式（受当前 VM 能力约束）──────────────────────────
+//
+// Rust 侧用 `Vec<Scope>` + `HashMap<String, Symbol>` 维护作用域链。
+// Aura 侧用**扁平字符串**表示：
+//
+//   * 作用域表：`var scopes: String` — 每行一个作用域，格式为
+//     `parent|isFunctionScope|symCount`，符号条目紧接其后。
+//   * 符号条目：`var entries: String` — 每行一个符号，格式为
+//     `name|kind|visibility|mutable|params|type`
+//     其中 `kind` 取值：`"Var"` / `"Fn"` / `"Type"` / `"EnumVariant"` / `"Module"`。
+//   * 当前作用域索引：`var current: Int`。
+//   * 全局类型/函数索引：用字符串表 `var typeIndex: String` / `var fnIndex: String`
+//     （格式：`name|ty` 或 `name|params|ret`，每行一项）。
+//
+// 查找操作沿作用域链向上遍历，与 Rust 行为一致。
+// ─────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────
+// 符号表
+// ─────────────────────────────────────────────────────────────
+
+class SymbolTable {
+
+    /// 作用域表（每行一个作用域：`parent|isFnScope|symCount`）。
+    var scopes: String = ""
+
+    /// 符号条目表（每行一个符号：`name|kind|vis|mut|params|ty`）。
+    var entries: String = ""
+
+    /// 当前作用域索引（初始为 0 = 全局作用域）。
+    var current: Int = 0
+
+    /// 全局类型索引（`name|ty`，每行一项）。
+    var typeIndex: String = ""
+
+    /// 全局函数索引（`name|params|ret`，每行一项）。
+    var fnIndex: String = ""
+
+    /// 作用域总数。
+    var scopeCount: Int = 0
+
+    /// 符号条目总数。
+    var entryCount: Int = 0
+
+    // ── 构造 ──
+
+    /// 新建一个空符号表，包含一个全局作用域。
+    init() {
+        this.scopes = "0|0|0\n"
+        this.entries = ""
+        this.current = 0
+        this.typeIndex = ""
+        this.fnIndex = ""
+        this.scopeCount = 1
+        this.entryCount = 0
+    }
+
+    // ── 辅助 ──
+
+    /// 取第 index 行的文本（内部辅助）。
+    fun stLineAt(text: String, index: Int): String {
+        var i: Int = 0
+        var fieldStart: Int = 0
+        var cur: Int = 0
+        val n: Int = text.length()
+        while (i < n) {
+            val c: String = toStr(text[i])
+            if (c == "\n") {
+                if (cur == index) {
+                    return text.substring(fieldStart, i)
+                }
+                cur = cur + 1
+                fieldStart = i + 1
+            }
+            i = i + 1
+        }
+        if (cur == index) {
+            return text.substring(fieldStart, n)
+        }
+        return ""
+    }
+
+    /// 取第 index 行的第 fieldIdx 个以 sep 分隔的字段。
+    fun stField(line: String, fieldIdx: Int, sep: String): String {
+        var i: Int = 0
+        var fieldStart: Int = 0
+        var cur: Int = 0
+        val n: Int = line.length()
+        while (i < n) {
+            val c: String = toStr(line[i])
+            if (c == sep) {
+                if (cur == fieldIdx) {
+                    return line.substring(fieldStart, i)
+                }
+                cur = cur + 1
+                fieldStart = i + 1
+            }
+            i = i + 1
+        }
+        if (cur == fieldIdx) {
+            return line.substring(fieldStart, n)
+        }
+        return ""
+    }
+
+    // ── 作用域管理 ──
+
+    /// 进入新作用域。
+    fun stEnterScope(isFunctionScope: Boolean): Int {
+        val parent: Int = this.current
+        val idx: Int = this.scopeCount
+        this.scopeCount = idx + 1
+        val flag: String = if (isFunctionScope) { "1" } else { "0" }
+        this.scopes = this.scopes + toStr(parent) + "|" + flag + "|0\n"
+        this.current = idx
+        return idx
+    }
+
+    /// 退出当前作用域（回到父作用域）。
+    fun stExitScope() {
+        val line: String = this.stLineAt(this.scopes, this.current)
+        val parentStr: String = this.stField(line, 0, "|")
+        val parent: Int = symToIntOf(parentStr)
+        this.current = parent
+    }
+
+    /// 当前作用域索引。
+    fun stCurrentScope(): Int {
+        return this.current
+    }
+
+    // ── 符号插入与查找 ──
+
+    /// 在当前作用域插入符号。若已存在（同名且同签名）则返回 -1，否则返回符号条目索引。
+    fun stInsert(name: String, kind: String, visibility: String, mutable: Boolean, params: String, ty: String): Int {
+        // 检查是否已存在（函数允许同名重载；变量/类型不允许）
+        if (kind != "Fn") {
+            val existing: Int = this.stFind(name)
+            if (existing >= 0) {
+                return -1
+            }
+        }
+
+        val mutFlag: String = if (mutable) { "1" } else { "0" }
+        val entry: String = name + "|" + kind + "|" + visibility + "|" + mutFlag + "|" + params + "|" + ty
+        this.entries = this.entries + entry + "\n"
+        val idx: Int = this.entryCount
+        this.entryCount = idx + 1
+
+        // 更新当前作用域的符号计数
+        val line: String = this.stLineAt(this.scopes, this.current)
+        val parentStr: String = this.stField(line, 0, "|")
+        val isFn: String = this.stField(line, 1, "|")
+        val cntStr: String = this.stField(line, 2, "|")
+        val newCnt: Int = symToIntOf(cntStr) + 1
+        val oldLine: String = this.stLineAt(this.scopes, this.current)
+        val newLine: String = parentStr + "|" + isFn + "|" + toStr(newCnt)
+        this.scopes = this.scopes.replace(oldLine, newLine)
+
+        // 更新全局索引
+        if (kind == "Type") {
+            this.typeIndex = this.typeIndex + name + "|" + ty + "\n"
+        } else if (kind == "Fn") {
+            this.fnIndex = this.fnIndex + name + "|" + params + "|" + ty + "\n"
+        }
+
+        return idx
+    }
+
+    /// 查找符号（沿作用域链向上查找）。
+    /// 返回符号条目索引，未找到返回 -1。
+    fun stFind(name: String): Int {
+        var scope: Int = this.current
+        var guard: Int = 0
+        while (scope >= 0 && guard < 100) {
+            val line: String = this.stLineAt(this.scopes, scope)
+            val cntStr: String = this.stField(line, 2, "|")
+            val cnt: Int = symToIntOf(cntStr)
+            // 遍历该作用域的所有符号
+            var i: Int = 0
+            while (i < cnt) {
+                val eIdx: Int = this.stScopeEntryIndex(scope, i)
+                if (eIdx >= 0) {
+                    val eLine: String = this.stLineAt(this.entries, eIdx)
+                    val eName: String = this.stField(eLine, 0, "|")
+                    if (eName == name) {
+                        return eIdx
+                    }
+                }
+                i = i + 1
+            }
+            val parentStr: String = this.stField(line, 0, "|")
+            val parent: Int = symToIntOf(parentStr)
+            // 初始作用域（scope 0）的 parent 也是 0，此时退出循环
+            if (parent == scope) {
+                break
+            }
+            scope = parent
+            guard = guard + 1
+        }
+        return -1
+    }
+
+    /// 取作用域 scope 的第 i 个符号条目索引。
+    /// 符号条目是顺序添加的，每个作用域占 cnt 个条目，从该作用域创建时的 entryCount 开始。
+    fun stScopeEntryIndex(scope: Int, i: Int): Int {
+        // 计算作用域 scope 的起始条目索引
+        var start: Int = 0
+        var s: Int = 0
+        while (s < scope) {
+            val line: String = this.stLineAt(this.scopes, s)
+            val cntStr: String = this.stField(line, 2, "|")
+            start = start + symToIntOf(cntStr)
+            s = s + 1
+        }
+        return start + i
+    }
+
+    // ── 符号查询 ──
+
+    /// 取符号条目的名称。
+    fun stEntryName(idx: Int): String {
+        val line: String = this.stLineAt(this.entries, idx)
+        return this.stField(line, 0, "|")
+    }
+
+    /// 取符号条目的种类。
+    fun stEntryKind(idx: Int): String {
+        val line: String = this.stLineAt(this.entries, idx)
+        return this.stField(line, 1, "|")
+    }
+
+    /// 取符号条目的类型。
+    fun stEntryType(idx: Int): String {
+        val line: String = this.stLineAt(this.entries, idx)
+        return this.stField(line, 5, "|")
+    }
+
+    /// 取符号条目是否可变。
+    fun stEntryMutable(idx: Int): Boolean {
+        val line: String = this.stLineAt(this.entries, idx)
+        val m: String = this.stField(line, 3, "|")
+        return m == "1"
+    }
+
+    /// 取符号条目的参数列表。
+    fun stEntryParams(idx: Int): String {
+        val line: String = this.stLineAt(this.entries, idx)
+        return this.stField(line, 4, "|")
+    }
+
+    // ── 全局索引查询 ──
+
+    /// 查找全局类型。返回类型名，未找到返回 ""。
+    fun stFindType(name: String): String {
+        val lines: List<String> = this.typeIndex.split("\n")
+        var i: Int = 0
+        while (i < lines.size) {
+            val line: String = lines[i]
+            if (line == "") {
+                i = i + 1
+                continue
+            }
+            val parts: List<String> = line.split("|")
+            if (parts.size >= 2 && parts[0] == name) {
+                return parts[1]
+            }
+            i = i + 1
+        }
+        return ""
+    }
+
+    /// 查找全局函数。返回参数|返回类型字符串，未找到返回 ""。
+    fun stFindFunction(name: String): String {
+        val lines: List<String> = this.fnIndex.split("\n")
+        var i: Int = 0
+        while (i < lines.size) {
+            val line: String = lines[i]
+            if (line == "") {
+                i = i + 1
+                continue
+            }
+            val parts: List<String> = line.split("|")
+            if (parts.size >= 3 && parts[0] == name) {
+                // params 可能为空
+                if (parts[1] == "") {
+                    return parts[2]
+                }
+                return parts[1] + "|" + parts[2]
+            }
+            i = i + 1
+        }
+        return ""
+    }
+
+    // ── 工具 ──
+
+    /// 获取当前作用域中的符号数量。
+    fun stCurrentScopeCount(): Int {
+        val line: String = this.stLineAt(this.scopes, this.current)
+        val cntStr: String = this.stField(line, 2, "|")
+        return symToIntOf(cntStr)
+    }
+}
+
+/// 替换 scopes 字符串中第 index 行的内容。
+fun stFieldAt(scopes: String, index: Int): String {
+    // 找到第 index 行的起始和结束位置
+    var i: Int = 0
+    var lineStart: Int = 0
+    var cur: Int = 0
+    val n: Int = scopes.length()
+    while (i < n) {
+        val c: String = toStr(scopes[i])
+        if (c == "\n") {
+            if (cur == index) {
+                return scopes.substring(lineStart, i)
+            }
+            cur = cur + 1
+            lineStart = i + 1
+        }
+        i = i + 1
+    }
+    if (cur == index) {
+        return scopes.substring(lineStart, n)
+    }
+    return ""
+}
+
+/// 十进制字符串 → Int。
+fun symToIntOf(text: String): Int {
+    val digits: String = "0123456789"
+    val len: Int = text.length()
+    var total: Int = 0
+    var i: Int = 0
+    while (i < len) {
+        total = total * 10 + digits.indexOf(toStr(text[i]))
+        i = i + 1
+    }
+    return total
+}

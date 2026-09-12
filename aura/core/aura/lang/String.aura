@@ -1,0 +1,684 @@
+// aura:///aura/lang/String.aura
+package aura.lang
+// 语言内置类型，不可修改
+
+import aura.lang.collection.ArrayList
+import aura.lang.collection.Array
+import aura.lang.collection.List
+
+/// 不可变字符串类型。
+///
+/// - 存储：VM 中为 `Rc<str>`（引用计数共享），AOT 中为 `{ptr, len}` 结构
+/// - 字符串字面量在编译期驻留于常量池
+/// - 支持字符串插值：`"hello ${name}"`
+/// - 字符串不可变——所有修改操作返回新字符串
+///
+/// @see Char, List
+/// @since 0.1
+internal value class String {
+
+    // ── 常量与工具函数（companion object）──
+
+    companion object {
+        /// 空字符串常量
+        const EMPTY: String = ""
+
+        /// 从字符数组构造字符串
+        fun fromChars(chars: Array<Char>): String {
+            var result: String = ""
+            var i: Int = 0
+            while (i < chars.size) {
+                result = result + chars[i]
+                i = i + 1
+            }
+            return result
+        }
+
+        /// 从 Unicode 码点构造单字符字符串（非法码点返回空字符串）
+        fun fromCharCode(code: Int): String {
+            if (code < 0 || code > 65535) return ""
+            return code.toChar().toString()
+        }
+
+        /// 用分隔符合并列表为字符串
+        fun join(list: List<String>, separator: String): String {
+            var result: String = ""
+            var i: Int = 0
+            while (i < list.size) {
+                if (i > 0) {
+                    result = result + separator
+                }
+                result = result + list[i]
+                i = i + 1
+            }
+            return result
+        }
+
+        /// 格式化字符串（{0} {1} 占位符）
+        fun format(template: String, vararg args: Any): String {
+            var result: String = template
+            var i: Int = 0
+            while (i < args.size) {
+                val placeholder = "{" + i + "}"
+                result = result.replace(placeholder, toStr(args[i]))
+                i = i + 1
+            }
+            return result
+        }
+
+        /// 重复字符串 n 次
+        fun repeat(text: String, times: Int): String {
+            var result: String = ""
+            var i: Int = 0
+            while (i < times) {
+                result = result + text
+                i = i + 1
+            }
+            return result
+        }
+
+        // ── 检查（纯逻辑，Aura 实现）──
+
+        /// 检查字符串是否包含子字符串。
+        fun contains(text: String, substring: String): Boolean {
+            return indexOf(text, substring) >= 0
+        }
+
+        /// 检查字符串是否以指定前缀开头。
+        fun startsWith(text: String, prefix: String): Boolean {
+            if (prefix.length > text.length) return false
+            if (prefix.length == 0) return true
+            return text.substring(0, prefix.length) == prefix
+        }
+
+        /// 检查字符串是否以指定后缀结尾。
+        fun endsWith(text: String, suffix: String): Boolean {
+            if (suffix.length > text.length) return false
+            if (suffix.length == 0) return true
+            return text.substring(text.length - suffix.length, text.length) == suffix
+        }
+
+        // ── 分割与连接（纯逻辑，Aura 实现）──
+
+        /// 按分隔符分割字符串。
+        fun split(text: String, separator: String): List<String> {
+            var result: List<String> = mutableListOf<String>()
+            if (text == "") {
+                result.add("")
+                return result
+            }
+            var start: Int = 0
+            var i: Int = 0
+            while (i <= text.length - separator.length) {
+                if (text.substring(i, i + separator.length) == separator) {
+                    result.add(text.substring(start, i))
+                    start = i + separator.length
+                    i = start
+                } else {
+                    i = i + 1
+                }
+            }
+            result.add(text.substring(start, text.length))
+            return result
+        }
+
+        // ── 查找与替换（纯逻辑，Aura 实现）──
+
+        /// 查找子字符串的索引。
+        fun indexOf(text: String, substring: String): Int {
+            if (substring == "") return 0
+            var i: Int = 0
+            while (i <= text.length - substring.length) {
+                if (text.substring(i, i + substring.length) == substring) {
+                    return i
+                }
+                i = i + 1
+            }
+            return -1
+        }
+
+        /// 查找子字符串的索引（从指定位置开始）。
+        fun indexOf(text: String, substring: String, fromIndex: Int): Int {
+            var start: Int = max(0, fromIndex)
+            var i: Int = start
+            while (i <= text.length - substring.length) {
+                if (text.substring(i, i + substring.length) == substring) {
+                    return i
+                }
+                i = i + 1
+            }
+            return -1
+        }
+
+        /// 查找子字符串的最后索引。
+        fun lastIndexOf(text: String, substring: String): Int {
+            if (substring == "") return text.length
+            var i: Int = text.length - substring.length
+            while (i >= 0) {
+                if (text.substring(i, i + substring.length) == substring) {
+                    return i
+                }
+                i = i - 1
+            }
+            return -1
+        }
+
+        /// 替换所有出现的子字符串。
+        fun replace(text: String, target: String, replacement: String): String {
+            if (target == "") return text
+            var result: String = ""
+            var i: Int = 0
+            while (i < text.length) {
+                if (text.substring(i, i + target.length) == target) {
+                    result = result + replacement
+                    i = i + target.length
+                } else {
+                    result = result + text[i]
+                    i = i + 1
+                }
+            }
+            return result
+        }
+
+        // ── 大小写转换（纯逻辑，Aura 实现）──
+
+        /// 转换为大写。
+        fun uppercase(text: String): String {
+            var result: String = ""
+            var i: Int = 0
+            while (i < text.length) {
+                val c = text[i]
+                if (c >= 'a' && c <= 'z') {
+                    result = result + (c - 32)
+                } else {
+                    result = result + c
+                }
+                i = i + 1
+            }
+            return result
+        }
+
+        /// 转换为小写。
+        fun lowercase(text: String): String {
+            var result: String = ""
+            var i: Int = 0
+            while (i < text.length) {
+                val c = text[i]
+                if (c >= 'A' && c <= 'Z') {
+                    result = result + (c + 32)
+                } else {
+                    result = result + c
+                }
+                i = i + 1
+            }
+            return result
+        }
+
+        // ── 去除空白（纯逻辑，Aura 实现）──
+
+        /// 去除首尾空白。
+        fun trim(text: String): String {
+            var start: Int = 0
+            var end: Int = text.length - 1
+            while (start < text.length && text[start] == ' ') {
+                start = start + 1
+            }
+            while (end >= 0 && text[end] == ' ') {
+                end = end - 1
+            }
+            if (start > end) return ""
+            return text.substring(start, end + 1)
+        }
+
+        /// 去除左侧空白。
+        fun trimStart(text: String): String {
+            var start: Int = 0
+            while (start < text.length && text[start] == ' ') {
+                start = start + 1
+            }
+            return text.substring(start, text.length)
+        }
+
+        /// 去除右侧空白。
+        fun trimEnd(text: String): String {
+            var end: Int = text.length - 1
+            while (end >= 0 && text[end] == ' ') {
+                end = end - 1
+            }
+            return text.substring(0, end + 1)
+        }
+
+        // ── 内部工具 ──
+
+        private fun max(a: Int, b: Int): Int {
+            return if (a > b) a else b
+        }
+    }
+
+    // ── 属性 ──
+
+    /// 字符串的字符数量
+    val length: Int
+
+    // ── 转换方法 ──
+
+    /// 转换为 32 位整数
+    fun toInt(): Int {
+        var result: Int = 0
+        var sign: Int = 1
+        var i: Int = 0
+        if (i < this.length && this[i] == '-') {
+            sign = -1
+            i = i + 1
+        } else if (i < this.length && this[i] == '+') {
+            i = i + 1
+        }
+        while (i < this.length) {
+            val c = this[i]
+            if (c >= '0' && c <= '9') {
+                result = result * 10 + (c - '0')
+            }
+            i = i + 1
+        }
+        return result * sign
+    }
+
+    /// 转换为 64 位长整数
+    fun toLong(): Long {
+        return this.toInt() as Long
+    }
+
+    /// 转换为 32 位浮点数
+    fun toFloat(): Float {
+        var result: Float = 0.0f
+        var sign: Int = 1
+        var i: Int = 0
+        if (i < this.length && this[i] == '-') {
+            sign = -1
+            i = i + 1
+        } else if (i < this.length && this[i] == '+') {
+            i = i + 1
+        }
+        var frac: Float = 0.0f
+        var divisor: Float = 1.0f
+        var afterDot = false
+        while (i < this.length) {
+            val c = this[i]
+            if (c == '.') {
+                afterDot = true
+                i = i + 1
+                continue
+            }
+            if (c >= '0' && c <= '9') {
+                val digit = (c - '0').toFloat()
+                if (afterDot) {
+                    frac = frac * 10.0f + digit
+                    divisor = divisor * 10.0f
+                } else {
+                    result = result * 10.0f + digit
+                }
+            }
+            i = i + 1
+        }
+        return (result + frac / divisor) * sign.toFloat()
+    }
+
+    /// 转换为 64 位双精度浮点数
+    fun toDouble(): Double {
+        return this.toFloat() as Double
+    }
+
+    /// 转换为布尔值（"true" → true, 其他 → false）
+    fun toBoolean(): Boolean {
+        if (this == "true") return true
+        return false
+    }
+
+    /// 转换为字符数组
+    fun toCharArray(): Array<Char> {
+        var chars = arrayOf<Char>()
+        var i: Int = 0
+        while (i < this.length) {
+            chars = chars + this[i]
+            i = i + 1
+        }
+        return chars
+    }
+
+    // ── 比较方法 ──
+
+    /// 比较两个字符串（字典序），返回 -1/0/1
+    fun compareTo(other: String): Int {
+        val len = min(this.length, other.length)
+        var i: Int = 0
+        while (i < len) {
+            val c1 = this[i]
+            val c2 = other[i]
+            if (c1 < c2) return -1
+            if (c1 > c2) return 1
+            i = i + 1
+        }
+        if (this.length < other.length) return -1
+        if (this.length > other.length) return 1
+        return 0
+    }
+
+    /// 检查两个字符串是否相等（内容相等）
+    override fun equals(other: String): Boolean {
+        if (this.length != other.length) return false
+        var i: Int = 0
+        while (i < this.length) {
+            if (this[i] != other[i]) return false
+            i = i + 1
+        }
+        return true
+    }
+
+    /// 检查字符串是否为空
+    fun isEmpty(): Boolean {
+        return this.length == 0
+    }
+
+    /// 检查字符串是否为空白（仅含空白字符或为空）
+    fun isBlank(): Boolean {
+        if (this.isEmpty()) return true
+        var i: Int = 0
+        while (i < this.length) {
+            if (this[i] != ' ' && this[i] != '\t' && this[i] != '\n') {
+                return false
+            }
+            i = i + 1
+        }
+        return true
+    }
+
+    // ── 查找方法 ──
+
+    /// 获取位置 index 字符的 Unicode 码点（越界返回 -1）
+    fun charCodeAt(index: Int): Int {
+        if (index < 0 || index >= this.length) return -1
+        return this[index].toInt()
+    }
+
+    /// 获取位置 index 的字符（越界返回空字符串）
+    fun charAt(index: Int): String {
+        if (index < 0 || index >= this.length) return ""
+        return this[index].toString()
+    }
+
+    /// 检查是否包含子字符串
+    fun contains(substring: String): Boolean {
+        return this.indexOf(substring) >= 0
+    }
+
+    /// 检查是否以指定前缀开头
+    fun startsWith(prefix: String): Boolean {
+        if (prefix.length > this.length) return false
+        if (prefix.length == 0) return true
+        return this.substring(0, prefix.length) == prefix
+    }
+
+    /// 检查是否以指定后缀结尾
+    fun endsWith(suffix: String): Boolean {
+        if (suffix.length > this.length) return false
+        if (suffix.length == 0) return true
+        return this.substring(this.length - suffix.length, this.length) == suffix
+    }
+
+    /// 查找子字符串的索引（从前往后，未找到返回 -1）
+    fun indexOf(substring: String): Int {
+        if (substring == "") return 0
+        val len = this.length - substring.length
+        var i: Int = 0
+        while (i <= len) {
+            if (this.substring(i, i + substring.length) == substring) {
+                return i
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// 查找子字符串的索引（从后往前，未找到返回 -1）
+    fun lastIndexOf(substring: String): Int {
+        if (substring == "") return this.length
+        var i: Int = this.length - substring.length
+        while (i >= 0) {
+            if (this.substring(i, i + substring.length) == substring) {
+                return i
+            }
+            i = i - 1
+        }
+        return -1
+    }
+
+    // ── 大小写转换 ──
+
+    /// 转换为小写
+    fun toLowerCase(): String {
+        var result: String = ""
+        var i: Int = 0
+        while (i < this.length) {
+            val c = this[i]
+            if (c >= 'A' && c <= 'Z') {
+                result = result + (c + 32)
+            } else {
+                result = result + c
+            }
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 转换为大写
+    fun toUpperCase(): String {
+        var result: String = ""
+        var i: Int = 0
+        while (i < this.length) {
+            val c = this[i]
+            if (c >= 'a' && c <= 'z') {
+                result = result + (c - 32)
+            } else {
+                result = result + c
+            }
+            i = i + 1
+        }
+        return result
+    }
+
+    // ── 去除空白 ──
+
+    /// 去除首尾空白
+    fun trim(): String {
+        var start: Int = 0
+        var end: Int = this.length - 1
+        while (start < this.length && this[start] == ' ') {
+            start = start + 1
+        }
+        while (end >= 0 && this[end] == ' ') {
+            end = end - 1
+        }
+        if (start > end) return ""
+        return this.substring(start, end + 1)
+    }
+
+    /// 去除前导空白
+    fun trimStart(): String {
+        var start: Int = 0
+        while (start < this.length && this[start] == ' ') {
+            start = start + 1
+        }
+        return this.substring(start, this.length)
+    }
+
+    /// 去除尾部空白
+    fun trimEnd(): String {
+        var end: Int = this.length - 1
+        while (end >= 0 && this[end] == ' ') {
+            end = end - 1
+        }
+        return this.substring(0, end + 1)
+    }
+
+    // ── 截取方法 ──
+
+    /// 截取子字符串 [from, to)
+    fun substring(from: Int, to: Int): String {
+        var result: String = ""
+        var i: Int = from
+        while (i < to && i < this.length) {
+            result = result + this[i]
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 截取子字符串 [from, from+len)
+    fun substringAt(from: Int, len: Int): String {
+        return this.substring(from, from + len)
+    }
+
+    /// 截取分隔符之前的部分
+    fun substringBefore(delimiter: String): String {
+        val index = this.indexOf(delimiter)
+        if (index < 0) return this
+        return this.substring(0, index)
+    }
+
+    /// 截取分隔符之后的部分
+    fun substringAfter(delimiter: String): String {
+        val index = this.indexOf(delimiter)
+        if (index < 0) return ""
+        return this.substring(index + delimiter.length, this.length)
+    }
+
+    // ── 分割与合并 ──
+
+    /// 按分隔符分割为列表
+    fun split(separator: String): List<String> {
+        val result = mutableListOf<String>()
+        if (this == "") {
+            result.add("")
+            return result
+        }
+        var start: Int = 0
+        var i: Int = 0
+        while (i <= this.length - separator.length) {
+            if (this.substring(i, i + separator.length) == separator) {
+                result.add(this.substring(start, i))
+                start = i + separator.length
+                i = start
+            } else {
+                i = i + 1
+            }
+        }
+        result.add(this.substring(start, this.length))
+        return result
+    }
+
+    /// 按换行符分割为列表
+    fun splitLines(): List<String> {
+        return this.split("\n")
+    }
+
+    // ── 替换与格式化 ──
+
+    /// 替换所有匹配的子字符串
+    fun replace(target: String, replacement: String): String {
+        if (target == "") return this
+        var result: String = ""
+        var i: Int = 0
+        while (i < this.length) {
+            if (this.substring(i, i + target.length) == target) {
+                result = result + replacement
+                i = i + target.length
+            } else {
+                result = result + this[i]
+                i = i + 1
+            }
+        }
+        return result
+    }
+
+    // ── 填充 ──
+
+    /// 左填充到指定长度
+    fun padStart(length: Int, char: Char): String {
+        var result: String = ""
+        var i: Int = 0
+        while (i < length - this.length) {
+            result = result + char
+            i = i + 1
+        }
+        return result + this
+    }
+
+    /// 右填充到指定长度
+    fun padEnd(length: Int, char: Char): String {
+        var result: String = this
+        var i: Int = 0
+        while (i < length - this.length) {
+            result = result + char
+            i = i + 1
+        }
+        return result
+    }
+
+    // ── 字符统计 ──
+
+    /// 统计指定字符出现次数
+    fun countChar(char: Char): Int {
+        var count = 0
+        var i: Int = 0
+        while (i < this.length) {
+            if (this[i] == char) {
+                count = count + 1
+            }
+            i = i + 1
+        }
+        return count
+    }
+
+    /// 返回第一个字符
+    fun first(): Char {
+        return this[0]
+    }
+
+    /// 返回最后一个字符
+    fun last(): Char {
+        return this[this.length - 1]
+    }
+
+    // ── 包含检查 ──
+
+    /// 检查是否包含指定字符中的任意一个
+    fun containsAny(chars: String): Boolean {
+        var i: Int = 0
+        while (i < chars.length) {
+            if (this.contains(chars[i].toString())) {
+                return true
+            }
+            i = i + 1
+        }
+        return false
+    }
+
+    /// 检查是否包含指定字符中的所有
+    fun containsAll(chars: String): Boolean {
+        var i: Int = 0
+        while (i < chars.length) {
+            if (!this.contains(chars[i].toString())) {
+                return false
+            }
+            i = i + 1
+        }
+        return true
+    }
+
+    // ── 转换 ──
+
+    /// 转换为字符串表示
+    override fun toString(): String {
+        return this
+    }
+}

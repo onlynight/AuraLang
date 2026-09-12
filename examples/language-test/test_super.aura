@@ -1,0 +1,20 @@
+open class Animal {
+    open fun name(): String {
+        return "Animal"
+    }
+
+    fun describe(): String {
+        return "This is " + this.name()
+    }
+}
+
+class Dog : Animal() {
+    override fun name(): String {
+        return super.name() + "/Dog"
+    }
+}
+
+fun main() {
+    val d = Dog()
+    println("this/super: " + d.describe())
+}

@@ -1,0 +1,93 @@
+// aura:///aura/lang/Char.aura
+package aura.lang
+// 语言内置类型，不可修改
+
+/// Unicode 字符类型。
+///
+/// - 范围：U+0000 到 U+10FFFF（Unicode 基本多文种平面 + 扩展平面）
+/// - 存储：VM 中为 `Value::Str(Rc<str>)`（单字符字符串）
+/// - 字面量：以单引号标识（如 `'A'`, `'中'`）
+/// - 转义：`'\n'`, `'\t'`, `'\''`, `'\\'`, `'\0'`
+///
+/// @see String, Int
+/// @since 0.1
+internal value class Char {
+
+    // ── 常量（companion object）──
+
+    companion object {
+        /// 字符最小值（空字符）
+        const MIN_VALUE: Char = '\0'
+
+        /// 字符最大值（用 Int 表示）
+        const MAX_VALUE_CODE: Int = 65535
+
+        /// 从字符串解析为字符（取第一个字符）
+        fun fromString(text: String): Char {
+            if (text.length == 0) return '\0'
+            return text[0]
+        }
+    }
+
+    // ── 转换方法 ──
+
+    /// 转换为字符串
+    override fun toString(): String {
+        return toStr(this)
+    }
+
+    /// 转换为 Unicode 码点（Int）
+    fun toInt(): Int {
+        return this as Int
+    }
+
+    /// 转换为大写
+    fun toUpperCase(): Char {
+        if (this >= 'a' && this <= 'z') {
+            return (this - 32) as Char
+        }
+        return this
+    }
+
+    /// 转换为小写
+    fun toLowerCase(): Char {
+        if (this >= 'A' && this <= 'Z') {
+            return (this + 32) as Char
+        }
+        return this
+    }
+
+    // ── 判断方法 ──
+
+    /// 检查是否为字母
+    fun isAlpha(): Boolean {
+        if (this >= 'a' && this <= 'z') return true
+        if (this >= 'A' && this <= 'Z') return true
+        return false
+    }
+
+    /// 检查是否为数字
+    fun isDigit(): Boolean {
+        return this >= '0' && this <= '9'
+    }
+
+    /// 检查是否为字母或数字
+    fun isAlphaNumeric(): Boolean {
+        return this.isAlpha() || this.isDigit()
+    }
+
+    /// 检查是否为空白字符
+    fun isWhitespace(): Boolean {
+        return this == ' ' || this == '\t' || this == '\n' || this == '\r'
+    }
+
+    /// 检查是否为大写字母
+    fun isUpper(): Boolean {
+        return this >= 'A' && this <= 'Z'
+    }
+
+    /// 检查是否为小写字母
+    fun isLower(): Boolean {
+        return this >= 'a' && this <= 'z'
+    }
+}

@@ -1,0 +1,223 @@
+// aura:///aura/lang/std/Test.aura
+package aura.lang.std
+// 标准库模块，不可修改
+// 实现：纯逻辑模块，全部以 Aura 编写（断言失败以 Aura 的 throw 抛出字符串）
+// (package 声明由编译器自动注入，无需显式声明)
+/// 测试断言模块。
+///
+/// 断言通过时返回 `"OK: <message>"`，失败时 `throw` 一个字符串，
+/// 由测试驱动代码用 `try / catch (e: String)` 捕获。
+///
+/// 使用前需 import：
+/// ```aura
+/// import aura.lang.std.Test
+/// ```
+///
+/// @see Assert
+/// @since 0.1
+
+import aura.lang.std.IO
+import aura.lang.std.Assert
+
+internal object Test {
+
+    // ── 布尔断言（纯逻辑，Aura 实现）──
+
+    /// 断言条件为 true，失败时抛出消息。
+    fun assertTrue(condition: Any, message: String): String {
+        return Assert.assertTrue(condition, message)
+    }
+
+    /// 断言条件为 false，失败时抛出消息。
+    fun assertFalse(condition: Any, message: String): String {
+        return Assert.assertFalse(condition, message)
+    }
+
+    /// 断言条件为 true（`fail` 的反义），返回 `Unit`。
+    fun checkTrue(condition: Any, message: String): Unit {
+        if (toBool(condition)) {
+            pass()
+        } else {
+            fail(message)
+        }
+    }
+
+    // ── 相等断言（纯逻辑，Aura 实现）──
+
+    /// 断言两个值相等。
+    fun assertEq(a: Any, b: Any, message: String): String {
+        return Assert.assertEq(a, b, message)
+    }
+
+    /// 断言两个值不相等。
+    fun assertNotEq(a: Any, b: Any, message: String): String {
+        return Assert.assertNotEq(a, b, message)
+    }
+
+    // ── 空值断言（纯逻辑，Aura 实现）──
+
+    /// 断言值不为 null。
+    fun assertNotNull(value: Any, message: String): String {
+        return Assert.assertNotNull(value, message)
+    }
+
+    /// 断言值为 null。
+    fun assertNull(value: Any, message: String): String {
+        return Assert.assertNull(value, message)
+    }
+
+    // ── 包含断言（纯逻辑，Aura 实现）──
+
+    /// 断言字符串包含子串，或列表包含元素。
+    fun assertContains(container: Any, item: Any, message: String): String {
+        if (containsItem(container, item)) {
+            return "OK: " + message
+        }
+        throw "Assertion failed (not contains): " + message + " — container " + toStr(container) + " lacks " + toStr(item)
+    }
+
+    /// 断言字符串不包含子串，或列表不包含元素。
+    fun assertNotContains(container: Any, item: Any, message: String): String {
+        if (!containsItem(container, item)) {
+            return "OK: " + message
+        }
+        throw "Assertion failed (unexpected contains): " + message + " — container " + toStr(container) + " has " + toStr(item)
+    }
+
+    // ── 异常断言（纯逻辑，Aura 实现）──
+
+    /// 断言执行代码块时抛出异常。
+    fun assertThrows(block: () -> Unit, message: String): String {
+        var thrown: Boolean = false
+        try {
+            block()
+        } catch (e: String) {
+            thrown = true
+        }
+        if (thrown) {
+            return "OK: " + message
+        }
+        throw "Assertion failed (expected throw): " + message
+    }
+
+    // ── 比较断言（纯逻辑，Aura 实现）──
+
+    /// 断言 a > b。
+    fun assertGt(a: Any, b: Any, message: String): String {
+        return Assert.assertGt(toFloat(a), toFloat(b), message)
+    }
+
+    /// 断言 a >= b。
+    fun assertGte(a: Any, b: Any, message: String): String {
+        return Assert.assertGte(toFloat(a), toFloat(b), message)
+    }
+
+    /// 断言 a < b。
+    fun assertLt(a: Any, b: Any, message: String): String {
+        return Assert.assertLt(toFloat(a), toFloat(b), message)
+    }
+
+    /// 断言 a <= b。
+    fun assertLte(a: Any, b: Any, message: String): String {
+        return Assert.assertLte(toFloat(a), toFloat(b), message)
+    }
+
+    // ── 近似断言（纯逻辑，Aura 实现）──
+
+    /// 断言两个浮点数近似相等（误差在 delta 范围内）。
+    fun assertApprox(a: Float, b: Float, delta: Float, message: String): String {
+        return Assert.assertApprox(a, b, delta, message)
+    }
+
+    // ── 数组 / 映射断言（纯逻辑，Aura 实现）──
+
+    /// 断言两个数组长度相同且逐元素相等。
+    fun assertArrayEq(a: Any, b: Any, message: String): String {
+        if (a == null || b == null) {
+            throw "Assertion failed (null array): " + message
+        }
+        val la: List<Any> = a as List<Any>
+        val lb: List<Any> = b as List<Any>
+        if (la.size != lb.size) {
+            throw "Assertion failed (array size " + toStr(la.size) + " != " + toStr(lb.size) + "): " + message
+        }
+        var i: Int = 0
+        while (i < la.size) {
+            if (toStr(la[i]) != toStr(lb[i])) {
+                throw "Assertion failed (array element " + toStr(i) + " differs): " + message
+            }
+            i = i + 1
+        }
+        return "OK: " + message
+    }
+
+    /// 断言两个映射的键集合与取值都相等。
+    fun assertMapEq(a: Any, b: Any, message: String): String {
+        if (a == null || b == null) {
+            throw "Assertion failed (null map): " + message
+        }
+        val ma: Map<Any, Any> = a as Map<Any, Any>
+        val mb: Map<Any, Any> = b as Map<Any, Any>
+        val keysA: List<Any> = ma.keys
+        if (keysA.size != mb.keys.size) {
+            throw "Assertion failed (map size differs): " + message
+        }
+        var i: Int = 0
+        while (i < keysA.size) {
+            val key: Any = keysA[i]
+            if (toStr(ma[key]) != toStr(mb[key])) {
+                throw "Assertion failed (map value at key " + toStr(key) + " differs): " + message
+            }
+            i = i + 1
+        }
+        return "OK: " + message
+    }
+
+    // ── 测试控制（纯逻辑，Aura 实现）──
+
+    /// 标记测试通过（输出一行提示）。
+    fun pass(): Unit {
+        IO.println("PASS")
+    }
+
+    /// 标记测试失败（输出一行提示后抛出）。
+    fun fail(message: String): Unit {
+        IO.println("FAIL: " + message)
+        throw "Test failed: " + message
+    }
+
+    /// 输出一条测试信息。
+    fun log(message: String): Unit {
+        IO.println(message)
+    }
+
+    // ── 内部工具（纯逻辑，Aura 实现）──
+
+    /// 判断容器是否包含元素：String 按子串，List 按字符串表示。
+    private fun containsItem(container: Any, item: Any): Boolean {
+        if (container == null) {
+            return false
+        }
+        val name: String = typeof(container)
+        if (name == "String") {
+            val text: String = container as String
+            return text.indexOf(toStr(item)) >= 0
+        }
+        if (name == "List" || name == "Array") {
+            val list: List<Any> = container as List<Any>
+            var i: Int = 0
+            while (i < list.size) {
+                if (toStr(list[i]) == toStr(item)) {
+                    return true
+                }
+                i = i + 1
+            }
+            return false
+        }
+        if (name == "Map") {
+            val map: Map<Any, Any> = container as Map<Any, Any>
+            return map[toStr(item)] != null
+        }
+        return false
+    }
+}

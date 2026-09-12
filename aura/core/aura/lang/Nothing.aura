@@ -1,0 +1,65 @@
+// aura:///aura/lang/Nothing.aura
+package aura.lang
+// 语言内置类型，不可修改
+
+/// 底部类型——Nothing 没有任何值可以赋值给它。
+///
+/// Nothing 是类型格的底部类型：
+/// - Nothing 可赋值给任意类型（`can_assign_to: Nothing → 任意类型`）
+/// - 没有值可以是 Nothing 类型
+/// - 用于表示"函数永不返回"或"空集合"
+///
+/// 典型用法：
+/// - 返回 Nothing 的函数表示永不返回（如 `exit()`）
+/// - `List<Nothing>` 表示空列表
+/// - 泛型默认参数：`fun max(): Nothing`
+///
+/// Nothing 是封闭类——不可被继承或实现。
+///
+/// @see Any, Unit
+/// @since 0.1
+internal open class Nothing {
+
+    // ── 构造 ──
+
+    /// Nothing 不可被构造——构造函数永不返回
+    constructor() {
+        throw Exception("Nothing cannot be constructed")
+    }
+
+    // ── 方法（重写 Any 基类方法，实际不可达）──
+
+    /// 返回 Nothing 的可读表示（实际不可达）
+    override fun toString(): String {
+        return "Nothing"
+    }
+
+    /// Nothing 实例之间始终相等（实际不可达）
+    override fun equals(other: Any): Boolean {
+        return false
+    }
+
+    /// Nothing 的哈希码（实际不可达）
+    override fun hashCode(): Int {
+        return 0
+    }
+
+    // ── 辅助函数 ──
+
+    companion object {
+        /// 抛出异常并返回 Nothing 类型（用于不返回的函数）
+        fun error(message: String): Nothing {
+            throw Exception(message)
+        }
+
+        /// 抛出异常并返回 Nothing 类型（用于不返回的函数）
+        fun error(message: String, cause: Any): Nothing {
+            throw Exception(message)
+        }
+
+        /// 从空集合构造 Nothing（类型推断辅助）
+        val EMPTY: List<Nothing> {
+            return mutableListOf<Nothing>()
+        }
+    }
+}

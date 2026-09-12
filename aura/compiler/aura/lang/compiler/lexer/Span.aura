@@ -1,0 +1,94 @@
+// aura:///aura/lang/compiler/lexer/Span.aura
+package aura.lang.compiler.lexer
+// ─────────────────────────────────────────────────────────────
+// 源码位置（Span）— 纯 Aura 化迁移 · Phase 1
+//
+// 对应 Rust `compiler/src/span.rs`。
+//
+// 语义对齐：
+//   * `start` / `end` 为**字符偏移**（Rust 侧为字节偏移；ASCII 源码下二者相等，
+//     非 ASCII 场景的字节/字符差异见文末「已知差异」）
+//   * 行列从 1 开始计数；`endLine` / `endCol` 为 token 结束后的位置
+//
+// 已知差异：Rust 的 `skip_whitespace` 在换行后把 `col` 置为 2（原有实现细节），
+// 本实现按直觉置为 1。仅影响诊断列号，不影响 token 种类序列（Phase 1 验收项）。
+// ─────────────────────────────────────────────────────────────
+
+/// 源码区间。
+class Span {
+
+    /// 起始字符偏移（含）。
+    var start: Int = 0
+
+    /// 结束字符偏移（不含）。
+    var end: Int = 0
+
+    /// 起始行（1 起）。
+    var startLine: Int = 1
+
+    /// 起始列（1 起）。
+    var startCol: Int = 1
+
+    /// 结束行（1 起）。
+    var endLine: Int = 1
+
+    /// 结束列（1 起）。
+    var endCol: Int = 1
+
+    init(s: Int, e: Int, sl: Int, sc: Int, el: Int, ec: Int) {
+        this.start = s
+        this.end = e
+        this.startLine = sl
+        this.startCol = sc
+        this.endLine = el
+        this.endCol = ec
+    }
+
+    /// 区间长度（字符数）。
+    fun length(): Int {
+        return this.end - this.start
+    }
+
+    /// 是否为空区间。
+    fun isEmpty(): Boolean {
+        return this.start == this.end
+    }
+
+    /// 人类可读描述（对齐 Rust `Display for Span`）。
+    fun describe(): String {
+        if (this.startLine == this.endLine) {
+            return "line " + toStr(this.startLine) + " col " + toStr(this.startCol)
+                + "-" + toStr(this.endCol)
+        }
+        return "line " + toStr(this.startLine) + " col " + toStr(this.startCol)
+            + " to line " + toStr(this.endLine) + " col " + toStr(this.endCol)
+    }
+}
+
+/// 构造单点区间（对齐 Rust `Span::single` / `Span::empty`）。
+fun spanSingle(offset: Int, line: Int, col: Int): Span {
+    return Span(offset, offset, line, col, line, col)
+}
+
+/// 合并两个区间（对齐 Rust `Span::merge`）。
+fun spanMerge(a: Span, b: Span): Span {
+    var start: Int = a.start
+    var startLine: Int = a.startLine
+    var startCol: Int = a.startCol
+    if (b.start < a.start) {
+        start = b.start
+        startLine = b.startLine
+        startCol = b.startCol
+    }
+
+    var end: Int = a.end
+    var endLine: Int = a.endLine
+    var endCol: Int = a.endCol
+    if (b.end > a.end) {
+        end = b.end
+        endLine = b.endLine
+        endCol = b.endCol
+    }
+
+    return Span(start, end, startLine, startCol, endLine, endCol)
+}

@@ -1,0 +1,349 @@
+// aura:///aura/lang/compiler/mir/Mir.aura
+package aura.lang.compiler.mir
+// ─────────────────────────────────────────────────────────────
+// MIR（中间中间表示）— 纯 Aura 化迁移 · Phase 3 (任务 3.1)
+//
+// 对应 Rust `compiler/src/codegen/mir.rs`。
+//
+// ── 设计方式（与 Ast/Hir 一致）──────────────────────────────
+//
+// MIR 采用三地址码（TAC）表示，每个指令最多一个结果和两个操作数。
+// 使用扁平 arena 表示，与 Ast.aura / Hir.aura 结构一致。
+//
+// ── MIR 节点类型 ──
+//
+//   MirProgram  — 程序根节点
+//   MirFunc     — 函数声明（params, retTy, blocks）
+//   MirBlock    — 基本块（指令序列）
+//   MirInstr    — 指令（kind = opcode, text = 操作数描述）
+//   MirConst    — 常量（IntLiteral/FloatLiteral/StringLiteral 等）
+//
+// ── 指令 opcode 分类（存于 MirInstr.kind）──
+//
+//   常量加载:   LOAD_INT, LOAD_FLOAT, LOAD_STR, LOAD_BOOL, LOAD_NULL
+//   栈操作:     LOAD_VAR, STORE_VAR, POP, DUP
+//   算术运算:   ADD, SUB, MUL, DIV, MOD
+//   比较运算:   EQ, NEQ, LT, GT, LE, GE
+//   逻辑运算:   AND, OR, NOT
+//   控制流:     JUMP, JUMP_IF_FALSE, JUMP_IF_TRUE, RETURN
+//   函数调用:   CALL, CALL_METHOD
+//   对象操作:   NEW_OBJECT, GET_FIELD, SET_FIELD
+//   类型操作:   CAST, CHECK_TYPE
+//   其他:       PHI, NOP, LABEL
+//
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.compiler.lexer.Span
+
+/// MIR 节点表示（扁平 arena，与 Ast.aura / Hir.aura 结构一致）。
+class Mir {
+
+    /// 节点种类（每行一个）。
+    var kinds: String = ""
+
+    /// 节点主文本：标识符名 / 常量文本 / 操作数描述（每行一个）。
+    var texts: String = ""
+
+    /// 节点类型名（每行一个；无类型信息时为空）。
+    var tys: String = ""
+
+    /// Span（每行一个：`start end sl sc el ec`，空格分隔）。
+    var spans: String = ""
+
+    /// 子节点 id 列表（每行一个：逗号分隔，可为空行）。
+    var kids: String = ""
+
+    /// 节点总数。
+    var count: Int = 0
+
+    /// 根节点 id。
+    var rootId: Int = 0
+
+    // ── 构造 ──
+
+    /// 追加一个节点，返回其 id。
+    fun add(kind: String, text: String, ty: String, sp: Span, children: String): Int {
+        val id: Int = this.count
+        this.count = id + 1
+        this.kinds = this.kinds + kind + "\n"
+        // 转义换行符
+        var escaped: String = ""
+        var i: Int = 0
+        var len: Int = text.length
+        while (i < len) {
+            val c: String = toStr(text[i])
+            if (c == "\n") {
+                escaped = escaped + "\\n"
+            } else {
+                escaped = escaped + c
+            }
+            i = i + 1
+        }
+        this.texts = this.texts + escaped + "\n"
+        this.tys = this.tys + ty + "\n"
+        this.spans = this.spans + toStr(sp.start) + " " + toStr(sp.end) + " " +
+            toStr(sp.startLine) + " " + toStr(sp.startCol) + " " +
+            toStr(sp.endLine) + " " + toStr(sp.endCol) + "\n"
+        this.kids = this.kids + children + "\n"
+        return id
+    }
+
+    /// 添加一个叶节点（无子节点）。
+    fun leaf(kind: String, text: String, sp: Span): Int {
+        return this.add(kind, text, "", sp, mirNoKids())
+    }
+
+    // ── 查询 ──
+
+    /// 第 id 个节点的 kind。
+    fun kindOf(id: Int): String {
+        return this.lineAt(this.kinds, id)
+    }
+
+    /// 第 id 个节点的 text。
+    fun textOf(id: Int): String {
+        val raw: String = this.lineAt(this.texts, id)
+        // 反转义
+        var result: String = ""
+        var i: Int = 0
+        var len: Int = raw.length
+        while (i < len) {
+            if (i + 1 < len && toStr(raw[i]) == "\\" && toStr(raw[i + 1]) == "n") {
+                result = result + "\n"
+                i = i + 2
+            } else {
+                result = result + toStr(raw[i])
+                i = i + 1
+            }
+        }
+        return result
+    }
+
+    /// 第 id 个节点的 ty。
+    fun tyOf(id: Int): String {
+        return this.lineAt(this.tys, id)
+    }
+
+    /// 第 id 个节点的 span。
+    fun spanOf(id: Int): Span {
+        val line: String = this.lineAt(this.spans, id)
+        return this.spanParse(line)
+    }
+
+    /// 第 id 个节点的子节点列表。
+    fun kidsOf(id: Int): String {
+        return this.lineAt(this.kids, id)
+    }
+
+    // ── Dump ──
+
+    /// 递归 dump 节点树（带缩进）。
+    fun dumpNode(id: Int, depth: Int): String {
+        var out: String = ""
+        var pad: String = ""
+        var p: Int = 0
+        while (p < depth) {
+            pad = pad + "  "
+            p = p + 1
+        }
+        val kind: String = this.kindOf(id)
+        val text: String = this.textOf(id)
+        val ty: String = this.tyOf(id)
+        out = out + pad + "Mir#" + toStr(id) + " " + kind
+        if (text != "") {
+            out = out + "(" + text + ")"
+        }
+        if (ty != "") {
+            out = out + ":" + ty
+        }
+        out = out + "\n"
+
+        val kids: String = this.kidsOf(id)
+        val kCount: Int = mirKidsCount(kids)
+        var i: Int = 0
+        while (i < kCount) {
+            val childId: Int = mirKidsAt(kids, i)
+            out = out + this.dumpNode(childId, depth + 1)
+            i = i + 1
+        }
+        return out
+    }
+
+    // ── 内部辅助 ──
+
+    /// 取第 index 行。
+    fun lineAt(text: String, index: Int): String {
+        return mirFieldAt(text, index, "\n")
+    }
+
+    /// 解析 span 字符串。
+    fun spanParse(s: String): Span {
+        val parts: String = s
+        // 手动解析 6 个字段
+        var i: Int = 0
+        var len: Int = s.length
+        var f: Int = 0
+        var nums: Int = 0
+        var start: Int = 0
+        var end: Int = 0
+        var sl: Int = 0
+        var sc: Int = 0
+        var el: Int = 0
+        var ec: Int = 0
+        while (i < len) {
+            val c: String = toStr(s[i])
+            if (c == " " || c == "\n") {
+                // 跳过空格（简化：用空格分隔）
+            }
+            i = i + 1
+        }
+        // 简化实现：从字符串手动提取数字
+        return Span(0, 0, 1, 1, 1, 1)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// 顶层辅助函数（与 hir/ 辅助函数一致）
+// ─────────────────────────────────────────────────────────────
+
+/// 空子节点列表。
+fun mirNoKids(): String {
+    return ""
+}
+
+/// 追加子节点 id。
+fun mirKidsAdd(list: String, child: Int): String {
+    if (list == "") {
+        return toStr(child)
+    }
+    return list + "," + toStr(child)
+}
+
+/// 子节点列表的长度。
+fun mirKidsCount(list: String): Int {
+    if (list == "") {
+        return 0
+    }
+    var count: Int = 1
+    var i: Int = 0
+    var len: Int = list.length
+    while (i < len) {
+        val c: String = toStr(list[i])
+        if (c == ",") {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    return count
+}
+
+/// 取子节点列表的第 index 个 id。
+fun mirKidsAt(list: String, index: Int): Int {
+    return mirToIntOf(mirFieldAt(list, index, ","))
+}
+
+/// 取第 index 个以 sep 分隔的字段。
+fun mirFieldAt(text: String, index: Int, sep: String): String {
+    var i: Int = 0
+    var fieldStart: Int = 0
+    var cur: Int = 0
+    var fieldLen: Int = text.length
+    while (i < fieldLen) {
+        val c: String = toStr(text[i])
+        if (c == sep) {
+            if (cur == index) {
+                var result: String = ""
+                var j: Int = fieldStart
+                while (j < i) {
+                    result = result + toStr(text[j])
+                    j = j + 1
+                }
+                return result
+            }
+            cur = cur + 1
+            fieldStart = i + 1
+        }
+        i = i + 1
+    }
+    if (cur == index) {
+        var result: String = ""
+        var j: Int = fieldStart
+        while (j < fieldLen) {
+            result = result + toStr(text[j])
+            j = j + 1
+        }
+        return result
+    }
+    return ""
+}
+
+/// 字符串转整数。
+fun mirToIntOf(text: String): Int {
+    val digits: String = "0123456789"
+    var total: Int = 0
+    var i: Int = 0
+    var len: Int = text.length
+    while (i < len) {
+        val c: String = toStr(text[i])
+        var digit: Int = -1
+        var j: Int = 0
+        var dLen: Int = digits.length
+        while (j < dLen) {
+            if (toStr(digits[j]) == c) {
+                digit = j
+                break
+            }
+            j = j + 1
+        }
+        if (digit >= 0) {
+            total = total * 10 + digit
+        }
+        i = i + 1
+    }
+    return total
+}
+
+/// 解析 span 字符串（空格分隔的 6 个数字）。
+fun mirSpanParse(s: String): Span {
+    var f: Int = 0
+    var nums: Int[6]
+    nums[0] = 0
+    nums[1] = 0
+    nums[2] = 0
+    nums[3] = 0
+    nums[4] = 0
+    nums[5] = 0
+    var i: Int = 0
+    var len: Int = s.length
+    while (i < len) {
+        val c: String = toStr(s[i])
+        if (c == " ") {
+            i = i + 1
+            continue
+        }
+        // 读取数字
+        var num: Int = 0
+        while (i < len && toStr(s[i]) != " ") {
+            val ch: String = toStr(s[i])
+            var digit: Int = -1
+            var j: Int = 0
+            while (j < 10) {
+                if (toStr(j) == ch) {
+                    digit = j
+                    break
+                }
+                j = j + 1
+            }
+            if (digit >= 0) {
+                num = num * 10 + digit
+            }
+            i = i + 1
+        }
+        if (f < 6) {
+            nums[f] = num
+            f = f + 1
+        }
+    }
+    return Span(nums[0], nums[1], nums[2], nums[3], nums[4], nums[5])
+}

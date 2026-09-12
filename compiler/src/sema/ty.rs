@@ -75,6 +75,30 @@ impl Ty {
         Ty::Int
     }
 
+    /// 从类型名解析为语义类型。
+    ///
+    /// 用于 `is T` 智能转换等场景：必须把 `"String"` 映射为 [`Ty::String`]，
+    /// 而不是 `Ty::Named("String")`——否则后续成员访问走 `Named` 分支，
+    /// 拿不到内置成员表，会把 `value.length` 误报为「unresolved member」。
+    /// 未知类型名退化为 `Ty::Named`。
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "Int" => Ty::Int,
+            "Long" => Ty::Long,
+            "Short" => Ty::Short,
+            "Byte" => Ty::Byte,
+            "Float" => Ty::Float,
+            "Double" => Ty::Double,
+            "Boolean" => Ty::Boolean,
+            "Char" => Ty::Char,
+            "String" => Ty::String,
+            "Any" => Ty::Any,
+            "Unit" => Ty::Unit,
+            "Nothing" => Ty::Nothing,
+            _ => Ty::Named(name.to_string()),
+        }
+    }
+
     /// 从语法类型（AST）解析为语义类型（不含泛型解析）
     pub fn from_ast(ty: &crate::ast::Type) -> Self {
         match ty {
@@ -106,9 +130,6 @@ impl Ty {
                 "Any" => Ty::Any,
                 "Nothing" => Ty::Nothing,
                 "Unit" => Ty::Unit,
-                "List" => Ty::List(Box::new(Ty::Any)),
-                "Map" => Ty::Map(Box::new(Ty::Any), Box::new(Ty::Any)),
-                "Set" => Ty::List(Box::new(Ty::Any)),
                 other => Ty::Named(other.to_string()),
             },
             crate::ast::Type::Generic {
@@ -116,14 +137,7 @@ impl Ty {
             } => {
                 let mapped: Vec<Ty> = args.iter().map(Ty::from_ast).collect();
                 match name.as_str() {
-                    "List" => Ty::List(Box::new(mapped.first().cloned().unwrap_or(Ty::Any))),
-                    "Set" => Ty::List(Box::new(mapped.first().cloned().unwrap_or(Ty::Any))),
-                    "Map" => Ty::Map(
-                        Box::new(mapped.first().cloned().unwrap_or(Ty::Any)),
-                        Box::new(mapped.get(1).cloned().unwrap_or(Ty::Any)),
-                    ),
                     "Pointer" => Ty::Pointer(Box::new(mapped.first().cloned().unwrap_or(Ty::Any))),
-                    "Array" => Ty::Array(Box::new(mapped.first().cloned().unwrap_or(Ty::Any))),
                     _ => Ty::Named(name.clone()),
                 }
             }

@@ -1,0 +1,17 @@
+fun add(a: Int, b: Int): Int {
+    return a + b
+}
+
+fun main() {
+    var i: Int = 0
+    var sum: Int = 0
+    while (i < 5) {
+        sum = add(sum, i)
+        i = i + 1
+    }
+    println("sum = " + sum.toString())
+    val hex: Int = 0xFF
+    println("hex = " + hex.toString())
+    val f: Float = 3.14f
+    println("f = " + f.toString())
+}

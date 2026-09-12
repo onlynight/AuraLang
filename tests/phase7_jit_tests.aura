@@ -1,0 +1,514 @@
+// ═════════════════════════════════════════════════════════════
+// Phase 7 验证用例：JIT（Cranelift）Aura 化
+//
+// 验证内容：
+//   1. JitAbi.aura      ：JitValue 标签 / 文本 / 入口 ABI / 调用上下文
+//   2. JitState.aura    ：热点计数 / 阈值 / 白名单 / Fix A / Fix B
+//   3. JitOpt.aura      ：7 个优化传递（折叠 / DCE / 跳转线程化 /
+//                          强度削弱 / 调度 / 内联 / 循环展开）
+//   4. JitLower.aura    ：字节码 → Cranelift IR 文本（算术 / 控制流 / 间接调用）
+//   5. JitDispatch.aura ：原生派发 / 解释器回退 / 优化差分（语义一致）
+//   6. JitRuntime.aura  ：段校验 / 描述符表 / 分发表重建 / W^X / Blob
+//   7. JitCore.aura     ：最小引导（热点阈值 / 基线编译 / 去优化）
+//
+// 运行：aura run tests/phase7_jit_tests.aura
+//   全通过时输出 "RESULT: PASS"
+// ═════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import "../aura/compiler/aura/lang/compiler/test/TestRunner.aura"
+import "../aura/compiler/aura/lang/compiler/jit/JitUtil.aura"
+import "../aura/compiler/aura/lang/compiler/jit/JitAbi.aura"
+import "../aura/compiler/aura/lang/compiler/jit/JitState.aura"
+import "../aura/compiler/aura/lang/compiler/jit/JitOpt.aura"
+import "../aura/compiler/aura/lang/compiler/jit/JitLower.aura"
+import "../aura/compiler/aura/lang/compiler/jit/JitDispatch.aura"
+import "../aura/compiler/aura/lang/compiler/jit/JitRuntime.aura"
+import "../aura/compiler/aura/lang/compiler/jit/JitCore.aura"
+
+// ═════════════════════════════════════════════════════════════
+// 测试 1: JitAbi.aura
+// ═════════════════════════════════════════════════════════════
+
+fun testJitAbi(): Int {
+    val t = TestRunner()
+    t.begin("JIT.abi")
+
+    t.assertEq(jitBackendVersion(), "0.1.0-phase7", "backend version")
+    t.assertEq(jitTagName(0), "Int", "tag Int")
+    t.assertEq(jitTagName(4), "Str", "tag Str")
+    t.assertEq(jitTagName(12), "CString", "tag CString")
+    t.assertEq(jitTagName(99), "Unknown", "tag unknown")
+    t.assertEq(jitTagFromName("Closure"), 11, "tag from name")
+    t.assertEq(jitTagFromName("Nope"), -1, "tag from name miss")
+    t.assertTrue(jitIsScalarTag(2), "bool scalar")
+    t.assertFalse(jitIsScalarTag(6), "obj not scalar")
+    t.assertTrue(jitIsRefTag(9), "list ref")
+    t.assertFalse(jitIsRefTag(3), "null not ref")
+
+    t.assertEq(jitValueNull().text(), "Null", "null text")
+    t.assertTrue(jitValueNull().isNull(), "null isNull")
+    t.assertFalse(jitValueInt(5).isNull(), "int not null")
+    t.assertEq(jitValueInt(-7).text(), "Int(-7)", "int text")
+    t.assertEq(jitValueBool(true).text(), "Bool(true)", "bool text")
+    t.assertEq(jitValueBool(false).text(), "Bool(false)", "bool false text")
+    t.assertEq(jitValueStr(9).text(), "Str(ptr=9)", "str text")
+    t.assertTrue(jitValueInt(1).isScalar(), "value scalar")
+    t.assertEq(jitValueInt(1).bytes(), 16, "value bytes")
+
+    t.assertEq(jitEntrySignature(), "void (JitValue* args, JitValue* out, i64 argc, void* dispatch)", "entry sig")
+    t.assertEq(jitEntryParamCount(), 4, "entry params")
+    t.assertEq(jitValueBytes(), 16, "value bytes const")
+    t.assertEq(jitMaxStack(), 256, "max stack")
+    t.assertEq(jitDispatchSlotBytes(), 8, "dispatch slot")
+    t.assertEq(jitDispatchParamIndex(), 3, "dispatch param")
+
+    val ctx = jitCallContext(2, 5)
+    t.assertEq(ctx.text(), "ctx(m2,f5,d0,e0)", "call ctx text")
+    t.assertEq(ctx.exception, 0, "ctx exception")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 2: JitState.aura（热点 / 白名单 / Fix A+B）
+// ═════════════════════════════════════════════════════════════
+
+fun testJitState(): Int {
+    val t = TestRunner()
+    t.begin("JIT.state")
+
+    t.assertEq(jitDefaultHotspotThreshold(), 10000, "default threshold")
+
+    val st = JitState()
+    st.setThreshold(3)
+    t.assertEq(st.incCallCount(0), 1, "count 1")
+    t.assertEq(st.incCallCount(0), 2, "count 2")
+    t.assertFalse(st.shouldCompile(0), "below threshold")
+    st.incCallCount(0)
+    t.assertTrue(st.reachThreshold(0), "reach threshold")
+    t.assertTrue(st.shouldCompile(0), "should compile")
+
+    // Fix A：入口函数可强制编译（忽略阈值）
+    t.assertTrue(st.canForce(7), "can force fresh")
+    st.insert(7)
+    t.assertTrue(st.isCompiled(7), "compiled")
+    t.assertEq(st.entryToken(7), "fn#7", "entry token")
+    t.assertFalse(st.canForce(7), "cannot force compiled")
+    t.assertFalse(st.shouldCompile(7), "compiled not recompiled")
+
+    // 跳过 → 永久回退
+    st.skip(9, "白名单不匹配")
+    t.assertTrue(st.isSkipped(9), "skipped")
+    t.assertEq(st.skipReason(9), "白名单不匹配", "skip reason")
+    t.assertFalse(st.canForce(9), "cannot force skipped")
+    t.assertEq(st.compiledCount(), 1, "compiled count")
+    t.assertEq(st.skippedCount(), 1, "skipped count")
+
+    // 白名单（Fix B：Call 在列）
+    t.assertTrue(jitIsCompilable("LoadVar 0\nAdd\nReturn\n"), "compilable")
+    t.assertTrue(jitIsCompilable("LoadVar 0\nCall 0\nReturn\n"), "recursive compilable (Fix B)")
+    t.assertFalse(jitIsCompilable("GetField x\n"), "getfield not compilable")
+    t.assertTrue(jitSkipReason("GetIndex 0\n") != "", "skip reason text")
+    t.assertEq(jitSkipReason("Return\n"), "", "no skip reason")
+
+    // 诊断行
+    val line: String = st.stateOf(0, "sum")
+    t.assertTrue(line.contains("未达阈值"), "state line defer")
+    val line7: String = st.stateOf(7, "main")
+    t.assertTrue(line7.contains("已编译"), "state line native")
+    val line9: String = st.stateOf(9, "fib")
+    t.assertTrue(line9.contains("已跳过"), "state line skip")
+
+    return t.report()
+}
+
+fun testJitCallGraph(): Int {
+    val t = TestRunner()
+    t.begin("JIT.callgraph")
+
+    val funcs = "0|main|3|0|0|1,2\n1|add|2|0|2|\n2|fib|5|0|1|2\n"
+    t.assertEq(jitFuncName(funcs, 2), "fib", "func name")
+    t.assertEq(jitFuncSize(funcs, 1), 2, "func size")
+    t.assertEq(jitFuncArity(funcs, 1), 2, "func arity")
+    t.assertFalse(jitFuncNative(funcs, 1), "func native")
+    t.assertEq(jitFuncCallees(funcs, 0), "1,2", "func callees")
+    t.assertTrue(jitFuncExists(funcs, 2), "func exists")
+    t.assertFalse(jitFuncExists(funcs, 5), "func missing")
+
+    // 后序：被调用者先（Fix B：保证分发表条目已存在）
+    t.assertEq(jitCompileOrder(funcs, 0), "1\n2\n0\n", "compile order")
+    t.assertEq(jitReachable(funcs, 0), "0\n1\n2\n", "reachable")
+    // 自递归不导致死循环
+    t.assertEq(jitCompileOrder("0|fib|5|0|1|0\n", 0), "0\n", "self recursion order")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 3: JitOpt.aura（7 个优化传递）
+// ═════════════════════════════════════════════════════════════
+
+fun testJitOptFold(): Int {
+    val t = TestRunner()
+    t.begin("JIT.opt.fold")
+
+    val fold = jitFoldConstants("LoadConst 0\nLoadConst 1\nAdd\nReturn\n", "3\n2\n")
+    val fc: String = fold.code
+    val fe: String = fold.extraConsts
+    t.assertTrue(fc.contains("LoadConst 2"), "fold to new const index")
+    t.assertEq(fold.resultExtraCount(), 1, "extra const count")
+    t.assertTrue(fe == "5\n", "folded value 5")
+
+    // 比较折叠
+    val cmp = jitFoldConstants("LoadConst 0\nLoadConst 1\nLt\nReturn\n", "3\n5\n")
+    val cmpe: String = cmp.extraConsts
+    t.assertTrue(cmpe == "1\n", "fold compare lt")
+
+    // 除零不可折叠
+    val dv = jitFoldConstants("LoadConst 0\nLoadConst 1\nDiv\nReturn\n", "4\n0\n")
+    val dvc: String = dv.code
+    t.assertTrue(dvc.contains("Div"), "div by zero kept")
+    t.assertEq(dv.resultExtraCount(), 0, "no extra const")
+
+    return t.report()
+}
+
+fun testJitOptPasses(): Int {
+    val t = TestRunner()
+    t.begin("JIT.opt.passes")
+
+    // 死码消除
+    t.assertEq(jitEliminateDeadCode("LoadVar 0\nStoreVar 0\nLoadVar 1\n"), "LoadVar 1\n", "dce")
+    // 跳转线程化
+    t.assertEq(jitThreadJumps("Jump 5\nJump 7\nReturn\n"), "Jump 7\nReturn\n", "thread jumps")
+    // 强度削弱：x * 4
+    val sr = jitStrengthReduce("LoadVar 0\nLoadConst 0\nMul\n", "4\n")
+    val src: String = sr.code
+    val sre: String = sr.extraConsts
+    t.assertTrue(src.contains("Shl"), "mul -> shl")
+    t.assertEq(sre, "2\n", "shift const")
+    t.assertEq(jitLineAt(src, 0), "LoadVar 0", "value pushed first")
+    // x / 4
+    val sr2 = jitStrengthReduce("LoadVar 0\nLoadConst 0\nDiv\n", "4\n")
+    val sr2c: String = sr2.code
+    t.assertTrue(sr2c.contains("Shr"), "div -> shr")
+    // x % 4
+    val sr3 = jitStrengthReduce("LoadVar 0\nLoadConst 0\nRem\n", "4\n")
+    val sr3c: String = sr3.code
+    val sr3e: String = sr3.extraConsts
+    t.assertTrue(sr3c.contains("BitAnd"), "rem -> bitand")
+    t.assertEq(sr3e, "3\n", "mask const")
+    // x * 1 → 恒等
+    val sr4 = jitStrengthReduce("LoadVar 0\nLoadConst 0\nMul\n", "1\n")
+    val sr4c: String = sr4.code
+    t.assertEq(sr4c, "LoadVar 0\n", "mul by 1 identity")
+
+    // 指令调度
+    val sch = jitScheduleInstructions("LoadConst 0\nLoadVar 0\nLoadVar 1\nAdd\n")
+    t.assertEq(jitLineAt(sch, 0), "LoadVar 0", "schedule reorder 0")
+    t.assertEq(jitLineAt(sch, 1), "LoadVar 1", "schedule reorder 1")
+    t.assertEq(jitLineAt(sch, 2), "LoadConst 0", "schedule reorder 2")
+
+    // 循环展开
+    val loopCode = "LoadVar 0\nLoadVar 1\nJumpIfFalse 5\nAdd\nReturn\nLoadVar 0\nReturn\n"
+    val un = jitUnrollLoops(loopCode)
+    t.assertEq(jitLineCount(un), 10, "unroll line count")
+    t.assertEq(jitLineAt(un, 2), "JumpIfFalse 8", "unroll target adjusted")
+    // 含后向跳转的循环不展开
+    val backEdge = "JumpIfTrue 0\nReturn\nReturn\nReturn\n"
+    t.assertEq(jitUnrollLoops(backEdge), backEdge, "backward jump not unrolled")
+
+    // 函数内联候选（Rust 基线为占位，代码不变）
+    val funcs = "0|main|3|0|0|1\n1|add|2|0|2|\n"
+    val callCode = "LoadVar 0\nCall 1\nReturn\n"
+    t.assertEq(jitInlineCandidateCount(callCode, funcs), 1, "inline candidate")
+    t.assertEq(jitInlineFunctions(callCode, funcs), callCode, "inline keeps code")
+
+    return t.report()
+}
+
+fun testJitOptPipeline(): Int {
+    val t = TestRunner()
+    t.begin("JIT.opt.pipeline")
+
+    // 3 + 4 先折叠为 7（单遍前瞻，与 Rust 基线一致：不跨折叠结果二次折叠）
+    val opt = jitOptimizeFunction("LoadConst 0\nLoadConst 1\nAdd\nLoadConst 2\nMul\nReturn\n", "3\n4\n5\n", "")
+    val code: String = opt.code
+    val extra: String = opt.extraConsts
+    t.assertEq(opt.resultLineCount(), 4, "pipeline line count")
+    t.assertTrue(code.contains("LoadConst 3"), "pipeline folded index")
+    t.assertEq(extra, "7\n", "pipeline folded value")
+    // 折叠后的 (7 * 5) 由解释器继续求值，结果不变（见 differential）
+    t.assertEq(jitInterpret(code, "3\n4\n5\n" + extra, 1000), "35", "pipeline runtime value")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 4: JitLower.aura（字节码 → Cranelift IR 文本）
+// ═════════════════════════════════════════════════════════════
+
+fun testJitLower(): Int {
+    val t = TestRunner()
+    t.begin("JIT.lower")
+
+    t.assertEq(jitClifOpcode("Add"), "iadd", "clif add")
+    t.assertEq(jitClifOpcode("Div"), "sdiv", "clif div")
+    t.assertEq(jitClifOpcode("Call"), "call_indirect", "clif call")
+    t.assertEq(jitClifOpcode("Jump"), "jump", "clif jump")
+    t.assertEq(jitClifCondition("Lt"), "slt", "clif cc lt")
+    t.assertEq(jitClifCondition("Ge"), "sge", "clif cc ge")
+
+    val clif = jitLowerFunction("add", "LoadVar 0\nLoadVar 1\nAdd\nReturn\n", "", "")
+    t.assertTrue(clif.contains("function %add(i64, i64, i64, i64) {"), "clif header")
+    t.assertTrue(clif.contains("block0:"), "clif block0")
+    t.assertTrue(clif.contains("iadd"), "clif iadd")
+    t.assertTrue(clif.contains("out_payload"), "clif out payload")
+
+    // 控制流：JumpIfFalse → brif（条件真走 next，条件假走 target）
+    val clif2 = jitLowerFunction("f", "LoadVar 0\nJumpIfFalse 3\nReturnUnit\nReturnUnit\n", "", "")
+    t.assertTrue(clif2.contains("brif"), "clif brif")
+    t.assertEq(jitCountSub(clif2, "return"), 2, "clif two returns")
+
+    // 间接调用（Fix B：dispatch_table + call_indirect）
+    val cfuncs = "0|main|3|0|0|1\n1|add|2|0|2|\n"
+    val clif3 = jitLowerFunction("main", "LoadVar 0\nLoadVar 1\nCall 1\nReturn\n", "", cfuncs)
+    t.assertTrue(clif3.contains("call_indirect fn1("), "clif call_indirect")
+    t.assertTrue(clif3.contains("dispatch_table"), "clif dispatch table")
+
+    // 常量加载带常量池
+    val clif4 = jitLowerFunction("k", "LoadConst 0\nReturn\n", "42\n", "")
+    t.assertTrue(clif4.contains("iconst.i64 42"), "clif iconst")
+
+    t.assertTrue(jitLowerBlockCount("LoadVar 0\nJumpIfFalse 3\nReturnUnit\nReturnUnit\n") >= 3, "clif block count")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 5: JitDispatch.aura（派发 / 回退 / 差分）
+// ═════════════════════════════════════════════════════════════
+
+fun testJitDispatch(): Int {
+    val t = TestRunner()
+    t.begin("JIT.dispatch")
+
+    val st = JitState()
+    st.setThreshold(2)
+    val funcs = "0|main|4|0|0|1\n1|add|3|0|2|\n"
+    val code = "LoadVar 0\nReturn\n"
+
+    t.assertEq(jitDecide(st, 1), "defer", "decide defer")
+    // Fix A：强制编译入口
+    t.assertEq(jitForceEntry(st, funcs, code, 1), "forced-native", "force entry")
+    t.assertTrue(st.isCompiled(1), "entry compiled")
+    t.assertEq(jitDecide(st, 1), "native", "decide native")
+    t.assertEq(jitInvoke(st, 1), "native:fn#1", "invoke native")
+    t.assertEq(jitInvoke(st, 9), "interpreter", "invoke interpreter")
+
+    // 不可编译 → 回退解释器
+    val st2 = JitState()
+    t.assertEq(jitForceEntry(st2, "0|main|1|0|0|\n", "GetField x\n", 0), "fallback-interpreter", "force skip")
+    t.assertTrue(st2.isSkipped(0), "skipped")
+    t.assertEq(jitDecide(st2, 0), "skip", "decide skip")
+    t.assertTrue(jitFallbackReason(st2, 0) != "", "fallback reason")
+    t.assertTrue(jitFallbackReason(st, 1) == "", "native no reason")
+
+    // 达阈值才编译（maybe）
+    val st3 = JitState()
+    st3.setThreshold(2)
+    st3.incCallCount(0)
+    t.assertFalse(jitMaybeCompile(st3, funcs, code, 0), "below threshold no compile")
+    st3.incCallCount(0)
+    t.assertTrue(jitMaybeCompile(st3, funcs, code, 0), "threshold compile")
+    t.assertTrue(st3.isCompiled(0), "compiled after threshold")
+
+    return t.report()
+}
+
+fun testJitInterpret(): Int {
+    val t = TestRunner()
+    t.begin("JIT.interpret")
+
+    val prog = "LoadConst 0\nLoadConst 1\nAdd\nLoadConst 2\nMul\nReturn\n"
+    t.assertEq(jitInterpret(prog, "3\n4\n5\n", 1000), "35", "interpret arith")
+    // 除法取余
+    t.assertEq(jitInterpret("LoadConst 0\nLoadConst 1\nDiv\nReturn\n", "9\n2\n", 100), "4", "interpret div")
+    t.assertEq(jitInterpret("LoadConst 0\nLoadConst 1\nRem\nReturn\n", "9\n2\n", 100), "1", "interpret rem")
+    // 除零 → deopt
+    t.assertTrue(jitSlice(jitInterpret("LoadConst 0\nLoadConst 1\nDiv\nReturn\n", "9\n0\n", 100), 0, 5) == "deopt", "interpret div0")
+    // 不支持的指令 → deopt
+    t.assertTrue(jitSlice(jitInterpret("Call 0\nReturn\n", "", 100), 0, 5) == "deopt", "interpret unsupported")
+
+    return t.report()
+}
+
+fun testJitDifferential(): Int {
+    val t = TestRunner()
+    t.begin("JIT.differential")
+
+    // 常量折叠：优化前后解释器结果一致
+    val prog = "LoadConst 0\nLoadConst 1\nAdd\nLoadConst 2\nMul\nReturn\n"
+    val before: String = jitInterpret(prog, "3\n4\n5\n", 1000)
+    val opt = jitOptimizeFunction(prog, "3\n4\n5\n", "")
+    val optCode: String = opt.code
+    val optExtra: String = opt.extraConsts
+    val after: String = jitInterpret(optCode, "3\n4\n5\n" + optExtra, 1000)
+    t.assertEq(before, "35", "before fold")
+    t.assertEq(after, before, "after fold equal")
+
+    // 强度削弱：优化前后解释器结果一致
+    val prog2 = "LoadConst 0\nStoreVar 0\nLoadVar 0\nLoadConst 1\nMul\nReturn\n"
+    val before2: String = jitInterpret(prog2, "6\n4\n", 1000)
+    val opt2 = jitOptimizeFunction(prog2, "6\n4\n", "")
+    val opt2Code: String = opt2.code
+    val opt2Extra: String = opt2.extraConsts
+    val after2: String = jitInterpret(opt2Code, "6\n4\n" + opt2Extra, 1000)
+    t.assertEq(before2, "24", "before strength")
+    t.assertEq(after2, before2, "after strength equal")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 6: JitRuntime.aura（段 / 描述符 / W^X / Blob）
+// ═════════════════════════════════════════════════════════════
+
+fun testJitRuntime(): Int {
+    val t = TestRunner()
+    t.begin("JIT.runtime")
+
+    t.assertEq(jitSegmentName(1), "SEG_MACHINE", "seg machine")
+    t.assertEq(jitSegmentName(2), "SEG_DESC_TABLE", "seg desc")
+    t.assertEq(jitSegmentName(9), "SEG_UNKNOWN", "seg unknown")
+    t.assertEq(jitSegmentEntryBytes(), 16, "seg entry bytes")
+    t.assertEq(jitFuncDescSize(), 32, "func desc size")
+    t.assertEq(jitMaxCallDepth(), 1024, "max call depth")
+    t.assertTrue(jitCallDepthOk(1023), "depth ok")
+    t.assertFalse(jitCallDepthOk(1024), "depth bad")
+    t.assertEq(jitBlobMagic(), "AURA", "blob magic")
+    t.assertEq(jitBlobVersion(), 4, "blob version")
+    t.assertEq(jitWxPolicy(), "mmap(RW) -> copy -> protect(RX)", "wx policy")
+    t.assertTrue(jitMmapStages().contains("protect-exec"), "mmap stages")
+
+    // 段校验
+    t.assertEq(jitValidateSegments("1|64|128|0\n2|200|64|0\n", 300), "", "segments ok")
+    t.assertEq(jitValidateSegments("2|0|32|0\n", 100), "missing SEG_MACHINE", "missing machine")
+    t.assertEq(jitValidateSegments("1|0|0|0\n2|0|0|0\n", 10), "machine code segment is empty", "empty machine")
+    t.assertTrue(jitValidateSegments("1|0|128|0\n2|0|64|0\n", 100) != "", "machine out of range")
+    t.assertEq(jitSegmentCount("1|0|16|0\n2|16|64|0\n"), 2, "segment count")
+
+    // 描述符个数
+    t.assertEq(jitDescriptorCount(64), 2, "desc count")
+    t.assertEq(jitDescriptorCount(96), 3, "desc count 3")
+    t.assertEq(jitDescriptorCount(70), -1, "desc count misaligned")
+
+    // 分发表重建（入口偏移须 >0 且 16 对齐）
+    val descs = "16|1\n0|1\n64|1\n"
+    val fdi = "3\n1\n0\n4\n"
+    val table = jitRebuildDispatch(4096, descs, fdi)
+    t.assertEq(jitRecordGet(table, "0"), "4160", "entry 0")
+    t.assertTrue(jitHasEntry(table, "1"), "entry 1 valid")
+    t.assertFalse(jitHasEntry(table, "2"), "entry 2 invalid")
+    t.assertFalse(jitHasEntry(table, "3"), "entry 3 out of range")
+    t.assertEq(jitEntryAddr(table, "2"), "", "entry addr empty")
+    t.assertEq(jitRuntimeVersion(), "0.1.0-phase7", "runtime version")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 7: JitCore.aura（最小引导 JIT）
+// ═════════════════════════════════════════════════════════════
+
+fun testJitCore(): Int {
+    val t = TestRunner()
+    t.begin("JIT.core")
+
+    t.assertEq(jitCoreDefaultThreshold(), 1000, "core threshold")
+    t.assertEq(jitCoreResolveBranch(3, 2), 6, "branch resolve")
+    t.assertEq(jitCoreResolveBranch(0, -5), -1, "branch invalid")
+
+    // JitUnit 数据模型（保留字段 ffiSlots 只用于 slotCount 计数）
+    val unit = JitUnit(0, "mul", 0, 1, "CONST_INT 6\nRETURN\n", "3,5")
+    t.assertEq(unit.lineCount(), 2, "unit line count")
+    t.assertEq(unit.slotCount(), 2, "unit slot count")
+    t.assertEq(unit.name, "mul", "unit name")
+
+    val jc = JitCoreCompiler()
+    jc.setThreshold(500)
+    t.assertEq(jc.hotThreshold, 500, "threshold set")
+
+    // 输入即 VM 字节码（CONST_INT 用常量池索引；base = 函数体首行绝对行号）
+    val mulBody = "CONST_INT 0\nSTORE_LOCAL 0\nLOAD_LOCAL 0\nCONST_INT 1\nMUL\nRETURN\n"
+    t.assertTrue(jc.tryCompile(0, "mul", 0, 1, mulBody, 0, "6\n4\n"), "compile leaf")
+    t.assertTrue(jc.isCompiled(0), "is compiled")
+    t.assertEq(jc.compiledCount(), 1, "compiled count")
+    t.assertEq(jc.compiles, 1, "compile stat")
+    t.assertEq(jc.execute(0, "", 1), "24", "execute mul")
+
+    // 非叶子函数（含 CALL）不可编译 → 回退
+    t.assertFalse(jc.tryCompile(1, "caller", 0, 0, "CONST_INT 0\nCALL foo 1\nRETURN\n", 0, "0\n"), "reject call")
+    t.assertFalse(jc.isCompiled(1), "caller not compiled")
+
+    // 分支：绝对目标在预解码时转为单元相对偏移
+    val brBody = "CONST_INT 0\nSTORE_LOCAL 0\nJUMP 3\nCONST_INT 1\nRETURN\n"
+    t.assertTrue(jc.tryCompile(4, "br", 0, 1, brBody, 0, "1\n9\n"), "compile branch")
+    val brCode: String = jc.unitCodeOf(4)
+    t.assertTrue(brCode.contains("JUMP 0"), "relative branch target")
+    t.assertTrue(brCode.contains("CONST_INT 1"), "pool index resolved to literal")
+
+    // 去优化：除零
+    val divBody = "CONST_INT 0\nSTORE_LOCAL 0\nLOAD_LOCAL 0\nCONST_INT 1\nDIV\nRETURN\n"
+    t.assertTrue(jc.tryCompile(2, "div", 0, 1, divBody, 0, "8\n0\n"), "compile div")
+    val dz: String = jc.execute(2, "", 1)
+    t.assertTrue(jitSlice(dz, 0, 5) == "deopt", "deopt div zero")
+
+    // 去优化：取模零
+    val modBody = "CONST_INT 0\nSTORE_LOCAL 0\nLOAD_LOCAL 0\nCONST_INT 1\nMOD\nRETURN\n"
+    t.assertTrue(jc.tryCompile(3, "mod", 0, 1, modBody, 0, "8\n0\n"), "compile mod")
+    val mz: String = jc.execute(3, "", 1)
+    t.assertTrue(jitSlice(mz, 0, 5) == "deopt", "deopt mod zero")
+    t.assertEq(jc.deopts, 2, "deopt stat")
+
+    // 失效
+    jc.invalidate(0)
+    t.assertFalse(jc.isCompiled(0), "invalidated")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 主函数
+// ═════════════════════════════════════════════════════════════
+
+fun main() {
+    println("=== Phase 7 JIT (Cranelift) Aura-ization Tests ===")
+    println()
+
+    val f1 = testJitAbi()
+    val f2 = testJitState()
+    val f3 = testJitCallGraph()
+    val f4 = testJitOptFold()
+    val f5 = testJitOptPasses()
+    val f6 = testJitOptPipeline()
+    val f7 = testJitLower()
+    val f8 = testJitDispatch()
+    val f9 = testJitInterpret()
+    val f10 = testJitDifferential()
+    val f11 = testJitRuntime()
+    val f12 = testJitCore()
+
+    val totalFailures: Int = f1 + f2 + f3 + f4 + f5 + f6 + f7 + f8 + f9 + f10 + f11 + f12
+
+    println()
+    println("=== Summary ===")
+    println("Total failures: " + toStr(totalFailures))
+
+    if (totalFailures == 0) {
+        println("RESULT: PASS")
+    } else {
+        println("RESULT: FAIL (" + toStr(totalFailures) + ")")
+    }
+}

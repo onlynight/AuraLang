@@ -1,0 +1,35 @@
+// Minimal Phase 2 test: SymbolTable only
+import aura.lang.std.String
+import "../aura/compiler/aura/lang/compiler/test/TestRunner.aura"
+import "../aura/compiler/aura/lang/compiler/sema/SymbolTable.aura"
+
+fun main() {
+    println("=== Phase 2 SymbolTable Test ===")
+    
+    val t = TestRunner()
+    
+    t.begin("SymbolTable.scopes")
+    val st = SymbolTable()
+    t.assertEq(st.stCurrentScope(), 0, "initial scope = 0")
+    st.stEnterScope(true)
+    t.assertEq(st.stCurrentScope(), 1, "after enterScope = 1")
+    st.stExitScope()
+    t.assertEq(st.stCurrentScope(), 0, "after exitScope = 0")
+    
+    t.begin("SymbolTable.insertFind")
+    val idx1: Int = st.stInsert("x", "Var", "public", true, "", "Int")
+    t.assertTrue(idx1 >= 0, "insert x")
+    val found1: Int = st.stFind("x")
+    t.assertTrue(found1 >= 0, "find x")
+    t.assertEq(st.stEntryName(found1), "x", "x name")
+    t.assertEq(st.stEntryKind(found1), "Var", "x kind")
+    t.assertEq(st.stEntryType(found1), "Int", "x type")
+    
+    val failures = t.report()
+    println()
+    if (failures == 0) {
+        println("RESULT: PASS")
+    } else {
+        println("RESULT: FAIL (" + toStr(failures) + ")")
+    }
+}

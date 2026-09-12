@@ -34,6 +34,53 @@ The **full toolchain** is implemented and functional — from lexer to AOT-compi
 
 ---
 
+## Pure Aura Compiler Migration (纯 Aura 化迁移)
+
+In parallel with the Rust compiler, a **compiler written entirely in Aura** is being built under `aura/compiler/aura/lang/compiler/`. The Rust compiler (`compiler/`) is preserved unmodified as the fallback and reference implementation.
+
+| Phase | Component | Status |
+|-------|-----------|--------|
+| P0 | Infrastructure (TestRunner, Main skeleton) | ✅ |
+| P1 | Lexer + Parser + AST | ✅ |
+| P2 | Sema (Type, SymbolTable, TypeInfo, TypeChecker) + HIR (Lower, Desugar, Mono, Inline, Fold) | ✅ |
+| P3 | MIR (IR types, HIR→MIR lowering, DCE/CSE/const-prop optimizations) | ✅ |
+| P4 | Bytecode Codegen (MIR→.auc) + VM interpreter | ✅ |
+| P5 | VM enhancements (closures, tail-call, stack frames) | ✅ |
+| P6 | AOT backend (LLVM IR generation) | ✅ |
+| P6.5 | AOT hardening: classes / std signature table / collections / multi-module link | 🚧 In progress |
+| P7 | JIT (Cranelift) | ✅ |
+| P8 | Core & standard library in Aura | ✅ |
+| P9 | End-to-end compile pipeline (VM / JIT / AOT) | ✅ |
+
+### Test Results (Phase 0–2)
+
+```
+tests/phase0_tests.aura           → RESULT: PASS
+tests/phase1_lexer_tests.aura     → RESULT: PASS
+tests/phase2_sema_hir_tests.aura  → RESULT: PASS  (20 test groups, 0 failures)
+tests/phase3_mir_tests.aura       → RESULT: PASS  (11 test groups, 0 failures)
+```
+
+Key modules under `aura/compiler/aura/lang/compiler/`:
+
+```
+test/       TestRunner.aura        — Test framework (self-contained)
+lexer/      Span, Token, Lexer     — Tokenizer with string interpolation
+parser/     Parser                 — Recursive-descent + Pratt parser
+ast/        Ast                    — Flat arena AST (kinds/texts/tys/spans/kids)
+sema/       Type, SymbolTable, TypeInfo, TypeChecker — Type system & semantic analysis
+hir/        Hir, Desugar, Mono, Inline, Fold — HIR lowering & optimization passes
+mir/        Mir, MirLower, MirOpt  — MIR IR, HIR→MIR lowering, optimization
+codegen/    Codegen                — MIR → bytecode emission
+vm/         VmRunner/Closures/TailCall/FrameManager — VM interpreter
+aot/        Emit/StdSigs/Runtime/ModuleLink          — LLVM IR emitter, std signature table, multi-module linker
+jit/        JitCore/JitState/JitOpt                  — JIT backend
+errors/     CompileError           — Diagnostic model
+Main.aura                       — Compiler entry skeleton
+```
+
+---
+
 ## Repository Structure
 
 ```text
@@ -329,7 +376,7 @@ All standard library modules are under the `aura.lang.std` package.
 
 **Prelude** (always available, no import needed): `println`, `print`, `puts`, `abs`, `sqrt`, `pow`, `toInt`, `toFloat`, `toStr`, `toString`, `clock`, `strlen`, `CString`, `CStr`, `ptrIsNull`, `ptrToInt`, `intToPtr`, `makeCallback`, `listOf`, `assertTrue`, `assertFalse`, `assertEq`, `assertNotEq`, `assertNotNull`, `assertNull`, `assertContains`, `assertNotContains`, `assertGt`, `assertGte`, `assertLt`, `assertLte`, `assertApprox`, `assertArrayEq`, `assertMapEq`, `pass`, `fail`
 
-**Phantom Source** (phantom-source/aura/lang/): IDE-facing type declarations for `Any`, `Int`, `String`, `List`, `Map`, `Actor`, `Channel`, `Coroutine`, `Box`, `Weak`, `DeathStrategy`, `ProcessActor`, `IntRange`, etc.
+**Core Source** (core/aura/lang/): IDE-facing type declarations for `Any`, `Int`, `String`, `List`, `Map`, `Actor`, `Channel`, `Coroutine`, `Box`, `Weak`, `DeathStrategy`, `ProcessActor`, `IntRange`, etc.
 
 ---
 

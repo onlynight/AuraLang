@@ -6,7 +6,7 @@
 
 use crate::codegen::opcode::FfiAbi;
 use crate::vm::value::Value;
-use crate::vm::{Instr, Vm, VmError};
+use crate::vm::{Handler, Instr, Vm, VmError};
 
 // P9: FFI 动态库加载
 #[cfg(windows)]
@@ -26,6 +26,11 @@ unsafe extern "C" {
         handle: *mut std::os::raw::c_void,
         symbol: *const std::os::raw::c_char,
     ) -> *mut std::os::raw::c_void;
+}
+
+/// 是否为「请求进程退出」的原生函数（`Process.exit` / `Process.exitProcess`）。
+fn is_exit_native(name: &str) -> bool {
+    name.ends_with("Process.exit") || name.ends_with("Process.exitProcess")
 }
 
 impl Vm {
@@ -155,9 +160,45 @@ impl Vm {
             }
             Instr::GetField(field) => {
                 let obj = self.pop(top)?;
-                let v = match obj {
-                    Value::Ref(h) => self.heap.get_field(h, field),
-                    _ => Value::Null,
+                let v = match &obj {
+                    // 堆对象：类实例按字段查；**堆列表/堆映射**没有字段，
+                    // 退回内建成员（`size`/`length`/`first`/`last`/`isEmpty`）。
+                    // 背景：`mutableListOf(...)` 现为堆列表（`HeapData::List`），
+                    // 而类型通道不总能把 `xs.size` 降级为 `LIST_LEN`。
+                    Value::Ref(h) => {
+                        let is_size = field == crate::codegen::emit::field_index("size")
+                            || field == crate::codegen::emit::field_index("length");
+                        let is_empty = field == crate::codegen::emit::field_index("isEmpty");
+                        let is_first = field == crate::codegen::emit::field_index("first");
+                        let is_last = field == crate::codegen::emit::field_index("last");
+                        match self.heap.get_data(*h) {
+                            Some(crate::vm::heap::HeapData::List(items)) => {
+                                if is_size {
+                                    Value::Int(items.len() as i64)
+                                } else if is_empty {
+                                    Value::Bool(items.is_empty())
+                                } else if is_first {
+                                    items.first().cloned().unwrap_or(Value::Null)
+                                } else if is_last {
+                                    items.last().cloned().unwrap_or(Value::Null)
+                                } else {
+                                    self.heap.get_field(*h, field)
+                                }
+                            }
+                            Some(crate::vm::heap::HeapData::Map(m)) => {
+                                if is_size {
+                                    Value::Int(m.len() as i64)
+                                } else if is_empty {
+                                    Value::Bool(m.is_empty())
+                                } else {
+                                    self.heap.get_field(*h, field)
+                                }
+                            }
+                            _ => self.heap.get_field(*h, field),
+                        }
+                    }
+                    // 集合 / 字符串的内建成员（`xs.size` / `s.length` / `xs.first` ...）
+                    other => builtin_member(other.clone(), field),
                 };
                 self.frames[top].stack.push(v);
             }
@@ -179,6 +220,15 @@ impl Vm {
                     Value::List(items) => {
                         let i = idx_v.as_int().max(0) as usize;
                         items.get(i).cloned().unwrap_or(Value::Null)
+                    }
+                    // 字符串索引：`s[i]` → 单字符字符串（越界返回 null）。
+                    // 语义对齐 sema（`Ty::String` 索引结果为 `Char`，运行时以单字符串表示）。
+                    Value::Str(s) => {
+                        let i = idx_v.as_int().max(0) as usize;
+                        match s.chars().nth(i) {
+                            Some(c) => Value::str_(c.to_string()),
+                            None => Value::Null,
+                        }
                     }
                     _ => Value::Null,
                 };
@@ -232,8 +282,11 @@ impl Vm {
             Instr::ListPush => {
                 let obj = self.pop(top)?;
                 let val = self.pop(top)?;
-                if let Value::Ref(h) = obj {
-                    self.heap.list_push(h, val);
+                match obj {
+                    Value::Ref(h) => self.heap.list_push(h, val),
+                    // 内联列表（native 产出，值语义）无法原地追加：
+                    // 此前 `.add` 根本无法编译到此处，故保持「不改变原值」不构成回归。
+                    _ => {}
                 }
                 self.frames[top].stack.push(Value::Null);
             }
@@ -247,8 +300,10 @@ impl Vm {
             }
             Instr::ListLen => {
                 let obj = self.pop(top)?;
+                // 同时兼容堆列表（`Value::Ref`）与内联列表（native 产出，如 `split`）
                 let len = match obj {
                     Value::Ref(h) => self.heap.list_len(h),
+                    Value::List(items) => items.len() as i64,
                     _ => 0,
                 };
                 self.frames[top].stack.push(Value::Int(len));
@@ -362,6 +417,19 @@ impl Vm {
                 // 标记 defer 区域结束
             }
 
+            // ── 异常处理（try/catch）──
+            Instr::PushHandler(handler_ip, slot) => {
+                self.handlers.push(Handler {
+                    frame_index: top,
+                    ip: handler_ip,
+                    stack_len: self.frames[top].stack.len(),
+                    slot,
+                });
+            }
+            Instr::PopHandler => {
+                self.handlers.pop();
+            }
+
             // ── FFI（C ABI）──
             Instr::CallC(idx) => {
                 // 当前字节码未单独携带 C 函数表，按原生索引查注册表处理
@@ -418,11 +486,12 @@ impl Vm {
                 let locals = closure_info.locals;
                 let capture_count = closure_info.capture_count as usize;
                 let func_idx = closure_info.func_idx as usize;
-                // 弹出捕获值（按序）
+                // 弹出捕获值（按序）：栈顶是最后一个捕获，弹出后需反转为声明顺序
                 let mut captures = Vec::with_capacity(capture_count);
                 for _ in 0..capture_count {
                     captures.push(self.pop(top)?);
                 }
+                captures.reverse();
                 // 创建闭包对象
                 let heap_data = crate::vm::heap::HeapData::Closure {
                     func_name: closure_name,
@@ -782,8 +851,14 @@ impl Vm {
                                 field_names.iter().position(|n| n == &member_name)
                             {
                                 let field_val = self.heap.get_field(handle, field_idx as u16);
-                                self.frames[top].stack.push(field_val);
-                                return Ok(());
+                                // 字段一旦被赋值即以堆值为准；尚未赋值（单例创建时统一置为 Null）
+                                // 时**不返回**，继续走常规调用路径执行 HIR 合成的
+                                // `<Object>.<field>` 零参读取函数，从而返回字段声明的默认值。
+                                // （`create_singletons` 只能把字段置为 Null，VM 侧拿不到默认值。）
+                                if field_val != Value::Null {
+                                    self.frames[top].stack.push(field_val);
+                                    return Ok(());
+                                }
                             }
                         }
                     } else {
@@ -863,6 +938,34 @@ impl Vm {
         Ok(())
     }
 
+    /// 抛出异常：查找最近的异常处理器并展开到它；无处理器则为未捕获异常。
+    ///
+    ///
+    /// 展开步骤（标准栈式异常处理）：
+    /// 1. 从 handler 栈顶弹出最近的处理器；
+    /// 2. 把帧栈截断到处理器所在帧（丢弃其间的调用帧）；
+    /// 3. 把该帧的操作数栈截断回注册时的高度；
+    /// 4. 异常值写入处理器的槽位（`u16::MAX` 表示无落点，退化为压栈）；
+    /// 5. 跳转到处理器入口。
+    fn raise(&mut self, value: Value) -> Result<(), VmError> {
+        while let Some(h) = self.handlers.pop() {
+            // 帧应在注册时存活；`pop_frame` 已清理失效处理器，此处仅作防御性检查
+            if h.frame_index < self.frames.len() {
+                self.frames.truncate(h.frame_index + 1);
+                let frame = &mut self.frames[h.frame_index];
+                frame.stack.truncate(h.stack_len);
+                if h.slot != u16::MAX && (h.slot as usize) < frame.locals.len() {
+                    frame.locals[h.slot as usize] = value;
+                } else {
+                    frame.stack.push(value);
+                }
+                frame.ip = h.ip;
+                return Ok(());
+            }
+        }
+        Err(VmError::Runtime(format!("uncaught exception: {}", value)))
+    }
+
     /// 原生 / FFI 函数调用
     fn do_call_native(&mut self, top: usize, idx: usize) -> Result<(), VmError> {
         if idx >= self.module.natives.len() {
@@ -874,6 +977,64 @@ impl Vm {
         let native = self.module.natives[idx].clone();
         let param_count = native.param_count as usize;
         let args = self.pop_n(top, param_count)?;
+
+        // `throw expr` 由 HIR 降级为 `__throw(expr)`：在原生派发前拦截，
+        // 展开到最近的异常处理器（`try/catch`），无处理器则报未捕获异常。
+        if native.name == "__throw" {
+            let v = args.into_iter().next().unwrap_or(Value::Null);
+            return self.raise(v);
+        }
+
+        // `Process.exit(code)`：记录退出码并干净地停止 VM（由 CLI 设置进程退出码）。
+        if is_exit_native(&native.name) {
+            let code = crate::std::std_process::last_int_arg(&args).unwrap_or(0) as i32;
+            self.request_exit(code);
+            return Ok(());
+        }
+
+        // Phase 3: Aura 编译的标准库函数版本优先 —— 但若同名**原生函数已注册**则以原生为准。
+        // 原因：同一 API 可能存在两套运行时表示（如 `listOf` 的 Aura 实现返回 ArrayList 类实例，
+        // 原生实现返回 Value::List），混用会导致 `.size` / `[]` 等行为不一致。
+        let std_lookup = if self.natives.contains(&native.name) {
+            None
+        } else {
+            self.find_stdlib_func(&native.name, param_count)
+        };
+        if let Some((std_func_idx, needs_self)) = std_lookup {
+            eprintln!(
+                "[vm] stdlib-aura: {} → Aura compiled func #{} (self={})",
+                native.name, std_func_idx, needs_self
+            );
+
+            if needs_self {
+                // 注入 singleton 对象作为 self 参数
+                let object_name = self.extract_object_name(&native.name);
+                let self_value = if let Some(obj_name) = object_name {
+                    self.singletons.get(obj_name).cloned().unwrap_or_else(|| {
+                        eprintln!(
+                            "[vm] stdlib-aura: singleton '{}' not found, using Null for {}",
+                            obj_name, native.name
+                        );
+                        Value::Null
+                    })
+                } else {
+                    eprintln!(
+                        "[vm] stdlib-aura: cannot extract object name from {}, using Null",
+                        native.name
+                    );
+                    Value::Null
+                };
+                let mut new_args = Vec::with_capacity(args.len() + 1);
+                new_args.push(self_value);
+                new_args.extend(args);
+                self.push_frame(std_func_idx, new_args)?;
+                return Ok(());
+            } else {
+                // 参数完全匹配，直接调用
+                self.push_frame(std_func_idx, args)?;
+                return Ok(());
+            }
+        }
 
         let result = if let Some(v) = self.intercept_object_native(&native.name, &args)? {
             v
@@ -936,7 +1097,63 @@ impl Vm {
         }
         let native = self.module.natives[idx].clone();
         // 使用实际参数个数而非声明的 param_count
-        let args = self.pop_n(top, argc)?;
+        let mut args = self.pop_n(top, argc)?;
+
+        // 对象单例方法（object 上的 `Class.method(...)`）会在调用点注入 self 作为首参，
+        // 使 `argc = 声明参数个数 + 1`。原生实现按声明签名取值，此处剥离注入的 self，
+        // 否则 `FileSystem.writeText(path, content)` 之类会整体错位（写出到空路径等）。
+        // 注意：变长原生（`println`/`listOf` 等）声明 param_count 为 0，不受此规则影响。
+        let mut eff_argc = argc;
+        if native.param_count as usize >= 1
+            && argc == native.param_count as usize + 1
+            && !args.is_empty()
+        {
+            args.remove(0);
+            eff_argc = argc - 1;
+        }
+
+        // 同 `do_call_native`：`throw` 走异常展开路径
+        if native.name == "__throw" {
+            let v = args.into_iter().next().unwrap_or(Value::Null);
+            return self.raise(v);
+        }
+
+        // 同 `do_call_native`：`Process.exit(code)` 请求退出
+        if is_exit_native(&native.name) {
+            let code = crate::std::std_process::last_int_arg(&args).unwrap_or(0) as i32;
+            self.request_exit(code);
+            return Ok(());
+        }
+
+        // Phase 3: Aura 编译的标准库函数版本优先（同名原生已注册时以原生为准，见 do_call_native）
+        let args_std_lookup = if self.natives.contains(&native.name) {
+            None
+        } else {
+            self.find_stdlib_func(&native.name, eff_argc)
+        };
+        if let Some((std_func_idx, needs_self)) = args_std_lookup {
+            eprintln!(
+                "[vm] stdlib-aura: {} (argc={}) → Aura compiled func #{} (self={})",
+                native.name, eff_argc, std_func_idx, needs_self
+            );
+
+            if needs_self {
+                let object_name = self.extract_object_name(&native.name);
+                let self_value = if let Some(obj_name) = object_name {
+                    self.singletons.get(obj_name).cloned().unwrap_or(Value::Null)
+                } else {
+                    Value::Null
+                };
+                let mut new_args = Vec::with_capacity(argc + 1);
+                new_args.push(self_value);
+                new_args.extend(args);
+                self.push_frame(std_func_idx, new_args)?;
+                return Ok(());
+            } else {
+                self.push_frame(std_func_idx, args)?;
+                return Ok(());
+            }
+        }
 
         // P9: 如果指定了 FFI 库，先加载库
         if let Some(ref lib_name) = native.ffi_lib {
@@ -1386,6 +1603,65 @@ where
     let a = vm.pop(top)?;
     vm.frames[top].stack.push(f(a, b));
     Ok(())
+}
+
+/// 集合 / 字符串的内建成员访问（`size` / `length` / `first` / `last` / `isEmpty`）。
+///
+/// 背景：`GetField` 指令只携带字段名的 FNV-1a 哈希（见 `codegen::emit::field_index`），
+/// 且 sema 表达式类型通道对裸标识符不可靠。这里在**运行期**按哈希识别内建成员，
+/// 使 `xs.size` / `s.first` / `m.isEmpty` 等直接可用。
+///
+/// 安全性：`Value::Ref`（类实例）走堆字段路径，不经过本函数，因此类字段语义不受影响；
+/// 只有 List / Map / Str 这三种“无字段”的内联值会被改写，原先一律返回 Null。
+fn builtin_member(obj: Value, field: u16) -> Value {
+    use crate::codegen::emit::field_index;
+    let is_size = field == field_index("size") || field == field_index("length");
+    let is_first = field == field_index("first");
+    let is_last = field == field_index("last");
+    let is_empty = field == field_index("isEmpty");
+
+    match obj {
+        Value::List(items) => {
+            if is_size {
+                return Value::Int(items.len() as i64);
+            }
+            if is_empty {
+                return Value::Bool(items.is_empty());
+            }
+            if is_first {
+                return items.first().cloned().unwrap_or(Value::Null);
+            }
+            if is_last {
+                return items.last().cloned().unwrap_or(Value::Null);
+            }
+            Value::Null
+        }
+        Value::Map(map) => {
+            if is_size {
+                return Value::Int(map.len() as i64);
+            }
+            if is_empty {
+                return Value::Bool(map.is_empty());
+            }
+            Value::Null
+        }
+        Value::Str(s) => {
+            if is_size {
+                return Value::Int(s.chars().count() as i64);
+            }
+            if is_empty {
+                return Value::Bool(s.is_empty());
+            }
+            if is_first {
+                return s.chars().next().map(|c| Value::str_(c.to_string())).unwrap_or(Value::Null);
+            }
+            if is_last {
+                return s.chars().last().map(|c| Value::str_(c.to_string())).unwrap_or(Value::Null);
+            }
+            Value::Null
+        }
+        _ => Value::Null,
+    }
 }
 
 fn const_to_value(c: &crate::codegen::opcode::Const) -> Value {

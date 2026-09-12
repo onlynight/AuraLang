@@ -1,0 +1,996 @@
+// aura:///aura/lang/compiler/vm/VmRunner.aura
+package aura.lang.compiler.vm
+// ─────────────────────────────────────────────────────────────
+// VM 运行器（增强版）— 纯 Aura 化迁移 · Phase 5 (任务 5.4)
+//
+// 对应 Rust `compiler/src/vm/runner.rs`。
+//
+// ── 设计方式 ──
+//
+// 整合 Phase 4 的 VM 核心与 Phase 5 的增强模块：
+//   - 闭包支持（ClosureManager）
+//   - 尾调用优化（TailCallOptimizer）
+//   - 栈帧管理（FrameManager）
+//
+// ── 执行模型 ──
+//
+// 1. 加载字节码 → 初始化 VM 状态
+// 2. 分配栈帧 → 设置指令指针
+// 3. 指令分派循环 → 解释执行
+// 4. 遇到 CALL 指令 → 检查尾调用 → 分配/复用帧
+// 5. 遇到 RETURN → 释放帧 → 返回结果
+// 6. 遇到闭包指令 → 创建闭包对象 → 解析上值
+//
+// ── 指令集（Phase 5 扩展）──
+//
+//   0x00-0x0F: 常量加载（CONST_INT/FL/STR/NULL/BOOL）
+//   0x10-0x1F: 栈操作（LOAD/STORE/POP/DUP）
+//   0x20-0x2F: 算术运算（ADD/SUB/MUL/DIV/MOD）
+//   0x30-0x3F: 比较运算（EQ/NEQ/LT/GT/LE/GE）
+//   0x40-0x4F: 控制流（JUMP/JUMP_IF_FALSE/JUMP_IF_TRUE）
+//   0x50-0x5F: 函数调用（CALL/CALL_METHOD/RETURN）
+//   0x60-0x6F: 对象操作（NEW/GET/SET）
+//   0x90-0x9F: 闭包操作（LOAD_CLOSURE/STORE_CLOSURE）
+//
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.compiler.lexer.Span
+import aura.lang.compiler.vm.Closures
+import aura.lang.compiler.vm.TailCall
+import aura.lang.compiler.vm.FrameManager
+import aura.lang.compiler.vm.Opcodes
+
+/// 增强 VM 运行器。
+class VmRunner {
+
+    /// 字节码（每行一条指令：`opcode arg1 arg2`）。
+    var bytecode: String = ""
+
+    /// 常量池（每行一个常量值）。
+    var constPool: String = ""
+
+    /// 当前指令指针。
+    var ip: Int = 0
+
+    /// 指令执行计数。
+    var instructionCount: Int = 0
+
+    /// 最大指令数限制。
+    var maxInstructions: Int = 1000000
+
+    /// 运行状态。
+    var running: Boolean = true
+
+    /// 返回值。
+    var returnValue: Any = null
+
+    /// 错误信息。
+    var error: String = ""
+
+    /// 栈（使用字符串表示：每行一个值）。
+    var stack: String = ""
+
+    /// 栈深度。
+    var stackDepth: Int = 0
+
+    /// 局部变量表（每行：`slotIdx|value`）。
+    var locals: String = ""
+
+    /// 全局变量表（每行：`name|value`）。
+    var globals: String = ""
+
+    /// 函数表（每行：`name|startOffset|paramCount`）。
+    var funcTable: String = ""
+
+    /// 调用栈（每行：`returnIp|frameId`）。
+    var callStack: String = ""
+
+    /// 保存的局部变量块（帧切换用，块之间以 \u0001 分隔）。
+    var savedLocals: String = ""
+
+    /// 闭包管理器。
+    var closures: ClosureManager = ClosureManager()
+
+    /// 尾调用优化器。
+    var tailCall: TailCallOptimizer = TailCallOptimizer()
+
+    /// 栈帧管理器。
+    var frames: FrameManager = FrameManager()
+
+    /// 当前帧 id。
+    var currentFrame: Int = -1
+
+    /// 当前函数名。
+    var currentFunc: String = ""
+
+    init() {
+        this.bytecode = ""
+        this.constPool = ""
+        this.ip = 0
+        this.instructionCount = 0
+        this.maxInstructions = 1000000
+        this.running = true
+        this.returnValue = null
+        this.error = ""
+        this.stack = ""
+        this.stackDepth = 0
+        this.locals = ""
+        this.globals = ""
+        this.funcTable = ""
+        this.callStack = ""
+        this.savedLocals = ""
+        this.closures = ClosureManager()
+        this.tailCall = TailCallOptimizer()
+        this.frames = FrameManager()
+        this.currentFrame = -1
+        this.currentFunc = ""
+    }
+
+    // ── 初始化 ──
+
+    /// 加载字节码。
+    fun loadBytecode(code: String, consts: String, funcs: String): Unit {
+        this.bytecode = code
+        this.constPool = consts
+        this.funcTable = funcs
+        this.ip = 0
+        this.instructionCount = 0
+        this.running = true
+        this.error = ""
+        this.stack = ""
+        this.stackDepth = 0
+        this.locals = ""
+        this.globals = ""
+        this.callStack = ""
+        this.savedLocals = ""
+    }
+
+    /// 分配主帧。
+    fun allocateMainFrame(): Int {
+        val frameId: Int = this.frames.allocateFrame("<main>", 0)
+        this.currentFrame = frameId
+        this.currentFunc = "<main>"
+        return frameId
+    }
+
+    // ── 栈操作 ──
+
+    /// 压栈。
+    fun push(value: String): Unit {
+        this.stack = this.stack + value + "\n"
+        this.stackDepth = this.stackDepth + 1
+    }
+
+    /// 弹栈。
+    fun pop(): String {
+        if (this.stackDepth == 0) {
+            this.error = "Stack underflow"
+            this.running = false
+            return ""
+        }
+        // 取最后一行
+        val value: String = this.fieldAtRow(this.stack, this.stackDepth - 1, "\n")
+        // 从栈中移除最后一行（连同其后的分隔符一起移除，
+        // 否则被弹出的值会残留在 stack 字符串里污染下一次 push）
+        var pos: Int = this.stack.length - 1
+        if (pos >= 0 && toStr(this.stack[pos]) == "\n") {
+            pos = pos - 1
+        }
+        while (pos >= 0 && toStr(this.stack[pos]) != "\n") {
+            pos = pos - 1
+        }
+        this.stack = this.stackSlice(this.stack, 0, pos + 1)
+        this.stackDepth = this.stackDepth - 1
+        return value
+    }
+
+    /// 查看栈顶。
+    fun peek(): String {
+        if (this.stackDepth == 0) {
+            return ""
+        }
+        return this.fieldAtRow(this.stack, this.stackDepth - 1, "\n")
+    }
+
+    // ── 局部变量操作 ──
+
+    /// 获取局部变量（按槽位号查找；未初始化返回 "0"）。
+    fun getLocal(slotIdx: Int): String {
+        val key: String = toStr(slotIdx)
+        var pos: Int = 0
+        var len: Int = this.locals.length
+        var lineStart: Int = 0
+        while (pos < len) {
+            if (toStr(this.locals[pos]) == "\n") {
+                val line: String = this.stackSlice(this.locals, lineStart, pos - lineStart)
+                if (this.fieldAtCol(line, 0, "|") == key) {
+                    return this.fieldAtCol(line, 1, "|")
+                }
+                lineStart = pos + 1
+            }
+            pos = pos + 1
+        }
+        return "0"
+    }
+
+    /// 设置局部变量（覆盖式写入：同一槽位只保留一行，避免读到陈旧值）。
+    fun setLocal(slotIdx: Int, value: String): Unit {
+        this.locals = this.localsRemoveSlot(slotIdx)
+        this.locals = this.locals + toStr(slotIdx) + "|" + value + "\n"
+    }
+
+    /// 删除局部变量表中指定槽位的行。
+    fun localsRemoveSlot(slotIdx: Int): String {
+        val key: String = toStr(slotIdx)
+        var result: String = ""
+        var pos: Int = 0
+        var len: Int = this.locals.length
+        var lineStart: Int = 0
+        while (pos < len) {
+            if (toStr(this.locals[pos]) == "\n") {
+                val line: String = this.stackSlice(this.locals, lineStart, pos - lineStart)
+                if (this.fieldAtCol(line, 0, "|") != key) {
+                    result = result + line + "\n"
+                }
+                lineStart = pos + 1
+            }
+            pos = pos + 1
+        }
+        return result
+    }
+
+    // ── 全局变量操作 ──
+
+    /// 获取全局变量。
+    fun getGlobal(name: String): String {
+        var pos: Int = 0
+        var len: Int = this.globals.length
+        var lineStart: Int = 0
+        while (pos < len) {
+            val c: String = toStr(this.globals[pos])
+            if (c == "\n") {
+                val line: String = this.stackSlice(this.globals, lineStart, pos - lineStart)
+                val lineName: String = this.fieldAtCol(line, 0, "|")
+                if (lineName == name) {
+                    return this.fieldAtCol(line, 1, "|")
+                }
+                lineStart = pos + 1
+            }
+            pos = pos + 1
+        }
+        // 处理最后一行
+        if (lineStart < len) {
+            val line: String = this.stackSlice(this.globals, lineStart, len - lineStart)
+            val lineName: String = this.fieldAtCol(line, 0, "|")
+            if (lineName == name) {
+                return this.fieldAtCol(line, 1, "|")
+            }
+        }
+        return ""
+    }
+
+    /// 设置全局变量。
+    fun setGlobal(name: String, value: String): Unit {
+        this.globals = this.globals + name + "|" + value + "\n"
+    }
+
+    // ── 主执行循环 ──
+
+    /// 执行字节码。
+    fun run(): Any {
+        this.allocateMainFrame()
+
+        // 从 `main` 函数入口开始执行（字节码中 main 未必是第一条指令）
+        this.ip = this.funcOffset("main")
+
+        while (this.running && this.ip < this.bytecodeLineCount()) {
+            this.instructionCount = this.instructionCount + 1
+            if (this.instructionCount > this.maxInstructions) {
+                this.error = "Instruction limit exceeded"
+                this.running = false
+                break
+            }
+
+            val line: String = this.getBytecodeLine(this.ip)
+            this.ip = this.ip + 1
+
+            // 解析指令
+            val opcode: String = this.parseOpcode(line)
+            val arg1: String = this.parseArg1(line)
+            val arg2: String = this.parseArg2(line)
+            val arg3: String = this.parseArg3(line)
+
+            // 指令分派
+            this.dispatch(opcode, arg1, arg2, arg3)
+        }
+
+        return this.returnValue
+    }
+
+    /// 指令分派（使用独立 if 语句，避免 else if 链问题）。
+    fun dispatch(opcode: String, arg1: String, arg2: String, arg3: String): Unit {
+        if (opcode == "CONST_INT") {
+            this.push(this.getConst(arg1))
+        }
+        if (opcode == "CONST_FLOAT") {
+            this.push(this.getConst(arg1))
+        }
+        if (opcode == "CONST_STRING") {
+            this.push(this.getConst(arg1))
+        }
+        if (opcode == "CONST_BOOL") {
+            // 布尔字面量内联（arg1 = true / false）
+            this.push(arg1)
+        }
+        if (opcode == "CONST_NULL") {
+            this.push("null")
+        }
+        if (opcode == "LOAD_LOCAL") {
+            this.push(this.getLocal(vrToInt(arg1)))
+        }
+        if (opcode == "STORE_LOCAL") {
+            this.setLocal(vrToInt(arg1), this.pop())
+        }
+        if (opcode == "DECL_LOCAL") {
+            // 声明占位：写入默认值 0（槽位在后续赋值时覆盖）
+            this.setLocal(vrToInt(arg1), "0")
+        }
+        if (opcode == "POP") {
+            this.pop()
+        }
+        if (opcode == "DUP") {
+            this.push(this.peek())
+        }
+        if (opcode == "ADD") {
+            val b: String = this.pop()
+            val a: String = this.pop()
+            this.push(this.arithAdd(a, b))
+        }
+        if (opcode == "SUB") {
+            val b: String = this.pop()
+            val a: String = this.pop()
+            this.push(this.arithSub(a, b))
+        }
+        if (opcode == "MUL") {
+            val b: String = this.pop()
+            val a: String = this.pop()
+            this.push(this.arithMul(a, b))
+        }
+        if (opcode == "DIV") {
+            val b: String = this.pop()
+            val a: String = this.pop()
+            this.push(this.arithDiv(a, b))
+        }
+        if (opcode == "MOD") {
+            val b: String = this.pop()
+            val a: String = this.pop()
+            this.push(this.arithMod(a, b))
+        }
+        if (opcode == "EQ") {
+            val b: String = this.pop()
+            val a: String = this.pop()
+            this.push(this.eq(a, b))
+        }
+        if (opcode == "NEQ") {
+            val b: String = this.pop()
+            val a: String = this.pop()
+            this.push(this.neq(a, b))
+        }
+        if (opcode == "LT") {
+            val b: String = this.pop()
+            val a: String = this.pop()
+            this.push(this.cmpBool(this.tryInt(a, 0) < this.tryInt(b, 0)))
+        }
+        if (opcode == "GT") {
+            val b: String = this.pop()
+            val a: String = this.pop()
+            this.push(this.cmpBool(this.tryInt(a, 0) > this.tryInt(b, 0)))
+        }
+        if (opcode == "LE") {
+            val b: String = this.pop()
+            val a: String = this.pop()
+            this.push(this.cmpBool(this.tryInt(a, 0) <= this.tryInt(b, 0)))
+        }
+        if (opcode == "GE") {
+            val b: String = this.pop()
+            val a: String = this.pop()
+            this.push(this.cmpBool(this.tryInt(a, 0) >= this.tryInt(b, 0)))
+        }
+        if (opcode == "NEG") {
+            val a: String = this.pop()
+            this.push(toStr(0 - this.tryInt(a, 0)))
+        }
+        if (opcode == "NOT") {
+            val a: String = this.pop()
+            this.push(this.cmpBool(!(a == "true")))
+        }
+        if (opcode == "JUMP") {
+            this.ip = vrToInt(arg1)
+        }
+        if (opcode == "JUMP_IF_FALSE") {
+            val cond: String = this.pop()
+            if (cond == "false" || cond == "0" || cond == "") {
+                this.ip = vrToInt(arg1)
+            }
+        }
+        if (opcode == "JUMP_IF_TRUE") {
+            val cond: String = this.pop()
+            if (cond == "true" || cond == "1") {
+                this.ip = vrToInt(arg1)
+            }
+        }
+        if (opcode == "CALL") {
+            this.callOrBuiltin(arg1, vrToInt(arg2))
+        }
+        if (opcode == "RETURN") {
+            this.returnFromFunc()
+        }
+        if (opcode == "LOAD_CLOSURE") {
+            this.loadClosure(arg1)
+        }
+        // 其他指令：忽略（TODO）
+    }
+
+    // ── 调用与返回 ──
+
+    /// 调用内置函数或用户函数。
+    ///
+    /// 内置：println / print / toStr / toString —— 直接由宿主（Aura）执行；
+    /// 用户函数：压入返回地址并跳转到函数入口。
+    fun callOrBuiltin(name: String, argc: Int): Unit {
+        if (name == "println" || name == "print") {
+            val text: String = this.collectArgs(argc)
+            if (name == "println") {
+                println(text)
+            } else {
+                print(text)
+            }
+            this.push("Unit")
+            return
+        }
+        if (name == "toStr" || name == "toString") {
+            val v: String = this.pop()
+            this.push(v)
+            return
+        }
+        // 用户函数：记录返回地址并跳转
+        val target: Int = this.funcOffset(name)
+        if (target <= 0 && this.funcParamCount(name) < 0) {
+            this.error = "unknown function: " + name
+            this.running = false
+            return
+        }
+        this.callStack = this.callStack + toStr(this.ip) + "|" + toStr(this.currentFrame) + "\n"
+        this.savedLocals = this.savedLocals + this.locals + "\u0001"
+        this.locals = ""
+
+        // 绑定实参到参数槽位 0..n-1（栈顶是最后一个实参，逆序弹出）
+        val pc: Int = this.funcParamCount(name)
+        var k: Int = pc - 1
+        while (k >= 0) {
+            this.setLocal(k, this.pop())
+            k = k - 1
+        }
+
+        this.currentFunc = name
+        this.tailCall.enterCall(name)
+        this.ip = target
+    }
+
+    /// 弹出 argc 个实参并按源顺序拼接为字符串（参数 >1 时以空格分隔）。
+    fun collectArgs(argc: Int): String {
+        if (argc <= 0) {
+            return ""
+        }
+        // 栈顶是最后一个实参；先逐个弹出到临时数组（用字符串保存），再逆序。
+        var args: String = ""
+        var i: Int = 0
+        while (i < argc) {
+            val v: String = this.pop()
+            args = v + "\u0002" + args
+            i = i + 1
+        }
+        var result: String = ""
+        var pos: Int = 0
+        var len: Int = args.length
+        var start: Int = 0
+        while (pos < len) {
+            if (toStr(args[pos]) == "\u0002") {
+                val seg: String = this.stackSlice(args, start, pos - start)
+                if (result == "") {
+                    result = seg
+                } else {
+                    result = result + " " + seg
+                }
+                start = pos + 1
+            }
+            pos = pos + 1
+        }
+        return result
+    }
+
+    /// 查找函数入口偏移（未找到返回 0）。
+    fun funcOffset(name: String): Int {
+        var pos: Int = 0
+        var len: Int = this.funcTable.length
+        var lineStart: Int = 0
+        while (pos < len) {
+            if (toStr(this.funcTable[pos]) == "\n") {
+                val line: String = this.stackSlice(this.funcTable, lineStart, pos - lineStart)
+                if (this.fieldAtCol(line, 0, "|") == name) {
+                    return vrToInt(this.fieldAtCol(line, 1, "|"))
+                }
+                lineStart = pos + 1
+            }
+            pos = pos + 1
+        }
+        return 0
+    }
+
+    /// 查找函数参数个数（未找到返回 -1）。
+    fun funcParamCount(name: String): Int {
+        var pos: Int = 0
+        var len: Int = this.funcTable.length
+        var lineStart: Int = 0
+        while (pos < len) {
+            if (toStr(this.funcTable[pos]) == "\n") {
+                val line: String = this.stackSlice(this.funcTable, lineStart, pos - lineStart)
+                if (this.fieldAtCol(line, 0, "|") == name) {
+                    return vrToInt(this.fieldAtCol(line, 2, "|"))
+                }
+                lineStart = pos + 1
+            }
+            pos = pos + 1
+        }
+        return -1
+    }
+
+    // ── 函数调用 ──
+
+    /// 调用函数。
+    fun callFunc(funcName: String): Unit {
+        // 检查尾调用
+        if (this.tailCall.checkTailPosition("return")) {
+            // 尾调用：复用当前帧
+            this.frames.reuseFrame(this.currentFrame, 0)
+        } else {
+            // 普通调用：分配新帧
+            val newFrame: Int = this.frames.allocateFrame(funcName, 0)
+            if (newFrame < 0) {
+                this.error = "Stack overflow"
+                this.running = false
+                return
+            }
+            this.currentFrame = newFrame
+        }
+        this.currentFunc = funcName
+        this.tailCall.enterCall(funcName)
+    }
+
+    /// 从函数返回。
+    ///
+    /// - 若调用栈为空（处于 main 帧）→ 结束执行；
+    /// - 否则弹出返回地址、恢复局部变量表并跳回调用点。
+    fun returnFromFunc(): Unit {
+        var retVal: String = "Unit"
+        if (this.stackDepth > 0) {
+            retVal = this.pop()
+        }
+        this.returnValue = retVal
+        this.tailCall.exitCall()
+
+        if (this.callStack == "") {
+            this.running = false
+            return
+        }
+
+        val last: String = this.lastLine(this.callStack)
+        this.ip = vrToInt(this.fieldAtCol(last, 0, "|"))
+        this.callStack = this.dropLastLine(this.callStack)
+        this.locals = this.popSavedLocals()
+        this.frames.deallocateFrame(this.currentFrame)
+
+        // 把返回值压回调用者的栈（供上层表达式继续消费）
+        this.push(retVal)
+    }
+
+    // ── 比较/算术辅助 ──
+
+    /// 布尔值字符串化。
+    fun cmpBool(b: Boolean): String {
+        if (b) {
+            return "true"
+        }
+        return "false"
+    }
+
+    /// 不相等比较。
+    fun neq(a: String, b: String): String {
+        if (a == b) {
+            return "false"
+        }
+        return "true"
+    }
+
+    /// 取余。
+    fun arithMod(a: String, b: String): String {
+        val bb: Int = this.tryInt(b, 0)
+        if (bb == 0) {
+            return "0"
+        }
+        return toStr(this.tryInt(a, 0) % bb)
+    }
+
+    /// 取字符串最后一行（不含尾随换行）。
+    fun lastLine(text: String): String {
+        var i: Int = text.length - 1
+        if (i >= 0 && toStr(text[i]) == "\n") {
+            i = i - 1
+        }
+        var start: Int = i
+        while (start >= 0 && toStr(text[start]) != "\n") {
+            start = start - 1
+        }
+        return this.stackSlice(text, start + 1, i - start)
+    }
+
+    /// 移除字符串最后一行。
+    fun dropLastLine(text: String): String {
+        var i: Int = text.length - 1
+        if (i >= 0 && toStr(text[i]) == "\n") {
+            i = i - 1
+        }
+        while (i >= 0 && toStr(text[i]) != "\n") {
+            i = i - 1
+        }
+        return this.stackSlice(text, 0, i + 1)
+    }
+
+    /// 弹出并返回最后一个保存的局部变量块。
+    fun popSavedLocals(): String {
+        var i: Int = this.savedLocals.length - 1
+        while (i >= 0 && toStr(this.savedLocals[i]) != "\u0001") {
+            i = i - 1
+        }
+        if (i < 0) {
+            return ""
+        }
+        var j: Int = i - 1
+        while (j >= 0 && toStr(this.savedLocals[j]) != "\u0001") {
+            j = j - 1
+        }
+        val block: String = this.stackSlice(this.savedLocals, j + 1, i - j - 1)
+        this.savedLocals = this.stackSlice(this.savedLocals, 0, j + 1)
+        return block
+    }
+
+    // ── 闭包支持 ──
+
+    /// 加载闭包。
+    fun loadClosure(closureData: String): Unit {
+        // 解析闭包数据
+        val funcName: String = this.parseArg1(closureData)
+        val varNames: String = this.parseArg2(closureData)
+        if (funcName != "" && varNames != "") {
+            val closure: String = this.closures.createClosure(funcName, varNames)
+            this.push(closure)
+        }
+    }
+
+    // ── 算术运算 ──
+
+    /// 加法。
+    fun arithAdd(a: String, b: String): String {
+        return toStr(this.tryInt(a, 0) + this.tryInt(b, 0))
+    }
+
+    /// 减法。
+    fun arithSub(a: String, b: String): String {
+        return toStr(this.tryInt(a, 0) - this.tryInt(b, 0))
+    }
+
+    /// 乘法。
+    fun arithMul(a: String, b: String): String {
+        return toStr(this.tryInt(a, 0) * this.tryInt(b, 0))
+    }
+
+    /// 除法。
+    fun arithDiv(a: String, b: String): String {
+        if (this.tryInt(b, 0) == 0) {
+            return "0"
+        }
+        return toStr(this.tryInt(a, 0) / this.tryInt(b, 0))
+    }
+
+    /// 相等比较。
+    fun eq(a: String, b: String): String {
+        if (a == b) {
+            return "true"
+        }
+        return "false"
+    }
+
+    // ── 字节码解析 ──
+
+    /// 获取字节码行数。
+    fun bytecodeLineCount(): Int {
+        var count: Int = 0
+        var i: Int = 0
+        var len: Int = this.bytecode.length
+        while (i < len) {
+            if (toStr(this.bytecode[i]) == "\n") {
+                count = count + 1
+            }
+            i = i + 1
+        }
+        if (this.bytecode.length > 0 && toStr(this.bytecode[this.bytecode.length - 1]) != "\n") {
+            count = count + 1
+        }
+        return count
+    }
+
+    /// 获取指定行的字节码。
+    fun getBytecodeLine(lineIdx: Int): String {
+        var pos: Int = 0
+        var len: Int = this.bytecode.length
+        var lineStart: Int = 0
+        var cur: Int = 0
+
+        while (pos < len) {
+            val c: String = toStr(this.bytecode[pos])
+            if (c == "\n") {
+                if (cur == lineIdx) {
+                    return this.stackSlice(this.bytecode, lineStart, pos - lineStart)
+                }
+                cur = cur + 1
+                lineStart = pos + 1
+            }
+            pos = pos + 1
+        }
+        if (cur == lineIdx) {
+            return this.stackSlice(this.bytecode, lineStart, len - lineStart)
+        }
+        return ""
+    }
+
+    /// 解析指令：返回 opcode。
+    fun parseOpcode(line: String): String {
+        var pos: Int = 0
+        var len: Int = line.length
+        while (pos < len) {
+            if (toStr(line[pos]) == " ") {
+                break
+            }
+            pos = pos + 1
+        }
+        return this.stackSlice(line, 0, pos)
+    }
+
+    /// 解析指令：返回第一个参数。
+    fun parseArg1(line: String): String {
+        var pos: Int = 0
+        var len: Int = line.length
+        // 跳过 opcode
+        while (pos < len && toStr(line[pos]) != " ") {
+            pos = pos + 1
+        }
+        pos = pos + 1  // 跳过空格
+        // 提取第一个参数
+        var argStart: Int = pos
+        while (pos < len && toStr(line[pos]) != " ") {
+            pos = pos + 1
+        }
+        return this.stackSlice(line, argStart, pos - argStart)
+    }
+
+    /// 解析指令：返回第二个参数。
+    fun parseArg2(line: String): String {
+        var pos: Int = 0
+        var len: Int = line.length
+        // 跳过 opcode
+        while (pos < len && toStr(line[pos]) != " ") {
+            pos = pos + 1
+        }
+        pos = pos + 1  // 跳过空格
+        // 跳过第一个参数
+        while (pos < len && toStr(line[pos]) != " ") {
+            pos = pos + 1
+        }
+        if (pos >= len) {
+            return ""
+        }
+        pos = pos + 1  // 跳过空格
+        // 提取第二个参数
+        var argStart: Int = pos
+        while (pos < len && toStr(line[pos]) != " ") {
+            pos = pos + 1
+        }
+        return this.stackSlice(line, argStart, pos - argStart)
+    }
+
+    /// 解析指令：返回第三个参数。
+    fun parseArg3(line: String): String {
+        var pos: Int = 0
+        var len: Int = line.length
+        // 跳过 opcode
+        while (pos < len && toStr(line[pos]) != " ") {
+            pos = pos + 1
+        }
+        pos = pos + 1  // 跳过空格
+        // 跳过第一个参数
+        while (pos < len && toStr(line[pos]) != " ") {
+            pos = pos + 1
+        }
+        if (pos >= len) {
+            return ""
+        }
+        pos = pos + 1  // 跳过空格
+        // 跳过第二个参数
+        while (pos < len && toStr(line[pos]) != " ") {
+            pos = pos + 1
+        }
+        if (pos >= len) {
+            return ""
+        }
+        pos = pos + 1  // 跳过空格
+        // 提取第三个参数
+        var argStart: Int = pos
+        while (pos < len && toStr(line[pos]) != " ") {
+            pos = pos + 1
+        }
+        return this.stackSlice(line, argStart, pos - argStart)
+    }
+
+    // ── 常量池 ──
+
+    /// 获取常量。
+    fun getConst(idx: String): String {
+        return this.fieldAt(this.constPool, vrToInt(idx), "\n", "\n", 0)
+    }
+
+    // ── 状态查询 ──
+
+    /// 获取错误信息。
+    fun getError(): String {
+        return this.error
+    }
+
+    /// 获取指令计数。
+    fun getInstructionCount(): Int {
+        return this.instructionCount
+    }
+
+    /// 检查是否运行中。
+    fun isRunning(): Boolean {
+        return this.running
+    }
+
+    /// 获取栈深度。
+    fun getStackDepth(): Int {
+        return this.stackDepth
+    }
+
+    /// 获取闭包管理器。
+    fun getClosures(): ClosureManager {
+        return this.closures
+    }
+
+    /// 获取尾调用优化器。
+    fun getTailCall(): TailCallOptimizer {
+        return this.tailCall
+    }
+
+    /// 获取栈帧管理器。
+    fun getFrames(): FrameManager {
+        return this.frames
+    }
+
+    // ── 内部辅助 ──
+
+    /// 字符串切片。
+    fun stackSlice(text: String, start: Int, length: Int): String {
+        var result: String = ""
+        var end: Int = start + length
+        if (end > text.length) {
+            end = text.length
+        }
+        var i: Int = start
+        while (i < end) {
+            result = result + toStr(text[i])
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 取第 rowIdx 行、第 colIdx 列的值。
+    fun fieldAt(text: String, rowIdx: Int, rowSep: String, colSep: String, colIdx: Int): String {
+        // 先取行
+        val line: String = this.fieldAtRow(text, rowIdx, rowSep)
+        // 再取列
+        return this.fieldAtCol(line, colIdx, colSep)
+    }
+
+    /// 取第 index 行。
+    fun fieldAtRow(text: String, index: Int, sep: String): String {
+        var i: Int = 0
+        var fieldStart: Int = 0
+        var cur: Int = 0
+        var fieldLen: Int = text.length
+        while (i < fieldLen) {
+            val c: String = toStr(text[i])
+            if (c == sep) {
+                if (cur == index) {
+                    return this.stackSlice(text, fieldStart, i - fieldStart)
+                }
+                cur = cur + 1
+                fieldStart = i + 1
+            }
+            i = i + 1
+        }
+        if (cur == index) {
+            return this.stackSlice(text, fieldStart, fieldLen - fieldStart)
+        }
+        return ""
+    }
+
+    /// 取第 index 列。
+    fun fieldAtCol(text: String, index: Int, sep: String): String {
+        var i: Int = 0
+        var fieldStart: Int = 0
+        var cur: Int = 0
+        var fieldLen: Int = text.length
+        while (i < fieldLen) {
+            val c: String = toStr(text[i])
+            if (c == sep) {
+                if (cur == index) {
+                    return this.stackSlice(text, fieldStart, i - fieldStart)
+                }
+                cur = cur + 1
+                fieldStart = i + 1
+            }
+            i = i + 1
+        }
+        if (cur == index) {
+            return this.stackSlice(text, fieldStart, fieldLen - fieldStart)
+        }
+        return ""
+    }
+
+    /// 尝试将字符串转为整数。
+    fun tryInt(s: String, default: Int): Int {
+        return vrToInt(s)
+    }
+}
+
+/// 字符串转整数（本地实现）。
+fun vrToInt(text: String): Int {
+    var total: Int = 0
+    var i: Int = 0
+    var len: Int = text.length
+    var neg: Boolean = false
+    if (len > 0 && toStr(text[0]) == "-") {
+        neg = true
+        i = 1
+    }
+    while (i < len) {
+        val c: String = toStr(text[i])
+        var digit: Int = -1
+        var j: Int = 0
+        while (j < 10) {
+            if (toStr(j) == c) {
+                digit = j
+                break
+            }
+            j = j + 1
+        }
+        if (digit >= 0) {
+            total = total * 10 + digit
+        }
+        i = i + 1
+    }
+    if (neg) {
+        return -total
+    }
+    return total
+}

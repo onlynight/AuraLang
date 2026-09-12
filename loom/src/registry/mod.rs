@@ -11,6 +11,10 @@
 
 pub mod client;
 pub mod local;
+pub mod stdlib;
 
 pub use client::{PackageInfo, RegistryClient, SearchResult, VersionInfo};
 pub use local::{CacheEntry, CacheIndex, LocalRegistry, RegistryStats};
+pub use stdlib::{
+    InstallResultRegistry, PublishResult, RegistryEntry, StdlibRegistryClient, UpdateResult,
+};

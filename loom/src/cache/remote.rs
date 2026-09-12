@@ -788,7 +788,7 @@ mod tests {
     fn setup_cache_service() -> (CacheService, TempDir, Arc<Mutex<LocalCache>>) {
         let tmp = TempDir::new().unwrap();
         let cache = Arc::new(Mutex::new(LocalCache::new(tmp.path()).unwrap()));
-        let build_config = Arc::new(ResolvedBuildConfig::default());
+        let build_config = Arc::new(ResolvedBuildConfig::isolated());
         let service = CacheService::new(cache.clone(), None, build_config).unwrap();
         (service, tmp, cache)
     }
@@ -1036,7 +1036,7 @@ mod tests {
     #[test]
     fn test_compute_cache_key_deterministic() {
         let task = make_task("compile-main", TaskKind::Compile("main".to_string()));
-        let config = ResolvedBuildConfig::default();
+        let config = ResolvedBuildConfig::isolated();
 
         // 创建一个有 URL 的配置（不实际连接）
         let cache_config = RemoteCacheConfig {
@@ -1055,7 +1055,7 @@ mod tests {
     fn test_compute_cache_key_changes_with_task() {
         let task1 = make_task("compile-main", TaskKind::Compile("main".to_string()));
         let task2 = make_task("compile-test", TaskKind::Compile("test".to_string()));
-        let config = ResolvedBuildConfig::default();
+        let config = ResolvedBuildConfig::isolated();
 
         let cache_config = RemoteCacheConfig {
             url: "http://localhost:99999".to_string(),

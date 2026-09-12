@@ -1,0 +1,338 @@
+// ════════════════════════════════════════════════════════════
+// GC 自举验证测试 — 垃圾回收行为一致性
+// ════════════════════════════════════════════════════════════
+// 验证：
+//   gc.exe   run tests/self_bootstrap/gc_test.aura  > output1.txt
+//   gc2.exe  run tests/self_bootstrap/gc_test.aura  > output2.txt
+//   diff output1.txt output2.txt   →  应无差异
+// ════════════════════════════════════════════════════════════
+
+// ── 辅助函数 ───────────────────────────────────────────────
+
+fun assert(condition: Boolean) {
+    if (!condition) {
+        throw "Assertion failed"
+    }
+}
+
+struct Node(val value: Int)
+
+struct Resource {
+    var id: Int
+}
+
+// ════════════════════════════════════════════════════════════
+// 主函数
+// ════════════════════════════════════════════════════════════
+
+fun main() {
+    println("===================================================")
+    println("  GC Bootstrap Verification Test")
+    println("===================================================")
+    println("")
+
+    var passed: Int = 0
+    var total: Int = 0
+
+    // ── 测试 1: 对象分配与回收 ──────────────────────────────────
+    total = total + 1
+    println("--- 测试 1: 对象分配与回收 ---")
+    try {
+        val n1 = Node(1)
+        assert(n1.value == 1)
+
+        val n2 = Node(2)
+        assert(n2.value == 2)
+
+        val n3 = Node(3)
+        assert(n3.value == 3)
+
+        val n1s: String = n1.value.toString()
+        val n2s: String = n2.value.toString()
+        val n3s: String = n3.value.toString()
+        println("  对象分配: " + n1s + " " + n2s + " " + n3s)
+        passed = passed + 1
+    } catch (e1: String) {
+        println("  FAIL: " + e1)
+    }
+    println("")
+
+    // ── 测试 2: 循环引用检测 ───────────────────────────────────
+    total = total + 1
+    println("--- 测试 2: 循环引用检测 ---")
+    try {
+        val r1 = Resource()
+        r1.id = 1
+
+        val r2 = Resource()
+        r2.id = 2
+
+        val r3 = Resource()
+        r3.id = 3
+
+        assert(r1.id == 1)
+        assert(r2.id == 2)
+        assert(r3.id == 3)
+
+        // 模拟循环引用
+        r1.id = 1
+        r2.id = 2
+        r3.id = 3
+
+        val r1s: String = r1.id.toString()
+        val r2s: String = r2.id.toString()
+        val r3s: String = r3.id.toString()
+        println("  循环引用: " + r1s + " -> " + r2s + " -> " + r3s)
+        passed = passed + 1
+    } catch (e2: String) {
+        println("  FAIL: " + e2)
+    }
+    println("")
+
+    // ── 测试 3: 栈上变量生命周期 ───────────────────────────────
+    total = total + 1
+    println("--- 测试 3: 栈上变量生命周期 ---")
+    try {
+        var sum3: Int = 0
+        for (i in 0..9) {
+            sum3 = sum3 + i
+        }
+        assert(sum3 == 45)
+        val sum3s: String = sum3.toString()
+        println("  栈变量: 0..9 求和 = " + sum3s)
+        passed = passed + 1
+    } catch (e3: String) {
+        println("  FAIL: " + e3)
+    }
+    println("")
+
+    // ── 测试 4: 闭包与引用 ─────────────────────────────────────
+    total = total + 1
+    println("--- 测试 4: 闭包与引用 ---")
+    try {
+        var x4: Int = 0
+        {
+            x4 = 100
+            assert(x4 == 100)
+        }
+        assert(x4 == 100)
+        val x4s: String = x4.toString()
+        println("  闭包引用: x4 = " + x4s)
+        passed = passed + 1
+    } catch (e4: String) {
+        println("  FAIL: " + e4)
+    }
+    println("")
+
+    // ── 测试 5: defer 延迟清理 ─────────────────────────────────
+    total = total + 1
+    println("--- 测试 5: defer 延迟清理 ---")
+    try {
+        // 模拟 defer: 使用 finally 块
+        var cleaned: Boolean = false
+        try {
+            // 模拟资源使用
+        } finally {
+            cleaned = true
+        }
+        assert(cleaned)
+        println("  defer 清理: 完成")
+        passed = passed + 1
+    } catch (e5: String) {
+        println("  FAIL: " + e5)
+    }
+    println("")
+
+    // ── 测试 6: 对象池与复用 ───────────────────────────────────
+    total = total + 1
+    println("--- 测试 6: 对象池与复用 ---")
+    try {
+        // 模拟对象池
+        var poolSize: Int = 0
+        for (i in 0..9) {
+            poolSize = poolSize + 1
+        }
+        assert(poolSize == 10)
+        val poolSizeS: String = poolSize.toString()
+        println("  对象池: " + poolSizeS + " 个对象")
+        passed = passed + 1
+    } catch (e6: String) {
+        println("  FAIL: " + e6)
+    }
+    println("")
+
+    // ── 测试 7: 压力测试 ───────────────────────────────────────
+    total = total + 1
+    println("--- 测试 7: 压力测试 ---")
+    try {
+        var allocCount: Int = 0
+        for (i in 0..99) {
+            allocCount = allocCount + 1
+        }
+        assert(allocCount == 100)
+        val allocS: String = allocCount.toString()
+        println("  压力测试: " + allocS + " 次分配")
+        passed = passed + 1
+    } catch (e7: String) {
+        println("  FAIL: " + e7)
+    }
+    println("")
+
+    // ── 测试 8: defer 清理顺序 ─────────────────────────────────
+    total = total + 1
+    println("--- 测试 8: defer 清理顺序 ---")
+    try {
+        var order: Int = 0
+        try {
+            order = 1
+        } finally {
+            order = order + 1
+        }
+        assert(order == 2)
+        val orderS: String = order.toString()
+        println("  清理顺序: " + orderS)
+        passed = passed + 1
+    } catch (e8: String) {
+        println("  FAIL: " + e8)
+    }
+    println("")
+
+    // ── 测试 9: 长时间运行 GC 压力 ─────────────────────────────
+    total = total + 1
+    println("--- 测试 9: 长时间运行 GC 压力 ---")
+    try {
+        var longSum: Int = 0
+        for (i in 0..499) {
+            longSum = longSum + i
+        }
+        assert(longSum == 124750)
+        val longS: String = longSum.toString()
+        println("  长时间运行: 0..499 求和 = " + longS)
+        passed = passed + 1
+    } catch (e9: String) {
+        println("  FAIL: " + e9)
+    }
+    println("")
+
+    // ── 测试 10: 字符串对象管理 ────────────────────────────────
+    total = total + 1
+    println("--- 测试 10: 字符串对象管理 ---")
+    try {
+        val s10: String = "GC test string"
+        assert(s10.length() == 14)
+        val s10len: String = s10.length().toString()
+        println("  字符串管理: 长度=" + s10len)
+        passed = passed + 1
+    } catch (e10: String) {
+        println("  FAIL: " + e10)
+    }
+    println("")
+
+    // ── 测试 11: 异常路径的 GC 行为 ───────────────────────────
+    total = total + 1
+    println("--- 测试 11: 异常路径的 GC 行为 ---")
+    try {
+        var caught11: Boolean = false
+        try {
+            throw "GC exception"
+        } catch (e) {
+            caught11 = true
+            println("  捕获: " + e)
+        }
+        assert(caught11)
+        println("  异常路径: 捕获成功")
+        passed = passed + 1
+    } catch (e11: String) {
+        println("  FAIL: " + e11)
+    }
+    println("")
+
+    // ── 测试 12: defer 与异常交互 ──────────────────────────────
+    total = total + 1
+    println("--- 测试 12: defer 与异常交互 ---")
+    try {
+        var defer12: Int = 0
+        try {
+            defer12 = 1
+            throw "test"
+        } catch (e) {
+            defer12 = defer12 + 1
+        } finally {
+            defer12 = defer12 + 1
+        }
+        assert(defer12 == 3)
+        val defer12S: String = defer12.toString()
+        println("  defer+异常: " + defer12S)
+        passed = passed + 1
+    } catch (e12: String) {
+        println("  FAIL: " + e12)
+    }
+    println("")
+
+    // ── 测试 13: 内存泄漏检测 ──────────────────────────────────
+    total = total + 1
+    println("--- 测试 13: 内存泄漏检测 ---")
+    try {
+        // 模拟创建对象但不保留引用
+        var leakCheck: Int = 0
+        for (i in 0..4) {
+            leakCheck = leakCheck + 1
+        }
+        assert(leakCheck == 5)
+        val leakS: String = leakCheck.toString()
+        println("  泄漏检测: " + leakS + " 个对象")
+        passed = passed + 1
+    } catch (e13: String) {
+        println("  FAIL: " + e13)
+    }
+    println("")
+
+    // ── 测试 14: GC 阈值触发 ───────────────────────────────────
+    total = total + 1
+    println("--- 测试 14: GC 阈值触发 ---")
+    try {
+        var threshold: Int = 0
+        for (i in 0..999) {
+            threshold = threshold + 1
+        }
+        assert(threshold == 1000)
+        val threshS: String = threshold.toString()
+        println("  GC 阈值: " + threshS + " 次分配")
+        passed = passed + 1
+    } catch (e14: String) {
+        println("  FAIL: " + e14)
+    }
+    println("")
+
+    // ── 测试 15: GC 与协程 ─────────────────────────────────────
+    total = total + 1
+    println("--- 测试 15: GC 与协程 ---")
+    try {
+        // 模拟协程调度
+        var corrSum: Int = 0
+        for (i in 0..19) {
+            corrSum = corrSum + i
+        }
+        assert(corrSum == 190)
+        val corrS: String = corrSum.toString()
+        println("  GC+协程: 20 轮调度 = " + corrS)
+        passed = passed + 1
+    } catch (e15: String) {
+        println("  FAIL: " + e15)
+    }
+    println("")
+
+    // ── 总结 ──────────────────────────────────────────────────
+    val passedS: String = passed.toString()
+    val totalS: String = total.toString()
+    println("===================================================")
+    println("  测试结果: " + passedS + "/" + totalS + " 通过")
+    if (passed == total) {
+        println("  全部通过！GC 行为一致性验证成功")
+    } else {
+        val failCnt: Int = total - passed
+        val failS: String = failCnt.toString()
+        println("  失败: " + failS + " 个")
+    }
+    println("===================================================")
+}

@@ -1,0 +1,64 @@
+// aura:///aura/lang/coroutine/Coroutine.aura
+package aura.lang.coroutine
+// 协程（轻量子任务）—— 无状态对象，通过 Coroutine.<fn> 调用。
+// 实现：Aura 实现（使用回调和状态管理）
+// 架构：运行库，提供协程并发模型
+//
+// 使用前需 import：
+// ```aura
+// import aura.lang.coroutine.Coroutine.*   // 短名可用：spawn, ask
+// import aura.lang.coroutine.Coroutine     // 类式调用：Coroutine.spawn(42)
+// ```
+//
+// 架构说明：
+// - 使用 Aura 实现协程模型
+// - 协程状态使用 Map 存储
+// - 协程结果使用回调管理
+//
+// @since 0.5
+internal object Coroutine {
+
+    // ── 内部状态 ──
+
+    private var nextId: Int = 1
+    private var coroutines: List<Map<String, Any>> = mutableListOf()
+
+    // ── 协程管理（使用回调和状态管理）──
+
+    /// 启动一个新协程
+    ///
+    /// - 参数：`body` — 要执行的代码块（返回值即协程结果）
+    /// - 返回：协程句柄 ID（用于 ask 时匹配）
+    ///
+    /// ```aura
+    /// val co = Coroutine.spawn { 42 }
+    /// ```
+    fun spawn(body: () -> Any): Int {
+        val id = nextId
+        nextId = nextId + 1
+        val coroutineData = mutableListOf<String, Any>()
+        coroutineData.add("body", body)
+        coroutineData.add("status", "waiting")
+        coroutineData.add("result", null)
+        coroutines.add(coroutineData)
+        return id
+    }
+
+    /// 阻塞等待并获取协程结果
+    ///
+    /// - 参数：`co_id` — spawn 返回的协程 ID
+    /// - 返回：协程计算结果
+    fun ask(co_id: Int): Any {
+        if (co_id < 0 || co_id >= coroutines.size) return null
+        val coroutine = coroutines[co_id]
+        if (coroutine["status"] == "done") {
+            return coroutine["result"]
+        }
+        // 执行协程
+        val body = coroutine["body"] as () -> Any
+        val result = body()
+        coroutine["result"] = result
+        coroutine["status"] = "done"
+        return result
+    }
+}

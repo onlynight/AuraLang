@@ -1,0 +1,977 @@
+Program {
+    imports: [],
+    declarations: [
+        Function(
+            FnDecl {
+                visibility: Public,
+                modifiers: [],
+                name: "classify",
+                type_params: [],
+                params: [
+                    Param {
+                        name: "n",
+                        type_hint: Some(
+                            Named {
+                                name: "Int",
+                                span: Span {
+                                    start: 88,
+                                    end: 91,
+                                    start_line: 2,
+                                    start_col: 18,
+                                    end_line: 2,
+                                    end_col: 21,
+                                },
+                            },
+                        ),
+                        default_value: None,
+                        is_vararg: false,
+                        is_noinline: false,
+                        is_crossinline: false,
+                        span: Span {
+                            start: 85,
+                            end: 91,
+                            start_line: 2,
+                            start_col: 15,
+                            end_line: 2,
+                            end_col: 21,
+                        },
+                    },
+                ],
+                return_type: Some(
+                    Named {
+                        name: "String",
+                        span: Span {
+                            start: 94,
+                            end: 101,
+                            start_line: 2,
+                            start_col: 24,
+                            end_line: 2,
+                            end_col: 31,
+                        },
+                    },
+                ),
+                body: Some(
+                    Block(
+                        [
+                            Expr(
+                                If {
+                                    condition: Binary {
+                                        op: Lt,
+                                        lhs: Ident(
+                                            "n",
+                                            Span {
+                                                start: 112,
+                                                end: 112,
+                                                start_line: 3,
+                                                start_col: 10,
+                                                end_line: 3,
+                                                end_col: 10,
+                                            },
+                                        ),
+                                        rhs: Literal(
+                                            Int(
+                                                0,
+                                            ),
+                                            Span {
+                                                start: 116,
+                                                end: 117,
+                                                start_line: 3,
+                                                start_col: 14,
+                                                end_line: 3,
+                                                end_col: 15,
+                                            },
+                                        ),
+                                        span: Span {
+                                            start: 112,
+                                            end: 117,
+                                            start_line: 3,
+                                            start_col: 10,
+                                            end_line: 3,
+                                            end_col: 15,
+                                        },
+                                    },
+                                    then_branch: Block(
+                                        [
+                                            Expr(
+                                                Return {
+                                                    value: Some(
+                                                        Literal(
+                                                            String(
+                                                                "negative",
+                                                            ),
+                                                            Span {
+                                                                start: 137,
+                                                                end: 147,
+                                                                start_line: 4,
+                                                                start_col: 17,
+                                                                end_line: 4,
+                                                                end_col: 27,
+                                                            },
+                                                        ),
+                                                    ),
+                                                    span: Span {
+                                                        start: 130,
+                                                        end: 153,
+                                                        start_line: 4,
+                                                        start_col: 10,
+                                                        end_line: 5,
+                                                        end_col: 6,
+                                                    },
+                                                },
+                                            ),
+                                        ],
+                                        Span {
+                                            start: 119,
+                                            end: 158,
+                                            start_line: 3,
+                                            start_col: 17,
+                                            end_line: 5,
+                                            end_col: 11,
+                                        },
+                                    ),
+                                    else_branch: Some(
+                                        If {
+                                            condition: Binary {
+                                                op: Eq,
+                                                lhs: Ident(
+                                                    "n",
+                                                    Span {
+                                                        start: 164,
+                                                        end: 164,
+                                                        start_line: 5,
+                                                        start_col: 17,
+                                                        end_line: 5,
+                                                        end_col: 17,
+                                                    },
+                                                ),
+                                                rhs: Literal(
+                                                    Int(
+                                                        0,
+                                                    ),
+                                                    Span {
+                                                        start: 169,
+                                                        end: 170,
+                                                        start_line: 5,
+                                                        start_col: 22,
+                                                        end_line: 5,
+                                                        end_col: 23,
+                                                    },
+                                                ),
+                                                span: Span {
+                                                    start: 164,
+                                                    end: 170,
+                                                    start_line: 5,
+                                                    start_col: 17,
+                                                    end_line: 5,
+                                                    end_col: 23,
+                                                },
+                                            },
+                                            then_branch: Block(
+                                                [
+                                                    Expr(
+                                                        Return {
+                                                            value: Some(
+                                                                Literal(
+                                                                    String(
+                                                                        "zero",
+                                                                    ),
+                                                                    Span {
+                                                                        start: 190,
+                                                                        end: 196,
+                                                                        start_line: 6,
+                                                                        start_col: 17,
+                                                                        end_line: 6,
+                                                                        end_col: 23,
+                                                                    },
+                                                                ),
+                                                            ),
+                                                            span: Span {
+                                                                start: 183,
+                                                                end: 202,
+                                                                start_line: 6,
+                                                                start_col: 10,
+                                                                end_line: 7,
+                                                                end_col: 6,
+                                                            },
+                                                        },
+                                                    ),
+                                                ],
+                                                Span {
+                                                    start: 172,
+                                                    end: 207,
+                                                    start_line: 5,
+                                                    start_col: 25,
+                                                    end_line: 7,
+                                                    end_col: 11,
+                                                },
+                                            ),
+                                            else_branch: Some(
+                                                Block(
+                                                    [
+                                                        Expr(
+                                                            Return {
+                                                                value: Some(
+                                                                    Literal(
+                                                                        String(
+                                                                            "positive",
+                                                                        ),
+                                                                        Span {
+                                                                            start: 227,
+                                                                            end: 237,
+                                                                            start_line: 8,
+                                                                            start_col: 17,
+                                                                            end_line: 8,
+                                                                            end_col: 27,
+                                                                        },
+                                                                    ),
+                                                                ),
+                                                                span: Span {
+                                                                    start: 220,
+                                                                    end: 243,
+                                                                    start_line: 8,
+                                                                    start_col: 10,
+                                                                    end_line: 9,
+                                                                    end_col: 6,
+                                                                },
+                                                            },
+                                                        ),
+                                                    ],
+                                                    Span {
+                                                        start: 209,
+                                                        end: 246,
+                                                        start_line: 7,
+                                                        start_col: 13,
+                                                        end_line: 10,
+                                                        end_col: 2,
+                                                    },
+                                                ),
+                                            ),
+                                            span: Span {
+                                                start: 160,
+                                                end: 246,
+                                                start_line: 5,
+                                                start_col: 13,
+                                                end_line: 10,
+                                                end_col: 2,
+                                            },
+                                        },
+                                    ),
+                                    span: Span {
+                                        start: 108,
+                                        end: 246,
+                                        start_line: 3,
+                                        start_col: 6,
+                                        end_line: 10,
+                                        end_col: 2,
+                                    },
+                                },
+                            ),
+                        ],
+                        Span {
+                            start: 101,
+                            end: 253,
+                            start_line: 2,
+                            start_col: 31,
+                            end_line: 12,
+                            end_col: 4,
+                        },
+                    ),
+                ),
+                doc: None,
+                span: Span {
+                    start: 72,
+                    end: 253,
+                    start_line: 2,
+                    start_col: 2,
+                    end_line: 12,
+                    end_col: 4,
+                },
+            },
+        ),
+        Function(
+            FnDecl {
+                visibility: Public,
+                modifiers: [],
+                name: "sumTo",
+                type_params: [],
+                params: [
+                    Param {
+                        name: "n",
+                        type_hint: Some(
+                            Named {
+                                name: "Int",
+                                span: Span {
+                                    start: 264,
+                                    end: 267,
+                                    start_line: 12,
+                                    start_col: 15,
+                                    end_line: 12,
+                                    end_col: 18,
+                                },
+                            },
+                        ),
+                        default_value: None,
+                        is_vararg: false,
+                        is_noinline: false,
+                        is_crossinline: false,
+                        span: Span {
+                            start: 261,
+                            end: 267,
+                            start_line: 12,
+                            start_col: 12,
+                            end_line: 12,
+                            end_col: 18,
+                        },
+                    },
+                ],
+                return_type: Some(
+                    Named {
+                        name: "Int",
+                        span: Span {
+                            start: 270,
+                            end: 274,
+                            start_line: 12,
+                            start_col: 21,
+                            end_line: 12,
+                            end_col: 25,
+                        },
+                    },
+                ),
+                body: Some(
+                    Block(
+                        [
+                            Var {
+                                name: "s",
+                                type_hint: None,
+                                initializer: Some(
+                                    Literal(
+                                        Int(
+                                            0,
+                                        ),
+                                        Span {
+                                            start: 289,
+                                            end: 290,
+                                            start_line: 13,
+                                            start_col: 14,
+                                            end_line: 13,
+                                            end_col: 15,
+                                        },
+                                    ),
+                                ),
+                                span: Span {
+                                    start: 281,
+                                    end: 298,
+                                    start_line: 13,
+                                    start_col: 6,
+                                    end_line: 14,
+                                    end_col: 8,
+                                },
+                            },
+                            Var {
+                                name: "i",
+                                type_hint: None,
+                                initializer: Some(
+                                    Literal(
+                                        Int(
+                                            1,
+                                        ),
+                                        Span {
+                                            start: 304,
+                                            end: 305,
+                                            start_line: 14,
+                                            start_col: 14,
+                                            end_line: 14,
+                                            end_col: 15,
+                                        },
+                                    ),
+                                ),
+                                span: Span {
+                                    start: 296,
+                                    end: 315,
+                                    start_line: 14,
+                                    start_col: 6,
+                                    end_line: 15,
+                                    end_col: 10,
+                                },
+                            },
+                            Expr(
+                                While {
+                                    condition: Binary {
+                                        op: Le,
+                                        lhs: Ident(
+                                            "i",
+                                            Span {
+                                                start: 318,
+                                                end: 318,
+                                                start_line: 15,
+                                                start_col: 13,
+                                                end_line: 15,
+                                                end_col: 13,
+                                            },
+                                        ),
+                                        rhs: Ident(
+                                            "n",
+                                            Span {
+                                                start: 323,
+                                                end: 323,
+                                                start_line: 15,
+                                                start_col: 18,
+                                                end_line: 15,
+                                                end_col: 18,
+                                            },
+                                        ),
+                                        span: Span {
+                                            start: 318,
+                                            end: 324,
+                                            start_line: 15,
+                                            start_col: 13,
+                                            end_line: 15,
+                                            end_col: 19,
+                                        },
+                                    },
+                                    body: Block(
+                                        [
+                                            Expr(
+                                                Assign {
+                                                    target: Ident(
+                                                        "s",
+                                                        Span {
+                                                            start: 337,
+                                                            end: 337,
+                                                            start_line: 16,
+                                                            start_col: 10,
+                                                            end_line: 16,
+                                                            end_col: 10,
+                                                        },
+                                                    ),
+                                                    value: Binary {
+                                                        op: Add,
+                                                        lhs: Ident(
+                                                            "s",
+                                                            Span {
+                                                                start: 337,
+                                                                end: 337,
+                                                                start_line: 16,
+                                                                start_col: 10,
+                                                                end_line: 16,
+                                                                end_col: 10,
+                                                            },
+                                                        ),
+                                                        rhs: Ident(
+                                                            "i",
+                                                            Span {
+                                                                start: 342,
+                                                                end: 342,
+                                                                start_line: 16,
+                                                                start_col: 15,
+                                                                end_line: 16,
+                                                                end_col: 15,
+                                                            },
+                                                        ),
+                                                        span: Span {
+                                                            start: 337,
+                                                            end: 353,
+                                                            start_line: 16,
+                                                            start_col: 10,
+                                                            end_line: 17,
+                                                            end_col: 10,
+                                                        },
+                                                    },
+                                                    span: Span {
+                                                        start: 337,
+                                                        end: 353,
+                                                        start_line: 16,
+                                                        start_col: 10,
+                                                        end_line: 17,
+                                                        end_col: 10,
+                                                    },
+                                                },
+                                            ),
+                                            Expr(
+                                                Assign {
+                                                    target: Ident(
+                                                        "i",
+                                                        Span {
+                                                            start: 353,
+                                                            end: 353,
+                                                            start_line: 17,
+                                                            start_col: 10,
+                                                            end_line: 17,
+                                                            end_col: 10,
+                                                        },
+                                                    ),
+                                                    value: Binary {
+                                                        op: Add,
+                                                        lhs: Ident(
+                                                            "i",
+                                                            Span {
+                                                                start: 353,
+                                                                end: 353,
+                                                                start_line: 17,
+                                                                start_col: 10,
+                                                                end_line: 17,
+                                                                end_col: 10,
+                                                            },
+                                                        ),
+                                                        rhs: Literal(
+                                                            Int(
+                                                                1,
+                                                            ),
+                                                            Span {
+                                                                start: 358,
+                                                                end: 359,
+                                                                start_line: 17,
+                                                                start_col: 15,
+                                                                end_line: 17,
+                                                                end_col: 16,
+                                                            },
+                                                        ),
+                                                        span: Span {
+                                                            start: 353,
+                                                            end: 365,
+                                                            start_line: 17,
+                                                            start_col: 10,
+                                                            end_line: 18,
+                                                            end_col: 6,
+                                                        },
+                                                    },
+                                                    span: Span {
+                                                        start: 353,
+                                                        end: 365,
+                                                        start_line: 17,
+                                                        start_col: 10,
+                                                        end_line: 18,
+                                                        end_col: 6,
+                                                    },
+                                                },
+                                            ),
+                                        ],
+                                        Span {
+                                            start: 326,
+                                            end: 374,
+                                            start_line: 15,
+                                            start_col: 21,
+                                            end_line: 19,
+                                            end_col: 8,
+                                        },
+                                    ),
+                                    span: Span {
+                                        start: 311,
+                                        end: 374,
+                                        start_line: 15,
+                                        start_col: 6,
+                                        end_line: 19,
+                                        end_col: 8,
+                                    },
+                                },
+                            ),
+                            Expr(
+                                For {
+                                    pattern: Ident(
+                                        "j",
+                                        Span {
+                                            start: 377,
+                                            end: 377,
+                                            start_line: 19,
+                                            start_col: 11,
+                                            end_line: 19,
+                                            end_col: 11,
+                                        },
+                                    ),
+                                    iterable: Range {
+                                        start: Some(
+                                            Literal(
+                                                Int(
+                                                    0,
+                                                ),
+                                                Span {
+                                                    start: 382,
+                                                    end: 383,
+                                                    start_line: 19,
+                                                    start_col: 16,
+                                                    end_line: 19,
+                                                    end_col: 17,
+                                                },
+                                            ),
+                                        ),
+                                        end: Some(
+                                            Literal(
+                                                Int(
+                                                    3,
+                                                ),
+                                                Span {
+                                                    start: 385,
+                                                    end: 386,
+                                                    start_line: 19,
+                                                    start_col: 19,
+                                                    end_line: 19,
+                                                    end_col: 20,
+                                                },
+                                            ),
+                                        ),
+                                        inclusive: true,
+                                        span: Span {
+                                            start: 382,
+                                            end: 386,
+                                            start_line: 19,
+                                            start_col: 16,
+                                            end_line: 19,
+                                            end_col: 20,
+                                        },
+                                    },
+                                    body: Block(
+                                        [
+                                            Expr(
+                                                Assign {
+                                                    target: Ident(
+                                                        "s",
+                                                        Span {
+                                                            start: 399,
+                                                            end: 399,
+                                                            start_line: 20,
+                                                            start_col: 10,
+                                                            end_line: 20,
+                                                            end_col: 10,
+                                                        },
+                                                    ),
+                                                    value: Binary {
+                                                        op: Add,
+                                                        lhs: Ident(
+                                                            "s",
+                                                            Span {
+                                                                start: 403,
+                                                                end: 403,
+                                                                start_line: 20,
+                                                                start_col: 14,
+                                                                end_line: 20,
+                                                                end_col: 14,
+                                                            },
+                                                        ),
+                                                        rhs: Ident(
+                                                            "j",
+                                                            Span {
+                                                                start: 407,
+                                                                end: 407,
+                                                                start_line: 20,
+                                                                start_col: 18,
+                                                                end_line: 20,
+                                                                end_col: 18,
+                                                            },
+                                                        ),
+                                                        span: Span {
+                                                            start: 403,
+                                                            end: 414,
+                                                            start_line: 20,
+                                                            start_col: 14,
+                                                            end_line: 21,
+                                                            end_col: 6,
+                                                        },
+                                                    },
+                                                    span: Span {
+                                                        start: 399,
+                                                        end: 414,
+                                                        start_line: 20,
+                                                        start_col: 10,
+                                                        end_line: 21,
+                                                        end_col: 6,
+                                                    },
+                                                },
+                                            ),
+                                        ],
+                                        Span {
+                                            start: 388,
+                                            end: 426,
+                                            start_line: 19,
+                                            start_col: 22,
+                                            end_line: 22,
+                                            end_col: 11,
+                                        },
+                                    ),
+                                    span: Span {
+                                        start: 372,
+                                        end: 426,
+                                        start_line: 19,
+                                        start_col: 6,
+                                        end_line: 22,
+                                        end_col: 11,
+                                    },
+                                },
+                            ),
+                            Expr(
+                                Return {
+                                    value: Some(
+                                        Ident(
+                                            "s",
+                                            Span {
+                                                start: 428,
+                                                end: 428,
+                                                start_line: 22,
+                                                start_col: 13,
+                                                end_line: 22,
+                                                end_col: 13,
+                                            },
+                                        ),
+                                    ),
+                                    span: Span {
+                                        start: 421,
+                                        end: 431,
+                                        start_line: 22,
+                                        start_col: 6,
+                                        end_line: 23,
+                                        end_col: 2,
+                                    },
+                                },
+                            ),
+                        ],
+                        Span {
+                            start: 274,
+                            end: 438,
+                            start_line: 12,
+                            start_col: 25,
+                            end_line: 25,
+                            end_col: 4,
+                        },
+                    ),
+                ),
+                doc: None,
+                span: Span {
+                    start: 251,
+                    end: 438,
+                    start_line: 12,
+                    start_col: 2,
+                    end_line: 25,
+                    end_col: 4,
+                },
+            },
+        ),
+        Function(
+            FnDecl {
+                visibility: Public,
+                modifiers: [],
+                name: "dayName",
+                type_params: [],
+                params: [
+                    Param {
+                        name: "day",
+                        type_hint: Some(
+                            Named {
+                                name: "Int",
+                                span: Span {
+                                    start: 453,
+                                    end: 456,
+                                    start_line: 25,
+                                    start_col: 19,
+                                    end_line: 25,
+                                    end_col: 22,
+                                },
+                            },
+                        ),
+                        default_value: None,
+                        is_vararg: false,
+                        is_noinline: false,
+                        is_crossinline: false,
+                        span: Span {
+                            start: 448,
+                            end: 456,
+                            start_line: 25,
+                            start_col: 14,
+                            end_line: 25,
+                            end_col: 22,
+                        },
+                    },
+                ],
+                return_type: Some(
+                    Named {
+                        name: "String",
+                        span: Span {
+                            start: 459,
+                            end: 466,
+                            start_line: 25,
+                            start_col: 25,
+                            end_line: 25,
+                            end_col: 32,
+                        },
+                    },
+                ),
+                body: Some(
+                    Block(
+                        [
+                            Expr(
+                                Return {
+                                    value: Some(
+                                        When {
+                                            subject: Some(
+                                                Ident(
+                                                    "day",
+                                                    Span {
+                                                        start: 486,
+                                                        end: 488,
+                                                        start_line: 26,
+                                                        start_col: 19,
+                                                        end_line: 26,
+                                                        end_col: 21,
+                                                    },
+                                                ),
+                                            ),
+                                            arms: [
+                                                WhenArm {
+                                                    patterns: [
+                                                        Literal(
+                                                            Int(
+                                                                1,
+                                                            ),
+                                                            Span {
+                                                                start: 502,
+                                                                end: 503,
+                                                                start_line: 27,
+                                                                start_col: 10,
+                                                                end_line: 27,
+                                                                end_col: 11,
+                                                            },
+                                                        ),
+                                                    ],
+                                                    guard: None,
+                                                    body: Literal(
+                                                        String(
+                                                            "Mon",
+                                                        ),
+                                                        Span {
+                                                            start: 507,
+                                                            end: 512,
+                                                            start_line: 27,
+                                                            start_col: 15,
+                                                            end_line: 27,
+                                                            end_col: 20,
+                                                        },
+                                                    ),
+                                                    span: Span {
+                                                        start: 502,
+                                                        end: 523,
+                                                        start_line: 27,
+                                                        start_col: 10,
+                                                        end_line: 28,
+                                                        end_col: 11,
+                                                    },
+                                                },
+                                                WhenArm {
+                                                    patterns: [
+                                                        Literal(
+                                                            Int(
+                                                                2,
+                                                            ),
+                                                            Span {
+                                                                start: 522,
+                                                                end: 523,
+                                                                start_line: 28,
+                                                                start_col: 10,
+                                                                end_line: 28,
+                                                                end_col: 11,
+                                                            },
+                                                        ),
+                                                    ],
+                                                    guard: None,
+                                                    body: Literal(
+                                                        String(
+                                                            "Tue",
+                                                        ),
+                                                        Span {
+                                                            start: 527,
+                                                            end: 532,
+                                                            start_line: 28,
+                                                            start_col: 15,
+                                                            end_line: 28,
+                                                            end_col: 20,
+                                                        },
+                                                    ),
+                                                    span: Span {
+                                                        start: 522,
+                                                        end: 545,
+                                                        start_line: 28,
+                                                        start_col: 10,
+                                                        end_line: 29,
+                                                        end_col: 13,
+                                                    },
+                                                },
+                                                WhenArm {
+                                                    patterns: [
+                                                        Ident(
+                                                            "__else__",
+                                                            Span {
+                                                                start: 542,
+                                                                end: 545,
+                                                                start_line: 29,
+                                                                start_col: 10,
+                                                                end_line: 29,
+                                                                end_col: 13,
+                                                            },
+                                                        ),
+                                                    ],
+                                                    guard: None,
+                                                    body: Literal(
+                                                        String(
+                                                            "Other",
+                                                        ),
+                                                        Span {
+                                                            start: 550,
+                                                            end: 557,
+                                                            start_line: 29,
+                                                            start_col: 18,
+                                                            end_line: 29,
+                                                            end_col: 25,
+                                                        },
+                                                    ),
+                                                    span: Span {
+                                                        start: 542,
+                                                        end: 563,
+                                                        start_line: 29,
+                                                        start_col: 10,
+                                                        end_line: 30,
+                                                        end_col: 6,
+                                                    },
+                                                },
+                                            ],
+                                            span: Span {
+                                                start: 480,
+                                                end: 566,
+                                                start_line: 26,
+                                                start_col: 13,
+                                                end_line: 31,
+                                                end_col: 2,
+                                            },
+                                        },
+                                    ),
+                                    span: Span {
+                                        start: 473,
+                                        end: 566,
+                                        start_line: 26,
+                                        start_col: 6,
+                                        end_line: 31,
+                                        end_col: 2,
+                                    },
+                                },
+                            ),
+                        ],
+                        Span {
+                            start: 466,
+                            end: 569,
+                            start_line: 25,
+                            start_col: 32,
+                            end_line: 32,
+                            end_col: 2,
+                        },
+                    ),
+                ),
+                doc: None,
+                span: Span {
+                    start: 436,
+                    end: 569,
+                    start_line: 25,
+                    start_col: 2,
+                    end_line: 32,
+                    end_col: 2,
+                },
+            },
+        ),
+    ],
+    top_level_statements: [],
+}

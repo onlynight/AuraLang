@@ -1,0 +1,25 @@
+// AOT 运行库回归：String.split → 动态列表（size / 下标取值 / 内容比较）。
+// 全部通过时进程退出码为 0。
+//
+// 验证（Rust AOT 后端）：
+//   aura build tests/aot/list_runtime.aura --aot --output build/aot-bin/list_runtime.exe
+//   build/aot-bin/list_runtime.exe   # 期望输出 "aot.list_runtime ok"，退出码 0
+fun main(): Int {
+    val parts = "a:b:c".split(":")
+
+    if (parts.size != 3) {
+        println("size failed")
+        return 1
+    }
+    if (parts[0] != "a") {
+        println("parts[0] failed")
+        return 2
+    }
+    if (parts[2] != "c") {
+        println("parts[2] failed")
+        return 3
+    }
+
+    println("aot.list_runtime ok")
+    return 0
+}

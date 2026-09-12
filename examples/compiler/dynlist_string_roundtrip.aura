@@ -1,0 +1,22 @@
+fun main() {
+    println("g1 start")
+    val lst = arrayListOf<String>()
+    lst.add("a")
+    println("g2 size=" + lst.size)
+    lst.add("b")
+    lst.add("c")
+    lst.add("d")
+    println("g3 size=" + lst.size)
+    lst.add("e")
+    println("g4 size=" + lst.size)
+    lst.add("f")
+    lst.add("g")
+    lst.add("h")
+    lst.add("i")
+    lst.add("j")
+    println("g5 size=" + lst.size)
+    for (s in lst) {
+        println("item=" + s)
+    }
+    println("done")
+}

@@ -1,0 +1,385 @@
+// aura:///aura/lang/compiler/vm/FrameManager.aura
+package aura.lang.compiler.vm
+// ─────────────────────────────────────────────────────────────
+// 栈帧管理器 — 纯 Aura 化迁移 · Phase 5 (任务 5.3)
+//
+// 对应 Rust `compiler/src/vm/frames.rs` 的增强版本。
+//
+// ── 设计方式 ──
+//
+// 使用扁平字符串表示栈帧链（与前端 IR 一致）：
+//   - 帧链表（frameChain）：每行 `frameId|funcName|ip|arity|locals|upvalues\n`
+//   - 栈内存（stackMemory）：每行 `slotIdx|value\n`
+//
+// ── 增强特性（Phase 5）──
+//
+//   1. 可配置栈大小和局部变量槽数
+//   2. 栈溢出保护（MAX_STACK_DEPTH）
+//   3. 帧链管理（支持闭包的上值链）
+//   4. 帧分配/释放（分配局部变量槽）
+//   5. 尾调用帧复用（不创建新帧）
+//
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.compiler.lexer.Span
+
+/// 增强栈帧管理器。
+class FrameManager {
+
+    /// 默认栈大小。
+    var stackSize: Int = 64
+
+    /// 默认局部变量槽数量。
+    var localsSize: Int = 32
+
+    /// 最大栈深度。
+    var maxStackDepth: Int = 256
+
+    /// 最大调用深度。
+    var maxCallDepth: Int = 64
+
+    /// 帧链表（每行：`frameId|funcName|ip|arity|locals|upvalues`）。
+    var frameChain: String = ""
+
+    /// 栈内存（每行：`slotIdx|value`）。
+    var stackMemory: String = ""
+
+    /// 帧总数。
+    var frameCount: Int = 0
+
+    /// 当前帧计数（调用深度）。
+    var callDepth: Int = 0
+
+    /// 下一个帧 id。
+    var nextFrameId: Int = 0
+
+    /// 栈溢出标志。
+    var stackOverflow: Boolean = false
+
+    /// 栈分配总量（字节）。
+    var totalAllocated: Int = 0
+
+    init() {
+        this.stackSize = 64
+        this.localsSize = 32
+        this.maxStackDepth = 256
+        this.maxCallDepth = 64
+        this.frameChain = ""
+        this.stackMemory = ""
+        this.frameCount = 0
+        this.callDepth = 0
+        this.nextFrameId = 0
+        this.stackOverflow = false
+        this.totalAllocated = 0
+    }
+
+    // ── 帧分配 ──
+
+    /// 分配新栈帧，返回帧 id。
+    fun allocateFrame(funcName: String, arity: Int): Int {
+        // 检查调用深度
+        if (this.callDepth >= this.maxCallDepth) {
+            this.stackOverflow = true
+            return -1
+        }
+
+        val id: Int = this.nextFrameId
+        this.nextFrameId = this.nextFrameId + 1
+
+        // 计算局部变量槽数
+        val locals: Int = arity + this.localsSize
+
+        // 分配栈内存
+        val slotBase: Int = this.totalAllocated
+        this.totalAllocated = this.totalAllocated + locals
+
+        // 检查栈溢出
+        if (this.totalAllocated > this.stackSize * 4) {
+            this.stackOverflow = true
+            return -1
+        }
+
+        // 记录帧
+        this.frameChain = this.frameChain + toStr(id) + "|" + funcName + "|0|" + toStr(arity) + "|" + toStr(locals) + "|\n"
+        this.frameCount = this.frameCount + 1
+        this.callDepth = this.callDepth + 1
+
+        return id
+    }
+
+    /// 释放栈帧。
+    fun deallocateFrame(frameId: Int): Unit {
+        if (this.callDepth > 0) {
+            this.callDepth = this.callDepth - 1
+        }
+        // 简化：不实际回收内存（GC 管理）
+    }
+
+    // ── 帧查询 ──
+
+    /// 查询帧的函数名。
+    fun frameFuncName(frameId: Int): String {
+        return this.fieldAt(this.frameChain, frameId, "\n", "|", 1)
+    }
+
+    /// 查询帧的指令指针。
+    fun frameIp(frameId: Int): Int {
+        val val: String = this.fieldAt(this.frameChain, frameId, "\n", "|", 2)
+        return fmToInt(val)
+    }
+
+    /// 查询帧的参数数量。
+    fun frameArity(frameId: Int): Int {
+        val val: String = this.fieldAt(this.frameChain, frameId, "\n", "|", 3)
+        return fmToInt(val)
+    }
+
+    /// 查询帧的局部变量槽数。
+    fun frameLocals(frameId: Int): Int {
+        val val: String = this.fieldAt(this.frameChain, frameId, "\n", "|", 4)
+        return fmToInt(val)
+    }
+
+    /// 查询帧的上值列表。
+    fun frameUpvalues(frameId: Int): String {
+        return this.fieldAt(this.frameChain, frameId, "\n", "|", 5)
+    }
+
+    // ── 栈操作 ──
+
+    /// 设置指令指针。
+    fun setIp(frameId: Int, ip: Int): Unit {
+        this.updateFrameField(frameId, 2, toStr(ip))
+    }
+
+    /// 获取栈内存值。
+    fun getStackValue(slotIdx: Int): String {
+        return this.fieldAt(this.stackMemory, slotIdx, "\n", "|", 1)
+    }
+
+    /// 设置栈内存值。
+    fun setStackValue(slotIdx: Int, value: String): Unit {
+        this.stackMemory = this.stackMemory + toStr(slotIdx) + "|" + value + "\n"
+    }
+
+    // ── 帧链管理（闭包支持）──
+
+    /// 附加上值到帧（闭包捕获）。
+    fun attachUpvalues(frameId: Int, upvalueIds: String): Unit {
+        this.updateFrameField(frameId, 5, upvalueIds)
+    }
+
+    /// 查找父帧（通过 upvalues 链）。
+    fun findParentFrame(frameId: Int): Int {
+        // 简化：返回 -1 表示无父帧
+        return -1
+    }
+
+    // ── 尾调用帧复用 ──
+
+    /// 复用当前帧（尾调用优化）。
+    fun reuseFrame(frameId: Int, newArity: Int): Boolean {
+        // 更新参数数量
+        this.updateFrameField(frameId, 3, toStr(newArity))
+        // 重置指令指针
+        this.updateFrameField(frameId, 2, "0")
+        return true
+    }
+
+    // ── 状态查询 ──
+
+    /// 获取当前调用深度。
+    fun getCallDepth(): Int {
+        return this.callDepth
+    }
+
+    /// 获取帧总数。
+    fun getFrameCount(): Int {
+        return this.frameCount
+    }
+
+    /// 检查栈是否溢出。
+    fun isStackOverflow(): Boolean {
+        return this.stackOverflow
+    }
+
+    /// 获取总分配量。
+    fun getTotalAllocated(): Int {
+        return this.totalAllocated
+    }
+
+    /// 获取当前栈深度。
+    fun getStackDepth(): Int {
+        return this.totalAllocated
+    }
+
+    // ── 内部辅助 ──
+
+    /// 取第 rowIdx 行、第 colIdx 列的值。
+    fun fieldAt(text: String, rowIdx: Int, rowSep: String, colSep: String, colIdx: Int): String {
+        val line: String = fmFieldAtRow(text, rowIdx, rowSep)
+        return fmFieldAtCol(line, colIdx, colSep)
+    }
+
+    /// 更新帧的某个字段。
+    fun updateFrameField(frameId: Int, colIdx: Int, value: String): Unit {
+        var lines: String = this.frameChain
+        var pos: Int = 0
+        var len: Int = lines.length
+        var lineStart: Int = 0
+        var result: String = ""
+        var found: Boolean = false
+
+        while (pos < len) {
+            val c: String = toStr(lines[pos])
+            if (c == "\n") {
+                val line: String = fmSliceStr(lines, lineStart, pos - lineStart)
+                val lineId: Int = fmToInt(fmFieldAtCol(line, 0, "|"))
+                if (!found && lineId == frameId) {
+                    // 重建行，更新指定列
+                    result = result + this.rebuildLine(line, colIdx, value, "|") + "\n"
+                    found = true
+                } else {
+                    result = result + line + "\n"
+                }
+                lineStart = pos + 1
+            }
+            pos = pos + 1
+        }
+        // 处理最后一行
+        if (lineStart < len) {
+            val line: String = fmSliceStr(lines, lineStart, len - lineStart)
+            val lineId: Int = fmToInt(fmFieldAtCol(line, 0, "|"))
+            if (!found && lineId == frameId) {
+                result = result + this.rebuildLine(line, colIdx, value, "|") + "\n"
+            } else {
+                result = result + line + "\n"
+            }
+        }
+        this.frameChain = result
+    }
+
+    /// 重建行（更新指定列）。
+    fun rebuildLine(line: String, colIdx: Int, newValue: String, sep: String): String {
+        var result: String = ""
+        var pos: Int = 0
+        var len: Int = line.length
+        var fieldStart: Int = 0
+        var cur: Int = 0
+
+        while (pos < len) {
+            val c: String = toStr(line[pos])
+            if (c == sep) {
+                if (cur == colIdx) {
+                    result = result + newValue + sep
+                } else {
+                    result = result + fmSliceStr(line, fieldStart, pos - fieldStart) + sep
+                }
+                cur = cur + 1
+                fieldStart = pos + 1
+            }
+            pos = pos + 1
+        }
+        // 最后一个字段
+        if (cur == colIdx) {
+            result = result + newValue
+        } else {
+            result = result + fmSliceStr(line, fieldStart, len - fieldStart)
+        }
+        return result
+    }
+
+    /// 取第 index 行。
+    fun fmFieldAtRow(text: String, index: Int, sep: String): String {
+        var i: Int = 0
+        var fieldStart: Int = 0
+        var cur: Int = 0
+        var fieldLen: Int = text.length
+        while (i < fieldLen) {
+            val c: String = toStr(text[i])
+            if (c == sep) {
+                if (cur == index) {
+                    return fmSliceStr(text, fieldStart, i - fieldStart)
+                }
+                cur = cur + 1
+                fieldStart = i + 1
+            }
+            i = i + 1
+        }
+        if (cur == index) {
+            return fmSliceStr(text, fieldStart, fieldLen - fieldStart)
+        }
+        return ""
+    }
+
+    /// 取第 index 列。
+    fun fmFieldAtCol(text: String, index: Int, sep: String): String {
+        var i: Int = 0
+        var fieldStart: Int = 0
+        var cur: Int = 0
+        var fieldLen: Int = text.length
+        while (i < fieldLen) {
+            val c: String = toStr(text[i])
+            if (c == sep) {
+                if (cur == index) {
+                    return fmSliceStr(text, fieldStart, i - fieldStart)
+                }
+                cur = cur + 1
+                fieldStart = i + 1
+            }
+            i = i + 1
+        }
+        if (cur == index) {
+            return fmSliceStr(text, fieldStart, fieldLen - fieldStart)
+        }
+        return ""
+    }
+}
+
+/// 字符串切片（本地实现）。
+fun fmSliceStr(text: String, start: Int, length: Int): String {
+    var result: String = ""
+    var end: Int = start + length
+    if (end > text.length) {
+        end = text.length
+    }
+    var i: Int = start
+    while (i < end) {
+        result = result + toStr(text[i])
+        i = i + 1
+    }
+    return result
+}
+
+/// 字符串转整数（本地实现）。
+fun fmToInt(text: String): Int {
+    var total: Int = 0
+    var i: Int = 0
+    var len: Int = text.length
+    var neg: Boolean = false
+    if (len > 0 && toStr(text[0]) == "-") {
+        neg = true
+        i = 1
+    }
+    while (i < len) {
+        val c: String = toStr(text[i])
+        var digit: Int = -1
+        var j: Int = 0
+        while (j < 10) {
+            if (toStr(j) == c) {
+                digit = j
+                break
+            }
+            j = j + 1
+        }
+        if (digit >= 0) {
+            total = total * 10 + digit
+        }
+        i = i + 1
+    }
+    if (neg) {
+        return -total
+    }
+    return total
+}

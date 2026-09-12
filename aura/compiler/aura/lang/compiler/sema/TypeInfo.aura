@@ -1,0 +1,68 @@
+// aura:///aura/lang/compiler/sema/TypeInfo.aura
+package aura.lang.compiler.sema
+// ─────────────────────────────────────────────────────────────
+// sema → codegen 信息通道 — 纯 Aura 化迁移 · Phase 2 (任务 2.3)
+//
+// 对应 Rust `compiler/src/sema/info.rs` 的 `SemaInfo`。
+//
+// Checker 在类型检查时顺带记录：
+//   - 每个表达式的类型名（以 span 字符串 `"start end"` 键控）——供降级期做
+//     接收者类型分派（方法调用 `obj.m()` / 运算符重载 `a + b` / 访问器 `obj.prop`）。
+//
+// 设计：用扁平字符串表示，每行一条记录：`spanStart|spanEnd|typeName`。
+// ─────────────────────────────────────────────────────────────
+
+/// sema 类型信息（表达式 span → 类型名）。
+class TypeInfo {
+
+    /// 记录表（每行：`spanStart|spanEnd|typeName`）。
+    var records: String = ""
+
+    /// 记录总数。
+    var count: Int = 0
+
+    init() {
+        this.records = ""
+        this.count = 0
+    }
+
+    /// 记录一个表达式的类型。
+    fun tiRecord(spanStart: Int, spanEnd: Int, typeName: String) {
+        this.records = this.records + toStr(spanStart) + "|" + toStr(spanEnd) + "|" + typeName + "\n"
+        this.count = this.count + 1
+    }
+
+    /// 查询表达式的静态类型名（剥掉可空标记 `?`）。
+    /// 未找到返回 ""。
+    fun tiQuery(spanStart: Int, spanEnd: Int): String {
+        val lines: List<String> = this.records.split("\n")
+        var i: Int = 0
+        while (i < lines.size) {
+            val line: String = lines[i]
+            if (line == "") {
+                i = i + 1
+                continue
+            }
+            val parts: List<String> = line.split("|")
+            if (parts.size >= 3) {
+                val ss: String = parts[0]
+                val se: String = parts[1]
+                if (ss == toStr(spanStart) && se == toStr(spanEnd)) {
+                    // 剥掉可空标记
+                    val ty: String = parts[2]
+                    if (ty.endsWith("?")) {
+                        return ty.substring(0, ty.length() - 1)
+                    }
+                    return ty
+                }
+            }
+            i = i + 1
+        }
+        return ""
+    }
+
+    /// 总记录数。
+    fun tiCount(): Int {
+        return this.count
+    }
+}

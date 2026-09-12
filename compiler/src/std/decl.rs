@@ -37,6 +37,10 @@ pub const PRELUDE_NAMES: &[&str] = &[
     "intToPtr",
     "makeCallback",
     "listOf",
+    "mutableListOf",
+    "arrayOf",
+    "min",
+    "max",
     // 类型查询与内省（prelu，免 import）
     "typeof",
     "isNull",
@@ -649,6 +653,7 @@ fn build_all_names() -> HashSet<&'static str> {
         "aura.lang.std.Process.argCount",
         "aura.lang.std.Process.pid",
         "aura.lang.std.Process.spawn",
+        "aura.lang.std.Process.run",
         "aura.lang.std.Process.kill",
         "aura.lang.std.Process.wait",
         "aura.lang.std.Process.exitProcess",

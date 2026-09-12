@@ -32,6 +32,21 @@ fn setup_project(tmp: &TempDir) -> PathBuf {
     tmp.path().to_path_buf()
 }
 
+/// 使用**独立临时目录**的构建配置。
+///
+/// `isolated_config()` 的 `out_dir` / `cache_dir` 是相对路径
+/// （`target/build`、`target/cache`），`cargo test` 的 CWD 是包目录 —— 多个用例
+/// 并行执行会共用同一目录并互相删除/覆盖（`clean` 任务直接 `remove_dir_all`），
+/// 表现为 `test_build_after_source_change` 等用例随机失败。
+fn isolated_config() -> ResolvedBuildConfig {
+    let dir = TempDir::new().unwrap().into_path();
+    ResolvedBuildConfig {
+        out_dir: dir.join("build").to_string_lossy().to_string(),
+        cache_dir: dir.join("cache").to_string_lossy().to_string(),
+        ..Default::default()
+    }
+}
+
 fn make_cache_service(
     cache_dir: &std::path::Path,
     build_config: Arc<ResolvedBuildConfig>,
@@ -346,7 +361,7 @@ fn test_cache_clear_removes_everything() {
 #[test]
 fn test_cache_service_local_hit() {
     let tmp = TempDir::new().unwrap();
-    let build_config = Arc::new(ResolvedBuildConfig::default());
+    let build_config = Arc::new(isolated_config());
     let service = make_cache_service(tmp.path(), build_config).unwrap();
     let mut svc = service.lock().unwrap();
 
@@ -376,7 +391,7 @@ fn test_cache_service_local_hit() {
 #[test]
 fn test_cache_service_restore_from_cache() {
     let tmp = TempDir::new().unwrap();
-    let build_config = Arc::new(ResolvedBuildConfig::default());
+    let build_config = Arc::new(isolated_config());
     let service = make_cache_service(tmp.path(), build_config).unwrap();
     let mut svc = service.lock().unwrap();
 
@@ -402,7 +417,7 @@ fn test_cache_service_restore_from_cache() {
 #[test]
 fn test_cache_service_invalidate() {
     let tmp = TempDir::new().unwrap();
-    let build_config = Arc::new(ResolvedBuildConfig::default());
+    let build_config = Arc::new(isolated_config());
     let service = make_cache_service(tmp.path(), build_config).unwrap();
     let mut svc = service.lock().unwrap();
 
@@ -428,7 +443,7 @@ fn test_cache_service_invalidate() {
 #[test]
 fn test_cache_service_fingerprint_change() {
     let tmp = TempDir::new().unwrap();
-    let build_config = Arc::new(ResolvedBuildConfig::default());
+    let build_config = Arc::new(isolated_config());
     let service = make_cache_service(tmp.path(), build_config).unwrap();
     let mut svc = service.lock().unwrap();
 
@@ -475,7 +490,7 @@ fn test_scheduler_no_cache() {
     let manifest = default_manifest("test");
 
     let graph = build_standard_task_graph(&manifest, &project_dir);
-    let build_config = Arc::new(ResolvedBuildConfig::default());
+    let build_config = Arc::new(isolated_config());
 
     // no-cache 模式
     let config = SchedulerConfig {
@@ -506,7 +521,7 @@ fn test_scheduler_clean_mode() {
     let manifest = default_manifest("test");
 
     let graph = build_standard_task_graph(&manifest, &project_dir);
-    let build_config = Arc::new(ResolvedBuildConfig::default());
+    let build_config = Arc::new(isolated_config());
 
     // 创建缓存
     let cache_dir = tmp.path().join("target/cache");
@@ -571,7 +586,7 @@ fn test_scheduler_cache_hit_on_second_run() {
     let project_dir = setup_project(&tmp);
     let manifest = default_manifest("test");
 
-    let build_config = Arc::new(ResolvedBuildConfig::default());
+    let build_config = Arc::new(isolated_config());
 
     let cache_dir = tmp.path().join("target/cache");
     let cache = Arc::new(Mutex::new(LocalCache::new(&cache_dir).unwrap()));
@@ -638,14 +653,14 @@ fn test_remote_cache_config_from_manifest() {
 
 #[test]
 fn test_remote_cache_not_configured() {
-    let build_config = ResolvedBuildConfig::default();
+    let build_config = isolated_config();
     assert!(RemoteCacheConfig::from_build_config(&build_config).is_none());
 }
 
 #[test]
 fn test_remote_cache_cache_key_stability() {
     let task = make_task_with_files("compile-main", TaskKind::Compile("main".to_string()), &[]);
-    let config = ResolvedBuildConfig::default();
+    let config = isolated_config();
 
     // 计算两次应该得到相同的 cache key
     let fp1 = Fingerprint::compute(&task).unwrap();
@@ -663,7 +678,7 @@ fn test_full_build_with_cache() {
     let project_dir = setup_project(&tmp);
     let manifest = default_manifest("test");
 
-    let build_config = Arc::new(ResolvedBuildConfig::default());
+    let build_config = Arc::new(isolated_config());
 
     let cache_dir = tmp.path().join("target/cache");
     let cache = Arc::new(Mutex::new(LocalCache::new(&cache_dir).unwrap()));
@@ -722,7 +737,7 @@ fn test_build_after_source_change() {
     let project_dir = setup_project(&tmp);
     let manifest = default_manifest("test");
 
-    let build_config = Arc::new(ResolvedBuildConfig::default());
+    let build_config = Arc::new(isolated_config());
 
     let cache_dir = tmp.path().join("target/cache");
     let cache = Arc::new(Mutex::new(LocalCache::new(&cache_dir).unwrap()));
@@ -775,7 +790,7 @@ fn test_no_cache_always_executes() {
     let project_dir = setup_project(&tmp);
     let manifest = default_manifest("test");
 
-    let build_config = Arc::new(ResolvedBuildConfig::default());
+    let build_config = Arc::new(isolated_config());
 
     let cache_dir = tmp.path().join("target/cache");
     let cache = Arc::new(Mutex::new(LocalCache::new(&cache_dir).unwrap()));

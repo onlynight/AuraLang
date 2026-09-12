@@ -50,8 +50,8 @@ ed25519-dalek = { version = "2", optional = true, features = ["rand_core"] }
 rand_core = { version = "0.6", optional = true }
 
 [features]
-# 默认：prelu + 并发运行时（常用功能）
-default = ["std-concurrent"]
+# 默认：prelu + 并发运行时 + 全部 std 模块（确保 VM 原生函数完整注册）
+default = ["std-concurrent", "std-all"]
 
 # 热点 JIT 编译（Cranelift）。默认关闭；启用需 `cargo build --features jit`。
 # 开启后热点（叶子整数）函数被编译为原生码并在调用点直接派发（§7.2 方法级 JIT）。
@@ -101,6 +101,7 @@ toml = "0.8"
 
 [dev-dependencies]
 insta = { version = "1", features = ["yaml"] }
+tempfile = "3"
 
 [[example]]
 name = "aot_bench"
@@ -146,3 +147,6 @@ name = "aot_vs_c_benchmarks"
 
 [[bench]]
 name = "vm_benchmarks"
+
+[[bench]]
+name = "stdlib_benchmarks"

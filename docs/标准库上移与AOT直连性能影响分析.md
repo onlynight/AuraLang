@@ -380,7 +380,7 @@ AOT 产出的二进制必须链接：
 | `hash(value: Any): Int` | 哈希码计算，依赖对象内存布局 |
 
 **交付物**：
-- `phantom-source/aura/lang/std/Builtin.aura`：添加 Aura 实现
+- `core/aura/lang/std/Builtin.aura`：添加 Aura 实现
 - `compiler/src/std/std_builtin.rs`：移除 toInt/toFloat/toBool 注册
 - `compiler/src/std/decl.rs`：更新注释，标记已上移函数
 
@@ -419,7 +419,7 @@ AOT 产出的二进制必须链接：
 | `String.equals(other): Boolean` | Any 核心虚方法 |
 
 **交付物**：
-- `phantom-source/aura/lang/std/String.aura`：添加 Aura 实现
+- `core/aura/lang/std/String.aura`：添加 Aura 实现
 - `compiler/src/std/std_string.rs`：移除已上移函数注册
 - `compiler/src/std/decl.rs`：更新注释，标记已上移函数
 
@@ -455,7 +455,7 @@ AOT 产出的二进制必须链接：
 | `Any.hashCode(): Int` | Any 核心虚方法 |
 
 **交付物**：
-- `phantom-source/aura/lang/std/Builtin.aura`：添加 Aura 实现
+- `core/aura/lang/std/Builtin.aura`：添加 Aura 实现
 - `compiler/src/std/std_builtin.rs`：移除已上移函数注册
 - `compiler/src/std/decl.rs`：更新注释，标记已上移函数
 

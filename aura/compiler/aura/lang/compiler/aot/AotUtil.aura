@@ -1,0 +1,262 @@
+// aura:///aura/lang/compiler/aot/AotUtil.aura
+package aura.lang.compiler.aot
+// ─────────────────────────────────────────────────────────────
+// AOT 后端公共辅助 — 纯 Aura 化迁移 · Phase 6
+//
+// 提供所有 aot/*.aura 模块共用的字符串解析工具（行/字段/CSV/整数）。
+// 命名统一以 `aot` 前缀，避免与 Ast/Hir/Mir 的同类辅助冲突
+// （它们分别用 ast*/hir*/mir*/ce* 前缀）。
+//
+// 说明：当前 VM 对 `List` 支持不稳定，故一律采用「字符串 + 字符扫描」，
+// 与 Phase 1–5 的实现风格保持一致。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+
+// ── 内存诊断（分阶段定位 AOT 运行时内存增长；见 C 运行库 aura_mem_used_mb）──
+
+/// 当前 AOT 运行时存活分配（MiB）。AOT 无 GC，所有分配只增不减，
+/// 该值即「进程累计未释放字节 / 1MiB」。
+fun aotMemMB(): String {
+    return toStr(aura_mem_used_mb())
+}
+
+/// 打印一条带标记的内存观测（形如 `[mem] <tag> = <n> MB`）。
+fun aotMemMark(tag: String) {
+    println("[mem] " + tag + " = " + aotMemMB() + " MB")
+}
+
+/// 取第 index 个以 sep 分隔的字段（0-based，字符扫描）。
+fun aotFieldAt(text: String, index: Int, sep: String): String {
+    var i: Int = 0
+    var fieldStart: Int = 0
+    var cur: Int = 0
+    var fieldLen: Int = text.length
+    while (i < fieldLen) {
+        if (toStr(text[i]) == sep) {
+            if (cur == index) {
+                return aotSlice(text, fieldStart, i - fieldStart)
+            }
+            cur = cur + 1
+            fieldStart = i + 1
+        }
+        i = i + 1
+    }
+    if (cur == index) {
+        return aotSlice(text, fieldStart, fieldLen - fieldStart)
+    }
+    return ""
+}
+
+/// 字符串切片（越界自动截断）。
+///
+/// 直接走 `String.substring`（AOT 下映射到运行时一次性分配的实现）：
+/// 旧实现的逐字符 `result + toStr(text[i])` 是平方级分配。
+fun aotSlice(text: String, start: Int, length: Int): String {
+    val len: Int = text.length
+    var s: Int = start
+    if (s < 0) {
+        s = 0
+    }
+    var end: Int = s + length
+    if (end > len) {
+        end = len
+    }
+    if (end <= s) {
+        return ""
+    }
+    return text.substring(s, end)
+}
+
+/// 十进制字符串 → Int（支持前导负号；非法字符忽略）。
+fun aotToInt(text: String): Int {
+    var total: Int = 0
+    var i: Int = 0
+    var len: Int = text.length
+    var neg: Boolean = false
+    if (len > 0 && toStr(text[0]) == "-") {
+        neg = true
+        i = 1
+    }
+    while (i < len) {
+        val c: String = toStr(text[i])
+        var digit: Int = -1
+        var j: Int = 0
+        while (j < 10) {
+            if (toStr(j) == c) {
+                digit = j
+                break
+            }
+            j = j + 1
+        }
+        if (digit >= 0) {
+            total = total * 10 + digit
+        }
+        i = i + 1
+    }
+    if (neg) {
+        return -total
+    }
+    return total
+}
+
+/// 文本行数（末尾无换行时补计一行；空串为 0）。
+///
+/// 用原生 `countChar` 一次统计换行数：逐字符 `text[i]` 在 AOT 下每次都是
+/// O(n)（`strlen` + 1 字符分配），对 MB 级文本（如整份 LLVM IR）会退化成
+/// O(n²)——表现为"IR 已生成完毕，进程却卡住不动"。
+fun aotLineCount(text: String): Int {
+    if (text == "") {
+        return 0
+    }
+    var count: Int = text.countChar("\n")
+    if (!text.endsWith("\n")) {
+        count = count + 1
+    }
+    return count
+}
+
+/// 取第 index 行（0-based）。
+fun aotLineAt(text: String, index: Int): String {
+    return aotFieldAt(text, index, "\n")
+}
+
+/// CSV 字段数（空串为 0）。
+fun aotCsvCount(csv: String): Int {
+    if (csv == "") {
+        return 0
+    }
+    var count: Int = 1
+    var i: Int = 0
+    val clen: Int = csv.length
+    while (i < clen) {
+        if (toStr(csv[i]) == ",") {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    return count
+}
+
+/// 将 CSV 转为「逗号 + 空格」分隔（LLVM 声明风格），如 `i32,i32` → `i32, i32`。
+fun aotCsvToSpaced(csv: String): String {
+    if (csv == "") {
+        return ""
+    }
+    var out: String = ""
+    var n: Int = aotCsvCount(csv)
+    var i: Int = 0
+    while (i < n) {
+        if (i > 0) {
+            out = out + ", "
+        }
+        out = out + aotFieldAt(csv, i, ",")
+        i = i + 1
+    }
+    return out
+}
+
+/// 判断 name 是否出现在以换行分隔的行清单中（如 `seen` 去重集合）。
+///
+/// 性能：`split` 一次后线性扫描（避免 `aotLineAt` 的 O(len²)）。
+fun aotListContains(lines: String, name: String): Boolean {
+    if (lines == "" || name == "") {
+        return false
+    }
+    // 全部条目以 `\n` 结尾：整行匹配等价于三段子串判定。旧实现逐行
+    // `aotLineAt`（每行都要从头切片、且逐字符分配）——`isStructSym` 每次
+    // 构造都会调用它，累计是千万级分配（自举内存暴涨的元凶之一）。
+    if (lines.startsWith(name + "\n")) {
+        return true
+    }
+    return lines.contains("\n" + name + "\n")
+}
+
+/// 是否为已知 std 类名（用于把 `Math.sin(x)` 识别为类静态调用、
+/// 把 `Class.method` 解析为调用点符号 `aura_lang_std_<Class>_<method>`）。
+fun isStdClassName(name: String): Boolean {
+    if (name == "Math") { return true }
+    if (name == "String") { return true }
+    if (name == "Collections") { return true }
+    if (name == "FileSystem") { return true }
+    if (name == "Process") { return true }
+    if (name == "Random") { return true }
+    if (name == "Time") { return true }
+    if (name == "Date") { return true }
+    if (name == "Env") { return true }
+    if (name == "IO") { return true }
+    if (name == "Memory") { return true }
+    if (name == "Encoding") { return true }
+    if (name == "Json") { return true }
+    if (name == "Network") { return true }
+    if (name == "Path") { return true }
+    if (name == "Ascii") { return true }
+    if (name == "Iter") { return true }
+    if (name == "Console") { return true }
+    return false
+}
+
+/// 把多个片段用 `sep` 连接成一个字符串（**树形归并**）。
+///
+/// 为什么不用 `acc = acc + piece`：那是 O(n²) 次字符复制。AOT 运行时**没有 GC**，
+/// 这些中间串会全部泄漏——拼接整份编译器 IR / 整个模块的 kids 串时能吃掉十几 GB
+/// 内存（进程看起来"内存一直涨直到卡死"）。树形归并每层只把片段两两合并，
+/// 总复制量降到 O(n log n)，中间串也随层数快速被上层吸收。
+fun joinPieces(parts: List<String>, sep: String): String {
+    var cur: List<String> = parts
+    if (cur.size == 0) {
+        return ""
+    }
+    while (cur.size > 1) {
+        var next: List<String> = arrayListOf<String>()
+        var i: Int = 0
+        while (i + 1 < cur.size) {
+            next.add(cur[i] + sep + cur[i + 1])
+            i = i + 2
+        }
+        if (i < cur.size) {
+            next.add(cur[i])
+        }
+        cur = next
+    }
+    return cur[0]
+}
+
+/// 去掉首尾空白（空格 / 制表 / 换行）。
+fun trimSpaces(s: String): String {
+    var start: Int = 0
+    var end: Int = s.length
+    while (start < end) {
+        val c: String = aotSlice(s, start, 1)
+        if (c == " " || c == "\t" || c == "\n" || c == "\r") {
+            start = start + 1
+        } else {
+            break
+        }
+    }
+    while (end > start) {
+        val c: String = aotSlice(s, end - 1, 1)
+        if (c == " " || c == "\t" || c == "\n" || c == "\r") {
+            end = end - 1
+        } else {
+            break
+        }
+    }
+    return aotSlice(s, start, end - start)
+}
+
+/// 取限定名的最后一段：`Collections.emptyList` → `emptyList`；无 `.` 时原样返回。
+fun aotLastSegment(name: String): String {
+    var start: Int = 0
+    var i: Int = 0
+    while (i < name.length) {
+        if (toStr(name[i]) == ".") {
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if (start == 0) {
+        return name
+    }
+    return aotSlice(name, start, name.length - start)
+}

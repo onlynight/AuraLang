@@ -1,0 +1,122 @@
+// aura:///aura/lang/Type.aura
+package aura.lang
+// 语言内置类型，不可修改
+
+/// 运行时类型对象——由 `typeOf()` 返回，用于反射。
+///
+/// 例：
+/// ```aura
+/// val t: Type = Dog().typeOf()
+/// println(t.name)       // "Dog"
+/// println(t.superClass) // "Animal"
+/// ```
+///
+/// @see Any
+/// @since 0.5
+internal value class Type {
+
+    /// 类型名称
+    val name: String
+
+    /// 父类类型（无父类返回 null）
+    val superClass: Type?
+
+    /// 是否为类类型
+    val isClass: Boolean
+
+    /// 是否为接口
+    val isInterface: Boolean
+
+    /// 是否为枚举
+    val isEnum: Boolean
+
+    /// 是否为基本类型
+    val isPrimitive: Boolean
+
+    /// 是否为可空类型
+    val isNullable: Boolean
+
+    // ── 构造 ──
+
+    /// 构造 Type 实例
+    constructor(name: String, isClass: Boolean, isInterface: Boolean, isEnum: Boolean, isPrimitive: Boolean, isNullable: Boolean) {
+        this.name = name
+        this.isClass = isClass
+        this.isInterface = isInterface
+        this.isEnum = isEnum
+        this.isPrimitive = isPrimitive
+        this.isNullable = isNullable
+        return this
+    }
+
+    // ── 检查方法 ──
+
+    /// 检查给定类型是否是本类型的子类或相同类型
+    fun isAssignableFrom(other: Type): Boolean {
+        if (this.name == other.name) return true
+        if (other.superClass != null) {
+            val parent = other.superClass as Type
+            return this.isAssignableFrom(parent)
+        }
+        return false
+    }
+
+    // ── 比较方法 ──
+
+    /// 检查两个类型是否相等
+    override fun equals(other: Any): Boolean {
+        if (other is Type) {
+            return this.name == other.name
+        }
+        return false
+    }
+
+    /// 返回类型的哈希码
+    override fun hashCode(): Int {
+        return this.name.hashCode()
+    }
+
+    /// 返回类型的可读表示
+    override fun toString(): String {
+        return this.name
+    }
+
+    // ── 常量（companion object）──
+
+    companion object {
+        /// Int 类型
+        val Int: Type {
+            return Type("Int", true, false, false, true, false)
+        }
+
+        /// Float 类型
+        val Float: Type {
+            return Type("Float", true, false, false, true, false)
+        }
+
+        /// Double 类型
+        val Double: Type {
+            return Type("Double", true, false, false, true, false)
+        }
+
+        /// Long 类型
+        val Long: Type {
+            return Type("Long", true, false, false, true, false)
+        }
+
+        /// Boolean 类型
+        val Boolean: Type {
+            return Type("Boolean", true, false, false, true, false)
+        }
+
+        /// String 类型
+        val String: Type {
+            return Type("String", true, false, false, false, false)
+        }
+
+        /// Any 类型
+        val Any: Type {
+            return Type("Any", true, false, false, false, false)
+        }
+    }
+}

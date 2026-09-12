@@ -1,0 +1,212 @@
+// aura:///aura/lang/std/Builtin.aura
+package aura.lang.std
+// 标准库模块，不可修改
+// 实现：类型标签/指针/回调等需要运行时的成员保留 native（Layer 0-A）；
+//       空值判断、数值判断与类型转换全部以 Aura 编写（Layer 1）
+// (package 声明由编译器自动注入，无需显式声明)
+/// 编译期内置函数模块。
+///
+/// 本模块分成两部分：
+/// - **native 成员**：`typeof` / `typeOf` / `isOfType`（需要运行时类型标签）与
+///   FFI 指针、回调相关函数（需要 VM 支持），属于引导层，不能在 Aura 中实现；
+/// - **Aura 成员**：空值判断、数值判断、类型转换，全部以 Aura 实现。
+///
+/// 使用前需 import：
+/// ```aura
+/// import aura.lang.std.Builtin
+/// ```
+///
+/// @since 0.1
+internal object Builtin {
+
+    // ── 类型查询（native：需要运行时类型标签）──
+
+    /// 返回值的类型名称（"Int"/"Long"/"Float"/"Double"/"Boolean"/"String"/"List"/"Map"/"Null"）。
+    fun typeof(value: Any): String
+
+    /// 返回值的类型名称（`typeof` 别名）。
+    fun typeOf(value: Any): String
+
+    /// 检查值的运行时类型是否匹配目标类型名。
+    fun isOfType(value: Any, typeName: String): Boolean
+
+    // ── FFI 指针与回调（native：需要 VM / FFI 支持）──
+
+    /// 将 Aura 字符串转换为 C 兼容的 null 终止字符串。
+    fun cstr(text: String): Any
+
+    /// 指针判空。
+    fun ptrIsNull(ptr: Any): Boolean
+
+    /// 指针转整数地址。
+    fun ptrToInt(ptr: Any): Int
+
+    /// 整数地址转指针。
+    fun intToPtr(value: Int): Any
+
+    /// 创建 C 回调蹦床。
+    fun makeCallback(fn: (Any) -> Any): Any
+
+    // ── 空值判断（纯逻辑，Aura 实现）──
+
+    /// 检查值是否为 null。
+    fun isNull(value: Any): Boolean {
+        return value == null
+    }
+
+    /// 检查值是否不为 null。
+    fun isNotNull(value: Any): Boolean {
+        return value != null
+    }
+
+    /// 检查值是否为布尔真。
+    fun isTruthy(value: Any): Boolean {
+        return toBoolean(value)
+    }
+
+    // ── 数值判断（纯逻辑，Aura 实现）──
+
+    /// 检查数值是否为零。
+    fun isZero(value: Any): Boolean {
+        if (isNull(value)) { return false }
+        if (isIntegral(value)) { return (value as Int) == 0 }
+        if (isFloating(value)) { return (value as Float) == 0.0f }
+        return false
+    }
+
+    /// 检查数值是否为正（大于 0）。
+    fun isPositive(value: Any): Boolean {
+        if (isNull(value)) { return false }
+        if (isIntegral(value)) { return (value as Int) > 0 }
+        if (isFloating(value)) { return (value as Float) > 0.0f }
+        return false
+    }
+
+    /// 检查数值是否为负（小于 0）。
+    fun isNegative(value: Any): Boolean {
+        if (isNull(value)) { return false }
+        if (isIntegral(value)) { return (value as Int) < 0 }
+        if (isFloating(value)) { return (value as Float) < 0.0f }
+        return false
+    }
+
+    /// 检查值是否为整数家族（Int / Long / Short / Byte）。
+    fun isIntegral(value: Any): Boolean {
+        if (isNull(value)) { return false }
+        val name: String = typeof(value)
+        return name == "Int" || name == "Long" || name == "Short" || name == "Byte"
+    }
+
+    /// 检查值是否为浮点家族（Float / Double）。
+    fun isFloating(value: Any): Boolean {
+        if (isNull(value)) { return false }
+        val name: String = typeof(value)
+        return name == "Float" || name == "Double"
+    }
+
+    /// 检查值是否为数值（整数或浮点）。
+    fun isNumeric(value: Any): Boolean {
+        return isIntegral(value) || isFloating(value)
+    }
+
+    // ── 类型转换（纯逻辑，Aura 实现）──
+
+    /// 转换为字符串。
+    fun toString(value: Any): String {
+        return toStr(value)
+    }
+
+    /// 转换为整数。
+    fun toInt(value: Any): Int {
+        if (isNull(value)) { return 0 }
+        if (isFloating(value)) { return (value as Float) as Int }
+        if (typeof(value) == "Boolean") { return if (value as Boolean) 1 else 0 }
+        if (typeof(value) == "String") { return parseInt(value as String) }
+        if (isIntegral(value)) { return value as Int }
+        return 0
+    }
+
+    /// 转换为浮点数。
+    fun toFloat(value: Any): Float {
+        if (isNull(value)) { return 0.0f }
+        if (isFloating(value)) { return value as Float }
+        if (typeof(value) == "Boolean") { return if (value as Boolean) 1.0f else 0.0f }
+        if (typeof(value) == "String") { return parseFloat(value as String) }
+        if (isIntegral(value)) { return (value as Int) as Float }
+        return 0.0f
+    }
+
+    /// 转换为布尔值（null/false/0/""/"false" 为假，其余为真）。
+    fun toBoolean(value: Any): Boolean {
+        if (isNull(value)) { return false }
+        if (typeof(value) == "Boolean") { return value as Boolean }
+        if (typeof(value) == "String") {
+            val text: String = value as String
+            if (text == "" || text == "false" || text == "0") { return false }
+            return true
+        }
+        if (isIntegral(value)) { return (value as Int) != 0 }
+        if (isFloating(value)) { return (value as Float) != 0.0f }
+        return true
+    }
+
+    // ── 字符串解析辅助（纯逻辑，Aura 实现）──
+
+    /// 将字符串解析为整数；遇到非数字字符停止，空串返回 0。
+    fun parseInt(text: String): Int {
+        var result: Int = 0
+        var sign: Int = 1
+        var i: Int = 0
+        if (i < text.length && (text[i] == '-' || text[i] == '+')) {
+            if (text[i] == '-') sign = -1
+            i = i + 1
+        }
+        while (i < text.length) {
+            val c: Char = text[i]
+            if (c >= '0' && c <= '9') {
+                result = result * 10 + (c - '0')
+            } else {
+                break
+            }
+            i = i + 1
+        }
+        return result * sign
+    }
+
+    /// 将字符串解析为浮点数；支持小数部分，空串返回 0。
+    fun parseFloat(text: String): Float {
+        var result: Float = 0.0f
+        var sign: Int = 1
+        var i: Int = 0
+        if (i < text.length && (text[i] == '-' || text[i] == '+')) {
+            if (text[i] == '-') sign = -1
+            i = i + 1
+        }
+        while (i < text.length) {
+            val c: Char = text[i]
+            if (c >= '0' && c <= '9') {
+                result = result * 10.0f + (c - '0').toFloat()
+            } else {
+                break
+            }
+            i = i + 1
+        }
+        if (i < text.length && text[i] == '.') {
+            i = i + 1
+            var frac: Float = 0.0f
+            var divisor: Float = 1.0f
+            while (i < text.length) {
+                val c: Char = text[i]
+                if (c >= '0' && c <= '9') {
+                    frac = frac * 10.0f + (c - '0').toFloat()
+                    divisor = divisor * 10.0f
+                } else {
+                    break
+                }
+                i = i + 1
+            }
+            result = result + frac / divisor
+        }
+        return result * sign.toFloat()
+    }
+}

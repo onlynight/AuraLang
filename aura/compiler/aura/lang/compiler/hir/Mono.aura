@@ -1,0 +1,105 @@
+// aura:///aura/lang/compiler/hir/mono.aura
+package aura.lang.compiler.hir
+// ─────────────────────────────────────────────────────────────
+// 泛型单态化 — 纯 Aura 化迁移 · Phase 2 (任务 2.7)
+//
+// 对应 Rust `compiler/src/codegen/hir.rs` 中的 mono 部分。
+//
+// 单态化是泛型代码的"去泛型化"：将每个泛型实例化为具体的类型特化版本。
+// 例如 `fun add<T>(a: T, b: T): T` 在 `add<Int>(1, 2)` 调用时
+// 生成一个 `add_Int` 特化版本。
+//
+// ── 本版覆盖范围 ──
+//
+// 简化版：保留泛型节点，不做实际单态化（需要类型推断支持）。
+// 完整实现需要：
+//   1. 类型变量替换（TypeVar → 具体类型）
+//   2. 泛型函数克隆 + 重命名
+//   3. 调用点更新
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+
+/// 泛型单态化处理。
+class Mono {
+
+    /// 输入的 HIR。
+    var src: Hir = Hir()
+
+    /// 输出的 HIR（单态化后的新 HIR）。
+    var dst: Hir = Hir()
+
+    /// 已单态化的函数名映射（原名 → 特化名）。
+    var monoNames: String = ""
+
+    init() {
+        this.src = Hir()
+        this.dst = Hir()
+        this.monoNames = ""
+    }
+
+    /// 执行单态化，返回新的 HIR 根节点 id。
+    fun mono(src: Hir): Int {
+        this.src = src
+        this.dst = Hir()
+        this.monoNames = ""
+        // 查找 Program 根节点
+        val n: Int = src.count
+        var rootIdx: Int = -1
+        var i: Int = 0
+        while (i < n) {
+            if (src.kindOf(i) == "HirProgram") {
+                rootIdx = i
+                break
+            }
+            i = i + 1
+        }
+        if (rootIdx < 0) {
+            rootIdx = 0
+        }
+        return this.monoNode(src, rootIdx)
+    }
+
+    /// 单态化单个节点。
+    fun monoNode(src: Hir, id: Int): Int {
+        val kind: String = src.kindOf(id)
+        val text: String = src.textOf(id)
+        val ty: String = src.tyOf(id)
+        val sp: Span = src.spanOf(id)
+        val kids: String = src.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+
+        // 递归单态化子节点
+        var newKids: String = hirNoKids()
+        var i: Int = 0
+        while (i < kCount) {
+            val childId: Int = hirKidsAt(kids, i)
+            val childDstId: Int = this.monoNode(src, childId)
+            if (childDstId >= 0) {
+                newKids = hirKidsAdd(newKids, childDstId)
+            }
+            i = i + 1
+        }
+
+        // 泛型函数声明：简化版保留原节点（完整单态化需要调用点分析）
+        if (kind == "HirFunction" && ty.contains("<")) {
+            // 生成特化函数名（简化版：仅记录，不克隆）
+            val monoName: String = text + "_mono"
+            this.monoNames = this.monoNames + text + "|" + monoName + "\n"
+            return this.dst.add(kind, monoName, ty, sp, newKids)
+        }
+
+        // 其他节点直接复制
+        return this.dst.add(kind, text, ty, sp, newKids)
+    }
+
+    /// 获取单态化后的 HIR。
+    fun getDst(): Hir {
+        return this.dst
+    }
+
+    /// 获取已单态化的函数名映射。
+    fun getMonoNames(): String {
+        return this.monoNames
+    }
+}

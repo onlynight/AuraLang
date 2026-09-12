@@ -46,6 +46,16 @@ pub enum MirInstr {
     GetIndex { dst: Reg, obj: Reg, idx: Reg },
     /// 数组元素写入：`obj[idx] = src`
     SetIndex { obj: Reg, idx: Reg, src: Reg },
+    /// 新建**堆列表**：`dst = []`（容量取常量池 `ci` 处的 Int）
+    ///
+    /// 与 native 产出的 `Value::List`（内联、值语义、每次修改整表拷贝）不同，
+    /// 堆列表（`HeapData::List`）支持 `ListPush` 原地追加，摊还 O(1)。
+    /// 这是 Aura 侧实现「可变列表 / 摊还 O(1) 追加」的唯一可行表示。
+    ListNew { dst: Reg, ci: usize },
+    /// 堆列表尾部追加：`obj.push(src)`（原地，摊还 O(1)，无返回值）
+    ListPush { obj: Reg, src: Reg },
+    /// 列表长度：`dst = obj.size`（同时兼容堆列表与内联列表）
+    ListLen { dst: Reg, obj: Reg },
     /// 保留引用计数 +1（P7.2 ARC 自动插入）
     Retain { src: Reg },
     /// 释放引用计数 -1（P7.2 ARC 自动插入）
@@ -79,6 +89,16 @@ pub enum MirInstr {
     InstanceOf { dst: Reg, src: Reg, type_id: u16 },
     /// 类型转换（Phase 2）：`dst = (src as type_id)`，不匹配则报错
     CheckCast { dst: Reg, src: Reg, type_id: u16 },
+
+    // ── 异常处理（try/catch）──
+    /// 注册异常处理器：`handler` 为处理器（catch 体）所在的基本块 id。
+    ///
+    /// 发射时解析为该块的字节偏移（`PushHandler(offset, slot)`）。
+    /// `slot` 为异常值的落点：有 catch 变量时是其槽位；无 catch 子句（仅 finally）时
+    /// 是一个临时槽，供处理器块末尾重抛使用。`u16::MAX` 表示不写入。
+    PushHandler { handler: usize, slot: u16 },
+    /// 注销最近的异常处理器（try 体正常结束时执行）。
+    PopHandler,
 }
 
 /// 基本块终结指令（控制流）
@@ -231,7 +251,17 @@ struct MirBuilder {
 }
 
 impl MirBuilder {
-    fn new(param_count: usize) -> Self {
+    /// 创建 MIR 构建器。
+    ///
+    /// `first_free_reg` 是**第一个可用的临时槽编号**，必须避让参数槽，
+    /// 否则第一个临时值会覆盖最后一个参数（历史 bug：`&&` 取值错误、
+    /// `x as Int` 改写形参本身，均由此产生）。
+    ///
+    /// 槽位约定（与 `Frame::new` 一致）：
+    /// - 顶层函数：参数占 `1..=param_count`（槽 0 保留给函数指针），
+    ///   因此传入 `param_count + 1`；
+    /// - 闭包：参数占 `0..param_count`，因此传入 `param_count`。
+    fn new(first_free_reg: usize) -> Self {
         MirBuilder {
             blocks: vec![
                 BasicBlock {
@@ -241,7 +271,7 @@ impl MirBuilder {
                 },
             ],
             current: 0,
-            next_reg: param_count,
+            next_reg: first_free_reg,
             scopes: vec![HashMap::new()],
             loop_stack: vec![],
             closures: Vec::new(),
@@ -448,6 +478,21 @@ impl MirBuilder {
                 HirStmt::Block(b) => {
                     Self::collect_free_vars_in_block(b, locals, out);
                 }
+                HirStmt::Try {
+                    body,
+                    catch_var,
+                    catch_body,
+                    finally,
+                } => {
+                    Self::collect_free_vars_in_block(body, locals, out);
+                    if let Some(v) = catch_var {
+                        locals.insert(v.clone());
+                    }
+                    Self::collect_free_vars_in_block(catch_body, locals, out);
+                    if let Some(f) = finally {
+                        Self::collect_free_vars_in_block(f, locals, out);
+                    }
+                }
             }
         }
     }
@@ -464,18 +509,26 @@ impl MirBuilder {
             locals.insert(p.name.clone());
         }
 
-        // 2. 收集捕获变量（free vars）
-        let mut captures: Vec<String> = Vec::new();
-        Self::collect_free_vars_in_block(body, &mut locals, &mut captures);
+        // 2. 收集捕获变量（free vars），仅保留父作用域中确实存在的变量
+        let mut raw_captures: Vec<String> = Vec::new();
+        Self::collect_free_vars_in_block(body, &mut locals, &mut raw_captures);
+        let captures: Vec<String> =
+            raw_captures.into_iter().filter(|name| self.lookup(name).is_some()).collect();
 
         // 3. 为每个捕获变量分配当前函数中的寄存器
         let capture_regs: Vec<Reg> = captures.iter().filter_map(|name| self.lookup(name)).collect();
 
-        // 4. 构建闭包函数体
-        let param_slots: Vec<usize> = (0..params.len()).collect();
-        let mut builder = MirBuilder::new(params.len());
+        // 4. 构建闭包函数体。
+        // 槽位约定（与普通函数一致）：槽 0 保留给函数指针，实参从槽 1 开始绑定。
+        // 调用约定：captures 在前、用户参数在后（见 CallClosure 的 all_args 构造），
+        // 因此 captures 占 `1..=C`，用户参数占 `C+1..=C+P`。
+        let cap_count = captures.len();
+        let mut builder = MirBuilder::new(cap_count + params.len() + 1);
+        for (i, name) in captures.iter().enumerate() {
+            builder.declare(name, i + 1);
+        }
         for (i, p) in params.iter().enumerate() {
-            builder.declare(&p.name, i);
+            builder.declare(&p.name, cap_count + i + 1);
         }
 
         // 5. 降级闭包体
@@ -687,7 +740,136 @@ impl MirBuilder {
                 self.lower_block(b, ctx);
                 self.exit_scope();
             }
+            HirStmt::Try {
+                body,
+                catch_var,
+                catch_body,
+                finally,
+            } => {
+                self.lower_try(
+                    body,
+                    catch_var.as_deref(),
+                    catch_body,
+                    finally.as_ref(),
+                    ctx,
+                );
+            }
         }
+    }
+
+    /// try/catch/finally 的 MIR 降级。
+    ///
+    /// 结构与发射后的字节码：
+    /// ```text
+    ///   PUSH_HANDLER handler            ; 注册处理器
+    ///   <try 体>
+    ///   POP_HANDLER                     ; 正常结束注销
+    ///   <finally>                       ; 正常路径的 finally
+    ///   GOTO merge
+    /// handler:
+    ///   [catch 体]                      ; 异常值已由 VM 写入 catch 变量槽 / 临时槽
+    ///   <finally>                       ; 异常路径的 finally
+    ///   [异常重抛]                      ; 仅当无 catch 子句（只有 finally）时
+    ///   GOTO merge
+    /// merge:
+    /// ```
+    ///
+    /// 无 catch 且无 finally 时 try 体退化为普通块（异常自然向外传播）。
+    fn lower_try(
+        &mut self,
+        body: &HirBlock,
+        catch_var: Option<&str>,
+        catch_body: &HirBlock,
+        finally: Option<&HirBlock>,
+        ctx: &mut LowerCtx,
+    ) {
+        let has_catch = catch_var.is_some();
+
+        // 无 catch 且无 finally：异常应向外传播，无需注册处理器
+        if !has_catch && finally.is_none() {
+            self.enter_scope();
+            self.lower_block(body, ctx);
+            self.exit_scope();
+            return;
+        }
+
+        let handler_id = self.new_block(); // 处理器入口（VM 跳入点）
+        let body_done = self.new_block(); // 正常路径 finally 入口
+        let handler_done = self.new_block(); // 异常路径 finally 入口
+        let merge_id = self.new_block();
+
+        // 1) 先降级 catch 体以取得 catch 变量槽位（catch 体首个语句是 `Val{catch_var}`）。
+        //    必须在 `exit_scope` 之前读出槽位，作为 PUSH_HANDLER 的落点。
+        let saved_cur = self.current;
+        self.current = handler_id;
+        self.enter_scope();
+        self.lower_block(catch_body, ctx);
+        let catch_slot: u16 = match catch_var {
+            Some(name) => self.lookup(name).map(|r| r as u16).unwrap_or(u16::MAX),
+            None => u16::MAX,
+        };
+        self.exit_scope();
+        // catch 体执行完落到「异常路径 finally」入口。注意：若 catch 体内部产生嵌套
+        // 控制流，`self.current` 已漂移到其合并块，此时只终结该合并块；`handler_id`
+        // 的终结指令由嵌套控制流自身设置（保持入口指令不变）。
+        if !self.is_closed(self.current) {
+            self.set_term(Terminator::Goto(handler_done));
+        }
+
+        // 无 catch 子句：用一个临时槽承接异常值，以便 finally 之后重抛
+        let exc_slot: u16 = if has_catch { catch_slot } else { self.alloc_reg() as u16 };
+
+        // 2) try 体（回到原块，注册处理器）
+        self.current = saved_cur;
+        self.emit(MirInstr::PushHandler {
+            handler: handler_id,
+            slot: exc_slot,
+        });
+        self.enter_scope();
+        self.lower_block(body, ctx);
+        self.exit_scope();
+        self.emit(MirInstr::PopHandler);
+        if !self.is_closed(self.current) {
+            self.set_term(Terminator::Goto(body_done));
+        }
+
+        // 3) 正常路径 finally
+        self.current = body_done;
+        if let Some(f) = finally {
+            self.enter_scope();
+            self.lower_block(f, ctx);
+            self.exit_scope();
+        }
+        if !self.is_closed(self.current) {
+            self.set_term(Terminator::Goto(merge_id));
+        }
+
+        // 4) 异常路径 finally（+ 无 catch 时重抛）
+        self.current = handler_done;
+        if let Some(f) = finally {
+            self.enter_scope();
+            self.lower_block(f, ctx);
+            self.exit_scope();
+        }
+        if !has_catch {
+            // 仅 finally：处理完清理后把异常继续向外抛（此时本处理器已被 VM 弹出，
+            // 因此重抛会命中外层处理器，或最终成为未捕获异常）。
+            let v = self.alloc_reg();
+            self.emit(MirInstr::LoadLocal {
+                dst: v,
+                slot: exc_slot as usize,
+            });
+            self.emit(MirInstr::CallNative {
+                dst: None,
+                func: "__throw".to_string(),
+                args: vec![v],
+            });
+        }
+        if !self.is_closed(self.current) {
+            self.set_term(Terminator::Goto(merge_id));
+        }
+
+        self.current = merge_id;
     }
 
     // ── 表达式降级：返回结果寄存器 ──
@@ -748,6 +930,40 @@ impl MirBuilder {
                         });
                         return dst;
                     }
+                }
+                // ── 堆列表内建（Plan A′：把 `mutableListOf` / `.add` / `.size` 降为
+                //    堆列表指令，避免 native 值语义列表每次修改整表拷贝）──
+                if callee == "__list_new" {
+                    // 新建堆列表，容量取元素个数；元素逐个原地追加
+                    let dst = self.alloc_reg();
+                    let ci = ctx.const_idx(&Literal::Int(args.len() as i64));
+                    self.emit(MirInstr::ListNew { dst, ci });
+                    for a in args {
+                        let v = self.lower_expr(a, ctx);
+                        self.emit(MirInstr::ListPush {
+                            obj: dst,
+                            src: v,
+                        });
+                    }
+                    return dst;
+                }
+                if callee == "__list_push" && args.len() == 2 {
+                    let obj = self.lower_expr(&args[0], ctx);
+                    let v = self.lower_expr(&args[1], ctx);
+                    self.emit(MirInstr::ListPush {
+                        obj,
+                        src: v,
+                    });
+                    let dst = self.alloc_reg();
+                    let ci = ctx.null_idx();
+                    self.emit(MirInstr::LoadConst { dst, ci });
+                    return dst;
+                }
+                if callee == "__list_len" && args.len() == 1 {
+                    let obj = self.lower_expr(&args[0], ctx);
+                    let dst = self.alloc_reg();
+                    self.emit(MirInstr::ListLen { dst, obj });
+                    return dst;
                 }
                 let argv: Vec<Reg> = args.iter().map(|a| self.lower_expr(a, ctx)).collect();
                 let dst = self.alloc_reg();
@@ -1046,12 +1262,14 @@ impl MirBuilder {
 
 /// 将单个 HIR 函数降级为 MIR
 pub fn lower_function(f: &HirFunction, ctx: &mut LowerCtx, hir: &HirProgram) -> MirFunction {
-    let param_slots: Vec<usize> = (0..f.params.len()).collect();
-    let mut builder = MirBuilder::new(f.params.len());
+    // 参数槽位从 1 开始（0 是函数指针）
+    let param_slots: Vec<usize> = (1..=f.params.len()).collect();
+    // 首个临时槽必须从参数槽之后开始，否则会覆盖最后一个参数
+    let mut builder = MirBuilder::new(f.params.len() + 1);
     builder.hir_program = Some(hir.clone());
-    // 声明参数到作用域
+    // 声明参数到作用域（slot 从 1 开始）
     for (i, p) in f.params.iter().enumerate() {
-        builder.declare(&p.name, i);
+        builder.declare(&p.name, i + 1);
     }
     if !f.is_native && !f.body.stmts.is_empty() {
         builder.lower_block(&f.body, ctx);

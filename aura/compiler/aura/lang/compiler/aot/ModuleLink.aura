@@ -1,0 +1,305 @@
+// aura:///aura/lang/compiler/aot/ModuleLink.aura
+package aura.lang.compiler.aot
+// ─────────────────────────────────────────────────────────────
+// 模块链接（多文件 → 单一 HIR）— 纯 Aura 化迁移 · Phase 6.5.10 前置
+//
+// Aura 侧 AOT 发射器（Emit.aura）只接收**一个** HIR。要让「Aura 编写的编译器」
+// 自身被 AOT（6.5.10），必须先把入口文件及其递归 `import` 的全部模块解析、
+// 降级并合并为同一个 HIR。本模块即该「模块链接器」。
+//
+// 解析规则（与仓库布局一致）：
+//   * 相对文件导入（含 `/` 或以 `.aura` 结尾）：相对当前文件目录解析；
+//   * 点分包名 `aura.lang.compiler.aot.Emit`：依次尝试
+//       aura/compiler/<包路径>.aura
+//       aura/core/<包路径>.aura
+//       <包路径>.aura
+//   * `a.b.*`（通配）与 `a.b.{C,D}`（花括号）展开为具体模块。
+//
+// 去重：以规范化后的完整路径为准，同一模块只加载一次。
+//
+// 边界：本模块只做「文件图 → 合并 HIR」；名称冲突依赖仓库既有的
+// 前缀约定（hir*/ast*/prs*/aot*/ce*/mir* …）避免。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.std.FileSystem
+import aura.lang.compiler.lexer.Span
+import aura.lang.compiler.parser.Parser
+import aura.lang.compiler.hir.Hir
+import aura.lang.compiler.aot.AotUtil
+
+/// 模块链接器：把入口文件及其递归 `import` 合并为单一 HIR。
+class AotModuleLinker {
+
+    /// 输出 HIR。
+    var hir: Hir = Hir()
+
+    /// 已加载的规范化路径（换行分隔）。
+    var seen: String = ""
+
+    /// 执行模块链接。
+    var loader: HirLowerer = HirLowerer()
+
+    /// 未找到的导入（换行分隔；供诊断）。
+    var missing: String = ""
+
+    init() {
+        this.hir = Hir()
+        this.seen = ""
+        this.loader = HirLowerer()
+        this.missing = ""
+    }
+
+    /// 入口文件 → 合并 HIR（含递归 import）。
+    fun link(entryPath: String): Hir {
+        this.hir = Hir()
+        this.seen = ""
+        this.missing = ""
+        this.loader = HirLowerer()
+        this.loader.useHir(this.hir)
+        val kids: String = this.loadPath(entryPath)
+        this.hir.rootId = this.hir.add("HirProgram", "", "", Span(0, 0, 1, 1, 1, 1), kids)
+        return this.hir
+    }
+
+    /// 已加载的模块数。
+    fun loadedCount(): Int {
+        return aotLineCount(this.seen)
+    }
+
+    /// 加载单个文件（去重）→ 其递归依赖 + 本文件顶层声明的 HIR kids 串。
+    fun loadPath(path: String): String {
+        val norm: String = normalizePath(path)
+        if (norm == "") {
+            return hirNoKids()
+        }
+        if (aotListContains(this.seen, norm)) {
+            return hirNoKids()
+        }
+        if (!FileSystem.exists(norm)) {
+            this.missing = this.missing + norm + "\n"
+            return hirNoKids()
+        }
+        this.seen = this.seen + norm + "\n"
+
+        val source: String = FileSystem.readText(norm)
+        val p: Parser = Parser(source)
+        p.parseProgram()
+        // 注意：不能直接 `p.ast.kindOf(...)` —— VM 对「字段访问得到的对象再调方法」
+        // 会错乱 this 绑定（既有缺陷）。必须先取局部变量。
+        val ast: Ast = p.ast
+
+        val dir: String = dirOf(norm)
+        // 分段收集、最后一次归并：`out = appendKids(out, …)` 在整棵导入树上是
+        // O(n²) 复制，且 AOT 运行时没有 GC —— 链接阶段就能吃掉数 GB 内存。
+        var parts: List<String> = arrayListOf<String>()
+        // 1) 先展开 import（被依赖模块的声明在前）
+        var i: Int = 0
+        while (i < ast.count) {
+            if (ast.kindOf(i) == "Import") {
+                val targets: String = this.resolveImports(ast.textOf(i), dir)
+                var j: Int = 0
+                val tn: Int = aotLineCount(targets)
+                while (j < tn) {
+                    val dep: String = this.loadPath(aotLineAt(targets, j))
+                    if (dep != "") {
+                        parts.add(dep)
+                    }
+                    j = j + 1
+                }
+            }
+            i = i + 1
+        }
+        // 2) 再降级本文件顶层声明
+        val own: String = this.loader.lowerTopLevel(ast)
+        if (own != "") {
+            parts.add(own)
+        }
+        return joinPieces(parts, ",")
+    }
+
+    /// 把一条 import 文本解析为若干「完整文件路径」（换行分隔）。
+    fun resolveImports(imp: String, baseDir: String): String {
+        val raw: String = trimSpaces(imp)
+        if (raw == "") {
+            return ""
+        }
+        // 花括号形式：a.b.{C,D}
+        val brace: Int = aotIndexOfSub(raw, ".{")
+        if (brace > 0) {
+            val prefix: String = aotSlice(raw, 0, brace)
+            val close: Int = aotIndexOfSub(raw, "}")
+            var body: String = raw
+            if (close > brace) {
+                body = aotSlice(raw, brace + 2, close - brace - 2)
+            }
+            var out: String = ""
+            var i: Int = 0
+            while (true) {
+                val item: String = trimSpaces(aotFieldAt(body, i, ","))
+                if (item != "") {
+                    val full: String = this.resolveOne(prefix + "." + item, baseDir)
+                    if (full != "") {
+                        out = out + full + "\n"
+                    }
+                }
+                i = i + 1
+                if (i >= aotCsvCount(body)) {
+                    break
+                }
+            }
+            return out
+        }
+        // 通配形式：a.b.*
+        var dotted: String = raw
+        if (dotted.endsWith(".*")) {
+            dotted = aotSlice(dotted, 0, dotted.length - 2)
+        }
+        val full2: String = this.resolveOne(dotted, baseDir)
+        if (full2 == "") {
+            return ""
+        }
+        return full2 + "\n"
+    }
+
+    /// 解析单条导入为完整路径（未命中返回 ""）。
+    fun resolveOne(imp: String, baseDir: String): String {
+        if (imp == "") {
+            return ""
+        }
+        // 相对文件导入
+        if (imp.endsWith(".aura") || imp.startsWith(".")) {
+            return normalizePath(joinPath(baseDir, imp))
+        }
+        val rel: String = replaceAllDots(imp)
+        val candidates: String = "aura/compiler/" + rel + ".aura\n" +
+            "aura/core/" + rel + ".aura\n" + rel + ".aura\n"
+        var i: Int = 0
+        val n: Int = aotLineCount(candidates)
+        while (i < n) {
+            val c: String = normalizePath(aotLineAt(candidates, i))
+            if (FileSystem.exists(c)) {
+                return c
+            }
+            i = i + 1
+        }
+        return ""
+    }
+}
+
+/// 顶层便捷入口：入口文件 → 合并 HIR。
+fun linkModules(entryPath: String): Hir {
+    val l: AotModuleLinker = AotModuleLinker()
+    return l.link(entryPath)
+}
+
+// ── 路径工具 ──
+
+/// 把点分包名转为路径（`aura.lang.std.String` → `aura/lang/std/String`）。
+fun replaceAllDots(s: String): String {
+    var out: String = ""
+    var i: Int = 0
+    while (i < s.length) {
+        val c: String = toStr(s[i])
+        if (c == ".") {
+            out = out + "/"
+        } else {
+            out = out + c
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// 取目录部分（无分隔符返回 "."）。
+fun dirOf(p: String): String {
+    var i: Int = p.length - 1
+    while (i >= 0) {
+        val c: String = toStr(p[i])
+        if (c == "/" || c == "\\") {
+            return aotSlice(p, 0, i)
+        }
+        i = i - 1
+    }
+    return "."
+}
+
+/// 目录 + 相对路径拼接（绝对路径原样返回）。
+fun joinPath(dir: String, rel: String): String {
+    if (rel.startsWith("/") || rel.contains(":")) {
+        return rel
+    }
+    if (dir == "" || dir == ".") {
+        return rel
+    }
+    return dir + "/" + rel
+}
+
+/// 追加两个 kids 串（逗号分隔），空串安全。
+fun appendKids(a: String, b: String): String {
+    if (a == "") {
+        return b
+    }
+    if (b == "") {
+        return a
+    }
+    return a + "," + b
+}
+
+/// 反斜杠 → 正斜杠（手写，避免依赖 String.replace 的类调用链接）。
+fun slashify(p: String): String {
+    var out: String = ""
+    var i: Int = 0
+    while (i < p.length) {
+        val c: String = toStr(p[i])
+        if (c == "\\") {
+            out = out + "/"
+        } else {
+            out = out + c
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// 规范化路径：折叠 `.` / `..` / 重复分隔符（保持 POSIX 风格）。
+fun normalizePath(p: String): String {
+    val parts: String = slashify(p)
+    var out: String = ""
+    var i: Int = 0
+    var seg: String = ""
+    while (i <= parts.length) {
+        var c: String = "/"
+        if (i < parts.length) {
+            c = toStr(parts[i])
+        }
+        if (c == "/") {
+            if (seg == "..") {
+                // 弹出上一段
+                out = popSegment(out)
+            } else if (seg != "" && seg != ".") {
+                if (out != "") {
+                    out = out + "/"
+                }
+                out = out + seg
+            }
+            seg = ""
+        } else {
+            seg = seg + c
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// 弹出路径的最后一段（用于 `..`）。
+fun popSegment(path: String): String {
+    var i: Int = path.length - 1
+    while (i >= 0) {
+        if (toStr(path[i]) == "/") {
+            return aotSlice(path, 0, i)
+        }
+        i = i - 1
+    }
+    return ""
+}

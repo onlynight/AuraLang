@@ -1,0 +1,389 @@
+// ═════════════════════════════════════════════════════════════
+// Phase 3/4 验证用例：MIR + Codegen · Aura 化
+//
+// 验证内容：
+//   1. Mir.aura：MIR IR 类型 / 节点添加 / dump
+//   2. MirLower.aura：HIR → MIR 降级
+//   3. MirOpt.aura：MIR 优化（DCE、常量传播）
+//   4. Codegen.aura：MIR → 字节码发射
+//
+// 运行：aura run tests/phase3_mir_tests.aura
+//   全通过时输出 "RESULT: PASS"
+// ═════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import "../aura/compiler/aura/lang/compiler/test/TestRunner.aura"
+import "../aura/compiler/aura/lang/compiler/lexer/Span.aura"
+import "../aura/compiler/aura/lang/compiler/ast/Ast.aura"
+import "../aura/compiler/aura/lang/compiler/hir/Hir.aura"
+import "../aura/compiler/aura/lang/compiler/mir/Mir.aura"
+import "../aura/compiler/aura/lang/compiler/mir/MirLower.aura"
+import "../aura/compiler/aura/lang/compiler/mir/MirOpt.aura"
+import "../aura/compiler/aura/lang/compiler/codegen/Codegen.aura"
+
+// ═════════════════════════════════════════════════════════════
+// 测试 1: Mir.aura — 节点添加与查询
+// ═════════════════════════════════════════════════════════════
+
+fun testMirNodes(): Int {
+    val t = TestRunner()
+    t.begin("Mir.nodes")
+
+    val m = Mir()
+    val span: Span = Span(0, 100, 1, 1, 1, 100)
+
+    // 添加根节点
+    val rootId: Int = m.add("MirProgram", "", "", span, mirNoKids())
+    t.assertEq(m.count, 1, "count after 1 add")
+    t.assertEq(m.kindOf(rootId), "MirProgram", "root kind")
+    t.assertEq(m.textOf(rootId), "", "root text empty")
+
+    // 添加叶节点
+    val litId: Int = m.leaf("LOAD_INT", "42", span)
+    t.assertEq(m.count, 2, "count after leaf")
+    t.assertEq(m.kindOf(litId), "LOAD_INT", "lit kind")
+    t.assertEq(m.textOf(litId), "42", "lit text")
+
+    // 添加带子节点的指令（连接到根）
+    val addId: Int = m.add("ADD", "+", "Int", span, mirKidsAdd(mirNoKids(), litId))
+    t.assertEq(m.count, 3, "count after 3")
+    t.assertEq(m.kindOf(addId), "ADD", "add kind")
+    t.assertEq(mirKidsCount(m.kidsOf(addId)), 1, "add has 1 kid")
+    t.assertEq(mirKidsAt(m.kidsOf(addId), 0), litId, "add kid is lit")
+
+    // ty 查询
+    t.assertEq(m.tyOf(litId), "", "lit ty empty")
+    t.assertEq(m.tyOf(addId), "Int", "add ty")
+
+    // dump（直接 dump addId，因为它有子节点）
+    val dump: String = m.dumpNode(addId, 0)
+    t.assertTrue(dump.contains("ADD"), "dump contains add")
+    t.assertTrue(dump.contains("LOAD_INT"), "dump contains lit")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 2: MirLower.aura — HIR → MIR 降级
+// ═════════════════════════════════════════════════════════════
+
+fun testMirLowerLiterals(): Int {
+    val t = TestRunner()
+    t.begin("Mir.lower.literals")
+
+    // 构造 HIR: Program → HirLit(42)
+    val ast = Ast()
+    val span: Span = Span(0, 50, 1, 1, 1, 50)
+    val intId: Int = ast.leaf("IntLiteral", "42", span)
+    val progId: Int = ast.add("Program", "", "", span, kidsAdd(noKids(), intId))
+
+    val lowerer = HirLowerer()
+    val rootId: Int = lowerer.lower(ast)
+    val hir = lowerer.hir
+
+    // 降级为 MIR
+    val mirLowerer = MirLowerer()
+    val mirRoot: Int = mirLowerer.lower(hir)
+    val mir = mirLowerer.mir
+
+    t.assertTrue(mir.count > 0, "MIR has nodes")
+    t.assertEq(mir.kindOf(mirRoot), "MirProgram", "root is MirProgram")
+
+    return t.report()
+}
+
+fun testMirLowerFunction(): Int {
+    val t = TestRunner()
+    t.begin("Mir.lower.function")
+
+    // 构造 HIR: fun f(): Int { return 42 }
+    val ast = Ast()
+    val span: Span = Span(0, 100, 1, 1, 1, 100)
+
+    val paramsId: Int = ast.add("Params", "", "", span, noKids())
+    val litId: Int = ast.leaf("IntLiteral", "42", span)
+    val returnId: Int = ast.add("Return", "", "", span, kidsAdd(noKids(), litId))
+    val blockId: Int = ast.add("Block", "", "", span, kidsAdd(noKids(), returnId))
+    val funId: Int = ast.add("Function", "f", "Int", span, kidsAdd(kidsAdd(noKids(), paramsId), blockId))
+    val progId: Int = ast.add("Program", "", "", span, kidsAdd(noKids(), funId))
+
+    val lowerer = HirLowerer()
+    val rootId: Int = lowerer.lower(ast)
+    val hir = lowerer.hir
+
+    // 降级为 MIR
+    val mirLowerer = MirLowerer()
+    val mirRoot: Int = mirLowerer.lower(hir)
+    val mir = mirLowerer.mir
+
+    t.assertTrue(mir.count > 0, "MIR has nodes")
+
+    // 查找 MirFunc
+    var foundFunc: Boolean = false
+    var foundRet: Boolean = false
+    var foundConst: Boolean = false
+    var i: Int = 0
+    while (i < mir.count) {
+        val k: String = mir.kindOf(i)
+        if (k == "MirFunc") { foundFunc = true }
+        if (k == "RETURN") { foundRet = true }
+        if (k == "LOAD_INT") { foundConst = true }
+        i = i + 1
+    }
+    t.assertTrue(foundFunc, "has MirFunc")
+    t.assertTrue(foundRet, "has RETURN")
+    t.assertTrue(foundConst, "has LOAD_INT")
+
+    return t.report()
+}
+
+fun testMirLowerBinary(): Int {
+    val t = TestRunner()
+    t.begin("Mir.lower.binary")
+
+    // 构造 HIR: 1 + 2
+    val ast = Ast()
+    val span: Span = Span(0, 50, 1, 1, 1, 50)
+    val lit1: Int = ast.leaf("IntLiteral", "1", span)
+    val lit2: Int = ast.leaf("IntLiteral", "2", span)
+    val binId: Int = ast.add("Binary", "+", "", span, kidsAdd(kidsAdd(noKids(), lit1), lit2))
+    val progId: Int = ast.add("Program", "", "", span, kidsAdd(noKids(), binId))
+
+    val lowerer = HirLowerer()
+    val rootId: Int = lowerer.lower(ast)
+    val hir = lowerer.hir
+
+    val mirLowerer = MirLowerer()
+    val mirRoot: Int = mirLowerer.lower(hir)
+    val mir = mirLowerer.mir
+
+    // 查找 ADD 指令
+    var foundAdd: Boolean = false
+    var i: Int = 0
+    while (i < mir.count) {
+        if (mir.kindOf(i) == "ADD") { foundAdd = true }
+        i = i + 1
+    }
+    t.assertTrue(foundAdd, "has ADD instruction")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 3: MirOpt.aura — MIR 优化
+// ═════════════════════════════════════════════════════════════
+
+fun testMirOptDce(): Int {
+    val t = TestRunner()
+    t.begin("Mir.opt.dce")
+
+    // 构造 MIR: Program → NOP
+    val m = Mir()
+    val span: Span = Span(0, 50, 1, 1, 1, 50)
+    val rootId: Int = m.add("MirProgram", "", "", span, mirNoKids())
+    val nopId: Int = m.add("NOP", "", "", span, mirNoKids())
+
+    val optimizer = MirOptimizer()
+    val optRoot: Int = optimizer.optimize(m)
+    val dst = optimizer.dst
+
+    // NOP 应该被移除
+    var foundNop: Boolean = false
+    var i: Int = 0
+    while (i < dst.count) {
+        if (dst.kindOf(i) == "NOP") { foundNop = true }
+        i = i + 1
+    }
+    t.assertFalse(foundNop, "NOP removed by DCE")
+    t.assertTrue(optimizer.dceRemoved > 0, "dceRemoved > 0")
+
+    return t.report()
+}
+
+fun testMirOptConstProp(): Int {
+    val t = TestRunner()
+    t.begin("Mir.opt.constProp")
+
+    // 构造 MIR: Program → LOAD_INT 42
+    val m = Mir()
+    val span: Span = Span(0, 50, 1, 1, 1, 50)
+    val rootId: Int = m.add("MirProgram", "", "", span, mirNoKids())
+    val litId: Int = m.add("LOAD_INT", "42", "Int", span, mirNoKids())
+
+    val optimizer = MirOptimizer()
+    val optRoot: Int = optimizer.optimize(m)
+    val dst = optimizer.dst
+
+    // 常量应该保留
+    var foundConst: Boolean = false
+    var i: Int = 0
+    while (i < dst.count) {
+        if (dst.kindOf(i) == "LOAD_INT" && dst.textOf(i) == "42") {
+            foundConst = true
+        }
+        i = i + 1
+    }
+    t.assertTrue(foundConst, "constant preserved")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 测试 4: Codegen.aura — 字节码发射
+// ═════════════════════════════════════════════════════════════
+
+fun testCodegenConst(): Int {
+    val t = TestRunner()
+    t.begin("Codegen.const")
+
+    // 构造 MIR: Program → LOAD_INT 42
+    val m = Mir()
+    val span: Span = Span(0, 50, 1, 1, 1, 50)
+    val rootId: Int = m.add("MirProgram", "", "", span, mirNoKids())
+    val litId: Int = m.add("LOAD_INT", "42", "Int", span, mirNoKids())
+
+    val cg = Codegen()
+    val bc: String = cg.emit(m)
+
+    t.assertTrue(bc.contains("CONST_INT"), "has CONST_INT")
+    t.assertTrue(cg.instrCount2() > 0, "instrCount > 0")
+
+    return t.report()
+}
+
+fun testCodegenArith(): Int {
+    val t = TestRunner()
+    t.begin("Codegen.arith")
+
+    // 构造 MIR: LOAD_INT 1, LOAD_INT 2, ADD
+    val m = Mir()
+    val span: Span = Span(0, 50, 1, 1, 1, 50)
+    val rootId: Int = m.add("MirProgram", "", "", span, mirNoKids())
+    val lit1: Int = m.add("LOAD_INT", "1", "Int", span, mirNoKids())
+    val lit2: Int = m.add("LOAD_INT", "2", "Int", span, mirNoKids())
+    val addId: Int = m.add("ADD", "+", "Int", span, mirNoKids())
+
+    val cg = Codegen()
+    val bc: String = cg.emit(m)
+
+    t.assertTrue(bc.contains("CONST_INT"), "has CONST_INT")
+    t.assertTrue(bc.contains("ADD"), "has ADD")
+
+    return t.report()
+}
+
+fun testCodegenVarStore(): Int {
+    val t = TestRunner()
+    t.begin("Codegen.varStore")
+
+    // 构造 MIR: LOAD_INT 42, STORE_VAR x
+    val m = Mir()
+    val span: Span = Span(0, 50, 1, 1, 1, 50)
+    val rootId: Int = m.add("MirProgram", "", "", span, mirNoKids())
+    val litId: Int = m.add("LOAD_INT", "42", "Int", span, mirNoKids())
+    val storeId: Int = m.add("STORE_VAR", "x", "Int", span, mirNoKids())
+
+    val cg = Codegen()
+    val bc: String = cg.emit(m)
+
+    t.assertTrue(bc.contains("STORE_LOCAL"), "has STORE_LOCAL")
+
+    return t.report()
+}
+
+fun testCodegenFunc(): Int {
+    val t = TestRunner()
+    t.begin("Codegen.func")
+
+    // 构造 MIR: MirFunc → MirBlock → RETURN
+    val m = Mir()
+    val span: Span = Span(0, 50, 1, 1, 1, 50)
+    val rootId: Int = m.add("MirProgram", "", "", span, mirNoKids())
+    val funcId: Int = m.add("MirFunc", "main", "Int", span, mirNoKids())
+    val blockId: Int = m.add("MirBlock", "", "", span, mirNoKids())
+    val retId: Int = m.add("RETURN", "", "Int", span, mirNoKids())
+
+    val cg = Codegen()
+    val bc: String = cg.emit(m)
+
+    t.assertTrue(bc.contains("RETURN"), "has RETURN")
+    t.assertTrue(bc.contains("func main"), "has func comment")
+
+    return t.report()
+}
+
+fun testCodegenFullPipeline(): Int {
+    val t = TestRunner()
+    t.begin("Codegen.fullPipeline")
+
+    // 完整流水线: AST → HIR → MIR → Bytecode
+    val ast = Ast()
+    val span: Span = Span(0, 100, 1, 1, 1, 100)
+
+    // fun main(): Int { return 42 + 58 }
+    val paramsId: Int = ast.add("Params", "", "", span, noKids())
+    val lit1: Int = ast.leaf("IntLiteral", "42", span)
+    val lit2: Int = ast.leaf("IntLiteral", "58", span)
+    val binId: Int = ast.add("Binary", "+", "", span, kidsAdd(kidsAdd(noKids(), lit1), lit2))
+    val returnId: Int = ast.add("Return", "", "", span, kidsAdd(noKids(), binId))
+    val blockId: Int = ast.add("Block", "", "", span, kidsAdd(noKids(), returnId))
+    val funId: Int = ast.add("Function", "main", "Int", span, kidsAdd(kidsAdd(noKids(), paramsId), blockId))
+    val progId: Int = ast.add("Program", "", "", span, kidsAdd(noKids(), funId))
+
+    // AST → HIR
+    val hirLowerer = HirLowerer()
+    val hirRoot: Int = hirLowerer.lower(ast)
+
+    // HIR → MIR
+    val mirLowerer = MirLowerer()
+    val mirRoot: Int = mirLowerer.lower(hirLowerer.hir)
+
+    // MIR → MIR optimized
+    val optimizer = MirOptimizer()
+    val optRoot: Int = optimizer.optimize(mirLowerer.mir)
+
+    // MIR → Bytecode
+    val cg = Codegen()
+    val bc: String = cg.emit(optimizer.dst)
+
+    // 验证字节码
+    t.assertTrue(bc.contains("CONST_INT"), "has CONST_INT")
+    t.assertTrue(bc.contains("ADD"), "has ADD")
+    t.assertTrue(bc.contains("RETURN"), "has RETURN")
+    t.assertTrue(cg.instrCount2() >= 3, "at least 3 instructions")
+
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════
+// 主函数
+// ═════════════════════════════════════════════════════════════
+
+fun main() {
+    println("=== Phase 3/4 MIR/Codegen Tests ===")
+    println()
+
+    val f1 = testMirNodes()
+    val f2 = testMirLowerLiterals()
+    val f3 = testMirLowerFunction()
+    val f4 = testMirLowerBinary()
+    val f5 = testMirOptDce()
+    val f6 = testMirOptConstProp()
+    val f7 = testCodegenConst()
+    val f8 = testCodegenArith()
+    val f9 = testCodegenVarStore()
+    val f10 = testCodegenFunc()
+    val f11 = testCodegenFullPipeline()
+
+    val totalFailures: Int = f1 + f2 + f3 + f4 + f5 + f6 + f7 + f8 + f9 + f10 + f11
+
+    println()
+    println("=== Summary ===")
+    println("Total failures: " + toStr(totalFailures))
+
+    if (totalFailures == 0) {
+        println("RESULT: PASS")
+    } else {
+        println("RESULT: FAIL (" + toStr(totalFailures) + ")")
+    }
+}

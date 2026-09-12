@@ -67,8 +67,8 @@ def main():
     alias_block = "\n".join(alias_lines)
 
     # Insert into NativeRegistry::new — before the "// Fix 9:" comment
-    anchor1 = '''        // Fix 9: 榛樿养浠呭姞杞?prelu锛屼笉鍔犺浇鍏ㄩ儴 std 妯″潡
-        // 濡傞渶鍔犺浇 std 妯″潡锛屼娇鐢?NativeRegistry::with_modules()'''
+    anchor1 = '''        // Fix 9: 默认仅加载 prelude，不加载全部 std 模块
+        // 如需加载 std 模块，使用 NativeRegistry::with_modules()'''
     if anchor1 in text:
         text = text.replace(anchor1, alias_block + anchor1)
     else:

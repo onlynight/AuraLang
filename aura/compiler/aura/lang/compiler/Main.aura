@@ -1,0 +1,572 @@
+// aura:///aura/lang/compiler/Main.aura
+package aura.lang.compiler
+// ─────────────────────────────────────────────────────────────
+// Aura 编译器入口（纯 Aura 化迁移）
+//
+// 「Aura 编写的 Aura 编译器」的入口：串起各阶段形成完整编译管线。
+//   Lexer → Parser → AST → Sema → HIR → MIR → Codegen(字节码) → VM 执行
+//
+// 编译管线由本文件直接拥有（无中间驱动层）：各阶段模块只暴露
+// 「本阶段输入 → 本阶段输出」的接口，端到端串联（含 AOT/JIT 源级封装）在此完成。
+//
+// 说明：本文件含 main()，因此**不可被 import**（重复 main 会破坏语义分析）；
+// 需要以编程方式调用管线的用例，请直接组合各阶段模块。
+//
+// 子模块目录：
+//   lexer/(P1) parser/(P1) ast/(P1) errors/(P1)
+//   sema/(P2)  hir/(P2)    mir/(P3) codegen/(P4) vm/(P4/5)
+//   aot/(P6)   jit/(P7)    test/(P0)
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.std.FileSystem
+import aura.lang.std.Process
+
+import aura.lang.compiler.lexer.Span
+import aura.lang.compiler.lexer.Token
+import aura.lang.compiler.lexer.Lexer
+import aura.lang.compiler.ast.Ast
+import aura.lang.compiler.errors.CompileError
+import aura.lang.compiler.parser.Parser
+import aura.lang.compiler.sema.Type
+import aura.lang.compiler.sema.TypeInfo
+import aura.lang.compiler.sema.SymbolTable
+import aura.lang.compiler.sema.TypeChecker
+import aura.lang.compiler.hir.Hir
+import aura.lang.compiler.hir.Desugar
+import aura.lang.compiler.hir.Mono
+import aura.lang.compiler.hir.Inline
+import aura.lang.compiler.hir.Fold
+import aura.lang.compiler.mir.Mir
+import aura.lang.compiler.mir.MirLower
+import aura.lang.compiler.mir.MirOpt
+import aura.lang.compiler.codegen.Codegen
+import aura.lang.compiler.vm.Opcodes
+import aura.lang.compiler.vm.Frames
+import aura.lang.compiler.vm.VmRunner
+
+// AOT 后端
+import aura.lang.compiler.aot.TypeMapper
+import aura.lang.compiler.aot.AotUtil
+import aura.lang.compiler.aot.Runtime
+import aura.lang.compiler.aot.StdSigs
+import aura.lang.compiler.aot.Ffi
+import aura.lang.compiler.aot.Target
+import aura.lang.compiler.aot.Optimize
+import aura.lang.compiler.aot.Emit
+import aura.lang.compiler.aot.Linker
+import aura.lang.compiler.aot.CBackend
+import aura.lang.compiler.aot.Dwarf
+import aura.lang.compiler.aot.Aot
+import aura.lang.compiler.aot.ModuleLink
+
+// JIT 后端
+import aura.lang.compiler.jit.JitUtil
+import aura.lang.compiler.jit.JitAbi
+import aura.lang.compiler.jit.JitState
+import aura.lang.compiler.jit.JitOpt
+import aura.lang.compiler.jit.JitLower
+import aura.lang.compiler.jit.JitDispatch
+import aura.lang.compiler.jit.JitRuntime
+import aura.lang.compiler.jit.JitCore
+
+/// 编译器元信息（静态查询，无可变状态）。
+object CompilerInfo {
+
+    /// 编译器名称。
+    fun name(): String {
+        return "aura-compiler"
+    }
+
+    /// 编译器版本。
+    fun version(): String {
+        return "0.1.0-phase9"
+    }
+
+    /// 当前迁移阶段描述。
+    fun phase(): String {
+        return "Phase 9：整体编译管线串联（Lexer→Parser→HIR→MIR→Codegen→VM）"
+    }
+}
+
+/// 返回一行编译器版本横幅。
+fun banner(): String {
+    return CompilerInfo.name() + " " + CompilerInfo.version()
+}
+
+/// 编译单个源文件（保留签名）。
+fun compileSource(path: String): String {
+    return "unimplemented: " + path
+}
+
+// ─────────────────────────────────────────────────────────────
+// 编译管线（VM 路径）
+//
+// 编译器入口文件即管线拥有者：各阶段模块（Lexer/Parser/Sema/HIR/MIR/
+// Codegen/VM/AOT/JIT）各自只暴露「本阶段输入 → 本阶段输出」的接口，
+// 端到端串联在此完成，不再另设中间驱动层。
+// ─────────────────────────────────────────────────────────────
+
+/// 编译结果（各阶段产物摘要 + 执行结果）。
+class CompileResult {
+
+    /// 生成的字节码（每行一条指令）。
+    var bytecode: String = ""
+
+    /// 常量池（每行一个常量）。
+    var constPool: String = ""
+
+    /// 函数表（name|offset|paramCount）。
+    var funcTable: String = ""
+
+    /// 变量表（name|slot）。
+    var varTable: String = ""
+
+    /// AST 节点数。
+    var astCount: Int = 0
+
+    /// HIR 节点数。
+    var hirCount: Int = 0
+
+    /// MIR 节点数。
+    var mirCount: Int = 0
+
+    /// 解析错误数。
+    var parseErrors: Int = 0
+
+    /// 语义告警/错误数。
+    var semaErrors: Int = 0
+
+    /// 执行结果（字符串化）。
+    var result: String = ""
+
+    /// VM 错误。
+    var vmError: String = ""
+}
+
+/// 执行完整编译管线：source → 字节码 → VM 执行。
+///
+/// 返回 `CompileResult`，各阶段产物均可读。
+fun compile(source: String): CompileResult {
+    val r = CompileResult()
+
+    // ── 1. 前端：Lexer + Parser ──
+    val p = Parser(source)
+    val root = p.parseProgram()
+    val ast = p.ast
+    val errors = p.errors
+    r.astCount = ast.count
+    r.parseErrors = errors.count
+    if (errors.count > 0) {
+        return r
+    }
+
+    // ── 2. 语义分析（Sema）──
+    val checker = TypeChecker()
+    checker.tcCheck(ast)
+    val sErr = checker.tcGetErrors()
+    r.semaErrors = sErr.count
+
+    // ── 3. AST → HIR ──
+    val hl = HirLowerer()
+    val hirRoot = hl.lower(ast)
+    val hir = hl.hir
+    r.hirCount = hir.count
+
+    // ── 4. HIR → MIR ──
+    val ml = MirLowerer()
+    val mirRoot = ml.lower(hir)
+    val mir = ml.mir
+    r.mirCount = mir.count
+
+    // ── 5. MIR → 字节码 ──
+    val cg = Codegen()
+    val bc = cg.emit(mir)
+    r.bytecode = bc
+    r.constPool = cg.constPoolStr()
+    r.funcTable = cg.funcTableStr()
+    r.varTable = cg.varTableStr()
+
+    // ── 6. VM 执行 ──
+    val vm = VmRunner()
+    vm.loadBytecode(r.bytecode, r.constPool, r.funcTable)
+    val out = vm.run()
+    r.result = toStr(out)
+    r.vmError = vm.getError()
+
+    return r
+}
+
+/// 编译并执行一段源码；返回可读摘要字符串。
+fun compileAndRun(source: String): String {
+    val r = compile(source)
+    var s: String = ""
+    s = s + "astNodes=" + toStr(r.astCount) + "\n"
+    s = s + "hirNodes=" + toStr(r.hirCount) + "\n"
+    s = s + "mirNodes=" + toStr(r.mirCount) + "\n"
+    s = s + "parseErrors=" + toStr(r.parseErrors) + "\n"
+    s = s + "--- bytecode ---\n" + r.bytecode
+    s = s + "--- constPool ---\n" + r.constPool
+    s = s + "--- funcTable ---\n" + r.funcTable
+    s = s + "result=" + r.result + "\n"
+    s = s + "vmError=" + r.vmError + "\n"
+    return s
+}
+
+// ─────────────────────────────────────────────────────────────
+// 后端源级封装
+//
+// 后端模块只接收自己的阶段输入（AOT 收 HIR、JIT 收字节码），
+// 「源码 → 阶段输入」的串联由入口统一完成。
+// ─────────────────────────────────────────────────────────────
+
+/// 源码 → HIR（AOT 路径的前半段）。
+fun sourceToHir(source: String): Hir {
+    val p = Parser(source)
+    p.parseProgram()
+    val hl = HirLowerer()
+    hl.lower(p.ast)
+    return hl.hir
+}
+
+/// 源码 → AOT 链接摘要（IR 文本 + llc/clang 命令 + C 源码）。
+fun compileAotSource(source: String): AotLinkResult {
+    return compileAot(sourceToHir(source))
+}
+
+/// 源码 → 原生可执行文件。
+fun aotBuildExeSource(source: String, moduleName: String, outDir: String,
+                      llvmHome: String): AotExeResult {
+    return aotBuildExeFromHir(sourceToHir(source), moduleName, outDir, llvmHome)
+}
+
+/// 源**文件**（含其递归 `import` 依赖）→ 原生可执行文件。
+///
+/// 与 [`aotBuildExeSource`] 的区别：先经 `AotModuleLinker` 把入口文件及其
+/// 递归导入合并为单一 HIR（多模块链接，6.5.12），再交给 Aura 侧 AOT 后端。
+/// 这是「Aura 编译器 AOT 自身」（6.5.10）所必需的入口：Main.aura 有 40+ 个
+/// 模块依赖，单文件 `sourceToHir` 无法解析。
+fun aotBuildExeFile(inputPath: String, moduleName: String, outDir: String,
+                    llvmHome: String): AotExeResult {
+    return aotBuildExeFileTraced(inputPath, moduleName, outDir, llvmHome, false)
+}
+
+/// [`aotBuildExeFile`] 的带诊断版本：`trace` 为真时打印各阶段 AOT 运行时内存占用。
+///
+/// AOT 运行时**没有 GC**，分配只增不减；分阶段观测（链接 / 发射）是定位
+/// 「内存异常增长」的唯一手段（`--mem-trace` CLI 标志即走本入口）。
+fun aotBuildExeFileTraced(inputPath: String, moduleName: String, outDir: String,
+                          llvmHome: String, trace: Boolean): AotExeResult {
+    if (trace) {
+        aotMemMark("start")
+    }
+    val linker = AotModuleLinker()
+    val hir: Hir = linker.link(inputPath)
+    if (trace) {
+        aotMemMark("link done modules=" + toStr(linker.loadedCount()) +
+            " nodes=" + toStr(hir.count))
+    }
+    val r = aotBuildExeFromHir(hir, moduleName, outDir, llvmHome)
+    if (trace) {
+        aotMemMark("emit + toolchain done")
+    }
+    return r
+}
+
+/// 源码 → JIT：就地把指定函数编译为 JIT 单元并执行。
+///
+/// **与 VM 共享同一字节码**：`JitCore.tryCompileInModule` 直接消费 `Codegen.emit`
+/// 的字节码（含函数表定位、常量池索引解析、分支绝对目标→单元相对偏移），
+/// 本函数不接触任何字节码结构。
+///
+/// 仅**叶子函数**（无 `CALL`）可编译；含不支持指令时置 `deopt = true` 回退解释器。
+fun jitCompileFunction(source: String, funcName: String, args: String): JitLinkResult {
+    val r = JitLinkResult()
+    r.funcName = funcName
+
+    val cr = compile(source)
+
+    val jc = JitCoreCompiler()
+    if (!jc.tryCompileInModule(0, funcName, cr.bytecode, cr.funcTable, cr.constPool)) {
+        r.deopt = true
+        r.reason = "function not found or contains unsupported opcode"
+        return r
+    }
+    r.compiled = true
+    r.locals = jc.unitLocalsOf(0)
+    r.jitCode = jc.unitCodeOf(0)
+
+    val out: String = jc.execute(0, args, r.locals)
+    r.result = out
+    if (jitSlice(out, 0, 5) == "deopt") {
+        r.deopt = true
+        r.reason = out
+    }
+    return r
+}
+
+/// 后端名：VM 解释器。
+fun backendVmName(): String {
+    return "vm"
+}
+
+/// 后端名：JIT。
+fun backendJitName(): String {
+    return "jit"
+}
+
+/// 后端名：AOT。
+fun backendAotName(): String {
+    return "aot"
+}
+
+/// 按后端选择编译链路，返回可读摘要。
+///
+/// - `vm`  → 完整编译并解释执行（`compileAndRun`）
+/// - `aot` → HIR → LLVM IR 文本 + llc/clang 命令摘要
+/// - `jit` → 对叶子函数 `square(x)` 做 JIT 编译并执行（无则回退说明）
+fun compileWith(source: String, backend: String): String {
+    if (backend == "aot") {
+        val r = compileAotSource(source)
+        return "target=" + r.targetTriple + " opt=" + r.optFlag +
+            " irLines=" + toStr(r.irLines) + " hasMain=" + toStr(r.hasMain) +
+            "\n--- llvm ir ---\n" + r.llvmIr
+    }
+    if (backend == "jit") {
+        val r = jitCompileFunction(source, "square", "5")
+        return "jit func=" + r.funcName + " compiled=" + toStr(r.compiled) +
+            " deopt=" + toStr(r.deopt) + " result=" + r.result
+    }
+    return compileAndRun(source)
+}
+
+// ─────────────────────────────────────────────────────────────
+// CLI 入口（有命令行参数时）
+// ─────────────────────────────────────────────────────────────
+
+/// 取路径的目录部分（无分隔符时返回 "."）。
+fun cliDir(p: String): String {
+    var i: Int = p.length - 1
+    while (i >= 0) {
+        val c: String = toStr(p[i])
+        if (c == "/" || c == "\\") {
+            return jitSlice(p, 0, i)
+        }
+        i = i - 1
+    }
+    return "."
+}
+
+/// 取路径的文件名主干（去目录与最后一个扩展名）。
+fun cliStem(p: String): String {
+    var start: Int = 0
+    var i: Int = 0
+    while (i < p.length) {
+        val c: String = toStr(p[i])
+        if (c == "/" || c == "\\") {
+            start = i + 1
+        }
+        i = i + 1
+    }
+    var name: String = jitSlice(p, start, p.length - start)
+    var dot: Int = -1
+    var j: Int = 0
+    while (j < name.length) {
+        if (toStr(name[j]) == ".") {
+            dot = j
+        }
+        j = j + 1
+    }
+    if (dot > 0) {
+        name = jitSlice(name, 0, dot)
+    }
+    return name
+}
+
+/// CLI 用法说明。
+fun cliUsage(): String {
+    return "用法: aura-compiler <input.aura> [-o <output.exe>] [--mem-trace]\n" +
+        "      aura-compiler                  无参数时仅打印本说明（自检见 runSelfTest）"
+}
+
+/// CLI 模式：读取命令行参数 → 读源文件 → AOT 产出原生可执行文件。
+fun runCli(): Unit {
+    val argc: Int = Process.argCount()
+    var inputPath: String = ""
+    var outputPath: String = ""
+    var trace: Boolean = false
+    var i: Int = 1
+    while (i < argc) {
+        val a: String = Process.arg(i)
+        if (a == "-o" || a == "--output") {
+            if (i + 1 < argc) {
+                outputPath = Process.arg(i + 1)
+                i = i + 1
+            }
+        } else if (a == "--mem-trace") {
+            trace = true
+        } else if (a == "-h" || a == "--help") {
+            println(cliUsage())
+            return
+        } else if (inputPath == "") {
+            inputPath = a
+        }
+        i = i + 1
+    }
+
+    if (inputPath == "") {
+        println(cliUsage())
+        return
+    }
+    if (!FileSystem.exists(inputPath)) {
+        println("错误: 找不到输入文件: " + inputPath)
+        return
+    }
+
+    var outDir: String = cliDir(inputPath)
+    var stem: String = cliStem(inputPath)
+    if (outputPath != "") {
+        outDir = cliDir(outputPath)
+        stem = cliStem(outputPath)
+    }
+
+    println(banner() + " — AOT 编译 " + inputPath)
+    val r: AotExeResult = aotBuildExeFileTraced(inputPath, stem, outDir,
+        llvmHomeDefault(), trace)
+    if (r.ok) {
+        println("✓ 已生成可执行文件: " + r.exePath)
+    } else {
+        println("错误: AOT 编译失败")
+        println("  llc=" + toStr(r.llcExit) + " clang=" + toStr(r.clangExit))
+        if (r.irError != "") {
+            println("  IR 错误: " + r.irError)
+        }
+    }
+}
+
+/// 编译器入口：有命令行参数时编译指定源文件，否则仅打印用法。
+///
+/// 注意：自检样例**不再**在无参数时自动运行；需要回归自检时显式调用
+/// [`runSelfTest`]（保持 `main` 的产出干净，便于 CLI 与 AOT 自举场景）。
+fun main() {
+    if (Process.argCount() >= 2) {
+        runCli()
+        return
+    }
+    println(cliUsage())
+}
+
+/// 编译管线自检：依次运行算术 / 循环 / 分支 / 函数调用 / 递归样例，
+/// 并额外走通 AOT（HIR → LLVM IR → 原生 exe）与 JIT（叶子函数编译执行）链路。
+///
+/// 默认**不**被 `main` 调用；需要验证编译器自身时手动调用本方法。
+fun runSelfTest() {
+    println(banner())
+    println(CompilerInfo.phase())
+
+    println("=== 样例 1：算术（预期 14）===")
+    println(compileAndRun(
+        "fun main() {\n" +
+        "    val x: Int = 2 + 3 * 4\n" +
+        "    println(x)\n" +
+        "}\n"
+    ))
+
+    println("=== 样例 2：while 循环（预期 10）===")
+    println(compileAndRun(
+        "fun main() {\n" +
+        "    var i: Int = 0\n" +
+        "    var sum: Int = 0\n" +
+        "    while (i < 5) {\n" +
+        "        sum = sum + i\n" +
+        "        i = i + 1\n" +
+        "    }\n" +
+        "    println(sum)\n" +
+        "}\n"
+    ))
+
+    println("=== 样例 3：if/else（预期 2）===")
+    println(compileAndRun(
+        "fun main() {\n" +
+        "    val n: Int = 7\n" +
+        "    if (n > 10) {\n" +
+        "        println(1)\n" +
+        "    } else {\n" +
+        "        println(2)\n" +
+        "    }\n" +
+        "}\n"
+    ))
+
+    println("=== 样例 4：函数调用（预期 5）===")
+    println(compileAndRun(
+        "fun add(a: Int, b: Int): Int {\n" +
+        "    return a + b\n" +
+        "}\n" +
+        "fun main() {\n" +
+        "    println(add(2, 3))\n" +
+        "}\n"
+    ))
+
+    println("=== 样例 5：递归（预期 120）===")
+    println(compileAndRun(
+        "fun fact(n: Int): Int {\n" +
+        "    if (n <= 1) {\n" +
+        "        return 1\n" +
+        "    }\n" +
+        "    return n * fact(n - 1)\n" +
+        "}\n" +
+        "fun main() {\n" +
+        "    println(fact(5))\n" +
+        "}\n"
+    ))
+
+    // ── AOT 链路：HIR → LLVM IR 文本 + llc/clang 命令 ──
+    val aotSrc = "fun main(): Int {\n" +
+        "    return 2 + 3 * 4\n" +
+        "}\n"
+    println("=== AOT 链路摘要 ===")
+    val aotR = compileAotSource(aotSrc)
+    println("target=" + aotR.targetTriple + " opt=" + aotR.optFlag +
+        " irLines=" + toStr(aotR.irLines) + " hasMain=" + toStr(aotR.hasMain))
+    println("llc : " + aotR.objectCommand)
+    println("clang: " + aotR.executableCommand)
+    println("--- llvm ir ---")
+    println(aotR.llvmIr)
+
+    // ── AOT 全链路：产出原生 exe 并运行 ──
+    println("=== AOT 原生产出 ===")
+    val exeSrc = "fun main(): Int {\n" +
+        "    return 6 * 7\n" +
+        "}\n"
+    val exeR = aotBuildExeSource(exeSrc, "aura_demo", "build/aot-demo", llvmHomeDefault())
+    println("aot ok=" + toStr(exeR.ok) + " llc=" + toStr(exeR.llcExit) +
+        " clang=" + toStr(exeR.clangExit))
+    println("exe=" + exeR.exePath)
+    if (exeR.ok) {
+        val code = runBuiltExe(exeR.exePath)
+        println("exe exit code = " + toStr(code))
+    }
+
+    // ── JIT 链路：叶子函数编译为 JIT 单元并执行 ──
+    println("=== JIT 链路摘要 ===")
+    val jitSrc = "fun square(x: Int): Int {\n" +
+        "    return x * x\n" +
+        "}\n" +
+        "fun main(): Int {\n" +
+        "    return square(5)\n" +
+        "}\n"
+    val jitR = jitCompileFunction(jitSrc, "square", "5")
+    println("jit func=" + jitR.funcName + " compiled=" + toStr(jitR.compiled) +
+        " deopt=" + toStr(jitR.deopt) + " result=" + jitR.result)
+    println("jit reason=" + jitR.reason)
+    println("--- jit code ---\n" + jitR.jitCode)
+
+    // 非叶子函数（含 CALL）→ 去优化回退
+    val jitR2 = jitCompileFunction(
+        "fun add(a: Int, b: Int): Int {\n    return a + b\n}\n" +
+        "fun main(): Int {\n    return add(2, 3)\n}\n",
+        "main",
+        ""
+    )
+    println("jit main compiled=" + toStr(jitR2.compiled) + " deopt=" + toStr(jitR2.deopt))
+}

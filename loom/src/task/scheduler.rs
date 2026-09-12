@@ -333,7 +333,7 @@ mod tests {
         };
         Scheduler::new(
             Arc::new(graph),
-            Arc::new(ResolvedBuildConfig::default()),
+            Arc::new(ResolvedBuildConfig::isolated()),
             None,
             config,
         )
@@ -378,7 +378,7 @@ mod tests {
         };
         let scheduler = Scheduler::new(
             Arc::new(graph),
-            Arc::new(ResolvedBuildConfig::default()),
+            Arc::new(ResolvedBuildConfig::isolated()),
             None,
             config,
         );

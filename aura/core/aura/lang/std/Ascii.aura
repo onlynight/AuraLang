@@ -1,0 +1,177 @@
+// aura:///aura/lang/std/Ascii.aura
+package aura.lang.std
+// 标准库模块，不可修改
+// 实现：纯逻辑模块，全部以 Aura 编写（判定委托给内置类型 Char 的方法）
+// (package 声明由编译器自动注入，无需显式声明)
+/// ASCII 字符判断与转换模块。
+///
+/// 本模块以 `String` 的首字符为操作对象，实际判定逻辑复用内置类型
+/// `Char` 的方法（见 `aura.lang.Char`），因此不依赖任何 native 实现。
+///
+/// 使用前需 import：
+/// ```aura
+/// import aura.lang.std.Ascii
+/// ```
+///
+/// @see Char
+/// @since 0.1
+internal object Ascii {
+
+    // ── 判断（纯逻辑，Aura 实现）──
+
+    /// 检查首字符是否为字母（A-Z / a-z）。
+    fun isAlpha(text: String): Boolean {
+        if (text.length == 0) { return false }
+        return text[0].isAlpha()
+    }
+
+    /// 检查首字符是否为数字（0-9）。
+    fun isDigit(text: String): Boolean {
+        if (text.length == 0) { return false }
+        return text[0].isDigit()
+    }
+
+    /// 检查首字符是否为字母或数字。
+    fun isAlphaNumeric(text: String): Boolean {
+        if (text.length == 0) { return false }
+        return text[0].isAlphaNumeric()
+    }
+
+    /// 检查首字符是否为空白字符（空格 / 制表符 / 换行 / 回车）。
+    fun isWhitespace(text: String): Boolean {
+        if (text.length == 0) { return false }
+        return text[0].isWhitespace()
+    }
+
+    /// 检查首字符是否为大写字母。
+    fun isUpper(text: String): Boolean {
+        if (text.length == 0) { return false }
+        return text[0].isUpper()
+    }
+
+    /// 检查首字符是否为小写字母。
+    fun isLower(text: String): Boolean {
+        if (text.length == 0) { return false }
+        return text[0].isLower()
+    }
+
+    /// 检查首字符是否为可打印的 ASCII 字符（0x20 - 0x7E）。
+    fun isPrintable(text: String): Boolean {
+        if (text.length == 0) { return false }
+        val code: Int = text.charCodeAt(0)
+        return code >= 32 && code <= 126
+    }
+
+    /// 检查首字符是否为控制字符（0x00 - 0x1F 或 0x7F）。
+    fun isControl(text: String): Boolean {
+        if (text.length == 0) { return false }
+        val code: Int = text.charCodeAt(0)
+        return code < 32 || code == 127
+    }
+
+    /// 检查字符串的每个字符是否都是字母。
+    fun allAlpha(text: String): Boolean {
+        if (text.length == 0) { return false }
+        var i: Int = 0
+        while (i < text.length) {
+            if (!text[i].isAlpha()) { return false }
+            i = i + 1
+        }
+        return true
+    }
+
+    /// 检查字符串的每个字符是否都是数字。
+    fun allDigit(text: String): Boolean {
+        if (text.length == 0) { return false }
+        var i: Int = 0
+        while (i < text.length) {
+            if (!text[i].isDigit()) { return false }
+            i = i + 1
+        }
+        return true
+    }
+
+    /// 检查字符串的每个字符是否都是空白字符。
+    fun allWhitespace(text: String): Boolean {
+        if (text.length == 0) { return false }
+        var i: Int = 0
+        while (i < text.length) {
+            if (!text[i].isWhitespace()) { return false }
+            i = i + 1
+        }
+        return true
+    }
+
+    // ── 转换（纯逻辑，Aura 实现）──
+
+    /// 转换首字符为大写，其余字符保持不变。
+    fun toUpper(text: String): String {
+        if (text.length == 0) { return text }
+        return text[0].toUpperCase().toString() + text.substring(1, text.length)
+    }
+
+    /// 转换首字符为小写，其余字符保持不变。
+    fun toLower(text: String): String {
+        if (text.length == 0) { return text }
+        return text[0].toLowerCase().toString() + text.substring(1, text.length)
+    }
+
+    /// 将字符串中的 ASCII 小写字母全部转为大写。
+    fun upperCaseAll(text: String): String {
+        var result: String = ""
+        var i: Int = 0
+        while (i < text.length) {
+            result = result + text[i].toUpperCase().toString()
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 将字符串中的 ASCII 大写字母全部转为小写。
+    fun lowerCaseAll(text: String): String {
+        var result: String = ""
+        var i: Int = 0
+        while (i < text.length) {
+            result = result + text[i].toLowerCase().toString()
+            i = i + 1
+        }
+        return result
+    }
+
+    // ── 码点（纯逻辑，Aura 实现）──
+
+    /// 获取位置 index 字符的 Unicode 码点；越界返回 -1。
+    fun codeAt(text: String, index: Int): Int {
+        if (index < 0 || index >= text.length) { return -1 }
+        return text.charCodeAt(index)
+    }
+
+    /// 获取位置 index 的字符；越界返回空字符串。
+    fun charAt(text: String, index: Int): String {
+        if (index < 0 || index >= text.length) { return "" }
+        return text[index].toString()
+    }
+
+    /// 从 Unicode 码点创建单字符字符串；非法码点返回空字符串。
+    fun fromCode(code: Int): String {
+        if (code < 0 || code > 65535) { return "" }
+        return String.fromCharCode(code)
+    }
+
+    /// 获取首字符的 Unicode 码点；空字符串返回 -1。
+    fun codePointAt(text: String): Int {
+        if (text.length == 0) { return -1 }
+        return text.charCodeAt(0)
+    }
+
+    /// 将字符串拆分为码点列表。
+    fun codePoints(text: String): List<Int> {
+        val result: List<Int> = mutableListOf<Int>()
+        var i: Int = 0
+        while (i < text.length) {
+            result.add(text.charCodeAt(i))
+            i = i + 1
+        }
+        return result
+    }
+}

@@ -25,6 +25,7 @@ pub mod coroutine;
 pub mod debugger;
 pub mod dynamic_ffi;
 pub mod ffi;
+pub mod ffi_cache;
 pub mod heap;
 pub mod interp;
 pub mod ipc;
@@ -35,6 +36,7 @@ pub mod jit_native;
 #[cfg(feature = "jit")]
 pub mod jit_opt;
 pub mod mmap_util;
+pub mod multi_module;
 pub mod native;
 pub mod serialize;
 pub mod thread_pool;
@@ -319,6 +321,14 @@ pub enum Instr {
     /// 调用 AOT 预编译函数（`func_idx` 为函数表索引），经 [`crate::vm::aot_runtime::AotRuntime`]
     /// dispatch_table 查找到 mmap 的机器码入口，使用共享 JitValue ABI 直接 `call`。
     CallAot(u16),
+
+    // ── 异常处理（try/catch）──
+    /// 注册异常处理器：`(处理器指令索引, 异常值落点槽位)`。
+    ///
+    /// 加载期已把字节偏移解析为指令索引；`u16::MAX` 表示不写入槽位。
+    PushHandler(usize, u16),
+    /// 注销最近的异常处理器
+    PopHandler,
 }
 
 /// 解码后的函数
@@ -658,6 +668,24 @@ fn decode_function(f: &BytecodeFunction) -> Result<DecodedFunction, VmError> {
                 ip += 2;
                 instrs.push(Instr::CallAot(v));
             }
+            crate::codegen::opcode::OpCode::PushHandler(..) => {
+                // 操作数：i32 处理器块字节偏移 + u16 异常值落点槽位。
+                // 注意：`from_byte` 产生的操作数是占位值，真实操作数必须从字节流读取
+                //（此前误用占位 0，导致处理器偏移恒为 0 → 跳到函数开头形成死循环）。
+                let off = i32::from_le_bytes([
+                    code[ip],
+                    code[ip + 1],
+                    code[ip + 2],
+                    code[ip + 3],
+                ]);
+                let slot = u16::from_le_bytes([
+                    code[ip + 4],
+                    code[ip + 5],
+                ]);
+                ip += 6;
+                instrs.push(Instr::PushHandler(off as usize, slot));
+            }
+            crate::codegen::opcode::OpCode::PopHandler => instrs.push(Instr::PopHandler),
         }
     }
 
@@ -676,6 +704,15 @@ fn decode_function(f: &BytecodeFunction) -> Result<DecodedFunction, VmError> {
                     _ => Instr::JumpIfFalse(idx),
                 };
             }
+            Instr::PushHandler(off, slot) => {
+                let idx = *offset_to_idx.get(off).ok_or_else(|| {
+                    VmError::Load(format!(
+                        "handler target {} not at instruction boundary",
+                        off
+                    ))
+                })?;
+                *instr = Instr::PushHandler(idx, *slot);
+            }
             _ => {}
         }
     }
@@ -687,6 +724,19 @@ fn decode_function(f: &BytecodeFunction) -> Result<DecodedFunction, VmError> {
         is_native: f.is_native,
         code: instrs,
     })
+}
+
+/// 异常处理器（`try/catch`）：记录 `PUSH_HANDLER` 注册时的执行状态
+#[derive(Debug, Clone)]
+pub struct Handler {
+    /// 注册该处理器的帧索引（`Vm::frames` 下标）
+    pub frame_index: usize,
+    /// 处理器入口的指令索引
+    pub ip: usize,
+    /// 注册时的操作数栈高度（抛出时把栈截断回此高度）
+    pub stack_len: usize,
+    /// 异常值写入的局部槽位（`u16::MAX` 表示不写入，仅作 finally 中转）
+    pub slot: u16,
 }
 
 /// 调用帧
@@ -708,8 +758,13 @@ impl Frame {
     fn new(func: &DecodedFunction, args: Vec<Value>, coroutine_id: usize) -> Self {
         let mut locals = vec![Value::Null; func.locals as usize];
         let n = func.param_count as usize;
+        // 参数从 locals[1] 开始（locals[0] 是函数指针占位）
+        // 注意：形参个数可能大于实际槽位（例如误用 stdlib 中同名的其它 arity 实现），
+        // 此时忽略多余槽位而不是 panic（越界写入会直接终止 VM）。
         for (i, a) in args.into_iter().take(n).enumerate() {
-            locals[i] = a;
+            if i + 1 < locals.len() {
+                locals[i + 1] = a;
+            }
         }
         Frame {
             func: 0,
@@ -733,6 +788,10 @@ pub struct Vm {
     result: Option<Value>,
     /// object 单例实例（类名 → 堆引用）
     singletons: std::collections::HashMap<String, Value>,
+    /// 异常处理器栈（`try/catch`，LIFO）
+    handlers: Vec<Handler>,
+    /// `Process.exit(code)` 请求的退出码（None = 未请求退出）
+    exit_code: Option<i32>,
     halt: bool,
     opts: VmOptions,
     #[cfg(feature = "jit")]
@@ -751,6 +810,9 @@ pub struct Vm {
     pub aot_runtime: crate::vm::aot_runtime::AotRuntime,
     /// extern interface: 已加载的 AOT 模块映射（库名 → module_id）
     aot_module_map: std::collections::HashMap<String, u32>,
+    /// Phase 3: 标准库 Aura 编译函数映射（函数名 → 合并后的函数索引）
+    /// 当 do_call_native 遇到 Aura 编译的标准库函数时，优先派发到该映射中的函数。
+    stdlib_func_map: std::collections::HashMap<String, usize>,
     /// P9: 已加载的动态库（库名 → 库句柄）
     #[cfg(windows)]
     loaded_libs: std::collections::HashMap<String, usize>,
@@ -798,6 +860,8 @@ impl Vm {
             call_counts: vec![0; module.functions.len()],
             result: None,
             singletons: std::collections::HashMap::new(),
+            handlers: Vec::new(),
+            exit_code: None,
             halt: false,
             opts,
             #[cfg(feature = "jit")]
@@ -809,6 +873,7 @@ impl Vm {
             registry: ModuleRegistry::new(),
             aot_runtime,
             aot_module_map: std::collections::HashMap::new(),
+            stdlib_func_map: std::collections::HashMap::new(),
             #[cfg(windows)]
             loaded_libs: std::collections::HashMap::new(),
             #[cfg(unix)]
@@ -818,7 +883,135 @@ impl Vm {
         vm.set_global_native_registry();
         // Phase 2: 创建 object 单例实例
         vm.create_singletons();
+        // Phase 3: 自动加载嵌入式标准库（预编译 AOT .auc）
+        vm.load_embedded_stdlib();
         Ok(vm)
+    }
+
+    /// Phase 3: 加载嵌入式标准库（预编译 AOT .auc 嵌入二进制）
+    ///
+    /// 从 `embedded_stdlib::EMBEDDED_STDLIB_MODULES` 加载预编译的 .auc 文件，
+    /// 解码函数并追加到当前模块的函数表中。VM 启动时自动调用。
+    ///
+    /// 调用后，`do_call_native` 会优先检查 `stdlib_func_map`，如果找到匹配的
+    /// Aura 编译函数则直接派发（优先 AOT 机器码），否则回退到 Rust native。
+    fn load_embedded_stdlib(&mut self) {
+        use crate::codegen::from_bytes;
+        use crate::std::embedded_stdlib::EMBEDDED_STDLIB_MODULES;
+
+        let mut loaded_count = 0;
+
+        for (module_name, auc_bytes) in EMBEDDED_STDLIB_MODULES {
+            match from_bytes(auc_bytes) {
+                Ok(std_module) => {
+                    // 加载 AOT 机器码段（如果存在）
+                    if std_module.has_aot() {
+                        let desc_idx: Vec<u32> =
+                            std_module.functions.iter().map(|f| f.aot_desc_idx).collect();
+                        if let Err(e) = self.aot_runtime.load_module_from(
+                            &std_module.aot_blob_data,
+                            &std_module.aot_segments,
+                            &desc_idx,
+                            module_name.to_string(),
+                        ) {
+                            eprintln!(
+                                "[vm] stdlib-aot: {} AOT 加载失败，回退字节码: {}",
+                                module_name, e
+                            );
+                        } else {
+                            eprintln!("[vm] stdlib-aot: {} AOT 机器码已加载", module_name);
+                        }
+                    }
+
+                    // 解码标准库函数并追加到当前模块
+                    for f in &std_module.functions {
+                        match decode_function(f) {
+                            Ok(decoded) => {
+                                let func_name = if f.name.contains('.') {
+                                    format!("aura.lang.std.{}", f.name)
+                                } else {
+                                    format!("aura.lang.std.{}.{}", module_name, f.name)
+                                };
+                                let idx = self.module.funcs.len();
+                                self.module.funcs.push(decoded);
+                                self.stdlib_func_map.insert(func_name.clone(), idx);
+                                // 同时注册短名
+                                let short_name = func_name.rsplit('.').next().unwrap_or(&func_name);
+                                if !short_name.is_empty() && short_name != func_name {
+                                    self.stdlib_func_map.insert(short_name.to_string(), idx);
+                                }
+                                loaded_count += 1;
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "[vm] stdlib: failed to decode {}.{}: {}",
+                                    module_name, f.name, e
+                                );
+                            }
+                        }
+                    }
+
+                    // 注册模块到 ModuleRegistry
+                    let mut named_module = std_module.clone();
+                    named_module.module_identity.name = module_name.to_string();
+                    if let Err(e) = self.registry.register(&named_module) {
+                        eprintln!("[vm] stdlib: registry warn for {}: {}", module_name, e);
+                    }
+
+                    eprintln!(
+                        "[vm] stdlib: loaded {} ({} functions merged)",
+                        module_name,
+                        std_module.functions.len()
+                    );
+                }
+                Err(e) => {
+                    eprintln!("[vm] stdlib: failed to load {}: {}", module_name, e);
+                }
+            }
+        }
+
+        if loaded_count > 0 {
+            eprintln!(
+                "[vm] stdlib: total {} Aura-compiled functions ready",
+                loaded_count
+            );
+            // 扩展 call_counts 以匹配新增的函数
+            let new_len = self.module.funcs.len();
+            if self.call_counts.len() < new_len {
+                self.call_counts.resize(new_len, 0);
+            }
+        }
+    }
+
+    /// 执行 object 单例的字段初始化函数（`<Object>.__singletonInit`）。
+    ///
+    /// `create_singletons` 只能把字段统一置为 `Value::Null`（VM 侧拿不到字段声明的默认值），
+    /// 因此字段默认值由 HIR 合成的初始化函数写入。这里在入口函数执行前逐个调用，
+    /// 使 `object Foo { var n: Int = 5 }` 的 `Foo.n` 初值为 5 而非 null。
+    fn run_singleton_initializers(&mut self) {
+        if self.singletons.is_empty() {
+            return;
+        }
+        let mut inits: Vec<(usize, Value)> = Vec::new();
+        for (name, val) in self.singletons.clone() {
+            let fname = format!("{}.__singletonInit", name);
+            if let Some(idx) = self.module.funcs.iter().position(|f| f.name == fname) {
+                inits.push((idx, val));
+            }
+        }
+        for (idx, self_val) in inits {
+            let saved_halt = self.halt;
+            let saved_result = self.result.take();
+            if self.push_frame(idx, vec![self_val]).is_ok() {
+                while !self.frames.is_empty() && !self.halt {
+                    if self.step().is_err() {
+                        break;
+                    }
+                }
+            }
+            self.halt = saved_halt;
+            self.result = saved_result;
+        }
     }
 
     /// 为所有 `is_singleton` 类创建单例实例
@@ -833,6 +1026,147 @@ impl Vm {
                 }
                 self.singletons.insert(class_def.name.clone(), Value::Ref(handle));
             }
+        }
+    }
+
+    /// Phase 3: 加载标准库 .auc 文件并将 Aura 编译的函数合并到模块函数表。
+    ///
+    /// 扫描 `dir` 目录下的所有 `.auc` 文件，解码其函数，追加到当前模块的
+    /// 函数表中，并记录函数名到合并后索引的映射。
+    ///
+    /// 调用后，`do_call_native` 会优先检查 `stdlib_func_map`，如果找到匹配的
+    /// Aura 编译函数则直接派发，否则回退到 Rust native。
+    ///
+    /// # 参数
+    /// * `dir` - 包含标准库 `.auc` 文件的目录路径
+    ///
+    /// # 返回
+    /// * `Ok(usize)` - 成功加载的函数数量
+    /// * `Err(VmError)` - 加载失败
+    pub fn load_stdlib_dir(&mut self, dir: &std::path::Path) -> Result<usize, VmError> {
+        use crate::codegen::read_auc;
+
+        if !dir.exists() {
+            return Err(VmError::Load(format!(
+                "stdlib directory does not exist: {}",
+                dir.display()
+            )));
+        }
+
+        let entries = std::fs::read_dir(dir).map_err(|e| {
+            VmError::Load(format!("cannot read stdlib dir {}: {}", dir.display(), e))
+        })?;
+
+        let mut loaded_count = 0;
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map(|e| e == "auc").unwrap_or(false) {
+                let module_name =
+                    path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown").to_string();
+
+                match read_auc(&path.to_string_lossy()) {
+                    Ok(std_module) => {
+                        // 解码标准库函数并追加到当前模块
+                        for f in &std_module.functions {
+                            match decode_function(f) {
+                                Ok(decoded) => {
+                                    // 函数名格式：
+                                    // - 对象方法: "Math.abs" → "aura.lang.std.Math.abs"
+                                    // - 顶层函数: "add" → "aura.lang.std.TestHelper.add"
+                                    let func_name = if f.name.contains('.') {
+                                        // 已包含对象前缀（如 "Math.abs"）
+                                        format!("aura.lang.std.{}", f.name)
+                                    } else {
+                                        // 顶层函数，需要添加模块前缀
+                                        format!("aura.lang.std.{}.{}", module_name, f.name)
+                                    };
+                                    let idx = self.module.funcs.len();
+                                    eprintln!(
+                                        "[vm] stdlib: registering {} (params={}, locals={})",
+                                        func_name, f.param_count, f.locals
+                                    );
+                                    self.module.funcs.push(decoded);
+                                    self.stdlib_func_map.insert(func_name.clone(), idx);
+                                    // 同时注册短名（如 "abs"）以便匹配 prelu 函数
+                                    let short_name =
+                                        func_name.rsplit('.').next().unwrap_or(&func_name);
+                                    if !short_name.is_empty() && short_name != func_name {
+                                        self.stdlib_func_map.insert(short_name.to_string(), idx);
+                                    }
+                                    loaded_count += 1;
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "[vm] stdlib: failed to decode function {}.{}: {}",
+                                        module_name, f.name, e
+                                    );
+                                }
+                            }
+                        }
+                        // 也注册模块到 ModuleRegistry（用于 CallExternal）
+                        // 使用模块名而非 "default"，避免名称冲突
+                        let mut named_module = std_module.clone();
+                        named_module.module_identity.name = module_name.clone();
+                        if let Err(e) = self.registry.register(&named_module) {
+                            eprintln!("[vm] stdlib: registry warn for {}: {}", module_name, e);
+                        }
+                        eprintln!(
+                            "[vm] stdlib: loaded {} ({} functions merged)",
+                            module_name, loaded_count
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("[vm] stdlib: failed to load {}: {}", module_name, e);
+                    }
+                }
+            }
+        }
+
+        // 扩展 call_counts 以匹配新的函数表大小
+        let new_len = self.module.funcs.len();
+        if self.call_counts.len() < new_len {
+            self.call_counts.resize(new_len, 0);
+        }
+
+        Ok(loaded_count)
+    }
+
+    /// Phase 3: 查找 Aura 编译的标准库函数。
+    ///
+    /// 返回 `(函数索引, 是否需要 self 参数)`。
+    /// - `Some((idx, false))` — 参数个数完全匹配，直接调用
+    /// - `Some((idx, true))` — 多一个参数（self），需要注入 singleton 对象
+    /// - `None` — 未找到匹配函数
+    pub fn find_stdlib_func(&self, name: &str, expected_params: usize) -> Option<(usize, bool)> {
+        self.stdlib_func_map.get(name).and_then(|&idx| {
+            if idx < self.module.funcs.len() {
+                let func = &self.module.funcs[idx];
+                let actual_params = func.param_count as usize;
+                if actual_params == expected_params {
+                    Some((idx, false)) // 完全匹配
+                } else if actual_params == expected_params + 1 {
+                    Some((idx, true)) // self 参数匹配（多一个参数）
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Phase 3: 从 native 函数名提取对象名（用于查找 singleton）。
+    ///
+    /// 例如："aura.lang.std.Math.abs" → Some("Math")
+    /// 例如："aura.lang.std.abs" → None（无对象名）
+    pub fn extract_object_name<'a>(&self, native_name: &'a str) -> Option<&'a str> {
+        // 格式: aura.lang.std.{ObjectName}.{funcName}
+        let parts: Vec<&str> = native_name.split('.').collect();
+        if parts.len() >= 4 && parts[0] == "aura" && parts[1] == "lang" && parts[2] == "std" {
+            Some(parts[3])
+        } else {
+            None
         }
     }
 
@@ -909,6 +1243,9 @@ impl Vm {
                 }
             }
         }
+
+        // object 单例字段默认值初始化（必须在入口函数之前）
+        self.run_singleton_initializers();
 
         self.push_frame(entry, Vec::new())?;
         while !self.frames.is_empty() && !self.halt {
@@ -1096,6 +1433,10 @@ impl Vm {
 
     fn pop_frame(&mut self, ret: Value) {
         self.frames.pop();
+        // 帧退出时丢弃其内部注册的异常处理器（处理器不跨帧存活），
+        // 否则外层函数后续抛出的异常会跳到已销毁帧的指令地址。
+        let depth = self.frames.len();
+        self.handlers.retain(|h| h.frame_index < depth);
         if self.frames.is_empty() {
             self.result = Some(ret);
             self.halt = true;
@@ -1103,6 +1444,23 @@ impl Vm {
             let top = self.frames.len() - 1;
             self.frames[top].stack.push(ret);
         }
+    }
+
+    /// `Process.exit(code)` 请求的退出码。
+    ///
+    /// `Some(code)` 表示 Aura 代码显式请求以该码结束；CLI 应据此设置进程退出码
+    /// （`std::process::exit` 的硬终止仅作为非 CLI 场景的回退）。
+    pub fn requested_exit_code(&self) -> Option<i32> {
+        self.exit_code
+    }
+
+    /// 请求退出：清空调用帧、停止执行，并记录退出码（供 `run()` 正常返回）。
+    fn request_exit(&mut self, code: i32) {
+        self.exit_code = Some(code);
+        self.frames.clear();
+        self.handlers.clear();
+        self.result = Some(Value::Null);
+        self.halt = true;
     }
 
     /// 热点检测（5.11）：返回某函数的累计调用次数

@@ -505,7 +505,7 @@ mod tests {
     fn test_execute_phase_unknown() {
         let manifest = default_manifest("test");
         let tmp = TempDir::new().unwrap();
-        let config = Arc::new(ResolvedBuildConfig::default());
+        let config = Arc::new(ResolvedBuildConfig::isolated());
         let scheduler_config = SchedulerConfig {
             dry_run: true,
             ..Default::default()
@@ -526,7 +526,7 @@ mod tests {
     fn test_execute_phase_clean() {
         let manifest = default_manifest("test");
         let tmp = TempDir::new().unwrap();
-        let config = Arc::new(ResolvedBuildConfig::default());
+        let config = Arc::new(ResolvedBuildConfig::isolated());
         let scheduler_config = SchedulerConfig {
             dry_run: true,
             ..Default::default()
@@ -553,7 +553,7 @@ mod tests {
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("main.aura"), "fun main() {}").unwrap();
 
-        let config = Arc::new(ResolvedBuildConfig::default());
+        let config = Arc::new(ResolvedBuildConfig::isolated());
         let scheduler_config = SchedulerConfig {
             dry_run: true,
             ..Default::default()

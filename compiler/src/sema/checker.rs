@@ -119,7 +119,7 @@ impl Checker {
 
         // 预置内置函数（std 内置，简化版）
         let builtin_span = Span::single(0, 1, 1);
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "println",
             vec![ParamSym {
                 name: "message".into(),
@@ -131,7 +131,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "print",
             vec![ParamSym {
                 name: "message".into(),
@@ -143,7 +143,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "listOf",
             // 注册 10 个默认参数，使 listOf 接受 0-10 个任意类型参数
             (0..10)
@@ -158,7 +158,29 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        // Plan A′：`mutableListOf` / `arrayListOf` 此前没有签名，接收者被推断为
+        // `Ty::Any`，导致 HIR 无法把 `.add` / `.size` 降级为堆列表指令。
+        // 补上与 `listOf` 一致的签名（返回 `List<Any>`），保证类型通道可用。
+        for ctor in [
+            "mutableListOf",
+            "arrayListOf",
+        ] {
+            let _ = symbols.insert_builtin_function(
+                ctor,
+                (0..10)
+                    .map(|i| ParamSym {
+                        name: format!("item{}", i),
+                        ty: Ty::Any,
+                        has_default: true,
+                        is_vararg: false,
+                    })
+                    .collect(),
+                Ty::List(Box::new(Ty::Any)),
+                Visibility::Public,
+                builtin_span,
+            );
+        }
+        let _ = symbols.insert_builtin_function(
             "Box",
             vec![ParamSym {
                 name: "value".into(),
@@ -172,7 +194,7 @@ impl Checker {
         );
 
         // 类型查询与内省函数（prelu，免 import）
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "typeof",
             vec![ParamSym {
                 name: "value".into(),
@@ -184,7 +206,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "isNull",
             vec![ParamSym {
                 name: "value".into(),
@@ -196,7 +218,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "isNotNull",
             vec![ParamSym {
                 name: "value".into(),
@@ -208,7 +230,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "isZero",
             vec![ParamSym {
                 name: "value".into(),
@@ -220,7 +242,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "isPositive",
             vec![ParamSym {
                 name: "value".into(),
@@ -232,7 +254,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "isNegative",
             vec![ParamSym {
                 name: "value".into(),
@@ -244,7 +266,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "toBool",
             vec![ParamSym {
                 name: "value".into(),
@@ -256,7 +278,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "sizeOf",
             vec![ParamSym {
                 name: "value".into(),
@@ -268,7 +290,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "hash",
             vec![ParamSym {
                 name: "value".into(),
@@ -280,7 +302,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "compare",
             vec![
                 ParamSym {
@@ -300,7 +322,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "clone",
             vec![ParamSym {
                 name: "value".into(),
@@ -312,7 +334,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "identity",
             vec![ParamSym {
                 name: "value".into(),
@@ -326,7 +348,7 @@ impl Checker {
         );
 
         // 测试断言函数（prelu，免 import）
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "assertTrue",
             vec![
                 ParamSym {
@@ -346,7 +368,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "assertFalse",
             vec![
                 ParamSym {
@@ -366,7 +388,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "assertEq",
             vec![
                 ParamSym {
@@ -392,7 +414,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "assertNotEq",
             vec![
                 ParamSym {
@@ -418,7 +440,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "assertNotNull",
             vec![
                 ParamSym {
@@ -438,7 +460,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "assertNull",
             vec![
                 ParamSym {
@@ -532,7 +554,7 @@ impl Checker {
                 Ty::Boolean,
             ),
         ] {
-            let _ = symbols.insert_function(
+            let _ = symbols.insert_builtin_function(
                 name,
                 params
                     .into_iter()
@@ -550,7 +572,7 @@ impl Checker {
         }
 
         // AOT 直调内置函数（Demo 3）
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "load_shared_library",
             vec![ParamSym {
                 name: "path".into(),
@@ -562,7 +584,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "call_func",
             vec![
                 ParamSym {
@@ -588,7 +610,7 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
-        let _ = symbols.insert_function(
+        let _ = symbols.insert_builtin_function(
             "unload_shared_library",
             vec![ParamSym {
                 name: "module_id".into(),
@@ -984,6 +1006,37 @@ impl Checker {
                 self.interface_types.insert(i.name.clone());
                 self.record_generic_bounds(&i.name, &i.type_params);
                 self.record_members(&i.name, &[], &i.methods);
+                // 接口继承链：`interface List<T> : Collection<T>`。
+                // 记录后，子接口继承父接口的方法/可赋值关系。
+                for base in &i.super_types {
+                    self.superclasses.insert(i.name.clone(), base.clone());
+                }
+                // Bug fix: 将接口方法注册到符号表（与 class/struct 一致）
+                // 此前仅调用 record_members 记录方法名，但没有通过 insert_function
+                // 将 `Interface.method` 符号注册进 self.symbols，导致方法分派
+                // 时 lookup_function("Shape.area") 找不到，报
+                // "unresolved method 'area' on 'Shape'"。
+                for m in &i.methods {
+                    let params = m
+                        .params
+                        .iter()
+                        .map(|p| ParamSym {
+                            name: p.name.clone(),
+                            ty: p.type_hint.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Any),
+                            has_default: p.default_value.is_some(),
+                            is_vararg: p.is_vararg,
+                        })
+                        .collect();
+                    let ret = m.return_type.as_deref().map(ast_type_to_ty).unwrap_or(Ty::Unit);
+                    let full_name = format!("{}.{}", i.name, m.name);
+                    let _ = self.symbols.insert_function(
+                        full_name.clone(),
+                        params,
+                        ret,
+                        m.visibility,
+                        m.span,
+                    );
+                }
             }
             Decl::Actor(a) => {
                 self.symbols.register_type(a.name.clone(), Ty::Named(a.name.clone()));
@@ -1842,7 +1895,7 @@ impl Checker {
                     || Self::expr_calls(callee, name)
                     || args.iter().any(|a| Self::expr_calls(a, name))
             }
-            Expr::Literal(..) | Expr::Ident(..) | Expr::This(_) => false,
+            Expr::Literal(..) | Expr::Ident(..) | Expr::This(_) | Expr::Super(_) => false,
             Expr::StrInterp { parts, .. } => parts.iter().any(|p| Self::expr_calls(p, name)),
             Expr::Break { .. } | Expr::Continue { .. } => false,
             Expr::Assign {
@@ -2112,6 +2165,15 @@ impl Checker {
                     Ty::Error
                 }
             }
+            Expr::Super(span) => {
+                // super 引用父类类型（语义分析阶段返回当前类型，实际解析在 HIR 阶段）
+                if let Some(type_name) = &self.current_type {
+                    Ty::Named(type_name.clone())
+                } else {
+                    self.report(*span, "super can only be used inside a class/struct/actor");
+                    Ty::Error
+                }
+            }
             Expr::MemberAccess {
                 object,
                 name,
@@ -2153,18 +2215,22 @@ impl Checker {
                         }
                     },
                     Ty::List(elem) => match name.as_str() {
-                        "size" => Ty::Int,
+                        "size" | "count" => Ty::Int,
                         "isEmpty" => Ty::Boolean,
                         "first" | "last" => (**elem).clone(),
+                        "get" | "getAt" => (**elem).clone(),
+                        "set" => Ty::Unit,
                         _ => {
                             self.report(*span, format!("unresolved member '{}' on List", name));
                             Ty::Error
                         }
                     },
                     Ty::Array(elem) => match name.as_str() {
-                        "size" => Ty::Int,
+                        "size" | "count" => Ty::Int,
                         "isEmpty" => Ty::Boolean,
                         "first" | "last" => (**elem).clone(),
+                        "get" | "getAt" => (**elem).clone(),
+                        "set" => Ty::Unit,
                         _ => {
                             self.report(*span, format!("unresolved member '{}' on Array", name));
                             Ty::Error
@@ -2939,6 +3005,16 @@ impl Checker {
         }
         let name = overloads[0].name.clone();
 
+        // 用户定义符号优先于编译器内置（prelude）符号：用户重载/定义同名函数时
+        // 遮蔽内置签名（如用户自定义 `fun <T> identity(x: T): T` 覆盖内置
+        // `identity(Any): Any`），避免无谓的重载歧义。
+        let filtered: Vec<Symbol> = if overloads.iter().any(|s| !s.is_builtin) {
+            overloads.iter().filter(|s| !s.is_builtin).cloned().collect()
+        } else {
+            overloads.to_vec()
+        };
+        let overloads: &[Symbol] = &filtered;
+
         // Phase 1: 检查从非 suspend 上下文调用 suspend 函数
         if !self.is_in_suspend_fn && self.suspend_functions.contains(&name) {
             self.report(
@@ -3255,10 +3331,58 @@ impl Checker {
                 Ty::List(Box::new((**elem).clone()))
             }
             (Ty::List(elem), "first") | (Ty::List(elem), "last") => (**elem).clone(),
+            // list.get(i) 与 list[i] 等价，返回元素类型
+            (Ty::List(elem), "get") => {
+                for a in args {
+                    self.check_expr(a);
+                }
+                (**elem).clone()
+            }
+            // Collection 通用方法（List/Array/Set 共享）
+            (Ty::List(elem), "getAt") => {
+                for a in args {
+                    self.check_expr(a);
+                }
+                (**elem).clone()
+            }
+            (Ty::List(_), "count") | (Ty::List(_), "size") => Ty::Int,
             (Ty::List(_), "isEmpty") => Ty::Boolean,
-            (Ty::List(_), "size") | (Ty::String, _) => Ty::Int,
+            (Ty::List(elem), "contains") => {
+                for a in args {
+                    self.check_expr(a);
+                }
+                Ty::Boolean
+            }
+            (Ty::List(_), "indexOf") => {
+                for a in args {
+                    self.check_expr(a);
+                }
+                Ty::Int
+            }
+            // set(i, v) → Unit（下标赋值）
+            (Ty::List(_), "set") => {
+                for a in args {
+                    self.check_expr(a);
+                }
+                Ty::Unit
+            }
+            (Ty::String, _) => Ty::Int,
             // P15: 类实例方法（沿继承链查找，支持子类调用父类方法）
             (Ty::Named(class_name), m) => {
+                // Plan A′：内建集合方法。`mutableListOf(...)` 等构造器没有 std 签名表，
+                // sema 会把接收者推断为 `Ty::Named("List")`（而非 `Ty::List(_)`），
+                // 这里先按内建集合处理 `.add/.push/.append`，避免误报 unresolved method。
+                let is_builtin_coll = class_name == "List"
+                    || class_name == "ArrayList"
+                    || class_name == "MutableList"
+                    || class_name == "Array"
+                    || class_name == "Set";
+                if is_builtin_coll && (m == "add" || m == "push" || m == "append") {
+                    for a in args {
+                        self.check_expr(a);
+                    }
+                    return Ty::Unit;
+                }
                 let mut cur = Some(class_name.clone());
                 while let Some(c) = cur {
                     let mname = format!("{}.{}", c, m);
@@ -3386,18 +3510,23 @@ impl Checker {
                 }
             },
             Ty::List(elem) => match name {
-                "size" => Ty::Int,
+                "size" | "count" => Ty::Int,
                 "isEmpty" => Ty::Boolean,
                 "first" | "last" => (**elem).clone(),
+                // `get` / `getAt` / `set` 作为方法，由 check_call 处理
+                "get" | "getAt" => (**elem).clone(),
+                "set" => Ty::Unit,
                 _ => {
                     self.report(span, format!("unresolved member '{}' on List", name));
                     Ty::Error
                 }
             },
             Ty::Array(elem) => match name {
-                "size" => Ty::Int,
+                "size" | "count" => Ty::Int,
                 "isEmpty" => Ty::Boolean,
                 "first" | "last" => (**elem).clone(),
+                "get" | "getAt" => (**elem).clone(),
+                "set" => Ty::Unit,
                 _ => {
                     self.report(span, format!("unresolved member '{}' on Array", name));
                     Ty::Error
@@ -3520,11 +3649,19 @@ impl Checker {
                 for p in &arm.patterns {
                     if let Expr::Ident(tname, _) = p {
                         if tname != "else" && tname != "__else__" {
+                            // `is T` 模式在 AST 中是 `Ident("__is__T")`（见 parser 的
+                            // `pattern_to_expr`）。必须剥掉 `__is__` 前缀才能拿到真实类型名，
+                            // 否则 `lookup_type` 恒为 None，`is String -> value.length` 这类
+                            // 分支不会被窄化，主体变量仍是 Any 而报成员不存在。
+                            let ty_name = match tname.strip_prefix("__is__") {
+                                Some(rest) => rest.to_string(),
+                                None => tname.clone(),
+                            };
                             let is_variant =
-                                subject_enum.as_ref().map_or(false, |vs| vs.contains(tname));
-                            // 仅当 tname 是已声明的类型时才视为 `is` 智能转换
-                            if !is_variant && self.symbols.lookup_type(tname).is_some() {
-                                narrowed = Some(tname.clone());
+                                subject_enum.as_ref().map_or(false, |vs| vs.contains(&ty_name));
+                            // 仅当 ty_name 是已声明的类型时才视为 `is` 智能转换
+                            if !is_variant && self.symbols.lookup_type(&ty_name).is_some() {
+                                narrowed = Some(ty_name);
                                 break;
                             }
                         }
@@ -3538,7 +3675,9 @@ impl Checker {
             if let (Some(sn), Some(nt)) = (&subj_name, &narrowed) {
                 if let Some(scope) = self.var_env.last_mut() {
                     let present = scope.contains_key(sn);
-                    let prev = scope.insert(sn.clone(), Ty::Named(nt.clone()));
+                    // 用 `Ty::from_name` 而非 `Ty::Named`：基础类型需映射为原始 Ty，
+                    // 否则成员访问走 Named 分支，`value.length` 会被误报为未解析成员。
+                    let prev = scope.insert(sn.clone(), Ty::from_name(nt));
                     if present {
                         had = Some(sn.clone());
                         prev_ty = prev;

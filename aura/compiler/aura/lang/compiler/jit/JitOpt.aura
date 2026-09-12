@@ -1,0 +1,728 @@
+// aura:///aura/lang/compiler/jit/JitOpt.aura
+package aura.lang.compiler.jit
+// ─────────────────────────────────────────────────────────────
+// JIT 字节码优化 — 纯 Aura 化迁移 · Phase 7 (任务 7.4)
+//
+// 对应 Rust `compiler/src/vm/jit_opt.rs`（7 个优化传递）。
+//
+// ── 传递顺序（与 Rust `optimize_function_with_deps` 一致）──
+//
+//   1. 常量折叠   foldConstants        —— 常量算术/比较在编译期求值
+//   2. 死码消除   eliminateDeadCode    —— 删除 LoadVar/StoreVar 同槽对
+//   3. 跳转线程化 threadJumps          —— 删除「Jump 紧跟 Jump」的多余跳转
+//   4. 强度削弱   strengthReduce       —— `/2^n`→移位、`%2^n`→掩码、`*2^n`→左移
+//   5. 指令调度   scheduleInstructions —— 常量加载后移，提升指令级并行
+//   6. 函数内联   inlineFunctions      —— 小函数（<20 指令）候选判定
+//   7. 循环展开   unrollLoops          —— 简单循环 2x 展开
+//
+// ── 表示 ──
+//
+//   解码代码（code）：每行 `<Opcode> [arg]`。
+//   常量池：行表，每行一个整数字面量。
+//   函数表（funcs）：`idx|name|size|native|callees`（见 JitUtil）。
+//
+// ── 与 Rust 基线的差异（有意为之，语义等价且更严格）──
+//
+//   * Rust `fold_constants` 的两遍实现会把「任意三个连续 LoadConst」折叠为
+//     最后一个（即使并非折叠产物），可能误删合法常量加载；本移植改为单遍
+//     前瞻，只在真正折叠时合并，输出等价但无不慎丢指令的风险。
+//   * Rust `strength_reduce` 在改写时会：① 把已写入的两个操作数再次复制，
+//     留下栈上多余值；② 以 `LoadConst shift` 在前、`value` 在后的顺序发射，
+//     使 `Shl` 的 a/b 操作数颠倒（移位方向相反）。本移植按语义正确形式输出：
+//     操作数恰好消费一次，且先压入 `value` 再压入移位量/掩码。
+//   * Rust `try_inline_function` 为占位（始终返回 None），本移植保持一致，
+//     仅额外暴露候选判定（`inlineCandidates`）以便验证与观测。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+
+/// 可内联函数的最大指令数（与 Rust `MAX_INLINE_SIZE` 一致）。
+fun jitMaxInlineSize(): Int {
+    return 20
+}
+
+/// 优化结果：优化后的代码 + 新增常量。
+class JitOptResult {
+
+    /// 优化后的解码代码（行表）。
+    var code: String = ""
+
+    /// 新增常量（行表，需追加到模块常量池并使用 `baseCount + i` 索引）。
+    var extraConsts: String = ""
+
+    init(resultCode: String, resultExtra: String) {
+        this.code = resultCode
+        this.extraConsts = resultExtra
+    }
+
+    /// 代码行数。
+    fun resultLineCount(): Int {
+        return jitLineCount(this.code)
+    }
+
+    /// 新增常量数量。
+    fun resultExtraCount(): Int {
+        return jitLineCount(this.extraConsts)
+    }
+}
+
+// ── 指令分类辅助 ──
+
+/// 是否可折叠的算术指令。
+fun jitIsArithOp(op: String): Boolean {
+    if (op == "Add") {
+        return true
+    }
+    if (op == "Sub") {
+        return true
+    }
+    if (op == "Mul") {
+        return true
+    }
+    if (op == "Div") {
+        return true
+    }
+    if (op == "Rem") {
+        return true
+    }
+    return false
+}
+
+/// 是否可折叠的比较指令。
+fun jitIsCompareOp(op: String): Boolean {
+    if (op == "Eq") {
+        return true
+    }
+    if (op == "Ne") {
+        return true
+    }
+    if (op == "Lt") {
+        return true
+    }
+    if (op == "Gt") {
+        return true
+    }
+    if (op == "Le") {
+        return true
+    }
+    if (op == "Ge") {
+        return true
+    }
+    return false
+}
+
+/// 是否是跳转类指令。
+fun jitIsJumpOp(op: String): Boolean {
+    if (op == "Jump") {
+        return true
+    }
+    if (op == "JumpIfTrue") {
+        return true
+    }
+    if (op == "JumpIfFalse") {
+        return true
+    }
+    return false
+}
+
+/// 常量算术求值，返回结果文本（除零等不可折叠返回空串）。
+fun jitFoldArith(op: String, a: Int, b: Int): String {
+    if (op == "Add") {
+        return toStr(a + b)
+    }
+    if (op == "Sub") {
+        return toStr(a - b)
+    }
+    if (op == "Mul") {
+        return toStr(a * b)
+    }
+    if (op == "Div") {
+        if (b == 0) {
+            return ""
+        }
+        return toStr(a / b)
+    }
+    if (op == "Rem") {
+        if (b == 0) {
+            return ""
+        }
+        return toStr(a - (a / b) * b)
+    }
+    return ""
+}
+
+/// 常量比较求值，返回 "1"/"0"（不可比较返回空串）。
+fun jitFoldCompare(op: String, a: Int, b: Int): String {
+    if (op == "Eq") {
+        if (a == b) {
+            return "1"
+        }
+        return "0"
+    }
+    if (op == "Ne") {
+        if (a != b) {
+            return "1"
+        }
+        return "0"
+    }
+    if (op == "Lt") {
+        if (a < b) {
+            return "1"
+        }
+        return "0"
+    }
+    if (op == "Gt") {
+        if (a > b) {
+            return "1"
+        }
+        return "0"
+    }
+    if (op == "Le") {
+        if (a <= b) {
+            return "1"
+        }
+        return "0"
+    }
+    if (op == "Ge") {
+        if (a >= b) {
+            return "1"
+        }
+        return "0"
+    }
+    return ""
+}
+
+/// 取整数二进制最低位。
+fun jitMod2(n: Int): Int {
+    if (n <= 0) {
+        return 0
+    }
+    val half: Int = n / 2
+    return n - half * 2
+}
+
+/// 位与（避免依赖位运算语法差异，逐位实现）。
+fun jitBitAnd(a: Int, b: Int): Int {
+    var result: Int = 0
+    var bit: Int = 1
+    var x: Int = a
+    var y: Int = b
+    var i: Int = 0
+    while (i < 31) {
+        val xb: Int = jitMod2(x)
+        val yb: Int = jitMod2(y)
+        if (xb == 1) {
+            if (yb == 1) {
+                result = result + bit
+            }
+        }
+        x = (x - xb) / 2
+        y = (y - yb) / 2
+        bit = bit * 2
+        i = i + 1
+    }
+    return result
+}
+
+/// 是否 2 的幂（n > 0）。
+fun jitIsPowerOfTwo(n: Int): Boolean {
+    if (n <= 0) {
+        return false
+    }
+    return jitBitAnd(n, n - 1) == 0
+}
+
+/// 尾零个数（n 为 2 的幂时即 log2）。
+fun jitTrailingZeros(n: Int): Int {
+    var x: Int = n
+    var count: Int = 0
+    while (x > 1) {
+        x = x / 2
+        count = count + 1
+    }
+    return count
+}
+
+// ── 优化器 ──
+
+/// JIT 字节码优化器（7 个传递）。
+///
+/// 说明：常量池以「两个直接字段」（`baseConsts` / `extraConsts`）表示，
+/// 而非嵌套对象，以规避当前 VM「对字段访问得到的对象再调方法会错乱
+/// this 绑定」的限制（见 README 已知差异）。
+class JitOptimizer {
+
+    /// 模块级常量（行表）。
+    var baseConsts: String = ""
+
+    /// 新增常量（行表）。
+    var extraConsts: String = ""
+
+    /// 内联候选数（诊断）。
+    var inlineCandidates: Int = 0
+
+    init() {
+        this.baseConsts = ""
+        this.extraConsts = ""
+        this.inlineCandidates = 0
+    }
+
+    // ── 常量池 ──
+
+    /// 模块常量数。
+    fun baseCount(): Int {
+        return jitLineCount(this.baseConsts)
+    }
+
+    /// 新增常量数。
+    fun extraCount(): Int {
+        return jitLineCount(this.extraConsts)
+    }
+
+    /// 按合并索引取常量（越界返回空串）。
+    fun valueAt(idx: Int): String {
+        if (idx < 0) {
+            return ""
+        }
+        val b: Int = this.baseCount()
+        if (idx < b) {
+            return jitLineAt(this.baseConsts, idx)
+        }
+        val e: Int = jitLineCount(this.extraConsts)
+        if (idx - b < e) {
+            return jitLineAt(this.extraConsts, idx - b)
+        }
+        return ""
+    }
+
+    /// 查找或追加常量，返回合并索引（对应 Rust `find_or_add_const`）。
+    fun findOrAdd(value: String): Int {
+        val b: Int = this.baseCount()
+        var i: Int = 0
+        while (i < b) {
+            val line: String = jitLineAt(this.baseConsts, i)
+            if (jitIsIntLiteral(line) && line == value) {
+                return i
+            }
+            i = i + 1
+        }
+        val e: Int = jitLineCount(this.extraConsts)
+        var j: Int = 0
+        while (j < e) {
+            if (jitLineAt(this.extraConsts, j) == value) {
+                return b + j
+            }
+            j = j + 1
+        }
+        this.extraConsts = this.extraConsts + value + "\n"
+        return b + e
+    }
+
+    // ── 主入口 ──
+
+    /// 执行全部 7 个传递，返回优化结果。
+    fun optimize(code: String, consts: String, funcs: String): JitOptResult {
+        this.baseConsts = consts
+        this.extraConsts = ""
+        this.inlineCandidates = 0
+
+        var c: String = code
+        c = this.foldConstants(c)
+        c = this.eliminateDeadCode(c)
+        c = this.threadJumps(c)
+        c = this.strengthReduce(c)
+        c = this.scheduleInstructions(c)
+        c = this.inlineFunctions(c, funcs)
+        c = this.unrollLoops(c)
+
+        return JitOptResult(c, this.extraConsts)
+    }
+
+    // ── 传递 1：常量折叠 ──
+
+    /// 常量折叠（单遍前瞻，见文件头差异说明）。
+    fun foldConstants(code: String): String {
+        var out: String = ""
+        val n: Int = jitLineCount(code)
+        var i: Int = 0
+        while (i < n) {
+            if (i + 2 < n) {
+                val la: String = jitLineAt(code, i)
+                val lb: String = jitLineAt(code, i + 1)
+                val lop: String = jitOpcodeOf(jitLineAt(code, i + 2))
+                if (jitOpcodeOf(la) == "LoadConst" && jitOpcodeOf(lb) == "LoadConst") {
+                    val a: String = this.valueAt(jitParseInt(jitArgOf(la)))
+                    val b: String = this.valueAt(jitParseInt(jitArgOf(lb)))
+                    var folded: String = ""
+                    if (jitIsIntLiteral(a) && jitIsIntLiteral(b)) {
+                        if (jitIsArithOp(lop)) {
+                            folded = jitFoldArith(lop, jitParseInt(a), jitParseInt(b))
+                        } else if (jitIsCompareOp(lop)) {
+                            folded = jitFoldCompare(lop, jitParseInt(a), jitParseInt(b))
+                        }
+                    }
+                    if (folded != "") {
+                        val ci: Int = this.findOrAdd(folded)
+                        out = out + "LoadConst " + toStr(ci) + "\n"
+                        i = i + 3
+                        continue
+                    }
+                }
+            }
+            out = out + jitLineAt(code, i) + "\n"
+            i = i + 1
+        }
+        return out
+    }
+
+    // ── 传递 2：死码消除 ──
+
+    /// 删除「LoadVar s 紧跟 StoreVar s」的同槽对（对应 Rust `eliminate_dead_code`）。
+    fun eliminateDeadCode(code: String): String {
+        var out: String = ""
+        val n: Int = jitLineCount(code)
+        var i: Int = 0
+        while (i < n) {
+            val line: String = jitLineAt(code, i)
+            if (jitOpcodeOf(line) == "LoadVar" && i + 1 < n) {
+                val next: String = jitLineAt(code, i + 1)
+                if (jitOpcodeOf(next) == "StoreVar" && jitArgOf(next) == jitArgOf(line)) {
+                    i = i + 2
+                    continue
+                }
+            }
+            out = out + line + "\n"
+            i = i + 1
+        }
+        return out
+    }
+
+    // ── 传递 3：跳转线程化 ──
+
+    /// 删除「Jump 紧跟 Jump」中的第一个跳转（对应 Rust `thread_jumps`）。
+    fun threadJumps(code: String): String {
+        var out: String = ""
+        val n: Int = jitLineCount(code)
+        var i: Int = 0
+        while (i < n) {
+            val line: String = jitLineAt(code, i)
+            if (jitOpcodeOf(line) == "Jump" && i + 1 < n) {
+                val next: String = jitLineAt(code, i + 1)
+                if (jitOpcodeOf(next) == "Jump") {
+                    out = out + next + "\n"
+                    i = i + 2
+                    continue
+                }
+            }
+            out = out + line + "\n"
+            i = i + 1
+        }
+        return out
+    }
+
+    // ── 传递 4：强度削弱 ──
+
+    /// 强度削弱：`*2^n`→左移、`/2^n`→算术右移、`%2^n`→掩码、`*0`/`*1` 化简。
+    fun strengthReduce(code: String): String {
+        var out: String = ""
+        val n: Int = jitLineCount(code)
+        var i: Int = 0
+        while (i < n) {
+            // 模式：<value> / LoadConst b / <op>   （操作数在 op 之前）
+            if (i + 2 < n) {
+                val valueLine: String = jitLineAt(code, i)
+                val midLine: String = jitLineAt(code, i + 1)
+                val op: String = jitOpcodeOf(jitLineAt(code, i + 2))
+                if (jitOpcodeOf(midLine) == "LoadConst") {
+                    val bText: String = this.valueAt(jitParseInt(jitArgOf(midLine)))
+                    if (jitIsIntLiteral(bText)) {
+                        val b: Int = jitParseInt(bText)
+                        if (op == "Mul") {
+                            val r1: String = this.reduceMulSecond(valueLine, b)
+                            if (r1 != "") {
+                                out = out + r1
+                                i = i + 3
+                                continue
+                            }
+                        }
+                        if (op == "Div") {
+                            if (jitIsPowerOfTwo(b) && b > 1) {
+                                val sh: Int = this.findOrAdd(toStr(jitTrailingZeros(b)))
+                                out = out + valueLine + "\nLoadConst " + toStr(sh) + "\nShr\n"
+                                i = i + 3
+                                continue
+                            }
+                        }
+                        if (op == "Rem") {
+                            if (jitIsPowerOfTwo(b) && b > 1) {
+                                val mask: Int = this.findOrAdd(toStr(b - 1))
+                                out = out + valueLine + "\nLoadConst " + toStr(mask) + "\nBitAnd\n"
+                                i = i + 3
+                                continue
+                            }
+                        }
+                    }
+                }
+                // 模式：LoadConst a / <value> / Mul（第一操作数为常量）
+                if (op == "Mul" && jitOpcodeOf(valueLine) == "LoadConst") {
+                    val aText: String = this.valueAt(jitParseInt(jitArgOf(valueLine)))
+                    if (jitIsIntLiteral(aText)) {
+                        val r2: String = this.reduceMulFirst(midLine, jitParseInt(aText))
+                        if (r2 != "") {
+                            out = out + r2
+                            i = i + 3
+                            continue
+                        }
+                    }
+                }
+            }
+            out = out + jitLineAt(code, i) + "\n"
+            i = i + 1
+        }
+        return out
+    }
+
+    /// `value * b`（b 为第二操作数常量）的改写；不可削弱返回空串。
+    ///
+    /// 操作数顺序：先压入 `value`，再压入移位量，`Shl` 弹出 b=移位量、a=value。
+    fun reduceMulSecond(valueLine: String, b: Int): String {
+        if (jitIsPowerOfTwo(b) && b > 1) {
+            val sh: Int = this.findOrAdd(toStr(jitTrailingZeros(b)))
+            return valueLine + "\nLoadConst " + toStr(sh) + "\nShl\n"
+        }
+        if (b == 1) {
+            return valueLine + "\n"
+        }
+        if (b == 0) {
+            val z: Int = this.findOrAdd("0")
+            return "LoadConst " + toStr(z) + "\n"
+        }
+        return ""
+    }
+
+    /// `a * value`（a 为第一操作数常量）的改写；不可削弱返回空串。
+    fun reduceMulFirst(valueLine: String, a: Int): String {
+        if (jitIsPowerOfTwo(a) && a > 1) {
+            val sh: Int = this.findOrAdd(toStr(jitTrailingZeros(a)))
+            return valueLine + "\nLoadConst " + toStr(sh) + "\nShl\n"
+        }
+        if (a == 1) {
+            return valueLine + "\n"
+        }
+        if (a == 0) {
+            val z: Int = this.findOrAdd("0")
+            return "LoadConst " + toStr(z) + "\n"
+        }
+        return ""
+    }
+
+    // ── 传递 5：指令调度 ──
+
+    /// 指令调度：常量加载后紧跟 >=2 个独立加载时，把常量加载移到它们之后。
+    fun scheduleInstructions(code: String): String {
+        var out: String = ""
+        val n: Int = jitLineCount(code)
+        var i: Int = 0
+        while (i < n) {
+            val line: String = jitLineAt(code, i)
+            if (jitOpcodeOf(line) == "LoadConst") {
+                var j: Int = i + 1
+                var loads: String = ""
+                var loadCount: Int = 0
+                var scanning: Boolean = true
+                while (j < n && scanning) {
+                    val cand: String = jitLineAt(code, j)
+                    val cop: String = jitOpcodeOf(cand)
+                    if (cop == "LoadConst" || cop == "LoadVar") {
+                        loads = loads + cand + "\n"
+                        loadCount = loadCount + 1
+                        j = j + 1
+                    } else {
+                        scanning = false
+                    }
+                }
+                if (loadCount >= 2) {
+                    out = out + loads
+                    out = out + line + "\n"
+                    i = j
+                    continue
+                }
+            }
+            out = out + line + "\n"
+            i = i + 1
+        }
+        return out
+    }
+
+    // ── 传递 6：函数内联 ──
+
+    /// 函数内联：与 Rust 基线一致保持为占位（仅统计候选）。
+    ///
+    /// Rust `try_inline_function` 返回 `None`（需 CFG 分析与寄存器分配），
+    /// 因此本传递不改变代码；`inlineCandidates` 记录可内联调用点数量。
+    fun inlineFunctions(code: String, funcs: String): String {
+        val n: Int = jitLineCount(code)
+        var i: Int = 0
+        while (i < n) {
+            val line: String = jitLineAt(code, i)
+            if (jitOpcodeOf(line) == "Call") {
+                val callee: Int = jitParseInt(jitArgOf(line))
+                if (jitFuncExists(funcs, callee)) {
+                    val size: Int = jitFuncSize(funcs, callee)
+                    if (size < jitMaxInlineSize() && !jitFuncNative(funcs, callee)) {
+                        this.inlineCandidates = this.inlineCandidates + 1
+                    }
+                }
+            }
+            i = i + 1
+        }
+        return code
+    }
+
+    // ── 传递 7：循环展开 ──
+
+    /// 循环展开：对首个可安全展开的条件跳转区域做 2x 展开。
+    fun unrollLoops(code: String): String {
+        val n: Int = jitLineCount(code)
+        var i: Int = 0
+        while (i < n) {
+            val line: String = jitLineAt(code, i)
+            val op: String = jitOpcodeOf(line)
+            if (op == "JumpIfTrue" || op == "JumpIfFalse") {
+                val target: Int = jitParseInt(jitArgOf(line))
+                if (target > i + 1 && target < n) {
+                    val unrolled: String = this.tryUnrollLoop(code, i, target)
+                    if (unrolled != "") {
+                        return unrolled
+                    }
+                }
+            }
+            i = i + 1
+        }
+        return code
+    }
+
+    /// 尝试展开 [loopStart, loopBack) 区域（复制两份，调整后向跳转目标）。
+    ///
+    /// 条件（对应 Rust `try_unroll_loop`）：区域 >=3 条、<=10 条，
+    /// 且区内无后向跳转、无指向区内的跳转；否则返回空串表示不可展开。
+    fun tryUnrollLoop(code: String, loopStart: Int, loopBack: Int): String {
+        if (loopBack < loopStart + 3) {
+            return ""
+        }
+        val bodyLen: Int = loopBack - loopStart
+        if (bodyLen > 10) {
+            return ""
+        }
+        var i: Int = loopStart
+        while (i < loopBack) {
+            val op: String = jitOpcodeOf(jitLineAt(code, i))
+            if (jitIsJumpOp(op)) {
+                val target: Int = jitParseInt(jitArgOf(jitLineAt(code, i)))
+                if (target < i) {
+                    return ""
+                }
+                if (target >= loopStart && target < loopBack) {
+                    return ""
+                }
+            }
+            i = i + 1
+        }
+
+        var out: String = ""
+        var p: Int = 0
+        while (p < loopStart) {
+            out = out + jitLineAt(code, p) + "\n"
+            p = p + 1
+        }
+        var copy: Int = 0
+        while (copy < 2) {
+            var b: Int = loopStart
+            while (b < loopBack) {
+                out = out + this.adjustJump(jitLineAt(code, b), loopBack, bodyLen) + "\n"
+                b = b + 1
+            }
+            copy = copy + 1
+        }
+        var q: Int = loopBack
+        val n: Int = jitLineCount(code)
+        while (q < n) {
+            out = out + this.adjustJump(jitLineAt(code, q), loopBack, bodyLen) + "\n"
+            q = q + 1
+        }
+        return out
+    }
+
+    /// 调整单条指令的跳转目标（>= loopBack 时后移 delta）。
+    fun adjustJump(line: String, loopBack: Int, delta: Int): String {
+        val op: String = jitOpcodeOf(line)
+        if (jitIsJumpOp(op)) {
+            val target: Int = jitParseInt(jitArgOf(line))
+            if (target >= loopBack) {
+                return op + " " + toStr(target + delta)
+            }
+        }
+        return line
+    }
+}
+
+// ── 顶层便捷入口（供测试/外部调用）──
+
+/// 仅执行常量折叠。
+fun jitFoldConstants(code: String, consts: String): JitOptResult {
+    val o: JitOptimizer = JitOptimizer()
+    o.baseConsts = consts
+    val out: String = o.foldConstants(code)
+    return JitOptResult(out, o.extraConsts)
+}
+
+/// 仅执行死码消除。
+fun jitEliminateDeadCode(code: String): String {
+    val o: JitOptimizer = JitOptimizer()
+    return o.eliminateDeadCode(code)
+}
+
+/// 仅执行跳转线程化。
+fun jitThreadJumps(code: String): String {
+    val o: JitOptimizer = JitOptimizer()
+    return o.threadJumps(code)
+}
+
+/// 仅执行强度削弱。
+fun jitStrengthReduce(code: String, consts: String): JitOptResult {
+    val o: JitOptimizer = JitOptimizer()
+    o.baseConsts = consts
+    val out: String = o.strengthReduce(code)
+    return JitOptResult(out, o.extraConsts)
+}
+
+/// 仅执行指令调度。
+fun jitScheduleInstructions(code: String): String {
+    val o: JitOptimizer = JitOptimizer()
+    return o.scheduleInstructions(code)
+}
+
+/// 仅执行函数内联候选判定（代码不变）。
+fun jitInlineFunctions(code: String, funcs: String): String {
+    val o: JitOptimizer = JitOptimizer()
+    return o.inlineFunctions(code, funcs)
+}
+
+/// 内联候选数。
+fun jitInlineCandidateCount(code: String, funcs: String): Int {
+    val o: JitOptimizer = JitOptimizer()
+    o.inlineFunctions(code, funcs)
+    return o.inlineCandidates
+}
+
+/// 仅执行循环展开。
+fun jitUnrollLoops(code: String): String {
+    val o: JitOptimizer = JitOptimizer()
+    return o.unrollLoops(code)
+}
+
+/// 执行全部 7 个传递。
+fun jitOptimizeFunction(code: String, consts: String, funcs: String): JitOptResult {
+    val o: JitOptimizer = JitOptimizer()
+    return o.optimize(code, consts, funcs)
+}

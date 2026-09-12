@@ -1,5 +1,6 @@
 pub mod ast;
 pub mod auz;
+pub mod bootstrap;
 pub mod codegen;
 pub mod docgen;
 pub mod errors;

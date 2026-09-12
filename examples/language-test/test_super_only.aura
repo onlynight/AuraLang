@@ -1,0 +1,16 @@
+open class Animal {
+    open fun name(): String {
+        return "Animal"
+    }
+}
+
+class Dog : Animal() {
+    override fun name(): String {
+        return super.name() + "/Dog"
+    }
+}
+
+fun main() {
+    val d = Dog()
+    println("super only: " + d.name())
+}

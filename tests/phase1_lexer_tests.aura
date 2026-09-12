@@ -1,0 +1,367 @@
+// ═════════════════════════════════════════════════════════════
+// Phase 1 验证用例：前端 Aura 化 · Lexer + Token + Span
+//
+// 验证内容：
+//   1. 快照一致性：Aura 词法器对 3 个快照用例产出的 TokenKind 序列，
+//      与 Rust 参考实现（`aura tokens`，见 tests/snapshots/baseline/）**完全一致**
+//   2. Span 数据模型（构造 / 合并 / 描述）
+//   3. Token 数据模型（构造 / span / display）
+//   4. 关键字表（keywordKind）
+//   5. 词法器边界行为（数字/运算符/注释/文档注释/字符串/原始字符串/空输入/span）
+//
+// 运行：aura run tests/phase1_lexer_tests.aura
+//   全通过时输出 "RESULT: PASS"
+//
+// 注意：`import` 为浅层内联（嵌套 import 会被剥离），因此此处需显式导入全部依赖。
+// ═════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import aura.lang.std.Collections
+import "../aura/compiler/aura/lang/compiler/test/TestRunner.aura"
+import "../aura/compiler/aura/lang/compiler/lexer/Span.aura"
+import "../aura/compiler/aura/lang/compiler/lexer/Token.aura"
+import "../aura/compiler/aura/lang/compiler/lexer/Lexer.aura"
+
+// ═════════════════════════════════════════════════════════════
+// 快照用例源码（与 tests/snapshots/cases/*.aura 保持逐字一致）
+// ═════════════════════════════════════════════════════════════
+
+fun srcDeclaration(): String {
+    return """// snapshot case: declaration tokens (val / var / fun / class / struct / object)
+val PI: Double = 3.14159
+
+var counter: Int = 0
+
+fun inc(): Int {
+    counter += 1
+    return counter
+}
+
+class Animal {
+    val legs: Int = 4
+    fun name(): String = "animal"
+}
+
+struct Vec2(val x: Float, val y: Float)
+
+object Registry {
+    fun name(): String = "registry"
+}
+"""
+}
+
+/// 期望值取自 tests/snapshots/baseline/lexer_declaration.tokens.txt
+fun expectedDeclaration(): String {
+    return "Val\nIdent\nColon\nIdent\nAssign\nFloatLiteral\n"
+        + "Var\nIdent\nColon\nIdent\nAssign\nIntLiteral\n"
+        + "Fun\nIdent\nLParen\nRParen\nColon\nIdent\nLBrace\nIdent\nPlusEq\nIntLiteral\nReturn\nIdent\nRBrace\n"
+        + "Class\nIdent\nLBrace\nVal\nIdent\nColon\nIdent\nAssign\nIntLiteral\n"
+        + "Fun\nIdent\nLParen\nRParen\nColon\nIdent\nAssign\nStringLiteral\nRBrace\n"
+        + "Struct\nIdent\nLParen\nVal\nIdent\nColon\nIdent\nComma\nVal\nIdent\nColon\nIdent\nRParen\n"
+        + "Object\nIdent\nLBrace\nFun\nIdent\nLParen\nRParen\nColon\nIdent\nAssign\nStringLiteral\nRBrace\n"
+        + "EOF\n"
+}
+
+fun srcControlFlow(): String {
+    return """// snapshot case: control-flow tokens (if / else / while / for / when)
+fun classify(n: Int): String {
+    if (n < 0) {
+        return "negative"
+    } else if (n == 0) {
+        return "zero"
+    } else {
+        return "positive"
+    }
+}
+
+fun sumTo(n: Int): Int {
+    var s = 0
+    var i = 1
+    while (i <= n) {
+        s += i
+        i += 1
+    }
+    for (j in 0..3) {
+        s = s + j
+    }
+    return s
+}
+
+fun dayName(day: Int): String {
+    return when (day) {
+        1 -> "Mon"
+        2 -> "Tue"
+        else -> "Other"
+    }
+}
+"""
+}
+
+/// 期望值取自 tests/snapshots/baseline/lexer_control_flow.tokens.txt
+fun expectedControlFlow(): String {
+    return "Fun\nIdent\nLParen\nIdent\nColon\nIdent\nRParen\nColon\nIdent\nLBrace\n"
+        + "If\nLParen\nIdent\nLt\nIntLiteral\nRParen\nLBrace\nReturn\nStringLiteral\nRBrace\n"
+        + "Else\nIf\nLParen\nIdent\nEqEq\nIntLiteral\nRParen\nLBrace\nReturn\nStringLiteral\nRBrace\n"
+        + "Else\nLBrace\nReturn\nStringLiteral\nRBrace\nRBrace\n"
+        + "Fun\nIdent\nLParen\nIdent\nColon\nIdent\nRParen\nColon\nIdent\nLBrace\n"
+        + "Var\nIdent\nAssign\nIntLiteral\nVar\nIdent\nAssign\nIntLiteral\n"
+        + "While\nLParen\nIdent\nLtEq\nIdent\nRParen\nLBrace\n"
+        + "Ident\nPlusEq\nIdent\nIdent\nPlusEq\nIntLiteral\nRBrace\n"
+        + "For\nLParen\nIdent\nIn\nIntLiteral\nDoubleDotOp\nIntLiteral\nRParen\nLBrace\n"
+        + "Ident\nAssign\nIdent\nPlus\nIdent\nRBrace\n"
+        + "Return\nIdent\nRBrace\n"
+        + "Fun\nIdent\nLParen\nIdent\nColon\nIdent\nRParen\nColon\nIdent\nLBrace\n"
+        + "Return\nWhen\nLParen\nIdent\nRParen\nLBrace\n"
+        + "IntLiteral\nArrow\nStringLiteral\nIntLiteral\nArrow\nStringLiteral\n"
+        + "Else\nArrow\nStringLiteral\nRBrace\nRBrace\nEOF\n"
+}
+
+fun srcGenericFunction(): String {
+    return """// snapshot case: generic function parsing
+fun identity<T>(value: T): T {
+    return value
+}
+
+fun firstOf<T>(a: T, b: T): T {
+    return a
+}
+
+fun main() {
+    // 仅验证泛型函数声明的解析；泛型调用（单态化）不在 Phase 1 快照范围内
+    println("generic declarations")
+}
+"""
+}
+
+/// 期望值取自 tests/snapshots/baseline/parser_generic_function.tokens.txt
+fun expectedGenericFunction(): String {
+    return "Fun\nIdent\nLt\nIdent\nGt\nLParen\nValue\nColon\nIdent\nRParen\nColon\nIdent\nLBrace\n"
+        + "Return\nValue\nRBrace\n"
+        + "Fun\nIdent\nLt\nIdent\nGt\nLParen\nIdent\nColon\nIdent\nComma\nIdent\nColon\nIdent\n"
+        + "RParen\nColon\nIdent\nLBrace\nReturn\nIdent\nRBrace\n"
+        + "Fun\nIdent\nLParen\nRParen\nLBrace\nIdent\nLParen\nStringLiteral\nRParen\nRBrace\nEOF\n"
+}
+
+fun srcStringInterp(): String {
+    return """// snapshot case: string interpolation tokens ($var / ${expr} / escaped $)
+fun greet(name: String, n: Int): String {
+    val simple: String = "hello $name"
+    val braced: String = "n = ${n + 1}"
+    val combo: String = "a $name b ${n} c"
+    val literalDollar: String = "cost: $5"
+    val empty: String = ""
+    return simple + braced + combo + literalDollar + empty
+}
+
+fun main() {
+    println(greet("aura", 1))
+}
+"""
+}
+
+/// 期望值取自 tests/snapshots/baseline/lexer_string_interp.tokens.txt
+///
+/// 插值协议：`"a $name b ${n} c"` → StringLiteral / StringInterpStart 交替；
+/// 无插值的 `"cost: $5"` 与 `""` 各产出一个 StringLiteral。
+fun expectedStringInterp(): String {
+    return "Fun\nIdent\nLParen\nIdent\nColon\nIdent\nComma\nIdent\nColon\nIdent\nRParen\nColon\nIdent\nLBrace\n"
+        + "Val\nIdent\nColon\nIdent\nAssign\nStringLiteral\nStringInterpStart\n"
+        + "Val\nIdent\nColon\nIdent\nAssign\nStringLiteral\nStringInterpStart\n"
+        + "Val\nIdent\nColon\nIdent\nAssign\nStringLiteral\nStringInterpStart\n"
+        + "StringLiteral\nStringInterpStart\nStringLiteral\n"
+        + "Val\nIdent\nColon\nIdent\nAssign\nStringLiteral\n"
+        + "Val\nIdent\nColon\nIdent\nAssign\nStringLiteral\n"
+        + "Return\nIdent\nPlus\nIdent\nPlus\nIdent\nPlus\nIdent\nPlus\nIdent\nRBrace\n"
+        + "Fun\nIdent\nLParen\nRParen\nLBrace\nIdent\nLParen\nIdent\nLParen\nStringLiteral\n"
+        + "Comma\nIntLiteral\nRParen\nRParen\nRBrace\nEOF\n"
+}
+
+// ═════════════════════════════════════════════════════════════
+// 比对辅助：不一致时打印首个差异位置
+// ═════════════════════════════════════════════════════════════
+
+fun compareKinds(t: TestRunner, label: String, got: String, want: String) {
+    if (got == want) {
+        t.assertTrue(true, label)
+        return
+    }
+
+    val g: List<String> = got.split("\n")
+    val w: List<String> = want.split("\n")
+    val gn: Int = got.countChar("\n")
+    val wn: Int = want.countChar("\n")
+
+    var limit: Int = gn
+    if (wn < limit) {
+        limit = wn
+    }
+
+    var i: Int = 0
+    var shown: Boolean = false
+    while (i < limit) {
+        val gv: String = lxLine(g, i)
+        val wv: String = lxLine(w, i)
+        if (gv != wv && !shown) {
+            println("  首个差异 @ token " + toStr(i) + ": got=" + gv + " / want=" + wv)
+            shown = true
+        }
+        i = i + 1
+    }
+    println("  token 数量: got=" + toStr(gn) + " / want=" + toStr(wn))
+
+    t.assertTrue(false, label)
+}
+
+// ═════════════════════════════════════════════════════════════
+// 入口
+// ═════════════════════════════════════════════════════════════
+
+fun main() {
+    println("════════ Phase 1 验证用例：Lexer / Token / Span ════════")
+    println("")
+
+    var failures: Int = 0
+
+    // ── 套件 1：快照一致性（Phase 1 核心验收项）──────────────
+    val s1 = TestRunner()
+    s1.begin("Phase1/lexer-snapshot-parity")
+    compareKinds(s1, "declaration 用例与 Rust 基线一致", tokenizeKinds(srcDeclaration()),
+        expectedDeclaration())
+    compareKinds(s1, "control-flow 用例与 Rust 基线一致", tokenizeKinds(srcControlFlow()),
+        expectedControlFlow())
+    compareKinds(s1, "generic-function 用例与 Rust 基线一致", tokenizeKinds(srcGenericFunction()),
+        expectedGenericFunction())
+    compareKinds(s1, "string-interp 用例与 Rust 基线一致", tokenizeKinds(srcStringInterp()),
+        expectedStringInterp())
+    failures = failures + s1.report()
+
+    // ── 套件 2：Span 数据模型 ────────────────────────────────
+    val s2 = TestRunner()
+    s2.begin("Phase1/span")
+    val sp = spanSingle(5, 2, 3)
+    s2.assertEq(sp.start, 5, "spanSingle.start")
+    s2.assertEq(sp.end, 5, "spanSingle.end")
+    s2.assertTrue(sp.isEmpty(), "spanSingle.isEmpty")
+    s2.assertEq(sp.length(), 0, "spanSingle.length")
+    s2.assertEq(sp.startLine, 2, "spanSingle.startLine")
+    s2.assertEq(sp.startCol, 3, "spanSingle.startCol")
+
+    val a = Span(1, 4, 1, 1, 1, 5)
+    val b = Span(3, 9, 1, 3, 2, 2)
+    val m = spanMerge(a, b)
+    s2.assertEq(m.start, 1, "spanMerge.start = min")
+    s2.assertEq(m.end, 9, "spanMerge.end = max")
+    s2.assertEq(m.startLine, 1, "spanMerge.startLine")
+    s2.assertEq(m.startCol, 1, "spanMerge.startCol")
+    s2.assertEq(m.endLine, 2, "spanMerge.endLine")
+    s2.assertEq(m.endCol, 2, "spanMerge.endCol")
+    s2.assertEq(m.length(), 8, "spanMerge.length")
+    s2.assertTrue(spanSingle(0, 1, 1).describe() == "line 1 col 1-1", "span.describe 同行")
+    failures = failures + s2.report()
+
+    // ── 套件 3：Token 数据模型 ───────────────────────────────
+    val s3 = TestRunner()
+    s3.begin("Phase1/token")
+    val tk = Token("Val", "val").withSpan(0, 3, 1, 1, 1, 4)
+    s3.assertEq(tk.kind, "Val", "token.kind")
+    s3.assertEq(tk.literal, "val", "token.literal")
+    s3.assertEq(tk.start, 0, "token.start")
+    s3.assertEq(tk.end, 3, "token.end")
+    s3.assertEq(tk.span().length(), 3, "token.span().length()")
+    s3.assertEq(tk.display(), "Val", "token.display（关键字用种类名）")
+    s3.assertTrue(tk.isKeyword(), "token.isKeyword")
+
+    val id = Token("Ident", "counter").withSpan(10, 17, 3, 5, 3, 12)
+    s3.assertEq(id.display(), "counter", "Ident.display 返回字面量")
+    s3.assertFalse(id.isKeyword(), "Ident.isKeyword 为 false")
+    s3.assertEq(Token("EOF", "").display(), "<EOF>", "EOF.display")
+    s3.assertEq(Token("Error", "@!").display(), "<Error: @!>", "Error.display")
+    failures = failures + s3.report()
+
+    // ── 套件 4：关键字表 ─────────────────────────────────────
+    val s4 = TestRunner()
+    s4.begin("Phase1/keyword-table")
+    s4.assertEq(keywordKind("val"), "Val", "keywordKind(val)")
+    s4.assertEq(keywordKind("var"), "Var", "keywordKind(var)")
+    s4.assertEq(keywordKind("fun"), "Fun", "keywordKind(fun)")
+    s4.assertEq(keywordKind("value"), "Value", "keywordKind(value) — value 是关键字")
+    s4.assertEq(keywordKind("when"), "When", "keywordKind(when)")
+    s4.assertEq(keywordKind("true"), "BoolLiteral", "keywordKind(true)")
+    s4.assertEq(keywordKind("false"), "BoolLiteral", "keywordKind(false)")
+    s4.assertEq(keywordKind("Int"), "Ident", "keywordKind(Int) — 基本类型名为标识符")
+    s4.assertEq(keywordKind("String"), "Ident", "keywordKind(String)")
+    s4.assertEq(keywordKind("counter"), "Ident", "keywordKind(非关键字)")
+    failures = failures + s4.report()
+
+    // ── 套件 5：词法器边界行为 ───────────────────────────────
+    val s5 = TestRunner()
+    s5.begin("Phase1/lexer-behaviour")
+    s5.assertEq(tokenizeKinds(""), "EOF\n", "空输入 → 仅 EOF")
+    s5.assertEq(tokenizeKinds("   \n\t  "), "EOF\n", "纯空白 → 仅 EOF")
+    s5.assertEq(tokenizeKinds("0xFF"), "IntLiteral\nEOF\n", "十六进制")
+    s5.assertEq(tokenizeKinds("0b1010"), "IntLiteral\nEOF\n", "二进制")
+    s5.assertEq(tokenizeKinds("1_000_000"), "IntLiteral\nEOF\n", "下划线分隔整数")
+    s5.assertEq(tokenizeKinds("3.14"), "FloatLiteral\nEOF\n", "浮点")
+    s5.assertEq(tokenizeKinds("2.0e-3"), "FloatLiteral\nEOF\n", "科学计数")
+    s5.assertEq(tokenizeKinds("a != b"), "Ident\nNeq\nIdent\nEOF\n", "!= 运算符")
+    s5.assertEq(tokenizeKinds("a <= b >= c"), "Ident\nLtEq\nIdent\nGtEq\nIdent\nEOF\n", "<= >=")
+    s5.assertEq(tokenizeKinds("x << 2 >> 1"), "Ident\nLtLt\nIntLiteral\nGtGt\nIntLiteral\nEOF\n",
+        "<< >>")
+    s5.assertEq(tokenizeKinds("a && b || c"), "Ident\nAndAnd\nIdent\nOrOr\nIdent\nEOF\n", "&& ||")
+    s5.assertEq(tokenizeKinds("x?.y ?: z"),
+        "Ident\nQuestionMark\nDot\nIdent\nQuestionMark\nColon\nIdent\nEOF\n", "?. 拆为 ? .")
+    s5.assertEq(tokenizeKinds("a?.b !!.c"),
+        "Ident\nQuestionMark\nDot\nIdent\nDoubleBang\nDot\nIdent\nEOF\n", "!! → DoubleBang")
+    s5.assertEq(tokenizeKinds("1..10"), "IntLiteral\nDoubleDotOp\nIntLiteral\nEOF\n", "范围 ..")
+    s5.assertEq(tokenizeKinds("f() -> g"), "Ident\nLParen\nRParen\nArrow\nIdent\nEOF\n", "->")
+    s5.assertEq(tokenizeKinds("// 注释\nval"), "Val\nEOF\n", "单行注释跳过")
+    s5.assertEq(tokenizeKinds("/* 块\n注释 */ val"), "Val\nEOF\n", "跨行块注释跳过")
+    s5.assertEq(tokenizeKinds("/// 文档\nval"), "DocComment\nVal\nEOF\n", "文档注释产出 DocComment")
+    s5.assertEq(tokenizeKinds("\"hi\""), "StringLiteral\nEOF\n", "普通字符串")
+    s5.assertEq(tokenizeKinds("\"a\\nb\""), "StringLiteral\nEOF\n", "含转义字符串")
+    s5.assertEq(tokenizeKinds("\"\"\"raw\"\"\""), "StringLiteral\nEOF\n", "原始字符串")
+    s5.assertEq(tokenizeKinds("'A'"), "CharLiteral\nEOF\n", "字符字面量")
+
+    // span 与字面量
+    val t0 = tokenAt("val x = 100", 0)
+    s5.assertEq(t0.kind, "Val", "tokenAt(0).kind")
+    s5.assertEq(t0.literal, "val", "tokenAt(0).literal")
+    s5.assertEq(t0.start, 0, "tokenAt(0).start")
+    s5.assertEq(t0.end, 3, "tokenAt(0).end")
+    s5.assertEq(t0.startLine, 1, "tokenAt(0).startLine")
+    s5.assertEq(t0.startCol, 1, "tokenAt(0).startCol")
+
+    val t1 = tokenAt("val x = 100", 1)
+    s5.assertEq(t1.kind, "Ident", "tokenAt(1).kind")
+    s5.assertEq(t1.literal, "x", "tokenAt(1).literal")
+    s5.assertEq(t1.start, 4, "tokenAt(1).start")
+    s5.assertEq(t1.startCol, 5, "tokenAt(1).startCol")
+
+    val t2 = tokenAt("val x = 100", 2)
+    s5.assertEq(t2.kind, "Assign", "tokenAt(2).kind")
+    s5.assertEq(t2.literal, "=", "tokenAt(2).literal")
+
+    val t3 = tokenAt("val x = 100", 3)
+    s5.assertEq(t3.kind, "IntLiteral", "tokenAt(3).kind")
+    s5.assertEq(t3.literal, "100", "tokenAt(3).literal")
+
+    s5.assertEq(tokenCount("val x = 100"), 5, "tokenCount 含 EOF")
+    s5.assertEq(tokenAt("val x = 100", 4).kind, "EOF", "末尾为 EOF")
+
+    // 多行：行列跟踪
+    val el = tokenAt("val a = 1\nvar b = 2", 4)
+    s5.assertEq(el.kind, "Var", "跨行 token 种类")
+    s5.assertEq(el.startLine, 2, "跨行 token 起始行")
+    s5.assertEq(el.startCol, 1, "跨行 token 起始列")
+    failures = failures + s5.report()
+
+    // ── 汇总 ─────────────────────────────────────────────────
+    println("")
+    println("失败断言总数: " + toStr(failures))
+    println("")
+    if (failures == 0) {
+        println("RESULT: PASS")
+    } else {
+        println("RESULT: FAIL")
+    }
+}

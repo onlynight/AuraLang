@@ -43,6 +43,9 @@ pub struct Symbol {
     pub visibility: Visibility,
     pub span: Span,
     pub defined: bool,
+    /// 是否为编译器预置的内置（prelude）符号。
+    /// 用户自定义符号在重载解析中优先于内置符号（用户定义遮蔽内置）。
+    pub is_builtin: bool,
 }
 
 impl Symbol {
@@ -58,6 +61,7 @@ impl Symbol {
             visibility,
             span,
             defined: true,
+            is_builtin: false,
         }
     }
 }
@@ -200,6 +204,28 @@ impl SymbolTable {
             span,
         );
         self.insert(sym)
+    }
+
+    /// 插入编译器预置的内置（prelude）函数符号。
+    /// 与用户定义符号区分：重载解析时用户定义优先（用户定义遮蔽内置）。
+    pub fn insert_builtin_function(
+        &mut self,
+        name: impl Into<String>,
+        params: Vec<ParamSym>,
+        return_type: Ty,
+        visibility: Visibility,
+        span: Span,
+    ) -> Result<(), String> {
+        let name: String = name.into();
+        let key = name.clone();
+        self.insert_function(name, params, return_type, visibility, span)?;
+        // 标记最新插入的同名重载为内置
+        if let Some(list) = self.functions.get_mut(&key) {
+            if let Some(last) = list.last_mut() {
+                last.is_builtin = true;
+            }
+        }
+        Ok(())
     }
 
     /// 注册模块到符号表（用于 `import aura.math`）

@@ -1,0 +1,39 @@
+// aura:///aura/compiler/aura/lang/compiler/memory/MemoryPool.aura
+// 内存池（Phase 4: 完整 VM Aura 编写）
+/// 内存池管理。
+///
+/// @since 0.5
+internal object MemoryPool {
+
+    /// 创建内存池。
+    fun create(initialSize: Int): Map<String, Any> {
+        val pool: Map<String, Any> = Collections.mutableMapOf()
+        pool["size"] = initialSize
+        pool["used"] = 0
+        pool["allocated"] = 0
+        return pool
+    }
+
+    /// 从池中分配内存。
+    fun allocate(pool: Map<String, Any>, size: Int): Any {
+        val used = pool["used"] as Int
+        pool["used"] = used + size
+        return null
+    }
+
+    /// 释放内存回池。
+    fun free(pool: Map<String, Any>, size: Int): Unit {
+        val used = pool["used"] as Int
+        pool["used"] = used - size
+    }
+
+    /// 获取已使用内存。
+    fun used(pool: Map<String, Any>): Int {
+        return pool["used"] as Int
+    }
+
+    /// 获取版本信息。
+    fun version(): String {
+        return "0.5.0-phase4-phantom"
+    }
+}

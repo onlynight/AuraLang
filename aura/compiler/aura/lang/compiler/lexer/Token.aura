@@ -1,0 +1,147 @@
+// aura:///aura/lang/compiler/lexer/Token.aura
+package aura.lang.compiler.lexer
+// ─────────────────────────────────────────────────────────────
+// Token 数据模型 — 纯 Aura 化迁移 · Phase 1
+//
+// 对应 Rust `compiler/src/token.rs`。
+//
+// 设计说明（受当前 VM 能力约束）：
+//   * `TokenKind` 以**名称字符串**表示（取值与 Rust `TokenKind` 的 Debug 名称一致，
+//     如 `"Val"` / `"IntLiteral"` / `"LParen"`），因此可直接与 Rust 基线比对。
+//   * `Token` 的 span 以 6 个 Int 字段平铺存放（避免类字段初始化器调用构造函数的限制）；
+//     需要 `Span` 对象时调用 `span()` 物化。
+// ─────────────────────────────────────────────────────────────
+
+/// 关键字 → TokenKind 名称映射表（`word|Kind` 以 `|` 分隔）。
+///
+/// 顺序与 Rust `KEYWORDS` 保持一致；`Int`/`String` 等基本类型名映射为 `Ident`。
+fun keywordTable(): String {
+    return "val|Val|var|Var|fun|Fun|struct|Struct|class|Class|interface|Interface"
+        + "|enum|Enum|actor|Actor|sealed|Sealed|return|Return|if|If|else|Else|when|When"
+        + "|for|For|in|In|while|While|do|Do|break|Break|continue|Continue|try|Try"
+        + "|catch|Catch|finally|Finally|throw|Throw|is|Is|as|As|public|Public"
+        + "|private|Private|protected|Protected|null|Null|this|This|super|Super"
+        + "|object|Object|unit|Unit|typealias|Typealias|override|Override|suspend|Suspend"
+        + "|inline|Inline|const|Const|comptime|Comptime|defer|Defer|extern|Extern"
+        + "|import|Import|lazy|Lazy|lateinit|Lateinit|data|Data|value|Value|await|Await"
+        + "|to|To|async|Async|select|Select|box|Box|weak|Weak|malloc|Malloc|free|Free"
+        + "|retain|Retain|release|Release"
+        + "|Int|Ident|Long|Ident|Short|Ident|Byte|Ident|Float|Ident|Double|Ident"
+        + "|Boolean|Ident|Char|Ident|String|Ident|Any|Ident|Nothing|Ident|Unit|Unit"
+        + "|true|BoolLiteral|false|BoolLiteral|it|Ident|by|Ident"
+}
+
+/// 关键字查询表：把 `key|kind|key|kind|...` 规整为 `#key|kind|#key|kind|...`。
+///
+/// **键前置 `#` 标记**：kind 值本身也是普通单词（`Box` / `Ident` / `Int` …），
+/// 若不加标记，用 `|word|` 做子串搜索会把 kind 值误判为键
+/// （例如查 `Box` 会命中 `|box|Box|` 里的值而返回 `Weak`）。
+/// 本函数只在 `Lexer` 初始化时调用一次，开销可忽略。
+fun keywordSearchTable(): String {
+    val parts: List<String> = keywordTable().split("|")
+    var out: String = ""
+    var i: Int = 0
+    while (i + 1 < parts.size) {
+        out = out + "#" + parts[i] + "|" + parts[i + 1] + "|"
+        i = i + 2
+    }
+    return out
+}
+
+/// 查询标识符对应的 TokenKind 名称；非关键字返回 `"Ident"`。
+///
+/// 与 Rust `lookup_keyword` 等价（首次命中即返回）。本函数会重建查询表，
+/// 仅适合冷路径；热路径（`Lexer.scanIdentifier`）请用缓存的表 +
+/// [`keywordLookup`]（见 `Lexer.lxKwKind`）。
+fun keywordKind(word: String): String {
+    return keywordLookup(keywordSearchTable(), word)
+}
+
+/// 在 `#word|Kind|#word|Kind|...` 形态的关键字查询表上查 `word` 的 Kind。
+///
+/// **零 `split`**：单次 `contains` 定位 + 两次切片。旧实现对每次调用都
+/// `split("|")` 出整表（~180 个子串 + 一张 List），AOT 运行时没有 GC，
+/// 每个标识符就产生约 200 次永久分配——解析 600KB 源码吃掉数百 MB 的主因。
+fun keywordLookup(table: String, word: String): String {
+    if (word == "") {
+        return "Ident"
+    }
+    val needle: String = "#" + word + "|"
+    if (!table.contains(needle)) {
+        return "Ident"
+    }
+    return table.substringAfter(needle).substringBefore("|")
+}
+
+/// 是否为关键字词。
+fun isKeywordWord(word: String): Boolean {
+    return keywordKind(word) != "Ident"
+}
+
+/// 词法单元。
+class Token {
+
+    /// TokenKind 名称（与 Rust Debug 名一致）。
+    var kind: String = ""
+
+    /// 原始字面量文本（标识符名、字面量内容、运算符拼写等）。
+    var literal: String = ""
+
+    /// 起始字符偏移。
+    var start: Int = 0
+
+    /// 结束字符偏移（不含）。
+    var end: Int = 0
+
+    /// 起始行。
+    var startLine: Int = 1
+
+    /// 起始列。
+    var startCol: Int = 1
+
+    /// 结束行。
+    var endLine: Int = 1
+
+    /// 结束列。
+    var endCol: Int = 1
+
+    init(k: String, lit: String) {
+        this.kind = k
+        this.literal = lit
+    }
+
+    /// 写入 span 信息，返回自身（链式构造）。
+    fun withSpan(s: Int, e: Int, sl: Int, sc: Int, el: Int, ec: Int): Token {
+        this.start = s
+        this.end = e
+        this.startLine = sl
+        this.startCol = sc
+        this.endLine = el
+        this.endCol = ec
+        return this
+    }
+
+    /// 物化为 `Span` 对象。
+    fun span(): Span {
+        return Span(this.start, this.end, this.startLine, this.startCol, this.endLine, this.endCol)
+    }
+
+    /// 是否关键字。
+    fun isKeyword(): Boolean {
+        return isKeywordWord(this.literal)
+    }
+
+    /// 人类可读展示（对齐 Rust `Token::display`）。
+    fun display(): String {
+        if (this.kind == "Ident" && this.literal != "") {
+            return this.literal
+        }
+        if (this.kind == "EOF") {
+            return "<EOF>"
+        }
+        if (this.kind == "Error") {
+            return "<Error: " + this.literal + ">"
+        }
+        return this.kind
+    }
+}

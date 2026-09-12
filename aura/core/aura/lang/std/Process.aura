@@ -1,0 +1,60 @@
+// aura:///aura/lang/std/Process.aura
+package aura.lang.std
+// 标准库模块，不可修改
+// 实现：syscall 邻近模块。Aura 侧只声明签名，实现位于引导层（Layer 0-A / FFI），
+//       因为进程控制（退出/派生子进程）必须经由操作系统，无法用纯 Aura 表达
+// (package 声明由编译器自动注入，无需显式声明)
+/// 进程管理模块。
+///
+/// 使用前需 import：
+/// ```aura
+/// import aura.process.*
+/// ```
+///
+/// @since 0.1
+internal object Process {
+
+    // ── 退出 ──
+
+    /// 退出进程并返回指定状态码。
+    fun exit(code: Int): Unit
+
+    /// 获取进程退出状态码。
+    val exitCode: Int
+
+    // ── 命令行参数 ──
+
+    /// 获取命令行参数列表。
+    val args: List<String>
+
+    /// 获取指定索引的命令行参数。
+    fun arg(index: Int): String
+
+    /// 获取命令行参数数量。
+    val argCount: Int
+
+    // ── 进程信息 ──
+
+    /// 获取当前进程 ID。
+    val pid: Int
+
+    // ── 进程控制 ──
+
+    /// 启动新进程。
+    fun spawn(command: String): Any
+
+    /// 以 shell 同步执行命令行，返回退出码（阻塞直到结束）。
+    ///
+    /// Windows 经 `cmd /C`、类 Unix 经 `sh -c` 执行，便于组合多步命令。
+    /// 与 `spawn`（异步、不等待）互补，供编译器驱动调用 `llc`/`clang` 等外部工具。
+    fun run(command: String): Int
+
+    /// 杀死指定进程。
+    fun kill(pid: Int): Unit
+
+    /// 等待指定进程结束并返回退出码。
+    fun wait(pid: Int): Int
+
+    /// 退出进程（`exit` 的别名）。
+    fun exitProcess(code: Int): Unit
+}

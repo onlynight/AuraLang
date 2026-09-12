@@ -56,6 +56,9 @@ fn main() {
         println!("cargo:rustc-env=AURA_CONFIG_CROSS_LINKER_ARMV7={}", c);
     }
 
+    // Phase 3: 检查嵌入式标准库 .auc 文件是否存在
+    check_embedded_stdlib();
+
     // 探测 LLVM 安装路径
     let home = detect_llvm_home(&config);
 
@@ -83,6 +86,45 @@ fn main() {
     println!("cargo:rerun-if-env-changed=AURA_LLVM_HOME");
     println!("cargo:rerun-if-env-changed=LLVM_CONFIG");
     println!("cargo:rerun-if-changed=build.rs");
+}
+
+/// Phase 3: 检查嵌入式标准库 .auc 文件是否存在
+///
+/// 如果 .auc 文件不存在，打印警告并提示用户运行 `aura stdlib-compile`
+fn check_embedded_stdlib() {
+    let manifest_dir = match env::var("CARGO_MANIFEST_DIR") {
+        Ok(d) => PathBuf::from(d),
+        Err(_) => return,
+    };
+
+    // .auc 文件路径（相对于 compiler/ 目录）
+    let std_auc_dir = manifest_dir.parent().unwrap().join("build");
+
+    // 需要嵌入的标准库模块
+    let required_modules = [
+        "Math",
+        "Time",
+        "Collections",
+        "Test",
+    ];
+
+    let mut missing = Vec::new();
+    for module in &required_modules {
+        let auc_path = std_auc_dir.join(format!("{}.auc", module));
+        if !auc_path.exists() {
+            missing.push(module.to_string());
+        }
+    }
+
+    if !missing.is_empty() {
+        println!(
+            "cargo:warning=Aura: 嵌入式标准库缺少 .auc 文件: {}",
+            missing.join(", ")
+        );
+        println!(
+            "cargo:warning=Aura: 请运行 `aura stdlib-compile aura/core/aura/lang/std --output build` 预编译"
+        );
+    }
 }
 
 /// 从根 Cargo.toml 读取 `[workspace.metadata.aura]` 配置

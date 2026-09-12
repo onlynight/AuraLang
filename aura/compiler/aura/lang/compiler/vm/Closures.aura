@@ -1,0 +1,349 @@
+// aura:///aura/lang/compiler/vm/Closures.aura
+package aura.lang.compiler.vm
+// ─────────────────────────────────────────────────────────────
+// 闭包与上值管理 — 纯 Aura 化迁移 · Phase 5 (任务 5.1)
+//
+// 对应 Rust `compiler/src/vm/closure.rs`。
+//
+// ── 设计方式 ──
+//
+// 使用扁平字符串表示（与前端 IR 一致），适配当前 VM 限制：
+//   - 闭包表（closureTable）：每行 `closureId|funcName|upvalueCount\n`
+//   - 上值表（upvalueTable）：每行 `upvalueId|varName|source|value\n`
+//   - source: "local"（栈上局部变量）或 "shared"（已捕获的上值）
+//
+// ── 闭包生命周期 ──
+//
+//   1. 编译期：Codegen 生成闭包指令（LOAD_CLOSURE）
+//   2. 运行期：VM 创建闭包对象，解析上值
+//   3. 逃逸分析：上值从局部变量提升为共享上值
+//
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.compiler.lexer.Span
+
+/// 闭包与上值管理器。
+class ClosureManager {
+
+    /// 闭包表（每行：`closureId|funcName|upvalueCount`）。
+    var closureTable: String = ""
+
+    /// 上值表（每行：`upvalueId|varName|source|value`）。
+    var upvalueTable: String = ""
+
+    /// 闭包总数。
+    var closureCount: Int = 0
+
+    /// 上值总数。
+    var upvalueCount: Int = 0
+
+    /// 当前闭包 id 计数器。
+    var nextClosureId: Int = 0
+
+    /// 当前上值 id 计数器。
+    var nextUpvalueId: Int = 0
+
+    init() {
+        this.closureTable = ""
+        this.upvalueTable = ""
+        this.closureCount = 0
+        this.upvalueCount = 0
+        this.nextClosureId = 0
+        this.nextUpvalueId = 0
+    }
+
+    // ── 闭包操作 ──
+
+    /// 注册一个闭包，返回其 id。
+    fun registerClosure(funcName: String, upvalueCount: Int): Int {
+        val id: Int = this.nextClosureId
+        this.nextClosureId = this.nextClosureId + 1
+        this.closureTable = this.closureTable + toStr(id) + "|" + funcName + "|" + toStr(upvalueCount) + "\n"
+        this.closureCount = this.closureCount + 1
+        return id
+    }
+
+    /// 查询闭包的函数名。
+    fun closureFuncName(closureId: Int): String {
+        return this.fieldAt(this.closureTable, closureId, "\n", "|", 1)
+    }
+
+    /// 查询闭包的上值数量。
+    fun closureUpvalueCount(closureId: Int): Int {
+        val val: String = this.fieldAt(this.closureTable, closureId, "\n", "|", 2)
+        return cmToInt(val)
+    }
+
+    // ── 上值操作 ──
+
+    /// 注册一个上值，返回其 id。
+    fun registerUpvalue(varName: String, source: String): Int {
+        val id: Int = this.nextUpvalueId
+        this.nextUpvalueId = this.nextUpvalueId + 1
+        // value 初始为空
+        this.upvalueTable = this.upvalueTable + toStr(id) + "|" + varName + "|" + source + "|\n"
+        this.upvalueCount = this.upvalueCount + 1
+        return id
+    }
+
+    /// 设置上值。
+    fun setUpvalue(upvalueId: Int, value: String): Unit {
+        // 简化：重建上值表（VM 限制下避免复杂字符串操作）
+        var lines: String = this.upvalueTable
+        var pos: Int = 0
+        var len: Int = lines.length
+        var lineStart: Int = 0
+        var result: String = ""
+        var found: Boolean = false
+        while (pos < len) {
+            val c: String = toStr(lines[pos])
+            if (c == "\n") {
+                val line: String = this.sliceStr(lines, lineStart, pos - lineStart)
+                val lineId: Int = cmToInt(this.fieldAt(line, 0, "|", "|", 0))
+                if (!found && lineId == upvalueId) {
+                    result = result + toStr(upvalueId) + "|" + this.upvalueName(upvalueId) + "|" + this.upvalueSource(upvalueId) + "|" + value + "\n"
+                    found = true
+                } else {
+                    result = result + line + "\n"
+                }
+                lineStart = pos + 1
+            }
+            pos = pos + 1
+        }
+        // 处理最后一行（无换行符结尾）
+        if (lineStart < len) {
+            val line: String = this.sliceStr(lines, lineStart, len - lineStart)
+            val lineId: Int = cmToInt(this.fieldAt(line, 0, "|", "|", 0))
+            if (!found && lineId == upvalueId) {
+                result = result + toStr(upvalueId) + "|" + this.upvalueName(upvalueId) + "|" + this.upvalueSource(upvalueId) + "|" + value + "\n"
+            } else {
+                result = result + line + "\n"
+            }
+        }
+        this.upvalueTable = result
+    }
+
+    /// 查询上值名称。
+    fun upvalueName(upvalueId: Int): String {
+        return this.fieldAt(this.upvalueTable, upvalueId, "\n", "|", 1)
+    }
+
+    /// 查询上值来源。
+    fun upvalueSource(upvalueId: Int): String {
+        return this.fieldAt(this.upvalueTable, upvalueId, "\n", "|", 2)
+    }
+
+    /// 查询上值值。
+    fun upvalueValue(upvalueId: Int): String {
+        return this.fieldAt(this.upvalueTable, upvalueId, "\n", "|", 3)
+    }
+
+    // ── 闭包解析 ──
+
+    /// 解析闭包的上值列表，返回上值 id 列表（逗号分隔）。
+    fun resolveUpvalues(closureId: Int, varNames: String): String {
+        val names: String = varNames
+        val count: Int = this.countChars(names, ",") + 1
+        var upvalueIds: String = ""
+        var i: Int = 0
+        var pos: Int = 0
+        var len: Int = names.length
+        while (i < count) {
+            val end: Int = this.findChar(names, pos, ",")
+            if (end < 0) {
+                val name: String = this.sliceStr(names, pos, len - pos)
+                val uid: Int = this.findOrRegisterUpvalue(name)
+                if (upvalueIds == "") {
+                    upvalueIds = toStr(uid)
+                } else {
+                    upvalueIds = upvalueIds + "," + toStr(uid)
+                }
+                pos = len
+            } else {
+                val name: String = this.sliceStr(names, pos, end - pos)
+                val uid: Int = this.findOrRegisterUpvalue(name)
+                if (upvalueIds == "") {
+                    upvalueIds = toStr(uid)
+                } else {
+                    upvalueIds = upvalueIds + "," + toStr(uid)
+                }
+                pos = end + 1
+            }
+            i = i + 1
+        }
+        return upvalueIds
+    }
+
+    /// 查找或注册上值。
+    fun findOrRegisterUpvalue(varName: String): Int {
+        // 先查找
+        var pos: Int = 0
+        var len: Int = this.upvalueTable.length
+        var lineStart: Int = 0
+        while (pos < len) {
+            val c: String = toStr(this.upvalueTable[pos])
+            if (c == "\n") {
+                val line: String = this.sliceStr(this.upvalueTable, lineStart, pos - lineStart)
+                val name: String = this.fieldAt(line, 1, "|", "|", 0)
+                if (name == varName) {
+                    return cmToInt(this.fieldAt(line, 0, "|", "|", 0))
+                }
+                lineStart = pos + 1
+            }
+            pos = pos + 1
+        }
+        // 未找到，注册新上值
+        return this.registerUpvalue(varName, "shared")
+    }
+
+    // ── 闭包创建 ──
+
+    /// 创建闭包对象，返回闭包描述（扁平字符串）。
+    fun createClosure(funcName: String, varNames: String): String {
+        val count: Int = this.countChars(varNames, ",") + 1
+        val closureId: Int = this.registerClosure(funcName, count)
+        val upvalueIds: String = this.resolveUpvalues(closureId, varNames)
+        return toStr(closureId) + "|" + funcName + "|" + upvalueIds
+    }
+
+    /// 获取闭包总数。
+    fun getClosureCount(): Int {
+        return this.closureCount
+    }
+
+    /// 获取上值总数。
+    fun getUpvalueCount(): Int {
+        return this.upvalueCount
+    }
+
+    // ── 内部辅助 ──
+
+    /// 取第 rowIdx 行、第 colIdx 列的值。
+    fun fieldAt(text: String, rowIdx: Int, rowSep: String, colSep: String, colIdx: Int): String {
+        // 先取行
+        val line: String = cmFieldAtRow(text, rowIdx, rowSep)
+        // 再取列
+        return cmFieldAtCol(line, colIdx, colSep)
+    }
+
+    /// 取第 index 个以 sep 分隔的行。
+    fun cmFieldAtRow(text: String, index: Int, sep: String): String {
+        var i: Int = 0
+        var fieldStart: Int = 0
+        var cur: Int = 0
+        var fieldLen: Int = text.length
+        while (i < fieldLen) {
+            val c: String = toStr(text[i])
+            if (c == sep) {
+                if (cur == index) {
+                    return this.sliceStr(text, fieldStart, i - fieldStart)
+                }
+                cur = cur + 1
+                fieldStart = i + 1
+            }
+            i = i + 1
+        }
+        if (cur == index) {
+            return this.sliceStr(text, fieldStart, fieldLen - fieldStart)
+        }
+        return ""
+    }
+
+    /// 取第 index 个以 sep 分隔的列。
+    fun cmFieldAtCol(text: String, index: Int, sep: String): String {
+        var i: Int = 0
+        var fieldStart: Int = 0
+        var cur: Int = 0
+        var fieldLen: Int = text.length
+        while (i < fieldLen) {
+            val c: String = toStr(text[i])
+            if (c == sep) {
+                if (cur == index) {
+                    return this.sliceStr(text, fieldStart, i - fieldStart)
+                }
+                cur = cur + 1
+                fieldStart = i + 1
+            }
+            i = i + 1
+        }
+        if (cur == index) {
+            return this.sliceStr(text, fieldStart, fieldLen - fieldStart)
+        }
+        return ""
+    }
+
+    /// 字符串切片。
+    fun sliceStr(text: String, start: Int, length: Int): String {
+        var result: String = ""
+        var end: Int = start + length
+        if (end > text.length) {
+            end = text.length
+        }
+        var i: Int = start
+        while (i < end) {
+            result = result + toStr(text[i])
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 查找字符位置。
+    fun findChar(text: String, start: Int, ch: String): Int {
+        var i: Int = start
+        var len: Int = text.length
+        while (i < len) {
+            if (toStr(text[i]) == ch) {
+                return i
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// 统计字符出现次数。
+    fun countChars(text: String, ch: String): Int {
+        var count: Int = 0
+        var i: Int = 0
+        var len: Int = text.length
+        while (i < len) {
+            if (toStr(text[i]) == ch) {
+                count = count + 1
+            }
+            i = i + 1
+        }
+        return count
+    }
+}
+
+/// 字符串转整数（本地实现）。
+fun cmToInt(text: String): Int {
+    var total: Int = 0
+    var i: Int = 0
+    var len: Int = text.length
+    var neg: Boolean = false
+    if (len > 0 && toStr(text[0]) == "-") {
+        neg = true
+        i = 1
+    }
+    while (i < len) {
+        val c: String = toStr(text[i])
+        var digit: Int = -1
+        var j: Int = 0
+        while (j < 10) {
+            if (toStr(j) == c) {
+                digit = j
+                break
+            }
+            j = j + 1
+        }
+        if (digit >= 0) {
+            total = total * 10 + digit
+        }
+        i = i + 1
+    }
+    if (neg) {
+        return -total
+    }
+    return total
+}

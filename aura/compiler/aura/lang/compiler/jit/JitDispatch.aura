@@ -1,0 +1,396 @@
+// aura:///aura/lang/compiler/jit/JitDispatch.aura
+package aura.lang.compiler.jit
+// ─────────────────────────────────────────────────────────────
+// JIT 派发与解释器回退 — 纯 Aura 化迁移 · Phase 7 (任务 7.5)
+//
+// 对应 Rust `compiler/src/vm/mod.rs` 的热点接缝与派发逻辑：
+//   * `maybe_jit_compile`  —— 达阈值时尝试编译；
+//   * `force_jit_compile`  —— Fix A：入口函数忽略阈值强制编译；
+//   * `try_jit_compile`    —— Fix B：先递归编译被调用者，再编译自身；
+//   * 原生派发 / 解释器回退 —— 已编译走原生入口，否则回退解释器。
+//
+// ── 回退语义 ──
+//
+//   不可编译函数（白名单不匹配）记入 skip 集合后**永久回退解释器**，
+//   保证结果与纯 VM 一致；本模块内置一个最小解释器（`jitInterpret`）
+//   用于回退执行与「优化前后语义差分」验证。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+
+/// 派发决策常量。
+object JitDecide {
+    /// 已编译走原生码。
+    const NATIVE: String = "native"
+    /// 已跳过，回退解释器。
+    const SKIP: String = "skip"
+    /// 未达阈值，暂用解释器。
+    const DEFER: String = "defer"
+}
+
+/// 派发决策（对应 Rust 运行期分支选择）。
+fun jitDecide(state: JitState, idx: Int): String {
+    if (state.isCompiled(idx)) {
+        return JitDecide.NATIVE
+    }
+    if (state.isSkipped(idx)) {
+        return JitDecide.SKIP
+    }
+    return JitDecide.DEFER
+}
+
+/// 回退原因（已编译返回空串）。
+fun jitFallbackReason(state: JitState, idx: Int): String {
+    if (state.isCompiled(idx)) {
+        return ""
+    }
+    if (state.isSkipped(idx)) {
+        return state.skipReason(idx)
+    }
+    return "未达热点阈值"
+}
+
+/// 尝试编译函数（对应 Rust `try_jit_compile`）。
+///
+/// Fix B：先按调用图后序编译被调用者，保证其分发表条目已存在，再编译自身。
+/// 返回是否编译成功。
+fun jitTryCompile(state: JitState, funcs: String, code: String, idx: Int): Boolean {
+    val order: String = jitCompileOrder(funcs, idx)
+    val n: Int = jitLineCount(order)
+    var i: Int = 0
+    // 只编译起点函数本身；被调用者按顺序先行登记（其代码假设同样可编译）
+    while (i < n) {
+        val cur: Int = jitParseInt(jitLineAt(order, i))
+        if (cur == idx) {
+            // 自身：检查白名单
+            val reason: String = jitSkipReason(code)
+            if (reason == "") {
+                state.insert(cur)
+                return true
+            }
+            state.skip(cur, reason)
+            return false
+        }
+        // 被调用者：登记分发表条目（若尚未处理）
+        if (!state.isCompiled(cur)) {
+            if (!state.isSkipped(cur)) {
+                state.insert(cur)
+            }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+/// 热点编译接缝（对应 `maybe_jit_compile`）：达阈值才尝试编译。
+fun jitMaybeCompile(state: JitState, funcs: String, code: String, idx: Int): Boolean {
+    if (!state.shouldCompile(idx)) {
+        return false
+    }
+    return jitTryCompile(state, funcs, code, idx)
+}
+
+/// Fix A：入口函数强制编译（忽略阈值），返回动作说明。
+fun jitForceEntry(state: JitState, funcs: String, code: String, entryIdx: Int): String {
+    if (state.isCompiled(entryIdx)) {
+        return "already-native"
+    }
+    if (state.isSkipped(entryIdx)) {
+        return "skipped"
+    }
+    val ok: Boolean = jitTryCompile(state, funcs, code, entryIdx)
+    if (ok) {
+        return "forced-native"
+    }
+    return "fallback-interpreter"
+}
+
+/// 原生派发模拟：已编译返回入口标记，否则标记回退解释器。
+fun jitInvoke(state: JitState, calleeIdx: Int): String {
+    val token: String = state.entryToken(calleeIdx)
+    if (token != "") {
+        return "native:" + token
+    }
+    return "interpreter"
+}
+
+// ── 解释器回退（最小 VM）──
+
+/// 解释执行解码代码，返回结果文本；出错返回 `deopt:<原因>`。
+///
+/// 支持指令：LoadConst/LoadVar/StoreVar/Pop/Dup/算术/比较/逻辑/位运算/
+/// Jump/JumpIfTrue/JumpIfFalse/Return/ReturnUnit。
+/// `Call`/`CallNative`/对象分配等标记为 `deopt`（回退到真实 VM）。
+fun jitInterpret(code: String, consts: String, maxSteps: Int): String {
+    val m: JitInterp = JitInterp()
+    return m.run(code, consts, maxSteps)
+}
+
+/// 最小解释器（回退路径 + 优化差分验证）。
+class JitInterp {
+
+    /// 解码代码。
+    var code: String = ""
+
+    /// 常量池。
+    var consts: String = ""
+
+    /// 局部变量（记录表：`slot|value`）。
+    var locals: String = ""
+
+    /// 运算栈（行表）。
+    var stack: String = ""
+
+    /// 指令指针。
+    var ip: Int = 0
+
+    /// 已执行步数。
+    var steps: Int = 0
+
+    /// 步数上限。
+    var maxSteps: Int = 100000
+
+    /// 返回值。
+    var result: String = ""
+
+    /// 是否停止。
+    var halt: Boolean = false
+
+    /// 错误（空 = 无）。
+    var error: String = ""
+
+    init() {
+        this.code = ""
+        this.consts = ""
+        this.locals = ""
+        this.stack = ""
+        this.ip = 0
+        this.steps = 0
+        this.maxSteps = 100000
+        this.result = ""
+        this.halt = false
+        this.error = ""
+    }
+
+    /// 执行。
+    fun run(program: String, pool: String, limit: Int): String {
+        this.code = program
+        this.consts = pool
+        this.locals = ""
+        this.stack = ""
+        this.ip = 0
+        this.steps = 0
+        this.maxSteps = limit
+        this.result = ""
+        this.halt = false
+        this.error = ""
+
+        val n: Int = jitLineCount(this.code)
+        while (!this.halt && this.ip < n) {
+            this.steps = this.steps + 1
+            if (this.steps > this.maxSteps) {
+                this.error = "step-limit"
+                break
+            }
+            val line: String = jitLineAt(this.code, this.ip)
+            this.ip = this.ip + 1
+            this.exec(line)
+        }
+        if (this.error != "") {
+            return "deopt:" + this.error
+        }
+        return this.result
+    }
+
+    // ── 栈 ──
+
+    /// 压栈。
+    fun push(value: String): Unit {
+        this.stack = this.stack + value + "\n"
+    }
+
+    /// 弹栈（空栈置错）。
+    fun pop(): String {
+        val n: Int = jitLineCount(this.stack)
+        if (n == 0) {
+            this.error = "stack-underflow"
+            this.halt = true
+            return "0"
+        }
+        val value: String = jitLineAt(this.stack, n - 1)
+        var out: String = ""
+        var i: Int = 0
+        while (i < n - 1) {
+            out = out + jitLineAt(this.stack, i) + "\n"
+            i = i + 1
+        }
+        this.stack = out
+        return value
+    }
+
+    /// 读局部变量。
+    fun getLocal(slot: String): String {
+        return jitRecordGet(this.locals, slot)
+    }
+
+    /// 写局部变量。
+    fun setLocal(slot: String, value: String): Unit {
+        this.locals = jitRecordSet(this.locals, slot, value)
+    }
+
+    // ── 单指令 ──
+
+    /// 执行一条指令。
+    fun exec(line: String): Unit {
+        val op: String = jitOpcodeOf(line)
+        val arg: String = jitArgOf(line)
+
+        if (op == "LoadConst") {
+            this.push(jitLineAt(this.consts, jitParseInt(arg)))
+            return
+        }
+        if (op == "LoadVar") {
+            this.push(this.getLocal(arg))
+            return
+        }
+        if (op == "StoreVar") {
+            this.setLocal(arg, this.pop())
+            return
+        }
+        if (op == "Pop") {
+            this.pop()
+            return
+        }
+        if (op == "Dup") {
+            val v: String = this.pop()
+            this.push(v)
+            this.push(v)
+            return
+        }
+        if (op == "Add" || op == "Sub" || op == "Mul" || op == "Div" || op == "Rem") {
+            val b: Int = jitParseInt(this.pop())
+            val a: Int = jitParseInt(this.pop())
+            this.push(this.arith(op, a, b))
+            return
+        }
+        if (op == "Neg") {
+            val a: Int = jitParseInt(this.pop())
+            this.push(toStr(0 - a))
+            return
+        }
+        if (op == "Not") {
+            val a: Int = jitParseInt(this.pop())
+            this.push(toStr(0 - a - 1))
+            return
+        }
+        if (jitIsCompareOp(op)) {
+            val b: Int = jitParseInt(this.pop())
+            val a: Int = jitParseInt(this.pop())
+            this.push(jitFoldCompare(op, a, b))
+            return
+        }
+        if (op == "And" || op == "BitAnd") {
+            val b: Int = jitParseInt(this.pop())
+            val a: Int = jitParseInt(this.pop())
+            this.push(toStr(jitBitAnd(a, b)))
+            return
+        }
+        if (op == "Shl") {
+            val b: Int = jitParseInt(this.pop())
+            val a: Int = jitParseInt(this.pop())
+            this.push(toStr(this.shiftLeft(a, b)))
+            return
+        }
+        if (op == "Shr") {
+            val b: Int = jitParseInt(this.pop())
+            val a: Int = jitParseInt(this.pop())
+            this.push(toStr(this.shiftRight(a, b)))
+            return
+        }
+        if (op == "Jump") {
+            this.ip = jitParseInt(arg)
+            return
+        }
+        if (op == "JumpIfTrue") {
+            val c: Int = jitParseInt(this.pop())
+            if (c != 0) {
+                this.ip = jitParseInt(arg)
+            }
+            return
+        }
+        if (op == "JumpIfFalse") {
+            val c: Int = jitParseInt(this.pop())
+            if (c == 0) {
+                this.ip = jitParseInt(arg)
+            }
+            return
+        }
+        if (op == "Return") {
+            this.result = this.pop()
+            this.halt = true
+            return
+        }
+        if (op == "ReturnUnit") {
+            this.result = "null"
+            this.halt = true
+            return
+        }
+        // 其余（Call / CallNative / 集合分配 / ARC …）不可解释 → 回退
+        this.error = "unsupported:" + op
+        this.halt = true
+    }
+
+    // ── 运算 ──
+
+    /// 整数算术。
+    fun arith(op: String, a: Int, b: Int): String {
+        if (op == "Add") {
+            return toStr(a + b)
+        }
+        if (op == "Sub") {
+            return toStr(a - b)
+        }
+        if (op == "Mul") {
+            return toStr(a * b)
+        }
+        if (op == "Div") {
+            if (b == 0) {
+                this.error = "div-by-zero"
+                this.halt = true
+                return "0"
+            }
+            return toStr(a / b)
+        }
+        if (op == "Rem") {
+            if (b == 0) {
+                this.error = "div-by-zero"
+                this.halt = true
+                return "0"
+            }
+            return toStr(a - (a / b) * b)
+        }
+        return "0"
+    }
+
+    /// 左移。
+    fun shiftLeft(a: Int, b: Int): Int {
+        var r: Int = a
+        var i: Int = 0
+        while (i < b) {
+            r = r * 2
+            i = i + 1
+        }
+        return r
+    }
+
+    /// 算术右移。
+    fun shiftRight(a: Int, b: Int): Int {
+        var r: Int = a
+        var i: Int = 0
+        while (i < b) {
+            r = r / 2
+            i = i + 1
+        }
+        return r
+    }
+}

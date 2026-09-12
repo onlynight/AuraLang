@@ -1,0 +1,260 @@
+// aura:///aura/lang/std/Time.aura
+package aura.lang.std
+// 标准库模块，不可修改
+// 实现：时钟/休眠等 syscall 成员保留 native（Layer 0-A）；
+//       时间差、日期换算、格式化与解析全部以 Aura 编写（Layer 1）
+// (package 声明由编译器自动注入，无需显式声明)
+/// 时间模块。
+///
+/// 时间戳统一使用 Unix 纪元（1970-01-01 00:00:00 UTC）以来的秒数。
+/// 日期换算采用纯 Aura 的儒略日算法实现，不依赖任何 native 函数；
+/// 只有"取当前时间"与"休眠"需要访问操作系统，属于引导层。
+///
+/// 使用前需 import：
+/// ```aura
+/// import aura.lang.std.Time
+/// ```
+///
+/// @since 0.1
+internal object Time {
+
+    // ── 常量 ──
+
+    /// 一天的秒数。
+    const SECONDS_PER_DAY: Int = 86400
+
+    /// 一小时的秒数。
+    const SECONDS_PER_HOUR: Int = 3600
+
+    /// 一分钟的秒数。
+    const SECONDS_PER_MINUTE: Int = 60
+
+    // ── 时间戳（native：需要访问系统时钟）──
+
+    /// 获取当前 Unix 时间戳（秒，浮点数）。
+    val now: Float
+
+    /// 获取当前 Unix 时间戳（秒，整数）。
+    val epoch: Int
+
+    /// 获取当前 Unix 时间戳（毫秒，整数）。
+    val currentTime: Int
+
+    // ── 休眠（native：需要访问操作系统调度）──
+
+    /// 休眠指定秒数。
+    fun sleep(seconds: Float): Unit
+
+    // ── 时间差（纯逻辑，Aura 实现）──
+
+    /// 计算两个时间戳的差值（秒，可为负）。
+    fun duration(start: Float, end: Float): Float {
+        return end - start
+    }
+
+    /// 计算两个时间戳的差值（秒，可为负）。
+    fun diff(start: Float, end: Float): Float {
+        return end - start
+    }
+
+    /// 计算两个时间戳之间的完整天数。
+    fun daysBetween(start: Int, end: Int): Int {
+        return (end - start) / SECONDS_PER_DAY
+    }
+
+    // ── 日期换算（纯逻辑，Aura 实现）──
+
+    /// 从 Unix 时间戳提取日期部分，返回 `[year, month, day]`（UTC）。
+    fun dateOf(timestamp: Int): List<Int> {
+        val days: Int = floorDiv(timestamp, SECONDS_PER_DAY)
+        return civilFromDays(days)
+    }
+
+    /// 从 Unix 时间戳提取时间部分，返回 `[hour, minute, second]`。
+    fun timeOf(timestamp: Int): List<Int> {
+        val secondsOfDay: Int = floorMod(timestamp, SECONDS_PER_DAY)
+        val result: List<Int> = mutableListOf<Int>()
+        result.add(secondsOfDay / SECONDS_PER_HOUR)
+        result.add(secondsOfDay % SECONDS_PER_HOUR / SECONDS_PER_MINUTE)
+        result.add(secondsOfDay % SECONDS_PER_MINUTE)
+        return result
+    }
+
+    /// 将时间戳转换为日期字符串（`YYYY-MM-DD`，UTC）。
+    fun toDateString(timestamp: Int): String {
+        val parts: List<Int> = dateOf(timestamp)
+        return pad(parts[0], 4) + "-" + pad(parts[1], 2) + "-" + pad(parts[2], 2)
+    }
+
+    /// 将时间戳转换为时间字符串（`HH:MM:SS`，UTC）。
+    fun toTimeString(timestamp: Int): String {
+        val parts: List<Int> = timeOf(timestamp)
+        return pad(parts[0], 2) + ":" + pad(parts[1], 2) + ":" + pad(parts[2], 2)
+    }
+
+    /// 将时间戳转换为日期时间字符串（`YYYY-MM-DD HH:MM:SS`，UTC）。
+    fun toDateTimeString(timestamp: Int): String {
+        return toDateString(timestamp) + " " + toTimeString(timestamp)
+    }
+
+    /// 按指定模式格式化时间戳。
+    ///
+    /// 支持的占位符：`YYYY` `MM` `DD` `HH` `mm` `ss`；其余字符原样输出。
+    fun formatDate(timestamp: Int, format: String): String {
+        val date: List<Int> = dateOf(timestamp)
+        val time: List<Int> = timeOf(timestamp)
+        var result: String = ""
+        var i: Int = 0
+        while (i < format.length) {
+            if (matchesAt(format, i, "YYYY")) {
+                result = result + pad(date[0], 4)
+                i = i + 4
+            } else if (matchesAt(format, i, "MM")) {
+                result = result + pad(date[1], 2)
+                i = i + 2
+            } else if (matchesAt(format, i, "DD")) {
+                result = result + pad(date[2], 2)
+                i = i + 2
+            } else if (matchesAt(format, i, "HH")) {
+                result = result + pad(time[0], 2)
+                i = i + 2
+            } else if (matchesAt(format, i, "mm")) {
+                result = result + pad(time[1], 2)
+                i = i + 2
+            } else if (matchesAt(format, i, "ss")) {
+                result = result + pad(time[2], 2)
+                i = i + 2
+            } else {
+                result = result + format[i].toString()
+                i = i + 1
+            }
+        }
+        return result
+    }
+
+    // ── 日期解析（纯逻辑，Aura 实现）──
+
+    /// 解析 `YYYY-MM-DD`（可带 `HH:MM:SS`）为 Unix 时间戳；解析失败返回 -1。
+    fun parseDate(text: String): Int {
+        if (text.length < 10) {
+            return -1
+        }
+        val year: Int = toInt(text.substring(0, 4))
+        val month: Int = toInt(text.substring(5, 7))
+        val day: Int = toInt(text.substring(8, 10))
+        if (month < 1 || month > 12) {
+            return -1
+        }
+        if (day < 1 || day > 31) {
+            return -1
+        }
+        var seconds: Int = daysFromCivil(year, month, day) * SECONDS_PER_DAY
+        if (text.length >= 19) {
+            val hour: Int = toInt(text.substring(11, 13))
+            val minute: Int = toInt(text.substring(14, 16))
+            val second: Int = toInt(text.substring(17, 19))
+            seconds = seconds + hour * SECONDS_PER_HOUR + minute * SECONDS_PER_MINUTE + second
+        }
+        return seconds
+    }
+
+    /// 判断给定年份是否为闰年。
+    fun isLeapYear(year: Int): Boolean {
+        if (year % 400 == 0) {
+            return true
+        }
+        if (year % 100 == 0) {
+            return false
+        }
+        return year % 4 == 0
+    }
+
+    // ── 内部工具（纯逻辑，Aura 实现）──
+
+    /// 向下取整除法（保证余数非负）。
+    private fun floorDiv(a: Int, b: Int): Int {
+        var q: Int = a / b
+        if (a % b != 0 && (a < 0) != (b < 0)) {
+            q = q - 1
+        }
+        return q
+    }
+
+    /// 非负取模。
+    private fun floorMod(a: Int, b: Int): Int {
+        return a - floorDiv(a, b) * b
+    }
+
+    /// 把 Unix 天数转换为 `[year, month, day]`（Howard Hinnant 的 civil_from_days 算法）。
+    private fun civilFromDays(days: Int): List<Int> {
+        val z: Int = days + 719468
+        val eraRaw: Int = if (z >= 0) z else z - 146096
+        val era: Int = eraRaw / 146097
+        val doe: Int = z - era * 146097
+        val yoe: Int = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+        var year: Int = yoe + era * 400
+        val doy: Int = doe - (365 * yoe + yoe / 4 - yoe / 100)
+        val mp: Int = (5 * doy + 2) / 153
+        val day: Int = doy - (153 * mp + 2) / 5 + 1
+        val month: Int = if (mp < 10) mp + 3 else mp - 9
+        if (month <= 2) {
+            year = year + 1
+        }
+        val result: List<Int> = mutableListOf<Int>()
+        result.add(year)
+        result.add(month)
+        result.add(day)
+        return result
+    }
+
+    /// 把 `[year, month, day]` 转换为 Unix 天数（civil_from_days 的逆运算）。
+    private fun daysFromCivil(year: Int, month: Int, day: Int): Int {
+        val y: Int = if (month <= 2) year - 1 else year
+        val eraRaw: Int = if (y >= 0) y else y - 399
+        val era: Int = eraRaw / 400
+        val yoe: Int = y - era * 400
+        val mp: Int = if (month > 2) month - 3 else month + 9
+        val doy: Int = (153 * mp + 2) / 5 + day - 1
+        val doe: Int = yoe * 365 + yoe / 4 - yoe / 100 + doy
+        return era * 146097 + doe - 719468
+    }
+
+    /// 判断 format 在位置 i 处是否为目标标记。
+    private fun matchesAt(format: String, i: Int, token: String): Boolean {
+        if (i + token.length > format.length) {
+            return false
+        }
+        return format.substring(i, i + token.length) == token
+    }
+
+    /// 把整数补零到指定宽度（超宽时原样返回，负数保留符号）。
+    private fun pad(value: Int, width: Int): String {
+        var text: String = ""
+        if (value < 0) {
+            text = "-"
+            value = -value
+        }
+        var digits: String = ""
+        var v: Int = value
+        if (v == 0) {
+            digits = "0"
+        }
+        while (v > 0) {
+            digits = digitChar(v % 10) + digits
+            v = v / 10
+        }
+        text = text + digits
+        while (text.length < width) {
+            text = "0" + text
+        }
+        return text
+    }
+
+    /// 把 0-9 的数字转换为字符。
+    private fun digitChar(value: Int): String {
+        if (value < 0 || value > 9) {
+            return ""
+        }
+        return String.fromCharCode(48 + value)
+    }
+}

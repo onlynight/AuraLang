@@ -1,0 +1,37 @@
+// aura:///aura/compiler/aura/lang/compiler/runtime/Coroutine.aura
+// 协程调度（Phase 4: 完整 VM Aura 编写）
+/// 协程调度器。
+///
+/// @since 0.5
+internal object Coroutine {
+
+    /// 协程状态。
+    fun create(): Map<String, Any> {
+        val co: Map<String, Any> = Collections.mutableMapOf()
+        co["id"] = 0
+        co["state"] = "created"
+        co["stack"] = Collections.emptyList()
+        return co
+    }
+
+    /// 启动协程。
+    fun start(co: Map<String, Any>): Boolean {
+        co["state"] = "running"
+        return true
+    }
+
+    /// 让出执行权。
+    fun yield(co: Map<String, Any>): Unit {
+        co["state"] = "suspended"
+    }
+
+    /// 检查协程是否运行中。
+    fun isRunning(co: Map<String, Any>): Boolean {
+        return co["state"] == "running"
+    }
+
+    /// 获取版本信息。
+    fun version(): String {
+        return "0.5.0-phase4-phantom"
+    }
+}

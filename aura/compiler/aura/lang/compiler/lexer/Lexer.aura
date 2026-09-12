@@ -1,0 +1,963 @@
+// aura:///aura/lang/compiler/lexer/Lexer.aura
+package aura.lang.compiler.lexer
+// ─────────────────────────────────────────────────────────────
+// 词法分析器 — 纯 Aura 化迁移 · Phase 1
+//
+// 对应 Rust `compiler/src/lexer.rs`（单遍 O(n) 手写扫描器）。
+//
+// 目标：对同一份源码，产出的 **TokenKind 序列** 与 Rust 参考实现完全一致，
+// 可直接与 `aura tokens` 的基线（tests/snapshots/baseline/*.tokens.txt）比对。
+//
+// ── 受当前 VM 能力约束的实现方式（重要）──────────────
+//   1. 字符访问：直接使用 `s[i]`（VM 已支持字符串索引，越界返回 null）。
+//   2. token 收集：VM 不支持 `List.add`，因此扫描期间把结果追加到 String
+//      （`kinds`：每行一个种类名；`detailed`：每 token 8 行，含字面量与 span），
+//      最后按需 `split`。
+//   3. 词法器状态挂在 `class` 实例上（VM 中 `object` 单例字段此前不可靠）。
+//   4. 字符串插值 `$var` / `${expr}` 已按 Rust 协议拆分为多个 token。
+//
+// ── 已知差异（WIP，见 aura/compiler/README.md「Phase 1 进度」）──
+//   * 行尾注释后的列号统计与 Rust 略有差异（不影响种类序列）。
+//   * 普通字符串跨行时仅结束当前 token，不产出 Error（Rust 会报错）。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+
+// ─────────────────────────────────────────────────────────────
+// 字符分类辅助
+// ─────────────────────────────────────────────────────────────
+
+/// 字符是否在给定字符集合中（空串恒为 false）。
+fun lxIn(set: String, ch: String): Boolean {
+    if (ch == "") {
+        return false
+    }
+    return set.indexOf(ch) >= 0
+}
+
+/// 十进制数字。
+fun lxIsDigit(ch: String): Boolean {
+    return lxIn("0123456789", ch)
+}
+
+/// 十六进制数字。
+fun lxIsHexDigit(ch: String): Boolean {
+    return lxIn("0123456789abcdefABCDEF", ch)
+}
+
+/// 字母（ASCII）。
+fun lxIsLetter(ch: String): Boolean {
+    return lxIn("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", ch)
+}
+
+/// 标识符起始字符。
+fun lxIsIdentStart(ch: String): Boolean {
+    return lxIsLetter(ch) || ch == "_"
+}
+
+/// 标识符后续字符。
+fun lxIsIdentPart(ch: String): Boolean {
+    return lxIsLetter(ch) || lxIsDigit(ch) || ch == "_"
+}
+
+/// 空白字符。
+fun lxIsSpace(ch: String): Boolean {
+    return lxIn(" \t\n\r", ch)
+}
+
+/// 列表安全取值（越界返回空串）。
+///
+/// 说明：当前 VM 中 `List<T>` 的 `[]` 索引在 sema 层会报 "cannot index into 'List'"
+/// 警告（运行期可用）。把索引集中到这一处，可把该警告收敛为 1 条。
+fun lxLine(items: List<String>, index: Int): String {
+    return items[index]
+}
+
+/// 十进制字符串 → Int（仅供 span 还原使用）。
+fun lxToInt(text: String): Int {
+    val digits: String = "0123456789"
+    val len: Int = text.length()
+    var total: Int = 0
+    var i: Int = 0
+    while (i < len) {
+        total = total * 10 + digits.indexOf(toStr(text[i]))
+        i = i + 1
+    }
+    return total
+}
+
+// ─────────────────────────────────────────────────────────────
+// 词法分析器
+// ─────────────────────────────────────────────────────────────
+
+/// 手写词法分析器。
+class Lexer {
+
+    // ── 源码与游标 ──
+
+    /// 源码全文。
+    var src: String = ""
+
+    /// 字符总数。
+    var n: Int = 0
+
+    /// 当前字符下标。
+    var pos: Int = 0
+
+    /// 当前行（1 起）。
+    var line: Int = 1
+
+    /// 当前列（1 起）。
+    var col: Int = 1
+
+    // ── 输出流 ──
+    //
+    // 说明：原先用**字符串 `+` 逐项拼接**（`kinds` / `detailed`），而本 VM 的
+    // 字符串 `+` 是整串拷贝，整体因此退化为 O(n²)。改用堆列表
+    // （`arrayListOf`，摊还 O(1) 追加）后词法分析为线性——这是 Aura 编译器
+    // 自举（1.5 万行）可行的前提。
+
+    /// token 种类列表（含结尾 `EOF`）。
+    var kindList: List<String> = arrayListOf<String>()
+
+    /// token 字面量列表（原样保存；列表化后不再需要转义换行）。
+    var litList: List<String> = arrayListOf<String>()
+
+    // token span：6 条并列 Int 列表。
+    //
+    // 原先是「每 token 拼一个 'start end sl sc el ec' 字符串」，即每 token 一次
+    // 字符串 `+`（分配 + 拷贝）。改成并列 Int 列表后，emit 只做纯整数追加，
+    // 大源码（1.5 万行）解析的常数显著下降。
+
+    /// token 起始偏移。
+    var spanStart: List<Int> = arrayListOf<Int>()
+
+    /// token 结束偏移。
+    var spanEnd: List<Int> = arrayListOf<Int>()
+
+    /// token 起始行。
+    var spanStartLine: List<Int> = arrayListOf<Int>()
+
+    /// token 起始列。
+    var spanStartCol: List<Int> = arrayListOf<Int>()
+
+    /// token 结束行。
+    var spanEndLine: List<Int> = arrayListOf<Int>()
+
+    /// token 结束列。
+    var spanEndCol: List<Int> = arrayListOf<Int>()
+
+    // ── 当前 token 的起始位置 ──
+
+    /// 当前 token 起始偏移。
+    var tStart: Int = 0
+
+    /// 当前 token 起始行。
+    var tStartLine: Int = 1
+
+    /// 当前 token 起始列。
+    var tStartCol: Int = 1
+
+    /// 关键字查询表（每实例构建一次）：`#word|Kind|#word|Kind|...`。
+    ///
+    /// `keywordKind` 旧实现每次调用都重建并 `split` 整张表（~180 个子串），
+    /// 而 `scanIdentifier` 对每个标识符调用一次 —— AOT 无 GC 下每个标识符约
+    /// 产生 200 次永久分配，是解析阶段数百 MB 的最大来源。缓存到实例字段后
+    /// 查询仅一次 `contains` + 两次切片。
+    var kwTable: String = ""
+
+    init(source: String) {
+        this.src = source
+        this.n = source.length()
+        this.pos = 0
+        this.line = 1
+        this.col = 1
+        this.kwTable = keywordSearchTable()
+        this.kindList = arrayListOf<String>()
+        this.litList = arrayListOf<String>()
+        this.spanStart = arrayListOf<Int>()
+        this.spanEnd = arrayListOf<Int>()
+        this.spanStartLine = arrayListOf<Int>()
+        this.spanStartCol = arrayListOf<Int>()
+        this.spanEndLine = arrayListOf<Int>()
+        this.spanEndCol = arrayListOf<Int>()
+        this.tStart = 0
+        this.tStartLine = 1
+        this.tStartCol = 1
+    }
+
+    // ── 游标操作 ──
+
+    /// 前瞻第 k 个字符（k = 0 为当前字符）；越界返回空串。
+    ///
+    /// 直接使用字符串索引 `src[i]`（VM 已支持，越界返回 null，此处显式拦为 `""`）。
+    fun peek(k: Int): String {
+        val i: Int = this.pos + k
+        if (i >= this.n) {
+            return ""
+        }
+        // sema 将字符串索引推断为 `Char`，此处显式转回 `String`（1 字符）
+        return toStr(this.src[i])
+    }
+
+    /// 前进一个字符。
+    fun advance() {
+        if (this.pos >= this.n) {
+            return
+        }
+        if (this.peek(0) == "\n") {
+            this.line = this.line + 1
+            this.col = 1
+        } else {
+            this.col = this.col + 1
+        }
+        this.pos = this.pos + 1
+    }
+
+    /// 标记当前 token 的起始位置。
+    fun markStart() {
+        this.tStart = this.pos
+        this.tStartLine = this.line
+        this.tStartCol = this.col
+    }
+
+    /// 记录一个 token 到输出流（纯列表追加，无字符串构造，摊还 O(1)）。
+    fun emit(kind: String, literal: String) {
+        this.kindList.add(kind)
+        this.litList.add(literal)
+        this.spanStart.add(this.tStart)
+        this.spanEnd.add(this.pos)
+        this.spanStartLine.add(this.tStartLine)
+        this.spanStartCol.add(this.tStartCol)
+        this.spanEndLine.add(this.line)
+        this.spanEndCol.add(this.col)
+    }
+
+    // ── 空白与注释 ──
+
+    /// 跳过空白与普通注释；遇到文档注释时停下（交由主循环产出 DocComment）。
+    fun skipTrivia() {
+        while (this.pos < this.n) {
+            val ch: String = this.peek(0)
+
+            if (lxIsSpace(ch)) {
+                this.advance()
+                continue
+            }
+
+            if (ch != "/") {
+                return
+            }
+
+            val c1: String = this.peek(1)
+
+            // 文档注释：/// 或 /**（且非 /**/）
+            if (c1 == "/" && this.peek(2) == "/") {
+                return
+            }
+            if (c1 == "*" && this.peek(2) == "*" && this.peek(3) != "/") {
+                return
+            }
+
+            // 普通单行注释
+            if (c1 == "/") {
+                while (this.pos < this.n && this.peek(0) != "\n") {
+                    this.advance()
+                }
+                continue
+            }
+
+            // 普通块注释 /* ... */
+            if (c1 == "*") {
+                this.advance()
+                this.advance()
+                while (this.pos < this.n) {
+                    if (this.peek(0) == "*" && this.peek(1) == "/") {
+                        this.advance()
+                        this.advance()
+                        break
+                    }
+                    this.advance()
+                }
+                continue
+            }
+
+            return
+        }
+    }
+
+    /// 单行文档注释 `/// ...`（消费到行尾）。
+    fun scanDocLine() {
+        this.advance()
+        this.advance()
+        this.advance()
+        var lit: String = ""
+        while (this.pos < this.n && this.peek(0) != "\n") {
+            lit = lit + this.peek(0)
+            this.advance()
+        }
+        this.emit("DocComment", lit)
+    }
+
+    /// 块文档注释 `/** ... */`。
+    fun scanDocBlock() {
+        this.advance()
+        this.advance()
+        this.advance()
+        var lit: String = ""
+        while (this.pos < this.n) {
+            if (this.peek(0) == "*" && this.peek(1) == "/") {
+                this.advance()
+                this.advance()
+                break
+            }
+            lit = lit + this.peek(0)
+            this.advance()
+        }
+        this.emit("DocComment", lit)
+    }
+
+    // ── 标识符 / 关键字 ──
+
+    /// 扫描标识符或关键字。
+    fun scanIdentifier() {
+        var lit: String = ""
+        while (this.pos < this.n && lxIsIdentPart(this.peek(0))) {
+            lit = lit + this.peek(0)
+            this.advance()
+        }
+        this.emit(this.lxKwKind(lit), lit)
+    }
+
+    /// 标识符 → 关键字 TokenKind（零分配；非关键字返回 `"Ident"`）。
+    fun lxKwKind(word: String): String {
+        return keywordLookup(this.kwTable, word)
+    }
+
+    // ── 数字 ──
+
+    /// 消费可选数值后缀（`L l f F d D u U`）。
+    fun takeSuffix(buf: String): String {
+        val ch: String = this.peek(0)
+        if (ch == "L" || ch == "l" || ch == "f" || ch == "F"
+            || ch == "d" || ch == "D" || ch == "u" || ch == "U") {
+            this.advance()
+            return buf + ch
+        }
+        return buf
+    }
+
+    /// 扫描数字字面量（十进制 / 十六进制 / 二进制 / 小数 / 科学计数）。
+    fun scanNumber() {
+        var buf: String = ""
+        var isFloat: Boolean = false
+
+        // 0x / 0b 前缀
+        if (this.peek(0) == "0") {
+            buf = buf + "0"
+            this.advance()
+            val nx: String = this.peek(0)
+            if (nx == "x" || nx == "X") {
+                buf = buf + nx
+                this.advance()
+                while (this.pos < this.n && lxIsHexDigit(this.peek(0))) {
+                    buf = buf + this.peek(0)
+                    this.advance()
+                }
+                buf = this.takeSuffix(buf)
+                this.emit("IntLiteral", buf)
+                return
+            }
+            if (nx == "b" || nx == "B") {
+                buf = buf + nx
+                this.advance()
+                while (this.pos < this.n && (this.peek(0) == "0" || this.peek(0) == "1")) {
+                    buf = buf + this.peek(0)
+                    this.advance()
+                }
+                buf = this.takeSuffix(buf)
+                this.emit("IntLiteral", buf)
+                return
+            }
+        }
+
+        // 十进制整数部分
+        while (this.pos < this.n && (lxIsDigit(this.peek(0)) || this.peek(0) == "_")) {
+            buf = buf + this.peek(0)
+            this.advance()
+        }
+
+        // 小数部分（`.` 后必须跟数字）
+        if (this.peek(0) == "." && lxIsDigit(this.peek(1))) {
+            isFloat = true
+            buf = buf + "."
+            this.advance()
+            while (this.pos < this.n && (lxIsDigit(this.peek(0)) || this.peek(0) == "_")) {
+                buf = buf + this.peek(0)
+                this.advance()
+            }
+        }
+
+        // 科学计数法
+        val e: String = this.peek(0)
+        if (e == "e" || e == "E") {
+            isFloat = true
+            buf = buf + e
+            this.advance()
+            val sign: String = this.peek(0)
+            if (sign == "+" || sign == "-") {
+                buf = buf + sign
+                this.advance()
+            }
+            while (this.pos < this.n && lxIsDigit(this.peek(0))) {
+                buf = buf + this.peek(0)
+                this.advance()
+            }
+        }
+
+        buf = this.takeSuffix(buf)
+        if (isFloat) {
+            this.emit("FloatLiteral", buf)
+            return
+        }
+        this.emit("IntLiteral", buf)
+    }
+
+    // ── 字符串 / 字符 ──
+
+    /// 普通字符串 `"..."`（不支持跨行）。
+    ///
+    /// `$var` / `${expr}` 插值按 Rust 参考实现的协议**拆分为多个 token**：
+    /// `StringLiteral(前缀)` + `StringInterpStart("$var" | "${expr}")` +
+    /// `StringLiteral(中段)` + ... + `StringLiteral(尾部)`，
+    /// 解析器据此重建 `Expr::StrInterp`。
+    fun scanString() {
+        this.advance() // 开引号
+        var buf: String = ""
+        var hasInterp: Boolean = false
+        while (true) {
+            if (this.pos >= this.n) {
+                this.emit("StringLiteral", buf)
+                return
+            }
+            val ch: String = this.peek(0)
+            if (ch == "\n") {
+                // 普通字符串不允许跨行（与 Rust 一致：报错并结束当前 token）
+                this.emit("StringLiteral", buf)
+                return
+            }
+            if (ch == "\"") {
+                this.advance()
+                break
+            }
+            if (ch == "\\") {
+                this.advance()
+                buf = buf + this.escapeChar(this.peek(0))
+                this.advance()
+                continue
+            }
+            if (ch == "$") {
+                // 插值判定：`${` 或 `$ident`（`$$` 视为字面量）
+                val nx: String = this.peek(1)
+                if (nx == "{" || (lxIsIdentStart(nx) && nx != "$")) {
+                    hasInterp = true
+                    // 冲刷已累积的字面量前缀（空串不产出 token，与 Rust 一致）
+                    if (buf != "") {
+                        this.emit("StringLiteral", buf)
+                        buf = ""
+                    }
+                    this.advance() // 跳过 $
+                    if (this.peek(0) == "{") {
+                        this.advance() // 跳过 {
+                        var expr: String = ""
+                        while (this.pos < this.n && this.peek(0) != "}") {
+                            expr = expr + this.peek(0)
+                            this.advance()
+                        }
+                        if (this.peek(0) == "}") {
+                            this.advance() // 跳过 }
+                        }
+                        // 注意：不能写 `"${"`（会被自身词法器当作插值起始而破坏文本），动态拼接。
+                        this.emit("StringInterpStart", "$" + "{" + expr + "}")
+                    } else {
+                        var name: String = ""
+                        while (this.pos < this.n && lxIsIdentPart(this.peek(0))) {
+                            name = name + this.peek(0)
+                            this.advance()
+                        }
+                        this.emit("StringInterpStart", "$" + name)
+                    }
+                    continue
+                }
+                // 非插值 `$`：作为字面量字符
+                buf = buf + ch
+                this.advance()
+                continue
+            }
+            buf = buf + ch
+            this.advance()
+        }
+        // 尾部字面量；整串无插值时始终输出（保住 `""` 空串语义）
+        if (buf != "" || !hasInterp) {
+            this.emit("StringLiteral", buf)
+        }
+    }
+
+    /// 原始（多行）字符串 `"""..."""`。
+    fun scanRawString() {
+        this.advance()
+        this.advance()
+        this.advance()
+        var buf: String = ""
+        while (true) {
+            if (this.pos >= this.n) {
+                this.emit("StringLiteral", buf)
+                return
+            }
+            if (this.peek(0) == "\"" && this.peek(1) == "\"" && this.peek(2) == "\"") {
+                this.advance()
+                this.advance()
+                this.advance()
+                break
+            }
+            buf = buf + this.peek(0)
+            this.advance()
+        }
+        this.emit("StringLiteral", buf)
+    }
+
+    /// 字符字面量 `'A'`。
+    fun scanChar() {
+        this.advance() // 开单引号
+        var buf: String = ""
+        if (this.pos < this.n) {
+            if (this.peek(0) == "\\") {
+                this.advance()
+                buf = buf + this.escapeChar(this.peek(0))
+                this.advance()
+            } else {
+                buf = buf + this.peek(0)
+                this.advance()
+            }
+        }
+        if (this.peek(0) == "'") {
+            this.advance()
+        }
+        this.emit("CharLiteral", buf)
+    }
+
+    /// 转义字符 → 实际字符（与 Rust 一致；非法转义原样保留）。
+    fun escapeChar(esc: String): String {
+        if (esc == "n") { return "\n" }
+        if (esc == "t") { return "\t" }
+        if (esc == "r") { return "\r" }
+        if (esc == "\\") { return "\\" }
+        if (esc == "'") { return "'" }
+        if (esc == "\"") { return "\"" }
+        if (esc == "0") { return "\0" }
+        return "\\" + esc
+    }
+
+    // ── 运算符 / 分隔符 ──
+
+    fun scanColon() {
+        this.advance()
+        if (this.peek(0) == ":") {
+            this.advance()
+            if (this.peek(0) == "=") {
+                this.advance()
+                this.emit("DoubleColonT", "::=")
+                return
+            }
+            this.emit("DoubleColon", "::")
+            return
+        }
+        this.emit("Colon", ":")
+    }
+
+    fun scanDot() {
+        this.advance()
+        if (this.peek(0) == ".") {
+            this.advance()
+            if (this.peek(0) == ".") {
+                this.advance()
+                this.emit("TripleDotOp", "...")
+                return
+            }
+            this.emit("DoubleDotOp", "..")
+            return
+        }
+        this.emit("Dot", ".")
+    }
+
+    fun scanQuestion() {
+        this.advance()
+        if (this.peek(0) == "?") {
+            this.advance()
+            this.emit("DoubleQMark", "??")
+            return
+        }
+        this.emit("QuestionMark", "?")
+    }
+
+    fun scanPipe() {
+        this.advance()
+        if (this.peek(0) == "|") {
+            this.advance()
+            this.emit("OrOr", "||")
+            return
+        }
+        this.emit("Pipe", "|")
+    }
+
+    fun scanAmpersand() {
+        this.advance()
+        if (this.peek(0) == "&") {
+            this.advance()
+            this.emit("AndAnd", "&&")
+            return
+        }
+        this.emit("Ampersand", "&")
+    }
+
+    fun scanPlus() {
+        this.advance()
+        val c1: String = this.peek(0)
+        if (c1 == "+") {
+            this.advance()
+            this.emit("DoublePlus", "++")
+            return
+        }
+        if (c1 == "=") {
+            this.advance()
+            this.emit("PlusEq", "+=")
+            return
+        }
+        this.emit("Plus", "+")
+    }
+
+    fun scanMinus() {
+        this.advance()
+        val c1: String = this.peek(0)
+        if (c1 == "-") {
+            this.advance()
+            this.emit("DoubleMinus", "--")
+            return
+        }
+        if (c1 == "=") {
+            this.advance()
+            this.emit("MinusEq", "-=")
+            return
+        }
+        if (c1 == ">") {
+            this.advance()
+            this.emit("Arrow", "->")
+            return
+        }
+        this.emit("Minus", "-")
+    }
+
+    fun scanStar() {
+        this.advance()
+        if (this.peek(0) == "=") {
+            this.advance()
+            this.emit("StarEq", "*=")
+            return
+        }
+        this.emit("Star", "*")
+    }
+
+    fun scanSlash() {
+        this.advance()
+        if (this.peek(0) == "=") {
+            this.advance()
+            this.emit("SlashEq", "/=")
+            return
+        }
+        this.emit("Slash", "/")
+    }
+
+    fun scanEqual() {
+        this.advance()
+        val c1: String = this.peek(0)
+        if (c1 == "=") {
+            this.advance()
+            this.emit("EqEq", "==")
+            return
+        }
+        if (c1 == ">") {
+            this.advance()
+            this.emit("DoubleArrow", "=>")
+            return
+        }
+        this.emit("Assign", "=")
+    }
+
+    fun scanBang() {
+        this.advance()
+        val c1: String = this.peek(0)
+        if (c1 == "=") {
+            this.advance()
+            this.emit("Neq", "!=")
+            return
+        }
+        if (c1 == "!") {
+            this.advance()
+            this.emit("DoubleBang", "!!")
+            return
+        }
+        this.emit("Bang", "!")
+    }
+
+    fun scanLt() {
+        this.advance()
+        val c1: String = this.peek(0)
+        if (c1 == "=") {
+            this.advance()
+            this.emit("LtEq", "<=")
+            return
+        }
+        if (c1 == "<") {
+            this.advance()
+            this.emit("LtLt", "<<")
+            return
+        }
+        this.emit("Lt", "<")
+    }
+
+    fun scanGt() {
+        this.advance()
+        val c1: String = this.peek(0)
+        if (c1 == "=") {
+            this.advance()
+            this.emit("GtEq", ">=")
+            return
+        }
+        if (c1 == ">") {
+            this.advance()
+            if (this.peek(0) == ">") {
+                this.advance()
+                this.emit("GtGtGt", ">>>")
+                return
+            }
+            this.emit("GtGt", ">>")
+            return
+        }
+        this.emit("Gt", ">")
+    }
+
+    fun scanPercent() {
+        this.advance()
+        if (this.peek(0) == "=") {
+            this.advance()
+            this.emit("PercentEq", "%=")
+            return
+        }
+        this.emit("Percent", "%")
+    }
+
+    /// 扫描单个字符型分隔符（`(` `)` `{` `}` `[` `]` `,` `;` `@` `#` `^`）。
+    fun scanDelimiter(kind: String, literal: String) {
+        this.advance()
+        this.emit(kind, literal)
+    }
+
+    // ── 主循环 ──
+
+    /// 执行完整扫描，返回 token 种类序列（每行一个，含结尾 `EOF`）。
+    fun scanAll(): String {
+        while (true) {
+            this.skipTrivia()
+
+            if (this.pos >= this.n) {
+                this.markStart()
+                this.emit("EOF", "")
+                break
+            }
+
+            this.markStart()
+            val ch: String = this.peek(0)
+
+            if (ch == "/" && this.peek(1) == "/" && this.peek(2) == "/") {
+                this.scanDocLine()
+            } else if (ch == "/" && this.peek(1) == "*" && this.peek(2) == "*"
+                && this.peek(3) != "/") {
+                this.scanDocBlock()
+            } else if (ch == "(") {
+                this.scanDelimiter("LParen", "(")
+            } else if (ch == ")") {
+                this.scanDelimiter("RParen", ")")
+            } else if (ch == "{") {
+                this.scanDelimiter("LBrace", "{")
+            } else if (ch == "}") {
+                this.scanDelimiter("RBrace", "}")
+            } else if (ch == "[") {
+                this.scanDelimiter("LBracket", "[")
+            } else if (ch == "]") {
+                this.scanDelimiter("RBracket", "]")
+            } else if (ch == ",") {
+                this.scanDelimiter("Comma", ",")
+            } else if (ch == ";") {
+                this.scanDelimiter("Semicolon", ";")
+            } else if (ch == "@") {
+                this.scanDelimiter("At", "@")
+            } else if (ch == "#") {
+                this.scanDelimiter("Hash", "#")
+            } else if (ch == "^") {
+                this.scanDelimiter("Caret", "^")
+            } else if (ch == ":") {
+                this.scanColon()
+            } else if (ch == ".") {
+                this.scanDot()
+            } else if (ch == "?") {
+                this.scanQuestion()
+            } else if (ch == "|") {
+                this.scanPipe()
+            } else if (ch == "&") {
+                this.scanAmpersand()
+            } else if (ch == "+") {
+                this.scanPlus()
+            } else if (ch == "-") {
+                this.scanMinus()
+            } else if (ch == "*") {
+                this.scanStar()
+            } else if (ch == "/") {
+                this.scanSlash()
+            } else if (ch == "=") {
+                this.scanEqual()
+            } else if (ch == "!") {
+                this.scanBang()
+            } else if (ch == "<") {
+                this.scanLt()
+            } else if (ch == ">") {
+                this.scanGt()
+            } else if (ch == "%") {
+                this.scanPercent()
+            } else if (ch == "\"") {
+                if (this.peek(1) == "\"" && this.peek(2) == "\"") {
+                    this.scanRawString()
+                } else {
+                    this.scanString()
+                }
+            } else if (ch == "'") {
+                this.scanChar()
+            } else if (lxIsDigit(ch)) {
+                this.scanNumber()
+            } else if (lxIsIdentStart(ch)) {
+                this.scanIdentifier()
+            } else {
+                // 非法字符：生成 Error token 后继续（与 Rust 的错误恢复一致）
+                this.advance()
+                this.emit("Error", ch)
+            }
+        }
+        // 注意：不再在扫描过程中拼接整串（O(n²)）。面向文本的入口
+        // （`tokenizeKinds`）请调用 `kindsText()`。
+        return ""
+    }
+
+    // ── 结果读取 ──
+
+    /// token 数量（含结尾 `EOF`）。
+    fun tokenCount(): Int {
+        return this.kindList.size
+    }
+
+    /// 种类序列文本（每行一个，末尾带换行；与旧 `kinds` 字段格式一致）。
+    ///
+    /// 按需拼接整串（O(总量)），仅供 `tokenizeKinds` 等文本入口使用；
+    /// 解析器请直接用 `kindList` 下标访问（O(1)）。
+    fun kindsText(): String {
+        var out: String = ""
+        var i: Int = 0
+        val n: Int = this.kindList.size
+        while (i < n) {
+            out = out + this.kindList[i] + "\n"
+            i = i + 1
+        }
+        return out
+    }
+
+    /// 第 index 个 token 的字面量。
+    fun litAt(index: Int): String {
+        if (index < 0 || index >= this.litList.size) {
+            return ""
+        }
+        return this.litList[index]
+    }
+
+    /// 第 index 个 token 的 span 字段（0..5：start / end / sl / sc / el / ec）。
+    fun spanFieldAt(index: Int, field: Int): Int {
+        if (field == 0) {
+            return lxIntAt(this.spanStart, index)
+        }
+        if (field == 1) {
+            return lxIntAt(this.spanEnd, index)
+        }
+        if (field == 2) {
+            return lxIntAt(this.spanStartLine, index)
+        }
+        if (field == 3) {
+            return lxIntAt(this.spanStartCol, index)
+        }
+        if (field == 4) {
+            return lxIntAt(this.spanEndLine, index)
+        }
+        return lxIntAt(this.spanEndCol, index)
+    }
+
+    /// 还原第 index 个 token（含字面量与 span）。
+    fun tokenAt(index: Int): Token {
+        if (index < 0 || index >= this.kindList.size) {
+            return Token("EOF", "")
+        }
+        val t = Token(this.kindList[index], this.litAt(index))
+        return t.withSpan(
+            this.spanFieldAt(index, 0),
+            this.spanFieldAt(index, 1),
+            this.spanFieldAt(index, 2),
+            this.spanFieldAt(index, 3),
+            this.spanFieldAt(index, 4),
+            this.spanFieldAt(index, 5)
+        )
+    }
+}
+
+/// Int 列表安全取项（越界返回 0）。
+fun lxIntAt(items: List<Int>, index: Int): Int {
+    if (index < 0 || index >= items.size) {
+        return 0
+    }
+    return items[index]
+}
+
+// ─────────────────────────────────────────────────────────────
+// 便捷入口
+// ─────────────────────────────────────────────────────────────
+
+/// 词法分析：返回 token 种类序列（每行一个，含结尾 `EOF`，末尾带换行）。
+fun tokenizeKinds(src: String): String {
+    val lx = Lexer(src)
+    lx.scanAll()
+    return lx.kindsText()
+}
+
+/// 词法分析：返回 token 种类列表（含结尾 `"EOF"`）。
+fun tokenize(src: String): List<String> {
+    val text: String = tokenizeKinds(src)
+    return text.split("\n")
+}
+
+/// 取回第 index 个 token 的完整信息（含字面量与 span）。
+fun tokenAt(src: String, index: Int): Token {
+    val lx = Lexer(src)
+    lx.scanAll()
+    return lx.tokenAt(index)
+}
+
+/// 源码 token 数量。
+fun tokenCount(src: String): Int {
+    val lx = Lexer(src)
+    lx.scanAll()
+    return lx.tokenCount()
+}

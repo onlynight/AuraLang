@@ -1,0 +1,472 @@
+Program {
+    imports: [],
+    declarations: [
+        Function(
+            FnDecl {
+                visibility: Public,
+                modifiers: [],
+                name: "inc",
+                type_params: [],
+                params: [],
+                return_type: Some(
+                    Named {
+                        name: "Int",
+                        span: Span {
+                            start: 145,
+                            end: 149,
+                            start_line: 6,
+                            start_col: 13,
+                            end_line: 6,
+                            end_col: 17,
+                        },
+                    },
+                ),
+                body: Some(
+                    Block(
+                        [
+                            Expr(
+                                Assign {
+                                    target: Ident(
+                                        "counter",
+                                        Span {
+                                            start: 156,
+                                            end: 162,
+                                            start_line: 7,
+                                            start_col: 6,
+                                            end_line: 7,
+                                            end_col: 12,
+                                        },
+                                    ),
+                                    value: Binary {
+                                        op: Add,
+                                        lhs: Ident(
+                                            "counter",
+                                            Span {
+                                                start: 156,
+                                                end: 162,
+                                                start_line: 7,
+                                                start_col: 6,
+                                                end_line: 7,
+                                                end_col: 12,
+                                            },
+                                        ),
+                                        rhs: Literal(
+                                            Int(
+                                                1,
+                                            ),
+                                            Span {
+                                                start: 167,
+                                                end: 168,
+                                                start_line: 7,
+                                                start_col: 17,
+                                                end_line: 7,
+                                                end_col: 18,
+                                            },
+                                        ),
+                                        span: Span {
+                                            start: 156,
+                                            end: 179,
+                                            start_line: 7,
+                                            start_col: 6,
+                                            end_line: 8,
+                                            end_col: 11,
+                                        },
+                                    },
+                                    span: Span {
+                                        start: 156,
+                                        end: 179,
+                                        start_line: 7,
+                                        start_col: 6,
+                                        end_line: 8,
+                                        end_col: 11,
+                                    },
+                                },
+                            ),
+                            Expr(
+                                Return {
+                                    value: Some(
+                                        Ident(
+                                            "counter",
+                                            Span {
+                                                start: 181,
+                                                end: 187,
+                                                start_line: 8,
+                                                start_col: 13,
+                                                end_line: 8,
+                                                end_col: 19,
+                                            },
+                                        ),
+                                    ),
+                                    span: Span {
+                                        start: 174,
+                                        end: 190,
+                                        start_line: 8,
+                                        start_col: 6,
+                                        end_line: 9,
+                                        end_col: 2,
+                                    },
+                                },
+                            ),
+                        ],
+                        Span {
+                            start: 149,
+                            end: 199,
+                            start_line: 6,
+                            start_col: 17,
+                            end_line: 11,
+                            end_col: 6,
+                        },
+                    ),
+                ),
+                doc: None,
+                span: Span {
+                    start: 134,
+                    end: 199,
+                    start_line: 6,
+                    start_col: 2,
+                    end_line: 11,
+                    end_col: 6,
+                },
+            },
+        ),
+        Class(
+            ClassDecl {
+                visibility: Public,
+                sealed: false,
+                name: "Animal",
+                type_params: [],
+                superclass: None,
+                fields: [
+                    StructField {
+                        visibility: Public,
+                        is_mutable: false,
+                        name: "legs",
+                        type_hint: Some(
+                            Named {
+                                name: "Int",
+                                span: Span {
+                                    start: 225,
+                                    end: 229,
+                                    start_line: 12,
+                                    start_col: 16,
+                                    end_line: 12,
+                                    end_col: 20,
+                                },
+                            },
+                        ),
+                        default_value: Some(
+                            Literal(
+                                Int(
+                                    4,
+                                ),
+                                Span {
+                                    start: 231,
+                                    end: 232,
+                                    start_line: 12,
+                                    start_col: 22,
+                                    end_line: 12,
+                                    end_col: 23,
+                                },
+                            ),
+                        ),
+                        accessors: None,
+                        span: Span {
+                            start: 215,
+                            end: 240,
+                            start_line: 12,
+                            start_col: 6,
+                            end_line: 13,
+                            end_col: 8,
+                        },
+                    },
+                ],
+                methods: [
+                    FnDecl {
+                        visibility: Public,
+                        modifiers: [],
+                        name: "name",
+                        type_params: [],
+                        params: [],
+                        return_type: Some(
+                            Named {
+                                name: "String",
+                                span: Span {
+                                    start: 250,
+                                    end: 257,
+                                    start_line: 13,
+                                    start_col: 18,
+                                    end_line: 13,
+                                    end_col: 25,
+                                },
+                            },
+                        ),
+                        body: Some(
+                            Literal(
+                                String(
+                                    "animal",
+                                ),
+                                Span {
+                                    start: 259,
+                                    end: 267,
+                                    start_line: 13,
+                                    start_col: 27,
+                                    end_line: 13,
+                                    end_col: 35,
+                                },
+                            ),
+                        ),
+                        doc: None,
+                        span: Span {
+                            start: 238,
+                            end: 269,
+                            start_line: 13,
+                            start_col: 6,
+                            end_line: 14,
+                            end_col: 2,
+                        },
+                    },
+                ],
+                implementations: [],
+                init_blocks: [],
+                constructors: [],
+                companion_objects: [],
+                doc: None,
+                span: Span {
+                    start: 195,
+                    end: 279,
+                    start_line: 11,
+                    start_col: 2,
+                    end_line: 16,
+                    end_col: 7,
+                },
+                modifiers: [],
+            },
+        ),
+        Struct(
+            StructDecl {
+                visibility: Public,
+                sealed: false,
+                name: "Vec2",
+                type_params: [],
+                fields: [
+                    StructField {
+                        visibility: Public,
+                        is_mutable: false,
+                        name: "x",
+                        type_hint: Some(
+                            Named {
+                                name: "Float",
+                                span: Span {
+                                    start: 293,
+                                    end: 298,
+                                    start_line: 16,
+                                    start_col: 21,
+                                    end_line: 16,
+                                    end_col: 26,
+                                },
+                            },
+                        ),
+                        default_value: None,
+                        accessors: None,
+                        span: Span {
+                            start: 286,
+                            end: 298,
+                            start_line: 16,
+                            start_col: 14,
+                            end_line: 16,
+                            end_col: 26,
+                        },
+                    },
+                    StructField {
+                        visibility: Public,
+                        is_mutable: false,
+                        name: "y",
+                        type_hint: Some(
+                            Named {
+                                name: "Float",
+                                span: Span {
+                                    start: 307,
+                                    end: 312,
+                                    start_line: 16,
+                                    start_col: 35,
+                                    end_line: 16,
+                                    end_col: 40,
+                                },
+                            },
+                        ),
+                        default_value: None,
+                        accessors: None,
+                        span: Span {
+                            start: 300,
+                            end: 312,
+                            start_line: 16,
+                            start_col: 28,
+                            end_line: 16,
+                            end_col: 40,
+                        },
+                    },
+                ],
+                methods: [],
+                implementations: [],
+                init_blocks: [],
+                constructors: [],
+                companion_objects: [],
+                doc: None,
+                span: Span {
+                    start: 274,
+                    end: 322,
+                    start_line: 16,
+                    start_col: 2,
+                    end_line: 18,
+                    end_col: 7,
+                },
+            },
+        ),
+        Object(
+            ObjectDecl {
+                visibility: Public,
+                name: "Registry",
+                superclass: None,
+                implementations: [],
+                fields: [],
+                methods: [
+                    FnDecl {
+                        visibility: Public,
+                        modifiers: [],
+                        name: "name",
+                        type_params: [],
+                        params: [],
+                        return_type: Some(
+                            Named {
+                                name: "String",
+                                span: Span {
+                                    start: 352,
+                                    end: 359,
+                                    start_line: 19,
+                                    start_col: 18,
+                                    end_line: 19,
+                                    end_col: 25,
+                                },
+                            },
+                        ),
+                        body: Some(
+                            Literal(
+                                String(
+                                    "registry",
+                                ),
+                                Span {
+                                    start: 361,
+                                    end: 371,
+                                    start_line: 19,
+                                    start_col: 27,
+                                    end_line: 19,
+                                    end_col: 37,
+                                },
+                            ),
+                        ),
+                        doc: None,
+                        span: Span {
+                            start: 340,
+                            end: 373,
+                            start_line: 19,
+                            start_col: 6,
+                            end_line: 20,
+                            end_col: 2,
+                        },
+                    },
+                ],
+                init_blocks: [],
+                modifiers: [],
+                doc: None,
+                span: Span {
+                    start: 317,
+                    end: 376,
+                    start_line: 18,
+                    start_col: 2,
+                    end_line: 21,
+                    end_col: 2,
+                },
+            },
+        ),
+    ],
+    top_level_statements: [
+        Val {
+            name: "PI",
+            type_hint: Some(
+                Named {
+                    name: "Double",
+                    span: Span {
+                        start: 90,
+                        end: 97,
+                        start_line: 2,
+                        start_col: 10,
+                        end_line: 2,
+                        end_col: 17,
+                    },
+                },
+            ),
+            initializer: Some(
+                Literal(
+                    Float(
+                        3.14159,
+                    ),
+                    Span {
+                        start: 99,
+                        end: 106,
+                        start_line: 2,
+                        start_col: 19,
+                        end_line: 2,
+                        end_col: 26,
+                    },
+                ),
+            ),
+            span: Span {
+                start: 82,
+                end: 112,
+                start_line: 2,
+                start_col: 2,
+                end_line: 4,
+                end_col: 4,
+            },
+        },
+        Var {
+            name: "counter",
+            type_hint: Some(
+                Named {
+                    name: "Int",
+                    span: Span {
+                        start: 123,
+                        end: 127,
+                        start_line: 4,
+                        start_col: 15,
+                        end_line: 4,
+                        end_col: 19,
+                    },
+                },
+            ),
+            initializer: Some(
+                Literal(
+                    Int(
+                        0,
+                    ),
+                    Span {
+                        start: 129,
+                        end: 130,
+                        start_line: 4,
+                        start_col: 21,
+                        end_line: 4,
+                        end_col: 22,
+                    },
+                ),
+            ),
+            span: Span {
+                start: 110,
+                end: 136,
+                start_line: 4,
+                start_col: 2,
+                end_line: 6,
+                end_col: 4,
+            },
+        },
+    ],
+}

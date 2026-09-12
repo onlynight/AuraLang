@@ -1299,25 +1299,25 @@ use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::std::source_index::{SourceArchive, SourceIndex, SourceLocation};
 
-/// 从 phantom-source/ 目录生成 SourceIndex
+/// 从 core/ 目录生成 SourceIndex（原 phantom-source/）
 ///
 /// 遍历所有 `.aura` 文件，解析 AST，提取符号（类型、函数、常量、变量）
 /// 及其源码位置，构建 SourceIndex。
 ///
 /// # 参数
-/// - `phantom_source_dir`: phantom source 根目录路径
+/// - `core_dir`: core 源码根目录路径
 ///
 /// # 返回
 /// - `Ok(SourceIndex)`: 生成的源码索引
 /// - `Err(String)`: 错误信息
-pub fn generate_source_index(phantom_source_dir: &std::path::Path) -> Result<SourceIndex, String> {
+pub fn generate_source_index(core_dir: &std::path::Path) -> Result<SourceIndex, String> {
     let mut index = SourceIndex::new();
     index.version = 1;
 
     // 收集所有 .aura 文件
     let mut aura_files = Vec::new();
-    collect_aura_files(phantom_source_dir, phantom_source_dir, &mut aura_files)
-        .map_err(|e| format!("扫描 phantom source 目录失败: {}", e))?;
+    collect_aura_files(core_dir, core_dir, &mut aura_files)
+        .map_err(|e| format!("扫描 core 目录失败: {}", e))?;
 
     if aura_files.is_empty() {
         return Ok(index);
@@ -1335,7 +1335,7 @@ pub fn generate_source_index(phantom_source_dir: &std::path::Path) -> Result<Sou
         if !parser.errors().is_empty() {
             // 解析失败的文件跳过（记录到日志但不中断）
             eprintln!(
-                "warning: phantom source 解析失败: {} — {}",
+                "warning: core source 解析失败: {} — {}",
                 rel_path,
                 parser.errors().first().map(|e| e.message.clone()).unwrap_or_default()
             );

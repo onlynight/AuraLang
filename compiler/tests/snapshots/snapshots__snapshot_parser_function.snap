@@ -60,19 +60,42 @@ Program {
                             Expr(
                                 Return {
                                     value: Some(
-                                        Literal(
-                                            String(
-                                                "hi name",
-                                            ),
-                                            Span {
+                                        StrInterp {
+                                            parts: [
+                                                Literal(
+                                                    String(
+                                                        "hi ",
+                                                    ),
+                                                    Span {
+                                                        start: 41,
+                                                        end: 45,
+                                                        start_line: 1,
+                                                        start_col: 42,
+                                                        end_line: 1,
+                                                        end_col: 46,
+                                                    },
+                                                ),
+                                                Ident(
+                                                    "name",
+                                                    Span {
+                                                        start: 41,
+                                                        end: 50,
+                                                        start_line: 1,
+                                                        start_col: 42,
+                                                        end_line: 1,
+                                                        end_col: 51,
+                                                    },
+                                                ),
+                                            ],
+                                            span: Span {
                                                 start: 41,
-                                                end: 51,
+                                                end: 52,
                                                 start_line: 1,
                                                 start_col: 42,
                                                 end_line: 1,
-                                                end_col: 52,
+                                                end_col: 53,
                                             },
-                                        ),
+                                        },
                                     ),
                                     span: Span {
                                         start: 34,

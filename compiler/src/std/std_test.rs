@@ -5,6 +5,33 @@
 use crate::vm::native::NativeRegistry;
 use crate::vm::value::Value;
 
+/// 注册测试断言 prelude 裸名（免 import：`assertTrue` / `assertEq` / ... / `pass` / `fail`）。
+pub fn register_prelude(reg: &mut NativeRegistry) {
+    let table: [(&str, fn(&[Value]) -> Value); 18] = [
+        ("assertTrue", nat_assert_true),
+        ("assertFalse", nat_assert_false),
+        ("assertEq", nat_assert_eq),
+        ("assertNotEq", nat_assert_not_eq),
+        ("assertNotNull", nat_assert_not_null),
+        ("assertNull", nat_assert_null),
+        ("assertContains", nat_assert_contains),
+        ("assertNotContains", nat_assert_not_contains),
+        ("assertThrows", nat_assert_throws),
+        ("assertGt", nat_assert_gt),
+        ("assertGte", nat_assert_gte),
+        ("assertLt", nat_assert_lt),
+        ("assertLte", nat_assert_lte),
+        ("assertApprox", nat_assert_approx),
+        ("assertArrayEq", nat_assert_array_eq),
+        ("assertMapEq", nat_assert_map_eq),
+        ("pass", nat_pass),
+        ("fail", nat_fail),
+    ];
+    for (name, f) in table {
+        reg.register(name, f);
+    }
+}
+
 pub fn register(reg: &mut NativeRegistry) {
     reg.register("aura.lang.std.Test.assertTrue", nat_assert_true);
     reg.register("aura.lang.std.Test.assertFalse", nat_assert_false);

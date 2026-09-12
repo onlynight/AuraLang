@@ -1,0 +1,119 @@
+// aura:///aura/compiler/aura/lang/compiler/vm/Opcodes.aura
+// VM 指令集定义（Phase 4: 完整 VM Aura 编写）
+/// 虚拟机指令集常量定义。
+///
+/// @since 0.5
+internal object Opcodes {
+
+    // ── 常量指令 (0x00 - 0x0F) ──
+    const CONST_INT: Int = 0
+    const CONST_FLOAT: Int = 1
+    const CONST_STRING: Int = 2
+    const CONST_NULL: Int = 3
+
+    // ── 栈操作 (0x10 - 0x1F) ──
+    const LOAD_LOCAL: Int = 10
+    const STORE_LOCAL: Int = 11
+    const POP: Int = 12
+    const DUP: Int = 13
+
+    // ── 算术运算 (0x20 - 0x2F) ──
+    const ADD: Int = 20
+    const SUB: Int = 21
+    const MUL: Int = 22
+    const DIV: Int = 23
+    const MOD: Int = 24
+
+    // ── 比较运算 (0x30 - 0x3F) ──
+    const EQ: Int = 30
+    const NEQ: Int = 31
+    const LT: Int = 32
+    const GT: Int = 33
+    const LE: Int = 34
+    const GE: Int = 35
+
+    // ── 控制流 (0x40 - 0x4F) ──
+    const JUMP: Int = 40
+    const JUMP_IF_FALSE: Int = 41
+    const JUMP_IF_TRUE: Int = 42
+
+    // ── 函数调用 (0x50 - 0x5F) ──
+    const CALL: Int = 50
+    const CALL_METHOD: Int = 51
+    const RETURN: Int = 52
+
+    // ── 对象操作 (0x60 - 0x6F) ──
+    const NEW_OBJECT: Int = 60
+    const GET_FIELD: Int = 61
+    const SET_FIELD: Int = 62
+
+    // ── FFI 调用 (0x70 - 0x7F) ──
+    const CALL_C: Int = 70
+    const CALL_RUST: Int = 71
+    const CALL_AURA: Int = 72
+
+    // ── GC 指令 (0x80 - 0x8F) ──
+    const GC_MARK: Int = 80
+    const GC_SWEEP: Int = 81
+
+    // ── 辅助函数 ──
+
+    /// 获取指令助记符（调试用）。
+    fun opcodeName(opcode: Int): String {
+        return when (opcode) {
+            CONST_INT       -> "CONST_INT"
+            CONST_FLOAT     -> "CONST_FLOAT"
+            CONST_STRING    -> "CONST_STRING"
+            CONST_NULL      -> "CONST_NULL"
+            LOAD_LOCAL      -> "LOAD_LOCAL"
+            STORE_LOCAL     -> "STORE_LOCAL"
+            POP             -> "POP"
+            DUP             -> "DUP"
+            ADD             -> "ADD"
+            SUB             -> "SUB"
+            MUL             -> "MUL"
+            DIV             -> "DIV"
+            MOD             -> "MOD"
+            EQ              -> "EQ"
+            NEQ             -> "NEQ"
+            LT              -> "LT"
+            GT              -> "GT"
+            LE              -> "LE"
+            GE              -> "GE"
+            JUMP            -> "JUMP"
+            JUMP_IF_FALSE   -> "JUMP_IF_FALSE"
+            JUMP_IF_TRUE    -> "JUMP_IF_TRUE"
+            CALL            -> "CALL"
+            CALL_METHOD     -> "CALL_METHOD"
+            RETURN          -> "RETURN"
+            NEW_OBJECT      -> "NEW_OBJECT"
+            GET_FIELD       -> "GET_FIELD"
+            SET_FIELD       -> "SET_FIELD"
+            CALL_C          -> "CALL_C"
+            CALL_RUST       -> "CALL_RUST"
+            CALL_AURA       -> "CALL_AURA"
+            GC_MARK         -> "GC_MARK"
+            GC_SWEEP        -> "GC_SWEEP"
+            else            -> "UNKNOWN"
+        }
+    }
+
+    /// 检查指令是否为常量指令。
+    fun isConst(opcode: Int): Boolean {
+        return opcode >= CONST_INT and opcode <= CONST_NULL
+    }
+
+    /// 获取所有指令名称列表（用于调试和文档）。
+    fun allOpcodes(): List<String> {
+        val result: List<String> = Collections.emptyList()
+        var i: Int = 0
+        while (i <= GC_SWEEP) {
+            val name = opcodeName(i)
+            if (name != "UNKNOWN") {
+                result.add(name)
+            }
+            i = i + 1
+        }
+        return result
+    }
+}

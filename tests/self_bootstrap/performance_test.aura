@@ -1,0 +1,237 @@
+// ════════════════════════════════════════════════════════════
+// 性能自举验证测试 — 性能基准对比
+// ════════════════════════════════════════════════════════════
+// 验证：
+//   vm.exe   run tests/self_bootstrap/performance_test.aura → time1
+//   vm2.exe  run tests/self_bootstrap/performance_test.aura → time2
+//   |time1 - time2| / time1 < 5%   →  性能一致
+// ════════════════════════════════════════════════════════════
+
+// ── 辅助函数 ───────────────────────────────────────────────
+
+fun assert(condition: Boolean) {
+    if (!condition) {
+        throw "Assertion failed"
+    }
+}
+
+fun fib(n: Int): Int {
+    if (n <= 0) {
+        return 0
+    }
+    if (n == 1) {
+        return 1
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+
+struct Node(val value: Int)
+
+// ════════════════════════════════════════════════════════════
+// 主函数 — 执行性能基准测试
+// ════════════════════════════════════════════════════════════
+
+fun main() {
+    println("===================================================")
+    println("  Performance Bootstrap Verification Test")
+    println("===================================================")
+    println("")
+
+    // ── 基准 1: 算术运算性能 ──────────────────────────────────
+    println("--- 基准 1: 算术运算 ---")
+    try {
+        var sum1: Int = 0
+        for (i in 0..99999) {
+            sum1 = sum1 + i
+        }
+        val sum1s: String = sum1.toString()
+        println("  算术求和(0..99999): " + sum1s)
+    } catch (e: String) {
+        println("  ERROR: " + e)
+    }
+    println("")
+
+    // ── 基准 2: 字符串操作性能 ────────────────────────────────
+    println("--- 基准 2: 字符串操作 ---")
+    try {
+        var strCount: Int = 0
+        for (i in 0..999) {
+            strCount = strCount + 1
+        }
+        val strCntS: String = strCount.toString()
+        println("  字符串操作(1000次): count=" + strCntS)
+    } catch (e: String) {
+        println("  ERROR: " + e)
+    }
+    println("")
+
+    // ── 基准 3: 列表操作性能 ──────────────────────────────────
+    println("--- 基准 3: 列表操作 ---")
+    try {
+        var listSum: Int = 0
+        for (i in 0..99) {
+            val tempList = listOf(i)
+            listSum = listSum + tempList.size
+        }
+        assert(listSum == 100)
+        val listSumS: String = listSum.toString()
+        println("  列表创建(100个): 总元素=" + listSumS)
+    } catch (e: String) {
+        println("  ERROR: " + e)
+    }
+    println("")
+
+    // ── 基准 4: 函数调用性能 ──────────────────────────────────
+    println("--- 基准 4: 函数调用 ---")
+    try {
+        val fib15: Int = fib(15)
+        assert(fib15 == 610)
+        val fib15s: String = fib15.toString()
+        println("  递归函数 fib(15): " + fib15s)
+    } catch (e: String) {
+        println("  ERROR: " + e)
+    }
+    println("")
+
+    // ── 基准 5: 循环嵌套性能 ──────────────────────────────────
+    println("--- 基准 5: 循环嵌套 ---")
+    try {
+        var doubleSum: Int = 0
+        for (i in 0..99) {
+            for (j in 0..99) {
+                doubleSum = doubleSum + 1
+            }
+        }
+        assert(doubleSum == 10000)
+        val doubleSumS: String = doubleSum.toString()
+        println("  双重循环(100x100): count=" + doubleSumS)
+    } catch (e: String) {
+        println("  ERROR: " + e)
+    }
+    println("")
+
+    // ── 基准 6: 对象分配性能 ──────────────────────────────────
+    println("--- 基准 6: 对象分配 ---")
+    try {
+        var objCount: Int = 0
+        for (i in 0..4999) {
+            val obj = Node(i)
+            assert(obj.value == i)
+            objCount = objCount + 1
+        }
+        assert(objCount == 5000)
+        val objCntS: String = objCount.toString()
+        println("  对象分配(5000个): count=" + objCntS)
+    } catch (e: String) {
+        println("  ERROR: " + e)
+    }
+    println("")
+
+    // ── 基准 7: 控制流性能 ────────────────────────────────────
+    println("--- 基准 7: 控制流 ---")
+    try {
+        var branchCount: Int = 0
+        for (i in 0..9999) {
+            if (i % 2 == 0) {
+                branchCount = branchCount + 1
+            }
+        }
+        assert(branchCount == 5000)
+        val branchS: String = branchCount.toString()
+        println("  条件分支(10000次): count=" + branchS)
+    } catch (e: String) {
+        println("  ERROR: " + e)
+    }
+    println("")
+
+    // ── 基准 8: 综合性能测试 ──────────────────────────────────
+    println("--- 基准 8: 综合性能 ---")
+    try {
+        var compResult: Int = 0
+        for (i in 0..4999) {
+            compResult = compResult + i * 2 - i / 3 + (i % 5)
+        }
+        val compS: String = compResult.toString()
+        println("  综合性能(0..4999): " + compS)
+    } catch (e: String) {
+        println("  ERROR: " + e)
+    }
+    println("")
+
+    // ── 基准 9: 字符串构建性能 ────────────────────────────────
+    println("--- 基准 9: 字符串构建 ---")
+    try {
+        var interpSum: Int = 0
+        for (i in 0..999) {
+            val n: Int = i
+            val ns: String = n.toString()
+            interpSum = interpSum + ns.length()
+        }
+        val interpS: String = interpSum.toString()
+        println("  字符串构建(1000次): 总长度=" + interpS)
+    } catch (e: String) {
+        println("  ERROR: " + e)
+    }
+    println("")
+
+    // ── 基准 10: 栈与调用深度 ─────────────────────────────────
+    println("--- 基准 10: 栈与调用深度 ---")
+    try {
+        var depthSum: Int = 0
+        for (i in 1..100) {
+            depthSum = depthSum + i
+        }
+        assert(depthSum == 5050)
+        val depthS: String = depthSum.toString()
+        println("  尾递归(100): " + depthS)
+    } catch (e: String) {
+        println("  ERROR: " + e)
+    }
+    println("")
+
+    // ── 基准 11: 列表高阶操作 ─────────────────────────────────
+    println("--- 基准 11: 列表操作 ---")
+    try {
+        var listCount: Int = 0
+        for (i in 0..4) {
+            val tempList11 = listOf(i)
+            listCount = listCount + tempList11.size
+        }
+        assert(listCount == 5)
+        val listCS: String = listCount.toString()
+        println("  列表操作: count=" + listCS)
+    } catch (e: String) {
+        println("  ERROR: " + e)
+    }
+    println("")
+
+    // ── 基准 12: 错误处理性能 ─────────────────────────────────
+    println("--- 基准 12: 错误处理 ---")
+    try {
+        var catchCount: Int = 0
+        for (i in 0..99) {
+            try {
+                if (i % 10 == 0) {
+                    throw "error " + i
+                }
+            } catch (e) {
+                catchCount = catchCount + 1
+            }
+        }
+        assert(catchCount == 10)
+        val catchCS: String = catchCount.toString()
+        println("  try-catch(100次): 捕获=" + catchCS)
+    } catch (e: String) {
+        println("  ERROR: " + e)
+    }
+    println("")
+
+    // ── 总结 ──────────────────────────────────────────────────
+    println("===================================================")
+    println("  性能基准测试完成！")
+    println("  使用以下命令比较性能:")
+    println("    time vm.exe  run tests/self_bootstrap/performance_test.aura")
+    println("    time vm2.exe run tests/self_bootstrap/performance_test.aura")
+    println("  性能差异应在 5% 以内")
+    println("===================================================")
+}

@@ -448,8 +448,6 @@ pub fn builtin_type_uri(type_name: &str) -> Option<&'static str> {
         "Char" => Some("aura://builtin/Char.aura"),
         "String" => Some("aura://builtin/String.aura"),
         "List" => Some("aura://builtin/List.aura"),
-        "Map" => Some("aura://builtin/Map.aura"),
-        "Array" => Some("aura://builtin/Array.aura"),
         "Function" => Some("aura://builtin/Function.aura"),
         "Type" => Some("aura://builtin/Type.aura"),
         _ => None,
@@ -624,8 +622,6 @@ mod tests {
             ("Double", "aura://builtin/Double.aura"),
             ("Char", "aura://builtin/Char.aura"),
             ("List", "aura://builtin/List.aura"),
-            ("Map", "aura://builtin/Map.aura"),
-            ("Array", "aura://builtin/Array.aura"),
             ("Function", "aura://builtin/Function.aura"),
             ("Type", "aura://builtin/Type.aura"),
             ("Nothing", "aura://builtin/Nothing.aura"),
@@ -639,6 +635,11 @@ mod tests {
             ("aura.math", "aura://stdlib/aura/math/Math.aura"),
             ("aura.string", "aura://stdlib/aura/string/String.aura"),
             ("aura.io", "aura://stdlib/aura/io/IO.aura"),
+            (
+                "aura.collections",
+                "aura://stdlib/aura/collections/Collections.aura",
+            ),
+            ("aura.fs", "aura://stdlib/aura/fs/FileSystem.aura"),
         ] {
             index.add_module_def(module, uri, 1, 0, 1, 0);
         }
@@ -648,6 +649,7 @@ mod tests {
         assert!(index.lookup_module("aura.math").is_some());
         assert!(index.lookup("Int").is_some());
         assert!(index.lookup("unknown").is_none());
-        assert!(index.total_count() >= 20); // 17 types + 3 modules
+        // 15 个基础类型（`builtin_type_uri` 支持的全集）+ 5 个 stdlib 模块
+        assert!(index.total_count() >= 20);
     }
 }
