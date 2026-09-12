@@ -67,6 +67,8 @@ pub mod std_path;
 pub mod std_process;
 #[cfg(feature = "std-random")]
 pub mod std_random;
+#[cfg(feature = "std-sb")]
+pub mod std_sb;
 #[cfg(feature = "std-string")]
 pub mod std_string;
 #[cfg(feature = "std-test")]
@@ -125,6 +127,8 @@ pub fn register_all(reg: &mut NativeRegistry) {
     std_process::register(reg);
     #[cfg(feature = "std-random")]
     std_random::register(reg);
+    #[cfg(feature = "std-sb")]
+    std_sb::register(reg);
     #[cfg(feature = "std-encoding")]
     std_encoding::register(reg);
     #[cfg(feature = "std-ascii")]
@@ -172,6 +176,8 @@ pub fn register_with_modules(reg: &mut NativeRegistry, modules: &[&str]) {
             "process" => std_process::register(reg),
             #[cfg(feature = "std-random")]
             "random" => std_random::register(reg),
+            #[cfg(feature = "std-sb")]
+            "sb" => std_sb::register(reg),
             #[cfg(feature = "std-encoding")]
             "encoding" => std_encoding::register(reg),
             #[cfg(feature = "std-ascii")]
@@ -216,6 +222,7 @@ pub fn module_name_from_path(path: &str) -> Option<&str> {
             "Process" => Some("process"),
             "Random" => Some("random"),
             "String" => Some("string"),
+            "StringBuilder" => Some("sb"),
             "Test" => Some("test"),
             "Time" => Some("time"),
             "Coroutine" => Some("concurrent"),

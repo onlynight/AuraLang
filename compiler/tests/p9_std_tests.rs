@@ -36,6 +36,7 @@ const ALL_MODULES: &[&str] = &[
     "iter",
     "net",
     "concurrent",
+    "sb",
 ];
 
 /// 验证所有标准库函数已注册
@@ -1090,6 +1091,111 @@ fn test_std_process_basic() {
     // exitCode should return 0
     let result = call(&reg, "aura.lang.std.Process.exitCode", &[]);
     assert_eq!(result, Value::Int(0));
+}
+
+#[test]
+fn test_std_string_builder() {
+    let reg = NativeRegistry::with_modules(ALL_MODULES);
+
+    // 句柄（Long）
+    let h = call(&reg, "aura.lang.std.StringBuilder.create", &[]);
+    assert!(matches!(h, Value::Int(_)));
+    assert_eq!(
+        call(&reg, "aura.lang.std.StringBuilder.length", &[h.clone()]),
+        Value::Int(0)
+    );
+
+    // 同一句柄就地追加：长度随内容增长（可变字符串）
+    call(
+        &reg,
+        "aura.lang.std.StringBuilder.append",
+        &[
+            h.clone(),
+            Value::str_("Hello"),
+        ],
+    );
+    assert_eq!(
+        call(&reg, "aura.lang.std.StringBuilder.length", &[h.clone()]),
+        Value::Int(5)
+    );
+    call(
+        &reg,
+        "aura.lang.std.StringBuilder.append",
+        &[
+            h.clone(),
+            Value::str_(", "),
+        ],
+    );
+    call(
+        &reg,
+        "aura.lang.std.StringBuilder.append",
+        &[
+            h.clone(),
+            Value::str_("World"),
+        ],
+    );
+    assert_eq!(
+        call(&reg, "aura.lang.std.StringBuilder.length", &[h.clone()]),
+        Value::Int(12)
+    );
+
+    // appendChar / appendInt
+    call(
+        &reg,
+        "aura.lang.std.StringBuilder.appendChar",
+        &[
+            h.clone(),
+            Value::Int('!' as i64),
+        ],
+    );
+    call(
+        &reg,
+        "aura.lang.std.StringBuilder.appendInt",
+        &[
+            h.clone(),
+            Value::Int(123),
+        ],
+    );
+    assert_eq!(
+        call(&reg, "aura.lang.std.StringBuilder.length", &[h.clone()]),
+        Value::Int(16)
+    );
+
+    // finish 交出内容，句柄失效
+    let s = call(&reg, "aura.lang.std.StringBuilder.finish", &[h.clone()]);
+    assert_eq!(s, Value::str_("Hello, World!123"));
+    assert_eq!(
+        call(&reg, "aura.lang.std.StringBuilder.length", &[h]),
+        Value::Int(0)
+    );
+
+    // reset 复用句柄
+    let h2 = call(&reg, "aura.lang.std.StringBuilder.create", &[]);
+    call(
+        &reg,
+        "aura.lang.std.StringBuilder.append",
+        &[
+            h2.clone(),
+            Value::str_("abc"),
+        ],
+    );
+    call(&reg, "aura.lang.std.StringBuilder.reset", &[h2.clone()]);
+    assert_eq!(
+        call(&reg, "aura.lang.std.StringBuilder.length", &[h2.clone()]),
+        Value::Int(0)
+    );
+    call(
+        &reg,
+        "aura.lang.std.StringBuilder.append",
+        &[
+            h2.clone(),
+            Value::str_("xy"),
+        ],
+    );
+    assert_eq!(
+        call(&reg, "aura.lang.std.StringBuilder.finish", &[h2]),
+        Value::str_("xy")
+    );
 }
 
 #[test]

@@ -85,6 +85,7 @@ std-console = []
 std-path = []
 std-assert = []
 std-iter = []
+std-sb = []
 std-concurrent = []
 
 # 全部 std 模块（方便开发测试）
@@ -92,7 +93,7 @@ std-all = [
     "std-io", "std-math", "std-string", "std-collections", "std-fs",
     "std-net", "std-json", "std-time", "std-test", "std-builtin",
     "std-env", "std-process", "std-random", "std-encoding", "std-ascii",
-    "std-console", "std-path", "std-assert", "std-iter", "std-concurrent",
+    "std-console", "std-path", "std-assert", "std-iter", "std-sb", "std-concurrent",
 ]
 
 # build.rs 使用 toml 解析根 Cargo.toml（toml 已在 dependencies 中，build-dependencies 继承同版本）

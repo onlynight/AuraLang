@@ -2454,7 +2454,9 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             // 少数**无参但有返回值**的原生需显式白名单，否则会被当作 Unit。
             let value_returning_no_arg = matches!(
                 name,
-                "aura.lang.std.Process.argCount" | "aura.lang.std.Process.args"
+                "aura.lang.std.Process.argCount"
+                    | "aura.lang.std.Process.args"
+                    | "aura.lang.std.StringBuilder.create"
             );
             let ret = (params.iter().any(|(_, pt)| *pt != "Unit") || value_returning_no_arg)
                 .then(|| HirType::Named("Any".into()));
@@ -4687,6 +4689,7 @@ fn is_std_module(name: &str) -> bool {
                 | "assert"
                 | "iter"
                 | "concurrent"
+                | "StringBuilder"
         );
     }
     // 兼容短名：io, math, ...
@@ -4710,6 +4713,7 @@ fn is_std_module(name: &str) -> bool {
             | "path"
             | "assert"
             | "iter"
+            | "StringBuilder"
     )
 }
 
@@ -4727,6 +4731,7 @@ fn std_module_to_class_name(module: &str) -> Option<&'static str> {
     let mod_name = module.strip_prefix("aura.").unwrap_or(module);
     Some(match mod_name {
         "string" => "aura.lang.std.String",
+        "StringBuilder" => "aura.lang.std.StringBuilder",
         "math" => "aura.lang.std.Math",
         "io" => "aura.lang.std.IO",
         "collections" => "aura.lang.std.Collections",
@@ -5713,6 +5718,41 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
         ("aura.lang.std.Env.platform", vec![]),
         ("aura.lang.std.Env.os", vec![]),
         ("aura.lang.std.Env.arch", vec![]),
+        // ── std.sb（StringBuilder：原生可变字符串缓冲区）──
+        ("aura.lang.std.StringBuilder.create", vec![]),
+        (
+            "aura.lang.std.StringBuilder.append",
+            vec![
+                ("handle", "Long"),
+                ("text", "String"),
+            ],
+        ),
+        (
+            "aura.lang.std.StringBuilder.appendChar",
+            vec![
+                ("handle", "Long"),
+                ("ch", "Char"),
+            ],
+        ),
+        (
+            "aura.lang.std.StringBuilder.appendInt",
+            vec![
+                ("handle", "Long"),
+                ("value", "Int"),
+            ],
+        ),
+        (
+            "aura.lang.std.StringBuilder.length",
+            vec![("handle", "Long")],
+        ),
+        (
+            "aura.lang.std.StringBuilder.finish",
+            vec![("handle", "Long")],
+        ),
+        (
+            "aura.lang.std.StringBuilder.reset",
+            vec![("handle", "Long")],
+        ),
         // ── std.process ──
         ("aura.lang.std.Process.exit", vec![("code", "Int")]),
         ("aura.lang.std.Process.exitCode", vec![]),

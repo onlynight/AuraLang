@@ -52,6 +52,7 @@ import "../aura/compiler/aura/lang/compiler/aot/StdSigs.aura"
 import "../aura/compiler/aura/lang/compiler/aot/Ffi.aura"
 import "../aura/compiler/aura/lang/compiler/aot/Target.aura"
 import "../aura/compiler/aura/lang/compiler/aot/Optimize.aura"
+import "../aura/compiler/aura/lang/compiler/aot/EmitBuffer.aura"
 import "../aura/compiler/aura/lang/compiler/aot/Emit.aura"
 import "../aura/compiler/aura/lang/compiler/aot/Linker.aura"
 import "../aura/compiler/aura/lang/compiler/aot/CBackend.aura"
@@ -134,8 +135,9 @@ fun testCallSiteSymbols(): Int {
     t.assertTrue(decls.contains("declare i64 @aura_lang_std_String_length(i8*)"), "String.length symbol")
     t.assertTrue(decls.contains("declare i32 @aura_lang_std_String_equals(i8*, i8*)"), "String.equals symbol")
 
-    // runtime 表计数不受 prelude 影响（Phase 6 契约保持）
-    t.assertEq(runtimeFunctionCount(), 10, "runtime fn count unchanged")
+    // runtime 表计数不受 prelude 影响（Phase 6 契约保持）；
+    // 11 = 原 10 项 + 内存诊断 aura_mem_used_mb（--mem-trace 用）
+    t.assertEq(runtimeFunctionCount(), 11, "runtime fn count unchanged")
 
     val sig: String = callSignature("aura_lang_std_String_length")
     t.assertEq(sig, "i64|i8*", "call signature lookup")

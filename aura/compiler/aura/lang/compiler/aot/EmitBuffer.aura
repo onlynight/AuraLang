@@ -1,0 +1,52 @@
+// aura:///aura/lang/compiler/aot/EmitBuffer.aura
+package aura.lang.compiler.aot
+
+// ─────────────────────────────────────────────────────────────
+// 发射缓冲：原生 StringBuilder（AOT: aura_std_cffi.c 的 AuraSb；
+// VM: compiler/src/std/std_sb.rs）的薄封装。
+//
+// 背景：AOT 运行时没有 GC，此前用「List<String> 分段累积 + joinPieces 树形归并」
+// 组装 IR 时，末尾会产生与「总长度 × log2(片段数)」成正比的中间串，且每个片段
+// 字符串都常驻内存。改用原生可变缓冲区后：
+//   - 追加摊还 O(1)（几何扩容）；
+//   - sbBuild 零拷贝交出内容（finish 转移缓冲区所有权）；
+// 累积与归并开销降为「总长度的一次拷贝」量级。
+//
+// 方法名统一加 `sb` 前缀：Aura 是扁平函数命名空间（类方法降级为 `Class.method`），
+// 前缀可避免与 List 的 add/append、StringBuilder.append 等重名解析歧义。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.StringBuilder
+
+/// 原生可变字符串缓冲区的薄封装。
+class EmitBuffer {
+
+    /// 原生缓冲区句柄（`StringBuilder.create()` 返回值，AOT 下为 i64）。
+    var h: Long = 0
+
+    init() {
+        this.h = StringBuilder.create()
+    }
+
+    /// 追加一段文本（不追加换行）。
+    fun sbAdd(s: String) {
+        this.h = StringBuilder.append(this.h, s)
+    }
+
+    /// 结束并交出全部内容（**零拷贝**）。
+    ///
+    /// 之后句柄失效：必须调用 `sbReset()` 才能继续复用。
+    fun sbBuild(): String {
+        return StringBuilder.finish(this.h)
+    }
+
+    /// 清空并复用缓冲区（`sbBuild()` 之后继续使用前必须调用）。
+    fun sbReset() {
+        this.h = StringBuilder.reset(this.h)
+    }
+
+    /// 当前已累积的字节数。
+    fun sbSize(): Int {
+        return StringBuilder.length(this.h)
+    }
+}

@@ -370,6 +370,16 @@ const char *aura_lang_std_FileSystem_readText(const char *path);
 void aura_lang_std_FileSystem_writeText(const char *path, const char *content);
 int aura_lang_std_FileSystem_mkdirP(const char *path);
 
+// aura.lang.std.StringBuilder.*（原生可变字符串缓冲区；句柄为 i64）
+int64_t aura_lang_std_StringBuilder_create(void);
+int64_t aura_lang_std_StringBuilder_append(int64_t handle, const char *text);
+int64_t aura_lang_std_StringBuilder_appendChar(int64_t handle, int16_t ch);
+int64_t aura_lang_std_StringBuilder_appendInt(int64_t handle, int32_t value);
+int64_t aura_lang_std_StringBuilder_length(int64_t handle);
+/** 结束并交出内容（零拷贝转移缓冲区所有权）；原句柄失效。 */
+const char *aura_lang_std_StringBuilder_finish(int64_t handle);
+int64_t aura_lang_std_StringBuilder_reset(int64_t handle);
+
 // aura.lang.std.Process.*
 int64_t aura_lang_std_Process_run(const char *cmd);
 /** 注入宿主进程 argv（由 AOT 发射的 C 入口 main 调用）。 */

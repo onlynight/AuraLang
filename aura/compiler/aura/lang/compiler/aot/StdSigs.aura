@@ -69,6 +69,14 @@ fun stdSignatureTable(): String {
         "aura_lang_std_FileSystem_readText|i8*|i8*\n" +
         "aura_lang_std_FileSystem_writeText|void|i8*,i8*\n" +
         "aura_lang_std_FileSystem_mkdirP|i32|i8*\n" +
+        // ── StringBuilder（原生可变字符串缓冲区）──
+        "aura_lang_std_StringBuilder_create|i64|\n" +
+        "aura_lang_std_StringBuilder_append|i64|i64,i8*\n" +
+        "aura_lang_std_StringBuilder_appendChar|i64|i64,i16\n" +
+        "aura_lang_std_StringBuilder_appendInt|i64|i64,i32\n" +
+        "aura_lang_std_StringBuilder_length|i64|i64\n" +
+        "aura_lang_std_StringBuilder_finish|i8*|i64\n" +
+        "aura_lang_std_StringBuilder_reset|i64|i64\n" +
         // ── Process ──
         "aura_lang_std_Process_run|i64|i8*\n" +
         "aura_lang_std_Process_argCount|i64|\n" +

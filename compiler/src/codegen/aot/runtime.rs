@@ -485,6 +485,25 @@ pub fn cffi_signature(name: &str) -> Option<(&'static str, Vec<&'static str>)> {
         | "aura_env_tmp" | "aura_env_pwd" => (P, &[]),
         "aura_env_get" => (P, &[P]),
         "aura_env_has" => ("i1", &[P]),
+        // aura.lang.std.StringBuilder.*（原生可变字符串缓冲区）
+        // 句柄为 i64（intptr_t 承载 AuraSb*）；finish 转移缓冲区所有权返回 i8*。
+        "aura_lang_std_StringBuilder_create" => ("i64", &[]),
+        "aura_lang_std_StringBuilder_append" => ("i64", &["i64", P]),
+        "aura_lang_std_StringBuilder_appendChar" => (
+            "i64",
+            &[
+                "i64", "i16",
+            ],
+        ),
+        "aura_lang_std_StringBuilder_appendInt" => (
+            "i64",
+            &[
+                "i64", "i32",
+            ],
+        ),
+        "aura_lang_std_StringBuilder_length" => ("i64", &["i64"]),
+        "aura_lang_std_StringBuilder_finish" => (P, &["i64"]),
+        "aura_lang_std_StringBuilder_reset" => ("i64", &["i64"]),
         // aura.fs
         "aura_fs_exists" | "aura_fs_isFile" | "aura_fs_isDirectory" => ("i1", &[P]),
         "aura_fs_readText" => (P, &[P]),

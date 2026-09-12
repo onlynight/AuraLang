@@ -179,6 +179,7 @@ fun isStdClassName(name: String): Boolean {
     if (name == "String") { return true }
     if (name == "Collections") { return true }
     if (name == "FileSystem") { return true }
+    if (name == "StringBuilder") { return true }
     if (name == "Process") { return true }
     if (name == "Random") { return true }
     if (name == "Time") { return true }

@@ -27,7 +27,10 @@ fun runtimeTable(): String {
         "aura_string_length|i64|i8*\n" +
         "toStringFloat|i8*|double\n" +
         "aura_string_data|i8*|i8*\n" +
-        "aura_string_concat|i8*|i8*,i64,i8*,i64\n"
+        "aura_string_concat|i8*|i8*,i64,i8*,i64\n" +
+        // 内存诊断：AOT 运行时当前存活分配（MiB）。Aura 自举编译器
+        // （`aot/AotUtil.aura::aotMemMB` → `Main.aura --mem-trace`）依赖它。
+        "aura_mem_used_mb|i32|\n"
 }
 
 /// C FFI 实现（aura_std_cffi.c）的真实 ABI 签名表。

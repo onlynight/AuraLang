@@ -719,6 +719,20 @@ fn build_all_names() -> HashSet<&'static str> {
         s.insert(n);
     }
 
+    // ── aura.lang.std.StringBuilder.* — 可变字符串缓冲区（std_sb.rs + AOT C FFI）──
+    // 原生句柄 API；Aura 侧为薄封装（aura/core/aura/lang/std/StringBuilder.aura）。
+    for n in [
+        "aura.lang.std.StringBuilder.create",
+        "aura.lang.std.StringBuilder.append",
+        "aura.lang.std.StringBuilder.appendChar",
+        "aura.lang.std.StringBuilder.appendInt",
+        "aura.lang.std.StringBuilder.length",
+        "aura.lang.std.StringBuilder.finish",
+        "aura.lang.std.StringBuilder.reset",
+    ] {
+        s.insert(n);
+    }
+
     // ── aura.lang.std.Test.* — 测试断言（std_test.rs）──
     for n in [
         "aura.lang.std.Test.assertTrue",
@@ -810,6 +824,7 @@ mod tests {
         assert!(names.iter().any(|n| n.starts_with("aura.lang.std.Process.")));
         assert!(names.iter().any(|n| n.starts_with("aura.lang.std.Random.")));
         assert!(names.iter().any(|n| n.starts_with("aura.lang.std.String.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.std.StringBuilder.")));
         assert!(names.iter().any(|n| n.starts_with("aura.lang.std.Test.")));
         assert!(names.iter().any(|n| n.starts_with("aura.lang.std.Time.")));
         assert!(names.iter().any(|n| n.starts_with("aura.lang.std.Coroutine.")));

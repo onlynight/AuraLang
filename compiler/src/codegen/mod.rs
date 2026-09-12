@@ -381,6 +381,7 @@ fn extract_enabled_modules(program: &crate::ast::Program) -> Vec<String> {
                 "Process" => "process",
                 "Random" => "random",
                 "String" => "string",
+                "StringBuilder" => "sb",
                 "Test" => "test",
                 "Time" => "time",
                 _ => "",

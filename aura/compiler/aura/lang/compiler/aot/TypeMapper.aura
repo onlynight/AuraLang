@@ -113,19 +113,34 @@ fun newTypeMapper(stringAsStruct: Boolean): TypeMapper {
 }
 
 /// 将标识符中 LLVM IR 不允许的字符替换为下划线。
+///
+/// 性能：绝大多数标识符本来已合法——先扫描确认，命中即**原串返回**（零分配）。
+/// 旧实现无条件逐字符 `out = out + c`：长度为 L 的名字产生 L 次分配 + O(L²)
+/// 复制，而 sanitizeLlvm 是发射期最热调用之一（函数名/变量名/类型名都要过一遍）。
 fun sanitizeLlvm(s: String): String {
     val allowed: String = tmAllowedChars()
-    var out: String = ""
-    var i: Int = 0
     var len: Int = s.length
+    var i: Int = 0
+    var rebuilding: Boolean = false
+    var out: String = ""
     while (i < len) {
         val c: String = toStr(s[i])
         if (allowed.indexOf(c) >= 0) {
-            out = out + c
+            // 全合法时一次也不追加：最终整串零分配返回原值
+            if (rebuilding) {
+                out = out + c
+            }
         } else {
+            if (!rebuilding) {
+                out = s.substring(0, i)
+                rebuilding = true
+            }
             out = out + "_"
         }
         i = i + 1
+    }
+    if (!rebuilding) {
+        return s
     }
     return out
 }

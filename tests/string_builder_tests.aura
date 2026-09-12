@@ -1,0 +1,79 @@
+// ═════════════════════════════════════════════════════════════
+// StringBuilder 验证用例：原生可变字符串缓冲区
+//
+// 目标：验证 `aura.lang.std.StringBuilder` 的「可变字符串」语义：
+//   - 同一句柄上的 append/appendChar/appendInt **就地修改**内容，
+//     length 随追加单调增长（而不是每次产生新的不可变 String）。
+//   - finish 交出内容后句柄失效；reset 可复用句柄。
+//   - 不同句柄互相独立。
+//
+// 运行：aura run tests/string_builder_tests.aura
+//   全通过时输出 "RESULT: PASS"
+// ═════════════════════════════════════════════════════════════
+
+import aura.lang.std.StringBuilder
+
+import "../aura/compiler/aura/lang/compiler/test/TestRunner.aura"
+
+fun testMutableBuffer(): Int {
+    val t = TestRunner()
+    t.begin("std.stringbuilder")
+
+    // ── 1. 新建缓冲区为空 ──
+    val h = StringBuilder.create()
+    t.assertEq(StringBuilder.length(h), 0, "new buffer is empty")
+
+    // ── 2. 同一句柄就地追加：length 随内容增长（可变证据 1）──
+    StringBuilder.append(h, "Hello")
+    t.assertEq(StringBuilder.length(h), 5, "length after 1st append")
+    StringBuilder.append(h, ", ")
+    StringBuilder.append(h, "World")
+    t.assertEq(StringBuilder.length(h), 12, "length grows in place (same handle)")
+
+    // ── 3. appendChar / appendInt（不产生中间串）──
+    StringBuilder.appendChar(h, '!')
+    t.assertEq(StringBuilder.length(h), 13, "appendChar")
+    StringBuilder.appendInt(h, 123)
+    t.assertEq(StringBuilder.length(h), 16, "appendInt")
+
+    // ── 4. finish 交出内容 ──
+    val s = StringBuilder.finish(h)
+    t.assertEq(s, "Hello, World!123", "finish returns accumulated content")
+
+    // ── 5. reset：句柄仍有效，清空后可继续追加（可变证据 2）──
+    val h2 = StringBuilder.create()
+    StringBuilder.append(h2, "abc")
+    t.assertEq(StringBuilder.length(h2), 3, "h2 before reset")
+    StringBuilder.reset(h2)
+    t.assertEq(StringBuilder.length(h2), 0, "h2 empty after reset")
+    StringBuilder.append(h2, "xy")
+    t.assertEq(StringBuilder.finish(h2), "xy", "h2 reusable after reset")
+
+    // ── 6. 不同句柄互相独立 ──
+    val a = StringBuilder.create()
+    val b = StringBuilder.create()
+    StringBuilder.append(a, "AAA")
+    StringBuilder.append(b, "BB")
+    t.assertEq(StringBuilder.length(a), 3, "handle a unaffected by b")
+    t.assertEq(StringBuilder.finish(a), "AAA", "handle a content")
+    t.assertEq(StringBuilder.finish(b), "BB", "handle b content")
+
+    return t.report()
+}
+
+fun main() {
+    println("=== StringBuilder (mutable string) Tests ===")
+    println()
+
+    val failures = testMutableBuffer()
+
+    println()
+    println("=== Summary ===")
+    println("Total failures: " + toStr(failures))
+
+    if (failures == 0) {
+        println("RESULT: PASS")
+    } else {
+        println("RESULT: FAIL (" + toStr(failures) + ")")
+    }
+}

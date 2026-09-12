@@ -1936,3 +1936,135 @@ const void *aura_fs_writeText(const char *path, const char *content) {
     return content;
 }
 
+/* ── aura.lang.std.StringBuilder.* ──
+ *
+ * 原生可变字符串缓冲区：句柄（i64，实为 AuraSb*）+ append/appendChar/appendInt
+ * + length/finish/reset。用于在 AOT 无 GC 的运行时里避免「不可变 String 反复拼接」
+ * 产生的海量中间串（编译器 IR 发射路径）。
+ *
+ * 契约（与 Rust VM std_sb.rs 对齐）：
+ *   create()                 -> i64 句柄
+ *   append(h, s)             -> i64 句柄（返回自身，便于链式）
+ *   appendChar(h, ch)        -> i64 句柄
+ *   appendInt(h, v)          -> i64 句柄
+ *   length(h)                -> i64 当前字节长度
+ *   finish(h)                -> i8* 字符串（**转移缓冲区所有权**，零拷贝；原句柄失效）
+ *   reset(h)                 -> i64 句柄（清空，保留容量）
+ *
+ * 所有分配都走 aura_mem_alloc/realloc，保持内存闸门记账一致。
+ * 句柄用 i64 承载指针，规避 Plan A「i8* 低位标记装箱整数」的历史坑。 */
+
+typedef struct {
+    char *buf;    /* 数据区（aura_mem_alloc 负载，16 字节对齐） */
+    int64_t len;  /* 已用字节（不含结尾 NUL） */
+    int64_t cap;  /* 容量（字节，含结尾可用位） */
+} AuraSb;
+
+/** 初始容量（字节）。 */
+#define AURA_SB_INIT_CAP 256
+
+static AuraSb *aura_sb_from_handle(int64_t handle) {
+    return (AuraSb *)(intptr_t)handle;
+}
+
+/** 确保容量 >= need（几何增长，保证 append 摊还 O(1)）。 */
+static void aura_sb_reserve(AuraSb *sb, int64_t need) {
+    int64_t newcap;
+    char *nb;
+    if (!sb || sb->cap >= need) return;
+    newcap = sb->cap > 0 ? sb->cap : AURA_SB_INIT_CAP;
+    while (newcap < need) {
+        newcap *= 2;
+    }
+    nb = (char *)aura_mem_realloc(sb->buf, newcap);
+    if (!nb) return;
+    sb->buf = nb;
+    sb->cap = newcap;
+}
+
+/** 底层追加 n 字节（不含 NUL）。 */
+static int64_t aura_sb_append_n(AuraSb *sb, const char *s, int64_t n) {
+    if (!sb || !sb->buf) return 0;
+    if (n < 0) n = 0;
+    aura_sb_reserve(sb, sb->len + n + 1);
+    if (s && n > 0) memcpy(sb->buf + sb->len, s, (size_t)n);
+    sb->len += n;
+    sb->buf[sb->len] = '\0';
+    return sb->len;
+}
+
+int64_t aura_lang_std_StringBuilder_create(void) {
+    AuraSb *sb = (AuraSb *)aura_mem_alloc((int64_t)sizeof(AuraSb));
+    if (!sb) return 0;
+    sb->buf = (char *)aura_mem_alloc(AURA_SB_INIT_CAP);
+    if (!sb->buf) {
+        sb->len = 0;
+        sb->cap = 0;
+        return (int64_t)(intptr_t)sb;
+    }
+    sb->buf[0] = '\0';
+    sb->len = 0;
+    sb->cap = AURA_SB_INIT_CAP;
+    return (int64_t)(intptr_t)sb;
+}
+
+int64_t aura_lang_std_StringBuilder_append(int64_t handle, const char *text) {
+    AuraSb *sb = aura_sb_from_handle(handle);
+    if (!text) return handle;
+    (void)aura_sb_append_n(sb, text, (int64_t)strlen(text));
+    return handle;
+}
+
+int64_t aura_lang_std_StringBuilder_appendChar(int64_t handle, int16_t ch) {
+    AuraSb *sb = aura_sb_from_handle(handle);
+    char c = (char)ch;
+    (void)aura_sb_append_n(sb, &c, 1);
+    return handle;
+}
+
+int64_t aura_lang_std_StringBuilder_appendInt(int64_t handle, int32_t value) {
+    AuraSb *sb = aura_sb_from_handle(handle);
+    char tmp[32];
+    int n = snprintf(tmp, sizeof(tmp), "%d", (int)value);
+    if (n < 0) return handle;
+    (void)aura_sb_append_n(sb, tmp, (int64_t)n);
+    return handle;
+}
+
+int64_t aura_lang_std_StringBuilder_length(int64_t handle) {
+    AuraSb *sb = aura_sb_from_handle(handle);
+    return sb ? sb->len : 0;
+}
+
+const char *aura_lang_std_StringBuilder_finish(int64_t handle) {
+    AuraSb *sb = aura_sb_from_handle(handle);
+    char *out;
+    if (!sb) return "";
+    out = sb->buf;
+    /* 转移所有权：句柄置为失效（buf=NULL）。缓冲区由调用方长期持有，
+     * 结构体本身保留（AOT 无 GC；如需续用请 reset 重新分配）。 */
+    sb->buf = NULL;
+    sb->len = 0;
+    sb->cap = 0;
+    return out ? out : "";
+}
+
+int64_t aura_lang_std_StringBuilder_reset(int64_t handle) {
+    AuraSb *sb = aura_sb_from_handle(handle);
+    if (!sb) return handle;
+    if (sb->buf) {
+        sb->buf[0] = '\0';
+        sb->len = 0;
+    } else {
+        sb->buf = (char *)aura_mem_alloc(AURA_SB_INIT_CAP);
+        if (sb->buf) {
+            sb->buf[0] = '\0';
+            sb->cap = AURA_SB_INIT_CAP;
+        } else {
+            sb->cap = 0;
+        }
+        sb->len = 0;
+    }
+    return handle;
+}
+

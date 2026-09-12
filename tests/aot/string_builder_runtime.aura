@@ -1,0 +1,48 @@
+// AOT 运行库回归：原生可变字符串缓冲区 StringBuilder。
+//
+// 验证 AOT 侧 C 运行库（aura_std_cffi.c 的 aura_lang_std_StringBuilder_*）与
+// VM 侧（std_sb.rs）语义一致：同一句柄就地追加、finish 交出内容、reset 复用。
+// 全部通过时进程退出码为 0。
+//
+// 验证（Rust AOT 后端）：
+//   aura build tests/aot/string_builder_runtime.aura --aot --output build/aot-bin/string_builder_runtime.exe
+//   build/aot-bin/string_builder_runtime.exe   # 期望输出 "aot.string_builder_runtime ok"，退出码 0
+
+import aura.lang.std.StringBuilder
+
+fun main(): Int {
+    val h = StringBuilder.create()
+
+    StringBuilder.append(h, "Hello")
+    StringBuilder.append(h, ", ")
+    StringBuilder.append(h, "World")
+    StringBuilder.appendChar(h, '!')
+    StringBuilder.appendInt(h, 42)
+
+    if (StringBuilder.length(h) != 15) {
+        println("length failed: " + toStr(StringBuilder.length(h)))
+        return 1
+    }
+
+    val s = StringBuilder.finish(h)
+    if (s != "Hello, World!42") {
+        println("content failed: " + s)
+        return 2
+    }
+
+    val h2 = StringBuilder.create()
+    StringBuilder.append(h2, "abc")
+    StringBuilder.reset(h2)
+    if (StringBuilder.length(h2) != 0) {
+        println("reset failed")
+        return 3
+    }
+    StringBuilder.append(h2, "xy")
+    if (StringBuilder.finish(h2) != "xy") {
+        println("reuse failed")
+        return 4
+    }
+
+    println("aot.string_builder_runtime ok")
+    return 0
+}

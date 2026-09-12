@@ -33,6 +33,7 @@ const KNOWN_STD_CLASSES: &[&str] = &[
     "Process",
     "Random",
     "String",
+    "StringBuilder",
     "Test",
     "Time",
     "Coroutine",

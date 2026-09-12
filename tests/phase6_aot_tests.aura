@@ -29,6 +29,7 @@ import "../aura/compiler/aura/lang/compiler/aot/Runtime.aura"
 import "../aura/compiler/aura/lang/compiler/aot/StdSigs.aura"
 import "../aura/compiler/aura/lang/compiler/aot/Ffi.aura"
 import "../aura/compiler/aura/lang/compiler/aot/Dwarf.aura"
+import "../aura/compiler/aura/lang/compiler/aot/EmitBuffer.aura"
 import "../aura/compiler/aura/lang/compiler/aot/Emit.aura"
 import "../aura/compiler/aura/lang/compiler/aot/Linker.aura"
 import "../aura/compiler/aura/lang/compiler/aot/CBackend.aura"
@@ -238,7 +239,7 @@ fun testRuntimeDecls(): Int {
 
     t.assertTrue(isRuntimeFunction("aura_malloc"), "is runtime")
     t.assertFalse(isRuntimeFunction("main"), "not runtime")
-    t.assertEq(runtimeFunctionCount(), 10, "runtime fn count")
+    t.assertEq(runtimeFunctionCount(), 11, "runtime fn count")
     t.assertEq(runtimeSignature("toStringFloat"), "i8*|double", "signature")
     t.assertEq(runtimeSignature("nope"), "", "unknown signature")
 

@@ -1,0 +1,45 @@
+// aura:///aura/lang/std/StringBuilder.aura
+package aura.lang.std
+// 标准库模块，不可修改
+// 原生可变字符串缓冲区（mutable string buffer）。
+//
+// 实现：
+// - AOT：C 运行库 `aura_std_cffi.c`（AuraSb + aura_lang_std_StringBuilder_*）
+// - VM ：Rust native `compiler/src/std/std_sb.rs`（全局句柄注册表）
+//
+// 用途：在无 GC 的 AOT 运行时里，用「可增长缓冲区 + 摊还 O(1) 追加 + finish
+// 零拷贝转移」替代不可变 String 的反复拼接（`a = a + b`），避免海量中间串驻留。
+//
+// 语义：句柄（Long）指向同一缓冲区；对同一句柄的 append/appendChar/appendInt
+// 会**就地修改**内容（因此是「可变字符串」），length 反映当前长度。
+// finish 交出内容后原句柄失效（如需继续使用请 reset）。
+//
+// 使用前需 import：
+// ```aura
+// import aura.lang.std.StringBuilder
+// ```
+//
+// @since 0.1
+internal object StringBuilder {
+
+    /// 新建缓冲区，返回句柄。
+    fun create(): Long
+
+    /// 追加字符串（返回自身句柄，便于链式）。
+    fun append(handle: Long, text: String): Long
+
+    /// 追加单字符。
+    fun appendChar(handle: Long, ch: Char): Long
+
+    /// 追加十进制整数（不产生中间字符串）。
+    fun appendInt(handle: Long, value: Int): Long
+
+    /// 当前长度（字节）。
+    fun length(handle: Long): Int
+
+    /// 结束并交出内容（**转移缓冲区所有权，零拷贝**）；原句柄失效。
+    fun finish(handle: Long): String
+
+    /// 清空（保留容量），返回句柄。
+    fun reset(handle: Long): Long
+}
