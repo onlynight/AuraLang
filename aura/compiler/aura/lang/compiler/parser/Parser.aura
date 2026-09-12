@@ -190,13 +190,16 @@ class Parser {
     /// 解析整个程序，返回 Program 节点 id（id 0）。
     fun parseProgram(): Int {
         var kids = noKids()
+        println("[dbg] pp start n=" + toStr(this.n))
         while (!this.prsAtEnd()) {
             this.prsSkipDocs()
             if (!this.prsAtEnd()) {
+                println("[dbg] pp top pos=" + toStr(this.pos) + " k=" + this.prsCurKind())
                 val d = this.parseTopLevel()
                 kids = kidsAdd(kids, d)
             }
         }
+        println("[dbg] pp loop done")
         return this.ast.add("Program", "", "", this.prsCurSpan(), kids)
     }
 
@@ -293,10 +296,13 @@ class Parser {
     /// `fun name(params): RetType { body }` 或 `fun name(params): RetType = expr`
     fun parseFunction(): Int {
         this.prsAdvance() // Fun
+        println("[dbg] pf1 lit=[" + this.prsCurLit() + "]")
         val name: String = this.prsCurLit()
         this.prsExpectName()
+        println("[dbg] pf2")
 
         this.prsExpect("LParen")
+        println("[dbg] pf3")
         var params = noKids()
         if (!this.prsCheck("RParen")) {
             while (true) {
@@ -313,18 +319,22 @@ class Parser {
             }
         }
         this.prsExpect("RParen")
+        println("[dbg] pf4")
 
         var retTy: String = ""
         if (this.prsMatch("Colon")) {
             retTy = this.parseTypeName()
         }
+        println("[dbg] pf5 ret=[" + retTy + "]")
 
         var bodyKids = noKids()
         if (this.prsCheck("LBrace")) {
+            println("[dbg] pf body block")
             bodyKids = kidsAdd(bodyKids, this.parseBlock())
         } else if (this.prsMatch("Assign")) {
             bodyKids = kidsAdd(bodyKids, this.parseExpr())
         }
+        println("[dbg] pf6")
 
         val paramsNode = this.ast.add("Params", "", "", this.prsCurSpan(), params)
         var bodyNode: Int = -1
@@ -344,14 +354,18 @@ class Parser {
         this.prsAdvance()
         val name: String = this.prsCurLit()
         this.prsExpectName()
+        println("[dbg] pd3 name=[" + name + "]")
         var ty: String = ""
         if (this.prsMatch("Colon")) {
             ty = this.parseTypeName()
         }
+        println("[dbg] pd4 ty=[" + ty + "]")
         var kids = noKids()
         if (this.prsMatch("Assign")) {
+            println("[dbg] pd5 expr")
             kids = kidsAdd(kids, this.parseExpr())
         }
+        println("[dbg] pd6")
         val nodeKind = if (k == "Val") { "ValDecl" } else { "VarDecl" }
         return this.ast.add(nodeKind, name, ty, this.prsCurSpan(), kids)
     }
@@ -482,16 +496,20 @@ class Parser {
 
     /// 解析语句块 `{ ... }`。
     fun parseBlock(): Int {
+        println("[dbg] pb1 expect LBrace pos=" + toStr(this.pos))
         this.prsExpect("LBrace")
         var kids = noKids()
         while (!this.prsCheck("RBrace") && !this.prsAtEnd()) {
             // 跳过文档注释后再判断是否已到块尾，避免把 `}` 当作语句吃掉
             this.prsSkipDocs()
             if (!this.prsCheck("RBrace") && !this.prsAtEnd()) {
+                println("[dbg] pb stmt pos=" + toStr(this.pos) + " k=" + this.prsCurKind())
                 kids = kidsAdd(kids, this.parseStatement())
+                println("[dbg] pb stmt ok")
             }
         }
         this.prsExpect("RBrace")
+        println("[dbg] pb done")
         return this.ast.add("Block", "", "", this.prsCurSpan(), kids)
     }
 
@@ -619,6 +637,7 @@ class Parser {
         while (true) {
             val op = this.prsCurKind()
             val prec = this.binPrec(op)
+            println("[dbg] pbin op=" + op + " prec=" + toStr(prec))
             if (prec == 0 || prec < minPrec) {
                 break
             }
@@ -626,6 +645,7 @@ class Parser {
             val right = this.parseBinary(prec + 1)
             val sp = mergeSpan(this.ast.spanOf(left), this.ast.spanOf(right))
             left = this.ast.add("Binary", op, "", sp, kidsAdd(kidsAdd(noKids(), left), right))
+            println("[dbg] pbin built")
         }
         return left
     }
@@ -645,8 +665,10 @@ class Parser {
     /// 后缀表达式：调用 () / 成员 . / 下标 []。
     fun parsePostfix(): Int {
         var node = this.parsePrimary()
+        println("[dbg] pfpost primary node=" + toStr(node))
         while (true) {
             val k = this.prsCurKind()
+            println("[dbg] pfpost loop k=" + k)
             if (k == "LParen") {
                 this.prsAdvance()
                 var args = noKids()
@@ -688,6 +710,7 @@ class Parser {
     /// 解析基础表达式（字面量 / 标识符 / 分组 / if / when）。
     fun parsePrimary(): Int {
         val k = this.prsCurKind()
+        println("[dbg] pprim k=" + k)
         if (k == "IntLiteral") {
             return this.leafLit("IntLiteral")
         }
@@ -768,10 +791,16 @@ class Parser {
 
     /// 便捷：把当前字面量 token 作为叶子节点消费。
     fun leafLit(kindName: String): Int {
+        println("[dbg] ll1")
         val text: String = this.prsCurLit()
+        println("[dbg] ll2 text=[" + text + "]")
         val sp = this.prsCurSpan()
+        println("[dbg] ll3")
         this.prsAdvance()
-        return this.ast.leaf(kindName, text, sp)
+        println("[dbg] ll4")
+        val nodeId: Int = this.ast.leaf(kindName, text, sp)
+        println("[dbg] ll5 id=" + toStr(nodeId))
+        return nodeId
     }
 }
 

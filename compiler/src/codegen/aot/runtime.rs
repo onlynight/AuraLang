@@ -92,6 +92,23 @@ const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
             ("idx", "i64"),
         ],
     },
+    // Plan A 低位标记值的拆箱助手（实现见 aura_std_cffi.c）
+    RuntimeFn {
+        name: "aura_to_int_any",
+        ret: "i64",
+        params: &[("v", "i64")],
+    },
+    RuntimeFn {
+        name: "aura_to_str_any",
+        ret: "i8*",
+        params: &[("v", "i8*")],
+    },
+    // toStr(Boolean) 专用：VM 语义为 "true"/"false"（见 aura_std_cffi.c 同名注释）
+    RuntimeFn {
+        name: "aura_to_str_bool",
+        ret: "i8*",
+        params: &[("v", "i64")],
+    },
     // ── AOT 直接调用的 C 运行时辅助函数（实现已存在于 aura_std_cffi.c，此前未登记声明）──
     RuntimeFn {
         name: "aura_strlen",

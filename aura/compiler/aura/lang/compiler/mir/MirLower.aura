@@ -68,6 +68,7 @@ class MirLowerer {
 
         // 查找 Program 根节点
         val n: Int = src.count
+        println("[dbg] mir n=" + toStr(n))
         var rootIdx: Int = -1
         var i: Int = 0
         while (i < n) {
@@ -92,6 +93,7 @@ class MirLowerer {
         while (i < kCount) {
             val childId: Int = hirKidsAt(kids, i)
             val childKind: String = src.kindOf(childId)
+            println("[dbg] mir child i=" + toStr(i) + " id=" + toStr(childId) + " kind=" + childKind)
             if (childKind == "HirFunction") {
                 val funcId: Int = this.lowerFunction(src, childId)
                 newKids = mirKidsAdd(newKids, funcId)
@@ -104,6 +106,7 @@ class MirLowerer {
             }
             i = i + 1
         }
+        println("[dbg] mir loop done")
 
         // 更新根节点的 kids（MIR arena 不直接支持修改，重新添加）
         // 简化：通过返回值传递 rootId

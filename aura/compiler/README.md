@@ -642,7 +642,12 @@ scripts\snapshot.ps1
 >
 > * `build/bin/aura.exe`（bootstrap）与 `build/bin/aura-compiler.auc` 均已可用：
 >   `aura run build/bin/aura-compiler.auc` 会跑通「Aura 编译器自检样例」。
-> * `build/bin/aura-compiler.exe`（把 Aura 编写的编译器 AOT 成原生 exe）**尚未打通**。
+> * `build/bin/aura-compiler.exe`（把 Aura 编写的编译器 AOT 成原生 exe）**已打通**：
+>   `aura build aura\compiler\aura\lang\compiler\Main.aura --aot --output build\bin\aura-compiler.exe`
+>   产出的原生 exe 可完整跑通 5 个自检样例，计数与结果均与 VM 路径一致
+>   （`astNodes/hirNodes/mirNodes` = 14/11/11、27/24/25、20/15/18、20/15/13、29/23/25，
+>   输出 14 / 10 / 2 / 5 / 120），且 `aot ok=true`、`runtime exe exit code = 42`、
+>   `jit func=square compiled=true result=25`。
 >
 >   已修复的阻塞项（Rust AOT 后端）：
 >   1. `cmd_build_aot` 曾把 P3 语义诊断当致命错误直接 `exit(1)`，现与字节码路径
@@ -659,17 +664,35 @@ scripts\snapshot.ps1
 >   4. 字符串比较曾生成 `icmp i32 …, { i8*, i64 } …` 等非法 IR，现统一走
 >      `aura_lang_std_String_equals` 做内容比较；整型 i32/i64 混用先统一。
 >   5. 字符串 `.length` / `.size` 曾被当作结构体字段 0（数据指针），现取字段 1。
+>   6. **`i8*` → 字符串结构体 `{ i8*, i64 }` 转换缺失**（`emit_store_converted`）：
+>      `val s: String = list[i]` 会退化成 `store i8* …, { i8*, i64 }* …`，
+>      只写入 8 字节指针、长度字段保持栈上垃圾值。表现为 `list[i].length` 变成
+>      随机数、`textOf()/kidOf()` 之类访问器读到空串或不稳定文本。
+>      现补齐 `aura_to_str_any` + `aura_string_length` 的组装（并加了
+>      `{ i8*, i64 } → i8*` 的反向分支）。
+>   7. **指针 → 整数缺少 Plan A 拆箱**（`coerce_int_width`）：AOT 列表 / `Any` 中
+>      的整数是低位标记装箱值 `(v<<1)|1`，而 ptr→int 只做 `ptrtoint` + `trunc`，
+>      因此 `list[i]` 读 7 会得到 **15**。现统一经 `aura_to_int_any` 拆箱
+>      （`coerce_arg` / `emit_coerce_to` 早已如此，本处是漏网路径）。
+>   8. **字符串内部指针破坏 Plan A 偶地址不变量**
+>      （`aura_lang_std_String_substringAfter`）：旧实现返回 `p + strlen(sep)`
+>      （原串内部指针，地址奇偶性不可控），会被 `aura_to_str_any` 误判为装箱整数，
+>      解出垃圾文本 —— 这是 `hirKidsAt(list, 1)` 类访问器返回随机 id 的直接原因。
+>      现改为 `aura_substr_dup` 新分配副本（字符串字面量也已 `align 16`）。
+>   9. `toStr(Boolean)` / `toString(Boolean)` 在 AOT 下走整数装箱通道，
+>      打印成 `-1` / `0`（VM 为 `true` / `false`）；`emit_call` 对 `i1` 实参改派
+>      到新增的 `aura_to_str_bool`。
 >
 >   现已可端到端验证（编译 → llc → clang → 运行）：
->   `tests/aot/string_runtime.aura`、`tests/aot/list_runtime.aura`
+>   `tests/aot/string_runtime.aura`、`tests/aot/list_runtime.aura`、
+>   `examples/compiler/aot_list_roundtrip.aura`
 >   （`aura build <file> --aot -o x.exe && x.exe`，退出码 0）。
 >
 >   剩余根因：AOT 依赖 sema 类型信息，而 `compiler/src/std/decl.rs` 只登记
 >   **std 函数名**、没有签名表，因此 `String.split` 等 native 调用在 sema 中退化为
 >   `Any`；再叠加「类对象 = 指针」与「值返回 = 结构体」两种表示混用
 >   （如 `Token.withSpan` 声明返回 `%struct.Token` 却 `ret i8*`），
->   Aura 编译器自身仍会在这些点产出非法 IR。
->   需先补「std 签名表 + 统一的值/指针表示」，Aura 编译器才可能 AOT 成功。
+>   部分边缘路径仍可能产出非法 IR，需补「std 签名表 + 统一的值/指针表示」加固。
 >
 > * **两套 AOT 发射器（重要）**：`aura build --aot` 走 **Rust** 后端
 >   （`compiler/src/codegen/aot/emit.rs`）；

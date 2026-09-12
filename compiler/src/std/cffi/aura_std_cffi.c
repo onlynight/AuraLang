@@ -81,16 +81,43 @@ double aura_to_float(int64_t x) {
     return (double)x;
 }
 
+/* 分配一份新的、以 NUL 结尾的字符串副本。
+ *
+ * 为什么不能用共享 static 缓冲：AOT 字符串是「值语义」，返回值可能被调用方
+ * 长期持有（如词法器字段 `src`、解析器缓存的 token 文本）。若返回 static
+ * 缓冲，后续任意一次字符串运算都会就地覆盖此前所有「字符串」的内容，表现为
+ * 字段读出来变成别的文本甚至空串。代价是这些副本不会被释放（AOT 运行时暂无
+ * 字符串 GC）。 */
+static char *aura_dup_n(const char *s, size_t n) {
+    char *out = (char *)malloc(n + 1);
+    if (!out) return (char *)"";
+    if (s && n > 0) memcpy(out, s, n);
+    out[n] = '\0';
+    return out;
+}
+
 const char *aura_to_str(int64_t x) {
-    static char buf[64];
-    snprintf(buf, sizeof(buf), "%lld", (long long)x);
+    char *buf = (char *)malloc(64);
+    if (!buf) return "";
+    snprintf(buf, 64, "%lld", (long long)x);
     return buf;
 }
 
 const char *aura_to_str_float(double x) {
-    static char buf[64];
-    snprintf(buf, sizeof(buf), "%g", x);
+    char *buf = (char *)malloc(64);
+    if (!buf) return "";
+    snprintf(buf, 64, "%g", x);
     return buf;
+}
+
+/* `toStr(Boolean)` / `toString(Boolean)` 的专用实现。
+ *
+ * VM 语义：true → "true"，false → "false"。
+ * AOT 下布尔与整数共用 Plan A 的 `i8*` 装箱通道（true 会编码成 -1），
+ * 若直接走 aura_to_str_any 会打印成 "-1"/"0" —— 与 VM 行为不一致。
+ * emit_call 对 `toStr`/`toString` 的 i1 实参改派到这里。 */
+const char *aura_to_str_bool(int64_t v) {
+    return v ? "true" : "false";
 }
 
 double aura_clock(void) {
@@ -200,52 +227,44 @@ int64_t aura_string_charCodeAt(const char *s, int64_t idx) {
 }
 
 const char *aura_string_charAt(const char *s, int64_t idx) {
-    static char buf[2] = {0, 0};
     if (!s || idx < 0 || (size_t)idx >= strlen(s)) return "";
-    buf[0] = s[idx];
-    return buf;
+    return aura_dup_n(s + idx, 1);
 }
 
 const char *aura_string_substring(const char *s, int64_t start, int64_t end) {
-    static char buf[4096];
     if (!s) return "";
     size_t len = strlen(s);
     if (start < 0) start = 0;
     if (end > (int64_t)len) end = len;
     if (start > end) return "";
-    size_t n = (size_t)(end - start);
-    if (n >= sizeof(buf)) n = sizeof(buf) - 1;
-    strncpy(buf, s + start, n);
-    buf[n] = '\0';
-    return buf;
+    return aura_dup_n(s + start, (size_t)(end - start));
 }
 
 const char *aura_string_toUpperCase(const char *s) {
-    static char buf[4096];
     if (!s) return "";
     size_t len = strlen(s);
-    if (len >= sizeof(buf)) len = sizeof(buf) - 1;
+    char *buf = (char *)malloc(len + 1);
+    if (!buf) return "";
     for (size_t i = 0; i < len; i++) {
-        buf[i] = toupper((unsigned char)s[i]);
+        buf[i] = (char)toupper((unsigned char)s[i]);
     }
     buf[len] = '\0';
     return buf;
 }
 
 const char *aura_string_toLowerCase(const char *s) {
-    static char buf[4096];
     if (!s) return "";
     size_t len = strlen(s);
-    if (len >= sizeof(buf)) len = sizeof(buf) - 1;
+    char *buf = (char *)malloc(len + 1);
+    if (!buf) return "";
     for (size_t i = 0; i < len; i++) {
-        buf[i] = tolower((unsigned char)s[i]);
+        buf[i] = (char)tolower((unsigned char)s[i]);
     }
     buf[len] = '\0';
     return buf;
 }
 
 const char *aura_string_trim(const char *s) {
-    static char buf[4096];
     if (!s) return "";
     size_t len = strlen(s);
     if (len == 0) return "";
@@ -255,11 +274,7 @@ const char *aura_string_trim(const char *s) {
     // 找结束非空白
     size_t end = len;
     while (end > start && isspace((unsigned char)s[end - 1])) end--;
-    size_t n = end - start;
-    if (n >= sizeof(buf)) n = sizeof(buf) - 1;
-    strncpy(buf, s + start, n);
-    buf[n] = '\0';
-    return buf;
+    return aura_dup_n(s + start, end - start);
 }
 
 int aura_string_startsWith(const char *s, const char *prefix) {
@@ -276,7 +291,7 @@ int aura_string_endsWith(const char *s, const char *suffix) {
 }
 
 const char *aura_string_replace(const char *s, const char *from, const char *to) {
-    static char buf[4096];
+    static char buf[65536];
     if (!s || !from) return s ? s : "";
     size_t from_len = strlen(from);
     if (from_len == 0) return s ? s : "";
@@ -295,7 +310,8 @@ const char *aura_string_replace(const char *s, const char *from, const char *to)
         }
     }
     buf[j] = '\0';
-    return buf;
+    // 拷贝到新分配内存返回（static 仅作本次调用的临时缓冲）
+    return aura_dup_n(buf, j);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -305,18 +321,19 @@ const char *aura_string_replace(const char *s, const char *from, const char *to)
 const char *aura_string_concat(const char *a, int64_t alen, const char *b, int64_t blen) {
     size_t a_len = (size_t)(alen > 0 ? alen : 0);
     size_t b_len = (size_t)(blen > 0 ? blen : 0);
-    size_t total = a_len + b_len;
-    if (total > 4094) total = 4094;
 
-    static char buf[4096];
+    // 必须返回新分配内存：同一表达式内的链式拼接（`a + b + c`）会把前一步的
+    // 结果再当作输入，若返回共享 static 缓冲则前后互相覆盖。
+    char *out = (char *)malloc(a_len + b_len + 1);
+    if (!out) return "";
     if (a && a_len > 0) {
-        memcpy(buf, a, a_len);
+        memcpy(out, a, a_len);
     }
     if (b && b_len > 0) {
-        memcpy(buf + a_len, b, b_len);
+        memcpy(out + a_len, b, b_len);
     }
-    buf[total] = '\0';
-    return buf;
+    out[a_len + b_len] = '\0';
+    return out;
 }
 
 const char *aura_string_data(AuraString s) {
@@ -415,10 +432,45 @@ double aura_sqrt_wrapper(double x) { return sqrt(x); }
 double aura_pow_wrapper(double b, double e) { return pow(b, e); }
 int64_t toInt(double x) { return (int64_t)x; }
 double toFloat(int64_t x) { return (double)x; }
-const char *toString(int64_t x) { return aura_to_str(x); }
+/* Plan A 助手的前向声明：必须先于 toString 声明，否则 C 会按「隐式声明返回 int」
+   处理，把 64 位指针截断成 32 位，导致返回的字符串指针被破坏。 */
+int64_t aura_to_int_any(uint64_t v);
+const char *aura_to_str_any(uint64_t v);
+
+/* toString 同样按 Plan A 解析：调用点传入的是低位标记的 i8*
+   （带标记的整数 → 十进制串；偶数真实指针 → 原样）。 */
+const char *toString(int64_t x) { return aura_to_str_any((uint64_t)x); }
+
+/* ── Plan A：低位标记（low-bit tagged）的统一值表示 ──
+ * AOT 下列表/Any 只有 64 位槽，整数经 inttoptr 装入后会与真实指针无法区分，
+ * 读回时若误按字符串 strlen 会对非法指针解引用 → 访问违规崩溃。
+ * 约定：
+ *   - 奇数 ((v<<1)|1)  : 装箱的整数 v
+ *   - 偶数             : 真实指针（字符串数据指针等），按指针原义使用
+ * 分配器返回的指针至少 2 字节对齐（实际通常 8/16），故真实指针低位恒为 0。
+ * 这样两个 helper 对「真实指针」的行为与旧代码完全一致（无回归）。 */
+int64_t aura_to_int_any(uint64_t v) {
+    if (v & (uint64_t)1) {
+        /* 带标记的整数：用算术右移恢复符号 */
+        return (int64_t)((int64_t)v >> 1);
+    }
+    /* 偶数：旧语义（raw inttoptr 的值或真实指针），原样返回 */
+    return (int64_t)v;
+}
+
+const char *aura_to_str_any(uint64_t v) {
+    if (v & (uint64_t)1) {
+        return aura_to_str((int64_t)((int64_t)v >> 1));
+    }
+    /* 偶数：真实字符串数据指针 */
+    return (const char *)(uintptr_t)v;
+}
 /* `toStr` 与 `toString` 语义一致：AOT 下调用点会把整数经 inttoptr 打成 i8* 句柄，
  * 指针与 int64 在 x86-64 上均用整数寄存器传递，故 ABI 兼容，此处直接按整数解释。 */
-const char *toStr(int64_t x) { return aura_to_str(x); }
+/* toStr 接收的是「已按 Plan A 装箱」的 i8*（低位标记），故必须经 aura_to_str_any 解析：
+   带标记的整数 → 十进制串；偶数（真实字符串指针）→ 原样返回。
+   （注：toString 仍保持原始语义，用于调用点现场 inttoptr 的裸整数。） */
+const char *toStr(int64_t x) { return aura_to_str_any((uint64_t)x); }
 double aura_clock_wrapper(void) { return (double)clock(); }
 int64_t aura_strlen_wrapper(const char *s) { return (int64_t)strlen(s); }
 const char *toStringFloat(double x) { return aura_to_str_float(x); }
@@ -621,12 +673,8 @@ void aura_free(const void *ptr) {
 // 创建字符串对象（返回字符串指针）
 // data: 字符串数据指针，len: 字符串长度
 const char *aura_string_new(const char *data, int64_t len) {
-    static char string_buf[4096];
     if (!data || len <= 0) return "";
-    size_t copy_len = (size_t)(len < 4095 ? len : 4095);
-    memcpy(string_buf, data, copy_len);
-    string_buf[copy_len] = '\0';
-    return string_buf;
+    return aura_dup_n(data, (size_t)len);
 }
 
 // 注：`aura_string_length` / `aura_string_data` 已在文件前部以 `const char*`
@@ -1205,7 +1253,13 @@ const char *aura_lang_std_String_substringBefore(const char *s, const char *sep)
 const char *aura_lang_std_String_substringAfter(const char *s, const char *sep) {
     if (!s || !sep || !sep[0]) return "";
     const char *p = strstr(s, sep);
-    return p ? p + strlen(sep) : "";
+    if (!p) return "";
+    p += strlen(sep);
+    /* 必须返回新分配副本，不能返回 `p`（原串的内部指针）：
+     * Plan A 低位标记方案依赖「真实字符串指针恒为偶数」来区分装箱整数
+     * ((v<<1)|1)。内部指针的地址奇偶性不可控，可能被判成装箱整数，
+     * 导致后续 aura_to_str_any 解出垃圾文本。 */
+    return aura_substr_dup(p, strlen(p));
 }
 
 const char *aura_lang_std_String_padStart(const char *s, int64_t width, const char *pad) {

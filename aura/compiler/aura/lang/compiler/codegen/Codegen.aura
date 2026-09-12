@@ -92,12 +92,15 @@ class Codegen {
         this.labelTable = ""
 
         // 第 1 趟：记录标签 → 行号
+        println("[dbg] cg1 assignLabels n=" + toStr(src.count))
         this.assignLabels(src)
+        println("[dbg] cg2 emit loop")
 
         // 第 2 趟：发射（MIR arena 是扁平序列，按创建顺序遍历）
         var ei: Int = 0
         while (ei < src.count) {
             val kind: String = src.kindOf(ei)
+            println("[dbg] cg instr i=" + toStr(ei) + " kind=" + kind)
             if (kind == "MirFunc") {
                 this.emitFunc(src, ei)
             } else if (kind == "LABEL") {
@@ -153,15 +156,22 @@ class Codegen {
     /// 每个函数拥有**独立**的局部变量槽位命名空间（对应 VM 的每帧 locals），
     /// 因此在此重置 varTable，并按声明顺序为参数预分配槽位 0..n-1。
     fun emitFunc(src: Mir, id: Int) {
+        println("[dbg] ef-1 id=" + toStr(id) + " count=" + toStr(src.count)
+            + " textlen=" + toStr(src.texts.length) + " kindslen=" + toStr(src.kinds.length))
         val raw: String = src.textOf(id)
+        println("[dbg] ef0b")
         val name: String = this.fieldBefore(raw, "|")
+        println("[dbg] ef0c name=" + name)
         val params: String = this.fieldAfter(raw, "|")
+        println("[dbg] ef0d params=" + params)
         val retTy: String = src.tyOf(id)
+        println("[dbg] ef1 name=" + name + " params=" + params)
 
         var paramCount: Int = 0
         if (params != "") {
             paramCount = this.countComma(params) + 1
         }
+        println("[dbg] ef2 pcount=" + toStr(paramCount))
 
         // 新函数：重置局部变量槽位（每帧独立），并预分配参数槽位
         this.varTable = ""
@@ -180,6 +190,7 @@ class Codegen {
             }
             pos = pos + 1
         }
+        println("[dbg] ef3")
 
         // `name|起始行|参数个数`
         this.funcTable = this.funcTable + name + "|" + toStr(this.lineCount) + "|" + toStr(paramCount) + "\n"
@@ -187,6 +198,7 @@ class Codegen {
         // 注释行（VM 视为 no-op，但计入行号以对齐 ip）
         this.bytecode = this.bytecode + "# func " + name + ":" + retTy + "\n"
         this.lineCount = this.lineCount + 1
+        println("[dbg] ef4")
     }
 
     /// 发射基本块（对扁平 arena 无实际作用，保留接口）。

@@ -274,6 +274,11 @@ double toFloat(int64_t x);
 const char *toString(int64_t x);
 /* `toStr`：与 toString 同语义的实现（AOT 调用点按整数句柄传入） */
 const char *toStr(int64_t x);
+/* Plan A 低位标记值的拆箱助手（见 aura_std_cffi.c 中同名注释） */
+int64_t aura_to_int_any(uint64_t v);
+const char *aura_to_str_any(uint64_t v);
+/* `toStr(Boolean)` 专用：VM 语义为 "true"/"false"（AOT 下布尔与整数共用装箱通道） */
+const char *aura_to_str_bool(int64_t v);
 double aura_clock_wrapper(void);
 int64_t aura_strlen_wrapper(const char *s);
 const char *toStringFloat(double x);

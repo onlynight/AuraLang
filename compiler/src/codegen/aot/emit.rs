@@ -99,6 +99,12 @@ pub(crate) struct EmitCtx {
     pub lambda_counter: u64,
     /// P3.3: Lambda 生成的函数 IR 片段（模块末尾输出）
     pub lambda_funcs: Vec<String>,
+    /// 类/结构体字段默认值：类名 → [(字段索引, 字段 LLVM 类型, 默认值表达式)]。
+    ///
+    /// AOT 的 `New` 必须显式写入默认值（对齐 MIR 路径的「Alloc + 字段默认值 +
+    /// __ctorN」）：否则未被构造参数或 init 块赋值的字段保持 `undef`，运行期读到
+    /// 随机内存，表现为**非确定性**结果（同一二进制每次运行数值都不同）。
+    pub class_defaults: HashMap<String, Vec<(usize, String, HirExpr)>>,
 }
 
 /// 变量槽（LLVM 名称 + 类型）
@@ -154,6 +160,7 @@ impl EmitCtx {
             enum_max_fields: HashMap::new(),
             lambda_counter: 0,
             lambda_funcs: Vec::new(),
+            class_defaults: HashMap::new(),
         }
     }
 
@@ -470,6 +477,23 @@ pub fn emit_program(
         ctx.sections.push(s);
     }
 
+    // 已知结构体/枚举名：字段/返回类型引用到未定义结构体时按 `i8*` 处理，
+    // 与 emit_struct_defs 保持一致。
+    //
+    // 必须在「预注册函数返回类型」之前构建：`llvm_type_checked` 依据
+    // `known_structs` 决定「未定义的 %struct.X → i8*」降级。若此时集合为空，
+    // 类返回值的函数会被登记为 `i8*`，而 `emit_function`（在其后执行、集合
+    // 已填充）却把定义生成为 `%struct.X`（按值返回，MSVC 走隐藏 sret 指针）
+    // → 调用点与定义 ABI 不一致，实参整体错位。
+    let mut known_structs: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for st in &program.structs {
+        known_structs.insert(st.name.clone());
+    }
+    for e in &program.enums {
+        known_structs.insert(e.name.clone());
+    }
+    ctx.known_structs = known_structs.clone();
+
     // 4.8 预注册函数返回类型映射（供 emit_call 推断返回类型）
     for func in &program.functions {
         if let Some(ref ret) = func.ret {
@@ -487,15 +511,6 @@ pub fn emit_program(
         ctx.func_param_types.insert(func.name.clone(), param_tys);
     }
     // 预注册类字段类型映射（供 emit_member_access 推断字段类型和索引）
-    // 已知结构体/枚举名：字段引用到未定义结构体时按 `i8*` 处理，与 emit_struct_defs 保持一致
-    let mut known_structs: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for st in &program.structs {
-        known_structs.insert(st.name.clone());
-    }
-    for e in &program.enums {
-        known_structs.insert(e.name.clone());
-    }
-    ctx.known_structs = known_structs.clone();
     for struct_def in &program.structs {
         // 与 `emit_struct_defs` 保持一致：同名结构体的 `%struct.X` 布局以**首个定义**为准，
         // 因此字段表也必须「首个定义优先」。若此处用 insert 覆盖成最后一个定义，
@@ -505,15 +520,23 @@ pub fn emit_program(
             continue;
         }
         let mut field_map = HashMap::new();
+        let mut defaults: Vec<(usize, String, HirExpr)> = Vec::new();
         for (fi, (field_name, field_ty)) in struct_def.fields.iter().enumerate() {
             let l = ctx.map_type(field_ty);
             let l = match l.strip_prefix("%struct.") {
                 Some(name) if !known_structs.contains(name) => "i8*".to_string(),
                 _ => l,
             };
+            // 字段默认值：AOT 构造（New）时必须显式写入，见 class_defaults 注释。
+            if let Some(Some(dv)) = struct_def.default_values.get(fi) {
+                defaults.push((fi, l.clone(), (**dv).clone()));
+            }
             field_map.insert(field_name.clone(), (l, fi));
         }
         ctx.class_field_types.insert(struct_def.name.clone(), field_map);
+        if !defaults.is_empty() {
+            ctx.class_defaults.insert(struct_def.name.clone(), defaults);
+        }
     }
     // 预注册类型别名表（供 AOT 解析 typealias）
     for (alias_name, alias_ty) in &program.type_aliases {
@@ -948,6 +971,10 @@ fn emit_variable_decl(
     } else if let Some(init_expr) = init {
         // 先发射初始化器获取其类型
         let (val_ir, val_ty) = emit_expr_val(ctx, blocks, init_expr)?;
+        eprintln!(
+            "[DBG emit_variable_decl] name={}, inferred val_ty={}",
+            name, val_ty
+        );
         let var_name = ctx.fresh_var();
         {
             let cur = blocks.last_mut();
@@ -988,7 +1015,66 @@ fn emit_variable_decl(
     Ok(())
 }
 
-/// 将值存储到目标类型中，处理可空结构体 { T, i1 } 的包装/提取
+/// 整数宽度适配：把 `val_ir`（类型 `val_ty`）转换为 `dst_ty` 所需的整数宽度。
+///
+/// 典型场景：`String.length` 产出 `i64`，而 `Int` 变量槽是 `i32`。不做转换会生成
+/// `store i64 %x, i32* %p` —— 虽然 LLVM 23 接受该 IR，但运行期会向 4 字节槽位写入
+/// 8 字节，破坏相邻栈槽（表现为难以定位的访问违例）。
+fn coerce_int_width(
+    ctx: &mut EmitCtx,
+    blocks: &mut FuncBlocks,
+    val_ir: &str,
+    val_ty: &str,
+    dst_ty: &str,
+) -> Option<String> {
+    fn bits(t: &str) -> Option<u32> {
+        t.strip_prefix('i').and_then(|r| r.parse::<u32>().ok())
+    }
+    // 指针 → 整数：`store i8* %x, i32* %p` 会向 4 字节槽写 8 字节（越界破坏相邻槽）。
+    // 先 ptrtoint 到 i64，再按目标宽度截断。
+    if is_ptr_ty(val_ty) {
+        let dst_bits = bits(dst_ty)?;
+        let pi = ctx.fresh_var();
+        blocks.last_mut().body.push(format!("{} = ptrtoint {} {} to i64", pi, val_ty, val_ir));
+        // Plan A：列表 / Any 中存放的整数是低位标记装箱值 `(v<<1)|1`（真实指针恒为
+        // 偶数）。必须经 `aura_to_int_any` 拆箱，否则读出来的是 `2v+1`
+        // （如 `list[i]` 取 7 会得到 15）。
+        let unboxed = ctx.fresh_var();
+        blocks.last_mut().body.push(format!(
+            "{} = call i64 @aura_to_int_any(i64 {})",
+            unboxed, pi
+        ));
+        if dst_bits == 64 {
+            return Some(unboxed);
+        }
+        let out = ctx.fresh_var();
+        blocks.last_mut().body.push(format!("{} = trunc i64 {} to {}", out, unboxed, dst_ty));
+        return Some(out);
+    }
+    let (Some(src_bits), Some(dst_bits)) = (bits(val_ty), bits(dst_ty)) else {
+        return None;
+    };
+    if src_bits == dst_bits {
+        return None;
+    }
+    let out = ctx.fresh_var();
+    let op = if src_bits > dst_bits {
+        "trunc"
+    } else if src_bits == 1 {
+        // i1 → iN：布尔真值零扩展
+        "zext"
+    } else {
+        // 一般整型：Aura 的整型是有符号的，按符号扩展
+        "sext"
+    };
+    blocks.last_mut().body.push(format!(
+        "{} = {} {} {} to {}",
+        out, op, val_ty, val_ir, dst_ty
+    ));
+    Some(out)
+}
+
+/// 将值存储到目标类型中，处理可空结构体 { T, i1 } 的包装/提取与整数宽度适配
 fn emit_store_converted(
     ctx: &mut EmitCtx,
     blocks: &mut FuncBlocks,
@@ -997,9 +1083,8 @@ fn emit_store_converted(
     val_ty: &str,
     var_name: &str,
 ) {
-    let cur = blocks.last_mut();
-
     if is_nullable_struct_type(dst_ty) && val_ty != dst_ty {
+        let cur = blocks.last_mut();
         // 目标类型是可空结构体 { T, i1 }
         if val_ir == "null" {
             // null → { T 0, i1 true }
@@ -1030,6 +1115,7 @@ fn emit_store_converted(
         // 值类型是可空结构体，目标类型不是 → 提取内部值
         let inner_ty = extract_inner_type(val_ty);
         let extract_var = ctx.fresh_var();
+        let cur = blocks.last_mut();
         cur.body.push(format!(
             "{} = extractvalue {} {}, 0",
             extract_var, val_ty, val_ir
@@ -1038,11 +1124,77 @@ fn emit_store_converted(
             "store {} {} , {}* {}",
             inner_ty, extract_var, dst_ty, var_name
         ));
-    } else {
+    } else if is_string_struct_ty(dst_ty) && val_ty == "i8*" {
+        // i8* → 字符串结构体 `{ i8*, i64 }`：先经 `aura_to_str_any` 解析
+        // （Plan A 下 i8* 可能是装箱整数），再用 strlen 补出长度字段。
+        //
+        // 若不处理，会退化成 `store i8* %p, { i8*, i64 }* %slot`：只写入 8 字节
+        // 指针，长度字段保持栈上的垃圾值 —— 表现为 `list[i].length` 变成随机数、
+        // 字符串拼接读到越界数据（`List<String>` 元素读出的核心故障）。
+        let sptr = ctx.fresh_var();
+        let slen = ctx.fresh_var();
+        let w0 = ctx.fresh_var();
+        let w1 = ctx.fresh_var();
+        let cur = blocks.last_mut();
         cur.body.push(format!(
-            "store {} {} , {}* {}",
-            val_ty, val_ir, dst_ty, var_name
+            "{} = call i8* @aura_to_str_any(i8* {})",
+            sptr, val_ir
         ));
+        cur.body.push(format!(
+            "{} = call i64 @aura_string_length(i8* {})",
+            slen, sptr
+        ));
+        cur.body.push(format!(
+            "{} = insertvalue {{ i8*, i64 }} undef, i8* {}, 0",
+            w0, sptr
+        ));
+        cur.body.push(format!(
+            "{} = insertvalue {{ i8*, i64 }} {}, i64 {}, 1",
+            w1, w0, slen
+        ));
+        cur.body.push(format!(
+            "store {{ i8*, i64 }} {} , {{ i8*, i64 }}* {}",
+            w1, var_name
+        ));
+    } else if val_ty == "{ i8*, i64 }" && dst_ty == "i8*" {
+        // 字符串结构体 → i8*：取数据指针（反向转换，避免 `store { i8*, i64 }` 到 `i8**`）
+        let dptr = ctx.fresh_var();
+        let cur = blocks.last_mut();
+        cur.body.push(format!(
+            "{} = extractvalue {{ i8*, i64 }} {}, 0",
+            dptr, val_ir
+        ));
+        cur.body.push(format!("store i8* {} , i8** {}", dptr, var_name));
+    } else {
+        // 指针 → 整数：coerce_int_width 处理 ptrtoint + trunc。
+        // 整数宽度不同（如 i64 的 .length 存入 i32 的 Int 槽）必须先转换，
+        // 否则会向 4 字节槽写 8 字节，破坏相邻栈槽。
+        if is_ptr_ty(val_ty) {
+            if let Some(v) = coerce_int_width(ctx, blocks, val_ir, val_ty, dst_ty) {
+                blocks
+                    .last_mut()
+                    .body
+                    .push(format!("store {} {} , {}* {}", dst_ty, v, dst_ty, var_name));
+            } else {
+                blocks.last_mut().body.push(format!(
+                    "store {} {} , {}* {}",
+                    val_ty, val_ir, dst_ty, var_name
+                ));
+            }
+        } else if val_ty == "i64" && dst_ty == "i32" {
+            let out = ctx.fresh_var();
+            blocks.last_mut().body.push(format!("{} = trunc i64 {} to i32", out, val_ir));
+            blocks.last_mut().body.push(format!("store i32 {} , i32* {}", out, var_name));
+        } else if val_ty == "i32" && dst_ty == "i64" {
+            let out = ctx.fresh_var();
+            blocks.last_mut().body.push(format!("{} = sext i32 {} to i64", out, val_ir));
+            blocks.last_mut().body.push(format!("store i64 {} , i64* {}", out, var_name));
+        } else {
+            blocks.last_mut().body.push(format!(
+                "store {} {} , {}* {}",
+                val_ty, val_ir, dst_ty, var_name
+            ));
+        }
     }
 }
 
@@ -1430,6 +1582,7 @@ fn emit_expr_val(
                 enum_max_fields: ctx.enum_max_fields.clone(),
                 lambda_counter: ctx.lambda_counter,
                 lambda_funcs: Vec::new(),
+                class_defaults: ctx.class_defaults.clone(),
             };
 
             // 注册参数
@@ -1628,8 +1781,11 @@ fn emit_string_literal(
     } else {
         let name = format!("@str_data.{}", ctx.const_counter);
         ctx.const_counter += 1;
+        // 必须显式指定对齐（≥2）：Plan A 低位标记方案依赖「真实指针恒为偶数」
+        // 来区分装箱整数 ((v<<1)|1) 与真实指针。字符数组默认对齐为 1，可能被
+        // 链接器放在奇数地址上，从而被 aura_to_str_any 误判为带标记整数。
         ctx.globals.push(format!(
-            "{} = private constant [{} x i8] {}",
+            "{} = private constant [{} x i8] {}, align 16",
             name, byte_len, llvm_str
         ));
         ctx.global_const_map.insert(key, name.clone());
@@ -1665,6 +1821,10 @@ fn emit_variable_load(
     name: &str,
 ) -> Result<(String, String), AotError> {
     if let Some(slot) = ctx.lookup_var(name).cloned() {
+        eprintln!(
+            "[DBG emit_variable_load] name={}, llvm_ty={}",
+            name, slot.llvm_ty
+        );
         let tmp = ctx.fresh_var();
         let cur = blocks.last_mut();
         cur.body.push(format!(
@@ -1673,6 +1833,7 @@ fn emit_variable_load(
         ));
         Ok((tmp, slot.llvm_ty))
     } else {
+        eprintln!("[DBG emit_variable_load] name={} NOT FOUND", name);
         // 未声明变量：作为外部引用（可能是函数调用）
         Ok((name.to_string(), "i32".to_string()))
     }
@@ -1680,6 +1841,11 @@ fn emit_variable_load(
 
 fn is_string_type(ty: &str) -> bool {
     ty == "i8*" || ty == "{ i8*, i64 }"
+}
+
+/// 是否为字符串结构体 `{ i8*, i64 }`（区别于以 `i1` 结尾的可空结构体）。
+fn is_string_struct_ty(ty: &str) -> bool {
+    ty.starts_with('{') && ty.contains("i8*") && ty.contains("i64")
 }
 
 /// 是否为数值类型（整数 / 浮点）。
@@ -1725,13 +1891,20 @@ fn extract_string_parts(
     val_ty: &str,
 ) -> (String, String) {
     if val_ty == "i8*" {
+        // Plan A：i8* 可能是装箱整数（低位标记），必须先用 aura_to_str_any 解析，
+        // 否则直接对整数位 strlen 会解引用非法指针而崩溃。
+        let sptr = ctx.fresh_var();
         let len_var = ctx.fresh_var();
         let cur = blocks.last_mut();
         cur.body.push(format!(
-            "{} = call i64 @aura_string_length(i8* {})",
-            len_var, val_ir
+            "{} = call i8* @aura_to_str_any(i8* {})",
+            sptr, val_ir
         ));
-        (val_ir.to_string(), len_var)
+        cur.body.push(format!(
+            "{} = call i64 @aura_string_length(i8* {})",
+            len_var, sptr
+        ));
+        (sptr, len_var)
     } else if val_ty == "{ i8*, i64 }" {
         let ptr_var = ctx.fresh_var();
         let len_var = ctx.fresh_var();
@@ -1752,10 +1925,10 @@ fn extract_string_parts(
         let len_var = ctx.fresh_var();
         let cur = blocks.last_mut();
         if is_int_ty(val_ty) {
-            cur.body.push(format!(
-                "{} = inttoptr {} {} to i8*",
-                as_ptr, val_ty, val_ir
-            ));
+            // Plan A：与通用装箱一致，打低位标记 (v<<1)|1，
+            // 后续 toString（= aura_to_str_any）才能正确解码回数值。
+            let boxed = box_int_to_i8ptr(ctx, &mut cur.body, val_ir, val_ty);
+            cur.body.push(format!("{} = bitcast i8* {} to i8*", as_ptr, boxed));
         } else {
             // 浮点：调用 toStringFloat(double)（bitcast 到指针会打印地址垃圾值）
             let fvar = ctx.fresh_var();
@@ -1776,14 +1949,19 @@ fn extract_string_parts(
         ));
         (str_var, len_var)
     } else {
-        // Fallback: treat as i8* with strlen
+        // Fallback: 同样按 i8* 处理，但先经 aura_to_str_any（Plan A 装箱整数）
+        let sptr = ctx.fresh_var();
         let len_var = ctx.fresh_var();
         let cur = blocks.last_mut();
         cur.body.push(format!(
-            "{} = call i64 @aura_string_length(i8* {})",
-            len_var, val_ir
+            "{} = call i8* @aura_to_str_any(i8* {})",
+            sptr, val_ir
         ));
-        (val_ir.to_string(), len_var)
+        cur.body.push(format!(
+            "{} = call i64 @aura_string_length(i8* {})",
+            len_var, sptr
+        ));
+        (sptr, len_var)
     }
 }
 
@@ -2070,6 +2248,17 @@ fn emit_binary(
                     cur.body.push(format!("{} = xor i1 {}, 1", tmp, eq));
                     return Ok((tmp, "i1".to_string()));
                 }
+                // 混合类型：一侧是字符串结构体，另一侧不是字符串类型。
+                // 字符串与整数/浮点等永远不会相等，直接返回编译期常量。
+                if matches!(op, HirBinOp::Eq | HirBinOp::Ne)
+                    && (is_struct_str(&l_ty) || is_struct_str(&r_ty))
+                    && !(is_str_like(&l_ty) && is_str_like(&r_ty))
+                {
+                    if *op == HirBinOp::Eq {
+                        return Ok(("false".to_string(), "i1".to_string()));
+                    }
+                    return Ok(("true".to_string(), "i1".to_string()));
+                }
             }
             let pred = if is_signed && l_ty.starts_with("i") {
                 format!("icmp {} {} {}, {}", icmp_pred, l_ty, l_ir, r_ir)
@@ -2150,15 +2339,131 @@ fn emit_unary(
     }
 }
 
+/// 方法调用接收者的「就地取地址」。
+///
+/// 当接收者是**结构体类型的变量**或**结构体字段**（`this.ast` / `obj.field`），
+/// 且形参是指针（方法 self 即 `i8*`）时，返回（地址 IR, 指针类型）。
+///
+/// 若不做此处理，接收者会按值加载成一份临时副本再传地址：方法内的
+/// `this.count = …` 只写进副本，调用方读到的一直是旧值（表现为 AST 节点 id
+/// 永远为 0、Lexer.pos 不前进等「状态不推进」类故障）。
+fn receiver_address(
+    ctx: &mut EmitCtx,
+    blocks: &mut FuncBlocks,
+    recv: &HirExpr,
+    want: &str,
+) -> Result<Option<(String, String)>, AotError> {
+    if !is_ptr_ty(want) {
+        return Ok(None);
+    }
+    // 把「对象表达式」转为「该结构体类型的指针」
+    fn base_of_struct(
+        ctx: &mut EmitCtx,
+        blocks: &mut FuncBlocks,
+        object: &HirExpr,
+        struct_ty: &str,
+    ) -> Result<Option<String>, AotError> {
+        if let HirExpr::Var(vn) = object {
+            if let Some(slot) = ctx.lookup_var(vn).cloned() {
+                if slot.llvm_ty == struct_ty {
+                    let cast = ctx.fresh_var();
+                    blocks.last_mut().body.push(format!(
+                        "{} = bitcast {}* {} to {}*",
+                        cast, slot.llvm_ty, slot.llvm_name, struct_ty
+                    ));
+                    return Ok(Some(cast));
+                }
+                if is_ptr_ty(&slot.llvm_ty) {
+                    // 槽里存的是「指向对象的指针」：必须先 load 出值再 bitcast，
+                    // 直接 bitcast 槽地址（X**）会得到非法的指针类型。
+                    let loaded = ctx.fresh_var();
+                    let cast = ctx.fresh_var();
+                    blocks.last_mut().body.push(format!(
+                        "{} = load {}, {}* {}",
+                        loaded, slot.llvm_ty, slot.llvm_ty, slot.llvm_name
+                    ));
+                    blocks.last_mut().body.push(format!(
+                        "{} = bitcast {} {} to {}*",
+                        cast, slot.llvm_ty, loaded, struct_ty
+                    ));
+                    return Ok(Some(cast));
+                }
+            }
+        }
+        let (oir, oty) = emit_expr_val(ctx, blocks, object)?;
+        if !is_ptr_ty(&oty) {
+            return Ok(None);
+        }
+        let cast = ctx.fresh_var();
+        blocks.last_mut().body.push(format!(
+            "{} = bitcast {} {} to {}*",
+            cast, oty, oir, struct_ty
+        ));
+        Ok(Some(cast))
+    }
+
+    match recv {
+        HirExpr::Var(name) => {
+            if let Some(slot) = ctx.lookup_var(name).cloned() {
+                if slot.llvm_ty.starts_with("%struct.") {
+                    let ptr_ty = format!("{}*", slot.llvm_ty);
+                    let cast = ctx.fresh_var();
+                    blocks.last_mut().body.push(format!(
+                        "{} = bitcast {} {} to {}",
+                        cast, ptr_ty, slot.llvm_name, want
+                    ));
+                    return Ok(Some((cast, want.to_string())));
+                }
+            }
+            Ok(None)
+        }
+        HirExpr::Member {
+            object,
+            name: field,
+        } => {
+            // 注意：这里要传**内层对象**（`this` / 局部变量），否则 `this`/`self`
+            // 分支不命中，会退化成「按字段名全局扫描」而选中同名字段的其它类
+            // （如 `ast` 命中 HirLowerer 而不是 Parser），GEP 出错误偏移。
+            let Some((class, field_ty, fidx)) =
+                resolve_member_field_owner(ctx, object, None, field)
+            else {
+                return Ok(None);
+            };
+            let struct_ty = format!("%struct.{}", sanitizellvm(&class));
+            let Some(base) = base_of_struct(ctx, blocks, object, &struct_ty)? else {
+                return Ok(None);
+            };
+            let gep = ctx.fresh_var();
+            let out = ctx.fresh_var();
+            let cur = blocks.last_mut();
+            cur.body.push(format!(
+                "{} = getelementptr {}, {}* {}, i32 0, i32 {}",
+                gep, struct_ty, struct_ty, base, fidx
+            ));
+            cur.body.push(format!(
+                "{} = bitcast {}* {} to {}",
+                out, field_ty, gep, want
+            ));
+            Ok(Some((out, want.to_string())))
+        }
+        _ => Ok(None),
+    }
+}
+
 fn emit_call(
     ctx: &mut EmitCtx,
     blocks: &mut FuncBlocks,
     callee: &str,
     args: &[HirExpr],
 ) -> Result<(String, String), AotError> {
-    // P9: 检查是否为结构体构造函数
-    if ctx.declared_structs.contains(callee) {
-        return emit_struct_constructor(ctx, blocks, callee, args);
+    // P9: 检查是否为结构体构造函数。
+    // declared_structs 存的是 `%struct.X` 格式，而 callee 是裸名 `X`，
+    // 因此需要同时检查裸名和 `%struct.{callee}` 两种形式。
+    {
+        let struct_name = format!("%struct.{}", sanitizellvm(callee));
+        if ctx.declared_structs.contains(callee) || ctx.declared_structs.contains(&struct_name) {
+            return emit_struct_constructor(ctx, blocks, callee, args);
+        }
     }
 
     // aura_isOfType: AOT 中值没有运行时类型标签，编译期解析
@@ -2251,8 +2556,43 @@ fn emit_call(
             effective_args.remove(0);
         }
     }
-    let args_ir: Vec<(String, String)> =
-        effective_args.iter().map(|a| emit_expr_val(ctx, blocks, a)).collect::<Result<_, _>>()?;
+    let param_tys = ctx.func_param_types.get(callee).cloned();
+
+    // 实参求值：若实参是「结构体局部变量」且对应形参是**指针**（方法接收者 self 即
+    // `i8*`），直接传该局部变量的「槽地址」，而不是按值加载后拷贝。
+    // 否则方法内的 `this.field = …` 会写进一份临时副本、调用方不可见，
+    // 导致状态永不推进（Lexer.pos 不前进 → scanAll 死循环 + alloca 累积 → 栈溢出）。
+    //
+    // 收紧范围：**仅**对方法接收者（首个实参 + `Class.method` 形式的被调方）生效，
+    // 避免影响其它「把结构体局部变量传给指针形参」的场景（如 Any/存进容器等，
+    // 传栈槽地址会在作用域结束后悬空）。
+    let is_method_call = callee.contains('.');
+    let mut args_ir: Vec<(String, String)> = Vec::with_capacity(effective_args.len());
+    for (i, a) in effective_args.iter().enumerate() {
+        let want = param_tys.as_ref().and_then(|p| p.get(i)).cloned();
+        if i == 0 && is_method_call {
+            if let Some(w) = want.as_ref() {
+                if let Some(recv) = receiver_address(ctx, blocks, a, w)? {
+                    args_ir.push(recv);
+                    continue;
+                }
+            }
+        }
+        args_ir.push(emit_expr_val(ctx, blocks, a)?);
+    }
+
+    // toStr(Boolean) / toString(Boolean)：AOT 下布尔与整数共用 Plan A 的 `i8*` 装箱
+    // 通道（true 编码为 -1），直接装箱会打印成 "-1"/"0"，与 VM 的 "true"/"false" 不一致。
+    // 在参数类型强制转换之前改派到 `aura_to_str_bool`。
+    if matches!(callee, "toStr" | "toString") && args_ir.len() == 1 && args_ir[0].1 == "i1" {
+        let (v, _) = &args_ir[0];
+        let ext = ctx.fresh_var();
+        let tmp = ctx.fresh_var();
+        let cur = blocks.last_mut();
+        cur.body.push(format!("{} = sext i1 {} to i64", ext, v));
+        cur.body.push(format!("{} = call i8* @aura_to_str_bool(i64 {})", tmp, ext));
+        return Ok((tmp, "i8*".to_string()));
+    }
 
     let ret_ty = if callee == "Runtime" {
         // 内置异常构造器：返回 String 结构体的数据指针（i8*），直接交给 `__throw`。
@@ -2260,8 +2600,6 @@ fn emit_call(
     } else {
         ctx.func_ret_types.get(callee).cloned().unwrap_or_else(|| "i32".to_string())
     };
-
-    let param_tys = ctx.func_param_types.get(callee).cloned();
     // 按被调方声明的参数类型转换实参（LLVM IR 对调用/声明类型一致性要求严格）
     let args_ir: Vec<(String, String)> = match &param_tys {
         Some(pts) => {
@@ -2301,6 +2639,25 @@ fn emit_call(
     // AOT 下 List/Array 表示为不透明指针 `i8*`（底层 AuraList，元素以 i64 句柄存储）。
     // 自举编译器大量使用 list.size / list.push / for x in list / arrayListOf / 1..10 等，
     // 这些内建在 VM 中以原生函数提供，但 AOT 后端此前未声明，导致链接到未定义符号。
+    // 0 参列表构造（`listOf()` / `mutableListOf()` / `arrayListOf()` / `emptyList()`）：
+    // 这类调用未被 HIR 降级为 `__list_new`，直接按名字发射会链接到不存在的
+    // `@listOf`（C 运行时只提供 aura_lang_std_Collections_emptyList）。
+    {
+        let bare = callee.rsplit('.').next().unwrap_or(callee);
+        if matches!(
+            bare,
+            "listOf" | "mutableListOf" | "arrayListOf" | "emptyList" | "emptyArray"
+        ) && args_ir.is_empty()
+        {
+            let tmp = ctx.fresh_var();
+            blocks.last_mut().body.push(format!(
+                "{} = call i8* @aura_lang_std_Collections_emptyList()",
+                tmp
+            ));
+            return Ok((tmp, "i8*".to_string()));
+        }
+    }
+
     if callee == "__list_len" && args_ir.len() == 1 {
         let (l, _) = &args_ir[0];
         let c = ctx.fresh_var();
@@ -2392,6 +2749,33 @@ fn emit_call(
             tmp, l
         ));
         return Ok((tmp, "i8*".to_string()));
+    }
+    // Map 下标赋值 `m["k"] = v` 会被降级为 `Collections.set(collection, key, value)`，
+    // 但 Collections.set 是**列表**语义（下标为 i64）；把字符串键传进去时实参是
+    // `{ i8*, i64 }` 而形参是 `i64`，ABI 不匹配 → 运行期崩溃。
+    // 当「下标」是字符串时改走 mapSet（Map 语义）。仅在 AOT 侧改派，不动 HIR/字节码。
+    if (callee == "aura_lang_std_Collections_set" || callee == "aura.lang.std.Collections.set")
+        && args_ir.len() == 3
+    {
+        let (coll, _) = &args_ir[0];
+        let (idx, idx_ty) = &args_ir[1];
+        if idx_ty.starts_with('{') || is_string_type(idx_ty) {
+            let key_ptr = if idx_ty.starts_with('{') {
+                let p = ctx.fresh_var();
+                let cur = blocks.last_mut();
+                cur.body.push(format!("{} = extractvalue {} {}, 0", p, idx_ty, idx));
+                p
+            } else {
+                idx.clone()
+            };
+            let val_ptr = coerce_val_to_i8ptr(ctx, blocks, &args_ir[2].0, &args_ir[2].1);
+            let cur = blocks.last_mut();
+            cur.body.push(format!(
+                "call void @aura_lang_std_Collections_mapSet(i8* {}, i8* {}, i8* {})",
+                coll, key_ptr, val_ptr
+            ));
+            return Ok((coll.clone(), "i8*".to_string()));
+        }
     }
     if callee == "__range" {
         // 参数：start(i32), end(i32), inclusive(i32)，由 HIR 在 desugar_expr 中传入。
@@ -2539,19 +2923,22 @@ fn coerce_arg(
         body.push(format!("{} = load {}, {}* {}", loaded, to, to, cast));
         return (loaded, to.to_string());
     }
-    // i8* → 字符串结构体：用 strlen 补长度
+    // i8* → 字符串结构体：先经 aura_to_str_any 解析（Plan A：可能是装箱整数），
+    // 再用 strlen 补长度。直接用原值 strlen 会对非指针位解引用而崩溃。
     if from == "i8*" && to.starts_with('{') && to.contains("i8*") && to.contains("i64") {
+        let sptr = ctx.fresh_var();
         let len = ctx.fresh_var();
         let with_len = ctx.fresh_var();
         let with_ptr = ctx.fresh_var();
         let body = &mut blocks.last_mut().body;
+        body.push(format!("{} = call i8* @aura_to_str_any(i8* {})", sptr, val));
         body.push(format!(
             "{} = call i64 @aura_string_length(i8* {})",
-            len, val
+            len, sptr
         ));
         body.push(format!(
             "{} = insertvalue {} undef, i8* {}, 0",
-            with_ptr, to, val
+            with_ptr, to, sptr
         ));
         body.push(format!(
             "{} = insertvalue {} {}, i64 {}, 1",
@@ -2560,20 +2947,24 @@ fn coerce_arg(
         return (with_len, to.to_string());
     }
     // 指针 ↔ 整数
+    // Plan A（低位标记装箱）：整型 → i8* 时编码为 (v<<1)|1，读回时经 aura_to_int_any
+    // 还原。真实指针恒为偶数，因此该 helper 对既有的「真实指针」路径零回归，
+    // 只有我们主动标记的装箱整数（列表元素等走偶数✓）会被正确拆箱。
     if is_ptr_ty(to) && is_int_ty(from) {
-        let t = ctx.fresh_var();
-        emit(
-            &mut blocks.last_mut().body,
-            format!("{} = inttoptr {} {} to {}", t, from, val, to),
-        );
+        let t = box_int_to_i8ptr(ctx, &mut blocks.last_mut().body, &val, from);
         return (t, to.to_string());
     }
     if is_ptr_ty(from) && is_int_ty(to) {
+        let body = &mut blocks.last_mut().body;
+        let raw = ctx.fresh_var();
+        body.push(format!("{} = ptrtoint {} {} to i64", raw, from, val));
+        let d = ctx.fresh_var();
+        body.push(format!("{} = call i64 @aura_to_int_any(i64 {})", d, raw));
+        if to == "i64" {
+            return (d, to.to_string());
+        }
         let t = ctx.fresh_var();
-        emit(
-            &mut blocks.last_mut().body,
-            format!("{} = ptrtoint {} {} to {}", t, from, val, to),
-        );
+        body.push(format!("{} = trunc i64 {} to {}", t, d, to));
         return (t, to.to_string());
     }
     // 整数宽度
@@ -2660,20 +3051,52 @@ fn coerce_val_to_i8ptr(
         blocks.last_mut().body.push(format!("{} = extractvalue {} {}, 0", t, from, val));
         return t;
     }
+    // 整数入列表：与通用装箱一致，采用 Plan A 低位标记 (v<<1)|1，
+    // 读回时 aura_to_str_any / aura_to_int_any 才能正确还原。
     if from == "i64" {
+        let sh = ctx.fresh_var();
+        blocks.last_mut().body.push(format!("{} = shl i64 {}, 1", sh, val));
+        let tg = ctx.fresh_var();
+        blocks.last_mut().body.push(format!("{} = or i64 {}, 1", tg, sh));
         let t = ctx.fresh_var();
-        blocks.last_mut().body.push(format!("{} = inttoptr i64 {} to i8*", t, val));
+        blocks.last_mut().body.push(format!("{} = inttoptr i64 {} to i8*", t, tg));
         return t;
     }
     if from == "i32" {
         let ext = ctx.fresh_var();
         blocks.last_mut().body.push(format!("{} = sext i32 {} to i64", ext, val));
+        let sh = ctx.fresh_var();
+        blocks.last_mut().body.push(format!("{} = shl i64 {}, 1", sh, ext));
+        let tg = ctx.fresh_var();
+        blocks.last_mut().body.push(format!("{} = or i64 {}, 1", tg, sh));
         let t = ctx.fresh_var();
-        blocks.last_mut().body.push(format!("{} = inttoptr i64 {} to i8*", t, ext));
+        blocks.last_mut().body.push(format!("{} = inttoptr i64 {} to i8*", t, tg));
         return t;
     }
     // 其它（如 %struct.*）→ 直接作为 i8*（尽力而为）
     val.to_string()
+}
+
+/// Plan A 装箱：把整型值编码为低位标记指针 `(v<<1)|1` → `i8*`。
+///
+/// 读回时由 `aura_to_int_any` / `aura_to_str_any` 解码。真实指针恒为偶数
+/// （分配器对齐 ≥2），故二者不会混淆，且对既有「真实指针」路径零回归。
+/// 注意：值本身已是 `i64` 时**不能**再发 `sext i64 → i64`（非法 cast）。
+fn box_int_to_i8ptr(ctx: &mut EmitCtx, body: &mut Vec<String>, val: &str, from: &str) -> String {
+    let ext = if from == "i64" {
+        val.to_string()
+    } else {
+        let e = ctx.fresh_var();
+        body.push(format!("{} = sext {} {} to i64", e, from, val));
+        e
+    };
+    let sh = ctx.fresh_var();
+    body.push(format!("{} = shl i64 {}, 1", sh, ext));
+    let tg = ctx.fresh_var();
+    body.push(format!("{} = or i64 {}, 1", tg, sh));
+    let t = ctx.fresh_var();
+    body.push(format!("{} = inttoptr i64 {} to i8*", t, tg));
+    t
 }
 
 /// 数值类型转换（整数 ↔ 浮点、float ↔ double、整数宽度调整）。
@@ -2759,18 +3182,25 @@ fn emit_coerce_to(
     // 目标为字符串结构体 { i8*, i64 }
     if to.starts_with('{') && to.contains("i8*") && to.contains("i64") {
         if from == "i8*" {
+            // Plan A：先用 aura_to_str_any 解析（可能是低位标记的整数），再 strlen
+            let sptr = ctx.fresh_var();
             let p = ctx.fresh_var();
             let len = ctx.fresh_var();
             let s = ctx.fresh_var();
             insert_before_terminator(
                 blocks,
                 block,
-                format!("{} = call i64 @aura_string_length(i8* {})", len, val),
+                format!("{} = call i8* @aura_to_str_any(i8* {})", sptr, val),
             );
             insert_before_terminator(
                 blocks,
                 block,
-                format!("{} = insertvalue {} undef, i8* {}, 0", p, to, val),
+                format!("{} = call i64 @aura_string_length(i8* {})", len, sptr),
+            );
+            insert_before_terminator(
+                blocks,
+                block,
+                format!("{} = insertvalue {} undef, i8* {}, 0", p, to, sptr),
             );
             insert_before_terminator(
                 blocks,
@@ -2797,12 +3227,24 @@ fn emit_coerce_to(
     // 目标为 i8*（Any）：整型 inttoptr，结构体取首字段，指针 bitcast
     if to == "i8*" {
         if is_int_ty(from) {
+            // Plan A：装箱整数 → 低位标记 (v<<1)|1（已是 i64 时不做 sext）
+            let ext = if from == "i64" {
+                val.to_string()
+            } else {
+                let e = ctx.fresh_var();
+                insert_before_terminator(
+                    blocks,
+                    block,
+                    format!("{} = sext {} {} to i64", e, from, val),
+                );
+                e
+            };
+            let sh = ctx.fresh_var();
+            insert_before_terminator(blocks, block, format!("{} = shl i64 {}, 1", sh, ext));
+            let tg = ctx.fresh_var();
+            insert_before_terminator(blocks, block, format!("{} = or i64 {}, 1", tg, sh));
             let v = ctx.fresh_var();
-            insert_before_terminator(
-                blocks,
-                block,
-                format!("{} = inttoptr {} {} to i8*", v, from, val),
-            );
+            insert_before_terminator(blocks, block, format!("{} = inttoptr i64 {} to i8*", v, tg));
             return v;
         }
         if from.starts_with('{') {
@@ -2825,14 +3267,25 @@ fn emit_coerce_to(
         }
         return val.to_string();
     }
-    // i8* → 整型：ptrtoint
+    // i8* → 整型：Plan A 低位标记拆箱（aura_to_int_any），再截断到目标宽度
     if from == "i8*" && is_int_ty(to) {
-        let v = ctx.fresh_var();
+        let raw = ctx.fresh_var();
         insert_before_terminator(
             blocks,
             block,
-            format!("{} = ptrtoint i8* {} to {}", v, val, to),
+            format!("{} = ptrtoint i8* {} to i64", raw, val),
         );
+        let d = ctx.fresh_var();
+        insert_before_terminator(
+            blocks,
+            block,
+            format!("{} = call i64 @aura_to_int_any(i64 {})", d, raw),
+        );
+        if to == "i64" {
+            return d;
+        }
+        let v = ctx.fresh_var();
+        insert_before_terminator(blocks, block, format!("{} = trunc i64 {} to {}", v, d, to));
         return v;
     }
     // 整型互转兜底
@@ -2857,6 +3310,34 @@ fn emit_coerce_to(
 /// （如 Dwarf.DebugInfo 有 subprograms 默认值字段，3 个构造参数对应 4 个字段）。位置式
 /// insertvalue 会按「实参 i → 字段 i」机械映射，在这种类上错位，触发 llc 的
 /// 「insertvalue operand and field disagree」。
+/// 把类/结构体的字段默认值写入已分配对象 `alloc`（类型 `struct_ty`）。
+///
+/// 对应 MIR 路径的「Alloc + 字段默认值 + Call __ctorN」中的中间一步。
+/// AOT 若省略这一步，未被构造参数 / init 块覆盖的字段会保持 `undef`。
+fn emit_field_defaults(
+    ctx: &mut EmitCtx,
+    blocks: &mut FuncBlocks,
+    class: &str,
+    struct_ty: &str,
+    alloc: &str,
+) -> Result<(), AotError> {
+    let Some(defaults) = ctx.class_defaults.get(class).cloned() else {
+        return Ok(());
+    };
+    for (idx, fty, expr) in defaults.iter() {
+        let (v, vty) = emit_expr_val(ctx, blocks, expr)?;
+        let (v, _) = coerce_arg(ctx, blocks, v, &vty, fty);
+        let gep = ctx.fresh_var();
+        let cur = blocks.last_mut();
+        cur.body.push(format!(
+            "{} = getelementptr {}, {}* {}, i32 0, i32 {}",
+            gep, struct_ty, struct_ty, alloc, idx
+        ));
+        cur.body.push(format!("store {} {}, {}* {}", fty, v, fty, gep));
+    }
+    Ok(())
+}
+
 fn try_emit_ctor(
     ctx: &mut EmitCtx,
     blocks: &mut FuncBlocks,
@@ -2879,16 +3360,17 @@ fn try_emit_ctor(
     let param_tys = ctor_name.as_ref().and_then(|n| ctx.func_param_types.get(n).cloned());
     if let (Some(ctor_name), Some(param_tys)) = (ctor_name, param_tys) {
         if param_tys.len() == args.len() + 1 {
-            let cur = blocks.last_mut();
             let alloc = ctx.fresh_var();
-            cur.body.push(format!("{} = alloca {}", alloc, struct_type));
+            blocks.last_mut().body.push(format!("{} = alloca {}", alloc, struct_type));
+            // 先写字段默认值（init 块/构造参数之外的字段仍须有确定初值）
+            emit_field_defaults(ctx, blocks, type_name, struct_type, &alloc)?;
             // self 形参类型在 desugar 中是 Any → i8*；按实际类型传参（必要时 bitcast）。
             let self_ty = &param_tys[0];
             let self_arg = if self_ty == &format!("{}*", struct_type) {
                 format!("{}* {}", struct_type, alloc)
             } else {
                 let bc = ctx.fresh_var();
-                cur.body.push(format!(
+                blocks.last_mut().body.push(format!(
                     "{} = bitcast {}* {} to {}",
                     bc, struct_type, alloc, self_ty
                 ));
@@ -2944,7 +3426,21 @@ fn emit_struct_constructor(
 
     let args_ir: Vec<(String, String)> =
         args.iter().map(|a| emit_expr_val(ctx, blocks, a)).collect::<Result<_, _>>()?;
-    let mut struct_val = "undef".to_string();
+    // 无合成构造函数（如无 init 块的类）：也必须先写字段默认值，否则未赋值字段
+    // 保持 undef → 运行期读到随机内存（非确定性）。
+    let mut struct_val = if ctx.class_defaults.contains_key(struct_name) {
+        let alloc = ctx.fresh_var();
+        blocks.last_mut().body.push(format!("{} = alloca {}", alloc, struct_type));
+        emit_field_defaults(ctx, blocks, struct_name, &struct_type, &alloc)?;
+        let loaded = ctx.fresh_var();
+        blocks.last_mut().body.push(format!(
+            "{} = load {}, {}* {}",
+            loaded, struct_type, struct_type, alloc
+        ));
+        loaded
+    } else {
+        "undef".to_string()
+    };
     for (i, (val, ty)) in args_ir.iter().enumerate() {
         // 按字段声明类型转换实参（如 `Any`/`i8*` → `i32`）
         let (v, vty) = match field_tys.iter().find(|(idx, _)| *idx == i) {
@@ -3022,6 +3518,10 @@ fn emit_member_access(
     // 普通成员访问：使用 extractvalue 从结构体值中提取字段
     let (obj_ir, obj_ty) = emit_expr_val(ctx, blocks, object)?;
     let tmp = ctx.fresh_var();
+    eprintln!(
+        "[DBG emit_member_access] name={}, obj_ir={}, obj_ty={}",
+        name, obj_ir, obj_ty
+    );
 
     // 内建属性：字符串 `{ i8*, i64 }` 的 length / size → 第 1 个字段（len）。
     // 若不特判，会落入下方「按字段名全局查找」的兜底分支取到字段 0（数据指针）。
@@ -3065,6 +3565,7 @@ fn emit_member_access(
     // 注意：`extractvalue` 的结构体类型必须与字段索引来自**同一个类**，
     // 否则会生成 `extractvalue %struct.Token …, 1` 这类错类型 IR。
     let owner = resolve_member_field_owner(ctx, object, Some(&obj_ty), name);
+    eprintln!("[DBG emit_member_access] owner={:?}", owner);
     let (field_llvm_ty, field_idx) = owner
         .as_ref()
         .map(|(_, ty, idx)| (ty.clone(), *idx))
@@ -3077,6 +3578,7 @@ fn emit_member_access(
             "i8*".to_string()
         }
     });
+    eprintln!("[DBG emit_member_access] owner_struct={:?}", owner_struct);
 
     // 判断对象是指针还是值
     let is_pointer = obj_ty.ends_with('*') || obj_ty == "i8*" || obj_ty == "ptr";
@@ -3146,15 +3648,26 @@ fn resolve_member_field_owner(
     name: &str,
 ) -> Option<(String, String, usize)> {
     let mut candidates: Vec<String> = Vec::new();
+    let mut obj_type_resolved = false;
+    eprintln!(
+        "[DBG resolve_member_field_owner] name={}, obj_ty={:?}, object={:?}",
+        name, obj_ty, object
+    );
     if let Some(t) = obj_ty {
         if let Some(cls) = struct_name_of_ty(t) {
             candidates.push(cls);
+            obj_type_resolved = true;
         }
     }
     if let HirExpr::Var(var) = object {
         if var == "this" || var == "self" {
+            eprintln!(
+                "[DBG resolve_member_field_owner] var={}, current_class={:?}",
+                var, ctx.current_class
+            );
             if let Some(cls) = &ctx.current_class {
                 candidates.push(cls.clone());
+                obj_type_resolved = true;
             }
         } else if let Some(cls) = ctx
             .var_scope
@@ -3164,12 +3677,19 @@ fn resolve_member_field_owner(
             .and_then(|slot| struct_name_of_ty(&slot.llvm_ty))
         {
             candidates.push(cls);
+            obj_type_resolved = true;
         }
     }
-    for cls in candidates {
-        if let Some((ty, idx)) = ctx.class_field_types.get(&cls).and_then(|m| m.get(name)) {
-            return Some((cls, ty.clone(), *idx));
+    for cls in &candidates {
+        if let Some((ty, idx)) = ctx.class_field_types.get(cls).and_then(|m| m.get(name)) {
+            return Some((cls.clone(), ty.clone(), *idx));
         }
+    }
+    // 如果对象的静态类型已解析为已知结构体，但字段未找到，
+    // 退回全局扫描会生成错误的 extractvalue（用 Token 类型提取 Span 值）。
+    // 此时宁可返回 None，让调用方按 i32/0 兜底，也不要用错结构体类型。
+    if obj_type_resolved {
+        return None;
     }
     ctx.class_field_types.iter().find_map(|(class, fields)| {
         fields.get(name).map(|(ty, idx)| (class.clone(), ty.clone(), *idx))
@@ -3317,8 +3837,21 @@ fn emit_new(
         .unwrap_or_default();
     field_tys.sort_by_key(|(idx, _)| *idx);
 
-    // 使用 insertvalue 构建结构体值
-    let mut struct_val = "undef".to_string();
+    // 使用 insertvalue 构建结构体值。
+    // 无合成构造函数时同样要先写字段默认值（见 class_defaults 注释）。
+    let mut struct_val = if ctx.class_defaults.contains_key(type_name) {
+        let alloc = ctx.fresh_var();
+        blocks.last_mut().body.push(format!("{} = alloca {}", alloc, llvm_struct_type));
+        emit_field_defaults(ctx, blocks, type_name, &llvm_struct_type, &alloc)?;
+        let loaded = ctx.fresh_var();
+        blocks.last_mut().body.push(format!(
+            "{} = load {}, {}* {}",
+            loaded, llvm_struct_type, llvm_struct_type, alloc
+        ));
+        loaded
+    } else {
+        "undef".to_string()
+    };
     for (i, (val, ty)) in arg_values.iter().enumerate() {
         let (v, vty) = match field_tys.iter().find(|(idx, _)| *idx == i) {
             Some((_, want)) => coerce_arg(ctx, blocks, val.clone(), ty, want),
@@ -3366,162 +3899,205 @@ fn emit_if_expr(
     // Then 块
     let _ = blocks.add_block_named(&then_name);
     let (then_ir, then_ty) = emit_expr_val(ctx, blocks, then_e)?;
-    // 获取 then 表达式的实际最后块名（可能是嵌套 if 的 merge 块）
-    let then_actual_block =
-        blocks.blocks.last().map(|bb| bb.name.clone()).unwrap_or(then_name.clone());
-    // 设置 then 块终止符
-    {
-        let cur = blocks.last_mut();
-        cur.terminator = Some(format!("br label %{}", merge_name));
-    }
+    // 分支若以 break/continue/return 结束，当前块已带终止符：绝不能改写它
+    // （改写会吞掉跳转，例如 `else { break }` 退化为死循环）。此时补一个
+    // 不可达块作为 merge 的前驱，保证 merge 的边数与 PHI 条目一致。
+    let then_terminated = blocks.has_terminator();
+    let then_actual_block = if then_terminated {
+        let name = ctx.fresh_bb("unreach");
+        let _ = blocks.add_block_named(&name);
+        name
+    } else {
+        blocks.blocks.last().map(|bb| bb.name.clone()).unwrap_or(then_name.clone())
+    };
+    blocks.set_terminator(&format!("br label %{}", merge_name));
 
     // Else 块
     let _ = blocks.add_block_named(&else_name);
     let (else_ir, else_ty) = emit_expr_val(ctx, blocks, else_e)?;
-    // 获取 else 表达式的实际最后块名（可能是嵌套 if 的 merge 块）
-    let else_actual_block =
-        blocks.blocks.last().map(|bb| bb.name.clone()).unwrap_or(else_name.clone());
-    // 设置 else 块终止符（分支到 merge）
-    {
-        let cur = blocks.last_mut();
-        cur.terminator = Some(format!("br label %{}", merge_name));
-    }
+    let else_terminated = blocks.has_terminator();
+    let else_actual_block = if else_terminated {
+        let name = ctx.fresh_bb("unreach");
+        let _ = blocks.add_block_named(&name);
+        name
+    } else {
+        blocks.blocks.last().map(|bb| bb.name.clone()).unwrap_or(else_name.clone())
+    };
+    blocks.set_terminator(&format!("br label %{}", merge_name));
 
-    // 类型协调：如果一边是可空结构体而另一边是普通类型，提取内部值
-    let (phi_type, then_phi_val, else_phi_val) =
-        if is_nullable_struct_type(&then_ty) && !is_nullable_struct_type(&else_ty) {
-            // then 分支是可空结构体，提取内部值
-            let inner_ty = extract_inner_type(&then_ty);
-            let extract_var = ctx.fresh_var();
-            // 插入 extractvalue 到 then 块（在终止符之前）
-            insert_before_terminator(
-                blocks,
-                &then_actual_block,
-                format!("{} = extractvalue {} {}, 0", extract_var, then_ty, then_ir),
-            );
-            (inner_ty, extract_var, else_ir)
-        } else if is_nullable_struct_type(&else_ty) && !is_nullable_struct_type(&then_ty) {
-            // else 分支是可空结构体，提取内部值
-            let inner_ty = extract_inner_type(&else_ty);
-            let extract_var = ctx.fresh_var();
-            insert_before_terminator(
-                blocks,
-                &else_actual_block,
-                format!("{} = extractvalue {} {}, 0", extract_var, else_ty, else_ir),
-            );
-            (inner_ty, then_ir, extract_var)
-        } else if then_ty.starts_with("{ i8*") && else_ty == "i8*" {
-            // then 分支是字符串结构体，else 分支是字符串指针 → 将指针包装为结构体
-            let len_var = ctx.fresh_var();
-            let wrap_var = ctx.fresh_var();
-            let wrap_var2 = ctx.fresh_var();
-            insert_before_terminator(
-                blocks,
-                &else_actual_block,
-                format!(
-                    "{} = call i64 @aura_string_length(i8* {})",
-                    len_var, else_ir
-                ),
-            );
-            insert_before_terminator(
-                blocks,
-                &else_actual_block,
-                format!(
-                    "{} = insertvalue {} undef, i8* {}, 0",
-                    wrap_var, then_ty, else_ir
-                ),
-            );
-            insert_before_terminator(
-                blocks,
-                &else_actual_block,
-                format!(
-                    "{} = insertvalue {} {}, i64 {}, 1",
-                    wrap_var2, then_ty, wrap_var, len_var
-                ),
-            );
-            (then_ty.clone(), then_ir, wrap_var2)
-        } else if else_ty.starts_with("{ i8*") && then_ty == "i8*" {
-            // then 分支是字符串指针，else 分支是字符串结构体 → 将指针包装为结构体
-            let len_var = ctx.fresh_var();
-            let wrap_var = ctx.fresh_var();
-            let wrap_var2 = ctx.fresh_var();
-            insert_before_terminator(
-                blocks,
-                &then_actual_block,
-                format!(
-                    "{} = call i64 @aura_string_length(i8* {})",
-                    len_var, then_ir
-                ),
-            );
-            insert_before_terminator(
-                blocks,
-                &then_actual_block,
-                format!(
-                    "{} = insertvalue {} undef, i8* {}, 0",
-                    wrap_var, else_ty, then_ir
-                ),
-            );
-            insert_before_terminator(
-                blocks,
-                &then_actual_block,
-                format!(
-                    "{} = insertvalue {} {}, i64 {}, 1",
-                    wrap_var2, else_ty, wrap_var, len_var
-                ),
-            );
-            (else_ty.clone(), wrap_var2, else_ir)
+    // 类型协调：
+    // (a) 任一侧已终止（break/return/continue）→ 该侧永不落到 merge，PHI 操作数用
+    //     `undef`；另一侧的值 coerce 到公共类型（只能在该侧块内插入指令，且该侧块
+    //     未终止，插入合法）。
+    // (b) 否则按可空结构体 / 字符串 / 数值等情形协调。
+    let (phi_type, then_phi_val, else_phi_val) = if then_terminated || else_terminated {
+        let cty = common_if_type(&then_ty, &else_ty);
+        let tv = if then_terminated {
+            "undef".to_string()
         } else {
-            if then_ty == else_ty {
-                // 类型相同：数值类型用 add X,0 归一（恒等式，保证 PHI 操作数为寄存器），其余原样
-                let ty = then_ty.clone();
-                let then_val = if is_numeric_type(&ty) {
-                    let phi_val = ctx.fresh_var();
-                    let then_operand = if then_ir == "null" { "0".to_string() } else { then_ir };
-                    insert_before_terminator(
-                        blocks,
-                        &then_actual_block,
-                        format!("{} = add {} {}, 0", phi_val, ty, then_operand),
-                    );
-                    phi_val
-                } else {
-                    then_ir
-                };
-                let else_val = if is_numeric_type(&ty) {
-                    let phi_val = ctx.fresh_var();
-                    let else_operand = if else_ir == "null" { "0".to_string() } else { else_ir };
-                    insert_before_terminator(
-                        blocks,
-                        &else_actual_block,
-                        format!("{} = add {} {}, 0", phi_val, ty, else_operand),
-                    );
-                    phi_val
-                } else {
-                    else_ir
-                };
-                (ty, then_val, else_val)
-            } else {
-                // 类型不同（如 i32 与字符串 { i8*, i64 }）：协调为统一公共类型，
-                // 两分支各 coerce 到该类型，确保 PHI 节点类型合法（值/指针表示统一）。
-                let cty = common_if_type(&then_ty, &else_ty);
-                let then_coerced = emit_coerce_to(
-                    ctx,
+            emit_coerce_to(
+                ctx,
+                blocks,
+                &then_actual_block,
+                then_ir.as_str(),
+                &then_ty,
+                &cty,
+            )
+        };
+        let ev = if else_terminated {
+            "undef".to_string()
+        } else {
+            emit_coerce_to(
+                ctx,
+                blocks,
+                &else_actual_block,
+                else_ir.as_str(),
+                &else_ty,
+                &cty,
+            )
+        };
+        (cty, tv, ev)
+    } else if is_nullable_struct_type(&then_ty) && !is_nullable_struct_type(&else_ty) {
+        // then 分支是可空结构体，提取内部值
+        let inner_ty = extract_inner_type(&then_ty);
+        let extract_var = ctx.fresh_var();
+        // 插入 extractvalue 到 then 块（在终止符之前）
+        insert_before_terminator(
+            blocks,
+            &then_actual_block,
+            format!("{} = extractvalue {} {}, 0", extract_var, then_ty, then_ir),
+        );
+        (inner_ty, extract_var, else_ir)
+    } else if is_nullable_struct_type(&else_ty) && !is_nullable_struct_type(&then_ty) {
+        // else 分支是可空结构体，提取内部值
+        let inner_ty = extract_inner_type(&else_ty);
+        let extract_var = ctx.fresh_var();
+        insert_before_terminator(
+            blocks,
+            &else_actual_block,
+            format!("{} = extractvalue {} {}, 0", extract_var, else_ty, else_ir),
+        );
+        (inner_ty, then_ir, extract_var)
+    } else if then_ty.starts_with("{ i8*") && else_ty == "i8*" {
+        // then 分支是字符串结构体，else 分支是字符串指针 → 将指针包装为结构体
+        // Plan A：i8* 可能是装箱整数，先经 aura_to_str_any 解析再 strlen
+        let sptr = ctx.fresh_var();
+        let len_var = ctx.fresh_var();
+        let wrap_var = ctx.fresh_var();
+        let wrap_var2 = ctx.fresh_var();
+        insert_before_terminator(
+            blocks,
+            &else_actual_block,
+            format!("{} = call i8* @aura_to_str_any(i8* {})", sptr, else_ir),
+        );
+        insert_before_terminator(
+            blocks,
+            &else_actual_block,
+            format!("{} = call i64 @aura_string_length(i8* {})", len_var, sptr),
+        );
+        insert_before_terminator(
+            blocks,
+            &else_actual_block,
+            format!(
+                "{} = insertvalue {} undef, i8* {}, 0",
+                wrap_var, then_ty, sptr
+            ),
+        );
+        insert_before_terminator(
+            blocks,
+            &else_actual_block,
+            format!(
+                "{} = insertvalue {} {}, i64 {}, 1",
+                wrap_var2, then_ty, wrap_var, len_var
+            ),
+        );
+        (then_ty.clone(), then_ir, wrap_var2)
+    } else if else_ty.starts_with("{ i8*") && then_ty == "i8*" {
+        // then 分支是字符串指针，else 分支是字符串结构体 → 将指针包装为结构体
+        // Plan A：同上，先解析可能的装箱整数
+        let sptr = ctx.fresh_var();
+        let len_var = ctx.fresh_var();
+        let wrap_var = ctx.fresh_var();
+        let wrap_var2 = ctx.fresh_var();
+        insert_before_terminator(
+            blocks,
+            &then_actual_block,
+            format!("{} = call i8* @aura_to_str_any(i8* {})", sptr, then_ir),
+        );
+        insert_before_terminator(
+            blocks,
+            &then_actual_block,
+            format!("{} = call i64 @aura_string_length(i8* {})", len_var, sptr),
+        );
+        insert_before_terminator(
+            blocks,
+            &then_actual_block,
+            format!(
+                "{} = insertvalue {} undef, i8* {}, 0",
+                wrap_var, else_ty, sptr
+            ),
+        );
+        insert_before_terminator(
+            blocks,
+            &then_actual_block,
+            format!(
+                "{} = insertvalue {} {}, i64 {}, 1",
+                wrap_var2, else_ty, wrap_var, len_var
+            ),
+        );
+        (else_ty.clone(), wrap_var2, else_ir)
+    } else {
+        if then_ty == else_ty {
+            // 类型相同：数值类型用 add X,0 归一（恒等式，保证 PHI 操作数为寄存器），其余原样
+            let ty = then_ty.clone();
+            let then_val = if is_numeric_type(&ty) {
+                let phi_val = ctx.fresh_var();
+                let then_operand = if then_ir == "null" { "0".to_string() } else { then_ir };
+                insert_before_terminator(
                     blocks,
                     &then_actual_block,
-                    then_ir.as_str(),
-                    &then_ty,
-                    &cty,
+                    format!("{} = add {} {}, 0", phi_val, ty, then_operand),
                 );
-                let else_coerced = emit_coerce_to(
-                    ctx,
+                phi_val
+            } else {
+                then_ir
+            };
+            let else_val = if is_numeric_type(&ty) {
+                let phi_val = ctx.fresh_var();
+                let else_operand = if else_ir == "null" { "0".to_string() } else { else_ir };
+                insert_before_terminator(
                     blocks,
                     &else_actual_block,
-                    else_ir.as_str(),
-                    &else_ty,
-                    &cty,
+                    format!("{} = add {} {}, 0", phi_val, ty, else_operand),
                 );
-                (cty, then_coerced, else_coerced)
-            }
-        };
+                phi_val
+            } else {
+                else_ir
+            };
+            (ty, then_val, else_val)
+        } else {
+            // 类型不同（如 i32 与字符串 { i8*, i64 }）：协调为统一公共类型，
+            // 两分支各 coerce 到该类型，确保 PHI 节点类型合法（值/指针表示统一）。
+            let cty = common_if_type(&then_ty, &else_ty);
+            let then_coerced = emit_coerce_to(
+                ctx,
+                blocks,
+                &then_actual_block,
+                then_ir.as_str(),
+                &then_ty,
+                &cty,
+            );
+            let else_coerced = emit_coerce_to(
+                ctx,
+                blocks,
+                &else_actual_block,
+                else_ir.as_str(),
+                &else_ty,
+                &cty,
+            );
+            (cty, then_coerced, else_coerced)
+        }
+    };
 
     // Merge 块 + PHI 节点
     let _ = blocks.add_block_named(&merge_name);

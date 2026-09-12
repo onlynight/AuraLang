@@ -111,10 +111,13 @@ class TypeChecker {
     /// 对 AST 执行语义检查（无返回值，结果通过查询方法获取）。
     fun tcCheck(ast: Ast) {
         // 1. 收集顶层声明
+        println("[dbg] tc1 collect")
         this.tcCollectDecls(ast)
+        println("[dbg] tc2 checkFns")
 
         // 2. 检查函数体
         this.tcCheckFunctions(ast)
+        println("[dbg] tc3 done")
     }
 
     /// 获取语义错误列表。
