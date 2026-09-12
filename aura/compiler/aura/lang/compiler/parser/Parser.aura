@@ -484,14 +484,95 @@ class Parser {
         if (k == "LBrace") {
             return this.parseBlock()
         }
-        // 表达式语句（可能带赋值）
+        // 前缀自增/自减 `++x` / `--x` → `x = x + 1` / `x = x - 1`
+        if (k == "DoublePlus" || k == "DoubleMinus") {
+            this.prsAdvance()
+            val operand: Int = this.parseUnary()
+            val one: Int = this.ast.leaf("IntLiteral", "1", this.ast.spanOf(operand))
+            var bop: String = "Plus"
+            if (k == "DoubleMinus") {
+                bop = "Minus"
+            }
+            val incBin: Int = this.ast.add(
+                "Binary",
+                bop,
+                "",
+                this.ast.spanOf(operand),
+                kidsAdd(kidsAdd(noKids(), operand), one)
+            )
+            return this.ast.add(
+                "Assign",
+                "",
+                "",
+                this.ast.spanOf(operand),
+                kidsAdd(kidsAdd(noKids(), operand), incBin)
+            )
+        }
+        // 表达式语句（可能带赋值 / 复合赋值）
         val e = this.parseExpr()
-        if (this.prsCheck("Assign")) {
+        val opK: String = this.prsCurKind()
+        if (opK == "Assign") {
             this.prsAdvance()
             val v = this.parseExpr()
-            return this.ast.add("Assign", "", "", this.prsCurSpan(), kidsAdd(kidsAdd(noKids(), e), v))
+            return this.parseAssignChain(e, v, this.ast.spanOf(e))
+        }
+        if (opK == "PlusEq" || opK == "MinusEq" || opK == "StarEq"
+            || opK == "SlashEq" || opK == "PercentEq") {
+            this.prsAdvance()
+            val v2: Int = this.parseExpr()
+            val cmpBin: Int = this.ast.add(
+                "Binary",
+                compoundAssignOp(opK),
+                "",
+                this.ast.spanOf(e),
+                kidsAdd(kidsAdd(noKids(), e), v2)
+            )
+            return this.ast.add(
+                "Assign",
+                "",
+                "",
+                this.ast.spanOf(e),
+                kidsAdd(kidsAdd(noKids(), e), cmpBin)
+            )
         }
         return this.ast.add("ExprStmt", "", "", this.prsCurSpan(), kidsAdd(noKids(), e))
+    }
+
+    /// 解析（右结合）赋值，`t0 = v0 [= v1 [= ...]]`。
+    ///
+    /// 链式赋值 `a = b = c` 脱糖为语句块 `{ b = c; a = b }`（自右向左执行）；
+    /// 单次赋值直接返回 `Assign` 节点。
+    fun parseAssignChain(t0: Int, v0: Int, sp0: Span): Int {
+        var targets: String = kidsAdd(kidsAdd(noKids(), t0), v0)
+        var sp: Span = sp0
+        while (this.prsCurKind() == "Assign") {
+            this.prsAdvance()
+            val t: Int = this.parseExpr()
+            targets = kidsAdd(targets, t)
+            sp = mergeSpan(sp, this.ast.spanOf(t))
+        }
+        val n: Int = kidsCount(targets)
+        var stmts: String = noKids()
+        var i: Int = n - 1
+        while (i >= 1) {
+            val tgt: Int = kidsAt(targets, i - 1)
+            val valId: Int = kidsAt(targets, i)
+            stmts = kidsAdd(
+                stmts,
+                this.ast.add(
+                    "Assign",
+                    "",
+                    "",
+                    this.ast.spanOf(tgt),
+                    kidsAdd(kidsAdd(noKids(), tgt), valId)
+                )
+            )
+            i = i - 1
+        }
+        if (kidsCount(stmts) == 1) {
+            return kidsAt(stmts, 0)
+        }
+        return this.ast.add("Block", "", "", sp, stmts)
     }
 
     /// 解析语句块 `{ ... }`。
@@ -626,8 +707,9 @@ class Parser {
         if (k == "AndAnd") { return 2 }
         if (k == "EqEq" || k == "Neq" || k == "Is" || k == "As") { return 3 }
         if (k == "Lt" || k == "Gt" || k == "LtEq" || k == "GtEq") { return 4 }
-        if (k == "Plus" || k == "Minus") { return 5 }
-        if (k == "Star" || k == "Slash" || k == "Percent") { return 6 }
+        if (k == "LtLt" || k == "GtGt" || k == "GtGtGt") { return 5 }
+        if (k == "Plus" || k == "Minus") { return 6 }
+        if (k == "Star" || k == "Slash" || k == "Percent") { return 7 }
         return 0
     }
 
@@ -635,6 +717,24 @@ class Parser {
     fun parseBinary(minPrec: Int): Int {
         var left = this.parseUnary()
         while (true) {
+            // Elvis `?:`：由 `QuestionMark` + `Colon` 两个 token 组成，优先级最低、右结合。
+            if (this.prsCurKind() == "QuestionMark" && this.prsKind(this.pos + 1) == "Colon") {
+                if (minPrec > 1) {
+                    break
+                }
+                this.prsAdvance() // `?`
+                this.prsAdvance() // `:`
+                val eRight = this.parseBinary(1)
+                val eSpan = mergeSpan(this.ast.spanOf(left), this.ast.spanOf(eRight))
+                left = this.ast.add(
+                    "Binary",
+                    "ElvisColon",
+                    "",
+                    eSpan,
+                    kidsAdd(kidsAdd(noKids(), left), eRight)
+                )
+                continue
+            }
             val op = this.prsCurKind()
             val prec = this.binPrec(op)
             println("[dbg] pbin op=" + op + " prec=" + toStr(prec))
@@ -718,7 +818,13 @@ class Parser {
             return this.leafLit("FloatLiteral")
         }
         if (k == "StringLiteral") {
-            return this.leafLit("StringLiteral")
+            val lit: Int = this.leafLit("StringLiteral")
+            // 字符串插值：Lexer 按协议拆成 `StringLiteral` + `StringInterpStart` + …，
+            // 此处重建为 `+` 拼接链（每段插值经 `toString(...)` 转字符串）。
+            if (this.prsCurKind() == "StringInterpStart") {
+                return this.parseStringInterp(lit)
+            }
+            return lit
         }
         if (k == "BoolLiteral") {
             return this.leafLit("BoolLiteral")
@@ -750,6 +856,18 @@ class Parser {
         }
         if (k == "When") {
             return this.parseWhen()
+        }
+        // 块表达式 `{ ... }`：单表达式块取值时直接返回该表达式
+        if (k == "LBrace") {
+            val blk: Int = this.parseBlock()
+            if (kidsCount(this.ast.kidsOf(blk)) == 1) {
+                val only: Int = this.ast.childOf(blk, 0)
+                if (this.ast.kindOf(only) == "ExprStmt"
+                    && kidsCount(this.ast.kidsOf(only)) == 1) {
+                    return this.ast.childOf(only, 0)
+                }
+            }
+            return blk
         }
         // 未知 token：报错并消费，避免死循环
         this.errors.pushAt(
@@ -802,7 +920,130 @@ class Parser {
         println("[dbg] ll5 id=" + toStr(nodeId))
         return nodeId
     }
+
+    /// 重建字符串插值：`left` 为已产出的首段字面量，随后交替出现
+    /// `StringInterpStart` 与中段/尾部 `StringLiteral`，统一拼成 `+` 链。
+    fun parseStringInterp(first: Int): Int {
+        var left: Int = first
+        while (this.prsCurKind() == "StringInterpStart") {
+            val raw: String = this.prsCurLit()
+            val sp: Span = this.prsCurSpan()
+            this.prsAdvance()
+            val part: Int = this.buildInterpPart(raw, sp)
+            val sp1: Span = mergeSpan(this.ast.spanOf(left), this.ast.spanOf(part))
+            left = this.ast.add(
+                "Binary",
+                "Plus",
+                "",
+                sp1,
+                kidsAdd(kidsAdd(noKids(), left), part)
+            )
+            if (this.prsCurKind() == "StringLiteral") {
+                val seg: Int = this.leafLit("StringLiteral")
+                val sp2: Span = mergeSpan(this.ast.spanOf(left), this.ast.spanOf(seg))
+                left = this.ast.add(
+                    "Binary",
+                    "Plus",
+                    "",
+                    sp2,
+                    kidsAdd(kidsAdd(noKids(), left), seg)
+                )
+            }
+        }
+        return left
+    }
+
+    /// 构造单个插值片段：`$name` → `toString(name)`；`${expr}` → `toString(<expr>)`。
+    fun buildInterpPart(raw: String, sp: Span): Int {
+        var exprId: Int = -1
+        // 注意：源码里不能直接写 `"${"`（词法器会当作插值起始），故动态拼接。
+        val dollarBrace: String = "$" + "{"
+        if (raw.startsWith(dollarBrace)) {
+            val inner: String = prsSlice(raw, 2, raw.length - 3)
+            exprId = this.parseInterpExpr(inner, sp)
+        } else if (raw.startsWith("$")) {
+            val name: String = prsSlice(raw, 1, raw.length - 1)
+            exprId = this.ast.leaf("Ident", name, sp)
+        }
+        if (exprId < 0) {
+            exprId = this.ast.leaf("StringLiteral", "", sp)
+        }
+        val callee: Int = this.ast.leaf("Ident", "toString", sp)
+        return this.ast.add(
+            "Call",
+            "",
+            "",
+            sp,
+            kidsAdd(kidsAdd(noKids(), callee), exprId)
+        )
+    }
+
+    /// 用子解析器解析 `${...}` 内部表达式，并把其 AST 子树复制进当前 arena。
+    fun parseInterpExpr(text: String, sp: Span): Int {
+        if (text == "") {
+            return this.ast.leaf("StringLiteral", "", sp)
+        }
+        val sub: Parser = Parser(text)
+        if (sub.n <= 1) {
+            return this.ast.leaf("StringLiteral", "", sp)
+        }
+        val subRoot: Int = sub.parseExpr()
+        if (subRoot < 0) {
+            return this.ast.leaf("StringLiteral", "", sp)
+        }
+        return this.copySubtree(sub.ast, subRoot)
+    }
+
+    /// 把 `src` 子树复制进当前 arena（`this.ast`）。
+    ///
+    /// 注意：必须作为方法写入 `this.ast`，**不能**把目标 Ast 作为参数传入 ——
+    /// 自举 AOT 下类实例参数按值传递，`dst.add` 会写进副本并使返回的 id 在主
+    /// arena 中错位（曾导致整个模块无函数）。
+    fun copySubtree(src: Ast, id: Int): Int {
+        var newKids: String = noKids()
+        var i: Int = 0
+        while (true) {
+            val c: Int = src.childOf(id, i)
+            if (c < 0) {
+                break
+            }
+            newKids = kidsAdd(newKids, this.copySubtree(src, c))
+            i = i + 1
+        }
+        return this.ast.add(src.kindOf(id), src.textOf(id), src.tyOf(id), src.spanOf(id), newKids)
+    }
 }
+
+// ─────────────────────────────────────────────────────────────
+// Parser 辅助（自由函数）
+// ─────────────────────────────────────────────────────────────
+
+/// 复合赋值 token → 对应二元运算符 token kind（供 `x += y` 脱糖为 `x = x + y`）。
+fun compoundAssignOp(k: String): String {
+    if (k == "PlusEq") { return "Plus" }
+    if (k == "MinusEq") { return "Minus" }
+    if (k == "StarEq") { return "Star" }
+    if (k == "SlashEq") { return "Slash" }
+    if (k == "PercentEq") { return "Percent" }
+    return "Plus"
+}
+
+/// 子串（start 起 length 长，越界截断）。
+fun prsSlice(text: String, start: Int, length: Int): String {
+    var out: String = ""
+    var i: Int = start
+    val end: Int = start + length
+    while (i < end && i < text.length) {
+        if (i >= 0) {
+            out = out + toStr(text[i])
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// 递归复制 `src` AST 子树到 `dst` arena，返回新节点 id（表达式为树，无共享节点）。
+/// 说明：目标 arena 必须通过方法内的 `this.ast` 写入，故此处已改为 `Parser.copySubtree`。
 
 /// 合并两个 span（用于复合节点）。
 fun mergeSpan(a: Span, b: Span): Span {

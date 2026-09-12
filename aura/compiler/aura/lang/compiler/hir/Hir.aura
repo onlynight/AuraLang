@@ -224,6 +224,10 @@ fun hirNormBinOp(op: String): String {
     if (op == "GtEq" || op == ">=") { return ">=" }
     if (op == "AndAnd" || op == "&&") { return "&&" }
     if (op == "OrOr" || op == "||") { return "||" }
+    if (op == "ElvisColon" || op == "?:") { return "?:" }
+    if (op == "LtLt" || op == "<<") { return "<<" }
+    if (op == "GtGt" || op == ">>") { return ">>" }
+    if (op == "GtGtGt" || op == ">>>") { return ">>>" }
     return op
 }
 
@@ -892,6 +896,7 @@ class HirLowerer {
         // 提取被调用函数名写入 HirCall.text（此前留空，导致 MIR/Codegen 丢失函数名）。
         var calleeName: String = ""
         var argStart: Int = 0
+        var hirKids: String = hirNoKids()
         if (kCount > 0) {
             val calleeId: Int = hirKidsAt(kids, 0)
             val calleeKind: String = ast.kindOf(calleeId)
@@ -899,15 +904,24 @@ class HirLowerer {
                 calleeName = ast.textOf(calleeId)
                 argStart = 1
             } else if (calleeKind == "Member") {
-                // 方法调用：名字取成员名，接收者（对象）作为首个实参保留。
+                // 方法调用 `obj.method(args)`：名字取成员名，**接收者对象**作为首个实参。
+                // 必须降级「成员节点的接收者子节点」本身，而不是成员节点：若降级成员节点，
+                // kids[0] 会变成一次成员访问（求值得到 0/null），方法调用丢失接收者，
+                // 生成 `toString(i32 0)` 这类错误 IR。
                 calleeName = ast.textOf(calleeId)
-                argStart = 0
+                val mKids: String = ast.kidsOf(calleeId)
+                if (hirKidsCount(mKids) > 0) {
+                    val recvHir: Int = this.lowerExpr(ast, hirKidsAt(mKids, 0))
+                    if (recvHir >= 0) {
+                        hirKids = hirKidsAdd(hirKids, recvHir)
+                    }
+                }
+                argStart = 1
             } else {
                 argStart = 0
             }
         }
 
-        var hirKids: String = hirNoKids()
         var i: Int = argStart
         while (i < kCount) {
             val childId: Int = hirKidsAt(kids, i)

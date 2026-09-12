@@ -204,6 +204,16 @@ const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
             ("value", "i8*"),
         ],
     },
+    // `to` 运算符 / Pair 构造：`a to b` 降级为 pairOf(a, b)，返回 2 元素列表（i8*）。
+    // 未登记会导致 AOT 链接期缺符号 `aura_lang_std_Collections_pairOf`。
+    RuntimeFn {
+        name: "aura_lang_std_Collections_pairOf",
+        ret: "i8*",
+        params: &[
+            ("a", "i8*"),
+            ("b", "i8*"),
+        ],
+    },
     RuntimeFn {
         name: "aura_lang_std_Collections_range",
         ret: "i8*",
@@ -211,6 +221,15 @@ const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
             ("start", "i32"),
             ("end", "i32"),
             ("inclusive", "i32"),
+        ],
+    },
+    // AOT 入口 main 把宿主 argv 注入 C 运行时（供 Process.arg/argCount 读取）。
+    RuntimeFn {
+        name: "aura_args_set",
+        ret: "void",
+        params: &[
+            ("argc", "i32"),
+            ("argv", "i8**"),
         ],
     },
 ];
@@ -466,6 +485,10 @@ pub fn cffi_signature(name: &str) -> Option<(&'static str, Vec<&'static str>)> {
         "aura_fs_mkdirP" => ("i64", &[P]),
         // aura.process
         "aura_process_run" => ("i64", &[P]),
+        // aura.process — 命令行参数（AOT 入口 main 经 aura_args_set 注入 argv）
+        "aura_process_argCount" => ("i64", &[]),
+        "aura_process_arg" => (P, &["i64"]),
+        "aura_process_args" => (P, &[]),
         // aura.io
         "aura_io_fileExists" => ("i1", &[P]),
         "aura_io_fileWrite" => ("void", &[P, P]),

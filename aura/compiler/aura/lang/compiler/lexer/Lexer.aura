@@ -463,7 +463,8 @@ class Lexer {
                         if (this.peek(0) == "}") {
                             this.advance() // 跳过 }
                         }
-                        this.emit("StringInterpStart", "${" + expr + "}")
+                        // 注意：不能写 `"${"`（会被自身词法器当作插值起始而破坏文本），动态拼接。
+                        this.emit("StringInterpStart", "$" + "{" + expr + "}")
                     } else {
                         var name: String = ""
                         while (this.pos < this.n && lxIsIdentPart(this.peek(0))) {

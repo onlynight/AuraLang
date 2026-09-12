@@ -708,6 +708,14 @@ class LlvmEmitter {
         if (ty == "Char") {
             return toStr(charCodeOf(raw))
         }
+        // 数字字面量规范化：LLVM 只接受十进制整数与带 `.`/指数的浮点字面量。
+        // 源码中的 0xFF / 0b1100 / 1_000_000 / 100L / 3.14f 必须转换后写入 IR。
+        if (isNumericLiteral(raw)) {
+            if (isFloatLiteral(raw)) {
+                return normalizeFloatLiteral(raw)
+            }
+            return normalizeNumberLiteral(raw)
+        }
         return raw
     }
 
@@ -752,6 +760,26 @@ class LlvmEmitter {
         val bTy: String = this.inferType(hir, bid)
         val a: String = this.emitExpr(hir, aid)
         val b: String = this.emitExpr(hir, bid)
+
+        // Elvis `a ?: b`：可空结构体 `{ T, i1 }` 判空后取内部值或右操作数。
+        if (op == "?:") {
+            if (isNullableStructTy(aTy)) {
+                val innerTy: String = nullableInnerTy(aTy)
+                val iv: String = this.freshVar()
+                this.fBody = this.fBody + "  " + iv + " = extractvalue "
+                    + aTy + " " + a + ", 0\n"
+                val nv: String = this.freshVar()
+                this.fBody = this.fBody + "  " + nv + " = extractvalue "
+                    + aTy + " " + a + ", 1\n"
+                val bco: String = this.coerceValue(b, bTy, innerTy)
+                val rv: String = this.freshVar()
+                this.fBody = this.fBody + "  " + rv + " = select i1 " + nv
+                    + ", " + innerTy + " " + bco + ", " + innerTy + " " + iv + "\n"
+                return rv
+            }
+            // 无可空跟踪（如 String? → i8*）：直接取左值
+            return a
+        }
 
         // 逻辑运算（i1）
         if (op == "&&" || op == "||") {
@@ -805,6 +833,27 @@ class LlvmEmitter {
                     + " " + common + " " + a2 + ", " + b2 + "\n"
             }
             return t
+        }
+
+        // 移位运算 `<<` / `>>`（算术右移）/ `>>>`（逻辑右移）
+        if (op == "<<" || op == ">>" || op == ">>>") {
+            val shCommon: String = this.commonNumTy(aTy, bTy)
+            if (intWidth(shCommon) > 0) {
+                val a3: String = this.coerceValue(a, aTy, shCommon)
+                val b3: String = this.coerceValue(b, bTy, shCommon)
+                var instr: String = "shl"
+                if (op == ">>") {
+                    instr = "ashr"
+                }
+                if (op == ">>>") {
+                    instr = "lshr"
+                }
+                val st: String = this.freshVar()
+                this.fBody = this.fBody + "  " + st + " = " + instr + " "
+                    + shCommon + " " + a3 + ", " + b3 + "\n"
+                return st
+            }
+            return a
         }
 
         // 算术运算（整型统一提升，避免 add i32 …, i64 … 非法 IR）
@@ -950,6 +999,37 @@ class LlvmEmitter {
         // 内置输出：println / print（参数统一转 i8*）
         if (fname == "println" || fname == "print") {
             return this.emitPrint(hir, kids, n, argStart, fname == "println")
+        }
+
+        // toString / toStr：C 侧 `toString` 收的是 **Plan A 装箱值**，裸整数必须走
+        // `aura_to_str`（偶数整数若按装箱值解释会被当成指针 → 解引用崩溃）；
+        // 浮点走 `aura_to_str_float`；布尔走 `aura_to_str_bool`；字符串原样返回。
+        if ((fname == "toString" || fname == "toStr") && n == 1) {
+            val fId: Int = hirKidsAt(kids, 0)
+            val fTy: String = this.inferType(hir, fId)
+            val fv: String = this.emitExpr(hir, fId)
+            if (fTy == "i8*") {
+                return fv
+            }
+            if (fTy == "float" || fTy == "double") {
+                val dv: String = this.coerceValue(fv, fTy, "double")
+                val ft: String = this.freshVar()
+                this.fBody = this.fBody + "  " + ft
+                    + " = call i8* @aura_to_str_float(double " + dv + ")\n"
+                return ft
+            }
+            if (fTy == "i1") {
+                val bv: String = this.coerceValue(fv, fTy, "i64")
+                val bt: String = this.freshVar()
+                this.fBody = this.fBody + "  " + bt
+                    + " = call i8* @aura_to_str_bool(i64 " + bv + ")\n"
+                return bt
+            }
+            val iv: String = this.coerceValue(fv, fTy, "i64")
+            val it: String = this.freshVar()
+            this.fBody = this.fBody + "  " + it
+                + " = call i8* @aura_to_str(i64 " + iv + ")\n"
+            return it
         }
 
         // 用户函数优先（模块内签名表）
@@ -1101,6 +1181,13 @@ class LlvmEmitter {
             val kids: String = hir.kidsOf(id)
             if (hirKidsCount(kids) >= 2) {
                 val aTy: String = this.inferType(hir, hirKidsAt(kids, 0))
+                // Elvis 结果类型 = 可空内部类型
+                if (op == "?:") {
+                    if (isNullableStructTy(aTy)) {
+                        return nullableInnerTy(aTy)
+                    }
+                    return aTy
+                }
                 val bTy: String = this.inferType(hir, hirKidsAt(kids, 1))
                 if (op == "+" && (aTy == "i8*" || bTy == "i8*")) {
                     return "i8*"
@@ -1188,6 +1275,16 @@ class LlvmEmitter {
         if (ty == "String") {
             return "i8*"
         }
+        // 可空类型 `T?`：标量包装为 `{ T, i1 }`（i1=true 表示 null），
+        // 非标量（如 String? → i8*）沿用内部类型。
+        if (ty.endsWith("?")) {
+            val inner: String = aotSlice(ty, 0, ty.length - 1)
+            val innerTy: String = this.mapTy(inner)
+            if (llvmIsScalar(innerTy)) {
+                return "{ " + innerTy + ", i1 }"
+            }
+            return innerTy
+        }
         val m: String = this.tm.map(ty)
         if (m == "void") {
             return ""
@@ -1238,13 +1335,79 @@ class LlvmEmitter {
         return ""
     }
 
-    /// 把一个值从 fromTy 转换为 toTy（整型扩展/截断；其余原样返回）。
+    /// 把一个值从 fromTy 转换为 toTy（整型宽度/浮点宽度/整数↔浮点/可空结构体；其余原样返回）。
     fun coerceValue(v: String, fromTy: String, toTy: String): String {
+        // 目标为可空结构体 `{ T, i1 }`：null → { zero, true }；非空 → 包装为 { v, false }
+        if (isNullableStructTy(toTy)) {
+            val inner: String = nullableInnerTy(toTy)
+            if (v == "null" || fromTy == "null") {
+                return "{ " + inner + " " + defaultValue(inner) + ", i1 true }"
+            }
+            if (isNullableStructTy(fromTy)) {
+                return v
+            }
+            return this.wrapNullable(this.coerceValue(v, fromTy, inner), inner, toTy)
+        }
+        // 源为可空结构体、目标为非可空：提取内部值
+        if (isNullableStructTy(fromTy) && !isNullableStructTy(toTy)) {
+            if (v == "null") {
+                return defaultValue(toTy)
+            }
+            val inner: String = nullableInnerTy(fromTy)
+            val t: String = this.freshVar()
+            this.fBody = this.fBody + "  " + t + " = extractvalue "
+                + fromTy + " " + v + ", 0\n"
+            return this.coerceValue(t, inner, toTy)
+        }
         if (toTy == "" || fromTy == toTy) {
             return v
         }
+        // 浮点宽度 / 整数↔浮点
+        if (isFloatTy(fromTy) || isFloatTy(toTy)) {
+            if (isFloatTy(fromTy) && isFloatTy(toTy)) {
+                val t: String = this.freshVar()
+                var op: String = "fptrunc"
+                if (toTy == "double") {
+                    op = "fpext"
+                }
+                this.fBody = this.fBody + "  " + t + " = " + op + " "
+                    + fromTy + " " + v + " to " + toTy + "\n"
+                return t
+            }
+            if (isFloatTy(fromTy) && intWidth(toTy) > 0) {
+                // 浮点 → 整数：fptosi 到 i64，再按目标宽度截断
+                val i64v: String = this.freshVar()
+                this.fBody = this.fBody + "  " + i64v + " = fptosi "
+                    + fromTy + " " + v + " to i64\n"
+                if (toTy == "i64") {
+                    return i64v
+                }
+                val t: String = this.freshVar()
+                this.fBody = this.fBody + "  " + t + " = trunc i64 "
+                    + i64v + " to " + toTy + "\n"
+                return t
+            }
+            if (intWidth(fromTy) > 0 && isFloatTy(toTy)) {
+                val t: String = this.freshVar()
+                this.fBody = this.fBody + "  " + t + " = sitofp "
+                    + fromTy + " " + v + " to " + toTy + "\n"
+                return t
+            }
+        }
         val fw: Int = intWidth(fromTy)
         val tw: Int = intWidth(toTy)
+        // 整数 ↔ 指针（Any / i8* 槽）：直接 `store i8* 1` 不是合法 IR，需显式转换。
+        if ((toTy == "i8*" || toTy == "ptr") && fw > 0) {
+            val w: String = this.coerceValue(v, fromTy, "i64")
+            val t: String = this.freshVar()
+            this.fBody = this.fBody + "  " + t + " = inttoptr i64 " + w + " to i8*\n"
+            return t
+        }
+        if ((fromTy == "i8*" || fromTy == "ptr") && tw > 0) {
+            val t: String = this.freshVar()
+            this.fBody = this.fBody + "  " + t + " = ptrtoint i8* " + v + " to i64\n"
+            return this.coerceValue(t, "i64", toTy)
+        }
         if (fw > 0 && tw > 0 && fw != tw) {
             val t: String = this.freshVar()
             if (tw > fw) {
@@ -1259,7 +1422,18 @@ class LlvmEmitter {
         return v
     }
 
-    /// 两个操作数的统一数值类型（整型取较宽者；含浮点时取浮点）。
+    /// 把内部值包装为可空结构体 `{ T, i1 }`（i1=false 表示非空）。
+    fun wrapNullable(v: String, inner: String, structTy: String): String {
+        val w0: String = this.freshVar()
+        this.fBody = this.fBody + "  " + w0 + " = insertvalue " + structTy
+            + " undef, " + inner + " " + v + ", 0\n"
+        val w1: String = this.freshVar()
+        this.fBody = this.fBody + "  " + w1 + " = insertvalue " + structTy
+            + " " + w0 + ", i1 false, 1\n"
+        return w1
+    }
+
+
     fun commonNumTy(a: String, b: String): String {
         if (a == "" || b == "") {
             return "i32"
@@ -1375,13 +1549,196 @@ fun inferLitType(raw: String): String {
     if (raw == "true" || raw == "false") {
         return "i1"
     }
+    if (raw == "null") {
+        return "i8*"
+    }
     if (raw.startsWith("\"")) {
         return "i8*"
     }
-    if (raw.contains(".")) {
+    // 进制字面量：0xFF / 0b1100（注意其末字符可能是 F，不能当浮点后缀）
+    if (raw.startsWith("0x") || raw.startsWith("0X")
+        || raw.startsWith("0b") || raw.startsWith("0B")) {
+        val hx: String = aotSlice(raw, raw.length - 1, 1)
+        if (hx == "L" || hx == "l") {
+            return "i64"
+        }
+        return "i32"
+    }
+    val last: String = aotSlice(raw, raw.length - 1, 1)
+    if (last == "L" || last == "l") {
+        return "i64"
+    }
+    if (last == "f" || last == "F") {
+        return "float"
+    }
+    if (last == "d" || last == "D") {
+        return "double"
+    }
+    if (raw.contains(".") || raw.contains("e") || raw.contains("E")) {
         return "double"
     }
     return "i32"
+}
+
+/// 是否为数字字面量（首字符为数字，或 `-` 后跟数字）。
+fun isNumericLiteral(raw: String): Boolean {
+    if (raw == "") {
+        return false
+    }
+    val c: Int = charCodeOf(aotSlice(raw, 0, 1))
+    if (c >= 48 && c <= 57) {
+        return true
+    }
+    if (c == 45 && raw.length > 1) {
+        return true
+    }
+    return false
+}
+
+/// 是否为浮点字面量（含小数/指数/浮点后缀；进制字面量恒为整数）。
+fun isFloatLiteral(raw: String): Boolean {
+    if (raw.startsWith("0x") || raw.startsWith("0X")
+        || raw.startsWith("0b") || raw.startsWith("0B")) {
+        return false
+    }
+    if (raw.contains(".") || raw.contains("e") || raw.contains("E")) {
+        return true
+    }
+    val last: String = aotSlice(raw, raw.length - 1, 1)
+    if (last == "f" || last == "F" || last == "d" || last == "D") {
+        return true
+    }
+    return false
+}
+
+/// 去掉下划线分隔符。
+fun stripUnderscores(s: String): String {
+    var out: String = ""
+    var i: Int = 0
+    while (i < s.length) {
+        val c: String = aotSlice(s, i, 1)
+        if (c != "_") {
+            out = out + c
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// 去掉整数/浮点字面量末尾的类型后缀（L/l/U/u/F/f/D/d）。
+fun stripNumberSuffix(s: String): String {
+    var end: Int = s.length
+    while (end > 0) {
+        val c: String = aotSlice(s, end - 1, 1)
+        if (c == "L" || c == "l" || c == "U" || c == "u"
+            || c == "F" || c == "f" || c == "D" || c == "d") {
+            end = end - 1
+        } else {
+            break
+        }
+    }
+    return aotSlice(s, 0, end)
+}
+
+/// 按进制解析数字串（支持 0-9 / a-f / A-F）。
+fun parseRadixDigits(s: String, radix: Int): Int {
+    var v: Int = 0
+    var i: Int = 0
+    while (i < s.length) {
+        val cc: Int = charCodeOf(aotSlice(s, i, 1))
+        var d: Int = -1
+        if (cc >= 48 && cc <= 57) {
+            d = cc - 48
+        } else if (cc >= 97 && cc <= 102) {
+            d = cc - 87
+        } else if (cc >= 65 && cc <= 70) {
+            d = cc - 55
+        }
+        if (d >= 0 && d < radix) {
+            v = v * radix + d
+        }
+        i = i + 1
+    }
+    return v
+}
+
+/// 整数/进制字面量 → 十进制文本（含符号）。
+fun normalizeNumberLiteral(raw: String): String {
+    var neg: Boolean = false
+    var body: String = raw
+    if (body.startsWith("-")) {
+        neg = true
+        body = aotSlice(body, 1, body.length - 1)
+    }
+    val radix: Int = numericRadix(body)
+    if (radix != 10) {
+        // 进制字面量：只允许 L/U 后缀。注意不能剥离尾部的 F/D —— 它们是十六进制数字，
+        // 例如 `0xFF` 若剥掉 F 会变成 `0x`，解析成 0。
+        val digits: String = stripUnderscores(
+            stripLongSuffix(aotSlice(body, 2, body.length - 2))
+        )
+        val out: String = toStr(parseRadixDigits(digits, radix))
+        if (neg) {
+            return "-" + out
+        }
+        return out
+    }
+    val out: String = stripUnderscores(stripNumberSuffix(body))
+    if (neg) {
+        return "-" + out
+    }
+    return out
+}
+
+/// 数字字面量的进制（0x→16，0b→2，否则 10）。
+fun numericRadix(s: String): Int {
+    if (s.startsWith("0x") || s.startsWith("0X")) {
+        return 16
+    }
+    if (s.startsWith("0b") || s.startsWith("0B")) {
+        return 2
+    }
+    return 10
+}
+
+/// 去掉进制字面量的 Long/Unsigned 后缀（L/l/U/u）。
+fun stripLongSuffix(s: String): String {
+    var end: Int = s.length
+    while (end > 0) {
+        val c: String = aotSlice(s, end - 1, 1)
+        if (c == "L" || c == "l" || c == "U" || c == "u") {
+            end = end - 1
+        } else {
+            break
+        }
+    }
+    return aotSlice(s, 0, end)
+}
+
+/// 浮点字面量 → 合法 LLVM 浮点文本（保证尾数含 `.`）。
+fun normalizeFloatLiteral(raw: String): String {
+    val body: String = stripUnderscores(stripNumberSuffix(raw))
+    // 拆分尾数与指数
+    var epos: Int = -1
+    var i: Int = 0
+    while (i < body.length) {
+        val cc: Int = charCodeOf(aotSlice(body, i, 1))
+        if (cc == 101 || cc == 69) {
+            epos = i
+            break
+        }
+        i = i + 1
+    }
+    var mantissa: String = body
+    var expo: String = ""
+    if (epos >= 0) {
+        mantissa = aotSlice(body, 0, epos)
+        expo = aotSlice(body, epos, body.length - epos)
+    }
+    if (!mantissa.contains(".")) {
+        mantissa = mantissa + ".0"
+    }
+    return mantissa + expo
 }
 
 /// 是否比较运算符。
@@ -1444,6 +1801,28 @@ fun intWidth(ty: String): Int {
     if (ty == "i64") { return 64 }
     if (ty == "i128") { return 128 }
     return 0
+}
+
+/// 是否为浮点 LLVM 类型。
+fun isFloatTy(ty: String): Boolean {
+    if (ty == "float" || ty == "double") {
+        return true
+    }
+    return false
+}
+
+/// 是否为可空结构体类型 `{ T, i1 }`（i1 字段表示是否 null）。
+fun isNullableStructTy(ty: String): Boolean {
+    if (ty.startsWith("{ ") && ty.endsWith(" i1 }")) {
+        return true
+    }
+    return false
+}
+
+/// 从可空结构体类型 `{ T, i1 }` 中提取内部类型 `T`。
+fun nullableInnerTy(ty: String): String {
+    // 去掉前缀 "{ "（2 字符）与后缀 ", i1 }"（6 字符）
+    return aotSlice(ty, 2, ty.length - 8)
 }
 
 /// 某 LLVM 类型的零值字面量（用于补齐无显式 return 的路径）。
@@ -1511,5 +1890,36 @@ fun charCodeSingle(c: String): Int {
         }
         i = i + 1
     }
+    // 标点符号（原先只覆盖数字/字母，`'_'` 等会得到 0）
+    if (c == " ") { return 32 }
+    if (c == "!") { return 33 }
+    if (c == "#") { return 35 }
+    if (c == "%") { return 37 }
+    if (c == "&") { return 38 }
+    if (c == "'") { return 39 }
+    if (c == "(") { return 40 }
+    if (c == ")") { return 41 }
+    if (c == "*") { return 42 }
+    if (c == "+") { return 43 }
+    if (c == ",") { return 44 }
+    if (c == "-") { return 45 }
+    if (c == ".") { return 46 }
+    if (c == "/") { return 47 }
+    if (c == ":") { return 58 }
+    if (c == ";") { return 59 }
+    if (c == "<") { return 60 }
+    if (c == "=") { return 61 }
+    if (c == ">") { return 62 }
+    if (c == "?") { return 63 }
+    if (c == "@") { return 64 }
+    if (c == "[") { return 91 }
+    if (c == "]") { return 93 }
+    if (c == "^") { return 94 }
+    if (c == "_") { return 95 }
+    if (c == "`") { return 96 }
+    if (c == "{") { return 123 }
+    if (c == "|") { return 124 }
+    if (c == "}") { return 125 }
+    if (c == "~") { return 126 }
     return 0
 }

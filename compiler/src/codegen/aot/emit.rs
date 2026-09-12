@@ -685,27 +685,50 @@ fn emit_function(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErr
     let _ = blocks.add_block_named(&entry_name);
 
     // 返回类型：无显式返回类型时默认为 void（Unit 函数）
-    let ret_ty =
+    let mut ret_ty =
         func.ret.as_ref().map(|t| ctx.llvm_type_checked(t)).unwrap_or_else(|| "void".to_string());
-    let ret_str = if ret_ty.is_empty() { "void".to_string() } else { ret_ty };
+    if ret_ty.is_empty() {
+        ret_ty = "void".to_string();
+    }
+
+    // 可执行程序入口 `main`：采用标准 C 签名 `i32 @main(i32 %argc, i8** %argv)`，
+    // 并在函数体最开始调用 `aura_args_set(argc, argv)` 把宿主 argv 注入 C 运行时，
+    // 供 `Process.arg(i)` / `Process.argCount()` 读取（VM 侧对应 std::env::args()）。
+    // blob_mode 不用 main 入口，故不处理。
+    let is_entry_main = func.name == "main" && !ctx.blob_mode;
+    if is_entry_main {
+        ret_ty = "i32".to_string();
+    }
+    let ret_str = ret_ty.clone();
     ctx.current_ret_ty = ret_str.clone();
 
     // 方法名形如 `Lexer.peek` → 当前类 `Lexer`（供 `this`/`self` 成员解析）
     ctx.current_class = func.name.rsplit_once('.').map(|(cls, _)| cls.to_string());
 
     // 参数类型
-    let params: Vec<(String, String)> = func
-        .params
-        .iter()
-        .map(|p| {
-            let ty = ctx.llvm_type_checked(p.ty.as_ref().unwrap_or(&HirType::Named("Int".into())));
-            (p.name.clone(), ty)
-        })
-        .collect();
+    let params: Vec<(String, String)> = if is_entry_main {
+        // C 入口：形参固定为 (argc, argv)，直接透传给 aura_args_set，不做 alloca
+        Vec::new()
+    } else {
+        func.params
+            .iter()
+            .map(|p| {
+                let ty =
+                    ctx.llvm_type_checked(p.ty.as_ref().unwrap_or(&HirType::Named("Int".into())));
+                (p.name.clone(), ty)
+            })
+            .collect()
+    };
 
-    let params_ir: Vec<String> =
-        params.iter().map(|(name, ty)| format!("{} %arg.{}", ty, sanitizellvm(name))).collect();
-    let params_str = params_ir.join(", ");
+    let params_str = if is_entry_main {
+        "i32 %argc, i8** %argv".to_string()
+    } else {
+        params
+            .iter()
+            .map(|(name, ty)| format!("{} %arg.{}", ty, sanitizellvm(name)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
 
     // 函数定义头
     let mut s = String::new();
@@ -744,6 +767,11 @@ fn emit_function(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErr
             ));
         }
         ctx.declare_var(name, var_name.clone(), ty.clone());
+    }
+
+    // C 入口 main：把宿主 argv 存入 C 运行时，供 Process.arg/argCount 读取。
+    if is_entry_main {
+        blocks.last_mut().body.push("call void @aura_args_set(i32 %argc, i8** %argv)".to_string());
     }
 
     // 生成函数体
@@ -904,7 +932,14 @@ fn emit_statement(
                     blocks.set_terminator(&format!("ret {} {}", converted.1, converted.0));
                 }
             } else {
-                blocks.set_terminator("ret void");
+                // 裸 `return`：按当前函数返回类型补零值终止符。
+                // 入口 main 被强制为 `i32`，若仍发 `ret void` 会导致签名不匹配。
+                let want = ctx.current_ret_ty.clone();
+                if want.is_empty() || want == "void" {
+                    blocks.set_terminator("ret void");
+                } else {
+                    blocks.set_terminator(&format!("ret {} {}", want, zero_value(&want)));
+                }
             }
         }
         HirStmt::If {
@@ -1165,6 +1200,48 @@ fn emit_store_converted(
             dptr, val_ir
         ));
         cur.body.push(format!("store i8* {} , i8** {}", dptr, var_name));
+    } else if is_float_ty(val_ty) && is_float_ty(dst_ty) && val_ty != dst_ty {
+        // 浮点宽度适配：`Float`（f32）与浮点字面量（AOT 发射为 f64 常量）宽度不同。
+        // 不做转换会生成 `store double %c, float* %slot` —— LLVM 接受该 IR，但
+        // 只把 f64 的低 32 位写入 4 字节槽（如 3.14f 打印成 1.26444e+11、1.5f 变 0）。
+        let out = ctx.fresh_var();
+        let op = if val_ty == "double" { "fptrunc" } else { "fpext" };
+        let cur = blocks.last_mut();
+        cur.body.push(format!(
+            "{} = {} {} {} to {}",
+            out, op, val_ty, val_ir, dst_ty
+        ));
+        cur.body.push(format!(
+            "store {} {} , {}* {}",
+            dst_ty, out, dst_ty, var_name
+        ));
+    } else if is_int_ty(val_ty) && is_float_ty(dst_ty) {
+        // 整数 → 浮点：`val d: Double = 5` 等
+        let out = ctx.fresh_var();
+        let cur = blocks.last_mut();
+        cur.body.push(format!(
+            "{} = sitofp {} {} to {}",
+            out, val_ty, val_ir, dst_ty
+        ));
+        cur.body.push(format!(
+            "store {} {} , {}* {}",
+            dst_ty, out, dst_ty, var_name
+        ));
+    } else if is_float_ty(val_ty) && is_int_ty(dst_ty) {
+        // 浮点 → 整数：fptosi 到 i64，再按目标宽度截断
+        let i64v = ctx.fresh_var();
+        let cur = blocks.last_mut();
+        cur.body.push(format!("{} = fptosi {} {} to i64", i64v, val_ty, val_ir));
+        if dst_ty == "i64" {
+            cur.body.push(format!("store i64 {} , i64* {}", i64v, var_name));
+        } else {
+            let trunc = ctx.fresh_var();
+            cur.body.push(format!("{} = trunc i64 {} to {}", trunc, i64v, dst_ty));
+            cur.body.push(format!(
+                "store {} {} , {}* {}",
+                dst_ty, trunc, dst_ty, var_name
+            ));
+        }
     } else {
         // 指针 → 整数：coerce_int_width 处理 ptrtoint + trunc。
         // 整数宽度不同（如 i64 的 .length 存入 i32 的 Int 槽）必须先转换，

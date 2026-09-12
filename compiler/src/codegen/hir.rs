@@ -2442,8 +2442,14 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                     is_vararg: false,
                 })
                 .collect();
-            let ret =
-                params.iter().any(|(_, pt)| *pt != "Unit").then(|| HirType::Named("Any".into()));
+            // 返回类型：有实参的原生默认 Any（真实类型由 AOT cffi_signature / VM 值决定）。
+            // 少数**无参但有返回值**的原生需显式白名单，否则会被当作 Unit。
+            let value_returning_no_arg = matches!(
+                name,
+                "aura.lang.std.Process.argCount" | "aura.lang.std.Process.args"
+            );
+            let ret = (params.iter().any(|(_, pt)| *pt != "Unit") || value_returning_no_arg)
+                .then(|| HirType::Named("Any".into()));
             natives.push(HirFunction {
                 name: name.into(),
                 params: param_defs,

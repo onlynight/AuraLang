@@ -69,6 +69,11 @@ fun preludeTable(): String {
         "aura_print|void|i8*\n" +
         "aura_to_str|i8*|i64\n" +
         "aura_to_str_float|i8*|double\n" +
+        "aura_to_str_bool|i8*|i64\n" +
+        "toString|i8*|i64\n" +
+        "toStr|i8*|i64\n" +
+        "aura_to_int_any|i64|i64\n" +
+        "aura_to_str_any|i8*|i64\n" +
         "aura_strlen|i64|i8*\n" +
         "aura_lang_std_String_length|i64|i8*\n" +
         "aura_lang_std_String_equals|i32|i8*,i8*\n" +

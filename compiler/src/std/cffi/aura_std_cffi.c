@@ -1424,6 +1424,16 @@ const void *aura_lang_std_Collections_listOf(const void *a, const void *b, const
     return (const void *)l;
 }
 
+/** pairOf(a, b)：`to` 运算符 / Pair 构造。AOT 下 Pair 以 2 元素 AuraDynList 表示
+ *  （与 VM 侧 `nat_pair_of` 的 2 元素 `Value::List` 语义一致），供 `val (x, y) = p`
+ *  解构经 getAt(0)/getAt(1) 取回，保证 AOT 产物链接期不再缺符号。 */
+const void *aura_lang_std_Collections_pairOf(const void *a, const void *b) {
+    AuraDynList *l = aura_dynlist_new(4);
+    aura_dynlist_push(l, (const char *)a);
+    aura_dynlist_push(l, (const char *)b);
+    return (const void *)l;
+}
+
 int64_t aura_lang_std_Collections_count(const void *list) {
     const AuraDynList *l = (const AuraDynList *)list;
     return l ? l->len : 0;
@@ -1571,6 +1581,54 @@ int64_t aura_lang_std_Process_run(const char *cmd) {
     return (int64_t)rc;
 }
 
+/* ── 命令行参数（AOT） ──
+ * AOT 发射的 C 入口 `main` 在函数体最开始调用 `aura_args_set(argc, argv)`，
+ * 把宿主进程的 argv 存入本模块；`Process.arg(i)` / `Process.argCount()` 据此读取。
+ * （VM 侧对应 std_process.rs 的 `std::env::args()`。） */
+static int aura_saved_argc = 0;
+static char **aura_saved_argv = NULL;
+
+void aura_args_set(int argc, char **argv) {
+    aura_saved_argc = argc;
+    aura_saved_argv = argv;
+}
+
+int64_t aura_lang_std_Process_argCount(void) {
+    return (int64_t)aura_saved_argc;
+}
+
+const char *aura_lang_std_Process_arg(int64_t index) {
+    if (index < 0 || index >= (int64_t)aura_saved_argc) return "";
+    if (!aura_saved_argv || !aura_saved_argv[index]) return "";
+    /* 必须返回 malloc 副本：argv[i] 是 OS 命令行缓冲的内部指针，低 bit 奇偶不可控，
+     * 而 Plan A 依赖「真实字符串指针恒为偶数」来区分装箱整数 ((v<<1)|1)。
+     * 返回内部指针会被 aura_to_str_any 误判成装箱整数，打印出地址数字。 */
+    return aura_strdup(aura_saved_argv[index]);
+}
+
+/** 所有 argv 以 '\n' 连接（AOT 下的简化表示；VM 侧返回 List）。 */
+const char *aura_lang_std_Process_args(void) {
+    static char *joined = NULL;
+    size_t total = 1;
+    int i;
+    if (joined) {
+        free(joined);
+        joined = NULL;
+    }
+    if (!aura_saved_argv) return "";
+    for (i = 0; i < aura_saved_argc; i++) {
+        if (aura_saved_argv[i]) total += strlen(aura_saved_argv[i]) + 1;
+    }
+    joined = (char *)malloc(total);
+    if (!joined) return "";
+    joined[0] = '\0';
+    for (i = 0; i < aura_saved_argc; i++) {
+        if (i > 0) strcat(joined, "\n");
+        if (aura_saved_argv[i]) strcat(joined, aura_saved_argv[i]);
+    }
+    return joined;
+}
+
 /* ── aura.lang.std.Math.*（转发到 aura_math_* 实现） ── */
 
 double aura_lang_std_Math_sin(double x) { return aura_math_sin(x); }
@@ -1608,14 +1666,32 @@ _Bool aura_fs_isDirectory(const char *path) {
 }
 
 const char *aura_fs_readText(const char *path) {
-    static char fs_buf[4096];
-    fs_buf[0] = '\0';
+    /* 动态扩容读取（旧实现用 static 4KB 缓冲，>4KB 的源码会被静默截断，
+     * 导致自举编译器中大文件解析出错）。返回堆分配副本，避免多次读取互相覆盖。 */
     FILE *f = fopen(path ? path : "", "rb");
-    if (!f) return fs_buf;
-    size_t n = fread(fs_buf, 1, sizeof(fs_buf) - 1, f);
-    fs_buf[n] = '\0';
+    size_t cap = 4096, len = 0;
+    char *buf;
+    if (!f) return "";
+    buf = (char *)malloc(cap);
+    if (!buf) {
+        fclose(f);
+        return "";
+    }
+    for (;;) {
+        size_t n;
+        if (len + 1 >= cap) {
+            char *nb = (char *)realloc(buf, cap * 2);
+            if (!nb) break;
+            buf = nb;
+            cap *= 2;
+        }
+        n = fread(buf + len, 1, cap - len - 1, f);
+        len += n;
+        if (n == 0) break;
+    }
     fclose(f);
-    return fs_buf;
+    buf[len] = '\0';
+    return buf;
 }
 
 const void *aura_fs_writeText(const char *path, const char *content) {

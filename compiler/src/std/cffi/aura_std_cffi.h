@@ -323,6 +323,8 @@ int aura_lang_std_String_equals(const char *a, const char *b);
 // aura.lang.std.Collections.*（列表：元素为字符串指针）
 const void *aura_lang_std_Collections_emptyList(void);
 const void *aura_lang_std_Collections_listOf(const void *a, const void *b, const void *c);
+/** Pair 构造（`to` 运算符）：返回 2 元素 AuraDynList */
+const void *aura_lang_std_Collections_pairOf(const void *a, const void *b);
 int64_t aura_lang_std_Collections_count(const void *list);
 int64_t aura_lang_std_Collections_listSize(const void *list);
 int64_t aura_lang_std_Collections_isEmpty(const void *list);
@@ -351,6 +353,11 @@ int aura_lang_std_FileSystem_mkdirP(const char *path);
 
 // aura.lang.std.Process.*
 int64_t aura_lang_std_Process_run(const char *cmd);
+/** 注入宿主进程 argv（由 AOT 发射的 C 入口 main 调用）。 */
+void aura_args_set(int argc, char **argv);
+int64_t aura_lang_std_Process_argCount(void);
+const char *aura_lang_std_Process_arg(int64_t index);
+const char *aura_lang_std_Process_args(void);
 
 // aura.lang.std.Math.*
 double aura_lang_std_Math_sin(double x);
