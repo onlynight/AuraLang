@@ -810,8 +810,9 @@ pub struct Vm {
     pub aot_runtime: crate::vm::aot_runtime::AotRuntime,
     /// extern interface: 已加载的 AOT 模块映射（库名 → module_id）
     aot_module_map: std::collections::HashMap<String, u32>,
-    /// Phase 3: 标准库 Aura 编译函数映射（函数名 → 合并后的函数索引）
+    /// Phase D: 标准库 Aura 编译函数映射（函数名 → 合并后的函数索引）
     /// 当 do_call_native 遇到 Aura 编译的标准库函数时，优先派发到该映射中的函数。
+    /// 优先级：Aura 编译函数（stdlib_func_map，过滤 native 声明）> Rust native 注册。
     stdlib_func_map: std::collections::HashMap<String, usize>,
     /// P9: 已加载的动态库（库名 → 库句柄）
     #[cfg(windows)]
@@ -896,8 +897,9 @@ impl Vm {
     /// 从 `embedded_stdlib::EMBEDDED_STDLIB_MODULES` 加载预编译的 .auc 文件，
     /// 解码函数并追加到当前模块的函数表中。VM 启动时自动调用。
     ///
-    /// 调用后，`do_call_native` 会优先检查 `stdlib_func_map`，如果找到匹配的
-    /// Aura 编译函数则直接派发（优先 AOT 机器码），否则回退到 Rust native。
+    /// Phase D: 调用后，`do_call_native` 会**始终优先**检查 `stdlib_func_map`，
+    /// 如果找到匹配的 Aura 编译函数（且非 native 声明）则直接派发，
+    /// 否则回退到 Rust native 注册。
     fn load_embedded_stdlib(&mut self) {
         use crate::codegen::from_bytes;
         use crate::std::embedded_stdlib::EMBEDDED_STDLIB_MODULES;
@@ -1037,8 +1039,9 @@ impl Vm {
     /// 扫描 `dir` 目录下的所有 `.auc` 文件，解码其函数，追加到当前模块的
     /// 函数表中，并记录函数名到合并后索引的映射。
     ///
-    /// 调用后，`do_call_native` 会优先检查 `stdlib_func_map`，如果找到匹配的
-    /// Aura 编译函数则直接派发，否则回退到 Rust native。
+    /// 调用后，`do_call_native` 会**始终优先**检查 `stdlib_func_map`，
+    /// 如果找到匹配的 Aura 编译函数（且非 native 声明）则直接派发，
+    /// 否则回退到 Rust native。
     ///
     /// # 参数
     /// * `dir` - 包含标准库 `.auc` 文件的目录路径

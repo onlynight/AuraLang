@@ -1007,14 +1007,15 @@ impl Vm {
             return Ok(());
         }
 
-        // Phase 3: Aura 编译的标准库函数版本优先 —— 但若同名**原生函数已注册**则以原生为准。
-        // 原因：同一 API 可能存在两套运行时表示（如 `listOf` 的 Aura 实现返回 ArrayList 类实例，
-        // 原生实现返回 Value::List），混用会导致 `.size` / `[]` 等行为不一致。
-        let std_lookup = if self.natives.contains(&native.name) {
-            None
-        } else {
-            self.find_stdlib_func(&native.name, param_count)
-        };
+        // Phase D: Aura 编译的标准库函数版本优先。
+        // 始终先查 `stdlib_func_map`（嵌入 .auc 的 Aura 编译函数），
+        // 仅当未找到或函数为 native 声明（is_native=true，无 Aura 实现体）时才回退到 Rust native。
+        // 这确保纯逻辑模块（Math.abs / String.contains / Collections.listOf …）
+        // 使用 Aura 实现，而 libm / syscall 等 native 声明仍走 Rust 实现。
+        let std_lookup = self.find_stdlib_func(&native.name, param_count).filter(|&(idx, _)| {
+            let func = &self.module.funcs[idx];
+            !func.is_native
+        });
         if let Some((std_func_idx, needs_self)) = std_lookup {
             eprintln!(
                 "[vm] stdlib-aura: {} → Aura compiled func #{} (self={})",
@@ -1140,12 +1141,11 @@ impl Vm {
             return Ok(());
         }
 
-        // Phase 3: Aura 编译的标准库函数版本优先（同名原生已注册时以原生为准，见 do_call_native）
-        let args_std_lookup = if self.natives.contains(&native.name) {
-            None
-        } else {
-            self.find_stdlib_func(&native.name, eff_argc)
-        };
+        // Phase D: Aura 编译的标准库函数版本优先（同 do_call_native，始终先查 stdlib_func_map）
+        let args_std_lookup = self.find_stdlib_func(&native.name, eff_argc).filter(|&(idx, _)| {
+            let func = &self.module.funcs[idx];
+            !func.is_native
+        });
         if let Some((std_func_idx, needs_self)) = args_std_lookup {
             eprintln!(
                 "[vm] stdlib-aura: {} (argc={}) → Aura compiled func #{} (self={})",
