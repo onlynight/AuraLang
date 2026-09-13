@@ -1,12 +1,12 @@
 ---
 name: aura-lang
-version: 1.0.0
-lastModified: 2026-09-06
-changes: 合并编译器探测报告，区分 WORKS/DOESN'T WORK，移除 class/actor/try-catch/import 等不可用特性
-description: Use when writing, reviewing, or debugging Aura programming language code (.aura files). Aura is a system-level scripting language with Kotlin-style syntax. This skill provides complete syntax reference, compiler limitations, and code verification workflow.
+version: 2.0.0
+lastModified: 2026-06-18
+changes: v2.0.0 — 全面更新：添加 P8-P10 并发/协程/select、Phase D FFI AOT/native、完整语法参考（class/actor/interface/object/try-catch/import/++/-- 等已恢复）
+description: Use when writing, reviewing, or debugging Aura programming language code (.aura files). Aura is a system-level scripting language with Kotlin-style syntax. This skill provides complete syntax reference, feature status, and code verification workflow.
 ---
 
-# Aura Language — Complete Reference
+# Aura Language — Complete Reference (v2.0)
 
 Aura is a **system-level scripting language for NovaOS**. Kotlin-style syntax, Rust implementation, AOT+JIT hybrid compilation, zero-cost FFI, ARC memory management.
 
@@ -16,7 +16,8 @@ Aura is a **system-level scripting language for NovaOS**. Kotlin-style syntax, R
 
 | Version | Date | Description |
 |---------|------|-------------|
-| 1.0.0 | 2026-09-06 | 初始版本。合并编译器探测报告，区分 WORKS/DOESN'T WORK，移除 class/actor/try-catch/import 等不可用特性 |
+| 2.0.0 | 2026-06-18 | **Major update**. Full syntax reference aligned with current compiler. Added P8-P10 (async/coroutine/actor/select), Phase D (extern object/@aot/native), value class, sealed class, object singleton. Restored class/actor/interface/try-catch/import/++/-- as WORKING. |
+| 1.0.0 | 2026-09-06 | Initial version. Compiled probe report, separated WORKS/DOESN'T WORK. |
 
 ---
 
@@ -25,65 +26,92 @@ Aura is a **system-level scripting language for NovaOS**. Kotlin-style syntax, R
 **You know this language completely. Do NOT:**
 - ❌ Create tasks to "explore" or "discover" Aura syntax
 - ❌ Ask the user to provide syntax details you already have
-- ❌ Use Kotlin syntax (this is NOT Kotlin — `struct` not `data class`)
+- ❌ Use Kotlin syntax (this is NOT Kotlin — `struct`/`value class` not `data class`)
 - ❌ Guess at syntax — use the exact patterns below
 - ❌ Skip verification — always run `aura check` after writing .aura code
-- ❌ **Use BROKEN features** (class, actor, break, continue, try-catch, import system, ++, --)
 
 **You MUST:**
 - ✅ Write .aura code directly using the syntax reference below
 - ✅ Verify every .aura file with `aura check <file>` after writing
 - ✅ Fix any errors reported by `aura check` before delivering to the user
-- ✅ **ONLY use features marked as ✅ in the COMPILER LIMITATIONS table below**
+- ✅ **ONLY use features marked as ✅ in the FEATURE STATUS table below**
 - ✅ Call prelude functions directly: `println(...)`, `abs(...)`, `sqrt(...)`
 
 ---
 
-## ⚠️ COMPILER LIMITATIONS (CRITICAL — READ BEFORE WRITING)
+## ⚠️ FEATURE STATUS (CRITICAL — READ BEFORE WRITING)
 
-The following features are **BROKEN or NOT YET IMPLEMENTED** in the current Aura compiler (`aura.exe`).
-Using them will cause compilation failures. **DO NOT USE.**
-
-### ❌ BROKEN — DO NOT USE
-
-| Feature | Status | Workaround |
-|---------|--------|------------|
-| `class` declaration | ❌ Compile error | Use top-level `fun` + `struct` |
-| Class method calls | ❌ `class not found` | Use top-level functions |
-| `this` keyword | ❌ `class not found` | Pass instance as parameter |
-| `actor` definition | ❌ `actor not implemented` | Use `struct` + top-level functions |
-| `break` / `continue` | ❌ `token not expected` | Use recursion or condition short-circuit |
-| Labeled break | ❌ `token not expected` | Use recursion |
-| `try-catch` | ❌ `token not expected` | Use return value checks |
-| `import` system | ❌ `token not expected` | Only use 17 prelude functions |
-| `++` / `--` | ❌ `unresolved function` | Use `x = x + 1` / `x = x - 1` |
-| `mutableListOf` | ❌ `unresolved function` | Use string concatenation |
-| `mapOf` / `emptyList` | ❌ `unresolved function` | Use string with separators |
-| List indexing/size/add | ❌ `not a function` | Split strings with `split(", ")` |
-| Nested functions | ❌ `function not expected` | Move to top-level |
-| All `import aura.*` | ❌ All fail | Import system is broken |
-| All std module calls | ❌ `unresolved function` | Only prelude + string methods |
-
-### ✅ WORKS — USE THESE
+### ✅ WORKS — USE THESE (confirmed in parser/AST)
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| `struct` + field access | ✅ | `Player(1, "Alice", 50)` |
-| `fun` (top-level) | ✅ | Expression + block body |
-| `enum` with data | ✅ | `CUSTOM(val r: Int, ...)` |
 | `val` / `var` | ✅ | With type annotations |
-| `main()` | ✅ | Returns `Unit` or `Int` |
-| `for (i in 0..5)` | ✅ | Range iteration |
-| `while` / `do-while` | ✅ | |
+| `fun` (top-level) | ✅ | Expression + block body |
+| `suspend fun` | ✅ | Coroutine support |
+| `fun` with generics | ✅ | `fun <T: Number> foo()` |
+| `fun` with default params | ✅ | `fun foo(x: Int = 0)` |
+| `fun` with vararg | ✅ | `fun foo(vararg items: Int)` |
+| `fun` with named args | ✅ | `Player(name = "Alice")` |
+| `struct` (struct declaration) | ✅ | `struct Player(val id: Int, ...)` |
+| `value class` (value type) | ✅ | Stack-allocated, immutable |
+| `class` | ✅ | With inheritance, interfaces |
+| `sealed class` | ✅ | Sealed hierarchy |
+| `interface` | ✅ | With method signatures |
+| `enum` with data | ✅ | `CUSTOM(val r: Int, ...)` |
+| `actor` | ✅ | Concurrent entity |
+| `object` (singleton) | ✅ | Global unique instance |
+| `typealias` | ✅ | Type alias |
+| `import` | ✅ | Module imports with aliases |
+| `extern "c"` | ✅ | C ABI FFI (inline + block) |
+| `extern object` + `@aot` | ✅ | AOT FFI interface |
+| `@native(...)` | ✅ | Syscall/asm/builtin |
+| `@aot` | ✅ | AOT annotation |
 | `if` / `else` | ✅ | Expression or statement |
-| `when` (value/range/type) | ✅ | With `is`, `in`, `else` |
+| `when` (value/range/type) | ✅ | With `is`, `in`, `else`, no subject |
+| `for (i in 0..5)` | ✅ | Range iteration |
+| `for (i in list)` | ✅ | Iterable iteration |
+| `while` / `do-while` | ✅ | |
+| `try-catch` | ✅ | With `Exception` type |
+| `try-catch-finally` | ✅ | |
+| `break` / `continue` | ✅ | Including labeled (`break@outer`) |
+| `defer` | ✅ | Defer block for cleanup |
+| `async { }` | ✅ | Async block (P8) |
+| `await` | ✅ | Await expression (P8) |
+| `select` | ✅ | Multiplexing (P10) |
+| `throw` | ✅ | Throw expression |
+| `return` | ✅ | Return with value |
 | String interpolation | ✅ | `$var`, `${expr}`, `"""raw"""` |
-| String methods | ✅ | `length`, `contains`, `indexOf`, `substring`, `trim`, `toUpperCase`, `toLowerCase`, `split`, `toInt` |
-| Arithmetic | ✅ | `+`, `*`, `-`, `/` |
+| String methods | ✅ | See below |
+| Lambda / closure | ✅ | `{ x -> x + 1 }` |
+| Method reference | ✅ | `obj::method` |
+| All operators | ✅ | `+` `*` `-` `/` `%` `+=` `-=` etc. |
+| `++` / `--` | ✅ | `x++` / `x--` / `++x` |
 | `toInt()` / `toFloat()` | ✅ | String → number |
 | `toString()` | ✅ | Any → String |
-| `listOf(1)` | ⚠️ **1 arg only** | `listOf(1, 2)` fails! |
-| **17 Prelude functions** | ✅ | See list below |
+| Type cast (`as`, `as?`) | ✅ | |
+| Null safety (`?`, `?.`, `!!`, `?:`) | ✅ | |
+| Range (`..`) | ✅ | `0..10`, `1..=10` |
+| Destructuring | ✅ | `val (a, b) = pair` |
+| Annotations (`@`) | ✅ | `@aot`, `@native`, `@Depends` |
+| Visibility (`public` `private` `protected` `internal`) | ✅ | |
+| Modifiers (`open` `abstract` `sealed` `override` etc.) | ✅ | |
+| Memory ops (`malloc` `free` `retain` `release`) | ✅ | P7 |
+| `box` / `weak` | ✅ | P7 |
+| `this` / `super` | ✅ | |
+| `new` | ✅ | New expression |
+| **Prelude functions** | ✅ | See list below |
+| **Std library modules** | ✅ | See list below |
+
+### ❌ NOT YET IMPLEMENTED (do NOT use)
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| `data class` (Kotlin style) | ❌ | Use `value class` instead |
+| `mutableListOf` | ❌ | Use string manipulation |
+| `mapOf` / `emptyList` | ❌ | Not in prelude |
+| List indexing (multi-arg) | ❌ | `listOf(1, 2)` fails — use single arg only |
+| `listOf` with 2+ args | ❌ | Use `listOf(1)` single-arg only |
+| `emptyList()` | ❌ | Not implemented |
 
 ### 📋 Prelude Functions (No Import Needed — Always Available)
 
@@ -95,6 +123,30 @@ clock, strlen
 CString, CStr
 ptrIsNull, ptrToInt
 intToPtr, makeCallback
+```
+
+### 📋 Std Library Modules (require import)
+
+```
+import aura.lang.std.String
+import aura.lang.std.Collections
+import aura.lang.std.Math
+import aura.lang.std.Iter
+import aura.lang.std.FileSystem
+import aura.lang.std.Process
+import aura.lang.std.IO
+import aura.lang.std.Json
+import aura.lang.std.Time
+import aura.lang.std.Path
+import aura.lang.std.Random
+import aura.lang.std.Encoding
+import aura.lang.std.Test
+import aura.lang.std.Net
+import aura.lang.std.Env
+import aura.lang.std.Console
+import aura.lang.std.ASCII
+import aura.lang.std.Assert
+import aura.lang.std.Builtin
 ```
 
 ---
@@ -127,6 +179,39 @@ $env:Path = "D:\Code\AuraLang\target\release;$env:AURA_LLVM_HOME\bin;$env:Path"
 
 ---
 
+## Complete Keyword Table
+
+### Hard Keywords (always recognized)
+
+| Category | Keywords |
+|----------|----------|
+| **Variable** | `val` `var` |
+| **Function** | `fun` |
+| **Type** | `struct` `class` `interface` `enum` `actor` `object` `typealias` |
+| **Control** | `if` `else` `when` `for` `while` `do` `try` `catch` `finally` `throw` `break` `continue` `return` `defer` `select` |
+| **Concurrency** | `async` `await` `suspend` |
+| **Access** | `public` `private` `protected` `internal` |
+| **Type ops** | `is` `as` `in` `to` `it` `by` |
+| **Other** | `import` `extern` `native` `null` `this` `super` `unit` |
+
+### Prefix Modifiers
+
+`abstract` `open` `sealed` `data` `value` `override` `lateinit` `inline` `suspend` `comptime` `const` `lazy` `defer` `extern` `box` `weak` `async` `init` `companion` `constructor` `expect` `actual` `malloc` `free` `retain` `release` `native` `operator` `infix` `tailrec`
+
+### Context Keywords (soft, stored as Ident)
+
+`it` `by` `get` `set` `where` `then` `field` `final` `annotation` `inner` `noinline` `crossinline` `vararg` `reified`
+
+### Boolean Literals
+
+`true` `false` `null`
+
+### Type Keywords (stored as Ident but represent types)
+
+`Int` `Long` `Short` `Byte` `Float` `Double` `Boolean` `Char` `String` `Any` `Nothing` `Unit`
+
+---
+
 ## Syntax Quick Reference
 
 ### Variables & Types
@@ -135,52 +220,145 @@ val immutable = 42                    // immutable
 var count: Int = 0                    // mutable
 val name: String = "Alice"            // with type annotation
 val flag: Boolean = true
+var cache: String                     // uninitialized (lateinit)
 
 // Type conversion
 val n = "123".toInt()                 // String → Int
 val f = "1.5".toFloat()               // String → Float
 val s = 42.toString()                 // Int → String
+
+// Null safety
+val safe: Int = n ?: 0                // Elvis operator
+val len: Int? = p.tag?.length         // Safe call
+val forced: Int = n!!                 // Assert non-null
 ```
 
 ### Functions
 ```aura
-fun add(a: Int, b: Int): Int = a + b              // expression body
-fun add(a: Int, b: Int): Int { return a + b }     // block body
-fun power(base: Int, exp: Int = 2): Int { }       // default params
-fun <T> identity(x: T): T = x                       // generic
-fun main() { println("Hello!") }                    // entry point
-fun main(): Int { return 0 }                        // entry point with return
+// Expression body
+fun add(a: Int, b: Int): Int = a + b
+
+// Block body
+fun add(a: Int, b: Int): Int { return a + b }
+
+// Default parameters
+fun power(base: Int, exp: Int = 2): Int { }
+
+// Vararg
+fun join(vararg parts: String): String { }
+
+// Generic with bound
+fun <T: Number> first(items: List<T>): T? { }
+
+// Coroutine
+suspend fun fetchData(): Int = 0
+
+// Entry point
+fun main() { println("Hello!") }
+fun main(): Int { return 0 }
+
+// Inline
+inline fun max(a: Int, b: Int): Int = a
+
+// Comptime
+comptime fun constValue(): Int = 1
 ```
 
 ### Data Structures
 ```aura
-// Struct with default values
+// Value class (value type, stack-allocated)
+value class Point(val x: Int, val y: Int)
+
+// Struct (same as value class)
 struct Player(val id: Int, val name: String, val health: Int = 100)
-struct Point(val x: Int, val y: Int)
 
-// Instantiate
-val p = Player(1, "Alice", 50)
+// Class (reference type, inheritance)
+class Circle : Shape() {
+    override fun area(): Float = 0.0f
+}
 
-// Field access
-println(p.name)
-println(p.id)
-println(p.health)
-```
+// Sealed class
+sealed class Shape {
+    fun area(): Float = 0.0f
+}
 
-### Enum
-```aura
+// Interface
+interface Drawable {
+    fun draw(): Unit
+}
+
+// Enum with data variants
 enum Color {
     RED,
     GREEN,
-    BLUE,
     CUSTOM(val r: Int, val g: Int, val b: Int)
 }
+
+// Actor (concurrent entity)
+actor Scheduler {
+    private var tick: Int = 0
+    fun step() { tick += 1 }
+}
+
+// Object (singleton)
+object Logger {
+    fun log(msg: String) { println(msg) }
+}
+
+// Type alias
+typealias Vec2 = Pair<Int, Int>
+
+// Instantiation
+val p = Player(1, "Alice", 50)
+println(p.name)
 ```
 
 ### Control Flow
 ```aura
+// if expression
+val status = if (hp > 0) "alive" else "dead"
+
+// if statement
+if (x > 0) {
+    println("positive")
+} else {
+    println("non-positive")
+}
+
+// when with subject
+val result = when (score) {
+    0 -> "zero"
+    in 1..50 -> "low"
+    51..100 -> "high"
+    else -> "extreme"
+}
+
+// when without subject
+when {
+    cond1 -> result1
+    cond2 -> result2
+    else -> result3
+}
+
+// when with type check
+val t = when (val) {
+    is Int -> "int"
+    is String -> "string"
+    else -> "other"
+}
+
 // for loop (range)
 for (i in 0..5) {
+    println(i)
+}
+
+// for loop (iterable)
+for (item in list) {
+    println(item)
+}
+
+// C-style for
+for (var i = 0; i < 5; i = i + 1) {
     println(i)
 }
 
@@ -195,100 +373,134 @@ do {
     i = i + 1
 } while (i < 3)
 
-// if / else
-if (x > 0) {
-    println("positive")
-} else {
-    println("non-positive")
+// Labeled break
+outer@ for (a in 0..3) {
+    for (b in 0..3) {
+        if (a == b) break@outer
+    }
+}
+```
+
+### Concurrency (P8-P10)
+```aura
+// Async block
+async {
+    await fetchData()
 }
 
-// when expression (value match)
-val result = when (score) {
-    0 -> "zero"
-    in 1..50 -> "low"
-    51..100 -> "high"
-    else -> "extreme"
+// Await expression
+val result = await fetch()
+
+// Select multiplexing
+select {
+    case msg = channel -> { handle(msg) }
+    case timeout -> { fallback() }
 }
 
-// when expression (type match)
-val t = when (val) {
-    is Int -> "int"
-    is String -> "string"
-    else -> "other"
+// Actor
+actor Server {
+    fun start() { println("Running") }
 }
+val server = concurrent.spawnActor(Server::class)
 ```
 
 ### Strings
 ```aura
-// String methods (call on object)
-val s = "Hello World"
-s.length                  // Int
-s.contains("World")       // Bool
-s.indexOf("World")        // Int
-s.substring(0, 5)         // String
-s.trim()                  // String
-s.toUpperCase()           // String
-s.toLowerCase()           // String
-s.split(" ")              // List<String>
-s.toInt()                 // String → Int
+// Interpolation
+val message = "Hello $name"
+val expr = "Score: ${score * 2}"
 
-// String interpolation
-println("Hello $name")
-println("Score: ${score * 2}")
-
-// Raw string (triple quotes)
+// Raw string (multi-line, no interpolation)
 val raw = """
-    Multi-line text
-    $interpolation
+    No interpolation here
+    Backslash: \n
 """
 
-// Concatenation
-val msg = "Length: " + s.length.toString()
+// String methods
+val s = "Hello World"
+s.length              // Int
+s.contains("World")   // Bool
+s.indexOf("World")    // Int
+s.substring(0, 5)     // String
+s.trim()              // String
+s.toUpperCase()       // String
+s.toLowerCase()       // String
+s.split(" ")          // List<String>
+s.toInt()             // String → Int
 ```
 
-### Workaround Patterns
-
+### FFI (C ABI)
 ```aura
-// ❌ DO NOT: class
-// class Database { fun query() { } }
+// Inline declaration
+extern "c" fun puts(msg: String): Int
+extern "c" fun strlen(s: CString): Int
 
-// ✅ DO: top-level function + struct
-struct QueryResult(val success: Bool, val data: String, val error: String)
-fun executeQuery(sql: String): QueryResult {
-    return QueryResult(true, "result", "")
+// Block declaration
+extern "c" "raylib" {
+    fun DrawCircle(x: Int, y: Int, radius: Float, color: Color)
+    fun GetFrameTime(): Float
+    val WHITE: Color
+}
+```
+
+### FFI (AOT — JitValue ABI)
+```aura
+extern object Utils {
+    default fun loadLibrary(): String = "utils"
+    @aot fun add(a: Int, b: Int): Int
+    @aot fun multiply(a: Int, b: Int): Int
 }
 
-// ❌ DO NOT: ++ / --
-// i++
+// Usage
+val sum = Utils.add(3, 4)
+```
 
-// ✅ DO: explicit assignment
-var i = 0
-i = i + 1
-i = i - 1
+### Native Annotation
+```aura
+// Syscall
+@native(SYS_READ)
+fun read(fd: Int, buf: CString, count: Int): Int
 
-// ❌ DO NOT: break / continue
-// for (i in 0..10) { if (i == 5) break }
+// Inline asm
+@native(asm = "rdtsc")
+fun rdtsc(): Long
 
-// ✅ DO: recursive function
-fun check(i: Int, max: Int) {
-    if (i >= max) { return }
-    println(i)
-    check(i + 1, max)
+// Compiler builtin
+native fun builtinFunc(a: Int): Int
+```
+
+### Type System
+```aura
+// Built-in types
+val i: Int = 42
+val l: Long = 42L
+val f: Float = 3.14f
+val d: Double = 3.14
+val b: Boolean = true
+val c: Char = 'A'
+val s: String = "hello"
+
+// Generics
+val nums: List<Int> = listOf(1, 2, 3)
+fun <T> identity(x: T): T = x
+
+// Nullable
+val n: Int? = null
+val s: String? = p.tag
+
+// Function types
+val f: (Int, Int) -> Int = { a, b -> a + b }
+```
+
+### Destructuring
+```aura
+// Destructuring declaration
+val (a, b) = pair
+
+// Destructuring in for
+for ((k, v) in map) {
+    println("Key: $k, Value: $v")
 }
-
-// ❌ DO NOT: try-catch
-// try { risky() } catch (e) { handle(e) }
-
-// ✅ DO: check return value
-val result = tryParse("123")
-if (result.success) { use(result.data) }
-else { handleError(result.error) }
-
-// ❌ DO NOT: import
-// import aura.lang.std.IO.*
-
-// ✅ DO: only prelude functions
-println("Hello")
 ```
 
 ---
@@ -316,15 +528,15 @@ fun main() {
 }
 ```
 
-### Example 2: Struct + Enum
+### Example 2: Value Class + Enum
 ```aura
+value class Player(val id: Int, val name: String, val health: Int = 100)
+
 enum Color {
     RED,
     GREEN,
     CUSTOM(val r: Int, val g: Int, val b: Int)
 }
-
-struct Player(val id: Int, val name: String, val health: Int = 100)
 
 fun main() {
     val p = Player(1, "Alice", 50)
@@ -334,128 +546,157 @@ fun main() {
 }
 ```
 
-### Example 3: String Processing
+### Example 3: Class + Interface
 ```aura
-fun processText(input: String): String {
-    val trimmed = input.trim()
-    val upper = trimmed.toUpperCase()
-    val words = upper.split(" ")
-    return upper
+interface Drawable {
+    fun draw(): Unit
+}
+
+class Circle(val radius: Float) : Drawable {
+    override fun draw() {
+        println("Drawing circle with radius: $radius")
+    }
+
+    fun area(): Float = 3.14159f * radius * radius
 }
 
 fun main() {
-    val result = processText("  hello aura  ")
-    println("Processed: " + result)
+    val c = Circle(5.0f)
+    c.draw()
+    println("Area: " + c.area())
 }
 ```
 
-### Example 4: Database Pattern (No class, No import)
+### Example 4: Sealed Class + When
 ```aura
-struct DBConfig(val host: String, val port: Int)
+sealed class Shape {
+    fun area(): Float = 0.0f
+}
 
-struct QueryResult(val success: Bool, val data: String, val error: String)
+class Circle(val radius: Float) : Shape() {
+    override fun area(): Float = 3.14159f * radius * radius
+}
 
-fun executeQuery(config: DBConfig, sql: String): QueryResult {
-    if (sql.length == 0) {
-        return QueryResult(false, "", "Empty SQL")
-    }
-    return QueryResult(true, "result data", "")
+class Rectangle(val width: Float, val height: Float) : Shape() {
+    override fun area(): Float = width * height
+}
+
+fun describe(shape: Shape): String = when (shape) {
+    is Circle -> "Circle(r=${shape.radius})"
+    is Rectangle -> "Rect(${shape.width}x${shape.height})"
 }
 
 fun main() {
-    val cfg = DBConfig("localhost", 5432)
-    val result = executeQuery(cfg, "SELECT * FROM users")
-    if (result.success) {
-        println("Query OK: " + result.data)
-    } else {
-        println("Error: " + result.error)
-    }
-}
-```
-
-### Example 5: String-based Collection (No list/map)
-```aura
-struct Record(val id: Int, val name: String, val value: Int)
-
-fun addRecord(records: String, id: Int, name: String, value: Int): String {
-    val sep = ", "
-    val newEntry = id.toString() + ":" + name + "=" + value.toString()
-    if (records.length == 0) {
-        return newEntry
-    }
-    return records + sep + newEntry
-}
-
-fun getRecordCount(records: String): Int {
-    if (records.length == 0) { return 0 }
-    return records.split(", ").length
-}
-
-fun main() {
-    var records = ""
-    records = addRecord(records, 1, "Alice", 100)
-    records = addRecord(records, 2, "Bob", 200)
-    println("Records: " + records)
-    println("Count: " + getRecordCount(records).toString())
-}
-```
-
-### Example 6: Error Handling Without try-catch
-```aura
-struct ParseResult(val success: Bool, val value: Int, val error: String)
-
-fun safeParse(text: String): ParseResult {
-    if (text.length == 0) {
-        return ParseResult(false, 0, "Empty input")
-    }
-    return ParseResult(true, text.toInt(), "")
-}
-
-fun main() {
-    val result = safeParse("123")
-    if (result.success) {
-        println("Parsed: " + result.value.toString())
-    } else {
-        println("Parse failed: " + result.error)
-    }
-    
-    val empty = safeParse("")
-    if (!empty.success) {
-        println("Caught: " + empty.error)
+    val shapes: List<Shape> = listOf(Circle(3.0f), Rectangle(4.0f, 5.0f))
+    for (s in shapes) {
+        println(describe(s) + " area=" + s.area())
     }
 }
 ```
 
-### Example 7: Recursive Loop (No break/continue)
+### Example 5: Actor + Select
 ```aura
-fun printRange(from: Int, to: Int) {
-    if (from >= to) { return }
-    println(from)
-    printRange(from + 1, to)
-}
-
-fun sumRange(from: Int, to: Int): Int {
-    if (from >= to) { return 0 }
-    return from + sumRange(from + 1, to)
+actor Counter {
+    private var value: Int = 0
+    fun increment() { value = value + 1 }
+    fun get(): Int { return value }
 }
 
 fun main() {
-    printRange(0, 5)
-    println("Sum: " + sumRange(1, 10).toString())
+    val counter = concurrent.spawnActor(Counter::class)
+    for (i in 0..5) {
+        counter.increment()
+        println("Count: " + counter.get())
+    }
 }
 ```
 
----
+### Example 6: FFI (C ABI)
+```aura
+extern "c" "libc" {
+    fun strlen(s: CString): Int
+    fun sqrt(x: Float): Float
+    fun clock(): Long
+}
 
-## Complete Keyword Table
+fun main() {
+    val msg = "Hello Aura"
+    println("Length: " + strlen(msg).toString())
+    println("Sqrt: " + sqrt(16.0f))
+    println("Clock: " + clock().toString())
+}
+```
 
-| Category | Keywords |
-|----------|----------|
-| Prefix modifiers | `abstract` `final` `enum` `open` `annotation` `sealed` `data` `override` `lateinit` `private` `protected` `public` `internal` `inner` `noinline` `crossinline` `vararg` `reified` `tailrec` `operator` `infix` `inline` `external` `const` `suspend` `comptime` `value` `defer` `extern` `lazy` `box` `weak` `async` |
-| Postfix modifiers | `where` `by` `get` `set` |
-| Soft keywords | `catch` `finally` `field` `else` `then` `unit` |
-| Hard keywords | `as` `is` `in` `to` `it` |
-| Control keywords | `if` `while` `do` `when` `throw` `return` `for` `select` `await` |
+### Example 7: FFI (AOT — extern object)
+```aura
+extern object Utils {
+    default fun loadLibrary(): String = "utils"
+    @aot fun add(a: Int, b: Int): Int
+    @aot fun factorial(n: Int): Int
+}
+
+fun main() {
+    val sum = Utils.add(3, 4)
+    println("Sum: " + sum.toString())
+    val fact = Utils.factorial(5)
+    println("5! = " + fact.toString())
+}
+```
+
+### Example 8: Async + Await
+```aura
+suspend fun fetchData(): Int = 42
+
+fun main() {
+    async {
+        val data = await fetchData()
+        println("Got: " + data.toString())
+    }
+}
+```
+
+### Example 9: Defer + Try-Catch
+```aura
+fun readFile(path: String): String {
+    defer {
+        println("Cleanup: closing file")
+    }
+    try {
+        val content = FileSystem.readText(path)
+        return content
+    } catch (e: Exception) {
+        println("Error: " + e.toString())
+        return ""
+    } finally {
+        println("Finally block")
+    }
+}
+
+fun main() {
+    val result = readFile("config.txt")
+    println("Result: " + result)
+}
+```
+
+### Example 10: Labeled Break + While
+```aura
+fun main() {
+    outer@
+    for (i in 0..5) {
+        for (j in 0..5) {
+            if (i == j) break@outer
+            println("($i, $j)")
+        }
+    }
+
+    var x = 10
+    while (x > 0) {
+        x = x - 1
+        if (x == 3) continue
+        println("x = " + x.toString())
+    }
+}
+```
 
 ---
 
@@ -467,6 +708,7 @@ fun main() {
 | Classes/Interfaces/Structs | PascalCase | `Player`, `Drawable` |
 | Functions/Variables | camelCase | `loadConfig`, `playerName` |
 | Generic params | Single uppercase | `T`, `U`, `K`, `V` |
+| Modules | lowercase dots | `std.io`, `std.math` |
 
 **Formatting**: 4-space indent, spaces around operators, Kotlin-style braces
 
@@ -476,27 +718,34 @@ fun main() {
 
 | Pitfall | ✅ Correct | ❌ Wrong |
 |---------|-----------|---------|
-| Data struct | `struct Name(...)` | `data class Name(...)` |
-| Class | ❌ Not supported | `class Name { }` |
-| Actor | ❌ Not implemented | `actor Name { }` |
-| Increment | `x = x + 1` | `x++` / `++x` |
-| Break | ❌ Not supported | `break` |
-| Try-catch | Check return values | `try { } catch { }` |
-| Import | ❌ System broken | `import aura.*` |
-| Collections | String with separators | `listOf(1,2)` / `mapOf` |
-| Nested fun | Move to top-level | `fun main() { fun inner() { } }` |
+| Data struct | `value class Name(...)` | `data class Name(...)` |
+| Value type | `value class` | `data class` |
+| Value type (alt) | `struct Name(...)` | `data class Name(...)` |
+| Concurrent entity | `actor Name { }` | `class Name { }` |
+| FFI (C ABI) | `extern "c" fun f()` | `extern fun f()` |
+| FFI block | `extern "c" "lib" { }` | `extern("c") { }` |
+| FFI AOT | `extern object Name { @aot fun f() }` | `extern fun f()` |
+| Native | `@native(SYS_READ)` | `@syscall(SYS_READ)` |
+| await | `await fetch()` | `await(fetch())` |
+| Struct ctor | `Player(1, "Alice")` | `Player(id=1, name="Alice")` |
+| String interp | `"${expr}"` | `${expr}` (no quotes) |
+| Raw string | `"""..."""` | `r"..."` |
+| Increment | `x++` / `++x` / `x = x + 1` | — (all work now) |
+| Elvis | `n ?: 0` | `if (n != null) { n } else { 0 }` |
+| Safe access | `obj?.field` | `if (obj != null) { obj.field }` |
 
 ---
 
 ## Reference Documentation
 
 Full source at `D:\Code\AuraLang\`:
-- `docs/01-aura-language-card.md` — Full language card
-- `docs/02-aura-stdlib-reference.md` — Complete stdlib API
-- `docs/04-aura-style-guide.md` — Style guide
+- `compiler/src/token.rs` — Complete token/keyword definitions
+- `compiler/src/lexer.rs` — Lexer implementation (authoritative keyword table)
+- `compiler/src/parser.rs` — Parser implementation (all supported constructs)
+- `compiler/src/ast.rs` — AST node definitions
 - `book/chapter-01.md` — Language tutorial
 - `book/chapter-02.md` — Example projects
-- `examples/` — 36 real .aura files
+- `docs/01-aura-language-card.md` — Complete language card
 - `docs/api/index.md` — Auto-generated API docs
 - `target/release/aura.exe` — Compiler binary (check/run/fmt)
-- `D:\Code\AuraProjs\SQLura\docs\Aura编码模式参考.md` — Compiler boundary reference
+- `examples/` — Real .aura files

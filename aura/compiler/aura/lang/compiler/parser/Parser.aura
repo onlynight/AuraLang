@@ -53,6 +53,12 @@ class Parser {
     /// （词法器内部为堆列表，O(1) 访问）。
     var kinds: List<String> = listOf()
 
+    /// 「禁止 lambda 解析」开关：when 分支模式位置置 true。
+    ///
+    /// 否则 `CONST_INT -> "CONST_INT"` 会被当作单参 lambda，箭头与分支体被
+    /// 一起吃掉，后续分支全部错位（见 `isLambdaStart`）。
+    var prsNoLambda: Boolean = false
+
     /// 构造：词法分析并缓存全部 token。
     init(source: String) {
         this.lx = Lexer(source)
@@ -197,6 +203,28 @@ class Parser {
         return true
     }
 
+    /// 期望声明名（`val`/`var` 声明、字段名等）：**接受硬关键字**。
+    ///
+    /// 与 [`prsExpectParamName`] 同理：声明名位置上只可能是名字，而源码里确有
+    /// `val val: Int = …` 这类「关键字当变量名」的写法（Rust 侧解析器用
+    /// `advance().literal` 直接取字面量，同样不排斥关键字）。
+    /// 仅对分隔符 / 赋值等**确定不是名字**的 token 报错。
+    fun prsExpectDeclName(): Boolean {
+        val k: String = this.prsCurKind()
+        if (k == "Comma" || k == "RParen" || k == "LBrace" || k == "Assign"
+            || k == "EOF" || k == "Colon" || k == "Semicolon") {
+            this.errors.pushAt(
+                severityError(),
+                "期望声明名，但遇到 " + k,
+                this.prsCurSpan().start,
+                this.prsCurSpan().end
+            )
+            return false
+        }
+        this.prsAdvance()
+        return true
+    }
+
     /// 消费一个类型名 token（标识符 / 软关键字 / 硬关键字）。
     ///
     /// 与 [`prsExpectName`] 的区别：后者只接受标识符与软关键字，遇到
@@ -205,7 +233,7 @@ class Parser {
     fun prsExpectTypeName(): Boolean {
         val k: String = this.prsCurKind()
         if (k == "Comma" || k == "RParen" || k == "Gt" || k == "LBrace" || k == "EOF"
-            || k == "Colon" || k == "QuestionMark" || k == "RBracket" || k == "Semi") {
+            || k == "Colon" || k == "QuestionMark" || k == "RBracket" || k == "Semicolon") {
             return false
         }
         this.prsAdvance()
@@ -234,6 +262,10 @@ class Parser {
         var kids = noKids()
         while (!this.prsAtEnd()) {
             this.prsSkipDocs()
+            // 语句分隔符 `;`：Rust 侧允许顶层出现，统一跳过
+            while (this.prsCheck("Semicolon")) {
+                this.prsAdvance()
+            }
             if (!this.prsAtEnd()) {
                 val d = this.parseTopLevel()
                 kids = kidsAdd(kids, d)
@@ -412,7 +444,10 @@ class Parser {
             this.prsAdvance()
         }
         val name: String = this.prsCurLit()
-        this.prsExpectName()
+        // 声明名位置只可能是名字：源码里存在 `val val: Int = …`（`val` 作变量名），
+        // 用 prsExpectName 会失败且**不消费令牌**，导致 `:` / `=` 全部错位、
+        // 整段反同步（Fold.aura / MirOpt.aura / vm/* 实测如此）。
+        this.prsExpectDeclName()
         var ty: String = ""
         if (this.prsMatch("Colon")) {
             ty = this.parseTypeName()
@@ -448,7 +483,7 @@ class Parser {
         }
         // 可选父类 / 接口（`: Base, Iface`）
         if (this.prsMatch("Colon")) {
-            while (!this.prsCheck("LBrace") && !this.prsCheck("Semi") && !this.prsAtEnd()) {
+            while (!this.prsCheck("LBrace") && !this.prsCheck("Semicolon") && !this.prsAtEnd()) {
                 this.prsAdvance()
             }
         }
@@ -507,7 +542,12 @@ class Parser {
         if (keyword == "At") {
             // @native(...) fun - 系统调用或内联汇编
             // @aot fun - AOT 库函数
-            if (this.prsPeek(1) == "Aot") {
+            //
+            // 注意：`aot` **不是**关键字（词法器无 `Aot` 种类，与 Rust 侧一致），
+            // 它是普通标识符，故必须比对字面量而非 token 种类——旧实现只比对
+            // `prsPeek(1) == "Aot"`（恒为 `false`），`@aot` 会被误送进
+            // `parseAnnotatedNativeFunction` → `prsExpect("Native")` 失败并反同步。
+            if (this.prsPeek(1) == "Aot" || this.prsLit(this.pos + 1) == "aot") {
                 return this.parseAotFunction()
             }
             return this.parseAnnotatedNativeFunction()
@@ -604,6 +644,11 @@ class Parser {
         }
         return this.ast.add("NativeMethod", "", "", this.prsCurSpan(), kids)
     }
+
+    /// 根据 annotation metadata 分类 AST 节点类型
+    fun classifyAnnotation(annotation: String): String {
+        if (annotation.startsWith("native|")) {
+            return "NativeMethod"
         } else if (annotation.startsWith("asm|")) {
             return "NativeMethod"
         } else if (annotation == "export") {
@@ -714,6 +759,12 @@ class Parser {
         }
         if (k == "Const" && this.prsPeek(1) == "Val") {
             return this.parseDecl(false)
+        }
+        // 可见性修饰符（`private fun visit(...)` / `public val` …）：
+        // Aura 侧不建模可见性，直接跳过修饰符再解析后续声明
+        if (k == "Private" || k == "Protected" || k == "Public") {
+            this.prsAdvance()
+            return this.parseStatement()
         }
         // 声明类语句（类体成员 / 嵌套声明）：此前这些 token 落到表达式分支，
         // 产生「意外的 token: Fun」并使整个类体反同步。
@@ -901,6 +952,12 @@ class Parser {
         while (!this.prsCheck("RBrace") && !this.prsAtEnd()) {
             // 跳过文档注释后再判断是否已到块尾，避免把 `}` 当作语句吃掉
             this.prsSkipDocs()
+            // 语句分隔符 `;`（可选）：Rust 侧允许 `a; b; c` 单行多语句，
+            // 此前未跳过 → 每个 `;` 都产生「意外的 token: Semicolon」诊断，
+            // 并使后续语句反同步。
+            while (this.prsCheck("Semicolon")) {
+                this.prsAdvance()
+            }
             if (!this.prsCheck("RBrace") && !this.prsAtEnd()) {
                 kids = kidsAdd(kids, this.parseStatement())
             }
@@ -912,7 +969,7 @@ class Parser {
     /// 解析 return 语句。
     fun parseReturn(): Int {
         this.prsAdvance()
-        if (this.prsCheck("LBrace") || this.prsCheck("Semi") || this.prsCheck("RBrace") || this.prsAtEnd()) {
+        if (this.prsCheck("LBrace") || this.prsCheck("Semicolon") || this.prsCheck("RBrace") || this.prsAtEnd()) {
             return this.ast.leaf("Return", "", this.prsCurSpan())
         }
         val e = this.parseExpr()
@@ -945,12 +1002,17 @@ class Parser {
         return this.ast.add("If", "", "", this.prsCurSpan(), kids)
     }
 
-    /// then / else 分支：块或单表达式。
+    /// then / else 分支：块或**单条语句**。
+    ///
+    /// 必须走 `parseStatement`（而非 `parseExpr`）：无花括号的分支可能是赋值
+    /// （`if (c) x = y` / `else if (c) x = y`），而 `parseExpr` 不消费 `=` ——
+    /// 会报「意外的 token: Assign」，并使整条 if/else if 链反同步
+    /// （实测 Fold.aura 因此产生 55 条诊断、类体断链）。
     fun parseBranch(): Int {
         if (this.prsCheck("LBrace")) {
             return this.parseBlock()
         }
-        return this.parseExpr()
+        return this.parseStatement()
     }
 
     /// 解析 while 循环。
@@ -968,7 +1030,11 @@ class Parser {
         return this.ast.add("While", "", "", this.prsCurSpan(), kidsAdd(kidsAdd(noKids(), cond), body))
     }
 
-    /// 解析 for 循环（`for (val i in 0..n) { ... }` 与 `for (x in list) { ... }`）。
+    /// 解析 for 循环。
+    ///
+    /// 支持两种形态（与 Rust 侧 `Expr::For` / `Expr::CFor` 一致）：
+    ///   * Kotlin 风格：`for (val i in 0..n) { ... }` / `for (x in list) { ... }`
+    ///   * C 风格：`for (var i: Int = 0; i < n; i = i + 1) { ... }`
     fun parseFor(): Int {
         this.prsAdvance() // For
         this.prsExpect("LParen")
@@ -985,6 +1051,34 @@ class Parser {
             this.prsExpectName()
             decl = this.ast.add("ValDecl", varName, "", varSpan, noKids())
         }
+        // C 风格：`for (init; cond; incr) body`。旧实现在此处直接
+        // `prsExpect("In")`，遇到 `;` 便报错并反同步 —— 类体因此在源代码中
+        // 断链（连带后续方法全部退化为顶层自由函数，丢失隐式 self）。
+        if (this.prsCheck("Semicolon")) {
+            this.prsAdvance() // ;
+            var cond: Int
+            if (this.prsCheck("Semicolon")) {
+                // 省略条件 → 恒真
+                cond = this.ast.add("BoolLiteral", "true", "", this.prsCurSpan(), noKids())
+            } else {
+                cond = this.parseExpr()
+            }
+            this.prsExpect("Semicolon")
+            var incr: Int
+            if (this.prsCheck("RParen")) {
+                // 省略步进 → 空块
+                incr = this.ast.add("Block", "", "", this.prsCurSpan(), noKids())
+            } else {
+                // 步进通常是赋值（`j = j + 1`）——赋值的解析在 parseStatement 里
+                // （parseExpr 不消费 `=`，会停在 Assign 上报「期望 RParen」）。
+                incr = this.parseStatement()
+            }
+            this.prsExpect("RParen")
+            val cfBody: Int = this.parseBlock()
+            // kids 固定为 [init, cond, incr, body]，缺失部分用上述占位节点补齐
+            var cfKids = kidsAdd(kidsAdd(kidsAdd(kidsAdd(noKids(), decl), cond), incr), cfBody)
+            return this.ast.add("CFor", "", "", this.prsCurSpan(), cfKids)
+        }
         this.prsExpect("In")
         val iterable = this.parseExpr()
         this.prsExpect("RParen")
@@ -994,11 +1088,15 @@ class Parser {
     }
 
     /// 解析 try / catch / finally。
+    ///
+    /// kids **固定为 `[body, catchBlock, finallyBlock]`**：缺失的 catch/finally
+    /// 补一个空 `Block` 占位。否则 `try { } finally { }` 与 `try { } catch { }`
+    /// 的 kids 长度相同、含义不可区分（HirTry 只有位置信息可用）。
     fun parseTry(): Int {
         this.prsAdvance() // Try
         val body = this.parseBlock()
-        var kids = kidsAdd(noKids(), body)
         var catchVar: String = ""
+        var catchBlock: Int = -1
         if (this.prsCheck("Catch")) {
             this.prsAdvance()
             if (this.prsCheck("LParen")) {
@@ -1012,12 +1110,20 @@ class Parser {
                 }
                 this.prsExpect("RParen")
             }
-            kids = kidsAdd(kids, this.parseBlock())
+            catchBlock = this.parseBlock()
         }
+        var finallyBlock: Int = -1
         if (this.prsCheck("Finally")) {
             this.prsAdvance()
-            kids = kidsAdd(kids, this.parseBlock())
+            finallyBlock = this.parseBlock()
         }
+        if (catchBlock < 0) {
+            catchBlock = this.ast.add("Block", "", "", this.prsCurSpan(), noKids())
+        }
+        if (finallyBlock < 0) {
+            finallyBlock = this.ast.add("Block", "", "", this.prsCurSpan(), noKids())
+        }
+        var kids = kidsAdd(kidsAdd(kidsAdd(noKids(), body), catchBlock), finallyBlock)
         return this.ast.add("Try", catchVar, "", this.prsCurSpan(), kids)
     }
 
@@ -1228,6 +1334,14 @@ class Parser {
             }
             return lit
         }
+        // 字符串**以插值开头**（`"$x + $y = …"`）：词法器此时不产出前置
+        // `StringLiteral`，直接以 `StringInterpStart` 开头。此前无分支 → 该 token
+        // 落到「意外的 token」，整个插值的首段被丢弃（Phase B.3 的
+        // testInterpMulti 因此只拼出后半段并返回错值）。
+        if (k == "StringInterpStart") {
+            val emptyLit: Int = this.ast.leaf("StringLiteral", "", this.prsCurSpan())
+            return this.parseStringInterp(emptyLit)
+        }
         if (k == "BoolLiteral") {
             return this.leafLit("BoolLiteral")
         }
@@ -1252,6 +1366,13 @@ class Parser {
             return this.leafLit("Super")
         }
         if (k == "LParen") {
+            // 括号参数 lambda 必须先试（`(a, b) -> a + b`）：否则会被当作分组
+            // 表达式，`(a` 之后遇到 `,` 直接报「期望 RParen」并把 remainder 变成
+            // ErrorExpr（Phase B.2 的 testLambdaTwoParams 由此损坏）。
+            val lambdaId: Int = this.tryParseParenLambda()
+            if (lambdaId >= 0) {
+                return lambdaId
+            }
             this.prsAdvance()
             val e = this.parseExpr()
             this.prsExpect("RParen")
@@ -1263,17 +1384,12 @@ class Parser {
         if (k == "When") {
             return this.parseWhen()
         }
-        // 括号表达式 / 括号参数 lambda：`(expr)`、`(x) -> body`、`(x: T) -> body`
-        if (k == "LParen") {
-            // 尝试解析括号参数 lambda
-            val lambdaId: Int = this.tryParseParenLambda()
-            if (lambdaId >= 0) {
-                return lambdaId
-            }
+        // `throw expr`（表达式位置；Rust 侧为 Expr::Throw）
+        if (k == "Throw") {
+            val throwSp: Span = this.prsCurSpan()
             this.prsAdvance()
-            val e = this.parseExpr()
-            this.prsExpect("RParen")
-            return e
+            val thrown: Int = this.parseExpr()
+            return this.ast.add("Throw", "", "", throwSp, kidsAdd(noKids(), thrown))
         }
         // 块表达式 `{ ... }`：单表达式块取值时直接返回该表达式
         if (k == "LBrace") {
@@ -1287,6 +1403,16 @@ class Parser {
             }
             return blk
         }
+        // 标识符 / 关键字作为表达式：与 Rust 侧原子解析一致（`advance().literal`），
+        // 关键字 token 同样按其字面量作标识符 —— 源码里存在 `val val: Int = …`
+        // 之后的 `toStr(-val)`、`isIntLiteral(val)` 这类把 `val` 当普通变量用的写法，
+        // 直接报错会让整段反同步（Fold/MirOpt/Closures/FrameManager 实测如此）。
+        val lit: String = this.prsCurLit()
+        if (prsIsWordLiteral(lit)) {
+            val node = this.ast.leaf("Ident", lit, this.prsCurSpan())
+            this.prsAdvance()
+            return node
+        }
         // 未知 token：报错并消费，避免死循环
         this.errors.pushAt(
             severityError(),
@@ -1294,7 +1420,7 @@ class Parser {
             this.prsCurSpan().start,
             this.prsCurSpan().end
         )
-        val bad = this.ast.leaf("ErrorExpr", this.prsCurLit(), this.prsCurSpan())
+        val bad = this.ast.leaf("ErrorExpr", lit, this.prsCurSpan())
         this.prsAdvance()
         return bad
     }
@@ -1311,7 +1437,25 @@ class Parser {
         this.prsExpect("LBrace")
         var arms = noKids()
         while (!this.prsCheck("RBrace") && !this.prsAtEnd()) {
-            val pat = this.parseExpr()
+            var pat: Int
+            if (this.prsCheck("Else")) {
+                // `else -> body`：`else` 是关键字 token，而模式位置走 parseExpr
+                // 会落进「意外 token」分支（产生 ErrorExpr + 诊断错误）。
+                // 按约定降级为标识符 `__else__`（与 Rust 侧 `Ident("__else__")`
+                // 一致），供 HIR 识别为恒真兜底分支。
+                val elseSp: Span = this.prsCurSpan()
+                this.prsAdvance()
+                pat = this.ast.leaf("Ident", "__else__", elseSp)
+            } else {
+                // 模式位置**禁止 lambda 解析**：`CONST_INT -> "…"` 会被
+                // `isLambdaStart()` 误判为单参 lambda 并连箭头带分支体一起吃掉，
+                // 于是下一个分支的模式处变成「期望 Arrow，但遇到 Ident」
+                // （Opcodes.aura 的 20 条诊断即由此而来）。
+                val prevNoLambda: Boolean = this.prsNoLambda
+                this.prsNoLambda = true
+                pat = this.parseExpr()
+                this.prsNoLambda = prevNoLambda
+            }
             this.prsExpect("Arrow")
             val body = this.parseExpr()
             arms = kidsAdd(arms, this.ast.add("WhenArm", "", "", this.prsCurSpan(), kidsAdd(kidsAdd(noKids(), pat), body)))
@@ -1331,6 +1475,10 @@ class Parser {
     /// 但当前 Parser 的 `parseWhen` 使用 `prsExpect("Arrow")` 而非 `parseLambda`，
     /// 因此 `isLambdaStart` 不需要显式抑制。
     fun isLambdaStart(): Boolean {
+        // 模式位置（when 分支）显式抑制：此处的 `->` 恒为分支分隔符
+        if (this.prsNoLambda) {
+            return false
+        }
         // 单参数 lambda: `x -> expr` 或 `x: Type -> expr`
         val cur: String = this.prsCurKind()
         if (cur == "Ident" || cur == "Val" || cur == "Var") {
@@ -1431,13 +1579,19 @@ class Parser {
         if (afterParen != "Arrow") { return -1 }
 
         // 检查括号内容是否是参数列表形态
-        for (var j: Int = this.pos + 1; j < i; j = j + 1) {
+        //
+        // 用 while 而非 C 风格 for：该分支在被 parsePrimary 正式接入前是死代码，
+        // C 风格 for 的（VM / AOT）降级从未被执行过；实测接入后此处会陷入死循环
+        //（进程内存持续增长、CPU 0%）。while 形式无歧义，且与仓库其余循环一致。
+        var j: Int = this.pos + 1
+        while (j < i) {
             val t: String = this.prsKind(j)
             if (t != "Ident" && t != "Colon" && t != "Comma" &&
                 t != "QuestionMark" && t != "Lt" && t != "Gt" &&
                 t != "Val" && t != "Var") {
                 return -1
             }
+            j = j + 1
         }
 
         // 解析 lambda
@@ -1613,6 +1767,29 @@ fun prsSlice(text: String, start: Int, length: Int): String {
 /// 说明：目标 arena 必须通过方法内的 `this.ast` 写入，故此处已改为 `Parser.copySubtree`。
 
 /// 合并两个 span（用于复合节点）。
+/// 是否为「词」字面量（标识符 / 关键字这类由字母数字下划线组成的 token 文本）。
+///
+/// 用于在表达式位置把关键字 token 按其字面量当作标识符处理，对齐 Rust 侧
+/// 原子解析 `advance().literal.clone()`；标点 token 的字面量（`(`、`+` …）与
+/// EOF 的空串一律判为 false（仍走「意外的 token」诊断路径）。
+fun prsIsWordLiteral(s: String): Boolean {
+    if (s == "") {
+        return false
+    }
+    // 逐字符查表（`indexOf`）而非 `c >= "a" && c <= "z"`：Aura 的字符串
+    // 关系比较在 AOT/VM 下语义不可靠（实测 `"$" >= "a"` 会判为 true，
+    // 于是 `$x` 被误当作标识符）。查表法用的是内容包含匹配，两边一致。
+    val wordChars: String = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
+    var i: Int = 0
+    while (i < s.length) {
+        if (wordChars.indexOf(toStr(s[i])) < 0) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
 fun mergeSpan(a: Span, b: Span): Span {
     return Span(a.start, b.end, a.startLine, a.startCol, b.endLine, b.endCol)
 }

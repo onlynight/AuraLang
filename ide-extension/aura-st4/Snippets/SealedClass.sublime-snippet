@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<snippet>
+    <content><![CDATA[sealed class ${1:Name} {
+    fun ${2:method}(): ${3:ReturnType} = ${4:default}
+}]]></content>
+    <tabTrigger>sealed</tabTrigger>
+    <scope>source.aura</scope>
+    <description>Sealed class</description>
+</snippet>

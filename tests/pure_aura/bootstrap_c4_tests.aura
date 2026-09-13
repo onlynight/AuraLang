@@ -1,0 +1,154 @@
+// ═════════════════════════════════════════════════════════════════
+// Phase C.4 流程测试（Aura 侧）：自举编译链的关键不变量
+//
+// 覆盖「Aura 编写的编译器能否编译自身」过程中修掉/暴露的几类缺口：
+//   1. 多模块链接：Main.aura → 全部依赖模块载入（无缺失）
+//   2. 每个模块都能被 Aura 前端**零诊断**解析（含 C 风格 for / `;` 分隔 /
+//      `else ->` 分支 / `private` 修饰符 / `throw` / 关键字作变量名 …）
+//   3. HIR 形态：when 已降级为嵌套 HirIfExpr（不留 HirWhen）、C 风格 for 降级出
+//      HirWhile、类体方法挂载（发射器据此识别 owner）
+//   4. 发射器：类方法带「限定名 + 隐式 self」（`Parser_leafLit(%struct.Parser*`），
+//      不得退化为无 self 的裸符号；@native C 分发声明进入 IR
+//
+// 运行：aura run tests/pure_aura/bootstrap_c4_tests.aura
+//   全通过时输出 "RESULT: PASS"
+//
+// 注意：本用例要链接/降级整棵编译器模块图（51 个模块），VM 上约需 1~2 分钟；
+//       只做「链接 + HIR + LLVM IR 文本」断言，**不调用 llc/clang**。
+//       真正的端到端自举（编译自身 → 运行产物）见 docs/pure_aura 的验证报告。
+// ═════════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import aura.lang.std.FileSystem
+
+import "../../aura/compiler/aura/lang/compiler/test/TestRunner.aura"
+
+import "../../aura/compiler/aura/lang/compiler/lexer/Span.aura"
+import "../../aura/compiler/aura/lang/compiler/lexer/Token.aura"
+import "../../aura/compiler/aura/lang/compiler/lexer/Lexer.aura"
+import "../../aura/compiler/aura/lang/compiler/ast/Ast.aura"
+import "../../aura/compiler/aura/lang/compiler/errors/CompileError.aura"
+import "../../aura/compiler/aura/lang/compiler/parser/Parser.aura"
+
+import "../../aura/compiler/aura/lang/compiler/hir/Hir.aura"
+import "../../aura/compiler/aura/lang/compiler/hir/Desugar.aura"
+import "../../aura/compiler/aura/lang/compiler/hir/Mono.aura"
+import "../../aura/compiler/aura/lang/compiler/hir/Inline.aura"
+import "../../aura/compiler/aura/lang/compiler/hir/Fold.aura"
+
+import "../../aura/compiler/aura/lang/compiler/aot/TypeMapper.aura"
+import "../../aura/compiler/aura/lang/compiler/aot/AotUtil.aura"
+import "../../aura/compiler/aura/lang/compiler/aot/Runtime.aura"
+import "../../aura/compiler/aura/lang/compiler/aot/StdSigs.aura"
+import "../../aura/compiler/aura/lang/compiler/aot/Ffi.aura"
+import "../../aura/compiler/aura/lang/compiler/aot/Target.aura"
+import "../../aura/compiler/aura/lang/compiler/aot/Optimize.aura"
+import "../../aura/compiler/aura/lang/compiler/aot/EmitBuffer.aura"
+import "../../aura/compiler/aura/lang/compiler/aot/Emit.aura"
+import "../../aura/compiler/aura/lang/compiler/aot/ModuleLink.aura"
+
+/// 自举入口（编译器主程序）。
+fun c4Entry(): String {
+    return "aura/compiler/aura/lang/compiler/Main.aura"
+}
+
+/// HIR 中是否存在指定 kind 的节点。
+fun c4HirHasKind(hir: Hir, kind: String): Boolean {
+    var i: Int = 0
+    while (i < hir.count) {
+        if (hir.kindOf(i) == kind) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// ═════════════════════════════════════════════════════════════════
+// 用例：链接 → 逐模块解析体检 → HIR 形态 → 发射器符号
+//（只做一次整图链接，避免重复降级 51 个模块）
+// ═════════════════════════════════════════════════════════════════
+
+fun testBootstrapChain(): Int {
+    val t = TestRunner()
+    t.begin("c4.bootstrap")
+
+    // ── 1) 多模块链接 ──
+    val l = AotModuleLinker()
+    val h: Hir = l.link(c4Entry())
+    t.assertTrue(l.loadedCount() >= 40, "compiler module graph loaded (>=40)")
+    t.assertEq(aotLineCount(l.missing), 0, "no missing import")
+    t.assertEq(h.kindOf(h.rootId), "HirProgram", "merged HIR root is HirProgram")
+
+    // ── 2) 每个模块零诊断解析 ──
+    val paths: List<String> = l.seen.split("\n")
+    var total: Int = 0
+    var i: Int = 0
+    while (i < paths.size) {
+        val pth: String = paths[i]
+        i = i + 1
+        if (pth == "") {
+            continue
+        }
+        val src: String = FileSystem.readText(pth)
+        val p = Parser(src)
+        p.parseProgram()
+        total = total + p.errors.errorCount()
+    }
+    t.assertEq(total, 0, "all modules parse with zero diagnostics")
+
+    // ── 3) HIR 降级形态 ──
+    t.assertFalse(c4HirHasKind(h, "HirWhen"), "no HirWhen left (lowered to HirIfExpr)")
+    t.assertTrue(c4HirHasKind(h, "HirIfExpr"), "when lowered into HirIfExpr")
+    t.assertTrue(c4HirHasKind(h, "HirWhile"), "C-style for lowered into HirWhile")
+
+    // 类体方法挂载：Parser 类块内挂载其方法（发射器据此解析 owner/隐式 self）
+    var clsOk: Boolean = false
+    i = 0
+    while (i < h.count) {
+        if (h.kindOf(i) == "HirClass" && h.textOf(i) == "Parser") {
+            val ck: String = h.kidsOf(i)
+            val cn: Int = hirKidsCount(ck)
+            var j: Int = 0
+            while (j < cn) {
+                val bid: Int = hirKidsAt(ck, j)
+                if (h.kindOf(bid) == "HirBlock" && hirKidsCount(h.kidsOf(bid)) > 30) {
+                    clsOk = true
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    t.assertTrue(clsOk, "Parser class body carries its methods")
+
+    // ── 4) 发射器符号（单模块发射，避免整图发射的开销） ──
+    //     Parser.aura 含 `fun leafLit` / `fun prsCurKind`（Parser 类方法）
+    val lp = AotModuleLinker()
+    val hp: Hir = lp.link("aura/compiler/aura/lang/compiler/parser/Parser.aura")
+    val ir: String = emitLlvmIr(hp, "c4", "x86_64-pc-windows-msvc")
+    t.assertTrue(ir.contains("define i32 @Parser_leafLit(%struct.Parser*"),
+        "Parser.leafLit carries implicit self")
+    t.assertFalse(ir.contains("define i32 @leafLit("),
+        "no bare @leafLit definition")
+    t.assertTrue(ir.contains("define i8* @Parser_prsCurKind(%struct.Parser*"),
+        "Parser.prsCurKind carries implicit self")
+    t.assertTrue(ir.contains("declare i64 @aura_syscall_dispatch(i64, i64, i64, i64, i64, i64, i64)"),
+        "syscall dispatch declared (Phase D link input)")
+
+    return t.report()
+}
+
+fun main() {
+    var failures: Int = 0
+    failures = failures + testBootstrapChain()
+
+    println("")
+    println("=== Summary ===")
+    println("Total failures: " + toStr(failures))
+    if (failures == 0) {
+        println("RESULT: PASS")
+    } else {
+        println("RESULT: FAIL")
+    }
+}

@@ -226,6 +226,25 @@ impl Parser {
             return Ok(Decl::Extern(self.parse_extern()));
         }
         if self.check(TokenKind::At) {
+            // @native(...) 作为函数声明前缀：解析为 pending_native_attr 后继续解析后续声明
+            // @native（无括号）→ Builtin；@native(asm=...) → Asm；@native(N) → Syscall
+            // 其他 @ 注解：解析为独立的 AnnotationDecl
+            let next = self.peek_ahead(1);
+            if (next.kind == TokenKind::Ident && next.literal == "native")
+                || next.kind == TokenKind::Native
+            {
+                self.advance(); // @
+                self.advance(); // native
+                // 检查是否有括号：@native() / @native(asm=...) / @native(N)
+                // 无括号 @native fun → Builtin（编译器内置）
+                if self.check(TokenKind::LParen) {
+                    self.pending_native_attr = self.parse_native_annotation_args();
+                } else {
+                    self.pending_native_attr = Some(NativeAttr::Builtin);
+                }
+                // 继续解析后续声明（通常是 fun 声明）
+                return self.parse_declaration();
+            }
             return Ok(Decl::Annotation(self.parse_annotation()));
         }
         if self.check(TokenKind::Typealias) {
@@ -552,7 +571,7 @@ impl Parser {
         let name = self.advance().literal.clone();
 
         // 类型参数
-        let ty = if self.check(TokenKind::Lt) {
+        let mut ty = if self.check(TokenKind::Lt) {
             self.advance(); // <
             let mut args = Vec::new();
             loop {
@@ -592,6 +611,21 @@ impl Parser {
         if self.check(TokenKind::QuestionMark) {
             self.advance();
             return Type::Nullable(Box::new(ty));
+        }
+
+        // 数组类型：Int[6] 或 Int[]
+        while self.check(TokenKind::LBracket) {
+            self.advance(); // [
+            if self.check(TokenKind::RBracket) {
+                // 空数组类型 Int[]
+                self.advance();
+                ty = Type::Array(Box::new(ty));
+            } else {
+                // 有界数组类型 Int[6]：解析大小表达式后丢弃
+                let _size_expr = self.parse_expression(0);
+                self.expect(TokenKind::RBracket);
+                ty = Type::Array(Box::new(ty));
+            }
         }
 
         ty
@@ -3539,22 +3573,78 @@ impl Parser {
         }
     }
 
-    /// for (pattern in iterable) body
+    /// for 表达式：支持两种语法
+    /// 1. for (pattern in iterable) body   — Kotlin 风格
+    /// 2. for (init; condition; increment) body — C 风格
     fn parse_for_expression(&mut self, start: Span) -> Expr {
         self.advance(); // for
         self.expect(TokenKind::LParen);
-        let pattern = self.parse_expression(0);
-        self.expect(TokenKind::In);
-        let iterable = self.parse_expression(0);
-        self.expect(TokenKind::RParen);
-        let body = self.parse_body_expr();
 
-        Expr::For {
-            pattern: Box::new(pattern),
-            iterable: Box::new(iterable),
-            body: Box::new(body),
-            span: Span::merge(&start, &self.current().span),
+        // 解析第一个表达式（可能是 pattern 或 init）
+        // C 风格 init 可能包含 var/val 声明，需要先判断
+        let first_expr = if self.check(TokenKind::Semicolon) {
+            // 空 init：for (; condition; increment)
+            Box::new(Expr::Literal(Literal::Int(0), self.current().span))
+        } else if self.check(TokenKind::Var) || self.check(TokenKind::Val) {
+            // C 风格 init 含声明：var j: Int = ...; 或 val x = ...;
+            // 解析为语句序列，编码为 Block 表达式
+            self.parse_cfor_init()
+        } else {
+            Box::new(self.parse_expression(0))
+        };
+
+        // 检测语法类型：`;` → C 风格，`in` → Kotlin 风格
+        if self.check(TokenKind::In) {
+            // ── Kotlin 风格：for (x in iterable) body ──
+            self.advance(); // in
+            let iterable = self.parse_expression(0);
+            self.expect(TokenKind::RParen);
+            let body = self.parse_body_expr();
+            Expr::For {
+                pattern: first_expr,
+                iterable: Box::new(iterable),
+                body: Box::new(body),
+                span: Span::merge(&start, &self.current().span),
+            }
+        } else {
+            // ── C 风格：for (init; condition; increment) body ──
+            self.expect(TokenKind::Semicolon);
+
+            // 解析 condition（空表示 true）
+            let condition = if self.check(TokenKind::Semicolon) {
+                Box::new(Expr::Literal(Literal::Bool(true), self.current().span))
+            } else {
+                Box::new(self.parse_expression(0))
+            };
+
+            self.expect(TokenKind::Semicolon);
+
+            // 解析 increment（空表示无操作）
+            let increment = if self.check(TokenKind::RParen) {
+                None
+            } else {
+                Some(Box::new(self.parse_expression(0)))
+            };
+
+            self.expect(TokenKind::RParen);
+            let body = self.parse_body_expr();
+
+            Expr::CFor {
+                init: Some(first_expr),
+                condition,
+                increment,
+                body: Box::new(body),
+                span: Span::merge(&start, &self.current().span),
+            }
         }
+    }
+
+    /// 解析 C 风格 for 循环的 init 部分（含 var/val 声明）
+    fn parse_cfor_init(&mut self) -> Box<Expr> {
+        let start = self.current().span;
+        // 解析一条语句（可能是 var/val 声明或表达式）
+        let stmt = self.parse_statement();
+        Box::new(Expr::Block(vec![stmt], start))
     }
 
     /// while (condition) body

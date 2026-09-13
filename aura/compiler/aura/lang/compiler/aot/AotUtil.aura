@@ -261,3 +261,115 @@ fun aotLastSegment(name: String): String {
     }
     return aotSlice(name, start, name.length - start)
 }
+
+/// 子串包含判定（`String.contains` 的包内别名，统一 `aot*` 命名）。
+fun aotContains(text: String, sub: String): Boolean {
+    if (sub == "") {
+        return true
+    }
+    return text.contains(sub)
+}
+
+/// 把 `text` 中所有 `from`（单字符）替换为 `to`（可多字符）。
+///
+/// 供 `@native(asm = "…")` 的内联汇编字符串转义使用（`"` → `\"`）。
+/// 不走 `String.replace`：Aura 侧字符串替换的类方法调用链在 AOT 下不稳定。
+fun aotReplaceAll(text: String, from: String, to: String): String {
+    if (from == "") {
+        return text
+    }
+    var out: String = ""
+    var i: Int = 0
+    val n: Int = text.length
+    while (i < n) {
+        val c: String = aotSlice(text, i, 1)
+        if (c == from) {
+            out = out + to
+        } else {
+            out = out + c
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// ASCII 大写 → 小写（其余字符原样保留）。
+fun aotToLower(s: String): String {
+    val upper: String = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    val lower: String = "abcdefghijklmnopqrstuvwxyz"
+    var out: String = ""
+    var i: Int = 0
+    val n: Int = s.length
+    while (i < n) {
+        val c: String = aotSlice(s, i, 1)
+        val idx: Int = aotIndexOfSub(upper, c)
+        if (idx >= 0) {
+            out = out + aotSlice(lower, idx, 1)
+        } else {
+            out = out + c
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/// `@native(...)` 注解文本 → syscall 号。
+///
+/// 接受十进制字面量（`"0"`）或常量名（`SYS_READ`）；未知名返回 `-1`
+/// （C 分发入口 `aura_syscall_dispatch` 对未知号同样返回 `-1`）。
+/// 常量表与 Rust 侧 `parser.rs::lookup_syscall_const` 保持一致。
+fun aotSyscallNumber(name: String): Int {
+    if (name == "") {
+        return -1
+    }
+    // 十进制字面量（`@native(0)`）
+    if (aotIsDecimal(name)) {
+        return aotToInt(name)
+    }
+    return aotSyscallConst(name)
+}
+
+/// 是否为十进制字面量（可选负号 + 纯数字）。
+fun aotIsDecimal(s: String): Boolean {
+    if (s == "") {
+        return false
+    }
+    val digits: String = "0123456789"
+    var i: Int = 0
+    if (aotSlice(s, 0, 1) == "-") {
+        i = 1
+    }
+    if (i >= s.length) {
+        return false
+    }
+    while (i < s.length) {
+        if (aotIndexOfSub(digits, aotSlice(s, i, 1)) < 0) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+/// syscall 常量名 → 号（与 `aura_syscalls.c` 的 `#define` 同源）。
+fun aotSyscallConst(name: String): Int {
+    if (name == "SYS_READ") { return 0 }
+    if (name == "SYS_WRITE") { return 1 }
+    if (name == "SYS_OPEN") { return 2 }
+    if (name == "SYS_CLOSE") { return 3 }
+    if (name == "SYS_FSTAT") { return 5 }
+    if (name == "SYS_LSEEK") { return 6 }
+    if (name == "SYS_MMAP") { return 9 }
+    if (name == "SYS_MUNMAP") { return 10 }
+    if (name == "SYS_ACCESS") { return 21 }
+    if (name == "SYS_PIPE") { return 32 }
+    if (name == "SYS_UNLINK") { return 39 }
+    if (name == "SYS_EXECVE") { return 59 }
+    if (name == "SYS_EXIT_GROUP") { return 60 }
+    if (name == "SYS_WAIT4") { return 61 }
+    if (name == "SYS_READV") { return 62 }
+    if (name == "SYS_WRITEV") { return 63 }
+    if (name == "SYS_CLOCK_GETTIME") { return 228 }
+    if (name == "SYS_GETRANDOM") { return 272 }
+    return -1
+}

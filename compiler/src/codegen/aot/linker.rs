@@ -181,9 +181,9 @@ pub fn link_to_executable(
     options: &AotOptions,
 ) -> Result<(), AotError> {
     // Phase 4: 如果启用 std C FFI，先编译 C FFI 源文件
-    let mut cffi_object_path = None;
+    let mut cffi_object_paths = Vec::new();
     if options.link_std_cffi {
-        cffi_object_path = Some(compile_std_cffi(options)?);
+        cffi_object_paths = compile_std_cffi(options)?;
     }
 
     #[cfg(target_os = "windows")]
@@ -194,7 +194,7 @@ pub fn link_to_executable(
             if let Some(clang_path) = find_tool("clang", options) {
                 let mut cmd = Command::new(clang_path);
                 cmd.arg(input_path);
-                if let Some(ref cffi_obj) = cffi_object_path {
+                for cffi_obj in &cffi_object_paths {
                     cmd.arg(cffi_obj);
                 }
                 cmd.arg("-o").arg(exe_path).arg(options.opt_level.as_llvm_flag());
@@ -213,7 +213,7 @@ pub fn link_to_executable(
             })?;
             let mut cmd = Command::new(tool_path);
             cmd.arg(input_path);
-            if let Some(ref cffi_obj) = cffi_object_path {
+            for cffi_obj in &cffi_object_paths {
                 cmd.arg(cffi_obj);
             }
             cmd.arg(format!("/out:{}", exe_path.display()))
@@ -227,7 +227,7 @@ pub fn link_to_executable(
     // 非 Windows 目标或非 Windows 主机：用 clang
     let mut cmd = build_command("clang", options)?;
     cmd.arg(input_path);
-    if let Some(ref cffi_obj) = cffi_object_path {
+    for cffi_obj in &cffi_object_paths {
         cmd.arg(cffi_obj);
     }
     cmd.arg("-o").arg(exe_path).arg(options.opt_level.as_llvm_flag());
@@ -243,33 +243,47 @@ pub fn link_to_executable(
 ///
 /// 编译 `compiler/src/std/cffi/aura_std_cffi.c` 为 `.o`/`.obj` 文件，
 /// 供 AOT 可执行文件链接使用。
-fn compile_std_cffi(options: &AotOptions) -> Result<PathBuf, AotError> {
+fn compile_std_cffi(options: &AotOptions) -> Result<Vec<PathBuf>, AotError> {
     // C FFI 源文件路径
     let cffi_src = concat!(env!("CARGO_MANIFEST_DIR"), "/src/std/cffi/aura_std_cffi.c");
+    let syscalls_src = concat!(env!("CARGO_MANIFEST_DIR"), "/src/std/cffi/aura_syscalls.c");
     let cffi_header = concat!(env!("CARGO_MANIFEST_DIR"), "/src/std/cffi/aura_std_cffi.h");
 
     // 输出文件路径（临时文件）
     let ext = if cfg!(target_os = "windows") { "obj" } else { "o" };
     let tmp_dir = std::env::temp_dir();
     let cffi_obj = tmp_dir.join(format!("aura_std_cffi.{}", ext));
+    let syscalls_obj = tmp_dir.join(format!("aura_syscalls.{}", ext));
 
     // 找 clang
     let clang_path = find_tool("clang", options).ok_or_else(|| {
         AotError::ToolError("clang not found, cannot compile std C FFI".to_string())
     })?;
 
-    // 编译命令
-    let mut cmd = Command::new(clang_path);
+    // 编译 aura_std_cffi.c
+    let mut cmd = Command::new(&clang_path);
     cmd.arg("-c")
         .arg(cffi_src)
         .arg("-o")
         .arg(&cffi_obj)
         .arg("-I")
         .arg(Path::new(cffi_header).parent().unwrap());
-
     run_and_report(&mut cmd, "clang")?;
 
-    Ok(cffi_obj)
+    // 编译 aura_syscalls.c（包含 setjmp/longjmp 异常桥等）
+    let mut cmd = Command::new(&clang_path);
+    cmd.arg("-c")
+        .arg(syscalls_src)
+        .arg("-o")
+        .arg(&syscalls_obj)
+        .arg("-I")
+        .arg(Path::new(cffi_header).parent().unwrap());
+    run_and_report(&mut cmd, "clang")?;
+
+    Ok(vec![
+        cffi_obj,
+        syscalls_obj,
+    ])
 }
 
 /// 执行命令并报告结果
@@ -544,12 +558,12 @@ pub fn link_to_shared_library(
     options: &AotOptions,
 ) -> Result<(), AotError> {
     // Phase 4: 如果启用 std C FFI，先编译 C FFI 源文件（与可执行文件相同）
-    let cffi_object_path =
-        if options.link_std_cffi { Some(compile_std_cffi(options)?) } else { None };
+    let cffi_object_paths =
+        if options.link_std_cffi { compile_std_cffi(options)? } else { Vec::new() };
 
     let mut cmd = build_command("clang", options)?;
     cmd.arg(input_path);
-    if let Some(ref cffi_obj) = cffi_object_path {
+    for cffi_obj in &cffi_object_paths {
         cmd.arg(cffi_obj);
     }
     if options.debug_info {
@@ -584,14 +598,14 @@ pub fn link_to_rust_host(
     host_path: &Path,
     options: &AotOptions,
 ) -> Result<(), AotError> {
-    let mut cffi_object_path = None;
+    let mut cffi_object_paths = Vec::new();
     if options.link_std_cffi {
-        cffi_object_path = Some(compile_std_cffi(options)?);
+        cffi_object_paths = compile_std_cffi(options)?;
     }
 
     let mut cmd = build_command("clang", options)?;
     cmd.arg(input_path);
-    if let Some(ref cffi_obj) = cffi_object_path {
+    for cffi_obj in &cffi_object_paths {
         cmd.arg(cffi_obj);
     }
     cmd.arg("-o").arg(host_path).arg(options.opt_level.as_llvm_flag());

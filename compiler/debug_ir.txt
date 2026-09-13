@@ -1,0 +1,7 @@
+declare i64 @aura_cpu_rdtsc()
+declare void @aura_cpu_mem_fence()
+declare i64 @aura_cpu_atomic_add(i64 %arg.0, i64 %arg.1)
+define i8* @Runtime(i8* %arg.msg) {
+define i64 @rdtsc() {
+define i32 @main(i32 %argc, i8** %argv) {
+    %var.0 = call i64 @rdtsc()

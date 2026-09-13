@@ -9,6 +9,7 @@
 
 pub mod checker;
 pub mod info;
+pub mod std_sigs;
 pub mod symbol;
 pub mod ty;
 

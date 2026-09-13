@@ -403,6 +403,74 @@ double aura_lang_std_Math_max(double a, double b);
 int64_t aura_lang_std_Math_ceil(double x);
 int64_t aura_lang_std_Math_floor(double x);
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase D: Syscall 分发层（@native(N) 注解底层）
+// 由 aura_syscalls.c 实现，供 AOT 发射器通过 declare/call 引用
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 通用 syscall 分发入口（按 syscall 号分发，最多 6 参数） */
+int64_t aura_syscall_dispatch(int64_t nr, int64_t a1, int64_t a2,
+                              int64_t a3, int64_t a4, int64_t a5, int64_t a6);
+
+/** Syscalls.read(fd, buf, count) */
+int64_t aura_syscall_read(int64_t fd, int64_t buf, int64_t count);
+/** Syscalls.write(fd, buf, count) */
+int64_t aura_syscall_write(int64_t fd, int64_t buf, int64_t count);
+/** Syscalls.open(path, flags) */
+int64_t aura_syscall_open(int64_t path, int64_t flags);
+/** Syscalls.close(fd) */
+int64_t aura_syscall_close(int64_t fd);
+/** Syscalls.fstat(fd, buf) */
+int64_t aura_syscall_fstat(int64_t fd, int64_t buf);
+/** Syscalls.lseek(fd, off, whence) */
+int64_t aura_syscall_lseek(int64_t fd, int64_t off, int64_t whence);
+/** Syscalls.mmap(addr, len, prot, flags, fd, off) */
+int64_t aura_syscall_mmap(int64_t addr, int64_t len, int64_t prot,
+                          int64_t flags, int64_t fd, int64_t off);
+/** Syscalls.munmap(addr, len) */
+int64_t aura_syscall_munmap(int64_t addr, int64_t len);
+/** Syscalls.access(path, mode) */
+int64_t aura_syscall_access(int64_t path, int64_t mode);
+/** Syscalls.unlink(path) */
+int64_t aura_syscall_unlink(int64_t path);
+/** Syscalls.execve(path, args, env) */
+int64_t aura_syscall_execve(int64_t path, int64_t args, int64_t env);
+/** Syscalls.exitGroup(code) */
+void aura_syscall_exit_group(int64_t code);
+/** Syscalls.wait4(pid, status, options, rusage) */
+int64_t aura_syscall_wait4(int64_t pid, int64_t status,
+                           int64_t options, int64_t rusage);
+/** Syscalls.clockGettime(clock, ts) */
+int64_t aura_syscall_clock_gettime(int64_t clock, int64_t ts);
+/** Syscalls.getrandom(buf, len, flags) */
+int64_t aura_syscall_getrandom(int64_t buf, int64_t len, int64_t flags);
+/** Syscalls.readv(fd, iov, iovcnt) */
+int64_t aura_syscall_readv(int64_t fd, int64_t iov, int64_t iovcnt);
+/** Syscalls.writev(fd, iov, iovcnt) */
+int64_t aura_syscall_writev(int64_t fd, int64_t iov, int64_t iovcnt);
+/** Syscalls.pipe(pipes) */
+int64_t aura_syscall_pipe(int64_t pipes);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase D: Memory.aura 内置指令（native fun，编译器内置）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Memory.alloc(n) — 通过 mmap 分配 */
+int64_t aura_memory_alloc(int64_t n);
+/** Memory.free(addr) — 通过 munmap 释放 */
+void aura_memory_free(int64_t addr);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase D: Cpu.aura 内联汇编（@native(asm = "...")）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Cpu.rdtsc() — 读取时间戳计数器 */
+int64_t aura_cpu_rdtsc(void);
+/** Cpu.memFence() — 内存屏障 */
+void aura_cpu_mem_fence(void);
+/** Cpu.atomicAdd(addr, delta) — 原子加法（返回旧值） */
+int64_t aura_cpu_atomic_add(int64_t addr, int64_t delta);
+
 #ifdef __cplusplus
 }
 #endif

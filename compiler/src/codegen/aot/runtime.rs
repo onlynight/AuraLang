@@ -239,6 +239,20 @@ const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
         ret: "i32",
         params: &[],
     },
+    // Phase D: setjmp/longjmp 异常桥（try/catch）
+    RuntimeFn {
+        name: "aura_setjmp",
+        ret: "i32",
+        params: &[("buf", "i8*")],
+    },
+    RuntimeFn {
+        name: "aura_longjmp",
+        ret: "void",
+        params: &[
+            ("buf", "i8*"),
+            ("val", "i32"),
+        ],
+    },
 ];
 
 /// 生成所有 runtime 函数的 LLVM 外部声明
@@ -246,8 +260,9 @@ pub fn generate_runtime_declarations(_type_mapper: &TypeMapper) -> String {
     let mut s = String::new();
     s.push_str("; ---- Aura Runtime Declarations ----\n");
     for fn_decl in RUNTIME_FUNCTIONS {
-        let params_str: Vec<&str> = fn_decl.params.iter().map(|(_, ty)| *ty).collect();
-        let params_str = if params_str.is_empty() { String::new() } else { params_str.join(", ") };
+        let params_str: Vec<String> =
+            fn_decl.params.iter().map(|(name, ty)| format!("{} %arg.{}", ty, name)).collect();
+        let params_str = params_str.join(", ");
         s.push_str(&format!(
             "declare {} @{}({})\n",
             fn_decl.ret, fn_decl.name, params_str

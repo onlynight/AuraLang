@@ -23,7 +23,7 @@ impl<'a> FfiGenerator<'a> {
     }
 
     /// 生成 FFI 函数声明的 LLVM IR 文本
-    pub fn generate_declarations(&self, funcs: &[HirFunction]) -> Result<Vec<String>, AotError> {
+    pub fn generate_declarations(&self, funcs: &[&HirFunction]) -> Result<Vec<String>, AotError> {
         let mut decls = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for func in funcs {
@@ -141,8 +141,9 @@ mod tests {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         };
-        let decls = ffi_gen.generate_declarations(&[func]).unwrap();
+        let decls = ffi_gen.generate_declarations(&[&func]).unwrap();
         assert_eq!(decls.len(), 1);
         assert!(decls[0].contains("DrawCircle"));
         assert!(decls[0].contains("void"));

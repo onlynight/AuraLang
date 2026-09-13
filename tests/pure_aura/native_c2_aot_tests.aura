@@ -1,0 +1,186 @@
+// ═════════════════════════════════════════════════════════════════
+// Phase C.2 端到端流程测试（Aura 侧）：源码 → HIR → LLVM IR → llc → clang → exe → 运行
+//
+// 对应差距分析「C 阶段 · 缺口 1/2/3」与 C.4 自举闭环里 `@native` 这一环：
+// Aura 侧 AOT 后端必须能像 Rust 后端一样，把 `extern object { @native … }`
+// 落成可链接、可运行的机器码（`aura_syscalls.c` 提供 C 分发符号）。
+//
+// 覆盖：
+//   * `native fun`（Memory builtin）：alloc/read/write/free + inttoptr/load/store
+//   * `@native(asm = …)`：rdtsc / mfence（C 封装路径）
+//   * `@native(SYS_*)`：aura_syscall_dispatch（跨平台：不支持时返回 -1，不崩溃）
+//
+// 运行：aura run tests/pure_aura/native_c2_aot_tests.aura
+//   全通过时输出 "RESULT: PASS"
+//   注意：需要本机安装 LLVM（路径见根 Cargo.toml 的
+//        [workspace.metadata.aura].llvm-home，或 AURA_LLVM_HOME）
+// ═════════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import aura.lang.std.FileSystem
+import aura.lang.std.Process
+
+import "../../aura/compiler/aura/lang/compiler/test/TestRunner.aura"
+
+import "../../aura/compiler/aura/lang/compiler/lexer/Span.aura"
+import "../../aura/compiler/aura/lang/compiler/lexer/Token.aura"
+import "../../aura/compiler/aura/lang/compiler/lexer/Lexer.aura"
+import "../../aura/compiler/aura/lang/compiler/ast/Ast.aura"
+import "../../aura/compiler/aura/lang/compiler/errors/CompileError.aura"
+import "../../aura/compiler/aura/lang/compiler/parser/Parser.aura"
+
+import "../../aura/compiler/aura/lang/compiler/hir/Hir.aura"
+import "../../aura/compiler/aura/lang/compiler/hir/Desugar.aura"
+import "../../aura/compiler/aura/lang/compiler/hir/Mono.aura"
+import "../../aura/compiler/aura/lang/compiler/hir/Inline.aura"
+import "../../aura/compiler/aura/lang/compiler/hir/Fold.aura"
+
+import "../../aura/compiler/aura/lang/compiler/aot/TypeMapper.aura"
+import "../../aura/compiler/aura/lang/compiler/aot/AotUtil.aura"
+import "../../aura/compiler/aura/lang/compiler/aot/Runtime.aura"
+import "../../aura/compiler/aura/lang/compiler/aot/StdSigs.aura"
+import "../../aura/compiler/aura/lang/compiler/aot/Ffi.aura"
+import "../../aura/compiler/aura/lang/compiler/aot/Target.aura"
+import "../../aura/compiler/aura/lang/compiler/aot/Optimize.aura"
+import "../../aura/compiler/aura/lang/compiler/aot/EmitBuffer.aura"
+import "../../aura/compiler/aura/lang/compiler/aot/Emit.aura"
+import "../../aura/compiler/aura/lang/compiler/aot/Linker.aura"
+import "../../aura/compiler/aura/lang/compiler/aot/CBackend.aura"
+import "../../aura/compiler/aura/lang/compiler/aot/Dwarf.aura"
+import "../../aura/compiler/aura/lang/compiler/aot/Aot.aura"
+
+/// 源码 → HIR（Aura 侧 AOT 前半段）。
+fun nc2aSourceToHir(source: String): Hir {
+    val p = Parser(source)
+    p.parseProgram()
+    val hl = HirLowerer()
+    hl.lower(p.ast)
+    return hl.hir
+}
+
+/// 源码 → 原生 exe → 运行，返回退出码（编译失败返回 -999）。
+fun nc2aBuildRun(name: String, source: String): Int {
+    val r: AotExeResult = aotBuildExeFromHir(nc2aSourceToHir(source), name,
+        "build/pure_aura", llvmHomeDefault())
+    if (!r.ok) {
+        println("  [build failed] " + name +
+            " llc=" + toStr(r.llcExit) +
+            " cffi=" + toStr(r.cffiExit) +
+            " syscalls=" + toStr(r.syscallsExit) +
+            " clang=" + toStr(r.clangExit))
+        if (r.irError != "") {
+            println("  IR error: " + r.irError)
+        }
+        return -999
+    }
+    return runBuiltExe(r.exePath)
+}
+
+// ═════════════════════════════════════════════════════════════════
+// 测试 1：Memory builtin 端到端（缺口 2）
+// ═════════════════════════════════════════════════════════════════
+
+fun nc2aTestMemory(): Int {
+    val t = TestRunner()
+    t.begin("c2a.memory")
+
+    val src = "extern object Memory {\n" +
+        "    native fun MemoryAlloc(n: Long): Long\n" +
+        "    native fun MemoryFree(addr: Long): Void\n" +
+        "    native fun MemoryRead(addr: Long): Byte\n" +
+        "    native fun MemoryWrite(addr: Long, v: Byte): Void\n" +
+        "}\n" +
+        "fun main(): Int {\n" +
+        "    val a: Long = MemoryAlloc(64)\n" +
+        "    if (a <= 0) { return 1 }\n" +
+        "    MemoryWrite(a, 42)\n" +
+        "    val v: Byte = MemoryRead(a)\n" +
+        "    if (v != 42) { return 2 }\n" +
+        "    MemoryWrite(a + 1, 100)\n" +
+        "    val w: Byte = MemoryRead(a + 1)\n" +
+        "    if (w != 100) { return 3 }\n" +
+        "    MemoryFree(a)\n" +
+        "    return 0\n" +
+        "}\n"
+
+    t.assertEq(nc2aBuildRun("nc2a_mem", src), 0, "Memory builtin AOT 端到端（alloc/read/write/free）")
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════════
+// 测试 2：@native(asm) 端到端（缺口 1）
+// ═════════════════════════════════════════════════════════════════
+
+fun nc2aTestAsm(): Int {
+    val t = TestRunner()
+    t.begin("c2a.asm")
+
+    // 注意：Windows 上 `aura_syscalls.c` 的 aura_cpu_rdtsc 走 `#else` 分支返回 0，
+    // 故只断言「单调不减」（与 Rust 侧 native_c2_asm 用例一致），不校验绝对值。
+    // `cpuid` / `mov eax, 42` 走通用 LLVM inline asm 路径（Intel 语法），
+    // 只验证「能汇编、能链接、能运行」，不校验其返回值（输出约束为通用 `=r`）。
+    val src = "extern object Cpu {\n" +
+        "    @native(asm = \"rdtsc\")  fun rdtsc(): Long\n" +
+        "    @native(asm = \"mfence\") fun memFence(): Void\n" +
+        "    @native(asm = \"cpuid\")  fun cpuid(): Long\n" +
+        "    @native(asm = \"mov eax, 42\") fun movEax(): Long\n" +
+        "}\n" +
+        "fun main(): Int {\n" +
+        "    val a: Long = rdtsc()\n" +
+        "    memFence()\n" +
+        "    cpuid()\n" +
+        "    movEax()\n" +
+        "    val b: Long = rdtsc()\n" +
+        "    if (b < a) { return 1 }\n" +
+        "    return 0\n" +
+        "}\n"
+
+    t.assertEq(nc2aBuildRun("nc2a_asm", src), 0, "asm（rdtsc/mfence/cpuid/mov）AOT 端到端")
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════════
+// 测试 3：@native(SYS_*) 端到端（syscall 分发链接）
+// ═════════════════════════════════════════════════════════════════
+
+fun nc2aTestSyscall(): Int {
+    val t = TestRunner()
+    t.begin("c2a.syscall")
+
+    // 平台无关：Linux 走真实 syscall；Windows 分发返回 -1。
+    // 本用例只验证「符号可链接、调用不崩溃」，不校验返回值（Linux/Windows 语义不同）。
+    val src = "extern object Syscalls {\n" +
+        "    @native(SYS_GETRANDOM) fun getrandom(buf: Long, len: Long, flags: Int): Long\n" +
+        "    @native(SYS_CLOSE)     fun close(fd: Int): Int\n" +
+        "}\n" +
+        "fun main(): Int {\n" +
+        "    val r: Long = getrandom(0, 0, 0)\n" +
+        "    close(999999)\n" +
+        "    if (r == 12345) { return 1 }\n" +
+        "    return 0\n" +
+        "}\n"
+
+    t.assertEq(nc2aBuildRun("nc2a_sys", src), 0, "syscall 分发 AOT 端到端（链接 + 调用）")
+    return t.report()
+}
+
+// ═════════════════════════════════════════════════════════════════
+// 入口
+// ═════════════════════════════════════════════════════════════════
+
+fun main(): Int {
+    println("=== Phase C.2 (Aura 侧) FFI AOT 端到端测试 ===")
+
+    var failures: Int = 0
+    failures = failures + nc2aTestMemory()
+    failures = failures + nc2aTestAsm()
+    failures = failures + nc2aTestSyscall()
+
+    println("")
+    if (failures == 0) {
+        println("RESULT: PASS")
+    } else {
+        println("RESULT: FAIL (" + toStr(failures) + " failed)")
+    }
+    return failures
+}

@@ -79,6 +79,8 @@ fun preludeTable(): String {
         "aura_to_int_any|i64|i64\n" +
         "aura_to_str_any|i8*|i64\n" +
         "aura_strlen|i64|i8*\n" +
+        "aura_str_to_int|i64|i8*\n" +
+        "aura_str_to_float|double|i8*\n" +
         "aura_lang_std_String_length|i64|i8*\n" +
         "aura_lang_std_String_equals|i32|i8*,i8*\n" +
         "aura_lang_std_String_contains|i32|i8*,i8*\n" +
@@ -115,6 +117,16 @@ fun runtimeDeclarations(): String {
     out.sbAdd("; ---- Aura Runtime Declarations ----\n")
     // C 入口用到：把宿主 argc/argv 注入运行时（`Process.arg/argCount` 依赖它）
     out.sbAdd("declare void @aura_args_set(i32, i8**)\n")
+    // Phase C.2 / D：@native 包装器依赖的 C 运行库符号（`aura_syscalls.c`）。
+    // 包装器定义（Emit.aura::emitNativeWrapper）只在这些符号被真实调用时引用它们；
+    // 链接阶段始终一并编译 aura_syscalls.c（Aot.aura::aotBuildExeFromHir）。
+    out.sbAdd("; ---- @native Dispatch (Phase D) ----\n")
+    out.sbAdd("declare i64 @aura_syscall_dispatch(i64, i64, i64, i64, i64, i64, i64)\n")
+    out.sbAdd("declare i64 @aura_memory_alloc(i64)\n")
+    out.sbAdd("declare void @aura_memory_free(i64)\n")
+    out.sbAdd("declare i64 @aura_cpu_rdtsc()\n")
+    out.sbAdd("declare void @aura_cpu_mem_fence()\n")
+    out.sbAdd("declare i64 @aura_cpu_atomic_add(i64, i64)\n")
     appendDeclarations(out, runtimeTable())
     val seenR: String = runtimeFunctionNames()
     appendDeclarationsFiltered(out, preludeTable(), seenR)

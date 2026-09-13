@@ -1077,6 +1077,9 @@ pub struct HirFunction {
     pub ffi_abi: FfiAbi,
     /// FFI 库名（对应 `extern "<abi>" "<lib>"`）
     pub ffi_lib: Option<String>,
+    /// Phase D: @native 注解（仅 `is_native == true` 时有意义）
+    /// Syscall(n) = @native(N)、Asm(code) = @native(asm="...")、Builtin = native fun
+    pub native_attr: Option<crate::ast::NativeAttr>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1279,6 +1282,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                         /* ffi fields set below */
                         ffi_abi: abi,
                         ffi_lib: e.library.clone(),
+                        native_attr: None,
                     });
                 }
                 // P8.1: 处理 extern 块中的常量
@@ -1335,6 +1339,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                         type_params: vec![],
                         ffi_abi: FfiAbi::Aura,
                         ffi_lib: e.lib_path.clone(),
+                        native_attr: f.native_attr.clone(),
                     });
                 }
             }
@@ -1428,6 +1433,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                             type_params: vec![],
                             ffi_abi: FfiAbi::None,
                             ffi_lib: None,
+                            native_attr: None,
                         });
                     }
                 }
@@ -1499,6 +1505,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                         type_params: vec![],
                         ffi_abi: FfiAbi::None,
                         ffi_lib: None,
+                        native_attr: None,
                     });
                 }
                 // 仅 init 块（无 0 参显式构造函数）→ 合成 `Class.__ctor0`
@@ -1524,6 +1531,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                         type_params: vec![],
                         ffi_abi: FfiAbi::None,
                         ffi_lib: None,
+                        native_attr: None,
                     });
                 }
                 // 属性访问器合成
@@ -1625,6 +1633,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                         type_params: vec![],
                         ffi_abi: FfiAbi::None,
                         ffi_lib: None,
+                        native_attr: None,
                     });
                 }
                 // 单例字段初始化函数：`<Object>.__singletonInit(self)`
@@ -1662,6 +1671,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                         type_params: vec![],
                         ffi_abi: FfiAbi::None,
                         ffi_lib: None,
+                        native_attr: None,
                     });
                 }
                 // 属性访问器合成
@@ -1720,6 +1730,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
 
@@ -1741,6 +1752,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
 
@@ -1770,6 +1782,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
 
@@ -1793,6 +1806,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
 
@@ -2031,6 +2045,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                 type_params: vec![],
                 ffi_abi: FfiAbi::None,
                 ffi_lib: None,
+                native_attr: None,
             });
         }
     }
@@ -2053,6 +2068,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
 
@@ -2077,6 +2093,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                 type_params: vec![],
                 ffi_abi: FfiAbi::None,
                 ffi_lib: None,
+                native_attr: None,
             });
         }
     }
@@ -2107,6 +2124,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                 type_params: vec![],
                 ffi_abi: FfiAbi::None,
                 ffi_lib: None,
+                native_attr: None,
             });
         }
     }
@@ -2129,6 +2147,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
     if !natives.iter().any(|n| n.name == "free") {
@@ -2148,6 +2167,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
 
@@ -2170,6 +2190,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
     // aura.lang.std.Actor.send(actor, msg) — 向 Actor 发送消息
@@ -2198,6 +2219,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
     // aura.lang.std.Coroutine.ask(actor, msg) — 向 Actor 请求响应
@@ -2226,6 +2248,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
     // aura.lang.std.Channel.newChannel(bound) — 创建 Channel
@@ -2246,6 +2269,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
     // aura.lang.std.Channel.channelSend(ch, val) — 发送值到 Channel
@@ -2274,6 +2298,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
     // aura.lang.std.Channel.channelRecv(ch) — 从 Channel 接收值（阻塞）
@@ -2294,6 +2319,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
     // aura.lang.std.Channel.channelTryRecv(ch) — 从 Channel 接收值（非阻塞）
@@ -2314,6 +2340,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
     // aura.lang.std.Channel.select(ch1, ch2) — select 多路复用（最多 2 通道）
@@ -2342,6 +2369,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
     // aura.lang.std.Coroutine.spawnActor(name) — 创建 Actor 实例（返回 actor ID）
@@ -2362,6 +2390,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
     // aura.lang.std.Actor.spawnActor(name) — 与 Coroutine.spawnActor 同一实现。
@@ -2387,6 +2416,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
     // aura.lang.std.Actor.supervise(parent, child) — 建立监督关系
@@ -2415,6 +2445,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
     // aura.lang.std.Actor.actorAlive(id) — 检查 Actor 是否存活
@@ -2435,6 +2466,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
 
@@ -2471,6 +2503,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                 type_params: vec![],
                 ffi_abi: FfiAbi::None,
                 ffi_lib: None,
+                native_attr: None,
             });
         }
     }
@@ -2589,10 +2622,11 @@ fn desugar_fn_with_self(f: &FnDecl, is_method: bool, name_override: Option<Strin
         params,
         ret: HirType::from_ast_opt(&f.return_type),
         body,
-        is_native: false,
+        is_native: f.native_attr.is_some(),
         type_params: f.type_params.iter().map(|t| t.name.clone()).collect(),
         ffi_abi: FfiAbi::None,
         ffi_lib: None,
+        native_attr: f.native_attr.clone(),
     }
 }
 
@@ -2687,6 +2721,7 @@ fn synthesize_accessors(class: &str, fields: &[StructField]) -> Vec<HirFunction>
                 type_params: vec![],
                 ffi_abi: FfiAbi::None,
                 ffi_lib: None,
+                native_attr: None,
             });
         }
         // setter
@@ -2728,6 +2763,7 @@ fn synthesize_accessors(class: &str, fields: &[StructField]) -> Vec<HirFunction>
                 type_params: vec![],
                 ffi_abi: FfiAbi::None,
                 ffi_lib: None,
+                native_attr: None,
             });
         }
     }
@@ -2889,6 +2925,13 @@ fn desugar_expr_stmt(e: &Expr) -> HirStmt {
             body,
             ..
         } => desugar_for(pattern, iterable, body),
+        Expr::CFor {
+            init,
+            condition,
+            increment,
+            body,
+            ..
+        } => desugar_cfor(init, condition, increment, body),
         Expr::Assign {
             target,
             value,
@@ -3249,6 +3292,58 @@ fn desugar_for(pattern: &Expr, iterable: &Expr, body: &Expr) -> HirStmt {
     })
 }
 
+/// C 风格 for 循环：for (init; condition; increment) body
+/// 降糖为：init; while (condition) { body; increment; }
+fn desugar_cfor(
+    init: &Option<Box<Expr>>,
+    condition: &Box<Expr>,
+    increment: &Option<Box<Expr>>,
+    body: &Expr,
+) -> HirStmt {
+    let mut stmts: Vec<HirStmt> = Vec::new();
+
+    // init：可能是 var/val 声明（包装在 Expr::Block 中）或普通表达式
+    if let Some(e) = init {
+        match e.as_ref() {
+            Expr::Block(stmts_inner, _) => {
+                // C 风格 for 的 init 含声明：var j: Int = ...
+                // 直接展开为语句，而非包装为表达式
+                for s in stmts_inner {
+                    stmts.push(desugar_stmt(s));
+                }
+            }
+            _ => {
+                // 普通表达式 init
+                stmts.push(HirStmt::Expr(desugar_expr(e)));
+            }
+        }
+    }
+
+    // while (condition) { body; increment; }
+    //
+    // 步进通常写成赋值（`i = i + 1`）。赋值必须经 `desugar_stmt` 降级为
+    // `HirStmt::Assign`：`desugar_expr(Expr::Assign)` **只求值不回写**，
+    // 于是循环变量永不变 → 死循环（实测 `for (var i: Int = 0; i < 5; i = i + 1)`
+    // 编译出的 exe 卡死、CPU 0%、内存不增长）。
+    let mut while_body = desugar_block(body).stmts;
+    if let Some(inc) = increment {
+        if matches!(inc.as_ref(), Expr::Assign { .. }) {
+            while_body.push(desugar_expr_stmt(inc));
+        } else {
+            while_body.push(HirStmt::Expr(desugar_expr(inc)));
+        }
+    }
+
+    stmts.push(HirStmt::While {
+        cond: desugar_expr(condition),
+        body: HirBlock {
+            stmts: while_body,
+        },
+    });
+
+    HirStmt::Block(HirBlock { stmts })
+}
+
 /// 辅助函数：在 thread-local 中查找导入解析，返回克隆的字符串（避免生命周期问题）
 fn lookup_import_short(n: &str) -> Option<String> {
     IMPORT_RESOLUTION.with(|r| {
@@ -3279,6 +3374,19 @@ fn extract_dotted_name(expr: &Expr) -> Option<String> {
             Some(format!("{}.{}", obj_name, name))
         }
         _ => None,
+    }
+}
+
+/// 检查表达式是否是纯模块点分链（全部由模块标识符组成）
+fn is_module_chain(e: &Expr) -> bool {
+    match e {
+        Expr::Ident(name, _) => is_std_module(name) || lookup_import_module_alias(name).is_some(),
+        Expr::MemberAccess {
+            object,
+            name,
+            ..
+        } => is_module_chain(object) && is_std_module(&format!("aura.{}", name)),
+        _ => false,
     }
 }
 
@@ -3907,14 +4015,17 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     }
                     // 深层嵌套 std 调用兜底：
                     // aura.lang.std.Coroutine.spawn(42) → callee "aura.lang.std.Coroutine.spawn"
-                    // 前面所有分支都没命中时，若 object 是纯点分链（MemberAccess），直接拼接完整名
-                    // 注意：简单标识符（如 c）不应走此路径，应交给 resolve_method_owner 处理
+                    // 前面所有分支都没命中时，若 object 是纯模块点分链（全部由 Ident 组成），直接拼接完整名
+                    // 注意：简单标识符（如 c）或字段访问（如 c3.x）不应走此路径，应交给 resolve_method_owner 处理
                     if let Expr::MemberAccess { .. } = object.as_ref() {
-                        if let Some(obj_path) = extract_dotted_name(object) {
-                            return HirExpr::Call {
-                                callee: format!("{}.{}", obj_path, name),
-                                args: args.iter().map(desugar_expr).collect(),
-                            };
+                        // 仅当整条链都是模块/类标识符时才走此路径
+                        if is_module_chain(object) {
+                            if let Some(obj_path) = extract_dotted_name(object) {
+                                return HirExpr::Call {
+                                    callee: format!("{}.{}", obj_path, name),
+                                    args: args.iter().map(desugar_expr).collect(),
+                                };
+                            }
                         }
                     }
                     // 类方法分派：接收者静态类型（含继承链）→ Class.method(self, args)；
@@ -4623,6 +4734,7 @@ pub fn synthesize_main_if_missing(hir: &mut HirProgram) -> bool {
                     type_params: vec![],
                     ffi_abi: FfiAbi::None,
                     ffi_lib: None,
+                    native_attr: None,
                 };
 
                 // 4. 插入到 functions 开头（确保 entry=0 指向 main）

@@ -634,6 +634,16 @@ double aura_sqrt_wrapper(double x) { return sqrt(x); }
 double aura_pow_wrapper(double b, double e) { return pow(b, e); }
 int64_t toInt(double x) { return (int64_t)x; }
 double toFloat(int64_t x) { return (double)x; }
+/* 字符串 → 数值：AOT 侧 `toInt("42")` / `toFloat("3.14")` 的调用点符号。
+   非法输入返回 0（与 VM 的宽松语义一致，不抛异常）。 */
+int64_t aura_str_to_int(const char *s) {
+    if (!s) return 0;
+    return (int64_t)strtoll(s, NULL, 10);
+}
+double aura_str_to_float(const char *s) {
+    if (!s) return 0.0;
+    return strtod(s, NULL);
+}
 /* Plan A 助手的前向声明：必须先于 toString 声明，否则 C 会按「隐式声明返回 int」
    处理，把 64 位指针截断成 32 位，导致返回的字符串指针被破坏。 */
 int64_t aura_to_int_any(uint64_t v);

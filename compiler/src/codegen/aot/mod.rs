@@ -53,7 +53,7 @@ pub struct AotOptions {
     pub opt_level: OptimizationLevel,
     /// 是否生成调试信息（默认 false）
     pub debug_info: bool,
-    /// 是否将 String 表示为 `{ i8*, i64 }` 结构（默认 true，便于长度感知的字符串操作）
+    /// 是否将 String 表示为 `{ i8*, i64 }` 结构（默认 false，统一为 i8* C ABI 指针）
     pub string_as_struct: bool,
     /// 是否注入 runtime 库声明（默认 true）
     pub link_runtime: bool,
@@ -74,7 +74,7 @@ impl Default for AotOptions {
             target: TargetTriple::default(),
             opt_level: OptimizationLevel::Aggressive,
             debug_info: false,
-            string_as_struct: true,
+            string_as_struct: false,
             link_runtime: true,
             link_std_cffi: true,
             llvm_home: None,

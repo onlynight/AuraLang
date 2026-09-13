@@ -18,6 +18,9 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
+#include <setjmp.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -168,7 +171,7 @@ void aura_syscall_exit_group(int64_t code) {
     /* 不会返回 */
 #else
     (void)code;
-    __builtin_exit((int)code);
+    exit((int)code);
 #endif
 }
 
@@ -238,13 +241,26 @@ int64_t aura_syscall_dispatch(int64_t nr, int64_t a1, int64_t a2,
 
 /** Memory.alloc(n) — 通过 mmap 分配 */
 int64_t aura_memory_alloc(int64_t n) {
+#if defined(AURA_PLATFORM_LINUX) || defined(AURA_PLATFORM_MACOS)
     return aura_syscall_mmap(0, n, 3 /* RW */, 0x22 /* PRIVATE|ANON */, -1, 0);
+#else
+    /* Windows 等无 mmap 的平台：退回 CRT malloc（与 aura_memory_free 对偶）。
+       旧实现直接走 aura_syscall 桩，恒返回 -1，导致 Aura 侧 `native fun
+       MemoryAlloc` 在 Windows 上完全不可用（AOT 产物一写入即崩溃）。 */
+    return (int64_t)(uintptr_t)malloc((size_t)n);
+#endif
 }
 
 /** Memory.free(addr) — 通过 munmap 释放 */
 void aura_memory_free(int64_t addr) {
+#if defined(AURA_PLATFORM_LINUX) || defined(AURA_PLATFORM_MACOS)
     /* munmap 需要长度参数，此处无法获知，使用固定页大小 4096 */
     aura_syscall_munmap(addr, 4096);
+#else
+    if (addr != 0) {
+        free((void *)(uintptr_t)addr);
+    }
+#endif
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -286,6 +302,39 @@ int64_t aura_cpu_atomic_add(int64_t addr, int64_t delta) {
 }
 
 #endif
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * Phase D: setjmp/longjmp 异常桥（try/catch）
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+#include <setjmp.h>
+
+/** 全局异常值（longjmp 只能传递一个 int，异常对象通过此全局变量传递） */
+void *aura_exception_value = NULL;
+
+/** jmp_buf 栈（支持嵌套 try/catch） */
+#define AURA_MAX_JMP_DEPTH 64
+static jmp_buf aura_jmp_stack[AURA_MAX_JMP_DEPTH];
+static int aura_jmp_depth = 0;
+
+/** aura_setjmp(buf) — 保存当前执行上下文，返回 0（首次调用）或非零（longjmp 返回） */
+int aura_setjmp(void *buf) {
+    if (aura_jmp_depth < AURA_MAX_JMP_DEPTH) {
+        memcpy(aura_jmp_stack[aura_jmp_depth], buf, sizeof(jmp_buf));
+    }
+    jmp_buf *jbp = (jmp_buf *)buf;
+    return setjmp(*jbp);
+}
+
+/** aura_longjmp(buf, val) — 跳转到最近的 setjmp 上下文 */
+void aura_longjmp(void *buf, int val) {
+    (void)buf; /* 使用栈顶的 jmp_buf */
+    if (aura_jmp_depth > 0) {
+        longjmp(aura_jmp_stack[aura_jmp_depth - 1], val);
+    }
+    /* 无活跃 try 块时，打印异常并退出 */
+    exit(1);
+}
 
 #ifdef __cplusplus
 }

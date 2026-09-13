@@ -1972,6 +1972,18 @@ impl Checker {
                     || Self::expr_calls(iterable, name)
                     || Self::expr_calls(body, name)
             }
+            Expr::CFor {
+                init,
+                condition,
+                increment,
+                body,
+                ..
+            } => {
+                init.as_ref().is_some_and(|e| Self::expr_calls(e, name))
+                    || Self::expr_calls(condition, name)
+                    || increment.as_ref().is_some_and(|e| Self::expr_calls(e, name))
+                    || Self::expr_calls(body, name)
+            }
             Expr::While {
                 condition,
                 body,
@@ -2313,6 +2325,24 @@ impl Checker {
                 body,
                 span,
             } => self.check_for(pattern, iterable, body, *span),
+            Expr::CFor {
+                init,
+                condition,
+                increment,
+                body,
+                span: _,
+            } => {
+                // C-style for: 检查各部分但不深入类型推导
+                if let Some(e) = init {
+                    self.check_expr(e);
+                }
+                self.check_expr(condition);
+                if let Some(e) = increment {
+                    self.check_expr(e);
+                }
+                self.check_expr(body);
+                Ty::Unit
+            }
             Expr::While {
                 condition,
                 body,
@@ -2887,6 +2917,31 @@ impl Checker {
             if let Some(fns) = self.symbols.lookup_function(&mname) {
                 let cloned: Vec<Symbol> = fns.clone();
                 return self.check_call_args(&cloned, args, span);
+            }
+            // Phase D: std 签名表兜底 — 避免 String.split 等退化为 Ty::Any
+            let type_name = _obj_ty.non_null().name();
+            if let Some(sig) =
+                crate::sema::std_sigs::std_signature_table().get(&(type_name, name.clone()))
+            {
+                // 检查实参数量
+                if args.len() > sig.params.len() && sig.params.len() > 0 {
+                    // 允许可变参数（如 listOf 接受任意多个参数）
+                    if args.len() < sig.params.len() {
+                        self.report(
+                            span,
+                            format!(
+                                "expected {} arguments, got {}",
+                                sig.params.len(),
+                                args.len()
+                            ),
+                        );
+                    }
+                }
+                // 检查实参类型
+                for a in args {
+                    self.check_expr(a);
+                }
+                return crate::sema::std_sigs::llvm_type_to_ty(sig.ret).unwrap_or(Ty::Any);
             }
             // 内置方法
             return self.check_builtin_method(&_obj_ty.non_null().clone(), name, args, span);

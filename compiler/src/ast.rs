@@ -224,6 +224,13 @@ pub enum Expr {
         body: Box<Expr>,
         span: Span,
     },
+    CFor {
+        init: Option<Box<Expr>>,
+        condition: Box<Expr>,
+        increment: Option<Box<Expr>>,
+        body: Box<Expr>,
+        span: Span,
+    },
     While {
         condition: Box<Expr>,
         body: Box<Expr>,
@@ -808,6 +815,9 @@ impl Expr {
                 span: s, ..
             }
             | Expr::For {
+                span: s, ..
+            }
+            | Expr::CFor {
                 span: s, ..
             }
             | Expr::While {
