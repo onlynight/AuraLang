@@ -20,22 +20,22 @@ import aura.lang.std.String
 
 /// JitValue 类型标签（对应 Rust `TAG_*` 常量）。
 object JitTags {
-    const INT: Int = 0
-    const FLOAT: Int = 1
-    const BOOL: Int = 2
-    const NULL: Int = 3
-    const STR: Int = 4
-    const PTR: Int = 5
-    const OBJ: Int = 6
-    const FUNC: Int = 7
-    const ARRAY: Int = 8
-    const LIST: Int = 9
-    const MAP: Int = 10
-    const CLOSURE: Int = 11
-    const CSTRING: Int = 12
+    const val INT: Int = 0
+    const val FLOAT: Int = 1
+    const val BOOL: Int = 2
+    const val NULL: Int = 3
+    const val STR: Int = 4
+    const val PTR: Int = 5
+    const val OBJ: Int = 6
+    const val FUNC: Int = 7
+    const val ARRAY: Int = 8
+    const val LIST: Int = 9
+    const val MAP: Int = 10
+    const val CLOSURE: Int = 11
+    const val CSTRING: Int = 12
 
     /// 标签总数。
-    const COUNT: Int = 13
+    const val COUNT: Int = 13
 }
 
 /// 共享调用约定值（tag + payload）。

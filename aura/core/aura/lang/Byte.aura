@@ -15,13 +15,13 @@ internal value class Byte {
 
     companion object {
         /// 8 位字节最小值
-        const MIN_VALUE: Byte = -128
+        const val MIN_VALUE: Byte = -128
 
         /// 8 位字节最大值
-        const MAX_VALUE: Byte = 127
+        const val MAX_VALUE: Byte = 127
 
         /// 位宽（8 位）
-        const BITS: Int = 8
+        const val BITS: Int = 8
 
         /// 从字符串解析为字节
         fun parseInt(text: String): Byte {

@@ -1,48 +1,43 @@
 // aura:///aura/lang/native/process/ProcessOps.aura
 package aura.lang.native.process
-// ─────────────────────────────────────────────────────────────
-// 进程管理 — Phase S2
+// ------------------------------------------------------------------
+// Process management -- Phase S2
 //
-// 提供进程创建、退出、等待等操作。
+// Provides process creation, exit, wait operations.
 //
-// ── 使用方式 ──
+// Usage:
 //   ProcessOps.exit(0)
-//   val pid: Int = ProcessOps.fork()
-// ─────────────────────────────────────────────────────────────
+//   val pid: Int = ProcessOps.wait(0)
+// ------------------------------------------------------------------
 
 import aura.lang.native.Syscalls
 
-/// 进程管理
+/// Process management
 extern object ProcessOps {
 
-    // ── 系统调用声明 ──
-
+    // -- Syscall declarations --
     @native(SYS_EXIT_GROUP) fun exitGroup(code: Int)
-    @native(SYS_WAIT4) fun wait4(pid: Int, status: Long, options: Int, rusage: Long): Int
-    @native(SYS_EXECVE) fun execve(path: CString, args: Long, env: Long): Long
+    @native(SYS_WAIT4)      fun wait4(pid: Int, status: Long, options: Int, rusage: Long): Int
+    @native(SYS_EXECVE)     fun execve(path: Long, args: Long, env: Long): Long
+    @native(SYS_GETPID)     fun getpid(): Int
 
-    // ── 进程操作函数 ──
-
-    /// 退出程序
+    /// Exit program
     fun exit(code: Int) {
         exitGroup(code)
     }
 
-    /// 等待子进程结束
+    /// Wait for child process to finish
     fun wait(pid: Int): Int {
         return wait4(pid, 0, 0, 0)
     }
 
-    /// 执行外部程序（替换当前进程）
-    fun exec(path: String, args: Long, env: Long): Long {
-        val pathAddr: Long = path as Long
-        return execve(pathAddr, args, env)
+    /// Execute external program (replace current process)
+    fun exec(path: Long, args: Long, env: Long): Long {
+        return execve(path, args, env)
     }
 
-    /// 获取当前进程 ID（需要额外系统调用）
-    fun getpid(): Int {
-        // 简化实现：使用 getpid 系统调用（60）
-        // 这里返回一个占位值
-        return 0
+    /// Get current process ID
+    fun getPid(): Int {
+        return getpid()
     }
 }

@@ -21,14 +21,14 @@ object PlanA {
     // ── 常量 ──
 
     /// 对象指针标记位（最低位）
-    const PTR_TAG: Long = 1
+    const val PTR_TAG: Long = 1
     /// 对象指针掩码
-    const PTR_MASK: Long = -2
+    const val PTR_MASK: Long = -2
 
     /// 小整数最小值
-    const SMALL_INT_MIN: Long = -16
+    const val SMALL_INT_MIN: Long = -16
     /// 小整数最大值
-    const SMALL_INT_MAX: Long = 15
+    const val SMALL_INT_MAX: Long = 15
 
     // ── 装箱函数 ──
 

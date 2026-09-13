@@ -16,28 +16,28 @@ internal value class Double {
 
     companion object {
         /// 双精度浮点数最小正值
-        const MIN_VALUE: Double = 4.9e-324
+        const val MIN_VALUE: Double = 4.9e-324
 
         /// 双精度浮点数最大值
-        const MAX_VALUE: Double = 1.7976931348623157e308
+        const val MAX_VALUE: Double = 1.7976931348623157e308
 
         /// 正无穷大
-        const POSITIVE_INFINITY: Double = 1.7976931348623157e308
+        const val POSITIVE_INFINITY: Double = 1.7976931348623157e308
 
         /// 负无穷大
-        const NEGATIVE_INFINITY: Double = -1.7976931348623157e308
+        const val NEGATIVE_INFINITY: Double = -1.7976931348623157e308
 
         /// 非数字
-        const NaN: Double = 0.0
+        const val NaN: Double = 0.0
 
         /// 位宽（64 位）
-        const BITS: Int = 64
+        const val BITS: Int = 64
 
         /// 圆周率 π
-        const PI: Double = 3.141592653589793
+        const val PI: Double = 3.141592653589793
 
         /// 自然常数 e
-        const E: Double = 2.718281828459045
+        const val E: Double = 2.718281828459045
 
         /// 从字符串解析为双精度浮点数
         fun parseDouble(text: String): Double {

@@ -20,31 +20,32 @@ import aura.lang.native.Memory
 extern object Syscalls {
 
     // ── 标准文件描述符 ──
-
-    const STDIN: Int = 0
-    const STDOUT: Int = 1
-    const STDERR: Int = 2
+    const val STDIN: Int = 0
+    const val STDOUT: Int = 1
+    const val STDERR: Int = 2
 
     // ── 文件操作常量 ──
-
-    const O_RDONLY: Int = 0
-    const O_WRONLY: Int = 1
-    const O_RDWR: Int = 2
-    const O_CREAT: Int = 0x40
-    const O_TRUNC: Int = 0x200
+    const val O_RDONLY: Int = 0
+    const val O_WRONLY: Int = 1
+    const val O_RDWR: Int = 2
+    const val O_CREAT: Int = 0x40
+    const val O_TRUNC: Int = 0x200
 
     // ── 内存保护常量 ──
-
-    const PROT_NONE: Int = 0
-    const PROT_READ: Int = 1
-    const PROT_WRITE: Int = 2
-    const PROT_EXEC: Int = 4
+    const val PROT_NONE: Int = 0
+    const val PROT_READ: Int = 1
+    const val PROT_WRITE: Int = 2
+    const val PROT_EXEC: Int = 4
 
     // ── 内存映射常量 ──
+    const val MAP_SHARED: Int = 1
+    const val MAP_PRIVATE: Int = 2
+    const val MAP_ANONYMOUS: Int = 0x20
 
-    const MAP_SHARED: Int = 1
-    const MAP_PRIVATE: Int = 2
-    const MAP_ANONYMOUS: Int = 0x20
+    // ── Windows 特定常量 ──
+    const val INVALID_HANDLE_VALUE: Long = -1
+    const val GENERIC_READ: Int = 0x80000000
+    const val GENERIC_WRITE: Int = 0x40000000
 
     // ── 系统调用声明 ──
     // 注意：Windows 使用 FFI 方式，不是 syscall 指令
@@ -60,10 +61,4 @@ extern object Syscalls {
 
     /// 退出进程
     @native(asm = "call qword [rip + ExitProcess]") fun exitProcess(code: Int)
-
-    // ── Windows 特定常量 ──
-
-    const INVALID_HANDLE_VALUE: Long = -1
-    const GENERIC_READ: Int = 0x80000000
-    const GENERIC_WRITE: Int = 0x40000000
 }

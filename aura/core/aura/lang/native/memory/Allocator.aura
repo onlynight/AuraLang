@@ -1,86 +1,94 @@
 // aura:///aura/lang/native/memory/Allocator.aura
 package aura.lang.native.memory
-// ─────────────────────────────────────────────────────────────
-// 内存分配器 — Phase S1
+// ------------------------------------------------------------------
+// Memory allocator -- Phase S1
 //
-// 简单的 bump allocator（线性分配器）。
-// 分配器从一块预分配的堆区域开始，每次分配移动一个指针。
-// 不支持 free（简化实现），适合嵌入式或短生命周期程序。
+// Simple bump allocator (linear allocator).
+// The allocator starts from a pre-allocated heap region,
+// moving a pointer forward on each allocation.
+// Does not support free (simplified), suitable for embedded or
+// short-lived programs.
 //
-// ── 使用方式 ──
+// Usage:
 //   val addr: Long = Allocator.malloc(100)
 //   Memory.write(addr, 0x42 as Byte)
 //   val v: Byte = Memory.read(addr)
-// ─────────────────────────────────────────────────────────────
+// ------------------------------------------------------------------
 
 import aura.lang.native.Memory
 
-/// 内存分配器（bump allocator）
+/// Memory allocator (bump allocator)
 extern object Allocator {
 
-    // ── 内部状态（全局变量）──
+    // -- Constants --
+    const val PROT_READ: Int = 1
+    const val PROT_WRITE: Int = 2
+    const val MAP_PRIVATE: Int = 2
+    const val MAP_ANONYMOUS: Int = 0x20
+    const val MAP_FAILED: Long = -1
 
-    /// 堆起始地址
-    @native(SYS_MMAP) fun allocHeap(size: Long, prot: Int, flags: Int): Long
-
-    /// 当前分配指针
+    // -- Internal state --
     var heapPtr: Long = 0
-
-    /// 堆结束地址
     var heapEnd: Long = 0
+    private var heapStart: Long = 0
 
-    /// 初始化堆（分配 1MB 内存）
+    /// Initialize heap (allocate 1MB memory)
     fun init(): Boolean {
-        // 使用 mmap 分配 1MB 内存
-        val heapSize: Long = 1024 * 1024 as Long  // 1MB
-        val addr: Long = allocHeap(heapSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS)
-        if (addr == MAP_FAILED) {
+        val heapSize: Long = 1048576
+        val addr: Long = Memory.alloc(heapSize)
+        if (addr == 0) {
             return false
         }
-        this.heapPtr = addr
-        this.heapEnd = addr + heapSize
+        heapStart = addr
+        heapPtr = addr
+        heapEnd = addr + heapSize
         return true
     }
 
-    /// 分配内存（对齐到 8 字节）
+    /// Allocate memory (aligned to 8 bytes)
     fun malloc(n: Long): Long {
-        // 对齐
-        val aligned: Long = (n + 7) and (-8)
-        // 检查是否超出堆范围
-        if (this.heapPtr + aligned > this.heapEnd) {
-            return 0  // 分配失败
+        val aligned: Long = (n + 7) / 8 * 8
+        if (heapPtr + aligned > heapEnd) {
+            return 0
         }
-        // 分配
-        val addr: Long = this.heapPtr
-        this.heapPtr = this.heapPtr + aligned
+        val addr: Long = heapPtr
+        heapPtr = heapPtr + aligned
         return addr
     }
 
-    /// 释放内存（bump allocator 不支持，空操作）
+    /// Free memory (bump allocator does not support, no-op)
     fun free(addr: Long) {
-        // bump allocator 不支持 free，空操作
+        // bump allocator does not support free, no-op
     }
 
-    /// 重新分配（简化：总是失败，需要手动拷贝）
+    /// Reallocate (allocate new space and copy)
     fun realloc(addr: Long, newSize: Long): Long {
-        // 简化实现：不支持 realloc
-        return 0
+        if (addr == 0) {
+            return malloc(newSize)
+        }
+        if (addr < heapStart || addr >= heapPtr) {
+            return 0
+        }
+        val oldSize: Long = heapPtr - addr
+        if (oldSize <= 0) {
+            return 0
+        }
+        val newAddr: Long = malloc(newSize)
+        if (newAddr == 0) {
+            return 0
+        }
+        val copySize: Long = if (oldSize < newSize) oldSize else newSize
+        Memory.copy(newAddr, addr, copySize)
+        return newAddr
     }
 
-    /// 查询剩余内存
+    /// Query remaining memory
     fun remaining(): Long {
-        return this.heapEnd - this.heapPtr
+        return heapEnd - heapPtr
     }
 
-    /// 查询已分配内存
+    /// Query allocated memory
     fun used(): Long {
-        return this.heapPtr - this.heapEnd  // 注意：heapPtr > heapEnd 时为正
+        return heapPtr - heapStart
     }
 }
-
-// ── 常量定义 ──
-const PROT_READ: Int = 1
-const PROT_WRITE: Int = 2
-const MAP_PRIVATE: Int = 2
-const MAP_ANONYMOUS: Int = 0x20
-const MAP_FAILED: Long = -1

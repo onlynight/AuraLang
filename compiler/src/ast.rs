@@ -540,6 +540,8 @@ pub struct StructDecl {
 pub struct StructField {
     pub visibility: Visibility,
     pub is_mutable: bool,
+    /// 是否由 `const val` 声明（静态常量，编译期可内联）
+    pub is_const: bool,
     pub name: String,
     pub type_hint: Option<Box<Type>>,
     pub default_value: Option<Box<Expr>>,
@@ -642,6 +644,8 @@ pub struct ExternInterfaceDecl {
     pub name: String,             // 接口名，如 "Utils"
     pub lib_path: Option<String>, // 库路径，None 时按模块名自动查找
     pub functions: Vec<FnDecl>,   // 函数声明列表
+    /// Phase S3: extern object 内的常量声明（`const NAME: Type = value`）
+    pub constants: Vec<Stmt>,
     pub span: Span,
 }
 

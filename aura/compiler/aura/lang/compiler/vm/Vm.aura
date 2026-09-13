@@ -9,13 +9,13 @@ internal object Vm {
     // ── 常量 ──
 
     /// VM 最大指令执行次数（防止无限循环）
-    const MAX_INSTRUCTIONS: Int = 1000000
+    const val MAX_INSTRUCTIONS: Int = 1000000
 
     /// VM 最大栈深度
-    const MAX_STACK_DEPTH: Int = 256
+    const val MAX_STACK_DEPTH: Int = 256
 
     /// VM 最大调用深度
-    const MAX_CALL_DEPTH: Int = 64
+    const val MAX_CALL_DEPTH: Int = 64
 
     // ── VM 状态 ──
 

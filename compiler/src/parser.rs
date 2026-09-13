@@ -1170,6 +1170,7 @@ impl Parser {
                     members.fields.push(StructField {
                         visibility: self.take_visibility(),
                         is_mutable: false,
+                        is_const: false,
                         name: self.advance().literal.clone(),
                         type_hint: None,
                         default_value: None,
@@ -1223,15 +1224,30 @@ impl Parser {
         let visibility = self.take_visibility();
 
         let mut is_mutable = false;
-        if self.check(TokenKind::Var) {
-            self.advance();
-            is_mutable = true;
+        let mut is_const = false;
+        // 语法：<visibility>? const val NAME (: Type)? (= value)?
+        // 或：  <visibility>? val NAME (: Type)? (= value)?
+        // 或：  <visibility>? var NAME (: Type)? (= value)?
+        if self.check(TokenKind::Const) {
+            self.advance(); // const
+            is_const = true;
+            is_mutable = false;
+            // const 必须后跟 val
+            if self.check(TokenKind::Val) {
+                self.advance(); // val
+            } else {
+                let span = self.current().span;
+                self.errors.push(CompileError::spanned(
+                    "const 修饰符必须后跟 val，例如 `const val NAME = value`".to_string(),
+                    span,
+                ));
+                self.advance();
+            }
         } else if self.check(TokenKind::Val) {
             self.advance();
-        } else if self.check(TokenKind::Const) {
-            // const 修饰符：常量（不可变），与 val 相同 AST 但语义不同
+        } else if self.check(TokenKind::Var) {
             self.advance();
-            is_mutable = false;
+            is_mutable = true;
         }
 
         let name = self.advance().literal.clone();
@@ -1255,6 +1271,7 @@ impl Parser {
         StructField {
             visibility,
             is_mutable,
+            is_const,
             name,
             type_hint,
             default_value,
@@ -2140,10 +2157,30 @@ impl Parser {
 
         // 函数声明块（库路径从 default fun loadLibrary() 提取）
         let mut functions = Vec::new();
+        let mut constants: Vec<Stmt> = Vec::new();
         let mut lib_path: Option<String> = None;
         if self.check(TokenKind::LBrace) {
             self.advance();
             while !self.check(TokenKind::RBrace) && !self.is_at_end() {
+                // 跳过文档注释
+                while self.check(TokenKind::DocComment) {
+                    self.advance();
+                }
+                // Phase S3: 处理 const/val/var 常量声明
+                if self.check(TokenKind::Const)
+                    || self.check(TokenKind::Val)
+                    || self.check(TokenKind::Var)
+                    || (self.is_visibility_token() && {
+                        let k1 = self.peek_ahead(1);
+                        k1.kind == TokenKind::Const
+                            || k1.kind == TokenKind::Val
+                            || k1.kind == TokenKind::Var
+                    })
+                {
+                    let stmt = self.parse_struct_field_stmt();
+                    constants.push(stmt);
+                    continue;
+                }
                 // Phase D: 处理 @native 注解
                 //   @native(SYSCALL_NUMBER)       → NativeAttr::Syscall
                 //   @native(asm = "...")          → NativeAttr::Asm
@@ -2151,7 +2188,8 @@ impl Parser {
                 // 也兼容已有的 @aot fun xxx()
                 if self.check(TokenKind::At) {
                     self.advance(); // @
-                    let ann_name = if self.check(TokenKind::Ident) {
+                    let ann_name = if self.check(TokenKind::Ident) || self.check(TokenKind::Native)
+                    {
                         Some(self.advance().literal.clone())
                     } else {
                         None
@@ -2189,7 +2227,20 @@ impl Parser {
             name,
             lib_path,
             functions,
+            constants,
             span: Span::merge(&start, &self.current().span),
+        }
+    }
+
+    /// 解析 extern object 内的常量声明（const/val/var）
+    /// 将 StructField 包装为 Stmt::Val 形式以便统一处理
+    fn parse_struct_field_stmt(&mut self) -> Stmt {
+        let field = self.parse_struct_field();
+        Stmt::Val {
+            name: field.name,
+            type_hint: field.type_hint,
+            initializer: field.default_value,
+            span: field.span,
         }
     }
 
@@ -3222,6 +3273,9 @@ impl Parser {
             match self.current().literal.as_str() {
                 "and" => return 2, // 同 AndAnd
                 "or" => return 1,  // 同 OrOr
+                "xor" => return 4, // 同 Caret
+                "shl" => return 5, // 同 LtLt
+                "shr" => return 5, // 同 GtGt
                 _ => {}
             }
         }
@@ -3239,6 +3293,10 @@ impl Parser {
             TokenKind::AndAnd => 2,
             TokenKind::OrOr => 1,
             TokenKind::LtLt | TokenKind::GtGt | TokenKind::GtGtGt => 5,
+            // 位运算符
+            TokenKind::Ampersand => 5,    // &
+            TokenKind::Caret => 4,        // ^
+            TokenKind::Pipe => 3,         // |
             TokenKind::QuestionMark => 8, // Elvis
             TokenKind::DoubleDotOp => 8,  // 范围 ..
             TokenKind::To => 2,           // map entry: "a" to 1
@@ -3269,6 +3327,9 @@ impl Parser {
             match tok.literal.as_str() {
                 "and" => return BinOp::And,
                 "or" => return BinOp::Or,
+                "xor" => return BinOp::BitXor,
+                "shl" => return BinOp::Shl,
+                "shr" => return BinOp::Shr,
                 _ => {}
             }
         }
@@ -3287,6 +3348,9 @@ impl Parser {
             TokenKind::GtEq => BinOp::Ge,
             TokenKind::AndAnd => BinOp::And,
             TokenKind::OrOr => BinOp::Or,
+            TokenKind::Ampersand => BinOp::BitAnd,
+            TokenKind::Caret => BinOp::BitXor,
+            TokenKind::Pipe => BinOp::BitOr,
             TokenKind::LtLt => BinOp::Shl,
             TokenKind::GtGt => BinOp::Shr,
             TokenKind::GtGtGt => BinOp::UShr,

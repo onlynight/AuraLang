@@ -8,22 +8,22 @@ internal object Gc {
     // ── GC 常量 ──
 
     /// GC 状态：空闲
-    const GC_IDLE: Int = 0
+    const val GC_IDLE: Int = 0
 
     /// GC 状态：标记中
-    const GC_MARKING: Int = 1
+    const val GC_MARKING: Int = 1
 
     /// GC 状态：清除中
-    const GC_SWEEPING: Int = 2
+    const val GC_SWEEPING: Int = 2
 
     /// GC 状态：暂停
-    const GC_SUSPENDED: Int = 3
+    const val GC_SUSPENDED: Int = 3
 
     /// 默认触发阈值（字节数）
-    const DEFAULT_THRESHOLD: Int = 1048576
+    const val DEFAULT_THRESHOLD: Int = 1048576
 
     /// 默认最大暂停时间（毫秒）
-    const DEFAULT_MAX_PAUSE: Int = 50
+    const val DEFAULT_MAX_PAUSE: Int = 50
 
     // ── GC 状态 ──
 

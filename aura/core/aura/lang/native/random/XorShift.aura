@@ -1,78 +1,77 @@
 // aura:///aura/lang/native/random/XorShift.aura
 package aura.lang.native.random
-// ─────────────────────────────────────────────────────────────
-// 随机数生成 — Phase S2
+// ------------------------------------------------------------------
+// Random number generation -- Phase S2
 //
-// 实现 XorShift 伪随机数生成器。
-// 无需系统调用，纯 Aura 实现。
+// Implements XorShift pseudo-random number generator.
+// No syscalls needed, pure Aura implementation.
 //
-// ── 使用方式 ──
-//   val rng: XorShift = XorShift.seed(12345)
+// Usage:
+//   val rng: XorShift = XorShift.seedTime()
 //   val n: Long = rng.next()
-// ─────────────────────────────────────────────────────────────
+// ------------------------------------------------------------------
 
-/// XorShift 伪随机数生成器
+import aura.lang.native.time.Clock
+
+/// XorShift pseudo-random number generator
 struct XorShift {
     var state: Long = 1
 
     init(seed: Long) {
-        this.state = seed
-        if (this.state == 0) {
-            this.state = 1
+        state = seed
+        if (state == 0) {
+            state = 1
         }
     }
 
-    /// 生成下一个随机数
+    /// Generate next random number
     fun next(): Long {
-        var x: Long = this.state
-        x = x xor (x shl 13)
-        x = x xor (x shr 7)
-        x = x xor (x shl 17)
-        this.state = x
+        var x: Long = state
+        x = x ^ (x << 13)
+        x = x ^ (x >> 7)
+        x = x ^ (x << 17)
+        state = x
         return x
     }
 
-    /// 生成指定范围的随机数 [0, bound)
+    /// Generate random number in range [0, bound)
     fun nextRange(bound: Long): Long {
-        if (bound <= 0) {
-            return 0
-        }
-        return this.next() % bound
+        if (bound <= 0) { return 0 }
+        return next() % bound
     }
 
-    /// 生成浮点随机数 [0.0, 1.0)
+    /// Generate float random number [0.0, 1.0)
     fun nextFloat(): Double {
-        return (this.next() and 0xFFFFFFFFL) / 4294967295.0
+        return (next() & 0xFFFFFFFFL) / 4294967295.0
     }
 
-    /// 使用当前时间播种（简化实现）
+    /// Seed with current time
     fun seedTime(): XorShift {
-        // 简化：使用固定种子
-        // 实际实现应使用 Clock.now()
-        return XorShift(0x123456789ABCDEF)
+        val t: Long = Clock.timeNs()
+        return XorShift(t)
     }
 }
 
-/// 全局随机数生成器（单例）
+/// Global random number generator (singleton)
 object Random {
     var rng: XorShift = XorShift.seedTime()
 
-    /// 生成下一个随机数
+    /// Generate next random number
     fun next(): Long {
         return rng.next()
     }
 
-    /// 生成指定范围的随机数
+    /// Generate random number in range
     fun nextRange(bound: Long): Long {
         return rng.nextRange(bound)
     }
 
-    /// 生成浮点随机数
+    /// Generate float random number
     fun nextFloat(): Double {
         return rng.nextFloat()
     }
 
-    /// 重新播种
+    /// Re-seed
     fun reseed(seed: Long) {
         rng = XorShift(seed)
     }

@@ -21,13 +21,13 @@ internal object Time {
     // ── 常量 ──
 
     /// 一天的秒数。
-    const SECONDS_PER_DAY: Int = 86400
+    const val SECONDS_PER_DAY: Int = 86400
 
     /// 一小时的秒数。
-    const SECONDS_PER_HOUR: Int = 3600
+    const val SECONDS_PER_HOUR: Int = 3600
 
     /// 一分钟的秒数。
-    const SECONDS_PER_MINUTE: Int = 60
+    const val SECONDS_PER_MINUTE: Int = 60
 
     // ── 时间戳（native：需要访问系统时钟）──
 

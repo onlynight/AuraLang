@@ -17,13 +17,13 @@ package aura.lang.std
 internal object Path {
 
     /// 路径分隔符（标准形式）。
-    const SEPARATOR: String = "/"
+    const val SEPARATOR: String = "/"
 
     /// 当前目录表示。
-    const CURRENT_DIR: String = "."
+    const val CURRENT_DIR: String = "."
 
     /// 上级目录表示。
-    const PARENT_DIR: String = ".."
+    const val PARENT_DIR: String = ".."
 
     // ── 拼接与分割（纯逻辑，Aura 实现）──
 

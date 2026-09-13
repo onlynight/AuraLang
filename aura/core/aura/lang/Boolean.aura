@@ -15,10 +15,10 @@ internal value class Boolean {
 
     companion object {
         /// true 字面量
-        const TRUE: Boolean = true
+        const val TRUE: Boolean = true
 
         /// false 字面量
-        const FALSE: Boolean = false
+        const val FALSE: Boolean = false
     }
 
     // ── 转换方法 ──

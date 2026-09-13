@@ -8,10 +8,10 @@ internal object Frames {
     // ── 常量 ──
 
     /// 默认栈大小（初始值）
-    const DEFAULT_STACK_SIZE: Int = 64
+    const val DEFAULT_STACK_SIZE: Int = 64
 
     /// 默认局部变量槽数量
-    const DEFAULT_LOCALS_SIZE: Int = 32
+    const val DEFAULT_LOCALS_SIZE: Int = 32
 
     // ── 栈帧操作 ──
 

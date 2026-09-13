@@ -14,51 +14,51 @@ extern object Syscalls {
 
     // ── 系统调用号 ──
 
-    const SYS_READ: Int = 0
-    const SYS_WRITE: Int = 4
-    const SYS_OPEN: Int = 5
-    const SYS_CLOSE: Int = 6
-    const SYS_STAT: Int = 168
-    const SYS_LSEEK: Int = 7
-    const SYS_MMAP: Int = 197
-    const SYS_MUNMAP: Int = 20
-    const SYS_ACCESS: Int = 3
-    const SYS_UNLINK: Int = 10
-    const SYS_FORK: Int = 2
-    const SYS_EXECVE: Int = 59
-    const SYS_EXIT: Int = 1
-    const SYS_WAIT4: Int = 61
-    const SYS_CLOCK_GETTIME: Int = 201
-    const SYS_GETRANDOM: Int = 286
-    const SYS_GETPID: Int = 20
+    const val SYS_READ: Int = 0
+    const val SYS_WRITE: Int = 4
+    const val SYS_OPEN: Int = 5
+    const val SYS_CLOSE: Int = 6
+    const val SYS_STAT: Int = 168
+    const val SYS_LSEEK: Int = 7
+    const val SYS_MMAP: Int = 197
+    const val SYS_MUNMAP: Int = 20
+    const val SYS_ACCESS: Int = 3
+    const val SYS_UNLINK: Int = 10
+    const val SYS_FORK: Int = 2
+    const val SYS_EXECVE: Int = 59
+    const val SYS_EXIT: Int = 1
+    const val SYS_WAIT4: Int = 61
+    const val SYS_CLOCK_GETTIME: Int = 201
+    const val SYS_GETRANDOM: Int = 286
+    const val SYS_GETPID: Int = 20
 
     // ── 标准文件描述符 ──
 
-    const STDIN: Int = 0
-    const STDOUT: Int = 1
-    const STDERR: Int = 2
+    const val STDIN: Int = 0
+    const val STDOUT: Int = 1
+    const val STDERR: Int = 2
 
     // ── 文件操作常量 ──
 
-    const O_RDONLY: Int = 0
-    const O_WRONLY: Int = 1
-    const O_RDWR: Int = 2
-    const O_CREAT: Int = 0x0200
-    const O_TRUNC: Int = 0x0400
-    const O_EXCL: Int = 0x0800
+    const val O_RDONLY: Int = 0
+    const val O_WRONLY: Int = 1
+    const val O_RDWR: Int = 2
+    const val O_CREAT: Int = 0x0200
+    const val O_TRUNC: Int = 0x0400
+    const val O_EXCL: Int = 0x0800
 
     // ── 内存保护常量 ──
 
-    const PROT_NONE: Int = 0
-    const PROT_READ: Int = 1
-    const PROT_WRITE: Int = 2
-    const PROT_EXEC: Int = 4
+    const val PROT_NONE: Int = 0
+    const val PROT_READ: Int = 1
+    const val PROT_WRITE: Int = 2
+    const val PROT_EXEC: Int = 4
 
     // ── 内存映射常量 ──
 
-    const MAP_SHARED: Int = 0x0001
-    const MAP_PRIVATE: Int = 0x0002
-    const MAP_ANONYMOUS: Int = 0x1000
+    const val MAP_SHARED: Int = 0x0001
+    const val MAP_PRIVATE: Int = 0x0002
+    const val MAP_ANONYMOUS: Int = 0x1000
 
     // ── 系统调用声明 ──
 
@@ -82,11 +82,11 @@ extern object Syscalls {
 
     // ── 时钟常量 ──
 
-    const CLOCK_REALTIME: Int = 0
-    const CLOCK_MONOTONIC: Int = 4
+    const val CLOCK_REALTIME: Int = 0
+    const val CLOCK_MONOTONIC: Int = 4
 
     // ── 其他常量 ──
 
-    const INVALID_FD: Int = -1
-    const MAP_FAILED: Long = -1
+    const val INVALID_FD: Int = -1
+    const val MAP_FAILED: Long = -1
 }

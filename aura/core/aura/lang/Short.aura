@@ -15,13 +15,13 @@ internal value class Short {
 
     companion object {
         /// 16 位短整型最小值
-        const MIN_VALUE: Short = -32768
+        const val MIN_VALUE: Short = -32768
 
         /// 16 位短整型最大值
-        const MAX_VALUE: Short = 32767
+        const val MAX_VALUE: Short = 32767
 
         /// 位宽（16 位）
-        const BITS: Int = 16
+        const val BITS: Int = 16
 
         /// 从字符串解析为短整型
         fun parseInt(text: String): Short {

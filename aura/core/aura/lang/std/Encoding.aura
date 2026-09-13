@@ -18,10 +18,10 @@ internal object Encoding {
     // ── 常量 ──
 
     /// Base64 字母表（标准 RFC 4648 变体）。
-    private const BASE64_CHARS: String = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    private const val BASE64_CHARS: String = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 
     /// 十六进制字母表（大写）。
-    private const HEX_CHARS: String = "0123456789ABCDEF"
+    private const val HEX_CHARS: String = "0123456789ABCDEF"
 
     // ── Base64（纯逻辑，Aura 实现）──
 

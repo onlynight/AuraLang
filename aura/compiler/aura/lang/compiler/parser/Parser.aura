@@ -268,6 +268,9 @@ class Parser {
         if (k == "Val" || k == "Var") {
             return this.parseDecl(true)
         }
+        if (k == "Const" && this.prsPeek(1) == "Val") {
+            return this.parseDecl(true)
+        }
         if (k == "Struct") {
             return this.parseTypeDecl("Struct")
         }
@@ -394,10 +397,20 @@ class Parser {
         return this.ast.add("Function", name, retTy, this.prsCurSpan(), kids)
     }
 
-    /// 解析 val / var 声明（顶层或语句内）。
+    /// 解析 val / var / const val 声明（顶层或语句内）。
     fun parseDecl(topLevel: Boolean): Int {
-        val k = this.prsCurKind() // Val / Var
-        this.prsAdvance()
+        val k = this.prsCurKind() // Val / Var / Const
+        // const 修饰符：const val NAME = ...
+        if (k == "Const") {
+            this.prsAdvance() // Const
+            if (this.prsCheck("Val")) {
+                this.prsAdvance() // Val
+            } else {
+                this.errors.pushAt(severityError(), "const 修饰符必须后跟 val", this.prsCurSpan().start, this.prsCurSpan().end)
+            }
+        } else {
+            this.prsAdvance()
+        }
         val name: String = this.prsCurLit()
         this.prsExpectName()
         var ty: String = ""
@@ -699,6 +712,9 @@ class Parser {
         if (k == "Val" || k == "Var") {
             return this.parseDecl(false)
         }
+        if (k == "Const" && this.prsPeek(1) == "Val") {
+            return this.parseDecl(false)
+        }
         // 声明类语句（类体成员 / 嵌套声明）：此前这些 token 落到表达式分支，
         // 产生「意外的 token: Fun」并使整个类体反同步。
         if (k == "At" || k == "Native" || k == "Export") {
@@ -957,7 +973,8 @@ class Parser {
         this.prsAdvance() // For
         this.prsExpect("LParen")
         var decl: Int
-        if (this.prsCheck("Val") || this.prsCheck("Var")) {
+        if (this.prsCheck("Val") || this.prsCheck("Var")
+            || (this.prsCheck("Const") && this.prsPeek(1) == "Val")) {
             decl = this.parseDecl(false)
         } else {
             // 无 `val`/`var` 关键字的形态：直接是循环变量名。

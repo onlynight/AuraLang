@@ -21,7 +21,7 @@ internal value class Unit {
 
     companion object {
         /// Unit 单例实例
-        const INSTANCE: Unit = Unit()
+        const val INSTANCE: Unit = Unit()
     }
 
     // ── 构造 ──

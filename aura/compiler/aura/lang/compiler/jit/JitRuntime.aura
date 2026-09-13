@@ -24,12 +24,12 @@ import aura.lang.std.String
 
 /// `.auc` v4 段 id（与 Rust `SEG_*` 一致）。
 object JitSegments {
-    const BYTECODE: Int = 0
-    const MACHINE: Int = 1
-    const DESC_TABLE: Int = 2
-    const DEBUG: Int = 3
-    const STRING_POOL: Int = 4
-    const SIGNATURE: Int = 5
+    const val BYTECODE: Int = 0
+    const val MACHINE: Int = 1
+    const val DESC_TABLE: Int = 2
+    const val DEBUG: Int = 3
+    const val STRING_POOL: Int = 4
+    const val SIGNATURE: Int = 5
 }
 
 /// 段名。

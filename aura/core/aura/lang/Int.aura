@@ -19,22 +19,22 @@ internal value class Int {
 
     companion object {
         /// 32 位整数最小值
-        const MIN_VALUE: Int = -2147483648
+        const val MIN_VALUE: Int = -2147483648
 
         /// 32 位整数最大值
-        const MAX_VALUE: Int = 2147483647
+        const val MAX_VALUE: Int = 2147483647
 
         /// 位宽（32 位）
-        const BITS: Int = 32
+        const val BITS: Int = 32
 
         /// 字节大小（4 字节）
-        const SIZE: Int = 32
+        const val SIZE: Int = 32
 
         /// 64 位长整数最小值
-        const MIN_LONG: Long = -9223372036854775808L
+        const val MIN_LONG: Long = -9223372036854775808L
 
         /// 64 位长整数最大值
-        const MAX_LONG: Long = 9223372036854775807L
+        const val MAX_LONG: Long = 9223372036854775807L
 
         /// 从字符串解析为整数
         fun parseInt(text: String): Int {

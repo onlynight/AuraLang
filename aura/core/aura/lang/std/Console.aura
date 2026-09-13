@@ -27,10 +27,10 @@ internal object Console {
     private val ESC: String = String.fromCharCode(27)
 
     /// 默认终端宽度。
-    const DEFAULT_WIDTH: Int = 80
+    const val DEFAULT_WIDTH: Int = 80
 
     /// 默认终端高度。
-    const DEFAULT_HEIGHT: Int = 24
+    const val DEFAULT_HEIGHT: Int = 24
 
     // ── 光标控制（纯逻辑，Aura 实现）──
 

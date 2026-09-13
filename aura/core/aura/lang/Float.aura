@@ -17,28 +17,28 @@ internal value class Float {
 
     companion object {
         /// 浮点数最小正值
-        const MIN_VALUE: Float = 1.4e-45f
+        const val MIN_VALUE: Float = 1.4e-45f
 
         /// 浮点数最大值
-        const MAX_VALUE: Float = 3.4028235e38f
+        const val MAX_VALUE: Float = 3.4028235e38f
 
         /// 正无穷大
-        const POSITIVE_INFINITY: Float = 3.4028235e38f
+        const val POSITIVE_INFINITY: Float = 3.4028235e38f
 
         /// 负无穷大
-        const NEGATIVE_INFINITY: Float = -3.4028235e38f
+        const val NEGATIVE_INFINITY: Float = -3.4028235e38f
 
         /// 非数字
-        const NaN: Float = 0.0f
+        const val NaN: Float = 0.0f
 
         /// 位宽（32 位）
-        const BITS: Int = 32
+        const val BITS: Int = 32
 
         /// 圆周率 π
-        const PI: Float = 3.14159265f
+        const val PI: Float = 3.14159265f
 
         /// 自然常数 e
-        const E: Float = 2.71828182f
+        const val E: Float = 2.71828182f
     }
 
     // ── 转换方法 ──

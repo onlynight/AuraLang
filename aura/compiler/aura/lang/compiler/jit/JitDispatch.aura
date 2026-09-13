@@ -21,11 +21,11 @@ import aura.lang.std.String
 /// 派发决策常量。
 object JitDecide {
     /// 已编译走原生码。
-    const NATIVE: String = "native"
+    const val NATIVE: String = "native"
     /// 已跳过，回退解释器。
-    const SKIP: String = "skip"
+    const val SKIP: String = "skip"
     /// 未达阈值，暂用解释器。
-    const DEFER: String = "defer"
+    const val DEFER: String = "defer"
 }
 
 /// 派发决策（对应 Rust 运行期分支选择）。

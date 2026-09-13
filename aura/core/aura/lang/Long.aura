@@ -16,22 +16,22 @@ internal value class Long {
 
     companion object {
         /// 64 位长整数最小值
-        const MIN_VALUE: Long = -9223372036854775808L
+        const val MIN_VALUE: Long = -9223372036854775808L
 
         /// 64 位长整数最大值
-        const MAX_VALUE: Long = 9223372036854775807L
+        const val MAX_VALUE: Long = 9223372036854775807L
 
         /// 位宽（64 位）
-        const BITS: Long = 64
+        const val BITS: Long = 64
 
         /// 字节大小（8 字节）
-        const SIZE: Long = 64
+        const val SIZE: Long = 64
 
         /// 32 位整数最小值
-        const MIN_INT: Int = -2147483648
+        const val MIN_INT: Int = -2147483648
 
         /// 32 位整数最大值
-        const MAX_INT: Int = 2147483647
+        const val MAX_INT: Int = 2147483647
 
         /// 从字符串解析为长整数
         fun parseLong(text: String): Long {

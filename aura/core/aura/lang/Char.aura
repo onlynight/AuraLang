@@ -17,10 +17,10 @@ internal value class Char {
 
     companion object {
         /// 字符最小值（空字符）
-        const MIN_VALUE: Char = '\0'
+        const val MIN_VALUE: Char = '\0'
 
         /// 字符最大值（用 Int 表示）
-        const MAX_VALUE_CODE: Int = 65535
+        const val MAX_VALUE_CODE: Int = 65535
 
         /// 从字符串解析为字符（取第一个字符）
         fun fromString(text: String): Char {

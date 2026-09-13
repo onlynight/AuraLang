@@ -1,73 +1,86 @@
 // aura:///aura/lang/native/time/Clock.aura
 package aura.lang.native.time
-// ─────────────────────────────────────────────────────────────
-// 时间/时钟操作 — Phase S2
+// ------------------------------------------------------------------
+// Time/clock operations -- Phase S2
 //
-// 提供时间获取、睡眠等操作。
+// Provides time acquisition and sleep operations.
 //
-// ── 使用方式 ──
-//   val now: Long = Clock.now()
-//   val ms: Long = Clock.timeMs()
-// ─────────────────────────────────────────────────────────────
+// Usage:
+//   val now: Long = Clock.timeNs()
+//   Clock.sleep(1000)
+// ------------------------------------------------------------------
 
 import aura.lang.native.Syscalls
+import aura.lang.native.Memory
+import aura.lang.native.Cpu
 
-/// 时间/时钟操作
-extern object Clock {
-
-    // ── 系统调用声明 ──
-
-    @native(SYS_CLOCK_GETTIME) fun clockGettime(clock: Int, ts: Long): Long
-
-    // ── 时间操作函数 ──
-
-    /// 获取当前时间（秒 + 纳秒）
-    fun now(): Time {
-        // 简化实现：返回占位时间
-        val t: Time = Time()
-        t.sec = 0
-        t.nsec = 0
-        return t
-    }
-
-    /// 获取当前时间（毫秒）
-    fun timeMs(): Long {
-        // 简化实现：返回占位值
-        return 0
-    }
-
-    /// 获取当前时间（微秒）
-    fun timeUs(): Long {
-        // 简化实现：返回占位值
-        return 0
-    }
-
-    /// 获取当前时间（纳秒）
-    fun timeNs(): Long {
-        // 简化实现：返回占位值
-        return 0
-    }
-
-    /// 睡眠（毫秒）
-    fun sleep(ms: Long) {
-        // 简化实现：空操作
-        // 实际需要调用 nanosleep 系统调用
-    }
-}
-
-/// 时间结构
+/// Time structure
 struct Time {
     var sec: Long = 0
     var nsec: Long = 0
 
-    /// 获取时间戳（秒 + 纳秒/1e9）
     fun timestamp(): Double {
         return sec + nsec / 1000000000.0
     }
 }
 
-// ── 常量定义 ──
-const CLOCK_REALTIME: Int = 0
-const CLOCK_MONOTONIC: Int = 1
-const CLOCK_PROCESS_CPUTIME_ID: Int = 2
-const CLOCK_THREAD_CPUTIME_ID: Int = 3
+extern object Clock {
+
+    // -- Constants --
+    const val CLOCK_REALTIME: Int = 0
+    const val CLOCK_MONOTONIC: Int = 1
+    const val CLOCK_PROCESS_CPUTIME_ID: Int = 2
+    const val CLOCK_THREAD_CPUTIME_ID: Int = 3
+
+    // -- Internal buffer --
+    var tsBuf: Long = 0
+
+    // -- Syscall declarations --
+    @native(SYS_CLOCK_GETTIME) fun clockGettime(clock: Int, ts: Long): Long
+
+    /// Initialize time buffer
+    fun init(): Boolean {
+        tsBuf = Memory.alloc(16)
+        return tsBuf != 0
+    }
+
+    /// Get current time (seconds + nanoseconds)
+    fun now(): Time {
+        if (tsBuf == 0) { return Time() }
+        var t: Time = Time()
+        val ret: Long = clockGettime(CLOCK_REALTIME, tsBuf)
+        if (ret == 0) {
+            t.sec = Memory.read64(tsBuf)
+            t.nsec = Memory.read64(tsBuf + 8)
+        }
+        return t
+    }
+
+    /// Get current time (milliseconds)
+    fun timeMs(): Long {
+        val t: Time = now()
+        return t.sec * 1000 + t.nsec / 1000000
+    }
+
+    /// Get current time (microseconds)
+    fun timeUs(): Long {
+        val t: Time = now()
+        return t.sec * 1000000 + t.nsec / 1000
+    }
+
+    /// Get current time (nanoseconds)
+    fun timeNs(): Long {
+        val t: Time = now()
+        return t.sec * 1000000000 + t.nsec
+    }
+
+    /// Sleep (milliseconds, busy-wait simplified implementation)
+    fun sleep(ms: Long) {
+        if (ms <= 0) { return }
+        val startNs: Long = timeNs()
+        val endNs: Long = startNs + ms * 1000000
+        while (timeNs() < endNs) {
+            Cpu.memFence()
+        }
+    }
+}

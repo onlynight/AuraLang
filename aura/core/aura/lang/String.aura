@@ -21,7 +21,7 @@ internal value class String {
 
     companion object {
         /// 空字符串常量
-        const EMPTY: String = ""
+        const val EMPTY: String = ""
 
         /// 从字符数组构造字符串
         fun fromChars(chars: Array<Char>): String {
