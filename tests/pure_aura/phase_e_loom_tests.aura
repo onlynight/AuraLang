@@ -1,0 +1,253 @@
+// Phase E.4: Loom.aura 单元测试
+//
+// 验证 Manifest 解析、TaskGraph、BuildCache、Plugin 等核心功能。
+
+import aura.lang.std.String
+import aura.lang.std.IO
+import aura.lang.std.FileSystem
+import aura.lang.std.Collections
+import aura.lang.std.Assert
+import aura.lang.std.Encoding
+
+// ── Manifest 测试 ──
+
+fun testManifestConstruction(): Int {
+    val m = Manifest("my-project", "aura.toml")
+    Assert.assert(m.name == "my-project", "Name should be 'my-project'")
+    Assert.assert(m.version == "0.1.0", "Default version should be '0.1.0'")
+    Assert.assert(m.description == "", "Default description should be empty")
+    Assert.assert(m.dependencies.size == 0, "No dependencies initially")
+    Assert.assert(m.devDependencies.size == 0, "No dev dependencies initially")
+    Assert.assert(m.buildTasks.size == 0, "No build tasks initially")
+    return 0
+}
+
+fun testManifestAddDependency(): Int {
+    val m = Manifest("my-project", "aura.toml")
+    m.addDependency("aura.core")
+    m.addDependency("aura.std")
+    Assert.assert(m.dependencies.size == 2, "Should have 2 dependencies")
+    Assert.assert(m.dependencies.get(0) == "aura.core", "First dep should be aura.core")
+    Assert.assert(m.dependencies.get(1) == "aura.std", "Second dep should be aura.std")
+    return 0
+}
+
+fun testManifestAddDevDependency(): Int {
+    val m = Manifest("my-project", "aura.toml")
+    m.addDevDependency("aura.test")
+    Assert.assert(m.devDependencies.size == 1, "Should have 1 dev dependency")
+    Assert.assert(m.devDependencies.get(0) == "aura.test", "Dev dep should be aura.test")
+    return 0
+}
+
+fun testManifestAddBuildTask(): Int {
+    val m = Manifest("my-project", "aura.toml")
+    m.addBuildTask("build")
+    m.addBuildTask("test")
+    Assert.assert(m.buildTasks.size == 2, "Should have 2 build tasks")
+    Assert.assert(m.buildTasks.get(0) == "build", "First task should be build")
+    Assert.assert(m.buildTasks.get(1) == "test", "Second task should be test")
+    return 0
+}
+
+// ── Task 测试 ──
+
+fun testTaskConstruction(): Int {
+    val t = Task("build", "aura build src/*.aura")
+    Assert.assert(t.name == "build", "Task name should be 'build'")
+    Assert.assert(t.command == "aura build src/*.aura", "Command should be correct")
+    Assert.assert(t.dependsOn.size == 0, "No dependencies initially")
+    Assert.assert(!t.cached, "Should not be cached initially")
+    return 0
+}
+
+fun testTaskAddDependency(): Int {
+    val t = Task("build", "aura build")
+    t.addDep("check")
+    t.addDep("fmt")
+    Assert.assert(t.dependsOn.size == 2, "Should have 2 dependencies")
+    Assert.assert(t.dependsOn.get(0) == "check", "First dep should be check")
+    Assert.assert(t.dependsOn.get(1) == "fmt", "Second dep should be fmt")
+    return 0
+}
+
+// ── TaskGraph 测试 ──
+
+fun testTaskGraphAddTask(): Int {
+    val g = TaskGraph()
+    g.addTask("build", "aura build")
+    Assert.assert(g.tasks.containsKey("build"), "Should contain 'build' task")
+    return 0
+}
+
+fun testTaskGraphAddDependency(): Int {
+    val g = TaskGraph()
+    g.addTask("build", "aura build")
+    g.addTask("check", "aura check")
+    g.addDependency("build", "check")
+    val buildTask = g.tasks.getOrDefault("build", null)
+    Assert.assert(buildTask != null, "Build task should exist")
+    if (buildTask != null) {
+        Assert.assert(buildTask.dependsOn.size == 1, "Build should depend on 1 task")
+        Assert.assert(buildTask.dependsOn.get(0) == "check", "Build should depend on check")
+    }
+    return 0
+}
+
+fun testTaskGraphTopoSort(): Int {
+    val g = TaskGraph()
+    g.addTask("check", "aura check")
+    g.addTask("build", "aura build")
+    g.addTask("test", "aura test")
+    g.addDependency("build", "check")
+    g.addDependency("test", "build")
+
+    val result = g.topoSort()
+    Assert.assert(result == 0, "Topo sort should succeed")
+    Assert.assert(g.executionOrder.size == 3, "Should have 3 tasks in order")
+    // check should come before build, build before test
+    Assert.assert(g.executionOrder.get(0) == "check", "Check should be first")
+    Assert.assert(g.executionOrder.get(1) == "build", "Build should be second")
+    Assert.assert(g.executionOrder.get(2) == "test", "Test should be third")
+    return 0
+}
+
+// ── BuildCache 测试 ──
+
+fun testBuildCacheConstruction(): Int {
+    val cache = BuildCache(".loom/cache")
+    Assert.assert(cache.enabled, "Cache should be enabled by default")
+    return 0
+}
+
+fun testBuildCacheDisabled(): Int {
+    val cache = BuildCache(".loom/cache")
+    cache.enabled = false
+    Assert.assert(!cache.enabled, "Cache should be disabled")
+    return 0
+}
+
+// ── Plugin 测试 ──
+
+fun testPluginConstruction(): Int {
+    val p = Plugin("my-plugin", "1.0.0")
+    Assert.assert(p.name == "my-plugin", "Plugin name should be 'my-plugin'")
+    Assert.assert(p.version == "1.0.0", "Plugin version should be '1.0.0'")
+    Assert.assert(p.enabled, "Plugin should be enabled by default")
+    return 0
+}
+
+fun testPluginRegistry(): Int {
+    val reg = PluginRegistry()
+    val p1 = Plugin("plugin1", "1.0.0")
+    val p2 = Plugin("plugin2", "2.0.0")
+    reg.register(p1)
+    reg.register(p2)
+    Assert.assert(reg.plugins.size == 2, "Should have 2 plugins")
+    return 0
+}
+
+// ── CiConfig 测试 ──
+
+fun testCiConfigConstruction(): Int {
+    val ci = CiConfig()
+    Assert.assert(ci.phases.size == 0, "No phases initially")
+    Assert.assert(ci.timeout == 300, "Default timeout should be 300")
+    Assert.assert(!ci.parallel, "Should not be parallel initially")
+    return 0
+}
+
+fun testCiConfigAddPhase(): Int {
+    val ci = CiConfig()
+    ci.addPhase("build")
+    ci.addPhase("test")
+    ci.addPhase("deploy")
+    Assert.assert(ci.phases.size == 3, "Should have 3 phases")
+    Assert.assert(ci.phases.get(0) == "build", "First phase should be build")
+    Assert.assert(ci.phases.get(2) == "deploy", "Third phase should be deploy")
+    return 0
+}
+
+// ── Watcher 测试 ──
+
+fun testWatcherConstruction(): Int {
+    var watcher = Watcher()
+    Assert.assert(!watcher.watching, "Should not be watching initially")
+    Assert.assert(watcher.watchIds.size == 0, "No watch ids initially")
+    return 0
+}
+
+// ── Loom 主类测试 ──
+
+fun testLoomConstruction(): Int {
+    val loom = Loom()
+    Assert.assert(loom.projectDir == "", "Project dir should be empty initially")
+    return 0
+}
+
+// ── 主测试函数 ──
+
+fun main(): Int {
+    println("=== Phase E.4: Loom Unit Tests ===")
+
+    var testsRun: Int = 0
+    var testsPassed: Int = 0
+
+    println("Running Manifest tests...")
+    if (testManifestConstruction() == 0) { testsPassed = testsPassed + 1 }
+    testsRun = testsRun + 1
+    if (testManifestAddDependency() == 0) { testsPassed = testsPassed + 1 }
+    testsRun = testsRun + 1
+    if (testManifestAddDevDependency() == 0) { testsPassed = testsPassed + 1 }
+    testsRun = testsRun + 1
+    if (testManifestAddBuildTask() == 0) { testsPassed = testsPassed + 1 }
+    testsRun = testsRun + 1
+
+    println("Running Task tests...")
+    if (testTaskConstruction() == 0) { testsPassed = testsPassed + 1 }
+    testsRun = testsRun + 1
+    if (testTaskAddDependency() == 0) { testsPassed = testsPassed + 1 }
+    testsRun = testsRun + 1
+
+    println("Running TaskGraph tests...")
+    if (testTaskGraphAddTask() == 0) { testsPassed = testsPassed + 1 }
+    testsRun = testsRun + 1
+    if (testTaskGraphAddDependency() == 0) { testsPassed = testsPassed + 1 }
+    testsRun = testsRun + 1
+    if (testTaskGraphTopoSort() == 0) { testsPassed = testsPassed + 1 }
+    testsRun = testsRun + 1
+
+    println("Running BuildCache tests...")
+    if (testBuildCacheConstruction() == 0) { testsPassed = testsPassed + 1 }
+    testsRun = testsRun + 1
+    if (testBuildCacheDisabled() == 0) { testsPassed = testsPassed + 1 }
+    testsRun = testsRun + 1
+
+    println("Running Plugin tests...")
+    if (testPluginConstruction() == 0) { testsPassed = testsPassed + 1 }
+    testsRun = testsRun + 1
+    if (testPluginRegistry() == 0) { testsPassed = testsPassed + 1 }
+    testsRun = testsRun + 1
+
+    println("Running CiConfig tests...")
+    if (testCiConfigConstruction() == 0) { testsPassed = testsPassed + 1 }
+    testsRun = testsRun + 1
+    if (testCiConfigAddPhase() == 0) { testsPassed = testsPassed + 1 }
+    testsRun = testsRun + 1
+
+    println("Running Watcher/Loom tests...")
+    if (testWatcherConstruction() == 0) { testsPassed = testsPassed + 1 }
+    testsRun = testsRun + 1
+    if (testLoomConstruction() == 0) { testsPassed = testsPassed + 1 }
+    testsRun = testsRun + 1
+
+    println("")
+    println("=== Results: $testsPassed / $testsRun passed ===")
+    if (testsPassed == testsRun) {
+        println("ALL TESTS PASSED")
+        return 0
+    } else {
+        println("SOME TESTS FAILED")
+        return 1
+    }
+}

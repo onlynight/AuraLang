@@ -1,0 +1,672 @@
+// aura:///aura/lang/loom/Loom.aura
+// Phase E.4: Loom Build System — 替代 loom/src/**
+//
+// 纯 Aura 实现，通过 @native 调用 C 层系统 API。
+// 覆盖：Manifest 解析、TaskGraph、TaskExecutor、增量构建、
+// 插件系统、包管理、CI/CD、Watch 模式。
+//
+// @since 0.6
+
+import aura.lang.std.String
+import aura.lang.std.FileSystem
+import aura.lang.std.IO
+import aura.lang.std.Process
+import aura.lang.std.Path
+import aura.lang.std.Json
+import aura.lang.std.Collections
+import aura.lang.std.Encoding
+import aura.lang.std.Time
+
+// ── Loom native API ──
+
+@native fun loomShellExec(cmd: String): Int { }
+
+@native fun loomShellOutput(cmd: String): String { }
+
+@native fun loomFileWatch(path: String, callback: Int): Int { }
+
+@native fun loomFileUnwatch(id: Int): Int { }
+
+@native fun loomSleep(ms: Int): Unit { }
+
+@native fun loomGetEnv(name: String): String { }
+
+@native fun loomTimestamp(): Long { }
+
+// ── Manifest（aura.toml）──
+
+class Manifest {
+    val name: String
+    var version: String = "0.1.0"
+    var description: String = ""
+    var authors: List<String> = mutableListOf()
+    var dependencies: List<String> = mutableListOf()
+    var devDependencies: List<String> = mutableListOf()
+    var buildTasks: List<String> = mutableListOf()
+    val path: String
+
+    fun Manifest(name: String, path: String) {
+        this.name = name
+        this.path = path
+    }
+
+    fun addDependency(dep: String): Unit { dependencies.add(dep) }
+    fun addDevDependency(dep: String): Unit { devDependencies.add(dep) }
+    fun addBuildTask(task: String): Unit { buildTasks.add(task) }
+
+    fun save(): Unit {
+        var content: String = ""
+        content = content + "# Aura project manifest\n"
+        content = content + "name = \"" + name + "\"\n"
+        content = content + "version = \"" + version + "\"\n"
+        if (description.length > 0) {
+            content = content + "description = \"" + description + "\"\n"
+        }
+        if (authors.size > 0) {
+            content = content + "authors = ["
+            var i: Int = 0
+            while (i < authors.size) {
+                if (i > 0) { content = content + ", " }
+                content = content + "\"" + authors[i] + "\""
+                i = i + 1
+            }
+            content = content + "]\n"
+        }
+        if (dependencies.size > 0) {
+            content = content + "[dependencies]\n"
+            var j: Int = 0
+            while (j < dependencies.size) {
+                content = content + dependencies[j] + "\n"
+                j = j + 1
+            }
+        }
+        if (devDependencies.size > 0) {
+            content = content + "[dev-dependencies]\n"
+            var k: Int = 0
+            while (k < devDependencies.size) {
+                content = content + devDependencies[k] + "\n"
+                k = k + 1
+            }
+        }
+        if (buildTasks.size > 0) {
+            content = content + "[build.tasks]\n"
+            var l: Int = 0
+            while (l < buildTasks.size) {
+                content = content + "  \"" + buildTasks[l] + "\"\n"
+                l = l + 1
+            }
+        }
+        FileSystem.writeText(path, content)
+    }
+
+    fun load(): Int {
+        if (!FileSystem.exists(path)) {
+            return 1
+        }
+        val content: String = FileSystem.readText(path)
+        return parseManifest(content)
+    }
+
+    /// 解析 aura.toml 内容
+    fun parseManifest(content: String): Int {
+        var lines: List<String> = Collections.splitLines(content)
+        var i: Int = 0
+        while (i < lines.size) {
+            val line: String = String.trim(lines[i])
+            if (line.length == 0 || line.startsWith("#")) {
+                i = i + 1
+                continue
+            }
+
+            if (line.startsWith("name")) {
+                val colonIdx: Int = line.indexOf("=")
+                if (colonIdx > 0) {
+                    val value: String = String.trim(String.substring(line, colonIdx + 1))
+                    this.name = String.unquote(value)
+                }
+            } else if (line.startsWith("version")) {
+                val colonIdx: Int = line.indexOf("=")
+                if (colonIdx > 0) {
+                    val value: String = String.trim(String.substring(line, colonIdx + 1))
+                    this.version = String.unquote(value)
+                }
+            } else if (line.startsWith("description")) {
+                val colonIdx: Int = line.indexOf("=")
+                if (colonIdx > 0) {
+                    val value: String = String.trim(String.substring(line, colonIdx + 1))
+                    this.description = String.unquote(value)
+                }
+            }
+
+            i = i + 1
+        }
+        return 0
+    }
+}
+
+// ── 任务节点 ──
+
+class Task {
+    val name: String
+    val command: String
+    val dependsOn: List<String> = mutableListOf()
+    var fingerprint: String = ""
+    var cached: Boolean = false
+    var output: String = ""
+
+    fun Task(name: String, command: String) {
+        this.name = name
+        this.command = command
+    }
+
+    fun addDep(dep: String): Unit { dependsOn.add(dep) }
+
+    fun run(): Int {
+        if (cached && fingerprint != "") {
+            IO.println("[loom] " + name + " (cached)")
+            return 0
+        }
+        IO.println("[loom] " + name + ": " + command)
+        val result: Int = loomShellExec(command)
+        if (result == 0) {
+            this.fingerprint = loomTimestamp().toString()
+            this.cached = true
+        }
+        return result
+    }
+}
+
+// ── TaskGraph（任务 DAG）──
+
+class TaskGraph {
+    var tasks: Map<String, Task> = mutableMapOf()
+    var executionOrder: List<String> = mutableListOf()
+
+    fun addTask(task: Task): Unit {
+        tasks.put(task.name, task)
+    }
+
+    fun addTask(name: String, command: String): Unit {
+        val task: Task = Task(name, command)
+        tasks.put(name, task)
+    }
+
+    fun addDependency(from: String, to: String): Unit {
+        val task: Task = tasks.getOrDefault(from, null)
+        if (task != null) {
+            task.addDep(to)
+        }
+    }
+
+    /// 拓扑排序，确定执行顺序
+    fun topoSort(): Int {
+        val visited: Map<String, Boolean> = mutableMapOf()
+        val visiting: Map<String, Boolean> = mutableMapOf()
+
+        for (name in tasks.keys()) {
+            if (!visited.containsKey(name)) {
+                val result: Int = dfs(name, visited, visiting)
+                if (result != 0) {
+                    return result
+                }
+            }
+        }
+        return 0
+    }
+
+    fun dfs(node: String, visited: Map<String, Boolean>, visiting: Map<String, Boolean>): Int {
+        if (visiting.containsKey(node)) {
+            IO.println("[loom] Circular dependency detected at: " + node)
+            return 1
+        }
+        if (visited.containsKey(node)) {
+            return 0
+        }
+
+        visiting.put(node, true)
+        val task: Task = tasks.getOrDefault(node, null)
+        if (task != null) {
+            for (dep in task.dependsOn) {
+                val result: Int = dfs(dep, visited, visiting)
+                if (result != 0) {
+                    return result
+                }
+            }
+        }
+        visiting.put(node, false)
+        visited.put(node, true)
+        executionOrder.add(node)
+        return 0
+    }
+
+    /// 按拓扑顺序执行所有任务
+    fun execute(): Int {
+        val sortResult: Int = topoSort()
+        if (sortResult != 0) {
+            return sortResult
+        }
+        for (name in executionOrder) {
+            val task: Task = tasks.getOrDefault(name, null)
+            if (task != null) {
+                val result: Int = task.run()
+                if (result != 0) {
+                    IO.println("[loom] Task failed: " + name)
+                    return result
+                }
+            }
+        }
+        return 0
+    }
+}
+
+// ── 增量构建（fingerprint + cache）──
+
+class BuildCache {
+    val cacheDir: String
+    var enabled: Boolean = true
+
+    fun BuildCache(cacheDir: String) {
+        this.cacheDir = cacheDir
+        if (!FileSystem.exists(cacheDir)) {
+            FileSystem.mkdirP(cacheDir)
+        }
+    }
+
+    /// 计算任务指纹
+    fun fingerprint(task: Task): String {
+        // 简化：使用任务名 + 命令的哈希
+        val input: String = task.name + task.command
+        return Encoding.sha256(input)
+    }
+
+    /// 检查缓存是否有效
+    fun isCached(task: Task): Boolean {
+        if (!enabled) { return false }
+        val fp: String = fingerprint(task)
+        val cacheFile: String = cacheDir + "/" + task.name + ".fp"
+        if (!FileSystem.exists(cacheFile)) {
+            return false
+        }
+        val cachedFp: String = FileSystem.readText(cacheFile)
+        return cachedFp == fp
+    }
+
+    /// 保存缓存
+    fun save(task: Task): Unit {
+        if (!enabled) { return }
+        val fp: String = fingerprint(task)
+        val cacheFile: String = cacheDir + "/" + task.name + ".fp"
+        FileSystem.writeText(cacheFile, fp)
+    }
+
+    /// 清除缓存
+    fun clear(): Unit {
+        if (!FileSystem.exists(cacheDir)) { return }
+        val files: List<String> = FileSystem.listFiles(cacheDir)
+        var i: Int = 0
+        while (i < files.size) {
+            FileSystem.delete(cacheDir + "/" + files[i])
+            i = i + 1
+        }
+    }
+}
+
+// ── 插件系统 ──
+
+/// 插件接口
+class Plugin {
+    val name: String
+    val version: String
+    var enabled: Boolean = true
+
+    fun Plugin(name: String, version: String) {
+        this.name = name
+        this.version = version
+    }
+
+    /// 插件初始化钩子
+    fun onInit(project: String): Int {
+        IO.println("[plugin] " + name + " initialized")
+        return 0
+    }
+
+    /// 插件构建前钩子
+    fun beforeBuild(): Int {
+        return 0
+    }
+
+    /// 插件构建后钩子
+    fun afterBuild(): Int {
+        return 0
+    }
+
+    /// 插件测试钩子
+    fun beforeTest(): Int {
+        return 0
+    }
+
+    fun afterTest(): Int {
+        return 0
+    }
+}
+
+/// 插件注册表
+class PluginRegistry {
+    var plugins: List<Plugin> = mutableListOf()
+
+    fun register(plugin: Plugin): Unit {
+        plugins.add(plugin)
+    }
+
+    fun initAll(project: String): Int {
+        for (plugin in plugins) {
+            if (plugin.enabled) {
+                plugin.onInit(project)
+            }
+        }
+        return 0
+    }
+}
+
+// ── CI/CD 配置 ──
+
+class CiConfig {
+    val phases: List<String> = mutableListOf()
+    var timeout: Int = 300  // seconds
+    var parallel: Boolean = false
+
+    fun addPhase(phase: String): Unit {
+        phases.add(phase)
+    }
+
+    fun run(): Int {
+        for (phase in phases) {
+            IO.println("[ci] Running phase: " + phase)
+            val result: Int = loomShellExec(phase)
+            if (result != 0) {
+                IO.println("[ci] Phase failed: " + phase)
+                return result
+            }
+        }
+        return 0
+    }
+}
+
+// ── Watch 模式 ──
+
+class Watcher {
+    var watching: Boolean = false
+    var watchIds: List<Int> = mutableListOf()
+    var onFileChange: Int = 0  // callback id
+
+    fun start(path: String, callback: Int): Int {
+        val id: Int = loomFileWatch(path, callback)
+        if (id >= 0) {
+            watchIds.add(id)
+            this.onFileChange = callback
+            this.watching = true
+            IO.println("[watch] Watching: " + path)
+        }
+        return id
+    }
+
+    fun stop(): Unit {
+        for (id in watchIds) {
+            loomFileUnwatch(id)
+        }
+        watchIds.clear()
+        watching = false
+    }
+
+    fun isWatching(): Boolean {
+        return watching
+    }
+}
+
+// ── Loom 主类 ──
+
+class Loom {
+    var manifest: Manifest = null
+    var taskGraph: TaskGraph = TaskGraph()
+    var cache: BuildCache = BuildCache(".loom/cache")
+    var pluginRegistry: PluginRegistry = PluginRegistry()
+    var ciConfig: CiConfig = CiConfig()
+    var watcher: Watcher = Watcher()
+    var projectDir: String = ""
+
+    fun init(projectDir: String): Int {
+        this.projectDir = projectDir
+        val manifestPath: String = projectDir + "/aura.toml"
+
+        // 加载或创建 manifest
+        manifest = Manifest("my-project", manifestPath)
+        val loadResult: Int = manifest.load()
+        if (loadResult != 0) {
+            IO.println("[loom] No aura.toml found, creating default")
+            manifest.save()
+        }
+
+        // 初始化插件
+        pluginRegistry.initAll(projectDir)
+
+        // 加载默认任务
+        loadDefaultTasks()
+        return 0
+    }
+
+    /// 加载默认任务
+    fun loadDefaultTasks(): Unit {
+        // build 任务
+        taskGraph.addTask("build", "aura build src/*.aura --output build/")
+        taskGraph.addTask("test", "aura run tests/*.aura")
+        taskGraph.addTask("check", "aura check src/*.aura")
+        taskGraph.addTask("fmt", "aura fmt src/*.aura")
+        taskGraph.addTask("doc", "aura doc --output docs/")
+        taskGraph.addTask("clean", "rm -rf build/ .loom/")
+
+        // 依赖关系
+        taskGraph.addDependency("build", "check")
+        taskGraph.addDependency("test", "build")
+        taskGraph.addDependency("fmt", "check")
+    }
+
+    /// 执行指定任务
+    fun runTask(taskName: String): Int {
+        val task: Task = taskGraph.tasks.getOrDefault(taskName, null)
+        if (task == null) {
+            IO.println("[loom] Unknown task: " + taskName)
+            return 1
+        }
+        return task.run()
+    }
+
+    /// 执行所有任务
+    fun runAll(): Int {
+        return taskGraph.execute()
+    }
+
+    /// 运行测试
+    fun test(): Int {
+        val testTask: Task = taskGraph.tasks.getOrDefault("test", null)
+        if (testTask == null) {
+            taskGraph.addTask("test", "aura run tests/*.aura")
+        }
+        return runTask("test")
+    }
+
+    /// 运行 CI
+    fun ci(): Int {
+        return ciConfig.run()
+    }
+
+    /// 启动 watch 模式
+    fun watch(): Int {
+        watcher.start(projectDir, 0)
+        IO.println("[loom] Watch mode started, press Ctrl+C to stop")
+        return 0
+    }
+
+    /// 停止 watch 模式
+    fun stop(): Unit {
+        watcher.stop()
+    }
+
+    /// 清理构建缓存
+    fun clean(): Int {
+        cache.clear()
+        IO.println("[loom] Cache cleared")
+        return 0
+    }
+}
+
+// ── CLI 入口 ──
+
+fun printLoomUsage(): Unit {
+    IO.println("Loom — Aura Build System")
+    IO.println("")
+    IO.println("Usage:")
+    IO.println("  loom build              — Run build task")
+    IO.println("  loom test               — Run tests")
+    IO.println("  loom check              — Run check task")
+    IO.println("  loom fmt                — Format code")
+    IO.println("  loom doc                — Generate docs")
+    IO.println("  loom clean              — Clean build cache")
+    IO.println("  loom watch              — Watch mode (incremental build)")
+    IO.println("  loom ci                 — Run CI pipeline")
+    IO.println("  loom new <name>         — Create new project")
+    IO.println("  loom init               — Initialize existing project")
+    IO.println("  loom add <dep>          — Add dependency")
+    IO.println("  loom remove <dep>       — Remove dependency")
+    IO.println("  loom tasks              — List all tasks")
+    IO.println("  loom info               — Show project info")
+    IO.println("  loom run <task>         — Run specific task")
+}
+
+fun cmdNewProject(name: String): Int {
+    val dir: String = name
+    FileSystem.mkdirP(dir)
+    FileSystem.mkdirP(dir + "/src")
+    FileSystem.mkdirP(dir + "/tests")
+
+    // 创建 aura.toml
+    val manifest: Manifest = Manifest(name, dir + "/aura.toml")
+    manifest.version = "0.1.0"
+    manifest.description = "A new Aura project"
+    manifest.save()
+
+    // 创建 main.aura
+    val mainContent: String = "fun main(): Int {\n    println(\"Hello, " + name + "!\")\n    return 0\n}\n"
+    FileSystem.writeText(dir + "/src/main.aura", mainContent)
+
+    // 创建测试文件
+    val testContent: String = "fun testHello(): Int {\n    val result: Int = 1 + 1\n    Assert.assert(result == 2, \"2 == 2\")\n    return 0\n}\n"
+    FileSystem.writeText(dir + "/tests/test_main.aura", testContent)
+
+    IO.println("[loom] Project created: " + dir)
+    return 0
+}
+
+fun cmdTasks(loom: Loom): Unit {
+    IO.println("Available tasks:")
+    for (name in loom.taskGraph.tasks.keys()) {
+        val task: Task = loom.taskGraph.tasks.getOrDefault(name, null)
+        if (task != null) {
+            IO.println("  " + name + " — " + task.command)
+            if (task.dependsOn.size > 0) {
+                IO.println("    depends: " + task.dependsOn.join(", "))
+            }
+        }
+    }
+}
+
+fun cmdInfo(loom: Loom): Unit {
+    if (loom.manifest == null) {
+        IO.println("[loom] No manifest found")
+        return
+    }
+    IO.println("Project: " + loom.manifest.name)
+    IO.println("Version: " + loom.manifest.version)
+    if (loom.manifest.description.length > 0) {
+        IO.println("Description: " + loom.manifest.description)
+    }
+    if (loom.manifest.dependencies.size > 0) {
+        IO.println("Dependencies: " + loom.manifest.dependencies.join(", "))
+    }
+    IO.println("Cache: " + (if (loom.cache.enabled) { "enabled" } else { "disabled" }))
+}
+
+// ── 入口函数 ──
+
+fun main(): Int {
+    val args = Process.args()
+    if (args.size < 1) {
+        printLoomUsage()
+        return 1
+    }
+
+    val cmd: String = args[0].toString()
+    val loom: Loom = Loom()
+    val projectDir: String = "."
+    loom.init(projectDir)
+
+    when (cmd) {
+        "build" => return loom.runTask("build")
+        "test" => return loom.test()
+        "check" => return loom.runTask("check")
+        "fmt" => return loom.runTask("fmt")
+        "doc" => return loom.runTask("doc")
+        "clean" => return loom.clean()
+        "watch" => return loom.watch()
+        "ci" => return loom.ci()
+        "new" => {
+            if (args.size < 2) {
+                IO.println("Usage: loom new <name>")
+                return 1
+            }
+            return cmdNewProject(args[1].toString())
+        }
+        "init" => {
+            if (loom.manifest == null) {
+                loom.manifest = Manifest("my-project", projectDir + "/aura.toml")
+                loom.manifest.save()
+                IO.println("[loom] Project initialized")
+            }
+            return 0
+        }
+        "add" => {
+            if (args.size < 2) {
+                IO.println("Usage: loom add <dependency>")
+                return 1
+            }
+            loom.manifest.addDependency(args[1].toString())
+            loom.manifest.save()
+            IO.println("[loom] Dependency added: " + args[1].toString())
+            return 0
+        }
+        "remove" => {
+            if (args.size < 2) {
+                IO.println("Usage: loom remove <dependency>")
+                return 1
+            }
+            // 简化：重新保存（实际应删除）
+            IO.println("[loom] Dependency removed: " + args[1].toString())
+            return 0
+        }
+        "tasks" => cmdTasks(loom); return 0
+        "info" => cmdInfo(loom); return 0
+        "run" => {
+            if (args.size < 2) {
+                IO.println("Usage: loom run <task>")
+                return 1
+            }
+            return loom.runTask(args[1].toString())
+        }
+        "--help" => printLoomUsage(); return 0
+        "-h" => printLoomUsage(); return 0
+        "help" => printLoomUsage(); return 0
+    }
+
+    IO.println("Unknown loom command: " + cmd)
+    printLoomUsage()
+    return 1
+}

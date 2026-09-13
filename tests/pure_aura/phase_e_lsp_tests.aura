@@ -1,0 +1,149 @@
+// Phase E.2: AuraLsp.aura 单元测试
+//
+// 验证 LSP 服务器结构、请求解析、文档管理等核心功能。
+
+import aura.lang.std.String
+import aura.lang.std.IO
+import aura.lang.std.Collections
+import aura.lang.std.Assert
+import aura.lang.std.Json
+
+// ── LspRequest / LspResponse 测试 ──
+
+fun testLspRequestConstruction(): Int {
+    val req = LspRequest(1, "textDocument/completion", "{\"position\": {\"character\": 5}}")
+    Assert.assert(req.id == 1, "Request id should be 1")
+    Assert.assert(req.method == "textDocument/completion", "Method should be completion")
+    return 0
+}
+
+fun testLspResponseConstruction(): Int {
+    val resp = LspResponse(1, "result_json", "")
+    Assert.assert(resp.id == 1, "Response id should be 1")
+    Assert.assert(resp.result == "result_json", "Result should be 'result_json'")
+    Assert.assert(resp.error == "", "Error should be empty")
+    return 0
+}
+
+fun testLspResponseToJson(): Int {
+    val resp = LspResponse(1, "test_result", "")
+    val json = resp.toJson()
+    Assert.assert(json.contains("\"id\""), "JSON should contain id")
+    Assert.assert(json.contains("\"result\""), "JSON should contain result")
+    return 0
+}
+
+fun testLspResponseWithErrorResponse(): Int {
+    val resp = LspResponse(1, "", "error_message")
+    val json = resp.toJson()
+    Assert.assert(json.contains("\"error\""), "JSON should contain error field")
+    return 0
+}
+
+// ── LspServer 文档管理测试 ──
+
+fun testLspServerDocumentOpen(): Int {
+    val server = LspServer()
+    // 模拟 didOpen
+    val params = "{\"textDocument\": {\"uri\": \"file:///test.aura\", \"text\": \"fun main() {}\"}}"
+    val result = server.handleDidOpen(params)
+    Assert.assert(result == "null", "didOpen should return null")
+    return 0
+}
+
+fun testLspServerDocumentClose(): Int {
+    val server = LspServer()
+    // 先打开
+    server.handleDidOpen("{\"textDocument\": {\"uri\": \"file:///test.aura\", \"text\": \"fun main() {}\"}}")
+    // 再关闭
+    val result = server.handleDidClose("{\"textDocument\": {\"uri\": \"file:///test.aura\"}}")
+    Assert.assert(result == "null", "didClose should return null")
+    return 0
+}
+
+// ── Content-Length 解析测试 ──
+
+fun testParseContentLength(): Int {
+    Assert.assert(parseContentLength("Content-Length: 100") == 100, "Should parse 100")
+    Assert.assert(parseContentLength("Content-Length: 0") == 0, "Should parse 0")
+    Assert.assert(parseContentLength("Invalid header") == -1, "Should return -1 for invalid")
+    Assert.assert(parseContentLength("") == -1, "Should return -1 for empty")
+    return 0
+}
+
+// ── 请求分派测试 ──
+
+fun testDispatchShutdown(): Int {
+    val server = LspServer()
+    val req = LspRequest(1, "shutdown", "{}")
+    val result = server.dispatchRequest(req)
+    Assert.assert(result == "null", "shutdown should return null")
+    return 0
+}
+
+// ── JSON 字段提取测试 ──
+
+fun testExtractField(): Int {
+    val server = LspServer()
+    val json = "{\"textDocument\": {\"uri\": \"file:///test.aura\"}}"
+    val uri = server.extractField(json, "textDocument", "uri")
+    Assert.assert(uri == "file:///test.aura", "Should extract URI")
+    return 0
+}
+
+fun testExtractIntField(): Int {
+    val server = LspServer()
+    val json = "{\"position\": {\"character\": 42}}"
+    val pos = server.extractIntField(json, "position", "character")
+    Assert.assert(pos == 42, "Should extract position 42")
+    return 0
+}
+
+// ── 主测试函数 ──
+
+fun main(): Int {
+    println("=== Phase E.2: AuraLsp Unit Tests ===")
+
+    var testsRun: Int = 0
+    var testsPassed: Int = 0
+
+    println("Running LspRequest/LspResponse tests...")
+    if (testLspRequestConstruction() == 0) { testsPassed = testsPassed + 1 }
+    testsRun = testsRun + 1
+    if (testLspResponseConstruction() == 0) { testsPassed = testsPassed + 1 }
+    testsRun = testsRun + 1
+    if (testLspResponseToJson() == 0) { testsPassed = testsPassed + 1 }
+    testsRun = testsRun + 1
+    if (testLspResponseWithErrorResponse() == 0) { testsPassed = testsPassed + 1 }
+    testsRun = testsRun + 1
+
+    println("Running LspServer document tests...")
+    if (testLspServerDocumentOpen() == 0) { testsPassed = testsPassed + 1 }
+    testsRun = testsRun + 1
+    if (testLspServerDocumentClose() == 0) { testsPassed = testsPassed + 1 }
+    testsRun = testsRun + 1
+
+    println("Running Content-Length parsing tests...")
+    if (testParseContentLength() == 0) { testsPassed = testsPassed + 1 }
+    testsRun = testsRun + 1
+
+    println("Running dispatch tests...")
+    if (testDispatchShutdown() == 0) { testsPassed = testsPassed + 1 }
+    testsRun = testsRun + 1
+
+    println("Running JSON extraction tests...")
+    if (testExtractField() == 0) { testsPassed = testsPassed + 1 }
+    testsRun = testsRun + 1
+    if (testExtractIntField() == 0) { testsPassed = testsPassed + 1 }
+    testsRun = testsRun + 1
+
+    println("")
+    println("=== Results: $testsPassed / $testsRun passed ===")
+    if (testsPassed == testsRun) {
+        println("ALL TESTS PASSED")
+        return 0
+    } else {
+        println("SOME TESTS FAILED")
+        return 1
+    }
+}

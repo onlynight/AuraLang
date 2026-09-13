@@ -295,6 +295,12 @@ impl Parser {
         if self.check(TokenKind::Actor) {
             return Ok(Decl::Actor(self.parse_actor()));
         }
+        // Phase D: 顶层 native fun xxx() — 编译器内置
+        if self.check(TokenKind::Native) {
+            self.advance(); // native
+            self.pending_native_attr = Some(NativeAttr::Builtin);
+            return Ok(Decl::Function(self.parse_fn_decl()));
+        }
         if self.check(TokenKind::Fun) || self.is_method_modifier_token() {
             return Ok(Decl::Function(self.parse_fn_decl()));
         }
@@ -2342,22 +2348,21 @@ impl Parser {
             "SYS_OPEN" => 2,
             "SYS_CLOSE" => 3,
             "SYS_FSTAT" => 5,
-            "SYS_LSEEK" => 6,
+            "SYS_LSEEK" => 8,
             "SYS_MMAP" => 9,
-            "SYS_MUNMAP" => 10,
+            "SYS_MUNMAP" => 11,
             "SYS_ACCESS" => 21,
             "SYS_UNLINK" => 39,
             "SYS_EXECVE" => 59,
-            "SYS_EXIT_GROUP" => 60,
+            "SYS_EXIT_GROUP" => 231,
             "SYS_WAIT4" => 61,
             "SYS_CLOCK_GETTIME" => 228,
-            "SYS_GETRANDOM" => 272,
+            "SYS_GETRANDOM" => 257,
             // 其他系统调用（按 Linux x86_64 ABI）
             "SYS_READV" => 62,
             "SYS_WRITEV" => 63,
             "SYS_CLONE" => 56,
             "SYS_FORK" => 57,
-            "SYS_EXECVE" => 59,
             "SYS_PIPE" => 32,
             "SYS_PIPE2" => 291,
             "SYS_GETPID" => 39,
@@ -2374,6 +2379,43 @@ impl Parser {
             "SYS_MSGRCV" => 69,
             "SYS_SEMOP" => 65,
             "SYS_SEMGET" => 64,
+            _ => -1,
+        }
+    }
+
+    /// Windows Nt* 系统调用服务号表（x86_64）
+    /// 注意：Windows Nt* 服务号在不同版本间可能变化，此处为常见值
+    #[allow(dead_code)]
+    fn lookup_nt_service_const(&self, name: &str) -> i64 {
+        match name {
+            "NT_WRITEFILE" => 0x0000000000000000,
+            "NT_READFILE" => 0x0000000000000001,
+            "NT_CREATEFILE" => 0x0000000000000005,
+            "NT_CLOSE" => 0x0000000000000006,
+            "NT_SETEVENT" => 0x0000000000000007,
+            "NT_WAIT_FOR_SINGLE_OBJECT" => 0x0000000000000009,
+            "NT_EXIT_PROCESS" => 0x0000000000000010,
+            "NT_QUIT" => 0x0000000000000011,
+            "NT_TERMINATE_THREAD" => 0x0000000000000012,
+            "NT_QUERY_INFORMATION_PROCESS" => 0x0000000000000013,
+            "NT_WRITE_VARIANT" => 0x0000000000000014,
+            "NT_READ_VARIANT" => 0x0000000000000015,
+            "NT_EXIT_THREAD" => 0x0000000000000016,
+            "NT_READ_CONTROL_FILE" => 0x0000000000000017,
+            "NT_WRITE_CONTROL_FILE" => 0x0000000000000018,
+            "NT_MAP_VIEW_OF_FILE" => 0x0000000000000019,
+            "NT_UNMAP_VIEW_OF_FILE" => 0x000000000000001A,
+            "NT_WRITE_GATHER" => 0x000000000000001B,
+            "NT_READ_GATHER" => 0x000000000000001C,
+            "NT_QUERY_SYSTEM_INFORMATION" => 0x000000000000001D,
+            "NT_SET_SYSTEM_INFORMATION" => 0x000000000000001E,
+            "NT_READ_VARIANT_FILE" => 0x000000000000001F,
+            "NT_WRITE_VARIANT_FILE" => 0x0000000000000020,
+            "NT_WRITE_VARIANT_CONTROL" => 0x0000000000000021,
+            "NT_WRITE_VARIANT_GATHER" => 0x0000000000000022,
+            "NT_READ_VARIANT_GATHER" => 0x0000000000000023,
+            "NT_READ_VARIANT_CONTROL" => 0x0000000000000024,
+            "NT_EXIT" => 0x0000000000000025,
             _ => -1,
         }
     }

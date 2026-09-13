@@ -1,0 +1,124 @@
+// aura:///aura/lang/native/arch/x86_64_linux/Syscalls.aura
+package aura.lang.native.arch.x86_64_linux
+// ─────────────────────────────────────────────────────────────
+// x86_64 Linux 系统调用表 — Phase S3 / v3.0
+//
+// Linux x86_64 系统调用号（stable ABI，Linux 5.0+）。
+// 通过 syscall 指令调用。
+//
+// @native(N) 由编译器直接生成内联 syscall 指令 IR，
+// 不依赖任何 C 分发函数。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.native.Memory
+
+/// x86_64 Linux 系统调用
+extern object Syscalls {
+
+    // ── 标准文件描述符 ──
+    const val STDIN: Int = 0
+    const val STDOUT: Int = 1
+    const val STDERR: Int = 2
+
+    // ── 文件操作常量 ──
+    const val O_RDONLY: Int = 0
+    const val O_WRONLY: Int = 1
+    const val O_RDWR: Int = 2
+    const val O_CREAT: Int = 0x40
+    const val O_EXCL: Int = 0x80
+    const val O_TRUNC: Int = 0x200
+
+    // ── 内存保护常量 ──
+    const val PROT_NONE: Int = 0
+    const val PROT_READ: Int = 1
+    const val PROT_WRITE: Int = 2
+    const val PROT_EXEC: Int = 4
+
+    // ── 内存映射常量 ──
+    const val MAP_SHARED: Int = 1
+    const val MAP_PRIVATE: Int = 2
+    const val MAP_ANONYMOUS: Int = 0x20
+    const val MAP_ANON: Int = 0x20
+
+    // ── 文件操作 ──
+    @native(0) fun read(fd: Int, buf: Long, count: Long): Long
+    @native(1) fun write(fd: Int, buf: Long, count: Long): Long
+    @native(2) fun open(path: Long, flags: Int, mode: Int): Int
+    @native(3) fun close(fd: Int): Int
+    @native(6) fun fstat(fd: Int, buf: Long): Long
+    @native(8) fun lseek(fd: Int, off: Long, whence: Int): Long
+
+    // ── 内存管理 ──
+    @native(9) fun mmap(addr: Long, len: Long, prot: Int, flags: Int, fd: Int, off: Long): Long
+    @native(11) fun munmap(addr: Long, len: Long): Long
+    @native(12) fun brk(addr: Long): Long
+
+    // ── 进程管理 ──
+    @native(39) fun getpid(): Int
+    @native(64) fun getppid(): Int
+    @native(57) fun fork(): Int
+    @native(59) fun execve(path: Long, argv: Long, envp: Long): Int
+    @native(61) fun wait4(pid: Int, status: Long, options: Int, rusage: Long): Int
+    @native(231) fun exitGroup(code: Int)
+
+    // ── 文件操作（目录）──
+    @native(80) fun readdir(fd: Int): Long
+    @native(82) fun rename(oldpath: Long, newpath: Long): Int
+    @native(83) fun mkdir(path: Long, mode: Int): Int
+    @native(84) fun rmdir(path: Long): Int
+    @native(87) fun unlink(path: Long): Int
+
+    // ── 时间 ──
+    @native(228) fun clock_gettime(clock: Int, ts: Long): Long
+    @native(35) fun nanosleep(req: Long, rem: Long): Long
+
+    // ── 网络 ──
+    @native(41) fun socket(domain: Int, type: Int, protocol: Int): Int
+    @native(42) fun connect(fd: Int, addr: Long, addrlen: Int): Int
+    @native(49) fun bind(fd: Int, addr: Long, addrlen: Int): Int
+    @native(50) fun listen(fd: Int, backlog: Int): Int
+    @native(43) fun accept(fd: Int, addr: Long, addrlen: Long): Int
+    @native(44) fun sendto(fd: Int, buf: Long, len: Int, flags: Int, addr: Long, addrlen: Int): Long
+    @native(45) fun recvfrom(fd: Int, buf: Long, len: Int, flags: Int, addr: Long, addrlen: Long): Long
+    @native(23) fun select(n: Int, readfds: Long, writefds: Long, exceptfds: Long, timeout: Long): Int
+    @native(291) fun epoll_create1(flags: Int): Int
+    @native(290) fun epoll_ctl(epfd: Int, op: Int, fd: Int, event: Long): Int
+    @native(281) fun epoll_pwait(epfd: Int, events: Long, maxevents: Int, timeout: Int, sigmask: Long): Int
+
+    // ── 管道 ──
+    @native(22) fun pipe(fds: Long): Int
+    @native(257) fun pipe2(fds: Long, flags: Int): Int
+    @native(32) fun dup(oldfd: Int): Int
+    @native(33) fun dup2(oldfd: Int, newfd: Int): Int
+
+    // ── 文件监控 ──
+    @native(254) fun inotify_init1(flags: Int): Int
+    @native(255) fun inotify_add_watch(fd: Int, path: Long, mask: Int): Int
+    @native(256) fun inotify_rm_watch(fd: Int, wd: Int): Int
+
+    // ── 文件描述符 ──
+    @native(16) fun ioctl(fd: Int, request: Int, arg: Int): Int
+
+    // ── 杂项 ──
+    @native(257) fun getrandom(buf: Long, len: Long, flags: Int): Long
+    @native(62) fun kill(pid: Int, sig: Int): Int
+
+    // ── 其他常量 ──
+    const val INVALID_FD: Int = -1
+    const val MAP_FAILED: Long = -1
+    const val AT_FDCWD: Int = -100
+    const val F_OK: Int = 0
+    const val R_OK: Int = 4
+    const val W_OK: Int = 2
+    const val X_OK: Int = 1
+
+    // ── 时钟常量 ──
+    const val CLOCK_REALTIME: Int = 0
+    const val CLOCK_MONOTONIC: Int = 1
+    const val CLOCK_MONOTONIC_RAW: Int = 4
+    const val CLOCK_REALTIME_COARSE: Int = 5
+    const val CLOCK_MONOTONIC_COARSE: Int = 6
+    const val CLOCK_PROCESS_CPUTIME_ID: Int = 2
+    const val CLOCK_THREAD_CPUTIME_ID: Int = 3
+    const val CLOCK_BOOTTIME: Int = 7
+}

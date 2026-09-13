@@ -1219,7 +1219,39 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
 
     for decl in &program.declarations {
         match decl {
-            Decl::Function(f) => functions.push(desugar_fn(f)),
+            Decl::Function(f) => {
+                // 顶层 native fun / @native fun → 加入 natives（由 emit_native_wrappers 处理）
+                // 普通 fun → 加入 functions
+                if f.native_attr.is_some() {
+                    natives.push(HirFunction {
+                        name: f.name.clone(),
+                        params: f
+                            .params
+                            .iter()
+                            .map(|p| HirParam {
+                                name: p.name.clone(),
+                                ty: HirType::from_ast_opt(&p.type_hint),
+                                default_value: p
+                                    .default_value
+                                    .as_ref()
+                                    .map(|e| Box::new(desugar_expr(e))),
+                                is_vararg: p.is_vararg,
+                            })
+                            .collect(),
+                        ret: HirType::from_ast_opt(&f.return_type),
+                        body: HirBlock {
+                            stmts: vec![],
+                        },
+                        is_native: true,
+                        type_params: vec![],
+                        ffi_abi: FfiAbi::Aura,
+                        ffi_lib: None,
+                        native_attr: f.native_attr.clone(),
+                    });
+                } else {
+                    functions.push(desugar_fn(f));
+                }
+            }
             Decl::Struct(s) => {
                 structs.push(HirStruct {
                     name: s.name.clone(),

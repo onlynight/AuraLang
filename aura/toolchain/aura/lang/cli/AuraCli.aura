@@ -1,0 +1,509 @@
+// aura:///aura/lang/cli/AuraCli.aura
+// Phase E.1: Aura CLI — 替代 cli/src/main.rs
+//
+// 纯 Aura 实现，通过 @native 调用 C 层 aura_std_cffi.c / aura_syscalls.c。
+// 替代 Rust cli/src/main.rs，完全脱离 Rust CLI。
+//
+// 用法：
+//   aura build <file.aura> [--output <out>]
+//   aura build <file.aura> --aot [--output <exe>]
+//   aura run <file.aura>
+//   aura check <file.aura>
+//   aura disasm <file.auc>
+//   aura tokens <file.aura>
+//   aura ast <file.aura>
+//   aura fmt <file.aura> [--check]
+//   aura leak-check <file.aura>
+//   aura doc [--output <dir>]
+//   aura eval [--expr <code>]
+//   aura repl
+//   aura install / update / publish / deps / new
+//   aura package / inspect / verify
+//   aura lsp
+//   aura debug <file.aura>
+//
+// @since 0.6
+
+import aura.lang.std.String
+import aura.lang.std.Encoding
+import aura.lang.std.FileSystem
+import aura.lang.std.IO
+import aura.lang.std.Process
+import aura.lang.std.Path
+import aura.lang.std.Json
+import aura.lang.std.Collections
+
+// ── 编译器 API（@native 桥接到 Rust 编译器或 C 层）──
+
+@native fun compilerMain(args: Int): Int { }
+
+@native fun lexerTokenize(src: String): String { }
+
+@native fun parserParse(src: String): String { }
+
+@native fun astToString(src: String): String { }
+
+@native fun semaCheck(src: String): String { }
+
+@native fun codegenCompile(src: String): String { }
+
+@native fun codegenDisasm(src: String): String { }
+
+@native fun vmRun(src: String): Int { }
+
+@native fun fmtFormat(src: String): String { }
+
+@native fun fmtCheck(src: String): Int { }
+
+@native fun docGenerate(src: String): String { }
+
+@native fun evalExec(expr: String): String { }
+
+@native fun replMain(): Int { }
+
+@native fun packageCreate(src: String): String { }
+
+@native fun packageInspect(src: String): String { }
+
+@native fun packageVerify(src: String): String { }
+
+@native fun lspMain(): Int { }
+
+@native fun debuggerMain(args: Int): Int { }
+
+@native fun installDep(args: Int): Int { }
+
+@native fun updateDep(args: Int): Int { }
+
+@native fun publishPkg(args: Int): Int { }
+
+@native fun depsList(args: Int): Int { }
+
+@native fun newProject(args: Int): Int { }
+
+@native fun exportHeader(src: String): String { }
+
+@native fun leakCheck(src: String): String { }
+
+// ── 命令行参数解析 ──
+
+/// 命令行参数容器
+class Args {
+    var raw: List<String> = mutableListOf()
+
+    fun add(arg: String): Unit { raw.add(arg) }
+
+    fun get(index: Int): String { return raw[index] }
+
+    fun size(): Int { return raw.size }
+
+    fun isEmpty(): Boolean { return raw.size == 0 }
+
+    fun hasFlag(flag: String): Boolean {
+        var i: Int = 0
+        while (i < raw.size) {
+            if (raw[i] == flag) { return true }
+            i = i + 1
+        }
+        return false
+    }
+
+    fun getValue(flag: String): String {
+        var i: Int = 0
+        while (i < raw.size - 1) {
+            if (raw[i] == flag) { return raw[i + 1] }
+            i = i + 1
+        }
+        return ""
+    }
+}
+
+/// 从原生进程参数构建 Args
+fun parseArgs(): Args {
+    val args = Args()
+    // 通过 native 调用获取进程参数
+    val rawArgs = Process.args()
+    var i: Int = 0
+    while (i < rawArgs.size) {
+        args.add(rawArgs[i].toString())
+        i = i + 1
+    }
+    return args
+}
+
+// ── 帮助信息 ──
+
+fun printUsage(): Unit {
+    IO.println("Aura language toolchain")
+    IO.println("")
+    IO.println("Usage:")
+    IO.println("  aura build <file.aura> [--output <out>]        Compile to bytecode .auc / native executable")
+    IO.println("  aura build <file.aura> --aot [--output <exe>]   AOT compile to native executable")
+    IO.println("  aura build <file.aura> --aot-embed              Compile .auc v4 (embed AOT machine code)")
+    IO.println("  aura build <file.aura> --lib [--output <out>]   Compile to library")
+    IO.println("  aura run <file.aura>                            Compile and run")
+    IO.println("  aura check <file.aura>                          Syntax/semantics check only")
+    IO.println("  aura disasm <file.auc> [--source <file.aura>]   Disassemble .auc")
+    IO.println("  aura tokens <file.aura>                         Output lexer tokens")
+    IO.println("  aura ast <file.aura>                            Output AST")
+    IO.println("  aura fmt <file.aura> [--check]                  Format code")
+    IO.println("  aura leak-check <file.aura>                     Memory leak check")
+    IO.println("  aura doc [--output <dir>]                       Generate documentation")
+    IO.println("  aura eval [--expr <code>]                       Evaluate expression")
+    IO.println("  aura repl                                       Interactive REPL")
+    IO.println("  aura install                                    Install dependencies")
+    IO.println("  aura update                                     Update dependencies")
+    IO.println("  aura publish                                    Publish package")
+    IO.println("  aura deps                                       List dependencies")
+    IO.println("  aura new                                        Create new project")
+    IO.println("  aura package <file.aura>                        Package as .auz")
+    IO.println("  aura inspect <file.auz>                         Inspect .auz package")
+    IO.println("  aura verify <file.auz>                          Verify .auz package")
+    IO.println("  aura lsp                                        Start LSP server")
+    IO.println("  aura debug <file.aura>                          Start debugger")
+    IO.println("  aura export-header <file.aura>                  Export C ABI header")
+    IO.println("")
+    IO.println("Options:")
+    IO.println("  --help, -h                                      Show this help message")
+    IO.println("  --version                                       Show version")
+}
+
+// ── 子命令处理 ──
+
+/// aura build <file.aura> [--output <out>] [--aot] [--aot-embed] [--lib]
+fun cmdBuild(args: Args): Int {
+    if (args.size < 1) {
+        IO.println("Error: build requires a source file")
+        return 1
+    }
+    val src: String = args.get(0)
+    val out: String = args.getValue("--output")
+    val isAot: Boolean = args.hasFlag("--aot")
+    val isAotEmbed: Boolean = args.hasFlag("--aot-embed")
+    val isLib: Boolean = args.hasFlag("--lib")
+
+    // 读取源文件
+    val content: String = FileSystem.readText(src)
+    if (content.length == 0) {
+        IO.println("Error: cannot read file: " + src)
+        return 1
+    }
+
+    if (isAot) {
+        val result: String = codegenCompile(content)
+        if (out.length > 0) {
+            FileSystem.writeText(out, result)
+            IO.println("AOT compiled: " + out)
+        } else {
+            IO.println(result)
+        }
+        return 0
+    } else if (isAotEmbed) {
+        val result: String = codegenCompile(content)
+        if (out.length > 0) {
+            FileSystem.writeText(out, result)
+            IO.println("AOT-embed compiled: " + out)
+        }
+        return 0
+    } else if (isLib) {
+        val result: String = codegenCompile(content)
+        if (out.length > 0) {
+            FileSystem.writeText(out, result)
+            IO.println("Library compiled: " + out)
+        }
+        return 0
+    } else {
+        val result: String = codegenCompile(content)
+        if (out.length > 0) {
+            FileSystem.writeText(out, result)
+            IO.println("Compiled: " + out)
+        } else {
+            IO.println(result)
+        }
+        return 0
+    }
+}
+
+/// aura run <file.aura>
+fun cmdRun(args: Args): Int {
+    if (args.size < 1) {
+        IO.println("Error: run requires a source file")
+        return 1
+    }
+    val src: String = args.get(0)
+    val content: String = FileSystem.readText(src)
+    if (content.length == 0) {
+        IO.println("Error: cannot read file: " + src)
+        return 1
+    }
+    return vmRun(content)
+}
+
+/// aura check <file.aura>
+fun cmdCheck(args: Args): Int {
+    if (args.size < 1) {
+        IO.println("Error: check requires a source file")
+        return 1
+    }
+    val src: String = args.get(0)
+    val content: String = FileSystem.readText(src)
+    val result: String = semaCheck(content)
+    IO.println(result)
+    // 检查结果中是否包含错误
+    if (result.contains("error")) {
+        return 1
+    }
+    return 0
+}
+
+/// aura disasm <file.auc>
+fun cmdDisasm(args: Args): Int {
+    if (args.size < 1) {
+        IO.println("Error: disasm requires a .auc file")
+        return 1
+    }
+    val src: String = args.get(0)
+    val content: String = FileSystem.readText(src)
+    val result: String = codegenDisasm(content)
+    IO.println(result)
+    return 0
+}
+
+/// aura tokens <file.aura>
+fun cmdTokens(args: Args): Int {
+    if (args.size < 1) {
+        IO.println("Error: tokens requires a source file")
+        return 1
+    }
+    val src: String = args.get(0)
+    val content: String = FileSystem.readText(src)
+    val result: String = lexerTokenize(content)
+    IO.println(result)
+    return 0
+}
+
+/// aura ast <file.aura>
+fun cmdAst(args: Args): Int {
+    if (args.size < 1) {
+        IO.println("Error: ast requires a source file")
+        return 1
+    }
+    val src: String = args.get(0)
+    val content: String = FileSystem.readText(src)
+    val result: String = astToString(content)
+    IO.println(result)
+    return 0
+}
+
+/// aura fmt <file.aura> [--check]
+fun cmdFmt(args: Args): Int {
+    if (args.size < 1) {
+        IO.println("Error: fmt requires a source file")
+        return 1
+    }
+    val src: String = args.get(0)
+    val content: String = FileSystem.readText(src)
+
+    if (args.hasFlag("--check")) {
+        return fmtCheck(content)
+    } else {
+        val result: String = fmtFormat(content)
+        FileSystem.writeText(src, result)
+        IO.println("Formatted: " + src)
+        return 0
+    }
+}
+
+/// aura leak-check <file.aura>
+fun cmdLeakCheck(args: Args): Int {
+    if (args.size < 1) {
+        IO.println("Error: leak-check requires a source file")
+        return 1
+    }
+    val src: String = args.get(0)
+    val content: String = FileSystem.readText(src)
+    val result: String = leakCheck(content)
+    IO.println(result)
+    return 0
+}
+
+/// aura doc [--output <dir>]
+fun cmdDoc(args: Args): Int {
+    val out: String = args.getValue("--output")
+    if (args.size >= 1) {
+        val src: String = args.get(0)
+        val content: String = FileSystem.readText(src)
+        val result: String = docGenerate(content)
+        if (out.length > 0) {
+            FileSystem.writeText(out + "/index.html", result)
+            IO.println("Documentation generated: " + out)
+        } else {
+            IO.println(result)
+        }
+    } else {
+        IO.println("Error: doc requires a source file")
+    }
+    return 0
+}
+
+/// aura eval [--expr <code>]
+fun cmdEval(args: Args): Int {
+    val expr: String = args.getValue("--expr")
+    if (expr.length > 0) {
+        val result: String = evalExec(expr)
+        IO.println(result)
+    } else {
+        IO.println("Error: eval requires --expr <code>")
+        return 1
+    }
+    return 0
+}
+
+/// aura repl
+fun cmdRepl(args: Args): Int {
+    return replMain()
+}
+
+/// aura install
+fun cmdInstall(args: Args): Int {
+    return installDep(args.size)
+}
+
+/// aura update
+fun cmdUpdate(args: Args): Int {
+    return updateDep(args.size)
+}
+
+/// aura publish
+fun cmdPublish(args: Args): Int {
+    return publishPkg(args.size)
+}
+
+/// aura deps
+fun cmdDepList(args: Args): Int {
+    return depsList(args.size)
+}
+
+/// aura new
+fun cmdNew(args: Args): Int {
+    return newProject(args.size)
+}
+
+/// aura package <file.aura>
+fun cmdPackage(args: Args): Int {
+    if (args.size < 1) {
+        IO.println("Error: package requires a source file")
+        return 1
+    }
+    val src: String = args.get(0)
+    val content: String = FileSystem.readText(src)
+    val result: String = packageCreate(content)
+    IO.println(result)
+    return 0
+}
+
+/// aura inspect <file.auz>
+fun cmdInspect(args: Args): Int {
+    if (args.size < 1) {
+        IO.println("Error: inspect requires a .auz file")
+        return 1
+    }
+    val src: String = args.get(0)
+    val content: String = FileSystem.readText(src)
+    val result: String = packageInspect(content)
+    IO.println(result)
+    return 0
+}
+
+/// aura verify <file.auz>
+fun cmdVerify(args: Args): Int {
+    if (args.size < 1) {
+        IO.println("Error: verify requires a .auz file")
+        return 1
+    }
+    val src: String = args.get(0)
+    val content: String = FileSystem.readText(src)
+    val result: String = packageVerify(content)
+    IO.println(result)
+    return 0
+}
+
+/// aura lsp
+fun cmdLsp(args: Args): Int {
+    return lspMain()
+}
+
+/// aura debug <file.aura>
+fun cmdDebug(args: Args): Int {
+    if (args.size < 1) {
+        IO.println("Error: debug requires a source file")
+        return 1
+    }
+    val src: String = args.get(0)
+    return debuggerMain(args.size)
+}
+
+/// aura export-header <file.aura>
+fun cmdExportHeader(args: Args): Int {
+    if (args.size < 1) {
+        IO.println("Error: export-header requires a source file")
+        return 1
+    }
+    val src: String = args.get(0)
+    val content: String = FileSystem.readText(src)
+    val result: String = exportHeader(content)
+    IO.println(result)
+    return 0
+}
+
+// ── 入口函数 ──
+
+fun main(): Int {
+    val args: Args = parseArgs()
+    if (args.isEmpty()) {
+        printUsage()
+        return 1
+    }
+
+    val cmd: String = args.get(0)
+    // 构建子命令参数（跳过第一个参数 = 命令名）
+    val subArgs = Args()
+    var i: Int = 1
+    while (i < args.size) {
+        subArgs.add(args.get(i))
+        i = i + 1
+    }
+
+    when (cmd) {
+        "build" => return cmdBuild(subArgs)
+        "run" => return cmdRun(subArgs)
+        "check" => return cmdCheck(subArgs)
+        "disasm" => return cmdDisasm(subArgs)
+        "tokens" => return cmdTokens(subArgs)
+        "ast" => return cmdAst(subArgs)
+        "fmt" => return cmdFmt(subArgs)
+        "leak-check" => return cmdLeakCheck(subArgs)
+        "doc" => return cmdDoc(subArgs)
+        "eval" => return cmdEval(subArgs)
+        "repl" => return cmdRepl(subArgs)
+        "install" => return cmdInstall(subArgs)
+        "update" => return cmdUpdate(subArgs)
+        "publish" => return cmdPublish(subArgs)
+        "deps" => return cmdDepList(subArgs)
+        "new" => return cmdNew(subArgs)
+        "package" => return cmdPackage(subArgs)
+        "inspect" => return cmdInspect(subArgs)
+        "verify" => return cmdVerify(subArgs)
+        "lsp" => return cmdLsp(subArgs)
+        "debug" => return cmdDebug(subArgs)
+        "export-header" => return cmdExportHeader(subArgs)
+        "--help" => printUsage(); return 0
+        "-h" => printUsage(); return 0
+        "help" => printUsage(); return 0
+        "--version" => IO.println("Aura v0.6.0"); return 0
+    }
+
+    IO.println("Unknown subcommand: " + cmd)
+    printUsage()
+    return 1
+}

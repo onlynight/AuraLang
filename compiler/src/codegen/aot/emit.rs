@@ -482,15 +482,18 @@ impl EmitCtx {
         let mut s = String::new();
         s.push_str("; ---- @native Wrappers (Phase D) ----\n");
 
-        // 1. 声明 C 分发函数
-        s.push_str("declare i64 @aura_syscall_dispatch(i64 %arg.0, i64 %arg.1, i64 %arg.2, i64 %arg.3, i64 %arg.4, i64 %arg.5, i64 %arg.6)\n");
-        s.push_str("declare i64 @aura_memory_alloc(i64 %arg.0)\n");
-        s.push_str("declare void @aura_memory_free(i64 %arg.0)\n");
+        // 1. 声明外部函数（Phase 1: malloc/free 由 FFI generator 通过 cffi_signature 处理）
+        //    @native(N) 改为编译器直接生成内联 syscall 指令 IR，不再依赖 aura_syscall_dispatch
+        //    @native 的 Builtin 分支（alloc/free）使用 C 运行时 malloc/free
         s.push_str("declare i64 @aura_cpu_rdtsc()\n");
         s.push_str("declare void @aura_cpu_mem_fence()\n");
         s.push_str("declare i64 @aura_cpu_atomic_add(i64 %arg.0, i64 %arg.1)\n");
         // Phase D: 异常值全局变量（setjmp/longjmp 桥用）— 在 aura_syscalls.c 中定义
         s.push_str("declare i8* @aura_exception_value()\n");
+        // LLVM 内建函数声明（Memory.copy / Memory.set / Memory.compare 用）
+        s.push_str("declare void @llvm.memcpy(i8*, i8*, i64, i1)\n");
+        s.push_str("declare void @llvm.memset(i8*, i8, i64, i1)\n");
+        s.push_str("declare i32 @llvm.memcmp(i8*, i8*, i64, i1)\n");
 
         // 2. 为每个 @native 函数生成包装器
         for func in &native_wrappers {
@@ -597,26 +600,80 @@ fn emit_native_wrapper(
     // 函数体
     let body = match attr {
         crate::ast::NativeAttr::Syscall(nr) => {
-            // 调用 aura_syscall_dispatch(nr, args...)
-            // 最多 6 个参数，不足的用 0 补齐。
-            // LLVM IR 的 call 实参必须带类型（`i64 %arg.0`），否则 llc 报
-            // `expected type`（缺口 1 修复后的实测问题）。
+            // Phase 0: 直接生成内联 syscall 指令 IR，不依赖 aura_syscall_dispatch
+            //
+            // Linux x86_64 syscall ABI:
+            //   rax = syscall number (input/output)
+            //   rdi = arg0, rsi = arg1, rdx = arg2
+            //   r10 = arg3, r8 = arg4, r9 = arg5
+            //   rcx, r11 = clobbered by syscall
+            //
+            // Windows x86_64 Nt* ABI:
+            //   rax = service number
+            //   rcx = arg0, rdx = arg1, r8 = arg2, r9 = arg3
+            //   rcx, r11 = clobbered by syscall
+            //
             let nr_str = nr.to_string();
-            let arg_names: Vec<String> =
-                func.params.iter().enumerate().map(|(i, _)| format!("i64 %arg.{}", i)).collect();
-            let mut call_args = vec![format!(
-                "i64 {}",
-                nr_str
-            )];
-            for i in 0..6 {
-                if i < arg_names.len() {
-                    call_args.push(arg_names[i].clone());
+            let is_windows = target_triple.contains("windows")
+                || target_triple.contains("win32")
+                || target_triple.contains("win64");
+
+            // 使用命名寄存器约束直接设置 syscall ABI 寄存器，无需 mov 指令
+            // Linux: rax=nr, rdi=arg0, rsi=arg1, rdx=arg2, r10=arg3, r8=arg4, r9=arg5
+            // Windows: rax=service, rcx=arg0, rdx=arg1, r8=arg2, r9=arg3
+            let (arg_regs, clobbers) = if is_windows {
+                (
+                    vec![
+                        "{rcx}".to_string(),
+                        "{rdx}".to_string(),
+                        "{r8}".to_string(),
+                        "{r9}".to_string(),
+                    ],
+                    "~{rcx},~{r11}".to_string(),
+                )
+            } else {
+                (
+                    vec![
+                        "{rdi}".to_string(),
+                        "{rsi}".to_string(),
+                        "{rdx}".to_string(),
+                        "{r10}".to_string(),
+                        "{r8}".to_string(),
+                        "{r9}".to_string(),
+                    ],
+                    "~{rcx},~{r11}".to_string(),
+                )
+            };
+
+            // 构建约束串: "={rax}" (output) + "0" (syscall nr in rax) + arg_regs + clobbers
+            let mut constraints_parts: Vec<String> = Vec::new();
+            constraints_parts.push("={rax}".to_string());
+            constraints_parts.push("0".to_string()); // syscall number in rax (same as output)
+            for i in 0..func.params.len() {
+                if i < arg_regs.len() {
+                    constraints_parts.push(arg_regs[i].clone());
                 } else {
-                    call_args.push("i64 0".to_string());
+                    constraints_parts.push("r".to_string());
                 }
             }
-            let call_str = format!("call i64 @aura_syscall_dispatch({})", call_args.join(", "));
-            format!("{} = {}", ret_str, call_str)
+            constraints_parts.push(clobbers);
+            let constraints = constraints_parts.join(",");
+
+            // 构建参数列表: syscall number + args
+            let mut arg_list: Vec<String> = Vec::new();
+            arg_list.push(format!("i64 {}", nr_str)); // syscall number
+            for i in 0..func.params.len() {
+                arg_list.push(format!("i64 %arg.{}", i));
+            }
+
+            // 使用纯 "syscall" 指令，所有寄存器通过约束设置
+            let call = format!(
+                "call {} asm sideeffect \"syscall\", \"{}\"({})",
+                ret_str,
+                constraints,
+                arg_list.join(", ")
+            );
+            if ret_str == "void" { call } else { format!("%result = {}", call) }
         }
         crate::ast::NativeAttr::Asm(code) => {
             // 内联汇编：生成 LLVM inline asm 调用
@@ -685,17 +742,61 @@ fn emit_native_wrapper(
         }
         crate::ast::NativeAttr::Builtin => {
             // 编译器内置：按函数名匹配
+            // 提取方法名：处理 object method call (Memory.read) 和 top-level function (MemoryRead)
+            let method_name = if func.name.contains("Memory.") {
+                func.name.split('.').last().unwrap_or("").to_string()
+            } else if func.name.contains("Memory_") {
+                func.name.split('_').last().unwrap_or("").to_string()
+            } else if let Some(rest) = sym.to_lowercase().strip_prefix("memory") {
+                // Top-level: MemoryRead → Read, Memory_read → read
+                rest.trim_start_matches('_').to_string()
+            } else {
+                sym.to_lowercase()
+            };
+            let method_lower = method_name.to_lowercase();
             let sym_lower = sym.to_lowercase();
             if sym_lower.contains("alloc") {
-                "call i64 @aura_memory_alloc(i64 %arg.0)".to_string()
+                // Memory.alloc(n) → call malloc(n), ptrtoint to i64
+                "%ptr.alloc = call i8* @malloc(i64 %arg.0)\n%result = ptrtoint i8* %ptr.alloc to i64".to_string()
             } else if sym_lower.contains("free") {
-                "call void @aura_memory_free(i64 %arg.0)".to_string()
-            } else if sym_lower.contains("read") && func.name.contains("Memory") {
-                // Memory.read(addr) — 地址是 i64，需 inttoptr 转为 i8* 再 load
-                "%ptr.0 = inttoptr i64 %arg.0 to i8*\n%result = load i8, i8* %ptr.0".to_string()
-            } else if sym_lower.contains("write") && func.name.contains("Memory") {
-                // Memory.write(addr, value) — 地址是 i64，需 inttoptr 转为 i8* 再 store
-                "%ptr.0 = inttoptr i64 %arg.0 to i8*\nstore i8 %arg.1, i8* %ptr.0".to_string()
+                // Memory.free(addr) → inttoptr from i64, call free
+                "%ptr.free = inttoptr i64 %arg.0 to i8*\ncall void @free(i8* %ptr.free)".to_string()
+            } else if func.name.contains("Memory") && method_lower.starts_with("read") {
+                // Memory.read(addr) / read16 / read32 / read64
+                let (load_ty, ptr_ty) = if method_lower == "read16" {
+                    ("i16", "i16*")
+                } else if method_lower == "read32" {
+                    ("i32", "i32*")
+                } else if method_lower == "read64" {
+                    ("i64", "i64*")
+                } else {
+                    ("i8", "i8*")
+                };
+                format!(
+                    "%ptr.0 = inttoptr i64 %arg.0 to {}\n%result = load {}, {}* %ptr.0",
+                    ptr_ty, load_ty, load_ty
+                )
+            } else if func.name.contains("Memory") && method_lower.starts_with("write") {
+                // Memory.write(addr, value) / write16 / write32 / write64
+                let (store_ty, ptr_ty) = if method_lower == "write16" {
+                    ("i16", "i16*")
+                } else if method_lower == "write32" {
+                    ("i32", "i32*")
+                } else if method_lower == "write64" {
+                    ("i64", "i64*")
+                } else {
+                    ("i8", "i8*")
+                };
+                format!(
+                    "%ptr.0 = inttoptr i64 %arg.0 to {}\nstore {} %arg.1, {}* %ptr.0",
+                    ptr_ty, store_ty, store_ty
+                )
+            } else if func.name.contains("Memory") && method_lower == "copy" {
+                // Memory.copy(dst, src, n) → @llvm.memcpy
+                "%ptr.dst = inttoptr i64 %arg.0 to i8*\n%ptr.src = inttoptr i64 %arg.1 to i8*\ncall void @llvm.memcpy(i8* %ptr.dst, i8* %ptr.src, i64 %arg.2, i1 false)".to_string()
+            } else if func.name.contains("Memory") && method_lower == "set" {
+                // Memory.set(addr, v, n) → @llvm.memset
+                "%ptr.addr = inttoptr i64 %arg.0 to i8*\ncall void @llvm.memset(i8* %ptr.addr, i8 %arg.1, i64 %arg.2, i1 false)".to_string()
             } else {
                 // 未知内置：直接返回默认值（不可生成 `%result = 0` 这类非法 IR）
                 String::new()
@@ -2591,22 +2692,14 @@ fn aura_ty_of_expr(ctx: &EmitCtx, e: &HirExpr) -> String {
 ///
 /// Aura 的 `String` 与 `List` 在 LLVM 层都是 `i8*`，必须靠 Aura 类型区分：
 ///   * 有 Aura 类型 → 非集合即字符串；
-///   * 无类型信息（无法推断）→ 退回旧的变量名前缀启发式，保持既有行为不变。
+///   * 无类型信息（无法推断）→ 返回 false（不再用变量名前缀启发式，
+///     避免 `p.length`（`p: String`）被误判为列表计数）。
 fn is_string_like(ctx: &EmitCtx, expr: &HirExpr) -> bool {
     let ty = aura_ty_of_expr(ctx, expr);
     if ty.is_empty() {
-        if let HirExpr::Var(name) = expr {
-            return name.starts_with('s') || name.starts_with("str") || name.starts_with("msg");
-        }
         return false;
     }
     !is_collection_aura_ty(&ty)
-}
-
-/// 是否为字符串结构体 `{ i8*, i64 }`（已废弃，String 统一为 i8*）
-#[allow(dead_code)]
-fn is_string_struct_ty(ty: &str) -> bool {
-    ty.starts_with('{') && ty.contains("i8*") && ty.contains("i64")
 }
 
 /// 是否为数值类型（整数 / 浮点）。

@@ -363,6 +363,10 @@ pub fn cffi_signature(name: &str) -> Option<(&'static str, Vec<&'static str>)> {
     const D: &str = "double";
     const P: &str = "i8*";
     let (ret, params): (&'static str, &[&str]) = match name {
+        // C 运行时函数（Phase 1: 使用 C 运行时 malloc/free，不依赖 aura_memory_*）
+        "malloc" => ("i8*", &["i64"]),
+        "free" => ("void", &[P]),
+        // aura.math
         "aura_math_sin" | "aura_math_cos" | "aura_math_tan" | "aura_math_asin"
         | "aura_math_acos" | "aura_math_atan" | "aura_math_atan2" | "aura_math_log"
         | "aura_math_log2" | "aura_math_log10" | "aura_math_exp" | "aura_math_sqrt"

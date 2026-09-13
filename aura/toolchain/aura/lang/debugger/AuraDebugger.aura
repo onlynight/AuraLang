@@ -1,0 +1,386 @@
+// aura:///aura/lang/debugger/AuraDebugger.aura
+// Phase E.3: Aura Debugger — 替代 cli/src/debugger.rs
+//
+// 纯 Aura 实现，通过 @native 调用 C 层调试 API。
+// 覆盖：断点管理、单步执行、变量查看、表达式求值、调用栈查看。
+//
+// @since 0.6
+
+import aura.lang.std.String
+import aura.lang.std.FileSystem
+import aura.lang.std.IO
+import aura.lang.std.Process
+import aura.lang.std.Collections
+import aura.lang.std.Json
+
+// ── 调试器 native API ──
+
+@native fun debugInit(src: String): Int { }
+
+@native fun debugRun(): Int { }
+
+@native fun debugContinue(): Int { }
+
+@native fun debugStepOver(): Int { }
+
+@native fun debugStepInto(): Int { }
+
+@native fun debugStepOut(): Int { }
+
+@native fun debugBreakpointAdd(file: String, line: Int): Int { }
+
+@native fun debugBreakpointRemove(id: Int): Int { }
+
+@native fun debugBreakpointList(): String { }
+
+@native fun debugVariables(): String { }
+
+@native fun debugStackFrame(depth: Int): String { }
+
+@native fun debugCallStack(): String { }
+
+@native fun debugEval(expr: String): String { }
+
+@native fun debugNextStop(): String { }
+
+@native fun debugWatch(expr: String): Int { }
+
+@native fun debugUnwatch(id: Int): Int { }
+
+@native fun debugQuit(): Int { }
+
+// ── 断点管理 ──
+
+class Breakpoint {
+    val id: Int
+    val file: String
+    val line: Int
+    val enabled: Boolean
+
+    fun Breakpoint(id: Int, file: String, line: Int, enabled: Boolean) {
+        this.id = id
+        this.file = file
+        this.line = line
+        this.enabled = enabled
+    }
+
+    fun toStr(): String {
+        return "#" + id + " " + (if (enabled) { "✓" } else { "✗" }) + " " + file + ":" + line
+    }
+}
+
+class BreakpointManager {
+    var breakpoints: List<Breakpoint> = mutableListOf()
+    var nextId: Int = 1
+
+    fun add(file: String, line: Int): Breakpoint {
+        val bp = Breakpoint(nextId, file, line, true)
+        breakpoints.add(bp)
+        debugBreakpointAdd(file, line)
+        nextId = nextId + 1
+        return bp
+    }
+
+    fun remove(id: Int): Unit {
+        var i: Int = 0
+        while (i < breakpoints.size) {
+            if (breakpoints[i].id == id) {
+                breakpoints.remove(i)
+                debugBreakpointRemove(id)
+                return
+            }
+            i = i + 1
+        }
+    }
+
+    fun list(): List<Breakpoint> {
+        return breakpoints
+    }
+
+    fun toggle(id: Int): Unit {
+        var i: Int = 0
+        while (i < breakpoints.size) {
+            if (breakpoints[i].id == id) {
+                breakpoints[i].enabled = !breakpoints[i].enabled
+                return
+            }
+            i = i + 1
+        }
+    }
+
+    fun printAll(): Unit {
+        if (breakpoints.size == 0) {
+            IO.println("No breakpoints")
+            return
+        }
+        IO.println("Breakpoints:")
+        var i: Int = 0
+        while (i < breakpoints.size) {
+            IO.println("  " + breakpoints[i].toStr())
+            i = i + 1
+        }
+    }
+}
+
+// ── 调试器主类 ──
+
+class Debugger {
+    var initialized: Boolean = false
+    var running: Boolean = false
+    var srcFile: String = ""
+    var breakpoints: BreakpointManager = BreakpointManager()
+    var watchExprs: List<String> = mutableListOf()
+    var nextWatchId: Int = 1
+
+    fun init(src: String): Int {
+        this.srcFile = src
+        val result: Int = debugInit(src)
+        if (result == 0) {
+            this.initialized = true
+            IO.println("Debugger initialized: " + src)
+        } else {
+            IO.println("Debugger init failed")
+        }
+        return result
+    }
+
+    /// 运行程序（到第一个断点或结束）
+    fun run(): Int {
+        if (!initialized) {
+            IO.println("Error: debugger not initialized")
+            return 1
+        }
+        running = true
+        val result: Int = debugRun()
+        if (result == 0) {
+            IO.println("Program started, executing...")
+        }
+        return result
+    }
+
+    /// 继续执行到下一个断点
+    fun continueExec(): Int {
+        val result: Int = debugContinue()
+        if (result == 0) {
+            IO.println("Continuing...")
+        }
+        return result
+    }
+
+    /// 单步执行（step over）
+    fun stepOver(): Int {
+        val result: Int = debugStepOver()
+        if (result == 0) {
+            printStopInfo()
+        }
+        return result
+    }
+
+    /// 单步执行（step into）
+    fun stepInto(): Int {
+        val result: Int = debugStepInto()
+        if (result == 0) {
+            printStopInfo()
+        }
+        return result
+    }
+
+    /// 单步执行（step out）
+    fun stepOut(): Int {
+        val result: Int = debugStepOut()
+        if (result == 0) {
+            printStopInfo()
+        }
+        return result
+    }
+
+    /// 打印停止位置信息
+    fun printStopInfo(): Unit {
+        val stop: String = debugNextStop()
+        IO.println("Stopped: " + stop)
+        // 打印 watch 表达式值
+        if (watchExprs.size > 0) {
+            IO.println("Watch:")
+            var i: Int = 0
+            while (i < watchExprs.size) {
+                val val: String = debugEval(watchExprs[i])
+                IO.println("  " + watchExprs[i] + " = " + val)
+                i = i + 1
+            }
+        }
+    }
+
+    /// 添加断点
+    fun addBreakpoint(file: String, line: Int): Breakpoint {
+        return breakpoints.add(file, line)
+    }
+
+    /// 移除断点
+    fun removeBreakpoint(id: Int): Unit {
+        breakpoints.remove(id)
+    }
+
+    /// 列出所有断点
+    fun listBreakpoints(): Unit {
+        breakpoints.printAll()
+    }
+
+    /// 查看局部变量
+    fun variables(): Unit {
+        val result: String = debugVariables()
+        IO.println(result)
+    }
+
+    /// 查看调用栈
+    fun callStack(): Unit {
+        val result: String = debugCallStack()
+        IO.println(result)
+    }
+
+    /// 查看指定栈帧
+    fun stackFrame(depth: Int): Unit {
+        val result: String = debugStackFrame(depth)
+        IO.println(result)
+    }
+
+    /// 求值表达式
+    fun eval(expr: String): String {
+        val result: String = debugEval(expr)
+        IO.println(result)
+        return result
+    }
+
+    /// 添加 watch 表达式
+    fun watch(expr: String): Int {
+        watchExprs.add(expr)
+        debugWatch(expr)
+        IO.println("Watch #" + nextWatchId + ": " + expr)
+        nextWatchId = nextWatchId + 1
+        return nextWatchId
+    }
+
+    /// 移除 watch 表达式
+    fun unwatch(id: Int): Unit {
+        debugUnwatch(id)
+    }
+
+    /// 退出调试器
+    fun quit(): Int {
+        running = false
+        initialized = false
+        return debugQuit()
+    }
+}
+
+// ── 交互式调试器 REPL ──
+
+fun debugRepl(debugger: Debugger): Unit {
+    IO.println("Aura Debugger REPL")
+    IO.println("Commands:")
+    IO.println("  run              — Start execution")
+    IO.println("  continue         — Continue to next breakpoint")
+    IO.println("  step             — Step over (step over)")
+    IO.println("  step-into        — Step into function call")
+    IO.println("  step-out         — Step out of function")
+    IO.println("  break <file>:<line>  — Add breakpoint")
+    IO.println("  delete <id>      — Remove breakpoint")
+    IO.println("  breakpoints      — List all breakpoints")
+    IO.println("  variables        — Show local variables")
+    IO.println("  stack            — Show call stack")
+    IO.println("  frame <depth>    — Show stack frame")
+    IO.println("  eval <expr>      — Evaluate expression")
+    IO.println("  watch <expr>     — Watch expression")
+    IO.println("  quit             — Exit debugger")
+    IO.println("")
+
+    while (true) {
+        IO.println("(debug) ")
+        val line: String = IO.readLine()
+
+        if (line.length == 0) { continue }
+
+        if (line == "quit" || line == "q") {
+            debugger.quit()
+            return
+        } else if (line == "run") {
+            debugger.run()
+        } else if (line == "continue" || line == "c") {
+            debugger.continueExec()
+        } else if (line == "step" || line == "s") {
+            debugger.stepOver()
+        } else if (line == "step-into") {
+            debugger.stepInto()
+        } else if (line == "step-out") {
+            debugger.stepOut()
+        } else if (line.startsWith("break ") || line.startsWith("b ")) {
+            val spec: String = if (line.startsWith("break ")) {
+                String.substring(line, 6)
+            } else {
+                String.substring(line, 2)
+            }
+            val colonIdx: Int = spec.indexOf(":")
+            if (colonIdx > 0) {
+                val file: String = String.substring(spec, 0, colonIdx)
+                val lineStr: String = String.substring(spec, colonIdx + 1)
+                val lineNum: Int = String.toInt(lineStr)
+                debugger.addBreakpoint(file, lineNum)
+            } else {
+                IO.println("Usage: break <file>:<line>")
+            }
+        } else if (line.startsWith("delete ") || line.startsWith("d ")) {
+            val idStr: String = if (line.startsWith("delete ")) {
+                String.substring(line, 7)
+            } else {
+                String.substring(line, 2)
+            }
+            debugger.removeBreakpoint(String.toInt(idStr))
+        } else if (line == "breakpoints" || line == "bl") {
+            debugger.listBreakpoints()
+        } else if (line == "variables" || line == "v") {
+            debugger.variables()
+        } else if (line == "stack" || line == "st") {
+            debugger.callStack()
+        } else if (line.startsWith("frame ")) {
+            val depthStr: String = String.substring(line, 6)
+            debugger.stackFrame(String.toInt(depthStr))
+        } else if (line.startsWith("eval ") || line.startsWith("e ")) {
+            val expr: String = if (line.startsWith("eval ")) {
+                String.substring(line, 5)
+            } else {
+                String.substring(line, 2)
+            }
+            debugger.eval(expr)
+        } else if (line.startsWith("watch ") || line.startsWith("w ")) {
+            val expr: String = if (line.startsWith("watch ")) {
+                String.substring(line, 6)
+            } else {
+                String.substring(line, 2)
+            }
+            debugger.watch(expr)
+        } else {
+            IO.println("Unknown command: " + line)
+        }
+    }
+}
+
+// ── 入口函数 ──
+
+fun main(): Int {
+    // 从进程参数获取源文件
+    val args = Process.args()
+    if (args.size < 1) {
+        IO.println("Usage: aura debug <file.aura>")
+        return 1
+    }
+
+    val src: String = args[0].toString()
+    val debugger: Debugger = Debugger()
+    val initResult: Int = debugger.init(src)
+    if (initResult != 0) {
+        IO.println("Failed to initialize debugger")
+        return 1
+    }
+
+    debugRepl(debugger)
+    return 0
+}
