@@ -15,10 +15,10 @@ import aura.lang.native.Memory
 import aura.lang.native.Syscalls
 
 /// 字符串操作
-extern object StrOps {
+object StrOps {
 
     /// 计算字符串长度（不含 '\0'）
-    native fun strlen(addr: Long): Long {
+    fun strlen(addr: Long): Long {
         var n: Long = 0
         var c: Byte = Memory.read(addr + n)
         while (c != 0) {
@@ -30,7 +30,7 @@ extern object StrOps {
 
     /// 比较两个字符串
     /// 返回：0 表示相等，<0 表示 a < b，>0 表示 a > b
-    native fun strcmp(a: Long, b: Long): Int {
+    fun strcmp(a: Long, b: Long): Int {
         var i: Long = 0
         while (true) {
             val ca: Byte = Memory.read(a + i)
@@ -55,7 +55,7 @@ extern object StrOps {
     }
 
     /// 复制字符串
-    native fun strcpy(dst: Long, src: Long): Long {
+    fun strcpy(dst: Long, src: Long): Long {
         var i: Long = 0
         while (true) {
             val c: Byte = Memory.read(src + i)
@@ -68,7 +68,7 @@ extern object StrOps {
     }
 
     /// 复制字符串（限制最大长度）
-    native fun strncpy(dst: Long, src: Long, n: Long): Long {
+    fun strncpy(dst: Long, src: Long, n: Long): Long {
         var i: Long = 0
         while (i < n) {
             val c: Byte = Memory.read(src + i)
@@ -90,7 +90,7 @@ extern object StrOps {
     }
 
     /// 将字符串转换为大写
-    native fun strtoupper(addr: Long) {
+    fun strtoupper(addr: Long) {
         var i: Long = 0
         while (true) {
             val c: Byte = Memory.read(addr + i)
@@ -106,7 +106,7 @@ extern object StrOps {
     }
 
     /// 将字符串转换为小写
-    native fun strtolower(addr: Long) {
+    fun strtolower(addr: Long) {
         var i: Long = 0
         while (true) {
             val c: Byte = Memory.read(addr + i)
@@ -122,7 +122,7 @@ extern object StrOps {
     }
 
     /// 计算字符串哈希（djb2 算法）
-    native fun hash(addr: Long): Long {
+    fun hash(addr: Long): Long {
         var hash: Long = 5381
         var i: Long = 0
         while (true) {

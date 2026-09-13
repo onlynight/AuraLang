@@ -13,30 +13,45 @@ Syntax:
   }
 
 MethodDecl:
-  [@NativeAnnotation] fun <Name>(<Params>): <ReturnType>
+  'default' 'fun' 'loadLibrary' '(' ')' ':' 'String' '=' STRING   // AOT 库路径
+  | '@aot' 'fun' <Name>(<Params>): <ReturnType>                   // AOT 库函数
+  | [@NativeAnnotation] fun <Name>(<Params>): <ReturnType>        // 系统调用/内联汇编
+  | 'native' fun <Name>(<Params>): <ReturnType>                   // 编译器内置
+  | 'export' 'fun' <Name>(<Params>): <ReturnType> '{' <Block> '}'  // 导出符号
 ```
 
 **语义**：
-- `extern object` 是一个只含原生/外部方法的容器
-- 内部方法可以有或没有 Aura 实现体
-- 没有实现体的方法必须是 `@native` 标注的（由编译器或外部库提供实现）
-- 有实现体的方法可以是 `@export`（导出符号）或普通方法（内部使用）
+- `extern object` 是一个外部方法容器，支持系统级绑定和 AOT 库绑定
+- **系统级模式**（无 `loadLibrary()`）：包含 `@native`/`native`/`export` 方法
+- **AOT 库模式**（有 `loadLibrary()`）：包含 `@aot` 方法，绑定到 Aura AOT 动态库
+- `default fun loadLibrary(): String = "libname"` 声明库路径（仅 AOT 库模式需要）
+- `@aot fun` 函数实现在 AOT 库中，通过 JitValue ABI 调用
 
 **示例**：
 ```aura
+// 系统级绑定（syscall）
 extern object Syscalls {
     @native(1) fun write(fd: Int, buf: Long, count: Long): Long
     @native(0) fun read(fd: Int, buf: Long, count: Long): Long
 }
 
+// 编译器内置
 extern object Memory {
-    @native fun read(addr: Long): Byte
-    @native fun write(addr: Long, v: Byte)
+    native fun read(addr: Long): Byte
+    native fun write(addr: Long, v: Byte)
 }
 
+// 内联汇编
 extern object Cpu {
     @native(asm = "rdtsc") fun rdtsc(): Long
     @native(asm = "mfence") fun memFence()
+}
+
+// AOT 库绑定
+extern object Utils {
+    default fun loadLibrary(): String = "utils"
+    @aot fun add(a: Int, b: Int): Int
+    @aot fun multiply(a: Int, b: Int): Int
 }
 ```
 
@@ -47,7 +62,7 @@ extern object Cpu {
   @native(<SyscallNumber>)
   @native("libc:<SymbolName>")
   @native(asm = "<AssemblyCode>")
-  @native
+  native
 
 <AssemblyCode>:
   字符串字面量，LLVM inline asm 语法
@@ -63,12 +78,12 @@ extern object Cpu {
 - `@native(N)`：系统调用，N 为 syscall 号
 - `@native("libc:name")`：外部库符号（libc 或其他链接库）
 - `@native(asm = "...")`：内联汇编
-- `@native`（无参数）：编译器内置（内存操作、常量等）
+- `native`（无参数）：编译器内置（内存操作、常量等）
 
-### 1.3 `@export` 标注
+### 1.3 `export` 标注
 
 ```
-@export fun <Name>(<Params>): <ReturnType> { <Body> }
+export fun <Name>(<Params>): <ReturnType> { <Body> }
 ```
 
 **语义**：
@@ -76,6 +91,29 @@ extern object Cpu {
 - 符号名默认为方法名（如 `@export fun malloc` → 符号 `malloc`）
 - 可以用 `@export("custom_name")` 指定符号名
 - 必须有 Aura 实现体
+
+### 1.4 `@aot` 标注
+
+```
+@aot fun <Name>(<Params>): <ReturnType>
+```
+
+**语义**：
+- 标记方法为 AOT 库函数（JitValue ABI 直调）
+- 必须配合 `default fun loadLibrary(): String = "libname"` 使用
+- 函数实现在 AOT 编译的动态库中
+- 调用约定：JitValue ABI（零参数转换开销）
+- 导出符号格式：`aura_aot_<name>!<arg_types>!<ret_type>`
+
+**示例**：
+```aura
+extern object Math {
+    default fun loadLibrary(): String = "aura_std_math"
+    @aot fun abs(x: Int): Int
+    @aot fun sin(x: Float): Float
+    @aot fun sqrt(x: Float): Float
+}
+```
 
 ---
 
@@ -137,24 +175,24 @@ if (addr == 0) { ... }  // 空指针检查
 ```aura
 extern object Memory {
     // 读取
-    @native fun read(addr: Long): Byte
-    @native fun read16(addr: Long): Short
-    @native fun read32(addr: Long): Int
-    @native fun read64(addr: Long): Long
+    native fun read(addr: Long): Byte
+    native fun read16(addr: Long): Short
+    native fun read32(addr: Long): Int
+    native fun read64(addr: Long): Long
     
     // 写入
-    @native fun write(addr: Long, v: Byte)
-    @native fun write16(addr: Long, v: Short)
-    @native fun write32(addr: Long, v: Int)
-    @native fun write64(addr: Long, v: Long)
+    native fun write(addr: Long, v: Byte)
+    native fun write16(addr: Long, v: Short)
+    native fun write32(addr: Long, v: Int)
+    native fun write64(addr: Long, v: Long)
     
     // 块操作
-    @native fun copy(dst: Long, src: Long, n: Long)
-    @native fun set(addr: Long, v: Byte, n: Long)
+    native fun copy(dst: Long, src: Long, n: Long)
+    native fun set(addr: Long, v: Byte, n: Long)
     
     // 分配/释放（编译器内置，可替换为 Allocator）
-    @native fun alloc(n: Long): Long
-    @native fun free(addr: Long)
+    native fun alloc(n: Long): Long
+    native fun free(addr: Long)
 }
 ```
 
@@ -281,11 +319,11 @@ object Allocator {
     var HEAP_POS: Long = 0
     var HEAP_USED: Long = 0
 
-    @export fun malloc(n: Long): Long {
+    export fun malloc(n: Long): Long {
         // ...
     }
 
-    @export fun free(addr: Long) {
+    export fun free(addr: Long) {
         // ...
     }
 
@@ -300,9 +338,9 @@ object Allocator {
 **导出符号名**：默认与方法名相同。
 
 ```aura
-@export fun malloc(n: Long): Long { ... }  // 符号: malloc
-@export fun free(addr: Long) { ... }       // 符号: free
-@export fun println(s: String) { ... }     // 符号: println
+export fun malloc(n: Long): Long { ... }  // 符号: malloc
+export fun free(addr: Long) { ... }       // 符号: free
+export fun println(s: String) { ... }     // 符号: println
 ```
 
 **带前缀的符号**：可以用 `@export("prefix:name")` 指定。
@@ -367,7 +405,7 @@ define i64 @write(i32 %fd, i64 %buf, i64 %count) {
 }
 ```
 
-### 8.2 `@native`（无参数）→ load/store
+### 8.2 `native`（无参数）→ load/store
 
 ```llvm
 define i8 @Memory.read(i64 %addr) {
@@ -390,7 +428,7 @@ define i64 @Cpu.rdtsc() {
 }
 ```
 
-### 8.4 `@export` → define external
+### 8.4 `export` → define external
 
 ```llvm
 define i64 @malloc(i64 %n) {

@@ -171,17 +171,17 @@ class AppLogger : Loggable {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// §5.10 extern interface — 外部接口（AOT 动态库绑定）
+// §5.10 extern object — 外部接口（AOT 动态库绑定）
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// extern interface：绑定到 AOT 动态库的函数接口
+/// extern object + @aot：绑定到 AOT 动态库的函数接口
 /// 必须包含 default fun loadLibrary() 声明库路径
-extern interface MathLib {
+extern object MathLib {
     default fun loadLibrary(): String = "math"
 
-    fun add(a: Int, b: Int): Int
-    fun multiply(a: Int, b: Int): Int
-    fun square(x: Int): Int
+    @aot fun add(a: Int, b: Int): Int
+    @aot fun multiply(a: Int, b: Int): Int
+    @aot fun square(x: Int): Int
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -428,9 +428,9 @@ fun main() {
     val logger = AppLogger()
     println("  Logger logLevel: " + logger.showLevel())
 
-    // ── §5.10 extern interface ───────────────────────────────────────────
+    // ── §5.10 extern object ───────────────────────────────────────────────
     println("")
-    println("§5.10 extern interface:")
+    println("§5.10 extern object + @aot:")
     println("  MathLib.add(3,4): " + MathLib.add(3, 4).toString())
     println("  MathLib.multiply(3,4): " + MathLib.multiply(3, 4).toString())
     println("  MathLib.square(5): " + MathLib.square(5).toString())

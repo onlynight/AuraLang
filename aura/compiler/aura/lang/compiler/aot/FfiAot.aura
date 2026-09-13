@@ -61,6 +61,8 @@ class FfiAotEmitter {
                 this.emitNativeMethod(ast, i)
             } else if (kind == "ExportMethod") {
                 this.emitExportMethod(ast, i)
+            } else if (kind == "AotMethod") {
+                this.emitAotMethod(ast, i)
             }
             
             i = i + 1
@@ -88,6 +90,8 @@ class FfiAotEmitter {
                 this.emitNativeMethod(ast, kidId)
             } else if (kidKind == "ExportMethod") {
                 this.emitExportMethod(ast, kidId)
+            } else if (kidKind == "AotMethod") {
+                this.emitAotMethod(ast, kidId)
             }
             
             j = j + 1
@@ -165,6 +169,64 @@ class FfiAotEmitter {
         
         // 生成 define external
         this.emitExport(funcName, retTy, paramsCsv, funcKids)
+    }
+
+    /// 发射 @aot method 节点（AOT 库函数，JitValue ABI 直调）。
+    /// 生成 declare 语句，库路径从父 ExternObject 的 loadLibrary() 获取。
+    fun emitAotMethod(ast: Ast, id: Int) {
+        val kids: String = ast.kidsOf(id)
+        var kCount: Int = kidsCount(kids)
+        
+        if (kCount < 2) {
+            return
+        }
+        
+        // 第一个子节点是 AotInfo（元数据标记）
+        val infoId: Int = kidsAt(kids, 0)
+        
+        // 第二个子节点是 Function
+        val funcId: Int = kidsAt(kids, 1)
+        val funcKind: String = ast.kindOf(funcId)
+        
+        if (funcKind != "Function") {
+            return
+        }
+        
+        // 获取函数信息
+        val funcName: String = ast.textOf(funcId)
+        val retTy: String = ast.tyOf(funcId)
+        val funcKids: String = ast.kidsOf(funcId)
+        
+        // 提取参数类型
+        val paramsCsv: String = this.extractParamTypes(ast, funcKids)
+        
+        // 生成 declare（AOT 库函数，JitValue ABI）
+        // 库路径在运行时从 func_name_map 查找
+        val sym: String = sanitizeLlvm(funcName)
+        if (this.isDeclared(sym)) {
+            return
+        }
+        
+        val retStr: String = this.tm.map(retTy)
+        val retLlvm: String = if (retStr == "") { "void" } else { retStr }
+        
+        var paramsStr: String = "void"
+        if (paramsCsv != "") {
+            paramsStr = ""
+            var n: Int = aotCsvCount(paramsCsv)
+            var i: Int = 0
+            while (i < n) {
+                if (i > 0) {
+                    paramsStr = paramsStr + ", "
+                }
+                paramsStr = paramsStr + this.tm.map(aotFieldAt(paramsCsv, i, ","))
+                i = i + 1
+            }
+        }
+        
+        val decl: String = "declare " + retLlvm + " @" + sym + "(" + paramsStr + ")\n\n"
+        this.declParts.sbAdd(decl)
+        this.markDeclared(sym)
     }
 
     /// 提取参数类型列表（逗号分隔）。

@@ -21,7 +21,7 @@ extern object Allocator {
     // ── 内部状态（全局变量）──
 
     /// 堆起始地址
-    native(SYS_MMAP) fun allocHeap(size: Long, prot: Int, flags: Int): Long
+    @native(SYS_MMAP) fun allocHeap(size: Long, prot: Int, flags: Int): Long
 
     /// 当前分配指针
     var heapPtr: Long = 0

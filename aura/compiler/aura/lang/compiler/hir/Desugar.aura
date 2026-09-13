@@ -6,11 +6,12 @@ package aura.lang.compiler.hir
 // 对应 Rust `compiler/src/codegen/hir.rs` 中的 desugar 部分。
 //
 // HIR 是去除了语法糖的 AST。本 pass 进一步降级：
-//   * `when` → 嵌套 `if`
-//   * `for` → `while` + 索引变量
-//   * 字符串插值降级为显式控制流
-//   * 安全调用降级
-//   * Elvis 降级
+//   * `when` → 嵌套 `if`（Phase B.1）
+//   * `for` → 保留（Phase B：保留 HirFor 节点，由 MIR 降级）
+//   * `try/catch/finally` → 保留 HirTry 节点（Phase B.4，MIR 降级）
+//   * `lambda/closure` → 保留 HirLambda 节点（Phase B.2，MIR 降级）
+//   * Elvis → 嵌套 if
+//   * 安全调用 → 嵌套 if
 //
 // ── 设计方式（与 Hir.aura 一致）──────────────────────────────
 //
@@ -80,40 +81,122 @@ class Desugar {
             return this.desugarWhen(src, id)
         } else if (kind == "HirFor") {
             return this.desugarFor(src, id)
+        } else if (kind == "HirBinary" && (text == "?:" || text == "ElvisColon")) {
+            return this.desugarElvis(src, id)
         } else {
-            // 其他节点直接复制到 dst
+            // 其他节点直接复制到 dst（HirTry / HirLambda 保留结构）
             return this.dst.add(kind, text, ty, sp, newKids)
         }
     }
 
-    /// 降级 when 表达式为嵌套 if。
+    /// 降级 when 表达式为嵌套 if（Phase B.1）。
+    ///
+    /// 结构：HirWhen([subject?], HirWhenArms([HirWhenArm(pattern, body)...]))
+    /// 降级为：if (subject == pat1) body1 else if (subject == pat2) body2 else ...
     fun desugarWhen(src: Hir, id: Int): Int {
         val sp: Span = src.spanOf(id)
-        // 简化版：保留 HirWhen 节点（完整降级需要 when 臂的语义分析）
         val kids: String = src.kidsOf(id)
         val kCount: Int = hirKidsCount(kids)
 
-        var newKids: String = hirNoKids()
+        // 提取 subject（可选，子节点 0）
+        var subjectId: Int = -1
+        var armsId: Int = -1
         var i: Int = 0
         while (i < kCount) {
             val childId: Int = hirKidsAt(kids, i)
-            val childDstId: Int = this.desugarNode(src, childId)
-            if (childDstId >= 0) {
-                newKids = hirKidsAdd(newKids, childDstId)
+            val childKind: String = src.kindOf(childId)
+            if (childKind == "HirWhenArms") {
+                armsId = childId
+            } else {
+                subjectId = childId
             }
             i = i + 1
         }
-        return this.dst.add("HirWhen", "", "", sp, newKids)
+
+        if (armsId < 0) {
+            // 无 arms，返回空块
+            return this.dst.leaf("HirBlock", "", sp)
+        }
+
+        // 提取 arms
+        val armsKids: String = src.kidsOf(armsId)
+        val armsKCount: Int = hirKidsCount(armsKids)
+
+        // 从后往前构造 else 链
+        var resultId: Int = -1
+        var j: Int = 0
+        while (j < armsKCount) {
+            val armId: Int = hirKidsAt(armsKids, j)
+            val armKids: String = src.kidsOf(armId)
+            val armKCount: Int = hirKidsCount(armKids)
+
+            if (armKCount < 2) {
+                j = j + 1
+                continue
+            }
+
+            // 提取 pattern 和 body
+            val patternId: Int = hirKidsAt(armKids, 0)
+            val bodyId: Int = hirKidsAt(armKids, 1)
+
+            // 降级 pattern 和 body
+            val patternDstId: Int = this.desugarNode(src, patternId)
+            val bodyDstId: Int = this.desugarNode(src, bodyId)
+
+            if (patternDstId < 0 || bodyDstId < 0) {
+                j = j + 1
+                continue
+            }
+
+            // 构造条件：subject == pattern
+            var condDstId: Int = -1
+            if (subjectId >= 0) {
+                val subjectDstId: Int = this.desugarNode(src, subjectId)
+                if (subjectDstId >= 0) {
+                    // HirBinary("==", [subject, pattern])
+                    var condKids: String = hirKidsAdd(hirNoKids(), subjectDstId)
+                    condKids = hirKidsAdd(condKids, patternDstId)
+                    condDstId = this.dst.add("HirBinary", "==", "", sp, condKids)
+                }
+            } else {
+                // 无 subject：pattern 本身即条件
+                condDstId = patternDstId
+            }
+
+            // 构造 else 链：如果已有 result，则当前 arm 的 else = 之前的 result
+            var elseDstId: Int = -1
+            if (resultId >= 0) {
+                elseDstId = resultId
+            }
+
+            // 构造 HirIf(cond, then, else)
+            var ifKids: String = hirNoKids()
+            if (condDstId >= 0) {
+                ifKids = hirKidsAdd(ifKids, condDstId)
+            }
+            ifKids = hirKidsAdd(ifKids, bodyDstId)
+            if (elseDstId >= 0) {
+                ifKids = hirKidsAdd(ifKids, elseDstId)
+            }
+
+            resultId = this.dst.add("HirIfExpr", "", "", sp, ifKids)
+            j = j + 1
+        }
+
+        if (resultId >= 0) {
+            return resultId
+        }
+
+        // 无有效 arm，返回空块
+        return this.dst.leaf("HirBlock", "", sp)
     }
 
-    /// 降级 for 循环为 while + 索引变量。
+    /// 降级 for 循环（Phase B：保留 HirFor 节点，由 MIR 降级）。
     fun desugarFor(src: Hir, id: Int): Int {
         val sp: Span = src.spanOf(id)
         val kids: String = src.kidsOf(id)
         val kCount: Int = hirKidsCount(kids)
 
-        // 子节点结构：[ValDecl(iterVar), Iterable, Block(body)]
-        // 简化版：保留 HirFor 节点
         var newKids: String = hirNoKids()
         var i: Int = 0
         while (i < kCount) {
@@ -125,6 +208,39 @@ class Desugar {
             i = i + 1
         }
         return this.dst.add("HirFor", "", "", sp, newKids)
+    }
+
+    /// 降级 Elvis 操作符 `a ?: b` 为 `if (a != null) a else b`。
+    fun desugarElvis(src: Hir, id: Int): Int {
+        val sp: Span = src.spanOf(id)
+        val kids: String = src.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+
+        if (kCount < 2) {
+            return this.dst.leaf("HirExpr", "elvis", sp)
+        }
+
+        val lhsId: Int = hirKidsAt(kids, 0)
+        val rhsId: Int = hirKidsAt(kids, 1)
+
+        val lhsDstId: Int = this.desugarNode(src, lhsId)
+        val rhsDstId: Int = this.desugarNode(src, rhsId)
+
+        if (lhsDstId < 0 || rhsDstId < 0) {
+            return this.dst.leaf("HirExpr", "elvis", sp)
+        }
+
+        // 构造 a != null
+        val nullLitId: Int = this.dst.leaf("HirLit", "null", sp)
+        var condKids: String = hirKidsAdd(hirNoKids(), lhsDstId)
+        condKids = hirKidsAdd(condKids, nullLitId)
+        val condDstId: Int = this.dst.add("HirBinary", "!=", "", sp, condKids)
+
+        // 构造 if (cond) a else b
+        var ifKids: String = hirKidsAdd(hirNoKids(), condDstId)
+        ifKids = hirKidsAdd(ifKids, lhsDstId)
+        ifKids = hirKidsAdd(ifKids, rhsDstId)
+        return this.dst.add("HirIfExpr", "", "", sp, ifKids)
     }
 
     /// 获取去糖后的 HIR。

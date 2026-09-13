@@ -42,9 +42,9 @@
 5. **TypeMapper 扩展**：添加 `CString`、`Long`、`Byte` 等类型映射
 
 ### 验证标准
-- `native(SYS_WRITE) fun write(...)` 能正确翻译为 inline asm ❌
+- `@native(SYS_WRITE) fun write(...)` 能正确翻译为 inline asm ❌
 - `native fun read(addr: Long): Byte` 能正确翻译为 `load i8` ❌
-- `native(asm = "rdtsc") fun rdtsc(): Long` 能正确翻译为 inline asm ❌
+- `@native(asm = "rdtsc") fun rdtsc(): Long` 能正确翻译为 inline asm ❌
 - `export fun malloc(...)` 能正确翻译为 `define external` ❌
 - 单元测试通过 ❌
 
@@ -260,9 +260,9 @@ Aura 编译器自身用 Aura AOT 编译，完全无 Rust 参与。
 
 | 模块 | 行数（估算） | 难度 | 状态 |
 |---|---|---|---|
-| `@native` 语法 + IR 翻译 | 200-400 | 中 | ✅ IR 完成，语法待扩展 |
+| `native` 语法 + IR 翻译 | 200-400 | 中 | ✅ IR 完成，语法待扩展 |
 | `extern object` 语法 + IR 翻译 | 100-200 | 低 | ⚠️ IR 完成，语法待扩展 |
-| `@export` 语法 + IR 翻译 | 100-200 | 低 | ✅ 完成 |
+| `export` 语法 + IR 翻译 | 100-200 | 低 | ✅ 完成 |
 | 内存分配器（bump） | 100-200 | 低 | ❌ 未开始 |
 | 内存分配器（dlmalloc 移植） | 500-1000 | 中 | ❌ 未开始 |
 | 字符串 / 内存操作 | 200-300 | 低 | ❌ 未开始 |

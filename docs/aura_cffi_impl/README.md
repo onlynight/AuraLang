@@ -48,8 +48,8 @@
                     │  编译期翻译（Rust AOT 后端）       │
                     │  HIR → LLVM IR 文本               │
                     │  @native(N) → inline asm syscall  │
-                    │  @native → load/store             │
-                    │  @export → define external        │
+                    │  native → load/store             │
+                    │  export → define external        │
                     └────────────────┬────────────────┘
                                      │
                     ┌────────────────▼────────────────┐
@@ -76,9 +76,11 @@
 | `extern object Name { ... }` | 封装原生/外部方法 | `extern object Syscalls { ... }` |
 | `@native(N)` | 系统调用（N 为 syscall 号） | `@native(1) fun write(...)` |
 | `@native("libc:name")` | 外部库符号 | `@native("libc:malloc") fun malloc(...)` |
-| `@native` | 编译器内置（无参数） | `@native fun read(addr: Long): Byte` |
+| `native` | 编译器内置（无参数） | `native fun read(addr: Long): Byte` |
 | `@native(asm = "...")` | 内联汇编 | `@native(asm = "rdtsc") fun rdtsc(): Long` |
-| `@export` | 导出符号（Aura 实现体） | `@export fun malloc(n: Long): Long { ... }` |
+| `export` | 导出符号（Aura 实现体） | `export fun malloc(n: Long): Long { ... }` |
+| `@aot` | AOT 库函数（JitValue ABI） | `@aot fun add(a: Int, b: Int): Int` |
+| `default fun loadLibrary()` | AOT 库路径声明 | `default fun loadLibrary(): String = "utils"` |
 
 ---
 
@@ -144,11 +146,11 @@ aura/core/aura/lang/runtime/
 | Aura 语法 | LLVM IR |
 |---|---|
 | `@native(N) fun write(...)` | `define i64 @write(...) { call asm "mov $N, %rax; ...; syscall" }` |
-| `@native fun read(addr: Long): Byte` | `load i8, ptr %addr` |
-| `@native fun write64(addr, v)` | `store i64 %v, ptr %addr` |
-| `@native fun copy(dst, src, n)` | `call void @llvm.memcpy(...)` |
+| `native fun read(addr: Long): Byte` | `load i8, ptr %addr` |
+| `native fun write64(addr, v)` | `store i64 %v, ptr %addr` |
+| `native fun copy(dst, src, n)` | `call void @llvm.memcpy(...)` |
 | `@native(asm = "rdtsc") fun rdtsc(): Long` | `call i64 asm "rdtsc" { ... }` |
-| `@export fun malloc(n: Long): Long { ... }` | `define i64 @malloc(i64 %n) { ... }` |
+| `export fun malloc(n: Long): Long { ... }` | `define i64 @malloc(i64 %n) { ... }` |
 | `Syscalls.write(1, buf, n)` | `call i64 @write(i32 1, i64 %buf, i64 %n)` |
 | `Memory.read(addr)` | `load i8, ptr %addr` |
 | `s as Long`（CString → Long） | `ptrtoint` |
@@ -181,9 +183,9 @@ aura build my_program.aura --aot -o build/bin/my_program.exe
 
 ### Phase S0：语法与发射器（3-5 天）
 
-- 新增 `@native` 语法
+- 新增 `native` 语法
 - 新增 `extern object` 语法
-- IR 翻译：`@native(N)` → inline asm；`@native` → load/store
+- IR 翻译：`@native(N)` → inline asm；`native` → load/store
 - 测试：`tests/phase_s0_native_syntax_tests.aura`
 
 ### Phase S1：最小运行库（1 周）

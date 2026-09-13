@@ -32,6 +32,45 @@ pub static EMBEDDED_COLLECTIONS_AUC: &[u8] =
 /// 嵌入的 Test 标准库（AOT 机器码）— 纯逻辑
 pub static EMBEDDED_TEST_AUC: &[u8] = include_bytes!(concat!("../../../build/", "Test.auc"));
 
+/// 嵌入的 Ascii 标准库（AOT 机器码）— 纯逻辑
+pub static EMBEDDED_ASCII_AUC: &[u8] = include_bytes!(concat!("../../../build/", "Ascii.auc"));
+
+/// 嵌入的 Assert 标准库（AOT 机器码）— 纯逻辑
+pub static EMBEDDED_ASSERT_AUC: &[u8] = include_bytes!(concat!("../../../build/", "Assert.auc"));
+
+/// 嵌入的 Encoding 标准库（AOT 机器码）— 纯逻辑（Base64 / Hex）
+pub static EMBEDDED_ENCODING_AUC: &[u8] =
+    include_bytes!(concat!("../../../build/", "Encoding.auc"));
+
+/// 嵌入的 Iter 标准库（AOT 机器码）— 纯逻辑（函数式工具）
+pub static EMBEDDED_ITER_AUC: &[u8] = include_bytes!(concat!("../../../build/", "Iter.auc"));
+
+/// 嵌入的 Json 标准库（AOT 机器码）— 纯逻辑（JSON parse/stringify）
+pub static EMBEDDED_JSON_AUC: &[u8] = include_bytes!(concat!("../../../build/", "Json.auc"));
+
+/// 嵌入的 StringBuilder 标准库（AOT 机器码）— 纯逻辑
+pub static EMBEDDED_SB_AUC: &[u8] = include_bytes!(concat!("../../../build/", "StringBuilder.auc"));
+
+/// 嵌入的 TestHelper 标准库（AOT 机器码）— 纯逻辑
+pub static EMBEDDED_TEST_HELPER_AUC: &[u8] =
+    include_bytes!(concat!("../../../build/", "TestHelper.auc"));
+
+/// 嵌入的 Path 标准库（AOT 机器码）— 纯逻辑（路径操作）
+pub static EMBEDDED_PATH_AUC: &[u8] = include_bytes!(concat!("../../../build/", "Path.auc"));
+
+/// 嵌入的 String 标准库（AOT 机器码）— 纯逻辑
+pub static EMBEDDED_STRING_AUC: &[u8] = include_bytes!(concat!("../../../build/", "String.auc"));
+
+/// 嵌入的 Actor 标准库（AOT 机器码）— 纯逻辑（单线程 Actor）
+pub static EMBEDDED_ACTOR_AUC: &[u8] = include_bytes!(concat!("../../../build/", "Actor.auc"));
+
+/// 嵌入的 Channel 标准库（AOT 机器码）— 纯逻辑
+pub static EMBEDDED_CHANNEL_AUC: &[u8] = include_bytes!(concat!("../../../build/", "Channel.auc"));
+
+/// 嵌入的 Coroutine 标准库（AOT 机器码）— 纯逻辑
+pub static EMBEDDED_COROUTINE_AUC: &[u8] =
+    include_bytes!(concat!("../../../build/", "Coroutine.auc"));
+
 /// 所有嵌入的标准库模块（模块名, .auc 字节）
 /// 仅包含纯逻辑模块（FFI 模块保持 Rust native）
 pub static EMBEDDED_STDLIB_MODULES: &[(&str, &[u8])] = &[
@@ -39,6 +78,18 @@ pub static EMBEDDED_STDLIB_MODULES: &[(&str, &[u8])] = &[
     ("Time", EMBEDDED_TIME_AUC),
     ("Collections", EMBEDDED_COLLECTIONS_AUC),
     ("Test", EMBEDDED_TEST_AUC),
+    ("Ascii", EMBEDDED_ASCII_AUC),
+    ("Assert", EMBEDDED_ASSERT_AUC),
+    ("Encoding", EMBEDDED_ENCODING_AUC),
+    ("Iter", EMBEDDED_ITER_AUC),
+    ("Json", EMBEDDED_JSON_AUC),
+    ("StringBuilder", EMBEDDED_SB_AUC),
+    ("TestHelper", EMBEDDED_TEST_HELPER_AUC),
+    ("Path", EMBEDDED_PATH_AUC),
+    ("String", EMBEDDED_STRING_AUC),
+    ("Actor", EMBEDDED_ACTOR_AUC),
+    ("Channel", EMBEDDED_CHANNEL_AUC),
+    ("Coroutine", EMBEDDED_COROUTINE_AUC),
 ];
 
 /// 标准库模块总数

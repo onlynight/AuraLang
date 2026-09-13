@@ -17,7 +17,7 @@ extern object Clock {
 
     // ── 系统调用声明 ──
 
-    native(SYS_CLOCK_GETTIME) fun clockGettime(clock: Int, ts: Long): Long
+    @native(SYS_CLOCK_GETTIME) fun clockGettime(clock: Int, ts: Long): Long
 
     // ── 时间操作函数 ──
 

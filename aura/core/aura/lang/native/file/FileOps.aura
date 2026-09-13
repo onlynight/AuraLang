@@ -19,13 +19,13 @@ extern object FileOps {
 
     // ── 系统调用声明 ──
 
-    native(SYS_OPEN) fun open(path: CString, flags: Int): Int
-    native(SYS_CLOSE) fun close(fd: Int): Int
-    native(SYS_READ) fun read(fd: Int, buf: Long, count: Long): Long
-    native(SYS_WRITE) fun write(fd: Int, buf: Long, count: Long): Long
-    native(SYS_LSEEK) fun lseek(fd: Int, off: Long, whence: Int): Long
-    native(SYS_FSTAT) fun fstat(fd: Int, buf: Long): Long
-    native(SYS_UNLINK) fun unlink(path: CString): Int
+    @native(SYS_OPEN) fun open(path: CString, flags: Int): Int
+    @native(SYS_CLOSE) fun close(fd: Int): Int
+    @native(SYS_READ) fun read(fd: Int, buf: Long, count: Long): Long
+    @native(SYS_WRITE) fun write(fd: Int, buf: Long, count: Long): Long
+    @native(SYS_LSEEK) fun lseek(fd: Int, off: Long, whence: Int): Long
+    @native(SYS_FSTAT) fun fstat(fd: Int, buf: Long): Long
+    @native(SYS_UNLINK) fun unlink(path: CString): Int
 
     // ── 文件操作函数 ──
 

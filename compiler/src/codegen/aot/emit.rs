@@ -182,12 +182,14 @@ impl EmitCtx {
 
     /// 类型映射（带「未定义结构体 → `i8*`」降级）。
     ///
-    /// 与 `map_type` 的区别：若映射结果是 `%struct.X` 而 `X` 不在
+    /// 与 `map_type` 的区别：若映射结果是 `%struct.X` 或 `%struct.X*` 而 `X` 不在
     /// `known_structs` 中（未被定义），返回 `i8*`，避免生成 unsized 类型引用。
     pub fn llvm_type_checked(&self, ty: &HirType) -> String {
         let l = self.llvm_type(ty);
         match l.strip_prefix("%struct.") {
-            Some(name) if !self.known_structs.contains(name) => "i8*".to_string(),
+            Some(name) if !self.known_structs.contains(name.trim_end_matches('*')) => {
+                "i8*".to_string()
+            }
             _ => l,
         }
     }
@@ -303,7 +305,9 @@ impl EmitCtx {
                 .map(|(_, ty)| {
                     let l = self.llvm_type(ty);
                     match l.strip_prefix("%struct.") {
-                        Some(name) if !known.contains(name) => "i8*".to_string(),
+                        Some(name) if !known.contains(name.trim_end_matches('*')) => {
+                            "i8*".to_string()
+                        }
                         _ => l,
                     }
                 })
@@ -2885,19 +2889,23 @@ fn emit_call(
     let param_tys = ctx.func_param_types.get(callee).cloned();
 
     // 实参求值：若实参是「结构体局部变量」且对应形参是**指针**（方法接收者 self 即
-    // `i8*`），直接传该局部变量的「槽地址」，而不是按值加载后拷贝。
+    // `i8*`，类实例指针即 `%struct.X*`），直接传该局部变量的「槽地址」，而不是按值加载后拷贝。
     // 否则方法内的 `this.field = …` 会写进一份临时副本、调用方不可见，
     // 导致状态永不推进（Lexer.pos 不前进 → scanAll 死循环 + alloca 累积 → 栈溢出）。
     //
-    // 收紧范围：**仅**对方法接收者（首个实参 + `Class.method` 形式的被调方）生效，
-    // 避免影响其它「把结构体局部变量传给指针形参」的场景（如 Any/存进容器等，
-    // 传栈槽地址会在作用域结束后悬空）。
+    // Phase A.1：类实例按引用传递——对 `%struct.X*` 形参始终走地址传递；
+    // 对 `i8*` 形参（方法 self 等）保留原有行为（仅方法首参）。
     let is_method_call = callee.contains('.');
     let param_fn_sigs = ctx.fn_param_sigs.get(callee).cloned();
     let mut args_ir: Vec<(String, String)> = Vec::with_capacity(effective_args.len());
     for (i, a) in effective_args.iter().enumerate() {
         let want = param_tys.as_ref().and_then(|p| p.get(i)).cloned();
-        if i == 0 && is_method_call {
+        let use_address = if let Some(w) = want.as_ref() {
+            is_struct_ptr_ty(w) || (i == 0 && is_method_call && is_ptr_ty(w))
+        } else {
+            false
+        };
+        if use_address {
             if let Some(w) = want.as_ref() {
                 if let Some(recv) = receiver_address(ctx, blocks, a, w)? {
                     args_ir.push(recv);
@@ -3202,6 +3210,12 @@ fn llvm_ty_to_aura_name(t: &str) -> Option<&'static str> {
 /// 判断 LLVM 类型字符串是否是指针
 fn is_ptr_ty(t: &str) -> bool {
     t.ends_with('*') || t == "ptr"
+}
+
+/// 是否为「类实例指针」类型（`%struct.X*`，Phase A.1 按引用传递）。
+/// 区别于 `i8*`（String/Any/Unknown）和 `{ i8*, i64 }`（String 结构体）。
+fn is_struct_ptr_ty(t: &str) -> bool {
+    t.starts_with("%struct.") && t.ends_with('*')
 }
 
 /// 变量槽的指针类型：LLVM 不透明指针模式下 `ptr` 不能再取 `ptr*`（llc 报
@@ -3731,19 +3745,39 @@ fn try_emit_ctor(
     let param_tys = ctor_name.as_ref().and_then(|n| ctx.func_param_types.get(n).cloned());
     if let (Some(ctor_name), Some(param_tys)) = (ctor_name, param_tys) {
         if param_tys.len() == args.len() + 1 {
+            // Phase A.1：struct_type 是 `%struct.X*`（指针），alloca 需要值类型 `%struct.X`
+            // Phase A.3：构造函数返回值可能是指针（类实例按引用），必须堆分配避免 dangling
+            let value_type = struct_type.trim_end_matches('*').to_string();
+            // 计算结构体大小并堆分配
+            let size_ptr = ctx.fresh_var();
+            let size = ctx.fresh_var();
+            let raw = ctx.fresh_var();
             let alloc = ctx.fresh_var();
-            push_alloca_entry(blocks, &alloc, &struct_type);
+            let cur = blocks.last_mut();
+            cur.body.push(format!(
+                "{} = getelementptr {}, {}* null, i32 1",
+                size_ptr, value_type, value_type
+            ));
+            cur.body.push(format!(
+                "{} = ptrtoint {}* {} to i64",
+                size, value_type, size_ptr
+            ));
+            cur.body.push(format!("{} = call i8* @aura_malloc(i64 {})", raw, size));
+            cur.body.push(format!(
+                "{} = bitcast i8* {} to {}*",
+                alloc, raw, value_type
+            ));
             // 先写字段默认值（init 块/构造参数之外的字段仍须有确定初值）
-            emit_field_defaults(ctx, blocks, type_name, struct_type, &alloc)?;
+            emit_field_defaults(ctx, blocks, type_name, &value_type, &alloc)?;
             // self 形参类型在 desugar 中是 Any → i8*；按实际类型传参（必要时 bitcast）。
             let self_ty = &param_tys[0];
-            let self_arg = if self_ty == &format!("{}*", struct_type) {
-                format!("{}* {}", struct_type, alloc)
+            let self_arg = if self_ty == struct_type {
+                format!("{} {}", struct_type, alloc)
             } else {
                 let bc = ctx.fresh_var();
                 blocks.last_mut().body.push(format!(
                     "{} = bitcast {}* {} to {}",
-                    bc, struct_type, alloc, self_ty
+                    bc, value_type, alloc, self_ty
                 ));
                 format!("{} {}", self_ty, bc)
             };
@@ -3760,13 +3794,8 @@ fn try_emit_ctor(
                 sanitizellvm(&ctor_name),
                 call_args.join(", ")
             ));
-            let loaded = ctx.fresh_var();
-            let cur = blocks.last_mut();
-            cur.body.push(format!(
-                "{} = load {}, {}* {}",
-                loaded, struct_type, struct_type, alloc
-            ));
-            return Ok(Some((loaded, struct_type.to_string())));
+            // Phase A.1：返回 alloca 地址（指针），而非加载的结构体值
+            return Ok(Some((alloc, struct_type.to_string())));
         }
     }
     Ok(None)
@@ -3787,7 +3816,32 @@ fn emit_struct_constructor(
         return Ok((v, t));
     }
 
-    // 兜底：位置式 insertvalue（适用于无合成构造函数的纯值结构体 / 枚举变体）
+    // 兜底：位置式 GEP + store（适用于无合成构造函数的纯值结构体 / 枚举变体）
+    // Phase A.1：struct_type 是 `%struct.X*`（指针），alloca 需要值类型 `%struct.X`
+    // Phase A.3：构造函数返回值可能是指针（类实例按引用），必须堆分配避免 dangling
+    let value_type = struct_type.trim_end_matches('*').to_string();
+    let size_ptr = ctx.fresh_var();
+    let size = ctx.fresh_var();
+    let raw = ctx.fresh_var();
+    let alloc = ctx.fresh_var();
+    let cur = blocks.last_mut();
+    cur.body.push(format!(
+        "{} = getelementptr {}, {}* null, i32 1",
+        size_ptr, value_type, value_type
+    ));
+    cur.body.push(format!(
+        "{} = ptrtoint {}* {} to i64",
+        size, value_type, size_ptr
+    ));
+    cur.body.push(format!("{} = call i8* @aura_malloc(i64 {})", raw, size));
+    cur.body.push(format!(
+        "{} = bitcast i8* {} to {}*",
+        alloc, raw, value_type
+    ));
+    // 无合成构造函数（如无 init 块的类）：也必须先写字段默认值，否则未赋值字段
+    // 保持 undef → 运行期读到随机内存（非确定性）。
+    emit_field_defaults(ctx, blocks, struct_name, &value_type, &alloc)?;
+
     let mut field_tys: Vec<(usize, String)> = ctx
         .class_field_types
         .get(struct_name)
@@ -3797,36 +3851,21 @@ fn emit_struct_constructor(
 
     let args_ir: Vec<(String, String)> =
         args.iter().map(|a| emit_expr_val(ctx, blocks, a)).collect::<Result<_, _>>()?;
-    // 无合成构造函数（如无 init 块的类）：也必须先写字段默认值，否则未赋值字段
-    // 保持 undef → 运行期读到随机内存（非确定性）。
-    let mut struct_val = if ctx.class_defaults.contains_key(struct_name) {
-        let alloc = ctx.fresh_var();
-        push_alloca_entry(blocks, &alloc, &struct_type);
-        emit_field_defaults(ctx, blocks, struct_name, &struct_type, &alloc)?;
-        let loaded = ctx.fresh_var();
-        blocks.last_mut().body.push(format!(
-            "{} = load {}, {}* {}",
-            loaded, struct_type, struct_type, alloc
-        ));
-        loaded
-    } else {
-        "undef".to_string()
-    };
     for (i, (val, ty)) in args_ir.iter().enumerate() {
         // 按字段声明类型转换实参（如 `Any`/`i8*` → `i32`）
         let (v, vty) = match field_tys.iter().find(|(idx, _)| *idx == i) {
             Some((_, want)) => coerce_arg(ctx, blocks, val.clone(), ty, want),
             None => (val.clone(), ty.clone()),
         };
-        let new_val = ctx.fresh_var();
+        let gep = ctx.fresh_var();
         let cur = blocks.last_mut();
         cur.body.push(format!(
-            "{} = insertvalue {} {}, {} {}, {}",
-            new_val, struct_type, struct_val, vty, v, i
+            "{} = getelementptr {}, {}* {}, i32 0, i32 {}",
+            gep, value_type, value_type, alloc, i
         ));
-        struct_val = new_val;
+        cur.body.push(format!("store {} {}, {}* {}", vty, v, vty, gep));
     }
-    Ok((struct_val, struct_type))
+    Ok((alloc, struct_type))
 }
 
 fn emit_member_access(
@@ -4177,8 +4216,8 @@ fn emit_new(
     let arg_values: Vec<(String, String)> =
         args.iter().map(|a| emit_expr_val(ctx, blocks, a)).collect::<Result<_, _>>()?;
 
-    // 获取结构体类型名
-    let llvm_struct_type = format!("%struct.{}", sanitizellvm(type_name));
+    // 获取结构体类型名（Phase A.1：使用指针类型）
+    let llvm_struct_type = format!("%struct.{}*", sanitizellvm(type_name));
 
     // 优先走合成构造函数 Class.__ctorN（与 emit_struct_constructor 一致：按名赋值字段，
     // 正确处理默认值字段 / 构造函数按名赋值）。
@@ -4194,36 +4233,42 @@ fn emit_new(
         .unwrap_or_default();
     field_tys.sort_by_key(|(idx, _)| *idx);
 
-    // 使用 insertvalue 构建结构体值。
-    // 无合成构造函数时同样要先写字段默认值（见 class_defaults 注释）。
-    let mut struct_val = if ctx.class_defaults.contains_key(type_name) {
-        let alloc = ctx.fresh_var();
-        push_alloca_entry(blocks, &alloc, &llvm_struct_type);
-        emit_field_defaults(ctx, blocks, type_name, &llvm_struct_type, &alloc)?;
-        let loaded = ctx.fresh_var();
-        blocks.last_mut().body.push(format!(
-            "{} = load {}, {}* {}",
-            loaded, llvm_struct_type, llvm_struct_type, alloc
-        ));
-        loaded
-    } else {
-        "undef".to_string()
-    };
+    // 兜底：位置式 GEP + store（Phase A.1：指针语义，Phase A.3：堆分配避免 dangling）
+    let value_type = llvm_struct_type.trim_end_matches('*').to_string();
+    let size_ptr = ctx.fresh_var();
+    let size = ctx.fresh_var();
+    let raw = ctx.fresh_var();
+    let alloc = ctx.fresh_var();
+    let cur = blocks.last_mut();
+    cur.body.push(format!(
+        "{} = getelementptr {}, {}* null, i32 1",
+        size_ptr, value_type, value_type
+    ));
+    cur.body.push(format!(
+        "{} = ptrtoint {}* {} to i64",
+        size, value_type, size_ptr
+    ));
+    cur.body.push(format!("{} = call i8* @aura_malloc(i64 {})", raw, size));
+    cur.body.push(format!(
+        "{} = bitcast i8* {} to {}*",
+        alloc, raw, value_type
+    ));
+    emit_field_defaults(ctx, blocks, type_name, &value_type, &alloc)?;
+
     for (i, (val, ty)) in arg_values.iter().enumerate() {
         let (v, vty) = match field_tys.iter().find(|(idx, _)| *idx == i) {
             Some((_, want)) => coerce_arg(ctx, blocks, val.clone(), ty, want),
             None => (val.clone(), ty.clone()),
         };
-        let new_val = ctx.fresh_var();
+        let gep = ctx.fresh_var();
         let cur = blocks.last_mut();
         cur.body.push(format!(
-            "{} = insertvalue {} {}, {} {}, {}",
-            new_val, llvm_struct_type, struct_val, vty, v, i
+            "{} = getelementptr {}, {}* {}, i32 0, i32 {}",
+            gep, value_type, value_type, alloc, i
         ));
-        struct_val = new_val;
+        cur.body.push(format!("store {} {}, {}* {}", vty, v, vty, gep));
     }
-
-    Ok((struct_val, llvm_struct_type))
+    Ok((alloc, llvm_struct_type))
 }
 
 fn emit_if_expr(

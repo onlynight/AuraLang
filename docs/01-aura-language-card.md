@@ -351,15 +351,15 @@ extern "c" "libc" {
 
 ```aura
 // 声明外部 AOT 接口（库名通过 loadLibrary() 声明）
-extern interface Utils {
+extern object Utils {
     default fun loadLibrary(): String = "utils"
-    fun add(a: Int, b: Int): Int
-    fun multiply(a: Int, b: Int): Int
-    fun factorial(n: Int): Int
-    fun power(base: Int, exp: Int): Int
+    @aot fun add(a: Int, b: Int): Int
+    @aot fun multiply(a: Int, b: Int): Int
+    @aot fun factorial(n: Int): Int
+    @aot fun power(base: Int, exp: Int): Int
 }
 
-// 调用方式：接口名.函数名
+// 调用方式：对象名.函数名
 fun main() = {
     val sum = Utils.add(3, 4)
     println("sum = " + toString(sum))
@@ -370,9 +370,9 @@ fun main() = {
 
 ```aura
 // utils_interface.aura（独立文件）
-extern interface Utils {
+extern object Utils {
     default fun loadLibrary(): String = "utils"
-    fun add(a: Int, b: Int): Int
+    @aot fun add(a: Int, b: Int): Int
 }
 
 // main.aura（导入使用）
@@ -385,11 +385,11 @@ fun main() = {
 
 ### 6.4 FFI 对比
 
-| | `extern "c"` | `extern interface` |
+| | `extern "c"` | `extern object` + `@aot` |
 |---|---|---|
 | 调用约定 | C ABI | JitValue ABI |
 | 库名声明 | `extern "c" "lib"` | `default fun loadLibrary(): String = "lib"` |
-| 调用方式 | `func(args)` | `Interface.func(args)` |
+| 调用方式 | `func(args)` | `Object.func(args)` |
 | 导出符号 | `aura_c_func` | `aura_aot_func!2!0!0!0` |
 | 编译参数 | `--aot --shared --cabi` | `--aot --shared` |
 

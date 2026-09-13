@@ -1,0 +1,69 @@
+// ═════════════════════════════════════════════════════════════
+// Phase B.1 验证：when 表达式降级为嵌套 if
+//
+// 运行：aura run tests/hir_b1_when_tests.aura
+//   全通过时输出 "RESULT: PASS"
+// ═════════════════════════════════════════════════════════════
+
+fun testWhenBasic(): Int {
+    val x: Int = 2
+    val result: Int = when (x) {
+        1 -> 10
+        2 -> 20
+        3 -> 30
+        else -> 0
+    }
+    return result
+}
+
+fun testWhenString(): Int {
+    val s: String = "hello"
+    val result: String = when (s) {
+        "hello" -> "world"
+        "foo" -> "bar"
+        else -> "none"
+    }
+    return result.length
+}
+
+fun testWhenNoSubject(): Int {
+    val result: Int = when {
+        true -> 1
+        false -> 2
+        else -> 3
+    }
+    return result
+}
+
+fun testWhenWithArithmetic(): Int {
+    val n: Int = 7
+    return when (n) {
+        7 -> n * 2
+        14 -> n * 3
+        else -> n * 4
+    }
+}
+
+fun main(): Int {
+    var failures: Int = 0
+
+    if (testWhenBasic() != 20) { failures = failures + 1; println("FAIL: testWhenBasic") }
+    else { println("PASS: testWhenBasic") }
+
+    if (testWhenString() != 5) { failures = failures + 1; println("FAIL: testWhenString") }
+    else { println("PASS: testWhenString") }
+
+    if (testWhenNoSubject() != 1) { failures = failures + 1; println("FAIL: testWhenNoSubject") }
+    else { println("PASS: testWhenNoSubject") }
+
+    if (testWhenWithArithmetic() != 14) { failures = failures + 1; println("FAIL: testWhenWithArithmetic") }
+    else { println("PASS: testWhenWithArithmetic") }
+
+    println("")
+    println("Total failures: " + toStr(failures))
+    if (failures == 0) {
+        println("RESULT: PASS")
+    } else {
+        println("RESULT: FAIL")
+    }
+}

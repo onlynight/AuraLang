@@ -392,7 +392,7 @@ fn extract_module_info(file: &Path, source: &str) -> Result<StdlibModule, String
                     }
                 }
             }
-            compiler::ast::Decl::ExternInterface(extern_if) => {
+            compiler::ast::Decl::ExternObject(extern_if) => {
                 has_extern = true;
                 for fn_decl in &extern_if.functions {
                     function_names.push(fn_decl.name.clone());
@@ -480,7 +480,7 @@ fn extract_ffi_declarations(file: &Path, source: &str) -> Result<Vec<FfiDeclarat
         }
 
         // Also scan extern interface declarations
-        if let compiler::ast::Decl::ExternInterface(extern_if) = decl {
+        if let compiler::ast::Decl::ExternObject(extern_if) = decl {
             let library = extern_if.lib_path.clone().unwrap_or_else(|| "native".to_string());
 
             for fn_decl in &extern_if.functions {

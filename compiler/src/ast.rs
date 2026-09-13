@@ -348,7 +348,9 @@ pub enum Decl {
     Object(ObjectDecl),
     TypeAlias(TypeAliasDecl),
     Extern(ExternDecl),
-    ExternInterface(ExternInterfaceDecl),
+    /// `extern interface`（已废弃）或 `extern object`（新语法）：绑定到 AOT 动态库的函数接口
+    /// 或系统级外部绑定（syscall / libc / inline asm / 编译器内置）
+    ExternObject(ExternInterfaceDecl),
     Import(ImportDecl),
     Annotation(AnnotationDecl),
 }
@@ -364,7 +366,21 @@ pub struct FnDecl {
     pub body: Option<Box<Expr>>,
     /// 文档注释（`///` / `/** */`），按行合并
     pub doc: Option<String>,
+    /// Phase D: native 注解（@native(N) / @native(asm="...") / native fun）
+    pub native_attr: Option<NativeAttr>,
     pub span: Span,
+}
+
+/// Phase D: @native 注解类型
+///
+/// - `Syscall(n)` — `@native(SYS_READ)` 系统调用号
+/// - `Asm(code)` — `@native(asm = "rdtsc")` 内联汇编
+/// - `Builtin` — `native fun` 编译器内置
+#[derive(Debug, Clone, PartialEq)]
+pub enum NativeAttr {
+    Syscall(i64),
+    Asm(String),
+    Builtin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -393,8 +409,10 @@ pub enum FnModifier {
     Expect,
     /// 多平台 actual 实现
     Actual,
-    /// 默认实现（extern interface 内 loadLibrary 使用）
+    /// 默认实现（extern object 内 loadLibrary 使用）
     Default,
+    /// AOT 库函数（JitValue ABI 直调）：@aot fun xxx()
+    Aot,
 }
 
 /// 类修饰符（value / data / sealed / final / open / abstract / expect / actual）。

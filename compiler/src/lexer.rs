@@ -80,6 +80,8 @@ const KEYWORDS: &[(&str, TokenKind)] = &[
     ("free", TokenKind::Free),
     ("retain", TokenKind::Retain),
     ("release", TokenKind::Release),
+    // Phase D: native 关键字（extern object 中的编译器内置函数）
+    ("native", TokenKind::Native),
     // 基本类型关键字
     ("Int", TokenKind::Ident),
     ("Long", TokenKind::Ident),

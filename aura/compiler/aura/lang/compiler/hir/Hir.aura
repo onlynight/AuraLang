@@ -574,8 +574,16 @@ class HirLowerer {
             return this.hir.leaf("HirContinue", "", ast.spanOf(id))
         } else if (kind == "ExprStmt") {
             return this.lowerExprStmt(ast, id)
+        } else if (kind == "Try") {
+            return this.lowerTry(ast, id)
+        } else if (kind == "Lambda") {
+            return this.lowerLambda(ast, id)
+        } else if (kind == "Closure") {
+            return this.lowerLambda(ast, id)
+        } else if (kind == "Defer") {
+            return this.hir.leaf("HirDefer", "", ast.spanOf(id))
         } else {
-            // 其他语句类型（如 Try）暂不处理
+            // 其他语句类型暂不处理
             return -1
         }
     }
@@ -854,9 +862,14 @@ class HirLowerer {
             return this.lowerBlock(ast, id)
         }
 
-        // when 表达式（本版保留 When 节点）
+        // when 表达式 → HirWhen（保留结构供 Desugar 降级为嵌套 If）
         if (kind == "When") {
-            return this.hir.leaf("HirWhen", "", sp)
+            return this.lowerWhen(ast, id)
+        }
+
+        // lambda / closure → HirLambda
+        if (kind == "Lambda" || kind == "Closure") {
+            return this.lowerLambda(ast, id)
         }
 
         // 其他类型
@@ -1094,6 +1107,134 @@ class HirLowerer {
             i = i + 1
         }
         return this.hir.add("HirIfExpr", "", "", sp, hirKids)
+    }
+
+    /// 降级 when 表达式（Phase B.1）。
+    ///
+    /// AST 形状：`When([subject], WhenArms([WhenArm(pattern, body)...])])`
+    /// HIR 形状：`HirWhen([subject], HirWhenArms([HirWhenArm(pattern, body)...])])`
+    fun lowerWhen(ast: Ast, id: Int): Int {
+        val sp: Span = ast.spanOf(id)
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+
+        var hirKids: String = hirNoKids()
+
+        // 子节点 0：可选的 subject 表达式
+        var hasSubject: Boolean = false
+        if (kCount >= 1) {
+            val childId: Int = hirKidsAt(kids, 0)
+            val childKind: String = ast.kindOf(childId)
+            if (childKind != "WhenArms") {
+                val childHirId: Int = this.lowerExpr(ast, childId)
+                if (childHirId >= 0) {
+                    hirKids = hirKidsAdd(hirKids, childHirId)
+                    hasSubject = true
+                }
+            }
+        }
+
+        // 子节点 1：WhenArms → HirWhenArms
+        var i: Int = 0
+        while (i < kCount) {
+            val childId: Int = hirKidsAt(kids, i)
+            if (ast.kindOf(childId) == "WhenArms") {
+                val armsKids: String = ast.kidsOf(childId)
+                val armsKCount: Int = hirKidsCount(armsKids)
+                var armsHir: String = hirNoKids()
+                var j: Int = 0
+                while (j < armsKCount) {
+                    val armId: Int = hirKidsAt(armsKids, j)
+                    // WhenArm(pattern, body) → HirWhenArm(pattern, body)
+                    val armKids: String = ast.kidsOf(armId)
+                    val armKCount: Int = hirKidsCount(armKids)
+                    var armHir: String = hirNoKids()
+                    var k: Int = 0
+                    while (k < armKCount) {
+                        val armChildId: Int = hirKidsAt(armKids, k)
+                        val armChildHirId: Int = this.lowerExpr(ast, armChildId)
+                        if (armChildHirId >= 0) {
+                            armHir = hirKidsAdd(armHir, armChildHirId)
+                        }
+                        k = k + 1
+                    }
+                    val armHirId: Int = this.hir.add("HirWhenArm", "", "", ast.spanOf(armId), armHir)
+                    armsHir = hirKidsAdd(armsHir, armHirId)
+                    j = j + 1
+                }
+                val armsHirId: Int = this.hir.add("HirWhenArms", "", "", ast.spanOf(childId), armsHir)
+                hirKids = hirKidsAdd(hirKids, armsHirId)
+                break
+            }
+            i = i + 1
+        }
+
+        return this.hir.add("HirWhen", "", "", sp, hirKids)
+    }
+
+    /// 降级 try/catch/finally（Phase B.4）。
+    ///
+    /// AST 形状：`Try(catchVar, [body, catchBody?, finallyBody?])`
+    /// HIR 形状：`HirTry(catchVar, [body, catchBody?, finallyBody?])`
+    fun lowerTry(ast: Ast, id: Int): Int {
+        val sp: Span = ast.spanOf(id)
+        val catchVar: String = ast.textOf(id)
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+
+        var hirKids: String = hirNoKids()
+        var i: Int = 0
+        while (i < kCount) {
+            val childId: Int = hirKidsAt(kids, i)
+            val childHirId: Int = this.lowerBlockOrExpr(ast, childId)
+            if (childHirId >= 0) {
+                hirKids = hirKidsAdd(hirKids, childHirId)
+            }
+            i = i + 1
+        }
+        return this.hir.add("HirTry", catchVar, "", sp, hirKids)
+    }
+
+    /// 降级 lambda / closure（Phase B.2）。
+    ///
+    /// AST 形状：`Lambda/Closure([params], body)`
+    /// HIR 形状：`HirLambda([HirParam...], body)`
+    fun lowerLambda(ast: Ast, id: Int): Int {
+        val sp: Span = ast.spanOf(id)
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = hirKidsCount(kids)
+
+        var hirKids: String = hirNoKids()
+        var paramsStr: String = hirNoKids()
+
+        // 子节点 0：参数列表
+        if (kCount >= 1) {
+            val paramsNodeId: Int = hirKidsAt(kids, 0)
+            val paramsKids: String = ast.kidsOf(paramsNodeId)
+            val pkCount: Int = hirKidsCount(paramsKids)
+            var pi: Int = 0
+            while (pi < pkCount) {
+                val pId: Int = hirKidsAt(paramsKids, pi)
+                val pName: String = ast.textOf(pId)
+                val pTy: String = ast.tyOf(pId)
+                val pSp: Span = ast.spanOf(pId)
+                val paramId: Int = this.hir.add("HirParam", pName, pTy, pSp, hirNoKids())
+                paramsStr = hirKidsAdd(paramsStr, paramId)
+                pi = pi + 1
+            }
+        }
+        hirKids = hirKidsAdd(hirKids, paramsStr)
+
+        // 子节点 1：body
+        if (kCount >= 2) {
+            val bodyAstId: Int = hirKidsAt(kids, 1)
+            val bodyHirId: Int = this.lowerBlockOrExpr(ast, bodyAstId)
+            if (bodyHirId >= 0) {
+                hirKids = hirKidsAdd(hirKids, bodyHirId)
+            }
+        }
+
+        return this.hir.add("HirLambda", "", "", sp, hirKids)
     }
 }
 

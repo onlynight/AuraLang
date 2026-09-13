@@ -1087,16 +1087,17 @@ impl Checker {
                     );
                 }
             }
-            Decl::ExternInterface(e) => {
-                // extern interface: 校验必须包含 default fun loadLibrary()
+            Decl::ExternObject(e) => {
+                // extern object: 校验 @aot fun 必须配合 default fun loadLibrary()
                 let has_load_library = e.functions.iter().any(|f| {
                     f.name == "loadLibrary" && f.modifiers.iter().any(|m| m == &FnModifier::Default)
                 });
-                if !has_load_library {
+                let has_aot = e.functions.iter().any(|f| f.modifiers.contains(&FnModifier::Aot));
+                if has_aot && !has_load_library {
                     self.report(
                         e.span,
                         format!(
-                            "extern interface `{}` must include a `default fun loadLibrary(): String = \"...\"` method",
+                            "extern object `{}` with @aot fun must include a `default fun loadLibrary(): String = \"...\"` method",
                             e.name
                         ),
                     );
@@ -1561,7 +1562,7 @@ impl Checker {
                 }
             }
             Decl::Extern(_)
-            | Decl::ExternInterface(_)
+            | Decl::ExternObject(_)
             | Decl::Annotation(_)
             | Decl::Enum(_)
             | Decl::TypeAlias(_) => {}

@@ -22,12 +22,12 @@
 
 实现了 FFI 语法到 LLVM IR 的翻译逻辑：
 - `ffiEmitSyscall` - 发射 @native(N) 系统调用函数（inline asm）
-- `ffiEmitBuiltinRead` - 发射 @native 内存读取函数（load 指令）
-- `ffiEmitBuiltinWrite` - 发射 @native 内存写入函数（store 指令）
-- `ffiEmitBuiltinMemCopy` - 发射 @native memcpy 函数（LLVM intrinsic）
-- `ffiEmitBuiltinMemSet` - 发射 @native memset 函数（LLVM intrinsic）
+- `ffiEmitBuiltinRead` - 发射 native 内存读取函数（load 指令）
+- `ffiEmitBuiltinWrite` - 发射 native 内存写入函数（store 指令）
+- `ffiEmitBuiltinMemCopy` - 发射 native memcpy 函数（LLVM intrinsic）
+- `ffiEmitBuiltinMemSet` - 发射 native memset 函数（LLVM intrinsic）
 - `ffiEmitAsm` - 发射 @native(asm = "...") 内联汇编函数
-- `ffiEmitExport` - 发射 @export 函数定义
+- `ffiEmitExport` - 发射 export 函数定义
 - `ffiEmitAll` - 批量发射 FFI 函数定义
 
 ### 3. 运行时核心声明
@@ -72,14 +72,14 @@ CPU 级操作（内联汇编）：
 
 需要添加的关键词和符号：
 - `@` - 注解前缀
-- `native` - @native 标注
-- `export` - @export 标注
+- `native` - native 标注
+- `export` - export 标注
 - `extern` - extern object 关键词
 
 **修改点**：
 1. 在关键词表中添加 `native`, `export`, `extern`
 2. 添加 `@` 符号的识别逻辑
-3. 确保 `@native(1)`, `@native(asm = "...")`, `@export` 等语法能被正确词法分析
+3. 确保 `@native(1)`, `@native(asm = "...")`, `export` 等语法能被正确词法分析
 
 ### 2. AST 扩展
 
@@ -102,7 +102,7 @@ CPU 级操作（内联汇编）：
 - 解析 `extern object Name { ... }` 语法
 - 解析 `@native(N) fun name(...)` 语法
 - 解析 `@native(asm = "...") fun name(...)` 语法
-- 解析 `@export fun name(...) { ... }` 语法
+- 解析 `export fun name(...) { ... }` 语法
 
 **修改点**：
 1. 添加 `parseExternObject` 方法

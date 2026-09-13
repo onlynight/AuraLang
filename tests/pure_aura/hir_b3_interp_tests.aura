@@ -1,0 +1,69 @@
+// ═════════════════════════════════════════════════════════════
+// Phase B.3 验证：字符串插值降级
+//
+// 运行：aura run tests/hir_b3_interp_tests.aura
+//   全通过时输出 "RESULT: PASS"
+// ═════════════════════════════════════════════════════════════
+
+fun testInterpBasic(): Int {
+    val name: String = "World"
+    val msg: String = "Hello, $name!"
+    return msg.length
+}
+
+fun testInterpInt(): Int {
+    val n: Int = 42
+    val msg: String = "Value: $n"
+    return msg.length
+}
+
+fun testInterpExpr(): Int {
+    val a: Int = 3
+    val b: Int = 4
+    val msg: String = "Sum: ${a + b}"
+    return msg.length
+}
+
+fun testInterpMulti(): Int {
+    val x: Int = 10
+    val y: Int = 20
+    val msg: String = "$x + $y = ${x + y}"
+    return msg.length
+}
+
+fun testInterpNone(): Int {
+    val msg: String = "No interpolation"
+    return msg.length
+}
+
+fun main(): Int {
+    var failures: Int = 0
+
+    // "Hello, World!" = 13
+    if (testInterpBasic() != 13) { failures = failures + 1; println("FAIL: testInterpBasic") }
+    else { println("PASS: testInterpBasic") }
+
+    // "Value: 42" = 9
+    if (testInterpInt() != 9) { failures = failures + 1; println("FAIL: testInterpInt") }
+    else { println("PASS: testInterpInt") }
+
+    // "Sum: 7" = 6
+    if (testInterpExpr() != 6) { failures = failures + 1; println("FAIL: testInterpExpr") }
+    else { println("PASS: testInterpExpr") }
+
+    // "10 + 20 = 30" = 12
+    if (testInterpMulti() != 12) { failures = failures + 1; println("FAIL: testInterpMulti") }
+    else { println("PASS: testInterpMulti") }
+
+    // "No interpolation" = 16
+    if (testInterpNone() != 16) { failures = failures + 1; println("FAIL: testInterpNone") }
+    else { println("PASS: testInterpNone") }
+
+    println("")
+    println("Total failures: " + toStr(failures))
+    if (failures == 0) {
+        println("RESULT: PASS")
+    } else {
+        println("RESULT: FAIL")
+    }
+}

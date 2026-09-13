@@ -122,20 +122,20 @@ extern object Syscalls {
 
     // ── 系统调用声明 ──
 
-    native(SYS_READ) fun read(fd: Int, buf: Long, count: Long): Long
-    native(SYS_WRITE) fun write(fd: Int, buf: Long, count: Long): Long
-    native(SYS_OPENAT) fun openat(dirfd: Int, path: CString, flags: Int): Int
-    native(SYS_CLOSE) fun close(fd: Int): Int
-    native(SYS_LSEEK) fun lseek(fd: Int, off: Long, whence: Int): Long
-    native(SYS_MMAP) fun mmap(addr: Long, len: Long, prot: Int, flags: Int, fd: Int, off: Long): Long
-    native(SYS_MUNMAP) fun munmap(addr: Long, len: Long): Long
-    native(SYS_ACCESS) fun access(path: CString, mode: Int): Int
-    native(SYS_UNLINKAT) fun unlinkat(dirfd: Int, path: CString, flags: Int): Int
-    native(SYS_EXIT_GROUP) fun exitGroup(code: Int)
-    native(SYS_WAIT4) fun wait4(pid: Int, status: Long, options: Int, rusage: Long): Int
-    native(SYS_CLOCK_GETTIME) fun clockGettime(clock: Int, ts: Long): Long
-    native(SYS_GETRANDOM) fun getrandom(buf: Long, len: Long, flags: Int): Long
-    native(SYS_GETPID) fun getpid(): Int
+    @native(SYS_READ) fun read(fd: Int, buf: Long, count: Long): Long
+    @native(SYS_WRITE) fun write(fd: Int, buf: Long, count: Long): Long
+    @native(SYS_OPENAT) fun openat(dirfd: Int, path: CString, flags: Int): Int
+    @native(SYS_CLOSE) fun close(fd: Int): Int
+    @native(SYS_LSEEK) fun lseek(fd: Int, off: Long, whence: Int): Long
+    @native(SYS_MMAP) fun mmap(addr: Long, len: Long, prot: Int, flags: Int, fd: Int, off: Long): Long
+    @native(SYS_MUNMAP) fun munmap(addr: Long, len: Long): Long
+    @native(SYS_ACCESS) fun access(path: CString, mode: Int): Int
+    @native(SYS_UNLINKAT) fun unlinkat(dirfd: Int, path: CString, flags: Int): Int
+    @native(SYS_EXIT_GROUP) fun exitGroup(code: Int)
+    @native(SYS_WAIT4) fun wait4(pid: Int, status: Long, options: Int, rusage: Long): Int
+    @native(SYS_CLOCK_GETTIME) fun clockGettime(clock: Int, ts: Long): Long
+    @native(SYS_GETRANDOM) fun getrandom(buf: Long, len: Long, flags: Int): Long
+    @native(SYS_GETPID) fun getpid(): Int
 
     // ── 时钟常量 ──
 

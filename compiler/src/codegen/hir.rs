@@ -1305,8 +1305,8 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                     }
                 }
             }
-            Decl::ExternInterface(e) => {
-                // extern interface: 绑定到 AOT 动态库的函数接口
+            Decl::ExternObject(e) => {
+                // extern object: 绑定到 AOT 动态库的函数接口（或系统级外部绑定）
                 INTERFACE_NAMES.with(|n| n.borrow_mut().insert(e.name.clone()));
                 for f in &e.functions {
                     if f.name == "loadLibrary" {

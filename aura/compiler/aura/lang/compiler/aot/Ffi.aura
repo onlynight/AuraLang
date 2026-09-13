@@ -46,7 +46,7 @@ fun ffiDeclare(name: String, retTy: String, paramsCsv: String,
             comment = "; library: " + lib + "\n"
         }
     } else if (abi == "Aura") {
-        comment = "; extern interface: AOT direct call (JitValue ABI)\n"
+        comment = "; extern object: AOT direct call (JitValue ABI)\n"
         if (lib != "") {
             comment = comment + ";   library: " + lib + "\n"
         }

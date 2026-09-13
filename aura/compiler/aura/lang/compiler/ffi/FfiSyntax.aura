@@ -33,6 +33,9 @@ val AST_NATIVE_METHOD: String = "NativeMethod"
 /// @export 方法节点（Aura 实现，导出符号）
 val AST_EXPORT_METHOD: String = "ExportMethod"
 
+/// @aot 方法节点（AOT 库函数，JitValue ABI 直调）
+val AST_AOT_METHOD: String = "AotMethod"
+
 // ─────────────────────────────────────────────────────────────
 // @native 类型常量
 // ─────────────────────────────────────────────────────────────
@@ -49,6 +52,9 @@ val NATIVE_TYPE_LIBC: String = "libc"
 /// 内联汇编类型
 val NATIVE_TYPE_ASM: String = "asm"
 
+/// AOT 库函数类型（JitValue ABI 直调）
+val NATIVE_TYPE_AOT: String = "aot"
+
 // ─────────────────────────────────────────────────────────────
 // 辅助函数
 // ─────────────────────────────────────────────────────────────
@@ -57,7 +63,8 @@ val NATIVE_TYPE_ASM: String = "asm"
 fun ffiIsNode(kind: String): Boolean {
     return kind == AST_EXTERN_OBJECT ||
            kind == AST_NATIVE_METHOD ||
-           kind == AST_EXPORT_METHOD
+           kind == AST_EXPORT_METHOD ||
+           kind == AST_AOT_METHOD
 }
 
 /// 从 native 类型字符串解析 syscall 号。
@@ -112,4 +119,14 @@ fun ffiMakeLibcText(symbol: String): String {
 /// 生成 native 类型字符串（builtin）。
 fun ffiMakeBuiltinText(): String {
     return "builtin"
+}
+
+/// 生成 native 类型字符串（aot）。
+fun ffiMakeAotText(): String {
+    return NATIVE_TYPE_AOT
+}
+
+/// 判断是否为 aot 类型。
+fun ffiIsAot(text: String): Boolean {
+    return text == NATIVE_TYPE_AOT
 }

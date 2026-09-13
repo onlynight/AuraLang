@@ -17,9 +17,9 @@ extern object ProcessOps {
 
     // ── 系统调用声明 ──
 
-    native(SYS_EXIT_GROUP) fun exitGroup(code: Int)
-    native(SYS_WAIT4) fun wait4(pid: Int, status: Long, options: Int, rusage: Long): Int
-    native(SYS_EXECVE) fun execve(path: CString, args: Long, env: Long): Long
+    @native(SYS_EXIT_GROUP) fun exitGroup(code: Int)
+    @native(SYS_WAIT4) fun wait4(pid: Int, status: Long, options: Int, rusage: Long): Int
+    @native(SYS_EXECVE) fun execve(path: CString, args: Long, env: Long): Long
 
     // ── 进程操作函数 ──
 

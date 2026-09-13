@@ -30,6 +30,7 @@ import aura.lang.std.String
 import aura.lang.compiler.ast.Ast
 import aura.lang.compiler.lexer.Span
 import aura.lang.compiler.errors.CompileError
+import aura.lang.compiler.aot.StdSigs
 
 /// 语义检查器。
 class TypeChecker {
@@ -649,6 +650,24 @@ class TypeChecker {
                     return parts[1]
                 }
             }
+
+            // Phase B.5: std 签名表兜底
+            // 1) 直接符号名（如 "aura_lang_std_String_length"）
+            val stdSig: String = stdSignature(calleeName)
+            if (stdSig != "") {
+                val sep: Int = stdSig.indexOf("|")
+                if (sep > 0) {
+                    return stdSig.substring(0, sep)
+                }
+            }
+            // 2) 限定名（如 "String.length"）
+            val qualifiedSig: String = stdSignatureOfQualified(calleeName)
+            if (qualifiedSig != "") {
+                val sep2: Int = qualifiedSig.indexOf("|")
+                if (sep2 > 0) {
+                    return qualifiedSig.substring(0, sep2)
+                }
+            }
         }
         return "Any"
     }
@@ -662,7 +681,27 @@ class TypeChecker {
             val memberName: String = ast.textOf(kidsAt(kids, 1))
             val objTy: String = this.tcCheckExpr(ast, objId)
 
-            // 简单成员类型推断
+            // Phase B.5: std 签名表 — 按接收者类型 + 方法名查询
+            if (isString(objTy)) {
+                val sig: String = stdSignatureFor("String", memberName)
+                if (sig != "") {
+                    val sep: Int = sig.indexOf("|")
+                    if (sep > 0) {
+                        return sig.substring(0, sep)
+                    }
+                }
+            }
+            if (objTy.startsWith("List") || objTy.startsWith("Array") || objTy.startsWith("Set")) {
+                val sig2: String = stdSignatureFor("Collections", memberName)
+                if (sig2 != "") {
+                    val sep2: Int = sig2.indexOf("|")
+                    if (sep2 > 0) {
+                        return sig2.substring(0, sep2)
+                    }
+                }
+            }
+
+            // 简单成员类型推断（std 签名表兜底后仍保留原有逻辑）
             if (isString(objTy)) {
                 if (memberName == "length" || memberName == "size") {
                     return "Int"

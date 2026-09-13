@@ -1,0 +1,92 @@
+// ═════════════════════════════════════════════════════════════
+// Phase B.4 验证：try/catch/finally 降级
+//
+// 运行：aura run tests/hir_b4_try_tests.aura
+//   全通过时输出 "RESULT: PASS"
+// ═════════════════════════════════════════════════════════════
+
+fun testTryCatchBasic(): Int {
+    var result: Int = 0
+    try {
+        result = 10
+    } catch (e) {
+        result = -1
+    } finally {
+        result = result + 1
+    }
+    return result
+}
+
+fun testTryNoCatch(): Int {
+    var result: Int = 0
+    try {
+        result = 5
+    } finally {
+        result = result + 1
+    }
+    return result
+}
+
+fun testTryNoFinally(): Int {
+    var result: Int = 0
+    try {
+        result = 7
+    } catch (e) {
+        result = -1
+    }
+    return result
+}
+
+fun testTryAllThree(): Int {
+    var result: Int = 0
+    try {
+        result = 3
+    } catch (e) {
+        result = -1
+    } finally {
+        result = result + 2
+    }
+    return result
+}
+
+fun testTryNested(): Int {
+    var outer: Int = 0
+    var inner: Int = 0
+    try {
+        try {
+            inner = 5
+        } catch (e) {
+            inner = -1
+        }
+    } finally {
+        outer = inner + 1
+    }
+    return outer
+}
+
+fun main(): Int {
+    var failures: Int = 0
+
+    if (testTryCatchBasic() != 11) { failures = failures + 1; println("FAIL: testTryCatchBasic") }
+    else { println("PASS: testTryCatchBasic") }
+
+    if (testTryNoCatch() != 6) { failures = failures + 1; println("FAIL: testTryNoCatch") }
+    else { println("PASS: testTryNoCatch") }
+
+    if (testTryNoFinally() != 7) { failures = failures + 1; println("FAIL: testTryNoFinally") }
+    else { println("PASS: testTryNoFinally") }
+
+    if (testTryAllThree() != 5) { failures = failures + 1; println("FAIL: testTryAllThree") }
+    else { println("PASS: testTryAllThree") }
+
+    if (testTryNested() != 6) { failures = failures + 1; println("FAIL: testTryNested") }
+    else { println("PASS: testTryNested") }
+
+    println("")
+    println("Total failures: " + toStr(failures))
+    if (failures == 0) {
+        println("RESULT: PASS")
+    } else {
+        println("RESULT: FAIL")
+    }
+}

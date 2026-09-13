@@ -50,16 +50,16 @@ extern object Syscalls {
     // 注意：Windows 使用 FFI 方式，不是 syscall 指令
 
     /// 写入控制台（简化实现）
-    native(asm = "call qword [rip + WriteFile]") fun writeFile(handle: Long, buf: Long, count: Long): Long
+    @native(asm = "call qword [rip + WriteFile]") fun writeFile(handle: Long, buf: Long, count: Long): Long
 
     /// 读取控制台（简化实现）
-    native(asm = "call qword [rip + ReadFile]") fun readFile(handle: Long, buf: Long, count: Long): Long
+    @native(asm = "call qword [rip + ReadFile]") fun readFile(handle: Long, buf: Long, count: Long): Long
 
     /// 获取当前时间
-    native(asm = "call qword [rip + GetSystemTimeAsFileTime]") fun getTime(): Long
+    @native(asm = "call qword [rip + GetSystemTimeAsFileTime]") fun getTime(): Long
 
     /// 退出进程
-    native(asm = "call qword [rip + ExitProcess]") fun exitProcess(code: Int)
+    @native(asm = "call qword [rip + ExitProcess]") fun exitProcess(code: Int)
 
     // ── Windows 特定常量 ──
 

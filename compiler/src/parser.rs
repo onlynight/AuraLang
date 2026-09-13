@@ -23,6 +23,8 @@ pub struct Parser {
     /// 抑制 `x -> ...` 形式的 lambda 解析（用于 `when` 分支模式，避免把
     /// `RED -> "red"` 当成单参数 lambda）
     suppress_lambda: usize,
+    /// Phase D: 待应用的 @native 注解（由 parse_extern_object 设置，parse_fn_decl 取走）
+    pending_native_attr: Option<NativeAttr>,
 }
 
 /// 类/结构体/Actor 体成员的解析产物（Kotlin 风格成员全集）
@@ -64,6 +66,7 @@ impl Parser {
             pending_fn_mods: Vec::new(),
             pending_visibility: Visibility::Public,
             suppress_lambda: 0,
+            pending_native_attr: None,
         }
     }
 
@@ -215,9 +218,10 @@ impl Parser {
             return Ok(Decl::Import(self.parse_import()));
         }
         if self.check(TokenKind::Extern) {
-            // 检查是否是 extern interface
-            if self.peek_ahead(1).kind == TokenKind::Interface {
-                return Ok(Decl::ExternInterface(self.parse_extern_interface()));
+            // 检查是否是 extern object（新语法）或 extern interface（已废弃，自动转换）
+            let next_kind = self.peek_ahead(1).kind;
+            if next_kind == TokenKind::Object || next_kind == TokenKind::Interface {
+                return Ok(Decl::ExternObject(self.parse_extern_object()));
             }
             return Ok(Decl::Extern(self.parse_extern()));
         }
@@ -404,6 +408,7 @@ impl Parser {
             return_type,
             body,
             doc: self.take_doc(),
+            native_attr: self.pending_native_attr.take(),
             span: Span::merge(&start, &self.current().span),
         }
     }
@@ -2113,12 +2118,24 @@ impl Parser {
         }
     }
 
-    /// 解析 extern interface 声明
-    /// 语法：`extern interface Name { default fun loadLibrary(): String = "path"; fun add(...) }`
-    pub fn parse_extern_interface(&mut self) -> ExternInterfaceDecl {
+    /// 解析 extern object 声明（原 extern interface，已统一）
+    /// 语法：`extern object Name { default fun loadLibrary(): String = "path"; @aot fun add(...) }`
+    /// 兼容旧语法：`extern interface Name { default fun loadLibrary(): String = "path"; fun add(...) }`
+    pub fn parse_extern_object(&mut self) -> ExternInterfaceDecl {
         let start = self.current().span;
-        self.expect(TokenKind::Extern); // "extern"
-        self.expect(TokenKind::Interface); // "interface"
+        self.expect(TokenKind::Extern);
+        // 接受 "object" 或 "interface"（已废弃）
+        let keyword = if self.check(TokenKind::Object) || self.check(TokenKind::Interface) {
+            let kw = self.advance().literal.clone();
+            if kw == "interface" {
+                self.warn_deprecated_extern_interface();
+            }
+            kw
+        } else {
+            // fallback: 读取下一个 token
+            self.advance().literal.clone()
+        };
+
         let name = self.advance().literal.clone(); // 接口名
 
         // 函数声明块（库路径从 default fun loadLibrary() 提取）
@@ -2127,6 +2144,30 @@ impl Parser {
         if self.check(TokenKind::LBrace) {
             self.advance();
             while !self.check(TokenKind::RBrace) && !self.is_at_end() {
+                // Phase D: 处理 @native 注解
+                //   @native(SYSCALL_NUMBER)       → NativeAttr::Syscall
+                //   @native(asm = "...")          → NativeAttr::Asm
+                //   native fun xxx()              → NativeAttr::Builtin
+                // 也兼容已有的 @aot fun xxx()
+                if self.check(TokenKind::At) {
+                    self.advance(); // @
+                    let ann_name = if self.check(TokenKind::Ident) {
+                        Some(self.advance().literal.clone())
+                    } else {
+                        None
+                    };
+                    if ann_name.as_deref() == Some("native") {
+                        // 解析 @native(...) 参数
+                        let native_attr = self.parse_native_annotation_args();
+                        self.pending_native_attr = native_attr;
+                    } else if ann_name.as_deref() == Some("aot") {
+                        self.pending_fn_mods.push(FnModifier::Aot);
+                    }
+                } else if self.check(TokenKind::Native) {
+                    // native fun xxx() — 编译器内置
+                    self.advance(); // native
+                    self.pending_native_attr = Some(NativeAttr::Builtin);
+                }
                 let fn_decl = self.parse_fn_decl();
                 // 检查是否是 default fun loadLibrary(): String = "path"
                 if fn_decl.name == "loadLibrary"
@@ -2150,6 +2191,113 @@ impl Parser {
             functions,
             span: Span::merge(&start, &self.current().span),
         }
+    }
+
+    /// Phase D: 解析 @native(...) 的参数
+    ///
+    /// 语法：
+    ///   @native(SYS_READ)           → NativeAttr::Syscall(0)（标识符或字面量）
+    ///   @native(asm = "rdtsc")      → NativeAttr::Asm("rdtsc")
+    ///
+    /// 返回 None 表示无参数（编译错误，应报告）
+    fn parse_native_annotation_args(&mut self) -> Option<NativeAttr> {
+        if !self.check(TokenKind::LParen) {
+            eprintln!("[parser] error: @native expects '(' after annotation name");
+            return None;
+        }
+        self.advance(); // (
+
+        if self.check(TokenKind::RParen) {
+            self.advance();
+            return Some(NativeAttr::Builtin); // 无参数 = 编译器内置
+        }
+
+        // @native(asm = "...")
+        if self.check(TokenKind::Ident) && self.current().literal == "asm" {
+            self.advance(); // asm
+            if self.check(TokenKind::Assign) {
+                self.advance(); // =
+            }
+            if self.check(TokenKind::StringLiteral) {
+                let code = self.advance().literal.clone();
+                self.expect(TokenKind::RParen);
+                return Some(NativeAttr::Asm(code));
+            } else {
+                eprintln!("[parser] error: @native(asm = \"...\") expects a string literal");
+                return None;
+            }
+        }
+
+        // @native(0) 或 @native(SYS_READ)
+        // 尝试解析标识符或整数作为 syscall 号
+        let token = self.current();
+        let nr = if token.kind == TokenKind::IntLiteral {
+            self.advance().literal.parse::<i64>().unwrap_or(-1)
+        } else if token.kind == TokenKind::Ident {
+            // 解析标识符：查找对应的常量值
+            let name = self.advance().literal.clone();
+            self.lookup_syscall_const(&name)
+        } else {
+            eprintln!("[parser] error: @native() expects a syscall number or identifier");
+            self.advance();
+            -1
+        };
+
+        self.expect(TokenKind::RParen);
+        Some(NativeAttr::Syscall(nr))
+    }
+
+    /// 查找系统调用常量名称对应的数值
+    ///
+    /// 这些常量定义在 Syscalls.aura 中（如 SYS_READ = 0, SYS_WRITE = 1 等）
+    fn lookup_syscall_const(&self, name: &str) -> i64 {
+        match name {
+            "SYS_READ" => 0,
+            "SYS_WRITE" => 1,
+            "SYS_OPEN" => 2,
+            "SYS_CLOSE" => 3,
+            "SYS_FSTAT" => 5,
+            "SYS_LSEEK" => 6,
+            "SYS_MMAP" => 9,
+            "SYS_MUNMAP" => 10,
+            "SYS_ACCESS" => 21,
+            "SYS_UNLINK" => 39,
+            "SYS_EXECVE" => 59,
+            "SYS_EXIT_GROUP" => 60,
+            "SYS_WAIT4" => 61,
+            "SYS_CLOCK_GETTIME" => 228,
+            "SYS_GETRANDOM" => 272,
+            // 其他系统调用（按 Linux x86_64 ABI）
+            "SYS_READV" => 62,
+            "SYS_WRITEV" => 63,
+            "SYS_CLONE" => 56,
+            "SYS_FORK" => 57,
+            "SYS_EXECVE" => 59,
+            "SYS_PIPE" => 32,
+            "SYS_PIPE2" => 291,
+            "SYS_GETPID" => 39,
+            "SYS_GETPPID" => 64,
+            "SYS_SCHED_YIELD" => 158,
+            "SYS_SCHED_GETPARAM" => 144,
+            "SYS_SCHED_SETPARAM" => 145,
+            "SYS_SETSCHEDULER" => 155,
+            "SYS_SETAFFINITY" => 204,
+            "SYS_GETAFFINITY" => 203,
+            "SYS_SET_TID_ADDRESS" => 218,
+            "SYS_SEMTIMEDOP" => 220,
+            "SYS_MSGSND" => 68,
+            "SYS_MSGRCV" => 69,
+            "SYS_SEMOP" => 65,
+            "SYS_SEMGET" => 64,
+            _ => -1,
+        }
+    }
+
+    /// 发出 extern interface 废弃警告
+    fn warn_deprecated_extern_interface(&self) {
+        eprintln!(
+            "[parser] warning: `extern interface` is deprecated, use `extern object` instead"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────

@@ -23,8 +23,8 @@ import aura.lang.native.Cpu
 
 // 系统调用
 extern object Syscalls {
-    native(SYS_READ) fun read(fd: Int, buf: Long, count: Long): Long
-    native(SYS_WRITE) fun write(fd: Int, buf: Long, count: Long): Long
+    @native(SYS_READ) fun read(fd: Int, buf: Long, count: Long): Long
+    @native(SYS_WRITE) fun write(fd: Int, buf: Long, count: Long): Long
 }
 
 // 内存操作
@@ -36,7 +36,7 @@ extern object Memory {
 
 // CPU 操作
 extern object Cpu {
-    native(asm = "rdtsc") fun rdtsc(): Long
+    @native(asm = "rdtsc") fun rdtsc(): Long
 }
 
 // 导出函数

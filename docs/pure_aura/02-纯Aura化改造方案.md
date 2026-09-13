@@ -806,3 +806,51 @@ cargo test -p compiler --test stdlib_consistency
 ---
 
 *本文档为「详细改造方案」，配套 `01-现状分析.md`（现状评估）一并阅读。*
+
+---
+
+## 十二、阶段 D 实施记录（2026-07-05）
+
+### 12.1 完成内容
+
+| 交付物 | 状态 | 说明 |
+|--------|------|------|
+| `compiler/src/token.rs` | ✅ | 新增 `Native` token 类型 |
+| `compiler/src/lexer.rs` | ✅ | 新增 `"native"` 关键字 |
+| `compiler/src/ast.rs` | ✅ | 新增 `NativeAttr` 枚举 + `FnDecl.native_attr` 字段 |
+| `compiler/src/parser.rs` | ✅ | `@native(N)` / `@native(asm="...")` / `native fun` 解析 |
+| `compiler/src/ast.rs` | ✅ | `Decl::ExternObject` 命名修复（原 ExternInterface） |
+| `compiler/src/sema/checker.rs` | ✅ | ExternObject 处理（@aot 校验 + 符号表注册） |
+| `compiler/src/codegen/hir.rs` | ✅ | ExternObject → HirFunction（is_native） |
+| `compiler/src/std/cffi/aura_syscalls.c` | ✅ | 系统调用分发层（17 个 syscall + 3 个 CPU 指令） |
+| `compiler/src/std/embedded_stdlib.rs` | ✅ | 嵌入式标准库从 4 模块扩展到 16 模块（292 函数） |
+| `compiler/tests/stdlib_consistency.rs` | ✅ | 一致性检查测试（2 个测试用例） |
+
+### 12.2 验证结果
+
+| 测试 | 结果 |
+|------|------|
+| `aura run tests/phase0_tests.aura` | ✅ PASS |
+| `aura run tests/phase1_lexer_tests.aura` | ✅ PASS |
+| `aura run tests/phase3_mir_tests.aura` | ✅ PASS |
+| `aura run tests/phase5_vm_tests.aura` | ✅ PASS |
+| `aura run tests/phase6_aot_tests.aura` | ✅ PASS |
+| `aura run tests/phase7_jit_tests.aura` | ✅ PASS |
+| `aura run tests/phase8_stdlib_tests.aura` | ✅ PASS（46 断言） |
+| `cargo test -p compiler --test stdlib_consistency` | ✅ PASS（2 测试） |
+| `aura stdlib-compile aura/core/aura/lang/std --output build` | ✅ 20/20 成功 |
+
+### 12.3 嵌入式标准库扩展
+
+阶段 D 前：4 模块（Math, Time, Collections, Test）= 84 函数
+阶段 D 后：16 模块 = 292 函数
+
+新增模块：Ascii, Assert, Encoding, Iter, Json, StringBuilder, TestHelper, Path, String, Actor, Channel, Coroutine
+
+### 12.4 遗留项
+
+- AOT 发射器（`emit.rs`）尚未完全处理 @native 注解的 LLVM IR 发射（syscall → `call i64 @aura_syscall_dispatch(i64 N, ...)`，asm → 内联汇编，builtin → 直接 VM 指令）
+- `@native(asm = "...")` 内联汇编支持需在 AOT 发射器中实现
+- `Memory.aura` 的 `native fun` 已在解析层支持，但 AOT 发射器需增加对应的 LLVM 指令映射
+- 部分测试文件（phase2_sema_hir, phase6_5_aot, phase9_compiler）存在导入路径解析问题（pre-existing）
+

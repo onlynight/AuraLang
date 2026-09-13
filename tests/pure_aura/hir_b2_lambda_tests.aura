@@ -1,0 +1,74 @@
+// ═════════════════════════════════════════════════════════════
+// Phase B.2 验证：lambda / 闭包降级
+//
+// 运行：aura run tests/pure_aura/hir_b2_lambda_tests.aura
+//   全通过时输出 "RESULT: PASS"
+// ═════════════════════════════════════════════════════════════
+
+fun testLambdaBasic(): Int {
+    val f = x -> x * 2
+    return f(10)
+}
+
+fun testLambdaTwoParams(): Int {
+    val add = (a, b) -> a + b
+    return add(3, 4)
+}
+
+fun testLambdaWithType(): Int {
+    val f = x: Int -> x * 3
+    return f(5)
+}
+
+fun testLambdaBlock(): Int {
+    val f = x -> {
+        val y: Int = x + 1
+        return y * 2
+    }
+    return f(10)
+}
+
+fun testLambdaReturnString(): String {
+    val greet = name -> "Hello, " + name
+    return greet("World")
+}
+
+fun testLambdaInLoop(): Int {
+    var sum: Int = 0
+    val xs = listOf(1, 2, 3, 4, 5)
+    val add = (a, b) -> a + b
+    for (x in xs) {
+        sum = add(sum, x)
+    }
+    return sum
+}
+
+fun main(): Int {
+    var failures: Int = 0
+
+    if (testLambdaBasic() != 20) { failures = failures + 1; println("FAIL: testLambdaBasic") }
+    else { println("PASS: testLambdaBasic") }
+
+    if (testLambdaTwoParams() != 7) { failures = failures + 1; println("FAIL: testLambdaTwoParams") }
+    else { println("PASS: testLambdaTwoParams") }
+
+    if (testLambdaWithType() != 15) { failures = failures + 1; println("FAIL: testLambdaWithType") }
+    else { println("PASS: testLambdaWithType") }
+
+    if (testLambdaBlock() != 22) { failures = failures + 1; println("FAIL: testLambdaBlock") }
+    else { println("PASS: testLambdaBlock") }
+
+    if (testLambdaReturnString().length != 12) { failures = failures + 1; println("FAIL: testLambdaReturnString") }
+    else { println("PASS: testLambdaReturnString") }
+
+    if (testLambdaInLoop() != 15) { failures = failures + 1; println("FAIL: testLambdaInLoop") }
+    else { println("PASS: testLambdaInLoop") }
+
+    println("")
+    println("Total failures: " + toStr(failures))
+    if (failures == 0) {
+        println("RESULT: PASS")
+    } else {
+        println("RESULT: FAIL")
+    }
+}

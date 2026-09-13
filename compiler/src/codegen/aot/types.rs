@@ -91,9 +91,9 @@ impl TypeMapper {
             // 函数类型 → 函数指针
             _ if name.starts_with('(') => "ptr".to_string(),
             _ => {
-                // 用户自定义结构体/命名类型：在 emit 阶段会被替换为对应的 struct 类型名
-                // 这里返回 `%struct.<Name>` 占位符
-                format!("%struct.{}", sanitizellvm(name))
+                // 用户自定义结构体/命名类型：按指针语义返回 `%struct.<Name>*`
+                // （Phase A.1：类实例按引用传递，避免拷贝丢失字段修改）
+                format!("%struct.{}*", sanitizellvm(name))
             }
         }
     }
@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn test_map_struct_named() {
         let tm = TypeMapper::new(true);
-        assert_eq!(tm.map(&HirType::Named("Player".into())), "%struct.Player");
+        assert_eq!(tm.map(&HirType::Named("Player".into())), "%struct.Player*");
     }
 
     #[test]

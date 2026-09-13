@@ -278,8 +278,9 @@ class Parser {
             return this.parseTypeDecl("Object")
         }
         if (k == "Extern") {
-            // extern object Name { ... }
-            if (this.prsPeek(1) == "Object") {
+            // extern object Name { ... }（新语法）
+            // extern interface Name { ... }（已废弃，自动转换）
+            if (this.prsPeek(1) == "Object" || this.prsPeek(1) == "Interface") {
                 return this.parseExternObject()
             }
             this.errors.pushAt(severityError(), "unexpected token: Extern", this.prsCurSpan().start, this.prsCurSpan().end)
@@ -462,9 +463,15 @@ class Parser {
     }
 
     /// 解析 extern object 声明：`extern object Name { ... }`
+    /// 兼容旧语法：`extern interface Name { ... }`（已废弃）
     fun parseExternObject(): Int {
         this.prsAdvance() // Extern
-        this.prsExpect("Object")
+        // 接受 "Object"（新语法）或 "Interface"（已废弃）
+        if (this.prsCheck("Object") || this.prsCheck("Interface")) {
+            this.prsAdvance()
+        } else {
+            this.prsExpect("Object")
+        }
         val name: String = this.prsCurLit()
         this.prsExpectName()
         
@@ -486,6 +493,10 @@ class Parser {
         
         if (keyword == "At") {
             // @native(...) fun - 系统调用或内联汇编
+            // @aot fun - AOT 库函数
+            if (this.prsPeek(1) == "Aot") {
+                return this.parseAotFunction()
+            }
             return this.parseAnnotatedNativeFunction()
         } else if (keyword == "Native") {
             // native fun - 编译器内置（无参数）
@@ -502,9 +513,26 @@ class Parser {
         }
         
         // 未知关键字
-        this.errors.pushAt(severityError(), "Unknown native/export function", this.prsCurSpan().start, this.prsCurSpan().end)
+        this.errors.pushAt(severityError(), "Unknown native/export/aot function", this.prsCurSpan().start, this.prsCurSpan().end)
         this.prsAdvance()
         return -1
+    }
+
+    /// 解析 @aot fun - AOT 库函数（JitValue ABI 直调）
+    fun parseAotFunction(): Int {
+        this.prsAdvance() // @
+        this.prsAdvance() // aot
+        
+        // 解析函数
+        val funcId = this.parseFunction()
+        
+        // 创建 AotMethod 节点
+        var kids = noKids()
+        kids = kidsAdd(kids, this.ast.leaf("AotInfo", "aot", this.prsCurSpan()))
+        if (funcId >= 0) {
+            kids = kidsAdd(kids, funcId)
+        }
+        return this.ast.add("AotMethod", "", "", this.prsCurSpan(), kids)
     }
 
     /// 解析 @native(...) fun - 系统调用或内联汇编
@@ -673,6 +701,10 @@ class Parser {
         }
         // 声明类语句（类体成员 / 嵌套声明）：此前这些 token 落到表达式分支，
         // 产生「意外的 token: Fun」并使整个类体反同步。
+        if (k == "At" || k == "Native" || k == "Export") {
+            // @native(...) fun / native fun / export fun / @aot fun
+            return this.parseNativeOrExportFunction()
+        }
         if (k == "Fun") {
             return this.parseFunction()
         }
@@ -1190,6 +1222,10 @@ class Parser {
         }
         // 标识符：软关键字（`value` / `data` / …）同样按标识符处理
         if (this.prsIsNameToken()) {
+            // 单参数 lambda: `x -> expr` 或 `x: Type -> expr`
+            if (this.isLambdaStart()) {
+                return this.parseLambda()
+            }
             return this.leafLit("Ident")
         }
         if (k == "This") {
@@ -1209,6 +1245,18 @@ class Parser {
         }
         if (k == "When") {
             return this.parseWhen()
+        }
+        // 括号表达式 / 括号参数 lambda：`(expr)`、`(x) -> body`、`(x: T) -> body`
+        if (k == "LParen") {
+            // 尝试解析括号参数 lambda
+            val lambdaId: Int = this.tryParseParenLambda()
+            if (lambdaId >= 0) {
+                return lambdaId
+            }
+            this.prsAdvance()
+            val e = this.parseExpr()
+            this.prsExpect("RParen")
+            return e
         }
         // 块表达式 `{ ... }`：单表达式块取值时直接返回该表达式
         if (k == "LBrace") {
@@ -1258,6 +1306,161 @@ class Parser {
         }
         kids = kidsAdd(kids, this.ast.add("WhenArms", "", "", this.prsCurSpan(), arms))
         return this.ast.add("When", "", "", this.prsCurSpan(), kids)
+    }
+
+    /// 判断当前位置是否是 lambda 起始（Phase B.2）。
+    ///
+    /// `when` 分支模式中 `->` 是分支分隔符，不能当作 lambda 箭头。
+    /// 但当前 Parser 的 `parseWhen` 使用 `prsExpect("Arrow")` 而非 `parseLambda`，
+    /// 因此 `isLambdaStart` 不需要显式抑制。
+    fun isLambdaStart(): Boolean {
+        // 单参数 lambda: `x -> expr` 或 `x: Type -> expr`
+        val cur: String = this.prsCurKind()
+        if (cur == "Ident" || cur == "Val" || cur == "Var") {
+            // 检查后面是否是 `->` 或 `: ... ->`
+            var i: Int = this.pos + 1
+            var depth: Int = 0
+            while (i < this.n) {
+                val tk: String = this.prsKind(i)
+                if (tk == "LParen" || tk == "LBrace") { depth = depth + 1 }
+                else if (tk == "RParen" || tk == "RBrace") {
+                    if (depth == 0) { return false }
+                    depth = depth - 1
+                } else if (tk == "Arrow") { return true }
+                else if (tk == "Colon") {
+                    // 检查类型后是否有 `->`
+                    var j: Int = i + 1
+                    while (j < this.n) {
+                        val tk2: String = this.prsKind(j)
+                        if (tk2 == "Arrow") { return true }
+                        if (tk2 == "Comma" || tk2 == "RParen" || tk2 == "RBrace") { return false }
+                        j = j + 1
+                    }
+                    return false
+                } else if (tk == "Comma" || tk == "Semicolon" ||
+                           tk == "RParen" || tk == "RBrace" || tk == "RBracket" ||
+                           tk == "Plus" || tk == "Minus" || tk == "Star" ||
+                           tk == "Slash" || tk == "Percent" || tk == "Assign" ||
+                           tk == "EqEq" || tk == "Neq" || tk == "Lt" || tk == "Gt" ||
+                           tk == "LtEq" || tk == "GtEq" || tk == "AndAnd" || tk == "OrOr" ||
+                           tk == "Dot" || tk == "QuestionMark" || tk == "In" ||
+                           tk == "If" || tk == "When" || tk == "Fun" || tk == "Return" ||
+                           tk == "Break" || tk == "Continue" || tk == "While" ||
+                           tk == "For" || tk == "Try" || tk == "Catch" || tk == "Finally" ||
+                           tk == "LBracket" || tk == "LBrace" || tk == "Colon") {
+                    return false
+                }
+                i = i + 1
+            }
+        }
+        return false
+    }
+
+    /// 解析单参数 lambda（Phase B.2）：`x -> expr` 或 `x: Type -> expr`。
+    fun parseLambda(): Int {
+        val startSp: Span = this.prsCurSpan()
+        var params: String = noKids()
+
+        // 解析参数名（可能带类型标注）
+        val name: String = this.prsCurLit()
+        val sp: Span = this.prsCurSpan()
+        this.prsExpectParamName()
+
+        // 检查是否有类型标注
+        if (this.prsCheck("Colon")) {
+            this.prsAdvance()
+            val typeStr: String = this.parseTypeName()
+            val paramId: Int = this.ast.add("Param", name, typeStr, sp, noKids())
+            params = kidsAdd(params, paramId)
+        } else {
+            val paramId: Int = this.ast.add("Param", name, "", sp, noKids())
+            params = kidsAdd(params, paramId)
+        }
+
+        // 消费 ->
+        this.prsExpect("Arrow")
+
+        // 解析 body
+        val body: Int = this.parseExpr()
+
+        // 构造 Lambda AST 节点
+        val paramsNode: Int = this.ast.add("Params", "", "", startSp, params)
+        val lambdaKids: String = kidsAdd(kidsAdd(noKids(), paramsNode), body)
+        return this.ast.add("Lambda", "", "", startSp, lambdaKids)
+    }
+
+    /// 尝试解析括号参数 lambda（Phase B.2）：`(x) -> expr` 或 `(x: T, y: T) -> expr`。
+    ///
+    /// 向前扫描配对 `)`，若其后紧跟 `->` 且括号内容形如参数列表则按 lambda 解析。
+    /// 返回 lambda AST 节点 id，非 lambda 时返回 -1。
+    fun tryParseParenLambda(): Int {
+        // 扫描配对括号
+        var depth: Int = 0
+        var i: Int = this.pos
+        while (i < this.n) {
+            val tk: String = this.prsKind(i)
+            if (tk == "LParen") { depth = depth + 1 }
+            else if (tk == "RParen") {
+                depth = depth - 1
+                if (depth == 0) { break }
+            }
+            i = i + 1
+        }
+        if (depth != 0 || i >= this.n) { return -1 }
+
+        // 检查 `)` 后面是否是 `->`
+        if (i + 1 >= this.n) { return -1 }
+        val afterParen: String = this.prsKind(i + 1)
+        if (afterParen != "Arrow") { return -1 }
+
+        // 检查括号内容是否是参数列表形态
+        for (var j: Int = this.pos + 1; j < i; j = j + 1) {
+            val t: String = this.prsKind(j)
+            if (t != "Ident" && t != "Colon" && t != "Comma" &&
+                t != "QuestionMark" && t != "Lt" && t != "Gt" &&
+                t != "Val" && t != "Var") {
+                return -1
+            }
+        }
+
+        // 解析 lambda
+        val startSp: Span = this.prsCurSpan()
+        this.prsAdvance() // (
+        var params: String = noKids()
+        if (!this.prsCheck("RParen")) {
+            val paramId: Int = this.parseLambdaParam()
+            if (paramId >= 0) { params = kidsAdd(params, paramId) }
+            while (this.prsCheck("Comma")) {
+                this.prsAdvance()
+                val p: Int = this.parseLambdaParam()
+                if (p >= 0) { params = kidsAdd(params, p) }
+            }
+        }
+        this.prsExpect("RParen")
+        this.prsExpect("Arrow")
+
+        // 解析 body
+        val body: Int = this.parseExpr()
+
+        // 构造 Lambda AST 节点
+        val paramsNode: Int = this.ast.add("Params", "", "", startSp, params)
+        val lambdaKids: String = kidsAdd(kidsAdd(noKids(), paramsNode), body)
+        return this.ast.add("Lambda", "", "", startSp, lambdaKids)
+    }
+
+    /// 解析 lambda 参数（Phase B.2）：`name` 或 `name: Type`。
+    fun parseLambdaParam(): Int {
+        val name: String = this.prsCurLit()
+        val sp: Span = this.prsCurSpan()
+        this.prsExpectParamName()
+
+        // 检查是否有类型标注
+        if (this.prsCheck("Colon")) {
+            this.prsAdvance()
+            val typeStr: String = this.parseTypeName()
+            return this.ast.add("Param", name, typeStr, sp, noKids())
+        }
+        return this.ast.add("Param", name, "", sp, noKids())
     }
 
     /// 便捷：把当前字面量 token 作为叶子节点消费。

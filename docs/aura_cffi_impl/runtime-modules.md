@@ -38,18 +38,18 @@ package aura.lang.runtime
 
 // 编译器内置内存操作（直接降低到 LLVM load/store）
 extern object Memory {
-    @native fun read(addr: Long): Byte
-    @native fun read16(addr: Long): Short
-    @native fun read32(addr: Long): Int
-    @native fun read64(addr: Long): Long
-    @native fun write(addr: Long, v: Byte)
-    @native fun write16(addr: Long, v: Short)
-    @native fun write32(addr: Long, v: Int)
-    @native fun write64(addr: Long, v: Long)
-    @native fun copy(dst: Long, src: Long, n: Long)
-    @native fun set(addr: Long, v: Byte, n: Long)
-    @native fun alloc(n: Long): Long
-    @native fun free(addr: Long)
+    native fun read(addr: Long): Byte
+    native fun read16(addr: Long): Short
+    native fun read32(addr: Long): Int
+    native fun read64(addr: Long): Long
+    native fun write(addr: Long, v: Byte)
+    native fun write16(addr: Long, v: Short)
+    native fun write32(addr: Long, v: Int)
+    native fun write64(addr: Long, v: Long)
+    native fun copy(dst: Long, src: Long, n: Long)
+    native fun set(addr: Long, v: Byte, n: Long)
+    native fun alloc(n: Long): Long
+    native fun free(addr: Long)
 }
 ```
 
@@ -84,7 +84,7 @@ object Allocator {
     var HEAP_POS: Long = 0
     var HEAP_USED: Long = 0
 
-    @export fun malloc(n: Long): Long {
+    export fun malloc(n: Long): Long {
         val aligned: Long = (n + 7) & (~7L)  // 8 字节对齐
         if (HEAP_POS + aligned > HEAP_SIZE) {
             expandHeap()
@@ -95,11 +95,11 @@ object Allocator {
         return p
     }
 
-    @export fun free(addr: Long) {
+    export fun free(addr: Long) {
         // bump allocator：不释放
     }
 
-    @export fun resetHeap() {
+    export fun resetHeap() {
         HEAP_POS = 0
         HEAP_USED = 0
     }
@@ -124,7 +124,7 @@ import aura.lang.runtime.Memory
 import aura.lang.runtime.memory.Allocator
 
 object StrOps {
-    @export fun strlen(s: CString): Long {
+    export fun strlen(s: CString): Long {
         val sAddr: Long = s as Long
         if (sAddr == 0) { return 0 }
         var i: Long = 0
@@ -136,7 +136,7 @@ object StrOps {
         return i
     }
 
-    @export fun strcmp(a: CString, b: CString): Int {
+    export fun strcmp(a: CString, b: CString): Int {
         if (a == b) { return 0 }
         var i: Long = 0
         while (true) {
@@ -148,7 +148,7 @@ object StrOps {
         }
     }
 
-    @export fun strcpy(dst: Long, src: Long): Long {
+    export fun strcpy(dst: Long, src: Long): Long {
         var i: Long = 0
         var c: Byte = Memory.read(src + i)
         while (c != 0) {
@@ -160,7 +160,7 @@ object StrOps {
         return dst
     }
 
-    @export fun memCopy(dst: Long, src: Long, n: Long) {
+    export fun memCopy(dst: Long, src: Long, n: Long) {
         var i: Long = 0
         while (i < n) {
             Memory.write(dst + i, Memory.read(src + i))
@@ -168,7 +168,7 @@ object StrOps {
         }
     }
 
-    @export fun memSet(addr: Long, v: Byte, n: Long) {
+    export fun memSet(addr: Long, v: Byte, n: Long) {
         var i: Long = 0
         while (i < n) {
             Memory.write(addr + i, v)
@@ -176,7 +176,7 @@ object StrOps {
         }
     }
 
-    @export fun stringConcat(a: String, b: String): String {
+    export fun stringConcat(a: String, b: String): String {
         val aAddr: Long = a as Long
         val bAddr: Long = b as Long
         val la: Long = strlen(aAddr as CString)
@@ -199,14 +199,14 @@ import aura.lang.runtime.Syscalls
 import aura.lang.runtime.string.StrOps
 
 object Console {
-    @export fun println(s: String) {
+    export fun println(s: String) {
         val sAddr: Long = s as Long
         val n: Long = StrOps.strlen(sAddr as CString)
         Syscalls.write(1, sAddr, n)
         Syscalls.write(1, "\n" as Long, 1)
     }
 
-    @export fun print(s: String) {
+    export fun print(s: String) {
         val sAddr: Long = s as Long
         val n: Long = StrOps.strlen(sAddr as CString)
         Syscalls.write(1, sAddr, n)
@@ -222,7 +222,7 @@ object Console {
 package aura.lang.runtime.math
 
 object MathCore {
-    @export fun sqrt(x: Double): Double {
+    export fun sqrt(x: Double): Double {
         var g: Double = x / 2.0
         var i: Int = 0
         while (i < 32) {
@@ -232,7 +232,7 @@ object MathCore {
         return g
     }
 
-    @export fun sin(x: Double): Double {
+    export fun sin(x: Double): Double {
         var term: Double = x
         var sum: Double = x
         var n: Int = 1
@@ -246,7 +246,7 @@ object MathCore {
         return sum
     }
 
-    @export fun cos(x: Double): Double {
+    export fun cos(x: Double): Double {
         var term: Double = 1.0
         var sum: Double = 1.0
         var n: Int = 1
@@ -260,7 +260,7 @@ object MathCore {
         return sum
     }
 
-    @export fun exp(x: Double): Double {
+    export fun exp(x: Double): Double {
         var term: Double = 1.0
         var sum: Double = 1.0
         var n: Int = 1
@@ -274,7 +274,7 @@ object MathCore {
         return sum
     }
 
-    @export fun ln(x: Double): Double {
+    export fun ln(x: Double): Double {
         val z: Double = (x - 1.0) / (x + 1.0)
         var term: Double = z
         var sum: Double = z
@@ -289,7 +289,7 @@ object MathCore {
         return 2.0 * sum
     }
 
-    @export fun pow(x: Double, y: Double): Double {
+    export fun pow(x: Double, y: Double): Double {
         return exp(y * ln(x))
     }
 }
@@ -305,7 +305,7 @@ package aura.lang.runtime.random
 object XorShift {
     var state: Long = 0xDEADBEEFCAFE1234L
 
-    @export fun rand(): Int {
+    export fun rand(): Int {
         var s: Long = state
         s = s ^ (s >> 12)
         s = s ^ (s << 25)
@@ -314,7 +314,7 @@ object XorShift {
         return (s * 2685821657736338717L) as Int
     }
 
-    @export fun srand(seed: Long) {
+    export fun srand(seed: Long) {
         state = seed | 1L
     }
 }
@@ -331,7 +331,7 @@ import aura.lang.runtime.Memory
 import aura.lang.runtime.memory.Allocator
 
 object Clock {
-    @export fun time(): Long {
+    export fun time(): Long {
         val ts: Long = Allocator.malloc(16)
         Syscalls.clockGettime(0, ts)
         val sec: Long = Memory.read64(ts)
@@ -339,7 +339,7 @@ object Clock {
         return sec
     }
 
-    @export fun millis(): Long {
+    export fun millis(): Long {
         val ts: Long = Allocator.malloc(16)
         Syscalls.clockGettime(1, ts)
         val sec: Long = Memory.read64(ts)
@@ -360,7 +360,7 @@ import aura.lang.runtime.Syscalls
 import aura.lang.runtime.memory.Allocator
 
 object FileOps {
-    @export fun read(path: CString): Long {
+    export fun read(path: CString): Long {
         val fd: Int = Syscalls.open(path, 0)
         if (fd < 0) { return -1 }
         val buf: Long = Allocator.malloc(1048576)
@@ -374,7 +374,7 @@ object FileOps {
         return buf
     }
 
-    @export fun write(path: CString, data: Long, len: Long): Int {
+    export fun write(path: CString, data: Long, len: Long): Int {
         val fd: Int = Syscalls.open(path, 0x241)
         if (fd < 0) { return -1 }
         val r: Long = Syscalls.write(fd, data, len)
@@ -382,7 +382,7 @@ object FileOps {
         return r as Int
     }
 
-    @export fun exists(path: CString): Boolean {
+    export fun exists(path: CString): Boolean {
         val fd: Int = Syscalls.open(path, 0)
         if (fd < 0) { return false }
         Syscalls.close(fd)
@@ -402,7 +402,7 @@ import aura.lang.runtime.Memory
 import aura.lang.runtime.memory.Allocator
 
 object ProcessOps {
-    @export fun run(cmd: String): Int {
+    export fun run(cmd: String): Int {
         val args: Long = Allocator.malloc(3 * 8)
         Memory.write64(args, "/bin/sh" as Long)
         Memory.write64(args + 8, "-c" as Long)
@@ -411,7 +411,7 @@ object ProcessOps {
         return -1
     }
 
-    @export fun exit(code: Int) {
+    export fun exit(code: Int) {
         Syscalls.exitGroup(code)
     }
 }
@@ -426,23 +426,23 @@ package aura.lang.runtime.boxed
 import aura.lang.runtime.Memory
 
 object PlanA {
-    @export fun intToAny(v: Long): Long {
+    export fun intToAny(v: Long): Long {
         return (v << 1) | 1
     }
 
-    @export fun toIntAny(v: Long): Long {
+    export fun toIntAny(v: Long): Long {
         return v >> 1
     }
 
-    @export fun toStrAny(v: Long): Long {
+    export fun toStrAny(v: Long): Long {
         return Memory.read64(v)
     }
 
-    @export fun isNullable(v: Long): Boolean {
+    export fun isNullable(v: Long): Boolean {
         return v == 0
     }
 
-    @export fun isInt(v: Long): Boolean {
+    export fun isInt(v: Long): Boolean {
         return (v & 1) == 1
     }
 }

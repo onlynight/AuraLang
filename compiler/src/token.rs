@@ -75,6 +75,8 @@ pub enum TokenKind {
     Free,
     Retain,
     Release,
+    // Phase D: native 关键字（extern object 中的编译器内置函数）
+    Native,
 
     // ============ Operators ============
     // Arithmetic
