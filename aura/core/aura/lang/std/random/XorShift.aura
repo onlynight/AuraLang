@@ -1,5 +1,5 @@
-// aura:///aura/lang/native/random/XorShift.aura
-package aura.lang.native.random
+// aura:///aura/lang/std/random/XorShift.aura
+package aura.lang.std.random
 // ------------------------------------------------------------------
 // Random number generation -- Phase S2
 //

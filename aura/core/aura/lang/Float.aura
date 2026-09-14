@@ -2,6 +2,8 @@
 package aura.lang
 // 语言内置类型，不可修改
 
+import aura.lang.std.math.MathCore
+
 /// 32 位单精度浮点数类型。
 ///
 /// - 范围：约 ±1.4 × 10⁻⁴⁵ 到 ±3.4 × 10³⁸
@@ -139,59 +141,53 @@ internal value class Float {
         return (this as Int) as Float
     }
 
-    // ── 数学方法（Rust native 实现）──
+    // ── 数学方法（调用 MathCore 实现）──
 
     /// 平方根
     fun sqrt(): Float {
-        // Rust native 实现（libm sqrt）
-        return this
+        return MathCore.sqrt(this as Double) as Float
     }
 
     /// 立方根
     fun cbrt(): Float {
-        // Rust native 实现（libm cbrt）
-        return this
+        if (this == 0.0f) return 0.0f
+        val n: Double = if (this < 0.0f) -(this as Double) else (this as Double)
+        val r: Double = MathCore.exp(MathCore.log(n) / 3.0)
+        return if (this < 0.0f) (-r) as Float else r as Float
     }
 
     /// 计算幂
     fun pow(exp: Float): Float {
-        // Rust native 实现（libm powf）
-        return this
+        return MathCore.pow(this as Double, exp as Double) as Float
     }
 
     /// 自然对数
     fun log(): Float {
-        // Rust native 实现（libm log）
-        return this
+        return MathCore.log(this as Double) as Float
     }
 
     /// 以 2 为底的对数
     fun log2(): Float {
-        // Rust native 实现（libm log2）
-        return this
+        return (MathCore.log(this as Double) / MathCore.log(2.0)) as Float
     }
 
     /// 以 10 为底的对数
     fun log10(): Float {
-        // Rust native 实现（libm log10）
-        return this
+        return (MathCore.log(this as Double) / MathCore.log(10.0)) as Float
     }
 
     /// 正弦（弧度）
     fun sin(): Float {
-        // Rust native 实现（libm sin）
-        return this
+        return MathCore.sin(this as Double) as Float
     }
 
     /// 余弦（弧度）
     fun cos(): Float {
-        // Rust native 实现（libm cos）
-        return this
+        return MathCore.cos(this as Double) as Float
     }
 
     /// 正切（弧度）
     fun tan(): Float {
-        // Rust native 实现（libm tan）
-        return this
+        return MathCore.tan(this as Double) as Float
     }
 }

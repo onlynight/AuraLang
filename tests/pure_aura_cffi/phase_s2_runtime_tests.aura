@@ -11,9 +11,9 @@ import aura.lang.native.Runtime
 import aura.lang.native.file.FileOps
 import aura.lang.native.process.ProcessOps
 import aura.lang.native.time.Clock
-import aura.lang.native.random.XorShift
-import aura.lang.native.random.Random
-import aura.lang.native.math.MathCore
+import aura.lang.std.random.XorShift
+import aura.lang.std.random.Random
+import aura.lang.std.math.MathCore
 import aura.lang.native.boxed.PlanA
 
 // ─────────────────────────────────────────────────────────────

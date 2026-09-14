@@ -1,5 +1,5 @@
-// aura:///aura/lang/native/math/MathCore.aura
-package aura.lang.native.math
+// aura:///aura/lang/std/math/MathCore.aura
+package aura.lang.std.math
 // ─────────────────────────────────────────────────────────────
 // 数学库 — Phase S2
 //

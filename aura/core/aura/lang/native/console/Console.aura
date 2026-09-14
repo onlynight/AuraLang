@@ -13,7 +13,7 @@ package aura.lang.native.console
 
 import aura.lang.native.Syscalls
 import aura.lang.native.Memory
-import aura.lang.native.string.StrOps
+import aura.lang.std.string.StringOps
 
 /// Console output
 extern object Console {
@@ -37,13 +37,13 @@ extern object Console {
 
     /// Write string (no newline)
     fun print(msg: Long) {
-        val len: Long = StrOps.strlen(msg)
+        val len: Long = StringOps.strlen(msg)
         writeStdout(msg, len)
     }
 
     /// Write string (with newline)
     fun println(msg: Long) {
-        val len: Long = StrOps.strlen(msg)
+        val len: Long = StringOps.strlen(msg)
         writeStdout(msg, len)
         if (newlineBuf != 0) {
             writeStdout(newlineBuf, 1)
@@ -54,7 +54,7 @@ extern object Console {
     fun printlnInt(n: Long) {
         val buf: Long = intToStr(n)
         if (buf == 0) { return }
-        val len: Long = StrOps.strlen(buf)
+        val len: Long = StringOps.strlen(buf)
         writeStdout(buf, len)
         if (newlineBuf != 0) {
             writeStdout(newlineBuf, 1)
@@ -65,7 +65,7 @@ extern object Console {
     fun printInt(n: Long) {
         val buf: Long = intToStr(n)
         if (buf == 0) { return }
-        val len: Long = StrOps.strlen(buf)
+        val len: Long = StringOps.strlen(buf)
         writeStdout(buf, len)
     }
 

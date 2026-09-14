@@ -1,5 +1,5 @@
-// aura:///aura/lang/native/string/StrOps.aura
-package aura.lang.native.string
+// aura:///aura/lang/std/string/StringOps.aura
+package aura.lang.std.string
 // ─────────────────────────────────────────────────────────────
 // 字符串操作 — Phase S1
 //
@@ -7,15 +7,14 @@ package aura.lang.native.string
 // 所有函数接收 CString（C 风格字符串，以 '\0' 结尾）。
 //
 // ── 使用方式 ──
-//   val n: Long = StrOps.strlen("hello")
-//   val cmp: Int = StrOps.strcmp("hello", "world")
+//   val n: Long = StringOps.strlen("hello")
+//   val cmp: Int = StringOps.strcmp("hello", "world")
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.native.Memory
-import aura.lang.native.Syscalls
 
 /// 字符串操作
-object StrOps {
+object StringOps {
 
     /// 计算字符串长度（不含 '\0'）
     fun strlen(addr: Long): Long {

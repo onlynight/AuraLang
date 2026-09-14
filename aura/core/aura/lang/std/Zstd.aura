@@ -46,8 +46,8 @@ import aura.lang.std.IO
 // 常量
 // ═══════════════════════════════════════════════════════════════
 
-/// Zstd 魔数（4 字节）。
-const val ZSTD_MAGIC: String = "\x28\xB5\x2F\xFD"
+/// Zstd 魔数（4 字节：0x28 0xB5 0x2F 0xFD）。
+val ZSTD_MAGIC: String = String.fromCharCode(0x28) + String.fromCharCode(0xB5) + String.fromCharCode(0x2F) + String.fromCharCode(0xFD)
 
 /// 默认压缩级别。
 const val ZSTD_LEVEL_DEFAULT: Int = 3

@@ -503,45 +503,33 @@ define { i8*, i64 } @concat(i8* %a, i64 %alen, i8* %b, i64 %blen) {
 
 ---
 
-## 五、工具链 .aura 文件修正
+## 五、工具链 .aura 文件修正（Phase E）
 
 ### 5.1 Loom.aura
 
 **当前问题**：6 个裸 `@native` 声明，函数名不在匹配表，生成空壳。
 
-**修正**：
+**修正**：不调用 Rust，不调用 `@native`，使用纯 Aura + `aura.core.native`：
 ```aura
-// 当前（错误）：
+// 错误方式 1（旧）：通过 Rust 实现
 @native fun loomShellExec(cmd: String): Int { }
 
-// 修正（正确）：
-@native(0) fun loomShellExec(cmd: String): Int { }  // SYS_fork + SYS_execve
-@native(0) fun loomShellOutput(cmd: String): String { }
-@native(0) fun loomFileWatch(path: String, callback: Int): Int { }  // inotify
-@native(0) fun loomFileUnwatch(id: Int): Int { }
-@native(0) fun loomSleep(ms: Int): Unit { }  // nanosleep
-@native(0) fun loomGetEnv(name: String): String { }  // 解析 /proc/self/environ
-@native(0) fun loomTimestamp(): Long { }  // clock_gettime
-```
+// 错误方式 2（旧）：在工具链中自行声明 @native
+@native(SYS_FORK) fun loomShellExec(cmd: String): Int { }
 
-或者用内联汇编：
-```aura
-@native(asm = "syscall") fun loomShellExec(cmd: String): Int { }
-```
+// 正确方式（Phase E）：使用 aura.core.native 包
+import aura.lang.native.Syscalls
+import aura.lang.native.file.FileOps
+import aura.lang.native.process.ProcessOps
+import aura.lang.native.console.Console
 
-**但更好的方案**：不直接用 syscall，而是调用纯 Aura 实现：
-```aura
-// 纯 Aura 实现，通过 syscall 层调用
+// 纯 Aura 实现，通过 aura.core.native 包调用
 fun loomShellExec(cmd: String): Int {
-    val pid: Int = Process.fork()
-    if (pid == 0) {
-        // 子进程：执行命令
-        val argv: List<String> = Collections.singletonList(cmd)
-        Process.execve("/bin/sh", argv, null)
-        // 不会到达这里
-    }
-    val status: Int = Process.waitpid(pid)
-    return Process.exitStatus(status)
+    // 使用 FileOps 进行文件操作
+    val fd: Int = FileOps.open(cmdAddr, O_WRONLY)
+    FileOps.write(fd, outputBuf, outputLen)
+    FileOps.close(fd)
+    return 0
 }
 ```
 
@@ -549,38 +537,50 @@ fun loomShellExec(cmd: String): Int {
 
 **当前问题**：20 个裸 `@native` 声明，参数类型为 Int（丢失参数信息）。
 
-**修正**：编译器 API 不再是 @native，而是直接调用 Aura 编译器函数：
+**修正**：纯 Aura 实现，调用编译器 API + `aura.core.native` 包：
 ```aura
-// 当前（错误）：
-@native fun lexerTokenize(src: String): String { }
+import aura.lang.compiler.Main
+import aura.lang.native.file.FileOps
+import aura.lang.native.console.Console
+import aura.lang.native.memory.Allocator
 
-// 修正：编译器函数由 Aura 编译器自身实现
-fun lexerTokenize(src: String): String {
-    return Compiler.lex(src).toString()
+// 编译器函数由 Aura 编译器自身实现
+fun codegenCompile(src: String): String {
+    val ir: String = Main.compile(src)
+    return ir
 }
-```
 
-或者用 `native fun` 标记为编译器内置（由 AOT 编译器内联）：
-```aura
-native fun lexerTokenize(src: String): String { }
+// 文件操作使用 aura.core.native
+fun readSourceFile(path: String): String {
+    val fd: Int = FileOps.open(pathAddr, O_RDONLY)
+    val buf: Long = Allocator.malloc(4096)
+    val bytesRead: Long = FileOps.read(fd, buf, 4096)
+    FileOps.close(fd)
+    return stringFromBuffer(buf, bytesRead)
+}
 ```
 
 ### 5.3 AuraLsp.aura
 
 **当前问题**：11 个裸 `@native` 声明，JSON-RPC 用字符串搜索模拟。
 
-**修正**：
+**修正**：纯 Aura JSON 解析 + 编译器 API + `aura.core.native`：
 ```aura
+import aura.lang.compiler.Main
+import aura.lang.native.console.Console
+import aura.lang.native.file.FileOps
+
 // 纯 Aura JSON 解析器
 fun lspParseRequest(data: String): String {
     val parsed: List<Any> = Json.parse(data)
     return Json.stringify(parsed)
 }
 
-// LSP 请求分派
+// LSP 请求分派：调用编译器 API
 fun lspCompletion(file: String, pos: Int): String {
-    val ast = Compiler.parse(FileSystem.readText(file))
-    val symbol = Compiler.findSymbolAt(ast, pos)
+    val content: String = readViaFileOps(file)
+    val ast = Main.parse(content)
+    val symbol = Main.findSymbolAt(ast, pos)
     return Json.stringify(["label": symbol.name, "kind": symbol.kind])
 }
 ```
@@ -589,19 +589,23 @@ fun lspCompletion(file: String, pos: Int): String {
 
 **当前问题**：13 个裸 `@native` 声明，无 VM 交互。
 
-**修正**：通过 Aura 编译器的调试接口实现：
+**修正**：纯 Aura + 编译器 API + `aura.core.native`：
 ```aura
+import aura.lang.compiler.Main
+import aura.lang.native.console.Console
+import aura.lang.native.file.FileOps
+
 // 编译器插入断点检查
 fun debugRun(): Int {
-    return Debugger.start()
+    return Main.debugStart()
 }
 
 fun debugStepOver(): Int {
-    return Debugger.stepOver()
+    return Main.debugStepOver()
 }
 
 fun debugVariables(): String {
-    return Debugger.currentVariables()
+    return Main.debugCurrentVariables()
 }
 ```
 
@@ -658,15 +662,30 @@ fun debugVariables(): String {
 | 3.5 | 去除 aura_std_cffi.c 依赖 | C 清理 | 2d |
 | 3.6 | 验证：全部标准库通过 | 测试 | 2d |
 
-### Phase 4：工具链全部用 Aura 重写（3 周）
+### Phase E：工具链全部用 Aura 重写（3 周）
 
 **目标**：工具链（Loom/AuraCli/AuraLsp/AuraDebugger）完全用 Aura 实现，**每个工具独立编译为 exe**，不再依赖 Rust 编译的 `aura` CLI。
 
 **核心原则**：
-- 编译器代码已存在于 `aura/compiler/aura/lang/compiler/`（50+ 文件，完整编译管线）
-- 工具链 .aura 文件**直接调用** Aura 编译器 API，而非通过 shell 调用 `aura` CLI
+- **零 Rust 调用**：工具链 .aura 文件不包含任何 `@native` 调用 Rust 实现的代码，所有逻辑用纯 Aura 编写
+- **纯 Aura 实现**：编译器代码已存在于 `aura/compiler/aura/lang/compiler/`（50+ 文件，完整编译管线），工具链直接调用 Aura 编译器 API
+- **Native 接口唯一来源**：需要系统级操作时，**仅调用 `aura.core.native` 包**下的接口（Syscalls / FileOps / ProcessOps / Console / Memory / Allocator / StrOps / MathCore 等），不自行编写 `@native` 声明
 - 每个工具独立编译为 exe，零 Rust 依赖
-- 仅依赖 LLVM 工具链（clang/llc/opt）
+- 仅依赖 LLVM 工具链（clang/llc/opt）+ `aura.core.native` 包
+
+**`aura.core.native` 包提供的 Native 接口**：
+| 模块 | 路径 | 提供的能力 |
+|------|------|-----------|
+| Syscalls | `aura.lang.native.Syscalls` | 系统调用号常量（SYS_READ / SYS_WRITE / SYS_OPEN 等） |
+| FileOps | `aura.lang.native.file.FileOps` | 文件读写/打开/关闭/seek/stat/delete/exists |
+| ProcessOps | `aura.lang.native.process.ProcessOps` | 进程退出/wait/exec/pid |
+| Console | `aura.lang.native.console.Console` | stdout 输出（print/println/printInt/printlnInt） |
+| Memory | `aura.lang.native.Memory` | 内存 read/write/copy/set/alloc/free |
+| Allocator | `aura.lang.native.memory.Allocator` | 堆内存 malloc/free/realloc（bump allocator） |
+| StrOps | `aura.lang.native.string.StrOps` | 字符串 strlen/strcmp/strcpy/strncpy/hash |
+| Cpu | `aura.lang.native.Cpu` | rdtsc/memFence/cpuid/atomicAdd（内联汇编） |
+| MathCore | `aura.lang.native.math.MathCore` | abs/max/min/sqrt/sin/cos/tan/pow/log/exp |
+| Clock | `aura.lang.native.time.Clock` | clock_gettime 高精度时钟 |
 
 **架构设计**：
 ```
@@ -676,7 +695,17 @@ fun debugVariables(): String {
 │  AuraCli.exe  ──┐                                        │
 │  Loom.exe      ──┤→ 直接调用 Aura 编译器 API              │
 │  AuraLsp.exe   ──┤   (Main.compile / aotBuildExeSource)  │
-│  Debugger.exe  ──┘                                        │
+│  Debugger.exe  ──┘   零 Rust 调用，纯 Aura 实现            │
+├─────────────────────────────────────────────────────────┤
+│              aura.core.native 包 (Native 接口层)            │
+│  ┌──────────┬──────────┬──────────┬───────────────┐     │
+│  │ Syscalls │ FileOps  │ ProcessOps│ Console       │     │
+│  ├──────────┼──────────┼──────────┼───────────────┤     │
+│  │ Memory   │ Allocator│ StrOps   │ Cpu           │     │
+│  ├──────────┼──────────┼──────────┼───────────────┤     │
+│  │ MathCore │ Clock    │          │               │     │
+│  └──────────┴──────────┴──────────┴───────────────┘     │
+│  ⚠ 所有 @native 声明集中在 native 包，工具链不自行声明       │
 ├─────────────────────────────────────────────────────────┤
 │                    编译器层 (Aura 实现)                     │
 │  aura/compiler/aura/lang/compiler/Main.aura              │
@@ -714,21 +743,23 @@ aura build aura/toolchain/aura/lang/debugger/AuraDebugger.aura --aot --llvm-home
 
 | # | 任务 | 文件 | 工作量 |
 |---|------|------|--------|
-| 4.1 | 验证 aura/compiler/ 编译管线可用 | `aura/compiler/**` | 2d |
-| 4.2 | AuraCli.aura → 独立 CLI（直接调用编译器 API） | `AuraCli.aura` | 3d |
-| 4.3 | Loom.aura → 独立构建系统（直接调用编译器 API） | `Loom.aura` | 3d |
-| 4.4 | AuraLsp.aura → 独立 LSP 服务器 | `AuraLsp.aura` | 2d |
-| 4.5 | AuraDebugger.aura → 独立调试器 | `AuraDebugger.aura` | 2d |
-| 4.6 | 验证：4 个工具独立编译为 exe | 测试 | 1d |
-| 4.7 | 验证：零 Rust 依赖 | 测试 | 1d |
+| E.1 | 验证 aura/compiler/ 编译管线可用 | `aura/compiler/**` | 2d |
+| E.2 | AuraCli.aura → 独立 CLI（纯 Aura，调用编译器 API + aura.core.native） | `AuraCli.aura` | 3d |
+| E.3 | Loom.aura → 独立构建系统（纯 Aura，调用编译器 API + aura.core.native） | `Loom.aura` | 3d |
+| E.4 | AuraLsp.aura → 独立 LSP 服务器（纯 Aura，调用编译器 API + aura.core.native） | `AuraLsp.aura` | 2d |
+| E.5 | AuraDebugger.aura → 独立调试器（纯 Aura，调用编译器 API + aura.core.native） | `AuraDebugger.aura` | 2d |
+| E.6 | 验证：4 个工具独立编译为 exe | 测试 | 1d |
+| E.7 | 验证：零 Rust 调用、零自写 @native 声明 | 测试 | 1d |
 
 **关键区别（vs Phase 4 旧方案）**：
-| 旧方案 | 新方案 |
-|--------|--------|
+| 旧方案 | 新方案（Phase E） |
+|--------|-------------------|
 | 工具链调用 `system("aura build ...")` | 工具链直接调用 `Main.aotBuildExeSource()` |
 | 任务命令是字符串 "aura build ..." | 任务直接调用 Aura API |
 | 依赖 Rust 编译的 `aura` CLI | 每个工具独立编译为 exe |
 | shell 调用 aura.exe | 进程内函数调用 |
+| 工具链内自行声明 `@native` | 仅调用 `aura.core.native` 包 |
+| 工具链调用 Rust 实现（vmRun 等） | 纯 Aura 实现，无 Rust 调用 |
 
 **编译器模块结构**（`aura/compiler/aura/lang/compiler/`）：
 ```
@@ -746,13 +777,23 @@ jit/               ← JIT 编译器 (JitCore, JitLower, JitOpt...)
 gc/                ← 垃圾回收 (Gc, MarkSweep, Concurrent...)
 ```
 
-**工具链调用关系**（进程内直接调用，无 shell）：
+**工具链调用关系**（进程内直接调用，无 shell，无 Rust）：
 ```
-AuraCli.exe        → Main.compile() / Main.aotBuildExeSource()
-Loom.exe           → Main.compile() / Main.aotBuildExeSource()
-AuraLsp.exe        → Main.compile() (诊断) / lexer/parser (补全)
-AuraDebugger.exe   → Main.compile() (求值) / vm (调试)
+AuraCli.exe        → Main.compile() / Main.aotBuildExeSource()   + FileOps (文件读写) + Console (输出)
+Loom.exe           → Main.compile() / Main.aotBuildExeSource()   + FileOps (文件读写) + Allocator (内存)
+AuraLsp.exe        → Main.compile() (诊断) / lexer/parser (补全) + Console (stdio I/O)
+AuraDebugger.exe   → Main.compile() (求值) / vm (调试)           + Console (交互式输出)
 ```
+
+**禁止事项**：
+| 禁止 | 正确做法 |
+|------|---------|
+| 工具链中声明 `@native` 函数 | 调用 `aura.core.native` 包已有的 native 函数 |
+| 工具链调用 `system("aura build ...")` | 直接调用 `Main.aotBuildExeSource()` |
+| 工具链调用 `Process.args()` 来自 Rust | 使用 `ProcessOps.getPid()` 等 native 接口 |
+| 自行实现文件 I/O | 使用 `FileOps.open/read/write/close` |
+| 自行实现控制台输出 | 使用 `Console.println/print` 或 `IO.println` |
+| 自行实现内存分配 | 使用 `Allocator.malloc` 或 `Memory.alloc` |
 
 **总工期**：3 周（14 天）
 

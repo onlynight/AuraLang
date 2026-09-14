@@ -1,0 +1,314 @@
+// aura:///aura/lang/native/process/Process.aura
+package aura.lang.native.process
+// ─────────────────────────────────────────────────────────────
+// 进程管理 — Phase S2 (native 包实现)
+//
+// 使用 extern object + @native 实现，零 Rust 依赖。
+// 替代 aura.lang.std.Process（internal object → Rust bootstrap）。
+//
+// ── 设计原则 ──
+//   * 低层：直接映射 syscall（fork / execve / wait4 / kill / exit / getpid）
+//   * 高层：用纯 Aura 组合低层 syscall 实现 spawn / run / args / arg / argCount
+//   * 命令行参数：读取 /proc/self/cmdline（NUL 分隔）
+//
+// ── 使用方式 ──
+//   import aura.lang.native.process.Process
+//
+//   Process.exit(0)
+//   val pid: Int = Process.pid()
+//   val code: Int = Process.wait(pid)
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.native.Syscalls
+import aura.lang.native.Memory
+import aura.lang.native.memory.Allocator
+import aura.lang.std.string.StringOps
+
+/// 进程管理（native 实现）
+extern object Process {
+
+    // ═══════════════════════════════════════════════════════════
+    // 低层 syscall 声明
+    // ═══════════════════════════════════════════════════════════
+
+    @native(SYS_EXIT_GROUP) fun exitGroup(code: Int)
+    @native(SYS_WAIT4)      fun wait4(pid: Int, status: Long, options: Int, rusage: Long): Int
+    @native(SYS_EXECVE)     fun execve(path: CString, args: Long, env: Long): Long
+    @native(SYS_GETPID)     fun getpid(): Int
+    @native(SYS_FORK)       fun fork(): Int
+    @native(SYS_KILL)       fun killSyscall(pid: Int, sig: Int): Int
+
+    // 文件 syscall（用于读取 /proc/self/cmdline）
+    @native(SYS_OPEN)       fun openFile(path: CString, flags: Int): Int
+    @native(SYS_CLOSE)      fun closeFile(fd: Int): Int
+    @native(SYS_READ)       fun readSyscall(fd: Int, buf: Long, count: Long): Long
+
+    // ═══════════════════════════════════════════════════════════
+    // 高层 API
+    // ═══════════════════════════════════════════════════════════
+
+    // -- 退出 --
+
+    /// 退出进程并返回指定状态码。
+    fun exit(code: Int) {
+        exitGroup(code)
+    }
+
+    /// 退出进程（exit 的别名）。
+    fun exitProcess(code: Int) {
+        exitGroup(code)
+    }
+
+    // -- 进程信息 --
+
+    /// 获取当前进程 ID。
+    fun pid(): Int {
+        return getpid()
+    }
+
+    /// 获取当前进程 ID（属性别名）。
+    val pid: Int = 0  // 占位，运行时由 pid() 获取
+
+    // -- 进程控制 --
+
+    /// 等待指定进程结束并返回退出码。
+    fun wait(pid: Int): Int {
+        return wait4(pid, 0, 0, 0)
+    }
+
+    /// 杀死指定进程（SIGKILL）。
+    fun kill(pid: Int): Int {
+        return killSyscall(pid, 9)  // SIGKILL = 9
+    }
+
+    /// 以 shell 同步执行命令行，返回退出码（阻塞直到结束）。
+    fun run(command: String): Int {
+        val childPid: Int = spawn(command)
+        if (childPid <= 0) {
+            return -1
+        }
+        return wait(childPid)
+    }
+
+    /// 启动新进程，返回子进程 PID。
+    ///
+    /// 在子进程中调用 execve 替换进程映像。
+    /// 如果 execve 失败，子进程以错误码 1 退出。
+    fun spawn(command: String): Int {
+        val result: Int = fork()
+        if (result < 0) {
+            return -1  // fork 失败
+        }
+        if (result == 0) {
+            // 子进程：执行命令
+            // 构造 argv: [command, null]
+            val cmdAddr: Long = stringToBuffer(command)
+            if (cmdAddr == 0) {
+                exitGroup(1)
+                return -1
+            }
+            val argvAddr: Long = Allocator.malloc(16)  // 2 * 8 bytes
+            if (argvAddr == 0) {
+                Allocator.free(cmdAddr)
+                exitGroup(1)
+                return -1
+            }
+            Memory.write64(argvAddr, cmdAddr)     // argv[0]
+            Memory.write64(argvAddr + 8, 0)       // argv[1] = NULL
+            execve(CString(command), argvAddr, 0)
+            // 如果 execve 返回，说明失败
+            Allocator.free(argvAddr)
+            Allocator.free(cmdAddr)
+            exitGroup(1)
+            return -1
+        }
+        // 父进程：返回子进程 PID
+        return result
+    }
+
+    // -- 命令行参数 --
+
+    /// 获取命令行参数数量。
+    fun argCount(): Int {
+        return countCmdlineArgs()
+    }
+
+    /// 获取指定索引的命令行参数。
+    fun arg(index: Int): String {
+        return getCmdlineArg(index)
+    }
+
+    /// 获取命令行参数列表（需先调用 argCount 确定数量）。
+    fun args(): List<String> {
+        val count: Int = argCount()
+        val result: List<String> = mutableListOf()
+        var i: Int = 0
+        while (i < count) {
+            result.add(arg(i))
+            i = i + 1
+        }
+        return result
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 内部实现：/proc/self/cmdline 解析
+    // ═══════════════════════════════════════════════════════════
+
+    /// 读取 /proc/self/cmdline 到内存缓冲区。
+    /// 返回读取的字节数，失败返回 -1。
+    fun readCmdline(): Long {
+        val fd: Int = openFile(CString("/proc/self/cmdline"), Syscalls.O_RDONLY)
+        if (fd < 0) {
+            return -1
+        }
+        val buf: Long = Allocator.malloc(4096)
+        if (buf == 0) {
+            closeFile(fd)
+            return -1
+        }
+        val bytesRead: Long = readSyscall(fd, buf, 4096)
+        closeFile(fd)
+        if (bytesRead < 0) {
+            Allocator.free(buf)
+            return -1
+        }
+        return buf  // 调用方负责 free
+    }
+
+    /// 计算命令行参数数量（NUL 分隔）。
+    fun countCmdlineArgs(): Int {
+        val buf: Long = readCmdline()
+        if (buf < 0) {
+            return 0
+        }
+        // 获取读取长度
+        val fd: Int = openFile(CString("/proc/self/cmdline"), Syscalls.O_RDONLY)
+        if (fd < 0) {
+            Allocator.free(buf)
+            return 0
+        }
+        val tempBuf: Long = Allocator.malloc(4096)
+        if (tempBuf == 0) {
+            closeFile(fd)
+            Allocator.free(buf)
+            return 0
+        }
+        val bytesRead: Long = readSyscall(fd, tempBuf, 4096)
+        closeFile(fd)
+
+        if (bytesRead <= 0) {
+            Allocator.free(buf)
+            Allocator.free(tempBuf)
+            return 0
+        }
+
+        // 统计 NUL 分隔符数量
+        var count: Int = 0
+        var i: Long = 0
+        while (i < bytesRead) {
+            val c: Byte = Memory.read(buf + i)
+            if (c == 0) {
+                count = count + 1
+            }
+            i = i + 1
+        }
+        // 如果最后一个字符不是 NUL，多一个参数
+        if (bytesRead > 0 && Memory.read(buf + bytesRead - 1) != 0) {
+            count = count + 1
+        }
+
+        Allocator.free(buf)
+        Allocator.free(tempBuf)
+        return count
+    }
+
+    /// 获取指定索引的命令行参数。
+    fun getCmdlineArg(index: Int): String {
+        val fd: Int = openFile(CString("/proc/self/cmdline"), Syscalls.O_RDONLY)
+        if (fd < 0) {
+            return ""
+        }
+        val buf: Long = Allocator.malloc(4096)
+        if (buf == 0) {
+            closeFile(fd)
+            return ""
+        }
+        val bytesRead: Long = readSyscall(fd, buf, 4096)
+        closeFile(fd)
+
+        if (bytesRead <= 0) {
+            Allocator.free(buf)
+            return ""
+        }
+
+        // 找到第 index 个参数
+        var argCount: Int = 0
+        var startPos: Long = 0
+        var i: Long = 0
+        var found: Boolean = false
+
+        while (i < bytesRead && argCount <= index) {
+            val c: Byte = Memory.read(buf + i)
+            if (c == 0) {
+                // 到达参数边界
+                if (argCount == index) {
+                    // 提取 [startPos, i) 之间的字符串
+                    val len: Long = i - startPos
+                    if (len <= 0) {
+                        Allocator.free(buf)
+                        return ""
+                    }
+                    val result: String = bufferToString(buf + startPos, len)
+                    Allocator.free(buf)
+                    return result
+                }
+                argCount = argCount + 1
+                startPos = i + 1
+            }
+            i = i + 1
+        }
+
+        // 最后一个参数（无 NUL 终止）
+        if (argCount == index) {
+            val len: Long = bytesRead - startPos
+            if (len <= 0) {
+                Allocator.free(buf)
+                return ""
+            }
+            val result: String = bufferToString(buf + startPos, len)
+            Allocator.free(buf)
+            return result
+        }
+
+        Allocator.free(buf)
+        return ""
+    }
+
+    /// 将内存缓冲区转换为 String。
+    fun bufferToString(addr: Long, len: Long): String {
+        var result: String = ""
+        var i: Long = 0
+        while (i < len) {
+            val c: Byte = Memory.read(addr + i)
+            result = result + String.fromCharCode(c)
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 将 String 复制到内存缓冲区（NUL 终止）。
+    fun stringToBuffer(s: String): Long {
+        val len: Long = s.length + 1  // +1 for NUL terminator
+        val buf: Long = Allocator.malloc(len)
+        if (buf == 0) {
+            return 0
+        }
+        var i: Int = 0
+        while (i < s.length) {
+            Memory.write(buf + i, s.charCodeAt(i))
+            i = i + 1
+        }
+        Memory.write(buf + s.length, 0)  // NUL terminator
+        return buf
+    }
+}

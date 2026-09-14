@@ -11,7 +11,7 @@ import aura.lang.native.Runtime
 import aura.lang.native.Syscalls
 import aura.lang.native.Memory
 import aura.lang.native.memory.Allocator
-import aura.lang.native.string.StrOps
+import aura.lang.std.string.StringOps
 import aura.lang.native.console.Console
 
 // ─────────────────────────────────────────────────────────────
@@ -63,7 +63,7 @@ fun testAllocatorMultiple(): Boolean {
 
 fun testStrlen(): Boolean {
     val s: String = "hello"
-    val n: Long = StrOps.strlen(s as Long)
+    val n: Long = StringOps.strlen(s as Long)
     return n == 5
 }
 
@@ -71,17 +71,17 @@ fun testStrcmp(): Boolean {
     val a: String = "apple"
     val b: String = "banana"
     
-    val cmp1: Int = StrOps.strcmp(a as Long, b as Long)
+    val cmp1: Int = StringOps.strcmp(a as Long, b as Long)
     if (cmp1 >= 0) {
         return false
     }
     
-    val cmp2: Int = StrOps.strcmp(b as Long, a as Long)
+    val cmp2: Int = StringOps.strcmp(b as Long, a as Long)
     if (cmp2 <= 0) {
         return false
     }
     
-    val cmp3: Int = StrOps.strcmp(a as Long, a as Long)
+    val cmp3: Int = StringOps.strcmp(a as Long, a as Long)
     if (cmp3 != 0) {
         return false
     }
@@ -100,10 +100,10 @@ fun testStrcpy(): Boolean {
     }
     
     // 复制
-    StrOps.strcpy(dstAddr, srcAddr)
+    StringOps.strcpy(dstAddr, srcAddr)
     
     // 比较
-    val cmp: Int = StrOps.strcmp(dstAddr, srcAddr)
+    val cmp: Int = StringOps.strcmp(dstAddr, srcAddr)
     return cmp == 0
 }
 
@@ -112,9 +112,9 @@ fun testStrHash(): Boolean {
     val s2: String = "hello"
     val s3: String = "world"
     
-    val h1: Long = StrOps.hash(s1 as Long)
-    val h2: Long = StrOps.hash(s2 as Long)
-    val h3: Long = StrOps.hash(s3 as Long)
+    val h1: Long = StringOps.hash(s1 as Long)
+    val h2: Long = StringOps.hash(s2 as Long)
+    val h3: Long = StringOps.hash(s3 as Long)
     
     // 相同字符串哈希相同
     if (h1 != h2) {
