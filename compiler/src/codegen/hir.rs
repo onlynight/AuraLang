@@ -38,6 +38,9 @@ struct ImportResolution {
     /// 别名 → 模块名（模块/通配导入 + 别名）
     /// 例如: "cc" → "aura.concurrent"
     alias_to_module: HashMap<String, String>,
+    /// 导入的模块短名集合（用于识别 module.method() 调用）
+    /// 例如: "Main" → 来自 `import aura.lang.compiler.Main`
+    module_names: std::collections::HashSet<String>,
 }
 
 impl ImportResolution {
@@ -52,6 +55,10 @@ impl ImportResolution {
     /// 查找模块别名（如 `cc` → `aura.concurrent`）
     fn resolve_module_alias(&self, name: &str) -> Option<&str> {
         self.alias_to_module.get(name).map(|s| s.as_str())
+    }
+    /// 检查是否为已导入的模块短名
+    fn is_module_name(&self, name: &str) -> bool {
+        self.module_names.contains(name)
     }
 }
 
@@ -735,6 +742,8 @@ fn build_import_resolution(imports: &[ImportDecl]) -> ImportResolution {
                     // Class-name style: "Coroutine.spawn"
                     if let Some(cn) = &class_name {
                         r.short_to_full.insert(format!("{}.{}", cn, sn), full);
+                        // 注册模块短名供 module.method() 调用识别
+                        r.module_names.insert(cn.clone());
                     }
                 }
             }
@@ -749,6 +758,8 @@ fn build_import_resolution(imports: &[ImportDecl]) -> ImportResolution {
                         let full = format!("{}.{}", path, sn);
                         r.short_to_full.insert(format!("{}.{}", cn, sn), full);
                     }
+                    // 注册模块短名供 module.method() 调用识别
+                    r.module_names.insert(cn.clone());
                 }
             }
             None if is_function => {
@@ -758,6 +769,9 @@ fn build_import_resolution(imports: &[ImportDecl]) -> ImportResolution {
             }
             None => {
                 // 旧命名：import aura.concurrent → 模块引用，无需映射（调用时用完整路径）
+                // 同时注册模块短名供 module.method() 调用识别
+                let short_name = parts.last().unwrap_or(&"").to_string();
+                r.module_names.insert(short_name);
             }
         }
     }
@@ -3982,6 +3996,10 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     }
                     // 检查模块别名：import aura.concurrent as cc + cc.spawn(42)
                     if let Expr::Ident(module_name, _) = object.as_ref() {
+                        // 仅当对象类型不是 String 时才视为模块调用
+                        // （String 变量如 `json` 调用 `.indexOf()` 不应解析为 Json 模块方法）
+                        let obj_ty = lookup_expr_type(object);
+                        let is_string_var = matches!(obj_ty.as_deref(), Some("String"));
                         if let Some(am) = lookup_import_module_alias(module_name) {
                             let resolved = resolve_function_path(&format!("{}.{}", am, name));
                             return HirExpr::Call {
@@ -3990,7 +4008,8 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                             };
                         }
                         // 检查是否为标准库模块调用（支持嵌套：aura.lang.std.Coroutine.spawn）
-                        if is_std_module(module_name) {
+                        // 但仅当对象不是 String 变量时才应用
+                        if !is_string_var && is_std_module(module_name) {
                             let class_name = std_module_to_class_name(module_name)
                                 .map(|s| s.to_string())
                                 .unwrap_or_else(|| full_package_name(module_name));
@@ -4041,6 +4060,20 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                         if INTERFACE_NAMES.with(|n| n.borrow().contains(obj_name)) {
                             return HirExpr::Call {
                                 callee: format!("{}.{}", obj_name, name),
+                                args: args.iter().map(desugar_expr).collect(),
+                            };
+                        }
+                        // 导入模块方法调用：Main.compile(src) → Main.compile(src)
+                        // 不传接收者作为首参（与 Collections.emptyList() 一致）
+                        if IMPORT_RESOLUTION.with(|r| {
+                            r.borrow().as_ref().map_or(false, |ir| ir.is_module_name(obj_name))
+                        }) {
+                            // 解析短名为完整名（如 "Process.args" → "aura.lang.std.Process.args"）
+                            let short_callee = format!("{}.{}", obj_name, name);
+                            let full_callee =
+                                lookup_import_short(&short_callee).unwrap_or(short_callee);
+                            return HirExpr::Call {
+                                callee: full_callee,
                                 args: args.iter().map(desugar_expr).collect(),
                             };
                         }

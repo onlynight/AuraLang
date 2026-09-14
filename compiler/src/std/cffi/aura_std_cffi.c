@@ -335,6 +335,20 @@ const char *aura_io_readLine(void) {
     return NULL;
 }
 
+/** IO.readAll() — 读取所有 stdin 输入（不含换行符） */
+const char *aura_io_readAll(void) {
+    static char buf[65536];
+    size_t total = 0;
+    int c;
+    while ((c = fgetc(stdin)) != EOF && total < sizeof(buf) - 1) {
+        if (c != '\n' && c != '\r') {
+            buf[total++] = (char)c;
+        }
+    }
+    buf[total] = '\0';
+    return buf;
+}
+
 int aura_io_fileExists(const char *path) {
     struct stat buffer;
     return (stat(path, &buffer) == 0) ? 1 : 0;
@@ -629,6 +643,16 @@ double aura_random_nextFloat(void) {
 
 void println(const char *s) { aura_println(s); }
 void print(const char *s) { aura_print(s); }
+// AOT IR 生成的新命名别名（aura_lang_std_IO_println 等）
+void aura_lang_std_IO_println(const char *s) { aura_println(s); }
+void aura_lang_std_IO_print(const char *s) { aura_print(s); }
+void aura_lang_std_IO_puts(const char *s) { aura_puts(s); }
+/* std 风格包装器：IO.readLine() 的调用点符号 */
+const char *aura_lang_std_IO_readLine(void) { return aura_io_readLine(); }
+/* std 风格包装器：IO.readAll() 的调用点符号 */
+const char *aura_lang_std_IO_readAll(void) { return aura_io_readAll(); }
+/* Json 模块存根（LSP/Debugger 使用，返回空字符串或 0） */
+const char *aura_lang_std_Json_remove(const char *json, const char *key) { (void)json; (void)key; return ""; }
 int64_t aura_abs_wrapper(int64_t x) { return x < 0 ? -x : x; }
 double aura_sqrt_wrapper(double x) { return sqrt(x); }
 double aura_pow_wrapper(double b, double e) { return pow(b, e); }
@@ -643,6 +667,13 @@ int64_t aura_str_to_int(const char *s) {
 double aura_str_to_float(const char *s) {
     if (!s) return 0.0;
     return strtod(s, NULL);
+}
+/* std 风格包装器：String.toInt() / String.toFloat() 的调用点符号 */
+int64_t aura_lang_std_String_toInt(const char *s) {
+    return aura_str_to_int(s);
+}
+double aura_lang_std_String_toFloat(const char *s) {
+    return aura_str_to_float(s);
 }
 /* Plan A 助手的前向声明：必须先于 toString 声明，否则 C 会按「隐式声明返回 int」
    处理，把 64 位指针截断成 32 位，导致返回的字符串指针被破坏。 */
@@ -1604,6 +1635,15 @@ const void *aura_lang_std_Collections_mapGet(const void *map, const char *key) {
         }
     }
     return "";
+}
+
+/** Map.getOrDefault(map, key, default) — 返回 key 对应的值，不存在则返回 default */
+const void *aura_lang_std_Collections_getOrDefault(const void *map, const char *key, const void *default_val) {
+    const void *result = aura_lang_std_Collections_mapGet(map, key);
+    if (result == "" || result == NULL) {
+        return default_val ? default_val : "";
+    }
+    return result;
 }
 
 int64_t aura_lang_std_Collections_mapSize(const void *map) {

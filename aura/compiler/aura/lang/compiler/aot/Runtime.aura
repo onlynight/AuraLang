@@ -81,6 +81,8 @@ fun preludeTable(): String {
         "aura_strlen|i64|i8*\n" +
         "aura_str_to_int|i64|i8*\n" +
         "aura_str_to_float|double|i8*\n" +
+        "aura_lang_std_String_toInt|i64|i8*\n" +
+        "aura_lang_std_String_toFloat|double|i8*\n" +
         "aura_lang_std_String_length|i64|i8*\n" +
         "aura_lang_std_String_equals|i32|i8*,i8*\n" +
         "aura_lang_std_String_contains|i32|i8*,i8*\n" +
@@ -90,6 +92,7 @@ fun preludeTable(): String {
         "aura_lang_std_String_countChar|i64|i8*,i8*\n" +
         "aura_lang_std_String_substring|i8*|i8*,i64,i64\n" +
         "aura_lang_std_String_charAt|i8*|i8*,i64\n" +
+        "aura_lang_std_String_charCodeAt|i64|i8*,i64\n" +
         "aura_lang_std_String_toUpperCase|i8*|i8*\n" +
         "aura_lang_std_String_toLowerCase|i8*|i8*\n" +
         "aura_lang_std_String_trim|i8*|i8*\n" +
@@ -127,6 +130,10 @@ fun runtimeDeclarations(): String {
     out.sbAdd("declare i64 @aura_cpu_rdtsc()\n")
     out.sbAdd("declare void @aura_cpu_mem_fence()\n")
     out.sbAdd("declare i64 @aura_cpu_atomic_add(i64, i64)\n")
+    // Phase D: setjmp/longjmp 异常桥（try/catch）
+    out.sbAdd("declare i32 @aura_setjmp(i8*)\n")
+    out.sbAdd("declare void @aura_longjmp(i8*, i32)\n")
+    out.sbAdd("@aura_exception_value = external global i8*\n")
     appendDeclarations(out, runtimeTable())
     val seenR: String = runtimeFunctionNames()
     appendDeclarationsFiltered(out, preludeTable(), seenR)

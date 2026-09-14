@@ -1,0 +1,198 @@
+import aura.lang.std.String
+import aura.lang.std.IO
+import aura.lang.std.FileSystem
+import aura.lang.std.Collections
+import aura.lang.std.Encoding
+
+// Test framework
+object TestRunner {
+    var passed: Int = 0
+    var failed: Int = 0
+    var total: Int = 0
+    var failures: List<String> = mutableListOf()
+
+    fun reset(): Unit { passed = 0; failed = 0; total = 0; failures = mutableListOf() }
+
+    fun assert(condition: Boolean, message: String): Unit {
+        total = total + 1
+        if (condition) { passed = passed + 1 } else { failed = failed + 1; failures.add(message) }
+    }
+
+    fun assertEqual(actual: Int, expected: Int, message: String): Unit {
+        total = total + 1
+        if (actual == expected) { passed = passed + 1 } else { failed = failed + 1; failures.add(message) }
+    }
+
+    fun assertEqual(actual: String, expected: String, message: String): Unit {
+        total = total + 1
+        if (actual == expected) { passed = passed + 1 } else { failed = failed + 1; failures.add(message) }
+    }
+
+    fun report(): Unit {
+        IO.println("")
+        IO.println("Total: " + total + " Passed: " + passed + " Failed: " + failed)
+        if (failed > 0) {
+            var i: Int = 0
+            while (i < failures.size) { IO.println("  X " + failures[i]); i = i + 1 }
+        } else {
+            IO.println("All tests passed!")
+        }
+    }
+}
+
+// Task types
+object TaskType {
+    const val CLEAN: Int = 0
+    const val COMPILE: Int = 2
+    const val TEST: Int = 3
+    const val CHECK: Int = 6
+}
+
+// Test classes
+class TestTask {
+    val name: String
+    val kind: Int
+    val dependsOn: List<String> = mutableListOf()
+    fun TestTask(name: String, kind: Int) { this.name = name; this.kind = kind }
+    fun addDep(dep: String): Unit { dependsOn.add(dep) }
+}
+
+class TestGraph {
+    var tasks: List<TestTask> = mutableListOf()
+    fun addTask(name: String, kind: Int): Unit { tasks.add(TestTask(name, kind)) }
+    fun addDependency(from: String, to: String): Unit {
+        var i: Int = 0
+        while (i < tasks.size) {
+            if (tasks[i].name == from) { tasks[i].addDep(to); return }
+            i = i + 1
+        }
+    }
+    fun topoSort(): List<String> {
+        val order: List<String> = mutableListOf()
+        val visited: Map<String, Boolean> = mutableMapOf()
+        var i: Int = 0
+        while (i < tasks.size) {
+            if (!visited.containsKey(tasks[i].name)) { visit(tasks[i], order, visited) }
+            i = i + 1
+        }
+        return order
+    }
+    fun visit(task: TestTask, order: List<String>, visited: Map<String, Boolean>): Unit {
+        visited.put(task.name, true)
+        var i: Int = 0
+        while (i < task.dependsOn.size) {
+            val dep: String = task.dependsOn[i]
+            var j: Int = 0
+            while (j < tasks.size) {
+                if (tasks[j].name == dep && !visited.containsKey(dep)) { visit(tasks[j], order, visited) }
+                j = j + 1
+            }
+            i = i + 1
+        }
+        order.add(task.name)
+    }
+}
+
+// Test functions
+fun testTaskBasic(): Unit {
+    IO.println("[TestTask] Basic creation")
+    val task: TestTask = TestTask("compile", TaskType.COMPILE)
+    TestRunner.assertEqual(task.name, "compile", "Task name")
+    TestRunner.assertEqual(task.kind, TaskType.COMPILE, "Task kind")
+}
+
+fun testTaskAddDependency(): Unit {
+    IO.println("[TestTask] Add dependency")
+    val task: TestTask = TestTask("compile", TaskType.COMPILE)
+    task.addDep("check")
+    task.addDep("resolve")
+    TestRunner.assertEqual(task.dependsOn.size, 2, "Dependency count")
+    TestRunner.assertEqual(task.dependsOn[0], "check", "First dependency")
+}
+
+fun testGraphBasic(): Unit {
+    IO.println("[TestGraph] Basic operations")
+    val graph: TestGraph = TestGraph()
+    graph.addTask("a", TaskType.CHECK)
+    graph.addTask("b", TaskType.COMPILE)
+    graph.addTask("c", TaskType.TEST)
+    TestRunner.assertEqual(graph.tasks.size, 3, "Task count")
+}
+
+fun testGraphTopoSort(): Unit {
+    IO.println("[TestGraph] Topological sort")
+    val graph: TestGraph = TestGraph()
+    graph.addTask("a", TaskType.CHECK)
+    graph.addTask("b", TaskType.COMPILE)
+    graph.addTask("c", TaskType.TEST)
+    graph.addDependency("b", "a")
+    graph.addDependency("c", "b")
+    val order: List<String> = graph.topoSort()
+    TestRunner.assertEqual(order.size, 3, "Sort result size")
+    TestRunner.assertEqual(order.indexOf("a") < order.indexOf("b"), true, "a before b")
+    TestRunner.assertEqual(order.indexOf("b") < order.indexOf("c"), true, "b before c")
+}
+
+fun testStringSplit(): Unit {
+    IO.println("[String] Split")
+    val text: String = "hello world foo bar"
+    val parts: List<String> = text.split(" ")
+    TestRunner.assertEqual(parts.size, 4, "Split count")
+    TestRunner.assertEqual(parts[0], "hello", "First part")
+}
+
+fun testStringTrim(): Unit {
+    IO.println("[String] Trim")
+    val text: String = "  hello  "
+    val trimmed: String = String.trim(text)
+    TestRunner.assertEqual(trimmed, "hello", "Trimmed string")
+}
+
+fun testStringContains(): Unit {
+    IO.println("[String] Contains")
+    val text: String = "hello world"
+    TestRunner.assertEqual(text.contains("hello"), true, "Contains hello")
+    TestRunner.assertEqual(text.contains("foo"), false, "Not contains foo")
+}
+
+fun testEncodingSha256(): Unit {
+    IO.println("[Encoding] SHA-256")
+    val hash: String = Encoding.sha256("hello")
+    TestRunner.assertEqual(hash.length > 0, true, "Hash not empty")
+    TestRunner.assertEqual(hash.length == 64, true, "Hash length 64")
+}
+
+fun testListBasic(): Unit {
+    IO.println("[List] Basic operations")
+    val list: List<String> = mutableListOf()
+    list.add("a"); list.add("b"); list.add("c")
+    TestRunner.assertEqual(list.size, 3, "List size")
+    TestRunner.assertEqual(list[0], "a", "First element")
+}
+
+fun testMapBasic(): Unit {
+    IO.println("[Map] Basic operations")
+    val map: Map<String, String> = mutableMapOf()
+    map.put("key1", "value1")
+    map.put("key2", "value2")
+    TestRunner.assertEqual(map.size, 2, "Map size")
+    TestRunner.assertEqual(map.getOrDefault("key1", ""), "value1", "Get key1")
+}
+
+fun main(): Int {
+    IO.println("Aura Loom Unit Tests")
+    TestRunner.reset()
+    testTaskBasic()
+    testTaskAddDependency()
+    testGraphBasic()
+    testGraphTopoSort()
+    testStringSplit()
+    testStringTrim()
+    testStringContains()
+    testEncodingSha256()
+    testListBasic()
+    testMapBasic()
+    TestRunner.report()
+    if (TestRunner.failed > 0) { return 1 }
+    return 0
+}

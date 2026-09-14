@@ -61,4 +61,32 @@ extern object Syscalls {
 
     /// 退出进程
     @native(asm = "call qword [rip + ExitProcess]") fun exitProcess(code: Int)
+
+    // ── Nt* 系统调用（Phase 2: 直接 syscall 指令）──
+    // Windows Nt* 服务号（x86_64，常见值）
+    // 注意：Nt* 服务号在不同 Windows 版本间可能变化
+
+    /// NtWriteFile — 写入文件
+    @native(0x0000000000000000) fun ntWriteFile(handle: Long, event: Long, apc: Long, context: Long, buffer: Long, length: Long, key: Long, disposition: Long): Long
+
+    /// NtReadFile — 读取文件
+    @native(0x0000000000000001) fun ntReadFile(handle: Long, event: Long, apc: Long, context: Long, buffer: Long, length: Long, key: Long, disposition: Long): Long
+
+    /// NtCreateFile — 创建/打开文件
+    @native(0x0000000000000005) fun ntCreateFile(handle: Long, desiredAccess: Int, objectAttributes: Long, ioStatus: Long, allocationSize: Long, fileAttributes: Long, shareAccess: Int, createDisposition: Int, createOptions: Int, eap: Long, eapLength: Long): Long
+
+    /// NtClose — 关闭句柄
+    @native(0x0000000000000006) fun ntClose(handle: Long): Long
+
+    /// NtSetEvent — 设置事件
+    @native(0x0000000000000007) fun ntSetEvent(event: Long): Long
+
+    /// NtWaitForSingleObject — 等待对象
+    @native(0x0000000000000009) fun ntWaitForSingleObject(handle: Long, alertable: Int, timeout: Long): Long
+
+    /// NtExitProcess — 退出进程（Nt 版本）
+    @native(0x0000000000000010) fun ntExitProcess(status: Long)
+
+    /// NtQuerySystemInformation — 查询系统信息
+    @native(0x000000000000001D) fun ntQuerySystemInformation(systemInformationClass: Int, systemInformation: Long, systemInformationLength: Long, returnLength: Long): Long
 }

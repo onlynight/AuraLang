@@ -1,9 +1,77 @@
 // aura:///aura/lang/std/Math.aura
 package aura.lang.std
 // 标准库模块，不可修改
-// 实现：取整/符号/夹取等纯逻辑函数用 Aura 实现；
-//       三角、指数、对数、开方等 libm 函数保留 native（Layer 0-A / FFI）
-// (package 声明由编译器自动注入，无需显式声明)
+// Phase 3: 纯 LLVM 化 — extern "C" 直连 libm (sin/cos/sqrt/pow/log/exp/atan2)
+//
+// 架构说明：
+// - AOT 路径：extern "C" 直连 libm.lib / libm.so
+// - VM 路径：internal object → Rust bootstrap (Layer 0-A / FFI)
+//
+// @since 0.1
+
+// ═══════════════════════════════════════════════════════════════
+// Phase 3: libm 声明 (AOT 路径)
+// ═══════════════════════════════════════════════════════════════
+
+// ── libm: 三角函数 ──
+extern "C" {
+    fun libm_sin(x: Float): Float
+    fun libm_cos(x: Float): Float
+    fun libm_tan(x: Float): Float
+    fun libm_asin(x: Float): Float
+    fun libm_acos(x: Float): Float
+    fun libm_atan(x: Float): Float
+    fun libm_atan2(y: Float, x: Float): Float
+}
+
+// ── libm: 指数与对数 ──
+extern "C" {
+    fun libm_sqrt(x: Float): Float
+    fun libm_cbrt(x: Float): Float
+    fun libm_pow(base: Float, exp: Float): Float
+    fun libm_exp(x: Float): Float
+    fun libm_log(x: Float): Float
+    fun libm_log2(x: Float): Float
+    fun libm_log10(x: Float): Float
+}
+
+// ── libm: 取整函数 ──
+extern "C" {
+    fun libm_floor(x: Float): Float
+    fun libm_ceil(x: Float): Float
+    fun libm_trunc(x: Float): Float
+    fun libm_round(x: Float): Float
+    fun libm_fabs(x: Float): Float
+}
+
+// ═══════════════════════════════════════════════════════════════
+// AOT 路径: 使用 libm 的数学函数实现
+// ═══════════════════════════════════════════════════════════════
+
+fun math_sqrt(x: Float): Float { return libm_sqrt(x) }
+fun math_cbrt(x: Float): Float { return libm_cbrt(x) }
+fun math_pow(base: Float, exp: Float): Float { return libm_pow(base, exp) }
+fun math_exp(x: Float): Float { return libm_exp(x) }
+fun math_log(x: Float): Float { return libm_log(x) }
+fun math_log2(x: Float): Float { return libm_log2(x) }
+fun math_log10(x: Float): Float { return libm_log10(x) }
+fun math_sin(x: Float): Float { return libm_sin(x) }
+fun math_cos(x: Float): Float { return libm_cos(x) }
+fun math_tan(x: Float): Float { return libm_tan(x) }
+fun math_asin(x: Float): Float { return libm_asin(x) }
+fun math_acos(x: Float): Float { return libm_acos(x) }
+fun math_atan(x: Float): Float { return libm_atan(x) }
+fun math_atan2(y: Float, x: Float): Float { return libm_atan2(y, x) }
+fun math_floor(x: Float): Float { return libm_floor(x) }
+fun math_ceil(x: Float): Float { return libm_ceil(x) }
+fun math_trunc(x: Float): Float { return libm_trunc(x) }
+fun math_round(x: Float): Float { return libm_round(x) }
+fun math_fabs(x: Float): Float { return libm_fabs(x) }
+
+// ═══════════════════════════════════════════════════════════════
+// VM 路径: internal object (Rust bootstrap 实现)
+// ═══════════════════════════════════════════════════════════════
+
 /// 数学函数与常量模块。
 ///
 /// 使用前需 import：
@@ -36,8 +104,6 @@ internal object Math {
     // ── 基础运算（纯逻辑，Aura 实现）──
 
     /// 返回绝对值。
-    ///
-    /// 注意：`abs(INT_MIN)` 溢出为 `INT_MIN` 本身。
     fun abs(x: Int): Int {
         if (x < 0) {
             return 0 - x

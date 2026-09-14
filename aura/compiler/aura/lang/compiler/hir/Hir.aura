@@ -1217,27 +1217,37 @@ class HirLowerer {
                 // （`set` 分支已如此）。旧实现把 callee 成员节点整个降级成 kids[0]，
                 // 接收者被埋在其 kids 里，实参整体错位 —— 字符串 `indexOf` 因此
                 // 走列表实现恒返回 -1。
+                //
+                // Phase E: 修复 —— 仅当接收者类型不是 String 时才应用此转换。
+                // String.indexOf(sub) 应保留为方法调用，由 AOT 后端解析到
+                // aura_lang_std_String_indexOf。
                 if (memberName == "contains" || memberName == "indexOf") {
                     val calleeKids: String = ast.kidsOf(calleeId)
                     if (hirKidsCount(calleeKids) >= 1) {
-                        var hirKids: String = hirNoKids()
-                        val recvHirId: Int = this.lowerExpr(ast, hirKidsAt(calleeKids, 0))
-                        if (recvHirId >= 0) {
-                            hirKids = hirKidsAdd(hirKids, recvHirId)
-                        }
-                        var i: Int = 1
-                        while (i < kCount) {
-                            val childHirId: Int = this.lowerExpr(ast, hirKidsAt(kids, i))
-                            if (childHirId >= 0) {
-                                hirKids = hirKidsAdd(hirKids, childHirId)
+                        val recvId: Int = hirKidsAt(calleeKids, 0)
+                        val recvTy: String = ast.tyOf(recvId)
+                        // 仅当接收者不是 String 时才转换为 Collections 调用
+                        if (recvTy != "String") {
+                            var hirKids: String = hirNoKids()
+                            val recvHirId: Int = this.lowerExpr(ast, recvId)
+                            if (recvHirId >= 0) {
+                                hirKids = hirKidsAdd(hirKids, recvHirId)
                             }
-                            i = i + 1
+                            var i: Int = 1
+                            while (i < kCount) {
+                                val childHirId: Int = this.lowerExpr(ast, hirKidsAt(kids, i))
+                                if (childHirId >= 0) {
+                                    hirKids = hirKidsAdd(hirKids, childHirId)
+                                }
+                                i = i + 1
+                            }
+                            var qname: String = "Collections.contains"
+                            if (memberName == "indexOf") {
+                                qname = "Collections.indexOf"
+                            }
+                            return this.hir.add("HirCall", qname, "", sp, hirKids)
                         }
-                        var qname: String = "Collections.contains"
-                        if (memberName == "indexOf") {
-                            qname = "Collections.indexOf"
-                        }
-                        return this.hir.add("HirCall", qname, "", sp, hirKids)
+                        // 接收者是 String：跳过 Collections 转换，走普通方法调用路径
                     }
                 }
             }

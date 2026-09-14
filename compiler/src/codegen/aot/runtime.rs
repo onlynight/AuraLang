@@ -92,6 +92,27 @@ const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
             ("idx", "i64"),
         ],
     },
+    // `s.charCodeAt(i)`：返回字符码（i32），C 侧实现见 aura_std_cffi.c
+    RuntimeFn {
+        name: "aura_lang_std_String_charCodeAt",
+        ret: "i64",
+        params: &[
+            ("s", "i8*"),
+            ("idx", "i64"),
+        ],
+    },
+    // `s.toInt()`：字符串转整数，C 侧实现见 aura_std_cffi.c
+    RuntimeFn {
+        name: "aura_lang_std_String_toInt",
+        ret: "i64",
+        params: &[("s", "i8*")],
+    },
+    // `s.toFloat()`：字符串转浮点数，C 侧实现见 aura_std_cffi.c
+    RuntimeFn {
+        name: "aura_lang_std_String_toFloat",
+        ret: "double",
+        params: &[("s", "i8*")],
+    },
     // Plan A 低位标记值的拆箱助手（实现见 aura_std_cffi.c）
     RuntimeFn {
         name: "aura_to_int_any",
@@ -251,6 +272,53 @@ const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
         params: &[
             ("buf", "i8*"),
             ("val", "i32"),
+        ],
+    },
+    // IO 模块函数（AOT IR 生成的新命名）
+    RuntimeFn {
+        name: "aura_lang_std_IO_println",
+        ret: "void",
+        params: &[("s", "i8*")],
+    },
+    RuntimeFn {
+        name: "aura_lang_std_IO_print",
+        ret: "void",
+        params: &[("s", "i8*")],
+    },
+    RuntimeFn {
+        name: "aura_lang_std_IO_puts",
+        ret: "void",
+        params: &[("s", "i8*")],
+    },
+    // IO.readLine()：从 stdin 读取一行（不含换行符）
+    RuntimeFn {
+        name: "aura_lang_std_IO_readLine",
+        ret: "i8*",
+        params: &[],
+    },
+    // IO.readAll()：读取所有 stdin 输入
+    RuntimeFn {
+        name: "aura_lang_std_IO_readAll",
+        ret: "i8*",
+        params: &[],
+    },
+    // Json 模块存根（LSP/Debugger 使用）
+    RuntimeFn {
+        name: "aura_lang_std_Json_remove",
+        ret: "i8*",
+        params: &[
+            ("json", "i8*"),
+            ("key", "i8*"),
+        ],
+    },
+    // Map.getOrDefault(map, key, default) — 返回 key 对应的值，不存在则返回 default
+    RuntimeFn {
+        name: "aura_lang_std_Collections_getOrDefault",
+        ret: "i8*",
+        params: &[
+            ("map", "i8*"),
+            ("key", "i8*"),
+            ("default", "i8*"),
         ],
     },
 ];

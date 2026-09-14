@@ -1,0 +1,316 @@
+// aura:///aura/lang/std/Zstd.aura
+package aura.lang.std
+// ------------------------------------------------------------------
+// Zstd 压缩/解压 — 纯 Aura 接口 + Native 实现（P3 阶段）
+//
+// 对应 Rust `compiler/src/auz/reader.rs` 的 zstd 压缩逻辑。
+// Zstd 是性能敏感组件，通过 @native FFI 调用 Rust zstd crate。
+//
+// @since 0.3
+// ------------------------------------------------------------------
+
+import aura.lang.std.String
+import aura.lang.std.IO
+
+// ═══════════════════════════════════════════════════════════════
+// Native FFI 声明
+// ═══════════════════════════════════════════════════════════════
+
+// ── Zstd 压缩/解压（Rust zstd crate）──
+//
+// 这些函数由 compiler/src/std/cffi/ 中的 Rust 实现提供。
+// 数据格式：
+//   - 输入：字符串（字节序列）
+//   - 输出：字符串（压缩后字节序列或解压后字节序列）
+//   - 失败：返回空串
+
+/// 压缩数据（level 1-22，默认 3）。
+@native fun zstd_compress(data: String, level: Int): String
+
+/// 解压数据。
+@native fun zstd_decompress(data: String): String
+
+/// 压缩数据（便捷函数，默认 level 3）。
+@native fun zstd_compress_default(data: String): String
+
+/// 获取压缩后数据大小（估计）。
+@native fun zstd_estimate_size(data: String, level: Int): Int
+
+/// 获取解压后数据大小（从压缩数据）。
+@native fun zstd_decompressed_size(data: String): Int
+
+/// 检查是否为有效的 Zstd 数据。
+@native fun zstd_is_valid(data: String): Boolean
+
+// ═══════════════════════════════════════════════════════════════
+// 常量
+// ═══════════════════════════════════════════════════════════════
+
+/// Zstd 魔数（4 字节）。
+const val ZSTD_MAGIC: String = "\x28\xB5\x2F\xFD"
+
+/// 默认压缩级别。
+const val ZSTD_LEVEL_DEFAULT: Int = 3
+
+/// 最低压缩级别。
+const val ZSTD_LEVEL_MIN: Int = 1
+
+/// 最高压缩级别。
+const val ZSTD_LEVEL_MAX: Int = 22
+
+// ═══════════════════════════════════════════════════════════════
+// Zstd 压缩器
+// ═══════════════════════════════════════════════════════════════
+
+/// Zstd 压缩配置。
+class ZstdConfig {
+    /// 压缩级别（1-22）。
+    var level: Int = ZSTD_LEVEL_DEFAULT
+
+    fun ZstdConfig() {
+    }
+
+    fun ZstdConfig(level: Int) {
+        if (level < ZSTD_LEVEL_MIN) {
+            level = ZSTD_LEVEL_MIN
+        }
+        if (level > ZSTD_LEVEL_MAX) {
+            level = ZSTD_LEVEL_MAX
+        }
+        this.level = level
+    }
+
+    /// 使用默认配置。
+    fun default(): ZstdConfig {
+        return ZstdConfig(ZSTD_LEVEL_DEFAULT)
+    }
+}
+
+/// 压缩结果。
+class ZstdResult {
+    /// 压缩后的数据。
+    var data: String = ""
+
+    /// 原始数据大小。
+    var originalSize: Int = 0
+
+    /// 压缩后大小。
+    var compressedSize: Int = 0
+
+    /// 是否成功。
+    var success: Boolean = false
+
+    /// 错误信息。
+    var error: String = ""
+
+    fun ZstdResult() {
+    }
+
+    /// 压缩率。
+    fun ratio(): Double {
+        if (originalSize == 0) {
+            return 0.0
+        }
+        return (Double(compressedSize) / Double(originalSize))
+    }
+
+    /// 压缩节省的字节数。
+    fun savedBytes(): Int {
+        return originalSize - compressedSize
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 压缩/解压函数
+// ═══════════════════════════════════════════════════════════════
+
+/// 压缩字符串数据。
+fun zstdCompress(data: String): ZstdResult {
+    return zstdCompressWithLevel(data, ZSTD_LEVEL_DEFAULT)
+}
+
+/// 压缩字符串数据（指定级别）。
+fun zstdCompressWithLevel(data: String, level: Int): ZstdResult {
+    val result = ZstdResult()
+    result.originalSize = data.length
+
+    if (data == "") {
+        result.success = false
+        result.error = "empty input"
+        return result
+    }
+
+    // 调用 native 压缩
+    val compressed: String = zstd_compress(data, level)
+
+    if (compressed == "") {
+        result.success = false
+        result.error = "compression failed"
+        return result
+    }
+
+    result.data = compressed
+    result.compressedSize = compressed.length
+    result.success = true
+    return result
+}
+
+/// 解压字符串数据。
+fun zstdDecompress(data: String): ZstdResult {
+    val result = ZstdResult()
+
+    if (data == "") {
+        result.success = false
+        result.error = "empty input"
+        return result
+    }
+
+    // 检查魔数
+    if (!zstdIsMagic(data)) {
+        result.success = false
+        result.error = "invalid zstd magic"
+        return result
+    }
+
+    // 调用 native 解压
+    val decompressed: String = zstd_decompress(data)
+
+    if (decompressed == "") {
+        result.success = false
+        result.error = "decompression failed"
+        return result
+    }
+
+    result.data = decompressed
+    result.originalSize = decompressed.length
+    result.compressedSize = data.length
+    result.success = true
+    return result
+}
+
+/// 压缩文件。
+fun zstdCompressFile(inputPath: String, outputPath: String): Boolean {
+    return zstdCompressFileWithLevel(inputPath, outputPath, ZSTD_LEVEL_DEFAULT)
+}
+
+/// 压缩文件（指定级别）。
+fun zstdCompressFileWithLevel(inputPath: String, outputPath: String, level: Int): Boolean {
+    val data: String = IO.readFile(inputPath)
+    if (data == "") {
+        return false
+    }
+
+    val result: ZstdResult = zstdCompressWithLevel(data, level)
+    if (!result.success) {
+        return false
+    }
+
+    return IO.writeFile(outputPath, result.data)
+}
+
+/// 解压文件。
+fun zstdDecompressFile(inputPath: String, outputPath: String): Boolean {
+    val data: String = IO.readFile(inputPath)
+    if (data == "") {
+        return false
+    }
+
+    val result: ZstdResult = zstdDecompress(data)
+    if (!result.success) {
+        return false
+    }
+
+    return IO.writeFile(outputPath, result.data)
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 工具函数
+// ═══════════════════════════════════════════════════════════════
+
+/// 检查数据是否为有效的 Zstd 格式（检查魔数）。
+fun zstdIsMagic(data: String): Boolean {
+    if (data.length < 4) {
+        return false
+    }
+
+    // 检查魔数
+    val b0: Int = data.get(0)
+    val b1: Int = data.get(1)
+    val b2: Int = data.get(2)
+    val b3: Int = data.get(3)
+
+    // Zstd magic: 0x28 0xB5 0x2F 0xFD
+    return b0 == 0x28 && b1 == 0xB5 && b2 == 0x2F && b3 == 0xFD
+}
+
+/// 获取压缩后数据大小（估计）。
+fun zstdEstimateSize(data: String): Int {
+    return zstdEstimateSize(data, ZSTD_LEVEL_DEFAULT)
+}
+
+/// 获取压缩后数据大小（估计，指定级别）。
+fun zstdEstimateSizeWithLevel(data: String, level: Int): Int {
+    if (data == "") {
+        return 0
+    }
+    return zstd_estimate_size(data, level)
+}
+
+/// 获取解压后数据大小。
+fun zstdDecompressedSize(data: String): Int {
+    if (data == "" || !zstdIsMagic(data)) {
+        return 0
+    }
+    return zstd_decompressed_size(data)
+}
+
+/// 检查是否为有效的 Zstd 数据。
+fun zstdIsValid(data: String): Boolean {
+    return zstd_is_valid(data)
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 便捷函数
+// ═══════════════════════════════════════════════════════════════
+
+/// 压缩（便捷函数）。
+fun zstdCompressFast(data: String): String {
+    val result: ZstdResult = zstdCompress(data)
+    if (result.success) {
+        return result.data
+    }
+    return ""
+}
+
+/// 解压（便捷函数）。
+fun zstdDecompressFast(data: String): String {
+    val result: ZstdResult = zstdDecompress(data)
+    if (result.success) {
+        return result.data
+    }
+    return ""
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 文件操作便捷函数
+// ═══════════════════════════════════════════════════════════════
+
+/// 压缩文件到 .zst。
+fun zstdPackFile(inputPath: String): String {
+    val outputPath: String = inputPath + ".zst"
+    if (zstdCompressFile(inputPath, outputPath)) {
+        return outputPath
+    }
+    return ""
+}
+
+/// 解压 .zst 文件。
+fun zstdUnpackFile(inputPath: String): String {
+    if (inputPath.endsWith(".zst")) {
+        val outputPath: String = inputPath.substring(0, inputPath.length - 4)
+        if (zstdDecompressFile(inputPath, outputPath)) {
+            return outputPath
+        }
+    }
+    return ""
+}

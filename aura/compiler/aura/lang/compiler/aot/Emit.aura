@@ -873,8 +873,15 @@ class LlvmEmitter {
             this.fBody.sbAdd("  store ")
             this.fBody.sbAdd(selfTy)
             this.fBody.sbAdd(" %arg.this, ")
-            this.fBody.sbAdd(selfTy)
-            this.fBody.sbAdd("* %arg.this.addr\n")
+            // 指针类型（%struct.X*）不再追加 *
+            if (!selfTy.endsWith("*")) {
+                this.fBody.sbAdd(selfTy)
+                this.fBody.sbAdd("* ")
+            } else {
+                this.fBody.sbAdd(selfTy)
+                this.fBody.sbAdd(" ")
+            }
+            this.fBody.sbAdd("%arg.this.addr\n")
             this.fVarList.add("this|%arg.this.addr|" + selfTy)
             this.fVarNames.add("this")
         }
@@ -905,8 +912,14 @@ class LlvmEmitter {
                     this.fBody.sbAdd(" %arg.")
                     this.fBody.sbAdd(psym)
                     this.fBody.sbAdd(", ")
-                    this.fBody.sbAdd(pty)
-                    this.fBody.sbAdd("* ")
+                    // 指针类型（ptr / %struct.X*）不再追加 *
+                    if (pty != "ptr" && !pty.endsWith("*")) {
+                        this.fBody.sbAdd(pty)
+                        this.fBody.sbAdd("* ")
+                    } else {
+                        this.fBody.sbAdd(pty)
+                        this.fBody.sbAdd(" ")
+                    }
                     this.fBody.sbAdd(addr)
                     this.fBody.sbAdd("\n")
                     this.fVarList.add(pname + "|" + addr + "|" + pty)
@@ -1513,8 +1526,7 @@ class LlvmEmitter {
             this.fBody.sbAdd(" %arg.")
             this.fBody.sbAdd(toStr(i))
             this.fBody.sbAdd(", ")
-            this.fBody.sbAdd(pty)
-            this.fBody.sbAdd("* ")
+            this.fBody.sbAdd(toPtrTySp(pty))
             this.fBody.sbAdd(addr)
             this.fBody.sbAdd("\n")
             i = i + 1
@@ -1750,8 +1762,7 @@ class LlvmEmitter {
         this.fBody.sbAdd(" ")
         this.fBody.sbAdd(defaultValue(elemTy))
         this.fBody.sbAdd(", ")
-        this.fBody.sbAdd(elemTy)
-        this.fBody.sbAdd("* ")
+        this.fBody.sbAdd(toPtrTySp(elemTy))
         this.fBody.sbAdd(varAddr)
         this.fBody.sbAdd("\n")
 
@@ -1823,8 +1834,7 @@ class LlvmEmitter {
         this.fBody.sbAdd(" ")
         this.fBody.sbAdd(elemCo)
         this.fBody.sbAdd(", ")
-        this.fBody.sbAdd(elemTy)
-        this.fBody.sbAdd("* ")
+        this.fBody.sbAdd(toPtrTySp(elemTy))
         this.fBody.sbAdd(varAddr)
         this.fBody.sbAdd("\n")
         this.fTerminated = false
@@ -1914,8 +1924,7 @@ class LlvmEmitter {
         this.fBody.sbAdd(" ")
         this.fBody.sbAdd(coerced)
         this.fBody.sbAdd(", ")
-        this.fBody.sbAdd(llvmTy)
-        this.fBody.sbAdd("* ")
+        this.fBody.sbAdd(toPtrTySp(llvmTy))
         this.fBody.sbAdd(addr)
         this.fBody.sbAdd("\n")
         this.fTerminated = false
@@ -2029,8 +2038,7 @@ class LlvmEmitter {
         this.fBody.sbAdd(" ")
         this.fBody.sbAdd(coerced)
         this.fBody.sbAdd(", ")
-        this.fBody.sbAdd(ty)
-        this.fBody.sbAdd("* ")
+        this.fBody.sbAdd(toPtrTySp(ty))
         this.fBody.sbAdd(addr)
         this.fBody.sbAdd("\n")
         this.fTerminated = false
@@ -2069,8 +2077,7 @@ class LlvmEmitter {
         this.fBody.sbAdd(" = getelementptr inbounds ")
         this.fBody.sbAdd(ct)
         this.fBody.sbAdd(", ")
-        this.fBody.sbAdd(ct)
-        this.fBody.sbAdd("* ")
+        this.fBody.sbAdd(toPtrTySp(ct))
         this.fBody.sbAdd(addr)
         this.fBody.sbAdd(", i64 0, i64 ")
         this.fBody.sbAdd(iv)
@@ -2080,8 +2087,7 @@ class LlvmEmitter {
         this.fBody.sbAdd(" ")
         this.fBody.sbAdd(v)
         this.fBody.sbAdd(", ")
-        this.fBody.sbAdd(elemTy)
-        this.fBody.sbAdd("* ")
+        this.fBody.sbAdd(toPtrTySp(elemTy))
         this.fBody.sbAdd(p)
         this.fBody.sbAdd("\n")
         this.fTerminated = false
@@ -2178,23 +2184,94 @@ class LlvmEmitter {
 
     /// 发射 try/catch/finally（`HirTry` kids = `[body, catchBlock, finallyBlock]`）。
     ///
-    /// Aura AOT **没有异常机制**：`throw e` 在 HIR 层已降级为
-    /// `HirCall("__throw", …)`，而发射器对未解析符号一发即崩（不再发调用），
-    /// 即「throw 不转移控制流」。因此这里按**顺序语义**发射：
-    ///
-    ///   * body      —— 正常执行
-    ///   * catchBlock—— **跳过**（无异常传入；进入该分支的唯一途径是 throw）
-    ///   * finallyBlock —— 无条件执行（对齐「finally 总会跑」的语义）
-    ///
-    /// 与 VM / Rust AOT（同样不发异常传播）行为一致；后续若引入异常，
-    /// 在此改为「catch 分支 + 异常标签跳转」即可。
+    /// 使用 setjmp/longjmp 桥实现异常传播：
+    ///   1. 分配 jmp_buf
+    ///   2. 调用 setjmp，返回 0 = 正常路径，非 0 = 异常路径
+    ///   3. 正常路径执行 body，异常路径跳转 catch
+    ///   4. throw 调用 longjmp 跳转到最近的 setjmp
+    ///   5. finally 块在两条路径汇合后执行
     fun emitTry(hir: Hir, id: Int) {
         val kids: String = hir.kidsOf(id)
         val n: Int = hirKidsCount(kids)
         if (n < 1) {
             return
         }
+        val catchVar: String = hir.textOf(id)
+
+        // 分配 jmp_buf（x86_64: 14 x i64）
+        val jmpBuf: String = this.freshVar()
+        this.fBody.sbAdd("  ")
+        this.fBody.sbAdd(jmpBuf)
+        this.fBody.sbAdd(" = alloca [14 x i64]\n")
+
+        // 调用 setjmp
+        val sjResult: String = this.freshVar()
+        this.fBody.sbAdd("  ")
+        this.fBody.sbAdd(sjResult)
+        this.fBody.sbAdd(" = call i32 @aura_setjmp(i8* ")
+        this.fBody.sbAdd(jmpBuf)
+        this.fBody.sbAdd(")\n")
+
+        // 判断是否为异常路径
+        val sjBool: String = this.freshVar()
+        this.fBody.sbAdd("  ")
+        this.fBody.sbAdd(sjBool)
+        this.fBody.sbAdd(" = icmp ne i32 ")
+        this.fBody.sbAdd(sjResult)
+        this.fBody.sbAdd(", 0\n")
+
+        // 创建基本块
+        val tryBb: String = this.freshBb("try_body")
+        val catchBb: String = this.freshBb("catch_body")
+        val mergeBb: String = this.freshBb("finally_merge")
+
+        // 分支
+        this.fBody.sbAdd("  br i1 ")
+        this.fBody.sbAdd(sjBool)
+        this.fBody.sbAdd(", label %")
+        this.fBody.sbAdd(catchBb)
+        this.fBody.sbAdd(", label %")
+        this.fBody.sbAdd(tryBb)
+        this.fBody.sbAdd("\n")
+
+        // try 体（正常路径）
+        this.fBody.sbAdd(tryBb)
+        this.fBody.sbAdd(":\n")
+        this.fTerminated = false
         this.emitBody(hir, hirKidsAt(kids, 0))
+        if (!this.fTerminated) {
+            this.fBody.sbAdd("  br label %")
+            this.fBody.sbAdd(mergeBb)
+            this.fBody.sbAdd("\n")
+        }
+
+        // catch 体（异常路径）
+        this.fBody.sbAdd(catchBb)
+        this.fBody.sbAdd(":\n")
+        this.fTerminated = false
+
+        // 加载异常值到 catch 变量
+        if (n >= 2 && catchVar != "") {
+            val excVal: String = this.freshVar()
+            this.fBody.sbAdd("  ")
+            this.fBody.sbAdd(excVal)
+            this.fBody.sbAdd(" = load i8*, i8* @aura_exception_value\n")
+            this.declareVar(catchVar, excVal, "i8*")
+        }
+
+        if (n >= 2) {
+            this.emitBody(hir, hirKidsAt(kids, 1))
+        }
+        if (!this.fTerminated) {
+            this.fBody.sbAdd("  br label %")
+            this.fBody.sbAdd(mergeBb)
+            this.fBody.sbAdd("\n")
+        }
+
+        // finally 合并块
+        this.fBody.sbAdd(mergeBb)
+        this.fBody.sbAdd(":\n")
+        this.fTerminated = false
         if (n >= 3) {
             this.emitBody(hir, hirKidsAt(kids, 2))
         }
@@ -2314,8 +2391,7 @@ class LlvmEmitter {
                 this.fBody.sbAdd(" = getelementptr inbounds ")
                 this.fBody.sbAdd(ct)
                 this.fBody.sbAdd(", ")
-                this.fBody.sbAdd(ct)
-                this.fBody.sbAdd("* ")
+                this.fBody.sbAdd(toPtrTySp(ct))
                 this.fBody.sbAdd(addr)
                 this.fBody.sbAdd(", i64 0, i64 ")
                 this.fBody.sbAdd(ivA)
@@ -2327,8 +2403,7 @@ class LlvmEmitter {
                 this.fBody.sbAdd(" = load ")
                 this.fBody.sbAdd(elemTy)
                 this.fBody.sbAdd(", ")
-                this.fBody.sbAdd(elemTy)
-                this.fBody.sbAdd("* ")
+                this.fBody.sbAdd(toPtrTySp(elemTy))
                 this.fBody.sbAdd(p)
                 this.fBody.sbAdd("\n")
                 return t
@@ -2438,8 +2513,7 @@ class LlvmEmitter {
         this.fBody.sbAdd(" = load ")
         this.fBody.sbAdd(ty)
         this.fBody.sbAdd(", ")
-        this.fBody.sbAdd(ty)
-        this.fBody.sbAdd("* ")
+        this.fBody.sbAdd(toPtrTySp(ty))
         this.fBody.sbAdd(addr)
         this.fBody.sbAdd("\n")
         return t
@@ -2785,8 +2859,7 @@ class LlvmEmitter {
         this.fBody.sbAdd(" = load ")
         this.fBody.sbAdd(fty)
         this.fBody.sbAdd(", ")
-        this.fBody.sbAdd(fty)
-        this.fBody.sbAdd("* ")
+        this.fBody.sbAdd(toPtrTySp(fty))
         this.fBody.sbAdd(fp)
         this.fBody.sbAdd("\n")
         return t
@@ -2831,8 +2904,7 @@ class LlvmEmitter {
         this.fBody.sbAdd(" ")
         this.fBody.sbAdd(coerced)
         this.fBody.sbAdd(", ")
-        this.fBody.sbAdd(fty)
-        this.fBody.sbAdd("* ")
+        this.fBody.sbAdd(toPtrTySp(fty))
         this.fBody.sbAdd(fp)
         this.fBody.sbAdd("\n")
         this.fTerminated = false
@@ -2895,8 +2967,7 @@ class LlvmEmitter {
         this.fBody.sbAdd(" = load ")
         this.fBody.sbAdd(fty)
         this.fBody.sbAdd(", ")
-        this.fBody.sbAdd(fty)
-        this.fBody.sbAdd("* ")
+        this.fBody.sbAdd(toPtrTySp(fty))
         this.fBody.sbAdd(fp)
         this.fBody.sbAdd("\n")
         return t
@@ -2931,8 +3002,7 @@ class LlvmEmitter {
         this.fBody.sbAdd(" ")
         this.fBody.sbAdd(coerced)
         this.fBody.sbAdd(", ")
-        this.fBody.sbAdd(fty)
-        this.fBody.sbAdd("* ")
+        this.fBody.sbAdd(toPtrTySp(fty))
         this.fBody.sbAdd(fp)
         this.fBody.sbAdd("\n")
         this.fTerminated = false
@@ -3030,6 +3100,22 @@ class LlvmEmitter {
         // 内置输出：println / print（参数统一转 i8*）
         if (fname == "println" || fname == "print") {
             return this.emitPrint(hir, kids, n, argStart, fname == "println")
+        }
+
+        // Phase D: __throw 异常桥 — 存储异常值并 longjmp 到最近的 try 块
+        if (fname == "__throw" && n >= 1) {
+            val excVal: String = this.emitExpr(hir, hirKidsAt(kids, argStart))
+            // 存储异常值到全局变量（0 → null）
+            val excStr: String = if (excVal == "0") { "null" } else { excVal }
+            this.fBody.sbAdd("  store i8* ")
+            this.fBody.sbAdd(excStr)
+            this.fBody.sbAdd(", i8* @aura_exception_value\n")
+            // 调用 longjmp 跳转到最近的 setjmp（jmp_buf 为 null 时使用默认跳转点）
+            this.fBody.sbAdd("  call void @aura_longjmp(i8* null, i32 1)\n")
+            // unreachable（longjmp 不返回）
+            this.fBody.sbAdd("  unreachable\n")
+            this.fTerminated = true
+            return "0"
         }
 
         // toString / toStr：C 侧 `toString` 收的是 **Plan A 装箱值**，裸整数必须走
@@ -3284,12 +3370,21 @@ class LlvmEmitter {
             if (paramsCsv != "") {
                 // 同 `emitCall`：参数表是带空格 CSV（`i8*, i64`），必须 trim。
                 wantTy = trimSpaces(aotFieldAt(paramsCsv, ai, ","))
+                // 如果参数表没有对应的类型（ai 超出范围），使用 HIR 推断的类型
+                if (wantTy == "") {
+                    wantTy = aTy
+                }
             }
             val coerced: String = this.coerceArg(sym, a, aTy, wantTy)
             if (args != "") {
                 args = args + ", "
             }
-            args = args + wantTy + " " + coerced
+            // 确保类型不为空（空类型会导致多余的空格）
+            if (wantTy != "") {
+                args = args + wantTy + " " + coerced
+            } else {
+                args = args + coerced
+            }
             ai = ai + 1
             i = i + 1
         }
@@ -3433,8 +3528,7 @@ class LlvmEmitter {
             this.fBody.sbAdd(" ")
             this.fBody.sbAdd(thenVal)
             this.fBody.sbAdd(", ")
-            this.fBody.sbAdd(valTy)
-            this.fBody.sbAdd("* ")
+            this.fBody.sbAdd(toPtrTySp(valTy))
             this.fBody.sbAdd(slot)
             this.fBody.sbAdd("\n")
             this.fBody.sbAdd("  br label %")
@@ -3453,8 +3547,7 @@ class LlvmEmitter {
                 this.fBody.sbAdd(" ")
                 this.fBody.sbAdd(elseVal)
                 this.fBody.sbAdd(", ")
-                this.fBody.sbAdd(valTy)
-                this.fBody.sbAdd("* ")
+                this.fBody.sbAdd(toPtrTySp(valTy))
                 this.fBody.sbAdd(slot)
                 this.fBody.sbAdd("\n")
             }
@@ -3474,8 +3567,7 @@ class LlvmEmitter {
         this.fBody.sbAdd(" = load ")
         this.fBody.sbAdd(valTy)
         this.fBody.sbAdd(", ")
-        this.fBody.sbAdd(valTy)
-        this.fBody.sbAdd("* ")
+        this.fBody.sbAdd(toPtrTySp(valTy))
         this.fBody.sbAdd(slot)
         this.fBody.sbAdd("\n")
         return res
@@ -3852,7 +3944,8 @@ class LlvmEmitter {
         val calleeId: Int = hirKidsAt(kids, 0)
         val ck: String = hir.kindOf(calleeId)
         // 形态 A：kids[0] 直接是接收者（当前 HIR：成员调用把接收者降级为 kids[0]）
-        if (ck == "HirVar") {
+        // 支持 HirVar（变量）、HirIdent（标识符，如 String/Math）
+        if (ck == "HirVar" || ck == "HirIdent") {
             val nm: String = hir.textOf(calleeId)
             if (isStdClassName(nm)) {
                 return nm
@@ -3866,12 +3959,13 @@ class LlvmEmitter {
                 return ""
             }
             val recvId: Int = hirKidsAt(mk, 0)
-            if (hir.kindOf(recvId) != "HirVar") {
-                return ""
-            }
-            val nm2: String = hir.textOf(recvId)
-            if (isStdClassName(nm2)) {
-                return nm2
+            val rk: String = hir.kindOf(recvId)
+            // 支持 HirVar 和 HirIdent
+            if (rk == "HirVar" || rk == "HirIdent") {
+                val nm2: String = hir.textOf(recvId)
+                if (isStdClassName(nm2)) {
+                    return nm2
+                }
             }
         }
         return ""
@@ -4846,4 +4940,27 @@ fun charCodeSingle(c: String): Int {
     if (c == "}") { return 125 }
     if (c == "~") { return 126 }
     return 0
+}
+
+/// 判断 LLVM 类型是否已经是指针类型（不应再追加 *）。
+///
+/// LLVM 13+ 使用不透明指针 `ptr` 替代 `T*`；
+/// 用户自定义类型映射为 `%struct.X*`（已含 *）。
+fun isPointerTy(ty: String): Boolean {
+    if (ty == "ptr") { return true }
+    if (ty == "") { return false }
+    val last: String = aotSlice(ty, ty.length - 1, 1)
+    return last == "*"
+}
+
+/// 将类型转为指针类型（若已是指针则原样返回）。
+fun toPtrTy(ty: String): String {
+    if (isPointerTy(ty)) { return ty }
+    return ty + "*"
+}
+
+/// 将类型转为指针类型（带空格，供 sbAdd 使用）。
+fun toPtrTySp(ty: String): String {
+    if (isPointerTy(ty)) { return ty + " " }
+    return ty + "* "
 }

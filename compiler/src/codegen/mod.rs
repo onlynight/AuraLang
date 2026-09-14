@@ -268,6 +268,9 @@ fn resolve_aura_imports_rec(
         // 匹配 `import "path"` 或 `import <pkg>`
         if let Some(rest) = trimmed.strip_prefix("import ") {
             let rest = rest.trim();
+            // 剥离行内注释（// 和 #）
+            let rest = rest.split("//").next().unwrap_or(rest).trim();
+            let rest = rest.split("#").next().unwrap_or(rest).trim();
             // 计算需要内联的目标文件路径（若有）
             let target: Option<std::path::PathBuf> = if let Some(path_str) = rest.strip_prefix("\"")
             {

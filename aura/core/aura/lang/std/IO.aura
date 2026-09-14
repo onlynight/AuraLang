@@ -1,19 +1,122 @@
 // aura:///aura/lang/std/IO.aura
 package aura.lang.std
-// 标准库模块，不可修改
-// 实现：syscall 邻近模块。Aura 侧只声明签名，实现位于引导层（Layer 0-A / FFI），
-//       因为标准输入输出必须经由操作系统，无法用纯 Aura 表达
-// (package 声明由编译器自动注入，无需显式声明)
-/// 标准输入输出模块。
+// ------------------------------------------------------------------
+// 标准输入输出模块 — Phase 3: 纯 LLVM 化
+//
+// AOT 路径：extern "C" 直连 C 运行时 (printf/puts/fgets) + @native syscall
+// VM 路径：internal object → Rust bootstrap (Layer 0-A / FFI)
+//
+// @since 0.1
+// ------------------------------------------------------------------
+
+// ═══════════════════════════════════════════════════════════════
+// Phase 3: C 运行时声明 (AOT 路径)
+// ═══════════════════════════════════════════════════════════════
+
+// ── 标准输出 ──
+extern "C" {
+    /// printf — 格式化输出到 stdout
+    fun printf(format: Pointer<Byte>): Int
+    /// puts — 输出字符串 + 换行到 stdout
+    fun puts(s: Pointer<Byte>): Int
+    /// fwrite — 写入到 stdout
+    fun fwrite(ptr: Pointer<Byte>, size: Int, count: Int, stream: Pointer<Byte>): Int
+    /// fflush — 刷新标准输出缓冲区
+    fun fflush(stream: Pointer<Byte>): Int
+}
+
+// ── 标准输入 ──
+extern "C" {
+    /// fgets — 从 stdin 读取一行
+    fun fgets(buf: Pointer<Byte>, size: Int, stream: Pointer<Byte>): Pointer<Byte>
+    /// fread — 从 stdin 读取数据
+    fun fread(ptr: Pointer<Byte>, size: Int, count: Int, stream: Pointer<Byte>): Int
+}
+
+// ── 文件 I/O (C 运行时) ──
+extern "C" {
+    /// fopen — 打开文件
+    fun fopen(filename: Pointer<Byte>, mode: Pointer<Byte>): Pointer<Byte>
+    /// fread (文件) — 从文件读取
+    fun fread_file(ptr: Pointer<Byte>, size: Int, count: Int, stream: Pointer<Byte>): Int
+    /// fwrite (文件) — 写入文件
+    fun fwrite_file(ptr: Pointer<Byte>, size: Int, count: Int, stream: Pointer<Byte>): Int
+    /// fclose — 关闭文件
+    fun fclose(stream: Pointer<Byte>): Int
+}
+
+// ── 文件存在检查 ──
+extern "C" {
+    /// access — 检查文件是否存在 (mode=0)
+    fun access(path: Pointer<Byte>, mode: Int): Int
+}
+
+// ── Linux x86_64 Syscall 调用 ──
+extern object IO_syscalls {
+    @native(0) fun syscall_read(fd: Int, buf: Pointer<Byte>, count: Long): Long
+    @native(1) fun syscall_write(fd: Int, buf: Pointer<Byte>, count: Long): Long
+    @native(2) fun syscall_open(path: Pointer<Byte>, flags: Int, mode: Int): Int
+    @native(3) fun syscall_close(fd: Int): Int
+}
+
+// ═══════════════════════════════════════════════════════════════
+// AOT 路径: 使用 C 运行时 + syscall 的函数实现
+// ═══════════════════════════════════════════════════════════════
+
+/// 输出字符串（带换行）— AOT: puts()
+fun io_println(msg: Pointer<Byte>): Unit {
+    puts(msg)
+    fflush(null)
+}
+
+/// 输出字符串（不带换行）— AOT: printf()
+fun io_print(msg: Pointer<Byte>): Unit {
+    printf(msg)
+    fflush(null)
+}
+
+/// 刷新标准输出 — AOT: fflush()
+fun io_flush(): Unit {
+    fflush(null)
+}
+
+/// 写入文件内容 — AOT: fopen/fwrite/fclose
+fun io_file_write(path: Pointer<Byte>, content: Pointer<Byte>, len: Int): Int {
+    var f: Pointer<Byte> = fopen(path, "w")
+    if (f == null) {
+        return -1
+    }
+    var n: Int = fwrite_file(content, 1, len, f)
+    fclose(f)
+    return n
+}
+
+/// 读取文件内容 — AOT: fopen/fread/fclose
+fun io_file_read(path: Pointer<Byte>, buf: Pointer<Byte>, maxLen: Int): Int {
+    var f: Pointer<Byte> = fopen(path, "r")
+    if (f == null) {
+        return -1
+    }
+    var n: Int = fread_file(buf, 1, maxLen, f)
+    fclose(f)
+    return n
+}
+
+/// 检查文件是否存在 — AOT: access()
+fun io_file_exists(path: Pointer<Byte>): Boolean {
+    return access(path, 0) == 0
+}
+
+// ═══════════════════════════════════════════════════════════════
+// VM 路径: internal object (Rust bootstrap 实现)
+// ═══════════════════════════════════════════════════════════════
+
+/// 标准输入输出模块（VM 路径）。
 ///
 /// 使用前需 import：
 /// ```aura
 /// import aura.io.*
 /// ```
-///
-/// 架构说明：
-/// - Layer 2（C FFI）：当前通过 Rust native 实现
-/// - 未来：通过 `extern "c" "libc"` 直连 printf/fgets/fread 等 syscall
 ///
 /// @since 0.1
 internal object IO {
@@ -21,7 +124,6 @@ internal object IO {
     // ── 输出（通过 libc printf/puts 实现）──
 
     /// 输出字符串（带换行）。
-    /// 未来实现：`extern "c" "libc" fun printf(format: String, ...): Int`
     fun println(msg: String): Unit
 
     /// 输出字符串（不带换行）。
@@ -30,7 +132,6 @@ internal object IO {
     // ── 输入（通过 libc fgets/fread 实现）──
 
     /// 从标准输入读取一行。
-    /// 未来实现：`extern "c" "libc" fun fgets(buf: Pointer, size: Int, stream: Pointer): Pointer`
     val readLine: String
 
     /// 从标准输入读取全部。

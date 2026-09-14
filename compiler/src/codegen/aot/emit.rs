@@ -2921,6 +2921,40 @@ fn emit_binary(
                 cur.body.push(format!("{} = {} {}, {}", tmp, op, l_conv, r_conv));
                 Ok((tmp, result_ty.to_string()))
             } else {
+                // 指针参与减法：转换为整数后相减（sub 不支持指针类型）
+                if l_ty == "i8*" || r_ty == "i8*" {
+                    let l_int = ctx.fresh_var();
+                    let r_int = ctx.fresh_var();
+                    let cur = blocks.last_mut();
+                    // 左侧转换
+                    if l_ty == "i8*" {
+                        cur.body.push(format!("{} = ptrtoint i8* {} to i64", l_int, l_ir));
+                    } else {
+                        // 整数 → i64（可能需要扩展）
+                        if l_ty == "i32" {
+                            cur.body.push(format!("{} = zext i32 {} to i64", l_int, l_ir));
+                        } else if l_ty == "i64" {
+                            cur.body.push(format!("{} = {}", l_int, l_ir));
+                        } else {
+                            cur.body.push(format!("{} = sext {} {} to i64", l_int, l_ty, l_ir));
+                        }
+                    }
+                    // 右侧转换
+                    if r_ty == "i8*" {
+                        cur.body.push(format!("{} = ptrtoint i8* {} to i64", r_int, r_ir));
+                    } else {
+                        // 整数 → i64（可能需要扩展）
+                        if r_ty == "i32" {
+                            cur.body.push(format!("{} = zext i32 {} to i64", r_int, r_ir));
+                        } else if r_ty == "i64" {
+                            cur.body.push(format!("{} = {}", r_int, r_ir));
+                        } else {
+                            cur.body.push(format!("{} = sext {} {} to i64", r_int, r_ty, r_ir));
+                        }
+                    }
+                    cur.body.push(format!("{} = sub i64 {}, {}", tmp, l_int, r_int));
+                    return Ok((tmp, "i64".to_string()));
+                }
                 cur.body.push(format!("{} = sub {} {}, {}", tmp, l_ty, l_ir, r_ir));
                 Ok((tmp, l_ty))
             }
@@ -3070,14 +3104,17 @@ fn emit_binary(
                     let eq = ctx.fresh_var();
                     let cur = blocks.last_mut();
                     cur.body.push(format!(
-                        "{} = call i1 @aura_lang_std_String_equals(i8* {}, i8* {})",
+                        "{} = call i32 @aura_lang_std_String_equals(i8* {}, i8* {})",
                         eq, l_ir, r_ir
                     ));
                     if *op == HirBinOp::Eq {
-                        return Ok((eq, "i1".to_string()));
+                        let cmp = ctx.fresh_var();
+                        cur.body.push(format!("{} = icmp ne i32 {}, 0", cmp, eq));
+                        return Ok((cmp, "i1".to_string()));
                     }
-                    cur.body.push(format!("{} = xor i1 {}, 1", tmp, eq));
-                    return Ok((tmp, "i1".to_string()));
+                    let cmp = ctx.fresh_var();
+                    cur.body.push(format!("{} = icmp eq i32 {}, 0", cmp, eq));
+                    return Ok((cmp, "i1".to_string()));
                 }
                 // 混合类型：一侧是字符串结构体，另一侧不是字符串类型。
                 // 字符串与整数/浮点等永远不会相等，直接返回编译期常量。
@@ -3152,7 +3189,24 @@ fn emit_unary(
             Ok((tmp, v_ty))
         }
         HirUnOp::Not => {
-            cur.body.push(format!("{} = xor i1 {}, 1", tmp, v_ir));
+            // 确保操作数是 i1 类型（整数 → icmp ne, 指针 → icmp ne null）
+            let v_i1 = if v_ty == "i1" {
+                v_ir.clone()
+            } else if v_ty.starts_with("i") {
+                let cmp = ctx.fresh_var();
+                cur.body.push(format!("{} = icmp ne {} {}, 0", cmp, v_ty, v_ir));
+                cmp
+            } else if v_ty == "float" || v_ty == "double" {
+                let cmp = ctx.fresh_var();
+                cur.body.push(format!("{} = fcmp one {} {}, 0.0", cmp, v_ty, v_ir));
+                cmp
+            } else {
+                // 指针类型：icmp ne ptr, null
+                let cmp = ctx.fresh_var();
+                cur.body.push(format!("{} = icmp ne {} {}, null", cmp, v_ty, v_ir));
+                cmp
+            };
+            cur.body.push(format!("{} = xor i1 {}, true", tmp, v_i1));
             Ok((tmp, "i1".to_string()))
         }
     }
@@ -3564,9 +3618,9 @@ fn emit_call(
     // AOT 下 List/Array 表示为不透明指针 `i8*`（底层 AuraList，元素以 i64 句柄存储）。
     // 自举编译器大量使用 list.size / list.push / for x in list / arrayListOf / 1..10 等，
     // 这些内建在 VM 中以原生函数提供，但 AOT 后端此前未声明，导致链接到未定义符号。
-    // 0 参列表构造（`listOf()` / `mutableListOf()` / `arrayListOf()` / `emptyList()`）：
-    // 这类调用未被 HIR 降级为 `__list_new`，直接按名字发射会链接到不存在的
-    // `@listOf`（C 运行时只提供 aura_lang_std_Collections_emptyList）。
+    // 0 参列表/Map 构造（`listOf()` / `mutableListOf()` / `arrayListOf()` / `emptyList()` /
+    // `mutableMapOf()` / `emptyMap()`）：这类调用未被 HIR 降级，直接按名字发射会链接到
+    // 不存在的符号（C 运行时只提供 aura_lang_std_Collections_emptyList / mutableMapOf）。
     {
         let bare = callee.rsplit('.').next().unwrap_or(callee);
         if matches!(
@@ -3590,6 +3644,15 @@ fn emit_call(
                 cur_list = nxt;
             }
             return Ok((cur_list, "i8*".to_string()));
+        }
+        // Map 构造：mutableMapOf() / emptyMap()
+        if matches!(bare, "mutableMapOf" | "emptyMap") {
+            let tmp0 = ctx.fresh_var();
+            blocks.last_mut().body.push(format!(
+                "{} = call i8* @aura_lang_std_Collections_mutableMapOf()",
+                tmp0
+            ));
+            return Ok((tmp0, "i8*".to_string()));
         }
     }
 
@@ -3726,11 +3789,11 @@ fn emit_call(
         return Ok((tmp, "i8*".to_string()));
     }
 
-    let cur = blocks.last_mut();
     let args_str: Vec<String> = args_ir.iter().map(|(v, t)| format!("{} {}", t, v)).collect();
 
     // toString / toStr 对浮点实参：调用 toStringFloat(double)（C 的 toString 只收 int64）
     if (callee == "toString" || callee == "toStr") && args_ir.len() == 1 {
+        let cur = blocks.last_mut();
         let (v, t) = &args_ir[0];
         if t == "double" || t == "float" {
             let dv = if t == "float" {
@@ -3745,6 +3808,132 @@ fn emit_call(
             return Ok((tmp, "i8*".to_string()));
         }
     }
+
+    // ── String 方法调用：HIR 降级丢失类名前缀，按接收者类型改派到 std 符号 ──
+    // `charCodeAt(s, i)` → `aura_lang_std_String_charCodeAt(i8*, i64)`
+    // `toInt(s)` → `aura_lang_std_String_toInt(i8*)`
+    // `toFloat(s)` → `aura_lang_std_String_toFloat(i8*)`
+    // `indexOf(s, sub)` → `aura_lang_std_String_indexOf(i8*, i8*)`
+    // `getOrDefault(map, key, default)` → `aura_lang_std_Collections_getOrDefault(i8*, i8*, i8*)`
+    if args_ir.len() >= 1 && args_ir[0].1 == "i8*" {
+        let bare = callee.rsplit('.').next().unwrap_or(callee);
+
+        // charCodeAt(s, i) → i32
+        if bare == "charCodeAt" && args_ir.len() == 2 {
+            let (s, _) = &args_ir[0];
+            let (i, it) = &args_ir[1];
+            let cur = blocks.last_mut();
+            let i64 = if it == "i32" {
+                let ext = ctx.fresh_var();
+                cur.body.push(format!("{} = zext i32 {} to i64", ext, i));
+                ext
+            } else {
+                i.clone()
+            };
+            let tmp = ctx.fresh_var();
+            cur.body.push(format!(
+                "{} = call i64 @aura_lang_std_String_charCodeAt(i8* {}, i64 {})",
+                tmp, s, i64
+            ));
+            let r = ctx.fresh_var();
+            cur.body.push(format!("{} = trunc i64 {} to i32", r, tmp));
+            return Ok((r, "i32".to_string()));
+        }
+
+        // toInt(s) → i32
+        if bare == "toInt" && args_ir.len() == 1 {
+            let (s, _) = &args_ir[0];
+            let cur = blocks.last_mut();
+            let tmp = ctx.fresh_var();
+            cur.body.push(format!(
+                "{} = call i64 @aura_lang_std_String_toInt(i8* {})",
+                tmp, s
+            ));
+            let r = ctx.fresh_var();
+            cur.body.push(format!("{} = trunc i64 {} to i32", r, tmp));
+            return Ok((r, "i32".to_string()));
+        }
+
+        // toFloat(s) → double
+        if bare == "toFloat" && args_ir.len() == 1 {
+            let (s, _) = &args_ir[0];
+            let cur = blocks.last_mut();
+            let tmp = ctx.fresh_var();
+            cur.body.push(format!(
+                "{} = call double @aura_lang_std_String_toFloat(i8* {})",
+                tmp, s
+            ));
+            return Ok((tmp, "double".to_string()));
+        }
+
+        // indexOf(s, sub) → i32
+        if bare == "indexOf" && args_ir.len() == 2 {
+            let (s, _) = &args_ir[0];
+            let (sub, sub_ty) = &args_ir[1];
+            // 第二个参数可能是 i32（字面量）或 i8*（字符串变量），需要统一为 i8*
+            let sub_ptr = if sub_ty == "i8*" {
+                sub.clone()
+            } else if sub_ty == "i32" {
+                // i32 字面量 → 字符串常量（通过 aura_to_str 转换）
+                let cur = blocks.last_mut();
+                let ext = ctx.fresh_var();
+                cur.body.push(format!("{} = zext i32 {} to i64", ext, sub));
+                let tmp = ctx.fresh_var();
+                cur.body.push(format!("{} = call i8* @aura_to_str(i64 {})", tmp, ext));
+                tmp
+            } else {
+                // 其他类型 → 尝试转换为 i8*
+                coerce_val_to_i8ptr(ctx, blocks, sub, sub_ty)
+            };
+            let cur = blocks.last_mut();
+            let tmp = ctx.fresh_var();
+            cur.body.push(format!(
+                "{} = call i64 @aura_lang_std_String_indexOf(i8* {}, i8* {})",
+                tmp, s, sub_ptr
+            ));
+            let r = ctx.fresh_var();
+            cur.body.push(format!("{} = trunc i64 {} to i32", r, tmp));
+            return Ok((r, "i32".to_string()));
+        }
+
+        // Map.getOrDefault(map, key, default) → i8*
+        if bare == "getOrDefault" && args_ir.len() == 3 {
+            let (m, _) = &args_ir[0];
+            let (k, k_ty) = &args_ir[1];
+            let (d, d_ty) = &args_ir[2];
+            // 确保 key 和 default 都是 i8*（可能需要类型转换）
+            let k_ptr =
+                if k_ty == "i8*" { k.clone() } else { coerce_val_to_i8ptr(ctx, blocks, k, k_ty) };
+            let d_ptr =
+                if d_ty == "i8*" { d.clone() } else { coerce_val_to_i8ptr(ctx, blocks, d, d_ty) };
+            let cur = blocks.last_mut();
+            let tmp = ctx.fresh_var();
+            cur.body.push(format!(
+                "{} = call i8* @aura_lang_std_Collections_getOrDefault(i8* {}, i8* {}, i8* {})",
+                tmp, m, k_ptr, d_ptr
+            ));
+            return Ok((tmp, "i8*".to_string()));
+        }
+        // Map.put(map, key, value) → void（原地修改 Map）
+        if (bare == "put" || bare == "set") && args_ir.len() == 3 {
+            let (m, _) = &args_ir[0];
+            let (k, k_ty) = &args_ir[1];
+            let (v, v_ty) = &args_ir[2];
+            // 确保 key 和 value 都是 i8*
+            let k_ptr =
+                if k_ty == "i8*" { k.clone() } else { coerce_val_to_i8ptr(ctx, blocks, k, k_ty) };
+            let v_ptr =
+                if v_ty == "i8*" { v.clone() } else { coerce_val_to_i8ptr(ctx, blocks, v, v_ty) };
+            let cur = blocks.last_mut();
+            cur.body.push(format!(
+                "call void @aura_lang_std_Collections_mapSet(i8* {}, i8* {}, i8* {})",
+                m, k_ptr, v_ptr
+            ));
+            return Ok(("0".to_string(), "void".to_string()));
+        }
+    }
+
+    let cur = blocks.last_mut();
 
     let callee_sym = sanitizellvm(callee);
     // 处理 void / 空返回类型：不能赋值给寄存器（LLVM IR 语法限制）

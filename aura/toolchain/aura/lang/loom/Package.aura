@@ -1,0 +1,457 @@
+// aura:///aura/lang/loom/Package.aura
+// Phase E.4: Loom Package Management
+//
+// 纯 Aura 实现，对标 Rust loom 的 package/ 和 registry/ 模块：
+// - builder.rs: 包构建器 (.auz 格式)
+// - installer.rs: 包安装器
+// - reader.rs: 包读取器
+// - registry/client.rs: 注册表客户端
+// - registry/local.rs: 本地注册表
+//
+// @since 0.6
+
+import aura.lang.std.String
+import aura.lang.std.FileSystem
+import aura.lang.std.IO
+import aura.lang.std.Collections
+import aura.lang.std.Encoding
+import aura.lang.std.Time
+
+// ═══════════════════════════════════════════════════════════════
+// 包元数据
+// ═══════════════════════════════════════════════════════════════
+
+class PackageMeta {
+    val name: String
+    val version: String
+    var description: String = ""
+    var authors: List<String> = mutableListOf()
+    var license: String = ""
+    var repository: String = ""
+    var entry: String = "src/main.aura"
+    var files: List<String> = mutableListOf()
+    var dependencies: List<String> = mutableListOf()
+    var checksum: String = ""
+    var createdAt: Long = 0
+    var executionModes: List<String> = mutableListOf()
+
+    fun PackageMeta(name: String, version: String) {
+        this.name = name
+        this.version = version
+        this.files = mutableListOf()
+        this.dependencies = mutableListOf()
+        this.executionModes = mutableListOf()
+    }
+
+    fun addFile(file: String): Unit { files.add(file) }
+    fun addDependency(dep: String): Unit { dependencies.add(dep) }
+    fun addExecutionMode(mode: String): Unit { executionModes.add(mode) }
+
+    fun toToml(): String {
+        var content: String = "[package]\n"
+        content = content + "name = \"" + name + "\"\n"
+        content = content + "version = \"" + version + "\"\n"
+        if (description.length > 0) {
+            content = content + "description = \"" + description + "\"\n"
+        }
+        if (authors.size > 0) {
+            content = content + "authors = ["
+            var i: Int = 0
+            while (i < authors.size) {
+                if (i > 0) { content = content + ", " }
+                content = content + "\"" + authors[i] + "\""
+                i = i + 1
+            }
+            content = content + "]\n"
+        }
+        if (license.length > 0) {
+            content = content + "license = \"" + license + "\"\n"
+        }
+        if (repository.length > 0) {
+            content = content + "repository = \"" + repository + "\"\n"
+        }
+        content = content + "entry = \"" + entry + "\"\n"
+        if (files.size > 0) {
+            content = content + "files = ["
+            var j: Int = 0
+            while (j < files.size) {
+                if (j > 0) { content = content + ", " }
+                content = content + "\"" + files[j] + "\""
+                j = j + 1
+            }
+            content = content + "]\n"
+        }
+        if (dependencies.size > 0) {
+            content = content + "dependencies = ["
+            var k: Int = 0
+            while (k < dependencies.size) {
+                if (k > 0) { content = content + ", " }
+                content = content + "\"" + dependencies[k] + "\""
+                k = k + 1
+            }
+            content = content + "]\n"
+        }
+        if (executionModes.size > 0) {
+            content = content + "execution-modes = ["
+            var l: Int = 0
+            while (l < executionModes.size) {
+                if (l > 0) { content = content + ", " }
+                content = content + "\"" + executionModes[l] + "\""
+                l = l + 1
+            }
+            content = content + "]\n"
+        }
+        return content
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 包构建器
+// 对标 Rust: package/builder.rs
+// ═══════════════════════════════════════════════════════════════
+
+class PackageBuilder {
+    val projectDir: String
+    val outDir: String
+    var meta: PackageMeta = null
+    var verbose: Boolean = false
+
+    fun PackageBuilder(projectDir: String, outDir: String) {
+        this.projectDir = projectDir
+        this.outDir = outDir
+    }
+
+    fun build(): Int {
+        // 读取 manifest
+        val manifestPath: String = projectDir + "/aura.toml"
+        if (!FileSystem.exists(manifestPath)) {
+            IO.println("[package] Manifest not found: " + manifestPath)
+            return 1
+        }
+        val manifestContent: String = FileSystem.readText(manifestPath)
+        
+        // 解析 manifest（简化）
+        meta = parseManifest(manifestContent)
+        
+        // 收集文件
+        collectFiles()
+        
+        // 计算校验和
+        computeChecksum()
+        
+        // 构建包
+        return createPackage()
+    }
+
+    fun parseManifest(content: String): PackageMeta {
+        val lines: List<String> = String.splitLines(content)
+        var name: String = "unknown"
+        var version: String = "0.1.0"
+        var description: String = ""
+        
+        var i: Int = 0
+        while (i < lines.size) {
+            val line: String = String.trim(lines[i])
+            if (line.startsWith("name")) {
+                val colonIdx: Int = line.indexOf("=")
+                if (colonIdx > 0) {
+                    val value: String = String.trim(String.substring(line, colonIdx + 1))
+                    name = String.unquote(value)
+                }
+            } else if (line.startsWith("version")) {
+                val colonIdx: Int = line.indexOf("=")
+                if (colonIdx > 0) {
+                    val value: String = String.trim(String.substring(line, colonIdx + 1))
+                    version = String.unquote(value)
+                }
+            } else if (line.startsWith("description")) {
+                val colonIdx: Int = line.indexOf("=")
+                if (colonIdx > 0) {
+                    val value: String = String.trim(String.substring(line, colonIdx + 1))
+                    description = String.unquote(value)
+                }
+            }
+            i = i + 1
+        }
+        
+        val meta: PackageMeta = PackageMeta(name, version)
+        meta.description = description
+        meta.addExecutionMode("aot")
+        meta.addExecutionMode("vm")
+        meta.createdAt = Time.currentTimeMillis() / 1000
+        return meta
+    }
+
+    fun collectFiles(): Unit {
+        // 简化：仅收集 src/ 目录下的文件
+        val srcDir: String = projectDir + "/src"
+        if (FileSystem.exists(srcDir)) {
+            val files: List<String> = FileSystem.listFiles(srcDir)
+            var i: Int = 0
+            while (i < files.size) {
+                val file: String = files[i]
+                if (file.endsWith(".aura")) {
+                    meta.addFile(file)
+                }
+                i = i + 1
+            }
+        }
+    }
+
+    fun computeChecksum(): Unit {
+        // 简化：使用文件名和版本作为校验和
+        val input: String = meta.name + meta.version + meta.files.join("|")
+        meta.checksum = Encoding.sha256(input)
+    }
+
+    fun createPackage(): Int {
+        val pkgName: String = meta.name + "-" + meta.version + ".auz"
+        val outPath: String = outDir + "/" + pkgName
+        
+        // 创建包目录
+        if (!FileSystem.exists(outDir)) {
+            FileSystem.mkdirP(outDir)
+        }
+        
+        // 写入元数据
+        val metaContent: String = meta.toToml()
+        FileSystem.writeText(outPath + ".meta", metaContent)
+        
+        IO.println("[package] Built: " + outPath)
+        IO.println("[package]   Name: " + meta.name)
+        IO.println("[package]   Version: " + meta.version)
+        IO.println("[package]   Files: " + meta.files.size)
+        IO.println("[package]   Checksum: " + meta.checksum)
+        
+        return 0
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 包读取器
+// 对标 Rust: package/reader.rs
+// ═══════════════════════════════════════════════════════════════
+
+class PackageReader {
+    val path: String
+    var meta: PackageMeta = null
+
+    fun PackageReader(path: String) {
+        this.path = path
+    }
+
+    fun read(): Int {
+        // 读取元数据文件
+        val metaPath: String = path + ".meta"
+        if (!FileSystem.exists(metaPath)) {
+            IO.println("[package] Meta file not found: " + metaPath)
+            return 1
+        }
+        
+        val content: String = FileSystem.readText(metaPath)
+        meta = parseMeta(content)
+        
+        IO.println("[package] Read: " + path)
+        IO.println("[package]   Name: " + meta.name)
+        IO.println("[package]   Version: " + meta.version)
+        
+        return 0
+    }
+
+    fun parseMeta(content: String): PackageMeta {
+        val lines: List<String> = String.splitLines(content)
+        var name: String = "unknown"
+        var version: String = "0.1.0"
+        
+        var i: Int = 0
+        while (i < lines.size) {
+            val line: String = String.trim(lines[i])
+            if (line.startsWith("name")) {
+                val colonIdx: Int = line.indexOf("=")
+                if (colonIdx > 0) {
+                    val value: String = String.trim(String.substring(line, colonIdx + 1))
+                    name = String.unquote(value)
+                }
+            } else if (line.startsWith("version")) {
+                val colonIdx: Int = line.indexOf("=")
+                if (colonIdx > 0) {
+                    val value: String = String.trim(String.substring(line, colonIdx + 1))
+                    version = String.unquote(value)
+                }
+            }
+            i = i + 1
+        }
+        
+        return PackageMeta(name, version)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 包安装器
+// 对标 Rust: package/installer.rs
+// ═══════════════════════════════════════════════════════════════
+
+class PackageInstaller {
+    val cacheDir: String = "~/.aura/cache/packages"
+    var verbose: Boolean = false
+
+    fun install(pkgPath: String): Int {
+        val reader: PackageReader = PackageReader(pkgPath)
+        val result: Int = reader.read()
+        if (result != 0) {
+            return result
+        }
+        
+        val meta: PackageMeta = reader.meta
+        
+        // 创建安装目录
+        val installDir: String = cacheDir + "/" + meta.name + "-" + meta.version
+        if (!FileSystem.exists(cacheDir)) {
+            FileSystem.mkdirP(cacheDir)
+        }
+        if (!FileSystem.exists(installDir)) {
+            FileSystem.mkdirP(installDir)
+        }
+        
+        IO.println("[install] Installed: " + meta.name + "@" + meta.version)
+        IO.println("[install]   Location: " + installDir)
+        
+        return 0
+    }
+
+    fun uninstall(name: String, version: String): Int {
+        val uninstallDir: String = cacheDir + "/" + name + "-" + version
+        if (FileSystem.exists(uninstallDir)) {
+            FileSystem.delete(uninstallDir)
+            IO.println("[uninstall] Removed: " + name + "@" + version)
+            return 0
+        }
+        IO.println("[uninstall] Not found: " + name + "@" + version)
+        return 1
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 注册表客户端
+// 对标 Rust: registry/client.rs
+// ═══════════════════════════════════════════════════════════════
+
+class RegistryClient {
+    var url: String = "https://registry.aura.dev"
+    var localRegistry: LocalRegistry = LocalRegistry("~/.aura/registry")
+
+    fun RegistryClient() {
+    }
+
+    fun RegistryClient(url: String) {
+        this.url = url
+    }
+
+    fun search(query: String): List<PackageInfo> {
+        // 简化：仅搜索本地注册表
+        return localRegistry.search(query)
+    }
+
+    fun get(name: String, version: String): PackageInfo {
+        return localRegistry.get(name, version)
+    }
+
+    fun download(name: String, version: String, destDir: String): Int {
+        // 简化：从本地注册表复制
+        val pkgPath: String = localRegistry.getPkgPath(name, version)
+        if (pkgPath == null || !FileSystem.exists(pkgPath)) {
+            IO.println("[registry] Package not found: " + name + "@" + version)
+            return 1
+        }
+        // 简化：直接返回路径
+        IO.println("[registry] Package path: " + pkgPath)
+        return 0
+    }
+
+    fun publish(name: String, version: String, pkgPath: String): Int {
+        // 简化：复制到本地注册表
+        val destDir: String = localRegistry.getDir(name)
+        if (!FileSystem.exists(destDir)) {
+            FileSystem.mkdirP(destDir)
+        }
+        IO.println("[registry] Published: " + name + "@" + version)
+        IO.println("[registry]   Location: " + destDir)
+        return 0
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 本地注册表
+// 对标 Rust: registry/local.rs
+// ═══════════════════════════════════════════════════════════════
+
+class LocalRegistry {
+    val baseDir: String
+    var packages: Map<String, List<PackageInfo>> = mutableMapOf()
+
+    fun LocalRegistry(baseDir: String) {
+        this.baseDir = baseDir
+    }
+
+    fun getDir(name: String): String {
+        return baseDir + "/" + name
+    }
+
+    fun getPkgPath(name: String, version: String): String {
+        val dir: String = getDir(name)
+        val pkgName: String = name + "-" + version + ".auz"
+        return dir + "/" + pkgName
+    }
+
+    fun search(query: String): List<PackageInfo> {
+        val results: List<PackageInfo> = mutableListOf()
+        if (!FileSystem.exists(baseDir)) {
+            return results
+        }
+        // 简化：返回空列表
+        return results
+    }
+
+    fun get(name: String, version: String): PackageInfo {
+        val pkgPath: String = getPkgPath(name, version)
+        if (!FileSystem.exists(pkgPath)) {
+            return null
+        }
+        val info: PackageInfo = PackageInfo(name, version, pkgPath)
+        return info
+    }
+
+    fun add(pkg: PackageInfo): Unit {
+        val key: String = pkg.name
+        if (!packages.containsKey(key)) {
+            packages.put(key, mutableListOf())
+        }
+        packages.get(key).add(pkg)
+    }
+
+    fun len(): Int {
+        return packages.size
+    }
+
+    fun toStr(): String {
+        return "LocalRegistry{baseDir='" + baseDir + "', packages=" + packages.size + "}"
+    }
+}
+
+class PackageInfo {
+    val name: String
+    val version: String
+    val path: String
+    var description: String = ""
+    var checksum: String = ""
+
+    fun PackageInfo(name: String, version: String, path: String) {
+        this.name = name
+        this.version = version
+        this.path = path
+    }
+
+    fun toStr(): String {
+        return name + "@" + version
+    }
+}

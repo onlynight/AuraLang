@@ -658,15 +658,103 @@ fun debugVariables(): String {
 | 3.5 | 去除 aura_std_cffi.c 依赖 | C 清理 | 2d |
 | 3.6 | 验证：全部标准库通过 | 测试 | 2d |
 
-### Phase 4：工具链 .aura 修正（2 周）
+### Phase 4：工具链全部用 Aura 重写（3 周）
+
+**目标**：工具链（Loom/AuraCli/AuraLsp/AuraDebugger）完全用 Aura 实现，**每个工具独立编译为 exe**，不再依赖 Rust 编译的 `aura` CLI。
+
+**核心原则**：
+- 编译器代码已存在于 `aura/compiler/aura/lang/compiler/`（50+ 文件，完整编译管线）
+- 工具链 .aura 文件**直接调用** Aura 编译器 API，而非通过 shell 调用 `aura` CLI
+- 每个工具独立编译为 exe，零 Rust 依赖
+- 仅依赖 LLVM 工具链（clang/llc/opt）
+
+**架构设计**：
+```
+┌─────────────────────────────────────────────────────────┐
+│                    工具链层 (独立 exe)                      │
+├─────────────────────────────────────────────────────────┤
+│  AuraCli.exe  ──┐                                        │
+│  Loom.exe      ──┤→ 直接调用 Aura 编译器 API              │
+│  AuraLsp.exe   ──┤   (Main.compile / aotBuildExeSource)  │
+│  Debugger.exe  ──┘                                        │
+├─────────────────────────────────────────────────────────┤
+│                    编译器层 (Aura 实现)                     │
+│  aura/compiler/aura/lang/compiler/Main.aura              │
+│  ├── lexer/  ├── parser/  ├── sema/  ├── hir/            │
+│  ├── mir/    ├── codegen/ ├── aot/   ├── vm/             │
+│  └── jit/    └── gc/                                    │
+├─────────────────────────────────────────────────────────┤
+│                    LLVM 工具链                              │
+│  clang.exe / llc.exe / opt.exe                           │
+└─────────────────────────────────────────────────────────┘
+```
+
+**独立编译目标**：
+| 工具 | 输入文件 | 输出 exe | 功能 |
+|------|----------|----------|------|
+| AuraCli | `aura/toolchain/aura/lang/cli/AuraCli.aura` | `aura.exe` | 编译/运行/检查/格式化 |
+| Loom | `aura/toolchain/aura/lang/loom/Loom.aura` | `loom.exe` | 构建系统/任务编排 |
+| AuraLsp | `aura/toolchain/aura/lang/lsp/AuraLsp.aura` | `aura-lsp.exe` | LSP 服务器 |
+| Debugger | `aura/toolchain/aura/lang/debugger/AuraDebugger.aura` | `aura-debug.exe` | 调试器 |
+
+**编译命令**：
+```bash
+# 编译 AuraCli.exe
+aura build aura/toolchain/aura/lang/cli/AuraCli.aura --aot --llvm-home <LLVM> --output build/aura.exe
+
+# 编译 Loom.exe
+aura build aura/toolchain/aura/lang/loom/Loom.aura --aot --llvm-home <LLVM> --output build/loom.exe
+
+# 编译 AuraLsp.exe
+aura build aura/toolchain/aura/lang/lsp/AuraLsp.aura --aot --llvm-home <LLVM> --output build/aura-lsp.exe
+
+# 编译 Debugger.exe
+aura build aura/toolchain/aura/lang/debugger/AuraDebugger.aura --aot --llvm-home <LLVM> --output build/aura-debug.exe
+```
 
 | # | 任务 | 文件 | 工作量 |
 |---|------|------|--------|
-| 4.1 | Loom.aura → syscall 调用 | `Loom.aura` | 3d |
-| 4.2 | AuraCli.aura → 纯 Aura 调用 | `AuraCli.aura` | 3d |
-| 4.3 | AuraLsp.aura → 纯 Aura 实现 | `AuraLsp.aura` | 2d |
-| 4.4 | AuraDebugger.aura → 纯 Aura 实现 | `AuraDebugger.aura` | 2d |
-| 4.5 | 验证：全部工具链编译通过 | 测试 | 1d |
+| 4.1 | 验证 aura/compiler/ 编译管线可用 | `aura/compiler/**` | 2d |
+| 4.2 | AuraCli.aura → 独立 CLI（直接调用编译器 API） | `AuraCli.aura` | 3d |
+| 4.3 | Loom.aura → 独立构建系统（直接调用编译器 API） | `Loom.aura` | 3d |
+| 4.4 | AuraLsp.aura → 独立 LSP 服务器 | `AuraLsp.aura` | 2d |
+| 4.5 | AuraDebugger.aura → 独立调试器 | `AuraDebugger.aura` | 2d |
+| 4.6 | 验证：4 个工具独立编译为 exe | 测试 | 1d |
+| 4.7 | 验证：零 Rust 依赖 | 测试 | 1d |
+
+**关键区别（vs Phase 4 旧方案）**：
+| 旧方案 | 新方案 |
+|--------|--------|
+| 工具链调用 `system("aura build ...")` | 工具链直接调用 `Main.aotBuildExeSource()` |
+| 任务命令是字符串 "aura build ..." | 任务直接调用 Aura API |
+| 依赖 Rust 编译的 `aura` CLI | 每个工具独立编译为 exe |
+| shell 调用 aura.exe | 进程内函数调用 |
+
+**编译器模块结构**（`aura/compiler/aura/lang/compiler/`）：
+```
+Main.aura          ← 主入口，编译管线
+lexer/             ← 词法分析 (Lexer, Token, Span)
+parser/            ← 语法分析 (Parser)
+ast/               ← AST 定义
+sema/              ← 语义分析 (TypeChecker, Type, TypeInfo, SymbolTable)
+hir/               ← HIR (Desugar, Hir, Mono, Inline, Fold)
+mir/               ← MIR (Mir, MirLower, MirOpt)
+codegen/           ← 代码生成 (Codegen)
+aot/               ← AOT 后端 (Aot, Emit, Target, Linker, Runtime, Ffi...)
+vm/                ← 虚拟机 (Vm, VmRunner, Frames, Opcodes...)
+jit/               ← JIT 编译器 (JitCore, JitLower, JitOpt...)
+gc/                ← 垃圾回收 (Gc, MarkSweep, Concurrent...)
+```
+
+**工具链调用关系**（进程内直接调用，无 shell）：
+```
+AuraCli.exe        → Main.compile() / Main.aotBuildExeSource()
+Loom.exe           → Main.compile() / Main.aotBuildExeSource()
+AuraLsp.exe        → Main.compile() (诊断) / lexer/parser (补全)
+AuraDebugger.exe   → Main.compile() (求值) / vm (调试)
+```
+
+**总工期**：3 周（14 天）
 
 ### Phase 5：C FFI 层标记为遗留代码（1 周）
 

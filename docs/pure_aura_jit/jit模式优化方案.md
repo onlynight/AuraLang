@@ -281,50 +281,93 @@ fn native_select(args: &[Value]) -> Value {
 
 | 根因 | 说明 | 影响 |
 |------|------|------|
-| **无事件通知机制** | Channel/Actor 没有 `Condvar`/`EventFd`，发送方无法唤醒接收方 | 接收方必须轮询 |
-| **无锁设计** | Channel 用裸 `VecDeque`（无 `Mutex`），无法安全通知 | 需要加锁才能通知 |
-| **协作调度模型** | 单 VM 内是协程协作调度，阻塞会卡住整个 VM | 不能简单用 `Condvar.wait()` |
-| **线程本地 VM** | 每线程独立 VM，跨线程通信需通过 TCP | 同进程多线程无法共享 Channel |
-| **无优先级继承** | 无锁设计无法处理优先级反转 | 高优先级协程可能被低优先级阻塞 |
+| **无事件通知机制** | Channel/Actor 没有事件通知（EventFd/kqueue/CPipe），发送方无法唤醒接收方 | 接收方必须轮询 |
+| **协作调度模型** | 单 VM 内是协程协作调度，阻塞会卡住整个 VM | 不能用 `Condvar.wait()`（会阻塞 OS 线程） |
+| **单 VM 单线程** | Channel 只在单 VM 内使用，无并发访问 | **不需要 Mutex**（单线程无竞争） |
+| **线程本地 VM** | 每线程独立 VM，跨线程通信通过 TCP | 同进程多线程不共享 Channel（无锁） |
 
-### 7.3 方案设计
+**关键纠正**：单 VM 内是单线程协程调度，**不需要 Mutex**——无锁设计是正确的。问题不是"缺少锁"，而是"缺少事件通知机制"。
 
-#### 7.3.1 总体架构
+### 7.3 方案设计：事件驱动（无锁 + 精确阻塞）
+
+#### 7.3.1 核心原则
+
+**不加锁，用事件通知**：
+
+- 单 VM 内是单线程，不需要 Mutex
+- 用 EventFd（Linux）/ kqueue（macOS）/ CPipe（Windows）实现事件通知
+- 发送方写入事件，接收方 epoll/kqueue 等待（精确阻塞，零 CPU 空转）
+- 保持 Aura 的无锁隔离优势，不退回到 Java 的"共享内存 + 锁"模型
+
+#### 7.3.2 总体架构
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  Channel/Actor 精确阻塞架构                                        │
+│  Channel 事件驱动架构（无锁 + 精确阻塞）                             │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                   │
 │  发送方（producer）                                               │
 │  ┌─────────────────────────────────────────┐                    │
 │  │  channel.send(val)                       │                    │
-│  │    1. 获取 channel 锁                     │                    │
-│  │    2. 写入 buffer                        │                    │
-│  │    3. notify_one() → 唤醒等待的接收方      │                    │
-│  │    4. 释放锁                             │                    │
+│  │    1. 写入 buffer（无锁，单线程）          │                    │
+│  │    2. event_fd.write(1) → 通知事件        │                    │
+│  │    （无锁，无 Condvar）                    │                    │
 │  └─────────────────────────────────────────┘                    │
-│                    ↓ 事件通知                                       │
+│                    ↓ 事件通知（EventFd/kqueue/CPipe）              │
 │  接收方（consumer）                                               │
 │  ┌─────────────────────────────────────────┐                    │
 │  │  channel.recv()                          │                    │
-│  │    1. 获取 channel 锁                     │                    │
-│  │    2. buffer 非空 → pop 并返回            │                    │
-│  │    3. buffer 空 → Condvar.wait() 阻塞     │                    │
+│  │    1. buffer 非空 → pop 并返回            │                    │
+│  │    2. buffer 空 → epoll_wait() 阻塞      │                    │
 │  │       （OS 线程挂起，零 CPU 消耗）         │                    │
-│  │    4. 被唤醒后重新检查 buffer             │                    │
-│  │    5. 释放锁                             │                    │
+│  │    3. 被唤醒后 pop 并返回                 │                    │
+│  │    （无锁，无 Mutex）                      │                    │
 │  └─────────────────────────────────────────┘                    │
 │                                                                   │
-│  关键：Mutex + Condvar 组合实现精确阻塞                              │
-│        - Mutex 保护 buffer 读写                                    │
-│        - Condvar 实现阻塞/唤醒                                     │
-│        - 等待条件：buffer 非空                                      │
+│  关键：EventFd + epoll 实现精确阻塞                                 │
+│        - 无锁（单 VM 单线程）                                       │
+│        - 零 CPU 空转（epoll 阻塞）                                  │
+│        - 保持 Aura 无锁隔离优势                                    │
 │                                                                   │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-#### 7.3.2 核心数据结构改造
+#### 7.3.3 跨平台事件通知抽象
+
+```rust
+/// 事件通知抽象（跨平台）
+pub trait EventNotifier: Send + Sync {
+    /// 写入事件（发送方调用）
+    fn notify(&self) -> io::Result<()>;
+    /// 等待事件（接收方调用，精确阻塞）
+    fn wait(&self, timeout: Option<Duration>) -> io::Result<bool>;
+    /// 消耗已读事件（防止重复触发）
+    fn drain(&self) -> io::Result<()>;
+    /// 获取 epoll/kqueue fd（用于 select 多路复用）
+    fn fd(&self) -> RawFd;
+}
+
+// Linux: EventFd 实现
+#[cfg(target_os = "linux")]
+pub struct EventFdNotifier {
+    fd: EventFd,  // libc::eventfd
+}
+
+// macOS: kqueue 实现
+#[cfg(target_os = "macos")]
+pub struct KqueueNotifier {
+    kq: RawFd,
+    id: u64,
+}
+
+// Windows: CPipe 实现
+#[cfg(target_os = "windows")]
+pub struct CPipeNotifier {
+    pipe: CPipe,
+}
+```
+
+#### 7.3.4 Channel 数据结构改造
 
 **当前**（`vm/channel.rs:20-27`）：
 
@@ -336,112 +379,111 @@ pub struct Channel {
 }
 ```
 
-**改造后**：
+**改造后**（新增事件通知，不加锁）：
 
 ```rust
 pub struct Channel {
     pub id: ChannelId,
     pub bound: usize,
-    /// 缓冲区 + 锁（保护并发读写）
-    pub inner: Mutex<ChannelInner>,
-}
-
-struct ChannelInner {
-    buffer: VecDeque<Value>,
-    /// 接收方等待条件：buffer 非空时唤醒
-    recv_not_empty: Condvar,
-    /// 发送方等待条件：buffer 未满时唤醒（有界 Channel）
-    send_not_full: Condvar,
+    /// 缓冲区（无锁，单 VM 内单线程使用）
+    pub buffer: VecDeque<Value>,
+    /// 事件通知（发送方写入，接收方 epoll 等待）
+    pub notifier: EventNotifier,
 }
 ```
 
 **关键设计**：
-- `Mutex` 保护 buffer 的并发读写（解决线程安全问题）
-- `recv_not_empty`：接收方阻塞条件（buffer 非空）
-- `send_not_full`：发送方阻塞条件（有界 Channel 缓冲区未满）
-- 双 `Condvar` 支持生产者和消费者双向阻塞
+- `buffer` 保持无锁（单 VM 单线程，不需要 Mutex）
+- `notifier` 新增：EventFd/kqueue/CPipe 实现事件通知
+- 无 Mutex、无 Condvar——保持 Aura 无锁优势
 
-#### 7.3.3 精确阻塞的 recv 实现
+#### 7.3.5 精确阻塞的 recv 实现
 
 ```rust
-/// 从 Channel 接收值（精确阻塞，零 CPU 空转）
-pub fn recv(&self, id: ChannelId) -> Value {
-    let guard = self.get(id).unwrap().inner.lock().unwrap();
+/// 从 Channel 接收值（精确阻塞，零 CPU 空转，无锁）
+pub fn recv(&mut self, id: ChannelId) -> Value {
+    let ch = self.get_mut(id).unwrap();
 
-    // 等待条件：buffer 非空
-    let result = guard.recv_not_empty.wait_while(guard, |inner| {
-        inner.buffer.is_empty()  // 条件为 true 时继续等待
-    }).unwrap();
+    // 1. 先尝试非阻塞 pop
+    if let Some(val) = ch.buffer.pop_front() {
+        return val;
+    }
 
-    result.buffer.pop_front().unwrap_or(Value::Null)
+    // 2. buffer 空，等待事件（精确阻塞，零 CPU 空转）
+    ch.notifier.wait(None).unwrap();
+
+    // 3. 被唤醒后 pop
+    ch.buffer.pop_front().unwrap_or(Value::Null)
 }
 
 /// 从 Channel 接收值（带超时）
-pub fn recv_timeout(&self, id: ChannelId, timeout: Duration) -> Value {
-    let guard = self.get(id).unwrap().inner.lock().unwrap();
+pub fn recv_timeout(&mut self, id: ChannelId, timeout: Duration) -> Value {
+    let ch = self.get_mut(id).unwrap();
 
-    let result = guard.recv_not_empty.wait_timeout_while(guard, timeout, |inner| {
-        inner.buffer.is_empty()
-    }).unwrap();
+    // 1. 先尝试非阻塞 pop
+    if let Some(val) = ch.buffer.pop_front() {
+        return val;
+    }
 
-    match result {
-        Ok(guard) => guard.buffer.pop_front().unwrap_or(Value::Null),
-        Err(_) => Value::Null,  // 超时
+    // 2. buffer 空，等待事件（带超时）
+    match ch.notifier.wait(Some(timeout)).unwrap() {
+        true => ch.buffer.pop_front().unwrap_or(Value::Null),  // 有事件
+        false => Value::Null,  // 超时
     }
 }
 ```
 
 **关键改进**：
-- `wait_while`：条件为 true 时阻塞，为 false 时返回（精确阻塞）
-- `wait_timeout_while`：带超时的精确阻塞（无轮询）
-- 零 CPU 空转：阻塞期间 OS 线程挂起，不消耗 CPU
+- `notifier.wait()`：精确阻塞（epoll/kqueue 系统调用），零 CPU 空转
+- 无 Mutex、无 Condvar——保持无锁优势
+- 超时由 `notifier.wait(timeout)` 精确处理（误差 <100µs）
 
-#### 7.3.4 精确阻塞的 send 实现（有界 Channel）
+#### 7.3.6 精确阻塞的 send 实现
 
 ```rust
-/// 向 Channel 发送值（有界 Channel 满时精确阻塞）
-pub fn send(&self, id: ChannelId, val: Value) -> bool {
-    let mut guard = self.get(id).unwrap().inner.lock().unwrap();
+/// 向 Channel 发送值（无锁，发送后通知事件）
+pub fn send(&mut self, id: ChannelId, val: Value) -> bool {
+    let ch = self.get_mut(id).unwrap();
 
-    // 等待条件：buffer 未满（有界 Channel）
-    if guard.bound > 0 {
-        guard.send_not_full.wait_while(guard, |inner| {
-            inner.buffer.len() >= guard.bound  // 条件为 true 时继续等待
-        }).unwrap();
+    // 1. 有界 Channel 满时返回 false（非阻塞模式）
+    if ch.bound > 0 && ch.buffer.len() >= ch.bound {
+        return false;
     }
 
-    guard.buffer.push_back(val);
+    // 2. 写入 buffer（无锁，单线程）
+    ch.buffer.push_back(val);
 
-    // 唤醒等待的接收方
-    guard.recv_not_empty.notify_one();
+    // 3. 通知事件（唤醒等待的接收方）
+    ch.notifier.notify().unwrap();
 
     true
 }
 ```
 
 **关键改进**：
-- 有界 Channel 满时精确阻塞（无空转）
-- 发送后唤醒接收方（零延迟通知）
-- 无界 Channel（`bound == 0`）不阻塞
+- 无锁写入（单 VM 单线程）
+- 发送后通知事件（零延迟唤醒接收方）
+- 有界 Channel 满时非阻塞返回（不卡死发送方）
 
-#### 7.3.5 Actor 精确阻塞改造
+#### 7.3.7 Actor 精确阻塞改造
 
 **当前**（`vm/actor.rs:129-160`）：`ask` 注册 `PendingRequest`，协程调度器轮询 `response_queue`。
 
-**改造后**：
+**改造后**（事件驱动，无锁）：
 
 ```rust
 pub struct ActorRuntime {
     actors: Vec<Option<Actor>>,
     next_id: usize,
-    /// 待处理请求（带通知机制）
+    /// 待处理请求
     pending_requests: HashMap<u64, PendingRequest>,
-    /// 响应队列 + 通知条件
-    response_notify: Condvar,
+    /// 响应队列（无锁，单 VM 内）
     response_queue: VecDeque<(u64, Value)>,
+    /// 事件通知（响应到达时通知）
+    response_notifier: EventNotifier,
 }
 
-/// 向 Actor 请求响应（精确阻塞，零 CPU 空转）
+/// 向 Actor 请求响应（精确阻塞，零 CPU 空转，无锁）
 pub fn ask(&mut self, id: ActorId, msg: Value) -> Value {
     // 1. 发送消息
     self.send(id, msg);
@@ -453,43 +495,49 @@ pub fn ask(&mut self, id: ActorId, msg: Value) -> Value {
         request_id,
         from_actor: self.current_actor_id,
         target_actor: id,
-        // ...
     });
 
-    // 3. 精确阻塞等待响应（零 CPU 空转）
+    // 3. 精确阻塞等待响应（零 CPU 空转，无锁）
     loop {
-        let mut guard = self.response_queue_guard.lock().unwrap();
-        let response = guard.response_notify.wait_while(guard, |q| {
-            // 条件：队列为空 或 响应不是给自己的
-            q.is_empty() || q.front().map(|(rid, _)| *rid != request_id).unwrap_or(true)
-        }).unwrap();
-
-        if let Some((rid, val)) = guard.response_queue.pop_front() {
+        // 3.1 先检查 response_queue（非阻塞）
+        while let Some((rid, val)) = self.response_queue.front().cloned() {
             if rid == request_id {
+                self.response_queue.pop_front();
                 return val;  // 找到响应
-            } else {
-                guard.response_queue.push_front((rid, val));  // 不是自己的，放回
-                guard.response_notify.notify_one();  // 唤醒其他等待者
             }
+            self.response_queue.pop_front();  // 不是自己的，丢弃
         }
+
+        // 3.2 队列为空，等待事件（精确阻塞）
+        self.response_notifier.wait(None).unwrap();
     }
+}
+
+/// Actor 处理消息后写回响应（通知等待的 ask）
+pub fn respond(&mut self, request_id: u64, val: Value) {
+    self.response_queue.push_back((request_id, val));
+    self.response_notifier.notify().unwrap();  // 唤醒等待的 ask
 }
 ```
 
 **关键改进**：
-- `ask` 精确阻塞等待（零 CPU 空转）
-- 响应到达时唤醒对应等待者（精确通知）
-- 多等待者时正确路由响应
+- `ask` 精确阻塞等待（零 CPU 空转，无锁）
+- 响应到达时 `notify()` 唤醒等待者（零延迟）
+- 无 Mutex、无 Condvar——保持无锁优势
 
-#### 7.3.6 select 多路复用精确阻塞
+#### 7.3.8 select 多路复用（epoll/kqueue 原生支持）
 
 **当前**（`vm/native.rs:754-764`）：检查所有通道，全空返回 Null（非阻塞）。
 
-**改造后**：
+**改造后**（epoll/kqueue 原生多路复用）：
 
 ```rust
-/// select 多路复用（精确阻塞，零 CPU 空转）
-pub fn select(&self, channel_ids: &[ChannelId], timeout: Option<Duration>) -> Option<(ChannelId, Value)> {
+/// select 多路复用（epoll/kqueue 精确阻塞，零 CPU 空转，无锁）
+pub fn select(
+    &mut self,
+    channel_ids: &[ChannelId],
+    timeout: Option<Duration>,
+) -> Option<(ChannelId, Value)> {
     // 1. 先尝试非阻塞检查
     for &id in channel_ids {
         if let Some(val) = self.try_recv(id) {
@@ -497,195 +545,217 @@ pub fn select(&self, channel_ids: &[ChannelId], timeout: Option<Duration>) -> Op
         }
     }
 
-    // 2. 全部为空，精确阻塞等待（任一通道有消息即唤醒）
-    // 需要注册 waiters 到每个 Channel 的 Condvar
-    let mut waiters = Vec::new();
+    // 2. 全部为空，用 epoll/kqueue 等待任一通道事件
+    let mut events = Vec::with_capacity(channel_ids.len());
     for &id in channel_ids {
-        let channel = self.get(id).unwrap();
-        let mut guard = channel.inner.lock().unwrap();
-        // 注册 waiter（等待条件：buffer 非空）
-        guard.recv_not_empty.wait_while(guard, |inner| inner.buffer.is_empty()).unwrap();
-        // 被唤醒后检查
-        if let Some(val) = guard.buffer.pop_front() {
-            return Some((id, val));
-        }
+        let ch = self.get_mut(id).unwrap();
+        events.push(EventListener {
+            fd: ch.notifier.fd(),
+            channel_id: id,
+            events: EPOLLIN,  // 等待可读事件
+        });
     }
 
-    // 3. 超时处理
-    None
-}
-```
+    // 3. epoll_wait（精确阻塞，零 CPU 空转）
+    let mut epoll_evts = [EpollEvent::default(); channel_ids.len()];
+    let n = epoll_wait(&events, &mut epoll_evts, timeout).unwrap();
 
-**简化实现**（推荐）：
-
-```rust
-/// select 多路复用（简化实现：轮询 + 退避）
-pub fn select(&self, channel_ids: &[ChannelId], timeout: Option<Duration>) -> Option<(ChannelId, Value)> {
-    let deadline = timeout.map(|t| Instant::now() + t);
-
-    loop {
-        // 1. 非阻塞检查所有通道
-        for &id in channel_ids {
+    if n > 0 {
+        // 4. 找到就绪的通道，pop 并返回
+        for evt in &epoll_evts[..n] {
+            let id = self.fd_to_channel_id(evt.fd);
             if let Some(val) = self.try_recv(id) {
                 return Some((id, val));
             }
         }
-
-        // 2. 检查超时
-        if let Some(deadline) = deadline {
-            if Instant::now() >= deadline {
-                return None;  // 超时
-            }
-        }
-
-        // 3. 精确休眠（无空转）
-        // 使用 nanosleep 而非 sleep，支持更精确的退避
-        std::thread::sleep(Duration::from_micros(100));  // 100µs 退避
     }
+
+    None  // 超时或无就绪通道
 }
 ```
 
-**设计取舍**：
-- 精确阻塞实现复杂（需要跨 Channel 的 Condvar 协调）
-- 简化实现用退避轮询（100µs 间隔，CPU 空转 <0.01%）
-- 推荐先用简化实现，后续优化为精确阻塞
+**关键改进**：
+- epoll/kqueue 原生支持多路复用（一次等待多个通道）
+- 精确阻塞，零 CPU 空转
+- 无 Mutex、无 Condvar——保持无锁优势
+- 一次系统调用等待所有通道（高效）
 
 ### 7.4 实现阶段规划
 
-#### 阶段 1：Channel Mutex + Condvar 改造（P8，2 周）
+#### 阶段 1：EventNotifier 跨平台抽象（P8，2 周）
 
-**目标**：Channel 支持精确阻塞，消除轮询空转。
+**目标**：实现跨平台事件通知抽象（EventFd/kqueue/CPipe）。
 
 **任务**：
-- [ ] 改造 `Channel` 结构体，引入 `Mutex<ChannelInner>` + 双 `Condvar`
-- [ ] 实现精确阻塞的 `recv` / `send` / `recv_timeout`
-- [ ] 保持无界 Channel 不阻塞语义
-- [ ] 保持有界 Channel 满时阻塞语义
-- [ ] 添加单元测试（并发 send/recv、超时、有界阻塞）
+- [ ] 设计 `EventNotifier` trait（notify / wait / drain / fd）
+- [ ] Linux: EventFd 实现（`libc::eventfd`）
+- [ ] macOS: kqueue 实现（`libc::kqueue`）
+- [ ] Windows: CPipe 实现（`windows-sys`）
+- [ ] 添加单元测试（notify/wait/timeout/drain）
 
 **验证**：
-- 并发 send/recv 无数据竞争（Rust 编译器保证）
+- 三平台 notify + wait 正确唤醒
+- wait 超时精确（误差 <100µs）
+- wait 阻塞期间零 CPU 消耗（ps 验证）
+- drain 消耗事件后不重复触发
+
+**预期收益**：
+- 跨平台事件通知基础设施就绪
+- 无锁、零空转的事件驱动基础
+
+#### 阶段 2：Channel 事件驱动改造（P8，2 周）
+
+**目标**：Channel 支持精确阻塞，消除轮询空转，**不加锁**。
+
+**任务**：
+- [ ] 改造 `Channel` 结构体，新增 `notifier: EventNotifier`
+- [ ] 实现精确阻塞的 `recv` / `recv_timeout`（epoll 等待）
+- [ ] 实现 `send`（写入 buffer + notify）
+- [ ] 保持无界 Channel 不阻塞语义
+- [ ] 保持有界 Channel 满时非阻塞语义
+- [ ] 添加单元测试（send/recv/timeout/有界满）
+
+**验证**：
 - recv 空时阻塞（零 CPU 消耗，ps 验证）
 - recv_timeout 超时精确（误差 <100µs）
-- 有界 Channel 满时 send 阻塞
+- send 后 recv 立即唤醒（延迟 <100µs）
+- 有界 Channel 满时 send 返回 false（不阻塞）
+- 无锁（单线程，无数据竞争）
 
 **预期收益**：
 - CPU 空转从 100% 降为 0%（阻塞期间）
-- 延迟精度从 1ms 提升为 <100µs（Condvar 唤醒延迟）
-- 内存开销增加（Mutex + Condvar 约 56 字节/Channel）
+- 延迟精度从 1ms 提升为 <100µs（epoll 唤醒延迟）
+- 内存开销增加（EventFd 约 40 字节/Channel）
+- **无锁竞争**（保持 Aura 无锁优势）
 
-#### 阶段 2：Actor 精确阻塞改造（P8，2 周）
+#### 阶段 3：Actor 事件驱动改造（P8，2 周）
 
-**目标**：`Actor.ask` 支持精确阻塞，消除协程调度器轮询。
+**目标**：`Actor.ask` 支持精确阻塞，消除协程调度器轮询，**不加锁**。
 
 **任务**：
-- [ ] 改造 `ActorRuntime`，引入 `Condvar` 通知机制
-- [ ] 实现精确阻塞的 `ask`（等待响应时挂起）
-- [ ] 实现精确唤醒（响应到达时唤醒对应等待者）
-- [ ] 处理多等待者场景（响应路由）
-- [ ] 添加单元测试（并发 ask、超时、多等待者）
+- [ ] 改造 `ActorRuntime`，新增 `response_notifier: EventNotifier`
+- [ ] 实现精确阻塞的 `ask`（epoll 等待响应）
+- [ ] 实现 `respond`（写 response_queue + notify）
+- [ ] 处理多请求场景（request_id 路由）
+- [ ] 添加单元测试（ask/respond/超时/多请求）
 
 **验证**：
-- 并发 ask 无数据竞争
 - ask 等待时阻塞（零 CPU 消耗）
 - 响应到达时精确唤醒（延迟 <100µs）
-- 多等待者时响应正确路由
+- 多请求时响应正确路由
+- 无锁（单线程，无数据竞争）
 
 **预期收益**：
 - 协程调度器不再轮询 `response_queue`
 - ask 等待时零 CPU 消耗
 - 响应延迟从轮询间隔降为 <100µs
 
-#### 阶段 3：select 多路复用优化（P9，1 周）
+#### 阶段 4：select 多路复用优化（P9，1 周）
 
-**目标**：`select` 支持精确阻塞或高效退避。
+**目标**：`select` 支持 epoll/kqueue 精确阻塞，消除轮询空转。
 
 **任务**：
-- [ ] 实现简化版 select（退避轮询，100µs 间隔）
-- [ ] 评估精确阻塞实现的复杂度
-- [ ] 如果复杂度可接受，实现精确阻塞版
+- [ ] 实现 epoll/kqueue 版 select（多通道等待）
+- [ ] 实现超时支持（`epoll_wait(timeout)`）
 - [ ] 添加单元测试（多通道、超时、混合阻塞）
 
 **验证**：
 - 多通道 select 正确返回第一个有值的通道
 - 超时精确（误差 <200µs）
-- CPU 空转 <0.01%（退避实现）或 0%（精确阻塞实现）
+- CPU 空转 0%（epoll 阻塞）
+- 无锁（单线程）
 
 **预期收益**：
 - select 延迟从 1ms 降为 <200µs
-- CPU 空转从 100% 降为 <0.01%
+- CPU 空转从 100% 降为 0%
 
-#### 阶段 4：跨线程 Channel 共享（P9，2 周）
+#### 阶段 5：跨线程 Channel 共享（P9，可选，2 周）
 
 **目标**：同进程多线程可以共享 Channel（无需 TCP）。
 
 **任务**：
 - [ ] 设计跨线程 Channel 共享机制
-- [ ] 实现 `Arc<Channel>` 支持多线程共享
-- [ ] 处理线程安全问题（Mutex + Condvar 已覆盖）
-- [ ] 添加集成测试（多线程 send/recv）
+- [ ] 方案 A：无锁队列（lock-free queue，如 `crossbeam::queue::ArrayQueue`）
+- [ ] 方案 B：保留 TCP（当前设计，无共享内存）
+- [ ] 评估复杂度，如果可接受则实现方案 A
 
 **验证**：
-- 多线程共享 Channel 无数据竞争
+- 多线程共享 Channel 无数据竞争（Rust 编译器保证）
 - 跨线程 send/recv 正确唤醒
-- 延迟 <200µs（Condvar 唤醒）
+- 延迟 <200µs
 
 **预期收益**：
 - 消除同进程多线程的 TCP 开销（~50µs/消息）
-- 支持更灵活的并发架构
+- 无锁（lock-free queue 或 TCP 流式 I/O）
 
 ### 7.5 性能影响预估
 
-| 指标 | 当前（轮询） | 改造后（精确阻塞） | 提升 |
+| 指标 | 当前（轮询） | 改造后（事件驱动） | 提升 |
 |------|-------------|-------------------|------|
-| **CPU 空转** | 100%（busy-spin） | 0%（阻塞） | ✅ 100% |
-| **recv 延迟** | 1ms（轮询间隔） | <100µs（Condvar 唤醒） | ✅ 10x |
-| **select 延迟** | 1ms（轮询间隔） | <200µs（退避/精确） | ✅ 5x |
-| **ask 延迟** | 轮询间隔（协程调度） | <100µs（Condvar 唤醒） | ✅ 10x |
-| **内存开销** | 0 | ~56 字节/Channel | ⚠️ 增加 |
-| **锁竞争** | ❌ 无 | ✅ 有（Mutex） | ⚠️ 增加 |
-| **死锁风险** | ❌ 无 | ✅ 有（锁顺序） | ⚠️ 增加 |
+| **CPU 空转** | 100%（busy-spin） | 0%（epoll 阻塞） | ✅ 100% |
+| **recv 延迟** | 1ms（轮询间隔） | <100µs（epoll 唤醒） | ✅ 10x |
+| **select 延迟** | 1ms（轮询间隔） | <200µs（epoll 多路复用） | ✅ 5x |
+| **ask 延迟** | 轮询间隔（协程调度） | <100µs（epoll 唤醒） | ✅ 10x |
+| **内存开销** | 0 | ~40 字节/Channel（EventFd） | ⚠️ 增加 |
+| **锁竞争** | ❌ 无 | ❌ 无（保持无锁） | ✅ 持平 |
+| **死锁风险** | ❌ 无 | ❌ 无（无锁） | ✅ 持平 |
 
 **权衡**：
-- 精确阻塞用「锁竞争 + 内存开销」换取「零 CPU 空转 + 低延迟」
-- 高并发场景下锁竞争可能成为瓶颈，需分片（sharded）优化
-- 低并发场景下精确阻塞收益明显（零空转、低延迟）
+- 事件驱动用「少量内存开销」换取「零 CPU 空转 + 低延迟」
+- **无锁竞争**（保持 Aura 无锁优势，不退回到 Java 模型）
+- **无死锁风险**（无锁，不可能死锁）
+- 跨线程共享用无锁队列或 TCP，不引入 Mutex
 
 ### 7.6 与 Java 的对比
 
-| 维度 | Aura（改造后） | Java | 差异 |
-|------|---------------|------|------|
-| **Channel 实现** | `Mutex` + `Condvar` + `VecDeque` | `LinkedBlockingQueue`（`ReentrantLock` + `Condition`） | 类似 |
-| **阻塞机制** | `Condvar.wait/notify` | `Condition.await/signal` | 类似 |
-| **超时精度** | <100µs | <100µs | 持平 |
-| **CPU 空转** | 0%（精确阻塞） | 0%（精确阻塞） | 持平 |
-| **内存开销** | ~56 字节/Channel | ~100 字节/Queue | Aura 更省 |
-| **锁竞争** | 有（Mutex） | 有（ReentrantLock） | 类似 |
-| **无锁并发** | ❌ 有锁（Mutex） | ❌ 有锁（ReentrantLock） | 类似 |
+| 维度 | Aura（事件驱动） | Java | 差异 |
+|------|-----------------|------|------|
+| **并发模型** | Actor 隔离 + 消息传递 | 共享堆 + 锁 | ✅ Aura 无锁隔离 |
+| **Channel 实现** | `VecDeque` + `EventFd`（无锁） | `LinkedBlockingQueue`（`ReentrantLock` + `Condition`） | ✅ Aura 无锁 |
+| **阻塞机制** | `epoll`/`kqueue`（事件驱动） | `Condition.await/signal`（锁 + 条件变量） | ✅ Aura 无锁 |
+| **超时精度** | <100µs（epoll） | <100µs（`Condition.awaitNanos`） | 持平 |
+| **CPU 空转** | 0%（epoll 阻塞） | 0%（Condition 阻塞） | 持平 |
+| **内存开销** | ~40 字节/Channel（EventFd） | ~100 字节/Queue（Lock + Condition） | ✅ Aura 更省 |
+| **锁竞争** | ❌ 无（无锁） | ✅ 有（ReentrantLock） | ✅ Aura 无竞争 |
+| **死锁风险** | ❌ 无（无锁） | ✅ 有（锁顺序） | ✅ Aura 无死锁 |
+| **无锁并发** | ✅ 无锁（事件驱动） | ❌ 有锁（ReentrantLock） | ✅ Aura 优势 |
 
 **关键差异**：
-- Aura 改造后与 Java 的阻塞机制趋同（`Mutex` + `Condvar` vs `ReentrantLock` + `Condition`）
-- Aura 保留 Actor 隔离优势（无共享内存），Java 保留共享内存优势
-- Aura 的内存开销略低（VecDeque vs LinkedList）
+- Aura 保持无锁隔离优势（`VecDeque` + `EventFd`，无 Mutex、无 Condvar）
+- Java 用锁保护共享内存（`ReentrantLock` + `Condition`）
+- Aura 的阻塞是"事件驱动"（epoll/kqueue），Java 是"锁 + 条件变量"
+- Aura 无死锁风险（无锁），Java 有死锁风险（锁顺序）
+- Aura 内存开销更低（EventFd ~40 字节 vs Lock+Condition ~100 字节）
+
+**核心区别**：
+- Java 需要锁是因为"多线程共享堆"——锁保护共享可变状态
+- Aura 不需要锁是因为"VM 隔离，不共享可变状态"——通信通过消息传递 + 事件通知
+- 事件驱动是 Aura 的解法，锁 + 条件变量是 Java 的解法——两者本质不同
 
 ### 7.7 风险与缓解
 
 | 风险 | 影响 | 缓解 |
 |------|------|------|
-| **死锁** | 锁顺序错误导致死锁 | 统一锁顺序（先 Channel 锁，后 Actor 锁） |
-| **优先级反转** | 低优先级线程持有锁，阻塞高优先级 | 使用优先级继承锁（`parking_lot::Mutex`） |
-| **锁竞争** | 高并发下 Mutex 成为瓶颈 | 分片 Channel（sharded，多个子 Channel） |
-| **唤醒风暴** | 一次通知唤醒多个等待者 | `notify_one` 而非 `notify_all` |
-| **虚假唤醒** | `Condvar.wait` 可能虚假唤醒 | `wait_while` 重新检查条件 |
-| **内存泄漏** | 未关闭的 Channel/Actor | `Drop` trait 自动清理 |
+| **虚假唤醒** | `epoll_wait` 可能虚假唤醒 | 唤醒后检查 buffer（`pop_front` 为空则继续等待） |
+| **事件丢失** | 发送方 notify 但接收方未及时 drain | 每次 notify 写 1，接收方 `epoll_wait` 后 `drain` |
+| **跨平台差异** | EventFd/kqueue/CPipe 行为不同 | 抽象 `EventNotifier` trait，平台特定实现 |
+| **epoll 容量** | `epoll_wait` 一次最多 1024 事件 | select 限制通道数 <1024 |
+| **内存泄漏** | 未关闭的 Channel/Actor | `Drop` trait 自动清理 EventFd |
+| **超时精度** | epoll 超时可能有调度延迟 | 容忍 <200µs 误差 |
+
+**关键风险消除**：
+- **死锁**：无锁，不可能死锁（Aura 优势）
+- **优先级反转**：无锁，不存在优先级反转（Aura 优势）
+- **锁竞争**：无锁，无竞争（Aura 优势）
 
 ### 7.8 关键代码位置
 
 | 文件 | 当前行 | 改造内容 |
 |------|--------|---------|
-| `compiler/src/vm/channel.rs` | 20-147 | Channel 结构体 + send/recv/recv_timeout |
-| `compiler/src/vm/actor.rs` | 52-336 | ActorRuntime + ask |
+| `compiler/src/vm/channel.rs` | 20-147 | Channel 结构体 + send/recv/recv_timeout（新增 EventNotifier） |
+| `compiler/src/vm/actor.rs` | 52-336 | ActorRuntime + ask（新增 response_notifier） |
 | `compiler/src/vm/native.rs` | 711-764 | channelSend/channelRecv/select 绑定 |
+| `compiler/src/vm/event_notifier.rs` | 新增 | EventNotifier trait + 跨平台实现 |
 | `compiler/src/vm/thread_pool.rs` | 17-146 | ThreadPool（参考实现） |
 
 ---
@@ -714,8 +784,8 @@ pub fn select(&self, channel_ids: &[ChannelId], timeout: Option<Duration>) -> Op
 
 **待完成（JIT 层）**：JIT 去重编译（P8）、OSR（P8）、逃逸分析（P8）、类型反馈（P9）、编译线程池（P9）、Profile-Guided（P10）。
 
-**待完成（并发层）**：Channel 精确阻塞（P8，2 周）、Actor 精确阻塞（P8，2 周）、select 多路复用优化（P9，1 周）、跨线程 Channel 共享（P9，2 周）。精确阻塞改造消除轮询空转，CPU 从 100% 降为 0%，延迟从 1ms 降为 <100µs。
+**待完成（并发层）**：EventNotifier 跨平台抽象（P8，2 周）、Channel 事件驱动改造（P8，2 周）、Actor 事件驱动改造（P8，2 周）、select 多路复用优化（P9，1 周）、跨线程 Channel 共享（P9，可选，2 周）。事件驱动改造消除轮询空转，CPU 从 100% 降为 0%，延迟从 1ms 降为 <100µs，**保持无锁优势**（不加 Mutex、不加 Condvar）。
 
-**核心差距**：优化深度（Cranelift vs C2）、编译去重（无 vs 有）、OSR（无 vs 有）、类型反馈（无 vs 有）、并发精确阻塞（轮询空转 vs Condvar 精确阻塞）。这些是 Aura JIT 追赶 Java JIT 的关键路径。
+**核心差距**：优化深度（Cranelift vs C2）、编译去重（无 vs 有）、OSR（无 vs 有）、类型反馈（无 vs 有）、并发精确阻塞（轮询空转 vs epoll 事件驱动）。这些是 Aura JIT 追赶 Java JIT 的关键路径。
 
-**架构优势**：线程独立 VM + 无锁并发，在高并发、低延迟场景下优于 Java 的共享 JVM 模型。优化方向是借鉴 Java 的编译去重、类型反馈和精确阻塞机制，同时保留无锁并发的架构优势。
+**架构优势**：线程独立 VM + 无锁并发，在高并发、低延迟场景下优于 Java 的共享 JVM 模型。优化方向是借鉴 Java 的编译去重和类型反馈，同时用**事件驱动**（EventFd + epoll）而非锁 + 条件变量实现精确阻塞，保留 Aura 的无锁隔离优势。

@@ -450,6 +450,11 @@ fun runCli(): Unit {
 /// [`runSelfTest`]（保持 `main` 的产出干净，便于 CLI 与 AOT 自举场景）。
 fun main() {
     if (Process.argCount() >= 2) {
+        val first: String = Process.arg(1)
+        if (first == "--selftest" || first == "-t") {
+            runSelfTest()
+            return
+        }
         runCli()
         return
     }
