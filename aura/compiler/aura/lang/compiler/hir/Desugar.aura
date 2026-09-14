@@ -153,10 +153,21 @@ class Desugar {
             if (subjectId >= 0) {
                 val subjectDstId: Int = this.desugarNode(src, subjectId)
                 if (subjectDstId >= 0) {
-                    // HirBinary("==", [subject, pattern])
-                    var condKids: String = hirKidsAdd(hirNoKids(), subjectDstId)
-                    condKids = hirKidsAdd(condKids, patternDstId)
-                    condDstId = this.dst.add("HirBinary", "==", "", sp, condKids)
+                    val patText: String = src.textOf(patternId)
+                    if (patText.startsWith("__is__")) {
+                        // `is T` 模式 → `aura_isOfType(subject, "T")`
+                        // （typeName 为 C 字符串常量）
+                        val tname: String = patText.substring(6, patText.length)
+                        var isoKids: String = hirKidsAdd(hirNoKids(), subjectDstId)
+                        val tlit: Int = this.dst.add("HirLit", tname, "String", sp, hirNoKids())
+                        isoKids = hirKidsAdd(isoKids, tlit)
+                        condDstId = this.dst.add("HirCall", "aura_isOfType", "", sp, isoKids)
+                    } else {
+                        // HirBinary("==", [subject, pattern])
+                        var condKids: String = hirKidsAdd(hirNoKids(), subjectDstId)
+                        condKids = hirKidsAdd(condKids, patternDstId)
+                        condDstId = this.dst.add("HirBinary", "==", "", sp, condKids)
+                    }
                 }
             } else {
                 // 无 subject：pattern 本身即条件

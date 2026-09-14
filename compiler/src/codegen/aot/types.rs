@@ -88,6 +88,12 @@ impl TypeMapper {
             {
                 "i8*".to_string()
             }
+            // 泛型类型参数（`fun <T> f(x: T)` / `<K, V>`）：AOT 不做单态化，
+            // 统一按 Any（i8*）表示；否则会落到 `%struct.T*` 占位类型，
+            // 生成 `call %struct.T* @identity(%struct.T* 5)` 这类非法 IR。
+            _ if name.len() == 1 && name.chars().next().unwrap().is_ascii_uppercase() => {
+                "i8*".to_string()
+            }
             // 函数类型 → 函数指针
             _ if name.starts_with('(') => "ptr".to_string(),
             _ => {

@@ -433,7 +433,16 @@ class HirLowerer {
                 val pName: String = ast.textOf(pId)
                 val pTy: String = ast.tyOf(pId)
                 val pSp: Span = ast.spanOf(pId)
-                val paramId: Int = this.hir.add("HirParam", pName, pTy, pSp, hirNoKids())
+                // 默认参数值：作为 HirParam 的 kids[0]，供调用点补齐实参
+                var pKids: String = hirNoKids()
+                val pAstKids: String = ast.kidsOf(pId)
+                if (hirKidsCount(pAstKids) > 0) {
+                    val dId: Int = this.lowerExpr(ast, hirKidsAt(pAstKids, 0))
+                    if (dId >= 0) {
+                        pKids = hirKidsAdd(pKids, dId)
+                    }
+                }
+                val paramId: Int = this.hir.add("HirParam", pName, pTy, pSp, pKids)
                 paramsStr = hirKidsAdd(paramsStr, paramId)
                 pi = pi + 1
             }
@@ -442,7 +451,18 @@ class HirLowerer {
         // 子节点 1: 函数体（Block 或单个表达式）
         if (kCount > 1) {
             val bodyAstId: Int = hirKidsAt(kids, 1)
-            bodyId = this.lowerBlockOrExpr(ast, bodyAstId)
+            if (ast.kindOf(bodyAstId) == "Block") {
+                bodyId = this.lowerBlockOrExpr(ast, bodyAstId)
+            } else {
+                // 表达式体函数 `fun f(x: Int): Int = x * x`：必须包装成
+                // `return <expr>`，否则函数体是一个裸表达式，发射器按语句求值后
+                // 落到「隐式返回零值」路径 —— 实测 `square(5)` 恒得 0。
+                val e: Int = this.lowerExpr(ast, bodyAstId)
+                if (e >= 0) {
+                    bodyId = this.hir.add("HirReturn", "", "",
+                        ast.spanOf(bodyAstId), hirKidsAdd(hirNoKids(), e))
+                }
+            }
         }
 
         // 构造 HirFunction 节点
@@ -641,7 +661,9 @@ class HirLowerer {
             else if (kind == "Class") { "HirClass" }
             else if (kind == "Object") { "HirObject" }
             else { "HirEnum" }
-        return this.hir.add(hirKind, name, "", sp, hirKids)
+        // ty 列承载**基类名**（`class Dog : Animal()` → "Animal"）：
+        // 发射器据此解析 `super.m()` 与继承方法的回退查找
+        return this.hir.add(hirKind, name, ast.tyOf(id), sp, hirKids)
     }
 
     // ── 块/表达式降级 ──
@@ -1055,6 +1077,57 @@ class HirLowerer {
             return this.hir.leaf("HirVar", "super", sp)
         }
 
+        // 区间 `a..b` / `a..<b` → `__range(a, b, inclusive)`
+        // （与 Rust 侧 `desugar_expr(Expr::Range)` 的 HIR 形状一致；AOT 发射器
+        //  按 `__range` 生成 `aura_lang_std_Collections_range` 调用。）
+        if (kind == "Range") {
+            val rangeSp: Span = ast.spanOf(id)
+            val rangeKids: String = ast.kidsOf(id)
+            var incText: String = "1"
+            if (ast.textOf(id) == "0") {
+                incText = "0"
+            }
+            var callKids: String = hirNoKids()
+            var ri: Int = 0
+            while (ri < hirKidsCount(rangeKids)) {
+                val cid: Int = hirKidsAt(rangeKids, ri)
+                val cHir: Int = this.lowerExpr(ast, cid)
+                if (cHir >= 0) {
+                    callKids = hirKidsAdd(callKids, cHir)
+                }
+                ri = ri + 1
+            }
+            val incNode: Int = this.hir.add("HirLit", incText, "Int", rangeSp, hirNoKids())
+            callKids = hirKidsAdd(callKids, incNode)
+            return this.hir.add("HirCall", "__range", "", rangeSp, callKids)
+        }
+
+        // 非空断言 `expr!!`（`Unwrap`）：HIR 层直接穿透（可空值在 AOT 下
+        // 以值本身表示，`!!` 等价于原值，仅作类型收窄），
+        // 但必须存在分支——否则落到「未知 AST 种类」返回 -1，
+        // 整个表达式被静默丢弃并可能触发编译器崩溃。
+        if (kind == "Unwrap") {
+            val ukids: String = ast.kidsOf(id)
+            if (hirKidsCount(ukids) > 0) {
+                return this.lowerExpr(ast, hirKidsAt(ukids, 0))
+            }
+            return -1
+        }
+
+        // 命名实参 `f(name = v)` → `HirNamedArg(name, [value])`
+        if (kind == "NamedArg") {
+            val naSp: Span = ast.spanOf(id)
+            val naKids: String = ast.kidsOf(id)
+            var naHir: String = hirNoKids()
+            if (hirKidsCount(naKids) > 0) {
+                val v: Int = this.lowerExpr(ast, hirKidsAt(naKids, 0))
+                if (v >= 0) {
+                    naHir = hirKidsAdd(naHir, v)
+                }
+            }
+            return this.hir.add("HirNamedArg", ast.textOf(id), "", naSp, naHir)
+        }
+
         // 二元运算
         if (kind == "Binary") {
             return this.lowerBinary(ast, id)
@@ -1120,6 +1193,21 @@ class HirLowerer {
         val sp: Span = ast.spanOf(id)
         val kids: String = ast.kidsOf(id)
         val kCount: Int = hirKidsCount(kids)
+
+        // 中缀 `a to b` → Pair 构造 `Collections.pairOf(a, b)`
+        // （AOT 下是 2 元素 `AuraDynList`，`val (x, y) = p` 经 getAt(0/1) 解构）
+        if (op == "to") {
+            var toKids: String = hirNoKids()
+            var ti: Int = 0
+            while (ti < kCount) {
+                val th: Int = this.lowerExpr(ast, hirKidsAt(kids, ti))
+                if (th >= 0) {
+                    toKids = hirKidsAdd(toKids, th)
+                }
+                ti = ti + 1
+            }
+            return this.hir.add("HirCall", "Collections.pairOf", "", sp, toKids)
+        }
 
         var hirKids: String = hirNoKids()
         var opTy: String = ""
@@ -1417,6 +1505,46 @@ class HirLowerer {
             val patText: String = ast.textOf(patId)
             if (patText == "__else__" || patText == "else") {
                 condHir = this.hir.add("HirLit", "true", "Boolean", sp, hirNoKids())
+            } else if (patText.startsWith("__is__")) {
+                // `is T` 模式 → `aura_isOfType(subject, "T")`（不能走 `subject == pattern`：
+                // 那会把模式标识符 `__is__T` 当变量比较，且 `aura_isOfType` 才是类型检查语义）
+                if (subjectHir >= 0) {
+                    val tname: String = patText.substring(6, patText.length)
+                    var ik: String = hirKidsAdd(hirNoKids(), subjectHir)
+                    val tl: Int = this.hir.add("HirLit", tname, "String", sp, hirNoKids())
+                    ik = hirKidsAdd(ik, tl)
+                    condHir = this.hir.add("HirCall", "aura_isOfType", "", ast.spanOf(armId), ik)
+                }
+            } else if (ast.kindOf(patId) == "InPattern") {
+                // `in a..b` 范围模式 → `subject >= a && subject <= b`
+                // （`a..<b` → `subject < b`）。分解区间上下界、复用既有比较/逻辑
+                // 发射路径，避免为「区间成员测试」新增运行库/发射器分支。
+                if (subjectHir >= 0) {
+                    val pk: String = ast.kidsOf(patId)
+                    if (hirKidsCount(pk) > 0) {
+                        val rngAst: Int = hirKidsAt(pk, 0)
+                        val rk: String = ast.kidsOf(rngAst)
+                        if (hirKidsCount(rk) >= 2) {
+                            val loHir: Int = this.lowerExpr(ast, hirKidsAt(rk, 0))
+                            val hiHir: Int = this.lowerExpr(ast, hirKidsAt(rk, 1))
+                            if (loHir >= 0 && hiHir >= 0) {
+                                val kLo: String = hirKidsAdd(hirKidsAdd(hirNoKids(), subjectHir), loHir)
+                                val geNode: Int = this.hir.add("HirBinary", ">=",
+                                    "", ast.spanOf(armId), kLo)
+                                var hiOp: String = "<="
+                                if (ast.textOf(rngAst) == "0") {
+                                    hiOp = "<"
+                                }
+                                val kHi: String = hirKidsAdd(hirKidsAdd(hirNoKids(), subjectHir), hiHir)
+                                val leNode: Int = this.hir.add("HirBinary", hiOp,
+                                    "", ast.spanOf(armId), kHi)
+                                val kBoth: String = hirKidsAdd(hirKidsAdd(hirNoKids(), geNode), leNode)
+                                condHir = this.hir.add("HirBinary", "&&",
+                                    "", ast.spanOf(armId), kBoth)
+                            }
+                        }
+                    }
+                }
             } else {
                 val patHir: Int = this.lowerExpr(ast, patId)
                 if (patHir >= 0) {
@@ -1502,7 +1630,16 @@ class HirLowerer {
                 val pName: String = ast.textOf(pId)
                 val pTy: String = ast.tyOf(pId)
                 val pSp: Span = ast.spanOf(pId)
-                val paramId: Int = this.hir.add("HirParam", pName, pTy, pSp, hirNoKids())
+                // 默认参数值：作为 HirParam 的 kids[0]，供调用点补齐实参
+                var pKids: String = hirNoKids()
+                val pAstKids: String = ast.kidsOf(pId)
+                if (hirKidsCount(pAstKids) > 0) {
+                    val dId: Int = this.lowerExpr(ast, hirKidsAt(pAstKids, 0))
+                    if (dId >= 0) {
+                        pKids = hirKidsAdd(pKids, dId)
+                    }
+                }
+                val paramId: Int = this.hir.add("HirParam", pName, pTy, pSp, pKids)
                 paramsStr = hirKidsAdd(paramsStr, paramId)
                 pi = pi + 1
             }

@@ -59,6 +59,14 @@ class Parser {
     /// 一起吃掉，后续分支全部错位（见 `isLambdaStart`）。
     var prsNoLambda: Boolean = false
 
+    /// 「禁止 `is` 二元运算符」开关：when 分支体位置置 true。
+    ///
+    /// 否则分支体 `1` 后面的**下一个分支模式** `is Int` 会被 binPrec("Is") 当作
+    /// 二元运算吃掉（`1 is Int`），随后 `->` 悬空 → 解析错位、整段 when 反同步
+    /// （多个 `is` 分支的 when 在自举产物上直接段错误）。
+    /// 模式位置由 `parseWhen` 的专用分支处理，不需要 `is` 二元运算符。
+    var prsNoBinaryIs: Boolean = false
+
     /// 构造：词法分析并缓存全部 token。
     init(source: String) {
         this.lx = Lexer(source)
@@ -160,6 +168,18 @@ class Parser {
         if (k == "Ident") {
             return true
         }
+        // 注意：`val` / `var` **不在此列**。它们作为标识符使用
+        // （`val val: Int = 5` 之后的 `toStr(-val)`）走的是
+        // `parsePrimary` 末尾的「关键字字面量」兜底路径（与 Rust 侧
+        // `advance().literal` 一致），无需在此额外放行。
+        //
+        // 历史上该兜底路径曾在自举产物中崩溃（`prsIsWordLiteral` 里
+        // `strlen(-1)`），根因**不在词法/取值**，而是发射器的局部变量表
+        // 不处理同名遮蔽：`parsePrimary` 里 StringLiteral 分支的
+        // `val lit: Int` 与兜底分支的 `val lit: String` 共用了一个 i32 槽，
+        // 使 i8* 被按 i32 读出并装箱成野指针。
+        // 已在 `LlvmEmitter.declareVar` / `fvField` 修复（同名不同类型另开
+        // 槽位 + 查找取最后一次声明）。
         return k == "Value" || k == "Data" || k == "Lazy" || k == "Lateinit"
             || k == "It" || k == "By" || k == "To" || k == "Box" || k == "Weak"
             || k == "Select" || k == "Async" || k == "Await" || k == "Comptime"
@@ -328,6 +348,11 @@ class Parser {
         if (k == "Interface") {
             return this.parseTypeDecl("Interface")
         }
+        // `actor Name { … }`：并发实体声明，词法器产出 `Actor` 关键字，
+        // 语义上等价于类（并发由运行时 API 承担）。
+        if (k == "Actor") {
+            return this.parseTypeDecl("Class")
+        }
         if (k == "Typealias") {
             return this.parseTypealias()
         }
@@ -372,7 +397,10 @@ class Parser {
             }
             break
         }
-        if (this.prsCheck("as")) {
+        // 别名导入 `import a.b.C as D`。词法器把 `as` 归类为 **`As`**（非字面量
+        // `"as"`），旧实现用 `prsCheck("as")` 恒为假 → `as D` 不被消费，
+        // 顶层随后把 `as` 当语句解析并反同步（编译期崩溃）。
+        if (this.prsCheck("As")) {
             this.prsAdvance()
             name = name + " as " + this.prsCurLit()
             this.prsAdvance()
@@ -384,6 +412,31 @@ class Parser {
     /// `fun name(params): RetType { body }` 或 `fun name(params): RetType = expr`
     fun parseFunction(): Int {
         this.prsAdvance() // Fun
+        // 泛型类型参数 `<T>` / `<T: Comparable<T>>`：整体跳过。
+        // 不跳过时 `prsCurLit()` 会取到 `<`（非法名字），`prsExpectName` 又**不消费**
+        // 令牌 → 函数名退化为 `_`（sanitizeLlvm("<")），且整段参数/体全部错位。
+        if (this.prsCheck("Lt")) {
+            var depth: Int = 0
+            while (!this.prsAtEnd()) {
+                val gk: String = this.prsCurKind()
+                if (gk == "Lt") {
+                    depth = depth + 1
+                } else if (gk == "Gt") {
+                    depth = depth - 1
+                } else if (gk == "GtGt") {
+                    // `>>` 被词法器合并成**单个** token（`<T: Comparable<T>>`）：
+                    // 按 2 层扣减，否则会一直找不到 `>` 而吞掉整段源码。
+                    depth = depth - 2
+                } else if (gk == "GtGtGt") {
+                    depth = depth - 3
+                }
+                if (depth <= 0 && (gk == "Gt" || gk == "GtGt" || gk == "GtGtGt")) {
+                    this.prsAdvance()
+                    break
+                }
+                this.prsAdvance()
+            }
+        }
         val name: String = this.prsCurLit()
         this.prsExpectName()
 
@@ -391,13 +444,27 @@ class Parser {
         var params = noKids()
         if (!this.prsCheck("RParen")) {
             while (true) {
-                val pname: String = this.prsCurLit()
+                var pname: String = this.prsCurLit()
+                // `vararg` 是软关键字（词法器产出的仍是 Ident）：`vararg nums: Int`。
+                // 不跳过会把 `vararg` 当作参数名，真正的参数名 `nums` 无处安放，
+                // 整个参数列表反同步（`fun f(vararg xs: Int)` 声明被吞掉 → 崩）。
+                if (pname == "vararg" && this.prsKind(this.pos + 1) == "Ident") {
+                    this.prsAdvance()
+                    pname = this.prsCurLit()
+                }
                 this.prsExpectParamName()
                 var pty: String = ""
                 if (this.prsMatch("Colon")) {
                     pty = this.parseTypeName()
                 }
-                params = kidsAdd(params, this.ast.add("Param", pname, pty, this.prsCurSpan(), noKids()))
+                // 默认参数值 `name: Type = expr`：作为 Param 的子节点保存，
+                // 调用点实参不足时由发射器补齐。不解析会让 `=` 处的参数列表
+                // 反同步（`fun greet(a: String = "x")` 整段声明被吞掉）。
+                var pdef = noKids()
+                if (this.prsMatch("Assign")) {
+                    pdef = kidsAdd(noKids(), this.parseExpr())
+                }
+                params = kidsAdd(params, this.ast.add("Param", pname, pty, this.prsCurSpan(), pdef))
                 if (!this.prsMatch("Comma")) {
                     break
                 }
@@ -443,6 +510,63 @@ class Parser {
         } else {
             this.prsAdvance()
         }
+        val nodeKindD: String = if (k == "Val") { "ValDecl" } else { "VarDecl" }
+        // 解构声明 `val (a, b) = expr`：名字位置是括号列表。
+        // 不识别会让 `prsExpectDeclName` 取到 `(`，整条声明反同步（编译期崩溃）。
+        // 降级为块：先把右值绑定到临时名，再按位 `getAt(tmp, i)` 取出各分量
+        // （`to` / `Pair` 在 AOT 下是 2 元素 `AuraDynList`，与 C 侧 `pairOf` 一致）。
+        // 名字用 CSV 串累积（不用 `List`：AOT 下 List 索引会生成野指针）。
+        if (this.prsCheck("LParen")) {
+            val dSp: Span = this.prsCurSpan()
+            this.prsAdvance() // (
+            var namesCsv: String = ""
+            while (!this.prsCheck("RParen") && !this.prsAtEnd()) {
+                if (prsIsWordLiteral(this.prsCurLit())) {
+                    if (namesCsv != "") {
+                        namesCsv = namesCsv + ","
+                    }
+                    namesCsv = namesCsv + this.prsCurLit()
+                }
+                this.prsAdvance()
+            }
+            this.prsExpect("RParen")
+            var dInit: Int = -1
+            if (this.prsMatch("Assign")) {
+                dInit = this.parseExpr()
+            }
+            val nNames: Int = aotCsvCount(namesCsv)
+            val n0: String = aotFieldAt(namesCsv, 0, ",")
+            // 单个名字：直接绑定整个右值
+            if (nNames <= 1) {
+                if (dInit < 0) {
+                    return this.ast.add(nodeKindD, n0, "", dSp, noKids())
+                }
+                return this.ast.add(nodeKindD, n0, "", dSp, kidsAdd(noKids(), dInit))
+            }
+            // 多个名字：`val __destr = expr` + `val a = __destr.getAt(0)` …
+            val tmpName: String = "__destr"
+            var dkids: String = noKids()
+            if (dInit >= 0) {
+                dkids = kidsAdd(dkids,
+                    this.ast.add(nodeKindD, tmpName, "", dSp, kidsAdd(noKids(), dInit)))
+            }
+            var di: Int = 0
+            while (di < nNames) {
+                val recv = this.ast.leaf("Ident", tmpName, dSp)
+                // 用限定名作 callee（`Collections.getAt`）：HIR 对 `obj.getAt(i)`
+                // 形态会把 Member 本身当成 kids[0] 降级（求值得 0），故直接用
+                // 限定名调用形式，实参只有 [接收者, 下标]。
+                val callee = this.ast.leaf("Ident", "Collections.getAt", dSp)
+                val idxLit = this.ast.leaf("IntLiteral", toStr(di), dSp)
+                val callNode = this.ast.add("Call", "", "", dSp,
+                    kidsAdd(kidsAdd(kidsAdd(noKids(), callee), recv), idxLit))
+                dkids = kidsAdd(dkids,
+                    this.ast.add(nodeKindD, aotFieldAt(namesCsv, di, ","), "", dSp,
+                        kidsAdd(noKids(), callNode)))
+                di = di + 1
+            }
+            return this.ast.add("Block", "", "", dSp, dkids)
+        }
         val name: String = this.prsCurLit()
         // 声明名位置只可能是名字：源码里存在 `val val: Int = …`（`val` 作变量名），
         // 用 prsExpectName 会失败且**不消费令牌**，导致 `:` / `=` 全部错位、
@@ -482,12 +606,70 @@ class Parser {
             ctorFields = this.parseCtorParams()
         }
         // 可选父类 / 接口（`: Base, Iface`）
+        //
+        // 首个名字（`class Dog : Animal()` → `Animal`）记入节点 ty 列：
+        // `super.m()` 需要它解析到父类实现，继承来的方法也要沿父链回退查找。
+        // 此前整段被丢弃，`super.name()` 只好解析到自身 → 无限递归 → 栈溢出。
+        var parentName: String = ""
         if (this.prsMatch("Colon")) {
+            if (prsIsWordLiteral(this.prsCurLit())) {
+                parentName = this.prsCurLit()
+            }
             while (!this.prsCheck("LBrace") && !this.prsCheck("Semicolon") && !this.prsAtEnd()) {
                 this.prsAdvance()
             }
         }
         var kids = noKids()
+        // 枚举体：`RED, GREEN, BLUE` / 带数据变体 `Circle(Double)`。
+        // 不能走通用 parseBlock —— 逗号分隔的变体列表会让语句解析在 `,` 处反同步
+        // （超过一个变体即触发编译器崩溃）。此处按「变体列表」单独解析，
+        // 每个变体降级为 `ExprStmt(Ident(name))`（与单变体时的通用路径一致）。
+        if (kindName == "Enum" && this.prsCheck("LBrace")) {
+            this.prsAdvance() // {
+            var vkids = noKids()
+            while (!this.prsCheck("RBrace") && !this.prsAtEnd()) {
+                val vLit: String = this.prsCurLit()
+                if (prsIsWordLiteral(vLit)) {
+                    val vSp: Span = this.prsCurSpan()
+                    this.prsAdvance()
+                    // 带数据变体：消费 `( … )` 载荷（AOT 下枚举按整型常量处理）
+                    if (this.prsCheck("LParen")) {
+                        var depth: Int = 0
+                        while (!this.prsAtEnd()) {
+                            val kk: String = this.prsCurKind()
+                            if (kk == "LParen") {
+                                depth = depth + 1
+                            }
+                            if (kk == "RParen") {
+                                depth = depth - 1
+                                this.prsAdvance()
+                                if (depth <= 0) {
+                                    break
+                                }
+                                continue
+                            }
+                            this.prsAdvance()
+                        }
+                    }
+                    val vIdent = this.ast.leaf("Ident", vLit, vSp)
+                    val vStmt = this.ast.add("ExprStmt", "", "", vSp,
+                        kidsAdd(noKids(), vIdent))
+                    vkids = kidsAdd(vkids, vStmt)
+                } else {
+                    // 注解 / 文档等：跳过，避免死循环
+                    this.prsAdvance()
+                }
+                if (!this.prsMatch("Comma")) {
+                    // 变体间可省略逗号（换行分隔）
+                }
+            }
+            this.prsExpect("RBrace")
+            if (vkids != "") {
+                val mergedEnum = this.ast.add("Block", "", "", this.prsCurSpan(), vkids)
+                kids = kidsAdd(kids, mergedEnum)
+            }
+            return this.ast.add(kindName, name, parentName, this.prsCurSpan(), kids)
+        }
         if (this.prsCheck("LBrace")) {
             val bodyId = this.parseBlock()
             val bodyKids: String = this.ast.kidsOf(bodyId)
@@ -507,7 +689,7 @@ class Parser {
             val merged = this.ast.add("Block", "", "", this.prsCurSpan(), ctorFields)
             kids = kidsAdd(kids, merged)
         }
-        return this.ast.add(kindName, name, "", this.prsCurSpan(), kids)
+        return this.ast.add(kindName, name, parentName, this.prsCurSpan(), kids)
     }
 
     /// 解析 extern object 声明：`extern object Name { ... }`
@@ -711,8 +893,34 @@ class Parser {
         return this.ast.leaf("Typealias", name + " = " + aliased, this.prsCurSpan())
     }
 
-    /// 解析类型名（含可选泛型参数 `<...>`）。
+    /// 解析类型名（含可选泛型参数 `<...>` 与函数类型 `(A, B) -> C`）。
     fun parseTypeName(): String {
+        // 函数类型 `(Int) -> Int` / `(Int, String) -> Boolean`：此前完全不支持，
+        // `(` 被当作类型名起点、`Int` 留在原地 → 整条声明反同步（`val f: (Int) -> Int`
+        // 直接让自举编译器段错误）。
+        if (this.prsCheck("LParen")) {
+            this.prsAdvance()
+            var inner: String = "("
+            var firstP: Boolean = true
+            while (!this.prsCheck("RParen") && !this.prsAtEnd()) {
+                if (!firstP) {
+                    inner = inner + ", "
+                }
+                inner = inner + this.parseTypeName()
+                firstP = false
+                if (!this.prsMatch("Comma")) {
+                    break
+                }
+            }
+            this.prsExpect("RParen")
+            var fnTy: String = inner + ")"
+            if (this.prsCheck("Arrow")) {
+                this.prsAdvance()
+                fnTy = fnTy + " -> " + this.parseTypeName()
+            }
+            fnTy = this.parseTypeSuffix(fnTy)
+            return fnTy
+        }
         var name: String = this.prsCurLit()
         // 类型名位置按「标识符 / 软关键字 / 硬关键字」一律接受：
         // `Unit` 在关键字表里是**硬关键字**（`unit|Unit`），而 `Int`/`String`
@@ -730,6 +938,12 @@ class Parser {
             this.prsExpect("Gt")
             name = name + ">"
         }
+        return this.parseTypeSuffix(name)
+    }
+
+    /// 类型名后缀：`?`（可空）与 `[N]`（定长数组）。
+    fun parseTypeSuffix(base: String): String {
+        var name: String = base
         // 后缀 `?`（可空类型）
         if (this.prsCheck("QuestionMark")) {
             name = name + "?"
@@ -766,6 +980,44 @@ class Parser {
             this.prsAdvance()
             return this.parseStatement()
         }
+        // 软关键字修饰符：**仅当后一个 token 是声明起始**时才跳过。
+        // 否则 `value` / `data` 等作普通标识符使用会被误吞
+        // （实测 `value = v`（类内裸字段赋值）整条语句反同步并让编译器崩溃）。
+        if (k == "Suspend" || k == "Override" || k == "Inline" || k == "Lateinit"
+            || k == "Data" || k == "Sealed" || k == "Value"
+            || k == "Abstract" || k == "Open" || k == "Comptime" || k == "Extern") {
+            val nkMod: String = this.prsKind(this.pos + 1)
+            if (nkMod == "Fun" || nkMod == "Val" || nkMod == "Var"
+                || nkMod == "Class" || nkMod == "Struct" || nkMod == "Object"
+                || nkMod == "Enum" || nkMod == "Interface"
+                // 修饰符链：`value data class Money` / `sealed value class P`
+                || nkMod == "Data" || nkMod == "Sealed" || nkMod == "Value"
+                || nkMod == "Suspend" || nkMod == "Override" || nkMod == "Inline"
+                || nkMod == "Lateinit" || nkMod == "Const") {
+                this.prsAdvance()
+                return this.parseStatement()
+            }
+        }
+        // 软关键字修饰符：`tailrec fun` / `operator fun` / `infix fun` /
+        // `abstract fun` / `open fun` / `lateinit var` …（词法器产出 Ident）。
+        // 不跳过会把修饰符当作函数名，整条声明反同步。
+        if (k == "Ident") {
+            val modw: String = this.prsCurLit()
+            // `companion object { … }`（伴生对象）：`companion` 是普通标识符。
+            // 不跳过会被当作表达式语句，整个类体反同步并崩溃。
+            if (modw == "companion" && this.prsKind(this.pos + 1) == "Object") {
+                this.prsAdvance()
+                return this.parseStatement()
+            }
+            if (modw == "tailrec" || modw == "operator" || modw == "infix"
+                || modw == "abstract" || modw == "open") {
+                val nk: String = this.prsKind(this.pos + 1)
+                if (nk == "Fun" || nk == "Val" || nk == "Var") {
+                    this.prsAdvance()
+                    return this.parseStatement()
+                }
+            }
+        }
         // 声明类语句（类体成员 / 嵌套声明）：此前这些 token 落到表达式分支，
         // 产生「意外的 token: Fun」并使整个类体反同步。
         if (k == "At" || k == "Native" || k == "Export") {
@@ -775,10 +1027,15 @@ class Parser {
         if (k == "Fun") {
             return this.parseFunction()
         }
+        // 嵌套 `actor Name { … }`（词法器产出 `Actor` 关键字）
+        if (k == "Actor") {
+            return this.parseTypeDecl("Class")
+        }
         // 构造函数：`init { ... }` / `init(source: String) { ... }`
         // （`init` 是普通标识符，需看下一个 token 是 `{` 还是 `(`）。
         // 降级为名为 `init` 的 `Function` 节点（HIR 侧合成 `<Class>.init`）。
-        if (k == "Ident" && this.prsCurLit() == "init"
+        if (k == "Ident"
+            && (this.prsCurLit() == "init" || this.prsCurLit() == "constructor")
             && (this.prsKind(this.pos + 1) == "LBrace"
                 || this.prsKind(this.pos + 1) == "LParen")) {
             this.prsAdvance() // init
@@ -836,6 +1093,9 @@ class Parser {
         }
         if (k == "While") {
             return this.parseWhile()
+        }
+        if (k == "Do") {
+            return this.parseDoWhile()
         }
         if (k == "For") {
             return this.parseFor()
@@ -1015,6 +1275,29 @@ class Parser {
         return this.parseStatement()
     }
 
+    /// 解析 do-while 循环：`do { body } while (cond)`。
+    ///
+    /// 语义等价于「先执行一次 body，再 `while (cond) { body }`」，故降级为
+    /// `Block([body, While(cond, body)])`（body 节点被复用/复制两次）。
+    fun parseDoWhile(): Int {
+        val sp: Span = this.prsCurSpan()
+        this.prsAdvance() // Do
+        val body: Int = this.parseBlock()
+        this.prsExpect("While")
+        var cond: Int
+        if (this.prsCheck("LParen")) {
+            this.prsAdvance()
+            cond = this.parseExpr()
+            this.prsExpect("RParen")
+        } else {
+            cond = this.parseExpr()
+        }
+        val whileNode: Int = this.ast.add("While", "", "", sp, kidsAdd(kidsAdd(noKids(), cond), body))
+        var blockKids: String = kidsAdd(noKids(), body)
+        blockKids = kidsAdd(blockKids, whileNode)
+        return this.ast.add("Block", "", "", sp, blockKids)
+    }
+
     /// 解析 while 循环。
     fun parseWhile(): Int {
         this.prsAdvance() // While
@@ -1138,7 +1421,12 @@ class Parser {
     fun binPrec(k: String): Int {
         if (k == "OrOr") { return 1 }
         if (k == "AndAnd") { return 2 }
-        if (k == "EqEq" || k == "Neq" || k == "Is" || k == "As") { return 3 }
+        if (k == "EqEq" || k == "Neq" || k == "Is" || k == "As") {
+            if (k == "Is" && this.prsNoBinaryIs) {
+                return 0
+            }
+            return 3
+        }
         if (k == "Lt" || k == "Gt" || k == "LtEq" || k == "GtEq") { return 4 }
         if (k == "LtLt" || k == "GtGt" || k == "GtGtGt") { return 5 }
         if (k == "Plus" || k == "Minus") { return 6 }
@@ -1168,7 +1456,39 @@ class Parser {
                 )
                 continue
             }
+            // 中缀函数 `a to b`（Pair 构造）：词法器产出 **`To`** 关键字。
+            // 不识别时 `val p = 3 to 4` 会被解析成 `val p = 3` + 独立语句 `to 4`，
+            // `p` 退化为整数，后续解构/字段访问全部错乱。
+            if (this.prsCurKind() == "To"
+                && this.prsKind(this.pos + 1) != "Assign") {
+                if (minPrec > 5) {
+                    break
+                }
+                this.prsAdvance()
+                val toRight = this.parseBinary(6)
+                val toSp = mergeSpan(this.ast.spanOf(left), this.ast.spanOf(toRight))
+                left = this.ast.add("Binary", "to", "", toSp,
+                    kidsAdd(kidsAdd(noKids(), left), toRight))
+                continue
+            }
             val op = this.prsCurKind()
+            // 区间 `a..b`（闭）/ `a..<b`（左闭右开）：构造 `Range` AST 节点，
+            // text 为 inclusive 标志（"1"/"0"）。此前完全未处理，`for (i in 1..5)`
+            // 的迭代对象会被解析成裸 `1`（右界丢失 → 循环退化为 `count(1)`）。
+            if (op == "DoubleDotOp" || op == "DoubleDotLtOp") {
+                if (minPrec > 1) {
+                    break
+                }
+                this.prsAdvance()
+                val rEnd: Int = this.parseBinary(2)
+                var rInc: String = "1"
+                if (op == "DoubleDotLtOp") {
+                    rInc = "0"
+                }
+                val rsp = mergeSpan(this.ast.spanOf(left), this.ast.spanOf(rEnd))
+                left = this.ast.add("Range", rInc, "", rsp, kidsAdd(kidsAdd(noKids(), left), rEnd))
+                continue
+            }
             val prec = this.binPrec(op)
             if (prec == 0 || prec < minPrec) {
                 break
@@ -1215,7 +1535,20 @@ class Parser {
                 if (!this.prsCheck("RParen")) {
                     while (true) {
                         val a = this.parseExpr()
-                        args = kidsAdd(args, a)
+                        // 命名参数 `f(name = v)`：实参位置是裸标识符且后跟 `=`。
+                        // 不识别会让参数列表在 `=` 处反同步（整条调用表达式被吞掉）。
+                        // 记为 `NamedArg(text=参数名, kids=[值])`，供 HIR/发射器取用。
+                        if (this.prsCheck("Assign")
+                            && this.ast.kindOf(a) == "Ident") {
+                            val nSp: Span = this.ast.spanOf(a)
+                            val argName: String = this.ast.textOf(a)
+                            this.prsAdvance() // `=`
+                            val av: Int = this.parseExpr()
+                            args = kidsAdd(args, this.ast.add("NamedArg", argName, "",
+                                nSp, kidsAdd(noKids(), av)))
+                        } else {
+                            args = kidsAdd(args, a)
+                        }
                         if (!this.prsMatch("Comma")) {
                             break
                         }
@@ -1223,6 +1556,12 @@ class Parser {
                 }
                 this.prsExpect("RParen")
                 node = this.ast.add("Call", "", "", this.prsCurSpan(), args)
+            } else if (k == "DoubleBang") {
+                // 非空断言 `expr!!`：词法器产出 `DoubleBang`。
+                // 不识别会让整个表达式在 `!!` 处反同步（编译期崩溃）。
+                val sp: Span = mergeSpan(this.ast.spanOf(node), this.prsCurSpan())
+                this.prsAdvance()
+                node = this.ast.add("Unwrap", "", "", sp, kidsAdd(noKids(), node))
             } else if (k == "Dot") {
                 this.prsAdvance()
                 val member: String = this.prsCurLit()
@@ -1248,6 +1587,39 @@ class Parser {
                     this.prsCurSpan(),
                     kidsAdd(kidsAdd(noKids(), node), idx)
                 )
+            } else if (k == "LBrace" && this.ast.kindOf(node) == "Member"
+                && this.prsCurSpan().startLine == this.ast.spanOf(node).endLine) {
+                // 尾随 lambda：`nums.filter { it > 2 }` → `Call(filter, [接收者, 块])`。
+                // 不识别时块会被当作独立语句，**后续 `.map { … }` 的 `.` 无法接续**
+                // （postfix 循环已 break）→ 表达式反同步、编译期崩溃
+                // （实测 `nums.filter { it > 2 }.map { it * 100 }`）。
+                // 仅当「接收者是成员访问」且「`{` 与接收者同一行」时按尾随 lambda
+                // 处理，避免把「成员访问语句后紧跟的块语句」误判为实参。
+                val tBlkSp: Span = this.prsCurSpan()
+                var tBlk: Int = this.parseBlock()
+                // 单表达式块：取内层表达式作为 lambda 体。
+                // 块体 lambda 在发射器里按「语句序列」处理，**末条表达式不会作为返回值**
+                // （实测 `{ it % 2 == 0 }` 生成 `ret i32 0` → filter 恒空）。
+                // 与 `parsePrimary` 的块表达式取法保持一致。
+                val tBkKids: String = this.ast.kidsOf(tBlk)
+                if (kidsCount(tBkKids) == 1) {
+                    val tOnly: Int = this.ast.childOf(tBlk, 0)
+                    if (this.ast.kindOf(tOnly) == "ExprStmt"
+                        && kidsCount(this.ast.kidsOf(tOnly)) == 1) {
+                        tBlk = this.ast.childOf(tOnly, 0)
+                    }
+                }
+                // 包成 lambda：隐式单参 `it`（`nums.filter { it % 2 == 0 }`）。
+                // 不包 lambda 时块只是普通表达式，`it` 是未定义变量（求值为 0），
+                // 闭包实参退化为「装箱 0」的野指针 → 运行期访问违例。
+                val tIt: Int = this.ast.add("Param", "it", "", tBlkSp, noKids())
+                val tParams: Int = this.ast.add("Params", "", "", tBlkSp,
+                    kidsAdd(noKids(), tIt))
+                val tLam: Int = this.ast.add("Lambda", "", "", tBlkSp,
+                    kidsAdd(kidsAdd(noKids(), tParams), tBlk))
+                val tSp: Span = mergeSpan(this.ast.spanOf(node), this.ast.spanOf(tBlk))
+                node = this.ast.add("Call", "", "", tSp,
+                    kidsAdd(kidsAdd(noKids(), node), tLam))
             } else {
                 break
             }
@@ -1446,6 +1818,21 @@ class Parser {
                 val elseSp: Span = this.prsCurSpan()
                 this.prsAdvance()
                 pat = this.ast.leaf("Ident", "__else__", elseSp)
+            } else if (this.prsCheck("Is")) {
+                // `is T` 模式：`is` 在模式位置没有左操作数，走 parseExpr 会落进
+                // 「意外 token」分支。按 Rust 侧约定降级为标识符 `__is__T`。
+                val isSp: Span = this.prsCurSpan()
+                this.prsAdvance() // Is
+                val tname: String = this.parseTypeName()
+                pat = this.ast.leaf("Ident", "__is__" + tname, isSp)
+            } else if (this.prsCheck("In")) {
+                // `in a..b` 范围模式：`in` 在模式位置没有左操作数。
+                // 降级为新节点 `InPattern(kids=[rangeExpr])`，由 HIR 侧翻译成
+                // `Collections.contains(__range(...), subject)`。
+                val inSp: Span = this.prsCurSpan()
+                this.prsAdvance() // In
+                val rngPat: Int = this.parseExpr()
+                pat = this.ast.add("InPattern", "", "", inSp, kidsAdd(noKids(), rngPat))
             } else {
                 // 模式位置**禁止 lambda 解析**：`CONST_INT -> "…"` 会被
                 // `isLambdaStart()` 误判为单参 lambda 并连箭头带分支体一起吃掉，
@@ -1457,7 +1844,19 @@ class Parser {
                 this.prsNoLambda = prevNoLambda
             }
             this.prsExpect("Arrow")
+            // 分支体位置限制：
+            //   * 禁止 `is` 二元运算符 —— 否则下一个分支模式 `is T` 会被当前
+            //     分支体吞掉（`1 is Int`），`->` 悬空导致解析错位；
+            //   * 禁止 lambda 识别 —— 否则 `"+" -> a` 后面紧跟的 `"-" -> b`
+            //     会被当作单参 lambda `a -> b` 整体吃掉（分支体退化成闭包，
+            //     `when (op) { "+" -> a; "-" -> b }` 生成垃圾值/崩溃）。
+            val prevNoIs: Boolean = this.prsNoBinaryIs
+            val prevNoLam: Boolean = this.prsNoLambda
+            this.prsNoBinaryIs = true
+            this.prsNoLambda = true
             val body = this.parseExpr()
+            this.prsNoBinaryIs = prevNoIs
+            this.prsNoLambda = prevNoLam
             arms = kidsAdd(arms, this.ast.add("WhenArm", "", "", this.prsCurSpan(), kidsAdd(kidsAdd(noKids(), pat), body)))
         }
         this.prsExpect("RBrace")

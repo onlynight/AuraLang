@@ -513,6 +513,7 @@ impl EmitCtx {
 /// 某 LLVM 类型的零值字面量（补齐无显式返回路径；与 Aura 侧 `defaultValue` 一致）。
 fn default_value_for_llvm(ty: &str) -> String {
     match ty {
+        "void" => String::new(),
         "float" | "double" => "0.0".to_string(),
         "i1" => "false".to_string(),
         "i8*" | "ptr" => "null".to_string(),
@@ -1478,10 +1479,16 @@ fn emit_statement(
             finally,
         } => {
             // Phase D: setjmp/longjmp 异常桥
-            // 1. 分配 jmp_buf（x86_64 Linux: 14 x i64）
+            // 1. 分配 jmp_buf。**必须 16 x i64（128 字节）**：
+            //    Linux x86_64 的 `jmp_buf` 为 14 个 i64，但 Windows/MSVC x64 的
+            //    `_JUMP_BUFFER` 为 16 个 i64；按 14 分配会让 `setjmp` 越界写 16 字节，
+            //    踩坏栈帧（表现为 try 块正常执行、函数返回后访问违例）。
             let jmp_buf = ctx.fresh_var();
             let cur = blocks.last_mut();
-            cur.body.push(format!("{} = alloca [14 x i64]", jmp_buf));
+            // 尺寸取 64 个 i64（512 字节）：MSVC x64 的 `jmp_buf`（`_JUMP_BUFFER`）
+            // 除通用寄存器外还保存 XMM6–XMM15，远大于 Linux 的 14 个 i64。
+            // 旧实现按 14/16 分配 → `setjmp` 越界写栈，实测崩溃。
+            cur.body.push(format!("{} = alloca [64 x i64], align 16", jmp_buf));
 
             // 2. 调用 setjmp，返回值 0 = 正常路径，非 0 = 异常路径
             let sj_result = ctx.fresh_var();
@@ -1592,26 +1599,33 @@ fn emit_variable_decl(
         }
         let (val_ir, val_ty) = emit_expr_val(ctx, blocks, init_expr)?;
         let var_name = ctx.fresh_var();
-        push_alloca_entry(blocks, &var_name, &val_ty);
-        let cur = blocks.last_mut();
-        // 如果值类型和目标类型不匹配（如 null 存入可空结构体），需要转换
-        if val_ir == "null" && val_ty.starts_with("{ ") && val_ty.ends_with(" i1 }") {
-            let null_val = zero_value(&val_ty);
-            cur.body.push(format!(
-                "store {} {} , {} {}",
-                val_ty,
-                null_val,
-                slot_ptr_ty(&val_ty),
-                var_name
-            ));
+        // void 类型初始化器（如调用 void 函数）：不存储返回值，用默认值初始化
+        if val_ty == "void" {
+            push_alloca_entry(blocks, &var_name, "i32");
+            let cur = blocks.last_mut();
+            cur.body.push(format!("store i32 0 , {} {}", slot_ptr_ty("i32"), var_name));
         } else {
-            cur.body.push(format!(
-                "store {} {} , {} {}",
-                val_ty,
-                val_ir,
-                slot_ptr_ty(&val_ty),
-                var_name
-            ));
+            push_alloca_entry(blocks, &var_name, &val_ty);
+            let cur = blocks.last_mut();
+            // 如果值类型和目标类型不匹配（如 null 存入可空结构体），需要转换
+            if val_ir == "null" && val_ty.starts_with("{ ") && val_ty.ends_with(" i1 }") {
+                let null_val = zero_value(&val_ty);
+                cur.body.push(format!(
+                    "store {} {} , {} {}",
+                    val_ty,
+                    null_val,
+                    slot_ptr_ty(&val_ty),
+                    var_name
+                ));
+            } else {
+                cur.body.push(format!(
+                    "store {} {} , {} {}",
+                    val_ty,
+                    val_ir,
+                    slot_ptr_ty(&val_ty),
+                    var_name
+                ));
+            }
         }
         ctx.declare_var(name, var_name, val_ty);
         if let Some(sig) = fn_sig {
@@ -3582,6 +3596,19 @@ fn emit_call(
         return Ok((tmp, "i8*".to_string()));
     }
 
+    // println/print/puts：C 运行库形参是 `const char*`，Aura 语义下实参是「任意值」。
+    // 必须在调用前把数值（i32/i64/i1/float/double）显式转成 C 字符串
+    // （aura_to_str*），否则会把装箱整数当指针交给 printf("%s") 而崩溃。
+    // 与 Aura 侧 Emit.aura::emitPrint / toStringOperand 保持一致。
+    let bare_print = callee.rsplit('.').next().unwrap_or(callee);
+    if matches!(bare_print, "println" | "print" | "puts") {
+        let converted: Vec<(String, String)> = args_ir
+            .iter()
+            .map(|(v, t)| (coerce_to_c_string(ctx, blocks, v, t), "i8*".to_string()))
+            .collect();
+        args_ir = converted;
+    }
+
     let ret_ty = if callee == "Runtime" {
         // 内置异常构造器：返回 String 结构体的数据指针（i8*），直接交给 `__throw`。
         "i8*".to_string()
@@ -3774,6 +3801,25 @@ fn emit_call(
             ));
             return Ok((coll.clone(), "i8*".to_string()));
         }
+        // 列表下标赋值 `lst[i] = v`（int 下标）：走 listSet（原地修改）。
+        // **必须在此处返回**，否则会落入下方「Map.put/set」分支：
+        // 那里会把 i64 下标错误地装箱成 i8* 并调用 mapSet（把下标当字符串键），
+        // 且返回类型（i32）被回写到 i8* 目标变量 → 非法 IR + 运行期崩溃。
+        let idx64 = if is_int_ty(idx_ty) && idx_ty != "i64" {
+            let c = ctx.fresh_var();
+            let cur = blocks.last_mut();
+            cur.body.push(format!("{} = sext {} {} to i64", c, idx_ty, idx));
+            c
+        } else {
+            idx.clone()
+        };
+        let val_ptr = coerce_val_to_i8ptr(ctx, blocks, &args_ir[2].0, &args_ir[2].1);
+        let cur = blocks.last_mut();
+        cur.body.push(format!(
+            "call void @aura_lang_std_Collections_listSet(i8* {}, i64 {}, i8* {})",
+            coll, idx64, val_ptr
+        ));
+        return Ok((coll.clone(), "i8*".to_string()));
     }
     if callee == "__range" {
         // 参数：start(i32), end(i32), inclusive(i32)，由 HIR 在 desugar_expr 中传入。
@@ -3929,7 +3975,7 @@ fn emit_call(
                 "call void @aura_lang_std_Collections_mapSet(i8* {}, i8* {}, i8* {})",
                 m, k_ptr, v_ptr
             ));
-            return Ok(("0".to_string(), "void".to_string()));
+            return Ok(("0".to_string(), "i32".to_string()));
         }
     }
 
@@ -4189,6 +4235,68 @@ fn coerce_arg(
         return (t, to.to_string());
     }
     (val, from.to_string())
+}
+
+/// 把任意值转换为 C 字符串指针 `i8*`（供 println/print 等输出）。
+///
+/// 与 Aura 侧 `Emit.aura::toStringOperand` 对齐：
+/// - `i8*`/`ptr`      → 原样（已是字符串指针）
+/// - `float`/`double` → `aura_to_str_float(double)`
+/// - `i1`             → `sext i64` + `aura_to_str_bool(i64)`
+/// - 字符串结构体      → `extractvalue ..., 0` 取数据指针
+/// - 其它整型          → 拓宽到 `i64` + `aura_to_str(i64)`
+fn coerce_to_c_string(ctx: &mut EmitCtx, blocks: &mut FuncBlocks, val: &str, from: &str) -> String {
+    if from == "i8*" || from == "ptr" {
+        return val.to_string();
+    }
+    if from == "float" || from == "double" {
+        let dv = if from == "float" {
+            let e = ctx.fresh_var();
+            blocks.last_mut().body.push(format!("{} = fpext float {} to double", e, val));
+            e
+        } else {
+            val.to_string()
+        };
+        let t = ctx.fresh_var();
+        blocks.last_mut().body.push(format!(
+            "{} = call i8* @aura_to_str_float(double {})",
+            t, dv
+        ));
+        return t;
+    }
+    if from == "i1" {
+        let e = ctx.fresh_var();
+        blocks.last_mut().body.push(format!("{} = sext i1 {} to i64", e, val));
+        let t = ctx.fresh_var();
+        blocks.last_mut().body.push(format!("{} = call i8* @aura_to_str_bool(i64 {})", t, e));
+        return t;
+    }
+    // 字符串结构体 `{ i8*, i64 }` → 取数据指针字段
+    if from.starts_with("{ i8*") {
+        let t = ctx.fresh_var();
+        blocks.last_mut().body.push(format!("{} = extractvalue {} {}, 0", t, from, val));
+        return t;
+    }
+    // 其它（整型）：统一拓宽到 i64 再转字符串
+    let iv = if from == "i64" {
+        val.to_string()
+    } else if is_int_ty(from) {
+        let e = ctx.fresh_var();
+        if int_bits(from) < 64 {
+            blocks.last_mut().body.push(format!("{} = sext {} {} to i64", e, from, val));
+        } else {
+            blocks.last_mut().body.push(format!("{} = trunc {} {} to i64", e, from, val));
+        }
+        e
+    } else {
+        // 兜底：指针 → i64（ptrtoint），避免生成非法 cast
+        let e = ctx.fresh_var();
+        blocks.last_mut().body.push(format!("{} = ptrtoint {} {} to i64", e, from, val));
+        e
+    };
+    let t = ctx.fresh_var();
+    blocks.last_mut().body.push(format!("{} = call i8* @aura_to_str(i64 {})", t, iv));
+    t
 }
 
 /// 将任意 AOT 值规整为 `i8*`，用于按值存入 AuraDynList（AOT 下列表元素统一为 i8* 句柄）。

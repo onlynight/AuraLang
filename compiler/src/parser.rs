@@ -292,8 +292,9 @@ impl Parser {
         if self.check(TokenKind::Interface) {
             return Ok(Decl::Interface(self.parse_interface()));
         }
+        // actor 按类降级（见 `parse_actor`：并发仅由运行时承担，语法同 class）
         if self.check(TokenKind::Actor) {
-            return Ok(Decl::Actor(self.parse_actor()));
+            return Ok(Decl::Class(self.parse_actor()));
         }
         // Phase D: 顶层 native fun xxx() — 编译器内置
         if self.check(TokenKind::Native) {
@@ -2076,8 +2077,18 @@ impl Parser {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn parse_actor(&mut self) -> ActorDecl {
+    /// `actor Name { … }` —— 并发实体声明。
+    ///
+    /// 语法与类完全一致（字段 / 方法 / init 块 / 次构造函数 / 伴生对象），
+    /// 并发语义由运行时 `aura.concurrent` API 承担，因此这里**降级为类**。
+    ///
+    /// 旧实现返回 `ActorDecl`，而 `Decl::Actor` 在 HIR 侧只把方法抽成
+    /// **自由函数**（丢掉字段与隐式 this）：`actor Worker { var tick: Int
+    /// … fun step() { tick = tick + 1 } }` 会发射出
+    /// `add i32 tick, 1` —— `tick` 未加 `%`，llc 直接报
+    /// `expected value token`。按类降级后字段/隐式接收者/构造函数全部走
+    /// 既有成熟路径（与 Aura 侧解析器的处理保持一致）。
+    pub fn parse_actor(&mut self) -> ClassDecl {
         let start = self.current().span;
         let visibility = self.take_visibility();
         self.expect(TokenKind::Actor);
@@ -2095,16 +2106,21 @@ impl Parser {
 
         let _ = std::mem::take(&mut self.pending_class_mods);
 
-        ActorDecl {
+        ClassDecl {
             visibility,
+            sealed: false,
             name,
+            type_params: Vec::new(),
+            superclass: None,
             fields: members.fields,
             methods: members.methods,
+            implementations: Vec::new(),
             init_blocks: members.init_blocks,
             constructors: members.constructors,
             companion_objects: members.companions,
             doc: self.take_doc(),
             span: Span::merge(&start, &self.current().span),
+            modifiers: Vec::new(),
         }
     }
 

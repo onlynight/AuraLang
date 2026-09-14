@@ -64,6 +64,10 @@ fun stdSignatureTable(): String {
         "aura_lang_std_Collections_indexOf|i64|i8*,i8*\n" +
         "aura_lang_std_Collections_contains|i32|i8*,i8*\n" +
         "aura_lang_std_Collections_set|i8*|i8*,i64,i8*\n" +
+        // 迭代器链（filter/map 第二实参为闭包句柄，take 为个数）
+        "aura_lang_std_Collections_filter|i8*|i8*,i8*\n" +
+        "aura_lang_std_Collections_map|i8*|i8*,i8*\n" +
+        "aura_lang_std_Collections_take|i8*|i8*,i64\n" +
         // ── FileSystem ──
         "aura_lang_std_FileSystem_exists|i32|i8*\n" +
         "aura_lang_std_FileSystem_readText|i8*|i8*\n" +

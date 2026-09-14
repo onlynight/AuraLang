@@ -719,15 +719,33 @@ int64_t aura_strlen_wrapper(const char *s) { return (int64_t)strlen(s); }
 const char *toStringFloat(double x) { return aura_to_str_float(x); }
 
 // aura.isOfType(value, typeName) → i1：检查值的运行时类型是否匹配目标类型名
-// value: i8* (值指针), typeName: { i8*, i64 } (类型名字符串结构体)
-// 简化实现：将值指针的第一个 4 字节视为类型标签，与目标类型名比较
-_Bool aura_isOfType(const void *value, const AuraString *typeName) {
-    if (!value || !typeName || !typeName->data) return 0;
-    // 将值视为带类型标签的对象：第一个 8 字节存储类型标签指针
-    const char *value_type_name = *(const char *const *)value;
-    if (!value_type_name) return 0;
-    size_t len = typeName->len > 0 ? (size_t)typeName->len : 0;
-    return strncmp(value_type_name, typeName->data, len) == 0 && value_type_name[len] == '\0';
+// value: i8*（AOT 统一的不透明值句柄）, typeName: i8*（C 字符串）
+//
+// AOT 下没有运行时类型标签（数值为 Plan A 低位标记的整数，其余为真实指针），
+// 因此这里是**保守近似**：只保证「不崩溃」，并在常见情况下给出正确判定。
+// 旧实现无条件把 value 当作「指向类型标签的指针」解引用，遇到装箱整数
+// （奇数地址）会直接段错误 —— `when (v) { is Int -> … }` 崩溃的根因。
+_Bool aura_isOfType(const void *value, const char *typeName) {
+    if (!typeName) return 0;
+    // Plan A：低位为 1 → 装箱整数
+    if ((uintptr_t)value & (uintptr_t)1) {
+        return strcmp(typeName, "Int") == 0
+            || strcmp(typeName, "Long") == 0
+            || strcmp(typeName, "Short") == 0
+            || strcmp(typeName, "Byte") == 0
+            || strcmp(typeName, "Number") == 0
+            || strcmp(typeName, "Any") == 0;
+    }
+    if (!value) {
+        return strcmp(typeName, "Null") == 0
+            || strcmp(typeName, "Nothing") == 0
+            || strcmp(typeName, "Any") == 0;
+    }
+    // 真实指针：字符串 / 集合 / 对象。无法区分，按「最宽泛」处理：
+    // 仅当目标是 String/Any/Object 时返回真，其余为假。
+    return strcmp(typeName, "String") == 0
+        || strcmp(typeName, "Any") == 0
+        || strcmp(typeName, "Object") == 0;
 }
 
 // __throw(value) → void：打印异常值到 stderr（AOT throw 表达式支持）
@@ -1728,6 +1746,76 @@ const void *aura_lang_std_Collections_listAppend(const void *list, const void *v
     return (const void *)l;
 }
 
+/* ── 迭代器链：filter / map / take ──
+ *
+ * 闭包实参是「env 句柄」（`i8*`）：首字段为函数指针，调用约定与发射器生成的
+ * `__lambda_N(i8* env, <param>)` 一致（见 aot/Emit.aura 的闭包 ABI）。
+ * 集合元素统一为 `i8*` 句柄：整数按 Plan A 低位标记装箱 `(v<<1)|1`，
+ * 故先解箱成 int64_t 传给闭包，再把闭包结果装箱回写。 */
+typedef int64_t (*AuraIterFn)(void *env, int64_t x);
+
+static AuraIterFn aura_iter_fn(void *clo) {
+    if (!clo) return NULL;
+    return (AuraIterFn)(*(void **)clo);
+}
+
+/** Plan A 解箱：奇数（低位标记）→ `v >> 1`，偶数视为真实指针（此处按整数原值处理）。 */
+static int64_t aura_iter_unbox(int64_t v) {
+    if ((v & 1) != 0) return v >> 1;
+    return v;
+}
+
+/** Plan A 装箱：`(v << 1) | 1`。 */
+static const char *aura_iter_box(int64_t v) {
+    return (const char *)(intptr_t)((((uint64_t)v) << 1) | 1ULL);
+}
+
+const void *aura_lang_std_Collections_filter(const void *list, const void *clo) {
+    AuraDynList *out = aura_dynlist_new(4);
+    const AuraDynList *l = (const AuraDynList *)list;
+    AuraIterFn fn = aura_iter_fn((void *)clo);
+    if (!l || !fn) return (const void *)out;
+    int64_t i = 0;
+    while (i < l->len) {
+        int64_t arg = aura_iter_unbox((int64_t)(intptr_t)l->items[i]);
+        /* 谓词闭包的返回类型是 `i1`（如 `icmp`），ABI 只保证低字节有效；
+         * 直接按 int32 读取会把高位垃圾当「真」→ filter 恒全通过。 */
+        int64_t keep = (int64_t)(uint8_t)fn((void *)clo, arg);
+        if (keep != 0) {
+            aura_dynlist_push(out, l->items[i]);
+        }
+        i = i + 1;
+    }
+    return (const void *)out;
+}
+
+const void *aura_lang_std_Collections_map(const void *list, const void *clo) {
+    AuraDynList *out = aura_dynlist_new(4);
+    const AuraDynList *l = (const AuraDynList *)list;
+    AuraIterFn fn = aura_iter_fn((void *)clo);
+    if (!l || !fn) return (const void *)out;
+    int64_t i = 0;
+    while (i < l->len) {
+        int64_t arg = aura_iter_unbox((int64_t)(intptr_t)l->items[i]);
+        int64_t r = (int64_t)(int32_t)fn((void *)clo, arg);
+        aura_dynlist_push(out, aura_iter_box(r));
+        i = i + 1;
+    }
+    return (const void *)out;
+}
+
+const void *aura_lang_std_Collections_take(const void *list, int64_t n) {
+    AuraDynList *out = aura_dynlist_new(4);
+    const AuraDynList *l = (const AuraDynList *)list;
+    if (!l || n <= 0) return (const void *)out;
+    int64_t i = 0;
+    while (i < l->len && i < n) {
+        aura_dynlist_push(out, l->items[i]);
+        i = i + 1;
+    }
+    return (const void *)out;
+}
+
 /** list.pop()：弹出并返回末尾元素（AOT 下列表元素为 i8* 句柄）。
  *  空列表返回 NULL；返回值经 getAt 的逆转换还原为原类型。 */
 const void *aura_lang_std_Collections_listPop(const void *list) {
@@ -1738,8 +1826,10 @@ const void *aura_lang_std_Collections_listPop(const void *list) {
 }
 
 /** 构造整数区间列表（对应 Aura `start..end` / `start..<end` / `start..=end`）。
- *  start/end/inclusive 均为 i32；元素以 i64 句柄（值本身）存入 AuraDynList，
- *  供 AOT 的 `for i in 1..10` 等循环消费。 */
+ *  start/end/inclusive 均为 i32；元素以 **Plan A 低位标记** 装箱
+ *  `((i<<1)|1)` 存入 AuraDynList —— 与 `aura_to_int_any` / 列表元素装箱约定
+ *  一致。旧实现存原始整数：偶数被当成真实指针、奇数被当成已标记整数
+ *  （`aura_to_int_any` 再右移一位），`for (i in 1..5)` 读出的值全错。 */
 const void *aura_lang_std_Collections_range(int32_t start, int32_t end, int32_t inclusive) {
     AuraDynList *l = aura_dynlist_new(16);
     if (!l) return NULL;
@@ -1748,7 +1838,7 @@ const void *aura_lang_std_Collections_range(int32_t start, int32_t end, int32_t 
         for (;;) {
             if (i > (int64_t)end) break;
             if (i == (int64_t)end && !inclusive) break;
-            aura_dynlist_push(l, (const char *)(intptr_t)i);
+            aura_dynlist_push(l, (const char *)(intptr_t)((i << 1) | 1));
             if (i == (int64_t)end) break;
             i++;
         }
@@ -1757,7 +1847,7 @@ const void *aura_lang_std_Collections_range(int32_t start, int32_t end, int32_t 
         for (;;) {
             if (i < (int64_t)end) break;
             if (i == (int64_t)end && !inclusive) break;
-            aura_dynlist_push(l, (const char *)(intptr_t)i);
+            aura_dynlist_push(l, (const char *)(intptr_t)((i << 1) | 1));
             if (i == (int64_t)end) break;
             i--;
         }

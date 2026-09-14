@@ -597,6 +597,13 @@ class Lexer {
                 this.emit("TripleDotOp", "...")
                 return
             }
+            // `..<`（左闭右开区间）：必须作为**单个** token，否则会被拆成
+            // `..` + `<`，解析成 `(a..b) < c`。
+            if (this.peek(0) == "<") {
+                this.advance()
+                this.emit("DoubleDotLtOp", "..<")
+                return
+            }
             this.emit("DoubleDotOp", "..")
             return
         }

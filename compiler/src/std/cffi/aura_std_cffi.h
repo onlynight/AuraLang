@@ -302,8 +302,8 @@ double aura_clock_wrapper(void);
 int64_t aura_strlen_wrapper(const char *s);
 const char *toStringFloat(double x);
 
-/** 类型检查：isOfType(value, typeName) → _Bool */
-_Bool aura_isOfType(const void *value, const AuraString *typeName);
+/** 类型检查：isOfType(value, typeName) → _Bool（typeName 为 C 字符串） */
+_Bool aura_isOfType(const void *value, const char *typeName);
 
 /** throw 表达式（AOT）：打印异常值到 stderr */
 void __throw(const void *value);

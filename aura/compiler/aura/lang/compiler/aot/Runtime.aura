@@ -101,6 +101,10 @@ fun preludeTable(): String {
         "aura_lang_std_Collections_count|i64|i8*\n" +
         "aura_lang_std_Collections_getAt|i8*|i8*,i64\n" +
         "aura_lang_std_Collections_listSet|void|i8*,i64,i8*\n" +
+        // 迭代器链（闭包回调由 C 侧经 env 首字段取函数指针调用）
+        "aura_lang_std_Collections_filter|i8*|i8*,i8*\n" +
+        "aura_lang_std_Collections_map|i8*|i8*,i8*\n" +
+        "aura_lang_std_Collections_take|i8*|i8*,i64\n" +
         "aura_lang_std_Math_sin|double|double\n" +
         "aura_lang_std_Math_cos|double|double\n" +
         "aura_lang_std_Math_sqrt|double|double\n" +
@@ -131,9 +135,16 @@ fun runtimeDeclarations(): String {
     out.sbAdd("declare void @aura_cpu_mem_fence()\n")
     out.sbAdd("declare i64 @aura_cpu_atomic_add(i64, i64)\n")
     // Phase D: setjmp/longjmp 异常桥（try/catch）
+    // `setjmp` 必须**直接在 try 所在函数内调用**：经 C 辅助函数转发时
+    // 保存的是辅助函数的栈帧，函数返回后帧失效（MSVC 下表现为进程退出时
+    // 访问违例）。这里让生成的 IR 直接调用 CRT 的 `setjmp` 符号。
+    out.sbAdd("declare i32 @setjmp(i8*)\n")
     out.sbAdd("declare i32 @aura_setjmp(i8*)\n")
     out.sbAdd("declare void @aura_longjmp(i8*, i32)\n")
     out.sbAdd("@aura_exception_value = external global i8*\n")
+    // `is` 类型检查（`when` 模式 / `x is T`）：签名 `(value: i8*, typeName: i8*) → i1`，
+    // typeName 为 C 字符串（不是 AuraString 结构体指针），与 Rust 侧声明保持一致。
+    out.sbAdd("declare i1 @aura_isOfType(i8*, i8*)\n")
     appendDeclarations(out, runtimeTable())
     val seenR: String = runtimeFunctionNames()
     appendDeclarationsFiltered(out, preludeTable(), seenR)
@@ -252,6 +263,12 @@ fun tableSignature(table: String, name: String): String {
 /// HIR 把 `s.split(":")` 降级为 `HirCall text="split"` 且接收者在 kids[0]；
 /// 本表把裸方法名解析为 C 运行库的调用点符号。未命中返回 ""。
 fun methodCallSymbol(name: String): String {
+    // 迭代器链：`nums.filter { … }` / `.map { … }` / `.take(n)`。
+    // 第二实参为闭包句柄（`filter`/`map`）或个数（`take`），
+    // 由 C 运行库 `aura_lang_std_Collections_*` 实现。
+    if (name == "filter") { return "aura_lang_std_Collections_filter" }
+    if (name == "map") { return "aura_lang_std_Collections_map" }
+    if (name == "take") { return "aura_lang_std_Collections_take" }
     if (name == "length" || name == "size") { return "aura_lang_std_String_length" }
     if (name == "contains") { return "aura_lang_std_String_contains" }
     if (name == "startsWith") { return "aura_lang_std_String_startsWith" }
