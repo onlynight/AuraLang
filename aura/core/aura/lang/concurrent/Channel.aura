@@ -1,0 +1,48 @@
+// aura:///aura/lang/concurrent/Channel.aura
+package aura.lang.concurrent
+// 消息通道（Channel）—— 运行时原生实现（非纯 Aura）。
+//
+// 为什么保留 native：跨线程阻塞队列 / select 需要调度器与条件变量配合，
+// TCP 通道还需要 socket 系统调用，属于运行时设施（Layer 0-B），
+// 无法在 Aura 源码层完整表达，因此本类只声明签名、实现由 VM / 运行库提供。
+//
+// 使用前需 import：
+// ```aura
+// import aura.lang.concurrent.Channel.*   // 短名可用：newChannel, channelSend, ...
+// import aura.lang.concurrent.Channel     // 类式调用：Channel.newChannel(0)
+// ```
+//
+// @since 0.5
+internal object Channel {
+
+    // ── 本地通道 ──
+
+    /// 创建新的容量受限消息通道
+    ///
+    /// - 参数：`capacity` — 缓冲区大小（0 = 无缓冲）
+    /// - 返回：通道 ID
+    fun newChannel(capacity: Int): Int
+
+    /// 向通道发送一个消息（容量满时阻塞）
+    fun channelSend(ch: Int, value: Any): Unit
+
+    /// 从通道接收一个消息（空时阻塞）
+    fun channelRecv(ch: Int): Any
+
+    /// 从通道非阻塞接收；返回 null 表示通道为空
+    fun channelTryRecv(ch: Int): Any
+
+    /// 多通道选择（至少一个就绪时返回索引）
+    fun select(channels: List<Int>): Int
+
+    /// 带超时的多通道选择（返回索引；超时返回 -1）
+    fun selectTimeout(channels: List<Int>, timeoutMs: Int): Int
+
+    // ── TCP 网络通道 ──
+
+    /// 创建 TCP 网络通道（返回通道 ID）
+    fun newTcpChannel(host: String, port: Int): Int
+
+    /// 通过 TCP 通道发送字符串
+    fun tcpChannelSend(ch: Int, message: String): Unit
+}

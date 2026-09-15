@@ -230,6 +230,23 @@ impl Linker {
     ) -> Option<crate::signature::FuncSig> {
         match kind {
             SymbolKind::Function => sig.find_function(name).cloned(),
+            SymbolKind::Type => sig.find_type(name).map(|t| crate::signature::FuncSig {
+                name: t.name.clone(),
+                params: vec![],
+                return_type: crate::signature::TypeSig::UserType {
+                    name: t.name.clone(),
+                    type_params: vec![],
+                },
+                is_public: t.is_public,
+                type_params: t.type_params.clone(),
+            }),
+            SymbolKind::Const => sig.find_constant(name).map(|c| crate::signature::FuncSig {
+                name: c.name.clone(),
+                params: vec![],
+                return_type: c.type_sig.clone(),
+                is_public: c.is_public,
+                type_params: vec![],
+            }),
             _ => sig.find_function(name).cloned(),
         }
     }
@@ -241,7 +258,7 @@ impl Linker {
         let mut stack = Vec::new();
 
         for mod_name in self.modules.keys() {
-            if !!visited.contains_key(mod_name) {
+            if !visited.contains_key(mod_name) {
                 self.visit_deps(mod_name, &mut visited, &mut stack, &mut errors);
             }
         }

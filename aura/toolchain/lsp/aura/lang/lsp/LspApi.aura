@@ -1,0 +1,158 @@
+// aura:///lsp/aura/lang/lsp/LspApi.aura
+package aura.lang.lsp
+
+// ── 标准库 ──
+import aura.lang.std.String
+
+// ── Native 包 ──
+import aura.lang.native.console.Console
+
+// ── 编译器模块 ──
+import aura.lang.compiler.parser.Parser
+import aura.lang.compiler.sema.TypeChecker
+
+// ── 兄弟模块 ──
+import aura.lang.lsp.FileIO
+
+// ═══════════════════════════════════════════════════════════════
+// Phase E: LSP API 实现（纯 Aura，调用编译器模块）
+// ═══════════════════════════════════════════════════════════════
+
+/// 启动 LSP 服务器 → exit code
+fun lspStart(): Int {
+    Console.println("[LSP] Server started (pure Aura, Phase E)")
+    return 0
+}
+
+/// 停止 LSP 服务器 → exit code
+fun lspStop(): Int {
+    Console.println("[LSP] Server stopped")
+    return 0
+}
+
+/// 解析 JSON-RPC 请求 → 解析后的 JSON 字符串
+fun lspParseRequest(data: String): String {
+    return data  // 简化：原样返回
+}
+
+/// 代码补全 → 补全项 JSON 数组
+fun lspCompletion(file: String, pos: Int): String {
+    val content: String = readLspFile(file)
+    if (content.length == 0) { return "[]" }
+    val p = Parser(content)
+    p.parseProgram()
+    if (p.errors.count > 0) { return "[]" }
+    // 简化：返回所有顶级函数名作为补全
+    var result: String = "["
+    var i: Int = 0
+    var first: Boolean = true
+    while (i < p.ast.count) {
+        if (p.ast.kindOf(i) == "FunDecl") {
+            if (!first) { result = result + "," }
+            val name: String = p.ast.literalAt(i)
+            result = result + "{\"label\":\"" + name + "\",\"kind\":2}"
+            first = false
+        }
+        i = i + 1
+    }
+    result = result + "]"
+    return result
+}
+
+/// 悬停信息 → 悬停信息 JSON
+fun lspHover(file: String, pos: Int): String {
+    val content: String = readLspFile(file)
+    if (content.length == 0) { return "{}" }
+    val p = Parser(content)
+    p.parseProgram()
+    // 简化：返回基本类型信息
+    return "{\"contents\":{\"kind\":\"markdown\",\"value\":\"*Hover info*\"}}"
+}
+
+/// 跳转定义 → 定义位置 JSON
+fun lspDefinition(file: String, pos: Int): String {
+    val content: String = readLspFile(file)
+    if (content.length == 0) { return "null" }
+    val p = Parser(content)
+    p.parseProgram()
+    return "null"
+}
+
+/// 查找引用 → 引用位置 JSON 数组
+fun lspReferences(file: String, pos: Int): String {
+    val content: String = readLspFile(file)
+    if (content.length == 0) { return "[]" }
+    val p = Parser(content)
+    p.parseProgram()
+    return "[]"
+}
+
+/// 诊断信息 → 诊断 JSON 数组
+fun lspDiagnostic(file: String): String {
+    val content: String = readLspFile(file)
+    if (content.length == 0) { return "[]" }
+    val p = Parser(content)
+    p.parseProgram()
+    var result: String = "["
+    var first: Boolean = true
+    // 添加解析错误
+    val errors = p.errors
+    if (errors.count > 0) {
+        // 简化：返回错误计数
+        result = result + "{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":0}},\"severity\":1,\"message\":\"" + toStr(errors.count) + " parse error(s)\"}"
+    }
+    // 添加语义错误
+    val checker = TypeChecker()
+    checker.tcCheck(p.ast)
+    val semaErrors = checker.tcGetErrors()
+    if (semaErrors.count > 0) {
+        if (!first) { result = result + "," }
+        result = result + "{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":0}},\"severity\":1,\"message\":\"" + toStr(semaErrors.count) + " semantic error(s)\"}"
+        first = false
+    }
+    result = result + "]"
+    return result
+}
+
+/// 代码格式化 → 格式化后的文本
+fun lspFormatting(file: String, text: String): String {
+    return text  // 简化：原样返回
+}
+
+/// 文档符号 → 文档符号 JSON 数组
+fun lspDocumentSymbol(file: String): String {
+    val content: String = readLspFile(file)
+    if (content.length == 0) { return "[]" }
+    val p = Parser(content)
+    p.parseProgram()
+    var result: String = "["
+    var first: Boolean = true
+    var i: Int = 0
+    while (i < p.ast.count) {
+        if (p.ast.kindOf(i) == "FunDecl" || p.ast.kindOf(i) == "ClassDecl" || p.ast.kindOf(i) == "ObjectDecl") {
+            if (!first) { result = result + "," }
+            val name: String = p.ast.literalAt(i)
+            val kind: Int = if (p.ast.kindOf(i) == "FunDecl") { 12 } else if (p.ast.kindOf(i) == "ClassDecl") { 5 } else { 7 }
+            result = result + "{\"name\":\"" + name + "\",\"kind\":" + kind + "}"
+            first = false
+        }
+        i = i + 1
+    }
+    result = result + "]"
+    return result
+}
+
+/// 签名帮助 → 签名信息 JSON
+fun lspSignatureHelp(file: String, pos: Int): String {
+    return "{}"
+}
+
+/// 内联提示 → 内联提示 JSON 数组
+fun lspInlayHint(file: String): String {
+    return "[]"
+}
+
+/// 代码操作 → 代码操作 JSON 数组
+fun lspCodeAction(file: String, range: String): String {
+    return "[]"
+}

@@ -112,7 +112,7 @@ pub enum SymbolKind {
 }
 
 impl SymbolKind {
-    fn to_lsp_kind(&self) -> i32 {
+    pub fn to_lsp_kind(&self) -> i32 {
         match self {
             SymbolKind::Function => 3,
             SymbolKind::Variable => 6,

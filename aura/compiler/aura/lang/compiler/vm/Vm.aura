@@ -1,4 +1,5 @@
 // aura:///aura/compiler/aura/lang/compiler/vm/Vm.aura
+package aura.lang.compiler.vm
 // 虚拟机核心实现（Phase 4: 完整 VM Aura 编写）
 // 概念：使用 Aura 语言本身编写完整的虚拟机，实现 bootstrapping
 /// 完整虚拟机实现。
@@ -71,25 +72,24 @@ internal object Vm {
     fun arithmeticAdd(a: Any, b: Any): Any {
         if (typeof(a) == "Int" and typeof(b) == "Int") {
             return (a as Int) + (b as Int)
-        }
-        if (typeof(a) == "Float" or typeof(b) == "Float") {
+        } else if (typeof(a) == "Float" or typeof(b) == "Float") {
             return toFloat(a) + toFloat(b)
-        }
-        if (typeof(a) == "String") {
+        } else if (typeof(a) == "String") {
             return toStr(a) + toStr(b)
+        } else {
+            throw Runtime("ADD: unsupported types " + typeof(a) + " + " + typeof(b))
         }
-        throw Runtime("ADD: unsupported types " + typeof(a) + " + " + typeof(b))
     }
 
     /// 减法。
     fun arithmeticSub(a: Any, b: Any): Any {
         if (typeof(a) == "Float" or typeof(b) == "Float") {
             return toFloat(a) - toFloat(b)
-        }
-        if (typeof(a) == "Int" and typeof(b) == "Int") {
+        } else if (typeof(a) == "Int" and typeof(b) == "Int") {
             return (a as Int) - (b as Int)
+        } else {
+            throw Runtime("SUB: unsupported types " + typeof(a) + " - " + typeof(b))
         }
-        throw Runtime("SUB: unsupported types " + typeof(a) + " - " + typeof(b))
     }
 
     // ── 入口点 ──

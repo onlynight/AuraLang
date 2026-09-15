@@ -204,14 +204,14 @@ fn test_concurrent_module_on_demand() {
     // 无 import 时并发函数不注册（使用 with_modules）
     let reg_no_concurrent = NativeRegistry::with_modules(&["math"]);
     assert!(
-        !reg_no_concurrent.contains("aura.lang.std.Coroutine.spawn"),
-        "未 import aura.lang.std.Coroutine 时不应注册并发函数"
+        !reg_no_concurrent.contains("aura.lang.concurrent.Coroutine.spawn"),
+        "未 import aura.lang.concurrent.Coroutine 时不应注册并发函数"
     );
 
     // 有 import 时并发函数注册
     let reg_with_concurrent = NativeRegistry::with_modules(&["concurrent"]);
     assert!(
-        reg_with_concurrent.contains("aura.lang.std.Coroutine.spawn"),
-        "import aura.lang.std.Coroutine 后应注册并发函数"
+        reg_with_concurrent.contains("aura.lang.concurrent.Coroutine.spawn"),
+        "import aura.lang.concurrent.Coroutine 后应注册并发函数"
     );
 }

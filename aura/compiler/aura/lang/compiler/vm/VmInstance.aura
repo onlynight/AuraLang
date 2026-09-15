@@ -1,0 +1,274 @@
+// aura:///aura/lang/compiler/vm/VmInstance.aura
+package aura.lang.compiler.vm
+// ─────────────────────────────────────────────────────────────
+// VM 实例 —— 统一状态所有权
+//
+// 设计原则：
+//   1. 所有可变状态挂在 class 实例上，禁止 object 单例可变字段。
+//   2. 所有集合用 ArrayList/HashMap，禁止字符串编码。
+//   3. 所有句柄（Mutex/Atomic/Thread 等）属于 VM 实例，随 VM 生命周期自动回收。
+//   4. VM 销毁时，所有子组件的引用同时断开，GC 可回收。
+//
+// 结构：
+//   VmInstance (class, 每 VM 一个实例)
+//   ├── interpreter: VmRunner (class)        —— 解释器
+//   ├── heap: ArcHeap (class)                —— 引用计数堆
+//   ├── gc: GcHeap (class)                   —— 标记-清除堆
+//   ├── jitBridge: VmJitBridge (class)       —— JIT 桥接
+//   ├── coroutines: Coroutine (class)        —— 协程调度器
+//   └── natives: Map<String, Any>            —— 原生函数注册表
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.collection.ArrayList
+import aura.lang.collection.HashMap
+import aura.lang.compiler.vm.VmRunner
+import aura.lang.compiler.vm.FrameManager
+import aura.lang.compiler.vm.VmJitBridge
+import aura.lang.compiler.gc.Gc
+import aura.lang.compiler.memory.Arc
+import aura.lang.compiler.jit.JitState
+import aura.lang.concurrent.Coroutine
+
+/// VM 实例配置。
+class VmConfig {
+    /// 最大指令数。
+    var maxInstructions: Int = 1000000
+
+    /// JIT 热点阈值。
+    var hotspotThreshold: Int = 10000
+
+    /// 是否启用 JIT。
+    var jitEnabled: Boolean = true
+
+    /// GC 触发阈值（分配数）。
+    var gcThreshold: Int = 1000
+
+    /// 最大协程数。
+    var maxCoroutines: Int = 1024
+
+    init() {
+        this.maxInstructions = 1000000
+        this.hotspotThreshold = 10000
+        this.jitEnabled = true
+        this.gcThreshold = 1000
+        this.maxCoroutines = 1024
+    }
+}
+
+/// VM 实例 —— 统一状态所有权。
+///
+/// 每个 VM 实例拥有所有子组件（解释器、堆、GC、JIT、协程），
+/// 随 VM 生命周期自动回收。禁止使用 object 单例承载可变状态。
+class VmInstance {
+
+    /// 解释器。
+    var interpreter: VmRunner
+
+    /// 引用计数堆（ARC）。
+    var heap: ArcHeap
+
+    /// 标记-清除堆（GC）。
+    var gc: GcHeap
+
+    /// JIT 桥接。
+    var jitBridge: VmJitBridge
+
+    /// 协程调度器。
+    var coroutines: Coroutine
+
+    /// 原生函数注册表。
+    var natives: HashMap<String, Any>
+
+    /// VM 配置。
+    var config: VmConfig
+
+    /// 运行状态。
+    var running: Boolean = false
+
+    /// 错误信息。
+    var error: String = ""
+
+    /// 返回值。
+    var returnValue: Any = null
+
+    /// 初始化次数统计。
+    var initCount: Int = 0
+
+    init() {
+        this.config = VmConfig()
+        this.interpreter = VmRunner()
+        this.heap = ArcHeap()
+        this.gc = GcHeap()
+        this.jitBridge = VmJitBridge()
+        this.coroutines = Coroutine()
+        this.natives = HashMap<String, Any>()
+        this.running = false
+        this.error = ""
+        this.returnValue = null
+        this.initCount = 0
+
+        // 配置传递
+        this.interpreter.maxInstructions = this.config.maxInstructions
+        this.jitBridge.state.threshold = this.config.hotspotThreshold
+
+        // 关联协程调度器
+        this.interpreter.coroutineScheduler = this.coroutines
+
+        // 关联 JIT 状态
+        this.jitBridge.state.threshold = this.config.hotspotThreshold
+
+        this.initCount = this.initCount + 1
+    }
+
+    /// 使用自定义配置创建 VM 实例。
+    fun VmInstance(config: VmConfig): VmInstance {
+        // Aura 不支持多构造函数，使用 init 后修改配置
+        return this
+    }
+
+    // ── 字节码加载与执行 ──
+
+    /// 加载字节码。
+    fun loadBytecode(code: String, consts: String, funcs: String): Unit {
+        this.interpreter.loadBytecode(code, consts, funcs)
+    }
+
+    /// 运行 VM。
+    fun run(): Any {
+        this.running = true
+        this.returnValue = this.interpreter.run()
+        this.error = this.interpreter.error
+        this.running = false
+        return this.returnValue
+    }
+
+    // ── 函数注册 ──
+
+    /// 注册函数代码（供 JIT 编译使用）。
+    fun registerFunction(idx: Int, code: String, params: String): Unit {
+        this.jitBridge.registerFunction(idx, code, params)
+    }
+
+    /// 注册原生函数。
+    fun registerNative(name: String, fn: Any): Unit {
+        this.natives.put(name, fn)
+    }
+
+    // ── 协程管理 ──
+
+    /// 启动协程。
+    fun spawnCoroutine(body: () -> Any): Int {
+        return this.coroutines.spawn(body)
+    }
+
+    /// 获取协程结果。
+    fun askCoroutine(co_id: Int): Any {
+        return this.coroutines.ask(co_id)
+    }
+
+    /// 协程调度。
+    fun scheduleCoroutine(): Int {
+        return this.coroutines.schedule()
+    }
+
+    // ── 堆操作 ──
+
+    /// 分配堆对象（ARC）。
+    fun allocHeap(): Int {
+        return this.heap.alloc()
+    }
+
+    /// 增加引用计数。
+    fun retain(idx: Int): Unit {
+        this.heap.retain(idx)
+    }
+
+    /// 减少引用计数。
+    fun release(idx: Int): Unit {
+        this.heap.release(idx)
+    }
+
+    /// 获取堆对象数据。
+    fun getHeapObject(idx: Int): Map<String, Any> {
+        return this.heap.getObject(idx)
+    }
+
+    /// 分配 GC 堆对象。
+    fun gcAlloc(): Int {
+        return this.gc.alloc()
+    }
+
+    /// 触发 GC。
+    fun gcCollect(): Int {
+        return this.gc.collect()
+    }
+
+    // ── JIT 操作 ──
+
+    /// JIT 调用检查。
+    fun jitCheckCall(idx: Int, args: String): String {
+        return checkCall(this.jitBridge, idx, args)
+    }
+
+    /// JIT 统计信息。
+    fun jitStats(): String {
+        return jitStats(this.jitBridge)
+    }
+
+    // ── 状态查询 ──
+
+    /// VM 是否正在运行。
+    fun isRunning(): Boolean {
+        return this.running
+    }
+
+    /// 获取错误信息。
+    fun getError(): String {
+        return this.error
+    }
+
+    /// 获取返回值。
+    fun getReturnValue(): Any {
+        return this.returnValue
+    }
+
+    /// 获取指令执行计数。
+    fun getInstructionCount(): Int {
+        return this.interpreter.instructionCount
+    }
+
+    /// 获取栈深度。
+    fun getStackDepth(): Int {
+        return this.interpreter.getStackDepth()
+    }
+
+    // ── 资源管理 ──
+
+    /// 销毁 VM 实例，释放所有子组件。
+    fun destroy(): Unit {
+        // 清理协程
+        this.coroutines.cleanup()
+        this.coroutines = Coroutine()
+
+        // 重置 JIT 状态
+        resetStats(this.jitBridge)
+        this.jitBridge = VmJitBridge()
+
+        // 清空原生注册表
+        this.natives.clear()
+
+        // 重置解释器
+        this.interpreter = VmRunner()
+        this.interpreter.maxInstructions = this.config.maxInstructions
+
+        // 重置堆
+        this.heap = ArcHeap()
+        this.gc = GcHeap()
+
+        // 重置状态
+        this.running = false
+        this.error = ""
+        this.returnValue = null
+    }
+}

@@ -17,107 +17,114 @@ package aura.lang.native
 //   WNOHANG   : wait4() 非阻塞标志
 // ─────────────────────────────────────────────────────────────
 
-// ═══════════════════════════════════════════════════════════════
-// 系统调用号（x86_64 Linux）
-// ═══════════════════════════════════════════════════════════════
+/// 系统调用常量与标志。
+///
+/// 所有系统调用号、文件描述符常量、open/mmap/lseek 等标志位
+/// 均收敛到本对象中，避免顶层声明散落。
+object SyscallsUtils {
 
-val SYS_READ: Int = 0
-val SYS_WRITE: Int = 1
-val SYS_OPEN: Int = 2
-val SYS_CLOSE: Int = 3
-val SYS_FSTAT: Int = 5
-val SYS_LSEEK: Int = 6
-val SYS_MMAP: Int = 9
-val SYS_MUNMAP: Int = 10
-val SYS_ACCESS: Int = 21
-val SYS_UNLINK: Int = 39
-val SYS_EXECVE: Int = 59
-val SYS_EXIT_GROUP: Int = 60
-val SYS_WAIT4: Int = 61
-val SYS_FORK: Int = 57
-val SYS_KILL: Int = 62
-val SYS_GETPID: Int = 39
-val SYS_CLOCK_GETTIME: Int = 228
-val SYS_GETRANDOM: Int = 272
+    // ═══════════════════════════════════════════════════════════════
+    // 系统调用号（x86_64 Linux）
+    // ═══════════════════════════════════════════════════════════════
 
-// ═══════════════════════════════════════════════════════════════
-// 文件描述符常量
-// ═══════════════════════════════════════════════════════════════
+    val SYS_READ: Int = 0
+    val SYS_WRITE: Int = 1
+    val SYS_OPEN: Int = 2
+    val SYS_CLOSE: Int = 3
+    val SYS_FSTAT: Int = 5
+    val SYS_LSEEK: Int = 6
+    val SYS_MMAP: Int = 9
+    val SYS_MUNMAP: Int = 10
+    val SYS_ACCESS: Int = 21
+    val SYS_UNLINK: Int = 39
+    val SYS_EXECVE: Int = 59
+    val SYS_EXIT_GROUP: Int = 60
+    val SYS_WAIT4: Int = 61
+    val SYS_FORK: Int = 57
+    val SYS_KILL: Int = 62
+    val SYS_GETPID: Int = 39
+    val SYS_CLOCK_GETTIME: Int = 228
+    val SYS_GETRANDOM: Int = 272
 
-val STDIN: Int = 0
-val STDOUT: Int = 1
-val STDERR: Int = 2
+    // ═══════════════════════════════════════════════════════════════
+    // 文件描述符常量
+    // ═══════════════════════════════════════════════════════════════
 
-// ═══════════════════════════════════════════════════════════════
-// open() 文件访问模式
-// ═══════════════════════════════════════════════════════════════
+    val STDIN: Int = 0
+    val STDOUT: Int = 1
+    val STDERR: Int = 2
 
-val O_RDONLY: Int = 0x0000
-val O_WRONLY: Int = 0x0001
-val O_RDWR: Int = 0x0002
-val O_CREAT: Int = 0x0040
-val O_EXCL: Int = 0x0080
-val O_TRUNC: Int = 0x0200
+    // ═══════════════════════════════════════════════════════════════
+    // open() 文件访问模式
+    // ═══════════════════════════════════════════════════════════════
 
-// ═══════════════════════════════════════════════════════════════
-// access() 权限检查标志
-// ═══════════════════════════════════════════════════════════════
+    val O_RDONLY: Int = 0x0000
+    val O_WRONLY: Int = 0x0001
+    val O_RDWR: Int = 0x0002
+    val O_CREAT: Int = 0x0040
+    val O_EXCL: Int = 0x0080
+    val O_TRUNC: Int = 0x0200
 
-val F_OK: Int = 0
-val W_OK: Int = 2
-val R_OK: Int = 4
-val X_OK: Int = 1
+    // ═══════════════════════════════════════════════════════════════
+    // access() 权限检查标志
+    // ═══════════════════════════════════════════════════════════════
 
-// ═══════════════════════════════════════════════════════════════
-// mmap() 内存保护标志
-// ═══════════════════════════════════════════════════════════════
+    val F_OK: Int = 0
+    val W_OK: Int = 2
+    val R_OK: Int = 4
+    val X_OK: Int = 1
 
-val PROT_NONE: Int = 0x0
-val PROT_READ: Int = 0x1
-val PROT_WRITE: Int = 0x2
-val PROT_EXEC: Int = 0x4
+    // ═══════════════════════════════════════════════════════════════
+    // mmap() 内存保护标志
+    // ═══════════════════════════════════════════════════════════════
 
-// ═══════════════════════════════════════════════════════════════
-// mmap() 映射类型标志
-// ═══════════════════════════════════════════════════════════════
+    val PROT_NONE: Int = 0x0
+    val PROT_READ: Int = 0x1
+    val PROT_WRITE: Int = 0x2
+    val PROT_EXEC: Int = 0x4
 
-val MAP_SHARED: Int = 0x01
-val MAP_PRIVATE: Int = 0x02
-val MAP_ANONYMOUS: Int = 0x20
-val MAP_ANON: Int = MAP_ANONYMOUS
+    // ═══════════════════════════════════════════════════════════════
+    // mmap() 映射类型标志
+    // ═══════════════════════════════════════════════════════════════
 
-// ═══════════════════════════════════════════════════════════════
-// lseek() 位置偏移基准
-// ═══════════════════════════════════════════════════════════════
+    val MAP_SHARED: Int = 0x01
+    val MAP_PRIVATE: Int = 0x02
+    val MAP_ANONYMOUS: Int = 0x20
+    val MAP_ANON: Int = MAP_ANONYMOUS
 
-val SEEK_SET: Int = 0
-val SEEK_CUR: Int = 1
-val SEEK_END: Int = 2
+    // ═══════════════════════════════════════════════════════════════
+    // lseek() 位置偏移基准
+    // ═══════════════════════════════════════════════════════════════
 
-// ═══════════════════════════════════════════════════════════════
-// clock_gettime() 时钟源
-// ═══════════════════════════════════════════════════════════════
+    val SEEK_SET: Int = 0
+    val SEEK_CUR: Int = 1
+    val SEEK_END: Int = 2
 
-val CLOCK_REALTIME: Int = 0
-val CLOCK_MONOTONIC: Int = 1
-val CLOCK_PROCESS_CPUTIME_ID: Int = 2
-val CLOCK_THREAD_CPUTIME_ID: Int = 3
-val CLOCK_MONOTONIC_RAW: Int = 4
+    // ═══════════════════════════════════════════════════════════════
+    // clock_gettime() 时钟源
+    // ═══════════════════════════════════════════════════════════════
 
-// ═══════════════════════════════════════════════════════════════
-// wait4() 选项标志
-// ═══════════════════════════════════════════════════════════════
+    val CLOCK_REALTIME: Int = 0
+    val CLOCK_MONOTONIC: Int = 1
+    val CLOCK_PROCESS_CPUTIME_ID: Int = 2
+    val CLOCK_THREAD_CPUTIME_ID: Int = 3
+    val CLOCK_MONOTONIC_RAW: Int = 4
 
-val WNOHANG: Int = 0x00000001
-val WUNTRACED: Int = 0x00000002
+    // ═══════════════════════════════════════════════════════════════
+    // wait4() 选项标志
+    // ═══════════════════════════════════════════════════════════════
 
-// ═══════════════════════════════════════════════════════════════
-// 特殊值
-// ═══════════════════════════════════════════════════════════════
+    val WNOHANG: Int = 0x00000001
+    val WUNTRACED: Int = 0x00000002
 
-val INVALID_FD: Int = -1
-val MAP_FAILED: Long = -1
+    // ═══════════════════════════════════════════════════════════════
+    // 特殊值
+    // ═══════════════════════════════════════════════════════════════
 
-// ═══════════════════════════════════════════════════════════════
-// 系统调用声明 — 架构特定声明见 native/arch/ 各平台文件
-// ═══════════════════════════════════════════════════════════════
+    val INVALID_FD: Int = -1
+    val MAP_FAILED: Long = -1
+
+    // ═══════════════════════════════════════════════════════════════
+    // 系统调用声明 — 架构特定声明见 native/arch/ 各平台文件
+    // ═══════════════════════════════════════════════════════════════
+}

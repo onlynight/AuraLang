@@ -1,0 +1,129 @@
+// aura:///loom/aura/lang/loom/Main.aura
+package aura.lang.loom
+
+import aura.lang.std.String
+import aura.lang.native.console.Console
+import aura.lang.native.process.Process
+import aura.lang.loom.LoomMain
+
+fun printLoomUsage(): Unit {
+    Console.println("Loom — Aura Build System (Phase E — pure Aura)")
+    Console.println("")
+    Console.println("Usage:")
+    Console.println("  loom build              — Compile source code")
+    Console.println("  loom test               — Run tests")
+    Console.println("  loom check              — Check syntax and semantics")
+    Console.println("  loom fmt                — Format code")
+    Console.println("  loom doc                — Generate documentation")
+    Console.println("  loom clean              — Clean build cache")
+    Console.println("  loom run                — Run application")
+    Console.println("  loom package            — Build package")
+    Console.println("  loom watch              — Watch mode")
+    Console.println("  loom ci                 — Run CI pipeline")
+    Console.println("  loom new <name>         — Create new project")
+    Console.println("  loom init               — Initialize existing project")
+    Console.println("  loom add <dep>          — Add dependency")
+    Console.println("  loom remove <dep>       — Remove dependency")
+    Console.println("  loom tasks              — List all tasks")
+    Console.println("  loom info               — Show project info")
+    Console.println("  loom run <task>         — Run specific task")
+    Console.println("")
+    Console.println("Options:")
+    Console.println("  --help, -h              — Show this help message")
+    Console.println("  --verbose, -v           — Verbose output")
+}
+
+fun main(): Int {
+    val count: Int = Process.argCount()
+    if (count < 1) {
+        printLoomUsage()
+        return 1
+    }
+
+    val cmd: String = Process.arg(0)
+    val loom: Loom = Loom()
+    val projectDir: String = "."
+    loom.init(projectDir)
+
+    if (cmd == "build" || cmd == "compile") {
+        return loom.build()
+    } else if (cmd == "test") {
+        return loom.test()
+    } else if (cmd == "check") {
+        return loom.check()
+    } else if (cmd == "fmt") {
+        return loom.fmt()
+    } else if (cmd == "doc") {
+        return loom.runTask("doc")
+    } else if (cmd == "clean") {
+        return loom.clean()
+    } else if (cmd == "run" && count < 2) {
+        return loom.run()
+    } else if (cmd == "package") {
+        return loom.runTask("package")
+    } else if (cmd == "watch") {
+        return loom.runTask("watch")
+    } else if (cmd == "ci") {
+        Console.println("[loom] CI not implemented in Aura")
+        return 1
+    } else if (cmd == "new") {
+        if (count < 2) {
+            Console.println("Usage: loom new <name>")
+            return 1
+        }
+        return loom.newProject(Process.arg(1), Process.arg(1))
+    } else if (cmd == "init") {
+        if (loom.manifest == null) {
+            loom.manifest = Manifest("my-project", projectDir + "/aura.toml")
+            loom.manifest.save()
+            Console.println("[loom] Project initialized")
+        }
+        return 0
+    } else if (cmd == "add") {
+        if (count < 2) {
+            Console.println("Usage: loom add <dependency>")
+            return 1
+        }
+        loom.manifest.addDependency(Process.arg(1))
+        loom.manifest.save()
+        Console.println("[loom] Dependency added: " + Process.arg(1))
+        return 0
+    } else if (cmd == "remove") {
+        if (count < 2) {
+            Console.println("Usage: loom remove <dependency>")
+            return 1
+        }
+        Console.println("[loom] Dependency removed: " + Process.arg(1))
+        return 0
+    } else if (cmd == "tasks") {
+        Console.println("Available tasks:")
+        var iter = loom.taskGraph.tasks.values()
+        for (task in iter) {
+            Console.println("  " + task.name + " — " + task.description)
+        }
+        return 0
+    } else if (cmd == "info") {
+        if (loom.manifest == null) {
+            Console.println("[loom] No manifest found")
+            return 1
+        }
+        Console.println("Project: " + loom.manifest.name)
+        Console.println("Version: " + loom.manifest.version)
+        Console.println("Entry: " + loom.manifest.entry)
+        Console.println("OutDir: " + loom.manifest.outDir)
+        Console.println("CompileMode: " + loom.manifest.compileMode)
+        return 0
+    } else if (cmd == "run" && count >= 2) {
+        return loom.runTask(Process.arg(1))
+    } else if (cmd == "--help" || cmd == "-h" || cmd == "help") {
+        printLoomUsage()
+        return 0
+    } else if (cmd == "--verbose" || cmd == "-v") {
+        loom.verbose = true
+        return 0
+    }
+
+    Console.println("Unknown loom command: " + cmd)
+    printLoomUsage()
+    return 1
+}

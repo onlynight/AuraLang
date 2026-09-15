@@ -96,6 +96,6 @@ fn test_with_modules_empty() {
 #[test]
 fn test_concurrent_functions_loaded() {
     let registry = NativeRegistry::new();
-    assert!(registry.contains("aura.lang.std.Coroutine.spawn"));
-    assert!(registry.contains("aura.lang.std.Channel.newChannel"));
+    assert!(registry.contains("aura.lang.concurrent.Coroutine.spawn"));
+    assert!(registry.contains("aura.lang.concurrent.Channel.newChannel"));
 }

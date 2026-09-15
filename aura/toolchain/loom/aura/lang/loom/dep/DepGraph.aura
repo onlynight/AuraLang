@@ -1,0 +1,70 @@
+// aura:///loom/dep/aura/lang/loom/dep/DepGraph.aura
+package aura.lang.loom.dep
+// Phase E.4: Loom Dependency Management - Dependency Graph
+// 对标 Rust: dep/graph.rs
+//
+// @since 0.6
+
+import aura.lang.std.String
+import aura.lang.std.Collections
+
+// ══════════════════════════════════════════════════════════════
+// 依赖图
+// 对标 Rust: dep/graph.rs
+// ══════════════════════════════════════════════════════════════
+class DepGraph {
+    var nodes: Map<String, DependencyNode> = mutableMapOf()
+    var edges: Map<String, List<String>> = mutableMapOf()
+
+    fun addNode(node: DependencyNode): Unit {
+        nodes.put(node.name, node)
+    }
+
+    fun addEdge(from: String, to: String): Unit {
+        if (!edges.containsKey(from)) {
+            edges.put(from, mutableListOf())
+        }
+        edges.get(from).add(to)
+    }
+
+    fun get(name: String): DependencyNode {
+        return nodes.getOrDefault(name, null)
+    }
+
+    fun contains(name: String): Boolean {
+        return nodes.containsKey(name)
+    }
+
+    fun len(): Int {
+        return nodes.size
+    }
+
+    fun toStr(): String {
+        var s: String = "DepGraph{nodes=" + nodes.size + ", edges="
+        var iter = edges.values()
+        var totalEdges: Int = 0
+        for (list in iter) {
+            totalEdges = totalEdges + list.size
+        }
+        s = s + totalEdges + "}"
+        return s
+    }
+}
+
+class DependencyNode {
+    val name: String
+    val version: String
+    var deps: List<String> = mutableListOf()
+
+    fun DependencyNode(name: String, version: String) {
+        this.name = name
+        this.version = version
+        this.deps = mutableListOf()
+    }
+
+    fun addDep(dep: String): Unit { deps.add(dep) }
+
+    fun toStr(): String {
+        return name + "@" + version
+    }
+}

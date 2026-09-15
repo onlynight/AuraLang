@@ -1,4 +1,5 @@
 // aura:///aura/compiler/aura/lang/compiler/runtime/Coroutine.aura
+package aura.lang.compiler.runtime
 // 协程调度（Phase 4: 完整 VM Aura 编写）
 /// 协程调度器。
 ///

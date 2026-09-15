@@ -1,0 +1,75 @@
+// aura:///loom/plugin/aura/lang/loom/plugin/Plugin.aura
+package aura.lang.loom.plugin
+
+import aura.lang.std.String
+import aura.lang.std.Collections
+import aura.lang.std.IO
+
+// ═══════════════════════════════════════════════════════════════
+// 插件接口
+// 对标 Rust: plugin/trait.rs
+// ═══════════════════════════════════════════════════════════════
+
+class Plugin {
+    val name: String
+    val version: String
+    var enabled: Boolean = true
+    var config: String = ""
+    var tasks: List<String> = mutableListOf()
+
+    fun Plugin(name: String, version: String) {
+        this.name = name
+        this.version = version
+        this.tasks = mutableListOf()
+    }
+
+    fun addTask(task: String): Unit { tasks.add(task) }
+
+    // 生命周期钩子
+    fun onInit(projectDir: String): Int {
+        IO.println("[plugin] " + name + " initialized")
+        return 0
+    }
+
+    fun beforeBuild(): Int {
+        return 0
+    }
+
+    fun afterBuild(): Int {
+        return 0
+    }
+
+    fun beforeTest(): Int {
+        return 0
+    }
+
+    fun afterTest(): Int {
+        return 0
+    }
+
+    fun beforeClean(): Int {
+        return 0
+    }
+
+    fun afterClean(): Int {
+        return 0
+    }
+
+    fun beforePackage(): Int {
+        return 0
+    }
+
+    fun afterPackage(): Int {
+        return 0
+    }
+
+    fun onTask(taskName: String): Int {
+        // 执行插件自定义任务
+        IO.println("[plugin] " + name + " executing task: " + taskName)
+        return 0
+    }
+
+    fun toStr(): String {
+        return "Plugin{name='" + name + "', version='" + version + "', tasks=" + tasks.size + "}"
+    }
+}

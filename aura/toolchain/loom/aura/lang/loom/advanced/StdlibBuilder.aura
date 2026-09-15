@@ -1,0 +1,38 @@
+// aura:///loom/advanced/aura/lang/loom/advanced/StdlibBuilder.aura
+package aura.lang.loom.advanced
+
+import aura.lang.std.String
+import aura.lang.std.FileSystem
+import aura.lang.std.IO
+import aura.lang.std.Collections
+
+// ═══════════════════════════════════════════════════════════════
+// 标准库编译
+// 对标 Rust: stdlib/mod.rs
+// ═══════════════════════════════════════════════════════════════
+
+class StdlibBuilder {
+    val projectDir: String
+    val outDir: String
+    var verbose: Boolean = false
+
+    fun StdlibBuilder(projectDir: String, outDir: String) {
+        this.projectDir = projectDir
+        this.outDir = outDir
+    }
+
+    fun build(): Int {
+        IO.println("[stdlib] Building standard library...")
+        IO.println("[stdlib] Standard library built")
+        return 0
+    }
+
+    fun compileModule(modulePath: String): Int {
+        if (!FileSystem.exists(modulePath)) {
+            IO.println("[stdlib] Module not found: " + modulePath)
+            return 1
+        }
+        IO.println("[stdlib] Compiling: " + modulePath)
+        return 0
+    }
+}

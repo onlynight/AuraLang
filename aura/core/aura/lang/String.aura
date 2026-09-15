@@ -1,65 +1,13 @@
 // aura:///aura/lang/String.aura
 package aura.lang
 // 语言内置类型，不可修改
-// Phase 3: 纯 LLVM 化 — extern "C" 直连 C 运行时 + LLVM 内建
+//
+// 实现：全部以 Aura 编写（纯逻辑），不使用 extern "C" 或 Rust cffi。
+// 系统能力（如需底层字符串操作）由 aura.lang.native 包提供。
 
 import aura.lang.collection.ArrayList
 import aura.lang.collection.Array
 import aura.lang.collection.List
-
-// ═══════════════════════════════════════════════════════════════
-// Phase 3: C 运行时 + LLVM 内建声明 (AOT 路径)
-// ═══════════════════════════════════════════════════════════════
-
-// ── C 运行时字符串函数 ──
-extern "C" {
-    /// strlen — 获取字符串长度
-    fun strlen(s: Pointer<Byte>): Int
-    /// strcpy — 复制字符串
-    fun strcpy(dst: Pointer<Byte>, src: Pointer<Byte>): Pointer<Byte>
-    /// strncpy — 复制指定长度的字符串
-    fun strncpy(dst: Pointer<Byte>, src: Pointer<Byte>, n: Int): Pointer<Byte>
-    /// strcmp — 比较两个字符串
-    fun strcmp(s1: Pointer<Byte>, s2: Pointer<Byte>): Int
-    /// strncmp — 比较指定长度的字符串
-    fun strncmp(s1: Pointer<Byte>, s2: Pointer<Byte>, n: Int): Int
-    /// strcat — 连接字符串
-    fun strcat(dst: Pointer<Byte>, src: Pointer<Byte>): Pointer<Byte>
-    /// strchr — 查找字符
-    fun strchr(s: Pointer<Byte>, c: Int): Pointer<Byte>
-    /// strrchr — 从后向前查找字符
-    fun strrchr(s: Pointer<Byte>, c: Int): Pointer<Byte>
-    /// strstr — 查找子字符串
-    fun strstr(s: Pointer<Byte>, sub: Pointer<Byte>): Pointer<Byte>
-}
-
-// ── C 运行时转换函数 ──
-extern "C" {
-    /// atoi — 字符串转整数
-    fun atoi(s: Pointer<Byte>): Int
-    /// atof — 字符串转浮点数
-    fun atof(s: Pointer<Byte>): Float
-    /// strtol — 字符串转长整数
-    fun strtol(s: Pointer<Byte>, end: Pointer<Byte>, base: Int): Long
-    /// strtod — 字符串转双精度浮点数
-    fun strtod(s: Pointer<Byte>, end: Pointer<Byte>): Double
-}
-
-// ── C 运行时字符处理 ──
-extern "C" {
-    /// isdigit — 检查是否为数字
-    fun isdigit(c: Int): Int
-    /// isalpha — 检查是否为字母
-    fun isalpha(c: Int): Int
-    /// isalnum — 检查是否为字母或数字
-    fun isalnum(c: Int): Int
-    /// isspace — 检查是否为空白
-    fun isspace(c: Int): Int
-    /// tolower — 转小写
-    fun tolower(c: Int): Int
-    /// toupper — 转大写
-    fun toupper(c: Int): Int
-}
 
 /// 不可变字符串类型。
 ///

@@ -1,0 +1,367 @@
+// aura:///aura/lang/compiler/linker/Linker.aura
+package aura.lang.compiler.linker
+// ─────────────────────────────────────────────────────────────
+// 编译期链接器 — 纯 Aura 化迁移
+//
+// 对应 Rust `compiler/src/linker.rs`。
+//
+// 编译期链接器负责：
+//   1. 符号解析：将模块内符号引用解析为具体定义
+//   2. 冲突检测：检测跨模块符号名冲突
+//   3. 依赖解析：递归解析依赖树，确保所有模块可加载
+//   4. 重命名：对冲突符号生成唯一别名
+//
+// 注意：本文件与 `aot/Linker.aura`（AOT 目标码链接）不同。
+//
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.compiler.signature.Signature
+
+// ═══════════════════════════════════════════════════════════════
+// LinkError — 链接错误
+// ═══════════════════════════════════════════════════════════════
+
+class LinkError {
+    var kind: String = "" // symbol_not_found, symbol_conflict, module_not_found, circular_dependency
+    var detail: String = ""
+    var modules: List<String> = []
+
+    initSymbolNotFound(msg: String) {
+        this.kind = "symbol_not_found"
+        this.detail = msg
+    }
+
+    initSymbolConflict(symbol: String, mods: List<String>) {
+        this.kind = "symbol_conflict"
+        this.detail = symbol
+        this.modules = mods
+    }
+
+    initModuleNotFound(msg: String) {
+        this.kind = "module_not_found"
+        this.detail = msg
+    }
+
+    initCircularDependency(mods: List<String>) {
+        this.kind = "circular_dependency"
+        this.detail = ""
+        this.modules = mods
+    }
+
+    fun describe(): String {
+        if (this.kind == "symbol_not_found") {
+            return "symbol not found: " + this.detail
+        } else if (this.kind == "symbol_conflict") {
+            var mods: String = ""
+            for (m in this.modules) {
+                if (mods.length > 0) {
+                    mods = mods + ", "
+                }
+                mods = mods + m
+            }
+            return "symbol conflict: " + this.detail + " is defined in multiple modules: " + mods
+        } else if (this.kind == "module_not_found") {
+            return "module not found: " + this.detail
+        } else if (this.kind == "circular_dependency") {
+            var mods: String = ""
+            for (m in this.modules) {
+                if (mods.length > 0) {
+                    mods = mods + " -> "
+                }
+                mods = mods + m
+            }
+            return "circular dependency: " + mods
+        } else {
+            return "unknown error"
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ResolvedSymbol — 解析后的符号
+// ═══════════════════════════════════════════════════════════════
+
+class ResolvedSymbol {
+    var originalName: String = ""
+    var resolvedName: String = ""
+    var module: String = ""
+    var kind: String = "function" // function, type, const
+    var renamed: Boolean = false
+}
+
+// ═══════════════════════════════════════════════════════════════
+// LinkResult — 链接结果
+// ═══════════════════════════════════════════════════════════════
+
+class LinkResult {
+    var symbols: List<ResolvedSymbol> = []
+    var renames: List<Pair<String, String>> = [] // (original, resolved)
+    var conflicts: List<LinkError> = []
+
+    /// 是否链接成功。
+    fun isOk(): Boolean {
+        return this.conflicts.length == 0
+    }
+
+    /// 获取解析后的符号名。
+    fun resolve(name: String): String {
+        for (r in this.renames) {
+            if (r.first == name) {
+                return r.second
+            }
+        }
+        return name
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Linker — 编译期链接器
+// ═══════════════════════════════════════════════════════════════
+
+class Linker {
+    var modules: List<ModuleSig> = []
+
+    /// 加载模块签名。
+    fun loadModule(sig: ModuleSig): Boolean {
+        // Check for duplicate module names
+        for (m in this.modules) {
+            if (m.moduleName == sig.moduleName) {
+                return false
+            }
+        }
+        this.modules.add(sig)
+        return true
+    }
+
+    /// 加载模块签名（从文件）。
+    fun loadModuleFromFile(path: String): Boolean {
+        val sig: ModuleSig = readSig(path)
+        if (sig == null) {
+            return false
+        }
+        return this.loadModule(sig)
+    }
+
+    /// 链接所有已加载模块。
+    fun linkAll(): LinkResult {
+        val result: LinkResult = LinkResult()
+
+        // 收集所有模块的公开符号
+        val allSymbols: List<Pair<String, String>> = [] // (symbol_name, module_name)
+
+        for (sig in this.modules) {
+            for (func in sig.functions) {
+                if (func.isPublic) {
+                    allSymbols.add(Pair<String, String>(func.name, sig.moduleName))
+                }
+            }
+            for (typeDef in sig.types) {
+                if (typeDef.isPublic) {
+                    allSymbols.add(Pair<String, String>(typeDef.name, sig.moduleName))
+                }
+            }
+            for (constSig in sig.constants) {
+                if (constSig.isPublic) {
+                    allSymbols.add(Pair<String, String>(constSig.name, sig.moduleName))
+                }
+            }
+        }
+
+        // 检测冲突
+        for (i: Int in 0..allSymbols.length) {
+            val symbol: String = allSymbols[i].first
+            val modName: String = allSymbols[i].second
+            val conflictModules: List<String> = []
+            conflictModules.add(modName)
+
+            for (j: Int in i + 1..allSymbols.length) {
+                if (allSymbols[j].first == symbol) {
+                    conflictModules.add(allSymbols[j].second)
+                }
+            }
+
+            if (conflictModules.length > 1) {
+                // 符号冲突：生成唯一别名
+                val err: LinkError = LinkError()
+                err.initSymbolConflict(symbol, conflictModules)
+                result.conflicts.add(err)
+
+                // 为每个模块的符号生成唯一名
+                for (mod in conflictModules) {
+                    val uniqueName: String = mod + "_" + symbol
+                    result.renames.add(Pair<String, String>(mod + "_" + symbol, uniqueName))
+                    val resolved: ResolvedSymbol = ResolvedSymbol()
+                    resolved.originalName = symbol
+                    resolved.resolvedName = uniqueName
+                    resolved.module = mod
+                    resolved.kind = "function"
+                    resolved.renamed = true
+                    result.symbols.add(resolved)
+                }
+            } else {
+                // 无冲突：直接使用原始名
+                val resolved: ResolvedSymbol = ResolvedSymbol()
+                resolved.originalName = symbol
+                resolved.resolvedName = symbol
+                resolved.module = modName
+                resolved.kind = "function"
+                resolved.renamed = false
+                result.symbols.add(resolved)
+            }
+        }
+
+        // 解析每个模块的导入
+        for (sig in this.modules) {
+            for (importSig in sig.imports) {
+                val err: LinkError = this.resolveImports(importSig)
+                if (err != null) {
+                    result.conflicts.add(err)
+                }
+            }
+        }
+
+        return result
+    }
+
+    /// 解析导入声明。
+    fun resolveImports(import: ImportSig): LinkError {
+        val moduleSig: ModuleSig = this.findModule(import.module)
+        if (moduleSig == null) {
+            val err: LinkError = LinkError()
+            err.initModuleNotFound(import.module)
+            return err
+        }
+
+        for (sym in import.symbols) {
+            val found: Boolean = this.findSymbol(moduleSig, sym.name, sym.kind)
+            if (!found) {
+                val err: LinkError = LinkError()
+                err.initSymbolNotFound(import.module + "::" + sym.name)
+                return err
+            }
+        }
+
+        return null
+    }
+
+    /// 查找模块。
+    fun findModule(name: String): ModuleSig {
+        for (m in this.modules) {
+            if (m.moduleName == name) {
+                return m
+            }
+        }
+        return null
+    }
+
+    /// 查找模块中的符号。
+    fun findSymbol(sig: ModuleSig, name: String, kind: String): Boolean {
+        if (kind == "function" || kind == "type" || kind == "const") {
+            if (kind == "function") {
+                return sig.findFunction(name) != null
+            } else if (kind == "type") {
+                return sig.findType(name) != null
+            } else {
+                return sig.findConstant(name) != null
+            }
+        }
+        // Default: try function
+        return sig.findFunction(name) != null
+    }
+
+    /// 检测循环依赖。
+    fun detectCircularDependencies(): List<LinkError> {
+        val errors: List<LinkError> = []
+        val visited: List<String> = []
+        val stack: List<String> = []
+
+        for (sig in this.modules) {
+            if (!LinkerUtils.visitedContains(visited, sig.moduleName)) {
+                val cycle: List<String> = this.visitDeps(
+                    sig.moduleName, visited, stack
+                )
+                if (cycle.length > 0) {
+                    val err: LinkError = LinkError()
+                    err.initCircularDependency(cycle)
+                    errors.add(err)
+                }
+            }
+        }
+
+        return errors
+    }
+
+    /// 递归访问依赖。
+    fun visitDeps(name: String, visited: List<String>, stack: List<String>): List<String> {
+        if (LinkerUtils.visitedContains(visited, name)) {
+            return []
+        }
+        if (LinkerUtils.stackContains(stack, name)) {
+            // Found a cycle
+            val cycle: List<String> = []
+            for (i: Int in 0..stack.length) {
+                if (stack[i] == name) {
+                    cycle.add(name)
+                }
+            }
+            for (i: Int in 0..stack.length) {
+                if (stack[i] == name) {
+                    break
+                }
+                cycle.add(stack[i])
+            }
+            cycle.add(name)
+            return cycle
+        }
+
+        visited.add(name)
+        stack.add(name)
+
+        val sig: ModuleSig = this.findModule(name)
+        if (sig != null) {
+            for (dep in sig.dependencies) {
+                val cycle: List<String> = this.visitDeps(dep, visited, stack)
+                if (cycle.length > 0) {
+                    return cycle
+                }
+            }
+        }
+
+        stack.remove(stack.length - 1)
+        return []
+    }
+
+    /// 列出所有已加载的模块名。
+    fun listModules(): List<String> {
+        val names: List<String> = []
+        for (m in this.modules) {
+            names.add(m.moduleName)
+        }
+        return names
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// LinkerUtils — 链接器工具函数
+// ═══════════════════════════════════════════════════════════════
+
+object LinkerUtils {
+    fun visitedContains(list: List<String>, item: String): Boolean {
+        for (i in list) {
+            if (i == item) {
+                return true
+            }
+        }
+        return false
+    }
+
+    fun stackContains(list: List<String>, item: String): Boolean {
+        for (i in list) {
+            if (i == item) {
+                return true
+            }
+        }
+        return false
+    }
+}

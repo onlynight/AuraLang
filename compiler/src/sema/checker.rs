@@ -36,9 +36,21 @@ const KNOWN_STD_CLASSES: &[&str] = &[
     "StringBuilder",
     "Test",
     "Time",
+];
+
+/// 已知的并发包类名清单（用于 `import aura.lang.concurrent.*` 通配时注册别名）
+const KNOWN_CONCURRENT_CLASSES: &[&str] = &[
     "Coroutine",
     "Actor",
     "Channel",
+    "Thread",
+    "Atomic",
+    "Mutex",
+    "RwLock",
+    "Condvar",
+    "Barrier",
+    "Future",
+    "Semaphore",
 ];
 
 /// 语义分析结果
@@ -141,6 +153,19 @@ impl Checker {
                 is_vararg: false,
             }],
             Ty::Unit,
+            Visibility::Public,
+            builtin_span,
+        );
+        // fnIndex(name) → Int：按函数名解析函数表下标（供 Thread.spawn 等使用）
+        let _ = symbols.insert_builtin_function(
+            "fnIndex",
+            vec![ParamSym {
+                name: "name".into(),
+                ty: Ty::String,
+                has_default: false,
+                is_vararg: false,
+            }],
+            Ty::Int,
             Visibility::Public,
             builtin_span,
         );
@@ -485,12 +510,12 @@ impl Checker {
         // P10: 并发运行时内置函数（aura.concurrent.* 命名空间）
         for (name, params, ret) in [
             (
-                "aura.lang.std.Coroutine.spawn",
+                "aura.lang.concurrent.Coroutine.spawn",
                 vec![("expr", Ty::Any)],
                 Ty::Int,
             ),
             (
-                "aura.lang.std.Actor.send",
+                "aura.lang.concurrent.Actor.send",
                 vec![
                     ("actor", Ty::Int),
                     ("msg", Ty::Any),
@@ -498,7 +523,7 @@ impl Checker {
                 Ty::Unit,
             ),
             (
-                "aura.lang.std.Coroutine.ask",
+                "aura.lang.concurrent.Coroutine.ask",
                 vec![
                     ("actor", Ty::Int),
                     ("msg", Ty::Any),
@@ -506,12 +531,12 @@ impl Checker {
                 Ty::Any,
             ),
             (
-                "aura.lang.std.Channel.newChannel",
+                "aura.lang.concurrent.Channel.newChannel",
                 vec![("bound", Ty::Int)],
                 Ty::Int,
             ),
             (
-                "aura.lang.std.Channel.channelSend",
+                "aura.lang.concurrent.Channel.channelSend",
                 vec![
                     ("ch", Ty::Int),
                     ("val", Ty::Any),
@@ -519,17 +544,17 @@ impl Checker {
                 Ty::Unit,
             ),
             (
-                "aura.lang.std.Channel.channelRecv",
+                "aura.lang.concurrent.Channel.channelRecv",
                 vec![("ch", Ty::Int)],
                 Ty::Any,
             ),
             (
-                "aura.lang.std.Channel.channelTryRecv",
+                "aura.lang.concurrent.Channel.channelTryRecv",
                 vec![("ch", Ty::Int)],
                 Ty::Any,
             ),
             (
-                "aura.lang.std.Channel.select",
+                "aura.lang.concurrent.Channel.select",
                 vec![
                     ("ch1", Ty::Int),
                     ("ch2", Ty::Int),
@@ -537,12 +562,12 @@ impl Checker {
                 Ty::Any,
             ),
             (
-                "aura.lang.std.Coroutine.spawnActor",
+                "aura.lang.concurrent.Coroutine.spawnActor",
                 vec![("name", Ty::String)],
                 Ty::Int,
             ),
             (
-                "aura.lang.std.Actor.supervise",
+                "aura.lang.concurrent.Actor.supervise",
                 vec![
                     ("parent", Ty::Int),
                     ("child", Ty::Int),
@@ -550,7 +575,7 @@ impl Checker {
                 Ty::Unit,
             ),
             (
-                "aura.lang.std.Actor.actorAlive",
+                "aura.lang.concurrent.Actor.actorAlive",
                 vec![("id", Ty::Int)],
                 Ty::Boolean,
             ),
@@ -623,6 +648,393 @@ impl Checker {
             Visibility::Public,
             builtin_span,
         );
+
+        // ── 并发标准库函数签名（Thread/Mutex/Atomic/RwLock/Condvar/Barrier/Future）──
+        // Thread
+        for (name, params, ret) in [
+            (
+                "aura.lang.concurrent.Thread.spawn",
+                vec![
+                    "fn_id".into(),
+                    "arg".into(),
+                ],
+                Ty::Int,
+            ),
+            (
+                "aura.lang.concurrent.Thread.join",
+                vec!["thread_id".into()],
+                Ty::Int,
+            ),
+            (
+                "aura.lang.concurrent.Thread.sleep",
+                vec!["ms".into()],
+                Ty::Unit,
+            ),
+            ("aura.lang.concurrent.Thread.id", vec![], Ty::Int),
+            ("aura.lang.concurrent.Thread.parallelism", vec![], Ty::Int),
+            (
+                "aura.lang.concurrent.Thread.availableCores",
+                vec![],
+                Ty::Int,
+            ),
+        ] {
+            let _ = symbols.insert_builtin_function(
+                name,
+                params
+                    .into_iter()
+                    .map(|n| ParamSym {
+                        name: n,
+                        ty: Ty::Int,
+                        has_default: false,
+                        is_vararg: false,
+                    })
+                    .collect(),
+                ret,
+                Visibility::Public,
+                builtin_span,
+            );
+        }
+
+        // Mutex
+        for (name, params, ret) in [
+            ("aura.lang.concurrent.Mutex.new", vec![], Ty::Int),
+            (
+                "aura.lang.concurrent.Mutex.lock",
+                vec!["lock_id".into()],
+                Ty::Unit,
+            ),
+            (
+                "aura.lang.concurrent.Mutex.unlock",
+                vec!["lock_id".into()],
+                Ty::Unit,
+            ),
+            (
+                "aura.lang.concurrent.Mutex.tryLock",
+                vec!["lock_id".into()],
+                Ty::Boolean,
+            ),
+            (
+                "aura.lang.concurrent.Mutex.destroy",
+                vec!["lock_id".into()],
+                Ty::Unit,
+            ),
+        ] {
+            let _ = symbols.insert_builtin_function(
+                name,
+                params
+                    .into_iter()
+                    .map(|n| ParamSym {
+                        name: n,
+                        ty: Ty::Int,
+                        has_default: false,
+                        is_vararg: false,
+                    })
+                    .collect(),
+                ret,
+                Visibility::Public,
+                builtin_span,
+            );
+        }
+
+        // Atomic
+        for (name, params, ret) in [
+            (
+                "aura.lang.concurrent.Atomic.new",
+                vec!["initial".into()],
+                Ty::Int,
+            ),
+            (
+                "aura.lang.concurrent.Atomic.load",
+                vec!["atomic_id".into()],
+                Ty::Int,
+            ),
+            (
+                "aura.lang.concurrent.Atomic.store",
+                vec![
+                    "atomic_id".into(),
+                    "value".into(),
+                ],
+                Ty::Unit,
+            ),
+            (
+                "aura.lang.concurrent.Atomic.add",
+                vec![
+                    "atomic_id".into(),
+                    "delta".into(),
+                ],
+                Ty::Int,
+            ),
+            (
+                "aura.lang.concurrent.Atomic.sub",
+                vec![
+                    "atomic_id".into(),
+                    "delta".into(),
+                ],
+                Ty::Int,
+            ),
+            (
+                "aura.lang.concurrent.Atomic.cas",
+                vec![
+                    "atomic_id".into(),
+                    "expected".into(),
+                    "desired".into(),
+                ],
+                Ty::Boolean,
+            ),
+            (
+                "aura.lang.concurrent.Atomic.destroy",
+                vec!["atomic_id".into()],
+                Ty::Unit,
+            ),
+        ] {
+            let _ = symbols.insert_builtin_function(
+                name,
+                params
+                    .into_iter()
+                    .map(|n| ParamSym {
+                        name: n,
+                        ty: Ty::Int,
+                        has_default: false,
+                        is_vararg: false,
+                    })
+                    .collect(),
+                ret,
+                Visibility::Public,
+                builtin_span,
+            );
+        }
+
+        // RwLock
+        for (name, params, ret) in [
+            ("aura.lang.concurrent.RwLock.new", vec![], Ty::Int),
+            (
+                "aura.lang.concurrent.RwLock.readLock",
+                vec!["lock_id".into()],
+                Ty::Unit,
+            ),
+            (
+                "aura.lang.concurrent.RwLock.writeLock",
+                vec!["lock_id".into()],
+                Ty::Unit,
+            ),
+            (
+                "aura.lang.concurrent.RwLock.readUnlock",
+                vec!["lock_id".into()],
+                Ty::Unit,
+            ),
+            (
+                "aura.lang.concurrent.RwLock.writeUnlock",
+                vec!["lock_id".into()],
+                Ty::Unit,
+            ),
+            (
+                "aura.lang.concurrent.RwLock.destroy",
+                vec!["lock_id".into()],
+                Ty::Unit,
+            ),
+        ] {
+            let _ = symbols.insert_builtin_function(
+                name,
+                params
+                    .into_iter()
+                    .map(|n| ParamSym {
+                        name: n,
+                        ty: Ty::Int,
+                        has_default: false,
+                        is_vararg: false,
+                    })
+                    .collect(),
+                ret,
+                Visibility::Public,
+                builtin_span,
+            );
+        }
+
+        // Condvar
+        for (name, params, ret) in [
+            ("aura.lang.concurrent.Condvar.new", vec![], Ty::Int),
+            (
+                "aura.lang.concurrent.Condvar.wait",
+                vec![
+                    "cv_id".into(),
+                    "mutex_id".into(),
+                ],
+                Ty::Unit,
+            ),
+            (
+                "aura.lang.concurrent.Condvar.signal",
+                vec!["cv_id".into()],
+                Ty::Unit,
+            ),
+            (
+                "aura.lang.concurrent.Condvar.broadcast",
+                vec!["cv_id".into()],
+                Ty::Unit,
+            ),
+            (
+                "aura.lang.concurrent.Condvar.destroy",
+                vec!["cv_id".into()],
+                Ty::Unit,
+            ),
+        ] {
+            let _ = symbols.insert_builtin_function(
+                name,
+                params
+                    .into_iter()
+                    .map(|n| ParamSym {
+                        name: n,
+                        ty: Ty::Int,
+                        has_default: false,
+                        is_vararg: false,
+                    })
+                    .collect(),
+                ret,
+                Visibility::Public,
+                builtin_span,
+            );
+        }
+
+        // Barrier
+        for (name, params, ret) in [
+            (
+                "aura.lang.concurrent.Barrier.new",
+                vec!["count".into()],
+                Ty::Int,
+            ),
+            (
+                "aura.lang.concurrent.Barrier.wait",
+                vec!["barrier_id".into()],
+                Ty::Int,
+            ),
+            (
+                "aura.lang.concurrent.Barrier.destroy",
+                vec!["barrier_id".into()],
+                Ty::Unit,
+            ),
+        ] {
+            let _ = symbols.insert_builtin_function(
+                name,
+                params
+                    .into_iter()
+                    .map(|n| ParamSym {
+                        name: n,
+                        ty: Ty::Int,
+                        has_default: false,
+                        is_vararg: false,
+                    })
+                    .collect(),
+                ret,
+                Visibility::Public,
+                builtin_span,
+            );
+        }
+
+        // Future
+        for (name, params, ret) in [
+            (
+                "aura.lang.concurrent.Future.spawn",
+                vec![
+                    "fn_id".into(),
+                    "arg".into(),
+                ],
+                Ty::Int,
+            ),
+            (
+                "aura.lang.concurrent.Future.await",
+                vec!["future_id".into()],
+                Ty::Int,
+            ),
+            (
+                "aura.lang.concurrent.Future.isDone",
+                vec!["future_id".into()],
+                Ty::Boolean,
+            ),
+            (
+                "aura.lang.concurrent.Future.all",
+                vec!["future_ids".into()],
+                Ty::List(Box::new(Ty::Int)),
+            ),
+            (
+                "aura.lang.concurrent.Future.any",
+                vec!["future_ids".into()],
+                Ty::Int,
+            ),
+            (
+                "aura.lang.concurrent.Future.cancel",
+                vec!["future_id".into()],
+                Ty::Unit,
+            ),
+        ] {
+            let _ = symbols.insert_builtin_function(
+                name,
+                params
+                    .into_iter()
+                    .map(|n| {
+                        let param_ty =
+                            if n == "future_ids" { Ty::List(Box::new(Ty::Int)) } else { Ty::Int };
+                        ParamSym {
+                            name: n,
+                            ty: param_ty,
+                            has_default: false,
+                            is_vararg: false,
+                        }
+                    })
+                    .collect(),
+                ret,
+                Visibility::Public,
+                builtin_span,
+            );
+        }
+
+        // Semaphore
+        for (name, params, ret) in [
+            (
+                "aura.lang.concurrent.Semaphore.new",
+                vec!["permits".into()],
+                Ty::Int,
+            ),
+            (
+                "aura.lang.concurrent.Semaphore.acquire",
+                vec!["sem_id".into()],
+                Ty::Unit,
+            ),
+            (
+                "aura.lang.concurrent.Semaphore.tryAcquire",
+                vec!["sem_id".into()],
+                Ty::Boolean,
+            ),
+            (
+                "aura.lang.concurrent.Semaphore.release",
+                vec!["sem_id".into()],
+                Ty::Unit,
+            ),
+            (
+                "aura.lang.concurrent.Semaphore.count",
+                vec!["sem_id".into()],
+                Ty::Int,
+            ),
+            (
+                "aura.lang.concurrent.Semaphore.destroy",
+                vec!["sem_id".into()],
+                Ty::Unit,
+            ),
+        ] {
+            let _ = symbols.insert_builtin_function(
+                name,
+                params
+                    .into_iter()
+                    .map(|n| ParamSym {
+                        name: n,
+                        ty: Ty::Int,
+                        has_default: false,
+                        is_vararg: false,
+                    })
+                    .collect(),
+                ret,
+                Visibility::Public,
+                builtin_span,
+            );
+        }
 
         let mut var_env = Vec::new();
         var_env.push(HashMap::new());
@@ -1603,12 +2015,20 @@ impl Checker {
             }]
         };
 
-        // 检测是否是新的 std 命名空间（aura.lang.std.*）
-        let is_new_scheme = module_path.starts_with("aura.lang.std");
-        // 提取类名（如果存在）：aura.lang.std.<ClassName> 或 aura.lang.std.<ClassName>.<fn>
+        // 检测是否是新的命名空间（aura.lang.std.* / aura.lang.concurrent.* / aura.lang.native.*）
+        let is_new_scheme = module_path.starts_with("aura.lang.std")
+            || module_path.starts_with("aura.lang.concurrent")
+            || module_path.starts_with("aura.lang.native");
+        // 包前缀：aura.lang.std / aura.lang.concurrent
+        let pkg_prefix = if is_new_scheme {
+            module_path.split('.').take(3).collect::<Vec<_>>().join(".")
+        } else {
+            String::new()
+        };
+        // 提取类名（如果存在）：aura.lang.<pkg>.<ClassName>[.<fn>]
         let class_name = if is_new_scheme {
             let parts: Vec<&str> = module_path.split('.').collect();
-            // aura.lang.std.<ClassName>[.<fn>]
+            // aura.lang.<pkg>.<ClassName>[.<fn>]
             if parts.len() >= 4 { Some(parts[3].to_string()) } else { None }
         } else {
             None
@@ -1642,11 +2062,17 @@ impl Checker {
             None => {
                 if imp.wildcard {
                     if is_new_scheme && class_name.is_none() {
-                        // import aura.lang.std.* → 只引入类名作模块别名（不做短名导入）
-                        for class in KNOWN_STD_CLASSES {
+                        // import aura.lang.std.* / aura.lang.concurrent.*
+                        // → 只引入类名作模块别名（不做短名导入）
+                        let classes: &[&str] = if pkg_prefix == "aura.lang.concurrent" {
+                            KNOWN_CONCURRENT_CLASSES
+                        } else {
+                            KNOWN_STD_CLASSES
+                        };
+                        for class in classes {
                             let _ = self.symbols.insert_module_alias(
                                 class.to_string(),
-                                format!("aura.lang.std.{}", class),
+                                format!("{}.{}", pkg_prefix, class),
                             );
                         }
                     } else {
@@ -1714,7 +2140,7 @@ impl Checker {
                                 imp.span,
                             );
                             let _ = self.symbols.insert_function(
-                                format!("aura.lang.std.{}.{}", cn, short_name2),
+                                format!("{}.{}.{}", pkg_prefix, cn, short_name2),
                                 any_params(),
                                 Ty::Any,
                                 Visibility::Public,
@@ -1733,7 +2159,7 @@ impl Checker {
                                     imp.span,
                                 );
                                 let _ = self.symbols.insert_function(
-                                    format!("aura.lang.std.{}.{}", cn, short),
+                                    format!("{}.{}.{}", pkg_prefix, cn, short),
                                     any_params(),
                                     Ty::Any,
                                     Visibility::Public,
@@ -2869,7 +3295,7 @@ impl Checker {
         }
     }
 
-    /// 从成员访问链中提取完整点分函数名（如 `aura.lang.std.Coroutine.spawn`）
+    /// 从成员访问链中提取完整点分函数名（如 `aura.lang.concurrent.Coroutine.spawn`）
     fn extract_dotted_name(expr: &Expr) -> Option<String> {
         match expr {
             Expr::Ident(name, _) => Some(name.clone()),
@@ -2886,7 +3312,7 @@ impl Checker {
     }
 
     fn check_call(&mut self, callee: &Expr, args: &[Expr], span: Span) -> Ty {
-        // 先尝试完整点分函数名解析（支持 aura.lang.std.Coroutine.spawn 等）
+        // 先尝试完整点分函数名解析（支持 aura.lang.concurrent.Coroutine.spawn 等）
         if let Some(full_name) = Self::extract_dotted_name(callee) {
             if let Some(fns) = self.symbols.lookup_function(&full_name) {
                 let cloned: Vec<Symbol> = fns.clone();
@@ -2898,7 +3324,7 @@ impl Checker {
                 return Ty::Any;
             }
             // 完全限定 std 路径的免 import 兜底：
-            // 允许 `aura.lang.std.Actor.spawnActor(...)` 无需 import（依赖 HIR 的 native dispatch）
+            // 允许 `aura.lang.concurrent.Actor.spawnActor(...)` 无需 import（依赖 HIR 的 native dispatch）
             if crate::std::decl::is_builtin(&full_name) {
                 return Ty::Any;
             }

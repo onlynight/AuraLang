@@ -27,6 +27,192 @@ import aura.lang.compiler.aot.Emit
 import aura.lang.compiler.aot.Linker
 import aura.lang.compiler.aot.CBackend
 
+/// AOT 工具方法集合：集中管理 AOT 相关的全局函数，支持 O(1) 方法分派。
+object AotUtils {
+
+    /// 默认 AOT 选项。
+    fun defaultAotOptions(): AotOptions {
+        return AotOptions(targetDefault(), optLevelDefault(), "main")
+    }
+
+    /// 空结果占位。
+    fun emptyAotResult(): AotResult {
+        return AotResult("", "", "", "", "", "")
+    }
+
+    /// 顶层入口：HIR → AOT 结果。
+    fun aotCompile(hir: Hir, options: AotOptions): AotResult {
+        val gen: AotCodeGenerator = AotCodeGenerator()
+        return gen.compile(hir, options)
+    }
+
+    /// AOT 后端版本。
+    fun aotBackendVersion(): String {
+        return "0.1.0-phase6"
+    }
+
+    /// HIR → LLVM IR 文本 + llc/clang 命令 + C 后端源码（纯函数，不触发 IO）。
+    ///
+    /// 会同时生成 C 后端备选源码（`cSource`）。若调用方只走 LLVM 工具链，请用
+    /// [`compileAotIrOnly`]：省掉整份 HIR 的二次翻译（自举时约 40MB 分配）。
+    fun compileAot(hir: Hir): AotLinkResult {
+        val r: AotLinkResult = AotLinkResult()
+        val opts: AotOptions = AotUtils.defaultAotOptions()
+        val aot: AotResult = AotUtils.aotCompile(hir, opts)
+
+        r.llvmIr = aot.llvmIr
+        r.targetTriple = aot.targetTriple
+        r.optFlag = aot.optFlag
+        r.objectCommand = aot.objectCommand
+        r.executableCommand = aot.executableCommand
+        r.cSource = aot.cSource
+        r.hasMain = aot.hasFunction("main")
+        r.irLines = aot.irLineCount()
+        return r
+    }
+
+    /// 同 [`compileAot`]，但**不生成 C 后端备选源码**（`cSource` 为空串）。
+    ///
+    /// 供「HIR → IR → llc → clang → exe」的产物构建路径使用：该路径从不读 `cSource`，
+    /// 生成它是纯粹的内存浪费（`emitC` 会重新遍历整份 HIR 并拼接 C 文本）。
+    fun compileAotIrOnly(hir: Hir): AotLinkResult {
+        val r: AotLinkResult = AotLinkResult()
+        val opts: AotOptions = AotUtils.defaultAotOptions()
+        opts.emitCSource = false
+        val aot: AotResult = AotUtils.aotCompile(hir, opts)
+
+        r.llvmIr = aot.llvmIr
+        r.targetTriple = aot.targetTriple
+        r.optFlag = aot.optFlag
+        r.objectCommand = aot.objectCommand
+        r.executableCommand = aot.executableCommand
+        r.cSource = ""
+        r.hasMain = aot.hasFunction("main")
+        r.irLines = aot.irLineCount()
+        return r
+    }
+
+    /// HIR → IR →（llc）→ .obj →（clang）→ 原生 exe。
+    ///
+    /// 通过 `FileSystem.writeText` 落盘 IR，经 `Process.run` 调用 LLVM 工具链。
+    /// `llvmHome` 为 LLVM 根目录（如 `D:/DevTools/LLVM/clang+llvm-23.1.0-...`）。
+    fun aotBuildExeFromHir(hir: Hir, moduleName: String, outDir: String, llvmHome: String): AotExeResult {
+        val r: AotExeResult = AotExeResult()
+
+        val a: AotLinkResult = AotUtils.compileAotIrOnly(hir)
+        val tgt: String = a.targetTriple
+        r.target = tgt
+
+        val llPath: String = outDir + "/" + moduleName + ".ll"
+        val objPath: String = outDir + "/" + moduleName + ".obj"
+        var exePath: String = outDir + "/" + moduleName
+        if (tgt.contains("windows")) {
+            exePath = exePath + ".exe"
+        }
+        r.llPath = llPath
+        r.objPath = objPath
+        r.exePath = exePath
+
+        // 1. 落盘 LLVM IR
+        FileSystem.mkdirP(outDir)
+        FileSystem.writeText(llPath, a.llvmIr)
+
+        // 2. llc：IR → 目标文件
+        //    Phase 6.5.8：llc 自带模块验证；把 stderr 重定向到日志文件，
+        //    失败时保留 .ll 并回读首个错误行（定位首个非法指令，无需重跑）。
+        val llc: String = toolPreferredPath("llc", llvmHome)
+        val clang: String = toolPreferredPath("clang", llvmHome)
+        val optFlag: String = a.optFlag
+        val logPath: String = outDir + "/" + moduleName + ".llc.log"
+        r.llcLog = logPath
+        val llcCmd: String = llc + " -mtriple " + tgt + " " + llPath +
+            " -o " + objPath + " " + optFlag + " -filetype=obj 2> " + AotUtils.aotWinPath(logPath)
+        r.llcExit = Process.run(llcCmd)
+        if (r.llcExit != 0) {
+            if (FileSystem.exists(logPath)) {
+                val log: String = FileSystem.readText(logPath)
+                r.irError = aotLineAt(log, 0)
+            }
+            // IR 非法：保留 .ll + .llc.log，直接返回，避免下游 clang 掩盖根因
+            return r
+        }
+
+        // 3. clang：编译 std C 运行库（提供 aura_println / aura_math_* /
+        //    aura_lang_std_String_* 等符号；不链接会出现 undefined symbol）
+        val cffiSrc: String = "compiler/src/std/cffi/aura_std_cffi.c"
+        var cffiObj: String = ""
+        if (FileSystem.exists(cffiSrc)) {
+            cffiObj = outDir + "/aura_std_cffi.obj"
+            val cffiCmd: String = clang + " -c " + cffiSrc + " -o " + cffiObj + " -O1"
+            r.cffiExit = Process.run(cffiCmd)
+        }
+
+        // 3.5 clang：编译 syscall 分发库（提供 aura_syscall_dispatch /
+        //     aura_memory_alloc / aura_memory_free / aura_cpu_* 等符号，
+        //     供 `@native(...)` 包装器解析；与 Rust 侧 linker.rs 的
+        //     `compile_std_cffi` 一致，两个 C 源都要编译并链接）
+        val sysSrc: String = "compiler/src/std/cffi/aura_syscalls.c"
+        var sysObj: String = ""
+        if (FileSystem.exists(sysSrc)) {
+            sysObj = outDir + "/aura_syscalls.obj"
+            val sysCmd: String = clang + " -c " + sysSrc + " -o " + sysObj + " -O1"
+            r.syscallsExit = Process.run(sysCmd)
+        }
+
+        // 4. clang：目标文件 + std 运行库 → 可执行文件。
+        //    与 Rust 侧 `link_to_executable` 一致：链接宿主目标**不加** `-target`
+        //    （`-target` 会让 clang 走另一套库/ABI，链接 C 运行库时失败）；
+        //    交叉编译目标三元组已由 llc 的 `-mtriple` 决定。
+        var clangCmd: String = clang + " " + objPath
+        if (cffiObj != "") {
+            clangCmd = clangCmd + " " + cffiObj
+        }
+        if (sysObj != "") {
+            clangCmd = clangCmd + " " + sysObj
+        }
+        clangCmd = clangCmd + " -o " + exePath + " " + optFlag
+        // Windows 目标：COFF 对象经 lld-link 链接时需要显式 `subsystem`
+        // （否则报 `lld-link: error: subsystem must be defined`）。
+        if (tgt.contains("windows")) {
+            clangCmd = clangCmd + " -Wl,/subsystem:console"
+        }
+        r.clangExit = Process.run(clangCmd)
+
+        r.ok = (r.llcExit == 0) && (r.cffiExit == 0) && (r.syscallsExit == 0)
+            && (r.clangExit == 0)
+        return r
+    }
+
+    /// 运行已产出的可执行文件，返回其退出码。
+    ///
+    /// 注意：`Process.run` 经 `cmd /C` 执行，`cmd` 会把路径中的 `/` 当作开关分隔符，
+    /// 故先把分隔符规范化为反斜杠（`build/a/b.exe` → `build\a\b.exe`）。
+    fun runBuiltExe(exePath: String): Int {
+        return Process.run(AotUtils.aotWinPath(exePath))
+    }
+
+    /// 把路径分隔符 `/` 规范化为 `\`（Windows `cmd` 友好）。
+    fun aotWinPath(p: String): String {
+        var out: String = ""
+        var i: Int = 0
+        while (i < p.length) {
+            val c: String = toStr(p[i])
+            if (c == "/") {
+                out = out + "\\"
+            } else {
+                out = out + c
+            }
+            i = i + 1
+        }
+        return out
+    }
+
+    /// 默认 LLVM 工具链根目录（与根 `Cargo.toml` 的 `[workspace.metadata.aura].llvm-home` 一致）。
+    fun llvmHomeDefault(): String {
+        return "D:/DevTools/LLVM/clang+llvm-23.1.0-x86_64-pc-windows-msvc"
+    }
+}
+
 /// AOT 编译选项。
 class AotOptions {
 
@@ -68,11 +254,6 @@ class AotOptions {
         this.linkStdCffi = false
         this.emitCSource = true
     }
-}
-
-/// 默认 AOT 选项。
-fun defaultAotOptions(): AotOptions {
-    return AotOptions(targetDefault(), optLevelDefault(), "main")
 }
 
 /// AOT 编译结果。
@@ -124,10 +305,10 @@ class AotResult {
 class AotCodeGenerator {
 
     /// 最近一次编译结果。
-    var lastResult: AotResult = emptyAotResult()
+    var lastResult: AotResult = AotUtils.emptyAotResult()
 
     init() {
-        this.lastResult = emptyAotResult()
+        this.lastResult = AotUtils.emptyAotResult()
     }
 
     /// HIR → AOT 结果（IR + 命令 + C 源码）。
@@ -167,22 +348,6 @@ class AotCodeGenerator {
     }
 }
 
-/// 空结果占位。
-fun emptyAotResult(): AotResult {
-    return AotResult("", "", "", "", "", "")
-}
-
-/// 顶层入口：HIR → AOT 结果。
-fun aotCompile(hir: Hir, options: AotOptions): AotResult {
-    val gen: AotCodeGenerator = AotCodeGenerator()
-    return gen.compile(hir, options)
-}
-
-/// AOT 后端版本。
-fun aotBackendVersion(): String {
-    return "0.1.0-phase6"
-}
-
 // ─────────────────────────────────────────────────────────────
 // AOT 产物落盘与原生 exe 产出（Phase 9：接入 LLVM 工具链）
 //
@@ -216,47 +381,6 @@ class AotLinkResult {
 
     /// 是否定义了 main。
     var hasMain: Boolean = false
-}
-
-/// HIR → LLVM IR 文本 + llc/clang 命令 + C 后端源码（纯函数，不触发 IO）。
-///
-/// 会同时生成 C 后端备选源码（`cSource`）。若调用方只走 LLVM 工具链，请用
-/// [`compileAotIrOnly`]：省掉整份 HIR 的二次翻译（自举时约 40MB 分配）。
-fun compileAot(hir: Hir): AotLinkResult {
-    val r: AotLinkResult = AotLinkResult()
-    val opts: AotOptions = defaultAotOptions()
-    val aot: AotResult = aotCompile(hir, opts)
-
-    r.llvmIr = aot.llvmIr
-    r.targetTriple = aot.targetTriple
-    r.optFlag = aot.optFlag
-    r.objectCommand = aot.objectCommand
-    r.executableCommand = aot.executableCommand
-    r.cSource = aot.cSource
-    r.hasMain = aot.hasFunction("main")
-    r.irLines = aot.irLineCount()
-    return r
-}
-
-/// 同 [`compileAot`]，但**不生成 C 后端备选源码**（`cSource` 为空串）。
-///
-/// 供「HIR → IR → llc → clang → exe」的产物构建路径使用：该路径从不读 `cSource`，
-/// 生成它是纯粹的内存浪费（`emitC` 会重新遍历整份 HIR 并拼接 C 文本）。
-fun compileAotIrOnly(hir: Hir): AotLinkResult {
-    val r: AotLinkResult = AotLinkResult()
-    val opts: AotOptions = defaultAotOptions()
-    opts.emitCSource = false
-    val aot: AotResult = aotCompile(hir, opts)
-
-    r.llvmIr = aot.llvmIr
-    r.targetTriple = aot.targetTriple
-    r.optFlag = aot.optFlag
-    r.objectCommand = aot.objectCommand
-    r.executableCommand = aot.executableCommand
-    r.cSource = ""
-    r.hasMain = aot.hasFunction("main")
-    r.irLines = aot.irLineCount()
-    return r
 }
 
 /// AOT 原生编译结果。
@@ -301,124 +425,4 @@ class AotExeResult {
 
     /// llc 报错首行（IR 非法时非空；便于定位首个非法指令）。
     var irError: String = ""
-}
-
-/// HIR → IR →（llc）→ .obj →（clang）→ 原生 exe。
-///
-/// 通过 `FileSystem.writeText` 落盘 IR，经 `Process.run` 调用 LLVM 工具链。
-/// `llvmHome` 为 LLVM 根目录（如 `D:/DevTools/LLVM/clang+llvm-23.1.0-...`）。
-fun aotBuildExeFromHir(hir: Hir, moduleName: String, outDir: String, llvmHome: String): AotExeResult {
-    val r: AotExeResult = AotExeResult()
-
-    val a: AotLinkResult = compileAotIrOnly(hir)
-    val tgt: String = a.targetTriple
-    r.target = tgt
-
-    val llPath: String = outDir + "/" + moduleName + ".ll"
-    val objPath: String = outDir + "/" + moduleName + ".obj"
-    var exePath: String = outDir + "/" + moduleName
-    if (tgt.contains("windows")) {
-        exePath = exePath + ".exe"
-    }
-    r.llPath = llPath
-    r.objPath = objPath
-    r.exePath = exePath
-
-    // 1. 落盘 LLVM IR
-    FileSystem.mkdirP(outDir)
-    FileSystem.writeText(llPath, a.llvmIr)
-
-    // 2. llc：IR → 目标文件
-    //    Phase 6.5.8：llc 自带模块验证；把 stderr 重定向到日志文件，
-    //    失败时保留 .ll 并回读首个错误行（定位首个非法指令，无需重跑）。
-    val llc: String = toolPreferredPath("llc", llvmHome)
-    val clang: String = toolPreferredPath("clang", llvmHome)
-    val optFlag: String = a.optFlag
-    val logPath: String = outDir + "/" + moduleName + ".llc.log"
-    r.llcLog = logPath
-    val llcCmd: String = llc + " -mtriple " + tgt + " " + llPath +
-        " -o " + objPath + " " + optFlag + " -filetype=obj 2> " + aotWinPath(logPath)
-    r.llcExit = Process.run(llcCmd)
-    if (r.llcExit != 0) {
-        if (FileSystem.exists(logPath)) {
-            val log: String = FileSystem.readText(logPath)
-            r.irError = aotLineAt(log, 0)
-        }
-        // IR 非法：保留 .ll + .llc.log，直接返回，避免下游 clang 掩盖根因
-        return r
-    }
-
-    // 3. clang：编译 std C 运行库（提供 aura_println / aura_math_* /
-    //    aura_lang_std_String_* 等符号；不链接会出现 undefined symbol）
-    val cffiSrc: String = "compiler/src/std/cffi/aura_std_cffi.c"
-    var cffiObj: String = ""
-    if (FileSystem.exists(cffiSrc)) {
-        cffiObj = outDir + "/aura_std_cffi.obj"
-        val cffiCmd: String = clang + " -c " + cffiSrc + " -o " + cffiObj + " -O1"
-        r.cffiExit = Process.run(cffiCmd)
-    }
-
-    // 3.5 clang：编译 syscall 分发库（提供 aura_syscall_dispatch /
-    //     aura_memory_alloc / aura_memory_free / aura_cpu_* 等符号，
-    //     供 `@native(...)` 包装器解析；与 Rust 侧 linker.rs 的
-    //     `compile_std_cffi` 一致，两个 C 源都要编译并链接）
-    val sysSrc: String = "compiler/src/std/cffi/aura_syscalls.c"
-    var sysObj: String = ""
-    if (FileSystem.exists(sysSrc)) {
-        sysObj = outDir + "/aura_syscalls.obj"
-        val sysCmd: String = clang + " -c " + sysSrc + " -o " + sysObj + " -O1"
-        r.syscallsExit = Process.run(sysCmd)
-    }
-
-    // 4. clang：目标文件 + std 运行库 → 可执行文件。
-    //    与 Rust 侧 `link_to_executable` 一致：链接宿主目标**不加** `-target`
-    //    （`-target` 会让 clang 走另一套库/ABI，链接 C 运行库时失败）；
-    //    交叉编译目标三元组已由 llc 的 `-mtriple` 决定。
-    var clangCmd: String = clang + " " + objPath
-    if (cffiObj != "") {
-        clangCmd = clangCmd + " " + cffiObj
-    }
-    if (sysObj != "") {
-        clangCmd = clangCmd + " " + sysObj
-    }
-    clangCmd = clangCmd + " -o " + exePath + " " + optFlag
-    // Windows 目标：COFF 对象经 lld-link 链接时需要显式 `subsystem`
-    // （否则报 `lld-link: error: subsystem must be defined`）。
-    if (tgt.contains("windows")) {
-        clangCmd = clangCmd + " -Wl,/subsystem:console"
-    }
-    r.clangExit = Process.run(clangCmd)
-
-    r.ok = (r.llcExit == 0) && (r.cffiExit == 0) && (r.syscallsExit == 0)
-        && (r.clangExit == 0)
-    return r
-}
-
-/// 运行已产出的可执行文件，返回其退出码。
-///
-/// 注意：`Process.run` 经 `cmd /C` 执行，`cmd` 会把路径中的 `/` 当作开关分隔符，
-/// 故先把分隔符规范化为反斜杠（`build/a/b.exe` → `build\a\b.exe`）。
-fun runBuiltExe(exePath: String): Int {
-    return Process.run(aotWinPath(exePath))
-}
-
-/// 把路径分隔符 `/` 规范化为 `\`（Windows `cmd` 友好）。
-fun aotWinPath(p: String): String {
-    var out: String = ""
-    var i: Int = 0
-    while (i < p.length) {
-        val c: String = toStr(p[i])
-        if (c == "/") {
-            out = out + "\\"
-        } else {
-            out = out + c
-        }
-        i = i + 1
-    }
-    return out
-}
-
-/// 默认 LLVM 工具链根目录（与根 `Cargo.toml` 的 `[workspace.metadata.aura].llvm-home` 一致）。
-fun llvmHomeDefault(): String {
-    return "D:/DevTools/LLVM/clang+llvm-23.1.0-x86_64-pc-windows-msvc"
 }

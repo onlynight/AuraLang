@@ -91,3 +91,56 @@ pub unsafe extern "C" fn aura_jit_call_native_by_index(
         *out_ptr = JitValue::null();
     }
 }
+
+/// Phase D: JIT 原生函数调度器（按名称查找，供并发指令使用）
+///
+/// 参数：
+/// - name_ptr: 函数名 C 字符串指针
+/// - name_len: 函数名长度
+/// - argc: 参数个数
+/// - args_ptr: 参数数组指针（JitValue 格式）
+/// - out_ptr: 返回值输出指针（JitValue 格式）
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aura_jit_call_native_by_name(
+    name_ptr: *const u8,
+    name_len: i64,
+    argc: i64,
+    args_ptr: *const JitValue,
+    out_ptr: *mut JitValue,
+) {
+    let reg = match get_native_registry() {
+        p if !p.is_null() => &*p,
+        _ => {
+            *out_ptr = JitValue::null();
+            return;
+        }
+    };
+
+    let argc = argc as usize;
+
+    // 从 C 字符串构造 Rust String
+    let name_bytes = std::slice::from_raw_parts(name_ptr, name_len as usize);
+    let name = match std::str::from_utf8(name_bytes) {
+        Ok(s) => s.to_string(),
+        Err(_) => {
+            *out_ptr = JitValue::null();
+            return;
+        }
+    };
+
+    // 查找原生函数
+    if let Some(native_fn) = reg.get(&name) {
+        // 将 JitValue 参数转换为 Value 数组
+        let values: Vec<Value> = (0..argc).map(|i| (*args_ptr.add(i)).to_value()).collect();
+
+        // 调用原生函数
+        let result = native_fn(&values);
+
+        // 将返回值转换为 JitValue
+        let jit_result = JitValue::from_value(&result);
+        *out_ptr = jit_result;
+    } else {
+        // 函数未注册，返回 Null
+        *out_ptr = JitValue::null();
+    }
+}

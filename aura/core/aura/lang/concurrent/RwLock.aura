@@ -1,0 +1,113 @@
+// aura:///aura/lang/concurrent/RwLock.aura
+package aura.lang.concurrent
+// 读写锁（RwLock）—— 纯 Aura 实现，不依赖 Rust 运行库。
+//
+// 实现说明：
+//   * 句柄指向一段 24 字节堆内存：`w0`=守卫自旋锁，`w1`=读者计数，`w2`=写者标志。
+//   * 守卫自旋锁使用 `Cpu.atomicAdd`（`lock xaddq`）原生原子指令；
+//     读者/写者判定与计数在 Aura 中完成。
+//   * 语义：多个读者可共存；写者独占（等待读者归零）。
+//
+// 使用前需 import：
+// ```aura
+// import aura.lang.concurrent.RwLock.*   // 短名可用：new, readLock, writeLock, ...
+// import aura.lang.concurrent.RwLock     // 类式调用：RwLock.new()
+// ```
+//
+// @since 0.6
+import aura.lang.native.Memory
+import aura.lang.native.Cpu
+
+internal object RwLock {
+
+    /// 创建新的读写锁
+    ///
+    /// - 返回：读写锁 ID（堆地址）
+    fun new(): Int {
+        val addr: Long = Memory.alloc(24L)
+        Memory.write64(addr, 0L)
+        Memory.write64(addr + 8L, 0L)
+        Memory.write64(addr + 16L, 0L)
+        return addr as Int
+    }
+
+    /// 获取读锁（多个读锁可共存）
+    ///
+    /// - 参数：`lock_id` — 读写锁 ID
+    fun readLock(lock_id: Int): Unit {
+        val guard: Long = lock_id as Long
+        val readers: Long = guard + 8L
+        val writer: Long = guard + 16L
+        while (true) {
+            spinAcquire(guard)
+            if (Memory.read64(writer) == 0L) {
+                Memory.write64(readers, Memory.read64(readers) + 1L)
+                spinRelease(guard)
+                return
+            }
+            spinRelease(guard)
+        }
+    }
+
+    /// 获取写锁（独占锁，阻塞直到所有读锁和写锁释放）
+    ///
+    /// - 参数：`lock_id` — 读写锁 ID
+    fun writeLock(lock_id: Int): Unit {
+        val guard: Long = lock_id as Long
+        val readers: Long = guard + 8L
+        val writer: Long = guard + 16L
+        while (true) {
+            spinAcquire(guard)
+            if (Memory.read64(readers) == 0L && Memory.read64(writer) == 0L) {
+                Memory.write64(writer, 1L)
+                spinRelease(guard)
+                return
+            }
+            spinRelease(guard)
+        }
+    }
+
+    /// 释放读锁
+    ///
+    /// - 参数：`lock_id` — 读写锁 ID
+    fun readUnlock(lock_id: Int): Unit {
+        val guard: Long = lock_id as Long
+        val readers: Long = guard + 8L
+        spinAcquire(guard)
+        Memory.write64(readers, Memory.read64(readers) - 1L)
+        spinRelease(guard)
+    }
+
+    /// 释放写锁
+    ///
+    /// - 参数：`lock_id` — 读写锁 ID
+    fun writeUnlock(lock_id: Int): Unit {
+        val guard: Long = lock_id as Long
+        val writer: Long = guard + 16L
+        spinAcquire(guard)
+        Memory.write64(writer, 0L)
+        spinRelease(guard)
+    }
+
+    /// 销毁读写锁
+    ///
+    /// - 参数：`lock_id` — 读写锁 ID
+    fun destroy(lock_id: Int): Unit {
+        Memory.free(lock_id as Long)
+    }
+
+    // ── 内部：自旋守卫 ──
+
+    private fun spinAcquire(word: Long): Unit {
+        while (true) {
+            if (Cpu.atomicAdd(word, 1L) == 0L) {
+                return
+            }
+            Cpu.atomicAdd(word, 0L - 1L)
+        }
+    }
+
+    private fun spinRelease(word: Long): Unit {
+        Cpu.atomicAdd(word, 0L - 1L)
+    }
+}

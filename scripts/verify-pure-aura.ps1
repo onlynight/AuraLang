@@ -1,8 +1,6 @@
-# Phase E: 纯 Aura 化工具链验证脚本
+﻿# Phase E: �?Aura 化工具链验证脚本
 #
-# 验证 AuraCli / AuraLsp / AuraDebugger / Loom 的纯 Aura 实现。
-# 对应改造方案 E.5「验证」章节。
-#
+# 验证 AuraCli / AuraLsp / AuraDebugger / Loom 的纯 Aura 实现�?# 对应改造方�?E.5「验证」章节�?#
 # 用法：pwsh scripts/verify-pure-aura.ps1
 
 param(
@@ -17,28 +15,28 @@ $fail = 0
 
 function Check($desc, $cond) {
     if ($cond) {
-        Write-Host "  ✓ $desc" -ForegroundColor Green
+        Write-Host "  �?$desc" -ForegroundColor Green
         $script:pass++
     } else {
-        Write-Host "  ✗ $desc" -ForegroundColor Red
+        Write-Host "  �?$desc" -ForegroundColor Red
         $script:fail++
     }
 }
 
 function Section($title) {
     Write-Host ""
-    Write-Host "━━━ $title ━━━" -ForegroundColor Cyan
+    Write-Host "━━�?$title ━━�? -ForegroundColor Cyan
 }
 
-Write-Host "═══ 纯 Aura 化工具链验证 ═══" -ForegroundColor White
+Write-Host "══�?�?Aura 化工具链验证 ══�? -ForegroundColor White
 Write-Host "日期: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 Write-Host "仓库: $root"
 
-# ─── 快速模式 ───
+# ─── 快速模�?───
 if ($Quick) {
-    Section "E.1 AuraCli.aura"
-    Check "File exists" (Test-Path "$root/aura/toolchain/aura/lang/cli/AuraCli.aura")
-    $cli = Get-Content "$root/aura/toolchain/aura/lang/cli/AuraCli.aura" -Raw
+    Section "E.1 CLI Main.aura"
+    Check "File exists" (Test-Path "$root/aura/toolchain/cli/aura/lang/cli/Main.aura")
+    $cli = Get-Content "$root/aura/toolchain/cli/aura/lang/cli/Main.aura" -Raw
     Check "Has main()" ($cli -match "fun main\(\)")
     Check "Has cmdBuild" ($cli -match "cmdBuild")
     Check "Has cmdRun" ($cli -match "cmdRun")
@@ -46,26 +44,26 @@ if ($Quick) {
     Check "Has cmdLsp" ($cli -match "cmdLsp")
     Check "Has cmdDebug" ($cli -match "cmdDebug")
 
-    Section "E.2 AuraLsp.aura"
-    Check "File exists" (Test-Path "$root/aura/toolchain/aura/lang/lsp/AuraLsp.aura")
-    $lsp = Get-Content "$root/aura/toolchain/aura/lang/lsp/AuraLsp.aura" -Raw
+    Section "E.2 LSP Main.aura"
+    Check "File exists" (Test-Path "$root/aura/toolchain/lsp/aura/lang/lsp/Main.aura")
+    $lsp = Get-Content "$root/aura/toolchain/lsp/aura/lang/lsp/Main.aura" -Raw
     Check "Has LspServer" ($lsp -match "class LspServer")
     Check "Has lspCompletion" ($lsp -match "lspCompletion")
     Check "Has lspHover" ($lsp -match "lspHover")
     Check "Has lspDiagnostic" ($lsp -match "lspDiagnostic")
     Check "Has JSON-RPC" ($lsp -match "Content-Length")
 
-    Section "E.3 AuraDebugger.aura"
-    Check "File exists" (Test-Path "$root/aura/toolchain/aura/lang/debugger/AuraDebugger.aura")
-    $dbg = Get-Content "$root/aura/toolchain/aura/lang/debugger/AuraDebugger.aura" -Raw
+    Section "E.3 Debugger Main.aura"
+    Check "File exists" (Test-Path "$root/aura/toolchain/debugger/aura/lang/debugger/Main.aura")
+    $dbg = Get-Content "$root/aura/toolchain/debugger/aura/lang/debugger/Main.aura" -Raw
     Check "Has Debugger class" ($dbg -match "class Debugger")
     Check "Has breakpoint" ($dbg -match "Breakpoint")
     Check "Has stepOver" ($dbg -match "stepOver")
     Check "Has debugRepl" ($dbg -match "debugRepl")
 
-    Section "E.4 Loom.aura"
-    Check "File exists" (Test-Path "$root/aura/toolchain/aura/lang/loom/Loom.aura")
-    $loom = Get-Content "$root/aura/toolchain/aura/lang/loom/Loom.aura" -Raw
+    Section "E.4 Loom Main.aura"
+    Check "File exists" (Test-Path "$root/aura/toolchain/loom/aura/lang/loom/Main.aura")
+    $loom = Get-Content "$root/aura/toolchain/loom/aura/lang/loom/Main.aura" -Raw
     Check "Has Loom class" ($loom -match "class Loom")
     Check "Has Manifest" ($loom -match "class Manifest")
     Check "Has TaskGraph" ($loom -match "class TaskGraph")
@@ -85,14 +83,14 @@ if ($Quick) {
     Check "aura_syscalls.c has sha256" (Get-Content "$root/compiler/src/std/cffi/aura_syscalls.c" -Raw -match "aura_sha256")
 
     Write-Host ""
-    Write-Host "═══ 快速模式结果: $pass passed, $fail failed ═══" -ForegroundColor ($if ($fail -eq 0) { "Green" } else { "Yellow" })
+    Write-Host "══�?快速模式结�? $pass passed, $fail failed ══�? -ForegroundColor ($if ($fail -eq 0) { "Green" } else { "Yellow" })
     return
 }
 
 # ─── 完整模式 ───
 
-Section "E.1 AuraCli.aura — 结构验证"
-$cliPath = "$root/aura/toolchain/aura/lang/cli/AuraCli.aura"
+Section "E.1 AuraCli.aura �?结构验证"
+$cliPath = "$root/aura/toolchain/cli/aura/lang/cli/Main.aura"
 $cli = Get-Content $cliPath -Raw
 Check "File exists" (Test-Path $cliPath)
 Check "Has main()" ($cli -match "fun main\(\)")
@@ -118,8 +116,8 @@ Check "Has @native declarations" ($cli -match "@native")
 Check "Covers 22+ subcommands" ($cli -match '"build"')
 Check "Imports std modules" ($cli -match "import aura.lang.std")
 
-Section "E.2 AuraLsp.aura — 结构验证"
-$lspPath = "$root/aura/toolchain/aura/lang/lsp/AuraLsp.aura"
+Section "E.2 AuraLsp.aura �?结构验证"
+$lspPath = "$root/aura/toolchain/lsp/aura/lang/lsp/Main.aura"
 $lsp = Get-Content $lspPath -Raw
 Check "File exists" (Test-Path $lspPath)
 Check "Has LspServer class" ($lsp -match "class LspServer")
@@ -140,8 +138,8 @@ Check "Has signatureHelp" ($lsp -match "signatureHelp")
 Check "Has inlayHint" ($lsp -match "inlayHint")
 Check "Has codeAction" ($lsp -match "codeAction")
 
-Section "E.3 AuraDebugger.aura — 结构验证"
-$dbgPath = "$root/aura/toolchain/aura/lang/debugger/AuraDebugger.aura"
+Section "E.3 AuraDebugger.aura �?结构验证"
+$dbgPath = "$root/aura/toolchain/debugger/aura/lang/debugger/Main.aura"
 $dbg = Get-Content $dbgPath -Raw
 Check "File exists" (Test-Path $dbgPath)
 Check "Has Debugger class" ($dbg -match "class Debugger")
@@ -162,8 +160,8 @@ Check "Has debugWatch" ($dbg -match "debugWatch")
 Check "Has debugRepl" ($dbg -match "debugRepl")
 Check "Has REPL commands" ($dbg -match "breakpoints")
 
-Section "E.4 Loom.aura — 结构验证"
-$loomPath = "$root/aura/toolchain/aura/lang/loom/Loom.aura"
+Section "E.4 Loom.aura �?结构验证"
+$loomPath = "$root/aura/toolchain/loom/aura/lang/loom/Main.aura"
 $loom = Get-Content $loomPath -Raw
 Check "File exists" (Test-Path $loomPath)
 Check "Has Loom class" ($loom -match "class Loom")
@@ -208,9 +206,9 @@ if (-not $SkipLlm) {
     Check "stdlib_consistency passes" ($consOut -match "2 passed")
 }
 
-# ─── 汇总 ───
+# ─── 汇�?───
 Write-Host ""
-Write-Host "═══════════════════════════════════════" -ForegroundColor White
+Write-Host "══════════════════════════════════════�? -ForegroundColor White
 Write-Host "  验证完成: $pass passed, $fail failed" -ForegroundColor ($if ($fail -eq 0) { "Green" } else { "Yellow" })
-Write-Host "═══════════════════════════════════════" -ForegroundColor White
+Write-Host "══════════════════════════════════════�? -ForegroundColor White
 exit $fail

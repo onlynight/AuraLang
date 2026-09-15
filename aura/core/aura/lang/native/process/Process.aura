@@ -3,8 +3,8 @@ package aura.lang.native.process
 // ─────────────────────────────────────────────────────────────
 // 进程管理 — Phase S2 (native 包实现)
 //
-// 使用 extern object + @native 实现，零 Rust 依赖。
-// 替代 aura.lang.std.Process（internal object → Rust bootstrap）。
+// 使用 extern object + @native 实现，零外部库依赖。
+// 替代 aura.lang.std.Process（内部接口）。
 //
 // ── 设计原则 ──
 //   * 低层：直接映射 syscall（fork / execve / wait4 / kill / exit / getpid）

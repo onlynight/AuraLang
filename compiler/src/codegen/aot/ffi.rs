@@ -28,25 +28,26 @@ impl<'a> FfiGenerator<'a> {
         let mut seen = std::collections::HashSet::new();
         for func in funcs {
             let sym = crate::codegen::aot::types::sanitizellvm(&func.name);
+            // 将新命名转换为旧 C 符号名（与 aura_std_cffi.c 一致）
+            let legacy_sym = crate::codegen::aot::runtime::translate_to_legacy_c(&sym);
             // 内置 runtime 函数已由 emit_runtime 统一声明，跳过避免重定义
-            if crate::codegen::aot::runtime::is_runtime_function(&sym) {
+            if crate::codegen::aot::runtime::is_runtime_function(&legacy_sym) {
                 continue;
             }
             // 去重：不同原生函数名清洗后可能得到同一符号（如 aura.lang.std.Math.sin / aura_math_sin）
-            if !seen.insert(sym) {
+            if !seen.insert(legacy_sym.clone()) {
                 continue;
             }
-            decls.push(self.generate_extern_function(func));
+            decls.push(self.generate_extern_function(func, &legacy_sym));
         }
         Ok(decls)
     }
 
-    fn generate_extern_function(&self, func: &HirFunction) -> String {
-        let sym = crate::codegen::aot::types::sanitizellvm(&func.name);
+    fn generate_extern_function(&self, func: &HirFunction, legacy_sym: &str) -> String {
         // C FFI 实现函数：使用真实 C ABI 签名（与 aura_std_cffi.c 一致）
-        if let Some((ret, params)) = crate::codegen::aot::runtime::cffi_signature(&sym) {
+        if let Some((ret, params)) = crate::codegen::aot::runtime::cffi_signature(&legacy_sym) {
             let params_str = params.join(", ");
-            return format!("declare {} @{}({})\n", ret, sym, params_str);
+            return format!("declare {} @{}({})\n", ret, legacy_sym, params_str);
         }
         let ret_ty = self
             .type_mapper
@@ -90,8 +91,8 @@ impl<'a> FfiGenerator<'a> {
             "{comment}declare {ret_str} @{name}({params_str})\n",
             comment = comment,
             ret_str = ret_str,
-            // 符号名必须与调用点一致（点号等非法字符替换为下划线，如 aura.lang.std.Coroutine.spawn → aura_concurrent_spawn）
-            name = crate::codegen::aot::types::sanitizellvm(&func.name),
+            // 符号名使用旧 C 符号名（与 aura_std_cffi.c 一致）
+            name = legacy_sym,
             params_str = params_str,
         )
     }

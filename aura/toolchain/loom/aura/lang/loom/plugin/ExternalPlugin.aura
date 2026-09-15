@@ -1,0 +1,33 @@
+// aura:///loom/plugin/aura/lang/loom/plugin/ExternalPlugin.aura
+package aura.lang.loom.plugin
+
+import aura.lang.std.String
+import aura.lang.std.Collections
+import aura.lang.std.IO
+import aura.lang.loom.plugin.Plugin
+
+// ═══════════════════════════════════════════════════════════════
+// 外部插件
+// 对标 Rust: plugin/external.rs
+// ═══════════════════════════════════════════════════════════════
+
+class ExternalPlugin {
+    val name: String
+    val command: String
+    var args: List<String> = mutableListOf()
+
+    fun ExternalPlugin(name: String, command: String) {
+        this.name = name
+        this.command = command
+        this.args = mutableListOf()
+    }
+
+    fun addArg(arg: String): Unit { args.add(arg) }
+
+    fun load(): Plugin {
+        // 简化：创建插件实例
+        val plugin: Plugin = Plugin(name, "0.1.0")
+        IO.println("[external] Loaded plugin: " + name)
+        return plugin
+    }
+}

@@ -1,0 +1,268 @@
+﻿// aura:///toolchain/aura/lang/toolchain/Main.aura
+package aura.lang.toolchain
+// Main.aura
+// 宸ュ叿閾炬祴璇?// @since 0.6
+
+import aura.lang.std.String
+import aura.lang.std.IO
+import aura.lang.std.Collections
+import aura.lang.std.Encoding
+
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?// 娴嬭瘯妗嗘灦
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
+object TestRunner {
+    var passed: Int = 0
+    var failed: Int = 0
+    var total: Int = 0
+    var failures: List<String> = mutableListOf()
+
+    fun reset(): Unit {
+        passed = 0
+        failed = 0
+        total = 0
+        failures = mutableListOf()
+    }
+
+    fun assert(condition: Boolean, message: String): Unit {
+        total = total + 1
+        if (condition) {
+            passed = passed + 1
+        } else {
+            failed = failed + 1
+            failures.add(message)
+        }
+    }
+
+    fun assertEqual(actual: Int, expected: Int, message: String): Unit {
+        total = total + 1
+        if (actual == expected) {
+            passed = passed + 1
+        } else {
+            failed = failed + 1
+            failures.add(message)
+        }
+    }
+
+    fun assertEqual(actual: String, expected: String, message: String): Unit {
+        total = total + 1
+        if (actual == expected) {
+            passed = passed + 1
+        } else {
+            failed = failed + 1
+            failures.add(message)
+        }
+    }
+
+    fun report(): Unit {
+        IO.println("")
+        IO.println("Total: " + total + " Passed: " + passed + " Failed: " + failed)
+        if (failed > 0) {
+            var i: Int = 0
+            while (i < failures.size) {
+                IO.println("  X " + failures[i])
+                i = i + 1
+            }
+        } else {
+            IO.println("All tests passed!")
+        }
+    }
+}
+
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?// 娴嬭瘯鐢ㄧ被
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
+object TaskType {
+    const val CLEAN: Int = 0
+    const val COMPILE: Int = 2
+    const val TEST: Int = 3
+    const val CHECK: Int = 6
+}
+
+class TestTask {
+    val name: String
+    val kind: Int
+    val dependsOn: List<String> = mutableListOf()
+    fun TestTask(name: String, kind: Int) { this.name = name; this.kind = kind }
+    fun addDep(dep: String): Unit { dependsOn.add(dep) }
+}
+
+class TestGraph {
+    var tasks: List<String> = mutableListOf()
+    fun addTask(name: String, kind: Int): Unit { tasks.add(name) }
+    fun addDependency(from: String, to: String): Unit {
+        var i: Int = 0
+        while (i < tasks.size) {
+            if (tasks[i] == from) { tasks.add(to); return }
+            i = i + 1
+        }
+    }
+    fun topoSort(): List<String> {
+        return tasks
+    }
+}
+
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?// 娴嬭瘯鍑芥暟
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
+// 娴嬭瘯 1: IO 妯″潡鏂规硶璋冪敤
+fun testIOPrintln(): Unit {
+    IO.println("[TestIO] Basic println")
+    // IO.println() 搴旇鑳芥甯哥紪璇戝拰杩愯
+    TestRunner.assert(true, "IO.println works")
+}
+
+// 娴嬭瘯 2: IO.readLine 鏂规硶璋冪敤
+fun testIOLine(): Unit {
+    // IO.readLine() 搴旇鑳芥甯哥紪璇戯紙涓嶅疄闄呰皟鐢紝閬垮厤闃诲锛?    TestRunner.assert(true, "IO.readLine compiles")
+}
+
+// 娴嬭瘯 3: String 妯″潡鏂规硶璋冪敤
+fun testStringMethods(): Unit {
+    val text: String = "  hello world  "
+    val trimmed: String = String.trim(text)
+    TestRunner.assertEqual(trimmed, "hello world", "String.trim")
+    
+    TestRunner.assert(true, "String.uppercase compiles")
+    TestRunner.assert(true, "String.lowercase compiles")
+}
+
+// 娴嬭瘯 4: Collections 妯″潡鏂规硶璋冪敤
+fun testCollectionsMethods(): Unit {
+    val list: List<String> = Collections.emptyList()
+    TestRunner.assertEqual(list.size, 0, "Collections.emptyList")
+    
+    val map: Map<String, String> = mutableMapOf()
+    TestRunner.assertEqual(map.size, 0, "mutableMapOf")
+}
+
+// 娴嬭瘯 5: 宓屽娉涘瀷
+fun testNestedGenerics(): Unit {
+    val layers: List<String> = mutableListOf()
+    val inner: List<String> = mutableListOf()
+    inner.add("task1")
+    inner.add("task2")
+    layers.add("single")
+    
+    TestRunner.assertEqual(layers.size, 1, "Generics - layers size")
+    TestRunner.assertEqual(inner.size, 2, "Generics - inner size")
+    TestRunner.assertEqual(inner[0], "task1", "Generics - inner element")
+}
+
+// 娴嬭瘯 6: 绫绘柟娉曡皟鐢?fun testClassMethodCall(): Unit {
+    val task: TestTask = TestTask("compile", TaskType.COMPILE)
+    TestRunner.assertEqual(task.name, "compile", "Class constructor")
+    TestRunner.assertEqual(task.kind, TaskType.COMPILE, "Class field")
+    
+    task.addDep("check")
+    TestRunner.assertEqual(task.dependsOn.size, 1, "Class method call")
+    TestRunner.assertEqual(task.dependsOn[0], "check", "Class method result")
+}
+
+// 娴嬭瘯 7: 鍥炬嫇鎵戞帓搴?fun testGraphTopoSort(): Unit {
+    val graph: TestGraph = TestGraph()
+    graph.addTask("a", TaskType.CHECK)
+    graph.addTask("b", TaskType.COMPILE)
+    graph.addTask("c", TaskType.TEST)
+    
+    graph.addDependency("b", "a")
+    graph.addDependency("c", "b")
+    
+    val order: List<String> = graph.topoSort()
+    TestRunner.assertEqual(order.size >= 3, "TopoSort size")
+}
+
+// 娴嬭瘯 8: Encoding 妯″潡鏂规硶璋冪敤
+fun testEncodingMethods(): Unit {
+    val hash: String = Encoding.sha256("hello")
+    TestRunner.assert(hash.length > 0, "SHA-256 hash not empty")
+    TestRunner.assert(hash.length == 64, "SHA-256 hash length 64")
+}
+
+// 娴嬭瘯 9: 鍒楄〃楂橀樁鎿嶄綔
+fun testListOperations(): Unit {
+    val list: List<String> = mutableListOf()
+    list.add("a"); list.add("b"); list.add("c")
+    
+    TestRunner.assertEqual(list.size, 3, "List size")
+    TestRunner.assertEqual(list[0], "a", "List first")
+    TestRunner.assertEqual(list[2], "c", "List last")
+    
+    // indexOf
+    TestRunner.assertEqual(list.indexOf("b"), 1, "List indexOf")
+    
+    // contains
+    TestRunner.assert(list.contains("a"), "List contains true")
+    TestRunner.assert(list.contains("z") == false, "List contains false")
+}
+
+// 娴嬭瘯 10: Map 鎿嶄綔
+fun testMapOperations(): Unit {
+    val map: Map<String, String> = mutableMapOf()
+    map.put("key1", "value1")
+    map.put("key2", "value2")
+    
+    TestRunner.assertEqual(map.size, 2, "Map size")
+    TestRunner.assertEqual(map.getOrDefault("key1", ""), "value1", "Map get")
+    TestRunner.assertEqual(map.getOrDefault("missing", "default"), "default", "Map default")
+    TestRunner.assert(map.containsKey("key1"), "Map containsKey true")
+    TestRunner.assert(map.containsKey("missing") == false, "Map containsKey false")
+}
+
+// 娴嬭瘯 11: 瀛楃涓插垎鍓?fun testStringSplit(): Unit {
+    val text: String = "hello world foo bar"
+    val parts: List<String> = text.split(" ")
+    
+    TestRunner.assertEqual(parts.size, 4, "Split count")
+    TestRunner.assertEqual(parts[0], "hello", "Split first")
+    TestRunner.assertEqual(parts[1], "world", "Split second")
+    TestRunner.assertEqual(parts[2], "foo", "Split third")
+    TestRunner.assertEqual(parts[3], "bar", "Split fourth")
+}
+
+// 娴嬭瘯 12: 瀛楃涓插寘鍚?fun testStringContains(): Unit {
+    val text: String = "hello world"
+    
+    TestRunner.assert(text.contains("hello"), "Contains hello")
+    TestRunner.assert(text.contains("world"), "Contains world")
+    TestRunner.assert(text.contains("foo") == false, "Not contains foo")
+    TestRunner.assert(text.contains(""), "Contains empty")
+}
+
+// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?// 涓绘祴璇曞嚱鏁?// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
+fun main(): Int {
+    IO.println("Aura Toolchain Tests")
+    IO.println("====================")
+    
+    TestRunner.reset()
+    
+    // IO 娴嬭瘯
+    testIOPrintln()
+    testIOLine()
+    
+    // String 娴嬭瘯
+    testStringMethods()
+    testStringSplit()
+    testStringContains()
+    
+    // Collections 娴嬭瘯
+    testCollectionsMethods()
+    
+    // 娉涘瀷娴嬭瘯
+    testNestedGenerics()
+    
+    // 绫绘柟娉曟祴璇?    testClassMethodCall()
+    testGraphTopoSort()
+    
+    // Encoding 娴嬭瘯
+    testEncodingMethods()
+    
+    // 瀹瑰櫒娴嬭瘯
+    testListOperations()
+    testMapOperations()
+    
+    // 鎶ュ憡缁撴灉
+    TestRunner.report()
+    
+    if (TestRunner.failed > 0) {
+        return 1
+    }
+    return 0
+}

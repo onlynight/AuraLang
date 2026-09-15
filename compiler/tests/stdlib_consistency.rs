@@ -141,6 +141,15 @@ fn test_embedded_stdlib_modules_exist() {
         "Actor.auc",
         "Channel.auc",
         "Coroutine.auc",
+        // 并发包（aura.lang.concurrent）：同步原语为纯 Aura，Thread/Future 为 native 声明占位
+        "Atomic.auc",
+        "Mutex.auc",
+        "RwLock.auc",
+        "Condvar.auc",
+        "Barrier.auc",
+        "Semaphore.auc",
+        "Thread.auc",
+        "Future.auc",
     ];
 
     let mut missing = Vec::new();
@@ -153,7 +162,7 @@ fn test_embedded_stdlib_modules_exist() {
 
     if !missing.is_empty() {
         panic!(
-            "嵌入标准库模块缺失: {:?}\n请先运行: aura stdlib-compile aura/core/aura/lang/std --output build",
+            "嵌入标准库模块缺失: {:?}\n请先运行: aura stdlib-compile aura/core/aura/lang/std --output build（并发包：aura/core/aura/lang/concurrent）",
             missing
         );
     }

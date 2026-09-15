@@ -1,0 +1,17 @@
+// aura:///lsp/aura/lang/lsp/LspRequest.aura
+package aura.lang.lsp
+
+import aura.lang.std.String
+
+/// LSP 请求
+class LspRequest {
+    val id: Int
+    val method: String
+    val params: String
+
+    fun LspRequest(id: Int, method: String, params: String) {
+        this.id = id
+        this.method = method
+        this.params = params
+    }
+}

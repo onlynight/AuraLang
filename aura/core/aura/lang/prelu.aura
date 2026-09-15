@@ -145,7 +145,7 @@ fun intToPtr(value: Int): Any {
     return Builtin.intToPtr(value)
 }
 
-/// 创建回调函数（用于 FFI）。
+/// 创建回调函数（用于 native 调用）。
 fun makeCallback(fn: (Any) -> Any): Any {
     return Builtin.makeCallback(fn)
 }

@@ -1,0 +1,5 @@
+fun main() {
+    val s = "hello"
+    val c = s.charCodeAt(0)
+    println("charCodeAt(0) = " + c.toString())
+}

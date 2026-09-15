@@ -1,4 +1,5 @@
 // aura:///aura/compiler/aura/lang/compiler/vm/Frames.aura
+package aura.lang.compiler.vm
 // 虚拟机栈帧管理（Phase 4: 完整 VM Aura 编写）
 /// 虚拟机栈帧管理。
 ///

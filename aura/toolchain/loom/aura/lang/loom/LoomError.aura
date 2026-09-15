@@ -1,0 +1,17 @@
+// aura:///loom/aura/lang/loom/LoomError.aura
+package aura.lang.loom
+
+// ═══════════════════════════════════════════════════════════════
+// 错误类型
+// ═══════════════════════════════════════════════════════════════
+
+object LoomError {
+    const val OK: Int = 0
+    const val IO_ERROR: Int = 1
+    const val PARSE_ERROR: Int = 2
+    const val NOT_FOUND: Int = 3
+    const val COMPILE_ERROR: Int = 4
+    const val RUNTIME_ERROR: Int = 5
+    const val CYCLE_DETECTED: Int = 6
+    const val INVALID_CONFIG: Int = 7
+}

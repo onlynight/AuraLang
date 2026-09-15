@@ -1,4 +1,5 @@
 // aura:///aura/lang/compiler/test/TestRunner.aura
+package aura.lang.compiler.test
 // ─────────────────────────────────────────────────────────────
 // Aura 测试框架（纯 Aura 化迁移 · Phase 0）
 //
@@ -182,30 +183,34 @@ class TestRunner {
 }
 
 // ─────────────────────────────────────────────────────────────
-// 框架自检：由 TestRunnerSelfTest.aura 驱动（本文件不含 main）
+// TestRunner 工具对象：收集所有 top-level 声明
 // ─────────────────────────────────────────────────────────────
 
-/// 运行 TestRunner 自检用例，返回失败数。
-///
-/// 仅使用当前 VM 可靠支持的断言（避免依赖尚未链接的字符串内置方法）。
-fun selfTest(): Int {
-    val t = TestRunner()
-    t.begin("TestRunner/self-test")
+/// TestRunner 相关的工具方法。
+object TestRunnerUtils {
 
-    t.assertEq(1 + 1, 2, "int addition")
-    t.assertEq("au" + "ra", "aura", "string concat")
-    t.assertTrue(3 > 2, "3 > 2")
-    t.assertFalse(1 > 2, "!(1 > 2)")
-    t.assertNotEq(1, 2, "1 != 2")
-    t.assertNotNull("x", "non-null literal")
-    t.assertNull(null, "null literal")
-    t.assertGt(5.0, 3.0, "5 > 3")
-    t.assertGte(5.0, 5.0, "5 >= 5")
+    /// 运行 TestRunner 自检用例，返回失败数。
+    ///
+    /// 仅使用当前 VM 可靠支持的断言（避免依赖尚未链接的字符串内置方法）。
+    fun selfTest(): Int {
+        val t = TestRunner()
+        t.begin("TestRunner/self-test")
 
-    // 计数器一致性（自检内部再做一次断言，用同一实例）
-    // 注意：passCount() 在本行调用前应为 9（上方 9 次断言），随后自增。
-    t.assertEq(t.passCount(), 9, "pass counter accumulates")
-    t.assertEq(t.failCount(), 0, "no failures so far")
+        t.assertEq(1 + 1, 2, "int addition")
+        t.assertEq("au" + "ra", "aura", "string concat")
+        t.assertTrue(3 > 2, "3 > 2")
+        t.assertFalse(1 > 2, "!(1 > 2)")
+        t.assertNotEq(1, 2, "1 != 2")
+        t.assertNotNull("x", "non-null literal")
+        t.assertNull(null, "null literal")
+        t.assertGt(5.0, 3.0, "5 > 3")
+        t.assertGte(5.0, 5.0, "5 >= 5")
 
-    return t.report()
+        // 计数器一致性（自检内部再做一次断言，用同一实例）
+        // 注意：passCount() 在本行调用前应为 9（上方 9 次断言），随后自增。
+        t.assertEq(t.passCount(), 9, "pass counter accumulates")
+        t.assertEq(t.failCount(), 0, "no failures so far")
+
+        return t.report()
+    }
 }

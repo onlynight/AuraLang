@@ -18,8 +18,8 @@ fn test_doc_concurrent_module() {
     let registry = DocRegistry::new().load_all();
     let docs = registry.by_module("concurrent");
     assert!(!docs.is_empty(), "concurrent module should have docs");
-    assert!(docs.iter().any(|d| d.name == "aura.lang.std.Coroutine.spawn"));
-    assert!(docs.iter().any(|d| d.name == "aura.lang.std.Channel.newChannel"));
+    assert!(docs.iter().any(|d| d.name == "aura.lang.concurrent.Coroutine.spawn"));
+    assert!(docs.iter().any(|d| d.name == "aura.lang.concurrent.Channel.newChannel"));
 }
 
 #[test]

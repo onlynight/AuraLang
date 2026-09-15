@@ -1,0 +1,5 @@
+import aura.lang.std.Ascii
+fun main() {
+    val result = if (Ascii.isAlpha("a")) { "true" } else { "false" }
+    println("isAlpha('a') = " + result)
+}

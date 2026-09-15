@@ -24,66 +24,108 @@ package aura.lang.compiler.lexer
 import aura.lang.std.String
 
 // ─────────────────────────────────────────────────────────────
-// 字符分类辅助
+// 词法分析器工具与便捷入口
 // ─────────────────────────────────────────────────────────────
 
-/// 字符是否在给定字符集合中（空串恒为 false）。
-fun lxIn(set: String, ch: String): Boolean {
-    if (ch == "") {
-        return false
+object LexerUtils {
+
+    // ── 字符分类辅助 ──
+
+    /// 字符是否在给定字符集合中（空串恒为 false）。
+    fun lxIn(set: String, ch: String): Boolean {
+        if (ch == "") {
+            return false
+        }
+        return set.indexOf(ch) >= 0
     }
-    return set.indexOf(ch) >= 0
-}
 
-/// 十进制数字。
-fun lxIsDigit(ch: String): Boolean {
-    return lxIn("0123456789", ch)
-}
-
-/// 十六进制数字。
-fun lxIsHexDigit(ch: String): Boolean {
-    return lxIn("0123456789abcdefABCDEF", ch)
-}
-
-/// 字母（ASCII）。
-fun lxIsLetter(ch: String): Boolean {
-    return lxIn("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", ch)
-}
-
-/// 标识符起始字符。
-fun lxIsIdentStart(ch: String): Boolean {
-    return lxIsLetter(ch) || ch == "_"
-}
-
-/// 标识符后续字符。
-fun lxIsIdentPart(ch: String): Boolean {
-    return lxIsLetter(ch) || lxIsDigit(ch) || ch == "_"
-}
-
-/// 空白字符。
-fun lxIsSpace(ch: String): Boolean {
-    return lxIn(" \t\n\r", ch)
-}
-
-/// 列表安全取值（越界返回空串）。
-///
-/// 说明：当前 VM 中 `List<T>` 的 `[]` 索引在 sema 层会报 "cannot index into 'List'"
-/// 警告（运行期可用）。把索引集中到这一处，可把该警告收敛为 1 条。
-fun lxLine(items: List<String>, index: Int): String {
-    return items[index]
-}
-
-/// 十进制字符串 → Int（仅供 span 还原使用）。
-fun lxToInt(text: String): Int {
-    val digits: String = "0123456789"
-    val len: Int = text.length()
-    var total: Int = 0
-    var i: Int = 0
-    while (i < len) {
-        total = total * 10 + digits.indexOf(toStr(text[i]))
-        i = i + 1
+    /// 十进制数字。
+    fun lxIsDigit(ch: String): Boolean {
+        return lxIn("0123456789", ch)
     }
-    return total
+
+    /// 十六进制数字。
+    fun lxIsHexDigit(ch: String): Boolean {
+        return lxIn("0123456789abcdefABCDEF", ch)
+    }
+
+    /// 字母（ASCII）。
+    fun lxIsLetter(ch: String): Boolean {
+        return lxIn("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", ch)
+    }
+
+    /// 标识符起始字符。
+    fun lxIsIdentStart(ch: String): Boolean {
+        return lxIsLetter(ch) || ch == "_"
+    }
+
+    /// 标识符后续字符。
+    fun lxIsIdentPart(ch: String): Boolean {
+        return lxIsLetter(ch) || lxIsDigit(ch) || ch == "_"
+    }
+
+    /// 空白字符。
+    fun lxIsSpace(ch: String): Boolean {
+        return lxIn(" \t\n\r", ch)
+    }
+
+    /// 列表安全取值（越界返回空串）。
+    ///
+    /// 说明：当前 VM 中 `List<T>` 的 `[]` 索引在 sema 层会报 "cannot index into 'List'"
+    /// 警告（运行期可用）。把索引集中到这一处，可把该警告收敛为 1 条。
+    fun lxLine(items: List<String>, index: Int): String {
+        return items[index]
+    }
+
+    /// 十进制字符串 → Int（仅供 span 还原使用）。
+    fun lxToInt(text: String): Int {
+        val digits: String = "0123456789"
+        val len: Int = text.length()
+        var total: Int = 0
+        var i: Int = 0
+        while (i < len) {
+            total = total * 10 + digits.indexOf(toStr(text[i]))
+            i = i + 1
+        }
+        return total
+    }
+
+    /// Int 列表安全取项（越界返回 0）。
+    fun lxIntAt(items: List<Int>, index: Int): Int {
+        if (index < 0 || index >= items.size) {
+            return 0
+        }
+        return items[index]
+    }
+
+    // ── 便捷入口 ──
+
+    /// 词法分析：返回 token 种类序列（每行一个，含结尾 `EOF`，末尾带换行）。
+    fun tokenizeKinds(src: String): String {
+        val lx = Lexer(src)
+        lx.scanAll()
+        return lx.kindsText()
+    }
+
+    /// 词法分析：返回 token 种类列表（含结尾 `"EOF"`）。
+    fun tokenize(src: String): List<String> {
+        val text: String = tokenizeKinds(src)
+        return text.split("\n")
+    }
+
+    /// 取回第 index 个 token 的完整信息（含字面量与 span）。
+    fun tokenAt(src: String, index: Int): Token {
+        val lx = Lexer(src)
+        lx.scanAll()
+        return lx.tokenAt(index)
+    }
+
+    /// 源码 token 数量。
+    fun tokenCount(src: String): Int {
+        val lx = Lexer(src)
+        lx.scanAll()
+        return lx.tokenCount()
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -240,7 +282,7 @@ class Lexer {
         while (this.pos < this.n) {
             val ch: String = this.peek(0)
 
-            if (lxIsSpace(ch)) {
+            if (LexerUtils.lxIsSpace(ch)) {
                 this.advance()
                 continue
             }
@@ -335,7 +377,7 @@ class Lexer {
     /// 实测**词法阶段 42MB** 里的主要部分即来自此。
     fun scanIdentifier() {
         val start: Int = this.pos
-        while (this.pos < this.n && lxIsIdentPart(this.peek(0))) {
+        while (this.pos < this.n && LexerUtils.lxIsIdentPart(this.peek(0))) {
             this.advance()
         }
         val lit: String = this.sliceOf(start, this.pos)
@@ -373,7 +415,7 @@ class Lexer {
             if (nx == "x" || nx == "X") {
                 buf = buf + nx
                 this.advance()
-                while (this.pos < this.n && lxIsHexDigit(this.peek(0))) {
+                while (this.pos < this.n && LexerUtils.lxIsHexDigit(this.peek(0))) {
                     buf = buf + this.peek(0)
                     this.advance()
                 }
@@ -395,17 +437,17 @@ class Lexer {
         }
 
         // 十进制整数部分
-        while (this.pos < this.n && (lxIsDigit(this.peek(0)) || this.peek(0) == "_")) {
+        while (this.pos < this.n && (LexerUtils.lxIsDigit(this.peek(0)) || this.peek(0) == "_")) {
             buf = buf + this.peek(0)
             this.advance()
         }
 
         // 小数部分（`.` 后必须跟数字）
-        if (this.peek(0) == "." && lxIsDigit(this.peek(1))) {
+        if (this.peek(0) == "." && LexerUtils.lxIsDigit(this.peek(1))) {
             isFloat = true
             buf = buf + "."
             this.advance()
-            while (this.pos < this.n && (lxIsDigit(this.peek(0)) || this.peek(0) == "_")) {
+            while (this.pos < this.n && (LexerUtils.lxIsDigit(this.peek(0)) || this.peek(0) == "_")) {
                 buf = buf + this.peek(0)
                 this.advance()
             }
@@ -422,7 +464,7 @@ class Lexer {
                 buf = buf + sign
                 this.advance()
             }
-            while (this.pos < this.n && lxIsDigit(this.peek(0))) {
+            while (this.pos < this.n && LexerUtils.lxIsDigit(this.peek(0))) {
                 buf = buf + this.peek(0)
                 this.advance()
             }
@@ -472,7 +514,7 @@ class Lexer {
             if (ch == "$") {
                 // 插值判定：`${` 或 `$ident`（`$$` 视为字面量）
                 val nx: String = this.peek(1)
-                if (nx == "{" || (lxIsIdentStart(nx) && nx != "$")) {
+                if (nx == "{" || (LexerUtils.lxIsIdentStart(nx) && nx != "$")) {
                     hasInterp = true
                     // 冲刷已累积的字面量前缀（空串不产出 token，与 Rust 一致）
                     if (buf != "") {
@@ -494,7 +536,7 @@ class Lexer {
                         this.emit("StringInterpStart", "$" + "{" + expr + "}")
                     } else {
                         var name: String = ""
-                        while (this.pos < this.n && lxIsIdentPart(this.peek(0))) {
+                        while (this.pos < this.n && LexerUtils.lxIsIdentPart(this.peek(0))) {
                             name = name + this.peek(0)
                             this.advance()
                         }
@@ -861,9 +903,9 @@ class Lexer {
                 }
             } else if (ch == "'") {
                 this.scanChar()
-            } else if (lxIsDigit(ch)) {
+            } else if (LexerUtils.lxIsDigit(ch)) {
                 this.scanNumber()
-            } else if (lxIsIdentStart(ch)) {
+            } else if (LexerUtils.lxIsIdentStart(ch)) {
                 this.scanIdentifier()
             } else {
                 // 非法字符：生成 Error token 后继续（与 Rust 的错误恢复一致）
@@ -909,21 +951,21 @@ class Lexer {
     /// 第 index 个 token 的 span 字段（0..5：start / end / sl / sc / el / ec）。
     fun spanFieldAt(index: Int, field: Int): Int {
         if (field == 0) {
-            return lxIntAt(this.spanStart, index)
+            return LexerUtils.lxIntAt(this.spanStart, index)
         }
         if (field == 1) {
-            return lxIntAt(this.spanEnd, index)
+            return LexerUtils.lxIntAt(this.spanEnd, index)
         }
         if (field == 2) {
-            return lxIntAt(this.spanStartLine, index)
+            return LexerUtils.lxIntAt(this.spanStartLine, index)
         }
         if (field == 3) {
-            return lxIntAt(this.spanStartCol, index)
+            return LexerUtils.lxIntAt(this.spanStartCol, index)
         }
         if (field == 4) {
-            return lxIntAt(this.spanEndLine, index)
+            return LexerUtils.lxIntAt(this.spanEndLine, index)
         }
-        return lxIntAt(this.spanEndCol, index)
+        return LexerUtils.lxIntAt(this.spanEndCol, index)
     }
 
     /// 还原第 index 个 token（含字面量与 span）。
@@ -941,43 +983,4 @@ class Lexer {
             this.spanFieldAt(index, 5)
         )
     }
-}
-
-/// Int 列表安全取项（越界返回 0）。
-fun lxIntAt(items: List<Int>, index: Int): Int {
-    if (index < 0 || index >= items.size) {
-        return 0
-    }
-    return items[index]
-}
-
-// ─────────────────────────────────────────────────────────────
-// 便捷入口
-// ─────────────────────────────────────────────────────────────
-
-/// 词法分析：返回 token 种类序列（每行一个，含结尾 `EOF`，末尾带换行）。
-fun tokenizeKinds(src: String): String {
-    val lx = Lexer(src)
-    lx.scanAll()
-    return lx.kindsText()
-}
-
-/// 词法分析：返回 token 种类列表（含结尾 `"EOF"`）。
-fun tokenize(src: String): List<String> {
-    val text: String = tokenizeKinds(src)
-    return text.split("\n")
-}
-
-/// 取回第 index 个 token 的完整信息（含字面量与 span）。
-fun tokenAt(src: String, index: Int): Token {
-    val lx = Lexer(src)
-    lx.scanAll()
-    return lx.tokenAt(index)
-}
-
-/// 源码 token 数量。
-fun tokenCount(src: String): Int {
-    val lx = Lexer(src)
-    lx.scanAll()
-    return lx.tokenCount()
 }

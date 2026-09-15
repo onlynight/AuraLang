@@ -1,0 +1,106 @@
+// aura:///debugger/aura/lang/debugger/Repl.aura
+package aura.lang.debugger
+
+// ── 标准库 ──
+import aura.lang.std.String
+import aura.lang.std.IO
+
+// ── Native 包 ──
+import aura.lang.native.console.Console
+import aura.lang.native.process.Process
+
+// ── 兄弟模块 ──
+import aura.lang.debugger.Debugger
+
+// ═══════════════════════════════════════════════════════════════
+// 交互式调试器 REPL
+// ═══════════════════════════════════════════════════════════════
+
+fun debugRepl(debugger: Debugger): Unit {
+    Console.println("Aura Debugger REPL (Phase E — pure Aura)")
+    Console.println("Commands:")
+    Console.println("  run              — Start execution")
+    Console.println("  continue         — Continue to next breakpoint")
+    Console.println("  step             — Step over (step over)")
+    Console.println("  step-into        — Step into function call")
+    Console.println("  step-out         — Step out of function")
+    Console.println("  break <file>:<line>  — Add breakpoint")
+    Console.println("  delete <id>      — Remove breakpoint")
+    Console.println("  breakpoints      — List all breakpoints")
+    Console.println("  variables        — Show local variables")
+    Console.println("  stack            — Show call stack")
+    Console.println("  frame <depth>    — Show stack frame")
+    Console.println("  eval <expr>      — Evaluate expression")
+    Console.println("  watch <expr>     — Watch expression")
+    Console.println("  quit             — Exit debugger")
+    Console.println("")
+
+    while (true) {
+        Console.println("(debug) ")
+        val line: String = IO.readLine()
+
+        if (line.length == 0) { continue }
+
+        if (line == "quit" || line == "q") {
+            debugger.quit()
+            return
+        } else if (line == "run") {
+            debugger.run()
+        } else if (line == "continue" || line == "c") {
+            debugger.continueExec()
+        } else if (line == "step" || line == "s") {
+            debugger.stepOver()
+        } else if (line == "step-into") {
+            debugger.stepInto()
+        } else if (line == "step-out") {
+            debugger.stepOut()
+        } else if (line.startsWith("break ") || line.startsWith("b ")) {
+            val spec: String = if (line.startsWith("break ")) {
+                String.substring(line, 6)
+            } else {
+                String.substring(line, 2)
+            }
+            val colonIdx: Int = spec.indexOf(":")
+            if (colonIdx > 0) {
+                val file: String = String.substring(spec, 0, colonIdx)
+                val lineStr: String = String.substring(spec, colonIdx + 1)
+                val lineNum: Int = String.toInt(lineStr)
+                debugger.addBreakpoint(file, lineNum)
+            } else {
+                Console.println("Usage: break <file>:<line>")
+            }
+        } else if (line.startsWith("delete ") || line.startsWith("d ")) {
+            val idStr: String = if (line.startsWith("delete ")) {
+                String.substring(line, 7)
+            } else {
+                String.substring(line, 2)
+            }
+            debugger.removeBreakpoint(String.toInt(idStr))
+        } else if (line == "breakpoints" || line == "bl") {
+            debugger.listBreakpoints()
+        } else if (line == "variables" || line == "v") {
+            debugger.variables()
+        } else if (line == "stack" || line == "st") {
+            debugger.callStack()
+        } else if (line.startsWith("frame ")) {
+            val depthStr: String = String.substring(line, 6)
+            debugger.stackFrame(String.toInt(depthStr))
+        } else if (line.startsWith("eval ") || line.startsWith("e ")) {
+            val expr: String = if (line.startsWith("eval ")) {
+                String.substring(line, 5)
+            } else {
+                String.substring(line, 2)
+            }
+            debugger.eval(expr)
+        } else if (line.startsWith("watch ") || line.startsWith("w ")) {
+            val expr: String = if (line.startsWith("watch ")) {
+                String.substring(line, 6)
+            } else {
+                String.substring(line, 2)
+            }
+            debugger.watch(expr)
+        } else {
+            Console.println("Unknown command: " + line)
+        }
+    }
+}

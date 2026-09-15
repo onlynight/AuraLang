@@ -213,6 +213,65 @@ pub enum OpCode {
     PushHandler(i32, u16),
     /// 注销最近的异常处理器（try 块正常结束时执行）。
     PopHandler,
+
+    // ── Phase B: 并发运行时指令 ──
+    /// 创建线程执行函数（栈顶为函数索引，返回线程 ID 压栈）
+    ThreadSpawn(u16),
+    /// 等待线程结束（栈顶为线程 ID，返回线程结果压栈）
+    ThreadJoin,
+    /// 线程休眠（栈顶为毫秒数）
+    ThreadSleep,
+    /// 获取当前线程 ID（压栈）
+    ThreadId,
+    /// 获取可用并行度（压栈）
+    ThreadParallelism,
+
+    /// 创建 Mutex（返回句柄压栈）
+    MutexNew,
+    /// Mutex 加锁（栈顶为句柄）
+    MutexLock,
+    /// Mutex 解锁（栈顶为句柄）
+    MutexUnlock,
+    /// Mutex 尝试加锁（栈顶为句柄，返回 bool）
+    MutexTryLock,
+
+    /// 创建 Atomic 计数器（栈顶为初始值，返回句柄压栈）
+    AtomicNew,
+    /// 原子读取（栈顶为句柄，返回值压栈）
+    AtomicLoad,
+    /// 原子写入（栈顶为值、其下为句柄）
+    AtomicStore,
+    /// 原子加法（栈顶为增量、其下为句柄，返回新值压栈）
+    AtomicAdd,
+    /// 原子比较交换（栈顶为期望值、其下为目标值、再下为句柄，返回 bool）
+    AtomicCas,
+
+    /// 创建 RwLock（返回句柄压栈）
+    RwLockNew,
+    /// 获取读锁（栈顶为句柄）
+    RwLockReadLock,
+    /// 获取写锁（栈顶为句柄）
+    RwLockWriteLock,
+    /// 释放读锁（栈顶为句柄）
+    RwLockReadUnlock,
+    /// 释放写锁（栈顶为句柄）
+    RwLockWriteUnlock,
+
+    /// 创建 Channel（栈顶为容量，返回句柄压栈）
+    ChannelNew,
+    /// 向 Channel 发送值（栈顶为值、其下为句柄）
+    ChannelSend,
+    /// 从 Channel 接收值（栈顶为句柄，返回值压栈）
+    ChannelRecv,
+
+    /// 创建 Condvar（返回句柄压栈）
+    CondvarNew,
+    /// 等待 Condvar（栈顶为 mutex 句柄、其下为 condvar 句柄）
+    CondvarWait,
+    /// 唤醒一个（栈顶为句柄）
+    CondvarSignal,
+    /// 唤醒所有（栈顶为句柄）
+    CondvarBroadcast,
 }
 
 impl OpCode {
@@ -299,6 +358,39 @@ impl OpCode {
             OpCode::CallAot(_) => 77,
             OpCode::PushHandler(..) => 82,
             OpCode::PopHandler => 83,
+
+            // ── Phase B: 并发运行时指令 ──
+            OpCode::ThreadSpawn(_) => 84,
+            OpCode::ThreadJoin => 85,
+            OpCode::ThreadSleep => 86,
+            OpCode::ThreadId => 87,
+            OpCode::ThreadParallelism => 88,
+
+            OpCode::MutexNew => 89,
+            OpCode::MutexLock => 90,
+            OpCode::MutexUnlock => 91,
+            OpCode::MutexTryLock => 92,
+
+            OpCode::AtomicNew => 93,
+            OpCode::AtomicLoad => 94,
+            OpCode::AtomicStore => 95,
+            OpCode::AtomicAdd => 96,
+            OpCode::AtomicCas => 97,
+
+            OpCode::RwLockNew => 98,
+            OpCode::RwLockReadLock => 99,
+            OpCode::RwLockWriteLock => 100,
+            OpCode::RwLockReadUnlock => 101,
+            OpCode::RwLockWriteUnlock => 102,
+
+            OpCode::ChannelNew => 103,
+            OpCode::ChannelSend => 104,
+            OpCode::ChannelRecv => 105,
+
+            OpCode::CondvarNew => 106,
+            OpCode::CondvarWait => 107,
+            OpCode::CondvarSignal => 108,
+            OpCode::CondvarBroadcast => 109,
         }
     }
 
@@ -317,6 +409,7 @@ impl OpCode {
             66 => 2,                     // MakeCallback u16 函数索引
             70 => 2,                     // CallExport u16 sym_idx
             71 => 4,                     // CallExternal u16 mod_idx + u16 sym_idx
+            84 => 2,                     // ThreadSpawn u16 func_idx
             _ => 0,
         }
     }
@@ -403,6 +496,39 @@ impl OpCode {
             78 => OpCode::CallNativeArgs(0, 0),
             82 => OpCode::PushHandler(0, 0),
             83 => OpCode::PopHandler,
+
+            // ── Phase B: 并发运行时指令 ──
+            84 => OpCode::ThreadSpawn(0),
+            85 => OpCode::ThreadJoin,
+            86 => OpCode::ThreadSleep,
+            87 => OpCode::ThreadId,
+            88 => OpCode::ThreadParallelism,
+
+            89 => OpCode::MutexNew,
+            90 => OpCode::MutexLock,
+            91 => OpCode::MutexUnlock,
+            92 => OpCode::MutexTryLock,
+
+            93 => OpCode::AtomicNew,
+            94 => OpCode::AtomicLoad,
+            95 => OpCode::AtomicStore,
+            96 => OpCode::AtomicAdd,
+            97 => OpCode::AtomicCas,
+
+            98 => OpCode::RwLockNew,
+            99 => OpCode::RwLockReadLock,
+            100 => OpCode::RwLockWriteLock,
+            101 => OpCode::RwLockReadUnlock,
+            102 => OpCode::RwLockWriteUnlock,
+
+            103 => OpCode::ChannelNew,
+            104 => OpCode::ChannelSend,
+            105 => OpCode::ChannelRecv,
+
+            106 => OpCode::CondvarNew,
+            107 => OpCode::CondvarWait,
+            108 => OpCode::CondvarSignal,
+            109 => OpCode::CondvarBroadcast,
             _ => return None,
         })
     }
@@ -430,7 +556,8 @@ impl OpCode {
             | OpCode::EnumConstruct(i)
             | OpCode::MakeFnRef(i)
             | OpCode::CallExport(i)
-            | OpCode::CallAot(i) => buf.extend_from_slice(&i.to_le_bytes()),
+            | OpCode::CallAot(i)
+            | OpCode::ThreadSpawn(i) => buf.extend_from_slice(&i.to_le_bytes()),
             OpCode::CallNativeArgs(idx, argc) => {
                 buf.extend_from_slice(&idx.to_le_bytes());
                 buf.extend_from_slice(&argc.to_le_bytes());
@@ -536,6 +663,39 @@ impl fmt::Display for OpCode {
                 write!(f, "CALL_EXTERNAL ({}, {})", mod_idx, sym_idx)
             }
             OpCode::CallAot(i) => write!(f, "CALL_AOT {}", i),
+
+            // ── Phase B: 并发运行时指令 ──
+            OpCode::ThreadSpawn(i) => write!(f, "THREAD_SPAWN {}", i),
+            OpCode::ThreadJoin => write!(f, "THREAD_JOIN"),
+            OpCode::ThreadSleep => write!(f, "THREAD_SLEEP"),
+            OpCode::ThreadId => write!(f, "THREAD_ID"),
+            OpCode::ThreadParallelism => write!(f, "THREAD_PARALLELISM"),
+
+            OpCode::MutexNew => write!(f, "MUTEX_NEW"),
+            OpCode::MutexLock => write!(f, "MUTEX_LOCK"),
+            OpCode::MutexUnlock => write!(f, "MUTEX_UNLOCK"),
+            OpCode::MutexTryLock => write!(f, "MUTEX_TRYLOCK"),
+
+            OpCode::AtomicNew => write!(f, "ATOMIC_NEW"),
+            OpCode::AtomicLoad => write!(f, "ATOMIC_LOAD"),
+            OpCode::AtomicStore => write!(f, "ATOMIC_STORE"),
+            OpCode::AtomicAdd => write!(f, "ATOMIC_ADD"),
+            OpCode::AtomicCas => write!(f, "ATOMIC_CAS"),
+
+            OpCode::RwLockNew => write!(f, "RWLOCK_NEW"),
+            OpCode::RwLockReadLock => write!(f, "RWLOCK_READ_LOCK"),
+            OpCode::RwLockWriteLock => write!(f, "RWLOCK_WRITE_LOCK"),
+            OpCode::RwLockReadUnlock => write!(f, "RWLOCK_READ_UNLOCK"),
+            OpCode::RwLockWriteUnlock => write!(f, "RWLOCK_WRITE_UNLOCK"),
+
+            OpCode::ChannelNew => write!(f, "CHANNEL_NEW"),
+            OpCode::ChannelSend => write!(f, "CHANNEL_SEND"),
+            OpCode::ChannelRecv => write!(f, "CHANNEL_RECV"),
+
+            OpCode::CondvarNew => write!(f, "CONDVAR_NEW"),
+            OpCode::CondvarWait => write!(f, "CONDVAR_WAIT"),
+            OpCode::CondvarSignal => write!(f, "CONDVAR_SIGNAL"),
+            OpCode::CondvarBroadcast => write!(f, "CONDVAR_BROADCAST"),
         }
     }
 }

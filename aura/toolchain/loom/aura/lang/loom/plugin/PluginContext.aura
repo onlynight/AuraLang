@@ -1,0 +1,51 @@
+// aura:///loom/plugin/aura/lang/loom/plugin/PluginContext.aura
+package aura.lang.loom.plugin
+
+import aura.lang.std.String
+import aura.lang.std.Collections
+
+// ═══════════════════════════════════════════════════════════════
+// 插件上下文
+// 对标 Rust: plugin/context.rs
+// ═══════════════════════════════════════════════════════════════
+
+class PluginContext {
+    val projectDir: String
+    var manifest: String = ""
+    var outDir: String = "target"
+    var cacheDir: String = "target/cache"
+    var compileMode: String = "aot"
+    var env: Map<String, String> = mutableMapOf()
+    var logs: List<String> = mutableListOf()
+
+    fun PluginContext(projectDir: String) {
+        this.projectDir = projectDir
+        this.env = mutableMapOf()
+        this.logs = mutableListOf()
+    }
+
+    fun setManifest(manifest: String): Unit { this.manifest = manifest }
+    fun setOutDir(dir: String): Unit { this.outDir = dir }
+    fun setCacheDir(dir: String): Unit { this.cacheDir = dir }
+    fun setCompileMode(mode: String): Unit { this.compileMode = mode }
+
+    fun getEnv(key: String): String {
+        return env.getOrDefault(key, "")
+    }
+
+    fun setEnv(key: String, value: String): Unit {
+        env.put(key, value)
+    }
+
+    fun log(message: String): Unit {
+        logs.add(message)
+    }
+
+    fun getLogs(): List<String> {
+        return logs
+    }
+
+    fun toStr(): String {
+        return "PluginContext{projectDir='" + projectDir + "', outDir='" + outDir + "'}"
+    }
+}

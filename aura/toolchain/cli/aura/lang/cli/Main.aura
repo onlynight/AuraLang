@@ -1,0 +1,84 @@
+// aura:///cli/aura/lang/cli/Main.aura
+package aura.lang.cli
+
+import aura.lang.native.console.Console
+import aura.lang.cli.Args
+import aura.lang.cli.Commands
+import aura.lang.cli.CompilerApi
+import aura.lang.cli.FileIO
+
+// ═══════════════════════════════════════════════════════════════
+// 帮助信息
+// ═══════════════════════════════════════════════════════════════
+
+fun printUsage(): Unit {
+    Console.println("Aura language toolchain (Phase E — pure Aura)")
+    Console.println("")
+    Console.println("Usage:")
+    Console.println("  aura build <file.aura> [--output <out>]        Compile to bytecode / native exe")
+    Console.println("  aura build <file.aura> --aot [--output <exe>]  AOT compile to native exe")
+    Console.println("  aura run <file.aura>                           Compile and run")
+    Console.println("  aura check <file.aura>                         Syntax/semantics check only")
+    Console.println("  aura disasm <file.auc>                         Disassemble .auc")
+    Console.println("  aura tokens <file.aura>                        Output lexer tokens")
+    Console.println("  aura ast <file.aura>                           Output AST")
+    Console.println("  aura fmt <file.aura> [--check]                 Format code")
+    Console.println("  aura doc [--output <dir>]                      Generate documentation")
+    Console.println("  aura eval [--expr <code>]                      Evaluate expression")
+    Console.println("  aura repl                                      Interactive REPL")
+    Console.println("  aura export-header <file.aura>                 Export C ABI header")
+    Console.println("")
+    Console.println("Options:")
+    Console.println("  --help, -h                                     Show this help message")
+    Console.println("  --version                                      Show version")
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 入口函数
+// ═══════════════════════════════════════════════════════════════
+
+fun main(): Int {
+    val args: Args = parseArgs()
+    if (args.isEmpty()) {
+        printUsage()
+        return 1
+    }
+
+    val cmd: String = args.get(0)
+    val subArgs = Args()
+    var i: Int = 1
+    while (i < args.size()) {
+        subArgs.add(args.get(i))
+        i = i + 1
+    }
+
+    if (cmd == "build") {
+        return cmdBuild(subArgs)
+    } else if (cmd == "run") {
+        return cmdRun(subArgs)
+    } else if (cmd == "check") {
+        return cmdCheck(subArgs)
+    } else if (cmd == "tokens") {
+        return cmdTokens(subArgs)
+    } else if (cmd == "ast") {
+        return cmdAst(subArgs)
+    } else if (cmd == "fmt") {
+        return cmdFmt(subArgs)
+    } else if (cmd == "doc") {
+        return cmdDoc(subArgs)
+    } else if (cmd == "eval") {
+        return cmdEval(subArgs)
+    } else if (cmd == "export-header") {
+        return cmdExportHeader(subArgs)
+    } else if (cmd == "--help" || cmd == "-h" || cmd == "help") {
+        printUsage()
+        return 0
+    } else if (cmd == "--version") {
+        Console.println("Aura v0.6.0 (Phase E)")
+        return 0
+    }
+
+    Console.println("Unknown subcommand: " + cmd)
+    printUsage()
+    return 1
+}

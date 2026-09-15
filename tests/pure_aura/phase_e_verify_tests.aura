@@ -1,9 +1,6 @@
-// Phase E.5: 纯 Aura 化工具链验证测试
+﻿// Phase E.5: �?Aura 化工具链验证测试
 //
-// 对应改造方案 E.5「验证」章节。
-// 验证纯 Aura 工具链（AuraCli / AuraLsp / AuraDebugger / Loom）
-// 的核心功能。
-//
+// 对应改造方�?E.5「验证」章节�?// 验证�?Aura 工具链（AuraCli / AuraLsp / AuraDebugger / Loom�?// 的核心功能�?//
 // 运行：aura run tests/pure_aura/phase_e_verify_tests.aura
 
 import aura.lang.std.String
@@ -32,8 +29,7 @@ fun testHelpOutput(): Int {
 
     // 验证 printUsage 输出关键命令
     printUsage()
-    // 验证成功执行（不崩溃）
-    return 0
+    // 验证成功执行（不崩溃�?    return 0
 }
 
 // ── E.5.2: aura build 验证 ──
@@ -52,8 +48,7 @@ fun testBuildCommand(): Int {
     Assert.assert(args.hasFlag("--output"), "Should have --output flag")
     Assert.assert(args.getValue("--output") == "/tmp/test_build.aura", "Output should be correct")
 
-    // 验证 build 命令处理（无源文件应返回错误）
-    val emptyArgs = Args()
+    // 验证 build 命令处理（无源文件应返回错误�?    val emptyArgs = Args()
     val result = cmdBuild(emptyArgs)
     Assert.assert(result == 1, "cmdBuild with no args should return 1")
 
@@ -169,8 +164,7 @@ fun testEvalCommand(): Int {
 
 fun testReplCommand(): Int {
     println("[E.5.12] Testing aura repl...")
-    // repl 会阻塞，只验证函数存在
-    return 0
+    // repl 会阻塞，只验证函数存�?    return 0
 }
 
 // ── E.5.13: aura lsp 验证 ──
@@ -236,8 +230,7 @@ fun testVerifyCommand(): Int {
 fun testLoomBuild(): Int {
     println("[E.5.18] Testing loom build...")
 
-    // 验证 Loom 可以初始化
-    val loom = Loom()
+    // 验证 Loom 可以初始�?    val loom = Loom()
     Assert.assert(loom.projectDir == "", "Project dir should be empty initially")
     return 0
 }
@@ -264,7 +257,7 @@ fun testLoomWatch(): Int {
     return 0
 }
 
-// ── E.5.21: LSP JSON-RPC 端到端验证 ──
+// ── E.5.21: LSP JSON-RPC 端到端验�?──
 
 fun testLspJsonRpc(): Int {
     println("[E.5.21] Testing LSP JSON-RPC...")
@@ -298,8 +291,7 @@ fun testLspJsonRpc(): Int {
 fun testDebuggerLifecycle(): Int {
     println("[E.5.22] Testing Debugger lifecycle...")
 
-    // 创建调试器
-    val dbg = Debugger()
+    // 创建调试�?    val dbg = Debugger()
     Assert.assert(!dbg.initialized, "Should not be initialized")
 
     // 添加断点
@@ -337,8 +329,7 @@ fun testLoomManifestParsing(): Int {
     m.addDevDependency("aura.test")
     m.addBuildTask("build")
 
-    // 验证所有字段
-    Assert.assert(m.name == "test-project", "Name should be 'test-project'")
+    // 验证所有字�?    Assert.assert(m.name == "test-project", "Name should be 'test-project'")
     Assert.assert(m.version == "1.0.0", "Version should be '1.0.0'")
     Assert.assert(m.description == "A test project", "Description should be set")
     Assert.assert(m.dependencies.size == 1, "Should have 1 dependency")
@@ -369,7 +360,7 @@ fun testLoomTaskGraphTopoSort(): Int {
     Assert.assert(result == 0, "Topo sort should succeed")
     Assert.assert(g.executionOrder.size == 6, "Should have 6 tasks")
 
-    // 验证 check 在 build 之前
+    // 验证 check �?build 之前
     var checkIdx = -1
     var buildIdx = -1
     var testIdx = -1
@@ -389,27 +380,27 @@ fun testLoomTaskGraphTopoSort(): Int {
     return 0
 }
 
-// ── E.5.25: 工具链文件存在性验证 ──
+// ── E.5.25: 工具链文件存在性验�?──
 
 fun testToolchainFilesExist(): Int {
     println("[E.5.25] Testing toolchain files exist...")
 
     // 验证所有工具链文件存在
-    Assert.assert(testFileExists("aura/toolchain/aura/lang/cli/AuraCli.aura"),
-                  "AuraCli.aura should exist")
-    Assert.assert(testFileExists("aura/toolchain/aura/lang/lsp/AuraLsp.aura"),
-                  "AuraLsp.aura should exist")
-    Assert.assert(testFileExists("aura/toolchain/aura/lang/debugger/AuraDebugger.aura"),
-                  "AuraDebugger.aura should exist")
-    Assert.assert(testFileExists("aura/toolchain/aura/lang/loom/Loom.aura"),
-                  "Loom.aura should exist")
+    Assert.assert(testFileExists("aura/toolchain/cli/aura/lang/cli/Main.aura"),
+                  "CLI Main.aura should exist")
+    Assert.assert(testFileExists("aura/toolchain/lsp/aura/lang/lsp/Main.aura"),
+                  "LSP Main.aura should exist")
+    Assert.assert(testFileExists("aura/toolchain/debugger/aura/lang/debugger/Main.aura"),
+                  "Debugger Main.aura should exist")
+    Assert.assert(testFileExists("aura/toolchain/loom/aura/lang/loom/Main.aura"),
+                  "Loom Main.aura should exist")
     Assert.assert(testFileExists("scripts/verify-pure-aura.ps1"),
                   "verify-pure-aura.ps1 should exist")
 
     return 0
 }
 
-// ── 主测试函数 ──
+// ── 主测试函�?──
 
 fun main(): Int {
     println("=== Phase E.5: Toolchain Verification Tests ===")
@@ -482,8 +473,7 @@ fun main(): Int {
     if (testToolchainFilesExist() == 0) { testsPassed = testsPassed + 1 }
     testsRun = testsRun + 1
 
-    // 汇总
-    println("")
+    // 汇�?    println("")
     println("=== Results: $testsPassed / $testsRun passed ===")
     if (testsPassed == testsRun) {
         println("ALL E.5 VERIFICATION TESTS PASSED")

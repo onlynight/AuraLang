@@ -1,0 +1,57 @@
+// aura:///examples/concurrency/thread_future_demo.aura
+// Thread / Future 演示（纯 Aura 实现，仅线程桥 ThreadOps 走 native）
+//
+// 运行：aura run examples/concurrency/thread_future_demo.aura
+
+import aura.lang.concurrent.Thread
+import aura.lang.concurrent.Future
+
+/// 异步任务体
+fun square(n: Int): Int {
+    return n * n
+}
+
+fun main(): Int {
+    // ── Thread：核心数 / 并行度 / 线程标识 / 休眠（均经 Aura 类 → ThreadOps 桥）──
+    println("availableCores = " + Thread.availableCores())
+    println("parallelism    = " + Thread.parallelism())
+    println("currentId      = " + Thread.id())
+    Thread.sleep(5)
+    println("sleep(5) ok")
+
+    // ── Thread：非法句柄应安全失败，不崩溃 ──
+    println("spawn(-1, 0)   = " + Thread.spawn(-1, 0))
+    println("join(999999)   = " + Thread.join(999999))
+    Thread.sleep(0)
+    println("sleep(0) ok")
+
+    // ── Future：纯 Aura 的结果槽 / 状态机边界行为 ──
+    val emptyList: List<Int> = arrayListOf<Int>()
+    Future.all(emptyList)
+    println("all(empty)      = ok")
+    println("any(empty)      = " + Future.any(emptyList))
+    println("isDone(0)       = " + Future.isDone(0))
+    Future.cancel(0)
+    println("cancel(0) ok")
+
+    // ── Future：真实异步执行（fnIndex 取函数下标 → 新线程执行 → await 取结果）──
+    val f = Future.spawn(fnIndex("square"), 7)
+    println("future          = " + f)
+    println("isDone(before)  = " + Future.isDone(f))
+    println("await           = " + Future.await(f))
+    println("isDone(after)   = " + Future.isDone(f))
+
+    // ── 多个 Future：all 按输入顺序汇总（同时验证 for-in 迭代）──
+    val ids: List<Int> = arrayListOf<Int>()
+    ids.add(Future.spawn(fnIndex("square"), 3))
+    ids.add(Future.spawn(fnIndex("square"), 4))
+    val results = Future.all(ids)
+    var sum = 0
+    for (r in results) {
+        sum = sum + r
+    }
+    println("all sum         = " + sum)
+
+    println("done")
+    return 0
+}

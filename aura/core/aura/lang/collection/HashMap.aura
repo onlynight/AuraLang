@@ -133,19 +133,23 @@ internal class HashMap<K, V> {
     }
 }
 
-// ── 工厂函数 ──
+// ── 工具对象 ──
 
-/// 创建不可变映射
-fun <K, V> mapOf(vararg pairs: Any): HashMap<K, V> {
-    return HashMap<K, V>(pairs)
-}
+/// HashMap 工厂函数集合
+object HashMapUtils {
 
-/// 创建可变映射
-fun <K, V> mutableMapOf(vararg pairs: Any): HashMap<K, V> {
-    return mapOf(pairs)
-}
+    /// 创建不可变映射
+    fun <K, V> mapOf(vararg pairs: Any): HashMap<K, V> {
+        return HashMap<K, V>(pairs)
+    }
 
-/// 创建空映射
-fun <K, V> emptyMap(): HashMap<K, V> {
-    return HashMap<K, V>()
+    /// 创建可变映射
+    fun <K, V> mutableMapOf(vararg pairs: Any): HashMap<K, V> {
+        return mapOf(pairs)
+    }
+
+    /// 创建空映射
+    fun <K, V> emptyMap(): HashMap<K, V> {
+        return HashMap<K, V>()
+    }
 }

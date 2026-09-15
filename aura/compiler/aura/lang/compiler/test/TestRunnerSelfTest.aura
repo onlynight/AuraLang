@@ -1,4 +1,5 @@
 // aura:///aura/lang/compiler/test/TestRunnerSelfTest.aura
+package aura.lang.compiler.test
 // ─────────────────────────────────────────────────────────────
 // TestRunner 框架的可运行自检入口（纯 Aura 化迁移 · Phase 0）
 //

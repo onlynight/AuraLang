@@ -219,31 +219,60 @@ pub fn compile_source(source: &str) -> Result<BytecodeModule, String> {
 /// 包名 import 形如（无引号，与 `aura.lang.std.*` 风格一致）：
 ///   import aura.lang.compiler.lexer.Span
 /// 末段为模块文件名（去掉 `.aura`），前段为子包目录；
-/// `aura.lang.compiler.lexer.Span` → `lexer/Span.aura`（相对入口目录）。
+/// `aura.lang.compiler.lexer.Span` → `lexer/Span.aura`（相对包根目录）。
 const COMPILER_PKG_ROOT: &str = "aura.lang.compiler.";
+
+/// `aura.lang.collection.` 包根前缀：映射到 `aura/core/aura/lang/collection/`。
+const COLLECTION_PKG_ROOT: &str = "aura.lang.collection.";
+
+/// native 包根：`aura.lang.native` 映射到 `aura/lang/native/` 目录。
+///
+/// `aura.lang.native.Memory` → `<lang>/native/Memory.aura`；
+/// `aura.lang.native.time.Clock` → `<lang>/native/time/Clock.aura`。
+/// 其中 `<lang>` 从当前文件路径向上查找名为 `lang` 且含 `native/` 子目录的目录。
+///
+/// 这样 `extern object`（Memory / Cpu 等）可以集中放在 native 包下，
+/// 由使用方 `import aura.lang.native.*` 引用，而不是在各处重复声明。
+const NATIVE_PKG_ROOT: &str = "aura.lang.native.";
 
 /// 预处理：解析 `import` 语句，将外部模块内容内联。
 ///
 /// 支持三种形式：
 /// 1. `import "path.aura"`（引号 + 文件路径，相对入口目录）—— 内联文件内容；
 /// 2. `import aura.lang.compiler.<pkg>.<Mod>`（包名，无引号）—— 映射为
-///    `<pkg>/<Mod>.aura` 后内联；
-/// 3. 其余（如 `import aura.lang.std.String`）原样透传，交给 VM 模块系统。
+///    `<pkg>/<Mod>.aura` 后内联（相对 `aura/lang/compiler/` 包根）；
+/// 3. `import aura.lang.collection.<Mod>`（包名，无引号）—— 映射为
+///    `<Mod>.aura` 后内联（相对 `aura/core/aura/lang/collection/` 包根）；
+/// 4. 其余（如 `import aura.lang.std.String`）原样透传，交给 VM 模块系统。
 ///
 /// `file_path` 为当前源文件路径（用于解析相对路径），`None` 时无法解析相对导入。
 pub fn resolve_aura_imports(source: &str, file_path: Option<&str>) -> String {
-    // `pkg_root`：`aura.lang.compiler` 包根目录（即入口文件所在目录
-    // `aura/lang/compiler/`），包名 import 一律相对它解析。
     // `base_dir`：当前正在处理的文件的目录，仅用于路径形式 import
     // （`import "x.aura"`），相对该文件解析。
-    let pkg_root = match file_path {
+    let base_dir = match file_path {
         Some(fp) => {
             std::path::Path::new(fp).parent().unwrap_or(std::path::Path::new(".")).to_path_buf()
         }
         None => std::path::PathBuf::from("."),
     };
+    // `project_root`：项目根目录（包含 Cargo.toml），用于定位包根目录。
+    let project_root = find_project_root(&base_dir);
+    // `compiler_pkg_root`：`aura.lang.compiler` 包根目录。
+    let compiler_pkg_root: Option<std::path::PathBuf> = project_root
+        .as_ref()
+        .map(|pr| pr.join("aura").join("compiler").join("aura").join("lang").join("compiler"));
+    // `collection_pkg_root`：`aura.lang.collection` 包根目录。
+    let collection_pkg_root: Option<std::path::PathBuf> = project_root
+        .as_ref()
+        .map(|pr| pr.join("aura").join("core").join("aura").join("lang").join("collection"));
     let mut visited = std::collections::HashSet::new();
-    resolve_aura_imports_rec(source, &pkg_root, &pkg_root, &mut visited)
+    resolve_aura_imports_rec(
+        source,
+        &compiler_pkg_root,
+        &collection_pkg_root,
+        &base_dir,
+        &mut visited,
+    )
 }
 
 /// 递归解析 import：除入口文件的顶层 import 外，被内联文件内部的 import
@@ -252,7 +281,8 @@ pub fn resolve_aura_imports(source: &str, file_path: Option<&str>) -> String {
 /// 避免多路径重复 import 造成的重复定义。
 fn resolve_aura_imports_rec(
     source: &str,
-    pkg_root: &std::path::Path,
+    compiler_pkg_root: &Option<std::path::PathBuf>,
+    collection_pkg_root: &Option<std::path::PathBuf>,
     base_dir: &std::path::Path,
     visited: &mut std::collections::HashSet<std::path::PathBuf>,
 ) -> String {
@@ -278,15 +308,48 @@ fn resolve_aura_imports_rec(
                 if path.ends_with(".aura") {
                     Some(base_dir.join(path))
                 } else if path.starts_with(COMPILER_PKG_ROOT) {
-                    let rel =
-                        pkg_to_aura_path(path.strip_prefix(COMPILER_PKG_ROOT).unwrap_or(path));
-                    Some(pkg_root.join(rel))
+                    if let Some(root) = compiler_pkg_root {
+                        let rel =
+                            pkg_to_aura_path(path.strip_prefix(COMPILER_PKG_ROOT).unwrap_or(path));
+                        Some(root.join(rel))
+                    } else {
+                        None
+                    }
+                } else if path.starts_with(COLLECTION_PKG_ROOT) {
+                    if let Some(root) = collection_pkg_root {
+                        let rel = pkg_to_aura_path(
+                            path.strip_prefix(COLLECTION_PKG_ROOT).unwrap_or(path),
+                        );
+                        Some(root.join(rel))
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
             } else if let Some(pkg) = rest.strip_prefix(COMPILER_PKG_ROOT) {
-                let rel = pkg_to_aura_path(pkg);
-                Some(pkg_root.join(rel))
+                if let Some(root) = compiler_pkg_root {
+                    let rel = pkg_to_aura_path(pkg);
+                    Some(root.join(rel))
+                } else {
+                    None
+                }
+            } else if let Some(pkg) = rest.strip_prefix(COLLECTION_PKG_ROOT) {
+                if let Some(root) = collection_pkg_root {
+                    let rel = pkg_to_aura_path(pkg);
+                    Some(root.join(rel))
+                } else {
+                    None
+                }
+            } else if let Some(pkg) = rest.strip_prefix(NATIVE_PKG_ROOT) {
+                // `aura.lang.native.*` → 定位 `aura/lang/native/` 后内联。
+                // 去掉通配/别名的尾巴（如 `Memory.*` / `Memory as M`）。
+                let pkg = pkg.split_whitespace().next().unwrap_or(pkg);
+                let pkg = pkg.trim_end_matches(".*");
+                find_lang_root(base_dir).map(|lang| {
+                    let rel = pkg_to_aura_path(pkg);
+                    lang.join("native").join(rel)
+                })
             } else {
                 None
             };
@@ -300,10 +363,15 @@ fn resolve_aura_imports_rec(
                 if let Ok(content) = std::fs::read_to_string(&full_path) {
                     visited.insert(canon);
                     // 被导入文件内部的路径 import 相对其自身目录解析；
-                    // 包名 import 永远相对包根，故 pkg_root 透传。
-                    let child_base = full_path.parent().unwrap_or(pkg_root);
-                    let resolved =
-                        resolve_aura_imports_rec(&content, pkg_root, child_base, visited);
+                    // 包名 import 永远相对包根，故包根透传。
+                    let child_base = full_path.parent().unwrap_or(base_dir);
+                    let resolved = resolve_aura_imports_rec(
+                        &content,
+                        compiler_pkg_root,
+                        collection_pkg_root,
+                        child_base,
+                        visited,
+                    );
                     result.push_str(&resolved);
                     continue; // 跳过原 import 行
                 } else {
@@ -340,12 +408,40 @@ fn pkg_to_aura_path(pkg: &str) -> String {
     }
 }
 
+/// 从 `start` 向上查找项目根目录（包含 `Cargo.toml` 的目录）。
+fn find_project_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut cur = Some(start);
+    while let Some(dir) = cur {
+        if dir.join("Cargo.toml").is_file() {
+            return Some(dir.to_path_buf());
+        }
+        cur = dir.parent();
+    }
+    None
+}
+
+/// 从 `start` 向上查找 `aura/lang` 目录（名为 `lang` 且含 `native/` 子目录）。
+///
+/// 用于把 `aura.lang.native.*` 包名 import 解析为真实文件路径：
+/// `aura.core/aura/lang/concurrent/Mutex.aura` → `<core>/aura/lang`。
+fn find_lang_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut cur = Some(start);
+    while let Some(dir) = cur {
+        let is_lang = dir.file_name().map(|n| n == "lang").unwrap_or(false);
+        if is_lang && dir.join("native").is_dir() {
+            return Some(dir.to_path_buf());
+        }
+        cur = dir.parent();
+    }
+    None
+}
+
 /// 从 AST 程序提取启用的 std 模块名
 ///
 /// 遍历 `program.imports`，解析 `import` 声明，返回模块名集合（如 `["math", "io"]`）。
 ///
 /// 新命名（`aura.lang.std.<ClassName>`）：
-/// - `aura.lang.std.Coroutine.*` → `["concurrent"]`（Coroutine/Actor/Channel 共用一个模块键）
+/// - `aura.lang.concurrent.Coroutine.*` → `["concurrent"]`（Coroutine/Actor/Channel 共用一个模块键）
 /// - `aura.lang.std.Math.*`     → `["math"]`
 /// - `aura.lang.std.FileSystem` → `["fs"]`
 /// - `aura.lang.std.Network`    → `["net"]`
@@ -395,6 +491,10 @@ fn extract_enabled_modules(program: &crate::ast::Program) -> Vec<String> {
                 String::from(mod_name)
             };
             modules.insert(owned);
+        } else if path.starts_with("aura.lang.concurrent.") {
+            // 并发包（Thread/Mutex/Atomic/RwLock/Condvar/Barrier/Future/Semaphore、
+            // Coroutine/Actor/Channel）共用一个 "concurrent" 模块键
+            modules.insert("concurrent".to_string());
         } else if let Some(rest) = path.strip_prefix("aura.") {
             // 旧命名：路径形如 aura.<module>[.<fn>]
             let module = rest.split('.').next().unwrap_or(rest);

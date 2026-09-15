@@ -17,14 +17,14 @@
 use crate::codegen::aot::types::TypeMapper;
 
 /// Runtime 函数声明
-struct RuntimeFn {
-    name: &'static str,
-    ret: &'static str,
-    params: &'static [(&'static str, &'static str)], // (name, llvm_type)
+pub struct RuntimeFn {
+    pub name: &'static str,
+    pub ret: &'static str,
+    pub params: &'static [(&'static str, &'static str)], // (name, llvm_type)
 }
 
 /// 所有 runtime 函数的声明
-const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
+pub const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
     RuntimeFn {
         name: "aura_arc_increment",
         ret: "void",
@@ -321,6 +321,221 @@ const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
             ("default", "i8*"),
         ],
     },
+    // ── Phase A: 并发运行时原语（对应 aura_syscalls.c） ──
+    // Thread
+    RuntimeFn {
+        name: "aura_thread_create",
+        ret: "i64",
+        params: &[
+            ("fn", "i64"),
+            ("arg", "i64"),
+        ],
+    },
+    RuntimeFn {
+        name: "aura_thread_join",
+        ret: "void",
+        params: &[("id", "i64")],
+    },
+    RuntimeFn {
+        name: "aura_thread_sleep",
+        ret: "void",
+        params: &[("ms", "i64")],
+    },
+    RuntimeFn {
+        name: "aura_thread_id",
+        ret: "i64",
+        params: &[],
+    },
+    RuntimeFn {
+        name: "aura_thread_available_parallelism",
+        ret: "i64",
+        params: &[],
+    },
+    // Mutex
+    RuntimeFn {
+        name: "aura_mutex_new",
+        ret: "i64",
+        params: &[],
+    },
+    RuntimeFn {
+        name: "aura_mutex_lock",
+        ret: "void",
+        params: &[("id", "i64")],
+    },
+    RuntimeFn {
+        name: "aura_mutex_unlock",
+        ret: "void",
+        params: &[("id", "i64")],
+    },
+    RuntimeFn {
+        name: "aura_mutex_trylock",
+        ret: "i32",
+        params: &[("id", "i64")],
+    },
+    RuntimeFn {
+        name: "aura_mutex_destroy",
+        ret: "void",
+        params: &[("id", "i64")],
+    },
+    // RwLock
+    RuntimeFn {
+        name: "aura_rwlock_new",
+        ret: "i64",
+        params: &[],
+    },
+    RuntimeFn {
+        name: "aura_rwlock_read_lock",
+        ret: "void",
+        params: &[("id", "i64")],
+    },
+    RuntimeFn {
+        name: "aura_rwlock_write_lock",
+        ret: "void",
+        params: &[("id", "i64")],
+    },
+    RuntimeFn {
+        name: "aura_rwlock_read_unlock",
+        ret: "void",
+        params: &[("id", "i64")],
+    },
+    RuntimeFn {
+        name: "aura_rwlock_write_unlock",
+        ret: "void",
+        params: &[("id", "i64")],
+    },
+    RuntimeFn {
+        name: "aura_rwlock_destroy",
+        ret: "void",
+        params: &[("id", "i64")],
+    },
+    // Atomic
+    RuntimeFn {
+        name: "aura_atomic_load",
+        ret: "i64",
+        params: &[("addr", "i64*")],
+    },
+    RuntimeFn {
+        name: "aura_atomic_store",
+        ret: "void",
+        params: &[
+            ("addr", "i64*"),
+            ("val", "i64"),
+        ],
+    },
+    RuntimeFn {
+        name: "aura_atomic_add",
+        ret: "i64",
+        params: &[
+            ("addr", "i64*"),
+            ("delta", "i64"),
+        ],
+    },
+    RuntimeFn {
+        name: "aura_atomic_sub",
+        ret: "i64",
+        params: &[
+            ("addr", "i64*"),
+            ("delta", "i64"),
+        ],
+    },
+    RuntimeFn {
+        name: "aura_atomic_add_and_get",
+        ret: "i64",
+        params: &[
+            ("addr", "i64*"),
+            ("delta", "i64"),
+        ],
+    },
+    RuntimeFn {
+        name: "aura_atomic_get_and_add",
+        ret: "i64",
+        params: &[
+            ("addr", "i64*"),
+            ("delta", "i64"),
+        ],
+    },
+    RuntimeFn {
+        name: "aura_atomic_cas",
+        ret: "i32",
+        params: &[
+            ("addr", "i64*"),
+            ("expected", "i64"),
+            ("desired", "i64"),
+        ],
+    },
+    RuntimeFn {
+        name: "aura_atomic_compare_and_swap",
+        ret: "i64",
+        params: &[
+            ("addr", "i64*"),
+            ("expected", "i64"),
+            ("desired", "i64"),
+        ],
+    },
+    // Condvar
+    RuntimeFn {
+        name: "aura_condvar_new",
+        ret: "i64",
+        params: &[],
+    },
+    RuntimeFn {
+        name: "aura_condvar_wait",
+        ret: "void",
+        params: &[
+            ("id", "i64"),
+            ("mutex_id", "i64"),
+        ],
+    },
+    RuntimeFn {
+        name: "aura_condvar_signal",
+        ret: "void",
+        params: &[("id", "i64")],
+    },
+    RuntimeFn {
+        name: "aura_condvar_broadcast",
+        ret: "void",
+        params: &[("id", "i64")],
+    },
+    RuntimeFn {
+        name: "aura_condvar_destroy",
+        ret: "void",
+        params: &[("id", "i64")],
+    },
+    // Barrier
+    RuntimeFn {
+        name: "aura_barrier_new",
+        ret: "i64",
+        params: &[("count", "i64")],
+    },
+    RuntimeFn {
+        name: "aura_barrier_wait",
+        ret: "i64",
+        params: &[("id", "i64")],
+    },
+    RuntimeFn {
+        name: "aura_barrier_destroy",
+        ret: "void",
+        params: &[("id", "i64")],
+    },
+    // TLS
+    RuntimeFn {
+        name: "aura_tls_key_create",
+        ret: "i64",
+        params: &[],
+    },
+    RuntimeFn {
+        name: "aura_tls_get",
+        ret: "i64",
+        params: &[("key_idx", "i64")],
+    },
+    RuntimeFn {
+        name: "aura_tls_set",
+        ret: "void",
+        params: &[
+            ("key_idx", "i64"),
+            ("val", "i64"),
+        ],
+    },
 ];
 
 /// 生成所有 runtime 函数的 LLVM 外部声明
@@ -378,46 +593,58 @@ pub fn runtime_signature(name: &str) -> Option<(&'static str, Vec<&'static str>)
 ///       `aura_lang_std_IO_readLine` → `aura_io_readLine`
 ///       `aura_lang_std_Filesystem_exists` → `aura_fs_exists`
 ///       `aura_lang_std_Network_tcpConnect` → `aura_net_tcpConnect`
+///       `aura_lang_concurrent_Coroutine_actorAlive` → `aura_concurrent_actorAlive`
+///       `aura_lang_concurrent_Channel_newChannel` → `aura_concurrent_newChannel`
 ///
 /// 若输入不是新命名形式，返回原值（用于兼容旧命名下的 C 符号）。
-fn translate_to_legacy_c(name: &str) -> String {
-    let prefix = "aura_lang_std_";
-    if !name.starts_with(prefix) {
-        return name.to_string();
+pub fn translate_to_legacy_c(name: &str) -> String {
+    // 处理 aura.lang.std 前缀
+    let std_prefix = "aura_lang_std_";
+    if name.starts_with(std_prefix) {
+        let rest = &name[std_prefix.len()..];
+        let parts: Vec<&str> = rest.splitn(2, '_').collect();
+        if parts.len() != 2 {
+            return name.to_string();
+        }
+        let (class, fn_name) = (parts[0], parts[1]);
+        let c_prefix = match class {
+            "Math" => "math",
+            "IO" => "io",
+            "Ascii" => "ascii",
+            "Assert" => "assert",
+            "Builtin" => "builtin",
+            "Collections" => "collections",
+            "Console" => "console",
+            "Encoding" => "encoding",
+            "Env" => "env",
+            "FileSystem" => "fs",
+            "Iter" => "iter",
+            "Json" => "json",
+            "Network" => "net",
+            "Path" => "path",
+            "Process" => "process",
+            "Random" => "random",
+            "String" => "string",
+            "Test" => "test",
+            "Time" => "time",
+            _ => return name.to_string(),
+        };
+        return format!("aura_{}_{}", c_prefix, fn_name);
     }
-    let rest = &name[prefix.len()..];
-    let parts: Vec<&str> = rest.splitn(2, '_').collect();
-    if parts.len() != 2 {
-        return name.to_string();
+
+    // 处理 aura.lang.concurrent 前缀
+    let concurrent_prefix = "aura_lang_concurrent_";
+    if name.starts_with(concurrent_prefix) {
+        let rest = &name[concurrent_prefix.len()..];
+        let parts: Vec<&str> = rest.splitn(2, '_').collect();
+        if parts.len() != 2 {
+            return name.to_string();
+        }
+        let (_class, fn_name) = (parts[0], parts[1]);
+        return format!("aura_concurrent_{}", fn_name);
     }
-    let (class, fn_name) = (parts[0], parts[1]);
-    // 类名到 C 前缀的映射（与旧命名一致）
-    let c_prefix = match class {
-        "Math" => "math",
-        "IO" => "io",
-        "Ascii" => "ascii",
-        "Assert" => "assert",
-        "Builtin" => "builtin",
-        "Collections" => "collections",
-        "Console" => "console",
-        "Encoding" => "encoding",
-        "Env" => "env",
-        "FileSystem" => "fs",
-        "Iter" => "iter",
-        "Json" => "json",
-        "Network" => "net",
-        "Path" => "path",
-        "Process" => "process",
-        "Random" => "random",
-        "String" => "string",
-        "Test" => "test",
-        "Time" => "time",
-        "Coroutine" => "concurrent",
-        "Actor" => "concurrent",
-        "Channel" => "concurrent",
-        _ => return name.to_string(),
-    };
-    format!("aura_{}_{}", c_prefix, fn_name)
+
+    name.to_string()
 }
 
 /// aura_std_cffi.c 中实现的 C FFI 函数签名覆盖
@@ -605,6 +832,99 @@ pub fn cffi_signature(name: &str) -> Option<(&'static str, Vec<&'static str>)> {
         // aura.io
         "aura_io_fileExists" => ("i1", &[P]),
         "aura_io_fileWrite" => ("void", &[P, P]),
+        // ── Phase A: 并发运行时原语 ──
+        // Thread
+        "aura_thread_create" => (
+            "i64",
+            &[
+                "i64", "i64",
+            ],
+        ),
+        "aura_thread_join" => ("void", &["i64"]),
+        "aura_thread_sleep" => ("void", &["i64"]),
+        "aura_thread_id" => ("i64", &[]),
+        "aura_thread_available_parallelism" => ("i64", &[]),
+        // Mutex
+        "aura_mutex_new" => ("i64", &[]),
+        "aura_mutex_lock" => ("void", &["i64"]),
+        "aura_mutex_unlock" => ("void", &["i64"]),
+        "aura_mutex_trylock" => ("i32", &["i64"]),
+        "aura_mutex_destroy" => ("void", &["i64"]),
+        // RwLock
+        "aura_rwlock_new" => ("i64", &[]),
+        "aura_rwlock_read_lock" => ("void", &["i64"]),
+        "aura_rwlock_write_lock" => ("void", &["i64"]),
+        "aura_rwlock_read_unlock" => ("void", &["i64"]),
+        "aura_rwlock_write_unlock" => ("void", &["i64"]),
+        "aura_rwlock_destroy" => ("void", &["i64"]),
+        // Atomic
+        "aura_atomic_load" => ("i64", &["i64*"]),
+        "aura_atomic_store" => (
+            "void",
+            &[
+                "i64*", "i64",
+            ],
+        ),
+        "aura_atomic_add" => (
+            "i64",
+            &[
+                "i64*", "i64",
+            ],
+        ),
+        "aura_atomic_sub" => (
+            "i64",
+            &[
+                "i64*", "i64",
+            ],
+        ),
+        "aura_atomic_add_and_get" => (
+            "i64",
+            &[
+                "i64*", "i64",
+            ],
+        ),
+        "aura_atomic_get_and_add" => (
+            "i64",
+            &[
+                "i64*", "i64",
+            ],
+        ),
+        "aura_atomic_cas" => (
+            "i32",
+            &[
+                "i64*", "i64", "i64",
+            ],
+        ),
+        "aura_atomic_compare_and_swap" => (
+            "i64",
+            &[
+                "i64*", "i64", "i64",
+            ],
+        ),
+        // Condvar
+        "aura_condvar_new" => ("i64", &[]),
+        "aura_condvar_wait" => (
+            "void",
+            &[
+                "i64", "i64",
+            ],
+        ),
+        "aura_condvar_signal" => ("void", &["i64"]),
+        "aura_condvar_broadcast" => ("void", &["i64"]),
+        "aura_condvar_destroy" => ("void", &["i64"]),
+        // Barrier
+        "aura_barrier_new" => ("i64", &["i64"]),
+        "aura_barrier_wait" => ("i64", &["i64"]),
+        "aura_barrier_destroy" => ("void", &["i64"]),
+        // TLS
+        "aura_tls_key_create" => ("i64", &[]),
+        "aura_tls_get" => ("i64", &["i64"]),
+        "aura_tls_set" => (
+            "void",
+            &[
+                "i64", "i64",
+            ],
+        ),
         _ => return None,
     };
     Some((ret, params.to_vec()))
@@ -624,6 +944,14 @@ mod tests {
         assert!(decls.contains("aura_malloc"));
         assert!(decls.contains("aura_free"));
         assert!(decls.contains("aura_string_new"));
+        // Phase A concurrent primitives
+        assert!(decls.contains("aura_thread_create"));
+        assert!(decls.contains("aura_mutex_new"));
+        assert!(decls.contains("aura_atomic_load"));
+        assert!(decls.contains("aura_rwlock_new"));
+        assert!(decls.contains("aura_condvar_new"));
+        assert!(decls.contains("aura_barrier_new"));
+        assert!(decls.contains("aura_tls_key_create"));
     }
 
     #[test]

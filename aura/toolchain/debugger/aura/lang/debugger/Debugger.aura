@@ -1,0 +1,165 @@
+// aura:///debugger/aura/lang/debugger/Debugger.aura
+package aura.lang.debugger
+
+// ── 标准库 ──
+import aura.lang.std.String
+import aura.lang.std.Collections
+
+// ── Native 包 ──
+import aura.lang.native.console.Console
+
+// ── 兄弟模块 ──
+import aura.lang.debugger.Breakpoint
+import aura.lang.debugger.BreakpointManager
+import aura.lang.debugger.DebugApi
+
+// ═══════════════════════════════════════════════════════════════
+// 调试器主类
+// ═══════════════════════════════════════════════════════════════
+
+class Debugger {
+    var initialized: Boolean = false
+    var running: Boolean = false
+    var srcFile: String = ""
+    var breakpoints: BreakpointManager = BreakpointManager()
+    var watchExprs: List<String> = mutableListOf()
+    var nextWatchId: Int = 1
+
+    fun init(src: String): Int {
+        this.srcFile = src
+        val result: Int = debugInit(src)
+        if (result == 0) {
+            this.initialized = true
+            Console.println("Debugger initialized: " + src)
+        } else {
+            Console.println("Debugger init failed")
+        }
+        return result
+    }
+
+    /// 运行程序（到第一个断点或结束）
+    fun run(): Int {
+        if (!initialized) {
+            Console.println("Error: debugger not initialized")
+            return 1
+        }
+        running = true
+        val result: Int = debugRun()
+        if (result == 0) {
+            Console.println("Program started, executing...")
+        }
+        return result
+    }
+
+    /// 继续执行到下一个断点
+    fun continueExec(): Int {
+        val result: Int = debugContinue()
+        if (result == 0) {
+            Console.println("Continuing...")
+        }
+        return result
+    }
+
+    /// 单步执行（step over）
+    fun stepOver(): Int {
+        val result: Int = debugStepOver()
+        if (result == 0) {
+            printStopInfo()
+        }
+        return result
+    }
+
+    /// 单步执行（step into）
+    fun stepInto(): Int {
+        val result: Int = debugStepInto()
+        if (result == 0) {
+            printStopInfo()
+        }
+        return result
+    }
+
+    /// 单步执行（step out）
+    fun stepOut(): Int {
+        val result: Int = debugStepOut()
+        if (result == 0) {
+            printStopInfo()
+        }
+        return result
+    }
+
+    /// 打印停止位置信息
+    fun printStopInfo(): Unit {
+        val stop: String = debugNextStop()
+        Console.println("Stopped: " + stop)
+        if (watchExprs.size > 0) {
+            Console.println("Watch:")
+            var i: Int = 0
+            while (i < watchExprs.size) {
+                val val: String = debugEval(watchExprs[i])
+                Console.println("  " + watchExprs[i] + " = " + val)
+                i = i + 1
+            }
+        }
+    }
+
+    /// 添加断点
+    fun addBreakpoint(file: String, line: Int): Breakpoint {
+        return breakpoints.add(file, line)
+    }
+
+    /// 移除断点
+    fun removeBreakpoint(id: Int): Unit {
+        breakpoints.remove(id)
+    }
+
+    /// 列出所有断点
+    fun listBreakpoints(): Unit {
+        breakpoints.printAll()
+    }
+
+    /// 查看局部变量
+    fun variables(): Unit {
+        val result: String = debugVariables()
+        Console.println(result)
+    }
+
+    /// 查看调用栈
+    fun callStack(): Unit {
+        val result: String = debugCallStack()
+        Console.println(result)
+    }
+
+    /// 查看指定栈帧
+    fun stackFrame(depth: Int): Unit {
+        val result: String = debugStackFrame(depth)
+        Console.println(result)
+    }
+
+    /// 求值表达式
+    fun eval(expr: String): String {
+        val result: String = debugEval(expr)
+        Console.println(result)
+        return result
+    }
+
+    /// 添加 watch 表达式
+    fun watch(expr: String): Int {
+        watchExprs.add(expr)
+        debugWatch(expr)
+        Console.println("Watch #" + toStr(nextWatchId) + ": " + expr)
+        nextWatchId = nextWatchId + 1
+        return nextWatchId
+    }
+
+    /// 移除 watch 表达式
+    fun unwatch(id: Int): Unit {
+        debugUnwatch(id)
+    }
+
+    /// 退出调试器
+    fun quit(): Int {
+        running = false
+        initialized = false
+        return debugQuit()
+    }
+}

@@ -34,7 +34,8 @@ pub const MAGIC: &[u8; 4] = b"AURA";
 ///   aot_mode/aot_desc_idx 字段时按 0 处理，段表为空）。
 /// - v3 VM 遇到 v4 文件会因 `version > VERSION` 拒绝加载。
 /// Phase 1 v6: 类定义表（类 ID 系统 + 类层级 + object 单例）
-pub const VERSION: u16 = 6;
+/// Phase 1 v7: 并发指令集（Thread/Mutex/Atomic/RwLock/Condvar/Barrier/Channel/Future）
+pub const VERSION: u16 = 7;
 
 #[derive(Debug)]
 pub enum SerializeError {

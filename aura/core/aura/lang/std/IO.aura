@@ -1,161 +1,132 @@
 // aura:///aura/lang/std/IO.aura
 package aura.lang.std
 // ------------------------------------------------------------------
-// 标准输入输出模块 — Phase 3: 纯 LLVM 化
+// 标准输入输出模块 — 纯 Aura 实现
 //
-// AOT 路径：extern "C" 直连 C 运行时 (printf/puts/fgets) + @native syscall
-// VM 路径：internal object → Rust bootstrap (Layer 0-A / FFI)
+// 实现策略：
+// - 全部以 Aura 编写，不使用 extern "C" 或 Rust cffi。
+// - 系统调用经由 aura.lang.native 包（Console / FileOps / Syscalls）完成。
+// - Aura String 与内存缓冲区之间的转换在 native.io.Stdio 中提供。
 //
 // @since 0.1
 // ------------------------------------------------------------------
 
-// ═══════════════════════════════════════════════════════════════
-// Phase 3: C 运行时声明 (AOT 路径)
-// ═══════════════════════════════════════════════════════════════
-
-// ── 标准输出 ──
-extern "C" {
-    /// printf — 格式化输出到 stdout
-    fun printf(format: Pointer<Byte>): Int
-    /// puts — 输出字符串 + 换行到 stdout
-    fun puts(s: Pointer<Byte>): Int
-    /// fwrite — 写入到 stdout
-    fun fwrite(ptr: Pointer<Byte>, size: Int, count: Int, stream: Pointer<Byte>): Int
-    /// fflush — 刷新标准输出缓冲区
-    fun fflush(stream: Pointer<Byte>): Int
-}
-
-// ── 标准输入 ──
-extern "C" {
-    /// fgets — 从 stdin 读取一行
-    fun fgets(buf: Pointer<Byte>, size: Int, stream: Pointer<Byte>): Pointer<Byte>
-    /// fread — 从 stdin 读取数据
-    fun fread(ptr: Pointer<Byte>, size: Int, count: Int, stream: Pointer<Byte>): Int
-}
-
-// ── 文件 I/O (C 运行时) ──
-extern "C" {
-    /// fopen — 打开文件
-    fun fopen(filename: Pointer<Byte>, mode: Pointer<Byte>): Pointer<Byte>
-    /// fread (文件) — 从文件读取
-    fun fread_file(ptr: Pointer<Byte>, size: Int, count: Int, stream: Pointer<Byte>): Int
-    /// fwrite (文件) — 写入文件
-    fun fwrite_file(ptr: Pointer<Byte>, size: Int, count: Int, stream: Pointer<Byte>): Int
-    /// fclose — 关闭文件
-    fun fclose(stream: Pointer<Byte>): Int
-}
-
-// ── 文件存在检查 ──
-extern "C" {
-    /// access — 检查文件是否存在 (mode=0)
-    fun access(path: Pointer<Byte>, mode: Int): Int
-}
-
-// ── Linux x86_64 Syscall 调用 ──
-extern object IO_syscalls {
-    @native(0) fun syscall_read(fd: Int, buf: Pointer<Byte>, count: Long): Long
-    @native(1) fun syscall_write(fd: Int, buf: Pointer<Byte>, count: Long): Long
-    @native(2) fun syscall_open(path: Pointer<Byte>, flags: Int, mode: Int): Int
-    @native(3) fun syscall_close(fd: Int): Int
-}
+import aura.lang.native.Memory
+import aura.lang.native.memory.Allocator
+import aura.lang.native.console.Console
+import aura.lang.native.file.FileOps
+import aura.lang.native.Syscalls
+import aura.lang.native.io.Stdio
 
 // ═══════════════════════════════════════════════════════════════
-// AOT 路径: 使用 C 运行时 + syscall 的函数实现
+// IOUtils — 供 AOT / 底层调用的字符串级工具（纯 Aura）
 // ═══════════════════════════════════════════════════════════════
 
-/// 输出字符串（带换行）— AOT: puts()
-fun io_println(msg: Pointer<Byte>): Unit {
-    puts(msg)
-    fflush(null)
-}
+/// IO 工具对象（纯 Aura 实现，委托到 native 包）。
+object IOUtils {
 
-/// 输出字符串（不带换行）— AOT: printf()
-fun io_print(msg: Pointer<Byte>): Unit {
-    printf(msg)
-    fflush(null)
-}
-
-/// 刷新标准输出 — AOT: fflush()
-fun io_flush(): Unit {
-    fflush(null)
-}
-
-/// 写入文件内容 — AOT: fopen/fwrite/fclose
-fun io_file_write(path: Pointer<Byte>, content: Pointer<Byte>, len: Int): Int {
-    var f: Pointer<Byte> = fopen(path, "w")
-    if (f == null) {
-        return -1
+    /// 输出字符串（带换行）。
+    fun io_println(msg: String): Unit {
+        Stdio.println(msg)
     }
-    var n: Int = fwrite_file(content, 1, len, f)
-    fclose(f)
-    return n
-}
 
-/// 读取文件内容 — AOT: fopen/fread/fclose
-fun io_file_read(path: Pointer<Byte>, buf: Pointer<Byte>, maxLen: Int): Int {
-    var f: Pointer<Byte> = fopen(path, "r")
-    if (f == null) {
-        return -1
+    /// 输出字符串（不带换行）。
+    fun io_print(msg: String): Unit {
+        Stdio.print(msg)
     }
-    var n: Int = fread_file(buf, 1, maxLen, f)
-    fclose(f)
-    return n
-}
 
-/// 检查文件是否存在 — AOT: access()
-fun io_file_exists(path: Pointer<Byte>): Boolean {
-    return access(path, 0) == 0
+    /// 刷新标准输出（当前实现为立即写入，无缓冲）。
+    fun io_flush(): Unit {
+        // 无缓冲，无需刷新
+    }
+
+    /// 写入文件内容。
+    fun io_file_write(path: String, content: String): Boolean {
+        return Stdio.writeFile(path, content)
+    }
+
+    /// 读取文件内容。
+    fun io_file_read(path: String): String {
+        return Stdio.readFile(path)
+    }
+
+    /// 检查文件是否存在。
+    fun io_file_exists(path: String): Boolean {
+        return Stdio.fileExists(path)
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
-// VM 路径: internal object (Rust bootstrap 实现)
+// IO — 标准库接口（纯 Aura，委托到 native.io.Stdio）
 // ═══════════════════════════════════════════════════════════════
 
-/// 标准输入输出模块（VM 路径）。
+/// 标准输入输出模块。
 ///
 /// 使用前需 import：
 /// ```aura
 /// import aura.io.*
 /// ```
 ///
+/// 实现全部为纯 Aura 代码，系统能力委托到 aura.lang.native 包。
+///
 /// @since 0.1
-internal object IO {
+object IO {
 
-    // ── 输出（通过 libc printf/puts 实现）──
+    // ── 输出 ──
 
     /// 输出字符串（带换行）。
-    fun println(msg: String): Unit
+    fun println(msg: String): Unit {
+        Stdio.println(msg)
+    }
 
     /// 输出字符串（不带换行）。
-    fun print(msg: String): Unit
+    fun print(msg: String): Unit {
+        Stdio.print(msg)
+    }
 
-    // ── 输入（通过 libc fgets/fread 实现）──
+    // ── 输入 ──
 
     /// 从标准输入读取一行。
-    val readLine: String
+    fun readLine(): String {
+        return Stdio.readLine()
+    }
 
     /// 从标准输入读取全部。
-    val readAll: String
+    fun readAll(): String {
+        return Stdio.readAll()
+    }
 
     // ── 刷新 ──
 
-    /// 刷新标准输出缓冲区。
-    fun flush(): Unit
+    /// 刷新标准输出缓冲区（无缓冲实现，直接写入）。
+    fun flush(): Unit {
+        // 无缓冲
+    }
 
-    // ── 文件操作（通过 libc fopen/fread/fwrite 实现）──
+    // ── 文件操作 ──
 
     /// 读取文件内容。
-    fun fileRead(path: String): String
+    fun fileRead(path: String): String {
+        return Stdio.readFile(path)
+    }
 
     /// 写入文件内容。
-    fun fileWrite(path: String, content: String): Unit
+    fun fileWrite(path: String, content: String): Unit {
+        Stdio.writeFile(path, content)
+    }
 
     /// 检查文件是否存在。
-    fun fileExists(path: String): Boolean
+    fun fileExists(path: String): Boolean {
+        return Stdio.fileExists(path)
+    }
 
     /// 写入文件（fileWrite 别名）。
-    fun writeFile(path: String, content: String): Unit
+    fun writeFile(path: String, content: String): Unit {
+        Stdio.writeFile(path, content)
+    }
 
     /// 读取文件（fileRead 别名）。
-    fun readFile(path: String): String
+    fun readFile(path: String): String {
+        return Stdio.readFile(path)
+    }
 }

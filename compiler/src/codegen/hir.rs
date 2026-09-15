@@ -21,19 +21,19 @@ use std::collections::HashMap;
 //
 // 从 ImportDecl 构建，用于在 desugar_expr 中将短名/别名解析为完整原生函数名。
 // 支持：
-// - `import aura.concurrent.*` + `spawn(42)` → `aura.lang.std.Coroutine.spawn(42)`
-// - `import aura.lang.std.Coroutine.spawn` + `spawn(42)` → `aura.lang.std.Coroutine.spawn(42)`
-// - `import aura.lang.std.Coroutine.spawn as s` + `s(42)` → `aura.lang.std.Coroutine.spawn(42)`
-// - `import aura.concurrent as cc` + `cc.spawn(42)` → `aura.lang.std.Coroutine.spawn(42)`
+// - `import aura.concurrent.*` + `spawn(42)` → `aura.lang.concurrent.Coroutine.spawn(42)`
+// - `import aura.lang.concurrent.Coroutine.spawn` + `spawn(42)` → `aura.lang.concurrent.Coroutine.spawn(42)`
+// - `import aura.lang.concurrent.Coroutine.spawn as s` + `s(42)` → `aura.lang.concurrent.Coroutine.spawn(42)`
+// - `import aura.concurrent as cc` + `cc.spawn(42)` → `aura.lang.concurrent.Coroutine.spawn(42)`
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Default)]
 struct ImportResolution {
     /// 短名 → 完整原生函数名（通配/精确引入，无别名）
-    /// 例如: "spawn" → "aura.lang.std.Coroutine.spawn"
+    /// 例如: "spawn" → "aura.lang.concurrent.Coroutine.spawn"
     short_to_full: HashMap<String, String>,
     /// 别名 → 完整原生函数名（精确引入 + 别名）
-    /// 例如: "s" → "aura.lang.std.Coroutine.spawn"
+    /// 例如: "s" → "aura.lang.concurrent.Coroutine.spawn"
     alias_to_full: HashMap<String, String>,
     /// 别名 → 模块名（模块/通配导入 + 别名）
     /// 例如: "cc" → "aura.concurrent"
@@ -44,11 +44,11 @@ struct ImportResolution {
 }
 
 impl ImportResolution {
-    /// 查找短名映射（如 `spawn` → `aura.lang.std.Coroutine.spawn`）
+    /// 查找短名映射（如 `spawn` → `aura.lang.concurrent.Coroutine.spawn`）
     fn resolve_short_name(&self, name: &str) -> Option<&str> {
         self.short_to_full.get(name).map(|s| s.as_str())
     }
-    /// 查找别名映射（如 `s` → `aura.lang.std.Coroutine.spawn`）
+    /// 查找别名映射（如 `s` → `aura.lang.concurrent.Coroutine.spawn`）
     fn resolve_alias(&self, name: &str) -> Option<&str> {
         self.alias_to_full.get(name).map(|s| s.as_str())
     }
@@ -690,11 +690,12 @@ fn build_import_resolution(imports: &[ImportDecl]) -> ImportResolution {
         }
 
         let parts: Vec<&str> = path.split('.').collect();
-        let is_new_scheme = path.starts_with("aura.lang.std");
+        let is_new_scheme =
+            path.starts_with("aura.lang.std") || path.starts_with("aura.lang.concurrent");
         // 新命名下：class = 4 段，function = 5 段
         // 旧命名下：module = 2 段，function = 3 段
         let is_function = if is_new_scheme { parts.len() == 5 } else { parts.len() == 3 };
-        // 新命名下的 class 段数（4 段，如 aura.lang.std.Coroutine）
+        // 新命名下的 class 段数（4 段，如 aura.lang.concurrent.Coroutine）
         let is_class = is_new_scheme && parts.len() == 4;
         // 提取类名（如果有）
         let class_name =
@@ -702,18 +703,18 @@ fn build_import_resolution(imports: &[ImportDecl]) -> ImportResolution {
 
         match &imp.alias {
             Some(alias) if is_function => {
-                // import aura.lang.std.Coroutine.spawn as s → alias "s" → full name
+                // import aura.lang.concurrent.Coroutine.spawn as s → alias "s" → full name
                 // For short paths like aura.math.sqrt, resolve module → class name
                 let resolved_path =
                     if is_new_scheme { path.clone() } else { resolve_function_path(path) };
                 r.alias_to_full.insert(alias.clone(), resolved_path);
             }
             Some(alias) if is_new_scheme && class_name.is_some() && !imp.wildcard => {
-                // import aura.lang.std.Coroutine as cc → alias → module path
+                // import aura.lang.concurrent.Coroutine as cc → alias → module path
                 r.alias_to_module.insert(alias.clone(), path.clone());
             }
             Some(alias) if imp.wildcard => {
-                // import aura.lang.std.Coroutine.* as cc → alias → module path
+                // import aura.lang.concurrent.Coroutine.* as cc → alias → module path
                 // 同时注册短名供通配调用使用
                 let resolved_path = std_module_to_class_name(path)
                     .map(|s| s.to_string())
@@ -730,7 +731,7 @@ fn build_import_resolution(imports: &[ImportDecl]) -> ImportResolution {
                 r.alias_to_module.insert(alias.clone(), path.clone());
             }
             None if imp.wildcard => {
-                // import aura.lang.std.Coroutine.* → 所有函数短名 → 完整名
+                // import aura.lang.concurrent.Coroutine.* → 所有函数短名 → 完整名
                 // 同时：新命名下注册 "Coroutine.spawn" 形式供 check_call 使用
                 let resolved_path = std_module_to_class_name(path)
                     .map(|s| s.to_string())
@@ -748,10 +749,10 @@ fn build_import_resolution(imports: &[ImportDecl]) -> ImportResolution {
                 }
             }
             None if is_new_scheme && class_name.is_some() && is_class => {
-                // import aura.lang.std.Coroutine → 类引用
+                // import aura.lang.concurrent.Coroutine → 类引用
                 // 同时注册：
                 // 1) "Coroutine.spawn" 形式（用户常用）
-                // 2) "aura.lang.std.Coroutine.spawn" 完整形式
+                // 2) "aura.lang.concurrent.Coroutine.spawn" 完整形式
                 let short_names = crate::std::decl::module_functions(path);
                 if let Some(cn) = &class_name {
                     for sn in short_names {
@@ -763,7 +764,7 @@ fn build_import_resolution(imports: &[ImportDecl]) -> ImportResolution {
                 }
             }
             None if is_function => {
-                // import aura.lang.std.Coroutine.spawn → 短名 spawn → 完整名
+                // import aura.lang.concurrent.Coroutine.spawn → 短名 spawn → 完整名
                 let short_name = parts.last().unwrap_or(&"").to_string();
                 r.short_to_full.insert(short_name, path.clone());
             }
@@ -1894,6 +1895,15 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                     }],
                     Some(HirType::Named("Unit".into())),
                 ),
+                "fnIndex" => (
+                    vec![HirParam {
+                        name: "name".into(),
+                        ty: Some(HirType::Named("String".into())),
+                        default_value: None,
+                        is_vararg: false,
+                    }],
+                    Some(HirType::Named("Int".into())),
+                ),
                 "abs" | "sqrt" | "pow" => (
                     vec![HirParam {
                         name: "x".into(),
@@ -2218,10 +2228,10 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
     }
 
     // ── P10: 并发运行时原生函数（aura.concurrent.* 命名空间）──
-    // aura.lang.std.Coroutine.spawn(expr) — 创建新协程/Actor
-    if !natives.iter().any(|n| n.name == "aura.lang.std.Coroutine.spawn") {
+    // aura.lang.concurrent.Coroutine.spawn(expr) — 创建新协程/Actor
+    if !natives.iter().any(|n| n.name == "aura.lang.concurrent.Coroutine.spawn") {
         natives.push(HirFunction {
-            name: "aura.lang.std.Coroutine.spawn".into(),
+            name: "aura.lang.concurrent.Coroutine.spawn".into(),
             params: vec![HirParam {
                 name: "expr".into(),
                 ty: Some(HirType::Named("Any".into())),
@@ -2239,10 +2249,10 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             native_attr: None,
         });
     }
-    // aura.lang.std.Actor.send(actor, msg) — 向 Actor 发送消息
-    if !natives.iter().any(|n| n.name == "aura.lang.std.Actor.send") {
+    // aura.lang.concurrent.Actor.send(actor, msg) — 向 Actor 发送消息
+    if !natives.iter().any(|n| n.name == "aura.lang.concurrent.Actor.send") {
         natives.push(HirFunction {
-            name: "aura.lang.std.Actor.send".into(),
+            name: "aura.lang.concurrent.Actor.send".into(),
             params: vec![
                 HirParam {
                     name: "actor".into(),
@@ -2268,10 +2278,10 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             native_attr: None,
         });
     }
-    // aura.lang.std.Coroutine.ask(actor, msg) — 向 Actor 请求响应
-    if !natives.iter().any(|n| n.name == "aura.lang.std.Coroutine.ask") {
+    // aura.lang.concurrent.Coroutine.ask(actor, msg) — 向 Actor 请求响应
+    if !natives.iter().any(|n| n.name == "aura.lang.concurrent.Coroutine.ask") {
         natives.push(HirFunction {
-            name: "aura.lang.std.Coroutine.ask".into(),
+            name: "aura.lang.concurrent.Coroutine.ask".into(),
             params: vec![
                 HirParam {
                     name: "actor".into(),
@@ -2297,10 +2307,10 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             native_attr: None,
         });
     }
-    // aura.lang.std.Channel.newChannel(bound) — 创建 Channel
-    if !natives.iter().any(|n| n.name == "aura.lang.std.Channel.newChannel") {
+    // aura.lang.concurrent.Channel.newChannel(bound) — 创建 Channel
+    if !natives.iter().any(|n| n.name == "aura.lang.concurrent.Channel.newChannel") {
         natives.push(HirFunction {
-            name: "aura.lang.std.Channel.newChannel".into(),
+            name: "aura.lang.concurrent.Channel.newChannel".into(),
             params: vec![HirParam {
                 name: "bound".into(),
                 ty: Some(HirType::Named("Int".into())),
@@ -2318,10 +2328,10 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             native_attr: None,
         });
     }
-    // aura.lang.std.Channel.channelSend(ch, val) — 发送值到 Channel
-    if !natives.iter().any(|n| n.name == "aura.lang.std.Channel.channelSend") {
+    // aura.lang.concurrent.Channel.channelSend(ch, val) — 发送值到 Channel
+    if !natives.iter().any(|n| n.name == "aura.lang.concurrent.Channel.channelSend") {
         natives.push(HirFunction {
-            name: "aura.lang.std.Channel.channelSend".into(),
+            name: "aura.lang.concurrent.Channel.channelSend".into(),
             params: vec![
                 HirParam {
                     name: "ch".into(),
@@ -2347,10 +2357,10 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             native_attr: None,
         });
     }
-    // aura.lang.std.Channel.channelRecv(ch) — 从 Channel 接收值（阻塞）
-    if !natives.iter().any(|n| n.name == "aura.lang.std.Channel.channelRecv") {
+    // aura.lang.concurrent.Channel.channelRecv(ch) — 从 Channel 接收值（阻塞）
+    if !natives.iter().any(|n| n.name == "aura.lang.concurrent.Channel.channelRecv") {
         natives.push(HirFunction {
-            name: "aura.lang.std.Channel.channelRecv".into(),
+            name: "aura.lang.concurrent.Channel.channelRecv".into(),
             params: vec![HirParam {
                 name: "ch".into(),
                 ty: Some(HirType::Named("Int".into())),
@@ -2368,10 +2378,10 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             native_attr: None,
         });
     }
-    // aura.lang.std.Channel.channelTryRecv(ch) — 从 Channel 接收值（非阻塞）
-    if !natives.iter().any(|n| n.name == "aura.lang.std.Channel.channelTryRecv") {
+    // aura.lang.concurrent.Channel.channelTryRecv(ch) — 从 Channel 接收值（非阻塞）
+    if !natives.iter().any(|n| n.name == "aura.lang.concurrent.Channel.channelTryRecv") {
         natives.push(HirFunction {
-            name: "aura.lang.std.Channel.channelTryRecv".into(),
+            name: "aura.lang.concurrent.Channel.channelTryRecv".into(),
             params: vec![HirParam {
                 name: "ch".into(),
                 ty: Some(HirType::Named("Int".into())),
@@ -2389,10 +2399,10 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             native_attr: None,
         });
     }
-    // aura.lang.std.Channel.select(ch1, ch2) — select 多路复用（最多 2 通道）
-    if !natives.iter().any(|n| n.name == "aura.lang.std.Channel.select") {
+    // aura.lang.concurrent.Channel.select(ch1, ch2) — select 多路复用（最多 2 通道）
+    if !natives.iter().any(|n| n.name == "aura.lang.concurrent.Channel.select") {
         natives.push(HirFunction {
-            name: "aura.lang.std.Channel.select".into(),
+            name: "aura.lang.concurrent.Channel.select".into(),
             params: vec![
                 HirParam {
                     name: "ch1".into(),
@@ -2418,10 +2428,10 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             native_attr: None,
         });
     }
-    // aura.lang.std.Coroutine.spawnActor(name) — 创建 Actor 实例（返回 actor ID）
-    if !natives.iter().any(|n| n.name == "aura.lang.std.Coroutine.spawnActor") {
+    // aura.lang.concurrent.Coroutine.spawnActor(name) — 创建 Actor 实例（返回 actor ID）
+    if !natives.iter().any(|n| n.name == "aura.lang.concurrent.Coroutine.spawnActor") {
         natives.push(HirFunction {
-            name: "aura.lang.std.Coroutine.spawnActor".into(),
+            name: "aura.lang.concurrent.Coroutine.spawnActor".into(),
             params: vec![HirParam {
                 name: "name".into(),
                 ty: Some(HirType::Named("String".into())),
@@ -2439,15 +2449,15 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             native_attr: None,
         });
     }
-    // aura.lang.std.Actor.spawnActor(name) — 与 Coroutine.spawnActor 同一实现。
+    // aura.lang.concurrent.Actor.spawnActor(name) — 与 Coroutine.spawnActor 同一实现。
     //
-    // 必须**单独注册**：`import aura.lang.std.Actor.*`（或 `as a`）会把短名解析为
+    // 必须**单独注册**：`import aura.lang.concurrent.Actor.*`（或 `as a`）会把短名解析为
     // **Actor** 前缀（见 `std::decl::module_functions`）。若只注册 Coroutine 前缀，
     // 该调用就不再是原生调用，而会退化为用户函数调用 → 函数名查不到 → 落到函数索引 0
     // （即 main）→ **无限递归爆栈**。
-    if !natives.iter().any(|n| n.name == "aura.lang.std.Actor.spawnActor") {
+    if !natives.iter().any(|n| n.name == "aura.lang.concurrent.Actor.spawnActor") {
         natives.push(HirFunction {
-            name: "aura.lang.std.Actor.spawnActor".into(),
+            name: "aura.lang.concurrent.Actor.spawnActor".into(),
             params: vec![HirParam {
                 name: "name".into(),
                 ty: Some(HirType::Named("String".into())),
@@ -2465,10 +2475,10 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             native_attr: None,
         });
     }
-    // aura.lang.std.Actor.supervise(parent, child) — 建立监督关系
-    if !natives.iter().any(|n| n.name == "aura.lang.std.Actor.supervise") {
+    // aura.lang.concurrent.Actor.supervise(parent, child) — 建立监督关系
+    if !natives.iter().any(|n| n.name == "aura.lang.concurrent.Actor.supervise") {
         natives.push(HirFunction {
-            name: "aura.lang.std.Actor.supervise".into(),
+            name: "aura.lang.concurrent.Actor.supervise".into(),
             params: vec![
                 HirParam {
                     name: "parent".into(),
@@ -2494,10 +2504,10 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             native_attr: None,
         });
     }
-    // aura.lang.std.Actor.actorAlive(id) — 检查 Actor 是否存活
-    if !natives.iter().any(|n| n.name == "aura.lang.std.Actor.actorAlive") {
+    // aura.lang.concurrent.Actor.actorAlive(id) — 检查 Actor 是否存活
+    if !natives.iter().any(|n| n.name == "aura.lang.concurrent.Actor.actorAlive") {
         natives.push(HirFunction {
-            name: "aura.lang.std.Actor.actorAlive".into(),
+            name: "aura.lang.concurrent.Actor.actorAlive".into(),
             params: vec![HirParam {
                 name: "id".into(),
                 ty: Some(HirType::Named("Int".into())),
@@ -2514,6 +2524,217 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             ffi_lib: None,
             native_attr: None,
         });
+    }
+
+    // ── aura.lang.concurrent 同步原语 / 线程原语 ──
+    // 注册原生签名，使 VM/AOT 能解析 `Mutex.lock(m)` 这类调用。
+    // 运行时：Atomic/Mutex/RwLock/Condvar/Barrier/Semaphore 由嵌入的 Aura 标准库
+    // （stdlib_func_map）优先派发；Thread/Future 走 Rust native 回退。
+    let sync_natives: Vec<(&str, Vec<&str>, &str)> = vec![
+        // Thread
+        (
+            "aura.lang.concurrent.Thread.spawn",
+            vec![
+                "fn_id", "arg",
+            ],
+            "Int",
+        ),
+        ("aura.lang.concurrent.Thread.join", vec!["thread_id"], "Int"),
+        ("aura.lang.concurrent.Thread.sleep", vec!["ms"], "Unit"),
+        ("aura.lang.concurrent.Thread.id", vec![], "Int"),
+        ("aura.lang.concurrent.Thread.parallelism", vec![], "Int"),
+        ("aura.lang.concurrent.Thread.availableCores", vec![], "Int"),
+        // Mutex
+        ("aura.lang.concurrent.Mutex.new", vec![], "Int"),
+        ("aura.lang.concurrent.Mutex.lock", vec!["lock_id"], "Unit"),
+        ("aura.lang.concurrent.Mutex.unlock", vec!["lock_id"], "Unit"),
+        (
+            "aura.lang.concurrent.Mutex.tryLock",
+            vec!["lock_id"],
+            "Boolean",
+        ),
+        (
+            "aura.lang.concurrent.Mutex.destroy",
+            vec!["lock_id"],
+            "Unit",
+        ),
+        // Atomic
+        ("aura.lang.concurrent.Atomic.new", vec!["initial"], "Int"),
+        ("aura.lang.concurrent.Atomic.load", vec!["atomic_id"], "Int"),
+        (
+            "aura.lang.concurrent.Atomic.store",
+            vec![
+                "atomic_id",
+                "value",
+            ],
+            "Unit",
+        ),
+        (
+            "aura.lang.concurrent.Atomic.add",
+            vec![
+                "atomic_id",
+                "delta",
+            ],
+            "Int",
+        ),
+        (
+            "aura.lang.concurrent.Atomic.sub",
+            vec![
+                "atomic_id",
+                "delta",
+            ],
+            "Int",
+        ),
+        (
+            "aura.lang.concurrent.Atomic.cas",
+            vec![
+                "atomic_id",
+                "expected",
+                "desired",
+            ],
+            "Boolean",
+        ),
+        (
+            "aura.lang.concurrent.Atomic.destroy",
+            vec!["atomic_id"],
+            "Unit",
+        ),
+        // RwLock
+        ("aura.lang.concurrent.RwLock.new", vec![], "Int"),
+        (
+            "aura.lang.concurrent.RwLock.readLock",
+            vec!["lock_id"],
+            "Unit",
+        ),
+        (
+            "aura.lang.concurrent.RwLock.writeLock",
+            vec!["lock_id"],
+            "Unit",
+        ),
+        (
+            "aura.lang.concurrent.RwLock.readUnlock",
+            vec!["lock_id"],
+            "Unit",
+        ),
+        (
+            "aura.lang.concurrent.RwLock.writeUnlock",
+            vec!["lock_id"],
+            "Unit",
+        ),
+        (
+            "aura.lang.concurrent.RwLock.destroy",
+            vec!["lock_id"],
+            "Unit",
+        ),
+        // Condvar
+        ("aura.lang.concurrent.Condvar.new", vec![], "Int"),
+        (
+            "aura.lang.concurrent.Condvar.wait",
+            vec![
+                "cv_id", "mutex_id",
+            ],
+            "Unit",
+        ),
+        ("aura.lang.concurrent.Condvar.signal", vec!["cv_id"], "Unit"),
+        (
+            "aura.lang.concurrent.Condvar.broadcast",
+            vec!["cv_id"],
+            "Unit",
+        ),
+        (
+            "aura.lang.concurrent.Condvar.destroy",
+            vec!["cv_id"],
+            "Unit",
+        ),
+        // Barrier
+        ("aura.lang.concurrent.Barrier.new", vec!["count"], "Int"),
+        (
+            "aura.lang.concurrent.Barrier.wait",
+            vec!["barrier_id"],
+            "Int",
+        ),
+        (
+            "aura.lang.concurrent.Barrier.destroy",
+            vec!["barrier_id"],
+            "Unit",
+        ),
+        // Future
+        (
+            "aura.lang.concurrent.Future.spawn",
+            vec![
+                "fn_id", "arg",
+            ],
+            "Int",
+        ),
+        (
+            "aura.lang.concurrent.Future.await",
+            vec!["future_id"],
+            "Int",
+        ),
+        (
+            "aura.lang.concurrent.Future.isDone",
+            vec!["future_id"],
+            "Boolean",
+        ),
+        ("aura.lang.concurrent.Future.all", vec!["future_ids"], "Any"),
+        ("aura.lang.concurrent.Future.any", vec!["future_ids"], "Int"),
+        (
+            "aura.lang.concurrent.Future.cancel",
+            vec!["future_id"],
+            "Unit",
+        ),
+        // Semaphore
+        ("aura.lang.concurrent.Semaphore.new", vec!["permits"], "Int"),
+        (
+            "aura.lang.concurrent.Semaphore.acquire",
+            vec!["sem_id"],
+            "Unit",
+        ),
+        (
+            "aura.lang.concurrent.Semaphore.tryAcquire",
+            vec!["sem_id"],
+            "Boolean",
+        ),
+        (
+            "aura.lang.concurrent.Semaphore.release",
+            vec!["sem_id"],
+            "Unit",
+        ),
+        (
+            "aura.lang.concurrent.Semaphore.count",
+            vec!["sem_id"],
+            "Int",
+        ),
+        (
+            "aura.lang.concurrent.Semaphore.destroy",
+            vec!["sem_id"],
+            "Unit",
+        ),
+    ];
+    for (name, params, ret) in sync_natives {
+        if !natives.iter().any(|n| n.name == name) {
+            natives.push(HirFunction {
+                name: name.into(),
+                params: params
+                    .into_iter()
+                    .map(|pn| HirParam {
+                        name: pn.into(),
+                        ty: Some(HirType::Named("Int".into())),
+                        default_value: None,
+                        is_vararg: false,
+                    })
+                    .collect(),
+                ret: Some(HirType::Named(ret.into())),
+                body: HirBlock {
+                    stmts: vec![],
+                },
+                is_native: true,
+                type_params: vec![],
+                ffi_abi: FfiAbi::None,
+                ffi_lib: None,
+                native_attr: None,
+            });
+        }
     }
 
     // P9.11: 注册所有标准库函数为原生函数（使编译器能解析 module.method() 调用）
@@ -3405,9 +3626,9 @@ fn lookup_import_module_alias(n: &str) -> Option<String> {
     })
 }
 
-/// 从成员访问链中提取完整点分名（如 `aura.lang.std.Coroutine` → "aura.lang.std.Coroutine"）
+/// 从成员访问链中提取完整点分名（如 `aura.lang.concurrent.Coroutine` → "aura.lang.concurrent.Coroutine"）
 ///
-/// 用于将 `aura.lang.std.Coroutine.spawn(42)` 等深层嵌套表达式还原为完整原生函数名。
+/// 用于将 `aura.lang.concurrent.Coroutine.spawn(42)` 等深层嵌套表达式还原为完整原生函数名。
 fn extract_dotted_name(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Ident(name, _) => Some(name.clone()),
@@ -3869,8 +4090,8 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                         };
                     }
                     // 检查导入解析：短名/别名 → 完整原生函数名
-                    // import aura.concurrent.* + spawn(42) → aura.lang.std.Coroutine.spawn(42)
-                    // import aura.lang.std.Coroutine.spawn as s + s(42) → aura.lang.std.Coroutine.spawn(42)
+                    // import aura.concurrent.* + spawn(42) → aura.lang.concurrent.Coroutine.spawn(42)
+                    // import aura.lang.concurrent.Coroutine.spawn as s + s(42) → aura.lang.concurrent.Coroutine.spawn(42)
                     lookup_import_short(n).unwrap_or_else(|| n.clone())
                 }
                 // 模块调用 `module.method(args)`：降级为 `module.method(args...)`
@@ -4007,7 +4228,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                                 args: args.iter().map(desugar_expr).collect(),
                             };
                         }
-                        // 检查是否为标准库模块调用（支持嵌套：aura.lang.std.Coroutine.spawn）
+                        // 检查是否为标准库模块调用（支持嵌套：aura.lang.concurrent.Coroutine.spawn）
                         // 但仅当对象不是 String 变量时才应用
                         if !is_string_var && is_std_module(module_name) {
                             let class_name = std_module_to_class_name(module_name)
@@ -4019,7 +4240,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                             };
                         }
                     }
-                    // 嵌套：aura.lang.std.Coroutine.spawn
+                    // 嵌套：aura.lang.concurrent.Coroutine.spawn
                     if let Expr::MemberAccess {
                         object: inner_obj,
                         name: inner_name,
@@ -4079,13 +4300,24 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                         }
                     }
                     // 深层嵌套 std 调用兜底：
-                    // aura.lang.std.Coroutine.spawn(42) → callee "aura.lang.std.Coroutine.spawn"
+                    // aura.lang.concurrent.Coroutine.spawn(42) → callee "aura.lang.concurrent.Coroutine.spawn"
                     // 前面所有分支都没命中时，若 object 是纯模块点分链（全部由 Ident 组成），直接拼接完整名
                     // 注意：简单标识符（如 c）或字段访问（如 c3.x）不应走此路径，应交给 resolve_method_owner 处理
                     if let Expr::MemberAccess { .. } = object.as_ref() {
-                        // 仅当整条链都是模块/类标识符时才走此路径
-                        if is_module_chain(object) {
-                            if let Some(obj_path) = extract_dotted_name(object) {
+                        // 仅当整条链都是模块/类标识符时才走此路径。
+                        //
+                        // 另外显式放行**完全限定**的 std / concurrent 路径
+                        // （`aura.lang.std.X.fn`、`aura.lang.concurrent.X.fn`）：
+                        // 这类链的类段（X）不是「模块名」，`is_module_chain` 判定为 false；
+                        // 若不放行，调用会退化成「按方法末段猜模块」（如 `spawn`
+                        // 被猜成 `Process.spawn`）或直接 `Call(0)` 自递归爆栈。
+                        let dotted = extract_dotted_name(object);
+                        let is_fqn = dotted.as_deref().map_or(false, |p| {
+                            p.starts_with("aura.lang.std.")
+                                || p.starts_with("aura.lang.concurrent.")
+                        });
+                        if is_module_chain(object) || is_fqn {
+                            if let Some(obj_path) = dotted {
                                 return HirExpr::Call {
                                     callee: format!("{}.{}", obj_path, name),
                                     args: args.iter().map(desugar_expr).collect(),
@@ -4564,7 +4796,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
         Expr::This(_) => HirExpr::Var("self".to_string()),
         // super 引用：作为独立表达式时降级为 self（不应单独使用）
         Expr::Super(_) => HirExpr::Var("self".to_string()),
-        // P10.9: select 多路复用 — 降级为 `aura.lang.std.Channel.select(ch1, ch2)` 原生函数调用（最多 2 通道）
+        // P10.9: select 多路复用 — 降级为 `aura.lang.concurrent.Channel.select(ch1, ch2)` 原生函数调用（最多 2 通道）
         Expr::Select {
             branches, ..
         } => {
@@ -4588,7 +4820,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                 args.push(HirExpr::Lit(Literal::Int(0)));
             }
             HirExpr::Call {
-                callee: "aura.lang.std.Channel.select".into(),
+                callee: "aura.lang.concurrent.Channel.select".into(),
                 args,
             }
         }
@@ -4818,7 +5050,19 @@ pub fn synthesize_main_if_missing(hir: &mut HirProgram) -> bool {
 // P9: 标准库模块检测与原生函数注册
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 解析内置方法名为完整原生函数名（如 `toString` → `toString` prelu，或 `aura.lang.std.Builtin.xxx`）
+/// 解析内置方法名为完整原生函数名（如 `toString` → `toString` prelu）。
+///
+/// **重要**：此函数**仅**匹配 prelu 函数（免import 的全局内置），
+/// 不再将任意方法名匹配到 std 命名空间模块函数。
+///
+/// 之前的实现会把 `isAlpha` 匹配到 `aura.lang.std.Ascii.isAlpha`、
+/// `contains` 匹配到 `aura.lang.std.String.contains`，导致：
+/// - `text[0].isAlpha()`（Char 实例方法）被解析为模块级函数 `Ascii.isAlpha`
+/// - 形成 `Ascii.isAlpha → text[0].isAlpha() → Ascii.isAlpha` 无限递归 → 栈溢出
+/// - 同类问题影响 String.contains / Math.abs / Math.min 等
+///
+/// 模块方法（如 `Char.isAlpha`）应由 VM 层面的原生注册表或
+/// 内置类型拦截器处理，不应通过此函数解析。
 fn resolve_builtin_method(name: &str) -> Option<String> {
     // Plan A′：`arrayListOf(...)` 必须是**堆列表**才能原地追加（native 产出的
     // `Value::List` 是值语义、每次修改整表拷贝，无法做到摊还 O(1)）。
@@ -4826,17 +5070,9 @@ fn resolve_builtin_method(name: &str) -> Option<String> {
     if name == "arrayListOf" {
         return Some("__list_new".to_string());
     }
-    // 优先检查 prelu 函数（免import，始终可用）
+    // 仅匹配 prelu 函数（免import，始终可用）
     if crate::std::decl::is_prelude(name) {
         return Some(name.to_string());
-    }
-    // 其次检查 std 命名空间函数
-    for (full_name, _) in std_native_functions() {
-        if let Some(method_name) = full_name.split('.').last() {
-            if method_name == name {
-                return Some(full_name.to_string());
-            }
-        }
     }
     None
 }
@@ -4927,7 +5163,7 @@ fn std_module_to_class_name(module: &str) -> Option<&'static str> {
         "path" => "aura.lang.std.Path",
         "assert" => "aura.lang.std.Assert",
         "iter" => "aura.lang.std.Iter",
-        "concurrent" => "aura.lang.std.Coroutine",
+        "concurrent" => "aura.lang.concurrent.Coroutine",
         _ => return None,
     })
 }
@@ -4944,11 +5180,11 @@ fn resolve_function_path(path: &str) -> String {
                 let channel_class = match func {
                     "newChannel" | "channelSend" | "channelRecv" | "channelTryRecv" | "select"
                     | "selectTimeout" | "newTcpChannel" | "tcpChannelSend" => {
-                        "aura.lang.std.Channel"
+                        "aura.lang.concurrent.Channel"
                     }
                     "spawnActor" | "supervise" | "actorAlive" | "send" | "spawnActorProcess"
-                    | "processActorAlive" | "killProcessActor" => "aura.lang.std.Actor",
-                    _ => "aura.lang.std.Coroutine",
+                    | "processActorAlive" | "killProcessActor" => "aura.lang.concurrent.Actor",
+                    _ => "aura.lang.concurrent.Coroutine",
                 };
                 return format!("{}.{}", channel_class, func);
             }

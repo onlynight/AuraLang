@@ -1,0 +1,78 @@
+// aura:///aura/lang/concurrent/Mutex.aura
+package aura.lang.concurrent
+// 互斥锁（Mutex）—— 纯 Aura 实现（自旋锁），不依赖 Rust 运行库。
+//
+// 实现说明：
+//   * 句柄是一段 8 字节堆内存的地址（`Memory.alloc`），存放锁字。
+//   * 加锁/解锁使用 `Cpu.atomicAdd`（内联汇编 `lock xaddq`）这一原生原子操作，
+//     Aura 侧只负责自旋与状态管理——因此实现是纯 Aura，只有最底层的
+//     原子指令走 `@native`。
+//   * 锁字语义：`0` 表示未持有；`>0` 表示持有者数量（含正在探测的线程）。
+//     只有 `fetch_add(1)` 返回旧值 `0` 的调用者才算真正获取到锁。
+//
+// 使用前需 import：
+// ```aura
+// import aura.lang.concurrent.Mutex.*   // 短名可用：new, lock, unlock, ...
+// import aura.lang.concurrent.Mutex     // 类式调用：Mutex.new()
+// ```
+//
+// @since 0.6
+// 低层原语来自 native 包：
+//   * `aura.lang.native.Memory` — 编译器内置内存操作（alloc/read64/write64/free）
+//   * `aura.lang.native.Cpu`    — 内联汇编原子操作（`lock xaddq`）
+// 二者均为 `extern object`，实现由编译器/运行库提供，本文件不重复声明。
+import aura.lang.native.Memory
+import aura.lang.native.Cpu
+
+internal object Mutex {
+
+    /// 创建新的互斥锁
+    ///
+    /// - 返回：互斥锁 ID（堆地址）
+    fun new(): Int {
+        val addr: Long = Memory.alloc(8L)
+        Memory.write64(addr, 0L)
+        return addr as Int
+    }
+
+    /// 获取互斥锁（阻塞直到可用）
+    ///
+    /// - 参数：`lock_id` — 互斥锁 ID
+    fun lock(lock_id: Int): Unit {
+        val addr: Long = lock_id as Long
+        while (true) {
+            if (Cpu.atomicAdd(addr, 1L) == 0L) {
+                return
+            }
+            // 未获得锁：撤销本次探测
+            Cpu.atomicAdd(addr, 0L - 1L)
+        }
+    }
+
+    /// 尝试获取互斥锁（非阻塞）
+    ///
+    /// - 参数：`lock_id` — 互斥锁 ID
+    /// - 返回：true 表示获取成功，false 表示锁已被持有
+    fun tryLock(lock_id: Int): Boolean {
+        val addr: Long = lock_id as Long
+        if (Cpu.atomicAdd(addr, 1L) == 0L) {
+            return true
+        }
+        Cpu.atomicAdd(addr, 0L - 1L)
+        return false
+    }
+
+    /// 释放互斥锁
+    ///
+    /// - 参数：`lock_id` — 互斥锁 ID
+    fun unlock(lock_id: Int): Unit {
+        Cpu.atomicAdd(lock_id as Long, 0L - 1L)
+    }
+
+    /// 销毁互斥锁
+    ///
+    /// - 参数：`lock_id` — 互斥锁 ID
+    fun destroy(lock_id: Int): Unit {
+        Memory.free(lock_id as Long)
+    }
+}

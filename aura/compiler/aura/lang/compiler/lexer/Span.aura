@@ -14,6 +14,38 @@ package aura.lang.compiler.lexer
 // 本实现按直觉置为 1。仅影响诊断列号，不影响 token 种类序列（Phase 1 验收项）。
 // ─────────────────────────────────────────────────────────────
 
+/// Span 工具对象：集中管理 Span 相关的顶层函数，支持 O(1) 方法分派。
+object SpanUtils {
+
+    /// 构造单点区间（对齐 Rust `Span::single` / `Span::empty`）。
+    fun spanSingle(offset: Int, line: Int, col: Int): Span {
+        return Span(offset, offset, line, col, line, col)
+    }
+
+    /// 合并两个区间（对齐 Rust `Span::merge`）。
+    fun spanMerge(a: Span, b: Span): Span {
+        var start: Int = a.start
+        var startLine: Int = a.startLine
+        var startCol: Int = a.startCol
+        if (b.start < a.start) {
+            start = b.start
+            startLine = b.startLine
+            startCol = b.startCol
+        }
+
+        var end: Int = a.end
+        var endLine: Int = a.endLine
+        var endCol: Int = a.endCol
+        if (b.end > a.end) {
+            end = b.end
+            endLine = b.endLine
+            endCol = b.endCol
+        }
+
+        return Span(start, end, startLine, startCol, endLine, endCol)
+    }
+}
+
 /// 源码区间。
 class Span {
 
@@ -59,36 +91,9 @@ class Span {
         if (this.startLine == this.endLine) {
             return "line " + toStr(this.startLine) + " col " + toStr(this.startCol)
                 + "-" + toStr(this.endCol)
+        } else {
+            return "line " + toStr(this.startLine) + " col " + toStr(this.startCol)
+                + " to line " + toStr(this.endLine) + " col " + toStr(this.endCol)
         }
-        return "line " + toStr(this.startLine) + " col " + toStr(this.startCol)
-            + " to line " + toStr(this.endLine) + " col " + toStr(this.endCol)
     }
-}
-
-/// 构造单点区间（对齐 Rust `Span::single` / `Span::empty`）。
-fun spanSingle(offset: Int, line: Int, col: Int): Span {
-    return Span(offset, offset, line, col, line, col)
-}
-
-/// 合并两个区间（对齐 Rust `Span::merge`）。
-fun spanMerge(a: Span, b: Span): Span {
-    var start: Int = a.start
-    var startLine: Int = a.startLine
-    var startCol: Int = a.startCol
-    if (b.start < a.start) {
-        start = b.start
-        startLine = b.startLine
-        startCol = b.startCol
-    }
-
-    var end: Int = a.end
-    var endLine: Int = a.endLine
-    var endCol: Int = a.endCol
-    if (b.end > a.end) {
-        end = b.end
-        endLine = b.endLine
-        endCol = b.endCol
-    }
-
-    return Span(start, end, startLine, startCol, endLine, endCol)
 }

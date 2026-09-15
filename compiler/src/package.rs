@@ -12,13 +12,62 @@ use std::process::Command;
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// 语义化版本号（Semantic Versioning 2.0.0）
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Version {
     pub major: u64,
     pub minor: u64,
     pub patch: u64,
     pub prerelease: Vec<String>,
     pub build: Vec<String>,
+}
+
+impl PartialOrd for Version {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Version {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        if self.major != other.major {
+            return self.major.cmp(&other.major);
+        }
+        if self.minor != other.minor {
+            return self.minor.cmp(&other.minor);
+        }
+        if self.patch != other.patch {
+            return self.patch.cmp(&other.patch);
+        }
+        // Prerelease: no prerelease > has prerelease (SemVer 2.0.0 §11)
+        if self.prerelease.is_empty() && other.prerelease.is_empty() {
+            return Ordering::Equal;
+        }
+        if self.prerelease.is_empty() {
+            return Ordering::Greater;
+        }
+        if other.prerelease.is_empty() {
+            return Ordering::Less;
+        }
+        // Compare prerelease identifiers
+        let min_len = self.prerelease.len().min(other.prerelease.len());
+        for i in 0..min_len {
+            let a = &self.prerelease[i];
+            let b = &other.prerelease[i];
+            // Numeric identifiers are compared numerically
+            if let (Ok(a_num), Ok(b_num)) = (a.parse::<u64>(), b.parse::<u64>()) {
+                if a_num != b_num {
+                    return a_num.cmp(&b_num);
+                }
+            } else {
+                let cmp = a.cmp(b);
+                if cmp != Ordering::Equal {
+                    return cmp;
+                }
+            }
+        }
+        self.prerelease.len().cmp(&other.prerelease.len())
+    }
 }
 
 impl Version {
@@ -296,7 +345,8 @@ pub fn parse_depends(source: &str) -> Vec<Dependency> {
         }
 
         let name = parts[0].to_string();
-        let version_str = parts.get(1).map(|s| s.to_string()).unwrap_or_else(|| "*".to_string());
+        // Version constraint may be multi-token (e.g. "== 2.1", ">= 1.0.0")
+        let version_str = if parts.len() >= 2 { parts[1..].join(" ") } else { "*".to_string() };
 
         let version = VersionConstraint::parse(&version_str).unwrap_or(VersionConstraint::Any);
 

@@ -198,9 +198,9 @@ internal object Encoding {
         return c == '-' || c == '_' || c == '.' || c == '~'
     }
 
-    // ── Phase D.2 P4: 密码学哈希（SHA256 native + HMAC Aura 实现）──
+    // ── 密码学哈希（SHA256 运行时实现 + HMAC Aura 实现）──
 
-    /// SHA256 哈希（native 实现，C/Rust 后端）。
+    /// SHA256 哈希（运行时内置实现）。
     /// 返回 64 字符十六进制小写字符串。
     fun sha256(text: String): String
 

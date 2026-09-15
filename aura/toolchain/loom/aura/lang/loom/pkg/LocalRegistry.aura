@@ -1,0 +1,87 @@
+// aura:///loom/pkg/aura/lang/loom/pkg/LocalRegistry.aura
+package aura.lang.loom.pkg
+
+import aura.lang.std.String
+import aura.lang.std.FileSystem
+import aura.lang.std.Collections
+import aura.lang.std.Encoding
+import aura.lang.loom.pkg.PackageMeta
+import aura.lang.loom.pkg.PackageBuilder
+import aura.lang.loom.pkg.PackageInstaller
+
+// Local registry
+// Mirrors Rust: registry/local.rs
+// @since 0.6
+class LocalRegistry {
+    val baseDir: String
+    var packages: Map<String, List<PackageInfo>> = mutableMapOf()
+
+    fun LocalRegistry(baseDir: String) {
+        this.baseDir = baseDir
+    }
+
+    fun getDir(name: String): String {
+        return baseDir + "/" + name
+    }
+
+    fun getPkgPath(name: String, version: String): String {
+        val dir: String = getDir(name)
+        val pkgName: String = name + "-" + version + ".auz"
+        return dir + "/" + pkgName
+    }
+
+    fun search(query: String): List<PackageInfo> {
+        val results: List<PackageInfo> = mutableListOf()
+        if (!FileSystem.exists(baseDir)) {
+            return results
+        }
+        // Simplified: return empty list
+        return results
+    }
+
+    fun get(name: String, version: String): PackageInfo {
+        val pkgPath: String = getPkgPath(name, version)
+        if (!FileSystem.exists(pkgPath)) {
+            return null
+        }
+        val info: PackageInfo = PackageInfo(name, version, pkgPath)
+        return info
+    }
+
+    fun add(pkg: PackageInfo): Unit {
+        val key: String = pkg.name
+        if (!packages.containsKey(key)) {
+            packages.put(key, mutableListOf())
+        }
+        packages.get(key).add(pkg)
+    }
+
+    fun len(): Int {
+        return packages.size
+    }
+
+    fun toStr(): String {
+        return "LocalRegistry{baseDir='" + baseDir + "', packages=" + packages.size + "}"
+    }
+}
+
+// Package info
+// Mirrors Rust: registry/info.rs
+// @since 0.6
+class PackageInfo {
+    val name: String
+    val version: String
+    val path: String
+    var description: String = ""
+    var checksum: String = ""
+
+    fun PackageInfo(name: String, version: String, path: String) {
+        this.name = name
+        this.version = version
+        this.path = path
+    }
+
+    fun toStr(): String {
+        return name + "@" + version
+    }
+}

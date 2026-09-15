@@ -3981,7 +3981,9 @@ fn emit_call(
 
     let cur = blocks.last_mut();
 
-    let callee_sym = sanitizellvm(callee);
+    let callee_sym_raw = sanitizellvm(callee);
+    // 将新命名转换为旧 C 符号名（与 aura_std_cffi.c 一致）
+    let callee_sym = crate::codegen::aot::runtime::translate_to_legacy_c(&callee_sym_raw);
     // 处理 void / 空返回类型：不能赋值给寄存器（LLVM IR 语法限制）
     if ret_ty.is_empty() || ret_ty == "void" {
         cur.body.push(format!(

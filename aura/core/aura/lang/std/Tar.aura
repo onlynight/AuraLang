@@ -3,8 +3,7 @@ package aura.lang.std
 // ------------------------------------------------------------------
 // Tar 归档格式 — 纯 Aura 实现（P3 阶段）
 //
-// 对应 Rust `compiler/src/auz/reader.rs` 的 tar 读取逻辑。
-// 实现 POSIX tar 格式（uStar 兼容）的纯 Aura 读写。
+// 实现 POSIX tar 格式（uStar 兼容）的纯 Aura 读写，不依赖外部库。
 //
 // Tar 块结构（512 字节头 + 数据块）：
 //   name[100]      — 文件名（最多 100 字节）
@@ -30,31 +29,6 @@ package aura.lang.std
 
 import aura.lang.std.String
 import aura.lang.std.IO
-
-// ═══════════════════════════════════════════════════════════════
-// 常量
-// ═══════════════════════════════════════════════════════════════
-
-/// Tar 块大小。
-const val TAR_BLOCK_SIZE: Int = 512
-
-/// 文件名最大长度。
-const val TAR_NAME_MAX: Int = 100
-
-/// Tar 魔数。
-const val TAR_MAGIC: String = "ustar"
-
-/// Tar 版本。
-const val TAR_VERSION: String = "00"
-
-/// 普通文件类型标志。
-const val TAR_TYPE_FILE: String = "0"
-
-/// 目录类型标志。
-const val TAR_TYPE_DIR: String = "5"
-
-/// 空条目类型标志。
-const val TAR_TYPE_END: String = "0"
 
 // ═══════════════════════════════════════════════════════════════
 // Tar 条目
@@ -105,7 +79,7 @@ class TarEntry {
         this.mode = "000644"
         this.uid = "0000000"
         this.gid = "0000000"
-        this.typeflag = TAR_TYPE_FILE
+        this.typeflag = TarUtils.TAR_TYPE_FILE
     }
 
     /// 计算校验和。
@@ -152,7 +126,7 @@ class TarArchive {
     /// 添加目录条目。
     fun addDir(name: String): Unit {
         val entry = TarEntry(name, "")
-        entry.typeflag = TAR_TYPE_DIR
+        entry.typeflag = TarUtils.TAR_TYPE_DIR
         entry.mode = "000755"
         entries.add(entry)
     }
@@ -179,11 +153,11 @@ class TarArchive {
         // 写入每个条目
         for (var i: Int = 0; i < entries.length; i = i + 1) {
             val entry = entries.get(i)
-            result = result + encodeEntry(entry)
+            result = result + TarUtils.encodeEntry(entry)
         }
 
         // 写入结束标记（两个 512 字节零块）
-        result = result + zeros(TAR_BLOCK_SIZE * 2)
+        result = result + TarUtils.zeros(TarUtils.TAR_BLOCK_SIZE * 2)
 
         return result
     }
@@ -193,18 +167,18 @@ class TarArchive {
         entries.clear()
 
         var offset: Int = 0
-        var blockSize: Int = TAR_BLOCK_SIZE
+        var blockSize: Int = TarUtils.TAR_BLOCK_SIZE
 
         while (offset < tarData.length && offset + blockSize <= tarData.length) {
             // 读取块
             val block: String = tarData.substring(offset, offset + blockSize)
 
             // 检查是否为空块（结束标记）
-            if (isZeroBlock(block)) {
+            if (TarUtils.isZeroBlock(block)) {
                 offset = offset + blockSize
                 if (offset < tarData.length && offset + blockSize <= tarData.length) {
                     val nextBlock: String = tarData.substring(offset, offset + blockSize)
-                    if (isZeroBlock(nextBlock)) {
+                    if (TarUtils.isZeroBlock(nextBlock)) {
                         break
                     }
                 }
@@ -212,7 +186,7 @@ class TarArchive {
             }
 
             // 解析条目
-            val entry = parseHeader(block)
+            val entry = TarUtils.parseHeader(block)
             if (entry != null) {
                 // 读取数据块
                 var data: String = ""
@@ -263,7 +237,7 @@ class TarArchive {
         val names: List<String> = List()
         for (var i: Int = 0; i < entries.length; i = i + 1) {
             val entry = entries.get(i)
-            if (entry.typeflag == TAR_TYPE_FILE) {
+            if (entry.typeflag == TarUtils.TAR_TYPE_FILE) {
                 names.add(entry.name)
             }
         }
@@ -281,216 +255,219 @@ class TarArchive {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 内部工具函数
+// Tar 工具
 // ═══════════════════════════════════════════════════════════════
 
-/// 编码条目为 Tar 块。
-fun encodeEntry(entry: TarEntry): String {
-    var header: String = ""
+/// Tar 工具对象，包含常量与辅助函数。
+object TarUtils {
+    /// Tar 块大小。
+    const val TAR_BLOCK_SIZE: Int = 512
 
-    // name[100]
-    header = header + padRight(entry.name, TAR_NAME_MAX)
+    /// 文件名最大长度。
+    const val TAR_NAME_MAX: Int = 100
 
-    // mode[8]
-    header = header + padRight(entry.mode, 8)
+    /// Tar 魔数。
+    const val TAR_MAGIC: String = "ustar"
 
-    // uid[8]
-    header = header + padRight(entry.uid, 8)
+    /// Tar 版本。
+    const val TAR_VERSION: String = "00"
 
-    // gid[8]
-    header = header + padRight(entry.gid, 8)
+    /// 普通文件类型标志。
+    const val TAR_TYPE_FILE: String = "0"
 
-    // size[12]
-    header = header + padRight(entry.size.toStr(), 12)
+    /// 目录类型标志。
+    const val TAR_TYPE_DIR: String = "5"
 
-    // mtime[12]
-    header = header + padRight(entry.mtime.toStr(), 12)
+    /// 空条目类型标志。
+    const val TAR_TYPE_END: String = "0"
 
-    // chksum[8] — 先填空，后面计算
-    header = header + "        "
+    /// 编码条目为 Tar 块。
+    fun encodeEntry(entry: TarEntry): String {
+        var header: String = ""
 
-    // typeflag[1]
-    header = header + entry.typeflag
+        // name[100]
+        header = header + TarUtils.padRight(entry.name, TarUtils.TAR_NAME_MAX)
 
-    // linkname[100]
-    header = header + padRight(entry.linkname, 100)
+        // mode[8]
+        header = header + TarUtils.padRight(entry.mode, 8)
 
-    // magic[6]
-    header = header + TAR_MAGIC
+        // uid[8]
+        header = header + TarUtils.padRight(entry.uid, 8)
 
-    // version[2]
-    header = header + TAR_VERSION
+        // gid[8]
+        header = header + TarUtils.padRight(entry.gid, 8)
 
-    // uname[32]
-    header = header + padRight(entry.uname, 32)
+        // size[12]
+        header = header + TarUtils.padRight(entry.size.toStr(), 12)
 
-    // gname[32]
-    header = header + padRight(entry.gname, 32)
+        // mtime[12]
+        header = header + TarUtils.padRight(entry.mtime.toStr(), 12)
 
-    // devmajor[8]
-    header = header + "0000000"
+        // chksum[8] — 先填空，后面计算
+        header = header + "        "
 
-    // devminor[8]
-    header = header + "0000000"
+        // typeflag[1]
+        header = header + entry.typeflag
 
-    // prefix[155]
-    header = header + zeros(155)
+        // linkname[100]
+        header = header + TarUtils.padRight(entry.linkname, 100)
 
-    // padding[12]
-    header = header + zeros(12)
+        // magic[6]
+        header = header + TarUtils.TAR_MAGIC
 
-    // 计算校验和
-    val chksum: Int = entry.checksum()
-    val chksumStr: String = padRight(chksum.toStr(), 8)
+        // version[2]
+        header = header + TarUtils.TAR_VERSION
 
-    // 替换 chksum 字段
-    header = header.substring(0, 148) + chksumStr + header.substring(156)
+        // uname[32]
+        header = header + TarUtils.padRight(entry.uname, 32)
 
-    // 写入数据块（对齐到 512 字节）
-    var data: String = entry.content
-    if (data.length % TAR_BLOCK_SIZE != 0) {
-        data = data + zeros(TAR_BLOCK_SIZE - data.length % TAR_BLOCK_SIZE)
-    }
-    if (data.length == 0) {
-        data = zeros(TAR_BLOCK_SIZE)
-    }
+        // gname[32]
+        header = header + TarUtils.padRight(entry.gname, 32)
 
-    return header + data
-}
+        // devmajor[8]
+        header = header + "0000000"
 
-/// 解析 Tar 头部。
-fun parseHeader(block: String): TarEntry? {
-    if (block.length < TAR_BLOCK_SIZE) {
-        return null
-    }
+        // devminor[8]
+        header = header + "0000000"
 
-    val entry = TarEntry()
+        // prefix[155]
+        header = header + TarUtils.zeros(155)
 
-    // name[0:100]
-    entry.name = trim(block.substring(0, TAR_NAME_MAX))
+        // padding[12]
+        header = header + TarUtils.zeros(12)
 
-    // mode[100:108]
-    entry.mode = trim(block.substring(100, 108))
+        // 计算校验和
+        val chksum: Int = entry.checksum()
+        val chksumStr: String = TarUtils.padRight(chksum.toStr(), 8)
 
-    // uid[108:116]
-    entry.uid = trim(block.substring(108, 116))
+        // 替换 chksum 字段
+        header = header.substring(0, 148) + chksumStr + header.substring(156)
 
-    // gid[116:124]
-    entry.gid = trim(block.substring(116, 124))
+        // 写入数据块（对齐到 512 字节）
+        var data: String = entry.content
+        if (data.length % TarUtils.TAR_BLOCK_SIZE != 0) {
+            data = data + TarUtils.zeros(TarUtils.TAR_BLOCK_SIZE - data.length % TarUtils.TAR_BLOCK_SIZE)
+        }
+        if (data.length == 0) {
+            data = TarUtils.zeros(TarUtils.TAR_BLOCK_SIZE)
+        }
 
-    // size[124:136]
-    entry.size = parseInt(trim(block.substring(124, 136)))
-
-    // mtime[136:148]
-    entry.mtime = parseInt(trim(block.substring(136, 148)))
-
-    // typeflag[156]
-    entry.typeflag = block.substring(156, 157)
-
-    // linkname[157:257]
-    entry.linkname = trim(block.substring(157, 257))
-
-    // uname[265:297]
-    entry.uname = trim(block.substring(265, 297))
-
-    // gname[297:329]
-    entry.gname = trim(block.substring(297, 329))
-
-    return entry
-}
-
-/// 字符串右填充（空格）。
-fun padRight(s: String, length: Int): String {
-    if (s.length >= length) {
-        return s.substring(0, length)
-    }
-    return s + zeros(length - s.length)
-}
-
-/// 去除字符串首尾空格。
-fun trim(s: String): String {
-    var start: Int = 0
-    var end: Int = s.length - 1
-
-    while (start <= end && s.get(start) == ' ') {
-        start = start + 1
+        return header + data
     }
 
-    while (end >= start && s.get(end) == ' ') {
-        end = end - 1
+    /// 解析 Tar 头部。
+    fun parseHeader(block: String): TarEntry? {
+        if (block.length < TarUtils.TAR_BLOCK_SIZE) {
+            return null
+        }
+
+        val entry = TarEntry()
+
+        // name[0:100]
+        entry.name = TarUtils.trim(block.substring(0, TarUtils.TAR_NAME_MAX))
+
+        // mode[100:108]
+        entry.mode = TarUtils.trim(block.substring(100, 108))
+
+        // uid[108:116]
+        entry.uid = TarUtils.trim(block.substring(108, 116))
+
+        // gid[116:124]
+        entry.gid = TarUtils.trim(block.substring(116, 124))
+
+        // size[124:136]
+        entry.size = TarUtils.parseInt(TarUtils.trim(block.substring(124, 136)))
+
+        // mtime[136:148]
+        entry.mtime = TarUtils.parseInt(TarUtils.trim(block.substring(136, 148)))
+
+        // typeflag[156]
+        entry.typeflag = block.substring(156, 157)
+
+        // linkname[157:257]
+        entry.linkname = TarUtils.trim(block.substring(157, 257))
+
+        // uname[265:297]
+        entry.uname = TarUtils.trim(block.substring(265, 297))
+
+        // gname[297:329]
+        entry.gname = TarUtils.trim(block.substring(297, 329))
+
+        return entry
     }
 
-    if (start > end) {
-        return ""
-    }
-
-    return s.substring(start, end + 1)
-}
-
-/// 解析整数。
-fun parseInt(s: String): Int {
-    if (s == "") {
-        return 0
-    }
-    var result: Int = 0
-    for (var i: Int = 0; i < s.length; i = i + 1) {
-        val c: Int = s.get(i)
-        if (c >= '0' && c <= '9') {
-            result = result * 10 + (c - '0')
+    /// 字符串右填充（空格）。
+    fun padRight(s: String, length: Int): String {
+        if (s.length >= length) {
+            return s.substring(0, length)
+        } else {
+            return s + TarUtils.zeros(length - s.length)
         }
     }
-    return result
-}
 
-/// 生成指定长度的零字符串。
-fun zeros(n: Int): String {
-    var s: String = ""
-    for (var i: Int = 0; i < n; i = i + 1) {
-        s = s + "\0"
+    /// 去除字符串首尾空格。
+    fun trim(s: String): String {
+        var start: Int = 0
+        var end: Int = s.length - 1
+
+        while (start <= end && s.get(start) == ' ') {
+            start = start + 1
+        }
+
+        while (end >= start && s.get(end) == ' ') {
+            end = end - 1
+        }
+
+        if (start > end) {
+            return ""
+        } else {
+            return s.substring(start, end + 1)
+        }
     }
-    return s
-}
 
-/// 检查块是否全为零。
-fun isZeroBlock(block: String): Boolean {
-    if (block.length == 0) {
+    /// 解析整数。
+    fun parseInt(s: String): Int {
+        if (s == "") {
+            return 0
+        }
+        var result: Int = 0
+        for (var i: Int = 0; i < s.length; i = i + 1) {
+            val c: Int = s.get(i)
+            if (c >= '0' && c <= '9') {
+                result = result * 10 + (c - '0')
+            }
+        }
+        return result
+    }
+
+    /// 生成指定长度的零字符串。
+    fun zeros(n: Int): String {
+        var s: String = ""
+        for (var i: Int = 0; i < n; i = i + 1) {
+            s = s + "\0"
+        }
+        return s
+    }
+
+    /// 检查块是否全为零。
+    fun isZeroBlock(block: String): Boolean {
+        if (block.length == 0) {
+            return true
+        }
+        for (var i: Int = 0; i < block.length; i = i + 1) {
+            if (block.get(i) != 0) {
+                return false
+            }
+        }
         return true
     }
-    for (var i: Int = 0; i < block.length; i = i + 1) {
-        if (block.get(i) != 0) {
-            return false
+
+    /// 最小值。
+    fun min(a: Int, b: Int): Int {
+        if (a < b) {
+            return a
+        } else {
+            return b
         }
     }
-    return true
-}
-
-/// 最小值。
-fun min(a: Int, b: Int): Int {
-    if (a < b) {
-        return a
-    }
-    return b
-}
-
-// ═══════════════════════════════════════════════════════════════
-// 便捷函数
-// ═══════════════════════════════════════════════════════════════
-
-/// 创建 Tar 归档（便捷函数）。
-fun tarCreate(): TarArchive {
-    return TarArchive()
-}
-
-/// 读取 Tar 归档（便捷函数）。
-fun tarRead(data: String): TarArchive {
-    val archive = TarArchive()
-    archive import(data)
-    return archive
-}
-
-/// 从文件读取 Tar 归档（便捷函数）。
-fun tarReadFile(path: String): TarArchive {
-    val archive = TarArchive()
-    archive readFromFile(path)
-    return archive
 }

@@ -1,0 +1,61 @@
+// aura:///lsp/aura/lang/lsp/Main.aura
+package aura.lang.lsp
+
+// ── 标准库 ──
+import aura.lang.std.String
+import aura.lang.std.IO
+
+// ── Native 包 ──
+import aura.lang.native.console.Console
+import aura.lang.native.process.Process
+
+// ── 兄弟模块 ──
+import aura.lang.lsp.LspServer
+
+// ═══════════════════════════════════════════════════════════════
+// 主循环
+// ═══════════════════════════════════════════════════════════════
+
+fun lspMainLoop(): Unit {
+    val server: LspServer = LspServer()
+    server.start()
+    Console.println("LSP server ready (pure Aura, Phase E)")
+
+    while (server.running) {
+        val headerLine: String = IO.readLine()
+        if (headerLine.length == 0) { break }
+
+        val len: Int = parseContentLength(headerLine)
+        if (len <= 0) { continue }
+
+        IO.readLine()  // 读取空行（分隔符）
+        val data: String = IO.readAll(len)
+        if (data.length == 0) { continue }
+
+        val response: String = server.handleRequest(data)
+        if (response.length > 0) {
+            IO.println("Content-Length: " + toStr(response.length) + "\n")
+            IO.println(response)
+        }
+    }
+    server.stop()
+}
+
+/// 解析 Content-Length 头
+fun parseContentLength(header: String): Int {
+    val prefix: String = "Content-Length: "
+    if (String.startsWith(header, prefix)) {
+        val numStr: String = String.substring(header, prefix.length)
+        return String.toInt(String.trim(numStr))
+    }
+    return -1
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 入口函数
+// ═══════════════════════════════════════════════════════════════
+
+fun main(): Int {
+    lspMainLoop()
+    return 0
+}

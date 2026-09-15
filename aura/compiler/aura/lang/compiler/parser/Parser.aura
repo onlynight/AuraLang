@@ -521,7 +521,7 @@ class Parser {
             this.prsAdvance() // (
             var namesCsv: String = ""
             while (!this.prsCheck("RParen") && !this.prsAtEnd()) {
-                if (prsIsWordLiteral(this.prsCurLit())) {
+                if (ParserUtils.prsIsWordLiteral(this.prsCurLit())) {
                     if (namesCsv != "") {
                         namesCsv = namesCsv + ","
                     }
@@ -612,7 +612,7 @@ class Parser {
         // 此前整段被丢弃，`super.name()` 只好解析到自身 → 无限递归 → 栈溢出。
         var parentName: String = ""
         if (this.prsMatch("Colon")) {
-            if (prsIsWordLiteral(this.prsCurLit())) {
+            if (ParserUtils.prsIsWordLiteral(this.prsCurLit())) {
                 parentName = this.prsCurLit()
             }
             while (!this.prsCheck("LBrace") && !this.prsCheck("Semicolon") && !this.prsAtEnd()) {
@@ -629,7 +629,7 @@ class Parser {
             var vkids = noKids()
             while (!this.prsCheck("RBrace") && !this.prsAtEnd()) {
                 val vLit: String = this.prsCurLit()
-                if (prsIsWordLiteral(vLit)) {
+                if (ParserUtils.prsIsWordLiteral(vLit)) {
                     val vSp: Span = this.prsCurSpan()
                     this.prsAdvance()
                     // 带数据变体：消费 `( … )` 载荷（AOT 下枚举按整型常量处理）
@@ -1152,7 +1152,7 @@ class Parser {
             val v2: Int = this.parseExpr()
             val cmpBin: Int = this.ast.add(
                 "Binary",
-                compoundAssignOp(opK),
+                ParserUtils.compoundAssignOp(opK),
                 "",
                 this.ast.spanOf(e),
                 kidsAdd(kidsAdd(noKids(), e), v2)
@@ -1179,7 +1179,7 @@ class Parser {
             this.prsAdvance()
             val t: Int = this.parseExpr()
             targets = kidsAdd(targets, t)
-            sp = mergeSpan(sp, this.ast.spanOf(t))
+            sp = ParserUtils.mergeSpan(sp, this.ast.spanOf(t))
         }
         val n: Int = kidsCount(targets)
         var stmts: String = noKids()
@@ -1446,7 +1446,7 @@ class Parser {
                 this.prsAdvance() // `?`
                 this.prsAdvance() // `:`
                 val eRight = this.parseBinary(1)
-                val eSpan = mergeSpan(this.ast.spanOf(left), this.ast.spanOf(eRight))
+                val eSpan = ParserUtils.mergeSpan(this.ast.spanOf(left), this.ast.spanOf(eRight))
                 left = this.ast.add(
                     "Binary",
                     "ElvisColon",
@@ -1466,7 +1466,7 @@ class Parser {
                 }
                 this.prsAdvance()
                 val toRight = this.parseBinary(6)
-                val toSp = mergeSpan(this.ast.spanOf(left), this.ast.spanOf(toRight))
+                val toSp = ParserUtils.mergeSpan(this.ast.spanOf(left), this.ast.spanOf(toRight))
                 left = this.ast.add("Binary", "to", "", toSp,
                     kidsAdd(kidsAdd(noKids(), left), toRight))
                 continue
@@ -1485,7 +1485,7 @@ class Parser {
                 if (op == "DoubleDotLtOp") {
                     rInc = "0"
                 }
-                val rsp = mergeSpan(this.ast.spanOf(left), this.ast.spanOf(rEnd))
+                val rsp = ParserUtils.mergeSpan(this.ast.spanOf(left), this.ast.spanOf(rEnd))
                 left = this.ast.add("Range", rInc, "", rsp, kidsAdd(kidsAdd(noKids(), left), rEnd))
                 continue
             }
@@ -1500,12 +1500,12 @@ class Parser {
             if (op == "As" || op == "Is") {
                 val tname: String = this.parseTypeName()
                 val tId: Int = this.ast.leaf("Lit", tname, this.prsCurSpan())
-                val spT = mergeSpan(this.ast.spanOf(left), this.ast.spanOf(tId))
+                val spT = ParserUtils.mergeSpan(this.ast.spanOf(left), this.ast.spanOf(tId))
                 left = this.ast.add("Binary", op, "", spT, kidsAdd(kidsAdd(noKids(), left), tId))
                 continue
             }
             val right = this.parseBinary(prec + 1)
-            val sp = mergeSpan(this.ast.spanOf(left), this.ast.spanOf(right))
+            val sp = ParserUtils.mergeSpan(this.ast.spanOf(left), this.ast.spanOf(right))
             left = this.ast.add("Binary", op, "", sp, kidsAdd(kidsAdd(noKids(), left), right))
         }
         return left
@@ -1517,7 +1517,7 @@ class Parser {
         if (k == "Minus" || k == "Bang" || k == "Plus") {
             this.prsAdvance()
             val operand = this.parseUnary()
-            val sp = mergeSpan(this.prsCurSpan(), this.ast.spanOf(operand))
+            val sp = ParserUtils.mergeSpan(this.prsCurSpan(), this.ast.spanOf(operand))
             return this.ast.add("Unary", k, "", sp, kidsAdd(noKids(), operand))
         }
         return this.parsePostfix()
@@ -1559,7 +1559,7 @@ class Parser {
             } else if (k == "DoubleBang") {
                 // 非空断言 `expr!!`：词法器产出 `DoubleBang`。
                 // 不识别会让整个表达式在 `!!` 处反同步（编译期崩溃）。
-                val sp: Span = mergeSpan(this.ast.spanOf(node), this.prsCurSpan())
+                val sp: Span = ParserUtils.mergeSpan(this.ast.spanOf(node), this.prsCurSpan())
                 this.prsAdvance()
                 node = this.ast.add("Unwrap", "", "", sp, kidsAdd(noKids(), node))
             } else if (k == "Dot") {
@@ -1617,7 +1617,7 @@ class Parser {
                     kidsAdd(noKids(), tIt))
                 val tLam: Int = this.ast.add("Lambda", "", "", tBlkSp,
                     kidsAdd(kidsAdd(noKids(), tParams), tBlk))
-                val tSp: Span = mergeSpan(this.ast.spanOf(node), this.ast.spanOf(tBlk))
+                val tSp: Span = ParserUtils.mergeSpan(this.ast.spanOf(node), this.ast.spanOf(tBlk))
                 node = this.ast.add("Call", "", "", tSp,
                     kidsAdd(kidsAdd(noKids(), node), tLam))
             } else {
@@ -1780,7 +1780,7 @@ class Parser {
         // 之后的 `toStr(-val)`、`isIntLiteral(val)` 这类把 `val` 当普通变量用的写法，
         // 直接报错会让整段反同步（Fold/MirOpt/Closures/FrameManager 实测如此）。
         val lit: String = this.prsCurLit()
-        if (prsIsWordLiteral(lit)) {
+        if (ParserUtils.prsIsWordLiteral(lit)) {
             val node = this.ast.leaf("Ident", lit, this.prsCurSpan())
             this.prsAdvance()
             return node
@@ -2050,7 +2050,7 @@ class Parser {
             val sp: Span = this.prsCurSpan()
             this.prsAdvance()
             val part: Int = this.buildInterpPart(raw, sp)
-            val sp1: Span = mergeSpan(this.ast.spanOf(left), this.ast.spanOf(part))
+            val sp1: Span = ParserUtils.mergeSpan(this.ast.spanOf(left), this.ast.spanOf(part))
             left = this.ast.add(
                 "Binary",
                 "Plus",
@@ -2060,7 +2060,7 @@ class Parser {
             )
             if (this.prsCurKind() == "StringLiteral") {
                 val seg: Int = this.leafLit("StringLiteral")
-                val sp2: Span = mergeSpan(this.ast.spanOf(left), this.ast.spanOf(seg))
+                val sp2: Span = ParserUtils.mergeSpan(this.ast.spanOf(left), this.ast.spanOf(seg))
                 left = this.ast.add(
                     "Binary",
                     "Plus",
@@ -2079,10 +2079,10 @@ class Parser {
         // 注意：源码里不能直接写 `"${"`（词法器会当作插值起始），故动态拼接。
         val dollarBrace: String = "$" + "{"
         if (raw.startsWith(dollarBrace)) {
-            val inner: String = prsSlice(raw, 2, raw.length - 3)
+            val inner: String = ParserUtils.prsSlice(raw, 2, raw.length - 3)
             exprId = this.parseInterpExpr(inner, sp)
         } else if (raw.startsWith("$")) {
-            val name: String = prsSlice(raw, 1, raw.length - 1)
+            val name: String = ParserUtils.prsSlice(raw, 1, raw.length - 1)
             exprId = this.ast.leaf("Ident", name, sp)
         }
         if (exprId < 0) {
@@ -2135,60 +2135,66 @@ class Parser {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Parser 辅助（自由函数）
+// Parser 辅助（工具对象）
 // ─────────────────────────────────────────────────────────────
 
-/// 复合赋值 token → 对应二元运算符 token kind（供 `x += y` 脱糖为 `x = x + y`）。
-fun compoundAssignOp(k: String): String {
-    if (k == "PlusEq") { return "Plus" }
-    if (k == "MinusEq") { return "Minus" }
-    if (k == "StarEq") { return "Star" }
-    if (k == "SlashEq") { return "Slash" }
-    if (k == "PercentEq") { return "Percent" }
-    return "Plus"
-}
+object ParserUtils {
 
-/// 子串（start 起 length 长，越界截断）。
-fun prsSlice(text: String, start: Int, length: Int): String {
-    var out: String = ""
-    var i: Int = start
-    val end: Int = start + length
-    while (i < end && i < text.length) {
-        if (i >= 0) {
-            out = out + toStr(text[i])
+    /// 复合赋值 token → 对应二元运算符 token kind（供 `x += y` 脱糖为 `x = x + y`）。
+    fun compoundAssignOp(k: String): String {
+        if (k == "PlusEq") {
+            return "Plus"
+        } else if (k == "MinusEq") {
+            return "Minus"
+        } else if (k == "StarEq") {
+            return "Star"
+        } else if (k == "SlashEq") {
+            return "Slash"
+        } else if (k == "PercentEq") {
+            return "Percent"
         }
-        i = i + 1
+        return "Plus"
     }
-    return out
-}
 
-/// 递归复制 `src` AST 子树到 `dst` arena，返回新节点 id（表达式为树，无共享节点）。
-/// 说明：目标 arena 必须通过方法内的 `this.ast` 写入，故此处已改为 `Parser.copySubtree`。
-
-/// 合并两个 span（用于复合节点）。
-/// 是否为「词」字面量（标识符 / 关键字这类由字母数字下划线组成的 token 文本）。
-///
-/// 用于在表达式位置把关键字 token 按其字面量当作标识符处理，对齐 Rust 侧
-/// 原子解析 `advance().literal.clone()`；标点 token 的字面量（`(`、`+` …）与
-/// EOF 的空串一律判为 false（仍走「意外的 token」诊断路径）。
-fun prsIsWordLiteral(s: String): Boolean {
-    if (s == "") {
-        return false
+    /// 子串（start 起 length 长，越界截断）。
+    fun prsSlice(text: String, start: Int, length: Int): String {
+        var out: String = ""
+        var i: Int = start
+        val end: Int = start + length
+        while (i < end && i < text.length) {
+            if (i >= 0) {
+                out = out + toStr(text[i])
+            }
+            i = i + 1
+        }
+        return out
     }
-    // 逐字符查表（`indexOf`）而非 `c >= "a" && c <= "z"`：Aura 的字符串
-    // 关系比较在 AOT/VM 下语义不可靠（实测 `"$" >= "a"` 会判为 true，
-    // 于是 `$x` 被误当作标识符）。查表法用的是内容包含匹配，两边一致。
-    val wordChars: String = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
-    var i: Int = 0
-    while (i < s.length) {
-        if (wordChars.indexOf(toStr(s[i])) < 0) {
+
+    /// 合并两个 span（用于复合节点）。
+    fun mergeSpan(a: Span, b: Span): Span {
+        return Span(a.start, b.end, a.startLine, a.startCol, b.endLine, b.endCol)
+    }
+
+    /// 是否为「词」字面量（标识符 / 关键字这类由字母数字下划线组成的 token 文本）。
+    ///
+    /// 用于在表达式位置把关键字 token 按其字面量当作标识符处理，对齐 Rust 侧
+    /// 原子解析 `advance().literal.clone()`；标点 token 的字面量（`(`、`+` …）与
+    /// EOF 的空串一律判为 false（仍走「意外的 token」诊断路径）。
+    fun prsIsWordLiteral(s: String): Boolean {
+        if (s == "") {
             return false
         }
-        i = i + 1
+        // 逐字符查表（`indexOf`）而非 `c >= "a" && c <= "z"`：Aura 的字符串
+        // 关系比较在 AOT/VM 下语义不可靠（实测 `"$" >= "a"` 会判为 true，
+        // 于是 `$x` 被误当作标识符）。查表法用的是内容包含匹配，两边一致。
+        val wordChars: String = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
+        var i: Int = 0
+        while (i < s.length) {
+            if (wordChars.indexOf(toStr(s[i])) < 0) {
+                return false
+            }
+            i = i + 1
+        }
+        return true
     }
-    return true
-}
-
-fun mergeSpan(a: Span, b: Span): Span {
-    return Span(a.start, b.end, a.startLine, a.startCol, b.endLine, b.endCol)
 }

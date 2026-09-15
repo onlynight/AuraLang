@@ -1,0 +1,52 @@
+// aura:///loom/dep/aura/lang/loom/dep/Dependency.aura
+package aura.lang.loom.dep
+// Phase E.4: Loom Dependency Management - Dependency Definition
+//
+// @since 0.6
+
+import aura.lang.std.String
+import aura.lang.std.Collections
+
+// ══════════════════════════════════════════════════════════════
+// 依赖定义
+// ══════════════════════════════════════════════════════════════
+class Dependency {
+    val name: String
+    var version: String = "*"
+    var path: String = ""  // 本地路径
+    var registry: String = ""  // 远程注册表
+    var features: List<String> = mutableListOf()
+    var optional: Boolean = false
+
+    fun Dependency(name: String) {
+        this.name = name
+        this.features = mutableListOf()
+    }
+
+    fun Dependency(name: String, version: String) {
+        this.name = name
+        this.version = version
+        this.features = mutableListOf()
+    }
+
+    fun Dependency(name: String, version: String, path: String) {
+        this.name = name
+        this.version = version
+        this.path = path
+        this.features = mutableListOf()
+    }
+
+    fun addFeature(feature: String): Unit { features.add(feature) }
+    fun setOptional(optional: Boolean): Unit { this.optional = optional }
+
+    fun toStr(): String {
+        var s: String = name + "@" + version
+        if (path.length > 0) {
+            s = s + " (local: " + path + ")"
+        }
+        if (features.size > 0) {
+            s = s + " features=" + features.join(",")
+        }
+        return s
+    }
+}

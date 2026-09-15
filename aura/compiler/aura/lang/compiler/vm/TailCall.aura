@@ -73,12 +73,12 @@ class TailCallOptimizer {
         // return f(args) → 尾位置
         if (callKind == "return") {
             return true
-        }
-        // if cond { return f(a) } → 尾位置（递归检测）
-        if (callKind == "branch") {
+        } else if (callKind == "branch") {
+            // if cond { return f(a) } → 尾位置（递归检测）
             return true
+        } else {
+            return false
         }
-        return false
     }
 
     // ── 递归检测 ──

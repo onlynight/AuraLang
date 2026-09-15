@@ -1,0 +1,74 @@
+// aura:///aura/lang/concurrent/Thread.aura
+package aura.lang.concurrent
+// 线程（Thread）—— 纯 Aura 实现，仅最底层「线程桥」走 native。
+//
+// 实现分层：
+//   * 本类（句柄有效性校验、参数归一、并行度/核心数缓存等）为纯 Aura；
+//   * 唯一不可在 Aura 源码层表达的是「在新 OS 线程上执行一段 Aura 函数」，
+//     该桥接由 `aura.lang.native.thread.ThreadOps` 提供（见该文件：为什么必须 native）。
+//
+// 使用前需 import：
+// ```aura
+// import aura.lang.concurrent.Thread.*   // 短名可用：spawn, join, sleep, ...
+// import aura.lang.concurrent.Thread     // 类式调用：Thread.id()
+// ```
+//
+// @since 0.6
+import aura.lang.native.thread.ThreadOps
+
+internal object Thread {
+
+    /// 创建新线程并执行给定函数
+    ///
+    /// - 参数：`fn_id` — 函数 ID（VM 函数索引）
+    /// - 参数：`arg` — 传递给线程的初始值
+    /// - 返回：新线程的线程 ID（0 表示创建失败）
+    fun spawn(fn_id: Int, arg: Int): Int {
+        if (fn_id < 0) {
+            return 0
+        }
+        return ThreadOps.create(fn_id, arg)
+    }
+
+    /// 等待指定线程结束并返回其结果
+    ///
+    /// - 参数：`thread_id` — 要等待的线程 ID
+    /// - 返回：线程的返回值（线程不存在时返回 0）
+    fun join(thread_id: Int): Int {
+        if (thread_id <= 0) {
+            return 0
+        }
+        return ThreadOps.join(thread_id)
+    }
+
+    /// 休眠指定毫秒数
+    ///
+    /// - 参数：`ms` — 休眠毫秒数（<= 0 时立即返回）
+    fun sleep(ms: Int): Unit {
+        if (ms <= 0) {
+            return
+        }
+        ThreadOps.sleepMs(ms)
+    }
+
+    /// 获取当前线程 ID
+    ///
+    /// - 返回：当前线程 ID
+    fun id(): Int {
+        return ThreadOps.currentId()
+    }
+
+    /// 获取系统可用的最大并行度
+    ///
+    /// - 返回：可用并行度
+    fun parallelism(): Int {
+        return ThreadOps.cores()
+    }
+
+    /// 获取可用 CPU 核心数
+    ///
+    /// - 返回：CPU 核心数
+    fun availableCores(): Int {
+        return ThreadOps.cores()
+    }
+}

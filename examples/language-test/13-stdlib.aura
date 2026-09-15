@@ -30,11 +30,11 @@ fun main() {
         + ", contains=" + contains)
 
     // ── §13.3 aura.ascii（P13）──
-    val isA = if (aura.ascii.isAlpha('a')) { "true" } else { "false" }
-    val isD = if (aura.ascii.isDigit('7')) { "true" } else { "false" }
+    val isA = if (aura.ascii.isAlpha("a")) { "true" } else { "false" }
+    val isD = if (aura.ascii.isDigit("7")) { "true" } else { "false" }
     println("§13.3 ascii: isAlpha('a')=" + isA
         + ", isDigit('7')=" + isD
-        + ", toUpper('b')=" + aura.ascii.toUpper('b').toString())
+        + ", toUpper('b')=" + aura.ascii.toUpper("b").toString())
 
     // ── §13.4 aura.collections（P13）──
     val list = aura.collections.listOf(3, 1, 2)

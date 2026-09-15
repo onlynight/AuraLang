@@ -1,0 +1,27 @@
+// aura:///debugger/aura/lang/debugger/Breakpoint.aura
+package aura.lang.debugger
+
+// ── 标准库 ──
+import aura.lang.std.String
+
+// ═══════════════════════════════════════════════════════════════
+// 断点管理 — Breakpoint 类
+// ═══════════════════════════════════════════════════════════════
+
+class Breakpoint {
+    val id: Int
+    val file: String
+    val line: Int
+    val enabled: Boolean
+
+    fun Breakpoint(id: Int, file: String, line: Int, enabled: Boolean) {
+        this.id = id
+        this.file = file
+        this.line = line
+        this.enabled = enabled
+    }
+
+    fun toStr(): String {
+        return "#" + toStr(id) + " " + (if (enabled) { "✓" } else { "✗" }) + " " + file + ":" + toStr(line)
+    }
+}

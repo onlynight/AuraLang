@@ -815,6 +815,8 @@ fn cmd_check(args: &[String]) {
             exit(1);
         }
     };
+    // 预处理：解析 import 语句，剥离 package 声明（与 cmd_run 一致）
+    let source = compiler::codegen::resolve_aura_imports(&source, Some(input));
 
     let mut errs = 0;
     // 词法

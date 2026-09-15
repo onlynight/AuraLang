@@ -15,11 +15,11 @@ use compiler::vm::{Vm, VmOptions};
 fn test_concurrent_registered_with_default_features() {
     let reg = NativeRegistry::new();
     assert!(
-        reg.contains("aura.lang.std.Coroutine.spawn"),
+        reg.contains("aura.lang.concurrent.Coroutine.spawn"),
         "默认 features 应包含并发函数"
     );
     assert!(
-        reg.contains("aura.lang.std.Channel.channelSend"),
+        reg.contains("aura.lang.concurrent.Channel.channelSend"),
         "默认 features 应包含并发函数"
     );
 }
@@ -33,11 +33,11 @@ fn test_concurrent_registered_with_default_features() {
 fn test_concurrent_not_registered_without_features() {
     let reg = NativeRegistry::new();
     assert!(
-        !reg.contains("aura.lang.std.Coroutine.spawn"),
+        !reg.contains("aura.lang.concurrent.Coroutine.spawn"),
         "无 std-concurrent feature 时不应注册并发函数"
     );
     assert!(
-        !reg.contains("aura.lang.std.Channel.channelSend"),
+        !reg.contains("aura.lang.concurrent.Channel.channelSend"),
         "无 std-concurrent feature 时不应注册并发函数"
     );
 }

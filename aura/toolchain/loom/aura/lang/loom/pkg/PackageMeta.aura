@@ -1,0 +1,92 @@
+// aura:///loom/pkg/aura/lang/loom/pkg/PackageMeta.aura
+package aura.lang.loom.pkg
+
+import aura.lang.std.String
+import aura.lang.std.Collections
+
+// Package metadata
+// Mirrors Rust: package/manifest.rs
+// @since 0.6
+class PackageMeta {
+    val name: String
+    val version: String
+    var description: String = ""
+    var authors: List<String> = mutableListOf()
+    var license: String = ""
+    var repository: String = ""
+    var entry: String = "src/main.aura"
+    var files: List<String> = mutableListOf()
+    var dependencies: List<String> = mutableListOf()
+    var checksum: String = ""
+    var createdAt: Long = 0
+    var executionModes: List<String> = mutableListOf()
+
+    fun PackageMeta(name: String, version: String) {
+        this.name = name
+        this.version = version
+        this.files = mutableListOf()
+        this.dependencies = mutableListOf()
+        this.executionModes = mutableListOf()
+    }
+
+    fun addFile(file: String): Unit { files.add(file) }
+    fun addDependency(dep: String): Unit { dependencies.add(dep) }
+    fun addExecutionMode(mode: String): Unit { executionModes.add(mode) }
+
+    fun toToml(): String {
+        var content: String = "[package]\n"
+        content = content + "name = \"" + name + "\"\n"
+        content = content + "version = \"" + version + "\"\n"
+        if (description.length > 0) {
+            content = content + "description = \"" + description + "\"\n"
+        }
+        if (authors.size > 0) {
+            content = content + "authors = ["
+            var i: Int = 0
+            while (i < authors.size) {
+                if (i > 0) { content = content + ", " }
+                content = content + "\"" + authors[i] + "\""
+                i = i + 1
+            }
+            content = content + "]\n"
+        }
+        if (license.length > 0) {
+            content = content + "license = \"" + license + "\"\n"
+        }
+        if (repository.length > 0) {
+            content = content + "repository = \"" + repository + "\"\n"
+        }
+        content = content + "entry = \"" + entry + "\"\n"
+        if (files.size > 0) {
+            content = content + "files = ["
+            var j: Int = 0
+            while (j < files.size) {
+                if (j > 0) { content = content + ", " }
+                content = content + "\"" + files[j] + "\""
+                j = j + 1
+            }
+            content = content + "]\n"
+        }
+        if (dependencies.size > 0) {
+            content = content + "dependencies = ["
+            var k: Int = 0
+            while (k < dependencies.size) {
+                if (k > 0) { content = content + ", " }
+                content = content + "\"" + dependencies[k] + "\""
+                k = k + 1
+            }
+            content = content + "]\n"
+        }
+        if (executionModes.size > 0) {
+            content = content + "execution-modes = ["
+            var l: Int = 0
+            while (l < executionModes.size) {
+                if (l > 0) { content = content + ", " }
+                content = content + "\"" + executionModes[l] + "\""
+                l = l + 1
+            }
+            content = content + "]\n"
+        }
+        return content
+    }
+}

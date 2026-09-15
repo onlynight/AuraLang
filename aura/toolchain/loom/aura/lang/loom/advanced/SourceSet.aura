@@ -1,0 +1,113 @@
+// aura:///loom/advanced/aura/lang/loom/advanced/SourceSet.aura
+package aura.lang.loom.advanced
+
+import aura.lang.std.String
+import aura.lang.std.FileSystem
+import aura.lang.std.IO
+import aura.lang.std.Collections
+
+// ═══════════════════════════════════════════════════════════════
+// 源码集
+// 对标 Rust: sourceset/mod.rs, sourceset/discover.rs, sourceset/resolve.rs
+// ═══════════════════════════════════════════════════════════════
+
+class SourceSet {
+    val name: String
+    val srcDir: String
+    var files: List<String> = mutableListOf()
+    var testDir: String = ""
+    var testFiles: List<String> = mutableListOf()
+
+    fun SourceSet(name: String, srcDir: String) {
+        this.name = name
+        this.srcDir = srcDir
+        this.files = mutableListOf()
+        this.testFiles = mutableListOf()
+    }
+
+    fun discover(): Int {
+        if (!FileSystem.exists(srcDir)) {
+            return 1
+        }
+        val found: List<String> = FileSystem.listFiles(srcDir)
+        var i: Int = 0
+        while (i < found.size) {
+            val file: String = found[i]
+            if (file.endsWith(".aura")) {
+                files.add(file)
+            }
+            i = i + 1
+        }
+        IO.println("[sourceset] Discovered " + files.size + " files in " + srcDir)
+        return 0
+    }
+
+    fun resolve(include: List<String>): Unit {
+    }
+
+    fun getFiles(): List<String> {
+        return files
+    }
+
+    fun len(): Int {
+        return files.size
+    }
+
+    fun toStr(): String {
+        return "SourceSet{name='" + name + "', files=" + files.size + "}"
+    }
+}
+
+class SourceSetManager {
+    var sourceSets: List<SourceSet> = mutableListOf()
+
+    fun SourceSetManager() {
+        this.sourceSets = mutableListOf()
+    }
+
+    fun addSourceSet(set: SourceSet): Unit {
+        sourceSets.add(set)
+    }
+
+    fun addSourceSet(name: String, srcDir: String): Unit {
+        val set: SourceSet = SourceSet(name, srcDir)
+        sourceSets.add(set)
+    }
+
+    fun discoverAll(): Int {
+        IO.println("[sourceset] Discovering all source sets...")
+        var i: Int = 0
+        while (i < sourceSets.size) {
+            sourceSets[i].discover()
+            i = i + 1
+        }
+        return 0
+    }
+
+    fun resolveAll(include: List<String>): Unit {
+        var i: Int = 0
+        while (i < sourceSets.size) {
+            sourceSets[i].resolve(include)
+            i = i + 1
+        }
+    }
+
+    fun getAllFiles(): List<String> {
+        val allFiles: List<String> = mutableListOf()
+        var i: Int = 0
+        while (i < sourceSets.size) {
+            val files: List<String> = sourceSets[i].getFiles()
+            var j: Int = 0
+            while (j < files.size) {
+                allFiles.add(files[j])
+                j = j + 1
+            }
+            i = i + 1
+        }
+        return allFiles
+    }
+
+    fun toStr(): String {
+        return "SourceSetManager{sourceSets=" + sourceSets.size + "}"
+    }
+}

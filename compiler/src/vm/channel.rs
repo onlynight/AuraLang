@@ -8,22 +8,45 @@
 //! - `recv` 在通道为空时阻塞
 //! - `tryRecv` 非阻塞，空时返回 `Null`
 //! - `recv_timeout`（Fix 11）：带超时的接收，超时返回 `Null`
+//!
+//! **P8 优化**：新增事件通知（EventNotifier），消除轮询空转。
+//! - 发送方写入 buffer 后 `notify()` 通知事件
+//! - 接收方 buffer 空时 `wait()` 精确阻塞（零 CPU 空转）
+//! - 无 Mutex、无 Condvar——保持 Aura 无锁隔离优势
+//!
+//! 对应文档：`docs/pure_aura_jit/jit模式优化方案.md` §7.3
 
+use crate::vm::event_notifier::{EventNotifier, create_notifier};
 use crate::vm::value::Value;
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Channel 实例 ID
 pub type ChannelId = usize;
 
 /// Channel 实例
-#[derive(Debug, Clone)]
 pub struct Channel {
     pub id: ChannelId,
     /// 容量（0 = 无界）
     pub bound: usize,
-    /// 消息缓冲区
+    /// 消息缓冲区（无锁，单 VM 内单线程使用）
     pub buffer: VecDeque<Value>,
+    /// 事件通知（发送方写入，接收方 epoll 等待）
+    ///
+    /// P8 优化：消除轮询空转，实现精确阻塞。
+    /// 无 Mutex、无 Condvar——保持 Aura 无锁优势。
+    pub notifier: Arc<dyn EventNotifier>,
+}
+
+impl std::fmt::Debug for Channel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Channel")
+            .field("id", &self.id)
+            .field("bound", &self.bound)
+            .field("buffer", &self.buffer)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Channel 运行时管理器
@@ -56,6 +79,7 @@ impl ChannelRuntime {
             id,
             bound,
             buffer: VecDeque::new(),
+            notifier: Arc::from(create_notifier()),
         });
         id
     }
@@ -73,23 +97,59 @@ impl ChannelRuntime {
     /// 向 Channel 发送值
     ///
     /// 有界 Channel 且缓冲区满时返回 `false`（非阻塞模式）
+    ///
+    /// P8 优化：发送后 `notify()` 唤醒等待的接收方（零延迟）。
     pub fn send(&mut self, id: ChannelId, val: Value) -> bool {
         if let Some(ch) = self.get_mut(id) {
             if ch.bound > 0 && ch.buffer.len() >= ch.bound {
                 return false; // 缓冲区满
             }
+            // 写入 buffer（无锁，单线程）
             ch.buffer.push_back(val);
+            // 通知事件（唤醒等待的接收方）
+            let _ = ch.notifier.notify();
             true
         } else {
             false
         }
     }
 
-    /// 从 Channel 接收值（阻塞语义）
+    /// 从 Channel 接收值（精确阻塞，零 CPU 空转）
     ///
-    /// 在当前协作调度模型下，`recv` 立即返回：
-    /// 若缓冲区非空则取出并返回，否则返回 `Null`。
+    /// P8 优化：
+    /// - 先尝试非阻塞 pop
+    /// - buffer 空时 `notifier.wait()` 精确阻塞（epoll 系统调用，零 CPU 消耗）
+    /// - 被唤醒后 pop 并返回
+    /// - 无 Mutex、无 Condvar——保持 Aura 无锁优势
     pub fn recv(&mut self, id: ChannelId) -> Value {
+        if let Some(ch) = self.get_mut(id) {
+            // 1. 先尝试非阻塞 pop
+            if let Some(val) = ch.buffer.pop_front() {
+                return val;
+            }
+
+            // 2. buffer 空，等待事件（精确阻塞，零 CPU 空转）
+            let _ = ch.notifier.wait(None);
+
+            // 3. 被唤醒后 pop
+            ch.buffer.pop_front().unwrap_or(Value::Null)
+        } else {
+            Value::Null
+        }
+    }
+
+    /// 从 Channel 接收值（精确阻塞，零 CPU 空转）
+    ///
+    /// 兼容旧版 `recv_blocking` 接口
+    #[inline]
+    pub fn recv_blocking(&mut self, id: ChannelId) -> Value {
+        self.recv(id)
+    }
+
+    /// 尝试从 Channel 接收值（非阻塞）
+    ///
+    /// 若缓冲区为空或 Channel 不存在，返回 `Null`。
+    pub fn try_recv(&mut self, id: ChannelId) -> Value {
         if let Some(ch) = self.get_mut(id) {
             ch.buffer.pop_front().unwrap_or(Value::Null)
         } else {
@@ -97,36 +157,35 @@ impl ChannelRuntime {
         }
     }
 
-    /// 尝试从 Channel 接收值（非阻塞）
-    ///
-    /// 若缓冲区为空或 Channel 不存在，返回 `Null`。
-    pub fn try_recv(&mut self, id: ChannelId) -> Value {
-        self.recv(id)
-    }
-
-    /// 带超时的接收（Fix 11）
+    /// 带超时的接收（P8 优化：事件驱动，精确超时）
     ///
     /// 在 `timeout` 时间内等待消息，超时返回 `Null`。
-    /// 由于当前是单线程协作调度，此方法通过轮询 + 休眠实现超时。
+    ///
+    /// P8 优化：
+    /// - 使用 `notifier.wait(Some(timeout))` 精确阻塞
+    /// - 误差 <100µs（epoll 唤醒延迟）
+    /// - 替代原来的 1ms 轮询 + sleep
     pub fn recv_timeout(&mut self, id: ChannelId, timeout: Duration) -> Value {
-        let start = std::time::Instant::now();
-        let poll_interval = Duration::from_millis(1);
+        if let Some(ch) = self.get_mut(id) {
+            // 1. 先尝试非阻塞 pop
+            if let Some(val) = ch.buffer.pop_front() {
+                return val;
+            }
 
-        loop {
-            // 尝试立即接收
-            if let Some(ch) = self.get_mut(id) {
-                if let Some(val) = ch.buffer.pop_front() {
-                    return val;
+            // 2. buffer 空，等待事件（带超时）
+            match ch.notifier.wait(Some(timeout)) {
+                Ok(true) => {
+                    // 有事件，pop 并返回
+                    ch.buffer.pop_front().unwrap_or(Value::Null)
                 }
+                Ok(false) => {
+                    // 超时
+                    Value::Null
+                }
+                Err(_) => Value::Null,
             }
-
-            // 检查超时
-            if start.elapsed() >= timeout {
-                return Value::Null;
-            }
-
-            // 休眠后重试（让出 CPU）
-            std::thread::sleep(poll_interval);
+        } else {
+            Value::Null
         }
     }
 

@@ -69,7 +69,7 @@ class AotModuleLinker {
 
     /// 加载单个文件（去重）→ 其递归依赖 + 本文件顶层声明的 HIR kids 串。
     fun loadPath(path: String): String {
-        val norm: String = normalizePath(path)
+        val norm: String = ModuleLinkUtils.normalizePath(path)
         if (norm == "") {
             return hirNoKids()
         }
@@ -89,7 +89,7 @@ class AotModuleLinker {
         // 会错乱 this 绑定（既有缺陷）。必须先取局部变量。
         val ast: Ast = p.ast
 
-        val dir: String = dirOf(norm)
+        val dir: String = ModuleLinkUtils.dirOf(norm)
         // 分段收集、最后一次归并：`out = appendKids(out, …)` 在整棵导入树上是
         // O(n²) 复制，且 AOT 运行时没有 GC —— 链接阶段就能吃掉数 GB 内存。
         var parts: List<String> = arrayListOf<String>()
@@ -169,15 +169,15 @@ class AotModuleLinker {
         }
         // 相对文件导入
         if (imp.endsWith(".aura") || imp.startsWith(".")) {
-            return normalizePath(joinPath(baseDir, imp))
+            return ModuleLinkUtils.normalizePath(ModuleLinkUtils.joinPath(baseDir, imp))
         }
-        val rel: String = replaceAllDots(imp)
+        val rel: String = ModuleLinkUtils.replaceAllDots(imp)
         val candidates: String = "aura/compiler/" + rel + ".aura\n" +
             "aura/core/" + rel + ".aura\n" + rel + ".aura\n"
         var i: Int = 0
         val n: Int = aotLineCount(candidates)
         while (i < n) {
-            val c: String = normalizePath(aotLineAt(candidates, i))
+            val c: String = ModuleLinkUtils.normalizePath(aotLineAt(candidates, i))
             if (FileSystem.exists(c)) {
                 return c
             }
@@ -187,119 +187,122 @@ class AotModuleLinker {
     }
 }
 
-/// 顶层便捷入口：入口文件 → 合并 HIR。
-fun linkModules(entryPath: String): Hir {
-    val l: AotModuleLinker = AotModuleLinker()
-    return l.link(entryPath)
-}
+object ModuleLinkUtils {
 
-// ── 路径工具 ──
+    /// 顶层便捷入口：入口文件 → 合并 HIR。
+    fun linkModules(entryPath: String): Hir {
+        val l: AotModuleLinker = AotModuleLinker()
+        return l.link(entryPath)
+    }
 
-/// 把点分包名转为路径（`aura.lang.std.String` → `aura/lang/std/String`）。
-fun replaceAllDots(s: String): String {
-    var out: String = ""
-    var i: Int = 0
-    while (i < s.length) {
-        val c: String = toStr(s[i])
-        if (c == ".") {
-            out = out + "/"
-        } else {
-            out = out + c
-        }
-        i = i + 1
-    }
-    return out
-}
+    // ── 路径工具 ──
 
-/// 取目录部分（无分隔符返回 "."）。
-fun dirOf(p: String): String {
-    var i: Int = p.length - 1
-    while (i >= 0) {
-        val c: String = toStr(p[i])
-        if (c == "/" || c == "\\") {
-            return aotSlice(p, 0, i)
-        }
-        i = i - 1
-    }
-    return "."
-}
-
-/// 目录 + 相对路径拼接（绝对路径原样返回）。
-fun joinPath(dir: String, rel: String): String {
-    if (rel.startsWith("/") || rel.contains(":")) {
-        return rel
-    }
-    if (dir == "" || dir == ".") {
-        return rel
-    }
-    return dir + "/" + rel
-}
-
-/// 追加两个 kids 串（逗号分隔），空串安全。
-fun appendKids(a: String, b: String): String {
-    if (a == "") {
-        return b
-    }
-    if (b == "") {
-        return a
-    }
-    return a + "," + b
-}
-
-/// 反斜杠 → 正斜杠（手写，避免依赖 String.replace 的类调用链接）。
-fun slashify(p: String): String {
-    var out: String = ""
-    var i: Int = 0
-    while (i < p.length) {
-        val c: String = toStr(p[i])
-        if (c == "\\") {
-            out = out + "/"
-        } else {
-            out = out + c
-        }
-        i = i + 1
-    }
-    return out
-}
-
-/// 规范化路径：折叠 `.` / `..` / 重复分隔符（保持 POSIX 风格）。
-fun normalizePath(p: String): String {
-    val parts: String = slashify(p)
-    var out: String = ""
-    var i: Int = 0
-    var seg: String = ""
-    while (i <= parts.length) {
-        var c: String = "/"
-        if (i < parts.length) {
-            c = toStr(parts[i])
-        }
-        if (c == "/") {
-            if (seg == "..") {
-                // 弹出上一段
-                out = popSegment(out)
-            } else if (seg != "" && seg != ".") {
-                if (out != "") {
-                    out = out + "/"
-                }
-                out = out + seg
+    /// 把点分包名转为路径（`aura.lang.std.String` → `aura/lang/std/String`）。
+    fun replaceAllDots(s: String): String {
+        var out: String = ""
+        var i: Int = 0
+        while (i < s.length) {
+            val c: String = toStr(s[i])
+            if (c == ".") {
+                out = out + "/"
+            } else {
+                out = out + c
             }
-            seg = ""
-        } else {
-            seg = seg + c
+            i = i + 1
         }
-        i = i + 1
+        return out
     }
-    return out
-}
 
-/// 弹出路径的最后一段（用于 `..`）。
-fun popSegment(path: String): String {
-    var i: Int = path.length - 1
-    while (i >= 0) {
-        if (toStr(path[i]) == "/") {
-            return aotSlice(path, 0, i)
+    /// 取目录部分（无分隔符返回 "."）。
+    fun dirOf(p: String): String {
+        var i: Int = p.length - 1
+        while (i >= 0) {
+            val c: String = toStr(p[i])
+            if (c == "/" || c == "\\") {
+                return aotSlice(p, 0, i)
+            }
+            i = i - 1
         }
-        i = i - 1
+        return "."
     }
-    return ""
+
+    /// 目录 + 相对路径拼接（绝对路径原样返回）。
+    fun joinPath(dir: String, rel: String): String {
+        if (rel.startsWith("/") || rel.contains(":")) {
+            return rel
+        } else if (dir == "" || dir == ".") {
+            return rel
+        } else {
+            return dir + "/" + rel
+        }
+    }
+
+    /// 追加两个 kids 串（逗号分隔），空串安全。
+    fun appendKids(a: String, b: String): String {
+        if (a == "") {
+            return b
+        } else if (b == "") {
+            return a
+        } else {
+            return a + "," + b
+        }
+    }
+
+    /// 反斜杠 → 正斜杠（手写，避免依赖 String.replace 的类调用链接）。
+    fun slashify(p: String): String {
+        var out: String = ""
+        var i: Int = 0
+        while (i < p.length) {
+            val c: String = toStr(p[i])
+            if (c == "\\") {
+                out = out + "/"
+            } else {
+                out = out + c
+            }
+            i = i + 1
+        }
+        return out
+    }
+
+    /// 规范化路径：折叠 `.` / `..` / 重复分隔符（保持 POSIX 风格）。
+    fun normalizePath(p: String): String {
+        val parts: String = slashify(p)
+        var out: String = ""
+        var i: Int = 0
+        var seg: String = ""
+        while (i <= parts.length) {
+            var c: String = "/"
+            if (i < parts.length) {
+                c = toStr(parts[i])
+            }
+            if (c == "/") {
+                if (seg == "..") {
+                    // 弹出上一段
+                    out = popSegment(out)
+                } else if (seg != "" && seg != ".") {
+                    if (out != "") {
+                        out = out + "/"
+                    }
+                    out = out + seg
+                }
+                seg = ""
+            } else {
+                seg = seg + c
+            }
+            i = i + 1
+        }
+        return out
+    }
+
+    /// 弹出路径的最后一段（用于 `..`）。
+    fun popSegment(path: String): String {
+        var i: Int = path.length - 1
+        while (i >= 0) {
+            if (toStr(path[i]) == "/") {
+                return aotSlice(path, 0, i)
+            }
+            i = i - 1
+        }
+        return ""
+    }
 }

@@ -1,0 +1,248 @@
+// aura:///aura/lang/native/io/Stdio.aura
+package aura.lang.native.io
+// ------------------------------------------------------------------
+// 高级 I/O — 纯 Aura 实现
+//
+// 为 Aura String 提供高级 I/O 接口，委托到 native 包的底层系统调用。
+//
+// 依赖：
+//   - aura.lang.native.Memory         内存读写
+//   - aura.lang.native.memory.Allocator  内存分配
+//   - aura.lang.native.console.Console   控制台输出（底层 write 系统调用）
+//   - aura.lang.native.file.FileOps      文件 I/O（底层 syscall）
+//   - aura.lang.native.Syscalls           系统调用常量
+//
+// 字符串与缓冲区转换：
+//   - stringToBuffer：Aura String → 内存缓冲区（含 NUL 终止符）
+//   - bufferToString：内存缓冲区 → Aura String
+//
+// @since 0.1
+// ------------------------------------------------------------------
+
+import aura.lang.native.Memory
+import aura.lang.native.memory.Allocator
+import aura.lang.native.console.Console
+import aura.lang.native.file.FileOps
+import aura.lang.native.Syscalls
+
+/// 高级标准 I/O（纯 Aura 实现，委托到 native 包）
+object Stdio {
+
+    // ═══════════════════════════════════════════════════════════════
+    // String ↔ Buffer 转换
+    // ═══════════════════════════════════════════════════════════════
+
+    /// 将 Aura String 复制到内存缓冲区（含 NUL 终止符）。
+    /// 返回缓冲区地址，失败返回 0。
+    fun stringToBuffer(s: String): Long {
+        if (s == null || s.length == 0) {
+            val buf: Long = Allocator.malloc(1)
+            if (buf == 0) { return 0 }
+            Memory.write(buf, 0)
+            return buf
+        }
+        val len: Long = s.length + 1  // +1 for NUL terminator
+        val buf: Long = Allocator.malloc(len)
+        if (buf == 0) { return 0 }
+        var i: Int = 0
+        while (i < s.length) {
+            Memory.write(buf + i, s.charCodeAt(i))
+            i = i + 1
+        }
+        Memory.write(buf + s.length, 0)  // NUL terminator
+        return buf
+    }
+
+    /// 将内存缓冲区转换为 Aura String（不包含 NUL 终止符）。
+    fun bufferToString(buf: Long, maxLen: Long): String {
+        if (buf == 0) { return "" }
+        var result: String = ""
+        var i: Long = 0
+        while (i < maxLen) {
+            val c: Byte = Memory.read(buf + i)
+            if (c == 0) { break }
+            result = result + String.fromCharCode(c)
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 计算缓冲区中字符串的长度（不含 NUL 终止符）。
+    fun strlen(buf: Long): Long {
+        if (buf == 0) { return 0 }
+        var n: Long = 0
+        var c: Byte = Memory.read(buf + n)
+        while (c != 0) {
+            n = n + 1
+            c = Memory.read(buf + n)
+        }
+        return n
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 标准输出
+    // ═══════════════════════════════════════════════════════════════
+
+    /// 输出字符串（带换行）。
+    fun println(msg: String): Unit {
+        val buf: Long = stringToBuffer(msg)
+        if (buf == 0) { return }
+        val len: Long = strlen(buf)
+        Console.writeStdout(buf, len)
+        val nl: Long = Console.getNewlineBuffer()
+        if (nl != 0) {
+            Console.writeStdout(nl, 1)
+        }
+    }
+
+    /// 输出字符串（不带换行）。
+    fun print(msg: String): Unit {
+        val buf: Long = stringToBuffer(msg)
+        if (buf == 0) { return }
+        val len: Long = strlen(buf)
+        Console.writeStdout(buf, len)
+    }
+
+    /// 刷新标准输出（无缓冲实现，直接写入）。
+    fun flush(): Unit {
+        // 无缓冲，无需刷新
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 标准输入
+    // ═══════════════════════════════════════════════════════════════
+
+    /// 从标准输入读取一行（不含换行符）。
+    fun readLine(): String {
+        val buf: Long = Allocator.malloc(4096)
+        if (buf == 0) { return "" }
+        // 使用 SYS_READ 读取
+        val fd: Int = 0  // stdin
+        val bytesRead: Long = FileOps.read(fd, buf, 4096)
+        if (bytesRead <= 0) {
+            Allocator.free(buf)
+            return ""
+        }
+        // 找到换行符并截断
+        var end: Long = bytesRead
+        var i: Long = 0
+        while (i < bytesRead) {
+            val c: Byte = Memory.read(buf + i)
+            if (c == 10) {  // '\n'
+                end = i
+                break
+            }
+            i = i + 1
+        }
+        val result: String = bufferToString(buf, end)
+        Allocator.free(buf)
+        return result
+    }
+
+    /// 从标准输入读取全部（直到 EOF）。
+    fun readAll(): String {
+        val buf: Long = Allocator.malloc(65536)
+        if (buf == 0) { return "" }
+        var result: String = ""
+        var total: Long = 0
+        var bytesRead: Long
+        while (true) {
+            bytesRead = FileOps.read(0, buf + total, 65536 - total)
+            if (bytesRead <= 0) { break }
+            total = total + bytesRead
+            if (total >= 65536) { break }
+        }
+        result = bufferToString(buf, total)
+        Allocator.free(buf)
+        return result
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 文件操作
+    // ═══════════════════════════════════════════════════════════════
+
+    /// 读取文件内容（文本）。
+    fun readFile(path: String): String {
+        val pathBuf: Long = stringToBuffer(path)
+        if (pathBuf == 0) { return "" }
+
+        val fd: Int = FileOps.open(pathBuf, 0)  // O_RDONLY
+        if (fd < 0) {
+            Allocator.free(pathBuf)
+            return ""
+        }
+
+        // 获取文件大小
+        val statBuf: Long = Allocator.malloc(144)  // sizeof(struct stat) = 144 on x86_64
+        if (statBuf == 0) {
+            FileOps.close(fd)
+            Allocator.free(pathBuf)
+            return ""
+        }
+        FileOps.fstat(fd, statBuf)
+        val size: Long = Memory.read64(statBuf + 48)  // st_size offset
+
+        // 读取文件内容
+        val content: String = ""
+        if (size > 0) {
+            val buf: Long = Allocator.malloc(size)
+            if (buf != 0) {
+                var offset: Long = 0
+                var remaining: Long = size
+                while (remaining > 0) {
+                    val bytesRead: Long = FileOps.read(fd, buf + offset, remaining)
+                    if (bytesRead <= 0) { break }
+                    offset = offset + bytesRead
+                    remaining = remaining - bytesRead
+                }
+                content = bufferToString(buf, offset)
+                Allocator.free(buf)
+            }
+        }
+
+        Allocator.free(statBuf)
+        FileOps.close(fd)
+        Allocator.free(pathBuf)
+        return content
+    }
+
+    /// 写入文件内容。返回是否成功。
+    fun writeFile(path: String, content: String): Boolean {
+        val pathBuf: Long = stringToBuffer(path)
+        if (pathBuf == 0) { return false }
+
+        val fd: Int = FileOps.open(pathBuf, 1 | 0x40 | 0x200)  // O_WRONLY | O_CREAT | O_TRUNC
+        if (fd < 0) {
+            Allocator.free(pathBuf)
+            return false
+        }
+
+        val contentBuf: Long = stringToBuffer(content)
+        if (contentBuf == 0) {
+            FileOps.close(fd)
+            Allocator.free(pathBuf)
+            return false
+        }
+        val len: Long = strlen(contentBuf)
+        var written: Long = 0
+        while (written < len) {
+            val n: Long = FileOps.write(fd, contentBuf + written, len - written)
+            if (n <= 0) { break }
+            written = written + n
+        }
+
+        FileOps.close(fd)
+        Allocator.free(contentBuf)
+        Allocator.free(pathBuf)
+        return written == len
+    }
+
+    /// 检查文件是否存在。
+    fun fileExists(path: String): Boolean {
+        val pathBuf: Long = stringToBuffer(path)
+        if (pathBuf == 0) { return false }
+        val result: Int = FileOps.access(pathBuf, 0)  // F_OK
+        Allocator.free(pathBuf)
+        return result == 0
+    }
+}

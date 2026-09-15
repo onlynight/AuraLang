@@ -21,6 +21,8 @@ pub const PRELUDE_NAMES: &[&str] = &[
     "println",
     "print",
     "puts",
+    // 函数表下标解析（供 Thread.spawn / ThreadOps.create 使用）
+    "fnIndex",
     "abs",
     "sqrt",
     "pow",
@@ -36,6 +38,10 @@ pub const PRELUDE_NAMES: &[&str] = &[
     "ptrToInt",
     "intToPtr",
     "makeCallback",
+    // ── String 实例方法（VM native 回退，供 Aura 编译的 stdlib 函数调用）──
+    "charCodeAt",
+    "fromCharCode",
+    "substring",
     "listOf",
     "mutableListOf",
     "arrayOf",
@@ -202,6 +208,7 @@ fn build_all_names() -> HashSet<&'static str> {
         "println",
         "print",
         "puts",
+        "fnIndex",
         "abs",
         "sqrt",
         "pow",
@@ -217,6 +224,10 @@ fn build_all_names() -> HashSet<&'static str> {
         "ptrToInt",
         "intToPtr",
         "makeCallback",
+        // ── String 实例方法（VM native 回退）──
+        "charCodeAt",
+        "fromCharCode",
+        "substring",
     ] {
         s.insert(n);
     }
@@ -226,6 +237,7 @@ fn build_all_names() -> HashSet<&'static str> {
         "aura.lang.std.println",
         "aura.lang.std.print",
         "aura.lang.std.puts",
+        "aura.lang.std.fnIndex",
         "aura.lang.std.abs",
         "aura.lang.std.sqrt",
         "aura.lang.std.pow",
@@ -283,26 +295,141 @@ fn build_all_names() -> HashSet<&'static str> {
 
     // ── aura.lang.std.{Coroutine,Actor,Channel}.* — 协程 / Actor / 通道（native.rs 注册）──
     for n in [
-        "aura.lang.std.Coroutine.spawn",
-        "aura.lang.std.Coroutine.ask",
-        "aura.lang.std.Actor.send",
-        "aura.lang.std.Actor.reply",
-        "aura.lang.std.Actor.spawnActor",
-        "aura.lang.std.Actor.supervise",
-        "aura.lang.std.Actor.actorAlive",
-        "aura.lang.std.Actor.spawnActorProcess",
-        "aura.lang.std.Actor.sendProcessActor",
-        "aura.lang.std.Actor.recvProcessActor",
-        "aura.lang.std.Actor.processActorAlive",
-        "aura.lang.std.Actor.killProcessActor",
-        "aura.lang.std.Channel.newChannel",
-        "aura.lang.std.Channel.channelSend",
-        "aura.lang.std.Channel.channelRecv",
-        "aura.lang.std.Channel.channelTryRecv",
-        "aura.lang.std.Channel.select",
-        "aura.lang.std.Channel.selectTimeout",
-        "aura.lang.std.Channel.newTcpChannel",
-        "aura.lang.std.Channel.tcpChannelSend",
+        "aura.lang.concurrent.Coroutine.spawn",
+        "aura.lang.concurrent.Coroutine.ask",
+        // Coroutine Thread 原语包装方法
+        "aura.lang.concurrent.Coroutine.spawnThread",
+        "aura.lang.concurrent.Coroutine.joinThread",
+        "aura.lang.concurrent.Coroutine.sleep",
+        "aura.lang.concurrent.Coroutine.threadId",
+        "aura.lang.concurrent.Coroutine.parallelism",
+        "aura.lang.concurrent.Coroutine.availableCores",
+        "aura.lang.concurrent.Coroutine.newMutex",
+        "aura.lang.concurrent.Coroutine.lockMutex",
+        "aura.lang.concurrent.Coroutine.unlockMutex",
+        "aura.lang.concurrent.Coroutine.tryLockMutex",
+        "aura.lang.concurrent.Coroutine.destroyMutex",
+        "aura.lang.concurrent.Coroutine.newAtomic",
+        "aura.lang.concurrent.Coroutine.atomicLoad",
+        "aura.lang.concurrent.Coroutine.atomicStore",
+        "aura.lang.concurrent.Coroutine.atomicAdd",
+        "aura.lang.concurrent.Coroutine.atomicSub",
+        "aura.lang.concurrent.Coroutine.atomicCas",
+        "aura.lang.concurrent.Coroutine.spawnFuture",
+        "aura.lang.concurrent.Coroutine.awaitFuture",
+        "aura.lang.concurrent.Coroutine.isFutureDone",
+        "aura.lang.concurrent.Coroutine.awaitAllFuture",
+        "aura.lang.concurrent.Coroutine.cancelFuture",
+        "aura.lang.concurrent.Actor.send",
+        "aura.lang.concurrent.Actor.reply",
+        "aura.lang.concurrent.Actor.spawnActor",
+        "aura.lang.concurrent.Actor.supervise",
+        "aura.lang.concurrent.Actor.actorAlive",
+        "aura.lang.concurrent.Actor.spawnActorProcess",
+        "aura.lang.concurrent.Actor.sendProcessActor",
+        "aura.lang.concurrent.Actor.recvProcessActor",
+        "aura.lang.concurrent.Actor.processActorAlive",
+        "aura.lang.concurrent.Actor.killProcessActor",
+        "aura.lang.concurrent.Channel.newChannel",
+        "aura.lang.concurrent.Channel.channelSend",
+        "aura.lang.concurrent.Channel.channelRecv",
+        "aura.lang.concurrent.Channel.channelTryRecv",
+        "aura.lang.concurrent.Channel.select",
+        "aura.lang.concurrent.Channel.selectTimeout",
+        "aura.lang.concurrent.Channel.newTcpChannel",
+        "aura.lang.concurrent.Channel.tcpChannelSend",
+    ] {
+        s.insert(n);
+    }
+
+    // ── aura.lang.concurrent.Thread.* — 线程原语（concurrent_native.rs 注册）──
+    for n in [
+        "aura.lang.concurrent.Thread.spawn",
+        "aura.lang.concurrent.Thread.join",
+        "aura.lang.concurrent.Thread.sleep",
+        "aura.lang.concurrent.Thread.id",
+        "aura.lang.concurrent.Thread.parallelism",
+        "aura.lang.concurrent.Thread.availableCores",
+    ] {
+        s.insert(n);
+    }
+
+    // ── aura.lang.concurrent.Mutex.* — 互斥锁（concurrent_native.rs 注册）──
+    for n in [
+        "aura.lang.concurrent.Mutex.new",
+        "aura.lang.concurrent.Mutex.lock",
+        "aura.lang.concurrent.Mutex.unlock",
+        "aura.lang.concurrent.Mutex.tryLock",
+        "aura.lang.concurrent.Mutex.destroy",
+    ] {
+        s.insert(n);
+    }
+
+    // ── aura.lang.concurrent.Atomic.* — 原子整数（concurrent_native.rs 注册）──
+    for n in [
+        "aura.lang.concurrent.Atomic.new",
+        "aura.lang.concurrent.Atomic.load",
+        "aura.lang.concurrent.Atomic.store",
+        "aura.lang.concurrent.Atomic.add",
+        "aura.lang.concurrent.Atomic.sub",
+        "aura.lang.concurrent.Atomic.cas",
+        "aura.lang.concurrent.Atomic.destroy",
+    ] {
+        s.insert(n);
+    }
+
+    // ── aura.lang.concurrent.RwLock.* — 读写锁（concurrent_native.rs 注册）──
+    for n in [
+        "aura.lang.concurrent.RwLock.new",
+        "aura.lang.concurrent.RwLock.readLock",
+        "aura.lang.concurrent.RwLock.writeLock",
+        "aura.lang.concurrent.RwLock.readUnlock",
+        "aura.lang.concurrent.RwLock.writeUnlock",
+        "aura.lang.concurrent.RwLock.destroy",
+    ] {
+        s.insert(n);
+    }
+
+    // ── aura.lang.concurrent.Condvar.* — 条件变量（concurrent_native.rs 注册）──
+    for n in [
+        "aura.lang.concurrent.Condvar.new",
+        "aura.lang.concurrent.Condvar.wait",
+        "aura.lang.concurrent.Condvar.signal",
+        "aura.lang.concurrent.Condvar.broadcast",
+        "aura.lang.concurrent.Condvar.destroy",
+    ] {
+        s.insert(n);
+    }
+
+    // ── aura.lang.concurrent.Barrier.* — 屏障（concurrent_native.rs 注册）──
+    for n in [
+        "aura.lang.concurrent.Barrier.new",
+        "aura.lang.concurrent.Barrier.wait",
+        "aura.lang.concurrent.Barrier.destroy",
+    ] {
+        s.insert(n);
+    }
+
+    // ── aura.lang.concurrent.Future.* — 异步 Future（concurrent_native.rs 注册）──
+    for n in [
+        "aura.lang.concurrent.Future.spawn",
+        "aura.lang.concurrent.Future.await",
+        "aura.lang.concurrent.Future.isDone",
+        "aura.lang.concurrent.Future.all",
+        "aura.lang.concurrent.Future.any",
+        "aura.lang.concurrent.Future.cancel",
+    ] {
+        s.insert(n);
+    }
+
+    // ── aura.lang.concurrent.Semaphore.* — 信号量（纯 Aura 实现）──
+    for n in [
+        "aura.lang.concurrent.Semaphore.new",
+        "aura.lang.concurrent.Semaphore.acquire",
+        "aura.lang.concurrent.Semaphore.tryAcquire",
+        "aura.lang.concurrent.Semaphore.release",
+        "aura.lang.concurrent.Semaphore.count",
+        "aura.lang.concurrent.Semaphore.destroy",
     ] {
         s.insert(n);
     }
@@ -775,6 +902,138 @@ fn build_all_names() -> HashSet<&'static str> {
         s.insert(n);
     }
 
+    // ── aura.lang.native.math.MathOps.* — 纯 Aura 数学运算（MathOps.aura）──
+    for n in [
+        "aura.lang.native.math.MathOps.fabs",
+        "aura.lang.native.math.MathOps.fmax",
+        "aura.lang.native.math.MathOps.fmin",
+        "aura.lang.native.math.MathOps.floor",
+        "aura.lang.native.math.MathOps.ceil",
+        "aura.lang.native.math.MathOps.trunc",
+        "aura.lang.native.math.MathOps.round",
+        "aura.lang.native.math.MathOps.sqrt",
+        "aura.lang.native.math.MathOps.cbrt",
+        "aura.lang.native.math.MathOps.pow",
+        "aura.lang.native.math.MathOps.exp_fn",
+        "aura.lang.native.math.MathOps.log",
+        "aura.lang.native.math.MathOps.log2",
+        "aura.lang.native.math.MathOps.log10",
+        "aura.lang.native.math.MathOps.sin",
+        "aura.lang.native.math.MathOps.cos",
+        "aura.lang.native.math.MathOps.tan",
+        "aura.lang.native.math.MathOps.asin",
+        "aura.lang.native.math.MathOps.acos",
+        "aura.lang.native.math.MathOps.atan",
+        "aura.lang.native.math.MathOps.atan2",
+    ] {
+        s.insert(n);
+    }
+
+    // ── aura.lang.native.io.Stdio.* — 纯 Aura IO 操作（Stdio.aura）──
+    for n in [
+        "aura.lang.native.io.Stdio.stringToBuffer",
+        "aura.lang.native.io.Stdio.bufferToString",
+        "aura.lang.native.io.Stdio.strlen",
+        "aura.lang.native.io.Stdio.println",
+        "aura.lang.native.io.Stdio.print",
+        "aura.lang.native.io.Stdio.flush",
+        "aura.lang.native.io.Stdio.readLine",
+        "aura.lang.native.io.Stdio.readAll",
+        "aura.lang.native.io.Stdio.readFile",
+        "aura.lang.native.io.Stdio.writeFile",
+        "aura.lang.native.io.Stdio.fileExists",
+    ] {
+        s.insert(n);
+    }
+
+    // ── aura.lang.native.file.FileOps.* — 纯 Aura 文件操作（FileOps.aura）──
+    for n in [
+        "aura.lang.native.file.FileOps.open",
+        "aura.lang.native.file.FileOps.close",
+        "aura.lang.native.file.FileOps.read",
+        "aura.lang.native.file.FileOps.write",
+        "aura.lang.native.file.FileOps.lseek",
+        "aura.lang.native.file.FileOps.fstat",
+        "aura.lang.native.file.FileOps.unlink",
+        "aura.lang.native.file.FileOps.access",
+        "aura.lang.native.file.FileOps.openFile",
+        "aura.lang.native.file.FileOps.closeFile",
+        "aura.lang.native.file.FileOps.readFile",
+        "aura.lang.native.file.FileOps.writeFile",
+        "aura.lang.native.file.FileOps.seekFile",
+        "aura.lang.native.file.FileOps.statFile",
+        "aura.lang.native.file.FileOps.deleteFile",
+        "aura.lang.native.file.FileOps.exists",
+    ] {
+        s.insert(n);
+    }
+
+    // ── aura.lang.native.env.EnvOps.* — 纯 Aura 环境变量（EnvOps.aura）──
+    for n in [
+        "aura.lang.native.env.EnvOps.readEnviron",
+        "aura.lang.native.env.EnvOps.findEnv",
+        "aura.lang.native.env.EnvOps.findChar",
+        "aura.lang.native.env.EnvOps.get",
+        "aura.lang.native.env.EnvOps.has",
+        "aura.lang.native.env.EnvOps.keys",
+        "aura.lang.native.env.EnvOps.values",
+        "aura.lang.native.env.EnvOps.home",
+        "aura.lang.native.env.EnvOps.tmp",
+        "aura.lang.native.env.EnvOps.pwd",
+        "aura.lang.native.env.EnvOps.platform",
+        "aura.lang.native.env.EnvOps.arch",
+        "aura.lang.native.env.EnvOps.set",
+        "aura.lang.native.env.EnvOps.remove",
+    ] {
+        s.insert(n);
+    }
+
+    // ── aura.lang.native.network.NetworkOps.* — 纯 Aura 网络操作（NetworkOps.aura）──
+    for n in [
+        "aura.lang.native.network.NetworkOps.socket",
+        "aura.lang.native.network.NetworkOps.close",
+        "aura.lang.native.network.NetworkOps.connect",
+        "aura.lang.native.network.NetworkOps.bind",
+        "aura.lang.native.network.NetworkOps.listen",
+        "aura.lang.native.network.NetworkOps.accept",
+        "aura.lang.native.network.NetworkOps.sendto",
+        "aura.lang.native.network.NetworkOps.recvfrom",
+        "aura.lang.native.network.NetworkOps.tcpSend",
+        "aura.lang.native.network.NetworkOps.tcpRecv",
+    ] {
+        s.insert(n);
+    }
+
+    // ── aura.lang.native.console.Console.* — 纯 Aura 控制台（Console.aura）──
+    for n in [
+        "aura.lang.native.console.Console.writeStdout",
+        "aura.lang.native.console.Console.init",
+        "aura.lang.native.console.Console.print",
+        "aura.lang.native.console.Console.println",
+        "aura.lang.native.console.Console.printlnInt",
+        "aura.lang.native.console.Console.printInt",
+        "aura.lang.native.console.Console.printlnFloat",
+        "aura.lang.native.console.Console.getNewlineBuffer",
+        "aura.lang.native.console.Console.getIntBuffer",
+        "aura.lang.native.console.Console.intToStr",
+    ] {
+        s.insert(n);
+    }
+
+    // ── aura.lang.native.time.Clock.* — 纯 Aura 时钟（Clock.aura）──
+    for n in [
+        "aura.lang.native.time.Clock.timestamp",
+        "aura.lang.native.time.Clock.clockGettime",
+        "aura.lang.native.time.Clock.init",
+        "aura.lang.native.time.Clock.now",
+        "aura.lang.native.time.Clock.timeMs",
+        "aura.lang.native.time.Clock.timeUs",
+        "aura.lang.native.time.Clock.timeNs",
+        "aura.lang.native.time.Clock.sleep",
+    ] {
+        s.insert(n);
+    }
+
     s
 }
 
@@ -796,9 +1055,9 @@ mod tests {
     fn test_is_builtin_basic() {
         assert!(is_builtin("println"));
         assert!(is_builtin("aura.lang.std.Math.sin"));
-        assert!(is_builtin("aura.lang.std.Coroutine.spawn"));
-        assert!(is_builtin("aura.lang.std.Actor.send"));
-        assert!(is_builtin("aura.lang.std.Channel.newChannel"));
+        assert!(is_builtin("aura.lang.concurrent.Coroutine.spawn"));
+        assert!(is_builtin("aura.lang.concurrent.Actor.send"));
+        assert!(is_builtin("aura.lang.concurrent.Channel.newChannel"));
         assert!(!is_builtin("myFunction"));
         assert!(!is_builtin(""));
     }
@@ -827,8 +1086,15 @@ mod tests {
         assert!(names.iter().any(|n| n.starts_with("aura.lang.std.StringBuilder.")));
         assert!(names.iter().any(|n| n.starts_with("aura.lang.std.Test.")));
         assert!(names.iter().any(|n| n.starts_with("aura.lang.std.Time.")));
-        assert!(names.iter().any(|n| n.starts_with("aura.lang.std.Coroutine.")));
-        assert!(names.iter().any(|n| n.starts_with("aura.lang.std.Actor.")));
-        assert!(names.iter().any(|n| n.starts_with("aura.lang.std.Channel.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.concurrent.Coroutine.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.concurrent.Actor.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.concurrent.Channel.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.concurrent.Thread.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.concurrent.Mutex.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.concurrent.Atomic.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.concurrent.RwLock.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.concurrent.Condvar.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.concurrent.Barrier.")));
+        assert!(names.iter().any(|n| n.starts_with("aura.lang.concurrent.Future.")));
     }
 }

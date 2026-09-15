@@ -1,14 +1,25 @@
 // aura:///aura/lang/std/Time.aura
 package aura.lang.std
 // 标准库模块，不可修改
-// 实现：时钟/休眠等 syscall 成员保留 native（Layer 0-A）；
-//       时间差、日期换算、格式化与解析全部以 Aura 编写（Layer 1）
-// (package 声明由编译器自动注入，无需显式声明)
+//
+// 实现策略：
+// - 全部以 Aura 编写，不使用 extern "C" 或 Rust cffi。
+// - 时钟/休眠委托到 aura.lang.native.time.Clock（使用 clock_gettime syscall）。
+// - 时间差、日期换算、格式化与解析全部以 Aura 编写。
+//
+// 使用前需 import：
+// ```aura
+// import aura.lang.std.Time
+// ```
+//
+// @since 0.1
+
+import aura.lang.native.time.Clock
+
 /// 时间模块。
 ///
 /// 时间戳统一使用 Unix 纪元（1970-01-01 00:00:00 UTC）以来的秒数。
-/// 日期换算采用纯 Aura 的儒略日算法实现，不依赖任何 native 函数；
-/// 只有"取当前时间"与"休眠"需要访问操作系统，属于引导层。
+/// 日期换算采用纯 Aura 的儒略日算法实现，不依赖任何外部库。
 ///
 /// 使用前需 import：
 /// ```aura
@@ -16,7 +27,7 @@ package aura.lang.std
 /// ```
 ///
 /// @since 0.1
-internal object Time {
+object Time {
 
     // ── 常量 ──
 
@@ -29,21 +40,35 @@ internal object Time {
     /// 一分钟的秒数。
     const val SECONDS_PER_MINUTE: Int = 60
 
-    // ── 时间戳（native：需要访问系统时钟）──
+    // ── 时间戳（委托到 native.time.Clock）──
 
     /// 获取当前 Unix 时间戳（秒，浮点数）。
-    val now: Float
+    val now: Float = getNow()
 
     /// 获取当前 Unix 时间戳（秒，整数）。
-    val epoch: Int
+    val epoch: Int = getNow() as Int
 
     /// 获取当前 Unix 时间戳（毫秒，整数）。
-    val currentTime: Int
+    val currentTime: Int = getNowMs() as Int
 
-    // ── 休眠（native：需要访问操作系统调度）──
+    /// 获取当前时间戳（秒，浮点数）。
+    fun getNow(): Float {
+        val t: Clock.Time = Clock.now()
+        return t.timestamp()
+    }
+
+    /// 获取当前时间戳（毫秒）。
+    fun getNowMs(): Int {
+        return Clock.timeMs() as Int
+    }
+
+    // ── 休眠（委托到 native.time.Clock）──
 
     /// 休眠指定秒数。
-    fun sleep(seconds: Float): Unit
+    fun sleep(seconds: Float): Unit {
+        val ms: Int = (seconds * 1000.0f) as Int
+        Clock.sleep(ms as Long)
+    }
 
     // ── 时间差（纯逻辑，Aura 实现）──
 
@@ -139,9 +164,9 @@ internal object Time {
         if (text.length < 10) {
             return -1
         }
-        val year: Int = toInt(text.substring(0, 4))
-        val month: Int = toInt(text.substring(5, 7))
-        val day: Int = toInt(text.substring(8, 10))
+        val year: Int = text.substring(0, 4).toInt()
+        val month: Int = text.substring(5, 7).toInt()
+        val day: Int = text.substring(8, 10).toInt()
         if (month < 1 || month > 12) {
             return -1
         }
@@ -150,9 +175,9 @@ internal object Time {
         }
         var seconds: Int = daysFromCivil(year, month, day) * SECONDS_PER_DAY
         if (text.length >= 19) {
-            val hour: Int = toInt(text.substring(11, 13))
-            val minute: Int = toInt(text.substring(14, 16))
-            val second: Int = toInt(text.substring(17, 19))
+            val hour: Int = text.substring(11, 13).toInt()
+            val minute: Int = text.substring(14, 16).toInt()
+            val second: Int = text.substring(17, 19).toInt()
             seconds = seconds + hour * SECONDS_PER_HOUR + minute * SECONDS_PER_MINUTE + second
         }
         return seconds
@@ -162,11 +187,11 @@ internal object Time {
     fun isLeapYear(year: Int): Boolean {
         if (year % 400 == 0) {
             return true
-        }
-        if (year % 100 == 0) {
+        } else if (year % 100 == 0) {
             return false
+        } else {
+            return year % 4 == 0
         }
-        return year % 4 == 0
     }
 
     // ── 内部工具（纯逻辑，Aura 实现）──

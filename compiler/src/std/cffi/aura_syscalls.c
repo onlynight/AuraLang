@@ -293,6 +293,29 @@ int64_t aura_cpu_atomic_add(int64_t addr, int64_t delta) {
     return old_val;
 }
 
+#elif defined(AURA_PLATFORM_WINDOWS)
+
+#include <intrin.h>
+
+/** Cpu.rdtsc() — 读取时间戳计数器 */
+int64_t aura_cpu_rdtsc(void) {
+    return (int64_t)__rdtsc();
+}
+
+/** Cpu.memFence() — 内存屏障 */
+void aura_cpu_mem_fence(void) {
+    _mm_mfence();
+}
+
+/** Cpu.atomicAdd(addr, delta) — 原子加法（返回旧值）
+ *
+ *  供 aura.lang.concurrent 的纯 Aura 同步原语（自旋锁）使用；
+ *  Windows 下通过 InterlockedExchangeAdd64 提供与 Linux `lock xaddq` 一致语义。 */
+int64_t aura_cpu_atomic_add(int64_t addr, int64_t delta) {
+    return (int64_t)_InterlockedExchangeAdd64(
+        (volatile __int64 *)(uintptr_t)addr, (__int64)delta);
+}
+
 #else
 
 int64_t aura_cpu_rdtsc(void) { return 0; }
@@ -309,7 +332,12 @@ int64_t aura_cpu_atomic_add(int64_t addr, int64_t delta) {
 
 #if defined(AURA_PLATFORM_LINUX) || defined(AURA_PLATFORM_MACOS)
 
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200112L
+#endif
 #include <pthread.h>
+#include <time.h>
+#include <unistd.h>
 
 /** Thread.create(fn, arg) — 创建新线程，返回线程句柄 */
 int64_t aura_thread_create(int64_t (*fn)(void *), int64_t arg) {
@@ -386,9 +414,170 @@ void aura_condvar_destroy(int64_t id) {
     }
 }
 
+/** Mutex.tryLock(id) — 尝试加锁（非阻塞），1=成功, 0=失败 */
+int aura_mutex_trylock(int64_t id) {
+    if (id <= 0) return 0;
+    return pthread_mutex_trylock((pthread_mutex_t *)(uintptr_t)id) == 0 ? 1 : 0;
+}
+
+/** Thread.sleep(ms) — 休眠指定毫秒 */
+void aura_thread_sleep(int64_t ms) {
+    if (ms <= 0) return;
+    struct timespec ts;
+    ts.tv_sec  = (time_t)(ms / 1000);
+    ts.tv_nsec = (long)(ms % 1000) * 1000000L;
+    nanosleep(&ts, NULL);
+}
+
+/** Thread.id() — 获取当前线程 ID */
+int64_t aura_thread_id(void) {
+    return (int64_t)(uintptr_t)pthread_self();
+}
+
+/** Thread.availableParallelism() — 获取可用并行度（CPU 核心数） */
+int64_t aura_thread_available_parallelism(void) {
+    return (int64_t)sysconf(_SC_NPROCESSORS_ONLN);
+}
+
+/* ── RwLock ── */
+
+/** RwLock.new() — 创建读写锁，返回句柄 */
+int64_t aura_rwlock_new(void) {
+    pthread_rwlock_t *rw = malloc(sizeof(pthread_rwlock_t));
+    if (rw) pthread_rwlock_init(rw, NULL);
+    return (int64_t)(uintptr_t)rw;
+}
+
+/** RwLock.readLock(id) — 获取读锁 */
+void aura_rwlock_read_lock(int64_t id) {
+    if (id > 0) pthread_rwlock_rdlock((pthread_rwlock_t *)(uintptr_t)id);
+}
+
+/** RwLock.writeLock(id) — 获取写锁 */
+void aura_rwlock_write_lock(int64_t id) {
+    if (id > 0) pthread_rwlock_wrlock((pthread_rwlock_t *)(uintptr_t)id);
+}
+
+/** RwLock.readUnlock(id) — 释放读锁 */
+void aura_rwlock_read_unlock(int64_t id) {
+    if (id > 0) pthread_rwlock_unlock((pthread_rwlock_t *)(uintptr_t)id);
+}
+
+/** RwLock.writeUnlock(id) — 释放写锁 */
+void aura_rwlock_write_unlock(int64_t id) {
+    if (id > 0) pthread_rwlock_unlock((pthread_rwlock_t *)(uintptr_t)id);
+}
+
+/** RwLock.destroy(id) — 销毁读写锁 */
+void aura_rwlock_destroy(int64_t id) {
+    if (id > 0) {
+        pthread_rwlock_t *rw = (pthread_rwlock_t *)(uintptr_t)id;
+        pthread_rwlock_destroy(rw);
+        free(rw);
+    }
+}
+
+/* ── 原子操作（跨平台） ── */
+
+/** Atomic.load(addr) — 原子读取 */
+int64_t aura_atomic_load(volatile int64_t *addr) {
+    return __atomic_load_n(addr, __ATOMIC_SEQ_CST);
+}
+
+/** Atomic.store(addr, val) — 原子写入 */
+void aura_atomic_store(volatile int64_t *addr, int64_t val) {
+    __atomic_store_n(addr, val, __ATOMIC_SEQ_CST);
+}
+
+/** Atomic.add(addr, delta) — 原子加法，返回旧值 */
+int64_t aura_atomic_add(volatile int64_t *addr, int64_t delta) {
+    return __atomic_fetch_add(addr, delta, __ATOMIC_SEQ_CST);
+}
+
+/** Atomic.sub(addr, delta) — 原子减法，返回旧值 */
+int64_t aura_atomic_sub(volatile int64_t *addr, int64_t delta) {
+    return __atomic_fetch_sub(addr, delta, __ATOMIC_SEQ_CST);
+}
+
+/** Atomic.addAndGet(addr, delta) — 原子加法，返回新值 */
+int64_t aura_atomic_add_and_get(volatile int64_t *addr, int64_t delta) {
+    return __atomic_add_fetch(addr, delta, __ATOMIC_SEQ_CST);
+}
+
+/** Atomic.getAndAdd(addr, delta) — 原子加法，返回旧值（= atomicAdd） */
+int64_t aura_atomic_get_and_add(volatile int64_t *addr, int64_t delta) {
+    return __atomic_fetch_add(addr, delta, __ATOMIC_SEQ_CST);
+}
+
+/** Atomic.compareAndSet(addr, expected, desired) — CAS，返回是否成功 */
+int aura_atomic_cas(volatile int64_t *addr, int64_t expected, int64_t desired) {
+    return __atomic_compare_exchange(addr, &expected, &desired, 0,
+                                       __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
+
+/** Atomic.compareAndSwap(addr, expected, desired) — CAS，返回旧值 */
+int64_t aura_atomic_compare_and_swap(volatile int64_t *addr, int64_t expected, int64_t desired) {
+    int64_t old = expected;
+    __atomic_compare_exchange(addr, &old, &desired, 0,
+                               __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    return old;
+}
+
+/* ── Barrier ── */
+
+/** Barrier.new(count) — 创建屏障，count 为需要等待的线程数 */
+int64_t aura_barrier_new(int64_t count) {
+    pthread_barrier_t *bar = malloc(sizeof(pthread_barrier_t));
+    if (bar) pthread_barrier_init(bar, NULL, (unsigned int)count);
+    return (int64_t)(uintptr_t)bar;
+}
+
+/** Barrier.wait(id) — 等待所有线程到达屏障，返回到达序号 */
+int64_t aura_barrier_wait(int64_t id) {
+    if (id <= 0) return 0;
+    return (int64_t)pthread_barrier_wait((pthread_barrier_t *)(uintptr_t)id);
+}
+
+/** Barrier.destroy(id) — 销毁屏障 */
+void aura_barrier_destroy(int64_t id) {
+    if (id > 0) {
+        pthread_barrier_t *bar = (pthread_barrier_t *)(uintptr_t)id;
+        pthread_barrier_destroy(bar);
+        free(bar);
+    }
+}
+
+/* ── TLS（线程本地存储） ── */
+
+static pthread_key_t aura_tls_keys[64];
+static int aura_tls_key_count = 0;
+
+/** TLS.keyCreate() — 创建线程本地存储 key，返回 key 索引 */
+int64_t aura_tls_key_create(void) {
+    if (aura_tls_key_count >= 64) return -1;
+    pthread_key_t key;
+    if (pthread_key_create(&key, NULL) != 0) return -1;
+    aura_tls_keys[aura_tls_key_count] = key;
+    return (int64_t)(aura_tls_key_count++);
+}
+
+/** TLS.get(keyIdx) — 获取当前线程的 TLS 值 */
+int64_t aura_tls_get(int64_t keyIdx) {
+    if (keyIdx < 0 || keyIdx >= aura_tls_key_count) return 0;
+    void *val = pthread_getspecific(aura_tls_keys[keyIdx]);
+    return (int64_t)(uintptr_t)val;
+}
+
+/** TLS.set(keyIdx, val) — 设置当前线程的 TLS 值 */
+void aura_tls_set(int64_t keyIdx, int64_t val) {
+    if (keyIdx < 0 || keyIdx >= aura_tls_key_count) return;
+    pthread_setspecific(aura_tls_keys[keyIdx], (void *)(uintptr_t)val);
+}
+
 #elif defined(_WIN32)
 
 #include <windows.h>
+#include <intrin.h>
 
 typedef DWORD (*ThreadFn)(LPVOID);
 
@@ -460,6 +649,176 @@ void aura_condvar_destroy(int64_t id) {
     if (id > 0) CloseHandle((HANDLE)(uintptr_t)id);
 }
 
+/** Mutex.tryLock(id) — 尝试进入临界区（非阻塞），1=成功, 0=失败 */
+int aura_mutex_trylock(int64_t id) {
+    if (id <= 0) return 0;
+    return TryEnterCriticalSection((CRITICAL_SECTION *)(uintptr_t)id) ? 1 : 0;
+}
+
+/** Thread.sleep(ms) — 休眠指定毫秒 */
+void aura_thread_sleep(int64_t ms) {
+    if (ms <= 0) return;
+    Sleep((DWORD)ms);
+}
+
+/** Thread.id() — 获取当前线程 ID */
+int64_t aura_thread_id(void) {
+    return (int64_t)(uintptr_t)GetCurrentThreadId();
+}
+
+/** Thread.availableParallelism() — 获取可用并行度 */
+int64_t aura_thread_available_parallelism(void) {
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    return (int64_t)si.dwNumberOfProcessors;
+}
+
+/* ── RwLock（使用 SRWLOCK） ── */
+
+/** RwLock.new() — 创建读写锁 */
+int64_t aura_rwlock_new(void) {
+    SRWLOCK *rw = (SRWLOCK *)malloc(sizeof(SRWLOCK));
+    if (rw) InitializeSRWLock(rw);
+    return (int64_t)(uintptr_t)rw;
+}
+
+/** RwLock.readLock(id) — 获取读锁 */
+void aura_rwlock_read_lock(int64_t id) {
+    if (id > 0) AcquireSRWLockShared((SRWLOCK *)(uintptr_t)id);
+}
+
+/** RwLock.writeLock(id) — 获取写锁 */
+void aura_rwlock_write_lock(int64_t id) {
+    if (id > 0) AcquireSRWLockExclusive((SRWLOCK *)(uintptr_t)id);
+}
+
+/** RwLock.readUnlock(id) — 释放读锁 */
+void aura_rwlock_read_unlock(int64_t id) {
+    if (id > 0) ReleaseSRWLockShared((SRWLOCK *)(uintptr_t)id);
+}
+
+/** RwLock.writeUnlock(id) — 释放写锁 */
+void aura_rwlock_write_unlock(int64_t id) {
+    if (id > 0) ReleaseSRWLockExclusive((SRWLOCK *)(uintptr_t)id);
+}
+
+/** RwLock.destroy(id) — 销毁读写锁 */
+void aura_rwlock_destroy(int64_t id) {
+    if (id > 0) free((void *)(uintptr_t)id);
+}
+
+/* ── 原子操作（Windows Interlocked*） ── */
+
+int64_t aura_atomic_load(volatile int64_t *addr) {
+    // 64-bit 对齐读在 x86 上是原子的；用 volatile 防止优化
+    return *(volatile int64_t *)addr;
+}
+
+void aura_atomic_store(volatile int64_t *addr, int64_t val) {
+    // 64-bit 对齐写在 x86 上是原子的
+    *(volatile int64_t *)addr = val;
+}
+
+int64_t aura_atomic_add(volatile int64_t *addr, int64_t delta) {
+    return InterlockedAdd64((volatile LONG64 *)addr, (LONG64)delta);
+}
+
+int64_t aura_atomic_sub(volatile int64_t *addr, int64_t delta) {
+    return InterlockedAdd64((volatile LONG64 *)addr, (LONG64)(-delta));
+}
+
+int64_t aura_atomic_add_and_get(volatile int64_t *addr, int64_t delta) {
+    LONG64 prev = InterlockedAdd64((volatile LONG64 *)addr, (LONG64)delta);
+    return prev + (LONG64)delta;  // 返回新值
+}
+
+int64_t aura_atomic_get_and_add(volatile int64_t *addr, int64_t delta) {
+    return InterlockedAdd64((volatile LONG64 *)addr, (LONG64)delta);
+}
+
+int aura_atomic_cas(volatile int64_t *addr, int64_t expected, int64_t desired) {
+    return (int)(InterlockedCompareExchange64((volatile LONG64 *)addr,
+            (LONG64)desired, (LONG64)expected) == (LONG64)expected);
+}
+
+int64_t aura_atomic_compare_and_swap(volatile int64_t *addr, int64_t expected, int64_t desired) {
+    return InterlockedCompareExchange64((volatile LONG64 *)addr,
+            (LONG64)desired, (LONG64)expected);
+}
+
+/* ── Barrier（手动实现） ── */
+
+typedef struct {
+    int64_t count;
+    int64_t arrived;
+    CRITICAL_SECTION cs;
+    HANDLE event;
+    int64_t generation;
+} AuraBarrier;
+
+int64_t aura_barrier_new(int64_t count) {
+    AuraBarrier *bar = (AuraBarrier *)malloc(sizeof(AuraBarrier));
+    if (!bar) return 0;
+    bar->count = count;
+    bar->arrived = 0;
+    bar->generation = 0;
+    InitializeCriticalSection(&bar->cs);
+    bar->event = CreateEvent(NULL, TRUE, FALSE, NULL);  // manual reset
+    if (!bar->event) { free(bar); return 0; }
+    return (int64_t)(uintptr_t)bar;
+}
+
+int64_t aura_barrier_wait(int64_t id) {
+    if (id <= 0) return 0;
+    AuraBarrier *bar = (AuraBarrier *)(uintptr_t)id;
+    int64_t gen;
+    EnterCriticalSection(&bar->cs);
+    bar->arrived++;
+    if (bar->arrived >= bar->count) {
+        bar->arrived = 0;
+        bar->generation++;
+        SetEvent(bar->event);
+        LeaveCriticalSection(&bar->cs);
+        return 0;  // 最后一个线程返回 0
+    }
+    gen = bar->generation;
+    LeaveCriticalSection(&bar->cs);
+    // 等待当前 generation 的 event
+    WaitForSingleObject(bar->event, INFINITE);
+    return gen;
+}
+
+void aura_barrier_destroy(int64_t id) {
+    if (id <= 0) return;
+    AuraBarrier *bar = (AuraBarrier *)(uintptr_t)id;
+    CloseHandle(bar->event);
+    DeleteCriticalSection(&bar->cs);
+    free(bar);
+}
+
+/* ── TLS（线程本地存储） ── */
+
+static DWORD aura_tls_keys[64];
+static int aura_tls_key_count = 0;
+
+int64_t aura_tls_key_create(void) {
+    if (aura_tls_key_count >= 64) return -1;
+    DWORD key = TlsAlloc();
+    if (key == TLS_OUT_OF_INDEXES) return -1;
+    aura_tls_keys[aura_tls_key_count] = key;
+    return (int64_t)(aura_tls_key_count++);
+}
+
+int64_t aura_tls_get(int64_t keyIdx) {
+    if (keyIdx < 0 || keyIdx >= aura_tls_key_count) return 0;
+    return (int64_t)(uintptr_t)TlsGetValue(aura_tls_keys[keyIdx]);
+}
+
+void aura_tls_set(int64_t keyIdx, int64_t val) {
+    if (keyIdx < 0 || keyIdx >= aura_tls_key_count) return;
+    TlsSetValue(aura_tls_keys[keyIdx], (LPVOID)(uintptr_t)val);
+}
+
 #else
 
 /* 非 Linux/macOS/Windows 平台：返回空实现 */
@@ -467,10 +826,34 @@ int64_t aura_thread_create(int64_t (*fn)(void *), int64_t arg) {
     (void)fn; (void)arg; return -1;
 }
 void aura_thread_join(int64_t id) { (void)id; }
+void aura_thread_sleep(int64_t ms) { (void)ms; }
+int64_t aura_thread_id(void) { return 0; }
+int64_t aura_thread_available_parallelism(void) { return 1; }
 int64_t aura_mutex_new(void) { return 0; }
 void aura_mutex_lock(int64_t id) { (void)id; }
 void aura_mutex_unlock(int64_t id) { (void)id; }
 void aura_mutex_destroy(int64_t id) { (void)id; }
+int aura_mutex_trylock(int64_t id) { (void)id; return 0; }
+int64_t aura_rwlock_new(void) { return 0; }
+void aura_rwlock_read_lock(int64_t id) { (void)id; }
+void aura_rwlock_write_lock(int64_t id) { (void)id; }
+void aura_rwlock_read_unlock(int64_t id) { (void)id; }
+void aura_rwlock_write_unlock(int64_t id) { (void)id; }
+void aura_rwlock_destroy(int64_t id) { (void)id; }
+int64_t aura_atomic_load(volatile int64_t *addr) { return *addr; }
+void aura_atomic_store(volatile int64_t *addr, int64_t val) { *addr = val; }
+int64_t aura_atomic_add(volatile int64_t *addr, int64_t delta) { return *addr; }
+int64_t aura_atomic_sub(volatile int64_t *addr, int64_t delta) { return *addr; }
+int64_t aura_atomic_add_and_get(volatile int64_t *addr, int64_t delta) { return *addr; }
+int64_t aura_atomic_get_and_add(volatile int64_t *addr, int64_t delta) { return *addr; }
+int aura_atomic_cas(volatile int64_t *addr, int64_t expected, int64_t desired) { (void)addr; (void)expected; (void)desired; return 0; }
+int64_t aura_atomic_compare_and_swap(volatile int64_t *addr, int64_t expected, int64_t desired) { (void)addr; (void)expected; (void)desired; return 0; }
+int64_t aura_barrier_new(int64_t count) { (void)count; return 0; }
+int64_t aura_barrier_wait(int64_t id) { (void)id; return 0; }
+void aura_barrier_destroy(int64_t id) { (void)id; }
+int64_t aura_tls_key_create(void) { return -1; }
+int64_t aura_tls_get(int64_t keyIdx) { (void)keyIdx; return 0; }
+void aura_tls_set(int64_t keyIdx, int64_t val) { (void)keyIdx; (void)val; }
 int64_t aura_condvar_new(void) { return 0; }
 void aura_condvar_wait(int64_t id, int64_t mutexId) { (void)id; (void)mutexId; }
 void aura_condvar_signal(int64_t id) { (void)id; }

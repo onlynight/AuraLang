@@ -1,0 +1,88 @@
+// aura:///loom/dep/aura/lang/loom/dep/DepResolver.aura
+package aura.lang.loom.dep
+// Phase E.4: Loom Dependency Management - Dependency Resolver
+// 对标 Rust: dep/resolver.rs
+//
+// @since 0.6
+
+import aura.lang.std.String
+import aura.lang.std.FileSystem
+import aura.lang.std.Collections
+import aura.lang.loom.dep.Dependency
+import aura.lang.loom.dep.LockFile
+import aura.lang.loom.dep.DepGraph
+
+// ══════════════════════════════════════════════════════════════
+// 依赖解析器
+// 对标 Rust: dep/resolver.rs
+// ══════════════════════════════════════════════════════════════
+class DepResolver {
+    val cacheDir: String = "~/.aura/cache/packages"
+    var graph: DepGraph = DepGraph()
+    var lockFile: LockFile = null
+
+    fun DepResolver(lockFile: LockFile) {
+        this.lockFile = lockFile
+    }
+
+    fun resolve(deps: List<Dependency>): Int {
+        graph = DepGraph()
+        
+        var i: Int = 0
+        while (i < deps.size) {
+            val dep: Dependency = deps[i]
+            resolveDep(dep)
+            i = i + 1
+        }
+        
+        return 0
+    }
+
+    fun resolveDep(dep: Dependency): Unit {
+        // 检查锁文件
+        if (lockFile != null) {
+            val locked: LockPackage = lockFile.find(dep.name)
+            if (locked != null) {
+                // 使用锁文件中的版本
+                val node: DependencyNode = DependencyNode(dep.name, locked.version)
+                graph.addNode(node)
+                return
+            }
+        }
+        
+        // 本地路径依赖
+        if (dep.path.length > 0) {
+            if (FileSystem.exists(dep.path)) {
+                val version: String = resolveLocalVersion(dep.path)
+                val node: DependencyNode = DependencyNode(dep.name, version)
+                graph.addNode(node)
+                return
+            }
+        }
+        
+        // 远程依赖（简化：跳过）
+        val node: DependencyNode = DependencyNode(dep.name, dep.version)
+        graph.addNode(node)
+    }
+
+    fun resolveLocalVersion(path: String): String {
+        val manifestPath: String = path + "/aura.toml"
+        if (FileSystem.exists(manifestPath)) {
+            val content: String = FileSystem.readText(manifestPath)
+            val lines: List<String> = String.splitLines(content)
+            var i: Int = 0
+            while (i < lines.size) {
+                val line: String = String.trim(lines[i])
+                if (line.startsWith("version")) {
+                    val colonIdx: Int = line.indexOf("=")
+                    if (colonIdx > 0) {
+                        val value: String = String.trim(String.substring(line, colonIdx + 1))
+                        return String.unquote(value)
+                    }
+                }
+                i = i + 1
+            }
+        }
+        return "0.0.0"
+    }
+}

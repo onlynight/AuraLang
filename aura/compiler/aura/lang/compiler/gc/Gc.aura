@@ -1,102 +1,235 @@
 // aura:///aura/compiler/aura/lang/compiler/gc/Gc.aura
-// 垃圾收集器（Phase 4: 完整 VM Aura 编写）
-/// 垃圾收集器核心实现。
-///
-/// @since 0.5
-internal object Gc {
+package aura.lang.compiler.gc
+// 垃圾收集器（标记-清除，实例级）
+//
+// 设计：
+// - GcHeap 是实例类，每个 VM 持有独立堆，随 VM 生命周期自动回收。
+// - 对象以 Map<String, Any> 表示，__idx 字段回指堆槽位。
+// - mark 阶段从根集合遍历对象图（Map 值中若含 __idx 则递归标记）。
+// - sweep 阶段将未标记对象回收进空闲链表，下次 alloc 复用。
+// - 替代旧版全空壳的 object Gc（malloc→null, sweep→0, shouldCollect→always true）。
 
-    // ── GC 常量 ──
+import aura.lang.collection.ArrayList
+import aura.lang.collection.HashMap
 
-    /// GC 状态：空闲
-    const val GC_IDLE: Int = 0
+/// 堆对象槽位。
+class HeapSlot {
+    var idx: Int = 0
+    var data: Map<String, Any>
+    var marked: Boolean = false
+    var alive: Boolean = true
 
-    /// GC 状态：标记中
-    const val GC_MARKING: Int = 1
-
-    /// GC 状态：清除中
-    const val GC_SWEEPING: Int = 2
-
-    /// GC 状态：暂停
-    const val GC_SUSPENDED: Int = 3
-
-    /// 默认触发阈值（字节数）
-    const val DEFAULT_THRESHOLD: Int = 1048576
-
-    /// 默认最大暂停时间（毫秒）
-    const val DEFAULT_MAX_PAUSE: Int = 50
-
-    // ── GC 状态 ──
-
-    /// GC 状态对象。
-    fun create(): Map<String, Any> {
-        val state: Map<String, Any> = Collections.mutableMapOf()
-        state["status"] = GC_IDLE
-        state["threshold"] = DEFAULT_THRESHOLD
-        state["maxPause"] = DEFAULT_MAX_PAUSE
-        state["collectedCount"] = 0
-        state["totalFreed"] = 0
-        return state
+    init() {
+        this.data = HashMap<String, Any>()
     }
 
-    // ── 内存管理 ──
+    init(idx: Int, data: Map<String, Any>) {
+        this.idx = idx
+        this.data = data
+    }
+}
 
-    /// 分配内存块（占位实现）。
-    fun malloc(size: Int): Any {
-        return null
+/// 垃圾收集堆（标记-清除）。
+class GcHeap {
+    // ── 内部状态 ──
+
+    var slots: ArrayList<HeapSlot> = ArrayList<HeapSlot>()
+    var freeList: ArrayList<Int> = ArrayList<Int>()
+    var roots: ArrayList<Int> = ArrayList<Int>()
+    var nextId: Int = 0
+    var collectedCount: Int = 0
+    var totalFreed: Int = 0
+
+    /// 创建空堆。
+    init() {
+        this.slots = ArrayList<HeapSlot>()
+        this.freeList = ArrayList<Int>()
+        this.roots = ArrayList<Int>()
+        this.nextId = 0
+        this.collectedCount = 0
+        this.totalFreed = 0
     }
 
-    /// 释放内存块（占位实现）。
-    fun free(ptr: Any): Unit {
-        return
+    // ── 分配 ──
+
+    /// 分配一个新对象槽位，返回堆索引。
+    fun alloc(): Int {
+        if (freeList.size > 0) {
+            val idx = freeList.remove(freeList.size - 1)
+            val slot = slots.get(idx)
+            slot.data = HashMap<String, Any>()
+            slot.marked = false
+            slot.alive = true
+            slot.data.put("__idx", idx)
+            return idx
+        }
+        val idx = slots.size
+        val slot = HeapSlot(idx, HashMap<String, Any>())
+        slot.data.put("__idx", idx)
+        slots.add(slot)
+        return idx
     }
 
-    /// 重新分配内存（占位实现）。
-    fun realloc(ptr: Any, size: Int): Any {
-        return ptr
+    /// 分配并初始化对象，返回堆索引。
+    fun allocObject(obj: Map<String, Any>): Int {
+        val idx = alloc()
+        slots.get(idx).data = obj
+        obj.put("__idx", idx)
+        return idx
     }
 
-    // ── GC 操作 ──
+    // ── 访问 ──
 
-    /// 触发 GC 标记阶段。
-    fun mark(state: Map<String, Any>): Boolean {
-        state["status"] = GC_MARKING
-        return true
+    /// 获取堆槽位中的对象数据。
+    fun getObject(idx: Int): Map<String, Any> {
+        if (idx < 0 || idx >= slots.size) {
+            return HashMap<String, Any>()
+        } else {
+            val slot = slots.get(idx)
+            if (!slot.alive) {
+                return HashMap<String, Any>()
+            } else {
+                return slot.data
+            }
+        }
     }
 
-    /// 触发 GC 清除阶段。
-    fun sweep(state: Map<String, Any>): Int {
-        state["status"] = GC_SWEEPING
-        val collected = 0
-        state["collectedCount"] = (state["collectedCount"] as Int) + collected
-        state["status"] = GC_IDLE
-        return collected
+    /// 设置堆槽位中的对象数据。
+    fun setObject(idx: Int, data: Map<String, Any>): Unit {
+        if (idx < 0 || idx >= slots.size) return
+        val slot = slots.get(idx)
+        slot.data = data
+        data.put("__idx", idx)
     }
 
-    /// 执行完整 GC 周期。
-    fun collect(state: Map<String, Any>): Int {
-        mark(state)
-        return sweep(state)
+    // ── 根管理 ──
+
+    /// 注册根引用（保持对象存活）。
+    fun addRoot(idx: Int): Unit {
+        if (idx >= 0 && idx < slots.size) {
+            roots.add(idx)
+        }
     }
 
-    /// 检查是否需要触发 GC。
-    fun shouldCollect(state: Map<String, Any>): Boolean {
-        return (state["status"] as Int) == GC_IDLE
+    /// 移除根引用。
+    fun removeRoot(idx: Int): Unit {
+        var i = 0
+        while (i < roots.size) {
+            if (roots.get(i) == idx) {
+                roots.remove(i)
+                return
+            }
+            i = i + 1
+        }
     }
 
-    // ── 状态查询 ──
+    // ── 标记 ──
 
-    /// 获取 GC 状态。
-    fun status(state: Map<String, Any>): Int {
-        return state["status"] as Int
+    /// 标记单个对象及其可达对象图。
+    fun mark(idx: Int): Unit {
+        if (idx < 0 || idx >= slots.size) {
+            return
+        } else {
+            val slot = slots.get(idx)
+            if (!slot.alive || slot.marked) {
+                return
+            } else {
+                slot.marked = true
+
+                // 遍历对象的所有值，若含 __idx 则递归标记
+                val data = slot.data
+                val vals = data.values()
+                var i = 0
+                while (i < vals.size) {
+                    val v = vals.get(i)
+                    if (v is Map<String, Any>) {
+                        val refIdx = (v.get("__idx")) as Int
+                        mark(refIdx)
+                    }
+                    i = i + 1
+                }
+            }
+        }
     }
 
-    /// 获取已收集对象数量。
-    fun collectedCount(state: Map<String, Any>): Int {
-        return state["collectedCount"] as Int
+    // ── 清除 ──
+
+    /// 执行一次完整 GC（标记 + 清除），返回回收对象数。
+    fun collect(): Int {
+        // mark: 从根集合遍历
+        var i = 0
+        while (i < roots.size) {
+            mark(roots.get(i))
+            i = i + 1
+        }
+
+        // sweep: 回收未标记对象
+        var freed = 0
+        i = 0
+        while (i < slots.size) {
+            val slot = slots.get(i)
+            if (slot.alive && !slot.marked) {
+                freeList.add(slot.idx)
+                slot.alive = false
+                freed = freed + 1
+            }
+            slot.marked = false
+            i = i + 1
+        }
+
+        collectedCount = collectedCount + 1
+        totalFreed = totalFreed + freed
+        return freed
     }
 
-    /// 获取 GC 版本信息。
+    // ── 统计 ──
+
+    /// 获取活跃对象数。
+    fun liveCount(): Int {
+        var count = 0
+        var i = 0
+        while (i < slots.size) {
+            if (slots.get(i).alive) count = count + 1
+            i = i + 1
+        }
+        return count
+    }
+
+    /// 获取总槽位数（含已回收）。
+    fun totalCount(): Int {
+        return slots.size
+    }
+
+    /// 获取已回收对象数。
+    fun freedCount(): Int {
+        return freeList.size
+    }
+
+    /// 获取 GC 执行次数。
+    fun collectionCount(): Int {
+        return collectedCount
+    }
+}
+
+/// GC 状态查询工具。
+internal object GcStats {
+    fun live(heap: GcHeap): Int {
+        return heap.liveCount()
+    }
+
+    fun freed(heap: GcHeap): Int {
+        return heap.freedCount()
+    }
+
+    fun collections(heap: GcHeap): Int {
+        return heap.collectionCount()
+    }
+
+    fun strategyName(): String {
+        return "mark-sweep"
+    }
+
     fun version(): String {
-        return "0.5.0-phase4-phantom"
+        return "0.6.0-gc-heap"
     }
 }

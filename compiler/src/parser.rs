@@ -3167,10 +3167,16 @@ impl Parser {
                 // 泛型函数调用：`arrayOf<Char>()` 或 `foo<T>(...)`
                 TokenKind::Lt => {
                     // 判断是否为泛型类型参数（而非小于运算符）
-                    // 启发式：`<` 后跟标识符且再后跟 `>` 或 `,` 视为类型参数
+                    // 启发式：`<` 后跟标识符且再后跟 `>`/`,`/`<` 视为类型参数
+                    // （嵌套泛型如 `ArrayList<HashMap<Int, String>>` 的 `peek_ahead(2)` 为 `Lt`）
                     if self.check(TokenKind::Lt) && self.peek_ahead(1).kind == TokenKind::Ident {
                         let a1 = self.peek_ahead(2);
-                        if a1.kind == TokenKind::Gt || a1.kind == TokenKind::Comma {
+                        if a1.kind == TokenKind::Gt
+                            || a1.kind == TokenKind::GtGt
+                            || a1.kind == TokenKind::GtGtGt
+                            || a1.kind == TokenKind::Comma
+                            || a1.kind == TokenKind::Lt
+                        {
                             // 泛型函数调用：解析类型参数
                             self.advance(); // <
                             // 解析类型参数列表（使用 parse_type 而非 parse_expression）
@@ -3182,7 +3188,8 @@ impl Parser {
                                 }
                                 self.advance();
                             }
-                            self.expect(TokenKind::Gt);
+                            // 使用 expect_type_gt 处理嵌套泛型的 `>>` / `>>>`
+                            self.expect_type_gt();
                             // 继续解析调用（如果有 `(`）
                             continue;
                         }

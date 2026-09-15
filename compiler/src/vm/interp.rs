@@ -430,6 +430,119 @@ impl Vm {
                 self.handlers.pop();
             }
 
+            // ── Phase B: 并发运行时指令 ──
+            Instr::ThreadSpawn(func_idx) => {
+                // 创建线程执行函数（当前为占位实现）
+                self.frames[top].stack.push(Value::Int(func_idx as i64));
+            }
+            Instr::ThreadJoin => {
+                let tid = self.pop(top)?.as_int();
+                self.frames[top].stack.push(Value::Int(tid));
+            }
+            Instr::ThreadSleep => {
+                let ms = self.pop(top)?.as_int();
+                if ms > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+                }
+                self.frames[top].stack.push(Value::Null);
+            }
+            Instr::ThreadId => {
+                // 返回当前线程 ID（简化为 0）
+                self.frames[top].stack.push(Value::Int(0));
+            }
+            Instr::ThreadParallelism => {
+                let cores =
+                    std::thread::available_parallelism().map(|n| n.get() as i64).unwrap_or(1);
+                self.frames[top].stack.push(Value::Int(cores));
+            }
+            Instr::MutexNew => {
+                self.frames[top].stack.push(Value::Int(0)); // 占位
+            }
+            Instr::MutexLock => {
+                let _ = self.pop(top)?;
+                self.frames[top].stack.push(Value::Null);
+            }
+            Instr::MutexUnlock => {
+                let _ = self.pop(top)?;
+                self.frames[top].stack.push(Value::Null);
+            }
+            Instr::MutexTryLock => {
+                let _ = self.pop(top)?;
+                self.frames[top].stack.push(Value::Bool(true));
+            }
+            Instr::AtomicNew => {
+                let _ = self.pop(top)?;
+                self.frames[top].stack.push(Value::Int(0)); // 占位
+            }
+            Instr::AtomicLoad => {
+                let _ = self.pop(top)?;
+                self.frames[top].stack.push(Value::Int(0));
+            }
+            Instr::AtomicStore => {
+                let _val = self.pop(top)?;
+                let _handle = self.pop(top)?;
+                self.frames[top].stack.push(Value::Null);
+            }
+            Instr::AtomicAdd => {
+                let _delta = self.pop(top)?;
+                let _handle = self.pop(top)?;
+                self.frames[top].stack.push(Value::Int(0));
+            }
+            Instr::AtomicCas => {
+                let _expected = self.pop(top)?;
+                let _desired = self.pop(top)?;
+                let _handle = self.pop(top)?;
+                self.frames[top].stack.push(Value::Bool(false));
+            }
+            Instr::RwLockNew => {
+                self.frames[top].stack.push(Value::Int(0));
+            }
+            Instr::RwLockReadLock => {
+                let _ = self.pop(top)?;
+                self.frames[top].stack.push(Value::Null);
+            }
+            Instr::RwLockWriteLock => {
+                let _ = self.pop(top)?;
+                self.frames[top].stack.push(Value::Null);
+            }
+            Instr::RwLockReadUnlock => {
+                let _ = self.pop(top)?;
+                self.frames[top].stack.push(Value::Null);
+            }
+            Instr::RwLockWriteUnlock => {
+                let _ = self.pop(top)?;
+                self.frames[top].stack.push(Value::Null);
+            }
+            Instr::ChannelNew => {
+                let _cap = self.pop(top)?.as_int();
+                self.frames[top].stack.push(Value::Int(0));
+            }
+            Instr::ChannelSend => {
+                let _val = self.pop(top)?;
+                let _handle = self.pop(top)?;
+                self.frames[top].stack.push(Value::Null);
+            }
+            Instr::ChannelRecv => {
+                let _handle = self.pop(top)?;
+                self.frames[top].stack.push(Value::Null);
+            }
+            Instr::CondvarNew => {
+                self.frames[top].stack.push(Value::Int(0));
+            }
+            Instr::CondvarWait => {
+                let _mutex = self.pop(top)?;
+                let _condvar = self.pop(top)?;
+                self.frames[top].stack.push(Value::Null);
+            }
+            Instr::CondvarSignal => {
+                let _ = self.pop(top)?;
+                self.frames[top].stack.push(Value::Null);
+            }
+            Instr::CondvarBroadcast => {
+                let _ = self.pop(top)?;
+                self.frames[top].stack.push(Value::Null);
+            }
+
             // ── FFI（C ABI）──
             Instr::CallC(idx) => {
                 // 当前字节码未单独携带 C 函数表，按原生索引查注册表处理

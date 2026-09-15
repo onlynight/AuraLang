@@ -1,0 +1,293 @@
+// aura:///aura/lang/native/math/MathOps.aura
+package aura.lang.native.math
+// ------------------------------------------------------------------
+// 数学库 — 纯 Aura 实现
+//
+// 提供三角函数、指数对数、取整等基本数学函数。
+// 使用 Taylor 级数 / 牛顿法实现，不依赖 libm 或任何外部库。
+//
+// 依赖：无（纯 Aura 逻辑）
+//
+// @since 0.1
+// ------------------------------------------------------------------
+
+/// 数学库（纯 Aura 实现）
+object MathOps {
+
+    // ═══════════════════════════════════════════════════════════════
+    // 常量
+    // ═══════════════════════════════════════════════════════════════
+
+    const val PI: Float = 3.14159265f
+    const val E: Float = 2.71828182f
+    const val PI_OVER_2: Float = 1.57079632f
+    const val LOG2_E: Float = 1.44269504f
+    const val LN2: Float = 0.69314718f
+
+    // ═══════════════════════════════════════════════════════════════
+    // 绝对值 / 最大最小
+    // ═══════════════════════════════════════════════════════════════
+
+    /// 绝对值（浮点数）。
+    fun fabs(x: Float): Float {
+        if (x < 0.0f) { return 0.0f - x }
+        return x
+    }
+
+    /// 最大值（浮点数）。
+    fun fmax(a: Float, b: Float): Float {
+        if (a > b) { return a }
+        return b
+    }
+
+    /// 最小值（浮点数）。
+    fun fmin(a: Float, b: Float): Float {
+        if (a < b) { return a }
+        return b
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 取整
+    // ═══════════════════════════════════════════════════════════════
+
+    /// 向下取整（返回不超过 x 的最大整数）。
+    fun floor(x: Float): Float {
+        val truncated: Int = x as Int
+        if (x < 0.0f && (truncated as Float) != x) {
+            return (truncated - 1) as Float
+        }
+        return truncated as Float
+    }
+
+    /// 向上取整（返回不小于 x 的最小整数）。
+    fun ceil(x: Float): Float {
+        return 0.0f - floor(0.0f - x)
+    }
+
+    /// 向零取整（直接截断小数部分）。
+    fun trunc(x: Float): Float {
+        return (x as Int) as Float
+    }
+
+    /// 四舍五入（.5 向上取整）。
+    fun round(x: Float): Float {
+        return floor(x + 0.5f)
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 平方根 / 立方根（牛顿法）
+    // ═══════════════════════════════════════════════════════════════
+
+    /// 平方根（牛顿法迭代）。
+    fun sqrt(x: Float): Float {
+        if (x < 0.0f) { return 0.0f }
+        if (x == 0.0f) { return 0.0f }
+        var y: Float = x / 2.0f
+        var i: Int = 0
+        while (i < 100) {
+            y = (y + x / y) / 2.0f
+            i = i + 1
+        }
+        return y
+    }
+
+    /// 立方根（牛顿法迭代）。
+    fun cbrt(x: Float): Float {
+        if (x == 0.0f) { return 0.0f }
+        val sign: Float = if (x > 0.0f) 1.0f else -1.0f
+        val absx: Float = if (x > 0.0f) x else 0.0f - x
+        var y: Float = absx / 3.0f
+        if (y == 0.0f) { y = 1.0f }
+        var i: Int = 0
+        while (i < 100) {
+            val y2: Float = y * y
+            y = (2.0f * y + absx / y2) / 3.0f
+            i = i + 1
+        }
+        return sign * y
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 幂函数
+    // ═══════════════════════════════════════════════════════════════
+
+    /// 幂运算 x^y（使用 exp(y * ln(x))）。
+    fun pow(base: Float, exp: Float): Float {
+        if (base == 0.0f) { return 0.0f }
+        if (exp == 0.0f) { return 1.0f }
+        val sign: Float = if (base > 0.0f) 1.0f else -1.0f
+        val absBase: Float = if (base > 0.0f) base else 0.0f - base
+        val result: Float = sign * exp_fn(exp * log(absBase))
+        return result
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 指数与对数（Taylor 级数）
+    // ═══════════════════════════════════════════════════════════════
+
+    /// e 的 x 次方（Taylor 级数）。
+    fun exp_fn(x: Float): Float {
+        var term: Float = 1.0f
+        var result: Float = 1.0f
+        var i: Int = 1
+        while (i <= 30) {
+            term = term * x / (i as Float)
+            result = result + term
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 自然对数 ln(x)（归一化 + Taylor 级数）。
+    fun log(x: Float): Float {
+        if (x <= 0.0f) { return 0.0f }
+        // 归一化：将 x 缩放到 [1, 2)
+        var y: Float = x
+        var scale: Int = 0
+        while (y >= 2.0f) {
+            y = y / 2.0f
+            scale = scale + 1
+        }
+        while (y < 1.0f) {
+            y = y * 2.0f
+            scale = scale - 1
+        }
+        // ln(y) 使用 ln(1+u) 级数，其中 u = (y-1)/(y+1)
+        // ln(y) = 2 * (u + u^3/3 + u^5/5 + ...)
+        val u: Float = (y - 1.0f) / (y + 1.0f)
+        var sum: Float = 0.0f
+        var term: Float = u
+        var i: Int = 0
+        while (i < 40) {
+            sum = sum + term / ((2 * i + 1) as Float)
+            term = term * u * u
+            i = i + 1
+        }
+        // ln(x) = scale * ln(2) + 2 * sum
+        return (scale as Float) * LN2 + 2.0f * sum
+    }
+
+    /// 以 2 为底的对数。
+    fun log2(x: Float): Float {
+        if (x <= 0.0f) { return 0.0f }
+        return log(x) / LN2
+    }
+
+    /// 以 10 为底的对数。
+    fun log10(x: Float): Float {
+        if (x <= 0.0f) { return 0.0f }
+        return log(x) * LOG2_E
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 三角函数（Taylor 级数）
+    // ═══════════════════════════════════════════════════════════════
+
+    /// 正弦（弧度）。
+    fun sin(x: Float): Float {
+        // 归一化到 [-PI, PI]
+        var y: Float = x
+        while (y > PI) { y = y - 2.0f * PI }
+        while (y < -PI) { y = y + 2.0f * PI }
+        // Taylor 级数：sin(x) = x - x^3/3! + x^5/5! - ...
+        var term: Float = y
+        var result: Float = y
+        var i: Int = 1
+        while (i <= 15) {
+            term = term * y * y / ((2 * i) as Float * ((2 * i + 1) as Float))
+            if (i % 2 == 1) {
+                result = result - term
+            } else {
+                result = result + term
+            }
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 余弦（弧度）。
+    fun cos(x: Float): Float {
+        // 归一化到 [-PI, PI]
+        var y: Float = x
+        while (y > PI) { y = y - 2.0f * PI }
+        while (y < -PI) { y = y + 2.0f * PI }
+        // Taylor 级数：cos(x) = 1 - x^2/2! + x^4/4! - ...
+        var term: Float = 1.0f
+        var result: Float = 1.0f
+        var i: Int = 1
+        while (i <= 15) {
+            term = term * y * y / (((2 * i - 1) as Float) * ((2 * i) as Float))
+            result = result - term
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 正切（弧度）。
+    fun tan(x: Float): Float {
+        val c: Float = cos(x)
+        if (c == 0.0f) { return 0.0f }
+        return sin(x) / c
+    }
+
+    /// 反正弦（返回弧度）。
+    fun asin(x: Float): Float {
+        if (x <= -1.0f) { return -PI_OVER_2 }
+        if (x >= 1.0f) { return PI_OVER_2 }
+        // asin(x) = atan(x / sqrt(1-x^2))
+        val denom: Float = 1.0f - x * x
+        if (denom <= 0.0f) { return 0.0f }
+        return atan(x / sqrt(denom))
+    }
+
+    /// 反余弦（返回弧度）。
+    fun acos(x: Float): Float {
+        if (x <= -1.0f) { return PI }
+        if (x >= 1.0f) { return 0.0f }
+        return PI_OVER_2 - asin(x)
+    }
+
+    /// 反正切（返回弧度）。
+    fun atan(x: Float): Float {
+        // 归一化到 [-1, 1] 以加速收敛
+        if (x > 1.0f) {
+            return PI_OVER_2 - atan(1.0f / x)
+        }
+        if (x < -1.0f) {
+            return -PI_OVER_2 - atan(1.0f / x)
+        }
+        // Taylor 级数：atan(x) = x - x^3/3 + x^5/5 - ...
+        var term: Float = x
+        var result: Float = x
+        var power: Float = x
+        var i: Int = 1
+        while (i <= 50) {
+            power = power * x * x
+            if (i % 2 == 1) {
+                result = result - term / ((2 * i + 1) as Float)
+            } else {
+                result = result + term / ((2 * i + 1) as Float)
+            }
+            term = power
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 双参数反正切 atan2(y, x)（返回弧度）。
+    fun atan2(y: Float, x: Float): Float {
+        if (x > 0.0f) {
+            return atan(y / x)
+        }
+        if (x < 0.0f) {
+            if (y >= 0.0f) {
+                return atan(y / x) + PI
+            }
+            return atan(y / x) - PI
+        }
+        // x == 0
+        if (y > 0.0f) { return PI_OVER_2 }
+        if (y < 0.0f) { return -PI_OVER_2 }
+        return 0.0f
+    }
+}

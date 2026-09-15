@@ -1,0 +1,157 @@
+// aura:///aura/lang/compiler/signing/Signing.aura
+package aura.lang.compiler.signing
+// ─────────────────────────────────────────────────────────────
+// 包签名 — 纯 Aura 化迁移
+//
+// 对应 Rust `compiler/src/signing.rs`。
+//
+// 使用 HMAC-SHA256 对包校验和文件进行签名，
+// 确保包在发布后未被篡改。
+//
+// 签名文件格式（signature.sig）：
+//   [line 1] signer name
+//   [line 2] timestamp (unix seconds)
+//   [line 3] hex-encoded HMAC-SHA256 signature
+//
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.std.FileSystem
+import aura.lang.std.Encoding
+
+// ═══════════════════════════════════════════════════════════════
+// SigningUtils — 顶层声明收集对象
+// ═══════════════════════════════════════════════════════════════
+
+object SigningUtils {
+    const val SIGNATURE_PATH: String = "META-INF/signature.sig"
+    const val CHECKSUM_PATH: String = "META-INF/checksum.sha256"
+
+    /// HMAC-SHA256 签名，返回 hex 编码结果。
+    fun hmacSha256(key: String, data: String): String {
+        // Key padding: 如果密钥超过 64 字节，先取 SHA256
+        var keyBytes: String = key
+        if (keyBytes.length > 64) {
+            keyBytes = SigningUtils.sha256ToBytes(keyBytes)
+        }
+
+        // Pad key to 64 bytes
+        while (keyBytes.length < 64) {
+            keyBytes = keyBytes + String.fromCharCode(0)
+        }
+
+        // Compute inner hash: SHA256((K' xor ipad) || data)
+        val ipad: String = SigningUtils.xorBytes(keyBytes, 0x36)
+        val innerHash: String = SigningUtils.sha256ToBytes(ipad + data)
+
+        // Compute outer hash: SHA256((K' xor opad) || inner_hash)
+        val opad: String = SigningUtils.xorBytes(keyBytes, 0x5C)
+        val outerHash: String = SigningUtils.sha256ToBytes(opad + innerHash)
+
+        // Return hex-encoded
+        return Encoding.hexEncode(outerHash)
+    }
+
+    /// 计算 SHA-256 并返回字节字符串。
+    fun sha256ToBytes(data: String): String {
+        // 使用 Encoding 模块的 sha256
+        val hash: String = Encoding.sha256(data)
+        // hash 是 hex 编码的，转换为字节
+        return Encoding.hexDecode(hash)
+    }
+
+    /// 对字节字符串的每个字符与 x 做 XOR。
+    fun xorBytes(s: String, x: Int): String {
+        var result: String = ""
+        for (i: Int in 0..s.length) {
+            result = result + String.fromCharCode(s.charCodeAt(i) xor x)
+        }
+        return result
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// KeyConfig — 签名密钥配置
+// ═══════════════════════════════════════════════════════════════
+
+class KeyConfig {
+    var hmacKey: String = ""
+    var signer: String = "unknown"
+    var timestamp: Long = 0
+
+    /// 从文件加载密钥配置。
+    fun fromFile(path: String): KeyConfig {
+        val kc: KeyConfig = KeyConfig()
+        val content: String = FileSystem.readFile(path)
+        if (content == null || content.length == 0) {
+            return null
+        }
+        val lines: Array = content.split("\n")
+        if (lines.length >= 1) {
+            kc.hmacKey = lines[0].trim()
+        }
+        if (lines.length >= 2) {
+            kc.signer = lines[1].trim()
+        }
+        return kc
+    }
+
+    fun parseFromFile(path: String): KeyConfig {
+        return KeyConfig.fromFile(path)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Signer — 签名器
+// ═══════════════════════════════════════════════════════════════
+
+class Signer {
+    var config: KeyConfig = KeyConfig()
+
+    init(config: KeyConfig) {
+        this.config = config
+    }
+
+    /// 对数据签名，返回 hex 编码的 HMAC-SHA256。
+    fun sign(data: String): String {
+        val keyBytes: String = Encoding.hexDecode(this.config.hmacKey)
+        if (keyBytes.length == 0) {
+            return ""
+        }
+        val hmac: String = SigningUtils.hmacSha256(keyBytes, data)
+        return hmac
+    }
+
+    /// 生成签名文件内容。
+    fun generateSignatureFile(checksum: String): String {
+        val sig: String = this.sign(checksum)
+        var result: String = ""
+        result = result + this.config.signer + "\n"
+        result = result + toStr(this.config.timestamp) + "\n"
+        result = result + sig
+        return result
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Verifier — 验证器
+// ═══════════════════════════════════════════════════════════════
+
+class Verifier {
+    var config: KeyConfig = KeyConfig()
+
+    init(config: KeyConfig) {
+        this.config = config
+    }
+
+    /// 验证签名是否有效。
+    fun verify(data: String, signature: String): Boolean {
+        val keyBytes: String = Encoding.hexDecode(this.config.hmacKey)
+        if (keyBytes.length == 0) {
+            return false
+        }
+        val expected: String = SigningUtils.hmacSha256(keyBytes, data)
+        return expected == signature
+    }
+}
+

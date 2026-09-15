@@ -1,0 +1,78 @@
+// ════════════════════════════════════════════════════════════
+// Phase 16 — 脚本模式测试（P16）
+// 顶层语句（无 main 也能执行）
+// ════════════════════════════════════════════════════════════
+
+import aura.lang.std.Math
+
+// ── §16.1 顶层变量 ──
+val globalInt: Int = 42
+var globalVar: String = "hello"
+
+// ── §16.2 顶层函数 ──
+fun topLevelFunc(x: Int): Int {
+    return x * 2
+}
+
+// ── §16.3 顶层语句（脚本模式核心）──
+// 以下语句将在程序启动时自动执行
+
+// 输出顶层变量
+println("§16.1 globalInt=" + globalInt.toString())
+println("§16.1 globalVar=" + globalVar.toString())
+
+// 调用顶层函数
+val result = topLevelFunc(21)
+println("§16.2 topLevelFunc(21)=" + result.toString())
+
+// 修改全局变量
+globalVar = "world"
+println("§16.1 globalVar after change=" + globalVar.toString())
+
+// 使用标准库
+val pi = Math.PI
+println("§16.3 Math.PI=" + pi.toString())
+
+// 表达式语句
+val sum = 1 + 2 + 3
+println("§16.3 sum=" + sum.toString())
+
+// 控制流
+if (true) {
+    println("§16.3 if block")
+}
+
+// 循环
+var i = 0
+while (i < 3) {
+    println("§16.3 while i=" + i.toString())
+    i = i + 1
+}
+
+// for 循环
+for (j in 0..2) {
+    println("§16.3 for j=" + j.toString())
+}
+
+// 类定义
+class ScriptClass {
+    val name: String = "Script"
+
+    fun greet(): String {
+        return "Hello from " + this.name
+    }
+}
+
+val obj = ScriptClass()
+println("§16.3 ScriptClass.greet()=" + obj.greet())
+
+// 高阶函数
+val add3 = (a: Int) -> a + 3
+println("§16.3 add3(10)=" + add3(10).toString())
+
+// 尾随 lambda
+val list = [1, 2, 3]
+val doubled = list.map { (x) -> x * 2 }
+println("§16.3 list.map doubled=" + doubled.toString())
+
+println("=== Phase 16 Complete ===")

@@ -1,0 +1,70 @@
+// aura:///debugger/aura/lang/debugger/BreakpointManager.aura
+package aura.lang.debugger
+
+// ── 标准库 ──
+import aura.lang.std.String
+import aura.lang.std.Collections
+
+// ── Native 包 ──
+import aura.lang.native.console.Console
+
+// ── 兄弟模块 ──
+import aura.lang.debugger.Breakpoint
+import aura.lang.debugger.DebugApi
+
+// ═══════════════════════════════════════════════════════════════
+// 断点管理 — BreakpointManager 类
+// ═══════════════════════════════════════════════════════════════
+
+class BreakpointManager {
+    var breakpoints: List<Breakpoint> = mutableListOf()
+    var nextId: Int = 1
+
+    fun add(file: String, line: Int): Breakpoint {
+        val bp = Breakpoint(nextId, file, line, true)
+        breakpoints.add(bp)
+        debugBreakpointAdd(file, line)
+        nextId = nextId + 1
+        return bp
+    }
+
+    fun remove(id: Int): Unit {
+        var i: Int = 0
+        while (i < breakpoints.size) {
+            if (breakpoints[i].id == id) {
+                breakpoints.remove(i)
+                debugBreakpointRemove(id)
+                return
+            }
+            i = i + 1
+        }
+    }
+
+    fun list(): List<Breakpoint> {
+        return breakpoints
+    }
+
+    fun toggle(id: Int): Unit {
+        var i: Int = 0
+        while (i < breakpoints.size) {
+            if (breakpoints[i].id == id) {
+                breakpoints[i] = Breakpoint(breakpoints[i].id, breakpoints[i].file, breakpoints[i].line, !breakpoints[i].enabled)
+                return
+            }
+            i = i + 1
+        }
+    }
+
+    fun printAll(): Unit {
+        if (breakpoints.size == 0) {
+            Console.println("No breakpoints")
+            return
+        }
+        Console.println("Breakpoints:")
+        var i: Int = 0
+        while (i < breakpoints.size) {
+            Console.println("  " + breakpoints[i].toStr())
+            i = i + 1
+        }
+    }
+}

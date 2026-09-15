@@ -1,76 +1,15 @@
 // aura:///aura/lang/std/Math.aura
 package aura.lang.std
 // 标准库模块，不可修改
-// Phase 3: 纯 LLVM 化 — extern "C" 直连 libm (sin/cos/sqrt/pow/log/exp/atan2)
 //
-// 架构说明：
-// - AOT 路径：extern "C" 直连 libm.lib / libm.so
-// - VM 路径：internal object → Rust bootstrap (Layer 0-A / FFI)
+// 实现策略：
+// - 全部以 Aura 编写，不使用 extern "C" 或 Rust cffi。
+// - 三角函数、指数对数、取整等数学运算委托到 aura.lang.native.math.MathOps。
+// - MathOps 使用 Taylor 级数 / 牛顿法实现，不依赖 libm。
 //
 // @since 0.1
 
-// ═══════════════════════════════════════════════════════════════
-// Phase 3: libm 声明 (AOT 路径)
-// ═══════════════════════════════════════════════════════════════
-
-// ── libm: 三角函数 ──
-extern "C" {
-    fun libm_sin(x: Float): Float
-    fun libm_cos(x: Float): Float
-    fun libm_tan(x: Float): Float
-    fun libm_asin(x: Float): Float
-    fun libm_acos(x: Float): Float
-    fun libm_atan(x: Float): Float
-    fun libm_atan2(y: Float, x: Float): Float
-}
-
-// ── libm: 指数与对数 ──
-extern "C" {
-    fun libm_sqrt(x: Float): Float
-    fun libm_cbrt(x: Float): Float
-    fun libm_pow(base: Float, exp: Float): Float
-    fun libm_exp(x: Float): Float
-    fun libm_log(x: Float): Float
-    fun libm_log2(x: Float): Float
-    fun libm_log10(x: Float): Float
-}
-
-// ── libm: 取整函数 ──
-extern "C" {
-    fun libm_floor(x: Float): Float
-    fun libm_ceil(x: Float): Float
-    fun libm_trunc(x: Float): Float
-    fun libm_round(x: Float): Float
-    fun libm_fabs(x: Float): Float
-}
-
-// ═══════════════════════════════════════════════════════════════
-// AOT 路径: 使用 libm 的数学函数实现
-// ═══════════════════════════════════════════════════════════════
-
-fun math_sqrt(x: Float): Float { return libm_sqrt(x) }
-fun math_cbrt(x: Float): Float { return libm_cbrt(x) }
-fun math_pow(base: Float, exp: Float): Float { return libm_pow(base, exp) }
-fun math_exp(x: Float): Float { return libm_exp(x) }
-fun math_log(x: Float): Float { return libm_log(x) }
-fun math_log2(x: Float): Float { return libm_log2(x) }
-fun math_log10(x: Float): Float { return libm_log10(x) }
-fun math_sin(x: Float): Float { return libm_sin(x) }
-fun math_cos(x: Float): Float { return libm_cos(x) }
-fun math_tan(x: Float): Float { return libm_tan(x) }
-fun math_asin(x: Float): Float { return libm_asin(x) }
-fun math_acos(x: Float): Float { return libm_acos(x) }
-fun math_atan(x: Float): Float { return libm_atan(x) }
-fun math_atan2(y: Float, x: Float): Float { return libm_atan2(y, x) }
-fun math_floor(x: Float): Float { return libm_floor(x) }
-fun math_ceil(x: Float): Float { return libm_ceil(x) }
-fun math_trunc(x: Float): Float { return libm_trunc(x) }
-fun math_round(x: Float): Float { return libm_round(x) }
-fun math_fabs(x: Float): Float { return libm_fabs(x) }
-
-// ═══════════════════════════════════════════════════════════════
-// VM 路径: internal object (Rust bootstrap 实现)
-// ═══════════════════════════════════════════════════════════════
+import aura.lang.native.math.MathOps.*
 
 /// 数学函数与常量模块。
 ///
@@ -82,15 +21,15 @@ fun math_fabs(x: Float): Float { return libm_fabs(x) }
 /// 部分函数也在 prelu 中可用（免 import）：`abs`, `sqrt`, `pow`
 ///
 /// @since 0.1
-internal object Math {
+object Math {
 
     // ── 常量 ──
 
     /// 圆周率 π
-    const val PI: Float = 3.14159265f
+    const val PI: Float = MathOps.PI
 
     /// 自然常数 e
-    const val E: Float = 2.71828182f
+    const val E: Float = MathOps.E
 
     /// 32 位整数最大值
     const val INT_MAX: Int = 2147483647
@@ -129,10 +68,7 @@ internal object Math {
 
     /// 返回最小值（浮点数版本）。
     fun min(a: Float, b: Float): Float {
-        if (a < b) {
-            return a
-        }
-        return b
+        return MathOps.fmin(a, b)
     }
 
     /// 返回最大值。
@@ -145,85 +81,106 @@ internal object Math {
 
     /// 返回最大值（浮点数版本）。
     fun max(a: Float, b: Float): Float {
-        if (a > b) {
-            return a
-        }
-        return b
+        return MathOps.fmax(a, b)
     }
 
-    // ── 取整（纯逻辑，Aura 实现）──
+    // ── 取整（委托到 native.math.MathOps）──
 
     /// 向下取整（返回不超过 x 的最大整数）。
     fun floor(x: Float): Float {
-        val truncated: Int = x as Int
-        if (x < 0.0f && (truncated as Float) != x) {
-            return (truncated - 1) as Float
-        }
-        return truncated as Float
+        return MathOps.floor(x)
     }
 
     /// 向上取整（返回不小于 x 的最小整数）。
     fun ceil(x: Float): Float {
-        return 0.0f - floor(0.0f - x)
+        return MathOps.ceil(x)
     }
 
     /// 向零取整（直接截断小数部分）。
     fun trunc(x: Float): Float {
-        return (x as Int) as Float
+        return MathOps.trunc(x)
     }
 
     /// 四舍五入（.5 向上取整）。
     fun round(x: Float): Float {
-        return floor(x + 0.5f)
+        return MathOps.round(x)
     }
 
-    // ── 指数与开方（libm 函数，native 实现）──
+    // ── 指数与开方（委托到 native.math.MathOps）──
 
     /// 平方根。
-    fun sqrt(x: Float): Float
+    fun sqrt(x: Float): Float {
+        return MathOps.sqrt(x)
+    }
 
     /// 立方根。
-    fun cbrt(x: Float): Float
+    fun cbrt(x: Float): Float {
+        return MathOps.cbrt(x)
+    }
 
-    /// 幂运算 x^y（一般实数幂，依赖 libm）。
-    fun pow(base: Float, exp: Float): Float
+    /// 幂运算 x^y。
+    fun pow(base: Float, exp: Float): Float {
+        return MathOps.pow(base, exp)
+    }
 
     /// e 的 x 次方。
-    fun exp(x: Float): Float
+    fun exp(x: Float): Float {
+        return MathOps.exp_fn(x)
+    }
 
-    // ── 对数（libm 函数，native 实现）──
+    // ── 对数（委托到 native.math.MathOps）──
 
     /// 自然对数。
-    fun log(x: Float): Float
+    fun log(x: Float): Float {
+        return MathOps.log(x)
+    }
 
     /// 以 2 为底的对数。
-    fun log2(x: Float): Float
+    fun log2(x: Float): Float {
+        return MathOps.log2(x)
+    }
 
     /// 以 10 为底的对数。
-    fun log10(x: Float): Float
+    fun log10(x: Float): Float {
+        return MathOps.log10(x)
+    }
 
-    // ── 三角函数（libm 函数，native 实现）──
+    // ── 三角函数（委托到 native.math.MathOps）──
 
     /// 正弦（弧度）。
-    fun sin(x: Float): Float
+    fun sin(x: Float): Float {
+        return MathOps.sin(x)
+    }
 
     /// 余弦（弧度）。
-    fun cos(x: Float): Float
+    fun cos(x: Float): Float {
+        return MathOps.cos(x)
+    }
 
     /// 正切（弧度）。
-    fun tan(x: Float): Float
+    fun tan(x: Float): Float {
+        return MathOps.tan(x)
+    }
 
     /// 反正弦（返回弧度）。
-    fun asin(x: Float): Float
+    fun asin(x: Float): Float {
+        return MathOps.asin(x)
+    }
 
     /// 反余弦（返回弧度）。
-    fun acos(x: Float): Float
+    fun acos(x: Float): Float {
+        return MathOps.acos(x)
+    }
 
     /// 反正切（返回弧度）。
-    fun atan(x: Float): Float
+    fun atan(x: Float): Float {
+        return MathOps.atan(x)
+    }
 
     /// 双参数反正切 atan2(y, x)（返回弧度）。
-    fun atan2(y: Float, x: Float): Float
+    fun atan2(y: Float, x: Float): Float {
+        return MathOps.atan2(y, x)
+    }
 
     // ── 幂与根（纯逻辑，Aura 实现）──
 
@@ -245,7 +202,7 @@ internal object Math {
         return result
     }
 
-    /// 平方（纯逻辑，用于替代 `pow(x, 2)` 的常见场景）。
+    /// 平方。
     fun square(x: Float): Float {
         return x * x
     }
@@ -261,33 +218,33 @@ internal object Math {
     fun sign(x: Float): Int {
         if (x > 0.0f) {
             return 1
-        }
-        if (x < 0.0f) {
+        } else if (x < 0.0f) {
             return -1
+        } else {
+            return 0
         }
-        return 0
     }
 
     /// 限制在 `[lo, hi]` 范围内。
     fun clamp(x: Float, lo: Float, hi: Float): Float {
         if (x < lo) {
             return lo
-        }
-        if (x > hi) {
+        } else if (x > hi) {
             return hi
+        } else {
+            return x
         }
-        return x
     }
 
     /// 限制在 `[lo, hi]` 范围内（整数版本）。
     fun clampInt(x: Int, lo: Int, hi: Int): Int {
         if (x < lo) {
             return lo
-        }
-        if (x > hi) {
+        } else if (x > hi) {
             return hi
+        } else {
+            return x
         }
-        return x
     }
 
     /// 线性插值：`a + (b - a) * t`（t 不裁剪）。
