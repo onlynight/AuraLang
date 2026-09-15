@@ -155,6 +155,14 @@ pub fn link_to_object(
     object_path: &Path,
     options: &AotOptions,
 ) -> Result<(), AotError> {
+    // P6.5.8：编译前先独立验证 IR 合法性（`llc -verify-each`）。
+    // 失败时立即定位首个非法指令，避免编译到一半才报错、定位困难。
+    {
+        let mut verify_cmd = build_command("llc", options)?;
+        verify_cmd.arg(ll_path).arg("-verify-each");
+        run_and_report(&mut verify_cmd, "llc -verify")?;
+    }
+
     let mut cmd = build_command("llc", options)?;
     cmd.arg(ll_path)
         .arg("-o")

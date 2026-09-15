@@ -117,12 +117,27 @@ object AotUtils {
         FileSystem.mkdirP(outDir)
         FileSystem.writeText(llPath, a.llvmIr)
 
-        // 2. llc：IR → 目标文件
-        //    Phase 6.5.8：llc 自带模块验证；把 stderr 重定向到日志文件，
-        //    失败时保留 .ll 并回读首个错误行（定位首个非法指令，无需重跑）。
+        // 2. Phase 6.5.8：llc -verify 门禁（在编译前独立验证 IR 合法性）
+        //    失败时立即定位首个非法指令，避免编译到一半才报错、定位困难。
         val llc: String = toolPreferredPath("llc", llvmHome)
         val clang: String = toolPreferredPath("clang", llvmHome)
         val optFlag: String = a.optFlag
+        val verifyLog: String = outDir + "/" + moduleName + ".verify.log"
+        val verifyCmd: String = llc + " -mtriple " + tgt + " " + llPath +
+            " -verify-each 2> " + AotUtils.aotWinPath(verifyLog)
+        val verifyExit: Int = Process.run(verifyCmd)
+        if (verifyExit != 0) {
+            // IR 验证失败：保留 .ll + .verify.log，直接返回
+            if (FileSystem.exists(verifyLog)) {
+                val vlog: String = FileSystem.readText(verifyLog)
+                r.irError = aotLineAt(vlog, 0)
+            }
+            return r
+        }
+
+        // 3. llc：IR → 目标文件
+        //    把 stderr 重定向到日志文件，失败时保留 .ll 并回读首个错误行
+        //    （定位首个非法指令，无需重跑）。
         val logPath: String = outDir + "/" + moduleName + ".llc.log"
         r.llcLog = logPath
         val llcCmd: String = llc + " -mtriple " + tgt + " " + llPath +
@@ -137,7 +152,7 @@ object AotUtils {
             return r
         }
 
-        // 3. clang：编译 std C 运行库（提供 aura_println / aura_math_* /
+        // 4. clang：编译 std C 运行库（提供 aura_println / aura_math_* /
         //    aura_lang_std_String_* 等符号；不链接会出现 undefined symbol）
         val cffiSrc: String = "compiler/src/std/cffi/aura_std_cffi.c"
         var cffiObj: String = ""
@@ -147,7 +162,7 @@ object AotUtils {
             r.cffiExit = Process.run(cffiCmd)
         }
 
-        // 3.5 clang：编译 syscall 分发库（提供 aura_syscall_dispatch /
+        // 4.5 clang：编译 syscall 分发库（提供 aura_syscall_dispatch /
         //     aura_memory_alloc / aura_memory_free / aura_cpu_* 等符号，
         //     供 `@native(...)` 包装器解析；与 Rust 侧 linker.rs 的
         //     `compile_std_cffi` 一致，两个 C 源都要编译并链接）
@@ -159,7 +174,7 @@ object AotUtils {
             r.syscallsExit = Process.run(sysCmd)
         }
 
-        // 4. clang：目标文件 + std 运行库 → 可执行文件。
+        // 5. clang：目标文件 + std 运行库 → 可执行文件。
         //    与 Rust 侧 `link_to_executable` 一致：链接宿主目标**不加** `-target`
         //    （`-target` 会让 clang 走另一套库/ABI，链接 C 运行库时失败）；
         //    交叉编译目标三元组已由 llc 的 `-mtriple` 决定。

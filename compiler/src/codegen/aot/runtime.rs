@@ -321,6 +321,57 @@ pub const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
             ("default", "i8*"),
         ],
     },
+    // Collections.listContains(list, val) — 检查列表中是否包含指定值
+    RuntimeFn {
+        name: "aura_lang_std_Collections_listContains",
+        ret: "i1",
+        params: &[
+            ("list", "i8*"),
+            ("val", "i8*"),
+        ],
+    },
+    // Collections.listIndexOf(list, val) — 返回指定值在列表中的索引
+    RuntimeFn {
+        name: "aura_lang_std_Collections_listIndexOf",
+        ret: "i64",
+        params: &[
+            ("list", "i8*"),
+            ("val", "i8*"),
+        ],
+    },
+    // Coroutine.actorAlive(id) — 检查 Actor 是否存活
+    RuntimeFn {
+        name: "aura_lang_concurrent_Coroutine_actorAlive",
+        ret: "i1",
+        params: &[("id", "i64")],
+    },
+    // Channel.newChannel() — 创建新通道
+    RuntimeFn {
+        name: "aura_lang_concurrent_Channel_newChannel",
+        ret: "i64",
+        params: &[],
+    },
+    // Channel.channelSend(ch, val) — 向通道发送值
+    RuntimeFn {
+        name: "aura_lang_concurrent_Channel_channelSend",
+        ret: "i64",
+        params: &[
+            ("ch", "i64"),
+            ("val", "i8*"),
+        ],
+    },
+    // Channel.channelRecv(ch) — 从通道接收值
+    RuntimeFn {
+        name: "aura_lang_concurrent_Channel_channelRecv",
+        ret: "i8*",
+        params: &[("ch", "i64")],
+    },
+    // Builtin.ptrIsNull(ptr) — 检查指针是否为空
+    RuntimeFn {
+        name: "ptrIsNull",
+        ret: "i1",
+        params: &[("ptr", "i64")],
+    },
     // ── Phase A: 并发运行时原语（对应 aura_syscalls.c） ──
     // Thread
     RuntimeFn {
@@ -613,7 +664,8 @@ pub fn translate_to_legacy_c(name: &str) -> String {
             "Ascii" => "ascii",
             "Assert" => "assert",
             "Builtin" => "builtin",
-            "Collections" => "collections",
+            // Collections 保持新命名（C 运行时实现为 aura_lang_std_Collections_*）
+            "Collections" => return name.to_string(),
             "Console" => "console",
             "Encoding" => "encoding",
             "Env" => "env",
@@ -711,7 +763,7 @@ pub fn cffi_signature(name: &str) -> Option<(&'static str, Vec<&'static str>)> {
         "aura_collections_count" | "aura_collections_listSize" => ("i64", &[P]),
         "aura_collections_isEmpty" => ("i1", &[P]),
         "aura_collections_getAt" | "aura_collections_listGet" => (P, &[P, "i64"]),
-        "aura_collections_listAppend" => (P, &[P, P]),
+        "aura_collections_listAppend" => (P, &[P, P]), // 实际实现：aura_lang_std_Collections_listAppend
         "aura_collections_indexOf" => ("i64", &[P, P]),
         "aura_collections_contains" => ("i1", &[P, P]),
         "aura_collections_set" => (

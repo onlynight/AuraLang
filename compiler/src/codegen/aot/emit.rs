@@ -1503,23 +1503,23 @@ fn emit_statement(
                 sj_bool, sj_result
             );
             cur.body.push(format!("{} = icmp ne i32 {}, 0", sj_bool, sj_result));
-            // 3. 分支
+            // 3. 分支（终止指令，设置为 terminator）
             let try_bb = ctx.fresh_bb("try_body");
             let catch_bb = ctx.fresh_bb("catch_body");
             let merge_bb = ctx.fresh_bb("finally_merge");
             eprintln!(
-                "DEBUG: emitting br: br i1 {}, label {}, label {}",
+                "DEBUG: emitting br: br i1 {}, label %{}, label %{}",
                 sj_bool, try_bb, catch_bb
             );
-            cur.body.push(format!(
-                "br i1 {}, label {}, label {}",
+            blocks.set_terminator(&format!(
+                "br i1 {}, label %{}, label %{}",
                 sj_bool, try_bb, catch_bb
             ));
 
             // 4. try 体（正常路径）
             blocks.add_block_named(&try_bb);
             emit_block(ctx, blocks, body)?;
-            blocks.set_terminator(&format!("br label {}", merge_bb));
+            blocks.set_terminator(&format!("br label %{}", merge_bb));
 
             // 5. catch 体（异常路径）
             blocks.add_block_named(&catch_bb);
@@ -1534,7 +1534,7 @@ fn emit_statement(
                 ctx.declare_var(var_name, exc_val.clone(), "i8*".to_string());
             }
             emit_block(ctx, blocks, catch_body)?;
-            blocks.set_terminator(&format!("br label {}", merge_bb));
+            blocks.set_terminator(&format!("br label %{}", merge_bb));
 
             // 6. finally 体（两条路径汇合）
             blocks.add_block_named(&merge_bb);
@@ -2557,8 +2557,9 @@ fn emit_variable_load(
         ));
         Ok((tmp, slot.llvm_ty))
     } else {
-        // 未声明变量：作为外部引用（可能是函数调用）
-        Ok((name.to_string(), "i32".to_string()))
+        // 未声明变量：作为外部引用（可能是函数调用或全局变量）
+        // 添加 % 前缀，确保 LLVM IR 语法正确
+        Ok((format!("%{}", name), "i32".to_string()))
     }
 }
 
@@ -3008,9 +3009,12 @@ fn emit_binary(
             }
         }
         HirBinOp::Rem => {
+            // 类型转换：确保两个操作数类型相同
+            let l_conv = emit_numeric_convert(ctx, blocks, &l_ir, &l_ty, &l_ty);
+            let r_conv = emit_numeric_convert(ctx, blocks, &r_ir, &r_ty, &l_ty);
             let cur = blocks.last_mut();
-            cur.body.push(format!("{} = srem {} {}, {}", tmp, l_ty, l_ir, r_ir));
-            Ok((tmp, l_ty))
+            cur.body.push(format!("{} = srem {} {}, {}", tmp, l_ty, l_conv, r_conv));
+            Ok((tmp, l_ty.to_string()))
         }
         HirBinOp::Eq | HirBinOp::Ne | HirBinOp::Lt | HirBinOp::Gt | HirBinOp::Le | HirBinOp::Ge => {
             // 可空类型与 null 比较：检查 is_null 标志（结构体字段 1）
@@ -3613,7 +3617,10 @@ fn emit_call(
         // 内置异常构造器：返回 String 结构体的数据指针（i8*），直接交给 `__throw`。
         "i8*".to_string()
     } else {
-        ctx.func_ret_types.get(callee).cloned().unwrap_or_else(|| "i32".to_string())
+        // P6.5 修复（#14/#32）：此前未解析的返回类型默认 i32，导致返回指针/结构体/
+        // void 的函数调用点生成非法 IR（`call i32 @func` vs `ret i8*`/`ret void`）。
+        // 改为 void：与 Aura 侧 AOT 发射器一致（retTy == "" → 不发调用或 void）。
+        ctx.func_ret_types.get(callee).cloned().unwrap_or_else(|| "void".to_string())
     };
     // 按被调方声明的参数类型转换实参（LLVM IR 对调用/声明类型一致性要求严格）
     let args_ir: Vec<(String, String)> = match &param_tys {
@@ -4858,10 +4865,24 @@ fn emit_member_access(
         // 对象是结构体值：直接使用 extractvalue（结构体类型与字段索引同源）
         let struct_type = owner_struct.clone().unwrap_or_else(|| obj_ty.clone());
 
-        cur.body.push(format!(
-            "{} = extractvalue {} {}, {}",
-            tmp, struct_type, obj_ir, field_idx
-        ));
+        // 检查 obj_ty 是否是聚合类型，如果不是，需要转换为结构体类型
+        let is_aggregate = struct_type.starts_with("{") || struct_type.starts_with("%struct.");
+
+        if is_aggregate {
+            cur.body.push(format!(
+                "{} = extractvalue {} {}, {}",
+                tmp, struct_type, obj_ir, field_idx
+            ));
+        } else {
+            // obj_ty 不是聚合类型，无法使用 extractvalue
+            // 回退到 i8* 方式
+            let gep = ctx.fresh_var();
+            cur.body.push(format!("{} = getelementptr i8, i8* {}, i64 0", gep, obj_ir));
+            cur.body.push(format!(
+                "{} = load {}, {}* {}",
+                tmp, field_llvm_ty, field_llvm_ty, gep
+            ));
+        }
     }
     Ok((tmp, field_llvm_ty))
 }

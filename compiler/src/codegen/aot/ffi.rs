@@ -44,6 +44,7 @@ impl<'a> FfiGenerator<'a> {
     }
 
     fn generate_extern_function(&self, func: &HirFunction, legacy_sym: &str) -> String {
+        let sym = crate::codegen::aot::types::sanitizellvm(&func.name);
         // C FFI 实现函数：使用真实 C ABI 签名（与 aura_std_cffi.c 一致）
         if let Some((ret, params)) = crate::codegen::aot::runtime::cffi_signature(&legacy_sym) {
             let params_str = params.join(", ");
@@ -91,7 +92,7 @@ impl<'a> FfiGenerator<'a> {
             "{comment}declare {ret_str} @{name}({params_str})\n",
             comment = comment,
             ret_str = ret_str,
-            // 符号名使用旧 C 符号名（与 aura_std_cffi.c 一致）
+            // 符号名必须与调用点一致（使用旧 C 符号名，与 aura_std_cffi.c 一致）
             name = legacy_sym,
             params_str = params_str,
         )

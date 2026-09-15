@@ -1714,6 +1714,11 @@ const void *aura_lang_std_Collections_pairOf(const void *a, const void *b) {
     return (const void *)l;
 }
 
+/** 旧式名称兼容：aura_collections_pairOf */
+const void *aura_collections_pairOf(const void *a, const void *b) {
+    return aura_lang_std_Collections_pairOf(a, b);
+}
+
 int64_t aura_lang_std_Collections_count(const void *list) {
     const AuraDynList *l = (const AuraDynList *)list;
     return l ? l->len : 0;
@@ -2206,5 +2211,93 @@ int64_t aura_lang_std_StringBuilder_reset(int64_t handle) {
         sb->len = 0;
     }
     return handle;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 缺失的纯 Aura 函数 stub（AOT 链接用）
+// 这些函数现在是纯 Aura 实现，但 AOT 编译器仍生成外部符号引用。
+// 长期方案：AOT 编译嵌入 stdlib 模块到原生代码。
+// ─────────────────────────────────────────────────────────────────────────────
+
+// aura.lang.concurrent.Coroutine.actorAlive
+_Bool aura_lang_concurrent_Coroutine_actorAlive(int64_t id) {
+    (void)id;
+    return 1; // stub: 返回 true
+}
+
+// aura.lang.concurrent.Channel.newChannel
+int64_t aura_lang_concurrent_Channel_newChannel(void) {
+    return 0; // stub: 返回空指针
+}
+
+// aura.lang.concurrent.Channel.channelSend
+int64_t aura_lang_concurrent_Channel_channelSend(int64_t ch, const char *val) {
+    (void)ch;
+    (void)val;
+    return 0; // stub: 返回 0
+}
+
+// aura.lang.concurrent.Channel.channelRecv
+const char *aura_lang_concurrent_Channel_channelRecv(int64_t ch) {
+    (void)ch;
+    return ""; // stub: 返回空字符串
+}
+
+// aura.lang.std.IO.fileExists (new-style name)
+int aura_lang_std_IO_fileExists(const char *path) {
+    return aura_io_fileExists(path);
+}
+
+// aura.lang.std.Ascii.isAlpha (new-style name)
+_Bool aura_lang_std_Ascii_isAlpha(int16_t c) {
+    return aura_ascii_isAlpha(c);
+}
+
+// aura.lang.std.Ascii.isDigit (new-style name)
+_Bool aura_lang_std_Ascii_isDigit(int16_t c) {
+    return aura_ascii_isDigit(c);
+}
+
+// aura.lang.std.Ascii.toUpper (new-style name)
+int64_t aura_lang_std_Ascii_toUpper(int16_t c) {
+    return aura_ascii_toUpper(c);
+}
+
+// aura.lang.std.Ascii.toLower (new-style name)
+int64_t aura_lang_std_Ascii_toLower(int16_t c) {
+    return aura_ascii_toLower(c);
+}
+
+// Builtin: intToPtr / ptrToInt
+int64_t aura_lang_std_Builtin_intToPtr(int32_t value) {
+    return (int64_t)value;
+}
+
+int32_t aura_lang_std_Builtin_ptrToInt(int64_t ptr) {
+    return (int32_t)ptr;
+}
+
+// 旧式名称（兼容）
+int64_t intToPtr(int32_t value) {
+    return (int64_t)value;
+}
+
+int32_t ptrToInt(int64_t ptr) {
+    return (int32_t)ptr;
+}
+
+// Builtin: ptrIsNull
+_Bool ptrIsNull(int64_t ptr) {
+    return ptr == 0;
+}
+
+// aura.lang.std.Collections.listContains (new-style name)
+_Bool aura_lang_std_Collections_listContains(const void *list, const void *val) {
+    return aura_collections_listContains(list, val);
+}
+
+// aura.lang.std.Collections.listIndexOf (new-style name)
+int64_t aura_lang_std_Collections_listIndexOf(const void *list, const void *val) {
+    return aura_collections_listIndexOf(list, val);
 }
 

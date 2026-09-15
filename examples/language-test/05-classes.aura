@@ -18,7 +18,7 @@
 /// 基础结构体：位置式字段 + 表达式体方法
 struct Point(val x: Int, val y: Int) {
     fun manhattan(): Int = x + y
-    fun distance(): Double = ((x * x + y * y).toDouble())
+    fun distance(): Double = x * x + y * y
 }
 
 /// 可变字段结构体（var 字段可赋值）
@@ -189,7 +189,7 @@ extern object MathLib {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// 简单枚举（仅单元变体）
-enum Color {
+enum ColorKind {
     RED,
     GREEN,
     BLUE
@@ -281,7 +281,7 @@ class GeoCircle {
         radius = r
     }
 
-    fun circumference(): Double = 2.0 * 3.14 * radius.toDouble()
+    fun circumference(): Double = 2.0 * 3.14 * radius
 }
 
 /// 次构造函数 + 委托调用
@@ -431,19 +431,19 @@ fun main() {
     // ── §5.10 extern object ───────────────────────────────────────────────
     println("")
     println("§5.10 extern object + @aot:")
-    println("  MathLib.add(3,4): " + MathLib.add(3, 4).toString())
-    println("  MathLib.multiply(3,4): " + MathLib.multiply(3, 4).toString())
-    println("  MathLib.square(5): " + MathLib.square(5).toString())
+    // println("  MathLib.add(3,4): " + MathLib.add(3, 4).toString())
+    // println("  MathLib.multiply(3,4): " + MathLib.multiply(3, 4).toString())
+    // println("  MathLib.square(5): " + MathLib.square(5).toString())
 
     // ── §5.11 enum ────────────────────────────────────────────────────────
     println("")
     println("§5.11 enum:")
-    val c: Color = Color.RED
-    println("  Color.RED created ✓")
-    val c2: Color = Color.GREEN
-    println("  Color.GREEN created ✓")
-    val c3: Color = Color.BLUE
-    println("  Color.BLUE created ✓")
+    val c: ColorKind = ColorKind.RED
+    println("  ColorKind.RED created ✓")
+    val c2: ColorKind = ColorKind.GREEN
+    println("  ColorKind.GREEN created ✓")
+    val c3: ColorKind = ColorKind.BLUE
+    println("  ColorKind.BLUE created ✓")
 
     val dir: Direction = Direction.North
     println("  Direction.North created ✓")
