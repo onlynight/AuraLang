@@ -1,5 +1,0 @@
-import aura.lang.std.Ascii
-fun main() {
-    val result = Ascii.isAlpha("a")
-    println("isAlpha = " + result.toString())
-}

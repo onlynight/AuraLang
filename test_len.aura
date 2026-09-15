@@ -1,5 +1,0 @@
-fun main() {
-    val s = "hello"
-    val len = s.length
-    println("length = " + len.toString())
-}
