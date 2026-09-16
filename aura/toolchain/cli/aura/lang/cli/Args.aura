@@ -3,7 +3,7 @@ package aura.lang.cli
 
 import aura.lang.std.String
 import aura.lang.std.Collections
-import aura.lang.native.process.Process
+import aura.lang.native.process.ProcessNative
 
 // ═══════════════════════════════════════════════════════════════
 // 命令行参数解析
@@ -40,10 +40,10 @@ class Args {
 /// 从原生进程参数构建 Args
 fun parseArgs(): Args {
     val args = Args()
-    val count: Int = Process.argCount()
+    val count: Int = ProcessNative.argCount()
     var i: Int = 0
     while (i < count) {
-        args.add(Process.arg(i))
+        args.add(ProcessNative.arg(i))
         i = i + 1
     }
     return args

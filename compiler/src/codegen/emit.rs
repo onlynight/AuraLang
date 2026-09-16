@@ -592,7 +592,21 @@ fn emit_instr(
             for a in args {
                 OpCode::LoadVar(*a as u16).write(code);
             }
-            let idx = fn_index.get(func.as_str()).copied().unwrap_or(0);
+            // 未解析的 callee **绝不能**回退到索引 0：函数表 0 号是入口函数（main），
+            // 会变成「自己调用自己」→ 无限递归 + 内存无上限增长（表现为进程吃满内存、
+            // 卡死；见 `vm::mod::remap_embedded_instrs` 的同一类说明）。
+            // 这里退化为硬错误：打印未解析符号并调用一个必然越界的索引，
+            // 让 VM 立即报「无效函数索引」而不是静默递归。
+            let idx = match fn_index.get(func.as_str()) {
+                Some(i) => *i,
+                None => {
+                    eprintln!(
+                        "[bytecode] error: 未解析的函数调用 '{}'（既非用户函数、也非原生函数）",
+                        func
+                    );
+                    u16::MAX
+                }
+            };
             OpCode::Call(idx).write(code);
             if let Some(d) = dst {
                 OpCode::StoreVar(*d as u16).write(code);
@@ -606,7 +620,18 @@ fn emit_instr(
             for a in args {
                 OpCode::LoadVar(*a as u16).write(code);
             }
-            let idx = native_index.get(func.as_str()).copied().unwrap_or(0);
+            // 同 `Call`：未解析的原生名不能静默回退到索引 0（那是别的原生函数，
+            // 会「悄悄派发到错误实现」而不是报错）。
+            let idx = match native_index.get(func.as_str()) {
+                Some(i) => *i,
+                None => {
+                    eprintln!(
+                        "[bytecode] error: 未解析的原生调用 '{}'（原生函数表无此名）",
+                        func
+                    );
+                    u16::MAX
+                }
+            };
             OpCode::CallNativeArgs(idx, args.len() as u16).write(code);
             if let Some(d) = dst {
                 OpCode::StoreVar(*d as u16).write(code);

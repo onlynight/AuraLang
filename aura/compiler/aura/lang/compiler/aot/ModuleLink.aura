@@ -225,19 +225,35 @@ object ModuleLinkUtils {
         //
         // String.aura / Math.aura / MathOps.aura / Memory.aura / Cpu.aura / Runtime.aura
         // 均已验证可正常自动包含（object 方法 receiver 问题已修复，package 声明已处理）。
+        //
+        // Phase 1: 消除双实现冗余 — 所有 AOT 依赖改为 Aura native 实现。
+        // 新增模块提供 C FFI 符号的 Aura 替代实现，通过 @native 声明生成 LLVM IR。
         return "aura/core/aura/lang/String.aura\n" +
+            // 内建基类 Any：所有类型隐式继承，`hashCode` / `equals` / `toString`
+            // 的默认实现必须始终参与编译（调用点不能只有 declare 没有 define）。
+            "aura/core/aura/lang/Any.aura\n" +
             "aura/core/aura/lang/std/Math.aura\n" +
             "aura/core/aura/lang/native/math/MathOps.aura\n" +
             "aura/core/aura/lang/native/Memory.aura\n" +
             "aura/core/aura/lang/native/Cpu.aura\n" +
             "aura/core/aura/lang/native/Runtime.aura\n" +
+            // Phase 1: native 包底层原语（C FFI 替代）
+            "aura/core/aura/lang/native/Syscalls.aura\n" +
+            "aura/core/aura/lang/native/memory/Allocator.aura\n" +
+            "aura/core/aura/lang/native/console/Console.aura\n" +
+            "aura/core/aura/lang/native/io/Stdio.aura\n" +
+            "aura/core/aura/lang/native/time/Clock.aura\n" +
+            "aura/core/aura/lang/native/env/EnvOps.aura\n" +
+            "aura/core/aura/lang/native/process/ProcessOps.aura\n" +
+            "aura/core/aura/lang/native/thread/ThreadOps.aura\n" +
+            "aura/core/aura/lang/native/network/NetworkOps.aura\n" +
             // Phase P1-P3: 纯 Aura 标准库模块（已验证可自动包含）
             "aura/core/aura/lang/std/string/StringBuilder.aura\n" +
             "aura/core/aura/lang/std/collection/Collections.aura\n" +
             "aura/core/aura/lang/std/FileSystem.aura\n" +
             "aura/core/aura/lang/native/file/FileOps.aura\n" +
             "aura/core/aura/lang/std/string/StringOps.aura\n" +
-            "aura/core/aura/lang/native/process/Process.aura\n"
+            "aura/core/aura/lang/native/process/ProcessNative.aura\n"
     }
 
     // ── 路径工具 ──

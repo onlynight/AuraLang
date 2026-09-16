@@ -2718,10 +2718,19 @@ impl Parser {
         // 杜绝 `advance` 在 EOF 处不推进导致的无限循环。
         loop {
             // 自定义中缀调用（Kotlin `infix fun`）：`lhs name rhs` → Call(name, [lhs, rhs])
-            // 排除单词形式逻辑运算符 `and` / `or`：它们是运算符而非函数名。
+            //
+            // 必须排除**单词形式的保留运算符**（`and` / `or` / `xor` / `shl` / `shr` /
+            // `ushr`）：它们在 `infix_binding_power` / `parse_infix_operator` 中已有确定
+            // 的运算符语义。旧实现只排除 `and` / `or`，于是 `h shr 16`（右操作数是字面量）
+            // 会走本分支变成 `Call("shr", [h, 16])` —— AOT 下即对未定义符号 `@shr`
+            // 的调用（llc: use of undefined value '@shr'），且调用结果被当作 `0` 参与外层
+            // 运算，静默算出错误结果（HashMap 哈希混合即因此全塌成 0）。
             if self.current().kind == TokenKind::Ident
                 && !self.is_lambda_start()
-                && !matches!(self.current().literal.as_str(), "and" | "or")
+                && !matches!(
+                    self.current().literal.as_str(),
+                    "and" | "or" | "xor" | "shl" | "shr" | "ushr"
+                )
             {
                 if let Some(infix) = self.try_parse_infix_call(&lhs, min_bp) {
                     lhs = infix;
@@ -3385,11 +3394,12 @@ impl Parser {
         // `Call(and, [lhs, rhs])`，AOT 下即是对未定义符号 `@and` 的调用。
         if self.current().kind == TokenKind::Ident {
             match self.current().literal.as_str() {
-                "and" => return 2, // 同 AndAnd
-                "or" => return 1,  // 同 OrOr
-                "xor" => return 4, // 同 Caret
-                "shl" => return 5, // 同 LtLt
-                "shr" => return 5, // 同 GtGt
+                "and" => return 2,  // 同 AndAnd
+                "or" => return 1,   // 同 OrOr
+                "xor" => return 4,  // 同 Caret
+                "shl" => return 5,  // 同 LtLt
+                "shr" => return 5,  // 同 GtGt
+                "ushr" => return 5, // 同 GtGtGt
                 _ => {}
             }
         }
@@ -3444,6 +3454,7 @@ impl Parser {
                 "xor" => return BinOp::BitXor,
                 "shl" => return BinOp::Shl,
                 "shr" => return BinOp::Shr,
+                "ushr" => return BinOp::UShr,
                 _ => {}
             }
         }

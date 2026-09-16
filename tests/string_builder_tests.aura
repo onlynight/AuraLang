@@ -11,7 +11,7 @@
 //   全通过时输出 "RESULT: PASS"
 // ═════════════════════════════════════════════════════════════
 
-import aura.lang.std.StringBuilder
+import aura.lang.std.string.StringBuilder
 
 import "../aura/compiler/aura/lang/compiler/test/TestRunner.aura"
 

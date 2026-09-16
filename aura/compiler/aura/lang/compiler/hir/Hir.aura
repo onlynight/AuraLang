@@ -62,6 +62,11 @@ object HirUtils {
         if (op == "LtLt" || op == "<<") { return "<<" }
         if (op == "GtGt" || op == ">>") { return ">>" }
         if (op == "GtGtGt" || op == ">>>") { return ">>>" }
+        // 位运算（符号形式）：`&` / `|` / `^`。不归一化则发射器拿不到运算符文本，
+        // 二元表达式退化为默认可选分支（错误的 IR）。
+        if (op == "Ampersand" || op == "&") { return "&" }
+        if (op == "Pipe" || op == "|") { return "|" }
+        if (op == "Caret" || op == "^") { return "^" }
         return op
     }
 

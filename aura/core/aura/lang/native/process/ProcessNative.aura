@@ -1,4 +1,4 @@
-// aura:///aura/lang/native/process/Process.aura
+// aura:///aura/lang/native/process/ProcessNative.aura
 package aura.lang.native.process
 // ─────────────────────────────────────────────────────────────
 // 进程管理 — Phase S2 (native 包实现)
@@ -6,26 +6,45 @@ package aura.lang.native.process
 // 使用 extern object + @native 实现，零外部库依赖。
 // 替代 aura.lang.std.Process（内部接口）。
 //
+// ── 命名说明 ──
+// 对象名从 `Process` 改为 **`ProcessNative`**：`aura/lang/std/Process.aura`
+// 里也有一个 `object Process`（兼容包装），两者同处一个模块（前者来自
+// `ModuleLink.essentialStdModules`，后者来自编译器自身 import）会造成**同名
+// 符号互相覆盖** —— extern object 的成员体被跳过、std 版的 `Process_arg` 胜出，
+// 使 `std/Process.arg` 的委托调用退化成未定义的裸符号 `@arg`。
+// 改名后两者符号空间分离（`ProcessNative_*` / `Process_*`）。
+//
 // ── 设计原则 ──
 //   * 低层：直接映射 syscall（fork / execve / wait4 / kill / exit / getpid）
 //   * 高层：用纯 Aura 组合低层 syscall 实现 spawn / run / args / arg / argCount
 //   * 命令行参数：读取 /proc/self/cmdline（NUL 分隔）
 //
 // ── 使用方式 ──
-//   import aura.lang.native.process.Process
+//   import aura.lang.native.process.ProcessNative
 //
-//   Process.exit(0)
-//   val pid: Int = Process.pid()
-//   val code: Int = Process.wait(pid)
+//   ProcessNative.exit(0)
+//   val pid: Int = ProcessNative.pid()
+//   val code: Int = ProcessNative.wait(pid)
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.native.Syscalls
 import aura.lang.native.Memory
 import aura.lang.native.memory.Allocator
 import aura.lang.std.string.StringOps
+// 命令行参数访问器（`aura_process_argCount` / `aura_process_arg`）声明在
+// `ProcessOps`（extern object，符号名即成员名）。
+import aura.lang.native.process.ProcessOps
 
 /// 进程管理（native 实现）
-extern object Process {
+///
+/// 注意：这里是**普通 `object`**，不是 `extern object`。
+/// `extern object` 的成员在 AOT 被一律当外部 C 符号处理（只 `declare`、
+/// **不发射函数体**），而本对象的高层成员（`arg` / `args` / `argCount` /
+/// `spawn` / `run` …）是**纯 Aura 组合实现**，必须发射为
+/// `ProcessNative_<member>` 的 `define`；否则调用点找不到定义，退化成
+/// 未定义的裸符号（llc: `use of undefined value '@arg'`）。
+/// 低层 `@native(SYS_*)` 成员仍由 native 包装器机制处理（与是否 extern 无关）。
+object ProcessNative {
 
     // ═══════════════════════════════════════════════════════════
     // 低层 syscall 声明
@@ -129,13 +148,30 @@ extern object Process {
     // -- 命令行参数 --
 
     /// 获取命令行参数数量。
+    ///
+    /// 走 C 运行库的跨平台访问器（由 C 入口注入的宿主 argv），
+    /// 不再解析 Linux 专有的 `/proc/self/cmdline` —— 后者在 Windows 下
+    /// 永远读不到参数（`argc` 恒 0，自举产物无法接收命令行参数）。
     fun argCount(): Int {
-        return countCmdlineArgs()
+        return ProcessOps.aura_process_argCount() as Int
     }
 
     /// 获取指定索引的命令行参数。
+    ///
+    /// 实现：取全量参数（C 侧以 '\n' 连接）后按行切分。
+    /// 不直接调用逐条访问器 `aura_process_arg(index)` —— extern object 成员调用点
+    /// 会在实参前补「接收者」占位，索引会错位到第 2 个参数槽（C 只认第 1 个），
+    /// 导致 `arg(i)` 恒返回 argv[0]。
     fun arg(index: Int): String {
-        return getCmdlineArg(index)
+        if (index < 0) {
+            return ""
+        }
+        val all: String = ProcessOps.aura_process_args()
+        val parts: List<String> = all.split("\n")
+        if (index >= parts.size) {
+            return ""
+        }
+        return parts[index]
     }
 
     /// 获取命令行参数列表（需先调用 argCount 确定数量）。

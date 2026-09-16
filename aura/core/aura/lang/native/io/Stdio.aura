@@ -28,6 +28,17 @@ import aura.lang.native.Syscalls
 /// 高级标准 I/O（纯 Aura 实现，委托到 native 包）
 object Stdio {
 
+    /// 换行字节缓冲（懒初始化，全生命周期复用）。
+    ///
+    /// 不再使用 `Console.getNewlineBuffer()`：`Console` 是 `extern object`，
+    /// AOT 前端把其成员**一律按外部 C 符号处理**（只 `declare`、不发射函数体，
+    /// 见 `Emit.aura` 的 `fExternFnIds`），而 `getNewlineBuffer` 既没有 C 实现
+    /// 也没有 Aura `define` → llc 报
+    /// `use of undefined value '@getNewlineBuffer'`。
+    /// 这里自建 1 字节缓冲，只依赖普通 Aura 模块（`Allocator`/`Memory`）与
+    /// `Console.writeStdout`（`@native` 包装器，可正常发射）。
+    var nlBuf: Long = 0
+
     // ═══════════════════════════════════════════════════════════════
     // String ↔ Buffer 转换
     // ═══════════════════════════════════════════════════════════════
@@ -89,9 +100,15 @@ object Stdio {
         if (buf == 0) { return }
         val len: Long = strlen(buf)
         Console.writeStdout(buf, len)
-        val nl: Long = Console.getNewlineBuffer()
-        if (nl != 0) {
-            Console.writeStdout(nl, 1)
+        // 换行：复用自建的 1 字节缓冲（见 `nlBuf` 字段说明）。
+        if (nlBuf == 0) {
+            nlBuf = Allocator.malloc(1)
+            if (nlBuf != 0) {
+                Memory.write(nlBuf, 10)
+            }
+        }
+        if (nlBuf != 0) {
+            Console.writeStdout(nlBuf, 1)
         }
     }
 
@@ -162,47 +179,53 @@ object Stdio {
     // ═══════════════════════════════════════════════════════════════
 
     /// 读取文件内容（文本）。
+    ///
+    /// **不依赖 `struct stat` 布局**：早期实现用
+    /// `FileOps.fstat(fd, statBuf)` + `Memory.read64(statBuf + 48)` 取 Linux 的
+    /// `st_size` 偏移；Windows 上 `fstat` 落到 CRT `_fstat`（写入 `struct _stat`，
+    /// 布局不同）→ 读到垃圾长度 → `Allocator.malloc(垃圾)` → 段错误 / 无界分配。
+    ///
+    /// 现改为「按块 `read` 直到返回 0（EOF）」+ 按需扩容，跨平台无结构体布局依赖。
     fun readFile(path: String): String {
         val pathBuf: Long = stringToBuffer(path)
         if (pathBuf == 0) { return "" }
 
         val fd: Int = FileOps.open(pathBuf, 0)  // O_RDONLY
-        if (fd < 0) {
-            Allocator.free(pathBuf)
-            return ""
-        }
-
-        // 获取文件大小
-        val statBuf: Long = Allocator.malloc(144)  // sizeof(struct stat) = 144 on x86_64
-        if (statBuf == 0) {
-            FileOps.close(fd)
-            Allocator.free(pathBuf)
-            return ""
-        }
-        FileOps.fstat(fd, statBuf)
-        val size: Long = Memory.read64(statBuf + 48)  // st_size offset
-
-        // 读取文件内容
-        val content: String = ""
-        if (size > 0) {
-            val buf: Long = Allocator.malloc(size)
-            if (buf != 0) {
-                var offset: Long = 0
-                var remaining: Long = size
-                while (remaining > 0) {
-                    val bytesRead: Long = FileOps.read(fd, buf + offset, remaining)
-                    if (bytesRead <= 0) { break }
-                    offset = offset + bytesRead
-                    remaining = remaining - bytesRead
-                }
-                content = bufferToString(buf, offset)
-                Allocator.free(buf)
-            }
-        }
-
-        Allocator.free(statBuf)
-        FileOps.close(fd)
         Allocator.free(pathBuf)
+        if (fd < 0) {
+            return ""
+        }
+
+        val chunk: Long = 65536
+        var buf: Long = Allocator.malloc(chunk)
+        if (buf == 0) {
+            FileOps.close(fd)
+            return ""
+        }
+        var cap: Long = chunk
+        var total: Long = 0
+        while (true) {
+            if (total >= cap) {
+                // 扩容：新缓冲 + 逐字节拷贝（AOT 下无 realloc 语义保证）
+                val ncap: Long = cap * 2
+                val nbuf: Long = Allocator.malloc(ncap)
+                if (nbuf == 0) { break }
+                var k: Long = 0
+                while (k < total) {
+                    Memory.write(nbuf + k, Memory.read(buf + k))
+                    k = k + 1
+                }
+                Allocator.free(buf)
+                buf = nbuf
+                cap = ncap
+            }
+            val n: Long = FileOps.read(fd, buf + total, cap - total)
+            if (n <= 0) { break }
+            total = total + n
+        }
+        val content: String = bufferToString(buf, total)
+        Allocator.free(buf)
+        FileOps.close(fd)
         return content
     }
 

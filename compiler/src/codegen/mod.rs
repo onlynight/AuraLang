@@ -266,13 +266,38 @@ pub fn resolve_aura_imports(source: &str, file_path: Option<&str>) -> String {
         .as_ref()
         .map(|pr| pr.join("aura").join("core").join("aura").join("lang").join("collection"));
     let mut visited = std::collections::HashSet::new();
-    resolve_aura_imports_rec(
+    let mut out = resolve_aura_imports_rec(
         source,
         &compiler_pkg_root,
         &collection_pkg_root,
         &base_dir,
         &mut visited,
-    )
+    );
+    // 内建基类 `Any` 无条件参与编译。
+    //
+    // 所有类型隐式继承 `Any`，因此 `x.hashCode()` / `a.equals(b)` 这类**基类方法**
+    // 调用在任何程序里都可能出现（AOT 无运行时反射，必须绑定到 Aura 实现）。
+    // `Any` 属于语言内建类型，源码里不会 `import`，故在此显式内联 ——
+    // 否则调用点只有 `declare` 没有 `define`，链接期报
+    // `undefined symbol: hashCode / equals`。
+    if let Some(pr) = project_root.as_ref() {
+        let any_path = pr.join("aura").join("core").join("aura").join("lang").join("Any.aura");
+        let canon = std::fs::canonicalize(&any_path).unwrap_or_else(|_| any_path.clone());
+        if !visited.contains(&canon) {
+            if let Ok(content) = std::fs::read_to_string(&any_path) {
+                visited.insert(canon);
+                let child_base = any_path.parent().unwrap_or(&base_dir);
+                out.push_str(&resolve_aura_imports_rec(
+                    &content,
+                    &compiler_pkg_root,
+                    &collection_pkg_root,
+                    child_base,
+                    &mut visited,
+                ));
+            }
+        }
+    }
+    out
 }
 
 /// 递归解析 import：除入口文件的顶层 import 外，被内联文件内部的 import

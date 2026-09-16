@@ -64,7 +64,7 @@ object SigningUtils {
     fun xorBytes(s: String, x: Int): String {
         var result: String = ""
         for (i: Int in 0..s.length) {
-            result = result + String.fromCharCode(s.charCodeAt(i) xor x)
+            result = result + String.fromCharCode(s.charCodeAt(i) ^ x)
         }
         return result
     }

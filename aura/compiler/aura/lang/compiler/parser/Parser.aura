@@ -937,11 +937,38 @@ class Parser {
         if (this.prsCheck("Lt")) {
             name = name + "<"
             this.prsAdvance()
-            while (!this.prsCheck("Gt") && !this.prsAtEnd()) {
-                name = name + this.prsCurLit()
+            // 泛型实参需**按深度配平**扫描：词法器把 `>>` / `>>>` 合并成单个
+            // token（`GtGt` / `GtGtGt`），旧实现只认单独的 `Gt`，于是
+            // `ArrayList<ArrayList<K>>` 永远等不到闭合 `>` —— 循环一路吞掉
+            // 后续所有 token 当作类型文本，产出形如
+            // `ArrayList_ArrayList_K___bucketKeys_…` 的巨型垃圾类型名，
+            // 最终 llc 报 `use of undefined type named 'struct.HashMap_…'`。
+            var dep: Int = 1
+            while (dep > 0 && !this.prsAtEnd()) {
+                val tk: String = this.prsCurKind()
+                if (tk == "Lt") {
+                    dep = dep + 1
+                    name = name + "<"
+                } else if (tk == "Gt") {
+                    dep = dep - 1
+                    if (dep > 0) {
+                        name = name + ">"
+                    }
+                } else if (tk == "GtGt") {
+                    dep = dep - 2
+                    if (dep > 0) {
+                        name = name + ">>"
+                    }
+                } else if (tk == "GtGtGt") {
+                    dep = dep - 3
+                    if (dep > 0) {
+                        name = name + ">>>"
+                    }
+                } else {
+                    name = name + this.prsCurLit()
+                }
                 this.prsAdvance()
             }
-            this.prsExpect("Gt")
             name = name + ">"
         }
         return this.parseTypeSuffix(name)
@@ -1435,6 +1462,13 @@ class Parser {
         }
         if (k == "Lt" || k == "Gt" || k == "LtEq" || k == "GtEq") { return 4 }
         if (k == "LtLt" || k == "GtGt" || k == "GtGtGt") { return 5 }
+        // 位运算：与 Rust 侧 `infix_binding_power` 一致
+        //（`&` 5 / `^` 4 / `|` 3）。缺这三项时 `a & b` 会在 `&` 处直接中断二元
+        // 解析 —— 左值留下、`& b` 变成独立垃圾语句（`Int.aura` 的
+        // `and/or/xor` 方法体、`HashMap` 的桶下标取模都依赖它们）。
+        if (k == "Ampersand") { return 5 }
+        if (k == "Caret") { return 4 }
+        if (k == "Pipe") { return 3 }
         if (k == "Plus" || k == "Minus") { return 6 }
         if (k == "Star" || k == "Slash" || k == "Percent") { return 7 }
         return 0

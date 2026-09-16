@@ -191,6 +191,7 @@ fn push_local_scope() {
             ctx.locals.push(std::collections::HashSet::new());
         }
     });
+    push_local_type_scope();
 }
 
 fn pop_local_scope() {
@@ -199,6 +200,7 @@ fn pop_local_scope() {
             ctx.locals.pop();
         }
     });
+    pop_local_type_scope();
 }
 
 fn register_local(n: &str) {
@@ -209,6 +211,92 @@ fn register_local(n: &str) {
             }
         }
     });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 局部变量/形参的**声明类型**通道（与 sema 类型通道互补）
+//
+// `lookup_expr_type` 只依赖 sema（span 键控）。当检查器在某处提前收尾或把
+// 构造器推断成 `<error>` 时（例如 `var xs: ArrayList<Int> = arrayListOf<Int>()`
+// 会报 "cannot initialize 'ArrayList' with '<error>'"），接收者类型就查不到，
+// 于是 `.size` / `.add` / `.get` / Map 接口改派等**全部退化为类字段访问或裸名调用**：
+// `xs.size` 会去读 Aura 类 `ArrayList._size`（运行期列表并没有该字段）→ 取到 null。
+//
+// 这里在降级期自行记录「变量名 → 声明类型」，作为 sema 缺失时的兜底。
+// ─────────────────────────────────────────────────────────────────────────────
+thread_local! {
+    static LOCAL_TYPE_SCOPES: RefCell<Vec<HashMap<String, String>>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+fn push_local_type_scope() {
+    LOCAL_TYPE_SCOPES.with(|s| s.borrow_mut().push(HashMap::new()));
+}
+
+fn pop_local_type_scope() {
+    LOCAL_TYPE_SCOPES.with(|s| {
+        s.borrow_mut().pop();
+    });
+}
+
+/// 登记局部变量/形参的声明类型（`None` 或空名忽略）。
+fn register_local_type(name: &str, ty: Option<String>) {
+    let Some(t) = ty else { return };
+    if t.trim().is_empty() || name.is_empty() {
+        return;
+    }
+    LOCAL_TYPE_SCOPES.with(|s| {
+        let mut b = s.borrow_mut();
+        if b.is_empty() {
+            b.push(HashMap::new());
+        }
+        if let Some(top) = b.last_mut() {
+            top.insert(name.to_string(), t);
+        }
+    });
+}
+
+/// 查询局部变量/形参的声明类型（由内向外查找）。
+fn lookup_local_type(name: &str) -> Option<String> {
+    LOCAL_TYPE_SCOPES.with(|s| {
+        let b = s.borrow();
+        for sc in b.iter().rev() {
+            if let Some(t) = sc.get(name) {
+                return Some(t.clone());
+            }
+        }
+        None
+    })
+}
+
+/// 取 AST 类型标注的类型名（命名/泛型/可空/基本类型；函数类型等返回 None）。
+fn ast_type_name(t: &crate::ast::Type) -> Option<String> {
+    use crate::ast::Type as T;
+    match t {
+        T::Named { name, .. } => Some(name.clone()),
+        T::Generic {
+            name, args, ..
+        } => {
+            let inner: Vec<String> =
+                args.iter().map(|a| ast_type_name(a).unwrap_or_else(|| "Any".into())).collect();
+            Some(format!("{}<{}>", name, inner.join(",")))
+        }
+        T::Nullable(inner) => ast_type_name(inner).map(|n| format!("{}?", n)),
+        T::Int => Some("Int".into()),
+        T::Long => Some("Long".into()),
+        T::Short => Some("Short".into()),
+        T::Byte => Some("Byte".into()),
+        T::Float => Some("Float".into()),
+        T::Double => Some("Double".into()),
+        T::Boolean => Some("Boolean".into()),
+        T::Char => Some("Char".into()),
+        T::String => Some("String".into()),
+        T::Any => Some("Any".into()),
+        T::Unit => Some("Unit".into()),
+        T::Nothing => Some("Nothing".into()),
+        T::Array(inner) => ast_type_name(inner).map(|n| format!("Array<{}>", n)),
+        _ => None,
+    }
 }
 
 /// 裸标识符改写：类体中的字段访问 / 访问器中的 `field`
@@ -330,6 +418,21 @@ fn field_receiver_method(
     None
 }
 
+/// `Any` 基类默认实现解析（`hashCode` / `equals` / `toString` …）。
+///
+/// 所有 class / object 都**隐式继承** `Any`，因此这些方法在任何类型上都可调用。
+/// 当接收者类型未知、是值类型（Int / String / …）或类未显式重写时，落到
+/// `Any.aura` 的默认实现（`AOT` 下发射为 `Any_<method>`）。
+/// 仅当 `Any.aura` 参与编译（CLASS_TABLE 含 `Any`）时命中，否则返回 None
+/// 让调用点退回 prelude 内置路径。
+fn any_base_method(
+    table: &HashMap<String, ClassEntry>,
+    method: &str,
+) -> Option<(String, ClassEntry)> {
+    let e = table.get("Any")?;
+    if e.methods.contains(method) { Some(("Any".to_string(), e.clone())) } else { None }
+}
+
 /// 方法调用的接收者类解析：静态类型命中（含继承链）→ 全表唯一候选兜底
 fn resolve_method_owner(object: &Expr, method: &str) -> Option<(String, ClassEntry)> {
     let table = CLASS_TABLE.with(|t| t.borrow().clone());
@@ -353,9 +456,11 @@ fn resolve_method_owner(object: &Expr, method: &str) -> Option<(String, ClassEnt
         if let Some(found) = find_method_in_chain(&table, ty, method) {
             return Some(found);
         }
-        // 已知接收者类型且是成员表中的类但无此方法 → 交给内置/未命中
+        // 已知接收者类型且是成员表中的类但无此方法 → 尝试 `Any` 的默认实现
+        //（所有 class / object 都隐式继承 Any，`hashCode` / `equals` / `toString`
+        //  等基类方法即使未显式重写也应命中 Any 的默认实现）
         if table.contains_key(ty) {
-            return None;
+            return any_base_method(&table, method);
         }
         // 类型不在成员表（List/String/Any/泛型等）：继续尝试字段接收者兜底
     }
@@ -363,9 +468,14 @@ fn resolve_method_owner(object: &Expr, method: &str) -> Option<(String, ClassEnt
     if let Some(found) = field_receiver_method(&table, object, method) {
         return Some(found);
     }
-    // 已知非类类型（List/String 等）→ 交给内置方法
+    // 已知非类类型（List/String/Any/泛型等）→ 先试 `Any` 默认实现，再交给内置方法
     if sema_ty.is_some() {
-        return None;
+        return any_base_method(&table, method);
+    }
+    // 1.8) 无类型信息：`Any` 默认实现优先于「全表唯一候选」兜底
+    //      （`hashCode` / `equals` 被大量类重写，唯一候选兜底必然失败）
+    if let Some(found) = any_base_method(&table, method) {
+        return Some(found);
     }
     // 2) 兜底（无类型信息时）：整个成员表中唯一拥有该方法的类
     let cands: Vec<String> =
@@ -1047,7 +1157,8 @@ impl HirBinOp {
             BinOp::To => HirBinOp::To,
             BinOp::Is => HirBinOp::Is,
             BinOp::As => HirBinOp::As,
-            BinOp::Assign | BinOp::UShr => HirBinOp::Shr, // 近似
+            BinOp::UShr => HirBinOp::Shr, // 近似：逻辑右移 → 算术右移
+            _ => HirBinOp::Add,           // 其他未处理的运算符（如 Assign）默认回退
         }
     }
 }
@@ -3004,6 +3115,8 @@ fn branch_value_of(b: &HirBlock) -> Option<HirExpr> {
 
 /// 降级函数，可选添加隐式 self 参数（方法需要）；`name_override` 供类方法使用
 fn desugar_fn_with_self(f: &FnDecl, is_method: bool, name_override: Option<String>) -> HirFunction {
+    // 形参声明类型先入作用域（`desugar_block` 会再压一层块作用域，形参在外层可见）
+    push_fn_param_types(f);
     let mut body = match &f.body {
         Some(b) => desugar_block(b),
         None => HirBlock {
@@ -3069,6 +3182,7 @@ fn desugar_fn_with_self(f: &FnDecl, is_method: bool, name_override: Option<Strin
         let param_names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
         body = tailrec_rewrite(&fname, &param_names, body);
     }
+    pop_fn_param_types();
     HirFunction {
         name: fname,
         params,
@@ -3079,6 +3193,20 @@ fn desugar_fn_with_self(f: &FnDecl, is_method: bool, name_override: Option<Strin
         ffi_abi: FfiAbi::None,
         ffi_lib: None,
         native_attr: f.native_attr.clone(),
+    }
+}
+
+/// 结束形参类型作用域（与 `push_fn_param_types` 配对）。
+fn pop_fn_param_types() {
+    pop_local_type_scope();
+}
+
+/// 在降级函数体前登记形参声明类型（供 `lookup_expr_type` 兜底），
+/// 返回后需调用 `pop_local_type_scope()`。
+fn push_fn_param_types(f: &FnDecl) {
+    push_local_type_scope();
+    for p in &f.params {
+        register_local_type(&p.name, p.type_hint.as_deref().and_then(ast_type_name));
     }
 }
 
@@ -3099,8 +3227,9 @@ fn desugar_class_method(f: &FnDecl, class: &str, with_self: bool) -> HirFunction
     });
     // 参数进入局部作用域（屏蔽同名字段）
     let param_names: Vec<String> = f.params.iter().map(|p| p.name.clone()).collect();
-    for p in &param_names {
-        register_local(p);
+    for p in &f.params {
+        register_local(&p.name);
+        register_local_type(&p.name, p.type_hint.as_deref().and_then(ast_type_name));
     }
     let mut hir = desugar_fn_with_self(f, with_self, Some(full_name.clone()));
     pop_local_scope();
@@ -3194,6 +3323,10 @@ fn synthesize_accessors(class: &str, fields: &[StructField]) -> Vec<HirFunction>
                 })
             });
             register_local(&param_name);
+            register_local_type(
+                &param_name,
+                st.param.as_ref().and_then(|p| p.type_hint.as_deref().and_then(ast_type_name)),
+            );
             let body = desugar_block(&st.body);
             pop_local_scope();
             CLASS_CTX.with(|c| *c.borrow_mut() = prev_ctx);
@@ -3273,6 +3406,7 @@ fn desugar_stmt(s: &Stmt) -> HirStmt {
             ..
         } => {
             register_local(name);
+            register_local_type(name, type_hint.as_deref().and_then(ast_type_name));
             HirStmt::Val {
                 name: name.clone(),
                 ty: HirType::from_ast_opt(type_hint),
@@ -3286,6 +3420,7 @@ fn desugar_stmt(s: &Stmt) -> HirStmt {
             ..
         } => {
             register_local(name);
+            register_local_type(name, type_hint.as_deref().and_then(ast_type_name));
             HirStmt::Var {
                 name: name.clone(),
                 ty: HirType::from_ast_opt(type_hint),
@@ -3855,8 +3990,43 @@ fn is_module_chain(e: &Expr) -> bool {
 }
 
 /// 查询表达式的静态类型名（来自 sema 信息通道，strip 可空标记）
+///
+/// sema 查不到时回退到降级期自行记录的「局部变量/形参声明类型」
+/// （见 `LOCAL_TYPE_SCOPES`）——检查器提前收尾或把 `arrayListOf(...)`
+/// 推断成 `<error>` 时，这是唯一还能拿到接收者类型的来源。
 fn lookup_expr_type(e: &Expr) -> Option<String> {
-    SEMA_INFO.with(|s| s.borrow().as_ref().and_then(|i| i.expr_type(e)))
+    if let Some(t) = SEMA_INFO.with(|s| s.borrow().as_ref().and_then(|i| i.expr_type(e))) {
+        return Some(t);
+    }
+    if let Expr::Ident(name, _) = e {
+        return lookup_local_type(name);
+    }
+    None
+}
+
+/// 是否为「运行期由 VM/运行库**内建列表**支撑」的类型名。
+///
+/// `List`/`ArrayList`/`Array`/`Set` 等类型在运行期都是 `Value::List`（AOT 下是
+/// `AuraDynList` 句柄），**没有**对应的 Aura 类实例与私有字段。因此：
+/// - `.size` / `.length` / `.isEmpty` / `.add` / `.get` 等必须降级为内建列表指令
+///   （`__list_len` / `__list_push` / `Collections.getAt` …）；
+/// - 若误走「类成员访问」路径，会读到 `ArrayList._size` 这类**不存在的字段** →
+///   运行期取到 `null`（现象：`toStr(l.size)` 打印 "null"，而 `l.size` 参与算术/比较
+///   时又看似正常）。
+///
+/// 注意：不能用 `starts_with("List")` 单独判断 —— `ArrayList` 不以 `List` 开头，
+/// 这正是此前遗漏的原因。
+fn is_list_like_type(ty: &str) -> bool {
+    let base = ty.trim_end_matches('?');
+    base.starts_with("List")
+        || base.starts_with("Array")
+        || base.starts_with("Set")
+        || base.starts_with("ArrayList")
+        || base.starts_with("MutableList")
+        || base.starts_with("MutableSet")
+        || base.starts_with("Collection")
+        || base.starts_with("Iterable")
+        || base.starts_with("Sequence")
 }
 
 /// 判断 AST 表达式是否为字符串字面量或字符串插值
@@ -4398,18 +4568,40 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     // P15: List 高阶方法（filter/map/take）→ 内联循环块
                     if matches!(name.as_str(), "filter" | "map" | "take") {
                         if let Some(ty) = lookup_expr_type(object) {
-                            if ty.starts_with("List") {
+                            if is_list_like_type(&ty) {
                                 return desugar_list_hof(name, object, args);
+                            }
+                        }
+                    }
+                    // 列表类的「尺寸/空判定」方法调用 → 内建列表指令。
+                    //
+                    // `l.getSize()` / `l.isEmpty()` 若按普通方法解析，会调用 Aura 侧
+                    // `ArrayList.getSize`（读私有字段 `_size`），而运行期 `l` 是
+                    // `Value::List` → 字段不存在 → 取到 null。
+                    if name.as_str() == "getSize" && args.is_empty() {
+                        if let Some(ty) = lookup_expr_type(object) {
+                            if is_list_like_type(&ty) {
+                                return HirExpr::Call {
+                                    callee: "__list_len".into(),
+                                    args: vec![desugar_expr(object)],
+                                };
+                            }
+                        }
+                    }
+                    if name.as_str() == "isEmpty" && args.is_empty() {
+                        if let Some(ty) = lookup_expr_type(object) {
+                            if is_list_like_type(&ty) {
+                                return HirExpr::Call {
+                                    callee: "aura.lang.std.Collections.isEmpty".into(),
+                                    args: vec![desugar_expr(object)],
+                                };
                             }
                         }
                     }
                     // List/Array/Set 的 Collection 通用方法调用 → Collections.* 原生函数
                     if name.as_str() == "get" || name.as_str() == "getAt" {
                         if let Some(ty) = lookup_expr_type(object) {
-                            if ty.starts_with("List")
-                                || ty.starts_with("Array")
-                                || ty.starts_with("Set")
-                            {
+                            if is_list_like_type(&ty) {
                                 let mut all_args = vec![desugar_expr(object)];
                                 for a in args {
                                     all_args.push(desugar_expr(a));
@@ -4421,17 +4613,39 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                             }
                         }
                     }
-                    // Map/MutableMap 的 get(key) → 具体实现 HashMap.get
-                    // （Map 为接口，不在成员表中；不显式改派会退化为裸名 `get` 未定义符号）
-                    if name.as_str() == "get" {
-                        if let Some(ty) = lookup_expr_type(object) {
-                            if ty.starts_with("Map") || ty.starts_with("MutableMap") {
+                    // Map/MutableMap 接收者 → 具体实现 HashMap.<method>
+                    //
+                    // `Map` 是接口，不参与类表；接口类型变量上的方法调用若按普通
+                    // 方法解析会退化为**裸名**（如 `put`）→ 字节码查表失败
+                    // （运行期报「未定义函数」）。这里按名字显式改派到 `HashMap`：
+                    // 运行期该变量必然持有 HashMap 实例（项目内 Map 的唯一实现）。
+                    if let Some(ty) = lookup_expr_type(object) {
+                        if ty.starts_with("Map") || ty.starts_with("MutableMap") {
+                            let mapped: Option<&str> = match name.as_str() {
+                                "get" => Some("get"),
+                                "put" => Some("put"),
+                                "set" => Some("put"),
+                                "getOrDefault" => Some("getOrDefault"),
+                                "containsKey" => Some("containsKey"),
+                                "containsValue" => Some("containsValue"),
+                                "remove" => Some("remove"),
+                                "clear" => Some("clear"),
+                                "isEmpty" => Some("isEmpty"),
+                                "getSize" => Some("getSize"),
+                                "keys" => Some("keys"),
+                                "values" => Some("values"),
+                                "toString" => Some("toString"),
+                                "equals" => Some("equals"),
+                                "hashCode" => Some("hashCode"),
+                                _ => None,
+                            };
+                            if let Some(m) = mapped {
                                 let mut all_args = vec![desugar_expr(object)];
                                 for a in args {
                                     all_args.push(desugar_expr(a));
                                 }
                                 return HirExpr::Call {
-                                    callee: "HashMap.get".into(),
+                                    callee: format!("HashMap.{}", m),
                                     args: all_args,
                                 };
                             }
@@ -4439,10 +4653,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     }
                     if name.as_str() == "contains" || name.as_str() == "indexOf" {
                         if let Some(ty) = lookup_expr_type(object) {
-                            if ty.starts_with("List")
-                                || ty.starts_with("Array")
-                                || ty.starts_with("Set")
-                            {
+                            if is_list_like_type(&ty) {
                                 let callee = if name.as_str() == "contains" {
                                     "aura.lang.std.Collections.contains".to_string()
                                 } else {
@@ -4465,10 +4676,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                         || name.as_str() == "append"
                     {
                         if let Some(ty) = lookup_expr_type(object) {
-                            if ty.starts_with("List")
-                                || ty.starts_with("Array")
-                                || ty.starts_with("Set")
-                            {
+                            if is_list_like_type(&ty) {
                                 let mut all_args = vec![desugar_expr(object)];
                                 for a in args {
                                     all_args.push(desugar_expr(a));
@@ -4483,7 +4691,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     // set(i, v) → Collections.set(collection, i, v)，结果回赋到集合变量
                     if name.as_str() == "set" {
                         if let Some(ty) = lookup_expr_type(object) {
-                            if ty.starts_with("List") || ty.starts_with("Array") {
+                            if is_list_like_type(&ty) {
                                 let mut all_args = vec![desugar_expr(object)];
                                 for a in args {
                                     all_args.push(desugar_expr(a));
@@ -4625,7 +4833,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                         // 默认参数填充
                         let params_opt = FUNCTION_PARAMS
                             .with(|f| f.borrow().get(&format!("{}.{}", class, name)).cloned());
-                        if let Some(params) = params_opt {
+                        if let Some(params) = params_opt.as_ref() {
                             let required = params
                                 .iter()
                                 .filter(|p| p.default_value.is_none() && !p.is_vararg)
@@ -4640,21 +4848,54 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                                 all_args.extend(defaults);
                             }
                         }
-                        let is_virtual = CLASS_TABLE.with(|t| {
-                            let table = t.borrow();
-                            let mut cur = Some(class.clone());
-                            while let Some(cn) = cur {
-                                if let Some(e) = table.get(&cn) {
-                                    if e.open_methods.contains(name) {
-                                        return true;
+                        // vararg 打包（与自由函数调用路径一致；此前类/object 方法路径缺失）。
+                        //
+                        // `HashMapUtils.mapOf(vararg pairs: Any)` 这类**object/类方法的可变参数**：
+                        // 调用点若不把多余实参打包成列表，实参会整体前移一格 ——
+                        // `pairs` 收到第一个实参本身（如字符串 "x"），`pairs.size` 变成对字符串
+                        // 取长度（或 0）→ 循环体不执行 → 工厂返回空集合。
+                        if let Some(params) = params_opt.as_ref() {
+                            if let Some(last_param) = params.last() {
+                                if last_param.is_vararg {
+                                    let named_count = params.len().saturating_sub(1);
+                                    let provided = all_args.len().saturating_sub(1); // 去掉 self
+                                    if provided > named_count {
+                                        let vararg_exprs: Vec<HirExpr> =
+                                            all_args[1 + named_count..].to_vec();
+                                        all_args.truncate(1 + named_count);
+                                        all_args.push(HirExpr::Call {
+                                            callee: "listOf".to_string(),
+                                            args: vararg_exprs,
+                                        });
                                     }
-                                    cur = e.superclass.clone();
-                                } else {
-                                    break;
                                 }
                             }
-                            false
-                        });
+                        }
+                        // `Any` 的默认实现**不做动态分派**。
+                        //
+                        // `Any` 是所有类型的隐式基类，其方法（`hashCode` / `equals` /
+                        // `toString`）都是 `open`。但接收者常常是**没有 vtable 的值**：
+                        // `Any` 本身（`Any` 映射为 `i8*`）、值类型（Int / String）、
+                        // 泛型形参等。走 CallVirtual 时发射器找不到 vtable，退化为
+                        // `call @hashCode(...)` —— 一个未定义的裸符号
+                        //（链接期 `undefined symbol: hashCode / equals`）。
+                        // 解析到 `Any` 时一律直接调用 `Any.<method>`。
+                        let is_virtual = class != "Any"
+                            && CLASS_TABLE.with(|t| {
+                                let table = t.borrow();
+                                let mut cur = Some(class.clone());
+                                while let Some(cn) = cur {
+                                    if let Some(e) = table.get(&cn) {
+                                        if e.open_methods.contains(name) {
+                                            return true;
+                                        }
+                                        cur = e.superclass.clone();
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                false
+                            });
                         if is_virtual {
                             return HirExpr::CallVirtual {
                                 recv: Box::new(desugar_expr(object)),
@@ -4780,12 +5021,22 @@ fn desugar_expr(e: &Expr) -> HirExpr {
         Expr::MemberAccess {
             object,
             name,
-            ..
+            span,
         } => {
+            if std::env::var("AURA_DEBUG_SIZE").is_ok() && (name == "size" || name == "length") {
+                let ty = lookup_expr_type(object);
+                eprintln!(
+                    "[size] line={} name={} ty={:?} list_like={}",
+                    span.start_line,
+                    name,
+                    ty,
+                    ty.as_ref().map(|t| is_list_like_type(t)).unwrap_or(false)
+                );
+            }
             // P15: List/Array 内建成员 → Collection 通用接口调用
             // （VM 的 GetField 不支持 Value::List，需降级为原生函数）
             if let Some(ty) = lookup_expr_type(object) {
-                if ty.starts_with("List") || ty.starts_with("Array") {
+                if is_list_like_type(&ty) {
                     match name.as_str() {
                         "size" | "length" | "count" => {
                             // Plan A′：降为 LIST_LEN，同时兼容堆列表与内联列表
@@ -5011,6 +5262,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
             push_local_scope();
             for p in params {
                 register_local(&p.name);
+                register_local_type(&p.name, p.type_hint.as_deref().and_then(ast_type_name));
             }
             let hir_body = desugar_block(body);
             pop_local_scope();
@@ -5037,6 +5289,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
             push_local_scope();
             for p in params {
                 register_local(&p.name);
+                register_local_type(&p.name, p.type_hint.as_deref().and_then(ast_type_name));
             }
             let hir_body = desugar_block(body);
             pop_local_scope();

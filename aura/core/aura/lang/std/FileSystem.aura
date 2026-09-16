@@ -80,25 +80,21 @@ object FSUtils {
     }
 
     /// 获取文件大小。
+    ///
+    /// **不依赖 `struct stat` 布局**：早期实现 `fstat` 后按 Linux 偏移
+    /// `Memory.read64(statBuf + 48)` 读 `st_size`；Windows 上 `fstat` 落到 CRT
+    /// `_fstat`（`struct _stat`，布局不同）→ 垃圾长度。
+    /// 改用可移植的 `lseek(fd, 0, SEEK_END)`（CRT `_lseeki64`），返回值即大小。
     fun fs_file_size(path: String): Long {
         val pathBuf: Long = Stdio.stringToBuffer(path)
         if (pathBuf == 0) { return 0 }
         val fd: Int = FileOps.open(pathBuf, 0)  // O_RDONLY
-        if (fd < 0) {
-            Allocator.free(pathBuf)
-            return 0
-        }
-        val statBuf: Long = Allocator.malloc(144)
-        if (statBuf == 0) {
-            FileOps.close(fd)
-            Allocator.free(pathBuf)
-            return 0
-        }
-        FileOps.fstat(fd, statBuf)
-        val size: Long = Memory.read64(statBuf + 48)
-        Allocator.free(statBuf)
-        FileOps.close(fd)
         Allocator.free(pathBuf)
+        if (fd < 0) {
+            return 0
+        }
+        val size: Long = FileOps.lseek(fd, 0, 2)  // SEEK_END
+        FileOps.close(fd)
         return size
     }
 }
@@ -186,7 +182,7 @@ object FileSystem {
     fun mkdir(path: String): Unit {
         val pathBuf: Long = Stdio.stringToBuffer(path)
         if (pathBuf == 0) { return }
-        FileOps.mkdirFile(pathBuf, 493)  // 0755
+        FileOps.mkdir(pathBuf, 493)  // 0755
         Allocator.free(pathBuf)
     }
 
@@ -206,13 +202,13 @@ object FileSystem {
             if (c == '/') {
                 // 临时替换 '/' 为 '\0'，创建当前段目录
                 Memory.write(pathBuf + i, 0)
-                FileOps.mkdirFile(pathBuf, 493)  // 0755
+                FileOps.mkdir(pathBuf, 493)  // 0755
                 Memory.write(pathBuf + i, '/')
             }
             i = i + 1
         }
         // 创建最后一段（完整路径）
-        FileOps.mkdirFile(pathBuf, 493)
+        FileOps.mkdir(pathBuf, 493)
         Allocator.free(pathBuf)
     }
 

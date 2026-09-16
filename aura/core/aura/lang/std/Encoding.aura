@@ -250,7 +250,7 @@ object Encoding {
         var result: String = ""
         var i: Int = 0
         while (i < s.length) {
-            result = result + String.fromCharCode(s.charCodeAt(i) xor x)
+            result = result + String.fromCharCode(s.charCodeAt(i) ^ x)
             i = i + 1
         }
         return result

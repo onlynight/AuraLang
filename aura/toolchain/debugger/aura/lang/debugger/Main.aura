@@ -6,7 +6,7 @@ import aura.lang.std.String
 
 // ── Native 包 ──
 import aura.lang.native.console.Console
-import aura.lang.native.process.Process
+import aura.lang.native.process.ProcessNative
 
 // ── 兄弟模块 ──
 import aura.lang.debugger.Debugger
@@ -17,13 +17,13 @@ import aura.lang.debugger.Repl
 // ═══════════════════════════════════════════════════════════════
 
 fun main(): Int {
-    val count: Int = Process.argCount()
+    val count: Int = ProcessNative.argCount()
     if (count < 1) {
         Console.println("Usage: aura debug <file.aura>")
         return 1
     }
 
-    val src: String = Process.arg(0)
+    val src: String = ProcessNative.arg(0)
     val debugger: Debugger = Debugger()
     val initResult: Int = debugger.init(src)
     if (initResult != 0) {

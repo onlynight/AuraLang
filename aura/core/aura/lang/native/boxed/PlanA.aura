@@ -36,7 +36,7 @@ object PlanA {
     fun boxInt(n: Long): Long {
         if (n >= SMALL_INT_MIN && n <= SMALL_INT_MAX) {
             // 小整数：内联（tag = 0）
-            return n shl 1
+            return n << 1
         }
         // 大整数：堆分配
         val addr: Long = Memory.alloc(8)
@@ -46,12 +46,12 @@ object PlanA {
 
     /// 拆箱整数
     fun unboxInt(v: Long): Long {
-        if ((v and PTR_TAG) == 0) {
+        if ((v & PTR_TAG) == 0) {
             // 小整数：内联
-            return v shr 1
+            return v >> 1
         }
         // 大整数：堆分配
-        return Memory.read64(v and PTR_MASK)
+        return Memory.read64(v & PTR_MASK)
     }
 
     /// 装箱布尔值
@@ -83,21 +83,21 @@ object PlanA {
 
     /// 检查是否为对象指针
     fun isObjectPtr(v: Long): Boolean {
-        return (v and PTR_TAG) == PTR_TAG
+        return (v & PTR_TAG) == PTR_TAG
     }
 
     /// 检查是否为小整数
     fun isSmallInt(v: Long): Boolean {
-        if ((v and PTR_TAG) != 0) {
+        if ((v & PTR_TAG) != 0) {
             return false
         }
-        val n: Long = v shr 1
+        val n: Long = v >> 1
         return n >= SMALL_INT_MIN && n <= SMALL_INT_MAX
     }
 
     /// 获取对象指针（去除标记）
     fun getObjectPtr(v: Long): Long {
-        return v and PTR_MASK
+        return v & PTR_MASK
     }
 
     /// 添加对象标记

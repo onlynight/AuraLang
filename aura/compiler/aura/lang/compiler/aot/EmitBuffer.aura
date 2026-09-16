@@ -16,7 +16,7 @@ package aura.lang.compiler.aot
 // 前缀可避免与 List 的 add/append、StringBuilder.append 等重名解析歧义。
 // ─────────────────────────────────────────────────────────────
 
-import aura.lang.std.StringBuilder
+import aura.lang.std.string.StringBuilder
 
 /// 原生可变字符串缓冲区的薄封装。
 class EmitBuffer {

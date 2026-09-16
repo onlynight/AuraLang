@@ -20,6 +20,22 @@ import aura.lang.std.String
 /// 类型映射工具集（纯函数辅助）。
 object TypeMapperUtils {
 
+    /// 去掉泛型实参：`HashMap<Int, Int>` → `HashMap`（无 `<` 时原样返回）。
+    ///
+    /// AOT 不做单态化：泛型实例擦除到基类布局（与 Rust 侧一致）。保留实参会产生
+    /// 没有任何 `= type {…}` 定义的合成类型（如 `HashMap_Int_Int_`），llc 报
+    /// `use of undefined type named 'struct.HashMap_Int_Int_'`。
+    fun stripGenericArgs(ty: String): String {
+        var i: Int = 0
+        while (i < ty.length) {
+            if (aotSlice(ty, i, 1) == "<") {
+                return trimSpaces(aotSlice(ty, 0, i))
+            }
+            i = i + 1
+        }
+        return ty
+    }
+
     /// LLVM IR 标识符允许字符（其余替换为 `_`）。
     fun tmAllowedChars(): String {
         return "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
@@ -125,7 +141,15 @@ class TypeMapper {
             // 与 `emitNewStruct`（返回实例指针）、字段访问（gep on `%struct.X*`）、
             // 以及 `inferType`（构造结果为指针）保持一致；同时满足 Aura 的引用语义
             //（类实例按引用共享，而非按值拷贝 —— AOT 按值拷贝会丢失字段修改）。
-            return "%struct." + TypeMapperUtils.sanitizeLlvm(ty) + "*"
+            //
+            // 泛型实参**擦除**到基类：`HashMap<Int, Int>` → `%struct.HashMap*`、
+            // `ArrayList<K>` → `%struct.ArrayList*`。与 Rust 侧一致
+            //（Rust 侧 `%struct.HashMap = type {%struct.ArrayList*, …}`，方法接收者
+            // 直接是 `i8*`）。若保留实参（`HashMap_Int_Int_` / `ArrayList_K_`），
+            // 这些类型没有任何 `= type {…}` 定义 → llc 报
+            // `use of undefined type named 'struct.HashMap_Int_Int_'`。
+            val base: String = TypeMapperUtils.stripGenericArgs(ty)
+            return "%struct." + TypeMapperUtils.sanitizeLlvm(base) + "*"
         }
     }
 

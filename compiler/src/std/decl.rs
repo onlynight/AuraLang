@@ -39,9 +39,25 @@ pub const PRELUDE_NAMES: &[&str] = &[
     "intToPtr",
     "makeCallback",
     // ── String 实例方法（VM native 回退，供 Aura 编译的 stdlib 函数调用）──
+    //
+    // 这些短名由 `std::std_string::register` 以**裸名**注册进 VM 原生表
+    // （见该文件「短名注册」段）。此处必须同步登记，否则：
+    //   `s.startsWith(p)` 的 callee 既不在用户函数表、也不在编译器 natives 表 →
+    //   MIR 误判为用户函数调用 → 字节码 `Call(idx)` 查表失败 → 回退索引 0
+    //   （= 入口 main）→ **自己调用自己**：无限递归 + 内存无上限增长。
     "charCodeAt",
     "fromCharCode",
     "substring",
+    "substringBefore",
+    "substringAfter",
+    "indexOf",
+    "lastIndexOf",
+    "replace",
+    "contains",
+    "startsWith",
+    "endsWith",
+    "toLowerCase",
+    "toUpperCase",
     "listOf",
     "mutableListOf",
     "arrayOf",

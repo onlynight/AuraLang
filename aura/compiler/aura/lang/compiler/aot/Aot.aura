@@ -152,14 +152,38 @@ object AotUtils {
             return r
         }
 
-        // 4. clang：编译 std C 运行库（提供 aura_println / aura_math_* /
-        //    aura_lang_std_String_* 等符号；不链接会出现 undefined symbol）
+        // 4. clang：编译 std C 运行库（提供 aura_println / aura_to_str /
+        //    aura_to_str_any / aura_strlen / aura_lang_std_Collections_* 等符号；
+        //    不链接会出现 undefined symbol）。
+        //
+        //    注意：删除本步骤属于 **Phase B/C 收尾** 的工作，前置条件是
+        //    「这些 runtime 符号已由纯 Aura native 模块提供 define」。在
+        //    `Runtime.aura` 尚未逐符号落地前删除，会让 Aura 侧 AOT 产出
+        //    缺符号的可执行文件（链接期 undefined symbol）——Rust 侧
+        //    `codegen/aot/linker.rs::compile_std_cffi` 至今仍保留该步骤，
+        //    两侧必须一致。
         val cffiSrc: String = "compiler/src/std/cffi/aura_std_cffi.c"
         var cffiObj: String = ""
         if (FileSystem.exists(cffiSrc)) {
             cffiObj = outDir + "/aura_std_cffi.obj"
             val cffiCmd: String = clang + " -c " + cffiSrc + " -o " + cffiObj + " -O1"
             r.cffiExit = Process.run(cffiCmd)
+        }
+        // syscall / 异常桥运行库：提供 `aura_setjmp` / `aura_longjmp` /
+        // `aura_exception_value`（try/catch 的 LLVM EH 桥）。缺它链接期报
+        // `undefined symbol: aura_longjmp / aura_exception_value`
+        //（发射器把这些声明当成 runtime 的一部分，见 `Runtime.aura`）。
+        // Rust 侧 `linker.rs::compile_std_cffi` **同时**编译
+        // `aura_std_cffi.c` 与 `aura_syscalls.c`，两侧必须一致。
+        val syscallsSrc: String = "compiler/src/std/cffi/aura_syscalls.c"
+        var syscallsObj: String = ""
+        if (FileSystem.exists(syscallsSrc)) {
+            syscallsObj = outDir + "/aura_syscalls.obj"
+            val sysCmd: String = clang + " -c " + syscallsSrc + " -o " + syscallsObj + " -O1"
+            val sysExit: Int = Process.run(sysCmd)
+            if (sysExit != 0) {
+                r.cffiExit = sysExit
+            }
         }
 
         // 4.5 clang：编译 syscall 分发库（Phase A 后不再需要，已移除）。
@@ -170,12 +194,16 @@ object AotUtils {
         //     Phase B 完成后 aura_std_cffi.c 也将移除）。
 
         // 5. clang：目标文件 + std 运行库 → 可执行文件。
+        //
         //    与 Rust 侧 `link_to_executable` 一致：链接宿主目标**不加** `-target`
         //    （`-target` 会让 clang 走另一套库/ABI，链接 C 运行库时失败）；
         //    交叉编译目标三元组已由 llc 的 `-mtriple` 决定。
         var clangCmd: String = clang + " " + objPath
         if (cffiObj != "") {
             clangCmd = clangCmd + " " + cffiObj
+        }
+        if (syscallsObj != "") {
+            clangCmd = clangCmd + " " + syscallsObj
         }
         clangCmd = clangCmd + " -o " + exePath + " " + optFlag
         // Windows 目标：COFF 对象经 lld-link 链接时需要显式 `subsystem`

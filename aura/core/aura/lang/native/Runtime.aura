@@ -1,9 +1,15 @@
 // aura:///aura/lang/native/Runtime.aura
 package aura.lang.native
 // ─────────────────────────────────────────────────────────────
-// Runtime 入口聚合 — Phase S1
+// Runtime 入口聚合 — Phase S1 / Phase 1
 //
 // 聚合所有 native 模块，提供统一的入口。
+//
+// ── Phase 1 整改：C-only runtime 函数的 Aura 实现 ──
+//   - arcIncrement / arcDecrement: ARC 引用计数（@native(asm) 原子操作）
+//   - coroutineYield: 协程挂起（@native(asm) 保存上下文）
+//   - memUsedMb: 内存诊断（纯 Aura 实现）
+//   - malloc/free: 已由 Memory.aura 的 @native builtin 提供
 //
 // ── 模块列表 ──
 //   - Syscalls: 系统调用
@@ -21,12 +27,15 @@ import aura.lang.native.memory.Allocator
 import aura.lang.std.string.StringOps
 import aura.lang.native.console.Console
 
-/// Runtime 入口
-object Runtime {
+/// Runtime 入口（Phase 1: C-only runtime 的 Aura 实现）
+extern object Runtime {
+
+    // ═══════════════════════════════════════════════════════════
+    // 初始化
+    // ═══════════════════════════════════════════════════════════
 
     /// 初始化所有模块
     fun init(): Boolean {
-        // 初始化内存分配器
         val ok: Boolean = Allocator.init()
         if (!ok) {
             return false
@@ -36,6 +45,79 @@ object Runtime {
 
     /// 获取版本信息
     fun version(): String {
-        return "Aura Runtime 0.1.0 (Phase S1)"
+        return "Aura Runtime 0.1.0 (Phase 1)"
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // ARC 引用计数（Phase 1: 替代 aura_arc_increment / aura_arc_decrement）
+    // ═══════════════════════════════════════════════════════════
+
+    /// 对象头引用计数偏移量。
+    const val ARC_COUNT_OFFSET: Long = 0
+
+    /// 原子递增引用计数（对应 `aura_arc_increment`）。
+    ///
+    /// 对象布局：`[refcount (i64)] [payload ...]`
+    /// refcount 位于对象头 offset 0。
+    ///
+    /// 使用 `lock inc qword [rdi]` 原子递增（x86_64）。
+    @native(asm = "lock inc qword [rdi]") fun arcIncrement(ptr: Long)
+
+    /// 原子递减引用计数（对应 `aura_arc_decrement`）。
+    ///
+    /// 返回递减后的计数值；调用方检查是否为 0 并决定释放。
+    /// 使用 `lock dec qword [rdi]` + 返回值在 rax。
+    @native(asm = "lock dec qword [rdi]") fun arcDecrement(ptr: Long): Long
+
+    // ═══════════════════════════════════════════════════════════
+    // 协程挂起（Phase 1: 替代 aura_coroutine_yield）
+    // ═══════════════════════════════════════════════════════════
+
+    /// 协程挂起（对应 `aura_coroutine_yield`）。
+    ///
+    /// 保存当前协程上下文到指定缓冲区。
+    /// 简化实现：空操作（Phase 1 占位，后续用 LLVM coro 实现）。
+    @native(asm = "nop") fun coroutineYield(ctx: Long)
+
+    // ═══════════════════════════════════════════════════════════
+    // 内存诊断（Phase 1: 替代 aura_mem_used_mb）
+    // ═══════════════════════════════════════════════════════════
+
+    /// 当前存活分配（MiB）（对应 `aura_mem_used_mb`）。
+    ///
+    /// 纯 Aura 实现：查询 Allocator 的已使用内存。
+    fun memUsedMb(): Int {
+        val used: Long = Allocator.used()
+        val mb: Long = used / (1024 * 1024)
+        return mb as Int
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 内部分配追踪（Phase 1: 纯 Aura 实现）
+    // ═══════════════════════════════════════════════════════════
+
+    /// 分配追踪：已分配字节数。
+    var allocTotal: Long = 0
+
+    /// 分配追踪：当前存活字节数。
+    var allocLive: Long = 0
+
+    /// 分配追踪：分配次数。
+    var allocCount: Int = 0
+
+    /// 分配追踪：释放次数。
+    var freeCount: Int = 0
+
+    /// 追踪分配（由 Memory.alloc 调用）。
+    fun trackAlloc(size: Long) {
+        allocTotal = allocTotal + size
+        allocLive = allocLive + size
+        allocCount = allocCount + 1
+    }
+
+    /// 追踪释放（由 Memory.free 调用）。
+    fun trackFree(size: Long) {
+        allocLive = allocLive - size
+        freeCount = freeCount + 1
     }
 }

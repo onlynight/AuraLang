@@ -441,8 +441,17 @@ impl EmitCtx {
         let ffi_gen = FfiGenerator::new(&self.type_mapper);
         // Phase D: 带 @native 注解的函数由 emit_native_wrappers 生成包装器，
         // 此处跳过其 extern declare（否则会与包装器定义冲突）
-        let natives_no_attr: Vec<&HirFunction> =
-            program.natives.iter().filter(|f| f.native_attr.is_none()).collect();
+        // Phase B：若同名函数已在模块内由 **Aura 源码定义**（`program.functions`），
+        // 则不再为 prelude/extern 声明发射 `declare` —— 否则同一符号同时出现
+        // `declare` 与 `define`，llc 直接报 `invalid redefinition of function`。
+        // 典型场景：`hashCode` / `equals` 由 Aura 顶层函数实现（免 import 的 prelude
+        // 名同时被注册成 native），旧逻辑会两者都发射。
+        let natives_no_attr: Vec<&HirFunction> = program
+            .natives
+            .iter()
+            .filter(|f| f.native_attr.is_none())
+            .filter(|f| !program.functions.iter().any(|g| g.name == f.name))
+            .collect();
         if let Ok(decls) = ffi_gen.generate_declarations(&natives_no_attr) {
             for d in &decls {
                 // toString / toStr 原生函数实际返回 C 字符串 (const char*),
@@ -1842,6 +1851,18 @@ fn emit_store_converted(
                 dst_ty, trunc, dst_ty, var_name
             ));
         }
+    } else if is_ptr_ty(dst_ty) && is_int_ty(val_ty) {
+        // 整型 → 指针槽（`Any`（i8*）等）：必须按 Plan A 低位标记装箱 `(v<<1)|1`。
+        //
+        // 旧实现落到末尾兜底 `store i8* %v, i8** %slot`，把**裸整数**当指针写入：
+        // `val x: Any = 5` 存了 5（奇数 → 被读取侧当作标记整数），
+        // `aura_to_str_any` / `aura_to_int_any` 按 `(v-1)>>1` 解码得到 2 ——
+        // 表现为 `toStr(x)` 打印 "2"、`hashCode`/`equals` 全部错位。
+        let boxed = box_int_to_i8ptr(ctx, &mut blocks.last_mut().body, &val_ir, &val_ty);
+        blocks.last_mut().body.push(format!(
+            "store {} {} , {}* {}",
+            dst_ty, boxed, dst_ty, var_name
+        ));
     } else {
         // 指针 → 整数：coerce_int_width 处理 ptrtoint + trunc。
         // 整数宽度不同（如 i64 的 .length 存入 i32 的 Int 槽）必须先转换，
@@ -4500,25 +4521,13 @@ fn coerce_val_to_i8ptr(
     }
     // 整数入列表：与通用装箱一致，采用 Plan A 低位标记 (v<<1)|1，
     // 读回时 aura_to_str_any / aura_to_int_any 才能正确还原。
-    if from == "i64" {
-        let sh = ctx.fresh_var();
-        blocks.last_mut().body.push(format!("{} = shl i64 {}, 1", sh, val));
-        let tg = ctx.fresh_var();
-        blocks.last_mut().body.push(format!("{} = or i64 {}, 1", tg, sh));
-        let t = ctx.fresh_var();
-        blocks.last_mut().body.push(format!("{} = inttoptr i64 {} to i8*", t, tg));
-        return t;
-    }
-    if from == "i32" {
-        let ext = ctx.fresh_var();
-        blocks.last_mut().body.push(format!("{} = sext i32 {} to i64", ext, val));
-        let sh = ctx.fresh_var();
-        blocks.last_mut().body.push(format!("{} = shl i64 {}, 1", sh, ext));
-        let tg = ctx.fresh_var();
-        blocks.last_mut().body.push(format!("{} = or i64 {}, 1", tg, sh));
-        let t = ctx.fresh_var();
-        blocks.last_mut().body.push(format!("{} = inttoptr i64 {} to i8*", t, tg));
-        return t;
+    //
+    // 覆盖**所有**整型宽度（含 `i1` 布尔）：旧实现只列 `i64`/`i32`，`i1` 落到末尾
+    // 兜底被原样当 `i8*` 传出 —— `fs.add(true)`（HashMap 的 `ArrayList<Boolean>`）
+    // 因此生成 `call … listAppend(i8*, i8* 1)`，llc 报
+    // `integer/byte constant must have integer/byte type`。
+    if is_int_ty(from) {
+        return box_int_to_i8ptr(ctx, &mut blocks.last_mut().body, val, from);
     }
     // 其它（如 %struct.*）→ 直接作为 i8*（尽力而为）
     val.to_string()

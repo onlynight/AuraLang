@@ -117,7 +117,7 @@ object RuntimeUtils {
     ///
     /// Phase A 改造：@native 包装器不再依赖 C 运行库符号（aura_syscalls.c），
     /// 改为直接生成 LLVM IR（内联 syscall/asm/fence/atomicrmw）+ declare 系统 libc。
-    fun runtimeDeclarations(): String {
+    fun runtimeDeclarationsEx(defs: String): String {
         // 用原生缓冲区累积：旧实现 `out = out + …` 对数百行声明是 O(n²) 拷贝，
         // 且 AOT 无 GC 时每一级中间串都永久驻留（整份声明文本量级）。
         val out: EmitBuffer = EmitBuffer()
@@ -132,7 +132,43 @@ object RuntimeUtils {
         out.sbAdd("declare void @free(i64)\n")
         out.sbAdd("declare i64 @strlen(i8*)\n")
         out.sbAdd("declare void @exit(i32)\n")
-        out.sbAdd("declare i32 @getpid()\n")
+        // 注意：**不要**在此声明 `@getpid`。
+        // `aura/core/aura/lang/native/**/Syscalls.aura` 已用
+        // `@native(SYS_GETPID) fun getpid(): Int` 提供实现，发射器会把它发成
+        // `define i32 @getpid()`；若这里再 `declare i32 @getpid()`，
+        // llc 直接报 `invalid redefinition of function 'getpid'`。
+        // 需要 `getpid` 的调用点会解析到该 Aura 包装器（同名同签名）。
+        //
+        // ── Windows 平台实现（CRT / UCRT）──
+        // `@native(SYS_*)` 成员在 Windows 目标下由 `Emit.aura::winCrtWrapper`
+        // 映射为这些 CRT 实现（Linux 目标走裸 syscall，不引用这里）。
+        // 非 Windows 目标下声明未被引用，属无害冗余。
+        out.sbAdd("; ---- Windows CRT（@native(SYS_*) 的平台实现）----\n")
+        out.sbAdd("declare i32 @_write(i32, i8*, i32)\n")
+        out.sbAdd("declare i32 @_read(i32, i8*, i32)\n")
+        out.sbAdd("declare i32 @_open(i8*, i32, i32)\n")
+        out.sbAdd("declare i32 @_close(i32)\n")
+        out.sbAdd("declare i64 @_lseeki64(i32, i64, i32)\n")
+        out.sbAdd("declare i32 @_fstat(i32, i8*)\n")
+        out.sbAdd("declare i32 @_stat64(i8*, i8*)\n")
+        out.sbAdd("declare i32 @_access(i8*, i32)\n")
+        out.sbAdd("declare i32 @_unlink(i8*)\n")
+        out.sbAdd("declare i32 @_mkdir(i8*)\n")
+        out.sbAdd("declare i32 @_rmdir(i8*)\n")
+        out.sbAdd("declare i32 @_getpid()\n")
+        // ── 命令行参数（跨平台，`aura_std_cffi.c`）──
+        //
+        // 生成的 C 入口先 `aura_args_set(argc, argv)` 注入宿主参数，以下两个
+        // 访问器从注入结果读取（Rust 侧实现 `Process.arg/argCount` 用的就是它们）。
+        // Aura 侧 `ProcessNative.argCount/arg` 通过 `ProcessOps` 的无函数体成员
+        // 调用（符号名即成员名），故此处必须补 `declare`，否则 llc 报
+        // `use of undefined value '@aura_process_argCount'`。
+        out.sbAdd("; ---- Command line args (portable) ----\n")
+        out.sbAdd("declare i64 @aura_process_argCount()\n")
+        // 全量参数（'\n' 连接）。**不要**改用逐条访问器 `aura_process_arg(i64)`：
+        // extern object 成员调用点会补「接收者」占位，索引会落到第 2 个参数槽
+        //（C 只认第 1 个）→ `arg(i)` 恒返回 argv[0]。
+        out.sbAdd("declare i8* @aura_process_args()\n")
         // Phase D: setjmp/longjmp 异常桥（try/catch）— Phase D 改造前暂保留
         // emitTry 调用 @aura_setjmp（保存 jmp_buf 到静态栈，支持嵌套 try/catch），
         // emitThrow 调用 @aura_longjmp（从栈顶 longjmp 回最近的 setjmp）。
@@ -154,10 +190,25 @@ object RuntimeUtils {
         // `is` 类型检查（`when` 模式 / `x is T`）：签名 `(value: i8*, typeName: i8*) → i1`，
         // typeName 为 C 字符串（不是 AuraString 结构体指针），与 Rust 侧声明保持一致。
         out.sbAdd("declare i1 @aura_isOfType(i8*, i8*)\n")
+        // Phase B.1 曾把 `aura_lang_std_String_*` 的 C 映射从 `preludeTable` 移除
+        //（预期调用全部改走 Aura 编译的 `String_*`）。但仍有调用点按 C 符号发射
+        //（`String.charAt` / 值相等判定），而 C 运行库**确实提供**这两个实现
+        //（`aura_std_cffi.c`）。缺 `declare` 时 llc 直接报
+        // `use of undefined value '@aura_lang_std_String_charAt'`。
+        out.sbAdd("declare i8* @aura_lang_std_String_charAt(i8*, i64)\n")
+        out.sbAdd("declare i32 @aura_lang_std_String_equals(i8*, i8*)\n")
         appendDeclarations(out, runtimeTable())
         val seenR: String = runtimeFunctionNames()
-        appendDeclarationsFiltered(out, preludeTable(), seenR)
+        // `defs`：本模块已有 `define` 的符号（见 `Emit.aura::fDefNames`）。
+        // 必须一并跳过，否则同一符号 define + declare 并存，llc 报
+        // `invalid redefinition of function 'toString'`。
+        appendDeclarationsFiltered(out, preludeTable(), seenR + defs)
         return out.sbBuild()
+    }
+
+    /// [`runtimeDeclarationsEx`] 的兼容入口（不做 define 过滤）。
+    fun runtimeDeclarations(): String {
+        return runtimeDeclarationsEx("")
     }
 
     /// 取一张符号表的全部名字（每行以换行结尾），用于声明去重。

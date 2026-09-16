@@ -7,7 +7,7 @@ import aura.lang.std.IO
 
 // ── Native 包 ──
 import aura.lang.native.console.Console
-import aura.lang.native.process.Process
+import aura.lang.native.process.ProcessNative
 
 // ── 兄弟模块 ──
 import aura.lang.debugger.Debugger
