@@ -24,7 +24,7 @@ package aura.lang.std
 import aura.lang.std.Collections
 import aura.lang.std.Builtin
 
-internal object Json {
+object Json {
 
     // ── 解析（纯逻辑，Aura 实现）──
 

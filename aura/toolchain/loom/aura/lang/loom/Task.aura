@@ -13,8 +13,8 @@ import aura.lang.loom.LoomError
 
 class TaskInputs {
     var files: List<String> = mutableListOf()
-    var options: Map<String, String> = mutableMapOf()
-    var depFingerprints: Map<String, String> = mutableMapOf()
+    private var options: Map<String, String> = mutableMapOf()
+    private var depFingerprints: Map<String, String> = mutableMapOf()
 
     fun addFile(file: String): Unit { files.add(file) }
     fun addOption(key: String, value: String): Unit { options.put(key, value) }
@@ -22,8 +22,8 @@ class TaskInputs {
 }
 
 class TaskOutputs {
-    var files: List<String> = mutableListOf()
-    var dir: String = ""
+    private var files: List<String> = mutableListOf()
+    private var dir: String = ""
 
     fun addFile(file: String): Unit { files.add(file) }
     fun setDir(dir: String): Unit { this.dir = dir }
@@ -36,9 +36,9 @@ class Task {
     val dependsOn: List<String> = mutableListOf()
     val inputs: TaskInputs
     val outputs: TaskOutputs
-    var fingerprint: String = ""
-    var cached: Boolean = false
-    var pluginName: String = ""
+    private var fingerprint: String = ""
+    private var cached: Boolean = false
+    private var pluginName: String = ""
 
     fun Task(name: String, kind: Int) {
         this.name = name

@@ -298,6 +298,90 @@ test('incremental: chunked tokenization matches whole-document tokenization', as
   assert.equal(result.lines.length, whole.length, 'chunked line count matches');
 });
 
+test('incremental: a single budget-limited call leaves the tail, so callers must loop', async () => {
+  // Regression guard for the preview's truncation bug. `tokenizeNextChunk`
+  // honours its character budget, so one call on a large document returns
+  // `complete: false` with only the tokenized prefix. The preview must drive it
+  // in a loop until `complete`, and must render the untouched tail from the raw
+  // source rather than from the token array.
+  const unit = 'fun main() { println("Hello, Aura!") }\n';
+  const code = unit.repeat(Math.ceil((32 * 1024 * 3) / unit.length));
+  assert.ok(code.length > 32 * 1024 * 3, `fixture is ${code.length} chars`);
+
+  const highlighter = await getHighlighter();
+  const theme = THEME_BY_MODE.light;
+  const budget = { chars: 32 * 1024, lines: 4000 };
+
+  const oneShot = tokenizeNextChunk(
+    highlighter,
+    code,
+    createIncrementalState(),
+    budget,
+    theme,
+  );
+  assert.equal(
+    oneShot.complete,
+    false,
+    'one call does not cover a document larger than the budget',
+  );
+  assert.ok(oneShot.length < code.length, 'the un-tokenized tail exists');
+
+  const state = createIncrementalState();
+  let result;
+  let frames = 0;
+  do {
+    result = tokenizeNextChunk(highlighter, code, state, budget, theme);
+    frames += 1;
+  } while (!result.complete && frames < 2000);
+
+  assert.equal(result.complete, true, 'the loop finishes');
+  assert.ok(frames > 1, `expected multiple frames, took ${frames}`);
+  assert.equal(result.length, code.length, 'the whole document is consumed');
+  assert.equal(
+    result.lines.map(lineText).join('\n'),
+    code,
+    'looped output is the full source',
+  );
+});
+
+test('incremental: the rewrite fingerprint never overruns the cursor', async () => {
+  // The fingerprint must stay a suffix of the *consumed* prefix. If a slice
+  // overruns the cursor, the next frame's origin lands negative,
+  // `isAppendOnly` reports a rewrite, and the state resets to zero every frame:
+  // the file stops scrolling past the first chunk and the bottom of the preview
+  // is cut off at exactly the first budget's worth of lines.
+  const code = 'fun main() { println("Hello, Aura!") }\n'.repeat(1200);
+  const highlighter = await getHighlighter();
+  const state = createIncrementalState();
+  let result;
+  let frames = 0;
+  do {
+    result = tokenizeNextChunk(
+      highlighter,
+      code,
+      state,
+      { chars: 32 * 1024, lines: 4000 },
+      THEME_BY_MODE.light,
+    );
+    frames += 1;
+    assert.ok(
+      state.tail.length <= 4096,
+      `fingerprint grew to ${state.tail.length} on frame ${frames}`,
+    );
+    assert.equal(
+      code.startsWith(state.tail, state.length - state.tail.length),
+      true,
+      `frame ${frames}: fingerprint is a suffix of the consumed prefix`,
+    );
+    assert.ok(
+      result.length >= state.length,
+      `frame ${frames}: the cursor did not move backwards`,
+    );
+  } while (!result.complete && frames < 2000);
+  assert.equal(result.complete, true, `finished in ${frames} frames`);
+  assert.ok(frames > 1, 'advanced past the first chunk');
+});
+
 test('incremental: grammar state carries a block comment across chunks', async () => {
   const code = '/* opened\nnever closed here\nfun main() {}\n';
   const highlighter = await getHighlighter();

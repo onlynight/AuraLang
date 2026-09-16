@@ -13,8 +13,8 @@ import aura.lang.loom.pkg.PackageInstaller
 // Mirrors Rust: registry/local.rs
 // @since 0.6
 class LocalRegistry {
-    val baseDir: String
-    var packages: Map<String, List<PackageInfo>> = mutableMapOf()
+    private val baseDir: String
+    private var packages: Map<String, List<PackageInfo>> = mutableMapOf()
 
     fun LocalRegistry(baseDir: String) {
         this.baseDir = baseDir
@@ -72,8 +72,8 @@ class PackageInfo {
     val name: String
     val version: String
     val path: String
-    var description: String = ""
-    var checksum: String = ""
+    private var description: String = ""
+    private var checksum: String = ""
 
     fun PackageInfo(name: String, version: String, path: String) {
         this.name = name

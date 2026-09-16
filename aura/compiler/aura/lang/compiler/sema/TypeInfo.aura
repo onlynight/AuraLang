@@ -15,11 +15,10 @@ package aura.lang.compiler.sema
 /// sema 类型信息（表达式 span → 类型名）。
 class TypeInfo {
 
-    /// 记录表（每行：`spanStart|spanEnd|typeName`）。
-    var records: String = ""
+    private var records: String = ""
 
     /// 记录总数。
-    var count: Int = 0
+    private var count: Int = 0
 
     init() {
         this.records = ""

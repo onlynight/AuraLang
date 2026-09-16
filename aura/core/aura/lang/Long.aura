@@ -10,7 +10,7 @@ package aura.lang
 ///
 /// @see Int, Float, Double
 /// @since 0.1
-internal value class Long {
+value class Long {
 
     // ── 常量（companion object）──
 

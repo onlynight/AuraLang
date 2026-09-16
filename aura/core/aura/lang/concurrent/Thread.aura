@@ -15,8 +15,7 @@ package aura.lang.concurrent
 //
 // @since 0.6
 import aura.lang.native.thread.ThreadOps
-
-internal object Thread {
+object Thread {
 
     /// 创建新线程并执行给定函数
     ///

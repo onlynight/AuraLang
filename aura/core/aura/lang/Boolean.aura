@@ -9,7 +9,7 @@ package aura.lang
 ///
 /// @see Int, String
 /// @since 0.1
-internal value class Boolean {
+value class Boolean {
 
     // ── 常量（companion object）──
 

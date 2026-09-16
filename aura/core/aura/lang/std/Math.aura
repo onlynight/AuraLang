@@ -51,7 +51,9 @@ object Math {
     }
 
     /// 返回绝对值（浮点数版本）。
-    fun abs(x: Float): Float {
+    /// 注意：AOT 发射器不支持「同名校验重载」（符号只有 `Class.method`），
+    /// 故浮点版本使用独立方法名，避免与 `abs(Int)` 生成重复符号。
+    fun absF(x: Float): Float {
         if (x < 0.0f) {
             return 0.0f - x
         }
@@ -66,8 +68,8 @@ object Math {
         return b
     }
 
-    /// 返回最小值（浮点数版本）。
-    fun min(a: Float, b: Float): Float {
+    /// 返回最小值（浮点数版本）。独立方法名，理由同 `absF`。
+    fun minF(a: Float, b: Float): Float {
         return MathOps.fmin(a, b)
     }
 
@@ -79,8 +81,8 @@ object Math {
         return b
     }
 
-    /// 返回最大值（浮点数版本）。
-    fun max(a: Float, b: Float): Float {
+    /// 返回最大值（浮点数版本）。独立方法名，理由同 `absF`。
+    fun maxF(a: Float, b: Float): Float {
         return MathOps.fmax(a, b)
     }
 

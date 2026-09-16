@@ -18,7 +18,7 @@ import aura.lang.collection.List
 ///
 /// @see Char, List
 /// @since 0.1
-internal value class String {
+value class String {
 
     // ── 常量与工具函数（companion object）──
 

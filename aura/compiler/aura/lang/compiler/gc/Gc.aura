@@ -14,10 +14,10 @@ import aura.lang.collection.HashMap
 
 /// 堆对象槽位。
 class HeapSlot {
-    var idx: Int = 0
-    var data: Map<String, Any>
-    var marked: Boolean = false
-    var alive: Boolean = true
+    private var idx: Int = 0
+    private var data: Map<String, Any>
+    private var marked: Boolean = false
+    private var alive: Boolean = true
 
     init() {
         this.data = HashMap<String, Any>()
@@ -33,12 +33,12 @@ class HeapSlot {
 class GcHeap {
     // ── 内部状态 ──
 
-    var slots: ArrayList<HeapSlot> = ArrayList<HeapSlot>()
-    var freeList: ArrayList<Int> = ArrayList<Int>()
-    var roots: ArrayList<Int> = ArrayList<Int>()
-    var nextId: Int = 0
-    var collectedCount: Int = 0
-    var totalFreed: Int = 0
+    private var slots: ArrayList<HeapSlot> = ArrayList<HeapSlot>()
+    private var freeList: ArrayList<Int> = ArrayList<Int>()
+    private var roots: ArrayList<Int> = ArrayList<Int>()
+    private var nextId: Int = 0
+    private var collectedCount: Int = 0
+    private var totalFreed: Int = 0
 
     /// 创建空堆。
     init() {

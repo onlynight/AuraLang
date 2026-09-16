@@ -9,7 +9,7 @@ package aura.lang
 ///
 /// @see Int, Long, Byte
 /// @since 0.1
-internal value class Short {
+value class Short {
 
     // ── 常量（companion object）──
 

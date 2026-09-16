@@ -93,10 +93,11 @@ pub enum MirInstr {
     // ── 异常处理（try/catch）──
     /// 注册异常处理器：`handler` 为处理器（catch 体）所在的基本块 id。
     ///
-    /// 发射时解析为该块的字节偏移（`PushHandler(offset, slot)`）。
+    /// 发射时解析为该块的字节偏移（`PushHandler(offset, slot, catch_type)`）。
     /// `slot` 为异常值的落点：有 catch 变量时是其槽位；无 catch 子句（仅 finally）时
     /// 是一个临时槽，供处理器块末尾重抛使用。`u16::MAX` 表示不写入。
-    PushHandler { handler: usize, slot: u16 },
+    /// `catch_type` 为 catch 子句声明的异常类型（类 ID）；`u16::MAX` 表示 catch-all。
+    PushHandler { handler: usize, slot: u16, catch_type: u16 },
     /// 注销最近的异常处理器（try 体正常结束时执行）。
     PopHandler,
 }
@@ -481,6 +482,7 @@ impl MirBuilder {
                 HirStmt::Try {
                     body,
                     catch_var,
+                    catch_type: _,
                     catch_body,
                     finally,
                 } => {
@@ -743,12 +745,14 @@ impl MirBuilder {
             HirStmt::Try {
                 body,
                 catch_var,
+                catch_type,
                 catch_body,
                 finally,
             } => {
                 self.lower_try(
                     body,
                     catch_var.as_deref(),
+                    catch_type.as_deref(),
                     catch_body,
                     finally.as_ref(),
                     ctx,
@@ -779,6 +783,7 @@ impl MirBuilder {
         &mut self,
         body: &HirBlock,
         catch_var: Option<&str>,
+        catch_type: Option<&str>,
         catch_body: &HirBlock,
         finally: Option<&HirBlock>,
         ctx: &mut LowerCtx,
@@ -821,9 +826,18 @@ impl MirBuilder {
 
         // 2) try 体（回到原块，注册处理器）
         self.current = saved_cur;
+        // 解析 catch 类型名 → 类 ID（用于 VM 类型过滤）
+        let catch_type_id = catch_type
+            .and_then(|name| {
+                self.hir_program.as_ref().and_then(|hir| {
+                    hir.structs.iter().position(|s| s.name == name).map(|p| p as u16)
+                })
+            })
+            .unwrap_or(u16::MAX); // catch-all 或类型未知
         self.emit(MirInstr::PushHandler {
             handler: handler_id,
             slot: exc_slot,
+            catch_type: catch_type_id,
         });
         self.enter_scope();
         self.lower_block(body, ctx);

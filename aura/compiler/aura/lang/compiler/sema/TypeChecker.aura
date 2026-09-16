@@ -30,28 +30,33 @@ import aura.lang.std.String
 import aura.lang.compiler.ast.Ast
 import aura.lang.compiler.lexer.Span
 import aura.lang.compiler.errors.CompileError
-import aura.lang.compiler.aot.StdSigs
 
 /// 语义检查器。
 class TypeChecker {
 
     /// 符号表。
-    var st: SymbolTable = SymbolTable()
+    private var st: SymbolTable = SymbolTable()
 
     /// 诊断错误。
-    var errors: CompileErrors = CompileErrors()
+    private var errors: CompileErrors = CompileErrors()
 
     /// sema → codegen 信息通道。
-    var info: TypeInfo = TypeInfo()
+    private var info: TypeInfo = TypeInfo()
 
     /// 当前函数返回类型。
-    var curFnRet: String = ""
+    private var curFnRet: String = ""
 
     /// 当前是否在循环中（break/continue 检查）。
-    var inLoopDepth: Int = 0
+    private var inLoopDepth: Int = 0
 
     /// 当前作用域内的变量类型环境（扁平字符串：`name|ty\n`）。
-    var varEnv: String = ""
+    private var varEnv: String = ""
+
+    /// 当前包名（用于 internal 可见性判断）。
+    private var curPkg: String = ""
+
+    /// 类型可见性表（扁平字符串：`typeName|visibility\n`）。
+    private var typeVis: String = ""
 
     // ── 辅助 ──
 
@@ -111,11 +116,30 @@ class TypeChecker {
 
     /// 对 AST 执行语义检查（无返回值，结果通过查询方法获取）。
     fun tcCheck(ast: Ast) {
+        // 0. 提取包名（从 Program 的 Package 子节点）
+        this.tcExtractPackage(ast)
+
         // 1. 收集顶层声明
         this.tcCollectDecls(ast)
 
         // 2. 检查函数体
         this.tcCheckFunctions(ast)
+    }
+
+    /// 从 Program 的 Package 子节点提取包名。
+    fun tcExtractPackage(ast: Ast) {
+        val rootIdx: Int = this.findRoot(ast)
+        val rootKids: String = ast.kidsOf(rootIdx)
+        val kCount: Int = kidsCount(rootKids)
+        var i: Int = 0
+        while (i < kCount) {
+            val childId: Int = kidsAt(rootKids, i)
+            if (ast.kindOf(childId) == "Package") {
+                this.curPkg = ast.textOf(childId)
+                break
+            }
+            i = i + 1
+        }
     }
 
     /// 获取语义错误列表。
@@ -650,24 +674,6 @@ class TypeChecker {
                     return parts[1]
                 }
             }
-
-            // Phase B.5: std 签名表兜底
-            // 1) 直接符号名（如 "aura_lang_std_String_length"）
-            val stdSig: String = stdSignature(calleeName)
-            if (stdSig != "") {
-                val sep: Int = stdSig.indexOf("|")
-                if (sep > 0) {
-                    return stdSig.substring(0, sep)
-                }
-            }
-            // 2) 限定名（如 "String.length"）
-            val qualifiedSig: String = stdSignatureOfQualified(calleeName)
-            if (qualifiedSig != "") {
-                val sep2: Int = qualifiedSig.indexOf("|")
-                if (sep2 > 0) {
-                    return qualifiedSig.substring(0, sep2)
-                }
-            }
         }
         return "Any"
     }
@@ -681,27 +687,7 @@ class TypeChecker {
             val memberName: String = ast.textOf(kidsAt(kids, 1))
             val objTy: String = this.tcCheckExpr(ast, objId)
 
-            // Phase B.5: std 签名表 — 按接收者类型 + 方法名查询
-            if (isString(objTy)) {
-                val sig: String = stdSignatureFor("String", memberName)
-                if (sig != "") {
-                    val sep: Int = sig.indexOf("|")
-                    if (sep > 0) {
-                        return sig.substring(0, sep)
-                    }
-                }
-            }
-            if (objTy.startsWith("List") || objTy.startsWith("Array") || objTy.startsWith("Set")) {
-                val sig2: String = stdSignatureFor("Collections", memberName)
-                if (sig2 != "") {
-                    val sep2: Int = sig2.indexOf("|")
-                    if (sep2 > 0) {
-                        return sig2.substring(0, sep2)
-                    }
-                }
-            }
-
-            // 简单成员类型推断（std 签名表兜底后仍保留原有逻辑）
+            // 简单成员类型推断
             if (isString(objTy)) {
                 if (memberName == "length" || memberName == "size") {
                     return "Int"

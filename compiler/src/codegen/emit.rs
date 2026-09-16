@@ -489,8 +489,8 @@ fn instr_size(instr: &crate::codegen::mir::MirInstr) -> usize {
         InstanceOf { .. } => 9,
         // CheckCast（Phase 2）：LoadVar(src)(3) + CheckCast(3) + StoreVar(dst)(3) = 9
         CheckCast { .. } => 9,
-        // PushHandler：PUSH_HANDLER(1 + i32) + u16 槽位 = 7
-        PushHandler { .. } => 7,
+        // PushHandler：PUSH_HANDLER(1) + i32(4) + u16 slot(2) + u16 catch_type(2) = 9
+        PushHandler { .. } => 9,
         // PopHandler：POP_HANDLER(1) = 1
         PopHandler => 1,
     }
@@ -667,10 +667,11 @@ fn emit_instr(
         PushHandler {
             handler,
             slot,
+            catch_type,
         } => {
             // 处理器块 id → 绝对字节偏移（与 Jump 同一套跳转目标约定）
             let off = block_offsets.get(*handler).copied().unwrap_or(0) as i32;
-            OpCode::PushHandler(off, *slot).write(code);
+            OpCode::PushHandler(off, *slot, *catch_type).write(code);
         }
         PopHandler => {
             OpCode::PopHandler.write(code);

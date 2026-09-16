@@ -88,6 +88,14 @@ impl TypeMapper {
             {
                 "i8*".to_string()
             }
+            // 其它泛型实例化（`HashMap<String, Any>` / `ArrayList<K>` …）：
+            // AOT 不做单态化，按**基类**表示。否则会把实例化后的名字当作类型名，
+            // 生成 `%struct.HashMap_String__Any_*` 这种从未定义的类型
+            //（llc: `use of undefined type named 'struct.HashMap_String__Any_'`）。
+            _ if name.contains('<') => {
+                let base = name.split('<').next().unwrap_or(name).trim();
+                self.map_named(base)
+            }
             // 泛型类型参数（`fun <T> f(x: T)` / `<K, V>`）：AOT 不做单态化，
             // 统一按 Any（i8*）表示；否则会落到 `%struct.T*` 占位类型，
             // 生成 `call %struct.T* @identity(%struct.T* 5)` 这类非法 IR。

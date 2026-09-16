@@ -20,9 +20,9 @@ import aura.lang.lsp.FileIO
 
 class LspServer {
     var running: Boolean = false
-    var requestId: Int = 1
-    var documents: Map<String, String> = mutableMapOf()
-    var diagnostics: Map<String, String> = mutableMapOf()
+    private var requestId: Int = 1
+    private var documents: Map<String, String> = mutableMapOf()
+    private var diagnostics: Map<String, String> = mutableMapOf()
 
     /// 启动 LSP 服务器
     fun start(): Int {
@@ -53,7 +53,7 @@ class LspServer {
     }
 
     /// 分派请求到具体处理器
-    fun dispatchRequest(req: LspRequest): String {
+    private fun dispatchRequest(req: LspRequest): String {
         val params: String = req.params
         val file: String = extractField(params, "textDocument", "uri")
         val pos: Int = extractIntField(params, "position", "character")
@@ -95,7 +95,7 @@ class LspServer {
     }
 
     /// 处理 didOpen
-    fun handleDidOpen(params: String): String {
+    private fun handleDidOpen(params: String): String {
         val uri: String = extractField(params, "textDocument", "uri")
         val text: String = extractField(params, "textDocument", "text")
         documents.put(uri, text)
@@ -105,7 +105,7 @@ class LspServer {
     }
 
     /// 处理 didChange
-    fun handleDidChange(params: String): String {
+    private fun handleDidChange(params: String): String {
         val uri: String = extractField(params, "textDocument", "uri")
         val text: String = extractField(params, "contentChanges", "text")
         documents.put(uri, text)
@@ -115,7 +115,7 @@ class LspServer {
     }
 
     /// 处理 didClose
-    fun handleDidClose(params: String): String {
+    private fun handleDidClose(params: String): String {
         val uri: String = extractField(params, "textDocument", "uri")
         documents.remove(uri)
         diagnostics.remove(uri)
@@ -123,7 +123,7 @@ class LspServer {
     }
 
     /// 从 JSON 中提取嵌套字段
-    fun extractField(json: String, parent: String, key: String): String {
+    private fun extractField(json: String, parent: String, key: String): String {
         val parentStart: Int = json.indexOf("\"" + parent + "\"")
         if (parentStart < 0) { return "" }
         val braceStart: Int = json.indexOf("{", parentStart)
@@ -140,7 +140,7 @@ class LspServer {
     }
 
     /// 从 JSON 中提取整数字段
-    fun extractIntField(json: String, parent: String, key: String): Int {
+    private fun extractIntField(json: String, parent: String, key: String): Int {
         val parentStart: Int = json.indexOf("\"" + parent + "\"")
         if (parentStart < 0) { return 0 }
         val keyStart: Int = json.indexOf("\"" + key + "\"", parentStart)
@@ -161,7 +161,7 @@ class LspServer {
     }
 
     /// 解析 JSON-RPC 请求
-    fun parseRequest(json: String): LspRequest {
+    private fun parseRequest(json: String): LspRequest {
         val id: Int = extractIntField(json, null, "id")
         val method: String = extractTopField(json, "method")
         val params: String = ""
@@ -191,7 +191,7 @@ class LspServer {
     }
 
     /// 从顶层 JSON 提取字段
-    fun extractTopField(json: String, key: String): String {
+    private fun extractTopField(json: String, key: String): String {
         val keyStart: Int = json.indexOf("\"" + key + "\"")
         if (keyStart < 0) { return "" }
         val colonIdx: Int = json.indexOf(":", keyStart)

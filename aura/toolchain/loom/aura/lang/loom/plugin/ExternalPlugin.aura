@@ -14,7 +14,7 @@ import aura.lang.loom.plugin.Plugin
 class ExternalPlugin {
     val name: String
     val command: String
-    var args: List<String> = mutableListOf()
+    private var args: List<String> = mutableListOf()
 
     fun ExternalPlugin(name: String, command: String) {
         this.name = name

@@ -36,7 +36,7 @@ class PackageReader {
         return 0
     }
 
-    fun parseMeta(content: String): PackageMeta {
+    private fun parseMeta(content: String): PackageMeta {
         val lines: List<String> = String.splitLines(content)
         var name: String = "unknown"
         var version: String = "0.1.0"

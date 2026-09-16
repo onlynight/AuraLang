@@ -1,0 +1,42 @@
+// 测试简单类构造
+open class MyError {
+    var message: String = ""
+    
+    constructor(message: String) {
+        this.message = message
+    }
+    
+    fun getMessage(): String {
+        return message
+    }
+}
+
+class MyException : MyError() {
+    constructor(message: String) : super(message) { }
+    
+    fun getMessage(): String {
+        return super.getMessage()
+    }
+}
+
+fun testSimpleClass(): Int {
+    val e = MyError("simple test")
+    println("MyError: " + e.getMessage())
+    return 0
+}
+
+fun testSuperClass(): Int {
+    val e = MyException("super test")
+    println("MyException: " + e.getMessage())
+    return 0
+}
+
+fun main(): Int {
+    println("Test simple class:")
+    testSimpleClass()
+    println("")
+    println("Test super class:")
+    testSuperClass()
+    println("Done")
+    return 0
+}

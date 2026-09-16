@@ -664,7 +664,94 @@ build/bin/
 
 ---
 
-> **文档状态**：方案分析完成，待实施
+## 6. 实施进度追踪（2026-09-16）
+
+### 6.1 已完成
+
+| Phase | 改造项 | 状态 | 代码位置 |
+|-------|--------|------|---------|
+| A.1 | `@native(N)` → 内联 syscall asm（平台特定寄存器映射） | ✅ | `Emit.aura:1737-1767` |
+| A.2 | `@native(asm="rdtsc")` → 通用 inline asm 路径（移除特殊分支） | ✅ | `Emit.aura:1792-1836` |
+| A.3 | `@native(asm="mfence")` → LLVM `fence seq_cst` | ✅ | `Emit.aura:1772-1777` |
+| A.4 | `@native(asm="atomic")` → LLVM `atomicrmw add` | ✅ | `Emit.aura:1779-1791` |
+| A.5 | `@native` 内置（alloc/free）→ `@malloc`/`@free` | ✅ | `Emit.aura:1842-1849` |
+| A.6 | Runtime 声明替换（系统 libc 声明） | ✅ | `Runtime.aura:127-142` |
+| C.1 | 移除 `aura_syscalls.c` 编译步骤 | ✅ | `Aot.aura:165-170` |
+| C.3 | 移除 `syscallsExit` 字段 + 简化 `ok` 判定 | ✅ | `Aot.aura:188, 416-421` |
+| B.3 | ModuleLink 自动包含 std 模块 | ✅ | `ModuleLink.aura:53-76, 211-232` |
+| B.3b | object 方法（静态方法）receiver 修复 | ✅ | `Emit.aura:152-155, 343-345, 1408-1415, 1457-1462` |
+| B.2a | 移除 `isStdClassName` 检查（emitCall + inferRetTy） | ✅ | `Emit.aura:4282, 4978` |
+| B.3c | HIR Package 声明处理修复 | ✅ | `Hir.aura:538-544` |
+| E.1 | 冻结引导二进制脚本（freeze-bootstrap.ps1） | ✅ | `scripts/freeze-bootstrap.ps1` |
+| E.2 | SHA256SUMS 生成 + 发行包布局 | ✅ | `scripts/freeze-bootstrap.ps1` |
+| D.1a | LLVM 异常处理基础设施声明（personality 函数） | ✅ | `Runtime.aura:143-152` |
+
+### 6.2 进行中
+
+| Phase | 改造项 | 状态 | 说明 |
+|-------|--------|------|------|
+| B.1 | 移除 `preludeTable()` 中的 String/Math `aura_lang_std_*` 映射 | ✅ 已移除 | `Runtime.aura:preludeTable` 中 String C 映射已注释；StdSigs.aura 保留（发射器仍需） |
+| B.2 | 发射器改造：std 调用走 Aura 编译 | 🔄 进行中 | **Step 1 已完成**：4 处 std 调用路径已添加 HIR 签名表优先检查 |
+| B.2a | `emitCall` stdClassReceiver 路径 | ✅ | `Emit.aura:4477-4491` 优先查 `funcSignatureOf` |
+| B.2b | `emitCall` methodCallSymbol 路径（Collections 重写） | ✅ | `Emit.aura:4425-4452` 优先查 `funcSignatureOf` |
+| B.2c | `emitCall` methodCallSymbol 路径（裸方法名） | ✅ | `Emit.aura:4499-4530` 优先查 `funcSignatureOf` |
+| B.2d | `inferRetTy` stdClassReceiver 路径 | ✅ | `Emit.aura:5170-5176` 优先查 `funcSignatureOf` |
+| B.2e | `inferRetTy` methodCallSymbol 路径 | ✅ | `Emit.aura:5197-5213` 优先查 `funcSignatureOf` |
+| C.2 | 链接命令简化（移除 `aura_std_cffi.c`） | ⚠️ 待 Phase B 完成 | 当前仍保留 `aura_std_cffi.c` 编译（Aot.aura:157-163） |
+| D.1b | emitTry → LLVM invoke/landingpad/resume | ⚠️ 待实现 | 当前仍用 setjmp/longjmp；LLVM `invoke` 需将 try 体包装为函数调用 |
+
+### 6.3 待开始
+
+| Phase | 改造项 | 状态 |
+|-------|--------|------|
+| D.2 | 移除 `aura_setjmp`/`aura_longjmp` 声明 | ❌ 待 D.1b 完成 |
+| D.3 | 移除 `aura_exception_value` 全局变量 | ❌ 待 D.1b 完成 |
+| E.3 | 发行包自动化（CI 集成） | ❌ 待开始 |
+
+### 6.4 关键发现
+
+1. **HIR Package 声明处理**：`lowerDecl` 函数不处理 "Package" 类型，导致含 `package` 声明的文件（如 Math.aura）在 HIR 降级时异常。已修复为跳过 Package 节点（与 Import 相同）。
+2. **object 方法 receiver 问题**：object 内的方法（静态方法）被错误地添加 `%struct.<Class>*` receiver 参数。已修复：新增 `fObjectClassNames` 集合，object 方法不再添加 receiver。
+3. **Rust 编译器 resolve_method_owner**：当多个类共享方法名（如 `noKids` 在 AstUtils 和 MirUtils 中）且 sema 信息不可用时，`resolve_method_owner` 返回 None，导致 HIR 产生裸名 callee + phantom receiver。已修复：`emit_call` 中检测裸名 callee + phantom receiver 并自动补全类名前缀。
+4. **发射器 std 调用路径**：`stdSymbolFor` 函数无条件为 std 类方法生成 C 符号名（如 `aura_lang_std_String_length`），即使该函数已作为 Aura 编译。**已修复**：4 处调用路径（`emitCall` 的 `stdClassReceiver`、`methodCallSymbol`×2；`inferRetTy` 的 `stdClassReceiver`、`methodCallSymbol`）均已添加 HIR 签名表优先检查，std 函数存在 HIR 时走 Aura 路径。
+5. **编译器自举限制**：`aura.exe build Main.aura --aot` 可编译（Rust 编译器），但 self-compiled compiler (`aura-compiler-native2.exe`) 编译 Main.aura 时崩溃（访问违例）。需先解决自举问题后才能验证 Phase B 的完整效果。
+6. **value class 方法调用**：String 是 value class，非 struct，故 `isStructSym("String")` 返回 false，path 2（静态方法）无法命中。**已修复**：在 `inferType` 中新增 `i8*` receiver 检查，直接查 `funcSignatureOf("String_" + fname)`。
+7. **functionSignature 命名不一致**：`functionSignature` 生成 "Class.method"（含 `.`），但 `emitFunction` 的 `sanitizeLlvm` 将 `.` 替换为 `_`，导致签名表查不到函数。**已修复**：`functionSignature` 改用 `_` 分隔（`Class_method`），11 处 `funcSignatureOf` 调用同步更新。
+8. **预存 bug：String.toFloat 字符转换**：AOT 编译时 `String.toFloat()` 中 `(c - '0').toFloat()` 的 `inferType` 返回 `i32`（默认值），导致 `%digit.addr = alloca i32` 但存储 `float`。**已修复**：`i8*` receiver 检查 + `methodCallSymbol` 新增 String 转换方法（toFloat/toInt/toLong/toDouble/toBoolean 等）。验证：`%digit.addr = alloca float`（正确），`sign.toFloat()` 无双重 `sitofp` 转换。
+9. **预存 bug：@init 调用缺少类前缀**：`Runtime_init1` 函数体内调用 `@init` 而非 `@Runtime_init1`。原因：`init` 方法未在 `methodCallSymbol` 中登记，`emitCall` 按自由函数处理。**待修复**：需单独修复 `emitCall` 对 `this` 方法调用的解析。
+
+### 6.5 下一步计划
+
+```
+Step 1：✅ 改造发射器 std 调用路径（4 处路径均已修复）
+  - emitCall/stdClassReceiver (Emit.aura:4477-4491)
+  - emitCall/methodCallSymbol-Collections重写 (Emit.aura:4425-4452)
+  - emitCall/methodCallSymbol-裸方法名 (Emit.aura:4499-4530)
+  - inferRetTy/stdClassReceiver (Emit.aura:5170-5176)
+  - inferRetTy/methodCallSymbol (Emit.aura:5197-5213)
+Step 2：✅ 修复预存 bug：functionSignature 命名不一致（`.` → `_`）
+  - functionSignature 函数生成 "Class_method"（与 emitFunction 的 sanitizeLlvm 一致）
+  - 11 处 funcSignatureOf 调用同步更新
+  - i8* receiver 检查：String 方法（value class）接收者类型为 i8*，非 %struct.String*
+Step 3：✅ 验证 String.toFloat 字符算术类型推断 bug 修复
+  - `%digit.addr = alloca float`（原为 i32，现正确）
+  - `sign.toFloat()` 无双重 sitofp 转换（原 bug 已修复）
+Step 4：⚠️ 预存 bug：@init 调用缺少类前缀（独立于 Phase B）
+  - `Runtime_init1` 函数体内调用 `@init` 而非 `@Runtime_init1`
+  - 原因：init 方法未在 methodCallSymbol 中登记，emitCall 按自由函数处理
+  - 需单独修复 emitCall 对 `this` 方法调用的解析
+Step 5：移除 StdSigs.aura 中的 String/Math 条目（发射器改造后验证）
+Step 6：Phase B 完成后移除 aura_std_cffi.c 编译步骤（Phase C.2）
+Step 7：Phase D.1b：实现 LLVM invoke/landingpad/resume 异常处理
+Step 8：Phase D.2-D.3：移除 setjmp/longjmp 声明 + aura_exception_value
+Step 9：解决编译器自举问题（aura-compiler-native2.exe 崩溃）
+Step 10：运行 freeze-bootstrap.ps1 验证完整自举流程
+Step 11：Phase E.3：CI 集成 + 发行包自动化
+```
+
+---
+
+> **文档状态**：Phase A 完成 + Phase C 部分完成 + Phase B 进行中（发射器 4 处 std 调用路径已改造，命名一致性修复，String.toFloat 类型推断修复；预存 @init bug 待修）
 > **最后更新**：2026-09-16
 > **相关文档**：
 > - `docs/编译器LLVM交互分析与纯Aura化迁移计划.md` — 总迁移计划

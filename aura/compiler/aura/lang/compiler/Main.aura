@@ -49,7 +49,6 @@ import aura.lang.compiler.vm.VmRunner
 import aura.lang.compiler.aot.TypeMapper
 import aura.lang.compiler.aot.AotUtil
 import aura.lang.compiler.aot.Runtime
-import aura.lang.compiler.aot.StdSigs
 import aura.lang.compiler.aot.Ffi
 import aura.lang.compiler.aot.Target
 import aura.lang.compiler.aot.Optimize

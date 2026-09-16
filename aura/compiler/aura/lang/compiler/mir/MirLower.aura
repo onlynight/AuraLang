@@ -28,17 +28,16 @@ import aura.lang.compiler.hir.Hir
 /// HIR → MIR 降级器。
 class MirLowerer {
 
-    /// 输出 MIR。
-    var mir: Mir = Mir()
+    private var mir: Mir = Mir()
 
     /// 当前函数返回类型。
-    var curFnRet: String = ""
+    private var curFnRet: String = ""
 
     /// 临时变量计数器。
-    var tmpCount: Int = 0
+    private var tmpCount: Int = 0
 
     /// 控制流标签计数器。
-    var labelCount: Int = 0
+    private var labelCount: Int = 0
 
     /// 生成一个临时变量名。
     fun genTmp(): String {

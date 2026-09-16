@@ -328,10 +328,14 @@ fn resolve_aura_imports_rec(
                     None
                 }
             } else if let Some(pkg) = rest.strip_prefix(COMPILER_PKG_ROOT) {
+                eprintln!("[debug] resolving compiler pkg import: {} -> {}", rest, pkg);
                 if let Some(root) = compiler_pkg_root {
                     let rel = pkg_to_aura_path(pkg);
-                    Some(root.join(rel))
+                    let target_path = root.join(rel);
+                    eprintln!("[debug] target path: {}", target_path.display());
+                    Some(target_path)
                 } else {
+                    eprintln!("[debug] compiler_pkg_root is None!");
                     None
                 }
             } else if let Some(pkg) = rest.strip_prefix(COLLECTION_PKG_ROOT) {

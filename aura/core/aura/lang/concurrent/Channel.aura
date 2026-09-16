@@ -13,7 +13,7 @@ package aura.lang.concurrent
 // ```
 //
 // @since 0.5
-internal object Channel {
+object Channel {
 
     // ── 本地通道 ──
 

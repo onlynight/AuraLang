@@ -14,9 +14,9 @@ class Dependency {
     val name: String
     var version: String = "*"
     var path: String = ""  // 本地路径
-    var registry: String = ""  // 远程注册表
-    var features: List<String> = mutableListOf()
-    var optional: Boolean = false
+    private var registry: String = ""  // 远程注册表
+    private var features: List<String> = mutableListOf()
+    private var optional: Boolean = false
 
     fun Dependency(name: String) {
         this.name = name

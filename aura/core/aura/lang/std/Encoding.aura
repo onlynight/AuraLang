@@ -13,7 +13,7 @@ package aura.lang.std
 /// ```
 ///
 /// @since 0.1
-internal object Encoding {
+object Encoding {
 
     // ── 常量 ──
 

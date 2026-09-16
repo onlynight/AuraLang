@@ -31,7 +31,7 @@ object SourceMapUtils {
     }
 
     /// 最大函数。
-    fun max(a: Int, b: Int): Int {
+    private fun max(a: Int, b: Int): Int {
         if (a > b) {
             return a
         }

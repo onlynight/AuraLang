@@ -19,7 +19,7 @@ package aura.lang.std
 
 import aura.lang.std.IO
 
-internal object Console {
+object Console {
 
     // ── 内部常量 ──
 

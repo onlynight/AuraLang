@@ -1,0 +1,13 @@
+// aura:///aura/lang/std/fs/FileSystem.aura
+package aura.lang.std.fs
+// ─────────────────────────────────────────────────────────────
+// 文件系统操作 — Phase P3
+//
+// 注意：Aura 级别 API（String 参数版本）定义在
+// aura/core/aura/lang/std/FileSystem.aura。
+//
+// 本文件保留为 C ABI 兼容层参考，不纳入 essentialStdModules。
+// 实际迁移使用已有的 aura/core/aura/lang/std/FileSystem.aura。
+// ─────────────────────────────────────────────────────────────
+
+// 此文件不再被编译包含。保留作为 C ABI 实现参考。

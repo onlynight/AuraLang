@@ -1,0 +1,203 @@
+// aura:///aura/lang/std/string/StringBuilder.aura
+package aura.lang.std.string
+// ─────────────────────────────────────────────────────────────
+// 原生可变字符串缓冲区 — Phase P1
+//
+// 句柄为 i64（实为 AuraSb* 指针）。
+// 内存布局：
+//   offset 0  : buf ptr (i64, 数据区)
+//   offset 8  : len (i64, 已用字节)
+//   offset 16 : cap (i64, 容量)
+//
+// 所有分配走 Memory.alloc（带上限检查），保持内存闸门记账一致。
+// 句柄用 i64 承载指针，规避 Plan A「i8* 低位标记装箱整数」的历史坑。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.native.Memory
+import aura.lang.std.string.StringOps
+
+/// 原生可变字符串缓冲区（纯 Aura 实现）。
+///
+/// 契约（与 Rust VM std_sb.rs 对齐）：
+///   create()                  -> Long 句柄
+///   append(h, s)              -> Long 句柄（返回自身，便于链式）
+///   appendChar(h, ch)         -> Long 句柄
+///   appendInt(h, v)           -> Long 句柄
+///   length(h)                 -> Long 当前字节长度
+///   finish(h)                 -> Long 字符串指针（**转移缓冲区所有权**，原句柄失效）
+///   reset(h)                  -> Long 句柄（清空，保留容量）
+object StringBuilder {
+
+    /// 初始容量（字节）。
+    const val SB_INIT_CAP: Long = 256
+
+    // ── 公开接口 ──
+
+    /// 创建字符串缓冲区，返回句柄。
+    fun create(): Long {
+        val sb: Long = Memory.alloc(24)
+        if (sb == 0) { return 0 }
+        val buf: Long = Memory.alloc(SB_INIT_CAP)
+        if (buf == 0) {
+            Memory.write64(sb, 0)       // buf = NULL
+            Memory.write64(sb + 8, 0)   // len = 0
+            Memory.write64(sb + 16, 0)  // cap = 0
+            return sb
+        }
+        Memory.write64(sb, buf)
+        Memory.write(buf, 0 as Byte)    // buf[0] = '\0'
+        Memory.write64(sb + 8, 0)
+        Memory.write64(sb + 16, SB_INIT_CAP)
+        return sb
+    }
+
+    /// 追加字符串（返回自身句柄，便于链式调用）。
+    fun append(handle: Long, text: Long): Long {
+        if (text == 0) { return handle }
+        val n: Long = StringOps.strlen(text)
+        appendN(handle, text, n)
+        return handle
+    }
+
+    /// 追加单个字符（返回自身句柄）。
+    fun appendChar(handle: Long, ch: Short): Long {
+        val sb: Long = handle
+        val len: Long = Memory.read64(sb + 8)
+        reserve(sb, len + 2)
+        val buf: Long = Memory.read64(sb)
+        if (buf == 0) { return handle }
+        Memory.write(buf + len, ch as Byte)
+        Memory.write64(sb + 8, len + 1)
+        Memory.write(buf + len + 1, 0 as Byte)
+        return handle
+    }
+
+    /// 追加整数（返回自身句柄）。
+    fun appendInt(handle: Long, value: Int): Long {
+        val sb: Long = handle
+        val len: Long = Memory.read64(sb + 8)
+        reserve(sb, len + 12)
+
+        val buf: Long = Memory.read64(sb)
+        if (buf == 0) { return handle }
+
+        // 整数转字符串：逐位取模 10，逆序写入
+        var v: Long = value as Long
+        var neg: Boolean = false
+        if (v < 0) { neg = true; v = -v }
+
+        // 临时缓冲区（栈上不够，用 alloc）
+        val tmp: Long = Memory.alloc(32)
+        if (tmp == 0) { return handle }
+
+        if (v == 0) {
+            Memory.write(tmp, '0' as Byte)
+            v = 1
+        }
+
+        var pos: Long = 0
+        while (v > 0) {
+            val digit: Long = v % 10
+            Memory.write(tmp + pos, (48 + digit) as Byte)
+            pos = pos + 1
+            v = v / 10
+        }
+        if (neg) {
+            Memory.write(tmp + pos, 45 as Byte)  // '-'
+            pos = pos + 1
+        }
+
+        // 反转（数字是逆序写入的）
+        var start: Long = 0
+        var end: Long = pos - 1
+        while (start < end) {
+            val a: Byte = Memory.read(tmp + start)
+            val b: Byte = Memory.read(tmp + end)
+            Memory.write(tmp + start, b)
+            Memory.write(tmp + end, a)
+            start = start + 1
+            end = end - 1
+        }
+
+        // 追加到 sb.buf
+        val newLen: Long = len + pos
+        Memory.copy(buf + len, tmp, pos)
+        Memory.write64(sb + 8, newLen)
+        Memory.write(buf + newLen, 0 as Byte)
+        Memory.free(tmp)
+        return handle
+    }
+
+    /// 当前字节长度。
+    fun length(handle: Long): Long {
+        return Memory.read64(handle + 8)
+    }
+
+    /// 结束并交出内容（转移缓冲区所有权，原句柄失效）。
+    fun finish(handle: Long): Long {
+        val sb: Long = handle
+        val buf: Long = Memory.read64(sb)
+        Memory.write64(sb, 0)
+        Memory.write64(sb + 8, 0)
+        Memory.write64(sb + 16, 0)
+        if (buf == 0) { return 0 }
+        return buf
+    }
+
+    /// 清空（保留容量）。
+    fun reset(handle: Long): Long {
+        val sb: Long = handle
+        var buf: Long = Memory.read64(sb)
+        if (buf == 0) {
+            buf = Memory.alloc(SB_INIT_CAP)
+            if (buf == 0) {
+                Memory.write64(sb + 16, 0)
+            } else {
+                Memory.write(buf, 0 as Byte)
+                Memory.write64(sb + 16, SB_INIT_CAP)
+            }
+            Memory.write64(sb, buf)
+        } else {
+            Memory.write(buf, 0 as Byte)
+        }
+        Memory.write64(sb + 8, 0)
+        return handle
+    }
+
+    // ── 内部辅助 ──
+
+    /// 确保容量 >= need（几何增长，保证 append 摊还 O(1)）。
+    private fun reserve(sb: Long, need: Long) {
+        val cap: Long = Memory.read64(sb + 16)
+        if (cap >= need) { return }
+        var newcap: Long = cap
+        if (newcap < SB_INIT_CAP) { newcap = SB_INIT_CAP }
+        while (newcap < need) { newcap = newcap * 2 }
+        val oldBuf: Long = Memory.read64(sb)
+        val newBuf: Long = Memory.alloc(newcap)
+        if (newBuf == 0) { return }
+        val oldLen: Long = Memory.read64(sb + 8)
+        if (oldLen > 0 && oldBuf != 0) {
+            Memory.copy(newBuf, oldBuf, oldLen)
+            Memory.write(newBuf + oldLen, 0 as Byte)
+        }
+        Memory.free(oldBuf)
+        Memory.write64(sb, newBuf)
+        Memory.write64(sb + 16, newcap)
+    }
+
+    /// 底层追加 n 字节（不含 NUL）。
+    private fun appendN(handle: Long, src: Long, n: Long) {
+        val sb: Long = handle
+        if (n < 0) { return }
+        val len: Long = Memory.read64(sb + 8)
+        reserve(sb, len + n + 1)
+        val buf: Long = Memory.read64(sb)
+        if (buf == 0) { return }
+        if (src != 0 && n > 0) {
+            Memory.copy(buf + len, src, n)
+        }
+        Memory.write64(sb + 8, len + n)
+        Memory.write(buf + len + n, 0 as Byte)
+    }
+}

@@ -63,23 +63,22 @@ object ClosuresUtils {
 /// 闭包与上值管理器。
 class ClosureManager {
 
-    /// 闭包表（每行：`closureId|funcName|upvalueCount`）。
-    var closureTable: String = ""
+    private var closureTable: String = ""
 
     /// 上值表（每行：`upvalueId|varName|source|value`）。
-    var upvalueTable: String = ""
+    private var upvalueTable: String = ""
 
     /// 闭包总数。
-    var closureCount: Int = 0
+    private var closureCount: Int = 0
 
     /// 上值总数。
-    var upvalueCount: Int = 0
+    private var upvalueCount: Int = 0
 
     /// 当前闭包 id 计数器。
-    var nextClosureId: Int = 0
+    private var nextClosureId: Int = 0
 
     /// 当前上值 id 计数器。
-    var nextUpvalueId: Int = 0
+    private var nextUpvalueId: Int = 0
 
     init() {
         this.closureTable = ""

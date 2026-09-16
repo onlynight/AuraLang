@@ -16,10 +16,10 @@ import aura.lang.loom
 // ═══════════════════════════════════════════════════════════════
 
 class CiConfig {
-    var phases: List<String> = mutableListOf()
-    var timeout: Int = 300  // seconds
-    var parallel: Boolean = false
-    var notify: List<String> = mutableListOf()
+    private var phases: List<String> = mutableListOf()
+    private var timeout: Int = 300  // seconds
+    private var parallel: Boolean = false
+    private var notify: List<String> = mutableListOf()
 
     fun CiConfig() {
         this.phases = mutableListOf()

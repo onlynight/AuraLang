@@ -17,7 +17,7 @@ package aura.lang.std
 
 import aura.lang.std.Collections
 
-internal object Iter {
+object Iter {
 
     // ── 聚合（纯逻辑，Aura 实现）──
 

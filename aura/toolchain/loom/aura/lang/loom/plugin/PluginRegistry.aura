@@ -13,8 +13,8 @@ import aura.lang.loom.plugin.PluginContext
 // ═══════════════════════════════════════════════════════════════
 
 class PluginRegistry {
-    var plugins: List<Plugin> = mutableListOf()
-    var contexts: Map<String, PluginContext> = mutableMapOf()
+    private var plugins: List<Plugin> = mutableListOf()
+    private var contexts: Map<String, PluginContext> = mutableMapOf()
 
     fun register(plugin: Plugin): Unit {
         plugins.add(plugin)

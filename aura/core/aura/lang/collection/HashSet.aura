@@ -10,7 +10,7 @@ package aura.lang.collection
 ///
 /// @see Set, HashMap, ArrayList
 /// @since 0.5
-internal class HashSet<T> {
+class HashSet<T> {
 
     // ── 内部存储 ──
 

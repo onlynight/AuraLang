@@ -57,7 +57,20 @@ class AotModuleLinker {
         this.missing = ""
         this.loader = HirLowerer()
         this.loader.useHir(this.hir)
-        val kids: String = this.loadPath(entryPath)
+        // Phase B.3：入口文件 + 递归 import + 自动包含 std 模块
+        var kids: String = this.loadPath(entryPath)
+        // 自动包含 std 模块（用户代码引用 String/Math/FileSystem 等时，
+        // 对应 Aura 实现必须参与编译；否则 preludeTable 移除后会出现 undefined symbol）
+        val stdMods: String = ModuleLinkUtils.essentialStdModules()
+        var si: Int = 0
+        while (si < aotLineCount(stdMods)) {
+            val sp: String = aotLineAt(stdMods, si)
+            val dep: String = this.loadPath(sp)
+            if (dep != "") {
+                kids = ModuleLinkUtils.appendKids(kids, dep)
+            }
+            si = si + 1
+        }
         this.hir.rootId = this.hir.add("HirProgram", "", "", Span(0, 0, 1, 1, 1, 1), kids)
         return this.hir
     }
@@ -193,6 +206,38 @@ object ModuleLinkUtils {
     fun linkModules(entryPath: String): Hir {
         val l: AotModuleLinker = AotModuleLinker()
         return l.link(entryPath)
+    }
+
+    /// Phase B.3：自动包含的 std 模块路径列表（换行分隔）。
+    ///
+    /// 当用户代码引用 String/Math/FileSystem 等 std 类时，对应的 Aura 实现
+    /// 必须参与编译。这些模块通过 `@native` 声明底层 syscall/asm，再由
+    /// Phase A 的 emitNativeWrapper 直接生成 LLVM IR（无 C 运行库）。
+    ///
+    /// 仅包含「无外部依赖」或「依赖已在本列表」的模块：
+    ///   * String.aura          — 字符串操作（纯 Aura 逻辑）
+    ///   * MathOps.aura         — 数学函数（Taylor 级数/牛顿法）
+    ///   * Memory.aura          — 内存分配（@native alloc/free → @malloc/@free）
+    ///   * Cpu.aura             — CPU 指令（@native(asm) → LLVM inline asm/fence/atomicrmw）
+    ///   * Runtime.aura         — 运行时入口（@native → syscall/asm）
+    fun essentialStdModules(): String {
+        // Phase B.3: 自动包含的 std 模块。
+        //
+        // String.aura / Math.aura / MathOps.aura / Memory.aura / Cpu.aura / Runtime.aura
+        // 均已验证可正常自动包含（object 方法 receiver 问题已修复，package 声明已处理）。
+        return "aura/core/aura/lang/String.aura\n" +
+            "aura/core/aura/lang/std/Math.aura\n" +
+            "aura/core/aura/lang/native/math/MathOps.aura\n" +
+            "aura/core/aura/lang/native/Memory.aura\n" +
+            "aura/core/aura/lang/native/Cpu.aura\n" +
+            "aura/core/aura/lang/native/Runtime.aura\n" +
+            // Phase P1-P3: 纯 Aura 标准库模块（已验证可自动包含）
+            "aura/core/aura/lang/std/string/StringBuilder.aura\n" +
+            "aura/core/aura/lang/std/collection/Collections.aura\n" +
+            "aura/core/aura/lang/std/FileSystem.aura\n" +
+            "aura/core/aura/lang/native/file/FileOps.aura\n" +
+            "aura/core/aura/lang/std/string/StringOps.aura\n" +
+            "aura/core/aura/lang/native/process/Process.aura\n"
     }
 
     // ── 路径工具 ──

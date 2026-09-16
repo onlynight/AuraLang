@@ -24,8 +24,7 @@ package aura.lang.concurrent
 // @since 0.6
 import aura.lang.native.Memory
 import aura.lang.native.Cpu
-
-internal object Barrier {
+object Barrier {
 
     /// 创建新的屏障
     ///

@@ -18,8 +18,8 @@ import aura.lang.loom
 
 class Workspace {
     val rootDir: String
-    var members: List<WorkspaceMember> = mutableListOf()
-    var sharedConfig: Map<String, String> = mutableMapOf()
+    private var members: List<WorkspaceMember> = mutableListOf()
+    private var sharedConfig: Map<String, String> = mutableMapOf()
 
     fun Workspace(rootDir: String) {
         this.rootDir = rootDir
@@ -91,8 +91,8 @@ class Workspace {
 class WorkspaceMember {
     val name: String
     val path: String
-    var manifest: Manifest = null
-    var built: Boolean = false
+    private var manifest: Manifest = null
+    private var built: Boolean = false
 
     fun WorkspaceMember(name: String, path: String) {
         this.name = name

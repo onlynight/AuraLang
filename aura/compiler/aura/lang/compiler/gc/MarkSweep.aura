@@ -9,7 +9,7 @@ import aura.lang.collection.HashMap
 
 /// 标记-清除 GC 包装器。
 class MarkSweep {
-    var heap: GcHeap
+    private var heap: GcHeap
 
     constructor() {
         this.heap = GcHeap()

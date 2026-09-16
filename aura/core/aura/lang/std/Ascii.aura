@@ -15,7 +15,7 @@ package aura.lang.std
 ///
 /// @see Char
 /// @since 0.1
-internal object Ascii {
+object Ascii {
 
     // ── 判断（纯逻辑，Aura 实现）──
 

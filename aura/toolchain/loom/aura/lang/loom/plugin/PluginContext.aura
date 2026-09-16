@@ -11,12 +11,12 @@ import aura.lang.std.Collections
 
 class PluginContext {
     val projectDir: String
-    var manifest: String = ""
-    var outDir: String = "target"
-    var cacheDir: String = "target/cache"
-    var compileMode: String = "aot"
-    var env: Map<String, String> = mutableMapOf()
-    var logs: List<String> = mutableListOf()
+    private var manifest: String = ""
+    private var outDir: String = "target"
+    private var cacheDir: String = "target/cache"
+    private var compileMode: String = "aot"
+    private var env: Map<String, String> = mutableMapOf()
+    private var logs: List<String> = mutableListOf()
 
     fun PluginContext(projectDir: String) {
         this.projectDir = projectDir

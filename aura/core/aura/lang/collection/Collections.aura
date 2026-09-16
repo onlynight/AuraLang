@@ -11,7 +11,7 @@ package aura.lang.collection
 /// ```
 ///
 /// @since 0.1
-internal object Collections {
+object Collections {
 
     // ── List 创建 ──
 

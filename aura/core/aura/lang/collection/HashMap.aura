@@ -10,7 +10,7 @@ package aura.lang.collection
 ///
 /// @see Map, ArrayList, HashSet
 /// @since 0.5
-internal class HashMap<K, V> {
+class HashMap<K, V> {
 
     // ── 内部存储 ──
 

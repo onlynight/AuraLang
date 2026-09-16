@@ -176,23 +176,22 @@ object JitStateUtils {
 /// 使用 HashMap 替代旧版字符串记录表，查找/更新 O(1)。
 class JitState {
 
-    /// 已编译函数索引集合（idx → true）。
-    var compiled: HashMap<Int, Boolean> = HashMap<Int, Boolean>()
+    private var compiled: HashMap<Int, Boolean> = HashMap<Int, Boolean>()
 
     /// 已跳过函数（idx → reason）。
-    var skipped: HashMap<Int, String> = HashMap<Int, String>()
+    private var skipped: HashMap<Int, String> = HashMap<Int, String>()
 
     /// 分发表（idx → entryToken），entryToken 为原生入口标记。
-    var dispatch: HashMap<Int, String> = HashMap<Int, String>()
+    private var dispatch: HashMap<Int, String> = HashMap<Int, String>()
 
     /// 调用计数（idx → count）。
-    var callCounts: HashMap<Int, Int> = HashMap<Int, Int>()
+    private var callCounts: HashMap<Int, Int> = HashMap<Int, Int>()
 
     /// 热点阈值。
     var threshold: Int = 10000
 
     /// 分发表容量（保证指针稳定）。
-    var capacity: Int = 0
+    private var capacity: Int = 0
 
     init() {
         this.compiled = HashMap<Int, Boolean>()
@@ -335,17 +334,16 @@ class JitState {
 /// 编译顺序规划器（带 visited/order 状态以适应递归）。
 class JitCompilePlanner {
 
-    /// 函数表。
-    var funcs: String = ""
+    private var funcs: String = ""
 
     /// 已访问集合（行表）。
-    var visited: String = ""
+    private var visited: String = ""
 
     /// 后序编译顺序（行表）。
-    var order: String = ""
+    private var order: String = ""
 
     /// 可达集合（行表）。
-    var reached: String = ""
+    private var reached: String = ""
 
     init() {
         this.funcs = ""

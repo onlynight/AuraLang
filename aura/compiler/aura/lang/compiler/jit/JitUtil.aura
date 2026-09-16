@@ -85,6 +85,62 @@ object JitUtilUtils {
         return ""
     }
 
+    /// 取第 index 行（0-based；行表以 `\n` 分隔）。
+    fun jitLineAt(text: String, index: Int): String {
+        return jitFieldAt(text, index, "\n")
+    }
+
+    /// 取第 index 个逗号分隔项。
+    fun jitCsvAt(csv: String, index: Int): String {
+        return jitFieldAt(csv, index, ",")
+    }
+
+    /// 行表中是否包含与 value 完全相等的行。
+    fun jitLineHas(lines: String, value: String): Boolean {
+        return jitLineIndex(lines, value) >= 0
+    }
+
+    // ── 函数表访问（表格式：`name|offset|paramCount`，见 Codegen.funcTableStr）──
+
+    /// 第 idx 个函数的名称（越界返回空串）。
+    fun jitFuncName(funcs: String, idx: Int): String {
+        if (idx < 0 || idx >= jitLineCount(funcs)) {
+            return ""
+        }
+        return jitFieldAt(jitLineAt(funcs, idx), 0, "|")
+    }
+
+    /// 第 idx 个函数的形参个数（越界返回 0）。
+    fun jitFuncArity(funcs: String, idx: Int): Int {
+        if (idx < 0 || idx >= jitLineCount(funcs)) {
+            return 0
+        }
+        return jitParseInt(jitFieldAt(jitLineAt(funcs, idx), 2, "|"))
+    }
+
+    /// 函数索引是否有效。
+    fun jitFuncExists(funcs: String, idx: Int): Boolean {
+        return idx >= 0 && idx < jitLineCount(funcs)
+    }
+
+    /// 函数体规模（当前函数表不含体积信息，返回 0 表示未知）。
+    fun jitFuncSize(funcs: String, idx: Int): Int {
+        if (!jitFuncExists(funcs, idx)) {
+            return 0
+        }
+        return 0
+    }
+
+    /// 是否为原生（FFI）函数（当前函数表不含该标记，返回 false）。
+    fun jitFuncNative(funcs: String, idx: Int): Boolean {
+        return false
+    }
+
+    /// 被调函数索引列表（逗号分隔；当前函数表不含调用图，返回空串）。
+    fun jitFuncCallees(funcs: String, idx: Int): String {
+        return ""
+    }
+
     // ── 数值解析 ──
 
     /// 字符串转整数（支持前导 `-`），非法字符忽略。
@@ -150,6 +206,15 @@ object JitUtilUtils {
     }
 
     // ── 记录表 ──
+
+    /// 记录表取值（默认取第 1 列，即 `key|value` 的 value）。
+    ///
+    /// 调用点（`JitRuntime` / `JitLower` / `JitDispatch` / `JitCore`）统一写
+    /// `jitRecordGet(map, key)`；此前只有带 `col` 的三参版本，调用点找不到
+    /// 定义 → AOT 下链接到未定义符号 `jitRecordGet`。此处补齐二参重载。
+    fun jitRecordGet(map: String, key: String): String {
+        return jitRecordGetCol(map, key, 1)
+    }
 
     /// 记录表取值（指定列）。
     fun jitRecordGetCol(map: String, key: String, col: Int): String {

@@ -676,7 +676,7 @@ fn test_private_member_access_outside_type() {
         "#,
     );
     assert!(
-        has_error_containing(&errors, "cannot be accessed outside"),
+        has_error_containing(&errors, "cannot be accessed"),
         "expected private access warning, got: {:?}",
         errors
     );

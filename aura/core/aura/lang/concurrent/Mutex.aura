@@ -23,8 +23,7 @@ package aura.lang.concurrent
 // 二者均为 `extern object`，实现由编译器/运行库提供，本文件不重复声明。
 import aura.lang.native.Memory
 import aura.lang.native.Cpu
-
-internal object Mutex {
+object Mutex {
 
     /// 创建新的互斥锁
     ///

@@ -74,68 +74,66 @@ object VmRunnerUtils {
 /// 增强 VM 运行器。
 class VmRunner {
 
-    /// 字节码（每行一条指令：`opcode arg1 arg2`）。
-    var bytecode: String = ""
+    private var bytecode: String = ""
 
     /// 常量池（每行一个常量值）。
-    var constPool: String = ""
+    private var constPool: String = ""
 
     /// 当前指令指针。
-    var ip: Int = 0
+    private var ip: Int = 0
 
     /// 指令执行计数。
-    var instructionCount: Int = 0
+    private var instructionCount: Int = 0
 
     /// 最大指令数限制。
-    var maxInstructions: Int = 1000000
+    private var maxInstructions: Int = 1000000
 
     /// 运行状态。
-    var running: Boolean = true
+    private var running: Boolean = true
 
     /// 返回值。
-    var returnValue: Any = null
+    private var returnValue: Any = null
 
     /// 错误信息。
-    var error: String = ""
+    private var error: String = ""
 
     /// 栈（ArrayList 实现，O(1) push/pop）。
-    var stack: ArrayList<String> = ArrayList<String>()
+    private var stack: ArrayList<String> = ArrayList<String>()
 
     /// 局部变量表（HashMap 实现，O(1) get/set）。
-    var locals: HashMap<Int, String> = HashMap<Int, String>()
+    private var locals: HashMap<Int, String> = HashMap<Int, String>()
 
     /// 全局变量表（HashMap 实现，O(1) get/set）。
-    var globals: HashMap<String, String> = HashMap<String, String>()
+    private var globals: HashMap<String, String> = HashMap<String, String>()
 
     /// 函数表（每行：`name|startOffset|paramCount`）。
-    var funcTable: String = ""
+    private var funcTable: String = ""
 
     /// 调用栈（ArrayList 实现，O(1) push/pop）。
-    var callStack: ArrayList<String> = ArrayList<String>()
+    private var callStack: ArrayList<String> = ArrayList<String>()
 
     /// 保存的局部变量块（ArrayList of HashMap，帧切换用）。
-    var savedLocals: ArrayList<HashMap<Int, String>> = ArrayList<HashMap<Int, String>>()
+    private var savedLocals: ArrayList<HashMap<Int, String>> = ArrayList<HashMap<Int, String>>()
 
     /// 闭包管理器。
-    var closures: ClosureManager = ClosureManager()
+    private var closures: ClosureManager = ClosureManager()
 
     /// 尾调用优化器。
-    var tailCall: TailCallOptimizer = TailCallOptimizer()
+    private var tailCall: TailCallOptimizer = TailCallOptimizer()
 
     /// 栈帧管理器。
-    var frames: FrameManager = FrameManager()
+    private var frames: FrameManager = FrameManager()
 
     /// 当前帧 id。
-    var currentFrame: Int = -1
+    private var currentFrame: Int = -1
 
     /// 当前函数名。
-    var currentFunc: String = ""
+    private var currentFunc: String = ""
 
-    /// 协程挂起标志（YIELD 指令触发）。
-    var suspended: Boolean = false
+    private var suspended: Boolean = false
 
     /// 协程调度器（由外部设置，为 null 时 YIELD 直接跳过）。
-    var coroutineScheduler: Any = null
+    private var coroutineScheduler: Any = null
 
     init() {
         this.bytecode = ""

@@ -13,7 +13,7 @@ import aura.lang.std.math.MathCore
 ///
 /// @see Double, Int, Long
 /// @since 0.1
-internal value class Float {
+value class Float {
 
     // ── 常量（companion object）──
 

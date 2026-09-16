@@ -38,7 +38,7 @@ class DepResolver {
         return 0
     }
 
-    fun resolveDep(dep: Dependency): Unit {
+    private fun resolveDep(dep: Dependency): Unit {
         // 检查锁文件
         if (lockFile != null) {
             val locked: LockPackage = lockFile.find(dep.name)
@@ -65,7 +65,7 @@ class DepResolver {
         graph.addNode(node)
     }
 
-    fun resolveLocalVersion(path: String): String {
+    private fun resolveLocalVersion(path: String): String {
         val manifestPath: String = path + "/aura.toml"
         if (FileSystem.exists(manifestPath)) {
             val content: String = FileSystem.readText(manifestPath)

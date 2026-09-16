@@ -13,7 +13,7 @@ package aura.lang
 ///
 /// @see Any, Long, Float, Double
 /// @since 0.1
-internal value class Int {
+value class Int {
 
     // ── 常量（companion object）──
 

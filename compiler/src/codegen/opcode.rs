@@ -206,11 +206,11 @@ pub enum OpCode {
     CallAot(u16),
 
     // ── 异常处理（try/catch）──
-    /// 注册异常处理器：操作数为**处理器块的绝对字节偏移** + 异常值落点槽位。
+    /// 注册异常处理器：操作数为**处理器块的绝对字节偏移** + 异常值落点槽位 + catch 类型过滤器。
     ///
-    /// VM 收到该指令时把 `(当前帧, 目标 ip, 栈高, 槽位)` 压入 handler 栈；`throw`
-    /// 触发时弹出最近的 handler，展开到对应帧、把异常值写入槽位后跳转过去。
-    PushHandler(i32, u16),
+    /// VM 收到该指令时把 `(当前帧, 目标 ip, 栈高, 槽位, catch_type)` 压入 handler 栈；`throw`
+    /// 触发时弹出最近的 handler，若 catch_type 不为 `u16::MAX` 则检查 isInstance，匹配才展开。
+    PushHandler(i32, u16, u16),
     /// 注销最近的异常处理器（try 块正常结束时执行）。
     PopHandler,
 
@@ -399,7 +399,7 @@ impl OpCode {
         match byte {
             0 | 1 | 2 | 30 | 32 | 33 | 72 | 74 | 76 | 77 => 2, // u16 操作数
             23 | 24 | 25 => 4,                                 // i32 偏移
-            82 => 6, // PushHandler: i32 处理器块偏移 + u16 异常值槽位
+            82 => 8, // PushHandler: i32 处理器块偏移 + u16 异常值槽位 + u16 catch_type
             // ⚠ 必须与 `write` 实际写出的操作数字节数一致：解码器用本表
             // 推进指令游标并构建「字节偏移 → 指令索引」映射，长度不符会导致
             // 其后所有指令边界错位。
@@ -494,7 +494,7 @@ impl OpCode {
             71 => OpCode::CallExternal(0, 0),
             77 => OpCode::CallAot(0),
             78 => OpCode::CallNativeArgs(0, 0),
-            82 => OpCode::PushHandler(0, 0),
+            82 => OpCode::PushHandler(0, 0, u16::MAX),
             83 => OpCode::PopHandler,
 
             // ── Phase B: 并发运行时指令 ──
@@ -569,9 +569,10 @@ impl OpCode {
             OpCode::Jump(o) | OpCode::JumpIfTrue(o) | OpCode::JumpIfFalse(o) => {
                 buf.extend_from_slice(&o.to_le_bytes())
             }
-            OpCode::PushHandler(o, slot) => {
+            OpCode::PushHandler(o, slot, catch_type) => {
                 buf.extend_from_slice(&o.to_le_bytes());
                 buf.extend_from_slice(&slot.to_le_bytes());
+                buf.extend_from_slice(&catch_type.to_le_bytes());
             }
             _ => {}
         }
@@ -607,7 +608,11 @@ impl fmt::Display for OpCode {
             OpCode::Jump(o) => write!(f, "JUMP {}", o),
             OpCode::JumpIfTrue(o) => write!(f, "JUMP_IF_TRUE {}", o),
             OpCode::JumpIfFalse(o) => write!(f, "JUMP_IF_FALSE {}", o),
-            OpCode::PushHandler(o, slot) => write!(f, "PUSH_HANDLER {} slot={}", o, slot),
+            OpCode::PushHandler(o, slot, catch_type) => write!(
+                f,
+                "PUSH_HANDLER {} slot={} catch_type={}",
+                o, slot, catch_type
+            ),
             OpCode::PopHandler => write!(f, "POP_HANDLER"),
             OpCode::Call(i) => write!(f, "CALL {}", i),
             OpCode::CallNative(i) => write!(f, "CALL_NATIVE {}", i),

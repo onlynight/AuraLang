@@ -1,0 +1,444 @@
+// aura:///aura/lang/std/collection/Collections.aura
+package aura.lang.std.collection
+// ─────────────────────────────────────────────────────────────
+// 标准库集合操作 — Phase P2
+//
+// 纯 Aura 实现，不依赖 C 运行库。
+//
+// 数据结构布局：
+//   AuraDynList (24 字节):
+//     offset 0  : len (i64)
+//     offset 8  : cap (i64)
+//     offset 16 : items ptr (i64 → i64[] 数组)
+//   AuraDynMap (32 字节):
+//     offset 0  : len (i64)
+//     offset 8  : cap (i64)
+//     offset 16 : keys ptr (i64 → i64[] 数组)
+//     offset 24 : vals ptr (i64 → i64[] 数组)
+//
+// Plan A 装箱：整数以 `(v<<1)|1`（奇数）存储，真实指针以偶数存储。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.native.Memory
+import aura.lang.std.string.StringOps
+
+/// 标准库集合操作（纯 Aura 实现）。
+object Collections {
+
+    // ── 内部常量 ──
+
+    private const val LIST_MIN_CAP: Long = 4
+    private const val MAP_MIN_CAP: Long = 4
+    private const val LIST_HDR_SIZE: Long = 24
+    private const val MAP_HDR_SIZE: Long = 32
+
+    // ══════════════════════════════════════════════════════════
+    //  List 操作
+    // ══════════════════════════════════════════════════════════
+
+    /// 创建空列表。
+    fun emptyList(): Long {
+        return newList(LIST_MIN_CAP)
+    }
+
+    /// 创建包含最多 3 个元素的列表。
+    fun listOf(a: Long, b: Long, c: Long): Long {
+        val l: Long = newList(LIST_MIN_CAP)
+        push(l, a)
+        push(l, b)
+        push(l, c)
+        return l
+    }
+
+    /// 创建 Pair（2 元素列表），用于 `to` 运算符解构。
+    fun pairOf(a: Long, b: Long): Long {
+        val l: Long = newList(LIST_MIN_CAP)
+        push(l, a)
+        push(l, b)
+        return l
+    }
+
+    /// 元素数量。
+    fun count(list: Long): Long {
+        if (list == 0) { return 0 }
+        return Memory.read64(list)
+    }
+
+    /// 元素数量（别名）。
+    fun listSize(list: Long): Long {
+        return count(list)
+    }
+
+    /// 是否为空。
+    fun isEmpty(list: Long): Boolean {
+        return count(list) == 0
+    }
+
+    /// 按下标获取元素（越界返回 0）。
+    fun getAt(list: Long, idx: Long): Long {
+        if (list == 0 || idx < 0) { return 0 }
+        val len: Long = Memory.read64(list)
+        if (idx >= len) { return 0 }
+        val items: Long = Memory.read64(list + 16)
+        if (items == 0) { return 0 }
+        return Memory.read64(items + idx * 8)
+    }
+
+    /// 按下标获取元素（别名）。
+    fun listGet(list: Long, idx: Long): Long {
+        return getAt(list, idx)
+    }
+
+    /// 追加元素（原地修改，返回自身句柄）。
+    fun listAppend(list: Long, value: Long): Long {
+        if (list == 0) {
+            val l: Long = newList(LIST_MIN_CAP)
+            push(l, value)
+            return l
+        }
+        push(list, value)
+        return list
+    }
+
+    /// 弹出末尾元素（原地修改）。
+    fun listPop(list: Long): Long {
+        if (list == 0) { return 0 }
+        val len: Long = Memory.read64(list)
+        if (len <= 0) { return 0 }
+        val items: Long = Memory.read64(list + 16)
+        val v: Long = Memory.read64(items + (len - 1) * 8)
+        Memory.write64(list, len - 1)
+        return v
+    }
+
+    /// 按下标写入（越界则追加，原地修改）。
+    fun listSet(list: Long, idx: Long, value: Long): Long {
+        if (list == 0) {
+            val l: Long = newList(LIST_MIN_CAP)
+            push(l, value)
+            return l
+        }
+        val len: Long = Memory.read64(list)
+        if (idx >= 0 && idx < len) {
+            val items: Long = Memory.read64(list + 16)
+            Memory.write64(items + idx * 8, value)
+        } else {
+            push(list, value)
+        }
+        return list
+    }
+
+    /// 按下标写入（返回新列表，越界则追加）。
+    fun set(list: Long, idx: Long, value: Long): Long {
+        return listSet(list, idx, value)
+    }
+
+    /// 构造整数区间列表（Plan A 低位标记装箱）。
+    fun range(start: Int, end: Int, inclusive: Int): Long {
+        val l: Long = newList(16)
+        if (l == 0) { return 0 }
+        val s: Long = start as Long
+        val e: Long = end as Long
+        val inc: Long = inclusive as Long
+        if (s <= e) {
+            var i: Long = s
+            while (true) {
+                if (i > e) { break }
+                if (i == e && inc == 0) { break }
+                push(l, (i << 1) | 1)  // Plan A 装箱
+                if (i == e) { break }
+                i = i + 1
+            }
+        } else {
+            var i: Long = s
+            while (true) {
+                if (i < e) { break }
+                if (i == e && inc == 0) { break }
+                push(l, (i << 1) | 1)
+                if (i == e) { break }
+                i = i - 1
+            }
+        }
+        return l
+    }
+
+    /// 查找元素的索引（未找到返回 -1）。
+    fun indexOf(list: Long, value: Long): Long {
+        if (list == 0 || value == 0) { return -1 }
+        val len: Long = Memory.read64(list)
+        val items: Long = Memory.read64(list + 16)
+        var i: Long = 0
+        while (i < len) {
+            val it: Long = Memory.read64(items + i * 8)
+            if (handleEquals(it, value)) {
+                return i
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// 检查集合是否包含指定元素。
+    fun contains(list: Long, value: Long): Boolean {
+        return indexOf(list, value) >= 0
+    }
+
+    /// 取前 n 个元素。
+    fun take(list: Long, n: Long): Long {
+        val out: Long = newList(LIST_MIN_CAP)
+        if (list == 0 || n <= 0) { return out }
+        val len: Long = Memory.read64(list)
+        val items: Long = Memory.read64(list + 16)
+        var i: Long = 0
+        while (i < len && i < n) {
+            push(out, Memory.read64(items + i * 8))
+            i = i + 1
+        }
+        return out
+    }
+
+    /// 迭代器链 filter — 纯 Aura 实现（通过 __callClosure 间接调用闭包）。
+    ///
+    /// 闭包 ABI: (env: i8*, element: i64) -> i64 (non-zero = keep)
+    /// sig 格式: "i64|i64" (retTy|paramTys, env 由发射器自动前置)
+    fun filter(list: Long, clo: Long): Long {
+        val out: Long = newList(LIST_MIN_CAP)
+        if (list == 0) { return out }
+        val len: Long = Memory.read64(list)
+        val items: Long = Memory.read64(list + 16)
+        var i: Long = 0
+        while (i < len) {
+            val elem: Long = Memory.read64(items + i * 8)
+            val keep: Long = __callClosure(clo, "i64|i64", elem)
+            if (keep != 0) {
+                push(out, elem)
+            }
+            i = i + 1
+        }
+        return out
+    }
+
+    /// 迭代器链 map — 纯 Aura 实现（通过 __callClosure 间接调用闭包）。
+    ///
+    /// 闭包 ABI: (env: i8*, element: i64) -> i64 (transformed value)
+    /// sig 格式: "i64|i64" (retTy|paramTys, env 由发射器自动前置)
+    fun map(list: Long, clo: Long): Long {
+        val out: Long = newList(LIST_MIN_CAP)
+        if (list == 0) { return out }
+        val len: Long = Memory.read64(list)
+        val items: Long = Memory.read64(list + 16)
+        var i: Long = 0
+        while (i < len) {
+            val elem: Long = Memory.read64(items + i * 8)
+            val result: Long = __callClosure(clo, "i64|i64", elem)
+            push(out, result)
+            i = i + 1
+        }
+        return out
+    }
+
+    // ══════════════════════════════════════════════════════════
+    //  Map 操作
+    // ══════════════════════════════════════════════════════════
+
+    /// 创建可变映射表。
+    fun mutableMapOf(): Long {
+        return newMap(MAP_MIN_CAP * 2)
+    }
+
+    /// 创建空映射表。
+    fun emptyMap(): Long {
+        return newMap(MAP_MIN_CAP)
+    }
+
+    /// 写入键值对（原地修改，覆盖已有键）。
+    fun mapSet(map: Long, key: Long, value: Long): Long {
+        if (map == 0 || key == 0) { return map }
+        val len: Long = Memory.read64(map)
+        val keys: Long = Memory.read64(map + 16)
+        val vals: Long = Memory.read64(map + 24)
+        // 查找已有键
+        var i: Long = 0
+        while (i < len) {
+            if (strEquals(Memory.read64(keys + i * 8), key)) {
+                Memory.write64(vals + i * 8, value)
+                return map
+            }
+            i = i + 1
+        }
+        // 未找到，追加
+        val cap: Long = Memory.read64(map + 8)
+        if (len >= cap) {
+            growMap(map, len, cap)
+        }
+        val newKeys: Long = Memory.read64(map + 16)
+        val newVals: Long = Memory.read64(map + 24)
+        // 复制 key 字符串（Map 键需要拥有独立副本）
+        val keyCopy: Long = strdup(key)
+        Memory.write64(newKeys + len * 8, keyCopy)
+        Memory.write64(newVals + len * 8, value)
+        Memory.write64(map, len + 1)
+        return map
+    }
+
+    /// 按键获取值（未找到返回 0）。
+    fun mapGet(map: Long, key: Long): Long {
+        if (map == 0 || key == 0) { return 0 }
+        val len: Long = Memory.read64(map)
+        val keys: Long = Memory.read64(map + 16)
+        val vals: Long = Memory.read64(map + 24)
+        var i: Long = 0
+        while (i < len) {
+            if (strEquals(Memory.read64(keys + i * 8), key)) {
+                return Memory.read64(vals + i * 8)
+            }
+            i = i + 1
+        }
+        return 0
+    }
+
+    /// 映射表大小。
+    fun mapSize(map: Long): Long {
+        if (map == 0) { return 0 }
+        return Memory.read64(map)
+    }
+
+    /// 检查映射表是否包含指定键。
+    fun mapContains(map: Long, key: Long): Boolean {
+        if (map == 0 || key == 0) { return false }
+        val len: Long = Memory.read64(map)
+        val keys: Long = Memory.read64(map + 16)
+        var i: Long = 0
+        while (i < len) {
+            if (strEquals(Memory.read64(keys + i * 8), key)) {
+                return true
+            }
+            i = i + 1
+        }
+        return false
+    }
+
+    // ══════════════════════════════════════════════════════════
+    //  内部辅助
+    // ══════════════════════════════════════════════════════════
+
+    /// 创建新的列表（len=0, 指定 cap）。
+    private fun newList(cap: Long): Long {
+        if (cap < LIST_MIN_CAP) { cap = LIST_MIN_CAP }
+        val l: Long = Memory.alloc(LIST_HDR_SIZE)
+        if (l == 0) { return 0 }
+        val items: Long = Memory.alloc(cap * 8)
+        Memory.write64(l, 0)
+        Memory.write64(l + 8, cap)
+        if (items == 0) {
+            Memory.write64(l + 16, 0)
+        } else {
+            Memory.write64(l + 16, items)
+        }
+        return l
+    }
+
+    /// 追加元素到列表（几何增长）。
+    private fun push(l: Long, value: Long) {
+        val len: Long = Memory.read64(l)
+        val cap: Long = Memory.read64(l + 8)
+        if (len >= cap) {
+            var newcap: Long = cap * 2
+            if (newcap < LIST_MIN_CAP) { newcap = LIST_MIN_CAP }
+            val oldItems: Long = Memory.read64(l + 16)
+            val newItems: Long = Memory.alloc(newcap * 8)
+            if (newItems == 0) { return }
+            if (len > 0 && oldItems != 0) {
+                Memory.copy(newItems, oldItems, len * 8)
+            }
+            Memory.free(oldItems)
+            Memory.write64(l + 16, newItems)
+            Memory.write64(l + 8, newcap)
+        }
+        val items: Long = Memory.read64(l + 16)
+        if (items == 0) { return }
+        Memory.write64(items + len * 8, value)
+        Memory.write64(l, len + 1)
+    }
+
+    /// 创建新的映射表。
+    private fun newMap(cap: Long): Long {
+        if (cap < MAP_MIN_CAP) { cap = MAP_MIN_CAP }
+        val m: Long = Memory.alloc(MAP_HDR_SIZE)
+        if (m == 0) { return 0 }
+        val keys: Long = Memory.alloc(cap * 8)
+        val vals: Long = Memory.alloc(cap * 8)
+        Memory.write64(m, 0)
+        Memory.write64(m + 8, cap)
+        if (keys == 0) {
+            Memory.write64(m + 16, 0)
+            if (vals != 0) { Memory.free(vals) }
+        } else if (vals == 0) {
+            Memory.write64(m + 16, 0)
+            Memory.free(keys)
+        } else {
+            Memory.write64(m + 16, keys)
+            Memory.write64(m + 24, vals)
+        }
+        return m
+    }
+
+    /// 扩展映射表容量。
+    private fun growMap(m: Long, oldLen: Long, oldCap: Long) {
+        var newcap: Long = oldCap * 2
+        if (newcap < MAP_MIN_CAP) { newcap = MAP_MIN_CAP }
+        val oldKeys: Long = Memory.read64(m + 16)
+        val oldVals: Long = Memory.read64(m + 24)
+        val newKeys: Long = Memory.alloc(newcap * 8)
+        val newVals: Long = Memory.alloc(newcap * 8)
+        if (newKeys == 0 || newVals == 0) {
+            if (newKeys != 0) { Memory.free(newKeys) }
+            if (newVals != 0) { Memory.free(newVals) }
+            return
+        }
+        if (oldLen > 0) {
+            if (oldKeys != 0) { Memory.copy(newKeys, oldKeys, oldLen * 8) }
+            if (oldVals != 0) { Memory.copy(newVals, oldVals, oldLen * 8) }
+        }
+        Memory.free(oldKeys)
+        Memory.free(oldVals)
+        Memory.write64(m + 16, newKeys)
+        Memory.write64(m + 24, newVals)
+        Memory.write64(m + 8, newcap)
+    }
+
+    /// 复制字符串（带 NUL 结尾）。
+    private fun strdup(s: Long): Long {
+        if (s == 0) { return 0 }
+        val n: Long = StringOps.strlen(s)
+        val buf: Long = Memory.alloc(n + 1)
+        if (buf == 0) { return 0 }
+        if (n > 0) {
+            Memory.copy(buf, s, n)
+        }
+        Memory.write(buf + n, 0 as Byte)
+        return buf
+    }
+
+    /// 比较两个 C 字符串是否相等。
+    private fun strEquals(a: Long, b: Long): Boolean {
+        if (a == b) { return true }
+        if (a == 0 || b == 0) { return false }
+        return StringOps.strcmp(a, b) == 0
+    }
+
+    /// 比较两个值句柄（Plan A 感知）。
+    private fun handleEquals(a: Long, b: Long): Boolean {
+        if (a == b) { return true }
+        if (a == 0 || b == 0) { return false }
+        // Plan A：低位为 1 → 装箱整数
+        val ua: Long = a
+        val ub: Long = b
+        val isA: Boolean = (ua & 1) != 0
+        val isB: Boolean = (ub & 1) != 0
+        if (isA || isB) {
+            return isA == isB && ua == ub
+        }
+        return strEquals(a, b)
+    }
+}

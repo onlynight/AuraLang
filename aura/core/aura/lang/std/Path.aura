@@ -14,7 +14,7 @@ package aura.lang.std
 /// ```
 ///
 /// @since 0.1
-internal object Path {
+object Path {
 
     /// 路径分隔符（标准形式）。
     const val SEPARATOR: String = "/"

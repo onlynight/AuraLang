@@ -14,8 +14,8 @@ import aura.lang.std.Collections
 // 对标 Rust: dep/lock.rs
 // ══════════════════════════════════════════════════════════════
 class LockFile {
-    val path: String
-    var packages: List<LockPackage> = mutableListOf()
+    private val path: String
+    private var packages: List<LockPackage> = mutableListOf()
 
     fun LockFile(path: String) {
         this.path = path
@@ -63,7 +63,7 @@ class LockFile {
         return parseLock(content)
     }
 
-    fun parseLock(content: String): Int {
+    private fun parseLock(content: String): Int {
         val lines: List<String> = String.splitLines(content)
         var currentPkg: LockPackage = null
         var i: Int = 0
@@ -130,9 +130,9 @@ class LockFile {
 class LockPackage {
     val name: String
     val version: String
-    var source: String = ""
-    var checksum: String = ""
-    var dependencies: List<String> = mutableListOf()
+    private var source: String = ""
+    private var checksum: String = ""
+    private var dependencies: List<String> = mutableListOf()
 
     fun LockPackage(name: String, version: String) {
         this.name = name

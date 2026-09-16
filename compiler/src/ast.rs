@@ -738,6 +738,8 @@ pub struct Program {
     pub declarations: Vec<Decl>,
     /// 顶层语句（脚本模式：无 main 时，顶层语句会被自动包装为隐式 main）
     pub top_level_statements: Vec<Stmt>,
+    /// 包声明（`package aura.lang.std`）
+    pub package: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -81,6 +81,16 @@ pub static EMBEDDED_PATH_AUC: &[u8] = include_bytes!(concat!("../../../build/", 
 /// 嵌入的 String 标准库 — 纯逻辑
 pub static EMBEDDED_STRING_AUC: &[u8] = include_bytes!(concat!("../../../build/", "String.auc"));
 
+/// 嵌入的 Exception 异常类层次结构 — 纯逻辑（新包结构 aura.lang.errors）
+pub static EMBEDDED_ERRORS_THROWABLE_AUC: &[u8] =
+    include_bytes!(concat!("../../../build/", "errors/Throwable.auc"));
+pub static EMBEDDED_ERRORS_ERROR_AUC: &[u8] =
+    include_bytes!(concat!("../../../build/", "errors/Error.auc"));
+pub static EMBEDDED_ERRORS_EXCEPTION_AUC: &[u8] =
+    include_bytes!(concat!("../../../build/", "errors/Exception.auc"));
+pub static EMBEDDED_ERRORS_IO_AUC: &[u8] =
+    include_bytes!(concat!("../../../build/", "errors/IOException.auc"));
+
 // ── aura.lang.native（native 原语辅助模块）──
 //
 // 这些模块是纯 Aura 实现，为 std/ 包中的模块提供底层数学/IO/网络等辅助功能。
@@ -170,6 +180,19 @@ pub static EMBEDDED_STDLIB_MODULES: &[(&str, &str, &[u8])] = &[
     ("TestHelper", "aura.lang.std", EMBEDDED_TEST_HELPER_AUC),
     ("Path", "aura.lang.std", EMBEDDED_PATH_AUC),
     ("String", "aura.lang.std", EMBEDDED_STRING_AUC),
+    // ── 异常类层次结构（aura.lang.errors，纯 Aura）──
+    (
+        "Throwable",
+        "aura.lang.errors",
+        EMBEDDED_ERRORS_THROWABLE_AUC,
+    ),
+    ("Error", "aura.lang.errors", EMBEDDED_ERRORS_ERROR_AUC),
+    (
+        "Exception",
+        "aura.lang.errors",
+        EMBEDDED_ERRORS_EXCEPTION_AUC,
+    ),
+    ("IOException", "aura.lang.errors", EMBEDDED_ERRORS_IO_AUC),
     // ── 并发同步原语（aura.lang.concurrent，纯 Aura）──
     ("Atomic", PKG_CONCURRENT, EMBEDDED_ATOMIC_AUC),
     ("Mutex", PKG_CONCURRENT, EMBEDDED_MUTEX_AUC),

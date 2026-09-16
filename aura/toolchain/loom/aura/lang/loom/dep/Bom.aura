@@ -15,7 +15,7 @@ import aura.lang.loom.dep.Dependency
 // 对标 Rust: dep/bom.rs
 // ══════════════════════════════════════════════════════════════
 class Bom {
-    var packages: List<BomEntry> = mutableListOf()
+    private var packages: List<BomEntry> = mutableListOf()
 
     fun addPackage(name: String, version: String, source: String): Unit {
         val entry: BomEntry = BomEntry(name, version, source)
@@ -48,7 +48,7 @@ class Bom {
         return 0
     }
 
-    fun extractVersion(content: String): String {
+    private fun extractVersion(content: String): String {
         val lines: List<String> = String.splitLines(content)
         var i: Int = 0
         while (i < lines.size) {

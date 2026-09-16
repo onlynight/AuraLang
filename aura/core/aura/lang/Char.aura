@@ -11,7 +11,7 @@ package aura.lang
 ///
 /// @see String, Int
 /// @since 0.1
-internal value class Char {
+value class Char {
 
     // ── 常量（companion object）──
 

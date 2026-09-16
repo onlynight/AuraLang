@@ -218,44 +218,34 @@ object HirUtils {
 /// HIR 节点表示（扁平 arena，与 Ast.aura 结构一致）。
 class Hir {
 
-    /// 节点种类（**堆列表**：追加摊还 O(1)、下标 O(1)）。
-    ///
-    /// 说明：原先用字符串 `+` 逐项拼接（5 条流 × n 次追加 → O(n²)，且每次
-    /// `kindOf/textOf/...` 都要 `fieldAt` 从头线性扫描 → 访问也 O(n)）。
-    /// 合并 ~40 个模块时这是 6.5.10 自举的主要瓶颈，故与 `Ast` 统一改为
-    /// `arrayListOf` 堆列表（Rust 侧 `__list_new`/`__list_push` 原地追加）。
-    var kinds: List<String> = arrayListOf<String>()
+    private var kinds: List<String> = arrayListOf<String>()
 
     /// 节点主文本：标识符名 / 字面量文本 / 运算符（堆列表，换行已转义）。
-    var texts: List<String> = arrayListOf<String>()
+    private var texts: List<String> = arrayListOf<String>()
 
     /// 节点类型名（堆列表；无类型信息时为空串）。
-    var tys: List<String> = arrayListOf<String>()
+    private var tys: List<String> = arrayListOf<String>()
 
     /// Span 分量（6 条**并列 Int 堆列表**）。
-    ///
-    /// 原先每节点拼一个 `"start end sl sc el ec"` 字符串（4 次 `+` 拼接 +
-    /// 6 次 `toStr`）。AOT 无 GC，合并 49 模块时按 HIR 节点数万计会产生
-    /// 数百万次小分配——是「链接阶段数百 MB」的主要来源。
-    var spanStart: List<Int> = arrayListOf<Int>()
+    private var spanStart: List<Int> = arrayListOf<Int>()
 
     /// 结束偏移。
-    var spanEnd: List<Int> = arrayListOf<Int>()
+    private var spanEnd: List<Int> = arrayListOf<Int>()
 
     /// 起始行。
-    var spanStartLine: List<Int> = arrayListOf<Int>()
+    private var spanStartLine: List<Int> = arrayListOf<Int>()
 
     /// 起始列。
-    var spanStartCol: List<Int> = arrayListOf<Int>()
+    private var spanStartCol: List<Int> = arrayListOf<Int>()
 
     /// 结束行。
-    var spanEndLine: List<Int> = arrayListOf<Int>()
+    private var spanEndLine: List<Int> = arrayListOf<Int>()
 
     /// 结束列。
-    var spanEndCol: List<Int> = arrayListOf<Int>()
+    private var spanEndCol: List<Int> = arrayListOf<Int>()
 
     /// 子节点 id 列表（堆列表，每项为逗号分隔串，可为空串）。
-    var kids: List<String> = arrayListOf<String>()
+    private var kids: List<String> = arrayListOf<String>()
 
     /// 节点总数。
     var count: Int = 0
@@ -427,11 +417,10 @@ class Hir {
 
 class HirLowerer {
 
-    /// 输入的 AST。
-    var ast: Ast = Ast()
+    private var ast: Ast = Ast()
 
     /// 输出的 HIR。
-    var hir: Hir = Hir()
+    private var hir: Hir = Hir()
 
     init() {
         this.ast = Ast()
@@ -548,8 +537,8 @@ class HirLowerer {
             return this.hir.leaf("HirTypealias", text, sp)
         } else {
             // 其他顶层节点：如果是表达式，降级为 HirExpr
-            // 如果是 Import 等，跳过
-            if (kind == "Import") {
+            // 如果是 Import / Package 等，跳过
+            if (kind == "Import" || kind == "Package") {
                 return -1
             }
             return this.lowerExpr(ast, id)

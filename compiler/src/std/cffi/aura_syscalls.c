@@ -994,11 +994,16 @@ static int aura_jmp_depth = 0;
 
 /** aura_setjmp(buf) — 保存当前执行上下文，返回 0（首次调用）或非零（longjmp 返回） */
 int aura_setjmp(void *buf) {
-    if (aura_jmp_depth < AURA_MAX_JMP_DEPTH) {
-        memcpy(aura_jmp_stack[aura_jmp_depth], buf, sizeof(jmp_buf));
-    }
     jmp_buf *jbp = (jmp_buf *)buf;
-    return setjmp(*jbp);
+    int r = setjmp(*jbp);
+    if (r == 0) {
+        // 首次调用：保存 jmp_buf 副本到栈中，供 aura_longjmp 使用
+        if (aura_jmp_depth < AURA_MAX_JMP_DEPTH) {
+            memcpy(aura_jmp_stack[aura_jmp_depth], jbp, sizeof(jmp_buf));
+            aura_jmp_depth++;
+        }
+    }
+    return r;
 }
 
 /** aura_longjmp(buf, val) — 跳转到最近的 setjmp 上下文 */

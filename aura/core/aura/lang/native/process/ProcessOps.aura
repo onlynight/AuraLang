@@ -18,6 +18,7 @@ extern object ProcessOps {
     // -- Syscall declarations --
     @native(SYS_EXIT_GROUP) fun exitGroup(code: Int)
     @native(SYS_WAIT4)      fun wait4(pid: Int, status: Long, options: Int, rusage: Long): Int
+    @native(SYS_FORK)       fun fork(): Int
     @native(SYS_EXECVE)     fun execve(path: Long, args: Long, env: Long): Long
     @native(SYS_GETPID)     fun getpid(): Int
 
@@ -39,5 +40,10 @@ extern object ProcessOps {
     /// Get current process ID
     fun getPid(): Int {
         return getpid()
+    }
+
+    /// Fork a child process
+    fun forkProcess(): Int {
+        return fork()
     }
 }

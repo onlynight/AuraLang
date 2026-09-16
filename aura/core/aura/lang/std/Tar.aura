@@ -463,7 +463,7 @@ object TarUtils {
     }
 
     /// 最小值。
-    fun min(a: Int, b: Int): Int {
+    private fun min(a: Int, b: Int): Int {
         if (a < b) {
             return a
         } else {

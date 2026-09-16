@@ -14,7 +14,7 @@ import aura.lang.loom.plugin.Plugin
 class ExplicitPlugin {
     val name: String
     val path: String
-    var version: String = "0.1.0"
+    private var version: String = "0.1.0"
 
     fun ExplicitPlugin(name: String, path: String) {
         this.name = name

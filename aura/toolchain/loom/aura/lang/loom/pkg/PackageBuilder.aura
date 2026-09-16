@@ -44,7 +44,7 @@ class PackageBuilder {
         return createPackage()
     }
 
-    fun parseManifest(content: String): PackageMeta {
+    private fun parseManifest(content: String): PackageMeta {
         val lines: List<String> = String.splitLines(content)
         var name: String = "unknown"
         var version: String = "0.1.0"
@@ -83,7 +83,7 @@ class PackageBuilder {
         return meta
     }
 
-    fun collectFiles(): Unit {
+    private fun collectFiles(): Unit {
         // Simplified: only collect .aura files under src/
         val srcDir: String = projectDir + "/src"
         if (FileSystem.exists(srcDir)) {
@@ -99,13 +99,13 @@ class PackageBuilder {
         }
     }
 
-    fun computeChecksum(): Unit {
+    private fun computeChecksum(): Unit {
         // Simplified: use filename and version as checksum
         val input: String = meta.name + meta.version + meta.files.join("|")
         meta.checksum = Encoding.sha256(input)
     }
 
-    fun createPackage(): Int {
+    private fun createPackage(): Int {
         val pkgName: String = meta.name + "-" + meta.version + ".auz"
         val outPath: String = outDir + "/" + pkgName
 

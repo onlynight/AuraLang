@@ -80,11 +80,25 @@ impl Parser {
         let mut imports = Vec::new();
         let mut declarations = Vec::new();
         let mut top_level_statements = Vec::new();
+        let mut package = None;
 
         while !self.is_at_end() {
             match self.current().kind {
                 TokenKind::Import => {
                     imports.push(self.parse_import());
+                }
+                TokenKind::Package => {
+                    // package aura.lang.std
+                    self.advance(); // consume "package"
+                    let mut path = String::new();
+                    path.push_str(&self.advance().literal);
+                    while self.check(TokenKind::Dot) {
+                        self.advance(); // consume .
+                        let tok = self.advance();
+                        path.push('.');
+                        path.push_str(&tok.literal);
+                    }
+                    package = Some(path);
                 }
                 TokenKind::EOF => break,
                 _ => {
@@ -106,6 +120,7 @@ impl Parser {
             imports,
             declarations,
             top_level_statements,
+            package,
         }
     }
 

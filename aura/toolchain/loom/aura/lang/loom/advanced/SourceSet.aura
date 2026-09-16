@@ -14,9 +14,9 @@ import aura.lang.std.Collections
 class SourceSet {
     val name: String
     val srcDir: String
-    var files: List<String> = mutableListOf()
-    var testDir: String = ""
-    var testFiles: List<String> = mutableListOf()
+    private var files: List<String> = mutableListOf()
+    private var testDir: String = ""
+    private var testFiles: List<String> = mutableListOf()
 
     fun SourceSet(name: String, srcDir: String) {
         this.name = name
@@ -59,7 +59,7 @@ class SourceSet {
 }
 
 class SourceSetManager {
-    var sourceSets: List<SourceSet> = mutableListOf()
+    private var sourceSets: List<SourceSet> = mutableListOf()
 
     fun SourceSetManager() {
         this.sourceSets = mutableListOf()

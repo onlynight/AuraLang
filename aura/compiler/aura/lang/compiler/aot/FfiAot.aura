@@ -39,7 +39,7 @@ object FfiAotUtils {
     }
 
     /// 子节点列表的长度。
-    fun kidsCount(list: String): Int {
+    fun ffiKidsCount(list: String): Int {
         if (list == "") {
             return 0
         }
@@ -48,7 +48,7 @@ object FfiAotUtils {
     }
 
     /// 取子节点列表的第 index 个 id。
-    fun kidsAt(list: String, index: Int): Int {
+    fun ffiKidsAt(list: String, index: Int): Int {
         val parts: List<String> = list.split(",")
         if (index < 0 || index >= parts.size) {
             return -1
@@ -57,7 +57,7 @@ object FfiAotUtils {
     }
 
     /// 字符串切片。
-    fun aotSlice(s: String, start: Int, len: Int): String {
+    fun ffiSlice(s: String, start: Int, len: Int): String {
         if (start < 0 || start >= s.length) {
             return ""
         } else if (start + len > s.length) {
@@ -68,7 +68,7 @@ object FfiAotUtils {
     }
 
     /// CSV 分割计数。
-    fun aotCsvCount(csv: String): Int {
+    fun ffiCsvCount(csv: String): Int {
         if (csv == "") {
             return 0
         }
@@ -77,7 +77,7 @@ object FfiAotUtils {
     }
 
     /// 取 CSV 第 index 项。
-    fun aotFieldAt(csv: String, index: Int, sep: String): String {
+    fun ffiFieldAt(csv: String, index: Int, sep: String): String {
         val parts: List<String> = csv.split(sep)
         if (index < 0 || index >= parts.size) {
             return ""
@@ -142,10 +142,10 @@ class FfiAotEmitter {
         val kids: String = ast.kidsOf(id)
         
         // 遍历子节点，发射每个方法
-        var kCount: Int = FfiAotUtils.kidsCount(kids)
+        var kCount: Int = FfiAotUtils.ffiKidsCount(kids)
         var j: Int = 0
         while (j < kCount) {
-            val kidId: Int = FfiAotUtils.kidsAt(kids, j)
+            val kidId: Int = FfiAotUtils.ffiKidsAt(kids, j)
             val kidKind: String = ast.kindOf(kidId)
             
             if (kidKind == "NativeMethod") {
@@ -163,18 +163,18 @@ class FfiAotEmitter {
     /// 发射 native method 节点。
     fun emitNativeMethod(ast: Ast, id: Int) {
         val kids: String = ast.kidsOf(id)
-        var kCount: Int = FfiAotUtils.kidsCount(kids)
+        var kCount: Int = FfiAotUtils.ffiKidsCount(kids)
         
         if (kCount < 2) {
             return
         }
         
         // 第一个子节点是 NativeInfo（包含元数据）
-        val infoId: Int = FfiAotUtils.kidsAt(kids, 0)
+        val infoId: Int = FfiAotUtils.ffiKidsAt(kids, 0)
         val metadata: String = ast.textOf(infoId)
         
         // 第二个子节点是 Function
-        val funcId: Int = FfiAotUtils.kidsAt(kids, 1)
+        val funcId: Int = FfiAotUtils.ffiKidsAt(kids, 1)
         val funcKind: String = ast.kindOf(funcId)
         
         if (funcKind != "Function") {
@@ -192,14 +192,14 @@ class FfiAotEmitter {
         // 根据 metadata 类型生成不同的 IR
         if (metadata.startsWith("native|")) {
             // syscall: native(SYS_READ)
-            val sysNum: String = FfiAotUtils.aotSlice(metadata, 7, metadata.length - 7)
+            val sysNum: String = FfiAotUtils.ffiSlice(metadata, 7, metadata.length - 7)
             this.emitSyscall(funcName, sysNum, retTy, paramsCsv)
         } else if (metadata == "native") {
             // builtin memory op: native
             this.emitBuiltin(funcName, retTy, paramsCsv)
         } else if (metadata.startsWith("asm|")) {
             // inline asm: native(asm = "...")
-            val asmCode: String = FfiAotUtils.aotSlice(metadata, 4, metadata.length - 4)
+            val asmCode: String = FfiAotUtils.ffiSlice(metadata, 4, metadata.length - 4)
             this.emitAsm(funcName, asmCode, retTy, paramsCsv)
         }
     }
@@ -207,14 +207,14 @@ class FfiAotEmitter {
     /// 发射 export method 节点。
     fun emitExportMethod(ast: Ast, id: Int) {
         val kids: String = ast.kidsOf(id)
-        var kCount: Int = FfiAotUtils.kidsCount(kids)
+        var kCount: Int = FfiAotUtils.ffiKidsCount(kids)
         
         if (kCount < 1) {
             return
         }
         
         // 第一个子节点是 Function
-        val funcId: Int = FfiAotUtils.kidsAt(kids, 0)
+        val funcId: Int = FfiAotUtils.ffiKidsAt(kids, 0)
         val funcKind: String = ast.kindOf(funcId)
         
         if (funcKind != "Function") {
@@ -237,17 +237,17 @@ class FfiAotEmitter {
     /// 生成 declare 语句，库路径从父 ExternObject 的 loadLibrary() 获取。
     fun emitAotMethod(ast: Ast, id: Int) {
         val kids: String = ast.kidsOf(id)
-        var kCount: Int = FfiAotUtils.kidsCount(kids)
+        var kCount: Int = FfiAotUtils.ffiKidsCount(kids)
         
         if (kCount < 2) {
             return
         }
         
         // 第一个子节点是 AotInfo（元数据标记）
-        val infoId: Int = FfiAotUtils.kidsAt(kids, 0)
+        val infoId: Int = FfiAotUtils.ffiKidsAt(kids, 0)
         
         // 第二个子节点是 Function
-        val funcId: Int = FfiAotUtils.kidsAt(kids, 1)
+        val funcId: Int = FfiAotUtils.ffiKidsAt(kids, 1)
         val funcKind: String = ast.kindOf(funcId)
         
         if (funcKind != "Function") {
@@ -275,13 +275,13 @@ class FfiAotEmitter {
         var paramsStr: String = "void"
         if (paramsCsv != "") {
             paramsStr = ""
-            var n: Int = FfiAotUtils.aotCsvCount(paramsCsv)
+            var n: Int = FfiAotUtils.ffiCsvCount(paramsCsv)
             var i: Int = 0
             while (i < n) {
                 if (i > 0) {
                     paramsStr = paramsStr + ", "
                 }
-                paramsStr = paramsStr + this.tm.map(FfiAotUtils.aotFieldAt(paramsCsv, i, ","))
+                paramsStr = paramsStr + this.tm.map(FfiAotUtils.ffiFieldAt(paramsCsv, i, ","))
                 i = i + 1
             }
         }
@@ -294,20 +294,20 @@ class FfiAotEmitter {
     /// 提取参数类型列表（逗号分隔）。
     fun extractParamTypes(ast: Ast, funcKids: String): String {
         var paramsCsv: String = ""
-        var kCount: Int = FfiAotUtils.kidsCount(funcKids)
+        var kCount: Int = FfiAotUtils.ffiKidsCount(funcKids)
         
         var j: Int = 0
         while (j < kCount) {
-            val kidId: Int = FfiAotUtils.kidsAt(funcKids, j)
+            val kidId: Int = FfiAotUtils.ffiKidsAt(funcKids, j)
             val kidKind: String = ast.kindOf(kidId)
             
             if (kidKind == "Params") {
                 // 提取参数列表
                 val paramKids: String = ast.kidsOf(kidId)
-                var pCount: Int = FfiAotUtils.kidsCount(paramKids)
+                var pCount: Int = FfiAotUtils.ffiKidsCount(paramKids)
                 var p: Int = 0
                 while (p < pCount) {
-                    val pId: Int = FfiAotUtils.kidsAt(paramKids, p)
+                    val pId: Int = FfiAotUtils.ffiKidsAt(paramKids, p)
                     if (ast.kindOf(pId) == "Param") {
                         val pTy: String = ast.tyOf(pId)
                         if (paramsCsv != "") {
@@ -344,13 +344,13 @@ class FfiAotEmitter {
         var paramsStr: String = "i64"
         if (params != "") {
             paramsStr = ""
-            var n: Int = FfiAotUtils.aotCsvCount(params)
+            var n: Int = FfiAotUtils.ffiCsvCount(params)
             var i: Int = 0
             while (i < n) {
                 if (i > 0) {
                     paramsStr = paramsStr + ", "
                 }
-                paramsStr = paramsStr + this.tm.map(FfiAotUtils.aotFieldAt(params, i, ","))
+                paramsStr = paramsStr + this.tm.map(FfiAotUtils.ffiFieldAt(params, i, ","))
                 i = i + 1
             }
         }
@@ -450,13 +450,13 @@ class FfiAotEmitter {
         var paramsStr: String = "i64"
         if (params != "") {
             paramsStr = ""
-            var n: Int = FfiAotUtils.aotCsvCount(params)
+            var n: Int = FfiAotUtils.ffiCsvCount(params)
             var i: Int = 0
             while (i < n) {
                 if (i > 0) {
                     paramsStr = paramsStr + ", "
                 }
-                paramsStr = paramsStr + this.tm.map(FfiAotUtils.aotFieldAt(params, i, ","))
+                paramsStr = paramsStr + this.tm.map(FfiAotUtils.ffiFieldAt(params, i, ","))
                 i = i + 1
             }
         }
@@ -490,13 +490,13 @@ class FfiAotEmitter {
         var paramsStr: String = "void"
         if (params != "") {
             paramsStr = ""
-            var n: Int = FfiAotUtils.aotCsvCount(params)
+            var n: Int = FfiAotUtils.ffiCsvCount(params)
             var i: Int = 0
             while (i < n) {
                 if (i > 0) {
                     paramsStr = paramsStr + ", "
                 }
-                paramsStr = paramsStr + this.tm.map(FfiAotUtils.aotFieldAt(params, i, ","))
+                paramsStr = paramsStr + this.tm.map(FfiAotUtils.ffiFieldAt(params, i, ","))
                 i = i + 1
             }
         }

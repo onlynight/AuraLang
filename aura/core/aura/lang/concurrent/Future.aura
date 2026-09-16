@@ -28,8 +28,7 @@ package aura.lang.concurrent
 // @since 0.6
 import aura.lang.native.Memory
 import aura.lang.concurrent.Thread
-
-internal object Future {
+object Future {
 
     /// 异步执行一个线程任务，返回 Future 句柄
     ///

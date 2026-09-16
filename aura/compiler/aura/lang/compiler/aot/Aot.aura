@@ -162,17 +162,12 @@ object AotUtils {
             r.cffiExit = Process.run(cffiCmd)
         }
 
-        // 4.5 clang：编译 syscall 分发库（提供 aura_syscall_dispatch /
-        //     aura_memory_alloc / aura_memory_free / aura_cpu_* 等符号，
-        //     供 `@native(...)` 包装器解析；与 Rust 侧 linker.rs 的
-        //     `compile_std_cffi` 一致，两个 C 源都要编译并链接）
-        val sysSrc: String = "compiler/src/std/cffi/aura_syscalls.c"
-        var sysObj: String = ""
-        if (FileSystem.exists(sysSrc)) {
-            sysObj = outDir + "/aura_syscalls.obj"
-            val sysCmd: String = clang + " -c " + sysSrc + " -o " + sysObj + " -O1"
-            r.syscallsExit = Process.run(sysCmd)
-        }
+        // 4.5 clang：编译 syscall 分发库（Phase A 后不再需要，已移除）。
+        //     Phase A 改造：@native 包装器不再依赖 aura_syscalls.c 提供的符号
+        //    （aura_syscall_dispatch / aura_memory_alloc / aura_cpu_*），
+        //     改为直接生成 LLVM IR（内联 syscall/asm/fence/atomicrmw）。
+        //     Phase C：移除本编译步骤。仅保留 aura_std_cffi.c（供 preludeTable 符号使用，
+        //     Phase B 完成后 aura_std_cffi.c 也将移除）。
 
         // 5. clang：目标文件 + std 运行库 → 可执行文件。
         //    与 Rust 侧 `link_to_executable` 一致：链接宿主目标**不加** `-target`
@@ -182,9 +177,6 @@ object AotUtils {
         if (cffiObj != "") {
             clangCmd = clangCmd + " " + cffiObj
         }
-        if (sysObj != "") {
-            clangCmd = clangCmd + " " + sysObj
-        }
         clangCmd = clangCmd + " -o " + exePath + " " + optFlag
         // Windows 目标：COFF 对象经 lld-link 链接时需要显式 `subsystem`
         // （否则报 `lld-link: error: subsystem must be defined`）。
@@ -193,8 +185,7 @@ object AotUtils {
         }
         r.clangExit = Process.run(clangCmd)
 
-        r.ok = (r.llcExit == 0) && (r.cffiExit == 0) && (r.syscallsExit == 0)
-            && (r.clangExit == 0)
+        r.ok = (r.llcExit == 0) && (r.cffiExit == 0) && (r.clangExit == 0)
         return r
     }
 
@@ -421,13 +412,6 @@ class AotExeResult {
 
     /// std C 运行库（aura_std_cffi.c）编译退出码。
     var cffiExit: Int = 0
-
-    /// syscall 分发 C 库（aura_syscalls.c）编译退出码。
-    ///
-    /// Phase C.2：`@native(...)` 包装器（Emit.aura::emitNativeWrapper）会调用
-    /// `aura_syscall_dispatch` / `aura_memory_*` / `aura_cpu_*`，这些符号由
-    /// `aura_syscalls.c` 提供，故必须与 `aura_std_cffi.c` 一并编译链接。
-    var syscallsExit: Int = 0
 
     /// 目标三元组。
     var target: String = ""

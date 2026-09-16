@@ -38,6 +38,11 @@ pub fn register_prelude(reg: &mut NativeRegistry) {
     // 仅在 stderr 输出诊断，避免把错误藏起来。完整异常传播见 README 待办。
     reg.register("__throw", nat_throw);
 
+    // `__new_exception(type_name, message)` — 异常类构造器的原生降级目标。
+    // 在 VM 中创建异常对象（堆分配 + 字段赋值），返回堆引用。
+    // HIR 将 `Exception("msg")` 降级为 `__new_exception("Exception", "msg")`。
+    reg.register("__new_exception", nat_new_exception);
+
     // `Process.exit` / `Process.exitProcess` 的短名别名。
     // 单例对象方法的运行时名解析为 `Process.exit` 形式，而注册表只有
     // `aura.lang.std.Process.exit`；补别名可让 Aura 代码无需 import 即可退出。
@@ -61,6 +66,27 @@ fn nat_throw(args: &[Value]) -> Value {
         v
     );
     Value::Null
+}
+
+/// `__new_exception(type_name, message)` — 异常类构造器的原生降级目标。
+///
+/// **解释器路径不会走到这里**：`Vm::do_call_native` 在原生派发前拦截 `__new_exception`
+/// 并调用 `Vm::create_exception_object()` 创建异常对象。此处仅为 JIT / AOT 直接调用
+/// 原生函数的场景保留一个安全的兜底实现。
+fn nat_new_exception(args: &[Value]) -> Value {
+    let type_name = match args.first() {
+        Some(Value::Str(s)) => s.to_string(),
+        _ => "Exception".to_string(),
+    };
+    let msg = match args.get(1) {
+        Some(Value::Str(s)) => s.to_string(),
+        _ => String::new(),
+    };
+    eprintln!(
+        "[vm] __new_exception({}, {}): not intercepted, returning string",
+        type_name, msg
+    );
+    Value::Str(std::rc::Rc::from(msg))
 }
 
 pub fn register(reg: &mut NativeRegistry) {

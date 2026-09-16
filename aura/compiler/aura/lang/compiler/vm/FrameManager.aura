@@ -27,12 +27,12 @@ import aura.lang.collection.HashMap
 
 /// 栈帧（结构化对象，替代旧版字符串编码）。
 class Frame {
-    var id: Int = 0
-    var funcName: String = ""
-    var ip: Int = 0
-    var arity: Int = 0
-    var localsCount: Int = 0
-    var upvalues: String = ""
+    private var id: Int = 0
+    private var funcName: String = ""
+    private var ip: Int = 0
+    private var arity: Int = 0
+    private var localsCount: Int = 0
+    private var upvalues: String = ""
 
     init() {
         this.id = 0
@@ -47,38 +47,37 @@ class Frame {
 /// 增强栈帧管理器。
 class FrameManager {
 
-    /// 默认栈大小。
-    var stackSize: Int = 64
+    private var stackSize: Int = 64
 
     /// 默认局部变量槽数量。
-    var localsSize: Int = 32
+    private var localsSize: Int = 32
 
     /// 最大栈深度。
-    var maxStackDepth: Int = 256
+    private var maxStackDepth: Int = 256
 
     /// 最大调用深度。
-    var maxCallDepth: Int = 64
+    private var maxCallDepth: Int = 64
 
     /// 帧链表（ArrayList 实现，O(1) 访问）。
-    var frames: ArrayList<Frame> = ArrayList<Frame>()
+    private var frames: ArrayList<Frame> = ArrayList<Frame>()
 
     /// 栈内存（HashMap 实现，O(1) get/set）。
-    var stackMemory: HashMap<Int, String> = HashMap<Int, String>()
+    private var stackMemory: HashMap<Int, String> = HashMap<Int, String>()
 
     /// 帧总数。
-    var frameCount: Int = 0
+    private var frameCount: Int = 0
 
     /// 当前帧计数（调用深度）。
-    var callDepth: Int = 0
+    private var callDepth: Int = 0
 
     /// 下一个帧 id。
-    var nextFrameId: Int = 0
+    private var nextFrameId: Int = 0
 
     /// 栈溢出标志。
-    var stackOverflow: Boolean = false
+    private var stackOverflow: Boolean = false
 
     /// 栈分配总量（字节）。
-    var totalAllocated: Int = 0
+    private var totalAllocated: Int = 0
 
     init() {
         this.stackSize = 64

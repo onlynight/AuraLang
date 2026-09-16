@@ -42,7 +42,7 @@ object StringBuilder {
 
     /// 确保缓冲区有足够的剩余空间（至少 extra 字节）。
     /// 返回新句柄（可能重新分配）。
-    fun ensureCapacity(handle: Long, extra: Long): Long {
+    private fun ensureCapacity(handle: Long, extra: Long): Long {
         if (handle == 0) { return 0 }
         val used: Long = Memory.read64(handle + 0)
         val capacity: Long = Memory.read64(handle + 8)
@@ -65,7 +65,7 @@ object StringBuilder {
     }
 
     /// 获取当前使用长度。
-    fun getLength(handle: Long): Long {
+    private fun getLength(handle: Long): Long {
         if (handle == 0) { return 0 }
         return Memory.read64(handle + 0)
     }

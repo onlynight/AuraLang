@@ -18,7 +18,7 @@ package aura.lang.concurrent
 // - Actor 生命周期使用回调管理
 //
 // @since 0.5
-internal object Actor {
+object Actor {
 
     // ── 内部状态 ──
 

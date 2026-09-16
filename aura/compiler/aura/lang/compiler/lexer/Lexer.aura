@@ -32,7 +32,7 @@ object LexerUtils {
     // ── 字符分类辅助 ──
 
     /// 字符是否在给定字符集合中（空串恒为 false）。
-    fun lxIn(set: String, ch: String): Boolean {
+    private fun lxIn(set: String, ch: String): Boolean {
         if (ch == "") {
             return false
         }
@@ -233,7 +233,7 @@ class Lexer {
     /// 前瞻第 k 个字符（k = 0 为当前字符）；越界返回空串。
     ///
     /// 直接使用字符串索引 `src[i]`（VM 已支持，越界返回 null，此处显式拦为 `""`）。
-    fun peek(k: Int): String {
+    private fun peek(k: Int): String {
         val i: Int = this.pos + k
         if (i >= this.n) {
             return ""
@@ -243,7 +243,7 @@ class Lexer {
     }
 
     /// 前进一个字符。
-    fun advance() {
+    private fun advance() {
         if (this.pos >= this.n) {
             return
         }
@@ -257,14 +257,14 @@ class Lexer {
     }
 
     /// 标记当前 token 的起始位置。
-    fun markStart() {
+    private fun markStart() {
         this.tStart = this.pos
         this.tStartLine = this.line
         this.tStartCol = this.col
     }
 
     /// 记录一个 token 到输出流（纯列表追加，无字符串构造，摊还 O(1)）。
-    fun emit(kind: String, literal: String) {
+    private fun emit(kind: String, literal: String) {
         this.kindList.add(kind)
         this.litList.add(literal)
         this.spanStart.add(this.tStart)
@@ -278,7 +278,7 @@ class Lexer {
     // ── 空白与注释 ──
 
     /// 跳过空白与普通注释；遇到文档注释时停下（交由主循环产出 DocComment）。
-    fun skipTrivia() {
+    private fun skipTrivia() {
         while (this.pos < this.n) {
             val ch: String = this.peek(0)
 
@@ -329,7 +329,7 @@ class Lexer {
     }
 
     /// 单行文档注释 `/// ...`（消费到行尾）。
-    fun scanDocLine() {
+    private fun scanDocLine() {
         this.advance()
         this.advance()
         this.advance()
@@ -341,7 +341,7 @@ class Lexer {
     }
 
     /// 块文档注释 `/** ... */`。
-    fun scanDocBlock() {
+    private fun scanDocBlock() {
         this.advance()
         this.advance()
         this.advance()
@@ -363,7 +363,7 @@ class Lexer {
     // ── 标识符 / 关键字 ──
 
     /// 取源串 `[start, end)` 的一次性切片（避免逐字符 `+` 的平方级分配）。
-    fun sliceOf(start: Int, end: Int): String {
+    private fun sliceOf(start: Int, end: Int): String {
         if (end <= start) {
             return ""
         }
@@ -375,7 +375,7 @@ class Lexer {
     /// 旧实现为 `lit = lit + peek(0)`：长度为 L 的 token 要分配 L 次、
     /// 累计复制 L(L+1)/2 字节。AOT 无 GC，这些中间串全部永久驻留 ——
     /// 实测**词法阶段 42MB** 里的主要部分即来自此。
-    fun scanIdentifier() {
+    private fun scanIdentifier() {
         val start: Int = this.pos
         while (this.pos < this.n && LexerUtils.lxIsIdentPart(this.peek(0))) {
             this.advance()
@@ -385,14 +385,14 @@ class Lexer {
     }
 
     /// 标识符 → 关键字 TokenKind（零分配；非关键字返回 `"Ident"`）。
-    fun lxKwKind(word: String): String {
+    private fun lxKwKind(word: String): String {
         return keywordLookup(this.kwTable, word)
     }
 
     // ── 数字 ──
 
     /// 消费可选数值后缀（`L l f F d D u U`）。
-    fun takeSuffix(buf: String): String {
+    private fun takeSuffix(buf: String): String {
         val ch: String = this.peek(0)
         if (ch == "L" || ch == "l" || ch == "f" || ch == "F"
             || ch == "d" || ch == "D" || ch == "u" || ch == "U") {
@@ -403,7 +403,7 @@ class Lexer {
     }
 
     /// 扫描数字字面量（十进制 / 十六进制 / 二进制 / 小数 / 科学计数）。
-    fun scanNumber() {
+    private fun scanNumber() {
         var buf: String = ""
         var isFloat: Boolean = false
 
@@ -486,7 +486,7 @@ class Lexer {
     /// `StringLiteral(前缀)` + `StringInterpStart("$var" | "${expr}")` +
     /// `StringLiteral(中段)` + ... + `StringLiteral(尾部)`，
     /// 解析器据此重建 `Expr::StrInterp`。
-    fun scanString() {
+    private fun scanString() {
         this.advance() // 开引号
         var buf: String = ""
         var hasInterp: Boolean = false
@@ -559,7 +559,7 @@ class Lexer {
     }
 
     /// 原始（多行）字符串 `"""..."""`。
-    fun scanRawString() {
+    private fun scanRawString() {
         this.advance()
         this.advance()
         this.advance()
@@ -582,7 +582,7 @@ class Lexer {
     }
 
     /// 字符字面量 `'A'`。
-    fun scanChar() {
+    private fun scanChar() {
         this.advance() // 开单引号
         var buf: String = ""
         if (this.pos < this.n) {
@@ -602,7 +602,7 @@ class Lexer {
     }
 
     /// 转义字符 → 实际字符（与 Rust 一致；非法转义原样保留）。
-    fun escapeChar(esc: String): String {
+    private fun escapeChar(esc: String): String {
         if (esc == "n") { return "\n" }
         if (esc == "t") { return "\t" }
         if (esc == "r") { return "\r" }
@@ -615,7 +615,7 @@ class Lexer {
 
     // ── 运算符 / 分隔符 ──
 
-    fun scanColon() {
+    private fun scanColon() {
         this.advance()
         if (this.peek(0) == ":") {
             this.advance()
@@ -630,7 +630,7 @@ class Lexer {
         this.emit("Colon", ":")
     }
 
-    fun scanDot() {
+    private fun scanDot() {
         this.advance()
         if (this.peek(0) == ".") {
             this.advance()
@@ -652,7 +652,7 @@ class Lexer {
         this.emit("Dot", ".")
     }
 
-    fun scanQuestion() {
+    private fun scanQuestion() {
         this.advance()
         if (this.peek(0) == "?") {
             this.advance()
@@ -662,7 +662,7 @@ class Lexer {
         this.emit("QuestionMark", "?")
     }
 
-    fun scanPipe() {
+    private fun scanPipe() {
         this.advance()
         if (this.peek(0) == "|") {
             this.advance()
@@ -672,7 +672,7 @@ class Lexer {
         this.emit("Pipe", "|")
     }
 
-    fun scanAmpersand() {
+    private fun scanAmpersand() {
         this.advance()
         if (this.peek(0) == "&") {
             this.advance()
@@ -682,7 +682,7 @@ class Lexer {
         this.emit("Ampersand", "&")
     }
 
-    fun scanPlus() {
+    private fun scanPlus() {
         this.advance()
         val c1: String = this.peek(0)
         if (c1 == "+") {
@@ -698,7 +698,7 @@ class Lexer {
         this.emit("Plus", "+")
     }
 
-    fun scanMinus() {
+    private fun scanMinus() {
         this.advance()
         val c1: String = this.peek(0)
         if (c1 == "-") {
@@ -719,7 +719,7 @@ class Lexer {
         this.emit("Minus", "-")
     }
 
-    fun scanStar() {
+    private fun scanStar() {
         this.advance()
         if (this.peek(0) == "=") {
             this.advance()
@@ -729,7 +729,7 @@ class Lexer {
         this.emit("Star", "*")
     }
 
-    fun scanSlash() {
+    private fun scanSlash() {
         this.advance()
         if (this.peek(0) == "=") {
             this.advance()
@@ -739,7 +739,7 @@ class Lexer {
         this.emit("Slash", "/")
     }
 
-    fun scanEqual() {
+    private fun scanEqual() {
         this.advance()
         val c1: String = this.peek(0)
         if (c1 == "=") {
@@ -755,7 +755,7 @@ class Lexer {
         this.emit("Assign", "=")
     }
 
-    fun scanBang() {
+    private fun scanBang() {
         this.advance()
         val c1: String = this.peek(0)
         if (c1 == "=") {
@@ -771,7 +771,7 @@ class Lexer {
         this.emit("Bang", "!")
     }
 
-    fun scanLt() {
+    private fun scanLt() {
         this.advance()
         val c1: String = this.peek(0)
         if (c1 == "=") {
@@ -787,7 +787,7 @@ class Lexer {
         this.emit("Lt", "<")
     }
 
-    fun scanGt() {
+    private fun scanGt() {
         this.advance()
         val c1: String = this.peek(0)
         if (c1 == "=") {
@@ -808,7 +808,7 @@ class Lexer {
         this.emit("Gt", ">")
     }
 
-    fun scanPercent() {
+    private fun scanPercent() {
         this.advance()
         if (this.peek(0) == "=") {
             this.advance()
@@ -819,7 +819,7 @@ class Lexer {
     }
 
     /// 扫描单个字符型分隔符（`(` `)` `{` `}` `[` `]` `,` `;` `@` `#` `^`）。
-    fun scanDelimiter(kind: String, literal: String) {
+    private fun scanDelimiter(kind: String, literal: String) {
         this.advance()
         this.emit(kind, literal)
     }

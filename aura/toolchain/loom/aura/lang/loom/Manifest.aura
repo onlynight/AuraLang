@@ -167,7 +167,7 @@ class Manifest {
         return parseManifest(content)
     }
 
-    fun parseManifest(content: String): Int {
+    private fun parseManifest(content: String): Int {
         val lines: List<String> = String.splitLines(content)
         var i: Int = 0
         while (i < lines.size) {
@@ -230,7 +230,7 @@ class Manifest {
         return LoomError.OK
     }
 
-    fun validate(): Int {
+    private fun validate(): Int {
         if (name.length == 0) { return LoomError.INVALID_CONFIG }
         if (version.length == 0) { return LoomError.INVALID_CONFIG }
         return LoomError.OK

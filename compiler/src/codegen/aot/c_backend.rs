@@ -221,6 +221,7 @@ fn emit_c_stmt(s: &mut String, stmt: &HirStmt, indent: usize) {
         HirStmt::Try {
             body,
             catch_var: _,
+            catch_type: _,
             catch_body: _,
             finally,
         } => {

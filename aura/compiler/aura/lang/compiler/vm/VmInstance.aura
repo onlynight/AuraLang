@@ -32,20 +32,19 @@ import aura.lang.concurrent.Coroutine
 
 /// VM 实例配置。
 class VmConfig {
-    /// 最大指令数。
-    var maxInstructions: Int = 1000000
+    private var maxInstructions: Int = 1000000
 
     /// JIT 热点阈值。
-    var hotspotThreshold: Int = 10000
+    private var hotspotThreshold: Int = 10000
 
     /// 是否启用 JIT。
-    var jitEnabled: Boolean = true
+    private var jitEnabled: Boolean = true
 
     /// GC 触发阈值（分配数）。
-    var gcThreshold: Int = 1000
+    private var gcThreshold: Int = 1000
 
     /// 最大协程数。
-    var maxCoroutines: Int = 1024
+    private var maxCoroutines: Int = 1024
 
     init() {
         this.maxInstructions = 1000000
@@ -62,38 +61,37 @@ class VmConfig {
 /// 随 VM 生命周期自动回收。禁止使用 object 单例承载可变状态。
 class VmInstance {
 
-    /// 解释器。
-    var interpreter: VmRunner
+    private var interpreter: VmRunner
 
     /// 引用计数堆（ARC）。
-    var heap: ArcHeap
+    private var heap: ArcHeap
 
     /// 标记-清除堆（GC）。
-    var gc: GcHeap
+    private var gc: GcHeap
 
     /// JIT 桥接。
-    var jitBridge: VmJitBridge
+    private var jitBridge: VmJitBridge
 
     /// 协程调度器。
-    var coroutines: Coroutine
+    private var coroutines: Coroutine
 
     /// 原生函数注册表。
-    var natives: HashMap<String, Any>
+    private var natives: HashMap<String, Any>
 
     /// VM 配置。
-    var config: VmConfig
+    private var config: VmConfig
 
     /// 运行状态。
-    var running: Boolean = false
+    private var running: Boolean = false
 
     /// 错误信息。
-    var error: String = ""
+    private var error: String = ""
 
     /// 返回值。
-    var returnValue: Any = null
+    private var returnValue: Any = null
 
     /// 初始化次数统计。
-    var initCount: Int = 0
+    private var initCount: Int = 0
 
     init() {
         this.config = VmConfig()

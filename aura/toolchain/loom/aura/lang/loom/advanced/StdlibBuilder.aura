@@ -14,7 +14,7 @@ import aura.lang.std.Collections
 class StdlibBuilder {
     val projectDir: String
     val outDir: String
-    var verbose: Boolean = false
+    private var verbose: Boolean = false
 
     fun StdlibBuilder(projectDir: String, outDir: String) {
         this.projectDir = projectDir

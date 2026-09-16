@@ -36,7 +36,9 @@ object SyscallsUtils {
     val SYS_MMAP: Int = 9
     val SYS_MUNMAP: Int = 10
     val SYS_ACCESS: Int = 21
-    val SYS_UNLINK: Int = 39
+    val SYS_UNLINK: Int = 87
+    val SYS_MKDIR: Int = 39
+    val SYS_RMDIR: Int = 80
     val SYS_EXECVE: Int = 59
     val SYS_EXIT_GROUP: Int = 60
     val SYS_WAIT4: Int = 61

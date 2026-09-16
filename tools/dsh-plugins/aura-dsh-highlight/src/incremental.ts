@@ -75,7 +75,12 @@ export function resetIncrementalState(state: IncrementalState): void {
 function isAppendOnly(code: string, state: IncrementalState): boolean {
   if (code.length < state.length) return false;
   if (state.tail === '') return true;
-  const from = Math.max(0, state.length - state.tail.length);
+  // The fingerprint is anchored to the cursor, so it is always a suffix of the
+  // consumed prefix. A negative origin would mean the fingerprint overran the
+  // cursor, which is a corrupt state: treat it as a rewrite rather than trying
+  // to compare it, or every frame resets and the stream stalls forever.
+  const from = state.length - state.tail.length;
+  if (from < 0) return false;
   return code.startsWith(state.tail, from);
 }
 
@@ -159,7 +164,12 @@ export function tokenizeNextChunk(
   state.grammar =
     result.grammarState ?? highlighter.getLastGrammarState(result.tokens);
   state.length = end;
-  state.tail = code.slice(Math.max(0, end - FINGERPRINT_CHARS));
+  // The fingerprint is the tail of the *consumed* prefix only. Slicing without
+  // an end bound would run past the cursor to the end of the document, so the
+  // next frame's origin lands negative, `isAppendOnly` reports a rewrite, and
+  // the state resets to zero every frame - the file then never scrolls past the
+  // first chunk and the bottom of the preview stays cut off.
+  state.tail = code.slice(Math.max(0, end - FINGERPRINT_CHARS), end);
 
   return finish(state, code);
 }

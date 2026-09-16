@@ -17,11 +17,11 @@ import aura.lang.std.FileSystem
 // ═══════════════════════════════════════════════════════════════
 
 class Watcher {
-    var watching: Boolean = false
-    var watchPaths: List<String> = mutableListOf()
-    var callback: Int = 0  // callback id
-    var lastCheckTime: Long = 0
-    var pollInterval: Int = 1000  // ms
+    private var watching: Boolean = false
+    private var watchPaths: List<String> = mutableListOf()
+    private var callback: Int = 0  // callback id
+    private var lastCheckTime: Long = 0
+    private var pollInterval: Int = 1000  // ms
 
     fun Watcher() {
         this.watchPaths = mutableListOf()

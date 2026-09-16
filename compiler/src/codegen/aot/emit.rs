@@ -338,7 +338,7 @@ impl EmitCtx {
             if !self.declared_structs.insert(llvm_name.clone()) {
                 continue;
             }
-            let fields: Vec<String> = st
+            let mut fields: Vec<String> = st
                 .fields
                 .iter()
                 .map(|(_, ty)| {
@@ -351,6 +351,11 @@ impl EmitCtx {
                     }
                 })
                 .collect();
+            // LLVM 不允许空结构体（GEP 报 `base element must be sized`）；
+            // 空类（仅有构造函数、无自有字段）补一个 i64 占位字段。
+            if fields.is_empty() {
+                fields.push("i64".to_string());
+            }
             s.push_str(&format!("{} = type {{{}}}\n", llvm_name, fields.join(", ")));
         }
         // P3.2: Enum → tagged union 结构体（tag: i32, 后续字段为关联值）
@@ -489,7 +494,7 @@ impl EmitCtx {
         s.push_str("declare void @aura_cpu_mem_fence()\n");
         s.push_str("declare i64 @aura_cpu_atomic_add(i64 %arg.0, i64 %arg.1)\n");
         // Phase D: 异常值全局变量（setjmp/longjmp 桥用）— 在 aura_syscalls.c 中定义
-        s.push_str("declare i8* @aura_exception_value()\n");
+        s.push_str("@aura_exception_value = external global i8*\n");
         // LLVM 内建函数声明（Memory.copy / Memory.set / Memory.compare 用）
         s.push_str("declare void @llvm.memcpy(i8*, i8*, i64, i1)\n");
         s.push_str("declare void @llvm.memset(i8*, i8, i64, i1)\n");
@@ -1177,7 +1182,27 @@ fn emit_function(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotErr
     ctx.current_ret_ty = ret_str.clone();
 
     // 方法名形如 `Lexer.peek` → 当前类 `Lexer`（供 `this`/`self` 成员解析）
-    ctx.current_class = func.name.rsplit_once('.').map(|(cls, _)| cls.to_string());
+    //
+    // 注意：访问器合成函数名为 `Class.prop.get` / `Class.prop.set`（三段），
+    // `rsplit_once` 会得到 `Class.prop`（不是类名）→ `self` 的字段解析失败，
+    // 退化成「不透明的 i8* + 偏移 0」加载（读到 vptr 的低 32 位），并把它当
+    // 集合句柄传给 `Collections.count` → 非法 IR。故三段以上取**首段**，
+    // 首段不是已知类时再退回倒数第二段。
+    ctx.current_class = {
+        let parts: Vec<&str> = func.name.split('.').collect();
+        match parts.len() {
+            0 | 1 => None,
+            2 => Some(parts[0].to_string()),
+            _ => {
+                let first = parts[0].to_string();
+                if ctx.class_field_types.contains_key(&first) {
+                    Some(first)
+                } else {
+                    parts.get(parts.len() - 2).map(|s| s.to_string())
+                }
+            }
+        }
+    };
 
     // 参数类型
     let params: Vec<(String, String)> = if is_entry_main {
@@ -1475,9 +1500,11 @@ fn emit_statement(
         HirStmt::Try {
             body,
             catch_var,
+            catch_type: _,
             catch_body,
             finally,
         } => {
+            eprintln!("DEBUG: emitTry called, catch_var={:?}", catch_var);
             // Phase D: setjmp/longjmp 异常桥
             // 1. 分配 jmp_buf。**必须 16 x i64（128 字节）**：
             //    Linux x86_64 的 `jmp_buf` 为 14 个 i64，但 Windows/MSVC x64 的
@@ -1527,10 +1554,7 @@ fn emit_statement(
                 // 加载异常值到 catch 变量
                 let exc_val = ctx.fresh_var();
                 let cur2 = blocks.last_mut();
-                cur2.body.push(format!(
-                    "{} = load i8*, i8** @aura_exception_value",
-                    exc_val
-                ));
+                cur2.body.push(format!("{} = load i8*, i8* @aura_exception_value", exc_val));
                 ctx.declare_var(var_name, exc_val.clone(), "i8*".to_string());
             }
             emit_block(ctx, blocks, catch_body)?;
@@ -3166,8 +3190,14 @@ fn emit_binary(
         }
         HirBinOp::And | HirBinOp::Or => {
             let op = if *op == HirBinOp::And { "and" } else { "or" };
+            // 两侧先规整到 `i1`：本函数开头的「整型统一到较宽类型」会把 `i1`
+            // （比较结果）`zext` 成 `i32`，而本分支此前硬编码 `i1` → 生成非法 IR
+            // （`or i1 0, %var` 其中 `%var` 为 i32，llc: `defined with type 'i32'
+            // but expected 'i1'`）。逐操作数按实际类型补 `icmp/fcmp … , 0`。
+            let l_i1 = emit_bool_convert(ctx, blocks, &l_ir, &l_ty);
+            let r_i1 = emit_bool_convert(ctx, blocks, &r_ir, &r_ty);
             let cur = blocks.last_mut();
-            cur.body.push(format!("{} = {} i1 {}, {}", tmp, op, l_ir, r_ir));
+            cur.body.push(format!("{} = {} i1 {}, {}", tmp, op, l_i1, r_i1));
             Ok((tmp, "i1".to_string()))
         }
         HirBinOp::BitAnd | HirBinOp::BitOr | HirBinOp::BitXor => {
@@ -3210,7 +3240,7 @@ fn emit_unary(
             // 确保操作数是 i1 类型（整数 → icmp ne, 指针 → icmp ne null）
             let v_i1 = if v_ty == "i1" {
                 v_ir.clone()
-            } else if v_ty.starts_with("i") {
+            } else if is_int_ty(&v_ty) {
                 let cmp = ctx.fresh_var();
                 cur.body.push(format!("{} = icmp ne {} {}, 0", cmp, v_ty, v_ir));
                 cmp
@@ -3227,6 +3257,56 @@ fn emit_unary(
             cur.body.push(format!("{} = xor i1 {}, true", tmp, v_i1));
             Ok((tmp, "i1".to_string()))
         }
+    }
+}
+
+/// 把值规整为 `i1`（布尔）：整数 `!= 0`、浮点 `!= 0.0`、指针 `!= null`。
+///
+/// `&&` / `||` 在 LLVM 里只能是 `i1` 操作数，而 HIR 的布尔表达式在 Aura 侧
+/// 并不保证是 `i1`（比较结果是 i1，但整型统一/显式 Bool 变量可能是 i32）。
+fn emit_bool_convert(
+    ctx: &mut EmitCtx,
+    blocks: &mut FuncBlocks,
+    val_ir: &str,
+    val_ty: &str,
+) -> String {
+    if val_ty == "i1" {
+        return val_ir.to_string();
+    }
+    let tmp = ctx.fresh_var();
+    let pred = if is_int_ty(val_ty) {
+        format!("{} = icmp ne {} {}, 0", tmp, val_ty, val_ir)
+    } else if val_ty == "float" || val_ty == "double" {
+        format!("{} = fcmp one {} {}, 0.0", tmp, val_ty, val_ir)
+    } else {
+        format!("{} = icmp ne {} {}, null", tmp, val_ty, val_ir)
+    };
+    blocks.last_mut().body.push(pred);
+    tmp
+}
+
+/// 裸字符串方法名 → std 调用点符号 `aura.lang.std.String.<m>`（未命中返回 None）。
+///
+/// 与 Aura 侧 `aot/Runtime.aura::methodCallSymbol` 的字符串分支保持同名同义：
+/// HIR 在接收者为内建 `String` 时丢失类名前缀，调用点必须在此改派到真实实现
+/// （否则发射成裸名 → 未定义符号 / 返回类型丢失）。
+///
+/// 仅收录**字符串专有**且 C ABI 已由 `cffi_signature` 覆盖的方法：
+///   * `contains` / `startsWith` / `endsWith`          → i1
+///   * `toUpperCase` / `toLowerCase` / `trim` / `substring` / `charAt` /
+///     `replace` / `replaceAll` / `padStart` / `substringBefore` /
+///     `substringAfter` / `split`                      → i8*
+///   * `lastIndexOf` / `countChar`                     → i64
+/// `indexOf` / `charCodeAt` / `toInt` / `toFloat` 由 emit_call 内的既有手写分支
+/// 处理（返回类型为 Aura 语义的 i32/double），不在此重复改派。
+fn string_method_symbol(name: &str) -> Option<String> {
+    match name {
+        "contains" | "startsWith" | "endsWith" | "toUpperCase" | "toLowerCase" | "trim"
+        | "substring" | "charAt" | "replace" | "replaceAll" | "padStart" | "substringBefore"
+        | "substringAfter" | "split" | "lastIndexOf" | "countChar" => {
+            Some(format!("aura.lang.std.String.{}", name))
+        }
+        _ => None,
     }
 }
 
@@ -3383,12 +3463,13 @@ fn emit_call(
     if callee == "__throw" {
         if let Some(exc_expr) = args.first() {
             let (exc_val, exc_ty) = emit_expr_val(ctx, blocks, exc_expr)?;
+            // 异常值是 `i8*` 全局（`@aura_exception_value`）：抛出非指针（如整型字面量、
+            // 未知返回类型的调用占位 `0`）时必须先装箱/转换，
+            // 否则生成 `store i32 0, i8* @aura_exception_value` 这类非法 IR。
+            let exc_ptr = coerce_val_to_i8ptr(ctx, blocks, &exc_val, &exc_ty);
             let cur = blocks.last_mut();
             // 存储异常值到全局变量
-            cur.body.push(format!(
-                "store {} {}, i8** @aura_exception_value",
-                exc_ty, exc_val
-            ));
+            cur.body.push(format!("store i8* {}, i8* @aura_exception_value", exc_ptr));
             // 调用 longjmp 跳转到最近的 setjmp
             cur.body.push("call void @aura_longjmp(i8* null, i32 1)".to_string());
         }
@@ -3510,6 +3591,7 @@ fn emit_call(
     // 不剔除会生成 `call i8* @..._emptyList(i32 Collections)` 这类非法 IR
     //（llc: `expected value token`）。
     let mut effective_args: Vec<HirExpr> = args.to_vec();
+    let mut callee_owned: String = callee.to_string();
     if let Some(cls_seg) = callee.split('.').rev().nth(1) {
         let is_phantom = match effective_args.first() {
             Some(HirExpr::Var(v)) => {
@@ -3519,6 +3601,38 @@ fn emit_call(
         };
         if is_phantom {
             effective_args.remove(0);
+        }
+    }
+    // object 单例方法裸名调用修复：HIR 在 resolve_method_owner 返回 None 时
+    // 会把 `AstUtils.noKids()` 降级为 `noKids(AstUtils)`（裸名 + 幽灵首参）。
+    // AOT 侧把首参幽灵类名拼回 callee 并剔除首参，生成正确的 `AstUtils.noKids()`。
+    // 注意：func_ret_types 使用 HIR 原名（含点），而非 sanitizellvm 后的下划线形式。
+    if !callee_owned.contains('.')
+        && !callee_owned.contains("__")
+        && effective_args.first().is_some()
+    {
+        let phantom_recv: Option<String> = match effective_args.first() {
+            Some(HirExpr::Var(v)) if !ctx.var_scope.iter().any(|s| s.contains_key(v.as_str())) => {
+                Some(v.clone())
+            }
+            _ => None,
+        };
+        if let Some(v) = phantom_recv {
+            // v 不是作用域内变量，可能是 object 单例名 / 标准库类名
+            //（`Collections.emptyList()` 在 HIR 中降级为 `emptyList(Collections)`）。
+            // 三种候选键：std 全名（`aura.lang.std.<C>.<m>`）、点分、下划线。
+            let candidates = [
+                format!("aura.lang.std.{}.{}", v, callee_owned),
+                format!("{}.{}", v, callee_owned),
+                format!("{}_{}", v, callee_owned),
+            ];
+            for cand in candidates {
+                if ctx.func_ret_types.contains_key(&cand) {
+                    callee_owned = cand;
+                    effective_args.remove(0);
+                    break;
+                }
+            }
         }
     }
     // ── 方法解析容错（Phase C.2 自举修复）──
@@ -3531,7 +3645,6 @@ fn emit_call(
     //
     // 这里按接收者的 **Aura 类型**改回 std 调用点符号 `aura.lang.std.<Type>.<m>`
     //（仅当该方法被解析成了「首参为类指针」且类型确实对不上时才改派）。
-    let mut callee_owned: String = callee.to_string();
     if let Some((cls, meth)) = callee.rsplit_once('.') {
         // 仅当被解析到的是**程序内某个类**的方法（`cls` 是已知类）时才做校验
         let callee_is_class_method = ctx.class_field_types.contains_key(cls);
@@ -3547,6 +3660,52 @@ fn emit_call(
                     let cand = format!("aura.lang.std.{}.{}", recv_ty, meth);
                     if ctx.func_ret_types.contains_key(&cand) {
                         callee_owned = cand;
+                    }
+                }
+            }
+        }
+    }
+    // ── String 实例方法裸名兜底（自举卡点修复）──
+    //
+    // HIR 的 `resolve_method_owner` 在接收者为内建类型（String）时返回 None，
+    // 于是 `ty.endsWith("?")` 被降级为**裸名调用** `endsWith(ty, "?")`。
+    // 原样发射会生成 `call void @endsWith(...)`：符号未定义（链接期 undefined
+    // symbol）且返回类型错误（实为布尔，被当作 void 用 `0` 占位）——自举编译
+    // `Main.aura` 时即卡在此处（llc 报 `use of undefined value '@endsWith'`）。
+    //
+    // 这里按 Aura 侧发射器 `aot/Runtime.aura::methodCallSymbol` 的同名映射，把
+    // 裸方法名改派为 std 调用点符号 `aura.lang.std.String.<m>`：其返回/参数类型
+    // 由 `cffi_signature`（= aura_std_cffi.c 的真实 C ABI）提供，与 `declare`
+    // 及 C 实现三者一致（发射时再经 `translate_to_legacy_c` 落到 `aura_string_*`）。
+    //
+    // 仅覆盖**字符串专有**方法名：`contains`/`indexOf` 等与集合重名者不在此表
+    //（它们在 HIR 中已带 `aura.lang.std.Collections.` 前缀，含 `.` 不会被改派）。
+    if !callee_owned.contains('.') && effective_args.first().is_some() {
+        if let Some(cand) = string_method_symbol(&callee_owned) {
+            if ctx.func_ret_types.contains_key(&cand) {
+                callee_owned = cand;
+            }
+        }
+    }
+    // ── 裸名 + 接收者 → 按接收者 Aura 类型改派为 `Type.method` / std 调用点 ──
+    //
+    // HIR 的方法归属解析在 sema 类型缺失或类型不可用时可能退化为裸名调用
+    //（`this.ast.leaf(...)` → `leaf(ast, ...)`），原样发射会生成未定义符号。
+    // 这里用发射期可得的接收者静态类型（参数/字段/局部变量的声明类型）把裸名
+    // 拼回 `Type.method`；若程序内无此方法，再退回 std 调用点符号
+    // `aura.lang.std.Type.method`。仅在裸名本身不是已知函数时改派，避免误伤自由函数。
+    if !callee_owned.contains('.') && !ctx.func_ret_types.contains_key(&callee_owned) {
+        if let Some(a0) = effective_args.first() {
+            let recv_ty = aura_ty_of_expr(ctx, a0);
+            if !recv_ty.is_empty() {
+                let cands = [
+                    format!("{}.{}", recv_ty, callee_owned),
+                    format!("aura.lang.std.{}.{}", recv_ty, callee_owned),
+                ];
+                for cand in cands {
+                    if ctx.func_ret_types.contains_key(&cand) {
+                        callee_owned = cand;
+                        break;
                     }
                 }
             }
@@ -3646,6 +3805,15 @@ fn emit_call(
         let cur = blocks.last_mut();
         cur.body.push(format!("{} = call i8* @Runtime(i8* {})", tmp, arg_ir));
         return Ok((tmp, "i8*".to_string()));
+    }
+
+    // 内置异常构造器 `__new_exception(type_name, msg)`：创建异常对象。
+    // AOT 下直接返回消息字符串指针（i8*），`__throw` 直接消费。
+    if callee == "__new_exception" && args_ir.len() >= 2 {
+        let (msg_val, msg_ty) = &args_ir[1];
+        // 确保消息值是 i8* 类型（字符串指针）
+        let coerced = coerce_val_to_i8ptr(ctx, blocks, msg_val, msg_ty);
+        return Ok((coerced, "i8*".to_string()));
     }
 
     // ── 集合/列表内建：映射到已有的 aura_lang_std_Collections_* 运行时 C 实现 ──
@@ -3940,8 +4108,10 @@ fn emit_call(
             };
             let cur = blocks.last_mut();
             let tmp = ctx.fresh_var();
+            // 调用**已声明**的 C 符号（`aura_lang_std_String_indexOf` 不在
+            // runtime/cffi 声明表内，原样发射会得到 undefined symbol）。
             cur.body.push(format!(
-                "{} = call i64 @aura_lang_std_String_indexOf(i8* {}, i8* {})",
+                "{} = call i64 @aura_string_indexOf(i8* {}, i8* {})",
                 tmp, s, sub_ptr
             ));
             let r = ctx.fresh_var();
@@ -5062,6 +5232,18 @@ fn emit_new(
     // 评估所有构造器参数
     let arg_values: Vec<(String, String)> =
         args.iter().map(|a| emit_expr_val(ctx, blocks, a)).collect::<Result<_, _>>()?;
+
+    // 防御：引用了未在本模块定义的结构体（例如定义在未 import 的模块中的类）。
+    // 对未定义（unsized/opaque）类型做 GEP 会被 llc 拒绝
+    // （`base element of getelementptr must be sized`），因此退化为按指针大小
+    // 分配的不透明对象，返回 `i8*`，保证 IR 合法。
+    let struct_decl = format!("%struct.{}", sanitizellvm(type_name));
+    if !ctx.declared_structs.contains(&struct_decl) {
+        let raw = ctx.fresh_var();
+        let cur = blocks.last_mut();
+        cur.body.push(format!("{} = call i8* @aura_malloc(i64 16)", raw));
+        return Ok((raw, "i8*".to_string()));
+    }
 
     // 获取结构体类型名（Phase A.1：使用指针类型）
     let llvm_struct_type = format!("%struct.{}*", sanitizellvm(type_name));

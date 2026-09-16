@@ -91,7 +91,7 @@ class Mir {
 
     /// 添加一个叶节点（无子节点）。
     fun leaf(kind: String, text: String, sp: Span): Int {
-        return this.add(kind, text, "", sp, MirUtils.noKids())
+        return this.add(kind, text, "", sp, MirUtils.mirNoKids())
     }
 
     // ── 查询 ──
@@ -160,10 +160,10 @@ class Mir {
         out = out + "\n"
 
         val kids: String = this.kidsOf(id)
-        val kCount: Int = MirUtils.kidsCount(kids)
+        val kCount: Int = MirUtils.mirKidsCount(kids)
         var i: Int = 0
         while (i < kCount) {
-            val childId: Int = MirUtils.kidsAt(kids, i)
+            val childId: Int = MirUtils.mirKidsAt(kids, i)
             out = out + this.dumpNode(childId, depth + 1)
             i = i + 1
         }
@@ -174,7 +174,7 @@ class Mir {
 
     /// 取第 index 行。
     fun lineAt(text: String, index: Int): String {
-        return MirUtils.fieldAt(text, index, "\n")
+        return MirUtils.mirFieldAt(text, index, "\n")
     }
 
     /// 解析 span 字符串。
@@ -210,12 +210,12 @@ class Mir {
 object MirUtils {
 
     /// 空子节点列表。
-    fun noKids(): String {
+    fun mirNoKids(): String {
         return ""
     }
 
     /// 追加子节点 id。
-    fun kidsAdd(list: String, child: Int): String {
+    fun mirKidsAdd(list: String, child: Int): String {
         if (list == "") {
             return toStr(child)
         }
@@ -223,7 +223,7 @@ object MirUtils {
     }
 
     /// 子节点列表的长度。
-    fun kidsCount(list: String): Int {
+    fun mirKidsCount(list: String): Int {
         if (list == "") {
             return 0
         }
@@ -241,12 +241,12 @@ object MirUtils {
     }
 
     /// 取子节点列表的第 index 个 id。
-    fun kidsAt(list: String, index: Int): Int {
-        return MirUtils.toIntOf(MirUtils.fieldAt(list, index, ","))
+    fun mirKidsAt(list: String, index: Int): Int {
+        return MirUtils.toIntOf(MirUtils.mirFieldAt(list, index, ","))
     }
 
     /// 取第 index 个以 sep 分隔的字段。
-    fun fieldAt(text: String, index: Int, sep: String): String {
+    fun mirFieldAt(text: String, index: Int, sep: String): String {
         var i: Int = 0
         var fieldStart: Int = 0
         var cur: Int = 0

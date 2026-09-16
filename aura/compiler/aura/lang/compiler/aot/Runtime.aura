@@ -14,7 +14,6 @@ package aura.lang.compiler.aot
 
 import aura.lang.std.String
 import aura.lang.compiler.aot.AotUtil
-import aura.lang.compiler.aot.StdSigs
 
 object RuntimeUtils {
 
@@ -83,34 +82,31 @@ object RuntimeUtils {
             "aura_strlen|i64|i8*\n" +
             "aura_str_to_int|i64|i8*\n" +
             "aura_str_to_float|double|i8*\n" +
-            "aura_lang_std_String_toInt|i64|i8*\n" +
-            "aura_lang_std_String_toFloat|double|i8*\n" +
-            "aura_lang_std_String_length|i64|i8*\n" +
-            "aura_lang_std_String_equals|i32|i8*,i8*\n" +
-            "aura_lang_std_String_contains|i32|i8*,i8*\n" +
-            "aura_lang_std_String_startsWith|i32|i8*,i8*\n" +
-            "aura_lang_std_String_endsWith|i32|i8*,i8*\n" +
-            "aura_lang_std_String_indexOf|i64|i8*,i8*\n" +
-            "aura_lang_std_String_countChar|i64|i8*,i8*\n" +
-            "aura_lang_std_String_substring|i8*|i8*,i64,i64\n" +
-            "aura_lang_std_String_charAt|i8*|i8*,i64\n" +
-            "aura_lang_std_String_charCodeAt|i64|i8*,i64\n" +
-            "aura_lang_std_String_toUpperCase|i8*|i8*\n" +
-            "aura_lang_std_String_toLowerCase|i8*|i8*\n" +
-            "aura_lang_std_String_trim|i8*|i8*\n" +
+            // Phase B.1: String 相关 C 映射已移除（String.aura 自动包含，调用走 Aura 编译）
+            // ── Phase B.1 前保留（已注释）──
+            // "aura_lang_std_String_toInt|i64|i8*\n" +
+            // "aura_lang_std_String_toFloat|double|i8*\n" +
+            // "aura_lang_std_String_length|i64|i8*\n" +
+            // "aura_lang_std_String_equals|i32|i8*,i8*\n" +
+            // "aura_lang_std_String_contains|i32|i8*,i8*\n" +
+            // "aura_lang_std_String_startsWith|i32|i8*,i8*\n" +
+            // "aura_lang_std_String_endsWith|i32|i8*,i8*\n" +
+            // "aura_lang_std_String_indexOf|i64|i8*,i8*\n" +
+            // "aura_lang_std_String_countChar|i64|i8*,i8*\n" +
+            // "aura_lang_std_String_substring|i8*|i8*,i64,i64\n" +
+            // "aura_lang_std_String_charAt|i8*|i8*,i64\n" +
+            // "aura_lang_std_String_charCodeAt|i64|i8*,i64\n" +
+            // "aura_lang_std_String_toUpperCase|i8*|i8*\n" +
+            // "aura_lang_std_String_toLowerCase|i8*|i8*\n" +
+            // "aura_lang_std_String_trim|i8*|i8*\n" +
             "aura_lang_std_Collections_emptyList|i8*|\n" +
             "aura_lang_std_Collections_listAppend|i8*|i8*,i8*\n" +
             "aura_lang_std_Collections_count|i64|i8*\n" +
             "aura_lang_std_Collections_getAt|i8*|i8*,i64\n" +
             "aura_lang_std_Collections_listSet|void|i8*,i64,i8*\n" +
-            // 迭代器链（闭包回调由 C 侧经 env 首字段取函数指针调用）
             "aura_lang_std_Collections_filter|i8*|i8*,i8*\n" +
             "aura_lang_std_Collections_map|i8*|i8*,i8*\n" +
-            "aura_lang_std_Collections_take|i8*|i8*,i64\n" +
-            "aura_lang_std_Math_sin|double|double\n" +
-            "aura_lang_std_Math_cos|double|double\n" +
-            "aura_lang_std_Math_sqrt|double|double\n" +
-            "aura_lang_std_Math_pow|double|double,double\n"
+            "aura_lang_std_Collections_take|i8*|i8*,i64\n"
     }
 
     /// 生成所有 runtime 函数 + 调用点符号的 LLVM 外部声明（去重）。
@@ -118,7 +114,9 @@ object RuntimeUtils {
     /// 声明来源（后者过滤掉前者已声明者）：
     ///   1. `runtimeTable()`   Aura runtime 库（ARC/GC/字符串基础）
     ///   2. `preludeTable()`   既有调用点符号层（向后兼容）
-    ///   3. `stdSignatureTable()` 独立 std 签名表（Phase 6.5.7b，完整覆盖）
+    ///
+    /// Phase A 改造：@native 包装器不再依赖 C 运行库符号（aura_syscalls.c），
+    /// 改为直接生成 LLVM IR（内联 syscall/asm/fence/atomicrmw）+ declare 系统 libc。
     fun runtimeDeclarations(): String {
         // 用原生缓冲区累积：旧实现 `out = out + …` 对数百行声明是 O(n²) 拷贝，
         // 且 AOT 无 GC 时每一级中间串都永久驻留（整份声明文本量级）。
@@ -126,31 +124,39 @@ object RuntimeUtils {
         out.sbAdd("; ---- Aura Runtime Declarations ----\n")
         // C 入口用到：把宿主 argc/argv 注入运行时（`Process.arg/argCount` 依赖它）
         out.sbAdd("declare void @aura_args_set(i32, i8**)\n")
-        // Phase C.2 / D：@native 包装器依赖的 C 运行库符号（`aura_syscalls.c`）。
-        // 包装器定义（Emit.aura::emitNativeWrapper）只在这些符号被真实调用时引用它们；
-        // 链接阶段始终一并编译 aura_syscalls.c（Aot.aura::aotBuildExeFromHir）。
-        out.sbAdd("; ---- @native Dispatch (Phase D) ----\n")
-        out.sbAdd("declare i64 @aura_syscall_dispatch(i64, i64, i64, i64, i64, i64, i64)\n")
-        out.sbAdd("declare i64 @aura_memory_alloc(i64)\n")
-        out.sbAdd("declare void @aura_memory_free(i64)\n")
-        out.sbAdd("declare i64 @aura_cpu_rdtsc()\n")
-        out.sbAdd("declare void @aura_cpu_mem_fence()\n")
-        out.sbAdd("declare i64 @aura_cpu_atomic_add(i64, i64)\n")
-        // Phase D: setjmp/longjmp 异常桥（try/catch）
-        // `setjmp` 必须**直接在 try 所在函数内调用**：经 C 辅助函数转发时
-        // 保存的是辅助函数的栈帧，函数返回后帧失效（MSVC 下表现为进程退出时
-        // 访问违例）。这里让生成的 IR 直接调用 CRT 的 `setjmp` 符号。
-        out.sbAdd("declare i32 @setjmp(i8*)\n")
+        // Phase A：系统 libc 声明（由链接器解析）
+        // @native 包装器不再调用 C 封装（aura_syscall_dispatch / aura_cpu_* / aura_memory_*），
+        // 改为直接生成 LLVM IR（内联 syscall/asm/fence/atomicrmw）+ declare 系统函数。
+        out.sbAdd("; ---- System libc (Phase A: pure LLVM IR) ----\n")
+        out.sbAdd("declare i64 @malloc(i64)\n")
+        out.sbAdd("declare void @free(i64)\n")
+        out.sbAdd("declare i64 @strlen(i8*)\n")
+        out.sbAdd("declare void @exit(i32)\n")
+        out.sbAdd("declare i32 @getpid()\n")
+        // Phase D: setjmp/longjmp 异常桥（try/catch）— Phase D 改造前暂保留
+        // emitTry 调用 @aura_setjmp（保存 jmp_buf 到静态栈，支持嵌套 try/catch），
+        // emitThrow 调用 @aura_longjmp（从栈顶 longjmp 回最近的 setjmp）。
+        // 实现位于 aura_std_cffi.c（Phase C 从 aura_syscalls.c 迁入）。
         out.sbAdd("declare i32 @aura_setjmp(i8*)\n")
         out.sbAdd("declare void @aura_longjmp(i8*, i32)\n")
         out.sbAdd("@aura_exception_value = external global i8*\n")
+        // Phase D.2: LLVM 原生异常处理基础设施（invoke/landingpad/resume）
+        // personality 函数：LLVM 用它分派异常到 landing pad。
+        // 目标平台决定 personality 符号名：
+        //   Windows MSVC: @__CxxFrameHandler3 / @__CxxFrameHandler4
+        //   Linux:        @__gxx_personality_v0
+        //   macOS:        @__gxx_personality_v0
+        // 此处声明为 external，由链接器解析（目标平台 CRT 提供实现）。
+        out.sbAdd("; ---- Phase D.2: LLVM exception handling ----\n")
+        out.sbAdd("declare i8* @llvm.eh_personality(i8*)\n")
+        // personality 函数声明（平台特定，由链接器解析）
+        out.sbAdd("declare i32 @__gxx_personality_v0(i32, i8*, i32, i8*, i8*, i8*)\n")
         // `is` 类型检查（`when` 模式 / `x is T`）：签名 `(value: i8*, typeName: i8*) → i1`，
         // typeName 为 C 字符串（不是 AuraString 结构体指针），与 Rust 侧声明保持一致。
         out.sbAdd("declare i1 @aura_isOfType(i8*, i8*)\n")
         appendDeclarations(out, runtimeTable())
         val seenR: String = runtimeFunctionNames()
         appendDeclarationsFiltered(out, preludeTable(), seenR)
-        appendDeclarationsFiltered(out, stdSignatureTable(), seenR + tableNameList(preludeTable()))
         return out.sbBuild()
     }
 
@@ -207,17 +213,12 @@ object RuntimeUtils {
         return "declare " + ret + " @" + name + "(" + params + ")\n"
     }
 
-    /// 调用点符号签名查询（std → runtime → C FFI → prelude，返回 `ret|paramsSpaced`）。
+    /// 调用点符号签名查询（runtime → C FFI → prelude，返回 `ret|paramsSpaced`）。
     ///
     /// 发射器统一用本函数决定调用的返回类型与参数形态。每个调用点都会查一次，
     /// 所以查询本身必须**零表构建、零切片**：先前实现每次都重建并 `split` 整张表，
-    /// 普通调用点（用户函数/方法名）白跑四张表——无 GC 时累积泄漏到数 GB。
+    /// 普通调用点（用户函数/方法名）白跑三张表——无 GC 时累积泄漏到数 GB。
     fun callSignature(name: String): String {
-        // std 表：仅 `aura_lang_std_*` 符号可能命中（守卫在最热的路径上快速失败）
-        val std: String = stdSignature(name)
-        if (std != "") {
-            return std
-        }
         // runtime / C FFI / prelude 的调用点符号**一律**以 `aura_` 开头，
         // 例外只有 `toString` / `toStr` / `toStringFloat`。普通调用点（用户函数 /
         // 方法名）不满足该形态，直接返回，避免为每个调用点重建三张表
@@ -291,6 +292,15 @@ object RuntimeUtils {
         else if (name == "padStart") { return "aura_lang_std_String_padStart" }
         else if (name == "split") { return "aura_lang_std_String_split" }
         else if (name == "equals") { return "aura_lang_std_String_equals" }
+        else if (name == "toInt") { return "aura_lang_std_String_toInt" }
+        else if (name == "toLong") { return "aura_lang_std_String_toLong" }
+        else if (name == "toFloat") { return "aura_lang_std_String_toFloat" }
+        else if (name == "toDouble") { return "aura_lang_std_String_toDouble" }
+        else if (name == "toBoolean") { return "aura_lang_std_String_toBoolean" }
+        else if (name == "toCharArray") { return "aura_lang_std_String_toCharArray" }
+        else if (name == "isEmpty") { return "aura_lang_std_String_isEmpty" }
+        else if (name == "isBlank") { return "aura_lang_std_String_isBlank" }
+        else if (name == "padEnd") { return "aura_lang_std_String_padEnd" }
         else { return "" }
     }
 

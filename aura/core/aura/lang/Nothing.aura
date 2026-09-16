@@ -18,7 +18,7 @@ package aura.lang
 ///
 /// @see Any, Unit
 /// @since 0.1
-internal open class Nothing {
+open class Nothing {
 
     // ── 构造 ──
 

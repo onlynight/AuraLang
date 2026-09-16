@@ -328,7 +328,7 @@ pub enum Instr {
     /// 注册异常处理器：`(处理器指令索引, 异常值落点槽位)`。
     ///
     /// 加载期已把字节偏移解析为指令索引；`u16::MAX` 表示不写入槽位。
-    PushHandler(usize, u16),
+    PushHandler(usize, u16, u16),
     /// 注销最近的异常处理器
     PopHandler,
 
@@ -750,9 +750,7 @@ fn decode_function(f: &BytecodeFunction) -> Result<DecodedFunction, VmError> {
                 instrs.push(Instr::CallAot(v));
             }
             crate::codegen::opcode::OpCode::PushHandler(..) => {
-                // 操作数：i32 处理器块字节偏移 + u16 异常值落点槽位。
-                // 注意：`from_byte` 产生的操作数是占位值，真实操作数必须从字节流读取
-                //（此前误用占位 0，导致处理器偏移恒为 0 → 跳到函数开头形成死循环）。
+                // 操作数：i32 处理器块字节偏移 + u16 异常值落点槽位 + u16 catch_type。
                 let off = i32::from_le_bytes([
                     code[ip],
                     code[ip + 1],
@@ -763,8 +761,12 @@ fn decode_function(f: &BytecodeFunction) -> Result<DecodedFunction, VmError> {
                     code[ip + 4],
                     code[ip + 5],
                 ]);
-                ip += 6;
-                instrs.push(Instr::PushHandler(off as usize, slot));
+                let catch_type = u16::from_le_bytes([
+                    code[ip + 6],
+                    code[ip + 7],
+                ]);
+                ip += 8;
+                instrs.push(Instr::PushHandler(off as usize, slot, catch_type));
             }
             crate::codegen::opcode::OpCode::PopHandler => instrs.push(Instr::PopHandler),
 
@@ -828,14 +830,14 @@ fn decode_function(f: &BytecodeFunction) -> Result<DecodedFunction, VmError> {
                     _ => Instr::JumpIfFalse(idx),
                 };
             }
-            Instr::PushHandler(off, slot) => {
+            Instr::PushHandler(off, slot, catch_type) => {
                 let idx = *offset_to_idx.get(off).ok_or_else(|| {
                     VmError::Load(format!(
                         "handler target {} not at instruction boundary",
                         off
                     ))
                 })?;
-                *instr = Instr::PushHandler(idx, *slot);
+                *instr = Instr::PushHandler(idx, *slot, *catch_type);
             }
             _ => {}
         }
@@ -861,6 +863,20 @@ pub struct Handler {
     pub stack_len: usize,
     /// 异常值写入的局部槽位（`u16::MAX` 表示不写入，仅作 finally 中转）
     pub slot: u16,
+    /// catch 子句的类型过滤器（类 ID；`u16::MAX` 表示 catch-all，不过滤类型）
+    pub catch_type: u16,
+}
+
+impl Default for Handler {
+    fn default() -> Self {
+        Self {
+            frame_index: 0,
+            ip: 0,
+            stack_len: 0,
+            slot: u16::MAX,
+            catch_type: u16::MAX,
+        }
+    }
 }
 
 /// 调用帧

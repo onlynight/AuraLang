@@ -24,7 +24,7 @@ package aura.lang
 ///
 /// @see Nothing, Type
 /// @since 0.1
-internal open class Any {
+open class Any {
 
     /// 返回对象的可读表示。
     ///

@@ -18,12 +18,12 @@ import aura.lang.debugger.DebugApi
 // ═══════════════════════════════════════════════════════════════
 
 class Debugger {
-    var initialized: Boolean = false
-    var running: Boolean = false
-    var srcFile: String = ""
-    var breakpoints: BreakpointManager = BreakpointManager()
-    var watchExprs: List<String> = mutableListOf()
-    var nextWatchId: Int = 1
+    private var initialized: Boolean = false
+    private var running: Boolean = false
+    private var srcFile: String = ""
+    private var breakpoints: BreakpointManager = BreakpointManager()
+    private var watchExprs: List<String> = mutableListOf()
+    private var nextWatchId: Int = 1
 
     fun init(src: String): Int {
         this.srcFile = src
@@ -88,7 +88,7 @@ class Debugger {
     }
 
     /// 打印停止位置信息
-    fun printStopInfo(): Unit {
+    private fun printStopInfo(): Unit {
         val stop: String = debugNextStop()
         Console.println("Stopped: " + stop)
         if (watchExprs.size > 0) {

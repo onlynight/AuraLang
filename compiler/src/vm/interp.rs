@@ -418,12 +418,13 @@ impl Vm {
             }
 
             // ── 异常处理（try/catch）──
-            Instr::PushHandler(handler_ip, slot) => {
+            Instr::PushHandler(handler_ip, slot, catch_type) => {
                 self.handlers.push(Handler {
                     frame_index: top,
                     ip: handler_ip,
                     stack_len: self.frames[top].stack.len(),
                     slot,
+                    catch_type,
                 });
             }
             Instr::PopHandler => {
@@ -1068,30 +1069,172 @@ impl Vm {
 
     /// 抛出异常：查找最近的异常处理器并展开到它；无处理器则为未捕获异常。
     ///
-    ///
     /// 展开步骤（标准栈式异常处理）：
     /// 1. 从 handler 栈顶弹出最近的处理器；
-    /// 2. 把帧栈截断到处理器所在帧（丢弃其间的调用帧）；
-    /// 3. 把该帧的操作数栈截断回注册时的高度；
-    /// 4. 异常值写入处理器的槽位（`u16::MAX` 表示无落点，退化为压栈）；
-    /// 5. 跳转到处理器入口。
+    /// 2. 若 `catch_type != u16::MAX`，检查异常值是否为 catch_type 的实例；不匹配则跳过；
+    /// 3. 若异常值是纯字符串且 catch_type 是 Exception/Throwable/其子类，自动包装为 Exception 对象；
+    /// 4. 若 catch_type 是 String，从 Exception 对象中提取 message 字段；
+    /// 5. 把帧栈截断到处理器所在帧（丢弃其间的调用帧）；
+    /// 6. 异常值写入处理器的槽位（`u16::MAX` 表示无落点，退化为压栈）；
+    /// 7. 跳转到处理器入口。
     fn raise(&mut self, value: Value) -> Result<(), VmError> {
+        let original_value = value.clone();
+        // 查找 Exception 类的 type_tag（用于自动包装字符串异常）
+        let exception_type_tag = self.class_id_by_name("Exception").unwrap_or(u16::MAX);
         while let Some(h) = self.handlers.pop() {
-            // 帧应在注册时存活；`pop_frame` 已清理失效处理器，此处仅作防御性检查
+            // 类型过滤：若 catch_type 不是 catch-all，检查异常值是否匹配
+            if h.catch_type != u16::MAX {
+                if !self.is_instance_of(&value, h.catch_type) {
+                    continue; // 类型不匹配，继续向上查找
+                }
+            }
             if h.frame_index < self.frames.len() {
+                // 计算槽位值：根据 catch_type 和值类型决定写入什么
+                let slot_value = self.compute_slot_value(&value, h.catch_type, exception_type_tag);
+                let slot = h.slot;
+                let ip = h.ip;
+                let stack_len = h.stack_len;
                 self.frames.truncate(h.frame_index + 1);
                 let frame = &mut self.frames[h.frame_index];
-                frame.stack.truncate(h.stack_len);
-                if h.slot != u16::MAX && (h.slot as usize) < frame.locals.len() {
-                    frame.locals[h.slot as usize] = value;
+                frame.stack.truncate(stack_len);
+                if slot != u16::MAX && (slot as usize) < frame.locals.len() {
+                    frame.locals[slot as usize] = slot_value;
                 } else {
-                    frame.stack.push(value);
+                    frame.stack.push(slot_value);
                 }
-                frame.ip = h.ip;
+                frame.ip = ip;
                 return Ok(());
             }
         }
-        Err(VmError::Runtime(format!("uncaught exception: {}", value)))
+        Err(VmError::Runtime(format!(
+            "uncaught exception: {}",
+            original_value
+        )))
+    }
+
+    /// 计算异常槽位值：根据 catch 类型和异常值类型决定写入什么。
+    ///
+    /// - 如果值是纯字符串且 catch_type 是 Exception/Throwable/其子类：包装为 Exception 对象
+    /// - 如果 catch_type 是 String 或 catch-all（u16::MAX）：从 Exception 对象提取 message
+    /// - 其他情况：原样写入
+    fn compute_slot_value(
+        &mut self,
+        value: &Value,
+        catch_type: u16,
+        exception_type_tag: u16,
+    ) -> Value {
+        let is_string_catch = self.is_string_type(catch_type);
+        let is_exception_like = catch_type != u16::MAX && self.is_exception_like(catch_type);
+        let is_catch_all = catch_type == u16::MAX;
+
+        if let Value::Str(msg) = value {
+            // 纯字符串异常
+            if is_exception_like && exception_type_tag != u16::MAX {
+                // 包装为 Exception 对象
+                self.wrap_string_in_exception(msg, exception_type_tag)
+            } else {
+                // catch_type 是 String 或 catch-all：直接返回字符串
+                value.clone()
+            }
+        } else {
+            // 异常对象（堆引用或其他值）
+            if is_string_catch || is_catch_all {
+                // 从 Exception 对象提取 message（兼容 String catch 和 catch-all）
+                self.extract_message(value)
+            } else {
+                value.clone()
+            }
+        }
+    }
+
+    /// 判断 class_id 是否表示 Exception 或其子类（Exception/Throwable/Error 等）
+    fn is_exception_like(&self, class_id: u16) -> bool {
+        if class_id == u16::MAX {
+            return false;
+        }
+        let name = self.class_name(class_id);
+        matches!(
+            name.as_str(),
+            "Exception"
+                | "Throwable"
+                | "Error"
+                | "RuntimeException"
+                | "IllegalArgumentException"
+                | "IllegalStateException"
+                | "NullPointerException"
+                | "IndexOutOfBoundsException"
+                | "ArrayIndexOutOfBoundsException"
+                | "EmptyListException"
+                | "UnsupportedOperationException"
+                | "ArithmeticException"
+                | "ClassCastException"
+                | "IOException"
+                | "FileNotFoundException"
+                | "TimeoutException"
+                | "AssertionError"
+                | "OutOfMemoryError"
+                | "StackOverflowError"
+        )
+    }
+
+    /// 将字符串包装为 Exception 对象
+    ///
+    /// 分配一个新的堆对象（Exception 类型），将字符串写入 message 字段，
+    /// 返回堆引用。用于 VM 层自动包装 `throw "string"` 为 Exception 对象。
+    fn wrap_string_in_exception(&mut self, msg: &str, exception_type_tag: u16) -> Value {
+        if exception_type_tag == u16::MAX {
+            return Value::Str(std::rc::Rc::from(msg));
+        }
+        let h = self.heap.alloc_object(exception_type_tag);
+        // message 字段索引由 FNV-1a 哈希计算（与 emit.rs::field_index 一致）
+        let field_idx = crate::codegen::emit::field_index("message");
+        self.heap.set_field(h, field_idx, Value::Str(std::rc::Rc::from(msg)));
+        Value::Ref(h)
+    }
+
+    /// 判断 catch_type 是否表示 String 类型
+    fn is_string_type(&self, class_id: u16) -> bool {
+        if class_id == u16::MAX {
+            return false;
+        }
+        self.class_name(class_id) == "String"
+    }
+
+    /// 从异常对象中提取 message 字段
+    ///
+    /// 如果 value 是 Exception 对象（堆引用），通过 fields 哈希表按字段名提取 message；
+    /// 如果是纯字符串值，直接返回。
+    fn extract_message(&self, value: &Value) -> Value {
+        if let Value::Ref(handle) = value {
+            if let Some(crate::vm::heap::HeapData::Object { fields, .. }) =
+                self.heap.get_data(*handle)
+            {
+                // message 字段索引由 FNV-1a 哈希计算
+                let field_idx = crate::codegen::emit::field_index("message");
+                if let Some(msg) = fields.get(&field_idx) {
+                    return msg.clone();
+                }
+                // 兜底：取第一个字段值
+                if let Some(msg) = fields.values().next() {
+                    return msg.clone();
+                }
+            }
+        }
+        value.clone()
+    }
+
+    /// 创建异常对象：根据类名查找 type_tag，分配堆对象，设置 message 字段。
+    /// 用于 `__new_exception(type_name, message)` 原生函数。
+    ///
+    /// 注意：由于嵌入式标准库的类 ID 未与宿主模块合并，此处使用简单的堆对象
+    /// （type_tag=0 表示 Any）来承载 message 字段。VM 的 catch-all 机制确保
+    /// 无论类型如何都能被捕获。
+    fn create_exception_object(&mut self, type_name: &str, msg: &str) -> Value {
+        // 分配一个通用对象（type_tag=0 为 Any），设置 message 字段
+        let h = self.heap.alloc_object(0);
+        let field_idx = crate::codegen::emit::field_index("message");
+        self.heap.set_field(h, field_idx, Value::Str(std::rc::Rc::from(msg)));
+        Value::Ref(h)
     }
 
     /// 原生 / FFI 函数调用
@@ -1111,6 +1254,21 @@ impl Vm {
         if native.name == "__throw" {
             let v = args.into_iter().next().unwrap_or(Value::Null);
             return self.raise(v);
+        }
+
+        // `__new_exception(type_name, message)`：创建异常对象
+        if native.name == "__new_exception" {
+            let type_name = match args.first() {
+                Some(Value::Str(s)) => s.to_string(),
+                _ => "Exception".to_string(),
+            };
+            let msg = match args.get(1) {
+                Some(Value::Str(s)) => s.to_string(),
+                _ => String::new(),
+            };
+            let obj = self.create_exception_object(&type_name, &msg);
+            self.frames[top].stack.push(obj);
+            return Ok(());
         }
 
         // `Process.exit(code)`：记录退出码并干净地停止 VM（由 CLI 设置进程退出码）。
@@ -1245,6 +1403,21 @@ impl Vm {
         if native.name == "__throw" {
             let v = args.into_iter().next().unwrap_or(Value::Null);
             return self.raise(v);
+        }
+
+        // 同 `do_call_native`：`__new_exception` 创建异常对象
+        if native.name == "__new_exception" {
+            let type_name = match args.first() {
+                Some(Value::Str(s)) => s.to_string(),
+                _ => "Exception".to_string(),
+            };
+            let msg = match args.get(1) {
+                Some(Value::Str(s)) => s.to_string(),
+                _ => String::new(),
+            };
+            let obj = self.create_exception_object(&type_name, &msg);
+            self.frames[top].stack.push(obj);
+            return Ok(());
         }
 
         // 同 `do_call_native`：`Process.exit(code)` 请求退出

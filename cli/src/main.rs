@@ -110,11 +110,13 @@ Usage:\n\
     );
 }
 
-/// 解析 `--output <path>` / `--source <path>` 选项
+/// 解析 `--output <path>` / `-o <path>` / `--source <path>` 选项
 fn extract_opt(args: &[String], name: &str) -> Option<String> {
     let mut i = 0;
     while i < args.len() {
-        if args[i] == name && i + 1 < args.len() {
+        // `-o` 是 `--output` 的短别名（自举脚本 `scripts/self-bootstrap.ps1` 使用）
+        let matched = args[i] == name || (name == "--output" && args[i] == "-o");
+        if matched && i + 1 < args.len() {
             return Some(args[i + 1].clone());
         }
         i += 1;
@@ -123,7 +125,22 @@ fn extract_opt(args: &[String], name: &str) -> Option<String> {
 }
 
 fn first_positional<'a>(args: &'a [String], skip: &'a str) -> Option<&'a String> {
-    args.iter().find(|a| a.as_str() != skip && !a.starts_with("--"))
+    let skip_short = skip == "--output";
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        let is_opt = a == skip || (skip_short && a == "-o");
+        if is_opt {
+            // 跳过选项本身与其取值（否则 `-o out.exe` 的路径会被当成输入文件）
+            i += 2;
+            continue;
+        }
+        if !a.starts_with("--") {
+            return Some(&args[i]);
+        }
+        i += 1;
+    }
+    None
 }
 
 fn cmd_build(args: &[String]) {

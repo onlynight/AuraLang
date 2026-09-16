@@ -1,0 +1,10 @@
+// Math-only test - avoids String.toFloat bug
+import aura.lang.std.Math
+
+fun main() {
+    // Test Math.sin
+    val x: Float = Math.sin(0.0f)
+    println("sin(0) = " + x)
+    
+    println("DONE")
+}

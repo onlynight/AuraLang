@@ -33,8 +33,8 @@ class Layer {
 
 class TaskGraph {
     var tasks: Map<String, Task> = mutableMapOf()
-    var executionOrder: List<String> = mutableListOf()
-    var executionLayers: List<Layer> = mutableListOf()
+    private var executionOrder: List<String> = mutableListOf()
+    private var executionLayers: List<Layer> = mutableListOf()
 
     fun addTask(task: Task): Unit { tasks.put(task.name, task) }
     fun addTask(name: String, kind: Int): Unit {
@@ -54,7 +54,7 @@ class TaskGraph {
         if (task != null) { task.addDep(to) }
     }
 
-    fun buildEdges(): Map<String, List<String>> {
+    private fun buildEdges(): Map<String, List<String>> {
         val edges: Map<String, List<String>> = mutableMapOf()
         var iter = tasks.values()
         for (task in iter) { edges.put(task.name, mutableListOf()) }
@@ -72,7 +72,7 @@ class TaskGraph {
         return edges
     }
 
-    fun buildInDegree(): Map<String, Int> {
+    private fun buildInDegree(): Map<String, Int> {
         val inDegree: Map<String, Int> = mutableMapOf()
         var iter = tasks.values()
         for (task in iter) { inDegree.put(task.name, 0) }
@@ -130,7 +130,7 @@ class TaskGraph {
         return result
     }
 
-    fun detectCycle(): Int {
+    private fun detectCycle(): Int {
         val visited: Map<String, Boolean> = mutableMapOf()
         val visiting: Map<String, Boolean> = mutableMapOf()
         var iter = tasks.keys()
@@ -143,7 +143,7 @@ class TaskGraph {
         return LoomError.OK
     }
 
-    fun dfsCycle(node: String, visited: Map<String, Boolean>, visiting: Map<String, Boolean>): Int {
+    private fun dfsCycle(node: String, visited: Map<String, Boolean>, visiting: Map<String, Boolean>): Int {
         if (visiting.containsKey(node)) {
             Console.println("[loom] Cycle detected at: " + node)
             return LoomError.CYCLE_DETECTED
@@ -165,7 +165,7 @@ class TaskGraph {
         return LoomError.OK
     }
 
-    fun computeLayers(): List<Layer> {
+    private fun computeLayers(): List<Layer> {
         val layers: List<Layer> = mutableListOf()
         val visited: Map<String, Boolean> = mutableMapOf()
         val maxDepth: Map<String, Int> = mutableMapOf()
@@ -196,7 +196,7 @@ class TaskGraph {
         return layers
     }
 
-    fun computeDepth(node: String, visited: Map<String, Boolean>, maxDepth: Map<String, Int>): Int {
+    private fun computeDepth(node: String, visited: Map<String, Boolean>, maxDepth: Map<String, Int>): Int {
         if (visited.containsKey(node)) { return maxDepth.getOrDefault(node, 0) }
         var depth: Int = 0
         val task: Task = tasks.getOrDefault(node, null)

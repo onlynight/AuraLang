@@ -28,14 +28,13 @@ import aura.lang.std.String
 /// 递归下降 + Pratt 解析器。
 class Parser {
 
-    /// 词法器（构造时已 scanAll）。
-    var lx: Lexer = Lexer("")
+    private var lx: Lexer = Lexer("")
 
     /// token 总数（含结尾 `EOF`）。
     var n: Int = 0
 
     /// 当前读取位置。
-    var pos: Int = 0
+    private var pos: Int = 0
 
     /// 构造的 AST（扁平 arena）。
     var ast: Ast = Ast()
@@ -51,13 +50,13 @@ class Parser {
     ///
     /// 字面量与 span 不再另存，统一走词法器的 `litAt` / `spanFieldAt`
     /// （词法器内部为堆列表，O(1) 访问）。
-    var kinds: List<String> = listOf()
+    private var kinds: List<String> = listOf()
 
     /// 「禁止 lambda 解析」开关：when 分支模式位置置 true。
     ///
     /// 否则 `CONST_INT -> "CONST_INT"` 会被当作单参 lambda，箭头与分支体被
     /// 一起吃掉，后续分支全部错位（见 `isLambdaStart`）。
-    var prsNoLambda: Boolean = false
+    private var prsNoLambda: Boolean = false
 
     /// 「禁止 `is` 二元运算符」开关：when 分支体位置置 true。
     ///
@@ -65,7 +64,7 @@ class Parser {
     /// 二元运算吃掉（`1 is Int`），随后 `->` 悬空 → 解析错位、整段 when 反同步
     /// （多个 `is` 分支的 when 在自举产物上直接段错误）。
     /// 模式位置由 `parseWhen` 的专用分支处理，不需要 `is` 二元运算符。
-    var prsNoBinaryIs: Boolean = false
+    private var prsNoBinaryIs: Boolean = false
 
     /// 构造：词法分析并缓存全部 token。
     init(source: String) {
@@ -307,6 +306,13 @@ class Parser {
     /// 解析一个顶层声明或语句。
     fun parseTopLevel(): Int {
         val k = this.prsCurKind()
+        if (k == "Package") {
+            // package aura.lang.std
+            this.prsAdvance()
+            val text = this.prsCurLit()
+            this.prsAdvance()
+            return this.ast.add("Package", text, "", this.prsCurSpan(), noKids())
+        }
         if (k == "Import") {
             return this.parseImport()
         }

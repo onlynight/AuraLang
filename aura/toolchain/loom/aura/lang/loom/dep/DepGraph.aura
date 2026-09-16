@@ -13,8 +13,8 @@ import aura.lang.std.Collections
 // 对标 Rust: dep/graph.rs
 // ══════════════════════════════════════════════════════════════
 class DepGraph {
-    var nodes: Map<String, DependencyNode> = mutableMapOf()
-    var edges: Map<String, List<String>> = mutableMapOf()
+    private var nodes: Map<String, DependencyNode> = mutableMapOf()
+    private var edges: Map<String, List<String>> = mutableMapOf()
 
     fun addNode(node: DependencyNode): Unit {
         nodes.put(node.name, node)
@@ -54,7 +54,7 @@ class DepGraph {
 class DependencyNode {
     val name: String
     val version: String
-    var deps: List<String> = mutableListOf()
+    private var deps: List<String> = mutableListOf()
 
     fun DependencyNode(name: String, version: String) {
         this.name = name

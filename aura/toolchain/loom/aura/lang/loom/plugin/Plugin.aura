@@ -14,8 +14,8 @@ class Plugin {
     val name: String
     val version: String
     var enabled: Boolean = true
-    var config: String = ""
-    var tasks: List<String> = mutableListOf()
+    private var config: String = ""
+    private var tasks: List<String> = mutableListOf()
 
     fun Plugin(name: String, version: String) {
         this.name = name

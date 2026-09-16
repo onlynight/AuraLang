@@ -29,25 +29,25 @@ package aura.lang.compiler.sema
 class SymbolTable {
 
     /// 作用域表（每行一个作用域：`parent|isFnScope|symCount`）。
-    var scopes: String = ""
+    private var scopes: String = ""
 
     /// 符号条目表（每行一个符号：`name|kind|vis|mut|params|ty`）。
-    var entries: String = ""
+    private var entries: String = ""
 
     /// 当前作用域索引（初始为 0 = 全局作用域）。
-    var current: Int = 0
+    private var current: Int = 0
 
     /// 全局类型索引（`name|ty`，每行一项）。
-    var typeIndex: String = ""
+    private var typeIndex: String = ""
 
     /// 全局函数索引（`name|params|ret`，每行一项）。
-    var fnIndex: String = ""
+    private var fnIndex: String = ""
 
     /// 作用域总数。
-    var scopeCount: Int = 0
+    private var scopeCount: Int = 0
 
     /// 符号条目总数。
-    var entryCount: Int = 0
+    private var entryCount: Int = 0
 
     // ── 构造 ──
 

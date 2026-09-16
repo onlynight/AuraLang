@@ -55,6 +55,7 @@ pub enum TokenKind {
     Defer,
     Extern,
     Import,
+    Package,
     Lazy,
     Lateinit,
     Data,

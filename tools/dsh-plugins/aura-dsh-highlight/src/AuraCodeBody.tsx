@@ -14,7 +14,7 @@
  * renders plain text.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import type {
   DocumentContent,
@@ -106,7 +106,12 @@ export function AuraCodeBody({
     return () => observer.disconnect();
   }, []);
 
-  // Tokenize. Coalesced to one rAF per frame.
+  // Tokenize. `tokenizeNextChunk` is deliberately budget-limited so a frame
+  // never blocks on a huge file, which means one call rarely finishes the
+  // document. Drive it with a self-rescheduling rAF loop until it reports
+  // `complete`: the effect only re-runs when the source text changes, so after
+  // the stream reaches EOF a single call would leave the tail un-tokenized and
+  // permanently absent from the render.
   useEffect(() => {
     if (!isText) {
       setLines(null);
@@ -115,6 +120,8 @@ export function AuraCodeBody({
     }
 
     if (phase === 'failed') {
+      // The regex tokenizer is synchronous and covers the whole document, so no
+      // continuation loop is needed here.
       const palette = dark ? AURA_DARK_PALETTE : AURA_LIGHT_PALETTE;
       setLines(tokenizeFallback(text, palette));
       return;
@@ -130,12 +137,13 @@ export function AuraCodeBody({
       return;
     }
 
-    let raf = 0;
     let cancelled = false;
-    raf = requestAnimationFrame(() => {
+    let raf = 0;
+    const theme = THEME_BY_MODE[dark ? 'dark' : 'light'];
+
+    const step = (): void => {
       if (cancelled) return;
       try {
-        const theme = THEME_BY_MODE[dark ? 'dark' : 'light'];
         const result = tokenizeNextChunk(
           highlighter,
           text,
@@ -144,12 +152,15 @@ export function AuraCodeBody({
           theme,
         );
         setLines(capLines(result.lines));
+        if (!result.complete) raf = requestAnimationFrame(step);
       } catch {
         // Never throw into the preview pane.
         const palette = dark ? AURA_DARK_PALETTE : AURA_LIGHT_PALETTE;
         setLines(tokenizeFallback(text, palette));
       }
-    });
+    };
+
+    raf = requestAnimationFrame(step);
     return () => {
       cancelled = true;
       cancelAnimationFrame(raf);
@@ -165,11 +176,17 @@ export function AuraCodeBody({
 
   if (!isText) return null;
 
-  const rawLines: readonly string[] =
-    lines === null ? text.split('\n') : lines.map((line) => joinLine(line));
+  // The full source, always. Tokenized lines are layered on top of the raw
+  // lines by index, so a document that is still mid-tokenization shows its
+  // entire text with only the tokenized prefix colored rather than ending
+  // early at the tokenizer's frontier.
+  const sourceLines = useMemo<readonly string[]>(
+    () => (isText ? text.split('\n') : []),
+    [text, isText],
+  );
 
   return (
-    <div data-aura-code data-wrap={wrap ? 'true' : 'false'}>
+    <div data-aura-code data-code-preview data-wrap={wrap ? 'true' : 'false'}>
       <div data-aura-banner>
         <span data-aura-lang>aura</span>
         <button
@@ -183,25 +200,29 @@ export function AuraCodeBody({
       </div>
       <div data-aura-scroll ref={scrollportRef}>
         <div data-aura-grid>
-          {rawLines.map((lineText, index) => {
-            const lineTokens = lines?.[index] ?? null;
-            return (
-              <FragmentPair
-                key={index}
-                num={String(index + 1)}
-                tokens={lineTokens}
-                raw={lineText}
-              />
-            );
-          })}
+          {sourceLines.map((lineText, index) => (
+            <FragmentPair
+              key={index}
+              num={String(index + 1)}
+              tokens={lines?.[index] ?? null}
+              raw={lineText}
+            />
+          ))}
         </div>
-        {rawLines.length === 0 ? <div data-aura-empty> </div> : null}
+        {sourceLines.length === 0 ? <div data-aura-empty> </div> : null}
       </div>
     </div>
   );
 }
 
-/** One gutter cell and one line cell. */
+/**
+ * One gutter cell and one line cell.
+ *
+ * `data-textpreview-line` is the host's line-anchor contract:
+ * `ui-sidebar-documentpreview` locates `[data-textpreview-line="N"]` inside the
+ * scrollport to honour `?line=` deep links, so omitting it silently breaks
+ * navigation from chat mentions to a specific line.
+ */
 function FragmentPair({
   num,
   tokens,
@@ -213,7 +234,7 @@ function FragmentPair({
 }): ReactNode {
   return (
     <>
-      <span data-aura-num>{num}</span>
+      <span data-aura-num data-textpreview-line={num}>{num}</span>
       <span data-aura-text>{tokens === null ? raw : renderTokens(tokens)}</span>
     </>
   );
@@ -238,13 +259,6 @@ function renderTokens(tokens: CodeToken[]): ReactNode {
       </span>
     );
   });
-}
-
-/** Rejoin a token line into text for the wrap/no-highlight path. */
-function joinLine(tokens: CodeToken[]): string {
-  let out = '';
-  for (const token of tokens) out += token.content;
-  return out;
 }
 
 /** Cap the rendered line count. */

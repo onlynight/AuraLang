@@ -19,7 +19,7 @@ import aura.lang.native.process.Process as NativeProcess
 /// ```
 ///
 /// @since 0.1
-internal object Process {
+object Process {
 
     // ── 退出 ──
 

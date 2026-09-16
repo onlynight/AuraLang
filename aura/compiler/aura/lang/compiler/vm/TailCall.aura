@@ -34,23 +34,22 @@ import aura.lang.compiler.lexer.Span
 /// 尾调用优化器。
 class TailCallOptimizer {
 
-    /// 尾调用候选表（每行：`callId|funcName|pos`）。
-    var tailCallTable: String = ""
+    private var tailCallTable: String = ""
 
     /// 尾调用总数。
-    var tailCallCount: Int = 0
+    private var tailCallCount: Int = 0
 
     /// 被优化的尾调用数。
-    var optimizedCount: Int = 0
+    private var optimizedCount: Int = 0
 
     /// 调用深度计数器（用于检测递归）。
-    var callDepth: Int = 0
+    private var callDepth: Int = 0
 
     /// 最大递归深度。
-    var maxRecursionDepth: Int = 0
+    private var maxRecursionDepth: Int = 0
 
     /// 当前函数名（用于检测直接递归）。
-    var currentFunc: String = ""
+    private var currentFunc: String = ""
 
     init() {
         this.tailCallTable = ""

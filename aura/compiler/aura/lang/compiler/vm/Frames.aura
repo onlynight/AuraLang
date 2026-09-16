@@ -54,7 +54,7 @@ internal object Frames {
         val stack = frame["stack"] as List<Any>
         val size = stack.size
         if (size == 0) {
-            throw Runtime("Stack underflow in frame")
+            throw RuntimeException("Stack underflow in frame")
         }
         return stack[size - 1]
     }
@@ -64,7 +64,7 @@ internal object Frames {
         val stack = frame["stack"] as List<Any>
         val size = stack.size
         if (size == 0) {
-            throw Runtime("Stack underflow: peek on empty stack")
+            throw RuntimeException("Stack underflow: peek on empty stack")
         }
         return stack[size - 1]
     }
@@ -75,7 +75,7 @@ internal object Frames {
     fun getLocal(frame: Map<String, Any>, index: Int): Any {
         val locals = frame["locals"] as List<Any>
         if (index >= locals.size) {
-            throw Runtime("Local index out of bounds: " + index)
+            throw RuntimeException("Local index out of bounds: " + index)
         }
         return locals[index]
     }
@@ -97,7 +97,7 @@ internal object Frames {
     fun getUpvalue(frame: Map<String, Any>, index: Int): Any {
         val upvalues = frame["upvalues"] as List<Any>
         if (index >= upvalues.size) {
-            throw Runtime("Upvalue index out of bounds: " + index)
+            throw RuntimeException("Upvalue index out of bounds: " + index)
         }
         return upvalues[index]
     }

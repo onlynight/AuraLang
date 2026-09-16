@@ -86,14 +86,13 @@ object CompileErrorUtils {
 ///   errs.push(severityError(), "Expected LParen, got Ident", span)
 class CompileErrors {
 
-    /// 严重级别（每行一个）。
-    var severities: String = ""
+    private var severities: String = ""
 
     /// 错误消息（每行一个，换行已转义）。
-    var messages: String = ""
+    private var messages: String = ""
 
     /// Span 信息（每行一个：`start end sl sc el ec`，空格分隔）。
-    var spans: String = ""
+    private var spans: String = ""
 
     /// 错误数量。
     var count: Int = 0

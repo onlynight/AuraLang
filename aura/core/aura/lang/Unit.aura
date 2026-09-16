@@ -15,7 +15,7 @@ package aura.lang
 ///
 /// @see Nothing, Any
 /// @since 0.1
-internal value class Unit {
+value class Unit {
 
     // ── 常量（companion object）──
 

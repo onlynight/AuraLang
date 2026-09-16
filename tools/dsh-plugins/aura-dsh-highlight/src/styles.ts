@@ -24,8 +24,10 @@ export const VIEWER_CSS = /* css */ `
 [data-aura-code]{
   display:flex;
   flex-direction:column;
+  flex:1 1 auto;
   min-height:0;
   height:100%;
+  overflow:hidden;
   font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
   font-size:13px;
   line-height:20px;
@@ -80,6 +82,11 @@ export const VIEWER_CSS = /* css */ `
   min-height:0;
   overflow:auto;
   padding:8px 0 12px;
+  /* This div is the element handed to the host's scrollport callback, and the
+     host scrolls a line into view using offsetTop. Offsets are measured from
+     the nearest positioned ancestor, so without this the host's body padding
+     and my banner would shift every line jump. */
+  position:relative;
   scrollbar-color:var(--dsw-alias-scrollbar-bg-l1,transparent) transparent;
 }
 [data-aura-code] [data-aura-grid]{

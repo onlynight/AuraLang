@@ -290,4 +290,60 @@ object MathOps {
         if (y < 0.0f) { return -PI_OVER_2 }
         return 0.0f
     }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Phase B: double 兼容包装器（64 位）
+    //
+    // C FFI 符号（aura_lang_std_Math_*）使用 double，而 MathOps 使用 Float。
+    // 本段提供 double 签名的包装器，供 AOT 发射器在 Phase B 迁移后调用。
+    // 签名与 aura_std_cffi.h 中的 aura_lang_std_Math_* 保持一致。
+    // ═══════════════════════════════════════════════════════════════
+
+    /// 正弦（弧度）— double 版本
+    fun sinD(x: Double): Double { return sin(x as Float) as Double }
+
+    /// 余弦（弧度）— double 版本
+    fun cosD(x: Double): Double { return cos(x as Float) as Double }
+
+    /// 正切（弧度）— double 版本
+    fun tanD(x: Double): Double { return tan(x as Float) as Double }
+
+    /// 反正弦（返回弧度）— double 版本
+    fun asinD(x: Double): Double { return asin(x as Float) as Double }
+
+    /// 反余弦（返回弧度）— double 版本
+    fun acosD(x: Double): Double { return acos(x as Float) as Double }
+
+    /// 反正切（返回弧度）— double 版本
+    fun atanD(x: Double): Double { return atan(x as Float) as Double }
+
+    /// 平方根 — double 版本
+    fun sqrtD(x: Double): Double { return sqrt(x as Float) as Double }
+
+    /// 幂运算 x^y — double 版本
+    fun powD(base: Double, exp: Double): Double { return pow(base as Float, exp as Float) as Double }
+
+    /// e 的 x 次方 — double 版本
+    fun expD(x: Double): Double { return exp_fn(x as Float) as Double }
+
+    /// 自然对数 — double 版本
+    fun logD(x: Double): Double { return log(x as Float) as Double }
+
+    /// 以 2 为底的对数 — double 版本
+    fun log2D(x: Double): Double { return log2(x as Float) as Double }
+
+    /// 以 10 为底的对数 — double 版本
+    fun log10D(x: Double): Double { return log10(x as Float) as Double }
+
+    /// 向上取整 — double 版本
+    fun ceilD(x: Double): Double { return ceil(x as Float) as Double }
+
+    /// 向下取整 — double 版本
+    fun floorD(x: Double): Double { return floor(x as Float) as Double }
+
+    /// 四舍五入 — double 版本
+    fun roundD(x: Double): Double { return round(x as Float) as Double }
+
+    /// 绝对值 — double 版本
+    fun absD(x: Double): Double { return fabs(x as Float) as Double }
 }

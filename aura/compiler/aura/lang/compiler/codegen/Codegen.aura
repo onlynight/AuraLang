@@ -112,7 +112,7 @@ class Codegen {
     }
 
     /// 第 1 趟：为每个 LABEL 记录其后的字节码行号。
-    fun assignLabels(src: Mir) {
+    private fun assignLabels(src: Mir) {
         this.labelTable = ""
         var line: Int = 0
         var i: Int = 0
@@ -131,7 +131,7 @@ class Codegen {
     }
 
     /// 解析标签名 → 字节码行号（未找到返回 0）。
-    fun resolveLabel(name: String): Int {
+    private fun resolveLabel(name: String): Int {
         var pos: Int = 0
         var len: Int = this.labelTable.length
         var lineStart: Int = 0
@@ -152,7 +152,7 @@ class Codegen {
     ///
     /// 每个函数拥有**独立**的局部变量槽位命名空间（对应 VM 的每帧 locals），
     /// 因此在此重置 varTable，并按声明顺序为参数预分配槽位 0..n-1。
-    fun emitFunc(src: Mir, id: Int) {
+    private fun emitFunc(src: Mir, id: Int) {
         val raw: String = src.textOf(id)
         val name: String = this.fieldBefore(raw, "|")
         val params: String = this.fieldAfter(raw, "|")
@@ -190,7 +190,7 @@ class Codegen {
     }
 
     /// 发射基本块（对扁平 arena 无实际作用，保留接口）。
-    fun emitBlock(src: Mir, id: Int) {
+    private fun emitBlock(src: Mir, id: Int) {
         val kids: String = src.kidsOf(id)
         val kCount: Int = mirKidsCount(kids)
 
@@ -203,7 +203,7 @@ class Codegen {
     }
 
     /// 发射单个节点。
-    fun emitNode(src: Mir, id: Int) {
+    private fun emitNode(src: Mir, id: Int) {
         val kind: String = src.kindOf(id)
         if (kind == "MirFunc") {
             this.emitFunc(src, id)
@@ -215,7 +215,7 @@ class Codegen {
     }
 
     /// 发射单条指令。
-    fun emitInstr(opcode: String, arg: String, ty: String) {
+    private fun emitInstr(opcode: String, arg: String, ty: String) {
         val bcOp: String = this.mapOpcode(opcode)
         var line: String = ""
 
@@ -258,7 +258,7 @@ class Codegen {
     }
 
     /// 检查是否是指令节点。
-    fun isInstr(kind: String): Boolean {
+    private fun isInstr(kind: String): Boolean {
         if (kind == "LOAD_INT" || kind == "LOAD_FLOAT" || kind == "LOAD_STR" ||
             kind == "LOAD_BOOL" || kind == "LOAD_NULL" ||
             kind == "LOAD_VAR" || kind == "STORE_VAR" || kind == "DECL_VAR" ||
@@ -280,7 +280,7 @@ class Codegen {
     }
 
     /// 映射 MIR opcode 到字节码指令。
-    fun mapOpcode(opcode: String): String {
+    private fun mapOpcode(opcode: String): String {
         if (opcode == "LOAD_INT") { return "CONST_INT" }
         if (opcode == "LOAD_FLOAT") { return "CONST_FLOAT" }
         if (opcode == "LOAD_STR") { return "CONST_STRING" }
@@ -295,7 +295,7 @@ class Codegen {
     }
 
     /// 常量池去重，返回索引（索引 = 常量**条数**）。
-    fun internConst(value: String): Int {
+    private fun internConst(value: String): Int {
         val found: Int = this.lookupConst(value)
         if (found >= 0) {
             return found
@@ -307,7 +307,7 @@ class Codegen {
     }
 
     /// 在常量表中查找（未找到返回 -1）。
-    fun lookupConst(value: String): Int {
+    private fun lookupConst(value: String): Int {
         var pos: Int = 0
         var len: Int = this.constMap.length
         var lineStart: Int = 0
@@ -325,7 +325,7 @@ class Codegen {
     }
 
     /// 变量槽位分配，返回槽位编号（槽位 = 变量**条数**）。
-    fun allocVar(name: String): Int {
+    private fun allocVar(name: String): Int {
         val found: Int = this.lookupVar(name)
         if (found >= 0) {
             return found
@@ -336,7 +336,7 @@ class Codegen {
     }
 
     /// 在变量表中查找（未找到返回 -1）。
-    fun lookupVar(name: String): Int {
+    private fun lookupVar(name: String): Int {
         var pos: Int = 0
         var len: Int = this.varTable.length
         var lineStart: Int = 0
@@ -356,7 +356,7 @@ class Codegen {
     // ── 辅助 ──
 
     /// 统计字符串中的换行数（= 完整行数）。
-    fun countLines(text: String): Int {
+    private fun countLines(text: String): Int {
         var count: Int = 0
         var i: Int = 0
         while (i < text.length) {
@@ -369,7 +369,7 @@ class Codegen {
     }
 
     /// 统计逗号个数。
-    fun countComma(text: String): Int {
+    private fun countComma(text: String): Int {
         var count: Int = 0
         var i: Int = 0
         while (i < text.length) {
@@ -382,7 +382,7 @@ class Codegen {
     }
 
     /// 取首个分隔符之前的部分。
-    fun fieldBefore(text: String, sep: String): String {
+    private fun fieldBefore(text: String, sep: String): String {
         var i: Int = 0
         while (i < text.length) {
             if (toStr(text[i]) == sep) {
@@ -394,7 +394,7 @@ class Codegen {
     }
 
     /// 取首个分隔符之后的部分。
-    fun fieldAfter(text: String, sep: String): String {
+    private fun fieldAfter(text: String, sep: String): String {
         var i: Int = 0
         while (i < text.length) {
             if (toStr(text[i]) == sep) {
@@ -406,7 +406,7 @@ class Codegen {
     }
 
     /// 字符串切片。
-    fun substr(text: String, start: Int, length: Int): String {
+    private fun substr(text: String, start: Int, length: Int): String {
         var result: String = ""
         var end: Int = start + length
         if (end > text.length) {
@@ -421,7 +421,7 @@ class Codegen {
     }
 
     /// 字符串转整数（本地版本，避免依赖 Mir.aura）。
-    fun mirToIntOf2(text: String): Int {
+    private fun mirToIntOf2(text: String): Int {
         var total: Int = 0
         var i: Int = 0
         var len: Int = text.length
@@ -460,7 +460,7 @@ class Codegen {
     }
 
     /// 返回指令计数。
-    fun instrCount2(): Int {
+    private fun instrCount2(): Int {
         return this.instrCount
     }
 }

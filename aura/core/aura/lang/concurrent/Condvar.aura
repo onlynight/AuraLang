@@ -30,8 +30,7 @@ package aura.lang.concurrent
 import aura.lang.native.Memory
 import aura.lang.native.Cpu
 import aura.lang.concurrent.Mutex
-
-internal object Condvar {
+object Condvar {
 
     /// 创建新的条件变量
     ///

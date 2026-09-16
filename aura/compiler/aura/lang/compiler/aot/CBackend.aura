@@ -122,7 +122,7 @@ class CEmitter {
     }
 
     /// 发射单个函数。
-    fun emitFunction(hir: Hir, id: Int): String {
+    private fun emitFunction(hir: Hir, id: Int): String {
         this.fBody = ""
         this.fVars = ""
         var retTy: String = CBackendUtils.cType(hir.tyOf(id))
@@ -168,7 +168,7 @@ class CEmitter {
     }
 
     /// 发射语句块（带缩进）。
-    fun emitBody(hir: Hir, id: Int, depth: Int) {
+    private fun emitBody(hir: Hir, id: Int, depth: Int) {
         if (hir.kindOf(id) == "HirBlock") {
             val kids: String = hir.kidsOf(id)
             val n: Int = hirKidsCount(kids)
@@ -183,7 +183,7 @@ class CEmitter {
     }
 
     /// 发射单条语句。
-    fun emitStmt(hir: Hir, id: Int, depth: Int) {
+    private fun emitStmt(hir: Hir, id: Int, depth: Int) {
         if (id < 0 || id >= hir.count) {
             return
         }
@@ -254,7 +254,7 @@ class CEmitter {
     }
 
     /// 发射表达式为 C 表达式字符串。
-    fun emitExpr(hir: Hir, id: Int): String {
+    private fun emitExpr(hir: Hir, id: Int): String {
         if (id < 0 || id >= hir.count) {
             return "0"
         }
@@ -304,12 +304,12 @@ class CEmitter {
     }
 
     /// 推断表达式 C 类型。
-    fun inferExprType(hir: Hir, id: Int): String {
+    private fun inferExprType(hir: Hir, id: Int): String {
         return CBackendUtils.cInferType(hir, id)
     }
 
     /// 查询局部变量 C 类型。
-    fun lookupVarTy(name: String): String {
+    private fun lookupVarTy(name: String): String {
         var n: Int = aotLineCount(this.fVars)
         var i: Int = 0
         while (i < n) {

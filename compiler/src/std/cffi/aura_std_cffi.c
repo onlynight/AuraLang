@@ -1579,6 +1579,41 @@ const void *aura_lang_std_String_split(const char *s, const char *sep) {
     return (const void *)l;
 }
 
+/* 旧命名别名：`translate_to_legacy_c` 会把 `aura_lang_std_String_<m>` 翻译为
+ * `aura_string_<m>` 发射调用（见 compiler/src/codegen/aot/runtime.rs 的
+ * cffi_signature 表），因此必须同时提供旧名符号。 */
+int64_t aura_string_indexOf(const char *s, const char *sub) {
+    return aura_lang_std_String_indexOf(s, sub);
+}
+
+int64_t aura_string_lastIndexOf(const char *s, const char *sub) {
+    return aura_lang_std_String_lastIndexOf(s, sub);
+}
+
+int64_t aura_string_countChar(const char *s, const char *ch) {
+    return aura_lang_std_String_countChar(s, ch);
+}
+
+const char *aura_string_substringBefore(const char *s, const char *sep) {
+    return aura_lang_std_String_substringBefore(s, sep);
+}
+
+const char *aura_string_substringAfter(const char *s, const char *sep) {
+    return aura_lang_std_String_substringAfter(s, sep);
+}
+
+const char *aura_string_replaceAll(const char *s, const char *from, const char *to) {
+    return aura_lang_std_String_replaceAll(s, from, to);
+}
+
+const char *aura_string_padStart(const char *s, int64_t width, const char *pad) {
+    return aura_lang_std_String_padStart(s, width, pad);
+}
+
+const void *aura_string_split(const char *s, const char *sep) {
+    return aura_lang_std_String_split(s, sep);
+}
+
 /** 字符串内容相等（AOT 字符串比较统一走这里，避免结构体按位比较） */
 int aura_lang_std_String_equals(const char *a, const char *b) {
     if (!a || !b) return a == b ? 1 : 0;
@@ -1948,6 +1983,13 @@ int aura_lang_std_FileSystem_mkdirP(const char *path) {
     return 0;
 }
 
+/* 旧命名别名：AOT 的 `translate_to_legacy_c` 把
+ * `aura_lang_std_FileSystem_mkdirP` 翻译为 `aura_fs_mkdirP` 发射调用，
+ * 因此必须同时提供旧名符号，否则链接期 undefined symbol。 */
+int64_t aura_fs_mkdirP(const char *path) {
+    return (int64_t)aura_lang_std_FileSystem_mkdirP(path);
+}
+
 /* ── aura.lang.std.Process.* ── */
 
 /** 同步执行命令，返回退出码（AOT 下用系统 shell） */
@@ -2003,6 +2045,24 @@ const char *aura_lang_std_Process_args(void) {
         if (aura_saved_argv[i]) strcat(joined, aura_saved_argv[i]);
     }
     return joined;
+}
+
+/* 旧命名别名：`translate_to_legacy_c` 发射 `aura_process_*` 调用
+ * （见 compiler/src/codegen/aot/runtime.rs 的 cffi_signature 表）。 */
+int64_t aura_process_run(const char *cmd) {
+    return aura_lang_std_Process_run(cmd);
+}
+
+int64_t aura_process_argCount(void) {
+    return aura_lang_std_Process_argCount();
+}
+
+const char *aura_process_arg(int64_t index) {
+    return aura_lang_std_Process_arg(index);
+}
+
+const char *aura_process_args(void) {
+    return aura_lang_std_Process_args();
 }
 
 /* ── aura.lang.std.Math.*（转发到 aura_math_* 实现） ── */
@@ -2300,4 +2360,6 @@ _Bool aura_lang_std_Collections_listContains(const void *list, const void *val) 
 int64_t aura_lang_std_Collections_listIndexOf(const void *list, const void *val) {
     return aura_collections_listIndexOf(list, val);
 }
+
+
 

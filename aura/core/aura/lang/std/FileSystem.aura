@@ -184,12 +184,36 @@ object FileSystem {
 
     /// 创建目录。
     fun mkdir(path: String): Unit {
-        FSUtils.fs_mkdir_new(path)
+        val pathBuf: Long = Stdio.stringToBuffer(path)
+        if (pathBuf == 0) { return }
+        FileOps.mkdirFile(pathBuf, 493)  // 0755
+        Allocator.free(pathBuf)
     }
 
-    /// 递归创建目录（含父目录，简化实现：仅创建单层）。
+    /// 递归创建目录（含父目录）。
     fun mkdirP(path: String): Unit {
-        FSUtils.fs_mkdir_new(path)
+        val pathBuf: Long = Stdio.stringToBuffer(path)
+        if (pathBuf == 0) { return }
+        val len: Long = Stdio.strlen(pathBuf)
+        if (len <= 0) {
+            Allocator.free(pathBuf)
+            return
+        }
+        // 逐段创建：遍历路径中的 '/'，逐段 mkdir
+        var i: Long = 1
+        while (i < len) {
+            val c: Byte = Memory.read(pathBuf + i)
+            if (c == '/') {
+                // 临时替换 '/' 为 '\0'，创建当前段目录
+                Memory.write(pathBuf + i, 0)
+                FileOps.mkdirFile(pathBuf, 493)  // 0755
+                Memory.write(pathBuf + i, '/')
+            }
+            i = i + 1
+        }
+        // 创建最后一段（完整路径）
+        FileOps.mkdirFile(pathBuf, 493)
+        Allocator.free(pathBuf)
     }
 
     /// 重命名文件/目录。

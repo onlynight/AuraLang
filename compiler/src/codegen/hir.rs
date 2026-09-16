@@ -86,6 +86,32 @@ fn is_type_name(n: &str) -> bool {
     TYPE_NAMES.with(|r| r.borrow().iter().any(|t| t == n))
 }
 
+/// 判断类型名是否为异常类（Throwable 及其子类）
+fn is_exception_type(n: &str) -> bool {
+    matches!(
+        n,
+        "Throwable"
+            | "Error"
+            | "OutOfMemoryError"
+            | "StackOverflowError"
+            | "Exception"
+            | "RuntimeException"
+            | "IllegalArgumentException"
+            | "IllegalStateException"
+            | "NullPointerException"
+            | "IndexOutOfBoundsException"
+            | "ArrayIndexOutOfBoundsException"
+            | "EmptyListException"
+            | "UnsupportedOperationException"
+            | "ArithmeticException"
+            | "ClassCastException"
+            | "IOException"
+            | "FileNotFoundException"
+            | "TimeoutException"
+            | "AssertionError"
+    )
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 类/结构体成员分派（P-K2）
 //
@@ -231,26 +257,114 @@ fn sema_expr_class(object: &Expr) -> Option<String> {
     })
 }
 
+/// 沿继承链在成员表中查找拥有方法 `method` 的类。
+fn find_method_in_chain(
+    table: &HashMap<String, ClassEntry>,
+    start: &str,
+    method: &str,
+) -> Option<(String, ClassEntry)> {
+    let mut cur = Some(start.to_string());
+    while let Some(cn) = cur {
+        if let Some(e) = table.get(&cn) {
+            if e.methods.contains(method) {
+                return Some((cn, e.clone()));
+            }
+            cur = e.superclass.clone();
+        } else {
+            break;
+        }
+    }
+    None
+}
+
+/// 取 HIR 命名类型的「基名」：剥可空标记与泛型参数（`List<String>` → `List`）。
+fn hir_type_base_name(ty: &HirType) -> Option<String> {
+    match ty {
+        HirType::Named(n) => {
+            let n = n.trim_end_matches('?');
+            let base = n.split('<').next().unwrap_or(n).trim();
+            if base.is_empty() { None } else { Some(base.to_string()) }
+        }
+        HirType::Nullable(inner) => hir_type_base_name(inner),
+        _ => None,
+    }
+}
+
+/// 字段接收者兜底：`this.<field>` / 类内裸字段 `<field>` → 用当前类的字段声明类型
+/// （含继承链）解析目标类方法。
+///
+/// 自举源码里大量存在 `this.ast.add(...)` / `this.ast.leaf(...)` 这类调用；
+/// 当 sema 未记录该 MemberAccess 的静态类型（span 未命中或推断为 `Any`）时，
+/// 仅靠 sema 无法解析，而「全表唯一候选」又因多类同名方法而失败。字段声明类型
+/// 是最可靠的兜底来源。
+fn field_receiver_method(
+    table: &HashMap<String, ClassEntry>,
+    object: &Expr,
+    method: &str,
+) -> Option<(String, ClassEntry)> {
+    let field_name: Option<String> =
+        match object {
+            Expr::MemberAccess {
+                object: inner,
+                name,
+                ..
+            } if matches!(inner.as_ref(), Expr::This(_)) => Some(name.clone()),
+            Expr::Ident(n, _) => CLASS_CTX.with(|c| {
+                c.borrow().as_ref().and_then(|ctx| {
+                    if ctx.is_local(n) { None } else { Some(n.to_string()) }
+                })
+            }),
+            _ => None,
+        };
+    let field_name = field_name?;
+    let ctx = CLASS_CTX.with(|c| c.borrow().clone())?;
+    let mut cur = Some(ctx.class.clone());
+    while let Some(cn) = cur {
+        let e = table.get(&cn)?;
+        if let Some(ty) = e.field_types.get(&field_name) {
+            let tn = hir_type_base_name(ty)?;
+            return find_method_in_chain(table, &tn, method);
+        }
+        cur = e.superclass.clone();
+    }
+    None
+}
+
 /// 方法调用的接收者类解析：静态类型命中（含继承链）→ 全表唯一候选兜底
 fn resolve_method_owner(object: &Expr, method: &str) -> Option<(String, ClassEntry)> {
     let table = CLASS_TABLE.with(|t| t.borrow().clone());
     if table.is_empty() {
         return None;
     }
-    // 1) sema 静态类型 + 继承链查找
-    if let Some(ty) = sema_expr_class(object) {
-        let mut cur = Some(ty);
-        while let Some(cn) = cur {
-            if let Some(e) = table.get(&cn) {
-                if e.methods.contains(method) {
-                    return Some((cn, e.clone()));
-                }
-                cur = e.superclass.clone();
-            } else {
-                break;
+    // 0) 直接对象名调用：object 是标识符且是 CLASS_TABLE 中的类/object 名
+    //    （AOT 无 sema 信息时，sema_expr_class 返回 None，唯一候选兜底在
+    //    多类同名方法时失败；object 单例方法必须走此路径）
+    if let Expr::Ident(obj_name, _) = object {
+        let obj_name_str = obj_name.to_string();
+        if let Some(e) = table.get(&obj_name_str) {
+            if e.methods.contains(method) {
+                return Some((obj_name_str, e.clone()));
             }
         }
-        // 已知接收者类型但不是成员表中的类（如 List/String）→ 交给内置方法
+    }
+    // 1) sema 静态类型 + 继承链查找
+    let sema_ty = sema_expr_class(object);
+    if let Some(ref ty) = sema_ty {
+        if let Some(found) = find_method_in_chain(&table, ty, method) {
+            return Some(found);
+        }
+        // 已知接收者类型且是成员表中的类但无此方法 → 交给内置/未命中
+        if table.contains_key(ty) {
+            return None;
+        }
+        // 类型不在成员表（List/String/Any/泛型等）：继续尝试字段接收者兜底
+    }
+    // 1.5) 字段接收者兜底：`this.<field>` / 裸字段（sema 缺失或类型不可用时）
+    if let Some(found) = field_receiver_method(&table, object, method) {
+        return Some(found);
+    }
+    // 已知非类类型（List/String 等）→ 交给内置方法
+    if sema_ty.is_some() {
         return None;
     }
     // 2) 兜底（无类型信息时）：整个成员表中唯一拥有该方法的类
@@ -262,6 +376,20 @@ fn resolve_method_owner(object: &Expr, method: &str) -> Option<(String, ClassEnt
         return Some((n, e));
     }
     None
+}
+
+/// 唯一拥有方法 `m` 的**单例 object** 名；无候选或存在多个候选时返回 None。
+///
+/// 供「跨 object 的裸方法调用」兜底（`object A` 的方法里直接写 `object B` 的
+/// 方法名 `m()`）。与 `resolve_method_owner` 的「全表唯一候选」兜底同思路。
+fn unique_singleton_with_method(m: &str) -> Option<String> {
+    let table = CLASS_TABLE.with(|t| t.borrow().clone());
+    let cands: Vec<String> = table
+        .iter()
+        .filter(|(_, e)| e.is_singleton && e.methods.contains(m))
+        .map(|(n, _)| n.clone())
+        .collect();
+    if cands.len() == 1 { cands.into_iter().next() } else { None }
 }
 
 /// companion 成员访问：`C.m(...)` / `C.f`（C 为类型名）→ 合成函数全名
@@ -1052,6 +1180,8 @@ pub enum HirStmt {
         body: HirBlock,
         /// catch 变量名（无 catch 子句时为 None，此时异常在 finally 后重新抛出）
         catch_var: Option<String>,
+        /// catch 子句的异常类型名（如 "Exception"、"RuntimeException"）；None 表示 catch-all
+        catch_type: Option<String>,
         /// catch 体（无 catch 子句时为空块）
         catch_body: HirBlock,
         /// finally 体（可选）
@@ -1190,7 +1320,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
     });
 
     // 预收集所有类型名（供 desugar_expr 检测构造器调用）
-    let type_names: Vec<String> = program
+    let mut type_names: Vec<String> = program
         .declarations
         .iter()
         .flat_map(|d| match d {
@@ -1202,6 +1332,30 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             _ => None,
         })
         .collect();
+    // 预置异常类类型名（来自 aura.lang.Exception 嵌入式标准库）
+    for t in [
+        "Throwable",
+        "Error",
+        "OutOfMemoryError",
+        "StackOverflowError",
+        "Exception",
+        "RuntimeException",
+        "IllegalArgumentException",
+        "IllegalStateException",
+        "NullPointerException",
+        "IndexOutOfBoundsException",
+        "ArrayIndexOutOfBoundsException",
+        "EmptyListException",
+        "UnsupportedOperationException",
+        "ArithmeticException",
+        "ClassCastException",
+        "IOException",
+        "FileNotFoundException",
+        "TimeoutException",
+        "AssertionError",
+    ] {
+        type_names.push(t.to_string());
+    }
     TYPE_NAMES.with(|r| {
         *r.borrow_mut() = type_names;
     });
@@ -1770,6 +1924,37 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                 is_vararg: false,
             }],
             ret: Some(HirType::Named("Unit".into())),
+            body: HirBlock {
+                stmts: vec![],
+            },
+            is_native: true,
+            type_params: vec![],
+            ffi_abi: FfiAbi::None,
+            ffi_lib: None,
+            native_attr: None,
+        });
+    }
+
+    // 注册 __new_exception 为原生函数（Exception 构造器降级目标）
+    // 在 VM 中创建异常对象，避免跨模块函数调用解析问题。
+    if !natives.iter().any(|n| n.name == "__new_exception") {
+        natives.push(HirFunction {
+            name: "__new_exception".into(),
+            params: vec![
+                HirParam {
+                    name: "type_name".into(),
+                    ty: Some(HirType::Named("String".into())),
+                    default_value: None,
+                    is_vararg: false,
+                },
+                HirParam {
+                    name: "message".into(),
+                    ty: Some(HirType::Named("String".into())),
+                    default_value: None,
+                    is_vararg: false,
+                },
+            ],
+            ret: Some(HirType::Named("Any".into())),
             body: HirBlock {
                 stmts: vec![],
             },
@@ -3267,7 +3452,7 @@ fn desugar_expr_stmt(e: &Expr) -> HirStmt {
             let body = desugar_block(block);
             // 仅建模首个 catch 子句：Aura 的 `catch (e: Type)` 类型过滤尚未实现，
             // 因此等价于「catch-all」。多子句时后续子句不可达（已在 README 记录）。
-            let (catch_var, catch_body) = match catches.first() {
+            let (catch_var, catch_type, catch_body) = match catches.first() {
                 Some(c) => {
                     let has_var = !c.variable.is_empty();
                     // 必须在降级 catch 体之前注册局部名，否则体内裸 `e` 会被当作字段访问
@@ -3276,7 +3461,12 @@ fn desugar_expr_stmt(e: &Expr) -> HirStmt {
                     }
                     let mut cb = desugar_block(&c.body);
                     if has_var {
-                        // 声明 catch 变量：MIR 分配槽位，VM 跳入处理器时把异常值写入该槽
+                        // 声明 catch 变量：MIR 分配槽位，VM 跳入处理器时把异常值写入该槽。
+                        //
+                        // 注意：这里刻意**不**标注类型。AOT 后端尚未把「异常值即消息串」
+                        // 贯通到类型信息（标注 `String` 会让拼接按裸 `i8*` 解引用，
+                        // 打印出垃圾字节；不标注则以默认 `i32` 声明，拼接口走整数路径
+                        // 打印指针数值）。两者都不理想，留待异常 AOT 语义统一后处理。
                         cb.stmts.insert(
                             0,
                             HirStmt::Val {
@@ -3286,9 +3476,15 @@ fn desugar_expr_stmt(e: &Expr) -> HirStmt {
                             },
                         );
                     }
-                    (if has_var { Some(c.variable.clone()) } else { None }, cb)
+                    (
+                        if has_var { Some(c.variable.clone()) } else { None },
+                        // 记录 catch 类型名（如 "Exception"、"RuntimeException"）
+                        if c.type_name.is_empty() { None } else { Some(c.type_name.clone()) },
+                        cb,
+                    )
                 }
                 None => (
+                    None,
                     None,
                     HirBlock {
                         stmts: vec![],
@@ -3299,6 +3495,7 @@ fn desugar_expr_stmt(e: &Expr) -> HirStmt {
             HirStmt::Try {
                 body,
                 catch_var,
+                catch_type,
                 catch_body,
                 finally,
             }
@@ -3660,6 +3857,15 @@ fn is_module_chain(e: &Expr) -> bool {
 /// 查询表达式的静态类型名（来自 sema 信息通道，strip 可空标记）
 fn lookup_expr_type(e: &Expr) -> Option<String> {
     SEMA_INFO.with(|s| s.borrow().as_ref().and_then(|i| i.expr_type(e)))
+}
+
+/// 判断 AST 表达式是否为字符串字面量或字符串插值
+fn is_string_expr(expr: &crate::ast::Expr) -> bool {
+    matches!(
+        expr,
+        crate::ast::Expr::Literal(crate::ast::Literal::String(_), _)
+            | crate::ast::Expr::StrInterp { .. }
+    )
 }
 
 /// 判断类型名是否为字符串（含可空形式）
@@ -4052,8 +4258,28 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                 }
             }
             // 构造器调用检测：Type(args) → HirExpr::New
+            // 异常类构造器走原生路径（__new_exception），避免跨模块函数解析问题。
             if let Expr::Ident(n, _) = callee.as_ref() {
                 if is_type_name(n) {
+                    // 异常类：走原生构造路径。支持 `E()`（空消息）、`E(msg)` 与
+                    // `E(msg, cause)`；cause 暂不传递（AOT/VM 的异常对象目前只承载消息）。
+                    // 若只处理单参形式，`E()` 会落到 `HirExpr::New`，而异常类定义位于
+                    // 独立的 aura.lang.errors 模块（未 import 时不会定义其 LLVM 结构体），
+                    // AOT 侧会对未定义（unsized）结构体生成 GEP，llc 报
+                    // `base element of getelementptr must be sized`。
+                    if is_exception_type(n) && args.len() <= 2 {
+                        let msg = match args.first() {
+                            Some(a) => desugar_expr(a),
+                            None => HirExpr::Lit(Literal::String(String::new())),
+                        };
+                        return HirExpr::Call {
+                            callee: "__new_exception".into(),
+                            args: vec![
+                                HirExpr::Lit(Literal::String(n.clone())),
+                                msg,
+                            ],
+                        };
+                    }
                     return HirExpr::New {
                         type_name: n.clone(),
                         args: args.iter().map(desugar_expr).collect(),
@@ -4076,6 +4302,27 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     };
                 }
             }
+            // 跨 object 的裸方法调用兜底：`targetDefault()` 写在**另一个** object 内时
+            // `bare_call_in_class` 查不到（它只看当前 object）。此处按「唯一拥有该方法的
+            // 单例 object」改写为 `Obj.m(null, args)`，与限定调用
+            // `Obj.m(...)` / `resolve_method_owner` 的单例分支保持一致
+            //（object 方法带 self 形参，见 `desugar_class_method(_, _, true)`）。
+            // 仅当**没有同名自由函数**且无导入别名解析时才改写（自由函数优先）。
+            if let Expr::Ident(n, _) = callee.as_ref() {
+                let is_free_fn = FUNCTION_PARAMS.with(|f| f.borrow().contains_key(n.as_str()));
+                if !is_free_fn && lookup_import_short(n).is_none() {
+                    if let Some(cls) = unique_singleton_with_method(n) {
+                        let mut all_args = vec![HirExpr::Lit(Literal::Null)];
+                        for a in args {
+                            all_args.push(desugar_expr(a));
+                        }
+                        return HirExpr::Call {
+                            callee: format!("{}.{}", cls, n),
+                            args: all_args,
+                        };
+                    }
+                }
+            }
             let callee_name = match callee.as_ref() {
                 Expr::Ident(n, _) => {
                     // Plan A′：`arrayListOf(...)` 降级为**堆列表**（`HeapData::List`），
@@ -4083,7 +4330,10 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     // 内联值语义列表（其读取/写入由 `Collections.getAt/set` 承载，
                     // 改为堆列表会使这些 native 失效）。
                     // 需要「真可变列表」时请用 `arrayListOf`。
-                    if n == "arrayListOf" {
+                    // `arrayOf` 与 `arrayListOf` 同属堆列表语义（AOT 无内联数组），
+                    // 统一降级为 `__list_new`；否则会残留对 prelude 原生 `arrayOf`
+                    // 的外部声明 → AOT 链接期 undefined symbol。
+                    if n == "arrayListOf" || n == "arrayOf" {
                         return HirExpr::Call {
                             callee: "__list_new".to_string(),
                             args: args.iter().map(desugar_expr).collect(),
@@ -4131,6 +4381,20 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                         }
                         // 无类上下文时，回退为普通方法调用
                     }
+                    // 异常对象访问器：`Throwable` 层次类是嵌入式标准库，通常**不参与**
+                    // 程序链接（成员表里没有 Throwable/Exception），因此
+                    // `e.getMessage()` 会退化为未定义的裸 `@getMessage`。
+                    // 而 AOT/VM 中异常值本身就是「消息」表示（`__new_exception`
+                    // 返回消息串），故 `e.getMessage()` / `e.getLocalizedMessage()`
+                    // 等价于 `e`，`e.getCause()` 等价于 `null`。
+                    if !name.is_empty() && args.is_empty() {
+                        if name == "getMessage" || name == "getLocalizedMessage" {
+                            return desugar_expr(object);
+                        }
+                        if name == "getCause" {
+                            return HirExpr::Lit(Literal::Null);
+                        }
+                    }
                     // P15: List 高阶方法（filter/map/take）→ 内联循环块
                     if matches!(name.as_str(), "filter" | "map" | "take") {
                         if let Some(ty) = lookup_expr_type(object) {
@@ -4152,6 +4416,22 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                                 }
                                 return HirExpr::Call {
                                     callee: "aura.lang.std.Collections.getAt".into(),
+                                    args: all_args,
+                                };
+                            }
+                        }
+                    }
+                    // Map/MutableMap 的 get(key) → 具体实现 HashMap.get
+                    // （Map 为接口，不在成员表中；不显式改派会退化为裸名 `get` 未定义符号）
+                    if name.as_str() == "get" {
+                        if let Some(ty) = lookup_expr_type(object) {
+                            if ty.starts_with("Map") || ty.starts_with("MutableMap") {
+                                let mut all_args = vec![desugar_expr(object)];
+                                for a in args {
+                                    all_args.push(desugar_expr(a));
+                                }
+                                return HirExpr::Call {
+                                    callee: "HashMap.get".into(),
                                     args: all_args,
                                 };
                             }
@@ -4329,8 +4609,14 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     // open/abstract 方法（可被子类重写）→ CallVirtual 动态分派
                     if let Some((class, entry)) = resolve_method_owner(object, name) {
                         let mut all_args = vec![];
-                        // object 单例：不传接收者，VM 拦截时自动添加单例实例
-                        if !entry.is_singleton {
+                        // object 方法由 HIR 统一带 self 形参（见 `desugar_class_method(_, _, true)`），
+                        // 调用点必须**占位**：单例没有实例可传，用 null 占位（object 无实例状态，
+                        // 方法体不读 self）；class 方法传真正的接收者。
+                        // 若不传，实参会整体前移一格（`TargetUtils.archName(this.arch)` 的 arch
+                        // 落到 self 槽位），生成「实参数与定义不符」的调用。
+                        if entry.is_singleton {
+                            all_args.push(HirExpr::Lit(Literal::Null));
+                        } else {
                             all_args.push(desugar_expr(object));
                         }
                         for a in args {
