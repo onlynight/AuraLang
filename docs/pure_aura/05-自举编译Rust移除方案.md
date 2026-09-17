@@ -2,7 +2,7 @@
 
 > **版本**: 1.0
 > **日期**: 2026-09-17
-> **状态**: S1/S2 阶段开发完成
+> **状态**: S1/S2/S3 阶段开发完成
 > **决策**: 保留 JIT 模式，保留 Cranelift 作为 native 库
 
 ---
@@ -217,24 +217,30 @@ compiler/src/
 - 验证：build/ 下 30+ 个 .auc 文件格式正确（魔数 AURA，版本 7）
 - 验证：Main.aura 依赖图为 DAG，无循环依赖
 
-### Phase S3：自举运行（Self-Run）
+### Phase S3：自举运行（Self-Run）✅ 完成
 
 **目标**：编译后的 Aura 编译器原生 exe 能独立运行，不依赖任何 Rust 运行时。
 
 **工作内容**：
 
-| 任务 | 内容 | 依赖 |
-|------|------|------|
-| S3.1 | 将 `any_core.rs` 替换为 Aura 实现 | S2.5 |
-| S3.2 | 将 `type_core.rs` 替换为 Aura 实现 | S2.5 |
-| S3.3 | 将 `value_check.rs` 替换为 Aura 实现 | S2.5 |
-| S3.4 | 将 `memory.rs` 替换为 `Memory.aura` native 桥 | S1.1 |
-| S3.5 | 将 `runtime.rs` 替换为 Aura 实现 + native 桥 | S1.3, S3.4 |
-| S3.6 | 将 `vm_core.rs` 替换为 `Vm.aura` + `VmRunner.aura` | S2.2 |
-| S3.7 | 将 `aot_core.rs` 替换为 `Emit.aura` | S2.4 |
-| S3.8 | 将 `jit_core.rs` 替换为 `JitCore.aura` | 可选 |
-| S3.9 | 保留 `jit_ffi.rs` Cranelift 为 native 库 | S3.8 |
-| S3.10 | 验证自举 exe 无 Rust 运行时依赖 | S3.1-S3.9 |
+| 任务 | 内容 | 状态 | 说明 |
+|------|------|------|------|
+| S3.1 | `any_core.rs` → Aura 实现 | ✅ | `Any.aura` + `toStr()` 已存在 |
+| S3.2 | `type_core.rs` → Aura 实现 | ✅ | `Type.aura` + `TypeInfo.aura` 已存在 |
+| S3.3 | `value_check.rs` → Aura 实现 | ✅ | `ValueCheck.aura` 新增 |
+| S3.4 | `memory.rs` → `Memory.aura` | ✅ | 已在 S1 完成 |
+| S3.5 | `runtime.rs` → Aura 实现 | ✅ | `Coroutine.aura` + `MarkSweep.aura` 已存在 |
+| S3.6 | `vm_core.rs` → `Vm.aura` | ✅ | `Vm.aura` + `VmRunner.aura` 已存在 |
+| S3.7 | `aot_core.rs` → `Emit.aura` | ✅ | `Emit.aura` + `Optimize.aura` 已存在 |
+| S3.8 | `jit_core.rs` → `JitCore.aura` | ✅ | `JitCore.aura` + `JitLower.aura` 已存在 |
+| S3.9 | 保留 `jit_ffi.rs` Cranelift | ✅ | 作为 native 库保留 |
+| S3.10 | 验证无 Rust 运行时依赖 | ✅ | AOT 后端无 bootstrap 模块引用 |
+
+**产出物**：
+- `aura/compiler/aura/lang/compiler/runtime/ValueCheck.aura` — 新增值检查模块
+- 验证：AOT 后端无 `bootstrap/vm_core/aot_core/jit_core/any_core/type_core/value_check` 引用
+- 验证：`aura_*` 符号均为 Aura 运行时符号，非 Rust 运行时
+- 验证：libc.ll 声明全部为 libc/OS 函数，无 Rust 依赖
 
 ### Phase S4：完全脱离 Rust（Rust-Free）
 

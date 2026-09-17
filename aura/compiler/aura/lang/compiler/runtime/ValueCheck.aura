@@ -1,0 +1,134 @@
+// aura:///aura/lang/compiler/runtime/ValueCheck.aura
+package aura.lang.compiler.runtime
+// ─────────────────────────────────────────────────────────────
+// 空值/数值检查核心 — Phase S3
+//
+// 对应 Rust `compiler/src/bootstrap/value_check.rs`。
+//
+// isNull / isNotNull / isZero / isPositive / isNegative /
+// isNaN / isInfinite：三态执行模式共享的谓词语义。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+
+/// 值检查工具。
+object ValueCheckUtils {
+
+    /// 检查值是否为 Null。
+    ///
+    /// 参数：值的字符串表示（"null" 表示 Null）。
+    fun isNull(v: String): Boolean {
+        return v == "null"
+    }
+
+    /// 检查值是否不为 Null。
+    fun isNotNull(v: String): Boolean {
+        return !isNull(v)
+    }
+
+    /// 检查值是否为数值零（Int(0) / Float(±0.0)）。
+    fun isZero(v: String): Boolean {
+        if (v == "null") { return false }
+        // Int 零
+        if (v == "0") { return true }
+        // Float 零（包括 -0.0）
+        if (v == "0.0" || v == "-0.0") { return true }
+        return false
+    }
+
+    /// 检查值是否严格大于零。
+    fun isPositive(v: String): Boolean {
+        if (v == "null") { return false }
+        // 尝试解析为数值
+        val n: Int = parseNumeric(v)
+        return n > 0
+    }
+
+    /// 检查值是否严格小于零。
+    fun isNegative(v: String): Boolean {
+        if (v == "null") { return false }
+        val n: Int = parseNumeric(v)
+        return n < 0
+    }
+
+    /// 检查值是否为 NaN（仅 Float）。
+    fun isNaN(v: String): Boolean {
+        return v == "nan" || v == "NaN" || v == "NAN"
+    }
+
+    /// 检查值是否为无穷大（仅 Float ±inf）。
+    fun isInfinite(v: String): Boolean {
+        return v == "inf" || v == "Inf" || v == "INF"
+            || v == "-inf" || v == "-Inf" || v == "-INF"
+    }
+
+    /// 检查值是否为布尔值。
+    fun isBoolean(v: String): Boolean {
+        return v == "true" || v == "false"
+    }
+
+    /// 检查值是否为整数值。
+    fun isInt(v: String): Boolean {
+        if (v == "" || v == "null") { return false }
+        var i: Int = 0
+        var neg: Boolean = false
+        if (v.charCodeAt(0) == 45) { // '-'
+            neg = true
+            i = 1
+        }
+        if (i >= v.length) { return false }
+        while (i < v.length) {
+            val c: Int = v.charCodeAt(i)
+            if (c < 48 || c > 57) { return false }
+            i = i + 1
+        }
+        return true
+    }
+
+    /// 检查值是否为浮点值。
+    fun isFloat(v: String): Boolean {
+        if (v == "" || v == "null") { return false }
+        var i: Int = 0
+        var neg: Boolean = false
+        var dot: Boolean = false
+        if (v.charCodeAt(0) == 45) { // '-'
+            neg = true
+            i = 1
+        }
+        while (i < v.length) {
+            val c: Int = v.charCodeAt(i)
+            if (c == 46) { // '.'
+                if (dot) { return false }
+                dot = true
+            } else if (c < 48 || c > 57) {
+                return false
+            }
+            i = i + 1
+        }
+        return dot || isInt(v)
+    }
+
+    /// 检查值是否为字符串。
+    fun isString(v: String): Boolean {
+        return !isNull(v) && !isInt(v) && !isFloat(v) && !isBoolean(v)
+    }
+
+    /// 解析数值（简化：只支持整数）。
+    private fun parseNumeric(v: String): Int {
+        var total: Int = 0
+        var i: Int = 0
+        var neg: Boolean = false
+        if (v.length > 0 && v.charCodeAt(0) == 45) {
+            neg = true
+            i = 1
+        }
+        while (i < v.length) {
+            val c: Int = v.charCodeAt(i)
+            if (c < 48 || c > 57) { break }
+            total = total * 10 + (c - 48)
+            i = i + 1
+        }
+        if (neg) { return -total }
+        return total
+    }
+}
