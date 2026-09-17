@@ -125,7 +125,13 @@ class TypeMapper {
         }
         else if (ty == "Any" || ty == "Nothing") { return "i8*" }
         else if (ty == "CString" || ty == "CStr" || ty == "Handle") { return "i8*" }
-        else if (ty == "Color") { return "{ i8, i8, i8, i8 }" }
+        // 注意：**不要**给具体类名做硬编码映射。此前这里把类型名 `Color` 一律
+        // 映射为 `{ i8, i8, i8, i8 }`（RGBA 字节），而用户源码里
+        // `value class Color(val r: Int, val g: Int, val b: Int)` 的真实布局是
+        // `%struct.Color = { i32, i32, i32 }` → 方法签名按值 4 字节、方法体按
+        // `%struct.Color*` 取字段，llc 报
+        // `'%var.N' defined with type '{ i8, i8, i8, i8 }' but expected 'ptr'`。
+        // 让类名走结构体/指针的通用映射即可。
         else if (ty == "List" || ty == "Map" || ty == "Set" || ty == "Value" ||
             ty == "Iterator" || ty == "Closure" || ty == "ArrayList"
             || ty == "HashSet" || ty == "LinkedList") {

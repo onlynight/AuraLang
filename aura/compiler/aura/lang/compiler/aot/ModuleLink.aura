@@ -71,7 +71,6 @@ class AotModuleLinker {
             }
             si = si + 1
         }
-        println("[L9] link done modules=" + toStr(this.loadedCount()))
         this.hir.rootId = this.hir.add("HirProgram", "", "", Span(0, 0, 1, 1, 1, 1), kids)
         return this.hir
     }
@@ -102,18 +101,6 @@ class AotModuleLinker {
         // 注意：不能直接 `p.ast.kindOf(...)` —— VM 对「字段访问得到的对象再调方法」
         // 会错乱 this 绑定（既有缺陷）。必须先取局部变量。
         val ast: Ast = p.ast
-        println("[L8] parsed count=" + toStr(ast.count))
-        println("[L8b] seenLines=" + toStr(aotLineCount(this.seen)))
-        val k0D: String = ast.kindOf(0)
-        println("[L8c] k0=" + k0D)
-        if (aotLineCount(this.seen) == 1) {
-            var zz: Int = 0
-            while (zz < ast.count) {
-                println("[K" + toStr(zz) + "] " + ast.kindOf(zz) + " | " + ast.textOf(zz))
-                zz = zz + 1
-            }
-            println("[K9] dumped")
-        }
 
         val dir: String = ModuleLinkUtils.dirOf(norm)
         // 分段收集、最后一次归并：`out = appendKids(out, …)` 在整棵导入树上是
@@ -372,7 +359,7 @@ object ModuleLinkUtils {
     fun popSegment(path: String): String {
         var i: Int = path.length - 1
         while (i >= 0) {
-            if (toStr(path[i]) == "/") {
+            if (path.charCodeAt(i) == 47) {
                 return aotSlice(path, 0, i)
             }
             i = i - 1

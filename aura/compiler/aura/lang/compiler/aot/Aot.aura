@@ -114,11 +114,9 @@ object AotUtils {
     fun aotBuildExeFromHirEx(hir: Hir, moduleName: String, outDir: String, llvmHome: String, basePath: String): AotExeResult {
         val r: AotExeResult = AotExeResult()
 
-        println("[A1] compileAotIrOnly enter")
         val opts: AotOptions = AotUtils.defaultAotOptionsEx(basePath)
         opts.emitCSource = false
         val a: AotLinkResult = AotUtils.compileAotIrOnlyEx(hir, opts)
-        println("[A2] IR done lines=" + toStr(a.irLines))
         val tgt: String = a.targetTriple
         r.target = tgt
 
@@ -135,7 +133,6 @@ object AotUtils {
         // 1. 落盘 LLVM IR
         FileSystem.mkdirP(outDir)
         FileSystem.writeText(llPath, a.llvmIr)
-        println("[A3] ll written")
 
         // 2. Phase 6.5.8：llc -verify 门禁（在编译前独立验证 IR 合法性）
         //    失败时立即定位首个非法指令，避免编译到一半才报错、定位困难。
@@ -146,7 +143,6 @@ object AotUtils {
         val verifyCmd: String = llc + " -mtriple " + tgt + " " + llPath +
             " -verify-each 2> " + AotUtils.aotWinPath(verifyLog)
         val verifyExit: Int = Process.run(verifyCmd)
-        println("[A4] verify exit=" + toStr(verifyExit))
         if (verifyExit != 0) {
             // IR 验证失败：保留 .ll + .verify.log，直接返回
             if (FileSystem.exists(verifyLog)) {
@@ -164,7 +160,6 @@ object AotUtils {
         val llcCmd: String = llc + " -mtriple " + tgt + " " + llPath +
             " -o " + objPath + " " + optFlag + " -filetype=obj 2> " + AotUtils.aotWinPath(logPath)
         r.llcExit = Process.run(llcCmd)
-        println("[A5] llc exit=" + toStr(r.llcExit))
         if (r.llcExit != 0) {
             if (FileSystem.exists(logPath)) {
                 val log: String = FileSystem.readText(logPath)

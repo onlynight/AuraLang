@@ -394,7 +394,7 @@ object MainUtils {
         var dot: Int = -1
         var j: Int = 0
         while (j < name.length) {
-            if (toStr(name[j]) == ".") {
+            if (name.charCodeAt(j) == 46) {
                 dot = j
             }
             j = j + 1
