@@ -127,11 +127,19 @@ class TypeMapper {
         else if (ty == "CString" || ty == "CStr" || ty == "Handle") { return "i8*" }
         else if (ty == "Color") { return "{ i8, i8, i8, i8 }" }
         else if (ty == "List" || ty == "Map" || ty == "Set" || ty == "Value" ||
-            ty == "Iterator" || ty == "Closure") {
+            ty == "Iterator" || ty == "Closure" || ty == "ArrayList"
+            || ty == "HashSet" || ty == "LinkedList") {
             return "i8*"
         }
         else if (ty.startsWith("List<") || ty.startsWith("Map<") ||
-            ty.startsWith("Set<") || ty.startsWith("Array<")) {
+            ty.startsWith("Set<") || ty.startsWith("Array<")
+            || ty.startsWith("ArrayList<") || ty.startsWith("HashSet<")
+            || ty.startsWith("LinkedList<")) {
+            // 集合实现的类型名同样按**句柄 `i8*`** 表示：
+            // 构造侧（`ArrayList()` / `mutableListOf()`）本来就发射成
+            // `aura_lang_std_Collections_emptyList()`（句柄），若类型侧仍当成
+            // `%struct.ArrayList*`，成员访问会拿句柄做结构体 `getelementptr`
+            // → 读到垃圾指针并崩溃（实测 `HashMap` 建桶时 0xC0000005）。
             return "i8*"
         }
         else if (ty.startsWith("Pointer<")) { return "ptr" }

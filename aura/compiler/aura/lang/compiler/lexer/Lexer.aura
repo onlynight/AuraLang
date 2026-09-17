@@ -214,7 +214,7 @@ class Lexer {
         this.pos = 0
         this.line = 1
         this.col = 1
-        this.kwTable = keywordSearchTable()
+        this.kwTable = TokenUtils.keywordSearchTable()
         this.kindList = arrayListOf<String>()
         this.litList = arrayListOf<String>()
         this.spanStart = arrayListOf<Int>()
@@ -386,7 +386,7 @@ class Lexer {
 
     /// 标识符 → 关键字 TokenKind（零分配；非关键字返回 `"Ident"`）。
     private fun lxKwKind(word: String): String {
-        return keywordLookup(this.kwTable, word)
+        return TokenUtils.keywordLookup(this.kwTable, word)
     }
 
     // ── 数字 ──

@@ -278,8 +278,10 @@ class Parser {
 
     /// 解析整个程序，返回 Program 节点 id（id 0）。
     fun parseProgram(): Int {
+        println("[PP] enter")
         var kids = noKids()
         while (!this.prsAtEnd()) {
+            println("[PP] iter kind=" + this.prsCurKind() + " pos=" + toStr(this.pos))
             this.prsSkipDocs()
             // 语句分隔符 `;`：Rust 侧允许顶层出现，统一跳过
             while (this.prsCheck("Semicolon")) {
@@ -287,9 +289,11 @@ class Parser {
             }
             if (!this.prsAtEnd()) {
                 val d = this.parseTopLevel()
+                println("[PP] topLevel ok")
                 kids = kidsAdd(kids, d)
             }
         }
+        println("[PP] loop end")
         return this.ast.add("Program", "", "", this.prsCurSpan(), kids)
     }
 
@@ -417,6 +421,7 @@ class Parser {
     /// 解析函数声明。
     /// `fun name(params): RetType { body }` 或 `fun name(params): RetType = expr`
     fun parseFunction(): Int {
+        println("[PF] enter")
         this.prsAdvance() // Fun
         // 泛型类型参数 `<T>` / `<T: Comparable<T>>`：整体跳过。
         // 不跳过时 `prsCurLit()` 会取到 `<`（非法名字），`prsExpectName` 又**不消费**
@@ -445,6 +450,7 @@ class Parser {
         }
         val name: String = this.prsCurLit()
         this.prsExpectName()
+        println("[PF] name=" + name)
 
         this.prsExpect("LParen")
         var params = noKids()
@@ -477,11 +483,13 @@ class Parser {
             }
         }
         this.prsExpect("RParen")
+        println("[PF] params done")
 
         var retTy: String = ""
         if (this.prsMatch("Colon")) {
             retTy = this.parseTypeName()
         }
+        println("[PF] retTy=" + retTy)
 
         var bodyKids = noKids()
         if (this.prsCheck("LBrace")) {
@@ -489,6 +497,7 @@ class Parser {
         } else if (this.prsMatch("Assign")) {
             bodyKids = kidsAdd(bodyKids, this.parseExpr())
         }
+        println("[PF] body=" + bodyKids)
 
         val paramsNode = this.ast.add("Params", "", "", this.prsCurSpan(), params)
         var bodyNode: Int = -1

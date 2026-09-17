@@ -1341,5 +1341,223 @@ llc/clang），用「带看门狗 + 阶段日志」的方式逐段验证；也�
    （集合、闭包、字符串方法、`HashMap` 等）存在边界 bug —— 可先用最小
    复现程序逐个验证这些构造在 Aura 产物中的行为。
 
+### 7.17 第十四轮：最小复现定位 —— HashMap 构造崩溃 + `indexOf` 恒 -1
+
+**探针 `build/_probe2.aura`**（String / List / HashMap / 继承，用 carrier 编译成
+Aura 产物后运行，带看门狗）：
+
+```
+1
+2 len=5 ✓      3 size=3 ✓     4 p1=b ✓     5 sub=a,b ✓
+6 idx=-1 ✗     ← String.indexOf("b") 对存在的子串返回 -1（应为 1）
+7 ch=97 ✓      8 starts=true ✓
+→ 第 9 步（HashMap 的 get）崩溃：RUN EXIT=-1073741819（0xC0000005）
+```
+
+**探针 `build/_probe3.aura`（细分）**：
+
+```
+A ctor          ← 打印成功
+（崩）          → RUN EXIT=-1073741819
+```
+
+⇒ **崩溃就在 `HashMap<String, Int>()` 构造路径上**（same 0xC0000005 as native2）。
+
+**IR 检查**：`%struct.HashMap` 布局已正确
+（`{ i8*, %struct.ArrayList* ×3, i32 ×4 }`，解析器修复后不再有垃圾字段），
+构造发射也正常（`malloc(sizeof)` + 逐字段 `store null` + 调 `HashMap_init1`），
+故崩溃点在 **`HashMap_init1` 内部或其调用的 callee**
+（`ArrayList` 构造 / `Collections.*` / `hashCode`/`equals` 路径）。
+
+**下一步**：
+
+1. 审 `HashMap_init1`（`_probe3.ll:1269`）体，逐个 callee 用最小探针验证，
+   定位首个崩溃调用；
+2. 顺带修 `String.indexOf`：Aura 侧对 String 接收者的 `indexOf` 仍走了
+   「列表语义」分支（`Hir.aura` 里已有注释指出「字符串 `indexOf` 因此走列表实现
+   恒返回 -1」），需让 String 接收者保留为方法调用并解析到
+   `String_indexOf`/内联实现。
+
+### 7.18 第十五轮：HashMap 崩溃根因（`ArrayList.add` 是字符串拼接 + 类型映射不一致）
+
+**两个根因（均已修）**：
+
+1. `ArrayList.add` 的实现是 `data = data + item` —— `+` 在发射器里是**字符串拼接**
+   （`aura_string_concat`），把列表句柄当 C 字符串解引用。IR 证据：
+   ```llvm
+   %var.131 = call i8* @aura_string_concat(%var.126, …, %var.128, …)
+   store i8* %var.131, i8* %var.133            ; add 在拼字符串
+   ```
+   `HashMap` 建桶/取值全依赖 `ArrayList.add` ⇒ 构造 `HashMap<K,V>()` 时直接
+   0xC0000005（与 native2 崩溃同类）。
+   修法：`add`/`remove` 改为列表方法（语句式）——
+   `data.add(item)`（走 `aura_lang_std_Collections_listAppend`）、
+   `newData.add(data[i])`；
+   同时把 `data: Array<T>` 改为 `data: List<T>`、`arrayOf<T>()` 改为
+   `mutableListOf<T>()`（`Array<T>` 在 Rust 侧不被认作集合，会退化成未定义裸符号
+   `@add`，破坏 Stage-1）。**注意不能写成 `data = data.add(item)`**：Rust 侧 `add`
+   按语句处理（无返回值）。
+
+2. **类型映射不一致**：`TypeMapper.map` 只把 `List<…/Map<…/Set<…/Array<…` 映射为句柄
+   `i8*`，**漏了 `ArrayList<…`** ⇒ 类型侧当 `%struct.ArrayList*`，而构造侧
+   （`ArrayList()` / `mutableListOf()`）发射的是 `aura_lang_std_Collections_emptyList()`
+   句柄 ⇒ 成员访问对句柄做结构体 `getelementptr` → 读垃圾指针 → 崩溃。
+   修法：`ArrayList` / `ArrayList<…`（另含 `HashSet` / `LinkedList`）统一映射为 `i8*`。
+
+**验证**：
+```
+build/_probe3.exe →  EXIT=0
+A ctor / B ctor ok / C put ok / D get=0 / E done      ← 不再崩溃
+```
+
+**剩余语义问题（下一步）**：`put("k", 7)` 后 `get("k")` 得到 **0**（应为 7）⇒
+装箱/拆箱或桶内元素类型标注仍有偏差；`coerceValue` 的 `i8* → 整数` 分支已按
+Plan A 调 `aura_to_int_any` 拆箱，故嫌疑在 **put 时值的装箱** 或
+`typeArgElemTy` 对 `ArrayList<V>` 的元素类型判定。native2 内部同样使用 HashMap，
+该语义错误极可能就是 Stage-4 仍崩溃的直接原因。
+
+### 7.19 第十六轮：HashMap 取值为 0 的根因（HIR 接收者丢失）与属性 getter
+
+**根因（HIR 层，最关键）**：`Hir.lowerCall` 里 `get` / `set` 的降级分支
+**从 `kids[0]` 开始遍历**，把 callee 成员节点（`get` 本身）也降级进去：
+
+```aura
+var i: Int = 0
+while (i < kCount) { ... hirKids = hirKidsAdd(hirKids, lowerExpr(ast, hirKidsAt(kids, i))) ... }
+return this.hir.add("HirCall", "Collections.getAt", "", sp, hirKids)
+```
+
+于是 `m.get("k")` 的 kids[0] 变成一次**成员访问**（推断 i32），真正接收者 `m`
+被埋进它的 kids 里。后果：
+
+* 发射器把它当**集合下标** → `aura_lang_std_Collections_getAt(null, <"k" 转成的下标>)`
+  → 恒读不到值（实测 `m.get("k")` 得 0，甚至整段调用被丢弃）；
+* 合法集合取元素 `xs.get(i)` 同样实参错位。
+
+**修法**：接收者取 `ast.kidsOf(calleeId)` 的首个子节点，其余实参从 `kids[1]` 起
+（与 `contains`/`indexOf` 分支及普通方法调用一致）。
+修复后 `Collections.getAt(recv, i)` 形状正确，发射器再按接收者类型分流
+（类实例 → `<Cls>_get`；集合句柄 → C `getAt`）。
+
+**配套修复（发射器）**：
+
+1. 新增 `Collections.getAt` / `Collections.set` 分支：类实例（`%struct.X*`）→
+   `<Cls>_get` / `<Cls>_set`；集合句柄（`i8*`）→ `aura_lang_std_Collections_getAt/set`；
+   `inferType` 同步返回 `i8*`；`preludeTable` 补
+   `aura_lang_std_Collections_set|i8*|i8*,i64,i8*`。
+2. **属性 getter 优先于同名字段**：`val size: Int get() = _size` 这类属性会被
+   `registerStruct` 当字段登记（它按 `HirValDecl`/`HirVarDecl` 收集），直接读字段
+   会读到未初始化槽位（`HashMap.size` 恒 0）。现在存在 `getX()` 时调用 getter。
+3. **第三处「Aura 编译路径」补值接收者判定**（从 C 符号名反推类名那一路）：
+   此前一律 `effArgStart = 1` + `%struct.X*` 占位 → `s.indexOf(sub)` 发成
+   `String_indexOf(%struct.String* null, i8* sub)`，而定义接收者是 `i8*`
+   → callee 拿到 null → **恒返回 -1**（编译器自身扫描字符串因此拿到负下标切片的
+   崩溃源头之一）。
+
+**验证（Aura 侧产物，全部看门狗 + 退出码 0）**：
+
+```
+_probe4:  size=1  gs=1  has=true  get=7  done
+_probe2:  2 len=5  3 size=3  4 p1=b  5 sub=a,b  6 idx=2  7 ch=97  8 starts=true
+          9 get=7  10 name=derived  11 done        （String / List / HashMap / 继承 全对）
+_probe3:  A ctor / B ctor ok / C put ok / D get=7 / E done
+回归:     语言测试 25/25 ✓   HashMap(VM) 157/0 ✓   Stage-1 ✓   Stage-3 ✓（native2 33s）
+```
+
+### 7.20 第十七轮：Stage-4 崩溃链收敛（`length()` 调用形式 → NUL 缓冲内容）
+
+用**阶段标记**（`println` 已 `fflush`，崩溃时最后一行仍可见）逐层定位 native2 的静默
+崩溃，得到完整证据链：
+
+| 层 | 载体（Rust 编出） | native2（Aura 发射器编出） |
+|---|---|---|
+| `loadPath` 读文件 | `readText` 走 C 运行库 | 走 Aura `Stdio.readFile` |
+| `Stdio.readFile` | len=21 ✓ | len=21 ✓（`total=21` ✓） |
+| `Lexer.init` | `argLen=21 n=21 srcLen=21` + `head="fun main(): Unit {"` ✓ | `argLen=21 n=21 srcLen=21` 但 **`head=000000000000000000000`** ✗ |
+| `parseProgram` | AST = `Block/Params/Function/Program`（4 节点）✓ | AST = `IntLiteral/ExprStmt/Program`（3 节点）✗（把源码当数字字面量） |
+
+**直接原因（已修）**：`Lexer.init` 写的是 `this.n = source.length()` ——
+`length` 的**方法调用形式**；而发射器只实现了**属性形式** `x.length`
+（`emitMember`），调用形式落到「未解析符号」回退 → 静默返回 `0`
+→ `this.n = 0` → 词法器 `pos >= n` 立刻成立 → 只产出 `EOF` → 空 AST → 崩溃。
+
+**修复**：`Emit.aura::emitCall` 新增 0.5) 分支处理 `x.length()` / `x.size()`
+（集合 → `aura_lang_std_Collections_count`；其余 → `aura_strlen`，都 `trunc` 到 `i32`），
+`inferTypeUncached` 同步返回 `i32`。效果：native2 的 AST 由 1 → 3 节点。
+
+**仍存的下一层差异（下一步）**：AST 仍差 1 个节点，根因是
+**native2 读到的字符串内容全为 NUL**（长度对、内容错）—— 即
+`Stdio.bufferToString`（`Memory.read(buf + i)` → `String.fromCharCode(c)` 逐字节）
+在 Aura 发射器生成的代码里取不到真实字节。嫌疑点：
+`Memory.read` 的发射（地址/宽度/`Byte` 窄化）、`String.fromCharCode` 的发射、
+或 `Stdio.readFile` 里 `FileOps.read(fd, buf+total, cap-total)` 的缓冲区写入。
+建议下一步：给 `bufferToString` 内层循环加标记（打印前若干 `c` 与 `buf` 地址），
+区分「缓冲区本身为空」还是「读取指令/转换错」。
+
+**建议的插桩手法（本轮已验证有效）**：在 `AotModuleLinker.link/loadPath`、
+`AotUtil.aotMemMark`、`Lexer.init`、`Stdio.readFile`、`FileSystem.readText`
+等处加 `println("[标签] …")`，重建 Stage-1（~35s）与 Stage-3（~35s）后运行，
+崩溃点即为**最后一行标记之后的第一条语句**；`println` 内部 `fflush(stdout)`，
+输出不会因崩溃丢失。
+
+### 7.21 第十八轮：`String.fromCharCode` 与 `String.countChar`（Aura 发射器）
+
+**已修复并验证（探针在「Aura 发射器产物」下运行，可快速复现/回归）**：
+
+| # | 缺陷 | 现象 | 修复 |
+|---|---|---|---|
+| 1 | `String.fromCharCode(c)` 未实现：Aura 侧实现是 `code.toChar().toString()`，发射器无 `toChar`/`Char.toString` → 「未解析符号」返回 0 → 拼串时 `aura_to_str(0)` 变 **"0"** | `FileSystem.readText` 把**任意文件读成一串 "0"**（长度对、内容全错）→ 词法器读到 "000…" → 把源码解析成 `IntLiteral` ✗ | `Emit.aura::emitCall` 0.4) 分支**内联构造**：`aura_malloc(2)` + 存字符 + NUL；`inferType` → `i8*`。探针 `_probe5`：`readText` 返回真实内容（`code0=102` ✓） |
+| 2 | `String.countChar(sub)` 走 Aura 实现，而 Aura 签名是 `countChar(char: Char)`，调用点却传**字符串**（`"\n"`）→ 实参错位 → 恒 0 | `aotLineCount` 恒 0 → 模块链接的逐行解析全废 | `Emit.aura::emitCall` 0.45) 分支直接调 C 运行库 `aura_lang_std_String_countChar`（`i64` → `trunc i32`）；`Runtime.aura::preludeTable` 补该符号声明。探针 `_probe7`：`count=2 lines=2 ends=true` ✓ |
+| 3 | 回归保护：`Collections.getAt` 的**集合句柄路径**缺元素拆箱 | `List<Int>` 下标（`spanStart[i]` 等）拿到装箱指针当整数 → 垃圾下标 | 与 `emitIndex` 对齐：`coerceValue(t, "i8*", receiverElemTy(...))`；`inferType` 同步返回元素类型 |
+
+**定位手法（重要）**：不再每轮重建 native2（~70s/轮），而是**用载体编译小探针** —— 探针同样是「Aura 发射器产物」，能在**小程序里复现** native2 的同类问题（`_probe5`/`_probe7` 即如此），迭代速度快一个数量级。
+
+**下一步（已缩小到两个点）**：native2 现在能正确读到源码 ✓，但
+
+* `[L8b] aotLineCount(this.seen) == 0`（应为 1）✗
+* `[L8c] ast.kindOf(0) == "Ident"`（应为 `Block`）✗ —— 首个节点是**标识符**暗示
+  **关键字表查询失效**（`Lexer.kwTable` 靠 `String.contains` + 切片）✗
+
+嫌疑集中在 `String.contains` / 关键字表构造，以及 `this.seen`（字符串字段）的读写。
+建议：先用探针（载体编译）验证 `"...".contains("fun")`、`keywordSearchTable()` 的返回，
+再决定是补发射器分支还是修标准库实现。
+
+**注意**：当前源码树中仍留有本轮为定位而加的阶段标记
+（`ModuleLink` 的 `[L8]/[L8b]/[L8c]/[L9]`、`Aot.aura` 的 `[A1]…[A5]`、`Hir.lower` 的 `[H1]`），
+定位完成后需一并移除。
+
+### 7.22 第十九轮：探针化定位（词法器已完全修好）
+
+**方法**：用载体编译**小探针**（探针同样是「Aura 发射器产物」），把 native2 的失败路径
+搬进小程序，并保持「VM 跑同一探针」作为参照答案。迭代从 ~70s/轮降到 ~40s/轮。
+
+**本轮修复（全部探针验证）**：
+
+| # | 缺陷 | 现象 | 修复 |
+|---|---|---|---|
+| 1 | `String.fromCharCode` 未实现（Aura 实现是 `code.toChar().toString()`） | `readText` 把文件读成一串 "0" | `emitCall` 内联构造 2 字节 C 串 |
+| 2 | `String.countChar` 走 Aura 实现而签名是 `Char` | `aotLineCount` 恒 0 | 直连 C 运行库 + 声明 |
+| 3 | `Collections.getAt` 句柄路径缺元素拆箱 | `List<Int>` 下标拿指针当整数 | 与 `emitIndex` 对齐 |
+| 4 | `Collections.contains/indexOf/pairOf` **inferType 缺分支** | 值正确（分支语义对）但 `toStr` 走整数路径 → 打印 `-1`/`0` 而非 `true`/`false` | 补 `i1`/`i32`/`i8*` 推断 |
+| 5 | **裸名调用 object 静态方法**（`keywordSearchTable()`）不解析 | `Lexer.kwTable` 为空 → 全部关键字识别失败 → kind 空串 → 垃圾 AST | `Emit.aura` 增加「跨 object 查找」解析路径（**必须在 `var callee = "@" + sym` 之前**，否则出现「参数按签名收敛、符号名仍是裸名」→ llc `use of undefined value '@fieldAt'`）＋ `inferType` 同步；另把 `Lexer.aura` 两处裸名改为 `TokenUtils.` 限定（该文件其它位置本就限定） |
+| 6 | （回归保护）`Collections.getAt` 拆箱、`length()` 调用形式等 | — | 已并入上表 |
+
+**当前状态**：
+
+* 词法器**已完全正确**：探针 `_probe11` 输出 `kwLen=861`、`t0=[Fun]|fun`、`t5=[Unit]|Unit` ✓
+* 解析器仍崩：探针 `_probe12` 打印 `A start` / `B parser built` 后在
+  **`p.parseProgram()` 内部** ACCESS_VIOLATION（`0xC0000005`）✗
+* 回归全绿：语言测试 25/25 ✓、HashMap(VM) ✓、探针 `_probe2/4/5/7/10/11` ✓
+
+**下一步**：在 `Parser.parseProgram` / `parseTopLevel` / `parseFunction` 内加阶段标记
+（载体重建 ~35s + 探针编译 ~30s 一轮），把崩溃收敛到具体语句。
+
+**Stage-4 现状**：`native2 build/_empty.aura -o …` 仍在 ~3.4s **静默崩溃**
+（0xC0000005，无 `.ll` 产出）⇒ 崩溃点在 native2 的**链接/发射**阶段，且与
+HashMap / 字符串方法 / 属性读取这些已修问题**无关**了。下一步方向：
+在 `AotModuleLinker.link()` 与发射器的关键点加阶段打印（需重建 Stage-1 + Stage-3），
+或对 native2 做更细的最小输入二分（如空模块、仅 `fun main(){}` 已试过 → 仍崩，
+说明是**模块链接本身**或**发射器初始化**路径）。
+
 
 

@@ -103,10 +103,19 @@ object RuntimeUtils {
             "aura_lang_std_Collections_listAppend|i8*|i8*,i8*\n" +
             "aura_lang_std_Collections_count|i64|i8*\n" +
             "aura_lang_std_Collections_getAt|i8*|i8*,i64\n" +
+            // `Collections_set`：HIR 把 `x[i] = v` / `x.set(i, v)` 降级为
+            // `Collections.set(x, i, v)`，发射器按 C 符号
+            // `aura_lang_std_Collections_set` 发射（返回列表句柄 `i8*`，
+            // 供 `xs = Collections.set(xs, …)` 赋值回变量）。
+            // C 运行库原型：`const void *aura_lang_std_Collections_set(const void*, int64_t, const void*)`。
+            "aura_lang_std_Collections_set|i8*|i8*,i64,i8*\n" +
             "aura_lang_std_Collections_listSet|void|i8*,i64,i8*\n" +
             "aura_lang_std_Collections_filter|i8*|i8*,i8*\n" +
             "aura_lang_std_Collections_map|i8*|i8*,i8*\n" +
-            "aura_lang_std_Collections_take|i8*|i8*,i64\n"
+            "aura_lang_std_Collections_take|i8*|i8*,i64\n" +
+            // `String.countChar`：Aura 发射器直接走 C 运行库
+            //（Aura 侧实现签名是 `countChar(char: Char)`，与调用点传字符串不符 → 恒 0）。
+            "aura_lang_std_String_countChar|i64|i8*,i8*\n"
     }
 
     /// 生成所有 runtime 函数 + 调用点符号的 LLVM 外部声明（去重）。

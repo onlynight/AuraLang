@@ -434,6 +434,7 @@ class HirLowerer {
 
     /// 执行降级，返回 HIR 根节点 id。
     fun lower(program: Ast): Int {
+        println("[H1] lower enter astCount=" + toStr(program.count))
         this.ast = program
         this.hir = Hir()
         // 查找 Program 根节点（可能不在 index 0）
@@ -1407,7 +1408,20 @@ class HirLowerer {
                     val calleeKCount: Int = HirUtils.hirKidsCount(calleeKids)
                     if (calleeKCount >= 1) {
                         var hirKids: String = HirUtils.hirNoKids()
-                        var i: Int = 0
+                        // **接收者必须作为 kids[0]**（发射器约定：接收者在 kids[0]）。
+                        // 旧实现从 i=0 起遍历**全部** kids，把 callee 成员节点
+                        // （`get` 本身）也降级进去 → kids[0] 变成一次成员访问
+                        // （推断 i32），真正接收者被埋在其 kids 里。后果：
+                        //   * `HashMap.get("k")` 被当集合下标 → 发射器走
+                        //     `aura_lang_std_Collections_getAt(null, idx)`（语义错，
+                        //     读不到值、恒为空）；
+                        //   * `xs.get(i)`（合法集合取元素）实参整体错位。
+                        // 正确形状：`Collections.getAt(recv, i)`。
+                        val getRecvHir: Int = this.lowerExpr(ast, HirUtils.hirKidsAt(calleeKids, 0))
+                        if (getRecvHir >= 0) {
+                            hirKids = HirUtils.hirKidsAdd(hirKids, getRecvHir)
+                        }
+                        var i: Int = 1
                         while (i < kCount) {
                             val childId: Int = HirUtils.hirKidsAt(kids, i)
                             val childHirId: Int = this.lowerExpr(ast, childId)
@@ -1424,9 +1438,14 @@ class HirLowerer {
                     val calleeKids: String = ast.kidsOf(calleeId)
                     val calleeKCount: Int = HirUtils.hirKidsCount(calleeKids)
                     if (calleeKCount >= 1) {
-                        val objId: Int = HirUtils.hirKidsAt(calleeKids, 0)
                         var hirKids: String = HirUtils.hirNoKids()
-                        var i: Int = 0
+                        // 同 `get`：接收者作 kids[0]，其余实参从 kids[1] 起
+                        //（旧实现从 0 起 → 接收者丢失、实参错位）。
+                        val setRecvHir: Int = this.lowerExpr(ast, HirUtils.hirKidsAt(calleeKids, 0))
+                        if (setRecvHir >= 0) {
+                            hirKids = HirUtils.hirKidsAdd(hirKids, setRecvHir)
+                        }
+                        var i: Int = 1
                         while (i < kCount) {
                             val childId: Int = HirUtils.hirKidsAt(kids, i)
                             val childHirId: Int = this.lowerExpr(ast, childId)
