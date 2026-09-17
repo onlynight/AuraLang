@@ -19,19 +19,19 @@ object RuntimeUtils {
 
     /// 全部 runtime 函数声明表。
     fun runtimeTable(): String {
-        return "aura_arc_increment|void|i8*\n" +
-            "aura_arc_decrement|void|i8*\n" +
-            "aura_coroutine_yield|void|i8*\n" +
-            "aura_malloc|i8*|i64\n" +
-            "aura_free|void|i8*\n" +
-            "aura_string_new|i8*|i8*,i64\n" +
-            "aura_string_length|i64|i8*\n" +
-            "toStringFloat|i8*|double\n" +
-            "aura_string_data|i8*|i8*\n" +
-            "aura_string_concat|i8*|i8*,i64,i8*,i64\n" +
-            // 内存诊断：AOT 运行时当前存活分配（MiB）。Aura 自举编译器
-            // （`aot/AotUtil.aura::aotMemMB` → `Main.aura --mem-trace`）依赖它。
-            "aura_mem_used_mb|i32|\n"
+        return ""
+            // Phase C: 全部 C 映射已移除（Emit.aura 改用系统 libc、内联 IR 或 Aura 函数）
+            // "toStringFloat|i8*|double\n" +
+            // "aura_mem_used_mb|i32|\n" +
+            // "aura_arc_increment|void|i8*\n" +
+            // "aura_arc_decrement|void|i8*\n" +
+            // "aura_coroutine_yield|void|i8*\n" +
+            // "aura_malloc|i8*|i64\n" +
+            // "aura_free|void|i8*\n" +
+            // "aura_string_new|i8*|i8*,i64\n" +
+            // "aura_string_length|i64|i8*\n" +
+            // "aura_string_data|i8*|i8*\n" +
+            // "aura_string_concat|i8*|i8*,i64,i8*,i64\n" +
     }
 
     /// C FFI 实现（aura_std_cffi.c）的真实 ABI 签名表。
@@ -52,18 +52,20 @@ object RuntimeUtils {
     /// 字符串边界（Phase 6.5.5）：Aura 侧 AOT 发射器内部按 **`i8*`（C 字符串）**
     /// 表示 String，与 C ABI (`const char*`) 直接对齐，跨边界无需 coerce。
     fun preludeTable(): String {
-        return "aura_println|void|i8*\n" +
-            "aura_print|void|i8*\n" +
-            "aura_to_str|i8*|i64\n" +
-            "aura_to_str_float|i8*|double\n" +
-            "aura_to_str_bool|i8*|i64\n" +
-            "toString|i8*|i64\n" +
-            "toStr|i8*|i64\n" +
-            "aura_to_int_any|i64|i64\n" +
-            "aura_to_str_any|i8*|i64\n" +
-            "aura_strlen|i64|i8*\n" +
-            "aura_str_to_int|i64|i8*\n" +
-            "aura_str_to_float|double|i8*\n" +
+        return ""
+            // Phase C: 全部 C 映射已移除（Emit.aura 改用内联 IR）
+            // "aura_println|void|i8*\n" +
+            // "aura_print|void|i8*\n" +
+            // "aura_to_str_float|i8*|double\n" +
+            // "aura_to_str|i8*|i64\n" +
+            // "aura_to_str_bool|i8*|i64\n" +
+            // "aura_to_int_any|i64|i64\n" +
+            // "aura_to_str_any|i8*|i64\n" +
+            // "aura_strlen|i64|i8*\n" +
+            // "aura_str_to_int|i64|i8*\n" +
+            // "aura_str_to_float|double|i8*\n" +
+            // "toString|i8*|i64\n" +
+            // "toStr|i8*|i64\n" +
             // Phase B.1: String 相关 C 映射已移除（String.aura 自动包含，调用走 Aura 编译）
             // ── Phase B.1 前保留（已注释）──
             // "aura_lang_std_String_toInt|i64|i8*\n" +
@@ -142,6 +144,9 @@ object RuntimeUtils {
         out.sbAdd("declare i32 @_mkdir(i8*)\n")
         out.sbAdd("declare i32 @_rmdir(i8*)\n")
         out.sbAdd("declare i32 @_getpid()\n")
+        // Phase C: _snprintf 用于内联 float→string 转换（替换 aura_to_str_float）
+        out.sbAdd("declare i32 @_snprintf(i8*, i32, i8*, ...)\n")
+        out.sbAdd("@fmt_float_g = private unnamed_addr constant [3 x i8] c\"%g\\00\"\n")
         // ── 命令行参数（跨平台，`aura_std_cffi.c`）──
         //
         // 生成的 C 入口先 `aura_args_set(argc, argv)` 注入宿主参数，以下两个
@@ -185,13 +190,11 @@ object RuntimeUtils {
         // `is` 类型检查（`when` 模式 / `x is T`）：签名 `(value: i8*, typeName: i8*) → i1`，
         // typeName 为 C 字符串（不是 AuraString 结构体指针），与 Rust 侧声明保持一致。
         out.sbAdd("declare i1 @aura_isOfType(i8*, i8*)\n")
-        // Phase B.1 曾把 `aura_lang_std_String_*` 的 C 映射从 `preludeTable` 移除
-        //（预期调用全部改走 Aura 编译的 `String_*`）。但仍有调用点按 C 符号发射
-        //（`String.charAt` / 值相等判定），而 C 运行库**确实提供**这两个实现
-        //（`aura_std_cffi.c`）。缺 `declare` 时 llc 直接报
-        // `use of undefined value '@aura_lang_std_String_charAt'`。
-        out.sbAdd("declare i8* @aura_lang_std_String_charAt(i8*, i64)\n")
-        out.sbAdd("declare i32 @aura_lang_std_String_equals(i8*, i8*)\n")
+        // Phase C: 以下 C 映射声明已移除（Emit.aura 改用 Aura 编译的 String_* 函数）
+        // "declare i8* @aura_lang_std_String_charAt(i8*, i64)\n" +
+        // "declare i32 @aura_lang_std_String_equals(i8*, i8*)\n" +
+        // 内存诊断：AotUtil.aura::aotMemMB 依赖此 C 函数
+        out.sbAdd("declare i32 @aura_mem_used_mb()\n")
         appendDeclarations(out, runtimeTable())
         val seenR: String = runtimeFunctionNames()
         // `defs`：本模块已有 `define` 的符号（见 `Emit.aura::fDefNames`）。
@@ -317,35 +320,35 @@ object RuntimeUtils {
         if (name == "filter") { return "Collections_filter" }
         else if (name == "map") { return "Collections_map" }
         else if (name == "take") { return "Collections_take" }
-        else if (name == "length" || name == "size") { return "aura_lang_std_String_length" }
-        else if (name == "contains") { return "aura_lang_std_String_contains" }
-        else if (name == "startsWith") { return "aura_lang_std_String_startsWith" }
-        else if (name == "endsWith") { return "aura_lang_std_String_endsWith" }
-        else if (name == "indexOf") { return "aura_lang_std_String_indexOf" }
-        else if (name == "lastIndexOf") { return "aura_lang_std_String_lastIndexOf" }
+        else if (name == "length" || name == "size") { return "String_length" }
+        else if (name == "contains") { return "String_contains" }
+        else if (name == "startsWith") { return "String_startsWith" }
+        else if (name == "endsWith") { return "String_endsWith" }
+        else if (name == "indexOf") { return "String_indexOf" }
+        else if (name == "lastIndexOf") { return "String_lastIndexOf" }
         else if (name == "countChar") { return "String_countCharStr" }
-        else if (name == "substring") { return "aura_lang_std_String_substring" }
-        else if (name == "substringBefore") { return "aura_lang_std_String_substringBefore" }
-        else if (name == "substringAfter") { return "aura_lang_std_String_substringAfter" }
-        else if (name == "charAt") { return "aura_lang_std_String_charAt" }
-        else if (name == "charCodeAt") { return "aura_lang_std_String_charCodeAt" }
-        else if (name == "toUpperCase") { return "aura_lang_std_String_toUpperCase" }
-        else if (name == "toLowerCase") { return "aura_lang_std_String_toLowerCase" }
-        else if (name == "trim") { return "aura_lang_std_String_trim" }
-        else if (name == "replace") { return "aura_lang_std_String_replace" }
-        else if (name == "replaceAll") { return "aura_lang_std_String_replaceAll" }
-        else if (name == "padStart") { return "aura_lang_std_String_padStart" }
-        else if (name == "split") { return "aura_lang_std_String_split" }
-        else if (name == "equals") { return "aura_lang_std_String_equals" }
-        else if (name == "toInt") { return "aura_lang_std_String_toInt" }
-        else if (name == "toLong") { return "aura_lang_std_String_toLong" }
-        else if (name == "toFloat") { return "aura_lang_std_String_toFloat" }
-        else if (name == "toDouble") { return "aura_lang_std_String_toDouble" }
-        else if (name == "toBoolean") { return "aura_lang_std_String_toBoolean" }
-        else if (name == "toCharArray") { return "aura_lang_std_String_toCharArray" }
-        else if (name == "isEmpty") { return "aura_lang_std_String_isEmpty" }
-        else if (name == "isBlank") { return "aura_lang_std_String_isBlank" }
-        else if (name == "padEnd") { return "aura_lang_std_String_padEnd" }
+        else if (name == "substring") { return "String_substring" }
+        else if (name == "substringBefore") { return "String_substringBefore" }
+        else if (name == "substringAfter") { return "String_substringAfter" }
+        else if (name == "charAt") { return "String_charAt" }
+        else if (name == "charCodeAt") { return "String_charCodeAt" }
+        else if (name == "toUpperCase") { return "String_toUpperCase" }
+        else if (name == "toLowerCase") { return "String_toLowerCase" }
+        else if (name == "trim") { return "String_trim" }
+        else if (name == "replace") { return "String_replace" }
+        else if (name == "replaceAll") { return "String_replaceAll" }
+        else if (name == "padStart") { return "String_padStart" }
+        else if (name == "split") { return "String_split" }
+        else if (name == "equals") { return "String_equals" }
+        else if (name == "toInt") { return "String_toInt" }
+        else if (name == "toLong") { return "String_toLong" }
+        else if (name == "toFloat") { return "String_toFloat" }
+        else if (name == "toDouble") { return "String_toDouble" }
+        else if (name == "toBoolean") { return "String_toBoolean" }
+        else if (name == "toCharArray") { return "String_toCharArray" }
+        else if (name == "isEmpty") { return "String_isEmpty" }
+        else if (name == "isBlank") { return "String_isBlank" }
+        else if (name == "padEnd") { return "String_padEnd" }
         else { return "" }
     }
 
