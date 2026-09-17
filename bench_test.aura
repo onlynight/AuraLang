@@ -1,0 +1,190 @@
+// bench_test.aura - 性能基准测试文件
+// 用于对比 Rust vs Aura 编译器性能
+
+import aura.lang.std.String
+import aura.lang.std.Collections
+
+fun fib(n: Int): Int {
+    if (n <= 0) return 0
+    if (n == 1) return 1
+    return fib(n - 1) + fib(n - 2)
+}
+
+fun factorial(n: Int): Int {
+    if (n <= 1) return 1
+    return n * factorial(n - 1)
+}
+
+fun loopSum(n: Int): Int {
+    var sum: Int = 0
+    for (i in 0..n) {
+        sum = sum + i
+    }
+    return sum
+}
+
+fun matrixMul(size: Int): Int {
+    var result: Int = 0
+    for (i in 0..size) {
+        for (j in 0..size) {
+            for (k in 0..size) {
+                result = result + i * j * k
+            }
+        }
+    }
+    return result
+}
+
+class Counter {
+    var count: Int = 0
+    
+    fun increment() {
+        this.count = this.count + 1
+    }
+    
+    fun getCount(): Int {
+        return this.count
+    }
+}
+
+struct Point(val x: Int, val y: Int)
+
+fun stringConcat(n: Int): String {
+    var result: String = ""
+    for (i in 0..n) {
+        result = result + "item" + i.toString()
+    }
+    return result
+}
+
+fun listOps(n: Int): Int {
+    val list = Collections.mutableListOf()
+    for (i in 0..n) {
+        list.add(i)
+    }
+    return list.size
+}
+
+fun mapOps(n: Int): Int {
+    val map = Collections.mutableMapOf<String, Int>()
+    for (i in 0..n) {
+        map["key" + i.toString()] = i
+    }
+    return map.size
+}
+
+fun recursion(n: Int): Int {
+    if (n == 0) return 1
+    return n * recursion(n - 1)
+}
+
+fun whileLoop(n: Int): Int {
+    var i: Int = 0
+    var sum: Int = 0
+    while (i < n) {
+        sum = sum + i
+        i = i + 1
+    }
+    return sum
+}
+
+fun nestedLoop(n: Int): Int {
+    var count: Int = 0
+    for (i in 0..n) {
+        for (j in 0..n) {
+            count = count + 1
+        }
+    }
+    return count
+}
+
+fun ifElse(n: Int): Int {
+    var result: Int = 0
+    for (i in 0..n) {
+        if (i % 2 == 0) {
+            result = result + 1
+        } else {
+            result = result - 1
+        }
+    }
+    return result
+}
+
+fun tryCatch(n: Int): Int {
+    var result: Int = 0
+    try {
+        for (i in 0..n) {
+            result = result + i
+            if (i == 100) {
+                throw "exception at 100"
+            }
+        }
+    } catch (e: String) {
+        result = result + 1
+    }
+    return result
+}
+
+fun main() {
+    println("=== Benchmark Test ===")
+    
+    // 1. Fibonacci
+    val fib10: Int = fib(10)
+    println("fib(10) = " + fib10.toString())
+    
+    // 2. Factorial
+    val fact10: Int = factorial(10)
+    println("factorial(10) = " + fact10.toString())
+    
+    // 3. Loop Sum
+    val sum100: Int = loopSum(100)
+    println("loopSum(100) = " + sum100.toString())
+    
+    // 4. Matrix Multiply
+    val mat5: Int = matrixMul(5)
+    println("matrixMul(5) = " + mat5.toString())
+    
+    // 5. String Concat
+    val strResult: String = stringConcat(50)
+    println("stringConcat(50).length = " + strResult.length.toString())
+    
+    // 6. List Ops
+    val listSize: Int = listOps(100)
+    println("listOps(100).size = " + listSize.toString())
+    
+    // 7. Map Ops
+    val mapSize: Int = mapOps(100)
+    println("mapOps(100).size = " + mapSize.toString())
+    
+    // 8. Recursion
+    val rec10: Int = recursion(10)
+    println("recursion(10) = " + rec10.toString())
+    
+    // 9. While Loop
+    val while100: Int = whileLoop(100)
+    println("whileLoop(100) = " + while100.toString())
+    
+    // 10. Nested Loop
+    val nested10: Int = nestedLoop(10)
+    println("nestedLoop(10) = " + nested10.toString())
+    
+    // 11. If/Else
+    val ifelse100: Int = ifElse(100)
+    println("ifElse(100) = " + ifelse100.toString())
+    
+    // 12. Try/Catch
+    val trycatch100: Int = tryCatch(100)
+    println("tryCatch(100) = " + trycatch100.toString())
+    
+    // 13. Class
+    val counter = Counter()
+    counter.increment()
+    counter.increment()
+    println("Counter.count = " + counter.getCount().toString())
+    
+    // 14. Struct
+    val p = Point(1, 2)
+    println("Point.x = " + p.x.toString())
+    
+    println("=== Benchmark Complete ===")
+}
