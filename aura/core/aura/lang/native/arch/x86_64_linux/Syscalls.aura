@@ -13,7 +13,7 @@ package aura.lang.native.arch.x86_64_linux
 import aura.lang.native.Memory
 
 /// x86_64 Linux 系统调用
-extern object Syscalls {
+extern interface Syscalls {
 
     // ── 标准文件描述符 ──
     const val STDIN: Int = 0

@@ -17,7 +17,7 @@ package aura.lang.native.arch.x86_64_windows
 import aura.lang.native.Memory
 
 /// Windows x86_64 系统调用
-extern object Syscalls {
+extern interface Syscalls {
 
     // ── 标准文件描述符 ──
     const val STDIN: Int = 0

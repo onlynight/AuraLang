@@ -18,6 +18,11 @@ package aura.lang.std
 /// @since 0.1
 
 import aura.lang.std.IO
+import aura.lang.std.io.OutputStream
+import aura.lang.std.io.InputStream
+import aura.lang.std.io.DefaultConsoleOut
+import aura.lang.std.io.DefaultConsoleErr
+import aura.lang.std.io.DefaultConsoleIn
 
 object Console {
 
@@ -31,6 +36,20 @@ object Console {
 
     /// 默认终端高度。
     const val DEFAULT_HEIGHT: Int = 24
+
+    // ── 可替换的输出/输入流（stdout/stderr/stdin）──
+
+    val stdout: OutputStream = DefaultConsoleOut()
+    val stderr: OutputStream = DefaultConsoleErr()
+    val stdin: InputStream = DefaultConsoleIn()
+
+    fun println(msg: String): Unit {
+        stdout.println(msg)
+    }
+
+    fun print(msg: String): Unit {
+        stdout.print(msg)
+    }
 
     // ── 光标控制（纯逻辑，Aura 实现）──
 

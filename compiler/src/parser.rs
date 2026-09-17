@@ -233,7 +233,7 @@ impl Parser {
             return Ok(Decl::Import(self.parse_import()));
         }
         if self.check(TokenKind::Extern) {
-            // 检查是否是 extern object（新语法）或 extern interface（已废弃，自动转换）
+            // 检查是否是 extern interface（新语法）或 extern object（已废弃，自动转换）
             let next_kind = self.peek_ahead(1).kind;
             if next_kind == TokenKind::Object || next_kind == TokenKind::Interface {
                 return Ok(Decl::ExternObject(self.parse_extern_object()));
@@ -2206,17 +2206,23 @@ impl Parser {
         }
     }
 
-    /// 解析 extern object 声明（原 extern interface，已统一）
-    /// 语法：`extern object Name { default fun loadLibrary(): String = "path"; @aot fun add(...) }`
-    /// 兼容旧语法：`extern interface Name { default fun loadLibrary(): String = "path"; fun add(...) }`
+    /// 解析 extern interface 声明（新语法，extern object 已废弃）
+    /// 语法：`extern interface Name { default fun loadLibrary(): String = "path"; fun add(...) }`
+    /// 兼容旧语法：`extern object Name { ... }`（已废弃，自动转换）
+    ///
+    /// 规则：
+    /// - 仅 `default fun loadLibrary()` 允许函数体（标记 Aura AOT FFI 库名）
+    /// - 其余 `fun` 必须无函数体（纯声明）
+    /// - 不允许 `var` 声明（状态移到 object）
+    /// - 允许 `const val` 常量
     pub fn parse_extern_object(&mut self) -> ExternInterfaceDecl {
         let start = self.current().span;
         self.expect(TokenKind::Extern);
-        // 接受 "object" 或 "interface"（已废弃）
+        // 接受 "interface"（新语法）或 "object"（已废弃）
         let keyword = if self.check(TokenKind::Object) || self.check(TokenKind::Interface) {
             let kw = self.advance().literal.clone();
-            if kw == "interface" {
-                self.warn_deprecated_extern_interface();
+            if kw == "object" {
+                self.warn_deprecated_extern_object();
             }
             kw
         } else {
@@ -2237,19 +2243,46 @@ impl Parser {
                 while self.check(TokenKind::DocComment) {
                     self.advance();
                 }
-                // Phase S3: 处理 const/val/var 常量声明
+                // Phase S3: 处理 const/val 常量声明（extern interface 禁止 var）
                 if self.check(TokenKind::Const)
                     || self.check(TokenKind::Val)
-                    || self.check(TokenKind::Var)
                     || (self.is_visibility_token() && {
                         let k1 = self.peek_ahead(1);
-                        k1.kind == TokenKind::Const
-                            || k1.kind == TokenKind::Val
-                            || k1.kind == TokenKind::Var
+                        k1.kind == TokenKind::Const || k1.kind == TokenKind::Val
                     })
                 {
                     let stmt = self.parse_struct_field_stmt();
                     constants.push(stmt);
+                    continue;
+                }
+                // var 禁止在 extern interface 内（移到 object）
+                if self.check(TokenKind::Var)
+                    || (self.is_visibility_token() && self.peek_ahead(1).kind == TokenKind::Var)
+                {
+                    let err_span = self.current().span;
+                    self.errors.push(CompileError {
+                        span: err_span,
+                        message:
+                            "`var` is not allowed in `extern interface`; move state to `object`"
+                                .to_string(),
+                        severity: ErrorSeverity::Error,
+                    });
+                    // 跳过 var 声明直到语句结束
+                    self.advance(); // var
+                    // 跳过标识符
+                    if self.check(TokenKind::Ident) {
+                        self.advance();
+                    }
+                    // 跳过类型标注
+                    if self.check(TokenKind::Colon) {
+                        self.advance();
+                        self.parse_type();
+                    }
+                    // 跳过等号和初始化值
+                    if self.check(TokenKind::Assign) {
+                        self.advance();
+                        self.parse_expression(0);
+                    }
                     continue;
                 }
                 // Phase D: 处理 @native 注解
@@ -2288,6 +2321,16 @@ impl Parser {
                             lib_path = Some(s.clone());
                         }
                     }
+                } else if fn_decl.body.is_some() {
+                    // 非 loadLibrary 的函数体禁止（移到 object）
+                    self.errors.push(CompileError {
+                        span: fn_decl.span,
+                        message: format!(
+                            "function `{}` is not allowed to have a body in `extern interface`; only `default fun loadLibrary()` can have a body. Move the implementation to an `object` block.",
+                            fn_decl.name
+                        ),
+                        severity: ErrorSeverity::Error,
+                    });
                 }
                 functions.push(fn_decl);
             }
@@ -2451,11 +2494,15 @@ impl Parser {
         }
     }
 
-    /// 发出 extern interface 废弃警告
-    fn warn_deprecated_extern_interface(&self) {
-        eprintln!(
-            "[parser] warning: `extern interface` is deprecated, use `extern object` instead"
-        );
+    /// 发出 extern object 废弃警告（硬错误）
+    fn warn_deprecated_extern_object(&mut self) {
+        let span = self.current().span;
+        self.errors.push(CompileError {
+            span,
+            message: "`extern object` is no longer supported; use `extern interface` instead"
+                .to_string(),
+            severity: ErrorSeverity::Error,
+        });
     }
 
     // ─────────────────────────────────────────────────────────────────────────

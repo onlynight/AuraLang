@@ -1,90 +1,72 @@
 // aura:///aura/lang/std/Process.aura
 package aura.lang.std
-// ─────────────────────────────────────────────────────────────
-// 进程管理模块 — 兼容包装层
-//
-// 实现已移至 aura.core.native 包（native/process/ProcessNative.aura）。
-// 本文件保留为向后兼容包装，委托调用 native 实现。
-//
-// @since 0.1
-// ─────────────────────────────────────────────────────────────
 
 import aura.lang.native.process.ProcessNative
 
-/// 进程管理模块（兼容包装）。
+/// 进程管理模块（创建工具 + 便捷入口）。
 ///
-/// 使用前需 import：
-/// ```aura
-/// import aura.lang.std.Process
-/// ```
-///
-/// @since 0.1
+/// @since 0.2
 object Process {
-
-    // ── 退出 ──
-
-    /// 退出进程并返回指定状态码。
+    
     fun exit(code: Int): Unit {
         ProcessNative.exit(code)
     }
-
-    /// 获取进程退出状态码。
+    
     val exitCode: Int = 0
-
-    // ── 命令行参数 ──
-
-    /// 获取命令行参数列表。
-    ///
-    /// 必须是 `fun`（不是 `val`）：`object` 的 `val` 在 AOT 下被当作**实例字段**
-    /// 处理 —— 读出来是默认值（数值为 `0`、对象为 `null`），初始化式不会在访问时
-    /// 求值。`val argCount` 就因此让 `Process.argCount()` 编译成常量 `0`
-    ///（IR: `icmp sge i32 0, 2`），自举产物永远走「无参数」分支、读不到命令行参数。
+    
     fun args(): List<String> {
         return ProcessNative.args()
     }
-
-    /// 获取指定索引的命令行参数。
+    
     fun arg(index: Int): String {
         return ProcessNative.arg(index)
     }
-
-    /// 获取命令行参数数量。
+    
     fun argCount(): Int {
         return ProcessNative.argCount()
     }
-
-    // ── 进程信息 ──
-
-    /// 获取当前进程 ID。
+    
     fun pid(): Int {
         return ProcessNative.pid()
     }
-
-    // ── 进程控制 ──
-
-    /// 启动新进程。
-    fun spawn(command: String): Any {
-        val pid: Int = ProcessNative.spawn(command)
-        return pid
+    
+    fun spawn(command: String): Int {
+        return ProcessNative.spawn(command)
     }
-
-    /// 以 shell 同步执行命令行，返回退出码（阻塞直到结束）。
+    
     fun run(command: String): Int {
         return ProcessNative.run(command)
     }
-
-    /// 杀死指定进程。
+    
     fun kill(pid: Int): Unit {
         ProcessNative.kill(pid)
     }
-
-    /// 等待指定进程结束并返回退出码。
+    
     fun wait(pid: Int): Int {
         return ProcessNative.wait(pid)
     }
-
-    /// 退出进程（`exit` 的别名）。
+    
     fun exitProcess(code: Int): Unit {
         ProcessNative.exitProcess(code)
+    }
+}
+
+/// 进程句柄（有状态实例）。
+///
+/// @since 0.2
+class ProcessHandle(pid: Int) {
+    
+    private val pid: Int = pid
+    
+    fun wait(): Int {
+        return ProcessNative.wait(pid)
+    }
+    
+    fun kill(): Unit {
+        ProcessNative.kill(pid)
+    }
+    
+    fun getPid(): Int {
+        return pid
     }
 }

@@ -5,11 +5,11 @@ package aura.lang.native
 //
 // CPU 级操作（内联汇编）
 //
-// 使用 extern object 封装，@native(asm = "...") 标注内联汇编。
+// 使用 extern interface 封装，@native(asm = "...") 标注内联汇编。
 // ─────────────────────────────────────────────────────────────
 
 // CPU 级操作（内联汇编）
-extern object Cpu {
+extern interface Cpu {
     @native(asm = "rdtsc") fun rdtsc(): Long
     @native(asm = "mfence") fun memFence()
     @native(asm = "cpuid") fun cpuid(level: Int): Long

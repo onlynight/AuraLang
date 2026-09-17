@@ -23,6 +23,7 @@ const KNOWN_STD_CLASSES: &[&str] = &[
     "Console",
     "Encoding",
     "Env",
+    "File",
     "FileSystem",
     "IO",
     "Iter",
@@ -31,6 +32,7 @@ const KNOWN_STD_CLASSES: &[&str] = &[
     "Network",
     "Path",
     "Process",
+    "ProcessHandle",
     "Random",
     "String",
     "StringBuilder",
@@ -1566,6 +1568,86 @@ impl Checker {
                 }
             }
             Decl::ExternObject(e) => {
+                // ── 安全加固：保留名检查 ──
+                const RESERVED_NAMES: &[&str] = &[
+                    "Memory",
+                    "Cpu",
+                    "Syscalls",
+                    "Runtime",
+                    "ThreadOps",
+                ];
+                if RESERVED_NAMES.contains(&e.name.as_str()) {
+                    // 允许 aura.lang.native 包内的声明（编译器内置）
+                    // 拒绝其他包的用户声明
+                    if !matches!(
+                        self.current_package.as_deref(),
+                        Some("aura.lang.native")
+                            | Some("aura.lang.native.console")
+                            | Some("aura.lang.native.file")
+                            | Some("aura.lang.native.time")
+                            | Some("aura.lang.native.thread")
+                            | Some("aura.lang.native.process")
+                            | Some("aura.lang.native.memory")
+                            | Some("aura.lang.native.env")
+                            | Some("aura.lang.native.math")
+                            | Some("aura.lang.native.io")
+                            | Some("aura.lang.native.network")
+                            | Some("aura.lang.native.boxed")
+                    ) {
+                        self.report(
+                            e.span,
+                            format!(
+                                "`{}` is a reserved name for compiler-internal extern interface; users cannot declare it",
+                                e.name
+                            ),
+                        );
+                    }
+                }
+
+                // ── 安全加固：用户不可声明 @native ──
+                for f in &e.functions {
+                    if f.native_attr.is_some() {
+                        if !matches!(
+                            self.current_package.as_deref(),
+                            Some("aura.lang.native")
+                                | Some("aura.lang.native.console")
+                                | Some("aura.lang.native.file")
+                                | Some("aura.lang.native.time")
+                                | Some("aura.lang.native.thread")
+                                | Some("aura.lang.native.process")
+                                | Some("aura.lang.native.memory")
+                                | Some("aura.lang.native.env")
+                                | Some("aura.lang.native.math")
+                                | Some("aura.lang.native.io")
+                                | Some("aura.lang.native.network")
+                                | Some("aura.lang.native.boxed")
+                        ) {
+                            self.report(
+                                f.span,
+                                format!(
+                                    "`@native` annotation is not allowed for user-defined extern interfaces; only compiler-internal interfaces can use @native"
+                                ),
+                            );
+                        }
+                    }
+                }
+
+                // ── 安全加固：非 loadLibrary 函数体检查 ──
+                for f in &e.functions {
+                    if f.name != "loadLibrary" && f.body.is_some() {
+                        self.report(
+                            f.span,
+                            format!(
+                                "function `{}` is not allowed to have a body in `extern interface`; only `default fun loadLibrary()` can have a body. Move the implementation to an `object` block.",
+                                f.name
+                            ),
+                        );
+                    }
+                }
+
+                // ── 安全加固：var 禁止检查 ──
+                // (parser already rejects var in extern interface; double-check here)
+
                 // extern object: 校验 @aot fun 必须配合 default fun loadLibrary()
                 let has_load_library = e.functions.iter().any(|f| {
                     f.name == "loadLibrary" && f.modifiers.iter().any(|m| m == &FnModifier::Default)
@@ -1575,7 +1657,7 @@ impl Checker {
                     self.report(
                         e.span,
                         format!(
-                            "extern object `{}` with @aot fun must include a `default fun loadLibrary(): String = \"...\"` method",
+                            "extern interface `{}` with @aot fun must include a `default fun loadLibrary(): String = \"...\"` method",
                             e.name
                         ),
                     );
@@ -2063,6 +2145,15 @@ impl Checker {
     /// 旧命名（`import aura.math.*` / `import aura.math.sin`）保留兼容。
     fn expand_import(&mut self, imp: &ImportDecl) {
         let module_path = imp.path.clone();
+
+        // ── 安全加固：禁止用户 import aura.lang.native ──
+        if module_path.starts_with("aura.lang.native") {
+            self.report(
+                imp.span,
+                "Import of `aura.lang.native` is not allowed for user code; use `aura.lang.std` instead".to_string(),
+            );
+            return;
+        }
 
         // 检查是否是 aura.* 命名空间
         if !module_path.starts_with("aura.") {
