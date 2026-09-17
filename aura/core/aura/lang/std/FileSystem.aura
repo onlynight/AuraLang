@@ -59,9 +59,9 @@ object FSUtils {
         if (pathBuf == 0) { return -1 }
         // 使用 syscall 83 (mkdir)
         val mode: Int = 493  // 0755
-        // 通过 FileOps 调用（需要扩展）
+        val result: Int = FileOps.mkdir(pathBuf, mode)
         Allocator.free(pathBuf)
-        return 0  // 简化实现
+        return result
     }
 
     /// 重命名。
@@ -73,10 +73,10 @@ object FSUtils {
             Allocator.free(oldBuf)
             return -1
         }
-        // 使用 syscall 82 (rename)
+        val result: Int = FileOps.rename(oldBuf, newBuf)
         Allocator.free(oldBuf)
         Allocator.free(newBuf)
-        return 0  // 简化实现
+        return result
     }
 
     /// 获取文件大小。

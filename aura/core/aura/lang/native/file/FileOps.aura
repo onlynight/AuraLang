@@ -40,6 +40,7 @@ extern object FileOps {
     @native(SYS_ACCESS) fun access(path: Long, mode: Int): Int
     @native(SYS_MKDIR)  fun mkdir(path: Long, mode: Int): Int
     @native(SYS_RMDIR)  fun rmdir(path: Long): Int
+    @native(SYS_RENAME) fun rename(old: Long, new: Long): Int
 
     /// Open file
     fun openFile(path: Long, flags: Int): Int {

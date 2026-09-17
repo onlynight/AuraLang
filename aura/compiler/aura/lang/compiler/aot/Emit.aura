@@ -2031,6 +2031,11 @@ class LlvmEmitter {
         if (lc == "getpid") {
             return this.winCrtFinish(pre, "_getpid", "i32", "")
         }
+        if (lc == "rename") {
+            val old: String = this.npAs(pre, paramsCsv, 0, "i8*")
+            val new: String = this.npAs(pre, paramsCsv, 1, "i8*")
+            return this.winCrtFinish(pre, "_rename", "i32", "i8* " + old + ", i8* " + new)
+        }
         if (lc == "exit" || lc == "exitgroup" || lc == "exitprocess") {
             val c: String = this.npAs(pre, paramsCsv, 0, "i32")
             return this.winCrtFinish(pre, "exit", "void", "i32 " + c)
@@ -2248,6 +2253,26 @@ class LlvmEmitter {
                 && aotContains(rawName, "Memory")) {
                 body = "%ptr.0 = inttoptr i64 %arg.0 to i8*\nstore i8 %arg.1, i8* %ptr.0"
                 retTy = "void"
+            } else if (aotContains(rawName, "ThreadOps") || aotContains(rawName, "Thread")) {
+                // ThreadOps 内置：调用运行库 C 封装
+                if (aotContains(lc, "create")) {
+                    body = "call i64 @aura_thread_create(i64 %arg.0, i64 %arg.1)"
+                    retTy = "i64"
+                } else if (aotContains(lc, "join")) {
+                    body = "call i64 @aura_thread_join(i64 %arg.0)"
+                    retTy = "i64"
+                } else if (aotContains(lc, "sleep")) {
+                    body = "call void @aura_thread_sleep(i64 %arg.0)"
+                    retTy = "void"
+                } else if (aotContains(lc, "currentid")) {
+                    body = "call i64 @aura_thread_currentId()"
+                    retTy = "i64"
+                } else if (aotContains(lc, "cores")) {
+                    body = "call i64 @aura_thread_cores()"
+                    retTy = "i64"
+                } else {
+                    rawValue = EmitUtils.defaultValue(retTy)
+                }
             } else {
                 // 未知内置：直接返回默认值（不生成非法 IR）
                 rawValue = EmitUtils.defaultValue(retTy)
