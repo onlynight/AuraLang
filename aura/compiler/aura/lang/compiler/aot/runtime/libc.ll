@@ -8,3 +8,6 @@ declare void @exit(i32)
 ; _snprintf for inline float→string conversion
 declare i32 @_snprintf(i8*, i32, i8*, ...)
 @fmt_float_g = private unnamed_addr constant [3 x i8] c"%g\00"
+
+; String.charAt for index access (called as void by compiler bug — declaration must match)
+declare void @charAt(i8*, i32)

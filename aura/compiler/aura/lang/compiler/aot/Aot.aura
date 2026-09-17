@@ -32,7 +32,12 @@ object AotUtils {
 
     /// 默认 AOT 选项。
     fun defaultAotOptions(): AotOptions {
-        return AotOptions(targetDefault(), optLevelDefault(), "main")
+        return AotOptions(targetDefault(), optLevelDefault(), "main", "")
+    }
+
+    /// 默认 AOT 选项（指定源文件目录）。
+    fun defaultAotOptionsEx(basePath: String): AotOptions {
+        return AotOptions(targetDefault(), optLevelDefault(), "main", basePath)
     }
 
     /// 空结果占位。
@@ -79,6 +84,12 @@ object AotUtils {
         val r: AotLinkResult = AotLinkResult()
         val opts: AotOptions = AotUtils.defaultAotOptions()
         opts.emitCSource = false
+        return compileAotIrOnlyEx(hir, opts)
+    }
+
+    fun compileAotIrOnlyEx(hir: Hir, opts: AotOptions): AotLinkResult {
+        val r: AotLinkResult = AotLinkResult()
+        opts.emitCSource = false
         val aot: AotResult = AotUtils.aotCompile(hir, opts)
 
         r.llvmIr = aot.llvmIr
@@ -97,10 +108,16 @@ object AotUtils {
     /// 通过 `FileSystem.writeText` 落盘 IR，经 `Process.run` 调用 LLVM 工具链。
     /// `llvmHome` 为 LLVM 根目录（如 `D:/DevTools/LLVM/clang+llvm-23.1.0-...`）。
     fun aotBuildExeFromHir(hir: Hir, moduleName: String, outDir: String, llvmHome: String): AotExeResult {
+        return aotBuildExeFromHirEx(hir, moduleName, outDir, llvmHome, "")
+    }
+
+    fun aotBuildExeFromHirEx(hir: Hir, moduleName: String, outDir: String, llvmHome: String, basePath: String): AotExeResult {
         val r: AotExeResult = AotExeResult()
 
         println("[A1] compileAotIrOnly enter")
-        val a: AotLinkResult = AotUtils.compileAotIrOnly(hir)
+        val opts: AotOptions = AotUtils.defaultAotOptionsEx(basePath)
+        opts.emitCSource = false
+        val a: AotLinkResult = AotUtils.compileAotIrOnlyEx(hir, opts)
         println("[A2] IR done lines=" + toStr(a.irLines))
         val tgt: String = a.targetTriple
         r.target = tgt
@@ -240,6 +257,9 @@ class AotOptions {
     /// 断言；故给「只要 IR + 工具链」的构建入口提供关闭开关（见 `compileAotIrOnly`）。
     var emitCSource: Boolean = true
 
+    /// 源文件目录（用于定位 runtime/*.ll 文件）。
+    var basePath: String = ""
+
     init(target: TargetTriple, optLevel: OptimizationLevel, moduleName: String) {
         this.target = target
         this.optLevel = optLevel
@@ -249,6 +269,19 @@ class AotOptions {
         this.llvmHome = ""
         this.linkStdCffi = false
         this.emitCSource = true
+        this.basePath = ""
+    }
+
+    init(target: TargetTriple, optLevel: OptimizationLevel, moduleName: String, basePath: String) {
+        this.target = target
+        this.optLevel = optLevel
+        this.moduleName = moduleName
+        this.linkRuntime = true
+        this.emitDebug = false
+        this.llvmHome = ""
+        this.linkStdCffi = false
+        this.emitCSource = true
+        this.basePath = basePath
     }
 }
 
@@ -316,7 +349,7 @@ class AotCodeGenerator {
         val triple: String = tgt.toTriple()
         val flag: String = lvl.flag()
 
-        val ir: String = emitLlvmIr(hir, options.moduleName, triple)
+        val ir: String = emitLlvmIrEx(hir, options.moduleName, triple, options.basePath)
 
         val objPath: String = options.moduleName + "." + tgt.objectExt()
         var exePath: String = options.moduleName

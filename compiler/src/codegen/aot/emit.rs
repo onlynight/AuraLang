@@ -3705,6 +3705,19 @@ fn emit_call(
         if let Some(cand) = string_method_symbol(&callee_owned) {
             if ctx.func_ret_types.contains_key(&cand) {
                 callee_owned = cand;
+            } else {
+                // HIR 中方法名可能不带 `aura.lang.std.` 前缀（如 `String.charAt`），
+                // 尝试去前缀形式。
+                let prefix_less = cand.replacen("aura.lang.std.", "", 1);
+                if ctx.func_ret_types.contains_key(&prefix_less) {
+                    callee_owned = prefix_less;
+                } else {
+                    // `func_ret_types` 仅包含 HIR 中的函数，stdlib 方法（如
+                    // `String.charAt`）在 Aura 自举编译中可能不在 HIR 内。
+                    // 此时仍应改派到 std 调用点符号，由 `RUNTIME_FUNCTIONS`
+                    // 表提供声明，`translate_to_legacy_c` 落到 C FFI 实现。
+                    callee_owned = cand;
+                }
             }
         }
     }

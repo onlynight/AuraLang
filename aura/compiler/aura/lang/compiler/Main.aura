@@ -133,6 +133,25 @@ object MainUtils {
         return CompilerInfo.name() + " " + CompilerInfo.version()
     }
 
+    /// 从输入路径提取目录部分（用于定位 runtime/*.ll 文件）。
+    /// 例："aura/compiler/aura/lang/compiler/Main.aura" → "aura/compiler/aura/lang/compiler/"
+    fun aotBaseDirFromInput(inputPath: String): String {
+        var i: Int = inputPath.length - 1
+        var found: Int = -1
+        while (i >= 0) {
+            val c: Char = inputPath.charAt(i)
+            if (c == "/" || c == "\\") {
+                found = i
+                break
+            }
+            i = i - 1
+        }
+        if (found < 0) {
+            return ""
+        }
+        return inputPath.substring(0, found + 1)
+    }
+
     /// 编译单个源文件（保留签名）。
     fun compileSource(path: String): String {
         return "unimplemented: " + path
@@ -268,7 +287,9 @@ object MainUtils {
             aotMemMark("link done modules=" + toStr(linker.loadedCount()) +
                 " nodes=" + toStr(hir.count))
         }
-        val r = aotBuildExeFromHir(hir, moduleName, outDir, llvmHome)
+        // 从输入路径推导 runtime/*.ll 的基础目录
+        val basePath: String = aotBaseDirFromInput(inputPath)
+        val r = aotBuildExeFromHirEx(hir, moduleName, outDir, llvmHome, basePath)
         if (trace) {
             aotMemMark("emit + toolchain done")
         }

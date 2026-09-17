@@ -92,10 +92,31 @@ pub const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
             ("idx", "i64"),
         ],
     },
+    // `aura_string_charAt`：`translate_to_legacy_c` 将 `aura_lang_std_String_charAt`
+    // 转换为此名，需要声明才能通过 llc。
+    RuntimeFn {
+        name: "aura_string_charAt",
+        ret: "i8*",
+        params: &[
+            ("s", "i8*"),
+            ("idx", "i64"),
+        ],
+    },
     // `s.charCodeAt(i)`：返回字符码（i32），C 侧实现见 aura_std_cffi.c
     RuntimeFn {
         name: "aura_lang_std_String_charCodeAt",
         ret: "i64",
+        params: &[
+            ("s", "i8*"),
+            ("idx", "i64"),
+        ],
+    },
+    // `String_charAt`：Aura 源码 `String.charAt` 方法经 sanitizellvm 后的符号名。
+    // 当 `string_method_symbol` 改派失败时，裸名 `charAt` 可能经接收者类型
+    // 改派为 `String.charAt` → `String_charAt`，需要声明才能通过 llc。
+    RuntimeFn {
+        name: "String_charAt",
+        ret: "i8*",
         params: &[
             ("s", "i8*"),
             ("idx", "i64"),

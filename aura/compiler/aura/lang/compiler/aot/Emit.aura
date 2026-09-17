@@ -47,6 +47,9 @@ class LlvmEmitter {
     /// 是否发射调试元数据。
     var emitDebug: Boolean = false
 
+    /// runtime/*.ll 基础目录（从源文件路径推导）。
+    var basePath: String = ""
+
     /// 类型映射器。
     var tm: TypeMapper = TypeMapper()
 
@@ -335,9 +338,14 @@ class LlvmEmitter {
 
     /// 将 HIR 程序生成为完整 LLVM IR 模块文本。
     fun emitProgram(hir: Hir, moduleName: String, target: String): String {
+        return emitProgramEx(hir, moduleName, target, "")
+    }
+
+    fun emitProgramEx(hir: Hir, moduleName: String, target: String, basePath: String): String {
         this.reset()
         this.moduleName = moduleName
         this.targetTriple = target
+        this.basePath = basePath
         // 签名表只构建一次（见字段注释：每次重建是发射期头号泄漏源）。
         this.fRtTable = runtimeTable()
         this.fCffiTable = cffiTable()
@@ -547,7 +555,7 @@ class LlvmEmitter {
             out.sbAdd("\n")
         }
         if (this.linkRuntime) {
-            out.sbAdd(runtimeDeclarationsEx(this.fDefNames))
+            out.sbAdd(runtimeDeclarationsEx(this.fDefNames, this.basePath))
             out.sbAdd("\n")
         }
         if (this.emitDebug) {
@@ -7417,8 +7425,12 @@ object EmitUtils {
 
     /// 顶层入口：HIR → LLVM IR 文本。
     fun emitLlvmIr(hir: Hir, moduleName: String, target: String): String {
+        return emitLlvmIrEx(hir, moduleName, target, "")
+    }
+
+    fun emitLlvmIrEx(hir: Hir, moduleName: String, target: String, basePath: String): String {
         val e: LlvmEmitter = LlvmEmitter()
-        return e.emitProgram(hir, moduleName, target)
+        return e.emitProgram(hir, moduleName, target, basePath)
     }
 
     /// 依目标三元组选择 data layout（对齐 Rust `emit_module_header`）。
