@@ -1763,7 +1763,9 @@ class LlvmEmitter {
         this.funcParts.sbAdd("define " + retTy + " @" + sanitizeLlvm(defName) + "(" + paramsIr + ") {\n")
         this.funcParts.sbAdd("entry:\n")
         if (isEntryMain) {
-            this.funcParts.sbAdd("  call void @aura_args_set(i32 %argc, i8** %argv)\n")
+            // Phase C: 用 IR 全局变量存储 argc/argv，替代 @aura_args_set C 调用
+            this.funcParts.sbAdd("  store i32 %argc, i32* @aura_argc_global\n")
+            this.funcParts.sbAdd("  store i8** %argv, i8*** @aura_argv_global\n")
         }
         this.funcParts.sbAdd(this.fAlloca.sbBuild())
         this.funcParts.sbAdd(this.fBody.sbBuild())
