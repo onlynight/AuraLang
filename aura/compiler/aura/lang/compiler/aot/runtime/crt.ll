@@ -1,0 +1,13 @@
+; ---- Windows CRT (@native(SYS_*) platform implementations) ----
+declare i32 @_write(i32, i8*, i32)
+declare i32 @_read(i32, i8*, i32)
+declare i32 @_open(i8*, i32, i32)
+declare i32 @_close(i32)
+declare i64 @_lseeki64(i32, i64, i32)
+declare i32 @_fstat(i32, i8*)
+declare i32 @_stat64(i8*, i8*)
+declare i32 @_access(i8*, i32)
+declare i32 @_unlink(i8*)
+declare i32 @_mkdir(i8*)
+declare i32 @_rmdir(i8*)
+declare i32 @_getpid()
