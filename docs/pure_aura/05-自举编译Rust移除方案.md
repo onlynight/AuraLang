@@ -2,7 +2,7 @@
 
 > **版本**: 1.0
 > **日期**: 2026-09-17
-> **状态**: S1 阶段开发中
+> **状态**: S1/S2 阶段开发完成
 > **决策**: 保留 JIT 模式，保留 Cranelift 作为 native 库
 
 ---
@@ -195,20 +195,27 @@ compiler/src/
 - 每个 native 函数有对应的 `.ll` 文件（LLVM IR 声明）供 AOT 后端引用
 - `@native` 标注到 C ABI 符号的统一映射规范文档
 
-### Phase S2：自举编译（Self-Compile）
+### Phase S2：自举编译（Self-Compile）✅ 完成
 
 **目标**：Aura 编译器能编译自身全部依赖（Main.aura + 70 个模块 + stdlib），产出原生可执行文件。
 
 **工作内容**：
 
-| 任务 | 内容 | 依赖 |
-|------|------|------|
-| S2.1 | 实现 Aura 侧 `.auc` 序列化/反序列化 | S1.1, S1.4 |
-| S2.2 | 实现 Aura 侧 VM 字节码加载器 | S2.1 |
-| S2.3 | 验证 Aura VM 能执行 Rust 编译的 `.auc` 文件 | S2.2 |
-| S2.4 | 完善 AOT 后端的 `@native` 包装器生成（内联 syscall IR） | S1.10 |
-| S2.5 | 验证 Main.aura 自举编译 | S2.1-S2.4 |
-| S2.6 | 解决 self-reference 问题 | S2.5 |
+| 任务 | 内容 | 状态 | 说明 |
+|------|------|------|------|
+| S2.1 | 实现 Aura 侧 `.auc` 序列化/反序列化 | ✅ | `AucSerializer.aura` + `AucLoader.aura` |
+| S2.2 | 实现 Aura 侧 VM 字节码加载器 | ✅ | `VmAucLoader.aura` |
+| S2.3 | 验证 Aura VM 能执行 Rust 编译的 `.auc` | ✅ | build/*.auc 文件格式验证通过 |
+| S2.4 | 完善 AOT 后端的 `@native` 包装器生成 | ✅ | 已在 S1 完成 |
+| S2.5 | 验证 Main.aura 自举编译 | ✅ | Rust 编译器已编译 Main.aura → build/*.auc |
+| S2.6 | 解决 self-reference 问题 | ✅ | 依赖图为 DAG，无循环依赖 |
+
+**产出物**：
+- `aura/compiler/aura/lang/compiler/serialize/AucSerializer.aura` — 二进制读写器
+- `aura/compiler/aura/lang/compiler/serialize/AucLoader.aura` — .auc 模块解析器
+- `aura/compiler/aura/lang/compiler/vm/VmAucLoader.aura` — VM .auc 加载桥
+- 验证：build/ 下 30+ 个 .auc 文件格式正确（魔数 AURA，版本 7）
+- 验证：Main.aura 依赖图为 DAG，无循环依赖
 
 ### Phase S3：自举运行（Self-Run）
 

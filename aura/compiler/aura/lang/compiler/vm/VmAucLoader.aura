@@ -1,0 +1,92 @@
+// aura:///aura/lang/compiler/vm/VmAucLoader.aura
+package aura.lang.compiler.vm
+// ─────────────────────────────────────────────────────────────
+// VM .auc 加载器 — Phase S2
+//
+// 桥接 .auc 二进制格式与 VM 文本字节码格式。
+//
+// 对应 Rust `compiler/src/vm/mod.rs` 的模块加载逻辑。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.compiler.serialize.AucModule
+import aura.lang.compiler.serialize.AucLoaderUtils
+import aura.lang.compiler.serialize.AucConstants
+
+/// VM .auc 加载结果。
+class VmAucLoadResult {
+    var success: Boolean = false
+    var module: AucModule = AucModule()
+    var errorCode: Int = 0
+    var errorMessage: String = ""
+
+    fun ok(): Boolean {
+        return success
+    }
+
+    fun describe(): String {
+        if (success) {
+            return "loaded: " + module.describe()
+        } else {
+            return "failed: " + errorMessage
+        }
+    }
+}
+
+/// VM .auc 加载器工具。
+object VmAucLoaderUtils {
+
+    /// 从 .auc 文件加载模块到 VM 格式。
+    fun loadAucModule(path: String): VmAucLoadResult {
+        val result: VmAucLoadResult = VmAucLoadResult()
+
+        val mod: AucModule = AucLoaderUtils.loadModule(path)
+        if (!mod.isValid()) {
+            result.success = false
+            result.errorCode = 1
+            result.errorMessage = mod.error
+            return result
+        }
+
+        result.success = true
+        result.module = mod
+        return result
+    }
+
+    /// 从 .auc 文件加载并执行。
+    ///
+    /// 注意：此函数需要 VM 实例才能执行。
+    /// 当前实现仅加载模块，执行由调用方负责。
+    fun loadAndExecute(path: String): String {
+        val result: VmAucLoadResult = loadAucModule(path)
+        if (!result.ok()) {
+            return "error: " + result.errorMessage
+        }
+
+        val mod: AucModule = result.module
+        // 简化：返回模块描述，实际执行由 VmRunner 负责
+        return mod.describe()
+    }
+
+    /// 检查 .auc 文件是否可加载。
+    fun canLoadAuc(path: String): Boolean {
+        return AucLoaderUtils.validateAuc(path)
+    }
+
+    /// 获取 .auc 文件的元信息（不加载完整模块）。
+    fun getAucInfo(path: String): String {
+        val mod: AucModule = AucLoaderUtils.loadModule(path)
+        if (!mod.isValid()) {
+            return "error: " + mod.error
+        }
+        return "module: " + mod.name + "\n"
+            + "version: " + mod.version + "\n"
+            + "functions: " + mod.funcsCount + "\n"
+            + "constants: " + mod.constsCount + "\n"
+            + "entry: " + mod.entry + "\n"
+            + "entry_kind: " + mod.entryKind + "\n"
+            + "exports: " + mod.exportsCount + "\n"
+            + "imports: " + mod.importsCount + "\n"
+            + "deps: " + mod.depsCount
+    }
+}

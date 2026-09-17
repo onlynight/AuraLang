@@ -1,0 +1,265 @@
+// aura:///aura/lang/compiler/serialize/AucLoader.aura
+package aura.lang.compiler.serialize
+// ─────────────────────────────────────────────────────────────
+// .auc 模块加载器 — Phase S2
+//
+// 从 .auc 二进制文件解析模块结构，提取字节码供 VM 执行。
+//
+// 对应 Rust `compiler/src/codegen/serialize.rs::read_auc`。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.native.Memory
+import aura.lang.native.memory.Allocator
+import aura.lang.native.file.FileOps
+import aura.lang.native.Syscalls
+import aura.lang.std.String
+import aura.lang.std.FileSystem
+
+/// 加载后的模块信息。
+class AucModule {
+    var name: String = ""
+    var version: String = ""
+    var headerFlags: Long = 0
+    var constsCount: Int = 0
+    var nativesCount: Int = 0
+    var funcsCount: Int = 0
+    var entry: Int = 0
+    var entryKind: String = ""
+    var exportsCount: Int = 0
+    var importsCount: Int = 0
+    var depsCount: Int = 0
+    var sigIdsCount: Int = 0
+    /// 字节码（文本格式，每行一条指令）。
+    var bytecode: String = ""
+    /// 常量池。
+    var constPool: String = ""
+    /// 错误信息。
+    var error: String = ""
+
+    fun isValid(): Boolean {
+        return error == "" && funcsCount > 0
+    }
+
+    fun describe(): String {
+        var desc: String = "AucModule {"
+        desc = desc + "name=" + name
+        desc = desc + ", version=" + version
+        desc = desc + ", funcs=" + funcsCount
+        desc = desc + ", consts=" + constsCount
+        desc = desc + ", entry=" + entry
+        if (error != "") {
+            desc = desc + ", error=" + error
+        }
+        desc = desc + "}"
+        return desc
+    }
+}
+
+/// .auc 加载器。
+object AucLoaderUtils {
+
+    /// 从文件加载 .auc 模块。
+    fun loadModule(path: String): AucModule {
+        val mod: AucModule = AucModule()
+
+        val reader: AucReader = AucReader()
+        if (!reader.readFromFile(path)) {
+            mod.error = "cannot read file: " + path
+            return mod
+        }
+
+        // 1. 魔数
+        val magic: String = readMagic(reader)
+        if (magic != AucConstants.MAGIC) {
+            mod.error = "bad magic: " + magic
+            reader.dispose()
+            return mod
+        }
+
+        // 2. 版本
+        val version: Int = reader.readU16()
+        if (version < 0 || version > AucConstants.VERSION) {
+            mod.error = "unsupported version: " + version
+            reader.dispose()
+            return mod
+        }
+
+        // 3. 头部标志
+        mod.headerFlags = reader.readU32()
+
+        // 4. 模块标识
+        mod.name = reader.readStr()
+        mod.version = reader.readStr()
+        reader.skip(16)  // UUID
+
+        // 5. 常量池
+        mod.constsCount = reader.readU32().toInt()
+        var ci: Int = 0
+        while (ci < mod.constsCount) {
+            val tag: Int = reader.readByte()
+            val value: String = readConstValue(reader, tag)
+            if (mod.constPool != "") {
+                mod.constPool = mod.constPool + "\n"
+            }
+            mod.constPool = mod.constPool + tag + ":" + value
+            ci = ci + 1
+        }
+
+        // 6. Native 函数
+        mod.nativesCount = reader.readU16()
+        var ni: Int = 0
+        while (ni < mod.nativesCount) {
+            reader.readStr()  // name
+            val retType: String = reader.readStr()
+            val paramsCount: Int = reader.readU16()
+            var pi: Int = 0
+            while (pi < paramsCount) {
+                reader.readStr()  // param type
+                pi = pi + 1
+            }
+            ni = ni + 1
+        }
+
+        // 7. 函数
+        mod.funcsCount = reader.readU16()
+        var fi: Int = 0
+        while (fi < mod.funcsCount) {
+            reader.readStr()  // name
+            val params: Int = reader.readU16()
+            val locals: Int = reader.readU16()
+            val codeLen: Int = reader.readU32().toInt()
+            // 读取字节码
+            val code: String = readBytecode(reader, codeLen)
+            if (mod.bytecode != "") {
+                mod.bytecode = mod.bytecode + "\n"
+            }
+            mod.bytecode = mod.bytecode + code
+            fi = fi + 1
+        }
+
+        // 8. 入口点
+        mod.entry = reader.readU16()
+        mod.entryKind = reader.readStr()
+
+        // 9. 导出
+        mod.exportsCount = reader.readU16()
+        var ei: Int = 0
+        while (ei < mod.exportsCount) {
+            reader.readStr()  // name
+            reader.readU16()  // kind
+            ei = ei + 1
+        }
+
+        // 10. 导入
+        mod.importsCount = reader.readU16()
+        var ii: Int = 0
+        while (ii < mod.importsCount) {
+            reader.readStr()  // module
+            reader.readStr()  // symbol
+            reader.readU16()  // kind
+            ii = ii + 1
+        }
+
+        // 11. 依赖
+        mod.depsCount = reader.readU16()
+        var di: Int = 0
+        while (di < mod.depsCount) {
+            reader.readStr()  // module
+            reader.readStr()  // version
+            di = di + 1
+        }
+
+        // 12. 签名 ID
+        mod.sigIdsCount = reader.readU16()
+        reader.skip(mod.sigIdsCount.toLong() * 4)  // u32 each
+
+        // v4+: 段表
+        if (version >= 4 && (mod.headerFlags and 0x2) != 0) {
+            reader.skip(reader.readU16().toLong() * 16)  // segments
+        }
+
+        reader.dispose()
+        return mod
+    }
+
+    /// 读取魔数。
+    private fun readMagic(reader: AucReader): String {
+        var result: String = ""
+        var i: Int = 0
+        while (i < 4) {
+            val c: Int = reader.readByte()
+            if (c < 0) { break }
+            result = result + String.fromCharCode(c)
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 读取常量值。
+    private fun readConstValue(reader: AucReader, tag: Int): String {
+        if (tag == AucConstants.CONST_INT) {
+            val v: Long = reader.readU64()
+            return v.toString()
+        } else if (tag == AucConstants.CONST_FLOAT) {
+            // 简化：读取 8 字节，不解析浮点值
+            reader.skip(8)
+            return "0.0"
+        } else if (tag == AucConstants.CONST_STR) {
+            val len: Long = reader.readU32()
+            var result: String = ""
+            var i: Long = 0
+            while (i < len) {
+                val c: Int = reader.readByte()
+                if (c < 0) { break }
+                result = result + String.fromCharCode(c)
+                i = i + 1
+            }
+            return result
+        } else if (tag == AucConstants.CONST_BOOL) {
+            val v: Int = reader.readByte()
+            return v.toString()
+        }
+        // NULL: 无数据
+        return "null"
+    }
+
+    /// 读取字节码（转换为文本格式）。
+    private fun readBytecode(reader: AucReader, codeLen: Int): String {
+        var result: String = ""
+        var i: Int = 0
+        while (i < codeLen) {
+            val opcode: Int = reader.readByte()
+            if (opcode < 0) { break }
+            if (result != "") {
+                result = result + "\n"
+            }
+            result = result + opcode.toString()
+            // 读取操作数（简化：只读 1 字节操作数）
+            val arg: Int = reader.readByte()
+            if (arg >= 0) {
+                result = result + " " + arg
+            }
+            i = i + 2  // 简化：每条指令 2 字节
+        }
+        return result
+    }
+
+    /// 验证 .auc 文件是否存在且有效。
+    fun validateAuc(path: String): Boolean {
+        if (!FileSystem.exists(path)) {
+            return false
+        }
+        val size: Long = FileSystem.fileSize(path)
+        if (size < 4) {
+            return false  // 至少要有魔数
+        }
+        // 读取魔数
+        val reader: AucReader = AucReader()
+        if (!reader.readFromFile(path)) {
+            return false
+        }
+        val magic: String = readMagic(reader)
+        reader.dispose()
+        return magic == AucConstants.MAGIC
+    }
+}
