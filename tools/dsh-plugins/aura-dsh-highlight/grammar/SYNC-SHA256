@@ -1,0 +1,5 @@
+f7040a52af5e92895255d2ee514283b8343998887c54ad8dc00945ba9bba8bef  aura.tmLanguage.json
+upstream      D:\Code\AuraLang\ide-extension\vscode-extension\syntaxes\aura.tmLanguage.json
+checkout      D:\Code\AuraLang
+language id   aura
+displayName   Aura

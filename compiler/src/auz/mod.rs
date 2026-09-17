@@ -104,12 +104,12 @@ pub enum ApkgError {
 impl std::fmt::Display for ApkgError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ApkgError::Io(m) => write!(f, "IO 错误: {}", m),
-            ApkgError::Format(m) => write!(f, "格式错误: {}", m),
-            ApkgError::Checksum(m) => write!(f, "校验和错误: {}", m),
-            ApkgError::Manifest(m) => write!(f, "清单错误: {}", m),
-            ApkgError::Compression(m) => write!(f, "压缩错误: {}", m),
-            ApkgError::Build(m) => write!(f, "打包错误: {}", m),
+            ApkgError::Io(m) => write!(f, "IO error: {}", m),
+            ApkgError::Format(m) => write!(f, "format error: {}", m),
+            ApkgError::Checksum(m) => write!(f, "checksum error: {}", m),
+            ApkgError::Manifest(m) => write!(f, "manifest error: {}", m),
+            ApkgError::Compression(m) => write!(f, "compression error: {}", m),
+            ApkgError::Build(m) => write!(f, "packaging error: {}", m),
         }
     }
 }

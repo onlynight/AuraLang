@@ -1,0 +1,14 @@
+// 简单异常测试
+fun testSimple(): Int {
+    try {
+        throw "test message"
+    } catch (e: Exception) {
+        println("Caught: " + e.getMessage())
+    }
+    return 0
+}
+
+fun main(): Int {
+    println("Simple exception test:")
+    return testSimple()
+}

@@ -38,6 +38,27 @@ pub fn register(reg: &mut NativeRegistry) {
     reg.register("aura.lang.std.String.containsAny", nat_contains_any);
     reg.register("aura.lang.std.String.containsAll", nat_contains_all);
 
+    // ── 短名注册（实例方法调用 `text.substring(i, j)` 解析为 "substring"）──
+    // Aura 编译的 companion 方法（如 String.indexOf）内部调用实例方法
+    // （如 `text.substring(i, j)`），编译器将短名 "substring" 发射为原生调用。
+    // 这些短名不在 stdlib_func_map 中（非 prelu），需在此注册为 native 回退。
+    reg.register("substring", nat_substring);
+    reg.register("substringBefore", nat_substring_before);
+    reg.register("substringAfter", nat_substring_after);
+    reg.register("indexOf", nat_index_of);
+    reg.register("lastIndexOf", nat_last_index_of);
+    reg.register("replace", nat_replace);
+    reg.register("contains", nat_contains);
+    reg.register("startsWith", nat_starts_with);
+    reg.register("endsWith", nat_ends_with);
+    reg.register("toLowerCase", nat_to_lower);
+    reg.register("toUpperCase", nat_to_upper);
+    reg.register("fromCharCode", nat_from_char_code);
+    reg.register("aura.lang.std.String.fromCharCode", nat_from_char_code);
+    reg.register("charCodeAt", nat_char_at_code);
+    reg.register("aura.lang.std.String.charCodeAt", nat_char_at_code);
+    reg.register("String.charCodeAt", nat_char_at_code);
+
     // ── 复杂函数（正则/格式化/转义，Rust native 实现）──
     reg.register("aura.lang.std.String.replaceAll", nat_replace_all);
     reg.register("aura.lang.std.String.format", nat_format);
@@ -62,16 +83,34 @@ fn i1(args: &[Value]) -> i64 {
     args.get(1).map(|v| v.as_int()).unwrap_or(0)
 }
 
+/// 兼容 self 前缀的参数提取：返回 (text, arg1, arg2_opt)
+fn str_args(args: &[Value]) -> (String, String, Option<String>) {
+    if args.len() >= 3 && !matches!(args.first(), Some(Value::Str(_))) {
+        // self 在前：args = [self, text, arg1, arg2]
+        (
+            args.get(1).map(|v| v.as_string()).unwrap_or_default(),
+            args.get(2).map(|v| v.as_string()).unwrap_or_default(),
+            args.get(3).map(|v| v.as_string()),
+        )
+    } else {
+        // 无 self：args = [text, arg1, arg2]
+        (s0(args), s1(args), args.get(2).map(|v| v.as_string()))
+    }
+}
+
 fn nat_contains(args: &[Value]) -> Value {
-    Value::Bool(s0(args).contains(s1(args).as_str()))
+    let (text, target, _) = str_args(args);
+    Value::Bool(text.contains(target.as_str()))
 }
 
 fn nat_starts_with(args: &[Value]) -> Value {
-    Value::Bool(s0(args).starts_with(s1(args).as_str()))
+    let (text, target, _) = str_args(args);
+    Value::Bool(text.starts_with(target.as_str()))
 }
 
 fn nat_ends_with(args: &[Value]) -> Value {
-    Value::Bool(s0(args).ends_with(s1(args).as_str()))
+    let (text, target, _) = str_args(args);
+    Value::Bool(text.ends_with(target.as_str()))
 }
 
 fn nat_split(args: &[Value]) -> Value {
@@ -197,16 +236,34 @@ fn nat_repeat(args: &[Value]) -> Value {
 }
 
 fn nat_index_of(args: &[Value]) -> Value {
-    let target = s1(args);
-    match s0(args).find(&target) {
+    // 兼容两种参数顺序：
+    //   (text, substring)        ← 独立调用
+    //   (self, text, substring)  ← companion 方法调用（VM 注入 self）
+    let (text, target) = if args.len() >= 3 && !matches!(args.first(), Some(Value::Str(_))) {
+        // self 在前：args = [self, text, substring]
+        (
+            args.get(1).map(|v| v.as_string()).unwrap_or_default(),
+            args.get(2).map(|v| v.as_string()).unwrap_or_default(),
+        )
+    } else {
+        (s0(args), s1(args))
+    };
+    match text.find(&target) {
         Some(pos) => Value::Int(pos as i64),
         None => Value::Int(-1),
     }
 }
 
 fn nat_last_index_of(args: &[Value]) -> Value {
-    let target = s1(args);
-    match s0(args).rfind(&target) {
+    let (text, target) = if args.len() >= 3 && !matches!(args.first(), Some(Value::Str(_))) {
+        (
+            args.get(1).map(|v| v.as_string()).unwrap_or_default(),
+            args.get(2).map(|v| v.as_string()).unwrap_or_default(),
+        )
+    } else {
+        (s0(args), s1(args))
+    };
+    match text.rfind(&target) {
         Some(pos) => Value::Int(pos as i64),
         None => Value::Int(-1),
     }
@@ -319,4 +376,23 @@ fn nat_contains_all(args: &[Value]) -> Value {
     let s = s0(args);
     let sep = s1(args);
     Value::Bool(sep.split('|').all(|p| s.contains(p)))
+}
+
+/// String.fromCharCode(code) — 从 Unicode 码点创建单字符字符串
+fn nat_from_char_code(args: &[Value]) -> Value {
+    let code = i0(args) as u32;
+    match char::from_u32(code) {
+        Some(c) => Value::str_(c.to_string()),
+        None => Value::Null,
+    }
+}
+
+/// String.charCodeAt(index) — 获取位置 index 字符的 Unicode 码点（越界返回 -1）
+fn nat_char_at_code(args: &[Value]) -> Value {
+    let s = s0(args);
+    let idx = i0(args) as usize;
+    match s.chars().nth(idx) {
+        Some(c) => Value::Int(c as i64),
+        None => Value::Int(-1),
+    }
 }

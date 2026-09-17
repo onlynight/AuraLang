@@ -1,4 +1,5 @@
 // aura:///aura/compiler/aura/lang/compiler/vm/Vm.aura
+package aura.lang.compiler.vm
 // 虚拟机核心实现（Phase 4: 完整 VM Aura 编写）
 // 概念：使用 Aura 语言本身编写完整的虚拟机，实现 bootstrapping
 /// 完整虚拟机实现。
@@ -9,13 +10,13 @@ internal object Vm {
     // ── 常量 ──
 
     /// VM 最大指令执行次数（防止无限循环）
-    const MAX_INSTRUCTIONS: Int = 1000000
+    const val MAX_INSTRUCTIONS: Int = 1000000
 
     /// VM 最大栈深度
-    const MAX_STACK_DEPTH: Int = 256
+    const val MAX_STACK_DEPTH: Int = 256
 
     /// VM 最大调用深度
-    const MAX_CALL_DEPTH: Int = 64
+    const val MAX_CALL_DEPTH: Int = 64
 
     // ── VM 状态 ──
 
@@ -60,7 +61,7 @@ internal object Vm {
     private fun stackPop(stack: List<Any>): Any {
         val size = stack.size
         if (size == 0) {
-            throw Runtime("VM: stack underflow")
+            throw RuntimeException("VM: stack underflow")
         }
         return stack[size - 1]
     }
@@ -71,25 +72,24 @@ internal object Vm {
     fun arithmeticAdd(a: Any, b: Any): Any {
         if (typeof(a) == "Int" and typeof(b) == "Int") {
             return (a as Int) + (b as Int)
-        }
-        if (typeof(a) == "Float" or typeof(b) == "Float") {
+        } else if (typeof(a) == "Float" or typeof(b) == "Float") {
             return toFloat(a) + toFloat(b)
-        }
-        if (typeof(a) == "String") {
+        } else if (typeof(a) == "String") {
             return toStr(a) + toStr(b)
+        } else {
+            throw RuntimeException("ADD: unsupported types " + typeof(a) + " + " + typeof(b))
         }
-        throw Runtime("ADD: unsupported types " + typeof(a) + " + " + typeof(b))
     }
 
     /// 减法。
     fun arithmeticSub(a: Any, b: Any): Any {
         if (typeof(a) == "Float" or typeof(b) == "Float") {
             return toFloat(a) - toFloat(b)
-        }
-        if (typeof(a) == "Int" and typeof(b) == "Int") {
+        } else if (typeof(a) == "Int" and typeof(b) == "Int") {
             return (a as Int) - (b as Int)
+        } else {
+            throw RuntimeException("SUB: unsupported types " + typeof(a) + " - " + typeof(b))
         }
-        throw Runtime("SUB: unsupported types " + typeof(a) + " - " + typeof(b))
     }
 
     // ── 入口点 ──

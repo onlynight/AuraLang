@@ -49,7 +49,7 @@ impl KeyConfig {
     /// 从环境变量加载密钥配置
     pub fn from_env() -> Result<Self, SigningError> {
         let hmac_key = std::env::var("AURA_SIGNING_KEY")
-            .map_err(|_| SigningError::Key("AURA_SIGNING_KEY 未设置".to_string()))?;
+            .map_err(|_| SigningError::Key("AURA_SIGNING_KEY not set".to_string()))?;
         let signer = std::env::var("AURA_SIGNER").unwrap_or_else(|_| "unknown".to_string());
         let timestamp = std::env::var("AURA_TIMESTAMP")
             .ok()
@@ -70,11 +70,11 @@ impl KeyConfig {
     /// 从密钥文件加载（第一行为 hex 密钥，第二行为签名者）
     pub fn from_file(path: &str) -> Result<Self, SigningError> {
         let content = std::fs::read_to_string(path)
-            .map_err(|e| SigningError::Io(format!("无法读取密钥文件: {}", e)))?;
+            .map_err(|e| SigningError::Io(format!("cannot read key file: {}", e)))?;
         let mut lines = content.lines();
         let hmac_key = lines
             .next()
-            .ok_or_else(|| SigningError::Key("密钥文件为空".to_string()))?
+            .ok_or_else(|| SigningError::Key("key file is empty".to_string()))?
             .trim()
             .to_string();
         let signer =
@@ -100,7 +100,7 @@ impl Signer {
     /// 对校验和文件内容签名
     pub fn sign(&self, checksum_content: &str) -> Result<String, SigningError> {
         let key = hex::decode(&self.config.hmac_key)
-            .map_err(|e| SigningError::Key(format!("密钥 hex 解码失败: {}", e)))?;
+            .map_err(|e| SigningError::Key(format!("failed to hex-decode key: {}", e)))?;
 
         let mut mac =
             HmacSha256::new_from_slice(&key).map_err(|e| SigningError::Key(e.to_string()))?;
@@ -128,20 +128,22 @@ impl Verifier {
     pub fn verify(checksum_content: &str, signature_file: &str) -> Result<bool, SigningError> {
         let lines: Vec<&str> = signature_file.lines().collect();
         if lines.len() < 3 {
-            return Err(SigningError::Signature("签名文件格式错误".to_string()));
+            return Err(SigningError::Signature(
+                "invalid signature file format".to_string(),
+            ));
         }
 
         let _signer = lines[0].trim();
         let _timestamp: u64 = lines[1]
             .trim()
             .parse()
-            .map_err(|_| SigningError::Signature("时间戳格式错误".to_string()))?;
+            .map_err(|_| SigningError::Signature("invalid timestamp format".to_string()))?;
         let signature_hex = lines[2].trim();
 
         // 获取密钥
         let key_config = KeyConfig::from_env()?;
         let key = hex::decode(&key_config.hmac_key)
-            .map_err(|e| SigningError::Key(format!("密钥 hex 解码失败: {}", e)))?;
+            .map_err(|e| SigningError::Key(format!("failed to hex-decode key: {}", e)))?;
 
         // 重新计算 HMAC
         let mut mac =

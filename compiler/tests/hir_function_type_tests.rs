@@ -27,20 +27,20 @@ fn parse_to_hir(src: &str) -> compiler::codegen::hir::HirProgram {
 fn test_hir_function_type_basic() {
     let hir = parse_to_hir("fun apply(f: (Int) -> Int, x: Int): Int { return f(x) }");
     // apply 函数的第一个参数类型应为 Function
-    let apply = hir.functions.iter().find(|f| f.name == "apply").expect("apply 函数存在");
-    let param_type = apply.params[0].ty.as_ref().expect("参数类型存在");
+    let apply = hir.functions.iter().find(|f| f.name == "apply").expect("apply function exists");
+    let param_type = apply.params[0].ty.as_ref().expect("parameter type exists");
     match param_type {
         HirType::Function {
             params,
             return_type,
         } => {
-            assert_eq!(params.len(), 1, "应有 1 个参数");
+            assert_eq!(params.len(), 1, "should have 1 parameter");
             assert!(
                 matches!(return_type.as_ref(), HirType::Named(n) if n == "Int"),
-                "返回类型应为 Int"
+                "return type should be Int"
             );
         }
-        other => panic!("期望 Function 类型，实际: {:?}", other),
+        other => panic!("expected Function type, got: {:?}", other),
     }
 }
 
@@ -49,20 +49,20 @@ fn test_hir_function_type_multi_param() {
     let hir = parse_to_hir(
         "fun apply2(f: (Int, String) -> Boolean, x: Int, y: String): Boolean { return f(x, y) }",
     );
-    let apply2 = hir.functions.iter().find(|f| f.name == "apply2").expect("apply2 函数存在");
-    let param_type = apply2.params[0].ty.as_ref().expect("参数类型存在");
+    let apply2 = hir.functions.iter().find(|f| f.name == "apply2").expect("apply2 function exists");
+    let param_type = apply2.params[0].ty.as_ref().expect("parameter type exists");
     match param_type {
         HirType::Function {
             params,
             return_type,
         } => {
-            assert_eq!(params.len(), 2, "应有 2 个参数");
+            assert_eq!(params.len(), 2, "should have 2 parameters");
             assert!(
                 matches!(return_type.as_ref(), HirType::Named(n) if n == "Boolean"),
-                "返回类型应为 Boolean"
+                "return type should be Boolean"
             );
         }
-        other => panic!("期望 Function 类型，实际: {:?}", other),
+        other => panic!("expected Function type, got: {:?}", other),
     }
 }
 
@@ -74,8 +74,8 @@ fn test_hir_function_type_multi_param() {
 fn test_hir_function_type_as_return() {
     let hir = parse_to_hir("fun make_adder(x: Int): (Int) -> Int { return fun(y: Int) => x + y }");
     let make_adder =
-        hir.functions.iter().find(|f| f.name == "make_adder").expect("make_adder 存在");
-    let ret_type = make_adder.ret.as_ref().expect("返回类型存在");
+        hir.functions.iter().find(|f| f.name == "make_adder").expect("make_adder exists");
+    let ret_type = make_adder.ret.as_ref().expect("return type exists");
     match ret_type {
         HirType::Function {
             params,
@@ -84,7 +84,7 @@ fn test_hir_function_type_as_return() {
             assert_eq!(params.len(), 1);
             assert!(matches!(return_type.as_ref(), HirType::Named(n) if n == "Int"));
         }
-        other => panic!("期望 Function 返回类型，实际: {:?}", other),
+        other => panic!("expected Function return type, got: {:?}", other),
     }
 }
 
@@ -97,8 +97,8 @@ fn test_hir_nested_function_type() {
     let hir = parse_to_hir(
         "fun compose(f: (Int) -> Int, g: (Int) -> Int): (Int) -> Int { return fun(x) => f(g(x)) }",
     );
-    let compose = hir.functions.iter().find(|f| f.name == "compose").expect("compose 存在");
-    let ret_type = compose.ret.as_ref().expect("返回类型存在");
+    let compose = hir.functions.iter().find(|f| f.name == "compose").expect("compose exists");
+    let ret_type = compose.ret.as_ref().expect("return type exists");
     match ret_type {
         HirType::Function {
             params,
@@ -107,7 +107,7 @@ fn test_hir_nested_function_type() {
             assert_eq!(params.len(), 1);
             assert!(matches!(return_type.as_ref(), HirType::Named(n) if n == "Int"));
         }
-        other => panic!("期望 Function 返回类型，实际: {:?}", other),
+        other => panic!("expected Function return type, got: {:?}", other),
     }
 }
 
@@ -123,7 +123,10 @@ fn test_llvm_function_type_maps_to_ptr() {
         return_type: Box::new(HirType::Named("Int".into())),
     };
     let llvm = tm.map(&func_type);
-    assert_eq!(llvm, "ptr", "函数类型应映射为 ptr（不透明指针）");
+    assert_eq!(
+        llvm, "ptr",
+        "function type should map to ptr (opaque pointer)"
+    );
 }
 
 #[test]
@@ -135,9 +138,9 @@ fn test_llvm_fn_type_signature() {
     ];
     let ret = HirType::Named("Boolean".into());
     let sig = tm.fn_type(&ret, &params, false);
-    assert!(sig.contains("i1"), "返回类型应为 i1");
-    assert!(sig.contains("i32"), "参数应包含 i32");
-    assert!(sig.contains("float"), "参数应包含 float");
+    assert!(sig.contains("i1"), "return type should be i1");
+    assert!(sig.contains("i32"), "params should contain i32");
+    assert!(sig.contains("float"), "params should contain float");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -147,7 +150,7 @@ fn test_llvm_fn_type_signature() {
 #[test]
 fn test_hir_no_function_type() {
     let hir = parse_to_hir("fun main(): Int { return 42 }");
-    let main = hir.functions.iter().find(|f| f.name == "main").expect("main 存在");
-    let ret_type = main.ret.as_ref().expect("返回类型存在");
+    let main = hir.functions.iter().find(|f| f.name == "main").expect("main exists");
+    let ret_type = main.ret.as_ref().expect("return type exists");
     assert!(matches!(ret_type, HirType::Named(n) if n == "Int"));
 }

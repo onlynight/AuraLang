@@ -1,0 +1,205 @@
+// ═════════════════════════════════════════════════════════════
+// .auz 包格式 测试用例 — 纯 Aura 化迁移
+//
+// 验证内容：
+//   1. 常量与路径约定
+//   2. 校验和计算与验证
+//   3. 打包选项
+//   4. 包内容结构
+//   5. 路径工具函数
+//
+// 运行：aura run tests/complier/aura/auz_test.aura
+//   全通过时最后输出 "RESULT: PASS"
+// ═════════════════════════════════════════════════════════════
+
+import "../../../aura/compiler/aura/lang/compiler/test/TestRunner.aura"
+import "../../../aura/compiler/aura/lang/compiler/auz/Auz.aura"
+import "../../../aura/compiler/aura/lang/compiler/package/Package.aura"
+
+fun main() {
+    println("════════ .auz 包格式 测试用例 ════════")
+    println("")
+
+    var totalFailures: Int = 0
+
+    // ── 套件 1：常量 ────────────────────────────────────────
+    val t1 = TestRunner()
+    t1.begin("Auz/Constants")
+
+    t1.assertEq(APKG_FORMAT_VERSION, 1, "format version")
+    t1.assertEq(DEFAULT_COMPRESSION_LEVEL, 3, "default compression level")
+    t1.assertEq(META_INF_DIR, "META-INF", "META-INF dir")
+    t1.assertEq(MANIFEST_FILENAME, "META-INF/aura.toml", "manifest filename")
+    t1.assertEq(CHECKSUM_FILENAME, "META-INF/checksum.sha256", "checksum filename")
+    t1.assertEq(SIGNATURE_FILENAME, "META-INF/signature.sig", "signature filename")
+    t1.assertEq(LIB_DIR, "lib", "lib dir")
+    t1.assertEq(REF_DIR, "ref", "ref dir")
+    t1.assertEq(REF_INDEX_FILENAME, "ref/index.json", "ref index filename")
+    t1.assertEq(NATIVE_DIR, "native", "native dir")
+    t1.assertEq(SRC_DIR, "src", "src dir")
+    t1.assertEq(DOCS_DIR, "docs", "docs dir")
+    t1.assertEq(RESOURCES_DIR, "resources", "resources dir")
+    t1.assertEq(TEST_DIR, "test", "test dir")
+
+    totalFailures = totalFailures + t1.report()
+
+    // ── 套件 2：路径工具 ────────────────────────────────────
+    val t2 = TestRunner()
+    t2.begin("Auz/PathUnder")
+
+    t2.assertTrue(pathUnder("META-INF", "META-INF/aura.toml"), "under META-INF")
+    t2.assertTrue(pathUnder("META-INF", "META-INF/sub/file"), "under nested")
+    t2.assertFalse(pathUnder("META-INF", "META-INF2/file"), "not under similar prefix")
+    t2.assertFalse(pathUnder("META-INF", "lib/foo"), "not under different dir")
+    t2.assertTrue(pathUnder("lib", "lib/name-version/entry.auc"), "under lib")
+
+    totalFailures = totalFailures + t2.report()
+
+    // ── 套件 3：校验和计算 ──────────────────────────────────
+    val t3 = TestRunner()
+    t3.begin("Auz/Checksum")
+
+    // SHA-256 of empty
+    val hashEmpty = computeSha256("")
+    t3.assertEq(hashEmpty.length, 64, "sha256 hex length")
+
+    // SHA-256 of hello
+    val hashHello = computeSha256("hello")
+    t3.assertEq(hashHello, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", "sha256 of hello")
+
+    totalFailures = totalFailures + t3.report()
+
+    // ── 套件 4：ChecksumEntry 解析 ──────────────────────────
+    val t4 = TestRunner()
+    t4.begin("Auz/ChecksumEntry")
+
+    val entry = ChecksumEntry()
+    entry.hash = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    entry.path = "META-INF/aura.toml"
+
+    val line = entry.toLine()
+    t4.assertEq(line, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824  META-INF/aura.toml", "entry to line")
+
+    val parsed = ChecksumEntry.parseLine(line)
+    t4.assertNotNull(parsed, "parsed entry not null")
+    t4.assertEq(parsed.hash, entry.hash, "parsed hash")
+    t4.assertEq(parsed.path, entry.path, "parsed path")
+
+    // 无效解析
+    t4.assertNull(ChecksumEntry.parseLine("abc  path"), "short hash")
+    t4.assertNull(ChecksumEntry.parseLine("zzzz  path"), "non-hex hash")
+    t4.assertNull(ChecksumEntry.parseLine(""), "empty line")
+    t4.assertNull(ChecksumEntry.parseLine("# comment"), "comment line")
+
+    totalFailures = totalFailures + t4.report()
+
+    // ── 套件 5：校验和文件生成与解析 ─────────────────────────
+    val t5 = TestRunner()
+    t5.begin("Auz/ChecksumFile")
+
+    val entries: List<ChecksumEntry> = []
+    val e1 = ChecksumEntry()
+    e1.hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    e1.path = "META-INF/aura.toml"
+    entries.add(e1)
+
+    val e2 = ChecksumEntry()
+    e2.hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    e2.path = "lib/test.auc"
+    entries.add(e2)
+
+    val content = generateChecksumFile(entries)
+    t5.assertTrue(content.endsWith("\n"), "checksum file ends with newline")
+
+    val parsedEntries = parseChecksumFile(content)
+    t5.assertEq(parsedEntries.length, 2, "two entries parsed")
+    t5.assertEq(parsedEntries[0].path, "META-INF/aura.toml", "first entry path")
+    t5.assertEq(parsedEntries[1].path, "lib/test.auc", "second entry path")
+
+    totalFailures = totalFailures + t5.report()
+
+    // ── 套件 6：打包选项 ────────────────────────────────────
+    val t6 = TestRunner()
+    t6.begin("Auz/BuildOptions")
+
+    val minimal = PackageBuildOptions.minimal()
+    t6.assertFalse(minimal.includeSources, "minimal no sources")
+    t6.assertFalse(minimal.includeResources, "minimal no resources")
+    t6.assertTrue(minimal.includeRefIndex, "minimal include ref index")
+    t6.assertEq(minimal.compressionLevel, DEFAULT_COMPRESSION_LEVEL, "minimal compression level")
+
+    val full = PackageBuildOptions.full()
+    t6.assertTrue(full.includeSources, "full include sources")
+    t6.assertFalse(full.includeResources, "full no resources")
+    t6.assertTrue(full.includeRefIndex, "full include ref index")
+
+    totalFailures = totalFailures + t6.report()
+
+    // ── 套件 7：校验和验证 ──────────────────────────────────
+    val t7 = TestRunner()
+    t7.begin("Auz/VerifyContent")
+
+    val content = PackageContent()
+    content.files.add(Pair<String, String>("META-INF/aura.toml", "name = \"test\"\n"))
+    content.files.add(Pair<String, String>("lib/test.auc", "bytecode"))
+
+    // 计算校验和
+    val entries: List<ChecksumEntry> = []
+    val entry1 = ChecksumEntry()
+    entry1.hash = computeSha256("name = \"test\"\n")
+    entry1.path = "META-INF/aura.toml"
+    entries.add(entry1)
+
+    val entry2 = ChecksumEntry()
+    entry2.hash = computeSha256("bytecode")
+    entry2.path = "lib/test.auc"
+    entries.add(entry2)
+
+    content.checksumEntries = entries
+    val verified = verifyContent(content)
+    t7.assertTrue(verified, "checksum verification passes")
+    t7.assertTrue(content.verified, "content marked as verified")
+
+    totalFailures = totalFailures + t7.report()
+
+    // ── 套件 8：PackageContent ──────────────────────────────
+    val t8 = TestRunner()
+    t8.begin("Auz/PackageContent")
+
+    val content2 = PackageContent()
+    content2.files.add(Pair<String, String>("META-INF/aura.toml", "manifest"))
+    content2.files.add(Pair<String, String>("src/main.aura", "fun main() {}"))
+    content2.files.add(Pair<String, String>("lib/test.auc", "bytecode"))
+
+    // 查找文件
+    val manifest = content2.fileContent("META-INF/aura.toml")
+    t8.assertEq(manifest, "manifest", "find manifest")
+    t8.assertNull(content2.fileContent("nonexistent"), "nonexistent file")
+
+    // 源码文件
+    val sources = content2.sourceFiles()
+    t8.assertEq(sources.length, 1, "one source file")
+    t8.assertEq(sources[0].first, "src/main.aura", "source file path")
+
+    totalFailures = totalFailures + t8.report()
+
+    // ── 套件 9：Zstd 魔数 ───────────────────────────────────
+    val t9 = TestRunner()
+    t9.begin("Auz/ZstdMagic")
+
+    t9.assertEq(ZSTD_MAGIC.length, 4, "zstd magic length")
+
+    totalFailures = totalFailures + t9.report()
+
+    // ── 汇总 ─────────────────────────────────────────────────
+    println("")
+    println("════════ 测试汇总 ════════")
+    println("总失败数: " + toStr(totalFailures) + " (期望 0)")
+    println("")
+
+    if (totalFailures == 0) {
+        println("RESULT: PASS")
+    } else {
+        println("RESULT: FAIL")
+    }
+}

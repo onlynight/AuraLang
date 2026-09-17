@@ -45,7 +45,7 @@ impl Fingerprint {
         for file in &task.inputs.files {
             if file.exists() {
                 let content = std::fs::read(file).map_err(|e| {
-                    LoomError::Cache(format!("无法读取文件 {}: {}", file.display(), e))
+                    LoomError::Cache(format!("Failed to read file {}: {}", file.display(), e))
                 })?;
                 let file_hash = hash_bytes(&content);
                 hasher.update(file_hash);
@@ -136,7 +136,7 @@ pub fn hash_bytes(data: &[u8]) -> Vec<u8> {
 /// 计算文件的 SHA-256 哈希
 pub fn hash_file(path: &Path) -> Result<String, LoomError> {
     let data = std::fs::read(path)
-        .map_err(|e| LoomError::Cache(format!("无法读取文件 {}: {}", path.display(), e)))?;
+        .map_err(|e| LoomError::Cache(format!("Failed to read file {}: {}", path.display(), e)))?;
     Ok(hex::encode(hash_bytes(&data)))
 }
 

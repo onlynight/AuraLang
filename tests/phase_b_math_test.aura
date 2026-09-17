@@ -1,0 +1,26 @@
+// Test Math methods availability (Phase B Step 1 verification)
+import aura.lang.std.Math
+
+fun main() {
+    // Test Math.sin
+    val x: Float = Math.sin(0.0f)
+    println("sin(0) = " + x)
+    
+    // Test Math.cos
+    val y: Float = Math.cos(0.0f)
+    println("cos(0) = " + y)
+    
+    // Test Math.sqrt
+    val z: Float = Math.sqrt(4.0f)
+    println("sqrt(4) = " + z)
+    
+    // Test Math.pow
+    val w: Float = Math.pow(2.0f, 3.0f)
+    println("pow(2,3) = " + w)
+    
+    // Test Math.abs
+    val a: Int = Math.abs(-5)
+    println("abs(-5) = " + a)
+    
+    println("DONE")
+}

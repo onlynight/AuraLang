@@ -29,8 +29,8 @@ fn test_terminate_propagates_to_children() {
 
     assert!(!runtime.is_alive(parent_id));
     // 子 Actor 应被终止
-    assert!(!runtime.is_alive(child1_id), "child1 应被终止");
-    assert!(!runtime.is_alive(child2_id), "child2 应被终止");
+    assert!(!runtime.is_alive(child1_id), "child1 should be terminated");
+    assert!(!runtime.is_alive(child2_id), "child2 should be terminated");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -52,7 +52,7 @@ fn test_escalate_notifies_parent() {
     runtime.kill(child_id);
 
     assert!(!runtime.is_alive(child_id));
-    assert!(runtime.is_alive(parent_id), "父 Actor 应存活");
+    assert!(runtime.is_alive(parent_id), "parent actor should be alive");
 
     // 父 Actor 邮箱应收到死亡消息
     assert!(
@@ -81,9 +81,13 @@ fn test_restart_revives_actor() {
     runtime.kill(id);
 
     // Actor 应存活（已重启）
-    assert!(runtime.is_alive(id), "Actor 应重启后存活");
+    assert!(runtime.is_alive(id), "actor should be alive after restart");
     // 邮箱应被清空
-    assert_eq!(runtime.mailbox_len(id), 0, "重启后邮箱应清空");
+    assert_eq!(
+        runtime.mailbox_len(id),
+        0,
+        "mailbox should be cleared after restart"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -145,6 +149,6 @@ fn test_multi_level_terminate() {
     runtime.kill(root_id);
 
     assert!(!runtime.is_alive(root_id));
-    assert!(!runtime.is_alive(mid_id), "mid 应被终止");
-    assert!(!runtime.is_alive(leaf_id), "leaf 应被终止");
+    assert!(!runtime.is_alive(mid_id), "mid should be terminated");
+    assert!(!runtime.is_alive(leaf_id), "leaf should be terminated");
 }

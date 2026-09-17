@@ -1,0 +1,98 @@
+// aura:///aura/lang/native/arch/aarch64_linux/Syscalls.aura
+package aura.lang.native.arch.aarch64_linux
+// ─────────────────────────────────────────────────────────────
+// aarch64 Linux 系统调用表 — Phase S3
+//
+// aarch64 Linux 系统调用号与 x86_64 不同。
+// 通过 syscall 指令调用（SVCall）。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.native.Memory
+
+/// aarch64 Linux 系统调用
+extern object Syscalls {
+
+    // ── 系统调用号 ──
+
+    const val SYS_READ: Int = 63
+    const val SYS_WRITE: Int = 64
+    const val SYS_CLOSE: Int = 57
+    const val SYS_LSEEK: Int = 62
+    const val SYS_MMAP: Int = 222
+    const val SYS_MUNMAP: Int = 215
+    const val SYS_ACCESS: Int = 81
+    const val SYS_UNLINKAT: Int = 82
+    const val SYS_EXIT_GROUP: Int = 94
+    const val SYS_WAIT4: Int = 61
+    const val SYS_CLOCK_GETTIME: Int = 113
+    const val SYS_GETRANDOM: Int = 278
+    const val SYS_GETPID: Int = 172
+
+    // ── 标准文件描述符 ──
+
+    const val STDIN: Int = 0
+    const val STDOUT: Int = 1
+    const val STDERR: Int = 2
+
+    // ── 文件操作常量 ──
+
+    const val O_RDONLY: Int = 0
+    const val O_WRONLY: Int = 1
+    const val O_RDWR: Int = 2
+    const val O_CREAT: Int = 0x40
+    const val O_EXCL: Int = 0x80
+    const val O_TRUNC: Int = 0x200
+
+    // ── 内存保护常量 ──
+
+    const val PROT_NONE: Int = 0
+    const val PROT_READ: Int = 1
+    const val PROT_WRITE: Int = 2
+    const val PROT_EXEC: Int = 4
+
+    // ── 内存映射常量 ──
+
+    const val MAP_SHARED: Int = 1
+    const val MAP_PRIVATE: Int = 2
+    const val MAP_ANONYMOUS: Int = 0x20
+    const val MAP_ANON: Int = 0x20
+
+    // ── 系统调用声明 ──
+
+    @native(63) fun read(fd: Int, buf: Long, count: Long): Long
+    @native(64) fun write(fd: Int, buf: Long, count: Long): Long
+    @native(56) fun openat(dirfd: Int, path: CString, flags: Int): Int
+    @native(57) fun close(fd: Int): Int
+    @native(62) fun lseek(fd: Int, off: Long, whence: Int): Long
+    @native(222) fun mmap(addr: Long, len: Long, prot: Int, flags: Int, fd: Int, off: Long): Long
+    @native(215) fun munmap(addr: Long, len: Long): Long
+    @native(81) fun access(path: CString, mode: Int): Int
+    @native(82) fun unlinkat(dirfd: Int, path: CString, flags: Int): Int
+    @native(94) fun exitGroup(code: Int)
+    @native(61) fun wait4(pid: Int, status: Long, options: Int, rusage: Long): Int
+    @native(113) fun clockGettime(clock: Int, ts: Long): Long
+    @native(278) fun getrandom(buf: Long, len: Long, flags: Int): Long
+    @native(172) fun getpid(): Int
+
+    // ── 时钟常量 ──
+
+    const val CLOCK_REALTIME: Int = 0
+    const val CLOCK_MONOTONIC: Int = 1
+    const val CLOCK_MONOTONIC_RAW: Int = 4
+    const val CLOCK_REALTIME_COARSE: Int = 5
+    const val CLOCK_MONOTONIC_COARSE: Int = 6
+    const val CLOCK_PROCESS_CPUTIME_ID: Int = 2
+    const val CLOCK_THREAD_CPUTIME_ID: Int = 3
+    const val CLOCK_BOOTTIME: Int = 7
+    const val CLOCK_REALTIME_ALARM: Int = 8
+
+    // ── 其他常量 ──
+
+    const val INVALID_FD: Int = -1
+    const val MAP_FAILED: Long = -1
+    const val AT_FDCWD: Int = -100
+    const val F_OK: Int = 0
+    const val R_OK: Int = 4
+    const val W_OK: Int = 2
+    const val X_OK: Int = 1
+}

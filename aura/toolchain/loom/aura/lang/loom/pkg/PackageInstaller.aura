@@ -1,0 +1,53 @@
+// aura:///loom/pkg/aura/lang/loom/pkg/PackageInstaller.aura
+package aura.lang.loom.pkg
+
+import aura.lang.std.String
+import aura.lang.std.FileSystem
+import aura.lang.std.IO
+import aura.lang.std.Encoding
+import aura.lang.std.Time
+import aura.lang.loom.pkg.PackageMeta
+import aura.lang.loom.pkg.PackageReader
+
+// Package installer
+// Mirrors Rust: package/installer.rs
+// @since 0.6
+class PackageInstaller {
+    val cacheDir: String = "~/.aura/cache/packages"
+    var verbose: Boolean = false
+
+    fun install(pkgPath: String): Int {
+        val reader: PackageReader = PackageReader(pkgPath)
+        val result: Int = reader.read()
+        if (result != 0) {
+            return result
+        }
+
+        val meta: PackageMeta = reader.meta
+
+        // Create install directory
+        val installDir: String = cacheDir + "/" + meta.name + "-" + meta.version
+        if (!FileSystem.exists(cacheDir)) {
+            FileSystem.mkdirP(cacheDir)
+        }
+        if (!FileSystem.exists(installDir)) {
+            FileSystem.mkdirP(installDir)
+        }
+
+        IO.println("[install] Installed: " + meta.name + "@" + meta.version)
+        IO.println("[install]   Location: " + installDir)
+
+        return 0
+    }
+
+    fun uninstall(name: String, version: String): Int {
+        val uninstallDir: String = cacheDir + "/" + name + "-" + version
+        if (FileSystem.exists(uninstallDir)) {
+            FileSystem.delete(uninstallDir)
+            IO.println("[uninstall] Removed: " + name + "@" + version)
+            return 0
+        }
+        IO.println("[uninstall] Not found: " + name + "@" + version)
+        return 1
+    }
+}

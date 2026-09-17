@@ -13,13 +13,13 @@ fn main() {
     let mut lexer = Lexer::new(SRC);
     let tokens = lexer.tokenize();
     if let Some(e) = lexer.errors().first() {
-        eprintln!("词法错误: {}", e.message);
+        eprintln!("lex error: {}", e.message);
         return;
     }
     let mut parser = Parser::new(tokens);
     let program = parser.parse_program();
     if let Some(e) = parser.errors().first() {
-        eprintln!("语法错误: {}", e.message);
+        eprintln!("syntax error: {}", e.message);
         return;
     }
     let hir = desugar_program(&program);
@@ -28,12 +28,12 @@ fn main() {
     let output = match codegen.compile(&hir, &output_dir, OutputFormat::SharedLibrary) {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("SharedLibrary 编译失败: {}", e);
+            eprintln!("SharedLibrary compilation failed: {}", e);
             return;
         }
     };
 
-    println!("✓ SharedLibrary 编译成功");
+    println!("* SharedLibrary compilation succeeded");
     println!("  LLVM IR: {:?}", output.ll_path);
     println!("  Object:  {:?}", output.object_path);
     println!("  DynamicLib: {:?}", output.shared_library_path);
@@ -48,13 +48,13 @@ fn main() {
             })
             .count();
         let has_main = ir.lines().any(|l| l.contains("define") && l.contains("@main"));
-        println!("\n  IR 分析:");
-        println!("    包装函数总数: {}", wrapper_count);
-        println!("    external 包装函数: {}", external_wrappers);
-        println!("    包含 main: {}", has_main);
+        println!("\n  IR analysis:");
+        println!("    total wrapper functions: {}", wrapper_count);
+        println!("    external wrapper functions: {}", external_wrappers);
+        println!("    contains main: {}", has_main);
     }
 
     if let Some(lib_path) = &output.shared_library_path {
-        println!("\n✓ 动态库路径: {}", lib_path.display());
+        println!("\n* Shared library path: {}", lib_path.display());
     }
 }

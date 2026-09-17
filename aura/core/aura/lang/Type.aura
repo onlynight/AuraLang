@@ -13,7 +13,7 @@ package aura.lang
 ///
 /// @see Any
 /// @since 0.5
-internal value class Type {
+value class Type {
 
     /// 类型名称
     val name: String

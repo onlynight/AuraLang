@@ -1,0 +1,50 @@
+// aura:///cli/aura/lang/cli/Args.aura
+package aura.lang.cli
+
+import aura.lang.std.String
+import aura.lang.std.Collections
+import aura.lang.native.process.ProcessNative
+
+// ═══════════════════════════════════════════════════════════════
+// 命令行参数解析
+// ═══════════════════════════════════════════════════════════════
+
+/// 命令行参数容器
+class Args {
+    var raw: List<String> = mutableListOf()
+
+    fun add(arg: String): Unit { raw.add(arg) }
+    fun get(index: Int): String { return raw[index] }
+    fun size(): Int { return raw.size }
+    fun isEmpty(): Boolean { return raw.size == 0 }
+
+    fun hasFlag(flag: String): Boolean {
+        var i: Int = 0
+        while (i < raw.size) {
+            if (raw[i] == flag) { return true }
+            i = i + 1
+        }
+        return false
+    }
+
+    fun getValue(flag: String): String {
+        var i: Int = 0
+        while (i < raw.size - 1) {
+            if (raw[i] == flag) { return raw[i + 1] }
+            i = i + 1
+        }
+        return ""
+    }
+}
+
+/// 从原生进程参数构建 Args
+fun parseArgs(): Args {
+    val args = Args()
+    val count: Int = ProcessNative.argCount()
+    var i: Int = 0
+    while (i < count) {
+        args.add(ProcessNative.arg(i))
+        i = i + 1
+    }
+    return args
+}

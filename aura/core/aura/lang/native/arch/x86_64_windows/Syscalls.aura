@@ -1,0 +1,92 @@
+// aura:///aura/lang/native/arch/x86_64_windows/Syscalls.aura
+package aura.lang.native.arch.x86_64_windows
+// ─────────────────────────────────────────────────────────────
+// Windows x86_64 系统调用表 — Phase S3
+//
+// Windows 使用 Nt* 系统调用（通过 syscall 指令或 Zw* 包装）。
+// 这里使用 Windows API 封装（通过 FFI 调用 kernel32.dll）。
+//
+// ── 注意 ──
+// Windows 不直接支持 syscall 指令调用，需要通过：
+//   1. kernel32.dll API（WriteFile, ReadFile 等）
+//   2. Nt* 系统调用（通过 syscall 指令，但需要 Nt* 服务号）
+//
+// 这里使用 FFI 方式调用 kernel32.dll。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.native.Memory
+
+/// Windows x86_64 系统调用
+extern object Syscalls {
+
+    // ── 标准文件描述符 ──
+    const val STDIN: Int = 0
+    const val STDOUT: Int = 1
+    const val STDERR: Int = 2
+
+    // ── 文件操作常量 ──
+    const val O_RDONLY: Int = 0
+    const val O_WRONLY: Int = 1
+    const val O_RDWR: Int = 2
+    const val O_CREAT: Int = 0x40
+    const val O_TRUNC: Int = 0x200
+
+    // ── 内存保护常量 ──
+    const val PROT_NONE: Int = 0
+    const val PROT_READ: Int = 1
+    const val PROT_WRITE: Int = 2
+    const val PROT_EXEC: Int = 4
+
+    // ── 内存映射常量 ──
+    const val MAP_SHARED: Int = 1
+    const val MAP_PRIVATE: Int = 2
+    const val MAP_ANONYMOUS: Int = 0x20
+
+    // ── Windows 特定常量 ──
+    const val INVALID_HANDLE_VALUE: Long = -1
+    const val GENERIC_READ: Int = 0x80000000
+    const val GENERIC_WRITE: Int = 0x40000000
+
+    // ── 系统调用声明 ──
+    // 注意：Windows 使用 FFI 方式，不是 syscall 指令
+
+    /// 写入控制台（简化实现）
+    @native(asm = "call qword [rip + WriteFile]") fun writeFile(handle: Long, buf: Long, count: Long): Long
+
+    /// 读取控制台（简化实现）
+    @native(asm = "call qword [rip + ReadFile]") fun readFile(handle: Long, buf: Long, count: Long): Long
+
+    /// 获取当前时间
+    @native(asm = "call qword [rip + GetSystemTimeAsFileTime]") fun getTime(): Long
+
+    /// 退出进程
+    @native(asm = "call qword [rip + ExitProcess]") fun exitProcess(code: Int)
+
+    // ── Nt* 系统调用（Phase 2: 直接 syscall 指令）──
+    // Windows Nt* 服务号（x86_64，常见值）
+    // 注意：Nt* 服务号在不同 Windows 版本间可能变化
+
+    /// NtWriteFile — 写入文件
+    @native(0x0000000000000000) fun ntWriteFile(handle: Long, event: Long, apc: Long, context: Long, buffer: Long, length: Long, key: Long, disposition: Long): Long
+
+    /// NtReadFile — 读取文件
+    @native(0x0000000000000001) fun ntReadFile(handle: Long, event: Long, apc: Long, context: Long, buffer: Long, length: Long, key: Long, disposition: Long): Long
+
+    /// NtCreateFile — 创建/打开文件
+    @native(0x0000000000000005) fun ntCreateFile(handle: Long, desiredAccess: Int, objectAttributes: Long, ioStatus: Long, allocationSize: Long, fileAttributes: Long, shareAccess: Int, createDisposition: Int, createOptions: Int, eap: Long, eapLength: Long): Long
+
+    /// NtClose — 关闭句柄
+    @native(0x0000000000000006) fun ntClose(handle: Long): Long
+
+    /// NtSetEvent — 设置事件
+    @native(0x0000000000000007) fun ntSetEvent(event: Long): Long
+
+    /// NtWaitForSingleObject — 等待对象
+    @native(0x0000000000000009) fun ntWaitForSingleObject(handle: Long, alertable: Int, timeout: Long): Long
+
+    /// NtExitProcess — 退出进程（Nt 版本）
+    @native(0x0000000000000010) fun ntExitProcess(status: Long)
+
+    /// NtQuerySystemInformation — 查询系统信息
+    @native(0x000000000000001D) fun ntQuerySystemInformation(systemInformationClass: Int, systemInformation: Long, systemInformationLength: Long, returnLength: Long): Long
+}

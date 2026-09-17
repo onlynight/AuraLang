@@ -1,0 +1,116 @@
+// aura:///aura/lang/concurrent/Semaphore.aura
+package aura.lang.concurrent
+// 信号量（Semaphore）—— 纯 Aura 实现，不依赖 Rust 运行库。
+//
+// 实现说明：
+//   * 句柄指向一段 16 字节堆内存：`w0`=守卫自旋锁，`w1`=许可计数。
+//   * `acquire` 在计数大于 0 时原子地取走一个许可，否则自旋等待；
+//     `release` 归还一个许可；`tryAcquire` 为非阻塞版本。
+//   * 守卫自旋锁基于 `Cpu.atomicAdd`（`lock xaddq`）原生原子指令，
+//     计数语义在 Aura 中实现。
+//
+// 使用前需 import：
+// ```aura
+// import aura.lang.concurrent.Semaphore.*   // 短名可用：new, acquire, release, ...
+// import aura.lang.concurrent.Semaphore     // 类式调用：Semaphore.new(1)
+// ```
+//
+// 使用模式：
+// ```aura
+// val sem = Semaphore.new(2)   // 初始 2 个许可
+// Semaphore.acquire(sem)       // 取走一个许可（无许可时阻塞）
+// // 临界区
+// Semaphore.release(sem)       // 归还许可
+// ```
+//
+// @since 0.6
+import aura.lang.native.Memory
+import aura.lang.native.Cpu
+object Semaphore {
+
+    /// 创建新的信号量
+    ///
+    /// - 参数：`permits` — 初始许可数
+    /// - 返回：信号量 ID（堆地址）
+    fun new(permits: Int): Int {
+        val addr: Long = Memory.alloc(16L)
+        Memory.write64(addr, 0L)
+        Memory.write64(addr + 8L, permits as Long)
+        return addr as Int
+    }
+
+    /// 获取一个许可（无可用许可时阻塞）
+    ///
+    /// - 参数：`sem_id` — 信号量 ID
+    fun acquire(sem_id: Int): Unit {
+        val guard: Long = sem_id as Long
+        val permits: Long = guard + 8L
+        while (true) {
+            spinAcquire(guard)
+            if (Memory.read64(permits) > 0L) {
+                Memory.write64(permits, Memory.read64(permits) - 1L)
+                spinRelease(guard)
+                return
+            }
+            spinRelease(guard)
+        }
+    }
+
+    /// 尝试获取一个许可（非阻塞）
+    ///
+    /// - 参数：`sem_id` — 信号量 ID
+    /// - 返回：true 表示获取成功
+    fun tryAcquire(sem_id: Int): Boolean {
+        val guard: Long = sem_id as Long
+        val permits: Long = guard + 8L
+        spinAcquire(guard)
+        var ok: Boolean = false
+        if (Memory.read64(permits) > 0L) {
+            Memory.write64(permits, Memory.read64(permits) - 1L)
+            ok = true
+        }
+        spinRelease(guard)
+        return ok
+    }
+
+    /// 归还一个许可
+    ///
+    /// - 参数：`sem_id` — 信号量 ID
+    fun release(sem_id: Int): Unit {
+        val guard: Long = sem_id as Long
+        val permits: Long = guard + 8L
+        spinAcquire(guard)
+        Memory.write64(permits, Memory.read64(permits) + 1L)
+        spinRelease(guard)
+    }
+
+    /// 查询当前可用许可数
+    ///
+    /// - 参数：`sem_id` — 信号量 ID
+    /// - 返回：当前许可数
+    fun count(sem_id: Int): Int {
+        return Memory.read64((sem_id as Long) + 8L) as Int
+    }
+
+    /// 销毁信号量
+    ///
+    /// - 参数：`sem_id` — 信号量 ID
+    fun destroy(sem_id: Int): Unit {
+        Memory.free(sem_id as Long)
+    }
+
+    // ── 内部：自旋守卫 ──
+
+    private fun spinAcquire(word: Long): Unit {
+        while (true) {
+            if (Cpu.atomicAdd(word, 1L) == 0L) {
+                return
+            }
+            Cpu.atomicAdd(word, 0L - 1L)
+        }
+    }
+
+    private fun spinRelease(word: Long): Unit {
+        Cpu.atomicAdd(word, 0L - 1L)
+    }
+}

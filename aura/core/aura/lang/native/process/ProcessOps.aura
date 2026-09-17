@@ -1,0 +1,78 @@
+// aura:///aura/lang/native/process/ProcessOps.aura
+package aura.lang.native.process
+// ------------------------------------------------------------------
+// Process management -- Phase S2
+//
+// Provides process creation, exit, wait operations.
+//
+// Usage:
+//   ProcessOps.exit(0)
+//   val pid: Int = ProcessOps.wait(0)
+// ------------------------------------------------------------------
+
+import aura.lang.native.Syscalls
+
+/// Process management
+extern object ProcessOps {
+
+    // -- Syscall declarations --
+    @native(SYS_EXIT_GROUP) fun exitGroup(code: Int)
+    @native(SYS_WAIT4)      fun wait4(pid: Int, status: Long, options: Int, rusage: Long): Int
+    @native(SYS_FORK)       fun fork(): Int
+    @native(SYS_EXECVE)     fun execve(path: Long, args: Long, env: Long): Long
+    @native(SYS_GETPID)     fun getpid(): Int
+    // 文件 syscall：`ProcessNative` 的高层实现（读取 `/proc/self/cmdline`）以
+    // **裸成员名**调用它们。声明必须留在某个 `extern object` 里 —— 只有
+    // extern object 的 `@native` 成员才会发射出「符号名 = 成员名」的包装器
+    //（普通 `object` 的 `@native` 成员不发射包装器，调用点会悬空为
+    // 未定义符号 `@openFile` / `@closeFile` / `@readSyscall`）。
+    @native(SYS_OPEN)       fun openFile(path: CString, flags: Int): Int
+    @native(SYS_CLOSE)      fun closeFile(fd: Int): Int
+    @native(SYS_READ)       fun readSyscall(fd: Int, buf: Long, count: Long): Long
+
+    // ── 命令行参数（C 运行库提供的跨平台访问器）──
+    //
+    // 生成的 C `main` 第一件事就是 `aura_args_set(argc, argv)` 把宿主参数注入
+    // 运行时；`aura_std_cffi.c` 的这三个函数即从注入结果读取
+    //（Rust 侧实现 `Process.arg/argCount` 用的就是它们）。
+    //
+    // 无函数体声明 = 「外部 C 符号」，符号名即成员名；调用点会发射
+    // `call i64 @aura_process_argCount()` 形式（`declare` 见
+    // `Runtime.aura::runtimeDeclarations`）。
+    // 有了它们，Aura 侧**不再需要**依赖 Linux 专有的 `/proc/self/cmdline`
+    //（旧实现在 Windows 下 `argc` 恒为 0，Aura 自举产物无法接收命令行参数）。
+    fun aura_process_argCount(): Long
+    // 取「全量参数」（C 侧以 '\n' 连接；VM 侧返回 List）。
+    //
+    // 为什么不用逐条访问器 `aura_process_arg(index)`：extern object 的成员调用点
+    // 会在实参**前**补一个「接收者」占位（IR: `call i8* @f(i64 0, i32 %index)`），
+    // 于索引落到第 2 个参数槽，而 C 只认第 1 个 —— `arg(i)` 会恒返回 argv[0]
+    //（实测三个参数都打印成同一路径）。`aura_process_args()` 无参，占位无害，
+    // 索引在 Aura 侧切分即可。
+    fun aura_process_args(): String
+
+    /// Exit program
+    fun exit(code: Int) {
+        exitGroup(code)
+    }
+
+    /// Wait for child process to finish
+    fun wait(pid: Int): Int {
+        return wait4(pid, 0, 0, 0)
+    }
+
+    /// Execute external program (replace current process)
+    fun exec(path: Long, args: Long, env: Long): Long {
+        return execve(path, args, env)
+    }
+
+    /// Get current process ID
+    fun getPid(): Int {
+        return getpid()
+    }
+
+    /// Fork a child process
+    fun forkProcess(): Int {
+        return fork()
+    }
+}

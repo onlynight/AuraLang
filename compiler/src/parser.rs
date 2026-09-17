@@ -23,6 +23,8 @@ pub struct Parser {
     /// 抑制 `x -> ...` 形式的 lambda 解析（用于 `when` 分支模式，避免把
     /// `RED -> "red"` 当成单参数 lambda）
     suppress_lambda: usize,
+    /// Phase D: 待应用的 @native 注解（由 parse_extern_object 设置，parse_fn_decl 取走）
+    pending_native_attr: Option<NativeAttr>,
 }
 
 /// 类/结构体/Actor 体成员的解析产物（Kotlin 风格成员全集）
@@ -64,6 +66,7 @@ impl Parser {
             pending_fn_mods: Vec::new(),
             pending_visibility: Visibility::Public,
             suppress_lambda: 0,
+            pending_native_attr: None,
         }
     }
 
@@ -77,11 +80,25 @@ impl Parser {
         let mut imports = Vec::new();
         let mut declarations = Vec::new();
         let mut top_level_statements = Vec::new();
+        let mut package = None;
 
         while !self.is_at_end() {
             match self.current().kind {
                 TokenKind::Import => {
                     imports.push(self.parse_import());
+                }
+                TokenKind::Package => {
+                    // package aura.lang.std
+                    self.advance(); // consume "package"
+                    let mut path = String::new();
+                    path.push_str(&self.advance().literal);
+                    while self.check(TokenKind::Dot) {
+                        self.advance(); // consume .
+                        let tok = self.advance();
+                        path.push('.');
+                        path.push_str(&tok.literal);
+                    }
+                    package = Some(path);
                 }
                 TokenKind::EOF => break,
                 _ => {
@@ -103,6 +120,7 @@ impl Parser {
             imports,
             declarations,
             top_level_statements,
+            package,
         }
     }
 
@@ -215,13 +233,33 @@ impl Parser {
             return Ok(Decl::Import(self.parse_import()));
         }
         if self.check(TokenKind::Extern) {
-            // 检查是否是 extern interface
-            if self.peek_ahead(1).kind == TokenKind::Interface {
-                return Ok(Decl::ExternInterface(self.parse_extern_interface()));
+            // 检查是否是 extern object（新语法）或 extern interface（已废弃，自动转换）
+            let next_kind = self.peek_ahead(1).kind;
+            if next_kind == TokenKind::Object || next_kind == TokenKind::Interface {
+                return Ok(Decl::ExternObject(self.parse_extern_object()));
             }
             return Ok(Decl::Extern(self.parse_extern()));
         }
         if self.check(TokenKind::At) {
+            // @native(...) 作为函数声明前缀：解析为 pending_native_attr 后继续解析后续声明
+            // @native（无括号）→ Builtin；@native(asm=...) → Asm；@native(N) → Syscall
+            // 其他 @ 注解：解析为独立的 AnnotationDecl
+            let next = self.peek_ahead(1);
+            if (next.kind == TokenKind::Ident && next.literal == "native")
+                || next.kind == TokenKind::Native
+            {
+                self.advance(); // @
+                self.advance(); // native
+                // 检查是否有括号：@native() / @native(asm=...) / @native(N)
+                // 无括号 @native fun → Builtin（编译器内置）
+                if self.check(TokenKind::LParen) {
+                    self.pending_native_attr = self.parse_native_annotation_args();
+                } else {
+                    self.pending_native_attr = Some(NativeAttr::Builtin);
+                }
+                // 继续解析后续声明（通常是 fun 声明）
+                return self.parse_declaration();
+            }
             return Ok(Decl::Annotation(self.parse_annotation()));
         }
         if self.check(TokenKind::Typealias) {
@@ -269,8 +307,15 @@ impl Parser {
         if self.check(TokenKind::Interface) {
             return Ok(Decl::Interface(self.parse_interface()));
         }
+        // actor 按类降级（见 `parse_actor`：并发仅由运行时承担，语法同 class）
         if self.check(TokenKind::Actor) {
-            return Ok(Decl::Actor(self.parse_actor()));
+            return Ok(Decl::Class(self.parse_actor()));
+        }
+        // Phase D: 顶层 native fun xxx() — 编译器内置
+        if self.check(TokenKind::Native) {
+            self.advance(); // native
+            self.pending_native_attr = Some(NativeAttr::Builtin);
+            return Ok(Decl::Function(self.parse_fn_decl()));
         }
         if self.check(TokenKind::Fun) || self.is_method_modifier_token() {
             return Ok(Decl::Function(self.parse_fn_decl()));
@@ -404,6 +449,7 @@ impl Parser {
             return_type,
             body,
             doc: self.take_doc(),
+            native_attr: self.pending_native_attr.take(),
             span: Span::merge(&start, &self.current().span),
         }
     }
@@ -547,7 +593,7 @@ impl Parser {
         let name = self.advance().literal.clone();
 
         // 类型参数
-        let ty = if self.check(TokenKind::Lt) {
+        let mut ty = if self.check(TokenKind::Lt) {
             self.advance(); // <
             let mut args = Vec::new();
             loop {
@@ -587,6 +633,21 @@ impl Parser {
         if self.check(TokenKind::QuestionMark) {
             self.advance();
             return Type::Nullable(Box::new(ty));
+        }
+
+        // 数组类型：Int[6] 或 Int[]
+        while self.check(TokenKind::LBracket) {
+            self.advance(); // [
+            if self.check(TokenKind::RBracket) {
+                // 空数组类型 Int[]
+                self.advance();
+                ty = Type::Array(Box::new(ty));
+            } else {
+                // 有界数组类型 Int[6]：解析大小表达式后丢弃
+                let _size_expr = self.parse_expression(0);
+                self.expect(TokenKind::RBracket);
+                ty = Type::Array(Box::new(ty));
+            }
         }
 
         ty
@@ -1165,6 +1226,7 @@ impl Parser {
                     members.fields.push(StructField {
                         visibility: self.take_visibility(),
                         is_mutable: false,
+                        is_const: false,
                         name: self.advance().literal.clone(),
                         type_hint: None,
                         default_value: None,
@@ -1218,15 +1280,30 @@ impl Parser {
         let visibility = self.take_visibility();
 
         let mut is_mutable = false;
-        if self.check(TokenKind::Var) {
-            self.advance();
-            is_mutable = true;
+        let mut is_const = false;
+        // 语法：<visibility>? const val NAME (: Type)? (= value)?
+        // 或：  <visibility>? val NAME (: Type)? (= value)?
+        // 或：  <visibility>? var NAME (: Type)? (= value)?
+        if self.check(TokenKind::Const) {
+            self.advance(); // const
+            is_const = true;
+            is_mutable = false;
+            // const 必须后跟 val
+            if self.check(TokenKind::Val) {
+                self.advance(); // val
+            } else {
+                let span = self.current().span;
+                self.errors.push(CompileError::spanned(
+                    "const 修饰符必须后跟 val，例如 `const val NAME = value`".to_string(),
+                    span,
+                ));
+                self.advance();
+            }
         } else if self.check(TokenKind::Val) {
             self.advance();
-        } else if self.check(TokenKind::Const) {
-            // const 修饰符：常量（不可变），与 val 相同 AST 但语义不同
+        } else if self.check(TokenKind::Var) {
             self.advance();
-            is_mutable = false;
+            is_mutable = true;
         }
 
         let name = self.advance().literal.clone();
@@ -1250,6 +1327,7 @@ impl Parser {
         StructField {
             visibility,
             is_mutable,
+            is_const,
             name,
             type_hint,
             default_value,
@@ -2014,8 +2092,18 @@ impl Parser {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn parse_actor(&mut self) -> ActorDecl {
+    /// `actor Name { … }` —— 并发实体声明。
+    ///
+    /// 语法与类完全一致（字段 / 方法 / init 块 / 次构造函数 / 伴生对象），
+    /// 并发语义由运行时 `aura.concurrent` API 承担，因此这里**降级为类**。
+    ///
+    /// 旧实现返回 `ActorDecl`，而 `Decl::Actor` 在 HIR 侧只把方法抽成
+    /// **自由函数**（丢掉字段与隐式 this）：`actor Worker { var tick: Int
+    /// … fun step() { tick = tick + 1 } }` 会发射出
+    /// `add i32 tick, 1` —— `tick` 未加 `%`，llc 直接报
+    /// `expected value token`。按类降级后字段/隐式接收者/构造函数全部走
+    /// 既有成熟路径（与 Aura 侧解析器的处理保持一致）。
+    pub fn parse_actor(&mut self) -> ClassDecl {
         let start = self.current().span;
         let visibility = self.take_visibility();
         self.expect(TokenKind::Actor);
@@ -2033,16 +2121,21 @@ impl Parser {
 
         let _ = std::mem::take(&mut self.pending_class_mods);
 
-        ActorDecl {
+        ClassDecl {
             visibility,
+            sealed: false,
             name,
+            type_params: Vec::new(),
+            superclass: None,
             fields: members.fields,
             methods: members.methods,
+            implementations: Vec::new(),
             init_blocks: members.init_blocks,
             constructors: members.constructors,
             companion_objects: members.companions,
             doc: self.take_doc(),
             span: Span::merge(&start, &self.current().span),
+            modifiers: Vec::new(),
         }
     }
 
@@ -2113,20 +2206,77 @@ impl Parser {
         }
     }
 
-    /// 解析 extern interface 声明
-    /// 语法：`extern interface Name { default fun loadLibrary(): String = "path"; fun add(...) }`
-    pub fn parse_extern_interface(&mut self) -> ExternInterfaceDecl {
+    /// 解析 extern object 声明（原 extern interface，已统一）
+    /// 语法：`extern object Name { default fun loadLibrary(): String = "path"; @aot fun add(...) }`
+    /// 兼容旧语法：`extern interface Name { default fun loadLibrary(): String = "path"; fun add(...) }`
+    pub fn parse_extern_object(&mut self) -> ExternInterfaceDecl {
         let start = self.current().span;
-        self.expect(TokenKind::Extern); // "extern"
-        self.expect(TokenKind::Interface); // "interface"
+        self.expect(TokenKind::Extern);
+        // 接受 "object" 或 "interface"（已废弃）
+        let keyword = if self.check(TokenKind::Object) || self.check(TokenKind::Interface) {
+            let kw = self.advance().literal.clone();
+            if kw == "interface" {
+                self.warn_deprecated_extern_interface();
+            }
+            kw
+        } else {
+            // fallback: 读取下一个 token
+            self.advance().literal.clone()
+        };
+
         let name = self.advance().literal.clone(); // 接口名
 
         // 函数声明块（库路径从 default fun loadLibrary() 提取）
         let mut functions = Vec::new();
+        let mut constants: Vec<Stmt> = Vec::new();
         let mut lib_path: Option<String> = None;
         if self.check(TokenKind::LBrace) {
             self.advance();
             while !self.check(TokenKind::RBrace) && !self.is_at_end() {
+                // 跳过文档注释
+                while self.check(TokenKind::DocComment) {
+                    self.advance();
+                }
+                // Phase S3: 处理 const/val/var 常量声明
+                if self.check(TokenKind::Const)
+                    || self.check(TokenKind::Val)
+                    || self.check(TokenKind::Var)
+                    || (self.is_visibility_token() && {
+                        let k1 = self.peek_ahead(1);
+                        k1.kind == TokenKind::Const
+                            || k1.kind == TokenKind::Val
+                            || k1.kind == TokenKind::Var
+                    })
+                {
+                    let stmt = self.parse_struct_field_stmt();
+                    constants.push(stmt);
+                    continue;
+                }
+                // Phase D: 处理 @native 注解
+                //   @native(SYSCALL_NUMBER)       → NativeAttr::Syscall
+                //   @native(asm = "...")          → NativeAttr::Asm
+                //   native fun xxx()              → NativeAttr::Builtin
+                // 也兼容已有的 @aot fun xxx()
+                if self.check(TokenKind::At) {
+                    self.advance(); // @
+                    let ann_name = if self.check(TokenKind::Ident) || self.check(TokenKind::Native)
+                    {
+                        Some(self.advance().literal.clone())
+                    } else {
+                        None
+                    };
+                    if ann_name.as_deref() == Some("native") {
+                        // 解析 @native(...) 参数
+                        let native_attr = self.parse_native_annotation_args();
+                        self.pending_native_attr = native_attr;
+                    } else if ann_name.as_deref() == Some("aot") {
+                        self.pending_fn_mods.push(FnModifier::Aot);
+                    }
+                } else if self.check(TokenKind::Native) {
+                    // native fun xxx() — 编译器内置
+                    self.advance(); // native
+                    self.pending_native_attr = Some(NativeAttr::Builtin);
+                }
                 let fn_decl = self.parse_fn_decl();
                 // 检查是否是 default fun loadLibrary(): String = "path"
                 if fn_decl.name == "loadLibrary"
@@ -2148,8 +2298,164 @@ impl Parser {
             name,
             lib_path,
             functions,
+            constants,
             span: Span::merge(&start, &self.current().span),
         }
+    }
+
+    /// 解析 extern object 内的常量声明（const/val/var）
+    /// 将 StructField 包装为 Stmt::Val 形式以便统一处理
+    fn parse_struct_field_stmt(&mut self) -> Stmt {
+        let field = self.parse_struct_field();
+        Stmt::Val {
+            name: field.name,
+            type_hint: field.type_hint,
+            initializer: field.default_value,
+            span: field.span,
+        }
+    }
+
+    /// Phase D: 解析 @native(...) 的参数
+    ///
+    /// 语法：
+    ///   @native(SYS_READ)           → NativeAttr::Syscall(0)（标识符或字面量）
+    ///   @native(asm = "rdtsc")      → NativeAttr::Asm("rdtsc")
+    ///
+    /// 返回 None 表示无参数（编译错误，应报告）
+    fn parse_native_annotation_args(&mut self) -> Option<NativeAttr> {
+        if !self.check(TokenKind::LParen) {
+            eprintln!("[parser] error: @native expects '(' after annotation name");
+            return None;
+        }
+        self.advance(); // (
+
+        if self.check(TokenKind::RParen) {
+            self.advance();
+            return Some(NativeAttr::Builtin); // 无参数 = 编译器内置
+        }
+
+        // @native(asm = "...")
+        if self.check(TokenKind::Ident) && self.current().literal == "asm" {
+            self.advance(); // asm
+            if self.check(TokenKind::Assign) {
+                self.advance(); // =
+            }
+            if self.check(TokenKind::StringLiteral) {
+                let code = self.advance().literal.clone();
+                self.expect(TokenKind::RParen);
+                return Some(NativeAttr::Asm(code));
+            } else {
+                eprintln!("[parser] error: @native(asm = \"...\") expects a string literal");
+                return None;
+            }
+        }
+
+        // @native(0) 或 @native(SYS_READ)
+        // 尝试解析标识符或整数作为 syscall 号
+        let token = self.current();
+        let nr = if token.kind == TokenKind::IntLiteral {
+            self.advance().literal.parse::<i64>().unwrap_or(-1)
+        } else if token.kind == TokenKind::Ident {
+            // 解析标识符：查找对应的常量值
+            let name = self.advance().literal.clone();
+            self.lookup_syscall_const(&name)
+        } else {
+            eprintln!("[parser] error: @native() expects a syscall number or identifier");
+            self.advance();
+            -1
+        };
+
+        self.expect(TokenKind::RParen);
+        Some(NativeAttr::Syscall(nr))
+    }
+
+    /// 查找系统调用常量名称对应的数值
+    ///
+    /// 这些常量定义在 Syscalls.aura 中（如 SYS_READ = 0, SYS_WRITE = 1 等）
+    fn lookup_syscall_const(&self, name: &str) -> i64 {
+        match name {
+            "SYS_READ" => 0,
+            "SYS_WRITE" => 1,
+            "SYS_OPEN" => 2,
+            "SYS_CLOSE" => 3,
+            "SYS_FSTAT" => 5,
+            "SYS_LSEEK" => 8,
+            "SYS_MMAP" => 9,
+            "SYS_MUNMAP" => 11,
+            "SYS_ACCESS" => 21,
+            "SYS_UNLINK" => 39,
+            "SYS_EXECVE" => 59,
+            "SYS_EXIT_GROUP" => 231,
+            "SYS_WAIT4" => 61,
+            "SYS_CLOCK_GETTIME" => 228,
+            "SYS_GETRANDOM" => 257,
+            // 其他系统调用（按 Linux x86_64 ABI）
+            "SYS_READV" => 62,
+            "SYS_WRITEV" => 63,
+            "SYS_CLONE" => 56,
+            "SYS_FORK" => 57,
+            "SYS_PIPE" => 32,
+            "SYS_PIPE2" => 291,
+            "SYS_GETPID" => 39,
+            "SYS_GETPPID" => 64,
+            "SYS_SCHED_YIELD" => 158,
+            "SYS_SCHED_GETPARAM" => 144,
+            "SYS_SCHED_SETPARAM" => 145,
+            "SYS_SETSCHEDULER" => 155,
+            "SYS_SETAFFINITY" => 204,
+            "SYS_GETAFFINITY" => 203,
+            "SYS_SET_TID_ADDRESS" => 218,
+            "SYS_SEMTIMEDOP" => 220,
+            "SYS_MSGSND" => 68,
+            "SYS_MSGRCV" => 69,
+            "SYS_SEMOP" => 65,
+            "SYS_SEMGET" => 64,
+            _ => -1,
+        }
+    }
+
+    /// Windows Nt* 系统调用服务号表（x86_64）
+    /// 注意：Windows Nt* 服务号在不同版本间可能变化，此处为常见值
+    #[allow(dead_code)]
+    fn lookup_nt_service_const(&self, name: &str) -> i64 {
+        match name {
+            "NT_WRITEFILE" => 0x0000000000000000,
+            "NT_READFILE" => 0x0000000000000001,
+            "NT_CREATEFILE" => 0x0000000000000005,
+            "NT_CLOSE" => 0x0000000000000006,
+            "NT_SETEVENT" => 0x0000000000000007,
+            "NT_WAIT_FOR_SINGLE_OBJECT" => 0x0000000000000009,
+            "NT_EXIT_PROCESS" => 0x0000000000000010,
+            "NT_QUIT" => 0x0000000000000011,
+            "NT_TERMINATE_THREAD" => 0x0000000000000012,
+            "NT_QUERY_INFORMATION_PROCESS" => 0x0000000000000013,
+            "NT_WRITE_VARIANT" => 0x0000000000000014,
+            "NT_READ_VARIANT" => 0x0000000000000015,
+            "NT_EXIT_THREAD" => 0x0000000000000016,
+            "NT_READ_CONTROL_FILE" => 0x0000000000000017,
+            "NT_WRITE_CONTROL_FILE" => 0x0000000000000018,
+            "NT_MAP_VIEW_OF_FILE" => 0x0000000000000019,
+            "NT_UNMAP_VIEW_OF_FILE" => 0x000000000000001A,
+            "NT_WRITE_GATHER" => 0x000000000000001B,
+            "NT_READ_GATHER" => 0x000000000000001C,
+            "NT_QUERY_SYSTEM_INFORMATION" => 0x000000000000001D,
+            "NT_SET_SYSTEM_INFORMATION" => 0x000000000000001E,
+            "NT_READ_VARIANT_FILE" => 0x000000000000001F,
+            "NT_WRITE_VARIANT_FILE" => 0x0000000000000020,
+            "NT_WRITE_VARIANT_CONTROL" => 0x0000000000000021,
+            "NT_WRITE_VARIANT_GATHER" => 0x0000000000000022,
+            "NT_READ_VARIANT_GATHER" => 0x0000000000000023,
+            "NT_READ_VARIANT_CONTROL" => 0x0000000000000024,
+            "NT_EXIT" => 0x0000000000000025,
+            _ => -1,
+        }
+    }
+
+    /// 发出 extern interface 废弃警告
+    fn warn_deprecated_extern_interface(&self) {
+        eprintln!(
+            "[parser] warning: `extern interface` is deprecated, use `extern object` instead"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -2412,10 +2718,19 @@ impl Parser {
         // 杜绝 `advance` 在 EOF 处不推进导致的无限循环。
         loop {
             // 自定义中缀调用（Kotlin `infix fun`）：`lhs name rhs` → Call(name, [lhs, rhs])
-            // 排除单词形式逻辑运算符 `and` / `or`：它们是运算符而非函数名。
+            //
+            // 必须排除**单词形式的保留运算符**（`and` / `or` / `xor` / `shl` / `shr` /
+            // `ushr`）：它们在 `infix_binding_power` / `parse_infix_operator` 中已有确定
+            // 的运算符语义。旧实现只排除 `and` / `or`，于是 `h shr 16`（右操作数是字面量）
+            // 会走本分支变成 `Call("shr", [h, 16])` —— AOT 下即对未定义符号 `@shr`
+            // 的调用（llc: use of undefined value '@shr'），且调用结果被当作 `0` 参与外层
+            // 运算，静默算出错误结果（HashMap 哈希混合即因此全塌成 0）。
             if self.current().kind == TokenKind::Ident
                 && !self.is_lambda_start()
-                && !matches!(self.current().literal.as_str(), "and" | "or")
+                && !matches!(
+                    self.current().literal.as_str(),
+                    "and" | "or" | "xor" | "shl" | "shr" | "ushr"
+                )
             {
                 if let Some(infix) = self.try_parse_infix_call(&lhs, min_bp) {
                     lhs = infix;
@@ -2876,10 +3191,16 @@ impl Parser {
                 // 泛型函数调用：`arrayOf<Char>()` 或 `foo<T>(...)`
                 TokenKind::Lt => {
                     // 判断是否为泛型类型参数（而非小于运算符）
-                    // 启发式：`<` 后跟标识符且再后跟 `>` 或 `,` 视为类型参数
+                    // 启发式：`<` 后跟标识符且再后跟 `>`/`,`/`<` 视为类型参数
+                    // （嵌套泛型如 `ArrayList<HashMap<Int, String>>` 的 `peek_ahead(2)` 为 `Lt`）
                     if self.check(TokenKind::Lt) && self.peek_ahead(1).kind == TokenKind::Ident {
                         let a1 = self.peek_ahead(2);
-                        if a1.kind == TokenKind::Gt || a1.kind == TokenKind::Comma {
+                        if a1.kind == TokenKind::Gt
+                            || a1.kind == TokenKind::GtGt
+                            || a1.kind == TokenKind::GtGtGt
+                            || a1.kind == TokenKind::Comma
+                            || a1.kind == TokenKind::Lt
+                        {
                             // 泛型函数调用：解析类型参数
                             self.advance(); // <
                             // 解析类型参数列表（使用 parse_type 而非 parse_expression）
@@ -2891,7 +3212,8 @@ impl Parser {
                                 }
                                 self.advance();
                             }
-                            self.expect(TokenKind::Gt);
+                            // 使用 expect_type_gt 处理嵌套泛型的 `>>` / `>>>`
+                            self.expect_type_gt();
                             // 继续解析调用（如果有 `(`）
                             continue;
                         }
@@ -3072,8 +3394,12 @@ impl Parser {
         // `Call(and, [lhs, rhs])`，AOT 下即是对未定义符号 `@and` 的调用。
         if self.current().kind == TokenKind::Ident {
             match self.current().literal.as_str() {
-                "and" => return 2, // 同 AndAnd
-                "or" => return 1,  // 同 OrOr
+                "and" => return 2,  // 同 AndAnd
+                "or" => return 1,   // 同 OrOr
+                "xor" => return 4,  // 同 Caret
+                "shl" => return 5,  // 同 LtLt
+                "shr" => return 5,  // 同 GtGt
+                "ushr" => return 5, // 同 GtGtGt
                 _ => {}
             }
         }
@@ -3091,6 +3417,10 @@ impl Parser {
             TokenKind::AndAnd => 2,
             TokenKind::OrOr => 1,
             TokenKind::LtLt | TokenKind::GtGt | TokenKind::GtGtGt => 5,
+            // 位运算符
+            TokenKind::Ampersand => 5,    // &
+            TokenKind::Caret => 4,        // ^
+            TokenKind::Pipe => 3,         // |
             TokenKind::QuestionMark => 8, // Elvis
             TokenKind::DoubleDotOp => 8,  // 范围 ..
             TokenKind::To => 2,           // map entry: "a" to 1
@@ -3121,6 +3451,10 @@ impl Parser {
             match tok.literal.as_str() {
                 "and" => return BinOp::And,
                 "or" => return BinOp::Or,
+                "xor" => return BinOp::BitXor,
+                "shl" => return BinOp::Shl,
+                "shr" => return BinOp::Shr,
+                "ushr" => return BinOp::UShr,
                 _ => {}
             }
         }
@@ -3139,6 +3473,9 @@ impl Parser {
             TokenKind::GtEq => BinOp::Ge,
             TokenKind::AndAnd => BinOp::And,
             TokenKind::OrOr => BinOp::Or,
+            TokenKind::Ampersand => BinOp::BitAnd,
+            TokenKind::Caret => BinOp::BitXor,
+            TokenKind::Pipe => BinOp::BitOr,
             TokenKind::LtLt => BinOp::Shl,
             TokenKind::GtGt => BinOp::Shr,
             TokenKind::GtGtGt => BinOp::UShr,
@@ -3327,22 +3664,78 @@ impl Parser {
         }
     }
 
-    /// for (pattern in iterable) body
+    /// for 表达式：支持两种语法
+    /// 1. for (pattern in iterable) body   — Kotlin 风格
+    /// 2. for (init; condition; increment) body — C 风格
     fn parse_for_expression(&mut self, start: Span) -> Expr {
         self.advance(); // for
         self.expect(TokenKind::LParen);
-        let pattern = self.parse_expression(0);
-        self.expect(TokenKind::In);
-        let iterable = self.parse_expression(0);
-        self.expect(TokenKind::RParen);
-        let body = self.parse_body_expr();
 
-        Expr::For {
-            pattern: Box::new(pattern),
-            iterable: Box::new(iterable),
-            body: Box::new(body),
-            span: Span::merge(&start, &self.current().span),
+        // 解析第一个表达式（可能是 pattern 或 init）
+        // C 风格 init 可能包含 var/val 声明，需要先判断
+        let first_expr = if self.check(TokenKind::Semicolon) {
+            // 空 init：for (; condition; increment)
+            Box::new(Expr::Literal(Literal::Int(0), self.current().span))
+        } else if self.check(TokenKind::Var) || self.check(TokenKind::Val) {
+            // C 风格 init 含声明：var j: Int = ...; 或 val x = ...;
+            // 解析为语句序列，编码为 Block 表达式
+            self.parse_cfor_init()
+        } else {
+            Box::new(self.parse_expression(0))
+        };
+
+        // 检测语法类型：`;` → C 风格，`in` → Kotlin 风格
+        if self.check(TokenKind::In) {
+            // ── Kotlin 风格：for (x in iterable) body ──
+            self.advance(); // in
+            let iterable = self.parse_expression(0);
+            self.expect(TokenKind::RParen);
+            let body = self.parse_body_expr();
+            Expr::For {
+                pattern: first_expr,
+                iterable: Box::new(iterable),
+                body: Box::new(body),
+                span: Span::merge(&start, &self.current().span),
+            }
+        } else {
+            // ── C 风格：for (init; condition; increment) body ──
+            self.expect(TokenKind::Semicolon);
+
+            // 解析 condition（空表示 true）
+            let condition = if self.check(TokenKind::Semicolon) {
+                Box::new(Expr::Literal(Literal::Bool(true), self.current().span))
+            } else {
+                Box::new(self.parse_expression(0))
+            };
+
+            self.expect(TokenKind::Semicolon);
+
+            // 解析 increment（空表示无操作）
+            let increment = if self.check(TokenKind::RParen) {
+                None
+            } else {
+                Some(Box::new(self.parse_expression(0)))
+            };
+
+            self.expect(TokenKind::RParen);
+            let body = self.parse_body_expr();
+
+            Expr::CFor {
+                init: Some(first_expr),
+                condition,
+                increment,
+                body: Box::new(body),
+                span: Span::merge(&start, &self.current().span),
+            }
         }
+    }
+
+    /// 解析 C 风格 for 循环的 init 部分（含 var/val 声明）
+    fn parse_cfor_init(&mut self) -> Box<Expr> {
+        let start = self.current().span;
+        // 解析一条语句（可能是 var/val 声明或表达式）
+        let stmt = self.parse_statement();
+        Box::new(Expr::Block(vec![stmt], start))
     }
 
     /// while (condition) body

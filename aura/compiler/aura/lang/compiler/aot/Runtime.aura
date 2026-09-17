@@ -14,278 +14,369 @@ package aura.lang.compiler.aot
 
 import aura.lang.std.String
 import aura.lang.compiler.aot.AotUtil
-import aura.lang.compiler.aot.StdSigs
 
-/// 全部 runtime 函数声明表。
-fun runtimeTable(): String {
-    return "aura_arc_increment|void|i8*\n" +
-        "aura_arc_decrement|void|i8*\n" +
-        "aura_coroutine_yield|void|i8*\n" +
-        "aura_malloc|i8*|i64\n" +
-        "aura_free|void|i8*\n" +
-        "aura_string_new|i8*|i8*,i64\n" +
-        "aura_string_length|i64|i8*\n" +
-        "toStringFloat|i8*|double\n" +
-        "aura_string_data|i8*|i8*\n" +
-        "aura_string_concat|i8*|i8*,i64,i8*,i64\n"
-}
+object RuntimeUtils {
 
-/// C FFI 实现（aura_std_cffi.c）的真实 ABI 签名表。
-/// 格式：`symbol|ret_llvm_type|param_llvm_types(逗号分隔)`
-fun cffiTable(): String {
-    return "aura_math_sin|double|double\n" +
-        "aura_math_cos|double|double\n" +
-        "aura_math_sqrt|double|double\n" +
-        "aura_math_pow|double|double,double\n" +
-        "aura_math_abs|i64|double\n" +
-        "aura_string_length|i64|i8*\n" +
-        "aura_string_contains|i1|i8*,i8*\n" +
-        "aura_string_toUpperCase|i8*|i8*\n" +
-        "aura_string_toLowerCase|i8*|i8*\n" +
-        "aura_string_trim|i8*|i8*\n" +
-        "aura_string_startsWith|i1|i8*,i8*\n" +
-        "aura_string_endsWith|i1|i8*,i8*\n" +
-        "aura_fs_exists|i1|i8*\n" +
-        "aura_fs_readText|i8*|i8*\n" +
-        "aura_fs_writeText|i8*|i8*,i8*\n" +
-        "aura_io_fileWrite|void|i8*,i8*\n" +
-        "aura_env_platform|i8*|\n" +
-        "aura_env_get|i8*|i8*\n" +
-        "aura_time_epoch|i64|\n" +
-        "aura_random_nextInt|i64|\n"
-}
-
-/// AOT 调用点符号表（Phase 6.5.3 / 6.5.4）。
-///
-/// 发射器把 `println(s)`、`s.length`、`String.split` 等调用/成员落成真实
-/// C 运行库符号。本表与 `compiler/src/std/cffi/aura_std_cffi.c` 的导出
-/// **同源**：`sanitize(aura.lang.std.X.y)` → `aura_lang_std_X_y`。
-///
-/// 格式：`symbol|ret_llvm_type|param_llvm_types(逗号分隔)`
-///
-/// 字符串边界（Phase 6.5.5）：Aura 侧 AOT 发射器内部按 **`i8*`（C 字符串）**
-/// 表示 String，与 C ABI (`const char*`) 直接对齐，跨边界无需 coerce。
-fun preludeTable(): String {
-    return "aura_println|void|i8*\n" +
-        "aura_print|void|i8*\n" +
-        "aura_to_str|i8*|i64\n" +
-        "aura_to_str_float|i8*|double\n" +
-        "aura_to_str_bool|i8*|i64\n" +
-        "toString|i8*|i64\n" +
-        "toStr|i8*|i64\n" +
-        "aura_to_int_any|i64|i64\n" +
-        "aura_to_str_any|i8*|i64\n" +
-        "aura_strlen|i64|i8*\n" +
-        "aura_lang_std_String_length|i64|i8*\n" +
-        "aura_lang_std_String_equals|i32|i8*,i8*\n" +
-        "aura_lang_std_String_contains|i32|i8*,i8*\n" +
-        "aura_lang_std_String_startsWith|i32|i8*,i8*\n" +
-        "aura_lang_std_String_endsWith|i32|i8*,i8*\n" +
-        "aura_lang_std_String_indexOf|i64|i8*,i8*\n" +
-        "aura_lang_std_String_countChar|i64|i8*,i8*\n" +
-        "aura_lang_std_String_substring|i8*|i8*,i64,i64\n" +
-        "aura_lang_std_String_charAt|i8*|i8*,i64\n" +
-        "aura_lang_std_String_toUpperCase|i8*|i8*\n" +
-        "aura_lang_std_String_toLowerCase|i8*|i8*\n" +
-        "aura_lang_std_String_trim|i8*|i8*\n" +
-        "aura_lang_std_Collections_emptyList|i8*|\n" +
-        "aura_lang_std_Collections_listAppend|i8*|i8*,i8*\n" +
-        "aura_lang_std_Collections_count|i64|i8*\n" +
-        "aura_lang_std_Collections_getAt|i8*|i8*,i64\n" +
-        "aura_lang_std_Collections_listSet|void|i8*,i64,i8*\n" +
-        "aura_lang_std_Math_sin|double|double\n" +
-        "aura_lang_std_Math_cos|double|double\n" +
-        "aura_lang_std_Math_sqrt|double|double\n" +
-        "aura_lang_std_Math_pow|double|double,double\n"
-}
-
-/// 生成所有 runtime 函数 + 调用点符号的 LLVM 外部声明（去重）。
-///
-/// 声明来源（后者过滤掉前者已声明者）：
-///   1. `runtimeTable()`   Aura runtime 库（ARC/GC/字符串基础）
-///   2. `preludeTable()`   既有调用点符号层（向后兼容）
-///   3. `stdSignatureTable()` 独立 std 签名表（Phase 6.5.7b，完整覆盖）
-fun runtimeDeclarations(): String {
-    var out: String = "; ---- Aura Runtime Declarations ----\n"
-    // C 入口用到：把宿主 argc/argv 注入运行时（`Process.arg/argCount` 依赖它）
-    out = out + "declare void @aura_args_set(i32, i8**)\n"
-    out = out + declarationsFrom(runtimeTable())
-    val seenR: String = runtimeFunctionNames()
-    out = out + declarationsFromFiltered(preludeTable(), seenR)
-    out = out + declarationsFromFiltered(stdSignatureTable(), seenR + tableNameList(preludeTable()))
-    return out
-}
-
-/// 取一张符号表的全部名字（每行以换行结尾），用于声明去重。
-fun tableNameList(table: String): String {
-    var out: String = ""
-    val lines: List<String> = table.split("\n")
-    var i: Int = 0
-    while (i < lines.size) {
-        out = out + aotFieldAt(lines[i], 0, "|") + "\n"
-        i = i + 1
+    /// 全部 runtime 函数声明表。
+    fun runtimeTable(): String {
+        return ""
+            // Phase C: 全部 C 映射已移除（Emit.aura 改用系统 libc、内联 IR 或 Aura 函数）
+            // "toStringFloat|i8*|double\n" +
+            // "aura_mem_used_mb|i32|\n" +
+            // "aura_arc_increment|void|i8*\n" +
+            // "aura_arc_decrement|void|i8*\n" +
+            // "aura_coroutine_yield|void|i8*\n" +
+            // "aura_malloc|i8*|i64\n" +
+            // "aura_free|void|i8*\n" +
+            // "aura_string_new|i8*|i8*,i64\n" +
+            // "aura_string_length|i64|i8*\n" +
+            // "aura_string_data|i8*|i8*\n" +
+            // "aura_string_concat|i8*|i8*,i64,i8*,i64\n" +
     }
-    return out
-}
 
-/// 把一张符号表渲染为 `declare` 行集合。
-fun declarationsFrom(table: String): String {
-    var out: String = ""
-    val lines: List<String> = table.split("\n")
-    var i: Int = 0
-    while (i < lines.size) {
-        val line: String = lines[i]
-        if (aotFieldAt(line, 0, "|") != "") {
-            out = out + declarationLine(line)
+    /// C FFI 实现（aura_std_cffi.c）的真实 ABI 签名表。
+    /// Phase B: 全部条目已移除——各 std 函数均由 Aura 实现提供。
+    /// 格式：`symbol|ret_llvm_type|param_llvm_types(逗号分隔)`
+    fun cffiTable(): String {
+        return ""
+    }
+
+    /// AOT 调用点符号表（Phase 6.5.3 / 6.5.4）。
+    ///
+    /// 发射器把 `println(s)`、`s.length`、`String.split` 等调用/成员落成真实
+    /// C 运行库符号。本表与 `compiler/src/std/cffi/aura_std_cffi.c` 的导出
+    /// **同源**：`sanitize(aura.lang.std.X.y)` → `aura_lang_std_X_y`。
+    ///
+    /// 格式：`symbol|ret_llvm_type|param_llvm_types(逗号分隔)`
+    ///
+    /// 字符串边界（Phase 6.5.5）：Aura 侧 AOT 发射器内部按 **`i8*`（C 字符串）**
+    /// 表示 String，与 C ABI (`const char*`) 直接对齐，跨边界无需 coerce。
+    fun preludeTable(): String {
+        return ""
+            // Phase C: 全部 C 映射已移除（Emit.aura 改用内联 IR）
+            // "aura_println|void|i8*\n" +
+            // "aura_print|void|i8*\n" +
+            // "aura_to_str_float|i8*|double\n" +
+            // "aura_to_str|i8*|i64\n" +
+            // "aura_to_str_bool|i8*|i64\n" +
+            // "aura_to_int_any|i64|i64\n" +
+            // "aura_to_str_any|i8*|i64\n" +
+            // "aura_strlen|i64|i8*\n" +
+            // "aura_str_to_int|i64|i8*\n" +
+            // "aura_str_to_float|double|i8*\n" +
+            // "toString|i8*|i64\n" +
+            // "toStr|i8*|i64\n" +
+            // Phase B.1: String 相关 C 映射已移除（String.aura 自动包含，调用走 Aura 编译）
+            // ── Phase B.1 前保留（已注释）──
+            // "aura_lang_std_String_toInt|i64|i8*\n" +
+            // "aura_lang_std_String_toFloat|double|i8*\n" +
+            // "aura_lang_std_String_length|i64|i8*\n" +
+            // "aura_lang_std_String_equals|i32|i8*,i8*\n" +
+            // "aura_lang_std_String_contains|i32|i8*,i8*\n" +
+            // "aura_lang_std_String_startsWith|i32|i8*,i8*\n" +
+            // "aura_lang_std_String_endsWith|i32|i8*,i8*\n" +
+            // "aura_lang_std_String_indexOf|i64|i8*,i8*\n" +
+            // "aura_lang_std_String_countChar|i64|i8*,i8*\n" +
+            // "aura_lang_std_String_substring|i8*|i8*,i64,i64\n" +
+            // "aura_lang_std_String_charAt|i8*|i8*,i64\n" +
+            // "aura_lang_std_String_charCodeAt|i64|i8*,i64\n" +
+            // "aura_lang_std_String_toUpperCase|i8*|i8*\n" +
+            // "aura_lang_std_String_toLowerCase|i8*|i8*\n" +
+            // "aura_lang_std_String_trim|i8*|i8*\n" +
+            // Phase B: Collections C 映射已移除（Collections.aura 自动包含，调用走 Aura 编译）
+            // ── Phase B 前保留（已注释）──
+            // "aura_lang_std_Collections_emptyList|i8*|\n" +
+            // "aura_lang_std_Collections_listAppend|i8*|i8*,i8*\n" +
+            // "aura_lang_std_Collections_count|i64|i8*\n" +
+            // "aura_lang_std_Collections_getAt|i8*|i8*,i64\n" +
+            // "aura_lang_std_Collections_set|i8*|i8*,i64,i8*\n" +
+            // "aura_lang_std_Collections_listSet|void|i8*,i64,i8*\n" +
+            // "aura_lang_std_Collections_filter|i8*|i8*,i8*\n" +
+            // "aura_lang_std_Collections_map|i8*|i8*,i8*\n" +
+            // "aura_lang_std_Collections_take|i8*|i8*,i64\n" +
+            ""
+    }
+
+    /// 生成所有 runtime 函数 + 调用点符号的 LLVM 外部声明（去重）。
+    ///
+    /// 声明来源（后者过滤掉前者已声明者）：
+    ///   1. `runtimeTable()`   Aura runtime 库（ARC/GC/字符串基础）
+    ///   2. `preludeTable()`   既有调用点符号层（向后兼容）
+    ///
+    /// Phase A 改造：@native 包装器不再依赖 C 运行库符号（aura_syscalls.c），
+    /// 改为直接生成 LLVM IR（内联 syscall/asm/fence/atomicrmw）+ declare 系统 libc。
+    fun runtimeDeclarationsEx(defs: String): String {
+        // 用原生缓冲区累积：旧实现 `out = out + …` 对数百行声明是 O(n²) 拷贝，
+        // 且 AOT 无 GC 时每一级中间串都永久驻留（整份声明文本量级）。
+        val out: EmitBuffer = EmitBuffer()
+        out.sbAdd("; ---- Aura Runtime Declarations ----\n")
+        // C 入口用到：把宿主 argc/argv 注入运行时（`Process.arg/argCount` 依赖它）
+        out.sbAdd("declare void @aura_args_set(i32, i8**)\n")
+        // Phase A：系统 libc 声明（由链接器解析）
+        // @native 包装器不再调用 C 封装（aura_syscall_dispatch / aura_cpu_* / aura_memory_*），
+        // 改为直接生成 LLVM IR（内联 syscall/asm/fence/atomicrmw）+ declare 系统函数。
+        out.sbAdd("; ---- System libc (Phase A: pure LLVM IR) ----\n")
+        out.sbAdd("declare i64 @malloc(i64)\n")
+        out.sbAdd("declare void @free(i64)\n")
+        out.sbAdd("declare i64 @strlen(i8*)\n")
+        out.sbAdd("declare void @exit(i32)\n")
+        // 注意：**不要**在此声明 `@getpid`。
+        // `aura/core/aura/lang/native/**/Syscalls.aura` 已用
+        // `@native(SYS_GETPID) fun getpid(): Int` 提供实现，发射器会把它发成
+        // `define i32 @getpid()`；若这里再 `declare i32 @getpid()`，
+        // llc 直接报 `invalid redefinition of function 'getpid'`。
+        // 需要 `getpid` 的调用点会解析到该 Aura 包装器（同名同签名）。
+        //
+        // ── Windows 平台实现（CRT / UCRT）──
+        // `@native(SYS_*)` 成员在 Windows 目标下由 `Emit.aura::winCrtWrapper`
+        // 映射为这些 CRT 实现（Linux 目标走裸 syscall，不引用这里）。
+        // 非 Windows 目标下声明未被引用，属无害冗余。
+        out.sbAdd("; ---- Windows CRT（@native(SYS_*) 的平台实现）----\n")
+        out.sbAdd("declare i32 @_write(i32, i8*, i32)\n")
+        out.sbAdd("declare i32 @_read(i32, i8*, i32)\n")
+        out.sbAdd("declare i32 @_open(i8*, i32, i32)\n")
+        out.sbAdd("declare i32 @_close(i32)\n")
+        out.sbAdd("declare i64 @_lseeki64(i32, i64, i32)\n")
+        out.sbAdd("declare i32 @_fstat(i32, i8*)\n")
+        out.sbAdd("declare i32 @_stat64(i8*, i8*)\n")
+        out.sbAdd("declare i32 @_access(i8*, i32)\n")
+        out.sbAdd("declare i32 @_unlink(i8*)\n")
+        out.sbAdd("declare i32 @_mkdir(i8*)\n")
+        out.sbAdd("declare i32 @_rmdir(i8*)\n")
+        out.sbAdd("declare i32 @_getpid()\n")
+        // Phase C: _snprintf 用于内联 float→string 转换（替换 aura_to_str_float）
+        out.sbAdd("declare i32 @_snprintf(i8*, i32, i8*, ...)\n")
+        out.sbAdd("@fmt_float_g = private unnamed_addr constant [3 x i8] c\"%g\\00\"\n")
+        // ── 命令行参数（跨平台，`aura_std_cffi.c`）──
+        //
+        // 生成的 C 入口先 `aura_args_set(argc, argv)` 注入宿主参数，以下两个
+        // 访问器从注入结果读取（Rust 侧实现 `Process.arg/argCount` 用的就是它们）。
+        // Aura 侧 `ProcessNative.argCount/arg` 通过 `ProcessOps` 的无函数体成员
+        // 调用（符号名即成员名），故此处必须补 `declare`，否则 llc 报
+        // `use of undefined value '@aura_process_argCount'`。
+        out.sbAdd("; ---- Command line args (portable) ----\n")
+        out.sbAdd("declare i64 @aura_process_argCount()\n")
+        // 全量参数（'\n' 连接）。**不要**改用逐条访问器 `aura_process_arg(i64)`：
+        // extern object 成员调用点会补「接收者」占位，索引会落到第 2 个参数槽
+        //（C 只认第 1 个）→ `arg(i)` 恒返回 argv[0]。
+        out.sbAdd("declare i8* @aura_process_args()\n")
+        // Phase D: setjmp/longjmp 异常桥（try/catch）— 已迁移到纯 IR
+        // emitTry 调用系统 libc 的 setjmp（@setjmp / @_setjmp），
+        // emitThrow 调用系统 libc 的 longjmp（@longjmp / @_longjmp）。
+        // jmp_buf 栈管理（嵌套 try/catch 支持）由 IR 内的全局数组实现。
+        // 非 Windows 目标：@setjmp / @longjmp
+        out.sbAdd("; ---- Phase D: setjmp/longjmp (pure IR, system libc) ----\n")
+        out.sbAdd("declare i32 @setjmp(i8*)\n")
+        out.sbAdd("declare void @longjmp(i8*, i32)\n")
+        // Windows 目标：@_setjmp / @_longjmp（UCRT）
+        out.sbAdd("declare i32 @_setjmp(i8*)\n")
+        out.sbAdd("declare void @_longjmp(i8*, i32)\n")
+        // 异常值全局变量（__throw 写入，catch 块读取）
+        out.sbAdd("@aura_exception_value = internal global i8* null\n")
+        // jmp_buf 栈（支持嵌套 try/catch；IR 内联管理，不依赖 C 源码）
+        out.sbAdd("@aura_jmp_stack = internal global [64 x i8*] zeroinitializer\n")
+        out.sbAdd("@aura_jmp_depth = internal global i32 0\n")
+        // Phase D.2: LLVM 原生异常处理基础设施（invoke/landingpad/resume）
+        // personality 函数：LLVM 用它分派异常到 landing pad。
+        // 目标平台决定 personality 符号名：
+        //   Windows MSVC: @__CxxFrameHandler3 / @__CxxFrameHandler4
+        //   Linux:        @__gxx_personality_v0
+        //   macOS:        @__gxx_personality_v0
+        // 此处声明为 external，由链接器解析（目标平台 CRT 提供实现）。
+        out.sbAdd("; ---- Phase D.2: LLVM exception handling ----\n")
+        out.sbAdd("declare i8* @llvm.eh_personality(i8*)\n")
+        // personality 函数声明（平台特定，由链接器解析）
+        out.sbAdd("declare i32 @__gxx_personality_v0(i32, i8*, i32, i8*, i8*, i8*)\n")
+        // `is` 类型检查（`when` 模式 / `x is T`）：签名 `(value: i8*, typeName: i8*) → i1`，
+        // typeName 为 C 字符串（不是 AuraString 结构体指针），与 Rust 侧声明保持一致。
+        out.sbAdd("declare i1 @aura_isOfType(i8*, i8*)\n")
+        // Phase C: 以下 C 映射声明已移除（Emit.aura 改用 Aura 编译的 String_* 函数）
+        // "declare i8* @aura_lang_std_String_charAt(i8*, i64)\n" +
+        // "declare i32 @aura_lang_std_String_equals(i8*, i8*)\n" +
+        // 内存诊断：AotUtil.aura::aotMemMB 依赖此 C 函数
+        out.sbAdd("declare i32 @aura_mem_used_mb()\n")
+        appendDeclarations(out, runtimeTable())
+        val seenR: String = runtimeFunctionNames()
+        // `defs`：本模块已有 `define` 的符号（见 `Emit.aura::fDefNames`）。
+        // 必须一并跳过，否则同一符号 define + declare 并存，llc 报
+        // `invalid redefinition of function 'toString'`。
+        appendDeclarationsFiltered(out, preludeTable(), seenR + defs)
+        return out.sbBuild()
+    }
+
+    /// [`runtimeDeclarationsEx`] 的兼容入口（不做 define 过滤）。
+    fun runtimeDeclarations(): String {
+        return runtimeDeclarationsEx("")
+    }
+
+    /// 取一张符号表的全部名字（每行以换行结尾），用于声明去重。
+    fun tableNameList(table: String): String {
+        val out: EmitBuffer = EmitBuffer()
+        appendNameList(out, table)
+        return out.sbBuild()
+    }
+
+    /// [`tableNameList`] 的追加式实现（写入既有缓冲区）。
+    fun appendNameList(out: EmitBuffer, table: String) {
+        val lines: List<String> = table.split("\n")
+        var i: Int = 0
+        while (i < lines.size) {
+            out.sbAdd(aotFieldAt(lines[i], 0, "|"))
+            out.sbAdd("\n")
+            i = i + 1
         }
-        i = i + 1
     }
-    return out
-}
 
-/// 渲染一张符号表，跳过 `seen`（换行分隔的名字清单）中已有的符号。
-fun declarationsFromFiltered(table: String, seen: String): String {
-    var out: String = ""
-    val lines: List<String> = table.split("\n")
-    var i: Int = 0
-    while (i < lines.size) {
-        val line: String = lines[i]
+    /// 把一张符号表渲染为 `declare` 行，追加到 `out`。
+    fun appendDeclarations(out: EmitBuffer, table: String) {
+        val lines: List<String> = table.split("\n")
+        var i: Int = 0
+        while (i < lines.size) {
+            val line: String = lines[i]
+            if (aotFieldAt(line, 0, "|") != "") {
+                out.sbAdd(declarationLine(line))
+            }
+            i = i + 1
+        }
+    }
+
+    /// 渲染一张符号表并追加到 `out`，跳过 `seen`（换行分隔的名字清单）中已有的符号。
+    fun appendDeclarationsFiltered(out: EmitBuffer, table: String, seen: String) {
+        val lines: List<String> = table.split("\n")
+        var i: Int = 0
+        while (i < lines.size) {
+            val line: String = lines[i]
+            val name: String = aotFieldAt(line, 0, "|")
+            if (name != "" && !aotListContains(seen, name)) {
+                out.sbAdd(declarationLine(line))
+            }
+            i = i + 1
+        }
+    }
+
+    /// 把一行符号表渲染为 `declare <ret> @<name>(<params>)`。
+    fun declarationLine(line: String): String {
         val name: String = aotFieldAt(line, 0, "|")
-        if (name != "" && !aotListContains(seen, name)) {
-            out = out + declarationLine(line)
-        }
-        i = i + 1
+        val ret: String = aotFieldAt(line, 1, "|")
+        val params: String = aotCsvToSpaced(aotFieldAt(line, 2, "|"))
+        return "declare " + ret + " @" + name + "(" + params + ")\n"
     }
-    return out
-}
 
-/// 把一行符号表渲染为 `declare <ret> @<name>(<params>)`。
-fun declarationLine(line: String): String {
-    val name: String = aotFieldAt(line, 0, "|")
-    val ret: String = aotFieldAt(line, 1, "|")
-    val params: String = aotCsvToSpaced(aotFieldAt(line, 2, "|"))
-    return "declare " + ret + " @" + name + "(" + params + ")\n"
-}
-
-/// 调用点符号签名查询（std → runtime → C FFI → prelude，返回 `ret|paramsSpaced`）。
-///
-/// 发射器统一用本函数决定调用的返回类型与参数形态。每个调用点都会查一次，
-/// 所以查询本身必须**零表构建、零切片**：先前实现每次都重建并 `split` 整张表，
-/// 普通调用点（用户函数/方法名）白跑四张表——无 GC 时累积泄漏到数 GB。
-fun callSignature(name: String): String {
-    // std 表：仅 `aura_lang_std_*` 符号可能命中（守卫在最热的路径上快速失败）
-    val std: String = stdSignature(name)
-    if (std != "") {
-        return std
-    }
-    // runtime / C FFI / prelude 的调用点符号**一律**以 `aura_` 开头，
-    // 例外只有 `toString` / `toStr` / `toStringFloat`。普通调用点（用户函数 /
-    // 方法名）不满足该形态，直接返回，避免为每个调用点重建三张表
-    // （每处约 60 次小分配，AOT 无 GC 时累计可达数百 MB）。
-    if (!name.startsWith("aura_") && name != "toString" && name != "toStr"
-        && name != "toStringFloat") {
-        return ""
-    }
-    val sig: String = runtimeSignature(name)
-    if (sig != "") {
-        return sig
-    }
-    val c: String = cffiSignature(name)
-    if (c != "") {
-        return c
-    }
-    return tableSignature(preludeTable(), name)
-}
-
-/// 从任意符号表查询签名（`ret|paramsSpaced`），未命中返回 ""。
-///
-/// 实现为**单次子串扫描**（`startsWith` / `contains` + `substringAfter`）：
-/// 不构建 `List`、不逐行切片，只有常数次字符串分配。
-fun tableSignature(table: String, name: String): String {
-    if (name == "") {
-        return ""
-    }
-    val needle: String = name + "|"
-    val mid: String = "\n" + needle
-    var rest: String = ""
-    if (table.startsWith(needle)) {
-        rest = table.substringAfter(needle)
-    } else {
-        if (!table.contains(mid)) {
+    /// 调用点符号签名查询（runtime → C FFI → prelude，返回 `ret|paramsSpaced`）。
+    ///
+    /// 发射器统一用本函数决定调用的返回类型与参数形态。每个调用点都会查一次，
+    /// 所以查询本身必须**零表构建、零切片**：先前实现每次都重建并 `split` 整张表，
+    /// 普通调用点（用户函数/方法名）白跑三张表——无 GC 时累积泄漏到数 GB。
+    fun callSignature(name: String): String {
+        // runtime / C FFI / prelude 的调用点符号**一律**以 `aura_` 开头，
+        // 例外只有 `toString` / `toStr` / `toStringFloat`。普通调用点（用户函数 /
+        // 方法名）不满足该形态，直接返回，避免为每个调用点重建三张表
+        // （每处约 60 次小分配，AOT 无 GC 时累计可达数百 MB）。
+        if (!name.startsWith("aura_") && name != "toString" && name != "toStr"
+            && name != "toStringFloat") {
             return ""
         }
-        rest = table.substringAfter(mid)
-    }
-    val line: String = rest.substringBefore("\n")
-    return aotFieldAt(line, 0, "|") + "|" + aotCsvToSpaced(aotFieldAt(line, 1, "|"))
-}
-
-/// 方法名 → 调用点符号（bare method call，接收者为第 0 个实参）。
-///
-/// HIR 把 `s.split(":")` 降级为 `HirCall text="split"` 且接收者在 kids[0]；
-/// 本表把裸方法名解析为 C 运行库的调用点符号。未命中返回 ""。
-fun methodCallSymbol(name: String): String {
-    if (name == "length" || name == "size") { return "aura_lang_std_String_length" }
-    if (name == "contains") { return "aura_lang_std_String_contains" }
-    if (name == "startsWith") { return "aura_lang_std_String_startsWith" }
-    if (name == "endsWith") { return "aura_lang_std_String_endsWith" }
-    if (name == "indexOf") { return "aura_lang_std_String_indexOf" }
-    if (name == "lastIndexOf") { return "aura_lang_std_String_lastIndexOf" }
-    if (name == "countChar") { return "aura_lang_std_String_countChar" }
-    if (name == "substring") { return "aura_lang_std_String_substring" }
-    if (name == "substringBefore") { return "aura_lang_std_String_substringBefore" }
-    if (name == "substringAfter") { return "aura_lang_std_String_substringAfter" }
-    if (name == "charAt") { return "aura_lang_std_String_charAt" }
-    if (name == "charCodeAt") { return "aura_lang_std_String_charCodeAt" }
-    if (name == "toUpperCase") { return "aura_lang_std_String_toUpperCase" }
-    if (name == "toLowerCase") { return "aura_lang_std_String_toLowerCase" }
-    if (name == "trim") { return "aura_lang_std_String_trim" }
-    if (name == "replace") { return "aura_lang_std_String_replace" }
-    if (name == "replaceAll") { return "aura_lang_std_String_replaceAll" }
-    if (name == "padStart") { return "aura_lang_std_String_padStart" }
-    if (name == "split") { return "aura_lang_std_String_split" }
-    if (name == "equals") { return "aura_lang_std_String_equals" }
-    return ""
-}
-
-/// 所有 runtime 函数名（换行分隔）。
-fun runtimeFunctionNames(): String {
-    val table: String = runtimeTable()
-    var out: String = ""
-    val lines: List<String> = table.split("\n")
-    var i: Int = 0
-    while (i < lines.size) {
-        out = out + aotFieldAt(lines[i], 0, "|") + "\n"
-        i = i + 1
-    }
-    return out
-}
-
-/// runtime 函数个数。
-fun runtimeFunctionCount(): Int {
-    return aotLineCount(runtimeTable())
-}
-
-/// 检查一个符号名是否为 runtime 函数。
-fun isRuntimeFunction(name: String): Boolean {
-    val table: String = runtimeTable()
-    val lines: List<String> = table.split("\n")
-    var i: Int = 0
-    while (i < lines.size) {
-        if (aotFieldAt(lines[i], 0, "|") == name) {
-            return true
+        val sig: String = runtimeSignature(name)
+        if (sig != "") {
+            return sig
         }
-        i = i + 1
+        val c: String = cffiSignature(name)
+        if (c != "") {
+            return c
+        }
+        return tableSignature(preludeTable(), name)
     }
-    return false
-}
 
-/// runtime 函数签名（`ret|paramsSpaced`），非 runtime 函数返回 ""。
-fun runtimeSignature(name: String): String {
-    return tableSignature(runtimeTable(), name)
-}
+    /// 从任意符号表查询签名（`ret|paramsSpaced`），未命中返回 ""。
+    ///
+    /// 实现为**单次子串扫描**（`startsWith` / `contains` + `substringAfter`）：
+    /// 不构建 `List`、不逐行切片，只有常数次字符串分配。
+    fun tableSignature(table: String, name: String): String {
+        if (name == "") {
+            return ""
+        }
+        val needle: String = name + "|"
+        val mid: String = "\n" + needle
+        var rest: String = ""
+        if (table.startsWith(needle)) {
+            rest = table.substringAfter(needle)
+        } else {
+            if (!table.contains(mid)) {
+                return ""
+            }
+            rest = table.substringAfter(mid)
+        }
+        val line: String = rest.substringBefore("\n")
+        return aotFieldAt(line, 0, "|") + "|" + aotCsvToSpaced(aotFieldAt(line, 1, "|"))
+    }
 
-/// C FFI 函数签名（`ret|paramsSpaced`），非 C FFI 函数返回 ""。
-fun cffiSignature(name: String): String {
-    return tableSignature(cffiTable(), name)
+    /// 方法名 → 调用点符号（bare method call，接收者为第 0 个实参）。
+    ///
+    /// HIR 把 `s.split(":")` 降级为 `HirCall text="split"` 且接收者在 kids[0]；
+    /// 本表把裸方法名解析为 C 运行库的调用点符号。未命中返回 ""。
+    fun methodCallSymbol(name: String): String {
+        // 迭代器链：`nums.filter { … }` / `.map { … }` / `.take(n)`。
+        // Phase B: 已切换到 Aura Collections 实现（i64/Long 类型）。
+        if (name == "filter") { return "Collections_filter" }
+        else if (name == "map") { return "Collections_map" }
+        else if (name == "take") { return "Collections_take" }
+        else if (name == "length" || name == "size") { return "String_length" }
+        else if (name == "contains") { return "String_contains" }
+        else if (name == "startsWith") { return "String_startsWith" }
+        else if (name == "endsWith") { return "String_endsWith" }
+        else if (name == "indexOf") { return "String_indexOf" }
+        else if (name == "lastIndexOf") { return "String_lastIndexOf" }
+        else if (name == "countChar") { return "String_countCharStr" }
+        else if (name == "substring") { return "String_substring" }
+        else if (name == "substringBefore") { return "String_substringBefore" }
+        else if (name == "substringAfter") { return "String_substringAfter" }
+        else if (name == "charAt") { return "String_charAt" }
+        else if (name == "charCodeAt") { return "String_charCodeAt" }
+        else if (name == "toUpperCase") { return "String_toUpperCase" }
+        else if (name == "toLowerCase") { return "String_toLowerCase" }
+        else if (name == "trim") { return "String_trim" }
+        else if (name == "replace") { return "String_replace" }
+        else if (name == "replaceAll") { return "String_replaceAll" }
+        else if (name == "padStart") { return "String_padStart" }
+        else if (name == "split") { return "String_split" }
+        else if (name == "equals") { return "String_equals" }
+        else if (name == "toInt") { return "String_toInt" }
+        else if (name == "toLong") { return "String_toLong" }
+        else if (name == "toFloat") { return "String_toFloat" }
+        else if (name == "toDouble") { return "String_toDouble" }
+        else if (name == "toBoolean") { return "String_toBoolean" }
+        else if (name == "toCharArray") { return "String_toCharArray" }
+        else if (name == "isEmpty") { return "String_isEmpty" }
+        else if (name == "isBlank") { return "String_isBlank" }
+        else if (name == "padEnd") { return "String_padEnd" }
+        else { return "" }
+    }
+
+    /// 所有 runtime 函数名（换行分隔）。
+    fun runtimeFunctionNames(): String {
+        return tableNameList(runtimeTable())
+    }
+
+    /// runtime 函数个数。
+    fun runtimeFunctionCount(): Int {
+        return aotLineCount(runtimeTable())
+    }
+
+    /// 检查一个符号名是否为 runtime 函数。
+    ///
+    /// 复用 `tableSignature` 的「零 split、零表重建」前缀定位：旧实现每次
+    /// `split("\n")` 出整张 runtime 表（一行一个子串 + 一张 List）。
+    fun isRuntimeFunction(name: String): Boolean {
+        return tableSignature(runtimeTable(), name) != ""
+    }
+
+    /// runtime 函数签名（`ret|paramsSpaced`），非 runtime 函数返回 ""。
+    fun runtimeSignature(name: String): String {
+        return tableSignature(runtimeTable(), name)
+    }
+
+    /// C FFI 函数签名（`ret|paramsSpaced`），非 C FFI 函数返回 ""。
+    fun cffiSignature(name: String): String {
+        return tableSignature(cffiTable(), name)
+    }
 }

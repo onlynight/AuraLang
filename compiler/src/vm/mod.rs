@@ -21,9 +21,11 @@ pub mod actor_process;
 pub mod aot_runtime;
 pub mod channel;
 pub mod channel_tcp;
+pub mod concurrent_native;
 pub mod coroutine;
 pub mod debugger;
 pub mod dynamic_ffi;
+pub mod event_notifier;
 pub mod ffi;
 pub mod ffi_cache;
 pub mod heap;
@@ -114,7 +116,7 @@ impl ModuleRegistry {
         let uuid = module.module_identity.uuid;
         let name = module.module_identity.name.clone();
         if self.name_index.contains_key(&name) {
-            return Err(format!("模块名称冲突: {}", name));
+            return Err(format!("Module name conflict: {}", name));
         }
         let loaded = RegisteredModule::from_module(module);
         self.name_index.insert(name, uuid);
@@ -326,9 +328,88 @@ pub enum Instr {
     /// 注册异常处理器：`(处理器指令索引, 异常值落点槽位)`。
     ///
     /// 加载期已把字节偏移解析为指令索引；`u16::MAX` 表示不写入槽位。
-    PushHandler(usize, u16),
+    PushHandler(usize, u16, u16),
     /// 注销最近的异常处理器
     PopHandler,
+
+    // ── Phase B: 并发运行时指令 ──
+    /// 创建线程（栈顶为函数索引，返回线程 ID 压栈）
+    ThreadSpawn(u16),
+    /// 等待线程结束（栈顶为线程 ID）
+    ThreadJoin,
+    /// 线程休眠（栈顶为毫秒数）
+    ThreadSleep,
+    /// 获取当前线程 ID（压栈）
+    ThreadId,
+    /// 获取可用并行度（压栈）
+    ThreadParallelism,
+    /// 创建 Mutex（返回句柄压栈）
+    MutexNew,
+    /// Mutex 加锁（栈顶为句柄）
+    MutexLock,
+    /// Mutex 解锁（栈顶为句柄）
+    MutexUnlock,
+    /// Mutex 尝试加锁（栈顶为句柄，返回 bool）
+    MutexTryLock,
+    /// 创建 Atomic 计数器（栈顶为初始值，返回句柄压栈）
+    AtomicNew,
+    /// 原子读取（栈顶为句柄，返回值压栈）
+    AtomicLoad,
+    /// 原子写入（栈顶为值、其下为句柄）
+    AtomicStore,
+    /// 原子加法（栈顶为增量、其下为句柄，返回新值压栈）
+    AtomicAdd,
+    /// 原子比较交换（栈顶为期望值、其下为目标值、再下为句柄，返回 bool）
+    AtomicCas,
+    /// 创建 RwLock（返回句柄压栈）
+    RwLockNew,
+    /// 获取读锁（栈顶为句柄）
+    RwLockReadLock,
+    /// 获取写锁（栈顶为句柄）
+    RwLockWriteLock,
+    /// 释放读锁（栈顶为句柄）
+    RwLockReadUnlock,
+    /// 释放写锁（栈顶为句柄）
+    RwLockWriteUnlock,
+    /// 创建 Channel（栈顶为容量，返回句柄压栈）
+    ChannelNew,
+    /// 向 Channel 发送值（栈顶为值、其下为句柄）
+    ChannelSend,
+    /// 从 Channel 接收值（栈顶为句柄，返回值压栈）
+    ChannelRecv,
+    /// 创建 Condvar（返回句柄压栈）
+    CondvarNew,
+    /// 等待 Condvar（栈顶为 mutex 句柄、其下为 condvar 句柄）
+    CondvarWait,
+    /// 唤醒一个（栈顶为句柄）
+    CondvarSignal,
+    /// 唤醒所有（栈顶为句柄）
+    CondvarBroadcast,
+}
+
+/// 合并嵌入模块时重定位指令中的「模块内下标」到宿主模块下标。
+///
+/// 嵌入模块（`.auc`）内部的指令下标都相对**它自己的**三张全局表：常量池、
+/// 原生函数表、函数表。追加到宿主模块后必须整体平移，否则：
+///   * `LoadConst` 读到宿主的错误常量；
+///   * `CallNative` 派发到宿主的错误原生函数（典型症状是派发回调用方自身 → 无限递归）；
+///   * `Call` 跳到宿主的错误函数（同样可能自我递归）。
+///
+/// 仅重定位与全局表相关的下标；类 / 字段 / 闭包等模块私有表未涉及
+/// （当前嵌入的标准库模块为纯逻辑，不定义类与闭包）。
+fn remap_embedded_instrs(code: &mut [Instr], const_base: u16, native_base: u16, func_base: u16) {
+    for ins in code.iter_mut() {
+        match ins {
+            Instr::LoadConst(i) => *i = i.wrapping_add(const_base),
+            Instr::CallNative(i) => *i = i.wrapping_add(native_base),
+            Instr::CallNativeArgs(i, _argc) => *i = i.wrapping_add(native_base),
+            Instr::Call(i) | Instr::ThreadSpawn(i) | Instr::NewCoroutine(i) => {
+                *i = i.wrapping_add(func_base)
+            }
+            Instr::CallAot(i) | Instr::MakeFnRef(i) => *i = i.wrapping_add(func_base),
+            _ => {}
+        }
+    }
 }
 
 /// 解码后的函数
@@ -669,9 +750,7 @@ fn decode_function(f: &BytecodeFunction) -> Result<DecodedFunction, VmError> {
                 instrs.push(Instr::CallAot(v));
             }
             crate::codegen::opcode::OpCode::PushHandler(..) => {
-                // 操作数：i32 处理器块字节偏移 + u16 异常值落点槽位。
-                // 注意：`from_byte` 产生的操作数是占位值，真实操作数必须从字节流读取
-                //（此前误用占位 0，导致处理器偏移恒为 0 → 跳到函数开头形成死循环）。
+                // 操作数：i32 处理器块字节偏移 + u16 异常值落点槽位 + u16 catch_type。
                 let off = i32::from_le_bytes([
                     code[ip],
                     code[ip + 1],
@@ -682,10 +761,57 @@ fn decode_function(f: &BytecodeFunction) -> Result<DecodedFunction, VmError> {
                     code[ip + 4],
                     code[ip + 5],
                 ]);
-                ip += 6;
-                instrs.push(Instr::PushHandler(off as usize, slot));
+                let catch_type = u16::from_le_bytes([
+                    code[ip + 6],
+                    code[ip + 7],
+                ]);
+                ip += 8;
+                instrs.push(Instr::PushHandler(off as usize, slot, catch_type));
             }
             crate::codegen::opcode::OpCode::PopHandler => instrs.push(Instr::PopHandler),
+
+            // ── Phase B: 并发运行时指令 ──
+            crate::codegen::opcode::OpCode::ThreadSpawn(_) => {
+                let v = u16::from_le_bytes([
+                    code[ip],
+                    code[ip + 1],
+                ]);
+                ip += 2;
+                instrs.push(Instr::ThreadSpawn(v));
+            }
+            crate::codegen::opcode::OpCode::ThreadJoin => instrs.push(Instr::ThreadJoin),
+            crate::codegen::opcode::OpCode::ThreadSleep => instrs.push(Instr::ThreadSleep),
+            crate::codegen::opcode::OpCode::ThreadId => instrs.push(Instr::ThreadId),
+            crate::codegen::opcode::OpCode::ThreadParallelism => {
+                instrs.push(Instr::ThreadParallelism)
+            }
+            crate::codegen::opcode::OpCode::MutexNew => instrs.push(Instr::MutexNew),
+            crate::codegen::opcode::OpCode::MutexLock => instrs.push(Instr::MutexLock),
+            crate::codegen::opcode::OpCode::MutexUnlock => instrs.push(Instr::MutexUnlock),
+            crate::codegen::opcode::OpCode::MutexTryLock => instrs.push(Instr::MutexTryLock),
+            crate::codegen::opcode::OpCode::AtomicNew => instrs.push(Instr::AtomicNew),
+            crate::codegen::opcode::OpCode::AtomicLoad => instrs.push(Instr::AtomicLoad),
+            crate::codegen::opcode::OpCode::AtomicStore => instrs.push(Instr::AtomicStore),
+            crate::codegen::opcode::OpCode::AtomicAdd => instrs.push(Instr::AtomicAdd),
+            crate::codegen::opcode::OpCode::AtomicCas => instrs.push(Instr::AtomicCas),
+            crate::codegen::opcode::OpCode::RwLockNew => instrs.push(Instr::RwLockNew),
+            crate::codegen::opcode::OpCode::RwLockReadLock => instrs.push(Instr::RwLockReadLock),
+            crate::codegen::opcode::OpCode::RwLockWriteLock => instrs.push(Instr::RwLockWriteLock),
+            crate::codegen::opcode::OpCode::RwLockReadUnlock => {
+                instrs.push(Instr::RwLockReadUnlock)
+            }
+            crate::codegen::opcode::OpCode::RwLockWriteUnlock => {
+                instrs.push(Instr::RwLockWriteUnlock)
+            }
+            crate::codegen::opcode::OpCode::ChannelNew => instrs.push(Instr::ChannelNew),
+            crate::codegen::opcode::OpCode::ChannelSend => instrs.push(Instr::ChannelSend),
+            crate::codegen::opcode::OpCode::ChannelRecv => instrs.push(Instr::ChannelRecv),
+            crate::codegen::opcode::OpCode::CondvarNew => instrs.push(Instr::CondvarNew),
+            crate::codegen::opcode::OpCode::CondvarWait => instrs.push(Instr::CondvarWait),
+            crate::codegen::opcode::OpCode::CondvarSignal => instrs.push(Instr::CondvarSignal),
+            crate::codegen::opcode::OpCode::CondvarBroadcast => {
+                instrs.push(Instr::CondvarBroadcast)
+            }
         }
     }
 
@@ -704,14 +830,14 @@ fn decode_function(f: &BytecodeFunction) -> Result<DecodedFunction, VmError> {
                     _ => Instr::JumpIfFalse(idx),
                 };
             }
-            Instr::PushHandler(off, slot) => {
+            Instr::PushHandler(off, slot, catch_type) => {
                 let idx = *offset_to_idx.get(off).ok_or_else(|| {
                     VmError::Load(format!(
                         "handler target {} not at instruction boundary",
                         off
                     ))
                 })?;
-                *instr = Instr::PushHandler(idx, *slot);
+                *instr = Instr::PushHandler(idx, *slot, *catch_type);
             }
             _ => {}
         }
@@ -737,6 +863,20 @@ pub struct Handler {
     pub stack_len: usize,
     /// 异常值写入的局部槽位（`u16::MAX` 表示不写入，仅作 finally 中转）
     pub slot: u16,
+    /// catch 子句的类型过滤器（类 ID；`u16::MAX` 表示 catch-all，不过滤类型）
+    pub catch_type: u16,
+}
+
+impl Default for Handler {
+    fn default() -> Self {
+        Self {
+            frame_index: 0,
+            ip: 0,
+            stack_len: 0,
+            slot: u16::MAX,
+            catch_type: u16::MAX,
+        }
+    }
 }
 
 /// 调用帧
@@ -810,9 +950,11 @@ pub struct Vm {
     pub aot_runtime: crate::vm::aot_runtime::AotRuntime,
     /// extern interface: 已加载的 AOT 模块映射（库名 → module_id）
     aot_module_map: std::collections::HashMap<String, u32>,
-    /// Phase 3: 标准库 Aura 编译函数映射（函数名 → 合并后的函数索引）
+    /// Phase D: 标准库 Aura 编译函数映射（函数名 → 合并后的函数索引列表）
     /// 当 do_call_native 遇到 Aura 编译的标准库函数时，优先派发到该映射中的函数。
-    stdlib_func_map: std::collections::HashMap<String, usize>,
+    /// 优先级：Aura 编译函数（stdlib_func_map，过滤 native 声明）> Rust native 注册。
+    /// 支持函数重载：同名函数可注册多个索引（如 Math.abs<Int> 和 Math.abs<Float>）。
+    stdlib_func_map: std::collections::HashMap<String, Vec<usize>>,
     /// P9: 已加载的动态库（库名 → 库句柄）
     #[cfg(windows)]
     loaded_libs: std::collections::HashMap<String, usize>,
@@ -849,7 +991,10 @@ impl Vm {
                 &desc_idx,
                 name,
             ) {
-                eprintln!("[vm] AOT 模块加载失败，回退字节码解释: {}", e);
+                eprintln!(
+                    "[vm] AOT module load failed, falling back to bytecode interpretation: {}",
+                    e
+                );
             }
         }
         let mut vm = Vm {
@@ -893,21 +1038,35 @@ impl Vm {
     /// 从 `embedded_stdlib::EMBEDDED_STDLIB_MODULES` 加载预编译的 .auc 文件，
     /// 解码函数并追加到当前模块的函数表中。VM 启动时自动调用。
     ///
-    /// 调用后，`do_call_native` 会优先检查 `stdlib_func_map`，如果找到匹配的
-    /// Aura 编译函数则直接派发（优先 AOT 机器码），否则回退到 Rust native。
+    /// Phase D: 调用后，`do_call_native` 会**始终优先**检查 `stdlib_func_map`，
+    /// 如果找到匹配的 Aura 编译函数（且非 native 声明）则直接派发，
+    /// 否则回退到 Rust native 注册。
     fn load_embedded_stdlib(&mut self) {
         use crate::codegen::from_bytes;
         use crate::std::embedded_stdlib::EMBEDDED_STDLIB_MODULES;
 
         let mut loaded_count = 0;
 
-        for (module_name, auc_bytes) in EMBEDDED_STDLIB_MODULES {
+        for (module_name, package_prefix, auc_bytes) in EMBEDDED_STDLIB_MODULES {
             match from_bytes(auc_bytes) {
                 Ok(std_module) => {
-                    // 加载 AOT 机器码段（如果存在）
+                    // 合并前记录宿主模块三张全局表的基址：嵌入模块内部的指令下标
+                    // 都相对其自身模块，追加后必须整体平移（见 remap_embedded_instrs）。
+                    let func_base = self.module.funcs.len() as u16;
+                    let const_base = self.module.consts.len() as u16;
+                    let native_base = self.module.natives.len() as u16;
+                    let func_count = std_module.functions.len();
+
+                    // 加载 AOT 机器码段（如果存在）。
+                    //
+                    // AotRuntime 的分发表按**宿主函数下标**检索，因此传入的 desc_idx
+                    // 必须是稀疏向量：长度 = func_base + 本模块函数数，本模块第 i 个
+                    // 函数映射到宿主下标 func_base + i。
                     if std_module.has_aot() {
-                        let desc_idx: Vec<u32> =
-                            std_module.functions.iter().map(|f| f.aot_desc_idx).collect();
+                        let mut desc_idx = vec![0u32; func_base as usize + func_count];
+                        for (i, f) in std_module.functions.iter().enumerate() {
+                            desc_idx[func_base as usize + i] = f.aot_desc_idx;
+                        }
                         if let Err(e) = self.aot_runtime.load_module_from(
                             &std_module.aot_blob_data,
                             &std_module.aot_segments,
@@ -915,30 +1074,64 @@ impl Vm {
                             module_name.to_string(),
                         ) {
                             eprintln!(
-                                "[vm] stdlib-aot: {} AOT 加载失败，回退字节码: {}",
+                                "[vm] stdlib-aot: {} AOT load failed, falling back to bytecode: {}",
                                 module_name, e
                             );
                         } else {
-                            eprintln!("[vm] stdlib-aot: {} AOT 机器码已加载", module_name);
+                            eprintln!("[vm] stdlib-aot: {} AOT machine code loaded", module_name);
                         }
                     }
 
-                    // 解码标准库函数并追加到当前模块
+                    // 追加常量池与原生函数表，使平移后的下标有效
+                    self.module.consts.extend(std_module.consts.iter().cloned());
+                    self.module.natives.extend(std_module.natives.iter().cloned());
+                    for (i, n) in std_module.natives.iter().enumerate() {
+                        self.module
+                            .native_index
+                            .insert(n.name.clone(), (native_base as usize + i) as u16);
+                    }
+
+                    // 解码标准库函数、重定位下标并追加到当前模块
                     for f in &std_module.functions {
                         match decode_function(f) {
-                            Ok(decoded) => {
+                            Ok(mut decoded) => {
+                                remap_embedded_instrs(
+                                    &mut decoded.code,
+                                    const_base,
+                                    native_base,
+                                    func_base,
+                                );
                                 let func_name = if f.name.contains('.') {
-                                    format!("aura.lang.std.{}", f.name)
+                                    format!("{}.{}", package_prefix, f.name)
                                 } else {
-                                    format!("aura.lang.std.{}.{}", module_name, f.name)
+                                    format!("{}.{}.{}", package_prefix, module_name, f.name)
                                 };
                                 let idx = self.module.funcs.len();
                                 self.module.funcs.push(decoded);
-                                self.stdlib_func_map.insert(func_name.clone(), idx);
-                                // 同时注册短名
+                                // 全名注册（支持重载：同名函数可追加多个索引）
+                                self.stdlib_func_map
+                                    .entry(func_name.clone())
+                                    .or_default()
+                                    .push(idx);
+                                // 注册短名（对象名.函数名），用于 MathOps.floor 等调用
+                                if !f.name.contains('.') {
+                                    let short_full = format!("{}.{}", module_name, f.name);
+                                    self.stdlib_func_map.entry(short_full).or_default().push(idx);
+                                }
+                                // 仅对 prelu 独立函数注册短名（如 "abs" → Math.abs）。
+                                // 含 '.' 的类方法（如 "ArrayList.toString"）不注册短名，
+                                // 否则 "toString" 会被错误映射到 ArrayList.toString 而非
+                                // 全局 toString native，导致所有 toString 调用返回错误值。
                                 let short_name = func_name.rsplit('.').next().unwrap_or(&func_name);
-                                if !short_name.is_empty() && short_name != func_name {
-                                    self.stdlib_func_map.insert(short_name.to_string(), idx);
+                                if !short_name.is_empty()
+                                    && short_name != func_name
+                                    && !f.name.contains('.')
+                                    && crate::std::decl::is_prelude(short_name)
+                                {
+                                    self.stdlib_func_map
+                                        .entry(short_name.to_string())
+                                        .or_default()
+                                        .push(idx);
                                 }
                                 loaded_count += 1;
                             }
@@ -1034,8 +1227,9 @@ impl Vm {
     /// 扫描 `dir` 目录下的所有 `.auc` 文件，解码其函数，追加到当前模块的
     /// 函数表中，并记录函数名到合并后索引的映射。
     ///
-    /// 调用后，`do_call_native` 会优先检查 `stdlib_func_map`，如果找到匹配的
-    /// Aura 编译函数则直接派发，否则回退到 Rust native。
+    /// 调用后，`do_call_native` 会**始终优先**检查 `stdlib_func_map`，
+    /// 如果找到匹配的 Aura 编译函数（且非 native 声明）则直接派发，
+    /// 否则回退到 Rust native。
     ///
     /// # 参数
     /// * `dir` - 包含标准库 `.auc` 文件的目录路径
@@ -1067,10 +1261,42 @@ impl Vm {
 
                 match read_auc(&path.to_string_lossy()) {
                     Ok(std_module) => {
-                        // 解码标准库函数并追加到当前模块
+                        // 合并前记录宿主三张全局表的基址（同 load_embedded_stdlib）
+                        let func_base = self.module.funcs.len() as u16;
+                        let const_base = self.module.consts.len() as u16;
+                        let native_base = self.module.natives.len() as u16;
+
+                        if std_module.has_aot() {
+                            let mut desc_idx =
+                                vec![0u32; func_base as usize + std_module.functions.len()];
+                            for (i, f) in std_module.functions.iter().enumerate() {
+                                desc_idx[func_base as usize + i] = f.aot_desc_idx;
+                            }
+                            let _ = self.aot_runtime.load_module_from(
+                                &std_module.aot_blob_data,
+                                &std_module.aot_segments,
+                                &desc_idx,
+                                module_name.clone(),
+                            );
+                        }
+                        self.module.consts.extend(std_module.consts.iter().cloned());
+                        self.module.natives.extend(std_module.natives.iter().cloned());
+                        for (i, n) in std_module.natives.iter().enumerate() {
+                            self.module
+                                .native_index
+                                .insert(n.name.clone(), (native_base as usize + i) as u16);
+                        }
+
+                        // 解码标准库函数、重定位下标并追加到当前模块
                         for f in &std_module.functions {
                             match decode_function(f) {
-                                Ok(decoded) => {
+                                Ok(mut decoded) => {
+                                    remap_embedded_instrs(
+                                        &mut decoded.code,
+                                        const_base,
+                                        native_base,
+                                        func_base,
+                                    );
                                     // 函数名格式：
                                     // - 对象方法: "Math.abs" → "aura.lang.std.Math.abs"
                                     // - 顶层函数: "add" → "aura.lang.std.TestHelper.add"
@@ -1087,12 +1313,23 @@ impl Vm {
                                         func_name, f.param_count, f.locals
                                     );
                                     self.module.funcs.push(decoded);
-                                    self.stdlib_func_map.insert(func_name.clone(), idx);
-                                    // 同时注册短名（如 "abs"）以便匹配 prelu 函数
+                                    // 全名注册（支持重载：同名函数可追加多个索引）
+                                    self.stdlib_func_map
+                                        .entry(func_name.clone())
+                                        .or_default()
+                                        .push(idx);
+                                    // 仅对 prelu 独立函数注册短名，避免命名冲突
                                     let short_name =
                                         func_name.rsplit('.').next().unwrap_or(&func_name);
-                                    if !short_name.is_empty() && short_name != func_name {
-                                        self.stdlib_func_map.insert(short_name.to_string(), idx);
+                                    if !short_name.is_empty()
+                                        && short_name != func_name
+                                        && !f.name.contains('.')
+                                        && crate::std::decl::is_prelude(short_name)
+                                    {
+                                        self.stdlib_func_map
+                                            .entry(short_name.to_string())
+                                            .or_default()
+                                            .push(idx);
                                     }
                                     loaded_count += 1;
                                 }
@@ -1138,22 +1375,24 @@ impl Vm {
     /// - `Some((idx, false))` — 参数个数完全匹配，直接调用
     /// - `Some((idx, true))` — 多一个参数（self），需要注入 singleton 对象
     /// - `None` — 未找到匹配函数
+    ///
+    /// 支持函数重载：同名函数可注册多个索引（如 Math.abs<Int> 和 Math.abs<Float>），
+    /// 遍历所有候选索引，返回参数个数最匹配的那个。
     pub fn find_stdlib_func(&self, name: &str, expected_params: usize) -> Option<(usize, bool)> {
-        self.stdlib_func_map.get(name).and_then(|&idx| {
-            if idx < self.module.funcs.len() {
-                let func = &self.module.funcs[idx];
-                let actual_params = func.param_count as usize;
-                if actual_params == expected_params {
-                    Some((idx, false)) // 完全匹配
-                } else if actual_params == expected_params + 1 {
-                    Some((idx, true)) // self 参数匹配（多一个参数）
-                } else {
-                    None
-                }
-            } else {
-                None
+        let indices = self.stdlib_func_map.get(name)?;
+        for &idx in indices {
+            if idx >= self.module.funcs.len() {
+                continue;
             }
-        })
+            let func = &self.module.funcs[idx];
+            let actual_params = func.param_count as usize;
+            if actual_params == expected_params {
+                return Some((idx, false)); // 完全匹配
+            } else if actual_params == expected_params + 1 {
+                return Some((idx, true)); // self 参数匹配（多一个参数）
+            }
+        }
+        None
     }
 
     /// Phase 3: 从 native 函数名提取对象名（用于查找 singleton）。
@@ -1161,9 +1400,13 @@ impl Vm {
     /// 例如："aura.lang.std.Math.abs" → Some("Math")
     /// 例如："aura.lang.std.abs" → None（无对象名）
     pub fn extract_object_name<'a>(&self, native_name: &'a str) -> Option<&'a str> {
-        // 格式: aura.lang.std.{ObjectName}.{funcName}
+        // 格式: aura.lang.std.{ObjectName}.{funcName} 或 aura.lang.concurrent.{ObjectName}.{funcName}
         let parts: Vec<&str> = native_name.split('.').collect();
-        if parts.len() >= 4 && parts[0] == "aura" && parts[1] == "lang" && parts[2] == "std" {
+        if parts.len() >= 4
+            && parts[0] == "aura"
+            && parts[1] == "lang"
+            && (parts[2] == "std" || parts[2] == "concurrent")
+        {
             Some(parts[3])
         } else {
             None
@@ -1258,6 +1501,61 @@ impl Vm {
         Ok(self.result.take().unwrap_or(Value::Null))
     }
 
+    /// 执行指定函数（供 `Thread.spawn` 使用）
+    ///
+    /// 与 `run()` 类似，但执行指定函数而非入口函数。
+    /// 函数参数通过 `args` 传递，返回值为函数的返回值。
+    /// 新线程调用此方法时，VM 分发器（原生函数 + 回调）会自动初始化。
+    pub fn run_function(&mut self, func_idx: usize, args: Vec<Value>) -> Result<Value, VmError> {
+        if func_idx >= self.module.funcs.len() {
+            return Err(VmError::Runtime(format!(
+                "run_function: invalid func_idx {} (module has {} functions)",
+                func_idx,
+                self.module.funcs.len()
+            )));
+        }
+
+        // P10: 设置并发运行时 VM 引用
+        crate::vm::native::set_vm_ref(self as *mut Self as *mut ());
+
+        // P8.7: 设置回调派发闭包
+        {
+            use crate::vm::ffi::set_dispatcher;
+            use std::sync::atomic::AtomicPtr;
+            let vm_ptr = std::sync::Arc::new(AtomicPtr::new(self as *mut Vm));
+            let vm_ptr_clone = vm_ptr.clone();
+            let dispatcher = std::sync::Arc::new(move |callback_id: i64, args: &[i64]| {
+                use std::sync::atomic::Ordering;
+                let ptr = vm_ptr_clone.load(Ordering::SeqCst);
+                if ptr.is_null() {
+                    return 0;
+                }
+                unsafe { (*ptr).call_callback(callback_id, args) }
+            });
+            set_dispatcher(dispatcher);
+        }
+
+        // object 单例字段默认值初始化
+        self.run_singleton_initializers();
+
+        // 推送函数帧并执行
+        self.push_frame(func_idx, args)?;
+        while !self.frames.is_empty() && !self.halt {
+            self.step()?;
+        }
+
+        // 清理
+        crate::vm::ffi::clear_dispatcher();
+        crate::vm::native::clear_vm_ref();
+
+        Ok(self.result.take().unwrap_or(Value::Null))
+    }
+
+    /// 返回字节码模块的克隆（供 `Thread.spawn` 创建新 VM 使用）
+    pub fn module_clone(&self) -> crate::codegen::opcode::BytecodeModule {
+        self.module.module.clone()
+    }
+
     /// 回调派发入口（P8.7）：被 C 蹦床通过 thread-local 派发闭包调用
     ///
     /// 从回调 ID 查注册表，获取 Aura 函数索引，推送新帧并执行。
@@ -1271,7 +1569,7 @@ impl Vm {
         let func_idx = match self.callbacks.lookup(callback_id) {
             Some(idx) => idx,
             None => {
-                eprintln!("[vm] 回调 #{} 未注册，返回 0", callback_id);
+                eprintln!("[vm] Callback #{} not registered, returning 0", callback_id);
                 return 0;
             }
         };
@@ -1280,7 +1578,10 @@ impl Vm {
         let param_count = if func_idx < self.module.funcs.len() {
             self.module.funcs[func_idx].param_count as usize
         } else {
-            eprintln!("[vm] 回调 #{} 指向无效函数 #{}", callback_id, func_idx);
+            eprintln!(
+                "[vm] Callback #{} points to invalid function #{}",
+                callback_id, func_idx
+            );
             return 0;
         };
 
@@ -1559,7 +1860,10 @@ impl Vm {
         if let Some(jit) = self.jit.as_mut() {
             match entry {
                 Some(e) => jit.insert(idx, e),
-                None => jit.skip(idx, "JIT 白名单不匹配（函数包含非可编译指令）"),
+                None => jit.skip(
+                    idx,
+                    "JIT whitelist mismatch (function contains non-compilable instructions)",
+                ),
             }
         }
     }

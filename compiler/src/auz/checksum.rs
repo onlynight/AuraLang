@@ -17,7 +17,7 @@ pub fn compute_sha256(bytes: &[u8]) -> String {
 /// 计算文件的 SHA-256
 pub fn compute_file_sha256(path: &Path) -> Result<String, ApkgError> {
     let bytes = std::fs::read(path)
-        .map_err(|e| ApkgError::Io(format!("无法读取 {}: {}", path.display(), e)))?;
+        .map_err(|e| ApkgError::Io(format!("cannot read {}: {}", path.display(), e)))?;
     Ok(compute_sha256(&bytes))
 }
 
@@ -70,7 +70,7 @@ pub fn verify_bytes(expected_hash: &str, bytes: &[u8]) -> Result<(), ApkgError> 
     let actual = compute_sha256(bytes);
     if !expected_hash.eq_ignore_ascii_case(&actual) {
         return Err(ApkgError::Checksum(format!(
-            "校验和不匹配: 期望 {}, 实际 {}",
+            "checksum mismatch: expected {}, actual {}",
             expected_hash, actual
         )));
     }

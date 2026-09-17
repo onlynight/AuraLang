@@ -24,7 +24,7 @@ package aura.lang
 ///
 /// @see Nothing, Type
 /// @since 0.1
-internal open class Any {
+open class Any {
 
     /// 返回对象的可读表示。
     ///
@@ -35,20 +35,14 @@ internal open class Any {
     /// @since 0.5
     open fun toString(): String {
         if (this == null) return "null"
-        val type = typeof(this)
-        if (type == "Int") return toStr(this as Int)
-        if (type == "Float") return toStr(this as Float)
-        if (type == "Double") return toStr(this as Double)
-        if (type == "Boolean") return if (this as Boolean) "true" else "false"
-        if (type == "String") return this as String
-        if (type == "Long") return toStr(this as Long)
-        if (type == "Char") return toStr(this as Char)
-        if (type == "Byte") return toStr(this as Byte)
-        if (type == "Short") return toStr(this as Short)
-        if (type == "List") return "List(" + (this as List<Any>).size + ")"
-        if (type == "Map") return "Map(" + (this as Map<Any, Any>).size + ")"
-        if (type == "Array") return "Array(" + (this as Array<Any>).size + ")"
-        return "<" + type + "@" + hashCode() + ">"
+        // 值 → 字符串统一走运行时转换（`toStr`）。
+        //
+        // 原实现用 `typeof(this)` 做类型分派，但 AOT 后端**没有** `typeof` 的运行时
+        // 实现（只有编译期按静态类型折叠的 `typeOf`），任何链接了 `Any` 的程序都会
+        // 在链接期报 `undefined symbol: typeof`。`toStr` 在 VM 与 AOT 两侧都是
+        // 「给定值 → 可读字符串」的规范入口（AOT 侧即 `aura_to_str_any`），
+        // 语义与原先的分派结果一致。
+        return toStr(this)
     }
 
     /// 检查两个对象是否值相等。
@@ -62,21 +56,10 @@ internal open class Any {
     open fun equals(other: Any): Boolean {
         if (this == null) return other == null
         if (other == null) return false
-        // 基本类型值相等
-        val thisType = typeof(this)
-        val otherType = typeof(other)
-        if (thisType != otherType) return false
-        if (thisType == "Int") return (this as Int) == (other as Int)
-        if (thisType == "Float") return (this as Float) == (other as Float)
-        if (thisType == "Double") return (this as Double) == (other as Double)
-        if (thisType == "Boolean") return (this as Boolean) == (other as Boolean)
-        if (thisType == "String") return (this as String) == (other as String)
-        if (thisType == "Long") return (this as Long) == (other as Long)
-        if (thisType == "Char") return (this as Char) == (other as Char)
-        if (thisType == "Byte") return (this as Byte) == (other as Byte)
-        if (thisType == "Short") return (this as Short) == (other as Short)
-        // 对象身份相等
-        return this === other
+        // 按「值的规范字符串形式」比较（见 toString 的说明：AOT 侧无 `typeof`）。
+        // 对 Int / Long / Boolean / String / Char 等可哈希键，相等值必得相等字符串，
+        // 与 VM 的值分派结果一致；类实例则退化为表示相等。
+        return toStr(this) == toStr(other)
     }
 
     /// 返回对象的哈希码。
@@ -87,44 +70,30 @@ internal open class Any {
     /// @since 0.5
     open fun hashCode(): Int {
         if (this == null) return 0
-        val type = typeof(this)
-        if (type == "Int") return (this as Int) * 31
-        if (type == "Float") return ((this as Float).toInt()) * 31
-        if (type == "Double") return ((this as Double).toInt()) * 31
-        if (type == "Boolean") return if (this as Boolean) 1231 else 1237
-        if (type == "String") {
-            var hash: Int = 0
-            val str = this as String
-            var i: Int = 0
-            while (i < str.length) {
-                hash = hash * 31 + str.charCodeAt(i)
-                i = i + 1
-            }
-            return hash
+        // 31 进制字符串散列（见 toString 的说明：AOT 侧无 `typeof`）。
+        // 与 `equals` 用同一规范形式，保证「相等 ⇒ 同哈希」；
+        // 对 Int / Long / Boolean / String 等键，散列分布与 VM 的值分派等价。
+        val s: String = toStr(this)
+        var hash: Int = 0
+        var i: Int = 0
+        while (i < s.length) {
+            hash = hash * 31 + s.charCodeAt(i)
+            i = i + 1
         }
-        if (type == "Long") return ((this as Long).toInt()) * 31
-        if (type == "Char") return (this as Char) * 31
-        if (type == "Byte") return (this as Byte) * 31
-        if (type == "Short") return (this as Short) * 31
-        // 对象身份哈希（基于指针地址）
-        return hashCodeImpl(this)
+        return hash
     }
 
-    /// 返回运行时类对象（反射）。
-    ///
-    /// 等价于 Java 的 `this.getClass()`。
-    ///
-    /// @return 运行时类对象
-    /// @since 0.5
-    open fun typeOf(): Type {
-        return Type.forName(typeof(this))
-    }
-
-    // ── 内部辅助方法 ──
-
-    /// 对象身份哈希码（基于 VM handle）。
-    /// 实际实现由 VM 提供，此处为 Aura 占位。
-    private fun hashCodeImpl(obj: Any): Int {
-        return 0
-    }
+    // ── 反射（暂缺） ──
+    //
+    // `open fun typeOf(): Type` 曾在此声明，其实现为 `Type.forName(typeof(this))`，
+    // 但存在两处硬伤：
+    //   1. `Type.forName` 在标准库（`aura/lang/Type.aura`）中**并不存在**；
+    //   2. `typeof` 在 AOT 后端没有运行时实现（AOT 只有编译期按静态类型折叠的
+    //      `typeOf`），而 `Type(...)` 的构造在 AOT 下也尚无符号落地。
+    // 结果是任何链接 `Any` 的程序都会在链接期报 `undefined symbol: typeof / Type`。
+    // 由于该方法当前无任何调用点（仅 `Type.aura` 的文档注释提及），选择暂不声明，
+    // 待 AOT 引入 RTTI + `Type` 构造路径后恢复。
+    //
+    // /// 返回运行时类对象（反射）。等价于 Java 的 `this.getClass()`。
+    // open fun typeOf(): Type { ... }
 }

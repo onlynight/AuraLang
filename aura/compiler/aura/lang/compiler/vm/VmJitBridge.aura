@@ -1,0 +1,344 @@
+// aura:///aura/lang/compiler/vm/VmJitBridge.aura
+package aura.lang.compiler.vm
+// ─────────────────────────────────────────────────────────────
+// VM-JIT 桥接层 — 纯 Aura 化迁移 · Phase 7 (任务 7.8)
+//
+// 本模块是 VM 派发路径与 JIT FFI 边界之间的桥接层，
+// 负责：
+//   1. 热点检测（调用计数 + 阈值判断）
+//   2. JIT 编译触发（调用 jit_compile → jit_load）
+//   3. 原生派发（调用 jit_call）
+//   4. 解释器回退（FFI 失败时）
+//
+// ── 数据流 ──
+//
+//   VM 函数调用 → VmJitBridge.checkCall()
+//     → 已编译？ → "native"（走原生码）
+//     → 已跳过？ → "skip"（回退解释器）
+//     → 达阈值？ → tryJitCompile()
+//         → 白名单检查 → Clif IR 生成 → FFI compile → FFI load
+//     → 未达阈值 → "defer"（继续解释器）
+//
+// ── FFI 边界 ──
+//
+//   @native fun jit_compile(clif_text: String): String
+//   @native fun jit_load(blob_b64: String): String
+//   @native fun jit_call(entry_token: String, args: String, out_slot: Int): String
+//   @native fun register_dispatch(idx: Int, token: String): Unit
+//   @native fun lookup_dispatch(idx: Int): String
+//
+// ── 回退策略 ──
+//
+//   FFI 返回空串 → 记入 skip 集合，永久回退解释器
+//   jit_call 返回 "DEOPT" → 去优化，回退解释器
+//   jit_call 返回空串 → 调用失败，回退解释器
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.compiler.jit.JitState
+import aura.lang.compiler.jit.JitDispatch
+import aura.lang.compiler.jit.JitLower
+import aura.lang.compiler.jit.JitOpt
+
+// ── FFI 声明（由 bootstrap/jit_ffi.rs 实现）──────────────────
+
+@native fun jit_compile(clif_text: String): String
+
+@native fun jit_load(blob_b64: String): String
+
+@native fun jit_call(entry_token: String, args: String, out_slot: Int): String
+
+@native fun register_dispatch(idx: Int, token: String): Unit
+
+@native fun lookup_dispatch(idx: Int): String
+
+// ── JIT 桥接状态 ─────────────────────────────────────────────
+
+/// JIT 桥接配置。
+object VmJitConfig {
+    /// 热点阈值（函数调用次数）。
+    const val HOTSPOT_THRESHOLD: Int = 10000
+
+    /// 是否启用 JIT。
+    const val ENABLED: Boolean = true
+
+    /// 最大编译函数数。
+    const val MAX_COMPILED_FNS: Int = 256
+}
+
+/// JIT 桥接状态（每个 VM 实例一个）。
+class VmJitBridge {
+    /// JIT 状态机（编译集合、跳过集合、分发表）。
+    var state: JitState
+
+    /// 函数调用计数（func_idx → count）。
+    var callCounts: Map<Int, Int>
+
+    /// 函数代码表（func_idx → code string）。
+    var funcCode: Map<Int, String>
+
+    /// 函数参数表（func_idx → params string）。
+    var funcParams: Map<Int, String>
+
+    /// 编译次数统计。
+    var compileCount: Int = 0
+
+    /// 去优化次数统计。
+    var deoptCount: Int = 0
+
+    /// 原生调用次数统计。
+    var nativeCallCount: Int = 0
+
+    /// 解释器回退次数统计。
+    var fallbackCount: Int = 0
+
+    fun VmJitBridge() {
+        state = JitState()
+        callCounts = Map()
+        funcCode = Map()
+        funcParams = Map()
+    }
+
+    /// 注册函数代码（供 JIT 编译使用）。
+    fun registerFunction(idx: Int, code: String, params: String) {
+        funcCode.put(idx, code)
+        funcParams.put(idx, params)
+    }
+
+    /// 增加调用计数。
+    fun incrementCallCount(idx: Int): Int {
+        val current: Int = callCounts.getOrDefault(idx, 0)
+        val next: Int = current + 1
+        callCounts.put(idx, next)
+        return next
+    }
+
+    /// 检查函数是否应 JIT 编译。
+    fun shouldCompile(idx: Int): Boolean {
+        // 已编译或已跳过 → 不编译
+        if (state.isCompiled(idx)) {
+            return false
+        } else if (state.isSkipped(idx)) {
+            return false
+        } else {
+            // 达到热点阈值 → 编译
+            val count: Int = callCounts.getOrDefault(idx, 0)
+            return count >= VmJitConfig.HOTSPOT_THRESHOLD
+        }
+    }
+}
+
+// ── 工具对象：派发决策、JIT 编译、原生调用、统计 ────────────
+
+object VmJitBridgeUtils {
+
+    /// 检查函数调用（VM 派发入口）。
+    ///
+    /// 返回派发决策：
+    /// - "native": 走原生码（已编译）
+    /// - "skip": 回退解释器（已跳过或不可编译）
+    /// - "defer": 继续解释器（未达阈值）
+    fun checkCall(bridge: VmJitBridge, idx: Int, args: String): String {
+        // 增加调用计数
+        bridge.incrementCallCount(idx)
+
+        // 派发决策
+        val decision: String = JitDispatch.jitDecide(bridge.state, idx)
+
+        if (decision == JitDispatch.JitDecide.NATIVE) {
+            // 已编译 → 走原生码
+            return "native"
+        } else if (decision == JitDispatch.JitDecide.SKIP) {
+            // 已跳过 → 回退解释器
+            return "skip"
+        } else if (bridge.shouldCompile(idx)) {
+            // 尝试 JIT 编译
+            val ok: Boolean = tryJitCompile(bridge, idx)
+            if (ok) {
+                return "native"
+            } else {
+                return "skip"
+            }
+        } else {
+            // 未达阈值 → 继续解释器
+            return "defer"
+        }
+    }
+
+    /// 尝试 JIT 编译函数。
+    ///
+    /// 流程：
+    /// 1. 白名单检查（JitState 内部）
+    /// 2. 生成 Clif IR 文本（JitLower）
+    /// 3. FFI: jit_compile(clif_text) → blob_b64
+    /// 4. FFI: jit_load(blob_b64) → entry_token
+    /// 5. 注册到分发表
+    ///
+    /// 返回是否编译成功。
+    fun tryJitCompile(bridge: VmJitBridge, idx: Int): Boolean {
+        // 1. 获取函数代码
+        val code: String = bridge.funcCode.getOrDefault(idx, "")
+        if (code == "") {
+            // 无代码 → 跳过
+            bridge.state.skip(idx, "no code available")
+            return false
+        } else {
+            // 2. 白名单检查（通过 JitDispatch.jitTryCompile）
+            //    这里简化处理：假设代码可编译
+            //    实际检查在 JitDispatch.jitSkipReason 中
+
+            // 3. 生成 Clif IR 文本（调用 JitLower 降级字节码）
+            val fnName: String = "func" + toStr(idx)
+            val clif_text: String = generateClifText(code, fnName, "", "")
+            if (clif_text == "") {
+                // 生成失败 → 跳过
+                bridge.state.skip(idx, "Clif IR generation failed")
+                return false
+            } else {
+                // 4. FFI: jit_compile
+                val blob_b64: String = jit_compile(clif_text)
+                if (blob_b64 == "") {
+                    // 编译失败 → 跳过
+                    bridge.state.skip(idx, "jit_compile failed")
+                    return false
+                } else {
+                    // 5. FFI: jit_load
+                    val entry_token: String = jit_load(blob_b64)
+                    if (entry_token == "") {
+                        // 装载失败 → 跳过
+                        bridge.state.skip(idx, "jit_load failed")
+                        return false
+                    } else {
+                        // 6. 注册到分发表
+                        bridge.state.insert(idx)
+                        bridge.compileCount = bridge.compileCount + 1
+
+                        // 7. 注册到 FFI 分发表（用于 jit_call 查找）
+                        registerDispatch(bridge, idx, entry_token)
+
+                        return true
+                    }
+                }
+            }
+        }
+    }
+
+    /// 生成 Clif IR 文本。
+    ///
+    /// 调用 JitLower.jitLowerFunction 将字节码降级为 Cranelift 文本 IR。
+    /// 若降级失败或输入为空，返回空串（调用方记为 skip）。
+    fun generateClifText(code: String, fnName: String, consts: String, funcs: String): String {
+        if (code == "") {
+            return ""
+        } else {
+            val clif: String = JitLower.jitLowerFunction(fnName, code, consts, funcs)
+            if (clif == "") {
+                return ""
+            } else {
+                return clif
+            }
+        }
+    }
+
+    /// 注册函数到 FFI 分发表（用于 jit_call 查找 entry_token）。
+    fun registerDispatch(bridge: VmJitBridge, idx: Int, entry_token: String) {
+        register_dispatch(idx, entry_token)
+    }
+
+    /// 调用 JIT 编译的函数。
+    ///
+    /// 流程：
+    /// 1. 从分发表查找 entry_token
+    /// 2. 格式化参数为记录表格式
+    /// 3. FFI: jit_call(entry_token, args, out_slot)
+    /// 4. 解析返回值（tag|payload）
+    ///
+    /// 返回结果字符串（tag|payload），或空串表示失败。
+    fun nativeCall(bridge: VmJitBridge, idx: Int, args: String): String {
+        // 1. 查找 entry_token
+        val entry_token: String = lookupDispatchToken(idx)
+        if (entry_token == "") {
+            bridge.fallbackCount = bridge.fallbackCount + 1
+            return ""
+        } else {
+            // 2. 格式化参数
+            // args 已经是记录表格式：每行 tag|payload
+            // 如果 args 是空串，使用默认参数
+
+            // 3. FFI: jit_call
+            val out_slot: Int = 0
+            val result: String = jit_call(entry_token, args, out_slot)
+
+            // 4. 检查结果
+            if (result == "DEOPT") {
+                // 去优化 → 回退解释器
+                bridge.deoptCount = bridge.deoptCount + 1
+                bridge.state.skip(idx, "deoptimized")
+                return ""
+            } else if (result == "") {
+                // 调用失败 → 回退解释器
+                bridge.fallbackCount = bridge.fallbackCount + 1
+                return ""
+            } else {
+                // 成功 → 更新统计
+                bridge.nativeCallCount = bridge.nativeCallCount + 1
+                return result
+            }
+        }
+    }
+
+    /// 查找分发表中的 entry_token（由 Rust 侧 jit_call 使用）。
+    fun lookupDispatchToken(idx: Int): String {
+        return lookup_dispatch(idx)
+    }
+
+    /// VM 函数调用钩子（由 VM 解释器调用）。
+    ///
+    /// 返回：
+    /// - "native": 走原生码
+    /// - "skip": 回退解释器
+    /// - "defer": 继续解释器
+    /// - "compiled": 刚编译完成，走原生码
+    /// - "fallback": 编译失败，回退解释器
+    fun vmCallHook(bridge: VmJitBridge, idx: Int, args: String): String {
+        // 检查调用
+        val decision: String = checkCall(bridge, idx, args)
+
+        if (decision == "native") {
+            // 走原生码
+            val result: String = nativeCall(bridge, idx, args)
+            if (result != "") {
+                return "native"
+            } else {
+                return "fallback"
+            }
+        } else if (decision == "skip" || decision == "defer") {
+            return decision
+        } else {
+            // 未知决策 → 回退解释器
+            return "fallback"
+        }
+    }
+
+    /// 获取 JIT 统计信息。
+    fun jitStats(bridge: VmJitBridge): String {
+        val lines: List<String> = List()
+        lines.add("JIT Statistics:")
+        lines.add("  compiled: " + bridge.compileCount.toStr())
+        lines.add("  native_calls: " + bridge.nativeCallCount.toStr())
+        lines.add("  deopt: " + bridge.deoptCount.toStr())
+        lines.add("  fallback: " + bridge.fallbackCount.toStr())
+        lines.add("  compiled_fns: " + bridge.state.compiledCount().toStr())
+        lines.add("  skipped_fns: " + bridge.state.skippedCount().toStr())
+        return lines.joinToString("\n")
+    }
+
+    /// 重置统计。
+    fun resetStats(bridge: VmJitBridge) {
+        bridge.compileCount = 0
+        bridge.deoptCount = 0
+        bridge.nativeCallCount = 0
+        bridge.fallbackCount = 0
+        bridge.state = JitState()
+    }
+}

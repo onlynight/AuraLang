@@ -1,0 +1,91 @@
+// aura:///aura/lang/concurrent/Barrier.aura
+package aura.lang.concurrent
+// 屏障（Barrier）—— 纯 Aura 实现，不依赖 Rust 运行库。
+//
+// 实现说明：
+//   * 句柄指向一段 32 字节堆内存：
+//     `w0`=守卫自旋锁，`w1`=剩余到达数，`w2`=代数，`w3`=参与线程总数。
+//   * 每个到达者把剩余数减一；最后一个到达者重置计数并递增代数，其余线程自旋等待代数变化。
+//   * 守卫自旋锁基于 `Cpu.atomicAdd`（`lock xaddq`）原生原子指令。
+//
+// 使用前需 import：
+// ```aura
+// import aura.lang.concurrent.Barrier.*   // 短名可用：new, wait, ...
+// import aura.lang.concurrent.Barrier     // 类式调用：Barrier.new(4)
+// ```
+//
+// 使用模式：
+// ```aura
+// val barrier = Barrier.new(4)  // 等待 4 个线程
+// // 每个线程执行完后调用 barrier.wait()
+// // 所有 4 个线程都到达 barrier 后，全部继续执行
+// ```
+//
+// @since 0.6
+import aura.lang.native.Memory
+import aura.lang.native.Cpu
+object Barrier {
+
+    /// 创建新的屏障
+    ///
+    /// - 参数：`count` — 需要等待的线程数
+    /// - 返回：屏障 ID（堆地址）
+    fun new(count: Int): Int {
+        val addr: Long = Memory.alloc(32L)
+        Memory.write64(addr, 0L)
+        Memory.write64(addr + 8L, count as Long)
+        Memory.write64(addr + 16L, 0L)
+        Memory.write64(addr + 24L, count as Long)
+        return addr as Int
+    }
+
+    /// 在屏障上等待（所有线程到达后全部释放）
+    ///
+    /// - 参数：`barrier_id` — 屏障 ID
+    /// - 返回：到达序号（最后一个到达者返回 0）
+    fun wait(barrier_id: Int): Int {
+        val guard: Long = barrier_id as Long
+        val remaining: Long = guard + 8L
+        val generation: Long = guard + 16L
+        val total: Long = guard + 24L
+
+        spinAcquire(guard)
+        val gen: Long = Memory.read64(generation)
+        val left: Long = Memory.read64(remaining) - 1L
+        Memory.write64(remaining, left)
+        if (left == 0L) {
+            // 最后一个到达者：重置并放行
+            Memory.write64(remaining, Memory.read64(total))
+            Memory.write64(generation, gen + 1L)
+            spinRelease(guard)
+            return 0
+        }
+        spinRelease(guard)
+        while (Memory.read64(generation) == gen) {
+            // 自旋等待其他线程到达
+        }
+        return (gen + 1L) as Int
+    }
+
+    /// 销毁屏障
+    ///
+    /// - 参数：`barrier_id` — 屏障 ID
+    fun destroy(barrier_id: Int): Unit {
+        Memory.free(barrier_id as Long)
+    }
+
+    // ── 内部：自旋守卫 ──
+
+    private fun spinAcquire(word: Long): Unit {
+        while (true) {
+            if (Cpu.atomicAdd(word, 1L) == 0L) {
+                return
+            }
+            Cpu.atomicAdd(word, 0L - 1L)
+        }
+    }
+
+    private fun spinRelease(word: Long): Unit {
+        Cpu.atomicAdd(word, 0L - 1L)
+    }
+}

@@ -1,0 +1,14 @@
+# Keeps this plugin's `pnpm install` self-contained when the checkout is not
+# itself a pnpm workspace. No packages are federated.
+packages: []
+
+allowBuilds:
+  esbuild: true
+
+# esbuild runs a postinstall that links its native binary. pnpm 11 refuses to
+# execute build scripts it has not been told it may run, so esbuild would be
+# installed unusable and `pnpm build` would fail on a missing executable.
+# Declared here rather than in package.json: pnpm 11 no longer reads the
+# `pnpm` field from a manifest.
+onlyBuiltDependencies:
+  - esbuild

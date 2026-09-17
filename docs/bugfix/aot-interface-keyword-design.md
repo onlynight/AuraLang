@@ -1,5 +1,9 @@
 # AOT 直调接口设计：`extern interface` 关键字方案
 
+> **⚠️ 已废弃**：`extern interface` 已统一为 `extern object` + `@aot` 注解。
+> 请参考 `docs/aura_cffi_impl/design.md` 中的最新规范。
+> 本文件保留作为历史参考。
+
 ## 设计动机
 
 当前 `demo_aot_direct` 使用命令式调用：

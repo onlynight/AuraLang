@@ -34,11 +34,11 @@ fn llc_available() -> bool {
 #[test]
 fn demo_end_to_end_aot_embed() {
     if !llc_available() {
-        eprintln!("skipped: LLVM 不可用");
+        eprintln!("skipped: LLVM not available");
         return;
     }
 
-    println!("=== Aura AOT 机器码嵌入演示 ===\n");
+    println!("=== Aura AOT machine code embedding demo ===\n");
 
     // Step 1: 编译源码
     let src = r#"
@@ -47,21 +47,24 @@ fn demo_end_to_end_aot_embed() {
         fun main(): Int { return add(multiply(6, 7), 2) }
     "#;
 
-    println!("Step 1: 编译源码 → 字节码...");
-    let module = compile_source(src).expect("编译失败");
-    println!("  ✓ 字节码编译成功: {} 个函数", module.functions.len());
+    println!("Step 1: Compile source -> bytecode...");
+    let module = compile_source(src).expect("compilation failed");
+    println!(
+        "  * bytecode compilation succeeded: {} functions",
+        module.functions.len()
+    );
 
     // Step 2: 重新解析得到 HIR
-    println!("\nStep 2: 解析 HIR...");
+    println!("\nStep 2: Parse HIR...");
     let mut lexer = Lexer::new(src);
     let tokens = lexer.tokenize();
     let mut parser = Parser::new(tokens);
     let program = parser.parse_program();
     let hir = desugar_program(&program);
-    println!("  ✓ HIR 解析成功");
+    println!("  * HIR parsed successfully");
 
     // Step 3: AOT 嵌入
-    println!("\nStep 3: AOT 嵌入（LLVM IR → 机器码 blob）...");
+    println!("\nStep 3: AOT embedding (LLVM IR -> machine code blob)...");
     let options = AotOptions {
         opt_level: OptimizationLevel::default(),
         ..Default::default()
@@ -71,73 +74,76 @@ fn demo_end_to_end_aot_embed() {
         std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
     ));
-    let result = embed_aot(module, &hir, options, &work_dir).expect("AOT 嵌入失败");
+    let result = embed_aot(module, &hir, options, &work_dir).expect("AOT embedding failed");
     let _ = std::fs::remove_dir_all(&work_dir);
 
     println!(
-        "  ✓ AOT 嵌入成功: 机器码 {} 字节, {} 个函数描述符",
+        "  * AOT embedding succeeded: machine code {} bytes, {} function descriptors",
         result.machine_size, result.desc_count
     );
     println!(
-        "  ✓ 段表: {} 个段 (含字符串池)",
+        "  * segment table: {} segments (incl. string pool)",
         result.module.aot_segments.len()
     );
 
     // Step 4: 基线执行（纯字节码解释）
-    println!("\nStep 4: 基线执行（纯字节码解释器）...");
+    println!("\nStep 4: Baseline execution (pure bytecode interpreter)...");
     let plain = compile_source(src).unwrap();
     let mut vm = Vm::new(&plain, VmOptions::default()).unwrap();
     let baseline = vm.run().unwrap();
-    println!("  ✓ 基线结果: {}", format_value(&baseline));
+    println!("  * baseline result: {}", format_value(&baseline));
 
     // Step 5: AOT 执行
-    println!("\nStep 5: AOT 机器码执行...");
-    let mut vm = Vm::new(&result.module, VmOptions::default()).expect("VM 初始化失败");
-    let aot_result = vm.run().expect("AOT 执行失败");
-    println!("  ✓ AOT 结果: {}", format_value(&aot_result));
-    assert_eq!(aot_result, baseline, "AOT 结果必须与解释器一致");
-    println!("  ✓ 结果一致!");
+    println!("\nStep 5: AOT machine code execution...");
+    let mut vm = Vm::new(&result.module, VmOptions::default()).expect("VM initialization failed");
+    let aot_result = vm.run().expect("AOT execution failed");
+    println!("  * AOT result: {}", format_value(&aot_result));
+    assert_eq!(aot_result, baseline, "AOT result must match interpreter");
+    println!("  * Results match!");
 
     // Step 6: 签名
-    println!("\nStep 6: Ed25519 签名...");
+    println!("\nStep 6: Ed25519 signing...");
     let auc_bytes = serialize::to_bytes(&result.module);
-    println!("  原始 .auc 大小: {} 字节", auc_bytes.len());
+    println!("  Original .auc size: {} bytes", auc_bytes.len());
 
     use compiler::codegen::serialize::Ed25519Keypair;
     let keypair = Ed25519Keypair::generate();
     let signed_bytes = serialize::sign_auc(&auc_bytes, &keypair);
     println!(
-        "  签名后大小: {} 字节 (增加 96 字节: 64 签名 + 32 公钥)",
+        "  Signed size: {} bytes (added 96 bytes: 64 signature + 32 public key)",
         signed_bytes.len()
     );
 
     // Step 7: 验证签名
-    println!("\nStep 7: 验证签名...");
+    println!("\nStep 7: Verify signature...");
     let pk = keypair.public_key.as_bytes().to_vec();
     let pk_bytes: [u8; 32] = pk.as_slice().try_into().unwrap();
     let valid = serialize::verify_auc_signature(&signed_bytes, &pk_bytes).unwrap();
-    println!("  ✓ 签名验证: {}", if valid { "通过" } else { "失败" });
+    println!(
+        "  * Signature verification: {}",
+        if valid { "passed" } else { "failed" }
+    );
     assert!(valid);
 
     // Step 8: 签名保护下 VM 加载
-    println!("\nStep 8: 签名保护下 VM 加载执行...");
+    println!("\nStep 8: VM load and execute under signature protection...");
     let loaded = serialize::from_bytes(&signed_bytes[..signed_bytes.len() - 96]).unwrap();
     let mut vm = Vm::new(&loaded, VmOptions::default()).unwrap();
     let result = vm.run().unwrap();
-    println!("  ✓ 签名后执行结果: {}", format_value(&result));
+    println!("  * Signed execution result: {}", format_value(&result));
     assert_eq!(result, baseline);
 
     // Step 9: 诊断信息
-    println!("\nStep 9: AOT 模块诊断...");
+    println!("\nStep 9: AOT module diagnostics...");
     if let Some(diag) = vm.aot_runtime.all_diagnostics().first() {
-        println!("  模块 ID: {}", diag.module_id);
-        println!("  模块名称: {}", diag.name);
-        println!("  代码基地址: 0x{:x}", diag.code_base);
-        println!("  函数数量: {}", diag.func_count);
-        println!("  分发表条目: {}", diag.dispatch_count);
+        println!("  Module ID: {}", diag.module_id);
+        println!("  Module name: {}", diag.name);
+        println!("  Code base address: 0x{:x}", diag.code_base);
+        println!("  Function count: {}", diag.func_count);
+        println!("  Dispatch table entries: {}", diag.dispatch_count);
     }
 
-    println!("\n=== 演示完成 ===");
+    println!("\n=== Demo complete ===");
 }
 
 fn format_value(v: &Value) -> String {

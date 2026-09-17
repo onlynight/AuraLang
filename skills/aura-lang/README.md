@@ -6,6 +6,7 @@ DSH 技能包：让 AI 编码助手直接生成正确的 Aura 代码。
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
+| 2.0.0 | 2026-06-18 | 全面更新：对齐当前编译器。添加 P8-P10（async/协程/actor/select）、Phase D（extern object/@aot/native）、value class、sealed class、object 单例。恢复 class/actor/interface/try-catch/import/++/-- 为 WORKING。 |
 | 1.0.0 | 2026-09-06 | 初始版本。合并编译器探测报告，区分 WORKS/DOESN'T WORK |
 
 ## 文件说明

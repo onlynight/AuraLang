@@ -1,0 +1,23 @@
+// aura:///loom/aura/lang/loom/TaskType.aura
+package aura.lang.loom
+
+// ═══════════════════════════════════════════════════════════════
+// 任务类型常量
+// ═══════════════════════════════════════════════════════════════
+
+object TaskType {
+    const val CLEAN: Int = 0
+    const val RESOLVE: Int = 1
+    const val COMPILE: Int = 2
+    const val TEST: Int = 3
+    const val PACKAGE: Int = 4
+    const val VERIFY: Int = 5
+    const val CHECK: Int = 6
+    const val INSTALL: Int = 7
+    const val DEPLOY: Int = 8
+    const val EXECUTE: Int = 9
+    const val WATCH: Int = 10
+    const val PLUGIN: Int = 11
+    const val FMT: Int = 12
+    const val DOC: Int = 13
+}

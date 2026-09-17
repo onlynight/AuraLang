@@ -117,6 +117,7 @@ Program {
                         ),
                         body: None,
                         doc: None,
+                        native_attr: None,
                         span: Span {
                             start: 67,
                             end: 85,

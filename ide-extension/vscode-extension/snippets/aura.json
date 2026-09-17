@@ -15,12 +15,22 @@
     ],
     "description": "创建单表达式函数"
   },
-  "// 结构体": {
+  "// 值类型（value class）": {
+    "prefix": "vc",
+    "body": [
+      "value class ${1:Name}(",
+      "    val ${2:field1}: ${3:Type1},",
+      "    var ${4:field2}: ${5:Type2} = ${6:defaultValue}",
+      ")"
+    ],
+    "description": "创建值类型（不可变，栈分配）"
+  },
+  "// 结构体（struct）": {
     "prefix": "struct",
     "body": [
       "struct ${1:Name}(",
-      "    val ${2:field1}: ${3:Type},",
-      "    var ${4:field2}: ${5:Type} = ${6:defaultValue}",
+      "    val ${2:field1}: ${3:Type1},",
+      "    var ${4:field2}: ${5:Type2} = ${6:defaultValue}",
       ")"
     ],
     "description": "创建结构体"
@@ -36,35 +46,34 @@
     ],
     "description": "创建枚举"
   },
-  "// 接口": {
-    "prefix": "interface",
-    "body": [
-      "interface ${1:Name} {",
-      "    fun ${2:method}(${3:params}): ${4:ReturnType}",
-      "    fun ${5:method2}(${6:params}): ${7:ReturnType} = ${8:defaultImpl}",
-      "}"
-    ],
-    "description": "创建接口"
-  },
   "// 类": {
     "prefix": "class",
     "body": [
-      "class ${1:Name} : ${2:Interface} {",
+      "class ${1:Name} : ${2:Superclass} {",
       "    override fun ${3:method}(${4:params}): ${5:ReturnType} {",
       "        $0",
       "    }",
       "}"
     ],
-    "description": "创建类实现接口"
+    "description": "创建类（继承）"
   },
-  "// 协程函数": {
-    "prefix": "suspend",
+  "// 密封类": {
+    "prefix": "sealed",
     "body": [
-      "suspend fun ${1:name}(${2:params}): ${3:ReturnType} {",
-      "    $0",
+      "sealed class ${1:Name} {",
+      "    fun ${2:method}(): ${3:ReturnType} = ${4:default}",
       "}"
     ],
-    "description": "创建协程函数"
+    "description": "创建密封类"
+  },
+  "// 接口": {
+    "prefix": "interface",
+    "body": [
+      "interface ${1:Name} {",
+      "    fun ${2:method}(${3:params}): ${4:ReturnType}",
+      "}"
+    ],
+    "description": "创建接口"
   },
   "// Actor": {
     "prefix": "actor",
@@ -77,7 +86,75 @@
       "    }",
       "}"
     ],
-    "description": "创建 Actor"
+    "description": "创建 Actor（并发实体）"
+  },
+  "// 单例对象": {
+    "prefix": "obj",
+    "body": [
+      "object ${1:Name} {",
+      "    fun ${2:method}(${3:params}): ${4:ReturnType} {",
+      "        $0",
+      "    }",
+      "}"
+    ],
+    "description": "创建单例对象"
+  },
+  "// 类型别名": {
+    "prefix": "ta",
+    "body": [
+      "typealias ${1:Name} = ${2:Type}"
+    ],
+    "description": "创建类型别名"
+  },
+  "// 泛型函数": {
+    "prefix": "gen",
+    "body": [
+      "fun <${1:T}> ${2:name}(${3:arg}: ${1:T}): ${1:T} {",
+      "    return ${3:arg}",
+      "}"
+    ],
+    "description": "创建泛型函数"
+  },
+  "// 协程函数": {
+    "prefix": "suspend",
+    "body": [
+      "suspend fun ${1:name}(${2:params}): ${3:ReturnType} {",
+      "    $0",
+      "}"
+    ],
+    "description": "创建协程函数"
+  },
+  "// async 块": {
+    "prefix": "async",
+    "body": [
+      "async {",
+      "    $0",
+      "}"
+    ],
+    "description": "async 异步块"
+  },
+  "// defer 延迟块": {
+    "prefix": "defer",
+    "body": [
+      "defer {",
+      "    $0",
+      "}"
+    ],
+    "description": "defer 延迟执行块"
+  },
+  "// select 多路复用": {
+    "prefix": "select",
+    "body": [
+      "select {",
+      "    case ${1:channel} -> {",
+      "        $0",
+      "    }",
+      "    case else -> {",
+      "        ${2:fallback}",
+      "    }",
+      "}"
+    ],
+    "description": "select 多路复用"
   },
   "// if-else": {
     "prefix": "if",
@@ -94,15 +171,21 @@
     "prefix": "when",
     "body": [
       "when (${1:value}) {",
-      "    ${2:case1} -> {",
-      "        $0",
-      "    }",
-      "    else -> {",
-      "        ${3:else}",
-      "    }",
+      "    ${2:case1} -> $0",
+      "    else -> ${3:else}",
       "}"
     ],
     "description": "when 表达式"
+  },
+  "// when 无 subject": {
+    "prefix": "when2",
+    "body": [
+      "when {",
+      "    ${1:condition1} -> $0",
+      "    else -> ${2:else}",
+      "}"
+    ],
+    "description": "when 无 subject 表达式"
   },
   "// for 循环": {
     "prefix": "for",
@@ -122,6 +205,15 @@
     ],
     "description": "while 循环"
   },
+  "// do-while 循环": {
+    "prefix": "dowhile",
+    "body": [
+      "do {",
+      "    $0",
+      "} while (${1:condition})"
+    ],
+    "description": "do-while 循环"
+  },
   "// try-catch": {
     "prefix": "try",
     "body": [
@@ -133,37 +225,82 @@
     ],
     "description": "try-catch 异常处理"
   },
-  "// 泛型函数": {
-    "prefix": "gen",
+  "// try-catch-finally": {
+    "prefix": "tryf",
     "body": [
-      "fun <${1:T}> ${2:name}(${3:arg}: ${1:T}): ${1:T} {",
-      "    return ${3:arg}",
+      "try {",
+      "    $0",
+      "} catch (e: ${1:Exception}) {",
+      "    ${2:handle}",
+      "} finally {",
+      "    ${3:cleanup}",
       "}"
     ],
-    "description": "创建泛型函数"
+    "description": "try-catch-finally 异常处理"
   },
-  "// Result": {
-    "prefix": "result",
-    "body": [
-      "fun ${1:name}(): Result<${2:Type}, ${3:Error}> {",
-      "    if (${4:success}) {",
-      "        return Result.Success(${5:value})",
-      "    } else {",
-      "        return Result.Error(${6:error})",
-      "    }",
-      "}"
-    ],
-    "description": "Result 错误处理"
-  },
-  "// FFI 声明": {
+  "// FFI 声明（C ABI）": {
     "prefix": "ffi",
     "body": [
       "extern \"c\" \"${1:library}\" {",
       "    fun ${2:functionName}(${3:params}): ${4:ReturnType}",
-      "    val ${5:CONSTANT}: ${6:Type}",
       "}"
     ],
-    "description": "FFI 外部函数声明"
+    "description": "FFI 外部函数声明（C ABI）"
+  },
+  "// FFI 声明（行内）": {
+    "prefix": "ffiinline",
+    "body": [
+      "extern \"c\" fun ${1:functionName}(${2:params}): ${3:ReturnType}"
+    ],
+    "description": "FFI 行内外部函数声明"
+  },
+  "// FFI AOT 接口（extern object）": {
+    "prefix": "ffiaot",
+    "body": [
+      "extern object ${1:Utils} {",
+      "    default fun loadLibrary(): String = \"${2:library}\"",
+      "    @aot fun ${3:add}(a: Int, b: Int): Int",
+      "    @aot fun ${4:multiply}(a: Int, b: Int): Int",
+      "}"
+    ],
+    "description": "FFI AOT 接口声明"
+  },
+  "// native 注解": {
+    "prefix": "native",
+    "body": [
+      "@native(${1:SYS_READ})",
+      "fun ${2:name}(${3:params}): ${4:ReturnType}"
+    ],
+    "description": "native 注解（系统调用 / 内联汇编 / 编译器内置）"
+  },
+  "// @aot 注解": {
+    "prefix": "aot",
+    "body": [
+      "@aot",
+      "fun ${1:name}(${2:params}): ${3:ReturnType}"
+    ],
+    "description": "@aot 注解（AOT 编译函数）"
+  },
+  "// Lambda": {
+    "prefix": "lambda",
+    "body": [
+      "val ${1:name} = (${2:params}) -> ${3:expression}"
+    ],
+    "description": "Lambda 表达式"
+  },
+  "// 方法引用": {
+    "prefix": "mref",
+    "body": [
+      "val ${1:name} = ${2:obj}::${3:method}"
+    ],
+    "description": "方法引用"
+  },
+  "// 导入": {
+    "prefix": "import",
+    "body": [
+      "import ${1:module} as ${2:alias}"
+    ],
+    "description": "导入模块"
   },
   "// 依赖声明": {
     "prefix": "dep",
@@ -181,21 +318,40 @@
     ],
     "description": "主函数入口"
   },
-  "// 数据类": {
-    "prefix": "data",
+  "// main 返回 Int": {
+    "prefix": "main2",
     "body": [
-      "struct ${1:Name}(",
-      "    val ${2:field1}: ${3:Type1},",
-      "    val ${4:field2}: ${5:Type2}",
-      ")"
+      "fun main(): Int {",
+      "    return 0",
+      "}"
     ],
-    "description": "创建数据类（自动生成 toString/equals/hashCode/copy）"
+    "description": "主函数入口（返回 Int）"
   },
-  "// 导入": {
-    "prefix": "import",
+  "// 文档注释（单行）": {
+    "prefix": "///",
     "body": [
-      "import ${1:module} as ${2:alias}"
+      "/// ${1:Description}",
+      "$0"
     ],
-    "description": "导入模块"
+    "description": "单行文档注释"
+  },
+  "// 文档注释（多行）": {
+    "prefix": "/**",
+    "body": [
+      "/**",
+      " * ${1:Description}",
+      " * @param ${2:name} ${3:description}",
+      " * @return ${4:returnDescription}",
+      " */",
+      "$0"
+    ],
+    "description": "多行文档注释"
+  },
+  "// 包声明": {
+    "prefix": "package",
+    "body": [
+      "package ${1:com.example.module}"
+    ],
+    "description": "文件头包声明"
   }
 }

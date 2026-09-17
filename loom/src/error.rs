@@ -5,39 +5,39 @@ use thiserror::Error;
 /// loom 构建系统统一错误
 #[derive(Debug, Error)]
 pub enum LoomError {
-    #[error("配置错误: {0}")]
+    #[error("Configuration error: {0}")]
     Config(String),
 
-    #[error("任务错误: {0}")]
+    #[error("Task error: {0}")]
     Task(String),
 
-    #[error("依赖错误: {0}")]
+    #[error("Dependency error: {0}")]
     Dependency(String),
 
-    #[error("缓存错误: {0}")]
+    #[error("Cache error: {0}")]
     Cache(String),
 
-    #[error("插件错误: {0}")]
+    #[error("Plugin error: {0}")]
     Plugin(String),
 
-    #[error("IO 错误: {0}")]
+    #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("TOML 解析错误: {0}")]
+    #[error("TOML parse error: {0}")]
     TomlParse(#[from] toml::de::Error),
 
-    #[error("序列化错误: {0}")]
+    #[error("Serialization error: {0}")]
     Serialize(#[from] serde_json::Error),
 
-    #[error("未实现: {0}")]
+    #[error("Not implemented: {0}")]
     Unimplemented(String),
 
-    #[error("注册表错误: {0}")]
+    #[error("Registry error: {0}")]
     Registry(String),
 
-    #[error("CI 配置错误: {0}")]
+    #[error("CI configuration error: {0}")]
     Ci(String),
 
-    #[error("IDE 错误: {0}")]
+    #[error("IDE error: {0}")]
     Ide(String),
 }

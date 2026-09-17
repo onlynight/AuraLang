@@ -40,69 +40,100 @@ import aura.lang.compiler.vm.Closures
 import aura.lang.compiler.vm.TailCall
 import aura.lang.compiler.vm.FrameManager
 import aura.lang.compiler.vm.Opcodes
+import aura.lang.collection.ArrayList
+import aura.lang.collection.HashMap
+
+/// VM 运行器工具对象（收集顶层声明）。
+object VmRunnerUtils {
+
+    /// 字符串转整数（charCodeAt 直接计算，避免 10× 冗余比较）。
+    fun vrToInt(text: String): Int {
+        var total: Int = 0
+        var i: Int = 0
+        var len: Int = text.length
+        var neg: Boolean = false
+        if (len > 0 && text.charCodeAt(0) == 45) { // '-'
+            neg = true
+            i = 1
+        }
+        while (i < len) {
+            val c: Int = text.charCodeAt(i)
+            if (c < 48 || c > 57) {
+                break
+            }
+            total = total * 10 + (c - 48)
+            i = i + 1
+        }
+        if (neg) {
+            return -total
+        }
+        return total
+    }
+}
 
 /// 增强 VM 运行器。
 class VmRunner {
 
-    /// 字节码（每行一条指令：`opcode arg1 arg2`）。
-    var bytecode: String = ""
+    private var bytecode: String = ""
 
     /// 常量池（每行一个常量值）。
-    var constPool: String = ""
+    private var constPool: String = ""
 
     /// 当前指令指针。
-    var ip: Int = 0
+    private var ip: Int = 0
 
     /// 指令执行计数。
-    var instructionCount: Int = 0
+    private var instructionCount: Int = 0
 
     /// 最大指令数限制。
-    var maxInstructions: Int = 1000000
+    private var maxInstructions: Int = 1000000
 
     /// 运行状态。
-    var running: Boolean = true
+    private var running: Boolean = true
 
     /// 返回值。
-    var returnValue: Any = null
+    private var returnValue: Any = null
 
     /// 错误信息。
-    var error: String = ""
+    private var error: String = ""
 
-    /// 栈（使用字符串表示：每行一个值）。
-    var stack: String = ""
+    /// 栈（ArrayList 实现，O(1) push/pop）。
+    private var stack: ArrayList<String> = ArrayList<String>()
 
-    /// 栈深度。
-    var stackDepth: Int = 0
+    /// 局部变量表（HashMap 实现，O(1) get/set）。
+    private var locals: HashMap<Int, String> = HashMap<Int, String>()
 
-    /// 局部变量表（每行：`slotIdx|value`）。
-    var locals: String = ""
-
-    /// 全局变量表（每行：`name|value`）。
-    var globals: String = ""
+    /// 全局变量表（HashMap 实现，O(1) get/set）。
+    private var globals: HashMap<String, String> = HashMap<String, String>()
 
     /// 函数表（每行：`name|startOffset|paramCount`）。
-    var funcTable: String = ""
+    private var funcTable: String = ""
 
-    /// 调用栈（每行：`returnIp|frameId`）。
-    var callStack: String = ""
+    /// 调用栈（ArrayList 实现，O(1) push/pop）。
+    private var callStack: ArrayList<String> = ArrayList<String>()
 
-    /// 保存的局部变量块（帧切换用，块之间以 \u0001 分隔）。
-    var savedLocals: String = ""
+    /// 保存的局部变量块（ArrayList of HashMap，帧切换用）。
+    private var savedLocals: ArrayList<HashMap<Int, String>> = ArrayList<HashMap<Int, String>>()
 
     /// 闭包管理器。
-    var closures: ClosureManager = ClosureManager()
+    private var closures: ClosureManager = ClosureManager()
 
     /// 尾调用优化器。
-    var tailCall: TailCallOptimizer = TailCallOptimizer()
+    private var tailCall: TailCallOptimizer = TailCallOptimizer()
 
     /// 栈帧管理器。
-    var frames: FrameManager = FrameManager()
+    private var frames: FrameManager = FrameManager()
 
     /// 当前帧 id。
-    var currentFrame: Int = -1
+    private var currentFrame: Int = -1
 
     /// 当前函数名。
-    var currentFunc: String = ""
+    private var currentFunc: String = ""
+
+    private var suspended: Boolean = false
+
+    /// 协程调度器（由外部设置，为 null 时 YIELD 直接跳过）。
+    private var coroutineScheduler: Any = null
 
     init() {
         this.bytecode = ""
@@ -113,18 +144,19 @@ class VmRunner {
         this.running = true
         this.returnValue = null
         this.error = ""
-        this.stack = ""
-        this.stackDepth = 0
-        this.locals = ""
-        this.globals = ""
+        this.stack = ArrayList<String>()
+        this.locals = HashMap<Int, String>()
+        this.globals = HashMap<String, String>()
         this.funcTable = ""
-        this.callStack = ""
-        this.savedLocals = ""
+        this.callStack = ArrayList<String>()
+        this.savedLocals = ArrayList<HashMap<Int, String>>()
         this.closures = ClosureManager()
         this.tailCall = TailCallOptimizer()
         this.frames = FrameManager()
         this.currentFrame = -1
         this.currentFunc = ""
+        this.suspended = false
+        this.coroutineScheduler = null
     }
 
     // ── 初始化 ──
@@ -138,12 +170,11 @@ class VmRunner {
         this.instructionCount = 0
         this.running = true
         this.error = ""
-        this.stack = ""
-        this.stackDepth = 0
-        this.locals = ""
-        this.globals = ""
-        this.callStack = ""
-        this.savedLocals = ""
+        this.stack = ArrayList<String>()
+        this.locals = HashMap<Int, String>()
+        this.globals = HashMap<String, String>()
+        this.callStack = ArrayList<String>()
+        this.savedLocals = ArrayList<HashMap<Int, String>>()
     }
 
     /// 分配主帧。
@@ -158,121 +189,53 @@ class VmRunner {
 
     /// 压栈。
     fun push(value: String): Unit {
-        this.stack = this.stack + value + "\n"
-        this.stackDepth = this.stackDepth + 1
+        this.stack.add(value)
     }
 
     /// 弹栈。
     fun pop(): String {
-        if (this.stackDepth == 0) {
+        if (this.stack.size == 0) {
             this.error = "Stack underflow"
             this.running = false
             return ""
         }
-        // 取最后一行
-        val value: String = this.fieldAtRow(this.stack, this.stackDepth - 1, "\n")
-        // 从栈中移除最后一行（连同其后的分隔符一起移除，
-        // 否则被弹出的值会残留在 stack 字符串里污染下一次 push）
-        var pos: Int = this.stack.length - 1
-        if (pos >= 0 && toStr(this.stack[pos]) == "\n") {
-            pos = pos - 1
-        }
-        while (pos >= 0 && toStr(this.stack[pos]) != "\n") {
-            pos = pos - 1
-        }
-        this.stack = this.stackSlice(this.stack, 0, pos + 1)
-        this.stackDepth = this.stackDepth - 1
-        return value
+        return this.stack.remove(this.stack.size - 1)
     }
 
     /// 查看栈顶。
     fun peek(): String {
-        if (this.stackDepth == 0) {
+        if (this.stack.size == 0) {
             return ""
         }
-        return this.fieldAtRow(this.stack, this.stackDepth - 1, "\n")
+        return this.stack.get(this.stack.size - 1)
     }
 
     // ── 局部变量操作 ──
 
     /// 获取局部变量（按槽位号查找；未初始化返回 "0"）。
     fun getLocal(slotIdx: Int): String {
-        val key: String = toStr(slotIdx)
-        var pos: Int = 0
-        var len: Int = this.locals.length
-        var lineStart: Int = 0
-        while (pos < len) {
-            if (toStr(this.locals[pos]) == "\n") {
-                val line: String = this.stackSlice(this.locals, lineStart, pos - lineStart)
-                if (this.fieldAtCol(line, 0, "|") == key) {
-                    return this.fieldAtCol(line, 1, "|")
-                }
-                lineStart = pos + 1
-            }
-            pos = pos + 1
-        }
-        return "0"
+        val v = this.locals.get(slotIdx)
+        if (toStr(v) == "null") return "0"
+        return v
     }
 
-    /// 设置局部变量（覆盖式写入：同一槽位只保留一行，避免读到陈旧值）。
+    /// 设置局部变量（HashMap 覆盖式写入）。
     fun setLocal(slotIdx: Int, value: String): Unit {
-        this.locals = this.localsRemoveSlot(slotIdx)
-        this.locals = this.locals + toStr(slotIdx) + "|" + value + "\n"
-    }
-
-    /// 删除局部变量表中指定槽位的行。
-    fun localsRemoveSlot(slotIdx: Int): String {
-        val key: String = toStr(slotIdx)
-        var result: String = ""
-        var pos: Int = 0
-        var len: Int = this.locals.length
-        var lineStart: Int = 0
-        while (pos < len) {
-            if (toStr(this.locals[pos]) == "\n") {
-                val line: String = this.stackSlice(this.locals, lineStart, pos - lineStart)
-                if (this.fieldAtCol(line, 0, "|") != key) {
-                    result = result + line + "\n"
-                }
-                lineStart = pos + 1
-            }
-            pos = pos + 1
-        }
-        return result
+        this.locals.put(slotIdx, value)
     }
 
     // ── 全局变量操作 ──
 
     /// 获取全局变量。
     fun getGlobal(name: String): String {
-        var pos: Int = 0
-        var len: Int = this.globals.length
-        var lineStart: Int = 0
-        while (pos < len) {
-            val c: String = toStr(this.globals[pos])
-            if (c == "\n") {
-                val line: String = this.stackSlice(this.globals, lineStart, pos - lineStart)
-                val lineName: String = this.fieldAtCol(line, 0, "|")
-                if (lineName == name) {
-                    return this.fieldAtCol(line, 1, "|")
-                }
-                lineStart = pos + 1
-            }
-            pos = pos + 1
-        }
-        // 处理最后一行
-        if (lineStart < len) {
-            val line: String = this.stackSlice(this.globals, lineStart, len - lineStart)
-            val lineName: String = this.fieldAtCol(line, 0, "|")
-            if (lineName == name) {
-                return this.fieldAtCol(line, 1, "|")
-            }
-        }
-        return ""
+        val v = this.globals.get(name)
+        if (toStr(v) == "null") return ""
+        return v
     }
 
     /// 设置全局变量。
     fun setGlobal(name: String, value: String): Unit {
-        this.globals = this.globals + name + "|" + value + "\n"
+        this.globals.put(name, value)
     }
 
     // ── 主执行循环 ──
@@ -308,128 +271,154 @@ class VmRunner {
         return this.returnValue
     }
 
-    /// 指令分派（使用独立 if 语句，避免 else if 链问题）。
+    /// 指令分派（else if 链，匹配后立即返回，O(1) 而非 O(m)）。
     fun dispatch(opcode: String, arg1: String, arg2: String, arg3: String): Unit {
         if (opcode == "CONST_INT") {
             this.push(this.getConst(arg1))
-        }
-        if (opcode == "CONST_FLOAT") {
+        } else if (opcode == "CONST_FLOAT") {
             this.push(this.getConst(arg1))
-        }
-        if (opcode == "CONST_STRING") {
+        } else if (opcode == "CONST_STRING") {
             this.push(this.getConst(arg1))
-        }
-        if (opcode == "CONST_BOOL") {
+        } else if (opcode == "CONST_BOOL") {
             // 布尔字面量内联（arg1 = true / false）
             this.push(arg1)
-        }
-        if (opcode == "CONST_NULL") {
+        } else if (opcode == "CONST_NULL") {
             this.push("null")
-        }
-        if (opcode == "LOAD_LOCAL") {
-            this.push(this.getLocal(vrToInt(arg1)))
-        }
-        if (opcode == "STORE_LOCAL") {
-            this.setLocal(vrToInt(arg1), this.pop())
-        }
-        if (opcode == "DECL_LOCAL") {
+        } else if (opcode == "LOAD_LOCAL") {
+            this.push(this.getLocal(VmRunnerUtils.vrToInt(arg1)))
+        } else if (opcode == "STORE_LOCAL") {
+            this.setLocal(VmRunnerUtils.vrToInt(arg1), this.pop())
+        } else if (opcode == "DECL_LOCAL") {
             // 声明占位：写入默认值 0（槽位在后续赋值时覆盖）
-            this.setLocal(vrToInt(arg1), "0")
-        }
-        if (opcode == "POP") {
+            this.setLocal(VmRunnerUtils.vrToInt(arg1), "0")
+        } else if (opcode == "POP") {
             this.pop()
-        }
-        if (opcode == "DUP") {
+        } else if (opcode == "DUP") {
             this.push(this.peek())
-        }
-        if (opcode == "ADD") {
+        } else if (opcode == "ADD") {
             val b: String = this.pop()
             val a: String = this.pop()
             this.push(this.arithAdd(a, b))
-        }
-        if (opcode == "SUB") {
+        } else if (opcode == "SUB") {
             val b: String = this.pop()
             val a: String = this.pop()
             this.push(this.arithSub(a, b))
-        }
-        if (opcode == "MUL") {
+        } else if (opcode == "MUL") {
             val b: String = this.pop()
             val a: String = this.pop()
             this.push(this.arithMul(a, b))
-        }
-        if (opcode == "DIV") {
+        } else if (opcode == "DIV") {
             val b: String = this.pop()
             val a: String = this.pop()
             this.push(this.arithDiv(a, b))
-        }
-        if (opcode == "MOD") {
+        } else if (opcode == "MOD") {
             val b: String = this.pop()
             val a: String = this.pop()
             this.push(this.arithMod(a, b))
-        }
-        if (opcode == "EQ") {
+        } else if (opcode == "EQ") {
             val b: String = this.pop()
             val a: String = this.pop()
             this.push(this.eq(a, b))
-        }
-        if (opcode == "NEQ") {
+        } else if (opcode == "NEQ") {
             val b: String = this.pop()
             val a: String = this.pop()
             this.push(this.neq(a, b))
-        }
-        if (opcode == "LT") {
+        } else if (opcode == "LT") {
             val b: String = this.pop()
             val a: String = this.pop()
             this.push(this.cmpBool(this.tryInt(a, 0) < this.tryInt(b, 0)))
-        }
-        if (opcode == "GT") {
+        } else if (opcode == "GT") {
             val b: String = this.pop()
             val a: String = this.pop()
             this.push(this.cmpBool(this.tryInt(a, 0) > this.tryInt(b, 0)))
-        }
-        if (opcode == "LE") {
+        } else if (opcode == "LE") {
             val b: String = this.pop()
             val a: String = this.pop()
             this.push(this.cmpBool(this.tryInt(a, 0) <= this.tryInt(b, 0)))
-        }
-        if (opcode == "GE") {
+        } else if (opcode == "GE") {
             val b: String = this.pop()
             val a: String = this.pop()
             this.push(this.cmpBool(this.tryInt(a, 0) >= this.tryInt(b, 0)))
-        }
-        if (opcode == "NEG") {
+        } else if (opcode == "NEG") {
             val a: String = this.pop()
             this.push(toStr(0 - this.tryInt(a, 0)))
-        }
-        if (opcode == "NOT") {
+        } else if (opcode == "NOT") {
             val a: String = this.pop()
             this.push(this.cmpBool(!(a == "true")))
-        }
-        if (opcode == "JUMP") {
-            this.ip = vrToInt(arg1)
-        }
-        if (opcode == "JUMP_IF_FALSE") {
+        } else if (opcode == "JUMP") {
+            this.ip = VmRunnerUtils.vrToInt(arg1)
+        } else if (opcode == "JUMP_IF_FALSE") {
             val cond: String = this.pop()
             if (cond == "false" || cond == "0" || cond == "") {
-                this.ip = vrToInt(arg1)
+                this.ip = VmRunnerUtils.vrToInt(arg1)
             }
-        }
-        if (opcode == "JUMP_IF_TRUE") {
+        } else if (opcode == "JUMP_IF_TRUE") {
             val cond: String = this.pop()
             if (cond == "true" || cond == "1") {
-                this.ip = vrToInt(arg1)
+                this.ip = VmRunnerUtils.vrToInt(arg1)
             }
-        }
-        if (opcode == "CALL") {
-            this.callOrBuiltin(arg1, vrToInt(arg2))
-        }
-        if (opcode == "RETURN") {
+        } else if (opcode == "CALL") {
+            this.callOrBuiltin(arg1, VmRunnerUtils.vrToInt(arg2))
+        } else if (opcode == "RETURN") {
             this.returnFromFunc()
-        }
-        if (opcode == "LOAD_CLOSURE") {
+        } else if (opcode == "LOAD_CLOSURE") {
             this.loadClosure(arg1)
+        } else if (opcode == "YIELD") {
+            // 协程让出：保存当前状态，挂起执行
+            this.yield()
         }
         // 其他指令：忽略（TODO）
+    }
+
+    /// 协程让出执行权（YIELD 指令）。
+    fun yield(): Unit {
+        this.suspended = true
+        this.running = false
+    }
+
+    /// 保存当前 VM 状态（协程切换用）。
+    fun saveState(): HashMap<String, Any> {
+        val state: HashMap<String, Any> = HashMap<String, Any>()
+        state.put("ip", this.ip)
+        state.put("running", this.running)
+        state.put("suspended", this.suspended)
+        state.put("returnValue", this.returnValue)
+        state.put("error", this.error)
+        state.put("stack", this.stack)
+        state.put("locals", this.locals)
+        state.put("callStack", this.callStack)
+        state.put("savedLocals", this.savedLocals)
+        state.put("currentFrame", this.currentFrame)
+        state.put("currentFunc", this.currentFunc)
+        return state
+    }
+
+    /// 恢复 VM 状态（协程切换用）。
+    fun restoreState(state: Map<String, Any>): Unit {
+        val ipVal = state.get("ip")
+        if (toStr(ipVal) != "null") this.ip = ipVal as Int
+        val runningVal = state.get("running")
+        if (toStr(runningVal) != "null") this.running = runningVal as Boolean
+        val suspendedVal = state.get("suspended")
+        if (toStr(suspendedVal) != "null") this.suspended = suspendedVal as Boolean
+        val retVal = state.get("returnValue")
+        if (toStr(retVal) != "null") this.returnValue = retVal
+        val errVal = state.get("error")
+        if (toStr(errVal) != "null") this.error = errVal as String
+        val stackVal = state.get("stack")
+        if (toStr(stackVal) != "null") this.stack = stackVal as ArrayList<String>
+        val localsVal = state.get("locals")
+        if (toStr(localsVal) != "null") this.locals = localsVal as HashMap<Int, String>
+        val callStackVal = state.get("callStack")
+        if (toStr(callStackVal) != "null") this.callStack = callStackVal as ArrayList<String>
+        val savedLocalsVal = state.get("savedLocals")
+        if (toStr(savedLocalsVal) != "null") this.savedLocals = savedLocalsVal as ArrayList<HashMap<Int, String>>
+        val currentFrameVal = state.get("currentFrame")
+        if (toStr(currentFrameVal) != "null") this.currentFrame = currentFrameVal as Int
+        val currentFuncVal = state.get("currentFunc")
+        if (toStr(currentFuncVal) != "null") this.currentFunc = currentFuncVal as String
+        this.suspended = false
+        this.running = true
     }
 
     // ── 调用与返回 ──
@@ -448,34 +437,34 @@ class VmRunner {
             }
             this.push("Unit")
             return
-        }
-        if (name == "toStr" || name == "toString") {
+        } else if (name == "toStr" || name == "toString") {
             val v: String = this.pop()
             this.push(v)
             return
-        }
-        // 用户函数：记录返回地址并跳转
-        val target: Int = this.funcOffset(name)
-        if (target <= 0 && this.funcParamCount(name) < 0) {
-            this.error = "unknown function: " + name
-            this.running = false
-            return
-        }
-        this.callStack = this.callStack + toStr(this.ip) + "|" + toStr(this.currentFrame) + "\n"
-        this.savedLocals = this.savedLocals + this.locals + "\u0001"
-        this.locals = ""
+        } else {
+            // 用户函数：记录返回地址并跳转
+            val target: Int = this.funcOffset(name)
+            if (target <= 0 && this.funcParamCount(name) < 0) {
+                this.error = "unknown function: " + name
+                this.running = false
+                return
+            }
+            this.callStack.add(toStr(this.ip) + "|" + toStr(this.currentFrame))
+            this.savedLocals.add(this.locals)
+            this.locals = HashMap<Int, String>()
 
-        // 绑定实参到参数槽位 0..n-1（栈顶是最后一个实参，逆序弹出）
-        val pc: Int = this.funcParamCount(name)
-        var k: Int = pc - 1
-        while (k >= 0) {
-            this.setLocal(k, this.pop())
-            k = k - 1
-        }
+            // 绑定实参到参数槽位 0..n-1（栈顶是最后一个实参，逆序弹出）
+            val pc: Int = this.funcParamCount(name)
+            var k: Int = pc - 1
+            while (k >= 0) {
+                this.setLocal(k, this.pop())
+                k = k - 1
+            }
 
-        this.currentFunc = name
-        this.tailCall.enterCall(name)
-        this.ip = target
+            this.currentFunc = name
+            this.tailCall.enterCall(name)
+            this.ip = target
+        }
     }
 
     /// 弹出 argc 个实参并按源顺序拼接为字符串（参数 >1 时以空格分隔）。
@@ -483,29 +472,16 @@ class VmRunner {
         if (argc <= 0) {
             return ""
         }
-        // 栈顶是最后一个实参；先逐个弹出到临时数组（用字符串保存），再逆序。
-        var args: String = ""
-        var i: Int = 0
-        while (i < argc) {
-            val v: String = this.pop()
-            args = v + "\u0002" + args
-            i = i + 1
-        }
         var result: String = ""
-        var pos: Int = 0
-        var len: Int = args.length
-        var start: Int = 0
-        while (pos < len) {
-            if (toStr(args[pos]) == "\u0002") {
-                val seg: String = this.stackSlice(args, start, pos - start)
-                if (result == "") {
-                    result = seg
-                } else {
-                    result = result + " " + seg
-                }
-                start = pos + 1
+        var i: Int = argc - 1
+        while (i >= 0) {
+            val v: String = this.pop()
+            if (result == "") {
+                result = v
+            } else {
+                result = v + " " + result
             }
-            pos = pos + 1
+            i = i - 1
         }
         return result
     }
@@ -519,7 +495,7 @@ class VmRunner {
             if (toStr(this.funcTable[pos]) == "\n") {
                 val line: String = this.stackSlice(this.funcTable, lineStart, pos - lineStart)
                 if (this.fieldAtCol(line, 0, "|") == name) {
-                    return vrToInt(this.fieldAtCol(line, 1, "|"))
+                    return VmRunnerUtils.vrToInt(this.fieldAtCol(line, 1, "|"))
                 }
                 lineStart = pos + 1
             }
@@ -537,7 +513,7 @@ class VmRunner {
             if (toStr(this.funcTable[pos]) == "\n") {
                 val line: String = this.stackSlice(this.funcTable, lineStart, pos - lineStart)
                 if (this.fieldAtCol(line, 0, "|") == name) {
-                    return vrToInt(this.fieldAtCol(line, 2, "|"))
+                    return VmRunnerUtils.vrToInt(this.fieldAtCol(line, 2, "|"))
                 }
                 lineStart = pos + 1
             }
@@ -574,20 +550,20 @@ class VmRunner {
     /// - 否则弹出返回地址、恢复局部变量表并跳回调用点。
     fun returnFromFunc(): Unit {
         var retVal: String = "Unit"
-        if (this.stackDepth > 0) {
+        if (this.stack.size > 0) {
             retVal = this.pop()
         }
         this.returnValue = retVal
         this.tailCall.exitCall()
 
-        if (this.callStack == "") {
+        if (this.callStack.size == 0) {
             this.running = false
             return
         }
 
-        val last: String = this.lastLine(this.callStack)
-        this.ip = vrToInt(this.fieldAtCol(last, 0, "|"))
-        this.callStack = this.dropLastLine(this.callStack)
+        val last: String = this.callStack.get(this.callStack.size - 1)
+        this.ip = VmRunnerUtils.vrToInt(this.fieldAtCol(last, 0, "|"))
+        this.callStack.remove(this.callStack.size - 1)
         this.locals = this.popSavedLocals()
         this.frames.deallocateFrame(this.currentFrame)
 
@@ -622,47 +598,12 @@ class VmRunner {
         return toStr(this.tryInt(a, 0) % bb)
     }
 
-    /// 取字符串最后一行（不含尾随换行）。
-    fun lastLine(text: String): String {
-        var i: Int = text.length - 1
-        if (i >= 0 && toStr(text[i]) == "\n") {
-            i = i - 1
-        }
-        var start: Int = i
-        while (start >= 0 && toStr(text[start]) != "\n") {
-            start = start - 1
-        }
-        return this.stackSlice(text, start + 1, i - start)
-    }
-
-    /// 移除字符串最后一行。
-    fun dropLastLine(text: String): String {
-        var i: Int = text.length - 1
-        if (i >= 0 && toStr(text[i]) == "\n") {
-            i = i - 1
-        }
-        while (i >= 0 && toStr(text[i]) != "\n") {
-            i = i - 1
-        }
-        return this.stackSlice(text, 0, i + 1)
-    }
-
     /// 弹出并返回最后一个保存的局部变量块。
-    fun popSavedLocals(): String {
-        var i: Int = this.savedLocals.length - 1
-        while (i >= 0 && toStr(this.savedLocals[i]) != "\u0001") {
-            i = i - 1
+    fun popSavedLocals(): HashMap<Int, String> {
+        if (this.savedLocals.size == 0) {
+            return HashMap<Int, String>()
         }
-        if (i < 0) {
-            return ""
-        }
-        var j: Int = i - 1
-        while (j >= 0 && toStr(this.savedLocals[j]) != "\u0001") {
-            j = j - 1
-        }
-        val block: String = this.stackSlice(this.savedLocals, j + 1, i - j - 1)
-        this.savedLocals = this.stackSlice(this.savedLocals, 0, j + 1)
-        return block
+        return this.savedLocals.remove(this.savedLocals.size - 1)
     }
 
     // ── 闭包支持 ──
@@ -846,7 +787,7 @@ class VmRunner {
 
     /// 获取常量。
     fun getConst(idx: String): String {
-        return this.fieldAt(this.constPool, vrToInt(idx), "\n", "\n", 0)
+        return this.fieldAt(this.constPool, VmRunnerUtils.vrToInt(idx), "\n", "\n", 0)
     }
 
     // ── 状态查询 ──
@@ -868,7 +809,7 @@ class VmRunner {
 
     /// 获取栈深度。
     fun getStackDepth(): Int {
-        return this.stackDepth
+        return this.stack.size
     }
 
     /// 获取闭包管理器。
@@ -959,38 +900,6 @@ class VmRunner {
 
     /// 尝试将字符串转为整数。
     fun tryInt(s: String, default: Int): Int {
-        return vrToInt(s)
+        return VmRunnerUtils.vrToInt(s)
     }
-}
-
-/// 字符串转整数（本地实现）。
-fun vrToInt(text: String): Int {
-    var total: Int = 0
-    var i: Int = 0
-    var len: Int = text.length
-    var neg: Boolean = false
-    if (len > 0 && toStr(text[0]) == "-") {
-        neg = true
-        i = 1
-    }
-    while (i < len) {
-        val c: String = toStr(text[i])
-        var digit: Int = -1
-        var j: Int = 0
-        while (j < 10) {
-            if (toStr(j) == c) {
-                digit = j
-                break
-            }
-            j = j + 1
-        }
-        if (digit >= 0) {
-            total = total * 10 + digit
-        }
-        i = i + 1
-    }
-    if (neg) {
-        return -total
-    }
-    return total
 }

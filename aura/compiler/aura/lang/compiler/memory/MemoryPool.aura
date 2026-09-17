@@ -1,4 +1,5 @@
 // aura:///aura/compiler/aura/lang/compiler/memory/MemoryPool.aura
+package aura.lang.compiler.memory
 // 内存池（Phase 4: 完整 VM Aura 编写）
 /// 内存池管理。
 ///

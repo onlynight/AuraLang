@@ -53,7 +53,7 @@ pub struct AotOptions {
     pub opt_level: OptimizationLevel,
     /// 是否生成调试信息（默认 false）
     pub debug_info: bool,
-    /// 是否将 String 表示为 `{ i8*, i64 }` 结构（默认 true，便于长度感知的字符串操作）
+    /// 是否将 String 表示为 `{ i8*, i64 }` 结构（默认 false，统一为 i8* C ABI 指针）
     pub string_as_struct: bool,
     /// 是否注入 runtime 库声明（默认 true）
     pub link_runtime: bool,
@@ -74,7 +74,7 @@ impl Default for AotOptions {
             target: TargetTriple::default(),
             opt_level: OptimizationLevel::Aggressive,
             debug_info: false,
-            string_as_struct: true,
+            string_as_struct: false,
             link_runtime: true,
             link_std_cffi: true,
             llvm_home: None,
@@ -282,6 +282,10 @@ impl AotCodeGenerator {
         mono_hir(&mut hir);
         inline_hir(&mut hir);
         fold_hir(&mut hir);
+
+        // Phase C: 注入并发原生函数声明（Thread/Mutex/Atomic/RwLock/Condvar/Barrier）
+        inject_concurrent_natives(&mut hir);
+
         self.compile(&hir, output_dir, output_format)
     }
 }
@@ -351,4 +355,229 @@ pub fn aot_compile(
     }
 
     Ok(output)
+}
+
+/// Phase C: 注入并发原生函数声明到 HIR 程序
+///
+/// 并发原生函数（Thread/Mutex/Atomic/RwLock/Condvar/Barrier）
+/// 在 VM 端注册于 NativeRegistry，但 AOT 后端需要
+/// 在 program.natives 中声明才能生成 LLVM IR 调用。
+fn inject_concurrent_natives(program: &mut crate::codegen::hir::HirProgram) {
+    use crate::codegen::hir::{HirFunction, HirParam, HirType};
+    use crate::codegen::opcode::FfiAbi;
+
+    let make_native = |name: &str, params: &[(&str, HirType)], ret: Option<HirType>| HirFunction {
+        name: name.to_string(),
+        params: params
+            .iter()
+            .map(|(n, t)| HirParam {
+                name: n.to_string(),
+                ty: Some(t.clone()),
+                default_value: None,
+                is_vararg: false,
+            })
+            .collect(),
+        ret,
+        body: crate::codegen::hir::HirBlock {
+            stmts: Vec::new(),
+        },
+        is_native: true,
+        type_params: Vec::new(),
+        ffi_abi: FfiAbi::C,
+        ffi_lib: None,
+        native_attr: None,
+    };
+
+    let i64 = || HirType::Named("Int".to_string());
+    let void = || Some(HirType::Named("Unit".to_string()));
+    let bool_t = || Some(HirType::Named("Boolean".to_string()));
+    let any_t = || HirType::Named("Any".to_string());
+
+    // 检查是否已存在（避免重复注入）
+    let existing_names: std::collections::HashSet<String> =
+        program.natives.iter().map(|n| n.name.clone()).collect();
+
+    let natives_to_add: Vec<HirFunction> = vec![
+        // Thread
+        make_native(
+            "aura.lang.concurrent.Thread.spawn",
+            &[
+                ("fnId", i64()),
+                ("arg", i64()),
+            ],
+            Some(i64()),
+        ),
+        make_native(
+            "aura.lang.concurrent.Thread.join",
+            &[("id", i64())],
+            Some(i64()),
+        ),
+        make_native(
+            "aura.lang.concurrent.Thread.sleep",
+            &[("ms", i64())],
+            void(),
+        ),
+        make_native("aura.lang.concurrent.Thread.id", &[], Some(i64())),
+        make_native("aura.lang.concurrent.Thread.parallelism", &[], Some(i64())),
+        make_native(
+            "aura.lang.concurrent.Thread.availableCores",
+            &[],
+            Some(i64()),
+        ),
+        // Mutex
+        make_native("aura.lang.concurrent.Mutex.new", &[], Some(i64())),
+        make_native("aura.lang.concurrent.Mutex.lock", &[("id", i64())], void()),
+        make_native(
+            "aura.lang.concurrent.Mutex.unlock",
+            &[("id", i64())],
+            void(),
+        ),
+        make_native(
+            "aura.lang.concurrent.Mutex.tryLock",
+            &[("id", i64())],
+            bool_t(),
+        ),
+        make_native(
+            "aura.lang.concurrent.Mutex.destroy",
+            &[("id", i64())],
+            void(),
+        ),
+        // Atomic
+        make_native(
+            "aura.lang.concurrent.Atomic.new",
+            &[("initial", i64())],
+            Some(i64()),
+        ),
+        make_native(
+            "aura.lang.concurrent.Atomic.load",
+            &[("id", i64())],
+            Some(i64()),
+        ),
+        make_native(
+            "aura.lang.concurrent.Atomic.store",
+            &[
+                ("id", i64()),
+                ("val", i64()),
+            ],
+            void(),
+        ),
+        make_native(
+            "aura.lang.concurrent.Atomic.add",
+            &[
+                ("id", i64()),
+                ("delta", i64()),
+            ],
+            Some(i64()),
+        ),
+        make_native(
+            "aura.lang.concurrent.Atomic.sub",
+            &[
+                ("id", i64()),
+                ("delta", i64()),
+            ],
+            Some(i64()),
+        ),
+        make_native(
+            "aura.lang.concurrent.Atomic.cas",
+            &[
+                ("id", i64()),
+                ("expected", i64()),
+                ("desired", i64()),
+            ],
+            bool_t(),
+        ),
+        // RwLock
+        make_native("aura.lang.concurrent.RwLock.new", &[], Some(i64())),
+        make_native(
+            "aura.lang.concurrent.RwLock.readLock",
+            &[("id", i64())],
+            void(),
+        ),
+        make_native(
+            "aura.lang.concurrent.RwLock.writeLock",
+            &[("id", i64())],
+            void(),
+        ),
+        make_native(
+            "aura.lang.concurrent.RwLock.readUnlock",
+            &[("id", i64())],
+            void(),
+        ),
+        make_native(
+            "aura.lang.concurrent.RwLock.writeUnlock",
+            &[("id", i64())],
+            void(),
+        ),
+        make_native(
+            "aura.lang.concurrent.RwLock.destroy",
+            &[("id", i64())],
+            void(),
+        ),
+        // Condvar
+        make_native("aura.lang.concurrent.Condvar.new", &[], Some(i64())),
+        make_native(
+            "aura.lang.concurrent.Condvar.wait",
+            &[
+                ("id", i64()),
+                ("mutexId", i64()),
+            ],
+            void(),
+        ),
+        make_native(
+            "aura.lang.concurrent.Condvar.signal",
+            &[("id", i64())],
+            void(),
+        ),
+        make_native(
+            "aura.lang.concurrent.Condvar.broadcast",
+            &[("id", i64())],
+            void(),
+        ),
+        make_native(
+            "aura.lang.concurrent.Condvar.destroy",
+            &[("id", i64())],
+            void(),
+        ),
+        // Barrier
+        make_native(
+            "aura.lang.concurrent.Barrier.new",
+            &[("count", i64())],
+            Some(i64()),
+        ),
+        make_native(
+            "aura.lang.concurrent.Barrier.wait",
+            &[("id", i64())],
+            Some(i64()),
+        ),
+        make_native(
+            "aura.lang.concurrent.Barrier.destroy",
+            &[("id", i64())],
+            void(),
+        ),
+        // Channel
+        make_native(
+            "aura.lang.concurrent.Channel.newChannel",
+            &[("cap", i64())],
+            Some(i64()),
+        ),
+        make_native(
+            "aura.lang.concurrent.Channel.channelSend",
+            &[
+                ("id", i64()),
+                ("val", any_t()),
+            ],
+            void(),
+        ),
+        make_native(
+            "aura.lang.concurrent.Channel.channelRecv",
+            &[("id", i64())],
+            Some(any_t()),
+        ),
+    ];
+
+    for native in natives_to_add {
+        if !existing_names.contains(&native.name) {
+            program.natives.push(native);
+        }
+    }
 }

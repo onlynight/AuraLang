@@ -35,7 +35,7 @@ use aura_loom::task::scheduler::{Scheduler, SchedulerConfig};
 use aura_loom::workspace::Workspace;
 
 #[derive(Parser, Debug)]
-#[command(name = "loom", version = "0.1.0", about = "Aura 构建系统")]
+#[command(name = "loom", version = "0.1.0", about = "Aura Build System")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -344,12 +344,12 @@ fn load_and_execute(dir: &str, phase: &str, args: &BuildArgs) -> Result<()> {
         parse::parse_from_file(&manifest_path)?
     } else {
         eprintln!(
-            "⚠ 未找到 {}（使用内置默认配置，建议运行 `loom new` 生成项目文件）",
+            "⚠ Not found {} (using built-in default config, recommend running `loom new` to generate project file)",
             manifest_path.display()
         );
         parse::parse_from_file(&manifest_path)?
     };
-    println!("项目: {} v{}", manifest.name, manifest.version);
+    println!("Project: {} v{}", manifest.name, manifest.version);
 
     // 2. 解析构建配置（应用 CLI 覆盖 + profile）
     let cli_overrides = build_cli_overrides(args);
@@ -378,7 +378,7 @@ fn load_and_execute(dir: &str, phase: &str, args: &BuildArgs) -> Result<()> {
         Ok(registry) => {
             if registry.len() > 0 {
                 println!(
-                    "插件: {} 个 ({} )",
+                    "Plugins: {} ({})",
                     registry.len(),
                     registry.names().join(", ")
                 );
@@ -386,7 +386,10 @@ fn load_and_execute(dir: &str, phase: &str, args: &BuildArgs) -> Result<()> {
             Some(Arc::new(registry))
         }
         Err(e) => {
-            eprintln!("⚠ 插件加载失败: {} (继续构建，但不含插件任务)", e);
+            eprintln!(
+                "⚠ Plugin loading failed: {} (continuing build without plugin tasks)",
+                e
+            );
             None
         }
     };
@@ -396,7 +399,10 @@ fn load_and_execute(dir: &str, phase: &str, args: &BuildArgs) -> Result<()> {
         match build_task_graph_with_plugins(&manifest, &project_dir, registry, &resolved_config) {
             Ok(g) => g,
             Err(e) => {
-                eprintln!("⚠ 插件任务图构建失败: {} (回退到标准任务图)", e);
+                eprintln!(
+                    "⚠ Plugin task graph build failed: {} (falling back to standard task graph)",
+                    e
+                );
                 build_standard_task_graph(&manifest, &project_dir)
             }
         }
@@ -414,7 +420,7 @@ fn load_and_execute(dir: &str, phase: &str, args: &BuildArgs) -> Result<()> {
                             Workspace::resolve_selection(args.member.as_deref(), args.with_deps);
                         let selected = workspace.selected_members(&selection);
                         println!(
-                            "Workspace: {} 个成员, 选择 {} 个",
+                            "Workspace: {} members, {} selected",
                             workspace.len(),
                             selected.len()
                         );
@@ -423,7 +429,7 @@ fn load_and_execute(dir: &str, phase: &str, args: &BuildArgs) -> Result<()> {
                         }
                     }
                     Err(e) => {
-                        eprintln!("⚠ Workspace 解析失败: {}", e);
+                        eprintln!("⚠ Workspace resolution failed: {}", e);
                     }
                 }
             }
@@ -491,18 +497,18 @@ fn print_results(scheduler: &Scheduler) {
     }
 
     println!();
-    println!("═══ 构建结果 ═══");
+    println!("═══ Build Results ═══");
     for result in &results {
         if !result.executed {
             if result.cache_hit {
                 let source = if result.cache_source.is_empty() {
                     String::new()
                 } else {
-                    format!(" (来源: {})", result.cache_source)
+                    format!(" (source: {})", result.cache_source)
                 };
                 println!("  ⏭  {} — {}{}", result.task_name, result.message, source);
             } else {
-                println!("  ⏭  {} (跳过)", result.task_name);
+                println!("  ⏭  {} (skipped)", result.task_name);
             }
         } else if result.success {
             let elapsed = if result.elapsed_ms > 0 {
@@ -521,7 +527,7 @@ fn print_results(scheduler: &Scheduler) {
     let skipped = results.iter().filter(|r| !r.executed).count();
     let cache_hits = results.iter().filter(|r| r.cache_hit).count();
     println!(
-        "═══ {} 执行, {} 跳过 ({} 缓存命中), 总计 {}ms ═══",
+        "═══ {} executed, {} skipped ({} cache hits), total {}ms ═══",
         executed, skipped, cache_hits, total_ms
     );
 }
@@ -539,12 +545,13 @@ fn main() -> Result<()> {
             let output_dir = project_dir.join(&output);
 
             std::fs::create_dir_all(&output_dir)
-                .map_err(|e| anyhow::anyhow!("创建输出目录失败: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to create output directory: {}", e))?;
 
             // 生成标准库文档
-            let std_docs = compiler::docgen::generate_docs(&output_dir)
-                .map_err(|e| anyhow::anyhow!("标准库文档生成失败: {}", e))?;
-            println!("✓ 标准库文档: {} 个文件", std_docs.len());
+            let std_docs = compiler::docgen::generate_docs(&output_dir).map_err(|e| {
+                anyhow::anyhow!("Std library documentation generation failed: {}", e)
+            })?;
+            println!("✓ Std library docs: {} files", std_docs.len());
 
             // 从项目源码生成文档
             let src_dir = project_dir.join("src");
@@ -553,8 +560,9 @@ fn main() -> Result<()> {
                 for entry in walkdir::WalkDir::new(&src_dir).into_iter().filter_map(|e| e.ok()) {
                     let path = entry.path();
                     if path.extension().map(|e| e == "aura").unwrap_or(false) {
-                        let source = std::fs::read_to_string(path)
-                            .map_err(|e| anyhow::anyhow!("读取 {} 失败: {}", path.display(), e))?;
+                        let source = std::fs::read_to_string(path).map_err(|e| {
+                            anyhow::anyhow!("Failed to read {}: {}", path.display(), e)
+                        })?;
                         let module_name = path
                             .strip_prefix(&src_dir)
                             .unwrap_or(path)
@@ -573,22 +581,22 @@ fn main() -> Result<()> {
                             std::fs::create_dir_all(parent).ok();
                         }
                         std::fs::write(&doc_path, doc_content).map_err(|e| {
-                            anyhow::anyhow!("写入 {} 失败: {}", doc_path.display(), e)
+                            anyhow::anyhow!("Failed to write {}: {}", doc_path.display(), e)
                         })?;
                         user_doc_count += 1;
                     }
                 }
                 if user_doc_count > 0 {
-                    println!("✓ 项目文档: {} 个文件", user_doc_count);
+                    println!("✓ Project docs: {} files", user_doc_count);
                 }
             }
 
             if let Some(ref m) = module {
-                println!("  模块过滤: {}", m);
+                println!("  Module filter: {}", m);
             }
 
-            println!("✓ 文档生成完成");
-            println!("  输出: {}", output_dir.display());
+            println!("✓ Documentation generation complete");
+            println!("  Output: {}", output_dir.display());
             Ok(())
         }
         Command::Fmt { dir, check } => {
@@ -596,7 +604,7 @@ fn main() -> Result<()> {
             let src_dir = project_dir.join("src");
 
             if !src_dir.exists() {
-                println!("✓ 无源码目录，跳过格式化");
+                println!("✓ No source directory, skipping formatting");
                 return Ok(());
             }
 
@@ -609,7 +617,7 @@ fn main() -> Result<()> {
                     let source = match std::fs::read_to_string(path) {
                         Ok(s) => s,
                         Err(e) => {
-                            eprintln!("⚠ 读取 {} 失败: {}", path.display(), e);
+                            eprintln!("⚠ Failed to read {}: {}", path.display(), e);
                             errors += 1;
                             continue;
                         }
@@ -620,15 +628,15 @@ fn main() -> Result<()> {
                     if formatted_source != source {
                         if check {
                             println!(
-                                "需要格式化: {}",
+                                "Needs formatting: {}",
                                 path.strip_prefix(&project_dir).unwrap_or(path).display()
                             );
                         } else {
                             std::fs::write(path, &formatted_source).map_err(|e| {
-                                anyhow::anyhow!("写入 {} 失败: {}", path.display(), e)
+                                anyhow::anyhow!("Failed to write {}: {}", path.display(), e)
                             })?;
                             println!(
-                                "✓ 已格式化: {}",
+                                "✓ Formatted: {}",
                                 path.strip_prefix(&project_dir).unwrap_or(path).display()
                             );
                         }
@@ -639,23 +647,23 @@ fn main() -> Result<()> {
 
             if check {
                 if formatted > 0 {
-                    println!("⚠ {} 个文件需要格式化", formatted);
+                    println!("⚠ {} files need formatting", formatted);
                     std::process::exit(1);
                 } else {
-                    println!("✓ 所有文件已格式化");
+                    println!("✓ All files formatted");
                 }
             } else {
-                println!("✓ 格式化完成: {} 个文件", formatted);
+                println!("✓ Formatting complete: {} files", formatted);
             }
             if errors > 0 {
-                eprintln!("⚠ {} 个错误", errors);
+                eprintln!("⚠ {} errors", errors);
             }
 
             Ok(())
         }
         Command::Version => {
             println!("loom 0.1.0");
-            println!("Aura 构建系统 — 纯 TOML 配置、任务 DAG、增量构建");
+            println!("Aura Build System — Pure TOML config, task DAG, incremental builds");
             Ok(())
         }
         Command::CheckConfig { dir } => {
@@ -663,20 +671,23 @@ fn main() -> Result<()> {
             let manifest = if manifest_path.exists() {
                 parse::parse_from_file(&manifest_path)?
             } else {
-                println!("⚠ 未找到 {}（检查内置默认配置）", manifest_path.display());
+                println!(
+                    "⚠ Not found {} (checking built-in default config)",
+                    manifest_path.display()
+                );
                 parse::parse_from_file(&manifest_path)?
             };
             let errors = aura_loom::manifest::validate::validate_manifest(&manifest);
             if errors.is_empty() {
-                println!("✓ 配置校验通过: {}", manifest.name);
-                println!("  版本: {}", manifest.version);
-                println!("  入口: {}", manifest.entry);
-                println!("  依赖: {} 个", manifest.all_dependencies().len());
-                println!("  源码集: {}", manifest.build.source_sets.len());
-                println!("  Profile: {}", manifest.profiles.len());
-                println!("  自定义任务: {}", manifest.tasks.len());
+                println!("✓ Configuration validation passed: {}", manifest.name);
+                println!("  Version: {}", manifest.version);
+                println!("  Entry: {}", manifest.entry);
+                println!("  Dependencies: {}", manifest.all_dependencies().len());
+                println!("  Source sets: {}", manifest.build.source_sets.len());
+                println!("  Profiles: {}", manifest.profiles.len());
+                println!("  Custom tasks: {}", manifest.tasks.len());
             } else {
-                println!("✗ 配置校验失败:");
+                println!("✗ Configuration validation failed:");
                 for err in &errors {
                     println!("  - {}", err);
                 }
@@ -702,14 +713,16 @@ fn main() -> Result<()> {
                 dir.join("src/main.aura"),
                 format!("fun main() {{\n    println(\"Hello from {}!\")\n}}\n", name),
             )?;
-            println!("✓ 项目创建成功: {}", name);
-            println!("  目录: {}", dir.display());
+            println!("✓ Project created successfully: {}", name);
+            println!("  Directory: {}", dir.display());
             println!(
-                "  模板: {}",
+                "  Template: {}",
                 template.unwrap_or_else(|| "default".to_string())
             );
-            println!("  配置: aura.toml（最小，其余字段使用内置默认）");
-            println!("  提示: loom new 等价于 aura new，包生态操作请使用 aura 命令");
+            println!("  Config: aura.toml (minimal, remaining fields use built-in defaults)");
+            println!(
+                "  Hint: loom new is equivalent to aura new; use aura commands for package ecosystem operations"
+            );
             Ok(())
         }
         Command::Build(args) => load_and_execute(&args.dir, "build", &args),
@@ -720,7 +733,7 @@ fn main() -> Result<()> {
             let manifest_path = dir.join("aura.toml");
 
             if !manifest_path.exists() {
-                println!("✓ 无 aura.toml，跳过检查");
+                println!("✓ No aura.toml, skipping check");
                 return Ok(());
             }
 
@@ -729,11 +742,11 @@ fn main() -> Result<()> {
 
             if errors.is_empty() {
                 println!(
-                    "✓ 语法/语义检查通过（{} 个依赖）",
+                    "✓ Syntax/semantic check passed ({} dependencies)",
                     manifest.all_dependencies().len()
                 );
             } else {
-                println!("⚠ 语法/语义检查发现 {} 个问题:", errors.len());
+                println!("⚠ Syntax/semantic check found {} issues:", errors.len());
                 for e in &errors {
                     println!("  - {}", e);
                 }
@@ -767,19 +780,19 @@ fn main() -> Result<()> {
 
             if !ci_path.exists() {
                 let default_path = aura_loom::ci::CiConfig::default_config_path(&project_dir);
-                println!("⚠ 未找到 CI 配置 (.loom/.aura-ci.yml)");
-                println!("  使用示例配置生成:");
+                println!("⚠ CI config not found (.loom/.aura-ci.yml)");
+                println!("  Generating with example config:");
 
                 // 创建 .loom/ 目录
                 if let Some(parent) = default_path.parent() {
                     std::fs::create_dir_all(parent)
-                        .map_err(|e| anyhow::anyhow!("创建 .loom/ 目录失败: {}", e))?;
+                        .map_err(|e| anyhow::anyhow!("Failed to create .loom/ directory: {}", e))?;
                 }
 
                 let example = aura_loom::ci::CiConfig::example();
                 let yaml = example.to_yaml()?;
                 std::fs::write(&default_path, &yaml)?;
-                println!("  ✓ 已生成示例配置: {}", default_path.display());
+                println!("  ✓ Example config generated: {}", default_path.display());
             } else {
                 let config = aura_loom::ci::CiConfig::from_file(&ci_path)?;
                 let warnings = config.validate()?;
@@ -790,7 +803,7 @@ fn main() -> Result<()> {
                 let executor = aura_loom::ci::CiExecutor::new(config, &project_dir, true);
                 let result = executor.execute()?;
                 println!(
-                    "\nCI dry-run 完成: {} 成功, {} 失败, {} 跳过",
+                    "\nCI dry-run complete: {} succeeded, {} failed, {} skipped",
                     result.success_count, result.failure_count, result.skip_count
                 );
             }
@@ -807,17 +820,17 @@ fn main() -> Result<()> {
                     match installer {
                         Ok(installer) => {
                             let result = installer.install()?;
-                            println!("✓ Wrapper 安装完成");
-                            println!("  版本: {}", result.version);
-                            println!("  路径: {}", result.executable_path.display());
-                            println!("  新安装: {}", result.installed);
+                            println!("✓ Wrapper installation complete");
+                            println!("  Version: {}", result.version);
+                            println!("  Path: {}", result.executable_path.display());
+                            println!("  Newly installed: {}", result.installed);
                         }
                         Err(e) => {
-                            eprintln!("⚠ Wrapper 加载失败: {}", e);
+                            eprintln!("⚠ Wrapper loading failed: {}", e);
                         }
                     }
                 } else {
-                    println!("⚠ 当前目录无 aura.toml，使用默认配置");
+                    println!("⚠ No aura.toml in current directory, using default config");
                     let installer = aura_loom::wrapper::installer::WrapperInstaller::new(
                         aura_loom::wrapper::WrapperConfig::default(),
                         &project_dir,
@@ -825,7 +838,7 @@ fn main() -> Result<()> {
                     let scripts = installer.generate_wrapper_scripts()?;
                     std::fs::write("aura-wrapper", &scripts.bash_script)?;
                     std::fs::write("aura-wrapper.bat", &scripts.bat_script)?;
-                    println!("✓ 生成 wrapper 脚本: aura-wrapper, aura-wrapper.bat");
+                    println!("✓ Generated wrapper scripts: aura-wrapper, aura-wrapper.bat");
                 }
                 Ok(())
             }
@@ -838,8 +851,8 @@ fn main() -> Result<()> {
             let manifest_path = project_dir.join("aura.toml");
 
             if !manifest_path.exists() {
-                eprintln!("错误: 当前目录无 aura.toml");
-                return Err(anyhow::anyhow!("aura.toml 不存在"));
+                eprintln!("Error: no aura.toml in current directory");
+                return Err(anyhow::anyhow!("aura.toml does not exist"));
             }
 
             let manifest = parse::parse_from_file(&manifest_path)?;
@@ -855,14 +868,14 @@ fn main() -> Result<()> {
             let output_path = aura_loom::ide::IdeProject::default_path(&project_dir);
             project.write_to(&output_path)?;
 
-            println!("✓ IDE 项目文件已生成");
-            println!("  路径: {}", output_path.display());
-            println!("  项目: {} v{}", project.name, project.version);
-            println!("  依赖: {} 个", project.dependencies.len());
-            println!("  任务: {} 个", project.tasks.len());
-            println!("  插件: {} 个", project.plugins.len());
+            println!("✓ IDE project file generated");
+            println!("  Path: {}", output_path.display());
+            println!("  Project: {} v{}", project.name, project.version);
+            println!("  Dependencies: {}", project.dependencies.len());
+            println!("  Tasks: {}", project.tasks.len());
+            println!("  Plugins: {}", project.plugins.len());
             if let Some(ref files) = project.files {
-                println!("  文件: {} 个", files.len());
+                println!("  Files: {}", files.len());
             }
             Ok(())
         }

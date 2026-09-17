@@ -123,7 +123,7 @@ fn aot_inprocess_bench(src: &str, iters: usize, expected: i64) -> Option<f64> {
     let expected_total = expected * (iters as i64);
     if code != expected_total {
         eprintln!(
-            "AOT inprocess 结果不一致: 期望 {} 实际 {}",
+            "AOT inprocess result mismatch: expected {} got {}",
             expected_total, code
         );
         return None;
@@ -133,7 +133,7 @@ fn aot_inprocess_bench(src: &str, iters: usize, expected: i64) -> Option<f64> {
     let exec_dur = total_dur - startup_time;
     if exec_dur <= 0.0 {
         eprintln!(
-            "执行时间异常: total={:.4}ms, startup={:.4}ms",
+            "Execution time anomaly: total={:.4}ms, startup={:.4}ms",
             total_dur * 1000.0,
             startup_time * 1000.0
         );
@@ -244,7 +244,7 @@ fn jit_bench(src: &str, iters: usize, expected: i64) -> f64 {
     .unwrap();
     // 预热：首次运行触发 JIT 编译
     let r = vm.run().unwrap();
-    assert_eq!(r.as_int(), expected, "JIT 结果不一致");
+    assert_eq!(r.as_int(), expected, "JIT result mismatch");
     vm.reset_for_reuse();
     // 计时
     let start = Instant::now();
@@ -342,7 +342,7 @@ fn aot_bench(_src: &str, _iters: usize, _expected: i64) -> Option<f64> {
 }
 
 fn print_bench(_name: &str, vm: f64, jit: Option<f64>, aot: Option<f64>, aot_inproc: Option<f64>) {
-    println!("  VM(字节码解释器):  {:.3} ms/op", vm * 1000.0);
+    println!("  VM(bytecode interpreter):  {:.3} ms/op", vm * 1000.0);
     if let Some(j) = jit {
         println!(
             "  JIT(Cranelift):    {:.3} ms/op ({:.1}x vs VM)",
@@ -350,34 +350,34 @@ fn print_bench(_name: &str, vm: f64, jit: Option<f64>, aot: Option<f64>, aot_inp
             vm / j
         );
     } else {
-        println!("  JIT: 未启用 jit feature");
+        println!("  JIT: jit feature not enabled");
     }
     if let Some(a) = aot {
         println!(
-            "  AOT(独立进程):    {:.3} ms/op ({:.1}x vs VM) [含进程启动开销]",
+            "  AOT(separate process):    {:.3} ms/op ({:.1}x vs VM) [includes process startup overhead]",
             a * 1000.0,
             vm / a
         );
     } else {
-        println!("  AOT(独立进程):    LLVM 未安装");
+        println!("  AOT(separate process):    LLVM not installed");
     }
     if let Some(a) = aot_inproc {
         println!(
-            "  AOT(进程内循环):  {:.3} ms/op ({:.1}x vs VM) [不含进程启动]",
+            "  AOT(inprocess loop):  {:.3} ms/op ({:.1}x vs VM) [no process startup]",
             a * 1000.0,
             vm / a
         );
         if let Some(j) = jit {
-            println!("  ─── JIT vs AOT(进程内): {:.2}x ───", j / a);
+            println!("  ─── JIT vs AOT(inprocess): {:.2}x ───", j / a);
         }
     } else {
-        println!("  AOT(进程内循环):  LLVM 未安装");
+        println!("  AOT(inprocess loop):  LLVM not installed");
     }
 }
 
 fn main() {
     println!("╔══════════════════════════════════════════════════════════╗");
-    println!("║          Aura 执行引擎性能对比基准 (P7)                   ║");
+    println!("║          Aura execution engine performance benchmark (P7)          ║");
     println!("╚══════════════════════════════════════════════════════════╝");
     println!();
 
@@ -419,8 +419,10 @@ fn main() {
     println!();
 
     // 汇总
-    println!("═══ 完整汇总 ════════════════════════════════════════════════════");
-    println!("| 场景       | VM (ms)  | JIT (ms) | JIT 加速 | AOT独立 (ms) | AOT进程内 (ms) |");
+    println!("=== Complete Summary ===");
+    println!(
+        "| Scenario     | VM (ms)  | JIT (ms) | JIT speedup | AOT sep proc (ms) | AOT inproc (ms) |"
+    );
     println!("|------------|----------|----------|----------|--------------|----------------|");
     println!(
         "| fib(25)   | {:9.3} | {:8.3} | {:>5.1}x | {:12.3} | {:14.3} |",
@@ -439,5 +441,7 @@ fn main() {
         aot_sum_inproc.map_or(f64::NAN, |a| a * 1000.0),
     );
     println!();
-    println!("注：AOT独立进程包含每次 ~4ms 的进程启动开销；AOT进程内循环不含进程启动开销");
+    println!(
+        "Note: AOT separate process includes ~4ms process startup overhead per run; AOT inprocess loop does not include process startup"
+    );
 }

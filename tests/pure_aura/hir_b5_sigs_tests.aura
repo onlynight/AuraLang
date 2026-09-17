@@ -1,0 +1,71 @@
+// ═════════════════════════════════════════════════════════════
+// Phase B.5 验证：std 签名表接入 sema
+//
+// 运行：aura run tests/hir_b5_sigs_tests.aura
+//   全通过时输出 "RESULT: PASS"
+// ═════════════════════════════════════════════════════════════
+
+fun testStdStringSignature(): Int {
+    // String.length → i64 → Int
+    val s: String = "hello"
+    val n: Int = s.length
+    return n
+}
+
+fun testStdStringContains(): Int {
+    val s: String = "hello world"
+    if (s.contains("world")) { return 1 }
+    return 0
+}
+
+fun testStdStringStartsWith(): Int {
+    val s: String = "hello world"
+    if (s.startsWith("hello")) { return 1 }
+    return 0
+}
+
+fun testStdCollectionsSize(): Int {
+    val xs = listOf(1, 2, 3)
+    return xs.size
+}
+
+fun testStdMathSqrt(): Int {
+    val result: Float = Math.sqrt(16.0)
+    return toInt(result)
+}
+
+fun testStdStringSubstring(): Int {
+    val s: String = "hello world"
+    val sub: String = s.substring(0, 5)
+    return sub.length
+}
+
+fun main(): Int {
+    var failures: Int = 0
+
+    if (testStdStringSignature() != 5) { failures = failures + 1; println("FAIL: testStdStringSignature") }
+    else { println("PASS: testStdStringSignature") }
+
+    if (testStdStringContains() != 1) { failures = failures + 1; println("FAIL: testStdStringContains") }
+    else { println("PASS: testStdStringContains") }
+
+    if (testStdStringStartsWith() != 1) { failures = failures + 1; println("FAIL: testStdStringStartsWith") }
+    else { println("PASS: testStdStringStartsWith") }
+
+    if (testStdCollectionsSize() != 3) { failures = failures + 1; println("FAIL: testStdCollectionsSize") }
+    else { println("PASS: testStdCollectionsSize") }
+
+    if (testStdMathSqrt() != 4) { failures = failures + 1; println("FAIL: testStdMathSqrt") }
+    else { println("PASS: testStdMathSqrt") }
+
+    if (testStdStringSubstring() != 5) { failures = failures + 1; println("FAIL: testStdStringSubstring") }
+    else { println("PASS: testStdStringSubstring") }
+
+    println("")
+    println("Total failures: " + toStr(failures))
+    if (failures == 0) {
+        println("RESULT: PASS")
+    } else {
+        println("RESULT: FAIL")
+    }
+}

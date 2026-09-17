@@ -82,7 +82,10 @@ fn test_with_modules_empty() {
     let registry = NativeRegistry::with_modules(&[]);
     let count = registry.len();
     // prelude (18) + 并发（11，默认启用，但 with_modules 不加载并发）
-    assert_eq!(count, 18, "空模块列表应仅加载 18 个 prelude 函数");
+    assert_eq!(
+        count, 18,
+        "empty module list should only load 18 prelude functions"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -93,6 +96,6 @@ fn test_with_modules_empty() {
 #[test]
 fn test_concurrent_functions_loaded() {
     let registry = NativeRegistry::new();
-    assert!(registry.contains("aura.lang.std.Coroutine.spawn"));
-    assert!(registry.contains("aura.lang.std.Channel.newChannel"));
+    assert!(registry.contains("aura.lang.concurrent.Coroutine.spawn"));
+    assert!(registry.contains("aura.lang.concurrent.Channel.newChannel"));
 }

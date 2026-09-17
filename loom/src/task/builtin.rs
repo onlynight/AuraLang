@@ -53,9 +53,12 @@ pub fn execute_clean(
 
     if out_dir.exists() {
         std::fs::remove_dir_all(&out_dir)?;
-        Ok((format!("✓ 已清理 {}", out_dir.display()), Vec::new()))
+        Ok((format!("✓ Cleaned {}", out_dir.display()), Vec::new()))
     } else {
-        Ok(("✓ 无需清理（目录不存在）".to_string(), Vec::new()))
+        Ok((
+            "✓ No cleanup needed (directory does not exist)".to_string(),
+            Vec::new(),
+        ))
     }
 }
 
@@ -97,7 +100,7 @@ pub fn execute_resolve(
     if lock_file.exists() {
         Ok((
             format!(
-                "✓ 依赖已解析（{} 个依赖，{} 个 BOM 锁定，锁文件已存在）",
+                "✓ Dependencies resolved ({} dependencies, {} BOM locked, lock file exists)",
                 all_deps.len(),
                 locked_count
             ),
@@ -106,7 +109,7 @@ pub fn execute_resolve(
     } else {
         Ok((
             format!(
-                "✓ 依赖解析完成（{} 个依赖，{} 个 BOM 锁定）",
+                "✓ Dependency resolution complete ({} dependencies, {} BOM locked)",
                 all_deps.len(),
                 locked_count
             ),
@@ -152,7 +155,7 @@ fn execute_compile_aot(
     let files = &task.inputs.files;
     if files.is_empty() {
         return Ok((
-            format!("✓ AOT 编译 {} 源码集: 无源文件", source_set),
+            format!("✓ AOT compile {} source set: no source files", source_set),
             Vec::new(),
         ));
     }
@@ -160,7 +163,7 @@ fn execute_compile_aot(
     // 读取源码
     let entry_file = files.iter().find(|f| f.is_file()).unwrap_or(&files[0]);
     let source = std::fs::read_to_string(entry_file)
-        .map_err(|e| LoomError::Task(format!("无法读取 {}: {}", entry_file.display(), e)))?;
+        .map_err(|e| LoomError::Task(format!("Failed to read {}: {}", entry_file.display(), e)))?;
 
     // 构建 AOT 选项
     let opt_level = match config.opt_level {
@@ -200,18 +203,18 @@ fn execute_compile_aot(
 
     // 执行 AOT 编译
     let _output = aot_compile(&source, &output_path, options)
-        .map_err(|e| LoomError::Task(format!("AOT 编译失败: {}", e)))?;
+        .map_err(|e| LoomError::Task(format!("AOT compilation failed: {}", e)))?;
 
     let ffi_info = match config.ffi_mode {
         FfiMode::Aot => "JitValue ABI (aura_aot_*)",
         FfiMode::Cabi => "C ABI (aura_c_*)",
     };
 
-    let product_type = if is_library { "动态库" } else { "可执行文件" };
+    let product_type = if is_library { "Dynamic library" } else { "Executable" };
 
     Ok((
         format!(
-            "✓ AOT 编译 {} 源码集: {} → {} ({}: {})",
+            "✓ AOT compile {} source set: {} → {} ({}: {})",
             source_set,
             entry_file.display(),
             output_path.display(),
@@ -236,7 +239,7 @@ fn execute_compile_aot(
     let files = &task.inputs.files;
     if files.is_empty() {
         return Ok((
-            format!("✓ AOT 编译 {} 源码集: 无源文件", source_set),
+            format!("✓ AOT compile {} source set: no source files", source_set),
             Vec::new(),
         ));
     }
@@ -249,7 +252,7 @@ fn execute_compile_aot(
 
     Ok((
         format!(
-            "✓ AOT 编译 {} 源码集: {} → {} (占位符: 需启用 llvm feature)",
+            "✓ AOT compile {} source set: {} → {} (placeholder: requires llvm feature)",
             source_set,
             entry_file.display(),
             exe_path.display()
@@ -294,7 +297,7 @@ fn execute_compile_bytecode(
                         // 写入 .auc 文件
                         if let Err(e) = write_auc(&out_file.to_string_lossy(), &module) {
                             return Err(LoomError::Config(format!(
-                                "写入字节码失败 {}: {}",
+                                "Failed to write bytecode {}: {}",
                                 file.display(),
                                 e
                             )));
@@ -303,7 +306,7 @@ fn execute_compile_bytecode(
                     }
                     Err(e) => {
                         return Err(LoomError::Config(format!(
-                            "编译失败 {}: {}",
+                            "Compilation failed {}: {}",
                             file.display(),
                             e
                         )));
@@ -314,7 +317,7 @@ fn execute_compile_bytecode(
 
         return Ok((
             format!(
-                "✓ 字节码编译 {} 源码集: {} 个文件 → {}",
+                "✓ Bytecode compile {} source set: {} files → {}",
                 source_set,
                 count,
                 out.display()
@@ -344,7 +347,7 @@ fn execute_compile_bytecode(
                         // 写入 .auc 文件
                         if let Err(e) = write_auc(&out_file.to_string_lossy(), &module) {
                             return Err(LoomError::Config(format!(
-                                "写入字节码失败 {}: {}",
+                                "Failed to write bytecode {}: {}",
                                 file.display(),
                                 e
                             )));
@@ -353,7 +356,7 @@ fn execute_compile_bytecode(
                     }
                     Err(e) => {
                         return Err(LoomError::Config(format!(
-                            "编译失败 {}: {}",
+                            "Compilation failed {}: {}",
                             file.display(),
                             e
                         )));
@@ -363,7 +366,7 @@ fn execute_compile_bytecode(
 
             return Ok((
                 format!(
-                    "✓ 字节码编译 {} 源码集: {} 个文件 → {}",
+                    "✓ Bytecode compile {} source set: {} files → {}",
                     source_set,
                     count,
                     out.display()
@@ -374,7 +377,10 @@ fn execute_compile_bytecode(
     }
 
     Ok((
-        format!("✓ 字节码编译 {} 源码集: 无源文件", source_set),
+        format!(
+            "✓ Bytecode compile {} source set: no source files",
+            source_set
+        ),
         Vec::new(),
     ))
 }
@@ -405,19 +411,22 @@ pub fn execute_test(
     let test_dir = dir.join("test");
 
     if !test_dir.exists() {
-        return Ok(("✓ 无测试目录，跳过测试".to_string(), Vec::new()));
+        return Ok((
+            "✓ No test directory, skipping tests".to_string(),
+            Vec::new(),
+        ));
     }
 
     let mut test_files = Vec::new();
     discover_aura_files(&test_dir, &mut test_files);
 
     if test_files.is_empty() {
-        return Ok(("✓ 无测试文件，跳过测试".to_string(), Vec::new()));
+        return Ok(("✓ No test files, skipping tests".to_string(), Vec::new()));
     }
 
     // 目前测试执行是占位符，后续集成 VM
     Ok((
-        format!("✓ 测试执行: {} 个测试文件", test_files.len()),
+        format!("✓ Test execution: {} test files", test_files.len()),
         vec![test_dir],
     ))
 }
@@ -439,7 +448,7 @@ pub fn execute_package(
 
     if !config.emit_package {
         return Ok((
-            "✓ 打包已禁用（emit-package = false）".to_string(),
+            "✓ Packaging disabled (emit-package = false)".to_string(),
             Vec::new(),
         ));
     }
@@ -451,14 +460,14 @@ pub fn execute_package(
     let manifest_path = dir.join("aura.toml");
     if !manifest_path.exists() {
         return Err(LoomError::Config(format!(
-            "未找到 aura.toml: {}",
+            "aura.toml not found: {}",
             manifest_path.display()
         )));
     }
 
     let manifest_content = std::fs::read_to_string(&manifest_path)?;
     let manifest: crate::manifest::LoomManifest = toml::from_str(&manifest_content)
-        .map_err(|e| LoomError::Config(format!("解析 aura.toml 失败: {}", e)))?;
+        .map_err(|e| LoomError::Config(format!("Failed to parse aura.toml: {}", e)))?;
 
     // 构建 PackageManifest（使用 compiler::package::PackageManifest）
     let pkg_manifest = PackageManifest {
@@ -486,7 +495,7 @@ pub fn execute_package(
     let compile_dir = out_dir.join("compile-main");
     if !compile_dir.exists() {
         return Err(LoomError::Config(format!(
-            "未找到编译产物目录: {}",
+            "Compilation output directory not found: {}",
             compile_dir.display()
         )));
     }
@@ -509,7 +518,7 @@ pub fn execute_package(
 
         if auc_files.is_empty() {
             return Err(LoomError::Config(format!(
-                "未找到 .auc 字节码文件: {}",
+                "No .auc bytecode file found: {}",
                 compile_dir.display()
             )));
         }
@@ -519,7 +528,7 @@ pub fn execute_package(
 
     // 读取 .auc 文件
     let module = read_auc(&auc_path.to_string_lossy())
-        .map_err(|e| LoomError::Config(format!("读取字节码失败: {}", e)))?;
+        .map_err(|e| LoomError::Config(format!("Failed to read bytecode: {}", e)))?;
 
     // 生成包名
     let package_name = format!("{}-{}.auz", manifest.name, manifest.version);
@@ -538,11 +547,12 @@ pub fn execute_package(
     let builder =
         PackageBuilder::new(&pkg_manifest, &module).with_source_dir(&src_dir).with_options(options);
 
-    let result =
-        builder.build(&package_path).map_err(|e| LoomError::Config(format!("打包失败: {}", e)))?;
+    let result = builder
+        .build(&package_path)
+        .map_err(|e| LoomError::Config(format!("Packaging failed: {}", e)))?;
 
     Ok((
-        format!("✓ 打包完成: {}", result.path.display()),
+        format!("✓ Packaging complete: {}", result.path.display()),
         vec![result.path],
     ))
 }
@@ -559,7 +569,7 @@ pub fn execute_verify(
     let package_dir = out_dir.join("package");
 
     if !package_dir.exists() {
-        return Ok(("✓ 无包需要验证".to_string(), Vec::new()));
+        return Ok(("✓ No packages to verify".to_string(), Vec::new()));
     }
 
     // 检查包文件
@@ -578,7 +588,10 @@ pub fn execute_verify(
         }
     }
 
-    Ok((format!("✓ 验证完成: {} 个包", verified), Vec::new()))
+    Ok((
+        format!("✓ Verification complete: {} packages", verified),
+        Vec::new(),
+    ))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -594,7 +607,7 @@ pub fn execute_check(
 
     // 检查 aura.toml 是否存在
     if !manifest_path.exists() {
-        return Ok(("✓ 无 aura.toml，跳过检查".to_string(), Vec::new()));
+        return Ok(("✓ No aura.toml, skipping check".to_string(), Vec::new()));
     }
 
     // 解析并验证 manifest
@@ -604,14 +617,14 @@ pub fn execute_check(
     if errors.is_empty() {
         Ok((
             format!(
-                "✓ 语法/语义检查通过（{} 个依赖）",
+                "✓ Syntax/semantic check passed ({} dependencies)",
                 manifest.all_dependencies().len()
             ),
             Vec::new(),
         ))
     } else {
         Ok((
-            format!("⚠ 语法/语义检查发现 {} 个问题", errors.len()),
+            format!("⚠ Syntax/semantic check found {} issues", errors.len()),
             Vec::new(),
         ))
     }
@@ -629,7 +642,7 @@ pub fn execute_install(
     let package_dir = out_dir.join("package");
 
     if !package_dir.exists() {
-        return Ok(("✓ 无包需要安装".to_string(), Vec::new()));
+        return Ok(("✓ No packages to install".to_string(), Vec::new()));
     }
 
     // 安装到本地注册表（占位符）
@@ -653,7 +666,7 @@ pub fn execute_install(
 
     Ok((
         format!(
-            "✓ 安装完成: {} 个包 → {}",
+            "✓ Installation complete: {} packages → {}",
             installed,
             registry_dir.display()
         ),
@@ -669,7 +682,10 @@ pub fn execute_deploy(
     _task: &TaskDefinition,
     _config: &ResolvedBuildConfig,
 ) -> Result<(String, Vec<PathBuf>), LoomError> {
-    Ok(("✓ 发布（占位符，Phase B6 实现）".to_string(), Vec::new()))
+    Ok((
+        "✓ Publish (placeholder, Phase B6 implementation)".to_string(),
+        Vec::new(),
+    ))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -686,11 +702,14 @@ pub fn execute_execute(
     // 查找编译产物
     let compile_dir = out_dir.join("compile-main");
     if !compile_dir.exists() {
-        return Ok(("✓ 运行（编译产物不存在，占位符）".to_string(), Vec::new()));
+        return Ok((
+            "✓ Run (compile output not found, placeholder)".to_string(),
+            Vec::new(),
+        ));
     }
 
     Ok((
-        format!("✓ 运行: {} (占位符)", out_dir.display()),
+        format!("✓ Run: {} (placeholder)", out_dir.display()),
         Vec::new(),
     ))
 }
@@ -704,7 +723,7 @@ pub fn execute_watch(
     _config: &ResolvedBuildConfig,
 ) -> Result<(String, Vec<PathBuf>), LoomError> {
     Ok((
-        "✓ Watch 模式（占位符，Phase B7 实现）".to_string(),
+        "✓ Watch mode (placeholder, Phase B7 implementation)".to_string(),
         Vec::new(),
     ))
 }
@@ -718,7 +737,10 @@ pub fn execute_plugin(
     plugin_name: &str,
     _config: &ResolvedBuildConfig,
 ) -> Result<(String, Vec<PathBuf>), LoomError> {
-    Ok((format!("✓ 插件任务 '{}' (占位符)", plugin_name), Vec::new()))
+    Ok((
+        format!("✓ Plugin task '{}' (placeholder)", plugin_name),
+        Vec::new(),
+    ))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -779,7 +801,7 @@ mod tests {
         std::fs::create_dir_all(config.out_dir.as_str()).unwrap();
 
         let (msg, _artifacts) = execute_clean(&task, &config).unwrap();
-        assert!(msg.contains("已清理"));
+        assert!(msg.contains("Cleaned"));
     }
 
     #[test]
@@ -791,7 +813,7 @@ mod tests {
         let task = make_task("clean", TaskKind::Clean);
 
         let (msg, _artifacts) = execute_clean(&task, &config).unwrap();
-        assert!(msg.contains("无需清理"));
+        assert!(msg.contains("No cleanup needed"));
     }
 
     #[test]
@@ -800,7 +822,7 @@ mod tests {
         let task = make_task("resolve", TaskKind::Resolve);
 
         let (msg, _artifacts) = execute_resolve(&task, &config).unwrap();
-        assert!(msg.contains("依赖解析"));
+        assert!(msg.contains("Dependency resolution"));
     }
 
     #[test]
@@ -809,7 +831,7 @@ mod tests {
         let task = make_task("compile-main", TaskKind::Compile("main".to_string()));
 
         let (msg, _artifacts) = execute_compile(&task, "main", &config).unwrap();
-        assert!(msg.contains("字节码编译 main") || msg.contains("AOT 编译 main"));
+        assert!(msg.contains("Bytecode compile main") || msg.contains("AOT compile main"));
     }
 
     #[test]
@@ -818,7 +840,11 @@ mod tests {
         let task = make_task("test", TaskKind::Test);
 
         let (msg, _artifacts) = execute_test(&task, &config).unwrap();
-        assert!(msg.contains("无测试目录") || msg.contains("无测试文件") || msg.contains("测试"));
+        assert!(
+            msg.contains("No test directory")
+                || msg.contains("No test files")
+                || msg.contains("tests")
+        );
     }
 
     #[test]
@@ -827,7 +853,7 @@ mod tests {
         let task = make_task("package", TaskKind::Package);
 
         let (msg, _artifacts) = execute_package(&task, &config).unwrap();
-        assert!(msg.contains("打包已禁用"));
+        assert!(msg.contains("Packaging disabled"));
     }
 
     #[test]
@@ -857,7 +883,7 @@ mod tests {
         let task = make_task("package", TaskKind::Package);
 
         let (msg, artifacts) = execute_package(&task, &config).unwrap();
-        assert!(msg.contains("打包完成"));
+        assert!(msg.contains("Packaging complete"));
         assert_eq!(artifacts.len(), 1);
         assert!(artifacts[0].exists());
     }
@@ -878,8 +904,8 @@ mod tests {
         let err = execute_package(&task, &config).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("未找到 aura.toml") && msg.contains(&*empty_project.to_string_lossy()),
-            "错误应指向配置的项目根，实际: {msg}"
+            msg.contains("aura.toml not found") && msg.contains(&*empty_project.to_string_lossy()),
+            "Error should point to configured project root, actual: {msg}"
         );
     }
 
@@ -889,7 +915,7 @@ mod tests {
         let task = make_task("verify", TaskKind::Verify);
 
         let (msg, _artifacts) = execute_verify(&task, &config).unwrap();
-        assert!(msg.contains("无包需要验证"));
+        assert!(msg.contains("No packages to verify"));
     }
 
     #[test]
@@ -898,7 +924,7 @@ mod tests {
         let task = make_task("install", TaskKind::Install);
 
         let (msg, _artifacts) = execute_install(&task, &config).unwrap();
-        assert!(msg.contains("无包需要安装"));
+        assert!(msg.contains("No packages to install"));
     }
 
     #[test]
@@ -907,7 +933,7 @@ mod tests {
         let task = make_task("deploy", TaskKind::Deploy);
 
         let (msg, _artifacts) = execute_deploy(&task, &config).unwrap();
-        assert!(msg.contains("发布"));
+        assert!(msg.contains("Publish"));
     }
 
     #[test]
@@ -916,7 +942,7 @@ mod tests {
         let task = make_task("run", TaskKind::Execute);
 
         let (msg, _artifacts) = execute_execute(&task, &config).unwrap();
-        assert!(msg.contains("运行"));
+        assert!(msg.contains("Run"));
     }
 
     #[test]

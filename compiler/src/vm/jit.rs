@@ -2,6 +2,7 @@
 use crate::codegen::opcode::Const;
 use crate::vm::{DecodedFunction, Instr};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 // JitValue / 类型标签 / JitEntry 已迁移至 vm::abi（Phase 1: AOT 嵌入共享调用约定）。
 // 此处再导出以保持向后兼容（jit feature 之外的路径引用 crate::vm::jit::* 依然有效）。
@@ -12,6 +13,164 @@ pub use crate::vm::abi::{
 
 /// JIT 入口 —— 与 AOT 入口同签名（AotEntry 别名）
 pub type JitEntry = AotEntry;
+
+// ═══════════════════════════════════════════════════════════════
+// P8 优化：JIT 去重编译（全局编译缓存）
+// ═══════════════════════════════════════════════════════════════
+
+/// 全局 JIT 编译缓存（线程安全）
+///
+/// P8 优化：消除多线程场景下同一函数被 N 个 VM 实例各编译一次的浪费。
+/// 编译前查缓存，命中则复用；未命中则编译并写入缓存。
+///
+/// 对应文档：`docs/pure_aura_jit/jit模式优化方案.md` §3.1
+///
+/// 线程安全：使用 `Mutex` 保护缓存，编译锁 + 双重检查锁。
+/// 注意：JitEntry 是函数指针（`fn(*const JitValue, *mut JitValue, usize, *const ())`)，
+/// 可安全跨线程共享。
+struct GlobalJitCache {
+    /// 函数代码哈希 → 编译后的入口
+    cache: Mutex<HashMap<String, JitEntry>>,
+    /// 统计：缓存命中次数
+    hits: Mutex<u64>,
+    /// 统计：缓存未命中次数
+    misses: Mutex<u64>,
+}
+
+impl GlobalJitCache {
+    fn new() -> Self {
+        GlobalJitCache {
+            cache: Mutex::new(HashMap::new()),
+            hits: Mutex::new(0),
+            misses: Mutex::new(0),
+        }
+    }
+
+    /// 获取全局缓存实例（懒初始化）
+    fn instance() -> &'static GlobalJitCache {
+        static INSTANCE: OnceLock<GlobalJitCache> = OnceLock::new();
+        INSTANCE.get_or_init(GlobalJitCache::new)
+    }
+
+    /// 计算函数代码的哈希（用于缓存键）
+    fn compute_key(idx: usize, f: &DecodedFunction, consts: &[Const]) -> String {
+        // 简单哈希：函数索引 + 代码长度 + 参数数 + 局部变量数
+        // 更精确的实现应对字节码做哈希
+        let mut key = format!("{}:{}", idx, f.code.len());
+        key.push_str(&format!(":p{}", f.param_count));
+        key.push_str(&format!(":l{}", f.locals));
+        // 简单内容哈希
+        for instr in &f.code {
+            key.push(':');
+            match instr {
+                Instr::LoadConst(ci) => key.push_str(&format!("c{}", ci)),
+                Instr::LoadVar(s) => key.push_str(&format!("lv{}", s)),
+                Instr::StoreVar(s) => key.push_str(&format!("sv{}", s)),
+                Instr::Add => key.push_str("a"),
+                Instr::Sub => key.push_str("s"),
+                Instr::Mul => key.push_str("m"),
+                Instr::Div => key.push_str("d"),
+                Instr::Rem => key.push_str("r"),
+                Instr::Neg => key.push_str("n"),
+                Instr::Eq => key.push_str("eq"),
+                Instr::Ne => key.push_str("ne"),
+                Instr::Lt => key.push_str("lt"),
+                Instr::Gt => key.push_str("gt"),
+                Instr::Le => key.push_str("le"),
+                Instr::Ge => key.push_str("ge"),
+                Instr::Not => key.push_str("not"),
+                Instr::ReturnUnit => key.push_str("ru"),
+                Instr::Jump(t) => key.push_str(&format!("j{}", t)),
+                Instr::JumpIfTrue(t) => key.push_str(&format!("jt{}", t)),
+                Instr::JumpIfFalse(t) => key.push_str(&format!("jf{}", t)),
+                Instr::Return => key.push_str("ret"),
+                Instr::Call(c) => key.push_str(&format!("ca{}", c)),
+                Instr::CallNative(c) => key.push_str(&format!("cn{}", c)),
+                Instr::CallNativeArgs(c, _) => key.push_str(&format!("cna{}", c)),
+                Instr::And => key.push_str("and"),
+                Instr::Or => key.push_str("or"),
+                Instr::BitAnd => key.push_str("band"),
+                Instr::BitOr => key.push_str("bor"),
+                Instr::BitXor => key.push_str("bxor"),
+                Instr::Shl => key.push_str("shl"),
+                Instr::Shr => key.push_str("shr"),
+                Instr::NewObject(t) => key.push_str(&format!("no{}", t)),
+                Instr::NewArray => key.push_str("na"),
+                Instr::NewList => key.push_str("nl"),
+                Instr::NewMap => key.push_str("nm"),
+                Instr::IncRef => key.push_str("ir"),
+                Instr::DecRef => key.push_str("dr"),
+                Instr::Retain => key.push_str("rt"),
+                Instr::Release => key.push_str("rl"),
+                Instr::DropRef => key.push_str("dro"),
+                _ => key.push_str("?"),
+            }
+        }
+        key
+    }
+
+    /// 从缓存获取编译结果（命中则返回，未命中返回 None）
+    fn lookup(&self, key: &str) -> Option<JitEntry> {
+        if let Ok(cache) = self.cache.lock() {
+            if let Some(entry) = cache.get(key) {
+                *self.hits.lock().unwrap() += 1;
+                return Some(*entry);
+            }
+        }
+        *self.misses.lock().unwrap() += 1;
+        None
+    }
+
+    /// 写入缓存
+    fn put(&self, key: String, entry: JitEntry) {
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.insert(key, entry);
+        }
+    }
+
+    /// 缓存统计
+    pub fn stats() -> (u64, u64, usize) {
+        let cache = Self::instance();
+        let hits = *cache.hits.lock().unwrap();
+        let misses = *cache.misses.lock().unwrap();
+        let size = cache.cache.lock().unwrap().len();
+        (hits, misses, size)
+    }
+
+    /// 清除缓存
+    pub fn clear() {
+        if let Ok(mut cache) = Self::instance().cache.lock() {
+            cache.clear();
+        }
+    }
+}
+
+/// 编译函数（带全局缓存）
+///
+/// P8 优化：编译前查全局缓存，命中则复用；未命中则编译并写入缓存。
+pub fn compile_function_cached(
+    idx: usize,
+    f: &DecodedFunction,
+    consts: &[Const],
+    funcs: &[DecodedFunction],
+) -> Option<JitEntry> {
+    let key = GlobalJitCache::compute_key(idx, f, consts);
+
+    /// 从缓存获取编译结果
+    if let Some(entry) = GlobalJitCache::instance().lookup(&key) {
+        return Some(entry);
+    }
+
+    // 2. 未命中，执行编译
+    let result = compile_function(idx, f, consts, funcs);
+
+    // 3. 编译成功则写入缓存
+    if let Some(ref entry) = result {
+        GlobalJitCache::instance().put(key, *entry);
+    }
+
+    result
+}
 
 pub struct JitState {
     compiled: HashMap<usize, JitEntry>,
@@ -171,6 +330,33 @@ fn is_jit_compilable_inner(
             | Instr::Retain
             | Instr::Release
             | Instr::DropRef => {}
+            // Phase D: 并发指令白名单
+            | Instr::ThreadSpawn(_)
+            | Instr::ThreadJoin
+            | Instr::ThreadSleep
+            | Instr::ThreadId
+            | Instr::ThreadParallelism
+            | Instr::MutexNew
+            | Instr::MutexLock
+            | Instr::MutexUnlock
+            | Instr::MutexTryLock
+            | Instr::AtomicNew
+            | Instr::AtomicLoad
+            | Instr::AtomicStore
+            | Instr::AtomicAdd
+            | Instr::AtomicCas
+            | Instr::RwLockNew
+            | Instr::RwLockReadLock
+            | Instr::RwLockWriteLock
+            | Instr::RwLockReadUnlock
+            | Instr::RwLockWriteUnlock
+            | Instr::ChannelNew
+            | Instr::ChannelSend
+            | Instr::ChannelRecv
+            | Instr::CondvarNew
+            | Instr::CondvarWait
+            | Instr::CondvarSignal
+            | Instr::CondvarBroadcast => {}
             Instr::Call(ci) => {
                 if !is_jit_compilable_inner(*ci as usize, consts, funcs, in_progress) {
                     return false;
@@ -314,6 +500,26 @@ mod cranelift_backend {
             };
             let native_dispatch_ref = fb.import_function(native_dispatch_data);
 
+            // Phase D: Import the name-based native dispatcher for concurrent instructions
+            let native_name_dispatch_sig = Signature {
+                params: vec![
+                    AbiParam::new(ptr_ty),     // name_ptr
+                    AbiParam::new(types::I64), // name_len
+                    AbiParam::new(types::I64), // argc
+                    AbiParam::new(ptr_ty),     // args_ptr
+                    AbiParam::new(ptr_ty),     // out_ptr
+                ],
+                returns: vec![],
+                call_conv,
+            };
+            let native_name_dispatch_sig_ref = fb.import_signature(native_name_dispatch_sig);
+            let native_name_dispatch_data = ExtFuncData {
+                name: ExternalName::testcase("aura_jit_call_native_by_name"),
+                signature: native_name_dispatch_sig_ref,
+                colocated: false,
+            };
+            let native_name_dispatch_ref = fb.import_function(native_name_dispatch_data);
+
             if pred_total.get(&0).copied().unwrap_or(0) == 0 {
                 sealed.insert(0);
                 fb.seal_block(entry);
@@ -408,6 +614,7 @@ mod cranelift_backend {
                     jit_entry_sig_ref,
                     dispatch_table,
                     native_dispatch_ref,
+                    native_name_dispatch_ref,
                 );
                 terminated = terminated || term;
 
@@ -520,6 +727,7 @@ mod cranelift_backend {
         jit_entry_sig_ref: cranelift::codegen::ir::SigRef,
         dispatch_table: Variable,
         native_dispatch_entry: cranelift::codegen::ir::FuncRef,
+        native_name_dispatch_entry: cranelift::codegen::ir::FuncRef,
     ) -> bool {
         let i64_ty = types::I64;
         let zero32 = Offset32::new(0);
@@ -757,11 +965,458 @@ mod cranelift_backend {
             Instr::IncRef | Instr::DecRef | Instr::Retain | Instr::Release | Instr::DropRef => {
                 false
             }
+            // ── Phase D: 并发指令 — 通过名称调度器调用 ──
+            Instr::ThreadSpawn(_) => {
+                emit_concurrent_call(
+                    fb,
+                    "aura.lang.concurrent.Thread.spawn",
+                    2,
+                    &mut push,
+                    &mut pop,
+                    stack_slot,
+                    sp,
+                    ptr_ty,
+                    native_name_dispatch_entry,
+                );
+                false
+            }
+            Instr::ThreadJoin => {
+                emit_concurrent_call(
+                    fb,
+                    "aura.lang.concurrent.Thread.join",
+                    1,
+                    &mut push,
+                    &mut pop,
+                    stack_slot,
+                    sp,
+                    ptr_ty,
+                    native_name_dispatch_entry,
+                );
+                false
+            }
+            Instr::ThreadSleep => {
+                emit_concurrent_call(
+                    fb,
+                    "aura.lang.concurrent.Thread.sleep",
+                    1,
+                    &mut push,
+                    &mut pop,
+                    stack_slot,
+                    sp,
+                    ptr_ty,
+                    native_name_dispatch_entry,
+                );
+                false
+            }
+            Instr::ThreadId => {
+                emit_concurrent_call(
+                    fb,
+                    "aura.lang.concurrent.Thread.id",
+                    0,
+                    &mut push,
+                    &mut pop,
+                    stack_slot,
+                    sp,
+                    ptr_ty,
+                    native_name_dispatch_entry,
+                );
+                false
+            }
+            Instr::ThreadParallelism => {
+                emit_concurrent_call(
+                    fb,
+                    "aura.lang.concurrent.Thread.parallelism",
+                    0,
+                    &mut push,
+                    &mut pop,
+                    stack_slot,
+                    sp,
+                    ptr_ty,
+                    native_name_dispatch_entry,
+                );
+                false
+            }
+            Instr::MutexNew => {
+                emit_concurrent_call(
+                    fb,
+                    "aura.lang.concurrent.Mutex.new",
+                    0,
+                    &mut push,
+                    &mut pop,
+                    stack_slot,
+                    sp,
+                    ptr_ty,
+                    native_name_dispatch_entry,
+                );
+                false
+            }
+            Instr::MutexLock => {
+                emit_concurrent_call(
+                    fb,
+                    "aura.lang.concurrent.Mutex.lock",
+                    1,
+                    &mut push,
+                    &mut pop,
+                    stack_slot,
+                    sp,
+                    ptr_ty,
+                    native_name_dispatch_entry,
+                );
+                false
+            }
+            Instr::MutexUnlock => {
+                emit_concurrent_call(
+                    fb,
+                    "aura.lang.concurrent.Mutex.unlock",
+                    1,
+                    &mut push,
+                    &mut pop,
+                    stack_slot,
+                    sp,
+                    ptr_ty,
+                    native_name_dispatch_entry,
+                );
+                false
+            }
+            Instr::MutexTryLock => {
+                emit_concurrent_call(
+                    fb,
+                    "aura.lang.concurrent.Mutex.tryLock",
+                    1,
+                    &mut push,
+                    &mut pop,
+                    stack_slot,
+                    sp,
+                    ptr_ty,
+                    native_name_dispatch_entry,
+                );
+                false
+            }
+            Instr::AtomicNew => {
+                emit_concurrent_call(
+                    fb,
+                    "aura.lang.concurrent.Atomic.new",
+                    1,
+                    &mut push,
+                    &mut pop,
+                    stack_slot,
+                    sp,
+                    ptr_ty,
+                    native_name_dispatch_entry,
+                );
+                false
+            }
+            Instr::AtomicLoad => {
+                emit_concurrent_call(
+                    fb,
+                    "aura.lang.concurrent.Atomic.load",
+                    1,
+                    &mut push,
+                    &mut pop,
+                    stack_slot,
+                    sp,
+                    ptr_ty,
+                    native_name_dispatch_entry,
+                );
+                false
+            }
+            Instr::AtomicStore => {
+                emit_concurrent_call(
+                    fb,
+                    "aura.lang.concurrent.Atomic.store",
+                    2,
+                    &mut push,
+                    &mut pop,
+                    stack_slot,
+                    sp,
+                    ptr_ty,
+                    native_name_dispatch_entry,
+                );
+                false
+            }
+            Instr::AtomicAdd => {
+                emit_concurrent_call(
+                    fb,
+                    "aura.lang.concurrent.Atomic.add",
+                    2,
+                    &mut push,
+                    &mut pop,
+                    stack_slot,
+                    sp,
+                    ptr_ty,
+                    native_name_dispatch_entry,
+                );
+                false
+            }
+            Instr::AtomicCas => {
+                emit_concurrent_call(
+                    fb,
+                    "aura.lang.concurrent.Atomic.cas",
+                    3,
+                    &mut push,
+                    &mut pop,
+                    stack_slot,
+                    sp,
+                    ptr_ty,
+                    native_name_dispatch_entry,
+                );
+                false
+            }
+            Instr::RwLockNew => {
+                emit_concurrent_call(
+                    fb,
+                    "aura.lang.concurrent.RwLock.new",
+                    0,
+                    &mut push,
+                    &mut pop,
+                    stack_slot,
+                    sp,
+                    ptr_ty,
+                    native_name_dispatch_entry,
+                );
+                false
+            }
+            Instr::RwLockReadLock => {
+                emit_concurrent_call(
+                    fb,
+                    "aura.lang.concurrent.RwLock.readLock",
+                    1,
+                    &mut push,
+                    &mut pop,
+                    stack_slot,
+                    sp,
+                    ptr_ty,
+                    native_name_dispatch_entry,
+                );
+                false
+            }
+            Instr::RwLockWriteLock => {
+                emit_concurrent_call(
+                    fb,
+                    "aura.lang.concurrent.RwLock.writeLock",
+                    1,
+                    &mut push,
+                    &mut pop,
+                    stack_slot,
+                    sp,
+                    ptr_ty,
+                    native_name_dispatch_entry,
+                );
+                false
+            }
+            Instr::RwLockReadUnlock => {
+                emit_concurrent_call(
+                    fb,
+                    "aura.lang.concurrent.RwLock.readUnlock",
+                    1,
+                    &mut push,
+                    &mut pop,
+                    stack_slot,
+                    sp,
+                    ptr_ty,
+                    native_name_dispatch_entry,
+                );
+                false
+            }
+            Instr::RwLockWriteUnlock => {
+                emit_concurrent_call(
+                    fb,
+                    "aura.lang.concurrent.RwLock.writeUnlock",
+                    1,
+                    &mut push,
+                    &mut pop,
+                    stack_slot,
+                    sp,
+                    ptr_ty,
+                    native_name_dispatch_entry,
+                );
+                false
+            }
+            Instr::ChannelNew => {
+                emit_concurrent_call(
+                    fb,
+                    "aura.lang.concurrent.Channel.newChannel",
+                    1,
+                    &mut push,
+                    &mut pop,
+                    stack_slot,
+                    sp,
+                    ptr_ty,
+                    native_name_dispatch_entry,
+                );
+                false
+            }
+            Instr::ChannelSend => {
+                emit_concurrent_call(
+                    fb,
+                    "aura.lang.concurrent.Channel.channelSend",
+                    2,
+                    &mut push,
+                    &mut pop,
+                    stack_slot,
+                    sp,
+                    ptr_ty,
+                    native_name_dispatch_entry,
+                );
+                false
+            }
+            Instr::ChannelRecv => {
+                emit_concurrent_call(
+                    fb,
+                    "aura.lang.concurrent.Channel.channelRecv",
+                    1,
+                    &mut push,
+                    &mut pop,
+                    stack_slot,
+                    sp,
+                    ptr_ty,
+                    native_name_dispatch_entry,
+                );
+                false
+            }
+            Instr::CondvarNew => {
+                emit_concurrent_call(
+                    fb,
+                    "aura.lang.concurrent.Condvar.new",
+                    0,
+                    &mut push,
+                    &mut pop,
+                    stack_slot,
+                    sp,
+                    ptr_ty,
+                    native_name_dispatch_entry,
+                );
+                false
+            }
+            Instr::CondvarWait => {
+                emit_concurrent_call(
+                    fb,
+                    "aura.lang.concurrent.Condvar.wait",
+                    2,
+                    &mut push,
+                    &mut pop,
+                    stack_slot,
+                    sp,
+                    ptr_ty,
+                    native_name_dispatch_entry,
+                );
+                false
+            }
+            Instr::CondvarSignal => {
+                emit_concurrent_call(
+                    fb,
+                    "aura.lang.concurrent.Condvar.signal",
+                    1,
+                    &mut push,
+                    &mut pop,
+                    stack_slot,
+                    sp,
+                    ptr_ty,
+                    native_name_dispatch_entry,
+                );
+                false
+            }
+            Instr::CondvarBroadcast => {
+                emit_concurrent_call(
+                    fb,
+                    "aura.lang.concurrent.Condvar.broadcast",
+                    1,
+                    &mut push,
+                    &mut pop,
+                    stack_slot,
+                    sp,
+                    ptr_ty,
+                    native_name_dispatch_entry,
+                );
+                false
+            }
             _ => {
                 fb.ins().trap(TrapCode::unwrap_user(2));
                 true
             }
         }
+    }
+
+    /// Phase D: 并发指令 JIT 发射辅助函数
+    ///
+    /// 通过名称调度器 (`aura_jit_call_native_by_name`) 调用并发原生函数。
+    /// 函数名作为栈上常量传递（避免 Cranelift 全局常量 API 兼容性差异）。
+    ///
+    /// 性能优化说明：
+    /// - 当前方案：每次调用将函数名字节写入栈，产生 N 条 store 指令（N = 函数名长度）
+    /// - 未来优化：使用 Cranelift `declare_data` + `define_data` API 创建只读数据段，
+    ///   通过 `fb.ins().global_value(gv, Offset32::new(0))` 直接加载地址，消除栈写入开销
+    /// - 影响评估：并发指令本身开销大（涉及内核调用），栈写入开销可忽略
+    fn emit_concurrent_call(
+        fb: &mut FunctionBuilder,
+        func_name: &str,
+        arg_count: i64,
+        push: &mut dyn FnMut(&mut FunctionBuilder, IrValue, IrValue),
+        _pop: &mut dyn FnMut(&mut FunctionBuilder) -> (IrValue, IrValue),
+        stack_slot: &cranelift::codegen::ir::StackSlot,
+        sp: Variable,
+        ptr_ty: types::Type,
+        native_name_dispatch_entry: cranelift::codegen::ir::FuncRef,
+    ) {
+        let i64_ty = types::I64;
+        let zero32 = Offset32::new(0);
+        let eight32 = Offset32::new(8);
+
+        // 在栈上分配空间存储函数名（最大 64 字节）
+        let name_size = std::cmp::max(func_name.len(), 16);
+        let name_slot = fb.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            name_size as u32,
+            4,
+        ));
+        let name_base = fb.ins().stack_addr(ptr_ty, name_slot, 0);
+
+        // 写入函数名字节到栈
+        let bytes = func_name.as_bytes();
+        for (i, &b) in bytes.iter().enumerate() {
+            let val = fb.ins().iconst(types::I8, b as i64);
+            let offset = i as i64;
+            let addr = fb.ins().iadd_imm(name_base, offset);
+            fb.ins().store(MemFlags::new(), val, addr, Offset32::new(0));
+        }
+        // 写入 null 终止符
+        let null_val = fb.ins().iconst(types::I8, 0i64);
+        let null_offset = func_name.len() as i64;
+        let null_addr = fb.ins().iadd_imm(name_base, null_offset);
+        fb.ins().store(MemFlags::new(), null_val, null_addr, Offset32::new(0));
+
+        // 准备调用栈帧
+        let cur_sp = fb.use_var(sp);
+        let args_sp = fb.ins().iadd_imm(cur_sp, -(arg_count));
+
+        let base = fb.ins().stack_addr(ptr_ty, *stack_slot, 0);
+        let args_off = fb.ins().imul_imm(args_sp, VALUE_BYTES);
+        let args_ptr_val = fb.ins().iadd(base, args_off);
+
+        let out_off = fb.ins().imul_imm(cur_sp, VALUE_BYTES);
+        let out_ptr_val = fb.ins().iadd(base, out_off);
+
+        let argc_val = fb.ins().iconst(types::I64, arg_count);
+        let name_len_val = fb.ins().iconst(types::I64, func_name.len() as i64);
+
+        // 调用名称调度器
+        fb.ins().call(
+            native_name_dispatch_entry,
+            &[
+                name_base,
+                name_len_val,
+                argc_val,
+                args_ptr_val,
+                out_ptr_val,
+            ],
+        );
+
+        fb.def_var(sp, args_sp);
+
+        // 从 out_ptr 加载返回值
+        let ret_tag = fb.ins().load(i64_ty, MemFlags::new(), out_ptr_val, zero32);
+        let ret_payload = fb.ins().load(i64_ty, MemFlags::new(), out_ptr_val, eight32);
+        push(fb, ret_tag, ret_payload);
     }
 
     fn bin_int<F>(

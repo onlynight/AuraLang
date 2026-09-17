@@ -34,7 +34,7 @@ fn llc_available() -> bool {
 }
 
 fn compile_with_aot_embed(source: &str) -> compiler::codegen::BytecodeModule {
-    let module = compile_source(source).expect("字节码编译应成功");
+    let module = compile_source(source).expect("bytecode compilation should succeed");
     let mut lexer = Lexer::new(source);
     let tokens = lexer.tokenize();
     assert!(lexer.errors().is_empty());
@@ -51,7 +51,7 @@ fn compile_with_aot_embed(source: &str) -> compiler::codegen::BytecodeModule {
         std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
     ));
-    let result = embed_aot(module, &hir, options, &work_dir).expect("AOT 嵌入失败");
+    let result = embed_aot(module, &hir, options, &work_dir).expect("AOT embedding failed");
     let _ = std::fs::remove_dir_all(&work_dir);
     result.module
 }
@@ -60,7 +60,7 @@ fn compile_with_aot_embed(source: &str) -> compiler::codegen::BytecodeModule {
 #[test]
 fn bench_function_call() {
     if !llc_available() {
-        eprintln!("skipped: LLVM 不可用");
+        eprintln!("skipped: LLVM not available");
         return;
     }
 
@@ -86,23 +86,26 @@ fn bench_function_call() {
     }
     let aot_elapsed = aot_start.elapsed();
 
-    println!("=== 函数调用 性能基准 ({} 次迭代) ===", ITERATIONS);
     println!(
-        "  VM  解释执行: {:.2} ms",
+        "=== Function call benchmark ({} iterations) ===",
+        ITERATIONS
+    );
+    println!(
+        "  VM  interpreted: {:.2} ms",
         vm_elapsed.as_secs_f64() * 1000.0
     );
     println!(
-        "  AOT 机器码:   {:.2} ms",
+        "  AOT machine code:   {:.2} ms",
         aot_elapsed.as_secs_f64() * 1000.0
     );
     let speedup = vm_elapsed.as_secs_f64() / aot_elapsed.as_secs_f64();
-    println!("  加速比:       {:.2}x", speedup);
+    println!("  speedup:       {:.2}x", speedup);
 }
 
 #[test]
 fn bench_accumulate_loop() {
     if !llc_available() {
-        eprintln!("skipped: LLVM 不可用");
+        eprintln!("skipped: LLVM not available");
         return;
     }
     // 仅验证编译成功，不实际运行（避免 VM 清理时崩溃）

@@ -1,0 +1,250 @@
+// aura:///loom/aura/lang/loom/Manifest.aura
+package aura.lang.loom
+
+// ── 标准库 ──
+import aura.lang.std.String
+
+// ── 项目内模块 ──
+import aura.lang.loom.FileIO
+import aura.lang.loom.LoomError
+
+// ═══════════════════════════════════════════════════════════════
+// Manifest（aura.toml 解析）
+// ═══════════════════════════════════════════════════════════════
+
+class Manifest {
+    val name: String
+    var version: String = "0.1.0"
+    var description: String = ""
+    var authors: List<String> = mutableListOf()
+    var license: String = ""
+    var repository: String = ""
+
+    var entry: String = "src/main.aura"
+    var outDir: String = "target"
+    var cacheDir: String = "target/cache"
+    var compileMode: String = "aot"  // aot/jit/vm
+    var ffiMode: String = "native"   // native/cffi
+
+    var dependencies: List<String> = mutableListOf()
+    var devDependencies: List<String> = mutableListOf()
+    var buildDependencies: List<String> = mutableListOf()
+
+    var srcDirs: List<String> = mutableListOf()
+    var testDirs: List<String> = mutableListOf()
+    var benchDirs: List<String> = mutableListOf()
+
+    var buildTasks: List<String> = mutableListOf()
+    var plugins: List<String> = mutableListOf()
+    var workspaceMembers: List<String> = mutableListOf()
+
+    val path: String
+
+    fun Manifest(name: String, path: String) {
+        this.name = name
+        this.path = path
+        this.srcDirs = mutableListOf()
+        this.srcDirs.add("src")
+        this.testDirs = mutableListOf()
+        this.testDirs.add("tests")
+    }
+
+    fun addDependency(dep: String): Unit { dependencies.add(dep) }
+    fun addDevDependency(dep: String): Unit { devDependencies.add(dep) }
+    fun addBuildDependency(dep: String): Unit { buildDependencies.add(dep) }
+    fun addBuildTask(task: String): Unit { buildTasks.add(task) }
+    fun addPlugin(plugin: String): Unit { plugins.add(plugin) }
+    fun addWorkspaceMember(member: String): Unit { workspaceMembers.add(member) }
+    fun addSrcDir(dir: String): Unit { srcDirs.add(dir) }
+    fun addTestDir(dir: String): Unit { testDirs.add(dir) }
+
+    fun save(): Unit {
+        var content: String = ""
+        content = content + "# Aura project manifest\n"
+        content = content + "schema-version = \"1.0\"\n"
+        content = content + "name = \"" + name + "\"\n"
+        content = content + "version = \"" + version + "\"\n"
+        if (description.length > 0) {
+            content = content + "description = \"" + description + "\"\n"
+        }
+        if (authors.size > 0) {
+            content = content + "authors = ["
+            var i: Int = 0
+            while (i < authors.size) {
+                if (i > 0) { content = content + ", " }
+                content = content + "\"" + authors[i] + "\""
+                i = i + 1
+            }
+            content = content + "]\n"
+        }
+        if (license.length > 0) {
+            content = content + "license = \"" + license + "\"\n"
+        }
+        if (repository.length > 0) {
+            content = content + "repository = \"" + repository + "\"\n"
+        }
+        content = content + "entry = \"" + entry + "\"\n"
+        content = content + "out-dir = \"" + outDir + "\"\n"
+        content = content + "cache-dir = \"" + cacheDir + "\"\n"
+        content = content + "compile-mode = \"" + compileMode + "\"\n"
+        content = content + "ffi-mode = \"" + ffiMode + "\"\n"
+        if (srcDirs.size > 0) {
+            content = content + "src-dirs = ["
+            var j: Int = 0
+            while (j < srcDirs.size) {
+                if (j > 0) { content = content + ", " }
+                content = content + "\"" + srcDirs[j] + "\""
+                j = j + 1
+            }
+            content = content + "]\n"
+        }
+        if (testDirs.size > 0) {
+            content = content + "test-dirs = ["
+            var k: Int = 0
+            while (k < testDirs.size) {
+                if (k > 0) { content = content + ", " }
+                content = content + "\"" + testDirs[k] + "\""
+                k = k + 1
+            }
+            content = content + "]\n"
+        }
+        if (dependencies.size > 0) {
+            content = content + "[dependencies]\n"
+            var l: Int = 0
+            while (l < dependencies.size) {
+                content = content + dependencies[l] + "\n"
+                l = l + 1
+            }
+        }
+        if (devDependencies.size > 0) {
+            content = content + "[dev-dependencies]\n"
+            var m: Int = 0
+            while (m < devDependencies.size) {
+                content = content + devDependencies[m] + "\n"
+                m = m + 1
+            }
+        }
+        if (buildDependencies.size > 0) {
+            content = content + "[build-dependencies]\n"
+            var n: Int = 0
+            while (n < buildDependencies.size) {
+                content = content + buildDependencies[n] + "\n"
+                n = n + 1
+            }
+        }
+        if (buildTasks.size > 0) {
+            content = content + "[build.tasks]\n"
+            var o: Int = 0
+            while (o < buildTasks.size) {
+                content = content + "  \"" + buildTasks[o] + "\"\n"
+                o = o + 1
+            }
+        }
+        if (plugins.size > 0) {
+            content = content + "[plugins]\n"
+            var p: Int = 0
+            while (p < plugins.size) {
+                content = content + plugins[p] + "\n"
+                p = p + 1
+            }
+        }
+        if (workspaceMembers.size > 0) {
+            content = content + "[workspace.members]\n"
+            var q: Int = 0
+            while (q < workspaceMembers.size) {
+                content = content + "  \"" + workspaceMembers[q] + "\"\n"
+                q = q + 1
+            }
+        }
+        loomWriteText(path, content)
+    }
+
+    fun load(): Int {
+        if (!loomExists(path)) {
+            return LoomError.NOT_FOUND
+        }
+        val content: String = loomReadText(path)
+        return parseManifest(content)
+    }
+
+    private fun parseManifest(content: String): Int {
+        val lines: List<String> = String.splitLines(content)
+        var i: Int = 0
+        while (i < lines.size) {
+            val line: String = String.trim(lines[i])
+            if (line.length == 0 || line.startsWith("#")) {
+                i = i + 1
+                continue
+            }
+            if (line.startsWith("name")) {
+                val colonIdx: Int = line.indexOf("=")
+                if (colonIdx > 0) {
+                    val value: String = String.trim(String.substring(line, colonIdx + 1))
+                    this.name = String.unquote(value)
+                }
+            } else if (line.startsWith("version")) {
+                val colonIdx: Int = line.indexOf("=")
+                if (colonIdx > 0) {
+                    val value: String = String.trim(String.substring(line, colonIdx + 1))
+                    this.version = String.unquote(value)
+                }
+            } else if (line.startsWith("description")) {
+                val colonIdx: Int = line.indexOf("=")
+                if (colonIdx > 0) {
+                    val value: String = String.trim(String.substring(line, colonIdx + 1))
+                    this.description = String.unquote(value)
+                }
+            } else if (line.startsWith("entry")) {
+                val colonIdx: Int = line.indexOf("=")
+                if (colonIdx > 0) {
+                    val value: String = String.trim(String.substring(line, colonIdx + 1))
+                    this.entry = String.unquote(value)
+                }
+            } else if (line.startsWith("out-dir")) {
+                val colonIdx: Int = line.indexOf("=")
+                if (colonIdx > 0) {
+                    val value: String = String.trim(String.substring(line, colonIdx + 1))
+                    this.outDir = String.unquote(value)
+                }
+            } else if (line.startsWith("cache-dir")) {
+                val colonIdx: Int = line.indexOf("=")
+                if (colonIdx > 0) {
+                    val value: String = String.trim(String.substring(line, colonIdx + 1))
+                    this.cacheDir = String.unquote(value)
+                }
+            } else if (line.startsWith("compile-mode")) {
+                val colonIdx: Int = line.indexOf("=")
+                if (colonIdx > 0) {
+                    val value: String = String.trim(String.substring(line, colonIdx + 1))
+                    this.compileMode = String.unquote(value)
+                }
+            } else if (line.startsWith("ffi-mode")) {
+                val colonIdx: Int = line.indexOf("=")
+                if (colonIdx > 0) {
+                    val value: String = String.trim(String.substring(line, colonIdx + 1))
+                    this.ffiMode = String.unquote(value)
+                }
+            }
+            i = i + 1
+        }
+        return LoomError.OK
+    }
+
+    private fun validate(): Int {
+        if (name.length == 0) { return LoomError.INVALID_CONFIG }
+        if (version.length == 0) { return LoomError.INVALID_CONFIG }
+        return LoomError.OK
+    }
+
+    fun toStr(): String {
+        var s: String = "Manifest{name='" + name + "', version='" + version + "'"
+        if (description.length > 0) {
+            s = s + ", description='" + description + "'"
+        }
+        if (dependencies.size > 0) {
+            s = s + ", deps=" + dependencies.size
+        }
+        s = s + "}"
+        return s
+    }
+}

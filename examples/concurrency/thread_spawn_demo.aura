@@ -1,0 +1,24 @@
+// aura:///examples/concurrency/thread_spawn_demo.aura
+// 真实多线程演示：用 fnIndex 取函数表下标，在新 OS 线程上执行 Aura 函数。
+//
+// 运行：aura run examples/concurrency/thread_spawn_demo.aura
+
+import aura.lang.concurrent.Thread
+
+/// 线程体：在独立 OS 线程的独立 VM 上执行
+fun worker(n: Int): Int {
+    return n * 2
+}
+
+fun main(): Int {
+    val idx = fnIndex("worker")
+    println("fnIndex(\"worker\") = " + idx)
+
+    val t = Thread.spawn(idx, 21)
+    println("thread id = " + t)
+
+    val r = Thread.join(t)
+    println("join result = " + r)
+
+    return 0
+}

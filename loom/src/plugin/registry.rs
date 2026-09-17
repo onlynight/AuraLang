@@ -65,7 +65,7 @@ impl PluginRegistry {
             let plugin_path = project_dir.join(&config.path);
             let plugin = load_external_plugin(&plugin_path)?;
             tracing::info!(
-                "已加载外部插件: {} v{} ({})",
+                "Loaded external plugin: {} v{} ({})",
                 name,
                 plugin.version(),
                 plugin_path.display()
@@ -73,7 +73,10 @@ impl PluginRegistry {
             registry.register(plugin);
         }
 
-        tracing::info!("插件加载完成: {} 个插件", registry.plugins.len());
+        tracing::info!(
+            "Plugin loading complete: {} plugins",
+            registry.plugins.len()
+        );
         Ok(registry)
     }
 
@@ -85,7 +88,7 @@ impl PluginRegistry {
         let index = self.plugins.len();
         self.by_name.insert(name.clone(), index);
         self.plugins.push(plugin);
-        tracing::debug!("注册插件: {} v{} [{}]", name, version, kind);
+        tracing::debug!("Registered plugin: {} v{} [{}]", name, version, kind);
     }
 
     /// 获取插件数量
@@ -119,11 +122,11 @@ impl PluginRegistry {
     /// 设置默认配置等。
     pub fn configure_all(&self, ctx: &mut PluginContext) -> Result<(), LoomError> {
         for plugin in &self.plugins {
-            tracing::debug!("配置插件: {}", plugin.name());
+            tracing::debug!("Configuring plugin: {}", plugin.name());
             plugin.configure(ctx)?;
         }
         tracing::info!(
-            "插件配置完成: {} 个插件注册了 {} 个任务",
+            "Plugin configuration complete: {} plugins registered {} tasks",
             self.plugins.len(),
             ctx.tasks.len()
         );
@@ -174,7 +177,7 @@ impl PluginRegistry {
         }
 
         Err(LoomError::Plugin(format!(
-            "找不到执行任务 '{}' 的插件",
+            "Cannot find plugin to execute task '{}'",
             task_name
         )))
     }
@@ -391,7 +394,7 @@ mod tests {
         let result = registry.execute_task("nonexistent", &ctx);
         assert!(result.is_err());
         let err = if let Err(e) = result { e.to_string() } else { unreachable!() };
-        assert!(err.contains("找不到"));
+        assert!(err.contains("Cannot find plugin"));
     }
 
     #[test]
@@ -485,7 +488,7 @@ aura-stdlib = true
         let result = PluginRegistry::from_manifest(&manifest, tmp.path());
         assert!(result.is_err());
         let err = if let Err(e) = result { e.to_string() } else { unreachable!() };
-        assert!(err.contains("不存在"));
+        assert!(err.contains("not found"));
     }
 
     #[test]
@@ -579,7 +582,7 @@ aura-format = true
         assert!(result.success);
         assert!(
             result.output.contains("doc-gen")
-                || result.output.contains("文档")
+                || result.output.contains("doc")
                 || result.output.contains("src")
         );
     }

@@ -1,0 +1,74 @@
+// aura:///loom/advanced/aura/lang/loom/advanced/CiConfig.aura
+package aura.lang.loom.advanced
+// Phase E.4: CI/CD 配置
+// 对标 Rust: ci/mod.rs, ci/config.rs
+//
+// @since 0.6
+
+import aura.lang.std.String
+import aura.lang.std.IO
+import aura.lang.std.Collections
+import aura.lang.loom
+
+// ═══════════════════════════════════════════════════════════════
+// CI/CD 配置
+// 对标 Rust: ci/mod.rs, ci/config.rs
+// ═══════════════════════════════════════════════════════════════
+
+class CiConfig {
+    private var phases: List<String> = mutableListOf()
+    private var timeout: Int = 300  // seconds
+    private var parallel: Boolean = false
+    private var notify: List<String> = mutableListOf()
+
+    fun CiConfig() {
+        this.phases = mutableListOf()
+        this.notify = mutableListOf()
+    }
+
+    fun addPhase(phase: String): Unit {
+        phases.add(phase)
+    }
+
+    fun addNotify(target: String): Unit {
+        notify.add(target)
+    }
+
+    fun run(executor: TaskExecutor): Int {
+        IO.println("[ci] Starting CI pipeline")
+        IO.println("[ci]   Timeout: " + timeout + "s")
+        IO.println("[ci]   Parallel: " + parallel)
+
+        var i: Int = 0
+        while (i < phases.size) {
+            val phase: String = phases[i]
+            IO.println("[ci] Running phase: " + phase)
+
+            // 执行阶段任务
+            val result: Int = executor.executeByName(phase)
+            if (result != 0) {
+                IO.println("[ci] Phase failed: " + phase)
+                return result
+            }
+
+            IO.println("[ci] Phase passed: " + phase)
+            i = i + 1
+        }
+
+        IO.println("[ci] CI pipeline completed")
+
+        // 发送通知
+        var j: Int = 0
+        while (j < notify.size) {
+            val target: String = notify[j]
+            IO.println("[ci] Notifying: " + target)
+            j = j + 1
+        }
+
+        return 0
+    }
+
+    fun toStr(): String {
+        return "CiConfig{phases=" + phases.size + ", timeout=" + timeout + "}"
+    }
+}

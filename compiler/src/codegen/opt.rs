@@ -94,11 +94,13 @@ fn fold_stmt(s: &HirStmt) -> HirStmt {
         HirStmt::Try {
             body,
             catch_var,
+            catch_type,
             catch_body,
             finally,
         } => HirStmt::Try {
             body: fold_block(body),
             catch_var: catch_var.clone(),
+            catch_type: catch_type.clone(),
             catch_body: fold_block(catch_body),
             finally: finally.as_ref().map(fold_block),
         },

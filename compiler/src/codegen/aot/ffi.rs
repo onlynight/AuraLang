@@ -23,30 +23,32 @@ impl<'a> FfiGenerator<'a> {
     }
 
     /// 生成 FFI 函数声明的 LLVM IR 文本
-    pub fn generate_declarations(&self, funcs: &[HirFunction]) -> Result<Vec<String>, AotError> {
+    pub fn generate_declarations(&self, funcs: &[&HirFunction]) -> Result<Vec<String>, AotError> {
         let mut decls = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for func in funcs {
             let sym = crate::codegen::aot::types::sanitizellvm(&func.name);
+            // 将新命名转换为旧 C 符号名（与 aura_std_cffi.c 一致）
+            let legacy_sym = crate::codegen::aot::runtime::translate_to_legacy_c(&sym);
             // 内置 runtime 函数已由 emit_runtime 统一声明，跳过避免重定义
-            if crate::codegen::aot::runtime::is_runtime_function(&sym) {
+            if crate::codegen::aot::runtime::is_runtime_function(&legacy_sym) {
                 continue;
             }
             // 去重：不同原生函数名清洗后可能得到同一符号（如 aura.lang.std.Math.sin / aura_math_sin）
-            if !seen.insert(sym) {
+            if !seen.insert(legacy_sym.clone()) {
                 continue;
             }
-            decls.push(self.generate_extern_function(func));
+            decls.push(self.generate_extern_function(func, &legacy_sym));
         }
         Ok(decls)
     }
 
-    fn generate_extern_function(&self, func: &HirFunction) -> String {
+    fn generate_extern_function(&self, func: &HirFunction, legacy_sym: &str) -> String {
         let sym = crate::codegen::aot::types::sanitizellvm(&func.name);
         // C FFI 实现函数：使用真实 C ABI 签名（与 aura_std_cffi.c 一致）
-        if let Some((ret, params)) = crate::codegen::aot::runtime::cffi_signature(&sym) {
+        if let Some((ret, params)) = crate::codegen::aot::runtime::cffi_signature(&legacy_sym) {
             let params_str = params.join(", ");
-            return format!("declare {} @{}({})\n", ret, sym, params_str);
+            return format!("declare {} @{}({})\n", ret, legacy_sym, params_str);
         }
         let ret_ty = self
             .type_mapper
@@ -78,7 +80,7 @@ impl<'a> FfiGenerator<'a> {
                 }
             }
             FfiAbi::Aura => {
-                comment = "; extern interface: AOT direct call (JitValue ABI)\n".to_string();
+                comment = "; extern object: AOT direct call (JitValue ABI)\n".to_string();
                 if let Some(ref lib) = func.ffi_lib {
                     comment.push_str(&format!(";   library: {}\n", lib));
                 }
@@ -90,8 +92,8 @@ impl<'a> FfiGenerator<'a> {
             "{comment}declare {ret_str} @{name}({params_str})\n",
             comment = comment,
             ret_str = ret_str,
-            // 符号名必须与调用点一致（点号等非法字符替换为下划线，如 aura.lang.std.Coroutine.spawn → aura_concurrent_spawn）
-            name = crate::codegen::aot::types::sanitizellvm(&func.name),
+            // 符号名必须与调用点一致（使用旧 C 符号名，与 aura_std_cffi.c 一致）
+            name = legacy_sym,
             params_str = params_str,
         )
     }
@@ -141,8 +143,9 @@ mod tests {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         };
-        let decls = ffi_gen.generate_declarations(&[func]).unwrap();
+        let decls = ffi_gen.generate_declarations(&[&func]).unwrap();
         assert_eq!(decls.len(), 1);
         assert!(decls[0].contains("DrawCircle"));
         assert!(decls[0].contains("void"));

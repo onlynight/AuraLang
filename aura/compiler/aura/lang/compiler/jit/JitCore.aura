@@ -15,6 +15,7 @@ package aura.lang.compiler.jit
 //         CONST_NULL、LOAD_LOCAL/STORE_LOCAL/DECL_LOCAL <slot>、POP、DUP、
 //         ADD/SUB/MUL/DIV/MOD/EQ/NEQ/LT/GT/LE/GE/AND/OR/NOT/NEG/POS、
 //         JUMP/JUMP_IF_FALSE/JUMP_IF_TRUE <abs>、RETURN
+//
 //   拒绝（→ deopt）：CALL/CALL_METHOD/GET_FIELD/SET_FIELD/NEW_OBJECT 等
 //
 //   常量池索引在预解码时解析为字面量（执行期免查表）；CALL 等不可编译结构
@@ -26,37 +27,50 @@ package aura.lang.compiler.jit
 
 import aura.lang.std.String
 
-/// 默认热点阈值（与 Rust `JitConfig::default` 一致）。
-fun jitCoreDefaultThreshold(): Int {
-    return 1000
-}
+/// 最小引导 JIT 工具函数集合。
+object JitCoreUtils {
 
-/// 相对偏移 → 绝对目标（相对「下一条指令」）；非法返回 -1。
-fun jitCoreResolveBranch(ip: Int, off: Int): Int {
-    val target: Int = ip + 1 + off
-    if (target < 0) {
-        return -1
+    /// 默认热点阈值（与 Rust `JitConfig::default` 一致）。
+    fun jitCoreDefaultThreshold(): Int {
+        return 1000
     }
-    return target
-}
 
-/// 统计函数体字节码中出现的最大局部槽位（`LOAD_LOCAL`/`STORE_LOCAL`/`DECL_LOCAL`）。
-fun jitMaxSlot(body: String): Int {
-    val n: Int = jitLineCount(body)
-    var maxSlot: Int = -1
-    var i: Int = 0
-    while (i < n) {
-        val line: String = jitLineAt(body, i)
-        val op: String = jitOpcodeOf(line)
-        if (op == "LOAD_LOCAL" || op == "STORE_LOCAL" || op == "DECL_LOCAL") {
-            val s: Int = jitParseInt(jitArgOf(line))
-            if (s > maxSlot) {
-                maxSlot = s
-            }
+    /// 相对偏移 → 绝对目标（相对「下一条指令」）；非法返回 -1。
+    fun jitCoreResolveBranch(ip: Int, off: Int): Int {
+        val target: Int = ip + 1 + off
+        if (target < 0) {
+            return -1
         }
-        i = i + 1
+        return target
     }
-    return maxSlot
+
+    /// 统计函数体字节码中出现的最大局部槽位（`LOAD_LOCAL`/`STORE_LOCAL`/`DECL_LOCAL`）。
+    fun jitMaxSlot(body: String): Int {
+        val n: Int = jitLineCount(body)
+        var maxSlot: Int = -1
+        var i: Int = 0
+        while (i < n) {
+            val line: String = jitLineAt(body, i)
+            val op: String = jitOpcodeOf(line)
+            if (op == "LOAD_LOCAL" || op == "STORE_LOCAL" || op == "DECL_LOCAL") {
+                val s: Int = jitParseInt(jitArgOf(line))
+                if (s > maxSlot) {
+                    maxSlot = s
+                }
+            }
+            i = i + 1
+        }
+        return maxSlot
+    }
+
+    /// 执行预解码单元。
+    ///
+    /// 任何运行期异常前置条件（栈下溢、除零）返回 `deopt`，
+    /// 由 VM 回退解释器并产生精确的错误信息。
+    fun jitCoreExecute(code: String, args: String, localCount: Int): String {
+        val vm: JitCoreVm = JitCoreVm()
+        return vm.run(code, args, localCount)
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -270,7 +284,7 @@ class JitCoreCompiler {
             i = i + 1
         }
 
-        val locals: Int = jitMaxSlot(body) + 1
+        val locals: Int = JitCoreUtils.jitMaxSlot(body) + 1
         val ok: Boolean = this.tryCompile(func, funcName, params, locals, body, bodyStart, consts)
         if (ok) {
             this.unitLocalsMap = jitRecordSet(this.unitLocalsMap, toStr(func), toStr(locals))
@@ -337,7 +351,7 @@ class JitCoreCompiler {
 
     /// 执行已编译单元；返回结果文本或 `deopt:<原因>`。
     fun execute(func: Int, args: String, localCount: Int): String {
-        val r: String = jitCoreExecute(this.unitCodeOf(func), args, localCount)
+        val r: String = JitCoreUtils.jitCoreExecute(this.unitCodeOf(func), args, localCount)
         if (jitSlice(r, 0, 5) == "deopt") {
             this.deopts = this.deopts + 1
         }
@@ -346,15 +360,6 @@ class JitCoreCompiler {
 }
 
 // ── 执行 JIT 单元（直接派发，无指令解码、无符号查找）──
-
-/// 执行预解码单元。
-///
-/// 任何运行期异常前置条件（栈下溢、除零）返回 `deopt`，
-/// 由 VM 回退解释器并产生精确的错误信息。
-fun jitCoreExecute(code: String, args: String, localCount: Int): String {
-    val vm: JitCoreVm = JitCoreVm()
-    return vm.run(code, args, localCount)
-}
 
 /// 最小引导执行器（与 VM 共享同一字节码语义）。
 class JitCoreVm {
@@ -471,32 +476,25 @@ class JitCoreVm {
         if (op == "CONST_INT" || op == "CONST_FLOAT" || op == "CONST_STRING") {
             this.push(arg)
             return
-        }
-        if (op == "CONST_BOOL") {
+        } else if (op == "CONST_BOOL") {
             this.push(arg)
             return
-        }
-        if (op == "CONST_NULL") {
+        } else if (op == "CONST_NULL") {
             this.push("null")
             return
-        }
-        if (op == "LOAD_LOCAL") {
+        } else if (op == "LOAD_LOCAL") {
             this.push(jitRecordGet(this.locals, arg))
             return
-        }
-        if (op == "STORE_LOCAL") {
+        } else if (op == "STORE_LOCAL") {
             this.locals = jitRecordSet(this.locals, arg, this.pop())
             return
-        }
-        if (op == "DECL_LOCAL") {
+        } else if (op == "DECL_LOCAL") {
             this.locals = jitRecordSet(this.locals, arg, "0")
             return
-        }
-        if (op == "POP") {
+        } else if (op == "POP") {
             this.pop()
             return
-        }
-        if (op == "DUP") {
+        } else if (op == "DUP") {
             val n: Int = jitLineCount(this.stack)
             if (n == 0) {
                 this.error = "stack-underflow"
@@ -505,26 +503,22 @@ class JitCoreVm {
             }
             this.push(jitLineAt(this.stack, n - 1))
             return
-        }
-        if (op == "ADD" || op == "SUB" || op == "MUL" || op == "DIV" || op == "MOD") {
+        } else if (op == "ADD" || op == "SUB" || op == "MUL" || op == "DIV" || op == "MOD") {
             val b: Int = jitParseInt(this.pop())
             val a: Int = jitParseInt(this.pop())
             this.push(this.arith(op, a, b))
             return
-        }
-        if (op == "EQ") {
+        } else if (op == "EQ") {
             val b: String = this.pop()
             val a: String = this.pop()
             this.push(this.boolStr(a == b))
             return
-        }
-        if (op == "NEQ") {
+        } else if (op == "NEQ") {
             val b: String = this.pop()
             val a: String = this.pop()
             this.push(this.boolStr(a != b))
             return
-        }
-        if (op == "LT" || op == "GT" || op == "LE" || op == "GE") {
+        } else if (op == "LT" || op == "GT" || op == "LE" || op == "GE") {
             val b: Int = jitParseInt(this.pop())
             val a: Int = jitParseInt(this.pop())
             if (op == "LT") {
@@ -537,71 +531,62 @@ class JitCoreVm {
                 this.push(this.boolStr(a >= b))
             }
             return
-        }
-        if (op == "NOT") {
+        } else if (op == "NOT") {
             this.push(this.boolStr(!this.truthy(this.pop())))
             return
-        }
-        if (op == "NEG") {
+        } else if (op == "NEG") {
             this.push(toStr(0 - jitParseInt(this.pop())))
             return
-        }
-        if (op == "POS") {
+        } else if (op == "POS") {
             // 恒等
             return
-        }
-        if (op == "JUMP") {
+        } else if (op == "JUMP") {
             this.ip = jitParseInt(arg)
             return
-        }
-        if (op == "JUMP_IF_FALSE") {
+        } else if (op == "JUMP_IF_FALSE") {
             if (!this.truthy(this.pop())) {
                 this.ip = jitParseInt(arg)
             }
             return
-        }
-        if (op == "JUMP_IF_TRUE") {
+        } else if (op == "JUMP_IF_TRUE") {
             if (this.truthy(this.pop())) {
                 this.ip = jitParseInt(arg)
             }
             return
-        }
-        if (op == "RETURN") {
+        } else if (op == "RETURN") {
             this.result = this.pop()
             this.halt = true
             return
+        } else {
+            this.error = "unsupported:" + op
+            this.halt = true
         }
-        this.error = "unsupported:" + op
-        this.halt = true
     }
 
     /// 整数算术。
     fun arith(op: String, a: Int, b: Int): String {
         if (op == "ADD") {
             return toStr(a + b)
-        }
-        if (op == "SUB") {
+        } else if (op == "SUB") {
             return toStr(a - b)
-        }
-        if (op == "MUL") {
+        } else if (op == "MUL") {
             return toStr(a * b)
-        }
-        if (op == "DIV") {
+        } else if (op == "DIV") {
             if (b == 0) {
                 this.error = "div-by-zero"
                 this.halt = true
                 return "0"
             }
             return toStr(a / b)
-        }
-        if (op == "MOD") {
+        } else if (op == "MOD") {
             if (b == 0) {
                 this.error = "mod-by-zero"
                 this.halt = true
                 return "0"
             }
             return toStr(a % b)
+        } else {
+            return "0"
         }
-        return "0"
     }
 }

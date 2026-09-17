@@ -14,7 +14,7 @@ use compiler::vm::heap::Heap;
 fn test_cstring_alloc_read() {
     let mut heap = Heap::new();
     let ptr = heap.alloc_c_string("hello".to_string());
-    assert!(ptr > 0, "分配的指针应非零");
+    assert!(ptr > 0, "allocated pointer should be nonzero");
     let s = heap.read_c_string(ptr);
     assert_eq!(s, "hello");
 }
@@ -24,7 +24,7 @@ fn test_cstring_multiple_allocs() {
     let mut heap = Heap::new();
     let ptr1 = heap.alloc_c_string("first".to_string());
     let ptr2 = heap.alloc_c_string("second".to_string());
-    assert!(ptr1 < ptr2, "后续分配的指针应更大");
+    assert!(ptr1 < ptr2, "subsequent allocated pointer should be larger");
     assert_eq!(heap.read_c_string(ptr1), "first");
     assert_eq!(heap.read_c_string(ptr2), "second");
 }
@@ -33,14 +33,14 @@ fn test_cstring_multiple_allocs() {
 fn test_cstring_nullptr() {
     let heap = Heap::new();
     let s = heap.read_c_string(0);
-    assert_eq!(s, "", "0 指针应返回空字符串");
+    assert_eq!(s, "", "0 pointer should return empty string");
 }
 
 #[test]
 fn test_cstring_invalid_ptr() {
     let heap = Heap::new();
     let s = heap.read_c_string(999);
-    assert_eq!(s, "", "无效指针应返回空字符串");
+    assert_eq!(s, "", "invalid pointer should return empty string");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

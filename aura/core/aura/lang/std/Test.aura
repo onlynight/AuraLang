@@ -19,7 +19,7 @@ package aura.lang.std
 import aura.lang.std.IO
 import aura.lang.std.Assert
 
-internal object Test {
+object Test {
 
     // ── 布尔断言（纯逻辑，Aura 实现）──
 
@@ -73,7 +73,7 @@ internal object Test {
         if (containsItem(container, item)) {
             return "OK: " + message
         }
-        throw "Assertion failed (not contains): " + message + " — container " + toStr(container) + " lacks " + toStr(item)
+        throw AssertionError("Assertion failed (not contains): " + message + " — container " + toStr(container) + " lacks " + toStr(item))
     }
 
     /// 断言字符串不包含子串，或列表不包含元素。
@@ -81,7 +81,7 @@ internal object Test {
         if (!containsItem(container, item)) {
             return "OK: " + message
         }
-        throw "Assertion failed (unexpected contains): " + message + " — container " + toStr(container) + " has " + toStr(item)
+        throw AssertionError("Assertion failed (unexpected contains): " + message + " — container " + toStr(container) + " has " + toStr(item))
     }
 
     // ── 异常断言（纯逻辑，Aura 实现）──
@@ -97,7 +97,7 @@ internal object Test {
         if (thrown) {
             return "OK: " + message
         }
-        throw "Assertion failed (expected throw): " + message
+        throw AssertionError("Assertion failed (expected throw): " + message)
     }
 
     // ── 比较断言（纯逻辑，Aura 实现）──
@@ -134,17 +134,17 @@ internal object Test {
     /// 断言两个数组长度相同且逐元素相等。
     fun assertArrayEq(a: Any, b: Any, message: String): String {
         if (a == null || b == null) {
-            throw "Assertion failed (null array): " + message
+            throw AssertionError("Assertion failed (null array): " + message)
         }
         val la: List<Any> = a as List<Any>
         val lb: List<Any> = b as List<Any>
         if (la.size != lb.size) {
-            throw "Assertion failed (array size " + toStr(la.size) + " != " + toStr(lb.size) + "): " + message
+            throw AssertionError("Assertion failed (array size " + toStr(la.size) + " != " + toStr(lb.size) + "): " + message)
         }
         var i: Int = 0
         while (i < la.size) {
             if (toStr(la[i]) != toStr(lb[i])) {
-                throw "Assertion failed (array element " + toStr(i) + " differs): " + message
+                throw AssertionError("Assertion failed (array element " + toStr(i) + " differs): " + message)
             }
             i = i + 1
         }
@@ -154,19 +154,19 @@ internal object Test {
     /// 断言两个映射的键集合与取值都相等。
     fun assertMapEq(a: Any, b: Any, message: String): String {
         if (a == null || b == null) {
-            throw "Assertion failed (null map): " + message
+            throw AssertionError("Assertion failed (null map): " + message)
         }
         val ma: Map<Any, Any> = a as Map<Any, Any>
         val mb: Map<Any, Any> = b as Map<Any, Any>
         val keysA: List<Any> = ma.keys
         if (keysA.size != mb.keys.size) {
-            throw "Assertion failed (map size differs): " + message
+            throw AssertionError("Assertion failed (map size differs): " + message)
         }
         var i: Int = 0
         while (i < keysA.size) {
             val key: Any = keysA[i]
             if (toStr(ma[key]) != toStr(mb[key])) {
-                throw "Assertion failed (map value at key " + toStr(key) + " differs): " + message
+                throw AssertionError("Assertion failed (map value at key " + toStr(key) + " differs): " + message)
             }
             i = i + 1
         }
@@ -183,7 +183,7 @@ internal object Test {
     /// 标记测试失败（输出一行提示后抛出）。
     fun fail(message: String): Unit {
         IO.println("FAIL: " + message)
-        throw "Test failed: " + message
+        throw AssertionError("Test failed: " + message)
     }
 
     /// 输出一条测试信息。

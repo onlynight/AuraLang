@@ -16,7 +16,7 @@ package aura.lang.std
 /// ```
 ///
 /// @since 0.1
-internal object Random {
+object Random {
 
     // ── 熵源（native：需要系统时钟 / 随机源）──
 

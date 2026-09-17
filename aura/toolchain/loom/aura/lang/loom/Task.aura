@@ -1,0 +1,87 @@
+// aura:///loom/aura/lang/loom/Task.aura
+package aura.lang.loom
+
+// ── 标准库 ──
+import aura.lang.std.Collections
+
+// ── 项目内模块 ──
+import aura.lang.loom.LoomError
+
+// ═══════════════════════════════════════════════════════════════
+// Task（任务定义）
+// ═══════════════════════════════════════════════════════════════
+
+class TaskInputs {
+    var files: List<String> = mutableListOf()
+    private var options: Map<String, String> = mutableMapOf()
+    private var depFingerprints: Map<String, String> = mutableMapOf()
+
+    fun addFile(file: String): Unit { files.add(file) }
+    fun addOption(key: String, value: String): Unit { options.put(key, value) }
+    fun addDepFingerprint(name: String, fp: String): Unit { depFingerprints.put(name, fp) }
+}
+
+class TaskOutputs {
+    private var files: List<String> = mutableListOf()
+    private var dir: String = ""
+
+    fun addFile(file: String): Unit { files.add(file) }
+    fun setDir(dir: String): Unit { this.dir = dir }
+}
+
+class Task {
+    val name: String
+    val description: String
+    val kind: Int
+    val dependsOn: List<String> = mutableListOf()
+    val inputs: TaskInputs
+    val outputs: TaskOutputs
+    private var fingerprint: String = ""
+    private var cached: Boolean = false
+    private var pluginName: String = ""
+
+    fun Task(name: String, kind: Int) {
+        this.name = name
+        this.kind = kind
+        this.description = ""
+        this.inputs = TaskInputs()
+        this.outputs = TaskOutputs()
+        this.pluginName = ""
+    }
+
+    fun Task(name: String, kind: Int, description: String) {
+        this.name = name
+        this.kind = kind
+        this.description = description
+        this.inputs = TaskInputs()
+        this.outputs = TaskOutputs()
+        this.pluginName = ""
+    }
+
+    fun Task(name: String, kind: Int, pluginName: String) {
+        this.name = name
+        this.kind = kind
+        this.description = ""
+        this.pluginName = pluginName
+        this.inputs = TaskInputs()
+        this.outputs = TaskOutputs()
+    }
+
+    fun addDep(dep: String): Unit { dependsOn.add(dep) }
+    fun addInputFile(file: String): Unit { inputs.addFile(file) }
+    fun addOutputFile(file: String): Unit { outputs.addFile(file) }
+    fun setOutputDir(dir: String): Unit { outputs.setDir(dir) }
+    fun addOption(key: String, value: String): Unit { inputs.addOption(key, value) }
+
+    fun toStr(): String {
+        var s: String = "Task{name='" + name + "', kind=" + kind
+        if (description.length > 0) {
+            s = s + ", desc='" + description + "'"
+        }
+        if (dependsOn.size > 0) {
+            s = s + ", deps=" +  dependsOn.size
+        }
+        s = s + "}"
+        return s
+    }
+}

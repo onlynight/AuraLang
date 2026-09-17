@@ -1,0 +1,107 @@
+// aura:///aura/lang/concurrent/Atomic.aura
+package aura.lang.concurrent
+// 原子整数（Atomic）—— 纯 Aura 实现，不依赖 Rust 运行库。
+//
+// 实现说明：
+//   * 句柄指向一段 16 字节堆内存：`[0..8)` 存放值，`[8..16)` 作为 CAS 守卫锁字。
+//   * `load/store/add/sub` 直接作用在值字上；其中 `add/sub` 使用
+//     `Cpu.atomicAdd`（`lock xaddq`）这一原生原子指令。
+//   * `cas` 用守卫锁字做临界区，在 Aura 中完成「读—比较—写」。
+//
+// 使用前需 import：
+// ```aura
+// import aura.lang.concurrent.Atomic.*   // 短名可用：new, load, store, ...
+// import aura.lang.concurrent.Atomic     // 类式调用：Atomic.new(0)
+// ```
+//
+// @since 0.6
+import aura.lang.native.Memory
+import aura.lang.native.Cpu
+object Atomic {
+
+    /// 创建新的原子整数
+    ///
+    /// - 参数：`initial` — 初始值
+    /// - 返回：原子整数 ID（堆地址）
+    fun new(initial: Int): Int {
+        val addr: Long = Memory.alloc(16L)
+        Memory.write64(addr, initial as Long)
+        Memory.write64(addr + 8L, 0L)
+        return addr as Int
+    }
+
+    /// 原子加载值
+    ///
+    /// - 参数：`atomic_id` — 原子整数 ID
+    /// - 返回：当前值
+    fun load(atomic_id: Int): Int {
+        return Memory.read64(atomic_id as Long) as Int
+    }
+
+    /// 原子存储值
+    ///
+    /// - 参数：`atomic_id` — 原子整数 ID
+    /// - 参数：`value` — 要存储的值
+    fun store(atomic_id: Int, value: Int): Unit {
+        Memory.write64(atomic_id as Long, value as Long)
+    }
+
+    /// 原子加法（返回加之前的值）
+    ///
+    /// - 参数：`atomic_id` — 原子整数 ID
+    /// - 参数：`delta` — 增量
+    /// - 返回：加之前的值
+    fun add(atomic_id: Int, delta: Int): Int {
+        return Cpu.atomicAdd(atomic_id as Long, delta as Long) as Int
+    }
+
+    /// 原子减法（返回减之前的值）
+    ///
+    /// - 参数：`atomic_id` — 原子整数 ID
+    /// - 参数：`delta` — 减量
+    /// - 返回：减之前的值
+    fun sub(atomic_id: Int, delta: Int): Int {
+        return Cpu.atomicAdd(atomic_id as Long, (0 - delta) as Long) as Int
+    }
+
+    /// 原子比较并交换（CAS）
+    ///
+    /// - 参数：`atomic_id` — 原子整数 ID
+    /// - 参数：`expected` — 期望值
+    /// - 参数：`desired` — 期望交换为的值
+    /// - 返回：true 表示交换成功，false 表示当前值不等于期望值
+    fun cas(atomic_id: Int, expected: Int, desired: Int): Boolean {
+        val base: Long = atomic_id as Long
+        val guard: Long = base + 8L
+        spinAcquire(guard)
+        var ok: Boolean = false
+        if (Memory.read64(base) == (expected as Long)) {
+            Memory.write64(base, desired as Long)
+            ok = true
+        }
+        spinRelease(guard)
+        return ok
+    }
+
+    /// 销毁原子整数
+    ///
+    /// - 参数：`atomic_id` — 原子整数 ID
+    fun destroy(atomic_id: Int): Unit {
+        Memory.free(atomic_id as Long)
+    }
+
+    // ── 内部：自旋守卫（仅用于保护非原子读改写）──
+
+    private fun spinAcquire(word: Long): Unit {
+        while (true) {
+            if (Cpu.atomicAdd(word, 1L) == 0L) {
+                return
+            }
+            Cpu.atomicAdd(word, 0L - 1L)
+        }
+    }
+
+    private fun spinRelease(word: Long): Unit {
+        Cpu.atomicAdd(word, 0L - 1L)
+    }
+}

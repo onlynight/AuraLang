@@ -88,7 +88,7 @@ impl BuildResult {
     /// 输出摘要
     pub fn summary(&self) -> String {
         format!(
-            "已打包 {} 个文件到 {}（{} 字节）",
+            "packed {} files to {} ({} bytes)",
             self.file_count,
             self.path.display(),
             self.size_bytes
@@ -148,7 +148,7 @@ impl<'a> PackageBuilder<'a> {
         let manifest_toml = self
             .manifest
             .to_toml()
-            .map_err(|e| ApkgError::Manifest(format!("序列化清单失败: {}", e)))?;
+            .map_err(|e| ApkgError::Manifest(format!("failed to serialize manifest: {}", e)))?;
         files.insert(
             MANIFEST_FILENAME.to_string(),
             manifest_toml.as_bytes().to_vec(),
@@ -226,37 +226,44 @@ impl<'a> PackageBuilder<'a> {
                         path.as_str(),
                         std::io::Cursor::new(content.as_slice()),
                     )
-                    .map_err(|e| ApkgError::Build(format!("tar 写入 {} 失败: {}", path, e)))?;
+                    .map_err(|e| {
+                        ApkgError::Build(format!("tar write to {} failed: {}", path, e))
+                    })?;
             }
 
-            builder.finish().map_err(|e| ApkgError::Build(format!("tar 收尾失败: {}", e)))?;
+            builder.finish().map_err(|e| ApkgError::Build(format!("tar finish failed: {}", e)))?;
         }
 
         // 5. zstd 压缩
         let mut compressed_buf: Vec<u8> = Vec::new();
-        let mut encoder =
-            zstd::Encoder::new(&mut compressed_buf, self.options.compression_level)
-                .map_err(|e| ApkgError::Compression(format!("创建 zstd 编码器失败: {}", e)))?;
+        let mut encoder = zstd::Encoder::new(&mut compressed_buf, self.options.compression_level)
+            .map_err(|e| {
+            ApkgError::Compression(format!("failed to create zstd encoder: {}", e))
+        })?;
         encoder
             .write_all(&tar_buf)
-            .map_err(|e| ApkgError::Compression(format!("zstd 写入失败: {}", e)))?;
+            .map_err(|e| ApkgError::Compression(format!("zstd write failed: {}", e)))?;
         let _encoder = encoder
             .finish()
-            .map_err(|e| ApkgError::Compression(format!("zstd 收尾失败: {}", e)))?;
+            .map_err(|e| ApkgError::Compression(format!("zstd finish failed: {}", e)))?;
         let output_bytes = compressed_buf;
 
         // 6. 确保输出目录存在
         if let Some(parent) = output_path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).map_err(|e| {
-                    ApkgError::Io(format!("无法创建目录 {}: {}", parent.display(), e))
+                    ApkgError::Io(format!(
+                        "cannot create directory {}: {}",
+                        parent.display(),
+                        e
+                    ))
                 })?;
             }
         }
 
         // 7. 写入输出文件
         std::fs::write(output_path, &output_bytes)
-            .map_err(|e| ApkgError::Io(format!("无法写入 {}: {}", output_path.display(), e)))?;
+            .map_err(|e| ApkgError::Io(format!("cannot write {}: {}", output_path.display(), e)))?;
 
         Ok(BuildResult {
             path: output_path.to_path_buf(),
@@ -321,15 +328,20 @@ impl<'a> PackageBuilder<'a> {
         result: &mut Vec<(String, Vec<u8>)>,
         filter: &dyn Fn(&Path) -> bool,
     ) -> Result<(), ApkgError> {
-        let entries = std::fs::read_dir(current)
-            .map_err(|e| ApkgError::Io(format!("无法读取目录 {}: {}", current.display(), e)))?;
+        let entries = std::fs::read_dir(current).map_err(|e| {
+            ApkgError::Io(format!(
+                "cannot read directory {}: {}",
+                current.display(),
+                e
+            ))
+        })?;
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
                 Self::walk_dir(base, &path, result, filter)?;
             } else if filter(&path) {
                 let content = std::fs::read(&path)
-                    .map_err(|e| ApkgError::Io(format!("无法读取 {}: {}", path.display(), e)))?;
+                    .map_err(|e| ApkgError::Io(format!("cannot read {}: {}", path.display(), e)))?;
                 let rel = path.strip_prefix(base).unwrap_or(&path);
                 let rel_str = rel.to_string_lossy().replace('\\', "/");
                 result.push((rel_str, content));

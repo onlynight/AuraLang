@@ -13,18 +13,21 @@ import aura.lang.collection.Array
 ///
 /// @see List, LinkedList, HashMap
 /// @since 0.5
-internal class ArrayList<T> : List<T> {
+class ArrayList<T> : List<T> {
 
     // ── 内部存储 ──
 
-    private var data: Array<T>
+    // 注意：类型用 `List<T>`（两个编译器都识别为集合句柄），
+    // 旧写法 `Array<T>` 在 Rust 侧不被认作集合 → `data.add(x)` 会退化成
+    // 未定义的裸符号 `@add`（llc: use of undefined value '@add'）。
+    private var data: List<T>
     private var _size: Int
 
     // ── 构造 ──
 
     /// 创建空列表
     constructor() {
-        data = arrayOf<T>()
+        data = mutableListOf<T>()
         _size = 0
     }
 
@@ -44,7 +47,7 @@ internal class ArrayList<T> : List<T> {
     /// 按下标获取元素
     override fun get(index: Int): T {
         if (index < 0 || index >= _size) {
-            throw IndexOutOfBounds("index: $index, size: $_size")
+            throw IndexOutOfBoundsException("index: $index, size: $_size")
         }
         return data[index]
     }
@@ -52,42 +55,52 @@ internal class ArrayList<T> : List<T> {
     /// 按下标设置元素
     fun set(index: Int, value: T): Unit {
         if (index < 0 || index >= _size) {
-            throw IndexOutOfBounds("index: $index, size: $_size")
+            throw IndexOutOfBoundsException("index: $index, size: $_size")
         }
         data[index] = value
     }
 
     /// 获取第一个元素
     override fun first(): T {
-        if (_size == 0) throw EmptyList()
+        if (_size == 0) throw EmptyListException()
         return data[0]
     }
 
     /// 获取最后一个元素
     override fun last(): T {
-        if (_size == 0) throw EmptyList()
+        if (_size == 0) throw EmptyListException()
         return data[_size - 1]
     }
 
     // ── 修改方法 ──
 
     /// 在末尾添加元素
+    ///
+    /// **必须用列表方法 `data.add(item)`，不能用 `data + item`**：
+    /// Aura 侧 `data` 的表示是列表句柄 `i8*`，`+` 在发射器里是**字符串拼接**
+    ///（`aura_string_concat`）—— 会把句柄当 C 字符串解引用而崩溃
+    /// （实测 `HashMap` 建桶时 0xC0000005）；而 `data.add(item)` 走
+    /// `aura_lang_std_Collections_listAppend`（返回新句柄，故要赋回 `data`）。
     fun add(item: T): Unit {
-        data = data + item
+        // 语句式追加（`listAppend` 原地修改并返回同一句柄）：
+        // 不能写成 `data = data.add(item)` —— Rust 侧 `add` 按语句处理（无返回值），
+        // 赋值会破坏 Stage-1 编译。
+        data.add(item)
         _size = _size + 1
     }
 
     /// 移除指定位置的元素
     fun remove(index: Int): T {
         if (index < 0 || index >= _size) {
-            throw IndexOutOfBounds("index: $index, size: $_size")
+            throw IndexOutOfBoundsException("index: $index, size: $_size")
         }
         val item = data[index]
-        var newData = arrayOf<T>()
+        var newData: List<T> = mutableListOf<T>()
         var i: Int = 0
         while (i < _size) {
             if (i != index) {
-                newData = newData + data[i]
+                // 同 `add`：用列表追加，不能用 `+`（字符串拼接）
+                newData.add(data[i])
             }
             i = i + 1
         }
@@ -98,7 +111,7 @@ internal class ArrayList<T> : List<T> {
 
     /// 清空列表
     fun clear(): Unit {
-        data = arrayOf<T>()
+        data = mutableListOf<T>()
         _size = 0
     }
 
@@ -202,7 +215,7 @@ internal class ArrayList<T> : List<T> {
 
     /// 取前 n 个元素
     fun take(n: Int): List<T> {
-        val count = min(n, _size)
+        val count = minOf(n, _size)
         val result = ArrayList<T>()
         var i: Int = 0
         while (i < count) {
@@ -214,7 +227,7 @@ internal class ArrayList<T> : List<T> {
 
     /// 跳过前 n 个元素
     fun skip(n: Int): List<T> {
-        var start = min(n, _size)
+        var start = minOf(n, _size)
         val result = ArrayList<T>()
         var i: Int = start
         while (i < _size) {
@@ -239,7 +252,7 @@ internal class ArrayList<T> : List<T> {
 
     /// 获取最小值
     fun min(): T {
-        if (_size == 0) throw EmptyList()
+        if (_size == 0) throw EmptyListException()
         var result = data[0]
         var i: Int = 1
         while (i < _size) {
@@ -253,7 +266,7 @@ internal class ArrayList<T> : List<T> {
 
     /// 获取最大值
     fun max(): T {
-        if (_size == 0) throw EmptyList()
+        if (_size == 0) throw EmptyListException()
         var result = data[0]
         var i: Int = 1
         while (i < _size) {
@@ -284,7 +297,7 @@ internal class ArrayList<T> : List<T> {
 
     // ── 辅助函数 ──
 
-    private fun min(a: Int, b: Int): Int {
+    private fun minOf(a: Int, b: Int): Int {
         if (a < b) return a
         return b
     }

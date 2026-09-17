@@ -1,0 +1,102 @@
+// aura:///aura/lang/native/network/NetworkOps.aura
+package aura.lang.native.network
+// ------------------------------------------------------------------
+// 网络操作 — 系统调用封装
+//
+// 提供 TCP/UDP socket 操作，委托到 x86_64 Linux syscalls。
+//
+// 依赖：
+//   - aura.lang.native.Memory          内存读写
+//   - aura.lang.native.memory.Allocator  内存分配
+//   - aura.lang.native.io.Stdio         String ↔ Buffer 转换
+//
+// 系统调用（x86_64 Linux）：
+//   41 socket(domain, type, protocol)
+//   42 connect(fd, addr, addrlen)
+//   43 accept(fd, addr, addrlen)
+//   44 sendto(fd, buf, len, flags, addr, addrlen)
+//   45 recvfrom(fd, buf, len, flags, addr, addrlen)
+//   49 bind(fd, addr, addrlen)
+//   50 listen(fd, backlog)
+//   57 close(fd)
+//   3  close(fd)
+//
+// @since 0.1
+// ------------------------------------------------------------------
+
+import aura.lang.native.Memory
+import aura.lang.native.memory.Allocator
+import aura.lang.native.io.Stdio
+import aura.lang.native.file.FileOps
+
+/// 网络操作（纯 Aura 实现，委托到 syscalls）
+object NetworkOps {
+
+    // ═══════════════════════════════════════════════════════════════
+    // 常量
+    // ═══════════════════════════════════════════════════════════════
+
+    // 地址族
+    const val AF_INET: Int = 2
+    const val AF_INET6: Int = 10
+
+    // 套接字类型
+    const val SOCK_STREAM: Int = 1
+    const val SOCK_DGRAM: Int = 2
+
+    // 协议
+    const val IPPROTO_TCP: Int = 6
+    const val IPPROTO_UDP: Int = 17
+
+    // 标志
+    const val MSG_DONTWAIT: Int = 0x40
+    const val MSG_PEEK: Int = 0x2
+
+    // ═══════════════════════════════════════════════════════════════
+    // Socket 创建
+    // ═══════════════════════════════════════════════════════════════
+
+    /// 创建套接字。返回文件描述符（>=0 成功）。
+    @native(41) fun socket(domain: Int, type: Int, protocol: Int): Int
+
+    /// 关闭套接字。
+    fun close(fd: Int): Int {
+        return FileOps.close(fd)
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // TCP 连接
+    // ═══════════════════════════════════════════════════════════════
+
+    /// 连接到服务器。
+    @native(42) fun connect(fd: Int, addr: Long, addrlen: Int): Int
+
+    /// 绑定地址。
+    @native(49) fun bind(fd: Int, addr: Long, addrlen: Int): Int
+
+    /// 开始监听。
+    @native(50) fun listen(fd: Int, backlog: Int): Int
+
+    /// 接受连接。
+    @native(43) fun accept(fd: Int, addr: Long, addrlen: Long): Int
+
+    // ═══════════════════════════════════════════════════════════════
+    // 发送/接收
+    // ═══════════════════════════════════════════════════════════════
+
+    /// 发送数据（UDP）。
+    @native(44) fun sendto(fd: Int, buf: Long, len: Int, flags: Int, addr: Long, addrlen: Int): Long
+
+    /// 接收数据（UDP）。
+    @native(45) fun recvfrom(fd: Int, buf: Long, len: Int, flags: Int, addr: Long, addrlen: Long): Long
+
+    /// 发送数据（TCP，使用 write syscall）。
+    fun tcpSend(fd: Int, buf: Long, len: Long): Long {
+        return FileOps.write(fd, buf, len)
+    }
+
+    /// 接收数据（TCP，使用 read syscall）。
+    fun tcpRecv(fd: Int, buf: Long, len: Long): Long {
+        return FileOps.read(fd, buf, len)
+    }
+}

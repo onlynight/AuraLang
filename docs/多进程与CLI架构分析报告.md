@@ -8,15 +8,19 @@
 
 ## 1. 现状分析
 
-### 1.1 二进制结构
+### 1.1 二进制结构（拆分前）
 
 | 组件 | 产物 | 子命令 | 依赖关系 |
 |------|------|--------|----------|
 | `compiler` | Rust **库** crate | 词法/语法/语义/字节码/VM/LSP/包管理/文档/JIT/AOT | 被引用 |
-| `cli` | **1 个 exe** (`aura`) | 21 个子命令 | 依赖 compiler |
+| `cli` | **3 个 exe** | `aura`(21) + `aura-lsp`(4) + `aura-debug`(6) | 依赖 compiler |
 | `loom` | **1 个 exe** (`loom`) | 13 个子命令 | 依赖 compiler |
 
-**关键事实**：`cli/src/main.rs`（1328 行）通过 `match cmd { ... }` 分发 21 个子命令。编译 `aura.exe` 时，**整个 compiler crate 的全部 ~70 个模块**（含 VM、LSP、LLVM AOT、Actor 运行时、JIT 等）全部链接进一个二进制。
+**关键事实**：`cli/src/main.rs`（1997 行）通过 `match cmd { ... }` 分发 21 个子命令。编译 `aura.exe` 时，**整个 compiler crate 的全部 ~70 个模块**（含 VM、LSP、LLVM AOT、Actor 运行时、JIT 等）全部链接进一个二进制。
+
+> **→ 拆分方案见 [`CLI-二进制拆分方案.md`](CLI-二进制拆分方案.md)**：
+> `aura.exe` → `aurac.exe`(编译器) + `aura.exe`(运行时) + `aurap.exe`(包管理器)
+> `aura-lsp.exe` → `lsp.exe`，`aura-debug.exe` → `aurad.exe`，`loom.exe` 不变
 
 ### 1.2 多进程隔离的实际状态
 
@@ -38,6 +42,10 @@
 ### 2.1 问题 A：单二进制膨胀
 
 `aura.exe` 当前包含全部代码：前端 + 字节码 + VM + 运行时 + JIT + AOT + LSP + 包管理 + 文档 + ARC + 格式化。仅 `aura check` 也要加载全部代码。
+
+> **→ 拆分方案见 [`CLI-二进制拆分方案.md`](CLI-二进制拆分方案.md)**：
+> `aurac.exe`（编译器）+ `aura.exe`（运行时）+ `aurap.exe`（包管理器）
+> `lsp.exe`（LSP）+ `aurad.exe`（调试器）+ `loom.exe`（构建系统）
 
 ### 2.2 问题 B：「多进程无法访问」的根因
 
@@ -135,9 +143,9 @@ LSP 是唯一需要长驻的组件。新建 `aura-lsp` 二进制，`aura lsp` �
 
 #### 4.4 明确不做的事
 
-- **不拆分 aura 的生态层为第三个二进制**：`.auz` 制品、aura.toml 包清单、注册表协议均属于 aura 产权；现阶段仅在库层面拆分（建议第四阶段之后做 `aura-ecosystem` crate 抽取，作为 `aura` 二进制和 loom 的公共依赖），不新增 `aupkg` 之类的独立二进制。触发条件：第三方包管理器需求 / 注册表规模化 / 二进制体积成为用户痛点 / aura.toml 字段膨胀。
+- ~~不拆分 aura 的生态层为第三个二进制~~ → **已修订**：[`CLI-二进制拆分方案.md`](CLI-二进制拆分方案.md) 将包管理职责拆为独立的 `aurap.exe`，对标 `npm` / `cargo` 模式。
 - **不合并两个二进制的入口**：`aura build`（单文件 `<file.aura>`）与 `loom build`（项目级，读 aura.toml）共存，语义与参数均不同，类似 `rustc` 与 `cargo build` 的共存关系。
-- **不改变 aura 的 21 条命令**：阶段 1-3 的运行时修复与 LSP 拆分不涉及 aura CLI 增删，第四阶段 aura 端保持原样。
+- ~~不改变 aura 的 21 条命令~~ → **已修订**：[`CLI-二进制拆分方案.md`](CLI-二进制拆分方案.md) 将 21 条命令拆分为 `aurac`(18) + `aura`(6) + `aurap`(8) 三个二进制，`lsp.exe` + `aurad.exe` + `loom.exe` 独立。
 
 ---
 

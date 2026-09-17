@@ -1,0 +1,126 @@
+// aura:///loom/plugin/aura/lang/loom/plugin/PluginRegistry.aura
+package aura.lang.loom.plugin
+
+import aura.lang.std.String
+import aura.lang.std.Collections
+import aura.lang.std.IO
+import aura.lang.loom.plugin.Plugin
+import aura.lang.loom.plugin.PluginContext
+
+// ═══════════════════════════════════════════════════════════════
+// 插件注册表
+// 对标 Rust: plugin/registry.rs
+// ═══════════════════════════════════════════════════════════════
+
+class PluginRegistry {
+    private var plugins: List<Plugin> = mutableListOf()
+    private var contexts: Map<String, PluginContext> = mutableMapOf()
+
+    fun register(plugin: Plugin): Unit {
+        plugins.add(plugin)
+        IO.println("[registry] Plugin registered: " + plugin.name)
+    }
+
+    fun unregister(name: String): Unit {
+        var i: Int = 0
+        while (i < plugins.size) {
+            if (plugins[i].name == name) {
+                plugins.remove(i)
+                IO.println("[registry] Plugin unregistered: " + name)
+                return
+            }
+            i = i + 1
+        }
+    }
+
+    fun get(name: String): Plugin {
+        var i: Int = 0
+        while (i < plugins.size) {
+            if (plugins[i].name == name) {
+                return plugins[i]
+            }
+            i = i + 1
+        }
+        return null
+    }
+
+    fun contains(name: String): Boolean {
+        return get(name) != null
+    }
+
+    fun len(): Int {
+        return plugins.size
+    }
+
+    fun list(): List<Plugin> {
+        return plugins
+    }
+
+    fun initAll(projectDir: String): Int {
+        var i: Int = 0
+        while (i < plugins.size) {
+            val plugin: Plugin = plugins[i]
+            if (plugin.enabled) {
+                plugin.onInit(projectDir)
+                contexts.put(plugin.name, PluginContext(projectDir))
+            }
+            i = i + 1
+        }
+        return 0
+    }
+
+    fun runBeforeBuild(): Unit {
+        var i: Int = 0
+        while (i < plugins.size) {
+            val plugin: Plugin = plugins[i]
+            if (plugin.enabled) {
+                plugin.beforeBuild()
+            }
+            i = i + 1
+        }
+    }
+
+    fun runAfterBuild(): Unit {
+        var i: Int = 0
+        while (i < plugins.size) {
+            val plugin: Plugin = plugins[i]
+            if (plugin.enabled) {
+                plugin.afterBuild()
+            }
+            i = i + 1
+        }
+    }
+
+    fun runBeforeTest(): Unit {
+        var i: Int = 0
+        while (i < plugins.size) {
+            val plugin: Plugin = plugins[i]
+            if (plugin.enabled) {
+                plugin.beforeTest()
+            }
+            i = i + 1
+        }
+    }
+
+    fun runAfterTest(): Unit {
+        var i: Int = 0
+        while (i < plugins.size) {
+            val plugin: Plugin = plugins[i]
+            if (plugin.enabled) {
+                plugin.afterTest()
+            }
+            i = i + 1
+        }
+    }
+
+    fun toStr(): String {
+        var s: String = "PluginRegistry{plugins=" + plugins.size + "\n"
+        var i: Int = 0
+        while (i < plugins.size) {
+            s = s + "  " + plugins[i].toStr() + "\n"
+            i = i + 1
+        }
+        s = s + "}"
+        return s
+    }
+}

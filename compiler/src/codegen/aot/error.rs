@@ -7,37 +7,37 @@ use thiserror::Error;
 /// AOT 代码生成错误
 #[derive(Debug, Error)]
 pub enum AotError {
-    #[error("LLVM 初始化失败: {0}")]
+    #[error("LLVM initialization failed: {0}")]
     InitializationFailed(String),
 
-    #[error("无效的目标三元组: {0}")]
+    #[error("invalid target triple: {0}")]
     InvalidTarget(String),
 
-    #[error("目标未找到: {0}")]
+    #[error("target not found: {0}")]
     TargetNotFound(String),
 
-    #[error("IR 验证失败: {0}")]
+    #[error("IR verification failed: {0}")]
     VerificationFailed(String),
 
-    #[error("代码生成失败: {0}")]
+    #[error("code generation failed: {0}")]
     CodeGenerationFailed(String),
 
-    #[error("链接器失败: {0}")]
+    #[error("linker failed: {0}")]
     LinkerFailed(String),
 
-    #[error("未定义函数: {0}")]
+    #[error("undefined function: {0}")]
     UndefinedFunction(String),
 
-    #[error("类型不匹配: {0}")]
+    #[error("type mismatch: {0}")]
     TypeMismatch(String),
 
-    #[error("不支持的表达式: {0}")]
+    #[error("unsupported expression: {0}")]
     UnsupportedExpr(String),
 
-    #[error("IO 错误: {0}")]
+    #[error("IO error: {0}")]
     Io(String),
 
-    #[error("LLVM 工具调用失败: {0}")]
+    #[error("LLVM tool invocation failed: {0}")]
     ToolError(String),
 
     #[error("{0}")]

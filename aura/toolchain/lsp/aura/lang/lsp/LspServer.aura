@@ -1,0 +1,205 @@
+// aura:///lsp/aura/lang/lsp/LspServer.aura
+package aura.lang.lsp
+
+// ── 标准库 ──
+import aura.lang.std.String
+import aura.lang.std.Collections
+
+// ── Native 包 ──
+import aura.lang.native.console.Console
+
+// ── 兄弟模块 ──
+import aura.lang.lsp.LspRequest
+import aura.lang.lsp.LspResponse
+import aura.lang.lsp.LspApi
+import aura.lang.lsp.FileIO
+
+// ═══════════════════════════════════════════════════════════════
+// LSP 服务器主类
+// ═══════════════════════════════════════════════════════════════
+
+class LspServer {
+    var running: Boolean = false
+    private var requestId: Int = 1
+    private var documents: Map<String, String> = mutableMapOf()
+    private var diagnostics: Map<String, String> = mutableMapOf()
+
+    /// 启动 LSP 服务器
+    fun start(): Int {
+        val result: Int = lspStart()
+        if (result == 0) {
+            this.running = true
+            Console.println("LSP server started (pure Aura)")
+        }
+        return result
+    }
+
+    /// 停止 LSP 服务器
+    fun stop(): Int {
+        running = false
+        return lspStop()
+    }
+
+    /// 处理 incoming 请求
+    fun handleRequest(data: String): String {
+        val parsed: String = lspParseRequest(data)
+        val request: LspRequest = parseRequest(parsed)
+        if (request == null) {
+            return "{\"jsonrpc\":\"2.0\",\"error\":\"Invalid request\"}"
+        }
+        val result: String = dispatchRequest(request)
+        val response: LspResponse = LspResponse(request.id, result, "")
+        return response.toJson()
+    }
+
+    /// 分派请求到具体处理器
+    private fun dispatchRequest(req: LspRequest): String {
+        val params: String = req.params
+        val file: String = extractField(params, "textDocument", "uri")
+        val pos: Int = extractIntField(params, "position", "character")
+
+        if (req.method == "textDocument/didOpen") {
+            return handleDidOpen(params)
+        } else if (req.method == "textDocument/didChange") {
+            return handleDidChange(params)
+        } else if (req.method == "textDocument/didClose") {
+            return handleDidClose(params)
+        } else if (req.method == "textDocument/completion") {
+            return lspCompletion(file, pos)
+        } else if (req.method == "textDocument/hover") {
+            return lspHover(file, pos)
+        } else if (req.method == "textDocument/definition") {
+            return lspDefinition(file, pos)
+        } else if (req.method == "textDocument/references") {
+            return lspReferences(file, pos)
+        } else if (req.method == "textDocument/diagnostic") {
+            return lspDiagnostic(file)
+        } else if (req.method == "textDocument/formatting") {
+            val text: String = documents.getOrDefault(file, "")
+            return lspFormatting(file, text)
+        } else if (req.method == "textDocument/documentSymbol") {
+            return lspDocumentSymbol(file)
+        } else if (req.method == "textDocument/signatureHelp") {
+            return lspSignatureHelp(file, pos)
+        } else if (req.method == "textDocument/inlayHint") {
+            return lspInlayHint(file)
+        } else if (req.method == "textDocument/codeAction") {
+            return lspCodeAction(file, params)
+        } else if (req.method == "shutdown") {
+            return "null"
+        } else if (req.method == "exit") {
+            stop()
+            return "null"
+        }
+        return "{\"error\":\"Unknown method: " + req.method + "\"}"
+    }
+
+    /// 处理 didOpen
+    private fun handleDidOpen(params: String): String {
+        val uri: String = extractField(params, "textDocument", "uri")
+        val text: String = extractField(params, "textDocument", "text")
+        documents.put(uri, text)
+        val diag: String = lspDiagnostic(uri)
+        diagnostics.put(uri, diag)
+        return "null"
+    }
+
+    /// 处理 didChange
+    private fun handleDidChange(params: String): String {
+        val uri: String = extractField(params, "textDocument", "uri")
+        val text: String = extractField(params, "contentChanges", "text")
+        documents.put(uri, text)
+        val diag: String = lspDiagnostic(uri)
+        diagnostics.put(uri, diag)
+        return "null"
+    }
+
+    /// 处理 didClose
+    private fun handleDidClose(params: String): String {
+        val uri: String = extractField(params, "textDocument", "uri")
+        documents.remove(uri)
+        diagnostics.remove(uri)
+        return "null"
+    }
+
+    /// 从 JSON 中提取嵌套字段
+    private fun extractField(json: String, parent: String, key: String): String {
+        val parentStart: Int = json.indexOf("\"" + parent + "\"")
+        if (parentStart < 0) { return "" }
+        val braceStart: Int = json.indexOf("{", parentStart)
+        if (braceStart < 0) { return "" }
+        val keyStart: Int = json.indexOf("\"" + key + "\"", braceStart)
+        if (keyStart < 0) { return "" }
+        val colonIdx: Int = json.indexOf(":", keyStart)
+        if (colonIdx < 0) { return "" }
+        val valueStart: Int = json.indexOf("\"", colonIdx)
+        if (valueStart < 0) { return "" }
+        val valueEnd: Int = json.indexOf("\"", valueStart + 1)
+        if (valueEnd < 0) { return "" }
+        return String.substring(json, valueStart + 1, valueEnd)
+    }
+
+    /// 从 JSON 中提取整数字段
+    private fun extractIntField(json: String, parent: String, key: String): Int {
+        val parentStart: Int = json.indexOf("\"" + parent + "\"")
+        if (parentStart < 0) { return 0 }
+        val keyStart: Int = json.indexOf("\"" + key + "\"", parentStart)
+        if (keyStart < 0) { return 0 }
+        val colonIdx: Int = json.indexOf(":", keyStart)
+        if (colonIdx < 0) { return 0 }
+        var i: Int = colonIdx + 1
+        while (i < json.length && (String.charCodeAt(json, i) == 32 || String.charCodeAt(json, i) == 9)) {
+            i = i + 1
+        }
+        var numStr: String = ""
+        while (i < json.length && String.charCodeAt(json, i) >= 48 && String.charCodeAt(json, i) <= 57) {
+            numStr = numStr + String.substring(json, i, i + 1)
+            i = i + 1
+        }
+        if (numStr.length == 0) { return 0 }
+        return String.toInt(numStr)
+    }
+
+    /// 解析 JSON-RPC 请求
+    private fun parseRequest(json: String): LspRequest {
+        val id: Int = extractIntField(json, null, "id")
+        val method: String = extractTopField(json, "method")
+        val params: String = ""
+
+        if (method.length == 0) { return null }
+
+        val paramsStart: Int = json.indexOf("\"params\"")
+        if (paramsStart >= 0) {
+            val braceStart: Int = json.indexOf("{", paramsStart)
+            if (braceStart >= 0) {
+                var depth: Int = 0
+                var i: Int = braceStart
+                while (i < json.length) {
+                    if (String.charCodeAt(json, i) == 123) { depth = depth + 1 }
+                    else if (String.charCodeAt(json, i) == 125) {
+                        depth = depth - 1
+                        if (depth == 0) {
+                            params = String.substring(json, braceStart, i + 1)
+                            break
+                        }
+                    }
+                    i = i + 1
+                }
+            }
+        }
+        return LspRequest(id, method, params)
+    }
+
+    /// 从顶层 JSON 提取字段
+    private fun extractTopField(json: String, key: String): String {
+        val keyStart: Int = json.indexOf("\"" + key + "\"")
+        if (keyStart < 0) { return "" }
+        val colonIdx: Int = json.indexOf(":", keyStart)
+        if (colonIdx < 0) { return "" }
+        val valueStart: Int = json.indexOf("\"", colonIdx)
+        if (valueStart < 0) { return "" }
+        val valueEnd: Int = json.indexOf("\"", valueStart + 1)
+        if (valueEnd < 0) { return "" }
+        return String.substring(json, valueStart + 1, valueEnd)
+    }
+}

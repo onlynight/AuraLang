@@ -26,18 +26,20 @@ pub enum LinkError {
 impl std::fmt::Display for LinkError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LinkError::SymbolNotFound(s) => write!(f, "符号未找到: {}", s),
+            LinkError::SymbolNotFound(s) => write!(f, "symbol not found: {}", s),
             LinkError::SymbolConflict {
                 symbol,
                 modules,
             } => write!(
                 f,
-                "符号冲突: {} 在多个模块中定义: {}",
+                "symbol conflict: {} is defined in multiple modules: {}",
                 symbol,
                 modules.join(", ")
             ),
-            LinkError::ModuleNotFound(m) => write!(f, "模块未找到: {}", m),
-            LinkError::CircularDependency(mods) => write!(f, "循环依赖: {}", mods.join(" -> ")),
+            LinkError::ModuleNotFound(m) => write!(f, "module not found: {}", m),
+            LinkError::CircularDependency(mods) => {
+                write!(f, "circular dependency: {}", mods.join(" -> "))
+            }
         }
     }
 }
@@ -228,6 +230,23 @@ impl Linker {
     ) -> Option<crate::signature::FuncSig> {
         match kind {
             SymbolKind::Function => sig.find_function(name).cloned(),
+            SymbolKind::Type => sig.find_type(name).map(|t| crate::signature::FuncSig {
+                name: t.name.clone(),
+                params: vec![],
+                return_type: crate::signature::TypeSig::UserType {
+                    name: t.name.clone(),
+                    type_params: vec![],
+                },
+                is_public: t.is_public,
+                type_params: t.type_params.clone(),
+            }),
+            SymbolKind::Const => sig.find_constant(name).map(|c| crate::signature::FuncSig {
+                name: c.name.clone(),
+                params: vec![],
+                return_type: c.type_sig.clone(),
+                is_public: c.is_public,
+                type_params: vec![],
+            }),
             _ => sig.find_function(name).cloned(),
         }
     }
@@ -239,7 +258,7 @@ impl Linker {
         let mut stack = Vec::new();
 
         for mod_name in self.modules.keys() {
-            if !!visited.contains_key(mod_name) {
+            if !visited.contains_key(mod_name) {
                 self.visit_deps(mod_name, &mut visited, &mut stack, &mut errors);
             }
         }

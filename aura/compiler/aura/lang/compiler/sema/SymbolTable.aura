@@ -29,25 +29,25 @@ package aura.lang.compiler.sema
 class SymbolTable {
 
     /// 作用域表（每行一个作用域：`parent|isFnScope|symCount`）。
-    var scopes: String = ""
+    private var scopes: String = ""
 
     /// 符号条目表（每行一个符号：`name|kind|vis|mut|params|ty`）。
-    var entries: String = ""
+    private var entries: String = ""
 
     /// 当前作用域索引（初始为 0 = 全局作用域）。
-    var current: Int = 0
+    private var current: Int = 0
 
     /// 全局类型索引（`name|ty`，每行一项）。
-    var typeIndex: String = ""
+    private var typeIndex: String = ""
 
     /// 全局函数索引（`name|params|ret`，每行一项）。
-    var fnIndex: String = ""
+    private var fnIndex: String = ""
 
     /// 作用域总数。
-    var scopeCount: Int = 0
+    private var scopeCount: Int = 0
 
     /// 符号条目总数。
-    var entryCount: Int = 0
+    private var entryCount: Int = 0
 
     // ── 构造 ──
 
@@ -83,8 +83,9 @@ class SymbolTable {
         }
         if (cur == index) {
             return text.substring(fieldStart, n)
+        } else {
+            return ""
         }
-        return ""
     }
 
     /// 取第 index 行的第 fieldIdx 个以 sep 分隔的字段。
@@ -106,8 +107,9 @@ class SymbolTable {
         }
         if (cur == fieldIdx) {
             return line.substring(fieldStart, n)
+        } else {
+            return ""
         }
-        return ""
     }
 
     // ── 作用域管理 ──
@@ -127,7 +129,7 @@ class SymbolTable {
     fun stExitScope() {
         val line: String = this.stLineAt(this.scopes, this.current)
         val parentStr: String = this.stField(line, 0, "|")
-        val parent: Int = symToIntOf(parentStr)
+        val parent: Int = SymbolTableUtils.symToIntOf(parentStr)
         this.current = parent
     }
 
@@ -159,7 +161,7 @@ class SymbolTable {
         val parentStr: String = this.stField(line, 0, "|")
         val isFn: String = this.stField(line, 1, "|")
         val cntStr: String = this.stField(line, 2, "|")
-        val newCnt: Int = symToIntOf(cntStr) + 1
+        val newCnt: Int = SymbolTableUtils.symToIntOf(cntStr) + 1
         val oldLine: String = this.stLineAt(this.scopes, this.current)
         val newLine: String = parentStr + "|" + isFn + "|" + toStr(newCnt)
         this.scopes = this.scopes.replace(oldLine, newLine)
@@ -182,7 +184,7 @@ class SymbolTable {
         while (scope >= 0 && guard < 100) {
             val line: String = this.stLineAt(this.scopes, scope)
             val cntStr: String = this.stField(line, 2, "|")
-            val cnt: Int = symToIntOf(cntStr)
+            val cnt: Int = SymbolTableUtils.symToIntOf(cntStr)
             // 遍历该作用域的所有符号
             var i: Int = 0
             while (i < cnt) {
@@ -197,7 +199,7 @@ class SymbolTable {
                 i = i + 1
             }
             val parentStr: String = this.stField(line, 0, "|")
-            val parent: Int = symToIntOf(parentStr)
+            val parent: Int = SymbolTableUtils.symToIntOf(parentStr)
             // 初始作用域（scope 0）的 parent 也是 0，此时退出循环
             if (parent == scope) {
                 break
@@ -217,7 +219,7 @@ class SymbolTable {
         while (s < scope) {
             val line: String = this.stLineAt(this.scopes, s)
             val cntStr: String = this.stField(line, 2, "|")
-            start = start + symToIntOf(cntStr)
+            start = start + SymbolTableUtils.symToIntOf(cntStr)
             s = s + 1
         }
         return start + i
@@ -306,43 +308,51 @@ class SymbolTable {
     fun stCurrentScopeCount(): Int {
         val line: String = this.stLineAt(this.scopes, this.current)
         val cntStr: String = this.stField(line, 2, "|")
-        return symToIntOf(cntStr)
+        return SymbolTableUtils.symToIntOf(cntStr)
     }
 }
 
-/// 替换 scopes 字符串中第 index 行的内容。
-fun stFieldAt(scopes: String, index: Int): String {
-    // 找到第 index 行的起始和结束位置
-    var i: Int = 0
-    var lineStart: Int = 0
-    var cur: Int = 0
-    val n: Int = scopes.length()
-    while (i < n) {
-        val c: String = toStr(scopes[i])
-        if (c == "\n") {
-            if (cur == index) {
-                return scopes.substring(lineStart, i)
+// ─────────────────────────────────────────────────────────────
+// 符号表工具对象
+// ─────────────────────────────────────────────────────────────
+
+object SymbolTableUtils {
+
+    /// 替换 scopes 字符串中第 index 行的内容。
+    fun stFieldAt(scopes: String, index: Int): String {
+        // 找到第 index 行的起始和结束位置
+        var i: Int = 0
+        var lineStart: Int = 0
+        var cur: Int = 0
+        val n: Int = scopes.length()
+        while (i < n) {
+            val c: String = toStr(scopes[i])
+            if (c == "\n") {
+                if (cur == index) {
+                    return scopes.substring(lineStart, i)
+                }
+                cur = cur + 1
+                lineStart = i + 1
             }
-            cur = cur + 1
-            lineStart = i + 1
+            i = i + 1
         }
-        i = i + 1
+        if (cur == index) {
+            return scopes.substring(lineStart, n)
+        } else {
+            return ""
+        }
     }
-    if (cur == index) {
-        return scopes.substring(lineStart, n)
-    }
-    return ""
-}
 
-/// 十进制字符串 → Int。
-fun symToIntOf(text: String): Int {
-    val digits: String = "0123456789"
-    val len: Int = text.length()
-    var total: Int = 0
-    var i: Int = 0
-    while (i < len) {
-        total = total * 10 + digits.indexOf(toStr(text[i]))
-        i = i + 1
+    /// 十进制字符串 → Int。
+    fun symToIntOf(text: String): Int {
+        val digits: String = "0123456789"
+        val len: Int = text.length()
+        var total: Int = 0
+        var i: Int = 0
+        while (i < len) {
+            total = total * 10 + digits.indexOf(toStr(text[i]))
+            i = i + 1
+        }
+        return total
     }
-    return total
 }

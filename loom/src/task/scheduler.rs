@@ -141,7 +141,10 @@ impl Scheduler {
     pub fn execute(&self, root_task: &str) -> Result<(), LoomError> {
         // 1. 验证任务存在
         if !self.graph.contains(root_task) {
-            return Err(LoomError::Task(format!("任务 '{}' 不存在", root_task)));
+            return Err(LoomError::Task(format!(
+                "Task '{}' does not exist",
+                root_task
+            )));
         }
 
         // 2. 验证任务图
@@ -168,7 +171,7 @@ impl Scheduler {
 
         if self.config.verbose {
             println!(
-                "调度: {} 个任务, {} 层, 并行: {}",
+                "Schedule: {} tasks, {} layers, parallel: {}",
                 total_tasks,
                 total_layers,
                 self.config.effective_jobs()
@@ -194,7 +197,7 @@ impl Scheduler {
                 .map(|r| format!("  ✗ {} — {}", r.task_name, r.message))
                 .collect();
             return Err(LoomError::Task(format!(
-                "构建失败 ({} 个任务失败):\n{}",
+                "Build failed ({} tasks failed):\n{}",
                 failures.len(),
                 failures.join("\n")
             )));
@@ -214,9 +217,9 @@ impl Scheduler {
     }
 
     fn print_dry_run_plan(&self, layers: &[Vec<String>], subgraph: &TaskGraph) {
-        println!("📋 执行计划 (dry-run):");
+        println!("📋 Execution plan (dry-run):");
         for (layer_idx, layer) in layers.iter().enumerate() {
-            println!("  层 {}:", layer_idx);
+            println!("  Layer {}:", layer_idx);
             for name in layer {
                 if let Some(task) = subgraph.get(name) {
                     let kind = format_task_kind(&task.kind);

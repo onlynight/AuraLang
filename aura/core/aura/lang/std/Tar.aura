@@ -1,0 +1,473 @@
+// aura:///aura/lang/std/Tar.aura
+package aura.lang.std
+// ------------------------------------------------------------------
+// Tar 归档格式 — 纯 Aura 实现（P3 阶段）
+//
+// 实现 POSIX tar 格式（uStar 兼容）的纯 Aura 读写，不依赖外部库。
+//
+// Tar 块结构（512 字节头 + 数据块）：
+//   name[100]      — 文件名（最多 100 字节）
+//   mode[8]        — 文件权限（八进制字符串）
+//   uid[8]         — 用户 ID
+//   gid[8]         — 组 ID
+//   size[12]       — 文件大小（八进制字符串）
+//   mtime[12]      — 修改时间（十进制字符串）
+//   chksum[8]      — 校验和（八进制字符串）
+//   typeflag[1]    — 类型标志（'0' = 普通文件）
+//   linkname[100]  — 符号链接目标
+//   magic[6]       — "ustar" 或 "ustar "
+//   version[2]     — 版本 "00"
+//   uname[32]      — 用户名
+//   gname[32]      — 组名
+//   devmajor[8]    — 设备主号
+//   devminor[8]    — 设备次号
+//   prefix[155]    — 前缀
+//   padding[12]    — 填充
+//
+// @since 0.3
+// ------------------------------------------------------------------
+
+import aura.lang.std.String
+import aura.lang.std.IO
+
+// ═══════════════════════════════════════════════════════════════
+// Tar 条目
+// ═══════════════════════════════════════════════════════════════
+
+/// Tar 归档条目。
+class TarEntry {
+    /// 文件名。
+    var name: String = ""
+
+    /// 文件权限（八进制）。
+    var mode: String = "000"
+
+    /// 用户 ID。
+    var uid: String = "0000000"
+
+    /// 组 ID。
+    var gid: String = "0000000"
+
+    /// 文件大小（字节）。
+    var size: Int = 0
+
+    /// 修改时间（Unix 时间戳）。
+    var mtime: Int = 0
+
+    /// 类型标志。
+    var typeflag: String = "0"
+
+    /// 符号链接目标。
+    var linkname: String = ""
+
+    /// 用户名。
+    var uname: String = ""
+
+    /// 组名。
+    var gname: String = ""
+
+    /// 文件内容。
+    var content: String = ""
+
+    fun TarEntry() {
+    }
+
+    fun TarEntry(name: String, content: String) {
+        this.name = name
+        this.content = content
+        this.size = content.length
+        this.mode = "000644"
+        this.uid = "0000000"
+        this.gid = "0000000"
+        this.typeflag = TarUtils.TAR_TYPE_FILE
+    }
+
+    /// 计算校验和。
+    fun checksum(): Int {
+        var sum: Int = 0
+        // 简化实现：直接计算名称+模式的和
+        for (var i: Int = 0; i < name.length; i = i + 1) {
+            sum = sum + name.get(i)
+        }
+        for (var i: Int = 0; i < content.length; i = i + 1) {
+            sum = sum + content.get(i)
+        }
+        return sum
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Tar 归档读写
+// ═══════════════════════════════════════════════════════════════
+
+/// Tar 归档文件。
+class TarArchive {
+    /// 条目列表。
+    var entries: List<TarEntry>
+
+    /// 是否已读取。
+    var loaded: Boolean = false
+
+    fun TarArchive() {
+        entries = List()
+    }
+
+    /// 添加条目。
+    fun addEntry(entry: TarEntry): Unit {
+        entries.add(entry)
+    }
+
+    /// 添加文件条目。
+    fun addFile(name: String, content: String): Unit {
+        val entry = TarEntry(name, content)
+        entries.add(entry)
+    }
+
+    /// 添加目录条目。
+    fun addDir(name: String): Unit {
+        val entry = TarEntry(name, "")
+        entry.typeflag = TarUtils.TAR_TYPE_DIR
+        entry.mode = "000755"
+        entries.add(entry)
+    }
+
+    /// 获取条目数量。
+    fun count(): Int {
+        return entries.length
+    }
+
+    /// 通过名称查找条目。
+    fun findEntry(name: String): TarEntry? {
+        for (var i: Int = 0; i < entries.length; i = i + 1) {
+            if (entries.get(i).name == name) {
+                return entries.get(i)
+            }
+        }
+        return null
+    }
+
+    /// 导出为 Tar 字节（字符串表示）。
+    fun export(): String {
+        var result: String = ""
+
+        // 写入每个条目
+        for (var i: Int = 0; i < entries.length; i = i + 1) {
+            val entry = entries.get(i)
+            result = result + TarUtils.encodeEntry(entry)
+        }
+
+        // 写入结束标记（两个 512 字节零块）
+        result = result + TarUtils.zeros(TarUtils.TAR_BLOCK_SIZE * 2)
+
+        return result
+    }
+
+    /// 从 Tar 字节读取。
+    fun import(tarData: String): Boolean {
+        entries.clear()
+
+        var offset: Int = 0
+        var blockSize: Int = TarUtils.TAR_BLOCK_SIZE
+
+        while (offset < tarData.length && offset + blockSize <= tarData.length) {
+            // 读取块
+            val block: String = tarData.substring(offset, offset + blockSize)
+
+            // 检查是否为空块（结束标记）
+            if (TarUtils.isZeroBlock(block)) {
+                offset = offset + blockSize
+                if (offset < tarData.length && offset + blockSize <= tarData.length) {
+                    val nextBlock: String = tarData.substring(offset, offset + blockSize)
+                    if (TarUtils.isZeroBlock(nextBlock)) {
+                        break
+                    }
+                }
+                break
+            }
+
+            // 解析条目
+            val entry = TarUtils.parseHeader(block)
+            if (entry != null) {
+                // 读取数据块
+                var data: String = ""
+                var dataOffset: Int = offset + blockSize
+                var dataBytes: Int = entry.size
+
+                while (dataBytes > 0 && dataOffset < tarData.length) {
+                    val chunk: String = tarData.substring(dataOffset, dataOffset + Math.min(dataBytes, blockSize))
+                    data = data + chunk
+                    dataOffset = dataOffset + chunk.length
+                    dataBytes = dataBytes - chunk.length
+                }
+
+                entry.content = data
+                entries.add(entry)
+
+                // 移动到下一个条目（数据块对齐到 512 字节）
+                offset = dataOffset
+                if (offset % blockSize != 0) {
+                    offset = offset + (blockSize - offset % blockSize)
+                }
+            } else {
+                break
+            }
+        }
+
+        loaded = true
+        return entries.length > 0
+    }
+
+    /// 写入到文件。
+    fun writeToFile(path: String): Boolean {
+        val data: String = export()
+        return IO.writeFile(path, data)
+    }
+
+    /// 从文件读取。
+    fun readFromFile(path: String): Boolean {
+        val data: String = IO.readFile(path)
+        if (data == "") {
+            return false
+        }
+        return import(data)
+    }
+
+    /// 获取所有文件名。
+    fun fileNames(): List<String> {
+        val names: List<String> = List()
+        for (var i: Int = 0; i < entries.length; i = i + 1) {
+            val entry = entries.get(i)
+            if (entry.typeflag == TarUtils.TAR_TYPE_FILE) {
+                names.add(entry.name)
+            }
+        }
+        return names
+    }
+
+    /// 获取指定文件的内容。
+    fun fileContent(name: String): String {
+        val entry = findEntry(name)
+        if (entry == null) {
+            return ""
+        }
+        return entry.content
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Tar 工具
+// ═══════════════════════════════════════════════════════════════
+
+/// Tar 工具对象，包含常量与辅助函数。
+object TarUtils {
+    /// Tar 块大小。
+    const val TAR_BLOCK_SIZE: Int = 512
+
+    /// 文件名最大长度。
+    const val TAR_NAME_MAX: Int = 100
+
+    /// Tar 魔数。
+    const val TAR_MAGIC: String = "ustar"
+
+    /// Tar 版本。
+    const val TAR_VERSION: String = "00"
+
+    /// 普通文件类型标志。
+    const val TAR_TYPE_FILE: String = "0"
+
+    /// 目录类型标志。
+    const val TAR_TYPE_DIR: String = "5"
+
+    /// 空条目类型标志。
+    const val TAR_TYPE_END: String = "0"
+
+    /// 编码条目为 Tar 块。
+    fun encodeEntry(entry: TarEntry): String {
+        var header: String = ""
+
+        // name[100]
+        header = header + TarUtils.padRight(entry.name, TarUtils.TAR_NAME_MAX)
+
+        // mode[8]
+        header = header + TarUtils.padRight(entry.mode, 8)
+
+        // uid[8]
+        header = header + TarUtils.padRight(entry.uid, 8)
+
+        // gid[8]
+        header = header + TarUtils.padRight(entry.gid, 8)
+
+        // size[12]
+        header = header + TarUtils.padRight(entry.size.toStr(), 12)
+
+        // mtime[12]
+        header = header + TarUtils.padRight(entry.mtime.toStr(), 12)
+
+        // chksum[8] — 先填空，后面计算
+        header = header + "        "
+
+        // typeflag[1]
+        header = header + entry.typeflag
+
+        // linkname[100]
+        header = header + TarUtils.padRight(entry.linkname, 100)
+
+        // magic[6]
+        header = header + TarUtils.TAR_MAGIC
+
+        // version[2]
+        header = header + TarUtils.TAR_VERSION
+
+        // uname[32]
+        header = header + TarUtils.padRight(entry.uname, 32)
+
+        // gname[32]
+        header = header + TarUtils.padRight(entry.gname, 32)
+
+        // devmajor[8]
+        header = header + "0000000"
+
+        // devminor[8]
+        header = header + "0000000"
+
+        // prefix[155]
+        header = header + TarUtils.zeros(155)
+
+        // padding[12]
+        header = header + TarUtils.zeros(12)
+
+        // 计算校验和
+        val chksum: Int = entry.checksum()
+        val chksumStr: String = TarUtils.padRight(chksum.toStr(), 8)
+
+        // 替换 chksum 字段
+        header = header.substring(0, 148) + chksumStr + header.substring(156)
+
+        // 写入数据块（对齐到 512 字节）
+        var data: String = entry.content
+        if (data.length % TarUtils.TAR_BLOCK_SIZE != 0) {
+            data = data + TarUtils.zeros(TarUtils.TAR_BLOCK_SIZE - data.length % TarUtils.TAR_BLOCK_SIZE)
+        }
+        if (data.length == 0) {
+            data = TarUtils.zeros(TarUtils.TAR_BLOCK_SIZE)
+        }
+
+        return header + data
+    }
+
+    /// 解析 Tar 头部。
+    fun parseHeader(block: String): TarEntry? {
+        if (block.length < TarUtils.TAR_BLOCK_SIZE) {
+            return null
+        }
+
+        val entry = TarEntry()
+
+        // name[0:100]
+        entry.name = TarUtils.trim(block.substring(0, TarUtils.TAR_NAME_MAX))
+
+        // mode[100:108]
+        entry.mode = TarUtils.trim(block.substring(100, 108))
+
+        // uid[108:116]
+        entry.uid = TarUtils.trim(block.substring(108, 116))
+
+        // gid[116:124]
+        entry.gid = TarUtils.trim(block.substring(116, 124))
+
+        // size[124:136]
+        entry.size = TarUtils.parseInt(TarUtils.trim(block.substring(124, 136)))
+
+        // mtime[136:148]
+        entry.mtime = TarUtils.parseInt(TarUtils.trim(block.substring(136, 148)))
+
+        // typeflag[156]
+        entry.typeflag = block.substring(156, 157)
+
+        // linkname[157:257]
+        entry.linkname = TarUtils.trim(block.substring(157, 257))
+
+        // uname[265:297]
+        entry.uname = TarUtils.trim(block.substring(265, 297))
+
+        // gname[297:329]
+        entry.gname = TarUtils.trim(block.substring(297, 329))
+
+        return entry
+    }
+
+    /// 字符串右填充（空格）。
+    fun padRight(s: String, length: Int): String {
+        if (s.length >= length) {
+            return s.substring(0, length)
+        } else {
+            return s + TarUtils.zeros(length - s.length)
+        }
+    }
+
+    /// 去除字符串首尾空格。
+    fun trim(s: String): String {
+        var start: Int = 0
+        var end: Int = s.length - 1
+
+        while (start <= end && s.get(start) == ' ') {
+            start = start + 1
+        }
+
+        while (end >= start && s.get(end) == ' ') {
+            end = end - 1
+        }
+
+        if (start > end) {
+            return ""
+        } else {
+            return s.substring(start, end + 1)
+        }
+    }
+
+    /// 解析整数。
+    fun parseInt(s: String): Int {
+        if (s == "") {
+            return 0
+        }
+        var result: Int = 0
+        for (var i: Int = 0; i < s.length; i = i + 1) {
+            val c: Int = s.get(i)
+            if (c >= '0' && c <= '9') {
+                result = result * 10 + (c - '0')
+            }
+        }
+        return result
+    }
+
+    /// 生成指定长度的零字符串。
+    fun zeros(n: Int): String {
+        var s: String = ""
+        for (var i: Int = 0; i < n; i = i + 1) {
+            s = s + "\0"
+        }
+        return s
+    }
+
+    /// 检查块是否全为零。
+    fun isZeroBlock(block: String): Boolean {
+        if (block.length == 0) {
+            return true
+        }
+        for (var i: Int = 0; i < block.length; i = i + 1) {
+            if (block.get(i) != 0) {
+                return false
+            }
+        }
+        return true
+    }
+
+    /// 最小值。
+    private fun min(a: Int, b: Int): Int {
+        if (a < b) {
+            return a
+        } else {
+            return b
+        }
+    }
+}

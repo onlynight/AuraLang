@@ -1,0 +1,48 @@
+// aura:///loom/plugin/aura/lang/loom/plugin/ConventionPlugin.aura
+package aura.lang.loom.plugin
+
+import aura.lang.std.String
+import aura.lang.std.Collections
+import aura.lang.std.FileSystem
+import aura.lang.std.IO
+import aura.lang.loom.plugin.Plugin
+
+// ═══════════════════════════════════════════════════════════════
+// 约定式插件
+// 对标 Rust: plugin/convention.rs
+// ═══════════════════════════════════════════════════════════════
+
+object ConventionPlugin {
+    // 约定式插件自动发现
+    fun discover(projectDir: String): List<Plugin> {
+        val plugins: List<Plugin> = mutableListOf()
+        val pluginDir: String = projectDir + "/.aura/plugins"
+        if (FileSystem.exists(pluginDir)) {
+            // 简化：返回空列表
+            IO.println("[convention] Plugin directory found: " + pluginDir)
+        }
+        return plugins
+    }
+
+    // 内置插件
+    fun builtin(): List<Plugin> {
+        val plugins: List<Plugin> = mutableListOf()
+        
+        // 格式化插件
+        val fmtPlugin: Plugin = Plugin("formatter", "0.1.0")
+        fmtPlugin.addTask("fmt")
+        plugins.add(fmtPlugin)
+        
+        // 文档插件
+        val docPlugin: Plugin = Plugin("docgen", "0.1.0")
+        docPlugin.addTask("doc")
+        plugins.add(docPlugin)
+        
+        // 测试插件
+        val testPlugin: Plugin = Plugin("testrunner", "0.1.0")
+        testPlugin.addTask("test")
+        plugins.add(testPlugin)
+        
+        return plugins
+    }
+}

@@ -151,7 +151,7 @@ fn bench_c(c_src: &str, label: &str) -> Result<f64, String> {
         .map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(format!(
-            "clang 失败: {}",
+            "clang failed: {}",
             String::from_utf8_lossy(&out.stderr)
         ));
     }
@@ -196,7 +196,7 @@ fn bench_aot(src: &str, label: &str) -> Result<f64, String> {
         .map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(format!(
-            "llc 失败: {}",
+            "llc failed: {}",
             String::from_utf8_lossy(&out.stderr)
         ));
     }
@@ -222,7 +222,7 @@ fn bench_aot(src: &str, label: &str) -> Result<f64, String> {
     };
     if !out.status.success() {
         return Err(format!(
-            "链接失败: {}",
+            "linking failed: {}",
             String::from_utf8_lossy(&out.stderr)
         ));
     }
@@ -251,7 +251,7 @@ fn bench_avg(c_src: &str, aura_src: &str, label: &str, runs: usize) {
     }
 
     if c_times.is_empty() || aot_times.is_empty() {
-        println!("  跳过（编译或运行失败）");
+        println!("  skipped (compilation or run failed)");
         println!();
         return;
     }
@@ -262,18 +262,18 @@ fn bench_avg(c_src: &str, aura_src: &str, label: &str, runs: usize) {
 
     println!("  C:   {:.2} ms", c_avg);
     println!("  AOT: {:.2} ms", aot_avg);
-    println!("  AOT 速度: {:.1}x vs C", speedup);
+    println!("  AOT speed: {:.1}x vs C", speedup);
     if speedup >= 0.9 {
-        println!("  ✅ AOT 达到 C 的 {}% 速度", speedup * 100.0);
+        println!("  * AOT reached {}% of C speed", speedup * 100.0);
     } else {
-        println!("  ⚠️  AOT 仅为 C 的 {}% 速度", speedup * 100.0);
+        println!("  ! AOT is only {}% of C speed", speedup * 100.0);
     }
     println!();
 }
 
 fn main() {
-    println!("=== Aura AOT vs C 性能对比基准 ===");
-    println!("（每次运行含 100 次内部迭代，消除进程启动开销）\n");
+    println!("=== Aura AOT vs C performance benchmark ===");
+    println!("(each run includes 100 internal iterations, eliminating process startup overhead)\n");
     bench_avg(FIB_C, FIB_AURA, "fib(20) × 100", 5);
     bench_avg(SUM_C, SUM_AURA, "sum(100k) × 100", 5);
     bench_avg(MATMUL_C, MATMUL_AURA, "matmul(100³) × 100", 3);

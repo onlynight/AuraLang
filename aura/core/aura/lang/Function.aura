@@ -18,7 +18,7 @@ package aura.lang
 ///
 /// @see Type
 /// @since 0.1
-internal open class Function {
+open class Function {
 
     // ── 调用方法 ──
 

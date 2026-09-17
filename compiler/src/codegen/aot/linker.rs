@@ -35,7 +35,7 @@ impl std::fmt::Display for LlvmToolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} 执行失败 (exit code {:?}): {}",
+            "{} execution failed (exit code {:?}): {}",
             self.tool, self.status, self.stderr
         )
     }
@@ -132,7 +132,7 @@ fn find_tool<'a>(name: &str, options: &'a AotOptions) -> Option<PathBuf> {
 fn build_command(tool: &str, options: &AotOptions) -> Result<Command, AotError> {
     let tool_path = find_tool(tool, options).ok_or_else(|| {
         AotError::ToolError(format!(
-            "找不到 LLVM 工具 '{}'，请设置 AURA_LLVM_HOME 或将 LLVM bin 加入 PATH",
+            "LLVM tool '{}' not found. Set AURA_LLVM_HOME or add LLVM bin to PATH",
             tool
         ))
     })?;
@@ -155,6 +155,14 @@ pub fn link_to_object(
     object_path: &Path,
     options: &AotOptions,
 ) -> Result<(), AotError> {
+    // P6.5.8：编译前先独立验证 IR 合法性（`llc -verify-each`）。
+    // 失败时立即定位首个非法指令，避免编译到一半才报错、定位困难。
+    {
+        let mut verify_cmd = build_command("llc", options)?;
+        verify_cmd.arg(ll_path).arg("-verify-each");
+        run_and_report(&mut verify_cmd, "llc -verify")?;
+    }
+
     let mut cmd = build_command("llc", options)?;
     cmd.arg(ll_path)
         .arg("-o")
@@ -181,9 +189,9 @@ pub fn link_to_executable(
     options: &AotOptions,
 ) -> Result<(), AotError> {
     // Phase 4: 如果启用 std C FFI，先编译 C FFI 源文件
-    let mut cffi_object_path = None;
+    let mut cffi_object_paths = Vec::new();
     if options.link_std_cffi {
-        cffi_object_path = Some(compile_std_cffi(options)?);
+        cffi_object_paths = compile_std_cffi(options)?;
     }
 
     #[cfg(target_os = "windows")]
@@ -194,7 +202,7 @@ pub fn link_to_executable(
             if let Some(clang_path) = find_tool("clang", options) {
                 let mut cmd = Command::new(clang_path);
                 cmd.arg(input_path);
-                if let Some(ref cffi_obj) = cffi_object_path {
+                for cffi_obj in &cffi_object_paths {
                     cmd.arg(cffi_obj);
                 }
                 cmd.arg("-o").arg(exe_path).arg(options.opt_level.as_llvm_flag());
@@ -207,13 +215,13 @@ pub fn link_to_executable(
             // 回退 lld-link（不提供 __chkstk，仅适用于小栈帧程序）
             let tool_path = find_tool("lld-link", options).ok_or_else(|| {
                 AotError::ToolError(
-                    "找不到 clang 或 lld-link，请设置 AURA_LLVM_HOME 或将 LLVM bin 加入 PATH"
+                    "clang or lld-link not found. Set AURA_LLVM_HOME or add LLVM bin to PATH"
                         .to_string(),
                 )
             })?;
             let mut cmd = Command::new(tool_path);
             cmd.arg(input_path);
-            if let Some(ref cffi_obj) = cffi_object_path {
+            for cffi_obj in &cffi_object_paths {
                 cmd.arg(cffi_obj);
             }
             cmd.arg(format!("/out:{}", exe_path.display()))
@@ -227,7 +235,7 @@ pub fn link_to_executable(
     // 非 Windows 目标或非 Windows 主机：用 clang
     let mut cmd = build_command("clang", options)?;
     cmd.arg(input_path);
-    if let Some(ref cffi_obj) = cffi_object_path {
+    for cffi_obj in &cffi_object_paths {
         cmd.arg(cffi_obj);
     }
     cmd.arg("-o").arg(exe_path).arg(options.opt_level.as_llvm_flag());
@@ -243,44 +251,60 @@ pub fn link_to_executable(
 ///
 /// 编译 `compiler/src/std/cffi/aura_std_cffi.c` 为 `.o`/`.obj` 文件，
 /// 供 AOT 可执行文件链接使用。
-fn compile_std_cffi(options: &AotOptions) -> Result<PathBuf, AotError> {
+fn compile_std_cffi(options: &AotOptions) -> Result<Vec<PathBuf>, AotError> {
     // C FFI 源文件路径
     let cffi_src = concat!(env!("CARGO_MANIFEST_DIR"), "/src/std/cffi/aura_std_cffi.c");
+    let syscalls_src = concat!(env!("CARGO_MANIFEST_DIR"), "/src/std/cffi/aura_syscalls.c");
     let cffi_header = concat!(env!("CARGO_MANIFEST_DIR"), "/src/std/cffi/aura_std_cffi.h");
 
     // 输出文件路径（临时文件）
     let ext = if cfg!(target_os = "windows") { "obj" } else { "o" };
     let tmp_dir = std::env::temp_dir();
     let cffi_obj = tmp_dir.join(format!("aura_std_cffi.{}", ext));
+    let syscalls_obj = tmp_dir.join(format!("aura_syscalls.{}", ext));
 
     // 找 clang
-    let clang_path = find_tool("clang", options)
-        .ok_or_else(|| AotError::ToolError("找不到 clang，无法编译 std C FFI".to_string()))?;
+    let clang_path = find_tool("clang", options).ok_or_else(|| {
+        AotError::ToolError("clang not found, cannot compile std C FFI".to_string())
+    })?;
 
-    // 编译命令
-    let mut cmd = Command::new(clang_path);
+    // 编译 aura_std_cffi.c
+    let mut cmd = Command::new(&clang_path);
     cmd.arg("-c")
         .arg(cffi_src)
         .arg("-o")
         .arg(&cffi_obj)
         .arg("-I")
         .arg(Path::new(cffi_header).parent().unwrap());
-
     run_and_report(&mut cmd, "clang")?;
 
-    Ok(cffi_obj)
+    // 编译 aura_syscalls.c（包含 setjmp/longjmp 异常桥等）
+    let mut cmd = Command::new(&clang_path);
+    cmd.arg("-c")
+        .arg(syscalls_src)
+        .arg("-o")
+        .arg(&syscalls_obj)
+        .arg("-I")
+        .arg(Path::new(cffi_header).parent().unwrap());
+    run_and_report(&mut cmd, "clang")?;
+
+    Ok(vec![
+        cffi_obj,
+        syscalls_obj,
+    ])
 }
 
 /// 执行命令并报告结果
 fn run_and_report(cmd: &mut Command, tool_name: &str) -> Result<(), AotError> {
-    let output =
-        cmd.output().map_err(|e| AotError::ToolError(format!("无法启动 {}: {}", tool_name, e)))?;
+    let output = cmd
+        .output()
+        .map_err(|e| AotError::ToolError(format!("failed to start {}: {}", tool_name, e)))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         return Err(AotError::LinkerFailed(format!(
-            "{} 失败:\nstdout: {}\nstderr: {}",
+            "{} failed:\nstdout: {}\nstderr: {}",
             tool_name, stdout, stderr
         )));
     }
@@ -357,8 +381,12 @@ fn parse_object_file(
 ) -> Result<(Vec<u8>, u64, bool, Vec<(String, u64)>), LlvmToolError> {
     use object::read::{File, Object, ObjectSection, ObjectSymbol};
 
-    let file = File::parse(bytes)
-        .map_err(|e| make_tool_error("parse_object", &format!("无法解析目标文件: {}", e)))?;
+    let file = File::parse(bytes).map_err(|e| {
+        make_tool_error(
+            "parse_object",
+            &format!("failed to parse object file: {}", e),
+        )
+    })?;
 
     let is_elf = matches!(file.format(), object::BinaryFormat::Elf);
 
@@ -368,14 +396,19 @@ fn parse_object_file(
     if let Some(section) = file.section_by_name(".text") {
         text_data = section
             .data()
-            .map_err(|e| make_tool_error("parse_object", &format!("读取 .text 段失败: {}", e)))?
+            .map_err(|e| {
+                make_tool_error(
+                    "parse_object",
+                    &format!("failed to read .text section: {}", e),
+                )
+            })?
             .to_vec();
         text_start = section.address();
     }
     if text_data.is_empty() {
         return Err(make_tool_error(
             "parse_object",
-            "目标文件中未找到 .text 段或段为空",
+            ".text section not found or empty in object file",
         ));
     }
 
@@ -443,15 +476,16 @@ pub fn link_to_blob(
     _options: &AotOptions,
 ) -> LlvmToolResult<Vec<(String, AuraFuncDesc)>> {
     // 1. 读取目标文件
-    let bytes = std::fs::read(object_path)
-        .map_err(|e| make_tool_error("read_object", &format!("读取目标文件失败: {}", e)))?;
+    let bytes = std::fs::read(object_path).map_err(|e| {
+        make_tool_error("read_object", &format!("failed to read object file: {}", e))
+    })?;
 
     // 2. 解析目标文件，提取 .text 数据和符号表
     let (text_data, text_start, is_elf, symbols) = parse_object_file(&bytes)?;
 
     // 3. 写入 blob 文件
     std::fs::write(blob_path, &text_data)
-        .map_err(|e| make_tool_error("write_blob", &format!("写入 blob 文件失败: {}", e)))?;
+        .map_err(|e| make_tool_error("write_blob", &format!("failed to write blob file: {}", e)))?;
 
     // 4. 为每个 aura_aot_* 符号生成函数描述符
     let mut descs = Vec::new();
@@ -486,8 +520,8 @@ pub fn link_to_blob(
             return Err(make_tool_error(
                 "link_to_blob",
                 &format!(
-                    "函数 '{}' 的 entry_offset 为 0（address={:#x}, text_start={:#x}），\
-                     请检查该符号是否在 .text 段内",
+                    "function '{}' has entry_offset 0 (address={:#x}, text_start={:#x}), \
+                     please check if this symbol is within the .text section",
                     name, address, text_start
                 ),
             ));
@@ -532,12 +566,12 @@ pub fn link_to_shared_library(
     options: &AotOptions,
 ) -> Result<(), AotError> {
     // Phase 4: 如果启用 std C FFI，先编译 C FFI 源文件（与可执行文件相同）
-    let cffi_object_path =
-        if options.link_std_cffi { Some(compile_std_cffi(options)?) } else { None };
+    let cffi_object_paths =
+        if options.link_std_cffi { compile_std_cffi(options)? } else { Vec::new() };
 
     let mut cmd = build_command("clang", options)?;
     cmd.arg(input_path);
-    if let Some(ref cffi_obj) = cffi_object_path {
+    for cffi_obj in &cffi_object_paths {
         cmd.arg(cffi_obj);
     }
     if options.debug_info {
@@ -572,14 +606,14 @@ pub fn link_to_rust_host(
     host_path: &Path,
     options: &AotOptions,
 ) -> Result<(), AotError> {
-    let mut cffi_object_path = None;
+    let mut cffi_object_paths = Vec::new();
     if options.link_std_cffi {
-        cffi_object_path = Some(compile_std_cffi(options)?);
+        cffi_object_paths = compile_std_cffi(options)?;
     }
 
     let mut cmd = build_command("clang", options)?;
     cmd.arg(input_path);
-    if let Some(ref cffi_obj) = cffi_object_path {
+    for cffi_obj in &cffi_object_paths {
         cmd.arg(cffi_obj);
     }
     cmd.arg("-o").arg(host_path).arg(options.opt_level.as_llvm_flag());

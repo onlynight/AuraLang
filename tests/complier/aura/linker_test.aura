@@ -1,0 +1,225 @@
+// ═════════════════════════════════════════════════════════════
+// Linker 测试用例 — 纯 Aura 化迁移
+//
+// 验证内容：
+//   1. 模块加载
+//   2. 符号解析与冲突检测
+//   3. 循环依赖检测
+//   4. 导入解析
+//
+// 运行：aura run tests/complier/aura/linker_test.aura
+//   全通过时最后输出 "RESULT: PASS"
+// ═════════════════════════════════════════════════════════════
+
+import "../../../aura/compiler/aura/lang/compiler/test/TestRunner.aura"
+import "../../../aura/compiler/aura/lang/compiler/linker/Linker.aura"
+import "../../../aura/compiler/aura/lang/compiler/signature/Signature.aura"
+
+fun main() {
+    println("════════ Linker 测试用例 ════════")
+    println("")
+
+    var totalFailures: Int = 0
+
+    // ── 套件 1：模块加载 ─────────────────────────────────────
+    val t1 = TestRunner()
+    t1.begin("Linker/ModuleLoad")
+
+    val linker = Linker()
+    t1.assertEq(linker.listModules().length, 0, "empty linker")
+
+    val sig1 = ModuleSig("math", "1.0.0", "aaaabbbbccccdddd")
+    val f1 = FuncSig()
+    f1.name = "add"
+    f1.isPublic = true
+    sig1.functions.add(f1)
+    linker.loadModule(sig1)
+
+    t1.assertEq(linker.listModules().length, 1, "one module loaded")
+    t1.assertTrue(linker.listModules().contains("math"), "math module listed")
+
+    val sig2 = ModuleSig("string", "1.0.0", "eeff001122334455")
+    val f2 = FuncSig()
+    f2.name = "concat"
+    f2.isPublic = true
+    sig2.functions.add(f2)
+    linker.loadModule(sig2)
+
+    t1.assertEq(linker.listModules().length, 2, "two modules loaded")
+
+    totalFailures = totalFailures + t1.report()
+
+    // ── 套件 2：链接无冲突 ───────────────────────────────────
+    val t2 = TestRunner()
+    t2.begin("Linker/NoConflict")
+
+    val linker2 = Linker()
+    val sigA = ModuleSig("math", "1.0.0", "aaaabbbbccccdddd")
+    val fa1 = FuncSig()
+    fa1.name = "add"
+    fa1.isPublic = true
+    sigA.functions.add(fa1)
+    val fa2 = FuncSig()
+    fa2.name = "sub"
+    fa2.isPublic = true
+    sigA.functions.add(fa2)
+    linker2.loadModule(sigA)
+
+    val sigB = ModuleSig("string", "1.0.0", "eeff001122334455")
+    val fb = FuncSig()
+    fb.name = "concat"
+    fb.isPublic = true
+    sigB.functions.add(fb)
+    linker2.loadModule(sigB)
+
+    val result = linker2.linkAll()
+    t2.assertTrue(result.isOk(), "no conflicts")
+    t2.assertEq(result.symbols.length, 3, "3 symbols resolved")
+    t2.assertEq(result.conflicts.length, 0, "no conflicts reported")
+
+    totalFailures = totalFailures + t2.report()
+
+    // ── 套件 3：符号冲突检测 ─────────────────────────────────
+    val t3 = TestRunner()
+    t3.begin("Linker/ConflictDetection")
+
+    val linker3 = Linker()
+    val sigC = ModuleSig("math", "1.0.0", "aaaabbbbccccdddd")
+    val fc1 = FuncSig()
+    fc1.name = "parse"
+    fc1.isPublic = true
+    sigC.functions.add(fc1)
+    linker3.loadModule(sigC)
+
+    val sigD = ModuleSig("string", "1.0.0", "eeff001122334455")
+    val fc2 = FuncSig()
+    fc2.name = "parse"
+    fc2.isPublic = true
+    sigD.functions.add(fc2)
+    linker3.loadModule(sigD)
+
+    val result2 = linker3.linkAll()
+    t3.assertFalse(result2.isOk(), "conflict detected")
+    t3.assertEq(result2.conflicts.length, 1, "one conflict")
+    t3.assertTrue(result2.conflicts[0].kind == "symbol_conflict", "conflict kind")
+    t3.assertEq(result2.conflicts[0].detail, "parse", "conflicting symbol name")
+
+    totalFailures = totalFailures + t3.report()
+
+    // ── 套件 4：循环依赖检测 ─────────────────────────────────
+    val t4 = TestRunner()
+    t4.begin("Linker/CircularDependency")
+
+    val linker4 = Linker()
+    val sigA = ModuleSig("a", "1.0.0", "aaaabbbbccccdddd")
+    sigA.dependencies.add("b")
+    linker4.loadModule(sigA)
+
+    val sigB = ModuleSig("b", "1.0.0", "eeff001122334455")
+    sigB.dependencies.add("c")
+    linker4.loadModule(sigB)
+
+    val sigC2 = ModuleSig("c", "1.0.0", "1122334455667788")
+    sigC2.dependencies.add("a")
+    linker4.loadModule(sigC2)
+
+    val errors = linker4.detectCircularDependencies()
+    t4.assertTrue(errors.length > 0, "circular dependency detected")
+    t4.assertTrue(errors[0].kind == "circular_dependency", "error kind")
+
+    // 线性依赖：不应有循环
+    val linker5 = Linker()
+    val sigX = ModuleSig("x", "1.0.0", "aaaabbbbccccdddd")
+    sigX.dependencies.add("y")
+    linker5.loadModule(sigX)
+    val sigY = ModuleSig("y", "1.0.0", "eeff001122334455")
+    sigY.dependencies.add("z")
+    linker5.loadModule(sigY)
+    val sigZ = ModuleSig("z", "1.0.0", "1122334455667788")
+    linker5.loadModule(sigZ)
+
+    val errors2 = linker5.detectCircularDependencies()
+    t4.assertEq(errors2.length, 0, "no circular dependency in linear chain")
+
+    totalFailures = totalFailures + t4.report()
+
+    // ── 套件 5：导入解析 ─────────────────────────────────────
+    val t5 = TestRunner()
+    t5.begin("Linker/ImportResolution")
+
+    val linker6 = Linker()
+    val sigLib = ModuleSig("lib", "1.0.0", "aaaabbbbccccdddd")
+    val libFunc = FuncSig()
+    libFunc.name = "add"
+    libFunc.isPublic = true
+    sigLib.functions.add(libFunc)
+    linker6.loadModule(sigLib)
+
+    // 有效导入
+    val import1 = ImportSig()
+    import1.module = "lib"
+    val sym1 = ImportSymbolSig()
+    sym1.name = "add"
+    sym1.kind = "function"
+    import1.symbols.add(sym1)
+    val err1 = linker6.resolveImports(import1)
+    t5.assertNull(err1, "valid import resolves")
+
+    // 模块不存在
+    val import2 = ImportSig()
+    import2.module = "nonexistent"
+    val err2 = linker6.resolveImports(import2)
+    t5.assertTrue(err2 != null, "missing module detected")
+    t5.assertTrue(err2.kind == "module_not_found", "module not found error")
+
+    totalFailures = totalFailures + t5.report()
+
+    // ── 套件 6：LinkResult resolve ───────────────────────────
+    val t6 = TestRunner()
+    t6.begin("Linker/LinkResult")
+
+    val linker7 = Linker()
+    val sigRenamed = ModuleSig("math", "1.0.0", "aaaabbbbccccdddd")
+    val renamedFunc = FuncSig()
+    renamedFunc.name = "parse"
+    renamedFunc.isPublic = true
+    sigRenamed.functions.add(renamedFunc)
+    linker7.loadModule(sigRenamed)
+
+    val sigRenamed2 = ModuleSig("string", "1.0.0", "eeff001122334455")
+    val renamedFunc2 = FuncSig()
+    renamedFunc2.name = "parse"
+    renamedFunc2.isPublic = true
+    sigRenamed2.functions.add(renamedFunc2)
+    linker7.loadModule(sigRenamed2)
+
+    val result3 = linker7.linkAll()
+    t6.assertFalse(result3.isOk(), "conflict detected for rename")
+
+    // 无冲突模块
+    val linker8 = Linker()
+    val sigNoConflict = ModuleSig("math", "1.0.0", "aaaabbbbccccdddd")
+    val ncFunc = FuncSig()
+    ncFunc.name = "add"
+    ncFunc.isPublic = true
+    sigNoConflict.functions.add(ncFunc)
+    linker8.loadModule(sigNoConflict)
+
+    val result4 = linker8.linkAll()
+    t6.assertTrue(result4.isOk(), "no conflict for unique symbols")
+    t6.assertEq(result4.resolve("add"), "add", "resolve unrenamed")
+
+    totalFailures = totalFailures + t6.report()
+
+    // ── 汇总 ─────────────────────────────────────────────────
+    println("")
+    println("════════ 测试汇总 ════════")
+    println("总失败数: " + toStr(totalFailures) + " (期望 0)")
+    println("")
+
+    if (totalFailures == 0) {
+        println("RESULT: PASS")
+    } else {
+        println("RESULT: FAIL")
+    }
+}

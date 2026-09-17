@@ -18,85 +18,89 @@ package aura.lang.compiler.aot
 import aura.lang.std.String
 import aura.lang.compiler.aot.AotUtil
 
-/// 生成单个 FFI 函数声明。
-///
-/// abi 取值："Rust" / "C" / "Aura" / ""；lib 为可选库名。
-fun ffiDeclare(name: String, retTy: String, paramsCsv: String,
-               abi: String, lib: String, tm: TypeMapper): String {
-    val sym: String = sanitizeLlvm(name)
-    // 内置 runtime 函数已统一声明，跳过
-    if (isRuntimeFunction(sym)) {
-        return ""
-    }
-    // C FFI 实现函数：使用真实 C ABI 签名
-    val cffi: String = cffiSignature(sym)
-    if (cffi != "") {
-        return "declare " + aotFieldAt(cffi, 0, "|") + " @" + sym
-            + "(" + aotFieldAt(cffi, 1, "|") + ")\n"
+object FfiUtils {
+
+    /// 生成单个 FFI 函数声明。
+    ///
+    /// abi 取值："Rust" / "C" / "Aura" / ""；lib 为可选库名。
+    fun ffiDeclare(name: String, retTy: String, paramsCsv: String,
+                   abi: String, lib: String, tm: TypeMapper): String {
+        val sym: String = sanitizeLlvm(name)
+        // 内置 runtime 函数已统一声明，跳过
+        if (isRuntimeFunction(sym)) {
+            return ""
+        }
+        // C FFI 实现函数：使用真实 C ABI 签名
+        val cffi: String = cffiSignature(sym)
+        if (cffi != "") {
+            return "declare " + aotFieldAt(cffi, 0, "|") + " @" + sym
+                + "(" + aotFieldAt(cffi, 1, "|") + ")\n"
+        }
+
+        var comment: String = ""
+        if (abi == "Rust") {
+            comment = "; P8-Rust: Rust library (C ABI)\n"
+            if (lib != "") {
+                comment = comment + ";   library: " + lib + "\n"
+            }
+        } else if (abi == "C") {
+            if (lib != "") {
+                comment = "; library: " + lib + "\n"
+            }
+        } else if (abi == "Aura") {
+            comment = "; extern object: AOT direct call (JitValue ABI)\n"
+            if (lib != "") {
+                comment = comment + ";   library: " + lib + "\n"
+            }
+        }
+
+        var retStr: String = tm.map(retTy)
+        if (retStr == "") {
+            retStr = "void"
+        }
+        var paramsStr: String = ""
+        if (paramsCsv != "") {
+            var n: Int = aotCsvCount(paramsCsv)
+            var i: Int = 0
+            while (i < n) {
+                if (i > 0) {
+                    paramsStr = paramsStr + ", "
+                }
+                paramsStr = paramsStr + tm.map(aotFieldAt(paramsCsv, i, ","))
+                i = i + 1
+            }
+        }
+        return comment + "declare " + retStr + " @" + sym + "(" + paramsStr + ")\n"
     }
 
-    var comment: String = ""
-    if (abi == "Rust") {
-        comment = "; P8-Rust: Rust library (C ABI)\n"
-        if (lib != "") {
-            comment = comment + ";   library: " + lib + "\n"
-        }
-    } else if (abi == "C") {
-        if (lib != "") {
-            comment = "; library: " + lib + "\n"
-        }
-    } else if (abi == "Aura") {
-        comment = "; extern interface: AOT direct call (JitValue ABI)\n"
-        if (lib != "") {
-            comment = comment + ";   library: " + lib + "\n"
-        }
-    }
-
-    var retStr: String = tm.map(retTy)
-    if (retStr == "") {
-        retStr = "void"
-    }
-    var paramsStr: String = ""
-    if (paramsCsv != "") {
-        var n: Int = aotCsvCount(paramsCsv)
+    /// 批量生成 FFI 声明（按清洗后符号名去重）。
+    ///
+    /// specs 每行一个声明：`name|retType|paramsCsv|abi|lib`。
+    fun ffiGenerate(specs: String, tm: TypeMapper): String {
+        var out: String = ""
+        var seen: String = ""
+        var n: Int = aotLineCount(specs)
         var i: Int = 0
         while (i < n) {
-            if (i > 0) {
-                paramsStr = paramsStr + ", "
+            val line: String = aotLineAt(specs, i)
+            if (line != "") {
+                val name: String = aotFieldAt(line, 0, "|")
+                val sym: String = sanitizeLlvm(name)
+                if (!aotListContains(seen, sym)) {
+                    seen = seen + sym + "\n"
+                    out = out + ffiDeclare(
+                        name,
+                        aotFieldAt(line, 1, "|"),
+                        aotFieldAt(line, 2, "|"),
+                        aotFieldAt(line, 3, "|"),
+                        aotFieldAt(line, 4, "|"),
+                        tm
+                    )
+                }
             }
-            paramsStr = paramsStr + tm.map(aotFieldAt(paramsCsv, i, ","))
             i = i + 1
         }
+        return out
     }
-    return comment + "declare " + retStr + " @" + sym + "(" + paramsStr + ")\n"
-}
 
-/// 批量生成 FFI 声明（按清洗后符号名去重）。
-///
-/// specs 每行一个声明：`name|retType|paramsCsv|abi|lib`。
-fun ffiGenerate(specs: String, tm: TypeMapper): String {
-    var out: String = ""
-    var seen: String = ""
-    var n: Int = aotLineCount(specs)
-    var i: Int = 0
-    while (i < n) {
-        val line: String = aotLineAt(specs, i)
-        if (line != "") {
-            val name: String = aotFieldAt(line, 0, "|")
-            val sym: String = sanitizeLlvm(name)
-            if (!aotListContains(seen, sym)) {
-                seen = seen + sym + "\n"
-                out = out + ffiDeclare(
-                    name,
-                    aotFieldAt(line, 1, "|"),
-                    aotFieldAt(line, 2, "|"),
-                    aotFieldAt(line, 3, "|"),
-                    aotFieldAt(line, 4, "|"),
-                    tm
-                )
-            }
-        }
-        i = i + 1
-    }
-    return out
 }

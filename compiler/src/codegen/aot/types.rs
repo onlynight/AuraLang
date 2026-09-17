@@ -88,12 +88,26 @@ impl TypeMapper {
             {
                 "i8*".to_string()
             }
+            // 其它泛型实例化（`HashMap<String, Any>` / `ArrayList<K>` …）：
+            // AOT 不做单态化，按**基类**表示。否则会把实例化后的名字当作类型名，
+            // 生成 `%struct.HashMap_String__Any_*` 这种从未定义的类型
+            //（llc: `use of undefined type named 'struct.HashMap_String__Any_'`）。
+            _ if name.contains('<') => {
+                let base = name.split('<').next().unwrap_or(name).trim();
+                self.map_named(base)
+            }
+            // 泛型类型参数（`fun <T> f(x: T)` / `<K, V>`）：AOT 不做单态化，
+            // 统一按 Any（i8*）表示；否则会落到 `%struct.T*` 占位类型，
+            // 生成 `call %struct.T* @identity(%struct.T* 5)` 这类非法 IR。
+            _ if name.len() == 1 && name.chars().next().unwrap().is_ascii_uppercase() => {
+                "i8*".to_string()
+            }
             // 函数类型 → 函数指针
             _ if name.starts_with('(') => "ptr".to_string(),
             _ => {
-                // 用户自定义结构体/命名类型：在 emit 阶段会被替换为对应的 struct 类型名
-                // 这里返回 `%struct.<Name>` 占位符
-                format!("%struct.{}", sanitizellvm(name))
+                // 用户自定义结构体/命名类型：按指针语义返回 `%struct.<Name>*`
+                // （Phase A.1：类实例按引用传递，避免拷贝丢失字段修改）
+                format!("%struct.{}*", sanitizellvm(name))
             }
         }
     }
@@ -175,7 +189,7 @@ mod tests {
     #[test]
     fn test_map_struct_named() {
         let tm = TypeMapper::new(true);
-        assert_eq!(tm.map(&HirType::Named("Player".into())), "%struct.Player");
+        assert_eq!(tm.map(&HirType::Named("Player".into())), "%struct.Player*");
     }
 
     #[test]

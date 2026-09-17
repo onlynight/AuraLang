@@ -1,7 +1,7 @@
 // aura:///aura/lang/collection/Collections.aura
 package aura.lang.collection
 // 集合工具模块
-// 实现：Rust 原生函数（compiler/src/std/std_collections.rs）
+// 实现：编译器内置函数（运行库提供）
 // (package 声明由编译器自动注入，无需显式声明)
 /// 集合工具模块。
 ///
@@ -11,7 +11,7 @@ package aura.lang.collection
 /// ```
 ///
 /// @since 0.1
-internal object Collections {
+object Collections {
 
     // ── List 创建 ──
 

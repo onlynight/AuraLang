@@ -18,13 +18,13 @@ variables:
 
   # ── Keywords ──────────────────────────────────────────────────────────
 
-  prefix_modifiers: '\b(?:abstract|final|enum|open|annotation|sealed|data|override|lateinit|private|protected|public|internal|inner|noinline|crossinline|vararg|reified|tailrec|operator|infix|inline|external|const|suspend|comptime|value|defer|extern|lazy|box|weak|async|init|companion|constructor|expect|actual|malloc|free|retain|release)\b'
+  prefix_modifiers: '\b(?:abstract|final|enum|open|annotation|sealed|data|override|lateinit|private|protected|public|internal|inner|noinline|crossinline|vararg|reified|tailrec|operator|infix|inline|external|const|suspend|comptime|value|defer|extern|lazy|box|weak|async|init|companion|constructor|expect|actual|malloc|free|retain|release|native)\b'
 
   postfix_modifiers: '\b(?:where|by|get|set)\b'
 
-  soft_keywords: '\b(?:catch|finally|field|else|then|unit)\b'
+  soft_keywords: '\b(?:catch|finally|else|unit)\b'
 
-  hard_keywords: '\b(?:as|is|in|to|it|typeof)\b'
+  hard_keywords: '\b(?:as|is|in|to|it)\b'
 
   control_keywords: '\b(?:if|while|do|when|try|throw|break|continue|return|for|select|await)\b'
 
@@ -82,8 +82,35 @@ contexts:
   # ── Root ───────────────────────────────────────────────────────────────
 
   main:
+    - include: package-declaration
     - include: imports
     - include: code
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # Package declaration (file header, consumed by preprocessor)
+  # ═══════════════════════════════════════════════════════════════════════
+
+  package-declaration:
+    - meta_include_prototype: false
+    - match: '\b(package)\b'
+      scope: storage.type.package.aura
+      captures:
+        1: storage.type.package.aura
+      push: package-rest
+
+  package-rest:
+    - meta_include_prototype: false
+    - match: '([A-Za-z_]\w*)(\.)([A-Za-z_]\w*)'
+      captures:
+        1: entity.name.package.aura
+        2: punctuation.separator.period.aura
+        3: entity.name.package.aura
+    - match: '([A-Za-z_]\w*)'
+      scope: entity.name.package.aura
+    - match: '\.'
+      scope: punctuation.separator.period.aura
+    - match: '(?=\S)'
+      set: code
 
   # ═══════════════════════════════════════════════════════════════════════
   # Imports

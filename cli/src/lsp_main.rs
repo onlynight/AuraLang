@@ -1,19 +1,19 @@
-//! Aura LSP 独立二进制入口
+//! Aura LSP standalone binary entry point
 //!
-//! 作为独立进程运行，通过 stdio 与编辑器通信。
-//! 从 `aura.exe` 中拆出，避免将 VM/AOT/JIT 等无关代码链接进 LSP 进程。
+//! Runs as a separate process and communicates with the editor via stdio.
+//! Split out from `aura.exe` to avoid linking unrelated VM/AOT/JIT code into the LSP process.
 //!
-//! 用法：
-//!   aura-lsp                    # 通过 stdio 通信（默认）
-//!   aura-lsp --port <port>      # 通过 TCP socket 通信（预留）
+//! Usage:
+//!   aura-lsp                    # Communicate via stdio (default)
+//!   aura-lsp --port <port>      # Communicate via TCP socket (reserved)
 
 fn main() {
-    // 解析命令行参数（当前仅支持 stdio 模式）
+    // Parse command-line arguments (currently only stdio mode is supported)
     let args: Vec<String> = std::env::args().collect();
 
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Aura LSP Server v0.1.0");
-        println!("通过 stdio (JSON-RPC) 与编辑器通信");
+        println!("Communicates with the editor via stdio (JSON-RPC)");
         return;
     }
 
@@ -22,6 +22,6 @@ fn main() {
         return;
     }
 
-    eprintln!("[aura-lsp] LSP 服务器启动 (stdio 模式)");
+    eprintln!("[aura-lsp] LSP server starting (stdio mode)");
     compiler::lsp::run_lsp_server();
 }

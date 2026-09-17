@@ -1,0 +1,49 @@
+// aura:///aura/lang/errors/Throwable.aura
+package aura.lang.errors
+
+/// 所有异常的基类——所有可抛出的异常必须是 Throwable 的子类。
+/// 纯 Aura 实现，不依赖任何 Rust native 函数。
+open class Throwable {
+
+    /// 异常消息
+    var message: String = ""
+
+    /// 引起此异常的根本原因（可为 null）
+    var cause: Throwable? = null
+
+    /// 构造 Throwable——只带消息
+    constructor(message: String) {
+        this.message = message
+    }
+
+    /// 构造 Throwable——带消息和原因
+    constructor(message: String, cause: Throwable?) {
+        this.message = message
+        this.cause = cause
+    }
+
+    /// 返回可读的异常描述
+    override fun toString(): String {
+        var className: String = typeof(this)
+        var result: String = className + ": " + message
+        if (cause != null) {
+            result = result + " caused by: " + cause.toString()
+        }
+        return result
+    }
+
+    /// 获取异常消息
+    fun getMessage(): String {
+        return message
+    }
+
+    /// 获取引起此异常的原因
+    fun getCause(): Throwable? {
+        return cause
+    }
+
+    /// 返回异常描述（含消息和原因链）
+    fun getLocalizedMessage(): String {
+        return this.toString()
+    }
+}

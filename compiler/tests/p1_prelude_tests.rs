@@ -29,7 +29,7 @@ fn test_prelude_println_free_import() {
             return 42
         }
     "#;
-    let result = run(src).expect("编译并运行应成功");
+    let result = run(src).expect("compilation and run should succeed");
     assert_eq!(result, Value::Int(42));
 }
 
@@ -41,7 +41,7 @@ fn test_prelude_abs_free_import() {
             return abs(-5)
         }
     "#;
-    let result = run(src).expect("编译并运行应成功");
+    let result = run(src).expect("compilation and run should succeed");
     assert_eq!(result, Value::Int(5));
 }
 
@@ -53,7 +53,7 @@ fn test_prelude_sqrt_free_import() {
             return sqrt(16.0)
         }
     "#;
-    let result = run(src).expect("编译并运行应成功");
+    let result = run(src).expect("compilation and run should succeed");
     let val = match result {
         Value::Float(f) => f,
         _ => panic!("expected Float, got {:?}", result),
@@ -117,7 +117,7 @@ fn test_user_can_define_sin_without_import() {
             return sin(3.0)
         }
     "#;
-    let result = run(src).expect("编译并运行应成功");
+    let result = run(src).expect("compilation and run should succeed");
     let val = match result {
         Value::Float(f) => f,
         _ => panic!("expected Float, got {:?}", result),
@@ -140,7 +140,7 @@ fn test_user_can_define_split_without_import() {
             return split("a-b-c", "-")
         }
     "#;
-    let result = run(src).expect("编译并运行应成功");
+    let result = run(src).expect("compilation and run should succeed");
     // 用户自定义 split 返回原字符串
     assert_eq!(result, Value::Str("a-b-c".into()));
 }

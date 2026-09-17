@@ -1,7 +1,7 @@
-// demo_aot_direct/src/main.aura — Demo 3: AOT 直调（extern interface + import）
+// demo_aot_direct/src/main.aura — Demo 3: AOT 直调（extern object + @aot + import）
 //
 // 架构：
-//   utils_interface.aura ──extern interface──→ utils.dll (Aura AOT + --shared)
+//   utils_interface.aura ──extern object + @aot──→ utils.dll (Aura AOT + --shared)
 //        ↑
 //   main.aura ────import "utils_interface.aura"
 //        │
@@ -17,7 +17,7 @@
 //   - Utils.factorial(5) = 120
 //   - Utils.power(2, 10) = 1024
 
-// 从独立文件导入 extern interface 声明
+// 从独立文件导入 extern object 声明
 import "utils_interface.aura"
 
 fun main() = {

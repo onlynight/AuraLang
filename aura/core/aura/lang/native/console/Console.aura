@@ -1,0 +1,117 @@
+// aura:///aura/lang/native/console/Console.aura
+package aura.lang.native.console
+// ------------------------------------------------------------------
+// Console operations -- Phase S1
+//
+// Provides console output functions.
+// Uses Syscalls.write to write directly to stdout (fd=1).
+//
+// Usage:
+//   Console.println("Hello, Aura!")
+//   Console.print("Hello")
+// ------------------------------------------------------------------
+
+import aura.lang.native.Syscalls
+import aura.lang.native.Memory
+import aura.lang.std.string.StringOps
+
+/// Console output
+extern object Console {
+
+    // -- Internal buffers --
+    var newlineBuf: Long = 0
+    var intBuf: Long = 0
+
+    /// Write to stdout (fd=1)
+    @native(SYS_WRITE) fun writeStdout(buf: Long, count: Long): Long
+
+    /// Initialize internal buffers
+    fun init(): Boolean {
+        newlineBuf = Memory.alloc(2)
+        if (newlineBuf == 0) { return false }
+        intBuf = Memory.alloc(32)
+        if (intBuf == 0) { return false }
+        Memory.write(newlineBuf, 10)
+        return true
+    }
+
+    /// Write string (no newline)
+    fun print(msg: Long) {
+        val len: Long = StringOps.strlen(msg)
+        writeStdout(msg, len)
+    }
+
+    /// Write string (with newline)
+    fun println(msg: Long) {
+        val len: Long = StringOps.strlen(msg)
+        writeStdout(msg, len)
+        if (newlineBuf != 0) {
+            writeStdout(newlineBuf, 1)
+        }
+    }
+
+    /// Write integer (decimal, with newline)
+    fun printlnInt(n: Long) {
+        val buf: Long = intToStr(n)
+        if (buf == 0) { return }
+        val len: Long = StringOps.strlen(buf)
+        writeStdout(buf, len)
+        if (newlineBuf != 0) {
+            writeStdout(newlineBuf, 1)
+        }
+    }
+
+    /// Write integer (no newline)
+    fun printInt(n: Long) {
+        val buf: Long = intToStr(n)
+        if (buf == 0) { return }
+        val len: Long = StringOps.strlen(buf)
+        writeStdout(buf, len)
+    }
+
+    /// Write float (simplified: integer part only, with newline)
+    fun printlnFloat(n: Float) {
+        val i: Long = n as Long
+        printlnInt(i)
+    }
+
+    /// Get newline buffer address
+    fun getNewlineBuffer(): Long {
+        return newlineBuf
+    }
+
+    /// Get integer conversion buffer address
+    fun getIntBuffer(): Long {
+        return intBuf
+    }
+
+    /// Convert integer to string (uses internal buffer)
+    fun intToStr(n: Long): Long {
+        if (intBuf == 0) { return 0 }
+        Memory.set(intBuf, 0, 32)
+        if (n == 0) {
+            Memory.write(intBuf, 48)
+            Memory.write(intBuf + 1, 0)
+            return intBuf
+        }
+        var pos: Long = 30
+        var num: Long = n
+        var negative: Boolean = false
+        if (num < 0) {
+            negative = true
+            num = -num
+        }
+        while (num > 0) {
+            val digit: Byte = (48 + num % 10) as Byte
+            pos = pos - 1
+            Memory.write(intBuf + pos, digit)
+            num = num / 10
+        }
+        if (negative) {
+            pos = pos - 1
+            Memory.write(intBuf + pos, 45)
+        }
+        Memory.write(intBuf + pos + 16, 0)
+        return intBuf + pos
+    }
+}

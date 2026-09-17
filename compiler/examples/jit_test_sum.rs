@@ -25,7 +25,7 @@ fn main() {
     )
     .unwrap();
     let r = vm.run().unwrap();
-    println!("结果: {} (期望 1799970000)", r.as_int());
+    println!("Result: {} (expected 1799970000)", r.as_int());
     assert_eq!(r.as_int(), 1_799_970_000i64);
-    println!("测试通过!");
+    println!("Test passed!");
 }

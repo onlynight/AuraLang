@@ -16,7 +16,7 @@ package aura.lang.std
 ///
 /// @see Test
 /// @since 0.1
-internal object Assert {
+object Assert {
 
     // ── 条件断言（纯逻辑，Aura 实现）──
 
@@ -27,7 +27,7 @@ internal object Assert {
         if (toBool(condition)) {
             return "OK: " + message
         }
-        throw "Assertion failed: " + message
+        throw AssertionError("Assertion failed: " + message)
     }
 
     /// 断言条件为 true。
@@ -35,7 +35,7 @@ internal object Assert {
         if (toBool(condition)) {
             return "OK: " + message
         }
-        throw "Assertion failed (expected true): " + message
+        throw AssertionError("Assertion failed (expected true): " + message)
     }
 
     /// 断言条件为 false。
@@ -43,7 +43,7 @@ internal object Assert {
         if (!toBool(condition)) {
             return "OK: " + message
         }
-        throw "Assertion failed (expected false): " + message
+        throw AssertionError("Assertion failed (expected false): " + message)
     }
 
     // ── 相等断言（纯逻辑，Aura 实现）──
@@ -53,7 +53,7 @@ internal object Assert {
         if (toStr(a) == toStr(b)) {
             return "OK: " + message
         }
-        throw "Assertion failed (values not equal): " + message + " — got " + toStr(a) + ", expected " + toStr(b)
+        throw AssertionError("Assertion failed (values not equal): " + message + " — got " + toStr(a) + ", expected " + toStr(b))
     }
 
     /// 断言两个值不相等。
@@ -61,7 +61,7 @@ internal object Assert {
         if (toStr(a) != toStr(b)) {
             return "OK: " + message
         }
-        throw "Assertion failed (values are equal): " + message + " — both are " + toStr(a)
+        throw AssertionError("Assertion failed (values are equal): " + message + " — both are " + toStr(a))
     }
 
     // ── 空值断言（纯逻辑，Aura 实现）──
@@ -71,7 +71,7 @@ internal object Assert {
         if (!isNull(value)) {
             return "OK: " + message
         }
-        throw "Assertion failed (expected non-null): " + message
+        throw AssertionError("Assertion failed (expected non-null): " + message)
     }
 
     /// 断言值为 null。
@@ -79,7 +79,7 @@ internal object Assert {
         if (isNull(value)) {
             return "OK: " + message
         }
-        throw "Assertion failed (expected null): " + message + " — got " + toStr(value)
+        throw AssertionError("Assertion failed (expected null): " + message + " — got " + toStr(value))
     }
 
     // ── 数值断言（纯逻辑，Aura 实现）──
@@ -89,7 +89,7 @@ internal object Assert {
         if (a > b) {
             return "OK: " + message
         }
-        throw "Assertion failed (expected " + toStr(a) + " > " + toStr(b) + "): " + message
+        throw AssertionError("Assertion failed (expected " + toStr(a) + " > " + toStr(b) + "): " + message)
     }
 
     /// 断言 a >= b。
@@ -97,7 +97,7 @@ internal object Assert {
         if (a >= b) {
             return "OK: " + message
         }
-        throw "Assertion failed (expected " + toStr(a) + " >= " + toStr(b) + "): " + message
+        throw AssertionError("Assertion failed (expected " + toStr(a) + " >= " + toStr(b) + "): " + message)
     }
 
     /// 断言 a < b。
@@ -105,7 +105,7 @@ internal object Assert {
         if (a < b) {
             return "OK: " + message
         }
-        throw "Assertion failed (expected " + toStr(a) + " < " + toStr(b) + "): " + message
+        throw AssertionError("Assertion failed (expected " + toStr(a) + " < " + toStr(b) + "): " + message)
     }
 
     /// 断言 a <= b。
@@ -113,7 +113,7 @@ internal object Assert {
         if (a <= b) {
             return "OK: " + message
         }
-        throw "Assertion failed (expected " + toStr(a) + " <= " + toStr(b) + "): " + message
+        throw AssertionError("Assertion failed (expected " + toStr(a) + " <= " + toStr(b) + "): " + message)
     }
 
     /// 断言浮点数近似相等（误差不超过 delta）。
@@ -122,7 +122,7 @@ internal object Assert {
         if (diff <= delta) {
             return "OK: " + message
         }
-        throw "Assertion failed (|" + toStr(a) + " - " + toStr(b) + "| > " + toStr(delta) + "): " + message
+        throw AssertionError("Assertion failed (|" + toStr(a) + " - " + toStr(b) + "| > " + toStr(delta) + "): " + message)
     }
 
     // ── 调试断言（纯逻辑，Aura 实现）──

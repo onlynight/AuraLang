@@ -21,37 +21,44 @@ use std::collections::HashMap;
 //
 // 从 ImportDecl 构建，用于在 desugar_expr 中将短名/别名解析为完整原生函数名。
 // 支持：
-// - `import aura.concurrent.*` + `spawn(42)` → `aura.lang.std.Coroutine.spawn(42)`
-// - `import aura.lang.std.Coroutine.spawn` + `spawn(42)` → `aura.lang.std.Coroutine.spawn(42)`
-// - `import aura.lang.std.Coroutine.spawn as s` + `s(42)` → `aura.lang.std.Coroutine.spawn(42)`
-// - `import aura.concurrent as cc` + `cc.spawn(42)` → `aura.lang.std.Coroutine.spawn(42)`
+// - `import aura.concurrent.*` + `spawn(42)` → `aura.lang.concurrent.Coroutine.spawn(42)`
+// - `import aura.lang.concurrent.Coroutine.spawn` + `spawn(42)` → `aura.lang.concurrent.Coroutine.spawn(42)`
+// - `import aura.lang.concurrent.Coroutine.spawn as s` + `s(42)` → `aura.lang.concurrent.Coroutine.spawn(42)`
+// - `import aura.concurrent as cc` + `cc.spawn(42)` → `aura.lang.concurrent.Coroutine.spawn(42)`
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Default)]
 struct ImportResolution {
     /// 短名 → 完整原生函数名（通配/精确引入，无别名）
-    /// 例如: "spawn" → "aura.lang.std.Coroutine.spawn"
+    /// 例如: "spawn" → "aura.lang.concurrent.Coroutine.spawn"
     short_to_full: HashMap<String, String>,
     /// 别名 → 完整原生函数名（精确引入 + 别名）
-    /// 例如: "s" → "aura.lang.std.Coroutine.spawn"
+    /// 例如: "s" → "aura.lang.concurrent.Coroutine.spawn"
     alias_to_full: HashMap<String, String>,
     /// 别名 → 模块名（模块/通配导入 + 别名）
     /// 例如: "cc" → "aura.concurrent"
     alias_to_module: HashMap<String, String>,
+    /// 导入的模块短名集合（用于识别 module.method() 调用）
+    /// 例如: "Main" → 来自 `import aura.lang.compiler.Main`
+    module_names: std::collections::HashSet<String>,
 }
 
 impl ImportResolution {
-    /// 查找短名映射（如 `spawn` → `aura.lang.std.Coroutine.spawn`）
+    /// 查找短名映射（如 `spawn` → `aura.lang.concurrent.Coroutine.spawn`）
     fn resolve_short_name(&self, name: &str) -> Option<&str> {
         self.short_to_full.get(name).map(|s| s.as_str())
     }
-    /// 查找别名映射（如 `s` → `aura.lang.std.Coroutine.spawn`）
+    /// 查找别名映射（如 `s` → `aura.lang.concurrent.Coroutine.spawn`）
     fn resolve_alias(&self, name: &str) -> Option<&str> {
         self.alias_to_full.get(name).map(|s| s.as_str())
     }
     /// 查找模块别名（如 `cc` → `aura.concurrent`）
     fn resolve_module_alias(&self, name: &str) -> Option<&str> {
         self.alias_to_module.get(name).map(|s| s.as_str())
+    }
+    /// 检查是否为已导入的模块短名
+    fn is_module_name(&self, name: &str) -> bool {
+        self.module_names.contains(name)
     }
 }
 
@@ -77,6 +84,32 @@ thread_local! {
 /// 判断名称是否为已知的结构体/类（用于检测构造器调用）
 fn is_type_name(n: &str) -> bool {
     TYPE_NAMES.with(|r| r.borrow().iter().any(|t| t == n))
+}
+
+/// 判断类型名是否为异常类（Throwable 及其子类）
+fn is_exception_type(n: &str) -> bool {
+    matches!(
+        n,
+        "Throwable"
+            | "Error"
+            | "OutOfMemoryError"
+            | "StackOverflowError"
+            | "Exception"
+            | "RuntimeException"
+            | "IllegalArgumentException"
+            | "IllegalStateException"
+            | "NullPointerException"
+            | "IndexOutOfBoundsException"
+            | "ArrayIndexOutOfBoundsException"
+            | "EmptyListException"
+            | "UnsupportedOperationException"
+            | "ArithmeticException"
+            | "ClassCastException"
+            | "IOException"
+            | "FileNotFoundException"
+            | "TimeoutException"
+            | "AssertionError"
+    )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -158,6 +191,7 @@ fn push_local_scope() {
             ctx.locals.push(std::collections::HashSet::new());
         }
     });
+    push_local_type_scope();
 }
 
 fn pop_local_scope() {
@@ -166,6 +200,7 @@ fn pop_local_scope() {
             ctx.locals.pop();
         }
     });
+    pop_local_type_scope();
 }
 
 fn register_local(n: &str) {
@@ -176,6 +211,92 @@ fn register_local(n: &str) {
             }
         }
     });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 局部变量/形参的**声明类型**通道（与 sema 类型通道互补）
+//
+// `lookup_expr_type` 只依赖 sema（span 键控）。当检查器在某处提前收尾或把
+// 构造器推断成 `<error>` 时（例如 `var xs: ArrayList<Int> = arrayListOf<Int>()`
+// 会报 "cannot initialize 'ArrayList' with '<error>'"），接收者类型就查不到，
+// 于是 `.size` / `.add` / `.get` / Map 接口改派等**全部退化为类字段访问或裸名调用**：
+// `xs.size` 会去读 Aura 类 `ArrayList._size`（运行期列表并没有该字段）→ 取到 null。
+//
+// 这里在降级期自行记录「变量名 → 声明类型」，作为 sema 缺失时的兜底。
+// ─────────────────────────────────────────────────────────────────────────────
+thread_local! {
+    static LOCAL_TYPE_SCOPES: RefCell<Vec<HashMap<String, String>>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+fn push_local_type_scope() {
+    LOCAL_TYPE_SCOPES.with(|s| s.borrow_mut().push(HashMap::new()));
+}
+
+fn pop_local_type_scope() {
+    LOCAL_TYPE_SCOPES.with(|s| {
+        s.borrow_mut().pop();
+    });
+}
+
+/// 登记局部变量/形参的声明类型（`None` 或空名忽略）。
+fn register_local_type(name: &str, ty: Option<String>) {
+    let Some(t) = ty else { return };
+    if t.trim().is_empty() || name.is_empty() {
+        return;
+    }
+    LOCAL_TYPE_SCOPES.with(|s| {
+        let mut b = s.borrow_mut();
+        if b.is_empty() {
+            b.push(HashMap::new());
+        }
+        if let Some(top) = b.last_mut() {
+            top.insert(name.to_string(), t);
+        }
+    });
+}
+
+/// 查询局部变量/形参的声明类型（由内向外查找）。
+fn lookup_local_type(name: &str) -> Option<String> {
+    LOCAL_TYPE_SCOPES.with(|s| {
+        let b = s.borrow();
+        for sc in b.iter().rev() {
+            if let Some(t) = sc.get(name) {
+                return Some(t.clone());
+            }
+        }
+        None
+    })
+}
+
+/// 取 AST 类型标注的类型名（命名/泛型/可空/基本类型；函数类型等返回 None）。
+fn ast_type_name(t: &crate::ast::Type) -> Option<String> {
+    use crate::ast::Type as T;
+    match t {
+        T::Named { name, .. } => Some(name.clone()),
+        T::Generic {
+            name, args, ..
+        } => {
+            let inner: Vec<String> =
+                args.iter().map(|a| ast_type_name(a).unwrap_or_else(|| "Any".into())).collect();
+            Some(format!("{}<{}>", name, inner.join(",")))
+        }
+        T::Nullable(inner) => ast_type_name(inner).map(|n| format!("{}?", n)),
+        T::Int => Some("Int".into()),
+        T::Long => Some("Long".into()),
+        T::Short => Some("Short".into()),
+        T::Byte => Some("Byte".into()),
+        T::Float => Some("Float".into()),
+        T::Double => Some("Double".into()),
+        T::Boolean => Some("Boolean".into()),
+        T::Char => Some("Char".into()),
+        T::String => Some("String".into()),
+        T::Any => Some("Any".into()),
+        T::Unit => Some("Unit".into()),
+        T::Nothing => Some("Nothing".into()),
+        T::Array(inner) => ast_type_name(inner).map(|n| format!("Array<{}>", n)),
+        _ => None,
+    }
 }
 
 /// 裸标识符改写：类体中的字段访问 / 访问器中的 `field`
@@ -224,27 +345,137 @@ fn sema_expr_class(object: &Expr) -> Option<String> {
     })
 }
 
+/// 沿继承链在成员表中查找拥有方法 `method` 的类。
+fn find_method_in_chain(
+    table: &HashMap<String, ClassEntry>,
+    start: &str,
+    method: &str,
+) -> Option<(String, ClassEntry)> {
+    let mut cur = Some(start.to_string());
+    while let Some(cn) = cur {
+        if let Some(e) = table.get(&cn) {
+            if e.methods.contains(method) {
+                return Some((cn, e.clone()));
+            }
+            cur = e.superclass.clone();
+        } else {
+            break;
+        }
+    }
+    None
+}
+
+/// 取 HIR 命名类型的「基名」：剥可空标记与泛型参数（`List<String>` → `List`）。
+fn hir_type_base_name(ty: &HirType) -> Option<String> {
+    match ty {
+        HirType::Named(n) => {
+            let n = n.trim_end_matches('?');
+            let base = n.split('<').next().unwrap_or(n).trim();
+            if base.is_empty() { None } else { Some(base.to_string()) }
+        }
+        HirType::Nullable(inner) => hir_type_base_name(inner),
+        _ => None,
+    }
+}
+
+/// 字段接收者兜底：`this.<field>` / 类内裸字段 `<field>` → 用当前类的字段声明类型
+/// （含继承链）解析目标类方法。
+///
+/// 自举源码里大量存在 `this.ast.add(...)` / `this.ast.leaf(...)` 这类调用；
+/// 当 sema 未记录该 MemberAccess 的静态类型（span 未命中或推断为 `Any`）时，
+/// 仅靠 sema 无法解析，而「全表唯一候选」又因多类同名方法而失败。字段声明类型
+/// 是最可靠的兜底来源。
+fn field_receiver_method(
+    table: &HashMap<String, ClassEntry>,
+    object: &Expr,
+    method: &str,
+) -> Option<(String, ClassEntry)> {
+    let field_name: Option<String> =
+        match object {
+            Expr::MemberAccess {
+                object: inner,
+                name,
+                ..
+            } if matches!(inner.as_ref(), Expr::This(_)) => Some(name.clone()),
+            Expr::Ident(n, _) => CLASS_CTX.with(|c| {
+                c.borrow().as_ref().and_then(|ctx| {
+                    if ctx.is_local(n) { None } else { Some(n.to_string()) }
+                })
+            }),
+            _ => None,
+        };
+    let field_name = field_name?;
+    let ctx = CLASS_CTX.with(|c| c.borrow().clone())?;
+    let mut cur = Some(ctx.class.clone());
+    while let Some(cn) = cur {
+        let e = table.get(&cn)?;
+        if let Some(ty) = e.field_types.get(&field_name) {
+            let tn = hir_type_base_name(ty)?;
+            return find_method_in_chain(table, &tn, method);
+        }
+        cur = e.superclass.clone();
+    }
+    None
+}
+
+/// `Any` 基类默认实现解析（`hashCode` / `equals` / `toString` …）。
+///
+/// 所有 class / object 都**隐式继承** `Any`，因此这些方法在任何类型上都可调用。
+/// 当接收者类型未知、是值类型（Int / String / …）或类未显式重写时，落到
+/// `Any.aura` 的默认实现（`AOT` 下发射为 `Any_<method>`）。
+/// 仅当 `Any.aura` 参与编译（CLASS_TABLE 含 `Any`）时命中，否则返回 None
+/// 让调用点退回 prelude 内置路径。
+fn any_base_method(
+    table: &HashMap<String, ClassEntry>,
+    method: &str,
+) -> Option<(String, ClassEntry)> {
+    let e = table.get("Any")?;
+    if e.methods.contains(method) { Some(("Any".to_string(), e.clone())) } else { None }
+}
+
 /// 方法调用的接收者类解析：静态类型命中（含继承链）→ 全表唯一候选兜底
 fn resolve_method_owner(object: &Expr, method: &str) -> Option<(String, ClassEntry)> {
     let table = CLASS_TABLE.with(|t| t.borrow().clone());
     if table.is_empty() {
         return None;
     }
-    // 1) sema 静态类型 + 继承链查找
-    if let Some(ty) = sema_expr_class(object) {
-        let mut cur = Some(ty);
-        while let Some(cn) = cur {
-            if let Some(e) = table.get(&cn) {
-                if e.methods.contains(method) {
-                    return Some((cn, e.clone()));
-                }
-                cur = e.superclass.clone();
-            } else {
-                break;
+    // 0) 直接对象名调用：object 是标识符且是 CLASS_TABLE 中的类/object 名
+    //    （AOT 无 sema 信息时，sema_expr_class 返回 None，唯一候选兜底在
+    //    多类同名方法时失败；object 单例方法必须走此路径）
+    if let Expr::Ident(obj_name, _) = object {
+        let obj_name_str = obj_name.to_string();
+        if let Some(e) = table.get(&obj_name_str) {
+            if e.methods.contains(method) {
+                return Some((obj_name_str, e.clone()));
             }
         }
-        // 已知接收者类型但不是成员表中的类（如 List/String）→ 交给内置方法
-        return None;
+    }
+    // 1) sema 静态类型 + 继承链查找
+    let sema_ty = sema_expr_class(object);
+    if let Some(ref ty) = sema_ty {
+        if let Some(found) = find_method_in_chain(&table, ty, method) {
+            return Some(found);
+        }
+        // 已知接收者类型且是成员表中的类但无此方法 → 尝试 `Any` 的默认实现
+        //（所有 class / object 都隐式继承 Any，`hashCode` / `equals` / `toString`
+        //  等基类方法即使未显式重写也应命中 Any 的默认实现）
+        if table.contains_key(ty) {
+            return any_base_method(&table, method);
+        }
+        // 类型不在成员表（List/String/Any/泛型等）：继续尝试字段接收者兜底
+    }
+    // 1.5) 字段接收者兜底：`this.<field>` / 裸字段（sema 缺失或类型不可用时）
+    if let Some(found) = field_receiver_method(&table, object, method) {
+        return Some(found);
+    }
+    // 已知非类类型（List/String/Any/泛型等）→ 先试 `Any` 默认实现，再交给内置方法
+    if sema_ty.is_some() {
+        return any_base_method(&table, method);
+    }
+    // 1.8) 无类型信息：`Any` 默认实现优先于「全表唯一候选」兜底
+    //      （`hashCode` / `equals` 被大量类重写，唯一候选兜底必然失败）
+    if let Some(found) = any_base_method(&table, method) {
+        return Some(found);
     }
     // 2) 兜底（无类型信息时）：整个成员表中唯一拥有该方法的类
     let cands: Vec<String> =
@@ -255,6 +486,20 @@ fn resolve_method_owner(object: &Expr, method: &str) -> Option<(String, ClassEnt
         return Some((n, e));
     }
     None
+}
+
+/// 唯一拥有方法 `m` 的**单例 object** 名；无候选或存在多个候选时返回 None。
+///
+/// 供「跨 object 的裸方法调用」兜底（`object A` 的方法里直接写 `object B` 的
+/// 方法名 `m()`）。与 `resolve_method_owner` 的「全表唯一候选」兜底同思路。
+fn unique_singleton_with_method(m: &str) -> Option<String> {
+    let table = CLASS_TABLE.with(|t| t.borrow().clone());
+    let cands: Vec<String> = table
+        .iter()
+        .filter(|(_, e)| e.is_singleton && e.methods.contains(m))
+        .map(|(n, _)| n.clone())
+        .collect();
+    if cands.len() == 1 { cands.into_iter().next() } else { None }
 }
 
 /// companion 成员访问：`C.m(...)` / `C.f`（C 为类型名）→ 合成函数全名
@@ -683,11 +928,12 @@ fn build_import_resolution(imports: &[ImportDecl]) -> ImportResolution {
         }
 
         let parts: Vec<&str> = path.split('.').collect();
-        let is_new_scheme = path.starts_with("aura.lang.std");
+        let is_new_scheme =
+            path.starts_with("aura.lang.std") || path.starts_with("aura.lang.concurrent");
         // 新命名下：class = 4 段，function = 5 段
         // 旧命名下：module = 2 段，function = 3 段
         let is_function = if is_new_scheme { parts.len() == 5 } else { parts.len() == 3 };
-        // 新命名下的 class 段数（4 段，如 aura.lang.std.Coroutine）
+        // 新命名下的 class 段数（4 段，如 aura.lang.concurrent.Coroutine）
         let is_class = is_new_scheme && parts.len() == 4;
         // 提取类名（如果有）
         let class_name =
@@ -695,18 +941,18 @@ fn build_import_resolution(imports: &[ImportDecl]) -> ImportResolution {
 
         match &imp.alias {
             Some(alias) if is_function => {
-                // import aura.lang.std.Coroutine.spawn as s → alias "s" → full name
+                // import aura.lang.concurrent.Coroutine.spawn as s → alias "s" → full name
                 // For short paths like aura.math.sqrt, resolve module → class name
                 let resolved_path =
                     if is_new_scheme { path.clone() } else { resolve_function_path(path) };
                 r.alias_to_full.insert(alias.clone(), resolved_path);
             }
             Some(alias) if is_new_scheme && class_name.is_some() && !imp.wildcard => {
-                // import aura.lang.std.Coroutine as cc → alias → module path
+                // import aura.lang.concurrent.Coroutine as cc → alias → module path
                 r.alias_to_module.insert(alias.clone(), path.clone());
             }
             Some(alias) if imp.wildcard => {
-                // import aura.lang.std.Coroutine.* as cc → alias → module path
+                // import aura.lang.concurrent.Coroutine.* as cc → alias → module path
                 // 同时注册短名供通配调用使用
                 let resolved_path = std_module_to_class_name(path)
                     .map(|s| s.to_string())
@@ -723,7 +969,7 @@ fn build_import_resolution(imports: &[ImportDecl]) -> ImportResolution {
                 r.alias_to_module.insert(alias.clone(), path.clone());
             }
             None if imp.wildcard => {
-                // import aura.lang.std.Coroutine.* → 所有函数短名 → 完整名
+                // import aura.lang.concurrent.Coroutine.* → 所有函数短名 → 完整名
                 // 同时：新命名下注册 "Coroutine.spawn" 形式供 check_call 使用
                 let resolved_path = std_module_to_class_name(path)
                     .map(|s| s.to_string())
@@ -735,29 +981,36 @@ fn build_import_resolution(imports: &[ImportDecl]) -> ImportResolution {
                     // Class-name style: "Coroutine.spawn"
                     if let Some(cn) = &class_name {
                         r.short_to_full.insert(format!("{}.{}", cn, sn), full);
+                        // 注册模块短名供 module.method() 调用识别
+                        r.module_names.insert(cn.clone());
                     }
                 }
             }
             None if is_new_scheme && class_name.is_some() && is_class => {
-                // import aura.lang.std.Coroutine → 类引用
+                // import aura.lang.concurrent.Coroutine → 类引用
                 // 同时注册：
                 // 1) "Coroutine.spawn" 形式（用户常用）
-                // 2) "aura.lang.std.Coroutine.spawn" 完整形式
+                // 2) "aura.lang.concurrent.Coroutine.spawn" 完整形式
                 let short_names = crate::std::decl::module_functions(path);
                 if let Some(cn) = &class_name {
                     for sn in short_names {
                         let full = format!("{}.{}", path, sn);
                         r.short_to_full.insert(format!("{}.{}", cn, sn), full);
                     }
+                    // 注册模块短名供 module.method() 调用识别
+                    r.module_names.insert(cn.clone());
                 }
             }
             None if is_function => {
-                // import aura.lang.std.Coroutine.spawn → 短名 spawn → 完整名
+                // import aura.lang.concurrent.Coroutine.spawn → 短名 spawn → 完整名
                 let short_name = parts.last().unwrap_or(&"").to_string();
                 r.short_to_full.insert(short_name, path.clone());
             }
             None => {
                 // 旧命名：import aura.concurrent → 模块引用，无需映射（调用时用完整路径）
+                // 同时注册模块短名供 module.method() 调用识别
+                let short_name = parts.last().unwrap_or(&"").to_string();
+                r.module_names.insert(short_name);
             }
         }
     }
@@ -904,7 +1157,8 @@ impl HirBinOp {
             BinOp::To => HirBinOp::To,
             BinOp::Is => HirBinOp::Is,
             BinOp::As => HirBinOp::As,
-            BinOp::Assign | BinOp::UShr => HirBinOp::Shr, // 近似
+            BinOp::UShr => HirBinOp::Shr, // 近似：逻辑右移 → 算术右移
+            _ => HirBinOp::Add,           // 其他未处理的运算符（如 Assign）默认回退
         }
     }
 }
@@ -1037,6 +1291,8 @@ pub enum HirStmt {
         body: HirBlock,
         /// catch 变量名（无 catch 子句时为 None，此时异常在 finally 后重新抛出）
         catch_var: Option<String>,
+        /// catch 子句的异常类型名（如 "Exception"、"RuntimeException"）；None 表示 catch-all
+        catch_type: Option<String>,
         /// catch 体（无 catch 子句时为空块）
         catch_body: HirBlock,
         /// finally 体（可选）
@@ -1077,6 +1333,9 @@ pub struct HirFunction {
     pub ffi_abi: FfiAbi,
     /// FFI 库名（对应 `extern "<abi>" "<lib>"`）
     pub ffi_lib: Option<String>,
+    /// Phase D: @native 注解（仅 `is_native == true` 时有意义）
+    /// Syscall(n) = @native(N)、Asm(code) = @native(asm="...")、Builtin = native fun
+    pub native_attr: Option<crate::ast::NativeAttr>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1172,7 +1431,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
     });
 
     // 预收集所有类型名（供 desugar_expr 检测构造器调用）
-    let type_names: Vec<String> = program
+    let mut type_names: Vec<String> = program
         .declarations
         .iter()
         .flat_map(|d| match d {
@@ -1184,6 +1443,30 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             _ => None,
         })
         .collect();
+    // 预置异常类类型名（来自 aura.lang.Exception 嵌入式标准库）
+    for t in [
+        "Throwable",
+        "Error",
+        "OutOfMemoryError",
+        "StackOverflowError",
+        "Exception",
+        "RuntimeException",
+        "IllegalArgumentException",
+        "IllegalStateException",
+        "NullPointerException",
+        "IndexOutOfBoundsException",
+        "ArrayIndexOutOfBoundsException",
+        "EmptyListException",
+        "UnsupportedOperationException",
+        "ArithmeticException",
+        "ClassCastException",
+        "IOException",
+        "FileNotFoundException",
+        "TimeoutException",
+        "AssertionError",
+    ] {
+        type_names.push(t.to_string());
+    }
     TYPE_NAMES.with(|r| {
         *r.borrow_mut() = type_names;
     });
@@ -1216,7 +1499,39 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
 
     for decl in &program.declarations {
         match decl {
-            Decl::Function(f) => functions.push(desugar_fn(f)),
+            Decl::Function(f) => {
+                // 顶层 native fun / @native fun → 加入 natives（由 emit_native_wrappers 处理）
+                // 普通 fun → 加入 functions
+                if f.native_attr.is_some() {
+                    natives.push(HirFunction {
+                        name: f.name.clone(),
+                        params: f
+                            .params
+                            .iter()
+                            .map(|p| HirParam {
+                                name: p.name.clone(),
+                                ty: HirType::from_ast_opt(&p.type_hint),
+                                default_value: p
+                                    .default_value
+                                    .as_ref()
+                                    .map(|e| Box::new(desugar_expr(e))),
+                                is_vararg: p.is_vararg,
+                            })
+                            .collect(),
+                        ret: HirType::from_ast_opt(&f.return_type),
+                        body: HirBlock {
+                            stmts: vec![],
+                        },
+                        is_native: true,
+                        type_params: vec![],
+                        ffi_abi: FfiAbi::Aura,
+                        ffi_lib: None,
+                        native_attr: f.native_attr.clone(),
+                    });
+                } else {
+                    functions.push(desugar_fn(f));
+                }
+            }
             Decl::Struct(s) => {
                 structs.push(HirStruct {
                     name: s.name.clone(),
@@ -1279,6 +1594,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                         /* ffi fields set below */
                         ffi_abi: abi,
                         ffi_lib: e.library.clone(),
+                        native_attr: None,
                     });
                 }
                 // P8.1: 处理 extern 块中的常量
@@ -1305,8 +1621,8 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                     }
                 }
             }
-            Decl::ExternInterface(e) => {
-                // extern interface: 绑定到 AOT 动态库的函数接口
+            Decl::ExternObject(e) => {
+                // extern object: 绑定到 AOT 动态库的函数接口（或系统级外部绑定）
                 INTERFACE_NAMES.with(|n| n.borrow_mut().insert(e.name.clone()));
                 for f in &e.functions {
                     if f.name == "loadLibrary" {
@@ -1335,6 +1651,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                         type_params: vec![],
                         ffi_abi: FfiAbi::Aura,
                         ffi_lib: e.lib_path.clone(),
+                        native_attr: f.native_attr.clone(),
                     });
                 }
             }
@@ -1428,6 +1745,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                             type_params: vec![],
                             ffi_abi: FfiAbi::None,
                             ffi_lib: None,
+                            native_attr: None,
                         });
                     }
                 }
@@ -1499,6 +1817,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                         type_params: vec![],
                         ffi_abi: FfiAbi::None,
                         ffi_lib: None,
+                        native_attr: None,
                     });
                 }
                 // 仅 init 块（无 0 参显式构造函数）→ 合成 `Class.__ctor0`
@@ -1524,6 +1843,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                         type_params: vec![],
                         ffi_abi: FfiAbi::None,
                         ffi_lib: None,
+                        native_attr: None,
                     });
                 }
                 // 属性访问器合成
@@ -1625,6 +1945,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                         type_params: vec![],
                         ffi_abi: FfiAbi::None,
                         ffi_lib: None,
+                        native_attr: None,
                     });
                 }
                 // 单例字段初始化函数：`<Object>.__singletonInit(self)`
@@ -1662,6 +1983,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                         type_params: vec![],
                         ffi_abi: FfiAbi::None,
                         ffi_lib: None,
+                        native_attr: None,
                     });
                 }
                 // 属性访问器合成
@@ -1720,6 +2042,38 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
+        });
+    }
+
+    // 注册 __new_exception 为原生函数（Exception 构造器降级目标）
+    // 在 VM 中创建异常对象，避免跨模块函数调用解析问题。
+    if !natives.iter().any(|n| n.name == "__new_exception") {
+        natives.push(HirFunction {
+            name: "__new_exception".into(),
+            params: vec![
+                HirParam {
+                    name: "type_name".into(),
+                    ty: Some(HirType::Named("String".into())),
+                    default_value: None,
+                    is_vararg: false,
+                },
+                HirParam {
+                    name: "message".into(),
+                    ty: Some(HirType::Named("String".into())),
+                    default_value: None,
+                    is_vararg: false,
+                },
+            ],
+            ret: Some(HirType::Named("Any".into())),
+            body: HirBlock {
+                stmts: vec![],
+            },
+            is_native: true,
+            type_params: vec![],
+            ffi_abi: FfiAbi::None,
+            ffi_lib: None,
+            native_attr: None,
         });
     }
 
@@ -1741,6 +2095,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
 
@@ -1770,6 +2125,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
 
@@ -1793,6 +2149,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
 
@@ -1833,6 +2190,15 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                         is_vararg: false,
                     }],
                     Some(HirType::Named("Unit".into())),
+                ),
+                "fnIndex" => (
+                    vec![HirParam {
+                        name: "name".into(),
+                        ty: Some(HirType::Named("String".into())),
+                        default_value: None,
+                        is_vararg: false,
+                    }],
+                    Some(HirType::Named("Int".into())),
                 ),
                 "abs" | "sqrt" | "pow" => (
                     vec![HirParam {
@@ -2031,6 +2397,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                 type_params: vec![],
                 ffi_abi: FfiAbi::None,
                 ffi_lib: None,
+                native_attr: None,
             });
         }
     }
@@ -2053,6 +2420,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
 
@@ -2077,6 +2445,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                 type_params: vec![],
                 ffi_abi: FfiAbi::None,
                 ffi_lib: None,
+                native_attr: None,
             });
         }
     }
@@ -2107,6 +2476,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                 type_params: vec![],
                 ffi_abi: FfiAbi::None,
                 ffi_lib: None,
+                native_attr: None,
             });
         }
     }
@@ -2129,6 +2499,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
     if !natives.iter().any(|n| n.name == "free") {
@@ -2148,14 +2519,15 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
 
     // ── P10: 并发运行时原生函数（aura.concurrent.* 命名空间）──
-    // aura.lang.std.Coroutine.spawn(expr) — 创建新协程/Actor
-    if !natives.iter().any(|n| n.name == "aura.lang.std.Coroutine.spawn") {
+    // aura.lang.concurrent.Coroutine.spawn(expr) — 创建新协程/Actor
+    if !natives.iter().any(|n| n.name == "aura.lang.concurrent.Coroutine.spawn") {
         natives.push(HirFunction {
-            name: "aura.lang.std.Coroutine.spawn".into(),
+            name: "aura.lang.concurrent.Coroutine.spawn".into(),
             params: vec![HirParam {
                 name: "expr".into(),
                 ty: Some(HirType::Named("Any".into())),
@@ -2170,12 +2542,13 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
-    // aura.lang.std.Actor.send(actor, msg) — 向 Actor 发送消息
-    if !natives.iter().any(|n| n.name == "aura.lang.std.Actor.send") {
+    // aura.lang.concurrent.Actor.send(actor, msg) — 向 Actor 发送消息
+    if !natives.iter().any(|n| n.name == "aura.lang.concurrent.Actor.send") {
         natives.push(HirFunction {
-            name: "aura.lang.std.Actor.send".into(),
+            name: "aura.lang.concurrent.Actor.send".into(),
             params: vec![
                 HirParam {
                     name: "actor".into(),
@@ -2198,12 +2571,13 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
-    // aura.lang.std.Coroutine.ask(actor, msg) — 向 Actor 请求响应
-    if !natives.iter().any(|n| n.name == "aura.lang.std.Coroutine.ask") {
+    // aura.lang.concurrent.Coroutine.ask(actor, msg) — 向 Actor 请求响应
+    if !natives.iter().any(|n| n.name == "aura.lang.concurrent.Coroutine.ask") {
         natives.push(HirFunction {
-            name: "aura.lang.std.Coroutine.ask".into(),
+            name: "aura.lang.concurrent.Coroutine.ask".into(),
             params: vec![
                 HirParam {
                     name: "actor".into(),
@@ -2226,12 +2600,13 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
-    // aura.lang.std.Channel.newChannel(bound) — 创建 Channel
-    if !natives.iter().any(|n| n.name == "aura.lang.std.Channel.newChannel") {
+    // aura.lang.concurrent.Channel.newChannel(bound) — 创建 Channel
+    if !natives.iter().any(|n| n.name == "aura.lang.concurrent.Channel.newChannel") {
         natives.push(HirFunction {
-            name: "aura.lang.std.Channel.newChannel".into(),
+            name: "aura.lang.concurrent.Channel.newChannel".into(),
             params: vec![HirParam {
                 name: "bound".into(),
                 ty: Some(HirType::Named("Int".into())),
@@ -2246,12 +2621,13 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
-    // aura.lang.std.Channel.channelSend(ch, val) — 发送值到 Channel
-    if !natives.iter().any(|n| n.name == "aura.lang.std.Channel.channelSend") {
+    // aura.lang.concurrent.Channel.channelSend(ch, val) — 发送值到 Channel
+    if !natives.iter().any(|n| n.name == "aura.lang.concurrent.Channel.channelSend") {
         natives.push(HirFunction {
-            name: "aura.lang.std.Channel.channelSend".into(),
+            name: "aura.lang.concurrent.Channel.channelSend".into(),
             params: vec![
                 HirParam {
                     name: "ch".into(),
@@ -2274,12 +2650,13 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
-    // aura.lang.std.Channel.channelRecv(ch) — 从 Channel 接收值（阻塞）
-    if !natives.iter().any(|n| n.name == "aura.lang.std.Channel.channelRecv") {
+    // aura.lang.concurrent.Channel.channelRecv(ch) — 从 Channel 接收值（阻塞）
+    if !natives.iter().any(|n| n.name == "aura.lang.concurrent.Channel.channelRecv") {
         natives.push(HirFunction {
-            name: "aura.lang.std.Channel.channelRecv".into(),
+            name: "aura.lang.concurrent.Channel.channelRecv".into(),
             params: vec![HirParam {
                 name: "ch".into(),
                 ty: Some(HirType::Named("Int".into())),
@@ -2294,12 +2671,13 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
-    // aura.lang.std.Channel.channelTryRecv(ch) — 从 Channel 接收值（非阻塞）
-    if !natives.iter().any(|n| n.name == "aura.lang.std.Channel.channelTryRecv") {
+    // aura.lang.concurrent.Channel.channelTryRecv(ch) — 从 Channel 接收值（非阻塞）
+    if !natives.iter().any(|n| n.name == "aura.lang.concurrent.Channel.channelTryRecv") {
         natives.push(HirFunction {
-            name: "aura.lang.std.Channel.channelTryRecv".into(),
+            name: "aura.lang.concurrent.Channel.channelTryRecv".into(),
             params: vec![HirParam {
                 name: "ch".into(),
                 ty: Some(HirType::Named("Int".into())),
@@ -2314,12 +2692,13 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
-    // aura.lang.std.Channel.select(ch1, ch2) — select 多路复用（最多 2 通道）
-    if !natives.iter().any(|n| n.name == "aura.lang.std.Channel.select") {
+    // aura.lang.concurrent.Channel.select(ch1, ch2) — select 多路复用（最多 2 通道）
+    if !natives.iter().any(|n| n.name == "aura.lang.concurrent.Channel.select") {
         natives.push(HirFunction {
-            name: "aura.lang.std.Channel.select".into(),
+            name: "aura.lang.concurrent.Channel.select".into(),
             params: vec![
                 HirParam {
                     name: "ch1".into(),
@@ -2342,12 +2721,13 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
-    // aura.lang.std.Coroutine.spawnActor(name) — 创建 Actor 实例（返回 actor ID）
-    if !natives.iter().any(|n| n.name == "aura.lang.std.Coroutine.spawnActor") {
+    // aura.lang.concurrent.Coroutine.spawnActor(name) — 创建 Actor 实例（返回 actor ID）
+    if !natives.iter().any(|n| n.name == "aura.lang.concurrent.Coroutine.spawnActor") {
         natives.push(HirFunction {
-            name: "aura.lang.std.Coroutine.spawnActor".into(),
+            name: "aura.lang.concurrent.Coroutine.spawnActor".into(),
             params: vec![HirParam {
                 name: "name".into(),
                 ty: Some(HirType::Named("String".into())),
@@ -2362,17 +2742,18 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
-    // aura.lang.std.Actor.spawnActor(name) — 与 Coroutine.spawnActor 同一实现。
+    // aura.lang.concurrent.Actor.spawnActor(name) — 与 Coroutine.spawnActor 同一实现。
     //
-    // 必须**单独注册**：`import aura.lang.std.Actor.*`（或 `as a`）会把短名解析为
+    // 必须**单独注册**：`import aura.lang.concurrent.Actor.*`（或 `as a`）会把短名解析为
     // **Actor** 前缀（见 `std::decl::module_functions`）。若只注册 Coroutine 前缀，
     // 该调用就不再是原生调用，而会退化为用户函数调用 → 函数名查不到 → 落到函数索引 0
     // （即 main）→ **无限递归爆栈**。
-    if !natives.iter().any(|n| n.name == "aura.lang.std.Actor.spawnActor") {
+    if !natives.iter().any(|n| n.name == "aura.lang.concurrent.Actor.spawnActor") {
         natives.push(HirFunction {
-            name: "aura.lang.std.Actor.spawnActor".into(),
+            name: "aura.lang.concurrent.Actor.spawnActor".into(),
             params: vec![HirParam {
                 name: "name".into(),
                 ty: Some(HirType::Named("String".into())),
@@ -2387,12 +2768,13 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
-    // aura.lang.std.Actor.supervise(parent, child) — 建立监督关系
-    if !natives.iter().any(|n| n.name == "aura.lang.std.Actor.supervise") {
+    // aura.lang.concurrent.Actor.supervise(parent, child) — 建立监督关系
+    if !natives.iter().any(|n| n.name == "aura.lang.concurrent.Actor.supervise") {
         natives.push(HirFunction {
-            name: "aura.lang.std.Actor.supervise".into(),
+            name: "aura.lang.concurrent.Actor.supervise".into(),
             params: vec![
                 HirParam {
                     name: "parent".into(),
@@ -2415,12 +2797,13 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
     }
-    // aura.lang.std.Actor.actorAlive(id) — 检查 Actor 是否存活
-    if !natives.iter().any(|n| n.name == "aura.lang.std.Actor.actorAlive") {
+    // aura.lang.concurrent.Actor.actorAlive(id) — 检查 Actor 是否存活
+    if !natives.iter().any(|n| n.name == "aura.lang.concurrent.Actor.actorAlive") {
         natives.push(HirFunction {
-            name: "aura.lang.std.Actor.actorAlive".into(),
+            name: "aura.lang.concurrent.Actor.actorAlive".into(),
             params: vec![HirParam {
                 name: "id".into(),
                 ty: Some(HirType::Named("Int".into())),
@@ -2435,7 +2818,219 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             type_params: vec![],
             ffi_abi: FfiAbi::None,
             ffi_lib: None,
+            native_attr: None,
         });
+    }
+
+    // ── aura.lang.concurrent 同步原语 / 线程原语 ──
+    // 注册原生签名，使 VM/AOT 能解析 `Mutex.lock(m)` 这类调用。
+    // 运行时：Atomic/Mutex/RwLock/Condvar/Barrier/Semaphore 由嵌入的 Aura 标准库
+    // （stdlib_func_map）优先派发；Thread/Future 走 Rust native 回退。
+    let sync_natives: Vec<(&str, Vec<&str>, &str)> = vec![
+        // Thread
+        (
+            "aura.lang.concurrent.Thread.spawn",
+            vec![
+                "fn_id", "arg",
+            ],
+            "Int",
+        ),
+        ("aura.lang.concurrent.Thread.join", vec!["thread_id"], "Int"),
+        ("aura.lang.concurrent.Thread.sleep", vec!["ms"], "Unit"),
+        ("aura.lang.concurrent.Thread.id", vec![], "Int"),
+        ("aura.lang.concurrent.Thread.parallelism", vec![], "Int"),
+        ("aura.lang.concurrent.Thread.availableCores", vec![], "Int"),
+        // Mutex
+        ("aura.lang.concurrent.Mutex.new", vec![], "Int"),
+        ("aura.lang.concurrent.Mutex.lock", vec!["lock_id"], "Unit"),
+        ("aura.lang.concurrent.Mutex.unlock", vec!["lock_id"], "Unit"),
+        (
+            "aura.lang.concurrent.Mutex.tryLock",
+            vec!["lock_id"],
+            "Boolean",
+        ),
+        (
+            "aura.lang.concurrent.Mutex.destroy",
+            vec!["lock_id"],
+            "Unit",
+        ),
+        // Atomic
+        ("aura.lang.concurrent.Atomic.new", vec!["initial"], "Int"),
+        ("aura.lang.concurrent.Atomic.load", vec!["atomic_id"], "Int"),
+        (
+            "aura.lang.concurrent.Atomic.store",
+            vec![
+                "atomic_id",
+                "value",
+            ],
+            "Unit",
+        ),
+        (
+            "aura.lang.concurrent.Atomic.add",
+            vec![
+                "atomic_id",
+                "delta",
+            ],
+            "Int",
+        ),
+        (
+            "aura.lang.concurrent.Atomic.sub",
+            vec![
+                "atomic_id",
+                "delta",
+            ],
+            "Int",
+        ),
+        (
+            "aura.lang.concurrent.Atomic.cas",
+            vec![
+                "atomic_id",
+                "expected",
+                "desired",
+            ],
+            "Boolean",
+        ),
+        (
+            "aura.lang.concurrent.Atomic.destroy",
+            vec!["atomic_id"],
+            "Unit",
+        ),
+        // RwLock
+        ("aura.lang.concurrent.RwLock.new", vec![], "Int"),
+        (
+            "aura.lang.concurrent.RwLock.readLock",
+            vec!["lock_id"],
+            "Unit",
+        ),
+        (
+            "aura.lang.concurrent.RwLock.writeLock",
+            vec!["lock_id"],
+            "Unit",
+        ),
+        (
+            "aura.lang.concurrent.RwLock.readUnlock",
+            vec!["lock_id"],
+            "Unit",
+        ),
+        (
+            "aura.lang.concurrent.RwLock.writeUnlock",
+            vec!["lock_id"],
+            "Unit",
+        ),
+        (
+            "aura.lang.concurrent.RwLock.destroy",
+            vec!["lock_id"],
+            "Unit",
+        ),
+        // Condvar
+        ("aura.lang.concurrent.Condvar.new", vec![], "Int"),
+        (
+            "aura.lang.concurrent.Condvar.wait",
+            vec![
+                "cv_id", "mutex_id",
+            ],
+            "Unit",
+        ),
+        ("aura.lang.concurrent.Condvar.signal", vec!["cv_id"], "Unit"),
+        (
+            "aura.lang.concurrent.Condvar.broadcast",
+            vec!["cv_id"],
+            "Unit",
+        ),
+        (
+            "aura.lang.concurrent.Condvar.destroy",
+            vec!["cv_id"],
+            "Unit",
+        ),
+        // Barrier
+        ("aura.lang.concurrent.Barrier.new", vec!["count"], "Int"),
+        (
+            "aura.lang.concurrent.Barrier.wait",
+            vec!["barrier_id"],
+            "Int",
+        ),
+        (
+            "aura.lang.concurrent.Barrier.destroy",
+            vec!["barrier_id"],
+            "Unit",
+        ),
+        // Future
+        (
+            "aura.lang.concurrent.Future.spawn",
+            vec![
+                "fn_id", "arg",
+            ],
+            "Int",
+        ),
+        (
+            "aura.lang.concurrent.Future.await",
+            vec!["future_id"],
+            "Int",
+        ),
+        (
+            "aura.lang.concurrent.Future.isDone",
+            vec!["future_id"],
+            "Boolean",
+        ),
+        ("aura.lang.concurrent.Future.all", vec!["future_ids"], "Any"),
+        ("aura.lang.concurrent.Future.any", vec!["future_ids"], "Int"),
+        (
+            "aura.lang.concurrent.Future.cancel",
+            vec!["future_id"],
+            "Unit",
+        ),
+        // Semaphore
+        ("aura.lang.concurrent.Semaphore.new", vec!["permits"], "Int"),
+        (
+            "aura.lang.concurrent.Semaphore.acquire",
+            vec!["sem_id"],
+            "Unit",
+        ),
+        (
+            "aura.lang.concurrent.Semaphore.tryAcquire",
+            vec!["sem_id"],
+            "Boolean",
+        ),
+        (
+            "aura.lang.concurrent.Semaphore.release",
+            vec!["sem_id"],
+            "Unit",
+        ),
+        (
+            "aura.lang.concurrent.Semaphore.count",
+            vec!["sem_id"],
+            "Int",
+        ),
+        (
+            "aura.lang.concurrent.Semaphore.destroy",
+            vec!["sem_id"],
+            "Unit",
+        ),
+    ];
+    for (name, params, ret) in sync_natives {
+        if !natives.iter().any(|n| n.name == name) {
+            natives.push(HirFunction {
+                name: name.into(),
+                params: params
+                    .into_iter()
+                    .map(|pn| HirParam {
+                        name: pn.into(),
+                        ty: Some(HirType::Named("Int".into())),
+                        default_value: None,
+                        is_vararg: false,
+                    })
+                    .collect(),
+                ret: Some(HirType::Named(ret.into())),
+                body: HirBlock {
+                    stmts: vec![],
+                },
+                is_native: true,
+                type_params: vec![],
+                ffi_abi: FfiAbi::None,
+                ffi_lib: None,
+                native_attr: None,
+            });
+        }
     }
 
     // P9.11: 注册所有标准库函数为原生函数（使编译器能解析 module.method() 调用）
@@ -2454,7 +3049,9 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             // 少数**无参但有返回值**的原生需显式白名单，否则会被当作 Unit。
             let value_returning_no_arg = matches!(
                 name,
-                "aura.lang.std.Process.argCount" | "aura.lang.std.Process.args"
+                "aura.lang.std.Process.argCount"
+                    | "aura.lang.std.Process.args"
+                    | "aura.lang.std.StringBuilder.create"
             );
             let ret = (params.iter().any(|(_, pt)| *pt != "Unit") || value_returning_no_arg)
                 .then(|| HirType::Named("Any".into()));
@@ -2469,6 +3066,7 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                 type_params: vec![],
                 ffi_abi: FfiAbi::None,
                 ffi_lib: None,
+                native_attr: None,
             });
         }
     }
@@ -2517,6 +3115,8 @@ fn branch_value_of(b: &HirBlock) -> Option<HirExpr> {
 
 /// 降级函数，可选添加隐式 self 参数（方法需要）；`name_override` 供类方法使用
 fn desugar_fn_with_self(f: &FnDecl, is_method: bool, name_override: Option<String>) -> HirFunction {
+    // 形参声明类型先入作用域（`desugar_block` 会再压一层块作用域，形参在外层可见）
+    push_fn_param_types(f);
     let mut body = match &f.body {
         Some(b) => desugar_block(b),
         None => HirBlock {
@@ -2582,15 +3182,31 @@ fn desugar_fn_with_self(f: &FnDecl, is_method: bool, name_override: Option<Strin
         let param_names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
         body = tailrec_rewrite(&fname, &param_names, body);
     }
+    pop_fn_param_types();
     HirFunction {
         name: fname,
         params,
         ret: HirType::from_ast_opt(&f.return_type),
         body,
-        is_native: false,
+        is_native: f.native_attr.is_some(),
         type_params: f.type_params.iter().map(|t| t.name.clone()).collect(),
         ffi_abi: FfiAbi::None,
         ffi_lib: None,
+        native_attr: f.native_attr.clone(),
+    }
+}
+
+/// 结束形参类型作用域（与 `push_fn_param_types` 配对）。
+fn pop_fn_param_types() {
+    pop_local_type_scope();
+}
+
+/// 在降级函数体前登记形参声明类型（供 `lookup_expr_type` 兜底），
+/// 返回后需调用 `pop_local_type_scope()`。
+fn push_fn_param_types(f: &FnDecl) {
+    push_local_type_scope();
+    for p in &f.params {
+        register_local_type(&p.name, p.type_hint.as_deref().and_then(ast_type_name));
     }
 }
 
@@ -2611,8 +3227,9 @@ fn desugar_class_method(f: &FnDecl, class: &str, with_self: bool) -> HirFunction
     });
     // 参数进入局部作用域（屏蔽同名字段）
     let param_names: Vec<String> = f.params.iter().map(|p| p.name.clone()).collect();
-    for p in &param_names {
-        register_local(p);
+    for p in &f.params {
+        register_local(&p.name);
+        register_local_type(&p.name, p.type_hint.as_deref().and_then(ast_type_name));
     }
     let mut hir = desugar_fn_with_self(f, with_self, Some(full_name.clone()));
     pop_local_scope();
@@ -2685,6 +3302,7 @@ fn synthesize_accessors(class: &str, fields: &[StructField]) -> Vec<HirFunction>
                 type_params: vec![],
                 ffi_abi: FfiAbi::None,
                 ffi_lib: None,
+                native_attr: None,
             });
         }
         // setter
@@ -2705,6 +3323,10 @@ fn synthesize_accessors(class: &str, fields: &[StructField]) -> Vec<HirFunction>
                 })
             });
             register_local(&param_name);
+            register_local_type(
+                &param_name,
+                st.param.as_ref().and_then(|p| p.type_hint.as_deref().and_then(ast_type_name)),
+            );
             let body = desugar_block(&st.body);
             pop_local_scope();
             CLASS_CTX.with(|c| *c.borrow_mut() = prev_ctx);
@@ -2726,6 +3348,7 @@ fn synthesize_accessors(class: &str, fields: &[StructField]) -> Vec<HirFunction>
                 type_params: vec![],
                 ffi_abi: FfiAbi::None,
                 ffi_lib: None,
+                native_attr: None,
             });
         }
     }
@@ -2783,6 +3406,7 @@ fn desugar_stmt(s: &Stmt) -> HirStmt {
             ..
         } => {
             register_local(name);
+            register_local_type(name, type_hint.as_deref().and_then(ast_type_name));
             HirStmt::Val {
                 name: name.clone(),
                 ty: HirType::from_ast_opt(type_hint),
@@ -2796,6 +3420,7 @@ fn desugar_stmt(s: &Stmt) -> HirStmt {
             ..
         } => {
             register_local(name);
+            register_local_type(name, type_hint.as_deref().and_then(ast_type_name));
             HirStmt::Var {
                 name: name.clone(),
                 ty: HirType::from_ast_opt(type_hint),
@@ -2887,6 +3512,13 @@ fn desugar_expr_stmt(e: &Expr) -> HirStmt {
             body,
             ..
         } => desugar_for(pattern, iterable, body),
+        Expr::CFor {
+            init,
+            condition,
+            increment,
+            body,
+            ..
+        } => desugar_cfor(init, condition, increment, body),
         Expr::Assign {
             target,
             value,
@@ -2955,7 +3587,7 @@ fn desugar_expr_stmt(e: &Expr) -> HirStmt {
             let body = desugar_block(block);
             // 仅建模首个 catch 子句：Aura 的 `catch (e: Type)` 类型过滤尚未实现，
             // 因此等价于「catch-all」。多子句时后续子句不可达（已在 README 记录）。
-            let (catch_var, catch_body) = match catches.first() {
+            let (catch_var, catch_type, catch_body) = match catches.first() {
                 Some(c) => {
                     let has_var = !c.variable.is_empty();
                     // 必须在降级 catch 体之前注册局部名，否则体内裸 `e` 会被当作字段访问
@@ -2964,7 +3596,12 @@ fn desugar_expr_stmt(e: &Expr) -> HirStmt {
                     }
                     let mut cb = desugar_block(&c.body);
                     if has_var {
-                        // 声明 catch 变量：MIR 分配槽位，VM 跳入处理器时把异常值写入该槽
+                        // 声明 catch 变量：MIR 分配槽位，VM 跳入处理器时把异常值写入该槽。
+                        //
+                        // 注意：这里刻意**不**标注类型。AOT 后端尚未把「异常值即消息串」
+                        // 贯通到类型信息（标注 `String` 会让拼接按裸 `i8*` 解引用，
+                        // 打印出垃圾字节；不标注则以默认 `i32` 声明，拼接口走整数路径
+                        // 打印指针数值）。两者都不理想，留待异常 AOT 语义统一后处理。
                         cb.stmts.insert(
                             0,
                             HirStmt::Val {
@@ -2974,9 +3611,15 @@ fn desugar_expr_stmt(e: &Expr) -> HirStmt {
                             },
                         );
                     }
-                    (if has_var { Some(c.variable.clone()) } else { None }, cb)
+                    (
+                        if has_var { Some(c.variable.clone()) } else { None },
+                        // 记录 catch 类型名（如 "Exception"、"RuntimeException"）
+                        if c.type_name.is_empty() { None } else { Some(c.type_name.clone()) },
+                        cb,
+                    )
                 }
                 None => (
+                    None,
                     None,
                     HirBlock {
                         stmts: vec![],
@@ -2987,6 +3630,7 @@ fn desugar_expr_stmt(e: &Expr) -> HirStmt {
             HirStmt::Try {
                 body,
                 catch_var,
+                catch_type,
                 catch_body,
                 finally,
             }
@@ -3247,6 +3891,58 @@ fn desugar_for(pattern: &Expr, iterable: &Expr, body: &Expr) -> HirStmt {
     })
 }
 
+/// C 风格 for 循环：for (init; condition; increment) body
+/// 降糖为：init; while (condition) { body; increment; }
+fn desugar_cfor(
+    init: &Option<Box<Expr>>,
+    condition: &Box<Expr>,
+    increment: &Option<Box<Expr>>,
+    body: &Expr,
+) -> HirStmt {
+    let mut stmts: Vec<HirStmt> = Vec::new();
+
+    // init：可能是 var/val 声明（包装在 Expr::Block 中）或普通表达式
+    if let Some(e) = init {
+        match e.as_ref() {
+            Expr::Block(stmts_inner, _) => {
+                // C 风格 for 的 init 含声明：var j: Int = ...
+                // 直接展开为语句，而非包装为表达式
+                for s in stmts_inner {
+                    stmts.push(desugar_stmt(s));
+                }
+            }
+            _ => {
+                // 普通表达式 init
+                stmts.push(HirStmt::Expr(desugar_expr(e)));
+            }
+        }
+    }
+
+    // while (condition) { body; increment; }
+    //
+    // 步进通常写成赋值（`i = i + 1`）。赋值必须经 `desugar_stmt` 降级为
+    // `HirStmt::Assign`：`desugar_expr(Expr::Assign)` **只求值不回写**，
+    // 于是循环变量永不变 → 死循环（实测 `for (var i: Int = 0; i < 5; i = i + 1)`
+    // 编译出的 exe 卡死、CPU 0%、内存不增长）。
+    let mut while_body = desugar_block(body).stmts;
+    if let Some(inc) = increment {
+        if matches!(inc.as_ref(), Expr::Assign { .. }) {
+            while_body.push(desugar_expr_stmt(inc));
+        } else {
+            while_body.push(HirStmt::Expr(desugar_expr(inc)));
+        }
+    }
+
+    stmts.push(HirStmt::While {
+        cond: desugar_expr(condition),
+        body: HirBlock {
+            stmts: while_body,
+        },
+    });
+
+    HirStmt::Block(HirBlock { stmts })
+}
+
 /// 辅助函数：在 thread-local 中查找导入解析，返回克隆的字符串（避免生命周期问题）
 fn lookup_import_short(n: &str) -> Option<String> {
     IMPORT_RESOLUTION.with(|r| {
@@ -3262,9 +3958,9 @@ fn lookup_import_module_alias(n: &str) -> Option<String> {
     })
 }
 
-/// 从成员访问链中提取完整点分名（如 `aura.lang.std.Coroutine` → "aura.lang.std.Coroutine"）
+/// 从成员访问链中提取完整点分名（如 `aura.lang.concurrent.Coroutine` → "aura.lang.concurrent.Coroutine"）
 ///
-/// 用于将 `aura.lang.std.Coroutine.spawn(42)` 等深层嵌套表达式还原为完整原生函数名。
+/// 用于将 `aura.lang.concurrent.Coroutine.spawn(42)` 等深层嵌套表达式还原为完整原生函数名。
 fn extract_dotted_name(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Ident(name, _) => Some(name.clone()),
@@ -3280,9 +3976,66 @@ fn extract_dotted_name(expr: &Expr) -> Option<String> {
     }
 }
 
+/// 检查表达式是否是纯模块点分链（全部由模块标识符组成）
+fn is_module_chain(e: &Expr) -> bool {
+    match e {
+        Expr::Ident(name, _) => is_std_module(name) || lookup_import_module_alias(name).is_some(),
+        Expr::MemberAccess {
+            object,
+            name,
+            ..
+        } => is_module_chain(object) && is_std_module(&format!("aura.{}", name)),
+        _ => false,
+    }
+}
+
 /// 查询表达式的静态类型名（来自 sema 信息通道，strip 可空标记）
+///
+/// sema 查不到时回退到降级期自行记录的「局部变量/形参声明类型」
+/// （见 `LOCAL_TYPE_SCOPES`）——检查器提前收尾或把 `arrayListOf(...)`
+/// 推断成 `<error>` 时，这是唯一还能拿到接收者类型的来源。
 fn lookup_expr_type(e: &Expr) -> Option<String> {
-    SEMA_INFO.with(|s| s.borrow().as_ref().and_then(|i| i.expr_type(e)))
+    if let Some(t) = SEMA_INFO.with(|s| s.borrow().as_ref().and_then(|i| i.expr_type(e))) {
+        return Some(t);
+    }
+    if let Expr::Ident(name, _) = e {
+        return lookup_local_type(name);
+    }
+    None
+}
+
+/// 是否为「运行期由 VM/运行库**内建列表**支撑」的类型名。
+///
+/// `List`/`ArrayList`/`Array`/`Set` 等类型在运行期都是 `Value::List`（AOT 下是
+/// `AuraDynList` 句柄），**没有**对应的 Aura 类实例与私有字段。因此：
+/// - `.size` / `.length` / `.isEmpty` / `.add` / `.get` 等必须降级为内建列表指令
+///   （`__list_len` / `__list_push` / `Collections.getAt` …）；
+/// - 若误走「类成员访问」路径，会读到 `ArrayList._size` 这类**不存在的字段** →
+///   运行期取到 `null`（现象：`toStr(l.size)` 打印 "null"，而 `l.size` 参与算术/比较
+///   时又看似正常）。
+///
+/// 注意：不能用 `starts_with("List")` 单独判断 —— `ArrayList` 不以 `List` 开头，
+/// 这正是此前遗漏的原因。
+fn is_list_like_type(ty: &str) -> bool {
+    let base = ty.trim_end_matches('?');
+    base.starts_with("List")
+        || base.starts_with("Array")
+        || base.starts_with("Set")
+        || base.starts_with("ArrayList")
+        || base.starts_with("MutableList")
+        || base.starts_with("MutableSet")
+        || base.starts_with("Collection")
+        || base.starts_with("Iterable")
+        || base.starts_with("Sequence")
+}
+
+/// 判断 AST 表达式是否为字符串字面量或字符串插值
+fn is_string_expr(expr: &crate::ast::Expr) -> bool {
+    matches!(
+        expr,
+        crate::ast::Expr::Literal(crate::ast::Literal::String(_), _)
+            | crate::ast::Expr::StrInterp { .. }
+    )
 }
 
 /// 判断类型名是否为字符串（含可空形式）
@@ -3675,8 +4428,28 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                 }
             }
             // 构造器调用检测：Type(args) → HirExpr::New
+            // 异常类构造器走原生路径（__new_exception），避免跨模块函数解析问题。
             if let Expr::Ident(n, _) = callee.as_ref() {
                 if is_type_name(n) {
+                    // 异常类：走原生构造路径。支持 `E()`（空消息）、`E(msg)` 与
+                    // `E(msg, cause)`；cause 暂不传递（AOT/VM 的异常对象目前只承载消息）。
+                    // 若只处理单参形式，`E()` 会落到 `HirExpr::New`，而异常类定义位于
+                    // 独立的 aura.lang.errors 模块（未 import 时不会定义其 LLVM 结构体），
+                    // AOT 侧会对未定义（unsized）结构体生成 GEP，llc 报
+                    // `base element of getelementptr must be sized`。
+                    if is_exception_type(n) && args.len() <= 2 {
+                        let msg = match args.first() {
+                            Some(a) => desugar_expr(a),
+                            None => HirExpr::Lit(Literal::String(String::new())),
+                        };
+                        return HirExpr::Call {
+                            callee: "__new_exception".into(),
+                            args: vec![
+                                HirExpr::Lit(Literal::String(n.clone())),
+                                msg,
+                            ],
+                        };
+                    }
                     return HirExpr::New {
                         type_name: n.clone(),
                         args: args.iter().map(desugar_expr).collect(),
@@ -3699,6 +4472,27 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     };
                 }
             }
+            // 跨 object 的裸方法调用兜底：`targetDefault()` 写在**另一个** object 内时
+            // `bare_call_in_class` 查不到（它只看当前 object）。此处按「唯一拥有该方法的
+            // 单例 object」改写为 `Obj.m(null, args)`，与限定调用
+            // `Obj.m(...)` / `resolve_method_owner` 的单例分支保持一致
+            //（object 方法带 self 形参，见 `desugar_class_method(_, _, true)`）。
+            // 仅当**没有同名自由函数**且无导入别名解析时才改写（自由函数优先）。
+            if let Expr::Ident(n, _) = callee.as_ref() {
+                let is_free_fn = FUNCTION_PARAMS.with(|f| f.borrow().contains_key(n.as_str()));
+                if !is_free_fn && lookup_import_short(n).is_none() {
+                    if let Some(cls) = unique_singleton_with_method(n) {
+                        let mut all_args = vec![HirExpr::Lit(Literal::Null)];
+                        for a in args {
+                            all_args.push(desugar_expr(a));
+                        }
+                        return HirExpr::Call {
+                            callee: format!("{}.{}", cls, n),
+                            args: all_args,
+                        };
+                    }
+                }
+            }
             let callee_name = match callee.as_ref() {
                 Expr::Ident(n, _) => {
                     // Plan A′：`arrayListOf(...)` 降级为**堆列表**（`HeapData::List`），
@@ -3706,15 +4500,18 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     // 内联值语义列表（其读取/写入由 `Collections.getAt/set` 承载，
                     // 改为堆列表会使这些 native 失效）。
                     // 需要「真可变列表」时请用 `arrayListOf`。
-                    if n == "arrayListOf" {
+                    // `arrayOf` 与 `arrayListOf` 同属堆列表语义（AOT 无内联数组），
+                    // 统一降级为 `__list_new`；否则会残留对 prelude 原生 `arrayOf`
+                    // 的外部声明 → AOT 链接期 undefined symbol。
+                    if n == "arrayListOf" || n == "arrayOf" {
                         return HirExpr::Call {
                             callee: "__list_new".to_string(),
                             args: args.iter().map(desugar_expr).collect(),
                         };
                     }
                     // 检查导入解析：短名/别名 → 完整原生函数名
-                    // import aura.concurrent.* + spawn(42) → aura.lang.std.Coroutine.spawn(42)
-                    // import aura.lang.std.Coroutine.spawn as s + s(42) → aura.lang.std.Coroutine.spawn(42)
+                    // import aura.concurrent.* + spawn(42) → aura.lang.concurrent.Coroutine.spawn(42)
+                    // import aura.lang.concurrent.Coroutine.spawn as s + s(42) → aura.lang.concurrent.Coroutine.spawn(42)
                     lookup_import_short(n).unwrap_or_else(|| n.clone())
                 }
                 // 模块调用 `module.method(args)`：降级为 `module.method(args...)`
@@ -3754,21 +4551,57 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                         }
                         // 无类上下文时，回退为普通方法调用
                     }
+                    // 异常对象访问器：`Throwable` 层次类是嵌入式标准库，通常**不参与**
+                    // 程序链接（成员表里没有 Throwable/Exception），因此
+                    // `e.getMessage()` 会退化为未定义的裸 `@getMessage`。
+                    // 而 AOT/VM 中异常值本身就是「消息」表示（`__new_exception`
+                    // 返回消息串），故 `e.getMessage()` / `e.getLocalizedMessage()`
+                    // 等价于 `e`，`e.getCause()` 等价于 `null`。
+                    if !name.is_empty() && args.is_empty() {
+                        if name == "getMessage" || name == "getLocalizedMessage" {
+                            return desugar_expr(object);
+                        }
+                        if name == "getCause" {
+                            return HirExpr::Lit(Literal::Null);
+                        }
+                    }
                     // P15: List 高阶方法（filter/map/take）→ 内联循环块
                     if matches!(name.as_str(), "filter" | "map" | "take") {
                         if let Some(ty) = lookup_expr_type(object) {
-                            if ty.starts_with("List") {
+                            if is_list_like_type(&ty) {
                                 return desugar_list_hof(name, object, args);
+                            }
+                        }
+                    }
+                    // 列表类的「尺寸/空判定」方法调用 → 内建列表指令。
+                    //
+                    // `l.getSize()` / `l.isEmpty()` 若按普通方法解析，会调用 Aura 侧
+                    // `ArrayList.getSize`（读私有字段 `_size`），而运行期 `l` 是
+                    // `Value::List` → 字段不存在 → 取到 null。
+                    if name.as_str() == "getSize" && args.is_empty() {
+                        if let Some(ty) = lookup_expr_type(object) {
+                            if is_list_like_type(&ty) {
+                                return HirExpr::Call {
+                                    callee: "__list_len".into(),
+                                    args: vec![desugar_expr(object)],
+                                };
+                            }
+                        }
+                    }
+                    if name.as_str() == "isEmpty" && args.is_empty() {
+                        if let Some(ty) = lookup_expr_type(object) {
+                            if is_list_like_type(&ty) {
+                                return HirExpr::Call {
+                                    callee: "aura.lang.std.Collections.isEmpty".into(),
+                                    args: vec![desugar_expr(object)],
+                                };
                             }
                         }
                     }
                     // List/Array/Set 的 Collection 通用方法调用 → Collections.* 原生函数
                     if name.as_str() == "get" || name.as_str() == "getAt" {
                         if let Some(ty) = lookup_expr_type(object) {
-                            if ty.starts_with("List")
-                                || ty.starts_with("Array")
-                                || ty.starts_with("Set")
-                            {
+                            if is_list_like_type(&ty) {
                                 let mut all_args = vec![desugar_expr(object)];
                                 for a in args {
                                     all_args.push(desugar_expr(a));
@@ -3780,12 +4613,47 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                             }
                         }
                     }
+                    // Map/MutableMap 接收者 → 具体实现 HashMap.<method>
+                    //
+                    // `Map` 是接口，不参与类表；接口类型变量上的方法调用若按普通
+                    // 方法解析会退化为**裸名**（如 `put`）→ 字节码查表失败
+                    // （运行期报「未定义函数」）。这里按名字显式改派到 `HashMap`：
+                    // 运行期该变量必然持有 HashMap 实例（项目内 Map 的唯一实现）。
+                    if let Some(ty) = lookup_expr_type(object) {
+                        if ty.starts_with("Map") || ty.starts_with("MutableMap") {
+                            let mapped: Option<&str> = match name.as_str() {
+                                "get" => Some("get"),
+                                "put" => Some("put"),
+                                "set" => Some("put"),
+                                "getOrDefault" => Some("getOrDefault"),
+                                "containsKey" => Some("containsKey"),
+                                "containsValue" => Some("containsValue"),
+                                "remove" => Some("remove"),
+                                "clear" => Some("clear"),
+                                "isEmpty" => Some("isEmpty"),
+                                "getSize" => Some("getSize"),
+                                "keys" => Some("keys"),
+                                "values" => Some("values"),
+                                "toString" => Some("toString"),
+                                "equals" => Some("equals"),
+                                "hashCode" => Some("hashCode"),
+                                _ => None,
+                            };
+                            if let Some(m) = mapped {
+                                let mut all_args = vec![desugar_expr(object)];
+                                for a in args {
+                                    all_args.push(desugar_expr(a));
+                                }
+                                return HirExpr::Call {
+                                    callee: format!("HashMap.{}", m),
+                                    args: all_args,
+                                };
+                            }
+                        }
+                    }
                     if name.as_str() == "contains" || name.as_str() == "indexOf" {
                         if let Some(ty) = lookup_expr_type(object) {
-                            if ty.starts_with("List")
-                                || ty.starts_with("Array")
-                                || ty.starts_with("Set")
-                            {
+                            if is_list_like_type(&ty) {
                                 let callee = if name.as_str() == "contains" {
                                     "aura.lang.std.Collections.contains".to_string()
                                 } else {
@@ -3808,10 +4676,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                         || name.as_str() == "append"
                     {
                         if let Some(ty) = lookup_expr_type(object) {
-                            if ty.starts_with("List")
-                                || ty.starts_with("Array")
-                                || ty.starts_with("Set")
-                            {
+                            if is_list_like_type(&ty) {
                                 let mut all_args = vec![desugar_expr(object)];
                                 for a in args {
                                     all_args.push(desugar_expr(a));
@@ -3826,7 +4691,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     // set(i, v) → Collections.set(collection, i, v)，结果回赋到集合变量
                     if name.as_str() == "set" {
                         if let Some(ty) = lookup_expr_type(object) {
-                            if ty.starts_with("List") || ty.starts_with("Array") {
+                            if is_list_like_type(&ty) {
                                 let mut all_args = vec![desugar_expr(object)];
                                 for a in args {
                                     all_args.push(desugar_expr(a));
@@ -3840,6 +4705,10 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     }
                     // 检查模块别名：import aura.concurrent as cc + cc.spawn(42)
                     if let Expr::Ident(module_name, _) = object.as_ref() {
+                        // 仅当对象类型不是 String 时才视为模块调用
+                        // （String 变量如 `json` 调用 `.indexOf()` 不应解析为 Json 模块方法）
+                        let obj_ty = lookup_expr_type(object);
+                        let is_string_var = matches!(obj_ty.as_deref(), Some("String"));
                         if let Some(am) = lookup_import_module_alias(module_name) {
                             let resolved = resolve_function_path(&format!("{}.{}", am, name));
                             return HirExpr::Call {
@@ -3847,8 +4716,9 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                                 args: args.iter().map(desugar_expr).collect(),
                             };
                         }
-                        // 检查是否为标准库模块调用（支持嵌套：aura.lang.std.Coroutine.spawn）
-                        if is_std_module(module_name) {
+                        // 检查是否为标准库模块调用（支持嵌套：aura.lang.concurrent.Coroutine.spawn）
+                        // 但仅当对象不是 String 变量时才应用
+                        if !is_string_var && is_std_module(module_name) {
                             let class_name = std_module_to_class_name(module_name)
                                 .map(|s| s.to_string())
                                 .unwrap_or_else(|| full_package_name(module_name));
@@ -3858,7 +4728,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                             };
                         }
                     }
-                    // 嵌套：aura.lang.std.Coroutine.spawn
+                    // 嵌套：aura.lang.concurrent.Coroutine.spawn
                     if let Expr::MemberAccess {
                         object: inner_obj,
                         name: inner_name,
@@ -3902,25 +4772,59 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                                 args: args.iter().map(desugar_expr).collect(),
                             };
                         }
-                    }
-                    // 深层嵌套 std 调用兜底：
-                    // aura.lang.std.Coroutine.spawn(42) → callee "aura.lang.std.Coroutine.spawn"
-                    // 前面所有分支都没命中时，若 object 是纯点分链（MemberAccess），直接拼接完整名
-                    // 注意：简单标识符（如 c）不应走此路径，应交给 resolve_method_owner 处理
-                    if let Expr::MemberAccess { .. } = object.as_ref() {
-                        if let Some(obj_path) = extract_dotted_name(object) {
+                        // 导入模块方法调用：Main.compile(src) → Main.compile(src)
+                        // 不传接收者作为首参（与 Collections.emptyList() 一致）
+                        if IMPORT_RESOLUTION.with(|r| {
+                            r.borrow().as_ref().map_or(false, |ir| ir.is_module_name(obj_name))
+                        }) {
+                            // 解析短名为完整名（如 "Process.args" → "aura.lang.std.Process.args"）
+                            let short_callee = format!("{}.{}", obj_name, name);
+                            let full_callee =
+                                lookup_import_short(&short_callee).unwrap_or(short_callee);
                             return HirExpr::Call {
-                                callee: format!("{}.{}", obj_path, name),
+                                callee: full_callee,
                                 args: args.iter().map(desugar_expr).collect(),
                             };
+                        }
+                    }
+                    // 深层嵌套 std 调用兜底：
+                    // aura.lang.concurrent.Coroutine.spawn(42) → callee "aura.lang.concurrent.Coroutine.spawn"
+                    // 前面所有分支都没命中时，若 object 是纯模块点分链（全部由 Ident 组成），直接拼接完整名
+                    // 注意：简单标识符（如 c）或字段访问（如 c3.x）不应走此路径，应交给 resolve_method_owner 处理
+                    if let Expr::MemberAccess { .. } = object.as_ref() {
+                        // 仅当整条链都是模块/类标识符时才走此路径。
+                        //
+                        // 另外显式放行**完全限定**的 std / concurrent 路径
+                        // （`aura.lang.std.X.fn`、`aura.lang.concurrent.X.fn`）：
+                        // 这类链的类段（X）不是「模块名」，`is_module_chain` 判定为 false；
+                        // 若不放行，调用会退化成「按方法末段猜模块」（如 `spawn`
+                        // 被猜成 `Process.spawn`）或直接 `Call(0)` 自递归爆栈。
+                        let dotted = extract_dotted_name(object);
+                        let is_fqn = dotted.as_deref().map_or(false, |p| {
+                            p.starts_with("aura.lang.std.")
+                                || p.starts_with("aura.lang.concurrent.")
+                        });
+                        if is_module_chain(object) || is_fqn {
+                            if let Some(obj_path) = dotted {
+                                return HirExpr::Call {
+                                    callee: format!("{}.{}", obj_path, name),
+                                    args: args.iter().map(desugar_expr).collect(),
+                                };
+                            }
                         }
                     }
                     // 类方法分派：接收者静态类型（含继承链）→ Class.method(self, args)；
                     // open/abstract 方法（可被子类重写）→ CallVirtual 动态分派
                     if let Some((class, entry)) = resolve_method_owner(object, name) {
                         let mut all_args = vec![];
-                        // object 单例：不传接收者，VM 拦截时自动添加单例实例
-                        if !entry.is_singleton {
+                        // object 方法由 HIR 统一带 self 形参（见 `desugar_class_method(_, _, true)`），
+                        // 调用点必须**占位**：单例没有实例可传，用 null 占位（object 无实例状态，
+                        // 方法体不读 self）；class 方法传真正的接收者。
+                        // 若不传，实参会整体前移一格（`TargetUtils.archName(this.arch)` 的 arch
+                        // 落到 self 槽位），生成「实参数与定义不符」的调用。
+                        if entry.is_singleton {
+                            all_args.push(HirExpr::Lit(Literal::Null));
+                        } else {
                             all_args.push(desugar_expr(object));
                         }
                         for a in args {
@@ -3929,7 +4833,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                         // 默认参数填充
                         let params_opt = FUNCTION_PARAMS
                             .with(|f| f.borrow().get(&format!("{}.{}", class, name)).cloned());
-                        if let Some(params) = params_opt {
+                        if let Some(params) = params_opt.as_ref() {
                             let required = params
                                 .iter()
                                 .filter(|p| p.default_value.is_none() && !p.is_vararg)
@@ -3944,21 +4848,54 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                                 all_args.extend(defaults);
                             }
                         }
-                        let is_virtual = CLASS_TABLE.with(|t| {
-                            let table = t.borrow();
-                            let mut cur = Some(class.clone());
-                            while let Some(cn) = cur {
-                                if let Some(e) = table.get(&cn) {
-                                    if e.open_methods.contains(name) {
-                                        return true;
+                        // vararg 打包（与自由函数调用路径一致；此前类/object 方法路径缺失）。
+                        //
+                        // `HashMapUtils.mapOf(vararg pairs: Any)` 这类**object/类方法的可变参数**：
+                        // 调用点若不把多余实参打包成列表，实参会整体前移一格 ——
+                        // `pairs` 收到第一个实参本身（如字符串 "x"），`pairs.size` 变成对字符串
+                        // 取长度（或 0）→ 循环体不执行 → 工厂返回空集合。
+                        if let Some(params) = params_opt.as_ref() {
+                            if let Some(last_param) = params.last() {
+                                if last_param.is_vararg {
+                                    let named_count = params.len().saturating_sub(1);
+                                    let provided = all_args.len().saturating_sub(1); // 去掉 self
+                                    if provided > named_count {
+                                        let vararg_exprs: Vec<HirExpr> =
+                                            all_args[1 + named_count..].to_vec();
+                                        all_args.truncate(1 + named_count);
+                                        all_args.push(HirExpr::Call {
+                                            callee: "listOf".to_string(),
+                                            args: vararg_exprs,
+                                        });
                                     }
-                                    cur = e.superclass.clone();
-                                } else {
-                                    break;
                                 }
                             }
-                            false
-                        });
+                        }
+                        // `Any` 的默认实现**不做动态分派**。
+                        //
+                        // `Any` 是所有类型的隐式基类，其方法（`hashCode` / `equals` /
+                        // `toString`）都是 `open`。但接收者常常是**没有 vtable 的值**：
+                        // `Any` 本身（`Any` 映射为 `i8*`）、值类型（Int / String）、
+                        // 泛型形参等。走 CallVirtual 时发射器找不到 vtable，退化为
+                        // `call @hashCode(...)` —— 一个未定义的裸符号
+                        //（链接期 `undefined symbol: hashCode / equals`）。
+                        // 解析到 `Any` 时一律直接调用 `Any.<method>`。
+                        let is_virtual = class != "Any"
+                            && CLASS_TABLE.with(|t| {
+                                let table = t.borrow();
+                                let mut cur = Some(class.clone());
+                                while let Some(cn) = cur {
+                                    if let Some(e) = table.get(&cn) {
+                                        if e.open_methods.contains(name) {
+                                            return true;
+                                        }
+                                        cur = e.superclass.clone();
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                false
+                            });
                         if is_virtual {
                             return HirExpr::CallVirtual {
                                 recv: Box::new(desugar_expr(object)),
@@ -4084,12 +5021,22 @@ fn desugar_expr(e: &Expr) -> HirExpr {
         Expr::MemberAccess {
             object,
             name,
-            ..
+            span,
         } => {
+            if std::env::var("AURA_DEBUG_SIZE").is_ok() && (name == "size" || name == "length") {
+                let ty = lookup_expr_type(object);
+                eprintln!(
+                    "[size] line={} name={} ty={:?} list_like={}",
+                    span.start_line,
+                    name,
+                    ty,
+                    ty.as_ref().map(|t| is_list_like_type(t)).unwrap_or(false)
+                );
+            }
             // P15: List/Array 内建成员 → Collection 通用接口调用
             // （VM 的 GetField 不支持 Value::List，需降级为原生函数）
             if let Some(ty) = lookup_expr_type(object) {
-                if ty.starts_with("List") || ty.starts_with("Array") {
+                if is_list_like_type(&ty) {
                     match name.as_str() {
                         "size" | "length" | "count" => {
                             // Plan A′：降为 LIST_LEN，同时兼容堆列表与内联列表
@@ -4315,6 +5262,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
             push_local_scope();
             for p in params {
                 register_local(&p.name);
+                register_local_type(&p.name, p.type_hint.as_deref().and_then(ast_type_name));
             }
             let hir_body = desugar_block(body);
             pop_local_scope();
@@ -4341,6 +5289,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
             push_local_scope();
             for p in params {
                 register_local(&p.name);
+                register_local_type(&p.name, p.type_hint.as_deref().and_then(ast_type_name));
             }
             let hir_body = desugar_block(body);
             pop_local_scope();
@@ -4386,7 +5335,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
         Expr::This(_) => HirExpr::Var("self".to_string()),
         // super 引用：作为独立表达式时降级为 self（不应单独使用）
         Expr::Super(_) => HirExpr::Var("self".to_string()),
-        // P10.9: select 多路复用 — 降级为 `aura.lang.std.Channel.select(ch1, ch2)` 原生函数调用（最多 2 通道）
+        // P10.9: select 多路复用 — 降级为 `aura.lang.concurrent.Channel.select(ch1, ch2)` 原生函数调用（最多 2 通道）
         Expr::Select {
             branches, ..
         } => {
@@ -4410,7 +5359,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                 args.push(HirExpr::Lit(Literal::Int(0)));
             }
             HirExpr::Call {
-                callee: "aura.lang.std.Channel.select".into(),
+                callee: "aura.lang.concurrent.Channel.select".into(),
                 args,
             }
         }
@@ -4621,6 +5570,7 @@ pub fn synthesize_main_if_missing(hir: &mut HirProgram) -> bool {
                     type_params: vec![],
                     ffi_abi: FfiAbi::None,
                     ffi_lib: None,
+                    native_attr: None,
                 };
 
                 // 4. 插入到 functions 开头（确保 entry=0 指向 main）
@@ -4639,7 +5589,19 @@ pub fn synthesize_main_if_missing(hir: &mut HirProgram) -> bool {
 // P9: 标准库模块检测与原生函数注册
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 解析内置方法名为完整原生函数名（如 `toString` → `toString` prelu，或 `aura.lang.std.Builtin.xxx`）
+/// 解析内置方法名为完整原生函数名（如 `toString` → `toString` prelu）。
+///
+/// **重要**：此函数**仅**匹配 prelu 函数（免import 的全局内置），
+/// 不再将任意方法名匹配到 std 命名空间模块函数。
+///
+/// 之前的实现会把 `isAlpha` 匹配到 `aura.lang.std.Ascii.isAlpha`、
+/// `contains` 匹配到 `aura.lang.std.String.contains`，导致：
+/// - `text[0].isAlpha()`（Char 实例方法）被解析为模块级函数 `Ascii.isAlpha`
+/// - 形成 `Ascii.isAlpha → text[0].isAlpha() → Ascii.isAlpha` 无限递归 → 栈溢出
+/// - 同类问题影响 String.contains / Math.abs / Math.min 等
+///
+/// 模块方法（如 `Char.isAlpha`）应由 VM 层面的原生注册表或
+/// 内置类型拦截器处理，不应通过此函数解析。
 fn resolve_builtin_method(name: &str) -> Option<String> {
     // Plan A′：`arrayListOf(...)` 必须是**堆列表**才能原地追加（native 产出的
     // `Value::List` 是值语义、每次修改整表拷贝，无法做到摊还 O(1)）。
@@ -4647,17 +5609,9 @@ fn resolve_builtin_method(name: &str) -> Option<String> {
     if name == "arrayListOf" {
         return Some("__list_new".to_string());
     }
-    // 优先检查 prelu 函数（免import，始终可用）
+    // 仅匹配 prelu 函数（免import，始终可用）
     if crate::std::decl::is_prelude(name) {
         return Some(name.to_string());
-    }
-    // 其次检查 std 命名空间函数
-    for (full_name, _) in std_native_functions() {
-        if let Some(method_name) = full_name.split('.').last() {
-            if method_name == name {
-                return Some(full_name.to_string());
-            }
-        }
     }
     None
 }
@@ -4687,6 +5641,7 @@ fn is_std_module(name: &str) -> bool {
                 | "assert"
                 | "iter"
                 | "concurrent"
+                | "StringBuilder"
         );
     }
     // 兼容短名：io, math, ...
@@ -4710,6 +5665,7 @@ fn is_std_module(name: &str) -> bool {
             | "path"
             | "assert"
             | "iter"
+            | "StringBuilder"
     )
 }
 
@@ -4727,6 +5683,7 @@ fn std_module_to_class_name(module: &str) -> Option<&'static str> {
     let mod_name = module.strip_prefix("aura.").unwrap_or(module);
     Some(match mod_name {
         "string" => "aura.lang.std.String",
+        "StringBuilder" => "aura.lang.std.StringBuilder",
         "math" => "aura.lang.std.Math",
         "io" => "aura.lang.std.IO",
         "collections" => "aura.lang.std.Collections",
@@ -4745,7 +5702,7 @@ fn std_module_to_class_name(module: &str) -> Option<&'static str> {
         "path" => "aura.lang.std.Path",
         "assert" => "aura.lang.std.Assert",
         "iter" => "aura.lang.std.Iter",
-        "concurrent" => "aura.lang.std.Coroutine",
+        "concurrent" => "aura.lang.concurrent.Coroutine",
         _ => return None,
     })
 }
@@ -4762,11 +5719,11 @@ fn resolve_function_path(path: &str) -> String {
                 let channel_class = match func {
                     "newChannel" | "channelSend" | "channelRecv" | "channelTryRecv" | "select"
                     | "selectTimeout" | "newTcpChannel" | "tcpChannelSend" => {
-                        "aura.lang.std.Channel"
+                        "aura.lang.concurrent.Channel"
                     }
                     "spawnActor" | "supervise" | "actorAlive" | "send" | "spawnActorProcess"
-                    | "processActorAlive" | "killProcessActor" => "aura.lang.std.Actor",
-                    _ => "aura.lang.std.Coroutine",
+                    | "processActorAlive" | "killProcessActor" => "aura.lang.concurrent.Actor",
+                    _ => "aura.lang.concurrent.Coroutine",
                 };
                 return format!("{}.{}", channel_class, func);
             }
@@ -5713,6 +6670,41 @@ fn std_native_functions() -> Vec<(&'static str, Vec<(&'static str, &'static str)
         ("aura.lang.std.Env.platform", vec![]),
         ("aura.lang.std.Env.os", vec![]),
         ("aura.lang.std.Env.arch", vec![]),
+        // ── std.sb（StringBuilder：原生可变字符串缓冲区）──
+        ("aura.lang.std.StringBuilder.create", vec![]),
+        (
+            "aura.lang.std.StringBuilder.append",
+            vec![
+                ("handle", "Long"),
+                ("text", "String"),
+            ],
+        ),
+        (
+            "aura.lang.std.StringBuilder.appendChar",
+            vec![
+                ("handle", "Long"),
+                ("ch", "Char"),
+            ],
+        ),
+        (
+            "aura.lang.std.StringBuilder.appendInt",
+            vec![
+                ("handle", "Long"),
+                ("value", "Int"),
+            ],
+        ),
+        (
+            "aura.lang.std.StringBuilder.length",
+            vec![("handle", "Long")],
+        ),
+        (
+            "aura.lang.std.StringBuilder.finish",
+            vec![("handle", "Long")],
+        ),
+        (
+            "aura.lang.std.StringBuilder.reset",
+            vec![("handle", "Long")],
+        ),
         // ── std.process ──
         ("aura.lang.std.Process.exit", vec![("code", "Int")]),
         ("aura.lang.std.Process.exitCode", vec![]),

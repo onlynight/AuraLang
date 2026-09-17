@@ -147,7 +147,7 @@ fn bench_c(c_src: &str, iters: usize, expected: i64, name: &str) -> Result<f64, 
     let out = cmd.output().map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(format!(
-            "clang 编译失败: {}",
+            "clang compilation failed: {}",
             String::from_utf8_lossy(&out.stderr)
         ));
     }
@@ -168,7 +168,7 @@ fn bench_c(c_src: &str, iters: usize, expected: i64, name: &str) -> Result<f64, 
     let out = link_cmd.output().map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(format!(
-            "链接失败: {}",
+            "linking failed: {}",
             String::from_utf8_lossy(&out.stderr)
         ));
     }
@@ -179,7 +179,7 @@ fn bench_c(c_src: &str, iters: usize, expected: i64, name: &str) -> Result<f64, 
         let out = Command::new(&exe_path).output().map_err(|e| e.to_string())?;
         let code = out.status.code().unwrap_or(-1) as i64;
         let code = if code < 0 { code + 256 } else { code };
-        assert_eq!(code, expected, "C 运行结果应为 {}", expected);
+        assert_eq!(code, expected, "C run result should be {}", expected);
     }
     let elapsed = start.elapsed().as_secs_f64() * 1000.0 / iters as f64;
 
@@ -216,7 +216,7 @@ fn bench_aot(src: &str, iters: usize, expected: i64, name: &str) -> Result<f64, 
     let out = cmd.output().map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(format!(
-            "llc 失败: {}",
+            "llc failed: {}",
             String::from_utf8_lossy(&out.stderr)
         ));
     }
@@ -237,7 +237,7 @@ fn bench_aot(src: &str, iters: usize, expected: i64, name: &str) -> Result<f64, 
     let out = link_cmd.output().map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(format!(
-            "链接失败: {}",
+            "linking failed: {}",
             String::from_utf8_lossy(&out.stderr)
         ));
     }
@@ -248,7 +248,7 @@ fn bench_aot(src: &str, iters: usize, expected: i64, name: &str) -> Result<f64, 
         let out = Command::new(&exe_path).output().map_err(|e| e.to_string())?;
         let code = out.status.code().unwrap_or(-1) as i64;
         let code = if code < 0 { code + 256 } else { code };
-        assert_eq!(code, expected, "AOT 运行结果应为 {}", expected);
+        assert_eq!(code, expected, "AOT run result should be {}", expected);
     }
     let elapsed = start.elapsed().as_secs_f64() * 1000.0 / iters as f64;
 
@@ -272,13 +272,13 @@ fn run_fib() {
             println!("  C:   {:.3} ms/op", c_ms);
             println!("  AOT: {:.3} ms/op", aot_ms);
             println!(
-                "  AOT/C 比值: {:.1}% {}",
+                "  AOT/C ratio: {:.1}% {}",
                 ratio * 100.0,
-                if ratio < 0.9 { "✅ ≥90%" } else { "⚠️ <90%" }
+                if ratio < 0.9 { "pass >=90%" } else { "warn <90%" }
             );
         }
-        (Ok(c_ms), Err(e)) => println!("  C:   {:.3} ms/op  |  AOT: 跳过 ({})", c_ms, e),
-        (Err(e), _) => println!("  C: 跳过 ({})", e),
+        (Ok(c_ms), Err(e)) => println!("  C:   {:.3} ms/op  |  AOT: skipped ({})", c_ms, e),
+        (Err(e), _) => println!("  C: skipped ({})", e),
     }
 }
 
@@ -296,13 +296,13 @@ fn run_sum() {
             println!("  C:   {:.3} ms/op", c_ms);
             println!("  AOT: {:.3} ms/op", aot_ms);
             println!(
-                "  AOT/C 比值: {:.1}% {}",
+                "  AOT/C ratio: {:.1}% {}",
                 ratio * 100.0,
-                if ratio < 0.9 { "✅ ≥90%" } else { "⚠️ <90%" }
+                if ratio < 0.9 { "pass >=90%" } else { "warn <90%" }
             );
         }
-        (Ok(c_ms), Err(e)) => println!("  C:   {:.3} ms/op  |  AOT: 跳过 ({})", c_ms, e),
-        (Err(e), _) => println!("  C: 跳过 ({})", e),
+        (Ok(c_ms), Err(e)) => println!("  C:   {:.3} ms/op  |  AOT: skipped ({})", c_ms, e),
+        (Err(e), _) => println!("  C: skipped ({})", e),
     }
 }
 
@@ -320,13 +320,13 @@ fn run_matmul() {
             println!("  C:   {:.3} ms/op", c_ms);
             println!("  AOT: {:.3} ms/op", aot_ms);
             println!(
-                "  AOT/C 比值: {:.1}% {}",
+                "  AOT/C ratio: {:.1}% {}",
                 ratio * 100.0,
-                if ratio < 0.9 { "✅ ≥90%" } else { "⚠️ <90%" }
+                if ratio < 0.9 { "pass >=90%" } else { "warn <90%" }
             );
         }
-        (Ok(c_ms), Err(e)) => println!("  C:   {:.3} ms/op  |  AOT: 跳过 ({})", c_ms, e),
-        (Err(e), _) => println!("  C: 跳过 ({})", e),
+        (Ok(c_ms), Err(e)) => println!("  C:   {:.3} ms/op  |  AOT: skipped ({})", c_ms, e),
+        (Err(e), _) => println!("  C: skipped ({})", e),
     }
 }
 

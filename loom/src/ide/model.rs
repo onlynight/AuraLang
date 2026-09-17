@@ -204,7 +204,8 @@ impl IdeProject {
 
     /// 序列化为 JSON 字符串
     pub fn to_json(&self) -> Result<String, LoomError> {
-        serde_json::to_string_pretty(self).map_err(|e| LoomError::Ide(format!("序列化失败: {}", e)))
+        serde_json::to_string_pretty(self)
+            .map_err(|e| LoomError::Ide(format!("Serialization failed: {}", e)))
     }
 
     /// 写入文件（自动创建父目录）
@@ -212,28 +213,29 @@ impl IdeProject {
         if let Some(parent) = path.parent() {
             if !parent.to_string_lossy().is_empty() {
                 std::fs::create_dir_all(parent)
-                    .map_err(|e| LoomError::Ide(format!("创建目录失败: {}", e)))?;
+                    .map_err(|e| LoomError::Ide(format!("Failed to create directory: {}", e)))?;
             }
         }
         let json = self.to_json()?;
-        std::fs::write(path, json).map_err(|e| LoomError::Ide(format!("写入文件失败: {}", e)))
+        std::fs::write(path, json)
+            .map_err(|e| LoomError::Ide(format!("Failed to write file: {}", e)))
     }
 
     /// 从 JSON 字符串解析
     pub fn from_json(content: &str) -> Result<Self, LoomError> {
-        serde_json::from_str(content).map_err(|e| LoomError::Ide(format!("解析失败: {}", e)))
+        serde_json::from_str(content).map_err(|e| LoomError::Ide(format!("Parse failed: {}", e)))
     }
 
     /// 从文件加载
     pub fn from_file(path: &Path) -> Result<Self, LoomError> {
         if !path.exists() {
             return Err(LoomError::Ide(format!(
-                "IDE 项目文件不存在: {}",
+                "IDE project file not found: {}",
                 path.display()
             )));
         }
         let content = std::fs::read_to_string(path)
-            .map_err(|e| LoomError::Ide(format!("读取文件失败: {}", e)))?;
+            .map_err(|e| LoomError::Ide(format!("Failed to read file: {}", e)))?;
         Self::from_json(&content)
     }
 

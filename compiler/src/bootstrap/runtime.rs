@@ -64,7 +64,7 @@ impl<'m> Coroutine<'m> {
     /// 恢复协程：`v` 交付给 `coroutine_yield` 表达式（首次恢复忽略）。
     pub fn resume(&mut self, v: Value) -> Result<Step, Trap> {
         if self.state == CoroutineState::Finished {
-            return Err(Trap::new("协程已结束，无法恢复"));
+            return Err(Trap::new("coroutine already finished, cannot resume"));
         }
         // Fresh：入口帧已由 new() 压入，直接驱动执行（交付值无消费者）；
         // Suspended：值是 Yield 表达式的结果。
@@ -148,12 +148,12 @@ impl GcHeap {
         match v {
             Value::Ptr(p) if *p != 0 => {
                 if !self.objects.contains_key(p) {
-                    return Err(Trap::new("gc: 根指向未登记对象"));
+                    return Err(Trap::new("gc: root points to unregistered object"));
                 }
                 self.roots.insert(*p);
                 Ok(())
             }
-            _ => Err(Trap::new("gc: 根必须是 Pointer")),
+            _ => Err(Trap::new("gc: root must be a Pointer")),
         }
     }
 

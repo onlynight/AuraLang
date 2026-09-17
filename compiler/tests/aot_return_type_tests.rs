@@ -23,7 +23,7 @@ fn gen_ir(src: &str) -> String {
     let program = parse(src);
     let hir = desugar_program(&program);
     let codegen = AotCodeGenerator::new(AotOptions::default());
-    codegen.generate_ir(&hir).expect("IR 生成失败")
+    codegen.generate_ir(&hir).expect("IR generation failed")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -35,7 +35,7 @@ fn test_user_func_returns_int() {
     let ir = gen_ir(
         "fun add(a: Int, b: Int): Int { return a + b }\nfun main(): Int { return add(1, 2) }",
     );
-    assert!(ir.contains("call i32 @add"), "add 返回 Int → i32");
+    assert!(ir.contains("call i32 @add"), "add returns Int → i32");
 }
 
 #[test]
@@ -43,7 +43,7 @@ fn test_user_func_returns_float() {
     let ir = gen_ir(
         "fun avg(a: Float, b: Float): Float { return (a + b) / 2.0f }\nfun main(): Float { return avg(1.0f, 3.0f) }",
     );
-    assert!(ir.contains("call float @avg"), "avg 返回 Float → float");
+    assert!(ir.contains("call float @avg"), "avg returns Float → float");
 }
 
 #[test]
@@ -60,7 +60,10 @@ fn test_user_func_returns_bool() {
 fn test_user_func_returns_void() {
     let ir = gen_ir("fun log(msg: Int) { println(msg) }\nfun main(): Int { log(42); return 0 }");
     // void 返回 → 不应包含 "call i32 @log"
-    assert!(!ir.contains("call i32 @log"), "log 返回 Unit → 不应用 i32");
+    assert!(
+        !ir.contains("call i32 @log"),
+        "log returns Unit → should not use i32"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -134,7 +137,10 @@ fn test_native_returns_pointer() {
     // 修复后应为：call ptr @native_calloc
     let call_lines: Vec<&str> =
         ir.lines().filter(|l| l.contains("native_calloc") && l.contains("call")).collect();
-    assert!(!call_lines.is_empty(), "应包含 native_calloc 的 call 指令");
+    assert!(
+        !call_lines.is_empty(),
+        "should contain native_calloc call instruction"
+    );
     // 确认不是 i32（修复前的行为）
     assert!(
         !call_lines.iter().any(|l| l.contains("call i32 @native_calloc")),
@@ -171,7 +177,7 @@ fn test_nested_call_return_type() {
     let ir = gen_ir(
         "fun double(x: Int): Int { return x * 2 }\nfun quad(x: Int): Int { return double(double(x)) }\nfun main(): Int { return quad(5) }",
     );
-    assert!(ir.contains("call i32 @double"), "double 调用返回 i32");
+    assert!(ir.contains("call i32 @double"), "double call returns i32");
 }
 
 #[test]
@@ -179,8 +185,8 @@ fn test_call_result_used_in_arithmetic() {
     let ir = gen_ir(
         "fun mul(a: Int, b: Int): Int { return a * b }\nfun main(): Int { return mul(3, 4) + 1 }",
     );
-    assert!(ir.contains("call i32 @mul"), "mul 调用返回 i32");
-    assert!(ir.contains("add"), "加法式存在");
+    assert!(ir.contains("call i32 @mul"), "mul call returns i32");
+    assert!(ir.contains("add"), "add instruction exists");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -191,7 +197,10 @@ fn test_call_result_used_in_arithmetic() {
 fn test_unknown_func_falls_back_to_i32() {
     // 未声明的函数调用 → 兜底 i32
     let ir = gen_ir("fun main(): Int { return unknown_func() }");
-    assert!(ir.contains("call i32 @unknown_func"), "未知函数兜底 i32");
+    assert!(
+        ir.contains("call i32 @unknown_func"),
+        "unknown function fallback i32"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -206,7 +215,11 @@ fn test_aot_compile_native_int_return() {
     if let Ok(_result) = std::env::var("AURA_LLVM_HOME") {
         let output = std::env::temp_dir().join("aura_test_native_int");
         let result = aot_compile(src, &output, AotOptions::default());
-        assert!(result.is_ok(), "AOT 编译应成功: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "AOT compilation should succeed: {:?}",
+            result.err()
+        );
         let _ = std::fs::remove_file(&output);
     }
 }

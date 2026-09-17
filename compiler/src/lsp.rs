@@ -112,7 +112,7 @@ pub enum SymbolKind {
 }
 
 impl SymbolKind {
-    fn to_lsp_kind(&self) -> i32 {
+    pub fn to_lsp_kind(&self) -> i32 {
         match self {
             SymbolKind::Function => 3,
             SymbolKind::Variable => 6,
@@ -607,7 +607,7 @@ impl LspHandler {
             }).map(|s| HoverResult {
                 contents: serde_json::json!({
                     "kind": "markdown",
-                    "value": format!("**{}**\n\n```\n{}\n```\n\n可见性: {}", s.name, s.type_str, match s.visibility {
+                    "value": format!("**{}**\n\n```\n{}\n```\n\nVisibility: {}", s.name, s.type_str, match s.visibility {
                         Visibility::Public => "public",
                         Visibility::Private => "private",
                         Visibility::Internal => "internal",

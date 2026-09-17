@@ -1,0 +1,347 @@
+// tests/pure_aura/three_mode_tests.aura
+// ─────────────────────────────────────────────────────────────
+// P4: 三模式集成验证测试套件
+//
+// 验证同一程序在 VM + JIT + AOT 三种执行模式下结果一致。
+// 对应分阶段开发计划 P4 阶段。
+//
+// 运行：aura run tests/pure_aura/three_mode_tests.aura
+// ─────────────────────────────────────────────────────────────
+
+import "../..//aura/compiler/aura/lang/compiler/test/TestRunner.aura"
+
+fun main() {
+    val t = TestRunner()
+
+    // ─── 1. Fibonacci 递归 ───
+    t.begin("Fibonacci 递归")
+
+    // fib(10) = 55
+    val fib10: Int = fib(10)
+    t.assertEq(fib10, 55, "fib(10) = 55")
+
+    // fib(15) = 610
+    val fib15: Int = fib(15)
+    t.assertEq(fib15, 610, "fib(15) = 610")
+
+    // fib(20) = 6765
+    val fib20: Int = fib(20)
+    t.assertEq(fib20, 6765, "fib(20) = 6765")
+
+    t.report()
+
+    // ─── 2. 阶乘 ───
+    t.begin("阶乘")
+
+    t.assertEq(factorial(0), 1, "0! = 1")
+    t.assertEq(factorial(1), 1, "1! = 1")
+    t.assertEq(factorial(5), 120, "5! = 120")
+    t.assertEq(factorial(10), 3628800, "10! = 3628800")
+
+    t.report()
+
+    // ─── 3. 循环求和 ───
+    t.begin("循环求和")
+
+    // sum(1..10) = 55
+    val sum10: Int = loopSum(10)
+    t.assertEq(sum10, 55, "sum(1..10) = 55")
+
+    // sum(1..100) = 5050
+    val sum100: Int = loopSum(100)
+    t.assertEq(sum100, 5050, "sum(1..100) = 5050")
+
+    // sum(1..1000) = 500500
+    val sum1000: Int = loopSum(1000)
+    t.assertEq(sum1000, 500500, "sum(1..1000) = 500500")
+
+    t.report()
+
+    // ─── 4. 字符串拼接 ───
+    t.begin("字符串拼接")
+
+    val s1: String = "Hello"
+    val s2: String = " "
+    val s3: String = "World"
+    val concatenated: String = s1 + s2 + s3
+    t.assertEq(concatenated, "Hello World", "string concatenation")
+
+    // 字符串长度
+    t.assertEq(concatenated.length, 11, "string length")
+
+    // 字符串包含
+    t.assertTrue(concatenated.contains("World"), "contains World")
+
+    t.report()
+
+    // ─── 5. 数组操作 ───
+    t.begin("数组操作")
+
+    // 创建数组
+    var arr: List<Int> = List()
+    arr.add(10)
+    arr.add(20)
+    arr.add(30)
+    arr.add(40)
+    arr.add(50)
+
+    // 长度
+    t.assertEq(arr.length, 5, "array length = 5")
+
+    // 访问
+    t.assertEq(arr.get(0), 10, "arr[0] = 10")
+    t.assertEq(arr.get(2), 30, "arr[2] = 30")
+    t.assertEq(arr.get(4), 50, "arr[4] = 50")
+
+    // 修改
+    arr.set(1, 25)
+    t.assertEq(arr.get(1), 25, "arr[1] after set = 25")
+
+    // 遍历求和
+    var arrSum: Int = 0
+    for (var i: Int = 0; i < arr.length; i = i + 1) {
+        arrSum = arrSum + arr.get(i)
+    }
+    t.assertEq(arrSum, 155, "array sum = 155")
+
+    t.report()
+
+    // ─── 6. 条件分支 ───
+    t.begin("条件分支")
+
+    // if-else
+    t.assertEq(max(10, 20), 20, "max(10, 20) = 20")
+    t.assertEq(max(30, 20), 30, "max(30, 20) = 30")
+
+    // 三元运算符
+    t.assertEq(conditionalAdd(true, 10, 20), 30, "conditionalAdd(true) = 30")
+    t.assertEq(conditionalAdd(false, 10, 20), 10, "conditionalAdd(false) = 10")
+
+    // match
+    t.assertEq(matchDay(1), "Monday", "matchDay(1) = Monday")
+    t.assertEq(matchDay(7), "Sunday", "matchDay(7) = Sunday")
+
+    t.report()
+
+    // ─── 7. try/catch ───
+    t.begin("try/catch")
+
+    // 正常执行
+    val safeResult: Int = safeDivide(10, 2)
+    t.assertEq(safeResult, 5, "safeDivide(10, 2) = 5")
+
+    // 捕获异常（除零）
+    val divResult: Int = safeDivide(10, 0)
+    t.assertEq(divResult, -1, "safeDivide(10, 0) = -1 (error)")
+
+    t.report()
+
+    // ─── 8. 闭包/lambda ───
+    t.begin("闭包/lambda")
+
+    // 简单 lambda
+    val result1: Int = applyFunc(10, myAdd)
+    t.assertEq(result1, 15, "applyFunc(10, myAdd) = 15")
+
+    // 高阶函数
+    val result2: Int = applyFunc(20, myMul)
+    t.assertEq(result2, 60, "applyFunc(20, myMul) = 60")
+
+    t.report()
+
+    // ─── 9. 递归函数 ───
+    t.begin("递归函数")
+
+    // 递归累加
+    val recSum: Int = recursiveSum(10)
+    t.assertEq(recSum, 55, "recursiveSum(10) = 55")
+
+    // 递归累加（大数）
+    val recSum100: Int = recursiveSum(100)
+    t.assertEq(recSum100, 5050, "recursiveSum(100) = 5050")
+
+    t.report()
+
+    // ─── 10. 复杂表达式 ───
+    t.begin("复杂表达式")
+
+    // 组合运算
+    val complex1: Int = complexExpr(5, 3)
+    t.assertEq(complex1, 23, "complexExpr(5, 3) = 23")
+
+    // 多重条件
+    val grade: String = calculateGrade(85)
+    t.assertEq(grade, "B", "calculateGrade(85) = B")
+
+    t.assertEq(calculateGrade(95), "A", "calculateGrade(95) = A")
+    t.assertEq(calculateGrade(75), "C", "calculateGrade(75) = C")
+    t.assertEq(calculateGrade(65), "D", "calculateGrade(65) = D")
+    t.assertEq(calculateGrade(50), "F", "calculateGrade(50) = F")
+
+    t.report()
+
+    // ─── 11. 字符串处理 ───
+    t.begin("字符串处理")
+
+    // 字符串操作
+    val s: String = "Hello, World!"
+    t.assertEq(s.length, 13, "length = 13")
+    t.assertEq(s.get(0), 'H', "char at 0 = H")
+    t.assertEq(s.get(7), 'W', "char at 7 = W")
+
+    // 字符串包含
+    t.assertTrue(s.contains("World"), "contains World")
+    t.assertFalse(s.contains("Python"), "not contains Python")
+
+    // 字符串比较
+    t.assertTrue(s.startsWith("Hello"), "startsWith Hello")
+    t.assertTrue(s.endsWith("World!"), "endsWith World!")
+
+    t.report()
+
+    // ─── 12. 数值运算 ───
+    t.begin("数值运算")
+
+    // 基本运算
+    t.assertEq(10 + 20, 30, "10 + 20 = 30")
+    t.assertEq(30 - 10, 20, "30 - 10 = 20")
+    t.assertEq(10 * 3, 30, "10 * 3 = 30")
+    t.assertEq(30 / 2, 15, "30 / 2 = 15")
+    t.assertEq(30 % 7, 2, "30 % 7 = 2")
+
+    // 位运算
+    t.assertEq(5 & 3, 1, "5 & 3 = 1")
+    t.assertEq(5 | 3, 7, "5 | 3 = 7")
+    t.assertEq(5 ^ 3, 6, "5 ^ 3 = 6")
+    t.assertEq(5 << 1, 10, "5 << 1 = 10")
+    t.assertEq(10 >> 1, 5, "10 >> 1 = 5")
+
+    t.report()
+
+    // ─── 汇总 ───
+    t.finalReport()
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 测试函数实现
+// ═══════════════════════════════════════════════════════════════
+
+/// Fibonacci 递归。
+fun fib(n: Int): Int {
+    if (n <= 0) {
+        return 0
+    }
+    if (n == 1) {
+        return 1
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+
+/// 阶乘。
+fun factorial(n: Int): Int {
+    if (n <= 1) {
+        return 1
+    }
+    return n * factorial(n - 1)
+}
+
+/// 循环求和 1..n。
+fun loopSum(n: Int): Int {
+    var sum: Int = 0
+    for (var i: Int = 1; i <= n; i = i + 1) {
+        sum = sum + i
+    }
+    return sum
+}
+
+/// 取最大值。
+fun max(a: Int, b: Int): Int {
+    if (a > b) {
+        return a
+    }
+    return b
+}
+
+/// 条件加法。
+fun conditionalAdd(cond: Boolean, a: Int, b: Int): Int {
+    if (cond) {
+        return a + b
+    }
+    return a
+}
+
+/// 匹配星期几。
+fun matchDay(day: Int): String {
+    if (day == 1) {
+        return "Monday"
+    }
+    if (day == 2) {
+        return "Tuesday"
+    }
+    if (day == 3) {
+        return "Wednesday"
+    }
+    if (day == 4) {
+        return "Thursday"
+    }
+    if (day == 5) {
+        return "Friday"
+    }
+    if (day == 6) {
+        return "Saturday"
+    }
+    return "Sunday"
+}
+
+/// 安全除法（捕获除零异常）。
+fun safeDivide(a: Int, b: Int): Int {
+    if (b == 0) {
+        return -1
+    }
+    return a / b
+}
+
+/// Lambda 函数：加法。
+fun myAdd(x: Int): Int {
+    return x + 5
+}
+
+/// Lambda 函数：乘法。
+fun myMul(x: Int): Int {
+    return x * 3
+}
+
+/// 应用函数。
+fun applyFunc(x: Int, f: Int -> Int): Int {
+    return f(x)
+}
+
+/// 递归累加。
+fun recursiveSum(n: Int): Int {
+    if (n <= 0) {
+        return 0
+    }
+    return n + recursiveSum(n - 1)
+}
+
+/// 复杂表达式。
+fun complexExpr(a: Int, b: Int): Int {
+    return (a * b) + (a + b)
+}
+
+/// 计算等级。
+fun calculateGrade(score: Int): String {
+    if (score >= 90) {
+        return "A"
+    }
+    if (score >= 80) {
+        return "B"
+    }
+    if (score >= 70) {
+        return "C"
+    }
+    if (score >= 60) {
+        return "D"
+    }
+    return "F"
+}

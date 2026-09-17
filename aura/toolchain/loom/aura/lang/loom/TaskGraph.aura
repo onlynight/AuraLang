@@ -1,0 +1,246 @@
+// aura:///loom/aura/lang/loom/TaskGraph.aura
+package aura.lang.loom
+
+// ── 标准库 ──
+import aura.lang.std.Collections
+
+// ── Native 包 ──
+import aura.lang.native.console.Console
+
+// ── 项目内模块 ──
+import aura.lang.loom.Task
+import aura.lang.loom.LoomError
+import aura.lang.loom.TaskExecutor
+
+// ═══════════════════════════════════════════════════════════════
+// TaskGraph（任务图 + 拓扑排序 + 循环检测）
+// ═══════════════════════════════════════════════════════════════
+
+class TopoSortResult {
+    var order: List<String> = mutableListOf()
+    var layers: List<Layer> = mutableListOf()
+
+    fun isEmpty(): Boolean { return order.size == 0 }
+}
+
+class Layer {
+    val tasks: List<String> = mutableListOf()
+
+    fun add(task: String): Unit { tasks.add(task) }
+    fun size(): Int { return tasks.size }
+    fun get(index: Int): String { return tasks[index] }
+}
+
+class TaskGraph {
+    var tasks: Map<String, Task> = mutableMapOf()
+    private var executionOrder: List<String> = mutableListOf()
+    private var executionLayers: List<Layer> = mutableListOf()
+
+    fun addTask(task: Task): Unit { tasks.put(task.name, task) }
+    fun addTask(name: String, kind: Int): Unit {
+        val task: Task = Task(name, kind)
+        tasks.put(name, task)
+    }
+    fun addTask(name: String, kind: Int, description: String): Unit {
+        val task: Task = Task(name, kind, description)
+        tasks.put(name, task)
+    }
+    fun get(name: String): Task { return tasks.getOrDefault(name, null) }
+    fun contains(name: String): Boolean { return tasks.containsKey(name) }
+    fun len(): Int { return tasks.size }
+
+    fun addDependency(from: String, to: String): Unit {
+        val task: Task = tasks.getOrDefault(from, null)
+        if (task != null) { task.addDep(to) }
+    }
+
+    private fun buildEdges(): Map<String, List<String>> {
+        val edges: Map<String, List<String>> = mutableMapOf()
+        var iter = tasks.values()
+        for (task in iter) { edges.put(task.name, mutableListOf()) }
+        var iter2 = tasks.values()
+        for (task in iter2) {
+            var i: Int = 0
+            while (i < task.dependsOn.size) {
+                val dep: String = task.dependsOn[i]
+                if (!edges.containsKey(dep)) { edges.put(dep, mutableListOf()) }
+                val list: List<String> = edges.getOrDefault(task.name, mutableListOf())
+                if (!list.contains(dep)) { list.add(dep) }
+                i = i + 1
+            }
+        }
+        return edges
+    }
+
+    private fun buildInDegree(): Map<String, Int> {
+        val inDegree: Map<String, Int> = mutableMapOf()
+        var iter = tasks.values()
+        for (task in iter) { inDegree.put(task.name, 0) }
+        var iter2 = tasks.values()
+        for (task in iter2) {
+            var i: Int = 0
+            while (i < task.dependsOn.size) {
+                val dep: String = task.dependsOn[i]
+                val current: Int = inDegree.getOrDefault(dep, 0)
+                inDegree.put(dep, current + 1)
+                i = i + 1
+            }
+        }
+        return inDegree
+    }
+
+    fun topoSort(): TopoSortResult {
+        val result: TopoSortResult = TopoSortResult()
+        val edges: Map<String, List<String>> = buildEdges()
+        val inDegree: Map<String, Int> = buildInDegree()
+
+        val queue: List<String> = mutableListOf()
+        var iter = inDegree.keys()
+        for (node in iter) {
+            val degree: Int = inDegree.getOrDefault(node, 0)
+            if (degree == 0) { queue.add(node) }
+        }
+
+        var processed: Int = 0
+        while (queue.size > 0) {
+            val current: String = queue[0]
+            queue.remove(0)
+            result.order.add(current)
+            processed = processed + 1
+
+            val neighbors: List<String> = edges.getOrDefault(current, mutableListOf())
+            var i: Int = 0
+            while (i < neighbors.size) {
+                val neighbor: String = neighbors[i]
+                val newDegree: Int = inDegree.getOrDefault(neighbor, 0) - 1
+                inDegree.put(neighbor, newDegree)
+                if (newDegree == 0) { queue.add(neighbor) }
+                i = i + 1
+            }
+        }
+
+        if (processed != tasks.size) {
+            val cycleResult: Int = detectCycle()
+            if (cycleResult != LoomError.OK) { return result }
+        }
+
+        result.layers = computeLayers()
+        executionOrder = result.order
+        executionLayers = result.layers
+        return result
+    }
+
+    private fun detectCycle(): Int {
+        val visited: Map<String, Boolean> = mutableMapOf()
+        val visiting: Map<String, Boolean> = mutableMapOf()
+        var iter = tasks.keys()
+        for (node in iter) {
+            if (!visited.containsKey(node)) {
+                val result: Int = dfsCycle(node, visited, visiting)
+                if (result != LoomError.OK) { return LoomError.CYCLE_DETECTED }
+            }
+        }
+        return LoomError.OK
+    }
+
+    private fun dfsCycle(node: String, visited: Map<String, Boolean>, visiting: Map<String, Boolean>): Int {
+        if (visiting.containsKey(node)) {
+            Console.println("[loom] Cycle detected at: " + node)
+            return LoomError.CYCLE_DETECTED
+        }
+        if (visited.containsKey(node)) { return LoomError.OK }
+        visiting.put(node, true)
+        val task: Task = tasks.getOrDefault(node, null)
+        if (task != null) {
+            var i: Int = 0
+            while (i < task.dependsOn.size) {
+                val dep: String = task.dependsOn[i]
+                val result: Int = dfsCycle(dep, visited, visiting)
+                if (result != LoomError.OK) { return result }
+                i = i + 1
+            }
+        }
+        visiting.put(node, false)
+        visited.put(node, true)
+        return LoomError.OK
+    }
+
+    private fun computeLayers(): List<Layer> {
+        val layers: List<Layer> = mutableListOf()
+        val visited: Map<String, Boolean> = mutableMapOf()
+        val maxDepth: Map<String, Int> = mutableMapOf()
+
+        var iter = tasks.keys()
+        for (node in iter) {
+            val depth: Int = computeDepth(node, visited, maxDepth)
+            maxDepth.put(node, depth)
+        }
+
+        val maxLayer: Int = 0
+        var iter2 = maxDepth.values()
+        for (depth in iter2) {
+            if (depth > maxLayer) { maxLayer = depth }
+        }
+
+        var layer: Int = 0
+        while (layer <= maxLayer) {
+            val currentLayer: Layer = Layer()
+            var iter3 = maxDepth.keys()
+            for (node in iter3) {
+                val depth: Int = maxDepth.getOrDefault(node, 0)
+                if (depth == layer) { currentLayer.add(node) }
+            }
+            if (currentLayer.size() > 0) { layers.add(currentLayer) }
+            layer = layer + 1
+        }
+        return layers
+    }
+
+    private fun computeDepth(node: String, visited: Map<String, Boolean>, maxDepth: Map<String, Int>): Int {
+        if (visited.containsKey(node)) { return maxDepth.getOrDefault(node, 0) }
+        var depth: Int = 0
+        val task: Task = tasks.getOrDefault(node, null)
+        if (task != null) {
+            var i: Int = 0
+            while (i < task.dependsOn.size) {
+                val dep: String = task.dependsOn[i]
+                val depDepth: Int = computeDepth(dep, visited, maxDepth)
+                if (depDepth + 1 > depth) { depth = depDepth + 1 }
+                i = i + 1
+            }
+        }
+        visited.put(node, true)
+        maxDepth.put(node, depth)
+        return depth
+    }
+
+    fun execute(executor: TaskExecutor): Int {
+        val sortResult: TopoSortResult = topoSort()
+        if (sortResult.isEmpty()) {
+            Console.println("[loom] No tasks to execute")
+            return LoomError.OK
+        }
+        var i: Int = 0
+        while (i < sortResult.order.size) {
+            val name: String = sortResult.order[i]
+            val task: Task = tasks.getOrDefault(name, null)
+            if (task != null) {
+                val result: Int = executor.execute(task)
+                if (result != LoomError.OK) {
+                    Console.println("[loom] Task failed: " + name)
+                    return result
+                }
+            }
+            i = i + 1
+        }
+        return LoomError.OK
+    }
+
+    fun toStr(): String {
+        var s: String = "TaskGraph{tasks=" + tasks.size + "\n"
+        var iter = tasks.values()
+        for (task in iter) { s = s + "  " + task.toStr() + "\n" }
+        s = s + "}"
+        return s
+    }
+}

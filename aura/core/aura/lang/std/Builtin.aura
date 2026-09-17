@@ -1,14 +1,26 @@
 // aura:///aura/lang/std/Builtin.aura
 package aura.lang.std
 // 标准库模块，不可修改
-// 实现：类型标签/指针/回调等需要运行时的成员保留 native（Layer 0-A）；
-//       空值判断、数值判断与类型转换全部以 Aura 编写（Layer 1）
-// (package 声明由编译器自动注入，无需显式声明)
-/// 编译期内置函数模块。
+//
+// 实现策略：
+// - 全部以 Aura 编写，不使用 extern "C" 或 Rust cffi。
+// - 类型标签（typeof/typeOf/isOfType）和回调（makeCallback）等需要运行时
+//   支持的成员，通过编译器内置指令实现（非外部库调用）。
+// - 指针操作（cstr/ptrIsNull/ptrToInt/intToPtr）在 VM 模式下由运行库处理。
+// - 空值判断、数值判断与类型转换全部以 Aura 编写（纯逻辑）。
+//
+// 使用前需 import：
+// ```aura
+// import aura.lang.std.Builtin
+// ```
+//
+// @since 0.1
+
+/// 编译期内建函数模块。
 ///
 /// 本模块分成两部分：
-/// - **native 成员**：`typeof` / `typeOf` / `isOfType`（需要运行时类型标签）与
-///   FFI 指针、回调相关函数（需要 VM 支持），属于引导层，不能在 Aura 中实现；
+/// - **运行时支持成员**：`typeof` / `typeOf` / `isOfType`（需要运行时类型标签）
+///   与指针/回调相关函数（需要 VM 支持），属于引导层，由编译器/运行库提供；
 /// - **Aura 成员**：空值判断、数值判断、类型转换，全部以 Aura 实现。
 ///
 /// 使用前需 import：
@@ -17,9 +29,9 @@ package aura.lang.std
 /// ```
 ///
 /// @since 0.1
-internal object Builtin {
+object Builtin {
 
-    // ── 类型查询（native：需要运行时类型标签）──
+    // ── 类型查询（运行时支持：需要运行时类型标签）──
 
     /// 返回值的类型名称（"Int"/"Long"/"Float"/"Double"/"Boolean"/"String"/"List"/"Map"/"Null"）。
     fun typeof(value: Any): String
@@ -30,7 +42,7 @@ internal object Builtin {
     /// 检查值的运行时类型是否匹配目标类型名。
     fun isOfType(value: Any, typeName: String): Boolean
 
-    // ── FFI 指针与回调（native：需要 VM / FFI 支持）──
+    // ── 指针与回调（运行时支持：需要 VM 支持）──
 
     /// 将 Aura 字符串转换为 C 兼容的 null 终止字符串。
     fun cstr(text: String): Any

@@ -105,18 +105,18 @@ impl FileWatcher {
 
     /// 开始监听（使用 notify crate 事件驱动）
     pub fn watch(&self, project_dir: &Path) -> Result<(), LoomError> {
-        println!("👁 Watch 模式启动");
-        println!("  监听目录:");
+        println!("👁 Watch mode started");
+        println!("  Watching directories:");
         for dir in &self.config.watch_dirs {
             let full_path = project_dir.join(dir);
             if full_path.exists() {
                 println!("    → {}", full_path.display());
             } else {
-                println!("    → {} (不存在)", full_path.display());
+                println!("    → {} (does not exist)", full_path.display());
             }
         }
-        println!("  扩展名: {:?}", self.config.extensions);
-        println!("  防抖: {}ms", self.config.debounce_ms);
+        println!("  Extensions: {:?}", self.config.extensions);
+        println!("  Debounce: {}ms", self.config.debounce_ms);
 
         // 使用 notify crate 创建事件驱动的文件监听器
         let running = Arc::clone(&self.running);
@@ -178,12 +178,12 @@ impl FileWatcher {
                         }
                     }
                     Err(e) => {
-                        eprintln!("  ⚠ 监听错误: {}", e);
+                        eprintln!("  ⚠ Watch error: {}", e);
                     }
                 }
             },
         ))
-        .map_err(|e| LoomError::Ci(format!("创建文件监听器失败: {}", e)))?;
+        .map_err(|e| LoomError::Ci(format!("Failed to create file watcher: {}", e)))?;
 
         // 添加监听目录
         for dir in &self.config.watch_dirs {
@@ -191,12 +191,16 @@ impl FileWatcher {
             if full_path.exists() {
                 notify::Watcher::watch(&mut watcher, &full_path, notify::RecursiveMode::Recursive)
                     .map_err(|e| {
-                        LoomError::Ci(format!("监听目录失败 {}: {}", full_path.display(), e))
+                        LoomError::Ci(format!(
+                            "Failed to watch directory {}: {}",
+                            full_path.display(),
+                            e
+                        ))
                     })?;
             }
         }
 
-        println!("\n  等待文件变化... (Ctrl+C 退出)\n");
+        println!("\n  Waiting for file changes... (Ctrl+C to exit)\n");
 
         // 保持 watcher 存活（防止被 GC）
         while self.running.load(Ordering::Relaxed) {
@@ -209,7 +213,7 @@ impl FileWatcher {
     /// 停止监听
     pub fn stop(&self) {
         self.running.store(false, Ordering::Relaxed);
-        println!("  👁 Watch 模式停止");
+        println!("  👁 Watch mode stopped");
     }
 
     /// 检查是否正在运行
@@ -220,10 +224,10 @@ impl FileWatcher {
 
 fn describe_event(event: &FileEvent) -> String {
     match event {
-        FileEvent::Created(p) => format!("创建: {}", p.display()),
-        FileEvent::Modified(p) => format!("修改: {}", p.display()),
-        FileEvent::Deleted(p) => format!("删除: {}", p.display()),
-        FileEvent::Renamed(old, new) => format!("重命名: {} → {}", old.display(), new.display()),
+        FileEvent::Created(p) => format!("Created: {}", p.display()),
+        FileEvent::Modified(p) => format!("Modified: {}", p.display()),
+        FileEvent::Deleted(p) => format!("Deleted: {}", p.display()),
+        FileEvent::Renamed(old, new) => format!("Renamed: {} → {}", old.display(), new.display()),
     }
 }
 
@@ -260,8 +264,8 @@ impl WatchSession {
 
     /// 开始 watch 会话
     pub fn start(&self) -> Result<(), LoomError> {
-        println!("🚀 Watch 会话启动");
-        println!("  项目: {}", self.project_dir.display());
+        println!("🚀 Watch session started");
+        println!("  Project: {}", self.project_dir.display());
 
         // 启动文件监听
         self.watcher.watch(&self.project_dir)?;
@@ -272,7 +276,7 @@ impl WatchSession {
     /// 停止 watch 会话
     pub fn stop(&self) {
         self.watcher.stop();
-        println!("🛑 Watch 会话停止");
+        println!("🛑 Watch session stopped");
     }
 
     /// 检查是否正在运行
@@ -285,7 +289,7 @@ impl WatchSession {
         if let Some(ref cb) = self.rebuild_callback {
             cb(events)
         } else {
-            println!("  ⚠ 未配置重编回调");
+            println!("  ⚠ No rebuild callback configured");
             Ok(())
         }
     }
@@ -378,7 +382,7 @@ mod tests {
     #[test]
     fn test_describe_event() {
         let desc = describe_event(&FileEvent::Created(PathBuf::from("test.aura")));
-        assert!(desc.contains("创建"));
+        assert!(desc.contains("Created"));
         assert!(desc.contains("test.aura"));
     }
 

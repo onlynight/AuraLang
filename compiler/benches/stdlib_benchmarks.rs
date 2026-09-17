@@ -202,7 +202,7 @@ fn bench_aot(src: &str, iters: usize, expected: i64) -> Result<f64, String> {
     let out = cmd.output().map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(format!(
-            "llc 失败: {}",
+            "llc failed: {}",
             String::from_utf8_lossy(&out.stderr)
         ));
     }
@@ -226,7 +226,7 @@ fn bench_aot(src: &str, iters: usize, expected: i64) -> Result<f64, String> {
     let out = link_cmd.output().map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(format!(
-            "链接失败: {}",
+            "linking failed: {}",
             String::from_utf8_lossy(&out.stderr)
         ));
     }
@@ -236,7 +236,7 @@ fn bench_aot(src: &str, iters: usize, expected: i64) -> Result<f64, String> {
         let out = Command::new(&exe_path).output().map_err(|e| e.to_string())?;
         let code = out.status.code().unwrap_or(-1) as i64;
         let code = if code < 0 { code + 256 } else { code };
-        assert_eq!(code, expected, "AOT 运行结果应为 {}", expected);
+        assert_eq!(code, expected, "AOT run result should be {}", expected);
     }
     let elapsed = start.elapsed().as_secs_f64() * 1000.0 / iters as f64;
 
@@ -259,7 +259,7 @@ fn llc_path() -> std::path::PathBuf {
 
 #[cfg(not(feature = "llvm"))]
 fn bench_aot(_src: &str, _iters: usize, _expected: i64) -> Result<f64, String> {
-    Err("未启用 llvm feature".to_string())
+    Err("llvm feature not enabled".to_string())
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -316,9 +316,9 @@ fn run_math_abs() {
         match bench_aot(MATH_ABS_SRC, iters, expected) {
             Ok(aot_ms) => {
                 println!("[Math.abs] AOT(native):     {:.3} ms/op", aot_ms);
-                println!("[Math.abs] AOT 加速比:      {:.1}x vs VM", vm_ms / aot_ms);
+                println!("[Math.abs] AOT speedup:      {:.1}x vs VM", vm_ms / aot_ms);
             }
-            Err(e) => println!("[Math.abs] AOT: 跳过 ({})", e),
+            Err(e) => println!("[Math.abs] AOT: skipped ({})", e),
         }
     }
 }
@@ -342,9 +342,12 @@ fn run_string_concat() {
         match bench_aot(STRING_CONCAT_SRC, iters, expected) {
             Ok(aot_ms) => {
                 println!("[String.concat] AOT(native):  {:.3} ms/op", aot_ms);
-                println!("[String.concat] AOT 加速比:   {:.1}x vs VM", vm_ms / aot_ms);
+                println!(
+                    "[String.concat] AOT speedup:   {:.1}x vs VM",
+                    vm_ms / aot_ms
+                );
             }
-            Err(e) => println!("[String.concat] AOT: 跳过 ({})", e),
+            Err(e) => println!("[String.concat] AOT: skipped ({})", e),
         }
     }
 }
@@ -372,12 +375,15 @@ fn run_ffi_aot_direct() {
     let iters = 50;
 
     let vm_direct = bench_vm(FFI_DIRECT_SRC, iters, expected_direct);
-    println!("[FFI 直接调用] VM: {:.3} ms/op", vm_direct);
+    println!("[FFI direct call] VM: {:.3} ms/op", vm_direct);
 
     let vm_indirect = bench_vm(FFI_INDIRECT_SRC, iters, expected_indirect);
-    println!("[FFI 间接调用] VM: {:.3} ms/op", vm_indirect);
+    println!("[FFI indirect call] VM: {:.3} ms/op", vm_indirect);
 
-    println!("[FFI] 直接/间接 比值: {:.2}x", vm_indirect / vm_direct);
+    println!(
+        "[FFI] direct/indirect ratio: {:.2}x",
+        vm_indirect / vm_direct
+    );
 }
 
 fn run_vm_minimal_vs_full() {
@@ -388,17 +394,17 @@ fn run_vm_minimal_vs_full() {
     let iters = 50;
 
     let vm_minimal = bench_vm(VM_MINIMAL_SRC, iters, expected_minimal);
-    println!("[精简 VM]  VM: {:.3} ms/op", vm_minimal);
+    println!("[minimal VM]  VM: {:.3} ms/op", vm_minimal);
 
     let vm_full = bench_vm(VM_FULL_SRC, iters, expected_full);
-    println!("[完整 VM]  VM: {:.3} ms/op", vm_full);
+    println!("[full VM]  VM: {:.3} ms/op", vm_full);
 
-    println!("[VM] 完整/精简 比值: {:.2}x", vm_full / vm_minimal);
+    println!("[VM] full/minimal ratio: {:.2}x", vm_full / vm_minimal);
 }
 
 /// 运行所有标准库基准
 pub fn run_all() {
-    println!("=== Aura 标准库性能基准 ===\n");
+    println!("=== Aura stdlib performance benchmarks ===\n");
 
     black_box(run_math_abs);
     black_box(run_string_concat);

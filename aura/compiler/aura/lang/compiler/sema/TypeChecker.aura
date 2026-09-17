@@ -35,22 +35,28 @@ import aura.lang.compiler.errors.CompileError
 class TypeChecker {
 
     /// 符号表。
-    var st: SymbolTable = SymbolTable()
+    private var st: SymbolTable = SymbolTable()
 
     /// 诊断错误。
-    var errors: CompileErrors = CompileErrors()
+    private var errors: CompileErrors = CompileErrors()
 
     /// sema → codegen 信息通道。
-    var info: TypeInfo = TypeInfo()
+    private var info: TypeInfo = TypeInfo()
 
     /// 当前函数返回类型。
-    var curFnRet: String = ""
+    private var curFnRet: String = ""
 
     /// 当前是否在循环中（break/continue 检查）。
-    var inLoopDepth: Int = 0
+    private var inLoopDepth: Int = 0
 
     /// 当前作用域内的变量类型环境（扁平字符串：`name|ty\n`）。
-    var varEnv: String = ""
+    private var varEnv: String = ""
+
+    /// 当前包名（用于 internal 可见性判断）。
+    private var curPkg: String = ""
+
+    /// 类型可见性表（扁平字符串：`typeName|visibility\n`）。
+    private var typeVis: String = ""
 
     // ── 辅助 ──
 
@@ -110,11 +116,30 @@ class TypeChecker {
 
     /// 对 AST 执行语义检查（无返回值，结果通过查询方法获取）。
     fun tcCheck(ast: Ast) {
+        // 0. 提取包名（从 Program 的 Package 子节点）
+        this.tcExtractPackage(ast)
+
         // 1. 收集顶层声明
         this.tcCollectDecls(ast)
 
         // 2. 检查函数体
         this.tcCheckFunctions(ast)
+    }
+
+    /// 从 Program 的 Package 子节点提取包名。
+    fun tcExtractPackage(ast: Ast) {
+        val rootIdx: Int = this.findRoot(ast)
+        val rootKids: String = ast.kidsOf(rootIdx)
+        val kCount: Int = kidsCount(rootKids)
+        var i: Int = 0
+        while (i < kCount) {
+            val childId: Int = kidsAt(rootKids, i)
+            if (ast.kindOf(childId) == "Package") {
+                this.curPkg = ast.textOf(childId)
+                break
+            }
+            i = i + 1
+        }
     }
 
     /// 获取语义错误列表。

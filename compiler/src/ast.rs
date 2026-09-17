@@ -224,6 +224,13 @@ pub enum Expr {
         body: Box<Expr>,
         span: Span,
     },
+    CFor {
+        init: Option<Box<Expr>>,
+        condition: Box<Expr>,
+        increment: Option<Box<Expr>>,
+        body: Box<Expr>,
+        span: Span,
+    },
     While {
         condition: Box<Expr>,
         body: Box<Expr>,
@@ -348,7 +355,9 @@ pub enum Decl {
     Object(ObjectDecl),
     TypeAlias(TypeAliasDecl),
     Extern(ExternDecl),
-    ExternInterface(ExternInterfaceDecl),
+    /// `extern interface`（已废弃）或 `extern object`（新语法）：绑定到 AOT 动态库的函数接口
+    /// 或系统级外部绑定（syscall / libc / inline asm / 编译器内置）
+    ExternObject(ExternInterfaceDecl),
     Import(ImportDecl),
     Annotation(AnnotationDecl),
 }
@@ -364,7 +373,21 @@ pub struct FnDecl {
     pub body: Option<Box<Expr>>,
     /// 文档注释（`///` / `/** */`），按行合并
     pub doc: Option<String>,
+    /// Phase D: native 注解（@native(N) / @native(asm="...") / native fun）
+    pub native_attr: Option<NativeAttr>,
     pub span: Span,
+}
+
+/// Phase D: @native 注解类型
+///
+/// - `Syscall(n)` — `@native(SYS_READ)` 系统调用号
+/// - `Asm(code)` — `@native(asm = "rdtsc")` 内联汇编
+/// - `Builtin` — `native fun` 编译器内置
+#[derive(Debug, Clone, PartialEq)]
+pub enum NativeAttr {
+    Syscall(i64),
+    Asm(String),
+    Builtin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -393,8 +416,10 @@ pub enum FnModifier {
     Expect,
     /// 多平台 actual 实现
     Actual,
-    /// 默认实现（extern interface 内 loadLibrary 使用）
+    /// 默认实现（extern object 内 loadLibrary 使用）
     Default,
+    /// AOT 库函数（JitValue ABI 直调）：@aot fun xxx()
+    Aot,
 }
 
 /// 类修饰符（value / data / sealed / final / open / abstract / expect / actual）。
@@ -522,6 +547,8 @@ pub struct StructDecl {
 pub struct StructField {
     pub visibility: Visibility,
     pub is_mutable: bool,
+    /// 是否由 `const val` 声明（静态常量，编译期可内联）
+    pub is_const: bool,
     pub name: String,
     pub type_hint: Option<Box<Type>>,
     pub default_value: Option<Box<Expr>>,
@@ -624,6 +651,8 @@ pub struct ExternInterfaceDecl {
     pub name: String,             // 接口名，如 "Utils"
     pub lib_path: Option<String>, // 库路径，None 时按模块名自动查找
     pub functions: Vec<FnDecl>,   // 函数声明列表
+    /// Phase S3: extern object 内的常量声明（`const NAME: Type = value`）
+    pub constants: Vec<Stmt>,
     pub span: Span,
 }
 
@@ -709,6 +738,8 @@ pub struct Program {
     pub declarations: Vec<Decl>,
     /// 顶层语句（脚本模式：无 main 时，顶层语句会被自动包装为隐式 main）
     pub top_level_statements: Vec<Stmt>,
+    /// 包声明（`package aura.lang.std`）
+    pub package: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -786,6 +817,9 @@ impl Expr {
                 span: s, ..
             }
             | Expr::For {
+                span: s, ..
+            }
+            | Expr::CFor {
                 span: s, ..
             }
             | Expr::While {

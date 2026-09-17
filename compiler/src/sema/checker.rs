@@ -33,11 +33,24 @@ const KNOWN_STD_CLASSES: &[&str] = &[
     "Process",
     "Random",
     "String",
+    "StringBuilder",
     "Test",
     "Time",
+];
+
+/// 已知的并发包类名清单（用于 `import aura.lang.concurrent.*` 通配时注册别名）
+const KNOWN_CONCURRENT_CLASSES: &[&str] = &[
     "Coroutine",
     "Actor",
     "Channel",
+    "Thread",
+    "Atomic",
+    "Mutex",
+    "RwLock",
+    "Condvar",
+    "Barrier",
+    "Future",
+    "Semaphore",
 ];
 
 /// 语义分析结果
@@ -89,6 +102,12 @@ pub struct Checker {
     superclasses: HashMap<String, String>,
     /// 当前正在检查的类型上下文（用于 private 成员访问判断）
     current_type: Option<String>,
+    /// 当前正在检查的包（用于 internal 可见性判断）
+    current_package: Option<String>,
+    /// 类型级可见性：类型名 -> 可见性
+    type_visibility: HashMap<String, Visibility>,
+    /// 类型所属包：类型名 -> 包名
+    type_package: HashMap<String, String>,
 
     // ── P3.10 增强：suspend 函数追踪（Phase 1 await 语义修正） ──
     /// 当前是否处于 suspend/async 函数体内
@@ -107,6 +126,37 @@ impl Checker {
         for t in [
             "Int", "Long", "Short", "Byte", "Float", "Double", "Boolean", "Char", "String", "Any",
             "Nothing", "Unit",
+        ] {
+            symbols.register_type(
+                t,
+                Ty::from_ast(&Type::Named {
+                    name: t.to_string(),
+                    span: Span::single(0, 1, 1),
+                }),
+            );
+        }
+
+        // 预置异常类层次结构（来自 aura.lang.Exception 模块）
+        for t in [
+            "Throwable",
+            "Error",
+            "OutOfMemoryError",
+            "StackOverflowError",
+            "Exception",
+            "RuntimeException",
+            "IllegalArgumentException",
+            "IllegalStateException",
+            "NullPointerException",
+            "IndexOutOfBoundsException",
+            "ArrayIndexOutOfBoundsException",
+            "EmptyListException",
+            "UnsupportedOperationException",
+            "ArithmeticException",
+            "ClassCastException",
+            "IOException",
+            "FileNotFoundException",
+            "TimeoutException",
+            "AssertionError",
         ] {
             symbols.register_type(
                 t,
@@ -140,6 +190,19 @@ impl Checker {
                 is_vararg: false,
             }],
             Ty::Unit,
+            Visibility::Public,
+            builtin_span,
+        );
+        // fnIndex(name) → Int：按函数名解析函数表下标（供 Thread.spawn 等使用）
+        let _ = symbols.insert_builtin_function(
+            "fnIndex",
+            vec![ParamSym {
+                name: "name".into(),
+                ty: Ty::String,
+                has_default: false,
+                is_vararg: false,
+            }],
+            Ty::Int,
             Visibility::Public,
             builtin_span,
         );
@@ -484,12 +547,12 @@ impl Checker {
         // P10: 并发运行时内置函数（aura.concurrent.* 命名空间）
         for (name, params, ret) in [
             (
-                "aura.lang.std.Coroutine.spawn",
+                "aura.lang.concurrent.Coroutine.spawn",
                 vec![("expr", Ty::Any)],
                 Ty::Int,
             ),
             (
-                "aura.lang.std.Actor.send",
+                "aura.lang.concurrent.Actor.send",
                 vec![
                     ("actor", Ty::Int),
                     ("msg", Ty::Any),
@@ -497,7 +560,7 @@ impl Checker {
                 Ty::Unit,
             ),
             (
-                "aura.lang.std.Coroutine.ask",
+                "aura.lang.concurrent.Coroutine.ask",
                 vec![
                     ("actor", Ty::Int),
                     ("msg", Ty::Any),
@@ -505,12 +568,12 @@ impl Checker {
                 Ty::Any,
             ),
             (
-                "aura.lang.std.Channel.newChannel",
+                "aura.lang.concurrent.Channel.newChannel",
                 vec![("bound", Ty::Int)],
                 Ty::Int,
             ),
             (
-                "aura.lang.std.Channel.channelSend",
+                "aura.lang.concurrent.Channel.channelSend",
                 vec![
                     ("ch", Ty::Int),
                     ("val", Ty::Any),
@@ -518,17 +581,17 @@ impl Checker {
                 Ty::Unit,
             ),
             (
-                "aura.lang.std.Channel.channelRecv",
+                "aura.lang.concurrent.Channel.channelRecv",
                 vec![("ch", Ty::Int)],
                 Ty::Any,
             ),
             (
-                "aura.lang.std.Channel.channelTryRecv",
+                "aura.lang.concurrent.Channel.channelTryRecv",
                 vec![("ch", Ty::Int)],
                 Ty::Any,
             ),
             (
-                "aura.lang.std.Channel.select",
+                "aura.lang.concurrent.Channel.select",
                 vec![
                     ("ch1", Ty::Int),
                     ("ch2", Ty::Int),
@@ -536,12 +599,12 @@ impl Checker {
                 Ty::Any,
             ),
             (
-                "aura.lang.std.Coroutine.spawnActor",
+                "aura.lang.concurrent.Coroutine.spawnActor",
                 vec![("name", Ty::String)],
                 Ty::Int,
             ),
             (
-                "aura.lang.std.Actor.supervise",
+                "aura.lang.concurrent.Actor.supervise",
                 vec![
                     ("parent", Ty::Int),
                     ("child", Ty::Int),
@@ -549,7 +612,7 @@ impl Checker {
                 Ty::Unit,
             ),
             (
-                "aura.lang.std.Actor.actorAlive",
+                "aura.lang.concurrent.Actor.actorAlive",
                 vec![("id", Ty::Int)],
                 Ty::Boolean,
             ),
@@ -623,6 +686,393 @@ impl Checker {
             builtin_span,
         );
 
+        // ── 并发标准库函数签名（Thread/Mutex/Atomic/RwLock/Condvar/Barrier/Future）──
+        // Thread
+        for (name, params, ret) in [
+            (
+                "aura.lang.concurrent.Thread.spawn",
+                vec![
+                    "fn_id".into(),
+                    "arg".into(),
+                ],
+                Ty::Int,
+            ),
+            (
+                "aura.lang.concurrent.Thread.join",
+                vec!["thread_id".into()],
+                Ty::Int,
+            ),
+            (
+                "aura.lang.concurrent.Thread.sleep",
+                vec!["ms".into()],
+                Ty::Unit,
+            ),
+            ("aura.lang.concurrent.Thread.id", vec![], Ty::Int),
+            ("aura.lang.concurrent.Thread.parallelism", vec![], Ty::Int),
+            (
+                "aura.lang.concurrent.Thread.availableCores",
+                vec![],
+                Ty::Int,
+            ),
+        ] {
+            let _ = symbols.insert_builtin_function(
+                name,
+                params
+                    .into_iter()
+                    .map(|n| ParamSym {
+                        name: n,
+                        ty: Ty::Int,
+                        has_default: false,
+                        is_vararg: false,
+                    })
+                    .collect(),
+                ret,
+                Visibility::Public,
+                builtin_span,
+            );
+        }
+
+        // Mutex
+        for (name, params, ret) in [
+            ("aura.lang.concurrent.Mutex.new", vec![], Ty::Int),
+            (
+                "aura.lang.concurrent.Mutex.lock",
+                vec!["lock_id".into()],
+                Ty::Unit,
+            ),
+            (
+                "aura.lang.concurrent.Mutex.unlock",
+                vec!["lock_id".into()],
+                Ty::Unit,
+            ),
+            (
+                "aura.lang.concurrent.Mutex.tryLock",
+                vec!["lock_id".into()],
+                Ty::Boolean,
+            ),
+            (
+                "aura.lang.concurrent.Mutex.destroy",
+                vec!["lock_id".into()],
+                Ty::Unit,
+            ),
+        ] {
+            let _ = symbols.insert_builtin_function(
+                name,
+                params
+                    .into_iter()
+                    .map(|n| ParamSym {
+                        name: n,
+                        ty: Ty::Int,
+                        has_default: false,
+                        is_vararg: false,
+                    })
+                    .collect(),
+                ret,
+                Visibility::Public,
+                builtin_span,
+            );
+        }
+
+        // Atomic
+        for (name, params, ret) in [
+            (
+                "aura.lang.concurrent.Atomic.new",
+                vec!["initial".into()],
+                Ty::Int,
+            ),
+            (
+                "aura.lang.concurrent.Atomic.load",
+                vec!["atomic_id".into()],
+                Ty::Int,
+            ),
+            (
+                "aura.lang.concurrent.Atomic.store",
+                vec![
+                    "atomic_id".into(),
+                    "value".into(),
+                ],
+                Ty::Unit,
+            ),
+            (
+                "aura.lang.concurrent.Atomic.add",
+                vec![
+                    "atomic_id".into(),
+                    "delta".into(),
+                ],
+                Ty::Int,
+            ),
+            (
+                "aura.lang.concurrent.Atomic.sub",
+                vec![
+                    "atomic_id".into(),
+                    "delta".into(),
+                ],
+                Ty::Int,
+            ),
+            (
+                "aura.lang.concurrent.Atomic.cas",
+                vec![
+                    "atomic_id".into(),
+                    "expected".into(),
+                    "desired".into(),
+                ],
+                Ty::Boolean,
+            ),
+            (
+                "aura.lang.concurrent.Atomic.destroy",
+                vec!["atomic_id".into()],
+                Ty::Unit,
+            ),
+        ] {
+            let _ = symbols.insert_builtin_function(
+                name,
+                params
+                    .into_iter()
+                    .map(|n| ParamSym {
+                        name: n,
+                        ty: Ty::Int,
+                        has_default: false,
+                        is_vararg: false,
+                    })
+                    .collect(),
+                ret,
+                Visibility::Public,
+                builtin_span,
+            );
+        }
+
+        // RwLock
+        for (name, params, ret) in [
+            ("aura.lang.concurrent.RwLock.new", vec![], Ty::Int),
+            (
+                "aura.lang.concurrent.RwLock.readLock",
+                vec!["lock_id".into()],
+                Ty::Unit,
+            ),
+            (
+                "aura.lang.concurrent.RwLock.writeLock",
+                vec!["lock_id".into()],
+                Ty::Unit,
+            ),
+            (
+                "aura.lang.concurrent.RwLock.readUnlock",
+                vec!["lock_id".into()],
+                Ty::Unit,
+            ),
+            (
+                "aura.lang.concurrent.RwLock.writeUnlock",
+                vec!["lock_id".into()],
+                Ty::Unit,
+            ),
+            (
+                "aura.lang.concurrent.RwLock.destroy",
+                vec!["lock_id".into()],
+                Ty::Unit,
+            ),
+        ] {
+            let _ = symbols.insert_builtin_function(
+                name,
+                params
+                    .into_iter()
+                    .map(|n| ParamSym {
+                        name: n,
+                        ty: Ty::Int,
+                        has_default: false,
+                        is_vararg: false,
+                    })
+                    .collect(),
+                ret,
+                Visibility::Public,
+                builtin_span,
+            );
+        }
+
+        // Condvar
+        for (name, params, ret) in [
+            ("aura.lang.concurrent.Condvar.new", vec![], Ty::Int),
+            (
+                "aura.lang.concurrent.Condvar.wait",
+                vec![
+                    "cv_id".into(),
+                    "mutex_id".into(),
+                ],
+                Ty::Unit,
+            ),
+            (
+                "aura.lang.concurrent.Condvar.signal",
+                vec!["cv_id".into()],
+                Ty::Unit,
+            ),
+            (
+                "aura.lang.concurrent.Condvar.broadcast",
+                vec!["cv_id".into()],
+                Ty::Unit,
+            ),
+            (
+                "aura.lang.concurrent.Condvar.destroy",
+                vec!["cv_id".into()],
+                Ty::Unit,
+            ),
+        ] {
+            let _ = symbols.insert_builtin_function(
+                name,
+                params
+                    .into_iter()
+                    .map(|n| ParamSym {
+                        name: n,
+                        ty: Ty::Int,
+                        has_default: false,
+                        is_vararg: false,
+                    })
+                    .collect(),
+                ret,
+                Visibility::Public,
+                builtin_span,
+            );
+        }
+
+        // Barrier
+        for (name, params, ret) in [
+            (
+                "aura.lang.concurrent.Barrier.new",
+                vec!["count".into()],
+                Ty::Int,
+            ),
+            (
+                "aura.lang.concurrent.Barrier.wait",
+                vec!["barrier_id".into()],
+                Ty::Int,
+            ),
+            (
+                "aura.lang.concurrent.Barrier.destroy",
+                vec!["barrier_id".into()],
+                Ty::Unit,
+            ),
+        ] {
+            let _ = symbols.insert_builtin_function(
+                name,
+                params
+                    .into_iter()
+                    .map(|n| ParamSym {
+                        name: n,
+                        ty: Ty::Int,
+                        has_default: false,
+                        is_vararg: false,
+                    })
+                    .collect(),
+                ret,
+                Visibility::Public,
+                builtin_span,
+            );
+        }
+
+        // Future
+        for (name, params, ret) in [
+            (
+                "aura.lang.concurrent.Future.spawn",
+                vec![
+                    "fn_id".into(),
+                    "arg".into(),
+                ],
+                Ty::Int,
+            ),
+            (
+                "aura.lang.concurrent.Future.await",
+                vec!["future_id".into()],
+                Ty::Int,
+            ),
+            (
+                "aura.lang.concurrent.Future.isDone",
+                vec!["future_id".into()],
+                Ty::Boolean,
+            ),
+            (
+                "aura.lang.concurrent.Future.all",
+                vec!["future_ids".into()],
+                Ty::List(Box::new(Ty::Int)),
+            ),
+            (
+                "aura.lang.concurrent.Future.any",
+                vec!["future_ids".into()],
+                Ty::Int,
+            ),
+            (
+                "aura.lang.concurrent.Future.cancel",
+                vec!["future_id".into()],
+                Ty::Unit,
+            ),
+        ] {
+            let _ = symbols.insert_builtin_function(
+                name,
+                params
+                    .into_iter()
+                    .map(|n| {
+                        let param_ty =
+                            if n == "future_ids" { Ty::List(Box::new(Ty::Int)) } else { Ty::Int };
+                        ParamSym {
+                            name: n,
+                            ty: param_ty,
+                            has_default: false,
+                            is_vararg: false,
+                        }
+                    })
+                    .collect(),
+                ret,
+                Visibility::Public,
+                builtin_span,
+            );
+        }
+
+        // Semaphore
+        for (name, params, ret) in [
+            (
+                "aura.lang.concurrent.Semaphore.new",
+                vec!["permits".into()],
+                Ty::Int,
+            ),
+            (
+                "aura.lang.concurrent.Semaphore.acquire",
+                vec!["sem_id".into()],
+                Ty::Unit,
+            ),
+            (
+                "aura.lang.concurrent.Semaphore.tryAcquire",
+                vec!["sem_id".into()],
+                Ty::Boolean,
+            ),
+            (
+                "aura.lang.concurrent.Semaphore.release",
+                vec!["sem_id".into()],
+                Ty::Unit,
+            ),
+            (
+                "aura.lang.concurrent.Semaphore.count",
+                vec!["sem_id".into()],
+                Ty::Int,
+            ),
+            (
+                "aura.lang.concurrent.Semaphore.destroy",
+                vec!["sem_id".into()],
+                Ty::Unit,
+            ),
+        ] {
+            let _ = symbols.insert_builtin_function(
+                name,
+                params
+                    .into_iter()
+                    .map(|n| ParamSym {
+                        name: n,
+                        ty: Ty::Int,
+                        has_default: false,
+                        is_vararg: false,
+                    })
+                    .collect(),
+                ret,
+                Visibility::Public,
+                builtin_span,
+            );
+        }
+
         let mut var_env = Vec::new();
         var_env.push(HashMap::new());
 
@@ -643,6 +1093,9 @@ impl Checker {
             operator_methods: HashMap::new(),
             superclasses: HashMap::new(),
             current_type: None,
+            current_package: None,
+            type_visibility: HashMap::new(),
+            type_package: HashMap::new(),
             is_in_suspend_fn: false,
             suspend_functions: HashSet::new(),
             info: SemaInfo::default(),
@@ -651,6 +1104,8 @@ impl Checker {
 
     /// 分析整个程序
     pub fn analyze(&mut self, program: &Program) {
+        // 设置当前包（用于 internal 可见性判断）
+        self.current_package = program.package.clone();
         // 第零遍：展开 import 声明到符号表（parse_program 将 import 收集到 program.imports，
         // 此前从未展开，导致 import aura.lang.std.Math.* 后 cos 等命名空间函数 unresolved）
         for imp in &program.imports {
@@ -741,6 +1196,10 @@ impl Checker {
             }
             Decl::Struct(s) => {
                 self.symbols.register_type(s.name.clone(), Ty::Named(s.name.clone()));
+                self.type_visibility.insert(s.name.clone(), s.visibility);
+                if let Some(pkg) = &self.current_package {
+                    self.type_package.insert(s.name.clone(), pkg.clone());
+                }
                 self.record_generic_bounds(&s.name, &s.type_params);
                 self.record_members(&s.name, &s.fields, &s.methods);
                 if s.sealed {
@@ -786,6 +1245,10 @@ impl Checker {
             }
             Decl::Enum(e) => {
                 self.symbols.register_type(e.name.clone(), Ty::Named(e.name.clone()));
+                self.type_visibility.insert(e.name.clone(), e.visibility);
+                if let Some(pkg) = &self.current_package {
+                    self.type_package.insert(e.name.clone(), pkg.clone());
+                }
                 self.enum_variants.insert(
                     e.name.clone(),
                     e.variants.iter().map(|v| v.name.clone()).collect(),
@@ -793,6 +1256,10 @@ impl Checker {
             }
             Decl::Class(c) => {
                 self.symbols.register_type(c.name.clone(), Ty::Named(c.name.clone()));
+                self.type_visibility.insert(c.name.clone(), c.visibility);
+                if let Some(pkg) = &self.current_package {
+                    self.type_package.insert(c.name.clone(), pkg.clone());
+                }
                 self.record_generic_bounds(&c.name, &c.type_params);
                 self.record_members(&c.name, &c.fields, &c.methods);
                 // 收集 class 方法（作为函数）— 与 struct 一致
@@ -938,6 +1405,10 @@ impl Checker {
             }
             Decl::Object(o) => {
                 self.symbols.register_type(o.name.clone(), Ty::Named(o.name.clone()));
+                self.type_visibility.insert(o.name.clone(), o.visibility);
+                if let Some(pkg) = &self.current_package {
+                    self.type_package.insert(o.name.clone(), pkg.clone());
+                }
                 self.record_members(&o.name, &o.fields, &o.methods);
                 // 收集 object 方法（作为函数）— 与 class 一致
                 for m in &o.methods {
@@ -1003,6 +1474,10 @@ impl Checker {
             }
             Decl::Interface(i) => {
                 self.symbols.register_type(i.name.clone(), Ty::Named(i.name.clone()));
+                self.type_visibility.insert(i.name.clone(), i.visibility);
+                if let Some(pkg) = &self.current_package {
+                    self.type_package.insert(i.name.clone(), pkg.clone());
+                }
                 self.interface_types.insert(i.name.clone());
                 self.record_generic_bounds(&i.name, &i.type_params);
                 self.record_members(&i.name, &[], &i.methods);
@@ -1040,6 +1515,10 @@ impl Checker {
             }
             Decl::Actor(a) => {
                 self.symbols.register_type(a.name.clone(), Ty::Named(a.name.clone()));
+                self.type_visibility.insert(a.name.clone(), a.visibility);
+                if let Some(pkg) = &self.current_package {
+                    self.type_package.insert(a.name.clone(), pkg.clone());
+                }
                 self.record_members(&a.name, &a.fields, &a.methods);
                 // Phase 1: 追踪 suspend 方法
                 for m in &a.methods {
@@ -1061,8 +1540,8 @@ impl Checker {
                 if e.abi == "rust" || e.abi == "Rust" {
                     self.report_warning(
                         e.span,
-                        "`extern \"rust\"` 块的函数需在 Rust 侧使用 #[no_mangle] extern \"C\"，\
-                         否则 ABI 不稳定，可能导致调用失败",
+                        "`extern \"rust\"` functions must use #[no_mangle] extern \"C\" on the Rust side,\
+                         otherwise the ABI is unstable and calls may fail",
                     );
                 }
                 for f in &e.functions {
@@ -1086,16 +1565,17 @@ impl Checker {
                     );
                 }
             }
-            Decl::ExternInterface(e) => {
-                // extern interface: 校验必须包含 default fun loadLibrary()
+            Decl::ExternObject(e) => {
+                // extern object: 校验 @aot fun 必须配合 default fun loadLibrary()
                 let has_load_library = e.functions.iter().any(|f| {
                     f.name == "loadLibrary" && f.modifiers.iter().any(|m| m == &FnModifier::Default)
                 });
-                if !has_load_library {
+                let has_aot = e.functions.iter().any(|f| f.modifiers.contains(&FnModifier::Aot));
+                if has_aot && !has_load_library {
                     self.report(
                         e.span,
                         format!(
-                            "extern interface `{}` 必须包含 `default fun loadLibrary(): String = \"...\"` 方法",
+                            "extern object `{}` with @aot fun must include a `default fun loadLibrary(): String = \"...\"` method",
                             e.name
                         ),
                     );
@@ -1560,7 +2040,7 @@ impl Checker {
                 }
             }
             Decl::Extern(_)
-            | Decl::ExternInterface(_)
+            | Decl::ExternObject(_)
             | Decl::Annotation(_)
             | Decl::Enum(_)
             | Decl::TypeAlias(_) => {}
@@ -1601,12 +2081,20 @@ impl Checker {
             }]
         };
 
-        // 检测是否是新的 std 命名空间（aura.lang.std.*）
-        let is_new_scheme = module_path.starts_with("aura.lang.std");
-        // 提取类名（如果存在）：aura.lang.std.<ClassName> 或 aura.lang.std.<ClassName>.<fn>
+        // 检测是否是新的命名空间（aura.lang.std.* / aura.lang.concurrent.* / aura.lang.native.*）
+        let is_new_scheme = module_path.starts_with("aura.lang.std")
+            || module_path.starts_with("aura.lang.concurrent")
+            || module_path.starts_with("aura.lang.native");
+        // 包前缀：aura.lang.std / aura.lang.concurrent
+        let pkg_prefix = if is_new_scheme {
+            module_path.split('.').take(3).collect::<Vec<_>>().join(".")
+        } else {
+            String::new()
+        };
+        // 提取类名（如果存在）：aura.lang.<pkg>.<ClassName>[.<fn>]
         let class_name = if is_new_scheme {
             let parts: Vec<&str> = module_path.split('.').collect();
-            // aura.lang.std.<ClassName>[.<fn>]
+            // aura.lang.<pkg>.<ClassName>[.<fn>]
             if parts.len() >= 4 { Some(parts[3].to_string()) } else { None }
         } else {
             None
@@ -1640,11 +2128,17 @@ impl Checker {
             None => {
                 if imp.wildcard {
                     if is_new_scheme && class_name.is_none() {
-                        // import aura.lang.std.* → 只引入类名作模块别名（不做短名导入）
-                        for class in KNOWN_STD_CLASSES {
+                        // import aura.lang.std.* / aura.lang.concurrent.*
+                        // → 只引入类名作模块别名（不做短名导入）
+                        let classes: &[&str] = if pkg_prefix == "aura.lang.concurrent" {
+                            KNOWN_CONCURRENT_CLASSES
+                        } else {
+                            KNOWN_STD_CLASSES
+                        };
+                        for class in classes {
                             let _ = self.symbols.insert_module_alias(
                                 class.to_string(),
-                                format!("aura.lang.std.{}", class),
+                                format!("{}.{}", pkg_prefix, class),
                             );
                         }
                     } else {
@@ -1712,7 +2206,7 @@ impl Checker {
                                 imp.span,
                             );
                             let _ = self.symbols.insert_function(
-                                format!("aura.lang.std.{}.{}", cn, short_name2),
+                                format!("{}.{}.{}", pkg_prefix, cn, short_name2),
                                 any_params(),
                                 Ty::Any,
                                 Visibility::Public,
@@ -1731,7 +2225,7 @@ impl Checker {
                                     imp.span,
                                 );
                                 let _ = self.symbols.insert_function(
-                                    format!("aura.lang.std.{}.{}", cn, short),
+                                    format!("{}.{}.{}", pkg_prefix, cn, short),
                                     any_params(),
                                     Ty::Any,
                                     Visibility::Public,
@@ -1968,6 +2462,18 @@ impl Checker {
             } => {
                 Self::expr_calls(pattern, name)
                     || Self::expr_calls(iterable, name)
+                    || Self::expr_calls(body, name)
+            }
+            Expr::CFor {
+                init,
+                condition,
+                increment,
+                body,
+                ..
+            } => {
+                init.as_ref().is_some_and(|e| Self::expr_calls(e, name))
+                    || Self::expr_calls(condition, name)
+                    || increment.as_ref().is_some_and(|e| Self::expr_calls(e, name))
                     || Self::expr_calls(body, name)
             }
             Expr::While {
@@ -2311,6 +2817,24 @@ impl Checker {
                 body,
                 span,
             } => self.check_for(pattern, iterable, body, *span),
+            Expr::CFor {
+                init,
+                condition,
+                increment,
+                body,
+                span: _,
+            } => {
+                // C-style for: 检查各部分但不深入类型推导
+                if let Some(e) = init {
+                    self.check_expr(e);
+                }
+                self.check_expr(condition);
+                if let Some(e) = increment {
+                    self.check_expr(e);
+                }
+                self.check_expr(body);
+                Ty::Unit
+            }
             Expr::While {
                 condition,
                 body,
@@ -2342,8 +2866,16 @@ impl Checker {
                 span,
             } => {
                 let vt = self.check_expr(value);
-                if !vt.is_string() && !vt.can_assign_to(&Ty::Named("Exception".into())) {
-                    self.report(*span, format!("cannot throw value of type '{}'", vt.name()));
+                // 允许 String 字面量（HIR 降级时自动包装为 Exception(msg)）
+                // 以及 Throwable 的子类（通过类层次检查）
+                if !vt.is_string() && !self.is_subclass_of_named(&vt, "Throwable") {
+                    self.report(
+                        *span,
+                        format!(
+                            "cannot throw value of type '{}': must be Throwable or a String (String is auto-wrapped as Exception)",
+                            vt.name()
+                        ),
+                    );
                 }
                 Ty::Nothing
             }
@@ -2537,6 +3069,10 @@ impl Checker {
         }
         // P-K2：类/结构体名引用（companion 访问 `MathUtil.PI` / `MathUtil.max(...)`）
         if self.symbols.lookup_type(name).is_some() {
+            // 类型级可见性检查：internal/private 类型不可在定义包/类之外被引用
+            if let Some(vis) = self.type_visibility.get(name) {
+                self.check_access(*vis, name, name, span);
+            }
             return Ty::Named(name.to_string());
         }
         self.report(span, format!("unresolved reference '{}'", name));
@@ -2597,6 +3133,17 @@ impl Checker {
                 return true;
             }
             cur = self.superclasses.get(s);
+        }
+        false
+    }
+
+    /// 判断命名类型是否为指定祖先类的子类（用于 throw 类型检查）
+    fn is_subclass_of_named(&self, ty: &Ty, ancestor: &str) -> bool {
+        if let Ty::Named(name) = ty {
+            if name == ancestor {
+                return true;
+            }
+            return self.is_subclass(name, ancestor);
         }
         false
     }
@@ -2837,7 +3384,7 @@ impl Checker {
         }
     }
 
-    /// 从成员访问链中提取完整点分函数名（如 `aura.lang.std.Coroutine.spawn`）
+    /// 从成员访问链中提取完整点分函数名（如 `aura.lang.concurrent.Coroutine.spawn`）
     fn extract_dotted_name(expr: &Expr) -> Option<String> {
         match expr {
             Expr::Ident(name, _) => Some(name.clone()),
@@ -2854,10 +3401,14 @@ impl Checker {
     }
 
     fn check_call(&mut self, callee: &Expr, args: &[Expr], span: Span) -> Ty {
-        // 先尝试完整点分函数名解析（支持 aura.lang.std.Coroutine.spawn 等）
+        // 先尝试完整点分函数名解析（支持 aura.lang.concurrent.Coroutine.spawn 等）
         if let Some(full_name) = Self::extract_dotted_name(callee) {
             if let Some(fns) = self.symbols.lookup_function(&full_name) {
                 let cloned: Vec<Symbol> = fns.clone();
+                // 访问控制：检查函数的可见性
+                if let Some(sym) = cloned.first() {
+                    self.check_access(sym.visibility, "", &sym.name, span);
+                }
                 return self.check_call_args(&cloned, args, span);
             }
             // Phase 1: prelude 函数兜底 — 仅 17 个全局内置免import
@@ -2866,7 +3417,7 @@ impl Checker {
                 return Ty::Any;
             }
             // 完全限定 std 路径的免 import 兜底：
-            // 允许 `aura.lang.std.Actor.spawnActor(...)` 无需 import（依赖 HIR 的 native dispatch）
+            // 允许 `aura.lang.concurrent.Actor.spawnActor(...)` 无需 import（依赖 HIR 的 native dispatch）
             if crate::std::decl::is_builtin(&full_name) {
                 return Ty::Any;
             }
@@ -2884,7 +3435,37 @@ impl Checker {
             let mname = format!("{}.{}", _obj_ty.non_null().name(), name);
             if let Some(fns) = self.symbols.lookup_function(&mname) {
                 let cloned: Vec<Symbol> = fns.clone();
+                // 访问控制：检查方法的可见性
+                if let Some(sym) = cloned.first() {
+                    let owner_type = _obj_ty.non_null().name().to_string();
+                    self.check_access(sym.visibility, &owner_type, name, span);
+                }
                 return self.check_call_args(&cloned, args, span);
+            }
+            // Phase D: std 签名表兜底 — 避免 String.split 等退化为 Ty::Any
+            let type_name = _obj_ty.non_null().name();
+            if let Some(sig) =
+                crate::sema::std_sigs::std_signature_table().get(&(type_name, name.clone()))
+            {
+                // 检查实参数量
+                if args.len() > sig.params.len() && sig.params.len() > 0 {
+                    // 允许可变参数（如 listOf 接受任意多个参数）
+                    if args.len() < sig.params.len() {
+                        self.report(
+                            span,
+                            format!(
+                                "expected {} arguments, got {}",
+                                sig.params.len(),
+                                args.len()
+                            ),
+                        );
+                    }
+                }
+                // 检查实参类型
+                for a in args {
+                    self.check_expr(a);
+                }
+                return crate::sema::std_sigs::llvm_type_to_ty(sig.ret).unwrap_or(Ty::Any);
             }
             // 内置方法
             return self.check_builtin_method(&_obj_ty.non_null().clone(), name, args, span);
@@ -2894,10 +3475,18 @@ impl Checker {
         if let Expr::Ident(name, _) = callee {
             if let Some(fns) = self.symbols.lookup_function(name) {
                 let cloned: Vec<Symbol> = fns.clone();
+                // 访问控制：检查顶层函数的可见性
+                if let Some(sym) = cloned.first() {
+                    self.check_access(sym.visibility, "", name, span);
+                }
                 return self.check_call_args(&cloned, args, span);
             }
             // 构造函数调用：类型名(...)
             if let Some(_t) = self.symbols.lookup_type(name) {
+                // 访问控制：检查类型的可见性
+                if let Some(vis) = self.type_visibility.get(name) {
+                    self.check_access(*vis, name, name, span);
+                }
                 for a in args {
                     self.check_expr(a);
                 }
@@ -3421,6 +4010,69 @@ impl Checker {
         }
     }
 
+    /// 检查访问是否被当前上下文允许（private/protected/internal 可见性控制）
+    fn check_access(&mut self, vis: Visibility, owner_type: &str, member_name: &str, span: Span) {
+        // 顶层函数/变量（owner_type 为空）：private/internal 在单文件模型中等同于 public
+        if owner_type.is_empty() {
+            return;
+        }
+        let type_name = owner_type.to_string();
+        let current_type = self.current_type.as_deref();
+        let current_pkg = self.current_package.as_deref();
+        let owner_pkg = self.type_package.get(&type_name).map(|s| s.as_str());
+
+        let blocked = match vis {
+            Visibility::Public => false,
+            Visibility::Private => {
+                // Private: 仅在同一类型内部可访问
+                current_type != Some(type_name.as_str())
+            }
+            Visibility::Protected => {
+                // Protected: 同一类型或子类可访问
+                if current_type == Some(type_name.as_str()) {
+                    false
+                } else {
+                    // 检查 current_type 是否是 owner_type 的子类
+                    let mut is_subclass = false;
+                    if let Some(ct) = current_type {
+                        let mut cur = self.superclasses.get(ct).cloned();
+                        while let Some(cn) = cur {
+                            if cn == type_name {
+                                is_subclass = true;
+                                break;
+                            }
+                            cur = self.superclasses.get(&cn).cloned();
+                        }
+                    }
+                    !is_subclass
+                }
+            }
+            Visibility::Internal => {
+                // Internal: 仅在同一包内可访问
+                match (current_pkg, owner_pkg) {
+                    (Some(cp), Some(op)) => cp != op,
+                    _ => false, // 无法确定时宽松放行
+                }
+            }
+        };
+
+        if blocked {
+            let vis_str = match vis {
+                Visibility::Private => "private",
+                Visibility::Protected => "protected",
+                Visibility::Internal => "internal",
+                Visibility::Public => unreachable!(),
+            };
+            self.report(
+                span,
+                format!(
+                    "'{}' is {} and cannot be accessed here",
+                    member_name, vis_str
+                ),
+            );
+        }
+    }
+
     fn check_member(&mut self, object: &Expr, name: &str, span: Span) -> Ty {
         let obj_ty = self.check_expr(object);
         if obj_ty.is_nullable() {
@@ -3434,22 +4086,10 @@ impl Checker {
             return Ty::Error;
         }
         let base = obj_ty.non_null();
-        // P3.6：private / protected 成员不可在定义类型之外被访问
         let type_name = base.name().to_string();
-        let private_access = match self.member_visibility.get(&format!("{}.{}", type_name, name)) {
-            Some(vis) if *vis != Visibility::Public => {
-                self.current_type.as_deref() != Some(type_name.as_str())
-            }
-            _ => false,
-        };
-        if private_access {
-            self.report(
-                span,
-                format!(
-                    "'{}' is private/protected and cannot be accessed outside '{}'",
-                    name, type_name
-                ),
-            );
+        // 访问控制检查：private/protected/internal 成员不可在定义类型/包之外被访问
+        if let Some(vis) = self.member_visibility.get(&format!("{}.{}", type_name, name)) {
+            self.check_access(*vis, &type_name, name, span);
         }
         match base {
             Ty::Named(type_name) => {

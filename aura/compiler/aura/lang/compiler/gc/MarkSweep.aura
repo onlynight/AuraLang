@@ -1,45 +1,67 @@
 // aura:///aura/compiler/aura/lang/compiler/gc/MarkSweep.aura
-// 标记-清除垃圾收集算法（Phase 4: 完整 VM Aura 编写）
-/// 标记-清除垃圾收集算法。
-///
-/// @since 0.5
-internal object MarkSweep {
+package aura.lang.compiler.gc
+// 标记-清除垃圾收集算法（委托 GcHeap 实现）
+//
+// 替代旧版空壳实现（markAll→只计数非 null 根，sweepAll→只计数未标记项）。
 
-    /// 标记阶段：遍历所有根对象，标记可达对象。
-    fun markAll(roots: List<Integer>): Int {
+import aura.lang.collection.ArrayList
+import aura.lang.collection.HashMap
+
+/// 标记-清除 GC 包装器。
+class MarkSweep {
+    private var heap: GcHeap
+
+    constructor() {
+        this.heap = GcHeap()
+    }
+
+    constructor(heap: GcHeap) {
+        this.heap = heap
+    }
+
+    /// 标记阶段：从根集合遍历对象图，标记可达对象。
+    fun mark(roots: List<Int>): Int {
         var marked = 0
-        for (root in roots) {
-            if (root != null) {
-                marked = marked + 1
-            }
+        var i = 0
+        while (i < roots.size) {
+            val idx = roots.get(i) as Int
+            this.heap.mark(idx)
+            marked = marked + 1
+            i = i + 1
         }
         return marked
     }
 
-    /// 清除阶段：回收未标记的对象。
-    fun sweepAll(heap: List<Any>, marked: List<Integer>): Int {
-        var freed = 0
-        for (i in 0 until heap.size) {
-            if (!marked.contains(i)) {
-                freed = freed + 1
-            }
-        }
-        return freed
+    /// 清除阶段：回收未标记对象。
+    fun sweep(): Int {
+        return this.heap.collect()
     }
 
     /// 执行完整标记-清除周期。
-    fun collect(roots: List<Integer>, heap: List<Any>): Int {
-        val marked = markAll(roots)
-        return sweepAll(heap, marked)
+    fun collect(roots: List<Int>): Int {
+        return this.heap.collect()
     }
 
-    /// 获取策略名称。
+    /// 注册根引用。
+    fun addRoot(idx: Int): Unit {
+        this.heap.addRoot(idx)
+    }
+
+    /// 分配对象。
+    fun alloc(): Int {
+        return this.heap.alloc()
+    }
+
+    /// 获取活跃对象数。
+    fun liveCount(): Int {
+        return this.heap.liveCount()
+    }
+
     fun strategyName(): String {
         return "mark-sweep"
     }
 
-    /// 获取版本信息。
     fun version(): String {
-        return "0.5.0-phase4-phantom"
+        return "0.6.0-mark-sweep"
     }
 }

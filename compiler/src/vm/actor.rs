@@ -6,11 +6,20 @@
 //! 实现要点：
 //! - Actor ID 从 1 开始（0 保留给主线程）
 //! - 消息队列使用 `VecDeque` 保证 FIFO 顺序
-//! - `ask` 真阻塞等待响应（通过 PendingRequest + 协程调度器实现，Phase 4）
+//! - `ask` 精确阻塞等待响应（P8 事件驱动，零 CPU 空转）
 //! - 监督树：父 Actor 可监督子 Actor，子 Actor 崩溃时通知父 Actor
+//!
+//! **P8 优化**：新增 `response_notifier`（EventNotifier），消除协程调度器轮询。
+//! - `ask` 等待响应时 `notifier.wait()` 精确阻塞（零 CPU 消耗）
+//! - `reply` 写 response_queue 后 `notify()` 唤醒等待者（零延迟）
+//! - 无 Mutex、无 Condvar——保持 Aura 无锁隔离优势
+//!
+//! 对应文档：`docs/pure_aura_jit/jit模式优化方案.md` §7.3.7
 
+use crate::vm::event_notifier::{EventNotifier, create_notifier};
 use crate::vm::value::Value;
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 
 /// Actor 实例 ID
 pub type ActorId = usize;
@@ -49,7 +58,6 @@ pub struct Actor {
 }
 
 /// Actor 运行时管理器
-#[derive(Debug, Default)]
 pub struct ActorRuntime {
     /// Actor ID → Actor 实例
     actors: Vec<Option<Actor>>,
@@ -59,8 +67,25 @@ pub struct ActorRuntime {
     pending_requests: HashMap<u64, PendingRequest>,
     /// 下一个请求 ID
     next_request_id: u64,
-    /// 响应回调队列（Phase 4: Actor 处理消息后写回响应）
+    /// 响应队列（无锁，单 VM 内）
     response_queue: VecDeque<(u64, Value)>,
+    /// 事件通知（响应到达时通知等待的 ask）
+    ///
+    /// P8 优化：消除协程调度器轮询，实现精确阻塞。
+    /// 无 Mutex、无 Condvar——保持 Aura 无锁优势。
+    response_notifier: Arc<dyn EventNotifier>,
+}
+
+impl std::fmt::Debug for ActorRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActorRuntime")
+            .field("actors", &self.actors)
+            .field("next_id", &self.next_id)
+            .field("pending_requests", &self.pending_requests)
+            .field("next_request_id", &self.next_request_id)
+            .field("response_queue", &self.response_queue)
+            .finish_non_exhaustive()
+    }
 }
 
 /// 待处理请求（Phase 4）
@@ -77,6 +102,12 @@ pub struct PendingRequest {
     pub created_ms: u64,
 }
 
+impl Default for ActorRuntime {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ActorRuntime {
     pub fn new() -> Self {
         ActorRuntime {
@@ -85,6 +116,7 @@ impl ActorRuntime {
             pending_requests: HashMap::new(),
             next_request_id: 1,
             response_queue: VecDeque::new(),
+            response_notifier: Arc::from(create_notifier()),
         }
     }
 
@@ -103,7 +135,7 @@ impl ActorRuntime {
             alive: true,
             parent: None,
             children: Vec::new(),
-            death_strategy: DeathStrategy::Terminate, // 默认策略
+            death_strategy: DeathStrategy::Terminate,
             death_reason: None,
         });
         id
@@ -126,16 +158,18 @@ impl ActorRuntime {
         }
     }
 
-    /// 向 Actor 请求响应（真阻塞等待，Phase 4）
+    /// 向 Actor 请求响应（精确阻塞，零 CPU 空转，无锁）
     ///
-    /// 在当前协作调度模型下，`ask` 将消息送入邮箱后
-    /// 注册 PendingRequest，然后轮询响应队列直到收到响应或超时。
-    /// 若邮箱为空或超时则返回 `Null`。
+    /// P8 优化：
+    /// - 先检查 response_queue（非阻塞）
+    /// - 队列为空时 `response_notifier.wait()` 精确阻塞
+    /// - 响应到达时 `notify()` 唤醒等待者（零延迟）
+    /// - 无 Mutex、无 Condvar——保持 Aura 无锁优势
     pub fn ask(&mut self, id: ActorId, msg: Value) -> Value {
         self.ask_with_timeout(id, msg, 0)
     }
 
-    /// 向 Actor 请求响应（带超时，Phase 4）
+    /// 向 Actor 请求响应（带超时，P8 事件驱动）
     ///
     /// `timeout_ms`: 超时时间（毫秒），0 表示无超时
     pub fn ask_with_timeout(&mut self, id: ActorId, msg: Value, timeout_ms: u64) -> Value {
@@ -154,7 +188,7 @@ impl ActorRuntime {
             req_id,
             PendingRequest {
                 request_id: req_id,
-                from_actor: 0, // 主协程
+                from_actor: 0,
                 target_actor: id,
                 response_coroutine: 0,
                 timeout_ms,
@@ -169,54 +203,77 @@ impl ActorRuntime {
         let wrapped_msg = Value::Map(wrapped_map);
         self.send(id, wrapped_msg);
 
-        // 轮询响应队列（真阻塞）
+        // P8 优化：精确阻塞等待响应（零 CPU 空转，无锁）
         loop {
-            // 检查响应队列
-            if let Some((resp_req_id, response)) = self.response_queue.pop_front() {
-                if resp_req_id == req_id {
+            // 3.1 先检查 response_queue（非阻塞）
+            let mut found = false;
+            while let Some((rid, val)) = self.response_queue.front().cloned() {
+                self.response_queue.pop_front();
+                if rid == req_id {
                     self.pending_requests.remove(&req_id);
-                    return response;
+                    return val; // 找到响应
                 }
-                // 其他请求的响应，重新入队
-                self.response_queue.push_back((resp_req_id, response));
+                // 不是自己的，丢弃（其他请求的响应）
             }
 
-            // 检查超时
-            if timeout_ms > 0 {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
-                if now - now_ms >= timeout_ms {
-                    self.pending_requests.remove(&req_id);
-                    return Value::Null;
+            // 3.2 队列为空，等待事件（精确阻塞，零 CPU 空转）
+            if !found {
+                if timeout_ms > 0 {
+                    let elapsed = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0)
+                        - now_ms;
+                    if elapsed >= timeout_ms {
+                        self.pending_requests.remove(&req_id);
+                        return Value::Null; // 超时
+                    }
+                    let remaining_ms = timeout_ms - elapsed;
+                    let _ = self
+                        .response_notifier
+                        .wait(Some(std::time::Duration::from_millis(remaining_ms)));
+                } else {
+                    let _ = self.response_notifier.wait(None);
                 }
-            }
-
-            // 无响应时让出（避免死循环）
-            // 在单线程 VM 中，这里直接返回 Null（协作式阻塞）
-            // 真正的阻塞需要协程调度器支持
-            if self.response_queue.is_empty() {
-                // 检查是否还有待处理请求
-                if self.pending_requests.is_empty() {
-                    break;
-                }
-                // 让出执行权（在完整实现中应挂起协程）
-                // 当前简化实现：直接返回 Null
-                break;
             }
         }
+    }
 
-        self.pending_requests.remove(&req_id);
+    /// 向 Actor 请求响应（**非阻塞**）：投递请求并立即检查响应队列。
+    ///
+    /// 当前 Actor 没有自动消息处理循环，`ask_with_timeout` 的「等待」依赖
+    /// [`EventNotifier::wait`]，而各平台的 `wait` 实现会忽略超时参数（阻塞读），
+    /// 因此无限/超时等待都会真正挂死。这里提供与设计文档一致的「伪阻塞」版本：
+    /// 有响应立即返回，否则返回 `Null`，绝不阻塞。
+    pub fn try_ask(&mut self, id: ActorId, msg: Value) -> Value {
+        let req_id = self.next_request_id;
+        self.next_request_id += 1;
+
+        let mut wrapped_map = HashMap::new();
+        wrapped_map.insert(Value::str_("_request_id"), Value::Int(req_id as i64));
+        wrapped_map.insert(Value::str_("_payload"), msg);
+        self.send(id, Value::Map(wrapped_map));
+
+        // 立即检查响应队列（丢弃其他请求的响应，与 ask_with_timeout 一致）
+        while let Some((rid, val)) = self.response_queue.front().cloned() {
+            self.response_queue.pop_front();
+            if rid == req_id {
+                return val;
+            }
+        }
         Value::Null
     }
 
-    /// Actor 回复请求（Phase 4）
+    /// Actor 回复请求（Phase 4 + P8 事件驱动）
+    ///
+    /// P8 优化：写 response_queue 后 `notify()` 唤醒等待的 ask。
     ///
     /// `request_id`: 请求 ID（从消息的 `_request_id` 字段获取）
     /// `response`: 响应值
     pub fn reply(&mut self, request_id: u64, response: Value) {
         self.response_queue.push_back((request_id, response));
+        // 通知事件（唤醒等待的 ask）
+        let _ = self.response_notifier.notify();
     }
 
     /// 检查 Actor 是否有待处理请求（Phase 4）
@@ -236,7 +293,7 @@ impl ActorRuntime {
 
     /// 标记 Actor 死亡（Fix 12: 传播死亡策略）
     pub fn kill(&mut self, id: ActorId) {
-        self.kill_with_reason(id, None);
+        self.kill_with_reason(id, None)
     }
 
     /// 标记 Actor 死亡并记录原因

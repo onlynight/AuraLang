@@ -1,0 +1,42 @@
+// Phase 1 verification: Memory.alloc/free uses C runtime malloc/free
+// Using standalone native fun declarations instead of extern object
+
+native fun MemoryAlloc(n: Long): Long
+native fun MemoryFree(addr: Long)
+native fun MemoryRead(addr: Long): Byte
+native fun MemoryWrite(addr: Long, v: Byte)
+native fun MemoryRead32(addr: Long): Int
+native fun MemoryWrite32(addr: Long, v: Int)
+native fun MemoryCopy(dst: Long, src: Long, n: Long)
+native fun MemorySet(addr: Long, v: Byte, n: Long)
+
+fun main(): Int {
+    // Test 1: alloc and free
+    val buf: Long = MemoryAlloc(256)
+    if (buf == 0) {
+        return 1  // allocation failed
+    }
+    
+    // Test 2: write and read
+    MemoryWrite(buf, 42)
+    val v: Byte = MemoryRead(buf)
+    if (v != 42) {
+        return 2  // read/write mismatch
+    }
+    
+    // Test 3: write32 and read32
+    MemoryWrite32(buf, 12345)
+    val w: Int = MemoryRead32(buf)
+    if (w != 12345) {
+        return 3  // read32/write32 mismatch
+    }
+    
+    // Test 4: set (memset)
+    MemorySet(buf, 0, 256)
+    
+    // Test 5: free
+    MemoryFree(buf)
+    
+    // Success
+    return 0
+}

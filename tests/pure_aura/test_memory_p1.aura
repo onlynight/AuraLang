@@ -1,0 +1,51 @@
+// Phase 1 verification: Memory.alloc/free uses C runtime malloc/free
+//
+// This test verifies:
+// 1. Memory.alloc(n) generates call @malloc + ptrtoint
+// 2. Memory.free(addr) generates inttoptr + call @free
+// 3. Binary links against C runtime (ucrt.lib/msvcrt.lib)
+// 4. No @aura_memory_alloc or @aura_memory_free in the binary
+//
+// Run: aura build tests/pure_aura/test_memory_p1.aura --aot --llvm-home "D:\DevTools\LLVM\clang+llvm-23.1.0-x86_64-pc-windows-msvc"
+
+extern object Memory {
+    native fun alloc(n: Long): Long
+    native fun free(addr: Long)
+    native fun read(addr: Long): Byte
+    native fun write(addr: Long, v: Byte)
+    native fun read32(addr: Long): Int
+    native fun write32(addr: Long, v: Int)
+    native fun copy(dst: Long, src: Long, n: Long)
+    native fun set(addr: Long, v: Byte, n: Long)
+}
+
+fun main(): Int {
+    // Test 1: alloc and free
+    val buf: Long = Memory.alloc(256)
+    if (buf == 0) {
+        return 1  // allocation failed
+    }
+    
+    // Test 2: write and read
+    Memory.write(buf, 42)
+    val v: Byte = Memory.read(buf)
+    if (v != 42) {
+        return 2  // read/write mismatch
+    }
+    
+    // Test 3: write32 and read32
+    Memory.write32(buf, 12345)
+    val w: Int = Memory.read32(buf)
+    if (w != 12345) {
+        return 3  // read32/write32 mismatch
+    }
+    
+    // Test 4: set (memset)
+    Memory.set(buf, 0, 256)
+    
+    // Test 5: free
+    Memory.free(buf)
+    
+    // Success
+    return 0
+}

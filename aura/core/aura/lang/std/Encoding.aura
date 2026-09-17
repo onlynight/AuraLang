@@ -13,15 +13,15 @@ package aura.lang.std
 /// ```
 ///
 /// @since 0.1
-internal object Encoding {
+object Encoding {
 
     // ── 常量 ──
 
     /// Base64 字母表（标准 RFC 4648 变体）。
-    private const BASE64_CHARS: String = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    private const val BASE64_CHARS: String = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 
     /// 十六进制字母表（大写）。
-    private const HEX_CHARS: String = "0123456789ABCDEF"
+    private const val HEX_CHARS: String = "0123456789ABCDEF"
 
     // ── Base64（纯逻辑，Aura 实现）──
 
@@ -196,5 +196,78 @@ internal object Encoding {
         if (c >= 'A' && c <= 'Z') { return true }
         if (c >= '0' && c <= '9') { return true }
         return c == '-' || c == '_' || c == '.' || c == '~'
+    }
+
+    // ── 密码学哈希（SHA256 运行时实现 + HMAC Aura 实现）──
+
+    /// SHA256 哈希（运行时内置实现）。
+    /// 返回 64 字符十六进制小写字符串。
+    fun sha256(text: String): String
+
+    /// HMAC-SHA256 消息认证码（Aura 实现，调用 sha256）。
+    ///
+    /// 算法：HMAC(K, m) = SHA256((K ⊕ opad) || SHA256((K ⊕ ipad) || m))
+    /// 其中 ipad = 0x36 重复，opad = 0x5C 重复。
+    ///
+    /// 返回 64 字符十六进制小写字符串。
+    /// 注意：key 和 message 必须是 ASCII 字符串（0-127）。
+    fun hmacSha256(key: String, message: String): String {
+        // 1. 准备 64 字节 key（如果超过 64 字节则先哈希）
+        val keyStr: String = if (key.length > 64) {
+            // key 超长：先 SHA256 得到 32 字节，再补零到 64
+            val kh: String = sha256(key)
+            val kBytes: String = bytesFromHex(kh)
+            kBytes + stringOfNul(64 - 32)
+        } else {
+            key + stringOfNul(64 - key.length)
+        }
+
+        // 2. 计算 ipad 和 opad（XOR 0x36 / 0x5C）
+        val ipad: String = xorString(keyStr, 0x36)
+        val opad: String = xorString(keyStr, 0x5C)
+
+        // 3. inner = SHA256(ipad || message)
+        val innerHex: String = sha256(ipad + message)
+        val innerBytes: String = bytesFromHex(innerHex)
+
+        // 4. outer = SHA256(opad || inner)
+        return sha256(opad + innerBytes)
+    }
+
+    /// 返回 n 个 NUL 字符组成的字符串
+    private fun stringOfNul(n: Int): String {
+        var s: String = ""
+        var i: Int = 0
+        while (i < n) {
+            s = s + String.fromCharCode(0)
+            i = i + 1
+        }
+        return s
+    }
+
+    /// 对字符串每个字符的 code 与 x 做异或，返回新字符串
+    private fun xorString(s: String, x: Int): String {
+        var result: String = ""
+        var i: Int = 0
+        while (i < s.length) {
+            result = result + String.fromCharCode(s.charCodeAt(i) ^ x)
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 将 64 字符十六进制字符串转换为 32 字节字符串
+    private fun bytesFromHex(hex: String): String {
+        var result: String = ""
+        var i: Int = 0
+        while (i + 1 < hex.length) {
+            val hi: Int = hexValue(hex.charCodeAt(i))
+            val lo: Int = hexValue(hex.charCodeAt(i + 1))
+            if (hi >= 0 && lo >= 0) {
+                result = result + String.fromCharCode(hi * 16 + lo)
+            }
+            i = i + 2
+        }
+        return result
     }
 }

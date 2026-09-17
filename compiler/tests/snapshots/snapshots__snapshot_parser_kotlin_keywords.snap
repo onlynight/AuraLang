@@ -88,6 +88,7 @@ Program {
                             ),
                         ),
                         doc: None,
+                        native_attr: None,
                         span: Span {
                             start: 24,
                             end: 74,
@@ -148,6 +149,7 @@ Program {
                         ),
                         body: None,
                         doc: None,
+                        native_attr: None,
                         span: Span {
                             start: 103,
                             end: 137,
@@ -234,6 +236,7 @@ Program {
                             StructField {
                                 visibility: Public,
                                 is_mutable: false,
+                                is_const: false,
                                 name: "PI",
                                 type_hint: Some(
                                     Named {
@@ -311,6 +314,7 @@ Program {
                     StructField {
                         visibility: Public,
                         is_mutable: true,
+                        is_const: false,
                         name: "x",
                         type_hint: Some(
                             Named {
@@ -491,6 +495,7 @@ Program {
                 return_type: None,
                 body: None,
                 doc: None,
+                native_attr: None,
                 span: Span {
                     start: 367,
                     end: 380,
@@ -566,6 +571,7 @@ Program {
                     ),
                 ),
                 doc: None,
+                native_attr: None,
                 span: Span {
                     start: 405,
                     end: 433,
@@ -655,6 +661,7 @@ Program {
                     ),
                 ),
                 doc: None,
+                native_attr: None,
                 span: Span {
                     start: 431,
                     end: 469,
@@ -730,6 +737,7 @@ Program {
                     ),
                 ),
                 doc: None,
+                native_attr: None,
                 span: Span {
                     start: 467,
                     end: 504,

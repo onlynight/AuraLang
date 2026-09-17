@@ -82,12 +82,12 @@ async function auraCheck(filePath: string): Promise<CheckResult> {
 #### B.6 常见错误检测
 | 检测项 | 规则 | 错误消息 |
 |--------|------|---------|
-| `data class` | 检测到 `data class` | "Aura 用 `data struct`，不是 `data class`" |
-| `fun` 缺返回类型 | `fun name()` 无 `:` 且非块体 | "函数声明缺少返回类型" |
-| `extern` 无引号 | `extern fun` 无 `"c"` | "FFI 声明需要语言标记：`extern \"c\"`" |
-| `Result` 单参数 | `Result<T>` 单类型参数 | "Aura 的 Result 需要两个类型参数：`Result<T, E>`" |
-| 缺分号 | 语句末尾无 `;`（非块体） | "建议语句末尾加分号" |
-| `await` 作函数 | `await(x)` | "`await` 是关键字，不是函数：`await x`" |
+| `data class` | 检测到 `data class` | "Aura uses `data struct`, not `data class`" |
+| `fun` 缺返回类型 | `fun name()` 无 `:` 且非块体 | "Function declaration missing return type" |
+| `extern` 无引号 | `extern fun` 无 `"c"` | "FFI declaration requires language tag: `extern \"c\"`" |
+| `Result` 单参数 | `Result<T>` 单类型参数 | "Aura's Result requires two type parameters: `Result<T, E>`" |
+| 缺分号 | 语句末尾无 `;`（非块体） | "Statement should end with a semicolon" |
+| `await` 作函数 | `await(x)` | "`await` is a keyword, not a function: `await x`" |
 
 ### 实现方式
 

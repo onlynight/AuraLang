@@ -1,37 +1,174 @@
 // aura:///aura/compiler/aura/lang/compiler/memory/Arc.aura
-// 引用计数（Phase 4: 完整 VM Aura 编写）
-/// ARC 智能指针。
-///
-/// @since 0.5
-internal object Arc {
+package aura.lang.compiler.memory
+// 引用计数（ARC）堆 —— 实例级，确定性回收
+//
+// 设计：
+// - ArcHeap 是实例类，每个 VM 持有独立堆，随 VM 生命周期自动回收。
+// - alloc() 分配堆槽位，返回 Int 索引；retain/release 管理引用计数。
+// - release 归零即回收（槽位进空闲链表），无 GC 暂停。
+// - 替代旧版空壳 object Arc（wrap 创建 Map 但不连接到对象图，IncRef/DecRef 空转）。
 
-    /// 创建 ARC 包装对象。
-    fun wrap(value: Any): Map<String, Any> {
-        val arc: Map<String, Any> = Collections.mutableMapOf()
-        arc["value"] = value
-        arc["count"] = 1
-        return arc
+import aura.lang.collection.ArrayList
+import aura.lang.collection.HashMap
+
+/// 堆槽位（含引用计数）。
+class ArcSlot {
+    private var data: Map<String, Any>
+    private var rc: Int = 0
+    private var alive: Boolean = true
+
+    constructor() {
+        this.data = HashMap<String, Any>()
+        this.rc = 0
+        this.alive = true
+    }
+}
+
+/// 引用计数堆（ARC）。
+class ArcHeap {
+    // ── 内部状态 ──
+
+    private var slots: ArrayList<ArcSlot> = ArrayList<ArcSlot>()
+    private var freeList: ArrayList<Int> = ArrayList<Int>()
+    private var totalAllocs: Int = 0
+    private var totalFrees: Int = 0
+
+    /// 创建空堆。
+    constructor() {
+        this.slots = ArrayList<ArcSlot>()
+        this.freeList = ArrayList<Int>()
+        this.totalAllocs = 0
+        this.totalFrees = 0
     }
 
-    /// 增加引用计数。
-    fun retain(arc: Map<String, Any>): Unit {
-        arc["count"] = (arc["count"] as Int) + 1
+    // ── 分配 ──
+
+    /// 分配一个新堆对象，引用计数初始为 1，返回堆索引。
+    fun alloc(): Int {
+        var idx: Int
+        if (freeList.size > 0) {
+            idx = freeList.remove(freeList.size - 1)
+            val slot = slots.get(idx)
+            slot.data = HashMap<String, Any>()
+            slot.rc = 1
+            slot.alive = true
+            slot.data.put("__idx", idx)
+        } else {
+            idx = slots.size
+            val slot = ArcSlot()
+            slot.rc = 1
+            slot.alive = true
+            slot.data.put("__idx", idx)
+            slots.add(slot)
+        }
+        totalAllocs = totalAllocs + 1
+        return idx
     }
 
-    /// 减少引用计数。
-    fun release(arc: Map<String, Any>): Boolean {
-        val count = (arc["count"] as Int) - 1
-        arc["count"] = count
-        return count <= 0
+    /// 分配并初始化对象，引用计数初始为 1。
+    fun allocObject(obj: Map<String, Any>): Int {
+        val idx = alloc()
+        slots.get(idx).data = obj
+        obj.put("__idx", idx)
+        return idx
     }
+
+    // ── 访问 ──
+
+    /// 获取堆槽位中的对象数据。
+    fun getObject(idx: Int): Map<String, Any> {
+        if (idx < 0 || idx >= slots.size) return HashMap<String, Any>()
+        val slot = slots.get(idx)
+        if (!slot.alive) return HashMap<String, Any>()
+        return slot.data
+    }
+
+    /// 设置堆槽位中的对象数据。
+    fun setObject(idx: Int, data: Map<String, Any>): Unit {
+        if (idx < 0 || idx >= slots.size) return
+        val slot = slots.get(idx)
+        slot.data = data
+        data.put("__idx", idx)
+    }
+
+    // ── 引用计数 ──
+
+    /// 增加引用计数（IncRef）。
+    fun retain(idx: Int): Unit {
+        if (idx < 0 || idx >= slots.size) return
+        val slot = slots.get(idx)
+        if (slot.alive) {
+            slot.rc = slot.rc + 1
+        }
+    }
+
+    /// 减少引用计数（DecRef）。归零时回收槽位。
+    /// 返回 true 表示已回收，false 表示仍存活。
+    fun release(idx: Int): Boolean {
+        if (idx < 0 || idx >= slots.size) return false
+        val slot = slots.get(idx)
+        if (!slot.alive) return false
+        slot.rc = slot.rc - 1
+        if (slot.rc <= 0) {
+            freeList.add(idx)
+            slot.alive = false
+            slot.rc = 0
+            totalFrees = totalFrees + 1
+            return true
+        }
+        return false
+    }
+
+    // ── 统计 ──
 
     /// 获取引用计数。
-    fun count(arc: Map<String, Any>): Int {
-        return arc["count"] as Int
+    fun count(idx: Int): Int {
+        if (idx < 0 || idx >= slots.size) return 0
+        return slots.get(idx).rc
     }
 
-    /// 获取版本信息。
+    /// 获取活跃对象数。
+    fun liveCount(): Int {
+        var count = 0
+        var i = 0
+        while (i < slots.size) {
+            if (slots.get(i).alive) count = count + 1
+            i = i + 1
+        }
+        return count
+    }
+
+    /// 获取总槽位数。
+    fun totalCount(): Int {
+        return slots.size
+    }
+
+    /// 获取总分配数。
+    fun allocCount(): Int {
+        return totalAllocs
+    }
+
+    /// 获取总释放数。
+    fun freeCount(): Int {
+        return totalFrees
+    }
+}
+
+/// ARC 统计工具。
+internal object ArcStats {
+    fun live(heap: ArcHeap): Int {
+        return heap.liveCount()
+    }
+
+    fun allocs(heap: ArcHeap): Int {
+        return heap.allocCount()
+    }
+
+    fun frees(heap: ArcHeap): Int {
+        return heap.freeCount()
+    }
+
     fun version(): String {
-        return "0.5.0-phase4-phantom"
+        return "0.6.0-arc-heap"
     }
 }

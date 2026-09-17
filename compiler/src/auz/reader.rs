@@ -55,9 +55,9 @@ pub struct PackageContent {
 impl PackageContent {
     /// 获取字节码模块（若不存在则返回错误）
     pub fn module(&self) -> Result<&BytecodeModule, ApkgError> {
-        self.module
-            .as_ref()
-            .ok_or_else(|| ApkgError::Format("包内未找到 lib/*.auc 字节码文件".to_string()))
+        self.module.as_ref().ok_or_else(|| {
+            ApkgError::Format("bytecode file not found in package: lib/*.auc".to_string())
+        })
     }
 
     /// 获取指定路径的文件内容
@@ -88,7 +88,7 @@ impl PackageReader {
     /// 从文件路径读取 `.auz`
     pub fn from_file(path: &Path) -> Result<PackageContent, ApkgError> {
         let bytes = std::fs::read(path)
-            .map_err(|e| ApkgError::Io(format!("无法读取 {}: {}", path.display(), e)))?;
+            .map_err(|e| ApkgError::Io(format!("cannot read {}: {}", path.display(), e)))?;
         Self::from_bytes(&bytes)
     }
 
@@ -106,11 +106,11 @@ impl PackageReader {
         // 4. 解析清单
         let manifest_content = files
             .get(MANIFEST_FILENAME)
-            .ok_or_else(|| ApkgError::Manifest(format!("包内缺少 {}", MANIFEST_FILENAME)))?;
+            .ok_or_else(|| ApkgError::Manifest(format!("package missing {}", MANIFEST_FILENAME)))?;
         let manifest_toml = std::str::from_utf8(manifest_content)
-            .map_err(|e| ApkgError::Manifest(format!("清单编码错误: {}", e)))?;
+            .map_err(|e| ApkgError::Manifest(format!("manifest encoding error: {}", e)))?;
         let manifest = PackageManifest::from_toml(manifest_toml)
-            .map_err(|e| ApkgError::Manifest(format!("解析清单失败: {}", e)))?;
+            .map_err(|e| ApkgError::Manifest(format!("failed to parse manifest: {}", e)))?;
 
         // 5. 加载字节码模块
         let module = Self::load_bytecode_module(&files)?;
@@ -139,13 +139,13 @@ impl PackageReader {
     fn check_zstd_magic(bytes: &[u8]) -> Result<(), ApkgError> {
         if bytes.len() < 4 {
             return Err(ApkgError::Format(format!(
-                "文件过小（{} 字节），不是有效的 .auz",
+                "file too small ({} bytes), not a valid .auz",
                 bytes.len()
             )));
         }
         if &bytes[..4] != &ZSTD_MAGIC {
             return Err(ApkgError::Format(format!(
-                "zstd 魔数不匹配: 期望 {:02X?}，实际 {:02X?}（不是 .auz 文件）",
+                "zstd magic mismatch: expected {:02X?}, got {:02X?} (not a .auz file)",
                 ZSTD_MAGIC,
                 &bytes[..4]
             )));
@@ -156,11 +156,11 @@ impl PackageReader {
     /// zstd 解压
     fn decompress_zstd(bytes: &[u8]) -> Result<Vec<u8>, ApkgError> {
         let mut decoder = zstd::Decoder::new(Cursor::new(bytes))
-            .map_err(|e| ApkgError::Compression(format!("创建 zstd 解码器失败: {}", e)))?;
+            .map_err(|e| ApkgError::Compression(format!("failed to create zstd decoder: {}", e)))?;
         let mut output = Vec::new();
         decoder
             .read_to_end(&mut output)
-            .map_err(|e| ApkgError::Compression(format!("zstd 解压失败: {}", e)))?;
+            .map_err(|e| ApkgError::Compression(format!("zstd decompression failed: {}", e)))?;
         Ok(output)
     }
 
@@ -170,9 +170,10 @@ impl PackageReader {
         let mut files = BTreeMap::new();
 
         for entry in
-            archive.entries().map_err(|e| ApkgError::Format(format!("tar 读取失败: {}", e)))?
+            archive.entries().map_err(|e| ApkgError::Format(format!("tar read failed: {}", e)))?
         {
-            let mut entry = entry.map_err(|e| ApkgError::Format(format!("tar 条目错误: {}", e)))?;
+            let mut entry =
+                entry.map_err(|e| ApkgError::Format(format!("tar entry error: {}", e)))?;
 
             // 只处理普通文件
             if !entry.header().entry_type().is_file() {
@@ -181,7 +182,7 @@ impl PackageReader {
 
             let path = entry
                 .path()
-                .map_err(|e| ApkgError::Format(format!("tar 路径错误: {}", e)))?
+                .map_err(|e| ApkgError::Format(format!("tar path error: {}", e)))?
                 .to_string_lossy()
                 .replace('\\', "/")
                 .to_string();
@@ -189,7 +190,7 @@ impl PackageReader {
             let mut content = Vec::new();
             entry
                 .read_to_end(&mut content)
-                .map_err(|e| ApkgError::Io(format!("读取 {} 失败: {}", path, e)))?;
+                .map_err(|e| ApkgError::Io(format!("failed to read {}: {}", path, e)))?;
 
             files.insert(path, content);
         }
@@ -214,8 +215,9 @@ impl PackageReader {
 
         // 加载第一个 .auc 文件（Phase 1 单模块；Phase 2 实现多模块）
         let first_auc = auc_files[0];
-        let module = codegen::from_bytes(&files[first_auc])
-            .map_err(|e| ApkgError::Format(format!("反序列化 {} 失败: {}", first_auc, e)))?;
+        let module = codegen::from_bytes(&files[first_auc]).map_err(|e| {
+            ApkgError::Format(format!("deserialization of {} failed: {}", first_auc, e))
+        })?;
         Ok(Some(module))
     }
 
@@ -228,7 +230,7 @@ impl PackageReader {
             None => return Ok(Vec::new()), // 校验和可选（旧包）
         };
         let text = std::str::from_utf8(checksum_content)
-            .map_err(|e| ApkgError::Format(format!("校验和文件编码错误: {}", e)))?;
+            .map_err(|e| ApkgError::Format(format!("checksum file encoding error: {}", e)))?;
         Ok(checksum::parse_checksum_file(text))
     }
 }
@@ -255,10 +257,13 @@ impl VerifyResult {
     /// 生成验证报告
     pub fn report(&self) -> String {
         if self.is_valid() {
-            format!("✓ 校验和验证通过（{} 个文件）", self.verified_count)
+            format!(
+                "✓ checksum verification passed ({} files)",
+                self.verified_count
+            )
         } else {
             let mut lines = vec![format!(
-                "✗ 校验和验证失败（{}/{} 通过）",
+                "✗ checksum verification failed ({}/{} passed)",
                 self.verified_count,
                 self.verified_count + self.failures.len()
             )];
@@ -299,7 +304,7 @@ impl PackageContent {
                     Err(e) => failures.push((entry.path.clone(), e.to_string())),
                 },
                 None => {
-                    failures.push((entry.path.clone(), "文件不存在".to_string()));
+                    failures.push((entry.path.clone(), "file not found".to_string()));
                 }
             }
         }

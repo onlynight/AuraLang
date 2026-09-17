@@ -418,16 +418,130 @@ impl Vm {
             }
 
             // ── 异常处理（try/catch）──
-            Instr::PushHandler(handler_ip, slot) => {
+            Instr::PushHandler(handler_ip, slot, catch_type) => {
                 self.handlers.push(Handler {
                     frame_index: top,
                     ip: handler_ip,
                     stack_len: self.frames[top].stack.len(),
                     slot,
+                    catch_type,
                 });
             }
             Instr::PopHandler => {
                 self.handlers.pop();
+            }
+
+            // ── Phase B: 并发运行时指令 ──
+            Instr::ThreadSpawn(func_idx) => {
+                // 创建线程执行函数（当前为占位实现）
+                self.frames[top].stack.push(Value::Int(func_idx as i64));
+            }
+            Instr::ThreadJoin => {
+                let tid = self.pop(top)?.as_int();
+                self.frames[top].stack.push(Value::Int(tid));
+            }
+            Instr::ThreadSleep => {
+                let ms = self.pop(top)?.as_int();
+                if ms > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+                }
+                self.frames[top].stack.push(Value::Null);
+            }
+            Instr::ThreadId => {
+                // 返回当前线程 ID（简化为 0）
+                self.frames[top].stack.push(Value::Int(0));
+            }
+            Instr::ThreadParallelism => {
+                let cores =
+                    std::thread::available_parallelism().map(|n| n.get() as i64).unwrap_or(1);
+                self.frames[top].stack.push(Value::Int(cores));
+            }
+            Instr::MutexNew => {
+                self.frames[top].stack.push(Value::Int(0)); // 占位
+            }
+            Instr::MutexLock => {
+                let _ = self.pop(top)?;
+                self.frames[top].stack.push(Value::Null);
+            }
+            Instr::MutexUnlock => {
+                let _ = self.pop(top)?;
+                self.frames[top].stack.push(Value::Null);
+            }
+            Instr::MutexTryLock => {
+                let _ = self.pop(top)?;
+                self.frames[top].stack.push(Value::Bool(true));
+            }
+            Instr::AtomicNew => {
+                let _ = self.pop(top)?;
+                self.frames[top].stack.push(Value::Int(0)); // 占位
+            }
+            Instr::AtomicLoad => {
+                let _ = self.pop(top)?;
+                self.frames[top].stack.push(Value::Int(0));
+            }
+            Instr::AtomicStore => {
+                let _val = self.pop(top)?;
+                let _handle = self.pop(top)?;
+                self.frames[top].stack.push(Value::Null);
+            }
+            Instr::AtomicAdd => {
+                let _delta = self.pop(top)?;
+                let _handle = self.pop(top)?;
+                self.frames[top].stack.push(Value::Int(0));
+            }
+            Instr::AtomicCas => {
+                let _expected = self.pop(top)?;
+                let _desired = self.pop(top)?;
+                let _handle = self.pop(top)?;
+                self.frames[top].stack.push(Value::Bool(false));
+            }
+            Instr::RwLockNew => {
+                self.frames[top].stack.push(Value::Int(0));
+            }
+            Instr::RwLockReadLock => {
+                let _ = self.pop(top)?;
+                self.frames[top].stack.push(Value::Null);
+            }
+            Instr::RwLockWriteLock => {
+                let _ = self.pop(top)?;
+                self.frames[top].stack.push(Value::Null);
+            }
+            Instr::RwLockReadUnlock => {
+                let _ = self.pop(top)?;
+                self.frames[top].stack.push(Value::Null);
+            }
+            Instr::RwLockWriteUnlock => {
+                let _ = self.pop(top)?;
+                self.frames[top].stack.push(Value::Null);
+            }
+            Instr::ChannelNew => {
+                let _cap = self.pop(top)?.as_int();
+                self.frames[top].stack.push(Value::Int(0));
+            }
+            Instr::ChannelSend => {
+                let _val = self.pop(top)?;
+                let _handle = self.pop(top)?;
+                self.frames[top].stack.push(Value::Null);
+            }
+            Instr::ChannelRecv => {
+                let _handle = self.pop(top)?;
+                self.frames[top].stack.push(Value::Null);
+            }
+            Instr::CondvarNew => {
+                self.frames[top].stack.push(Value::Int(0));
+            }
+            Instr::CondvarWait => {
+                let _mutex = self.pop(top)?;
+                let _condvar = self.pop(top)?;
+                self.frames[top].stack.push(Value::Null);
+            }
+            Instr::CondvarSignal => {
+                let _ = self.pop(top)?;
+                self.frames[top].stack.push(Value::Null);
+            }
+            Instr::CondvarBroadcast => {
+                let _ = self.pop(top)?;
+                self.frames[top].stack.push(Value::Null);
             }
 
             // ── FFI（C ABI）──
@@ -479,7 +593,10 @@ impl Vm {
                 // 先克隆闭包信息，避免借用冲突
                 let closure_info =
                     self.module.module.closures.get(closure_idx as usize).ok_or_else(|| {
-                        VmError::Runtime(format!("MakeClosure: 闭包 {} 不存在", closure_idx))
+                        VmError::Runtime(format!(
+                            "MakeClosure: closure {} does not exist",
+                            closure_idx
+                        ))
                     })?;
                 let closure_name = closure_info.name.clone();
                 let param_count = closure_info.param_count;
@@ -510,7 +627,7 @@ impl Vm {
                     .stack
                     .last()
                     .cloned()
-                    .ok_or_else(|| VmError::Runtime("CallClosure: 空栈".to_string()))?;
+                    .ok_or_else(|| VmError::Runtime("CallClosure: empty stack".to_string()))?;
                 if let Value::Ref(ref_id) = closure_val {
                     let heap_data = self.heap.get_data_mut(ref_id);
                     if let Some(crate::vm::heap::HeapData::Closure {
@@ -569,29 +686,41 @@ impl Vm {
             Instr::CallExport(sym_idx) => {
                 // 从导出符号表查找函数索引
                 let export = self.module.module.exports.get(sym_idx as usize).ok_or_else(|| {
-                    VmError::Runtime(format!("CallExport: 导出符号 {} 不存在", sym_idx))
+                    VmError::Runtime(format!(
+                        "CallExport: export symbol {} does not exist",
+                        sym_idx
+                    ))
                 })?;
                 let func_idx = export.func_idx.ok_or_else(|| {
-                    VmError::Runtime(format!("CallExport: 导出符号 {} 没有函数索引", export.name))
+                    VmError::Runtime(format!(
+                        "CallExport: export symbol {} has no function index",
+                        export.name
+                    ))
                 })?;
                 self.do_call(top, func_idx as usize, false)?;
             }
             Instr::CallExternal(mod_idx, sym_idx) => {
                 // 从导入表查找外部模块
                 let import = self.module.module.imports.get(mod_idx as usize).ok_or_else(|| {
-                    VmError::Runtime(format!("CallExternal: 导入模块 {} 不存在", mod_idx))
+                    VmError::Runtime(format!(
+                        "CallExternal: import module {} does not exist",
+                        mod_idx
+                    ))
                 })?;
                 // 在注册表中查找目标模块
                 let target =
                     self.registry.find_export(&import.module, &import.symbol).ok_or_else(|| {
                         VmError::Runtime(format!(
-                            "CallExternal: 未加载模块 {} 或符号 {} 不存在",
+                            "CallExternal: module {} not loaded or symbol {} does not exist",
                             import.module, import.symbol
                         ))
                     })?;
                 // 从目标模块的导出索引获取函数索引
                 let (_, func_idx) = target.export_index.get(&import.symbol).ok_or_else(|| {
-                    VmError::Runtime(format!("CallExternal: 符号 {} 没有函数索引", import.symbol))
+                    VmError::Runtime(format!(
+                        "CallExternal: symbol {} has no function index",
+                        import.symbol
+                    ))
                 })?;
                 self.do_call(top, *func_idx as usize, false)?;
             }
@@ -940,30 +1069,172 @@ impl Vm {
 
     /// 抛出异常：查找最近的异常处理器并展开到它；无处理器则为未捕获异常。
     ///
-    ///
     /// 展开步骤（标准栈式异常处理）：
     /// 1. 从 handler 栈顶弹出最近的处理器；
-    /// 2. 把帧栈截断到处理器所在帧（丢弃其间的调用帧）；
-    /// 3. 把该帧的操作数栈截断回注册时的高度；
-    /// 4. 异常值写入处理器的槽位（`u16::MAX` 表示无落点，退化为压栈）；
-    /// 5. 跳转到处理器入口。
+    /// 2. 若 `catch_type != u16::MAX`，检查异常值是否为 catch_type 的实例；不匹配则跳过；
+    /// 3. 若异常值是纯字符串且 catch_type 是 Exception/Throwable/其子类，自动包装为 Exception 对象；
+    /// 4. 若 catch_type 是 String，从 Exception 对象中提取 message 字段；
+    /// 5. 把帧栈截断到处理器所在帧（丢弃其间的调用帧）；
+    /// 6. 异常值写入处理器的槽位（`u16::MAX` 表示无落点，退化为压栈）；
+    /// 7. 跳转到处理器入口。
     fn raise(&mut self, value: Value) -> Result<(), VmError> {
+        let original_value = value.clone();
+        // 查找 Exception 类的 type_tag（用于自动包装字符串异常）
+        let exception_type_tag = self.class_id_by_name("Exception").unwrap_or(u16::MAX);
         while let Some(h) = self.handlers.pop() {
-            // 帧应在注册时存活；`pop_frame` 已清理失效处理器，此处仅作防御性检查
+            // 类型过滤：若 catch_type 不是 catch-all，检查异常值是否匹配
+            if h.catch_type != u16::MAX {
+                if !self.is_instance_of(&value, h.catch_type) {
+                    continue; // 类型不匹配，继续向上查找
+                }
+            }
             if h.frame_index < self.frames.len() {
+                // 计算槽位值：根据 catch_type 和值类型决定写入什么
+                let slot_value = self.compute_slot_value(&value, h.catch_type, exception_type_tag);
+                let slot = h.slot;
+                let ip = h.ip;
+                let stack_len = h.stack_len;
                 self.frames.truncate(h.frame_index + 1);
                 let frame = &mut self.frames[h.frame_index];
-                frame.stack.truncate(h.stack_len);
-                if h.slot != u16::MAX && (h.slot as usize) < frame.locals.len() {
-                    frame.locals[h.slot as usize] = value;
+                frame.stack.truncate(stack_len);
+                if slot != u16::MAX && (slot as usize) < frame.locals.len() {
+                    frame.locals[slot as usize] = slot_value;
                 } else {
-                    frame.stack.push(value);
+                    frame.stack.push(slot_value);
                 }
-                frame.ip = h.ip;
+                frame.ip = ip;
                 return Ok(());
             }
         }
-        Err(VmError::Runtime(format!("uncaught exception: {}", value)))
+        Err(VmError::Runtime(format!(
+            "uncaught exception: {}",
+            original_value
+        )))
+    }
+
+    /// 计算异常槽位值：根据 catch 类型和异常值类型决定写入什么。
+    ///
+    /// - 如果值是纯字符串且 catch_type 是 Exception/Throwable/其子类：包装为 Exception 对象
+    /// - 如果 catch_type 是 String 或 catch-all（u16::MAX）：从 Exception 对象提取 message
+    /// - 其他情况：原样写入
+    fn compute_slot_value(
+        &mut self,
+        value: &Value,
+        catch_type: u16,
+        exception_type_tag: u16,
+    ) -> Value {
+        let is_string_catch = self.is_string_type(catch_type);
+        let is_exception_like = catch_type != u16::MAX && self.is_exception_like(catch_type);
+        let is_catch_all = catch_type == u16::MAX;
+
+        if let Value::Str(msg) = value {
+            // 纯字符串异常
+            if is_exception_like && exception_type_tag != u16::MAX {
+                // 包装为 Exception 对象
+                self.wrap_string_in_exception(msg, exception_type_tag)
+            } else {
+                // catch_type 是 String 或 catch-all：直接返回字符串
+                value.clone()
+            }
+        } else {
+            // 异常对象（堆引用或其他值）
+            if is_string_catch || is_catch_all {
+                // 从 Exception 对象提取 message（兼容 String catch 和 catch-all）
+                self.extract_message(value)
+            } else {
+                value.clone()
+            }
+        }
+    }
+
+    /// 判断 class_id 是否表示 Exception 或其子类（Exception/Throwable/Error 等）
+    fn is_exception_like(&self, class_id: u16) -> bool {
+        if class_id == u16::MAX {
+            return false;
+        }
+        let name = self.class_name(class_id);
+        matches!(
+            name.as_str(),
+            "Exception"
+                | "Throwable"
+                | "Error"
+                | "RuntimeException"
+                | "IllegalArgumentException"
+                | "IllegalStateException"
+                | "NullPointerException"
+                | "IndexOutOfBoundsException"
+                | "ArrayIndexOutOfBoundsException"
+                | "EmptyListException"
+                | "UnsupportedOperationException"
+                | "ArithmeticException"
+                | "ClassCastException"
+                | "IOException"
+                | "FileNotFoundException"
+                | "TimeoutException"
+                | "AssertionError"
+                | "OutOfMemoryError"
+                | "StackOverflowError"
+        )
+    }
+
+    /// 将字符串包装为 Exception 对象
+    ///
+    /// 分配一个新的堆对象（Exception 类型），将字符串写入 message 字段，
+    /// 返回堆引用。用于 VM 层自动包装 `throw "string"` 为 Exception 对象。
+    fn wrap_string_in_exception(&mut self, msg: &str, exception_type_tag: u16) -> Value {
+        if exception_type_tag == u16::MAX {
+            return Value::Str(std::rc::Rc::from(msg));
+        }
+        let h = self.heap.alloc_object(exception_type_tag);
+        // message 字段索引由 FNV-1a 哈希计算（与 emit.rs::field_index 一致）
+        let field_idx = crate::codegen::emit::field_index("message");
+        self.heap.set_field(h, field_idx, Value::Str(std::rc::Rc::from(msg)));
+        Value::Ref(h)
+    }
+
+    /// 判断 catch_type 是否表示 String 类型
+    fn is_string_type(&self, class_id: u16) -> bool {
+        if class_id == u16::MAX {
+            return false;
+        }
+        self.class_name(class_id) == "String"
+    }
+
+    /// 从异常对象中提取 message 字段
+    ///
+    /// 如果 value 是 Exception 对象（堆引用），通过 fields 哈希表按字段名提取 message；
+    /// 如果是纯字符串值，直接返回。
+    fn extract_message(&self, value: &Value) -> Value {
+        if let Value::Ref(handle) = value {
+            if let Some(crate::vm::heap::HeapData::Object { fields, .. }) =
+                self.heap.get_data(*handle)
+            {
+                // message 字段索引由 FNV-1a 哈希计算
+                let field_idx = crate::codegen::emit::field_index("message");
+                if let Some(msg) = fields.get(&field_idx) {
+                    return msg.clone();
+                }
+                // 兜底：取第一个字段值
+                if let Some(msg) = fields.values().next() {
+                    return msg.clone();
+                }
+            }
+        }
+        value.clone()
+    }
+
+    /// 创建异常对象：根据类名查找 type_tag，分配堆对象，设置 message 字段。
+    /// 用于 `__new_exception(type_name, message)` 原生函数。
+    ///
+    /// 注意：由于嵌入式标准库的类 ID 未与宿主模块合并，此处使用简单的堆对象
+    /// （type_tag=0 表示 Any）来承载 message 字段。VM 的 catch-all 机制确保
+    /// 无论类型如何都能被捕获。
+    fn create_exception_object(&mut self, type_name: &str, msg: &str) -> Value {
+        // 分配一个通用对象（type_tag=0 为 Any），设置 message 字段
+        let h = self.heap.alloc_object(0);
+        let field_idx = crate::codegen::emit::field_index("message");
+        self.heap.set_field(h, field_idx, Value::Str(std::rc::Rc::from(msg)));
+        Value::Ref(h)
     }
 
     /// 原生 / FFI 函数调用
@@ -985,6 +1256,21 @@ impl Vm {
             return self.raise(v);
         }
 
+        // `__new_exception(type_name, message)`：创建异常对象
+        if native.name == "__new_exception" {
+            let type_name = match args.first() {
+                Some(Value::Str(s)) => s.to_string(),
+                _ => "Exception".to_string(),
+            };
+            let msg = match args.get(1) {
+                Some(Value::Str(s)) => s.to_string(),
+                _ => String::new(),
+            };
+            let obj = self.create_exception_object(&type_name, &msg);
+            self.frames[top].stack.push(obj);
+            return Ok(());
+        }
+
         // `Process.exit(code)`：记录退出码并干净地停止 VM（由 CLI 设置进程退出码）。
         if is_exit_native(&native.name) {
             let code = crate::std::std_process::last_int_arg(&args).unwrap_or(0) as i32;
@@ -992,14 +1278,15 @@ impl Vm {
             return Ok(());
         }
 
-        // Phase 3: Aura 编译的标准库函数版本优先 —— 但若同名**原生函数已注册**则以原生为准。
-        // 原因：同一 API 可能存在两套运行时表示（如 `listOf` 的 Aura 实现返回 ArrayList 类实例，
-        // 原生实现返回 Value::List），混用会导致 `.size` / `[]` 等行为不一致。
-        let std_lookup = if self.natives.contains(&native.name) {
-            None
-        } else {
-            self.find_stdlib_func(&native.name, param_count)
-        };
+        // Phase D: Aura 编译的标准库函数版本优先。
+        // 始终先查 `stdlib_func_map`（嵌入 .auc 的 Aura 编译函数），
+        // 仅当未找到或函数为 native 声明（is_native=true，无 Aura 实现体）时才回退到 Rust native。
+        // 这确保纯逻辑模块（Math.abs / String.contains / Collections.listOf …）
+        // 使用 Aura 实现，而 libm / syscall 等 native 声明仍走 Rust 实现。
+        let std_lookup = self.find_stdlib_func(&native.name, param_count).filter(|&(idx, _)| {
+            let func = &self.module.funcs[idx];
+            !func.is_native
+        });
         if let Some((std_func_idx, needs_self)) = std_lookup {
             eprintln!(
                 "[vm] stdlib-aura: {} → Aura compiled func #{} (self={})",
@@ -1045,7 +1332,7 @@ impl Vm {
         } else if native.ffi_abi == FfiAbi::Aura {
             // extern interface: AOT 直调
             self.call_aot_ffi(&native, &args).unwrap_or_else(|| {
-                eprintln!("[vm] AOT 接口调用失败: `{}`", native.name);
+                eprintln!("[vm] AOT interface call failed: `{}`", native.name);
                 Value::Int(0)
             })
         } else {
@@ -1075,7 +1362,7 @@ impl Vm {
                 Some(v) => v,
                 None => {
                     eprintln!(
-                        "[vm] 未链接的外部函数 `{}`，已忽略调用（参数: {:?}）",
+                        "[vm] Unlinked external function `{}`, call ignored (args: {:?})",
                         native.name,
                         args.iter().map(|v| v.to_string()).collect::<Vec<_>>()
                     );
@@ -1118,6 +1405,21 @@ impl Vm {
             return self.raise(v);
         }
 
+        // 同 `do_call_native`：`__new_exception` 创建异常对象
+        if native.name == "__new_exception" {
+            let type_name = match args.first() {
+                Some(Value::Str(s)) => s.to_string(),
+                _ => "Exception".to_string(),
+            };
+            let msg = match args.get(1) {
+                Some(Value::Str(s)) => s.to_string(),
+                _ => String::new(),
+            };
+            let obj = self.create_exception_object(&type_name, &msg);
+            self.frames[top].stack.push(obj);
+            return Ok(());
+        }
+
         // 同 `do_call_native`：`Process.exit(code)` 请求退出
         if is_exit_native(&native.name) {
             let code = crate::std::std_process::last_int_arg(&args).unwrap_or(0) as i32;
@@ -1125,12 +1427,11 @@ impl Vm {
             return Ok(());
         }
 
-        // Phase 3: Aura 编译的标准库函数版本优先（同名原生已注册时以原生为准，见 do_call_native）
-        let args_std_lookup = if self.natives.contains(&native.name) {
-            None
-        } else {
-            self.find_stdlib_func(&native.name, eff_argc)
-        };
+        // Phase D: Aura 编译的标准库函数版本优先（同 do_call_native，始终先查 stdlib_func_map）
+        let args_std_lookup = self.find_stdlib_func(&native.name, eff_argc).filter(|&(idx, _)| {
+            let func = &self.module.funcs[idx];
+            !func.is_native
+        });
         if let Some((std_func_idx, needs_self)) = args_std_lookup {
             eprintln!(
                 "[vm] stdlib-aura: {} (argc={}) → Aura compiled func #{} (self={})",
@@ -1181,7 +1482,7 @@ impl Vm {
         } else if native.ffi_abi == FfiAbi::Aura {
             // extern interface: AOT 直调
             self.call_aot_ffi(&native, &args).unwrap_or_else(|| {
-                eprintln!("[vm] AOT 接口调用失败: `{}`", native.name);
+                eprintln!("[vm] AOT interface call failed: `{}`", native.name);
                 Value::Int(0)
             })
         } else {
@@ -1196,7 +1497,7 @@ impl Vm {
                 Some(v) => v,
                 None => {
                     eprintln!(
-                        "[vm] 未链接的外部函数 `{}`，已忽略调用（参数: {:?}）",
+                        "[vm] Unlinked external function `{}`, call ignored (args: {:?})",
                         native.name,
                         args.iter().map(|v| v.to_string()).collect::<Vec<_>>()
                     );
@@ -1228,12 +1529,12 @@ impl Vm {
                 let handle = LoadLibraryW(wide.as_ptr());
                 if handle != 0 {
                     self.loaded_libs.insert(lib_name.to_string(), handle);
-                    eprintln!("[vm] 已加载库: {} ({})", lib_name, path);
+                    eprintln!("[vm] Loaded library: {} ({})", lib_name, path);
                     return;
                 }
             }
         }
-        eprintln!("[vm] 无法加载库: {}", lib_name);
+        eprintln!("[vm] Cannot load library: {}", lib_name);
     }
 
     #[cfg(unix)]
@@ -1253,12 +1554,12 @@ impl Vm {
                 let handle = dlopen(c_path.as_ptr(), 2); // RTLD_NOW = 2
                 if !handle.is_null() {
                     self.loaded_libs.insert(lib_name.to_string(), handle);
-                    eprintln!("[vm] 已加载库: {} ({})", lib_name, path);
+                    eprintln!("[vm] Loaded library: {} ({})", lib_name, path);
                     return;
                 }
             }
         }
-        eprintln!("[vm] 无法加载库: {}", lib_name);
+        eprintln!("[vm] Cannot load library: {}", lib_name);
     }
 
     /// extern interface: 确保 AOT 库已加载
@@ -1279,21 +1580,24 @@ impl Vm {
             match self.aot_runtime.load_shared_library(&lib_path) {
                 Ok(module_id) => {
                     eprintln!(
-                        "[vm] AOT 接口库已加载: {} ({}) → module_id={}",
+                        "[vm] AOT interface library loaded: {} ({}) → module_id={}",
                         lib_name, lib_path, module_id
                     );
                     self.aot_module_map.insert(lib_name.to_string(), module_id);
                     Some(module_id)
                 }
                 Err(e) => {
-                    eprintln!("[vm] AOT 接口库加载失败: {} ({})", lib_path, e);
+                    eprintln!(
+                        "[vm] AOT interface library load failed: {} ({})",
+                        lib_path, e
+                    );
                     None
                 }
             }
         }
         #[cfg(not(all(feature = "llvm", feature = "dynamic-ffi")))]
         {
-            eprintln!("[vm] AOT 接口库加载需要 llvm+dynamic-ffi 特性");
+            eprintln!("[vm] AOT interface library loading requires llvm+dynamic-ffi feature");
             None
         }
     }
@@ -1332,7 +1636,7 @@ impl Vm {
         let func_idx = self.aot_runtime.lookup_func_idx(module_id, func_name)?;
 
         eprintln!(
-            "[vm] AOT 接口调用: {} (module={}, func_idx={})",
+            "[vm] AOT interface call: {} (module={}, func_idx={})",
             native.name, module_id, func_idx
         );
 

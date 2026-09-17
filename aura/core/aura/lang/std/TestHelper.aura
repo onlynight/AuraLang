@@ -2,28 +2,32 @@
 package aura.lang.std
 // 用于验证 Aura 编译路径的实际执行
 
-/// 计算两个整数的和。
-fun add(a: Int, b: Int): Int {
-    a + b
-}
+object TestHelperUtils {
 
-/// 计算两个整数的乘积。
-fun multiply(a: Int, b: Int): Int {
-    a * b
-}
-
-/// 判断是否为偶数。
-fun isEven(n: Int): Boolean {
-    n % 2 == 0
-}
-
-/// 字符串反转（简单实现）。
-fun reverse(s: String): String {
-    var result = ""
-    var i = s.length - 1
-    while (i >= 0) {
-        result = result + s.substring(i, i + 1)
-        i = i - 1
+    /// 计算两个整数的和。
+    fun add(a: Int, b: Int): Int {
+        a + b
     }
-    return result
+
+    /// 计算两个整数的乘积。
+    fun multiply(a: Int, b: Int): Int {
+        a * b
+    }
+
+    /// 判断是否为偶数。
+    fun isEven(n: Int): Boolean {
+        n % 2 == 0
+    }
+
+    /// 字符串反转（简单实现）。
+    fun reverse(s: String): String {
+        var result = ""
+        var i = s.length - 1
+        while (i >= 0) {
+            result = result + s.substring(i, i + 1)
+            i = i - 1
+        }
+        return result
+    }
+
 }

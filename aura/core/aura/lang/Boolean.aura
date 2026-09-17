@@ -9,16 +9,16 @@ package aura.lang
 ///
 /// @see Int, String
 /// @since 0.1
-internal value class Boolean {
+value class Boolean {
 
     // ── 常量（companion object）──
 
     companion object {
         /// true 字面量
-        const TRUE: Boolean = true
+        const val TRUE: Boolean = true
 
         /// false 字面量
-        const FALSE: Boolean = false
+        const val FALSE: Boolean = false
     }
 
     // ── 转换方法 ──

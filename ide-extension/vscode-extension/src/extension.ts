@@ -22,7 +22,7 @@ let diagnosticManager: DiagnosticManager;
  * 激活扩展
  */
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
-    console.log("[Aura] 扩展激活");
+    console.log("[Aura] Extension activated");
 
     // 初始化诊断管理器
     diagnosticManager = new DiagnosticManager();
@@ -34,15 +34,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // 注册命令
     context.subscriptions.push(
         vscode.commands.registerCommand("aura.restartLSP", async () => {
-            await vscode.window.showInformationMessage("重启 Aura LSP 服务器...");
+            await vscode.window.showInformationMessage("Restarting Aura LSP server...");
             await stopLSPClient();
             await startLSPClient(context, diagnosticManager);
-            vscode.window.showInformationMessage("Aura LSP 服务器已重启");
+            vscode.window.showInformationMessage("Aura LSP server restarted");
         }),
         vscode.commands.registerCommand("aura.openDiagnostic", async () => {
             const currentEditor = vscode.window.activeTextEditor;
             if (!currentEditor || currentEditor.document.languageId !== "aura") {
-                vscode.window.showWarningMessage("请打开一个 Aura 文件");
+                vscode.window.showWarningMessage("Please open an Aura file");
                 return;
             }
             await sendDiagnosticRequest(currentEditor.document.uri);
@@ -50,7 +50,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         vscode.commands.registerCommand("aura.formatDocument", async () => {
             const currentEditor = vscode.window.activeTextEditor;
             if (!currentEditor || currentEditor.document.languageId !== "aura") {
-                vscode.window.showWarningMessage("请打开一个 Aura 文件");
+                vscode.window.showWarningMessage("Please open an Aura file");
                 return;
             }
             await formatDocument(currentEditor.document.uri);
@@ -77,7 +77,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.subscriptions.push(
         vscode.workspace.onDidChangeConfiguration(async (e) => {
             if (e.affectsConfiguration("aura")) {
-                console.log("[Aura] 配置变更，重启 LSP");
+                console.log("[Aura] Configuration changed, restarting LSP");
                 await stopLSPClient();
                 await startLSPClient(context, diagnosticManager);
             }
@@ -87,13 +87,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // 注册文档打开/变更回调 —— 实时诊断由 LSP 客户端（拉取模式）负责，
     // 这里无需手动调度。仅保留显式命令 aura.openDiagnostic。
 
-    console.log("[Aura] 扩展激活完成");
+    console.log("[Aura] Extension activation complete");
 }
 
 /**
  * 停用扩展
  */
 export async function deactivate(): Promise<void> {
-    console.log("[Aura] 扩展停用");
+    console.log("[Aura] Extension deactivated");
     await stopLSPClient();
 }

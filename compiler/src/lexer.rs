@@ -64,6 +64,7 @@ const KEYWORDS: &[(&str, TokenKind)] = &[
     ("defer", TokenKind::Defer),
     ("extern", TokenKind::Extern),
     ("import", TokenKind::Import),
+    ("package", TokenKind::Package),
     ("lazy", TokenKind::Lazy),
     ("lateinit", TokenKind::Lateinit),
     ("data", TokenKind::Data),
@@ -76,10 +77,13 @@ const KEYWORDS: &[(&str, TokenKind)] = &[
     // P7 内存管理关键字
     ("box", TokenKind::Box),
     ("weak", TokenKind::Weak),
-    ("malloc", TokenKind::Malloc),
-    ("free", TokenKind::Free),
-    ("retain", TokenKind::Retain),
-    ("release", TokenKind::Release),
+    // 注意：`malloc` / `free` / `retain` / `release` 不再作为保留字。
+    // 它们没有任何语法/语义用途，却会与标准库里的同名标识符冲突：
+    // `extern object Allocator { fun malloc(...) }`、`Memory.free(...)` 等
+    // 被词法器切成关键字 token 后，声明名/成员名解析失效，AOT 会生成
+    // 残缺定义（如 `define void @malloc(i32)` 与 libc `@malloc` 重定义）。
+    // Phase D: native 关键字（extern object 中的编译器内置函数）
+    ("native", TokenKind::Native),
     // 基本类型关键字
     ("Int", TokenKind::Ident),
     ("Long", TokenKind::Ident),

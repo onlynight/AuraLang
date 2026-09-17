@@ -1,0 +1,274 @@
+// aura:///aura/lang/compiler/sourcemap/SourceMap.aura
+package aura.lang.compiler.sourcemap
+// ─────────────────────────────────────────────────────────────
+// 源码映射 — 纯 Aura 化迁移
+//
+// 对应 Rust `compiler/src/source_map.rs`。
+//
+// 功能：
+//   1. 多文件源文本管理（按 FileId 索引）
+//   2. 字节偏移 → (行, 列) 映射
+//   3. 诊断代码片段渲染（含 `^` / `~` 标记）
+//
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.std.FileSystem
+import aura.lang.std.Path
+import aura.lang.compiler.lexer.Span
+
+// ═══════════════════════════════════════════════════════════════
+// SourceMapUtils — 工具函数
+// ═══════════════════════════════════════════════════════════════
+
+/// 源码映射工具函数。
+object SourceMapUtils {
+
+    /// 从文件路径读取源文本并注册到 SourceMap。
+    fun loadFileFromPath(map: SourceMap, path: String): Int {
+        val text: String = FileSystem.readFile(path)
+        return map.addFile(path, text)
+    }
+
+    /// 最大函数。
+    private fun max(a: Int, b: Int): Int {
+        if (a > b) {
+            return a
+        }
+        return b
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SourceFile — 单个源文件
+// ═══════════════════════════════════════════════════════════════
+
+/// 单个源文件，保存文件文本与位置索引。
+class SourceFile {
+
+    /// 文件标识（显示名）。
+    var id: Int = 0
+
+    /// 文件名。
+    var name: String = ""
+
+    /// 完整源文本。
+    var source: String = ""
+
+    /// 每行的起始字节偏移（1-indexed）。
+    var lineStarts: List<Int> = []
+
+    init(id: Int, name: String, source: String) {
+        this.id = id
+        this.name = name
+        this.source = source
+        this.lineStarts = [0]
+        var i: Int = 0
+        while (i < source.length) {
+            if (source.charCodeAt(i) == 10) {
+                this.lineStarts.add(i + 1)
+            }
+            i = i + 1
+        }
+    }
+
+    /// 行总数。
+    fun lineCount(): Int {
+        return this.lineStarts.length
+    }
+
+    /// 指定行的起始偏移。
+    fun lineStart(line: Int): Int {
+        if (line < 1 || line > this.lineStarts.length) {
+            return -1
+        }
+        return this.lineStarts[line - 1]
+    }
+
+    /// 指定行的文本（不含换行符）。
+    fun lineText(line: Int): String {
+        if (line < 1 || line > this.lineStarts.length) {
+            return ""
+        }
+        val start: Int = this.lineStarts[line - 1]
+        var end: Int = this.source.length
+        if (line < this.lineStarts.length) {
+            end = this.lineStarts[line]
+        }
+        // 去除行尾的 \r\n 或 \n
+        if (end > start && this.source.charCodeAt(end - 1) == 10) {
+            end = end - 1
+        }
+        if (end > start && this.source.charCodeAt(end - 1) == 13) {
+            end = end - 1
+        }
+        return this.source.substring(start, end)
+    }
+
+    /// 字节偏移 → (行, 列)，行列从 1 开始。
+    fun location(offset: Int): Pair<Int, Int> {
+        var lo: Int = 1
+        var hi: Int = this.lineStarts.length
+        while (lo <= hi) {
+            val mid: Int = (lo + hi) / 2
+            val start: Int = this.lineStarts[mid - 1]
+            if (start <= offset) {
+                lo = mid + 1
+            } else {
+                hi = mid - 1
+            }
+        }
+        val line: Int = hi
+        val col: Int = offset - this.lineStarts[line - 1] + 1
+        return Pair<Int, Int>(line, col)
+    }
+
+    /// 指定行的字节偏移起始位置。
+    fun lineOffset(line: Int): Int {
+        return this.lineStart(line)
+    }
+
+    /// 根据字节偏移查找所属行号。
+    fun lineOfOffset(offset: Int): Int {
+        return this.location(offset).first
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SourceMap — 多文件源码映射
+// ═══════════════════════════════════════════════════════════════
+
+/// 多文件源码映射管理器。
+class SourceMap {
+
+    /// 所有已注册的文件。
+    var files: List<SourceFile> = []
+
+    /// 下一个文件 ID。
+    var nextId: Int = 0
+
+    /// 添加源文件并返回其 ID。
+    fun addFile(name: String, source: String): Int {
+        val id: Int = this.nextId
+        this.nextId = this.nextId + 1
+        val sf: SourceFile = SourceFile(id, name, source)
+        this.files.add(sf)
+        return id
+    }
+
+    /// 获取文件。
+    fun file(id: Int): SourceFile {
+        for (f in this.files) {
+            if (f.id == id) {
+                return f
+            }
+        }
+        return null
+    }
+
+    /// 获取源文本。
+    fun source(id: Int): String {
+        val f: SourceFile = this.file(id)
+        if (f == null) {
+            return ""
+        }
+        return f.source
+    }
+
+    /// 字节偏移 → (行, 列)。
+    fun location(id: Int, offset: Int): Pair<Int, Int> {
+        val f: SourceFile = this.file(id)
+        if (f == null) {
+            return Pair<Int, Int>(1, 1)
+        }
+        return f.location(offset)
+    }
+
+    /// Span → (起始行, 起始列, 结束行, 结束列)。
+    fun spanLocation(id: Int, span: Span): Pair<Pair<Int, Int>, Pair<Int, Int>> {
+        val start: Pair<Int, Int> = this.location(id, span.start)
+        val end: Pair<Int, Int> = this.location(id, span.end)
+        return Pair<Pair<Int, Int>, Pair<Int, Int>>(start, end)
+    }
+
+    /// 生成诊断代码片段（含 `^` 标记）。
+    fun snippet(id: Int, span: Span): String {
+        val f: SourceFile = this.file(id)
+        if (f == null) {
+            return ""
+        }
+        val start: Pair<Int, Int> = f.location(span.start)
+        val end: Pair<Int, Int> = f.location(span.end)
+        val startLine: Int = start.first
+        val endLine: Int = end.first
+
+        var result: String = ""
+
+        // 显示范围：起始行到结束行（最多显示 5 行）
+        var displayStart: Int = startLine
+        var displayEnd: Int = endLine
+        if (displayEnd - displayStart > 4) {
+            displayEnd = displayStart + 4
+        }
+
+        val maxLineNum: Int = displayEnd
+        var lineNumWidth: Int = 0
+        var tmp: Int = maxLineNum
+        while (tmp > 0) {
+            lineNumWidth = lineNumWidth + 1
+            tmp = tmp / 10
+        }
+
+        for (line: Int in displayStart..displayEnd) {
+            // 行号 + 文本
+            result = result + toStr(line) + " | " + f.lineText(line) + "\n"
+            // 下划线标记
+            var marker: String = ""
+            val padWidth: Int = lineNumWidth + 3 + line - displayStart * 0
+            for (i: Int in 0..padWidth) {
+                marker = marker + " "
+            }
+            if (line == startLine && line == endLine) {
+                // 单行：在起始列开始用 ^ 标记到结束列
+                val pad: Int = start.second - 1
+                for (i: Int in 0..pad) {
+                    marker = marker + " "
+                }
+                val len: Int = SourceMapUtils.max(1, end.second - start.second)
+                for (i: Int in 0..len) {
+                    marker = marker + "^"
+                }
+            } else if (line == startLine) {
+                // 多行起始行：从起始列到行尾
+                val pad: Int = start.second - 1
+                for (i: Int in 0..pad) {
+                    marker = marker + " "
+                }
+                val len: Int = f.lineText(line).length
+                for (i: Int in 0..len) {
+                    marker = marker + "^"
+                }
+            } else if (line == endLine) {
+                // 多行结束行：从行首到结束列
+                val pad: Int = end.second
+                for (i: Int in 0..pad) {
+                    marker = marker + "^"
+                }
+            } else {
+                // 中间行：全行波浪线
+                val len: Int = f.lineText(line).length
+                for (i: Int in 0..len) {
+                    marker = marker + "~"
+                }
+            }
+            result = result + marker + "\n"
+        }
+
+        return result
+    }
+
+    /// 文件总数。
+    fun fileCount(): Int {
+        return this.files.length
+    }
+}

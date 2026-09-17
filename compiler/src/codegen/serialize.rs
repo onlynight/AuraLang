@@ -34,7 +34,8 @@ pub const MAGIC: &[u8; 4] = b"AURA";
 ///   aot_mode/aot_desc_idx 字段时按 0 处理，段表为空）。
 /// - v3 VM 遇到 v4 文件会因 `version > VERSION` 拒绝加载。
 /// Phase 1 v6: 类定义表（类 ID 系统 + 类层级 + object 单例）
-pub const VERSION: u16 = 6;
+/// Phase 1 v7: 并发指令集（Thread/Mutex/Atomic/RwLock/Condvar/Barrier/Channel/Future）
+pub const VERSION: u16 = 7;
 
 #[derive(Debug)]
 pub enum SerializeError {
@@ -283,17 +284,17 @@ fn write_str(buf: &mut Vec<u8>, s: &str) {
 /// 从字节反序列化
 pub fn from_bytes(bytes: &[u8]) -> Result<BytecodeModule, SerializeError> {
     if bytes.len() < 6 {
-        return Err(SerializeError::Format("文件太小".to_string()));
+        return Err(SerializeError::Format("File too small".to_string()));
     }
     if &bytes[..4] != MAGIC {
-        return Err(SerializeError::Format("魔数不匹配".to_string()));
+        return Err(SerializeError::Format("Magic number mismatch".to_string()));
     }
     let version = u16::from_le_bytes([
         bytes[4], bytes[5],
     ]);
     if version > VERSION {
         return Err(SerializeError::Format(format!(
-            "不支持的字节码版本: {}",
+            "Unsupported bytecode version: {}",
             version
         )));
     }
@@ -581,7 +582,10 @@ fn read_const(r: &mut Reader) -> Result<Const, SerializeError> {
         }
         3 => Ok(Const::Bool(r.u8()? != 0)),
         4 => Ok(Const::Null),
-        _ => Err(SerializeError::Format(format!("未知常量标签: {}", tag))),
+        _ => Err(SerializeError::Format(format!(
+            "Unknown constant tag: {}",
+            tag
+        ))),
     }
 }
 
@@ -601,7 +605,7 @@ impl<'a> Reader<'a> {
 
     fn advance(&mut self, n: usize) -> Result<(), SerializeError> {
         if self.pos + n > self.data.len() {
-            return Err(SerializeError::Format("数据越界".to_string()));
+            return Err(SerializeError::Format("Data out of bounds".to_string()));
         }
         self.pos += n;
         Ok(())
@@ -610,7 +614,7 @@ impl<'a> Reader<'a> {
     fn bytes(&mut self, n: usize) -> Result<[u8; 16], SerializeError> {
         let end = self.pos + n;
         if end > self.data.len() {
-            return Err(SerializeError::Format("数据越界".to_string()));
+            return Err(SerializeError::Format("Data out of bounds".to_string()));
         }
         let mut buf = [0u8; 16];
         buf[..n].copy_from_slice(&self.data[self.pos..end]);
@@ -622,7 +626,7 @@ impl<'a> Reader<'a> {
         let b = self
             .data
             .get(self.pos)
-            .ok_or_else(|| SerializeError::Format("数据越界".to_string()))?;
+            .ok_or_else(|| SerializeError::Format("Data out of bounds".to_string()))?;
         self.pos += 1;
         Ok(*b)
     }
@@ -630,7 +634,7 @@ impl<'a> Reader<'a> {
     fn u16(&mut self) -> Result<u16, SerializeError> {
         let end = self.pos + 2;
         if end > self.data.len() {
-            return Err(SerializeError::Format("数据越界".to_string()));
+            return Err(SerializeError::Format("Data out of bounds".to_string()));
         }
         let v = u16::from_le_bytes([
             self.data[self.pos],
@@ -643,7 +647,7 @@ impl<'a> Reader<'a> {
     fn u32(&mut self) -> Result<u32, SerializeError> {
         let end = self.pos + 4;
         if end > self.data.len() {
-            return Err(SerializeError::Format("数据越界".to_string()));
+            return Err(SerializeError::Format("Data out of bounds".to_string()));
         }
         let v = u32::from_le_bytes([
             self.data[self.pos],
@@ -658,7 +662,7 @@ impl<'a> Reader<'a> {
     fn i64(&mut self) -> Result<i64, SerializeError> {
         let end = self.pos + 8;
         if end > self.data.len() {
-            return Err(SerializeError::Format("数据越界".to_string()));
+            return Err(SerializeError::Format("Data out of bounds".to_string()));
         }
         let v = i64::from_le_bytes([
             self.data[self.pos],
@@ -677,7 +681,7 @@ impl<'a> Reader<'a> {
     fn f64(&mut self) -> Result<f64, SerializeError> {
         let end = self.pos + 8;
         if end > self.data.len() {
-            return Err(SerializeError::Format("数据越界".to_string()));
+            return Err(SerializeError::Format("Data out of bounds".to_string()));
         }
         let v = f64::from_le_bytes([
             self.data[self.pos],
@@ -702,7 +706,7 @@ impl<'a> Reader<'a> {
     fn take(&mut self, len: usize) -> Result<&[u8], SerializeError> {
         let end = self.pos + len;
         if end > self.data.len() {
-            return Err(SerializeError::Format("数据越界".to_string()));
+            return Err(SerializeError::Format("Data out of bounds".to_string()));
         }
         let slice = &self.data[self.pos..end];
         self.pos = end;
@@ -1034,10 +1038,10 @@ mod tests {
         let m = from_bytes(&b).unwrap();
         assert_eq!(m.functions.len(), 1);
         assert_eq!(m.functions[0].name, "main");
-        assert_eq!(m.functions[0].aot_mode, 0, "v3 文件按 aot_mode=0 处理");
+        assert_eq!(m.functions[0].aot_mode, 0, "v3 file treated as aot_mode=0");
         assert_eq!(m.functions[0].aot_desc_idx, 0);
         assert_eq!(m.entry_kind, "app");
-        assert!(m.aot_segments.is_empty(), "v3 文件无 AOT 段");
+        assert!(m.aot_segments.is_empty(), "v3 file has no AOT segments");
         assert!(!m.has_aot());
         // v4 重新序列化后仍可读
         let v4 = to_bytes(&m);

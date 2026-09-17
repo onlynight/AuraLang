@@ -1,0 +1,24 @@
+// aura:///lsp/aura/lang/lsp/LspResponse.aura
+package aura.lang.lsp
+
+import aura.lang.std.String
+
+/// LSP 响应
+class LspResponse {
+    val id: Int
+    val result: String
+    val error: String
+
+    fun LspResponse(id: Int, result: String, error: String) {
+        this.id = id
+        this.result = result
+        this.error = error
+    }
+
+    fun toJson(): String {
+        if (error.length > 0) {
+            return "{\"jsonrpc\":\"2.0\",\"id\":" + toStr(id) + ",\"error\":\"" + error + "\"}"
+        }
+        return "{\"jsonrpc\":\"2.0\",\"id\":" + toStr(id) + ",\"result\":" + result + "}"
+    }
+}

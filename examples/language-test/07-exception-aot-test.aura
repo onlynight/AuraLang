@@ -1,0 +1,9 @@
+// AOT compilation test for exception classes
+fun main(): Int {
+    try {
+        throw EmptyListException("list is empty")
+    } catch (e: String) {
+        println("Caught EmptyListException")
+    }
+    return 0
+}

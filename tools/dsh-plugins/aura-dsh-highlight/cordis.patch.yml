@@ -1,0 +1,17 @@
+# @aura-lang/dsh-highlight-aura bundle patch: inserts this plugin's host row.
+#
+# The row is what makes the plugin discoverable. `@deepseek-ai/dsh-client-modules`
+# builds the browser roster by scanning the Loader's mounted entries for packages
+# that declare `dsh.client`, so a row must exist before `lib/client.js` can be
+# served to the browser and the Aura preview can register itself.
+#
+# The host half (`lib/index.js`) contributes nothing to the host tree: the whole
+# preview lives in the browser export. The row is therefore just a mount point,
+# and `apply` there is intentionally empty.
+#
+# This file is referenced by `dsh.bundle.patch` in package.json, which is what
+# lets the package be listed in a profile's `dsh.profile.bundles`.
+
+- insert:
+    - id: aura-highlight-aura
+      name: '@aura-lang/dsh-highlight-aura'

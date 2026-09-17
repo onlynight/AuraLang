@@ -1,0 +1,409 @@
+// aura:///aura/lang/compiler/auz/Auz.aura
+package aura.lang.compiler.auz
+// ─────────────────────────────────────────────────────────────
+// .auz 包格式 — 纯 Aura 化迁移
+//
+// 对应 Rust `compiler/src/auz/` (builder.rs, reader.rs, checksum.rs, mod.rs)。
+//
+// .auz = tar + zstd 容器
+//
+// 目录布局：
+//   META-INF/aura.toml           主清单（必需）
+//   META-INF/checksum.sha256     全包校验和（必需）
+//   META-INF/signature.sig       HMAC 签名（可选）
+//   lib/name-version/*.auc       字节码
+//   ref/index.json               类型签名索引（可选）
+//   src/                         源码附件（可选）
+//
+// 魔数：28 B5 2F FD（zstd 标准）
+//
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.std.FileSystem
+import aura.lang.std.Path
+import aura.lang.std.Tar
+import aura.lang.std.Zstd
+import aura.lang.std.Encoding
+import aura.lang.compiler.package.Package
+import aura.lang.compiler.signature.Signature
+import aura.lang.compiler.signing.Signing
+import aura.lang.compiler.sourcemap.SourceMap
+
+// ═══════════════════════════════════════════════════════════════
+// AuzUtils — 顶层声明收集对象
+// ═══════════════════════════════════════════════════════════════
+
+object AuzUtils {
+    // 常量
+    const val ZSTD_MAGIC: String = "\u0028\u00b5\u002f\u00fd"
+    const val APKG_FORMAT_VERSION: Int = 1
+    const val DEFAULT_COMPRESSION_LEVEL: Int = 3
+
+    const val META_INF_DIR: String = "META-INF"
+    const val MANIFEST_FILENAME: String = "META-INF/aura.toml"
+    const val CHECKSUM_FILENAME: String = "META-INF/checksum.sha256"
+    const val SIGNATURE_FILENAME: String = "META-INF/signature.sig"
+    const val LIB_DIR: String = "lib"
+    const val REF_DIR: String = "ref"
+    const val REF_INDEX_FILENAME: String = "ref/index.json"
+    const val NATIVE_DIR: String = "native"
+    const val SRC_DIR: String = "src"
+    const val DOCS_DIR: String = "docs"
+    const val RESOURCES_DIR: String = "resources"
+    const val TEST_DIR: String = "test"
+
+    /// 计算字节的 SHA-256（hex 字符串）。
+    fun computeSha256(bytes: String): String {
+        return Encoding.sha256(bytes)
+    }
+
+    /// 生成 checksum.sha256 文件内容。
+    fun generateChecksumFile(entries: List<ChecksumEntry>): String {
+        var result: String = ""
+        for (entry in entries) {
+            result = result + entry.toLine() + "\n"
+        }
+        return result
+    }
+
+    /// 解析 checksum.sha256 文件内容。
+    fun parseChecksumFile(content: String): List<ChecksumEntry> {
+        val entries: List<ChecksumEntry> = []
+        val lines: Array = content.split("\n")
+        for (line in lines) {
+            val entry: ChecksumEntry = ChecksumEntry.parseLine(line)
+            if (entry != null) {
+                entries.add(entry)
+            }
+        }
+        return entries
+    }
+
+    /// 检查路径是否在给定目录下。
+    fun pathUnder(dir: String, path: String): Boolean {
+        if (path.indexOf(dir) != 0) {
+            return false
+        } else if (path.length == dir.length) {
+            return true
+        } else {
+            return path.charCodeAt(dir.length) == 47 // '/'
+        }
+    }
+
+    /// 从文件列表中查找内容。
+    fun findFileContent(files: List<Pair<String, String>>, name: String): String {
+        for (file in files) {
+            if (file.first == name) {
+                return file.second
+            }
+        }
+        return null
+    }
+
+    /// 验证包内容完整性。
+    fun verifyContent(content: PackageContent): Boolean {
+        for (entry in content.checksumEntries) {
+            val fileContent: String = content.fileContent(entry.path)
+            if (fileContent == null) {
+                return false
+            }
+            val hash: String = AuzUtils.computeSha256(fileContent)
+            if (hash != entry.hash) {
+                return false
+            }
+        }
+        content.verified = true
+        return true
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ChecksumEntry — 校验和条目
+// ═══════════════════════════════════════════════════════════════
+
+class ChecksumEntry {
+    var hash: String = ""
+    var path: String = ""
+
+    /// 格式化为 sha256sum 一行。
+    fun toLine(): String {
+        return this.hash + "  " + this.path
+    }
+
+    /// 从 sha256sum 一行解析。
+    fun parseLine(line: String): ChecksumEntry {
+        val trimmed: String = line.trim()
+        if (trimmed.length == 0 || trimmed.startsWith("#")) {
+            return null
+        }
+        val spaceIdx: Int = trimmed.indexOf("  ")
+        if (spaceIdx < 0) {
+            spaceIdx = trimmed.indexOf(" ")
+        }
+        if (spaceIdx < 0) {
+            return null
+        }
+        val hash: String = trimmed.substring(0, spaceIdx).trim()
+        val path: String = trimmed.substring(spaceIdx).trim()
+        if (hash.length != 64) {
+            return null
+        }
+        val entry: ChecksumEntry = ChecksumEntry()
+        entry.hash = hash
+        entry.path = path
+        return entry
+    }
+
+    fun parseFromString(line: String): ChecksumEntry {
+        return ChecksumEntry.parseLine(line)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PackageBuildOptions — 打包选项
+// ═══════════════════════════════════════════════════════════════
+
+class PackageBuildOptions {
+    var includeSources: Boolean = false
+    var includeResources: Boolean = false
+    var resourceIncludePatterns: List<String> = []
+    var includeRefIndex: Boolean = true
+    var compressionLevel: Int = AuzUtils.DEFAULT_COMPRESSION_LEVEL
+
+    /// 默认选项。
+    fun minimal(): PackageBuildOptions {
+        val opts: PackageBuildOptions = PackageBuildOptions()
+        opts.includeSources = false
+        opts.includeResources = false
+        opts.includeRefIndex = true
+        opts.compressionLevel = AuzUtils.DEFAULT_COMPRESSION_LEVEL
+        return opts
+    }
+
+    /// 完整选项。
+    fun full(): PackageBuildOptions {
+        val opts: PackageBuildOptions = PackageBuildOptions()
+        opts.includeSources = true
+        opts.includeResources = false
+        opts.includeRefIndex = true
+        opts.compressionLevel = AuzUtils.DEFAULT_COMPRESSION_LEVEL
+        return opts
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// BuildResult — 打包结果
+// ═══════════════════════════════════════════════════════════════
+
+class BuildResult {
+    var path: String = ""
+    var sizeBytes: Int = 0
+    var fileCount: Int = 0
+    var manifest: PackageManifest = PackageManifest()
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PackageBuilder — 包构建器
+// ═══════════════════════════════════════════════════════════════
+
+class PackageBuilder {
+    var manifest: PackageManifest = PackageManifest()
+    var bytecode: String = "" // .auc file content
+    var sourceDir: String = ""
+    var resourceDir: String = ""
+    var options: PackageBuildOptions = PackageBuildOptions()
+
+    init(manifest: PackageManifest, bytecode: String) {
+        this.manifest = manifest
+        this.bytecode = bytecode
+        this.options = PackageBuildOptions()
+    }
+
+    /// 指定源码目录。
+    fun withSourceDir(dir: String): PackageBuilder {
+        this.sourceDir = dir
+        return this
+    }
+
+    /// 指定资源目录。
+    fun withResourceDir(dir: String): PackageBuilder {
+        this.resourceDir = dir
+        return this
+    }
+
+    /// 设置打包选项。
+    fun withOptions(opts: PackageBuildOptions): PackageBuilder {
+        this.options = opts
+        return this
+    }
+
+    /// 执行打包。
+    fun build(outputPath: String): BuildResult {
+        val files: List<Pair<String, String>> = []
+
+        // 1. META-INF/aura.toml（主清单）
+        val manifestToml: String = this.manifest.toToml()
+        files.add(Pair<String, String>(AuzUtils.MANIFEST_FILENAME, manifestToml))
+
+        // 2. lib/name-version/entry.auc（字节码）
+        val entryBase: String = this.manifest.entry.replace(".aura", "")
+        val libSubdir: String = this.manifest.name + "-" + this.manifest.version
+        val aucPath: String = AuzUtils.LIB_DIR + "/" + libSubdir + "/" + entryBase + ".auc"
+        files.add(Pair<String, String>(aucPath, this.bytecode))
+
+        // 3. ref/index.json（类型签名索引，占位）
+        if (this.options.includeRefIndex) {
+            files.add(Pair<String, String>(AuzUtils.REF_INDEX_FILENAME, "{}"))
+        }
+
+        // 4. 源码附件
+        if (this.options.includeSources && this.sourceDir.length > 0) {
+            // 源码目录处理在实际打包时由 FileSystem 扫描
+        }
+
+        // 5. 计算校验和
+        val entries: List<ChecksumEntry> = []
+        for (file in files) {
+            val entry: ChecksumEntry = ChecksumEntry()
+            entry.hash = AuzUtils.computeSha256(file.second)
+            entry.path = file.first
+            entries.add(entry)
+        }
+        val checksumContent: String = AuzUtils.generateChecksumFile(entries)
+        files.add(Pair<String, String>(AuzUtils.CHECKSUM_FILENAME, checksumContent))
+
+        // 6. 构建 tar
+        val tarData: String = Tar.createTar(files)
+
+        // 7. Zstd 压缩
+        val compressed: String = Zstd.compress(tarData, this.options.compressionLevel)
+
+        // 8. 写入文件
+        val result: BuildResult = BuildResult()
+        result.path = outputPath
+        result.sizeBytes = compressed.length
+        result.fileCount = files.length
+        result.manifest = this.manifest
+
+        FileSystem.writeFile(outputPath, compressed)
+
+        return result
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PackageContent — 包内容
+// ═══════════════════════════════════════════════════════════════
+
+class PackageContent {
+    var manifest: PackageManifest = PackageManifest()
+    var bytecode: String = ""
+    var files: List<Pair<String, String>> = []
+    var checksumEntries: List<ChecksumEntry> = []
+    var verified: Boolean = false
+
+    /// 获取字节码。
+    fun getBytecode(): String {
+        return this.bytecode
+    }
+
+    /// 获取文件内容。
+    fun fileContent(path: String): String {
+        for (file in this.files) {
+            if (file.first == path) {
+                return file.second
+            }
+        }
+        return ""
+    }
+
+    /// 获取源码文件列表。
+    fun sourceFiles(): List<Pair<String, String>> {
+        val sources: List<Pair<String, String>> = []
+        for (file in this.files) {
+            if (AuzUtils.pathUnder(AuzUtils.SRC_DIR, file.first)) {
+                sources.add(file)
+            }
+        }
+        return sources
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PackageReader — 包读取器
+// ═══════════════════════════════════════════════════════════════
+
+class PackageReader {
+
+    /// 从文件读取 .auz 包。
+    fun readFile(path: String): PackageContent {
+        val bytes: String = FileSystem.readFile(path)
+        if (bytes == null || bytes.length < 4) {
+            return null
+        }
+        return PackageReader.fromBytes(bytes)
+    }
+
+    /// 从字节读取 .auz 包。
+    fun fromBytes(bytes: String): PackageContent {
+        // 1. Zstd 魔数检测
+        if (bytes.length < 4 || bytes.substring(0, 4) != AuzUtils.ZSTD_MAGIC) {
+            return null
+        }
+
+        // 2. Zstd 解压
+        val tarBytes: String = Zstd.decompress(bytes)
+        if (tarBytes == null) {
+            return null
+        }
+
+        // 3. Tar 读取
+        val files: List<Pair<String, String>> = Tar.extractTar(tarBytes)
+        if (files == null) {
+            return null
+        }
+
+        // 4. 解析清单
+        val manifestContent: String = AuzUtils.findFileContent(files, AuzUtils.MANIFEST_FILENAME)
+        if (manifestContent == null) {
+            return null
+        }
+        val manifest: PackageManifest = PackageManifest.fromToml(manifestContent)
+
+        // 5. 加载字节码
+        val entryBase: String = manifest.entry.replace(".aura", "")
+        val libSubdir: String = manifest.name + "-" + manifest.version
+        val aucPath: String = AuzUtils.LIB_DIR + "/" + libSubdir + "/" + entryBase + ".auc"
+        val bytecode: String = AuzUtils.findFileContent(files, aucPath)
+
+        // 6. 加载校验和
+        val checksumContent: String = AuzUtils.findFileContent(files, AuzUtils.CHECKSUM_FILENAME)
+        val checksumEntries: List<ChecksumEntry> = []
+        if (checksumContent != null) {
+            val parsed: List<ChecksumEntry> = AuzUtils.parseChecksumFile(checksumContent)
+            if (parsed != null) {
+                checksumEntries = parsed
+            }
+        }
+
+        val content: PackageContent = PackageContent()
+        content.manifest = manifest
+        content.bytecode = bytecode
+        content.files = files
+        content.checksumEntries = checksumEntries
+        content.verified = false
+
+        return content
+    }
+
+    /// 验证 .auz 文件完整性。
+    fun verify(path: String): Boolean {
+        val content: PackageContent = PackageReader.readFile(path)
+        if (content == null) {
+            return false
+        }
+        return AuzUtils.verifyContent(content)
+    }
+}
+

@@ -110,9 +110,9 @@ impl LocalCache {
         // 加载已有的 fingerprint
         let store = if fingerprint_file.exists() {
             let content = std::fs::read_to_string(&fingerprint_file)
-                .map_err(|e| LoomError::Cache(format!("无法读取 fingerprint 文件: {}", e)))?;
+                .map_err(|e| LoomError::Cache(format!("Failed to read fingerprint file: {}", e)))?;
             serde_json::from_str(&content)
-                .map_err(|e| LoomError::Cache(format!("无法解析 fingerprint 文件: {}", e)))?
+                .map_err(|e| LoomError::Cache(format!("Failed to parse fingerprint file: {}", e)))?
         } else {
             FingerprintStore {
                 metadata: CacheMetadata {
@@ -128,9 +128,9 @@ impl LocalCache {
         // 加载已有的 metadata
         let meta_store = if metadata_file.exists() {
             let content = std::fs::read_to_string(&metadata_file)
-                .map_err(|e| LoomError::Cache(format!("无法读取 metadata 文件: {}", e)))?;
+                .map_err(|e| LoomError::Cache(format!("Failed to read metadata file: {}", e)))?;
             serde_json::from_str(&content)
-                .map_err(|e| LoomError::Cache(format!("无法解析 metadata 文件: {}", e)))?
+                .map_err(|e| LoomError::Cache(format!("Failed to parse metadata file: {}", e)))?
         } else {
             CacheMetaStore::default()
         };
@@ -188,9 +188,9 @@ impl LocalCache {
         self.store.metadata.total_size_bytes = self.compute_total_size();
 
         let content = serde_json::to_string_pretty(&self.store)
-            .map_err(|e| LoomError::Cache(format!("无法序列化 fingerprint: {}", e)))?;
+            .map_err(|e| LoomError::Cache(format!("Failed to serialize fingerprint: {}", e)))?;
         std::fs::write(&self.fingerprint_file, content)
-            .map_err(|e| LoomError::Cache(format!("无法写入 fingerprint 文件: {}", e)))?;
+            .map_err(|e| LoomError::Cache(format!("Failed to write fingerprint file: {}", e)))?;
         Ok(())
     }
 
@@ -267,7 +267,7 @@ impl LocalCache {
             }
 
             let file_name = artifact.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
-                LoomError::Cache(format!("无法获取文件名: {}", artifact.display()))
+                LoomError::Cache(format!("Failed to get file name: {}", artifact.display()))
             })?;
 
             let dest = dest_dir.join(file_name);
@@ -385,9 +385,9 @@ impl LocalCache {
         self.meta_store.metadata.total_size_bytes = self.compute_total_size();
 
         let content = serde_json::to_string_pretty(&self.meta_store)
-            .map_err(|e| LoomError::Cache(format!("无法序列化 metadata: {}", e)))?;
+            .map_err(|e| LoomError::Cache(format!("Failed to serialize metadata: {}", e)))?;
         std::fs::write(&self.metadata_file, content)
-            .map_err(|e| LoomError::Cache(format!("无法写入 metadata 文件: {}", e)))?;
+            .map_err(|e| LoomError::Cache(format!("Failed to write metadata file: {}", e)))?;
         Ok(())
     }
 
@@ -446,11 +446,11 @@ pub struct CacheStats {
 
 impl std::fmt::Display for CacheStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "缓存目录: {}", self.cache_dir.display())?;
-        writeln!(f, "  Fingerprint: {} 个任务", self.fingerprint_count)?;
-        write!(f, "  产物: {} 个文件", self.artifact_count)?;
-        write!(f, "  大小: {}", format_size(self.total_size_bytes))?;
-        writeln!(f, "  版本: {}", self.version)
+        write!(f, "Cache dir: {}", self.cache_dir.display())?;
+        writeln!(f, "  Fingerprint: {} tasks", self.fingerprint_count)?;
+        write!(f, "  Artifacts: {} files", self.artifact_count)?;
+        write!(f, "  Size: {}", format_size(self.total_size_bytes))?;
+        writeln!(f, "  Version: {}", self.version)
     }
 }
 

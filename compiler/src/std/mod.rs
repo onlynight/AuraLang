@@ -67,6 +67,8 @@ pub mod std_path;
 pub mod std_process;
 #[cfg(feature = "std-random")]
 pub mod std_random;
+#[cfg(feature = "std-sb")]
+pub mod std_sb;
 #[cfg(feature = "std-string")]
 pub mod std_string;
 #[cfg(feature = "std-test")]
@@ -125,16 +127,20 @@ pub fn register_all(reg: &mut NativeRegistry) {
     std_process::register(reg);
     #[cfg(feature = "std-random")]
     std_random::register(reg);
+    #[cfg(feature = "std-sb")]
+    std_sb::register(reg);
+    // Phase D: Encoding 保留 native 注册（SHA256 等 crypto 函数需 native），
+    // 但 base64/hex/url 等纯逻辑函数由 stdlib_func_map 优先派发 Aura 版本。
     #[cfg(feature = "std-encoding")]
     std_encoding::register(reg);
-    #[cfg(feature = "std-ascii")]
-    std_ascii::register(reg);
+    // #[cfg(feature = "std-ascii")]
+    // std_ascii::register(reg);
     #[cfg(feature = "std-console")]
     std_console::register(reg);
     #[cfg(feature = "std-path")]
     std_path::register(reg);
-    #[cfg(feature = "std-assert")]
-    std_assert::register(reg);
+    // #[cfg(feature = "std-assert")]
+    // std_assert::register(reg);
     #[cfg(feature = "std-iter")]
     std_iter::register(reg);
 }
@@ -172,16 +178,19 @@ pub fn register_with_modules(reg: &mut NativeRegistry, modules: &[&str]) {
             "process" => std_process::register(reg),
             #[cfg(feature = "std-random")]
             "random" => std_random::register(reg),
+            #[cfg(feature = "std-sb")]
+            "sb" => std_sb::register(reg),
+            // Phase D: encoding / ascii / assert 已完全 Aura 实现，由 stdlib_func_map 派发
             #[cfg(feature = "std-encoding")]
             "encoding" => std_encoding::register(reg),
             #[cfg(feature = "std-ascii")]
-            "ascii" => std_ascii::register(reg),
+            "ascii" => { /* 纯逻辑，Aura 实现优先，无需 native 注册 */ }
             #[cfg(feature = "std-console")]
             "console" => std_console::register(reg),
             #[cfg(feature = "std-path")]
             "path" => std_path::register(reg),
             #[cfg(feature = "std-assert")]
-            "assert" => std_assert::register(reg),
+            "assert" => { /* 纯逻辑，Aura 实现优先，无需 native 注册 */ }
             #[cfg(feature = "std-iter")]
             "iter" => std_iter::register(reg),
             _ => {} // 未知模块或未启用，跳过
@@ -216,6 +225,7 @@ pub fn module_name_from_path(path: &str) -> Option<&str> {
             "Process" => Some("process"),
             "Random" => Some("random"),
             "String" => Some("string"),
+            "StringBuilder" => Some("sb"),
             "Test" => Some("test"),
             "Time" => Some("time"),
             "Coroutine" => Some("concurrent"),

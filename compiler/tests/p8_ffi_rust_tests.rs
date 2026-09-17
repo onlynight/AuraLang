@@ -15,21 +15,21 @@ use compiler::vm::{Value, Vm, VmOptions};
 
 /// 编译源码并执行 main，返回结果
 fn run_main(source: &str) -> Value {
-    let module = compile_source(source).expect("编译应成功");
-    let mut vm = Vm::new(&module, VmOptions::default()).expect("VM 初始化");
-    vm.run().expect("运行应成功")
+    let module = compile_source(source).expect("compilation should succeed");
+    let mut vm = Vm::new(&module, VmOptions::default()).expect("VM initialization");
+    vm.run().expect("run should succeed")
 }
 
 /// 仅编译源码（不执行），用于语法/语义检查
 fn compile_only(source: &str) {
-    compile_source(source).expect("编译应成功");
+    compile_source(source).expect("compilation should succeed");
 }
 
 /// 解析源码并生成 HIR（用于检查 HIR 结构）
 fn parse_to_hir(source: &str) -> compiler::codegen::hir::HirProgram {
     let mut lexer = Lexer::new(source);
     let tokens = lexer.tokenize();
-    assert!(lexer.errors().is_empty(), "词法错误: {:?}", lexer.errors());
+    assert!(lexer.errors().is_empty(), "lex error: {:?}", lexer.errors());
     let mut parser = Parser::new(tokens);
     let program = parser.parse_program();
     let perrs: Vec<_> = parser
@@ -37,7 +37,7 @@ fn parse_to_hir(source: &str) -> compiler::codegen::hir::HirProgram {
         .iter()
         .filter(|e| e.severity == compiler::errors::ErrorSeverity::Error)
         .collect();
-    assert!(perrs.is_empty(), "语法错误: {:?}", perrs);
+    assert!(perrs.is_empty(), "syntax error: {:?}", perrs);
     desugar_program(&program)
 }
 
@@ -153,7 +153,7 @@ fn test_extern_rust_constants_in_bytecode() {
             return 42
         }
     "#;
-    let module = compile_source(src).expect("编译应成功");
+    let module = compile_source(src).expect("compilation should succeed");
     let has_int_42 =
         module.consts.iter().any(|c| matches!(c, compiler::codegen::opcode::Const::Int(42)));
     let has_float_314 = module.consts.iter().any(
@@ -163,9 +163,9 @@ fn test_extern_rust_constants_in_bytecode() {
         .consts
         .iter()
         .any(|c| matches!(c, compiler::codegen::opcode::Const::Str(s) if s == "hello"));
-    assert!(has_int_42, "常量池应包含 Int(42)");
-    assert!(has_float_314, "常量池应包含 Float(3.14)");
-    assert!(has_str_hello, "常量池应包含 Str(\"hello\")");
+    assert!(has_int_42, "constant pool should contain Int(42)");
+    assert!(has_float_314, "constant pool should contain Float(3.14)");
+    assert!(has_str_hello, "constant pool should contain Str(\"hello\")");
 }
 
 /// extern "rust" 回调注册（语法检查）
@@ -217,9 +217,9 @@ fn test_hir_ffi_abi_rust() {
     "#;
     let hir = parse_to_hir(src);
     // 找到 add 函数
-    let add_fn = hir.natives.iter().find(|f| f.name == "add").expect("应找到 add");
-    assert!(add_fn.is_native, "add 应为原生函数");
-    assert_eq!(add_fn.ffi_abi, FfiAbi::Rust, "ffi_abi 应为 Rust");
+    let add_fn = hir.natives.iter().find(|f| f.name == "add").expect("should find add");
+    assert!(add_fn.is_native, "add should be a native function");
+    assert_eq!(add_fn.ffi_abi, FfiAbi::Rust, "ffi_abi should be Rust");
     assert_eq!(
         add_fn.ffi_lib,
         Some("mylib".to_string()),
@@ -237,9 +237,9 @@ fn test_hir_ffi_abi_c() {
         fun main(): Int { return 42 }
     "#;
     let hir = parse_to_hir(src);
-    let add_fn = hir.natives.iter().find(|f| f.name == "add").expect("应找到 add");
+    let add_fn = hir.natives.iter().find(|f| f.name == "add").expect("should find add");
     assert!(add_fn.is_native);
-    assert_eq!(add_fn.ffi_abi, FfiAbi::C, "ffi_abi 应为 C");
+    assert_eq!(add_fn.ffi_abi, FfiAbi::C, "ffi_abi should be C");
     assert_eq!(
         add_fn.ffi_lib,
         Some("mylib".to_string()),
@@ -257,9 +257,9 @@ fn test_hir_ffi_abi_rust_no_lib() {
         fun main(): Int { return 42 }
     "#;
     let hir = parse_to_hir(src);
-    let add_fn = hir.natives.iter().find(|f| f.name == "add").expect("应找到 add");
+    let add_fn = hir.natives.iter().find(|f| f.name == "add").expect("should find add");
     assert_eq!(add_fn.ffi_abi, FfiAbi::Rust);
-    assert_eq!(add_fn.ffi_lib, None, "ffi_lib 应为 None");
+    assert_eq!(add_fn.ffi_lib, None, "ffi_lib should be None");
 }
 
 /// 普通函数 → ffi_abi = None
@@ -272,9 +272,13 @@ fn test_hir_ffi_abi_none_for_regular_fn() {
         fun main(): Int { return add(1, 2) }
     "#;
     let hir = parse_to_hir(src);
-    let add_fn = hir.functions.iter().find(|f| f.name == "add").expect("应找到 add");
+    let add_fn = hir.functions.iter().find(|f| f.name == "add").expect("should find add");
     assert!(!add_fn.is_native);
-    assert_eq!(add_fn.ffi_abi, FfiAbi::None, "普通函数 ffi_abi 应为 None");
+    assert_eq!(
+        add_fn.ffi_abi,
+        FfiAbi::None,
+        "regular function ffi_abi should be None"
+    );
     assert_eq!(add_fn.ffi_lib, None);
 }
 
@@ -285,7 +289,7 @@ fn test_hir_ffi_abi_none_for_builtin() {
         fun main(): Int { println("hello"); return 42 }
     "#;
     let hir = parse_to_hir(src);
-    let println_fn = hir.natives.iter().find(|f| f.name == "println").expect("应找到 println");
+    let println_fn = hir.natives.iter().find(|f| f.name == "println").expect("should find println");
     assert!(println_fn.is_native);
     assert_eq!(
         println_fn.ffi_abi,
@@ -305,7 +309,7 @@ fn test_hir_ffi_abi_rust_uppercase() {
         fun main(): Int { return 42 }
     "#;
     let hir = parse_to_hir(src);
-    let foo_fn = hir.natives.iter().find(|f| f.name == "foo").expect("应找到 foo");
+    let foo_fn = hir.natives.iter().find(|f| f.name == "foo").expect("should find foo");
     assert_eq!(
         foo_fn.ffi_abi,
         FfiAbi::Rust,
@@ -330,14 +334,15 @@ fn test_serialization_roundtrip_ffi_abi() {
         fun main(): Int { return 42 }
     "#;
     // 编译为字节码模块
-    let module = compile_source(src).expect("编译应成功");
+    let module = compile_source(src).expect("compilation should succeed");
     // 序列化
     let bytes = to_bytes(&module);
     // 反序列化
-    let loaded = from_bytes(&bytes).expect("反序列化应成功");
+    let loaded = from_bytes(&bytes).expect("deserialization should succeed");
 
     // 验证 FFI ABI 信息保留
-    let add_native = loaded.natives.iter().find(|n| n.name == "add").expect("应找到 add 原生函数");
+    let add_native =
+        loaded.natives.iter().find(|n| n.name == "add").expect("should find add native function");
     assert_eq!(
         add_native.ffi_abi,
         FfiAbi::Rust,
@@ -362,12 +367,17 @@ fn test_serialization_roundtrip_ffi_abi_c() {
         }
         fun main(): Int { return 42 }
     "#;
-    let module = compile_source(src).expect("编译应成功");
+    let module = compile_source(src).expect("compilation should succeed");
     let bytes = to_bytes(&module);
-    let loaded = from_bytes(&bytes).expect("反序列化应成功");
+    let loaded = from_bytes(&bytes).expect("deserialization should succeed");
 
-    let add_native = loaded.natives.iter().find(|n| n.name == "add").expect("应找到 add 原生函数");
-    assert_eq!(add_native.ffi_abi, FfiAbi::C, "序列化后 ffi_abi 应保留为 C");
+    let add_native =
+        loaded.natives.iter().find(|n| n.name == "add").expect("should find add native function");
+    assert_eq!(
+        add_native.ffi_abi,
+        FfiAbi::C,
+        "ffi_abi should be preserved as C after serialization"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -390,7 +400,10 @@ fn test_sema_warning_for_extern_rust() {
         .iter()
         .filter(|e| e.severity == compiler::errors::ErrorSeverity::Warning)
         .collect();
-    assert!(!warnings.is_empty(), "extern \"rust\" 块应产生 sema 警告");
+    assert!(
+        !warnings.is_empty(),
+        "extern \"rust\" block should produce sema warning"
+    );
     let has_ffi_warning =
         warnings.iter().any(|w| w.message.contains("#[no_mangle]") && w.message.contains("extern"));
     assert!(
@@ -418,7 +431,10 @@ fn test_no_sema_warning_for_extern_c() {
                 && e.message.contains("#[no_mangle]")
         })
         .collect();
-    assert!(ffi_warnings.is_empty(), "extern \"c\" 块不应产生 FFI 警告");
+    assert!(
+        ffi_warnings.is_empty(),
+        "extern \"c\" block should not produce FFI warning"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -449,14 +465,23 @@ fn test_aot_llvm_ir_for_extern_rust() {
         Ok(output) => {
             // 验证 LLVM IR 文本包含正确的声明
             let ir = &output.ir_text;
-            assert!(ir.contains("declare"), "LLVM IR 应包含 declare 声明");
-            assert!(ir.contains("add"), "LLVM IR 应包含 add 函数");
-            assert!(ir.contains("P8-Rust"), "LLVM IR 应包含 P8-Rust 注释");
+            assert!(
+                ir.contains("declare"),
+                "LLVM IR should contain declare statement"
+            );
+            assert!(ir.contains("add"), "LLVM IR should contain add function");
+            assert!(
+                ir.contains("P8-Rust"),
+                "LLVM IR should contain P8-Rust comment"
+            );
             // 清理临时文件
             let _ = std::fs::remove_file(&output_path);
         }
         Err(e) => {
-            eprintln!("AOT 编译失败（可能缺少 LLVM 工具链）: {}", e);
+            eprintln!(
+                "AOT compilation failed (LLVM toolchain may be missing): {}",
+                e
+            );
         }
     }
 }
@@ -490,7 +515,10 @@ fn test_aot_llvm_ir_for_extern_c() {
             let _ = std::fs::remove_file(&output_path);
         }
         Err(e) => {
-            eprintln!("AOT 编译失败（可能缺少 LLVM 工具链）: {}", e);
+            eprintln!(
+                "AOT compilation failed (LLVM toolchain may be missing): {}",
+                e
+            );
         }
     }
 }

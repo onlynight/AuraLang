@@ -17,13 +17,13 @@ fn main() {
     let mut lexer = Lexer::new(SRC);
     let tokens = lexer.tokenize();
     if let Some(e) = lexer.errors().first() {
-        eprintln!("词法错误: {}", e.message);
+        eprintln!("lex error: {}", e.message);
         return;
     }
     let mut parser = Parser::new(tokens);
     let program = parser.parse_program();
     if let Some(e) = parser.errors().first() {
-        eprintln!("语法错误: {}", e.message);
+        eprintln!("syntax error: {}", e.message);
         return;
     }
     let hir = desugar_program(&program);
@@ -32,32 +32,32 @@ fn main() {
     let output = match codegen.compile(&hir, &work_dir, OutputFormat::SharedLibrary) {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("SharedLibrary 编译失败: {}", e);
+            eprintln!("SharedLibrary compilation failed: {}", e);
             return;
         }
     };
 
-    let lib_path = output.shared_library_path.expect("应生成动态库");
-    println!("✓ 动态库编译完成: {}", lib_path.display());
+    let lib_path = output.shared_library_path.expect("should generate shared library");
+    println!("* Shared library compiled: {}", lib_path.display());
 
     // ── 2. 加载动态库 ──
     let mut runtime = AotRuntime::new();
     let module_id = match runtime.load_shared_library(lib_path.to_str().unwrap()) {
         Ok(id) => id,
         Err(e) => {
-            eprintln!("加载共享库失败: {}", e);
+            eprintln!("Failed to load shared library: {}", e);
             return;
         }
     };
 
     let func_count = runtime.shared_lib_func_count(module_id);
     println!(
-        "✓ 共享库加载成功 (module_id={}, 导出函数数={})",
+        "* Shared library loaded (module_id={}, exported functions={})",
         module_id, func_count
     );
 
-    let diag = runtime.module_diagnostics(module_id).expect("应有诊断信息");
-    println!("  模块: {} (func_count={})", diag.name, diag.func_count);
+    let diag = runtime.module_diagnostics(module_id).expect("should have diagnostics");
+    println!("  Module: {} (func_count={})", diag.name, diag.func_count);
 
     // ── 3. 调用函数 ──
     // func_idx=0: add(3,4)=7, func_idx=1: multiply(3,4)=12, func_idx=2: factorial(5)=120, func_idx=3: power(2,10)=1024
@@ -100,12 +100,12 @@ fn main() {
             );
         } else {
             println!(
-                "  func_idx={}: {}({}) 返回 tag={}, payload={}",
+                "  func_idx={}: {}({})  returned tag={}, payload={}",
                 func_idx, name, args_str, ret.tag, ret.payload
             );
         }
     }
 
     let _ = std::fs::remove_dir_all(&work_dir);
-    println!("\n✓ 端到端验证通过");
+    println!("\n* End-to-end verification passed");
 }

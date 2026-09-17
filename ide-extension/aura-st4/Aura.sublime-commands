@@ -34,7 +34,7 @@
         "command": "show_symbol_list",
         "args": {
             "symbols_style": "all",
-            "regex": "\\b(fun|class|struct|enum|interface|actor|object|typealias|val|var)\\s+\\w+"
+            "regex": "\\b(fun|class|struct|enum|interface|actor|object|typealias|val|var|defer|async|native|package)\\s+\\w+"
         }
     }
 ]

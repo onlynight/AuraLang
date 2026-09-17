@@ -1,0 +1,122 @@
+// aura:///aura/lang/concurrent/Future.aura
+package aura.lang.concurrent
+// 异步 Future —— 纯 Aura 实现（结果槽 + 状态机全部在 Aura 里）。
+//
+// 实现说明：
+//   * `spawn` 分配一块 24 字节堆内存作为 Future 状态块，并返回其地址作为句柄：
+//       +0   thread_id（`Thread.join` 的句柄）
+//       +8   完成标志（0 未完成 / 1 已完成）
+//       +16  结果
+//   * 真正的异步执行由 `aura.lang.concurrent.Thread` 承担；其底层「在新 OS 线程上
+//     执行 Aura 函数」的桥接见 `aura.lang.native.thread.ThreadOps`（不可在 Aura
+//     源码层表达的唯一一步）。
+//   * 句柄分配、完成状态、结果槽、all/any/cancel 语义都在这里用 Aura 实现，
+//     不再依赖 Rust 运行库里的 Future 注册表。
+//
+// 使用前需 import：
+// ```aura
+// import aura.lang.concurrent.Future.*   // 短名可用：spawn, await, ...
+// import aura.lang.concurrent.Future     // 类式调用：Future.spawn(...)
+// ```
+//
+// 使用模式：
+// ```aura
+// val future = Future.spawn(fn_id, 42)
+// val result = Future.await(future)
+// ```
+//
+// @since 0.6
+import aura.lang.native.Memory
+import aura.lang.concurrent.Thread
+object Future {
+
+    /// 异步执行一个线程任务，返回 Future 句柄
+    ///
+    /// - 参数：`fn_id` — 要异步执行的函数 ID
+    /// - 参数：`arg` — 传递给函数的参数
+    /// - 返回：Future 句柄 ID（状态块地址；0 表示创建失败）
+    fun spawn(fn_id: Int, arg: Int): Int {
+        val cell: Long = Memory.alloc(24L)
+        if (cell == 0L) {
+            return 0
+        }
+        val tid: Int = Thread.spawn(fn_id, arg)
+        if (tid <= 0) {
+            Memory.free(cell)
+            return 0
+        }
+        Memory.write64(cell, tid as Long)
+        Memory.write64(cell + 8L, 0L)
+        Memory.write64(cell + 16L, 0L)
+        return cell as Int
+    }
+
+    /// 阻塞等待 Future 完成并返回结果
+    ///
+    /// - 参数：`future_id` — Future 句柄 ID
+    /// - 返回：Future 的计算结果
+    fun await(future_id: Int): Int {
+        val cell: Long = future_id as Long
+        if (cell == 0L) {
+            return 0
+        }
+        val tid: Int = Memory.read64(cell) as Int
+        val result: Int = Thread.join(tid)
+        Memory.write64(cell + 16L, result as Long)
+        Memory.write64(cell + 8L, 1L)
+        return result
+    }
+
+    /// 非阻塞检查 Future 是否完成
+    ///
+    /// - 参数：`future_id` — Future 句柄 ID
+    /// - 返回：true 表示已完成（已 await 或被 cancel）
+    fun isDone(future_id: Int): Boolean {
+        val cell: Long = future_id as Long
+        if (cell == 0L) {
+            return false
+        }
+        return Memory.read64(cell + 8L) != 0L
+    }
+
+    /// 等待多个 Future 全部完成
+    ///
+    /// - 参数：`future_ids` — Future 句柄列表
+    /// - 返回：所有 Future 的结果列表（顺序与输入一致）
+    fun all(future_ids: List<Int>): List<Int> {
+        // 必须用 `arrayListOf`（堆列表，`__list_push` 原地追加）。
+        // `mutableListOf` 产出的是值语义 `Value::List`，`add` 的结果会被丢弃，
+        // 聚合结果将永远是空表。
+        val results: List<Int> = arrayListOf<Int>()
+        for (id in future_ids) {
+            // 必须用限定名调用：裸 `await(id)` 会被解析为协程挂起关键字 `await`，
+            // 而不是本对象的方法调用（会被静默丢弃，压栈的是循环变量本身）。
+            results.add(aura.lang.concurrent.Future.await(id))
+        }
+        return results
+    }
+
+    /// 等待多个 Future 中第一个完成的
+    ///
+    /// - 参数：`future_ids` — Future 句柄列表
+    /// - 返回：第一个完成的 Future 结果（列表为空返回 0）
+    fun any(future_ids: List<Int>): Int {
+        for (id in future_ids) {
+            // 同 all：必须限定调用，避免与 `await` 关键字冲突
+            return aura.lang.concurrent.Future.await(id)
+        }
+        return 0
+    }
+
+    /// 取消 Future（标记完成并释放状态块）
+    ///
+    /// - 参数：`future_id` — Future 句柄 ID
+    fun cancel(future_id: Int): Unit {
+        val cell: Long = future_id as Long
+        if (cell == 0L) {
+            return
+        }
+        Memory.write64(cell + 8L, 1L)
+        Memory.free(cell)
+    }
+}

@@ -57,7 +57,7 @@ impl LocalRegistry {
         let home = std::env::var("AURA_HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
             .or_else(|_| std::env::var("HOME"))
-            .map_err(|e| LoomError::Config(format!("无法获取主目录: {}", e)))?;
+            .map_err(|e| LoomError::Config(format!("Failed to get home directory: {}", e)))?;
         let root = PathBuf::from(home).join(".aura").join("registry");
         Ok(Self::new(root))
     }
@@ -68,7 +68,7 @@ impl LocalRegistry {
 
     fn ensure_dir(&self) -> Result<(), LoomError> {
         std::fs::create_dir_all(&self.root_dir)
-            .map_err(|e| LoomError::Registry(format!("创建注册表目录失败: {}", e)))
+            .map_err(|e| LoomError::Registry(format!("Failed to create registry directory: {}", e)))
     }
 
     pub fn install(
@@ -81,13 +81,14 @@ impl LocalRegistry {
         self.ensure_dir()?;
         let package_dir = self.root_dir.join(name);
         let version_dir = package_dir.join(version);
-        std::fs::create_dir_all(&version_dir)
-            .map_err(|e| LoomError::Registry(format!("创建版本目录失败: {}", e)))?;
+        std::fs::create_dir_all(&version_dir).map_err(|e| {
+            LoomError::Registry(format!("Failed to create version directory: {}", e))
+        })?;
 
         let dest_artifact = version_dir.join(format!("{}.auz", name));
         std::fs::copy(artifact_path, &dest_artifact).map_err(|e| {
             LoomError::Registry(format!(
-                "复制制品文件失败 {}: {}",
+                "Failed to copy artifact file {}: {}",
                 artifact_path.display(),
                 e
             ))
@@ -97,7 +98,7 @@ impl LocalRegistry {
             Some(c.to_string())
         } else {
             let content = std::fs::read(&dest_artifact)
-                .map_err(|e| LoomError::Registry(format!("读取制品文件失败: {}", e)))?;
+                .map_err(|e| LoomError::Registry(format!("Failed to read artifact file: {}", e)))?;
             let hash = sha256_hash(&content);
             Some(format!("sha256:{}", hash))
         };
@@ -110,9 +111,9 @@ impl LocalRegistry {
         };
         let metadata_path = version_dir.join("metadata.json");
         let json = serde_json::to_string_pretty(&metadata)
-            .map_err(|e| LoomError::Registry(format!("序列化元数据失败: {}", e)))?;
+            .map_err(|e| LoomError::Registry(format!("Failed to serialize metadata: {}", e)))?;
         std::fs::write(&metadata_path, json)
-            .map_err(|e| LoomError::Registry(format!("写入元数据失败: {}", e)))?;
+            .map_err(|e| LoomError::Registry(format!("Failed to write metadata: {}", e)))?;
 
         self.update_index(name, version, &metadata)?;
         Ok(metadata)
@@ -142,17 +143,18 @@ impl LocalRegistry {
             return Ok(Vec::new());
         }
         let content = std::fs::read_to_string(&index_path)
-            .map_err(|e| LoomError::Registry(format!("读取索引失败: {}", e)))?;
+            .map_err(|e| LoomError::Registry(format!("Failed to read index: {}", e)))?;
         let index: CacheIndex = serde_json::from_str(&content)
-            .map_err(|e| LoomError::Registry(format!("解析索引失败: {}", e)))?;
+            .map_err(|e| LoomError::Registry(format!("Failed to parse index: {}", e)))?;
         Ok(index.entries)
     }
 
     pub fn list_packages(&self) -> Result<Vec<String>, LoomError> {
         self.ensure_dir()?;
         let mut packages = Vec::new();
-        let entries = std::fs::read_dir(&self.root_dir)
-            .map_err(|e| LoomError::Registry(format!("读取注册表目录失败: {}", e)))?;
+        let entries = std::fs::read_dir(&self.root_dir).map_err(|e| {
+            LoomError::Registry(format!("Failed to read registry directory: {}", e))
+        })?;
         for entry in entries {
             let entry = match entry {
                 Ok(e) => e,
@@ -174,12 +176,13 @@ impl LocalRegistry {
         let version_dir = self.root_dir.join(name).join(version);
         if !version_dir.exists() {
             return Err(LoomError::Registry(format!(
-                "包 {}@{} 未安装",
+                "Package {}@{} is not installed",
                 name, version
             )));
         }
-        std::fs::remove_dir_all(&version_dir)
-            .map_err(|e| LoomError::Registry(format!("删除版本目录失败: {}", e)))?;
+        std::fs::remove_dir_all(&version_dir).map_err(|e| {
+            LoomError::Registry(format!("Failed to delete version directory: {}", e))
+        })?;
         self.update_index(name, version, &CacheEntry::default())?;
 
         let package_dir = self.root_dir.join(name);
@@ -194,8 +197,9 @@ impl LocalRegistry {
                 })
                 .unwrap_or(false);
             if !has_entries {
-                std::fs::remove_dir_all(&package_dir)
-                    .map_err(|e| LoomError::Registry(format!("删除包目录失败: {}", e)))?;
+                std::fs::remove_dir_all(&package_dir).map_err(|e| {
+                    LoomError::Registry(format!("Failed to delete package directory: {}", e))
+                })?;
             }
         }
         self.update_global_index()?;
@@ -233,8 +237,9 @@ impl LocalRegistry {
     pub fn cleanup(&self) -> Result<u64, LoomError> {
         let mut removed = 0u64;
         self.ensure_dir()?;
-        let entries = std::fs::read_dir(&self.root_dir)
-            .map_err(|e| LoomError::Registry(format!("读取注册表目录失败: {}", e)))?;
+        let entries = std::fs::read_dir(&self.root_dir).map_err(|e| {
+            LoomError::Registry(format!("Failed to read registry directory: {}", e))
+        })?;
         for entry in entries {
             let entry = match entry {
                 Ok(e) => e,
@@ -246,8 +251,9 @@ impl LocalRegistry {
                     continue;
                 }
                 let package_dir = self.root_dir.join(&name);
-                let version_entries = std::fs::read_dir(&package_dir)
-                    .map_err(|e| LoomError::Registry(format!("读取包目录失败: {}", e)))?;
+                let version_entries = std::fs::read_dir(&package_dir).map_err(|e| {
+                    LoomError::Registry(format!("Failed to read package directory: {}", e))
+                })?;
                 for version_entry in version_entries {
                     let version_entry = match version_entry {
                         Ok(e) => e,
@@ -270,8 +276,9 @@ impl LocalRegistry {
                             })
                             .unwrap_or(false);
                         if !has_files {
-                            std::fs::remove_dir_all(&version_dir)
-                                .map_err(|e| LoomError::Registry(format!("清理失败: {}", e)))?;
+                            std::fs::remove_dir_all(&version_dir).map_err(|e| {
+                                LoomError::Registry(format!("Cleanup failed: {}", e))
+                            })?;
                             removed += 1;
                         }
                     }
@@ -283,12 +290,13 @@ impl LocalRegistry {
 
     fn update_index(&self, name: &str, version: &str, entry: &CacheEntry) -> Result<(), LoomError> {
         let package_dir = self.root_dir.join(name);
-        std::fs::create_dir_all(&package_dir)
-            .map_err(|e| LoomError::Registry(format!("创建包目录失败: {}", e)))?;
+        std::fs::create_dir_all(&package_dir).map_err(|e| {
+            LoomError::Registry(format!("Failed to create package directory: {}", e))
+        })?;
         let index_path = package_dir.join("index.json");
         let mut index = if index_path.exists() {
             let content = std::fs::read_to_string(&index_path)
-                .map_err(|e| LoomError::Registry(format!("读取索引失败: {}", e)))?;
+                .map_err(|e| LoomError::Registry(format!("Failed to read index: {}", e)))?;
             serde_json::from_str(&content).unwrap_or_default()
         } else {
             CacheIndex {
@@ -312,9 +320,9 @@ impl LocalRegistry {
             }
         }
         let json = serde_json::to_string_pretty(&index)
-            .map_err(|e| LoomError::Registry(format!("序列化索引失败: {}", e)))?;
+            .map_err(|e| LoomError::Registry(format!("Failed to serialize index: {}", e)))?;
         std::fs::write(&index_path, json)
-            .map_err(|e| LoomError::Registry(format!("写入索引失败: {}", e)))?;
+            .map_err(|e| LoomError::Registry(format!("Failed to write index: {}", e)))?;
         self.update_global_index()?;
         Ok(())
     }
@@ -323,7 +331,7 @@ impl LocalRegistry {
         let index_path = self.root_dir.join("index.json");
         let mut index = if index_path.exists() {
             let content = std::fs::read_to_string(&index_path)
-                .map_err(|e| LoomError::Registry(format!("读取全局索引失败: {}", e)))?;
+                .map_err(|e| LoomError::Registry(format!("Failed to read global index: {}", e)))?;
             serde_json::from_str(&content).unwrap_or_default()
         } else {
             GlobalIndex::default()
@@ -331,9 +339,9 @@ impl LocalRegistry {
         index.packages = self.list_packages()?;
         index.updated_at = Some(current_timestamp());
         let json = serde_json::to_string_pretty(&index)
-            .map_err(|e| LoomError::Registry(format!("序列化全局索引失败: {}", e)))?;
+            .map_err(|e| LoomError::Registry(format!("Failed to serialize global index: {}", e)))?;
         std::fs::write(&index_path, json)
-            .map_err(|e| LoomError::Registry(format!("写入全局索引失败: {}", e)))?;
+            .map_err(|e| LoomError::Registry(format!("Failed to write global index: {}", e)))?;
         Ok(())
     }
 }

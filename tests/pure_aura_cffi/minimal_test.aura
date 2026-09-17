@@ -1,0 +1,8 @@
+// 最小测试：@native(SYS_READ) fun read(...)
+extern object TestSyscalls {
+    @native(SYS_READ) fun read(fd: Int, buf: Long, count: Long): Long
+}
+
+fun main() {
+    println("Hello")
+}

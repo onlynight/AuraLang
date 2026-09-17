@@ -51,6 +51,8 @@ impl NativeRegistry {
         r.register("print", native_print);
         r.register("puts", native_puts);
         r.register("abs", native_abs);
+        // fnIndex(name) → Int：按函数名解析函数表下标（供 Thread.spawn 等使用）
+        r.register("fnIndex", native_fn_index);
         r.register("sqrt", native_sqrt);
         r.register("pow", native_pow);
         r.register("toInt", native_to_int);
@@ -81,6 +83,7 @@ impl NativeRegistry {
         r.register("aura.lang.std.print", native_print);
         r.register("aura.lang.std.puts", native_puts);
         r.register("aura.lang.std.abs", native_abs);
+        r.register("aura.lang.std.fnIndex", native_fn_index);
         r.register("aura.lang.std.sqrt", native_sqrt);
         r.register("aura.lang.std.pow", native_pow);
         r.register("aura.lang.std.toInt", native_to_int);
@@ -107,6 +110,13 @@ impl NativeRegistry {
         // P10: 并发运行时（需 std-concurrent feature）——与 `with_modules` 共用同一实现
         #[cfg(feature = "std-concurrent")]
         Self::register_concurrent(&mut r);
+
+        // Phase B: 并发原生函数（Thread/Mutex/Atomic/RwLock/Condvar/Barrier）
+        crate::vm::concurrent_native::register_all(&mut r);
+        // native 包底层原语（Memory / Cpu）：供纯 Aura 标准库字节码路径调用
+        Self::register_native_pkg_primitives(&mut r);
+        // native 包线程桥（ThreadOps）：Thread / Future 的 Aura 实现依赖
+        Self::register_thread_bridge(&mut r);
         Self::register_ffi_aliases(&mut r);
 
         r
@@ -128,6 +138,8 @@ impl NativeRegistry {
         r.register("print", native_print);
         r.register("puts", native_puts);
         r.register("abs", native_abs);
+        // fnIndex(name) → Int：按函数名解析函数表下标（供 Thread.spawn 等使用）
+        r.register("fnIndex", native_fn_index);
         r.register("sqrt", native_sqrt);
         r.register("pow", native_pow);
         r.register("toInt", native_to_int);
@@ -149,6 +161,11 @@ impl NativeRegistry {
         r.register("typeOf", native_type_of);
         r.register("aura_cast", native_cast);
         r.register("aura_cast_safety", native_cast_safety);
+        // for 循环迭代器支持（__size/__get）：与 NativeRegistry::new 保持一致。
+        // 选择性加载路径缺这两个会退化为「未链接 → 返回 0」，使 `for (x in list)`
+        // 变成空循环且静默无输出。
+        r.register("__size", native_size);
+        r.register("__get", native_get);
 
         // prelude 裸名（isNull / listOf / min / assertEq ...）
         crate::std::register_prelude(&mut r);
@@ -158,6 +175,7 @@ impl NativeRegistry {
         r.register("aura.lang.std.print", native_print);
         r.register("aura.lang.std.puts", native_puts);
         r.register("aura.lang.std.abs", native_abs);
+        r.register("aura.lang.std.fnIndex", native_fn_index);
         r.register("aura.lang.std.sqrt", native_sqrt);
         r.register("aura.lang.std.pow", native_pow);
         r.register("aura.lang.std.toInt", native_to_int);
@@ -187,6 +205,12 @@ impl NativeRegistry {
         if modules.iter().any(|m| *m == "concurrent") {
             Self::register_concurrent(&mut r);
         }
+        // Phase B: 并发原生函数（Thread/Mutex/Atomic/RwLock/Condvar/Barrier）
+        crate::vm::concurrent_native::register_all(&mut r);
+        // native 包底层原语（Memory / Cpu）：供纯 Aura 标准库字节码路径调用
+        Self::register_native_pkg_primitives(&mut r);
+        // native 包线程桥（ThreadOps）：Thread / Future 的 Aura 实现依赖
+        Self::register_thread_bridge(&mut r);
         // FFI 别名（aura.ffi.*）属于基础能力，始终可用
         Self::register_ffi_aliases(&mut r);
 
@@ -197,56 +221,71 @@ impl NativeRegistry {
     ///
     /// 抽为共享函数，供「全量注册」([`Self::new`]) 与「按需注册」([`Self::with_modules`])
     /// 两条路径复用——此前只有按需路径注册它们，导致 `NativeRegistry::new()` 缺少
-    /// `aura.lang.std.Coroutine.spawnActor` 等条目（docgen 的注册表一致性检查因此失败）。
+    /// `aura.lang.concurrent.Coroutine.spawnActor` 等条目（docgen 的注册表一致性检查因此失败）。
     #[cfg(feature = "std-concurrent")]
     fn register_concurrent(r: &mut NativeRegistry) {
-        r.register("aura.lang.std.Coroutine.spawn", native_spawn);
-        r.register("aura.lang.std.Actor.send", native_send);
-        r.register("aura.lang.std.Coroutine.ask", native_ask);
-        r.register("aura.lang.std.Actor.reply", native_reply);
-        r.register("aura.lang.std.Channel.newChannel", native_new_channel);
-        r.register("aura.lang.std.Channel.channelSend", native_channel_send);
-        r.register("aura.lang.std.Channel.channelRecv", native_channel_recv);
+        r.register("aura.lang.concurrent.Coroutine.spawn", native_spawn);
+        r.register("aura.lang.concurrent.Actor.send", native_send);
+        r.register("aura.lang.concurrent.Coroutine.ask", native_ask);
+        r.register("aura.lang.concurrent.Actor.reply", native_reply);
         r.register(
-            "aura.lang.std.Channel.channelTryRecv",
+            "aura.lang.concurrent.Channel.newChannel",
+            native_new_channel,
+        );
+        r.register(
+            "aura.lang.concurrent.Channel.channelSend",
+            native_channel_send,
+        );
+        r.register(
+            "aura.lang.concurrent.Channel.channelRecv",
+            native_channel_recv,
+        );
+        r.register(
+            "aura.lang.concurrent.Channel.channelTryRecv",
             native_channel_try_recv,
         );
-        r.register("aura.lang.std.Channel.select", native_select);
-        r.register("aura.lang.std.Channel.selectTimeout", native_select_timeout);
-        r.register("aura.lang.std.Actor.spawnActor", native_spawn_actor);
+        r.register("aura.lang.concurrent.Channel.select", native_select);
+        r.register(
+            "aura.lang.concurrent.Channel.selectTimeout",
+            native_select_timeout,
+        );
+        r.register("aura.lang.concurrent.Actor.spawnActor", native_spawn_actor);
         // HIR 的并发路径解析也会产出 `Coroutine.spawnActor`（见 codegen::hir
         // 的 `resolve_function_path`），补别名避免同一函数两种名字解析不到。
-        r.register("aura.lang.std.Coroutine.spawnActor", native_spawn_actor);
-        r.register("aura.lang.std.Actor.supervise", native_supervise);
-        r.register("aura.lang.std.Actor.actorAlive", native_actor_alive);
+        r.register(
+            "aura.lang.concurrent.Coroutine.spawnActor",
+            native_spawn_actor,
+        );
+        r.register("aura.lang.concurrent.Actor.supervise", native_supervise);
+        r.register("aura.lang.concurrent.Actor.actorAlive", native_actor_alive);
 
         // Phase 3: 跨进程 Actor / Channel
         r.register(
-            "aura.lang.std.Actor.spawnActorProcess",
+            "aura.lang.concurrent.Actor.spawnActorProcess",
             native_spawn_actor_process,
         );
         r.register(
-            "aura.lang.std.Actor.sendProcessActor",
+            "aura.lang.concurrent.Actor.sendProcessActor",
             native_send_process_actor,
         );
         r.register(
-            "aura.lang.std.Actor.recvProcessActor",
+            "aura.lang.concurrent.Actor.recvProcessActor",
             native_recv_process_actor,
         );
         r.register(
-            "aura.lang.std.Actor.processActorAlive",
+            "aura.lang.concurrent.Actor.processActorAlive",
             native_process_actor_alive,
         );
         r.register(
-            "aura.lang.std.Actor.killProcessActor",
+            "aura.lang.concurrent.Actor.killProcessActor",
             native_kill_process_actor,
         );
         r.register(
-            "aura.lang.std.Channel.newTcpChannel",
+            "aura.lang.concurrent.Channel.newTcpChannel",
             native_new_tcp_channel,
         );
         r.register(
-            "aura.lang.std.Channel.tcpChannelSend",
+            "aura.lang.concurrent.Channel.tcpChannelSend",
             native_tcp_channel_send,
         );
     }
@@ -262,6 +301,61 @@ impl NativeRegistry {
         r.register("aura.ffi.ptrToInt", native_ptr_to_int);
         r.register("aura.ffi.intToPtr", native_int_to_ptr);
         r.register("aura.ffi.makeCallback", native_make_callback);
+    }
+
+    /// 注册 native 包（`aura.lang.native.*`）的底层原语（Memory / Cpu）。
+    ///
+    /// 这些是 Layer 0-A 的编译器内置能力：内存 read/write/alloc/free 与内联汇编
+    /// 原子指令。纯 Aura 标准库（如 `aura.lang.concurrent` 的同步原语）在**字节码
+    /// 解释**路径下会以 `Memory.alloc` / `Cpu.atomicAdd` 等名字调用它们；
+    /// AOT 路径由 `emit_native_wrapper` 直接降级为 malloc / load / store /
+    /// `aura_cpu_atomic_add`，不经过本表。
+    fn register_native_pkg_primitives(r: &mut NativeRegistry) {
+        r.register("Memory.alloc", native_memory_alloc);
+        r.register("Memory.free", native_memory_free);
+        r.register("Memory.read", native_memory_read);
+        r.register("Memory.read16", native_memory_read16);
+        r.register("Memory.read32", native_memory_read32);
+        r.register("Memory.read64", native_memory_read64);
+        r.register("Memory.write", native_memory_write);
+        r.register("Memory.write16", native_memory_write16);
+        r.register("Memory.write32", native_memory_write32);
+        r.register("Memory.write64", native_memory_write64);
+        r.register("Memory.copy", native_memory_copy);
+        r.register("Memory.set", native_memory_set);
+        r.register("Cpu.rdtsc", native_cpu_rdtsc);
+        r.register("Cpu.memFence", native_cpu_mem_fence);
+        r.register("Cpu.cpuid", native_cpu_cpuid);
+        r.register("Cpu.atomicAdd", native_cpu_atomic_add);
+    }
+
+    /// 注册 native 包的线程桥原语（`aura.lang.native.thread.ThreadOps`）。
+    ///
+    /// 这是「在新 OS 线程上执行一段 Aura 函数」的**唯一**桥接：`Thread` / `Future`
+    /// 的纯 Aura 实现调用它们，其余逻辑（句柄、状态机、结果槽、all/any/cancel）
+    /// 全部在 Aura 侧。桥本身需要克隆模块并为新线程建立 VM 执行环境，
+    /// 因此无法用 Aura 表达（见 `aura/lang/native/thread/ThreadOps.aura`）。
+    fn register_thread_bridge(r: &mut NativeRegistry) {
+        r.register(
+            "ThreadOps.create",
+            crate::vm::concurrent_native::native_thread_spawn,
+        );
+        r.register(
+            "ThreadOps.join",
+            crate::vm::concurrent_native::native_thread_join,
+        );
+        r.register(
+            "ThreadOps.sleepMs",
+            crate::vm::concurrent_native::native_thread_sleep,
+        );
+        r.register(
+            "ThreadOps.currentId",
+            crate::vm::concurrent_native::native_thread_id,
+        );
+        r.register(
+            "ThreadOps.cores",
+            crate::vm::concurrent_native::native_thread_available_cores,
+        );
     }
 
     pub fn register(&mut self, name: &str, f: NativeFn) {
@@ -634,6 +728,14 @@ fn get_vm_ref() -> Option<*mut crate::vm::Vm> {
         .map(|addr| addr as *mut crate::vm::Vm)
 }
 
+/// 获取当前 VM 的模块克隆（供 `Thread.spawn` 创建新 VM 使用）
+///
+/// 返回 `None` 表示当前线程无活跃 VM。
+pub fn current_vm_module_clone() -> Option<crate::codegen::opcode::BytecodeModule> {
+    let vm = get_vm_ref()?;
+    Some(unsafe { (*vm).module_clone() })
+}
+
 /// spawn(expr) → Int：创建新协程（P10.1）
 ///
 /// 将表达式作为协程入口，创建新协程并返回协程 ID。
@@ -671,7 +773,10 @@ fn native_ask(args: &[Value]) -> Value {
         let msg = args[1].clone();
         if let Some(vm_ptr) = get_vm_ref() {
             unsafe {
-                return (*vm_ptr).actors.ask(actor_id, msg);
+                // 使用非阻塞版本：Actor 没有自动消息处理循环，任何「等待」都会挂死
+                // （各平台的 EventNotifier::wait 忽略超时参数）。有响应返回响应，
+                // 否则返回 Null —— 与设计文档的「伪阻塞」语义一致。
+                return (*vm_ptr).actors.try_ask(actor_id, msg);
             }
         }
     }
@@ -874,6 +979,193 @@ fn native_actor_alive(args: &[Value]) -> Value {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Layer 0-A: native 包原语（Memory / Cpu）
+//
+// 供纯 Aura 标准库在字节码路径下调用；AOT 路径不复用这些实现。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 读取第 `i` 个参数为 i64（缺参按 0）。
+fn arg_i64(args: &[Value], i: usize) -> i64 {
+    args.get(i).map(|v| v.as_int()).unwrap_or(0)
+}
+
+/// fnIndex(name) → Int：按函数名解析当前模块函数表中的下标（找不到返回 -1）。
+///
+/// 存在的原因：`Thread.spawn(fn_id, arg)` / `ThreadOps.create(fn_id, arg)` 需要的是
+/// **函数表下标**，而 Aura 源码层此前没有任何方式取得它（`makeCallback` 产出的是
+/// C 回调蹦床，MIR 的 `MakeFnRef` 也没有 HIR 生产者）。有了 `fnIndex` 即可：
+/// ```aura
+/// fun worker(n: Int): Int { return n * 2 }
+/// val t = Thread.spawn(fnIndex("worker"), 21)
+/// Thread.join(t)   // 42
+/// ```
+///
+/// 解析顺序：先按完整名（`Class.method`）精确匹配，再退化为按末段（`method`）匹配；
+/// 用户函数在函数表中位于嵌入标准库之前，故优先命中用户定义。
+fn native_fn_index(args: &[Value]) -> Value {
+    let name = args.first().map(|v| v.as_string()).unwrap_or_default();
+    if name.is_empty() {
+        return Value::Int(-1);
+    }
+    if let Some(vm) = get_vm_ref() {
+        unsafe {
+            let funcs = &(*vm).module.funcs;
+            for (i, f) in funcs.iter().enumerate() {
+                if f.name == name {
+                    return Value::Int(i as i64);
+                }
+            }
+            for (i, f) in funcs.iter().enumerate() {
+                if f.name.rsplit('.').next() == Some(name.as_str()) {
+                    return Value::Int(i as i64);
+                }
+            }
+        }
+    }
+    Value::Int(-1)
+}
+
+/// Memory.alloc(n) → Long：分配 n 字节并返回地址
+fn native_memory_alloc(args: &[Value]) -> Value {
+    let n = arg_i64(args, 0).max(0) as usize;
+    let p = unsafe { libc::malloc(n.max(1)) };
+    Value::Int(p as i64)
+}
+
+/// Memory.free(addr)：释放由 `Memory.alloc` 分配的地址
+fn native_memory_free(args: &[Value]) -> Value {
+    let a = arg_i64(args, 0);
+    if a != 0 {
+        unsafe { libc::free(a as *mut libc::c_void) }
+    }
+    Value::Null
+}
+
+/// Memory.read(addr) → Byte
+fn native_memory_read(args: &[Value]) -> Value {
+    let a = arg_i64(args, 0);
+    if a == 0 {
+        return Value::Int(0);
+    }
+    Value::Int(unsafe { std::ptr::read_unaligned(a as *const i8) } as i64)
+}
+
+/// Memory.read16(addr) → Short
+fn native_memory_read16(args: &[Value]) -> Value {
+    let a = arg_i64(args, 0);
+    if a == 0 {
+        return Value::Int(0);
+    }
+    Value::Int(unsafe { std::ptr::read_unaligned(a as *const i16) } as i64)
+}
+
+/// Memory.read32(addr) → Int
+fn native_memory_read32(args: &[Value]) -> Value {
+    let a = arg_i64(args, 0);
+    if a == 0 {
+        return Value::Int(0);
+    }
+    Value::Int(unsafe { std::ptr::read_unaligned(a as *const i32) } as i64)
+}
+
+/// Memory.read64(addr) → Long
+fn native_memory_read64(args: &[Value]) -> Value {
+    let a = arg_i64(args, 0);
+    if a == 0 {
+        return Value::Int(0);
+    }
+    Value::Int(unsafe { std::ptr::read_unaligned(a as *const i64) })
+}
+
+/// Memory.write(addr, v)
+fn native_memory_write(args: &[Value]) -> Value {
+    let a = arg_i64(args, 0);
+    if a != 0 {
+        unsafe { std::ptr::write_unaligned(a as *mut i8, arg_i64(args, 1) as i8) }
+    }
+    Value::Null
+}
+
+/// Memory.write16(addr, v)
+fn native_memory_write16(args: &[Value]) -> Value {
+    let a = arg_i64(args, 0);
+    if a != 0 {
+        unsafe { std::ptr::write_unaligned(a as *mut i16, arg_i64(args, 1) as i16) }
+    }
+    Value::Null
+}
+
+/// Memory.write32(addr, v)
+fn native_memory_write32(args: &[Value]) -> Value {
+    let a = arg_i64(args, 0);
+    if a != 0 {
+        unsafe { std::ptr::write_unaligned(a as *mut i32, arg_i64(args, 1) as i32) }
+    }
+    Value::Null
+}
+
+/// Memory.write64(addr, v)
+fn native_memory_write64(args: &[Value]) -> Value {
+    let a = arg_i64(args, 0);
+    if a != 0 {
+        unsafe { std::ptr::write_unaligned(a as *mut i64, arg_i64(args, 1)) }
+    }
+    Value::Null
+}
+
+/// Memory.copy(dst, src, n)
+fn native_memory_copy(args: &[Value]) -> Value {
+    let dst = arg_i64(args, 0) as *mut u8;
+    let src = arg_i64(args, 1) as *const u8;
+    let n = arg_i64(args, 2).max(0) as usize;
+    if !dst.is_null() && !src.is_null() && n > 0 {
+        unsafe { std::ptr::copy_nonoverlapping(src, dst, n) }
+    }
+    Value::Null
+}
+
+/// Memory.set(addr, v, n)
+fn native_memory_set(args: &[Value]) -> Value {
+    let dst = arg_i64(args, 0) as *mut u8;
+    let v = arg_i64(args, 1) as u8;
+    let n = arg_i64(args, 2).max(0) as usize;
+    if !dst.is_null() && n > 0 {
+        unsafe { std::ptr::write_bytes(dst, v, n) }
+    }
+    Value::Null
+}
+
+/// Cpu.atomicAdd(addr, delta) → 旧值（顺序一致性）
+///
+/// 这是 `aura.lang.concurrent` 纯 Aura 自旋锁的唯一原子原语：
+/// `fetch_add(1) == 0` 判定获取成功，未获取者 `fetch_add(-1)` 撤销探测。
+fn native_cpu_atomic_add(args: &[Value]) -> Value {
+    let addr = arg_i64(args, 0);
+    let delta = arg_i64(args, 1);
+    if addr == 0 {
+        return Value::Int(0);
+    }
+    let atom = unsafe { &*(addr as *const std::sync::atomic::AtomicI64) };
+    Value::Int(atom.fetch_add(delta, std::sync::atomic::Ordering::SeqCst))
+}
+
+/// Cpu.memFence()：内存屏障（顺序一致性）
+fn native_cpu_mem_fence(_args: &[Value]) -> Value {
+    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+    Value::Null
+}
+
+/// Cpu.rdtsc() → 时间戳计数器（占位实现，返回 0）
+fn native_cpu_rdtsc(_args: &[Value]) -> Value {
+    Value::Int(0)
+}
+
+/// Cpu.cpuid(level) → CPU 信息（占位实现，返回 0）
+fn native_cpu_cpuid(_args: &[Value]) -> Value {
+    Value::Int(0)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Phase 3: 跨进程 Actor / Channel 原生函数
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -907,7 +1199,7 @@ fn native_spawn_actor_process(args: &[Value]) -> Value {
             Value::Map(map)
         }
         Err(e) => {
-            eprintln!("[Phase 3] 跨进程 Actor 启动失败: {}", e);
+            eprintln!("[Phase 3] Cross-process Actor spawn failed: {}", e);
             Value::Null
         }
     }
@@ -922,7 +1214,7 @@ fn native_send_process_actor(args: &[Value]) -> Value {
         let mut registry = crate::vm::actor_process::PROCESS_ACTORS.lock().unwrap();
         if let Some(actor) = registry.get_mut(&actor_id) {
             if let Err(e) = actor.send(&msg) {
-                eprintln!("[Phase 3] 跨进程发送失败: {}", e);
+                eprintln!("[Phase 3] Cross-process send failed: {}", e);
             }
         }
     }
@@ -940,7 +1232,7 @@ fn native_recv_process_actor(args: &[Value]) -> Value {
                 Ok(Some(val)) => return val,
                 Ok(None) => return Value::Null,
                 Err(e) => {
-                    eprintln!("[Phase 3] 跨进程接收失败: {}", e);
+                    eprintln!("[Phase 3] Cross-process receive failed: {}", e);
                     return Value::Null;
                 }
             }
@@ -992,7 +1284,7 @@ fn native_new_tcp_channel(args: &[Value]) -> Value {
             Value::Int(id as i64)
         }
         Err(e) => {
-            eprintln!("[Phase 3] TCP Channel 创建失败: {}", e);
+            eprintln!("[Phase 3] TCP Channel creation failed: {}", e);
             Value::Int(0)
         }
     }
@@ -1008,36 +1300,59 @@ fn native_tcp_channel_send(args: &[Value]) -> Value {
         if let Some(server) = registry.get_mut(&ch_id) {
             // 注：服务端需要连接才能发送，当前简化为直接发送
             // 实际使用需通过客户端连接发送
-            eprintln!("[Phase 3] TCP Channel 发送暂不支持（需客户端连接）");
+            eprintln!("[Phase 3] TCP Channel send not yet supported (requires client connection)");
         }
     }
     Value::Null
 }
 
 /// __size(iterable) -> Int: return collection length (for loop iterator support)
+///
+/// 同时支持内联列表（`Value::List`，`listOf/mutableListOf` 产出）与**堆列表**
+/// （`Value::Ref`，`arrayListOf` 产出）。此前只认前者，导致对 `arrayListOf`
+/// 的结果做 `for (x in xs)` 会静默变成空循环。
 fn native_size(args: &[Value]) -> Value {
     if args.is_empty() {
         return Value::Int(0);
     }
     match &args[0] {
         Value::List(items) => Value::Int(items.len() as i64),
+        Value::Ref(h) => {
+            if let Some(vm) = get_vm_ref() {
+                unsafe {
+                    return match (*vm).heap.get_data(*h) {
+                        Some(crate::vm::heap::HeapData::List(items)) => {
+                            Value::Int(items.len() as i64)
+                        }
+                        Some(crate::vm::heap::HeapData::Array(items)) => {
+                            Value::Int(items.len() as i64)
+                        }
+                        Some(crate::vm::heap::HeapData::Map(m)) => Value::Int(m.len() as i64),
+                        _ => Value::Int(0),
+                    };
+                }
+            }
+            Value::Int(0)
+        }
         _ => Value::Int(0),
     }
 }
 
-/// __get(iterable, index) -> Value: return element at index
+/// __get(iterable, index) -> Value: return element at index（内联列表与堆列表皆可）
 fn native_get(args: &[Value]) -> Value {
     if args.len() < 2 {
         return Value::Null;
     }
-    let index = args[1].as_int() as usize;
+    let index = args[1].as_int().max(0) as usize;
     match &args[0] {
-        Value::List(items) => {
-            if index < items.len() {
-                items[index].clone()
-            } else {
-                Value::Null
+        Value::List(items) => items.get(index).cloned().unwrap_or(Value::Null),
+        Value::Ref(h) => {
+            if let Some(vm) = get_vm_ref() {
+                unsafe {
+                    return (*vm).heap.get_index(*h, index);
+                }
             }
+            Value::Null
         }
         _ => Value::Null,
     }

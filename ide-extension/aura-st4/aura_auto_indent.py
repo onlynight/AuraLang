@@ -32,6 +32,8 @@ INDENT_INCREASE_PATTERNS = [
     # Keywords that open a block
     re.compile(r'\b(if|else|when|try|catch|finally|for|while|do)\b'),
     re.compile(r'\b(fun|class|struct|enum|interface|actor|object)\b.*\{'),
+    re.compile(r'\bdefer\b.*\{'),
+    re.compile(r'\basync\b.*\{'),
     # "else ->" or "else {"
     re.compile(r'\belse\b.*\{'),
 ]
@@ -54,7 +56,7 @@ NO_INCREASE_PATTERNS = [
 # Keywords that trigger indent increase when followed by block
 BLOCK_KEYWORDS = re.compile(
     r'\b(if|else|when|try|catch|finally|for|while|do|fun|class|struct|'
-    r'enum|interface|actor|object)\b'
+    r'enum|interface|actor|object|defer|async)\b'
 )
 
 

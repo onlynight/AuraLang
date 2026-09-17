@@ -1,0 +1,94 @@
+// aura:///aura/lang/native/memory/Allocator.aura
+package aura.lang.native.memory
+// ------------------------------------------------------------------
+// Memory allocator -- Phase S1
+//
+// Simple bump allocator (linear allocator).
+// The allocator starts from a pre-allocated heap region,
+// moving a pointer forward on each allocation.
+// Does not support free (simplified), suitable for embedded or
+// short-lived programs.
+//
+// Usage:
+//   val addr: Long = Allocator.malloc(100)
+//   Memory.write(addr, 0x42 as Byte)
+//   val v: Byte = Memory.read(addr)
+// ------------------------------------------------------------------
+
+import aura.lang.native.Memory
+
+/// Memory allocator (bump allocator)
+extern object Allocator {
+
+    // -- Constants --
+    const val PROT_READ: Int = 1
+    const val PROT_WRITE: Int = 2
+    const val MAP_PRIVATE: Int = 2
+    const val MAP_ANONYMOUS: Int = 0x20
+    const val MAP_FAILED: Long = -1
+
+    // -- Internal state --
+    var heapPtr: Long = 0
+    var heapEnd: Long = 0
+    private var heapStart: Long = 0
+
+    /// Initialize heap (allocate 1MB memory)
+    fun init(): Boolean {
+        val heapSize: Long = 1048576
+        val addr: Long = Memory.alloc(heapSize)
+        if (addr == 0) {
+            return false
+        }
+        heapStart = addr
+        heapPtr = addr
+        heapEnd = addr + heapSize
+        return true
+    }
+
+    /// Allocate memory (aligned to 8 bytes)
+    fun malloc(n: Long): Long {
+        val aligned: Long = (n + 7) / 8 * 8
+        if (heapPtr + aligned > heapEnd) {
+            return 0
+        }
+        val addr: Long = heapPtr
+        heapPtr = heapPtr + aligned
+        return addr
+    }
+
+    /// Free memory (bump allocator does not support, no-op)
+    fun free(addr: Long) {
+        // bump allocator does not support free, no-op
+    }
+
+    /// Reallocate (allocate new space and copy)
+    fun realloc(addr: Long, newSize: Long): Long {
+        if (addr == 0) {
+            return malloc(newSize)
+        }
+        if (addr < heapStart || addr >= heapPtr) {
+            return 0
+        }
+        val oldSize: Long = heapPtr - addr
+        if (oldSize <= 0) {
+            return 0
+        }
+        val newAddr: Long = malloc(newSize)
+        if (newAddr == 0) {
+            return 0
+        }
+        val copySize: Long = if (oldSize < newSize) oldSize else newSize
+        Memory.copy(newAddr, addr, copySize)
+        return newAddr
+    }
+
+    /// Query remaining memory
+    fun remaining(): Long {
+        return heapEnd - heapPtr
+    }
+
+    /// Query allocated memory
+    fun used(): Long {
+        return heapPtr - heapStart
+    }
+}

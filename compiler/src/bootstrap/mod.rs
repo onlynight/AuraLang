@@ -19,6 +19,7 @@
 pub mod any_core;
 pub mod aot_core;
 pub mod jit_core;
+pub mod jit_ffi;
 pub mod memory;
 pub mod runtime;
 pub mod type_core;
@@ -27,6 +28,11 @@ pub mod vm_core;
 
 pub use aot_core::{AotConfig, AotGenerator};
 pub use jit_core::{Deopt, JitCompiler, JitConfig, JitUnit};
+pub use jit_ffi::{
+    clear_all as jit_clear_all, default_hotspot_threshold as jit_default_threshold, jit_call,
+    jit_compile, jit_load, lookup_dispatch as jit_lookup_dispatch,
+    register_dispatch as jit_register_dispatch,
+};
 pub use runtime::{Coroutine, CoroutineState, GcHeap, GcStats};
 pub use vm_core::{BytecodeModule, FfiCache, FfiEntry, FuncDef, Insn, Step, Value, Vm};
 

@@ -17,9 +17,81 @@ package aura.lang.compiler.aot
 
 import aura.lang.std.String
 
-/// LLVM IR 标识符允许字符（其余替换为 `_`）。
-fun tmAllowedChars(): String {
-    return "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+/// 类型映射工具集（纯函数辅助）。
+object TypeMapperUtils {
+
+    /// 去掉泛型实参：`HashMap<Int, Int>` → `HashMap`（无 `<` 时原样返回）。
+    ///
+    /// AOT 不做单态化：泛型实例擦除到基类布局（与 Rust 侧一致）。保留实参会产生
+    /// 没有任何 `= type {…}` 定义的合成类型（如 `HashMap_Int_Int_`），llc 报
+    /// `use of undefined type named 'struct.HashMap_Int_Int_'`。
+    fun stripGenericArgs(ty: String): String {
+        var i: Int = 0
+        while (i < ty.length) {
+            if (aotSlice(ty, i, 1) == "<") {
+                return trimSpaces(aotSlice(ty, 0, i))
+            }
+            i = i + 1
+        }
+        return ty
+    }
+
+    /// LLVM IR 标识符允许字符（其余替换为 `_`）。
+    fun tmAllowedChars(): String {
+        return "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+    }
+
+    /// 将标识符中 LLVM IR 不允许的字符替换为下划线。
+    ///
+    /// 性能：绝大多数标识符本来已合法——先扫描确认，命中即**原串返回**（零分配）。
+    /// 旧实现无条件逐字符 `out = out + c`：长度为 L 的名字产生 L 次分配 + O(L²)
+    /// 复制，而 sanitizeLlvm 是发射期最热调用之一（函数名/变量名/类型名都要过一遍）。
+    fun sanitizeLlvm(s: String): String {
+        val allowed: String = tmAllowedChars()
+        var len: Int = s.length
+        var i: Int = 0
+        var rebuilding: Boolean = false
+        var out: String = ""
+        while (i < len) {
+            val c: String = toStr(s[i])
+            if (allowed.indexOf(c) >= 0) {
+                // 全合法时一次也不追加：最终整串零分配返回原值
+                if (rebuilding) {
+                    out = out + c
+                }
+            } else {
+                if (!rebuilding) {
+                    out = s.substring(0, i)
+                    rebuilding = true
+                }
+                out = out + "_"
+            }
+            i = i + 1
+        }
+        if (!rebuilding) {
+            return s
+        } else {
+            return out
+        }
+    }
+
+    /// 判断一个 LLVM 类型字符串是否为标量类型。
+    fun llvmIsScalar(ty: String): Boolean {
+        if (ty == "i1" || ty == "i8" || ty == "i16" || ty == "i32" || ty == "i64" || ty == "i128") {
+            return true
+        } else if (ty == "float" || ty == "double") {
+            return true
+        } else {
+            return false
+        }
+    }
+
+    /// 构造函数式入口（对应 Rust `TypeMapper::new(bool)`）。
+    fun newTypeMapper(stringAsStruct: Boolean): TypeMapper {
+        val tm = TypeMapper()
+        tm.stringAsStruct = stringAsStruct
+        return tm
+    }
 }
 
 /// 类型映射器。
@@ -35,48 +107,68 @@ class TypeMapper {
     /// 将类型名映射为 LLVM IR 类型字符串。
     fun map(ty: String): String {
         if (ty == "") { return "" }
-        if (ty == "Int") { return "i32" }
-        if (ty == "Long") { return "i64" }
-        if (ty == "Short") { return "i16" }
-        if (ty == "Byte" || ty == "U8") { return "i8" }
-        if (ty == "Float") { return "float" }
-        if (ty == "Double") { return "double" }
-        if (ty == "Boolean" || ty == "Bool") { return "i1" }
-        if (ty == "Char") { return "i16" }
-        if (ty == "Unit" || ty == "Void") { return "" }
-        if (ty == "String") {
+        else if (ty == "Int") { return "i32" }
+        else if (ty == "Long") { return "i64" }
+        else if (ty == "Short") { return "i16" }
+        else if (ty == "Byte" || ty == "U8") { return "i8" }
+        else if (ty == "Float") { return "float" }
+        else if (ty == "Double") { return "double" }
+        else if (ty == "Boolean" || ty == "Bool") { return "i1" }
+        else if (ty == "Char") { return "i16" }
+        else if (ty == "Unit" || ty == "Void") { return "" }
+        else if (ty == "String") {
             if (this.stringAsStruct) {
                 return "{ i8*, i64 }"
+            } else {
+                return "i8*"
             }
+        }
+        else if (ty == "Any" || ty == "Nothing") { return "i8*" }
+        else if (ty == "CString" || ty == "CStr" || ty == "Handle") { return "i8*" }
+        else if (ty == "Color") { return "{ i8, i8, i8, i8 }" }
+        else if (ty == "List" || ty == "Map" || ty == "Set" || ty == "Value" ||
+            ty == "Iterator" || ty == "Closure" || ty == "ArrayList"
+            || ty == "HashSet" || ty == "LinkedList") {
             return "i8*"
         }
-        if (ty == "Any" || ty == "Nothing") { return "i8*" }
-        if (ty == "CString" || ty == "CStr" || ty == "Handle") { return "i8*" }
-        if (ty == "Color") { return "{ i8, i8, i8, i8 }" }
-        if (ty == "List" || ty == "Map" || ty == "Set" || ty == "Value" ||
-            ty == "Iterator" || ty == "Closure") {
+        else if (ty.startsWith("List<") || ty.startsWith("Map<") ||
+            ty.startsWith("Set<") || ty.startsWith("Array<")
+            || ty.startsWith("ArrayList<") || ty.startsWith("HashSet<")
+            || ty.startsWith("LinkedList<")) {
+            // 集合实现的类型名同样按**句柄 `i8*`** 表示：
+            // 构造侧（`ArrayList()` / `mutableListOf()`）本来就发射成
+            // `aura_lang_std_Collections_emptyList()`（句柄），若类型侧仍当成
+            // `%struct.ArrayList*`，成员访问会拿句柄做结构体 `getelementptr`
+            // → 读到垃圾指针并崩溃（实测 `HashMap` 建桶时 0xC0000005）。
             return "i8*"
         }
-        if (ty.startsWith("List<") || ty.startsWith("Map<") ||
-            ty.startsWith("Set<") || ty.startsWith("Array<")) {
-            return "i8*"
+        else if (ty.startsWith("Pointer<")) { return "ptr" }
+        else if (ty.startsWith("(")) { return "ptr" }
+        else {
+            // 用户自定义结构体 / 类：实例统一以**指针**表示（Phase 6.5.1）。
+            // 与 `emitNewStruct`（返回实例指针）、字段访问（gep on `%struct.X*`）、
+            // 以及 `inferType`（构造结果为指针）保持一致；同时满足 Aura 的引用语义
+            //（类实例按引用共享，而非按值拷贝 —— AOT 按值拷贝会丢失字段修改）。
+            //
+            // 泛型实参**擦除**到基类：`HashMap<Int, Int>` → `%struct.HashMap*`、
+            // `ArrayList<K>` → `%struct.ArrayList*`。与 Rust 侧一致
+            //（Rust 侧 `%struct.HashMap = type {%struct.ArrayList*, …}`，方法接收者
+            // 直接是 `i8*`）。若保留实参（`HashMap_Int_Int_` / `ArrayList_K_`），
+            // 这些类型没有任何 `= type {…}` 定义 → llc 报
+            // `use of undefined type named 'struct.HashMap_Int_Int_'`。
+            val base: String = TypeMapperUtils.stripGenericArgs(ty)
+            return "%struct." + TypeMapperUtils.sanitizeLlvm(base) + "*"
         }
-        if (ty.startsWith("Pointer<")) { return "ptr" }
-        if (ty.startsWith("(")) { return "ptr" }
-        // 用户自定义结构体 / 类：实例统一以**指针**表示（Phase 6.5.1）。
-        // 与 `emitNewStruct`（返回实例指针）、字段访问（gep on `%struct.X*`）、
-        // 以及 `inferType`（构造结果为指针）保持一致；同时满足 Aura 的引用语义
-        //（类实例按引用共享，而非按值拷贝 —— AOT 按值拷贝会丢失字段修改）。
-        return "%struct." + sanitizeLlvm(ty) + "*"
     }
 
     /// 可空类型映射：标量包装为 `{ <inner>, i1 }`，其余保留内部类型。
     fun mapNullable(inner: String): String {
         val innerTy: String = this.map(inner)
-        if (llvmIsScalar(innerTy)) {
+        if (TypeMapperUtils.llvmIsScalar(innerTy)) {
             return "{ " + innerTy + ", i1 }"
+        } else {
+            return innerTy
         }
-        return innerTy
     }
 
     /// 函数类型描述字符串（供函数指针声明）。
@@ -100,43 +192,8 @@ class TypeMapper {
         }
         if (isVararg) {
             return retStr + "( " + paramsStr + ", ... )"
-        }
-        return retStr + "( " + paramsStr + " )"
-    }
-}
-
-/// 构造函数式入口（对应 Rust `TypeMapper::new(bool)`）。
-fun newTypeMapper(stringAsStruct: Boolean): TypeMapper {
-    val tm = TypeMapper()
-    tm.stringAsStruct = stringAsStruct
-    return tm
-}
-
-/// 将标识符中 LLVM IR 不允许的字符替换为下划线。
-fun sanitizeLlvm(s: String): String {
-    val allowed: String = tmAllowedChars()
-    var out: String = ""
-    var i: Int = 0
-    var len: Int = s.length
-    while (i < len) {
-        val c: String = toStr(s[i])
-        if (allowed.indexOf(c) >= 0) {
-            out = out + c
         } else {
-            out = out + "_"
+            return retStr + "( " + paramsStr + " )"
         }
-        i = i + 1
     }
-    return out
-}
-
-/// 判断一个 LLVM 类型字符串是否为标量类型。
-fun llvmIsScalar(ty: String): Boolean {
-    if (ty == "i1" || ty == "i8" || ty == "i16" || ty == "i32" || ty == "i64" || ty == "i128") {
-        return true
-    }
-    if (ty == "float" || ty == "double") {
-        return true
-    }
-    return false
 }

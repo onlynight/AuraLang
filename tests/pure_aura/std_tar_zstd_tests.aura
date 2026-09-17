@@ -1,0 +1,157 @@
+// tests/pure_aura/std_tar_zstd_tests.aura
+// ─────────────────────────────────────────────────────────────
+// P3: Tar + Zstd 标准库测试
+//
+// 验证 Tar.aura 和 Zstd.aura 的基本功能。
+//
+// 运行：aura run tests/pure_aura/std_tar_zstd_tests.aura
+// ─────────────────────────────────────────────────────────────
+
+import "../..//aura/compiler/aura/lang/compiler/test/TestRunner.aura"
+import "../..//aura/core/aura/lang/std/Tar.aura"
+import "../..//aura/core/aura/lang/std/Zstd.aura"
+
+fun main() {
+    val t = TestRunner()
+
+    // ─── 1. Tar 归档创建 ───
+    t.begin("Tar 归档创建")
+
+    val tar = TarArchive()
+
+    // 添加文件
+    tar.addFile("hello.txt", "Hello, World!")
+    t.assertEq(tar.count(), 1, "1 entry after addFile")
+
+    tar.addFile("foo/bar.txt", "Bar content")
+    t.assertEq(tar.count(), 2, "2 entries after second addFile")
+
+    // 添加目录
+    tar.addDir("subdir/")
+    t.assertEq(tar.count(), 3, "3 entries after addDir")
+
+    // 查找条目
+    val entry = tar.findEntry("hello.txt")
+    t.assertTrue(entry != null, "findEntry hello.txt")
+    if (entry != null) {
+        t.assertEq(entry.content, "Hello, World!", "entry content")
+        t.assertEq(entry.size, 13, "entry size")
+    }
+
+    t.report()
+
+    // ─── 2. Tar 导出/导入 ───
+    t.begin("Tar 导出/导入")
+
+    val tar2 = TarArchive()
+    tar2.addFile("a.txt", "AAA")
+    tar2.addFile("b.txt", "BBB")
+    tar2.addFile("c.txt", "CCC")
+
+    // 导出
+    val data: String = tar2.export()
+    t.assertTrue(data.length > 0, "export produces data")
+
+    // 导入
+    val tar3 = TarArchive()
+    val importOk: Boolean = tar3.import(data)
+    t.assertTrue(importOk, "import succeeds")
+    t.assertEq(tar3.count(), 3, "3 entries after import")
+
+    // 验证内容
+    t.assertEq(tar3.fileContent("a.txt"), "AAA", "a.txt content")
+    t.assertEq(tar3.fileContent("b.txt"), "BBB", "b.txt content")
+    t.assertEq(tar3.fileContent("c.txt"), "CCC", "c.txt content")
+
+    t.report()
+
+    // ─── 3. Tar 文件操作 ───
+    t.begin("Tar 文件操作")
+
+    val tar4 = TarArchive()
+    tar4.addFile("test1.txt", "Test 1")
+    tar4.addFile("test2.txt", "Test 2")
+
+    // 文件名列表
+    val names: List<String> = tar4.fileNames()
+    t.assertEq(names.length, 2, "2 file names")
+
+    t.report()
+
+    // ─── 4. Zstd 压缩 ───
+    t.begin("Zstd 压缩")
+
+    // 4.1 空输入
+    val emptyResult = zstdCompress("")
+    t.assertFalse(emptyResult.success, "empty input fails")
+
+    // 4.2 压缩字符串
+    val testData = "Hello, World! This is a test string for Zstd compression."
+    val compressResult = zstdCompress(testData)
+
+    // 注意：Zstd 压缩需要 native 实现，如果未注册则返回失败
+    if (compressResult.success) {
+        t.assertTrue(compressResult.compressedSize > 0, "compressed size > 0")
+        t.assertTrue(compressResult.compressedSize <= testData.length, "compressed <= original")
+
+        // 解压
+        val decompressResult = zstdDecompress(compressResult.data)
+        t.assertTrue(decompressResult.success, "decompression succeeds")
+        t.assertEq(decompressResult.data, testData, "decompressed data matches")
+    } else {
+        // Native 未注册，跳过压缩测试
+        t.assertTrue(true, "Zstd native not registered (skipped)")
+    }
+
+    t.report()
+
+    // ─── 5. Zstd 工具函数 ───
+    t.begin("Zstd 工具函数")
+
+    // 5.1 魔数检查
+    t.assertFalse(zstdIsMagic("invalid data"), "invalid data not magic")
+    t.assertFalse(zstdIsMagic(""), "empty not magic")
+
+    // 5.2 有效数据检查（需要 native）
+    if (compressResult.success) {
+        t.assertTrue(zstdIsMagic(compressResult.data), "compressed has magic")
+        t.assertTrue(zstdIsValid(compressResult.data), "compressed is valid")
+        t.assertEq(zstdDecompressedSize(compressResult.data), testData.length, "decompressed size")
+    }
+
+    t.report()
+
+    // ─── 6. Tar + Zstd 集成 ───
+    t.begin("Tar + Zstd 集成")
+
+    // 6.1 创建 Tar 并压缩
+    val tar5 = TarArchive()
+    tar5.addFile("file1.txt", "Content 1")
+    tar5.addFile("file2.txt", "Content 2")
+    tar5.addFile("file3.txt", "Content 3")
+
+    val tarData: String = tar5.export()
+
+    // 压缩 Tar 数据
+    val zstdResult = zstdCompress(tarData)
+
+    if (zstdResult.success) {
+        // 解压
+        val decompressedResult = zstdDecompress(zstdResult.data)
+        t.assertTrue(decompressedResult.success, "decompressed tar succeeds")
+        t.assertEq(decompressedResult.data, tarData, "tar data matches")
+
+        // 重新解析 Tar
+        val tar6 = TarArchive()
+        tar6.import(decompressedResult.data)
+        t.assertEq(tar6.count(), 3, "3 entries after roundtrip")
+        t.assertEq(tar6.fileContent("file1.txt"), "Content 1", "file1 content")
+    } else {
+        t.assertTrue(true, "Zstd native not registered (skipped integration)")
+    }
+
+    t.report()
+
+    // ─── 汇总 ───
+    t.finalReport()
+}

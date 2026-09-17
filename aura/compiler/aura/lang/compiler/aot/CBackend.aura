@@ -15,6 +15,75 @@ import aura.lang.compiler.lexer.Span
 import aura.lang.compiler.hir.Hir
 import aura.lang.compiler.aot.AotUtil
 
+/// C 后端顶层辅助工具。
+object CBackendUtils {
+
+    /// 顶层入口：HIR → C 源码。
+    fun emitC(hir: Hir, moduleName: String): String {
+        val e: CEmitter = CEmitter()
+        return e.emitProgram(hir, moduleName)
+    }
+
+    /// Aura 类型名 → C 类型。
+    fun cType(ty: String): String {
+        if (ty == "Int") { return "int" }
+        else if (ty == "Long") { return "long long" }
+        else if (ty == "Short") { return "short" }
+        else if (ty == "Byte" || ty == "U8") { return "unsigned char" }
+        else if (ty == "Float") { return "float" }
+        else if (ty == "Double") { return "double" }
+        else if (ty == "Boolean" || ty == "Bool") { return "bool" }
+        else if (ty == "Char") { return "char" }
+        else if (ty == "Unit" || ty == "Void") { return "void" }
+        else if (ty == "String") { return "const char*" }
+        else if (ty == "Any" || ty == "Nothing") { return "void*" }
+        else if (ty == "List" || ty == "Map" || ty == "Set" || ty == "Value") { return "void*" }
+        else if (ty.startsWith("List<") || ty.startsWith("Map<") ||
+                 ty.startsWith("Set<") || ty.startsWith("Array<")) {
+            return "void*"
+        }
+        else if (ty.startsWith("Pointer<")) { return "void*" }
+        else if (ty == "") { return "" }
+        else { return ty }
+    }
+
+    /// 推断表达式的 C 类型。
+    fun cInferType(hir: Hir, id: Int): String {
+        if (id < 0 || id >= hir.count) {
+            return "int"
+        }
+        val k: String = hir.kindOf(id)
+        if (k == "HirLit") {
+            val raw: String = hir.textOf(id)
+            if (raw == "true" || raw == "false") { return "bool" }
+            else if (raw.startsWith("\"")) { return "const char*" }
+            else if (raw.contains(".")) { return "double" }
+            else { return "int" }
+        } else if (k == "HirVar" && hir.tyOf(id) != "") {
+            return CBackendUtils.cType(hir.tyOf(id))
+        } else if (hir.tyOf(id) != "") {
+            return CBackendUtils.cType(hir.tyOf(id))
+        } else {
+            return "int"
+        }
+    }
+
+    /// C 缩进。
+    fun cIndent(depth: Int): String {
+        var s: String = ""
+        var i: Int = 0
+        while (i < depth) {
+            s = s + "    "
+            i = i + 1
+        }
+        return s
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// HIR → C 源码生成器
+// ─────────────────────────────────────────────────────────────
+
 /// HIR → C 源码生成器。
 class CEmitter {
 
@@ -53,10 +122,10 @@ class CEmitter {
     }
 
     /// 发射单个函数。
-    fun emitFunction(hir: Hir, id: Int): String {
+    private fun emitFunction(hir: Hir, id: Int): String {
         this.fBody = ""
         this.fVars = ""
-        var retTy: String = cType(hir.tyOf(id))
+        var retTy: String = CBackendUtils.cType(hir.tyOf(id))
         if (retTy == "") {
             retTy = "void"
         }
@@ -70,7 +139,7 @@ class CEmitter {
         while (i < kCount) {
             val cid: Int = hirKidsAt(kids, i)
             if (hir.kindOf(cid) == "HirParam") {
-                var pty: String = cType(hir.tyOf(cid))
+                var pty: String = CBackendUtils.cType(hir.tyOf(cid))
                 if (pty == "") {
                     pty = "int"
                 }
@@ -99,7 +168,7 @@ class CEmitter {
     }
 
     /// 发射语句块（带缩进）。
-    fun emitBody(hir: Hir, id: Int, depth: Int) {
+    private fun emitBody(hir: Hir, id: Int, depth: Int) {
         if (hir.kindOf(id) == "HirBlock") {
             val kids: String = hir.kidsOf(id)
             val n: Int = hirKidsCount(kids)
@@ -114,22 +183,22 @@ class CEmitter {
     }
 
     /// 发射单条语句。
-    fun emitStmt(hir: Hir, id: Int, depth: Int) {
+    private fun emitStmt(hir: Hir, id: Int, depth: Int) {
         if (id < 0 || id >= hir.count) {
             return
         }
-        val pad: String = cIndent(depth)
+        val pad: String = CBackendUtils.cIndent(depth)
         val k: String = hir.kindOf(id)
         if (k == "HirValDecl" || k == "HirVarDecl") {
             val name: String = hir.textOf(id)
-            var cty: String = cType(hir.tyOf(id))
+            var cty: String = CBackendUtils.cType(hir.tyOf(id))
             val kids: String = hir.kidsOf(id)
             var initExpr: String = "0"
             if (hirKidsCount(kids) > 0) {
                 val initId: Int = hirKidsAt(kids, 0)
                 initExpr = this.emitExpr(hir, initId)
                 if (cty == "") {
-                    cty = cInferType(hir, initId)
+                    cty = CBackendUtils.cInferType(hir, initId)
                 }
             }
             if (cty == "") {
@@ -185,33 +254,29 @@ class CEmitter {
     }
 
     /// 发射表达式为 C 表达式字符串。
-    fun emitExpr(hir: Hir, id: Int): String {
+    private fun emitExpr(hir: Hir, id: Int): String {
         if (id < 0 || id >= hir.count) {
             return "0"
         }
         val k: String = hir.kindOf(id)
         if (k == "HirLit") {
             return hir.textOf(id)
-        }
-        if (k == "HirVar") {
+        } else if (k == "HirVar") {
             return hir.textOf(id)
-        }
-        if (k == "HirBinary") {
+        } else if (k == "HirBinary") {
             val kids: String = hir.kidsOf(id)
             if (hirKidsCount(kids) < 2) {
                 return "0"
             }
             return "(" + this.emitExpr(hir, hirKidsAt(kids, 0)) + " " + hir.textOf(id)
                 + " " + this.emitExpr(hir, hirKidsAt(kids, 1)) + ")"
-        }
-        if (k == "HirUnary") {
+        } else if (k == "HirUnary") {
             val kids: String = hir.kidsOf(id)
             if (hirKidsCount(kids) < 1) {
                 return "0"
             }
             return "(" + hir.textOf(id) + this.emitExpr(hir, hirKidsAt(kids, 0)) + ")"
-        }
-        if (k == "HirCall") {
+        } else if (k == "HirCall") {
             val kids: String = hir.kidsOf(id)
             val n: Int = hirKidsCount(kids)
             var fname: String = hir.textOf(id)
@@ -233,17 +298,18 @@ class CEmitter {
                 i = i + 1
             }
             return sanitizeLlvm(fname) + "(" + args + ")"
+        } else {
+            return "0"
         }
-        return "0"
     }
 
     /// 推断表达式 C 类型。
-    fun inferExprType(hir: Hir, id: Int): String {
-        return cInferType(hir, id)
+    private fun inferExprType(hir: Hir, id: Int): String {
+        return CBackendUtils.cInferType(hir, id)
     }
 
     /// 查询局部变量 C 类型。
-    fun lookupVarTy(name: String): String {
+    private fun lookupVarTy(name: String): String {
         var n: Int = aotLineCount(this.fVars)
         var i: Int = 0
         while (i < n) {
@@ -257,68 +323,4 @@ class CEmitter {
     }
 }
 
-// ─────────────────────────────────────────────────────────────
-// 顶层辅助
-// ─────────────────────────────────────────────────────────────
 
-/// 顶层入口：HIR → C 源码。
-fun emitC(hir: Hir, moduleName: String): String {
-    val e: CEmitter = CEmitter()
-    return e.emitProgram(hir, moduleName)
-}
-
-/// Aura 类型名 → C 类型。
-fun cType(ty: String): String {
-    if (ty == "Int") { return "int" }
-    if (ty == "Long") { return "long long" }
-    if (ty == "Short") { return "short" }
-    if (ty == "Byte" || ty == "U8") { return "unsigned char" }
-    if (ty == "Float") { return "float" }
-    if (ty == "Double") { return "double" }
-    if (ty == "Boolean" || ty == "Bool") { return "bool" }
-    if (ty == "Char") { return "char" }
-    if (ty == "Unit" || ty == "Void") { return "void" }
-    if (ty == "String") { return "const char*" }
-    if (ty == "Any" || ty == "Nothing") { return "void*" }
-    if (ty == "List" || ty == "Map" || ty == "Set" || ty == "Value") { return "void*" }
-    if (ty.startsWith("List<") || ty.startsWith("Map<") ||
-        ty.startsWith("Set<") || ty.startsWith("Array<")) {
-        return "void*"
-    }
-    if (ty.startsWith("Pointer<")) { return "void*" }
-    if (ty == "" ) { return "" }
-    return ty
-}
-
-/// 推断表达式的 C 类型。
-fun cInferType(hir: Hir, id: Int): String {
-    if (id < 0 || id >= hir.count) {
-        return "int"
-    }
-    val k: String = hir.kindOf(id)
-    if (k == "HirLit") {
-        val raw: String = hir.textOf(id)
-        if (raw == "true" || raw == "false") { return "bool" }
-        if (raw.startsWith("\"")) { return "const char*" }
-        if (raw.contains(".")) { return "double" }
-        return "int"
-    }
-    if (k == "HirVar" && hir.tyOf(id) != "") {
-        return cType(hir.tyOf(id))
-    }
-    if (hir.tyOf(id) != "") {
-        return cType(hir.tyOf(id))
-    }
-    return "int"
-}
-
-/// C 缩进。
-fun cIndent(depth: Int): String {
-    var s: String = ""
-    var i: Int = 0
-    while (i < depth) {
-        s = s + "    "
-        i = i + 1
-    }
-    return s
-}

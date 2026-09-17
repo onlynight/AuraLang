@@ -10,6 +10,9 @@
     "scopeName": "source.aura",
     "patterns": [
         {
+            "include": "#package-declaration"
+        },
+        {
             "include": "#import"
         },
         {
@@ -20,6 +23,22 @@
         "aura"
     ],
     "repository": {
+        "package-declaration": {
+            "begin": "\\b(package)\\b\\s*",
+            "beginCaptures": {
+                "1": {
+                    "name": "storage.type.package.aura"
+                }
+            },
+            "end": ";|$",
+            "name": "meta.package.aura",
+            "contentName": "entity.name.package.aura",
+            "patterns": [
+                {
+                    "include": "#comments"
+                }
+            ]
+        },
         "import": {
             "begin": "\\b(import)\\b\\s?([\\w+.]*\\w+)?\\s*",
             "beginCaptures": {
@@ -62,6 +81,9 @@
                 },
                 {
                     "include": "#extern-declaration"
+                },
+                {
+                    "include": "#extern-object-declaration"
                 },
                 {
                     "include": "#struct-declaration-nobody"
@@ -306,7 +328,7 @@
             ]
         },
         "prefix-modifiers": {
-            "match": "\\b(abstract|final|enum|open|annotation|sealed|data|override|lateinit|private|protected|public|internal|inner|noinline|crossinline|vararg|reified|tailrec|operator|infix|inline|external|const|suspend|comptime|value|defer|extern|lazy|box|weak|async|init|companion|constructor|expect|actual|malloc|free|retain|release)\\b",
+            "match": "\\b(abstract|enum|open|sealed|data|override|lateinit|private|protected|public|internal|inner|noinline|crossinline|vararg|reified|tailrec|operator|infix|inline|external|const|suspend|comptime|value|defer|extern|lazy|box|weak|async|init|companion|constructor|expect|actual|malloc|free|retain|release|native)\\b",
             "name": "storage.modifier.other.aura"
         },
         "postfix-modifiers": {
@@ -318,7 +340,7 @@
             "name": "keyword.soft.aura"
         },
         "hard-keywords": {
-            "match": "\\b(as|is|in|to|it|typeof)\\b",
+            "match": "\\b(as|is|in|to|it)\\b",
             "name": "keyword.hard.aura"
         },
         "control-keywords": {
@@ -331,11 +353,11 @@
         },
 
         "annotation-simple": {
-            "match": "(?<!\\w)@[\\w.]+\\b(?!:|\\()",
+            "match": "(?<!\\w)@(aot|native|Depends|Inline|JvmStatic|Suppress|Volatile|JvmName|Depends)\\b(?!:|\\()",
             "name": "entity.name.type.annotation.aura"
         },
         "annotation-with-args": {
-            "begin": "(?<!\\w)@([\\w.]+)\\s*(\\()",
+            "begin": "(?<!\\w)@(aot|native|Depends|Inline|JvmStatic|Suppress|Volatile|JvmName)\\s*(\\()",
             "beginCaptures": {
                 "1": {
                     "name": "entity.name.type.annotation.aura"
@@ -351,6 +373,49 @@
                 }
             },
             "patterns": [
+                {
+                    "include": "#code"
+                }
+            ]
+        },
+        "extern-object-declaration": {
+            "begin": "\\b(extern)\\s+(object)\\s+(\\b\\w+\\b)\\s*(\\{)",
+            "beginCaptures": {
+                "1": {
+                    "name": "storage.type.extern.aura"
+                },
+                "2": {
+                    "name": "storage.type.object.aura"
+                },
+                "3": {
+                    "name": "entity.name.type.object.aura"
+                },
+                "4": {
+                    "name": "punctuation.section.block.begin.aura"
+                }
+            },
+            "end": "(^\\s*\\})",
+            "endCaptures": {
+                "1": {
+                    "name": "punctuation.section.block.end.aura"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#annotation-simple"
+                },
+                {
+                    "include": "#annotation-with-args"
+                },
+                {
+                    "include": "#function-declaration"
+                },
+                {
+                    "include": "#constant-declaration"
+                },
+                {
+                    "include": "#variable-declaration"
+                },
                 {
                     "include": "#code"
                 }

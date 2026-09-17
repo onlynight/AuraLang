@@ -26,15 +26,15 @@ struct Header {
 /// 返回**用户区指针**（头部之后）。
 pub fn malloc(size: usize) -> Result<*mut u8, Trap> {
     if size == 0 {
-        return Err(Trap::new("malloc: 大小必须大于 0"));
+        return Err(Trap::new("malloc: size must be greater than 0"));
     }
-    let total = size.checked_add(HEADER_SIZE).ok_or_else(|| Trap::new("malloc: 大小溢出"))?;
+    let total = size.checked_add(HEADER_SIZE).ok_or_else(|| Trap::new("malloc: size overflow"))?;
     let layout = std::alloc::Layout::from_size_align(total, 16)
-        .map_err(|e| Trap::new(format!("malloc: 布局错误: {e}")))?;
+        .map_err(|e| Trap::new(format!("malloc: layout error: {e}")))?;
     // SAFETY: layout 大小非零且对齐合法
     let raw = unsafe { std::alloc::alloc(layout) };
     if raw.is_null() {
-        return Err(Trap::new("malloc: 分配失败（内存不足）"));
+        return Err(Trap::new("malloc: allocation failed (out of memory)"));
     }
     // SAFETY: raw 指向 total 字节的合法分配
     let head = raw as *mut Header;
@@ -61,7 +61,7 @@ unsafe fn layout_of(user: *mut u8) -> std::alloc::Layout {
 /// # Safety
 /// `ptr` 必须是 [`malloc`] 返回且尚未释放的指针。
 pub unsafe fn free(ptr: *mut u8) {
-    assert!(!ptr.is_null(), "free: 空指针");
+    assert!(!ptr.is_null(), "free: null pointer");
     // SAFETY: 调用方保证指针有效且未释放
     unsafe {
         let layout = layout_of(ptr);

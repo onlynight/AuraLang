@@ -57,7 +57,7 @@ pub fn build_standard_task_graph(
     // 1. clean
     graph.add_task(TaskDefinition {
         name: "clean".to_string(),
-        description: "清理构建产物".to_string(),
+        description: "Clean build artifacts".to_string(),
         kind: TaskKind::Clean,
         depends_on: Vec::new(),
         inputs: TaskInputs::default(),
@@ -67,7 +67,7 @@ pub fn build_standard_task_graph(
     // 2. resolve
     graph.add_task(TaskDefinition {
         name: "resolve".to_string(),
-        description: "解析依赖".to_string(),
+        description: "Resolve dependencies".to_string(),
         kind: TaskKind::Resolve,
         depends_on: vec!["clean".to_string()],
         inputs: TaskInputs::default(),
@@ -78,7 +78,7 @@ pub fn build_standard_task_graph(
     let main_sources = discover_source_files(project_dir, "src");
     graph.add_task(TaskDefinition {
         name: "compile-main".to_string(),
-        description: "编译主源码集".to_string(),
+        description: "Compile main source set".to_string(),
         kind: TaskKind::Compile("main".to_string()),
         depends_on: vec!["resolve".to_string()],
         inputs: TaskInputs {
@@ -94,7 +94,7 @@ pub fn build_standard_task_graph(
     if !test_sources.is_empty() {
         graph.add_task(TaskDefinition {
             name: "compile-test".to_string(),
-            description: "编译测试源码集".to_string(),
+            description: "Compile test source set".to_string(),
             kind: TaskKind::Compile("test".to_string()),
             depends_on: vec!["compile-main".to_string()],
             inputs: TaskInputs {
@@ -111,7 +111,7 @@ pub fn build_standard_task_graph(
     if !bench_sources.is_empty() {
         graph.add_task(TaskDefinition {
             name: "compile-bench".to_string(),
-            description: "编译基准源码集".to_string(),
+            description: "Compile bench source set".to_string(),
             kind: TaskKind::Compile("bench".to_string()),
             depends_on: vec!["compile-main".to_string()],
             inputs: TaskInputs {
@@ -127,7 +127,7 @@ pub fn build_standard_task_graph(
     if graph.contains("compile-test") {
         graph.add_task(TaskDefinition {
             name: "run-tests".to_string(),
-            description: "执行测试".to_string(),
+            description: "Run tests".to_string(),
             kind: TaskKind::Test,
             depends_on: vec!["compile-test".to_string()],
             inputs: TaskInputs::default(),
@@ -138,7 +138,7 @@ pub fn build_standard_task_graph(
     // 7. package
     graph.add_task(TaskDefinition {
         name: "package".to_string(),
-        description: "打包为 .auz".to_string(),
+        description: "Package as .auz".to_string(),
         kind: TaskKind::Package,
         depends_on: vec!["compile-main".to_string()],
         inputs: TaskInputs::default(),
@@ -148,7 +148,7 @@ pub fn build_standard_task_graph(
     // 8. verify
     graph.add_task(TaskDefinition {
         name: "verify".to_string(),
-        description: "验证制品完整性".to_string(),
+        description: "Verify artifact integrity".to_string(),
         kind: TaskKind::Verify,
         depends_on: vec!["package".to_string()],
         inputs: TaskInputs::default(),
@@ -158,7 +158,7 @@ pub fn build_standard_task_graph(
     // 9. check
     graph.add_task(TaskDefinition {
         name: "check".to_string(),
-        description: "语法/语义检查".to_string(),
+        description: "Syntax/semantic check".to_string(),
         kind: TaskKind::Check,
         depends_on: vec!["resolve".to_string()],
         inputs: TaskInputs::default(),
@@ -168,7 +168,7 @@ pub fn build_standard_task_graph(
     // 10. install
     graph.add_task(TaskDefinition {
         name: "install".to_string(),
-        description: "安装到本地注册表".to_string(),
+        description: "Install to local registry".to_string(),
         kind: TaskKind::Install,
         depends_on: vec!["verify".to_string()],
         inputs: TaskInputs::default(),
@@ -178,7 +178,7 @@ pub fn build_standard_task_graph(
     // 10. publish
     graph.add_task(TaskDefinition {
         name: "publish".to_string(),
-        description: "发布到远程仓库".to_string(),
+        description: "Publish to remote registry".to_string(),
         kind: TaskKind::Deploy,
         depends_on: vec!["install".to_string()],
         inputs: TaskInputs::default(),
@@ -188,7 +188,7 @@ pub fn build_standard_task_graph(
     // 11. run
     graph.add_task(TaskDefinition {
         name: "run".to_string(),
-        description: "运行应用".to_string(),
+        description: "Run application".to_string(),
         kind: TaskKind::Execute,
         depends_on: vec!["compile-main".to_string()],
         inputs: TaskInputs::default(),
@@ -198,7 +198,7 @@ pub fn build_standard_task_graph(
     // 12. watch
     graph.add_task(TaskDefinition {
         name: "watch".to_string(),
-        description: "监听源码变化".to_string(),
+        description: "Watch for source changes".to_string(),
         kind: TaskKind::Watch,
         depends_on: vec!["resolve".to_string()],
         inputs: TaskInputs::default(),
@@ -250,7 +250,7 @@ pub fn build_task_graph_with_plugins(
     }
 
     if plugin_task_count > 0 {
-        tracing::info!("插件注册了 {} 个任务", plugin_task_count);
+        tracing::info!("Plugins registered {} tasks", plugin_task_count);
     }
 
     // 5. 验证任务图有效性
@@ -366,7 +366,12 @@ pub fn execute_phase_with_service(
         "publish" => "publish",
         "run" => "run",
         "watch" => "watch",
-        _ => return Err(LoomError::Task(format!("未知生命周期阶段: {}", phase))),
+        _ => {
+            return Err(LoomError::Task(format!(
+                "Unknown lifecycle phase: {}",
+                phase
+            )));
+        }
     };
 
     let scheduler = Scheduler::with_cache_service(

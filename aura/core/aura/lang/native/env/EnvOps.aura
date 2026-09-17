@@ -1,0 +1,249 @@
+// aura:///aura/lang/native/env/EnvOps.aura
+package aura.lang.native.env
+// ------------------------------------------------------------------
+// 环境变量操作 — 通过 /proc/self/environ 读取
+//
+// Linux 系统不直接提供 getenv/setenv 的系统调用。
+// 环境变量存储在内核的进程描述中，通过以下间接方式访问：
+//   - 读取：open("/proc/self/environ") + read()
+//   - 设置/删除：无法直接修改，需通过 prctl 或 execve 传递
+//
+// 当前实现：
+//   - get(name, default)：读取 /proc/self/environ，解析 NUL 分隔的键值对
+//   - has(name)：检查环境变量是否存在
+//   - keys/values/all：返回所有环境变量
+//   - home/tmp/pwd：通过特定环境变量或简化路径获取
+//   - set/remove：不支持（Linux 内核限制）
+//
+// @since 0.1
+// ------------------------------------------------------------------
+
+import aura.lang.native.Memory
+import aura.lang.native.memory.Allocator
+import aura.lang.native.io.Stdio
+import aura.lang.native.file.FileOps
+import aura.lang.native.Syscalls
+
+/// 环境变量操作（纯 Aura 实现，读取 /proc/self/environ）
+object EnvOps {
+
+    // ═══════════════════════════════════════════════════════════════
+    // 内部辅助
+    // ═══════════════════════════════════════════════════════════════
+
+    /// 读取 /proc/self/environ 到内存缓冲区。
+    /// 返回缓冲区地址和长度，失败返回 (0, 0)。
+    fun readEnviron(): List<Long> {
+        val pathBuf: Long = Stdio.stringToBuffer("/proc/self/environ")
+        if (pathBuf == 0) { return mutableListOf<Long>() }
+
+        val fd: Int = FileOps.open(pathBuf, 0)  // O_RDONLY
+        if (fd < 0) {
+            Allocator.free(pathBuf)
+            return mutableListOf<Long>()
+        }
+
+        val buf: Long = Allocator.malloc(65536)
+        if (buf == 0) {
+            FileOps.close(fd)
+            Allocator.free(pathBuf)
+            return mutableListOf<Long>()
+        }
+
+        val bytesRead: Long = FileOps.read(fd, buf, 65536)
+        FileOps.close(fd)
+        Allocator.free(pathBuf)
+
+        if (bytesRead <= 0) {
+            Allocator.free(buf)
+            return mutableListOf<Long>()
+        }
+
+        // 返回 [buf, bytesRead]
+        val result: List<Long> = mutableListOf<Long>()
+        result.add(buf)
+        result.add(bytesRead)
+        return result
+    }
+
+    /// 解析 environ 缓冲区，查找指定键的值。
+    /// 返回值的字符串，未找到返回 default。
+    fun findEnv(buf: Long, len: Long, key: String): String {
+        if (buf == 0 || len <= 0) { return "" }
+
+        val keyBuf: Long = Stdio.stringToBuffer(key)
+        if (keyBuf == 0) { return "" }
+        val keyLen: Long = Stdio.strlen(keyBuf)
+
+        var i: Long = 0
+        while (i < len) {
+            // 找到 '=' 分隔符
+            val eqPos: Long = findChar(buf + i, len - i, 61)  // '='
+            if (eqPos < 0) { break }
+
+            val entryStart: Long = i
+            val keyEnd: Long = i + eqPos
+            val valStart: Long = keyEnd + 1
+
+            // 检查键是否匹配
+            if (keyEnd - entryStart == keyLen) {
+                var match: Boolean = true
+                var j: Long = 0
+                while (j < keyLen) {
+                    if (Memory.read(buf + entryStart + j) != Memory.read(keyBuf + j)) {
+                        match = false
+                        break
+                    }
+                    j = j + 1
+                }
+                if (match) {
+                    // 找到值，读取到下一个 NUL
+                    var valLen: Long = 0
+                    while (valStart + valLen < len && Memory.read(buf + valStart + valLen) != 0) {
+                        valLen = valLen + 1
+                    }
+                    Allocator.free(keyBuf)
+                    val result: String = Stdio.bufferToString(buf + valStart, valLen)
+                    return result
+                }
+            }
+
+            // 移动到下一个条目（跳过当前值的 NUL 终止符）
+            var next: Long = valStart
+            while (next < len && Memory.read(buf + next) != 0) {
+                next = next + 1
+            }
+            i = next + 1
+        }
+
+        Allocator.free(keyBuf)
+        return ""
+    }
+
+    /// 在缓冲区中查找指定字符的位置。
+    fun findChar(buf: Long, maxLen: Long, ch: Byte): Long {
+        var i: Long = 0
+        while (i < maxLen) {
+            if (Memory.read(buf + i) == ch) {
+                return i
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 公共 API
+    // ═══════════════════════════════════════════════════════════════
+
+    /// 获取环境变量值，不存在时返回默认值。
+    fun get(name: String, default: String): String {
+        val environ: List<Long> = readEnviron()
+        if (environ.size < 2) { return default }
+        val buf: Long = environ[0]
+        val len: Long = environ[1]
+        val result: String = findEnv(buf, len, name)
+        Allocator.free(buf)
+        if (result == "") { return default }
+        return result
+    }
+
+    /// 检查环境变量是否存在。
+    fun has(name: String): Boolean {
+        val environ: List<Long> = readEnviron()
+        if (environ.size < 2) { return false }
+        val buf: Long = environ[0]
+        val len: Long = environ[1]
+        val result: String = findEnv(buf, len, name)
+        Allocator.free(buf)
+        return result != ""
+    }
+
+    /// 获取所有环境变量名。
+    fun keys(): List<String> {
+        val environ: List<Long> = readEnviron()
+        if (environ.size < 2) { return mutableListOf<String>() }
+        val buf: Long = environ[0]
+        val len: Long = environ[1]
+        val result: List<String> = mutableListOf<String>()
+        var i: Long = 0
+        while (i < len) {
+            val eqPos: Long = findChar(buf + i, len - i, 61)
+            if (eqPos < 0) { break }
+            val key: String = Stdio.bufferToString(buf + i, eqPos)
+            if (key != "") {
+                result.add(key)
+            }
+            var next: Long = i + eqPos + 1
+            while (next < len && Memory.read(buf + next) != 0) {
+                next = next + 1
+            }
+            i = next + 1
+        }
+        Allocator.free(buf)
+        return result
+    }
+
+    /// 获取所有环境变量的值。
+    fun values(): List<String> {
+        val environ: List<Long> = readEnviron()
+        if (environ.size < 2) { return mutableListOf<String>() }
+        val buf: Long = environ[0]
+        val len: Long = environ[1]
+        val result: List<String> = mutableListOf<String>()
+        var i: Long = 0
+        while (i < len) {
+            val eqPos: Long = findChar(buf + i, len - i, 61)
+            if (eqPos < 0) { break }
+            val valStart: Long = i + eqPos + 1
+            var valLen: Long = 0
+            while (valStart + valLen < len && Memory.read(buf + valStart + valLen) != 0) {
+                valLen = valLen + 1
+            }
+            val value: String = Stdio.bufferToString(buf + valStart, valLen)
+            result.add(value)
+            var next: Long = valStart
+            while (next < len && Memory.read(buf + next) != 0) {
+                next = next + 1
+            }
+            i = next + 1
+        }
+        Allocator.free(buf)
+        return result
+    }
+
+    /// 获取用户主目录。
+    fun home(): String {
+        return get("HOME", "")
+    }
+
+    /// 获取临时目录。
+    fun tmp(): String {
+        return get("TMPDIR", "/tmp")
+    }
+
+    /// 获取当前工作目录（简化实现：返回空字符串）。
+    fun pwd(): String {
+        return ""
+    }
+
+    /// 获取平台名称。
+    fun platform(): String {
+        return "linux"
+    }
+
+    /// 获取 CPU 架构。
+    fun arch(): String {
+        return "x86_64"
+    }
+
+    /// 设置环境变量（不支持：Linux 内核限制）。
+    fun set(name: String, value: String): Unit {
+        // 不支持直接修改环境变量
+    }
+
+    /// 删除环境变量（不支持：Linux 内核限制）。
+    fun remove(name: String): Unit {
+        // 不支持直接删除环境变量
+    }
+}

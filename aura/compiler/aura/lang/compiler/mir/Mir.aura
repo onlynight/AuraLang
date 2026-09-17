@@ -91,7 +91,7 @@ class Mir {
 
     /// 添加一个叶节点（无子节点）。
     fun leaf(kind: String, text: String, sp: Span): Int {
-        return this.add(kind, text, "", sp, mirNoKids())
+        return this.add(kind, text, "", sp, MirUtils.mirNoKids())
     }
 
     // ── 查询 ──
@@ -160,10 +160,10 @@ class Mir {
         out = out + "\n"
 
         val kids: String = this.kidsOf(id)
-        val kCount: Int = mirKidsCount(kids)
+        val kCount: Int = MirUtils.mirKidsCount(kids)
         var i: Int = 0
         while (i < kCount) {
-            val childId: Int = mirKidsAt(kids, i)
+            val childId: Int = MirUtils.mirKidsAt(kids, i)
             out = out + this.dumpNode(childId, depth + 1)
             i = i + 1
         }
@@ -174,7 +174,7 @@ class Mir {
 
     /// 取第 index 行。
     fun lineAt(text: String, index: Int): String {
-        return mirFieldAt(text, index, "\n")
+        return MirUtils.mirFieldAt(text, index, "\n")
     }
 
     /// 解析 span 字符串。
@@ -204,146 +204,149 @@ class Mir {
 }
 
 // ─────────────────────────────────────────────────────────────
-// 顶层辅助函数（与 hir/ 辅助函数一致）
+// MirUtils — 顶层辅助函数
 // ─────────────────────────────────────────────────────────────
 
-/// 空子节点列表。
-fun mirNoKids(): String {
-    return ""
-}
+object MirUtils {
 
-/// 追加子节点 id。
-fun mirKidsAdd(list: String, child: Int): String {
-    if (list == "") {
-        return toStr(child)
+    /// 空子节点列表。
+    fun mirNoKids(): String {
+        return ""
     }
-    return list + "," + toStr(child)
-}
 
-/// 子节点列表的长度。
-fun mirKidsCount(list: String): Int {
-    if (list == "") {
-        return 0
-    }
-    var count: Int = 1
-    var i: Int = 0
-    var len: Int = list.length
-    while (i < len) {
-        val c: String = toStr(list[i])
-        if (c == ",") {
-            count = count + 1
+    /// 追加子节点 id。
+    fun mirKidsAdd(list: String, child: Int): String {
+        if (list == "") {
+            return toStr(child)
         }
-        i = i + 1
+        return list + "," + toStr(child)
     }
-    return count
-}
 
-/// 取子节点列表的第 index 个 id。
-fun mirKidsAt(list: String, index: Int): Int {
-    return mirToIntOf(mirFieldAt(list, index, ","))
-}
-
-/// 取第 index 个以 sep 分隔的字段。
-fun mirFieldAt(text: String, index: Int, sep: String): String {
-    var i: Int = 0
-    var fieldStart: Int = 0
-    var cur: Int = 0
-    var fieldLen: Int = text.length
-    while (i < fieldLen) {
-        val c: String = toStr(text[i])
-        if (c == sep) {
-            if (cur == index) {
-                var result: String = ""
-                var j: Int = fieldStart
-                while (j < i) {
-                    result = result + toStr(text[j])
-                    j = j + 1
-                }
-                return result
+    /// 子节点列表的长度。
+    fun mirKidsCount(list: String): Int {
+        if (list == "") {
+            return 0
+        }
+        var count: Int = 1
+        var i: Int = 0
+        var len: Int = list.length
+        while (i < len) {
+            val c: String = toStr(list[i])
+            if (c == ",") {
+                count = count + 1
             }
-            cur = cur + 1
-            fieldStart = i + 1
-        }
-        i = i + 1
-    }
-    if (cur == index) {
-        var result: String = ""
-        var j: Int = fieldStart
-        while (j < fieldLen) {
-            result = result + toStr(text[j])
-            j = j + 1
-        }
-        return result
-    }
-    return ""
-}
-
-/// 字符串转整数。
-fun mirToIntOf(text: String): Int {
-    val digits: String = "0123456789"
-    var total: Int = 0
-    var i: Int = 0
-    var len: Int = text.length
-    while (i < len) {
-        val c: String = toStr(text[i])
-        var digit: Int = -1
-        var j: Int = 0
-        var dLen: Int = digits.length
-        while (j < dLen) {
-            if (toStr(digits[j]) == c) {
-                digit = j
-                break
-            }
-            j = j + 1
-        }
-        if (digit >= 0) {
-            total = total * 10 + digit
-        }
-        i = i + 1
-    }
-    return total
-}
-
-/// 解析 span 字符串（空格分隔的 6 个数字）。
-fun mirSpanParse(s: String): Span {
-    var f: Int = 0
-    var nums: Int[6]
-    nums[0] = 0
-    nums[1] = 0
-    nums[2] = 0
-    nums[3] = 0
-    nums[4] = 0
-    nums[5] = 0
-    var i: Int = 0
-    var len: Int = s.length
-    while (i < len) {
-        val c: String = toStr(s[i])
-        if (c == " ") {
             i = i + 1
-            continue
         }
-        // 读取数字
-        var num: Int = 0
-        while (i < len && toStr(s[i]) != " ") {
-            val ch: String = toStr(s[i])
+        return count
+    }
+
+    /// 取子节点列表的第 index 个 id。
+    fun mirKidsAt(list: String, index: Int): Int {
+        return MirUtils.toIntOf(MirUtils.mirFieldAt(list, index, ","))
+    }
+
+    /// 取第 index 个以 sep 分隔的字段。
+    fun mirFieldAt(text: String, index: Int, sep: String): String {
+        var i: Int = 0
+        var fieldStart: Int = 0
+        var cur: Int = 0
+        var fieldLen: Int = text.length
+        while (i < fieldLen) {
+            val c: String = toStr(text[i])
+            if (c == sep) {
+                if (cur == index) {
+                    var result: String = ""
+                    var j: Int = fieldStart
+                    while (j < i) {
+                        result = result + toStr(text[j])
+                        j = j + 1
+                    }
+                    return result
+                }
+                cur = cur + 1
+                fieldStart = i + 1
+            }
+            i = i + 1
+        }
+        if (cur == index) {
+            var result: String = ""
+            var j: Int = fieldStart
+            while (j < fieldLen) {
+                result = result + toStr(text[j])
+                j = j + 1
+            }
+            return result
+        }
+        return ""
+    }
+
+    /// 字符串转整数。
+    fun toIntOf(text: String): Int {
+        val digits: String = "0123456789"
+        var total: Int = 0
+        var i: Int = 0
+        var len: Int = text.length
+        while (i < len) {
+            val c: String = toStr(text[i])
             var digit: Int = -1
             var j: Int = 0
-            while (j < 10) {
-                if (toStr(j) == ch) {
+            var dLen: Int = digits.length
+            while (j < dLen) {
+                if (toStr(digits[j]) == c) {
                     digit = j
                     break
                 }
                 j = j + 1
             }
             if (digit >= 0) {
-                num = num * 10 + digit
+                total = total * 10 + digit
             }
             i = i + 1
         }
-        if (f < 6) {
-            nums[f] = num
-            f = f + 1
-        }
+        return total
     }
-    return Span(nums[0], nums[1], nums[2], nums[3], nums[4], nums[5])
+
+    /// 解析 span 字符串（空格分隔的 6 个数字）。
+    fun spanParse(s: String): Span {
+        var f: Int = 0
+        var nums: Int[6]
+        nums[0] = 0
+        nums[1] = 0
+        nums[2] = 0
+        nums[3] = 0
+        nums[4] = 0
+        nums[5] = 0
+        var i: Int = 0
+        var len: Int = s.length
+        while (i < len) {
+            val c: String = toStr(s[i])
+            if (c == " ") {
+                i = i + 1
+                continue
+            }
+            // 读取数字
+            var num: Int = 0
+            while (i < len && toStr(s[i]) != " ") {
+                val ch: String = toStr(s[i])
+                var digit: Int = -1
+                var j: Int = 0
+                while (j < 10) {
+                    if (toStr(j) == ch) {
+                        digit = j
+                        break
+                    }
+                    j = j + 1
+                }
+                if (digit >= 0) {
+                    num = num * 10 + digit
+                }
+                i = i + 1
+            }
+            if (f < 6) {
+                nums[f] = num
+                f = f + 1
+            }
+        }
+        return Span(nums[0], nums[1], nums[2], nums[3], nums[4], nums[5])
+    }
 }

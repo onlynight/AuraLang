@@ -122,7 +122,7 @@ impl ProcessActor {
         if len > 64 * 1024 * 1024 {
             return Err(ProcessActorError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("消息过大: {} 字节", len),
+                format!("Message too large: {} bytes", len),
             )));
         }
         let mut buf = vec![0u8; len];
@@ -190,6 +190,6 @@ fn find_aura_exe() -> Result<String, ProcessActorError> {
     }
     Err(ProcessActorError::Io(std::io::Error::new(
         std::io::ErrorKind::NotFound,
-        "无法找到 aura 可执行文件",
+        "Cannot find aura executable",
     )))
 }

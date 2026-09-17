@@ -26,7 +26,7 @@
     ["`", "`"]
   ],
   "indentationRules": {
-    "increaseIndentPattern": "^.*(\\{|\\(|\\$|do|then|else|when|for|if|while|try|select|catch|finally|extern)",
+    "increaseIndentPattern": "^.*(\\{|\\(|\\$|do|then|else|when|for|if|while|try|select|catch|finally|extern|defer|async)",
     "decreaseIndentPattern": "^.*(\\}|\\))"
   },
   "folding": {
@@ -46,14 +46,14 @@
         "comment": "fold declarations: struct/class/enum/interface/actor/object/extern/init/companion blocks"
       },
       {
-        "start": "^\\s*(?:\\w+\\s+)*?(?:if|else|when|for|while|do|try|catch|finally|select)\\b.*\\{",
+        "start": "^\\s*(?:\\w+\\s+)*?(?:if|else|when|for|while|do|try|catch|finally|select|defer|async)\\b.*\\{",
         "end": "^\\s*\\}",
         "startsAtFirstColumn": true,
         "nestable": true,
         "exclusive": false,
         "expansion": "none",
         "collapsed": true,
-        "comment": "fold control flow blocks: if/else/when/for/while/do/try/catch/finally/select"
+        "comment": "fold control flow blocks: if/else/when/for/while/do/try/catch/finally/select/defer/async"
       },
       {
         "start": "^\\s*(?:\\w+\\s+)*?(?:fun|constructor)\\b.*\\{",

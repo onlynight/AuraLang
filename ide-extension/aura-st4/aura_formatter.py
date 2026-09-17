@@ -48,7 +48,7 @@ class AuraFormatter:
     # Keywords that increase indent
     BLOCK_KEYWORDS = re.compile(
         r'\b(if|else|when|try|catch|finally|for|while|do|fun|class|struct|'
-        r'enum|interface|actor|object)\b'
+        r'enum|interface|actor|object|defer|async)\b'
     )
 
     @staticmethod
@@ -323,6 +323,31 @@ class AuraAutoCompleteCommand(sublime_plugin.TextCommand):
         ("suspend", "storage.modifier.other.aura", "suspend function"),
         ("inline", "storage.modifier.other.aura", "inline function"),
         ("async", "storage.modifier.other.aura", "async function"),
+        ("native", "storage.modifier.other.aura", "native keyword"),
+        ("defer", "keyword.control.aura", "defer block"),
+        ("do", "keyword.control.aura", "do-while loop"),
+        ("select", "keyword.control.aura", "select multiplexing"),
+        ("await", "keyword.control.aura", "await expression"),
+        ("box", "storage.modifier.other.aura", "box memory"),
+        ("weak", "storage.modifier.other.aura", "weak reference"),
+        ("malloc", "storage.modifier.other.aura", "malloc memory"),
+        ("free", "storage.modifier.other.aura", "free memory"),
+        ("retain", "storage.modifier.other.aura", "retain memory"),
+        ("release", "storage.modifier.other.aura", "release memory"),
+        ("value", "storage.modifier.other.aura", "value class"),
+        ("lazy", "storage.modifier.other.aura", "lazy initialization"),
+        ("const", "storage.modifier.other.aura", "const modifier"),
+        ("comptime", "storage.modifier.other.aura", "comptime function"),
+        ("this", "variable.language.aura", "self reference"),
+        ("super", "variable.language.aura", "parent reference"),
+        ("object", "storage.type.object.aura", "singleton object"),
+        ("unit", "storage.type.unit.aura", "unit type"),
+        ("private", "storage.modifier.other.aura", "private visibility"),
+        ("protected", "storage.modifier.other.aura", "protected visibility"),
+        ("public", "storage.modifier.other.aura", "public visibility"),
+        ("by", "keyword.soft.aura", "delegate keyword"),
+        ("to", "keyword.hard.aura", "map entry keyword"),
+        ("package", "storage.type.package.aura", "package declaration (file header)"),
     ]
 
     # Builtin types

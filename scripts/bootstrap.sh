@@ -32,55 +32,55 @@ find_aura() {
 
 check_file() {
     if [ ! -f "$1" ]; then
-        echo "✗ 文件不存在: $1"
-        echo "  请先完成 core/aura/lang/std/ 的编写"
+        echo "✗ File not found: $1"
+        echo "  Please complete core/aura/lang/std/ first"
         exit 1
     fi
 }
 
 # ── 阶段 0: 环境检查 ──────────────────────────────────────────────
-echo "=== 阶段 0: 环境检查 ==="
+echo "=== Phase 0: Environment check ==="
 check_file "compiler/Cargo.toml"
 
 AURA=$(find_aura)
 if [ -z "$AURA" ]; then
-    echo "  使用 cargo build --release 编译 aura.exe..."
+    echo "  Using cargo build --release to compile aura.exe..."
     AURA="$AURA_BIN"
 fi
 
 # ── 阶段 1: 编译最小 aura.exe（Rust） ─────────────────────────────
-echo "=== 阶段 1: 编译最小 aura.exe ==="
-echo "  运行: cargo build --release --manifest-path compiler/Cargo.toml"
+echo "=== Phase 1: Compile minimal aura.exe ==="
+echo "  Running: cargo build --release --manifest-path compiler/Cargo.toml"
 cargo build --release --manifest-path compiler/Cargo.toml
 AURA="$AURA_BIN"
 
 # ── 阶段 2: 用最小 aura.exe 编译 core/aura/lang/std/ ───────────────
-echo "=== 阶段 2: 用最小 aura.exe 编译 vm.aura / gc.aura / memory.aura ==="
+echo "=== Phase 2: Compile vm.aura / gc.aura / memory.aura with minimal aura.exe ==="
 check_file "core/aura/lang/std/vm/vm.aura"
 check_file "core/aura/lang/std/gc/gc.aura"
 check_file "core/aura/lang/std/memory/memory.aura"
 
-echo "  编译 vm.aura → vm.exe..."
+echo "  Compiling vm.aura → vm.exe..."
 "$AURA" build "core/aura/lang/std/vm/vm.aura" --aot --output "$VM_OUT"
 
-echo "  编译 gc.aura → gc.exe..."
+echo "  Compiling gc.aura → gc.exe..."
 "$AURA" build "core/aura/lang/std/gc/gc.aura" --aot --output "$GC_OUT"
 
-echo "  编译 memory.aura → memory.exe..."
+echo "  Compiling memory.aura → memory.exe..."
 "$AURA" build "core/aura/lang/std/memory/memory.aura" --aot --output "$MEM_OUT"
 
 # ── 阶段 3: 用 vm.exe 重新编译 vm.aura（自举验证） ────────────────
-echo "=== 阶段 3: 用 vm.exe 重新编译 vm.aura（自举验证）==="
+echo "=== Phase 3: Recompile vm.aura with vm.exe (bootstrap verification) ==="
 check_file "$VM_OUT"
 
-echo "  用 vm.exe 编译 vm.aura → vm2.exe..."
+echo "  Compiling vm.aura with vm.exe → vm2.exe..."
 "$VM_OUT" build "core/aura/lang/std/vm/vm.aura" --aot --output "$VM2_OUT"
 
-echo "  用 vm2.exe 编译 gc.aura → gc2.exe..."
+echo "  Compiling gc.aura with vm2.exe → gc2.exe..."
 "$VM2_OUT" build "core/aura/lang/std/gc/gc.aura" --aot --output "$GC2_OUT"
 
 # ── 阶段 4: 验证行为一致性 ────────────────────────────────────────
-echo "=== 阶段 4: 验证行为一致性 ==="
+echo "=== Phase 4: Verify behavioral consistency ==="
 check_file "$TEST_DIR/vm_test.aura"
 
 echo "  vm.exe run vm_test.aura → output1.txt..."
@@ -90,29 +90,29 @@ echo "  vm2.exe run vm_test.aura → output2.txt..."
 "$VM2_OUT" run "$TEST_DIR/vm_test.aura" > "$OUT2"
 
 if diff -q "$OUT1" "$OUT2" > /dev/null 2>&1; then
-    echo "  ✓ 行为一致: vm.exe 与 vm2.exe 输出相同"
-    echo "  ✓ 自举验证通过"
+    echo "  ✓ Behavior consistent: vm.exe and vm2.exe output identical"
+    echo "  ✓ Bootstrap verification passed"
 else
-    echo "  ✗ 行为不一致:"
+    echo "  ✗ Behavior inconsistent:"
     diff "$OUT1" "$OUT2" || true
-    echo "  ✗ 自举验证失败"
+    echo "  ✗ Bootstrap verification failed"
     exit 1
 fi
 
 # ── 阶段 5: 验证性能 ──────────────────────────────────────────────
-echo "=== 阶段 5: 验证性能 ==="
+echo "=== Phase 5: Verify performance ==="
 check_file "$TEST_DIR/performance_test.aura"
 
-echo "  运行 performance_test.aura (vm.exe)..."
+echo "  Running performance_test.aura (vm.exe)..."
 TIME1=$( { /usr/bin/time -f "%e" "$VM_OUT" run "$TEST_DIR/performance_test.aura" > /dev/null 2>&1; } 2>&1 )
 TIME1_VAL=$(echo "$TIME1" | awk '{print $1}')
 
-echo "  运行 performance_test.aura (vm2.exe)..."
+echo "  Running performance_test.aura (vm2.exe)..."
 TIME2=$( { /usr/bin/time -f "%e" "$VM2_OUT" run "$TEST_DIR/performance_test.aura" > /dev/null 2>&1; } 2>&1 )
 TIME2_VAL=$(echo "$TIME2" | awk '{print $1}')
 
-echo "  vm.exe 耗时:  ${TIME1_VAL}s"
-echo "  vm2.exe 耗时: ${TIME2_VAL}s"
+echo "  vm.exe elapsed:  ${TIME1_VAL}s"
+echo "  vm2.exe elapsed: ${TIME2_VAL}s"
 
 # 性能差异检查（5% 容差）
 PERF_DIFF=$(echo "$TIME1_VAL $TIME2_VAL" | awk '{
@@ -125,17 +125,17 @@ PERF_DIFF=$(echo "$TIME1_VAL $TIME2_VAL" | awk '{
     }
 }')
 
-echo "  性能差异: ${PERF_DIFF}%"
+echo "  Performance difference: ${PERF_DIFF}%"
 
 if [ "$(echo "$PERF_DIFF < 5.0" | bc -l 2>/dev/null || echo "0")" = "1" ]; then
-    echo "  ✓ 性能一致（差异 < 5%）"
+    echo "  ✓ Performance consistent (difference < 5%)"
 else
-    echo "  ⚠ 性能差异超过 5%，请检查"
-    echo "  注意: 性能差异检查为参考指标，不影响验证结果"
+    echo "  ⚠ Performance difference exceeds 5%, please check"
+    echo "  Note: Performance difference check is a reference metric and does not affect verification results"
 fi
 
 # ── 阶段 6: 替换（可选，默认不替换） ──────────────────────────────
-echo "=== 阶段 6: 验证总结 ==="
+echo "=== Phase 6: Verification summary ==="
 echo "  vm.exe  →  $VM_OUT"
 echo "  vm2.exe →  $VM2_OUT"
 echo "  gc.exe  →  $GC_OUT"
@@ -146,19 +146,19 @@ echo ""
 # 备份原始 aura.exe
 if [ -f "$AURA_BIN" ]; then
     cp "$AURA_BIN" "${AURA_BIN}.bak"
-    echo "  已备份原始 aura.exe → ${AURA_BIN}.bak"
+    echo "  Backed up original aura.exe → ${AURA_BIN}.bak"
 fi
 
 # 替换（仅当设置 AUTO_REPLACE=true 时执行）
 if [ "${AUTO_REPLACE:-false}" = "true" ]; then
-    echo "  AUTO_REPLACE=true，正在替换..."
+    echo "  AUTO_REPLACE=true, replacing..."
     cp "$VM_OUT" "$AURA_BIN"
     cp "$GC_OUT" "$ROOT_DIR/gc.exe"
     cp "$MEM_OUT" "$ROOT_DIR/memory.exe"
-    echo "  ✓ 替换完成"
+    echo "  ✓ Replacement complete"
 else
-    echo "  未设置 AUTO_REPLACE=true，跳过自动替换"
-    echo "  如需替换，请手动执行:"
+    echo "  AUTO_REPLACE=true not set, skipping auto-replacement"
+    echo "  To replace manually, run:"
     echo "    cp vm.exe target/release/aura.exe"
     echo "    cp gc.exe target/release/gc.exe"
     echo "    cp memory.exe target/release/memory.exe"
@@ -166,14 +166,14 @@ fi
 
 echo ""
 echo "═══════════════════════════════════════════════════════"
-echo "  自举验证完成！"
-echo "  行为一致性: ✓"
-echo "  性能一致性: ${PERF_DIFF}% 差异"
+echo "  Bootstrap verification complete!"
+echo "  Behavior consistency: ✓"
+echo "  Performance consistency: ${PERF_DIFF}% difference"
 echo "═══════════════════════════════════════════════════════"
 echo ""
-echo "清理临时文件:"
+echo "Cleaning up temporary files:"
 rm -f "$OUT1" "$OUT2"
-echo "  已删除 output1.txt, output2.txt"
+echo "  Deleted output1.txt, output2.txt"
 
 echo ""
-echo "验证完成时间: $(date)"
+echo "Verification completed at: $(date)"

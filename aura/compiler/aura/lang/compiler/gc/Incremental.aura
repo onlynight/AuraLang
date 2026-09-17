@@ -1,4 +1,5 @@
 // aura:///aura/compiler/aura/lang/compiler/gc/Incremental.aura
+package aura.lang.compiler.gc
 // 增量 GC 策略（Phase 4: 完整 VM Aura 编写）
 /// 增量 GC 策略。
 ///

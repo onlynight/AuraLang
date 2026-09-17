@@ -51,7 +51,10 @@ internal object Math {
 }
 "#;
     let module = compile_test_source(source);
-    assert!(!module.functions.is_empty(), "Math 模块应包含函数");
+    assert!(
+        !module.functions.is_empty(),
+        "Math module should contain functions"
+    );
     assert!(
         module.functions.iter().any(|f| f.name.contains("abs")),
         "Math 模块应包含 abs"
@@ -75,7 +78,10 @@ internal object String {
 }
 "#;
     let module = compile_test_source(source);
-    assert!(!module.functions.is_empty(), "String 模块应包含函数");
+    assert!(
+        !module.functions.is_empty(),
+        "String module should contain functions"
+    );
 }
 
 /// 测试 Path 模块编译
@@ -92,7 +98,10 @@ internal object Path {
 }
 "#;
     let module = compile_test_source(source);
-    assert!(!module.functions.is_empty(), "Path 模块应包含函数");
+    assert!(
+        !module.functions.is_empty(),
+        "Path module should contain functions"
+    );
 }
 
 /// 测试 Collections 模块编译
@@ -109,7 +118,10 @@ internal object Collections {
 }
 "#;
     let module = compile_test_source(source);
-    assert!(!module.functions.is_empty(), "Collections 模块应包含函数");
+    assert!(
+        !module.functions.is_empty(),
+        "Collections module should contain functions"
+    );
 }
 
 /// 测试 FileSystem 模块编译（FFI AOT 直接调用）
@@ -129,7 +141,10 @@ internal object FileSystem {
 }
 "#;
     let module = compile_test_source(source);
-    assert!(!module.functions.is_empty(), "FileSystem 模块应包含函数");
+    assert!(
+        !module.functions.is_empty(),
+        "FileSystem module should contain functions"
+    );
 }
 
 /// 测试 IO 模块编译（FFI AOT 直接调用）
@@ -146,7 +161,10 @@ internal object IO {
 }
 "#;
     let module = compile_test_source(source);
-    assert!(!module.functions.is_empty(), "IO 模块应包含函数");
+    assert!(
+        !module.functions.is_empty(),
+        "IO module should contain functions"
+    );
 }
 
 /// 测试 Network 模块编译（FFI AOT 直接调用）
@@ -166,7 +184,10 @@ internal object Network {
 }
 "#;
     let module = compile_test_source(source);
-    assert!(!module.functions.is_empty(), "Network 模块应包含函数");
+    assert!(
+        !module.functions.is_empty(),
+        "Network module should contain functions"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -239,7 +260,10 @@ extern interface Math {
 }
 "#;
     let module = compile_test_source(source);
-    assert!(!module.natives.is_empty(), "应包含原生函数声明");
+    assert!(
+        !module.natives.is_empty(),
+        "should contain native function declarations"
+    );
     assert!(
         module.natives.iter().any(|n| n.name.contains("abs")),
         "应包含 Math.abs"
@@ -314,7 +338,11 @@ extern "c" "libc" fun fopen(path: String, mode: String): Pointer
         compiler::codegen::ffi_aot::ExecutionMode::Aot,
     ] {
         let result = configure_ffi_aot_direct(&module, mode, &FfiAotConfig::default());
-        assert!(result.is_ok(), "configure_ffi_aot_direct({:?}) 失败", mode);
+        assert!(
+            result.is_ok(),
+            "configure_ffi_aot_direct({:?}) failed",
+            mode
+        );
         let r = result.unwrap();
         assert_eq!(
             r.extern_interface_count + r.c_ffi_count,

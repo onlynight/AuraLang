@@ -1,6 +1,9 @@
 // aura:///aura/lang/String.aura
 package aura.lang
 // 语言内置类型，不可修改
+//
+// 实现：全部以 Aura 编写（纯逻辑），不使用 extern "C" 或 Rust cffi。
+// 系统能力（如需底层字符串操作）由 aura.lang.native 包提供。
 
 import aura.lang.collection.ArrayList
 import aura.lang.collection.Array
@@ -15,13 +18,13 @@ import aura.lang.collection.List
 ///
 /// @see Char, List
 /// @since 0.1
-internal value class String {
+value class String {
 
     // ── 常量与工具函数（companion object）──
 
     companion object {
         /// 空字符串常量
-        const EMPTY: String = ""
+        const val EMPTY: String = ""
 
         /// 从字符数组构造字符串
         fun fromChars(chars: Array<Char>): String {
@@ -637,6 +640,14 @@ internal value class String {
             i = i + 1
         }
         return count
+    }
+
+    /// 统计指定子字符串出现次数（AOT 发射器调用入口）。
+    /// 接收者调用：`text.countCharStr("\n")`。
+    /// Aura 发射器把 `countChar("\n")` 映射到此方法。
+    fun countCharStr(sub: String): Int {
+        if (sub.length == 0 || this.length == 0) { return 0 }
+        return countChar(sub[0])
     }
 
     /// 返回第一个字符

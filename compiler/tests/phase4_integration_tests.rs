@@ -12,9 +12,9 @@ use compiler::vm::{Value, Vm, VmOptions};
 
 /// 编译并运行源码，返回 main 的返回值
 fn run_vm(source: &str) -> Value {
-    let module = compile_source(source).expect("编译应成功");
-    let mut vm = Vm::new(&module, VmOptions::default()).expect("VM 初始化");
-    vm.run().expect("运行应成功")
+    let module = compile_source(source).expect("compilation should succeed");
+    let mut vm = Vm::new(&module, VmOptions::default()).expect("VM initialization");
+    vm.run().expect("run should succeed")
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -357,10 +357,10 @@ fn test_example_class_runtime_runs() {
         env!("CARGO_MANIFEST_DIR"),
         "/../examples/classes/class_runtime.aura"
     );
-    let source = std::fs::read_to_string(path).expect("示例文件应可读");
-    let module = compile_source(&source).expect("示例应编译成功");
-    let mut vm = Vm::new(&module, VmOptions::default()).expect("VM 初始化");
-    vm.run().expect("示例应运行成功");
+    let source = std::fs::read_to_string(path).expect("example file should be readable");
+    let module = compile_source(&source).expect("example should compile");
+    let mut vm = Vm::new(&module, VmOptions::default()).expect("VM initialization");
+    vm.run().expect("example should run");
 }
 
 // ── 1.14 真实示例文件编译运行（examples/classes/object_hierarchy_test.aura） ──
@@ -371,10 +371,10 @@ fn test_example_object_hierarchy_runs() {
         env!("CARGO_MANIFEST_DIR"),
         "/../examples/classes/object_hierarchy_test.aura"
     );
-    let source = std::fs::read_to_string(path).expect("示例文件应可读");
-    let module = compile_source(&source).expect("示例应编译成功");
-    let mut vm = Vm::new(&module, VmOptions::default()).expect("VM 初始化");
-    vm.run().expect("示例应运行成功");
+    let source = std::fs::read_to_string(path).expect("example file should be readable");
+    let module = compile_source(&source).expect("example should compile");
+    let mut vm = Vm::new(&module, VmOptions::default()).expect("VM initialization");
+    vm.run().expect("example should run");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -407,14 +407,14 @@ mod aot_tests {
     }
 
     fn compile_with_aot_embed(source: &str) -> compiler::codegen::BytecodeModule {
-        let module = compile_source(source).expect("字节码编译应成功");
+        let module = compile_source(source).expect("bytecode compilation should succeed");
         let mut lexer = Lexer::new(source);
         let tokens = lexer.tokenize();
         let mut parser = Parser::new(tokens);
         let program = parser.parse_program();
         assert!(
             parser.errors().is_empty(),
-            "语法错误: {:?}",
+            "syntax error: {:?}",
             parser.errors().first()
         );
         let hir = desugar_program(&program);
@@ -427,7 +427,8 @@ mod aot_tests {
             std::process::id(),
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
         ));
-        let result = embed_aot(module, &hir, options, &work_dir).expect("AOT 嵌入应成功");
+        let result =
+            embed_aot(module, &hir, options, &work_dir).expect("AOT embedding should succeed");
         if std::env::var_os("AURA_KEEP_AOT_DIR").is_none() {
             let _ = std::fs::remove_dir_all(&work_dir);
         } else {
@@ -436,7 +437,7 @@ mod aot_tests {
         // 确保真的嵌入了机器码（否则测试会静默退化成解释执行）
         assert!(
             !result.module.aot_blob_data.is_empty(),
-            "AOT 应嵌入机器码 blob"
+            "AOT should embed machine code blob"
         );
         result.module
     }
@@ -444,14 +445,14 @@ mod aot_tests {
     /// AOT 编译并运行，返回 main 的返回值
     fn run_aot(source: &str) -> Value {
         let module = compile_with_aot_embed(source);
-        let mut vm = Vm::new(&module, VmOptions::default()).expect("VM 初始化");
-        vm.run().expect("AOT 运行应成功")
+        let mut vm = Vm::new(&module, VmOptions::default()).expect("VM initialization");
+        vm.run().expect("AOT run should succeed")
     }
 
     #[test]
     fn test_aot_primitive_is() {
         if !llc_available() {
-            eprintln!("skipped: LLVM 不可用");
+            eprintln!("skipped: LLVM not available");
             return;
         }
         let src = r#"
@@ -469,7 +470,7 @@ mod aot_tests {
     #[test]
     fn test_aot_as_cast() {
         if !llc_available() {
-            eprintln!("skipped: LLVM 不可用");
+            eprintln!("skipped: LLVM not available");
             return;
         }
         let src = r#"
@@ -485,7 +486,7 @@ mod aot_tests {
     #[test]
     fn test_aot_tostring() {
         if !llc_available() {
-            eprintln!("skipped: LLVM 不可用");
+            eprintln!("skipped: LLVM not available");
             return;
         }
         let src = r#"
@@ -509,7 +510,7 @@ mod aot_tests {
     #[test]
     fn test_aot_equals_hashcode() {
         if !llc_available() {
-            eprintln!("skipped: LLVM 不可用");
+            eprintln!("skipped: LLVM not available");
             return;
         }
         let src = r#"
@@ -527,7 +528,7 @@ mod aot_tests {
     #[test]
     fn test_aot_typeof() {
         if !llc_available() {
-            eprintln!("skipped: LLVM 不可用");
+            eprintln!("skipped: LLVM not available");
             return;
         }
         let src = r#"
@@ -554,14 +555,14 @@ mod jit_tests {
 
     /// 开启 JIT 并降低热点阈值，让热点函数真正被编译为原生码
     fn run_vm_jit(source: &str) -> Value {
-        let module = compile_source(source).expect("编译应成功");
+        let module = compile_source(source).expect("compilation should succeed");
         let opts = VmOptions {
             jit: true,
             hotspot_threshold: 1,
             ..VmOptions::default()
         };
-        let mut vm = Vm::new(&module, opts).expect("VM 初始化");
-        vm.run().expect("JIT 运行应成功")
+        let mut vm = Vm::new(&module, opts).expect("VM initialization");
+        vm.run().expect("JIT run should succeed")
     }
 
     /// Phase 4 相关函数（is / as）在 JIT 编译后结果应与解释器一致
@@ -644,9 +645,9 @@ mod jit_tests {
                 return score
             }
         "#;
-        let module = compile_source(src).expect("编译应成功");
-        let mut vm = Vm::new(&module, VmOptions::default()).expect("VM 初始化");
-        let result = vm.run().expect("运行应成功");
+        let module = compile_source(src).expect("compilation should succeed");
+        let mut vm = Vm::new(&module, VmOptions::default()).expect("VM initialization");
+        let result = vm.run().expect("run should succeed");
         assert_eq!(result, Value::Int(2));
     }
 }

@@ -10,7 +10,7 @@ package aura.lang.collection
 ///
 /// @see Set, HashMap, ArrayList
 /// @since 0.5
-internal class HashSet<T> {
+class HashSet<T> {
 
     // ── 内部存储 ──
 
@@ -19,12 +19,12 @@ internal class HashSet<T> {
     // ── 构造 ──
 
     /// 创建空集合
-    constructor() {
+    init() {
         data = ArrayList<T>()
     }
 
     /// 从可变参数创建集合
-    constructor(vararg items: T) {
+    init(vararg items: T) {
         data = ArrayList<T>()
         var i: Int = 0
         while (i < items.size) {
@@ -139,19 +139,24 @@ internal class HashSet<T> {
     }
 }
 
-// ── 工厂函数 ──
+// ── HashSet 工具对象 ──
 
-/// 创建不可变集合
-fun <T> setOf(vararg items: T): HashSet<T> {
-    return HashSet<T>(items)
+/// HashSet 工厂工具对象。
+object HashSetUtils {
+
+    /// 创建不可变集合
+    fun <T> setOf(vararg items: T): HashSet<T> {
+        return HashSet<T>(items)
+    }
+
+    /// 创建可变集合
+    fun <T> mutableSetOf(vararg items: T): HashSet<T> {
+        return setOf(items)
+    }
+
+    /// 创建空集合
+    fun <T> emptySet(): HashSet<T> {
+        return HashSet<T>()
+    }
 }
 
-/// 创建可变集合
-fun <T> mutableSetOf(vararg items: T): HashSet<T> {
-    return setOf(items)
-}
-
-/// 创建空集合
-fun <T> emptySet(): HashSet<T> {
-    return HashSet<T>()
-}

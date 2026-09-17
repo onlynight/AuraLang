@@ -1,6 +1,8 @@
 // ════════════════════════════════════════════════════════════
-// 语法高亮验证测试文件
+// 语法高亮验证测试文件（v2.0 — 对齐编译器源码关键字表）
 // ════════════════════════════════════════════════════════════
+
+package aura.lang.compiler.lexer
 
 import aura.concurrent.*
 import aura.io
@@ -25,8 +27,36 @@ fun legacyApi(): Int = 0
 suspend fun fetch(): Int = 0
 inline fun max(a: Int, b: Int): Int = a
 comptime fun constValue(): Int = 1
+const fun CONST_FN(): Int = 0
+
+// ── P10 并发 ──
+async fun concurrentTask(): Int = 0
+fun useSelect() {
+    select {
+        in channel -> {}
+        else -> {}
+    }
+}
+
+// ── P7 内存管理 ──
+fun useMemory() {
+    val ptr = malloc(64)
+    retain(ptr)
+    release(ptr)
+    free(ptr)
+    val box = box(42)
+    val weak = weak(box)
+}
+
+// ── Phase D: native ──
+native fun syscall(n: Int): Int = n
 
 extern "c" fun puts(msg: String): Int
+
+extern "c" "libc" {
+    fun strlen(s: String): Int
+    val MAGIC: Int
+}
 
 fun add(a: Int, b: Int): Int {
     return a + b
@@ -45,6 +75,10 @@ class Circle : Drawable {
     override fun draw() {}
 }
 
+sealed class Shape {
+    fun area(): Int = 0
+}
+
 enum Color {
     RED,
     GREEN,
@@ -58,6 +92,10 @@ interface Drawable {
 actor Scheduler {
     var tick: Int = 0
     fun step() { tick += 1 }
+}
+
+object Config {
+    val DEBUG: Boolean = false
 }
 
 typealias Vec2 = Pair<Int, Int>
@@ -141,4 +179,26 @@ fun main() {
     
     // 枚举访问
     val color = Color.RED
+    
+    // try-catch-finally
+    try {
+        risky()
+    } catch (e: Exception) {
+        handle(e)
+    } finally {
+        cleanup()
+    }
+    
+    // defer
+    defer {
+        cleanup()
+    }
+    
+    // async block
+    async {
+        await fetch()
+    }
+    
+    // throw
+    throw Error("oops")
 }
