@@ -642,6 +642,14 @@ value class String {
         return count
     }
 
+    /// 统计指定子字符串出现次数（AOT 发射器调用入口）。
+    /// 接收者调用：`text.countCharStr("\n")`。
+    /// Aura 发射器把 `countChar("\n")` 映射到此方法。
+    fun countCharStr(sub: String): Int {
+        if (sub.length == 0 || this.length == 0) { return 0 }
+        return countChar(sub[0])
+    }
+
     /// 返回第一个字符
     fun first(): Char {
         return this[0]

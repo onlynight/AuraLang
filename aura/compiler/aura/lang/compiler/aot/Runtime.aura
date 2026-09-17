@@ -35,28 +35,10 @@ object RuntimeUtils {
     }
 
     /// C FFI 实现（aura_std_cffi.c）的真实 ABI 签名表。
+    /// Phase B: 全部条目已移除——各 std 函数均由 Aura 实现提供。
     /// 格式：`symbol|ret_llvm_type|param_llvm_types(逗号分隔)`
     fun cffiTable(): String {
-        return "aura_math_sin|double|double\n" +
-            "aura_math_cos|double|double\n" +
-            "aura_math_sqrt|double|double\n" +
-            "aura_math_pow|double|double,double\n" +
-            "aura_math_abs|i64|double\n" +
-            "aura_string_length|i64|i8*\n" +
-            "aura_string_contains|i1|i8*,i8*\n" +
-            "aura_string_toUpperCase|i8*|i8*\n" +
-            "aura_string_toLowerCase|i8*|i8*\n" +
-            "aura_string_trim|i8*|i8*\n" +
-            "aura_string_startsWith|i1|i8*,i8*\n" +
-            "aura_string_endsWith|i1|i8*,i8*\n" +
-            "aura_fs_exists|i1|i8*\n" +
-            "aura_fs_readText|i8*|i8*\n" +
-            "aura_fs_writeText|i8*|i8*,i8*\n" +
-            "aura_io_fileWrite|void|i8*,i8*\n" +
-            "aura_env_platform|i8*|\n" +
-            "aura_env_get|i8*|i8*\n" +
-            "aura_time_epoch|i64|\n" +
-            "aura_random_nextInt|i64|\n"
+        return ""
     }
 
     /// AOT 调用点符号表（Phase 6.5.3 / 6.5.4）。
@@ -99,23 +81,18 @@ object RuntimeUtils {
             // "aura_lang_std_String_toUpperCase|i8*|i8*\n" +
             // "aura_lang_std_String_toLowerCase|i8*|i8*\n" +
             // "aura_lang_std_String_trim|i8*|i8*\n" +
-            "aura_lang_std_Collections_emptyList|i8*|\n" +
-            "aura_lang_std_Collections_listAppend|i8*|i8*,i8*\n" +
-            "aura_lang_std_Collections_count|i64|i8*\n" +
-            "aura_lang_std_Collections_getAt|i8*|i8*,i64\n" +
-            // `Collections_set`：HIR 把 `x[i] = v` / `x.set(i, v)` 降级为
-            // `Collections.set(x, i, v)`，发射器按 C 符号
-            // `aura_lang_std_Collections_set` 发射（返回列表句柄 `i8*`，
-            // 供 `xs = Collections.set(xs, …)` 赋值回变量）。
-            // C 运行库原型：`const void *aura_lang_std_Collections_set(const void*, int64_t, const void*)`。
-            "aura_lang_std_Collections_set|i8*|i8*,i64,i8*\n" +
-            "aura_lang_std_Collections_listSet|void|i8*,i64,i8*\n" +
-            "aura_lang_std_Collections_filter|i8*|i8*,i8*\n" +
-            "aura_lang_std_Collections_map|i8*|i8*,i8*\n" +
-            "aura_lang_std_Collections_take|i8*|i8*,i64\n" +
-            // `String.countChar`：Aura 发射器直接走 C 运行库
-            //（Aura 侧实现签名是 `countChar(char: Char)`，与调用点传字符串不符 → 恒 0）。
-            "aura_lang_std_String_countChar|i64|i8*,i8*\n"
+            // Phase B: Collections C 映射已移除（Collections.aura 自动包含，调用走 Aura 编译）
+            // ── Phase B 前保留（已注释）──
+            // "aura_lang_std_Collections_emptyList|i8*|\n" +
+            // "aura_lang_std_Collections_listAppend|i8*|i8*,i8*\n" +
+            // "aura_lang_std_Collections_count|i64|i8*\n" +
+            // "aura_lang_std_Collections_getAt|i8*|i8*,i64\n" +
+            // "aura_lang_std_Collections_set|i8*|i8*,i64,i8*\n" +
+            // "aura_lang_std_Collections_listSet|void|i8*,i64,i8*\n" +
+            // "aura_lang_std_Collections_filter|i8*|i8*,i8*\n" +
+            // "aura_lang_std_Collections_map|i8*|i8*,i8*\n" +
+            // "aura_lang_std_Collections_take|i8*|i8*,i64\n" +
+            ""
     }
 
     /// 生成所有 runtime 函数 + 调用点符号的 LLVM 外部声明（去重）。
@@ -178,13 +155,22 @@ object RuntimeUtils {
         // extern object 成员调用点会补「接收者」占位，索引会落到第 2 个参数槽
         //（C 只认第 1 个）→ `arg(i)` 恒返回 argv[0]。
         out.sbAdd("declare i8* @aura_process_args()\n")
-        // Phase D: setjmp/longjmp 异常桥（try/catch）— Phase D 改造前暂保留
-        // emitTry 调用 @aura_setjmp（保存 jmp_buf 到静态栈，支持嵌套 try/catch），
-        // emitThrow 调用 @aura_longjmp（从栈顶 longjmp 回最近的 setjmp）。
-        // 实现位于 aura_std_cffi.c（Phase C 从 aura_syscalls.c 迁入）。
-        out.sbAdd("declare i32 @aura_setjmp(i8*)\n")
-        out.sbAdd("declare void @aura_longjmp(i8*, i32)\n")
-        out.sbAdd("@aura_exception_value = external global i8*\n")
+        // Phase D: setjmp/longjmp 异常桥（try/catch）— 已迁移到纯 IR
+        // emitTry 调用系统 libc 的 setjmp（@setjmp / @_setjmp），
+        // emitThrow 调用系统 libc 的 longjmp（@longjmp / @_longjmp）。
+        // jmp_buf 栈管理（嵌套 try/catch 支持）由 IR 内的全局数组实现。
+        // 非 Windows 目标：@setjmp / @longjmp
+        out.sbAdd("; ---- Phase D: setjmp/longjmp (pure IR, system libc) ----\n")
+        out.sbAdd("declare i32 @setjmp(i8*)\n")
+        out.sbAdd("declare void @longjmp(i8*, i32)\n")
+        // Windows 目标：@_setjmp / @_longjmp（UCRT）
+        out.sbAdd("declare i32 @_setjmp(i8*)\n")
+        out.sbAdd("declare void @_longjmp(i8*, i32)\n")
+        // 异常值全局变量（__throw 写入，catch 块读取）
+        out.sbAdd("@aura_exception_value = internal global i8* null\n")
+        // jmp_buf 栈（支持嵌套 try/catch；IR 内联管理，不依赖 C 源码）
+        out.sbAdd("@aura_jmp_stack = internal global [64 x i8*] zeroinitializer\n")
+        out.sbAdd("@aura_jmp_depth = internal global i32 0\n")
         // Phase D.2: LLVM 原生异常处理基础设施（invoke/landingpad/resume）
         // personality 函数：LLVM 用它分派异常到 landing pad。
         // 目标平台决定 personality 符号名：
@@ -327,18 +313,17 @@ object RuntimeUtils {
     /// 本表把裸方法名解析为 C 运行库的调用点符号。未命中返回 ""。
     fun methodCallSymbol(name: String): String {
         // 迭代器链：`nums.filter { … }` / `.map { … }` / `.take(n)`。
-        // 第二实参为闭包句柄（`filter`/`map`）或个数（`take`），
-        // 由 C 运行库 `aura_lang_std_Collections_*` 实现。
-        if (name == "filter") { return "aura_lang_std_Collections_filter" }
-        else if (name == "map") { return "aura_lang_std_Collections_map" }
-        else if (name == "take") { return "aura_lang_std_Collections_take" }
+        // Phase B: 已切换到 Aura Collections 实现（i64/Long 类型）。
+        if (name == "filter") { return "Collections_filter" }
+        else if (name == "map") { return "Collections_map" }
+        else if (name == "take") { return "Collections_take" }
         else if (name == "length" || name == "size") { return "aura_lang_std_String_length" }
         else if (name == "contains") { return "aura_lang_std_String_contains" }
         else if (name == "startsWith") { return "aura_lang_std_String_startsWith" }
         else if (name == "endsWith") { return "aura_lang_std_String_endsWith" }
         else if (name == "indexOf") { return "aura_lang_std_String_indexOf" }
         else if (name == "lastIndexOf") { return "aura_lang_std_String_lastIndexOf" }
-        else if (name == "countChar") { return "aura_lang_std_String_countChar" }
+        else if (name == "countChar") { return "String_countCharStr" }
         else if (name == "substring") { return "aura_lang_std_String_substring" }
         else if (name == "substringBefore") { return "aura_lang_std_String_substringBefore" }
         else if (name == "substringAfter") { return "aura_lang_std_String_substringAfter" }

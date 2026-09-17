@@ -3014,17 +3014,23 @@ class LlvmEmitter {
         this.fBody.sbAdd(" = load i32, i32* ")
         this.fBody.sbAdd(idxAddr)
         this.fBody.sbAdd("\n")
-        val cnt: String = this.freshVar()
+        val list64: String = this.freshVar()
         this.fBody.sbAdd("  ")
-        this.fBody.sbAdd(cnt)
-        this.fBody.sbAdd(" = call i64 @aura_lang_std_Collections_count(i8* ")
+        this.fBody.sbAdd(list64)
+        this.fBody.sbAdd(" = ptrtoint i8* ")
         this.fBody.sbAdd(list)
+        this.fBody.sbAdd(" to i64\n")
+        val cnt64: String = this.freshVar()
+        this.fBody.sbAdd("  ")
+        this.fBody.sbAdd(cnt64)
+        this.fBody.sbAdd(" = call i64 @Collections_count(i64 ")
+        this.fBody.sbAdd(list64)
         this.fBody.sbAdd(")\n")
         val cnt32: String = this.freshVar()
         this.fBody.sbAdd("  ")
         this.fBody.sbAdd(cnt32)
         this.fBody.sbAdd(" = trunc i64 ")
-        this.fBody.sbAdd(cnt)
+        this.fBody.sbAdd(cnt64)
         this.fBody.sbAdd(" to i32\n")
         val cmp: String = this.freshVar()
         this.fBody.sbAdd("  ")
@@ -3051,15 +3057,27 @@ class LlvmEmitter {
         this.fBody.sbAdd(" = sext i32 ")
         this.fBody.sbAdd(idx)
         this.fBody.sbAdd(" to i64\n")
+        val list64b: String = this.freshVar()
+        this.fBody.sbAdd("  ")
+        this.fBody.sbAdd(list64b)
+        this.fBody.sbAdd(" = ptrtoint i8* ")
+        this.fBody.sbAdd(list)
+        this.fBody.sbAdd(" to i64\n")
         val elem: String = this.freshVar()
         this.fBody.sbAdd("  ")
         this.fBody.sbAdd(elem)
-        this.fBody.sbAdd(" = call i8* @aura_lang_std_Collections_getAt(i8* ")
-        this.fBody.sbAdd(this.ptrConst(list))
+        this.fBody.sbAdd(" = call i64 @Collections_getAt(i64 ")
+        this.fBody.sbAdd(list64b)
         this.fBody.sbAdd(", i64 ")
         this.fBody.sbAdd(idx64)
         this.fBody.sbAdd(")\n")
-        val elemCo: String = this.coerceValue(elem, "i8*", elemTy)
+        val elemPtr: String = this.freshVar()
+        this.fBody.sbAdd("  ")
+        this.fBody.sbAdd(elemPtr)
+        this.fBody.sbAdd(" = inttoptr i64 ")
+        this.fBody.sbAdd(elem)
+        this.fBody.sbAdd(" to i8*\n")
+        val elemCo: String = this.coerceValue(elemPtr, "i8*", elemTy)
         this.fBody.sbAdd("  store ")
         this.fBody.sbAdd(elemTy)
         this.fBody.sbAdd(" ")
@@ -3455,11 +3473,40 @@ class LlvmEmitter {
         this.fBody.sbAdd(jmpBuf)
         this.fBody.sbAdd(" = alloca [64 x i64], align 16\n")
 
-        // 调用 aura_setjmp（保存 jmp_buf 到栈，支持嵌套 try/catch）
+        // Phase D: 调用系统 libc 的 setjmp，前置 jmp_buf 栈入栈操作
+        // 1. 把 jmp_buf 指针压入栈（支持嵌套 try/catch）
+        val dIdx: String = this.freshVar()
+        this.fBody.sbAdd("  ")
+        this.fBody.sbAdd(dIdx)
+        this.fBody.sbAdd(" = load i32, i32* @aura_jmp_depth\n")
+        val sSlot: String = this.freshVar()
+        this.fBody.sbAdd("  ")
+        this.fBody.sbAdd(sSlot)
+        this.fBody.sbAdd(" = getelementptr [64 x i8*], [64 x i8*]* @aura_jmp_stack, i32 0, i32 ")
+        this.fBody.sbAdd(dIdx)
+        this.fBody.sbAdd("\n")
+        this.fBody.sbAdd("  store i8* ")
+        this.fBody.sbAdd(jmpBuf)
+        this.fBody.sbAdd(", i8* ")
+        this.fBody.sbAdd(sSlot)
+        this.fBody.sbAdd("\n")
+        val nDep: String = this.freshVar()
+        this.fBody.sbAdd("  ")
+        this.fBody.sbAdd(nDep)
+        this.fBody.sbAdd(" = add i32 ")
+        this.fBody.sbAdd(dIdx)
+        this.fBody.sbAdd(", 1\n")
+        this.fBody.sbAdd("  store i32 ")
+        this.fBody.sbAdd(nDep)
+        this.fBody.sbAdd(", i32* @aura_jmp_depth\n")
+        // 2. 调用系统 setjmp（平台特定名称：Windows → @_setjmp）
+        val sjSym: String = if (aotContains(this.targetTriple, "windows")) { "_setjmp" } else { "setjmp" }
         val sjResult: String = this.freshVar()
         this.fBody.sbAdd("  ")
         this.fBody.sbAdd(sjResult)
-        this.fBody.sbAdd(" = call i32 @aura_setjmp(i8* ")
+        this.fBody.sbAdd(" = call i32 @")
+        this.fBody.sbAdd(sjSym)
+        this.fBody.sbAdd("(i8* ")
         this.fBody.sbAdd(jmpBuf)
         this.fBody.sbAdd(")\n")
 
@@ -3679,17 +3726,29 @@ class LlvmEmitter {
         val iTy: String = this.inferType(hir, iId)
         val iv0: String = this.emitExpr(hir, iId)
         val iv: String = this.coerceValue(iv0, iTy, "i64")
-        // 集合：getAt（返回 Plan A i8* 句柄）→ 按元素类型拆箱（Int 列表 → i32）
+        // 集合：getAt（返回 i64 句柄）→ inttoptr 转 i8* → 按元素类型拆箱
         if (this.isCollectionReceiver(hir, cId)) {
             val elemTy: String = this.receiverElemTy(hir, cId)
-            val t: String = this.freshVar()
+            val c64: String = this.freshVar()
             this.fBody.sbAdd("  ")
-            this.fBody.sbAdd(t)
-            this.fBody.sbAdd(" = call i8* @aura_lang_std_Collections_getAt(i8* ")
-            this.fBody.sbAdd(this.ptrConst(c))
+            this.fBody.sbAdd(c64)
+            this.fBody.sbAdd(" = ptrtoint i8* ")
+            this.fBody.sbAdd(c)
+            this.fBody.sbAdd(" to i64\n")
+            val t64: String = this.freshVar()
+            this.fBody.sbAdd("  ")
+            this.fBody.sbAdd(t64)
+            this.fBody.sbAdd(" = call i64 @Collections_getAt(i64 ")
+            this.fBody.sbAdd(c64)
             this.fBody.sbAdd(", i64 ")
             this.fBody.sbAdd(iv)
             this.fBody.sbAdd(")\n")
+            val t: String = this.freshVar()
+            this.fBody.sbAdd("  ")
+            this.fBody.sbAdd(t)
+            this.fBody.sbAdd(" = inttoptr i64 ")
+            this.fBody.sbAdd(t64)
+            this.fBody.sbAdd(" to i8*\n")
             return this.coerceValue(t, "i8*", elemTy)
         }
         // 字符串：charAt（返回单字符字符串 i8*）
@@ -4210,16 +4269,22 @@ class LlvmEmitter {
         }
         val recv: String = this.emitExpr(hir, recvId)
         if (member == "length" || member == "size") {
-            // 集合：元素个数（`aura_lang_std_Collections_count`）；
+            // 集合：元素个数（Aura Collections.count，i64 类型）；
             // 字符串：字节长度（`aura_strlen`）。二者内部表示都是 `i8*`，
             // 只能靠接收者的**声明类型**区分（含字段接收者，见
             // `isCollectionReceiver`）。
             if (this.isCollectionReceiver(hir, recvId)) {
+                val recv64: String = this.freshVar()
+                this.fBody.sbAdd("  ")
+                this.fBody.sbAdd(recv64)
+                this.fBody.sbAdd(" = ptrtoint i8* ")
+                this.fBody.sbAdd(recv)
+                this.fBody.sbAdd(" to i64\n")
                 val c: String = this.freshVar()
                 this.fBody.sbAdd("  ")
                 this.fBody.sbAdd(c)
-                this.fBody.sbAdd(" = call i64 @aura_lang_std_Collections_count(i8* ")
-                this.fBody.sbAdd(recv)
+                this.fBody.sbAdd(" = call i64 @Collections_count(i64 ")
+                this.fBody.sbAdd(recv64)
                 this.fBody.sbAdd(")\n")
                 val ct: String = this.freshVar()
                 this.fBody.sbAdd("  ")
@@ -4505,60 +4570,82 @@ class LlvmEmitter {
 
         // 集合构造：`arrayListOf<T>()` / `listOf()` / `mutableListOf()` …
         // （泛型实参已在解析器消费，HIR 中不出现类型参数）→ 空列表句柄 + 逐个追加。
+        // Phase B: 已切换到 Aura Collections 实现（i64/Long 类型）。
         if (this.isCollectionCtor(fname)) {
             val empty: String = this.freshVar()
             this.fBody.sbAdd("  ")
             this.fBody.sbAdd(empty)
-            this.fBody.sbAdd(" = call i8* @aura_lang_std_Collections_emptyList()\n")
+            this.fBody.sbAdd(" = call i64 @Collections_emptyList()\n")
             var cur: String = empty
             var ci: Int = argStart
             while (ci < n) {
                 val cId: Int = hirKidsAt(kids, ci)
                 val cTy: String = this.inferType(hir, cId)
                 val cv: String = this.emitExpr(hir, cId)
-                val boxed: String = this.boxToPtr(cv, cTy)
+                val boxed0: String = this.boxToPtr(cv, cTy)
+                // boxToPtr 返回 i8*；Aura 函数签名收 i64(Long)，需 ptrtoint 转换
+                val boxed64: String = this.freshVar()
+                this.fBody.sbAdd("  ")
+                this.fBody.sbAdd(boxed64)
+                this.fBody.sbAdd(" = ptrtoint i8* ")
+                this.fBody.sbAdd(boxed0)
+                this.fBody.sbAdd(" to i64\n")
                 val nxt: String = this.freshVar()
                 this.fBody.sbAdd("  ")
                 this.fBody.sbAdd(nxt)
-                this.fBody.sbAdd(" = call i8* @aura_lang_std_Collections_listAppend(i8* ")
+                this.fBody.sbAdd(" = call i64 @Collections_listAppend(i64 ")
                 this.fBody.sbAdd(cur)
-                this.fBody.sbAdd(", i8* ")
-                this.fBody.sbAdd(boxed)
+                this.fBody.sbAdd(", i64 ")
+                this.fBody.sbAdd(boxed64)
                 this.fBody.sbAdd(")\n")
                 cur = nxt
                 ci = ci + 1
             }
-            return cur
+            // Aura 返回 i64；调用点期望 i8* 句柄，inttoptr 转换
+            val curPtr: String = this.freshVar()
+            this.fBody.sbAdd("  ")
+            this.fBody.sbAdd(curPtr)
+            this.fBody.sbAdd(" = inttoptr i64 ")
+            this.fBody.sbAdd(cur)
+            this.fBody.sbAdd(" to i8*\n")
+            return curPtr
         }
 
-        // 区间构造 `__range(a, b, inclusive)` → aura_lang_std_Collections_range
+        // 区间构造 `__range(a, b, inclusive)` → Aura Collections.range
         // （HIR 由 `a..b` / `a..<b` 降级而来；用于 `for (i in 1..5)`）。
+        // Phase B: 已切换到 Aura Collections.range（i64 类型）。
         if (fname == "__range") {
             var rs: String = "0"
             var re: String = "0"
             var rinc: String = "0"
             if (argStart < n) {
                 val sid: Int = hirKidsAt(kids, argStart)
-                rs = this.coerceValue(this.emitExpr(hir, sid), this.inferType(hir, sid), "i32")
+                rs = this.coerceValue(this.emitExpr(hir, sid), this.inferType(hir, sid), "i64")
             }
             if (argStart + 1 < n) {
                 val eid: Int = hirKidsAt(kids, argStart + 1)
-                re = this.coerceValue(this.emitExpr(hir, eid), this.inferType(hir, eid), "i32")
+                re = this.coerceValue(this.emitExpr(hir, eid), this.inferType(hir, eid), "i64")
             }
             if (argStart + 2 < n) {
                 val iid: Int = hirKidsAt(kids, argStart + 2)
-                rinc = this.coerceValue(this.emitExpr(hir, iid), this.inferType(hir, iid), "i32")
+                rinc = this.coerceValue(this.emitExpr(hir, iid), this.inferType(hir, iid), "i64")
             }
+            val rt64: String = this.freshVar()
+            this.fBody.sbAdd("  ")
+            this.fBody.sbAdd(rt64)
+            this.fBody.sbAdd(" = call i64 @Collections_range(i64 ")
+            this.fBody.sbAdd(rs)
+            this.fBody.sbAdd(", i64 ")
+            this.fBody.sbAdd(re)
+            this.fBody.sbAdd(", i64 ")
+            this.fBody.sbAdd(rinc)
+            this.fBody.sbAdd(")\n")
             val rt: String = this.freshVar()
             this.fBody.sbAdd("  ")
             this.fBody.sbAdd(rt)
-            this.fBody.sbAdd(" = call i8* @aura_lang_std_Collections_range(i32 ")
-            this.fBody.sbAdd(rs)
-            this.fBody.sbAdd(", i32 ")
-            this.fBody.sbAdd(re)
-            this.fBody.sbAdd(", i32 ")
-            this.fBody.sbAdd(rinc)
-            this.fBody.sbAdd(")\n")
+            this.fBody.sbAdd(" = inttoptr i64 ")
+            this.fBody.sbAdd(rt64)
+            this.fBody.sbAdd(" to i8*\n")
             return rt
         }
 
@@ -4582,29 +4669,51 @@ class LlvmEmitter {
             return iso
         }
 
-        // 集合方法：`lst.add(x)` → `listAppend`（接收者在 kids[0]，返回列表句柄）。
+        // 集合方法：`lst.add(x)` → Aura Collections.listAppend（接收者在 kids[0]，返回列表句柄）。
+        // Phase B: 已切换到 Aura Collections.listAppend（i64 类型）。
         if (fname == "add" && n >= 2) {
             val rId: Int = hirKidsAt(kids, 0)
             if (this.inferType(hir, rId) == "i8*") {
-                var cur: String = this.emitExpr(hir, rId)
+                var cur0: String = this.emitExpr(hir, rId)
+                // 调用点传入 i8*；Aura 函数收 i64，需 ptrtoint 转换
+                var cur64: String = this.freshVar()
+                this.fBody.sbAdd("  ")
+                this.fBody.sbAdd(cur64)
+                this.fBody.sbAdd(" = ptrtoint i8* ")
+                this.fBody.sbAdd(cur0)
+                this.fBody.sbAdd(" to i64\n")
+                var cur: String = cur64
                 var ai: Int = 1
                 while (ai < n) {
                     val aId: Int = hirKidsAt(kids, ai)
                     val aTy: String = this.inferType(hir, aId)
                     val av: String = this.emitExpr(hir, aId)
-                    val boxed: String = this.boxToPtr(av, aTy)
+                    val boxed0: String = this.boxToPtr(av, aTy)
+                    val boxed64: String = this.freshVar()
+                    this.fBody.sbAdd("  ")
+                    this.fBody.sbAdd(boxed64)
+                    this.fBody.sbAdd(" = ptrtoint i8* ")
+                    this.fBody.sbAdd(boxed0)
+                    this.fBody.sbAdd(" to i64\n")
                     val nxt: String = this.freshVar()
                     this.fBody.sbAdd("  ")
                     this.fBody.sbAdd(nxt)
-                    this.fBody.sbAdd(" = call i8* @aura_lang_std_Collections_listAppend(i8* ")
+                    this.fBody.sbAdd(" = call i64 @Collections_listAppend(i64 ")
                     this.fBody.sbAdd(cur)
-                    this.fBody.sbAdd(", i8* ")
-                    this.fBody.sbAdd(boxed)
+                    this.fBody.sbAdd(", i64 ")
+                    this.fBody.sbAdd(boxed64)
                     this.fBody.sbAdd(")\n")
                     cur = nxt
                     ai = ai + 1
                 }
-                return cur
+                // Aura 返回 i64；调用点期望 i8* 句柄，inttoptr 转换
+                val curPtr: String = this.freshVar()
+                this.fBody.sbAdd("  ")
+                this.fBody.sbAdd(curPtr)
+                this.fBody.sbAdd(" = inttoptr i64 ")
+                this.fBody.sbAdd(cur)
+                this.fBody.sbAdd(" to i8*\n")
+                return curPtr
             }
         }
 
@@ -4620,6 +4729,8 @@ class LlvmEmitter {
         }
 
         // Phase D: __throw 异常桥 — 存储异常值并 longjmp 到最近的 try 块
+        // 已迁移到纯 IR：从 jmp_buf 栈中取出最近一次 setjmp 的跳转缓冲，
+        // 调用系统 libc 的 longjmp（@longjmp / @_longjmp）。
         if (fname == "__throw" && n >= 1) {
             val excVal: String = this.emitExpr(hir, hirKidsAt(kids, argStart))
             // 存储异常值到全局变量（0 → null）
@@ -4627,9 +4738,58 @@ class LlvmEmitter {
             this.fBody.sbAdd("  store i8* ")
             this.fBody.sbAdd(excStr)
             this.fBody.sbAdd(", i8* @aura_exception_value\n")
-            // 调用 longjmp 跳转到最近的 setjmp（jmp_buf 为 null 时使用默认跳转点）
-            this.fBody.sbAdd("  call void @aura_longjmp(i8* null, i32 1)\n")
-            // unreachable（longjmp 不返回）
+            // 从 jmp_buf 栈中取出最近一次 setjmp 的跳转缓冲
+            val d0: String = this.freshVar()
+            this.fBody.sbAdd("  ")
+            this.fBody.sbAdd(d0)
+            this.fBody.sbAdd(" = load i32, i32* @aura_jmp_depth\n")
+            val hTry: String = this.freshVar()
+            this.fBody.sbAdd("  ")
+            this.fBody.sbAdd(hTry)
+            this.fBody.sbAdd(" = icmp sgt i32 ")
+            this.fBody.sbAdd(d0)
+            this.fBody.sbAdd(", 0\n")
+            this.fBody.sbAdd("  br i1 ")
+            this.fBody.sbAdd(hTry)
+            this.fBody.sbAdd(", label %")
+            val doLj: String = this.freshBb("do_longjmp")
+            this.fBody.sbAdd(doLj)
+            this.fBody.sbAdd(", label %")
+            val noTry: String = this.freshBb("no_try")
+            this.fBody.sbAdd(noTry)
+            this.fBody.sbAdd("\n")
+            // 有活跃 try 块：取出栈顶 jmp_buf 并 longjmp
+            this.fBody.sbAdd(doLj)
+            this.fBody.sbAdd(":\n")
+            val dDec: String = this.freshVar()
+            this.fBody.sbAdd("  ")
+            this.fBody.sbAdd(dDec)
+            this.fBody.sbAdd(" = sub i32 ")
+            this.fBody.sbAdd(d0)
+            this.fBody.sbAdd(", 1\n")
+            val sl0: String = this.freshVar()
+            this.fBody.sbAdd("  ")
+            this.fBody.sbAdd(sl0)
+            this.fBody.sbAdd(" = getelementptr [64 x i8*], [64 x i8*]* @aura_jmp_stack, i32 0, i32 ")
+            this.fBody.sbAdd(dDec)
+            this.fBody.sbAdd("\n")
+            val tp0: String = this.freshVar()
+            this.fBody.sbAdd("  ")
+            this.fBody.sbAdd(tp0)
+            this.fBody.sbAdd(" = load i8*, i8* ")
+            this.fBody.sbAdd(sl0)
+            this.fBody.sbAdd("\n")
+            val ljSym: String = if (aotContains(this.targetTriple, "windows")) { "_longjmp" } else { "longjmp" }
+            this.fBody.sbAdd("  call void @")
+            this.fBody.sbAdd(ljSym)
+            this.fBody.sbAdd("(i8* ")
+            this.fBody.sbAdd(tp0)
+            this.fBody.sbAdd(", i32 1)\n")
+            this.fBody.sbAdd("  unreachable\n")
+            // 无活跃 try 块：退出进程
+            this.fBody.sbAdd(noTry)
+            this.fBody.sbAdd(":\n")
+            this.fBody.sbAdd("  call void @exit(i32 1)\n")
             this.fBody.sbAdd("  unreachable\n")
             this.fTerminated = true
             return "0"
@@ -4879,22 +5039,34 @@ class LlvmEmitter {
                     }
                 }
             } else {
-                // ── 集合句柄：C 运行库 `getAt` / `set` ──
+                // ── 集合句柄：Aura Collections.getAt / set（i64 类型）──
                 val rvC: String = this.emitExpr(hir, rIdC)
                 val rsC: String = this.coerceValue(rvC, rTyC, "i8*")
+                val rs64C: String = this.freshVar()
+                this.fBody.sbAdd("  ")
+                this.fBody.sbAdd(rs64C)
+                this.fBody.sbAdd(" = ptrtoint i8* ")
+                this.fBody.sbAdd(rsC)
+                this.fBody.sbAdd(" to i64\n")
                 val iIdC: Int = hirKidsAt(kids, 1)
                 val iTyC: String = this.inferType(hir, iIdC)
                 val ivC: String = this.emitExpr(hir, iIdC)
                 val isC: String = this.coerceValue(ivC, iTyC, "i64")
                 if (mnameC == "get") {
-                    val tgC: String = this.freshVar()
+                    val tg64C: String = this.freshVar()
                     this.fBody.sbAdd("  ")
-                    this.fBody.sbAdd(tgC)
-                    this.fBody.sbAdd(" = call i8* @aura_lang_std_Collections_getAt(i8* ")
-                    this.fBody.sbAdd(rsC)
+                    this.fBody.sbAdd(tg64C)
+                    this.fBody.sbAdd(" = call i64 @Collections_getAt(i64 ")
+                    this.fBody.sbAdd(rs64C)
                     this.fBody.sbAdd(", i64 ")
                     this.fBody.sbAdd(isC)
                     this.fBody.sbAdd(")\n")
+                    val tgC: String = this.freshVar()
+                    this.fBody.sbAdd("  ")
+                    this.fBody.sbAdd(tgC)
+                    this.fBody.sbAdd(" = inttoptr i64 ")
+                    this.fBody.sbAdd(tg64C)
+                    this.fBody.sbAdd(" to i8*\n")
                     // 按元素类型拆箱，与 `emitIndex`（HirIndex 路径）保持一致：
                     // `List<Int>` 的元素是装箱指针，直接返回会让调用点把指针当整数。
                     return this.coerceValue(tgC, "i8*", this.receiverElemTy(hir, rIdC))
@@ -4904,16 +5076,28 @@ class LlvmEmitter {
                     val vTyC: String = this.inferType(hir, vIdC)
                     val vvC: String = this.emitExpr(hir, vIdC)
                     val vbC: String = this.boxToPtr(vvC, vTyC)
+                    val vb64C: String = this.freshVar()
+                    this.fBody.sbAdd("  ")
+                    this.fBody.sbAdd(vb64C)
+                    this.fBody.sbAdd(" = ptrtoint i8* ")
+                    this.fBody.sbAdd(vbC)
+                    this.fBody.sbAdd(" to i64\n")
+                    val ts64C: String = this.freshVar()
+                    this.fBody.sbAdd("  ")
+                    this.fBody.sbAdd(ts64C)
+                    this.fBody.sbAdd(" = call i64 @Collections_set(i64 ")
+                    this.fBody.sbAdd(rs64C)
+                    this.fBody.sbAdd(", i64 ")
+                    this.fBody.sbAdd(isC)
+                    this.fBody.sbAdd(", i64 ")
+                    this.fBody.sbAdd(vb64C)
+                    this.fBody.sbAdd(")\n")
                     val tsC: String = this.freshVar()
                     this.fBody.sbAdd("  ")
                     this.fBody.sbAdd(tsC)
-                    this.fBody.sbAdd(" = call i8* @aura_lang_std_Collections_set(i8* ")
-                    this.fBody.sbAdd(rsC)
-                    this.fBody.sbAdd(", i64 ")
-                    this.fBody.sbAdd(isC)
-                    this.fBody.sbAdd(", i8* ")
-                    this.fBody.sbAdd(vbC)
-                    this.fBody.sbAdd(")\n")
+                    this.fBody.sbAdd(" = inttoptr i64 ")
+                    this.fBody.sbAdd(ts64C)
+                    this.fBody.sbAdd(" to i8*\n")
                     return tsC
                 }
             }
@@ -4972,14 +5156,11 @@ class LlvmEmitter {
             }
         }
 
-        // 0.45) `String.countChar(sub)` → C 运行库 `aura_lang_std_String_countChar(s, ch)`。
+        // 0.45) `String.countChar(sub)` → Aura String.countCharStr(s, sub)。
         //
-        // Aura 侧实现签名是 `fun countChar(char: Char): Int`（`Char` 而非 `String`），
-        // 而调用点普遍传**字符串**（`text.countChar("\n")`）。若走 Aura 实现，
-        // 实参按 `Char`（i8/i32）收敛 → 拿到的是字符串指针/垃圾 → 计数恒为 0
-        //（`aotLineCount` 因此恒 0，波及整个模块链接阶段的逐行解析）。
-        // C 运行库版本正是 `(const char *s, const char *ch)`，与调用点一致。
-        // Rust 侧后端同样把 `countChar` 归到「字符串 → i64」一类。
+        // Aura 侧 `countChar(char: Char)` 接收单字符，而调用点普遍传**字符串**
+        // （`text.countChar("\n")`）。Phase B: 新增 `countCharStr(sub: String)`
+        // 包装函数，签名与调用点匹配。
         if (aotLastSegment(fname) == "countChar" && n >= 2) {
             val scId: Int = hirKidsAt(kids, 0)
             val scTy: String = this.inferType(hir, scId)
@@ -4992,18 +5173,12 @@ class LlvmEmitter {
             val r64C: String = this.freshVar()
             this.fBody.sbAdd("  ")
             this.fBody.sbAdd(r64C)
-            this.fBody.sbAdd(" = call i64 @aura_lang_std_String_countChar(i8* ")
+            this.fBody.sbAdd(" = call i32 @String_countCharStr(i8* ")
             this.fBody.sbAdd(scV)
             this.fBody.sbAdd(", i8* ")
             this.fBody.sbAdd(chV)
             this.fBody.sbAdd(")\n")
-            val r32C: String = this.freshVar()
-            this.fBody.sbAdd("  ")
-            this.fBody.sbAdd(r32C)
-            this.fBody.sbAdd(" = trunc i64 ")
-            this.fBody.sbAdd(r64C)
-            this.fBody.sbAdd(" to i32\n")
-            return r32C
+            return r64C
         }
 
         // 0.5) `x.length()` / `x.size()` —— **方法调用形式**，与属性形式等价。
@@ -5021,11 +5196,17 @@ class LlvmEmitter {
             val rV0L: String = this.emitExpr(hir, rIdL)
             if (this.isCollectionReceiver(hir, rIdL)) {
                 val rVcL: String = this.coerceValue(rV0L, rTyL, "i8*")
+                val rV64L: String = this.freshVar()
+                this.fBody.sbAdd("  ")
+                this.fBody.sbAdd(rV64L)
+                this.fBody.sbAdd(" = ptrtoint i8* ")
+                this.fBody.sbAdd(rVcL)
+                this.fBody.sbAdd(" to i64\n")
                 val cL: String = this.freshVar()
                 this.fBody.sbAdd("  ")
                 this.fBody.sbAdd(cL)
-                this.fBody.sbAdd(" = call i64 @aura_lang_std_Collections_count(i8* ")
-                this.fBody.sbAdd(rVcL)
+                this.fBody.sbAdd(" = call i64 @Collections_count(i64 ")
+                this.fBody.sbAdd(rV64L)
                 this.fBody.sbAdd(")\n")
                 val ctL: String = this.freshVar()
                 this.fBody.sbAdd("  ")
@@ -6998,7 +7179,7 @@ class LlvmEmitter {
     /// **装箱**（整数 → `(v<<1)|1`）。否则 `list.indexOf(30)` 会把裸整数
     /// 当指针解引用 → 访问违例（0xC0000005）。
     fun coerceArg(sym: String, v: String, fromTy: String, wantTy: String): String {
-        if (wantTy == "i8*" && sym.startsWith("aura_lang_std_Collections_")
+        if (wantTy == "i8*" && (sym.startsWith("aura_lang_std_Collections_") || sym.startsWith("Collections_"))
             && !fromTy.endsWith("*") && fromTy != "i8*" && fromTy != "ptr" && fromTy != "") {
             return this.boxToPtr(v, fromTy)
         }

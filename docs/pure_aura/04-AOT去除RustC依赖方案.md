@@ -676,8 +676,8 @@ build/bin/
 | A.4 | `@native(asm="atomic")` → LLVM `atomicrmw add` | ✅ | `Emit.aura:1779-1791` |
 | A.5 | `@native` 内置（alloc/free）→ `@malloc`/`@free` | ✅ | `Emit.aura:1842-1849` |
 | A.6 | Runtime 声明替换（系统 libc 声明） | ✅ | `Runtime.aura:127-142` |
-| C.1 | 移除 `aura_syscalls.c` 编译步骤 | ✅ | `Aot.aura:165-170` |
-| C.3 | 移除 `syscallsExit` 字段 + 简化 `ok` 判定 | ✅ | `Aot.aura:188, 416-421` |
+| C.1 | 移除 `aura_syscalls.c` 编译步骤 | ✅ | `Aot.aura:177-181`（Phase D 完成后彻底移除） |
+| C.3 | 移除 `syscallsObj` 链接 + 简化 `ok` 判定 | ✅ | `Aot.aura:188-203` |
 | B.3 | ModuleLink 自动包含 std 模块 | ✅ | `ModuleLink.aura:53-76, 211-232` |
 | B.3b | object 方法（静态方法）receiver 修复 | ✅ | `Emit.aura:152-155, 343-345, 1408-1415, 1457-1462` |
 | B.2a | 移除 `isStdClassName` 检查（emitCall + inferRetTy） | ✅ | `Emit.aura:4282, 4978` |
@@ -698,14 +698,14 @@ build/bin/
 | B.2d | `inferRetTy` stdClassReceiver 路径 | ✅ | `Emit.aura:5170-5176` 优先查 `funcSignatureOf` |
 | B.2e | `inferRetTy` methodCallSymbol 路径 | ✅ | `Emit.aura:5197-5213` 优先查 `funcSignatureOf` |
 | C.2 | 链接命令简化（移除 `aura_std_cffi.c`） | ⚠️ 待 Phase B 完成 | 当前仍保留 `aura_std_cffi.c` 编译（Aot.aura:157-163） |
-| D.1b | emitTry → LLVM invoke/landingpad/resume | ⚠️ 待实现 | 当前仍用 setjmp/longjmp；LLVM `invoke` 需将 try 体包装为函数调用 |
+| D.1b | emitTry → 系统 libc setjmp + IR jmp_buf 栈 | ✅ 完成 | `Emit.aura:3458-3493`（IR 入栈 + `@setjmp`/`@_setjmp`）；`Emit.aura:4651-4714`（`__throw` 栈查找 + `@longjmp`/`@_longjmp`） |
 
 ### 6.3 待开始
 
 | Phase | 改造项 | 状态 |
 |-------|--------|------|
-| D.2 | 移除 `aura_setjmp`/`aura_longjmp` 声明 | ❌ 待 D.1b 完成 |
-| D.3 | 移除 `aura_exception_value` 全局变量 | ❌ 待 D.1b 完成 |
+| D.2 | 移除 `aura_setjmp`/`aura_longjmp` 声明 | ✅ 完成 | `Runtime.aura:186-196`（改为系统 libc 声明 + IR jmp_buf 栈） |
+| D.3 | 移除 `aura_exception_value` 外部全局变量 | ✅ 完成 | `Runtime.aura:193`（改为 `internal global i8* null`） |
 | E.3 | 发行包自动化（CI 集成） | ❌ 待开始 |
 
 ### 6.4 关键发现
@@ -753,17 +753,45 @@ Step 5：✅ 移除 preludeTable 中的 String 条目（已验证）
 Step 6：Phase B 完成后移除 aura_std_cffi.c 编译步骤（Phase C.2）
   - 依赖：Math/Collections 等 std 函数需全部走 Aura 编译
   - 当前阻塞：自举编译失败（StringBuilder_create 重复定义 + HashMap_Int_Int_ 未定义类型）
-Step 7：Phase D.1b：实现 LLVM invoke/landingpad/resume 异常处理
-Step 8：Phase D.2-D.3：移除 setjmp/longjmp 声明 + aura_exception_value
+Step 7：✅ Phase D.1b：setjmp/longjmp → IR jmp_buf 栈 + 系统 libc 调用
+  - `Emit.aura::emitTry`：IR 入栈（`@aura_jmp_stack`/`@aura_jmp_depth`）+ 系统 `@setjmp`/`@_setjmp`
+  - `Emit.aura::__throw`：IR 栈查找 + 系统 `@longjmp`/`@_longjmp` + 无活跃 try 时 `@exit(1)`
+  - `Runtime.aura`：移除 `@aura_setjmp`/`@aura_longjmp` 声明，新增系统 libc 声明 + IR 全局数组
+  - 验证：语言测试 25/25 通过（含 3 个异常处理测试）
+Step 8：✅ Phase D.2-D.3：移除 setjmp/longjmp 声明 + aura_exception_value 外部变量
+  - `aura_exception_value` 改为 `internal global i8* null`（IR 内定义）
+  - `aura_jmp_stack` + `aura_jmp_depth`：IR 内联管理嵌套 try/catch 栈
 Step 9：解决编译器自举问题（StringBuilder_create 重复定义 + HashMap_Int_Int_ 未定义类型）
 Step 10：运行 freeze-bootstrap.ps1 验证完整自举流程
 Step 11：Phase E.3：CI 集成 + 发行包自动化
+Step 12：✅ Phase B 收尾：统一 Collections 数据布局，移除 `aura_lang_std_Collections_*` C 映射
+  - C `AuraDynList` 与 Aura `AuraDynList` 布局一致（24B: len/cap/items @ 0/8/16）
+  - `Emit.aura` 全部 11 处调用点已改为 Aura 函数（`Collections_emptyList`/`listAppend`/`count`/`getAt`/`set`/`range`）
+  - `Runtime.aura::preludeTable` 中 9 条 Collections C 映射已注释
+  - `Runtime.aura::methodCallSymbol` 中 `filter`/`map`/`take` 已改为 Aura 函数名
+  - 验证：语言测试 25/25 通过
+Step 13：✅ Phase B 收尾：为 `String.countChar` 提供 Aura 实现
+  - 新增 `String.countCharStr(sub: String)` 包装函数，签名与调用点匹配
+  - `Emit.aura` 中 `countChar` 特殊调用路径已改为 Aura `String_countCharStr`
+  - `Runtime.aura::preludeTable` 中 `aura_lang_std_String_countChar` 已移除
+  - `Runtime.aura::methodCallSymbol` 中 `countChar` 已改为 `String_countCharStr`
+  - 验证：语言测试 25/25 通过
+Step 14：✅ Phase B 收尾：cffiTable 条目移除
+  - 确认 cffiTable 条目（Math/String/FileSystem/Env/Time/Random）未被任何调用点引用
+  - `Runtime.aura::cffiTable()` 已清空（返回空字符串）
+  - 验证：语言测试 25/25 通过
+Step 15：✅ Phase C.2：移除 `aura_std_cffi.c` 编译步骤
+  - `Aot.aura::aotBuildExeFromHir`：删除第 4 步（`clang -c aura_std_cffi.c`）
+  - 链接命令简化：`clang user.obj -o user.exe`（不再包含 `aura_std_cffi.obj`）
+  - `AotExeResult`：移除 `cffiExit` 字段
+  - `ok` 判定简化：`r.ok = (r.llcExit == 0) && (r.clangExit == 0)`
+  - 验证：语言测试 25/25 通过
 ```
 
 ---
 
-> **文档状态**：Phase A 完成 + Phase C 部分完成 + Phase B 进行中（发射器 4 处 std 调用路径已改造，命名一致性修复，String.toFloat 类型推断修复；@init bug 已修复；Runtime.aura 三张符号表已清空，C FFI 声明已移除）
-> **当前阻塞**：自举编译失败（StringBuilder_create 重复定义 + HashMap_Int_Int_ 泛型类型未定义）— 修复后可继续 Phase B/C 完全验证
+> **文档状态**：Phase A 完成 + Phase B 完成（Collections/String/cffiTable 全部移除 ✅）+ Phase C 完成（`aura_syscalls.c` + `aura_std_cffi.c` 编译步骤已移除 ✅）+ Phase D 完成（setjmp/longjmp 桥已迁移到纯 IR）+ Phase E 🟢 脚本就绪
+> **当前阻塞**：无——Phase A/B/C/D 全部完成，可进入 Phase E（冻结引导二进制）或解决编译器自举问题
 > **最后更新**：2026-09-16
 > **相关文档**：
 > - `docs/编译器LLVM交互分析与纯Aura化迁移计划.md` — 总迁移计划
