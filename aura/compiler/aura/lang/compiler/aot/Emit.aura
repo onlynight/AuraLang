@@ -208,6 +208,34 @@ class LlvmEmitter {
     /// 每函数重置（`emitFunction` 里清空）。
     var fClosureSigs: String = ""
 
+    /// `fSigList` 的并行「Aura 返回类型」列（`Int` / `String` / `(Int) -> Int`）。
+    ///
+    /// 调用点需要知道「被调用函数是否返回**函数类型**」，以便把返回值登记成
+    /// 闭包变量（`val f = makeAdder(5)` → `f(10)` 走间接调用）。LLVM 侧两者
+    /// 都是 `i8*`（String / Any / List / 闭包），只看 `retTy` 无法区分，故保留
+    /// Aura 类型串。
+    var fSigAuraRets: List<String> = arrayListOf<String>()
+
+    /// 顶层 `val`/`var` 闭包变量表（每行 `name|retTy|p1,p2`）。
+    ///
+    /// AOT 不支持顶层可变字段的直接初始化，故每个这样的变量发射成
+    /// `@<name> = global i8* null` + 惰性初始化函数 `@<name>__init()`
+    /// （首次访问时构造闭包 env 并写入全局，之后直接返回）。
+    /// 与 `fClosureSigs` 不同：本表跨函数有效（模块级）。
+    var fGlobalClosures: String = ""
+
+    /// 全局闭包惰性初始化 IR 片段（模块末尾统一输出）。
+    var globalParts: EmitBuffer = EmitBuffer()
+
+    /// 当前 lambda 捕获的外层变量表（每行 `name|llvmTy`）。
+    ///
+    /// 闭包环境布局：`[0] = 函数指针`，`[1..]` = 按捕获顺序存放的值副本。
+    /// 进入 lambda 时登记，发射 body 内引用时按槽位从 env 读取。
+    var fCapturedVars: String = ""
+
+    /// `enterLambdaCtx` 的字段备份（lambda 嵌套超过一层时用于还原）。
+    var svCapturedVars: String = ""
+
     // ── 签名表缓存 ──
     //
     // `runtimeTable()` / `cffiTable()` / `preludeTable()` 都是
@@ -304,6 +332,7 @@ class LlvmEmitter {
         this.fVarNames = arrayListOf<String>()
         this.fSigList = arrayListOf<String>()
         this.fSigNames = arrayListOf<String>()
+        this.fSigAuraRets = arrayListOf<String>()
         this.fParamDefs = arrayListOf<String>()
         this.fOwnerIdStrs = arrayListOf<String>()
         this.fOwnerClasses = arrayListOf<String>()
@@ -326,6 +355,10 @@ class LlvmEmitter {
         this.lambdaCount = 0
         this.lambdaParts = EmitBuffer()
         this.fClosureSigs = ""
+        this.fGlobalClosures = ""
+        this.globalParts = EmitBuffer()
+        this.fCapturedVars = ""
+        this.svCapturedVars = ""
     }
 
     /// 生成新 SSA 临时变量名。
@@ -467,13 +500,16 @@ class LlvmEmitter {
         }
 
         // 2) 用户函数签名表（调用点返回类型/参数类型对齐，Phase 6.5.1）
+        //
+        // `fSigAuraRets` 存 **Aura** 返回类型（`Int` / `(Int) -> Int` …）：
+        // 闭包与 String / List 在 LLVM 侧同形（都是 `i8*`），只有 Aura 类型能
+        // 区分「这个调用返回的是不是函数」→ 见 `callFnSig`。
         i = 0
         while (i < hir.count) {
             val k: String = hir.kindOf(i)
             if (k == "HirFunction" || k == "HirAotDecl") {
                 val sigTmp: String = this.functionSignature(hir, i)
-                this.fSigList.add(sigTmp)
-                this.fSigNames.add(aotFieldAt(sigTmp, 0, "|"))
+                this.registerSig(aotFieldAt(sigTmp, 0, "|"), sigTmp, hir.tyOf(i))
                 // 方法定义表（OwnerSym|method|nodeId）：继承方法特化需要
                 if (k == "HirFunction") {
                     // 登记「已 define 的符号」：供 `runtimeDeclarationsEx` 过滤同名
@@ -490,8 +526,7 @@ class LlvmEmitter {
             } else if (k == "HirNativeFunction") {
                 // @native 函数：签名必须与实际发射的包装器一致（syscall 统一 i64）
                 val sigTmp: String = this.nativeFunctionSignature(hir, i)
-                this.fSigList.add(sigTmp)
-                this.fSigNames.add(aotFieldAt(sigTmp, 0, "|"))
+                this.registerSig(aotFieldAt(sigTmp, 0, "|"), sigTmp, "")
             }
             i = i + 1
         }
@@ -501,6 +536,35 @@ class LlvmEmitter {
         this.planInheritedMethods()
         // 2.6) 动态派发规划：方法槽位表（按方法名全局编号）
         this.planVtables(hir)
+
+        // 2.7) 顶层闭包变量（`val f: (Int) -> Int = x -> x * 2`）：
+        //      发射 `@f = global i8* null` + 惰性初始化函数，必须在任何函数体发射
+        //      之前登记（调用点 `f(21)` 需查 `fGlobalClosures`）。
+        //      仅处理**根节点**（HirProgram）的直接子节点——函数体内的声明由
+        //      `emitDecl` 走局部路径，不在此列。
+        //      HIR 节点类型为 `HirValDecl` / `HirVarDecl`（非 `HirVal`/`HirVar`）。
+        i = 0
+        val rootKids: String = hir.kidsOf(hir.rootId)
+        while (i < hirKidsCount(rootKids)) {
+            val rid: Int = hirKidsAt(rootKids, i)
+            val rk: String = hir.kindOf(rid)
+            if (rk == "HirValDecl" || rk == "HirVarDecl") {
+                val rKids: String = hir.kidsOf(rid)
+                if (hirKidsCount(rKids) > 0) {
+                    val initId: Int = hirKidsAt(rKids, 0)
+                    val rkKind: String = hir.kindOf(initId)
+                    if (rkKind == "HirLambda") {
+                        this.emitGlobalClosure(hir, rid, initId)
+                    } else if (rkKind == "HirCall") {
+                        val cs: String = this.callFnSig(hir, initId)
+                        if (cs != "") {
+                            this.emitGlobalClosure(hir, rid, initId)
+                        }
+                    }
+                }
+            }
+            i = i + 1
+        }
 
         // 3) 函数定义
         i = 0
@@ -593,6 +657,30 @@ class LlvmEmitter {
         val ffiDeclIr: String = ffiDecls.sbBuild()
         if (ffiDeclIr != "") {
             out.sbAdd(ffiDeclIr)
+            out.sbAdd("\n")
+        }
+        // 顶层闭包变量（`val f: (Int) -> Int = x -> x * 2`）：
+        // 每个闭包变量发射 `@f = global i8* null` + 惰性初始化函数 `@f__init()`。
+        // 必须在 funcParts 之前：函数体内引用 `@f__init()` 时需要该符号可见。
+        if (this.fGlobalClosures != "") {
+            out.sbAdd("; ---- Top-level Closures ----\n")
+            val gcLines: List<String> = this.fGlobalClosures.split("\n")
+            var gci: Int = 0
+            while (gci < gcLines.size) {
+                val gln: String = gcLines[gci]
+                gci = gci + 1
+                if (gln == "") {
+                    continue
+                }
+                val gname: String = sanitizeLlvm(aotFieldAt(gln, 0, "|"))
+                if (gname != "") {
+                    out.sbAdd("@" + gname + " = global i8* null\n")
+                }
+            }
+            val gIr: String = this.globalParts.sbBuild()
+            if (gIr != "") {
+                out.sbAdd(gIr)
+            }
             out.sbAdd("\n")
         }
         out.sbAdd(this.funcParts.sbBuild())
@@ -1904,6 +1992,14 @@ class LlvmEmitter {
                     if (EmitUtils.isCollectionTypeName(this.resolveAlias(pAuraTy))) {
                         this.markListVarTyped(pname, this.typeArgElemTy(pAuraTy))
                     }
+                    // 函数类型参数（`fun f(x: Int, f: (Int) -> Int)`）：
+                    // 登记闭包签名，使 `f(args…)` 能走 `emitIndirectCall`。
+                    if (this.isFnTy(this.resolveAlias(pAuraTy))) {
+                        val csig: String = this.fnTypeSig(this.resolveAlias(pAuraTy))
+                        if (csig != "") {
+                            this.registerClosureVar(pname, csig)
+                        }
+                    }
                 }
             } else {
                 bodyId = cid
@@ -2600,6 +2696,332 @@ class LlvmEmitter {
     var svClosureSigs: String = ""
     var svTerminated: Boolean = false
 
+    /// 是否为 Aura 函数类型（`(Int) -> Int` / `(Int, String) -> Int` …）。
+    fun isFnTy(ty: String): Boolean {
+        if (ty == "") {
+            return false
+        }
+        return aotSlice(ty, 0, 1) == "(" && EmitUtils.aotIndexOfSub(ty, "->") >= 0
+    }
+
+    /// 去掉类型串两端的空白。
+    fun TrimType(s: String): String {
+        var st: Int = 0
+        var en: Int = s.length
+        while (st < en && aotSlice(s, st, 1) == " ") {
+            st = st + 1
+        }
+        while (en > st && aotSlice(s, en - 1, 1) == " ") {
+            en = en - 1
+        }
+        return aotSlice(s, st, en - st)
+    }
+
+    /// CSV 切分（括号深度感知）：`(Int, (Int)->Int)` 中的逗号不会切开嵌套类型。
+    fun splitCsvDeep(s: String): List<String> {
+        val out: List<String> = arrayListOf<String>()
+        var depth: Int = 0
+        var start: Int = 0
+        var i: Int = 0
+        while (i < s.length) {
+            val ch: String = aotSlice(s, i, 1)
+            if (ch == "(") {
+                depth = depth + 1
+            } else if (ch == ")") {
+                depth = depth - 1
+            } else if (ch == "," && depth == 0) {
+                out.add(aotSlice(s, start, i - start))
+                start = i + 1
+            }
+            i = i + 1
+        }
+        out.add(aotSlice(s, start, s.length - start))
+        return out
+    }
+
+    /// 找**最后一个** `->`（自右向左扫描）。
+    ///
+    /// 参数里可能嵌套函数类型（`((T) -> Boolean) -> Boolean`），首次出现不是
+    /// 分隔符 → 必须取末位。此前用首次匹配会把返回类型误读成 `"T)"`，进而
+    /// 生成 `%struct.T_*` 未定义类型（llc: use of undefined type named
+    /// 'struct.T_'）导致整个模块编译失败。
+    fun fnTypeArrowLast(s: String): Int {
+        var i: Int = s.length - 2
+        while (i >= 0) {
+            if (aotSlice(s, i, 1) == "-" && aotSlice(s, i + 1, 1) == ">") {
+                return i
+            }
+            i = i - 1
+        }
+        return -1
+    }
+
+    /// Aura 函数类型 → 闭包签名 `retTy|p1,p2`（与 `closureSigOfVar` 返回格式一致）。
+    ///
+    /// `(Int, String) -> Int` → `i32|i32,i8*`。非函数类型返回 ""。
+    fun fnTypeSig(ty: String): String {
+        val resolved: String = this.resolveAlias(ty)
+        if (!this.isFnTy(resolved)) {
+            return ""
+        }
+        val arrow: Int = this.fnTypeArrowLast(resolved)
+        if (arrow < 0) {
+            return ""
+        }
+        var retAura: String = TrimType(this.aotSlice(resolved, arrow + 2, resolved.length - arrow - 2))
+        var retTy: String = this.mapTy(retAura)
+        if (retTy == "" || retTy == "void") {
+            retTy = "i32"
+        }
+        var paramsAura: String = aotSlice(resolved, 0, arrow)
+        // 去掉首尾的空白与外层括号：`(T) ` → `T`。
+        // 之前直接用 `aotSlice(p, 1, p.length - 2)` 会因为右侧的**尾部空白**
+        // （`resolved` 里 `-> ` 前有空格）保留下 `)` → `mapTy("T)")` 落到
+        // `%struct.T_*` 未定义类型。先 Trim 再剥括号，最后再 Trim 一次。
+        var inner: String = TrimType(paramsAura)
+        if (aotSlice(inner, 0, 1) == "(") {
+            inner = aotSlice(inner, 1, inner.length - 2)
+            inner = TrimType(inner)
+        }
+        var pTys: String = ""
+        val parts: List<String> = this.splitCsvDeep(inner)
+        var i: Int = 0
+        while (i < parts.size) {
+            var pty: String = this.mapTy(TrimType(parts[i]))
+            if (pty == "" || pty == "void") {
+                pty = "i32"
+            }
+            if (pTys != "") {
+                pTys = pTys + ","
+            }
+            pTys = pTys + pty
+            i = i + 1
+        }
+        return retTy + "|" + pTys
+    }
+
+    /// `call` 节点若调用的是「返回函数类型」的函数，返回闭包签名。
+    ///
+    /// 命中后调用方可把结果登记成闭包变量：`val f = makeAdder(5)` → `f(10)`
+    /// 走间接调用（否则 `f(10)` 按普通函数解析失败 → 恒得 0）。
+    fun callFnSig(hir: Hir, id: Int): String {
+        if (hir.kindOf(id) != "HirCall") {
+            return ""
+        }
+        val kids: String = hir.kidsOf(id)
+        var fname: String = ""
+        if (hirKidsCount(kids) < 1) {
+            // 无参调用（`makeTransformerSimple()`）：HIR 里 HirCall 无 kids，
+            // 函数名只存在于 HirCall 自身。旧实现遇到空 kids 直接 `return ""`
+            // → `val f = makeTransformerSimple()` 不会登记为闭包，调用点
+            // `f(5)` 无法走间接调用路径。
+            fname = hir.textOf(id)
+        } else {
+            val callee: Int = hirKidsAt(kids, 0)
+            val ck: String = hir.kindOf(callee)
+            if (ck == "HirVar" || ck == "HirIdent") {
+                fname = hir.textOf(callee)
+            }
+            if (fname == "") {
+                fname = hir.textOf(id)
+            }
+        }
+        val sym: String = sanitizeLlvm(fname)
+        var ret: String = this.auraRetTyOf(sym)
+        if (ret == "") {
+            var u: Int = 0
+            while (u < sym.length && aotSlice(sym, u, 1) != "_") {
+                u = u + 1
+            }
+            if (u > 0 && u < sym.length - 1) {
+                ret = this.auraRetTyOf(sanitizeLlvm(aotSlice(sym, 0, u) + "." + aotSlice(sym, u + 1, sym.length - u - 1)))
+            }
+        }
+        return this.fnTypeSig(ret)
+    }
+
+    /// 闭包变量签名查询（局部 + 顶层）。
+    fun closureSigOfAny(name: String): String {
+        val local: String = this.closureSigOfVar(name)
+        if (local != "") {
+            return local
+        }
+        return this.globalClosureSigOf(name)
+    }
+
+    /// 顶层闭包变量签名查询（未登记返回 ""）。
+    fun globalClosureSigOf(name: String): String {
+        if (name == "" || this.fGlobalClosures == "") {
+            return ""
+        }
+        val lines: List<String> = this.fGlobalClosures.split("\n")
+        var i: Int = 0
+        while (i < lines.size) {
+            val ln: String = lines[i]
+            i = i + 1
+            if (ln == "") {
+                continue
+            }
+            if (aotFieldAt(ln, 0, "|") == name) {
+                return aotFieldAt(ln, 1, "|") + "|" + aotFieldAt(ln, 2, "|")
+            }
+        }
+        return ""
+    }
+
+    /// 顶层闭包变量初始化器：为 `@<name>__init()` 生成函数体。
+    ///
+    /// 惰性语义：若全局指针非空则直接返回；否则构造 env（`malloc(8)` + 函数指针），
+    /// 写回全局，之后访问即命中缓存。闭包签名登记进 `fGlobalClosures` 供调用点查询。
+    fun emitGlobalClosure(hir: Hir, declId: Int, initId: Int) {
+        val name: String = hir.textOf(declId)
+        if (name == "") {
+            return
+        }
+        var sig: String = ""
+        if (hir.kindOf(initId) == "HirLambda") {
+            sig = this.closureSigOf(hir, initId)
+        } else {
+            sig = this.callFnSig(hir, initId)
+        }
+        if (sig == "") {
+            return
+        }
+        this.fGlobalClosures = this.fGlobalClosures + name + "|" + sig + "\n"
+
+        // 惰性初始化函数 `@<name>__init()`：
+        //   entry:
+        //     %p = load i8*, i8** @<name>
+        //     %n = icmp ne i8* %p, null
+        //     br %n, ret, init
+        //   ret:
+        //     ret i8* %p
+        //   init:
+        //     %env = call i8* @malloc(i64 8)
+        //     %e = bitcast i8* %env to i8**
+        //     <构造 env 内容>
+        //     store i8* %env, i8** @<name>
+        //     ret i8* %env
+        this.globalParts.sbAdd("define i8* @" + sanitizeLlvm(name) + "__init() {\n")
+        this.globalParts.sbAdd("entry:\n")
+        this.globalParts.sbAdd("  %p = load i8*, i8** @" + sanitizeLlvm(name) + "\n")
+        this.globalParts.sbAdd("  %n = icmp ne i8* %p, null\n")
+        this.globalParts.sbAdd("  br i1 %n, label %ret, label %init\n")
+        this.globalParts.sbAdd("ret:\n")
+        this.globalParts.sbAdd("  ret i8* %p\n")
+        this.globalParts.sbAdd("init:\n")
+        this.globalParts.sbAdd("  %env = call i8* @malloc(i64 8)\n")
+        this.globalParts.sbAdd("  %e = bitcast i8* %env to i8**\n")
+
+        // 用临时上下文发射 env 内容（字段 0 = 函数指针，字段 1.. = 捕获值）。
+        val savedBody: EmitBuffer = this.fBody
+        this.fBody = EmitBuffer()
+        if (hir.kindOf(initId) == "HirLambda") {
+            this.emitLambdaEnvBody(hir, initId, "%env", "%e")
+        } else {
+            this.emitLambdaEnvBody(hir, initId, "%env", "%e")
+        }
+        this.globalParts.sbAdd(this.fBody.sbBuild())
+        this.fBody = savedBody
+
+        this.globalParts.sbAdd("  store i8* %env, i8** @" + sanitizeLlvm(name) + "\n")
+        this.globalParts.sbAdd("  ret i8* %env\n")
+        this.globalParts.sbAdd("}\n\n")
+    }
+
+    /// 发射闭包 env 构造（供顶层闭包惰性初始化器使用）。
+    ///
+    /// 简化实现：仅处理 `HirLambda` 直接返回 `@__lambda_N` 函数指针的场景；
+    /// `HirCall` 通过 `callFnSig` 识别的返回-函数类型的调用暂按 0 处理。
+    fun emitLambdaEnvBody(hir: Hir, initId: Int, envName: String, envPtrName: String) {
+        // 简化路径：HirLambda 已经通过 `emitLambda` 生成 `@__lambda_N`；
+        // 这里需要的是「构造 env 首字段 = 函数指针」的 IR。
+        // 通过重新发射一次 lambda 得到 env（复用 emitLambda 的静态函数分配逻辑）。
+        if (hir.kindOf(initId) == "HirLambda") {
+            // emitLambda 会生成 `@__lambda_N` + env，返回值即 env 指针；
+            // 但顶层闭包需要的是把 lambda 的函数指针写入 env[0]。
+            // 通过重放：先保存当前 lambda 计数，让 emitLambda 生成新的 env。
+            val lp: String = this.lambdaPiece(hir, initId)
+            val paramIds: String = aotFieldAt(lp, 0, "|")
+            val bodyId: Int = aotToInt(aotFieldAt(lp, 1, "|"))
+            val pTys: String = this.lambdaParamTys(hir, paramIds, bodyId)
+            val retTy: String = this.lambdaRetTy(hir, paramIds, pTys, bodyId)
+            val fnName: String = "__lambda_" + toStr(this.lambdaCount)
+            this.lambdaCount = this.lambdaCount + 1
+            val pc: Int = aotCsvCount(paramIds)
+            // 子上下文发射 lambda 函数体
+            this.enterLambdaCtx(paramIds, retTy)
+            var i: Int = 0
+            while (i < pc) {
+                val pid: Int = aotToInt(aotFieldAt(paramIds, i, ","))
+                val pn: String = hir.textOf(pid)
+                val pty: String = aotFieldAt(pTys, i, ",")
+                val addr: String = this.declareVar(pn, pty)
+                this.fBody.sbAdd("  store ")
+                this.fBody.sbAdd(pty)
+                this.fBody.sbAdd(" %arg.")
+                this.fBody.sbAdd(toStr(i))
+                this.fBody.sbAdd(", ")
+                this.fBody.sbAdd(EmitUtils.toPtrTySp(pty))
+                this.fBody.sbAdd(addr)
+                this.fBody.sbAdd("\n")
+                i = i + 1
+            }
+            if (bodyId >= 0) {
+                if (hir.kindOf(bodyId) == "HirBlock") {
+                    this.emitBody(hir, bodyId)
+                } else {
+                    val v: String = this.emitExpr(hir, bodyId)
+                    val vTy: String = this.inferType(hir, bodyId)
+                    val cv: String = this.coerceValue(v, vTy, retTy)
+                    this.fBody.sbAdd("  ret ")
+                    this.fBody.sbAdd(retTy)
+                    this.fBody.sbAdd(" ")
+                    this.fBody.sbAdd(cv)
+                    this.fBody.sbAdd("\n")
+                    this.fTerminated = true
+                }
+            }
+            if (!this.fTerminated) {
+                if (retTy == "void") {
+                    this.fBody.sbAdd("  ret void\n")
+                } else {
+                    this.fBody.sbAdd("  ret ")
+                    this.fBody.sbAdd(retTy)
+                    this.fBody.sbAdd(" ")
+                    this.fBody.sbAdd(EmitUtils.defaultValue(retTy))
+                    this.fBody.sbAdd("\n")
+                }
+            }
+            val buf: EmitBuffer = EmitBuffer()
+            buf.sbAdd("define ")
+            buf.sbAdd(retTy)
+            buf.sbAdd(" @")
+            buf.sbAdd(fnName)
+            buf.sbAdd("(i8* %env")
+            i = 0
+            while (i < pc) {
+                buf.sbAdd(", ")
+                buf.sbAdd(aotFieldAt(pTys, i, ","))
+                buf.sbAdd(" %arg.")
+                buf.sbAdd(toStr(i))
+                i = i + 1
+            }
+            buf.sbAdd(") {\nentry:\n")
+            buf.sbAdd(this.fAlloca.sbBuild())
+            buf.sbAdd(this.fBody.sbBuild())
+            buf.sbAdd("}\n\n")
+            this.lambdaParts.sbAdd(buf.sbBuild())
+            this.leaveLambdaCtx()
+            // 把 lambda 函数指针写入 env[0]
+            this.fBody.sbAdd("  store i8* @")
+            this.fBody.sbAdd(fnName)
+            this.fBody.sbAdd(", i8** ")
+            this.fBody.sbAdd(envPtrName)
+            this.fBody.sbAdd("\n")
+        }
+    }
+
     /// lambda 的闭包签名：`retTy|p1,p2`（供变量登记与间接调用）。
     fun closureSigOf(hir: Hir, lambdaId: Int): String {
         val lp: String = this.lambdaPiece(hir, lambdaId)
@@ -2858,6 +3280,10 @@ class LlvmEmitter {
     }
 
     /// 发射 lambda 表达式：生成静态函数 `@__lambda_N` + 堆分配 env，返回 env 指针。
+    ///
+    /// env 布局：`[0] = 函数指针`，`[1..] = 捕获值`（按 fVarList 顺序，每 8 字节）。
+    /// 捕获变量：扫描 body 对**外层** fVarList 的引用，在 env 里存值，
+    /// 进 lambda 后从 env 加载到栈槽供 body 读取。
     fun emitLambda(hir: Hir, id: Int): String {
         val lp: String = this.lambdaPiece(hir, id)
         val paramIds: String = aotFieldAt(lp, 0, "|")
@@ -2868,8 +3294,42 @@ class LlvmEmitter {
         this.lambdaCount = this.lambdaCount + 1
         val pc: Int = aotCsvCount(paramIds)
 
+        // ── 捕获变量扫描：body 引用的外层变量（排除 lambda 自身形参）──
+        var captured: String = ""
+        if (bodyId >= 0) {
+            var vi: Int = 0
+            while (vi < this.fVarList.size) {
+                val entry: String = this.fVarList[vi]
+                vi = vi + 1
+                val vname: String = aotFieldAt(entry, 0, "|")
+                val vty: String = aotFieldAt(entry, 2, "|")
+                val vaddr: String = aotFieldAt(entry, 1, "|")
+                // 跳过 lambda 自身形参
+                var isParam: Boolean = false
+                var pi: Int = 0
+                while (pi < pc) {
+                    if (hir.textOf(aotToInt(aotFieldAt(paramIds, pi, ","))) == vname) {
+                        isParam = true
+                        break
+                    }
+                    pi = pi + 1
+                }
+                if (isParam) {
+                    continue
+                }
+                if (this.containsVar(hir, bodyId, vname, 0)) {
+                    if (captured != "") {
+                        captured = captured + "\n"
+                    }
+                    captured = captured + vname + "|" + vaddr + "|" + vty
+                }
+            }
+        }
+        val capCount: Int = aotLineCount(captured)
+
         // ── 函数体（子上下文）──
         this.enterLambdaCtx(paramIds, retTy)
+        // 形参入栈
         var i: Int = 0
         while (i < pc) {
             val pid: Int = aotToInt(aotFieldAt(paramIds, i, ","))
@@ -2885,6 +3345,56 @@ class LlvmEmitter {
             this.fBody.sbAdd(addr)
             this.fBody.sbAdd("\n")
             i = i + 1
+        }
+        // 捕获变量：从 env 加载到栈槽（env[0]=fn ptr, env[1..]=捕获值）
+        if (captured != "") {
+            var ci: Int = 0
+            while (ci < capCount) {
+                val line: String = aotLineAt(captured, ci)
+                ci = ci + 1
+                val cname: String = aotFieldAt(line, 0, "|")
+                val cty: String = aotFieldAt(line, 2, "|")
+                val caddr: String = "%" + sanitizeLlvm(cname) + ".cap." + toStr(this.lambdaCount)
+                this.fAlloca.sbAdd("  ")
+                this.fAlloca.sbAdd(caddr)
+                this.fAlloca.sbAdd(" = alloca ")
+                this.fAlloca.sbAdd(cty)
+                this.fAlloca.sbAdd("\n")
+                this.fVarList.add(cname + "|" + caddr + "|" + cty)
+                this.fVarNames.add(cname)
+                val slotOff: Int = (ci + 1) * 8
+                val gep: String = this.freshVar()
+                this.fBody.sbAdd("  ")
+                this.fBody.sbAdd(gep)
+                this.fBody.sbAdd(" = getelementptr inbounds i8, i8* %env, i64 ")
+                this.fBody.sbAdd(toStr(slotOff))
+                this.fBody.sbAdd("\n")
+                val cast: String = this.freshVar()
+                this.fBody.sbAdd("  ")
+                this.fBody.sbAdd(cast)
+                this.fBody.sbAdd(" = bitcast i8* ")
+                this.fBody.sbAdd(gep)
+                this.fBody.sbAdd(" to ")
+                this.fBody.sbAdd(cty)
+                this.fBody.sbAdd("*\n")
+                val ld: String = this.freshVar()
+                this.fBody.sbAdd("  ")
+                this.fBody.sbAdd(ld)
+                this.fBody.sbAdd(" = load ")
+                this.fBody.sbAdd(cty)
+                this.fBody.sbAdd(", ")
+                this.fBody.sbAdd(EmitUtils.toPtrTySp(cty))
+                this.fBody.sbAdd(cast)
+                this.fBody.sbAdd("\n")
+                this.fBody.sbAdd("  store ")
+                this.fBody.sbAdd(cty)
+                this.fBody.sbAdd(" ")
+                this.fBody.sbAdd(ld)
+                this.fBody.sbAdd(", ")
+                this.fBody.sbAdd(EmitUtils.toPtrTySp(cty))
+                this.fBody.sbAdd(caddr)
+                this.fBody.sbAdd("\n")
+            }
         }
         if (bodyId >= 0) {
             if (hir.kindOf(bodyId) == "HirBlock") {
@@ -2935,22 +3445,64 @@ class LlvmEmitter {
         this.lambdaParts.sbAdd(buf.sbBuild())
         this.leaveLambdaCtx()
 
-        // ── 外层：堆分配 env（字段 0 = 函数指针），闭包值即 env 指针 ──
+        // ── 外层：堆分配 env（字段 0 = 函数指针，字段 1.. = 捕获值）──
         val raw: String = this.freshVar()
         this.fBody.sbAdd("  ")
         this.fBody.sbAdd(raw)
-        this.fBody.sbAdd(" = call i8* @malloc(i64 8)\n")
-        val slot: String = this.freshVar()
-        this.fBody.sbAdd("  ")
-        this.fBody.sbAdd(slot)
-        this.fBody.sbAdd(" = bitcast i8* ")
-        this.fBody.sbAdd(raw)
-        this.fBody.sbAdd(" to i8**\n")
+        this.fBody.sbAdd(" = call i8* @malloc(i64 ")
+        this.fBody.sbAdd(toStr(8 * (capCount + 1)))
+        this.fBody.sbAdd(")\n")
+        // env[0] = lambda 函数指针
         this.fBody.sbAdd("  store i8* @")
         this.fBody.sbAdd(fnName)
         this.fBody.sbAdd(", i8** ")
-        this.fBody.sbAdd(slot)
+        this.fBody.sbAdd(raw)
         this.fBody.sbAdd("\n")
+        // env[1..] = 捕获值（从外层栈读取）
+        if (captured != "") {
+            var ci: Int = 0
+            while (ci < capCount) {
+                val line: String = aotLineAt(captured, ci)
+                ci = ci + 1
+                val cname: String = aotFieldAt(line, 0, "|")
+                val couter: String = aotFieldAt(line, 1, "|")
+                val cty: String = aotFieldAt(line, 2, "|")
+                val slotOff: Int = (ci + 1) * 8
+                val gep: String = this.freshVar()
+                this.fBody.sbAdd("  ")
+                this.fBody.sbAdd(gep)
+                this.fBody.sbAdd(" = getelementptr inbounds i8, i8* ")
+                this.fBody.sbAdd(raw)
+                this.fBody.sbAdd(", i64 ")
+                this.fBody.sbAdd(toStr(slotOff))
+                this.fBody.sbAdd("\n")
+                val cast: String = this.freshVar()
+                this.fBody.sbAdd("  ")
+                this.fBody.sbAdd(cast)
+                this.fBody.sbAdd(" = bitcast i8* ")
+                this.fBody.sbAdd(gep)
+                this.fBody.sbAdd(" to ")
+                this.fBody.sbAdd(cty)
+                this.fBody.sbAdd("*\n")
+                val ld: String = this.freshVar()
+                this.fBody.sbAdd("  ")
+                this.fBody.sbAdd(ld)
+                this.fBody.sbAdd(" = load ")
+                this.fBody.sbAdd(cty)
+                this.fBody.sbAdd(", ")
+                this.fBody.sbAdd(EmitUtils.toPtrTySp(cty))
+                this.fBody.sbAdd(couter)
+                this.fBody.sbAdd("\n")
+                this.fBody.sbAdd("  store ")
+                this.fBody.sbAdd(cty)
+                this.fBody.sbAdd(" ")
+                this.fBody.sbAdd(ld)
+                this.fBody.sbAdd(", ")
+                this.fBody.sbAdd(EmitUtils.toPtrTySp(cty))
+                this.fBody.sbAdd(cast)
+                this.fBody.sbAdd("\n")
+            }
+        }
         return raw
     }
 
@@ -2959,14 +3511,10 @@ class LlvmEmitter {
         fname: String, sig: String): String {
         val retTy: String = aotFieldAt(sig, 0, "|")
         val pTys: String = aotFieldAt(sig, 1, "|")
-        // env 指针（闭包值）→ 从 env 首字段取出真正的函数指针
-        val clo: String = this.emitVarLoad(fname)
-        val cloPtr: String = this.freshVar()
-        this.fBody.sbAdd("  ")
-        this.fBody.sbAdd(cloPtr)
-        this.fBody.sbAdd(" = inttoptr i64 ")
-        this.fBody.sbAdd(clo)
-        this.fBody.sbAdd(" to i8*\n")
+        // env 指针（闭包值）：`emitVarLoad` 已按 `i8*` 加载闭包变量
+        // （与 `emitLambda` 的 `malloc` 返回值、`TypeMapper.map` 对函数类型
+        // 的映射一致），无需 `inttoptr` 隐式转换。
+        val cloPtr: String = this.emitVarLoad(fname)
         val fn: String = this.freshVar()
         this.fBody.sbAdd("  ")
         this.fBody.sbAdd(fn)
@@ -3409,6 +3957,15 @@ class LlvmEmitter {
             // 注意必须在 emitExpr 之后：lambda 的发射会把子上下文状态换回外层。
             if (hir.kindOf(initId) == "HirLambda") {
                 this.registerClosureVar(name, this.closureSigOf(hir, initId))
+            } else if (hir.kindOf(initId) == "HirCall") {
+                // `val add5 = makeAdder(5)`：初始化器是「返回函数类型」的调用，
+                // 结果仍是闭包 env 指针，调用点 `add5(10)` 必须走间接调用。
+                // 不看 `initTy`：Lambda 返回值在 LLVM 侧也是 `i8*`（与 String 同形），
+                // 必须查 **Aura** 返回类型才知道是不是函数。
+                val cs: String = this.callFnSig(hir, initId)
+                if (cs != "") {
+                    this.registerClosureVar(name, cs)
+                }
             }
         }
         var llvmTy: String = this.mapTy(hir.tyOf(id))
@@ -4086,6 +4643,16 @@ class LlvmEmitter {
     fun emitVarLoad(name: String): String {
         val ty: String = this.lookupVarTy(name)
         if (ty == "") {
+            // 顶层闭包变量（`val f: (Int) -> Int = …`）：无局部声明，走惰性初始化函数
+            if (this.globalClosureSigOf(name) != "") {
+                val t: String = this.freshVar()
+                this.fBody.sbAdd("  ")
+                this.fBody.sbAdd(t)
+                this.fBody.sbAdd(" = call i8* @")
+                this.fBody.sbAdd(sanitizeLlvm(name))
+                this.fBody.sbAdd("__init()\n")
+                return t
+            }
             // 类方法内：裸字段名 → `this.field`（Phase 6.5.1b）
             if (this.curClassFieldIndex(name) >= 0) {
                 return this.emitThisFieldLoad(name)
@@ -4858,6 +5425,33 @@ class LlvmEmitter {
             if (n == 0) {
                 return "0"
             }
+            // 尾随 lambda / async 块：callee 是 Lambda 节点（无名字），
+            // 直接发射 lambda + 间接调用。不处理会退化为 "0"
+            // （`async { … }` / `nums.filter { … }` 的返回值守恒为 0）。
+            if (hir.kindOf(hirKidsAt(kids, 0)) == "HirLambda") {
+                val lamId: Int = hirKidsAt(kids, 0)
+                val env: String = this.emitLambda(hir, lamId)
+                // 构造闭包签名（从 lambda 参数推导）
+                val sig: String = this.closureSigOf(hir, lamId)
+                if (sig == "") {
+                    return env
+                }
+                // 将 env 存入临时变量并注册闭包签名，供 emitIndirectCall 加载
+                val tmpVar: String = this.freshVar()
+                this.fBody.sbAdd("  ")
+                this.fBody.sbAdd(tmpVar)
+                this.fBody.sbAdd(" = alloca i8*\n")
+                this.fBody.sbAdd("  store i8* ")
+                this.fBody.sbAdd(env)
+                this.fBody.sbAdd(", i8* ")
+                this.fBody.sbAdd(tmpVar)
+                this.fBody.sbAdd("\n")
+                val tmpName: String = "__iife_" + toStr(this.lambdaCount)
+                this.registerClosureVar(tmpName, sig)
+                this.fVarList.add(tmpName + "|" + tmpVar + "|i8*")
+                this.fVarNames.add(tmpName)
+                return this.emitIndirectCall(hir, kids, n, 1, tmpName, sig)
+            }
             fname = hir.textOf(hirKidsAt(kids, 0))
             argStart = 1
         }
@@ -5196,12 +5790,12 @@ class LlvmEmitter {
             return t
         }
 
-        // 闭包变量的间接调用：`f(args…)` 中 f 为持有闭包的局部变量
-        // （`val f = x -> …`）。必须在用户函数解析之前：闭包变量与同名全局函数
-        // 可能重名，而局部变量优先。
+        // 闭包变量的间接调用：`f(args…)` 中 f 为持有闭包的局部或顶层变量
+        // （`val f = x -> …` / 顶层 `val f: (Int) -> Int = x -> …`）。
+        // 必须在用户函数解析之前：闭包变量与同名全局函数可能重名，而变量优先。
         if (argStart == 0) {
-            val closSig: String = this.closureSigOfVar(fname)
-            if (closSig != "" && this.lookupVarAddr(fname) != "") {
+            val closSig: String = this.closureSigOfAny(fname)
+            if (closSig != "" && (this.lookupVarAddr(fname) != "" || this.globalClosureSigOf(fname) != "")) {
                 return this.emitIndirectCall(hir, kids, n, argStart, fname, closSig)
             }
         }
@@ -6930,7 +7524,7 @@ class LlvmEmitter {
             }
             // 闭包变量调用：返回类型取闭包签名（否则调用结果被当 i32，
             // `return greet("World")` 会产生 `sext i32 %i8ptr` 之类非法 IR）
-            val csig: String = this.closureSigOfVar(fname)
+            val csig: String = this.closureSigOfAny(fname)
             if (csig != "") {
                 return aotFieldAt(csig, 0, "|")
             }
@@ -7281,6 +7875,32 @@ class LlvmEmitter {
         while (i < this.fSigNames.size) {
             if (this.fSigNames[i] == name) {
                 return this.fSigList[i]
+            }
+            i = i + 1
+        }
+        return ""
+    }
+
+    /// 登记一条函数签名：三张并行表（`fSigNames` / `fSigList` / `fSigAuraRets`）
+    /// 必须同步追加，否则按下标取 Aura 返回类型会错位。
+    fun registerSig(name: String, sig: String, auraRet: String) {
+        if (name == "" || sig == "") {
+            return
+        }
+        this.fSigList.add(sig)
+        this.fSigNames.add(name)
+        this.fSigAuraRets.add(auraRet)
+    }
+
+    /// 用户函数的 **Aura** 返回类型（未登记返回 ""）。
+    fun auraRetTyOf(name: String): String {
+        if (name == "") {
+            return ""
+        }
+        var i: Int = 0
+        while (i < this.fSigNames.size) {
+            if (this.fSigNames[i] == name) {
+                return this.fSigAuraRets[i]
             }
             i = i + 1
         }

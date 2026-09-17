@@ -1551,7 +1551,7 @@ class Parser {
         return left
     }
 
-    /// 一元表达式（- / ! / +）。
+    /// 一元表达式（- / ! / + / await）。
     fun parseUnary(): Int {
         val k = this.prsCurKind()
         if (k == "Minus" || k == "Bang" || k == "Plus") {
@@ -1559,6 +1559,11 @@ class Parser {
             val operand = this.parseUnary()
             val sp = ParserUtils.mergeSpan(this.prsCurSpan(), this.ast.spanOf(operand))
             return this.ast.add("Unary", k, "", sp, kidsAdd(noKids(), operand))
+        }
+        // `await expr` → 直接透传表达式（AOT 下同步执行，无挂起语义）。
+        if (k == "Await") {
+            this.prsAdvance()
+            return this.parseUnary()
         }
         return this.parsePostfix()
     }
@@ -1762,6 +1767,29 @@ class Parser {
         }
         if (k == "Null") {
             return this.leafLit("NullLiteral")
+        }
+        // `async { ... }` → 立即调用的无参 lambda（IIFE）。
+        // 必须在 `prsIsNameToken()` 之前：`Async` 是软关键字，否则被当标识符
+        // （求值为 0），后面的块变成独立表达式（返回值丢失）。
+        if (k == "Async") {
+            val aSp: Span = this.prsCurSpan()
+            this.prsAdvance() // async
+            var blk: Int = this.parseBlock()
+            // 单表达式块：取内层表达式作为 lambda 体。
+            // 块体 lambda 在发射器里按「语句序列」处理，**末条表达式不会作为返回值**
+            // （实测 `{ it % 2 == 0 }` 生成 `ret i32 0` → filter 恒空）。
+            val bkKids: String = this.ast.kidsOf(blk)
+            if (kidsCount(bkKids) == 1) {
+                val only: Int = this.ast.childOf(blk, 0)
+                if (this.ast.kindOf(only) == "ExprStmt"
+                    && kidsCount(this.ast.kidsOf(only)) == 1) {
+                    blk = this.ast.childOf(only, 0)
+                }
+            }
+            val emptyParams: Int = this.ast.add("Params", "", "", aSp, noKids())
+            val lam: Int = this.ast.add("Lambda", "", "", aSp,
+                kidsAdd(kidsAdd(noKids(), emptyParams), blk))
+            return this.ast.add("Call", "", "", aSp, kidsAdd(noKids(), lam))
         }
         // 标识符：软关键字（`value` / `data` / …）同样按标识符处理
         if (this.prsIsNameToken()) {
