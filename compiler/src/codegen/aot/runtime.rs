@@ -366,22 +366,22 @@ pub const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
         ret: "i1",
         params: &[("id", "i64")],
     },
-    // Channel.newChannel() — 创建新通道
+    // Channel.newChannel(cap: Int) → Int
     RuntimeFn {
         name: "aura_lang_concurrent_Channel_newChannel",
         ret: "i64",
-        params: &[],
+        params: &[("cap", "i64")],
     },
-    // Channel.channelSend(ch, val) — 向通道发送值
+    // Channel.channelSend(ch: Int, val: Any) → Unit
     RuntimeFn {
         name: "aura_lang_concurrent_Channel_channelSend",
-        ret: "i64",
+        ret: "void",
         params: &[
             ("ch", "i64"),
             ("val", "i8*"),
         ],
     },
-    // Channel.channelRecv(ch) — 从通道接收值
+    // Channel.channelRecv(ch: Int) → Any
     RuntimeFn {
         name: "aura_lang_concurrent_Channel_channelRecv",
         ret: "i8*",
@@ -405,7 +405,7 @@ pub const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
     },
     RuntimeFn {
         name: "aura_thread_join",
-        ret: "void",
+        ret: "i64",
         params: &[("id", "i64")],
     },
     RuntimeFn {
@@ -709,12 +709,34 @@ pub fn translate_to_legacy_c(name: &str) -> String {
     let concurrent_prefix = "aura_lang_concurrent_";
     if name.starts_with(concurrent_prefix) {
         let rest = &name[concurrent_prefix.len()..];
+        // Thread 类特殊映射（运行时函数名与类方法名不一致）
+        if let Some(thread_rest) = rest.strip_prefix("Thread_") {
+            return match thread_rest {
+                "spawn" => "aura_thread_create".to_string(),
+                "join" => "aura_thread_join".to_string(),
+                "sleep" => "aura_thread_sleep".to_string(),
+                "id" => "aura_thread_id".to_string(),
+                "parallelism" => "aura_thread_available_parallelism".to_string(),
+                "availableCores" => "aura_thread_available_parallelism".to_string(),
+                _ => return name.to_string(),
+            };
+        }
+        // Channel 类：运行时函数名保留完整 sanitized 形式
+        if let Some(channel_rest) = rest.strip_prefix("Channel_") {
+            return format!("aura_lang_concurrent_Channel_{}", channel_rest);
+        }
+        // Mutex 类：同样保留完整形式
+        if let Some(mutex_rest) = rest.strip_prefix("Mutex_") {
+            return format!("aura_lang_concurrent_Mutex_{}", mutex_rest);
+        }
+        // Atomic / RwLock / Condvar / Barrier：保留完整形式
         let parts: Vec<&str> = rest.splitn(2, '_').collect();
         if parts.len() != 2 {
             return name.to_string();
         }
         let (_class, fn_name) = (parts[0], parts[1]);
-        return format!("aura_concurrent_{}", fn_name);
+        // 通用并发类：保留完整 sanitized 名
+        return format!("aura_lang_concurrent_{}_{}", _class, fn_name);
     }
 
     name.to_string()

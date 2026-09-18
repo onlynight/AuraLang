@@ -35,6 +35,8 @@ package aura.lang.compiler.codegen
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
+import aura.lang.collection.HashMap
+import aura.lang.collection.ArrayList
 import aura.lang.compiler.mir.Mir
 
 /// 字节码发射器。
@@ -46,6 +48,9 @@ class Codegen {
     /// 输出的字节码（每行一条指令）。
     var bytecode: String = ""
 
+    /// 字节码行收集器（ArrayList O(n) 批量追加，避免 O(n²) 字符串拼接）。
+    var bytecodeLines: ArrayList<String> = ArrayList<String>()
+
     /// 当前指令计数。
     var instrCount: Int = 0
 
@@ -55,41 +60,42 @@ class Codegen {
     /// 常量池（扁平字符串：`value\n`）。
     var constPool: String = ""
 
-    /// 常量池索引映射（value → index，扁平字符串：`value|index\n`）。
-    var constMap: String = ""
+    /// 常量池索引映射（value → index，HashMap O(1) 查找）。
+    var constIdxMap: HashMap<String, Int> = HashMap<String, Int>()
 
-    /// 变量表（varName → slot，扁平字符串：`name|slot\n`）。
-    var varTable: String = ""
+    /// 变量表（varName → slot，HashMap O(1) 查找）。
+    var varIdxMap: HashMap<String, Int> = HashMap<String, Int>()
 
     /// 函数表（`name|startOffset|paramCount\n`）。
     var funcTable: String = ""
 
-    /// 标签表（`labelName|line\n`，第 1 趟生成）。
-    var labelTable: String = ""
+    /// 标签表（labelName → line，HashMap O(1) 查找）。
+    var labelIdxMap: HashMap<String, Int> = HashMap<String, Int>()
 
     init() {
         this.mir = Mir()
         this.bytecode = ""
+        this.bytecodeLines = ArrayList<String>()
         this.instrCount = 0
         this.lineCount = 0
         this.constPool = ""
-        this.constMap = ""
-        this.varTable = ""
+        this.constIdxMap = HashMap<String, Int>()
+        this.varIdxMap = HashMap<String, Int>()
         this.funcTable = ""
-        this.labelTable = ""
+        this.labelIdxMap = HashMap<String, Int>()
     }
 
     /// 执行字节码发射，返回字节码字符串。
     fun emit(src: Mir): String {
         this.mir = src
-        this.bytecode = ""
+        this.bytecodeLines.clear()
         this.instrCount = 0
         this.lineCount = 0
         this.constPool = ""
-        this.constMap = ""
-        this.varTable = ""
+        this.constIdxMap.clear()
+        this.varIdxMap.clear()
         this.funcTable = ""
-        this.labelTable = ""
+        this.labelIdxMap.clear()
 
         // 第 1 趟：记录标签 → 行号
         this.assignLabels(src)
@@ -108,18 +114,28 @@ class Codegen {
             ei = ei + 1
         }
 
+        // 合并所有行（O(n) 批量拼接，避免逐行 O(n²)）
+        var result: String = ""
+        var lc: Int = this.bytecodeLines.getSize()
+        var li: Int = 0
+        while (li < lc) {
+            result = result + this.bytecodeLines.get(li) + "\n"
+            li = li + 1
+        }
+        this.bytecode = result
+
         return this.bytecode
     }
 
     /// 第 1 趟：为每个 LABEL 记录其后的字节码行号。
     private fun assignLabels(src: Mir) {
-        this.labelTable = ""
+        this.labelIdxMap.clear()
         var line: Int = 0
         var i: Int = 0
         while (i < src.count) {
             val kind: String = src.kindOf(i)
             if (kind == "LABEL") {
-                this.labelTable = this.labelTable + src.textOf(i) + "|" + toStr(line) + "\n"
+                this.labelIdxMap.put(src.textOf(i), line)
             } else if (kind == "MirFunc") {
                 // `# func` 注释行占用 1 行
                 line = line + 1
@@ -132,26 +148,13 @@ class Codegen {
 
     /// 解析标签名 → 字节码行号（未找到返回 0）。
     private fun resolveLabel(name: String): Int {
-        var pos: Int = 0
-        var len: Int = this.labelTable.length
-        var lineStart: Int = 0
-        while (pos < len) {
-            if (toStr(this.labelTable[pos]) == "\n") {
-                val line: String = this.substr(this.labelTable, lineStart, pos - lineStart)
-                if (this.fieldBefore(line, "|") == name) {
-                    return this.mirToIntOf2(this.fieldAfter(line, "|"))
-                }
-                lineStart = pos + 1
-            }
-            pos = pos + 1
-        }
-        return 0
+        return this.labelIdxMap.getOrDefault(name, 0)
     }
 
     /// 发射函数头（`# func name:retTy` 注释 + 函数表条目）。
     ///
     /// 每个函数拥有**独立**的局部变量槽位命名空间（对应 VM 的每帧 locals），
-    /// 因此在此重置 varTable，并按声明顺序为参数预分配槽位 0..n-1。
+    /// 因此在此重置 varIdxMap，并按声明顺序为参数预分配槽位 0..n-1。
     private fun emitFunc(src: Mir, id: Int) {
         val raw: String = src.textOf(id)
         val name: String = this.fieldBefore(raw, "|")
@@ -164,7 +167,7 @@ class Codegen {
         }
 
         // 新函数：重置局部变量槽位（每帧独立），并预分配参数槽位
-        this.varTable = ""
+        this.varIdxMap.clear()
         var pi: Int = 0
         var start: Int = 0
         var pos: Int = 0
@@ -185,7 +188,7 @@ class Codegen {
         this.funcTable = this.funcTable + name + "|" + toStr(this.lineCount) + "|" + toStr(paramCount) + "\n"
 
         // 注释行（VM 视为 no-op，但计入行号以对齐 ip）
-        this.bytecode = this.bytecode + "# func " + name + ":" + retTy + "\n"
+        this.bytecodeLines.add("# func " + name + ":" + retTy)
         this.lineCount = this.lineCount + 1
     }
 
@@ -252,7 +255,7 @@ class Codegen {
             line = bcOp
         }
 
-        this.bytecode = this.bytecode + line + "\n"
+        this.bytecodeLines.add(line)
         this.lineCount = this.lineCount + 1
         this.instrCount = this.instrCount + 1
     }
@@ -296,61 +299,35 @@ class Codegen {
 
     /// 常量池去重，返回索引（索引 = 常量**条数**）。
     private fun internConst(value: String): Int {
-        val found: Int = this.lookupConst(value)
+        val found: Int = this.constIdxMap.getOrDefault(value, -1)
         if (found >= 0) {
             return found
         }
         val idx: Int = this.countLines(this.constPool)
         this.constPool = this.constPool + value + "\n"
-        this.constMap = this.constMap + value + "|" + toStr(idx) + "\n"
+        this.constIdxMap.put(value, idx)
         return idx
     }
 
     /// 在常量表中查找（未找到返回 -1）。
     private fun lookupConst(value: String): Int {
-        var pos: Int = 0
-        var len: Int = this.constMap.length
-        var lineStart: Int = 0
-        while (pos < len) {
-            if (toStr(this.constMap[pos]) == "\n") {
-                val line: String = this.substr(this.constMap, lineStart, pos - lineStart)
-                if (this.fieldBefore(line, "|") == value) {
-                    return this.mirToIntOf2(this.fieldAfter(line, "|"))
-                }
-                lineStart = pos + 1
-            }
-            pos = pos + 1
-        }
-        return -1
+        return this.constIdxMap.getOrDefault(value, -1)
     }
 
     /// 变量槽位分配，返回槽位编号（槽位 = 变量**条数**）。
     private fun allocVar(name: String): Int {
-        val found: Int = this.lookupVar(name)
+        val found: Int = this.varIdxMap.getOrDefault(name, -1)
         if (found >= 0) {
             return found
         }
-        val slot: Int = this.countLines(this.varTable)
-        this.varTable = this.varTable + name + "|" + toStr(slot) + "\n"
+        val slot: Int = this.varIdxMap.getSize()
+        this.varIdxMap.put(name, slot)
         return slot
     }
 
     /// 在变量表中查找（未找到返回 -1）。
     private fun lookupVar(name: String): Int {
-        var pos: Int = 0
-        var len: Int = this.varTable.length
-        var lineStart: Int = 0
-        while (pos < len) {
-            if (toStr(this.varTable[pos]) == "\n") {
-                val line: String = this.substr(this.varTable, lineStart, pos - lineStart)
-                if (this.fieldBefore(line, "|") == name) {
-                    return this.mirToIntOf2(this.fieldAfter(line, "|"))
-                }
-                lineStart = pos + 1
-            }
-            pos = pos + 1
-        }
-        return -1
+        return this.varIdxMap.getOrDefault(name, -1)
     }
 
     // ── 辅助 ──
@@ -454,9 +431,18 @@ class Codegen {
         return this.funcTable
     }
 
-    /// 返回变量表字符串。
+    /// 返回变量表字符串（从 HashMap 重建，用于诊断输出）。
     fun varTableStr(): String {
-        return this.varTable
+        var result: String = ""
+        val keys: List<String> = this.varIdxMap.keys()
+        var i: Int = 0
+        while (i < this.varIdxMap.getSize()) {
+            val key: String = keys.get(i)
+            val val: Int = this.varIdxMap.get(key)
+            result = result + key + "|" + toStr(val) + "\n"
+            i = i + 1
+        }
+        return result
     }
 
     /// 返回指令计数。

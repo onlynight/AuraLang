@@ -2285,22 +2285,20 @@ _Bool aura_lang_concurrent_Coroutine_actorAlive(int64_t id) {
     return 1; // stub: 返回 true
 }
 
-// aura.lang.concurrent.Channel.newChannel
-int64_t aura_lang_concurrent_Channel_newChannel(void) {
-    return 0; // stub: 返回空指针
+// aura.lang.concurrent.Channel.newChannel(cap: Int) → Int
+int64_t aura_lang_concurrent_Channel_newChannel(int64_t cap) {
+    (void)cap;
+    return (int64_t)aura_concurrent_newChannel(0);
 }
 
-// aura.lang.concurrent.Channel.channelSend
-int64_t aura_lang_concurrent_Channel_channelSend(int64_t ch, const char *val) {
-    (void)ch;
-    (void)val;
-    return 0; // stub: 返回 0
+// aura.lang.concurrent.Channel.channelSend(ch: Int, val: Any) → Unit
+void aura_lang_concurrent_Channel_channelSend(int64_t ch, const char *val) {
+    aura_concurrent_channelSend((int32_t)ch, val);
 }
 
-// aura.lang.concurrent.Channel.channelRecv
+// aura.lang.concurrent.Channel.channelRecv(ch: Int) → Any
 const char *aura_lang_concurrent_Channel_channelRecv(int64_t ch) {
-    (void)ch;
-    return ""; // stub: 返回空字符串
+    return (const char *)aura_concurrent_channelRecv((int32_t)ch);
 }
 
 // aura.lang.std.IO.fileExists (new-style name)

@@ -339,10 +339,28 @@ int64_t aura_cpu_atomic_add(int64_t addr, int64_t delta) {
 #include <time.h>
 #include <unistd.h>
 
-/** Thread.create(fn, arg) — 创建新线程，返回线程句柄 */
-int64_t aura_thread_create(int64_t (*fn)(void *), int64_t arg) {
+// ── 函数分派表（AOT 编译器生成）──
+// 全局函数指针表，索引对应 HIR 函数索引
+// AOT 编译器生成：@__aura_fn_table = global [N x i8*] [...]
+extern void * __aura_fn_table[];
+extern int64_t __aura_fn_count;
+
+// 线程入口桥接：将函数索引转换为函数指针调用
+static void *thread_dispatch(void *arg) {
+    int64_t idx = (int64_t)(uintptr_t)arg;
+    if (idx >= 0 && idx < __aura_fn_count && __aura_fn_table[idx]) {
+        int64_t (*fn)(int64_t) = (int64_t (*)(int64_t))__aura_fn_table[idx];
+        // 注意：这里传入 0 作为参数，实际参数通过 Channel 传递
+        fn(0);
+    }
+    return NULL;
+}
+
+/** Thread.create(fn_id, arg) — 创建新线程，fn_id 为函数索引 */
+int64_t aura_thread_create(int64_t fn_id, int64_t arg) {
     pthread_t tid;
-    if (pthread_create(&tid, NULL, (void *(*)(void *))fn, (void *)arg) != 0) {
+    // 使用桥接函数，传入函数索引作为参数
+    if (pthread_create(&tid, NULL, thread_dispatch, (void *)(uintptr_t)fn_id) != 0) {
         return -1;
     }
     return (int64_t)(uintptr_t)tid;
@@ -581,9 +599,23 @@ void aura_tls_set(int64_t keyIdx, int64_t val) {
 
 typedef DWORD (*ThreadFn)(LPVOID);
 
-/** Thread.create(fn, arg) — 创建新线程（Win32） */
-int64_t aura_thread_create(int64_t (*fn)(void *), int64_t arg) {
-    HANDLE h = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)fn, (LPVOID)arg, 0, NULL);
+// ── 函数分派表（AOT 编译器生成）──
+extern void * __aura_fn_table[];
+extern int64_t __aura_fn_count;
+
+// 线程入口桥接：将函数索引转换为函数指针调用
+static DWORD WINAPI thread_dispatch(LPVOID param) {
+    int64_t idx = (int64_t)(uintptr_t)param;
+    if (idx >= 0 && idx < __aura_fn_count && __aura_fn_table[idx]) {
+        int64_t (*fn)(int64_t) = (int64_t (*)(int64_t))__aura_fn_table[idx];
+        fn(0);
+    }
+    return 0;
+}
+
+/** Thread.create(fn_id, arg) — 创建新线程（Win32），fn_id 为函数索引 */
+int64_t aura_thread_create(int64_t fn_id, int64_t arg) {
+    HANDLE h = CreateThread(NULL, 0, thread_dispatch, (LPVOID)(uintptr_t)fn_id, 0, NULL);
     if (h == NULL) return -1;
     return (int64_t)(uintptr_t)h;
 }

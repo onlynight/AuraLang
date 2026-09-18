@@ -11,6 +11,9 @@
 //! - `aura fmt <file.aura>`                          代码格式化（预留）
 
 use std::process::exit;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use rayon::prelude::*;
 
 use compiler::codegen::{
     BytecodeModule, SerializeError, compile_source, disassemble, read_auc, to_bytes, write_auc,
@@ -716,14 +719,15 @@ fn cmd_stdlib_compile(args: &[String]) {
         exit(1);
     }
 
-    let mut success = 0;
-    let mut failed = 0;
+    let success = AtomicUsize::new(0);
+    let failed = AtomicUsize::new(0);
 
     // 递归扫描 .aura 文件
     let aura_files = scan_aura_files_recursive(core_dir, core_dir).unwrap_or_default();
     eprintln!("[stdlib-compile] found {} .aura files", aura_files.len());
 
-    for (rel_path, abs_path) in &aura_files {
+    // R4: rayon 并行编译——每个文件独立编译，充分利用多核 CPU
+    aura_files.par_iter().for_each(|(rel_path, abs_path)| {
         let source = match std::fs::read_to_string(abs_path) {
             Ok(s) => s,
             Err(e) => {
@@ -732,8 +736,8 @@ fn cmd_stdlib_compile(args: &[String]) {
                     rel_path.display(),
                     e
                 );
-                failed += 1;
-                continue;
+                failed.fetch_add(1, Ordering::Relaxed);
+                return;
             }
         };
 
@@ -753,8 +757,8 @@ fn cmd_stdlib_compile(args: &[String]) {
                         out_dir_for_file.display(),
                         e
                     );
-                    failed += 1;
-                    continue;
+                    failed.fetch_add(1, Ordering::Relaxed);
+                    return;
                 }
                 match write_auc(&out_file.to_string_lossy(), &module) {
                     Ok(_) => {
@@ -763,7 +767,7 @@ fn cmd_stdlib_compile(args: &[String]) {
                             rel_path.display(),
                             out_file.display()
                         );
-                        success += 1;
+                        success.fetch_add(1, Ordering::Relaxed);
                     }
                     Err(e) => {
                         eprintln!(
@@ -771,7 +775,7 @@ fn cmd_stdlib_compile(args: &[String]) {
                             out_file.display(),
                             e
                         );
-                        failed += 1;
+                        failed.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }
@@ -781,19 +785,21 @@ fn cmd_stdlib_compile(args: &[String]) {
                     rel_path.display(),
                     e
                 );
-                failed += 1;
+                failed.fetch_add(1, Ordering::Relaxed);
             }
         }
-    }
+    });
 
+    let s = success.load(Ordering::Relaxed);
+    let f = failed.load(Ordering::Relaxed);
     eprintln!(
         "[stdlib-compile] done: {} succeeded, {} failed → {}",
-        success,
-        failed,
+        s,
+        f,
         out_path.display()
     );
 
-    if success == 0 {
+    if s == 0 {
         eprintln!("[stdlib-compile] Warning: no files were successfully compiled");
     }
 }

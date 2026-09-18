@@ -17,6 +17,7 @@ path = "src/debugger_main.rs"
 
 [dependencies]
 compiler = { path = "../compiler" }
+rayon = "1"
 
 [features]
 # AOT 编译支持（转发 compiler 的 llvm + dynamic-ffi features）

@@ -43,11 +43,22 @@ class AotModuleLinker {
     /// 未找到的导入（换行分隔；供诊断）。
     var missing: String = ""
 
+    /// 文件内容缓存（预加载后供 loadPath 复用，避免重复 I/O）。
+    ///
+    /// 编码：每条记录 = `规范化路径\n内容长度\n内容`，按读取顺序拼接。
+    /// **刻意不用 `HashMap`**：Aura 自举编译器对自身做 AOT 时，泛型集合的
+    /// 生成代码尚不可靠 —— `HashMap()` 构造即崩溃（EXIT 0xC0000005），
+    /// 链接阶段直接从「读文件」变成段错误，自举编译无法推进。
+    /// 扁平字符串编码只用到已充分验证的 String/Int 操作，规避该后端缺陷，
+    /// 同时保留「一次性预读、后续复用」的优化意图。
+    var cacheBlob: String = ""
+
     init() {
         this.hir = Hir()
         this.seen = ""
         this.loader = HirLowerer()
         this.missing = ""
+        this.cacheBlob = ""
     }
 
     /// 入口文件 → 合并 HIR（含递归 import）。
@@ -57,11 +68,14 @@ class AotModuleLinker {
         this.missing = ""
         this.loader = HirLowerer()
         this.loader.useHir(this.hir)
-        // Phase B.3：入口文件 + 递归 import + 自动包含 std 模块
-        var kids: String = this.loadPath(entryPath)
-        // 自动包含 std 模块（用户代码引用 String/Math/FileSystem 等时，
-        // 对应 Aura 实现必须参与编译；否则 preludeTable 移除后会出现 undefined symbol）
+        this.cacheBlob = ""
+
+        // B1: 预加载 std 模块文件到缓存（消除重复 I/O）
         val stdMods: String = ModuleLinkUtils.essentialStdModules()
+        this.preloadCache(stdMods)
+
+        // 入口文件 + 递归 import + 自动包含 std 模块
+        var kids: String = this.loadPath(entryPath)
         var si: Int = 0
         while (si < aotLineCount(stdMods)) {
             val sp: String = aotLineAt(stdMods, si)
@@ -73,6 +87,65 @@ class AotModuleLinker {
         }
         this.hir.rootId = this.hir.add("HirProgram", "", "", Span(0, 0, 1, 1, 1, 1), kids)
         return this.hir
+    }
+
+    /// B1: 预加载多个文件内容到 fileCache。
+    ///
+    /// 将已知路径的文件内容预读入内存，避免 loadPath 中的重复 I/O。
+    /// 注：AOT 分派表已实现 (Thread.spawn → trampoline → __aura_fn_table)，
+    /// 但 Aura 侧 Thread.spawn 在自举编译时函数名解析仍需 Rust 侧支持。
+    /// 并行文件读取在 Rust 编译器侧通过 rayon 实现（stdlib-compile）。
+    fun preloadCache(paths: String): Unit {
+        var i: Int = 0
+        while (i < aotLineCount(paths)) {
+            val p: String = aotLineAt(paths, i)
+            val norm: String = ModuleLinkUtils.normalizePath(p)
+            if (norm != "" && FileSystem.exists(norm) && this.cacheGet(norm) == "") {
+                val content: String = FileSystem.readText(norm)
+                this.cacheBlob = this.cacheBlob + norm + "\n" + toStr(content.length) + "\n" + content
+            }
+            i = i + 1
+        }
+    }
+
+    /// 从扁平缓存取文件内容（未命中返回 ""）。
+    ///
+    /// 记录布局：`路径\n内容长度\n内容`；按记录顺序线性扫描（缓存条目数为
+    /// std 模块数量级，扫描开销可忽略）。
+    fun cacheGet(path: String): String {
+        var pos: Int = 0
+        while (pos < this.cacheBlob.length) {
+            val nl1: Int = this.cacheLineEnd(pos)
+            if (nl1 < 0) {
+                return ""
+            }
+            val key: String = aotSlice(this.cacheBlob, pos, nl1 - pos)
+            val lenStart: Int = nl1 + 1
+            val nl2: Int = this.cacheLineEnd(lenStart)
+            if (nl2 < 0) {
+                return ""
+            }
+            val len: Int = aotToInt(aotSlice(this.cacheBlob, lenStart, nl2 - lenStart))
+            val bodyStart: Int = nl2 + 1
+            if (key == path) {
+                return aotSlice(this.cacheBlob, bodyStart, len)
+            }
+            pos = bodyStart + len
+        }
+        return ""
+    }
+
+    /// 自 `from` 起第一个换行的下标（无则返回 -1，供缓存解码用）。
+    fun cacheLineEnd(from: Int): Int {
+        if (from >= this.cacheBlob.length) {
+            return -1
+        }
+        val rest: String = aotSlice(this.cacheBlob, from, this.cacheBlob.length - from)
+        val rel: Int = aotIndexOfSub(rest, "\n")
+        if (rel < 0) {
+            return -1
+        }
+        return from + rel
     }
 
     /// 已加载的模块数。
@@ -95,7 +168,14 @@ class AotModuleLinker {
         }
         this.seen = this.seen + norm + "\n"
 
-        val source: String = FileSystem.readText(norm)
+        // B1: 优先从缓存读取（预加载阶段已填充），避免重复 I/O
+        val source: String
+        val cached: String = this.cacheGet(norm)
+        if (cached != "") {
+            source = cached
+        } else {
+            source = FileSystem.readText(norm)
+        }
         val p: Parser = Parser(source)
         p.parseProgram()
         // 注意：不能直接 `p.ast.kindOf(...)` —— VM 对「字段访问得到的对象再调方法」

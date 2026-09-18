@@ -1199,8 +1199,13 @@ class LlvmEmitter {
             val ik: Int = hirKidsAt(kids, 0)
             if (hir.kindOf(ik) == "HirLit") {
                 val ity: String = hir.tyOf(ik)
-                if (ity != "String" && (ity == "Int" || ity == "Long" ||
-                    ity == "Double" || ity == "Boolean")) {
+                if (ity == "Double" || ity == "Float") {
+                    // 浮点字段默认值：源码字面量可能带类型后缀（`0.0f` / `1.0d`）。
+                    // LLVM 词法器不接受该后缀 —— `store float 0.0f, float* %p`
+                    // 直接报 `expected ',' after store operand`，整个模块编译失败。
+                    return EmitUtils.stripNumberSuffix(hir.textOf(ik))
+                }
+                if (ity == "Int" || ity == "Long" || ity == "Boolean") {
                     return hir.textOf(ik)
                 }
             }

@@ -700,6 +700,14 @@ class Parser {
 
     /// 解析 extern object 声明：`extern object Name { ... }`
     /// 兼容旧语法：`extern interface Name { ... }`（已废弃）
+    ///
+    /// 名字还允许是**字符串库名**：`extern interface "runtime" { fun f() }`
+    /// （常量/运行时符号分组，与 Rust 解析器 `self.advance().literal` 对齐）。
+    /// 字符串形式此前被 `prsExpectName` 拒绝且**不消费令牌**，导致整条声明
+    /// 反同步：成员被当顶层无体函数解析，发射器为它们发成「返回默认值的
+    /// `define`」stub，与运行库预置的 `@aura_process_argCount` 定义重复 →
+    /// llc 报 `invalid redefinition of function 'aura_process_argCount'`，
+    /// 自举产物整个模块编译失败。
     fun parseExternObject(): Int {
         this.prsAdvance() // Extern
         // 接受 "Object"（新语法）或 "Interface"（已废弃）
@@ -709,7 +717,11 @@ class Parser {
             this.prsExpect("Object")
         }
         val name: String = this.prsCurLit()
-        this.prsExpectName()
+        if (this.prsCheck("StringLiteral")) {
+            this.prsAdvance() // 字符串库名（字面量已由 prsCurLit 取得）
+        } else {
+            this.prsExpectName()
+        }
         
         var kids = noKids()
         if (this.prsCheck("LBrace")) {

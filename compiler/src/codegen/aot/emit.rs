@@ -116,7 +116,8 @@ pub(crate) struct EmitCtx {
     pub current_fn_ret_sig: Option<(String, Vec<String>)>,
     /// 发射 lambda 时使用的期望签名（由变量声明 / 调用实参 / return 设置）
     pub pending_lambda_sig: Option<(String, Vec<String>)>,
-    /// 变量名 → **Aura 类型名**（作用域栈，与 `var_scope` 平行）。
+    /// 函数名 → 函数索引（供 Thread.spawn 解析函数引用为整数 ID）
+    pub fn_index_map: HashMap<String, u64>,
     ///
     /// 必需的原因：Aura 的 `String` 与 `List` 在 LLVM 层**都是 `i8*`**，仅凭
     /// LLVM 类型无法区分 `.length`/`.size` 该落到 `aura_string_length` 还是
@@ -192,6 +193,7 @@ impl EmitCtx {
             current_fn_ret_sig: None,
             pending_lambda_sig: None,
             var_aura_types: vec![HashMap::new()],
+            fn_index_map: HashMap::new(),
             func_ret_aura_types: HashMap::new(),
             class_field_aura_types: HashMap::new(),
         }
@@ -947,7 +949,9 @@ pub fn emit_program(
     ctx.known_structs = known_structs.clone();
 
     // 4.8 预注册函数返回类型映射（供 emit_call 推断返回类型）
-    for func in &program.functions {
+    // 同时构建函数索引映射（供 Thread.spawn 解析函数引用为整数 ID）
+    for (func_idx, func) in program.functions.iter().enumerate() {
+        ctx.fn_index_map.insert(func.name.clone(), func_idx as u64);
         if let Some(ref ret) = func.ret {
             ctx.func_ret_types.insert(func.name.clone(), ctx.llvm_type_checked(ret));
             // Aura 返回类型名：String 与 List 同为 i8*，需要靠 Aura 类型区分语义
@@ -1145,6 +1149,116 @@ pub fn emit_program(
         }
         s.push('\n');
         ctx.sections.push(s);
+    }
+
+    // 6.6 Thread.spawn 分派表：为每个非 native 函数生成 trampoline + 函数指针表
+    // trampoline 签名统一为 `i64 fn(i64 arg)`，适配 C 运行时的 thread_dispatch
+    let mut dispatch_section = String::new();
+    dispatch_section.push_str("; ---- Thread Dispatch Table ----\n");
+    let mut fn_ptrs: Vec<String> = Vec::new();
+    let func_count = program.functions.len();
+
+    for (idx, func) in program.functions.iter().enumerate() {
+        if func.is_native {
+            // native 函数生成空指针槽
+            fn_ptrs.push("null".to_string());
+            continue;
+        }
+
+        let sanitized = sanitizellvm(&func.name);
+        let tramp_name = format!("@{}_trampoline", sanitized);
+
+        // 生成 trampoline: i64 fn(i64 arg)
+        // 将 arg 截断/扩展到第一个参数类型，调用原函数，返回结果
+        let param_tys = func
+            .params
+            .iter()
+            .map(|p| {
+                let t =
+                    p.ty.as_ref()
+                        .map(|t| ctx.llvm_type_checked(t))
+                        .unwrap_or_else(|| "i32".to_string());
+                if t.is_empty() { "i32".to_string() } else { t }
+            })
+            .collect::<Vec<_>>();
+        let ret_ty_raw = func
+            .ret
+            .as_ref()
+            .map(|t| ctx.llvm_type_checked(t))
+            .unwrap_or_else(|| "void".to_string());
+        let ret_ty = if ret_ty_raw.is_empty() { "void".to_string() } else { ret_ty_raw };
+
+        // 调用参数：将 i64 arg 适配到第一个形参类型。
+        // 无法安全适配的类型 → 留空槽（`null`）并跳过该函数，绝不发出非法 IR。
+        let (call_args_str, preamble) = if param_tys.is_empty() {
+            (String::new(), String::new())
+        } else {
+            match trampoline_arg_from_i64(&param_tys[0], "%arg_i64") {
+                Some((pal, carg)) => (carg, pal),
+                None => {
+                    fn_ptrs.push("null".to_string());
+                    continue;
+                }
+            }
+        };
+
+        // void 函数：call 不赋值返回值，直接返回 0
+        if ret_ty == "void" {
+            dispatch_section.push_str(&format!(
+                "define internal i64 {}(i64 %arg_i64) {{\n{}    call void @{}({})\n    ret i64 0\n}}\n",
+                tramp_name,
+                preamble,
+                sanitized,
+                call_args_str
+            ));
+        } else {
+            // 返回值转换：trampoline 统一返回 `i64`。
+            //
+            // `i64` 是**恒等**转换，绝不能再拼成 `%ret_i64 = %call`：那行缺少
+            // 指令操作码，llc 直接报 `expected instruction opcode`，整个模块
+            // 编译失败（凡模块内存在返回 `i64` 的函数都会中招）。
+            // 其余类型逐类给出真实转换指令；未识别类型退化为 `ret i64 0`，
+            // 保证永远发出合法 IR（trampoline 只服务 Thread.spawn，不承载精确 ABI）。
+            let ret_stmt =
+                match ret_ty.as_str() {
+                    "i64" => "    ret i64 %call\n".to_string(),
+                    "i32" | "i16" | "i8" | "i1" => format!(
+                        "    %ret_i64 = zext {} %call to i64\n    ret i64 %ret_i64\n",
+                        ret_ty
+                    ),
+                    "i8*" => "    %ret_i64 = ptrtoint i8* %call to i64\n    ret i64 %ret_i64\n"
+                        .to_string(),
+                    "ptr" => "    %ret_i64 = ptrtoint ptr %call to i64\n    ret i64 %ret_i64\n"
+                        .to_string(),
+                    "float" | "double" => format!(
+                        "    %ret_i64 = fptosi {} %call to i64\n    ret i64 %ret_i64\n",
+                        ret_ty
+                    ),
+                    t if t.ends_with('*') => format!(
+                        "    %ret_i64 = ptrtoint {} %call to i64\n    ret i64 %ret_i64\n",
+                        t
+                    ),
+                    _ => "    ret i64 0\n".to_string(),
+                };
+            dispatch_section.push_str(&format!(
+                "define internal i64 {}(i64 %arg_i64) {{\n{}    %call = call {} @{}({})\n{}}}\n",
+                tramp_name, preamble, ret_ty, sanitized, call_args_str, ret_stmt
+            ));
+        }
+
+        fn_ptrs.push(format!("ptr {}", tramp_name));
+    }
+
+    // 生成分派表全局变量
+    dispatch_section.push_str(&format!(
+        "@__aura_fn_table = global [{} x ptr] [{}]\n",
+        func_count,
+        fn_ptrs.join(", ")
+    ));
+    dispatch_section.push_str(&format!("@__aura_fn_count = global i64 {}\n", func_count));
+
+    if !dispatch_section.is_empty() {
+        ctx.sections.push(dispatch_section);
     }
 
     // 7. 模块级全局常量（字符串字面量等，§9.2.1 generate_globals）
@@ -2313,6 +2427,7 @@ fn emit_expr_val(
                 current_fn_ret_sig: None,
                 pending_lambda_sig: None,
                 var_aura_types: vec![HashMap::new()],
+                fn_index_map: ctx.fn_index_map.clone(),
                 func_ret_aura_types: ctx.func_ret_aura_types.clone(),
                 class_field_aura_types: ctx.class_field_aura_types.clone(),
             };
@@ -3748,6 +3863,24 @@ fn emit_call(
     let callee: &str = &callee_owned;
     let param_tys = ctx.func_param_types.get(callee).cloned();
 
+    // ── Thread.spawn 特殊处理：函数引用 → 函数索引 ──
+    // Thread.spawn(fn, arg) 中 fn 期望函数索引（整数），
+    // 但 HIR 把函数名当作变量引用。此处解析函数名 → 函数索引。
+    {
+        let is_thread_spawn = callee == "aura.lang.concurrent.Thread.spawn"
+            || callee == "aura_concurrent_Thread_spawn"
+            || callee == "Thread_spawn"
+            || callee == "Thread.spawn";
+        if is_thread_spawn {
+            if let Some(HirExpr::Var(fn_name)) = effective_args.first() {
+                if let Some(&idx) = ctx.fn_index_map.get(fn_name) {
+                    // 用函数索引常量替换函数名引用
+                    effective_args[0] = HirExpr::Lit(crate::ast::Literal::Int(idx as i64));
+                }
+            }
+        }
+    }
+
     // 实参求值：若实参是「结构体局部变量」且对应形参是**指针**（方法接收者 self 即
     // `i8*`，类实例指针即 `%struct.X*`），直接传该局部变量的「槽地址」，而不是按值加载后拷贝。
     // 否则方法内的 `this.field = …` 会写进一份临时副本、调用方不可见，
@@ -3757,6 +3890,7 @@ fn emit_call(
     // 对 `i8*` 形参（方法 self 等）保留原有行为（仅方法首参）。
     let is_method_call = callee.contains('.');
     let param_fn_sigs = ctx.fn_param_sigs.get(callee).cloned();
+
     let mut args_ir: Vec<(String, String)> = Vec::with_capacity(effective_args.len());
     for (i, a) in effective_args.iter().enumerate() {
         let want = param_tys.as_ref().and_then(|p| p.get(i)).cloned();
@@ -6262,4 +6396,34 @@ fn emit_c_abi_wrapper(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, A
     s.push_str("}\n\n");
 
     Ok(s)
+}
+
+/// trampoline 入参适配：`i64 %arg_i64` → 第一个形参类型。
+///
+/// 返回 `(preamble IR, 调用实参)`；无法安全适配的类型返回 `None`，
+/// 由调用方把该函数留成空槽（`null`），避免发出非法 IR。
+///
+/// 注意：`i64` 恒等，**不能**生成 `%arg_conv = %arg_i64`（缺少操作码）。
+fn trampoline_arg_from_i64(target: &str, val: &str) -> Option<(String, String)> {
+    let with_conv = |ir: String| {
+        Some((
+            format!("    %arg_conv = {}\n", ir),
+            format!("{} %arg_conv", target),
+        ))
+    };
+    if target == "i64" {
+        return Some((String::new(), format!("i64 {}", val)));
+    }
+    if target.ends_with('*') || target == "ptr" {
+        return with_conv(format!("inttoptr i64 {} to {}", val, target));
+    }
+    match target {
+        "i32" => with_conv(format!("trunc i64 {} to i32", val)),
+        "i16" => with_conv(format!("trunc i64 {} to i16", val)),
+        "i8" => with_conv(format!("trunc i64 {} to i8", val)),
+        "i1" => with_conv(format!("trunc i64 {} to i1", val)),
+        "float" => with_conv(format!("sitofp i64 {} to float", val)),
+        "double" => with_conv(format!("sitofp i64 {} to double", val)),
+        _ => None,
+    }
 }
