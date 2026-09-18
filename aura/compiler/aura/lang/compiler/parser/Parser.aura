@@ -2278,7 +2278,7 @@ object ParserUtils {
         val wordChars: String = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
         var i: Int = 0
         while (i < s.length) {
-            if (wordChars.indexOf(toStr(s[i])) < 0) {
+            if (wordChars.indexOf(aotSlice(s, i, 1)) < 0) {
                 return false
             }
             i = i + 1

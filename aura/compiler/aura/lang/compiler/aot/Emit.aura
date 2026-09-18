@@ -431,7 +431,9 @@ class LlvmEmitter {
                 val clsName: String = hir.textOf(i)
                 // Phase B: 记录 object 类名（object 内方法是静态方法，无 receiver）
                 if (ck == "HirObject") {
-                    this.fObjectClassNames = this.fObjectClassNames + clsName + "\n"
+                    if (!aotListContains(this.fObjectClassNames, clsName)) {
+                        this.fObjectClassNames = this.fObjectClassNames + clsName + "\n"
+                    }
                 }
                 val cKids: String = hir.kidsOf(i)
                 val cn: Int = hirKidsCount(cKids)
@@ -9083,7 +9085,7 @@ object EmitUtils {
         if (v > 255) { v = 255 }
         val hi: Int = v / 16
         val lo: Int = v % 16
-        return toStr(digits[hi]) + toStr(digits[lo])
+        return aotSlice(digits, hi, 1) + aotSlice(digits, lo, 1)
     }
 
     /// 字符字面量（`'a'`）→ 字符码。非法输入返回 0。
@@ -9095,7 +9097,7 @@ object EmitUtils {
         if (body == "") {
             return 0
         }
-        return EmitUtils.charCodeSingle(toStr(body[0]))
+        return EmitUtils.charCodeSingle(aotSlice(body, 0, 1))
     }
 
     /// 单个字符 → ASCII 码（覆盖数字 / 大小写字母）。

@@ -31,34 +31,27 @@ object CompileErrorUtils {
 
     /// 十进制字符串 → Int（局部实现，避免依赖 Lexer 内部辅助，且不与 Ast.aura 的 toIntOf 重名）。
     fun ceToIntOf(text: String): Int {
-        val digits: String = "0123456789"
         val len: Int = text.length()
         var total: Int = 0
         var i: Int = 0
         while (i < len) {
-            total = total * 10 + digits.indexOf(toStr(text[i]))
+            total = total * 10 + (text.charCodeAt(i) - 48)
             i = i + 1
         }
         return total
     }
 
-    /// 取第 index 个字段（以 sep 分隔，0-based）。本文件本地实现，避免跨文件依赖。
+    /// 取第 index 个字段（以 sep 分隔，0-based）。
     fun ceFieldAt(text: String, index: Int, sep: String): String {
-        var i: Int = 0
         var fieldStart: Int = 0
         var cur: Int = 0
+        val sepChar: Int = aotSlice(sep, 0, 1).charCodeAt(0)
         var fieldLen: Int = text.length
+        var i: Int = 0
         while (i < fieldLen) {
-            val c: String = toStr(text[i])
-            if (c == sep) {
+            if (text.charCodeAt(i) == sepChar) {
                 if (cur == index) {
-                    var result: String = ""
-                    var j: Int = fieldStart
-                    while (j < i) {
-                        result = result + toStr(text[j])
-                        j = j + 1
-                    }
-                    return result
+                    return text.substring(fieldStart, i)
                 }
                 cur = cur + 1
                 fieldStart = i + 1
@@ -66,13 +59,7 @@ object CompileErrorUtils {
             i = i + 1
         }
         if (cur == index) {
-            var result: String = ""
-            var j: Int = fieldStart
-            while (j < fieldLen) {
-                result = result + toStr(text[j])
-                j = j + 1
-            }
-            return result
+            return text.substring(fieldStart, fieldLen)
         } else {
             return ""
         }

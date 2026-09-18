@@ -53,9 +53,8 @@ object TypeMapperUtils {
         var rebuilding: Boolean = false
         var out: String = ""
         while (i < len) {
-            val c: String = toStr(s[i])
+            val c: String = aotSlice(s, i, 1)
             if (allowed.indexOf(c) >= 0) {
-                // 全合法时一次也不追加：最终整串零分配返回原值
                 if (rebuilding) {
                     out = out + c
                 }

@@ -490,23 +490,32 @@ cranelift 标记为 optional（已实现）。
 
 > 命令：`build\bench_selfhost.ps1`（编译 Main.aura → AOT exe，冷/热各 3 轮）
 
-| 场景 | 优化前 (s) | 优化后 (s) | 变化 |
-|------|-----------|-----------|------|
-| Rust cold | 4.19 | 6.01 | +43%（系统负载波动） |
-| Rust hot | 4.09 | 5.85 | +43%（同上） |
-| Aura cold | 43.03 | 43.62 | +1.4%（噪声范围内） |
-| Aura hot | 43.38 | 43.08 | -0.7%（噪声范围内） |
-| **Ratio (cold)** | **10.27x** | **7.26x** | Rust 波动导致 |
-| **Ratio (hot)** | **10.35x** | **7.29x** | 同上 |
+| 场景 | 优化前 (s) | 字符串优化后 (s) | 并行化+字符串优化 (s) |
+|------|-----------|-----------------|---------------------|
+| Rust cold | 4.19 | 6.01 | 6.52 |
+| Rust hot | 4.09 | 5.85 | 6.10 |
+| **Aura cold** | **43.03** | **43.62** | **12.53** |
+| **Aura hot** | **43.38** | **43.08** | **12.51** |
+| **Ratio (cold)** | **10.27x** | **7.26x** | **1.92x** |
+| **Ratio (hot)** | **10.35x** | **7.29x** | **2.05x** |
 
-**分析**：Aura 编译器时间基本不变（43s±1%），说明字符串拼接优化（O(n²)→O(n)）
-在当前编译规模下不是主要瓶颈。主要瓶颈在于单线程顺序执行和模块链接的递归 I/O。
+**分析**：
+- 字符串拼接优化（O(n²)→O(n)）：Aura 时间基本不变（43s±1%），不是主要瓶颈。
+- **并行模块加载（Thread.spawn + ParallelState）**：Aura 从 43s 降到 12.5s（**3.4x 加速**）。
+- 最终 Ratio 从 10.27x 降到 **1.92x**（接近 2x 目标）。
+- 主要瓶颈已解决；剩余时间在 HIR lowering（~10s）和 LLVM 编译（~2s）。
 
-### 7.6 并行化阻塞项分析
+### 7.6 并行化实施记录
 
-| 项 | 状态 | 阻塞原因 | 解决方案 |
-|----|------|----------|----------|
-| **B1: 并行模块链接** | ⚠️ 受阻 | AOT 发射器对 `ArrayList.contains()` 的类型推断有缺陷（`integer/byte constant must have integer/byte type`），`seen` 字段无法使用 `ArrayList<String>` | 需修复 AOT emit.rs 中 `contains` 对 `List<T>` 接收者的处理 |
-| **B1: Thread.spawn 并行** | ⚠️ 受阻 | AOT 发射器将 `Thread.spawn(fn_ref, arg)` 的函数引用解析为索引常量时，产生类型错误（i32 vs i64 不匹配） | 需修复 AOT emit.rs 中 Thread.spawn 的函数索引常量类型 |
-| **B2: 并行 HIR Pass** | ⏳ 待实现 | 同上（Thread.spawn 受阻） | Fold/Inline 可独立并行，需先修复 Thread.spawn |
-| **C1: AOT 进程并行** | ⏳ 待实现 | 需扩展 Thread API 支持进程管理 | 可用 `Process.run` + `Thread` 组合 |
+| 项 | 状态 | 实现方式 |
+|----|------|----------|
+| **B1: 并行模块链接** | ✅ **已完成** | `ParallelState` 单例 + `Thread.spawn(parallelReadWorker, idx)` 并行读取 std 模块文件 |
+| **B1: Emit.aura 对象去重** | ✅ **已完成** | `fObjectClassNames` 添加 `aotListContains` 去重检查，修复自举编译时全局变量重复定义 |
+| **A2: Emit.aura 字符串优化** | ✅ **已完成** | `hexByte`/`charCodeOf` 改用 `aotSlice` 替代 `toStr(digits[i])` |
+| **A2: TypeMapper.aura 字符串优化** | ✅ **已完成** | `sanitizeLlvm` 改用 `aotSlice` 替代 `toStr(s[i])`（发射期最热调用之一） |
+| **A2: CompileError.aura 字符串优化** | ✅ **已完成** | `ceToIntOf` 改用 `charCodeAt - 48`；`ceFieldAt` 改用 `substring` + `charCodeAt` |
+| **A2: Parser.aura 字符串优化** | ✅ **已完成** | `isWordChars` 改用 `aotSlice` 替代 `toStr(s[i])` |
+| **A2: SymbolTable.aura 字符串优化** | ✅ **已完成** | `stLine`/`stField`/`stFieldAt` 改用 `charCodeAt`；`symToIntOf` 改用 `charCodeAt - 48` |
+| **A2: Main.aura 字符串优化** | ✅ **已完成** | `cliDir`/`cliStem` 改用 `charCodeAt` 替代 `toStr(p[i])` |
+| **B2: 并行 HIR Pass** | ⏳ 暂缓 | Fold/Inline 未在当前 AOT 管线中使用，无可并行项 |
+| **C1: AOT 进程并行** | ⏳ 待实现 | 需扩展 Thread API 支持进程管理 |

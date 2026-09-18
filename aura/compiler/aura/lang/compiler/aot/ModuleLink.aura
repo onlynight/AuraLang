@@ -27,6 +27,31 @@ import aura.lang.compiler.lexer.Span
 import aura.lang.compiler.parser.Parser
 import aura.lang.compiler.hir.Hir
 import aura.lang.compiler.aot.AotUtil
+import aura.lang.collection.ArrayList
+import aura.lang.concurrent.Thread
+
+// ─────────────────────────────────────────────────────────────
+// B1 并行模块加载 — 全局状态
+// Thread.spawn(fn_ref, arg) 只能传单个 Int。复杂数据通过
+// ParallelState 单例共享：路径列表只读，结果列表每个线程写
+// 唯一槽位（ArrayList.set(idx, val) 无竞争），无需 Mutex。
+// ─────────────────────────────────────────────────────────────
+
+/// 并行模块加载的全局状态（单例，线程安全：每个线程写唯一索引）。
+object ParallelState {
+    var paths: ArrayList<String> = ArrayList<String>()
+    var sources: ArrayList<String> = ArrayList<String>()
+    var threadIds: ArrayList<Int> = ArrayList<Int>()
+}
+
+/// 并行读取 worker：arg = 文件在 ParallelState.paths 中的索引。
+fun parallelReadWorker(arg: Int): Int {
+    val path: String = ParallelState.paths.get(arg)
+    if (path == "") { return 0 }
+    val source: String = FileSystem.readText(path)
+    ParallelState.sources.set(arg, source)
+    return 1
+}
 
 /// 模块链接器：把入口文件及其递归 `import` 合并为单一 HIR。
 class AotModuleLinker {
@@ -34,7 +59,7 @@ class AotModuleLinker {
     /// 输出 HIR。
     var hir: Hir = Hir()
 
-    /// 已加载的规范化路径（换行分隔）。
+    /// 已加载的规范化路径（换行分隔；ArrayList 字段会触发 Emit.aura 函数重定义缺陷）。
     var seen: String = ""
 
     /// 执行模块链接。
@@ -90,22 +115,53 @@ class AotModuleLinker {
         return this.hir
     }
 
-    /// B1: 预加载多个文件内容到 fileCache。
+    /// B1: 预加载多个文件内容到 fileCache（并行读取版）。
     ///
-    /// 将已知路径的文件内容预读入内存，避免 loadPath 中的重复 I/O。
-    /// 注：并行文件读取需 AOT 发射器完整支持 Thread.spawn(fn_ref, arg)
-    /// 的函数索引解析（当前 AOT 编译报 integer/byte constant 类型错误）。
-    /// Rust 编译器侧已通过 rayon 实现并行 stdlib 编译。
+    /// 阶段 1（顺序）：收集需要读取的路径到 ParallelState.paths；
+    /// 阶段 2（并行）：Thread.spawn 并行读取所有文件；
+    /// 阶段 3（顺序）：将并行结果写入 cacheBlob。
     fun preloadCache(paths: String): Unit {
+        ParallelState.paths.clear()
         var i: Int = 0
-        while (i < aotLineCount(paths)) {
+        val pathCount: Int = aotLineCount(paths)
+        while (i < pathCount) {
             val p: String = aotLineAt(paths, i)
             val norm: String = ModuleLinkUtils.normalizePath(p)
             if (norm != "" && FileSystem.exists(norm) && this.cacheGet(norm) == "") {
-                val content: String = FileSystem.readText(norm)
-                this.cacheBlob = this.cacheBlob + norm + "\n" + toStr(content.length) + "\n" + content
+                ParallelState.paths.add(norm)
             }
             i = i + 1
+        }
+
+        val n: Int = ParallelState.paths.getSize()
+        if (n == 0) { return }
+
+        ParallelState.sources.clear()
+        var pi: Int = 0
+        while (pi < n) { ParallelState.sources.add(""); pi = pi + 1 }
+
+        ParallelState.threadIds.clear()
+        var ti: Int = 0
+        while (ti < n) {
+            val tid: Int = Thread.spawn(parallelReadWorker, ti)
+            if (tid > 0) { ParallelState.threadIds.add(tid) }
+            ti = ti + 1
+        }
+
+        var wi: Int = 0
+        while (wi < ParallelState.threadIds.getSize()) {
+            Thread.join(ParallelState.threadIds.get(wi))
+            wi = wi + 1
+        }
+
+        var ci: Int = 0
+        while (ci < n) {
+            val norm: String = ParallelState.paths.get(ci)
+            val content: String = ParallelState.sources.get(ci)
+            if (content != "") {
+                this.cacheBlob = this.cacheBlob + norm + "\n" + toStr(content.length) + "\n" + content
+            }
+            ci = ci + 1
         }
     }
 
