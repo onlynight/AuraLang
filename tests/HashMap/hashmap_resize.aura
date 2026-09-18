@@ -1,0 +1,378 @@
+// tests/HashMap/hashmap_resize.aura
+// ─────────────────────────────────────────────────────────────────────────────
+// HashMap<K, V> 扩容重建压力测试
+//
+// 覆盖：逐步扩容路径 (16→32→64→128→256→512)；
+//       墓碑压实与链长有界；
+//       反复扩容后键值一致性；
+//       扩容后覆盖写 / 删除 / 查询；
+//       多次 clear + 重填周期。
+//
+// 运行：aura run tests/HashMap/hashmap_resize.aura
+//   全通过时输出 "ALL TESTS PASSED"
+// ─────────────────────────────────────────────────────────────────────────────
+
+package test
+
+import aura.lang.collection.HashMap
+import aura.lang.collection.ArrayList
+
+/// 断言计数与汇总输出。
+class Checker {
+    private var passed: Int
+    private var failed: Int
+
+    constructor() {
+        this.passed = 0
+        this.failed = 0
+    }
+
+    fun check(name: String, cond: Boolean): Unit {
+        if (cond) {
+            this.passed = this.passed + 1
+        } else {
+            this.failed = this.failed + 1
+            println("FAIL: " + name)
+        }
+    }
+
+    fun summary(): Unit {
+        println("passed=" + this.passed + " failed=" + this.failed)
+        if (this.failed == 0) {
+            println("ALL TESTS PASSED")
+        } else {
+            println("SOME TESTS FAILED")
+        }
+    }
+}
+
+// ── 1. 逐步扩容：100 条 Int 键（16→32→64→128）──
+
+fun testGradualResize(c: Checker): Unit {
+    var m: HashMap<Int, Int> = HashMap<Int, Int>()
+    var i: Int = 0
+    while (i < 100) {
+        m.put(i, i * 2)
+        i = i + 1
+    }
+    c.check("gr.size", m.size == 100)
+    var ok: Boolean = true
+    i = 0
+    while (i < 100) {
+        if (m.get(i) != (i * 2)) { ok = false }
+        i = i + 1
+    }
+    c.check("gr.allValues", ok)
+    c.check("gr.keysCount", m.keys().size == 100)
+    c.check("gr.valuesCount", m.values().size == 100)
+    // 扩容后覆盖写仍然正确
+    m.put(5, 999)
+    c.check("gr.overwriteAfterRehash", m.size == 100)
+    c.check("gr.overwriteAfterRehashVal", m.get(5) == 999)
+    c.check("gr.othersAfterRehash", m.get(6) == 12 && m.get(99) == 198)
+}
+
+// ── 2. 大跨度扩容：500 条 Int 键（16→32→64→128→256→512）──
+
+fun testLargeResize(c: Checker): Unit {
+    var m: HashMap<Int, Int> = HashMap<Int, Int>()
+    var n: Int = 500
+    var i: Int = 0
+    while (i < n) {
+        m.put(i, i * 4 + 7)
+        i = i + 1
+    }
+    c.check("lr.size", m.size == n)
+    c.check("lr.keysCount", m.keys().size == n)
+    var ok: Boolean = true
+    i = 0
+    while (i < n) {
+        if (m.get(i) != (i * 4 + 7)) { ok = false }
+        i = i + 1
+    }
+    c.check("lr.allValues", ok)
+    // 扩容后删除一半
+    i = 0
+    while (i < n) {
+        if (i % 2 == 0) { m.remove(i) }
+        i = i + 1
+    }
+    c.check("lr.sizeAfterRemove", m.size == 250)
+    ok = true
+    i = 0
+    while (i < n) {
+        if (i % 2 == 1) {
+            if (m.get(i) != (i * 4 + 7)) { ok = false }
+        } else {
+            if (m.containsKey(i)) { ok = false }
+        }
+        i = i + 1
+    }
+    c.check("lr.evenGoneOddKept", ok)
+}
+
+// ── 3. 墓碑压实：删除后再插入触发压实 ──
+
+fun testTombstoneCompaction(c: Checker): Unit {
+    var m: HashMap<Int, Int> = HashMap<Int, Int>()
+    var i: Int = 0
+    while (i < 60) {
+        m.put(i, i)
+        i = i + 1
+    }
+    // 删除一半
+    i = 0
+    while (i < 60) {
+        if (i % 2 == 0) { m.remove(i) }
+        i = i + 1
+    }
+    c.check("tc.sizeAfterRemove", m.size == 30)
+    var ok: Boolean = true
+    i = 0
+    while (i < 60) {
+        if (i % 2 == 1) {
+            if (m.get(i) != i) { ok = false }
+        } else {
+            if (m.containsKey(i)) { ok = false }
+        }
+        i = i + 1
+    }
+    c.check("tc.evenGoneOddKept", ok)
+    c.check("tc.keysCount", m.keys().size == 30)
+    // 再插入 100 个新键，触发多次扩容压实
+    i = 1000
+    while (i < 1100) {
+        m.put(i, i)
+        i = i + 1
+    }
+    c.check("tc.sizeAfterRefill", m.size == 130)
+    ok = true
+    i = 1000
+    while (i < 1100) {
+        if (m.get(i) != i) { ok = false }
+        i = i + 1
+    }
+    c.check("tc.refillValues", ok)
+    // 旧键值仍然存活
+    ok = true
+    i = 1
+    while (i < 60) {
+        if (i % 2 == 1) {
+            if (m.get(i) != i) { ok = false }
+        }
+        i = i + 2
+    }
+    c.check("tc.oldValuesSurviveRehash", ok)
+}
+
+// ── 4. 算术级数键：验证哈希混合防退化 ──
+
+fun testArithmeticProgression(c: Checker): Unit {
+    // 步长 16（capacity 初始值）的等差键
+    var m: HashMap<Int, Int> = HashMap<Int, Int>()
+    var i: Int = 0
+    while (i < 40) {
+        m.put(1 + i * 16, i)
+        i = i + 1
+    }
+    c.check("ap.size", m.size == 40)
+    var ok: Boolean = true
+    i = 0
+    while (i < 40) {
+        if (m.get(1 + i * 16) != i) { ok = false }
+        i = i + 1
+    }
+    c.check("ap.allValues", ok)
+    c.check("ap.remove", m.remove(1 + 20 * 16) == 20)
+    c.check("ap.sizeAfter", m.size == 39)
+    // 步长 1 的稠密键
+    var n: HashMap<Int, Int> = HashMap<Int, Int>()
+    i = 0
+    while (i < 64) {
+        n.put(i, i)
+        i = i + 1
+    }
+    ok = true
+    i = 0
+    while (i < 64) {
+        if (n.get(i) != i) { ok = false }
+        i = i + 1
+    }
+    c.check("ap.denseKeys", n.size == 64 && ok)
+}
+
+// ── 5. 多次 clear + 重填周期 ──
+
+fun testClearRefillCycles(c: Checker): Unit {
+    var m: HashMap<Int, Int> = HashMap<Int, Int>()
+    var cycles: Int = 5
+    var n: Int = 200
+    var cycleIdx: Int = 0
+    while (cycleIdx < cycles) {
+        // 填入 n 条
+        var i: Int = 0
+        while (i < n) {
+            m.put(i, cycleIdx * n + i)
+            i = i + 1
+        }
+        c.check("cr.fillSize", m.size == n)
+        var ok: Boolean = true
+        i = 0
+        while (i < n) {
+            if (m.get(i) != (cycleIdx * n + i)) { ok = false }
+            i = i + 1
+        }
+        c.check("cr.fillValues", ok)
+        // 清空
+        m.clear()
+        c.check("cr.clearSize", m.size == 0)
+        c.check("cr.clearIsEmpty", m.isEmpty())
+        // 验证旧键不存在
+        ok = true
+        i = 0
+        while (i < n) {
+            if (m.containsKey(i)) { ok = false }
+            i = i + 1
+        }
+        c.check("cr.oldKeysGone", ok)
+        cycleIdx = cycleIdx + 1
+    }
+}
+
+// ── 6. 扩容后立即大量删除 ──
+
+fun testResizeThenMassDelete(c: Checker): Unit {
+    var m: HashMap<Int, Int> = HashMap<Int, Int>()
+    var n: Int = 300
+    var i: Int = 0
+    while (i < n) {
+        m.put(i, i)
+        i = i + 1
+    }
+    c.check("rtd.size", m.size == n)
+    // 立即删除 80%
+    i = 0
+    while (i < 240) {
+        m.remove(i)
+        i = i + 1
+    }
+    c.check("rtd.sizeAfter", m.size == 60)
+    c.check("rtd.keysAfter", m.keys().size == 60)
+    // 验证剩余
+    var ok: Boolean = true
+    i = 240
+    while (i < 300) {
+        if (m.get(i) != i) { ok = false }
+        i = i + 1
+    }
+    c.check("rtd.tailKept", ok)
+    i = 0
+    while (i < 240) {
+        if (m.containsKey(i)) { ok = false }
+        i = i + 1
+    }
+    c.check("rtd.headGone", ok)
+    // 删除后再插入，验证 tombstone 不泄漏
+    i = 0
+    while (i < 240) {
+        m.put(1000 + i, i)
+        i = i + 1
+    }
+    c.check("rtd.sizeAfterRefill", m.size == 300)
+    ok = true
+    i = 0
+    while (i < 240) {
+        if (m.get(1000 + i) != i) { ok = false }
+        i = i + 1
+    }
+    c.check("rtd.refillValues", ok)
+    c.check("rtd.oldKeysStillGone", m.containsKey(0) == false)
+}
+
+// ── 7. 删除 + 再插入 + 再删除（多轮压缩）──
+
+fun testMultiRoundCompress(c: Checker): Unit {
+    var m: HashMap<Int, Int> = HashMap<Int, Int>()
+    var rounds: Int = 10
+    var n: Int = 30
+    var r: Int = 0
+    while (r < rounds) {
+        // 每轮填入 n 条
+        var i: Int = 0
+        while (i < n) {
+            m.put(r * n + i, r * n + i)
+            i = i + 1
+        }
+        // 删除一半
+        i = 0
+        while (i < n) {
+            if (i % 2 == 0) {
+                m.remove(r * n + i)
+            }
+            i = i + 1
+        }
+        r = r + 1
+    }
+    c.check("mrc.totalSize", m.size == rounds * 15)
+    c.check("mrc.keysCount", m.keys().size == rounds * 15)
+    // 验证所有存活键
+    var ok: Boolean = true
+    r = 0
+    while (r < rounds) {
+        var i: Int = 0
+        while (i < n) {
+            var key: Int = r * n + i
+            if (i % 2 == 1) {
+                if (m.get(key) != key) { ok = false }
+            } else {
+                if (m.containsKey(key)) { ok = false }
+            }
+            i = i + 1
+        }
+        r = r + 1
+    }
+    c.check("mrc.allValues", ok)
+}
+
+// ── 8. 负数 Int 键（测试哈希取模的负数处理）──
+
+fun testNegativeKeys(c: Checker): Unit {
+    var m: HashMap<Int, Int> = HashMap<Int, Int>()
+    var n: Int = 100
+    var i: Int = 0
+    while (i < n) {
+        var key: Int = i - n  // 范围 -100..-1
+        m.put(key, key * key)
+        i = i + 1
+    }
+    c.check("neg.size", m.size == n)
+    var ok: Boolean = true
+    i = 0
+    while (i < n) {
+        var key: Int = i - n
+        if (m.get(key) != (key * key)) { ok = false }
+        i = i + 1
+    }
+    c.check("neg.allValues", ok)
+    // 混合正负键
+    m.put(0, 0)
+    c.check("neg.zeroKey", m.get(0) == 0)
+    c.check("neg.sizeWithZero", m.size == n + 1)
+}
+
+// ── main ──
+
+fun main(): Unit {
+    var c: Checker = Checker()
+    println("=== HashMap Resize Tests ===")
+    println()
+    println("T01"); testGradualResize(c)
+    println("T02"); testLargeResize(c)
+    println("T03"); testTombstoneCompaction(c)
+    println("T04"); testArithmeticProgression(c)
+    println("T05"); testClearRefillCycles(c)
+    println("T06"); testResizeThenMassDelete(c)
+    println("T07"); testMultiRoundCompress(c)
+    println("T08"); testNegativeKeys(c)
+    println("TEND"); c.summary()
+}
