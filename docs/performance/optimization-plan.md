@@ -509,7 +509,7 @@ cranelift 标记为 optional（已实现）。
 
 | 项 | 状态 | 实现方式 |
 |----|------|----------|
-| **B1: 并行模块链接** | ✅ **已完成** | `ParallelState` 单例 + `Thread.spawn(parallelReadWorker, idx)` 并行读取 std 模块文件 |
+| **B1: 并行模块链接** | ⛔ **已回退（2026-09-19）** | 见下方「并行模块链接回退」：`object` 单例字段在 AOT 下不受支持，导致自举编译器「编译成功但一运行即段错误」；改为顺序预读，实测耗时无回退（13.2s vs 13.2s） |
 | **B1: Emit.aura 对象去重** | ✅ **已完成** | `fObjectClassNames` 添加 `aotListContains` 去重检查，修复自举编译时全局变量重复定义 |
 | **A2: Emit.aura 字符串优化** | ✅ **已完成** | `hexByte`/`charCodeOf` 改用 `aotSlice` 替代 `toStr(digits[i])` |
 | **A2: TypeMapper.aura 字符串优化** | ✅ **已完成** | `sanitizeLlvm` 改用 `aotSlice` 替代 `toStr(s[i])`（发射期最热调用之一） |
@@ -519,3 +519,49 @@ cranelift 标记为 optional（已实现）。
 | **A2: Main.aura 字符串优化** | ✅ **已完成** | `cliDir`/`cliStem` 改用 `charCodeAt` 替代 `toStr(p[i])` |
 | **B2: 并行 HIR Pass** | ⏳ 暂缓 | Fold/Inline 未在当前 AOT 管线中使用，无可并行项 |
 | **C1: AOT 进程并行** | ⏳ 待实现 | 需扩展 Thread API 支持进程管理 |
+
+#### 并行模块链接回退（2026-09-19）
+
+**现象**：自举编译器（`aura build aura/compiler/aura/lang/compiler/Main.aura --aot`）
+能编译成功，但一运行即崩溃：
+
+```
+[aura] memory limit exceeded: used ~0 MiB, requesting ~33681408 MiB more, limit 8192 MiB.
+```
+
+或直接 `0xC0000005`（访问冲突）。
+
+**定位**（gdb + `lld-link /map` 符号化调用栈）：
+
+```
+aura_mem_realloc ← aura_dynlist_push ← Collections_listAppend
+  ← AotModuleLinker_preloadCache ← AotModuleLinker_link ← MainUtils_runCli ← main
+```
+
+`Collections_listAppend` 收到的「列表句柄」是 `0xABABABABABABABAB`（MSVC 堆的
+未初始化填充值），`aura_dynlist_push` 读 `items` 字段（偏移 16）落在分配块之外。
+
+**根因**：`ModuleLink.aura` 的并行预读把共享状态放在
+`object ParallelState { var paths: ArrayList<String> ... }` 上，而
+**Rust AOT 后端（`compiler/src/codegen/aot/`）完全不支持 `object` 单例字段**：
+
+1. `ParallelState.paths`（HIR 里被降级为零参调用 `ParallelState.paths()`）
+   被发射成「新建一个 `ArrayList` 对象并返回」，从不读取单例全局
+   （Rust 后端连 `@aura_obj_*` 全局都不发射；`is_singleton` 在该后端零引用）；
+2. 该 `ArrayList` 实例随后又被当作**裸集合句柄**传给
+   `Collections.listAppend`/`getAt`/`count` —— `%struct.ArrayList`（`{i8*,i32,i32}`
+   = 16 字节）与 `AuraDynList`（`{len,cap,items}` = 24 字节）布局不同，
+   读 `items` 直接越界。
+
+对比：**Aura 侧发射器（`aot/Emit.aura`）已支持 `object` 单例**（`fObjectClassNames`
++ `@aura_obj_*` 全局 + 方法 `self` 传单例地址），因此由它生成的编译器可正常运行。
+
+**处置**：`preloadCache` 回到顺序预读（只依赖 `AotModuleLinker` 的 Class 实例字段，
+两个后端语义都正确）。实测 `pgen1.exe`（并行版）与 `aura-compiler-parallel.exe`
+（顺序版）编译自身均为 **13.2s**，即并行预读在此场景**没有可测收益**，
+故回退无性能损失。
+
+**后续（若要恢复并行）**：需要给 **Rust AOT 后端**补齐 `object` 单例支持：
+发射 `@aura_obj_<Name>` 全局、把 `Name.field` 零参调用降级为字段 `load`、
+把 `Name.field = v` 降级为字段 `store`、并在入口调用 `<Name>.__singletonInit`
+（或让 `Thread` 支持传递超过 Int 的负载）。

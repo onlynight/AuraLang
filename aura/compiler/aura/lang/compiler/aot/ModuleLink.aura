@@ -27,31 +27,6 @@ import aura.lang.compiler.lexer.Span
 import aura.lang.compiler.parser.Parser
 import aura.lang.compiler.hir.Hir
 import aura.lang.compiler.aot.AotUtil
-import aura.lang.collection.ArrayList
-import aura.lang.concurrent.Thread
-
-// ─────────────────────────────────────────────────────────────
-// B1 并行模块加载 — 全局状态
-// Thread.spawn(fn_ref, arg) 只能传单个 Int。复杂数据通过
-// ParallelState 单例共享：路径列表只读，结果列表每个线程写
-// 唯一槽位（ArrayList.set(idx, val) 无竞争），无需 Mutex。
-// ─────────────────────────────────────────────────────────────
-
-/// 并行模块加载的全局状态（单例，线程安全：每个线程写唯一索引）。
-object ParallelState {
-    var paths: ArrayList<String> = ArrayList<String>()
-    var sources: ArrayList<String> = ArrayList<String>()
-    var threadIds: ArrayList<Int> = ArrayList<Int>()
-}
-
-/// 并行读取 worker：arg = 文件在 ParallelState.paths 中的索引。
-fun parallelReadWorker(arg: Int): Int {
-    val path: String = ParallelState.paths.get(arg)
-    if (path == "") { return 0 }
-    val source: String = FileSystem.readText(path)
-    ParallelState.sources.set(arg, source)
-    return 1
-}
 
 /// 模块链接器：把入口文件及其递归 `import` 合并为单一 HIR。
 class AotModuleLinker {
@@ -115,53 +90,37 @@ class AotModuleLinker {
         return this.hir
     }
 
-    /// B1: 预加载多个文件内容到 fileCache（并行读取版）。
+    /// B1: 预加载多个文件内容到 fileCache（顺序读取）。
     ///
-    /// 阶段 1（顺序）：收集需要读取的路径到 ParallelState.paths；
-    /// 阶段 2（并行）：Thread.spawn 并行读取所有文件；
-    /// 阶段 3（顺序）：将并行结果写入 cacheBlob。
+    /// 将已知路径的文件内容预读入内存，避免 loadPath 中的重复 I/O。
+    ///
+    /// **为什么这里是顺序读取（而不是 Thread.spawn 并行）**：
+    /// 并行版本把「待读路径 / 读取结果 / 线程 id」放在 `object ParallelState`
+    /// 的单例字段里，由 worker 线程按唯一索引写入。但 **AOT 后端目前不支持
+    /// `object` 单例字段访问**：
+    ///   1. `ParallelState.paths` 会被发射成**每次调用都新建一个 `ArrayList` 对象**
+    ///      （而非读取单例全局的字段），所以写入的根本不是同一份数据；
+    ///   2. `ArrayList` 实例又会被当作**裸集合句柄**（`AuraDynList*`）传给
+    ///      `Collections.listAppend`，而 `%struct.ArrayList`（16 字节：data + size）
+    ///      与 `AuraDynList`（24 字节：len + cap + items）布局不同 —— 读 `items`
+    ///      会读到分配块之外的野值（实测为 MSVC 堆的 `0xABAB…` 填充），
+    ///      随即在 `realloc` 中段错误（0xC0000005）。
+    /// 这正是「自举编译器编译成功、一运行就崩」的直接根因。
+    ///
+    /// 顺序读取只依赖 `AotModuleLinker` 自身的实例字段（Class 实例字段在 AOT 下
+    /// 语义正确），因此对两个后端都成立。实测并行版与顺序版自举耗时相同
+    /// （均约 13.2s：40+ 模块的读取并非瓶颈），故本改动无性能回退。
     fun preloadCache(paths: String): Unit {
-        ParallelState.paths.clear()
         var i: Int = 0
         val pathCount: Int = aotLineCount(paths)
         while (i < pathCount) {
             val p: String = aotLineAt(paths, i)
             val norm: String = ModuleLinkUtils.normalizePath(p)
             if (norm != "" && FileSystem.exists(norm) && this.cacheGet(norm) == "") {
-                ParallelState.paths.add(norm)
-            }
-            i = i + 1
-        }
-
-        val n: Int = ParallelState.paths.getSize()
-        if (n == 0) { return }
-
-        ParallelState.sources.clear()
-        var pi: Int = 0
-        while (pi < n) { ParallelState.sources.add(""); pi = pi + 1 }
-
-        ParallelState.threadIds.clear()
-        var ti: Int = 0
-        while (ti < n) {
-            val tid: Int = Thread.spawn(parallelReadWorker, ti)
-            if (tid > 0) { ParallelState.threadIds.add(tid) }
-            ti = ti + 1
-        }
-
-        var wi: Int = 0
-        while (wi < ParallelState.threadIds.getSize()) {
-            Thread.join(ParallelState.threadIds.get(wi))
-            wi = wi + 1
-        }
-
-        var ci: Int = 0
-        while (ci < n) {
-            val norm: String = ParallelState.paths.get(ci)
-            val content: String = ParallelState.sources.get(ci)
-            if (content != "") {
+                val content: String = FileSystem.readText(norm)
                 this.cacheBlob = this.cacheBlob + norm + "\n" + toStr(content.length) + "\n" + content
             }
-            ci = ci + 1
+            i = i + 1
         }
     }
 
