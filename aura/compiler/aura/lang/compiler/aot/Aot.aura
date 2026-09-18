@@ -204,12 +204,12 @@ object AotUtils {
     fun aotWinPath(p: String): String {
         var out: String = ""
         var i: Int = 0
-        while (i < p.length) {
-            val c: String = toStr(p[i])
-            if (c == "/") {
+        val len: Int = p.length
+        while (i < len) {
+            if (p.charCodeAt(i) == 47) {  // '/'
                 out = out + "\\"
             } else {
-                out = out + c
+                out = out + p.substring(i, i + 1)
             }
             i = i + 1
         }

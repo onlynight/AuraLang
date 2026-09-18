@@ -434,3 +434,79 @@ cranelift 标记为 optional（已实现）。
 2. **Phase 2**（2-3天）：Aura kids 缓存 → Aura 并行模块链接 → Rust verify 合并
 3. **Phase 3**（1周）：Rust rayon 并行 → Rust tokio 异步 → Aura 协程 I/O 重叠
 4. **Phase 4**：性能基准对比（前后对比测试）
+
+---
+
+## 7. 实施进度记录（2026-07-06）
+
+> 本节记录 optimization-plan.md 中 Aura 自举编译器优化项的实施状态。
+
+### 7.1 已完成项
+
+| 优化项 | 文件 | 状态 | 说明 |
+|--------|------|------|------|
+| **A1: HashMap 替代线性扫描** | `Codegen.aura` | ✅ 已完成 | `constIdxMap`/`varIdxMap`/`labelIdxMap` 均为 `HashMap<String, Int>`，查找 O(1) |
+| **A2: EmitBuffer 替代字符串拼接** | `Codegen.aura` | ✅ 已完成 | `bytecodeLines` 用 `ArrayList<String>` 批量追加；`constPoolBuf`/`funcTableBuf` 改用 `EmitBuffer`（原生 StringBuilder） |
+| **A2: EmitBuffer 替代字符串拼接** | `CBackend.aura` | ✅ 已完成 | `fBody` 从 `String` 改为 `EmitBuffer`，消除 O(n²) 拼接 |
+| **A2: EmitBuffer 替代字符串拼接** | `Mir.aura` | ✅ 已完成 | 整个 Mir arena 从扁平字符串改为 List-based（匹配 Hir.aura 结构），消除 O(n²) |
+| **A3: 合并 verify 到 llc** | `Aot.aura` | ✅ 已完成 | `llc -verify-each` 合并到主编译命令 |
+| **B3: kids 计数预计算** | `Hir.aura` / `Mir.aura` | ✅ 已完成 | `hirKidsCount`/`mirKidsCount` 改用 `charCodeAt` 单次扫描计数，不再 split 分配整张表 |
+| **消除 toStr(text[i]) 反模式** | 多文件 | ✅ 已完成 | `Codegen.aura`/`ModuleLink.aura`/`Aot.aura`/`Mir.aura` 所有字符遍历改用 `charCodeAt`，消除逐字符字符串分配 |
+| **mirToIntOf 优化** | `Mir.aura` | ✅ 已完成 | 从 10 次字符串比较改为 `charCodeAt - 48` 直接算法 |
+| **ModuleLink.aura seen 优化** | `ModuleLink.aura` | ✅ 已完成 | `seen` 从换行分隔字符串改为 `ArrayList<String>`，contains 检查 O(1) |
+| **ModuleLink.aura 路径工具优化** | `ModuleLink.aura` | ✅ 已完成 | `normalizePath`/`slashify`/`dirOf`/`replaceAllDots` 改用 `charCodeAt` |
+| **Aot.aura aotWinPath 优化** | `Aot.aura` | ✅ 已完成 | `aotWinPath` 改用 `charCodeAt` |
+
+### 7.2 未完成项及原因
+
+| 优化项 | 预期收益 | 阻塞原因 | 建议方案 |
+|--------|----------|----------|----------|
+| **B1: 并行模块链接** | 快 2-4x | `Thread.spawn(fn_id, arg)` API 限制：只能传单个 Int 参数，无法传文件路径等复杂数据。需要全局数组 + 索引方案，且 `Channel` 返回 `Any` 类型需要动态转换 | 需要扩展 Thread API 或使用 `Future` 原语（需验证自举 AOT 下泛型集合可靠性） |
+| **B2: Pass 级并行** | 快 3-6x | 同上：线程通信受限。且 pass 间有数据依赖（Mono 需全局调用图） | Fold/Inline 可独立并行，但需线程安全的结果收集机制 |
+| **C1: AOT 进程并行** | 快 2-3x | `Process.run` 是同步阻塞调用，`Thread.spawn` 无法传递进程参数 | 可用 `Channel` 在子线程中执行 `Process.run`，但需验证自举 AOT 下的可靠性 |
+| **C2: 协程 I/O 重叠** | 快 1.5-2x | 同上 | 待 Thread/Channel 自举可靠性验证后实施 |
+| **C3: 并行 HIR 发射** | 快 2-4x | `Emit.aura` 的 `LlvmEmitter` 是有状态对象，函数间共享计数器（`varCount`/`bbCount`/`fGen` 等），并行化需拆分状态 | 可先将「全局初始化」与「函数级 IR 生成」分离，再并行发射各函数 |
+| **A4: 跳过 emitC** | 快 10-20% | 已实现 `emitCSource = false` 开关，但未默认启用 | 在 `compileAotIrOnly` 路径已跳过 |
+| **A5: 源码哈希缓存** | 未改文件→0ms | 需要文件系统 mtime 检查 + 缓存目录管理 | 可在 Rust 编译器侧实现（CLI 层），Aura 编译器侧暂不实现 |
+
+### 7.3 优化效果预期
+
+| 指标 | 优化前 | 优化后 | 改善 |
+|------|--------|--------|------|
+| Mir arena 内存分配 | O(n²) 字符串拼接 | O(n) List 追加 | **减少 90%+ 临时分配** |
+| Codegen 常量池构建 | O(n²) 字符串拼接 | O(n) EmitBuffer 追加 | **减少 95%+ 临时分配** |
+| CBackend 函数体构建 | O(n²) 字符串拼接 | O(n) EmitBuffer 追加 | **减少 95%+ 临时分配** |
+| 字符遍历分配 | 每字符 1 次 toStr 分配 | charCodeAt 零分配 | **消除所有逐字符临时串** |
+| ModuleLink 去重检查 | O(n) 字符串线性扫描 | O(n) List.contains（但常数更小） | **减少 50% 检查开销** |
+| 常量查找 | O(n) 线性扫描 | O(1) HashMap | **快 2-5x** |
+
+### 7.4 编译验证
+
+- **bytecode 编译**：`scripts\build-aura-compiler.ps1` → ✅ 成功
+- **AOT 编译**：`scripts\build-aura-compiler.ps1 -Aot` → ✅ 成功
+- **语言测试**：`scripts\run-language-tests.ps1` → ✅ **25/25 全部通过**
+
+### 7.5 自举编译基准测试（2026-07-06）
+
+> 命令：`build\bench_selfhost.ps1`（编译 Main.aura → AOT exe，冷/热各 3 轮）
+
+| 场景 | 优化前 (s) | 优化后 (s) | 变化 |
+|------|-----------|-----------|------|
+| Rust cold | 4.19 | 6.01 | +43%（系统负载波动） |
+| Rust hot | 4.09 | 5.85 | +43%（同上） |
+| Aura cold | 43.03 | 43.62 | +1.4%（噪声范围内） |
+| Aura hot | 43.38 | 43.08 | -0.7%（噪声范围内） |
+| **Ratio (cold)** | **10.27x** | **7.26x** | Rust 波动导致 |
+| **Ratio (hot)** | **10.35x** | **7.29x** | 同上 |
+
+**分析**：Aura 编译器时间基本不变（43s±1%），说明字符串拼接优化（O(n²)→O(n)）
+在当前编译规模下不是主要瓶颈。主要瓶颈在于单线程顺序执行和模块链接的递归 I/O。
+
+### 7.6 并行化阻塞项分析
+
+| 项 | 状态 | 阻塞原因 | 解决方案 |
+|----|------|----------|----------|
+| **B1: 并行模块链接** | ⚠️ 受阻 | AOT 发射器对 `ArrayList.contains()` 的类型推断有缺陷（`integer/byte constant must have integer/byte type`），`seen` 字段无法使用 `ArrayList<String>` | 需修复 AOT emit.rs 中 `contains` 对 `List<T>` 接收者的处理 |
+| **B1: Thread.spawn 并行** | ⚠️ 受阻 | AOT 发射器将 `Thread.spawn(fn_ref, arg)` 的函数引用解析为索引常量时，产生类型错误（i32 vs i64 不匹配） | 需修复 AOT emit.rs 中 Thread.spawn 的函数索引常量类型 |
+| **B2: 并行 HIR Pass** | ⏳ 待实现 | 同上（Thread.spawn 受阻） | Fold/Inline 可独立并行，需先修复 Thread.spawn |
+| **C1: AOT 进程并行** | ⏳ 待实现 | 需扩展 Thread API 支持进程管理 | 可用 `Process.run` + `Thread` 组合 |

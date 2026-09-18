@@ -93,9 +93,9 @@ class AotModuleLinker {
     /// B1: 预加载多个文件内容到 fileCache。
     ///
     /// 将已知路径的文件内容预读入内存，避免 loadPath 中的重复 I/O。
-    /// 注：AOT 分派表已实现 (Thread.spawn → trampoline → __aura_fn_table)，
-    /// 但 Aura 侧 Thread.spawn 在自举编译时函数名解析仍需 Rust 侧支持。
-    /// 并行文件读取在 Rust 编译器侧通过 rayon 实现（stdlib-compile）。
+    /// 注：并行文件读取需 AOT 发射器完整支持 Thread.spawn(fn_ref, arg)
+    /// 的函数索引解析（当前 AOT 编译报 integer/byte constant 类型错误）。
+    /// Rust 编译器侧已通过 rayon 实现并行 stdlib 编译。
     fun preloadCache(paths: String): Unit {
         var i: Int = 0
         while (i < aotLineCount(paths)) {
@@ -343,12 +343,12 @@ object ModuleLinkUtils {
     fun replaceAllDots(s: String): String {
         var out: String = ""
         var i: Int = 0
-        while (i < s.length) {
-            val c: String = toStr(s[i])
-            if (c == ".") {
+        val len: Int = s.length
+        while (i < len) {
+            if (s.charCodeAt(i) == 46) {  // '.'
                 out = out + "/"
             } else {
-                out = out + c
+                out = out + s.substring(i, i + 1)
             }
             i = i + 1
         }
@@ -359,8 +359,7 @@ object ModuleLinkUtils {
     fun dirOf(p: String): String {
         var i: Int = p.length - 1
         while (i >= 0) {
-            val c: String = toStr(p[i])
-            if (c == "/" || c == "\\") {
+            if (p.charCodeAt(i) == 47 || p.charCodeAt(i) == 92) {  // '/' or '\\'
                 return aotSlice(p, 0, i)
             }
             i = i - 1
@@ -394,12 +393,12 @@ object ModuleLinkUtils {
     fun slashify(p: String): String {
         var out: String = ""
         var i: Int = 0
-        while (i < p.length) {
-            val c: String = toStr(p[i])
-            if (c == "\\") {
+        val len: Int = p.length
+        while (i < len) {
+            if (p.charCodeAt(i) == 92) {  // '\\'
                 out = out + "/"
             } else {
-                out = out + c
+                out = out + p.substring(i, i + 1)
             }
             i = i + 1
         }
@@ -412,14 +411,14 @@ object ModuleLinkUtils {
         var out: String = ""
         var i: Int = 0
         var seg: String = ""
-        while (i <= parts.length) {
-            var c: String = "/"
-            if (i < parts.length) {
-                c = toStr(parts[i])
+        val len: Int = parts.length
+        while (i <= len) {
+            var c: Int = 47  // '/'
+            if (i < len) {
+                c = parts.charCodeAt(i)
             }
-            if (c == "/") {
+            if (c == 47) {
                 if (seg == "..") {
-                    // 弹出上一段
                     out = popSegment(out)
                 } else if (seg != "" && seg != ".") {
                     if (out != "") {
@@ -429,7 +428,7 @@ object ModuleLinkUtils {
                 }
                 seg = ""
             } else {
-                seg = seg + c
+                seg = seg + parts.substring(i, i + 1)
             }
             i = i + 1
         }

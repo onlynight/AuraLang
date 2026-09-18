@@ -8,7 +8,8 @@ package aura.lang.compiler.mir
 // ── 设计方式（与 Ast/Hir 一致）──────────────────────────────
 //
 // MIR 采用三地址码（TAC）表示，每个指令最多一个结果和两个操作数。
-// 使用扁平 arena 表示，与 Ast.aura / Hir.aura 结构一致。
+// 使用 List-based arena 表示（Phase Perf：从扁平字符串 arena 迁移到 List，
+// 消除 O(n²) 字符串拼接，匹配 Hir.aura 的结构）。
 //
 // ── MIR 节点类型 ──
 //
@@ -36,23 +37,28 @@ package aura.lang.compiler.mir
 import aura.lang.std.String
 import aura.lang.compiler.lexer.Span
 
-/// MIR 节点表示（扁平 arena，与 Ast.aura / Hir.aura 结构一致）。
+/// MIR 节点表示（List-based arena，与 Hir.aura 结构一致）。
 class Mir {
 
-    /// 节点种类（每行一个）。
-    var kinds: String = ""
+    /// 节点种类（堆列表，每项一个节点种类）。
+    private var kinds: List<String> = arrayListOf<String>()
 
-    /// 节点主文本：标识符名 / 常量文本 / 操作数描述（每行一个）。
-    var texts: String = ""
+    /// 节点主文本：标识符名 / 常量文本 / 操作数描述（堆列表，换行已转义）。
+    private var texts: List<String> = arrayListOf<String>()
 
-    /// 节点类型名（每行一个；无类型信息时为空）。
-    var tys: String = ""
+    /// 节点类型名（堆列表；无类型信息时为空串）。
+    private var tys: List<String> = arrayListOf<String>()
 
-    /// Span（每行一个：`start end sl sc el ec`，空格分隔）。
-    var spans: String = ""
+    /// Span 分量（6 条**并列 Int 堆列表**）。
+    private var spanStart: List<Int> = arrayListOf<Int>()
+    private var spanEnd: List<Int> = arrayListOf<Int>()
+    private var spanStartLine: List<Int> = arrayListOf<Int>()
+    private var spanStartCol: List<Int> = arrayListOf<Int>()
+    private var spanEndLine: List<Int> = arrayListOf<Int>()
+    private var spanEndCol: List<Int> = arrayListOf<Int>()
 
-    /// 子节点 id 列表（每行一个：逗号分隔，可为空行）。
-    var kids: String = ""
+    /// 子节点 id 列表（堆列表，每项为逗号分隔串，可为空串）。
+    private var kids: List<String> = arrayListOf<String>()
 
     /// 节点总数。
     var count: Int = 0
@@ -63,29 +69,40 @@ class Mir {
     // ── 构造 ──
 
     /// 追加一个节点，返回其 id。
+    ///
+    /// 注意：`id` 取 `kinds.size`、并在追加后回写 `count = kinds.size`。
+    /// 这样即使 `Mir` 实例被浅拷贝（Rust AOT 后端对结构体参数/字段按值传递），
+    /// 拷贝与原值仍共享同一组堆列表（`List` = `i8*`），`count` 也能自愈一致；
+    /// 否则标量 `count` 会在拷贝间失步。
     fun add(kind: String, text: String, ty: String, sp: Span, children: String): Int {
-        val id: Int = this.count
-        this.count = id + 1
-        this.kinds = this.kinds + kind + "\n"
-        // 转义换行符
-        var escaped: String = ""
-        var i: Int = 0
-        var len: Int = text.length
-        while (i < len) {
-            val c: String = toStr(text[i])
-            if (c == "\n") {
-                escaped = escaped + "\\n"
-            } else {
-                escaped = escaped + c
+        val id: Int = this.kinds.size
+        this.kinds.add(kind)
+        // 手动转义换行符（避免 replace 在 VM 内类调用时未链接）。
+        var escaped: String = text
+        if (text.contains("\n")) {
+            val tlen: Int = text.length
+            var buf: String = ""
+            var i: Int = 0
+            while (i < tlen) {
+                if (text.charCodeAt(i) == 10) {
+                    buf = buf + "\\n"
+                } else {
+                    buf = buf + text.substring(i, i + 1)
+                }
+                i = i + 1
             }
-            i = i + 1
+            escaped = buf
         }
-        this.texts = this.texts + escaped + "\n"
-        this.tys = this.tys + ty + "\n"
-        this.spans = this.spans + toStr(sp.start) + " " + toStr(sp.end) + " " +
-            toStr(sp.startLine) + " " + toStr(sp.startCol) + " " +
-            toStr(sp.endLine) + " " + toStr(sp.endCol) + "\n"
-        this.kids = this.kids + children + "\n"
+        this.texts.add(escaped)
+        this.tys.add(ty)
+        this.spanStart.add(sp.start)
+        this.spanEnd.add(sp.end)
+        this.spanStartLine.add(sp.startLine)
+        this.spanStartCol.add(sp.startCol)
+        this.spanEndLine.add(sp.endLine)
+        this.spanEndCol.add(sp.endCol)
+        this.kids.add(children)
+        this.count = this.kinds.size
         return id
     }
 
@@ -98,22 +115,27 @@ class Mir {
 
     /// 第 id 个节点的 kind。
     fun kindOf(id: Int): String {
-        return this.lineAt(this.kinds, id)
+        return MirUtils.mirItemAt(this.kinds, id)
     }
 
     /// 第 id 个节点的 text。
     fun textOf(id: Int): String {
-        val raw: String = this.lineAt(this.texts, id)
-        // 反转义
+        val raw: String = MirUtils.mirItemAt(this.texts, id)
+        // 绝大多数 text 不含换行转义：单次 `contains` 判定后直接复用原串，
+        // 避免每次访问都逐字符重建（textOf 是发射期最热访问之一）。
+        if (!raw.contains("\\")) {
+            return raw
+        }
+        // 手动反转义换行符（避免 replace 在 VM 内类调用时未链接）
         var result: String = ""
         var i: Int = 0
         var len: Int = raw.length
         while (i < len) {
-            if (i + 1 < len && toStr(raw[i]) == "\\" && toStr(raw[i + 1]) == "n") {
+            if (i + 1 < len && raw.charCodeAt(i) == 92 && raw.charCodeAt(i + 1) == 110) {
                 result = result + "\n"
                 i = i + 2
             } else {
-                result = result + toStr(raw[i])
+                result = result + raw.substring(i, i + 1)
                 i = i + 1
             }
         }
@@ -122,18 +144,21 @@ class Mir {
 
     /// 第 id 个节点的 ty。
     fun tyOf(id: Int): String {
-        return this.lineAt(this.tys, id)
+        return MirUtils.mirItemAt(this.tys, id)
     }
 
     /// 第 id 个节点的 span。
     fun spanOf(id: Int): Span {
-        val line: String = this.lineAt(this.spans, id)
-        return this.spanParse(line)
+        return Span(
+            MirUtils.mirIntAt(this.spanStart, id), MirUtils.mirIntAt(this.spanEnd, id),
+            MirUtils.mirIntAt(this.spanStartLine, id), MirUtils.mirIntAt(this.spanStartCol, id),
+            MirUtils.mirIntAt(this.spanEndLine, id), MirUtils.mirIntAt(this.spanEndCol, id)
+        )
     }
 
     /// 第 id 个节点的子节点列表。
     fun kidsOf(id: Int): String {
-        return this.lineAt(this.kids, id)
+        return MirUtils.mirItemAt(this.kids, id)
     }
 
     // ── Dump ──
@@ -141,16 +166,11 @@ class Mir {
     /// 递归 dump 节点树（带缩进）。
     fun dumpNode(id: Int, depth: Int): String {
         var out: String = ""
-        var pad: String = ""
-        var p: Int = 0
-        while (p < depth) {
-            pad = pad + "  "
-            p = p + 1
-        }
+        val pad: String = MirUtils.indent(depth)
         val kind: String = this.kindOf(id)
         val text: String = this.textOf(id)
         val ty: String = this.tyOf(id)
-        out = out + pad + "Mir#" + toStr(id) + " " + kind
+        out = pad + "Mir#" + toStr(id) + " " + kind
         if (text != "") {
             out = out + "(" + text + ")"
         }
@@ -169,38 +189,6 @@ class Mir {
         }
         return out
     }
-
-    // ── 内部辅助 ──
-
-    /// 取第 index 行。
-    fun lineAt(text: String, index: Int): String {
-        return MirUtils.mirFieldAt(text, index, "\n")
-    }
-
-    /// 解析 span 字符串。
-    fun spanParse(s: String): Span {
-        val parts: String = s
-        // 手动解析 6 个字段
-        var i: Int = 0
-        var len: Int = s.length
-        var f: Int = 0
-        var nums: Int = 0
-        var start: Int = 0
-        var end: Int = 0
-        var sl: Int = 0
-        var sc: Int = 0
-        var el: Int = 0
-        var ec: Int = 0
-        while (i < len) {
-            val c: String = toStr(s[i])
-            if (c == " " || c == "\n") {
-                // 跳过空格（简化：用空格分隔）
-            }
-            i = i + 1
-        }
-        // 简化实现：从字符串手动提取数字
-        return Span(0, 0, 1, 1, 1, 1)
-    }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -214,6 +202,23 @@ object MirUtils {
         return ""
     }
 
+    /// 列表安全取项（越界返回空串）；arena 各流（kinds/texts/tys/kids）
+    /// 的下标访问统一走此处，O(1)。
+    fun mirItemAt(items: List<String>, index: Int): String {
+        if (index < 0 || index >= items.size) {
+            return ""
+        }
+        return items[index]
+    }
+
+    /// Int 堆列表安全取项（越界返回 0）；span 的 6 条并列流下标访问统一走此处，O(1)。
+    fun mirIntAt(items: List<Int>, index: Int): Int {
+        if (index < 0 || index >= items.size) {
+            return 0
+        }
+        return items[index]
+    }
+
     /// 追加子节点 id。
     fun mirKidsAdd(list: String, child: Int): String {
         if (list == "") {
@@ -222,17 +227,22 @@ object MirUtils {
         return list + "," + toStr(child)
     }
 
-    /// 子节点列表的长度。
+    /// 子节点列表的长度（单次扫描计数；不再 split 分配整张表）。
+    ///
+    /// **性能关键**：改用 `charCodeAt` 比较（44 = `,`）。旧写法
+    /// `toStr(list[i]) == ","` 每扫描一个字符就要分配一个临时字符串
+    /// （AOT 下 `toStr` = malloc + snprintf），而该函数位于遍历子节点的
+    /// 循环条件里 → 分配量与「(子节点数)² × 每 id 字符数」成正比，
+    /// 自举编译时内存冲到 17 GB 的主因之一。
     fun mirKidsCount(list: String): Int {
         if (list == "") {
             return 0
         }
         var count: Int = 1
         var i: Int = 0
-        var len: Int = list.length
+        val len: Int = list.length
         while (i < len) {
-            val c: String = toStr(list[i])
-            if (c == ",") {
+            if (list.charCodeAt(i) == 44) {
                 count = count + 1
             }
             i = i + 1
@@ -242,111 +252,76 @@ object MirUtils {
 
     /// 取子节点列表的第 index 个 id。
     fun mirKidsAt(list: String, index: Int): Int {
-        return MirUtils.toIntOf(MirUtils.mirFieldAt(list, index, ","))
+        return MirUtils.mirToIntOf(MirUtils.mirFieldAt(list, index, ","))
     }
 
     /// 取第 index 个以 sep 分隔的字段。
+    ///
+    /// 单次扫描 + 一次切片：旧实现用 substringAfter 链，索引 i 的调用要
+    /// 分配 i 个「剩余串」，配合无 GC 的 AOT 运行时是平方级内存黑洞。
     fun mirFieldAt(text: String, index: Int, sep: String): String {
-        var i: Int = 0
-        var fieldStart: Int = 0
+        if (index < 0) {
+            return ""
+        }
+        val len: Int = text.length
+        val sepCode: Int = sep.charCodeAt(0)
         var cur: Int = 0
-        var fieldLen: Int = text.length
-        while (i < fieldLen) {
-            val c: String = toStr(text[i])
-            if (c == sep) {
+        var start: Int = 0
+        var i: Int = 0
+        while (i < len) {
+            if (text.charCodeAt(i) == sepCode) {
                 if (cur == index) {
-                    var result: String = ""
-                    var j: Int = fieldStart
-                    while (j < i) {
-                        result = result + toStr(text[j])
-                        j = j + 1
-                    }
-                    return result
+                    return text.substring(start, i)
                 }
                 cur = cur + 1
-                fieldStart = i + 1
+                start = i + 1
             }
             i = i + 1
         }
         if (cur == index) {
-            var result: String = ""
-            var j: Int = fieldStart
-            while (j < fieldLen) {
-                result = result + toStr(text[j])
-                j = j + 1
-            }
-            return result
+            return text.substring(start, len)
         }
         return ""
     }
 
-    /// 字符串转整数。
-    fun toIntOf(text: String): Int {
-        val digits: String = "0123456789"
+    /// 十进制字符串 → Int。
+    ///
+    /// 字符码直接算数字（48 = '0'）。旧写法对每个字符做 10 次
+    /// 字符串比较，每次比较都要先分配一个临时字符串 —— 该函数被
+    /// `mirKidsAt` 每个子节点调用一次，是热点分配源。
+    fun mirToIntOf(text: String): Int {
+        if (text == "") {
+            return 0
+        }
+        val len: Int = text.length
         var total: Int = 0
         var i: Int = 0
-        var len: Int = text.length
+        var neg: Boolean = false
+        if (len > 0 && text.charCodeAt(0) == 45) {
+            neg = true
+            i = 1
+        }
         while (i < len) {
-            val c: String = toStr(text[i])
-            var digit: Int = -1
-            var j: Int = 0
-            var dLen: Int = digits.length
-            while (j < dLen) {
-                if (toStr(digits[j]) == c) {
-                    digit = j
-                    break
-                }
-                j = j + 1
-            }
-            if (digit >= 0) {
+            val digit: Int = text.charCodeAt(i) - 48
+            if (digit >= 0 && digit <= 9) {
                 total = total * 10 + digit
             }
             i = i + 1
         }
+        if (neg) {
+            return -total
+        }
         return total
     }
 
-    /// 解析 span 字符串（空格分隔的 6 个数字）。
-    fun spanParse(s: String): Span {
-        var f: Int = 0
-        var nums: Int[6]
-        nums[0] = 0
-        nums[1] = 0
-        nums[2] = 0
-        nums[3] = 0
-        nums[4] = 0
-        nums[5] = 0
+    /// 生成 depth 级缩进（每级 2 空格）。
+    fun indent(depth: Int): String {
+        var s: String = ""
         var i: Int = 0
-        var len: Int = s.length
-        while (i < len) {
-            val c: String = toStr(s[i])
-            if (c == " ") {
-                i = i + 1
-                continue
-            }
-            // 读取数字
-            var num: Int = 0
-            while (i < len && toStr(s[i]) != " ") {
-                val ch: String = toStr(s[i])
-                var digit: Int = -1
-                var j: Int = 0
-                while (j < 10) {
-                    if (toStr(j) == ch) {
-                        digit = j
-                        break
-                    }
-                    j = j + 1
-                }
-                if (digit >= 0) {
-                    num = num * 10 + digit
-                }
-                i = i + 1
-            }
-            if (f < 6) {
-                nums[f] = num
-                f = f + 1
-            }
+        while (i < depth) {
+            s = s + "  "
+            i = i + 1
         }
-        return Span(nums[0], nums[1], nums[2], nums[3], nums[4], nums[5])
+        return s
     }
 }

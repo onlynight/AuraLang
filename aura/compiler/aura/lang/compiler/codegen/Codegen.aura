@@ -32,12 +32,19 @@ package aura.lang.compiler.codegen
 //   第 2 趟：发射指令，JUMP/JUMP_IF_FALSE 的目标由标签名解析为行号。
 //   常量索引/变量槽位按「条数」分配（此前的实现误用字符串长度，导致索引错乱）。
 //
+// ── Phase Perf 优化 ──
+//
+//   * constPool / funcTable 改用 EmitBuffer（原生 StringBuilder），消除 O(n²) 拼接
+//   * 所有字符遍历改用 charCodeAt，消除 toStr(text[i]) 逐字符分配
+//   * mirToIntOf 改用 charCodeAt - 48 算法，消除 10 次字符串比较
+//
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
 import aura.lang.collection.HashMap
 import aura.lang.collection.ArrayList
 import aura.lang.compiler.mir.Mir
+import aura.lang.compiler.aot.EmitBuffer
 
 /// 字节码发射器。
 class Codegen {
@@ -57,8 +64,8 @@ class Codegen {
     /// 已发射的字节码行数（含 `# func` 注释行，与 VM 的 ip 对齐）。
     var lineCount: Int = 0
 
-    /// 常量池（扁平字符串：`value\n`）。
-    var constPool: String = ""
+    /// 常量池（原生缓冲区累积，末尾零拷贝交出）。
+    var constPoolBuf: EmitBuffer = EmitBuffer()
 
     /// 常量池索引映射（value → index，HashMap O(1) 查找）。
     var constIdxMap: HashMap<String, Int> = HashMap<String, Int>()
@@ -66,8 +73,8 @@ class Codegen {
     /// 变量表（varName → slot，HashMap O(1) 查找）。
     var varIdxMap: HashMap<String, Int> = HashMap<String, Int>()
 
-    /// 函数表（`name|startOffset|paramCount\n`）。
-    var funcTable: String = ""
+    /// 函数表（原生缓冲区累积，末尾零拷贝交出）。
+    var funcTableBuf: EmitBuffer = EmitBuffer()
 
     /// 标签表（labelName → line，HashMap O(1) 查找）。
     var labelIdxMap: HashMap<String, Int> = HashMap<String, Int>()
@@ -78,10 +85,10 @@ class Codegen {
         this.bytecodeLines = ArrayList<String>()
         this.instrCount = 0
         this.lineCount = 0
-        this.constPool = ""
+        this.constPoolBuf = EmitBuffer()
         this.constIdxMap = HashMap<String, Int>()
         this.varIdxMap = HashMap<String, Int>()
-        this.funcTable = ""
+        this.funcTableBuf = EmitBuffer()
         this.labelIdxMap = HashMap<String, Int>()
     }
 
@@ -91,10 +98,10 @@ class Codegen {
         this.bytecodeLines.clear()
         this.instrCount = 0
         this.lineCount = 0
-        this.constPool = ""
+        this.constPoolBuf.sbReset()
         this.constIdxMap.clear()
         this.varIdxMap.clear()
-        this.funcTable = ""
+        this.funcTableBuf.sbReset()
         this.labelIdxMap.clear()
 
         // 第 1 趟：记录标签 → 行号
@@ -173,7 +180,7 @@ class Codegen {
         var pos: Int = 0
         var plen: Int = params.length
         while (pos <= plen) {
-            if (pos == plen || toStr(params[pos]) == ",") {
+            if (pos == plen || params.charCodeAt(pos) == 44) {
                 val pname: String = this.substr(params, start, pos - start)
                 if (pname != "") {
                     this.allocVar(pname)
@@ -185,7 +192,7 @@ class Codegen {
         }
 
         // `name|起始行|参数个数`
-        this.funcTable = this.funcTable + name + "|" + toStr(this.lineCount) + "|" + toStr(paramCount) + "\n"
+        this.funcTableBuf.sbAdd(name + "|" + toStr(this.lineCount) + "|" + toStr(paramCount) + "\n")
 
         // 注释行（VM 视为 no-op，但计入行号以对齐 ip）
         this.bytecodeLines.add("# func " + name + ":" + retTy)
@@ -303,8 +310,8 @@ class Codegen {
         if (found >= 0) {
             return found
         }
-        val idx: Int = this.countLines(this.constPool)
-        this.constPool = this.constPool + value + "\n"
+        val idx: Int = this.constIdxMap.getSize()
+        this.constPoolBuf.sbAdd(value + "\n")
         this.constIdxMap.put(value, idx)
         return idx
     }
@@ -336,8 +343,9 @@ class Codegen {
     private fun countLines(text: String): Int {
         var count: Int = 0
         var i: Int = 0
-        while (i < text.length) {
-            if (toStr(text[i]) == "\n") {
+        val len: Int = text.length
+        while (i < len) {
+            if (text.charCodeAt(i) == 10) {
                 count = count + 1
             }
             i = i + 1
@@ -349,8 +357,9 @@ class Codegen {
     private fun countComma(text: String): Int {
         var count: Int = 0
         var i: Int = 0
-        while (i < text.length) {
-            if (toStr(text[i]) == ",") {
+        val len: Int = text.length
+        while (i < len) {
+            if (text.charCodeAt(i) == 44) {
                 count = count + 1
             }
             i = i + 1
@@ -360,10 +369,12 @@ class Codegen {
 
     /// 取首个分隔符之前的部分。
     private fun fieldBefore(text: String, sep: String): String {
+        val sepCode: Int = sep.charCodeAt(0)
         var i: Int = 0
-        while (i < text.length) {
-            if (toStr(text[i]) == sep) {
-                return this.substr(text, 0, i)
+        val len: Int = text.length
+        while (i < len) {
+            if (text.charCodeAt(i) == sepCode) {
+                return text.substring(0, i)
             }
             i = i + 1
         }
@@ -372,10 +383,12 @@ class Codegen {
 
     /// 取首个分隔符之后的部分。
     private fun fieldAfter(text: String, sep: String): String {
+        val sepCode: Int = sep.charCodeAt(0)
         var i: Int = 0
-        while (i < text.length) {
-            if (toStr(text[i]) == sep) {
-                return this.substr(text, i + 1, text.length - i - 1)
+        val len: Int = text.length
+        while (i < len) {
+            if (text.charCodeAt(i) == sepCode) {
+                return text.substring(i + 1, len)
             }
             i = i + 1
         }
@@ -384,51 +397,21 @@ class Codegen {
 
     /// 字符串切片。
     private fun substr(text: String, start: Int, length: Int): String {
-        var result: String = ""
-        var end: Int = start + length
+        val end: Int = start + length
         if (end > text.length) {
-            end = text.length
+            return text.substring(start, text.length)
         }
-        var i: Int = start
-        while (i < end) {
-            result = result + toStr(text[i])
-            i = i + 1
-        }
-        return result
-    }
-
-    /// 字符串转整数（本地版本，避免依赖 Mir.aura）。
-    private fun mirToIntOf2(text: String): Int {
-        var total: Int = 0
-        var i: Int = 0
-        var len: Int = text.length
-        while (i < len) {
-            val c: String = toStr(text[i])
-            var digit: Int = -1
-            var j: Int = 0
-            while (j < 10) {
-                if (toStr(j) == c) {
-                    digit = j
-                    break
-                }
-                j = j + 1
-            }
-            if (digit >= 0) {
-                total = total * 10 + digit
-            }
-            i = i + 1
-        }
-        return total
+        return text.substring(start, end)
     }
 
     /// 返回常量池字符串。
     fun constPoolStr(): String {
-        return this.constPool
+        return this.constPoolBuf.sbBuild()
     }
 
     /// 返回函数表字符串。
     fun funcTableStr(): String {
-        return this.funcTable
+        return this.funcTableBuf.sbBuild()
     }
 
     /// 返回变量表字符串（从 HashMap 重建，用于诊断输出）。
