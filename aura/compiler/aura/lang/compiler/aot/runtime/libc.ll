@@ -7,12 +7,18 @@ declare i64 @strlen(i8*)
 declare i32 @strcmp(i8*, i8*)
 declare void @exit(i32)
 
-; Thread operations (runtime bridge)
+; Thread operations (runtime bridge — symbol names match aura_syscalls.c)
 declare i64 @aura_thread_create(i64, i64)
 declare i64 @aura_thread_join(i64)
 declare void @aura_thread_sleep(i64)
-declare i64 @aura_thread_currentId()
-declare i64 @aura_thread_cores()
+declare i64 @aura_thread_id()
+declare i64 @aura_thread_available_parallelism()
+
+; Thread dispatch table (referenced by aura_syscalls.c thread_dispatch)
+@__aura_fn_table = global [0 x i8*] zeroinitializer
+@__aura_fn_count = global i64 0
+
+; Channel operations are defined in channel.ll (pure LLVM IR implementation)
 
 ; snprintf for inline float→string conversion
 ; NOTE: UCRT does not export `_snprintf` / `sprintf`; `snprintf` is available.

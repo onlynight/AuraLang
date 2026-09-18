@@ -119,7 +119,7 @@ object RuntimeUtils {
         } else {
             base = "aura/compiler/aura/lang/compiler/aot/runtime/"
         }
-        val files: List<String> = list("libc.ll", "crt.ll", "args.ll", "types.ll", "exception.ll", "memdiag.ll")
+        val files: List<String> = list("libc.ll", "crt.ll", "args.ll", "types.ll", "exception.ll", "channel.ll")
         val out: EmitBuffer = EmitBuffer()
         out.sbAdd("; ---- Aura Runtime Declarations (from .ll files) ----\n")
         var i: Int = 0

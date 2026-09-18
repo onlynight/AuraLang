@@ -85,7 +85,8 @@ class AotModuleLinker {
             }
             si = si + 1
         }
-        this.hir.rootId = this.hir.add("HirProgram", "", "", Span(0, 0, 1, 1, 1, 1), kids)
+        this.hir.rootId = this.hir.add("HirProgram", "", "", Span(0, 0, 1, 1, 1, 1),
+            this.loader.synthesizeMainInKids(kids, Span(0, 0, 1, 1, 1, 1)))
         return this.hir
     }
 

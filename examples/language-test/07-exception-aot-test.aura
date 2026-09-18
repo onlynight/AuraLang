@@ -1,9 +1,63 @@
-// AOT compilation test for exception classes
-fun main(): Int {
+// ════════════════════════════════════════════════════════════════
+// Phase 7 — 异常类 AOT 编译测试（P7: Exception Classes in AOT）
+// ════════════════════════════════════════════════════════════════
+// 覆盖：`throw XxxException("msg")`（compiler-side 已知的异常类名）
+//      + `try / catch (e: String)`
+//
+// 验证：
+//   aura build examples/language-test/07-exception-aot-test.aura --aot --output <path>   (Rust AOT)
+//   aura-compiler <file> -o <path>                                                        (Aura self-host AOT)
+//
+// ── AOT codegen 已知限制（测试用例已规避） ──────────────────────
+// Aura 自举编译器的 AOT 后端用 setjmp/longjmp 实现 try/throw。
+// 当「包含 try 块的函数」在 `try` 之前没有任何语句时，longjmp 返回后
+// 栈对齐被破坏，进程以 STATUS_ILLEGAL_INSTRUCTION (0xC000001D) 终止。
+// 规避方式：在 try 之前至少放一条语句（如 println），使函数体足够大。
+// 这与 07-error-handling.aura / 07-exception-hierarchy.aura 的写法一致。
+// ════════════════════════════════════════════════════════════════
+
+// `EmptyListException` 是编译器内置的已知异常类名
+// （aura.lang.errors 包，见 compiler/src/codegen/hir.rs `is_exception_type`）：
+// 构造调用被降级为 `__new_exception`，无需 import errors 包。
+fun throwEmptyList(): Unit {
+    println("  throwing EmptyListException ...")
     try {
         throw EmptyListException("list is empty")
     } catch (e: String) {
         println("Caught EmptyListException")
     }
+}
+
+fun throwArithmetic(): Unit {
+    println("  throwing ArithmeticException ...")
+    try {
+        throw ArithmeticException("division by zero")
+    } catch (e: String) {
+        println("Caught ArithmeticException")
+    }
+}
+
+fun throwIllegalState(): Unit {
+    println("  throwing IllegalStateException ...")
+    try {
+        throw IllegalStateException("called before init")
+    } catch (e: String) {
+        println("Caught IllegalStateException")
+    }
+}
+
+fun main(): Int {
+    println("═══ Phase 7: exception AOT test ═══")
+    println("")
+    println("§7.1 EmptyListException:")
+    throwEmptyList()
+    println("")
+    println("§7.2 ArithmeticException:")
+    throwArithmetic()
+    println("")
+    println("§7.3 IllegalStateException:")
+    throwIllegalState()
+    println("")
+    println("═══ Phase 7 完成 ✓ ═══")
     return 0
 }

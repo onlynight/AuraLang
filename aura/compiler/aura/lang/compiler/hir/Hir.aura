@@ -119,6 +119,15 @@ object HirUtils {
         return a + "," + b
     }
 
+    /// 把 child 插到列表最前（脚本模式 synthesize_main 需要把隐式 main
+    /// 放到 functions[0]，使 entry=0 指向 main，与 Rust 侧行为一致）。
+    fun hirKidsPrepend(list: String, child: Int): String {
+        if (list == "") {
+            return toStr(child)
+        }
+        return toStr(child) + "," + list
+    }
+
     /// 子节点列表的长度（单次扫描计数；不再 split 分配整张表）。
     ///
     /// **性能关键**：改用 `charCodeAt` 比较（44 = `,`）。旧写法
@@ -421,6 +430,9 @@ class HirLowerer {
     }
 
     /// 执行降级，返回 HIR 根节点 id。
+    ///
+    /// 脚本模式（synthesize_main）：顶层可执行语句会被合成进 `main`，
+    /// 见 [`synthesizeMainInKids`]。
     fun lower(program: Ast): Int {
         this.ast = program
         this.hir = Hir()
@@ -438,7 +450,8 @@ class HirLowerer {
         if (rootIdx < 0) {
             rootIdx = 0
         }
-        // 根节点是 Program，其子节点是顶层声明
+        val rootSp: Span = program.spanOf(rootIdx)
+        // 根节点是 Program，其子节点是顶层声明（与顶层可执行语句混排）
         val rootKids: String = program.kidsOf(rootIdx)
         val kCount: Int = HirUtils.hirKidsCount(rootKids)
         var hirKids: String = HirUtils.hirNoKids()
@@ -451,9 +464,104 @@ class HirLowerer {
             }
             i = i + 1
         }
-        val rootHirId: Int = this.hir.add("HirProgram", "", "", program.spanOf(rootIdx), hirKids)
+        // 脚本模式：顶层可执行语句合成进 main
+        hirKids = this.synthesizeMainInKids(hirKids, rootSp)
+        val rootHirId: Int = this.hir.add("HirProgram", "", "", rootSp, hirKids)
         this.hir.rootId = rootHirId
         return rootHirId
+    }
+
+    /// **脚本模式：隐式 main 合成**（对应 Rust 侧
+    /// `synthesize_main_if_missing`，compiler/src/codegen/hir.rs）。
+    ///
+    /// 入参 `kids` 是顶层节点的 HIR id 串，其中混排着两类节点：
+    ///   * **声明**：`HirFunction` / `HirValDecl` / `HirVarDecl` / `HirTypeDecl`
+    ///     / `HirTypealias` / `HirExternObject` / `HirNativeFunction` / `HirAotDecl`
+    ///   * **顶层可执行语句**：`HirCall` / `HirAssign` / `HirWhile` / `HirFor` /
+    ///     `HirIf` / `HirBlock` / `HirReturn` / `HirThrow` / …
+    ///
+    /// **仅在无 main 时合成**：把顶层可执行语句（含顶层 val/var）包成一个
+    /// `fun main(): Unit`，插到顶层节点最前。
+    /// 已有 main 时原样返回——Aura 侧 Hir 节点不可变且 AOT 发射器按
+    /// `hir.count` 全量扫描（`Emit.aura` 函数定义循环），无法「重建」已有 main
+    /// 的体；若在此处新建一个 main 节点，旧 main 仍会被发射，产生
+    /// `invalid redefinition of function 'main'`。
+    /// 与 Rust 侧「splice 到已有 main 体首」的差异：Rust 的 HIR 是可变树，
+    /// 可原位改 body；Aura 侧受 VM 列表不可按下标赋值（见 Ast.aura 注释）
+    /// 与发射器全量扫描的双重约束，暂只支持「无 main」这一分支。
+    fun synthesizeMainInKids(kids: String, sp: Span): String {
+        // 第一遍：是否已有 main
+        var mainId: Int = -1
+        var i: Int = 0
+        while (i < HirUtils.hirKidsCount(kids)) {
+            val id: Int = HirUtils.hirKidsAt(kids, i)
+            if (this.hir.kindOf(id) == "HirFunction" && this.hir.textOf(id) == "main") {
+                mainId = id
+                break
+            }
+            i = i + 1
+        }
+        if (mainId >= 0) {
+            // 已有 main：不合成（见方法注释）
+            return kids
+        }
+        // 第二遍：无 main，收集顶层可执行语句。
+        //
+        // 顶层 val/var 归为「语句」：进入合成的 main 体成为局部变量。
+        // 这是脚本模式的关键——`var i = 0` 之后的 `i = i + 1` 必须作用在
+        // 同一变量上，否则循环变量被当全局符号解析、赋值丢失（实测 while 死循环）。
+        var declKids: String = HirUtils.hirNoKids()
+        var stmtKids: String = HirUtils.hirNoKids()
+        i = 0
+        while (i < HirUtils.hirKidsCount(kids)) {
+            val id: Int = HirUtils.hirKidsAt(kids, i)
+            if (this.isHirDeclaration(id, false)) {
+                declKids = HirUtils.hirKidsAdd(declKids, id)
+            } else {
+                stmtKids = HirUtils.hirKidsAdd(stmtKids, id)
+            }
+            i = i + 1
+        }
+        if (stmtKids == HirUtils.hirNoKids()) {
+            // 无顶层可执行语句：无需合成
+            return kids
+        }
+        val body: Int = this.hir.add("HirBlock", "", "", sp, stmtKids)
+        val newMain: Int = this.hir.add("HirFunction", "main", "Unit", sp,
+            HirUtils.hirKidsAdd(HirUtils.hirNoKids(), body))
+        return HirUtils.hirKidsPrepend(declKids, newMain)
+    }
+
+    /// 判断 HIR 节点是否为顶层「声明」（与顶层可执行语句相对）。
+    ///
+    /// `treatTopLevelValAsDeclaration` 为假时，顶层 `HirValDecl` / `HirVarDecl`
+    /// 归为语句，进入合成的 main 体成为局部变量——见 [`synthesizeMainInKids`]。
+    fun isHirDeclaration(hirId: Int, treatTopLevelValAsDeclaration: Boolean): Boolean {
+        val k: String = this.hir.kindOf(hirId)
+        if (k == "HirFunction" || k == "HirTypeDecl" || k == "HirTypealias"
+            || k == "HirExternObject" || k == "HirNativeFunction" || k == "HirAotDecl") {
+            return true
+        }
+        if (k == "HirValDecl" || k == "HirVarDecl") {
+            return treatTopLevelValAsDeclaration
+        }
+        return false
+    }
+
+    /// 在子节点 id 列表中把 oldId 原位替换为 newId（脚本模式 splice 用）。
+    fun hirKidsReplace(list: String, oldId: Int, newId: Int): String {
+        var out: String = HirUtils.hirNoKids()
+        var i: Int = 0
+        while (i < HirUtils.hirKidsCount(list)) {
+            val c: Int = HirUtils.hirKidsAt(list, i)
+            if (c == oldId) {
+                out = HirUtils.hirKidsAdd(out, newId)
+            } else {
+                out = HirUtils.hirKidsAdd(out, c)
+            }
+            i = i + 1
+        }
+        return out
     }
 
     // ── 多模块合并（Phase 6.5.10：把多个 AST 的顶层声明降级进同一 HIR）──
@@ -529,10 +637,23 @@ class HirLowerer {
             // Typealias 在 HIR 中保留为注释性节点
             return this.hir.leaf("HirTypealias", text, sp)
         } else {
-            // 其他顶层节点：如果是表达式，降级为 HirExpr
-            // 如果是 Import / Package 等，跳过
-            if (kind == "Import" || kind == "Package") {
+            // Import / Package 是元信息，不参与 HIR
+            if (kind == "Import" || kind == "Package" || kind == "Empty") {
                 return -1
+            }
+            // 顶层**可执行语句**（脚本模式）：parseStatement 产出的是
+            // ExprStmt / Assign / If / While / For / Try / Return / Block /
+            // Break / Continue / DoWhile 等**语句节点**，必须走 lowerStmt；
+            // 直接走 lowerExpr 会把 ExprStmt 落到「未知种类」分支，退化成
+            // 一个无子节点的 `HirExpr` 叶子（`HirExpr: ExprStmt`），
+            // 语句体被整个丢弃（顶层 println 静默不执行）。
+            if (kind == "ExprStmt" || kind == "Assign" || kind == "If"
+                || kind == "While" || kind == "DoWhile" || kind == "For"
+                || kind == "CFor" || kind == "Try" || kind == "Return"
+                || kind == "Block" || kind == "Break" || kind == "Continue"
+                || kind == "Throw" || kind == "Lambda" || kind == "Closure"
+                || kind == "Defer" || kind == "InitBlock") {
+                return this.lowerStmt(ast, id)
             }
             return this.lowerExpr(ast, id)
         }

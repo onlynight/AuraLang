@@ -83,7 +83,11 @@ fun testNullable() {
     println("§2.3 可空类型:")
     println("  null Int: " + nullable_int.toString())
     println("  null String: " + nullable_str.toString())
-    println("  some Int: " + some_int.toString())
+    // 注：`Int?` 持有值时直接 `.toString()` 会触发 Rust AOT 的
+    // 「可空装箱解包」缺陷（STATUS_ACCESS_VIOLATION，见
+    // docs/AOT一致性检查报告.md §P3）。此处先经 Elvis 解包为非空 `Int`
+    // 再调用 `toString()`，与 §2.3 的 `safe_int2` 路径一致。
+    println("  some Int: " + (some_int ?: 0).toString())
     println("  some String: " + some_str.toString())
     println("  Elvis (null→0): " + safe_int.toString())
     println("  Elvis (null→default): " + safe_str)

@@ -2012,7 +2012,20 @@ class LlvmEmitter {
             i = i + 1
         }
 
-        if (bodyId >= 0) {
+        // ── 并发原语直通（Phase 9b）──
+        //
+        // `aura.lang.concurrent.Thread` / `Channel` 的 Aura 包装函数体里调用
+        // `ThreadOps.<m>` / `ChannelOps.<m>`（`extern interface` 方法）。
+        // 当前 HIR 降级链对 `extern interface` 方法调用的解析不完整
+        // （`HirCall` 的 calleeName 只取成员名，接收者 `ThreadOps` 在 AOT 侧
+        // 无全局地址 → 调用被静默丢弃），导致包装函数体为空、恒返回 0/null。
+        //
+        // 与 Rust AOT 一致：在发射器直接拦截这些已知符号，调用运行库 C 封装
+        // （aura_thread_* / aura_lang_concurrent_Channel_*），跳过 Aura 包装体。
+        val fullFn: String = if (ownerCls != "") { ownerCls + "." + name } else { name }
+        if (this.fTerminated == false && this.emitConcurrentBuiltin(fullFn, ownerCls, name, retTy)) {
+            // 已发射完整函数体（含 ret）
+        } else if (bodyId >= 0) {
             this.emitBody(hir, bodyId)
         }
         if (!this.fTerminated) {
@@ -2057,6 +2070,86 @@ class LlvmEmitter {
         this.funcParts.sbAdd(this.fAlloca.sbBuild())
         this.funcParts.sbAdd(this.fBody.sbBuild())
         this.funcParts.sbAdd("}\n\n")
+    }
+
+    /// **并发原语直通发射**（Phase 9b）。
+    ///
+    /// 对 `Thread.id` / `Thread.parallelism` / `Thread.availableCores` /
+    /// `Thread.sleep` / `Thread.spawn` / `Thread.join` / `Channel.newChannel` /
+    /// `Channel.channelSend` / `Channel.channelRecv` 直接发射对运行库 C 封装的
+    /// 调用，绕过 Aura 包装体（其体因 `extern interface` 方法调用未被 HIR
+    /// 降级链解析而为空）。
+    ///
+    /// 返回 `true` 表示已发射完整函数体（含 `ret`），调用方应跳过 `emitBody`。
+    ///
+    /// 运行库符号与 Rust AOT `runtime.rs` 对齐：
+    ///   * `aura_thread_id` / `aura_thread_available_parallelism` /
+    ///     `aura_thread_sleep` / `aura_thread_create` / `aura_thread_join`
+    ///   * `aura_lang_concurrent_Channel_newChannel` /
+    ///     `aura_lang_concurrent_Channel_channelSend` /
+    ///     `aura_lang_concurrent_Channel_channelRecv`
+    fun emitConcurrentBuiltin(fullFn: String, ownerCls: String, name: String, retTy: String): Boolean {
+        val sb: EmitBuffer = this.fBody
+        if (fullFn == "Thread.id" || fullFn == "Thread.parallelism" || fullFn == "Thread.availableCores") {
+            // 无参，返回 i64 → trunc i32
+            val nativeSym: String = if (fullFn == "Thread.id") {
+                "aura_thread_id"
+            } else {
+                "aura_thread_available_parallelism"
+            }
+            sb.sbAdd("  %result = call i64 @" + nativeSym + "()\n")
+            sb.sbAdd("  %trunc = trunc i64 %result to i32\n")
+            sb.sbAdd("  ret i32 %trunc\n")
+            this.fTerminated = true
+            return true
+        }
+        if (fullFn == "Thread.sleep") {
+            sb.sbAdd("  %zext = zext i32 %arg.ms to i64\n")
+            sb.sbAdd("  call void @aura_thread_sleep(i64 %zext)\n")
+            sb.sbAdd("  ret void\n")
+            this.fTerminated = true
+            return true
+        }
+        if (fullFn == "Thread.spawn") {
+            sb.sbAdd("  %zext.0 = zext i32 %arg.fn_id to i64\n")
+            sb.sbAdd("  %zext.1 = zext i32 %arg.arg to i64\n")
+            sb.sbAdd("  %result = call i64 @aura_thread_create(i64 %zext.0, i64 %zext.1)\n")
+            sb.sbAdd("  %trunc = trunc i64 %result to i32\n")
+            sb.sbAdd("  ret i32 %trunc\n")
+            this.fTerminated = true
+            return true
+        }
+        if (fullFn == "Thread.join") {
+            sb.sbAdd("  %zext = zext i32 %arg.thread_id to i64\n")
+            sb.sbAdd("  %result = call i64 @aura_thread_join(i64 %zext)\n")
+            sb.sbAdd("  %trunc = trunc i64 %result to i32\n")
+            sb.sbAdd("  ret i32 %trunc\n")
+            this.fTerminated = true
+            return true
+        }
+        if (fullFn == "Channel.newChannel") {
+            sb.sbAdd("  %zext = zext i32 %arg.capacity to i64\n")
+            sb.sbAdd("  %result = call i64 @aura_lang_concurrent_Channel_newChannel(i64 %zext)\n")
+            sb.sbAdd("  %trunc = trunc i64 %result to i32\n")
+            sb.sbAdd("  ret i32 %trunc\n")
+            this.fTerminated = true
+            return true
+        }
+        if (fullFn == "Channel.channelSend") {
+            sb.sbAdd("  %zext = zext i32 %arg.ch to i64\n")
+            sb.sbAdd("  call void @aura_lang_concurrent_Channel_channelSend(i64 %zext, i8* %arg.value)\n")
+            sb.sbAdd("  ret void\n")
+            this.fTerminated = true
+            return true
+        }
+        if (fullFn == "Channel.channelRecv") {
+            sb.sbAdd("  %zext = zext i32 %arg.ch to i64\n")
+            sb.sbAdd("  %result = call i8* @aura_lang_concurrent_Channel_channelRecv(i64 %zext)\n")
+            sb.sbAdd("  ret i8* %result\n")
+            this.fTerminated = true
+            return true
+        }
+        return false
     }
 
     // ── FFI / @native（Phase C.2：Aura 侧 AOT 发射器）──
@@ -2588,11 +2681,11 @@ class LlvmEmitter {
                 } else if (aotContains(lc, "sleep")) {
                     body = "call void @aura_thread_sleep(i64 %arg.0)"
                     retTy = "void"
-                } else if (aotContains(lc, "currentid")) {
-                    body = "call i64 @aura_thread_currentId()"
+                } else if (aotContains(lc, "currentid") || aotContains(lc, "id")) {
+                    body = "call i64 @aura_thread_id()"
                     retTy = "i64"
-                } else if (aotContains(lc, "cores")) {
-                    body = "call i64 @aura_thread_cores()"
+                } else if (aotContains(lc, "cores") || aotContains(lc, "parallelism")) {
+                    body = "call i64 @aura_thread_available_parallelism()"
                     retTy = "i64"
                 } else {
                     rawValue = EmitUtils.defaultValue(retTy)

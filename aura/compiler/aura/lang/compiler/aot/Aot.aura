@@ -160,11 +160,26 @@ object AotUtils {
         //    Phase C.2：aura_std_cffi.c 编译步骤已移除。
         //    所有 std 函数（String/Collections/Math/FileSystem 等）均由 Aura 实现提供，
         //    编译到 user.obj 中；链接器自动解析系统 libc 函数（malloc/free/printf 等）。
+        //    并发原语（Channel）由 runtime/channel.ll 以纯 LLVM IR 提供；
+        //    Thread 原语（aura_thread_*）由 runtime/libc.ll declare、
+        //    实际实现由 aura_syscalls.c 在 Rust AOT 路径下链接。
         //
         //    与 Rust 侧 `link_to_executable` 一致：链接宿主目标**不加** `-target`
         //    （`-target` 会让 clang 走另一套库/ABI，链接 C 运行库时失败）；
         //    交叉编译目标三元组已由 llc 的 `-mtriple` 决定。
         var clangCmd: String = clang + " " + objPath
+        // 编译 aura_syscalls.c（线程桥，不含与 IR 重复的符号）
+        val cffiDir: String = "compiler/src/std/cffi"
+        if (FileSystem.exists(cffiDir + "/aura_syscalls.c")) {
+            val sysObj: String = outDir + "/" + moduleName + "_syscalls.obj"
+            val sysCmd: String = clang + " -c " + cffiDir + "/aura_syscalls.c"
+                + " -o " + AotUtils.aotWinPath(sysObj)
+                + " -I " + cffiDir
+            val sysExit: Int = Process.run(sysCmd)
+            if (sysExit == 0 && FileSystem.exists(sysObj)) {
+                clangCmd = clangCmd + " " + AotUtils.aotWinPath(sysObj)
+            }
+        }
         clangCmd = clangCmd + " -o " + exePath + " " + optFlag
         // Windows 目标：COFF 对象经 lld-link 链接时需要显式 `subsystem`
         // （否则报 `lld-link: error: subsystem must be defined`）。
