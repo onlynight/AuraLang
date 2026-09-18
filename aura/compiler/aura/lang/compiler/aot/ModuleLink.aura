@@ -59,7 +59,7 @@ class AotModuleLinker {
     /// 输出 HIR。
     var hir: Hir = Hir()
 
-    /// 已加载的规范化路径（换行分隔；ArrayList 字段会触发 Emit.aura 函数重定义缺陷）。
+    /// 已加载的规范化路径（换行分隔；String contains 比 ArrayList.contains 更快）。
     var seen: String = ""
 
     /// 执行模块链接。

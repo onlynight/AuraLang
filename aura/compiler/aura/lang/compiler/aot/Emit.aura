@@ -281,6 +281,18 @@ class LlvmEmitter {
     /// 会被 llc 拒绝（invalid redefinition of function）。首个定义胜出。
     var fNativeSyms: String = ""
 
+    /// 已发射的函数符号（换行分隔）。
+    ///
+    /// HIR 里可能出现同名 `HirFunction` 节点（如泛型类字段触发额外节点生成），
+    /// 重复 `define` 会被 llc 拒绝（invalid redefinition of function）。首个定义胜出。
+    var fEmittedFnSyms: String = ""
+
+    /// 已发射的函数名（换行分隔）。
+    ///
+    /// HIR 里可能出现同名 `HirFunction` 节点（如泛型类字段触发额外节点生成），
+    /// 重复 `define` 会被 llc 拒绝（invalid redefinition of function）。首个定义胜出。
+    var fEmittedFnNames: String = ""
+
     /// 用户结构体字段表（每项 `Sym|field|llvmTy|initLLVM|initExprId`）。
     var structLines: List<String> = arrayListOf<String>()
 
@@ -345,6 +357,7 @@ class LlvmEmitter {
         this.fExternObjNames = ""
         this.fDefNames = ""
         this.fNativeSyms = ""
+        this.fEmittedFnSyms = ""
         this.structLines = arrayListOf<String>()
         this.fListVars = ""
         this.fRetTy = "void"
@@ -574,7 +587,13 @@ class LlvmEmitter {
             if (hir.kindOf(i) == "HirFunction") {
                 // `extern object` 成员按外部 C 符号处理（只 declare，不 define）
                 if (!aotContains(this.fExternFnIds, "\n" + toStr(i) + "\n")) {
-                    this.emitFunction(hir, i)
+                    val sigTmp: String = this.functionSignature(hir, i)
+                    val fnSym: String = aotFieldAt(sigTmp, 0, "|")
+                    // 去重：同名函数只发射一次（泛型类字段可能触发额外 HIR 节点）
+                    if (!aotListContains(this.fEmittedFnSyms, fnSym)) {
+                        this.emitFunction(hir, i)
+                        this.fEmittedFnSyms = this.fEmittedFnSyms + fnSym + "\n"
+                    }
                 }
             }
             i = i + 1
