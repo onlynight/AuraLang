@@ -1,33 +1,42 @@
 // aura:///loom/aura/lang/loom/BuildCache.aura
 package aura.lang.loom
 
-// ── 标准库 ──
-import aura.lang.std.Collections
-import aura.lang.std.Encoding
+import aura.lang.std.String
 
-// ── Native 包 ──
-import aura.lang.native.console.Console
+import "Task.aura"
+import "FileIO.aura"
 
-// ── 项目内模块 ──
-import aura.lang.loom.Task
-import aura.lang.loom.FileIO
-
-// ═══════════════════════════════════════════════════════════════
-// BuildCache（增量构建 + 指纹）
-// ═══════════════════════════════════════════════════════════════
-
+// BuildCache — incremental build cache with simple hash
 class BuildCache {
     val cacheDir: String
     var enabled: Boolean = true
 
-    fun BuildCache(cacheDir: String) {
+    constructor(cacheDir: String) {
         this.cacheDir = cacheDir
         if (!loomExists(cacheDir)) { loomMkdirP(cacheDir) }
     }
 
+    // Simple hash function (no Encoding.sha256, no String.fromCharCode)
+    private fun simpleHash(s: String): String {
+        var h: Int = 0
+        var i: Int = 0
+        while (i < s.length) {
+            h = h * 31 + s.charCodeAt(i)
+            i = i + 1
+        }
+        // Use integer string representation instead of hex
+        return h.toString()
+    }
+
     fun fingerprint(task: Task): String {
-        val input: String = task.name + task.kind + task.inputs.files.join("|")
-        return Encoding.sha256(input)
+        var input: String = task.name
+        input = input + ":" + task.kind.toString()
+        var i: Int = 0
+        while (i < task.inputs.files.size) {
+            input = input + ":" + task.inputs.files.get(i).toString()
+            i = i + 1
+        }
+        return simpleHash(input)
     }
 
     fun isCached(task: Task): Boolean {
@@ -51,7 +60,7 @@ class BuildCache {
         val files: List<String> = loomListFiles(cacheDir)
         var i: Int = 0
         while (i < files.size) {
-            loomDelete(cacheDir + "/" + files[i])
+            loomDelete(cacheDir + "/" + files.get(i))
             i = i + 1
         }
     }

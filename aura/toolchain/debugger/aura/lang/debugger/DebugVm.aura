@@ -1,0 +1,754 @@
+// aura:///debugger/aura/lang/debugger/DebugVm.aura
+package aura.lang.debugger
+
+// 闂佸啿鍘滈崑鎾绘煃閸忓浜?闂佸搫绉村ú銈夊闯椤栨稒鍎?闂佸啿鍘滈崑鎾绘煃閸忓浜?
+import aura.lang.std.String
+
+// 闂佸啿鍘滈崑鎾绘煃閸忓浜?闂傚倸妫楀Λ妤呭箖?闂佸啿鍘滈崑鎾绘煃閸忓浜?
+import aura.lang.collection.ArrayList
+import aura.lang.collection.HashMap
+
+// 闂佸啿鍘滈崑鎾绘煃閸忓浜?闂佸搫绉村ú銈夊闯椤栨稒鍎?闂佸啿鍘滈崑鎾绘煃閸忓浜?
+import aura.lang.std.IO
+
+// 闂佸磭鍎ら崝蹇涘疾閺屻儱鐓涢柟鑸妽濞呮粓鏌嶉悜妯哄闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺?// DebugVm 闂?闁荤姴顑呴崯鎶芥儊椤栫偛绠涢柣鏃囨閸欌偓闂佹儳绻戠喊宥団偓姘懇瀵?//
+// 婵?VmRunner 闂佺绻愯ぐ澶愭閳哄懏鍎庣紒瀣閸婇亶鏌熺粙鎸庣煑闁硅翰鍊濆鍧楀幢椤撶姷顦繛杈剧到濡妲?//   1. 闂佸湱顣介崑鎾绘煛閸繍妲哄┑顔芥倐楠炩偓濞达絿顭堣ぐ鍡欌偓娈垮枓閸嬫捇鏌涘▎妯虹仭妞ゃ儱鎳樺濠氬Ψ椤栨粎顦﹊p闂侀潧妫旀径鐒ck闂侀潧妫旈崟绶奵als闂侀潧妫旂€圭帾obals闂侀潧妫旈幁鐠lStack闂?//   2. 闂佽　鍋撴い鏍ㄧ☉閻︻噣鏌涘Δ浣圭妞ゆ帞鍋ら獮宥堫樁妞ゃ垺鍨块弫宥夊锤閻ㄥ當p in/over/out闂?//   3. 濠殿噯绲界换鎴濐焽椤栫偛绠伴柛銉檮婵垽鏌熺粭娑樻－閺€浠嬫煕濮橆剟顎楃憸鎷屽皺閹噣顢曢敐搴⑩挄闂佸搫琚崕鏌ュ蓟閸ヮ剚鍊?//   4. 闂佽　鍋撴い鏍ㄧ☉閻︻噣鎮跺☉鏍у闁规椿浜滈锝堢疀閺冨倹鍕鹃梺?// 闂佸磭鍎ら崝蹇涘疾閺屻儱鐓涢柟鑸妽濞呮粓鏌嶉悜妯哄闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺?
+/// DebugVm 閻庤鎮堕崕閬嶅矗鐠恒劉鍋撻悽娈挎敯闁芥牕瀚版俊?object DebugVmUtils {
+
+    /// 闁诲孩绋掗〃鍫ヮ敄娴ｅ湱鈻旈柤鑹板煐缁侇噣鏌℃担鍝ユ憼闁哄棛鍠栭弫宥夊锤閸ф攣rCodeAt 闂佺儵鏅涢悺銊ф暜鐎靛憡濯奸柨娑樺閺嗩剟鏌ㄥ☉妯肩劯婵炴潙鍊垮畷妯侯渻閸撗呪枏濠殿噯绲惧Λ浣烘濠靛鏅璺虹墐閸?    fun vrToInt(text: String): Int {
+        var total: Int = 0
+        var i: Int = 0
+        val len: Int = text.length
+        var neg: Boolean = false
+        if (len > 0 && text.charCodeAt(0) == 45) {  // '-'
+            neg = true
+            i = 1
+        }
+        while (i < len) {
+            val c: Int = text.charCodeAt(i)
+            if (c < 48 || c > 57) {
+                break
+            }
+            total = total * 10 + (c - 48)
+            i = i + 1
+        }
+        if (neg) {
+            return -total
+        }
+        return total
+    }
+
+    /// 闁诲海鎳撻ˇ顖炲矗韫囨洍鍋撳☉娆忓閻熸洖妫濋弫宥夊锤閸炴挤ecode VM 闂佺绻掗崢褔顢欓幇鐗堟櫖婵﹩鍋勯埢蹇涙煟?text[i] + toStr闂佹寧绋戦ˇ顓㈠焵?    fun safeSubstring(text: String, start: Int, end: Int): String {
+        var result: String = ""
+        if (start < 0) { start = 0 }
+        if (end > text.length) { end = text.length }
+        if (start >= end) { return "" }
+        var i: Int = start
+        while (i < end) {
+            result = result + toStr(text[i])
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 闁诲孩绋掗〃鍫ヮ敄娴ｅ湱鈻旈柛娆忣槹绗戦梺鍛婄啲缂傛碍绂嶉幒妤€绠伴柛銉戝懏姣庨梺鍛婃尭缁夊墎妲愰幋婵愬殨闁逞屽墯瀵板嫭娼忛崜褏顦╅梺鍝勬搐閵囨﹢宕?text.startsWith闂佹寧绋戦ˇ顓㈠焵?    fun myStartsWith(text: String, prefix: String): Boolean {
+        if (prefix.length > text.length) {
+            return false
+        }
+        var i: Int = 0
+        while (i < prefix.length) {
+            if (text.charCodeAt(i) != prefix.charCodeAt(i)) {
+                return false
+            }
+            i = i + 1
+        }
+        return true
+    }
+}
+
+/// 闁荤姴顑呴崯鎶芥儊椤栫偛绠涢柣鏃囨閸欌偓闂佹儳绻戠喊宥団偓姘懇瀵敻骞侀幒鍡椾壕?class DebugVm {
+
+    // 闂佸啿鍘滈崑鎾绘煃閸忓浜?闁诲孩绋掗〃澶嬩繆椤撱垺鍎樺ù锝夘棑閻熴垽鏌涜箛鎾虫殲闁哄棛鍠栭獮?闂佸啿鍘滈崑鎾绘煃閸忓浜?
+    var bytecode: String = ""
+    var constPool: String = ""
+    var funcTable: String = ""
+
+    // 闂佸啿鍘滈崑鎾绘煃閸忓浜?闂佸湱鐟抽崱鈺傛杸闂佺粯顭堥崺鏍焵?闂佸啿鍘滈崑鎾绘煃閸忓浜?
+    var ip: Int = 0
+    var instructionCount: Int = 0
+    var maxInstructions: Int = 1000000
+    var running: Boolean = true
+    var paused: Boolean = false
+    var error: String = ""
+    var returnValue: String = ""
+
+    // 闂佸啿鍘滈崑鎾绘煃閸忓浜?闂佸搫绉撮悧鍛箔瀹€鍕煑婵せ鍋撻柛?闂佸啿鍘滈崑鎾绘煃閸忓浜?
+    var vmStack: ArrayList<String> = ArrayList<String>()
+    var locals: HashMap<Int, String> = HashMap<Int, String>()
+    var globals: HashMap<String, String> = HashMap<String, String>()
+    var callStack: ArrayList<String> = ArrayList<String>()
+    var savedLocals: ArrayList<HashMap<Int, String>> = ArrayList<HashMap<Int, String>>()
+
+    // 闂佸啿鍘滈崑鎾绘煃閸忓浜?闁荤姴顑呴崯浼村极閵堝棛鈻斿┑鐘辫兌閻熸捇鏌?闂佸啿鍘滈崑鎾绘煃閸忓浜?
+    var currentFunc: String = ""
+    var currentFrame: Int = -1
+    var suspended: Boolean = false
+
+    // 闂佸啿鍘滈崑鎾绘煃閸忓浜?闂佸憡顨嗗ú姗€顢楅悙鍝勭鐟滃秹宕?闂佸啿鍘滈崑鎾绘煃閸忓浜?
+    var stepMode: String = "off"   // "off", "in", "over", "out"
+    var stepOverDepth: Int = 0
+    var stepOutFunc: String = ""
+
+    // 闂佸磭鍎ら崝蹇涘疾閺屻儱鐓涢柟鑸妽濞呮粓鏌嶉悜妯哄闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺?    // 闂佸憡甯楃换鍌烇綖閹版澘绀?    // 闂佸磭鍎ら崝蹇涘疾閺屻儱鐓涢柟鑸妽濞呮粓鏌嶉悜妯哄闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺?
+    /// 闂佸憡姊绘慨鎯归崶鈹惧亾濞戞瑯娈欏┑鈽嗗弮閹秵鎷呯喊妯轰壕?    fun loadBytecode(code: String, consts: String, funcs: String): Unit {
+        bytecode = code
+        constPool = consts
+        funcTable = funcs
+        reset()
+    }
+
+    /// 闂備焦褰冪粔鍫曟偪閸℃稑绠ョ憸鎴︺€侀幋锔藉亹闁煎摜顣介崑鎾存媴绾版ê浜?    fun reset(): Unit {
+        ip = 0
+        instructionCount = 0
+        running = true
+        paused = false
+        error = ""
+        returnValue = ""
+        vmStack = ArrayList<String>()
+        locals = HashMap<Int, String>()
+        globals = HashMap<String, String>()
+        callStack = ArrayList<String>()
+        savedLocals = ArrayList<HashMap<Int, String>>()
+        currentFunc = ""
+        currentFrame = -1
+        suspended = false
+        stepMode = "off"
+        stepOverDepth = 0
+        stepOutFunc = ""
+    }
+
+    /// 闂佸憡鍑归崹鐗堟叏閳哄懎绠ョ憸鎴︺€侀幋锔芥櫖闁割偓绲块崕鏌ュ级閻戝棗澧柛?main闂佹寧绋戦ˇ顓㈠焵?    fun startExecution(): Unit {
+        ip = funcOffset("main")
+        currentFunc = "main"
+        currentFrame = 0
+        running = true
+        paused = false
+    }
+
+    // 闂佸磭鍎ら崝蹇涘疾閺屻儱鐓涢柟鑸妽濞呮粓鏌嶉悜妯哄闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺?    // 闂佸湱鐟抽崱鈺傛杸闂佺鐭囬崘銊у幀
+    // 闂佸磭鍎ら崝蹇涘疾閺屻儱鐓涢柟鑸妽濞呮粓鏌嶉悜妯哄闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺?
+    /// Execute one instruction. Return stop reason: "", "step", "completion", "error"
+        // 閻庣懓鎲¤ぐ鍐╃閻樺樊娼?        if (!running) {
+            return "completion"
+        }
+
+        // 闂佸湱顭堝ú锝夊箮閵堝鏋佸ù鐓庣摠椤庢瑩鏌?        instructionCount = instructionCount + 1
+        if (instructionCount > maxInstructions) {
+            error = "Instruction limit exceeded"
+            running = false
+            return "error"
+        }
+
+        // 闁荤姴娲╅褑銇愰崶顏備汗闁规儳鍟块·鍛存煙缁嬫寧鐭楅柟?        val line: String = getBytecodeLine(ip)
+        ip = ip + 1
+        val opcode: String = parseOpcode(line)
+
+        // 闁荤姴鎼悿鍥╂崲閸愩劉鏋栭柕濞炬櫅濞呯偤鎮跺☉妯垮闁归攱澹嗙划姘偊濞嗙偓鏂€
+        if (opcode == "#" || opcode == "" || opcode == "LABEL") {
+            return ""
+        }
+
+        // 闂佸憡甯掑Λ娆徢庨幎钘夌闁搞儻闄勬慨?        val arg1: String = parseArg1(line)
+        val arg2: String = parseArg2(line)
+        val arg3: String = parseArg3(line)
+        dispatch(opcode, arg1, arg2, arg3)
+
+        // 濠碘槅鍋€閸嬫捇鏌＄仦璇插姕婵″弶鎮傚畷銉╂晝閳ь剟宕甸銏＄叆?        if (!running) {
+            if (error != "") {
+                return "error"
+            }
+            return "completion"
+        }
+
+        // 濠碘槅鍋€閸嬫捇鏌＄仦璇插姎鐎规洜鍠庨～銏ゅΨ鏈担鍓插殨?        if (stepMode == "in") {
+            stepMode = "off"
+            return "step"
+        } else if (stepMode == "over") {
+            // 閻熸粎澧楅幑浣烘崲閹达箑鐐婇柣鎰絻閻撳倿鎮规担瑙勭凡缂傚秴绉归幆鍐礋椤旂偓顔嶉梺娲绘娇閸斿秶鎹㈡担瑙勫劅闁挎棁濮らˇ褔鏌涚€ｎ偆鐭嬫い?            if (callStack.size <= stepOverDepth) {
+                stepMode = "off"
+                return "step"
+            }
+            return ""
+        } else if (stepMode == "out") {
+            // 閻熸粎澧楅幐楣冣€栭崶褜鍤曢柍褜鍓濋妵鎰板箻閸愬樊鏋€闂佸憡鍨兼慨銈夊汲閻旂厧绫嶉悹楦挎〃缁粯鎱?            if (currentFunc != stepOutFunc) {
+                stepMode = "off"
+                return "step"
+            }
+            return ""
+        }
+
+        return ""
+    }
+
+    /// 闂佸湱顭堝ú锝夊箮閵堝绀嗛柛鈩兩戦悜锕傛煏?    fun dispatch(opcode: String, arg1: String, arg2: String, arg3: String): Unit {
+        if (opcode == "CONST_INT") {
+            push(getConst(arg1))
+        } else if (opcode == "CONST_FLOAT") {
+            push(getConst(arg1))
+        } else if (opcode == "CONST_STRING") {
+            push(getConst(arg1))
+        } else if (opcode == "CONST_BOOL") {
+            push(arg1)
+        } else if (opcode == "CONST_NULL") {
+            push("null")
+        } else if (opcode == "LOAD_LOCAL") {
+            push(getLocal(DebugVmUtils.vrToInt(arg1)))
+        } else if (opcode == "STORE_LOCAL") {
+            setLocal(DebugVmUtils.vrToInt(arg1), pop())
+        } else if (opcode == "DECL_LOCAL") {
+            setLocal(DebugVmUtils.vrToInt(arg1), "0")
+        } else if (opcode == "POP") {
+            pop()
+        } else if (opcode == "DUP") {
+            push(peek())
+        } else if (opcode == "ADD") {
+            val b: String = pop()
+            val a: String = pop()
+            push(arithAdd(a, b))
+        } else if (opcode == "SUB") {
+            val b: String = pop()
+            val a: String = pop()
+            push(arithSub(a, b))
+        } else if (opcode == "MUL") {
+            val b: String = pop()
+            val a: String = pop()
+            push(arithMul(a, b))
+        } else if (opcode == "DIV") {
+            val b: String = pop()
+            val a: String = pop()
+            push(arithDiv(a, b))
+        } else if (opcode == "MOD") {
+            val b: String = pop()
+            val a: String = pop()
+            push(arithMod(a, b))
+        } else if (opcode == "EQ") {
+            val b: String = pop()
+            val a: String = pop()
+            push(eq(a, b))
+        } else if (opcode == "NEQ") {
+            val b: String = pop()
+            val a: String = pop()
+            push(neq(a, b))
+        } else if (opcode == "LT") {
+            val b: String = pop()
+            val a: String = pop()
+            push(cmpBool(DebugVmUtils.vrToInt(a) < DebugVmUtils.vrToInt(b)))
+        } else if (opcode == "GT") {
+            val b: String = pop()
+            val a: String = pop()
+            push(cmpBool(DebugVmUtils.vrToInt(a) > DebugVmUtils.vrToInt(b)))
+        } else if (opcode == "LE") {
+            val b: String = pop()
+            val a: String = pop()
+            push(cmpBool(DebugVmUtils.vrToInt(a) <= DebugVmUtils.vrToInt(b)))
+        } else if (opcode == "GE") {
+            val b: String = pop()
+            val a: String = pop()
+            push(cmpBool(DebugVmUtils.vrToInt(a) >= DebugVmUtils.vrToInt(b)))
+        } else if (opcode == "NEG") {
+            val a: String = pop()
+            push(toStr(0 - DebugVmUtils.vrToInt(a)))
+        } else if (opcode == "NOT") {
+            val a: String = pop()
+            push(cmpBool(!(a == "true")))
+        } else if (opcode == "JUMP") {
+            ip = DebugVmUtils.vrToInt(arg1)
+        } else if (opcode == "JUMP_IF_FALSE") {
+            val cond: String = pop()
+            if (cond == "false" || cond == "0" || cond == "") {
+                ip = DebugVmUtils.vrToInt(arg1)
+            }
+        } else if (opcode == "JUMP_IF_TRUE") {
+            val cond: String = pop()
+            if (cond == "true" || cond == "1") {
+                ip = DebugVmUtils.vrToInt(arg1)
+            }
+        } else if (opcode == "CALL") {
+            callOrBuiltin(arg1, DebugVmUtils.vrToInt(arg2))
+        } else if (opcode == "RETURN") {
+            returnFromFunc()
+        } else if (opcode == "YIELD") {
+            suspended = true
+            running = false
+        }
+        // 闂佸搫鐗滄禍鐐烘偂閿熺姴绠伴柛銉檮婵垽鏌ㄥ☉娆掑闁归鍏橀幃楣冨Ψ椤栨粎顦╂繛?VmRunner 闁荤偞绋戞總鏃傛嫻閻斿摜鈻旈柍褜鍓熼幊娑欐綇閸撗咁槴
+    }
+
+    // 闂佸磭鍎ら崝蹇涘疾閺屻儱鐓涢柟鑸妽濞呮粓鏌嶉悜妯哄闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺?    // 闂佸憡鍨兼慨銈夊汲閻旂儤瀚柛鎰典簼閺?    // 闂佸磭鍎ら崝蹇涘疾閺屻儱鐓涢柟鑸妽濞呮粓鏌嶉悜妯哄闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺?
+    /// 闁荤姴顑呴崯浼村极閵堝绀冮柛娑卞灣閺嬪倿鏌涢幋锝呅撻柡鍡欏枛楠炲寮介锝嗘闂佽娼欓崲鏌ュ吹闁秴鏋侀柤鍓插厴閸?    fun callOrBuiltin(name: String, argc: Int): Unit {
+        if (name == "println" || name == "print") {
+            val text: String = collectArgs(argc)
+            if (name == "println") {
+                println(text)
+            } else {
+                print(text)
+            }
+            push("Unit")
+            return
+        } else if (name == "toStr" || name == "toString") {
+            val v: String = pop()
+            push(v)
+            return
+        } else {
+            // 闂佹椿娼块崝宥夊春濞戙垹绀勯柤鎭掑劜濞堝爼鎮圭€ｎ亜鏆熼柡?            val target: Int = funcOffset(name)
+            val pc: Int = funcParamCount(name)
+            if (target <= 0 && pc < 0) {
+                error = "unknown function: " + name
+                running = false
+                return
+            }
+            // 婵烇絽娲︾换鍌炴偤閵婏附浜ら柡鍌涘缁€鈧梺闈╅檮濠㈡ê顭囬崘顔兼そ閻忕偟鏅粔濂告煕閹惧磭孝闁?            callStack.add(toStr(ip) + "|" + toStr(currentFrame))
+            savedLocals.add(locals)
+            locals = HashMap<Int, String>()
+
+            // 缂傚倷鐒﹂崹鐢告偩閸撗€鍋撻崷顓炰粶鐎殿噮鍓熷畷姘跺级閸喗顥濋梺杞拌兌婢ф娼曟繛杈剧到缁嬪嫮妲愬▎鎾寸劵闁糕剝顨堢喊宥団偓娈垮枤閹虫捇宕甸銏℃櫖?            var k: Int = pc - 1
+            while (k >= 0) {
+                setLocal(k, pop())
+                k = k - 1
+            }
+
+            currentFunc = name
+            ip = target
+        }
+    }
+
+    /// 婵炲濮存鎼佸吹闁秴鏋侀柟宄扮灱缁犳煡鏌涢妷褍浜奸柍?    fun returnFromFunc(): Unit {
+        var retVal: String = "Unit"
+        if (vmStack.size > 0) {
+            retVal = pop()
+        }
+        returnValue = retVal
+
+        if (callStack.size == 0) {
+            // 婵犮垼娉涚€氼亞鑺?main 闁汇埄鍨庡鍥╊槷闂佸湱鐟抽崱鈺傛杸缂傚倷鐒﹂幐璇差焽?            running = false
+            return
+        }
+
+        val last: String = callStack.get(callStack.size - 1)
+        ip = DebugVmUtils.vrToInt(fieldAtSep(last, 0, "|"))
+        callStack.remove(callStack.size - 1)
+        locals = popSavedLocals()
+        currentFrame = DebugVmUtils.vrToInt(fieldAtSep(last, 1, "|"))
+
+        // 闂佺娉涢敃銊ф崲閹达箑鐐婇柣鎰ゴ閸嬫捇鎮℃惔锛勵伝闂佹悶鍎抽崑鐘绘儍閻斿吋鍋ㄩ柕濞垮妷閸嬫捇宕ㄩ鎯х伈
+        push(retVal)
+    }
+
+    /// 閻庢鍠氶幊鎾诲吹?argc 婵炴垶鎼╂禍婊堟偪閸曨垰鐭楅柛灞句亢鐎氭瑩鏌熺粙娆炬Ч缂侇煈鍠楅妵鍕传閸曨厾顣查梺鐟板槻閸氬鏁幘顔嘉?    fun collectArgs(argc: Int): String {
+        if (argc <= 0) {
+            return ""
+        }
+        var result: String = ""
+        var i: Int = argc - 1
+        while (i >= 0) {
+            val v: String = pop()
+            if (result == "") {
+                result = v
+            } else {
+                result = v + " " + result
+            }
+            i = i - 1
+        }
+        return result
+    }
+
+    /// 閻庢鍠氶幊鎾诲吹椤撱垹瀚夐柍褜鍓熷畷銉︽償濠靛牜浼囨繛鎴炴惄娴滄瑧鎹㈠鎵佸亾濞戞瑯鐒芥繛鍫熷灩娴狅箓鍩€椤掑嫭鐒鹃柕濞垮劚缂嶄線姊洪幓鎺旂婵炵》绻濇俊?    fun popSavedLocals(): HashMap<Int, String> {
+        if (savedLocals.size == 0) {
+            return HashMap<Int, String>()
+        }
+        return savedLocals.remove(savedLocals.size - 1)
+    }
+
+    // 闂佸磭鍎ら崝蹇涘疾閺屻儱鐓涢柟鑸妽濞呮粓鏌嶉悜妯哄闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺?    // 闂佸搫绉撮悧濠囧箹闁垮濯?    // 闂佸磭鍎ら崝蹇涘疾閺屻儱鐓涢柟鑸妽濞呮粓鏌嶉悜妯哄闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺?
+    fun push(value: String): Unit {
+        vmStack.add(value)
+    }
+
+    fun pop(): String {
+        if (vmStack.size == 0) {
+            error = "Stack underflow"
+            running = false
+            return ""
+        }
+        return vmStack.remove(vmStack.size - 1)
+    }
+
+    fun peek(): String {
+        if (vmStack.size == 0) {
+            return ""
+        }
+        return vmStack.get(vmStack.size - 1)
+    }
+
+    // 闂佸磭鍎ら崝蹇涘疾閺屻儱鐓涢柟鑸妽濞呮粓鏌嶉悜妯哄闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺?    // 闂佸憡鐟﹂敃銏ゅ闯濞差亜绠肩€广儱瀚粙?    // 闂佸磭鍎ら崝蹇涘疾閺屻儱鐓涢柟鑸妽濞呮粓鏌嶉悜妯哄闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺?
+    fun getLocal(slotIdx: Int): String {
+        val v = locals.get(slotIdx)
+        if (toStr(v) == "null") {
+            return "0"
+        }
+        return v as String
+    }
+
+    fun setLocal(slotIdx: Int, value: String): Unit {
+        locals.put(slotIdx, value)
+    }
+
+    fun getGlobal(name: String): String {
+        val v = globals.get(name)
+        if (toStr(v) == "null") {
+            return ""
+        }
+        return v as String
+    }
+
+    fun setGlobal(name: String, value: String): Unit {
+        globals.put(name, value)
+    }
+
+    // 闂佸磭鍎ら崝蹇涘疾閺屻儱鐓涢柟鑸妽濞呮粓鏌嶉悜妯哄闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺?    // 闂佺粯顭堥崺鏍焵椤戣法鍔嶆い銉ユ嚇瀵?    // 闂佸磭鍎ら崝蹇涘疾閺屻儱鐓涢柟鑸妽濞呮粓鏌嶉悜妯哄闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺?
+    fun getCurrentIp(): Int {
+        return ip
+    }
+
+    fun getCurrentFunc(): String {
+        return currentFunc
+    }
+
+    fun getCurrentLine(): String {
+        return getBytecodeLine(ip)
+    }
+
+    fun getStack(): ArrayList<String> {
+        return vmStack
+    }
+
+    fun getLocals(): HashMap<Int, String> {
+        return locals
+    }
+
+    fun getGlobals(): HashMap<String, String> {
+        return globals
+    }
+
+    fun getCallStack(): ArrayList<String> {
+        return callStack
+    }
+
+    fun getStackDepth(): Int {
+        return vmStack.size
+    }
+
+    fun getCallDepth(): Int {
+        return callStack.size
+    }
+
+    fun getError(): String {
+        return error
+    }
+
+    fun getReturnValue(): String {
+        return returnValue
+    }
+
+    fun isRunning(): Boolean {
+        return running
+    }
+
+    fun getInstructionCount(): Int {
+        return instructionCount
+    }
+
+    fun getBytecodeLineCount(): Int {
+        return bytecodeLineCount()
+    }
+
+    /// 闂佸憡鐟ョ粔鐢告儑閸︻厾纾介柡宓懐歇闂佸憡鎸哥粔鐢碘偓鍨缁傛帡濡舵径瀣碘偓宥夊级閳哄倸鐏熼柍?    fun disassemble(context: Int): String {
+        val total: Int = bytecodeLineCount()
+        var start: Int = ip - context
+        if (start < 0) {
+            start = 0
+        }
+        var end: Int = ip + context
+        if (end >= total) {
+            end = total - 1
+        }
+        var result: String = ""
+        var i: Int = start
+        while (i <= end) {
+            val line: String = getBytecodeLine(i)
+            val prefix: String = if (i == ip) { "> " } else { "  " }
+            result = result + prefix + toStr(i) + ": " + line + "\n"
+            i = i + 1
+        }
+        return result
+    }
+
+    // 闂佸磭鍎ら崝蹇涘疾閺屻儱鐓涢柟鑸妽濞呮粓鏌嶉悜妯哄闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺?    // 闁诲孩绋掗〃澶嬩繆椤撱垺鍎樺ù锝呭建閹烘鍑?    // 闂佸磭鍎ら崝蹇涘疾閺屻儱鐓涢柟鑸妽濞呮粓鏌嶉悜妯哄闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺?
+    /// 闂佸吋鍎抽崲鑼躲亹閸モ斁鍋撳☉娆樻畽濠碘槅鍙冮幆宥嗘媴缁涘鏂€闂佽桨娴囬崺鍥焵?    fun bytecodeLineCount(): Int {
+        var count: Int = 0
+        var i: Int = 0
+        val len: Int = bytecode.length
+        while (i < len) {
+            if (bytecode.charCodeAt(i) == 10) {  // '\n'
+                count = count + 1
+            }
+            i = i + 1
+        }
+        if (bytecode.length > 0 && bytecode.charCodeAt(bytecode.length - 1) != 10) {
+            count = count + 1
+        }
+        return count
+    }
+
+    /// 闂佸吋鍎抽崲鑼躲亹閸ヮ剙绠伴柛銉戝懏姣庨柣鐐寸☉閻厧鈻撻幋鐘亾濞戞瑯娈欏┑鈽嗗弮閹秵鎷呯喊妯轰壕?    fun getBytecodeLine(lineIdx: Int): String {
+        var pos: Int = 0
+        val len: Int = bytecode.length
+        var lineStart: Int = 0
+        var cur: Int = 0
+        while (pos < len) {
+            if (bytecode.charCodeAt(pos) == 10) {  // '\n'
+                if (cur == lineIdx) {
+                    return DebugVmUtils.safeSubstring(bytecode, lineStart, pos)
+                }
+                cur = cur + 1
+                lineStart = pos + 1
+            }
+            pos = pos + 1
+        }
+        if (cur == lineIdx) {
+            return DebugVmUtils.safeSubstring(bytecode, lineStart, len)
+        }
+        return ""
+    }
+
+    /// 闁荤喐鐟辩徊楣冩倵娴犲绠伴柛銉檮婵垽鏌ㄥ☉娆庝孩缂佺粯鍨垮畷?opcode闂?    fun parseOpcode(line: String): String {
+        var pos: Int = 0
+        val len: Int = line.length
+        while (pos < len) {
+            if (line.charCodeAt(pos) == 32) {  // ' '
+                break
+            }
+            pos = pos + 1
+        }
+        return DebugVmUtils.safeSubstring(line, 0, pos)
+    }
+
+    /// 闁荤喐鐟辩徊楣冩倵娴犲绠伴柛銉檮婵垽鏌ㄥ☉娆庝孩缂佺粯鍨垮畷鍫曟倷濞堝灝鍓虫繛鎴炴尨閸嬫挸鈽夐幙鍐х盎鐎殿噮鍓熷顐︽嚋椤戣棄浜?    fun parseArg1(line: String): String {
+        var pos: Int = 0
+        val len: Int = line.length
+        // 闁荤姴鎼悿鍥╂崲?opcode
+        while (pos < len && line.charCodeAt(pos) != 32) {
+            pos = pos + 1
+        }
+        pos = pos + 1  // 闁荤姴鎼悿鍥╂崲閸愵亞鐭氶柣鎴烆焽婢?        if (pos >= len) {
+            return ""
+        }
+        // 闂佸湱绮崝鏇°亹閸モ晝绠旀い鎴ｆ硶椤忓崬鈽夐幙鍐х盎鐎殿噮鍓熷?        var argStart: Int = pos
+        while (pos < len && line.charCodeAt(pos) != 32) {
+            pos = pos + 1
+        }
+        return DebugVmUtils.safeSubstring(line, argStart, pos)
+    }
+
+    /// 闁荤喐鐟辩徊楣冩倵娴犲绠伴柛銉檮婵垽鏌ㄥ☉娆庝孩缂佺粯鍨垮畷鍫曟倷濞堝灝鍓虫繛瀛樼矊婵傛棃鏌屽鍫濈煑闁稿本绋掑▓鍫曟煏?    fun parseArg2(line: String): String {
+        var pos: Int = 0
+        val len: Int = line.length
+        // 闁荤姴鎼悿鍥╂崲?opcode
+        while (pos < len && line.charCodeAt(pos) != 32) {
+            pos = pos + 1
+        }
+        pos = pos + 1  // 闁荤姴鎼悿鍥╂崲閸愵亞鐭氶柣鎴烆焽婢?        // 闁荤姴鎼悿鍥╂崲閸愵亞绠旀い鎴ｆ硶椤忓崬鈽夐幙鍐х盎鐎殿噮鍓熷?        while (pos < len && line.charCodeAt(pos) != 32) {
+            pos = pos + 1
+        }
+        if (pos >= len) {
+            return ""
+        }
+        pos = pos + 1  // 闁荤姴鎼悿鍥╂崲閸愵亞鐭氶柣鎴烆焽婢?        // 闂佸湱绮崝鏇°亹閸モ晝绠旀い鎴ｆ硶閻у苯鈽夐幙鍐х盎鐎殿噮鍓熷?        var argStart: Int = pos
+        while (pos < len && line.charCodeAt(pos) != 32) {
+            pos = pos + 1
+        }
+        return DebugVmUtils.safeSubstring(line, argStart, pos)
+    }
+
+    /// 闁荤喐鐟辩徊楣冩倵娴犲绠伴柛銉檮婵垽鏌ㄥ☉娆庝孩缂佺粯鍨垮畷鍫曟倷濞堝灝鍓虫繛鎴炴尭椤︻噣鏌屽鍫濈煑闁稿本绋掑▓鍫曟煏?    fun parseArg3(line: String): String {
+        var pos: Int = 0
+        val len: Int = line.length
+        // 闁荤姴鎼悿鍥╂崲?opcode
+        while (pos < len && line.charCodeAt(pos) != 32) {
+            pos = pos + 1
+        }
+        pos = pos + 1  // 闁荤姴鎼悿鍥╂崲閸愵亞鐭氶柣鎴烆焽婢?        // 闁荤姴鎼悿鍥╂崲閸愵亞绠旀い鎴ｆ硶椤忓崬鈽夐幙鍐х盎鐎殿噮鍓熷?        while (pos < len && line.charCodeAt(pos) != 32) {
+            pos = pos + 1
+        }
+        if (pos >= len) {
+            return ""
+        }
+        pos = pos + 1  // 闁荤姴鎼悿鍥╂崲閸愵亞鐭氶柣鎴烆焽婢?        // 闁荤姴鎼悿鍥╂崲閸愵亞绠旀い鎴ｆ硶閻у苯鈽夐幙鍐х盎鐎殿噮鍓熷?        while (pos < len && line.charCodeAt(pos) != 32) {
+            pos = pos + 1
+        }
+        if (pos >= len) {
+            return ""
+        }
+        pos = pos + 1  // 闁荤姴鎼悿鍥╂崲閸愵亞鐭氶柣鎴烆焽婢?        // 闂佸湱绮崝鏇°亹閸モ晝绠旀い鎴ｆ硶閻熷繐鈽夐幙鍐х盎鐎殿噮鍓熷?        var argStart: Int = pos
+        while (pos < len && line.charCodeAt(pos) != 32) {
+            pos = pos + 1
+        }
+        return DebugVmUtils.safeSubstring(line, argStart, pos)
+    }
+
+    // 闂佸磭鍎ら崝蹇涘疾閺屻儱鐓涢柟鑸妽濞呮粓鏌嶉悜妯哄闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺?    // 闁汇埄鍨遍幃鍌炲闯閸濆嫅?    // 闂佸磭鍎ら崝蹇涘疾閺屻儱鐓涢柟鑸妽濞呮粓鏌嶉悜妯哄闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺?
+    /// 闂佸吋鍎抽崲鑼躲亹閸モ晜鏆滈柟闂寸濞呫倝鏌?    fun getConst(idx: String): String {
+        return fieldAtRow(constPool, DebugVmUtils.vrToInt(idx))
+    }
+
+    // 闂佸磭鍎ら崝蹇涘疾閺屻儱鐓涢柟鑸妽濞呮粓鏌嶉悜妯哄闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺?    // 闂佸憡鍨兼慨銈夊汲閻旂儤鍋?    // 闂佸磭鍎ら崝蹇涘疾閺屻儱鐓涢柟鑸妽濞呮粓鏌嶉悜妯哄闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺?
+    /// 闂佸搫琚崕鍙夌珶濮椻偓瀹曟瑩鎳為妷锔筋啀闂佺绻堥崕杈亹濞戙垹纾婚煫鍥ㄦ长閳哄懏鏅柛顐ゅ枑瀵捇鏌熼崹顐㈠姢闁糕晛鏈濠氬棘閹稿海顦?-1闂佹寧绋戦ˇ顓㈠焵?    fun funcOffset(name: String): Int {
+        var pos: Int = 0
+        val len: Int = funcTable.length
+        var lineStart: Int = 0
+        while (pos < len) {
+            if (funcTable.charCodeAt(pos) == 10) {  // '\n'
+                val line: String = DebugVmUtils.safeSubstring(funcTable, lineStart, pos)
+                val colName: String = fieldAt(line, 0, "|")
+                if (colName == name) {
+                    return DebugVmUtils.vrToInt(fieldAtSep(line, 1, "|"))
+                }
+                lineStart = pos + 1
+            }
+            pos = pos + 1
+        }
+        return -1
+    }
+
+    /// 闂佸搫琚崕鍙夌珶濮椻偓瀹曟瑩鎳為妷锔筋啀闂佸憡鐟ラ崐褰掑汲閻斿摜鈻旀い蹇撴噺濞堝爼鏌ㄥ☉妯煎婵犫偓椤撱垹绠ラ柟顖嗗啰鍘掗柡澶嗘櫆閺屻劌煤?-1闂佹寧绋戦ˇ顓㈠焵?    fun funcParamCount(name: String): Int {
+        var pos: Int = 0
+        val len: Int = funcTable.length
+        var lineStart: Int = 0
+        while (pos < len) {
+            if (funcTable.charCodeAt(pos) == 10) {  // '\n'
+                val line: String = DebugVmUtils.safeSubstring(funcTable, lineStart, pos)
+                val colName: String = fieldAt(line, 0, "|")
+                if (colName == name) {
+                    return DebugVmUtils.vrToInt(fieldAtSep(line, 2, "|"))
+                }
+                lineStart = pos + 1
+            }
+            pos = pos + 1
+        }
+        return -1
+    }
+
+    // 闂佸磭鍎ら崝蹇涘疾閺屻儱鐓涢柟鑸妽濞呮粓鏌嶉悜妯哄闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺?    // 闁诲孩绋掗〃鍫ヮ敄娴ｅ湱鈻旈柟缁樺笂缁憋綁鏌?    // 闂佸磭鍎ら崝蹇涘疾閺屻儱鐓涢柟鑸妽濞呮粓鏌嶉悜妯哄闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺?
+    /// 闂佸憡鐟﹂悧婊堫敄?index 闁荤偞绋戦惌澶屾濮楃单 闂佸憡甯掑Λ婵嗏枔瑜旈弫宥嗗緞閸艾浜?    fun fieldAtRow(text: String, index: Int): String {
+        var i: Int = 0
+        var fieldStart: Int = 0
+        var cur: Int = 0
+        val fieldLen: Int = text.length
+        while (i < fieldLen) {
+            if (text.charCodeAt(i) == 10) {  // '\n'
+                if (cur == index) {
+                    return DebugVmUtils.safeSubstring(text, fieldStart, i)
+                }
+                cur = cur + 1
+                fieldStart = i + 1
+            }
+            i = i + 1
+        }
+        if (cur == index) {
+            return DebugVmUtils.safeSubstring(text, fieldStart, fieldLen)
+        }
+        return ""
+    }
+
+    /// 闂佸憡鐟﹂悧婊堫敄?rowIdx 闁荤偞绋戠悮顐﹀焵椤戣儻鍏屾い?colIdx 闂佸憡甯楅〃鍫濃枔閹达箑纾圭紒妤勩€€閸?    fun fieldAt(text: String, rowIdx: Int, rowSep: String, colSep: String, colIdx: Int): String {
+        val line: String = fieldAtRow(text, rowIdx)
+        return fieldAtCol(line, colIdx, colSep)
+    }
+
+    /// 闂佸憡鐟﹂悧婊堫敄?index 婵炴垶鎼╂禍娆愮?sep 闂佸憡甯掑Λ婵嗏枔瑜旈幆鍐礋椤愩倖鎲诲┑鐐茬墢閸嬶綁鍩€?    fun fieldAtSep(text: String, index: Int, sep: String): String {
+        var i: Int = 0
+        var fieldStart: Int = 0
+        var cur: Int = 0
+        val fieldLen: Int = text.length
+        val sepCode: Int = sep.charCodeAt(0)
+        while (i < fieldLen) {
+            if (text.charCodeAt(i) == sepCode) {
+                if (cur == index) {
+                    return DebugVmUtils.safeSubstring(text, fieldStart, i)
+                }
+                cur = cur + 1
+                fieldStart = i + 1
+            }
+            i = i + 1
+        }
+        if (cur == index) {
+            return DebugVmUtils.safeSubstring(text, fieldStart, fieldLen)
+        }
+        return ""
+    }
+
+    /// 闂佸憡鐟﹂悧婊堫敄?index 闂佸憡甯楅妵婊堝焵?    fun fieldAtCol(text: String, index: Int, sep: String): String {
+        return fieldAtSep(text, index, sep)
+    }
+
+    // 闂佸磭鍎ら崝蹇涘疾閺屻儱鐓涢柟鑸妽濞呮粓鏌嶉悜妯哄闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺?    // 缂備胶濮甸〃鍡楋耿閾忣偅缍囬柛娑卞幖琚?
+    // 闂佸磭鍎ら崝蹇涘疾閺屻儱鐓涢柟鑸妽濞呮粓鏌嶉悜妯哄闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺锟犲箛閵婏附鐝抽梺宕囧劋閸斿繘寮查弻銉ョ厸闁硅埇鍔嶅▍婊堟煃閻戞ê濮€闁哄懏鐓￠崺?
+    fun cmpBool(b: Boolean): String {
+        if (b) {
+            return "true"
+        }
+        return "false"
+    }
+
+    fun eq(a: String, b: String): String {
+        if (a == b) {
+            return "true"
+        }
+        return "false"
+    }
+
+    fun neq(a: String, b: String): String {
+        if (a == b) {
+            return "false"
+        }
+        return "true"
+    }
+
+    fun arithAdd(a: String, b: String): String {
+        return toStr(DebugVmUtils.vrToInt(a) + DebugVmUtils.vrToInt(b))
+    }
+
+    fun arithSub(a: String, b: String): String {
+        return toStr(DebugVmUtils.vrToInt(a) - DebugVmUtils.vrToInt(b))
+    }
+
+    fun arithMul(a: String, b: String): String {
+        return toStr(DebugVmUtils.vrToInt(a) * DebugVmUtils.vrToInt(b))
+    }
+
+    fun arithDiv(a: String, b: String): String {
+        val bb: Int = DebugVmUtils.vrToInt(b)
+        if (bb == 0) {
+            return "0"
+        }
+        return toStr(DebugVmUtils.vrToInt(a) / bb)
+    }
+
+    fun arithMod(a: String, b: String): String {
+        val bb: Int = DebugVmUtils.vrToInt(b)
+        if (bb == 0) {
+            return "0"
+        }
+        return toStr(DebugVmUtils.vrToInt(a) % bb)
+    }
+}

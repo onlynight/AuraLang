@@ -7,77 +7,95 @@ import aura.lang.cli.CompilerApi
 import aura.lang.cli.FileIO
 
 // ═══════════════════════════════════════════════════════════════
-// 帮助信息
+// CLI 入口（纯 Aura 实现）
+//
+// `fun main()` 为顶层入口（VM/AOT 要求），
+// 其余逻辑收敛到 MainUtils 对象中。
+// 退出码通过 main() 返回值传递（AOT 入口 main 返回 i32）。
 // ═══════════════════════════════════════════════════════════════
 
-fun printUsage(): Unit {
-    println("Aura language toolchain (Phase E — pure Aura)")
-    println("")
-    println("Usage:")
-    println("  aura build <file.aura> [--output <out>]        Compile to bytecode / native exe")
-    println("  aura build <file.aura> --aot [--output <exe>]  AOT compile to native exe")
-    println("  aura run <file.aura>                           Compile and run")
-    println("  aura check <file.aura>                         Syntax/semantics check only")
-    println("  aura disasm <file.auc>                         Disassemble .auc")
-    println("  aura tokens <file.aura>                        Output lexer tokens")
-    println("  aura ast <file.aura>                           Output AST")
-    println("  aura fmt <file.aura> [--check]                 Format code")
-    println("  aura doc [--output <dir>]                      Generate documentation")
-    println("  aura eval [--expr <code>]                      Evaluate expression")
-    println("  aura repl                                      Interactive REPL")
-    println("  aura export-header <file.aura>                 Export C ABI header")
-    println("")
-    println("Options:")
-    println("  --help, -h                                     Show this help message")
-    println("  --version                                      Show version")
-}
+/// 入口辅助工具对象
+object MainUtils {
 
-// ═══════════════════════════════════════════════════════════════
-// 入口函数
-// ═══════════════════════════════════════════════════════════════
+    /// 打印用法信息。
+    fun printUsage(): Unit {
+        println("Aura language toolchain (pure Aura)")
+        println("")
+        println("Usage:")
+        println("  aura build <file.aura> [--output <out>]        Compile to bytecode / native exe")
+        println("  aura build <file.aura> --aot [--output <exe>]  AOT compile to native exe")
+        println("  aura run <file.aura>                           Compile and run")
+        println("  aura check <file.aura>                         Syntax/semantics check only")
+        println("  aura tokens <file.aura>                        Output lexer tokens")
+        println("  aura ast <file.aura>                           Output AST")
+        println("  aura fmt <file.aura> [--check]                 Format code")
+        println("  aura doc [--output <dir>]                      Generate documentation")
+        println("  aura eval [--expr <code>]                      Evaluate expression")
+        println("  aura repl                                      Interactive REPL")
+        println("  aura export-header <file.aura>                 Export C ABI header")
+        println("")
+        println("Options:")
+        println("  --help, -h                                     Show this help message")
+        println("  --version                                      Show version")
+    }
 
-fun main(): Int {
-    val args: Args = parseArgs()
-    if (args.isEmpty()) {
-        printUsage()
+    /// 执行 CLI，返回退出码。
+    fun run(): Int {
+        val args: Args = ArgsUtils.parseArgs()
+        if (args.isEmpty()) {
+            MainUtils.printUsage()
+            return 1
+        }
+
+        val cmd: String = args.get(0)
+        val subArgs = Args()
+        var i: Int = 1
+        while (i < args.size()) {
+            subArgs.add(args.get(i))
+            i = i + 1
+        }
+
+        if (cmd == "build") {
+            return CommandsUtils.cmdBuild(subArgs)
+        } else if (cmd == "run") {
+            return CommandsUtils.cmdRun(subArgs)
+        } else if (cmd == "check") {
+            return CommandsUtils.cmdCheck(subArgs)
+        } else if (cmd == "tokens") {
+            return CommandsUtils.cmdTokens(subArgs)
+        } else if (cmd == "ast") {
+            return CommandsUtils.cmdAst(subArgs)
+        } else if (cmd == "fmt") {
+            return CommandsUtils.cmdFmt(subArgs)
+        } else if (cmd == "doc") {
+            return CommandsUtils.cmdDoc(subArgs)
+        } else if (cmd == "eval") {
+            return CommandsUtils.cmdEval(subArgs)
+        } else if (cmd == "repl") {
+            return CommandsUtils.cmdRepl(subArgs)
+        } else if (cmd == "export-header") {
+            return CommandsUtils.cmdExportHeader(subArgs)
+        } else if (cmd == "--help") {
+            MainUtils.printUsage()
+            return 0
+        } else if (cmd == "-h") {
+            MainUtils.printUsage()
+            return 0
+        } else if (cmd == "help") {
+            MainUtils.printUsage()
+            return 0
+        } else if (cmd == "--version") {
+            println("Aura v0.6.0 (pure Aura CLI)")
+            return 0
+        }
+
+        println("Unknown subcommand: " + cmd)
+        MainUtils.printUsage()
         return 1
     }
+}
 
-    val cmd: String = args.get(0)
-    val subArgs = Args()
-    var i: Int = 1
-    while (i < args.size()) {
-        subArgs.add(args.get(i))
-        i = i + 1
-    }
-
-    if (cmd == "build") {
-        return cmdBuild(subArgs)
-    } else if (cmd == "run") {
-        return cmdRun(subArgs)
-    } else if (cmd == "check") {
-        return cmdCheck(subArgs)
-    } else if (cmd == "tokens") {
-        return cmdTokens(subArgs)
-    } else if (cmd == "ast") {
-        return cmdAst(subArgs)
-    } else if (cmd == "fmt") {
-        return cmdFmt(subArgs)
-    } else if (cmd == "doc") {
-        return cmdDoc(subArgs)
-    } else if (cmd == "eval") {
-        return cmdEval(subArgs)
-    } else if (cmd == "export-header") {
-        return cmdExportHeader(subArgs)
-    } else if (cmd == "--help" || cmd == "-h" || cmd == "help") {
-        printUsage()
-        return 0
-    } else if (cmd == "--version") {
-        println("Aura v0.6.0 (Phase E)")
-        return 0
-    }
-
-    println("Unknown subcommand: " + cmd)
-    printUsage()
-    return 1
+/// CLI 入口函数。
+fun main(): Int {
+    return MainUtils.run()
 }

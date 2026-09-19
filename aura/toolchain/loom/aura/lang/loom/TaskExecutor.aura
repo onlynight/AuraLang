@@ -1,50 +1,44 @@
 // aura:///loom/aura/lang/loom/TaskExecutor.aura
 package aura.lang.loom
 
-// ── 标准库 ──
 import aura.lang.std.Collections
+import aura.lang.std.FileSystem
+import aura.lang.std.Process
 
-// ── Native 包 ──
-import aura.lang.native.console.Console
-
-// ── 编译器模块 ──
-import aura.lang.compiler.parser.Parser
-import aura.lang.compiler.sema.TypeChecker
-import aura.lang.compiler.hir.Hir
-import aura.lang.compiler.mir.MirLower
-import aura.lang.compiler.codegen.Codegen
-import aura.lang.compiler.vm.VmRunner
-
-// ── 项目内模块 ──
-import aura.lang.loom.Task
-import aura.lang.loom.Manifest
-import aura.lang.loom.BuildCache
-import aura.lang.loom.LoomError
-import aura.lang.loom.FileIO
+import "Task.aura"
+import "Manifest.aura"
+import "BuildCache.aura"
+import "LoomError.aura"
+import "TaskType.aura"
+import "FileIO.aura"
 
 // ═══════════════════════════════════════════════════════════════
-// TaskExecutor（任务执行器 — 纯 Aura + 编译器 API）
+// TaskExecutor（任务执行器 — 纯 Aura，编译委托外部 aura 编译器）
 // ═══════════════════════════════════════════════════════════════
 
 class TaskExecutor {
     val manifest: Manifest
     val cache: BuildCache
-    var llvmHome: String = "D:/DevTools/LLVM/clang+llvm-23.1.0-x86_64-pc-windows-msvc"
+    var llvmHome: String
+    var auraExe: String
 
-    fun TaskExecutor(manifest: Manifest, cache: BuildCache) {
+    constructor(manifest: Manifest, cache: BuildCache) {
         this.manifest = manifest
         this.cache = cache
+        this.llvmHome = "D:/DevTools/LLVM/clang+llvm-23.1.0-x86_64-pc-windows-msvc"
+        this.auraExe = "target/release/aura.exe"
     }
 
     fun setLlvmHome(path: String): Unit { this.llvmHome = path }
+    fun setAuraExe(path: String): Unit { this.auraExe = path }
 
     fun execute(task: Task): Int {
         if (cache.isCached(task)) {
-            Console.println("[loom] " + task.name + " (cached)")
+            println("[loom] " + task.name + " (cached)")
             return LoomError.OK
         }
 
-        Console.println("[loom] Executing: " + task.name + " (" + taskTypeStr(task.kind) + ")")
+        println("[loom] Executing: " + task.name + " (" + taskTypeStr(task.kind) + ")")
 
         var result: Int = LoomError.OK
         if (task.kind == TaskType.CLEAN) {
@@ -76,7 +70,7 @@ class TaskExecutor {
         } else if (task.kind == TaskType.DOC) {
             result = executeDoc(task)
         } else {
-            Console.println("[loom] Unknown task type: " + task.kind)
+            println("[loom] Unknown task type: " + task.kind)
             result = LoomError.INVALID_CONFIG
         }
 
@@ -87,165 +81,140 @@ class TaskExecutor {
     fun executeClean(task: Task): Int {
         val outDir: String = manifest.outDir
         if (loomExists(outDir)) {
-            // 递归删除目录（简化：只删除文件）
-            Console.println("[loom] Cleaned " + outDir)
+            loomDeleteDir(outDir)
+            println("[loom] Cleaned " + outDir)
             return LoomError.OK
         }
-        Console.println("[loom] No cleanup needed")
+        println("[loom] No cleanup needed")
         return LoomError.OK
     }
 
     fun executeResolve(task: Task): Int {
-        Console.println("[loom] Resolving dependencies...")
+        println("[loom] Resolving dependencies...")
         var i: Int = 0
         while (i < manifest.dependencies.size) {
-            val dep: String = manifest.dependencies[i]
-            Console.println("[loom]   - " + dep)
+            println("[loom]   - " + manifest.dependencies.get(i))
             i = i + 1
         }
-        Console.println("[loom] Dependencies resolved")
+        println("[loom] Dependencies resolved")
         return LoomError.OK
     }
 
     fun executeCompile(task: Task): Int {
         val entryFile: String = manifest.entry
         if (!loomExists(entryFile)) {
-            Console.println("[loom] Entry file not found: " + entryFile)
+            println("[loom] Entry file not found: " + entryFile)
             return LoomError.NOT_FOUND
         }
-        val content: String = loomReadText(entryFile)
-        if (content.length == 0) {
-            Console.println("[loom] Cannot read entry file: " + entryFile)
-            return LoomError.IO_ERROR
-        }
-        // 使用编译器 API 编译
-        val p = Parser(content)
-        p.parseProgram()
-        if (p.errors.count > 0) {
-            Console.println("[loom] Parse errors: " + toStr(p.errors.count))
-            return LoomError.COMPILE_ERROR
-        }
-        val checker = TypeChecker()
-        checker.tcCheck(p.ast)
-        val hl = HirLowerer()
-        hl.lower(p.ast)
-        val ml = MirLowerer()
-        ml.lower(hl.hir)
-        val cg = Codegen()
-        val bytecode = cg.emit(ml.mir)
-        // 写入输出
         val outDir: String = manifest.outDir
         if (!loomExists(outDir)) { loomMkdirP(outDir) }
-        loomWriteText(outDir + "/main.auc", bytecode)
-        Console.println("[loom] Compiled: " + outDir + "/main.auc")
+        val outPath: String = outDir + "/main.auc"
+        val cmd: String = auraExe + " build " + entryFile + " --output " + outPath
+        println("[loom] Compiling: " + entryFile + " -> " + outPath)
+        val exitCode: Int = Process.run(cmd)
+        if (exitCode != 0) {
+            println("[loom] Compilation failed (exit code: " + exitCode + ")")
+            return LoomError.COMPILE_ERROR
+        }
+        println("[loom] Compiled: " + outPath)
         return LoomError.OK
     }
 
     fun executeTest(task: Task): Int {
-        Console.println("[loom] Running tests...")
+        println("[loom] Running tests...")
         val testDir: String = "tests"
         if (!loomExists(testDir)) {
-            Console.println("[loom] No tests directory found")
+            println("[loom] No tests directory found")
             return LoomError.OK
         }
-        Console.println("[loom] Tests passed")
+        val cmd: String = auraExe + " build " + testDir + "/test_main.aura"
+        val exitCode: Int = Process.run(cmd)
+        if (exitCode != 0) {
+            println("[loom] Test compilation failed")
+            return LoomError.COMPILE_ERROR
+        }
+        println("[loom] Tests passed")
         return LoomError.OK
     }
 
     fun executePackage(task: Task): Int {
-        Console.println("[loom] Package building not implemented in Aura")
+        println("[loom] Package building not implemented in Aura")
         return LoomError.OK
     }
 
     fun executeVerify(task: Task): Int {
-        Console.println("[loom] Package verification not implemented in Aura")
+        println("[loom] Package verification not implemented in Aura")
         return LoomError.OK
     }
 
     fun executeCheck(task: Task): Int {
         val entryFile: String = manifest.entry
         if (!loomExists(entryFile)) {
-            Console.println("[loom] Entry file not found: " + entryFile)
+            println("[loom] Entry file not found: " + entryFile)
             return LoomError.NOT_FOUND
         }
-        val content: String = loomReadText(entryFile)
-        val p = Parser(content)
-        p.parseProgram()
-        if (p.errors.count > 0) {
-            Console.println("[loom] Parse errors: " + toStr(p.errors.count))
+        val cmd: String = auraExe + " check " + entryFile
+        println("[loom] Checking: " + entryFile)
+        val exitCode: Int = Process.run(cmd)
+        if (exitCode != 0) {
+            println("[loom] Check failed (exit code: " + exitCode + ")")
             return LoomError.COMPILE_ERROR
         }
-        val checker = TypeChecker()
-        checker.tcCheck(p.ast)
-        val errors = checker.tcGetErrors()
-        if (errors.count > 0) {
-            Console.println("[loom] Semantic errors: " + toStr(errors.count))
-            return LoomError.COMPILE_ERROR
-        }
-        Console.println("[loom] Check passed")
+        println("[loom] Check passed")
         return LoomError.OK
     }
 
     fun executeInstall(task: Task): Int {
-        Console.println("[loom] Install not implemented in Aura")
+        println("[loom] Install not implemented in Aura")
         return LoomError.OK
     }
 
     fun executeDeploy(task: Task): Int {
-        Console.println("[loom] Deploy not implemented in Aura")
+        println("[loom] Deploy not implemented in Aura")
         return LoomError.OK
     }
 
     fun executeRun(task: Task): Int {
         val entryFile: String = manifest.entry
         if (!loomExists(entryFile)) {
-            Console.println("[loom] Entry file not found: " + entryFile)
+            println("[loom] Entry file not found: " + entryFile)
             return LoomError.NOT_FOUND
         }
-        val content: String = loomReadText(entryFile)
-        val p = Parser(content)
-        p.parseProgram()
-        if (p.errors.count > 0) {
-            Console.println("[loom] Parse errors: " + toStr(p.errors.count))
-            return LoomError.COMPILE_ERROR
-        }
-        val checker = TypeChecker()
-        checker.tcCheck(p.ast)
-        val hl = HirLowerer()
-        hl.lower(p.ast)
-        val ml = MirLowerer()
-        ml.lower(hl.hir)
-        val cg = Codegen()
-        val bytecode = cg.emit(ml.mir)
-        val vm = VmRunner()
-        vm.loadBytecode(bytecode, cg.constPoolStr(), cg.funcTableStr())
-        val out = vm.run()
-        Console.println("result=" + toStr(out))
-        return LoomError.OK
+        val cmd: String = auraExe + " run " + entryFile
+        println("[loom] Running: " + entryFile)
+        val exitCode: Int = Process.run(cmd)
+        return exitCode
     }
 
     fun executeWatch(task: Task): Int {
-        Console.println("[loom] Watch mode not implemented in Aura")
+        println("[loom] Watch mode not implemented in Aura")
         return LoomError.OK
     }
 
     fun executePlugin(task: Task): Int {
-        Console.println("[loom] Plugin task not implemented in Aura")
+        println("[loom] Plugin task not implemented in Aura")
         return LoomError.OK
     }
 
     fun executeFmt(task: Task): Int {
         val entryFile: String = manifest.entry
         if (!loomExists(entryFile)) {
-            Console.println("[loom] Entry file not found: " + entryFile)
+            println("[loom] Entry file not found: " + entryFile)
             return LoomError.NOT_FOUND
         }
-        Console.println("[loom] Format check passed")
+        val cmd: String = auraExe + " fmt " + entryFile
+        println("[loom] Formatting: " + entryFile)
+        val exitCode: Int = Process.run(cmd)
+        if (exitCode != 0) {
+            println("[loom] Format failed (exit code: " + exitCode + ")")
+            return LoomError.COMPILE_ERROR
+        }
+        println("[loom] Format check passed")
         return LoomError.OK
     }
 
     fun executeDoc(task: Task): Int {
-        Console.println("[loom] Documentation generation not implemented in Aura")
+        println("[loom] Documentation generation not implemented in Aura")
         return LoomError.OK
     }
 

@@ -1,0 +1,19 @@
+// aura:///test/taskgraph-only.aura
+package test
+
+import "TaskGraph.aura"
+import "Task.aura"
+import "TaskType.aura"
+
+fun testTaskGraph(): Int {
+    println("creating taskgraph...")
+    val tg: TaskGraph = TaskGraph()
+    println("taskgraph created")
+    tg.addTaskByName("clean", TaskType.CLEAN)
+    println("task added")
+    return 0
+}
+
+fun main(): Int {
+    return testTaskGraph()
+}

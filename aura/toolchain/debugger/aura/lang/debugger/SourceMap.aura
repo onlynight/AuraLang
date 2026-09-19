@@ -1,0 +1,257 @@
+// aura:///debugger/aura/lang/debugger/SourceMap.aura
+package aura.lang.debugger
+
+// 闂備礁鍟块崢婊堝磻閹剧粯鐓冮柛蹇擃槸娴?闂備礁鎼粔鏉懨洪妶澶婇棷妞ゆ牗绋掗崕?闂備礁鍟块崢婊堝磻閹剧粯鐓冮柛蹇擃槸娴?import aura.lang.std.String
+
+// 闂備礁鍟块崢婊堝磻閹剧粯鐓冮柛蹇擃槸娴?闂傚倸鍊稿Λ妤€螞濡ゅ懎绠?闂備礁鍟块崢婊堝磻閹剧粯鐓冮柛蹇擃槸娴?import aura.lang.collection.ArrayList
+import aura.lang.collection.HashMap
+
+// 闂備礁鍟块崢婊堝磻閹剧粯鐓冮柛蹇擃槸娴?缂傚倸鍊搁崐褰掓偋閻愮儤鍎婄憸鏂跨暦閹惰棄惟閺堫亝绗熼埀顒€鐣?闂備礁鍟块崢婊堝磻閹剧粯鐓冮柛蹇擃槸娴?import aura.lang.compiler.ast.Ast
+
+// 闂備礁纾崕銈夊礉韫囨稑鐤鹃柡灞诲劚閻撴盯鏌熼懜顒€濡芥繛鍛矒閺屽秹鎮滃Ο鍝勵潊闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春?// 婵犵數濮嶉崟顐㈩潕闂佺粯鐗楃划宥夊箯閸涱収鍚嬮柛銉㈡櫆閻庮參姊洪崫鍕伀濠殿喗鎸抽幆?闂?闂佽绻愮换鎰涘▎鎴ｅС妞ゆ洍鍋撻柟顖氱У閹峰懐绮电€ｎ偅鏉搁梻浣告啞閻熲晠寮ㄩ崡鐐嶏綀顦村ù婊勬倐瀹曠喖顢曢姀銏犲笓闂佽瀛╃粙鎺椼€冩径瀣╃箚妞ゆ挶鍨洪崕妯好归敐鍥ㄥ殌闁伙妇鎳撻湁?// 濠电偠鎻紞鈧繛澶嬫礋瀵偊濡舵径灞界ウ闂佽鍨堕崑濠囧绩娴犲鐓涘ù锝囨嚀椤ュ绱掗鑲┬ら柍褜鍓氱粙鎺楁晪闂佺顑呯粔鐟扮暦濞嗘挻鍤嶉柕澶涢檮椤斿秵绻涢敐鍛闁告挻绻冪€靛ジ宕ㄧ€涙ɑ娅栭梺鍓插亖閸庢壆绱撴径鎰厱?ArrayList<Class> 闂?AOT 缂傚倸鍊搁崐褰掓偋閻愮儤鍎婄憸鏂款潖婵犳凹鏁嬮柍褜鍓熼妴鍌涚鐎ｎ偅娅?// 闂備礁纾崕銈夊礉韫囨稑鐤鹃柡灞诲劚閻撴盯鏌熼懜顒€濡芥繛鍛矒閺屽秹鎮滃Ο鍝勵潊闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春?
+/// 婵犵數濮嶉崟顐㈩潕闂佺粯鐗楃划鎾愁嚕娴煎瓨鍋愰柤纰卞墯椤?闂?婵犵數濮嶉崟顐㈩潕闂佺粯鐗楃划搴ㄥ箖閹殿喕娌柦妯侯槸閳?闂?闂佽瀛╃粙鎺椼€冩径瀣╃箚妞ゆ挶鍨洪崕妯好归敐鍥ㄥ殌闁伙妇鎳撻湁闁绘﹩鍠栭埀顒佸灴閸┾偓?class SourceMap {
+
+    var funcNames: ArrayList<String> = ArrayList<String>()
+    var funcStartLines: ArrayList<Int> = ArrayList<Int>()
+    var funcEndLines: ArrayList<Int> = ArrayList<Int>()
+    var funcOffsets: ArrayList<Int> = ArrayList<Int>()
+    var lineToFunc: HashMap<Int, Int> = HashMap<Int, Int>()
+
+    /// 濠?AST 闂?funcTable 闂備礁鎼鍛偓姘煎墰缁辨捇骞樼拠鎻掑挤闂佺粯顭堢亸娆忊枔閹间焦鐓?    fun build(ast: Ast, funcTable: String): Unit {
+        funcNames = ArrayList<String>()
+        funcStartLines = ArrayList<Int>()
+        funcEndLines = ArrayList<Int>()
+        funcOffsets = ArrayList<Int>()
+        lineToFunc = HashMap<Int, Int>()
+
+        var i: Int = 0
+        while (i < ast.count) {
+            if (ast.kindOf(i) == "Function") {
+                val name: String = ast.textOf(i)
+                val sp = ast.spanOf(i)
+                val offset: Int = SourceMapUtils.findFuncOffset(name, funcTable)
+
+                funcNames.add(name)
+                funcStartLines.add(sp.startLine)
+                funcEndLines.add(sp.endLine)
+                funcOffsets.add(offset)
+
+                // 闂備礁鎼€氼喗鎱ㄩ幘顔藉剭闁绘顕х粈鍕煠閹帒鍔滄繛鍫濈埣閺屻倝鎮℃惔鈩冩濠电偞褰冨鈥崇暦濮椻偓瀹曘劑顢涘☉姘婵犳鍣徊鐣屾崲鐎ｎ剛鍗氶悗闈涙啞閸嬫﹢鎮橀悙鑸殿棄闁?funcIdx
+                var line: Int = sp.startLine
+                val funcIdx: Int = funcNames.size - 1
+                while (line <= sp.endLine) {
+                    lineToFunc.put(line, funcIdx)
+                    line = line + 1
+                }
+            }
+            i = i + 1
+        }
+    }
+
+    /// 闂佽崵鍠愰悷杈╁緤妤ｅ啯鍊靛ù鐘差儏濡ɑ銇勯幘璺盒㈠ù鐙€鍨堕幃璺衡槈濡灝顏悷?闂?闂佽瀛╃粙鎺椼€冩径瀣╃箚妞ゆ挶鍨洪崕妯好归敐鍥ㄥ殌闁伙妇鎳撻湁闁绘﹩鍠栭埀顒佹礃缁傚秹宕妷褏鐓嬪┑顔炬嚀濞茬娀宕?    /// 闂佸搫顦弲婊堝蓟閵娿儍?-1 闂佽崵鍋炵粙蹇涘礉鎼淬劌桅婵椴哥€氭岸鏌曟径妯煎帥闁衡偓閽樺妲堥柟鎯х－瀛濆┑鐘亾妞ゅ繐鎳愰々鐑芥偣娴ｅ摜锛嶇紒澶婃健閺屾盯骞嬮敐鍛呮捇鏌￠崱娆忔灈鐎规洘锕㈠畷銊╊敃閻旇渹澹?    fun resolveBreakpoint(line: Int): Int {
+        val funcIdx = lineToFunc.get(line)
+        if (toStr(funcIdx) == "null") {
+            return -1
+        }
+        val idx: Int = funcIdx as Int
+        if (idx < 0 || idx >= funcOffsets.size) {
+            return -1
+        }
+        return funcOffsets[idx]
+    }
+
+    /// 闂備礁鍚嬮崕鎶藉床閼艰翰浜归柛銉墮缁犱即鏌涢妷鎴濇噺濮ｅ酣鏌ｉ悙瀵糕槈闁哄牜鍓氶弲璺侯吋婢跺﹥宓嶉梺闈涱焾閸庡崬袙閹扮増鐓涘ù锝堫潐缁舵煡鏌熼鑺ョ濠?    fun funcNameAtLine(line: Int): String {
+        val funcIdx = lineToFunc.get(line)
+        if (toStr(funcIdx) == "null") {
+            return ""
+        }
+        val idx: Int = funcIdx as Int
+        if (idx < 0 || idx >= funcNames.size) {
+            return ""
+        }
+        return funcNames[idx]
+    }
+
+    /// 闂備礁鎼粔鐑斤綖婢跺﹦鏆ゅù锝堛€€閸嬫挸鈽夊▎妯荤暯婵犵妲呴崣鍐箚瀹ュ棙濯撮梻鈧幇顔煎⒕缂傚倷绀侀ˇ杈╁垝椤栫偞鍋傞柨鐔哄Т缁犮儵鏌熼鍡楀暞閻︼綁姊烘潪鎵妽婵犮垺锕㈤獮鍐即閵忕姈?    fun funcNameAtOffset(offset: Int): String {
+        var i: Int = 0
+        while (i < funcOffsets.size) {
+            if (funcOffsets[i] >= 0 && offset >= funcOffsets[i]) {
+                return funcNames[i]
+            }
+            i = i + 1
+        }
+        return ""
+    }
+
+    /// 闂備礁鍚嬮崕鎶藉床閼艰翰浜归柛銉簵娴滃綊鏌熼幆褍鏆辨い?IP 闂佽娴烽弫鎼佸箠閹炬儼濮抽柡灞诲劜閸庡秹鏌涢弴銊ュ闁绘牠浜堕弻锝夘敊缂佹銈板銈冨灪閸ㄥ灝鐣烽敐澶婄闁靛牆娲ㄩˇ鈺呮煛婢跺棙娅嗛柛銊﹀▕楠炲酣鍩€椤掑嫭鐓ユ繛鎴烇供濡插爼鏌?    fun lineAtOffset(offset: Int): Int {
+        var bestFunc: Int = -1
+        var bestOffset: Int = -1
+        var i: Int = 0
+        while (i < funcOffsets.size) {
+            if (funcOffsets[i] >= 0 && funcOffsets[i] <= offset && funcOffsets[i] > bestOffset) {
+                bestOffset = funcOffsets[i]
+                bestFunc = i
+            }
+            i = i + 1
+        }
+        if (bestFunc >= 0) {
+            return funcStartLines[bestFunc]
+        }
+        return 0
+    }
+
+    /// 闂備礁鎲＄敮妤呫€冮崨鏉戝惞妞ゆ挶鍨圭粻銉╂煃瑜滈崜鐔奉嚕閸偄绶炲┑鐘插€归惁锝夋⒑鏉炴壆鍔嶅┑顖欑矙閹啴鎮㈤悜妯虹彴闂佸搫娲﹂惌顔炬崲閸℃稒鐓欐い鎾楀啰浠滈梺?    fun listFunctions(): String {
+        if (funcNames.size == 0) {
+            return "(no functions found)"
+        }
+        var result: String = ""
+        var i: Int = 0
+        while (i < funcNames.size) {
+            result = result + toStr(i) + ": " + funcNames[i] + " [" + toStr(funcStartLines[i]) + "-" + toStr(funcEndLines[i]) + "] @ " + toStr(funcOffsets[i]) + "\n"
+            i = i + 1
+        }
+        return result
+    }
+}
+
+/// SourceMap 闁诲氦顫夐幃鍫曞磿闁秴鐭楅悹鎭掑妷閸嬫捇鎮藉▓鎸庢暞闂佽姤鐗曠€氱増淇?object SourceMapUtils {
+    /// 濠?funcTable 闂備礁鎼悮顐﹀磿閸欏鐝舵慨妞诲亾鐎规洘鐟╅幊鐐哄Ψ閿旂瓔鍟€闂備胶顭堥鍛崲閹哄秶鏄傞梻鍌欑劍瑜板啰鎹㈤崼銉ョ劦?    fun findFuncOffset(name: String, funcTable: String): Int {
+        val lines: ArrayList<String> = splitLines(funcTable)
+        var i: Int = 0
+        while (i < lines.size) {
+            val line: String = lines[i]
+            if (line != "") {
+                val fields: ArrayList<String> = splitPipe(line)
+                if (fields.size >= 2 && fields[0] == name) {
+                    return vrToInt(fields[1])
+                }
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// 闂備礁婀遍…鍫ニ囬幎濮愨偓渚€骞嬮敃鈧粈鍡涙煕閳╁喚娈旀い銉ョ箻閹鈽夊▎妯荤暭濡炪倖鍨抽悞锔剧矙婢跺奔娌柛灞绢殔娴?    fun splitLines(text: String): ArrayList<String> {
+        var result: ArrayList<String> 
+        var lineStart: Int = 0
+        var i: Int = 0
+        val len: Int = text.length
+        while (i < len) {
+            if (text.charCodeAt(i) == 10) {  // '\n'
+                result.add(safeSubstring(text, lineStart, i))
+                lineStart = i + 1
+            }
+            i = i + 1
+        }
+        if (lineStart < len) {
+            result.add(safeSubstring(text, lineStart, len))
+        }
+        return result
+    }
+
+    /// 闂?| 闂備礁鎲＄敮鎺懳涘Δ浣虹彾濠电姴瀚ч崑鎾斥槈濞嗘ɑ鐣煎銈嗗灣閻掞妇绮欐径灞兼勃闁稿本顨呮禍?    fun splitPipe(text: String): ArrayList<String> {
+        var result: ArrayList<String> 
+        var start: Int = 0
+        var i: Int = 0
+        val len: Int = text.length
+        while (i < len) {
+            if (text.charCodeAt(i) == 124) {  // '|'
+                result.add(safeSubstring(text, start, i))
+                start = i + 1
+            }
+            i = i + 1
+        }
+        if (start < len) {
+            result.add(safeSubstring(text, start, len))
+        }
+        return result
+    }
+
+    /// 闂佽瀛╃粙鎺椼€冮崼銉晞濞达絽婀遍埢鏃堟煠閼规澘鐓愮紒渚囧櫍閺屸剝鎷呴崫銉︽喖闂佸搫妫涢崰鏍ㄤ繆?    fun vrToInt(text: String): Int {
+        if (text == "") {
+            return -1
+        }
+        val len: Int = text.length
+        var total: Int = 0
+        var i: Int = 0
+        var neg: Boolean = false
+        if (len > 0 && text.charCodeAt(0) == 45) {
+            neg = true
+            i = 1
+        }
+        while (i < len) {
+            val c: Int = text.charCodeAt(i)
+            if (c < 48 || c > 57) {
+                break
+            }
+            total = total * 10 + (c - 48)
+            i = i + 1
+        }
+        if (neg) {
+            return -total
+        }
+        return total
+    }
+
+    /// 闂佽娴烽幊鎾凰囬鐐茬煑闊洦娲嶉崑鎾斥槈濞嗗繐顫堥柣鐔告礀濡繈寮澶婇敜闁哥偞鎸code VM 闂備胶顭堢换鎺楀储瑜旈、娆撳箛閻楀牊娅栨繝銏ｆ硾閻楀啴宕?    fun safeSubstring(text: String, start: Int, end: Int): String {
+        var result: String = ""
+        if (start < 0) { start = 0 }
+        if (end > text.length) { end = text.length }
+        if (start >= end) { return "" }
+        var i: Int = start
+        while (i < end) {
+            result = result + toStr(text[i])
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 闂備礁鍚嬮崕鎶藉床閼艰翰浜?funcTable 濠电偞鍨堕幖鈺呭储閻ｅ备鍋撻崹顐ｇ殤闁逞屽墲椤绌卞ú顏傗偓渚€骞嬮敂钘夊壄闂佸憡娲﹂崑鍡涘箺閻斿摜绠鹃柛顐犲灩娴狀垶鏌?    fun fieldAt(text: String, rowIdx: Int, rowSep: String, colSep: String, colIdx: Int): String {
+        val line: String = fieldAtRow(text, rowIdx, rowSep)
+        return fieldAtCol(line, colIdx, colSep)
+    }
+
+    /// 闂備礁鍚嬮崕鎶藉床閼艰翰浜归柛銉墮缁犱即鏌涢妷鎴濇噺濮ｅ酣鏌ｉ悙瀵糕槈闁活剛鍘ч埢鎾诲箣閿曗偓缁€鍐煕濞戝崬寮鹃柛鐔锋喘閺?    fun fieldAtRow(text: String, rowIdx: Int, sep: String): String {
+        var lineStart: Int = 0
+        var cur: Int = 0
+        var i: Int = 0
+        val len: Int = text.length
+        val sepCode: Int = sep.charCodeAt(0)
+        while (i < len) {
+            if (text.charCodeAt(i) == sepCode) {
+                if (cur == rowIdx) {
+                    return safeSubstring(text, lineStart, i)
+                }
+                cur = cur + 1
+                lineStart = i + 1
+            }
+            i = i + 1
+        }
+        if (cur == rowIdx) {
+            return safeSubstring(text, lineStart, len)
+        }
+        return ""
+    }
+
+    /// 闂備礁鍚嬮崕鎶藉床閼艰翰浜归柛銉墮缁犱即鏌涢妷鎴濇噺濮ｅ酣鏌ｉ悙瀵糕槈闁活剛鍘ч埢鎾诲箣閿曗偓缁犱即鏌涢妷鎴濇噺濮ｅ酣姊洪崨濠傜瑲闁靛洦绮撻崺鈧?    fun fieldAtCol(text: String, colIdx: Int, sep: String): String {
+        var fieldStart: Int = 0
+        var cur: Int = 0
+        var i: Int = 0
+        val len: Int = text.length
+        val sepCode: Int = sep.charCodeAt(0)
+        while (i < len) {
+            if (text.charCodeAt(i) == sepCode) {
+                if (cur == colIdx) {
+                    return safeSubstring(text, fieldStart, i)
+                }
+                cur = cur + 1
+                fieldStart = i + 1
+            }
+            i = i + 1
+        }
+        if (cur == colIdx) {
+            return safeSubstring(text, fieldStart, len)
+        }
+        return ""
+    }
+}

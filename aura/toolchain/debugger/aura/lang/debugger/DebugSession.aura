@@ -1,0 +1,447 @@
+// aura:///debugger/aura/lang/debugger/DebugSession.aura
+package aura.lang.debugger
+
+// 闂備礁鍟块崢婊堝磻閹剧粯鐓冮柛蹇擃槸娴?闂備礁鎼粔鏉懨洪妶澶婇棷妞ゆ牗绋掗崕?闂備礁鍟块崢婊堝磻閹剧粯鐓冮柛蹇擃槸娴?import aura.lang.std.String
+import aura.lang.std.IO
+import aura.lang.std.Process
+
+// 闂備礁鍟块崢婊堝磻閹剧粯鐓冮柛蹇擃槸娴?闂傚倸鍊稿Λ妤€螞濡ゅ懎绠?闂備礁鍟块崢婊堝磻閹剧粯鐓冮柛蹇擃槸娴?import aura.lang.collection.ArrayList
+import aura.lang.collection.HashMap
+
+// 闂備礁鍟块崢婊堝磻閹剧粯鐓冮柛蹇擃槸娴?缂傚倸鍊搁崐褰掓偋閻愮儤鍎婄憸鏂跨暦閹惰棄惟閺堫亝绗熼埀顒€鐣?闂備礁鍟块崢婊堝磻閹剧粯鐓冮柛蹇擃槸娴?import aura.lang.compiler.parser.Parser
+import aura.lang.compiler.sema.TypeChecker
+import aura.lang.compiler.hir.Hir
+import aura.lang.compiler.mir.MirLower
+import aura.lang.compiler.codegen.Codegen
+
+// 闂備礁鍟块崢婊堝磻閹剧粯鐓冮柛蹇擃槸娴?闂備胶顭堢换鎰偓姘煎墰濡叉劙妫冨ù宕囧枛閸ㄩ箖鎼归顫樊 闂備礁鍟块崢婊堝磻閹剧粯鐓冮柛蹇擃槸娴?import "DebugVm.aura"
+import "SourceMap.aura"
+import "BreakpointManager.aura"
+import "FileIO.aura"
+
+// 闂備礁纾崕銈夊礉韫囨稑鐤鹃柡灞诲劚閻撴盯鏌熼懜顒€濡芥繛鍛矒閺屽秹鎮滃Ο鍝勵潊闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春?// DebugSession 闂?闂佽崵濮撮鍛村疮閹惰姤鍎婃い鏍仜闂傤垶鏌曟繛鍨偓鏇㈡儊濠婂應鍋撳▓鍨灍婵炲弶锕㈤獮?//
+// 闂傚倸鍊稿Λ妤€螞濞嗘挸鍨傛慨妯垮煐閺?//   缂傚倸鍊搁崐褰掓偋閻愮儤鍎婄憸蹇曞垝婵犳碍鏅柛鏇ㄥ亝閻ゅ洭姊洪幐搴ｂ槈闁绘妫濊棟濠电姵纰嶉悞楣冩煏婵炑冩噺閵囨繈鏌ｉ悩鍙夊闁糕晛锕﹀Σ鎰版儌閻ｅa build 闂?.auc闂?//   闂佽崵濮撮鍛村疮閹惰姤鍎?VM闂備焦瀵х粙鎴濓耿閹跺槐ugVm闂?//   闂備礁鎼崑鍡涘储妤ｅ啫纾婚柨婵嗘川娑撳秹鏌ㄥ☉妯侯仾闁稿﹦鍋ら弻銊モ槈濡崵顔噐eakpointManager闂?//   婵犵數濮嶉崟顐㈩潕闂佺粯鐗楃划鎾愁嚕娴煎瓨鍋愰柤纰卞墯椤斿繘姊洪幐搴ｂ槈婵犫偓閻ョ晩rceMap闂?//   闂佽崵鍋炵粙蹇涘礉韫囨稑绠垫い蹇撳閸ゆ洟鐓崶銊︹拻婵犫偓閹绢喗鐓曞┑鐘插閳ь剙顑囧Σ鎰瀶閸х⒓l闂?//   Watch 闂佽崵鍋炵粙蹇涘礉韫囨稑绠垫い蹇撳閸?// 闂備礁纾崕銈夊礉韫囨稑鐤鹃柡灞诲劚閻撴盯鏌熼懜顒€濡芥繛鍛矒閺屽秹鎮滃Ο鍝勵潊闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春?
+class DebugSession {
+
+    // 闂備礁鍟块崢婊堝磻閹剧粯鐓冮柛蹇擃槸娴?婵犵數濮嶉崟顐㈩潔闂佸搫顑呴崯顖滅矉閹烘瀚夐柛蹇撴憸缁犳岸姊?闂備礁鍟块崢婊堝磻閹剧粯鐓冮柛蹇擃槸娴?    var source: String = ""
+    var srcFile: String = ""
+    var sourceLines: ArrayList<String> = ArrayList<String>()
+
+    // 闂備礁鍟块崢婊堝磻閹剧粯鐓冮柛蹇擃槸娴?缂傚倸鍊搁崐褰掓偋閻愮儤鍎婄憸搴ｇ矉瀹ュ牜妲炬繝?闂備礁鍟块崢婊堝磻閹剧粯鐓冮柛蹇擃槸娴?    var bytecode: String = ""
+    var constPool: String = ""
+    var funcTable: String = ""
+    var varTable: String = ""
+
+    // 闂備礁鍟块崢婊堝磻閹剧粯鐓冮柛蹇擃槸娴?闂佽崵濮撮鍛村疮閹惰姤鍎婃い鏍ㄧ矌绾惧ジ鏌涢弴銊ょ凹妞?闂備礁鍟块崢婊堝磻閹剧粯鐓冮柛蹇擃槸娴?    var debugVm: DebugVm = new DebugVm()
+    var bpManager: BreakpointManager = new BreakpointManager()
+    var compiledFile: String = ""
+
+    // 闂備礁鍟块崢婊堝磻閹剧粯鐓冮柛蹇擃槸娴?Watch 闂佽崵鍋炵粙蹇涘礉韫囨稑绠垫い蹇撳閸?闂備礁鍟块崢婊堝磻閹剧粯鐓冮柛蹇擃槸娴?    var watchExprs: ArrayList<String> = ArrayList<String>()
+    var nextWatchId: Int = 1
+
+    // 闂備礁鍟块崢婊堝磻閹剧粯鐓冮柛蹇擃槸娴?闂備胶绮…鍫ュ春閺嶎厼鐒?闂備礁鍟块崢婊堝磻閹剧粯鐓冮柛蹇擃槸娴?    var initialized: Boolean = false
+    var started: Boolean = false
+
+    // 闂備礁纾崕銈夊礉韫囨稑鐤鹃柡灞诲劚閻撴盯鏌熼懜顒€濡芥繛鍛矒閺屽秹鎮滃Ο鍝勵潊闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春?    // 闂備礁鎲＄敮妤冩崲閸岀儑缍栭柟鐗堟緲缁€?    // 闂備礁纾崕銈夊礉韫囨稑鐤鹃柡灞诲劚閻撴盯鏌熼懜顒€濡芥繛鍛矒閺屽秹鎮滃Ο鍝勵潊闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春?
+    /// 闂備礁鎲＄敮妤冩崲閸岀儑缍栭柟鐗堟緲缁€宀勬煛瀹ュ骸澧版繛鍫濈埣閹綊宕堕妸锔撅紱缂備浇椴告竟鍡涘箯閻樻祴鏀介柟鎯у閻涖儵鏌ｉ悩鍙夌┛妞ゆ泦鍡愪汗闁搞儜鈧弨锕傛煙闁箑骞楅柣搴枛闇?闂?缂傚倸鍊搁崐褰掓偋閻愮儤鍎?闂?闂備礁鎼鍛偓姘煎墰缁辨捇骞樼拠鎻掑挤闂佺粯顭堢亸娆忊枔閹间焦鐓?    fun init(src: String): Int {
+        srcFile = src
+        val content: String = FileIO.readDebugFile(src)
+        if (content.length == 0) {
+            println("Error: cannot read file: " + src)
+            return 1
+        }
+        source = content
+        sourceLines = DebugSessionUtils.splitLines(content)
+
+        // 濠电姰鍨奸崺鏍偋閻樿纾块悗闈涙憸绾句粙鏌″搴″婵″樊鍨堕弻銊モ槈濞嗘垹鍙濇繝鐢靛仜濞差參骞?aura 缂傚倸鍊搁崐褰掓偋閻愮儤鍎婄憸鏂跨暦閹惰棄惟鐟滃繐顪冩禒瀣仯闁搞儯鍔岄悘锔剧磼椤垵娅嶇€殿噮鍓熷畷鍫曟晜缁涘浠?        compiledFile = "build/debugger_tmp.auc"
+        val cmd: String = "D:\\Code\\AuraLang\\target\\release\\aura.exe build " + src + " --output " + compiledFile
+        val rc: Int = Process.run(cmd)
+        if (rc != 0) {
+            println("Compilation failed (exit code: " + toStr(rc) + ")")
+            return 1
+        }
+        println("Compiled: " + compiledFile)
+
+        initialized = true
+        return 0
+    }
+
+    /// 缂傚倸鍊搁崐褰掓偋閻愮儤鍎婄憸宥夊煘閸愵喖绠涙い鎾跺枔閳ь剦鍠栭湁闁绘娅ｉ崼顏堟煃?    /// 缂傚倸鍊搁崐褰掓偋閻愮儤鍎婄憸宥夊煘閸愵喖绠涙い鎾跺枔閳ь剦鍠栭湁闁绘ü璀﹂崯鍥╃磼鏉堛劎鎳勭€垫澘瀚板浠嬵敇閻愭彃袚缂傚倸鍊搁崐褰掓偋閻愮儤鍎婄憸宥夘敊韫囨稑绠甸柟鐑樻崄閸?init() 濠电偞鍨堕幖鈺呭储婵傚憡鍋╂い鎺戝缁狅綁鏌熼弶鍨暢缂佲偓閸℃稒鐓?    fun compile(): Int {
+        return 0
+    }
+
+    // 闂備礁纾崕銈夊礉韫囨稑鐤鹃柡灞诲劚閻撴盯鏌熼懜顒€濡芥繛鍛矒閺屽秹鎮滃Ο鍝勵潊闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春?    // 闂備礁婀遍悷鎶藉幢閳哄倹鏉搁梻浣侯攰閻洭宕橀妸褍骞€
+    // 闂備礁纾崕銈夊礉韫囨稑鐤鹃柡灞诲劚閻撴盯鏌熼懜顒€濡芥繛鍛矒閺屽秹鎮滃Ο鍝勵潊闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春?
+    /// 闂佸搫顦弲婊堝礉濮椻偓閵嗕線骞嬮悩鐢电厯闁诲函缍嗘禍鐐靛枈瀹ュ鐓ユ繛鎴烆焽婢ф洘銇勯敃鈧…鐑藉蓟閸儱惟闁挎洍鍋撻柍閿嬫閹泛鈽夊Ο鑲╁姽缂備浇椴稿畝鍛婁繆?    fun run(): String {
+        if (!initialized) {
+            return "error: debugger not initialized"
+        }
+        val cmd: String = "D:\\Code\\AuraLang\\target\\release\\aura.exe run " + compiledFile
+        println("Running: " + cmd)
+        val rc: Int = Process.run(cmd)
+        started = true
+        if (rc != 0) {
+            return "error: exit code " + toStr(rc)
+        }
+        return "completion"
+    }
+
+    /// 缂傚倸鍊风紞鈧柛娑卞灡閺嗕即姊洪崷顓犳嚄闁糕檧鏅滈弬鈧梻浣告啞鐢繝銆傞敂鍓х當闁告侗鍠氶埢鏃堟煃瑜滈崜姘辩矙婢舵劦鏁傞柛娑卞枤閸旂兘姊虹紒妯哄缂佺姴绉归崺鈧?    fun continueExec(): String {
+        if (!started) {
+            return run()
+        }
+        return runUntilStop()
+    }
+
+    /// 闂備礁鎲￠〃鍡椕哄鈧、妤呮倷閸濆嫮顓奸悷婊勫灴閵嗕線骞嬮敂鑺ユ珫闂佸壊鍋嗛崳銉╁礉閸曨垱鐓曢煫鍥ь儏閸旂數绱掓潏銊ュ摵闁?濠电姰鍨奸崺鏍偋閻樿纾块柡澶嬪殾閻旂厧鐏崇€规洖娲ㄩ、鍛箾閹寸偞灏い鎴濆缁厽寰勯幇顒傚摋濡炪倖鐗楃粙鎴︽儊椤曗偓閺?    fun stepInto(): String {
+        return "error: step-through not supported in external mode"
+    }
+
+    /// 闂備礁鎲￠〃鍡椕哄鈧、妤呮倷閸濆嫮顓奸悷婊勫灴閵嗕線骞嬮敂鑺ユ珫闂佸壊鍋嗛崳銉╁礉閸曨垰绾ч柍杞扮劍缁侇偆绱掓潏銊ュ摵闁?濠电姰鍨奸崺鏍偋閻樿纾块柡澶嬪殾閻旂厧鐏崇€规洖娲ㄩ、鍛箾閹寸偞灏い鎴濆缁厽寰勯幇顒傚摋濡炪倖鐗楃粙鎴︽儊椤曗偓閺?    fun stepOver(): String {
+        return "error: step-through not supported in external mode"
+    }
+
+    /// 闂備礁鎲￠〃鍡椕哄鈧、妤呮倷閸濆嫮顓奸悷婊勫灴閵嗕線骞嬮敂鑺ユ珫闂佸壊鍋嗛崳銉╁礉閸曨垱鐓曢柟瀵稿Т閻ㄦ垹绱掓潏銊ュ摵闁?濠电姰鍨奸崺鏍偋閻樿纾块柡澶嬪殾閻旂厧鐏崇€规洖娲ㄩ、鍛箾閹寸偞灏い鎴濆缁厽寰勯幇顒傚摋濡炪倖鐗楃粙鎴︽儊椤曗偓閺?    fun stepOut(): String {
+        return "error: step-through not supported in external mode"
+    }
+
+    /// 闂備礁婀遍悷鎶藉幢閳哄倹鏉搁梻浣告啞鐢顭垮Ο鑽ゎ浄闁绘ê妯婂鐗堛亜椤愵偄鏋ょ紒鈧崟顖涚厸闁稿被鍊曢獮姗€鏌?闂備礁鎲￠〃鍡椕哄鈧、?缂傚倸鍊烽悞锕傚箰鐠囧樊鐒?闂傚倷鐒︾€笛囨偡閵娾晩鏁嬮柕鍫濐槹閺咁剙顭跨捄铏瑰闁?    fun runUntilStop(): String {
+        while (true) {
+            val stop: String = debugVm.step()
+            if (stop != "") {
+                return stop
+            }
+            // 婵犵妲呴崑鈧柛瀣崌閺岋紕浠︾拠鎻掑闂佸搫鑻ú顓㈠箖?            val bpId: Int = bpManager.checkBreakpoint(debugVm.getCurrentIp())
+            if (bpId != 0) {
+                return "breakpoint"
+            }
+            if (!debugVm.isRunning()) {
+                return "completion"
+            }
+        }
+    }
+
+    // 闂備礁纾崕銈夊礉韫囨稑鐤鹃柡灞诲劚閻撴盯鏌熼懜顒€濡芥繛鍛矒閺屽秹鎮滃Ο鍝勵潊闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春?    // 闂備礁鎼崑鍡涘储妤ｅ啫纾婚柨婵嗘川娑撳秹鏌ㄥ☉妯侯仾闁?    // 闂備礁纾崕銈夊礉韫囨稑鐤鹃柡灞诲劚閻撴盯鏌熼懜顒€濡芥繛鍛矒閺屽秹鎮滃Ο鍝勵潊闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春?
+    /// 婵犵數鍎戠紞鈧い鏇嗗嫭鍙忛柣鎰惈濡ɑ銇勯幘璺盒㈠ù鐙€鍨堕弻銊モ槈濡偐鍔紓浣虹帛閸ㄥ灝鐣烽崼鏇熷€烽悗娑欘焽閸旂兘姊?ID闂?    fun addBreakpoint(file: String, line: Int): Int {
+        return bpManager.add(file, line)
+    }
+
+    /// 缂傚倷绀侀ˇ顖炩€﹀畡鎵虫瀺閹兼番鍔屽Λ妯汇亜閹捐泛孝濞寸媭鍨堕弻?    fun removeBreakpoint(id: Int): Boolean {
+        return bpManager.remove(id)
+    }
+
+    /// 闂備礁鎲＄敮妤呫€冮崨鏉戝惞妞ゆ挶鍨圭粻銉╂煃瑜滈崜鐔奉嚕閸偄绶為悗锝庡亞閸旂兘姊虹紒妯哄缂佺姴绉归崺鈧?    fun listBreakpoints(): Unit {
+        bpManager.printAll()
+    }
+
+    // 闂備礁纾崕銈夊礉韫囨稑鐤鹃柡灞诲劚閻撴盯鏌熼懜顒€濡芥繛鍛矒閺屽秹鎮滃Ο鍝勵潊闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春?    // 闂備胶绮…鍫ュ春閺嶎厼鐒垫い鎴ｆ硶閸斿秵銇勯妷銉﹀殗鐎?    // 闂備礁纾崕銈夊礉韫囨稑鐤鹃柡灞诲劚閻撴盯鏌熼懜顒€濡芥繛鍛矒閺屽秹鎮滃Ο鍝勵潊闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春?
+    /// 闂備礁鎼悮顐﹀磿閸愯鑰块柛娑卞灟濞岊亪鏌嶈閸撶喖寮婚崼銉ノ╅柕澶堝劤缁夘噣姊绘担鐟扮祷濡ょ姴绻掑Σ鎰枎閹惧啿寮烽梺鍛婃寙娴ｉ椹虫繝纰樷偓鍐茬骇闁搞劍绻勭槐鐐哄川閺夋垹鐓戦悗鐟板婢ф鈧碍鐓￠弻娑欑節閸曗斁鍋撶€ｎ剚顫曟慨妯挎硾杩?    fun variables(): String {
+        var result: String = ""
+        val locals: HashMap<Int, String> = debugVm.getLocals()
+        val keys: ArrayList<Int> 
+
+        var slot: Int = 0
+        while (slot < 32) {
+            val v = locals.get(slot)
+            if (toStr(v) != "null") {
+                keys.add(slot)
+            }
+            slot = slot + 1
+        }
+
+        if (keys.size == 0) {
+            return "  (no local variables)"
+        }
+        var i: Int = 0
+        while (i < keys.size) {
+            val s: Int = keys[i]
+            val val: String = locals.get(s)
+            result = result + "  [" + toStr(s) + "] = " + val + "\n"
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 闂備礁鎼悮顐﹀磿閸愯鑰块柛娑欐綑缁€鍌炴煏婵炲灝鍔ゆ繝鈧导瀛樼厱婵炲棙鍔ч懓鍧楁煕閿濆棙銇濆┑?    fun globals(): String {
+        var result: String = ""
+        val g: HashMap<String, String> = debugVm.getGlobals()
+        if (g.size == 0) {
+            return "  (no global variables)"
+        }
+        val keys: ArrayList<String> = g.keys()
+        var i: Int = 0
+        while (i < keys.size) {
+            val name: String = keys[i]
+            result = result + "  " + name + " = " + g.get(name) + "\n"
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 闂備礁鎼悮顐﹀磿閸愯鑰块柛娑欐綑缁犺偐鈧箍鍎辩€氼喚绮欐繝鍥ㄧ厸濞达絽鎼。濂告煟閺嶃儱鈧繃淇?    fun stack(): String {
+        val st: ArrayList<String> = debugVm.getStack()
+        if (st.size == 0) {
+            return "  (empty stack)"
+        }
+        var result: String = ""
+        var i: Int = 0
+        while (i < st.size) {
+            result = result + "  [" + toStr(i) + "] " + st[i] + "\n"
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 闂備礁鎼悮顐﹀磿閸愯鑰块柛娑卞灡鐎氼剟鏌涢幇鍏哥凹闁哄棗绻橀弻鈥愁吋閸涱垰顣堕梺?    fun callStack(): String {
+        val cs: ArrayList<String> = debugVm.getCallStack()
+        if (cs.size == 0) {
+            return "  (no call stack 闂?in main frame)"
+        }
+        var result: String = "  Call stack (depth " + toStr(cs.size) + "):\n"
+        var i: Int = 0
+        while (i < cs.size) {
+            val entry: String = cs[i]
+            // 闂備礁鎼粔鍫曞储瑜忓Σ? "ip|frameId"
+            val parts: ArrayList<String> = DebugSessionUtils.splitPipe(entry)
+            val retIp: String = parts[0]
+            result = result + "  #" + toStr(i) + " ret@instr " + retIp + "\n"
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 闂備礁鎼悮顐﹀磿閸愯鑰块柛娑欐綑缁犱即鏌涢妷鎴濇噺濮ｅ酣姊洪崫鍕㈤柣妤€妫濋獮搴☆潩鐠轰綍?    fun stackFrame(depth: Int): String {
+        if (depth == 0) {
+            return variables()
+        }
+        // 婵犵數鍎戠徊钘夌暦椤掑倵鍋?> 0 闂傚倸鍊稿ú鐘诲磻閹剧粯鍋￠柡鍥ㄧ缁佺増銇勯弮鈧悧鐘差潖婵犳凹鏁婇柣鎾抽濞堛儲绻涢敐鍛缂佽鍊块幃娲Ω閳哄倸鍓?locals
+        val saved: ArrayList<HashMap<Int, String>> = debugVm.savedLocals
+        if (depth < 0 || depth >= saved.size) {
+            return "  Frame #" + toStr(depth) + " not available"
+        }
+        val frameLocals: HashMap<Int, String> = saved[depth]
+        var result: String = "  Frame #" + toStr(depth) + ":\n"
+        var slot: Int = 0
+        while (slot < 32) {
+            val v = frameLocals.get(slot)
+            if (toStr(v) != "null") {
+                result = result + "  [" + toStr(slot) + "] = " + v + "\n"
+            }
+            slot = slot + 1
+        }
+        return result
+    }
+
+    /// 闂備礁鎼悮顐﹀磿閸愯鑰块柛娑卞幐閺€锕傛煙闁箑鏋ら柛銊﹀▕閺屻劌鈽夊Ο鐓庮杸濠碘槅鍨伴ˇ杈╁垝閸儱浼犻柛鏇ㄥ幗濞堫噣姊烘潪鎵槮闁宦板妿閼洪亶顢氶埀顒€顕ｉ鍕倞闁挎梻鐡旈崑銊╂⒑閸涘﹤濮囬柟鍐查叄椤㈡瑩骞囬悧鍫熸珫婵犮垼娉涢悧鍐磻?    fun showSource(context: Int): String {
+        if (source == "") {
+            return "  (no source loaded)"
+        }
+        return "  " + source
+    }
+            result = result + prefix + toStr(i) + " | " + lineStr + "\n"
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 闂備礁鎲￠悷銉х矓閻㈠憡鍎戦柛锔诲幘绾句粙鏌″鍥ㄦ毄缂佲偓閸曨厽鍠愰柣妤€鐗婄亸顓烆熆瑜忔繛鈧鐐村姍瀹曞爼鏁傞挊澹垿姊婚崒姘仼閻庢凹鍨抽幑銏℃償閵婏附娅栨繝銏ｆ硾閻楀啴宕?    fun disassemble(context: Int): String {
+        return debugVm.disassemble(context)
+    }
+
+    /// 闂佽崵濮撮鍛村疮閹惰姤鍎婃い鏍ㄧ〒閳瑰秹鏌嶉埡浣告殨缂佽鲸鐗犻弻鐔兼嚍閵夘喚鍔稿銈傛櫔缁犳挻淇?    fun info(): String {
+        var s: String = ""
+        s = s + "  Program:     " + srcFile + "\n"
+        s = s + "  Source:      " + toStr(sourceLines.size) + " lines\n"
+        s = s + "  Bytecode:    " + toStr(debugVm.getBytecodeLineCount()) + " instructions\n"
+        s = s + "  VM state:    " + (if (debugVm.isRunning()) { "running" } else { "paused" }) + "\n"
+        s = s + "  IP:          " + toStr(debugVm.getCurrentIp()) + "\n"
+        s = s + "  Function:    " + debugVm.getCurrentFunc() + "\n"
+        s = s + "  Call depth:  " + toStr(debugVm.getCallDepth()) + "\n"
+        s = s + "  Stack depth: " + toStr(debugVm.getStackDepth()) + "\n"
+        s = s + "  Instructions: " + toStr(debugVm.getInstructionCount()) + "\n"
+        s = s + "  Breakpoints: " + toStr(bpManager.breakpoints.size) + "\n"
+        s = s + "  Watch:       " + toStr(watchExprs.size) + "\n"
+        if (debugVm.getError() != "") {
+            s = s + "  Error:       " + debugVm.getError() + "\n"
+        }
+        if (debugVm.getReturnValue() != "" && debugVm.getReturnValue() != "Unit") {
+            s = s + "  Return:      " + debugVm.getReturnValue() + "\n"
+        }
+        return s
+    }
+
+    // 闂備礁纾崕銈夊礉韫囨稑鐤鹃柡灞诲劚閻撴盯鏌熼懜顒€濡芥繛鍛矒閺屽秹鎮滃Ο鍝勵潊闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春?    // 闂佽崵鍋炵粙蹇涘礉韫囨稑绠垫い蹇撳閸ゆ洟鐓崶銊︹拻婵犫偓閹绢喗鐓?    // 闂備礁纾崕銈夊礉韫囨稑鐤鹃柡灞诲劚閻撴盯鏌熼懜顒€濡芥繛鍛矒閺屽秹鎮滃Ο鍝勵潊闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春?
+    /// 婵犳鍠氶幊鎾诲磹閹间礁鐒垫い鎺戝暙椤ュ秹鏌曢崱妤€鏆炴繛鐓庣箻楠炲棜顦寸痪顓涘亾闂備焦瀵х粙鎴︽偋閸涱垰鍨濋幖娣妼缂佲晜銇勯弽銊р槈闁伙富鍣ｉ弻娑樷枎閹版儼鈧潡鏌涢敐鍡樸仢鐎殿喖顭锋俊鐑芥晝閳ь剟藟濠靛鐓ユ繛鎴烇供濡插爼鏌?    fun eval(expr: String): String {
+        val trimmed: String = DebugSessionUtils.trim(expr)
+        val directVal: String = lookupVariable(trimmed)
+        if (directVal != "") {
+            return directVal
+        }
+        return "(not found: " + trimmed + ")"
+    }
+
+    /// 闂備礁鎼悮顐﹀磿閸欏鐝舵慨妞诲亾鐎规洩绲介～婊堝焵椤掑嫬闂繛宸簻鐟欙妇鈧箍鍎遍幏瀣吹閻樿绠归悗娑櫳戦埛鎺撶箾閸喎鐏寸€规洘鍔楀☉鍨槹鎼达綆妲遍梻浣哄劦閺呮盯鎮洪妸褎鏆滈柟缁㈠枛閽?VM globals闂備焦瀵х粙鎴λ囬銏犵劦?    fun lookupVariable(name: String): String {
+        val g: String = debugVm.getGlobal(name)
+        if (g != "") {
+            return g
+        }
+        return ""
+    }
+
+    // 闂備礁纾崕銈夊礉韫囨稑鐤鹃柡灞诲劚閻撴盯鏌熼懜顒€濡芥繛鍛矒閺屽秹鎮滃Ο鍝勵潊闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春?    // Watch 闂佽崵鍋炵粙蹇涘礉韫囨稑绠垫い蹇撳閸?    // 闂備礁纾崕銈夊礉韫囨稑鐤鹃柡灞诲劚閻撴盯鏌熼懜顒€濡芥繛鍛矒閺屽秹鎮滃Ο鍝勵潊闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春閿熺姴绠涢柕濠忛檮閻濇娊姊哄畷鍥у妺闁告柨绻樺鏌ュ蓟閵夈儳鍘搁梺纭呭焽閸斿秴鈻嶅鍫熺厓闁绘垶锚婵偓闂佸搫鎳忛悡锟犲春?
+    /// 婵犵數鍎戠紞鈧い鏇嗗嫭鍙?watch 闂佽崵鍋炵粙蹇涘礉韫囨稑绠垫い蹇撳閸ゆ洟鐓崶褜鍎岄柛?    fun watch(expr: String): Int {
+        watchExprs.add(expr)
+        println("  Watch #" + toStr(nextWatchId) + ": " + expr)
+        nextWatchId = nextWatchId + 1
+        return nextWatchId
+    }
+
+    /// 缂傚倷绀侀ˇ顖炩€﹀畡鎵虫瀺?watch 闂佽崵鍋炵粙蹇涘礉韫囨稑绠垫い蹇撳閸ゆ洟鐓崶褜鍎岄柛?    fun unwatch(id: Int): Boolean {
+        if (id < 1 || id > nextWatchId - 1) {
+            return false
+        }
+        val idx: Int = id - 1
+        if (idx < 0 || idx >= watchExprs.size) {
+            return false
+        }
+        val removed: String = watchExprs.remove(idx)
+        println("  Unwatch #" + toStr(id) + ": " + removed)
+        return true
+    }
+
+    /// 闂備胶鎳撻悘姘跺箰缁嬭法鏆ら柛鎰靛枛缁犮儵鏌嶈閸撶喎顕?watch 闂佽崵鍋炵粙蹇涘礉韫囨稑绠垫い蹇撳閸ゆ洟鐓崶銊︾闁伙綀浜幉鎼佹偋閸喎纰嶆繝鈷€鍛枅鐎规洘鍔楃划顓犳偘閳ュ厖澹?    fun printWatch(): String {
+        if (watchExprs.size == 0) {
+            return "  (no watch expressions)"
+        }
+        var result: String = ""
+        var i: Int = 0
+        while (i < watchExprs.size) {
+            val val: String = eval(watchExprs[i])
+            result = result + "  #" + toStr(i + 1) + " " + watchExprs[i] +
+                " = " + val + "\n"
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 闂傚倷绶￠崑鈧柛瀣崌閺屾盯骞嬮敂鍓х獥闂佹眹鍔庨崰鎾诲箯閻樿鍗抽柣鎰嚟瑜版粓姊?    fun quit(): Int {
+        initialized = false
+        started = false
+        return 0
+    }
+}
+
+/// DebugSession 闁诲氦顫夐幃鍫曞磿闁秴鐭楅悹鎭掑妷閸嬫捇鎮藉▓鎸庢暞闂佽姤鐗曠€氱増淇?object DebugSessionUtils {
+
+    /// 闂備礁婀遍…鍫ニ囬弶璺ㄦ殾闁肩⒈鍓氶崑妯尖偓鍏夊亾闁逞屽墴椤㈡牗绗熼埀顒€鐣峰璺哄耿婵°倐鍋撴い銉ョ箻閹鈽夊▎妯荤暭濡炪倖鍨抽悞锔剧矙婢跺奔娌柛灞绢殔娴?    fun splitLines(text: String): ArrayList<String> {
+        val result: ArrayList<String> 
+        var i: Int = 0
+        var lineStart: Int = 0
+        val len: Int = text.length
+        while (i < len) {
+            if (text.charCodeAt(i) == 10) {  // '\n'
+                result.add(DebugSessionUtils.safeSubstring(text, lineStart, i))
+                lineStart = i + 1
+            }
+            i = i + 1
+        }
+        if (lineStart < len) {
+            result.add(DebugSessionUtils.safeSubstring(text, lineStart, len))
+        }
+        return result
+    }
+
+    /// 闂?'|' 闂備礁鎲＄敮鎺懳涘Δ浣虹彾濠电姴瀚ч崑鎾斥槈濞嗘ɑ鐣煎銈嗗灣閻掞妇绮欐径灞兼勃闁稿本顨呮禍?    fun splitPipe(text: String): ArrayList<String> {
+        val result: ArrayList<String> 
+        var i: Int = 0
+        var start: Int = 0
+        val len: Int = text.length
+        while (i < len) {
+            if (text.charCodeAt(i) == 124) {  // '|'
+                result.add(DebugSessionUtils.safeSubstring(text, start, i))
+                start = i + 1
+            }
+            i = i + 1
+        }
+        if (start < len) {
+            result.add(DebugSessionUtils.safeSubstring(text, start, len))
+        }
+        return result
+    }
+
+    /// 闂備礁鎲￠敋妞ゎ厼鍢查埢宥嗘償椤喚纾鹃梺鍝勮癁閸涱厽娈圭紓鍌欑閻礁鈻嶉敐鍛瀺鐟滄梹淇?    fun trim(text: String): String {
+        var start: Int = 0
+        var end: Int = text.length
+        while (start < end && (text.charCodeAt(start) == 32 || text.charCodeAt(start) == 9 ||
+            text.charCodeAt(start) == 10 || text.charCodeAt(start) == 13)) {
+            start = start + 1
+        }
+        while (end > start && (text.charCodeAt(end - 1) == 32 || text.charCodeAt(end - 1) == 9 ||
+            text.charCodeAt(end - 1) == 10 || text.charCodeAt(end - 1) == 13)) {
+            end = end - 1
+        }
+        if (start == 0 && end == text.length) {
+            return text
+        }
+        return DebugSessionUtils.safeSubstring(text, start, end)
+    }
+
+    /// 闂佽瀛╃粙鎺椼€冮崼銉晞濞达絽婀遍埢鏃堟煠閼规澘鐓愮紒渚囧櫍閺屸剝鎷呴崫銉︽喖闂佸搫妫涢崰鏍极瀹ュ閱囬柣鏂挎憸椤╄鲸绻?String.toInt闂備焦瀵х粙鎴λ囬銏犵劦?    fun toInt(text: String): Int {
+        return DebugVmUtils.vrToInt(text)
+    }
+
+    /// 闂佽娴烽幊鎾凰囬鐐茬煑闊洦娲嶉崑鎾斥槈濞嗗繐顫堥柣鐔告礀濡繈寮澶婇敜闁哥偞鎸code VM 闂備胶顭堢换鎺楀储瑜旈、娆撳箛閻楀牊娅栨繝銏ｆ硾閻楀啴宕?    fun safeSubstring(text: String, start: Int, end: Int): String {
+        return DebugVmUtils.safeSubstring(text, start, end)
+    }
+
+    /// 闂佽瀛╃粙鎺椼€冮崼銉晞濞达絽婀遍埢鏃堟煕濞嗗浚妲圭粭鎴︽⒑閸涘﹦鍟茬紓鍌涚缁傚秹骞掑Δ鈧粻浼存煕閵夋垵鎳忓В搴ㄦ⒑閸涘﹥灏紒澶婂濡叉劙骞嬪┑鎰闂侀€炲苯澧€垫澘瀚蹇涘礈瑜忛ˇ鈺呮⒑閸濆嫭鎼愰柕鍥耿瀹?text.startsWith闂備焦瀵х粙鎴λ囬銏犵劦?    fun myStartsWith(text: String, prefix: String): Boolean {
+        if (prefix.length > text.length) {
+            return false
+        }
+        var i: Int = 0
+        while (i < prefix.length) {
+            if (text.charCodeAt(i) != prefix.charCodeAt(i)) {
+                return false
+            }
+            i = i + 1
+        }
+        return true
+    }
+
+    /// 闂佽崵鍠愰悷杈╁緤妤ｅ啯鍊靛ù鐘差儏閻鎱ㄥ璇蹭壕闂侀潻缍€濞咃綁骞冩导绮光偓锕傚箳閺冨偆妲遍梻浣告惈缁夊爼宕㈣濡? name|slot闂備焦瀵х粙鎴﹀嫉椤掑嫭鍎婇柨娑樺閸嬫﹢鎮橀悙璺轰汗妞ゅ繐宕埥澶愬箼閸愌勫€ｇ紓浣介哺瀹€鍛婁繆?    fun parseVarTable(varTable: String): HashMap<String, Int> {
+        val map: HashMap<String, Int> 
+        if (varTable == "") {
+            return map
+        }
+        var pos: Int = 0
+        val len: Int = varTable.length
+        var lineStart: Int = 0
+        while (pos < len) {
+            if (varTable.charCodeAt(pos) == 10) {  // '\n'
+                val line: String = DebugSessionUtils.safeSubstring(varTable, lineStart, pos)
+                if (line.length > 0) {
+                    val parts: ArrayList<String> = splitPipe(line)
+                    if (parts.size >= 2) {
+                        val name: String = parts[0]
+                        val slot: Int = DebugVmUtils.vrToInt(parts[1])
+                        map.put(name, slot)
+                    }
+                }
+                lineStart = pos + 1
+            }
+            pos = pos + 1
+        }
+        // 濠电姰鍨煎▔娑氣偓姘煎櫍楠炲啯绻濋崶褍鐝橀梺閫炲苯澧寸€规洏鍎查幆鏂库攽閸偂绱橀梺?        if (lineStart < len) {
+            val line: String = DebugSessionUtils.safeSubstring(varTable, lineStart, len)
+            if (line.length > 0) {
+                val parts: ArrayList<String> = splitPipe(line)
+                if (parts.size >= 2) {
+                    val name: String = parts[0]
+                    val slot: Int = DebugVmUtils.vrToInt(parts[1])
+                    map.put(name, slot)
+                }
+            }
+        }
+        return map
+    }
+}

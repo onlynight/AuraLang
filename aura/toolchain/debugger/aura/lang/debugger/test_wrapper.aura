@@ -1,0 +1,21 @@
+import ""DebugVm.aura""
+
+class Wrapper {
+    var vm: DebugVm = DebugVm()
+    
+    init() {
+        this.vm = DebugVm()
+    }
+    
+    fun getIp(): Int {
+        return this.vm.ip
+    }
+}
+
+fun main(): Int {
+    println("Creating Wrapper...")
+    val w = Wrapper()
+    println("Wrapper created!")
+    println("IP: " + toStr(w.getIp()))
+    return 0
+}

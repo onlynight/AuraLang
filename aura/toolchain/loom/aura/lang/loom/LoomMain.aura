@@ -4,35 +4,43 @@ package aura.lang.loom
 import aura.lang.std.String
 import aura.lang.std.Collections
 import aura.lang.std.IO
-import aura.lang.native.console.Console
-import aura.lang.loom.Manifest
-import aura.lang.loom.TaskGraph
-import aura.lang.loom.BuildCache
-import aura.lang.loom.TaskExecutor
-import aura.lang.loom.Task
-import aura.lang.loom.LoomError
-import aura.lang.loom.FileIO
+import aura.lang.std.FileSystem
 
-// ═══════════════════════════════════════════════════════════════
-// Loom（主类）
-// ═══════════════════════════════════════════════════════════════
+import "Manifest.aura"
+import "TaskGraph.aura"
+import "BuildCache.aura"
+import "TaskExecutor.aura"
+import "Task.aura"
+import "LoomError.aura"
+import "TaskType.aura"
+import "FileIO.aura"
 
+// Loom — main class
 class Loom {
-    var manifest: Manifest = null
-    var taskGraph: TaskGraph = TaskGraph()
-    var cache: BuildCache = BuildCache("target/cache")
-    var executor: TaskExecutor = null
-    var projectDir: String = ""
-    var verbose: Boolean = false
+    var manifest: Manifest
+    var taskGraph: TaskGraph
+    var cache: BuildCache
+    var executor: TaskExecutor
+    var projectDir: String
+    var verbose: Boolean
+
+    constructor() {
+        this.manifest = null
+        this.taskGraph = TaskGraph()
+        this.cache = null
+        this.executor = null
+        this.projectDir = ""
+        this.verbose = false
+    }
 
     fun init(projectDir: String): Int {
         this.projectDir = projectDir
         val manifestPath: String = projectDir + "/aura.toml"
 
-        manifest = Manifest("my-project", manifestPath)
+        manifest = createManifest("my-project", manifestPath)
         val loadResult: Int = manifest.load()
         if (loadResult != LoomError.OK) {
-            Console.println("[loom] No aura.toml found, creating default")
+            println("[loom] No aura.toml found, creating default")
             manifest.save()
         }
 
@@ -43,34 +51,41 @@ class Loom {
     }
 
     fun loadDefaultTasks(): Unit {
-        taskGraph.addTask("clean", TaskType.CLEAN, "Clean build artifacts")
-        taskGraph.addTask("resolve", TaskType.RESOLVE, "Resolve dependencies")
-        taskGraph.addTask("check", TaskType.CHECK, "Check syntax and semantics")
-        taskGraph.addTask("compile", TaskType.COMPILE, "Compile source code")
-        taskGraph.addTask("test", TaskType.TEST, "Run tests")
-        taskGraph.addTask("fmt", TaskType.FMT, "Format code")
-        taskGraph.addTask("doc", TaskType.DOC, "Generate documentation")
-        taskGraph.addTask("package", TaskType.PACKAGE, "Build package")
-        taskGraph.addTask("run", TaskType.EXECUTE, "Run application")
-        taskGraph.addTask("watch", TaskType.WATCH, "Watch mode")
+        taskGraph.addTaskByName("clean", TaskType.CLEAN)
+        taskGraph.addTaskByName("resolve", TaskType.RESOLVE)
+        taskGraph.addTaskByName("check", TaskType.CHECK)
+        taskGraph.addTaskByName("compile", TaskType.COMPILE)
+        taskGraph.addTaskByName("test", TaskType.TEST)
+        taskGraph.addTaskByName("fmt", TaskType.FMT)
+        taskGraph.addTaskByName("doc", TaskType.DOC)
+        taskGraph.addTaskByName("package", TaskType.PACKAGE)
+        taskGraph.addTaskByName("run", TaskType.EXECUTE)
+        taskGraph.addTaskByName("watch", TaskType.WATCH)
 
-        taskGraph.addDependency("compile", "resolve")
-        taskGraph.addDependency("compile", "check")
-        taskGraph.addDependency("test", "compile")
-        taskGraph.addDependency("package", "compile")
-        taskGraph.addDependency("run", "compile")
+        // Set up dependencies
+        val compile: Task = taskGraph.getTask("compile")
+        if (compile != null) {
+            compile.addDep("resolve")
+            compile.addDep("check")
+        }
+        val testTask: Task = taskGraph.getTask("test")
+        if (testTask != null) { testTask.addDep("compile") }
+        val pkgTask: Task = taskGraph.getTask("package")
+        if (pkgTask != null) { pkgTask.addDep("compile") }
+        val runTask: Task = taskGraph.getTask("run")
+        if (runTask != null) { runTask.addDep("compile") }
     }
 
     fun runTask(taskName: String): Int {
-        val task: Task = taskGraph.get(taskName)
+        val task: Task = taskGraph.getTask(taskName)
         if (task == null) {
-            Console.println("[loom] Unknown task: " + taskName)
+            println("[loom] Unknown task: " + taskName)
             return LoomError.NOT_FOUND
         }
         return executor.execute(task)
     }
 
-    fun runAll(): Int { return taskGraph.execute(executor) }
+    fun runAll(): Int { return taskGraph.executeAll(executor) }
     fun build(): Int { return runTask("compile") }
     fun test(): Int { return runTask("test") }
     fun check(): Int { return runTask("check") }
@@ -83,18 +98,18 @@ class Loom {
         loomMkdirP(dir + "/src")
         loomMkdirP(dir + "/tests")
 
-        val manifest: Manifest = Manifest(name, dir + "/aura.toml")
-        manifest.version = "0.1.0"
-        manifest.description = "A new Aura project"
-        manifest.save()
+        val m: Manifest = createManifest(name, dir + "/aura.toml")
+        m.version = "0.1.0"
+        m.description = "A new Aura project"
+        m.save()
 
         val mainContent: String = "fun main(): Int {\n    println(\"Hello, " + name + "!\")\n    return 0\n}\n"
         loomWriteText(dir + "/src/main.aura", mainContent)
 
-        val testContent: String = "fun testHello(): Int {\n    val result: Int = 1 + 1\n    Assert.assert(result == 2, \"2 == 2\")\n    return 0\n}\n"
+        val testContent: String = "fun testHello(): Int {\n    val result: Int = 1 + 1\n    if (result != 2) { println(\"FAIL\") ; return 1 }\n    return 0\n}\nfun main(): Int {\n    return testHello()\n}\n"
         loomWriteText(dir + "/tests/test_main.aura", testContent)
 
-        Console.println("[loom] Project created: " + dir)
+        println("[loom] Project created: " + dir)
         return LoomError.OK
     }
 }

@@ -9,7 +9,7 @@ class LspRequest {
     val method: String
     val params: String
 
-    fun LspRequest(id: Int, method: String, params: String) {
+    init(id: Int, method: String, params: String) {
         this.id = id
         this.method = method
         this.params = params

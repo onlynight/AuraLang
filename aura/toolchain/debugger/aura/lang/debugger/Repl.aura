@@ -1,106 +1,256 @@
 // aura:///debugger/aura/lang/debugger/Repl.aura
 package aura.lang.debugger
 
-// ── 标准库 ──
-import aura.lang.std.String
+// 闂傚倸鍊风粈渚€宕崸妤€鍌ㄦ繝濠傜墕绾惧鏌熼崜褏甯涢柣鎾冲暣閺屾稖绠涢幙鍐┬︽繛?闂傚倸鍊风粈渚€骞栭銈囩煋闁哄鍤氬ú顏勎у璺猴躬濡嘲顪冮妶鍡欏缂佸甯″畷?闂傚倸鍊风粈渚€宕崸妤€鍌ㄦ繝濠傜墕绾惧鏌熼崜褏甯涢柣鎾冲暣閺屾稖绠涢幙鍐┬︽繛?import aura.lang.std.String
 import aura.lang.std.IO
 
-// ── Native 包 ──
-import aura.lang.native.console.Console
-import aura.lang.native.process.ProcessNative
+// 闂傚倸鍊风粈渚€宕崸妤€鍌ㄦ繝濠傜墕绾惧鏌熼崜褏甯涢柣鎾冲暣閺屾稖绠涢幙鍐┬︽繛?闂傚倸鍊烽懗鍫曗€﹂崼銏″床闁归偊鍠掗崑鎾愁潩閻撳骸顫┑鈥冲级閸旀瑥螞閸愵煁鐟扮暦閸パ勭亪闂佹悶鍔戠粻鏍箹瑜版帩鏁冩い顐幗濡?闂傚倸鍊风粈渚€宕崸妤€鍌ㄦ繝濠傜墕绾惧鏌熼崜褏甯涢柣鎾冲暣閺屾稖绠涢幙鍐┬︽繛?import "session.aura"
+import "DebugVm.aura"
 
-// ── 兄弟模块 ──
-import aura.lang.debugger.Debugger
+// 闂傚倸鍊风粈浣哄椤撱垹纾块柕鍫濐槸缁€澶愮叓閸ャ劎鈽夐柣銈夌畺閺岋紕浠︾拠鎻掑闂佺粯鎸婚惄顖炲蓟閻斿吋鍤嬫い鎺嗗亾濠德ゅГ缁绘盯宕ㄩ鍓х厜闂佸搫鑻粔褰掑箖濠婂吘鐔煎传閸曞灚缍傞梻鍌欑閹碱偊骞婅箛娑欏亗闁跨喓濮撮弰銉╂煥閻斿搫孝缂佺姵鐩弻鏇熺節韫囨稒顎嶉梺缁樼箖婵炲﹤顫忛崫鍕殾闁搞儜鍐瀱闂備礁鎲￠弻銊ф崲濡警鍤曢柡灞诲劚閽冪喖鏌曟径鍫濆姢闁告ɑ鎮傚铏规兜閸涱厾鍔烽梺鍛婃煥缁夋挳鍩㈠鍜佺叆闁割偆鍠撻崢鎾绘⒑缂佹ê鐏﹂柨姘攽椤旂懓浜鹃梻鍌欑閹碱偊骞婅箛娑欏亗闁跨喓濮撮弰銉╂煥閻斿搫孝缂佺姵鐩弻鏇熺節韫囨稒顎嶉梺缁樼箖婵炲﹤顫忛崫鍕殾闁搞儜鍐瀱闂備礁鎲￠弻銊ф崲濡警鍤曢柡灞诲劚閽冪喖鏌曟径鍫濆姢闁告ɑ鎮傚铏规兜閸涱厾鍔烽梺鍛婃煥缁夋挳鍩㈠鍜佺叆闁割偆鍠撻崢鎾绘⒑缂佹ê鐏﹂柨姘攽椤旂懓浜鹃梻鍌欑閹碱偊骞婅箛娑欏亗闁跨喓濮撮弰銉╂煥閻斿搫孝缂佺姵鐩弻鏇熺節韫囨稒顎嶉梺缁樼箖婵炲﹤顫忛崫鍕殾闁搞儜鍐瀱闂備礁鎲￠弻銊ф崲濡警鍤曢柡灞诲劚閽冪喖鏌曟径鍫濆姢闁告ɑ鎮傚铏规兜閸涱厾鍔烽梺鍛婃煥缁夋挳鍩㈠鍜佺叆闁割偆鍠撻崢鎾绘⒑缂佹ê鐏﹂柨姘攽椤旂懓浜鹃梻鍌欑閹碱偊骞婅箛娑欏亗闁跨喓濮撮弰銉╂煥閻斿搫孝缂佺姵鐩弻鏇熺節韫囨稒顎嶉梺缁樼箖婵炲﹤顫忛崫鍕殾闁搞儜鍐瀱闂備礁鎲￠弻銊ф崲濡警鍤曢柡灞诲劚閽冪喖鏌曟径鍫濆姢闁告ɑ鎮傚铏规兜閸涱厾鍔烽梺鍛婃煥缁夋挳鍩㈠鍜佺叆闁割偆鍠撻崢鎾绘⒑缂佹ê鐏﹂柨姘攽椤旂懓浜鹃梻鍌欑閹碱偊骞婅箛娑欏亗闁跨喓濮撮弰銉╂煥閻斿搫孝缂佺姵鐩弻鏇熺節韫囨稒顎嶉梺缁樼箖婵炲﹤顫忛崫鍕殾闁搞儜鍐瀱闂備礁鎲￠弻銊ф崲濡警鍤曢柡灞诲劚閽冪喖鏌曟径鍫濆姢闁告ɑ鎮傚铏规兜閸涱厾鍔烽梺鍛婃煥缁夋挳鍩㈠鍜佺叆闁割偆鍠撻崢鎾绘⒑缂佹ê鐏﹂柨姘攽椤旂懓浜鹃梻鍌欑閹碱偊骞婅箛娑欏亗闁跨喓濮撮弰銉╂煥閻斿搫孝缂佺姵鐩弻鏇熺節韫囨稒顎嶉梺缁樼箖婵炲﹤顫忛崫鍕殾闁搞儜鍐瀱闂備礁鎲￠弻銊ф崲濡警鍤曢柡灞诲劚閽冪喖鏌曟径鍫濆姢闁告ɑ鎮傚铏规兜閸涱厾鍔烽梺鍛婃煥缁夋挳鍩㈠鍜佺叆闁割偆鍠撻崢鎾绘⒑缂佹ê鐏﹂柨姘攽椤旂懓浜鹃梻鍌欑閹碱偊骞婅箛娑欏亗闁跨喓濮撮弰銉╂煥閻斿搫孝缂佺姵鐩弻鏇熺節韫囨稒顎嶉梺缁樼箖婵炲﹤顫忛崫鍕殾闁搞儜鍐瀱闂備礁鎲￠弻銊ф崲濡警鍤曢柡灞诲劚閽冪喖鏌曟径鍫濆姢闁告ɑ鎮傚铏规兜閸涱厾鍔烽梺鍛婃煥缁夋挳鍩㈠鍜佺叆闁割偆鍠撻崢鎾绘⒑缂佹ê鐏﹂柨姘攽椤旂懓浜鹃梻鍌欑閹碱偊骞婅箛娑欏亗闁跨喓濮撮弰?// 濠电姷鏁搁崑娑㈡偤閵娾晛鍚归幖娣妼绾惧綊鏌熼悙顒€鍔跺┑顔藉▕閺屸剝寰勭€ｉ潧鍔岄梺鎼炲€栧ú鐔兼偂椤愶箑鐐婇柕濠忓濞堛倕鈹戦悙鑼闁绘牕銈搁獮鍐亹閹烘垹鍊為梺闈涱煭婵″洭藝閵夈儮鏀?REPL
+// 闂傚倸鍊风粈浣哄椤撱垹纾块柕鍫濐槸缁€澶愮叓閸ャ劎鈽夐柣銈夌畺閺岋紕浠︾拠鎻掑闂佺粯鎸婚惄顖炲蓟閻斿吋鍤嬫い鎺嗗亾濠德ゅГ缁绘盯宕ㄩ鍓х厜闂佸搫鑻粔褰掑箖濠婂吘鐔煎传閸曞灚缍傞梻鍌欑閹碱偊骞婅箛娑欏亗闁跨喓濮撮弰銉╂煥閻斿搫孝缂佺姵鐩弻鏇熺節韫囨稒顎嶉梺缁樼箖婵炲﹤顫忛崫鍕殾闁搞儜鍐瀱闂備礁鎲￠弻銊ф崲濡警鍤曢柡灞诲劚閽冪喖鏌曟径鍫濆姢闁告ɑ鎮傚铏规兜閸涱厾鍔烽梺鍛婃煥缁夋挳鍩㈠鍜佺叆闁割偆鍠撻崢鎾绘⒑缂佹ê鐏﹂柨姘攽椤旂懓浜鹃梻鍌欑閹碱偊骞婅箛娑欏亗闁跨喓濮撮弰銉╂煥閻斿搫孝缂佺姵鐩弻鏇熺節韫囨稒顎嶉梺缁樼箖婵炲﹤顫忛崫鍕殾闁搞儜鍐瀱闂備礁鎲￠弻銊ф崲濡警鍤曢柡灞诲劚閽冪喖鏌曟径鍫濆姢闁告ɑ鎮傚铏规兜閸涱厾鍔烽梺鍛婃煥缁夋挳鍩㈠鍜佺叆闁割偆鍠撻崢鎾绘⒑缂佹ê鐏﹂柨姘攽椤旂懓浜鹃梻鍌欑閹碱偊骞婅箛娑欏亗闁跨喓濮撮弰銉╂煥閻斿搫孝缂佺姵鐩弻鏇熺節韫囨稒顎嶉梺缁樼箖婵炲﹤顫忛崫鍕殾闁搞儜鍐瀱闂備礁鎲￠弻銊ф崲濡警鍤曢柡灞诲劚閽冪喖鏌曟径鍫濆姢闁告ɑ鎮傚铏规兜閸涱厾鍔烽梺鍛婃煥缁夋挳鍩㈠鍜佺叆闁割偆鍠撻崢鎾绘⒑缂佹ê鐏﹂柨姘攽椤旂懓浜鹃梻鍌欑閹碱偊骞婅箛娑欏亗闁跨喓濮撮弰銉╂煥閻斿搫孝缂佺姵鐩弻鏇熺節韫囨稒顎嶉梺缁樼箖婵炲﹤顫忛崫鍕殾闁搞儜鍐瀱闂備礁鎲￠弻銊ф崲濡警鍤曢柡灞诲劚閽冪喖鏌曟径鍫濆姢闁告ɑ鎮傚铏规兜閸涱厾鍔烽梺鍛婃煥缁夋挳鍩㈠鍜佺叆闁割偆鍠撻崢鎾绘⒑缂佹ê鐏﹂柨姘攽椤旂懓浜鹃梻鍌欑閹碱偊骞婅箛娑欏亗闁跨喓濮撮弰銉╂煥閻斿搫孝缂佺姵鐩弻鏇熺節韫囨稒顎嶉梺缁樼箖婵炲﹤顫忛崫鍕殾闁搞儜鍐瀱闂備礁鎲￠弻銊ф崲濡警鍤曢柡灞诲劚閽冪喖鏌曟径鍫濆姢闁告ɑ鎮傚铏规兜閸涱厾鍔烽梺鍛婃煥缁夋挳鍩㈠鍜佺叆闁割偆鍠撻崢鎾绘⒑缂佹ê鐏﹂柨姘攽椤旂懓浜鹃梻鍌欑閹碱偊骞婅箛娑欏亗闁跨喓濮撮弰銉╂煥閻斿搫孝缂佺姵鐩弻鏇熺節韫囨稒顎嶉梺缁樼箖婵炲﹤顫忛崫鍕殾闁搞儜鍐瀱闂備礁鎲￠弻銊ф崲濡警鍤曢柡灞诲劚閽冪喖鏌曟径鍫濆姢闁告ɑ鎮傚铏规兜閸涱厾鍔烽梺鍛婃煥缁夋挳鍩㈠鍜佺叆闁割偆鍠撻崢鎾绘⒑缂佹ê鐏﹂柨姘攽椤旂懓浜鹃梻鍌欑閹碱偊骞婅箛娑欏亗闁跨喓濮撮弰銉╂煥閻斿搫孝缂佺姵鐩弻鏇熺節韫囨稒顎嶉梺缁樼箖婵炲﹤顫忛崫鍕殾闁搞儜鍐瀱闂備礁鎲￠弻銊ф崲濡警鍤曢柡灞诲劚閽冪喖鏌曟径鍫濆姢闁告ɑ鎮傚铏规兜閸涱厾鍔烽梺鍛婃煥缁夋挳鍩㈠鍜佺叆闁割偆鍠撻崢鎾绘⒑缂佹ê鐏﹂柨姘攽椤旂懓浜鹃梻鍌欑閹碱偊骞婅箛娑欏亗闁跨喓濮撮弰?
+/// 闂傚倷娴囧畷鍨叏閹绢噮鏁勯柛娑欐綑閻ゎ噣鏌熼幆鏉啃撻柛搴★攻閵囧嫰寮介顫捕闂?REPL 闂傚倷娴囬褍霉閻戣棄鏋侀柟闂撮檷閳ь兛鐒︾换婵嬪炊閵娿儳妯侀梻浣告啞濞诧箓宕归幏宀€绠?object DebugRepl {
 
-// ═══════════════════════════════════════════════════════════════
-// 交互式调试器 REPL
-// ═══════════════════════════════════════════════════════════════
+    /// 闂傚倸鍊烽懗鍫曞箠閹剧粯鍊舵慨妯挎硾缁犳壆绱掔€ｎ厽纭堕柡鍡愬€濋弻娑㈠箛閸忓摜鍑归梺鍝勬缁秹濡甸崟顖氱睄闁稿本鑹炬禒姗€鎮跺鍗炐ｇ紒缁樼洴閺佹劙宕ㄩ缁㈡Ш闂備礁鎲￠幐鑽ゆ崲閸愵亖鍋撻棃娑栧仮鐎规洏鍔戝鍫曞箠?    fun printHelp(): Unit {
+        println("Commands:")
+        println("  run          - Start execution")
+        println("  c/continue   - Continue to next breakpoint")
+        println("  s/step       - Step into (single instruction)")
+        println("  so/step-over - Step over function calls")
+        println("  o/step-out   - Step out of current function")
+        println("  b <file>:<line>  - Set breakpoint")
+        println("  d <id>       - Delete breakpoint")
+        println("  bl           - List breakpoints")
+        println("  v            - Show local variables")
+        println("  g            - Show global variables")
+        println("  st           - Show call stack")
+        println("  frame <n>    - Show stack frame n")
+        println("  l            - List source (current line)")
+        println("  l <line>     - List source around line")
+        println("  dis          - Disassemble (current instruction)")
+        println("  dis <n>      - Disassemble with context")
+        println("  p <expr>     - Evaluate expression")
+        println("  w <expr>     - Watch expression")
+        println("  uw <id>      - Unwatch expression")
+        println("  info         - Show debug info")
+        println("  func         - List functions")
+        println("  help         - Show this help")
+        println("  q/quit       - Exit debugger")
+    }
 
-fun debugRepl(debugger: Debugger): Unit {
-    Console.println("Aura Debugger REPL (Phase E — pure Aura)")
-    Console.println("Commands:")
-    Console.println("  run              — Start execution")
-    Console.println("  continue         — Continue to next breakpoint")
-    Console.println("  step             — Step over (step over)")
-    Console.println("  step-into        — Step into function call")
-    Console.println("  step-out         — Step out of function")
-    Console.println("  break <file>:<line>  — Add breakpoint")
-    Console.println("  delete <id>      — Remove breakpoint")
-    Console.println("  breakpoints      — List all breakpoints")
-    Console.println("  variables        — Show local variables")
-    Console.println("  stack            — Show call stack")
-    Console.println("  frame <depth>    — Show stack frame")
-    Console.println("  eval <expr>      — Evaluate expression")
-    Console.println("  watch <expr>     — Watch expression")
-    Console.println("  quit             — Exit debugger")
-    Console.println("")
+    /// 闂傚倸鍊风粈渚€骞栭銈傚亾濮樼厧澧柡鍛板煐缁傛帞鈧綆鈧叏闄勯幈銊ノ熼幐搴ｃ€愮紒鎯у⒔缁垳鎹㈠┑鍥╃瘈闁稿本鍑规导宀勬⒑閸涘﹥灏伴柛搴＄枃瑜颁線姊洪幖鐐插姷缂佽尪濮ら弲鍫曞箵閹规缍婇幃鈩冩償閵忕姵鐣诲┑?    fun printStopInfo(session: DebugSession, reason: String): Unit {
+        println("")
+    /// Print stop information.
+        println("  闂?" + session.info())
+        println("  闂?Source:")
+        println("  闂?" + session.showSource(3))
+        if (session.watchExprs.size > 0) {
+            println("  闂?Watch:")
+            println("  闂?" + session.printWatch())
+        }
+            println("  [watch expressions]")
+    }
 
-    while (true) {
-        Console.println("(debug) ")
-        val line: String = IO.readLine()
-
-        if (line.length == 0) { continue }
-
-        if (line == "quit" || line == "q") {
-            debugger.quit()
-            return
-        } else if (line == "run") {
-            debugger.run()
-        } else if (line == "continue" || line == "c") {
-            debugger.continueExec()
-        } else if (line == "step" || line == "s") {
-            debugger.stepOver()
-        } else if (line == "step-into") {
-            debugger.stepInto()
-        } else if (line == "step-out") {
-            debugger.stepOut()
-        } else if (line.startsWith("break ") || line.startsWith("b ")) {
-            val spec: String = if (line.startsWith("break ")) {
-                String.substring(line, 6)
+    /// 闂傚倸鍊风粈渚€骞栭銈傚亾濮樼厧澧柡鍛板煐缁傛帞鈧綆鈧叏闄勯幈銊ノ熼幐搴ｃ€愮紓浣哄С閸楁娊寮诲☉銏犖ㄩ柟瀛樼箖閸ｇ儤鎱ㄩ敐鍛村弰闁哄矉缍侀幃娆戔偓鐢电《濡插牓姊哄ú璇插箹闁稿﹥鎮傞垾鏍ㄧ節閸ヨ埖鏅╅梺鍏间航閸庢澘顫濋敃鍌涒拺闁荤喖鍋婇崵鐔封攽椤旂偓鏆柟顔惧亾濞煎繘濡歌閻﹀牓鎮峰鍐弰鐎规洘绻傝灃闁告侗鍠栨禍顖氣攽閻樿宸ラ柣妤€妫滅换?    fun showSourceAroundLine(session: DebugSession, lineNum: Int, context: Int): Unit {
+        var start: Int = lineNum - context
+        if (start < 1) {
+            start = 1
+        }
+        var end: Int = lineNum + context
+        if (end > session.sourceLines.size) {
+            end = session.sourceLines.size
+        }
+        println("  Around line " + toStr(lineNum) + ":")
+        var i: Int = start
+        while (i <= end) {
+            val prefix: String = if (i == lineNum) {
+                "> "
             } else {
-                String.substring(line, 2)
+                "  "
             }
-            val colonIdx: Int = spec.indexOf(":")
-            if (colonIdx > 0) {
-                val file: String = String.substring(spec, 0, colonIdx)
-                val lineStr: String = String.substring(spec, colonIdx + 1)
-                val lineNum: Int = String.toInt(lineStr)
-                debugger.addBreakpoint(file, lineNum)
+            println("  " + prefix + toStr(i) + " | " + session.sourceLines[i - 1])
+            i = i + 1
+        }
+    }
+
+    /// 濠电姷鏁搁崑娑㈩敋椤撶喐鍙忛悗娑欙供濞堜粙鏌熼梻瀵割槮缂佺姷濞€閺屽秹鍩℃担鍛婃濡炪倐鏅濋崗姗€寮婚弴銏犻唶婵犻潧妫导鍌炴⒑閸涘渚涢柛鎾跺枛瀵鎮㈤搹鍦紲濠碘槅鍨伴幖顐︼綖瀹€鍕仭婵犲﹤瀚欢鍙夌箾瀹割喖骞栭柣锝囧厴閺佹劖寰勬繝鍕剁床婵犵數鍋為崹鍫曟偡閿曞偆鏁婄€广儱顦伴埛鎴︽煙缁嬫寧鎹ｉ柍钘夘樀閺岋絽螖娴ｇ懓纾抽悗娈垮枟婵炲﹪寮婚崱妤婂悑闁告侗鍘鹃悰鈺呮⒒娴ｇ儤鍤€闁宦板妿閺侇喖螖娴ｇ懓寮块梺闈涚箳婵＄銇愰幒鎴狀槯濠电偞娼欑€垫帗绂嶉鍕殾闁靛繒濮Σ鍫ユ煏韫囧﹤澧叉繛鍛墬缁绘繈濮€閿濆棛銆愰梺缁橆殔閸熸潙鐣?    fun extractArg(line: String, prefixLong: String, prefixShort: String): String {
+        if (DebugVmUtils.myStartsWith(line, prefixLong)) {
+            return DebugSessionUtils.safeSubstring(line, prefixLong.length, line.length)
+        }
+        if (DebugVmUtils.myStartsWith(line, prefixShort)) {
+            return DebugSessionUtils.safeSubstring(line, prefixShort.length, line.length)
+        }
+        return ""
+    }
+
+    /// 濠电姷鏁搁崑娑㈩敋椤撶喐鍙忛悗娑欙供濞堜粙鏌熼梻瀵割槮缂佺姷濞€閺屽秹鍩℃担鍛婃濡炪倐鏅濋崗姗€寮婚弴銏犻唶婵犻潧妫导鍌炴⒑閸涘渚涢柛鎾跺枛瀵鎮㈤搹鍦紲濠碘槅鍨伴幖顐︼綖瀹€鍕仭婵犲﹤瀚欢鍙夌箾瀹割喖骞栭柣锝囧厴閺佹劖寰勬繝鍕剁床婵犵數鍋為崹鍫曟偡閿曞偆鏁婄€广儱顦伴埛鎴︽煙缁嬫寧鎹ｉ柍钘夘樀閺岋絽螖閳ь剟骞婇幇鏉跨闁圭儤鎸婚崕鐔兼煏婵犲繗鍚傞柟宄扮秺濮婃椽宕滈懠顒€甯ラ梺鍝ュУ椤ㄥ﹤鐣烽悽绋跨闁圭偨鍔岀紞濠囧箖閳哄拋鏁婇悘蹇旂墪娴滃墽鎲歌箛鎾愶綁骞囬澶嬪兊闁荤姾妗ㄧ紞?    fun extractArgOnly(line: String, prefix: String): String {
+        if (DebugVmUtils.myStartsWith(line, prefix)) {
+            return DebugSessionUtils.safeSubstring(line, prefix.length, line.length)
+        }
+        return ""
+    }
+
+    /// 闂傚倷娴囧畷鍨叏閹绢噮鏁勯柛娑欐綑閻ゎ噣鏌熼幆鏉啃撻柛搴★攻閵囧嫰寮介顫捕闂?REPL 濠电姷鏁搁崑鐐哄垂閸洖绠插〒姘ｅ亾妞ゃ垺淇洪ˇ瑙勵殽閻愬弶顥炵紒缁樼箞瀹曞爼濡搁妷銈堟濠碉紕鍋戦崐鏍偋濡ゅ嫬缍旈梻?    fun run(session: DebugSession): Unit {
+        println("  ============================================================")
+        println("  Aura Debugger (Pure Aura Self-Hosted)")
+        println("  Target: " + session.srcFile)
+        println("  Commands: help  |  q to quit")
+        println("  ============================================================")
+        println("")
+
+        var quit: Boolean = false
+        while (!quit) {
+            // 闂傚倸鍊风粈渚€骞栭銈傚亾濮樼厧澧柡鍛板煐缁傛帞鈧綆鈧叏闄勯幈銊ノ熼幐搴ｃ€愮紓浣哄Х閺佸寮婚悢鍏肩劷闁挎洍鍋撻柡瀣煥闇夐柣妯虹－閵嗘帞绱?            val stateStr: String = if (session.debugVm.isRunning()) {
+                "[running]"
+            } else if (session.started) {
+                "[paused]"
             } else {
-                Console.println("Usage: break <file>:<line>")
+                "[idle]"
             }
-        } else if (line.startsWith("delete ") || line.startsWith("d ")) {
-            val idStr: String = if (line.startsWith("delete ")) {
-                String.substring(line, 7)
+            print("(debug " + stateStr + ") ")
+            val line: String = IO.readLine()
+
+            // 缂傚倸鍊搁崐椋庣矆娓氣偓閹矂宕掑鍛紳濠殿喗顭堟ご鎼侇敃閼恒儯浜滈柟鎯у船閻忊晝绱掗埀顒勫磼閻愬鍘繝銏ｅ煐缁嬫捇鎮鹃柆宥嗙厽?EOF 闂傚倷娴囧畷鍨叏閹绢喖绠规い鎰堕檮閸嬵亪鏌涢妷銏℃珕鐎?            val trimmed: String = DebugSessionUtils.trim(line)
+            if (trimmed.length == 0 || trimmed == "null") {
+                // stdin 闂傚倸鍊烽懗鍫曗€﹂崼銏″床闁瑰鍋熺粻鎯р攽閻樿弓杩规繛鎴欏灩缁犵粯銇勯弮鍥т汗妞?EOF闂傚倸鍊烽悞锔锯偓绗涘懐鐭欓柟杈鹃檮閸庢鏌涘畝鈧崑娑㈡倿閸偁浜滈柟杈剧稻椤ュ霉濠婂牏鐣烘慨濠冩そ瀹曘劍绻濋崒婊€娣梻浣告贡閳峰牓宕戞繝鍥╁祦闁糕剝顭囩弧鈧梺鎼炲劘閸斿本绂?                if (trimmed == "null") {
+                    println("  (stdin closed, exiting)")
+                    quit = true
+                }
+                } else {
+
+            // 闂傚倸鍊风粈渚€宕崸妤€鍌ㄦ繝濠傜墕绾惧鏌熼崜褏甯涢柣鎾冲暣閺屾稖绠涢幙鍐┬︽繛?闂傚倸鍊风粈渚€骞夐敍鍕煓闁圭儤顨呴崹鍌涚節闂堟侗鍎忕紒鐙€鍣ｉ弻鏇㈠醇濠垫劖笑缂備讲鍋撻柛鈩冪⊕閻撴洟鏌嶉埡浣稿絹闁硅揪闄勯崐?闂傚倸鍊风粈渚€宕崸妤€鍌ㄦ繝濠傜墕绾惧鏌熼崜褏甯涢柣鎾冲暣閺屾稖绠涢幙鍐┬︽繛?            if (trimmed == "quit" || trimmed == "q") {
+                session.quit()
+                println("Bye.")
+                quit = true
+
+            } else if (trimmed == "help" || trimmed == "h" || trimmed == "?") {
+                DebugRepl.printHelp()
+
+            } else if (trimmed == "run" || trimmed == "r") {
+                val reason: String = session.run()
+                if (reason == "completion") {
+                    println("  Execution completed. Return: " +
+                        session.debugVm.getReturnValue())
+                } else if (reason == "error") {
+                    println("  Error: " + session.debugVm.getError())
+                } else {
+                    DebugRepl.printStopInfo(session, reason)
+                }
+
+            } else if (trimmed == "continue" || trimmed == "c") {
+                val reason: String = session.continueExec()
+                if (reason == "completion") {
+                    println("  Execution completed. Return: " +
+                        session.debugVm.getReturnValue())
+                } else if (reason == "error") {
+                    println("  Error: " + session.debugVm.getError())
+                } else {
+                    DebugRepl.printStopInfo(session, reason)
+                }
+
+            } else if (trimmed == "step" || trimmed == "s" || trimmed == "si") {
+                val reason: String = session.stepInto()
+                DebugRepl.printStopInfo(session, reason)
+
+            } else if (trimmed == "step-over" || trimmed == "so" || trimmed == "n") {
+                val reason: String = session.stepOver()
+                DebugRepl.printStopInfo(session, reason)
+
+            } else if (trimmed == "step-out" || trimmed == "o") {
+                val reason: String = session.stepOut()
+                DebugRepl.printStopInfo(session, reason)
+
+            } else if (DebugVmUtils.myStartsWith(trimmed, "break ") || DebugVmUtils.myStartsWith(trimmed, "b ")) {
+                val spec: String = DebugRepl.extractArg(trimmed, "break ", "b ")
+                val colonIdx: Int = spec.indexOf(":")
+                if (colonIdx > 0) {
+                    val file: String = DebugSessionUtils.safeSubstring(spec, 0, colonIdx)
+                    val lineStr: String = DebugSessionUtils.safeSubstring(spec, colonIdx + 1)
+                    val lineNum: Int = DebugSessionUtils.toInt(DebugSessionUtils.trim(lineStr))
+                    session.addBreakpoint(file, lineNum)
+                } else {
+                    val lineNum: Int = DebugSessionUtils.toInt(DebugSessionUtils.trim(spec))
+                    session.addBreakpoint(session.srcFile, lineNum)
+                }
+
+            } else if (DebugVmUtils.myStartsWith(trimmed, "delete ") || DebugVmUtils.myStartsWith(trimmed, "d ")) {
+                val idStr: String = DebugRepl.extractArg(trimmed, "delete ", "d ")
+                val id: Int = DebugSessionUtils.toInt(DebugSessionUtils.trim(idStr))
+                if (session.removeBreakpoint(id)) {
+                    println("  Breakpoint #" + toStr(id) + " deleted")
+                } else {
+                    println("  Breakpoint #" + toStr(id) + " not found")
+                }
+
+            } else if (trimmed == "breakpoints" || trimmed == "bl") {
+                session.listBreakpoints()
+
+            } else if (trimmed == "variables" || trimmed == "v" || trimmed == "locals") {
+                println(session.variables())
+
+            } else if (trimmed == "globals" || trimmed == "g") {
+                println(session.globals())
+
+            } else if (trimmed == "stack" || trimmed == "st") {
+                println(session.callStack())
+
+            } else if (DebugVmUtils.myStartsWith(trimmed, "frame ")) {
+                val depthStr: String = DebugRepl.extractArgOnly(trimmed, "frame ")
+                val depth: Int = DebugSessionUtils.toInt(DebugSessionUtils.trim(depthStr))
+                println(session.stackFrame(depth))
+
+            } else if (trimmed == "frame" || trimmed == "f") {
+                println("  Frame 0 (current):")
+                println(session.stackFrame(0))
+
+            } else if (trimmed == "list" || trimmed == "l") {
+                println(session.showSource(5))
+
+            } else if (DebugVmUtils.myStartsWith(trimmed, "list ") || DebugVmUtils.myStartsWith(trimmed, "l ")) {
+                val lineStr: String = DebugRepl.extractArg(trimmed, "list ", "l ")
+                val lineNum: Int = DebugSessionUtils.toInt(DebugSessionUtils.trim(lineStr))
+                DebugRepl.showSourceAroundLine(session, lineNum, 5)
+
+            } else if (trimmed == "disassemble" || trimmed == "dis") {
+                println(session.disassemble(5))
+
+            } else if (DebugVmUtils.myStartsWith(trimmed, "disassemble ") || DebugVmUtils.myStartsWith(trimmed, "dis ")) {
+                val ctxStr: String = DebugRepl.extractArg(trimmed, "disassemble ", "dis ")
+                val ctx: Int = DebugSessionUtils.toInt(DebugSessionUtils.trim(ctxStr))
+                println(session.disassemble(ctx))
+
+            } else if (DebugVmUtils.myStartsWith(trimmed, "print ") || DebugVmUtils.myStartsWith(trimmed, "p ")) {
+                val expr: String = DebugRepl.extractArg(trimmed, "print ", "p ")
+                val result: String = session.eval(expr)
+                println("  " + expr + " = " + result)
+
+            } else if (DebugVmUtils.myStartsWith(trimmed, "eval ") || DebugVmUtils.myStartsWith(trimmed, "e ")) {
+                val expr: String = DebugRepl.extractArg(trimmed, "eval ", "e ")
+                val result: String = session.eval(expr)
+                println("  " + expr + " = " + result)
+
+            } else if (DebugVmUtils.myStartsWith(trimmed, "watch ") || DebugVmUtils.myStartsWith(trimmed, "w ")) {
+                val expr: String = DebugRepl.extractArg(trimmed, "watch ", "w ")
+                session.watch(expr)
+
+            } else if (DebugVmUtils.myStartsWith(trimmed, "unwatch ") || DebugVmUtils.myStartsWith(trimmed, "uw ")) {
+                val idStr: String = DebugRepl.extractArg(trimmed, "unwatch ", "uw ")
+                val id: Int = DebugSessionUtils.toInt(DebugSessionUtils.trim(idStr))
+                if (!session.unwatch(id)) {
+                    println("  Watch #" + toStr(id) + " not found")
+                }
+
+            } else if (trimmed == "info" || trimmed == "i") {
+                println(session.info())
+
+            } else if (trimmed == "func" || trimmed == "functions") {
+                println("  Functions:")
+                println("  (source map not available in external mode)")
+
             } else {
-                String.substring(line, 2)
+                println("  Unknown command: " + trimmed)
+                println("  Type 'help' for available commands")
             }
-            debugger.removeBreakpoint(String.toInt(idStr))
-        } else if (line == "breakpoints" || line == "bl") {
-            debugger.listBreakpoints()
-        } else if (line == "variables" || line == "v") {
-            debugger.variables()
-        } else if (line == "stack" || line == "st") {
-            debugger.callStack()
-        } else if (line.startsWith("frame ")) {
-            val depthStr: String = String.substring(line, 6)
-            debugger.stackFrame(String.toInt(depthStr))
-        } else if (line.startsWith("eval ") || line.startsWith("e ")) {
-            val expr: String = if (line.startsWith("eval ")) {
-                String.substring(line, 5)
-            } else {
-                String.substring(line, 2)
-            }
-            debugger.eval(expr)
-        } else if (line.startsWith("watch ") || line.startsWith("w ")) {
-            val expr: String = if (line.startsWith("watch ")) {
-                String.substring(line, 6)
-            } else {
-                String.substring(line, 2)
-            }
-            debugger.watch(expr)
-        } else {
-            Console.println("Unknown command: " + line)
         }
     }
 }

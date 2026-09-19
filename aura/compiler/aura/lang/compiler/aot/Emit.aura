@@ -704,6 +704,11 @@ class LlvmEmitter {
             }
             out.sbAdd("\n")
         }
+        // Phase C: 命令行参数全局变量（已在 runtime/args.ll 中定义）
+        // out.sbAdd("; ---- Command-line argv globals ----\n")
+        // out.sbAdd("@aura_argc_global = global i32 0\n")
+        // out.sbAdd("@aura_argv_global = global i8** null\n")
+        // out.sbAdd("\n")
         out.sbAdd(this.funcParts.sbBuild())
         // lambda 静态函数（闭包体）：与用户函数同级，模块末尾统一输出
         val lambdaIr: String = this.lambdaParts.sbBuild()

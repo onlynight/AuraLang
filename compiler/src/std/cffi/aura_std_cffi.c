@@ -2000,28 +2000,24 @@ int64_t aura_lang_std_Process_run(const char *cmd) {
 }
 
 /* ── 命令行参数（AOT） ──
- * AOT 发射的 C 入口 `main` 在函数体最开始调用 `aura_args_set(argc, argv)`，
- * 把宿主进程的 argv 存入本模块；`Process.arg(i)` / `Process.argCount()` 据此读取。
- * （VM 侧对应 std_process.rs 的 `std::env::args()`。） */
-static int aura_saved_argc = 0;
-static char **aura_saved_argv = NULL;
+ * AOT 发射的 C 入口 `main` 在函数体最开始 store 宿主 argv 到 IR 全局变量
+ * `aura_argc_global` / `aura_argv_global`（见 Emit.aura Phase C）。
+ * `Process.arg(i)` / `Process.argCount()` 据此读取。 */
 
-void aura_args_set(int argc, char **argv) {
-    aura_saved_argc = argc;
-    aura_saved_argv = argv;
-}
+extern int aura_argc_global;
+extern char **aura_argv_global;
 
 int64_t aura_lang_std_Process_argCount(void) {
-    return (int64_t)aura_saved_argc;
+    return (int64_t)aura_argc_global;
 }
 
 const char *aura_lang_std_Process_arg(int64_t index) {
-    if (index < 0 || index >= (int64_t)aura_saved_argc) return "";
-    if (!aura_saved_argv || !aura_saved_argv[index]) return "";
+    if (index < 0 || index >= (int64_t)aura_argc_global) return "";
+    if (!aura_argv_global || !aura_argv_global[index]) return "";
     /* 必须返回 malloc 副本：argv[i] 是 OS 命令行缓冲的内部指针，低 bit 奇偶不可控，
      * 而 Plan A 依赖「真实字符串指针恒为偶数」来区分装箱整数 ((v<<1)|1)。
      * 返回内部指针会被 aura_to_str_any 误判成装箱整数，打印出地址数字。 */
-    return aura_strdup(aura_saved_argv[index]);
+    return aura_strdup(aura_argv_global[index]);
 }
 
 /** 所有 argv 以 '\n' 连接（AOT 下的简化表示；VM 侧返回 List）。 */
@@ -2033,16 +2029,16 @@ const char *aura_lang_std_Process_args(void) {
         aura_mem_free(joined);
         joined = NULL;
     }
-    if (!aura_saved_argv) return "";
-    for (i = 0; i < aura_saved_argc; i++) {
-        if (aura_saved_argv[i]) total += strlen(aura_saved_argv[i]) + 1;
+    if (!aura_argv_global) return "";
+    for (i = 0; i < aura_argc_global; i++) {
+        if (aura_argv_global[i]) total += strlen(aura_argv_global[i]) + 1;
     }
     joined = (char *)aura_mem_alloc((int64_t)total);
     if (!joined) return "";
     joined[0] = '\0';
-    for (i = 0; i < aura_saved_argc; i++) {
+    for (i = 0; i < aura_argc_global; i++) {
         if (i > 0) strcat(joined, "\n");
-        if (aura_saved_argv[i]) strcat(joined, aura_saved_argv[i]);
+        if (aura_argv_global[i]) strcat(joined, aura_argv_global[i]);
     }
     return joined;
 }

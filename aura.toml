@@ -1,0 +1,9 @@
+# Aura project manifest
+schema-version = "1.0"
+name = "my-project"
+version = "0.1.0"
+entry = "src/main.aura"
+out-dir = "build"
+cache-dir = "build/cache"
+compile-mode = "aot"
+ffi-mode = "native"

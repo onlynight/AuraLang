@@ -5,163 +5,173 @@ import aura.lang.std.String
 import aura.lang.cli.Args
 import aura.lang.cli.CompilerApi
 import aura.lang.cli.FileIO
+import aura.lang.cli.Repl
 
 // ═══════════════════════════════════════════════════════════════
 // 子命令处理
+//
+// 所有顶层函数均收敛到 CommandsUtils 对象中。
 // ═══════════════════════════════════════════════════════════════
 
-/// aura build <file.aura> [--output <out>] [--aot]
-fun cmdBuild(args: Args): Int {
-    if (args.size() < 1) {
-        println("Error: build requires a source file")
-        return 1
-    }
-    val src: String = args.get(0)
-    val out: String = args.getValue("--output")
-    val isAot: Boolean = args.hasFlag("--aot")
+/// 子命令工具对象
+object CommandsUtils {
 
-    val content: String = readTextFile(src)
-    if (content.length == 0) {
-        println("Error: cannot read file: " + src)
-        return 1
-    }
-
-    if (isAot) {
-        // 真正走 AOT：源码（含递归 import）→ LLVM IR → llc → clang → 原生 exe。
-        // 这是纯 Aura 工具链产出可执行文件的正式路径（原先只打印 IR 文本）。
-        var outPath: String = out
-        if (outPath.length == 0) {
-            outPath = cliDirOf(src) + "/" + cliStemOf(src) + ".exe"
+    /// aura build <file.aura> [--output <out>] [--aot]
+    fun cmdBuild(args: Args): Int {
+        if (args.size() < 1) {
+            println("Error: build requires a source file")
+            return 1
         }
-        return aotBuildExeFile(src, outPath, args.getValue("--llvm-home"))
-    } else {
-        val result: String = codegenCompile(content)
-        if (out.length > 0) {
-            writeTextFile(out, result)
-            println("Compiled: " + out)
-        } else {
-            println(result)
-        }
-        return 0
-    }
-}
-
-/// aura run <file.aura>
-fun cmdRun(args: Args): Int {
-    if (args.size() < 1) {
-        println("Error: run requires a source file")
-        return 1
-    }
-    val src: String = args.get(0)
-    val content: String = readTextFile(src)
-    if (content.length == 0) {
-        println("Error: cannot read file: " + src)
-        return 1
-    }
-    return vmRun(content)
-}
-
-/// aura check <file.aura>
-fun cmdCheck(args: Args): Int {
-    if (args.size() < 1) {
-        println("Error: check requires a source file")
-        return 1
-    }
-    val src: String = args.get(0)
-    val content: String = readTextFile(src)
-    val result: String = semaCheck(content)
-    Console.println(result)
-    if (result.startsWith("error")) {
-        return 1
-    }
-    return 0
-}
-
-/// aura tokens <file.aura>
-fun cmdTokens(args: Args): Int {
-    if (args.size() < 1) {
-        println("Error: tokens requires a source file")
-        return 1
-    }
-    val src: String = args.get(0)
-    val content: String = readTextFile(src)
-    val result: String = lexerTokenize(content)
-    Console.println(result)
-    return 0
-}
-
-/// aura ast <file.aura>
-fun cmdAst(args: Args): Int {
-    if (args.size() < 1) {
-        println("Error: ast requires a source file")
-        return 1
-    }
-    val src: String = args.get(0)
-    val content: String = readTextFile(src)
-    val result: String = astToString(content)
-    Console.println(result)
-    return 0
-}
-
-/// aura fmt <file.aura> [--check]
-fun cmdFmt(args: Args): Int {
-    if (args.size() < 1) {
-        println("Error: fmt requires a source file")
-        return 1
-    }
-    val src: String = args.get(0)
-    val content: String = readTextFile(src)
-    if (args.hasFlag("--check")) {
-        return fmtCheck(content)
-    } else {
-        val result: String = fmtFormat(content)
-        writeTextFile(src, result)
-        println("Formatted: " + src)
-        return 0
-    }
-}
-
-/// aura doc [--output <dir>]
-fun cmdDoc(args: Args): Int {
-    val out: String = args.getValue("--output")
-    if (args.size() >= 1) {
         val src: String = args.get(0)
-        val content: String = readTextFile(src)
-        val result: String = docGenerate(content)
-        if (out.length > 0) {
-            writeTextFile(out + "/index.html", result)
-            println("Documentation generated: " + out)
-        } else {
-            println(result)
+        val out: String = args.getValue("--output")
+        val isAot: Boolean = args.hasFlag("--aot")
+
+        val content: String = FileIOUtils.readTextFile(src)
+        if (content.length == 0) {
+            println("Error: cannot read file: " + src)
+            return 1
         }
-    } else {
-        println("Error: doc requires a source file")
-    }
-    return 0
-}
 
-/// aura eval [--expr <code>]
-fun cmdEval(args: Args): Int {
-    val expr: String = args.getValue("--expr")
-    if (expr.length > 0) {
-        val result: String = evalExec(expr)
+        if (isAot) {
+            var outPath: String = out
+            if (outPath.length == 0) {
+                outPath = CompilerApiUtils.cliDirOf(src) + "/" + CompilerApiUtils.cliStemOf(src) + ".exe"
+            }
+            return CompilerApiUtils.aotBuildExeFile(src, outPath, args.getValue("--llvm-home"))
+        } else {
+            val result: String = CompilerApiUtils.codegenCompile(content)
+            if (out.length > 0) {
+                FileIOUtils.writeTextFile(out, result)
+                println("Compiled: " + out)
+            } else {
+                println(result)
+            }
+            return 0
+        }
+    }
+
+    /// aura run <file.aura>
+    fun cmdRun(args: Args): Int {
+        if (args.size() < 1) {
+            println("Error: run requires a source file")
+            return 1
+        }
+        val src: String = args.get(0)
+        val content: String = FileIOUtils.readTextFile(src)
+        if (content.length == 0) {
+            println("Error: cannot read file: " + src)
+            return 1
+        }
+        return CompilerApiUtils.vmRun(content)
+    }
+
+    /// aura check <file.aura>
+    fun cmdCheck(args: Args): Int {
+        if (args.size() < 1) {
+            println("Error: check requires a source file")
+            return 1
+        }
+        val src: String = args.get(0)
+        val content: String = FileIOUtils.readTextFile(src)
+        val result: String = CompilerApiUtils.semaCheck(content)
         println(result)
-    } else {
-        println("Error: eval requires --expr <code>")
-        return 1
+        if (result.startsWith("error")) {
+            return 1
+        }
+        return 0
     }
-    return 0
-}
 
-/// aura export-header <file.aura>
-fun cmdExportHeader(args: Args): Int {
-    if (args.size() < 1) {
-        println("Error: export-header requires a source file")
-        return 1
+    /// aura tokens <file.aura>
+    fun cmdTokens(args: Args): Int {
+        if (args.size() < 1) {
+            println("Error: tokens requires a source file")
+            return 1
+        }
+        val src: String = args.get(0)
+        val content: String = FileIOUtils.readTextFile(src)
+        val result: String = CompilerApiUtils.lexerTokenize(content)
+        println(result)
+        return 0
     }
-    val src: String = args.get(0)
-    val content: String = readTextFile(src)
-    val result: String = exportHeader(content)
-    Console.println(result)
-    return 0
+
+    /// aura ast <file.aura>
+    fun cmdAst(args: Args): Int {
+        if (args.size() < 1) {
+            println("Error: ast requires a source file")
+            return 1
+        }
+        val src: String = args.get(0)
+        val content: String = FileIOUtils.readTextFile(src)
+        val result: String = CompilerApiUtils.astToString(content)
+        println(result)
+        return 0
+    }
+
+    /// aura fmt <file.aura> [--check]
+    fun cmdFmt(args: Args): Int {
+        if (args.size() < 1) {
+            println("Error: fmt requires a source file")
+            return 1
+        }
+        val src: String = args.get(0)
+        val content: String = FileIOUtils.readTextFile(src)
+        if (args.hasFlag("--check")) {
+            return CompilerApiUtils.fmtCheck(content)
+        } else {
+            val result: String = CompilerApiUtils.fmtFormat(content)
+            FileIOUtils.writeTextFile(src, result)
+            println("Formatted: " + src)
+            return 0
+        }
+    }
+
+    /// aura doc [--output <dir>]
+    fun cmdDoc(args: Args): Int {
+        val out: String = args.getValue("--output")
+        if (args.size() >= 1) {
+            val src: String = args.get(0)
+            val content: String = FileIOUtils.readTextFile(src)
+            val result: String = CompilerApiUtils.docGenerate(content)
+            if (out.length > 0) {
+                FileIOUtils.writeTextFile(out + "/index.html", result)
+                println("Documentation generated: " + out)
+            } else {
+                println(result)
+            }
+        } else {
+            println("Error: doc requires a source file")
+        }
+        return 0
+    }
+
+    /// aura eval [--expr <code>]
+    fun cmdEval(args: Args): Int {
+        val expr: String = args.getValue("--expr")
+        if (expr.length > 0) {
+            val result: String = CompilerApiUtils.evalExec(expr)
+            println(result)
+        } else {
+            println("Error: eval requires --expr <code>")
+            return 1
+        }
+        return 0
+    }
+
+    /// aura repl — 交互式 REPL
+    fun cmdRepl(args: Args): Int {
+        return ReplUtils.run()
+    }
+
+    /// aura export-header <file.aura>
+    fun cmdExportHeader(args: Args): Int {
+        if (args.size() < 1) {
+            println("Error: export-header requires a source file")
+            return 1
+        }
+        val src: String = args.get(0)
+        val content: String = FileIOUtils.readTextFile(src)
+        val result: String = CompilerApiUtils.exportHeader(content)
+        println(result)
+        return 0
+    }
 }
