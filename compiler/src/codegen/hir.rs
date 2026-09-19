@@ -683,6 +683,51 @@ fn build_class_table(program: &Program) -> HashMap<String, ClassEntry> {
             _ => {}
         }
     }
+    // 内置类型 String 的 companion 方法（String.fromCharCode 等）
+    // String 是内置类型，不在 program.declarations 中，需手动注册到 CLASS_TABLE。
+    let string_methods = [
+        "fromChars",
+        "fromCharCode",
+        "join",
+        "length",
+        "isEmpty",
+        "substring",
+        "startsWith",
+        "endsWith",
+        "contains",
+        "indexOf",
+        "lastIndexOf",
+        "replace",
+        "trim",
+        "trimStart",
+        "trimEnd",
+        "padStart",
+        "padEnd",
+        "repeat",
+        "split",
+        "splitLines",
+        "joinLines",
+        "countChar",
+        "first",
+        "last",
+        "isBlank",
+        "containsAny",
+        "containsAll",
+        "toLowerCase",
+        "toUpperCase",
+        "charCodeAt",
+        "substringBefore",
+        "substringAfter",
+        "substringBeforeLast",
+        "substringAfterLast",
+        "toCharArray",
+    ];
+    let mut string_entry = ClassEntry::default();
+    for m in string_methods {
+        string_entry.companion_methods.insert(m.to_string());
+        string_entry.methods.insert(m.to_string());
+    }
+    table.entry("String".to_string()).or_insert(string_entry);
     table
 }
 

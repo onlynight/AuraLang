@@ -28,7 +28,8 @@ $ErrorActionPreference = 'Stop'
 
 $RootDir   = (Split-Path -Parent $PSScriptRoot)
 $BuildDir  = "$RootDir\build"
-$BinDir    = "$BuildDir\bin"
+# 冻结产物发布目录（随仓库分发；.gitignore 已为该 exe 开白名单）
+$BinDir    = "$RootDir\dist\bootstrap"
 $LLVMHome  = "D:/DevTools/LLVM/clang+llvm-23.1.0-x86_64-pc-windows-msvc"
 $MainAura  = "$RootDir\aura\compiler\aura\lang\compiler\Main.aura"
 $TestDir   = "$RootDir\tests"
@@ -140,7 +141,7 @@ Write-Host "  Written to: $SumFile" -ForegroundColor Green
 # ── Step 6: Output release package layout ──
 Write-Step "Step 6: Release package layout"
 Write-Host ""
-Write-Host "  build/bin/" -ForegroundColor White
+Write-Host "  dist/bootstrap/" -ForegroundColor White
 Write-Host "  |-- aura-compiler.exe    (frozen bootstrap binary)" -ForegroundColor White
 Write-Host "  |-- SHA256SUMS           (checksum)" -ForegroundColor White
 Write-Host ""
@@ -151,6 +152,7 @@ Write-Host "    - clang               (LLVM tools, link-only mode)"
 Write-Host "    - System CRT          (OS-provided: libc/kernel32.dll)"
 Write-Host ""
 Write-Host "  No Rust compiler, no C compiler, no C runtime source needed." -ForegroundColor Green
+Write-Host "  Verify with: scripts/self-bootstrap-frozen.ps1" -ForegroundColor Green
 
 # ── Summary ──
 Write-Host ""

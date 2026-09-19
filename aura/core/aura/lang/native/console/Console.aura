@@ -6,6 +6,8 @@ import aura.lang.std.string.StringOps
 
 /// Console output - declarations
 extern interface Console {
+    @native fun println(msg: Long): Unit
+    @native fun print(msg: Long): Unit
     @native(SYS_WRITE) fun writeStdout(buf: Long, count: Long): Long
 }
 

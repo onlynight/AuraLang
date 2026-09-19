@@ -281,8 +281,18 @@ class AotModuleLinker {
             return ModuleLinkUtils.normalizePath(ModuleLinkUtils.joinPath(baseDir, imp))
         }
         val rel: String = ModuleLinkUtils.replaceAllDots(imp)
+        // 候选根目录（按优先级）：
+        //   aura/compiler/    — Aura 编译器本体
+        //   aura/core/        — 核心库与标准库
+        //   aura/toolchain/*  — 纯 Aura 工具链（cli / lsp / debugger / loom）
+        //   <rel>             — 相对仓库根的裸路径
         val candidates: String = "aura/compiler/" + rel + ".aura\n" +
-            "aura/core/" + rel + ".aura\n" + rel + ".aura\n"
+            "aura/core/" + rel + ".aura\n" +
+            "aura/toolchain/cli/" + rel + ".aura\n" +
+            "aura/toolchain/lsp/" + rel + ".aura\n" +
+            "aura/toolchain/debugger/" + rel + ".aura\n" +
+            "aura/toolchain/loom/" + rel + ".aura\n" +
+            rel + ".aura\n"
         var i: Int = 0
         val n: Int = aotLineCount(candidates)
         while (i < n) {

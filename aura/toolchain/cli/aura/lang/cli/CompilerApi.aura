@@ -3,7 +3,6 @@ package aura.lang.cli
 
 import aura.lang.std.String
 import aura.lang.std.Collections
-import aura.lang.native.console.Console
 
 import aura.lang.compiler.parser.Parser
 import aura.lang.compiler.lexer.Lexer
@@ -43,12 +42,100 @@ fun codegenCompile(src: String): String {
     return result.llvmIr
 }
 
+// ───────────────────────────────────────────────────────────────
+// 路径辅助（AOT 产物路径推导）
+// ───────────────────────────────────────────────────────────────
+
+/// 取路径的目录部分（无分隔符返回 "."）。
+fun cliDirOf(p: String): String {
+    var i: Int = p.length - 1
+    while (i >= 0) {
+        val cc: Int = p.charCodeAt(i)
+        if (cc == 47 || cc == 92) {
+            return p.substring(0, i)
+        }
+        i = i - 1
+    }
+    return "."
+}
+
+/// 取路径的文件名主干（去目录与最后一个扩展名）。
+fun cliStemOf(p: String): String {
+    var start: Int = 0
+    var i: Int = 0
+    while (i < p.length) {
+        val cc: Int = p.charCodeAt(i)
+        if (cc == 47 || cc == 92) {
+            start = i + 1
+        }
+        i = i + 1
+    }
+    var name: String = p.substring(start, p.length)
+    var dot: Int = -1
+    var j: Int = 0
+    while (j < name.length) {
+        if (name.charCodeAt(j) == 46) {
+            dot = j
+        }
+        j = j + 1
+    }
+    if (dot > 0) {
+        name = name.substring(0, dot)
+    }
+    return name
+}
+
+/// 取路径的目录前缀（含尾部分隔符；无分隔符返回 ""）。
+fun cliBaseDirOf(p: String): String {
+    var i: Int = p.length - 1
+    var found: Int = -1
+    while (i >= 0) {
+        val cc: Int = p.charCodeAt(i)
+        if (cc == 47 || cc == 92) {
+            found = i
+            break
+        }
+        i = i - 1
+    }
+    if (found < 0) {
+        return ""
+    }
+    return p.substring(0, found + 1)
+}
+
+// ───────────────────────────────────────────────────────────────
+// AOT：源文件（含递归 import）→ 原生可执行文件
+// ───────────────────────────────────────────────────────────────
+
+/// AOT 编译源文件 → 原生可执行文件；返回退出码（0 成功）。
+///
+/// 与 VM 路径的区别：先经 `AotModuleLinker` 合并入口文件及其递归 import，
+/// 再交给 Aura 侧 AOT 后端（HIR → LLVM IR → llc → clang → exe）。
+/// 这是纯 Aura 工具链产出可执行文件的正式入口。
+fun aotBuildExeFile(inputPath: String, outPath: String, llvmHome: String): Int {
+    val linker = AotModuleLinker()
+    val hir: Hir = linker.link(inputPath)
+    val home: String = if (llvmHome.length > 0) { llvmHome } else { AotUtils.llvmHomeDefault() }
+    val r = aotBuildExeFromHirEx(hir, cliStemOf(outPath), cliDirOf(outPath),
+        home, cliBaseDirOf(inputPath))
+    if (r.ok) {
+        println("✓ Executable generated: " + r.exePath)
+        return 0
+    }
+    println("Error: AOT compilation failed")
+    println("  llc=" + toStr(r.llcExit) + " clang=" + toStr(r.clangExit))
+    if (r.irError != "") {
+        println("  IR error: " + r.irError)
+    }
+    return 1
+}
+
 /// VM 执行源码 → exit code
 fun vmRun(src: String): Int {
     val p = Parser(src)
     p.parseProgram()
     if (p.errors.count > 0) {
-        Console.println("Parse errors: " + toStr(p.errors.count))
+        println("Parse errors: " + toStr(p.errors.count))
         return 1
     }
     val checker = TypeChecker()

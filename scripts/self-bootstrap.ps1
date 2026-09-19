@@ -1,6 +1,10 @@
 #Requires -Version 5.0
 # Phase C.4: Aura 编译器自举验证脚本 (Windows PowerShell)
 # 验证流程：Rust AOT → aura-compiler-native.exe → 自举编译 → 行为一致性验证
+#
+# 注意：本脚本以 **Rust 编译器为 Stage-0 引导**，需要 cargo。
+#       不依赖 Rust 的纯 Aura 自举验证入口见 scripts/self-bootstrap-frozen.ps1
+#       （使用签入的冻结载体 dist/bootstrap/aura-compiler.exe）。
 $ErrorActionPreference = 'Stop'
 
 $RootDir   = (Split-Path -Parent $PSScriptRoot)

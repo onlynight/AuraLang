@@ -254,9 +254,11 @@ fn compile_std_cffi(options: &AotOptions) -> Result<Vec<PathBuf>, AotError> {
         env!("CARGO_MANIFEST_DIR"),
         "/src/std/cffi/aura_std_cffi.c"
     ));
+    // aura_syscalls.c 的单一真相源已迁至 Aura 侧（Aura 编译器自身也依赖它），
+    // 此处引用同一文件，避免两份副本漂移。
     let syscalls_src = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/src/std/cffi/aura_syscalls.c"
+        "/../aura/runtime/cffi/aura_syscalls.c"
     ));
     let cffi_header = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),

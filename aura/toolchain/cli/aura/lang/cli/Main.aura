@@ -1,7 +1,6 @@
 // aura:///cli/aura/lang/cli/Main.aura
 package aura.lang.cli
 
-import aura.lang.native.console.Console
 import aura.lang.cli.Args
 import aura.lang.cli.Commands
 import aura.lang.cli.CompilerApi
@@ -12,25 +11,25 @@ import aura.lang.cli.FileIO
 // ═══════════════════════════════════════════════════════════════
 
 fun printUsage(): Unit {
-    Console.println("Aura language toolchain (Phase E — pure Aura)")
-    Console.println("")
-    Console.println("Usage:")
-    Console.println("  aura build <file.aura> [--output <out>]        Compile to bytecode / native exe")
-    Console.println("  aura build <file.aura> --aot [--output <exe>]  AOT compile to native exe")
-    Console.println("  aura run <file.aura>                           Compile and run")
-    Console.println("  aura check <file.aura>                         Syntax/semantics check only")
-    Console.println("  aura disasm <file.auc>                         Disassemble .auc")
-    Console.println("  aura tokens <file.aura>                        Output lexer tokens")
-    Console.println("  aura ast <file.aura>                           Output AST")
-    Console.println("  aura fmt <file.aura> [--check]                 Format code")
-    Console.println("  aura doc [--output <dir>]                      Generate documentation")
-    Console.println("  aura eval [--expr <code>]                      Evaluate expression")
-    Console.println("  aura repl                                      Interactive REPL")
-    Console.println("  aura export-header <file.aura>                 Export C ABI header")
-    Console.println("")
-    Console.println("Options:")
-    Console.println("  --help, -h                                     Show this help message")
-    Console.println("  --version                                      Show version")
+    println("Aura language toolchain (Phase E — pure Aura)")
+    println("")
+    println("Usage:")
+    println("  aura build <file.aura> [--output <out>]        Compile to bytecode / native exe")
+    println("  aura build <file.aura> --aot [--output <exe>]  AOT compile to native exe")
+    println("  aura run <file.aura>                           Compile and run")
+    println("  aura check <file.aura>                         Syntax/semantics check only")
+    println("  aura disasm <file.auc>                         Disassemble .auc")
+    println("  aura tokens <file.aura>                        Output lexer tokens")
+    println("  aura ast <file.aura>                           Output AST")
+    println("  aura fmt <file.aura> [--check]                 Format code")
+    println("  aura doc [--output <dir>]                      Generate documentation")
+    println("  aura eval [--expr <code>]                      Evaluate expression")
+    println("  aura repl                                      Interactive REPL")
+    println("  aura export-header <file.aura>                 Export C ABI header")
+    println("")
+    println("Options:")
+    println("  --help, -h                                     Show this help message")
+    println("  --version                                      Show version")
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -74,11 +73,11 @@ fun main(): Int {
         printUsage()
         return 0
     } else if (cmd == "--version") {
-        Console.println("Aura v0.6.0 (Phase E)")
+        println("Aura v0.6.0 (Phase E)")
         return 0
     }
 
-    Console.println("Unknown subcommand: " + cmd)
+    println("Unknown subcommand: " + cmd)
     printUsage()
     return 1
 }

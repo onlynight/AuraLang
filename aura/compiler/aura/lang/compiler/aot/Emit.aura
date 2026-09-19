@@ -1307,7 +1307,15 @@ class LlvmEmitter {
             // 声明类型判定。旧实现只看局部变量表，字段会落到字符串分支
             //（`.size`→strlen、下标→charAt），生成错误 IR。
             if (this.lookupVarTy(rn) == "") {
-                val fty: String = this.curClassFieldTy(rn)
+                // 字段判定必须取 struct 表的 **Aura 类型列**：LLVM 类型 `i8*`
+                // 无法区分 `String` 与 `List<T>`（`curClassFieldTy` 返回的是 LLVM
+                // 类型，用它判断集合恒为 false，会把 `.size` 错算成 strlen）。
+                // HIR 可能把显式 `this.field` 记成带前缀的变量名，这里统一剥掉。
+                var fn2: String = rn
+                if (fn2.startsWith("this.")) {
+                    fn2 = aotSlice(fn2, 5, fn2.length - 5)
+                }
+                val fty: String = this.structFieldAuraTy(this.curClassSym(), fn2)
                 if (fty != "" && EmitUtils.isCollectionTypeName(this.resolveAlias(fty))) {
                     return true
                 }
@@ -1316,8 +1324,13 @@ class LlvmEmitter {
         if (hir.kindOf(recvId) == "HirMember") {
             val mk: String = hir.kidsOf(recvId)
             if (hirKidsCount(mk) >= 1) {
-                val recvTy: String = this.inferType(hir, hirKidsAt(mk, 0))
-                val sym: String = this.structSymOfPtr(recvTy)
+                val rid: Int = hirKidsAt(mk, 0)
+                var sym: String = this.structSymOfPtr(this.inferType(hir, rid))
+                // 显式 `this.field`：`this` 的类型即当前方法所属类。若 self 以
+                // `i8*` 表示则反解不出结构体符号，这里直接回退到当前类。
+                if (sym == "" && hir.kindOf(rid) == "HirVar" && hir.textOf(rid) == "this") {
+                    sym = this.curClassSym()
+                }
                 if (sym != "") {
                     val fty: String = this.structFieldAuraTy(sym, hir.textOf(recvId))
                     if (EmitUtils.isCollectionTypeName(this.resolveAlias(fty))) {
@@ -1337,15 +1350,31 @@ class LlvmEmitter {
     /// 未知一律按 `i8*` 句柄处理，避免错误的数值解箱）。
     fun receiverElemTy(hir: Hir, recvId: Int): String {
         if (hir.kindOf(recvId) == "HirVar") {
-            if (this.isListVar(hir.textOf(recvId))) {
-                return this.listElemTy(hir.textOf(recvId))
+            val rn: String = hir.textOf(recvId)
+            if (this.isListVar(rn)) {
+                return this.listElemTy(rn)
+            }
+            // 类方法内的裸字段名（`items`）/ 显式 `this.items`：按字段声明的
+            // Aura 类型取元素类型。
+            if (this.lookupVarTy(rn) == "") {
+                var fn2: String = rn
+                if (fn2.startsWith("this.")) {
+                    fn2 = aotSlice(fn2, 5, fn2.length - 5)
+                }
+                val fty: String = this.structFieldAuraTy(this.curClassSym(), fn2)
+                if (EmitUtils.isCollectionTypeName(this.resolveAlias(fty))) {
+                    return this.typeArgElemTy(fty)
+                }
             }
         }
         if (hir.kindOf(recvId) == "HirMember") {
             val mk: String = hir.kidsOf(recvId)
             if (hirKidsCount(mk) >= 1) {
-                val recvTy: String = this.inferType(hir, hirKidsAt(mk, 0))
-                val sym: String = this.structSymOfPtr(recvTy)
+                val rid: Int = hirKidsAt(mk, 0)
+                var sym: String = this.structSymOfPtr(this.inferType(hir, rid))
+                if (sym == "" && hir.kindOf(rid) == "HirVar" && hir.textOf(rid) == "this") {
+                    sym = this.curClassSym()
+                }
                 if (sym != "") {
                     val fty: String = this.structFieldAuraTy(sym, hir.textOf(recvId))
                     if (EmitUtils.isCollectionTypeName(this.resolveAlias(fty))) {
@@ -5217,7 +5246,21 @@ class LlvmEmitter {
         if (sym != "") {
             var getter: String = ""
             if (member == "size" || member == "length") {
-                getter = "getSize"
+                // 属性风格 `x.size` / `x.size()`：按优先级解析到类上的读取方法。
+                //   1) Kotlin 风格属性 getter `getSize()`
+                //   2) 同名方法 `size()` / `length()`（类确实定义了它）
+                // 旧实现只看 `getSize`：当类定义了 `size()`/`length()` 方法时，
+                // 既没有同名字段也没有 getSize，于是落到「字符串长度」兜底——
+                // `c.size()` 被算成 `strlen(对象指针)`（垃圾值），方法体根本没被调用。
+                if (this.funcSignatureOf(sym + "_getSize") != "") {
+                    getter = "getSize"
+                } else if (member == "size" && this.funcSignatureOf(sym + "_size") != "") {
+                    getter = "size"
+                } else if (member == "length" && this.funcSignatureOf(sym + "_length") != "") {
+                    getter = "length"
+                } else if (this.funcSignatureOf(sym + "_getLength") != "") {
+                    getter = "getLength"
+                }
             }
             if (getter != "") {
                 val gsig: String = this.funcSignatureOf(sym + "_" + getter)
@@ -6207,7 +6250,11 @@ class LlvmEmitter {
         //   `this.n = 0` → 词法器 `pos >= n` 立刻成立 → 只产出 `EOF`
         //   → `parseProgram` 立刻结束 → AST 只有 1 个节点 → 后续整条链路错乱
         //（Stage-4 的 native2 崩溃的直接根因）。
-        if ((fname == "length" || fname == "size") && n == 1) {
+        // 注意：接收者是**类实例**（`c.size()`）时不拦截 —— 交给下方常规类方法
+        // 解析（`c.size()` → `C_size`）。否则会按「字符串长度」对对象指针求
+        // `strlen`，得到垃圾值，且类上的 `size()` 方法体永不执行。
+        if ((fname == "length" || fname == "size") && n == 1
+            && this.structSymOfPtr(this.inferType(hir, hirKidsAt(kids, 0))) == "") {
             val rIdL: Int = hirKidsAt(kids, 0)
             val rTyL: String = this.inferType(hir, rIdL)
             val rV0L: String = this.emitExpr(hir, rIdL)

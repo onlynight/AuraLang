@@ -168,9 +168,11 @@ object AotUtils {
         //    （`-target` 会让 clang 走另一套库/ABI，链接 C 运行库时失败）；
         //    交叉编译目标三元组已由 llc 的 `-mtriple` 决定。
         var clangCmd: String = clang + " " + objPath
-        // 编译 aura_syscalls.c（线程桥，不含与 IR 重复的符号）
-        val cffiDir: String = "compiler/src/std/cffi"
-        if (FileSystem.exists(cffiDir + "/aura_syscalls.c")) {
+        // 编译 aura_syscalls.c（线程桥，不含与 IR 重复的符号）。
+        // 目录解析：优先 Aura 侧自带位置 `aura/runtime/cffi`（不依赖 Rust 编译器目录），
+        // 回退旧位置 `compiler/src/std/cffi`；两处都不存在时跳过（仅影响 Thread/并发）。
+        val cffiDir: String = AotUtils.resolveCffiDir()
+        if (cffiDir != "") {
             val sysObj: String = outDir + "/" + moduleName + "_syscalls.obj"
             val sysCmd: String = clang + " -c " + cffiDir + "/aura_syscalls.c"
                 + " -o " + AotUtils.aotWinPath(sysObj)
@@ -219,6 +221,21 @@ object AotUtils {
     /// 默认 LLVM 工具链根目录（与根 `Cargo.toml` 的 `[workspace.metadata.aura].llvm-home` 一致）。
     fun llvmHomeDefault(): String {
         return "D:/DevTools/LLVM/clang+llvm-23.1.0-x86_64-pc-windows-msvc"
+    }
+
+    /// 解析 C 运行时源码目录（`aura_syscalls.c` 所在目录）。
+    ///
+    /// 优先使用 Aura 侧自带位置 `aura/runtime/cffi`——这是 Aura 编译器自身的依赖，
+    /// 与 Rust 编译器目录无关；回退旧位置 `compiler/src/std/cffi` 以兼容过渡期工作区。
+    /// 两处都不存在时返回空串（调用方据此跳过线程桥编译，仅影响 Thread/并发）。
+    fun resolveCffiDir(): String {
+        if (FileSystem.exists("aura/runtime/cffi/aura_syscalls.c")) {
+            return "aura/runtime/cffi"
+        }
+        if (FileSystem.exists("compiler/src/std/cffi/aura_syscalls.c")) {
+            return "compiler/src/std/cffi"
+        }
+        return ""
     }
 }
 

@@ -79,8 +79,8 @@ if ($Quick) {
     Check "mod.rs has Ascii commented" (Get-Content "$root/compiler/src/std/mod.rs" -Raw -match "//.*std_ascii")
     Check "phase_d_tests.rs exists" (Test-Path "$root/compiler/tests/phase_d_tests.rs")
     Check "stdlib_consistency.rs exists" (Test-Path "$root/compiler/tests/stdlib_consistency.rs")
-    Check "aura_syscalls.c has pthread" (Get-Content "$root/compiler/src/std/cffi/aura_syscalls.c" -Raw -match "aura_thread_create")
-    Check "aura_syscalls.c has sha256" (Get-Content "$root/compiler/src/std/cffi/aura_syscalls.c" -Raw -match "aura_sha256")
+    Check "aura_syscalls.c has pthread" (Get-Content "$root/aura/runtime/cffi/aura_syscalls.c" -Raw -match "aura_thread_create")
+    Check "aura_syscalls.c has sha256" (Get-Content "$root/aura/runtime/cffi/aura_syscalls.c" -Raw -match "aura_sha256")
 
     Write-Host ""
     Write-Host "══�?快速模式结�? $pass passed, $fail failed ══�? -ForegroundColor ($if ($fail -eq 0) { "Green" } else { "Yellow" })
@@ -189,8 +189,8 @@ Check "Encoding.aura has hmacSha256" (Get-Content "$root/aura/core/aura/lang/std
 Check "interp.rs priority fix" (Get-Content "$root/compiler/src/vm/interp.rs" -Raw -match "stdlib_func_map")
 Check "mod.rs Ascii commented" (Get-Content "$root/compiler/src/std/mod.rs" -Raw -match "//.*std_ascii")
 Check "std_encoding.rs has SHA256" (Get-Content "$root/compiler/src/std/std_encoding.rs" -Raw -match "sha256_hex")
-Check "aura_syscalls.c has pthread" (Get-Content "$root/compiler/src/std/cffi/aura_syscalls.c" -Raw -match "aura_thread_create")
-Check "aura_syscalls.c has sha256" (Get-Content "$root/compiler/src/std/cffi/aura_syscalls.c" -Raw -match "aura_sha256")
+Check "aura_syscalls.c has pthread" (Get-Content "$root/aura/runtime/cffi/aura_syscalls.c" -Raw -match "aura_thread_create")
+Check "aura_syscalls.c has sha256" (Get-Content "$root/aura/runtime/cffi/aura_syscalls.c" -Raw -match "aura_sha256")
 Check "phase_d_tests.rs exists" (Test-Path "$root/compiler/tests/phase_d_tests.rs")
 Check "stdlib_consistency.rs exists" (Test-Path "$root/compiler/tests/stdlib_consistency.rs")
 

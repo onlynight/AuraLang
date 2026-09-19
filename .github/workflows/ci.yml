@@ -93,6 +93,23 @@ jobs:
       - name: Build Aura compiler skeleton
         run: bash scripts/build-aura-compiler.sh
 
+      # 条件4：std 必须来自 Aura 源码，不得依赖 Rust 预编译的 build/*.auc。
+      # ubuntu 上执行静态断言；Windows 宿主（含 LLVM）会做隔离式实证校验。
+      - name: Verify std loads from Aura sources (no .auc dependency)
+        run: bash scripts/verify-pure-aura-std.sh
+
+  frozen-bootstrap:
+    name: Frozen Bootstrap Integrity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 冻结的自举编译器（Stage-0 载体）随仓库分发，无需 Rust / LLVM 即可校验。
+      # 统一走脚本入口：非 Windows 宿主仅做完整性校验；Windows 宿主（含 LLVM）
+      # 会进一步执行纯 Aura 两轮自举 + 行为一致性检查。
+      - name: Verify frozen self-bootstrap artifact
+        run: bash scripts/self-bootstrap-frozen.sh
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest

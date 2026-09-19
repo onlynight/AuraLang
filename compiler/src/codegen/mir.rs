@@ -186,7 +186,7 @@ pub struct LowerCtx {
 
 impl LowerCtx {
     pub fn new() -> Self {
-        LowerCtx {
+        let mut ctx = LowerCtx {
             consts: Vec::new(),
             const_map: HashMap::new(),
             natives: HashSet::new(),
@@ -194,6 +194,102 @@ impl LowerCtx {
             user_functions: HashSet::new(),
             enum_names: HashSet::new(),
             next_closure_id: 0,
+        };
+        // Phase 4: 注册内置原生函数短名（实例方法调用 `text.split("\n")` 解析为 "split"）
+        // 这些短名在 NativeRegistry 中已注册，但不在 HIR 程序的 natives 中，
+        // 编译器需要知道它们是原生函数而非用户函数，否则会发射 Call(idx=0xFFFF)。
+        ctx.register_builtin_native_names();
+        ctx
+    }
+
+    /// 注册内置原生函数短名（与 std_string.rs / std_collections.rs 等对齐）
+    fn register_builtin_native_names(&mut self) {
+        // String 方法（std_string.rs 已注册为 native）
+        let string_methods: &[(&str, u16)] = &[
+            ("split", 2),
+            ("substring", 3),
+            ("substringBefore", 2),
+            ("substringAfter", 2),
+            ("indexOf", 2),
+            ("lastIndexOf", 2),
+            ("replace", 3),
+            ("contains", 2),
+            ("startsWith", 2),
+            ("endsWith", 2),
+            ("toLowerCase", 1),
+            ("toUpperCase", 1),
+            ("fromCharCode", 1),
+            ("charCodeAt", 2),
+            ("length", 1),
+            ("isEmpty", 1),
+            ("countChar", 2),
+            ("repeat", 2),
+            ("splitLines", 1),
+            ("joinLines", 2),
+            ("trim", 1),
+            ("trimStart", 1),
+            ("trimEnd", 1),
+            ("padStart", 3),
+            ("padEnd", 3),
+            ("first", 1),
+            ("last", 1),
+            ("isBlank", 1),
+            ("containsAny", 2),
+            ("containsAll", 2),
+            ("join", 2),
+            ("substringBeforeLast", 2),
+            ("substringAfterLast", 2),
+            // String 全限定名（companion 方法，Aura 编译）
+            ("String.fromCharCode", 1),
+            ("String.charCodeAt", 2),
+            ("String.length", 1),
+            ("String.isEmpty", 1),
+            ("String.substring", 3),
+            ("String.split", 2),
+            ("String.contains", 2),
+            ("String.startsWith", 2),
+            ("String.endsWith", 2),
+            ("String.indexOf", 2),
+            ("String.lastIndexOf", 2),
+            ("String.replace", 3),
+            ("String.toLowerCase", 1),
+            ("String.toUpperCase", 1),
+            ("String.trim", 1),
+            ("String.trimStart", 1),
+            ("String.trimEnd", 1),
+            ("String.padStart", 3),
+            ("String.padEnd", 3),
+            ("String.repeat", 2),
+            ("String.splitLines", 1),
+            ("String.joinLines", 2),
+            ("String.countChar", 2),
+            ("String.first", 1),
+            ("String.last", 1),
+            ("String.isBlank", 1),
+            ("String.containsAny", 2),
+            ("String.containsAll", 2),
+            ("String.join", 2),
+            ("String.substringBefore", 2),
+            ("String.substringAfter", 2),
+            ("String.substringBeforeLast", 2),
+            ("String.substringAfterLast", 2),
+        ];
+        for (name, pc) in string_methods {
+            self.register_native(name, *pc);
+        }
+        // List/Collection 方法
+        let list_methods: &[(&str, u16)] = &[
+            ("size", 1),
+            ("get", 2),
+            ("add", 2),
+            ("remove", 2),
+            ("clear", 1),
+            ("indexOf", 2),
+            ("contains", 2),
+            ("set", 3),
+        ];
+        for (name, pc) in list_methods {
+            self.register_native(name, *pc);
         }
     }
 
