@@ -2359,5 +2359,399 @@ int64_t aura_lang_std_Collections_listIndexOf(const void *list, const void *val)
     return aura_collections_listIndexOf(list, val);
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// 并发运行时 — AOT 原生支持（registry-based API）
+// 为 AOT 编译的并发原语提供 C 实现。
+// 使用全局注册表将整数 ID 映射到实际对象指针。
+// 底层调用 aura_syscalls.c 中的平台相关实现（Win32/POSIX）。
+// ═════════════════════════════════════════════════════════════════════════════
+
+#include <stdlib.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+// 外部声明（aura_syscalls.c 中的实现）
+extern int64_t aura_mutex_new(void);
+extern void aura_mutex_lock(int64_t id);
+extern void aura_mutex_unlock(int64_t id);
+extern int aura_mutex_trylock(int64_t id);
+extern void aura_mutex_destroy(int64_t id);
+
+extern int64_t aura_atomic_load(volatile int64_t *addr);
+extern void aura_atomic_store(volatile int64_t *addr, int64_t val);
+extern int64_t aura_atomic_add(volatile int64_t *addr, int64_t delta);
+extern int64_t aura_atomic_sub(volatile int64_t *addr, int64_t delta);
+extern int aura_atomic_cas(volatile int64_t *addr, int64_t expected, int64_t desired);
+
+extern int64_t aura_rwlock_new(void);
+extern void aura_rwlock_read_lock(int64_t id);
+extern void aura_rwlock_write_lock(int64_t id);
+extern void aura_rwlock_read_unlock(int64_t id);
+extern void aura_rwlock_write_unlock(int64_t id);
+extern void aura_rwlock_destroy(int64_t id);
+
+extern int64_t aura_condvar_new(void);
+extern void aura_condvar_wait(int64_t cv_id, int64_t mutex_id);
+extern void aura_condvar_signal(int64_t cv_id);
+extern void aura_condvar_broadcast(int64_t cv_id);
+extern void aura_condvar_destroy(int64_t cv_id);
+
+extern int64_t aura_barrier_new(int64_t count);
+extern int64_t aura_barrier_wait(int64_t id);
+extern void aura_barrier_destroy(int64_t id);
+
+extern int64_t aura_thread_create(int64_t fn_id, int64_t arg);
+extern void aura_thread_join(int64_t id);
+extern void aura_thread_sleep(int64_t ms);
+extern int64_t aura_thread_id(void);
+extern int64_t aura_thread_available_parallelism(void);
+
+#define CONCURRENCY_MAX_IDS 256
+
+// ── 注册表基础设施 ─────────────────────────────────────────
+
+static void *concurrent_registry[CONCURRENCY_MAX_IDS];
+
+static int64_t concurrent_alloc(void *obj) {
+    for (int i = 0; i < CONCURRENCY_MAX_IDS; i++) {
+        if (concurrent_registry[i] == NULL) {
+            concurrent_registry[i] = obj;
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void *concurrent_get(int64_t id) {
+    if (id < 0 || id >= CONCURRENCY_MAX_IDS) return NULL;
+    return concurrent_registry[id];
+}
+
+static void concurrent_free_slot(int64_t id) {
+    if (id < 0 || id >= CONCURRENCY_MAX_IDS) return;
+    concurrent_registry[id] = NULL;
+}
+
+// ── Mutex (aura_lang_concurrent_Mutex_*) ────────────────────
+
+int64_t aura_lang_concurrent_Mutex_new(void) {
+    int64_t ptr = aura_mutex_new();
+    if (ptr <= 0) return -1;
+    int64_t id = concurrent_alloc((void *)(uintptr_t)ptr);
+    return id;
+}
+
+void aura_lang_concurrent_Mutex_lock(int64_t id) {
+    void *obj = concurrent_get(id);
+    if (obj) aura_mutex_lock((int64_t)(uintptr_t)obj);
+}
+
+void aura_lang_concurrent_Mutex_unlock(int64_t id) {
+    void *obj = concurrent_get(id);
+    if (obj) aura_mutex_unlock((int64_t)(uintptr_t)obj);
+}
+
+_Bool aura_lang_concurrent_Mutex_tryLock(int64_t id) {
+    void *obj = concurrent_get(id);
+    if (obj) return aura_mutex_trylock((int64_t)(uintptr_t)obj);
+    return 0;
+}
+
+void aura_lang_concurrent_Mutex_destroy(int64_t id) {
+    void *obj = concurrent_get(id);
+    if (obj) aura_mutex_destroy((int64_t)(uintptr_t)obj);
+    concurrent_free_slot(id);
+}
+
+// ── Atomic (aura_lang_concurrent_Atomic_*) ──────────────────
+
+int64_t aura_lang_concurrent_Atomic_new(int64_t initial) {
+    volatile int64_t *p = (volatile int64_t *)malloc(sizeof(int64_t));
+    if (!p) return -1;
+    aura_atomic_store(p, initial);
+    int64_t id = concurrent_alloc((void *)p);
+    return id;
+}
+
+int64_t aura_lang_concurrent_Atomic_load(int64_t id) {
+    volatile int64_t *p = (volatile int64_t *)concurrent_get(id);
+    if (p) return aura_atomic_load(p);
+    return 0;
+}
+
+void aura_lang_concurrent_Atomic_store(int64_t id, int64_t val) {
+    volatile int64_t *p = (volatile int64_t *)concurrent_get(id);
+    if (p) aura_atomic_store(p, val);
+}
+
+int64_t aura_lang_concurrent_Atomic_add(int64_t id, int64_t delta) {
+    volatile int64_t *p = (volatile int64_t *)concurrent_get(id);
+    if (p) return aura_atomic_add(p, delta);
+    return delta;
+}
+
+int64_t aura_lang_concurrent_Atomic_sub(int64_t id, int64_t delta) {
+    volatile int64_t *p = (volatile int64_t *)concurrent_get(id);
+    if (p) return aura_atomic_sub(p, delta);
+    return -delta;
+}
+
+_Bool aura_lang_concurrent_Atomic_cas(int64_t id, int64_t expected, int64_t desired) {
+    volatile int64_t *p = (volatile int64_t *)concurrent_get(id);
+    if (p) return aura_atomic_cas(p, expected, desired);
+    return 0;
+}
+
+void aura_lang_concurrent_Atomic_destroy(int64_t id) {
+    volatile int64_t *p = (volatile int64_t *)concurrent_get(id);
+    if (p) free((void *)p);
+    concurrent_free_slot(id);
+}
+
+// ── RwLock (aura_lang_concurrent_RwLock_*) ──────────────────
+
+int64_t aura_lang_concurrent_RwLock_new(void) {
+    int64_t ptr = aura_rwlock_new();
+    if (ptr <= 0) return -1;
+    return concurrent_alloc((void *)(uintptr_t)ptr);
+}
+
+void aura_lang_concurrent_RwLock_readLock(int64_t id) {
+    void *obj = concurrent_get(id);
+    if (obj) aura_rwlock_read_lock((int64_t)(uintptr_t)obj);
+}
+
+void aura_lang_concurrent_RwLock_writeLock(int64_t id) {
+    void *obj = concurrent_get(id);
+    if (obj) aura_rwlock_write_lock((int64_t)(uintptr_t)obj);
+}
+
+void aura_lang_concurrent_RwLock_readUnlock(int64_t id) {
+    void *obj = concurrent_get(id);
+    if (obj) aura_rwlock_read_unlock((int64_t)(uintptr_t)obj);
+}
+
+void aura_lang_concurrent_RwLock_writeUnlock(int64_t id) {
+    void *obj = concurrent_get(id);
+    if (obj) aura_rwlock_write_unlock((int64_t)(uintptr_t)obj);
+}
+
+void aura_lang_concurrent_RwLock_destroy(int64_t id) {
+    void *obj = concurrent_get(id);
+    if (obj) aura_rwlock_destroy((int64_t)(uintptr_t)obj);
+    concurrent_free_slot(id);
+}
+
+// ── Condvar (aura_lang_concurrent_Condvar_*) ────────────────
+
+int64_t aura_lang_concurrent_Condvar_new(void) {
+    int64_t ptr = aura_condvar_new();
+    if (ptr <= 0) return -1;
+    return concurrent_alloc((void *)(uintptr_t)ptr);
+}
+
+void aura_lang_concurrent_Condvar_wait(int64_t cv_id, int64_t mutex_id) {
+    void *cv_obj = concurrent_get(cv_id);
+    void *m_obj = concurrent_get(mutex_id);
+    if (cv_obj && m_obj) aura_condvar_wait((int64_t)(uintptr_t)cv_obj, (int64_t)(uintptr_t)m_obj);
+}
+
+void aura_lang_concurrent_Condvar_signal(int64_t cv_id) {
+    void *cv_obj = concurrent_get(cv_id);
+    if (cv_obj) aura_condvar_signal((int64_t)(uintptr_t)cv_obj);
+}
+
+void aura_lang_concurrent_Condvar_broadcast(int64_t cv_id) {
+    void *cv_obj = concurrent_get(cv_id);
+    if (cv_obj) aura_condvar_broadcast((int64_t)(uintptr_t)cv_obj);
+}
+
+void aura_lang_concurrent_Condvar_destroy(int64_t cv_id) {
+    void *cv_obj = concurrent_get(cv_id);
+    if (cv_obj) aura_condvar_destroy((int64_t)(uintptr_t)cv_obj);
+    concurrent_free_slot(cv_id);
+}
+
+// ── Barrier (aura_lang_concurrent_Barrier_*) ────────────────
+
+int64_t aura_lang_concurrent_Barrier_new(int64_t count) {
+    int64_t ptr = aura_barrier_new(count);
+    if (ptr <= 0) return -1;
+    return concurrent_alloc((void *)(uintptr_t)ptr);
+}
+
+int64_t aura_lang_concurrent_Barrier_wait(int64_t barrier_id) {
+    void *obj = concurrent_get(barrier_id);
+    if (obj) return aura_barrier_wait((int64_t)(uintptr_t)obj);
+    return -1;
+}
+
+void aura_lang_concurrent_Barrier_destroy(int64_t barrier_id) {
+    void *obj = concurrent_get(barrier_id);
+    if (obj) aura_barrier_destroy((int64_t)(uintptr_t)obj);
+    concurrent_free_slot(barrier_id);
+}
+
+// ── Semaphore (aura_lang_concurrent_Semaphore_*) ────────────
+// Semaphore 使用 Mutex + Condvar 模拟实现
+
+typedef struct {
+    int64_t count;
+    int64_t mutex_id;  // aura_lang_concurrent_Mutex_* 的 ID
+    int64_t cv_id;     // aura_lang_concurrent_Condvar_* 的 ID
+} AuraSemaphore;
+
+int64_t aura_lang_concurrent_Semaphore_new(int64_t permits) {
+    AuraSemaphore *sem = (AuraSemaphore *)malloc(sizeof(AuraSemaphore));
+    if (!sem) return -1;
+    sem->count = permits;
+    sem->mutex_id = aura_lang_concurrent_Mutex_new();
+    sem->cv_id = aura_lang_concurrent_Condvar_new();
+    if (sem->mutex_id < 0 || sem->cv_id < 0) {
+        free(sem);
+        return -1;
+    }
+    return concurrent_alloc((void *)sem);
+}
+
+void aura_lang_concurrent_Semaphore_acquire(int64_t sem_id) {
+    AuraSemaphore *sem = (AuraSemaphore *)concurrent_get(sem_id);
+    if (!sem) return;
+    aura_lang_concurrent_Mutex_lock(sem->mutex_id);
+    while (sem->count <= 0) {
+        aura_lang_concurrent_Condvar_wait(sem->cv_id, sem->mutex_id);
+    }
+    sem->count--;
+    aura_lang_concurrent_Mutex_unlock(sem->mutex_id);
+}
+
+_Bool aura_lang_concurrent_Semaphore_tryAcquire(int64_t sem_id) {
+    AuraSemaphore *sem = (AuraSemaphore *)concurrent_get(sem_id);
+    if (!sem) return 0;
+    aura_lang_concurrent_Mutex_lock(sem->mutex_id);
+    if (sem->count > 0) {
+        sem->count--;
+        aura_lang_concurrent_Mutex_unlock(sem->mutex_id);
+        return 1;
+    }
+    aura_lang_concurrent_Mutex_unlock(sem->mutex_id);
+    return 0;
+}
+
+void aura_lang_concurrent_Semaphore_release(int64_t sem_id) {
+    AuraSemaphore *sem = (AuraSemaphore *)concurrent_get(sem_id);
+    if (!sem) return;
+    aura_lang_concurrent_Mutex_lock(sem->mutex_id);
+    sem->count++;
+    aura_lang_concurrent_Condvar_signal(sem->cv_id);
+    aura_lang_concurrent_Mutex_unlock(sem->mutex_id);
+}
+
+int64_t aura_lang_concurrent_Semaphore_count(int64_t sem_id) {
+    AuraSemaphore *sem = (AuraSemaphore *)concurrent_get(sem_id);
+    if (!sem) return 0;
+    aura_lang_concurrent_Mutex_lock(sem->mutex_id);
+    int64_t c = sem->count;
+    aura_lang_concurrent_Mutex_unlock(sem->mutex_id);
+    return c;
+}
+
+void aura_lang_concurrent_Semaphore_destroy(int64_t sem_id) {
+    AuraSemaphore *sem = (AuraSemaphore *)concurrent_get(sem_id);
+    if (sem) {
+        aura_lang_concurrent_Mutex_destroy(sem->mutex_id);
+        aura_lang_concurrent_Condvar_destroy(sem->cv_id);
+        free(sem);
+    }
+    concurrent_free_slot(sem_id);
+}
+
+// ── Future (aura_lang_concurrent_Future_*) ──────────────────
+// Future 基于 Thread 实现：spawn 创建线程，await 等待结果。
+// 使用全局注册表存储 future 状态。
+
+typedef struct {
+    int64_t thread_id;  // aura_thread_create 返回的线程 ID
+    int64_t result;
+    int done;
+    int cancelled;
+} AuraFuture;
+
+// aura.lang.concurrent.Future.spawn(fn_id, arg) → Int
+// 复用 aura_thread_create 创建线程，通过 thread_dispatch 分派
+int64_t aura_lang_concurrent_Future_spawn(int64_t fn_id, int64_t arg) {
+    AuraFuture *fut = (AuraFuture *)malloc(sizeof(AuraFuture));
+    if (!fut) return -1;
+    fut->result = 0;
+    fut->done = 0;
+    fut->cancelled = 0;
+    int64_t id = concurrent_alloc((void *)fut);
+    if (id < 0) { free(fut); return -1; }
+    // 通过 aura_thread_create 创建线程（fn_id 为函数索引）
+    fut->thread_id = aura_thread_create(fn_id, arg);
+    if (fut->thread_id < 0) {
+        concurrent_free_slot(id);
+        free(fut);
+        return -1;
+    }
+    return id;
+}
+
+// aura.lang.concurrent.Future.await(future_id) → Int
+int64_t aura_lang_concurrent_FutureAwait(int64_t future_id) {
+    AuraFuture *fut = (AuraFuture *)concurrent_get(future_id);
+    if (!fut) return 0;
+    if (fut->thread_id > 0) aura_thread_join(fut->thread_id);
+    fut->done = 1;
+    return fut->result;
+}
+
+// aura.lang.concurrent.Future.isDone(future_id) → Boolean
+_Bool aura_lang_concurrent_Future_isDone(int64_t future_id) {
+    AuraFuture *fut = (AuraFuture *)concurrent_get(future_id);
+    if (!fut) return 0;
+    return fut->done;
+}
+
+// aura.lang.concurrent.Future.cancel(future_id) → Unit
+void aura_lang_concurrent_Future_cancel(int64_t future_id) {
+    AuraFuture *fut = (AuraFuture *)concurrent_get(future_id);
+    if (fut) fut->cancelled = 1;
+}
+
+// aura.lang.concurrent.Future.all / Future.any — stubs
+void *aura_lang_concurrent_Future_all(void *future_ids) {
+    (void)future_ids;
+    return NULL;
+}
+int64_t aura_lang_concurrent_Future_any(void *future_ids) {
+    (void)future_ids;
+    return 0;
+}
+
+// ── Thread (aura_lang_concurrent_Thread_*) ──────────────────
+// Thread 函数由 translate_to_legacy_c 映射到已有 C 实现，
+// 此处提供 aura_lang_concurrent_Thread_* 别名以兼容直接调用。
+
+int64_t aura_lang_concurrent_Thread_spawn(int64_t fn_id, int64_t arg) {
+    return aura_thread_create(fn_id, arg);
+}
+void aura_lang_concurrent_Thread_join(int64_t id) {
+    aura_thread_join(id);
+}
+void aura_lang_concurrent_Thread_sleep(int64_t ms) {
+    aura_thread_sleep(ms);
+}
+int64_t aura_lang_concurrent_Thread_id(void) {
+    return aura_thread_id();
+}
+int64_t aura_lang_concurrent_Thread_parallelism(void) {
+    return aura_thread_available_parallelism();
+}
+int64_t aura_lang_concurrent_Thread_availableCores(void) {
+    return aura_thread_available_parallelism();
+}
+
 
 

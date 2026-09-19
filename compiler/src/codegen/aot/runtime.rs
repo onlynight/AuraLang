@@ -1020,6 +1020,89 @@ pub fn cffi_signature(name: &str) -> Option<(&'static str, Vec<&'static str>)> {
                 "i64", "i64",
             ],
         ),
+        // ── aura.lang.concurrent 高层 API（C runtime 包装） ──
+        // Mutex
+        "aura_lang_concurrent_Mutex_new" => ("i64", &[]),
+        "aura_lang_concurrent_Mutex_lock" => ("void", &["i64"]),
+        "aura_lang_concurrent_Mutex_unlock" => ("void", &["i64"]),
+        "aura_lang_concurrent_Mutex_tryLock" => ("i32", &["i64"]),
+        "aura_lang_concurrent_Mutex_destroy" => ("void", &["i64"]),
+        // Atomic
+        "aura_lang_concurrent_Atomic_new" => ("i64", &["i64"]),
+        "aura_lang_concurrent_Atomic_load" => ("i64", &["i64"]),
+        "aura_lang_concurrent_Atomic_store" => (
+            "void",
+            &[
+                "i64", "i64",
+            ],
+        ),
+        "aura_lang_concurrent_Atomic_add" => (
+            "i64",
+            &[
+                "i64", "i64",
+            ],
+        ),
+        "aura_lang_concurrent_Atomic_sub" => (
+            "i64",
+            &[
+                "i64", "i64",
+            ],
+        ),
+        "aura_lang_concurrent_Atomic_compareAndSet" => (
+            "i32",
+            &[
+                "i64", "i64", "i64",
+            ],
+        ),
+        // RwLock
+        "aura_lang_concurrent_RwLock_new" => ("i64", &[]),
+        "aura_lang_concurrent_RwLock_readLock" => ("void", &["i64"]),
+        "aura_lang_concurrent_RwLock_writeLock" => ("void", &["i64"]),
+        "aura_lang_concurrent_RwLock_readUnlock" => ("void", &["i64"]),
+        "aura_lang_concurrent_RwLock_writeUnlock" => ("void", &["i64"]),
+        "aura_lang_concurrent_RwLock_destroy" => ("void", &["i64"]),
+        // Condvar
+        "aura_lang_concurrent_Condvar_new" => ("i64", &[]),
+        "aura_lang_concurrent_Condvar_wait" => (
+            "void",
+            &[
+                "i64", "i64",
+            ],
+        ),
+        "aura_lang_concurrent_Condvar_signal" => ("void", &["i64"]),
+        "aura_lang_concurrent_Condvar_broadcast" => ("void", &["i64"]),
+        "aura_lang_concurrent_Condvar_destroy" => ("void", &["i64"]),
+        // Barrier
+        "aura_lang_concurrent_Barrier_new" => ("i64", &["i64"]),
+        "aura_lang_concurrent_Barrier_wait" => ("i64", &["i64"]),
+        "aura_lang_concurrent_Barrier_destroy" => ("void", &["i64"]),
+        // Semaphore
+        "aura_lang_concurrent_Semaphore_new" => ("i64", &["i64"]),
+        "aura_lang_concurrent_Semaphore_acquire" => ("void", &["i64"]),
+        "aura_lang_concurrent_Semaphore_release" => ("void", &["i64"]),
+        "aura_lang_concurrent_Semaphore_tryAcquire" => ("i32", &["i64"]),
+        "aura_lang_concurrent_Semaphore_destroy" => ("void", &["i64"]),
+        // Future
+        "aura_lang_concurrent_Future_spawn" => (
+            "i64",
+            &[
+                "i64", "i64",
+            ],
+        ),
+        "aura_lang_concurrent_Future_await" => ("i64", &["i64"]),
+        "aura_lang_concurrent_Future_isDone" => ("i32", &["i64"]),
+        "aura_lang_concurrent_Future_cancel" => ("i32", &["i64"]),
+        // Thread
+        "aura_lang_concurrent_Thread_spawn" => (
+            "i64",
+            &[
+                "i64", "i64",
+            ],
+        ),
+        "aura_lang_concurrent_Thread_join" => ("void", &["i64"]),
+        "aura_lang_concurrent_Thread_sleep" => ("void", &["i64"]),
+        "aura_lang_concurrent_Thread_id" => ("i64", &[]),
+        "aura_lang_concurrent_Thread_parallelism" => ("i64", &[]),
         _ => return None,
     };
     Some((ret, params.to_vec()))

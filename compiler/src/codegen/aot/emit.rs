@@ -3759,6 +3759,7 @@ fn emit_call(
             // 三种候选键：std 全名（`aura.lang.std.<C>.<m>`）、点分、下划线。
             let candidates = [
                 format!("aura.lang.std.{}.{}", v, callee_owned),
+                format!("aura.lang.concurrent.{}.{}", v, callee_owned),
                 format!("{}.{}", v, callee_owned),
                 format!("{}_{}", v, callee_owned),
             ];
@@ -3863,15 +3864,19 @@ fn emit_call(
     let callee: &str = &callee_owned;
     let param_tys = ctx.func_param_types.get(callee).cloned();
 
-    // ── Thread.spawn 特殊处理：函数引用 → 函数索引 ──
-    // Thread.spawn(fn, arg) 中 fn 期望函数索引（整数），
+    // ── Thread.spawn / Future.spawn 特殊处理：函数引用 → 函数索引 ──
+    // spawn(fn, arg) 中 fn 期望函数索引（整数），
     // 但 HIR 把函数名当作变量引用。此处解析函数名 → 函数索引。
     {
-        let is_thread_spawn = callee == "aura.lang.concurrent.Thread.spawn"
+        let is_spawn = callee == "aura.lang.concurrent.Thread.spawn"
             || callee == "aura_concurrent_Thread_spawn"
             || callee == "Thread_spawn"
-            || callee == "Thread.spawn";
-        if is_thread_spawn {
+            || callee == "Thread.spawn"
+            || callee == "aura.lang.concurrent.Future.spawn"
+            || callee == "aura_concurrent_Future_spawn"
+            || callee == "Future_spawn"
+            || callee == "Future.spawn";
+        if is_spawn {
             if let Some(HirExpr::Var(fn_name)) = effective_args.first() {
                 if let Some(&idx) = ctx.fn_index_map.get(fn_name) {
                     // 用函数索引常量替换函数名引用
