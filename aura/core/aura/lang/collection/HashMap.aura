@@ -52,13 +52,13 @@ class HashMap<K, V> : Map<K, V> {
     // ── 内部存储 ──
 
     /// 桶键链：第 b 个元素是第 b 号桶的键链。
-    private var bucketKeys: ArrayList<ArrayList<K>>
+    private var bucketKeys: List<List<K>>
 
     /// 桶值链：与 bucketKeys 的元素、以及各链内部下标对齐。
-    private var bucketValues: ArrayList<ArrayList<V>>
+    private var bucketValues: List<List<V>>
 
     /// 桶存活链：与 bucketKeys 对齐，记录每条记录是否仍有效。
-    private var bucketAlive: ArrayList<ArrayList<Boolean>>
+    private var bucketAlive: List<List<Boolean>>
 
     /// 桶数量，始终为 2 的幂。
     private var capacity: Int
@@ -97,9 +97,9 @@ class HashMap<K, V> : Map<K, V> {
     /// 按键获取值，键不存在或已删除返回 null。
     override fun get(key: K): V? {
         var b: Int = this.bucketIndex(key)
-        var ks: ArrayList<K> = this.bucketKeys[b]
-        var vs: ArrayList<V> = this.bucketValues[b]
-        var fs: ArrayList<Boolean> = this.bucketAlive[b]
+        var ks: List<K> = this.bucketKeys[b]
+        var vs: List<V> = this.bucketValues[b]
+        var fs: List<Boolean> = this.bucketAlive[b]
         var i: Int = ks.size - 1
         while (i >= 0) {
             if (this.valuesEqual(ks[i], key)) {
@@ -114,9 +114,9 @@ class HashMap<K, V> : Map<K, V> {
     /// 按键获取值，键不存在或已删除时返回默认值。
     override fun getOrDefault(key: K, default: V): V {
         var b: Int = this.bucketIndex(key)
-        var ks: ArrayList<K> = this.bucketKeys[b]
-        var vs: ArrayList<V> = this.bucketValues[b]
-        var fs: ArrayList<Boolean> = this.bucketAlive[b]
+        var ks: List<K> = this.bucketKeys[b]
+        var vs: List<V> = this.bucketValues[b]
+        var fs: List<Boolean> = this.bucketAlive[b]
         var i: Int = ks.size - 1
         while (i >= 0) {
             if (this.valuesEqual(ks[i], key)) {
@@ -135,8 +135,8 @@ class HashMap<K, V> : Map<K, V> {
     /// （内部经 `toStr` 分配字符串）→ 死循环 + 内存无上限增长。
     override fun containsKey(key: K): Boolean {
         var b: Int = this.bucketIndex(key)
-        var ks: ArrayList<K> = this.bucketKeys[b]
-        var fs: ArrayList<Boolean> = this.bucketAlive[b]
+        var ks: List<K> = this.bucketKeys[b]
+        var fs: List<Boolean> = this.bucketAlive[b]
         var i: Int = ks.size - 1
         while (i >= 0) {
             if (this.valuesEqual(ks[i], key)) {
@@ -155,9 +155,9 @@ class HashMap<K, V> : Map<K, V> {
     override fun containsValue(value: V): Boolean {
         var b: Int = 0
         while (b < this.capacity) {
-            var ks: ArrayList<K> = this.bucketKeys[b]
-            var vs: ArrayList<V> = this.bucketValues[b]
-            var fs: ArrayList<Boolean> = this.bucketAlive[b]
+            var ks: List<K> = this.bucketKeys[b]
+            var vs: List<V> = this.bucketValues[b]
+            var fs: List<Boolean> = this.bucketAlive[b]
             var i: Int = 0
             var n: Int = vs.size
             while (i < n) {
@@ -181,9 +181,9 @@ class HashMap<K, V> : Map<K, V> {
     /// 返回；`remove` 同理。扩容重建会丢弃所有被后续记录遮蔽的旧记录。
     override fun put(key: K, value: V): V? {
         var b: Int = this.bucketIndex(key)
-        var ks: ArrayList<K> = this.bucketKeys[b]
-        var vs: ArrayList<V> = this.bucketValues[b]
-        var fs: ArrayList<Boolean> = this.bucketAlive[b]
+        var ks: List<K> = this.bucketKeys[b]
+        var vs: List<V> = this.bucketValues[b]
+        var fs: List<Boolean> = this.bucketAlive[b]
         var old: V? = null
         var existed: Boolean = false
         var i: Int = ks.size - 1
@@ -214,9 +214,9 @@ class HashMap<K, V> : Map<K, V> {
     /// 记录在扩容重建时统一清除。
     override fun remove(key: K): V? {
         var b: Int = this.bucketIndex(key)
-        var ks: ArrayList<K> = this.bucketKeys[b]
-        var vs: ArrayList<V> = this.bucketValues[b]
-        var fs: ArrayList<Boolean> = this.bucketAlive[b]
+        var ks: List<K> = this.bucketKeys[b]
+        var vs: List<V> = this.bucketValues[b]
+        var fs: List<Boolean> = this.bucketAlive[b]
         var i: Int = ks.size - 1
         while (i >= 0) {
             if (this.valuesEqual(ks[i], key)) {
@@ -252,12 +252,16 @@ class HashMap<K, V> : Map<K, V> {
     // ── 集合操作 ──
 
     /// 获取所有键，每个键只出现一次。
-    override fun keys(): ArrayList<K> {
-        var out: ArrayList<K> = arrayListOf<K>()
+    ///
+    /// 返回值用**原生堆列表**（`arrayListOf`），与 `Map.keys(): List<K>` 接口一致；
+    /// 不能声明成 `ArrayList<K>`：`ArrayList` 是用户类，而调用方按 `List` 语义
+    /// 下标/取长，两种表示混用会在 AOT 下读到野值。
+    override fun keys(): List<K> {
+        var out: List<K> = arrayListOf<K>()
         var b: Int = 0
         while (b < this.capacity) {
-            var ks: ArrayList<K> = this.bucketKeys[b]
-            var fs: ArrayList<Boolean> = this.bucketAlive[b]
+            var ks: List<K> = this.bucketKeys[b]
+            var fs: List<Boolean> = this.bucketAlive[b]
             var i: Int = 0
             var n: Int = ks.size
             while (i < n) {
@@ -272,13 +276,14 @@ class HashMap<K, V> : Map<K, V> {
     }
 
     /// 获取所有值，顺序与 `keys()` 一一对应。
-    override fun values(): ArrayList<V> {
-        var out: ArrayList<V> = arrayListOf<V>()
+    /// 同 `keys()`：返回值必须是原生堆列表。
+    override fun values(): List<V> {
+        var out: List<V> = arrayListOf<V>()
         var b: Int = 0
         while (b < this.capacity) {
-            var ks: ArrayList<K> = this.bucketKeys[b]
-            var vs: ArrayList<V> = this.bucketValues[b]
-            var fs: ArrayList<Boolean> = this.bucketAlive[b]
+            var ks: List<K> = this.bucketKeys[b]
+            var vs: List<V> = this.bucketValues[b]
+            var fs: List<Boolean> = this.bucketAlive[b]
             var i: Int = 0
             var n: Int = ks.size
             while (i < n) {
@@ -296,8 +301,8 @@ class HashMap<K, V> : Map<K, V> {
 
     /// 转换为字符串表示，形如 `{a=1, b=2}`。
     override fun toString(): String {
-        var ks: ArrayList<K> = this.keys()
-        var vs: ArrayList<V> = this.values()
+        var ks: List<K> = this.keys()
+        var vs: List<V> = this.values()
         var result: String = "{"
         var i: Int = 0
         var n: Int = ks.size
@@ -316,9 +321,9 @@ class HashMap<K, V> : Map<K, V> {
 
     /// 分配 `cap` 条空桶链并写入三个桶数组字段。
     private fun allocBuckets(cap: Int): Unit {
-        var bk: ArrayList<ArrayList<K>> = arrayListOf<ArrayList<K>>()
-        var bv: ArrayList<ArrayList<V>> = arrayListOf<ArrayList<V>>()
-        var ba: ArrayList<ArrayList<Boolean>> = arrayListOf<ArrayList<Boolean>>()
+        var bk: List<List<K>> = arrayListOf<List<K>>()
+        var bv: List<List<V>> = arrayListOf<List<V>>()
+        var ba: List<List<Boolean>> = arrayListOf<List<Boolean>>()
         var i: Int = 0
         while (i < cap) {
             bk.add(arrayListOf<K>())
@@ -358,15 +363,22 @@ class HashMap<K, V> : Map<K, V> {
         return this.hashKey(key) & (this.capacity - 1)
     }
 
-    /// 空安全的值相等：任一侧为 null 时按 null 比较，否则委托 `equals`。
+    /// 空安全的值相等：任一侧为 null 时按 null 比较，否则用 `==`。
+    ///
+    /// **不能用 `a.equals(b)`**：AOT 下 `Any.equals(...)` 没有可解析的实现，
+    /// 会直接访问违规崩溃（实测）。`==` 走发射器的通用比较路径：
+    ///   * 整数（Plan A 装箱）：相同值的装箱结果完全相同 → 等值成立；
+    ///   * 字符串字面量：发射器对同一字面量复用同一常量 → 指针相等；
+    ///   * 其余对象：按句柄比较。
     private fun valuesEqual(a: Any, b: Any): Boolean {
         if (a == null) { return b == null }
-        return a.equals(b)
+        if (b == null) { return false }
+        return a == b
     }
 
     /// 判断桶链中第 `i` 条记录是否为该键的最新记录
     /// （其后不存在同键记录）。
-    private fun isLatest(ks: ArrayList<K>, i: Int): Boolean {
+    private fun isLatest(ks: List<K>, i: Int): Boolean {
         var key: K = ks[i]
         var j: Int = ks.size - 1
         while (j > i) {
@@ -387,17 +399,17 @@ class HashMap<K, V> : Map<K, V> {
     /// 按 `newCap` 重建桶数组：有效记录按新容量重新分桶，
     /// 失效记录与被遮蔽的旧记录一并丢弃。
     private fun rehash(newCap: Int): Unit {
-        var oldKeys: ArrayList<ArrayList<K>> = this.bucketKeys
-        var oldValues: ArrayList<ArrayList<V>> = this.bucketValues
-        var oldAlive: ArrayList<ArrayList<Boolean>> = this.bucketAlive
+        var oldKeys: List<List<K>> = this.bucketKeys
+        var oldValues: List<List<V>> = this.bucketValues
+        var oldAlive: List<List<Boolean>> = this.bucketAlive
         var oldCap: Int = this.capacity
         this.capacity = newCap
         this.allocBuckets(newCap)
         var b: Int = 0
         while (b < oldCap) {
-            var ok: ArrayList<K> = oldKeys[b]
-            var ov: ArrayList<V> = oldValues[b]
-            var oa: ArrayList<Boolean> = oldAlive[b]
+            var ok: List<K> = oldKeys[b]
+            var ov: List<V> = oldValues[b]
+            var oa: List<Boolean> = oldAlive[b]
             var n: Int = ok.size
             var i: Int = 0
             while (i < n) {
@@ -412,9 +424,9 @@ class HashMap<K, V> : Map<K, V> {
                         var key: K = ok[i]
                         var val: V = ov[i]
                         var t: Int = this.bucketIndex(key)
-                        var nk: ArrayList<K> = this.bucketKeys[t]
-                        var nv: ArrayList<V> = this.bucketValues[t]
-                        var na: ArrayList<Boolean> = this.bucketAlive[t]
+                        var nk: List<K> = this.bucketKeys[t]
+                        var nv: List<V> = this.bucketValues[t]
+                        var na: List<Boolean> = this.bucketAlive[t]
                         nk.add(key)
                         nv.add(val)
                         na.add(true)

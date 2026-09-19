@@ -1,0 +1,14 @@
+// Test ArrayList data field directly
+package test
+
+import aura.lang.collection.ArrayList
+
+fun main(): Int {
+    var l = ArrayList<Int>()
+    l.add(1)
+    l.add(2)
+    l.add(3)
+    println("size=" + l.size)
+    println("get(0)=" + l.get(0))
+    return 0
+}

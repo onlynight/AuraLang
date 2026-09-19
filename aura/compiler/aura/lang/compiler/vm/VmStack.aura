@@ -1,0 +1,158 @@
+// aura:///aura/compiler/aura/lang/compiler/vm/VmStack.aura
+package aura.lang.compiler.vm
+// ─────────────────────────────────────────────────────────────
+// VM 栈容器 — 自举编译器 AOT 兼容实现
+//
+// 为什么不用 `ArrayList<T>`：
+//   自举编译器的 AOT 后端把「集合类型」按**前缀**判定（Emit.isCollectionTypeName），
+//   而 `ArrayList` 以 `Array` 开头 → 被误判为裸集合句柄（`AuraDynList*`），
+//   于是 `.add` / `.get` / `.size` 全部走原生集合路径，读到的 `_size` 恒为 0。
+//   所以自举编译器自己的运行时容器必须用**原生堆列表**（`arrayListOf<T>()`）+ 显式
+//   栈指针来承载，`d[i] = v` / `d.add(v)` / `d[i]` 均按 `List<T>` 语义正确发射。
+//
+// ── 用法 ──
+//   push/pop/peek/size/clear，全部 O(1)。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.collection.HashMap
+
+/// VM 值栈（元素为 `Any`）。
+class VmStack {
+
+    private var d: List<Any> = arrayListOf<Any>()
+    private var sp: Int = 0
+    private var cap: Int = 0
+
+    /// 压入一个值。
+    fun push(v: Any): Unit {
+        if (this.sp < this.cap) {
+            this.d[this.sp] = v
+        } else {
+            this.d.add(v)
+            this.cap = this.cap + 1
+        }
+        this.sp = this.sp + 1
+    }
+
+    /// 弹出栈顶（空栈返回 null）。
+    fun pop(): Any {
+        if (this.sp <= 0) {
+            return null
+        }
+        this.sp = this.sp - 1
+        return this.d[this.sp]
+    }
+
+    /// 查看栈顶（不弹出；空栈返回 null）。
+    fun peek(): Any {
+        if (this.sp <= 0) {
+            return null
+        }
+        return this.d[this.sp - 1]
+    }
+
+    /// 当前元素个数。
+    fun size(): Int {
+        return this.sp
+    }
+
+    /// 按下标读取（从栈底数，不弹出；越界返回 null）。
+    ///
+    /// 用途：`listOf(a, b, c)` 这类**变参**内建必须按**原顺序**取实参 ——
+    /// 逐个 `pop` 会把顺序反转（实测 `listOf(1,2,3,4,5)` 得到 `[5,4,3,2,1]`，
+    /// `list[0]` 打印 5、`list[4]` 打印 1）。
+    /// 方法名刻意加前缀：本项目的 AOT 存在「同名成员被错绑到无关对象」的问题
+    ///（实测 `VmCollections.getAt(list, idx)` 被绑到别的 `getAt`，函数体根本不执行）。
+    fun vmSlotAt(i: Int): Any {
+        if (i < 0 || i >= this.sp) {
+            return null
+        }
+        return this.d[i]
+    }
+
+    /// 清空。
+    fun clear(): Unit {
+        this.d = arrayListOf<Any>()
+        this.sp = 0
+        this.cap = 0
+    }
+}
+
+/// VM 字符串栈（调用栈 / 异常处理器栈）。
+class VmStrStack {
+
+    private var d: List<String> = arrayListOf<String>()
+    private var sp: Int = 0
+    private var cap: Int = 0
+
+    fun push(v: String): Unit {
+        if (this.sp < this.cap) {
+            this.d[this.sp] = v
+        } else {
+            this.d.add(v)
+            this.cap = this.cap + 1
+        }
+        this.sp = this.sp + 1
+    }
+
+    fun pop(): String {
+        if (this.sp <= 0) {
+            return ""
+        }
+        this.sp = this.sp - 1
+        return this.d[this.sp]
+    }
+
+    fun peek(): String {
+        if (this.sp <= 0) {
+            return ""
+        }
+        return this.d[this.sp - 1]
+    }
+
+    fun size(): Int {
+        return this.sp
+    }
+
+    fun clear(): Unit {
+        this.d = arrayListOf<String>()
+        this.sp = 0
+        this.cap = 0
+    }
+}
+
+/// 保存的局部变量帧栈（函数调用时保存调用者的槽位表）。
+class VmFrameStack {
+
+    private var d: List<HashMap<Int, Any>> = arrayListOf<HashMap<Int, Any>>()
+    private var sp: Int = 0
+    private var cap: Int = 0
+
+    fun push(v: HashMap<Int, Any>): Unit {
+        if (this.sp < this.cap) {
+            this.d[this.sp] = v
+        } else {
+            this.d.add(v)
+            this.cap = this.cap + 1
+        }
+        this.sp = this.sp + 1
+    }
+
+    fun pop(): HashMap<Int, Any> {
+        if (this.sp <= 0) {
+            return HashMap<Int, Any>()
+        }
+        this.sp = this.sp - 1
+        return this.d[this.sp]
+    }
+
+    fun size(): Int {
+        return this.sp
+    }
+
+    fun clear(): Unit {
+        this.d = arrayListOf<HashMap<Int, Any>>()
+        this.sp = 0
+        this.cap = 0
+    }
+}

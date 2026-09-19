@@ -1,0 +1,14 @@
+// Test ArrayList addItem only
+package test
+
+import aura.lang.collection.ArrayList
+
+fun main(): Int {
+    var l = ArrayList<Int>()
+    l.addItem(1)
+    l.addItem(2)
+    l.addItem(3)
+    println("size=" + l.size)
+    println("l[0]=" + l[0])
+    return 0
+}

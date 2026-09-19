@@ -1,0 +1,9 @@
+// aura:///aura/compiler/aura/lang/compiler/serialize/WinFileIO.aura
+package aura.lang.compiler.serialize
+// ─────────────────────────────────────────────────────────────
+// Windows 文件 I/O — 待实现
+//
+// 当前版本仅使用 PlatformFileIO（Linux syscall）。
+// Windows 支持需要通过独立的 native helper library 或
+// 修改 AOT 后端的链接配置来实现。
+// ─────────────────────────────────────────────────────────────

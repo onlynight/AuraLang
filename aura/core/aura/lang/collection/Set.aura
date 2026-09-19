@@ -19,7 +19,7 @@ interface Set<T> : Collection<T> {
     fun add(item: T): Boolean
 
     /// 移除元素，返回是否成功移除
-    fun remove(item: T): Boolean
+    fun removeItem(item: T): Boolean
 
     /// 清空集合
     fun clear(): Unit

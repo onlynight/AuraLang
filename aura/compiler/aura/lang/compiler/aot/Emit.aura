@@ -296,6 +296,15 @@ class LlvmEmitter {
     /// 用户结构体字段表（每项 `Sym|field|llvmTy|initLLVM|initExprId`）。
     var structLines: List<String> = arrayListOf<String>()
 
+    /// 「用户类实例变量」表（每行 `name|Cls`）。
+    ///
+    /// 背景：接口类型变量（`var m: Map<String,Int> = HashMap<...>()`）的 LLVM 类型
+    /// 是 `i8*`，与**运行期集合句柄**（`mapOf()`/`listOf()` 产出）同形，静态类型
+    /// 无法区分二者 —— 前者应走 `HashMap_*` 类方法，后者应走 `Collections_*`。
+    /// 一刀切改派会让自举编译器编译自身时崩溃（它大量使用 `mapOf`）。
+    /// 因此在**声明处**按初始化器是否为类构造登记，使用处据此精确分流。
+    var fClsVars: String = ""
+
     /// 集合（List/Array/Set/Map）局部变量名（换行分隔）。
     ///
     /// 发射器内部把 String 与集合统一表示为 `i8*`，`.size` / `.add` / `for-in`
@@ -360,6 +369,7 @@ class LlvmEmitter {
         this.fEmittedFnSyms = ""
         this.structLines = arrayListOf<String>()
         this.fListVars = ""
+        this.fClsVars = ""
         this.fRetTy = "void"
         this.fCurClass = ""
         this.loopEnd = ""
@@ -1305,6 +1315,12 @@ class LlvmEmitter {
     fun isCollectionReceiver(hir: Hir, recvId: Int): Boolean {
         if (hir.kindOf(recvId) == "HirVar") {
             val rn: String = hir.textOf(recvId)
+            // 该变量持有**用户类实例**（`var m: Map<...> = HashMap<...>()`）→
+            // 不是运行期集合句柄：`.size` 等必须走类上的方法/属性
+            //（否则会被算成 `Collections_count(类指针)`/`strlen`）。
+            if (this.clsVarOf(rn) != "") {
+                return false
+            }
             if (this.isListVar(rn)) {
                 return true
             }
@@ -1346,6 +1362,10 @@ class LlvmEmitter {
         }
         val ty: String = hir.tyOf(recvId)
         if (ty != "" && EmitUtils.isCollectionTypeName(this.resolveAlias(ty))) {
+            // 排除 ArrayList（用户定义的类），避免下标访问被降级为 Collections.getAt
+            if (ty.startsWith("ArrayList")) {
+                return false
+            }
             return true
         }
         return false
@@ -1470,6 +1490,20 @@ class LlvmEmitter {
     ///
     /// `argc` 为**含隐式 self** 的形参数，用于在同名重载中挑对签名。
     /// 返回命中类符号（未命中返回 ""）；调用方据此拼 `Owner.m` 符号名与取签名。
+    /// 接口类型 → 项目内实现类。**当前返回空串（不改派）**。
+    ///
+    /// 曾经尝试过 `Map → HashMap` / `List → ArrayList` 改派，用于修
+    /// 「接口类型接收者的方法调用退化成裸名」的问题（`Map.remove(k)` 被错绑到
+    /// `EnvOps_remove`，返回 `void` → `== null` 生成非法 IR）。但接口类型变量
+    /// **既可能是实现类实例，也可能是 `listOf`/`mapOf` 产出的运行期句柄**
+    ///（`Value.List` / `AuraDynMap`），静态无法区分：改派到 `HashMap_*`/
+    /// `ArrayList_*` 会把句柄当 `%struct.X*` 解引用 —— 实测自举编译器编译
+    /// 自身时直接访问违规（n1 崩溃，无法产出 n2）。故保留此函数作为开关，
+    /// 等运行期句柄与实现类在类型上可区分后再启用。
+    fun implClassOfInterface(ty: String): String {
+        return ""
+    }
+
     fun ownerClassInChain(cls: String, fname: String, argc: Int): String {
         var cur: String = cls
         var depth: Int = 0
@@ -2440,6 +2474,16 @@ class LlvmEmitter {
             pre.sbAdd("  " + wf3 + " = or i32 " + wf2 + ", " + wd + "\n")
             val wf4: String = this.freshVar()
             pre.sbAdd("  " + wf4 + " = or i32 " + wf3 + ", " + we + "\n")
+            // **二进制模式位保留**：Aura 侧用 `0x8000` 表示「二进制打开」
+            //（Linux 该位为 O_LARGEFILE，读场景无副作用）。必须显式保留：
+            // 否则 UCRT `_open` 默认**文本模式**，`_read` 遇到 0x1A(Ctrl+Z)
+            // 就当 EOF、且会做 CRLF 转换 —— 读二进制 `.auc` 会**截断**
+            //（实测 21KB 的文件只读到 1941 字节），文本模式的 CRLF 转换也会
+            // 破坏二进制内容。
+            val wfbin: String = this.freshVar()
+            pre.sbAdd("  " + wfbin + " = and i32 " + fl + ", 32768\n")
+            val wf5: String = this.freshVar()
+            pre.sbAdd("  " + wf5 + " = or i32 " + wf4 + ", " + wfbin + "\n")
             // 第 3 个实参是 **创建模式**（仅 `_O_CREAT` 时生效），UCRT 要求
             // `_S_IREAD(0x100) | _S_IWRITE(0x80)` = 384。
             // 旧实现硬编码 `i32 0`（无任何权限）→ Windows 建出的文件被标记为
@@ -2448,7 +2492,7 @@ class LlvmEmitter {
             // 编译器重写 `.ll` 失败后，`llc -verify` 校验的是**上一次的旧 IR**，
             // 报出早已修掉的错误（自举产物上表现为「改了代码但错误不变」）。
             return this.winCrtFinish(pre, "_open", "i32",
-                "i8* " + p + ", i32 " + wf4 + ", i32 384")
+                "i8* " + p + ", i32 " + wf5 + ", i32 384")
         }
         // ── shell 执行：`run(command)` → UCRT `system`（内部走 `cmd /C`）──
         if (lc == "runshell" || lc == "system" || lc == "run") {
@@ -2951,6 +2995,48 @@ class LlvmEmitter {
             i = i + 1
         }
         return retTy + "|" + pTys
+    }
+
+    /// `call` 节点返回的 **Aura** 类型名（未登记返回 ""）。
+    ///
+    /// 用途：判断「初始化器返回的是不是集合」。`inferType` 只给 LLVM 类型，
+    /// 而 `List<T>` 与 `String` 在 LLVM 侧都是 `i8*`，无法区分 ——
+    /// 于是 `var t = e.take(2)` 这种**方法返回值初始化**的局部变量不会被登记为
+    /// 集合，后续 `t.size` 会被算成 `strlen(t)`（把列表句柄当 C 字符串，
+    /// 实测 `take(2).size` 得 1 而非 2）。
+    ///
+    /// 解析顺序：先按裸名查 `auraRetTyOf`（自由函数/静态方法），再按接收者类型
+    /// 拼 `Cls.method` 查（与 `emitCall` 的「类方法优先」一致）。
+    fun callAuraRetTy(hir: Hir, id: Int): String {
+        if (hir.kindOf(id) != "HirCall") {
+            return ""
+        }
+        val kids: String = hir.kidsOf(id)
+        var fname: String = hir.textOf(id)
+        if (fname == "" && hirKidsCount(kids) > 0) {
+            fname = hir.textOf(hirKidsAt(kids, 0))
+        }
+        if (fname == "") {
+            return ""
+        }
+        val direct: String = this.auraRetTyOf(sanitizeLlvm(fname))
+        if (direct != "") {
+            return direct
+        }
+        if (hirKidsCount(kids) >= 1) {
+            val rk: Int = hirKidsAt(kids, 0)
+            var sym: String = this.structSymOfPtr(this.inferType(hir, rk))
+            if (sym == "" && this.isThisNode(hir, rk)) {
+                sym = this.curClassSym()
+            }
+            if (sym != "") {
+                val owner: String = this.ownerClassInChain(sym, fname, hirKidsCount(kids))
+                if (owner != "") {
+                    return this.auraRetTyOf(sanitizeLlvm(owner + "_" + fname))
+                }
+            }
+        }
+        return ""
     }
 
     /// `call` 节点若调用的是「返回函数类型」的函数，返回闭包签名。
@@ -4119,6 +4205,36 @@ class LlvmEmitter {
                 if (cs != "") {
                     this.registerClosureVar(name, cs)
                 }
+                // 初始化器是「返回集合」的调用（`var t = e.take(2)` /
+                // `var d2 = xs.distinct()`）：必须登记为集合变量。
+                // 否则 `t.size` 会走字符串分支被算成 `strlen(列表句柄)`，
+                // `t[i]` / `t.get(i)` 也会按字符串处理（实测 take/skip/distinct
+                // 的 `.size` 全错）。判集合只能看 **Aura** 返回类型。
+                val art: String = this.callAuraRetTy(hir, initId)
+                // 类构造初始化（`var m: Map<...> = HashMap<...>()`）：该变量持有
+                // **用户类实例**（`%struct.HashMap*`），方法调用/成员访问必须走
+                // `HashMap_*`，不能按运行期句柄走 `Collections_*`
+                //（后者把类指针当列表头解引用 → 取值全错/崩溃）。
+                // 反之 `mapOf()`/`listOf()` 初始化的接口变量仍是句柄，不登记。
+                var cname: String = hir.textOf(initId)
+                if (cname == "" && hirKidsCount(hir.kidsOf(initId)) > 0) {
+                    cname = hir.textOf(hirKidsAt(hir.kidsOf(initId), 0))
+                }
+                if (cname != "" && this.isStructSym(sanitizeLlvm(cname))) {
+                    this.markClsVar(name, sanitizeLlvm(cname))
+                }
+                val artAlias: String = this.resolveAlias(art)
+                if (art != "" && EmitUtils.isCollectionTypeName(artAlias)
+                    && !artAlias.startsWith("ArrayList")) {
+                    this.markListVarTyped(name, this.typeArgElemTy(art))
+                }
+            } else if (hir.kindOf(initId) == "HirVar") {
+                // `var m: Map<..> = h`（h 已是类实例变量）→ 继承登记，
+                // 否则接口类型的 `m` 会被当成运行期句柄（`Collections_*`）。
+                val srcCls: String = this.clsVarOf(hir.textOf(initId))
+                if (srcCls != "") {
+                    this.markClsVar(name, srcCls)
+                }
             }
         }
         var llvmTy: String = this.mapTy(hir.tyOf(id))
@@ -4127,6 +4243,17 @@ class LlvmEmitter {
         }
         if (llvmTy == "") {
             llvmTy = "i32"
+        }
+        // 可空声明（`Int?`）但初始化器是**句柄**（`i8*`）时统一用句柄表示。
+        //
+        // 泛型返回 `V?`（如 `HashMap.put`/`remove`）在 LLVM 侧是 `i8*`
+        //（`mapTy` 对泛型形参擦除后的 `V?` 返回内层 `i8*`），而具体 `Int?` 是
+        // `{ i32, i1 }`。二者直接强转会把指针塞进 payload、标签位错乱 ——
+        // 实测 `var old: Int? = m.put("a", 1)` 后 `old == null` 恒假
+        //（空表 put 的旧值应为 null）。
+        if (hir.tyOf(id).endsWith("?") && initTy == "i8*"
+            && EmitUtils.isNullableStructTy(llvmTy)) {
+            llvmTy = "i8*"
         }
         // 定长数组：只 `alloca [N x T]`，不做整体初始化
         // （`store [N x T] 0` 不是合法 IR；元素由源码 `a[i] = v` 逐个写入）
@@ -4172,7 +4299,7 @@ class LlvmEmitter {
         }
     }
 
-    /// 集合构造调用的元素 LLVM 类型（取首个实参类型；无实参默认 `i32`）。
+    /// 集合构造调用的元素 LLVM 类型（取首个实参类型；**无法判定时按 `i8*`**）。
     fun collectionElemTy(hir: Hir, callId: Int): String {
         val kids: String = hir.kidsOf(callId)
         if (hirKidsCount(kids) > 0) {
@@ -4181,19 +4308,25 @@ class LlvmEmitter {
                 return e
             }
         }
-        return "i32"
+        return "i8*"
     }
 
-    /// 从声明类型 `List<T>` / `Map<K,V>` 中提取元素 T 的 LLVM 类型（默认 `i32`）。
+    /// 从声明类型 `List<T>` / `Map<K,V>` 中提取元素 T 的 LLVM 类型。
+    ///
+    /// **无法判定时返回 `i8*`（不是 `i32`）**：`i32` 会让 `list[i]` 读回的值
+    /// 走「数值拆箱」路径，而集合里实际存的是**装箱指针**，拆箱结果恒为 0
+    ///（实测 `List<String>` 的 `xs.get(i)`/`xs[i]` 全读成 0）。
+    /// 与 `receiverElemTy` 的既有约定（「未知一律按 `i8*` 句柄处理，避免错误的
+    /// 数值解箱」）保持一致。
     fun typeArgElemTy(ty: String): String {
         val lt: Int = EmitUtils.aotIndexOfSub(ty, "<")
         if (lt < 0) {
-            return "i32"
+            return "i8*"
         }
         val rest: String = aotSlice(ty, lt + 1, ty.length - lt - 1)
         val gt: Int = EmitUtils.aotIndexOfSub(rest, ">")
         if (gt < 0) {
-            return "i32"
+            return "i8*"
         }
         val inner: String = aotSlice(rest, 0, gt)
         // Map<K,V>：取 V（值类型）
@@ -4204,7 +4337,7 @@ class LlvmEmitter {
         }
         val m: String = this.mapTy(trimSpaces(elem))
         if (m == "" || m == "void") {
-            return "i32"
+            return "i8*"
         }
         return m
     }
@@ -4694,6 +4827,29 @@ class LlvmEmitter {
         val iTy: String = this.inferType(hir, iId)
         val iv0: String = this.emitExpr(hir, iId)
         val iv: String = this.coerceValue(iv0, iTy, "i64")
+        // ArrayList（用户定义的类）：调用 ArrayList.get 方法，而非 Collections.getAt
+        val cTy: String = this.inferType(hir, cId)
+        if (cTy.startsWith("ArrayList")) {
+            val gsig: String = this.funcSignatureOf("ArrayList_get")
+            if (gsig != "") {
+                val rt: String = aotFieldAt(gsig, 1, "|")
+                val gt: String = this.freshVar()
+                this.fBody.sbAdd("  ")
+                this.fBody.sbAdd(gt)
+                this.fBody.sbAdd(" = call ")
+                this.fBody.sbAdd(rt)
+                this.fBody.sbAdd(" @")
+                this.fBody.sbAdd(sanitizeLlvm("ArrayList_get"))
+                this.fBody.sbAdd("(%struct.")
+                this.fBody.sbAdd("ArrayList")
+                this.fBody.sbAdd("* ")
+                this.fBody.sbAdd(c)
+                this.fBody.sbAdd(", i64 ")
+                this.fBody.sbAdd(iv)
+                this.fBody.sbAdd(")\n")
+                return this.coerceValue(gt, rt, "i8*")
+            }
+        }
         // 集合：getAt（返回 i64 句柄）→ inttoptr 转 i8* → 按元素类型拆箱
         if (this.isCollectionReceiver(hir, cId)) {
             val elemTy: String = this.receiverElemTy(hir, cId)
@@ -5027,9 +5183,51 @@ class LlvmEmitter {
         if ((op == "==" || op == "!=") && (EmitUtils.isNullableStructTy(aTy) || EmitUtils.isNullableStructTy(bTy))) {
             var structVal: String = a
             var structTy: String = aTy
+            var otherVal: String = b
+            var otherTy: String = bTy
+            var otherKid: Int = a1
             if (!EmitUtils.isNullableStructTy(aTy)) {
                 structVal = b
                 structTy = bTy
+                otherVal = a
+                otherTy = aTy
+                otherKid = a0
+            }
+            // **与非 null 值比较**（`old == 1`）必须比较 **payload（字段 0）**，
+            // 只比标签位会退化成「判空」（实测 HashMap 的 `put`/`remove` 旧值断言
+            // 全部失败：`old == 1`、`removed == 2` …）。
+            // 限定条件（避免影响其它形态、破坏自举）：
+            //   * 另一侧不是 `null` 字面量（那是判空，走标签位）；
+            //   * 另一侧类型是**具体标量**（`i32`/`i64`/…，不是 `i1`/空/指针）；
+            //   * payload 类型与另一侧类型**完全一致**。
+            val innerOk: String = EmitUtils.nullableInnerTy(structTy)
+            if (!(this.isNullLit(hir, otherKid) || otherTy == "i1" || otherTy == "")
+                && innerOk == otherTy) {
+                val payload: String = this.freshVar()
+                this.fBody.sbAdd("  ")
+                this.fBody.sbAdd(payload)
+                this.fBody.sbAdd(" = extractvalue ")
+                this.fBody.sbAdd(structTy)
+                this.fBody.sbAdd(" ")
+                this.fBody.sbAdd(structVal)
+                this.fBody.sbAdd(", 0\n")
+                var ppred: String = "eq"
+                if (op == "!=") {
+                    ppred = "ne"
+                }
+                val pt: String = this.freshVar()
+                this.fBody.sbAdd("  ")
+                this.fBody.sbAdd(pt)
+                this.fBody.sbAdd(" = icmp ")
+                this.fBody.sbAdd(ppred)
+                this.fBody.sbAdd(" ")
+                this.fBody.sbAdd(innerOk)
+                this.fBody.sbAdd(" ")
+                this.fBody.sbAdd(payload)
+                this.fBody.sbAdd(", ")
+                this.fBody.sbAdd(this.coerceValue(otherVal, otherTy, innerOk))
+                this.fBody.sbAdd("\n")
+                return pt
             }
             val tag: String = this.freshVar()
             this.fBody.sbAdd("  ")
@@ -5236,9 +5434,16 @@ class LlvmEmitter {
         if (sym != "" && (member == "size" || member == "length")) {
             if (this.funcSignatureOf(sym + "_getSize") != "") {
                 hasPropGetter = true
+            } else if (this.funcSignatureOf(sym + "_getLength") != "") {
+                hasPropGetter = true
+            } else if (member == "size" && this.funcSignatureOf(sym + "_size") != "") {
+                hasPropGetter = true
+            } else if (member == "length" && this.funcSignatureOf(sym + "_length") != "") {
+                hasPropGetter = true
             }
         }
-        if (!hasPropGetter && sym != "" && this.structFieldIndex(sym, member) >= 0) {
+        if (!hasPropGetter && sym != "" && this.structFieldIndex(sym, member) >= 0
+            && member != "size" && member != "length") {
             return this.emitStructFieldLoad(hir, recvId, sym, member)
         }
         // 属性读取：`x.size` → `Class.getSize()`（Kotlin 风格 getter）。
@@ -5583,6 +5788,58 @@ class LlvmEmitter {
         return false
     }
 
+    /// 该节点是否为字面量 `null`。
+    fun isNullLit(hir: Hir, id: Int): Boolean {
+        return hir.kindOf(id) == "HirLit" && hir.textOf(id) == "null"
+    }
+
+    /// 接收者节点的变量名（非 HirVar 返回 ""）。
+    fun recvVarNameOf(hir: Hir, id: Int): String {
+        if (hir.kindOf(id) == "HirVar") {
+            return hir.textOf(id)
+        }
+        return ""
+    }
+
+    /// 该 HIR 节点是否为 `this`（显式 `this.m()` 或隐式形式）。
+    fun isThisNode(hir: Hir, id: Int): Boolean {
+        val k: String = hir.kindOf(id)
+        if (k == "HirThis") {
+            return true
+        }
+        return k == "HirVar" && hir.textOf(id) == "this"
+    }
+
+    /// 接收者是否为**自带同名方法的用户类实例**。
+    ///
+    /// 用途：`obj.toString()` / `obj.toStr()` 这类调用里，接收者是类实例时
+    /// 必须优先走**用户类方法**，否则会被 prelude 的「值 → 字符串」转换分支
+    /// 抢先命中 —— 那会把对象指针按整数装箱再 `toStr`，得到一串垃圾数字
+    ///（实测 ArrayList 测试打印 `-2022377008`）。
+    fun receiverHasClassMethod(hir: Hir, kids: String, mname: String): Boolean {
+        if (hirKidsCount(kids) < 1) {
+            return false
+        }
+        val rk: Int = hirKidsAt(kids, 0)
+        val rty: String = this.inferType(hir, rk)
+        var sym: String = this.structSymOfPtr(rty)
+        if (sym == "" && hir.kindOf(rk) == "HirVar") {
+            // 接口类型变量持有**类实例**（`var m: Map<..> = HashMap<..>()`）时，
+            // `inferType` 只给 `i8*`，推不出类符号。若据此返回 false，
+            // `m.toString()` 会被 prelude 的 `toString(x)` 转换分支抢走 ——
+            // 把类指针当值转成字符串（实测空表 `m.toString() == "{}"` 失败）。
+            // 注意：**不要**在这里加 `isThisNode`/`curClassSym` 回退 —— 那会让
+            // 编译器自身 `Any.equals` 里的 `toStr(this)` 改走类方法路径并生成
+            // 非法 IR（`llc: integer/byte constant must have integer/byte type`），
+            // 自举直接失败（已实测）。
+            sym = this.clsVarOf(hir.textOf(rk))
+        }
+        if (sym == "") {
+            return false
+        }
+        return this.funcSignatureOf(sym + "_" + mname) != ""
+    }
+
     fun emitCall(hir: Hir, id: Int): String {
         val kids: String = hir.kidsOf(id)
         val n: Int = hirKidsCount(kids)
@@ -5854,15 +6111,46 @@ class LlvmEmitter {
             return "0"
         }
 
+        // typeof(x) / typeOf(x) → 运行时类型名（`i8*`）。
+        //
+        // AOT 没有类型标签，故由 `@aura_typeof`（见 aot/runtime/libc.ll）按
+        // Plan A 低位标记给出保守判定：奇数 → "Int"，偶数非空 → "String"，空 → "Null"。
+        // 此前该调用没有分支，落到「未解析符号」兜底**恒返回 0**，使
+        // `VmOps.isString/isInt` 等全部误判（`add(2,5)` 被当成字符串拼接得到 "25"）。
+        if ((fname == "typeof" || fname == "typeOf") && n == 1) {
+            val fId: Int = hirKidsAt(kids, 0)
+            val fTy: String = this.inferType(hir, fId)
+            val fv: String = this.coerceValue(this.emitExpr(hir, fId), fTy, "i8*")
+            val tt: String = this.freshVar()
+            this.fBody.sbAdd("  ")
+            this.fBody.sbAdd(tt)
+            this.fBody.sbAdd(" = call i8* @aura_typeof(i8* ")
+            this.fBody.sbAdd(fv)
+            this.fBody.sbAdd(")\n")
+            return tt
+        }
+
         // toString / toStr：C 侧 `toString` 收的是 **Plan A 装箱值**，裸整数必须走
         // `aura_to_str`（偶数整数若按装箱值解释会被当成指针 → 解引用崩溃）；
         // 浮点走 `aura_to_str_float`；布尔走 `aura_to_str_bool`；字符串原样返回。
-        if ((fname == "toString" || fname == "toStr") && n == 1) {
+        if ((fname == "toString" || fname == "toStr") && n == 1
+            && !this.receiverHasClassMethod(hir, kids, "toString")) {
             val fId: Int = hirKidsAt(kids, 0)
             val fTy: String = this.inferType(hir, fId)
             val fv: String = this.emitExpr(hir, fId)
             if (fTy == "i8*") {
-                return fv
+                // `i8*` 既可能是真实字符串指针，也可能是 **Any 装箱值**（Plan A：
+                // 奇数 = 装箱整数）。原样返回会让装箱整数被下游按 C 字符串
+                // `strlen` 解引用 → 访问违规（自举编译器 VM 里 `toStr(anyValue)`
+                // 崩溃的根因）。统一经 `@toStr` 做 Plan A 解析：
+                // 奇数 → 十进制串；偶数真实指针 → 原样返回（零成本）。
+                val st: String = this.freshVar()
+                this.fBody.sbAdd("  ")
+                this.fBody.sbAdd(st)
+                this.fBody.sbAdd(" = call i8* @toStr(i8* ")
+                this.fBody.sbAdd(fv)
+                this.fBody.sbAdd(")\n")
+                return st
             }
             if (fTy == "float" || fTy == "double") {
                 val dv: String = this.coerceValue(fv, fTy, "double")
@@ -6046,14 +6334,40 @@ class LlvmEmitter {
         //      * 类实例（`%struct.X*`）→ 还原为 `<Cls>_get` / `<Cls>_set` 方法调用
         //        （如 `HashMap_get` / `HashMap_set`）；
         //      * 集合句柄（`i8*`）→ C 运行库 `aura_lang_std_Collections_getAt/set`。
-        if (n >= 2 && (fname == "Collections.getAt" || fname == "Collections.set")) {
+        // `Collections.contains/indexOf` 的接收者**必须收窄**：HIR 也会把
+        // **字符串**方法 `s.contains(x)` / `s.indexOf(x)` 改写成这两个点号名字
+        //（列表语义），若不加区分地走集合路径，就会把 C 字符串当列表句柄
+        //（`@Collections_contains` 里按 `Memory.read64` 解引用）→ 访问违规。
+        // 只有「类实例接收者」或「已登记的集合接收者」才允许走本分支。
+        var cmpOk: Boolean = false
+        if (n >= 2 && (fname == "Collections.contains" || fname == "Collections.indexOf")) {
+            val rIdP: Int = hirKidsAt(kids, 0)
+            if (this.structSymOfPtr(this.inferType(hir, rIdP)) != ""
+                || this.isCollectionReceiver(hir, rIdP)) {
+                cmpOk = true
+            }
+        }
+        if (n >= 2 && (fname == "Collections.getAt" || fname == "Collections.set" || cmpOk)) {
             var mnameC: String = "get"
             if (fname == "Collections.set") {
                 mnameC = "set"
             }
+            if (fname == "Collections.contains") {
+                mnameC = "contains"
+            }
+            if (fname == "Collections.indexOf") {
+                mnameC = "indexOf"
+            }
             val rIdC: Int = hirKidsAt(kids, 0)
             val rTyC: String = this.inferType(hir, rIdC)
-            val clsC: String = this.structSymOfPtr(rTyC)
+            var clsC: String = this.structSymOfPtr(rTyC)
+            if (clsC == "" && hir.kindOf(rIdC) == "HirVar") {
+                // 已登记的「类实例变量」（`var m: Map<..> = HashMap<..>()`）
+                clsC = this.clsVarOf(hir.textOf(rIdC))
+            }
+            if (clsC == "") {
+                clsC = this.implClassOfInterface(rTyC)
+            }
             if (clsC != "") {
                 // ── 类实例：还回类方法 ──
                 val ownerC: String = this.ownerClassInChain(clsC, mnameC, n)
@@ -6117,6 +6431,47 @@ class LlvmEmitter {
                 val iTyC: String = this.inferType(hir, iIdC)
                 val ivC: String = this.emitExpr(hir, iIdC)
                 val isC: String = this.coerceValue(ivC, iTyC, "i64")
+                if (mnameC == "contains" || mnameC == "indexOf") {
+                    // 运行期句柄：`Collections.contains/indexOf(list, value)`。
+                    // 必须走这里：否则下面的常规解析会把 `Collections.contains`
+                    // 的末段 `contains` 匹配到 **String 方法** → 发射
+                    // `String_contains(类指针/句柄, v)`，把集合当 C 字符串
+                    // `strlen` → 实测直接访问违规崩溃。
+                    val v2IdC: Int = hirKidsAt(kids, 1)
+                    val v2TyC: String = this.inferType(hir, v2IdC)
+                    val v2vC: String = this.emitExpr(hir, v2IdC)
+                    val v2bC: String = this.boxToPtr(v2vC, v2TyC)
+                    val v2b64C: String = this.freshVar()
+                    this.fBody.sbAdd("  ")
+                    this.fBody.sbAdd(v2b64C)
+                    this.fBody.sbAdd(" = ptrtoint i8* ")
+                    this.fBody.sbAdd(v2bC)
+                    this.fBody.sbAdd(" to i64\n")
+                    val t2C: String = this.freshVar()
+                    this.fBody.sbAdd("  ")
+                    this.fBody.sbAdd(t2C)
+                    if (mnameC == "contains") {
+                        this.fBody.sbAdd(" = call i1 @Collections_contains(%struct.Collections* @aura_obj_Collections, i64 ")
+                        this.fBody.sbAdd(rs64C)
+                        this.fBody.sbAdd(", i64 ")
+                        this.fBody.sbAdd(v2b64C)
+                        this.fBody.sbAdd(")\n")
+                        return t2C
+                    }
+                    this.fBody.sbAdd(" = call i64 @Collections_indexOf(%struct.Collections* @aura_obj_Collections, i64 ")
+                    this.fBody.sbAdd(rs64C)
+                    this.fBody.sbAdd(", i64 ")
+                    this.fBody.sbAdd(v2b64C)
+                    this.fBody.sbAdd(")\n")
+                    // `indexOf` 语义上是 Int（i32），调用点会按 i32 消费
+                    val t232C: String = this.freshVar()
+                    this.fBody.sbAdd("  ")
+                    this.fBody.sbAdd(t232C)
+                    this.fBody.sbAdd(" = trunc i64 ")
+                    this.fBody.sbAdd(t2C)
+                    this.fBody.sbAdd(" to i32\n")
+                    return t232C
+                }
                 if (mnameC == "get") {
                     val tg64C: String = this.freshVar()
                     this.fBody.sbAdd("  ")
@@ -6302,8 +6657,26 @@ class LlvmEmitter {
         //    若先命中自由函数就会少传一个形参——实参缺类型、生成非法 IR。
         //    形参数与实参数需一致，避免把「自由函数 + 结构体实参」误判成方法。
         if (n >= 1) {
-            val recvTy: String = this.inferType(hir, hirKidsAt(kids, 0))
-            val recvSym: String = this.structSymOfPtr(recvTy)
+            val recvId1: Int = hirKidsAt(kids, 0)
+            val recvTy: String = this.inferType(hir, recvId1)
+            var recvSym: String = this.structSymOfPtr(recvTy)
+            if (recvSym == "" && this.isThisNode(hir, recvId1)) {
+                // 类体内显式 `this.m(...)`：`this` 的推断类型常常是空的
+                //（记为 Any/i8*），于是上面的类方法解析被跳过、退化到**裸名**
+                // 并被错绑到无关对象的同名成员 —— 实测 `this.get(i)` 绑成
+                // `EnvOps_get`，`ArrayList.toString` 因此把下标当元素打印成
+                // `[0, 1]`（外面 `l.get(0)` 却是对的）。这里直接用当前类符号。
+                recvSym = this.curClassSym()
+            }
+            if (recvSym == "" && hir.kindOf(recvId1) == "HirVar") {
+                // 已登记的「类实例变量」：接口类型（`Map<K,V>` 等）在 LLVM 侧是
+                // `i8*`，推不出结构体符号，但运行期确定持有该类的实例。
+                recvSym = this.clsVarOf(hir.textOf(recvId1))
+            }
+            if (recvSym == "") {
+                // 接口类型接收者 → 实现类（见 `implClassOfInterface` 的说明）
+                recvSym = this.implClassOfInterface(recvTy)
+            }
             if (recvSym != "") {
                 // 沿继承链查找（`d.describe()` 中 describe 定义在父类 Animal）
                 val owner1: String = this.ownerClassInChain(recvSym, fname, n)
@@ -7105,7 +7478,11 @@ class LlvmEmitter {
         return t
     }
 
-    /// 发射 println/print 内置调用（内联 IR：@_write + @strlen）。
+    /// 发射 println/print 内置调用（调用运行时 `aura_lang_std_IO_println` / `_print`）。
+    ///
+    /// 平台无关性：这两个符号由 `aot/runtime/libc.ll` 以**纯 LLVM IR** 提供，
+    /// 内部只用 libc 的 `printf` / `fflush(NULL)`（C 标准函数，所有平台都有），
+    /// 不再直接使用 POSIX/CRT 专有的 fd 级 `@_write`。
     fun emitPrint(hir: Hir, kids: String, n: Int, argStart: Int, newline: Boolean): String {
         if (argStart >= n) {
             return "0"
@@ -7115,81 +7492,12 @@ class LlvmEmitter {
         val a: String = this.emitExpr(hir, aId)
         val s: String = this.toStringOperand(a, aTy)
         if (newline) {
-            // println(s): 分配 buf，复制 s + '\n'，_write(buf)，free(buf)
-            val len64: String = this.freshVar()
-            this.fBody.sbAdd("  ")
-            this.fBody.sbAdd(len64)
-            this.fBody.sbAdd(" = call i64 @strlen(i8* ")
+            this.fBody.sbAdd("  call void @aura_lang_std_IO_println(i8* ")
             this.fBody.sbAdd(s)
-            this.fBody.sbAdd(")\n")
-            val total64: String = this.freshVar()
-            this.fBody.sbAdd("  ")
-            this.fBody.sbAdd(total64)
-            this.fBody.sbAdd(" = add i64 ")
-            this.fBody.sbAdd(len64)
-            this.fBody.sbAdd(", 1\n")
-            val total32: String = this.freshVar()
-            this.fBody.sbAdd("  ")
-            this.fBody.sbAdd(total32)
-            this.fBody.sbAdd(" = trunc i64 ")
-            this.fBody.sbAdd(total64)
-            this.fBody.sbAdd(" to i32\n")
-            val buf: String = this.freshVar()
-            this.fBody.sbAdd("  ")
-            this.fBody.sbAdd(buf)
-            this.fBody.sbAdd(" = call i8* @malloc(i64 ")
-            this.fBody.sbAdd(total64)
-            this.fBody.sbAdd(")\n")
-            this.fBody.sbAdd("  call void @aura_block_copy(i8* align 1 ")
-            this.fBody.sbAdd(buf)
-            this.fBody.sbAdd(", i8* align 1 ")
-            this.fBody.sbAdd(s)
-            this.fBody.sbAdd(", i64 ")
-            this.fBody.sbAdd(len64)
-            this.fBody.sbAdd(", i1 false)\n")
-            val end: String = this.freshVar()
-            this.fBody.sbAdd("  ")
-            this.fBody.sbAdd(end)
-            this.fBody.sbAdd(" = getelementptr i8, i8* ")
-            this.fBody.sbAdd(buf)
-            this.fBody.sbAdd(", i64 ")
-            this.fBody.sbAdd(len64)
-            this.fBody.sbAdd("\n")
-            this.fBody.sbAdd("  store i8 10, i8* ")
-            this.fBody.sbAdd(end)
-            this.fBody.sbAdd(", align 1\n")
-            this.fBody.sbAdd("  call i32 @_write(i32 1, i8* ")
-            this.fBody.sbAdd(buf)
-            this.fBody.sbAdd(", i32 ")
-            this.fBody.sbAdd(total32)
-            this.fBody.sbAdd(")\n")
-            val bufI64: String = this.freshVar()
-            this.fBody.sbAdd("  ")
-            this.fBody.sbAdd(bufI64)
-            this.fBody.sbAdd(" = ptrtoint i8* ")
-            this.fBody.sbAdd(buf)
-            this.fBody.sbAdd(" to i64\n")
-            this.fBody.sbAdd("  call void @free(i64 ")
-            this.fBody.sbAdd(bufI64)
             this.fBody.sbAdd(")\n")
         } else {
-            // print(s): strlen + _write
-            val len64: String = this.freshVar()
-            this.fBody.sbAdd("  ")
-            this.fBody.sbAdd(len64)
-            this.fBody.sbAdd(" = call i64 @strlen(i8* ")
+            this.fBody.sbAdd("  call void @aura_lang_std_IO_print(i8* ")
             this.fBody.sbAdd(s)
-            this.fBody.sbAdd(")\n")
-            val len32: String = this.freshVar()
-            this.fBody.sbAdd("  ")
-            this.fBody.sbAdd(len32)
-            this.fBody.sbAdd(" = trunc i64 ")
-            this.fBody.sbAdd(len64)
-            this.fBody.sbAdd(" to i32\n")
-            this.fBody.sbAdd("  call i32 @_write(i32 1, i8* ")
-            this.fBody.sbAdd(s)
-            this.fBody.sbAdd(", i32 ")
-            this.fBody.sbAdd(len32)
             this.fBody.sbAdd(")\n")
         }
         return "0"
@@ -7562,6 +7870,10 @@ class LlvmEmitter {
             // llc 报 `'%var.N' defined with type 'ptr' but expected 'i32'`。
             // 字符串插值（`"$x"` → `toString(x)`，见 Parser.parseStringInterp）
             // 与手写 `toStr(...)` 都会命中该路径。
+            // `typeof(x)` / `typeOf(x)` → 运行时类型名，也是 `i8*`（C 字符串）。
+            if ((fname == "typeof" || fname == "typeOf") && hirKidsCount(kids) == 1) {
+                return "i8*"
+            }
             if ((fname == "toString" || fname == "toStr") && hirKidsCount(kids) == 1) {
                 return "i8*"
             }
@@ -7733,8 +8045,22 @@ class LlvmEmitter {
             // 类方法**优先**（与 `emitCall` 的解析顺序一致）：`this.isX(v)` 与顶层
             // 同名自由函数共存时，必须按接收者类型选到方法版本，否则返回类型也会取错。
             if (hirKidsCount(kids) >= 1) {
-                val recvTy: String = this.inferType(hir, hirKidsAt(kids, 0))
-                val recvSym: String = this.structSymOfPtr(recvTy)
+                val recvRk: Int = hirKidsAt(kids, 0)
+                val recvTy: String = this.inferType(hir, recvRk)
+                var recvSym: String = this.structSymOfPtr(recvTy)
+                if (recvSym == "" && this.isThisNode(hir, recvRk)) {
+                    recvSym = this.curClassSym()
+                }
+                if (recvSym == "" && hir.kindOf(recvRk) == "HirVar") {
+                    // 已登记的「类实例变量」（`var m: Map<..> = HashMap<..>()`）：
+                    // 接口类型在 LLVM 侧是 `i8*`，推不出结构体符号，但运行期
+                    // 确定持有该类实例 → 按类方法取返回类型（否则落到兜底 i32/void，
+                    // `m.remove(k) == 1` 会生成 `icmp eq void …` 非法 IR）。
+                    recvSym = this.clsVarOf(hir.textOf(recvRk))
+                }
+                if (recvSym == "") {
+                    recvSym = this.implClassOfInterface(recvTy)
+                }
                 if (recvSym != "") {
                     val ownerR: String = this.ownerClassInChain(recvSym, fname, hirKidsCount(kids))
                     if (ownerR != "") {
@@ -8567,9 +8893,34 @@ class LlvmEmitter {
 
     // ── 集合（List/Array/Set/Map）辅助 ──
 
-    /// 登记一个集合类型的局部变量（默认元素类型 `i32`）。
+    /// 登记「类实例变量」（`var m: Map<...> = HashMap<...>()`）。
+    fun markClsVar(name: String, cls: String) {
+        if (name == "" || cls == "" || this.clsVarOf(name) != "") {
+            return
+        }
+        this.fClsVars = this.fClsVars + name + "|" + cls + "\n"
+    }
+
+    /// 查「类实例变量」对应的类符号（未登记返回 ""）。
+    fun clsVarOf(name: String): String {
+        if (name == "") {
+            return ""
+        }
+        var i: Int = 0
+        val n: Int = aotLineCount(this.fClsVars)
+        while (i < n) {
+            val line: String = aotLineAt(this.fClsVars, i)
+            if (aotFieldAt(line, 0, "|") == name) {
+                return aotFieldAt(line, 1, "|")
+            }
+            i = i + 1
+        }
+        return ""
+    }
+
+    /// 登记一个集合类型的局部变量（默认元素类型 `i8*`，见 `typeArgElemTy`）。
     fun markListVar(name: String) {
-        this.markListVarTyped(name, "i32")
+        this.markListVarTyped(name, "i8*")
     }
 
     /// 登记一个集合类型的局部变量，并记录元素 LLVM 类型（`name|elemTy`）。
@@ -8593,7 +8944,7 @@ class LlvmEmitter {
         return false
     }
 
-    /// 集合局部变量的元素 LLVM 类型（未登记返回 `i32`）。
+    /// 集合局部变量的元素 LLVM 类型（未登记/空值时返回 `i8*`，见 `typeArgElemTy`）。
     fun listElemTy(name: String): String {
         var n: Int = aotLineCount(this.fListVars)
         var i: Int = 0
@@ -8604,11 +8955,11 @@ class LlvmEmitter {
                 if (e != "") {
                     return e
                 }
-                return "i32"
+                return "i8*"
             }
             i = i + 1
         }
-        return "i32"
+        return "i8*"
     }
 
     /// 集合构造器名（0 参形式返回空列表）。
@@ -8799,8 +9150,19 @@ object EmitUtils {
 
     /// 是否为已知 std 类名（用于把 `Math.sin(x)` 识别为类静态调用）。
     /// 类型名是否为集合类型（List / Array / Set / Map 及其可变形式）。
+    ///
+    /// 注意：这里用**前缀**匹配，因此 `ArrayList` 也被视为「运行时集合句柄」
+    /// （`AuraDynList*`）。这是刻意的：`ArrayList` 实例不应被直接构造使用，
+    /// 需要集合时请用原生堆列表（`arrayListOf<T>()` / `mutableListOf<T>()`）——
+    /// 直接 `ArrayList<T>()` 会拿到 `%struct.ArrayList` 对象，却被按裸句柄解释
+    /// （实测 `_size` 恒 0；若改判为普通类则其构造器 `mutableListOf<T>()` 会
+    /// 与 `mutableListOf` 的 `ArrayList<Any>(items)` 实现互相递归 → 栈溢出）。
     fun isCollectionTypeName(ty: String): Boolean {
         if (ty == "") {
+            return false
+        }
+        // 排除 ArrayList（用户定义的类），避免其下标/size 被降级为原生集合操作
+        if (ty.startsWith("ArrayList")) {
             return false
         }
         if (ty.startsWith("List") || ty.startsWith("MutableList") || ty.startsWith("Array")

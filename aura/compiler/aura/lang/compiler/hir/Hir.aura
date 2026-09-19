@@ -1500,6 +1500,36 @@ class HirLowerer {
         return this.hir.add("HirUnary", HirUtils.hirNormUnOp(op), "", sp, hirKids)
     }
 
+    /// 接收者是否为**不该降级为 `Collections.*`** 的对象。
+    ///
+    /// `Collections.getAt/set/contains/indexOf` 是给**运行期内建列表句柄**
+    ///（`listOf`/`mutableListOf` 产生，`Value.List`）用的。若接收者是：
+    ///   * 类内 `this`（如 `ArrayList.get` 里的 `this.get(i)`）；
+    ///   * 显式 `Collections.xxx(...)` 调用里的 `Collections` 自身；
+    ///   * 自带同名方法的用户集合类实例（`ArrayList`/`HashMap`/`HashSet`/…）；
+    /// 就必须保留为普通方法调用。否则会把**类实例指针**当成列表头解引用 ——
+    /// 实测 `this.get(i)` 被降级成 `Collections.getAt(this, i)` 后直接访问违规崩溃。
+    private fun receiverNotForCollections(recvId: Int): Boolean {
+        val k: String = this.ast.kindOf(recvId)
+        if (k == "This") {
+            return true
+        }
+        if (k == "Ident") {
+            val n: String = this.ast.textOf(recvId)
+            if (n == "this" || n == "Collections") {
+                return true
+            }
+        }
+        val t: String = this.ast.tyOf(recvId)
+        if (t == "") {
+            return false
+        }
+        return t.startsWith("ArrayList") || t.startsWith("LinkedList")
+            || t.startsWith("HashMap") || t.startsWith("LinkedHashMap")
+            || t.startsWith("HashSet") || t.startsWith("TreeSet")
+            || t.startsWith("TreeMap") || t.startsWith("Deque")
+    }
+
     /// 降级函数调用表达式。
     fun lowerCall(ast: Ast, id: Int): Int {
         val sp: Span = ast.spanOf(id)
@@ -1514,7 +1544,8 @@ class HirLowerer {
                 if (memberName == "get" || memberName == "getAt") {
                     val calleeKids: String = ast.kidsOf(calleeId)
                     val calleeKCount: Int = HirUtils.hirKidsCount(calleeKids)
-                    if (calleeKCount >= 1) {
+                    if (calleeKCount >= 1
+                        && !this.receiverNotForCollections(HirUtils.hirKidsAt(calleeKids, 0))) {
                         var hirKids: String = HirUtils.hirNoKids()
                         // **接收者必须作为 kids[0]**（发射器约定：接收者在 kids[0]）。
                         // 旧实现从 i=0 起遍历**全部** kids，把 callee 成员节点
@@ -1545,7 +1576,8 @@ class HirLowerer {
                 if (memberName == "set") {
                     val calleeKids: String = ast.kidsOf(calleeId)
                     val calleeKCount: Int = HirUtils.hirKidsCount(calleeKids)
-                    if (calleeKCount >= 1) {
+                    if (calleeKCount >= 1
+                        && !this.receiverNotForCollections(HirUtils.hirKidsAt(calleeKids, 0))) {
                         var hirKids: String = HirUtils.hirNoKids()
                         // 同 `get`：接收者作 kids[0]，其余实参从 kids[1] 起
                         //（旧实现从 0 起 → 接收者丢失、实参错位）。
@@ -1580,8 +1612,8 @@ class HirLowerer {
                     if (HirUtils.hirKidsCount(calleeKids) >= 1) {
                         val recvId: Int = HirUtils.hirKidsAt(calleeKids, 0)
                         val recvTy: String = ast.tyOf(recvId)
-                        // 仅当接收者不是 String 时才转换为 Collections 调用
-                        if (recvTy != "String") {
+                        // 仅当接收者不是 String、且不是用户集合类实例时才转换为 Collections 调用
+                        if (recvTy != "String" && !this.receiverNotForCollections(recvId)) {
                             var hirKids: String = HirUtils.hirNoKids()
                             val recvHirId: Int = this.lowerExpr(ast, recvId)
                             if (recvHirId >= 0) {

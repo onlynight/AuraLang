@@ -1,0 +1,10 @@
+package test
+
+import aura.lang.collection.HashSet
+
+fun main(): Int {
+    var s = HashSet<Int>()
+    s.add(1)
+    println("added")
+    return 0
+}

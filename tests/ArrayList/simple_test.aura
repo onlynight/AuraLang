@@ -1,0 +1,20 @@
+// Simple ArrayList test - getAt
+package test
+
+import aura.lang.collection.ArrayList
+
+fun main(): Int {
+    var l: ArrayList<Int> = arrayListOf<Int>()
+    l.add(1)
+    l.add(2)
+    l.add(3)
+    println("size=" + l.size)
+    println("count=" + l.count())
+    println("isEmpty=" + l.isEmpty())
+    println("first=" + l.first())
+    println("last=" + l.last())
+    println("contains(2)=" + l.contains(2))
+    println("indexOf(2)=" + l.indexOf(2))
+    println("toString=" + l.toString())
+    return 0
+}

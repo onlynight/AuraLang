@@ -1,0 +1,57 @@
+// Test: ArrayList-like class with data field
+package test
+
+import aura.lang.collection.List
+import aura.lang.collection.Collection
+
+class MyList<T> : List<T> {
+    private var data: List<T>
+    
+    constructor() {
+        data = arrayListOf<T>()
+    }
+    
+    fun testIndex(): Unit {
+        data.add(1)
+        data.add(2)
+        println("size=" + data.size)
+        println("data[0]=" + data[0])
+        println("data.getAt(0)=" + data.getAt(0))
+    }
+    
+    override fun count(): Int {
+        return data.size
+    }
+    
+    override fun getAt(index: Int): T {
+        return data[index]
+    }
+}
+
+class NonListClass {
+    private var data: List<Int>
+    
+    constructor() {
+        data = arrayListOf<Int>()
+    }
+    
+    fun testIndex(): Unit {
+        data.add(1)
+        data.add(2)
+        println("size=" + data.size)
+        println("data[0]=" + data[0])
+        println("data.getAt(0)=" + data.getAt(0))
+    }
+}
+
+fun main(): Int {
+    println("=== MyList ===")
+    var l = MyList<Int>()
+    l.testIndex()
+    
+    println("=== NonListClass ===")
+    var n = NonListClass()
+    n.testIndex()
+    
+    return 0
+}

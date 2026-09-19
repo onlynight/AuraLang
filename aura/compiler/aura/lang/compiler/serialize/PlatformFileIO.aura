@@ -1,0 +1,116 @@
+// aura:///aura/compiler/aura/lang/compiler/serialize/PlatformFileIO.aura
+package aura.lang.compiler.serialize
+// ─────────────────────────────────────────────────────────────
+// 平台文件 I/O 抽象层 — 只走 `FileOps`（编译器内置、按目标平台映射）
+//
+// 为什么不用 kernel32 内联汇编（CreateFileA/ReadFile）：
+//   1) `@native(asm=...)` 的 `call qword ptr [rip+CreateFileA]` 需要符号在 IAT
+//      就位，自举 AOT 下不可靠；
+//   2) 原实现 `ReadFile(handle, buf + total, CHUNK, ...)` 在 `total > 0` 时
+//      会**越过分配块**（缓冲区只有 CHUNK 字节）→ 堆损坏 / 访问违规；
+//   3) Aura AOT 链接期已把 `FileOps.open/read/close` 映射到宿主 CRT
+//      （Linux: open/read；Windows: `_open`/`_read`），本来就跨平台。
+// 因此统一采用与 `aura.lang.native.io.Stdio.readFile` 相同的
+// 「按块 read + 按需扩容」实现（该实现已被 AOT 编译器自身的文件读取验证）。
+//
+// 用法：
+//   val data = PlatformFileIO.readFile("path/to/file")
+//   if (data != 0) {
+//       val len = PlatformFileIO.lastSize
+//       // 使用 data + len 解析文件内容
+//       PlatformFileIO.dispose(data)
+//   }
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.native.Memory
+import aura.lang.native.memory.Allocator
+import aura.lang.native.file.FileOps
+
+/// 平台文件 I/O 抽象对象。
+object PlatformFileIO {
+
+    /// 上次读取的文件大小（字节）。
+    var lastSize: Long = 0
+
+    /// 读取整个文件到内存缓冲区，返回缓冲区地址（0 = 失败）。
+    ///
+    /// 返回的是**原始字节缓冲区**（不补 NUL）；长度见 `lastSize`。
+    /// 失败时 `lastSize = 0` 且返回 0。
+    fun readFile(path: String): Long {
+        lastSize = 0
+        val pathBuf: Long = stringToBuffer(path)
+        if (pathBuf == 0) { return 0 }
+
+        val fd: Int = FileOps.open(pathBuf, 0)  // O_RDONLY
+        Allocator.free(pathBuf)
+        if (fd < 0) { return 0 }
+
+        val chunk: Long = 65536
+        var buf: Long = Allocator.malloc(chunk)
+        if (buf == 0) {
+            FileOps.close(fd)
+            return 0
+        }
+        var cap: Long = chunk
+        var total: Long = 0
+        while (true) {
+            if (total >= cap) {
+                // 扩容：新缓冲 + 逐字节拷贝（AOT 下不假设 realloc 语义）
+                val ncap: Long = cap * 2
+                val nbuf: Long = Allocator.malloc(ncap)
+                if (nbuf == 0) { break }
+                var k: Long = 0
+                while (k < total) {
+                    Memory.write(nbuf + k, Memory.read(buf + k))
+                    k = k + 1
+                }
+                Allocator.free(buf)
+                buf = nbuf
+                cap = ncap
+            }
+            val n: Long = FileOps.read(fd, buf + total, cap - total)
+            if (n <= 0) { break }
+            total = total + n
+        }
+        FileOps.close(fd)
+
+        if (total <= 0) {
+            Allocator.free(buf)
+            return 0
+        }
+        lastSize = total
+        return buf
+    }
+
+    /// 释放 [`readFile`] 返回的缓冲区。
+    fun dispose(buf: Long): Unit {
+        if (buf != 0) {
+            Allocator.free(buf)
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  工具
+    // ═══════════════════════════════════════════════════════════
+
+    /// Aura 字符串 → NUL 结尾的 C 缓冲区（调用方负责 free）。
+    private fun stringToBuffer(s: String): Long {
+        if (s == null || s.length == 0) {
+            val empty: Long = Allocator.malloc(1)
+            if (empty == 0) { return 0 }
+            Memory.write(empty, 0)
+            return empty
+        }
+        val slen: Int = s.length
+        val len: Long = slen.toLong() + 1
+        val buf: Long = Allocator.malloc(len)
+        if (buf == 0) { return 0 }
+        var i: Int = 0
+        while (i < slen) {
+            Memory.write(buf + i.toLong(), s.charCodeAt(i))
+            i = i + 1
+        }
+        Memory.write(buf + slen.toLong(), 0)
+        return buf
+    }
+}

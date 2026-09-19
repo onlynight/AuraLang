@@ -27,6 +27,7 @@ import aura.lang.native.file.FileOps
 import aura.lang.native.Syscalls
 import aura.lang.std.String
 import aura.lang.std.FileSystem
+import aura.lang.compiler.serialize.PlatformFileIO
 
 /// .auc 格式常量。
 object AucConstants {
@@ -105,35 +106,35 @@ object AucWriter {
         bufPos = bufPos + 1
     }
 
-    /// 写入 2 字节（小端）。
+    /// 写入 2 字节（小端）。位运算用符号形式（见 `readU16` 说明）。
     fun writeU16(v: Int) {
         ensureCapacity(2)
-        Memory.write(buf + bufPos, (v and 0xFF) as Byte)
-        Memory.write(buf + bufPos + 1, ((v shr 8) and 0xFF) as Byte)
+        Memory.write(buf + bufPos, (v & 0xFF) as Byte)
+        Memory.write(buf + bufPos + 1, ((v >> 8) & 0xFF) as Byte)
         bufPos = bufPos + 2
     }
 
     /// 写入 4 字节（小端）。
     fun writeU32(v: Long) {
         ensureCapacity(4)
-        Memory.write(buf + bufPos, (v and 0xFF) as Byte)
-        Memory.write(buf + bufPos + 1, ((v shr 8) and 0xFF) as Byte)
-        Memory.write(buf + bufPos + 2, ((v shr 16) and 0xFF) as Byte)
-        Memory.write(buf + bufPos + 3, ((v shr 24) and 0xFF) as Byte)
+        Memory.write(buf + bufPos, (v & 0xFF) as Byte)
+        Memory.write(buf + bufPos + 1, ((v >> 8) & 0xFF) as Byte)
+        Memory.write(buf + bufPos + 2, ((v >> 16) & 0xFF) as Byte)
+        Memory.write(buf + bufPos + 3, ((v >> 24) & 0xFF) as Byte)
         bufPos = bufPos + 4
     }
 
     /// 写入 8 字节（小端）。
     fun writeU64(v: Long) {
         ensureCapacity(8)
-        Memory.write(buf + bufPos, (v and 0xFF) as Byte)
-        Memory.write(buf + bufPos + 1, ((v shr 8) and 0xFF) as Byte)
-        Memory.write(buf + bufPos + 2, ((v shr 16) and 0xFF) as Byte)
-        Memory.write(buf + bufPos + 3, ((v shr 24) and 0xFF) as Byte)
-        Memory.write(buf + bufPos + 4, ((v shr 32) and 0xFF) as Byte)
-        Memory.write(buf + bufPos + 5, ((v shr 40) and 0xFF) as Byte)
-        Memory.write(buf + bufPos + 6, ((v shr 48) and 0xFF) as Byte)
-        Memory.write(buf + bufPos + 7, ((v shr 56) and 0xFF) as Byte)
+        Memory.write(buf + bufPos, (v & 0xFF) as Byte)
+        Memory.write(buf + bufPos + 1, ((v >> 8) & 0xFF) as Byte)
+        Memory.write(buf + bufPos + 2, ((v >> 16) & 0xFF) as Byte)
+        Memory.write(buf + bufPos + 3, ((v >> 24) & 0xFF) as Byte)
+        Memory.write(buf + bufPos + 4, ((v >> 32) & 0xFF) as Byte)
+        Memory.write(buf + bufPos + 5, ((v >> 40) & 0xFF) as Byte)
+        Memory.write(buf + bufPos + 6, ((v >> 48) & 0xFF) as Byte)
+        Memory.write(buf + bufPos + 7, ((v >> 56) & 0xFF) as Byte)
         bufPos = bufPos + 8
     }
 
@@ -215,44 +216,68 @@ object AucWriter {
 }
 
 /// 二进制读取器（小端）。
-object AucReader {
+///
+/// 必须是 **class**（而非 `object` 单例）：自举 AOT 下对 `object` 单例**可变字段**
+/// 的写入会直接访问违规（实测 `--run-auc` 首行即崩）。状态（data/dataLen/pos）
+/// 放在实例字段上，由调用方 `AucReader()` 创建。
+class AucReader {
 
     /// 数据缓冲区。
     var data: Long = 0
     var dataLen: Long = 0
     var pos: Long = 0
 
-    /// 从文件读取。
+    /// 从文件读取整个文件到内存（按块 read + 按需扩容，跨平台走 FileOps）。
     fun readFromFile(path: String): Boolean {
-        val pathBuf: Long = stringToBuffer(path)
-        if (pathBuf == 0) { return false }
-        val fd: Int = FileOps.open(pathBuf, Syscalls.O_RDONLY)
-        Allocator.free(pathBuf)
-        if (fd < 0) { return false }
-
-        val size: Long = FileOps.lseek(fd, 0, Syscalls.SEEK_END)
-        FileOps.lseek(fd, 0, Syscalls.SEEK_SET)
-        if (size <= 0) {
-            FileOps.close(fd)
-            return false
-        }
-
-        data = Allocator.malloc(size)
-        if (data == 0) {
-            FileOps.close(fd)
-            return false
-        }
-
-        val bytesRead: Long = FileOps.read(fd, data, size)
-        FileOps.close(fd)
-        if (bytesRead <= 0) {
-            Allocator.free(data)
-            return false
-        }
-
-        dataLen = bytesRead
+        data = readFileToBuffer(path)
+        if (data == 0) { return false }
         pos = 0
         return true
+    }
+
+    /// 读取文件到缓冲区，返回地址（0 = 失败），长度写入 `dataLen`。
+    private fun readFileToBuffer(path: String): Long {
+        dataLen = 0
+        val pathBuf: Long = stringToBuffer(path)
+        if (pathBuf == 0) { return 0 }
+
+        val fd: Int = FileOps.open(pathBuf, 0x8000)  // O_RDONLY | 二进制位（见 winCrtWrapper）
+        Allocator.free(pathBuf)
+        if (fd < 0) { return 0 }
+
+        val chunk: Long = 65536
+        var buf: Long = Allocator.malloc(chunk)
+        if (buf == 0) {
+            FileOps.close(fd)
+            return 0
+        }
+        var cap: Long = chunk
+        var total: Long = 0
+        while (true) {
+            if (total >= cap) {
+                val ncap: Long = cap * 2
+                val nbuf: Long = Allocator.malloc(ncap)
+                if (nbuf == 0) { break }
+                var k: Long = 0
+                while (k < total) {
+                    Memory.write(nbuf + k, Memory.read(buf + k))
+                    k = k + 1
+                }
+                Allocator.free(buf)
+                buf = nbuf
+                cap = ncap
+            }
+            val n: Long = FileOps.read(fd, buf + total, cap - total)
+            if (n <= 0) { break }
+            total = total + n
+        }
+        FileOps.close(fd)
+        if (total <= 0) {
+            Allocator.free(buf)
+            return 0
+        }
+        dataLen = total
+        return buf
     }
 
     /// 释放。
@@ -265,48 +290,65 @@ object AucReader {
         pos = 0
     }
 
-    /// 读取 1 字节。
+    /// 读取 1 字节（**无符号** 0..255；EOF 返回 -1）。
+    ///
+    /// `Memory.read` 返回带符号 `Byte`，>=0x80 的字节会变成负数。若直接用，
+    /// 串/常量解析里的 `if (c < 0) break` 会**提前中断**（字符串按长度消费的
+    /// 字节数变少）→ 读指针失步，后续常量/原生/函数全部错位。
+    /// 含 UTF-8（中文）的 `.auc` 必然触发（实测 `vm_core_test.auc` 解析到
+    /// 函数数为 0）。
     fun readByte(): Int {
         if (pos >= dataLen) { return -1 }
-        val v: Int = Memory.read(data + pos)
+        var v: Int = Memory.read(data + pos)
         pos = pos + 1
+        if (v < 0) {
+            v = v + 256
+        }
         return v
     }
 
     /// 读取 2 字节（小端）。
+    ///
+    /// 必须经 `readByte()`（**无符号**）：直接用 `Memory.read` 时 `0xfe` 会变成
+    /// -2，`lo | (hi << 8)` 得到负数 → `readU32` 的 `lo < 0` 提前返回，
+    /// 一个 8 字节整数只消费 2 字节（实测含负整数的 `.auc` 常量区立即失步）。
+    /// 移位必须用符号形式 `<<`（单词 `shl` 在自举 AOT 下被静默丢弃）。
     fun readU16(): Int {
-        if (pos + 2 > dataLen) { return -1 }
-        val lo: Int = Memory.read(data + pos)
-        val hi: Int = Memory.read(data + pos + 1)
-        pos = pos + 2
-        return lo | (hi shl 8)
+        val lo: Int = readByte()
+        if (lo < 0) { return -1 }
+        val hi: Int = readByte()
+        if (hi < 0) { return -1 }
+        return lo | (hi << 8)
+    }
+
+    /// 读取 4 字节并解释为**有符号** Int（小端）。
+    fun readI32(): Int {
+        val b0: Int = readByte()
+        val b1: Int = readByte()
+        val b2: Int = readByte()
+        val b3: Int = readByte()
+        return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
     }
 
     /// 读取 4 字节（小端）。
+    ///
+    /// 用「先 `as Long` 再 `<<`」而不是逐字节 `.toLong()`：自举 AOT 下
+    /// `Int.toLong()` 不可靠（实测在 `readU32` 内直接访问违规）。
     fun readU32(): Long {
-        if (pos + 4 > dataLen) { return -1 }
-        val b0: Int = Memory.read(data + pos)
-        val b1: Int = Memory.read(data + pos + 1)
-        val b2: Int = Memory.read(data + pos + 2)
-        val b3: Int = Memory.read(data + pos + 3)
-        pos = pos + 4
-        return b0.toLong() | (b1.toLong() shl 8) | (b2.toLong() shl 16) | (b3.toLong() shl 24)
+        val lo: Int = readU16()
+        if (lo < 0) { return -1 }
+        val hi: Int = readU16()
+        if (hi < 0) { return -1 }
+        return (lo as Long) | (((hi as Long) << 16))
     }
 
     /// 读取 8 字节（小端）。
     fun readU64(): Long {
-        if (pos + 8 > dataLen) { return -1 }
-        val b0: Int = Memory.read(data + pos)
-        val b1: Int = Memory.read(data + pos + 1)
-        val b2: Int = Memory.read(data + pos + 2)
-        val b3: Int = Memory.read(data + pos + 3)
-        val b4: Int = Memory.read(data + pos + 4)
-        val b5: Int = Memory.read(data + pos + 5)
-        val b6: Int = Memory.read(data + pos + 6)
-        val b7: Int = Memory.read(data + pos + 7)
-        pos = pos + 8
-        return b0.toLong() | (b1.toLong() shl 8) | (b2.toLong() shl 16) | (b3.toLong() shl 24)
-            | (b4.toLong() shl 32) | (b5.toLong() shl 40) | (b6.toLong() shl 48) | (b7.toLong() shl 56)
+        val lo: Long = readU32()
+        if (lo < 0) { return -1 }
+        val hi: Long = readU32()
+        if (hi < 0) { return -1 }
+        return lo | (hi << 32)
     }
 
     /// 读取字符串（带长度前缀）。

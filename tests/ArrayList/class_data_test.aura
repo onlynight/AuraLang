@@ -1,0 +1,25 @@
+// Test class with data field
+package test
+
+class MyClass {
+    private var data: List<Int>
+    
+    constructor() {
+        data = arrayListOf<Int>()
+    }
+    
+    fun testSize(): Unit {
+        data.add(1)
+        data.add(2)
+        data.add(3)
+        println("data.size=" + data.size)
+        println("data[0]=" + data[0])
+        println("data.getAt(0)=" + data.getAt(0))
+    }
+}
+
+fun main(): Int {
+    var m = MyClass()
+    m.testSize()
+    return 0
+}

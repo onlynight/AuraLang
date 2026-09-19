@@ -301,6 +301,17 @@ pub const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
         ret: "void",
         params: &[("s", "i8*")],
     },
+    // 裸名 println/print（emitPrint 直接调用 C 运行时 aura_println/aura_print）
+    RuntimeFn {
+        name: "aura_println",
+        ret: "void",
+        params: &[("s", "i8*")],
+    },
+    RuntimeFn {
+        name: "aura_print",
+        ret: "void",
+        params: &[("s", "i8*")],
+    },
     RuntimeFn {
         name: "aura_lang_std_IO_print",
         ret: "void",

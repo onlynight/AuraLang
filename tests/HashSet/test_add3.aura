@@ -1,0 +1,12 @@
+package test
+
+import aura.lang.collection.HashSet
+
+fun main(): Int {
+    var s = HashSet<Int>()
+    s.add(1)
+    println("size=" + s.count())
+    println("add result=" + s.add(2))
+    println("dup result=" + s.add(2))
+    return 0
+}

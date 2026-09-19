@@ -408,7 +408,9 @@ object MainUtils {
     /// CLI 用法说明。
     fun cliUsage(): String {
         return "Usage: aura-compiler <input.aura> [-o <output.exe>] [--mem-trace]\n" +
-            "      aura-compiler                  Without arguments, prints this usage only (see runSelfTest for self-test)"
+            "      aura-compiler --run-auc <file.auc>    Load and execute .auc bytecode\n" +
+            "      aura-compiler --selftest              Run compiler self-test\n" +
+            "      aura-compiler                         Print usage\n"
     }
 
     /// CLI 模式：读取命令行参数 → 读源文件 → AOT 产出原生可执行文件。
@@ -590,6 +592,19 @@ fun main() {
         val first: String = Process.arg(1)
         if (first == "--selftest" || first == "-t") {
             MainUtils.runSelfTest()
+            return
+        }
+        if (first == "--run-auc") {
+            if (Process.argCount() >= 3) {
+                val aucPath: String = Process.arg(2)
+                val vm: VmRunner = VmRunner()
+                vm.loadAucAndRun(aucPath)
+                println("result=" + toStr(vm.getReturnValue()))
+                println("error=" + vm.getError())
+                println("instrCount=" + toStr(vm.getInstructionCount()))
+            } else {
+                println("Error: --run-auc requires a file path")
+            }
             return
         }
         MainUtils.runCli()

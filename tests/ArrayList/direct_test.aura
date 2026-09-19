@@ -1,0 +1,13 @@
+// Direct arrayListOf test
+package test
+
+fun main(): Int {
+    var l = arrayListOf<Int>()
+    l.add(1)
+    l.add(2)
+    l.add(3)
+    println("size=" + l.size)
+    println("l[0]=" + l[0])
+    println("l.getAt(0)=" + l.getAt(0))
+    return 0
+}

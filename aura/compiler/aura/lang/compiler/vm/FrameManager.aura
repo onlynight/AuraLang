@@ -58,8 +58,12 @@ class FrameManager {
     /// 最大调用深度。
     private var maxCallDepth: Int = 64
 
-    /// 帧链表（ArrayList 实现，O(1) 访问）。
-    private var frames: ArrayList<Frame> = ArrayList<Frame>()
+    /// 帧链表（原生堆列表，O(1) 访问）。
+    ///
+    /// **不能用 `ArrayList<Frame>` 类**：其构造器内部用 `mutableListOf`，
+    /// 而 `mutableListOf` 的实现又是 `ArrayList<Any>(items)`；
+    /// 自举 AOT 下这条环会变成无限递归（构造即栈溢出）。原生堆列表没有该问题。
+    private var frames: List<Frame> = arrayListOf<Frame>()
 
     /// 栈内存（HashMap 实现，O(1) get/set）。
     private var stackMemory: HashMap<Int, String> = HashMap<Int, String>()
@@ -84,7 +88,7 @@ class FrameManager {
         this.localsSize = 32
         this.maxStackDepth = 256
         this.maxCallDepth = 64
-        this.frames = ArrayList<Frame>()
+        this.frames = arrayListOf<Frame>()
         this.stackMemory = HashMap<Int, String>()
         this.frameCount = 0
         this.callDepth = 0

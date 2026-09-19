@@ -58,6 +58,77 @@ passthru:
   ret i8* %v
 }
 
+; ---- std IO print（平台无关：只用 libc printf / fflush，不碰任何 OS 专有 IO） ----
+; 旧实现直接 `@_write(1, buf, n)`（fd 1 是 POSIX/CRT 专有），在非 Windows 目标上
+; 符号不同 → 平台不兼容。这里改用 C 标准库：
+;   * `printf`  ：所有平台（MSVC / MinGW / glibc / musl / macOS）都导出；
+;   * `fflush(NULL)`：C 标准规定刷新**所有**输出流，避免 `printf` 缓冲在崩溃时丢失。
+; 这样 IR 本身与平台无关，链接期由 clang 解析宿主 CRT。
+declare i32 @printf(i8*, ...)
+declare i32 @fflush(i8*)
+@aura_fmt_s = private unnamed_addr constant [3 x i8] c"%s\00"
+@aura_fmt_s_nl = private unnamed_addr constant [4 x i8] c"%s\0A\00"
+@aura_fmt_nl = private unnamed_addr constant [2 x i8] c"\0A\00"
+
+define void @aura_lang_std_IO_print(i8* %s) {
+entry:
+  %isnull = icmp eq i8* %s, null
+  br i1 %isnull, label %done, label %pr
+pr:
+  call i32 (i8*, ...) @printf(i8* @aura_fmt_s, i8* %s)
+  br label %done
+done:
+  call i32 @fflush(i8* null)
+  ret void
+}
+
+define void @aura_lang_std_IO_println(i8* %s) {
+entry:
+  %isnull = icmp eq i8* %s, null
+  br i1 %isnull, label %nl, label %pr
+pr:
+  call i32 (i8*, ...) @printf(i8* @aura_fmt_s_nl, i8* %s)
+  br label %done
+nl:
+  call i32 (i8*, ...) @printf(i8* @aura_fmt_nl)
+  br label %done
+done:
+  call i32 @fflush(i8* null)
+  ret void
+}
+
+; ---- typeof / 运行时类型名（平台无关：只依赖 Plan A 低位标记） ----
+; AOT 下 `Any` 的表示是 Plan A 的统一句柄：
+;   * 奇数 ((v<<1)|1) → 装箱整数
+;   * 偶数            → 真实指针（字符串/对象/浮点盒）
+; 因此这里给出**保守但可用**的类型名：整数 → "Int"，其余非空 → "String"，空 → "Null"。
+; 这足以让 `toStr`/字符串拼接/数值运算的 Int 与 String 分派正确。
+;
+; **必须 `align 8`**：这三个常量是 `typeof` 的返回值，会被下游当作 `Any` 处理。
+; 若按默认 `align 1` 落在**奇数**地址上，Plan A 会把它们误判为「装箱整数」
+;（`toStr` 会把地址十进制化，`typeof(v) == "String"` 恒为 false →
+; `VmOps.isString/isNumeric` 全部误判、字符串拼接退化成数字加法）。
+@aura_ty_int = private unnamed_addr constant [4 x i8] c"Int\00", align 8
+@aura_ty_str = private unnamed_addr constant [7 x i8] c"String\00", align 8
+@aura_ty_null = private unnamed_addr constant [5 x i8] c"Null\00", align 8
+
+define i8* @aura_typeof(i8* %v) {
+entry:
+  %isnull = icmp eq i8* %v, null
+  br i1 %isnull, label %asnull, label %chk
+chk:
+  %bits = ptrtoint i8* %v to i64
+  %low = and i64 %bits, 1
+  %isint = icmp ne i64 %low, 0
+  br i1 %isint, label %asint, label %asstr
+asnull:
+  ret i8* @aura_ty_null
+asint:
+  ret i8* @aura_ty_int
+asstr:
+  ret i8* @aura_ty_str
+}
+
 ; ---- Block copy helper ----
 ; The Aura emitter emits `call void @aura_block_copy(...)` for inline string
 ; concatenation / printing. It is a plain function (not an LLVM intrinsic) so

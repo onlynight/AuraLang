@@ -55,8 +55,9 @@ class Codegen {
     /// 输出的字节码（每行一条指令）。
     var bytecode: String = ""
 
-    /// 字节码行收集器（ArrayList O(n) 批量追加，避免 O(n²) 字符串拼接）。
-    var bytecodeLines: ArrayList<String> = ArrayList<String>()
+    /// 字节码行收集器（原生 StringBuilder，O(n) 批量追加；不能使用 `ArrayList`：
+    /// 自举 AOT 会把 `ArrayList` 误当作裸集合句柄，`.add`/`.getSize` 全部失效）。
+    var bytecodeBuf: EmitBuffer = EmitBuffer()
 
     /// 当前指令计数。
     var instrCount: Int = 0
@@ -82,7 +83,7 @@ class Codegen {
     init() {
         this.mir = Mir()
         this.bytecode = ""
-        this.bytecodeLines = ArrayList<String>()
+        this.bytecodeBuf = EmitBuffer()
         this.instrCount = 0
         this.lineCount = 0
         this.constPoolBuf = EmitBuffer()
@@ -95,7 +96,7 @@ class Codegen {
     /// 执行字节码发射，返回字节码字符串。
     fun emit(src: Mir): String {
         this.mir = src
-        this.bytecodeLines.clear()
+        this.bytecodeBuf.sbReset()
         this.instrCount = 0
         this.lineCount = 0
         this.constPoolBuf.sbReset()
@@ -121,15 +122,8 @@ class Codegen {
             ei = ei + 1
         }
 
-        // 合并所有行（O(n) 批量拼接，避免逐行 O(n²)）
-        var result: String = ""
-        var lc: Int = this.bytecodeLines.getSize()
-        var li: Int = 0
-        while (li < lc) {
-            result = result + this.bytecodeLines.get(li) + "\n"
-            li = li + 1
-        }
-        this.bytecode = result
+        // 交出字节码（原生缓冲区零拷贝）
+        this.bytecode = this.bytecodeBuf.sbBuild()
 
         return this.bytecode
     }
@@ -195,7 +189,7 @@ class Codegen {
         this.funcTableBuf.sbAdd(name + "|" + toStr(this.lineCount) + "|" + toStr(paramCount) + "\n")
 
         // 注释行（VM 视为 no-op，但计入行号以对齐 ip）
-        this.bytecodeLines.add("# func " + name + ":" + retTy)
+        this.bytecodeBuf.sbAdd("# func " + name + ":" + retTy + "\n")
         this.lineCount = this.lineCount + 1
     }
 
@@ -262,7 +256,7 @@ class Codegen {
             line = bcOp
         }
 
-        this.bytecodeLines.add(line)
+        this.bytecodeBuf.sbAdd(line + "\n")
         this.lineCount = this.lineCount + 1
         this.instrCount = this.instrCount + 1
     }
