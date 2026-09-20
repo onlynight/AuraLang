@@ -1,0 +1,689 @@
+// aura:///aura/lang/compiler/backend/SystemLinker.aura
+package aura.lang.compiler.backend.photon
+// ─────────────────────────────────────────────────────────────
+// 系统链接器集成 — Phase E (任务 E.2)
+//
+// 对应后端链接阶段。将 AOT 后端产出的目标文件（.obj / .o）
+// 通过系统链接器（lld-link / ld / ld64）链接为可执行文件或共享库。
+//
+// ── 链接器选择策略（外部依赖，不随仓库分发）──
+//
+//   lld 单个驱动约 65-73 MB（内置一份约 271 MB），因此改为**外部依赖**：
+//   在项目根 aura.toml 的 [lld] 段登记各 host 平台对应的 lld bin 目录，
+//   由 PhotonLldConfig 解析后拼装命令行。
+//
+//   Windows host:  lld-link.exe / ld.lld.exe / ld64.lld.exe（取自 LLVM 发行包）
+//   Linux   host:  lld-link   / ld.lld   / ld64.lld
+//   macOS   host:  lld-link   / ld.lld   / ld64.lld
+//
+//   host 决定「用哪一份 lld」（aura.toml 的 key），
+//   target 决定「链接器的命令行参数」（/MACHINE:X64、-m aarch64linux），
+//   两者不是同一个维度 —— 同一份 lld 可交叉链接多个 target 架构。
+//
+// ── 查找优先级 ──
+//
+//   1. AURA_LINKER 环境变量（完整路径，最高优先级）
+//   2. aura.toml 的 [lld] 段（按 host 三元组 / 简写 key 取目录）
+//   3. PATH 中的同名工具（裸名字）
+//
+//   注：环境变量读取目前由 aura.lang.std.Env 提供，其底层实现读取
+//   /proc/self/environ，在 Windows 上会返回默认值 —— 即 Windows 下当前
+//   只有 2/3 两级生效（待补齐 Windows 侧 getenv 后自动恢复第 1 级）。
+//
+// ── 输出类型 ──
+//
+//   exe   — Windows 可执行文件
+//   dll   — Windows 动态链接库
+//   so    — Linux 共享库
+//   dylib — macOS 动态库
+//   obj   — 静态库（.lib / .a）
+//
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.std.Process
+import aura.lang.std.Env
+
+import "PhotonLldConfig.aura"
+
+// ─────────────────────────────────────────────────────────────
+// SystemLinker — 系统链接器调用封装
+// ─────────────────────────────────────────────────────────────
+
+/// 系统链接器：封装跨平台链接器调用（lld-link / ld / ld64）。
+class PhotonSystemLinker {
+
+    /// 目标架构（"x86_64"）。
+    var target: String = "x86_64"
+
+    /// 操作系统（"windows" / "linux" / "macos"）。
+    var os: String = "windows"
+
+    /// 链接器名称（"lld-link" / "ld" / "ld64"）。
+    var linker: String = "lld-link"
+
+    /// 输出类型（"exe" / "dll" / "so" / "dylib" / "obj"）。
+    var outputType: String = "exe"
+
+    /// 输出文件名。
+    var outputName: String = ""
+
+    /// 逗号分隔的库文件列表。
+    var libs: String = ""
+
+    /// 链接器标志（逗号分隔字符串）。
+    var flags: String = ""
+
+    /// 逗号分隔的目标文件路径列表。
+    var objectFiles: String = ""
+
+    /// 宿主操作系统（编译器自身运行的平台）——决定 aura.toml [lld] 用哪个目录。
+    var hostOs: String = "windows"
+
+    /// 宿主 CPU 架构 ——与 hostOs 共同构成 host 三元组。
+    var hostArch: String = "x86_64"
+
+    /// 项目清单路径（aura.toml），用于读取 [lld] 段。
+    var manifestPath: String = "aura.toml"
+
+    /// 是否追加平台默认库（msvcrt/ucrtbase/...）。
+    ///
+    /// 自研 runtime（不依赖 CRT）场景应置为 false，并配合 `/NODEFAULTLIB`，
+    /// 否则 lld-link 会把 msvcrt.lib 等当作输入文件去查找而报错。
+    var useDefaultLibs: Boolean = true
+
+    /// 是否启用 `AURA_LINKER` 环境变量覆盖（默认**关闭**）。
+    ///
+    /// `aura.lang.std.Env` 底层依赖 `Memory` / `FileOps` / `Allocator` 等
+    /// extern interface builtin，只有 AOT/LLVM 侧降低后才存在；经 VM 执行的
+    /// 代码调用它会在运行时直接崩（`call to undefined function #65535`）。
+    /// 因此默认关闭，待自举（Photon 编译 Photon）完成后再打开。
+    var useEnvOverride: Boolean = false
+
+    /// 环境变量名（仅在 `useEnvOverride` 为 true 时查询）。
+    var envVarName: String = "AURA_LINKER"
+
+    /// 解析出的 lld 目录缓存（空串表示未配置）。
+    var lldDirCached: String = ""
+
+    init() {
+        this.target = "x86_64"
+        this.os = "windows"
+        this.linker = "lld-link"
+        this.outputType = "exe"
+        this.outputName = ""
+        this.libs = ""
+        this.flags = ""
+        this.objectFiles = ""
+        this.hostOs = "windows"
+        this.hostArch = "x86_64"
+        this.manifestPath = "aura.toml"
+        this.lldDirCached = ""
+    }
+
+    // ── 主入口 ──
+
+    /// 主入口：调用系统链接器，返回退出码。
+    ///
+    /// 退出码 0 表示链接成功。
+    fun link(objectFiles: String, outputName: String, outputType: String): Int {
+        this.objectFiles = objectFiles
+        this.outputName = outputName
+        this.outputType = outputType
+
+        val cmd: String = this.buildCommand()
+        return this.runLinker(cmd)
+    }
+
+    // ── 命令构建 ──
+
+    /// 构建完整的链接器命令行。
+    fun buildCommand(): String {
+        if (this.os == "windows") {
+            return this.buildLldLinkCommand(this.objectFiles, this.outputName)
+        } else if (this.os == "macos") {
+            return this.buildLd64Command(this.objectFiles, this.outputName)
+        }
+        return this.buildLdCommand(this.objectFiles, this.outputName)
+    }
+
+    /// 执行链接器命令，返回退出码。
+    fun runLinker(command: String): Int {
+        return Process.run(command)
+    }
+
+    /// 构建参数列表（**不含**链接器路径本身）。
+    ///
+    /// 供无法直接落盘/无法直接 spawn 的场景使用：调用方拿到「链接器路径 + 参数列表」
+    /// 后可自行执行（例如由构建脚本执行）。
+    fun buildArgumentList(): String {
+        val full: String = this.buildCommand()
+        val prefix: String = this.getLldPath() + " "
+        if (full.startsWith(prefix)) {
+            return full.substring(prefix.length, full.length)
+        }
+        return full
+    }
+
+    // ── lld-link 命令构建（Windows）──
+
+    /// 构建 lld-link 命令。
+    ///
+    /// lld-link 语法（Windows 风格）：
+    ///   lld-link [options] <input-files> [/OUT:<output>] [/LIBPATH:<path>]
+    ///
+    /// 常用选项：
+    ///   /OUT:<path>     — 输出文件路径
+    ///   /DLL            — 创建 DLL
+    ///   /LIBPATH:<dir>  — 库搜索路径
+    ///   /SUBSYSTEM:<sub> — 子系统类型（console / windows）
+    ///   /ENTRY:<name>   — 入口点名称
+    ///   /MACHINE:<arch> — 目标架构
+    ///   /NODEFAULTLIB   — 不链接默认库
+    ///   /DEBUG          — 生成调试信息
+    ///   /OPT:REF        — 优化引用
+    ///   /OPT:ICF        — 折叠内部函数
+    fun buildLldLinkCommand(objectFiles: String, outputName: String): String {
+        var cmd: String = this.getLldPath() + " "
+
+        // 输入文件
+        cmd = cmd + objectFiles + " "
+
+        // 输出文件
+        var outName: String = outputName
+        if (this.outputType == "exe" && !outName.endsWith(".exe")) {
+            outName = outName + ".exe"
+        } else if (this.outputType == "dll" && !outName.endsWith(".dll")) {
+            outName = outName + ".dll"
+        } else if (this.outputType == "obj" && !outName.endsWith(".lib")) {
+            outName = outName + ".lib"
+        }
+        cmd = cmd + "/OUT:" + outName + " "
+
+        // 输出类型标志
+        if (this.outputType == "dll") {
+            cmd = cmd + "/DLL "
+        }
+
+        // 库文件（逗号分隔；缺后缀自动补 .lib）
+        if (this.libs != "") {
+            val libList: List<String> = PhotonSystemLinkerUtils.splitCsv(this.libs)
+            var i: Int = 0
+            while (i < libList.size) {
+                if (libList[i] != "") {
+                    cmd = cmd + PhotonSystemLinkerUtils.libLinkFlag("windows", libList[i]) + " "
+                }
+                i = i + 1
+            }
+        }
+
+        // 链接器标志（逗号分隔 → 逐项展开为独立参数）
+        cmd = cmd + PhotonSystemLinkerUtils.expandFlags(this.flags)
+
+        // 默认库（逗号分隔 → 逐项展开；getDefaultLibraries 已带 .lib 后缀）
+        if (this.useDefaultLibs) {
+            val defaultLibs: String = this.getDefaultLibraries()
+            if (defaultLibs != "") {
+                cmd = cmd + PhotonSystemLinkerUtils.expandFlags(defaultLibs)
+            }
+        }
+
+        return cmd
+    }
+
+    // ── ld 命令构建（Linux）──
+
+    /// 构建 GNU ld 命令。
+    ///
+    /// GNU ld 语法（Unix 风格）：
+    ///   ld [options] <input-files> -o <output>
+    ///
+    /// 常用选项：
+    ///   -o <path>       — 输出文件
+    ///   -shared         — 创建共享库
+    ///   -L<path>       — 库搜索路径
+    ///   -l<name>       — 链接库
+    ///   -e <entry>     — 入口点
+    ///   -m <arch>      — 目标架构
+    ///   -T <script>    — 链接脚本
+    ///   --gc-sections  — 移除未引用节
+    fun buildLdCommand(objectFiles: String, outputName: String): String {
+        var cmd: String = this.getLdPath() + " "
+
+        // 输入文件
+        cmd = cmd + objectFiles + " "
+
+        // 输出文件
+        var outName: String = outputName
+        if (this.outputType == "so" && !outName.startsWith("lib")) {
+            outName = "lib" + outName
+        }
+        if (this.outputType == "so" && !outName.endsWith(".so")) {
+            outName = outName + ".so"
+        } else if (this.outputType == "obj" && !outName.endsWith(".a")) {
+            outName = outName + ".a"
+        }
+        cmd = cmd + "-o " + outName + " "
+
+        // 输出类型标志
+        if (this.outputType == "so") {
+            cmd = cmd + "-shared "
+        }
+
+        // 库文件
+        if (this.libs != "") {
+            val libList: List<String> = PhotonSystemLinkerUtils.splitCsv(this.libs)
+            var i: Int = 0
+            while (i < libList.size) {
+                cmd = cmd + "-l" + libList[i] + " "
+                i = i + 1
+            }
+        }
+
+        // 链接器标志（逗号分隔 → 逐项展开为独立参数）
+        cmd = cmd + PhotonSystemLinkerUtils.expandFlags(this.flags)
+
+        return cmd
+    }
+
+    // ── ld64 命令构建（macOS）──
+
+    /// 构建 ld64 命令。
+    ///
+    /// ld64 语法（Apple Unix 风格）：
+    ///   ld64 [options] <input-files> -o <output>
+    ///
+    /// 常用选项：
+    ///   -o <path>        — 输出文件
+    ///   -dynamiclib     — 创建动态库
+    ///   -install_name <path> — 安装名称
+    ///   -L<path>        — 库搜索路径
+    ///   -l<name>        — 链接库
+    ///   -e <entry>      — 入口点
+    ///   -arch <arch>    — 目标架构
+    ///   -dead_strip     — 移除死代码
+    fun buildLd64Command(objectFiles: String, outputName: String): String {
+        var cmd: String = this.getLd64Path() + " "
+
+        // 输入文件
+        cmd = cmd + objectFiles + " "
+
+        // 输出文件
+        var outName: String = outputName
+        if (this.outputType == "dylib" && !outName.startsWith("lib")) {
+            outName = "lib" + outName
+        }
+        if (this.outputType == "dylib" && !outName.endsWith(".dylib")) {
+            outName = outName + ".dylib"
+        } else if (this.outputType == "obj" && !outName.endsWith(".a")) {
+            outName = outName + ".a"
+        }
+        cmd = cmd + "-o " + outName + " "
+
+        // 输出类型标志
+        if (this.outputType == "dylib") {
+            cmd = cmd + "-dynamiclib "
+        }
+
+        // 库文件
+        if (this.libs != "") {
+            val libList: List<String> = PhotonSystemLinkerUtils.splitCsv(this.libs)
+            var i: Int = 0
+            while (i < libList.size) {
+                cmd = cmd + "-l" + libList[i] + " "
+                i = i + 1
+            }
+        }
+
+        // 链接器标志（逗号分隔 → 逐项展开为独立参数）
+        cmd = cmd + PhotonSystemLinkerUtils.expandFlags(this.flags)
+
+        return cmd
+    }
+
+    // ── 配置方法 ──
+
+    /// 添加一个库文件到链接列表。
+    fun addLibrary(lib: String): Unit {
+        if (this.libs == "") {
+            this.libs = lib
+        } else {
+            this.libs = this.libs + "," + lib
+        }
+    }
+
+    /// 添加一个链接器标志。
+    fun addFlag(flag: String): Unit {
+        if (this.flags == "") {
+            this.flags = flag
+        } else {
+            this.flags = this.flags + "," + flag
+        }
+    }
+
+    /// 设置输出类型。
+    fun setOutputType(type: String): Unit {
+        this.outputType = type
+    }
+
+    // ── 路径和库查询 ──
+
+    /// 返回目标平台的默认库列表。
+    ///
+    /// Windows:  msvcrt.lib, kernel32.lib, user32.lib, gdi32.lib,
+    ///           winspool.lib, comdlg32.lib, advapi32.lib, shell32.lib,
+    ///           ole32.lib, oleaut32.lib, uuid.lib, odbc32.lib, odbccp32.lib,
+    ///           mpr.lib, winmm.lib, version.lib, wininet.lib, ws2_32.lib,
+    ///           normaliz.lib
+    ///
+    /// Linux:    pthread, dl, m, rt
+    ///
+    /// macOS:    pthread, m, dl
+    fun getDefaultLibraries(): String {
+        if (this.os == "windows") {
+            return "msvcrt.lib,ucrtbase.lib,oldnames.lib,ntdll.lib,ole32.lib,oleaut32.lib,shell32.lib,user32.lib,advapi32.lib,ws2_32.lib,msvcrt.lib,corelib.lib"
+        } else if (this.os == "macos") {
+            return "pthread,m,dl"
+        }
+        return "pthread,dl,m,rt"
+    }
+
+    // ── 工具链定位（aura.toml 外部依赖）──
+
+    /// 当前宿主三元组（编译器自身运行平台）。
+    ///
+    /// 例如 Windows x86_64 → "x86_64-pc-windows-msvc"，
+    /// 与 aura.toml 中 `[lld]` 段的 key 对齐。
+    fun hostTriple(): String {
+        return PhotonLldConfigUtils.hostTripleFor(this.hostOs, this.hostArch)
+    }
+
+    /// 返回 aura.toml 的 `[lld]` 段中登记的 lld 目录。
+    ///
+    /// 未配置时返回空串（表示应回退到 PATH）。
+    fun lldDir(): String {
+        if (this.lldDirCached.length > 0) {
+            return this.lldDirCached
+        }
+        val cfg: PhotonLldConfig = PhotonLldConfig()
+        cfg.manifestPath = this.manifestPath
+        if (cfg.resolve(this.hostTriple())) {
+            this.lldDirCached = cfg.dir
+            return this.lldDirCached
+        }
+        return ""
+    }
+
+    /// 宿主平台的可执行文件后缀（Windows 为 ".exe"，其余为空串）。
+    fun exeSuffix(): String {
+        if (this.hostOs == "windows") {
+            return ".exe"
+        }
+        return ""
+    }
+
+    /// 解析某个 lld 工具的完整路径。
+    ///
+    /// 优先级：
+    ///   1. `AURA_LINKER` 环境变量（完整路径）
+    ///   2. aura.toml 的 `[lld]` 段（目录 + 工具名 + 平台后缀）
+    ///   3. 裸工具名（交给 PATH 解析）
+    fun resolveTool(toolName: String): String {
+        // 1) 环境变量覆盖（最高优先级；默认关闭，见 useEnvOverride 说明）
+        if (this.useEnvOverride) {
+            val override: String = Env.get(this.envVarName, "")
+            if (override.length > 0) {
+                return override
+            }
+        }
+        // 2) aura.toml [lld] 段（目录结果缓存于 lldDirCached，避免重复解析清单）
+        var dir: String = this.lldDirCached
+        if (dir.length == 0) {
+            dir = this.lldDir()
+        }
+        if (dir.length > 0) {
+            return PhotonLldConfigUtils.joinPath(dir, toolName + this.exeSuffix())
+        }
+        // 3) PATH 回退（带平台可执行后缀）
+        return toolName + this.exeSuffix()
+    }
+
+    /// 按输出格式解析对应的 lld 驱动路径。
+    ///
+    ///   "pe"    → lld-link    （Windows PE）
+    ///   "elf"   → ld.lld      （Linux/BSD ELF）
+    ///   "macho" → ld64.lld    （macOS Mach-O）
+    ///   "wasm"  → wasm-ld     （WebAssembly）
+    fun resolveDriver(format: String): String {
+        return this.resolveTool(PhotonLldConfigUtils.driverForFormat(format))
+    }
+
+    /// 返回 PE 链接器（lld-link）的路径。
+    ///
+    /// 查找顺序：`AURA_LINKER` 环境变量 > aura.toml `[lld]` 段 > PATH。
+    fun getLldPath(): String {
+        return this.resolveTool("lld-link")
+    }
+
+    /// 返回 ELF 链接器（ld.lld）的路径。
+    fun getLdPath(): String {
+        return this.resolveTool("ld.lld")
+    }
+
+    /// 返回 Mach-O 链接器（ld64.lld）的路径。
+    fun getLd64Path(): String {
+        return this.resolveTool("ld64.lld")
+    }
+
+    /// 返回归档工具（.lib / .a）的路径：Windows 用 llvm-lib，其余用 llvm-ar。
+    ///
+    /// lld 自带归档能力较弱，静态库由同一发行包的 llvm-lib / llvm-ar 提供。
+    fun getArchiverPath(): String {
+        if (this.hostOs == "windows") {
+            return this.resolveTool("llvm-lib")
+        }
+        return this.resolveTool("llvm-ar")
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// PhotonSystemLinkerUtils — 顶层辅助函数
+// ─────────────────────────────────────────────────────────────
+
+object PhotonSystemLinkerUtils {
+
+    /// 默认系统链接器配置（Windows x86_64）。
+    fun defaultLinker(): PhotonSystemLinker {
+        return PhotonSystemLinker()
+    }
+
+    /// 按逗号切分字符串，返回 List<String>。
+    fun splitCsv(text: String): List<String> {
+        val out: List<String> = arrayListOf<String>()
+        if (text == "") {
+            return out
+        }
+        val len: Int = text.length
+        var start: Int = 0
+        var i: Int = 0
+        while (i < len) {
+            if (text[i] == ",") {
+                out.add(text.substring(start, i))
+                start = i + 1
+            }
+            i = i + 1
+        }
+        out.add(text.substring(start, len))
+        return out
+    }
+
+    /// 统计逗号分隔字符串中的条目数。
+    fun csvCount(text: String): Int {
+        if (text == "") {
+            return 0
+        }
+        var count: Int = 1
+        var i: Int = 0
+        val len: Int = text.length
+        while (i < len) {
+            if (text[i] == ",") {
+                count = count + 1
+            }
+            i = i + 1
+        }
+        return count
+    }
+
+    /// 将路径分隔符 `/` 规范化为 `\`（Windows 友好）。
+    fun winPath(p: String): String {
+        var out: String = ""
+        var i: Int = 0
+        val len: Int = p.length
+        while (i < len) {
+            if (p[i] == "/") {
+                out = out + "\\"
+            } else {
+                out = out + p.substring(i, i + 1)
+            }
+            i = i + 1
+        }
+        return out
+    }
+
+    /// 确定宿主操作系统对应的 lld 驱动名（与 PhotonLldConfigUtils.driverForFormat 一致）。
+    fun linkerForOs(os: String): String {
+        return PhotonLldConfigUtils.driverForFormat(PhotonLldConfigUtils.formatForOs(os))
+    }
+
+    /// 确定输出文件扩展名。
+    fun extensionForType(type: String, os: String): String {
+        if (os == "windows") {
+            if (type == "exe") { return "exe" }
+            if (type == "dll") { return "dll" }
+            if (type == "obj") { return "lib" }
+            return ""
+        } else if (os == "macos") {
+            if (type == "dylib") { return "dylib" }
+            if (type == "obj") { return "a" }
+            return ""
+        }
+        // Linux
+        if (type == "so") { return "so" }
+        if (type == "obj") { return "a" }
+        return ""
+    }
+
+    /// 确保输出文件名包含正确的扩展名。
+    fun ensureExtension(name: String, type: String, os: String): String {
+        val ext: String = extensionForType(type, os)
+        if (ext == "") {
+            return name
+        }
+        if (name.endsWith("." + ext)) {
+            return name
+        }
+        // 对于 so/dylib，检查是否需要 lib 前缀
+        if (os != "windows" && (type == "so" || type == "dylib")) {
+            if (!name.startsWith("lib")) {
+                name = "lib" + name
+            }
+        }
+        return name + "." + ext
+    }
+
+    /// 构建库搜索路径标志。
+    fun libPathFlag(os: String, dir: String): String {
+        if (os == "windows") {
+            return "/LIBPATH:" + winPath(dir)
+        }
+        return "-L" + dir
+    }
+
+    /// 构建库链接标志。
+    fun libLinkFlag(os: String, lib: String): String {
+        if (os == "windows") {
+            if (!lib.endsWith(".lib")) {
+                return lib + ".lib"
+            }
+            return lib
+        }
+        return "-l" + lib
+    }
+
+    /// 构建子系统标志（Windows 专用）。
+    fun subsystemFlag(subsystem: String): String {
+        return "/SUBSYSTEM:" + subsystem
+    }
+
+    /// 构建入口点标志。
+    fun entryFlag(os: String, entry: String): String {
+        if (os == "windows") {
+            return "/ENTRY:" + entry
+        }
+        return "-e " + entry
+    }
+
+    /// 判断是否为静态库输出。
+    fun isStaticLib(type: String): Boolean {
+        return type == "obj"
+    }
+
+    /// 判断是否为共享库输出。
+    fun isSharedLib(type: String): Boolean {
+        return type == "dll" || type == "so" || type == "dylib"
+    }
+
+    /// 判断是否为可执行文件输出。
+    fun isExecutable(type: String): Boolean {
+        return type == "exe"
+    }
+
+    /// 判断输出类型是否有效。
+    fun isValidOutputType(type: String): Boolean {
+        if (type == "exe" || type == "dll" || type == "so" ||
+            type == "dylib" || type == "obj") {
+            return true
+        }
+        return false
+    }
+
+    /// 判断操作系统是否有效。
+    fun isValidOs(os: String): Boolean {
+        if (os == "windows" || os == "linux" || os == "macos") {
+            return true
+        }
+        return false
+    }
+
+    /// 把逗号分隔的标志串展开为空格分隔的命令行片段（每项以空格结尾；空串返回空）。
+    ///
+    /// 原实现把 `flags` 原样拼接，逗号会进入命令行 ——
+    /// 例如 `flags = "/ENTRY:main,/MACHINE:X64"` 会被链接器当成单个含逗号的参数。
+    fun expandFlags(flags: String): String {
+        if (flags == "") {
+            return ""
+        }
+        val parts: List<String> = splitCsv(flags)
+        var out: String = ""
+        var i: Int = 0
+        while (i < parts.size) {
+            if (parts[i] != "") {
+                out = out + parts[i] + " "
+            }
+            i = i + 1
+        }
+        return out
+    }
+
+    /// 获取链接器版本探测命令（返回命令字符串，不执行）。
+    fun versionCommand(linker: String): String {
+        if (linker == "lld-link") {
+            return "lld-link /VERSION"
+        } else if (linker == "ld") {
+            return "ld --version"
+        } else if (linker == "ld64") {
+            return "ld64 -v"
+        }
+        return linker + " --version"
+    }
+}

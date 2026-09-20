@@ -419,7 +419,12 @@ object MainUtils {
         var inputPath: String = ""
         var outputPath: String = ""
         var trace: Boolean = false
-        var i: Int = 1
+        // Same base offset as main(): skip "exe" and "run" when invoked via `aura run`.
+        var base: Int = 0
+        if (argc >= 3 && Process.arg(1) == "run") {
+            base = 2
+        }
+        var i: Int = base + 1
         while (i < argc) {
             val a: String = Process.arg(i)
             if (a == "-o" || a == "--output") {
@@ -588,15 +593,23 @@ object MainUtils {
 /// 注意：自检样例**不再**在无参数时自动运行；需要回归自检时显式调用
 /// [`MainUtils.runSelfTest`]（保持 `main` 的产出干净，便于 CLI 与 AOT 自举场景）。
 fun main() {
-    if (Process.argCount() >= 2) {
-        val first: String = Process.arg(1)
+    // Determine argument base offset: when run via `aura run <file.auc> [args]`,
+    // the VM passes [exe, "run", file.auc, ...].  Skip those two so that
+    // arg(1) is the first user-supplied argument, matching standalone invocation.
+    var base: Int = 0
+    if (Process.argCount() >= 3 && Process.arg(1) == "run") {
+        base = 2
+    }
+
+    if (Process.argCount() >= base + 2) {
+        val first: String = Process.arg(base + 1)
         if (first == "--selftest" || first == "-t") {
             MainUtils.runSelfTest()
             return
         }
         if (first == "--run-auc") {
-            if (Process.argCount() >= 3) {
-                val aucPath: String = Process.arg(2)
+            if (Process.argCount() >= base + 3) {
+                val aucPath: String = Process.arg(base + 2)
                 val vm: VmRunner = VmRunner()
                 vm.loadAucAndRun(aucPath)
                 println("result=" + toStr(vm.getReturnValue()))

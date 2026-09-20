@@ -1,0 +1,315 @@
+// aura:///aura/lang/compiler/backend/photon/PhotonLldConfig.aura
+package aura.lang.compiler.backend.photon
+// ─────────────────────────────────────────────────────────────
+// PhotonLldConfig — 从 aura.toml 的 [lld] 段解析 lld 工具链位置
+//
+// lld 单个驱动约 65-73 MB，不适合随仓库分发（内置一份约 271 MB）。
+// 因此把 lld 作为**外部依赖**：在项目根 aura.toml 登记各 host 平台对应的
+// lld bin 目录，本类负责解析，PhotonSystemLinker 负责拼装链接命令。
+//
+// ── 配置格式（aura.toml）──
+//
+//   [lld]
+//   x86_64-pc-windows-msvc    = "D:/DevTools/LLVM/clang+llvm-23.1.0-x86_64-pc-windows-msvc/bin"
+//   aarch64-pc-windows-msvc   = "D:/DevTools/LLVM/clang+llvm-23.1.0-aarch64-pc-windows-msvc/bin"
+//   windows-x86_64            = "..."     # 简写形式同样支持，优先级低于三元组
+//
+// ── 为什么目录按 host 分、不按 target 分 ──
+//
+//   lld 是多 flavor / 多 target 交叉链接器：同一个 lld-link 通过
+//   /MACHINE:X64 或 /MACHINE:ARM64 就能产出两种架构的 PE；ld.lld 同理
+//   （-m elf_x86_64 / -m aarch64linux）。target 架构是**命令行参数**，
+//   不是目录维度，所以 key 只表达「编译器自身运行在哪个平台」。
+//
+// ── 查找优先级（由 PhotonSystemLinker 落实）──
+//
+//   AURA_LINKER 环境变量 > aura.toml [lld] > PATH
+//
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.std.FileSystem
+
+// ─────────────────────────────────────────────────────────────
+// PhotonLldConfig — [lld] 段解析
+// ─────────────────────────────────────────────────────────────
+
+/// lld 工具链配置：解析 aura.toml 的 `[lld]` 段，按 host 平台取出目录。
+class PhotonLldConfig {
+
+    /// 项目清单路径（默认进程 CWD 下的 aura.toml）。
+    var manifestPath: String = "aura.toml"
+
+    /// 当前解析使用的宿主三元组。
+    var hostTriple: String = ""
+
+    /// 命中的 lld 目录；未命中为空串。
+    var dir: String = ""
+
+    /// 是否已执行过解析（无论命中与否）。
+    var loaded: Boolean = false
+
+    init() {
+        this.manifestPath = "aura.toml"
+        this.hostTriple = ""
+        this.dir = ""
+        this.loaded = false
+    }
+
+    // ── 主入口 ──
+
+    /// 解析 `[lld]` 段，取出对应 host 三元组的目录。
+    ///
+    /// - 命中：`this.dir` 为目录，返回 true。
+    /// - 未命中（文件不存在 / 无 [lld] 段 / 该平台未登记）：返回 false，
+    ///   调用方应回退到 PATH 中的同名工具。
+    fun resolve(hostTriple: String): Boolean {
+        this.hostTriple = hostTriple
+        this.dir = ""
+        this.loaded = true
+
+        if (!FileSystem.exists(this.manifestPath)) {
+            return false
+        }
+        val text: String = FileSystem.readText(this.manifestPath)
+        if (text.length == 0) {
+            return false
+        }
+
+        val shortKey: String = this.shortKeyOf(hostTriple)
+        var inLldSection: Boolean = false
+        var tripleValue: String = ""
+        var shortValue: String = ""
+
+        // 手写按行扫描：不使用 `String.split` / `String.trim`
+        // —— 这两者在字节码生成阶段无法解析（见文件头注释）。
+        var i: Int = 0
+        var lineStart: Int = 0
+        while (i <= text.length) {
+            var isEol: Boolean = false
+            if (i == text.length) {
+                isEol = true
+            } else {
+                val c: Int = text.substring(i, i + 1).charCodeAt(0)
+                if (c == 10 || c == 13) {   // '\n' / '\r'
+                    isEol = true
+                }
+            }
+            if (isEol) {
+                if (i > lineStart) {
+                    val line: String = this.trimAscii(text.substring(lineStart, i))
+                    if (line.length > 0 && !line.startsWith("#")) {
+                        if (line.startsWith("[")) {
+                            // 段头：进入/离开 [lld]
+                            inLldSection = (line == "[lld]")
+                        } else {
+                            if (inLldSection) {
+                                val eqIdx: Int = line.indexOf("=")
+                                if (eqIdx > 0) {
+                                    val key: String = this.trimAscii(line.substring(0, eqIdx))
+                                    val value: String = this.readValue(line.substring(eqIdx + 1, line.length))
+                                    if (key == hostTriple) {
+                                        tripleValue = value
+                                    } else {
+                                        if (key == shortKey) {
+                                            shortValue = value
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                lineStart = i + 1
+            }
+            i = i + 1
+        }
+
+        // 三元组形式优先于简写形式
+        if (tripleValue.length > 0) {
+            this.dir = tripleValue
+            return true
+        }
+        if (shortValue.length > 0) {
+            this.dir = shortValue
+            return true
+        }
+        return false
+    }
+
+    /// 去掉首尾的 ASCII 空白（空格 / TAB / CR）。
+    ///
+    /// 不使用 `String.trim`（字节码生成阶段无法解析），也不使用 `break`。
+    fun trimAscii(s: String): String {
+        var start: Int = 0
+        var scanning: Boolean = true
+        while (start < s.length && scanning) {
+            val c: Int = s.substring(start, start + 1).charCodeAt(0)
+            if (c == 32 || c == 9 || c == 13) {
+                start = start + 1
+            } else {
+                scanning = false
+            }
+        }
+        var end: Int = s.length
+        scanning = true
+        while (end > start && scanning) {
+            val c: Int = s.substring(end - 1, end).charCodeAt(0)
+            if (c == 32 || c == 9 || c == 13) {
+                end = end - 1
+            } else {
+                scanning = false
+            }
+        }
+        return s.substring(start, end)
+    }
+
+    /// 使用缓存的解析结果（未解析过则按 `this.hostTriple` 解析一次）。
+    fun resolveCached(hostTriple: String): Boolean {
+        if (this.loaded && this.hostTriple == hostTriple) {
+            return this.dir.length > 0
+        }
+        return this.resolve(hostTriple)
+    }
+
+    // ── 路径拼装 ──
+
+    /// 目录 + 工具名 → 完整路径（自动补 host 平台的可执行后缀）。
+    ///
+    /// 未配置目录时返回裸工具名（交给 PATH 解析）。
+    fun toolPath(toolName: String, hostOs: String): String {
+        if (this.dir.length == 0) {
+            return toolName + this.exeSuffix(hostOs)
+        }
+        return PhotonLldConfigUtils.joinPath(this.dir, toolName + this.exeSuffix(hostOs))
+    }
+
+    /// host 平台的可执行文件后缀（Windows 为 ".exe"，其余为空）。
+    fun exeSuffix(hostOs: String): String {
+        if (hostOs == "windows") {
+            return ".exe"
+        }
+        return ""
+    }
+
+    /// 由 host 三元组推导简写 key：
+    ///   "x86_64-pc-windows-msvc" → "windows-x86_64"
+    ///   "aarch64-apple-darwin"    → "macos-aarch64"
+    fun shortKeyOf(hostTriple: String): String {
+        if (hostTriple.indexOf("windows") >= 0) {
+            if (hostTriple.startsWith("aarch64")) { return "windows-aarch64" }
+            if (hostTriple.startsWith("arm")) { return "windows-arm" }
+            return "windows-x86_64"
+        }
+        if (hostTriple.indexOf("darwin") >= 0 || hostTriple.indexOf("macos") >= 0) {
+            if (hostTriple.startsWith("aarch64")) { return "macos-aarch64" }
+            return "macos-x86_64"
+        }
+        if (hostTriple.startsWith("aarch64")) { return "linux-aarch64" }
+        if (hostTriple.startsWith("arm")) { return "linux-arm" }
+        return "linux-x86_64"
+    }
+
+    // ── 值解析 ──
+
+    /// 读取 TOML 值：剥掉外围引号并丢弃行内注释。
+    ///
+    /// 注意：不使用 `String.charAt`（当前 VM 无法解析该方法），
+    /// 统一用 `substring(i, i+1)` 取单字符。
+    fun readValue(raw: String): String {
+        val v: String = this.trimAscii(raw)
+        if (v.startsWith("\"")) {
+            // 取第一对引号之间的内容（逐字符扫描，避免依赖带起始位的 indexOf）
+            var out: String = ""
+            var i: Int = 1
+            while (i < v.length) {
+                val ch: String = v.substring(i, i + 1)
+                if (ch == "\"") {
+                    return out
+                }
+                out = out + ch
+                i = i + 1
+            }
+            return out
+        }
+        // 无引号：截断行内注释与首尾空白
+        val hash: Int = v.indexOf("#")
+        if (hash >= 0) {
+            return this.trimAscii(v.substring(0, hash))
+        }
+        return v
+    }
+
+    // ── 诊断 ──
+
+    /// 返回本配置的字符串描述（调试用）。
+    fun toStr(): String {
+        if (this.dir.length == 0) {
+            return "PhotonLldConfig{host='" + this.hostTriple + "', dir=<未配置>}"
+        }
+        return "PhotonLldConfig{host='" + this.hostTriple + "', dir='" + this.dir + "'}"
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// PhotonLldConfigUtils — 顶层辅助函数
+// ─────────────────────────────────────────────────────────────
+
+object PhotonLldConfigUtils {
+
+    /// 由 os/arch 得到宿主三元组（与 aura.toml 的 [lld] key 对齐）。
+    fun hostTripleFor(os: String, arch: String): String {
+        if (os == "windows") {
+            if (arch == "aarch64") { return "aarch64-pc-windows-msvc" }
+            if (arch == "arm") { return "arm64-pc-windows-msvc" }
+            return "x86_64-pc-windows-msvc"
+        }
+        if (os == "macos") {
+            if (arch == "aarch64") { return "aarch64-apple-darwin" }
+            return "x86_64-apple-darwin"
+        }
+        if (arch == "aarch64") { return "aarch64-unknown-linux-gnu" }
+        if (arch == "arm") { return "armv7-unknown-linux-gnueabihf" }
+        return "x86_64-unknown-linux-gnu"
+    }
+
+    /// 由 os/arch 得到简写 key（如 "windows-x86_64"）。
+    fun shortKeyFor(os: String, arch: String): String {
+        return os + "-" + arch
+    }
+
+    /// 拼接目录与文件名（保持 `\` 或 `/`，不重复分隔符）。
+    fun joinPath(dir: String, file: String): String {
+        if (dir.length == 0) { return file }
+        val last: String = dir.substring(dir.length - 1, dir.length)
+        if (last == "/" || last == "\\") {
+            return dir + file
+        }
+        return dir + "/" + file
+    }
+
+    /// 按输出格式给出 lld 驱动名（不含可执行后缀）。
+    ///
+    ///   "pe"    → lld-link   （Windows PE）
+    ///   "elf"   → ld.lld     （Linux/BSD ELF）
+    ///   "macho" → ld64.lld   （macOS Mach-O）
+    ///   "wasm"  → wasm-ld    （WebAssembly）
+    fun driverForFormat(format: String): String {
+        if (format == "elf") { return "ld.lld" }
+        if (format == "macho") { return "ld64.lld" }
+        if (format == "wasm") { return "wasm-ld" }
+        return "lld-link"
+    }
+
+    /// 按输出类型给出目标文件格式（"pe" / "elf" / "macho"）。
+    fun formatForOs(os: String): String {
+        if (os == "macos") { return "macho" }
+        if (os == "windows") { return "pe" }
+        return "elf"
+    }
+
+    /// 新建一个默认配置（清单路径为 CWD 下的 aura.toml）。
+    fun defaultConfig(): PhotonLldConfig {
+        return PhotonLldConfig()
+    }
+}

@@ -105,8 +105,13 @@ value class String {
         // ── 分割与连接（纯逻辑，Aura 实现）──
 
         /// 按分隔符分割字符串。
+        ///
+        /// 结果用**原生堆列表** `arrayListOf`（`List<T>`），不用
+        /// `mutableListOf`：后者实现为 `ArrayList<Any>(items)`（用户类**类构造**），
+        /// 在引导 VM/AOT 下无法解析 —— 实测 `s.split(",")` 直接
+        /// 「call to undefined function #65535」，连带 `tests/phase1|phase3|phase8` 全挂。
         fun split(text: String, separator: String): List<String> {
-            var result: List<String> = mutableListOf<String>()
+            var result: List<String> = arrayListOf<String>()
             if (text == "") {
                 result.add("")
                 return result
@@ -645,8 +650,11 @@ value class String {
     // ── 分割与合并 ──
 
     /// 按分隔符分割为列表
+    ///
+    /// 同 companion 的 `split`：结果必须是**原生堆列表**（`arrayListOf`），
+    /// 不能用 `mutableListOf`（= `ArrayList<Any>` 类构造，引导 VM 下解析失败）。
     fun split(separator: String): List<String> {
-        val result = mutableListOf<String>()
+        val result = arrayListOf<String>()
         if (this == "") {
             result.add("")
             return result

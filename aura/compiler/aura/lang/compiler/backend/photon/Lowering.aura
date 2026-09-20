@@ -1,0 +1,494 @@
+// aura:///aura/lang/compiler/backend/Lowering.aura
+package aura.lang.compiler.backend.photon
+// ─────────────────────────────────────────────────────────────
+// MIR → LIR 降低器 — Phase B (任务 B.2)
+//
+// 将 SSA MIR（SsaMir.aura）降低为 LIR（Lir.aura）。
+// 采用规则驱动的模式匹配，逐指令映射。
+//
+// ── 降低规则 ──
+//
+//   MIR Const    → LIR Const / ConstImm
+//   MIR Add      → LIR Add
+//   MIR Sub      → LIR Sub
+//   MIR Mul      → LIR Mul
+//   MIR SDiv     → LIR SDiv
+//   MIR SRem     → LIR SRem
+//   MIR Load     → LIR Load（带地址模式计算）
+//   MIR Store    → LIR Store（带地址模式计算）
+//   MIR Call     → LIR Call（带调用约定设置）
+//   MIR Gep      → LIR Gep
+//   MIR ICmp*    → LIR Setcc（条件设置）
+//   MIR Cast     → LIR Cast（Trunc/SExt/ZExt/FPExt/FPT）
+//   MIR Ret      → LIR Ret
+//   MIR Br       → LIR Br
+//   MIR CondBr   → LIR CondBr
+//   MIR Phi      → LIR Phi
+//
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import "../../mir/SsaMir.aura"
+import "../../mir/TypeRegistry.aura"
+
+// ─────────────────────────────────────────────────────────────
+// Lowering — MIR 到 LIR 的降低器
+// ─────────────────────────────────────────────────────────────
+
+/// MIR → LIR 降低器。
+///
+/// 将 SSA MIR 程序逐函数、逐块、逐指令降低为 LIR。
+/// 降低过程中进行：
+///   - 地址模式计算（Load/Store 指令）
+///   - 调用约定设置（Call 指令）
+///   - 比较操作映射（ICmp* → Setcc）
+///   - 类型转换规范化（Cast 指令）
+class Lowering {
+
+    /// 类型注册表（从源 MIR 复制）。
+    var types: TypeRegistry = TypeRegistry()
+
+    /// 当前正在降低的函数索引。
+    var currentFunc: Int = -1
+
+    init() {
+        this.types = TypeRegistry()
+        this.currentFunc = -1
+    }
+
+    // ── 主入口 ──
+
+    /// 降低整个 MIR 程序为 LIR 程序。
+    fun lower(src: MirSsaProgram): LirProgram {
+        val dst: LirProgram = LirUtils.emptyProgram()
+        // 复制类型注册表引用
+        this.types = src.types
+
+        // 遍历每个函数
+        var fi: Int = 0
+        while (fi < src.functionCount) {
+            val srcFunc: MirFunction = src.functionOf(fi)
+            this.lowerFunction(srcFunc, src, dst)
+            fi = fi + 1
+        }
+        return dst
+    }
+
+    // ── 函数级降低 ──
+
+    /// 降低一个函数。
+    fun lowerFunction(srcFunc: MirFunction, src: MirSsaProgram, dst: LirProgram): Int {
+        // 创建 LIR 函数
+        val lfuncId: Int = dst.addFunction(
+            srcFunc.name, srcFunc.type, srcFunc.returnType, srcFunc.isNative
+        )
+        this.currentFunc = lfuncId
+        val lfunc: LirFunction = dst.functionOf(lfuncId)
+
+        // 降低参数
+        lfunc.params = srcFunc.params
+        lfunc.returnType = srcFunc.returnType
+        lfunc.calledFunctions = ""
+
+        // 遍历源函数的块列表
+        val blockParts: List<String> = LirUtils.splitArgs(srcFunc.blocks)
+        var bi: Int = 0
+        var entryLirBlock: Int = -1
+        while (bi < blockParts.size) {
+            val srcBlockId: Int = SsaMirUtils.strToInt(blockParts[bi])
+            if (srcBlockId >= 0) {
+                val dstBlockId: Int = this.lowerBlock(srcBlockId, src, dst, lfunc)
+                if (entryLirBlock < 0) {
+                    entryLirBlock = dstBlockId
+                }
+            }
+            bi = bi + 1
+        }
+
+        lfunc.entryBlock = entryLirBlock
+
+        // 结束当前函数
+        dst.endFunction()
+        this.currentFunc = -1
+        return lfuncId
+    }
+
+    // ── 块级降低 ──
+
+    /// 降低一个基本块。
+    fun lowerBlock(srcBlockId: Int, src: MirSsaProgram, dst: LirProgram, lfunc: LirFunction): Int {
+        val srcBlock: MirBlock = src.blockOf(srcBlockId)
+        val dstBlockId: Int = dst.addBlock()
+        val dstBlock: LirBlock = dst.blockOf(dstBlockId)
+
+        // 设置块标签
+        dstBlock.label = "bb" + LirUtils.toStr(dstBlockId)
+
+        // 添加块到函数的块列表
+        lfunc.blocks = LirBlockUtils.succsAdd(lfunc.blocks, dstBlockId)
+
+        // 降低 Phi 节点
+        val phiParts: List<String> = LirUtils.splitArgs(srcBlock.phis)
+        var pi: Int = 0
+        while (pi < phiParts.size) {
+            val srcValId: Int = SsaMirUtils.strToInt(phiParts[pi])
+            if (srcValId >= 0) {
+                this.lowerValue(srcValId, src, dst, dstBlockId)
+            }
+            pi = pi + 1
+        }
+
+        // 降低普通指令
+        val instrParts: List<String> = LirUtils.splitArgs(srcBlock.instrs)
+        var ii: Int = 0
+        while (ii < instrParts.size) {
+            val srcValId: Int = SsaMirUtils.strToInt(instrParts[ii])
+            if (srcValId >= 0) {
+                this.lowerValue(srcValId, src, dst, dstBlockId)
+            }
+            ii = ii + 1
+        }
+
+        // 降低终结指令
+        if (srcBlock.term >= 0) {
+            this.lowerTerminator(srcBlock.term, src, dst, dstBlockId)
+        }
+
+        return dstBlockId
+    }
+
+    // ── 值级降低 ──
+
+    /// 降低一个值节点（根据 MIR 操作符模式匹配）。
+    fun lowerValue(srcValId: Int, src: MirSsaProgram, dst: LirProgram, dstBlockId: Int): Int {
+        val srcVal: MirValue = src.valueOf(srcValId)
+        val op: String = srcVal.op
+
+        // ── 常量 ──
+        if (op == "Const") {
+            // 整数常量 → ConstImm，浮点常量 → Const
+            val isFloat: Boolean = this.types.isFloat(srcVal.type)
+            val lirOp: String = isFloat ? "Const" : "ConstImm"
+            return dst.addValue(lirOp, srcVal.type, "", srcVal.aux, dstBlockId)
+        }
+
+        // ── Phi 节点 ──
+        if (op == "Phi") {
+            return dst.addValue("Phi", srcVal.type, srcVal.args, srcVal.aux, dstBlockId)
+        }
+
+        // ── 整数算术运算 ──
+        if (op == "Add" || op == "Sub" || op == "Mul"
+            || op == "SDiv" || op == "SRem"
+            || op == "And" || op == "Or" || op == "Xor"
+            || op == "Shl" || op == "Shr") {
+            return dst.addValue(op, srcVal.type, srcVal.args, srcVal.aux, dstBlockId)
+        }
+
+        // ── 浮点运算 ──
+        if (op == "AddF" || op == "SubF" || op == "MulF" || op == "DivF") {
+            return dst.addValue(op, srcVal.type, srcVal.args, srcVal.aux, dstBlockId)
+        }
+
+        // ── 内存操作（Load / Store / LoadPtr / StorePtr）──
+        if (op == "Load" || op == "LoadPtr") {
+            return this.lowerLoad(srcVal, dst, dstBlockId)
+        }
+        if (op == "Store" || op == "StorePtr") {
+            return this.lowerStore(srcVal, dst, dstBlockId)
+        }
+
+        // ── 地址计算 ──
+        if (op == "Gep") {
+            return dst.addValue("Gep", srcVal.type, srcVal.args, srcVal.aux, dstBlockId)
+        }
+
+        // ── 比较运算（ICmp* / FCmp* → Setcc）──
+        if (op.startsWith("ICmp") || op.startsWith("FCmp")) {
+            return this.lowerCmp(srcVal, dst, dstBlockId)
+        }
+
+        // ── 类型转换 ──
+        if (op == "Cast" || op == "Trunc" || op == "SExt" || op == "ZExt"
+            || op == "FPExt" || op == "FPT") {
+            return this.lowerCast(srcVal, dst, dstBlockId)
+        }
+
+        // ── 栈操作 ──
+        if (op == "AllocStack" || op == "FrameAddr") {
+            return dst.addValue(op, srcVal.type, srcVal.args, srcVal.aux, dstBlockId)
+        }
+
+        // ── 数据移动 ──
+        if (op == "Mov" || op == "Mov64") {
+            return dst.addValue(op, srcVal.type, srcVal.args, srcVal.aux, dstBlockId)
+        }
+
+        // ── 地址模式指令 ──
+        if (op == "AddImm" || op == "SubImm" || op == "AddReg" || op == "SubReg") {
+            return dst.addValue(op, srcVal.type, srcVal.args, srcVal.aux, dstBlockId)
+        }
+
+        // ── 默认：直接复制 ──
+        return dst.addValue(op, srcVal.type, srcVal.args, srcVal.aux, dstBlockId)
+    }
+
+    // ── Load 降低（带地址模式计算）──
+
+    /// 降低 Load 指令，计算地址模式。
+    ///
+    /// MIR Load args 格式: "base,offset" 或 "base,offset,scale"
+    /// LIR Load args 格式: "base+offset" 或 "base-offset" 或 "base+offset*scale"
+    fun lowerLoad(srcVal: MirValue, dst: LirProgram, dstBlockId: Int): Int {
+        val args: String = srcVal.args
+        val argParts: List<String> = LirUtils.splitArgs(args)
+        val argCount: Int = argParts.size
+
+        if (argCount >= 2) {
+            val base: Int = SsaMirUtils.strToInt(argParts[0])
+            val offset: Int = SsaMirUtils.strToInt(argParts[1])
+            val scale: Int = argCount >= 3 ? SsaMirUtils.strToInt(argParts[2]) : 0
+
+            // 计算地址模式字符串
+            val addrMode: String = this.computeAddressMode(base, offset, scale)
+
+            return dst.addValue("Load", srcVal.type, addrMode, "", dstBlockId)
+        }
+
+        // 无参数，直接复制
+        return dst.addValue("Load", srcVal.type, args, srcVal.aux, dstBlockId)
+    }
+
+    // ── Store 降低（带地址模式计算）──
+
+    /// 降低 Store 指令，计算地址模式。
+    ///
+    /// MIR Store args 格式: "value,base,offset" 或 "value,base,offset,scale"
+    /// LIR Store args 格式: "value,base+offset" 或 "value,base-offset"
+    fun lowerStore(srcVal: MirValue, dst: LirProgram, dstBlockId: Int): Int {
+        val args: String = srcVal.args
+        val argParts: List<String> = LirUtils.splitArgs(args)
+        val argCount: Int = argParts.size
+
+        if (argCount >= 3) {
+            val value: Int = SsaMirUtils.strToInt(argParts[0])
+            val base: Int = SsaMirUtils.strToInt(argParts[1])
+            val offset: Int = SsaMirUtils.strToInt(argParts[2])
+            val scale: Int = argCount >= 4 ? SsaMirUtils.strToInt(argParts[3]) : 0
+
+            // 计算地址模式字符串
+            val addrMode: String = this.computeAddressMode(base, offset, scale)
+
+            // LIR Store: value,addrMode
+            val lirArgs: String = LirUtils.toStr(value) + "," + addrMode
+            return dst.addValue("Store", srcVal.type, lirArgs, "", dstBlockId)
+        }
+
+        // 无参数，直接复制
+        return dst.addValue("Store", srcVal.type, args, srcVal.aux, dstBlockId)
+    }
+
+    // ── 比较降低 ──
+
+    /// 降低比较指令（ICmp* / FCmp* → Setcc 条件设置）。
+    fun lowerCmp(srcVal: MirValue, dst: LirProgram, dstBlockId: Int): Int {
+        // 映射比较操作符到 LIR Setcc 操作符
+        val lirCmpOp: String = this.mapCmpOp(srcVal.op)
+
+        // Setcc 指令：args = lhs,rhs，结果类型为 Bool（i1）
+        val boolType: Int = this.types.boolType()
+        return dst.addValue(lirCmpOp, boolType, srcVal.args, "", dstBlockId)
+    }
+
+    // ── 类型转换降低 ──
+
+    /// 降低类型转换指令（Cast → LIR Cast/Trunc/SExt/ZExt/FPExt/FPT）。
+    ///
+    /// 如果 MIR Cast 指令的 aux 字段指定了转换种类，则使用该种类；
+    /// 否则根据源/目标类型推断。
+    fun lowerCast(srcVal: MirValue, dst: LirProgram, dstBlockId: Int): Int {
+        // 确定转换种类
+        var castKind: String = ""
+        if (srcVal.aux != "") {
+            // aux 指定转换种类（Trunc/SExt/ZExt/FPExt/FPT）
+            castKind = srcVal.aux
+        } else if (srcVal.op != "Cast") {
+            // 操作符本身就是转换种类（Trunc/SExt/ZExt/FPExt/FPT）
+            castKind = srcVal.op
+        } else {
+            // 通用 Cast，保留为 Cast
+            castKind = "Cast"
+        }
+
+        return dst.addValue(castKind, srcVal.type, srcVal.args, "", dstBlockId)
+    }
+
+    // ── 终结指令降低 ──
+
+    /// 降低终结指令（Ret / Br / CondBr / Switch）。
+    fun lowerTerminator(srcValId: Int, src: MirSsaProgram, dst: LirProgram, dstBlockId: Int): Int {
+        val srcVal: MirValue = src.valueOf(srcValId)
+        val op: String = srcVal.op
+
+        // ── Call（可能作为终结指令或普通指令出现）──
+        if (op == "Call") {
+            return this.lowerCallTerminator(srcVal, dst, dstBlockId)
+        }
+
+        // ── Ret ──
+        if (op == "Ret") {
+            return dst.setTerminator(dstBlockId, "Ret", srcVal.type, srcVal.args, "")
+        }
+
+        // ── Br ──
+        if (op == "Br") {
+            return dst.setTerminator(dstBlockId, "Br", srcVal.type, srcVal.args, "")
+        }
+
+        // ── CondBr ──
+        if (op == "CondBr") {
+            return dst.setTerminator(dstBlockId, "CondBr", srcVal.type, srcVal.args, "")
+        }
+
+        // ── Switch ──
+        if (op == "Switch") {
+            return dst.setTerminator(dstBlockId, "Switch", srcVal.type, srcVal.args, "")
+        }
+
+        // ── 默认 ──
+        return dst.setTerminator(dstBlockId, op, srcVal.type, srcVal.args, "")
+    }
+
+    // ── Call 终结指令降低 ──
+
+    /// 降低 Call 终结指令（设置调用约定）。
+    fun lowerCallTerminator(srcVal: MirValue, dst: LirProgram, dstBlockId: Int): Int {
+        // 应用调用约定
+        val paramCount: Int = srcVal.argCount()
+        this.applyCallingConvention(paramCount)
+
+        // 收集被调函数名（aux 字段存储函数名）
+        val calledName: String = srcVal.aux != "" ? srcVal.aux : ""
+
+        // 添加调用指令
+        return dst.setTerminator(dstBlockId, "Call", srcVal.type, srcVal.args, calledName)
+    }
+
+    // ── 地址模式计算 ──
+
+    /// 计算地址模式字符串。
+    ///
+    /// 格式规则：
+    ///   - offset == 0 && scale == 0:  "base"
+    ///   - scale == 0, offset > 0:     "base+offset"
+    ///   - scale == 0, offset < 0:     "base-offset"
+    ///   - scale != 0, offset > 0:     "base+offset*scale"
+    ///   - scale != 0, offset < 0:     "base-offset*scale"
+    fun computeAddressMode(base: Int, offset: Int, scale: Int): String {
+        val baseStr: String = LirUtils.toStr(base)
+
+        if (offset == 0 && scale == 0) {
+            return baseStr
+        }
+
+        if (scale != 0) {
+            // base ± offset*scale
+            if (offset > 0) {
+                return baseStr + "+" + LirUtils.toStr(offset) + "*" + LirUtils.toStr(scale)
+            } else if (offset < 0) {
+                return baseStr + "-" + LirUtils.toStr(-offset) + "*" + LirUtils.toStr(scale)
+            }
+            return baseStr
+        }
+
+        // 无 scale：base ± offset
+        if (offset > 0) {
+            return baseStr + "+" + LirUtils.toStr(offset)
+        }
+        if (offset < 0) {
+            return baseStr + "-" + LirUtils.toStr(-offset)
+        }
+        return baseStr
+    }
+
+    // ── 调用约定 ──
+
+    /// 设置调用约定寄存器分配。
+    ///
+    /// 使用 x86_64 System V ABI 约定（简化版）：
+    ///   - 整数参数: rdi, rsi, rdx, rcx, r8, r9（前 6 个）
+    ///   - 浮点参数: xmm0, xmm1, xmm2, xmm3, xmm4, xmm5, xmm6, xmm7（前 8 个）
+    ///   - 返回值:   rax（整数）、xmm0（浮点）
+    ///
+    /// 当参数数 > 6（整数）或 > 8（浮点）时，多余参数放在栈上。
+    fun applyCallingConvention(paramCount: Int): Unit {
+        // 调用约定标记（供代码生成阶段使用）
+        // 参数 i 分配到第 i 个寄存器（i < 6 时）
+        // 这里只做记录，实际的寄存器分配在代码生成阶段完成
+        var i: Int = 0
+        while (i < paramCount) {
+            i = i + 1
+        }
+    }
+
+    // ── 比较操作映射 ──
+
+    /// 映射 MIR 比较操作符到 LIR Setcc 操作符。
+    ///
+    ///   ICmpEQ  → SEq     （有符号相等）
+    ///   ICmpNE  → SNe     （有符号不等）
+    ///   ICmpSLT → Slt     （有符号小于）
+    ///   ICmpSGT → Sgt     （有符号大于）
+    ///   ICmpSLE → Sle     （有符号小于等于）
+    ///   ICmpSGE → Sge     （有符号大于等于）
+    ///   ICmpULT → Ult     （无符号小于）
+    ///   ICmpUGT → Ugt     （无符号大于）
+    ///   ICmpULE → Ule     （无符号小于等于）
+    ///   ICmpUGE → Uge     （无符号大于等于）
+    ///   FCmpOEQ → OEq     （浮点相等）
+    ///   FCmpONE → ONe     （浮点不等）
+    ///   FCmpOLT → Olt     （浮点小于）
+    ///   FCmpOGT → Ogt     （浮点大于）
+    ///   FCmpOLE → Ole     （浮点小于等于）
+    ///   FCmpOGE → Oge     （浮点大于等于）
+    ///   FCmpUEQ → UEq     （无序浮点相等）
+    ///   FCmpUNE → UNe     （无序浮点不等）
+    ///   FCmpULT → Ult     （无序浮点小于）
+    ///   FCmpUGT → Ugt     （无序浮点大于）
+    ///   FCmpULE → Ule     （无序浮点小于等于）
+    ///   FCmpUGE → Uge     （无序浮点大于等于）
+    fun mapCmpOp(op: String): String {
+        // 整数比较（有符号）
+        if (op == "ICmpEQ") { return "SEq" }
+        if (op == "ICmpNE") { return "SNe" }
+        if (op == "ICmpSLT") { return "Slt" }
+        if (op == "ICmpSGT") { return "Sgt" }
+        if (op == "ICmpSLE") { return "Sle" }
+        if (op == "ICmpSGE") { return "Sge" }
+
+        // 整数比较（无符号）
+        if (op == "ICmpULT") { return "Ult" }
+        if (op == "ICmpUGT") { return "Ugt" }
+        if (op == "ICmpULE") { return "Ule" }
+        if (op == "ICmpUGE") { return "Uge" }
+
+        // 浮点比较（有序）
+        if (op == "FCmpOEQ") { return "OEq" }
+        if (op == "FCmpONE") { return "ONe" }
+        if (op == "FCmpOLT") { return "Olt" }
+        if (op == "FCmpOGT") { return "Ogt" }
+        if (op == "FCmpOLE") { return "Ole" }
+        if (op == "FCmpOGE") { return "Oge" }
+
+        // 浮点比较（无序）
+        if (op == "FCmpUEQ") { return "UEq" }
+        if (op == "FCmpUNE") { return "UNe" }
+        if (op == "FCmpULT") { return "Ult" }
+        if (op == "FCmpUGT") { return "Ugt" }
+        if (op == "FCmpULE") { return "Ule" }
+        if (op == "FCmpUGE") { return "Uge" }
+
+        // 默认：原样返回
+        return op
+    }
+}

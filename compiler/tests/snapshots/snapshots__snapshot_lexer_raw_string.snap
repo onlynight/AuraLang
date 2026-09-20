@@ -1,6 +1,0 @@
----
-source: compiler/tests/snapshots.rs
-expression: "token_dump(\"\\\"\\\"\\\"raw\\nmulti-line\\\"\\\"\\\"\")"
----
-StringLiteral("raw\nmulti-line") @1:1
-EOF

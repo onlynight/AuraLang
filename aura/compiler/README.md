@@ -716,11 +716,11 @@ aura run tests/phase8_stdlib_tests.aura
 aura run tests/phase9_compiler_tests.aura
 aura run aura/compiler/aura/lang/compiler/Main.aura
 
-# 11) 构建 Aura 编译器 → 产物集中输出到 build/bin/
-#     build/bin/aura.exe            Rust 最小 bootstrap 编译器（-Aot/--aot 时以
-#                                   `cargo build -p cli --features llvm` 重建）
-#     build/bin/aura-compiler.auc   Aura 编写的编译器（字节码，可 `aura run`）
-#     build/bin/aura-compiler.exe   Aura 编写的编译器（AOT 原生 exe；⚠ 见下方已知限制）
+# 11) 构建 Aura 编译器 → 产物集中输出
+#     build/bin/aura.exe                      Rust 最小 bootstrap 编译器（-Aot/--aot 时以
+#                                             `cargo build -p cli --features llvm` 重建）
+#     build/auc/compiler/aura-compiler.auc    Aura 编写的编译器（字节码，可 `aura run`）
+#     build/auc/compiler/aura-compiler.exe    Aura 编写的编译器（AOT 原生 exe；⚠ 见下方已知限制）
 #     注意：--aot 需要本机安装 LLVM
 #     （路径见根 Cargo.toml 的 [workspace.metadata.aura].llvm-home）
 scripts/build-aura-compiler.sh
@@ -748,12 +748,12 @@ scripts\build-aura-compiler.ps1
 scripts\snapshot.ps1
 ```
 
-> **build/bin 产物与 AOT 现状**
+> **build 产物与 AOT 现状**
 >
-> * `build/bin/aura.exe`（bootstrap）与 `build/bin/aura-compiler.auc` 均已可用：
->   `aura run build/bin/aura-compiler.auc` 会跑通「Aura 编译器自检样例」。
-> * `build/bin/aura-compiler.exe`（把 Aura 编写的编译器 AOT 成原生 exe）**已打通**：
->   `aura build aura\compiler\aura\lang\compiler\Main.aura --aot --output build\bin\aura-compiler.exe`
+> * `build/bin/aura.exe`（bootstrap）与 `build/auc/compiler/aura-compiler.auc` 均已可用：
+>   `aura run build/auc/compiler/aura-compiler.auc` 会跑通「Aura 编译器自检样例」。
+> * `build/auc/compiler/aura-compiler.exe`（把 Aura 编写的编译器 AOT 成原生 exe）**已打通**：
+>   `aura build aura\compiler\aura\lang\compiler\Main.aura --aot --output build\auc\compiler\aura-compiler.exe`
 >   产出的原生 exe 可完整跑通 5 个自检样例，计数与结果均与 VM 路径一致
 >   （`astNodes/hirNodes/mirNodes` = 14/11/11、27/24/25、20/15/18、20/15/13、29/23/25，
 >   输出 14 / 10 / 2 / 5 / 120），且 `aot ok=true`、`runtime exe exit code = 42`、

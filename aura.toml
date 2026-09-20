@@ -7,3 +7,26 @@ out-dir = "build"
 cache-dir = "build/cache"
 compile-mode = "aot"
 ffi-mode = "native"
+compiler-pkg-root = "aura/compiler/aura/lang/compiler"
+
+# ── 外部工具链：lld（Photon 后端链接阶段，Phase E3）──────────────────────
+# lld 单个驱动约 65-73 MB，不随仓库分发；在此登记本机 LLVM 发行包中的 bin 目录。
+#
+# 目录按 **host**（编译器自身运行的平台）区分:
+#   lld 是多 flavor / 多 target 交叉链接器，同一个 lld-link 用 /MACHINE:X64 或
+#   /MACHINE:ARM64 即可产出两种架构的 PE —— target 架构是命令行参数，不是目录维度，
+#   因此这里只登记 host 平台，不需要为每个 target 架构各建一份。
+#
+# key 支持两种写法（三元组优先，其次简写）：
+#   x86_64-pc-windows-msvc / aarch64-pc-windows-msvc / x86_64-unknown-linux-gnu / ...
+#   windows-x86_64 / windows-aarch64 / linux-x86_64 / macos-aarch64 / ...
+#
+# 查找优先级：AURA_LINKER 环境变量 > 本配置段 > PATH
+# 为空串表示「该平台未配置」，链接阶段会回退到 PATH 中的同名工具。
+[lld]
+x86_64-pc-windows-msvc    = "D:/DevTools/LLVM/clang+llvm-23.1.0-x86_64-pc-windows-msvc/bin"
+aarch64-pc-windows-msvc   = "D:/DevTools/LLVM/clang+llvm-23.1.0-aarch64-pc-windows-msvc/bin"
+x86_64-unknown-linux-gnu  = "/usr/bin"
+aarch64-unknown-linux-gnu = "/usr/bin"
+x86_64-apple-darwin       = "/usr/bin"
+aarch64-apple-darwin      = "/usr/bin"

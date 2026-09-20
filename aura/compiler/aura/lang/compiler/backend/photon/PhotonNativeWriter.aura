@@ -1,0 +1,114 @@
+// aura:///aura/lang/compiler/backend/photon/PhotonNativeWriter.aura
+package aura.lang.compiler.backend.photon
+// ─────────────────────────────────────────────────────────────
+// PhotonNativeWriter — 目标文件「原生二进制落盘」（Phase E2/E3）
+//
+// ⚠️ 本文件**只能**由运行在 AOT / 自举运行时的代码 import。
+//
+// 原因：这里用到 `Allocator` / `Memory` / `FileOps` —— 它们是
+// `extern interface` 声明，只有在 AOT（LLVM 后端）或自举产物中才被降低为真实调用。
+// 经种子编译器的**字节码模式**编译时，这些名字无法解析
+// （`未解析的函数调用 'Memory.write'（既非用户函数、也非原生函数）`），
+// 运行时会以 `call to undefined function #65535` 崩溃。
+//
+// 因此落盘被拆成两条互不干扰的通道：
+//
+//   ┌─ VM 路径（今天可用）
+//   │    PhotonObjectWriter.writeObjectHexFile() / PhotonObjectWriterUtils.saveHexFile()
+//   │      → 写 `<name>.obj.hex` 文本 → 构建脚本转二进制（scripts/build-photon-hello.ps1）
+//   │
+//   └─ AOT / 自举路径（本文件，自举完成后自动可用）
+//        PhotonNativeWriter.writeObjectFile()
+//          → hex 解码到 malloc 缓冲 → FileOps.write → `<name>.obj`
+//
+// 之所以不直接用 `FileSystem.writeBytes`：它依赖 `Array<Byte>` 与
+// `String.fromCharCode`，属于 LLVM IR 依赖链路（项目约定不使用），
+// 且其底层仍是 `Stdio.writeFile`（按 strlen 截断，遇到 COFF 头部的 0x00 即断）。
+//
+// 写法参照编译器自身的 `serialize/AucSerializer.aura`（.auc 落盘）——
+// 那条链路正是「纯 Aura + 原生 API 写二进制」的既有范式。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.native.Memory
+import aura.lang.native.memory.Allocator
+import aura.lang.native.file.FileOps
+import aura.lang.native.io.Stdio
+
+object PhotonNativeWriter {
+
+    /// POSIX 风格打开标志（Aura 侧唯一真相源；Windows 目标由 AOT 发射器的 CRT
+    /// 包装器翻译成 `_O_*`）：`O_WRONLY | O_CREAT | O_TRUNC`。
+    val O_WRONLY_CREAT_TRUNC: Int = 1 | 0x40 | 0x200
+
+    /// 把 COFF hex 文本解码为字节并写入 `path`（**仅 AOT / 自举运行时可用**）。
+    ///
+    /// - 用显式长度 `FileOps.write`，不做 strlen → 可安全写含 `0x00` 的二进制；
+    /// - 返回是否全部字节写完。
+    fun writeObjectFile(path: String, coffHex: String): Boolean {
+        val total: Int = coffHex.length / 2
+        if (total <= 0) {
+            return false
+        }
+
+        val buf: Long = Allocator.malloc(total as Long)
+        if (buf == 0) {
+            return false
+        }
+        var i: Int = 0
+        while (i < total) {
+            Memory.write(buf + i, PhotonNativeWriter.hexByteAt(coffHex, i) as Byte)
+            i = i + 1
+        }
+
+        val pathBuf: Long = Stdio.stringToBuffer(path)
+        if (pathBuf == 0) {
+            Allocator.free(buf)
+            return false
+        }
+
+        val fd: Int = FileOps.open(pathBuf, PhotonNativeWriter.O_WRONLY_CREAT_TRUNC)
+        if (fd < 0) {
+            Allocator.free(buf)
+            Allocator.free(pathBuf)
+            return false
+        }
+
+        var written: Long = 0
+        var ok: Boolean = true
+        val want: Long = total as Long
+        while (written < want) {
+            val n: Long = FileOps.write(fd, buf + written, want - written)
+            if (n <= 0) {
+                ok = false
+                written = want          // 退出循环
+            } else {
+                written = written + n
+            }
+        }
+
+        FileOps.close(fd)
+        Allocator.free(buf)
+        Allocator.free(pathBuf)
+        return ok && written == want
+    }
+
+    /// 取 hex 文本中第 `index` 个字节的值（0..255）。
+    fun hexByteAt(hex: String, index: Int): Int {
+        return PhotonNativeWriter.hexNibble(hex, index * 2) * 16
+            + PhotonNativeWriter.hexNibble(hex, index * 2 + 1)
+    }
+
+    /// 单个 hex 字符 → 半字节（非法字符按 0 处理）。
+    ///
+    /// 只使用 `substring` + `charCodeAt`：`String.charAt` 在部分运行时下不可解析。
+    fun hexNibble(hex: String, at: Int): Int {
+        if (at < 0 || at >= hex.length) {
+            return 0
+        }
+        val c: Int = hex.substring(at, at + 1).charCodeAt(0)
+        if (c >= 48 && c <= 57) { return c - 48 }        // '0'-'9'
+        if (c >= 97 && c <= 102) { return c - 87 }       // 'a'-'f'
+        if (c >= 65 && c <= 70) { return c - 55 }        // 'A'-'F'
+        return 0
+    }
+}

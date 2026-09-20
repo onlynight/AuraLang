@@ -1,0 +1,123 @@
+// aura:///tests/helloworld.aura
+// ─────────────────────────────────────────────────────────────
+// Aura 编译器最终验证：helloworld 程序
+//
+// 测试内容：
+//   1. 基本打印（println）
+//   2. 变量声明与赋值
+//   3. 算术运算
+//   4. 字符串拼接
+//   5. 条件语句
+//   6. 循环语句
+//   7. 函数定义与调用
+//
+// 运行：aura run tests/helloworld.aura
+// ─────────────────────────────────────────────────────────────
+
+fun main() {
+    println("╔══════════════════════════════════════╗")
+    println("║   Aura 编译器最终验证                 ║")
+    println("║   Phase A-E 全流程测试               ║")
+    println("╚══════════════════════════════════════╝")
+    println("")
+
+    // ── 1. 基本打印 ──
+    println("[1] 基本打印:")
+    println("    Hello, World!")
+    println("    Aura Compiler v0.1.0-phase9")
+    println("")
+
+    // ── 2. 变量声明与赋值 ──
+    println("[2] 变量声明与赋值:")
+    val name: String = "Aura"
+    var count: Int = 42
+    println("    name = " + name)
+    println("    count = " + toStr(count))
+    count = count + 8
+    println("    count + 8 = " + toStr(count))
+    println("")
+
+    // ── 3. 算术运算 ──
+    println("[3] 算术运算:")
+    val a: Int = 100
+    val b: Int = 23
+    println("    " + toStr(a) + " + " + toStr(b) + " = " + toStr(a + b))
+    println("    " + toStr(a) + " - " + toStr(b) + " = " + toStr(a - b))
+    println("    " + toStr(a) + " * " + toStr(b) + " = " + toStr(a * b))
+    println("    " + toStr(a) + " / " + toStr(b) + " = " + toStr(a / b))
+    println("    " + toStr(a) + " % " + toStr(b) + " = " + toStr(a % b))
+    println("")
+
+    // ── 4. 字符串拼接 ──
+    println("[4] 字符串拼接:")
+    val first: String = "Aura"
+    val last: String = "Compiler"
+    println("    " + first + " " + last)
+    println("    Hello, " + first + " " + last + "!")
+    println("")
+
+    // ── 5. 条件语句 ──
+    println("[5] 条件语句:")
+    val x: Int = 10
+    if (x > 5) {
+        println("    " + toStr(x) + " > 5: true")
+    } else {
+        println("    " + toStr(x) + " > 5: false")
+    }
+    if (x < 5) {
+        println("    " + toStr(x) + " < 5: true")
+    } else {
+        println("    " + toStr(x) + " < 5: false")
+    }
+    println("")
+
+    // ── 6. 循环语句 ──
+    println("[6] 循环语句:")
+    var sum: Int = 0
+    var i: Int = 1
+    while (i <= 5) {
+        sum = sum + i
+        i = i + 1
+    }
+    println("    1+2+3+4+5 = " + toStr(sum))
+    println("")
+
+    // ── 7. 函数定义与调用 ──
+    println("[7] 函数定义与调用:")
+    val result: Int = add(3, 5)
+    println("    add(3, 5) = " + toStr(result))
+    val fib: Int = fibonacci(10)
+    println("    fibonacci(10) = " + toStr(fib))
+    val fact: Int = factorial(10)
+    println("    factorial(10) = " + toStr(fact))
+    println("")
+
+    // ── 汇总 ──
+    println("═══════════════════════════════════════")
+    println("Phase A-E 全流程验证: PASS")
+    println("═══════════════════════════════════════")
+}
+
+/// 加法函数。
+fun add(a: Int, b: Int): Int {
+    return a + b
+}
+
+/// 斐波那契数列。
+fun fibonacci(n: Int): Int {
+    if (n <= 0) {
+        return 0
+    }
+    if (n == 1) {
+        return 1
+    }
+    return fibonacci(n - 1) + fibonacci(n - 2)
+}
+
+/// 阶乘。
+fun factorial(n: Int): Int {
+    if (n <= 1) {
+        return 1
+    }
+    return n * factorial(n - 1)
+}

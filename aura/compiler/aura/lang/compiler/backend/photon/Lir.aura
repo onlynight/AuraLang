@@ -1,0 +1,491 @@
+// aura:///aura/lang/compiler/backend/Lir.aura
+package aura.lang.compiler.backend.photon
+// ─────────────────────────────────────────────────────────────
+// LIR（Low-level IR）定义 — Phase B (任务 B.1)
+//
+// 对应后端 lowering 的目标 IR。机器无关 SSA IR，带地址模式标记。
+// 从 MIR (SsaMir.aura) 降低而来，为后续代码生成提供基础。
+//
+// ── 设计方式（与 Mir/SsaMir 一致）───────────────────────────
+//
+// LIR 采用 SSA 表示，每个值只被定义一次。
+// 使用 List-based arena 表示（与 SsaMir.aura 结构一致）。
+//
+// ── LIR 节点类型 ──
+//
+//   LirProgram  — 程序根节点
+//   LirFunction — 函数声明（params, retTy, blocks, calledFunctions）
+//   LirBlock    — 基本块（Phi 节点 + 指令序列 + 终结指令）
+//   LirValue    — 值节点（op = opcode, args = 操作数描述）
+//
+// ── LIR 指令 opcode 分类（存于 LirValue.op）──
+//
+//   整数运算:   Add, Sub, Mul, SDiv, SRem, And, Or, Xor, Shl, Shr
+//   浮点运算:   AddF, MulF, SubF, DivF
+//   内存操作:   Load, Store, LoadPtr, StorePtr
+//   地址模式:   AddImm, SubImm, AddReg, SubReg, Gep
+//   控制流:     Call, Ret, Br, CondBr
+//   SSA 节点:   Phi
+//   常量:       Const, ConstImm
+//   栈管理:     AllocStack, FrameAddr
+//   类型转换:   Cast
+//   数据移动:   Mov, Mov64
+//
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import "../../mir/TypeRegistry.aura"
+
+// ─────────────────────────────────────────────────────────────
+// LirValue — LIR 值节点
+// ─────────────────────────────────────────────────────────────
+
+/// LIR 值节点（每个值只被定义一次，可被多次使用）。
+///
+/// `op` 为指令 opcode，`args` 为逗号分隔的操作数 ValueID 字符串。
+/// `aux` 为辅助信息（地址模式、常量值、内存偏移等）。
+class LirValue {
+
+    /// 值 ID（全局唯一）。
+    var id: Int = 0
+
+    /// 操作符（如 "Add"、"Load"、"Phi"、"Const"）。
+    var op: String = ""
+
+    /// 结果类型 TypeID。
+    var type: Int = 0
+
+    /// 操作数 ValueID 列表（逗号分隔字符串）。
+    var args: String = ""
+
+    /// 辅助信息（常量值、内存偏移、地址模式等）。
+    var aux: String = ""
+
+    /// 所属基本块 BlockID。
+    var block: Int = 0
+
+    /// 使用计数（DCE 用）。
+    var useCount: Int = 0
+
+    init() {
+        this.id = 0
+        this.op = ""
+        this.type = 0
+        this.args = ""
+        this.aux = ""
+        this.block = 0
+        this.useCount = 0
+    }
+
+    /// 获取第 i 个操作数的 ValueID。
+    fun argAt(i: Int): Int {
+        if (this.args == "") {
+            return -1
+        }
+        val parts: List<String> = LirUtils.splitArgs(this.args)
+        if (i < 0 || i >= parts.size) {
+            return -1
+        }
+        return LirUtils.strToInt(parts[i])
+    }
+
+    /// 获取操作数个数。
+    fun argCount(): Int {
+        if (this.args == "") {
+            return 0
+        }
+        return LirUtils.splitArgs(this.args).size
+    }
+
+    /// 是否为常量指令（Const 或 ConstImm）。
+    fun isConst(): Boolean {
+        if (this.op == "Const" || this.op == "ConstImm") {
+            return true
+        }
+        return false
+    }
+
+    /// 是否为 Phi 节点。
+    fun isPhi(): Boolean {
+        return this.op == "Phi"
+    }
+
+    /// 是否为终结指令。
+    fun isTerminator(): Boolean {
+        val op: String = this.op
+        if (op == "Br" || op == "CondBr" || op == "Ret" || op == "Call") {
+            return true
+        }
+        return false
+    }
+
+    /// 是否为内存操作（Load / Store / LoadPtr / StorePtr）。
+    fun isMemoryOp(): Boolean {
+        val op: String = this.op
+        if (op == "Load" || op == "Store" || op == "LoadPtr" || op == "StorePtr") {
+            return true
+        }
+        return false
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// LirBlock — 基本块
+// ─────────────────────────────────────────────────────────────
+
+/// LIR 基本块（Phi 节点 + 指令序列 + 终结指令）。
+class LirBlock {
+
+    /// 块 ID。
+    var id: Int = 0
+
+    /// 块首 Phi 节点 ValueID（逗号分隔字符串）。
+    var phis: String = ""
+
+    /// 块内普通指令 ValueID（逗号分隔字符串）。
+    var instrs: String = ""
+
+    /// 终结指令 ValueID。
+    var term: Int = -1
+
+    /// 后继块 BlockID（逗号分隔字符串）。
+    var succs: String = ""
+
+    /// 前驱块 BlockID（逗号分隔字符串）。
+    var preds: String = ""
+
+    /// 块标签名（用于代码生成）。
+    var label: String = ""
+
+    init() {
+        this.id = 0
+        this.phis = ""
+        this.instrs = ""
+        this.term = -1
+        this.succs = ""
+        this.preds = ""
+        this.label = ""
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// LirFunction — LIR 函数
+// ─────────────────────────────────────────────────────────────
+
+/// LIR 函数（参数 + 基本块列表 + 栈分配信息）。
+class LirFunction {
+
+    /// 函数名。
+    var name: String = ""
+
+    /// 函数类型 TypeID。
+    var type: Int = 0
+
+    /// 基本块列表（BlockID 逗号分隔字符串）。
+    var blocks: String = ""
+
+    /// 入口块 BlockID。
+    var entryBlock: Int = 0
+
+    /// 参数 ValueID 列表（逗号分隔字符串）。
+    var params: String = ""
+
+    /// 返回类型 TypeID。
+    var returnType: Int = 0
+
+    /// 是否为原生函数。
+    var isNative: Boolean = false
+
+    /// 栈帧大小（字节）。
+    var stackSize: Int = 0
+
+    /// 被调函数名列表（逗号分隔字符串）。
+    var calledFunctions: String = ""
+
+    init() {
+        this.name = ""
+        this.type = 0
+        this.blocks = ""
+        this.entryBlock = -1
+        this.params = ""
+        this.returnType = 0
+        this.isNative = false
+        this.stackSize = 0
+        this.calledFunctions = ""
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// LirProgram — 程序根节点（LIR）
+// ─────────────────────────────────────────────────────────────
+
+/// LIR 程序根节点。
+class LirProgram {
+
+    /// 类型注册表。
+    var types: TypeRegistry = TypeRegistry()
+
+    /// 值节点表（List<LirValue>）。
+    var values: List<LirValue> = arrayListOf<LirValue>()
+
+    /// 块节点表（List<LirBlock>）。
+    var blocks: List<LirBlock> = arrayListOf<LirBlock>()
+
+    /// 函数节点表（List<LirFunction>）。
+    var functions: List<LirFunction> = arrayListOf<LirFunction>()
+
+    /// 值总数。
+    var valueCount: Int = 0
+
+    /// 块总数。
+    var blockCount: Int = 0
+
+    /// 函数总数。
+    var functionCount: Int = 0
+
+    /// 当前正在构建的函数索引（-1 表示不在函数上下文）。
+    var currentFunc: Int = -1
+
+    init() {
+        this.types = TypeRegistry()
+        this.values = arrayListOf<LirValue>()
+        this.blocks = arrayListOf<LirBlock>()
+        this.functions = arrayListOf<LirFunction>()
+        this.valueCount = 0
+        this.blockCount = 0
+        this.functionCount = 0
+        this.currentFunc = -1
+    }
+
+    // ── 值管理 ──
+
+    /// 创建一个新的 LIR 值节点，返回 ValueID。
+    fun addValue(op: String, typeId: Int, args: String, aux: String, blockId: Int): Int {
+        val v: LirValue = LirValue()
+        v.id = this.valueCount
+        v.op = op
+        v.type = typeId
+        v.args = args
+        v.aux = aux
+        v.block = blockId
+        v.useCount = 0
+        this.values.add(v)
+        this.valueCount = this.values.size
+        return v.id
+    }
+
+    /// 通过 ValueID 获取值节点。
+    fun valueOf(id: Int): LirValue {
+        if (id < 0 || id >= this.values.size) {
+            return LirValue()
+        }
+        return this.values[id]
+    }
+
+    // ── 块管理 ──
+
+    /// 创建一个新的基本块，返回 BlockID。
+    fun addBlock(): Int {
+        val b: LirBlock = LirBlock()
+        b.id = this.blockCount
+        this.blocks.add(b)
+        this.blockCount = this.blocks.size
+        return b.id
+    }
+
+    /// 通过 BlockID 获取块节点。
+    fun blockOf(id: Int): LirBlock {
+        if (id < 0 || id >= this.blocks.size) {
+            return LirBlock()
+        }
+        return this.blocks[id]
+    }
+
+    /// 向块追加一个 Phi 节点。
+    fun addPhi(blockId: Int, typeId: Int, incoming: String, aux: String): Int {
+        val b: LirBlock = this.blockOf(blockId)
+        val vid: Int = this.addValue("Phi", typeId, incoming, aux, blockId)
+        b.phis = LirBlockUtils.phisAdd(b.phis, vid)
+        return vid
+    }
+
+    /// 向块追加一条普通指令。
+    fun addInstr(blockId: Int, op: String, typeId: Int, args: String, aux: String): Int {
+        val b: LirBlock = this.blockOf(blockId)
+        val vid: Int = this.addValue(op, typeId, args, aux, blockId)
+        b.instrs = LirBlockUtils.instrsAdd(b.instrs, vid)
+        return vid
+    }
+
+    /// 设置块的终结指令。
+    fun setTerminator(blockId: Int, op: String, typeId: Int, args: String, aux: String): Int {
+        val b: LirBlock = this.blockOf(blockId)
+        val vid: Int = this.addValue(op, typeId, args, aux, blockId)
+        b.term = vid
+        return vid
+    }
+
+    // ── 函数管理 ──
+
+    /// 创建一个新的函数，返回 FunctionID。
+    fun addFunction(name: String, funcTypeId: Int, retTypeId: Int, isNative: Boolean): Int {
+        val f: LirFunction = LirFunction()
+        f.name = name
+        f.type = funcTypeId
+        f.returnType = retTypeId
+        f.isNative = isNative
+        f.blocks = ""
+        f.entryBlock = -1
+        f.params = ""
+        f.stackSize = 0
+        f.calledFunctions = ""
+        this.functions.add(f)
+        this.functionCount = this.functions.size
+        this.currentFunc = this.functions.size - 1
+        return this.currentFunc
+    }
+
+    /// 通过 FunctionID 获取函数节点。
+    fun functionOf(id: Int): LirFunction {
+        if (id < 0 || id >= this.functions.size) {
+            return LirFunction()
+        }
+        return this.functions[id]
+    }
+
+    /// 结束当前函数的构建。
+    fun endFunction(): Int {
+        if (this.currentFunc < 0) {
+            return -1
+        }
+        val fid: Int = this.currentFunc
+        this.currentFunc = -1
+        return fid
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// LirUtils — 顶层辅助函数
+// ─────────────────────────────────────────────────────────────
+
+object LirUtils {
+
+    /// 字符串转整数（支持负号前缀）。
+    fun strToInt(text: String): Int {
+        if (text == "") {
+            return 0
+        }
+        val len: Int = text.length
+        var total: Int = 0
+        var i: Int = 0
+        var neg: Boolean = false
+        if (len > 0 && text[0] == "-") {
+            neg = true
+            i = 1
+        }
+        while (i < len) {
+            val digit: Int = "0123456789".indexOf(text[i])
+            if (digit >= 0 && digit <= 9) {
+                total = total * 10 + digit
+            }
+            i = i + 1
+        }
+        if (neg) {
+            return -total
+        }
+        return total
+    }
+
+    /// 整数转字符串。
+    fun toStr(n: Int): String {
+        if (n == 0) {
+            return "0"
+        }
+        var neg: Boolean = false
+        if (n < 0) {
+            neg = true
+            n = -n
+        }
+        var result: String = ""
+        while (n > 0) {
+            result = digitChar(n % 10) + result
+            n = n / 10
+        }
+        if (neg) {
+            result = "-" + result
+        }
+        return result
+    }
+
+    /// 把 0-9 的数字转换为单字符字符串。
+    fun digitChar(value: Int): String {
+        if (value < 0 || value > 9) {
+            return ""
+        }
+        return "0123456789".substring(value, value + 1)
+    }
+
+    /// 创建空的 LIR 程序。
+    fun emptyProgram(): LirProgram {
+        return LirProgram()
+    }
+
+    /// 按逗号切分 args 字符串，返回 List<String>。
+    fun splitArgs(text: String): List<String> {
+        val out: List<String> = arrayListOf<String>()
+        if (text == "") {
+            return out
+        }
+        val len: Int = text.length
+        var start: Int = 0
+        var i: Int = 0
+        while (i < len) {
+            if (text[i] == ",") {
+                out.add(text.substring(start, i))
+                start = i + 1
+            }
+            i = i + 1
+        }
+        out.add(text.substring(start, len))
+        return out
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// LirBlockUtils — 基本块工具对象
+// ─────────────────────────────────────────────────────────────
+
+object LirBlockUtils {
+
+    /// 向 Phi 列表追加一个 ValueID。
+    fun phisAdd(list: String, vid: Int): String {
+        if (list == "") {
+            return LirUtils.toStr(vid)
+        }
+        return list + "," + LirUtils.toStr(vid)
+    }
+
+    /// 向指令列表追加一个 ValueID。
+    fun instrsAdd(list: String, vid: Int): String {
+        if (list == "") {
+            return LirUtils.toStr(vid)
+        }
+        return list + "," + LirUtils.toStr(vid)
+    }
+
+    /// 向后继列表追加一个 BlockID。
+    fun succsAdd(list: String, bid: Int): String {
+        if (list == "") {
+            return LirUtils.toStr(bid)
+        }
+        return list + "," + LirUtils.toStr(bid)
+    }
+
+    /// 向前驱列表追加一个 BlockID。
+    fun predsAdd(list: String, bid: Int): String {
+        if (list == "") {
+            return LirUtils.toStr(bid)
+        }
+        return list + "," + LirUtils.toStr(bid)
+    }
+}

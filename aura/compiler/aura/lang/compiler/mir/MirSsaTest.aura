@@ -1,0 +1,165 @@
+// aura:///aura/lang/compiler/mir/MirSsaTest.aura
+package aura.lang.compiler.mir
+// ─────────────────────────────────────────────────────────────
+// Phase A 测试：TypeRegistry + SSA MIR + SsaBuilder + Linearizer
+//
+// 测试内容：
+//   1. TypeRegistry: 基本类型注册、去重、查询
+//   2. SsaMir: 值/块/函数创建
+//   3. SsaBuilder: 创建与基本流程
+//   4. Linearizer: 创建与基本流程
+//
+// 运行：aura run aura/compiler/aura/lang/compiler/mir/MirSsaTest.aura
+// ─────────────────────────────────────────────────────────────
+
+import "../test/TestRunner.aura"
+import "TypeRegistry.aura"
+import "SsaMir.aura"
+import "SsaBuilder.aura"
+import "Linearizer.aura"
+
+fun main() {
+    val t: TestRunner = TestRunner()
+    var failures: Int = 0
+
+    // ── 1. TypeRegistry 测试 ──
+    t.begin("TypeRegistry/basics")
+    val reg: TypeRegistry = TypeRegistry()
+
+    // 基本类型注册
+    val intId: Int = reg.intType(64)
+    t.assertTrue(intId >= 0, "int64 registered")
+    t.assertEq(reg.kindOf(intId), "Int", "kind is Int")
+    t.assertEq(reg.widthOf(intId), 64, "width is 64")
+    t.assertTrue(reg.isInt(intId), "isInt returns true")
+
+    // 去重：同一类型不重复注册
+    val intId2: Int = reg.intType(64)
+    t.assertEq(intId, intId2, "dedup: same int64 ID")
+
+    // 浮点类型
+    val floatId: Int = reg.floatType(64)
+    t.assertTrue(reg.isFloat(floatId), "isFloat returns true")
+    t.assertEq(reg.widthOf(floatId), 64, "float64 width is 64")
+
+    // 布尔类型
+    val boolId: Int = reg.boolType()
+    t.assertTrue(reg.isBool(boolId), "isBool returns true")
+
+    // 指针类型
+    val ptrId: Int = reg.ptrType(intId)
+    t.assertTrue(reg.isPtr(ptrId), "isPtr returns true")
+    t.assertEq(reg.elemOf(ptrId), intId, "ptr elem is int64")
+
+    // 结构体类型
+    val structId: Int = reg.structType("MyStruct", toStr(intId) + "," + toStr(boolId))
+    t.assertTrue(reg.isStruct(structId), "isStruct returns true")
+    t.assertEq(reg.nameOf(structId), "MyStruct", "struct name is MyStruct")
+
+    // 函数类型
+    val funcId: Int = reg.funcType(toStr(intId), intId)
+    t.assertTrue(reg.isFunc(funcId), "isFunc returns true")
+
+    // 大小查询
+    t.assertEq(reg.sizeOf(intId), 8, "sizeOf(int64) = 8")
+    t.assertEq(reg.sizeOf(reg.intType(32)), 4, "sizeOf(int32) = 4")
+    t.assertEq(reg.sizeOf(ptrId), 8, "sizeOf(ptr) = 8")
+
+    // 从类型名构造
+    val fromNameId: Int = reg.fromTypeName("Int")
+    t.assertTrue(reg.isInt(fromNameId), "fromTypeName(Int) is Int")
+    val fromPtrId: Int = reg.fromTypeName("Pointer<Int>")
+    t.assertTrue(reg.isPtr(fromPtrId), "fromTypeName(Pointer<Int>) is Ptr")
+
+    failures = failures + t.report()
+
+    // ── 2. SsaMir 基本操作测试 ──
+    t.begin("SsaMir/basics")
+    val prog: MirSsaProgram = SsaMirUtils.emptyProgram()
+
+    // 创建类型
+    val intTy: Int = prog.types.intType(64)
+
+    // 创建块
+    val blockId: Int = prog.addBlock()
+    t.assertEq(blockId, 0, "first block ID is 0")
+    t.assertEq(prog.blockCount, 1, "block count is 1")
+
+    // 创建常量值
+    val constVal: Int = prog.addValue("Const", intTy, "", "42", blockId)
+    t.assertEq(constVal, 0, "first value ID is 0")
+    t.assertEq(prog.valueCount, 1, "value count is 1")
+
+    // 查询值
+    val v: MirValue = prog.valueOf(constVal)
+    t.assertEq(v.op, "Const", "value op is Const")
+    t.assertEq(v.aux, "42", "value aux is 42")
+    t.assertTrue(v.isConst(), "isConst returns true")
+    t.assertFalse(v.isTerminator(), "isTerminator returns false for Const")
+
+    // 创建指令
+    val constVal2: Int = prog.addValue("Const", intTy, "", "8", blockId)
+    val addArgs: String = toStr(constVal) + "," + toStr(constVal2)
+    val addVal: Int = prog.addValue("Add", intTy, addArgs, "", blockId)
+    t.assertEq(addVal, 2, "add value ID is 2")
+    t.assertEq(prog.valueCount, 3, "value count is 3")
+
+    // 查询指令
+    val av: MirValue = prog.valueOf(addVal)
+    t.assertEq(av.op, "Add", "value op is Add")
+    t.assertEq(av.argAt(0), constVal, "first arg is const42")
+    t.assertEq(av.argAt(1), constVal2, "second arg is const8")
+    t.assertFalse(av.isConst(), "isConst returns false for Add")
+    t.assertFalse(av.isTerminator(), "isTerminator returns false for Add")
+
+    // 创建终结指令
+    val retVal: Int = prog.setTerminator(blockId, "Ret", intTy, toStr(addVal), "")
+    t.assertTrue(prog.valueOf(retVal).isTerminator(), "isTerminator returns true for Ret")
+
+    // 创建函数
+    val funcId: Int = prog.addFunction("main", intTy, intTy, false)
+    t.assertEq(funcId, 0, "first function ID is 0")
+    t.assertEq(prog.functionCount, 1, "function count is 1")
+
+    // 查询函数
+    val f: MirFunction = prog.functionOf(funcId)
+    t.assertEq(f.name, "main", "function name is main")
+
+    failures = failures + t.report()
+
+    // ── 3. SsaBuilder 创建测试 ──
+    t.begin("SsaBuilder/creation")
+    val builder: SsaBuilder = SsaBuilder()
+    t.assertNotNull(builder, "builder created")
+
+    failures = failures + t.report()
+
+    // ── 4. Linearizer 创建测试 ──
+    t.begin("Linearizer/creation")
+    val linearizer: Linearizer = Linearizer()
+    t.assertNotNull(linearizer, "linearizer created")
+
+    failures = failures + t.report()
+
+    // ── 5. SsaMirUtils 工具函数测试 ──
+    t.begin("SsaMirUtils/tools")
+    t.assertEq(SsaMirUtils.strToInt("42"), 42, "strToInt(42) = 42")
+    t.assertEq(SsaMirUtils.strToInt("-5"), -5, "strToInt(-5) = -5")
+    t.assertEq(SsaMirUtils.strToInt(""), 0, "strToInt(\"\") = 0")
+    t.assertEq(SsaMirUtils.toStr(42), "42", "toStr(42) = \"42\"")
+    t.assertEq(SsaMirUtils.toStr(0), "0", "toStr(0) = \"0\"")
+    t.assertEq(SsaMirUtils.toStr(-5), "-5", "toStr(-5) = \"-5\"")
+
+    failures = failures + t.report()
+
+    // ── 汇总 ──
+    println("")
+    println("═══════════════════════════════════════════")
+    println("Phase A 测试结果：" + toStr(t.passCount()) + " 通过, " + toStr(failures) + " 失败")
+    println("═══════════════════════════════════════════")
+    if (failures == 0) {
+        println("RESULT: PASS")
+    } else {
+        println("RESULT: FAIL (" + toStr(failures) + ")")
+    }
+}

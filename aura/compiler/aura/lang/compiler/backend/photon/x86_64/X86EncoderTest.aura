@@ -1,0 +1,166 @@
+// aura:///aura/lang/compiler/backend/X86EncoderTest.aura
+package aura.lang.compiler.backend.photon.x86_64
+// ─────────────────────────────────────────────────────────────
+// X86Encoder 指令编码测试 — 验证 x86_64 机器码生成
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import "X86Encoder.aura"
+
+/// 测试入口。
+fun main() {
+    println("╔══════════════════════════════════════════════════╗")
+    println("║   X86Encoder 指令编码测试                         ║")
+    println("╚══════════════════════════════════════════════════╝")
+    println("")
+
+    var failures: Int = 0
+    var tests: Int = 0
+
+    // ── 测试 1: Prologue + Epilogue ──
+    tests = tests + 1
+    println("[Test 1] Prologue + Epilogue")
+    val enc1 = X86EncoderUtils.emptyEncoder()
+    enc1.emitPrologue(48)
+    enc1.emitEpilogue()
+    val hex1 = enc1.toHex()
+    println("  机器码: " + hex1)
+    println("  字节数: " + enc1.byteCount())
+    if (hex1 != "") {
+        println("  ✓ PASS")
+    } else {
+        println("  ✗ FAIL")
+        failures = failures + 1
+    }
+
+    // ── 测试 2: MOV 指令 ──
+    tests = tests + 1
+    println("[Test 2] MOV 指令")
+    val enc2 = X86EncoderUtils.emptyEncoder()
+    enc2.emitMovRR("rax", "rcx")
+    enc2.emitMovRI("rdx", 42)
+    val hex2 = enc2.toHex()
+    println("  机器码: " + hex2)
+    println("  字节数: " + enc2.byteCount())
+    if (hex2 != "") {
+        println("  ✓ PASS")
+    } else {
+        println("  ✗ FAIL")
+        failures = failures + 1
+    }
+
+    // ── 测试 3: 算术指令 ──
+    tests = tests + 1
+    println("[Test 3] 算术指令 (ADD/SUB/CMP)")
+    val enc3 = X86EncoderUtils.emptyEncoder()
+    enc3.emitAddRR("rax", "rcx")
+    enc3.emitSubRR("rax", "rdx")
+    enc3.emitCmpRI("rax", 0)
+    val hex3 = enc3.toHex()
+    println("  机器码: " + hex3)
+    println("  字节数: " + enc3.byteCount())
+    if (hex3 != "") {
+        println("  ✓ PASS")
+    } else {
+        println("  ✗ FAIL")
+        failures = failures + 1
+    }
+
+    // ── 测试 4: 控制流指令 ──
+    tests = tests + 1
+    println("[Test 4] 控制流指令 (RET/NOP/CALL)")
+    val enc4 = X86EncoderUtils.emptyEncoder()
+    enc4.emitRet()
+    enc4.emitNop()
+    enc4.emitCallRel("println")
+    val hex4 = enc4.toHex()
+    val reloc4 = enc4.getRelocations()
+    println("  机器码: " + hex4)
+    println("  字节数: " + enc4.byteCount())
+    println("  重定位数: " + reloc4.size)
+    if (hex4 != "" && reloc4.size == 1) {
+        println("  ✓ PASS")
+    } else {
+        println("  ✗ FAIL")
+        failures = failures + 1
+    }
+
+    // ── 测试 5: SETcc 条件设置 ──
+    tests = tests + 1
+    println("[Test 5] SETcc 条件设置 (eq/ne/lt)")
+    val enc5 = X86EncoderUtils.emptyEncoder()
+    enc5.emitSetcc("al", "eq")
+    enc5.emitSetcc("bl", "ne")
+    enc5.emitSetcc("cl", "lt")
+    val hex5 = enc5.toHex()
+    println("  机器码: " + hex5)
+    println("  字节数: " + enc5.byteCount())
+    if (hex5 != "") {
+        println("  ✓ PASS")
+    } else {
+        println("  ✗ FAIL")
+        failures = failures + 1
+    }
+
+    // ── 测试 6: 完整 helloworld 机器码 ──
+    tests = tests + 1
+    println("[Test 6] 完整 helloworld 机器码")
+    val enc6 = X86EncoderUtils.emptyEncoder()
+
+    // main 函数
+    enc6.emitPrologue(48)
+    // lea rcx, [rip + "hello"]
+    enc6.emitLeaRIP("rcx", "@str.0")
+    // call println
+    enc6.emitCallRel("println")
+    // xor eax, eax (return 0)
+    enc6.emitXorRR("eax", "eax")
+    // epilogue
+    enc6.emitEpilogue()
+
+    val hex6 = enc6.toHex()
+    val reloc6 = enc6.getRelocations()
+    println("  机器码: " + hex6)
+    println("  字节数: " + enc6.byteCount())
+    println("  重定位数: " + reloc6.size)
+    var i: Int = 0
+    while (i < reloc6.size) {
+        println("    [" + i + "] " + reloc6[i])
+        i = i + 1
+    }
+    if (hex6 != "" && reloc6.size == 2) {
+        println("  ✓ PASS")
+    } else {
+        println("  ✗ FAIL")
+        failures = failures + 1
+    }
+
+    // ── 测试 7: 条件跳转 ──
+    tests = tests + 1
+    println("[Test 7] 条件跳转 (Jcc)")
+    val enc7 = X86EncoderUtils.emptyEncoder()
+    enc7.emitCmpRI("rax", 0)
+    enc7.emitJccRel("eq", "label_zero")
+    enc7.emitAddRI("rax", 1)
+    val hex7 = enc7.toHex()
+    val reloc7 = enc7.getRelocations()
+    println("  机器码: " + hex7)
+    println("  重定位数: " + reloc7.size)
+    if (hex7 != "" && reloc7.size == 1) {
+        println("  ✓ PASS")
+    } else {
+        println("  ✗ FAIL")
+        failures = failures + 1
+    }
+
+    // ── 汇总 ──
+    println("")
+    println("══════════════════════════════════════════════════")
+    println("测试结果: " + (tests - failures) + "/" + tests + " 通过")
+    if (failures == 0) {
+        println("RESULT: PASS — X86Encoder 全部测试通过")
+    } else {
+        println("RESULT: FAIL (" + failures + " 失败)")
+    }
+    println("══════════════════════════════════════════════════")
+}

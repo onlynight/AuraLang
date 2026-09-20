@@ -1,0 +1,81 @@
+// aura:///aura/lang/compiler/backend/photon/PhotonHelloBuild.aura
+package aura.lang.compiler.backend.photon
+// ─────────────────────────────────────────────────────────────
+// E3 冒烟驱动 — 产出「可运行」helloworld 的目标文件与链接参数
+//
+// 输出四段（带标记，供构建脚本解析）：
+//
+//   ===MAIN===        main.obj 的 COFF hex（用户代码：main → call println）
+//   ===RUNTIME===     runtime.obj 的 COFF hex（Photon runtime：println → kernel32）
+//   ===HEX-FILES===   已落盘的 hex 文本路径 + 状态，格式：<main> <OK|FAIL> <runtime> <OK|FAIL>
+//   ===LLD===         链接器完整路径（来自 aura.toml 的 [lld] 段）
+//   ===LINK-ARGS===   lld-link 参数（不含链接器路径；kernel32.lib 由脚本按 SDK 目录补上）
+//
+// ── 落盘通道（见 PhotonNativeWriter 文件头）──
+//
+//   VM 路径（当前）：PhotonObjectWriterUtils.saveHexFile() 写 `<name>.obj.hex`，
+//                    再由构建脚本转成二进制 `.obj`；
+//   AOT / 自举路径：PhotonNativeWriter.writeObjectFile() 直接写二进制 `.obj`
+//                    （本驱动不 import 它，避免把不可解析的原生调用带进 VM 执行）。
+//
+// 链接命令（脚本执行）：
+//   <lld-link> <LINK-ARGS...> <WindowsKits>/Lib/<ver>/um/x64/kernel32.Lib
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import "PhotonObjectWriter.aura"
+import "PhotonRuntime.aura"
+import "PhotonSystemLinker.aura"
+
+fun main() {
+    val text: String = "hello world"
+    val outDir: String = "build/lldtest"
+
+    // ── 1. 两个目标文件（COFF hex）──
+    val mainHex: String = PhotonRuntime.buildMainObject(text)
+    val rtHex: String = PhotonRuntime.buildRuntimeObject()
+
+    // ── 2. 落盘：VM 路径写 hex 文本（AOT 路径可换 PhotonNativeWriter 直接写二进制）──
+    //    文件内容由写入器**重新序列化**产生，构建脚本会与上面的 stdout hex 做一致性对照。
+    val mainHexPath: String = outDir + "/hello.obj.hex"
+    val rtHexPath: String = outDir + "/aura_runtime.obj.hex"
+    val mainSaved: Boolean = PhotonRuntime.writeMainObjectHexFile(text, mainHexPath)
+    val rtSaved: Boolean = PhotonRuntime.writeRuntimeObjectHexFile(rtHexPath)
+
+    var mainFlag: String = "FAIL"
+    if (mainSaved) {
+        mainFlag = "OK"
+    }
+    var rtFlag: String = "FAIL"
+    if (rtSaved) {
+        rtFlag = "OK"
+    }
+
+    println("===MAIN===")
+    println(mainHex)
+
+    println("===RUNTIME===")
+    println(rtHex)
+
+    println("===HEX-FILES===")
+    println(mainHexPath + " " + mainFlag + " " + rtHexPath + " " + rtFlag)
+
+    // ── 3. 链接参数（链接器路径经 aura.toml [lld] 解析）──
+    val linker = PhotonSystemLinkerUtils.defaultLinker()
+    linker.os = "windows"
+    linker.hostOs = "windows"
+    linker.hostArch = "x86_64"
+    linker.manifestPath = "aura.toml"
+    linker.outputType = "exe"
+    linker.objectFiles = outDir + "/hello.obj " + outDir + "/aura_runtime.obj"
+    linker.outputName = outDir + "/hello"
+    // 自研 runtime 不依赖 CRT：走 /NODEFAULTLIB，只显式链接 kernel32.lib
+    linker.useDefaultLibs = false
+    linker.flags = "/SUBSYSTEM:CONSOLE,/ENTRY:main,/MACHINE:X64,/NODEFAULTLIB"
+
+    println("===LLD===")
+    println(linker.getLldPath())
+
+    println("===LINK-ARGS===")
+    println(linker.buildArgumentList())
+}

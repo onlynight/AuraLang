@@ -16,16 +16,9 @@ examples/
 │   ├── demo.aura                 语法综合验证
 │   ├── import_syntax_demo.aura   import 各形式演示
 │   ├── mini_struct.aura          最小 struct
-│   ├── t_for.aura / t_if.aura    for/if 微型示例
-│   ├── test_when.aura            when 守卫
-│   ├── test_print.aura           打印
-│   └── test_lambda*.aura         Lambda 语法（6 个递进测试）
+│   └── t_for.aura / t_if.aura    for/if 微型示例
 ├── classes/              ← 类与结构体
-│   ├── test_class_method.aura        class 方法
-│   ├── test_struct*.aura             struct 字段/字面量/方法
-│   ├── test_value_class*.aura        value class（4 个）
-│   ├── test_value_data_class.aura    value data class
-│   └── test_sealed_value_class.aura  sealed 继承 + override
+│   └── class_runtime.aura            类运行时特性演示
 ├── concurrency/          ← 并发编程
 │   ├── actor-basic.aura          Actor 基础
 │   ├── actor_system.aura         Actor / 监督树
@@ -38,10 +31,12 @@ examples/
 │   ├── showcase.aura             语言特性总览（sema 零错误）
 │   ├── demo_errors.aura          语义错误诊断示例
 │   ├── debug_when.aura           when 守卫调试
-│   ├── memory_test.aura          内存管理（逃逸分析/ARC/weak）
-│   ├── shared_lib_test.aura      AOT 动态库生成
-│   ├── script_test.aura          脚本模式（无 main）
-│   └── eval_test.aura            eval 求值
+│   ├── aot_list_roundtrip.aura   AOT 列表往返
+│   ├── cli_demo.aura             CLI 命令行演示
+│   ├── debug_when.aura           when 守卫调试
+│   ├── demo_errors.aura          语义错误诊断示例
+│   ├── dynlist_string_roundtrip.aura  动态列表/字符串往返
+│   └── showcase.aura             语言特性总览（sema 零错误）
 ├── ffi/                 ← 外部接口
 │   ├── extern-declarations.aura  FFI 声明
 │   ├── p8_c_ffi_demo.aura        extern "c" 调用 libc

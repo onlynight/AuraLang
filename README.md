@@ -38,6 +38,38 @@ The **full toolchain** is implemented and functional — from lexer to AOT-compi
 
 In parallel with the Rust compiler, a **compiler written entirely in Aura** is being built under `aura/compiler/aura/lang/compiler/`. The Rust compiler (`compiler/`) is preserved unmodified as the fallback and reference implementation.
 
+### Self-Bootstrap Process (自举流程)
+
+The Aura compiler is bootstrapped from a pre-built seed binary:
+
+```
+aura/seed/aura.exe          <- Rust bootstrap (seed, no rebuild needed)
+        │
+        ▼  aura build aura/compiler/.../Main.aura
+        │
+        ▼
+build/auc/compiler/aura-compiler.auc   <- Aura-written compiler bytecode
+        │
+        ▼  aura run aura-compiler.auc <file.aura>
+        │
+        ▼
+build/output/<file>.exe               <- AOT-compiled native executable
+```
+
+**Bootstrap resolution order** (in `build-aura-compiler.ps1`):
+
+1. `aura/seed/aura.exe` — pre-built seed (preferred, no Rust toolchain needed)
+2. `target/release/aura.exe` — local Rust build (if seed missing)
+3. `cargo build` — rebuild from Rust source (if neither exists)
+
+**Rebuilding the seed** (when Rust source is updated):
+
+```powershell
+scripts\build-aura-compiler.ps1 -RebuildSeed
+```
+
+This runs `cargo build --release -p cli --features llvm` and copies the result to `aura/seed/aura.exe`.
+
 | Phase | Component | Status |
 |-------|-----------|--------|
 | P0 | Infrastructure (TestRunner, Main skeleton) | ✅ |
@@ -85,80 +117,36 @@ Main.aura                       — Compiler entry skeleton
 
 ```text
 AuraLang/
-├── Cargo.toml              Workspace root (compiler, cli, loom)
+├── Cargo.toml              Workspace root (architectural dependency)
 ├── LICENSE                 Apache-2.0
 ├── README.md               ← You are here
 ├── README.zh-CN.md         中文文档
 │
-├── compiler/               Compiler library (Rust crate)
-│   ├── src/
-│   │   ├── lexer.rs            Lexer (hand-written, string interpolation, raw strings)
-│   │   ├── parser.rs           Recursive-descent + Pratt parser
-│   │   ├── ast.rs              AST node definitions
-│   │   ├── sema/               Semantic analysis (ty, symbol, checker)
-│   │   ├── codegen/
-│   │   │   ├── hir.rs              HIR desugaring
-│   │   │   ├── mir.rs              MIR lowering
-│   │   │   ├── emit.rs             Bytecode emitter
-│   │   │   ├── opt.rs              Optimization passes
-│   │   │   ├── arc.rs              ARC analysis & insertion
-│   │   │   ├── serialize.rs        .auc binary format
-│   │   │   └── aot/                AOT (LLVM) backend
-│   │   │       ├── emit.rs         LLVM IR generation
-│   │   │       ├── linker.rs       llc/clang linking
-│   │   │       ├── target.rs       Cross-platform triples
-│   │   │       ├── dwarf.rs        DWARF debug info
-│   │   │       └── c_backend.rs    C code fallback
-│   │   ├── vm/
-│   │   │   ├── interp.rs           Stack-based interpreter
-│   │   │   ├── jit.rs              Cranelift JIT
-│   │   │   ├── ffi.rs              C FFI (extern "c")
-│   │   │   ├── heap.rs             GC heap + ARC
-│   │   │   ├── value.rs            Runtime values
-│   │   │   ├── actor.rs            Actor runtime
-│   │   │   ├── channel.rs          Message channels
-│   │   │   ├── coroutine.rs        Coroutines & suspend
-│   │   │   ├── thread_pool.rs      ThreadPool
-│   │   │   ├── debugger.rs         Source-level debugger
-│   │   │   └── ...                 IPC, dynamic FFI, native, etc.
-│   │   ├── std/                    Standard library (19 modules)
-│   │   │   ├── decl.rs             Single source of truth for std functions
-│   │   │   ├── std_math.rs         Math (sin, cos, sqrt, pow, ...)
-│   │   │   ├── std_io.rs           I/O (readFile, writeFile, ...)
-│   │   │   ├── std_collections.rs  List, Map, Set operations
-│   │   │   ├── std_concurrent.rs   Actor, Channel, Coroutine APIs
-│   │   │   ├── std_json.rs         JSON parsing & serialization
-│   │   │   ├── std_string.rs       String operations
-│   │   │   ├── std_fs.rs           File system
-│   │   │   ├── std_env.rs          Environment variables
-│   │   │   ├── std_process.rs      Process management
-│   │   │   ├── std_time.rs         Time & dates
-│   │   │   └── ...                 (+8 more modules)
-│   │   ├── auz/                    .auz package format
-│   │   ├── lsp.rs                  LSP server (JSON-RPC over stdio)
-│   │   ├── package.rs              Package manager
-│   │   ├── docgen.rs               API documentation generator
-│   │   └── linker.rs               Module linking
-│   ├── tests/                    Integration tests (40+ test files)
-│   └── examples/                 AOT benchmarks
+├── aura/                   Aura language sources (self-bootstrapping)
+│   ├── core/               Core language types (Any, Int, String, ...)
+│   ├── compiler/           Compiler written in Aura
+│   │   └── aura/lang/compiler/   Lexer, Parser, Sema, HIR, MIR, Codegen, VM, AOT, JIT
+│   ├── toolchain/          LSP, debugger, docgen, cli
+│   └── seed/               Bootstrap seed binary
+│       └── aura.exe        <- Rust bootstrap (pre-built, no rebuild needed)
 │
-├── cli/                    Command-line tool (3 binaries)
-│   └── src/
-│       ├── main.rs             `aura` — 20+ subcommands
-│       ├── lsp_main.rs         `aura-lsp` — standalone LSP server
-│       └── debugger_main.rs    `aura-debug` — source-level debugger
+├── build/                  Compiled artifacts (.auc bytecode)
+│   ├── bin/                aura.exe (bootstrap), aura-compiler.auc
+│   └── auc/compiler/       Aura-written compiler output
 │
-├── loom/                   Build system (Gradle/Bazel-like)
-│   ├── src/                    manifest, task DAG, cache, plugins, CI/CD
-│   ├── docs/                   Design documents
-│   └── examples/               Example projects
-│
-├── vscode-extension/       VS Code extension (LSP + syntax highlighting)
+├── compiler/               [ARCH] Rust compiler source (architectural dependency)
+├── cli/                    [ARCH] Rust CLI source (architectural dependency)
 │
 ├── book/                   User documentation (tutorials, API, migration)
 ├── docs/                   Technical design documents
-└── examples/               Aura source examples (36 files)
+├── examples/               Aura source examples
+├── scripts/                Build & bootstrap scripts
+├── tests/                  Test files
+└── target/                 Rust build artifacts (generated)
 ```
+
+> **[ARCH]** = Architectural dependency: Rust source kept for bootstrap purposes only.
+> All Rust/C generated artifacts (`.exe`, `.ll`, `.obj`, `.llc.log`, etc.) have been removed.
 
 ---
 
@@ -171,13 +159,19 @@ AuraLang/
 
 ### Build
 
-```bash
-# Full toolchain (VM + JIT + AOT + all std modules)
-cargo build --release --features "llvm,jit,std-all"
+```powershell
+# Build the Aura compiler (self-bootstrap, no Rust toolchain needed)
+scripts\build-aura-compiler.ps1
 
-# Minimal (VM only)
-cargo build --release
+# Build with AOT (native executable, needs LLVM)
+scripts\build-aura-compiler.ps1 -Aot
+
+# Rebuild the seed binary from Rust source (when compiler/ is updated)
+scripts\build-aura-compiler.ps1 -RebuildSeed
 ```
+
+> **Note:** The pre-built seed at `aura/seed/aura.exe` eliminates the need for a Rust
+> toolchain during normal development. Only `-RebuildSeed` requires `cargo`.
 
 ### Run
 

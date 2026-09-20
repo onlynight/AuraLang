@@ -1,0 +1,303 @@
+// aura:///aura/lang/compiler/mir/TypeRegistry.aura
+package aura.lang.compiler.mir
+// ─────────────────────────────────────────────────────────────
+// 类型注册表（TypeRegistry）— Phase A (任务 A.1)
+//
+// 用**类型句柄 + 去重**管理类型。所有类型引用通过 TypeID（整数句柄）完成。
+// 类型比较 = 整数比较，序列化 = 整数写入。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.collection.HashMap
+import aura.lang.collection.ArrayList
+
+/// 类型注册表：管理所有类型的注册、去重和查询。
+class TypeRegistry {
+
+    /// 类型种类。
+    private var kinds: List<String> = ArrayList<String>()
+
+    /// 类型位宽。
+    private var widths: List<Int> = ArrayList<Int>()
+
+    /// 类型名称。
+    private var names: List<String> = ArrayList<String>()
+
+    /// 字段类型 ID 列表（每项为逗号分隔的 TypeID 字符串）。
+    private var fields: List<String> = ArrayList<String>()
+
+    /// 元素类型 ID。
+    private var elems: List<Integer> = ArrayList<Integer>()
+
+    /// 数组长度。
+    private var arrayLengths: List<Integer> = ArrayList<Integer>()
+
+    /// 类型名 → TypeID 去重表。
+    private var dedup: HashMap<String, Int> = HashMap<String, Int>()
+
+    /// 已注册类型数。
+    var count: Int = 0
+
+    init() {
+        this.kinds = ArrayList<String>()
+        this.widths = ArrayList<Integer>()
+        this.names = ArrayList<String>()
+        this.fields = ArrayList<String>()
+        this.elems = ArrayList<Integer>()
+        this.arrayLengths = ArrayList<Integer>()
+        this.dedup = HashMap<String, Int>()
+        this.count = 0
+
+        // 预注册基本类型
+        this.intType(8)
+        this.intType(16)
+        this.intType(32)
+        this.intType(64)
+        this.floatType(32)
+        this.floatType(64)
+        this.registerBasic("Bool")
+        this.registerBasic("Unit")
+        this.registerBasic("String")
+    }
+
+    // ── 基本操作 ──
+
+    /// 注册一个类型，返回 TypeID。如果已存在则返回已有 ID。
+    fun register(kind: String, width: Int, name: String,
+                 fieldIds: String, elemId: Int, arrayLen: Int): Int {
+        val key: String = kind + "|" + toStr(width) + "|" + name + "|"
+            + fieldIds + "|" + toStr(elemId) + "|" + toStr(arrayLen)
+
+        if (this.dedup.containsKey(key)) {
+            return this.dedup.get(key)
+        }
+
+        val id: Int = this.kinds.size
+        this.kinds.add(kind)
+        this.widths.add(width)
+        this.names.add(name)
+        this.fields.add(fieldIds)
+        this.elems.add(elemId)
+        this.arrayLengths.add(arrayLen)
+        this.dedup.put(key, id)
+        this.count = this.kinds.size
+        return id
+    }
+
+    /// 注册一个基本类型（无字段、无元素）。
+    private fun registerBasic(kind: String): Int {
+        return this.register(kind, 0, "", "", -1, -1)
+    }
+
+    // ── 类型构造工厂 ──
+
+    fun intType(width: Int): Int {
+        return this.register("Int", width, "", "", -1, -1)
+    }
+
+    fun floatType(width: Int): Int {
+        return this.register("Float", width, "", "", -1, -1)
+    }
+
+    fun boolType(): Int {
+        return this.registerBasic("Bool")
+    }
+
+    fun unitType(): Int {
+        return this.registerBasic("Unit")
+    }
+
+    fun stringType(): Int {
+        return this.registerBasic("String")
+    }
+
+    fun ptrType(pointee: Int): Int {
+        return this.register("Ptr", 0, "", "", pointee, -1)
+    }
+
+    fun structType(name: String, fieldIds: String): Int {
+        return this.register("Struct", 0, name, fieldIds, -1, -1)
+    }
+
+    fun arrayType(elemType: Int, length: Int): Int {
+        return this.register("Array", 0, "", "", elemType, length)
+    }
+
+    fun funcType(paramIds: String, retId: Int): Int {
+        return this.register("Func", 0, "", paramIds, retId, -1)
+    }
+
+    fun enumType(name: String, variantIds: String): Int {
+        return this.register("Enum", 0, name, variantIds, -1, -1)
+    }
+
+    // ── 查询 ──
+
+    fun kindOf(id: Int): String {
+        if (id < 0 || id >= this.kinds.size) { return "" }
+        return this.kinds[id]
+    }
+
+    fun widthOf(id: Int): Int {
+        if (id < 0 || id >= this.widths.size) { return 0 }
+        return this.widths[id]
+    }
+
+    fun nameOf(id: Int): String {
+        if (id < 0 || id >= this.names.size) { return "" }
+        return this.names[id]
+    }
+
+    fun fieldsOf(id: Int): String {
+        if (id < 0 || id >= this.fields.size) { return "" }
+        return this.fields[id]
+    }
+
+    fun elemOf(id: Int): Int {
+        if (id < 0 || id >= this.elems.size) { return -1 }
+        return this.elems[id]
+    }
+
+    fun arrayLenOf(id: Int): Int {
+        if (id < 0 || id >= this.arrayLengths.size) { return -1 }
+        return this.arrayLengths[id]
+    }
+
+    fun isInt(id: Int): Boolean { return this.kindOf(id) == "Int" }
+    fun isFloat(id: Int): Boolean { return this.kindOf(id) == "Float" }
+    fun isBool(id: Int): Boolean { return this.kindOf(id) == "Bool" }
+    fun isPtr(id: Int): Boolean { return this.kindOf(id) == "Ptr" }
+    fun isStruct(id: Int): Boolean { return this.kindOf(id) == "Struct" }
+    fun isFunc(id: Int): Boolean { return this.kindOf(id) == "Func" }
+    fun isEnum(id: Int): Boolean { return this.kindOf(id) == "Enum" }
+
+    // ── 从字符串类型名构造 TypeID ──
+
+    fun fromTypeName(name: String): Int {
+        if (name == "Int" || name == "Long") { return this.intType(64) }
+        if (name == "Short") { return this.intType(16) }
+        if (name == "Byte") { return this.intType(8) }
+        if (name == "Float") { return this.floatType(32) }
+        if (name == "Double") { return this.floatType(64) }
+        if (name == "Boolean") { return this.boolType() }
+        if (name == "String") { return this.stringType() }
+        if (name == "Unit") { return this.unitType() }
+        if (name == "Any" || name == "Nothing") { return this.ptrType(this.intType(8)) }
+        if (name == "") { return this.unitType() }
+        if (name.endsWith("?")) {
+            val inner: String = name.substring(0, name.length() - 1)
+            return this.ptrType(this.fromTypeName(inner))
+        }
+        if (name.startsWith("Pointer<") && name.endsWith(">")) {
+            val inner: String = name.substring(8, name.length() - 1)
+            return this.ptrType(this.fromTypeName(inner))
+        }
+        if (name.startsWith("Array<") && name.endsWith(">")) {
+            val inner: String = name.substring(6, name.length() - 1)
+            return this.arrayType(this.fromTypeName(inner), -1)
+        }
+        if (name.startsWith("List<") && name.endsWith(">")) {
+            val inner: String = name.substring(5, name.length() - 1)
+            return this.ptrType(this.fromTypeName(inner))
+        }
+        if (name.startsWith("Map<") && name.endsWith(">")) {
+            return this.ptrType(this.intType(64))
+        }
+        if (name.startsWith("(") && name.contains(") ->")) {
+            return this.fromFuncType(name)
+        }
+        return this.structType(name, "")
+    }
+
+    private fun fromFuncType(ty: String): Int {
+        val arrowPos: Int = ty.indexOf(") ->")
+        if (arrowPos < 0) { return this.funcType("", this.unitType()) }
+        val paramsPart: String = ty.substring(1, arrowPos)
+        val retPart: String = ty.substring(arrowPos + 5)
+        val paramIds: String = this.parseParamList(paramsPart)
+        val retId: Int = this.fromTypeName(retPart)
+        return this.funcType(paramIds, retId)
+    }
+
+    private fun parseParamList(params: String): String {
+        var result: String = ""
+        val parts: List<String> = params.split(",")
+        var i: Int = 0
+        while (i < parts.size) {
+            val p: String = parts[i]
+            if (p != "") {
+                if (result != "") { result = result + "," }
+                result = result + toStr(this.fromTypeName(p))
+            }
+            i = i + 1
+        }
+        return result
+    }
+
+    // ── 工具方法 ──
+
+    fun typeName(id: Int): String {
+        val kind: String = this.kindOf(id)
+        if (kind == "Int") { return "i" + toStr(this.widthOf(id)) }
+        if (kind == "Float") { return "f" + toStr(this.widthOf(id)) }
+        if (kind == "Struct" || kind == "Enum") { return this.nameOf(id) }
+        if (kind == "Ptr") { return "ptr<" + this.typeName(this.elemOf(id)) + ">" }
+        if (kind == "Array") { return "[" + this.typeName(this.elemOf(id)) + "]" }
+        if (kind == "Func") { return "func" }
+        return kind
+    }
+
+    fun sizeOf(id: Int): Int {
+        val kind: String = this.kindOf(id)
+        if (kind == "Int") {
+            val w: Int = this.widthOf(id)
+            if (w <= 8) { return 1 }
+            if (w <= 16) { return 2 }
+            if (w <= 32) { return 4 }
+            return 8
+        }
+        if (kind == "Float") {
+            val w: Int = this.widthOf(id)
+            if (w <= 32) { return 4 }
+            return 8
+        }
+        if (kind == "Bool" || kind == "Unit") { return 1 }
+        if (kind == "Ptr") { return 8 }
+        if (kind == "String") { return 16 }
+        if (kind == "Struct") {
+            val f: String = this.fieldsOf(id)
+            if (f == "") { return 0 }
+            return f.split(",").size * 8
+        }
+        if (kind == "Array") {
+            val len: Int = this.arrayLenOf(id)
+            if (len < 0) { return 8 }
+            return this.sizeOf(this.elemOf(id)) * len
+        }
+        return 8
+    }
+
+    fun alignOf(id: Int): Int {
+        val kind: String = this.kindOf(id)
+        if (kind == "Int") {
+            val w: Int = this.widthOf(id)
+            if (w <= 8) { return 1 }
+            if (w <= 16) { return 2 }
+            if (w <= 32) { return 4 }
+            return 8
+        }
+        if (kind == "Float") {
+            val w: Int = this.widthOf(id)
+            if (w <= 32) { return 4 }
+            return 8
+        }
+        if (kind == "Bool" || kind == "Unit") { return 1 }
+        return 8
+    }
+}
+
+object TypeRegistryUtils {
+    fun defaultRegistry(): TypeRegistry {
+        return TypeRegistry()
+    }
+}

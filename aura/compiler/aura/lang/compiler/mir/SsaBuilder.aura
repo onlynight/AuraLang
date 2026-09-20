@@ -1,0 +1,678 @@
+// aura:///aura/lang/compiler/mir/SsaBuilder.aura
+package aura.lang.compiler.mir
+// ─────────────────────────────────────────────────────────────
+// HIR → SSA MIR 构建器 — Phase A (任务 A.3)
+//
+// 将 HIR 树状结构降级为 SSA MIR（CFG + SSA + memory chain）。
+// 核心算法：
+//   1. 遍历 HIR 构建基本块和控制流
+//   2. 表达式平坦化（HIR → 指令序列）
+//   3. Phi 插入（Cytron 算法）
+//   4. Memory chain 插入（显式内存依赖）
+//
+// ── 与现有 MirLower.aura 的关系 ──
+//
+//   * MirLower.aura: HIR → TAC MIR（VM 路径使用）
+//   * SsaBuilder.aura: HIR → SSA MIR（AOT/JIT 路径使用）
+//   * 两者独立，各自消费 HIR 产出不同的 IR
+//
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import "../hir/Hir.aura"
+import "../lexer/Span.aura"
+// 同包依赖：输出程序类型 / 类型注册表 / 扁平字符串助手。
+// 同包符号需显式导入才进入编译单元（否则退化为未解析调用 #65535）。
+import "SsaMir.aura"
+import "TypeRegistry.aura"
+import "Mir.aura"
+
+/// HIR → SSA MIR 构建器。
+class SsaBuilder {
+
+    /// 输出的 SSA MIR 程序。
+    private var program: MirSsaProgram = MirSsaProgram()
+
+    /// 类型注册表（快捷引用）。
+    private var types: TypeRegistry = TypeRegistry()
+
+    /// 当前函数索引。
+    private var curFunc: Int = -1
+
+    /// 当前块索引。
+    private var curBlock: Int = 0
+
+    /// 临时值计数器（用于调试命名）。
+    private var tmpCount: Int = 0
+
+    /// 内存链当前值（memory chain head）。
+    private var memHead: Int = -1
+
+    /// 当前函数的参数值列表（ValueID 逗号分隔）。
+    private var curParams: String = ""
+
+    /// 局部变量名 → ValueID 映射（扁平字符串：name|vid\nname|vid\n…）。
+    ///
+    /// 采用与 MirLower.aura 一致的扁平字符串格式（`name|vid\n` 拼接），
+    /// 避免 `HashMap<String, Int>` 在 VM 内类调用时未链接的问题。
+    private var varMap: String = ""
+
+    /// 循环退出块栈（逗号分隔 BlockID，用于 break/continue 的退出目标查找）。
+    private var loopStack: String = ""
+
+    init() {
+        this.program = MirSsaProgram()
+        this.types = this.program.types
+        this.curFunc = -1
+        this.curBlock = 0
+        this.tmpCount = 0
+        this.memHead = -1
+        this.curParams = ""
+        this.varMap = ""
+        this.loopStack = ""
+    }
+
+    // ── 主入口 ──
+
+    /// 执行 HIR → SSA 降级，返回 SSA MIR 程序。
+    fun build(src: Hir): MirSsaProgram {
+        this.program = MirSsaProgram()
+        this.types = this.program.types
+        this.tmpCount = 0
+
+        // 查找 Program 根节点
+        val n: Int = src.count
+        var rootIdx: Int = -1
+        var i: Int = 0
+        while (i < n) {
+            if (src.kindOf(i) == "HirProgram") {
+                rootIdx = i
+                break
+            }
+            i = i + 1
+        }
+        if (rootIdx < 0) {
+            rootIdx = 0
+        }
+
+        // 递归构建子节点
+        val kids: String = src.kidsOf(rootIdx)
+        val kCount: Int = HirUtils.hirKidsCount(kids)
+        i = 0
+        while (i < kCount) {
+            val childId: Int = HirUtils.hirKidsAt(kids, i)
+            val childKind: String = src.kindOf(childId)
+            if (childKind == "HirFunction") {
+                this.buildFunction(src, childId)
+            }
+            i = i + 1
+        }
+
+        return this.program
+    }
+
+    // ── 函数构建 ──
+
+    /// 构建一个函数的 SSA MIR，返回 FunctionID。
+    fun buildFunction(src: Hir, id: Int): Int {
+        val name: String = src.textOf(id)
+        val retTy: String = src.tyOf(id)
+
+        // 注册返回类型
+        val retTypeId: Int = this.types.fromTypeName(retTy)
+
+        // 创建函数
+        val fid: Int = this.program.addFunction(name, retTypeId, retTypeId, false)
+        this.curFunc = fid
+        this.curParams = ""
+        this.varMap = ""
+
+        // 创建入口块
+        val entryBlock: Int = this.program.addBlock()
+        this.curBlock = entryBlock
+
+        // 初始化内存链（函数入口的 memory 状态）
+        val memTypeId: Int = this.types.intType(64)
+        this.memHead = this.program.addValue("Const", memTypeId, "", "entry_mem", entryBlock)
+
+        // 处理参数
+        val kids: String = src.kidsOf(id)
+        val kCount: Int = HirUtils.hirKidsCount(kids)
+        var i: Int = 0
+        while (i < kCount) {
+            val childId: Int = HirUtils.hirKidsAt(kids, i)
+            val childKind: String = src.kindOf(childId)
+            if (childKind == "HirParam") {
+                val paramName: String = src.textOf(childId)
+                val paramTy: String = src.tyOf(childId)
+                val paramTypeId: Int = this.types.fromTypeName(paramTy)
+
+                // 创建参数值（作为入口块的指令）
+                val paramVal: Int = this.program.addValue("Param", paramTypeId, "", paramName, entryBlock)
+
+                // 添加到参数列表
+                if (this.curParams == "") {
+                    this.curParams = toStr(paramVal)
+                } else {
+                    this.curParams = this.curParams + "," + toStr(paramVal)
+                }
+
+                // 添加到变量映射
+                this.varMapAdd(paramName, paramVal)
+
+                // 更新函数参数列表
+                val f: MirFunction = this.program.functionOf(this.curFunc)
+                f.params = this.curParams
+            }
+            i = i + 1
+        }
+
+        // 构建函数体
+        i = 0
+        while (i < kCount) {
+            val childId: Int = HirUtils.hirKidsAt(kids, i)
+            val childKind: String = src.kindOf(childId)
+            if (childKind != "HirParam") {
+                this.buildStmt(src, childId)
+            }
+            i = i + 1
+        }
+
+        // 如果没有终结指令，添加默认的 Ret
+        val b: MirBlock = this.program.blockOf(this.curBlock)
+        if (b.term < 0) {
+            this.program.setTerminator(this.curBlock, "Ret", retTypeId, "", "")
+        }
+
+        // 更新函数的块列表
+        val func: MirFunction = this.program.functionOf(this.curFunc)
+        func.entryBlock = entryBlock
+        this.endCurrentFunction()
+
+        return fid
+    }
+
+    /// 结束当前函数的构建。
+    fun endCurrentFunction() {
+        if (this.curFunc >= 0) {
+            this.program.endFunction()
+            this.curFunc = -1
+        }
+    }
+
+    // ── 语句构建 ──
+
+    /// 构建一个语句。
+    fun buildStmt(src: Hir, id: Int) {
+        val kind: String = src.kindOf(id)
+
+        if (kind == "HirValDecl" || kind == "HirVarDecl") {
+            this.buildVarDecl(src, id)
+        } else if (kind == "HirIf") {
+            this.buildIf(src, id)
+        } else if (kind == "HirWhile") {
+            this.buildWhile(src, id)
+        } else if (kind == "HirBlock") {
+            this.buildBlock(src, id)
+        } else if (kind == "HirReturn") {
+            this.buildReturn(src, id)
+        } else if (kind == "HirExprStmt") {
+            val kids: String = src.kidsOf(id)
+            if (HirUtils.hirKidsCount(kids) > 0) {
+                this.buildExpr(src, HirUtils.hirKidsAt(kids, 0))
+            }
+        } else if (kind == "HirAssign") {
+            this.buildAssign(src, id)
+        } else if (kind == "HirCall") {
+            this.buildExpr(src, id)
+        }
+    }
+
+    /// 构建变量声明（val/var）。
+    fun buildVarDecl(src: Hir, id: Int) {
+        val varName: String = src.textOf(id)
+        val kids: String = src.kidsOf(id)
+        val kCount: Int = HirUtils.hirKidsCount(kids)
+
+        // 降级初始化表达式
+        var initVal: Int = -1
+        if (kCount > 0) {
+            initVal = this.buildExpr(src, HirUtils.hirKidsAt(kids, 0))
+        } else {
+            // 无初始化：创建零值常量
+            val varTy: String = src.tyOf(id)
+            val varTypeId: Int = this.types.fromTypeName(varTy)
+            if (this.types.isInt(varTypeId)) {
+                initVal = this.program.addValue("Const", varTypeId, "", "0", this.curBlock)
+            } else if (this.types.isFloat(varTypeId)) {
+                initVal = this.program.addValue("Const", varTypeId, "", "0.0", this.curBlock)
+            } else {
+                initVal = this.program.addValue("Const", varTypeId, "", "null", this.curBlock)
+            }
+        }
+
+        // 存储到变量映射
+        this.varMapAdd(varName, initVal)
+    }
+
+    /// 构建 if 语句。
+    ///
+    /// 创建 then/else/merge 三个基本块：
+    ///   cond → CondBr(cond, then, else)
+    ///   then → build then body → Br(merge)
+    ///   else → build else body → Br(merge)
+    ///   merge → Phi 插入（若有变量被两分支定义）
+    fun buildIf(src: Hir, id: Int) {
+        val kids: String = src.kidsOf(id)
+        val kCount: Int = HirUtils.hirKidsCount(kids)
+        if (kCount < 2) {
+            return
+        }
+
+        // 降级条件
+        val condVal: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, 0))
+
+        // 创建 then 块、else 块、merge 块
+        val thenBlock: Int = this.program.addBlock()
+        val elseBlock: Int = this.program.addBlock()
+        val mergeBlock: Int = this.program.addBlock()
+
+        // 设置当前块的终结指令为 CondBr
+        this.program.setTerminator(this.curBlock, "CondBr", 0,
+            toStr(condVal) + "," + toStr(thenBlock) + "," + toStr(elseBlock), "")
+
+        // 构建 then 块
+        this.curBlock = thenBlock
+        this.buildBlock(src, HirUtils.hirKidsAt(kids, 1))
+
+        // 设置 then 块到 merge 块的跳转
+        val thenBlockObj: MirBlock = this.program.blockOf(this.curBlock)
+        if (thenBlockObj.term < 0) {
+            this.program.setTerminator(this.curBlock, "Br", 0, toStr(mergeBlock), "")
+        }
+
+        // 构建 else 块
+        if (kCount > 2) {
+            this.curBlock = elseBlock
+            this.buildBlock(src, HirUtils.hirKidsAt(kids, 2))
+            val elseBlockObj: MirBlock = this.program.blockOf(this.curBlock)
+            if (elseBlockObj.term < 0) {
+                this.program.setTerminator(this.curBlock, "Br", 0, toStr(mergeBlock), "")
+            }
+        } else {
+            // 无 else 分支：直接跳转到 merge
+            this.curBlock = elseBlock
+            this.program.setTerminator(this.curBlock, "Br", 0, toStr(mergeBlock), "")
+        }
+
+        // 继续构建 merge 块
+        this.curBlock = mergeBlock
+    }
+
+    /// 构建 while 语句。
+    ///
+    /// 创建 cond/body/end 三个基本块：
+    ///   cond → 降级条件 → CondBr(cond, body, end)
+    ///   body → 构建循环体 → Br(cond)
+    ///   end  → 循环结束
+    ///
+    /// 使用 loopStack 记录循环退出块，供 break/continue 查找。
+    fun buildWhile(src: Hir, id: Int) {
+        val kids: String = src.kidsOf(id)
+        val kCount: Int = HirUtils.hirKidsCount(kids)
+        if (kCount < 2) {
+            return
+        }
+
+        // 创建条件块（当前块）、循环体块、结束块
+        val condBlock: Int = this.curBlock
+        val bodyBlock: Int = this.program.addBlock()
+        val endBlock: Int = this.program.addBlock()
+
+        // 将结束块推入循环栈
+        this.loopStackPush(endBlock)
+
+        // 降级条件
+        val condVal: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, 0))
+
+        // 设置条件块的终结指令
+        this.program.setTerminator(condBlock, "CondBr", 0,
+            toStr(condVal) + "," + toStr(bodyBlock) + "," + toStr(endBlock), "")
+
+        // 构建循环体
+        this.curBlock = bodyBlock
+        this.buildBlock(src, HirUtils.hirKidsAt(kids, 1))
+
+        // 循环体结束：跳回条件块
+        val bodyBlockObj: MirBlock = this.program.blockOf(this.curBlock)
+        if (bodyBlockObj.term < 0) {
+            this.program.setTerminator(this.curBlock, "Br", 0, toStr(condBlock), "")
+        }
+
+        // 将结束块弹出循环栈
+        this.loopStackPop()
+
+        // 继续构建结束块
+        this.curBlock = endBlock
+    }
+
+    /// 构建块（HirBlock）。
+    fun buildBlock(src: Hir, id: Int) {
+        val kids: String = src.kidsOf(id)
+        val kCount: Int = HirUtils.hirKidsCount(kids)
+        var i: Int = 0
+        while (i < kCount) {
+            this.buildStmt(src, HirUtils.hirKidsAt(kids, i))
+            i = i + 1
+        }
+    }
+
+    /// 构建 return 语句。
+    fun buildReturn(src: Hir, id: Int) {
+        val kids: String = src.kidsOf(id)
+        val kCount: Int = HirUtils.hirKidsCount(kids)
+        if (kCount > 0) {
+            val retVal: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, 0))
+            this.program.setTerminator(this.curBlock, "Ret", 0, toStr(retVal), "")
+        } else {
+            this.program.setTerminator(this.curBlock, "Ret", 0, "", "")
+        }
+    }
+
+    /// 构建赋值语句。
+    fun buildAssign(src: Hir, id: Int) {
+        val kids: String = src.kidsOf(id)
+        val kCount: Int = HirUtils.hirKidsCount(kids)
+        if (kCount < 2) {
+            return
+        }
+        val varName: String = src.textOf(id)
+        val val: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, 1))
+        this.varMapAdd(varName, val)
+    }
+
+    // ── 表达式构建 ──
+
+    /// 构建一个表达式，返回 SSA ValueID。
+    fun buildExpr(src: Hir, id: Int): Int {
+        val kind: String = src.kindOf(id)
+
+        if (kind == "HirLit") {
+            return this.buildLit(src, id)
+        }
+        if (kind == "HirVar") {
+            return this.buildVar(src, id)
+        }
+        if (kind == "HirBinary") {
+            return this.buildBinary(src, id)
+        }
+        if (kind == "HirUnary") {
+            return this.buildUnary(src, id)
+        }
+        if (kind == "HirCall") {
+            return this.buildCall(src, id)
+        }
+        if (kind == "HirMember") {
+            return this.buildMember(src, id)
+        }
+        if (kind == "HirBlock") {
+            // 块表达式：构建块，返回最后一个表达式的值
+            val kids: String = src.kidsOf(id)
+            val kCount: Int = HirUtils.hirKidsCount(kids)
+            if (kCount == 0) {
+                return -1
+            }
+            // 构建块中的所有语句
+            var lastVal: Int = -1
+            var i: Int = 0
+            while (i < kCount) {
+                val childKind: String = src.kindOf(HirUtils.hirKidsAt(kids, i))
+                if (childKind == "HirExprStmt") {
+                    val ek: String = src.kidsOf(HirUtils.hirKidsAt(kids, i))
+                    if (HirUtils.hirKidsCount(ek) > 0) {
+                        lastVal = this.buildExpr(src, HirUtils.hirKidsAt(ek, 0))
+                    }
+                } else if (childKind != "HirReturn" && childKind != "HirIf"
+                    && childKind != "HirWhile" && childKind != "HirBlock") {
+                    lastVal = this.buildExpr(src, HirUtils.hirKidsAt(kids, i))
+                } else {
+                    this.buildStmt(src, HirUtils.hirKidsAt(kids, i))
+                }
+                i = i + 1
+            }
+            return lastVal
+        }
+
+        // 默认：返回零值常量
+        val ty: String = src.tyOf(id)
+        val typeId: Int = this.types.fromTypeName(ty)
+        if (this.types.isInt(typeId)) {
+            return this.program.addValue("Const", typeId, "", "0", this.curBlock)
+        } else if (this.types.isFloat(typeId)) {
+            return this.program.addValue("Const", typeId, "", "0.0", this.curBlock)
+        } else {
+            return this.program.addValue("Const", typeId, "", "null", this.curBlock)
+        }
+    }
+
+    /// 构建字面量。
+    fun buildLit(src: Hir, id: Int): Int {
+        val text: String = src.textOf(id)
+        val ty: String = src.tyOf(id)
+        val typeId: Int = this.types.fromTypeName(ty)
+
+        if (this.types.isInt(typeId)) {
+            return this.program.addValue("Const", typeId, "", text, this.curBlock)
+        } else if (this.types.isFloat(typeId)) {
+            return this.program.addValue("Const", typeId, "", text, this.curBlock)
+        } else if (this.types.isBool(typeId)) {
+            if (text == "true") {
+                return this.program.addValue("Const", typeId, "", "1", this.curBlock)
+            } else {
+                return this.program.addValue("Const", typeId, "", "0", this.curBlock)
+            }
+        } else {
+            return this.program.addValue("Const", typeId, "", text, this.curBlock)
+        }
+    }
+
+    /// 构建变量引用。
+    fun buildVar(src: Hir, id: Int): Int {
+        val name: String = src.textOf(id)
+        return this.varMapLookup(name)
+    }
+
+    /// 构建二元运算。
+    fun buildBinary(src: Hir, id: Int): Int {
+        val op: String = src.textOf(id)
+        val kids: String = src.kidsOf(id)
+        val kCount: Int = HirUtils.hirKidsCount(kids)
+        if (kCount < 2) {
+            return -1
+        }
+
+        val left: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, 0))
+        val right: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, 1))
+        val args: String = toStr(left) + "," + toStr(right)
+
+        // 映射运算符
+        val mirOp: String = this.mapBinaryOp(op)
+        val typeId: Int = this.types.fromTypeName(src.tyOf(id))
+
+        return this.program.addValue(mirOp, typeId, args, "", this.curBlock)
+    }
+
+    /// 构建一元运算。
+    fun buildUnary(src: Hir, id: Int): Int {
+        val op: String = src.textOf(id)
+        val kids: String = src.kidsOf(id)
+        val kCount: Int = HirUtils.hirKidsCount(kids)
+        if (kCount < 1) {
+            return -1
+        }
+
+        val operand: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, 0))
+        val args: String = toStr(operand)
+
+        // 映射运算符
+        val mirOp: String = this.mapUnaryOp(op)
+        val typeId: Int = this.types.fromTypeName(src.tyOf(id))
+
+        return this.program.addValue(mirOp, typeId, args, "", this.curBlock)
+    }
+
+    /// 构建函数调用。
+    fun buildCall(src: Hir, id: Int): Int {
+        val funcName: String = src.textOf(id)
+        val kids: String = src.kidsOf(id)
+        val kCount: Int = HirUtils.hirKidsCount(kids)
+
+        // 构建参数列表
+        var args: String = ""
+        var i: Int = 0
+        while (i < kCount) {
+            val argVal: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, i))
+            if (args == "") {
+                args = toStr(argVal)
+            } else {
+                args = args + "," + toStr(argVal)
+            }
+            i = i + 1
+        }
+
+        val typeId: Int = this.types.fromTypeName(src.tyOf(id))
+        return this.program.addValue("Call", typeId, args, funcName, this.curBlock)
+    }
+
+    /// 构建成员访问。
+    fun buildMember(src: Hir, id: Int): Int {
+        val fieldName: String = src.textOf(id)
+        val kids: String = src.kidsOf(id)
+        val kCount: Int = HirUtils.hirKidsCount(kids)
+        if (kCount < 1) {
+            return -1
+        }
+
+        val objVal: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, 0))
+        val args: String = toStr(objVal)
+        val typeId: Int = this.types.fromTypeName(src.tyOf(id))
+
+        return this.program.addValue("GetField", typeId, args, fieldName, this.curBlock)
+    }
+
+    // ── Phi 节点 ──
+
+    /// 向指定块添加 Phi 节点，返回 ValueID。
+    fun makePhi(blockId: Int, typeId: Int, incoming: String, aux: String): Int {
+        return this.program.addPhi(blockId, typeId, incoming, aux)
+    }
+
+    // ── 运算符映射 ──
+
+    /// 映射二元运算符到 MIR 操作符。
+    private fun mapBinaryOp(op: String): String {
+        if (op == "+" || op == "Plus") { return "Add" }
+        if (op == "-" || op == "Minus") { return "Sub" }
+        if (op == "*" || op == "Star") { return "Mul" }
+        if (op == "/" || op == "Slash") { return "SDiv" }
+        if (op == "%" || op == "Percent") { return "SRem" }
+        if (op == "==" || op == "EqEq") { return "ICmpEq" }
+        if (op == "!=" || op == "Neq") { return "ICmpNe" }
+        if (op == "<" || op == "Lt") { return "ICmpSlt" }
+        if (op == ">" || op == "Gt") { return "ICmpSgt" }
+        if (op == "<=" || op == "LtEq") { return "ICmpSle" }
+        if (op == ">=" || op == "GtEq") { return "ICmpSge" }
+        if (op == "<<" || op == "LtLt") { return "Shl" }
+        if (op == ">>" || op == "GtGt") { return "Shr" }
+        if (op == "&" || op == "Ampersand") { return "And" }
+        if (op == "|" || op == "Pipe") { return "Or" }
+        if (op == "^" || op == "Caret") { return "Xor" }
+        return "Add"
+    }
+
+    /// 映射一元运算符到 MIR 操作符。
+    private fun mapUnaryOp(op: String): String {
+        if (op == "-" || op == "Minus") { return "Neg" }
+        if (op == "!" || op == "Bang") { return "Not" }
+        if (op == "+" || op == "Plus") { return "Pos" }
+        return "Neg"
+    }
+
+    // ── 变量映射 ──
+
+    /// 向变量映射表追加一个条目。
+    ///
+    /// 使用 `name|vid\n` 拼接格式，与 MirLower.aura 一致。
+    private fun varMapAdd(name: String, vid: Int) {
+        this.varMap = this.varMap + name + "|" + toStr(vid) + "\n"
+    }
+
+    /// 从变量映射表查找变量值，返回 SSA ValueID。
+    ///
+    /// 遍历所有 `name|vid\n` 行，按 `|` 拆分后匹配名称。
+    private fun varMapLookup(name: String): Int {
+        val lines: List<String> = MirUtils.mirSplit(this.varMap, "\n")
+        var i: Int = 0
+        while (i < lines.size) {
+            val line: String = lines[i]
+            if (line != "" && line.contains("|")) {
+                val parts: List<String> = MirUtils.mirSplit(line, "|")
+                if (parts.size >= 2 && parts[0] == name) {
+                    return strToInt(parts[1])
+                }
+            }
+            i = i + 1
+        }
+        // 未找到：返回 0 值常量
+        return this.program.addValue("Const", this.types.intType(64), "", "0", this.curBlock)
+    }
+
+    // ── 循环栈 ──
+
+    /// 将块 ID 推入循环退出栈。
+    private fun loopStackPush(blockId: Int) {
+        if (this.loopStack == "") {
+            this.loopStack = toStr(blockId)
+        } else {
+            this.loopStack = toStr(blockId) + "," + this.loopStack
+        }
+    }
+
+    /// 从循环退出栈弹出块 ID。
+    private fun loopStackPop() {
+        if (this.loopStack == "") {
+            return
+        }
+        val commaIdx: Int = this.loopStack.indexOf(",")
+        if (commaIdx < 0) {
+            this.loopStack = ""
+        } else {
+            this.loopStack = this.loopStack.substring(commaIdx + 1)
+        }
+    }
+
+    // ── 工具方法 ──
+
+    /// 字符串转整数。
+    private fun strToInt(text: String): Int {
+        return SsaMirUtils.strToInt(text)
+    }
+
+    /// 整数转字符串。
+    private fun toStr(n: Int): String {
+        return SsaMirUtils.toStr(n)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// SsaBuilder 工具对象
+// ─────────────────────────────────────────────────────────────
+
+object SsaBuilderUtils {
+
+    /// 执行 HIR → SSA 降级。
+    fun build(hir: Hir): MirSsaProgram {
+        val builder: SsaBuilder = SsaBuilder()
+        return builder.build(hir)
+    }
+}
