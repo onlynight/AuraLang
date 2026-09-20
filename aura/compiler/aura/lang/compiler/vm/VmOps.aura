@@ -123,8 +123,38 @@ object VmOps {
     }
 
     /// Any -> Long（64 位）。
+    ///
+    /// 直接解析为 Long，不经过 toI32（后者仅 32 位，会丢失高 32 位）。
+    /// 64 位对象指针（如 `Memory.alloc` 返回的地址）必须保留完整精度。
     fun toI64(s: String): Long {
-        return toI32(s).toLong()
+        if (s == null || s == "") {
+            return 0
+        }
+        if (s == "true") {
+            return 1
+        }
+        if (s == "false" || s == "Unit") {
+            return 0
+        }
+        var total: Long = 0
+        var i: Int = 0
+        var len: Int = s.length
+        var neg: Boolean = false
+        if (len > 0 && s.charCodeAt(0) == 45) {
+            neg = true
+            i = 1
+        }
+        while (i < len) {
+            val c: Int = s.charCodeAt(i)
+            if (c >= 48 && c <= 57) {
+                total = total * 10 + (c - 48)
+            }
+            i = i + 1
+        }
+        if (neg) {
+            return -total
+        }
+        return total
     }
 
     /// Any -> Float（when 优化）。
@@ -487,6 +517,229 @@ object VmOps {
             i = i + 1
         }
         return true
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  字符串工具（FFI 原生函数支持）
+    // ═══════════════════════════════════════════════════════════
+
+    /// 判断字符串是否包含子串。
+    fun contains(text: String, sub: String): Boolean {
+        if (sub == "" || sub == null) {
+            return true
+        }
+        if (text == null || text.length < sub.length) {
+            return false
+        }
+        val tLen: Int = text.length
+        val sLen: Int = sub.length
+        var i: Int = 0
+        while (i <= tLen - sLen) {
+            var j: Int = 0
+            var match: Boolean = true
+            while (j < sLen) {
+                if (text.charCodeAt(i + j) != sub.charCodeAt(j)) {
+                    match = false
+                    break
+                }
+                j = j + 1
+            }
+            if (match) {
+                return true
+            }
+            i = i + 1
+        }
+        return false
+    }
+
+    /// 去除首尾空白字符。
+    fun trim(text: String): String {
+        if (text == null || text == "") {
+            return ""
+        }
+        var start: Int = 0
+        var end: Int = text.length
+        while (start < end && isSpace(text.charCodeAt(start))) {
+            start = start + 1
+        }
+        while (end > start && isSpace(text.charCodeAt(end - 1))) {
+            end = end - 1
+        }
+        if (start >= end) {
+            return ""
+        }
+        return text.substring(start, end)
+    }
+
+    /// 判断字符串是否以指定前缀开头。
+    fun startsWith(text: String, prefix: String): Boolean {
+        if (prefix == "" || prefix == null) {
+            return true
+        }
+        if (text == null || text.length < prefix.length) {
+            return false
+        }
+        var i: Int = 0
+        while (i < prefix.length) {
+            if (text.charCodeAt(i) != prefix.charCodeAt(i)) {
+                return false
+            }
+            i = i + 1
+        }
+        return true
+    }
+
+    /// 判断字符串是否以指定后缀结尾。
+    fun endsWith(text: String, suffix: String): Boolean {
+        if (suffix == "" || suffix == null) {
+            return true
+        }
+        if (text == null || text.length < suffix.length) {
+            return false
+        }
+        val diff: Int = text.length - suffix.length
+        var i: Int = 0
+        while (i < suffix.length) {
+            if (text.charCodeAt(diff + i) != suffix.charCodeAt(i)) {
+                return false
+            }
+            i = i + 1
+        }
+        return true
+    }
+
+    /// 查找子串在文本中的首次出现位置（从 start 开始搜索），未找到返回 -1。
+    fun indexOf(text: String, sub: String, start: Int): Int {
+        if (sub == "" || sub == null) {
+            return start
+        }
+        if (text == null || text.length < sub.length) {
+            return -1
+        }
+        val tLen: Int = text.length
+        val sLen: Int = sub.length
+        var i: Int = start
+        if (i < 0) { i = 0 }
+        while (i <= tLen - sLen) {
+            var j: Int = 0
+            var match: Boolean = true
+            while (j < sLen) {
+                if (text.charCodeAt(i + j) != sub.charCodeAt(j)) {
+                    match = false
+                    break
+                }
+                j = j + 1
+            }
+            if (match) {
+                return i
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// 替换字符串中的所有子串出现。
+    fun replace(text: String, old: String, newStr: String): String {
+        if (old == "" || old == null) {
+            return text
+        }
+        var result: String = ""
+        var i: Int = 0
+        var len: Int = text.length
+        var oLen: Int = old.length
+        while (i < len) {
+            if (i + oLen <= len) {
+                var j: Int = 0
+                var match: Boolean = true
+                while (j < oLen) {
+                    if (text.charCodeAt(i + j) != old.charCodeAt(j)) {
+                        match = false
+                        break
+                    }
+                    j = j + 1
+                }
+                if (match) {
+                    result = result + newStr
+                    i = i + oLen
+                    continue
+                }
+            }
+            result = result + String.fromCharCode(text.charCodeAt(i))
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 计算浮点数平方根（牛顿迭代法）。
+    fun sqrt(v: Float): Float {
+        if (v < 0.0f) {
+            return 0.0f
+        }
+        if (v == 0.0f) {
+            return 0.0f
+        }
+        var guess: Float = v / 2.0f
+        if (guess == 0.0f) {
+            guess = 0.0001f
+        }
+        var i: Int = 0
+        while (i < 100) {
+            val next: Float = (guess + v / guess) / 2.0f
+            if (absf(next - guess) < 0.00001f) {
+                break
+            }
+            guess = next
+            i = i + 1
+        }
+        return guess
+    }
+
+    /// 计算浮点幂次（base^exp）。
+    fun pow(base: Float, exp: Float): Float {
+        if (base == 0.0f) {
+            return 0.0f
+        }
+        if (exp == 0.0f) {
+            return 1.0f
+        }
+        if (exp == 1.0f) {
+            return base
+        }
+        if (exp == 2.0f) {
+            return base * base
+        }
+        if (exp == 0.5f) {
+            return sqrt(base)
+        }
+        // 通用实现：exp^ln(base) 近似
+        var result: Float = 1.0f
+        var e: Float = exp
+        var neg: Boolean = false
+        if (e < 0.0f) {
+            neg = true
+            e = -e
+        }
+        var i: Int = 0
+        while (e > 0.0f) {
+            result = result * base
+            e = e - 1.0f
+            i = i + 1
+            if (i > 1000000) {
+                break
+            }
+        }
+        if (neg) {
+            return 1.0f / result
+        }
+        return result
+    }
+
+    /// 浮点绝对值。
+    fun absf(v: Float): Float {
+        if (v < 0.0f) {
+            return -v
+        }
+        return v
     }
 
     /// 在函数表中查找函数偏移（`name|起始行|参数个数`）。

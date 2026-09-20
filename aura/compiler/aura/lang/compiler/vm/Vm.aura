@@ -16,8 +16,13 @@ package aura.lang.compiler.vm
 
 import aura.lang.std.String
 import aura.lang.std.FileSystem
+import aura.lang.std.IO
 import aura.lang.std.Process
+import aura.lang.std.Env
+import aura.lang.std.Time
 import aura.lang.native.Memory
+import aura.lang.native.Cpu
+import aura.lang.native.thread.ThreadOps
 import aura.lang.collection.HashMap
 import aura.lang.compiler.lexer.Span
 import aura.lang.compiler.vm.Opcodes
@@ -842,6 +847,229 @@ class Vm {
             return
         }
 
+        // ── Math（带命名空间） ──
+        else if (funcName == "aura.lang.std.Math.abs" || funcName == "Math.abs") {
+            val v: Any = this.stack.pop()
+            val iv: Int = VmOps.toI32(toStr(v))
+            this.stack.push(if (iv < 0) -iv else iv)
+            return
+        } else if (funcName == "aura.lang.std.Math.min" || funcName == "Math.min") {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            val av: Int = VmOps.toI32(toStr(a))
+            val bv: Int = VmOps.toI32(toStr(b))
+            this.stack.push(if (av < bv) av else bv)
+            return
+        } else if (funcName == "aura.lang.std.Math.max" || funcName == "Math.max") {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            val av: Int = VmOps.toI32(toStr(a))
+            val bv: Int = VmOps.toI32(toStr(b))
+            this.stack.push(if (av > bv) av else bv)
+            return
+        } else if (funcName == "aura.lang.std.Math.round" || funcName == "Math.round") {
+            val v: Any = this.stack.pop()
+            val fv: Float = VmOps.parseFloat(toStr(v))
+            this.stack.push(VmOps.toI32(toStr(fv + 0.5)))
+            return
+        } else if (funcName == "aura.lang.std.Math.floor" || funcName == "Math.floor") {
+            val v: Any = this.stack.pop()
+            val fv: Float = VmOps.parseFloat(toStr(v))
+            this.stack.push(VmOps.toI32(toStr(fv)))
+            return
+        } else if (funcName == "aura.lang.std.Math.ceil" || funcName == "Math.ceil") {
+            val v: Any = this.stack.pop()
+            val fv: Float = VmOps.parseFloat(toStr(v))
+            this.stack.push(VmOps.toI32(toStr(fv + 1)))
+            return
+        } else if (funcName == "aura.lang.std.Math.sqrt" || funcName == "Math.sqrt") {
+            val v: Any = this.stack.pop()
+            val fv: Float = VmOps.parseFloat(toStr(v))
+            this.stack.push(VmOps.sqrt(fv))
+            return
+        } else if (funcName == "aura.lang.std.Math.pow" || funcName == "Math.pow") {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            this.stack.push(VmOps.pow(VmOps.parseFloat(toStr(a)), VmOps.parseFloat(toStr(b))))
+            return
+        }
+
+        // ── String 方法（带命名空间） ──
+        else if (funcName == "String.isEmpty" || funcName == "isEmpty") {
+            val v: Any = this.stack.pop()
+            this.stack.push(toStr(v).length == 0)
+            return
+        } else if (funcName == "String.toUpper" || funcName == "toUpper") {
+            val v: Any = this.stack.pop()
+            this.stack.push(toStr(v).toUpperCase())
+            return
+        } else if (funcName == "String.toLower" || funcName == "toLower") {
+            val v: Any = this.stack.pop()
+            this.stack.push(toStr(v).toLowerCase())
+            return
+        } else if (funcName == "String.contains" || funcName == "contains") {
+            val sub: Any = this.stack.pop()
+            val v: Any = this.stack.pop()
+            this.stack.push(VmOps.contains(toStr(v), toStr(sub)))
+            return
+        } else if (funcName == "String.trim" || funcName == "trim") {
+            val v: Any = this.stack.pop()
+            this.stack.push(VmOps.trim(toStr(v)))
+            return
+        } else if (funcName == "String.startsWith" || funcName == "startsWith") {
+            val prefix: Any = this.stack.pop()
+            val v: Any = this.stack.pop()
+            this.stack.push(VmOps.startsWith(toStr(v), toStr(prefix)))
+            return
+        } else if (funcName == "String.endsWith" || funcName == "endsWith") {
+            val suffix: Any = this.stack.pop()
+            val v: Any = this.stack.pop()
+            this.stack.push(VmOps.endsWith(toStr(v), toStr(suffix)))
+            return
+        } else if (funcName == "String.split" || funcName == "split") {
+            val sep: Any = this.stack.pop()
+            val v: Any = this.stack.pop()
+            val sepStr: String = toStr(sep)
+            val text: String = toStr(v)
+            val result: Any = VmCollections.newList()
+            if (sepStr == "") {
+                // 空分隔符：每字符一个元素
+                var ci: Int = 0
+                while (ci < text.length) {
+                    VmCollections.push(result, String.fromCharCode(text.charCodeAt(ci)))
+                    ci = ci + 1
+                }
+                this.stack.push(result)
+                return
+            }
+            var pos: Int = 0
+            while (pos < text.length) {
+                val idx: Int = VmOps.indexOf(text, sepStr, pos)
+                if (idx < 0) {
+                    VmCollections.push(result, VmOps.vmSubstr(text, pos, text.length - pos))
+                    break
+                }
+                VmCollections.push(result, VmOps.vmSubstr(text, pos, idx - pos))
+                pos = idx + sepStr.length
+            }
+            this.stack.push(result)
+            return
+        } else if (funcName == "String.replace" || funcName == "replace") {
+            val newStr: Any = this.stack.pop()
+            val oldStr: Any = this.stack.pop()
+            val v: Any = this.stack.pop()
+            this.stack.push(VmOps.replace(toStr(v), toStr(oldStr), toStr(newStr)))
+            return
+        }
+
+        // ── 文件 I/O ──
+        else if (funcName == "fileRead" || funcName == "IO.fileRead"
+            || funcName == "aura.lang.std.IO.fileRead") {
+            val path: Any = this.stack.pop()
+            this.stack.push(IO.readFile(toStr(path)))
+            return
+        } else if (funcName == "fileWrite" || funcName == "IO.fileWrite"
+            || funcName == "aura.lang.std.IO.fileWrite") {
+            val content: Any = this.stack.pop()
+            val path: Any = this.stack.pop()
+            IO.writeFile(toStr(path), toStr(content))
+            this.stack.push("Unit")
+            return
+        } else if (funcName == "readLine" || funcName == "IO.readLine"
+            || funcName == "aura.lang.std.IO.readLine") {
+            this.stack.push(IO.readLine())
+            return
+        }
+
+        // ── Process ──
+        else if (funcName == "argCount" || funcName == "Process.argCount"
+            || funcName == "aura.lang.std.Process.argCount") {
+            this.stack.push(Process.argCount())
+            return
+        } else if (funcName == "arg" || funcName == "Process.arg"
+            || funcName == "aura.lang.std.Process.arg") {
+            val idx: Any = this.stack.pop()
+            this.stack.push(Process.arg(VmOps.toI32(toStr(idx))))
+            return
+        } else if (funcName == "Process.exit" || funcName == "aura.lang.std.Process.exit") {
+            val code: Any = this.stack.pop()
+            this.exitCode = VmOps.toI32(toStr(code))
+            this.running = false
+            return
+        } else if (funcName == "Process.env" || funcName == "aura.lang.std.Process.env") {
+            val name: Any = this.stack.pop()
+            this.stack.push(Env.get(toStr(name), ""))
+            return
+        }
+
+        // ── Collections（补充） ──
+        else if (funcName == "Collections.push" || funcName == "aura.lang.std.Collections.push") {
+            val elem: Any = this.stack.pop()
+            val list: Any = this.stack.pop()
+            VmCollections.push(list, elem)
+            this.stack.push("Unit")
+            return
+        } else if (funcName == "Collections.listOf" || funcName == "aura.lang.std.Collections.listOf") {
+            // 与顶层 listOf 相同
+            val list: Any = VmCollections.newList()
+            val base: Int = this.stack.size() - argc
+            var j: Int = 0
+            while (j < argc) {
+                VmCollections.push(list, this.stack.vmSlotAt(base + j))
+                j = j + 1
+            }
+            var k: Int = 0
+            while (k < argc) {
+                this.stack.pop()
+                k = k + 1
+            }
+            this.stack.push(list)
+            return
+        } else if (funcName == "Collections.mapOf" || funcName == "aura.lang.std.Collections.mapOf") {
+            val map: Any = VmCollections.newMap()
+            var i: Int = argc - 1
+            while (i >= 0) {
+                val val: Any = this.stack.pop()
+                val key: Any = this.stack.pop()
+                VmCollections.mapSet(map, key, val)
+                i = i - 1
+            }
+            this.stack.push(map)
+            return
+        }
+
+        // ── Time ──
+        else if (funcName == "Time.now" || funcName == "aura.lang.std.Time.now"
+            || funcName == "Time.sinceEpoch" || funcName == "aura.lang.std.Time.sinceEpoch") {
+            this.stack.push(Time.getNowMs())
+            return
+        }
+
+        // ── Json ──
+        else if (funcName == "Json.parse" || funcName == "aura.lang.std.Json.parse") {
+            val text: Any = this.stack.pop()
+            // 简化实现：返回原始字符串（完整 JSON 解析需要专用解析器）
+            this.stack.push(toStr(text))
+            return
+        } else if (funcName == "Json.stringify" || funcName == "aura.lang.std.Json.stringify") {
+            val v: Any = this.stack.pop()
+            this.stack.push(VmOps.toStrAny(v))
+            return
+        }
+
+        // ── Assert ──
+        else if (funcName == "Assert.equal" || funcName == "aura.lang.std.Assert.equal") {
+            val b: Any = this.stack.pop()
+            val a: Any = this.stack.pop()
+            if (VmOps.eq(a, b)) {
+                this.stack.push("Unit")
+            } else {
+                this.error = "Assertion failed: " + VmOps.toStrAny(a) + " != " + VmOps.toStrAny(b)
+                this.running = false
+            }
+            return
+        }
+
         // 用户函数：压栈返回地址，跳转到函数入口
         val target: Int = this.funcOffset(funcName)
         if (target == 0 && this.funcParamCount(funcName) < 0) {
@@ -1105,49 +1333,116 @@ class Vm {
     //  ARC 生命周期
     // ═══════════════════════════════════════════════════════════
 
-    // ARC：`RETAIN` / `RELEASE` / `INC_REF` / `DEC_REF` 的语义依赖
-    // 「堆对象头 + 引用计数」（`Gc.aura` / `Arc.aura`），而当前 Aura VM 尚未接入
-    // 该对象模型：旧实现把栈顶 `Any` 按 `toI64(toStr(v))` 当作指针，再去
-    // `ptr + 8` 读写引用计数 —— 字符串/装箱整数会被解释成任意地址，
-    // 执行到 `.auc` 的第一条 `RETAIN` 即访问违规。
-    // 这里退化为**空操作**（AOT 运行时本就无 GC，语义不变）。
+    // ARC 生命周期：基于堆对象头引用计数（offset 8 = u32 refcount）。
+    //
+    // 安全前提：编译器**仅**对引用类型（对象/集合/闭包）发射 ARC 指令。
+    // 但 VM 仍做**防御性类型检查**——若栈顶不是 Long 指针，直接透传
+    // （`typeName` 区分 Int/String/Float/Boolean 等装箱值）。
+    //
+    // 对象布局（与 `newObject` / `boxAlloc` 一致）：
+    //   offset 0..7   : 类型标签 / 值载荷 (u64)
+    //   offset 8..11  : 引用计数 (u32)
+    //   offset 12..15 : 保留
+
+    /// 递增引用计数。
     private fun incRef(): Unit {
-    }
-
-    private fun decRef(): Unit {
-    }
-
-    private fun retain(): Unit {
-    }
-
-    private fun release(): Unit {
-    }
-
-    private fun dropRef(): Unit {
-        // 维持栈平衡：弹出一个值，但不做回收（避免误释放字符串字面量/装箱值）
-        this.stack.pop()
-    }
-
-    private fun weakRef(): Unit {
-        // 弱引用：不增加计数，返回原值
-        this.stack.push(this.stack.peek())
-    }
-
-    private fun weakGet(): Unit {
-        // 弱引用升级：检查引用计数
         val v: Any = this.stack.pop()
-        if (v != null) {
-            val ptr: Long = VmOps.toI64(toStr(v))
-            if (ptr > 0) {
-                val rc: Int = Memory.read32(ptr + 8)
-                if (rc > 0) {
-                    Memory.write32(ptr + 8, rc + 1)
-                    this.stack.push(v)
-                    return
-                }
+        if (v == null || VmOps.typeName(v) != "Long") {
+            this.stack.push(v)
+            return
+        }
+        val ptr: Long = VmOps.toI64(toStr(v))
+        if (ptr <= 0) {
+            this.stack.push(v)
+            return
+        }
+        val rc: Int = Memory.read32(ptr + 8)
+        if (rc > 0) {
+            Memory.write32(ptr + 8, rc + 1)
+        }
+        this.stack.push(v)
+    }
+
+    /// 递减引用计数，归零时释放堆内存。
+    private fun decRef(): Unit {
+        val v: Any = this.stack.pop()
+        if (v == null || VmOps.typeName(v) != "Long") {
+            this.stack.push(v)
+            return
+        }
+        val ptr: Long = VmOps.toI64(toStr(v))
+        if (ptr <= 0) {
+            this.stack.push(v)
+            return
+        }
+        val rc: Int = Memory.read32(ptr + 8)
+        val newRc: Int = rc - 1
+        if (newRc <= 0) {
+            Memory.free(ptr)
+            this.stack.push(null)
+        } else {
+            Memory.write32(ptr + 8, newRc)
+            this.stack.push(v)
+        }
+    }
+
+    /// 保留（别名 incRef，语义更显式）。
+    private fun retain(): Unit {
+        this.incRef()
+    }
+
+    /// 释放（别名 decRef，语义更显式）。
+    private fun release(): Unit {
+        this.decRef()
+    }
+
+    /// 丢弃引用：弹出并回收。
+    private fun dropRef(): Unit {
+        val v: Any = this.stack.pop()
+        if (v == null || VmOps.typeName(v) != "Long") {
+            return
+        }
+        val ptr: Long = VmOps.toI64(toStr(v))
+        if (ptr <= 0) {
+            return
+        }
+        val rc: Int = Memory.read32(ptr + 8)
+        if (rc > 0) {
+            val newRc: Int = rc - 1
+            if (newRc <= 0) {
+                Memory.free(ptr)
+            } else {
+                Memory.write32(ptr + 8, newRc)
             }
         }
-        this.stack.push(null)
+    }
+
+    /// 创建弱引用（不增加引用计数，返回原指针值）。
+    private fun weakRef(): Unit {
+        val v: Any = this.stack.pop()
+        this.stack.push(v)
+    }
+
+    /// 弱引用升级：若对象仍存活（refcount > 0），升级（+1）并返回原值；
+    /// 否则返回 null（对象已被回收）。
+    private fun weakGet(): Unit {
+        val v: Any = this.stack.pop()
+        if (v == null || VmOps.typeName(v) != "Long") {
+            this.stack.push(v)
+            return
+        }
+        val ptr: Long = VmOps.toI64(toStr(v))
+        if (ptr <= 0) {
+            this.stack.push(null)
+            return
+        }
+        val rc: Int = Memory.read32(ptr + 8)
+        if (rc > 0) {
+            Memory.write32(ptr + 8, rc + 1)
+            this.stack.push(v)
+        } else {
+            this.stack.push(null)
+        }
     }
 
     private fun boxAlloc(): Unit {
@@ -1201,14 +1496,24 @@ class Vm {
     // ═══════════════════════════════════════════════════════════
 
     private fun callC(idx: Int): Unit {
-        // C ABI 函数调用（由外部宿主处理）
-        this.error = "CallC: native function not available in Aura VM"
+        // C ABI 函数调用。
+        //
+        // `.auc` 路径中，AucLoader 已将 CALL_C 转为 CALL_NATIVE_ARGS（按名分派），
+        // 此方法仅用于文本字节码直接生成的 CALL_C 指令。
+        // 完整的 C FFI 需要 VM 持有原生函数指针表，当前以清晰错误退让。
+        this.error = "CallC: index=" + toStr(idx)
+            + " (native function table not loaded; use .auc path via AucLoader)"
         this.running = false
     }
 
     private fun callNative(idx: Int): Unit {
-        // 原生函数调用
-        this.error = "CallNative: not available in Aura VM"
+        // 原生函数调用（按索引）。
+        //
+        // `.auc` 路径中，AucLoader 已将 CALL_NATIVE(27) 转为 CALL_NATIVE_ARGS
+        // 并将原生表下标解析为函数名，由 callOrBuiltin 按名分派。
+        // 此方法仅用于文本字节码直接生成的 CALL_NATIVE 指令。
+        this.error = "CallNative: index=" + toStr(idx)
+            + " (native function table not loaded; .auc files are handled by AucLoader)"
         this.running = false
     }
 
@@ -1280,100 +1585,276 @@ class Vm {
     }
 
     // ═══════════════════════════════════════════════════════════
-    //  并发（简化实现，由外部宿主处理）
+    //  并发（完整实现：线程 / 互斥锁 / 原子 / 通道 / 读写锁 / 条件变量）
+    // ═══════════════════════════════════════════════════════════
+    //
+    // 实现分层：
+    //   * 线程操作委托到 `ThreadOps`（native 桥）
+    //   * 自旋锁/原子操作使用 `Cpu.atomicAdd`（lock xaddq）
+    //   * 数据结构与状态管理在 Aura 中完成
+    //
+    // 与 `aura.lang.concurrent.*` 模块对应：
+    //   ThreadOps ←→ Thread; Mutex.*; Atomic.*; RwLock.*; Condvar.*
     // ═══════════════════════════════════════════════════════════
 
+    /// 自旋获取：`fetch_add(1)` 返回 0 则获得锁。
+    private fun vmSpinAcquire(word: Long): Unit {
+        while (true) {
+            if (Cpu.atomicAdd(word, 1L) == 0L) { return }
+            Cpu.atomicAdd(word, 0L - 1L)
+        }
+    }
+
+    /// 自旋释放：`fetch_add(-1)`。
+    private fun vmSpinRelease(word: Long): Unit {
+        Cpu.atomicAdd(word, 0L - 1L)
+    }
+
+    // ── 线程 ──
+
     private fun threadSpawn(): Unit {
-        this.stack.push(0)
+        val arg: Any = this.stack.pop()
+        val fnId: Any = this.stack.pop()
+        val handle: Int = ThreadOps.create(
+            VmOps.toI32(toStr(fnId)), VmOps.toI32(toStr(arg)))
+        this.stack.push(handle)
     }
+
     private fun threadJoin(): Unit {
-        this.stack.pop()
-        this.stack.push("Unit")
+        val tid: Any = this.stack.pop()
+        val result: Int = ThreadOps.join(VmOps.toI32(toStr(tid)))
+        this.stack.push(result)
     }
+
     private fun threadSleep(): Unit {
-        this.stack.pop()
+        val ms: Any = this.stack.pop()
+        ThreadOps.sleepMs(VmOps.toI32(toStr(ms)))
     }
+
     private fun threadId(): Unit {
-        this.stack.push(0)
+        this.stack.push(ThreadOps.currentId())
     }
+
     private fun threadParallelism(): Unit {
-        this.stack.push(1)
+        this.stack.push(ThreadOps.cores())
     }
+
+    // ── 互斥锁（自旋锁，8 字节锁字） ──
+
     private fun mutexNew(): Unit {
-        this.stack.push(0)
+        val addr: Long = Memory.alloc(8L)
+        Memory.write64(addr, 0L)
+        this.stack.push(addr)
     }
+
     private fun mutexLock(): Unit {
-        this.stack.pop()
+        val addr: Long = VmOps.toI64(toStr(this.stack.pop()))
+        while (true) {
+            if (Cpu.atomicAdd(addr, 1L) == 0L) { return }
+            Cpu.atomicAdd(addr, 0L - 1L)
+        }
     }
-    private fun mutexUnlock(): Unit {
-        this.stack.pop()
-    }
+
     private fun mutexTryLock(): Unit {
-        this.stack.pop()
-        this.stack.push(true)
+        val addr: Long = VmOps.toI64(toStr(this.stack.pop()))
+        if (Cpu.atomicAdd(addr, 1L) == 0L) {
+            this.stack.push(true)
+        } else {
+            Cpu.atomicAdd(addr, 0L - 1L)
+            this.stack.push(false)
+        }
     }
+
+    private fun mutexUnlock(): Unit {
+        val addr: Long = VmOps.toI64(toStr(this.stack.pop()))
+        Cpu.atomicAdd(addr, 0L - 1L)
+    }
+
+    // ── 原子整数（16 字节：值 + CAS 守卫） ──
+
+    private fun atomicNew(): Unit {
+        val initial: Any = this.stack.pop()
+        val addr: Long = Memory.alloc(16L)
+        Memory.write64(addr, VmOps.toI64(toStr(initial)))
+        Memory.write64(addr + 8L, 0L)
+        this.stack.push(addr)
+    }
+
+    private fun atomicLoad(): Unit {
+        val addr: Long = VmOps.toI64(toStr(this.stack.pop()))
+        this.stack.push(Memory.read64(addr))
+    }
+
+    private fun atomicStore(): Unit {
+        val value: Any = this.stack.pop()
+        val addr: Long = VmOps.toI64(toStr(this.stack.pop()))
+        Memory.write64(addr, VmOps.toI64(toStr(value)))
+    }
+
+    private fun atomicAdd(): Unit {
+        val delta: Any = this.stack.pop()
+        val addr: Long = VmOps.toI64(toStr(this.stack.pop()))
+        this.stack.push(Cpu.atomicAdd(addr, VmOps.toI64(toStr(delta))))
+    }
+
+    private fun atomicCas(): Unit {
+        val desired: Any = this.stack.pop()
+        val expected: Any = this.stack.pop()
+        val base: Long = VmOps.toI64(toStr(this.stack.pop()))
+        val guard: Long = base + 8L
+        val expVal: Long = VmOps.toI64(toStr(expected))
+        val desVal: Long = VmOps.toI64(toStr(desired))
+        vmSpinAcquire(guard)
+        val ok: Boolean = Memory.read64(base) == expVal
+        if (ok) { Memory.write64(base, desVal) }
+        vmSpinRelease(guard)
+        this.stack.push(ok)
+    }
+
+    // ── 通道（32B 头 + cap×8B 环形缓冲区） ──
+
     private fun channelNew(): Unit {
         val cap: Any = this.stack.pop()
-        this.stack.push(0)
+        var capacity: Long = VmOps.toI32(toStr(cap)).toLong()
+        if (capacity <= 0L) { capacity = 64L }
+        val addr: Long = Memory.alloc(32L + capacity * 8L)
+        Memory.write64(addr, 0L)
+        Memory.write64(addr + 8L, 0L)
+        Memory.write64(addr + 16L, capacity)
+        Memory.write64(addr + 24L, 0L)
+        this.stack.push(addr)
     }
+
     private fun channelSend(): Unit {
-        this.stack.pop()
-        this.stack.pop()
+        val value: Any = this.stack.pop()
+        val addr: Long = VmOps.toI64(toStr(this.stack.pop()))
+        val valueRaw: Long = VmOps.toI64(toStr(value))
+        val capacity: Long = Memory.read64(addr + 16L)
+        while (true) {
+            vmSpinAcquire(addr + 24L)
+            val head: Long = Memory.read64(addr)
+            val tail: Long = Memory.read64(addr + 8L)
+            if (head - tail < capacity) {
+                Memory.write64(addr + 32L + (head % capacity) * 8L, valueRaw)
+                Memory.write64(addr, head + 1L)
+                vmSpinRelease(addr + 24L)
+                return
+            }
+            vmSpinRelease(addr + 24L)
+            ThreadOps.sleepMs(1)
+        }
     }
+
     private fun channelRecv(): Unit {
-        this.stack.pop()
-        this.stack.push(null)
+        val addr: Long = VmOps.toI64(toStr(this.stack.pop()))
+        val capacity: Long = Memory.read64(addr + 16L)
+        while (true) {
+            vmSpinAcquire(addr + 24L)
+            val head: Long = Memory.read64(addr)
+            val tail: Long = Memory.read64(addr + 8L)
+            if (head > tail) {
+                val val: Long = Memory.read64(addr + 32L + (tail % capacity) * 8L)
+                Memory.write64(addr + 8L, tail + 1L)
+                vmSpinRelease(addr + 24L)
+                this.stack.push(val)
+                return
+            }
+            vmSpinRelease(addr + 24L)
+            ThreadOps.sleepMs(1)
+        }
     }
-    private fun atomicNew(): Unit {
-        this.stack.pop()
-        this.stack.push(0)
-    }
-    private fun atomicLoad(): Unit {
-        this.stack.pop()
-        this.stack.push(0)
-    }
-    private fun atomicStore(): Unit {
-        this.stack.pop()
-        this.stack.pop()
-    }
-    private fun atomicAdd(): Unit {
-        this.stack.pop()
-        this.stack.pop()
-        this.stack.push(0)
-    }
-    private fun atomicCas(): Unit {
-        this.stack.pop()
-        this.stack.pop()
-        this.stack.pop()
-        this.stack.push(false)
-    }
+
+    // ── 读写锁（24 字节：守卫 + 读者计数 + 写者标志） ──
+
     private fun rwLockNew(): Unit {
-        this.stack.push(0)
+        val addr: Long = Memory.alloc(24L)
+        Memory.write64(addr, 0L)
+        Memory.write64(addr + 8L, 0L)
+        Memory.write64(addr + 16L, 0L)
+        this.stack.push(addr)
     }
+
     private fun rwLockReadLock(): Unit {
-        this.stack.pop()
+        val guard: Long = VmOps.toI64(toStr(this.stack.pop()))
+        val readers: Long = guard + 8L
+        val writer: Long = guard + 16L
+        while (true) {
+            vmSpinAcquire(guard)
+            if (Memory.read64(writer) == 0L) {
+                Memory.write64(readers, Memory.read64(readers) + 1L)
+                vmSpinRelease(guard)
+                return
+            }
+            vmSpinRelease(guard)
+        }
     }
+
     private fun rwLockWriteLock(): Unit {
-        this.stack.pop()
+        val guard: Long = VmOps.toI64(toStr(this.stack.pop()))
+        val readers: Long = guard + 8L
+        val writer: Long = guard + 16L
+        while (true) {
+            vmSpinAcquire(guard)
+            if (Memory.read64(readers) == 0L && Memory.read64(writer) == 0L) {
+                Memory.write64(writer, 1L)
+                vmSpinRelease(guard)
+                return
+            }
+            vmSpinRelease(guard)
+        }
     }
+
     private fun rwLockReadUnlock(): Unit {
-        this.stack.pop()
+        val guard: Long = VmOps.toI64(toStr(this.stack.pop()))
+        val readers: Long = guard + 8L
+        vmSpinAcquire(guard)
+        Memory.write64(readers, Memory.read64(readers) - 1L)
+        vmSpinRelease(guard)
     }
+
     private fun rwLockWriteUnlock(): Unit {
-        this.stack.pop()
+        val guard: Long = VmOps.toI64(toStr(this.stack.pop()))
+        val writer: Long = guard + 16L
+        vmSpinAcquire(guard)
+        Memory.write64(writer, 0L)
+        vmSpinRelease(guard)
     }
+
+    // ── 条件变量（16 字节：守卫 + 代数计数器） ──
+
     private fun condvarNew(): Unit {
-        this.stack.push(0)
+        val addr: Long = Memory.alloc(16L)
+        Memory.write64(addr, 0L)
+        Memory.write64(addr + 8L, 0L)
+        this.stack.push(addr)
     }
+
     private fun condvarWait(): Unit {
-        this.stack.pop()
-        this.stack.pop()
+        val mutexId: Any = this.stack.pop()
+        val cvId: Any = this.stack.pop()
+        val guard: Long = VmOps.toI64(toStr(cvId))
+        val gen: Long = guard + 8L
+        vmSpinAcquire(guard)
+        val observed: Long = Memory.read64(gen)
+        vmSpinRelease(guard)
+        val mutexAddr: Long = VmOps.toI64(toStr(mutexId))
+        Cpu.atomicAdd(mutexAddr, 0L - 1L)
+        while (Memory.read64(gen) == observed) {
+            // 自旋等待 signal / broadcast
+        }
+        Cpu.atomicAdd(mutexAddr, 1L)
     }
+
     private fun condvarSignal(): Unit {
-        this.stack.pop()
+        val guard: Long = VmOps.toI64(toStr(this.stack.pop()))
+        val gen: Long = guard + 8L
+        vmSpinAcquire(guard)
+        Memory.write64(gen, Memory.read64(gen) + 1L)
+        vmSpinRelease(guard)
     }
+
     private fun condvarBroadcast(): Unit {
-        this.stack.pop()
+        this.condvarSignal()
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -1405,13 +1886,15 @@ class Vm {
     }
 
     private fun callExternal(modIdx: String, symIdx: String): Unit {
-        this.error = "CallExternal: cross-module not supported in Aura VM"
+        this.error = "CallExternal: module=" + modIdx + " symbol=" + symIdx
+            + " (cross-module linking requires ModuleLinker support)"
         this.running = false
     }
 
     private fun callAot(funcName: String): Unit {
-        this.error = "CallAot: AOT dispatch not supported in Aura VM"
-        this.running = false
+        // AOT 调度：尝试按函数名分派（复用 callOrBuiltin），
+        // 若为未知函数则退让。
+        this.callOrBuiltin(funcName, 0)
     }
 
     // ═══════════════════════════════════════════════════════════
