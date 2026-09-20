@@ -2,10 +2,10 @@
 # ─────────────────────────────────────────────────────────────
 # 构建 Aura 编译器（纯 Aura 化迁移）
 #
-# 产物集中放在 build/bin/：
-#   aura.exe            ← Rust 最小 bootstrap 编译器
-#   aura-compiler.auc   ← 「Aura 编写的 Aura 编译器」字节码（默认）
-#   aura-compiler.exe   ← 同上，AOT 原生可执行文件（--aot，需 LLVM）
+# 产物集中放在：
+#   build/bin/             ← Rust 最小 bootstrap 编译器 (aura.exe)
+#   build/auc/compiler/    ← 「Aura 编写的 Aura 编译器」字节码 (.auc)
+#                            或 AOT 原生可执行文件 (.exe)（--aot，需 LLVM）
 #
 # 用法：
 #   scripts/build-aura-compiler.sh             # 默认产出字节码 .auc
@@ -21,7 +21,8 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
 ENTRY="aura/compiler/aura/lang/compiler/Main.aura"
-OUT_DIR="build/bin"
+BIN_DIR="build/bin"
+AUC_DIR="build/auc/compiler"
 
 AOT=0
 NO_BOOTSTRAP=0
@@ -34,7 +35,9 @@ for arg in "$@"; do
             echo "  --aot            Produce native executable via LLVM backend (default: .auc bytecode)"
             echo "  --no-bootstrap   Do not copy bootstrap aura binary to build/bin"
             echo ""
-            echo "Outputs (build/bin): aura.exe, aura-compiler.(auc|exe)"
+            echo "Outputs:"
+            echo "  build/bin/aura.exe              Rust bootstrap compiler"
+            echo "  build/auc/compiler/aura-compiler.(auc|exe)   Aura-written compiler"
             exit 0
             ;;
         *)
@@ -87,28 +90,29 @@ fi
 
 echo "[build-aura-compiler] Rust bootstrap: $AURA"
 echo "[build-aura-compiler] entry source:      $ENTRY"
-echo "[build-aura-compiler] output dir:      $OUT_DIR"
+echo "[build-aura-compiler] bin dir:           $BIN_DIR"
+echo "[build-aura-compiler] auc dir:           $AUC_DIR"
 
-mkdir -p "$OUT_DIR"
+mkdir -p "$BIN_DIR" "$AUC_DIR"
 
 # 1) 最小 bootstrap 编译器 → build/bin/aura(.exe)
 if [ "$NO_BOOTSTRAP" = "0" ]; then
     case "$AURA" in
-        *.exe) BOOTSTRAP_OUT="$OUT_DIR/aura.exe" ;;
-        *)     BOOTSTRAP_OUT="$OUT_DIR/aura" ;;
+        *.exe) BOOTSTRAP_OUT="$BIN_DIR/aura.exe" ;;
+        *)     BOOTSTRAP_OUT="$BIN_DIR/aura" ;;
     esac
     cp -f "$AURA" "$BOOTSTRAP_OUT"
     echo "[build-aura-compiler] bootstrap → $BOOTSTRAP_OUT"
 fi
 
-# 2) Aura 编写的编译器 → build/bin/aura-compiler.(auc|exe)
+# 2) Aura 编写的编译器 → build/auc/compiler/aura-compiler.(auc|exe)
 if [ "$AOT" = "1" ]; then
-    OUT="$OUT_DIR/aura-compiler"
-    [ -x "$OUT_DIR/aura.exe" ] && OUT="$OUT_DIR/aura-compiler.exe"
+    OUT="$AUC_DIR/aura-compiler"
+    [ -x "$BIN_DIR/aura.exe" ] && OUT="$AUC_DIR/aura-compiler.exe"
     echo "[build-aura-compiler] mode: AOT (LLVM) → $OUT"
     "$AURA" build "$ENTRY" --aot --output "$OUT"
 else
-    OUT="$OUT_DIR/aura-compiler.auc"
+    OUT="$AUC_DIR/aura-compiler.auc"
     echo "[build-aura-compiler] mode: bytecode → $OUT"
     "$AURA" build "$ENTRY" --output "$OUT"
 fi

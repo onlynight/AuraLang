@@ -1,5 +1,0 @@
-# 构建产物
-target/
-
-# 插件编译产物
-plugins/target/
