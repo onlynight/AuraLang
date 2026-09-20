@@ -1,0 +1,58 @@
+// tests/photon/S1/03_instruction_selection.aura
+// ═════════════════════════════════════════════════════════════
+// InstructionSelection 单元测试
+// 运行：aura run tests/photon/S1/03_instruction_selection.aura
+// ═════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/Lir.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/MachineDag.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/InstructionSelection.aura"
+
+fun main() {
+    println("═══ InstructionSelection 测试 ═══")
+    var pass = 0
+    var total = 5
+
+    // [1] 工具方法
+    println("[1] 工具方法")
+    if (InstructionSelectorUtils.isConstOp("Const") &&
+        InstructionSelectorUtils.isArith("Add") &&
+        InstructionSelectorUtils.isICmp("ICmpEQ")) { pass = pass + 1 }
+
+    // [2] 空 DAG
+    println("[2] 空 DAG")
+    val dag = MachineDagUtils.emptyDag()
+    if (dag.nodeCount == 0 && dag.instrCount == 0) { pass = pass + 1 }
+
+    // [3] 选择器创建
+    println("[3] 选择器创建")
+    val sel = InstructionSelectorUtils.emptySelector()
+    pass = pass + 1
+
+    // [4] 空程序 select
+    println("[4] 空程序 select")
+    val lir = LirUtils.emptyProgram()
+    val dag2 = sel.select(lir)
+    println("  nodes=" + dag2.nodeCount + " instrs=" + dag2.instrCount)
+    if (dag2.nodeCount == 0 && dag2.instrCount == 0) { pass = pass + 1 }
+
+    // [5] 常量程序 select
+    println("[5] 常量程序 select")
+    val lir3 = LirUtils.emptyProgram()
+    val t3 = lir3.types
+    val i32 = t3.intType(32)
+    val fid = lir3.addFunction("test", i32, i32, false)
+    val func = lir3.functionOf(fid)
+    val bid = lir3.addBlock()
+    func.blocks = LirBlockUtils.succsAdd(func.blocks, bid)
+    func.entryBlock = bid
+    lir3.addInstr(bid, "Const", i32, "", "42")
+    lir3.setTerminator(bid, "Ret", i32, "0", "")
+    val dag3 = sel.select(lir3)
+    println("  nodes=" + dag3.nodeCount + " instrs=" + dag3.instrCount)
+    if (dag3.instrCount >= 1) { pass = pass + 1 }
+
+    println("")
+    println("PASS: " + pass + "/" + total)
+}

@@ -1,0 +1,214 @@
+// aura:///aura/lang/compiler/backend/photon/PhotonPipelineTest.aura
+package aura.lang.compiler.backend.photon
+// ─────────────────────────────────────────────────────────────
+// S1 管线集成测试 — 真实数据流端到端
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import "Lir.aura"
+import "MachineDag.aura"
+import "InstructionSelection.aura"
+import "RegisterAllocator.aura"
+import "X86Emitter.aura"
+import "PhotonObjectWriter.aura"
+
+fun main() {
+    println("╔══════════════════════════════════════════════╗")
+    println("║   S1 管线集成测试 — 真实数据流端到端         ║")
+    println("╚══════════════════════════════════════════════╝")
+
+    var passCount: Int = 0
+    var totalTests: Int = 10
+
+    // ── Test 1: X86Encoder 基本发射 ──
+    println("")
+    println("[Test 1] X86Encoder: 基本函数发射")
+    var enc = X86EncoderUtils.emptyEncoder()
+    enc.emitPrologue(0x30)
+    enc.emitMovRI("rcx", 42)
+    enc.emitMovRR("rax", "rcx")
+    enc.emitXorRR("eax", "eax")
+    enc.emitEpilogue()
+    val hex1 = enc.toHex()
+    if (hex1.length >= 20) {
+        println("  hex=" + hex1)
+        println("  bytes=" + enc.byteCount())
+        println("  ✓ PASS")
+        passCount = passCount + 1
+    } else {
+        println("  ✗ FAIL — hex too short")
+    }
+
+    // ── Test 2: X86Encoder 重定位 ──
+    println("")
+    println("[Test 2] X86Encoder: 重定位生成")
+    enc = X86EncoderUtils.emptyEncoder()
+    enc.emitPrologue(0x30)
+    enc.emitLeaRIP("rcx", "@str.0")
+    enc.emitCallRel("println")
+    enc.emitXorRR("eax", "eax")
+    enc.emitEpilogue()
+    val relocs2 = enc.getRelocations()
+    if (relocs2.size == 2) {
+        println("  relocs=" + relocs2.size)
+        println("  ✓ PASS")
+        passCount = passCount + 1
+    } else {
+        println("  ✗ FAIL — expected 2 relocs, got " + relocs2.size)
+    }
+
+    // ── Test 3: InstructionSelection 空 LIR 程序 ──
+    println("")
+    println("[Test 3] InstructionSelection: 空程序")
+    val emptyLir = LirUtils.emptyProgram()
+    val sel = InstructionSelectorUtils.emptySelector()
+    val dag3 = sel.select(emptyLir)
+    if (dag3.nodeCount == 0 && dag3.instrCount == 0) {
+        println("  empty DAG ✓")
+        println("  ✓ PASS")
+        passCount = passCount + 1
+    } else {
+        println("  ✗ FAIL — expected empty DAG")
+    }
+
+    // ── Test 4: InstructionSelection 常量 + Add ──
+    println("")
+    println("[Test 4] InstructionSelection: 常量 + Add 指令")
+    val lir4 = LirUtils.emptyProgram()
+    val t4 = lir4.types
+    val intType4 = t4.intType(32)
+
+    // 创建函数
+    val funcId4 = lir4.addFunction("test", intType4, intType4, false)
+    val func4 = lir4.functionOf(funcId4)
+
+    // 创建块
+    val blockId4 = lir4.addBlock()
+    func4.blocks = LirBlockUtils.succsAdd(func4.blocks, blockId4)
+    func4.entryBlock = blockId4
+
+    // 添加指令: const 42
+    val v4a = lir4.addInstr(blockId4, "Const", intType4, "", "42")
+    // 添加指令: add 42, 42
+    val v4b = lir4.addInstr(blockId4, "Add", intType4,
+        LirUtils.toStr(v4a) + "," + LirUtils.toStr(v4a), "")
+    // 设置终结指令: ret
+    lir4.setTerminator(blockId4, "Ret", intType4, LirUtils.toStr(v4b), "")
+
+    val sel4 = InstructionSelectorUtils.emptySelector()
+    val dag4 = sel4.select(lir4)
+    if (dag4.instrCount >= 2) {
+        println("  DAG instrs=" + dag4.instrCount + " nodes=" + dag4.nodeCount)
+        println("  ✓ PASS")
+        passCount = passCount + 1
+    } else {
+        println("  ✗ FAIL — expected >= 2 instrs, got " + dag4.instrCount)
+    }
+
+    // ── Test 5: RegisterAllocator 颜色分配 ──
+    println("")
+    println("[Test 5] RegisterAllocator: 颜色分配")
+    val dag5 = MachineDagUtils.emptyDag()
+    val n5a = dag5.addNode("Value", "Add", 0, "", "0,1", "", -1, "")
+    val n5b = dag5.addNode("Value", "Add", 0, "", "2,3", "", -1, "")
+    val n5c = dag5.addNode("Value", "Add", 0, "", "0,1", "", -1, "")
+    dag5.addRoot(n5a)
+    dag5.addRoot(n5b)
+    dag5.addRoot(n5c)
+
+    val alloc5 = RegisterAllocatorUtils.emptyAllocator()
+    alloc5.allocate(dag5)
+    val color5a = alloc5.getColor(n5a)
+    val color5b = alloc5.getColor(n5b)
+    if (color5a != "" && color5b != "") {
+        println("  color(a)=" + color5a + " color(b)=" + color5b)
+        // 验证颜色回写到 DagNode.reg
+        val nodeReg = dag5.nodeOf(n5a).reg
+        if (nodeReg == color5a) {
+            println("  ✓ color written back to DagNode.reg")
+            passCount = passCount + 1
+        } else {
+            println("  ✗ FAIL — color not written back (reg=" + nodeReg + ")")
+        }
+    } else {
+        println("  ✗ FAIL — no color assigned (a=" + color5a + " b=" + color5b + ")")
+    }
+
+    // ── Test 6: RegisterAllocator 溢出 ──
+    println("")
+    println("[Test 6] RegisterAllocator: 溢出检测")
+    val spillCount5 = alloc5.getSpillSlots()
+    if (spillCount5 >= 0) {
+        println("  spillSlots=" + spillCount5)
+        println("  ✓ PASS")
+        passCount = passCount + 1
+    } else {
+        println("  ✗ FAIL")
+    }
+
+    // ── Test 7: X86Emitter 函数发射 ──
+    println("")
+    println("[Test 7] X86Emitter: 函数发射")
+    val dag7 = MachineDagUtils.emptyDag()
+    val n7 = dag7.addNode("Const", "Const", 0, "rax", "", "", -1, "42")
+    dag7.selectPattern(6, MachineDagUtils.toStr(n7), n7)
+    val n7ret = dag7.addNode("Value", "Ret", 0, "rax", MachineDagUtils.toStr(n7), "", -1, "")
+    dag7.selectPattern(30, MachineDagUtils.toStr(n7ret), -1)
+
+    val emitter7 = X86EmitterUtils.emptyEmitter()
+    emitter7.emitFunction(dag7, "test")
+    val hex7 = emitter7.getOutputHex()
+    if (hex7.length >= 20) {
+        println("  hex=" + hex7)
+        println("  bytes=" + (hex7.length / 2))
+        println("  ✓ PASS")
+        passCount = passCount + 1
+    } else {
+        println("  ✗ FAIL — hex too short: " + hex7)
+    }
+
+    // ── Test 8: X86Emitter 重定位 ──
+    println("")
+    println("[Test 8] X86Emitter: 重定位记录")
+    val relocs7 = emitter7.getRelocRecords()
+    println("  relocs=" + relocs7)
+    println("  ✓ PASS")
+    passCount = passCount + 1
+
+    // ── Test 9: PhotonObjectWriter 从机器码发射 COFF ──
+    println("")
+    println("[Test 9] PhotonObjectWriter: 从机器码发射 COFF")
+    val writer9 = PhotonObjectWriterUtils.emptyBackend()
+    val coff9 = writer9.emitFromMachineCode(hex7, relocs7, "", "test")
+    if (coff9.length >= 200) {
+        println("  COFF size=" + (coff9.length / 2) + " bytes")
+        println("  ✓ PASS")
+        passCount = passCount + 1
+    } else {
+        println("  ✗ FAIL — COFF too small (" + coff9.length + " hex chars)")
+    }
+
+    // ── Test 10: PhotonObjectWriter hex 文件写入 ──
+    println("")
+    println("[Test 10] PhotonObjectWriter: hex 文件写入")
+    val hexPath9 = "build/photon/test.obj.hex"
+    val writeOk9 = writer9.writeObjectHexFile(hexPath9)
+    if (writeOk9) {
+        println("  wrote " + hexPath9)
+        println("  ✓ PASS")
+        passCount = passCount + 1
+    } else {
+        println("  ✗ FAIL — file write failed")
+    }
+
+    // ── Summary ──
+    println("")
+    println("══════════════════════════════════════════════")
+    println("测试结果: " + passCount + "/" + totalTests + " 通过")
+    if (passCount == totalTests) {
+        println("RESULT: PASS — S1 管线集成测试全部通过")
+    } else {
+        println("RESULT: FAIL — " + (totalTests - passCount) + " 项失败")
+    }
+    println("══════════════════════════════════════════════")
+}

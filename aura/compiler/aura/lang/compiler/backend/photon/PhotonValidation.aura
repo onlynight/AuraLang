@@ -42,11 +42,28 @@ fun toStr2(n: Int): String {
     if (n < 0) { neg = true; n = -n }
     var result: String = ""
     while (n > 0) {
-        result = toStr2(n % 10) + result
+        val digit: Int = n % 10
+        val digitStr: String = digitChar(digit)
+        result = digitStr + result
         n = n / 10
     }
     if (neg) { result = "-" + result }
     return result
+}
+
+/// 将单个数字转为字符串。
+fun digitChar(d: Int): String {
+    if (d == 0) { return "0" }
+    if (d == 1) { return "1" }
+    if (d == 2) { return "2" }
+    if (d == 3) { return "3" }
+    if (d == 4) { return "4" }
+    if (d == 5) { return "5" }
+    if (d == 6) { return "6" }
+    if (d == 7) { return "7" }
+    if (d == 8) { return "8" }
+    if (d == 9) { return "9" }
+    return ""
 }
 
 /// 测试入口。

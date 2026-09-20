@@ -1,0 +1,88 @@
+// tests/photon/S3/01_bootstrap_test.aura
+// ═════════════════════════════════════════════════════════════
+// S3: 编译器自举测试 — 验证 Photon 后端可编译 Aura 源码
+// 运行：aura run tests/photon/S3/01_bootstrap_test.aura
+// ═════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/Lir.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/MachineDag.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/InstructionSelection.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/RegisterAllocator.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/X86Encoder.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/X86Emitter.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/PhotonObjectWriter.aura"
+
+fun main() {
+    println("═══ S3 自举测试 ═══")
+    var pass = 0
+    var total = 4
+
+    // [1] 管线组件存在
+    println("[1] 管线组件存在")
+    val sel = InstructionSelectorUtils.emptySelector()
+    val alloc = RegisterAllocatorUtils.emptyAllocator()
+    val enc = X86EncoderUtils.emptyEncoder()
+    val emit = X86EmitterUtils.emptyEmitter()
+    val obj = PhotonObjectWriterUtils.emptyBackend()
+    if (sel != null && alloc != null && enc != null && emit != null && obj != null) {
+        pass = pass + 1
+    }
+
+    // [2] 完整管线：LIR → DAG → RegAlloc → Encode → COFF
+    println("[2] 完整管线")
+    val lir = LirUtils.emptyProgram()
+    val t = lir.types
+    val i32 = t.intType(32)
+    val fid = lir.addFunction("main", i32, i32, false)
+    val func = lir.functionOf(fid)
+    val bid = lir.addBlock()
+    func.blocks = LirBlockUtils.succsAdd(func.blocks, bid)
+    func.entryBlock = bid
+    val v1 = lir.addInstr(bid, "Const", i32, "", "42")
+    lir.setTerminator(bid, "Ret", i32, LirUtils.toStr(v1), "")
+    val dag = sel.select(lir)
+    alloc.allocate(dag)
+    val emitter = emit.emit(dag, "main")
+    val coff = obj.emitFromMachineCode(emitter.codeHex, emitter.relocs, "", "main")
+    if (coff != "" && coff.length > 100) {
+        pass = pass + 1
+        println("  COFF size=" + coff.length)
+    }
+
+    // [3] 多指令管线
+    println("[3] 多指令管线")
+    val lir2 = LirUtils.emptyProgram()
+    val t2 = lir2.types
+    val i32b = t2.intType(32)
+    val fid2 = lir2.addFunction("test", i32b, i32b, false)
+    val func2 = lir2.functionOf(fid2)
+    val bid2 = lir2.addBlock()
+    func2.blocks = LirBlockUtils.succsAdd(func2.blocks, bid2)
+    func2.entryBlock = bid2
+    val va = lir2.addInstr(bid2, "Const", i32b, "", "10")
+    val vb = lir2.addInstr(bid2, "Const", i32b, "", "20")
+    val vSum = lir2.addInstr(bid2, "Add", i32b, LirUtils.toStr(va) + "," + LirUtils.toStr(vb), "")
+    lir2.setTerminator(bid2, "Ret", i32b, LirUtils.toStr(vSum), "")
+    val dag2 = sel.select(lir2)
+    alloc.allocate(dag2)
+    val emitter2 = emit.emit(dag2, "test")
+    val coff2 = obj.emitFromMachineCode(emitter2.codeHex, emitter2.relocs, "", "test")
+    if (coff2 != "" && coff2.length > 100) {
+        pass = pass + 1
+        println("  COFF size=" + coff2.length)
+    }
+
+    // [4] 工具函数验证
+    println("[4] 工具函数验证")
+    if (MachineDagUtils.emptyDag().nodeCount == 0 &&
+        LirUtils.emptyProgram().valueCount == 0) {
+        pass = pass + 1
+    }
+
+    println("")
+    println("PASS: " + pass + "/" + total)
+    if (pass == total) {
+        println("ALL PASS — 自举管线就绪")
+    }
+}

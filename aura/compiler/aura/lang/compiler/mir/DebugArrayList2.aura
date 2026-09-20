@@ -1,0 +1,13 @@
+// aura:///aura/lang/compiler/mir/DebugArrayList2.aura
+package aura.lang.compiler.mir
+
+import aura.lang.std.String
+
+fun main() {
+    println("═══ Debug ArrayList2 ═══")
+    println("[1] arrayListOf<Integer>()")
+    val list = arrayListOf<Integer>()
+    list.add(42)
+    println("  size=" + list.size)
+    println("  PASS")
+}

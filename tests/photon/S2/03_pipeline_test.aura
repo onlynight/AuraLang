@@ -1,0 +1,80 @@
+// tests/photon/S2/03_pipeline_test.aura
+// ═════════════════════════════════════════════════════════════
+// S2 管线集成测试：多指令 + 寄存器分配
+// 运行：aura run tests/photon/S2/03_pipeline_test.aura
+// ═════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/Lir.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/MachineDag.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/InstructionSelection.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/RegisterAllocator.aura"
+
+fun main() {
+    println("═══ S2 管线集成测试 ═══")
+    var pass = 0
+    var total = 4
+
+    // [1] 多指令程序
+    println("[1] 多指令程序")
+    val lir = LirUtils.emptyProgram()
+    val t = lir.types
+    val i32 = t.intType(32)
+    val fid = lir.addFunction("test", i32, i32, false)
+    val func = lir.functionOf(fid)
+    val bid = lir.addBlock()
+    func.blocks = LirBlockUtils.succsAdd(func.blocks, bid)
+    func.entryBlock = bid
+    val v1 = lir.addInstr(bid, "Const", i32, "", "10")
+    val v2 = lir.addInstr(bid, "Const", i32, "", "20")
+    val v3 = lir.addInstr(bid, "Add", i32, LirUtils.toStr(v1) + "," + LirUtils.toStr(v2), "")
+    lir.setTerminator(bid, "Ret", i32, LirUtils.toStr(v3), "")
+    val sel = InstructionSelectorUtils.emptySelector()
+    val dag = sel.select(lir)
+    println("  nodes=" + dag.nodeCount + " instrs=" + dag.instrCount)
+    if (dag.instrCount >= 3) { pass = pass + 1 }
+
+    // [2] 寄存器分配
+    println("[2] 寄存器分配")
+    val allocator = RegisterAllocatorUtils.emptyAllocator()
+    allocator.allocate(dag)
+    // 检查节点是否分配了寄存器
+    var allAssigned: Boolean = true
+    var i: Int = 0
+    while (i < dag.nodeCount) {
+        val node = dag.nodeOf(i)
+        if (node.reg == "" && node.kind == "Value") {
+            allAssigned = false
+        }
+        i = i + 1
+    }
+    if (allAssigned) { pass = pass + 1; println("  all nodes assigned") }
+
+    // [3] 带 Phi 的程序
+    println("[3] 带 Phi 的程序")
+    val lir2 = LirUtils.emptyProgram()
+    val t2 = lir2.types
+    val i32b = t2.intType(32)
+    val fid2 = lir2.addFunction("test2", i32b, i32b, false)
+    val func2 = lir2.functionOf(fid2)
+    val bid2 = lir2.addBlock()
+    func2.blocks = LirBlockUtils.succsAdd(func2.blocks, bid2)
+    func2.entryBlock = bid2
+    val va = lir2.addInstr(bid2, "Const", i32b, "", "10")
+    val vb = lir2.addInstr(bid2, "Const", i32b, "", "20")
+    val vPhi = lir2.addPhi(bid2, i32b, LirUtils.toStr(va) + "," + LirUtils.toStr(vb), "")
+    lir2.setTerminator(bid2, "Ret", i32b, LirUtils.toStr(vPhi), "")
+    val sel2 = InstructionSelectorUtils.emptySelector()
+    val dag2 = sel2.select(lir2)
+    println("  nodes=" + dag2.nodeCount + " instrs=" + dag2.instrCount)
+    if (dag2.instrCount >= 2) { pass = pass + 1 }
+
+    // [4] 工具函数验证
+    println("[4] 工具函数验证")
+    if (InstructionSelectorUtils.emptySelector() != null &&
+        RegisterAllocatorUtils.emptyAllocator() != null) { pass = pass + 1 }
+
+    println("")
+    println("PASS: " + pass + "/" + total)
+    if (pass == total) { println("ALL PASS") }
+}

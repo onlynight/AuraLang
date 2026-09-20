@@ -1,0 +1,13 @@
+// aura:///aura/lang/compiler/mir/DebugHashMap3.aura
+package aura.lang.compiler.mir
+
+import aura.lang.std.String
+import aura.lang.collection.HashMap
+
+fun main() {
+    println("═══ Debug HashMap3 ═══")
+    println("[1] HashMap<String, Any>()")
+    val m = HashMap<String, Any>()
+    m.put("a", 1)
+    println("  PASS")
+}

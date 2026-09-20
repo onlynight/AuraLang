@@ -1,0 +1,41 @@
+// aura:///aura/lang/compiler/mir/DebugTypeReg2.aura
+package aura.lang.compiler.mir
+
+import aura.lang.std.String
+
+fun main() {
+    println("═══ Debug TypeReg2 ═══")
+
+    println("[1] kinds")
+    val kinds = arrayListOf<String>()
+    println("  PASS")
+
+    println("[2] widths")
+    val widths = arrayListOf<Integer>()
+    println("  PASS")
+
+    println("[3] names")
+    val names = arrayListOf<String>()
+    println("  PASS")
+
+    println("[4] fields")
+    val fields = arrayListOf<String>()
+    println("  PASS")
+
+    println("[5] elems")
+    val elems = arrayListOf<Integer>()
+    println("  PASS")
+
+    println("[6] arrayLengths")
+    val arrayLengths = arrayListOf<Integer>()
+    println("  PASS")
+
+    println("[7] all together")
+    val k = arrayListOf<String>()
+    val w = arrayListOf<Integer>()
+    val n = arrayListOf<String>()
+    val f = arrayListOf<String>()
+    val e = arrayListOf<Integer>()
+    val a = arrayListOf<Integer>()
+    println("  PASS")
+}

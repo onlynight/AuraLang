@@ -59,6 +59,9 @@ import aura.lang.compiler.aot.Dwarf
 import aura.lang.compiler.aot.Aot
 import aura.lang.compiler.aot.ModuleLink
 
+// Photon 后端
+import aura.lang.compiler.backend.photon.PhotonPipeline
+
 // JIT 后端
 import aura.lang.compiler.jit.JitUtil
 import aura.lang.compiler.jit.JitAbi
@@ -255,6 +258,17 @@ object MainUtils {
         return compileAot(MainUtils.sourceToHir(source))
     }
 
+    /// S1: 源码 → Photon 管线摘要。
+    fun photonCompileSource(source: String): String {
+        val hir = MainUtils.sourceToHir(source)
+        val pipeline = PhotonPipelineUtils.emptyPipeline()
+        val result = pipeline.compileHir(hir, "build/photon", "photon_test")
+        return "success=" + toStr(result.success) +
+            " encoded=" + toStr(result.encodedByteCount) +
+            " coff=" + toStr(result.coffSize) +
+            "\n--- machine code ---\n" + result.machineCodeHex
+    }
+
     /// 源码 → 原生可执行文件。
     fun aotBuildExeSource(source: String, moduleName: String, outDir: String,
                           llvmHome: String): AotExeResult {
@@ -294,6 +308,33 @@ object MainUtils {
             aotMemMark("emit + toolchain done")
         }
         return r
+    }
+
+    /// S1.8: Photon 后端编译文件为可执行文件。
+    fun photonBuildExeFile(inputPath: String, moduleName: String, outDir: String,
+                          trace: Boolean): Unit {
+        val linker = AotModuleLinker()
+        val hir: Hir = linker.link(inputPath)
+        if (trace) {
+            println("[photon] linked modules=" + toStr(linker.loadedCount()) +
+                " hirNodes=" + toStr(hir.count))
+        }
+
+        val pipeline = PhotonPipelineUtils.emptyPipeline()
+        val result = pipeline.compileHir(hir, outDir, moduleName)
+
+        if (result.success) {
+            println("✓ Photon target file: " + result.objectFilePath)
+            println("  encoded bytes=" + toStr(result.encodedByteCount) +
+                    " coff=" + toStr(result.coffSize))
+            println("  link command: " + result.linkCommand)
+            println("  executable: " + result.executablePath)
+        } else {
+            println("Error: Photon compilation failed")
+            if (result.errorMessage != "") {
+                println("  " + result.errorMessage)
+            }
+        }
     }
 
     /// 源码 → JIT：就地把指定函数编译为 JIT 单元并执行。
@@ -343,11 +384,17 @@ object MainUtils {
         return "aot"
     }
 
+    /// 后端名：Photon（新后端，纯 Aura 自研）。
+    fun backendPhotonName(): String {
+        return "photon"
+    }
+
     /// 按后端选择编译链路，返回可读摘要。
     ///
-    /// - `vm`  → 完整编译并解释执行（`compileAndRun`）
-    /// - `aot` → HIR → LLVM IR 文本 + llc/clang 命令摘要
-    /// - `jit` → 对叶子函数 `square(x)` 做 JIT 编译并执行（无则回退说明）
+    /// - `vm`      → 完整编译并解释执行（`compileAndRun`）
+    /// - `aot`     → HIR → LLVM IR 文本 + llc/clang 命令摘要
+    /// - `jit`     → 对叶子函数 `square(x)` 做 JIT 编译并执行（无则回退说明）
+    /// - `photon`  → S1: HIR → MIR → LIR → DAG → RegAlloc → Encode → COFF
     fun compileWith(source: String, backend: String): String {
         if (backend == "aot") {
             val r = MainUtils.compileAotSource(source)
@@ -358,6 +405,8 @@ object MainUtils {
             val r = MainUtils.jitCompileFunction(source, "square", "5")
             return "jit func=" + r.funcName + " compiled=" + toStr(r.compiled) +
                 " deopt=" + toStr(r.deopt) + " result=" + r.result
+        } else if (backend == "photon") {
+            return MainUtils.photonCompileSource(source)
         }
         return MainUtils.compileAndRun(source)
     }
@@ -407,10 +456,14 @@ object MainUtils {
 
     /// CLI 用法说明。
     fun cliUsage(): String {
-        return "Usage: aura-compiler <input.aura> [-o <output.exe>] [--mem-trace]\n" +
+        return "Usage: aura-compiler <input.aura> [-o <output>] [-b <backend>] [--mem-trace]\n" +
             "      aura-compiler --run-auc <file.auc>    Load and execute .auc bytecode\n" +
             "      aura-compiler --selftest              Run compiler self-test\n" +
-            "      aura-compiler                         Print usage\n"
+            "      aura-compiler                         Print usage\n" +
+            "\nOptions:\n" +
+            "  -b <backend>    Backend: vm (default), photon, aot\n" +
+            "  -o <output>     Output path\n" +
+            "  --mem-trace     Enable memory tracing (AOT)\n"
     }
 
     /// CLI 模式：读取命令行参数 → 读源文件 → AOT 产出原生可执行文件。
@@ -418,6 +471,7 @@ object MainUtils {
         val argc: Int = Process.argCount()
         var inputPath: String = ""
         var outputPath: String = ""
+        var backend: String = "vm"
         var trace: Boolean = false
         // Same base offset as main(): skip "exe" and "run" when invoked via `aura run`.
         var base: Int = 0
@@ -430,6 +484,11 @@ object MainUtils {
             if (a == "-o" || a == "--output") {
                 if (i + 1 < argc) {
                     outputPath = Process.arg(i + 1)
+                    i = i + 1
+                }
+            } else if (a == "-b" || a == "--backend") {
+                if (i + 1 < argc) {
+                    backend = Process.arg(i + 1)
                     i = i + 1
                 }
             } else if (a == "--mem-trace") {
@@ -456,6 +515,13 @@ object MainUtils {
         if (outputPath != "") {
             outDir = MainUtils.cliDir(outputPath)
             stem = MainUtils.cliStem(outputPath)
+        }
+
+        // S1.8: 按后端选择编译路径
+        if (backend == "photon") {
+            println(MainUtils.banner() + " — Photon AOT compilation " + inputPath)
+            photonBuildExeFile(inputPath, stem, outDir, trace)
+            return
         }
 
         println(MainUtils.banner() + " — AOT compilation " + inputPath)

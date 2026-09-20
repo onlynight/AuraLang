@@ -149,9 +149,17 @@ class PhotonObjectWriter {
     private fun buildSymbols(functionName: String, stringConsts: String): Unit {
         val recs: List<String> = arrayListOf<String>()
 
-        // 1) 函数符号：值 = 函数在 .text 内的偏移（单函数场景为 0）
+        // 1) 函数符号：支持逗号分隔的多函数列表
+        //    单函数场景为 0，多函数场景每个函数一个符号条目
         if (functionName != "") {
-            recs.add(functionName + "|0|1|0x0020|2")
+            val funcParts: List<String> = this.splitComma(functionName)
+            var fi: Int = 0
+            while (fi < funcParts.size) {
+                if (funcParts[fi] != "") {
+                    recs.add(funcParts[fi] + "|0|1|0x0020|2")
+                }
+                fi = fi + 1
+            }
         }
 
         // 2) 字符串常量符号：值 = 该字符串在 .rdata 内的字节偏移

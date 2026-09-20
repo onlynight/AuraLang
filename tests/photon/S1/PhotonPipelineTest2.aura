@@ -1,0 +1,58 @@
+﻿// aura:///aura/lang/compiler/backend/photon/PhotonPipelineTest2.aura
+package aura.lang.compiler.backend.photon
+import aura.lang.std.String
+import "MachineDag.aura"
+import "RegisterAllocator.aura"
+import "X86Encoder.aura"
+
+fun main() {
+    println("═══ S1 Test ═══")
+    var pc = 0
+
+    println("[1] X86Encoder basic")
+    var enc = X86EncoderUtils.emptyEncoder()
+    enc.emitPrologue(0x30)
+    enc.emitMovRI("rcx", 42)
+    enc.emitMovRR("rax", "rcx")
+    enc.emitXorRR("eax", "eax")
+    enc.emitEpilogue()
+    val h1 = enc.toHex()
+    println("  hex=" + h1)
+    pc = pc + 1
+
+    println("[2] X86Encoder relocs")
+    enc = X86EncoderUtils.emptyEncoder()
+    enc.emitPrologue(0x30)
+    enc.emitLeaRIP("rcx", "@str.0")
+    enc.emitCallRel("println")
+    enc.emitXorRR("eax", "eax")
+    enc.emitEpilogue()
+    println("  relocs=" + enc.getRelocations().size)
+    pc = pc + 1
+
+    println("[3] RegisterAllocator")
+    val d3 = MachineDagUtils.emptyDag()
+    val n3a = d3.addNode("Value", "Add", 0, "", "0,1", "", -1, "")
+    val n3b = d3.addNode("Value", "Add", 0, "", "2,3", "", -1, "")
+    d3.addRoot(n3a)
+    d3.addRoot(n3b)
+    val a3 = RegisterAllocatorUtils.emptyAllocator()
+    a3.allocate(d3)
+    println("  color(a)=" + a3.getColor(n3a) + " color(b)=" + a3.getColor(n3b))
+    println("  reg(a)=" + d3.nodeOf(n3a).reg)
+    pc = pc + 1
+
+    println("[4] X86Emitter")
+    val d4 = MachineDagUtils.emptyDag()
+    val n4 = d4.addNode("Const", "Const", 0, "rax", "", "", -1, "42")
+    d4.selectPattern(6, MachineDagUtils.toStr(n4), n4)
+    val n4r = d4.addNode("Value", "Ret", 0, "rax", MachineDagUtils.toStr(n4), "", -1, "")
+    d4.selectPattern(30, MachineDagUtils.toStr(n4r), -1)
+    val e4 = X86EmitterUtils.emptyEmitter()
+    e4.emitFunction(d4, "test")
+    println("  hex=" + e4.getOutputHex())
+    println("  relocs=" + e4.getRelocRecords())
+    pc = pc + 1
+
+    println("PASS: " + pc + "/4")
+}

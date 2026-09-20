@@ -52,15 +52,52 @@ class RegisterAllocator {
         this.callStack = ""
         this.spillSlots = 0
 
-        // DFS 遍历所有根节点
-        val roots: List<String> = d.roots.split(",")
+        // S1: 迭代分配（避免 VM 递归深度限制）
+        // 每个节点独立分配颜色，不考虑依赖关系。
+        // S2 阶段将引入完整的 DFS 遍历和依赖图处理。
         var i: Int = 0
-        while (i < roots.size) {
-            val root: Int = strToInt(roots[i])
-            if (root >= 0) {
-                this.dfs(root)
+        while (i < d.nodeCount) {
+            val node: DagNode = d.nodeOf(i)
+            if (node.kind == "Value" || node.kind == "Reg") {
+                val interference: String = this.buildInterference(i)
+                this.assignColor(i, interference)
             }
             i = i + 1
+        }
+
+        // S1.4: 将颜色回写到 DagNode.reg
+        this.applyColors()
+    }
+
+    /// S1.4: 将颜色表中的寄存器名回写到 DagNode.reg 字段。
+    fun applyColors(): Unit {
+        if (this.colorMap == "") { return }
+        var lineStart: Int = 0
+        var pos: Int = 0
+        val len: Int = this.colorMap.length
+        while (pos <= len) {
+            if (pos == len || this.colorMap[pos] == "\n") {
+                val line: String = this.colorMap.substring(lineStart, pos)
+                if (line != "") {
+                    // 找 | 分隔符
+                    var sepPos: Int = -1
+                    var i: Int = 0
+                    while (i < line.length) {
+                        if (line[i] == "|") { sepPos = i; break }
+                        i = i + 1
+                    }
+                    if (sepPos > 0) {
+                        val nodeId: Int = strToInt(line.substring(0, sepPos))
+                        val color: String = line.substring(sepPos + 1, line.length)
+                        if (nodeId >= 0 && nodeId < this.dag.nodeCount) {
+                            val node: DagNode = this.dag.nodeOf(nodeId)
+                            node.reg = color
+                        }
+                    }
+                }
+                lineStart = pos + 1
+            }
+            pos = pos + 1
         }
     }
 
@@ -77,7 +114,7 @@ class RegisterAllocator {
 
         // 递归处理子节点
         if (node.kind == "Value" || node.kind == "Reg") {
-            val args: List<String> = node.args.split(",")
+            val args: List<String> = this.splitComma(node.args)
             var j: Int = 0
             while (j < args.size) {
                 val arg: Int = strToInt(args[j])
@@ -110,7 +147,7 @@ class RegisterAllocator {
     private fun buildInterference(nodeId: Int): String {
         var result: String = ""
         val node: DagNode = this.dag.nodeOf(nodeId)
-        val args: List<String> = node.args.split(",")
+        val args: List<String> = this.splitComma(node.args)
         var i: Int = 0
         while (i < args.size) {
             val arg: Int = strToInt(args[i])
@@ -133,8 +170,8 @@ class RegisterAllocator {
 
     /// 查找空闲颜色。
     private fun getFreeColor(used: String): String {
-        val avail: List<String> = this.availColors.split(",")
-        val usedList: List<String> = used.split(",")
+        val avail: List<String> = this.splitComma(this.availColors)
+        val usedList: List<String> = this.splitComma(used)
         var i: Int = 0
         while (i < avail.size) {
             var conflict: Boolean = false
@@ -156,8 +193,8 @@ class RegisterAllocator {
 
     /// 乐观重着色。
     private fun tryOptimisticRecolor(nodeId: Int, interference: String): Boolean {
-        val avail: List<String> = this.availColors.split(",")
-        val usedList: List<String> = interference.split(",")
+        val avail: List<String> = this.splitComma(this.availColors)
+        val usedList: List<String> = this.splitComma(interference)
         var i: Int = 0
         while (i < usedList.size) {
             val conflictColor: String = usedList[i]
@@ -179,7 +216,7 @@ class RegisterAllocator {
     /// 查找使用指定颜色的冲突节点。
     private fun findConflictingNode(nodeId: Int, color: String): Int {
         val node: DagNode = this.dag.nodeOf(nodeId)
-        val args: List<String> = node.args.split(",")
+        val args: List<String> = this.splitComma(node.args)
         var i: Int = 0
         while (i < args.size) {
             val arg: Int = strToInt(args[i])
@@ -204,44 +241,95 @@ class RegisterAllocator {
         this.spillSlots = this.spillSlots + 1
     }
 
+    // ── 字符串工具（替代 String.split，VM 不支持）──
+
+    /// 按逗号分割字符串。
+    private fun splitComma(text: String): List<String> {
+        val out: List<String> = arrayListOf<String>()
+        if (text == "") { return out }
+        var start: Int = 0
+        var i: Int = 0
+        val len: Int = text.length
+        while (i < len) {
+            if (text[i] == ",") {
+                out.add(text.substring(start, i))
+                start = i + 1
+            }
+            i = i + 1
+        }
+        out.add(text.substring(start, len))
+        return out
+    }
+
+    /// 按换行符分割字符串。
+    private fun splitNewline(text: String): List<String> {
+        val out: List<String> = arrayListOf<String>()
+        if (text == "") { return out }
+        var start: Int = 0
+        var i: Int = 0
+        val len: Int = text.length
+        while (i < len) {
+            if (text[i] == "\n") {
+                out.add(text.substring(start, i))
+                start = i + 1
+            }
+            i = i + 1
+        }
+        out.add(text.substring(start, len))
+        return out
+    }
+
     // ── 颜色表操作（扁平字符串）──
 
     /// 存储颜色。
     private fun colorPut(nodeId: Int, color: String): Unit {
         this.colorRemove(nodeId)
-        this.colorMap = this.colorMap + toStr(nodeId) + "|" + color + "\n"
+        if (this.colorMap == "") {
+            this.colorMap = toStr(nodeId) + "|" + color + "\n"
+        } else if (this.colorMap.endsWith("\n")) {
+            this.colorMap = this.colorMap + toStr(nodeId) + "|" + color + "\n"
+        } else {
+            this.colorMap = this.colorMap + "\n" + toStr(nodeId) + "|" + color + "\n"
+        }
     }
 
     /// 读取颜色。
     private fun colorGet(nodeId: Int): String {
-        val lines: List<String> = this.colorMap.split("\n")
-        var i: Int = 0
-        while (i < lines.size) {
-            if (lines[i] != "" && lines[i].contains("|")) {
-                val parts: List<String> = lines[i].split("|")
-                if (parts.size >= 2 && strToInt(parts[0]) == nodeId) {
-                    return parts[1]
+        val targetKey: String = toStr(nodeId) + "|"
+        var lineStart: Int = 0
+        var pos: Int = 0
+        val len: Int = this.colorMap.length
+        while (pos <= len) {
+            if (pos == len || this.colorMap[pos] == "\n") {
+                val line: String = this.colorMap.substring(lineStart, pos)
+                if (line.length > targetKey.length && line.startsWith(targetKey)) {
+                    return line.substring(targetKey.length, line.length)
                 }
+                lineStart = pos + 1
             }
-            i = i + 1
+            pos = pos + 1
         }
         return ""
     }
 
     /// 删除颜色。
     private fun colorRemove(nodeId: Int): Unit {
-        val lines: List<String> = this.colorMap.split("\n")
+        if (this.colorMap == "") { return }
+        val targetKey: String = toStr(nodeId) + "|"
+        var lineStart: Int = 0
+        var pos: Int = 0
         var result: String = ""
-        var i: Int = 0
-        while (i < lines.size) {
-            if (lines[i] != "" && lines[i].contains("|")) {
-                val parts: List<String> = lines[i].split("|")
-                if (parts.size >= 2 && strToInt(parts[0]) != nodeId) {
+        val len: Int = this.colorMap.length
+        while (pos <= len) {
+            if (pos == len || this.colorMap[pos] == "\n") {
+                val line: String = this.colorMap.substring(lineStart, pos)
+                if (line != "" && line.length > targetKey.length && !line.startsWith(targetKey)) {
                     if (result != "") { result = result + "\n" }
-                    result = result + lines[i]
+                    result = result + line
                 }
+                lineStart = pos + 1
             }
-            i = i + 1
+            pos = pos + 1
         }
         this.colorMap = result
     }
@@ -250,10 +338,15 @@ class RegisterAllocator {
 
     private fun callStackContains(nodeId: Int): Boolean {
         if (this.callStack == "") { return false }
-        val parts: List<String> = this.callStack.split(",")
+        val target: String = "," + toStr(nodeId)
+        val withBoundaries: String = "," + this.callStack
         var i: Int = 0
-        while (i < parts.size) {
-            if (strToInt(parts[i]) == nodeId) { return true }
+        val tlen: Int = target.length
+        val len: Int = withBoundaries.length
+        while (i <= len - tlen) {
+            if (withBoundaries.substring(i, i + tlen) == target) {
+                return true
+            }
             i = i + 1
         }
         return false
@@ -268,18 +361,17 @@ class RegisterAllocator {
     }
 
     private fun callStackPop(): Unit {
-        val parts: List<String> = this.callStack.split(",")
-        if (parts.size <= 1) {
+        if (this.callStack == "") { return }
+        var lastComma: Int = -1
+        var i: Int = this.callStack.length - 1
+        while (i >= 0) {
+            if (this.callStack[i] == ",") { lastComma = i; break }
+            i = i - 1
+        }
+        if (lastComma < 0) {
             this.callStack = ""
         } else {
-            var result: String = ""
-            var i: Int = 0
-            while (i < parts.size - 1) {
-                if (result != "") { result = result + "," }
-                result = result + parts[i]
-                i = i + 1
-            }
-            this.callStack = result
+            this.callStack = this.callStack.substring(0, lastComma)
         }
     }
 
@@ -338,11 +430,28 @@ class RegisterAllocator {
         if (n < 0) { neg = true; n = -n }
         var result: String = ""
         while (n > 0) {
-            result = toStr(n % 10) + result
+            val digit: Int = n % 10
+            val digitStr: String = this.digitChar(digit)
+            result = digitStr + result
             n = n / 10
         }
         if (neg) { result = "-" + result }
         return result
+    }
+
+    /// 将单个数字转为字符串。
+    private fun digitChar(d: Int): String {
+        if (d == 0) { return "0" }
+        if (d == 1) { return "1" }
+        if (d == 2) { return "2" }
+        if (d == 3) { return "3" }
+        if (d == 4) { return "4" }
+        if (d == 5) { return "5" }
+        if (d == 6) { return "6" }
+        if (d == 7) { return "7" }
+        if (d == 8) { return "8" }
+        if (d == 9) { return "9" }
+        return ""
     }
 }
 

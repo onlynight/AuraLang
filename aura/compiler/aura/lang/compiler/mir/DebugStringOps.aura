@@ -1,0 +1,36 @@
+// aura:///aura/lang/compiler/mir/DebugStringOps.aura
+package aura.lang.compiler.mir
+
+import aura.lang.std.String
+
+fun main() {
+    println("═══ Debug String Ops ═══")
+
+    println("[1] split")
+    val s = "a|1\nb|2"
+    val lines = s.split("\n")
+    println("  lines.size=" + lines.size)
+    println("  PASS")
+
+    println("[2] split |")
+    val parts = "a|1".split("|")
+    println("  parts.size=" + parts.size)
+    println("  parts[0]=" + parts[0])
+    println("  parts[1]=" + parts[1])
+    println("  PASS")
+
+    println("[3] contains")
+    val c1 = "a|1".contains("|")
+    println("  contains(|)=" + c1)
+    println("  PASS")
+
+    println("[4] indexOf")
+    val idx = "0123456789".indexOf("5")
+    println("  indexOf(5)=" + idx)
+    println("  PASS")
+
+    println("[5] split empty string")
+    val empty = "".split("\n")
+    println("  empty.size=" + empty.size)
+    println("  PASS")
+}

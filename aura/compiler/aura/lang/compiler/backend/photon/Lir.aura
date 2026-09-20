@@ -67,6 +67,10 @@ class LirValue {
     /// 使用计数（DCE 用）。
     var useCount: Int = 0
 
+    /// 内存链 ID（-1 = 非内存指令；>=0 = 该指令的内存链槽位）。
+    /// S2: 用于 Load/Store 指令的内存依赖排序。
+    var chain: Int = -1
+
     init() {
         this.id = 0
         this.op = ""
@@ -75,6 +79,7 @@ class LirValue {
         this.aux = ""
         this.block = 0
         this.useCount = 0
+        this.chain = -1
     }
 
     /// 获取第 i 个操作数的 ValueID。
@@ -269,6 +274,25 @@ class LirProgram {
         v.aux = aux
         v.block = blockId
         v.useCount = 0
+        v.chain = -1
+        this.values.add(v)
+        this.valueCount = this.values.size
+        return v.id
+    }
+
+    /// 创建一个新的 LIR 值节点（带内存链 ID），返回 ValueID。
+    /// S2: 用于 Load/Store 指令的内存依赖排序。
+    fun addValueWithChain(op: String, typeId: Int, args: String, aux: String,
+                          blockId: Int, chainId: Int): Int {
+        val v: LirValue = LirValue()
+        v.id = this.valueCount
+        v.op = op
+        v.type = typeId
+        v.args = args
+        v.aux = aux
+        v.block = blockId
+        v.useCount = 0
+        v.chain = chainId
         this.values.add(v)
         this.valueCount = this.values.size
         return v.id

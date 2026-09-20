@@ -365,6 +365,23 @@ class MachineDag {
         return id
     }
 
+    /// 模式缓存查询。
+    private fun patternCacheGet(patternId: Int): Int {
+        // S1: 暂时禁用模式缓存以避免 VM 的 split 限制
+        return -1
+    }
+
+    /// 模式缓存写入。
+    private fun patternCachePut(patternId: Int, instrId: Int): Unit {
+        if (this.patternCacheKeys == "") {
+            this.patternCacheKeys = toStr(patternId)
+            this.patternCacheVals = toStr(instrId)
+        } else {
+            this.patternCacheKeys = this.patternCacheKeys + "," + toStr(patternId)
+            this.patternCacheVals = this.patternCacheVals + "," + toStr(instrId)
+        }
+    }
+
     // ── 根/链管理 ──
 
     /// 向根节点列表追加一个节点 ID。
@@ -482,25 +499,26 @@ object MachineDagUtils {
         // 20..29 : 控制流指令
         // 30..39 : 条件设置指令
         // 40..49 : 调用指令
-        if (patternId == 0) { return "add %dst, %src, $imm" }
+        // 注意：用 @ 代替 $ 以避免 Aura 字符串插值（$var → null）
+        if (patternId == 0) { return "add %dst, %src, @imm" }
         if (patternId == 1) { return "add %dst, %src" }
-        if (patternId == 2) { return "sub %dst, %src, $imm" }
+        if (patternId == 2) { return "sub %dst, %src, @imm" }
         if (patternId == 3) { return "sub %dst, %src" }
-        if (patternId == 4) { return "imul %dst, %src, $imm" }
+        if (patternId == 4) { return "imul %dst, %src, @imm" }
         if (patternId == 5) { return "imul %dst, %src" }
-        if (patternId == 6) { return "mov %dst, $imm" }
+        if (patternId == 6) { return "mov %dst, @imm" }
         if (patternId == 7) { return "mov %dst, %src" }
         // 内存指令
         if (patternId == 10) { return "mov %dst, [mem]" }
         if (patternId == 11) { return "mov [mem], %src" }
         if (patternId == 12) { return "lea %dst, [mem]" }
         // 比较指令
-        if (patternId == 20) { return "cmp %src, $imm" }
+        if (patternId == 20) { return "cmp %src, @imm" }
         if (patternId == 21) { return "cmp %src1, %src2" }
         // 控制流
         if (patternId == 30) { return "ret" }
-        if (patternId == 31) { return "jmp $target" }
-        if (patternId == 32) { return "jcc $target" }
+        if (patternId == 31) { return "jmp @target" }
+        if (patternId == 32) { return "jcc @target" }
         // 条件设置
         if (patternId == 40) { return "setcc %dst" }
         // 调用
@@ -660,31 +678,7 @@ object DagPatterns {
         return -1
     }
 
-    // ── 模式缓存操作 ──
-
-    private fun patternCacheGet(patternId: Int): Int {
-        if (this.patternCacheKeys == "") { return -1 }
-        val keys: List<String> = this.patternCacheKeys.split(",")
-        val vals: List<String> = this.patternCacheVals.split(",")
-        var i: Int = 0
-        while (i < keys.size) {
-            if (strToInt(keys[i]) == patternId) {
-                return strToInt(vals[i])
-            }
-            i = i + 1
-        }
-        return -1
-    }
-
-    private fun patternCachePut(patternId: Int, instrId: Int): Unit {
-        if (this.patternCacheKeys == "") {
-            this.patternCacheKeys = toStr(patternId)
-            this.patternCacheVals = toStr(instrId)
-        } else {
-            this.patternCacheKeys = this.patternCacheKeys + "," + toStr(patternId)
-            this.patternCacheVals = this.patternCacheVals + "," + toStr(instrId)
-        }
-    }
+    // ── 模式缓存操作已移至 MachineDag 类 ──
 
     // ── 工具 ──
 
@@ -710,10 +704,27 @@ object DagPatterns {
         if (n < 0) { neg = true; n = -n }
         var result: String = ""
         while (n > 0) {
-            result = toStr(n % 10) + result
+            val digit: Int = n % 10
+            val digitStr: String = this.digitChar(digit)
+            result = digitStr + result
             n = n / 10
         }
         if (neg) { result = "-" + result }
         return result
+    }
+
+    /// 将单个数字转为字符串。
+    private fun digitChar(d: Int): String {
+        if (d == 0) { return "0" }
+        if (d == 1) { return "1" }
+        if (d == 2) { return "2" }
+        if (d == 3) { return "3" }
+        if (d == 4) { return "4" }
+        if (d == 5) { return "5" }
+        if (d == 6) { return "6" }
+        if (d == 7) { return "7" }
+        if (d == 8) { return "8" }
+        if (d == 9) { return "9" }
+        return ""
     }
 }

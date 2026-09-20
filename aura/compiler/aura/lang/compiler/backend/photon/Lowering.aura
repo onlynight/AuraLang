@@ -51,9 +51,13 @@ class Lowering {
     /// 当前正在降低的函数索引。
     var currentFunc: Int = -1
 
+    /// 内存链计数器（S2: 用于 Load/Store 指令的内存依赖排序）。
+    var chainCounter: Int = 0
+
     init() {
         this.types = TypeRegistry()
         this.currentFunc = -1
+        this.chainCounter = 0
     }
 
     // ── 主入口 ──
@@ -244,6 +248,10 @@ class Lowering {
         val argParts: List<String> = LirUtils.splitArgs(args)
         val argCount: Int = argParts.size
 
+        // S2: 分配内存链 ID
+        val chainId: Int = this.chainCounter
+        this.chainCounter = this.chainCounter + 1
+
         if (argCount >= 2) {
             val base: Int = SsaMirUtils.strToInt(argParts[0])
             val offset: Int = SsaMirUtils.strToInt(argParts[1])
@@ -252,11 +260,11 @@ class Lowering {
             // 计算地址模式字符串
             val addrMode: String = this.computeAddressMode(base, offset, scale)
 
-            return dst.addValue("Load", srcVal.type, addrMode, "", dstBlockId)
+            return dst.addValueWithChain("Load", srcVal.type, addrMode, "", dstBlockId, chainId)
         }
 
         // 无参数，直接复制
-        return dst.addValue("Load", srcVal.type, args, srcVal.aux, dstBlockId)
+        return dst.addValueWithChain("Load", srcVal.type, args, srcVal.aux, dstBlockId, chainId)
     }
 
     // ── Store 降低（带地址模式计算）──
@@ -270,6 +278,10 @@ class Lowering {
         val argParts: List<String> = LirUtils.splitArgs(args)
         val argCount: Int = argParts.size
 
+        // S2: 分配内存链 ID
+        val chainId: Int = this.chainCounter
+        this.chainCounter = this.chainCounter + 1
+
         if (argCount >= 3) {
             val value: Int = SsaMirUtils.strToInt(argParts[0])
             val base: Int = SsaMirUtils.strToInt(argParts[1])
@@ -281,11 +293,11 @@ class Lowering {
 
             // LIR Store: value,addrMode
             val lirArgs: String = LirUtils.toStr(value) + "," + addrMode
-            return dst.addValue("Store", srcVal.type, lirArgs, "", dstBlockId)
+            return dst.addValueWithChain("Store", srcVal.type, lirArgs, "", dstBlockId, chainId)
         }
 
         // 无参数，直接复制
-        return dst.addValue("Store", srcVal.type, args, srcVal.aux, dstBlockId)
+        return dst.addValueWithChain("Store", srcVal.type, args, srcVal.aux, dstBlockId, chainId)
     }
 
     // ── 比较降低 ──

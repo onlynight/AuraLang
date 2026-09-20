@@ -1,0 +1,36 @@
+// aura:///aura/lang/compiler/mir/DebugTypeRegMinimal.aura
+package aura.lang.compiler.mir
+
+import aura.lang.std.String
+
+// Minimal TypeRegistry without init() calling register
+class TypeRegistryMinimal {
+    private var kinds: List<String> = arrayListOf<String>()
+    private var widths: List<Integer> = arrayListOf<Integer>()
+    var count: Int = 0
+
+    init() {
+        this.kinds = arrayListOf<String>()
+        this.widths = arrayListOf<Integer>()
+        this.count = 0
+    }
+
+    fun addType(kind: String, width: Int): Int {
+        val id = this.kinds.size
+        this.kinds.add(kind)
+        this.widths.add(width)
+        this.count = this.kinds.size
+        return id
+    }
+}
+
+fun main() {
+    println("═══ Debug TypeRegMinimal ═══")
+    println("[1] TypeRegistryMinimal()")
+    val reg = TypeRegistryMinimal()
+    println("  count=" + reg.count)
+    println("[2] addType")
+    val id = reg.addType("Int", 8)
+    println("  id=" + id + " count=" + reg.count)
+    println("  PASS")
+}

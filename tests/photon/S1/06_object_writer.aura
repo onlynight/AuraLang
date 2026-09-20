@@ -1,0 +1,55 @@
+// tests/photon/S1/06_object_writer.aura
+// ═════════════════════════════════════════════════════════════
+// PhotonObjectWriter 单元测试
+// 运行：aura run tests/photon/S1/06_object_writer.aura
+// ═════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/PhotonObjectWriter.aura"
+
+fun main() {
+    println("═══ PhotonObjectWriter 测试 ═══")
+    var pass: Int = 0
+    var fail: Int = 0
+
+    // ── [1] 工具函数 ──
+    println("[1] 工具函数")
+    val b = PhotonObjectWriterUtils.emptyBackend()
+    if (b != null) { pass = pass + 1 }
+    else { fail = fail + 1 }
+
+    // ── [2] COFF 常量 ──
+    println("[2] COFF 常量")
+    if (PhotonObjectWriterUtils.COFF_MACHINE_AMD64 == 0x8664) { pass = pass + 1 }
+    else { fail = fail + 1 }
+    if (PhotonObjectWriterUtils.SECTION_CODE == 0x20) { pass = pass + 1 }
+    else { fail = fail + 1 }
+    if (PhotonObjectWriterUtils.REL32 == 0x04) { pass = pass + 1 }
+    else { fail = fail + 1 }
+
+    // ── [3] 简单机器码输出 ──
+    println("[3] 简单机器码输出")
+    // Prologue (push rbp, mov rbp, rsp, sub rsp, 80)
+    val mcHex = "554889e54881ec50000000"
+    val reloc = ""
+    val strConsts = ""
+    val outHex = b.emitFromMachineCode(mcHex, reloc, strConsts, "main")
+    if (outHex != "" && outHex.length > 100) {
+        pass = pass + 1
+        println("  COFF size=" + outHex.length)
+    } else { fail = fail + 1 }
+
+    // ── [4] 带重定位的输出 ──
+    println("[4] 带重定位的输出")
+    val relocStr = "10|_main"
+    val outHex2 = b.emitFromMachineCode(mcHex, relocStr, strConsts, "main")
+    if (outHex2 != "" && outHex2.length > 100) {
+        pass = pass + 1
+        println("  COFF size=" + outHex2.length)
+    } else { fail = fail + 1 }
+
+    println("")
+    println("PASS: " + pass + "/" + (pass + fail))
+    if (fail == 0) { println("ALL PASS") }
+    else { println("FAILURES: " + fail) }
+}

@@ -1,0 +1,337 @@
+// aura:///aura/lang/compiler/backend/photon/X86Emitter.aura
+package aura.lang.compiler.backend.photon
+// ─────────────────────────────────────────────────────────────
+// X86 发射器 — DAG → X86Encoder 编码驱动器 (S1.5)
+//
+// 遍历 MachineDag.instrs，按 DagInstruction.template 派发到
+// X86Encoder.emitXxx 方法，产出裸机器码 hex + 重定位记录。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import "x86_64/X86Encoder.aura"
+import "MachineDag.aura"
+
+/// X86 发射器：将寄存器已分配的 MachineDag 编码为机器码字节。
+class X86Emitter {
+
+    /// 编码器。
+    private var enc: X86Encoder = null
+
+    /// 输出 hex 字符串。
+    private var outputHex: String = ""
+
+    /// 重定位项列表（逗号分隔的 "offset|symbol|type" 记录）。
+    private var relocRecords: String = ""
+
+    /// 当前帧大小。
+    private var frameSize: Int = 0x50
+
+    /// 字符串常量表（逗号分隔）。
+    private var strConsts: String = ""
+
+    init() {
+        this.enc = X86EncoderUtils.emptyEncoder()
+        this.outputHex = ""
+        this.relocRecords = ""
+        this.frameSize = 0x50
+        this.strConsts = ""
+    }
+
+    // ── 主入口 ──
+
+    /// 发射整个 MachineDag 为机器码（含 prologue/epilogue）。
+    fun emitFunction(dag: MachineDag, funcName: String): Unit {
+        this.enc.reset()
+        this.outputHex = ""
+        this.relocRecords = ""
+
+        // Prologue。
+        this.enc.emitPrologue(this.frameSize)
+
+        // 遍历所有指令。
+        var i: Int = 0
+        while (i < dag.instrCount) {
+            val instr: DagInstruction = dag.instrOf(i)
+            this.emitInstr(instr, dag)
+            i = i + 1
+        }
+
+        // Epilogue（如果最后一个指令不是 ret）。
+        if (dag.instrCount > 0) {
+            val lastInstr: DagInstruction = dag.instrOf(dag.instrCount - 1)
+            if (lastInstr.template != "ret") {
+                this.enc.emitXorRR("eax", "eax")
+                this.enc.emitEpilogue()
+            }
+        }
+
+        // 解析标签。
+        this.enc.resolveLabels()
+
+        // 获取最终 hex 和重定位。
+        this.outputHex = this.enc.toHex()
+        this.relocRecords = this.joinRelocRecords(this.enc.getRelocations())
+    }
+
+    // ── 单指令发射 ──
+
+    /// 发射单条指令。
+    private fun emitInstr(instr: DagInstruction, dag: MachineDag): Unit {
+        val template: String = instr.template
+        val nodes: List<String> = MachineDagUtils.splitArgs(instr.nodes)
+        val cond: String = instr.cond
+
+        if (template == "add %dst, %src, $imm") {
+            this.emitAddImm(nodes, dag)
+        } else if (template == "add %dst, %src") {
+            this.emitAddRR(nodes, dag)
+        } else if (template == "sub %dst, %src, $imm") {
+            this.emitSubImm(nodes, dag)
+        } else if (template == "sub %dst, %src") {
+            this.emitSubRR(nodes, dag)
+        } else if (template == "imul %dst, %src, $imm") {
+            this.emitImulImm(nodes, dag)
+        } else if (template == "imul %dst, %src") {
+            this.emitImulRR(nodes, dag)
+        } else if (template == "mov %dst, $imm") {
+            this.emitMovImm(nodes, dag)
+        } else if (template == "mov %dst, %src") {
+            this.emitMovRR(nodes, dag)
+        } else if (template == "mov %dst, [mem]") {
+            this.emitMovLoad(nodes, dag)
+        } else if (template == "mov [mem], %src") {
+            this.emitMovStore(nodes, dag)
+        } else if (template == "lea %dst, [mem]") {
+            this.emitLea(nodes, dag)
+        } else if (template == "cmp %src, $imm") {
+            this.emitCmpImm(nodes, dag)
+        } else if (template == "cmp %src1, %src2") {
+            this.emitCmpRR(nodes, dag)
+        } else if (template == "setcc %dst") {
+            this.emitSetcc(instr, nodes, dag)
+        } else if (template == "call %func") {
+            this.emitCall(nodes, dag)
+        } else if (template == "ret") {
+            this.emitRet()
+        } else if (template == "jmp $target") {
+            this.emitJmp(nodes, dag)
+        } else if (template == "jcc $target") {
+            this.emitJcc(cond, nodes, dag)
+        } else if (template == "nop") {
+            // 空操作。
+        }
+    }
+
+    // ── ALU 指令发射 ──
+
+    private fun emitAddImm(nodes: List<String>, dag: MachineDag): Unit {
+        if (nodes.size >= 2) {
+            val dst: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
+            val src: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[1])))
+            this.enc.emitAddRR(dst, src)
+        }
+    }
+
+    private fun emitAddRR(nodes: List<String>, dag: MachineDag): Unit {
+        if (nodes.size >= 2) {
+            val dst: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
+            val src: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[1])))
+            this.enc.emitAddRR(dst, src)
+        }
+    }
+
+    private fun emitSubImm(nodes: List<String>, dag: MachineDag): Unit {
+        if (nodes.size >= 2) {
+            val dst: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
+            val src: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[1])))
+            this.enc.emitSubRR(dst, src)
+        }
+    }
+
+    private fun emitSubRR(nodes: List<String>, dag: MachineDag): Unit {
+        if (nodes.size >= 2) {
+            val dst: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
+            val src: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[1])))
+            this.enc.emitSubRR(dst, src)
+        }
+    }
+
+    private fun emitImulImm(nodes: List<String>, dag: MachineDag): Unit {
+        if (nodes.size >= 2) {
+            val dst: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
+            val src: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[1])))
+            this.enc.emitImulRR(dst, src)
+        }
+    }
+
+    private fun emitImulRR(nodes: List<String>, dag: MachineDag): Unit {
+        if (nodes.size >= 2) {
+            val dst: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
+            val src: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[1])))
+            this.enc.emitImulRR(dst, src)
+        }
+    }
+
+    // ── MOV 指令发射 ──
+
+    private fun emitMovImm(nodes: List<String>, dag: MachineDag): Unit {
+        if (nodes.size >= 1) {
+            val nodeId: Int = MachineDagUtils.strToInt(nodes[0])
+            val node: DagNode = dag.nodeOf(nodeId)
+            val dst: String = this.regOfNode(node)
+            val imm: Int = MachineDagUtils.strToInt(node.aux)
+            this.enc.emitMovRI(dst, imm)
+        }
+    }
+
+    private fun emitMovRR(nodes: List<String>, dag: MachineDag): Unit {
+        if (nodes.size >= 1) {
+            val nodeId: Int = MachineDagUtils.strToInt(nodes[0])
+            val node: DagNode = dag.nodeOf(nodeId)
+            val dst: String = this.regOfNode(node)
+            this.enc.emitMovRR(dst, dst)
+        }
+    }
+
+    private fun emitMovLoad(nodes: List<String>, dag: MachineDag): Unit {
+        if (nodes.size >= 1) {
+            val dst: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
+            this.enc.emitStackLoad(dst, 0)
+        }
+    }
+
+    private fun emitMovStore(nodes: List<String>, dag: MachineDag): Unit {
+        if (nodes.size >= 1) {
+            val src: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
+            this.enc.emitStackStore(0, src)
+        }
+    }
+
+    private fun emitLea(nodes: List<String>, dag: MachineDag): Unit {
+        if (nodes.size >= 1) {
+            val dst: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
+            this.enc.emitLeaStack(dst, 0)
+        }
+    }
+
+    // ── 比较指令发射 ──
+
+    private fun emitCmpImm(nodes: List<String>, dag: MachineDag): Unit {
+        if (nodes.size >= 2) {
+            val src: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
+            val imm: Int = MachineDagUtils.strToInt(nodes[1])
+            this.enc.emitCmpRI(src, imm)
+        }
+    }
+
+    private fun emitCmpRR(nodes: List<String>, dag: MachineDag): Unit {
+        if (nodes.size >= 2) {
+            val dst: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
+            val src: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[1])))
+            this.enc.emitCmpRR(dst, src)
+        }
+    }
+
+    private fun emitSetcc(instr: DagInstruction, nodes: List<String>, dag: MachineDag): Unit {
+        if (nodes.size >= 1) {
+            val dst: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
+            this.enc.emitSetcc(dst, instr.cond)
+        }
+    }
+
+    // ── 控制流指令发射 ──
+
+    private fun emitCall(nodes: List<String>, dag: MachineDag): Unit {
+        if (nodes.size >= 1) {
+            val nodeId: Int = MachineDagUtils.strToInt(nodes[0])
+            val node: DagNode = dag.nodeOf(nodeId)
+            val funcName: String = node.aux
+            if (funcName != "" && funcName != "$imm") {
+                this.enc.emitCallRel(funcName)
+            }
+        }
+    }
+
+    private fun emitRet(): Unit {
+        this.enc.emitXorRR("eax", "eax")
+        this.enc.emitEpilogue()
+    }
+
+    private fun emitJmp(nodes: List<String>, dag: MachineDag): Unit {
+        if (nodes.size >= 1) {
+            val target: String = nodes[0]
+            if (target != "" && target.startsWith("bb")) {
+                this.enc.emitJmpLabel(target)
+            }
+        }
+    }
+
+    private fun emitJcc(cond: String, nodes: List<String>, dag: MachineDag): Unit {
+        if (nodes.size >= 1) {
+            val target: String = nodes[0]
+            if (target != "" && target.startsWith("bb")) {
+                this.enc.emitJccLabel(cond, target)
+            }
+        }
+    }
+
+    // ── 辅助方法 ──
+
+    /// 从 DAG 节点获取寄存器名（如果未分配则用默认寄存器 rax）。
+    private fun regOfNode(node: DagNode): String {
+        if (node != null && node.reg != "") {
+            return node.reg
+        }
+        return "rax"
+    }
+
+    /// 连接重定位记录为逗号分隔字符串。
+    private fun joinRelocRecords(relocs: List<String>): String {
+        var out: String = ""
+        var i: Int = 0
+        while (i < relocs.size) {
+            if (out != "") { out = out + "|" }
+            out = out + relocs[i]
+            i = i + 1
+        }
+        return out
+    }
+
+    // ── 查询 ──
+
+    fun getOutputHex(): String {
+        return this.outputHex
+    }
+
+    fun getRelocRecords(): String {
+        return this.relocRecords
+    }
+
+    fun getStringConsts(): String {
+        return this.strConsts
+    }
+
+    fun setStringConsts(s: String): Unit {
+        this.strConsts = s
+    }
+
+    fun getEncoder(): X86Encoder {
+        return this.enc
+    }
+
+    fun setFrameSize(s: Int): Unit {
+        this.frameSize = s
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// X86EmitterUtils — 工具对象
+// ─────────────────────────────────────────────────────────────
+
+object X86EmitterUtils {
+
+    /// 创建空的发射器。
+    fun emptyEmitter(): X86Emitter {
+        return X86Emitter()
+    }
+}

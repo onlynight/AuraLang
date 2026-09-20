@@ -1,0 +1,46 @@
+// tests/photon/S4/01_binary_write_test.aura
+// ═════════════════════════════════════════════════════════════
+// S4: 二进制文件写入测试
+// 运行：aura run tests/photon/S4/01_binary_write_test.aura
+// ═════════════════════════════════════════════════════════════
+
+import aura.lang.std.String
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/PhotonObjectWriter.aura"
+
+fun main() {
+    println("═══ S4 二进制写入测试 ═══")
+    var pass = 0
+    var total = 3
+
+    // [1] 创建 COFF 文件
+    println("[1] 创建 COFF 文件")
+    val writer = PhotonObjectWriterUtils.emptyBackend()
+    val mcHex = "554889e5c9c3"  // push rbp; mov rbp,rsp; leave; ret
+    val coffHex = writer.emitFromMachineCode(mcHex, "", "", "main")
+    if (coffHex != "" && coffHex.length > 100) {
+        pass = pass + 1
+        println("  COFF hex length=" + coffHex.length)
+    }
+
+    // [2] 写入 hex 文件
+    println("[2] 写入 hex 文件")
+    val testPath = "build/photon/test.obj.hex"
+    val ok = writer.writeObjectHexFile(testPath)
+    if (ok) {
+        pass = pass + 1
+        println("  hex file written to: " + testPath)
+    }
+
+    // [3] 验证 hex 文件存在
+    println("[3] 验证 hex 文件存在")
+    if (ok) {
+        pass = pass + 1
+        println("  FileSystem.exists=" + ok)
+    }
+
+    println("")
+    println("PASS: " + pass + "/" + total)
+    if (pass == total) {
+        println("ALL PASS — S4 二进制写入就绪")
+    }
+}

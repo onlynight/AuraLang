@@ -1,0 +1,105 @@
+// aura:///aura/lang/compiler/mir/DebugTypeRegMinimal2.aura
+package aura.lang.compiler.mir
+
+import aura.lang.std.String
+
+class TypeRegistryMinimal2 {
+    private var kinds: List<String> = arrayListOf<String>()
+    private var widths: List<Integer> = arrayListOf<Integer>()
+    private var dedup: String = ""
+    var count: Int = 0
+
+    init() {
+        this.kinds = arrayListOf<String>()
+        this.widths = arrayListOf<Integer>()
+        this.dedup = ""
+        this.count = 0
+    }
+
+    private fun toStr(n: Int): String {
+        if (n == 0) { return "0" }
+        var neg: Boolean = false
+        if (n < 0) { neg = true; n = -n }
+        var result: String = ""
+        while (n > 0) {
+            result = digitChar(n % 10) + result
+            n = n / 10
+        }
+        if (neg) { result = "-" + result }
+        return result
+    }
+
+    private fun digitChar(value: Int): String {
+        if (value < 0 || value > 9) { return "" }
+        return "0123456789".substring(value, value + 1)
+    }
+
+    fun register(kind: String, width: Int): Int {
+        val key: String = kind + "|" + toStr(width)
+        val existingId: Int = this.dedupLookup(key)
+        if (existingId >= 0) {
+            return existingId
+        }
+        val id: Int = this.kinds.size
+        this.kinds.add(kind)
+        this.widths.add(width)
+        this.dedupAppend(key, id)
+        this.count = this.kinds.size
+        return id
+    }
+
+    private fun dedupLookup(key: String): Int {
+        if (this.dedup == "") { return -1 }
+        val lines: List<String> = this.dedup.split("\n")
+        var i: Int = 0
+        while (i < lines.size) {
+            if (lines[i] != "" && lines[i].contains("|")) {
+                val parts: List<String> = lines[i].split("|")
+                if (parts.size >= 2 && parts[0] == key) {
+                    return strToInt(parts[1])
+                }
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+    private fun dedupAppend(key: String, id: Int): Unit {
+        val entry: String = key + "|" + toStr(id)
+        if (this.dedup == "") {
+            this.dedup = entry
+        } else {
+            this.dedup = this.dedup + "\n" + entry
+        }
+    }
+
+    private fun strToInt(text: String): Int {
+        if (text == "") { return 0 }
+        val len: Int = text.length
+        var total: Int = 0
+        var i: Int = 0
+        var neg: Boolean = false
+        if (len > 0 && text[0] == "-") { neg = true; i = 1 }
+        while (i < len) {
+            val c: Int = "0123456789".indexOf(text[i])
+            if (c >= 0 && c <= 9) { total = total * 10 + c }
+            i = i + 1
+        }
+        if (neg) { return -total }
+        return total
+    }
+}
+
+fun main() {
+    println("═══ Debug TypeRegMinimal2 ═══")
+    println("[1] create")
+    val reg = TypeRegistryMinimal2()
+    println("  count=" + reg.count)
+    println("[2] register Int8")
+    val id = reg.register("Int", 8)
+    println("  id=" + id + " count=" + reg.count)
+    println("[3] register Int8 again (dedup)")
+    val id2 = reg.register("Int", 8)
+    println("  id=" + id2 + " (should be 0)")
+    println("  PASS")
+}

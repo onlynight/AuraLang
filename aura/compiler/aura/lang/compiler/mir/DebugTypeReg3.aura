@@ -1,0 +1,36 @@
+// aura:///aura/lang/compiler/mir/DebugTypeReg3.aura
+package aura.lang.compiler.mir
+
+import aura.lang.std.String
+
+fun main() {
+    println("═══ Debug TypeReg3 ═══")
+
+    println("[1] create lists")
+    val kinds = arrayListOf<String>()
+    val widths = arrayListOf<Integer>()
+    val names = alphabetOf<String>()
+    val fields = arrayListOf<String>()
+    val elems = arrayListOf<Integer>()
+    val arrayLengths = arrayListOf<Integer>()
+    var count = 0
+    println("  PASS")
+
+    println("[2] register Int8")
+    val kind = "Int"
+    val width = 8
+    val name = ""
+    val fieldIds = ""
+    val elemId = -1
+    val arrayLen = -1
+    val id = kinds.size
+    kinds.add(kind)
+    widths.add(width)
+    names.add(name)
+    fields.add(fieldIds)
+    elems.add(elemId)
+    arrayLengths.add(arrayLen)
+    count = kinds.size
+    println("  id=" + id + " count=" + count)
+    println("  PASS")
+}

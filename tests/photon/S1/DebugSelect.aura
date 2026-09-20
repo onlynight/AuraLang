@@ -1,0 +1,28 @@
+// aura:///aura/lang/compiler/backend/photon/DebugSelect.aura
+package aura.lang.compiler.backend.photon
+// Debug: test select() within the photon package
+
+import aura.lang.std.String
+import "Lir.aura"
+import "MachineDag.aura"
+import "InstructionSelection.aura"
+
+fun main() {
+    println("═══ Debug Select ═══")
+
+    // Test 1: empty program
+    println("[1] empty program")
+    val lir = LirUtils.emptyProgram()
+    println("  program created, functionCount=" + lir.functionCount)
+
+    // Test 2: selector creation
+    println("[2] selector creation")
+    val sel = InstructionSelectorUtils.emptySelector()
+    println("  selector created")
+
+    // Test 3: call select
+    println("[3] call select")
+    val dag = sel.select(lir)
+    println("  nodes=" + dag.nodeCount + " instrs=" + dag.instrCount)
+    println("  PASS")
+}

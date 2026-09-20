@@ -1,0 +1,15 @@
+// aura:///aura/lang/compiler/mir/DebugTypeRegistry.aura
+package aura.lang.compiler.mir
+// Debug: test TypeRegistry creation
+
+import aura.lang.std.String
+import "TypeRegistry.aura"
+
+fun main() {
+    println("═══ Debug TypeRegistry ═══")
+
+    println("[1] TypeRegistry()")
+    val reg = TypeRegistry()
+    println("  count=" + reg.count)
+    println("  PASS")
+}
