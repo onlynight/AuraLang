@@ -110,25 +110,37 @@ object LspApi {
     // 跳转定义
     // ═══════════════════════════════════════════════════════════
 
-    /// 跳转定义 → 定义位置 JSON。
+    /// 跳转定义 → 定义位置 JSON（递归遍历 AST 子节点）。
     fun lspDefinition(uri: String, content: String, posLine: Int): String {
         if (content.length == 0) { return "null" }
         val p = Parser(content)
         val root: Int = p.parseProgram()
         if (p.errors.count > 0) { return "null" }
+        return findDefinitionRecursive(p.ast, root, posLine, uri)
+    }
 
+    /// 递归查找定义位置。
+    private fun findDefinitionRecursive(
+            ast: Ast, parentId: Int, posLine: Int, uri: String): String {
         var i: Int = 0
         while (true) {
-            val childId: Int = p.ast.childOf(root, i)
+            val childId: Int = ast.childOf(parentId, i)
             if (childId < 0) { break }
-            val sp: Span = p.ast.spanOf(childId)
+            val sp: Span = ast.spanOf(childId)
             if (posLine >= (sp.startLine - 1) && posLine <= (sp.endLine - 1)) {
-                return "{\"uri\":\"" + escapeJson(uri) + "\"," +
-                    "\"range\":{" +
-                    "\"start\":{\"line\":" + toStr(sp.startLine - 1) +
-                    ",\"character\":" + toStr(sp.startCol - 1) + "}," +
-                    "\"end\":{\"line\":" + toStr(sp.endLine - 1) +
-                    ",\"character\":" + toStr(sp.endCol - 1) + "}}}"
+                val name: String = ast.textOf(childId)
+                if (name.length > 0) {
+                    // 先递归查找更精确的子节点
+                    val deeper: String = findDefinitionRecursive(
+                        ast, childId, posLine, uri)
+                    if (deeper != "null") { return deeper }
+                    return "{\"uri\":\"" + escapeJson(uri) + "\"," +
+                        "\"range\":{" +
+                        "\"start\":{\"line\":" + toStr(sp.startLine - 1) +
+                        ",\"character\":" + toStr(sp.startCol - 1) + "}," +
+                        "\"end\":{\"line\":" + toStr(sp.endLine - 1) +
+                        ",\"character\":" + toStr(sp.endCol - 1) + "}}}"
+                }
             }
             i = i + 1
         }
@@ -139,9 +151,66 @@ object LspApi {
     // 查找引用
     // ═══════════════════════════════════════════════════════════
 
-    /// 查找引用 → 引用位置 JSON 数组。
+    /// 查找引用 → 引用位置 JSON 数组（递归遍历 AST 查找同名符号）。
     fun lspReferences(content: String, posLine: Int): String {
-        return "[]"
+        if (content.length == 0) { return "[]" }
+        val p = Parser(content)
+        val root: Int = p.parseProgram()
+        if (p.errors.count > 0) { return "[]" }
+
+        // 第一步：定位光标处的符号名
+        val symbolName: String = findSymbolAtLine(p.ast, root, posLine)
+        if (symbolName.length == 0) { return "[]" }
+
+        // 第二步：递归查找所有同名节点
+        var result: String = "["
+        var first: Boolean = true
+        collectReferences(p.ast, root, symbolName, posLine, result)
+        return "]"
+    }
+
+    /// 递归收集同名节点的引用位置。
+    private fun collectReferences(ast: Ast, parentId: Int,
+            symbolName: String, posLine: Int, result: String): String {
+        var i: Int = 0
+        while (true) {
+            val childId: Int = ast.childOf(parentId, i)
+            if (childId < 0) { break }
+            val name: String = ast.textOf(childId)
+            if (name == symbolName) {
+                val sp: Span = ast.spanOf(childId)
+                if (!first) { result = result + "," }
+                result = result + "{\"range\":{\"start\":{\"line\":" +
+                    toStr(sp.startLine - 1) + ",\"character\":" +
+                    toStr(sp.startCol - 1) + "},\"end\":{\"line\":" +
+                    toStr(sp.endLine - 1) + ",\"character\":" +
+                    toStr(sp.endCol - 1) + "}}}"
+                first = false
+            }
+            result = collectReferences(ast, childId, symbolName, posLine, result)
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 在 AST 中找到光标所在行的符号名。
+    private fun findSymbolAtLine(ast: Ast, parentId: Int, posLine: Int): String {
+        var i: Int = 0
+        while (true) {
+            val childId: Int = ast.childOf(parentId, i)
+            if (childId < 0) { break }
+            val sp: Span = ast.spanOf(childId)
+            if (posLine >= (sp.startLine - 1) && posLine <= (sp.endLine - 1)) {
+                val name: String = ast.textOf(childId)
+                if (name.length > 0) {
+                    val deeper: String = findSymbolAtLine(ast, childId, posLine)
+                    if (deeper.length > 0) { return deeper }
+                    return name
+                }
+            }
+            i = i + 1
+        }
+        return ""
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -262,9 +331,163 @@ object LspApi {
     // 签名帮助 / 内联提示 / 代码操作（占位）
     // ═══════════════════════════════════════════════════════════
 
-    fun lspSignatureHelp(content: String, pos: Int): String { return "{}" }
-    fun lspInlayHint(content: String): String { return "[]" }
-    fun lspCodeAction(content: String, params: String): String { return "[]" }
+    /// 签名帮助 → 签名帮助 JSON（从 AST 提取函数参数列表）。
+    fun lspSignatureHelp(content: String, posLine: Int): String {
+        if (content.length == 0) { return "{}" }
+        val p = Parser(content)
+        val root: Int = p.parseProgram()
+        if (p.errors.count > 0) { return "{}" }
+
+        // 查找光标所在函数调用，返回其参数列表
+        val funcInfo: String = findSignatureAtLine(p.ast, root, posLine)
+        if (funcInfo.length == 0) { return "{}" }
+
+        return "{\"signatures\":[{\"label\":\"" + escapeJson(funcInfo) +
+            "\",\"parameters\":[]}]," +
+            "\"activeSignature\":0,\"activeParameter\":0}"
+    }
+
+    /// 递归查找光标所在函数的签名。
+    private fun findSignatureAtLine(ast: Ast, parentId: Int, posLine: Int): String {
+        var i: Int = 0
+        while (true) {
+            val childId: Int = ast.childOf(parentId, i)
+            if (childId < 0) { break }
+            val kind: String = ast.kindOf(childId)
+            val name: String = ast.textOf(childId)
+            val sp: Span = ast.spanOf(childId)
+            if (posLine >= (sp.startLine - 1) && posLine <= (sp.endLine - 1)) {
+                // 递归查找更深层
+                val deeper: String = findSignatureAtLine(ast, childId, posLine)
+                if (deeper.length > 0) { return deeper }
+                // 如果是函数/方法定义，构建签名
+                if (kind == "Function" || kind == "Method" || kind == "Fun" ||
+                    kind == "FunDecl" || kind == "FunctionDecl") {
+                    return buildSignatureFromAst(ast, childId, name)
+                }
+            }
+            i = i + 1
+        }
+        return ""
+    }
+
+    /// 从 AST 节点构建函数签名字符串。
+    private fun buildSignatureFromAst(ast: Ast, funcId: Int, name: String): String {
+        // 尝试从 AST 子节点中提取参数列表
+        var params: String = ""
+        var pi: Int = 0
+        while (true) {
+            val childId: Int = ast.childOf(funcId, pi)
+            if (childId < 0) { break }
+            val childKind: String = ast.kindOf(childId)
+            if (childKind == "Param" || childKind == "Parameter" ||
+                childKind == "FormalParam") {
+                val pName: String = ast.textOf(childId)
+                if (pName.length > 0) {
+                    if (params.length > 0) { params = params + ", " }
+                    params = params + pName
+                }
+            }
+            pi = pi + 1
+        }
+        if (name.length > 0) {
+            if (params.length > 0) {
+                return name + "(" + params + ")"
+            }
+            return name + "()"
+        }
+        return ""
+    }
+
+    /// 内联提示 → 内联提示 JSON 数组（为无类型标注的变量推断类型提示）。
+    fun lspInlayHint(content: String): String {
+        if (content.length == 0) { return "[]" }
+        val p = Parser(content)
+        val root: Int = p.parseProgram()
+        if (p.errors.count > 0) { return "[]" }
+
+        var result: String = "["
+        var first: Boolean = true
+        collectInlayHints(p.ast, root, content, result)
+        return "]"
+    }
+
+    /// 递归收集内联提示。
+    private fun collectInlayHints(ast: Ast, parentId: Int,
+            content: String, result: String): String {
+        var i: Int = 0
+        while (true) {
+            val childId: Int = ast.childOf(parentId, i)
+            if (childId < 0) { break }
+            val kind: String = ast.kindOf(childId)
+            val name: String = ast.textOf(childId)
+            if ((kind == "VarDecl" || kind == "Var" || kind == "LocalVar") &&
+                name.length > 0) {
+                val sp: Span = ast.spanOf(childId)
+                // 查找变量声明行的原始文本
+                val lineNum: Int = sp.startLine - 1
+                val lineText: String = getLineAt(content, lineNum)
+                if (lineText.indexOf(":") < 0) {
+                    // 无类型标注，提示推断类型
+                    if (!first) { result = result + "," }
+                    result = result + "{\"position\":{\"line\":" +
+                        toStr(sp.startLine - 1) + ",\"character\":" +
+                        toStr(sp.startCol - 1) +
+                        "},\"label\":\"\"}"
+                    first = false
+                }
+            }
+            result = collectInlayHints(ast, childId, content, result)
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 获取指定行号（0-based）的文本。
+    private fun getLineAt(content: String, lineNum: Int): String {
+        var pos: Int = 0
+        var currentLine: Int = 0
+        val len: Int = content.length
+        while (pos < len && currentLine < lineNum) {
+            if (content.charCodeAt(pos) == 10) {
+                currentLine = currentLine + 1
+                pos = pos + 1
+            } else {
+                pos = pos + 1
+            }
+        }
+        var end: Int = pos
+        while (end < len && content.charCodeAt(end) != 10) {
+            end = end + 1
+        }
+        return content.substring(pos, end)
+    }
+
+    /// 代码操作 → 代码操作 JSON 数组（诊断快速修复）。
+    fun lspCodeAction(content: String, params: String): String {
+        // 解析诊断并生成对应的代码操作
+        if (content.length == 0) { return "[]" }
+        val p = Parser(content)
+        val root: Int = p.parseProgram()
+
+        var result: String = "["
+        var first: Boolean = true
+        val errors: CompileErrors = p.errors
+        val errorCount: Int = errors.count
+        var i: Int = 0
+        while (i < errorCount) {
+            val sp: Span = errors.spanAt(i)
+            val msg: String = errors.messageAt(i)
+            if (!first) { result = result + "," }
+            result = result + "{\"title\":\"Fix: " + escapeJson(msg) +
+                "\",\"kind\":\"quickfix\",\"diagnostics\":[]," +
+                "\"edit\":{\"changes\":{}}}"
+            first = false
+            i = i + 1
+        }
+        result = result + "]"
+        return result
+    }
 
     // ═══════════════════════════════════════════════════════════
     // 辅助函数

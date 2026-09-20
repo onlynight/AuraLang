@@ -40,6 +40,10 @@ class AucModule {
     /// 静默丢弃（读取侧 `mod.funcTable` 解析到别的东西），VM 因此拿不到函数表，
     /// 入口/调用目标全部解析失败。
     var funcTable: String = ""
+    /// 导出表（每行 `name|funcIdx`）。
+    var exports: String = ""
+    /// 导入表（每行 `name|module|symbol|funcIdx`）。
+    var imports: String = ""
     /// 错误信息。
     var error: String = ""
 
@@ -203,12 +207,50 @@ object AucLoaderUtils {
         mod.entry = reader.readU16()
         mod.entryKind = reader.readStr()
 
-        // 说明：其后还有导出/导入/依赖/签名/vtable/类表/段表等区段。
-        // VM 执行只需要 `bytecode` / `constPool` / `funcTable`，故**不再继续解析**
-        // —— 这些区段在本轮 JSON/类表布局上尚未逐字段对齐，继续读只会引入
-        // 失步风险（且不影响执行）。
+        // 9. 导出符号表（CALL_EXPORT 解析需要）
+        //    格式：u16 count, 每条: name(str) + kind(u8) + sig_id(str)
+        //          + has_func_idx(u8) + func_idx(u16)? + type_table_idx(u16) + const_idx(u16)
+        val nExportsL: Long = reader.readU16()
+        val nExports: Int = nExportsL as Int
+        var ei: Int = 0
+        while (ei < nExports) {
+            val expName: String = reader.readStr()
+            reader.readByte()             // kind
+            reader.readStr()              // sig_id
+            val hasFunc: Int = reader.readByte()
+            val expFuncIdx: Int = 0
+            if (hasFunc != 0) {
+                val fiL: Long = reader.readU16()
+                expFuncIdx = fiL as Int
+            }
+            reader.readU16()              // type_table_idx
+            reader.readU16()              // const_idx
+            mod.exports = mod.exports + expName + "|" + toStr(expFuncIdx) + "\n"
+            ei = ei + 1
+        }
 
+        // 10. 导入符号表（CALL_EXTERNAL 解析需要）
+        //     格式：u16 count, 每条: name(str) + kind(u8) + module(str)
+        //           + symbol(str) + sig_id(str) + func_idx(u16)
+        val nImportsL: Long = reader.readU16()
+        val nImports: Int = nImportsL as Int
+        var ii: Int = 0
+        while (ii < nImports) {
+            val impName: String = reader.readStr()
+            reader.readByte()             // kind
+            val impModule: String = reader.readStr()
+            val impSymbol: String = reader.readStr()
+            reader.readStr()              // sig_id
+            val impFuncIdxL: Long = reader.readU16()
+            val impFuncIdx: Int = impFuncIdxL as Int
+            mod.imports = mod.imports + impName + "|" + impModule + "|"
+                + impSymbol + "|" + toStr(impFuncIdx) + "\n"
+            ii = ii + 1
+        }
 
+        // 说明：其后还有依赖/签名/vtable/类表/段表等区段。
+        // VM 执行只需要 `bytecode` / `constPool` / `funcTable` / `exports` / `imports`，
+        // 故**不再继续解析**后续区段。
 
         reader.dispose()
         return mod

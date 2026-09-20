@@ -1,18 +1,28 @@
 // aura:///debugger/aura/lang/debugger/BreakpointManager.aura
 package aura.lang.debugger
 
-// 闂傚倷绀侀崯鍧楀储濠婂牆纾婚柟鍓х帛閻撳啴鏌涜箛鎿冩Ц濞?闂傚倷绀侀幖顐ょ矓閺夋嚚娲Χ婢跺﹪妫峰銈嗙墬缁嬫帡宕?闂傚倷绀侀崯鍧楀储濠婂牆纾婚柟鍓х帛閻撳啴鏌涜箛鎿冩Ц濞?import aura.lang.std.String
+// ── Standard library imports ──
+import aura.lang.std.String
 import aura.lang.collection.HashMap
 import aura.lang.collection.ArrayList
 
-// 闂傚倷绀侀崯鍧楀储濠婂牆纾婚柟鍓х帛閻撳啴鏌涜箛鎿冩Ц濞?闂傚倷鑳堕…鍫㈡崲閹邦喒鍋撳鐓庡婵″弶鍔欏Λ鍐瑰畷鍥ф灈闁搞劑绠栭幖褰掝敃椤厽妯?闂傚倷绀侀崯鍧楀储濠婂牆纾婚柟鍓х帛閻撳啴鏌涜箛鎿冩Ц濞?import "DebugVm.aura"
+// ── Sibling module imports ──
+import "DebugVm.aura"
 
-// 闂傚倷绀佺壕顓㈠磿閵堝绀夐煫鍥ㄧ☉閻ら箖鏌＄仦璇插姎闁绘挻鐩弻鐔兼嚋椤掆偓婵¤姤绻涢崨顔剧煉闁哄苯绉归幃婊兾熼崫鍕垫綂闂備礁鎼幊蹇涙偂閿熺姴鏄ラ柨鐔哄Т缁犳盯鏌曟繝蹇涙闁绘繃濞婂鍝勭暦閸パ冨闂佸憡鏌ㄧ换妯侯嚕閺屻儱钃熼柕澶堝劤閸樻悂姊虹涵鍛劷闁告柨绉撮埢宥咁煥閸喓鍘撻梺缁樺灦閿氬┑顔瑰亾闂備礁鎼幊蹇涙偂閿熺姴鏄ラ柨鐔哄Т缁犳盯鏌曟繝蹇涙闁绘繃濞婂鍝勭暦閸パ冨闂佸憡鏌ㄧ换妯侯嚕閺屻儱钃熼柕澶堝劤閸樻悂姊虹涵鍛劷闁告柨绉撮埢宥咁煥閸喓鍘撻梺缁樺灦閿氬┑顔瑰亾闂備礁鎼幊蹇涙偂閿熺姴鏄ラ柨鐔哄Т缁犳盯鏌曟繝蹇涙闁绘繃濞婂鍝勭暦閸パ冨闂佸憡鏌ㄧ换妯侯嚕閺屻儱钃熼柕澶堝劤閸樻悂姊虹涵鍛劷闁告柨绉撮埢宥咁煥閸喓鍘撻梺缁樺灦閿氬┑顔瑰亾闂備礁鎼幊蹇涙偂閿熺姴鏄ラ柨鐔哄Т缁犳盯鏌曟繝蹇涙闁绘繃濞婂鍝勭暦閸パ冨闂佸憡鏌ㄧ换妯侯嚕閺屻儱钃熼柕澶堝劤閸樻悂姊虹涵鍛劷闁告柨绉撮埢宥咁煥閸喓鍘撻梺缁樺灦閿氬┑顔瑰亾闂備礁鎼幊蹇涙偂閿熺姴鏄ラ柨鐔哄Т缁犳盯鏌曟繝蹇涙闁绘繃濞婂鍝勭暦閸パ冨闂佸憡鏌ㄧ换妯侯嚕閺屻儱钃熼柕澶堝劤閸樻悂姊虹涵鍛劷闁告柨绉撮埢宥咁煥閸喓鍘撻梺缁樺灦閿氬┑顔瑰亾闂備礁鎼幊蹇涙偂閿熺姴鏄ラ柨鐔哄Т缁犳盯鏌曟繝蹇涙闁绘繃濞婂鍝勭暦閸パ冨闂佸憡鏌ㄧ换妯侯嚕閺屻儱钃熼柕澶堝劤閸樻悂姊虹涵鍛劷闁告柨绉撮埢宥咁煥閸喓鍘撻梺缁樺灦閿氬┑顔瑰亾闂備礁鎼幊蹇涙偂閿熺姴鏄ラ柨鐔哄Т缁犳盯鏌曟繝蹇涙闁绘繃濞婂鍝勭暦閸パ冨闂佸憡鏌ㄧ换妯侯嚕閺屻儱钃熼柕澶堝劤閸樻悂姊虹涵鍛劷闁告柨绉撮埢宥咁煥閸喓鍘撻梺缁樺灦閿氬┑顔瑰亾闂備礁鎼幊蹇涙偂閿熺姴鏄?// BreakpointManager 闂?闂傚倷绀侀幖顐﹀磻閸℃稑鍌ㄥΔ锝呭暙绾惧鏌ㄥ┑鍡樺窛濞戞挸绉归弻銊モ槈濡警浠鹃梺绋匡功閸嬨倝寮诲☉銏℃櫜閹艰揪绲界敮銊х磽娴ｄ粙鍝洪柣鐔濆洦鍎?Aura闂傚倷鐒︾€笛呯矙閹寸偟闄勯柡鍐ｅ亾缂佺粯鐩畷鍫曨敆娴ｉ晲缂?HashMap 闂備浇顕х€涒晝绮欓幒妤佹櫔闂備胶顭堥鍛矓瑜版帒鏋?// 闂傚倷绀佺壕顓㈠磿閵堝绀夐煫鍥ㄧ☉閻ら箖鏌＄仦璇插姎闁绘挻鐩弻鐔兼嚋椤掆偓婵¤姤绻涢崨顔剧煉闁哄苯绉归幃婊兾熼崫鍕垫綂闂備礁鎼幊蹇涙偂閿熺姴鏄ラ柨鐔哄Т缁犳盯鏌曟繝蹇涙闁绘繃濞婂鍝勭暦閸パ冨闂佸憡鏌ㄧ换妯侯嚕閺屻儱钃熼柕澶堝劤閸樻悂姊虹涵鍛劷闁告柨绉撮埢宥咁煥閸喓鍘撻梺缁樺灦閿氬┑顔瑰亾闂備礁鎼幊蹇涙偂閿熺姴鏄ラ柨鐔哄Т缁犳盯鏌曟繝蹇涙闁绘繃濞婂鍝勭暦閸パ冨闂佸憡鏌ㄧ换妯侯嚕閺屻儱钃熼柕澶堝劤閸樻悂姊虹涵鍛劷闁告柨绉撮埢宥咁煥閸喓鍘撻梺缁樺灦閿氬┑顔瑰亾闂備礁鎼幊蹇涙偂閿熺姴鏄ラ柨鐔哄Т缁犳盯鏌曟繝蹇涙闁绘繃濞婂鍝勭暦閸パ冨闂佸憡鏌ㄧ换妯侯嚕閺屻儱钃熼柕澶堝劤閸樻悂姊虹涵鍛劷闁告柨绉撮埢宥咁煥閸喓鍘撻梺缁樺灦閿氬┑顔瑰亾闂備礁鎼幊蹇涙偂閿熺姴鏄ラ柨鐔哄Т缁犳盯鏌曟繝蹇涙闁绘繃濞婂鍝勭暦閸パ冨闂佸憡鏌ㄧ换妯侯嚕閺屻儱钃熼柕澶堝劤閸樻悂姊虹涵鍛劷闁告柨绉撮埢宥咁煥閸喓鍘撻梺缁樺灦閿氬┑顔瑰亾闂備礁鎼幊蹇涙偂閿熺姴鏄ラ柨鐔哄Т缁犳盯鏌曟繝蹇涙闁绘繃濞婂鍝勭暦閸パ冨闂佸憡鏌ㄧ换妯侯嚕閺屻儱钃熼柕澶堝劤閸樻悂姊虹涵鍛劷闁告柨绉撮埢宥咁煥閸喓鍘撻梺缁樺灦閿氬┑顔瑰亾闂備礁鎼幊蹇涙偂閿熺姴鏄ラ柨鐔哄Т缁犳盯鏌曟繝蹇涙闁绘繃濞婂鍝勭暦閸パ冨闂佸憡鏌ㄧ换妯侯嚕閺屻儱钃熼柕澶堝劤閸樻悂姊虹涵鍛劷闁告柨绉撮埢宥咁煥閸喓鍘撻梺缁樺灦閿氬┑顔瑰亾闂備礁鎼幊蹇涙偂閿熺姴鏄ラ柨鐔哄Т缁犳盯鏌曟繝蹇涙闁绘繃濞婂鍝勭暦閸パ冨闂佸憡鏌ㄧ换妯侯嚕閺屻儱钃熼柕澶堝劤閸樻悂姊虹涵鍛劷闁告柨绉撮埢宥咁煥閸喓鍘撻梺缁樺灦閿氬┑顔瑰亾闂備礁鎼幊蹇涙偂閿熺姴鏄?
+// ═══════════════════════════════════════════════════════════════
+// BreakpointManager — manages breakpoint set
+//
+// Breakpoints are stored in a HashMap keyed by unique ID.
+// Each breakpoint is itself a HashMap<String, String> with fields:
+//   id, file, line, funcName, funcOffset, enabled, hitCount, condition
+// ═══════════════════════════════════════════════════════════════
+
 class BreakpointManager {
     var breakpoints: HashMap<Int, HashMap<String, String>> = HashMap<Int, HashMap<String, String>>()
     var nextId: Int = 1
 
-    /// 濠电姷鏁搁崕鎴犵礊閳ь剚銇勯弴鍡楀閸欏繘鏌ｉ幇顒佹儓婵☆偅蓱閵囧嫰骞樼捄鐩掋垹霉閻欌偓閸ㄥ爼寮婚妸銉㈡婵☆垳鍘ч埅鎻掝渻閵堝啫鐏柛銊ョ仢閻ｇ兘鏁愭径瀣弳闁诲函绲藉Λ鏃傜矆娓氣偓椤㈡岸鏁愰崼銏㈡澑闂侀潧锛忛崪浣剐ラ梻?SourceMap 闂備浇宕甸崰鎰版偡鏉堚晛绶ゅΔ锝呭暞閸婇潧霉閻樺樊鍎愰柡鍜佸墮椤法鎹勯搹鐟邦暤闂?    fun add(file: String, line: Int): Int {
+    /// Add a breakpoint at file:line, returns the breakpoint ID.
+    fun add(file: String, line: Int): Int {
         val id: Int = nextId
         nextId = nextId + 1
 
@@ -30,7 +40,8 @@ class BreakpointManager {
         return id
     }
 
-    /// 缂傚倸鍊风粈渚€藝椤栫偐鈧箑鐣￠幍铏€洪柟鍏肩暘閸斿苯螞濡眹浜滈柟鎹愭硾瀛濇繛瀵稿閸ㄥ爼寮?    fun remove(id: Int): Boolean {
+    /// Remove a breakpoint by ID. Returns true if found.
+    fun remove(id: Int): Boolean {
         val bp: HashMap<String, String>? = breakpoints.get(id)
         if (bp == null) {
             return false
@@ -39,8 +50,9 @@ class BreakpointManager {
         return true
     }
 
-    /// 闂傚倷绀侀崥瀣磿閹惰棄搴婇柤鑹扮堪娴滃綊鏌涢妷顔煎婵☆偅蓱閵囧嫰骞樼捄鐩掋垹霉?ID 闂傚倷绀侀幉锛勬暜濡ゅ懌鈧啯寰勯幇顑┿儵鏌涢幇闈涙灈鏉?    fun list(): ArrayList<Int> {
-        var result: ArrayList<Int> 
+    /// List all breakpoint IDs.
+    fun list(): ArrayList<Int> {
+        val result: ArrayList<Int> = ArrayList<Int>()
         val keys: List<Int> = breakpoints.keys()
         var i: Int = 0
         while (i < keys.size) {
@@ -50,11 +62,13 @@ class BreakpointManager {
         return result
     }
 
-    /// 闂傚倷绀侀崥瀣磿閹惰棄搴婇柤鑹扮堪娴滃綊鏌涢妷顔煎缁绢厸鍋撻梻浣告惈濞诧箑鐣濋幖浣稿惞閻庯綆鍠楅悡娑㈡煕鐏炶鈧洟鐛鈧弻娑氣偓锝呭缁夘喚鈧鍣崑濠囧箖瑜斿畷鐓庘攽閸稑浜伴梻?    fun getBp(id: Int): HashMap<String, String>? {
+    /// Get a breakpoint by ID.
+    fun getBp(id: Int): HashMap<String, String>? {
         return breakpoints.get(id)
     }
 
-    /// 闂傚倷绀侀幉锛勬暜閹烘嚚娲晝閳ь剟鎮鹃悜钘夎摕闁靛鍎查ˉ婵嗩渻閵堝棙灏靛┑顔肩摠缁傛帡顢涢悙瀵稿幈濠殿喗顭囬崢褔鎮橀敐澶嬬厸濞达綁娼ч埀顒佺箞楠炲啴鍩￠崨顔兼疂缂佸墽澧楅敋濞存粍鍎抽湁闁挎繂娴傞弳顖炴煕?    fun toggle(id: Int): Boolean {
+    /// Toggle a breakpoint's enabled state.
+    fun toggle(id: Int): Boolean {
         val bp: HashMap<String, String>? = breakpoints.get(id)
         if (bp == null) {
             return false
@@ -68,7 +82,8 @@ class BreakpointManager {
         return true
     }
 
-    /// 闂備浇宕垫慨宕囩矆娴ｈ娅犲ù鐘差儐閸嬵亪鏌涢埄鍐槈婵☆偅蓱閵囧嫰骞樼捄鐩掋垹霉閻欌偓閸ㄥ爼寮婚埄鍐ㄧ窞闁糕€崇箰娴滈箖鏌涘▎蹇ｆ▓闁稿鍔戝?    fun setCondition(id: Int, condition: String): Boolean {
+    /// Set the condition expression for a breakpoint.
+    fun setCondition(id: Int, condition: String): Boolean {
         val bp: HashMap<String, String>? = breakpoints.get(id)
         if (bp == null) {
             return false
@@ -77,27 +92,27 @@ class BreakpointManager {
         return true
     }
 
-    /// 濠电姷顣藉Σ鍛村磻閳ь剟鏌涚€ｎ偅宕岄柡宀嬬磿娴狅妇鎷犻幓鎺戭潛缂傚倸鍊哥粔鎾敄婢跺﹦鏆?IP 闂傚倷绀侀幖顐も偓姘卞厴瀹曡瀵奸弶鎴犵暰婵炴挻鍩冮崑鎾垛偓娈垮枛閻忔艾顕ラ崟顓涘亾閿濆骸浜為柛鏃傚厴濮婅櫣绱掑Ο鍝勵潓缂備胶濮寸粔褰掑春閳ь剚銇勯幒鍡椾壕闂佺锕﹂弲顐﹀箲閵忋倕绠ｉ柨鏇楀亾闁绘劕锕弻锝夊箛椤掑倹鎲奸梺缁樺笂缁瑩寮?ID闂傚倷鐒︾€笛呯矙閹达箑瀚夋い鎺嗗亾閾荤偤鏌曢崼婵愭Ц缂佲偓閸℃绠鹃柛鈩兠粭褏绱掗悩宕囧弨闁?0闂?    fun checkBreakpoint(ip: Int): Int {
+    /// Check if current IP matches any enabled breakpoint. Returns ID or 0.
+    fun checkBreakpoint(ip: Int): Int {
         val keys: List<Int> = breakpoints.keys()
         var i: Int = 0
         while (i < keys.size) {
-            val bp: HashMap<String, String> = HashMap<String, String>()= breakpoints.get(keys[i])
-            if (bp.get("enabled") != "true") {
-                i = i + 1
-            } else {
-            val offset: Int = DebugVmUtils.vrToInt(bp.get("funcOffset"))
-            if (offset == ip) {
-                // 闂傚倷绀侀幉锛勭矙閹烘鍨傛繝闈涱儐閸ゅ牓鏌熸潏鍓х暠婵☆偅蓱閵囧嫰骞樼捄鐩掋垹霉?                val hits: Int = DebugVmUtils.vrToInt(bp.get("hitCount"))
-                bp.put("hitCount", toStr(hits + 1))
-                return keys[i]
+            val bp: HashMap<String, String>? = breakpoints.get(keys[i])
+            if (bp != null && bp.get("enabled") == "true") {
+                val offset: Int = DebugVmUtils.vrToInt(bp.get("funcOffset"))
+                if (offset == ip) {
+                    val hits: Int = DebugVmUtils.vrToInt(bp.get("hitCount"))
+                    bp.put("hitCount", toStr(hits + 1))
+                    return keys[i]
+                }
             }
             i = i + 1
-            }
         }
         return 0
     }
 
-    /// 闂傚倷鑳堕幊鎾绘倶濮樿泛绠扮紒瀣硶閺嗐倝鏌涢幇闈涙灈缂佺姰鍎甸弻宥堫檨闁告挾鍠庨锝夊垂椤愩垻绐為柣搴秵閸嬪棝宕濋悜鑺モ拺缂備焦锚婵洨绱掗悩鑼ч柛鈹惧亾?    fun printAll(): Unit {
+    /// Print all breakpoints with their state.
+    fun printAll(): Unit {
         if (breakpoints.size == 0) {
             println("  No breakpoints")
             return
@@ -106,38 +121,41 @@ class BreakpointManager {
         val keys: List<Int> = breakpoints.keys()
         var i: Int = 0
         while (i < keys.size) {
-            val bp: HashMap<String, String> = HashMap<String, String>()= breakpoints.get(keys[i])
-            var s: String = "  #" + bp.get("id") + " "
-            if (bp.get("enabled") == "true") {
-                s = s + "[v] "
-            } else {
-                s = s + "[x] "
+            val bp: HashMap<String, String>? = breakpoints.get(keys[i])
+            if (bp != null) {
+                var s: String = "  #" + bp.get("id") + " "
+                if (bp.get("enabled") == "true") {
+                    s = s + "[v] "
+                } else {
+                    s = s + "[x] "
+                }
+                s = s + bp.get("file") + ":" + bp.get("line")
+                if (bp.get("funcName") != "") {
+                    s = s + " (func: " + bp.get("funcName") + ")"
+                }
+                if (DebugVmUtils.vrToInt(bp.get("funcOffset")) >= 0) {
+                    s = s + " @ " + bp.get("funcOffset")
+                }
+                if (DebugVmUtils.vrToInt(bp.get("hitCount")) > 0) {
+                    s = s + " (hits:" + bp.get("hitCount") + ")"
+                }
+                if (bp.get("condition") != "") {
+                    s = s + " if " + bp.get("condition")
+                }
+                println(s)
             }
-            s = s + bp.get("file") + ":" + bp.get("line")
-            if (bp.get("funcName") != "") {
-                s = s + " (func: " + bp.get("funcName") + ")"
-            }
-            if (DebugVmUtils.vrToInt(bp.get("funcOffset")) >= 0) {
-                s = s + " @ " + bp.get("funcOffset")
-            }
-            if (DebugVmUtils.vrToInt(bp.get("hitCount")) > 0) {
-                s = s + " (hits:" + bp.get("hitCount") + ")"
-            }
-            if (bp.get("condition") != "") {
-                s = s + " if " + bp.get("condition")
-            }
-            println(s)
             i = i + 1
         }
     }
 
-    /// 闂傚倷绀侀崥瀣磿閹惰棄搴婇柤鑹扮堪娴滃綊鏌涢妷顔煎閻熸瑱闄勯妵鍕冀閵娧呯厑闂佸搫妫楃换姗€寮婚敐澶娢╅柕澶堝労娴犻箖姊洪崫鍕婵炲樊鍙冮獮鍐ㄢ枎閹寸偛鏋傞梺鍛婃处閸撴岸顢欏澶嬧拺?    fun enabledCount(): Int {
+    /// Count enabled breakpoints.
+    fun enabledCount(): Int {
         var count: Int = 0
         val keys: List<Int> = breakpoints.keys()
         var i: Int = 0
         while (i < keys.size) {
-            val bp: HashMap<String, String> = HashMap<String, String>()= breakpoints.get(keys[i])
-            if (bp.get("enabled") == "true") {
+            val bp: HashMap<String, String>? = breakpoints.get(keys[i])
+            if (bp != null && bp.get("enabled") == "true") {
                 count = count + 1
             }
             i = i + 1
@@ -145,7 +163,8 @@ class BreakpointManager {
         return count
     }
 
-    /// 濠电姷鏁搁崑鐐哄箰閹间礁绠犳俊顖濄€€閺嬪秹骞栧ǎ顒€濡肩紒鐘劦閺屽秷顧侀柛鎾跺枎椤曪綁宕归銏㈢獮闁诲函缍嗛崑鍡涘礉閻戣姤鈷戠紓浣姑慨鍥╃磼閻樿尙效闁糕斁鍋?    fun clearAll(): Unit {
+    /// Remove all breakpoints and reset the ID counter.
+    fun clearAll(): Unit {
         breakpoints.clear()
         nextId = 1
     }

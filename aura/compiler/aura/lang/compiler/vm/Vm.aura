@@ -44,6 +44,11 @@ class Vm {
     private var constPool: String = ""
     private var funcTable: String = ""
 
+    /// 导出表（每行 `name|funcIdx`，来自 .auc 的 exports 区段）。
+    private var exportsTable: String = ""
+    /// 导入表（每行 `name|module|symbol|funcIdx`，来自 .auc 的 imports 区段）。
+    private var importsTable: String = ""
+
     /// 加载期缓存的「指令行 / opcode / 参数表」（三者的下标与 `ip` 对齐）。
     ///
     /// 执行期不再做 `substring` / 参数字符串切分：AOT 运行时没有 GC，
@@ -114,6 +119,8 @@ class Vm {
         this.bytecode = ""
         this.constPool = ""
         this.funcTable = ""
+        this.exportsTable = ""
+        this.importsTable = ""
         this.lines = arrayListOf<String>()
         this.ops = arrayListOf<String>()
         this.argCache = arrayListOf<List<String>>()
@@ -179,6 +186,9 @@ class Vm {
         this.constPool = mod.constPool
         // 加载器已从 .auc 的函数区还原出 `name|起始行|参数个数` 文本函数表
         this.funcTable = mod.funcTable
+        // 加载导出/导入表（跨模块调用需要）
+        this.exportsTable = mod.exports
+        this.importsTable = mod.imports
         this.ip = 0
         this.running = true
         this.error = ""
@@ -1886,9 +1896,146 @@ class Vm {
     }
 
     private fun callExternal(modIdx: String, symIdx: String): Unit {
-        this.error = "CallExternal: module=" + modIdx + " symbol=" + symIdx
-            + " (cross-module linking requires ModuleLinker support)"
+        // CALL_EXTERNAL(modIdx, symIdx)：
+        // modIdx 是导入表下标，symIdx 未使用（导入表已含目标符号名）。
+        // 导入表格式：每行 `name|module|symbol|funcIdx`
+        //
+        // 语义（对应 Rust `interp.rs` 的 CallExternal）：
+        //   1. 从导入表查找 modIdx 对应的导入条目
+        //   2. 从导入条目获取 module 和 symbol 名称
+        //   3. 在当前模块的导出表中查找该符号（同模块自引用场景）
+        //   4. 若找到，按 funcIdx 调用；否则退让为错误
+        val importIdx: Int = VmOps.toI32(modIdx)
+        val importEntry: String = lookupImport(importIdx)
+        if (importEntry == "") {
+            this.error = "CallExternal: import index " + modIdx + " out of range"
+            this.running = false
+            return
+        }
+        // 解析导入表条目：name|module|symbol|funcIdx
+        val parts: List<String> = splitPipe(importEntry)
+        if (parts.size < 4) {
+            this.error = "CallExternal: malformed import entry: " + importEntry
+            this.running = false
+            return
+        }
+        val targetSymbol: String = parts.get(2)
+        val localFuncIdxStr: String = parts.get(3)
+        val localFuncIdx: Int = VmOps.toI32(localFuncIdxStr)
+
+        // 尝试从导出表查找目标符号（同模块场景）
+        val exportEntry: String = lookupExportByName(targetSymbol)
+        if (exportEntry != "") {
+            val expParts: List<String> = splitPipe(exportEntry)
+            if (expParts.size >= 2) {
+                val expFuncIdx: Int = VmOps.toI32(expParts.get(1))
+                // 通过函数表按索引调用
+                val funcName: String = findFuncNameByIndex(expFuncIdx)
+                if (funcName != "") {
+                    this.callOrBuiltin(funcName, 0)
+                    return
+                }
+            }
+        }
+
+        // 退让：尝试直接用导入条目的 funcIdx 作为全局函数索引
+        if (localFuncIdx >= 0) {
+            val fallbackName: String = findFuncNameByIndex(localFuncIdx)
+            if (fallbackName != "") {
+                this.callOrBuiltin(fallbackName, 0)
+                return
+            }
+        }
+
+        this.error = "CallExternal: module=" + parts.get(1)
+            + " symbol=" + targetSymbol
+            + " (cross-module linking requires loaded module registry)"
         this.running = false
+    }
+
+    /// 在导入表中按索引查找条目（格式 `name|module|symbol|funcIdx`）。
+    private fun lookupImport(idx: Int): String {
+        if (this.importsTable == "" || idx < 0) { return "" }
+        var lineIdx: Int = 0
+        var pos: Int = 0
+        var len: Int = this.importsTable.length
+        while (pos < len) {
+            val nl: Int = indexOfChar(this.importsTable, pos, 10)
+            val end: Int = if (nl >= 0) nl else len
+            val line: String = this.importsTable.substring(pos, end)
+            pos = end + 1
+            if (lineIdx == idx) {
+                return line
+            }
+            lineIdx = lineIdx + 1
+        }
+        return ""
+    }
+
+    /// 在导出表中按符号名查找条目（格式 `name|funcIdx`）。
+    private fun lookupExportByName(symName: String): String {
+        if (this.exportsTable == "" || symName == "") { return "" }
+        var pos: Int = 0
+        var len: Int = this.exportsTable.length
+        while (pos < len) {
+            val nl: Int = indexOfChar(this.exportsTable, pos, 10)
+            val end: Int = if (nl >= 0) nl else len
+            val line: String = this.exportsTable.substring(pos, end)
+            pos = end + 1
+            val pipe: Int = indexOfChar(line, 0, 124)
+            if (pipe > 0 && line.substring(0, pipe) == symName) {
+                return line
+            }
+        }
+        return ""
+    }
+
+    /// 按全局函数索引查找函数名（函数表行序 = 全局索引）。
+    private fun findFuncNameByIndex(idx: Int): String {
+        if (this.funcTable == "" || idx < 0) { return "" }
+        var lineIdx: Int = 0
+        var pos: Int = 0
+        var len: Int = this.funcTable.length
+        while (pos < len) {
+            val nl: Int = indexOfChar(this.funcTable, pos, 10)
+            val end: Int = if (nl >= 0) nl else len
+            val line: String = this.funcTable.substring(pos, end)
+            pos = end + 1
+            if (lineIdx == idx) {
+                val pipe: Int = indexOfChar(line, 0, 124)
+                if (pipe > 0) {
+                    return line.substring(0, pipe)
+                }
+                return line
+            }
+            lineIdx = lineIdx + 1
+        }
+        return ""
+    }
+
+    /// 在字符串中查找指定字符的下标（从 start 开始搜索），未找到返回 -1。
+    private fun indexOfChar(s: String, start: Int, ch: Int): Int {
+        var i: Int = start
+        val len: Int = s.length
+        while (i < len) {
+            if (s.charCodeAt(i) == ch) { return i }
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// 按管道符分割字符串。
+    private fun splitPipe(s: String): List<String> {
+        val result: List<String> = arrayListOf<String>()
+        var pos: Int = 0
+        var len: Int = s.length
+        while (pos < len) {
+            val pipe: Int = indexOfChar(s, pos, 124)
+            val end: Int = if (pipe >= 0) pipe else len
+            result.add(s.substring(pos, end))
+            pos = end + 1
+        }
+        return result
     }
 
     private fun callAot(funcName: String): Unit {

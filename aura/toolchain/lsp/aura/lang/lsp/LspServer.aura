@@ -90,6 +90,7 @@ class LspServer {
                 "\"diagnosticProvider\":true," +
                 "\"documentFormattingProvider\":true," +
                 "\"documentSymbolProvider\":true," +
+                "\"referenceProvider\":true," +
                 "\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\",\"]}," +
                 "\"inlayHintProvider\":{\"resolveProvider\":false}," +
                 "\"codeActionProvider\":true}}}"
@@ -114,7 +115,7 @@ class LspServer {
         } else if (method == "textDocument/documentSymbol") {
             return LspApi.lspDocumentSymbol(currentText)
         } else if (method == "textDocument/signatureHelp") {
-            return LspApi.lspSignatureHelp(currentText, posChar)
+            return LspApi.lspSignatureHelp(currentText, posLine)
         } else if (method == "textDocument/inlayHint") {
             return LspApi.lspInlayHint(currentText)
         } else if (method == "textDocument/codeAction") {
