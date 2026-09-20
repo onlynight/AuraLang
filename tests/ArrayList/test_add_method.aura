@@ -1,0 +1,24 @@
+// Test ArrayList add method directly
+package test
+
+import aura.lang.collection.ArrayList
+
+class TestArrayList {
+    fun test(): Unit {
+        var l = ArrayList<Int>()
+        println("before add: size=" + l.size)
+        l.add(1)
+        println("after 1 add: size=" + l.size)
+        l.add(2)
+        println("after 2 add: size=" + l.size)
+        l.add(3)
+        println("after 3 add: size=" + l.size)
+        println("l[0]=" + l[0])
+    }
+}
+
+fun main(): Int {
+    var t = TestArrayList()
+    t.test()
+    return 0
+}

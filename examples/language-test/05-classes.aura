@@ -176,7 +176,7 @@ class AppLogger : Loggable {
 
 /// extern object + @aot：绑定到 AOT 动态库的函数接口
 /// 必须包含 default fun loadLibrary() 声明库路径
-extern object MathLib {
+extern interface MathLib {
     default fun loadLibrary(): String = "math"
 
     @aot fun add(a: Int, b: Int): Int

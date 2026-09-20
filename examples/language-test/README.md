@@ -53,27 +53,38 @@ examples/language-test/
 | 阶段 | 文件 | VM | JIT | AOT |
 |------|------|:--:|:---:|:---:|
 | Phase 1 词法基础 | `01-lexer.aura` | ✅ | ✅ | ✅ |
-| Phase 2 类型与变量 | `02-types-variables.aura` | ✅ | ✅ | ✅（编译通过并可运行，部分 Double 输出待优化） |
+| Phase 2 类型与变量 | `02-types-variables.aura` | ✅ | ✅ | ✅（`Int?` 持值时须先 Elvis 解包再 `toString()`） |
 | Phase 3 函数 | `03-functions.aura` | ✅ | ⚠️（Cranelift 热点整数函数预存问题） | ✅（AOT 与 VM 输出一致，仅泛型 Boolean 拆分差异） |
 | Phase 4 控制流 | `04-control-flow.aura` | ✅ | ✅ | ✅ |
-| Phase 5 类与对象 | `05-classes.aura` | ✅ | ⚠️（方法分派异常） | ⏳ |
+| Phase 5 类与对象 | `05-classes.aura` | ✅ | ⚠️（方法分派异常） | ✅ |
 | Phase 6 空安全 | `06-null-safety.aura` | ✅ | ✅ | ✅（编译通过并可运行，toString 对 null/String 输出待优化） |
-| Phase 7 错误处理 | `07-error-handling.aura` | ✅ | ✅ | ✅（编译通过，运行时输出待优化） |
-| Phase 8 并发 | `08-concurrency.aura` | ⏳ | ⏳ | ⏳ |
-| Phase 9 FFI | `09-ffi.aura` | ⏳ | ⏳ | ⏳ |
-| Phase 10 内存管理 | `10-memory.aura` | ⏳ | ⏳ | ⏳ |
-| Phase 11 导入 | `11-imports.aura` | ⏳ | ⏳ | ⏳ |
-| Phase 12 注解 | `12-annotations.aura` | ⏳ | ⏳ | ⏳ |
-| Phase 13 标准库 | `13-stdlib.aura` | ⏳ | ⏳ | ⏳ |
-| Phase 14 字符串插值 | `14-string-interp.aura` | ⏳ | ⏳ | ⏳ |
-| Phase 15 高级特性 | `15-advanced.aura` | ⏳ | ⏳ | ⏳ |
-| Phase 16 脚本模式 | `16-script-mode.aura` | ⏳ | ⏳ | ⏳ |
+| Phase 7 错误处理 | `07-error-handling.aura` / `07-exception-*.aura` | ✅ | ✅ | ✅（`try` 前需有语句，见 AOT 已知限制） |
+| Phase 8 并发 | `08-concurrency.aura` | ⏳ | ⏳ | ✅（仅 `Thread` + `Channel` 子集） |
+| Phase 9 FFI | `09-ffi.aura` | ⏳ | ⏳ | ✅ |
+| Phase 10 内存管理 | `10-memory.aura` | ⏳ | ⏳ | ✅ |
+| Phase 11 导入 | `11-imports.aura` | ⏳ | ⏳ | ✅ |
+| Phase 12 注解 | `12-annotations.aura` | ⏳ | ⏳ | ✅ |
+| Phase 13 标准库 | `13-stdlib.aura` | ⏳ | ⏳ | ✅（`aura.lang.std.*` 新包路径） |
+| Phase 14 字符串插值 | `14-string-interp.aura` | ⏳ | ⏳ | ✅ |
+| Phase 15 高级特性 | `15-advanced.aura` | ⏳ | ⏳ | ✅ |
+| Phase 16 脚本模式 | `16-script-mode.aura` | ⏳ | ⏳ | ✅（Aura 侧须显式 `fun main()`） |
 
-> **AOT 已知限制**（`docs/遗留问题与风险分析报告.md`）：
+> **AOT 已知限制**（`docs/遗留问题与风险分析报告.md` + 本轮实测补充）：
 > - `Any` 类型 `is` 检查在 AOT 中返回 `String`（类型擦除为 `i8*`，无法区分实际类型）
 > - 标签循环 `break@label` / `continue@label` 尚未实现（AST 无 label 字段）
-> - 嵌套函数不支持（需使用顶层函数）
+> - 嵌套函数不支持（需使用顶层函数）；lambda 表达式不支持
 > - `Boolean.toString()` 返回 `0`/`1` 而非 `false`/`true`（C FFI 仅支持 Int/Double）
+> - Double / Float 经 `println` 输出为 `0` 或次正规数（`6.9e-323`）
+> - object 属性访问（`Env.platform` / `Time.epoch` / `Math.PI`）不可用，须改用方法调用
+> - `Int?` 持有非空值时直接 `.toString()` 在 Rust AOT 下触发访问违例，须先 Elvis 解包
+> - Aura 自举 AOT 的 `try/throw`（setjmp/longjmp）：包含 `try` 的函数在 `try` 前
+>   若无任何语句，longjmp 返回后栈对齐被破坏，以 `0xC000001D` 终止
+> - Rust AOT 运行库表仅注册 `Channel.newChannel/channelSend/channelRecv` 与
+>   `Thread` 的线程原语；`Actor` / `Mutex` / `Atomic` / `select` / `tryRecv` 未注册
+> - Rust AOT 的 `ascii` FFI 仍为 Char(`i16`) 签名，与 `aura.lang.std.Ascii` 的
+>   String 签名不匹配，返回值错误
+> - Aura 自举 AOT 在 `Encoding`（sha256/hex 路径）、`Time`（`struct.Clock`）、
+>   `Random`（Float 常量）、`Builtin`（`typeof`）等模块的 AOT 代码生成尚不完整
 
 ---
 

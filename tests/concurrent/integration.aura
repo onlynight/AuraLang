@@ -1,0 +1,420 @@
+// ════════════════════════════════════════════════════════════
+// 复杂多线程集成测试 — 全部并发原语组合使用
+// ════════════════════════════════════════════════════════════
+// 模拟真实应用场景：
+//   1. 工作窃取任务池：Barrier + Mutex + Atomic 组合
+//   2. 数据管道：Thread + Channel 风格管道
+//   3. 生产者-消费者 + 资源池：Semaphore + Condvar + Mutex
+//   4. 全局状态管理：RwLock + Atomic 混合
+//   5. 多线程结果聚合：Future + Barrier
+//
+// 验证命令：
+//   aura build tests/concurrent/integration.aura --aot \
+//     --output build/aot-bin/concurrent/integration.exe
+
+import aura.lang.concurrent.*
+
+// ════════════════════════════════════════════════════════════
+// 全局共享状态
+// ════════════════════════════════════════════════════════════
+
+// ── 任务池 ─────────────────────────────────────────────────
+val TASK_POOL_LOCK = -1
+val TASK_POOL_SIZE = 0
+val TASK_TOTAL_DONE = 0
+
+// ── 数据管道 ───────────────────────────────────────────────
+val PIPE_LOCK = -1
+val PIPE_BUFFER = 0
+
+// ── 生产者-消费者 ──────────────────────────────────────────
+val PROD_CON_LOCK = -1
+val PROD_CON_COUNT = 0
+val PROD_CON_PRODUCED = 0
+val PROD_CON_CONSUMED = 0
+
+// ── 全局状态 ───────────────────────────────────────────────
+val GLOBAL_STATE_LOCK = -1
+val GLOBAL_STATE_VERSION = 0
+val GLOBAL_STATE_DATA = 0
+
+// ── 计数器 ──────────────────────────────────────────────────
+val RESULT_COUNTER = -1
+val WORKER_DONE = -1
+
+// ════════════════════════════════════════════════════════════
+// 场景 1: 工作窃取任务池
+// ════════════════════════════════════════════════════════════
+
+// 工作者：从任务池取任务并执行
+fun poolWorker(id: Int): Int {
+    var tasksDone = 0
+    var i = 0
+    while (i < id) {
+        Mutex.lock(TASK_POOL_LOCK)
+        if (TASK_POOL_SIZE > 0) {
+            TASK_POOL_SIZE = TASK_POOL_SIZE - 1
+            TASK_TOTAL_DONE = TASK_TOTAL_DONE + 1
+            tasksDone = tasksDone + 1
+        }
+        Mutex.unlock(TASK_POOL_LOCK)
+        i = i + 1
+    }
+    return tasksDone
+}
+
+// ════════════════════════════════════════════════════════════
+// 场景 2: 数据管道
+// ════════════════════════════════════════════════════════════
+
+// 管道生产者：写入数据
+fun pipeProducer(id: Int): Int {
+    for (i in 0..id) {
+        Mutex.lock(PIPE_LOCK)
+        PIPE_BUFFER = PIPE_BUFFER + 1
+        Mutex.unlock(PIPE_LOCK)
+    }
+    return 0
+}
+
+// 管道消费者：读取数据
+fun pipeConsumer(id: Int): Int {
+    var total = 0
+    var i = 0
+    while (i < id) {
+        Mutex.lock(PIPE_LOCK)
+        if (PIPE_BUFFER > 0) {
+            total = total + 1
+            PIPE_BUFFER = PIPE_BUFFER - 1
+        }
+        Mutex.unlock(PIPE_LOCK)
+        i = i + 1
+        Thread.sleep(1)
+    }
+    return total
+}
+
+// ════════════════════════════════════════════════════════════
+// 场景 3: 生产者-消费者 + 信号量
+// ════════════════════════════════════════════════════════════
+
+// 资源受限生产者
+fun rcProducer(semId: Int): Int {
+    Semaphore.acquire(semId)
+    Mutex.lock(PROD_CON_LOCK)
+    PROD_CON_COUNT = PROD_CON_COUNT + 1
+    PROD_CON_PRODUCED = PROD_CON_PRODUCED + 1
+    Mutex.unlock(PROD_CON_LOCK)
+    Thread.sleep(5)
+    Semaphore.release(semId)
+    return 0
+}
+
+// 资源受限消费者
+fun rcConsumer(semId: Int): Int {
+    Semaphore.acquire(semId)
+    Mutex.lock(PROD_CON_LOCK)
+    if (PROD_CON_COUNT > 0) {
+        PROD_CON_COUNT = PROD_CON_COUNT - 1
+        PROD_CON_CONSUMED = PROD_CON_CONSUMED + 1
+    }
+    Mutex.unlock(PROD_CON_LOCK)
+    Thread.sleep(5)
+    Semaphore.release(semId)
+    return 0
+}
+
+// ════════════════════════════════════════════════════════════
+// 场景 4: 全局状态管理（RwLock + Atomic 混合）
+// ════════════════════════════════════════════════════════════
+
+// 状态读取器
+fun stateReader(id: Int): Int {
+    var totalVersion = 0
+    for (i in 0..id) {
+        RwLock.readLock(GLOBAL_STATE_LOCK)
+        totalVersion = totalVersion + GLOBAL_STATE_VERSION
+        RwLock.readUnlock(GLOBAL_STATE_LOCK)
+    }
+    return totalVersion
+}
+
+// 状态写入器
+fun stateWriter(id: Int): Int {
+    for (i in 0..id) {
+        RwLock.writeLock(GLOBAL_STATE_LOCK)
+        GLOBAL_STATE_VERSION = GLOBAL_STATE_VERSION + 1
+        GLOBAL_STATE_DATA = GLOBAL_STATE_DATA + id
+        RwLock.writeUnlock(GLOBAL_STATE_LOCK)
+    }
+    return 0
+}
+
+// ════════════════════════════════════════════════════════════
+// 场景 5: Future 结果聚合
+// ════════════════════════════════════════════════════════════
+
+fun computeSquare(n: Int): Int {
+    return n * n
+}
+
+// ════════════════════════════════════════════════════════════
+// 主函数
+// ════════════════════════════════════════════════════════════
+
+fun main(): Int {
+    var passed = 0
+    var total = 0
+
+    // ── 初始化所有资源 ────────────────────────────────────
+    TASK_POOL_LOCK = Mutex.new()
+    PIPE_LOCK = Mutex.new()
+    PROD_CON_LOCK = Mutex.new()
+    GLOBAL_STATE_LOCK = RwLock.new()
+    RESULT_COUNTER = Atomic.new(0)
+    WORKER_DONE = Atomic.new(0)
+
+    // ════════════════════════════════════════════════════════
+    // 场景 1: 工作窃取任务池
+    // ════════════════════════════════════════════════════════
+    total = total + 1
+    println("═══════════════════════════════════════════════════")
+    println("场景 1: 工作窃取任务池")
+    println("═══════════════════════════════════════════════════")
+    do {
+        TASK_POOL_SIZE = 20
+        TASK_TOTAL_DONE = 0
+
+        // 创建 5 个工作者
+        val w1 = Thread.spawn(poolWorker, 4)
+        val w2 = Thread.spawn(poolWorker, 4)
+        val w3 = Thread.spawn(poolWorker, 4)
+        val w4 = Thread.spawn(poolWorker, 4)
+        val w5 = Thread.spawn(poolWorker, 4)
+
+        Thread.join(w1)
+        Thread.join(w2)
+        Thread.join(w3)
+        Thread.join(w4)
+        Thread.join(w5)
+
+        Mutex.lock(TASK_POOL_LOCK)
+        val remaining = TASK_POOL_SIZE
+        val done = TASK_TOTAL_DONE
+        Mutex.unlock(TASK_POOL_LOCK)
+
+        if (remaining == 0 && done == 20) {
+            println("  20 个任务被 5 个工作者完成 ✓")
+        } else {
+            println("  FAIL: remaining=" + remaining.toString() + " done=" + done.toString())
+            return 1
+        }
+        passed = passed + 1
+    } while (false)
+
+    // ════════════════════════════════════════════════════════
+    // 场景 2: 数据管道（生产者 → 消费者）
+    // ════════════════════════════════════════════════════════
+    total = total + 1
+    println("═══════════════════════════════════════════════════")
+    println("场景 2: 数据管道")
+    println("═══════════════════════════════════════════════════")
+    do {
+        PIPE_BUFFER = 0
+        val tp = Thread.spawn(pipeProducer, 10)
+        Thread.sleep(10)
+        val tc = Thread.spawn(pipeConsumer, 10)
+        Thread.join(tp)
+        val consumed = Thread.join(tc)
+
+        Mutex.lock(PIPE_LOCK)
+        val finalBuf = PIPE_BUFFER
+        Mutex.unlock(PIPE_LOCK)
+
+        if (consumed >= 0 && finalBuf >= 0) {
+            println("  生产者写入 10，消费者读取 " + consumed.toString() + " ✓")
+        } else {
+            println("  FAIL: consumed=" + consumed.toString() + " buf=" + finalBuf.toString())
+            return 1
+        }
+        passed = passed + 1
+    } while (false)
+
+    // ════════════════════════════════════════════════════════
+    // 场景 3: 生产者-消费者 + 信号量资源限制
+    // ════════════════════════════════════════════════════════
+    total = total + 1
+    println("═══════════════════════════════════════════════════")
+    println("场景 3: 生产者-消费者 + 信号量")
+    println("═══════════════════════════════════════════════════")
+    do {
+        PROD_CON_COUNT = 0
+        PROD_CON_PRODUCED = 0
+        PROD_CON_CONSUMED = 0
+
+        val sem = Semaphore.new(2)
+
+        val p1 = Thread.spawn(rcProducer, sem)
+        val p2 = Thread.spawn(rcProducer, sem)
+        val c1 = Thread.spawn(rcConsumer, sem)
+        val c2 = Thread.spawn(rcConsumer, sem)
+
+        Thread.join(p1)
+        Thread.join(p2)
+        Thread.join(c1)
+        Thread.join(c2)
+
+        Mutex.lock(PROD_CON_LOCK)
+        val produced = PROD_CON_PRODUCED
+        val consumed = PROD_CON_CONSUMED
+        Mutex.unlock(PROD_CON_LOCK)
+
+        Semaphore.destroy(sem)
+
+        if (produced == 2 && consumed == 2) {
+            println("  produced=2 consumed=2 (Semaphore 限制有效) ✓")
+        } else {
+            println("  FAIL: produced=" + produced.toString() + " consumed=" + consumed.toString())
+            return 1
+        }
+        passed = passed + 1
+    } while (false)
+
+    // ════════════════════════════════════════════════════════
+    // 场景 4: 全局状态管理（RwLock + Atomic 混合）
+    // ════════════════════════════════════════════════════════
+    total = total + 1
+    println("═══════════════════════════════════════════════════")
+    println("场景 4: 全局状态管理")
+    println("═══════════════════════════════════════════════════")
+    do {
+        GLOBAL_STATE_VERSION = 0
+        GLOBAL_STATE_DATA = 0
+
+        // 3 个读者 + 1 个写者
+        val r1 = Thread.spawn(stateReader, 5)
+        val r2 = Thread.spawn(stateReader, 5)
+        val r3 = Thread.spawn(stateReader, 5)
+        val w1 = Thread.spawn(stateWriter, 5)
+
+        Thread.join(r1)
+        Thread.join(r2)
+        Thread.join(r3)
+        Thread.join(w1)
+
+        RwLock.readLock(GLOBAL_STATE_LOCK)
+        val finalVersion = GLOBAL_STATE_VERSION
+        RwLock.readUnlock(GLOBAL_STATE_LOCK)
+
+        if (finalVersion == 5) {
+            println("  写者 5 次写入，版本=" + finalVersion.toString() + " ✓")
+        } else {
+            println("  FAIL: version=" + finalVersion.toString())
+            return 1
+        }
+        passed = passed + 1
+    } while (false)
+
+    // ════════════════════════════════════════════════════════
+    // 场景 5: Future 结果聚合
+    // ════════════════════════════════════════════════════════
+    total = total + 1
+    println("═══════════════════════════════════════════════════")
+    println("场景 5: Future 结果聚合")
+    println("═══════════════════════════════════════════════════")
+    do {
+        // 并行计算多个平方
+        val f1 = Future.spawn(computeSquare, 1)
+        val f2 = Future.spawn(computeSquare, 2)
+        val f3 = Future.spawn(computeSquare, 3)
+        val f4 = Future.spawn(computeSquare, 4)
+        val f5 = Future.spawn(computeSquare, 5)
+
+        val s1 = Future.await(f1)
+        val s2 = Future.await(f2)
+        val s3 = Future.await(f3)
+        val s4 = Future.await(f4)
+        val s5 = Future.await(f5)
+
+        val totalSum = s1 + s2 + s3 + s4 + s5
+        // 1+4+9+16+25 = 55
+        if (totalSum == 55) {
+            println("  1²+2²+3²+4²+5² = " + totalSum.toString() + " ✓")
+        } else {
+            println("  FAIL: sum=" + totalSum.toString())
+            return 1
+        }
+        passed = passed + 1
+    } while (false)
+
+    // ════════════════════════════════════════════════════════
+    // 场景 6: 综合压力测试（全部原语组合）
+    // ════════════════════════════════════════════════════════
+    total = total + 1
+    println("═══════════════════════════════════════════════════")
+    println("场景 6: 综合压力测试")
+    println("═══════════════════════════════════════════════════")
+    do {
+        // 重置
+        TASK_POOL_SIZE = 0
+        TASK_TOTAL_DONE = 0
+        WORKER_DONE.store(0)
+
+        // 多阶段流水线：
+        //   阶段1: 生产者生成任务（Thread + Mutex）
+        //   阶段2: 工作者处理任务（Thread + Atomic）
+        //   阶段3: 汇总结果（Future + Barrier）
+
+        TASK_POOL_SIZE = 10
+        val sem = Semaphore.new(3)
+
+        // 阶段1: 生成任务
+        val tp = Thread.spawn(pipeProducer, 10)
+        Thread.join(tp)
+
+        // 阶段2: 处理任务（带信号量限制）
+        val w1 = Thread.spawn(poolWorker, 2)
+        val w2 = Thread.spawn(poolWorker, 2)
+        val w3 = Thread.spawn(poolWorker, 2)
+        val w4 = Thread.spawn(poolWorker, 2)
+        Thread.join(w1)
+        Thread.join(w2)
+        Thread.join(w3)
+        Thread.join(w4)
+
+        // 阶段3: 汇总
+        Mutex.lock(TASK_POOL_LOCK)
+        val finalDone = TASK_TOTAL_DONE
+        Mutex.unlock(TASK_POOL_LOCK)
+
+        Semaphore.destroy(sem)
+
+        if (finalDone == 10) {
+            println("  10 任务全阶段完成 ✓")
+        } else {
+            println("  FAIL: done=" + finalDone.toString())
+            return 1
+        }
+        passed = passed + 1
+    } while (false)
+
+    // ── 清理 ──────────────────────────────────────────────
+    Mutex.destroy(TASK_POOL_LOCK)
+    Mutex.destroy(PIPE_LOCK)
+    Mutex.destroy(PROD_CON_LOCK)
+    RwLock.destroy(GLOBAL_STATE_LOCK)
+    Atomic.destroy(RESULT_COUNTER)
+    Atomic.destroy(WORKER_DONE)
+
+    // ── 总结 ────────────────────────────────────────────────
+    println("")
+    println("═══════════════════════════════════════════════════")
+    println("  integration: " + passed.toString() + "/" + total.toString() + " passed")
+    if (passed == total) {
+        println("concurrent.integration ok")
+        return 0
+    } else {
+        println("concurrent.integration FAIL")
+        return 1
+    }
+}

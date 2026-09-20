@@ -18,3 +18,7 @@ __pycache__/
 libs/
 .migration*/
 .mimocode/
+
+# 冻结的自举编译器发布产物（Stage-0 载体，随仓库分发）
+# 说明：上方 `*.exe` 仍忽略其余可执行文件，此处用 `!` 例外放行发布目录
+!dist/bootstrap/aura-compiler.exe

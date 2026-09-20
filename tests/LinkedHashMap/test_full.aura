@@ -1,0 +1,37 @@
+package test
+
+import aura.lang.collection.LinkedHashMap
+
+fun main(): Int {
+    // Test LinkedHashMap put
+    var m = LinkedHashMap<Int, Int>()
+    m.put(1, 10)
+    m.put(2, 20)
+    m.put(3, 30)
+    
+    assert(m.getSize() == 3, "LinkedHashMap size should be 3")
+    assert(m.get(1) == 10, "LinkedHashMap get(1) should be 10")
+    assert(m.get(2) == 20, "LinkedHashMap get(2) should be 20")
+    assert(m.get(3) == 30, "LinkedHashMap get(3) should be 30")
+    
+    // Test LinkedHashMap containsKey
+    assert(m.containsKey(1) == true, "LinkedHashMap should contain key 1")
+    assert(m.containsKey(4) == false, "LinkedHashMap should not contain key 4")
+    
+    // Test LinkedHashMap overwrite
+    m.put(1, 100)
+    assert(m.getSize() == 3, "LinkedHashMap size should still be 3 after overwrite")
+    assert(m.get(1) == 100, "LinkedHashMap get(1) after overwrite should be 100")
+    
+    // Test LinkedHashMap remove
+    m.remove(2)
+    assert(m.getSize() == 2, "LinkedHashMap size after remove should be 2")
+    assert(m.get(2) == null, "LinkedHashMap get(2) after remove should be null")
+    
+    // Test LinkedHashMap clear
+    m.clear()
+    assert(m.isEmpty() == true, "LinkedHashMap should be empty after clear")
+    
+    println("LinkedHashMap tests passed")
+    return 0
+}

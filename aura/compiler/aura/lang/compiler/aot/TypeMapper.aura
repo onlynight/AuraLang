@@ -53,9 +53,8 @@ object TypeMapperUtils {
         var rebuilding: Boolean = false
         var out: String = ""
         while (i < len) {
-            val c: String = toStr(s[i])
+            val c: String = aotSlice(s, i, 1)
             if (allowed.indexOf(c) >= 0) {
-                // 全合法时一次也不追加：最终整串零分配返回原值
                 if (rebuilding) {
                     out = out + c
                 }
@@ -125,25 +124,53 @@ class TypeMapper {
         }
         else if (ty == "Any" || ty == "Nothing") { return "i8*" }
         else if (ty == "CString" || ty == "CStr" || ty == "Handle") { return "i8*" }
-        else if (ty == "Color") { return "{ i8, i8, i8, i8 }" }
+        // 注意：**不要**给具体类名做硬编码映射。此前这里把类型名 `Color` 一律
+        // 映射为 `{ i8, i8, i8, i8 }`（RGBA 字节），而用户源码里
+        // `value class Color(val r: Int, val g: Int, val b: Int)` 的真实布局是
+        // `%struct.Color = { i32, i32, i32 }` → 方法签名按值 4 字节、方法体按
+        // `%struct.Color*` 取字段，llc 报
+        // `'%var.N' defined with type '{ i8, i8, i8, i8 }' but expected 'ptr'`。
+        // 让类名走结构体/指针的通用映射即可。
         else if (ty == "List" || ty == "Map" || ty == "Set" || ty == "Value" ||
-            ty == "Iterator" || ty == "Closure" || ty == "ArrayList"
-            || ty == "HashSet" || ty == "LinkedList") {
+            ty == "Iterator" || ty == "Closure") {
             return "i8*"
         }
         else if (ty.startsWith("List<") || ty.startsWith("Map<") ||
-            ty.startsWith("Set<") || ty.startsWith("Array<")
-            || ty.startsWith("ArrayList<") || ty.startsWith("HashSet<")
-            || ty.startsWith("LinkedList<")) {
-            // 集合实现的类型名同样按**句柄 `i8*`** 表示：
-            // 构造侧（`ArrayList()` / `mutableListOf()`）本来就发射成
-            // `aura_lang_std_Collections_emptyList()`（句柄），若类型侧仍当成
-            // `%struct.ArrayList*`，成员访问会拿句柄做结构体 `getelementptr`
-            // → 读到垃圾指针并崩溃（实测 `HashMap` 建桶时 0xC0000005）。
+            ty.startsWith("Set<") || ty.startsWith("Array<")) {
+            return "i8*"
+        }
+        else if (ty.startsWith("Vararg<")) {
+            // `vararg xs: T` 形参：AOT 侧就是一个原生列表句柄（与 `List<T>` 同形）。
+            // 必须映射成 `i8*`，否则会落到通用类分支生成 `%struct.Vararg*`
+            //（无定义类型 → llc 报 use of undefined type）。
             return "i8*"
         }
         else if (ty.startsWith("Pointer<")) { return "ptr" }
-        else if (ty.startsWith("(")) { return "ptr" }
+        else if (ty.startsWith("(")) {
+            // 函数类型 = 闭包环境指针（env：字段 0 = 函数指针）。
+            //
+            // 必须与 `Emit.aura` 的闭包表示一致：`emitLambda` 分配 `malloc(8)`
+            // 得到 `i8*`，返回它作为闭包值；调用点 `emitIndirectCall` 也从
+            // `i8*` 里取出函数指针。此处若返回不透明 `ptr`，则：
+            //   * `define ptr @makeAdder()` 里 `ret ptr <i8* 值>` 非法 IR
+            //     （`inttoptr … to ptr` 不被词法器接受）；
+            //   * 形参 `f: (Int) -> Int` 变 `ptr`，`store ptr %env` 与
+            //     `inttoptr i64` 互斥，lambda 调用点生成非法 IR。
+            // 统一为 `i8*` 后闭包的 env 指针在 alloca / store / call / ret
+            // 各处类型一致，无需任何隐式转换。
+            return "i8*"
+        }
+        else if (this.isGenericTypeParam(ty)) {
+            // 泛型类形参（`class ArrayList<T>` 的 `T`）擦除为句柄 `i8*`。
+            //
+            // 所有集合实现已统一按句柄表示（见上方 `List<` / `ArrayList<` 分支），
+            // 若把 `T` 映射成 `%struct.T*`，则 `fun filter(predicate: (T) -> Boolean)`
+            // 的签名会声明 `%struct.T_*`——没有任何 `= type {…}` 定义的合成类型，
+            // llc 报 `use of undefined type named 'struct.T_'`（整个模块编译失败）。
+            // 擦除到 `i8*` 后与集合的实际表示一致，调用点实参（`String_charAt`
+            // → `i8*`、标量装箱句柄 → `i8*`）无需转换即可对齐。
+            return "i8*"
+        }
         else {
             // 用户自定义结构体 / 类：实例统一以**指针**表示（Phase 6.5.1）。
             // 与 `emitNewStruct`（返回实例指针）、字段访问（gep on `%struct.X*`）、
@@ -159,6 +186,19 @@ class TypeMapper {
             val base: String = TypeMapperUtils.stripGenericArgs(ty)
             return "%struct." + TypeMapperUtils.sanitizeLlvm(base) + "*"
         }
+    }
+
+    /// 是否为泛型类型形参名（单个大写字母：`T` / `K` / `V` / `U` …）。
+    ///
+    /// Aura 的泛型类形参约定用单个大写字母命名（`class ArrayList<T>`、
+    /// `class HashMap<K, V>`）。所有集合实现都按句柄 `i8*` 表示，故类型形参
+    /// 也必须擦除到 `i8*`——见 `map` 的调用点注释。
+    fun isGenericTypeParam(ty: String): Boolean {
+        if (ty.length != 1) {
+            return false
+        }
+        val c: Int = ty.charCodeAt(0)
+        return c >= 65 && c <= 90
     }
 
     /// 可空类型映射：标量包装为 `{ <inner>, i1 }`，其余保留内部类型。

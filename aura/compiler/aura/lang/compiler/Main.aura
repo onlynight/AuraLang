@@ -133,6 +133,25 @@ object MainUtils {
         return CompilerInfo.name() + " " + CompilerInfo.version()
     }
 
+    /// 从输入路径提取目录部分（用于定位 runtime/*.ll 文件）。
+    /// 例："aura/compiler/aura/lang/compiler/Main.aura" → "aura/compiler/aura/lang/compiler/"
+    fun aotBaseDirFromInput(inputPath: String): String {
+        var i: Int = inputPath.length - 1
+        var found: Int = -1
+        while (i >= 0) {
+            val c: Char = inputPath.charAt(i)
+            if (c == "/" || c == "\\") {
+                found = i
+                break
+            }
+            i = i - 1
+        }
+        if (found < 0) {
+            return ""
+        }
+        return inputPath.substring(0, found + 1)
+    }
+
     /// 编译单个源文件（保留签名）。
     fun compileSource(path: String): String {
         return "unimplemented: " + path
@@ -268,7 +287,9 @@ object MainUtils {
             aotMemMark("link done modules=" + toStr(linker.loadedCount()) +
                 " nodes=" + toStr(hir.count))
         }
-        val r = aotBuildExeFromHir(hir, moduleName, outDir, llvmHome)
+        // 从输入路径推导 runtime/*.ll 的基础目录
+        val basePath: String = aotBaseDirFromInput(inputPath)
+        val r = aotBuildExeFromHirEx(hir, moduleName, outDir, llvmHome, basePath)
         if (trace) {
             aotMemMark("emit + toolchain done")
         }
@@ -349,8 +370,8 @@ object MainUtils {
     fun cliDir(p: String): String {
         var i: Int = p.length - 1
         while (i >= 0) {
-            val c: String = toStr(p[i])
-            if (c == "/" || c == "\\") {
+            val cc: Int = p.charCodeAt(i)
+            if (cc == 47 || cc == 92) {
                 return jitSlice(p, 0, i)
             }
             i = i - 1
@@ -363,8 +384,8 @@ object MainUtils {
         var start: Int = 0
         var i: Int = 0
         while (i < p.length) {
-            val c: String = toStr(p[i])
-            if (c == "/" || c == "\\") {
+            val cc: Int = p.charCodeAt(i)
+            if (cc == 47 || cc == 92) {
                 start = i + 1
             }
             i = i + 1
@@ -373,7 +394,7 @@ object MainUtils {
         var dot: Int = -1
         var j: Int = 0
         while (j < name.length) {
-            if (toStr(name[j]) == ".") {
+            if (name.charCodeAt(j) == 46) {
                 dot = j
             }
             j = j + 1
@@ -387,7 +408,9 @@ object MainUtils {
     /// CLI 用法说明。
     fun cliUsage(): String {
         return "Usage: aura-compiler <input.aura> [-o <output.exe>] [--mem-trace]\n" +
-            "      aura-compiler                  Without arguments, prints this usage only (see runSelfTest for self-test)"
+            "      aura-compiler --run-auc <file.auc>    Load and execute .auc bytecode\n" +
+            "      aura-compiler --selftest              Run compiler self-test\n" +
+            "      aura-compiler                         Print usage\n"
     }
 
     /// CLI 模式：读取命令行参数 → 读源文件 → AOT 产出原生可执行文件。
@@ -569,6 +592,19 @@ fun main() {
         val first: String = Process.arg(1)
         if (first == "--selftest" || first == "-t") {
             MainUtils.runSelfTest()
+            return
+        }
+        if (first == "--run-auc") {
+            if (Process.argCount() >= 3) {
+                val aucPath: String = Process.arg(2)
+                val vm: VmRunner = VmRunner()
+                vm.loadAucAndRun(aucPath)
+                println("result=" + toStr(vm.getReturnValue()))
+                println("error=" + vm.getError())
+                println("instrCount=" + toStr(vm.getInstructionCount()))
+            } else {
+                println("Error: --run-auc requires a file path")
+            }
             return
         }
         MainUtils.runCli()

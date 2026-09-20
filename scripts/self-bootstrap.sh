@@ -1,6 +1,10 @@
 #!/bin/bash
 # Phase C.4: Aura 编译器自举验证脚本 (Linux/macOS)
 # 验证流程：Rust AOT → aura-compiler-native.exe → 自举编译 → 行为一致性验证
+#
+# 注意：本脚本以 **Rust 编译器为 Stage-0 引导**，需要 cargo。
+#       不依赖 Rust 的纯 Aura 自举验证入口见 scripts/self-bootstrap-frozen.sh
+#       （使用签入的冻结载体 dist/bootstrap/aura-compiler.exe）。
 set -e
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"

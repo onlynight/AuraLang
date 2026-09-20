@@ -10,7 +10,7 @@ package aura.lang.native.arch.x86_64_darwin
 import aura.lang.native.Memory
 
 /// macOS x86_64 系统调用
-extern object Syscalls {
+extern interface Syscalls {
 
     // ── 系统调用号 ──
 

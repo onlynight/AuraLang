@@ -65,7 +65,6 @@ dynamic-ffi = ["libloading"]
 llvm = ["thiserror", "object", "ed25519-dalek", "rand_core"]
 
 # Phase 3: std 模块按需编译（默认关闭，减小二进制体积）
-# 启用方式：cargo build --features "std-math,std-io"
 std-io = []
 std-math = []
 std-string = []

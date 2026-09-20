@@ -1,0 +1,21 @@
+// Test ArrayList with data field
+package test
+
+import aura.lang.collection.ArrayList
+
+fun main(): Int {
+    var l = ArrayList<Int>()
+    l.add(1)
+    l.add(2)
+    l.add(3)
+    println("size=" + l.size)
+    println("get(0)=" + l.get(0))
+    println("get(1)=" + l.get(1))
+    println("get(2)=" + l.get(2))
+    println("first=" + l.first())
+    println("last=" + l.last())
+    println("contains(2)=" + l.contains(2))
+    println("indexOf(2)=" + l.indexOf(2))
+    println("toString=" + l.toString())
+    return 0
+}

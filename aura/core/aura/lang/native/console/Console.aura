@@ -1,31 +1,21 @@
 // aura:///aura/lang/native/console/Console.aura
 package aura.lang.native.console
-// ------------------------------------------------------------------
-// Console operations -- Phase S1
-//
-// Provides console output functions.
-// Uses Syscalls.write to write directly to stdout (fd=1).
-//
-// Usage:
-//   Console.println("Hello, Aura!")
-//   Console.print("Hello")
-// ------------------------------------------------------------------
-
 import aura.lang.native.Syscalls
 import aura.lang.native.Memory
 import aura.lang.std.string.StringOps
 
-/// Console output
-extern object Console {
+/// Console output - declarations
+extern interface Console {
+    @native fun println(msg: Long): Unit
+    @native fun print(msg: Long): Unit
+    @native(SYS_WRITE) fun writeStdout(buf: Long, count: Long): Long
+}
 
-    // -- Internal buffers --
+/// Console output - implementation
+object ConsoleImpl {
     var newlineBuf: Long = 0
     var intBuf: Long = 0
 
-    /// Write to stdout (fd=1)
-    @native(SYS_WRITE) fun writeStdout(buf: Long, count: Long): Long
-
-    /// Initialize internal buffers
     fun init(): Boolean {
         newlineBuf = Memory.alloc(2)
         if (newlineBuf == 0) { return false }
@@ -35,57 +25,44 @@ extern object Console {
         return true
     }
 
-    /// Write string (no newline)
     fun print(msg: Long) {
         val len: Long = StringOps.strlen(msg)
-        writeStdout(msg, len)
+        Console.writeStdout(msg, len)
     }
 
-    /// Write string (with newline)
     fun println(msg: Long) {
         val len: Long = StringOps.strlen(msg)
-        writeStdout(msg, len)
+        Console.writeStdout(msg, len)
         if (newlineBuf != 0) {
-            writeStdout(newlineBuf, 1)
+            Console.writeStdout(newlineBuf, 1)
         }
     }
 
-    /// Write integer (decimal, with newline)
     fun printlnInt(n: Long) {
         val buf: Long = intToStr(n)
         if (buf == 0) { return }
         val len: Long = StringOps.strlen(buf)
-        writeStdout(buf, len)
+        Console.writeStdout(buf, len)
         if (newlineBuf != 0) {
-            writeStdout(newlineBuf, 1)
+            Console.writeStdout(newlineBuf, 1)
         }
     }
 
-    /// Write integer (no newline)
     fun printInt(n: Long) {
         val buf: Long = intToStr(n)
         if (buf == 0) { return }
         val len: Long = StringOps.strlen(buf)
-        writeStdout(buf, len)
+        Console.writeStdout(buf, len)
     }
 
-    /// Write float (simplified: integer part only, with newline)
     fun printlnFloat(n: Float) {
         val i: Long = n as Long
         printlnInt(i)
     }
 
-    /// Get newline buffer address
-    fun getNewlineBuffer(): Long {
-        return newlineBuf
-    }
+    fun getNewlineBuffer(): Long { return newlineBuf }
+    fun getIntBuffer(): Long { return intBuf }
 
-    /// Get integer conversion buffer address
-    fun getIntBuffer(): Long {
-        return intBuf
-    }
-
-    /// Convert integer to string (uses internal buffer)
     fun intToStr(n: Long): Long {
         if (intBuf == 0) { return 0 }
         Memory.set(intBuf, 0, 32)

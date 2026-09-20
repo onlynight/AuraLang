@@ -3,23 +3,54 @@ package aura.lang.native
 // ─────────────────────────────────────────────────────────────
 // 内存操作声明 — Phase S1
 //
-// 编译器内置内存操作（直接降低到 LLVM load/store）
+// 编译器内置内存操作（直接降低到 LLVM load/store 或 syscall）
 //
-// 使用 extern object 封装，@native 无参数标注编译器内置。
+// 使用 extern interface 封装：
+//   - `fun`（无 @native 注解）→ 编译器内置（load/store/alloc/free）
+//   - `@native(SYS_MMAP)` / `@native(SYS_MPROTECT)` → 系统调用
+//   - `@native(asm = "atomicrmw")` → ARC 原子操作
+//
 // ─────────────────────────────────────────────────────────────
 
+import aura.lang.native.Syscalls
+
 // 编译器内置内存操作
-extern object Memory {
-    native fun read(addr: Long): Byte
-    native fun read16(addr: Long): Short
-    native fun read32(addr: Long): Int
-    native fun read64(addr: Long): Long
-    native fun write(addr: Long, v: Byte)
-    native fun write16(addr: Long, v: Short)
-    native fun write32(addr: Long, v: Int)
-    native fun write64(addr: Long, v: Long)
-    native fun copy(dst: Long, src: Long, n: Long)
-    native fun set(addr: Long, v: Byte, n: Long)
-    native fun alloc(n: Long): Long
-    native fun free(addr: Long)
+extern interface Memory {
+
+    // ═══════════════════════════════════════════════════════════
+    // 内存读写（编译器内置：直接降低到 LLVM load/store 指令）
+    // ═══════════════════════════════════════════════════════════
+
+    fun read(addr: Long): Byte
+    fun read16(addr: Long): Short
+    fun read32(addr: Long): Int
+    fun read64(addr: Long): Long
+    fun write(addr: Long, v: Byte)
+    fun write16(addr: Long, v: Short)
+    fun write32(addr: Long, v: Int)
+    fun write64(addr: Long, v: Long)
+    fun copy(dst: Long, src: Long, n: Long)
+    fun set(addr: Long, v: Byte, n: Long)
+
+    // ═══════════════════════════════════════════════════════════
+    // 内存分配（编译器内置：调用 libc malloc/free）
+    // ═══════════════════════════════════════════════════════════
+
+    fun alloc(n: Long): Long
+    fun free(addr: Long)
+
+    // ═══════════════════════════════════════════════════════════
+    // 内存映射（系统调用：mmap/mprotect/munmap）
+    // ═══════════════════════════════════════════════════════════
+
+    @native(SYS_MMAP) fun mmap(addr: Long, length: Long, prot: Int, flags: Int, fd: Int, offset: Long): Long
+    @native(SYS_MUNMAP) fun munmap(addr: Long, length: Long): Int
+    @native(SYS_MPROTECT) fun mprotect(addr: Long, length: Long, prot: Int): Int
+
+    // ═══════════════════════════════════════════════════════════
+    // ARC 引用计数（原子操作：LLVM atomicrmw）
+    // ═══════════════════════════════════════════════════════════
+
+    @native(asm = "lock inc") fun arcIncrement(addr: Long): Long
+    @native(asm = "lock dec") fun arcDecrement(addr: Long): Long
 }

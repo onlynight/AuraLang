@@ -17,7 +17,29 @@ path = "src/debugger_main.rs"
 
 [dependencies]
 compiler = { path = "../compiler" }
+rayon = "1"
 
 [features]
-# AOT 编译支持（转发 compiler 的 llvm + dynamic-ffi features）
-llvm = ["compiler/llvm", "compiler/dynamic-ffi", "compiler/std-collections"]
+# AOT 编译支持（转发 compiler 的 llvm + dynamic-ffi features + 全部 std 模块）
+llvm = [
+    "compiler/llvm",
+    "compiler/dynamic-ffi",
+    "compiler/std-io",
+    "compiler/std-math",
+    "compiler/std-string",
+    "compiler/std-collections",
+    "compiler/std-fs",
+    "compiler/std-json",
+    "compiler/std-time",
+    "compiler/std-test",
+    "compiler/std-builtin",
+    "compiler/std-env",
+    "compiler/std-process",
+    "compiler/std-random",
+    "compiler/std-encoding",
+    "compiler/std-ascii",
+    "compiler/std-console",
+    "compiler/std-path",
+    "compiler/std-iter",
+    "compiler/std-sb",
+]

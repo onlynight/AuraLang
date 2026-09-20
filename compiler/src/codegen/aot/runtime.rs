@@ -92,10 +92,31 @@ pub const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
             ("idx", "i64"),
         ],
     },
+    // `aura_string_charAt`：`translate_to_legacy_c` 将 `aura_lang_std_String_charAt`
+    // 转换为此名，需要声明才能通过 llc。
+    RuntimeFn {
+        name: "aura_string_charAt",
+        ret: "i8*",
+        params: &[
+            ("s", "i8*"),
+            ("idx", "i64"),
+        ],
+    },
     // `s.charCodeAt(i)`：返回字符码（i32），C 侧实现见 aura_std_cffi.c
     RuntimeFn {
         name: "aura_lang_std_String_charCodeAt",
         ret: "i64",
+        params: &[
+            ("s", "i8*"),
+            ("idx", "i64"),
+        ],
+    },
+    // `String_charAt`：Aura 源码 `String.charAt` 方法经 sanitizellvm 后的符号名。
+    // 当 `string_method_symbol` 改派失败时，裸名 `charAt` 可能经接收者类型
+    // 改派为 `String.charAt` → `String_charAt`，需要声明才能通过 llc。
+    RuntimeFn {
+        name: "String_charAt",
+        ret: "i8*",
         params: &[
             ("s", "i8*"),
             ("idx", "i64"),
@@ -280,6 +301,17 @@ pub const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
         ret: "void",
         params: &[("s", "i8*")],
     },
+    // 裸名 println/print（emitPrint 直接调用 C 运行时 aura_println/aura_print）
+    RuntimeFn {
+        name: "aura_println",
+        ret: "void",
+        params: &[("s", "i8*")],
+    },
+    RuntimeFn {
+        name: "aura_print",
+        ret: "void",
+        params: &[("s", "i8*")],
+    },
     RuntimeFn {
         name: "aura_lang_std_IO_print",
         ret: "void",
@@ -345,22 +377,22 @@ pub const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
         ret: "i1",
         params: &[("id", "i64")],
     },
-    // Channel.newChannel() — 创建新通道
+    // Channel.newChannel(cap: Int) → Int
     RuntimeFn {
         name: "aura_lang_concurrent_Channel_newChannel",
         ret: "i64",
-        params: &[],
+        params: &[("cap", "i64")],
     },
-    // Channel.channelSend(ch, val) — 向通道发送值
+    // Channel.channelSend(ch: Int, val: Any) → Unit
     RuntimeFn {
         name: "aura_lang_concurrent_Channel_channelSend",
-        ret: "i64",
+        ret: "void",
         params: &[
             ("ch", "i64"),
             ("val", "i8*"),
         ],
     },
-    // Channel.channelRecv(ch) — 从通道接收值
+    // Channel.channelRecv(ch: Int) → Any
     RuntimeFn {
         name: "aura_lang_concurrent_Channel_channelRecv",
         ret: "i8*",
@@ -384,7 +416,7 @@ pub const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
     },
     RuntimeFn {
         name: "aura_thread_join",
-        ret: "void",
+        ret: "i64",
         params: &[("id", "i64")],
     },
     RuntimeFn {
@@ -688,12 +720,34 @@ pub fn translate_to_legacy_c(name: &str) -> String {
     let concurrent_prefix = "aura_lang_concurrent_";
     if name.starts_with(concurrent_prefix) {
         let rest = &name[concurrent_prefix.len()..];
+        // Thread 类特殊映射（运行时函数名与类方法名不一致）
+        if let Some(thread_rest) = rest.strip_prefix("Thread_") {
+            return match thread_rest {
+                "spawn" => "aura_thread_create".to_string(),
+                "join" => "aura_thread_join".to_string(),
+                "sleep" => "aura_thread_sleep".to_string(),
+                "id" => "aura_thread_id".to_string(),
+                "parallelism" => "aura_thread_available_parallelism".to_string(),
+                "availableCores" => "aura_thread_available_parallelism".to_string(),
+                _ => return name.to_string(),
+            };
+        }
+        // Channel 类：运行时函数名保留完整 sanitized 形式
+        if let Some(channel_rest) = rest.strip_prefix("Channel_") {
+            return format!("aura_lang_concurrent_Channel_{}", channel_rest);
+        }
+        // Mutex 类：同样保留完整形式
+        if let Some(mutex_rest) = rest.strip_prefix("Mutex_") {
+            return format!("aura_lang_concurrent_Mutex_{}", mutex_rest);
+        }
+        // Atomic / RwLock / Condvar / Barrier：保留完整形式
         let parts: Vec<&str> = rest.splitn(2, '_').collect();
         if parts.len() != 2 {
             return name.to_string();
         }
         let (_class, fn_name) = (parts[0], parts[1]);
-        return format!("aura_concurrent_{}", fn_name);
+        // 通用并发类：保留完整 sanitized 名
+        return format!("aura_lang_concurrent_{}_{}", _class, fn_name);
     }
 
     name.to_string()
@@ -977,6 +1031,89 @@ pub fn cffi_signature(name: &str) -> Option<(&'static str, Vec<&'static str>)> {
                 "i64", "i64",
             ],
         ),
+        // ── aura.lang.concurrent 高层 API（C runtime 包装） ──
+        // Mutex
+        "aura_lang_concurrent_Mutex_new" => ("i64", &[]),
+        "aura_lang_concurrent_Mutex_lock" => ("void", &["i64"]),
+        "aura_lang_concurrent_Mutex_unlock" => ("void", &["i64"]),
+        "aura_lang_concurrent_Mutex_tryLock" => ("i32", &["i64"]),
+        "aura_lang_concurrent_Mutex_destroy" => ("void", &["i64"]),
+        // Atomic
+        "aura_lang_concurrent_Atomic_new" => ("i64", &["i64"]),
+        "aura_lang_concurrent_Atomic_load" => ("i64", &["i64"]),
+        "aura_lang_concurrent_Atomic_store" => (
+            "void",
+            &[
+                "i64", "i64",
+            ],
+        ),
+        "aura_lang_concurrent_Atomic_add" => (
+            "i64",
+            &[
+                "i64", "i64",
+            ],
+        ),
+        "aura_lang_concurrent_Atomic_sub" => (
+            "i64",
+            &[
+                "i64", "i64",
+            ],
+        ),
+        "aura_lang_concurrent_Atomic_compareAndSet" => (
+            "i32",
+            &[
+                "i64", "i64", "i64",
+            ],
+        ),
+        // RwLock
+        "aura_lang_concurrent_RwLock_new" => ("i64", &[]),
+        "aura_lang_concurrent_RwLock_readLock" => ("void", &["i64"]),
+        "aura_lang_concurrent_RwLock_writeLock" => ("void", &["i64"]),
+        "aura_lang_concurrent_RwLock_readUnlock" => ("void", &["i64"]),
+        "aura_lang_concurrent_RwLock_writeUnlock" => ("void", &["i64"]),
+        "aura_lang_concurrent_RwLock_destroy" => ("void", &["i64"]),
+        // Condvar
+        "aura_lang_concurrent_Condvar_new" => ("i64", &[]),
+        "aura_lang_concurrent_Condvar_wait" => (
+            "void",
+            &[
+                "i64", "i64",
+            ],
+        ),
+        "aura_lang_concurrent_Condvar_signal" => ("void", &["i64"]),
+        "aura_lang_concurrent_Condvar_broadcast" => ("void", &["i64"]),
+        "aura_lang_concurrent_Condvar_destroy" => ("void", &["i64"]),
+        // Barrier
+        "aura_lang_concurrent_Barrier_new" => ("i64", &["i64"]),
+        "aura_lang_concurrent_Barrier_wait" => ("i64", &["i64"]),
+        "aura_lang_concurrent_Barrier_destroy" => ("void", &["i64"]),
+        // Semaphore
+        "aura_lang_concurrent_Semaphore_new" => ("i64", &["i64"]),
+        "aura_lang_concurrent_Semaphore_acquire" => ("void", &["i64"]),
+        "aura_lang_concurrent_Semaphore_release" => ("void", &["i64"]),
+        "aura_lang_concurrent_Semaphore_tryAcquire" => ("i32", &["i64"]),
+        "aura_lang_concurrent_Semaphore_destroy" => ("void", &["i64"]),
+        // Future
+        "aura_lang_concurrent_Future_spawn" => (
+            "i64",
+            &[
+                "i64", "i64",
+            ],
+        ),
+        "aura_lang_concurrent_Future_await" => ("i64", &["i64"]),
+        "aura_lang_concurrent_Future_isDone" => ("i32", &["i64"]),
+        "aura_lang_concurrent_Future_cancel" => ("i32", &["i64"]),
+        // Thread
+        "aura_lang_concurrent_Thread_spawn" => (
+            "i64",
+            &[
+                "i64", "i64",
+            ],
+        ),
+        "aura_lang_concurrent_Thread_join" => ("void", &["i64"]),
+        "aura_lang_concurrent_Thread_sleep" => ("void", &["i64"]),
+        "aura_lang_concurrent_Thread_id" => ("i64", &[]),
+        "aura_lang_concurrent_Thread_parallelism" => ("i64", &[]),
         _ => return None,
     };
     Some((ret, params.to_vec()))

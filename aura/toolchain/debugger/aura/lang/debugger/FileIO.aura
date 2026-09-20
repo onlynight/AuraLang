@@ -3,45 +3,54 @@ package aura.lang.debugger
 
 // ── 标准库 ──
 import aura.lang.std.String
-import aura.lang.std.Encoding
+import aura.lang.std.IO
 
-// ── Native 包 ──
-import aura.lang.native.file.FileOps
-import aura.lang.native.memory.Allocator
-import aura.lang.native.string.StrOps
+// ── 集合 ──
+import aura.lang.collection.ArrayList
+
+// ── 兄弟模块 ──
+import "DebugVm.aura"
 
 // ═══════════════════════════════════════════════════════════════
-// 文件 I/O 辅助（使用 aura.core.native）
+// 文件 I/O 辅助（object 形式，AOT 兼容）
 // ═══════════════════════════════════════════════════════════════
 
-/// 读取文件（使用 FileOps）
-fun readDebugFile(path: String): String {
-    val fd: Int = FileOps.open(CString(path), FileOps.O_RDONLY)
-    if (fd < 0) { return "" }
-    val buf: Long = Allocator.malloc(65536)
-    if (buf == 0) { FileOps.close(fd); return "" }
-    var total: Long = 0
-    var bytesRead: Long = 0
-    while (true) {
-        bytesRead = FileOps.read(fd, buf + total, 65536 - total)
-        if (bytesRead <= 0) { break }
-        total = total + bytesRead
-        if (total >= 65536) { break }
+object FileIO {
+    /// 读取文件内容。
+    fun readDebugFile(path: String): String {
+        val result: String = IO.readFile(path)
+        if (result == "" || DebugVmUtils.myStartsWith(result, "IO error")) {
+            println("[debug] Cannot read file: " + path)
+            return ""
+        }
+        return result
     }
-    FileOps.close(fd)
-    val result: String = bufferToString(buf, total)
-    Allocator.free(buf)
-    return result
-}
 
-/// 缓冲区转字符串
-fun bufferToString(addr: Long, len: Long): String {
-    var result: String = ""
-    var i: Long = 0
-    while (i < len) {
-        val c: Byte = StrOps.readByte(addr + i)
-        result = result + String.fromCharCode(c)
-        i = i + 1
+    /// 检查文件是否存在。
+    fun fileExists(path: String): Boolean {
+        return IO.fileExists(path)
     }
-    return result
+
+    /// 读取文件行（按行分割）。
+    fun readLines(path: String): ArrayList<String> {
+        var result: ArrayList<String> = ArrayList<String>()
+        val content: String = IO.readFile(path)
+        if (content == "") {
+            return result
+        }
+        var i: Int = 0
+        var lineStart: Int = 0
+        val len: Int = content.length
+        while (i < len) {
+            if (content.charCodeAt(i) == 10) {
+                result.add(DebugVmUtils.safeSubstring(content, lineStart, i))
+                lineStart = i + 1
+            }
+            i = i + 1
+        }
+        if (lineStart < len) {
+            result.add(DebugVmUtils.safeSubstring(content, lineStart, len))
+        }
+        return result
+    }
 }

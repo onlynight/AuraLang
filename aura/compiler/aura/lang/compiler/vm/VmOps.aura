@@ -1,0 +1,902 @@
+// aura:///aura/compiler/aura/lang/compiler/vm/VmOps.aura
+package aura.lang.compiler.vm
+// ─────────────────────────────────────────────────────────────
+// VM 操作助手 — P0 完整指令集支持（性能优化版）
+//
+// 所有类型判定/转换/运算函数均使用 when / if-else-if 链
+// 替代 if-return 早退，减少分支点和字节码跳转开销。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.collection.ArrayList
+import aura.lang.collection.HashMap
+import aura.lang.native.Memory
+
+/// VM 操作工具对象（集中管理无状态工具函数）。
+object VmOps {
+
+    // ═══════════════════════════════════════════════════════════
+    //  类型判定
+    // ═══════════════════════════════════════════════════════════
+
+    /// 返回值的运行时类型名称。
+    fun typeName(v: Any): String {
+        if (v == null) {
+            return "Null"
+        }
+        val t: String = typeof(v)
+        return t
+    }
+
+    /// 检查是否为数值类型（Int/Float/Long/Double）。
+    fun isNumeric(v: Any): Boolean {
+        if (v == null) {
+            return false
+        }
+        val t: String = typeof(v)
+        if (t == "Int" || t == "Long" || t == "Float" || t == "Double") {
+            return true
+        }
+        return false
+    }
+
+    /// 检查是否为整数类型。
+    fun isInt(v: Any): Boolean {
+        if (v == null) {
+            return false
+        }
+        val t: String = typeof(v)
+        if (t == "Int" || t == "Long") {
+            return true
+        }
+        return false
+    }
+
+    /// 检查是否为浮点类型。
+    fun isFloat(v: Any): Boolean {
+        if (v == null) {
+            return false
+        }
+        val t: String = typeof(v)
+        if (t == "Float" || t == "Double") {
+            return true
+        }
+        return false
+    }
+
+    /// 检查是否为布尔类型。
+    fun isBool(v: Any): Boolean {
+        if (v == null) {
+            return false
+        }
+        if (typeof(v) == "Boolean") {
+            return true
+        }
+        return false
+    }
+
+    /// 检查是否为字符串类型。
+    fun isString(v: Any): Boolean {
+        if (v == null) {
+            return false
+        }
+        if (typeof(v) == "String") {
+            return true
+        }
+        return false
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  类型转换（when 优化）
+    // ═══════════════════════════════════════════════════════════
+
+    /// Any -> Int（32 位）。
+    fun toI32(s: String): Int {
+        if (s == null || s == "") {
+            return 0
+        }
+        if (s == "true") {
+            return 1
+        }
+        if (s == "false" || s == "Unit") {
+            return 0
+        }
+        var total: Int = 0
+        var i: Int = 0
+        var len: Int = s.length
+        var neg: Boolean = false
+        if (len > 0 && s.charCodeAt(0) == 45) {
+            neg = true
+            i = 1
+        }
+        while (i < len) {
+            val c: Int = s.charCodeAt(i)
+            if (c >= 48 && c <= 57) {
+                total = total * 10 + (c - 48)
+            }
+            i = i + 1
+        }
+        if (neg) {
+            return -total
+        }
+        return total
+    }
+
+    /// Any -> Long（64 位）。
+    ///
+    /// 直接解析为 Long，不经过 toI32（后者仅 32 位，会丢失高 32 位）。
+    /// 64 位对象指针（如 `Memory.alloc` 返回的地址）必须保留完整精度。
+    fun toI64(s: String): Long {
+        if (s == null || s == "") {
+            return 0
+        }
+        if (s == "true") {
+            return 1
+        }
+        if (s == "false" || s == "Unit") {
+            return 0
+        }
+        var total: Long = 0
+        var i: Int = 0
+        var len: Int = s.length
+        var neg: Boolean = false
+        if (len > 0 && s.charCodeAt(0) == 45) {
+            neg = true
+            i = 1
+        }
+        while (i < len) {
+            val c: Int = s.charCodeAt(i)
+            if (c >= 48 && c <= 57) {
+                total = total * 10 + (c - 48)
+            }
+            i = i + 1
+        }
+        if (neg) {
+            return -total
+        }
+        return total
+    }
+
+    /// Any -> Float（when 优化）。
+    fun parseFloat(s: String): Float {
+        if (s == null || s == "") {
+            return 0.0f
+        }
+        if (s == "true") {
+            return 1.0f
+        }
+        if (s == "false") {
+            return 0.0f
+        }
+        return toFloat(s)
+    }
+
+    /// Any -> Boolean。
+    ///
+    /// AOT 下布尔值经 Plan A 装箱为整数（true → -1，false → 0），`typeof` 只能
+    /// 报出 "Int"，因此**不能**用 `typeof(v) == "Boolean"` 判定，也不能只认
+    /// "true"/"1"（-1 会被误判成 false —— while 条件为真时被当作假，循环体整段
+    /// 不执行，`sum` 恒为 0）。这里按「零/空 → false，其余 → true」处理。
+    fun toBool(v: Any): Boolean {
+        if (v == null) {
+            return false
+        }
+        if (typeof(v) == "Boolean") {
+            return v as Boolean
+        }
+        val s: String = toStr(v)
+        if (s == "true") {
+            return true
+        }
+        if (s == "false") {
+            return false
+        }
+        if (s == "0" || s == "") {
+            return false
+        }
+        return true
+    }
+
+    /// Int -> Any。
+    fun toAny(v: Int): Any {
+        return v
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  算术运算（if-else-if 优化）
+    // ═══════════════════════════════════════════════════════════
+
+    /// 加法。
+    fun add(a: Any, b: Any): Any {
+        if (isFloat(a) || isFloat(b)) {
+            return parseFloat(toStr(a)) + parseFloat(toStr(b))
+        } else if (isString(a) || isString(b)) {
+            return toStr(a) + toStr(b)
+        } else {
+            return toI32(toStr(a)) + toI32(toStr(b))
+        }
+    }
+
+    /// 减法。
+    fun sub(a: Any, b: Any): Any {
+        if (isFloat(a) || isFloat(b)) {
+            return parseFloat(toStr(a)) - parseFloat(toStr(b))
+        } else {
+            return toI32(toStr(a)) - toI32(toStr(b))
+        }
+    }
+
+    /// 乘法。
+    fun mul(a: Any, b: Any): Any {
+        if (isFloat(a) || isFloat(b)) {
+            return parseFloat(toStr(a)) * parseFloat(toStr(b))
+        } else {
+            return toI32(toStr(a)) * toI32(toStr(b))
+        }
+    }
+
+    /// 除法（零除保护）。
+    fun div(a: Any, b: Any): Any {
+        if (isFloat(a) || isFloat(b)) {
+            val bb: Float = parseFloat(toStr(b))
+            if (bb == 0.0f) {
+                return 0.0f
+            }
+            return parseFloat(toStr(a)) / bb
+        } else {
+            val bb: Int = toI32(toStr(b))
+            if (bb == 0) {
+                return 0
+            }
+            return toI32(toStr(a)) / bb
+        }
+    }
+
+    /// 取模（零除保护）。
+    fun mod(a: Any, b: Any): Any {
+        if (isFloat(a) || isFloat(b)) {
+            val bb: Float = parseFloat(toStr(b))
+            if (bb == 0.0f) {
+                return 0.0f
+            }
+            return parseFloat(toStr(a)) - parseFloat(toStr(a)) / bb * bb
+        } else {
+            val bb: Int = toI32(toStr(b))
+            if (bb == 0) {
+                return 0
+            }
+            return toI32(toStr(a)) % bb
+        }
+    }
+
+    /// 一元取负。
+    fun neg(a: Any): Any {
+        if (isFloat(a)) {
+            return -parseFloat(toStr(a))
+        } else {
+            return -toI32(toStr(a))
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  比较运算（if-else-if 优化）
+    // ═══════════════════════════════════════════════════════════
+
+    /// 布尔结果 → VM 统一表示（`"true"` / `"false"` 字符串）。
+    ///
+    /// **为什么用字符串而不是 Aura `Boolean`**：本 AOT 下 `Boolean` 与 `Int`
+    /// 共用 Plan A 装箱（`true → -1`、`false → 0`，打包后与 `Int` 的 -1/0
+    /// **无法区分**），`toStr` 因此把布尔结果打印成 `0`/`-1`；而 Rust VM 有独立
+    /// 的值类型，打印 `true`/`false` —— `.auc` 回放输出对不上
+    ///（实测 `7==3: 0`（Aura） vs `7==3: false`（Rust））。
+    /// 统一返回这两个字符串后输出与 Rust VM 一致；真值判定一律走 `toBool`
+    ///（已支持 `"true"`/`"false"`），故 `JUMP_IF_FALSE` / `and` / `or` / `not`
+    /// 语义不变。方法名加前缀以免与其它对象的同名成员错绑。
+    fun vmBool(b: Boolean): Any {
+        if (b) {
+            return "true"
+        }
+        return "false"
+    }
+
+    /// 相等比较（返回 `"true"`/`"false"`，见 `vmBool`）。
+    fun eq(a: Any, b: Any): Any {
+        if (a == null && b == null) {
+            return "true"
+        } else if (a == null || b == null) {
+            return "false"
+        } else if (isFloat(a) || isFloat(b)) {
+            return vmBool(parseFloat(toStr(a)) == parseFloat(toStr(b)))
+        } else {
+            return vmBool(a == b)
+        }
+    }
+
+    /// 不相等比较。
+    ///
+    /// **不要**写成 `return !eq(a, b)`，也**不要**写成 `if (eq(a, b))`：
+    /// 自举 AOT 下 `if (<返回 `Any` 的方法调用>)` 会被发射成
+    /// `icmp ne i8* <值>, null`（判空而不是判真假），而打包布尔 `false` 是
+    /// 整数 1（**非 null**）→ 条件恒真 → `neq` 恒返回 false（实测 `7 != 3`
+    /// 打印 `0`）。这里改成先转成字符串再按整数比较，绕开该真值判定。
+    fun neq(a: Any, b: Any): Any {
+        if (toBool(eq(a, b))) {
+            return "false"
+        }
+        return "true"
+    }
+
+    /// 小于比较（返回 `"true"`/`"false"`，见 `vmBool`）。
+    fun lt(a: Any, b: Any): Any {
+        if (isFloat(a) || isFloat(b)) {
+            return vmBool(parseFloat(toStr(a)) < parseFloat(toStr(b)))
+        } else {
+            return vmBool(toI32(toStr(a)) < toI32(toStr(b)))
+        }
+    }
+
+    /// 大于比较。
+    fun gt(a: Any, b: Any): Any {
+        if (isFloat(a) || isFloat(b)) {
+            return vmBool(parseFloat(toStr(a)) > parseFloat(toStr(b)))
+        } else {
+            return vmBool(toI32(toStr(a)) > toI32(toStr(b)))
+        }
+    }
+
+    /// 小于等于比较。
+    fun le(a: Any, b: Any): Any {
+        if (isFloat(a) || isFloat(b)) {
+            return vmBool(parseFloat(toStr(a)) <= parseFloat(toStr(b)))
+        } else {
+            return vmBool(toI32(toStr(a)) <= toI32(toStr(b)))
+        }
+    }
+
+    /// 大于等于比较。
+    fun ge(a: Any, b: Any): Any {
+        if (isFloat(a) || isFloat(b)) {
+            return vmBool(parseFloat(toStr(a)) >= parseFloat(toStr(b)))
+        } else {
+            return vmBool(toI32(toStr(a)) >= toI32(toStr(b)))
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  逻辑/位运算
+    // ═══════════════════════════════════════════════════════════
+
+    /// 逻辑与（返回 `"true"`/`"false"`，见 `vmBool`）。
+    fun and(a: Any, b: Any): Any {
+        return vmBool(toBool(a) && toBool(b))
+    }
+
+    /// 逻辑或。
+    fun or(a: Any, b: Any): Any {
+        return vmBool(toBool(a) || toBool(b))
+    }
+
+    /// 逻辑非。
+    fun not(a: Any): Any {
+        return vmBool(!toBool(a))
+    }
+
+    /// 按位与。
+    ///
+    /// **必须用符号形式 `&` / `|` / `^` / `<<` / `>>`**：Aura 的 `binPrec` 不接受
+    /// 单词形式（`and`/`or`/`xor`/`shl`/`shr`），自举 AOT 下它们会被静默降级
+    /// （实测 `x shl 8` 直接退化成 `x`，移位量被丢弃）——`.auc` 读取小端整数
+    /// 因此高字节恒为 0（`natives_count` 594 被读成 82）。
+    fun bitAnd(a: Any, b: Any): Any {
+        return toI32(toStr(a)) & toI32(toStr(b))
+    }
+
+    /// 按位或。
+    fun bitOr(a: Any, b: Any): Any {
+        return toI32(toStr(a)) | toI32(toStr(b))
+    }
+
+    /// 按位异或。
+    fun bitXor(a: Any, b: Any): Any {
+        return toI32(toStr(a)) ^ toI32(toStr(b))
+    }
+
+    /// 左移。
+    fun shl(a: Any, b: Any): Any {
+        return toI32(toStr(a)) << toI32(toStr(b))
+    }
+
+    /// 右移。
+    fun shr(a: Any, b: Any): Any {
+        return toI32(toStr(a)) >> toI32(toStr(b))
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  字符串工具
+    // ═══════════════════════════════════════════════════════════
+
+    /// 判断字符码是否为空白（空格 / 制表 / 换行 / 回车）。
+    fun isSpace(c: Int): Boolean {
+        if (c == 32 || c == 9 || c == 10 || c == 13) {
+            return true
+        }
+        return false
+    }
+
+    /// 解析指令行从 `start` 起的空格分隔参数列表。
+    ///
+    /// `start` 通常为 opcode 之后的第一个字符下标；返回按出现顺序排列的参数。
+    fun parseArgs(line: String, start: Int): List<String> {
+        val result: List<String> = arrayListOf<String>()
+        if (line == null) {
+            return result
+        }
+        var i: Int = start
+        var len: Int = line.length
+        while (i < len) {
+            // 跳过空白
+            while (i < len && isSpace(line.charCodeAt(i))) {
+                i = i + 1
+            }
+            if (i >= len) {
+                break
+            }
+            val argStart: Int = i
+            while (i < len && !isSpace(line.charCodeAt(i))) {
+                i = i + 1
+            }
+            result.add(vmSubstr(line, argStart, i - argStart))
+        }
+        return result
+    }
+
+    /// 字符串切片（注意：**不能**命名为 `substring`，否则会与 `String.substring`
+    /// 在按名解析时冲突，导致 `text.substring(...)` 被解析回本函数而形成无限递归）。
+    fun vmSubstr(text: String, start: Int, length: Int): String {
+        if (text == null) {
+            return ""
+        }
+        if (start < 0) {
+            return ""
+        }
+        if (start >= text.length) {
+            return ""
+        }
+        var end: Int = start + length
+        if (end < 0) {
+            end = 0
+        }
+        if (end > text.length) {
+            end = text.length
+        }
+        if (start == end) {
+            return ""
+        }
+        return text.substring(start, end)
+    }
+
+    /// 字符串切片（start 到 length）。
+    fun sub(text: String, start: Int, len: Int): String {
+        return vmSubstr(text, start, len)
+    }
+
+    /// `Any` → 原始 64 位表示。
+    ///
+    /// **不要**用 `toI64(toStr(x))` 取句柄/指针：Aura 的 `String`、集合句柄在 AOT
+    /// 下都是 `i8*`，`toStr` 会把裸指针**原样**返回，`toI64` 再去解析指针指向的
+    /// 内容 → 得到一个不相干的垃圾数（实测 `VmCollections` 里长度读出
+    /// `-1812475513`；`.auc` 执行 `listOf` 时因把垃圾当地址写入而访问违规崩溃）。
+    fun rawOf(x: Any): Long {
+        if (x == null) {
+            return 0
+        }
+        return x as Long
+    }
+
+    /// Any → String（统一入口）。
+    ///
+    /// 供 VM 的**值输出/内建分派**使用：`toStr(v)` 直接写在 `Vm` 的方法里时，
+    /// 自举 AOT 下对「刚从容器取回的值」会出现转换异常（实测 `collectArgs`
+    /// 里同一次 `toStr(v)` 得到 "5"、返回的却是 "0"）。经由本函数的调用点
+    /// 与 `VmOps.toI32(toStr(x))` 等既有可靠路径一致。
+    fun toStrAny(v: Any): String {
+        return toStr(v)
+    }
+
+    /// 字符串是否全为十进制数字（用于「函数序号」形式的调用目标）。
+    fun isAllDigits(s: String): Boolean {
+        if (s == null || s == "") {
+            return false
+        }
+        var i: Int = 0
+        while (i < s.length) {
+            val c: Int = s.charCodeAt(i)
+            if (c < 48 || c > 57) {
+                return false
+            }
+            i = i + 1
+        }
+        return true
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  字符串工具（FFI 原生函数支持）
+    // ═══════════════════════════════════════════════════════════
+
+    /// 判断字符串是否包含子串。
+    fun contains(text: String, sub: String): Boolean {
+        if (sub == "" || sub == null) {
+            return true
+        }
+        if (text == null || text.length < sub.length) {
+            return false
+        }
+        val tLen: Int = text.length
+        val sLen: Int = sub.length
+        var i: Int = 0
+        while (i <= tLen - sLen) {
+            var j: Int = 0
+            var match: Boolean = true
+            while (j < sLen) {
+                if (text.charCodeAt(i + j) != sub.charCodeAt(j)) {
+                    match = false
+                    break
+                }
+                j = j + 1
+            }
+            if (match) {
+                return true
+            }
+            i = i + 1
+        }
+        return false
+    }
+
+    /// 去除首尾空白字符。
+    fun trim(text: String): String {
+        if (text == null || text == "") {
+            return ""
+        }
+        var start: Int = 0
+        var end: Int = text.length
+        while (start < end && isSpace(text.charCodeAt(start))) {
+            start = start + 1
+        }
+        while (end > start && isSpace(text.charCodeAt(end - 1))) {
+            end = end - 1
+        }
+        if (start >= end) {
+            return ""
+        }
+        return text.substring(start, end)
+    }
+
+    /// 判断字符串是否以指定前缀开头。
+    fun startsWith(text: String, prefix: String): Boolean {
+        if (prefix == "" || prefix == null) {
+            return true
+        }
+        if (text == null || text.length < prefix.length) {
+            return false
+        }
+        var i: Int = 0
+        while (i < prefix.length) {
+            if (text.charCodeAt(i) != prefix.charCodeAt(i)) {
+                return false
+            }
+            i = i + 1
+        }
+        return true
+    }
+
+    /// 判断字符串是否以指定后缀结尾。
+    fun endsWith(text: String, suffix: String): Boolean {
+        if (suffix == "" || suffix == null) {
+            return true
+        }
+        if (text == null || text.length < suffix.length) {
+            return false
+        }
+        val diff: Int = text.length - suffix.length
+        var i: Int = 0
+        while (i < suffix.length) {
+            if (text.charCodeAt(diff + i) != suffix.charCodeAt(i)) {
+                return false
+            }
+            i = i + 1
+        }
+        return true
+    }
+
+    /// 查找子串在文本中的首次出现位置（从 start 开始搜索），未找到返回 -1。
+    fun indexOf(text: String, sub: String, start: Int): Int {
+        if (sub == "" || sub == null) {
+            return start
+        }
+        if (text == null || text.length < sub.length) {
+            return -1
+        }
+        val tLen: Int = text.length
+        val sLen: Int = sub.length
+        var i: Int = start
+        if (i < 0) { i = 0 }
+        while (i <= tLen - sLen) {
+            var j: Int = 0
+            var match: Boolean = true
+            while (j < sLen) {
+                if (text.charCodeAt(i + j) != sub.charCodeAt(j)) {
+                    match = false
+                    break
+                }
+                j = j + 1
+            }
+            if (match) {
+                return i
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// 替换字符串中的所有子串出现。
+    fun replace(text: String, old: String, newStr: String): String {
+        if (old == "" || old == null) {
+            return text
+        }
+        var result: String = ""
+        var i: Int = 0
+        var len: Int = text.length
+        var oLen: Int = old.length
+        while (i < len) {
+            if (i + oLen <= len) {
+                var j: Int = 0
+                var match: Boolean = true
+                while (j < oLen) {
+                    if (text.charCodeAt(i + j) != old.charCodeAt(j)) {
+                        match = false
+                        break
+                    }
+                    j = j + 1
+                }
+                if (match) {
+                    result = result + newStr
+                    i = i + oLen
+                    continue
+                }
+            }
+            result = result + String.fromCharCode(text.charCodeAt(i))
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 计算浮点数平方根（牛顿迭代法）。
+    fun sqrt(v: Float): Float {
+        if (v < 0.0f) {
+            return 0.0f
+        }
+        if (v == 0.0f) {
+            return 0.0f
+        }
+        var guess: Float = v / 2.0f
+        if (guess == 0.0f) {
+            guess = 0.0001f
+        }
+        var i: Int = 0
+        while (i < 100) {
+            val next: Float = (guess + v / guess) / 2.0f
+            if (absf(next - guess) < 0.00001f) {
+                break
+            }
+            guess = next
+            i = i + 1
+        }
+        return guess
+    }
+
+    /// 计算浮点幂次（base^exp）。
+    fun pow(base: Float, exp: Float): Float {
+        if (base == 0.0f) {
+            return 0.0f
+        }
+        if (exp == 0.0f) {
+            return 1.0f
+        }
+        if (exp == 1.0f) {
+            return base
+        }
+        if (exp == 2.0f) {
+            return base * base
+        }
+        if (exp == 0.5f) {
+            return sqrt(base)
+        }
+        // 通用实现：exp^ln(base) 近似
+        var result: Float = 1.0f
+        var e: Float = exp
+        var neg: Boolean = false
+        if (e < 0.0f) {
+            neg = true
+            e = -e
+        }
+        var i: Int = 0
+        while (e > 0.0f) {
+            result = result * base
+            e = e - 1.0f
+            i = i + 1
+            if (i > 1000000) {
+                break
+            }
+        }
+        if (neg) {
+            return 1.0f / result
+        }
+        return result
+    }
+
+    /// 浮点绝对值。
+    fun absf(v: Float): Float {
+        if (v < 0.0f) {
+            return -v
+        }
+        return v
+    }
+
+    /// 在函数表中查找函数偏移（`name|起始行|参数个数`）。
+    ///
+    /// `funcName` 支持两种形式：
+    ///   * 函数名（Aura 前端生成的文本字节码）；
+    ///   * **十进制序号**（`.auc` 二进制里 `CALL` 的操作数是函数下标），
+    ///     按函数表**行序**（0 起）解析。
+    fun findFuncOffset(funcTable: String, funcName: String): Int {
+        if (funcTable == null || funcTable == "" || funcName == "") {
+            return 0
+        }
+        val numeric: Boolean = isAllDigits(funcName)
+        val wantIdx: Int = toI32(funcName)
+        var row: Int = 0
+        var result: Int = 0
+        var len: Int = funcTable.length
+        var start: Int = 0
+        while (start < len) {
+            var end: Int = start
+            while (end < len && funcTable.charCodeAt(end) != 10) {
+                end = end + 1
+            }
+            val line: String = vmSubstr(funcTable, start, end - start)
+            if (line != "") {
+                val parts: List<String> = split(line, "|")
+                if (parts.size >= 2) {
+                    if (numeric) {
+                        if (row == wantIdx) {
+                            return toI32(parts.get(1))
+                        }
+                    } else if (parts.get(0) == funcName) {
+                        result = toI32(parts.get(1))
+                    }
+                }
+                row = row + 1
+            }
+            start = end + 1
+        }
+        return result
+    }
+
+    /// 在函数表中查找函数参数个数（语义同 [`findFuncOffset`]）。
+    fun findFuncParamCount(funcTable: String, funcName: String): Int {
+        if (funcTable == null || funcTable == "" || funcName == "") {
+            return -1
+        }
+        val numeric: Boolean = isAllDigits(funcName)
+        val wantIdx: Int = toI32(funcName)
+        var row: Int = 0
+        var result: Int = -1
+        var len: Int = funcTable.length
+        var start: Int = 0
+        while (start < len) {
+            var end: Int = start
+            while (end < len && funcTable.charCodeAt(end) != 10) {
+                end = end + 1
+            }
+            val line: String = vmSubstr(funcTable, start, end - start)
+            if (line != "") {
+                val parts: List<String> = split(line, "|")
+                if (parts.size >= 3) {
+                    if (numeric) {
+                        if (row == wantIdx) {
+                            return toI32(parts.get(2))
+                        }
+                    } else if (parts.get(0) == funcName) {
+                        result = toI32(parts.get(2))
+                    }
+                }
+                row = row + 1
+            }
+            start = end + 1
+        }
+        return result
+    }
+
+    /// 按分隔符分割字符串。
+    fun split(text: String, sep: String): List<String> {
+        val result: List<String> = arrayListOf<String>()
+        if (text == null || text == "") {
+            return result
+        }
+        var start: Int = 0
+        var i: Int = 0
+        var len: Int = text.length
+        while (i < len) {
+            if (sep.length == 1 && text.charCodeAt(i) == sep.charCodeAt(0)) {
+                result.add(vmSubstr(text, start, i - start))
+                start = i + 1
+            }
+            i = i + 1
+        }
+        if (start < len) {
+            result.add(vmSubstr(text, start, len - start))
+        }
+        return result
+    }
+
+    /// 获取字符串中第 idx 行（按换行符分隔）。
+    fun getFieldAt(text: String, idx: Int, sep: String): Any {
+        if (text == null || text == "") {
+            return ""
+        }
+        if (idx < 0) {
+            return ""
+        }
+        var start: Int = 0
+        var i: Int = 0
+        var len: Int = text.length
+        var count: Int = 0
+        while (i < len) {
+            if (sep.length == 1 && text.charCodeAt(i) == sep.charCodeAt(0)) {
+                if (count == idx) {
+                    return vmSubstr(text, start, i - start)
+                }
+                count = count + 1
+                start = i + 1
+            }
+            i = i + 1
+        }
+        if (count == idx) {
+            return vmSubstr(text, start, len - start)
+        }
+        return ""
+    }
+
+    /// 按字段分隔符提取指定列。
+    fun fieldAt(text: String, col: Int, sep: String): String {
+        if (text == null || text == "") {
+            return ""
+        }
+        if (col < 0) {
+            return ""
+        }
+        var start: Int = 0
+        var i: Int = 0
+        var len: Int = text.length
+        var count: Int = 0
+        while (i < len) {
+            if (sep.length == 1 && text.charCodeAt(i) == sep.charCodeAt(0)) {
+                if (count == col) {
+                    return vmSubstr(text, start, i - start)
+                }
+                count = count + 1
+                start = i + 1
+            }
+            i = i + 1
+        }
+        if (count == col) {
+            return vmSubstr(text, start, len - start)
+        }
+        return ""
+    }
+
+    /// 字符串转整数（别名）。
+    fun toIntOf(s: String): Int {
+        return toI32(s)
+    }
+}

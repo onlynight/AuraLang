@@ -1,0 +1,366 @@
+// tests/HashMap/hashmap_edge_cases.aura
+// ─────────────────────────────────────────────────────────────────────────────
+// HashMap<K, V> 边界与异常场景测试
+//
+// 覆盖：null 值反复覆盖；删除已删除键；空表操作序列；
+//       同键连续操作（put→get→put→remove→put）；
+//       值覆盖写与删除后重插组合；
+//       HashMapUtils 工厂函数；
+//       clear 后大量重填；
+//       getOrDefault 对 null 值的处理。
+//
+// 运行：aura run tests/HashMap/hashmap_edge_cases.aura
+//   全通过时输出 "ALL TESTS PASSED"
+// ─────────────────────────────────────────────────────────────────────────────
+
+package test
+
+import aura.lang.collection.HashMap
+import aura.lang.collection.Map
+import aura.lang.collection.ArrayList
+
+/// 断言计数与汇总输出。
+class Checker {
+    private var passed: Int
+    private var failed: Int
+
+    constructor() {
+        this.passed = 0
+        this.failed = 0
+    }
+
+    fun check(name: String, cond: Boolean): Unit {
+        if (cond) {
+            this.passed = this.passed + 1
+        } else {
+            this.failed = this.failed + 1
+            println("FAIL: " + name)
+        }
+    }
+
+    fun summary(): Unit {
+        println("passed=" + this.passed + " failed=" + this.failed)
+        if (this.failed == 0) {
+            println("ALL TESTS PASSED")
+        } else {
+            println("SOME TESTS FAILED")
+        }
+    }
+}
+
+// ── 1. null 值反复覆盖 ──
+
+fun testNullValueOverwrite(c: Checker): Unit {
+    var m: HashMap<String, Int> = HashMap<String, Int>()
+    m.put("a", 1)
+    c.check("nvo.hasValue", m.get("a") == 1)
+    m.put("a", null)
+    c.check("nvo.nullValue", m.get("a") == null)
+    c.check("nvo.containsKey", m.containsKey("a"))
+    c.check("nvo.size", m.size == 1)
+    // 覆盖回正常值
+    m.put("a", 99)
+    c.check("nvo.recovered", m.get("a") == 99)
+    c.check("nvo.sizeStable", m.size == 1)
+    // 删除
+    var removed: Int? = m.remove("a")
+    c.check("nvo.removed", removed == 99)
+    c.check("nvo.sizeZero", m.size == 0)
+    c.check("nvo.gone", m.containsKey("a") == false)
+}
+
+// ── 2. 删除已删除键 ──
+
+fun testRemoveAlreadyRemoved(c: Checker): Unit {
+    var m: HashMap<String, Int> = HashMap<String, Int>()
+    m.put("x", 10)
+    m.remove("x")
+    // 第二次删除应该返回 null
+    var second: Int? = m.remove("x")
+    c.check("rar.secondRemove", second == null)
+    c.check("rar.sizeZero", m.size == 0)
+    // 删除不存在的键
+    var missing: Int? = m.remove("zz")
+    c.check("rar.missingRemove", missing == null)
+    c.check("rar.sizeStillZero", m.size == 0)
+}
+
+// ── 3. 空表完整操作序列 ──
+
+fun testEmptyTableSequence(c: Checker): Unit {
+    var m: HashMap<Int, Int> = HashMap<Int, Int>()
+    // 在空表上执行各种操作
+    c.check("ets.isEmpty", m.isEmpty())
+    c.check("ets.getSize", m.getSize() == 0)
+    c.check("ets.get", m.get(1) == null)
+    c.check("ets.containsKey", m.containsKey(1) == false)
+    c.check("ets.containsValue", m.containsValue(1) == false)
+    c.check("ets.getOrDefault", m.getOrDefault(1, 42) == 42)
+    c.check("ets.remove", m.remove(1) == null)
+    c.check("ets.keys", m.keys().size == 0)
+    c.check("ets.values", m.values().size == 0)
+    c.check("ets.toString", m.toString() == "{}")
+    c.check("ets.clear", m.isEmpty())  // clear 空表仍然为空
+}
+
+// ── 4. 同键连续操作序列 ──
+
+fun testSameKeySequence(c: Checker): Unit {
+    var m: HashMap<String, Int> = HashMap<String, Int>()
+    // put → get → put → remove → put → remove
+    m.put("k", 1)
+    c.check("sks.after1stPut", m.get("k") == 1)
+    var old1: Int? = m.put("k", 2)
+    c.check("sks.overwriteOld", old1 == 1)
+    c.check("sks.after2ndPut", m.get("k") == 2)
+    var removed1: Int? = m.remove("k")
+    c.check("sks.removedVal", removed1 == 2)
+    c.check("sks.afterRemove", m.get("k") == null)
+    c.check("sks.afterRemoveContains", m.containsKey("k") == false)
+    var old2: Int? = m.put("k", 3)
+    c.check("sks.reinsertOld", old2 == null)
+    c.check("sks.afterReinsert", m.get("k") == 3)
+    c.check("sks.sizeOne", m.size == 1)
+    var removed2: Int? = m.remove("k")
+    c.check("sks.finalRemove", removed2 == 3)
+    c.check("sks.finalEmpty", m.isEmpty())
+}
+
+// ── 5. 值覆盖写与删除后重插组合 ──
+
+fun testOverwriteAndRemoveCombo(c: Checker): Unit {
+    var m: HashMap<Int, String> = HashMap<Int, String>()
+    m.put(1, "one")
+    m.put(2, "two")
+    m.put(3, "three")
+    // 覆盖 1 的值
+    m.put(1, "ONE")
+    c.check("ovrc.size", m.size == 3)
+    c.check("ovrc.overwritten", m.get(1) == "ONE")
+    c.check("ovrc.originalGone", m.containsValue("one") == false)
+    // 删除 2
+    m.remove(2)
+    c.check("ovrc.sizeAfterRemove", m.size == 2)
+    c.check("ovrc.removed", m.get(2) == null)
+    c.check("ovrc.removedValue", m.containsValue("two") == false)
+    // 重插 2
+    m.put(2, "TWO")
+    c.check("ovrc.sizeAfterReinsert", m.size == 3)
+    c.check("ovrc.reinserted", m.get(2) == "TWO")
+    c.check("ovrc.allIntact", m.get(1) == "ONE" && m.get(3) == "three")
+}
+
+// ── 6. HashMapUtils 工厂函数 ──
+
+fun testHashMapUtils(c: Checker): Unit {
+    // emptyMap
+    var e: HashMap<String, Int> = HashMapUtils.emptyMap<String, Int>()
+    c.check("hu.emptySize", e.size == 0)
+    c.check("hu.emptyIsEmpty", e.isEmpty())
+    c.check("hu.emptyGet", e.get("a") == null)
+    c.check("hu.emptyRemove", e.remove("a") == null)
+    // 空工厂调用
+    var none: HashMap<String, Int> = HashMapUtils.mapOf<String, Int>()
+    c.check("hu.noArgs", none.size == 0)
+
+    // 单对
+    var one: HashMap<String, Int> = HashMapUtils.mapOf<String, Int>("only", 1)
+    c.check("hu.single", one.size == 1 && one.get("only") == 1)
+
+    // 多对
+    var mu: HashMap<String, Int> = HashMapUtils.mutableMapOf<String, Int>("a", 1, "b", 2)
+    c.check("hu.mutableSize", mu.size == 2)
+    c.check("hu.mutableA", mu.get("a") == 1)
+    c.check("hu.mutableB", mu.get("b") == 2)
+    mu.put("c", 3)
+    c.check("hu.mutablePut", mu.size == 3 && mu.get("c") == 3)
+
+    var mo: HashMap<String, Int> = HashMapUtils.mapOf<String, Int>("x", 10, "y", 20)
+    c.check("hu.mapSize", mo.size == 2)
+    c.check("hu.mapX", mo.get("x") == 10)
+    c.check("hu.mapY", mo.get("y") == 20)
+
+    // Int 键
+    var ik: HashMap<Int, String> = HashMapUtils.mapOf<Int, String>(1, "one", 2, "two")
+    c.check("hu.intKeys", ik.size == 2 && ik.get(2) == "two")
+}
+
+// ── 7. clear 后大量重填 ──
+
+fun testClearThenMassFill(c: Checker): Unit {
+    var m: HashMap<Int, Int> = HashMap<Int, Int>()
+    var n: Int = 300
+    var i: Int = 0
+    // 第一轮填充
+    while (i < n) {
+        m.put(i, i)
+        i = i + 1
+    }
+    c.check("ctmf.fill1", m.size == n)
+    m.clear()
+    c.check("ctmf.cleared", m.isEmpty())
+    // 验证旧键不存在
+    var ok: Boolean = true
+    i = 0
+    while (i < n) {
+        if (m.containsKey(i)) { ok = false }
+        i = i + 1
+    }
+    c.check("ctmf.oldKeysGone", ok)
+    // 第二轮填充
+    i = 0
+    while (i < n) {
+        m.put(i, i + 1000)
+        i = i + 1
+    }
+    c.check("ctmf.fill2", m.size == n)
+    ok = true
+    i = 0
+    while (i < n) {
+        if (m.get(i) != (i + 1000)) { ok = false }
+        i = i + 1
+    }
+    c.check("ctmf.fill2Values", ok)
+}
+
+// ── 8. getOrDefault 对 null 值的处理 ──
+
+fun testGetOrDefaultNullValue(c: Checker): Unit {
+    var m: HashMap<String, Int> = HashMap<String, Int>()
+    m.put("a", null)
+    // 键存在但值为 null，getOrDefault 返回 null
+    var result: Int = m.getOrDefault("a", 99)
+    c.check("gonv.existsNullVal", result == null)
+    // 键不存在，返回默认值
+    var result2: Int = m.getOrDefault("zz", 99)
+    c.check("gonv.missingDefault", result2 == 99)
+    // 键存在且值非 null，返回值
+    m.put("b", 42)
+    var result3: Int = m.getOrDefault("b", 99)
+    c.check("gonv.existsValue", result3 == 42)
+}
+
+// ── 9. 删除后再插入同键（验证 tombstone 不泄漏旧值）──
+
+fun testRemoveThenReinsert(c: Checker): Unit {
+    var m: HashMap<Int, Int> = HashMap<Int, Int>()
+    m.put(1, 100)
+    m.put(2, 200)
+    m.put(3, 300)
+    // 删除中间的
+    m.remove(2)
+    c.check("rtr.sizeAfterRemove", m.size == 2)
+    c.check("rtr.removedGone", m.get(2) == null)
+    // 重插不同的值
+    m.put(2, 999)
+    c.check("rtr.sizeAfterReinsert", m.size == 3)
+    c.check("rtr.newValue", m.get(2) == 999)
+    c.check("rtr.othersIntact", m.get(1) == 100 && m.get(3) == 300)
+    // 验证 containsValue
+    c.check("rtr.oldValueGone", m.containsValue(200) == false)
+    c.check("rtr.newValueExists", m.containsValue(999))
+}
+
+// ── 10. 大键空间下的删除密集场景 ──
+
+fun testStressRemoveInsert(c: Checker): Unit {
+    var m: HashMap<Int, Int> = HashMap<Int, Int>()
+    var n: Int = 200
+    var i: Int = 0
+    while (i < n) {
+        m.put(i, i)
+        i = i + 1
+    }
+    // 交替删除 / 重插
+    i = 0
+    while (i < 100) {
+        m.remove(i)
+        m.put(1000 + i, 1000 + i)
+        i = i + 1
+    }
+    c.check("ssr.size", m.size == n)
+    var ok: Boolean = true
+    i = 100
+    while (i < 200) {
+        if (m.get(i) != i) { ok = false }
+        i = i + 1
+    }
+    c.check("ssr.tailKept", ok)
+    i = 0
+    while (i < 100) {
+        if (m.containsKey(i)) { ok = false }
+        i = i + 1
+    }
+    c.check("ssr.headRemoved", ok)
+    ok = true
+    i = 0
+    while (i < 100) {
+        if (m.get(1000 + i) != (1000 + i)) { ok = false }
+        i = i + 1
+    }
+    c.check("ssr.refillKept", ok)
+    c.check("ssr.keysCount", m.keys().size == n)
+}
+
+// ── 11. Map 接口多态完整验证 ──
+
+fun testPolymorphicMapFull(c: Checker): Unit {
+    var m: Map<String, Int> = HashMap<String, Int>()
+    m.put("a", 1)
+    m.put("b", 2)
+    m.put("c", 3)
+    c.check("pmf.size", m.getSize() == 3)
+    c.check("pmf.getA", m.get("a") == 1)
+    c.check("pmf.getB", m.get("b") == 2)
+    c.check("pmf.getC", m.get("c") == 3)
+    c.check("pmf.getMiss", m.get("zz") == null)
+    c.check("pmf.getOrDefault", m.getOrDefault("zz", 5) == 5)
+    c.check("pmf.containsKey", m.containsKey("b"))
+    c.check("pmf.notContains", m.containsKey("zz") == false)
+    c.check("pmf.containsValue", m.containsValue(2))
+    c.check("pmf.notContainsValue", m.containsValue(99) == false)
+    m.remove("b")
+    c.check("pmf.sizeAfterRemove", m.getSize() == 2)
+    c.check("pmf.removedGone", m.get("b") == null)
+    c.check("pmf.removedNotContains", m.containsKey("b") == false)
+    c.check("pmf.removedNotContainsValue", m.containsValue(2) == false)
+    c.check("pmf.keysCount", m.keys().size == 2)
+    c.check("pmf.valuesCount", m.values().size == 2)
+    m.clear()
+    c.check("pmf.cleared", m.getSize() == 0)
+    c.check("pmf.isEmpty", m.isEmpty())
+    c.check("pmf.toString", m.toString() == "{}")
+}
+
+// ── 12. 接口类型混合调用 ──
+
+fun testMixedInterfaceCalls(c: Checker): Unit {
+    var m: HashMap<String, Int> = HashMap<String, Int>()
+    m.put("a", 1)
+    var viaInterface: Map<String, Int> = m
+    c.check("mic.sameInstance", viaInterface.get("a") == 1)
+    m.put("a", 2)
+    c.check("mic.reflected", viaInterface.get("a") == 2)
+    c.check("mic.sizeMatch", m.size == viaInterface.getSize())
+}
+
+// ── main ──
+
+fun main(): Unit {
+    var c: Checker = Checker()
+    println("=== HashMap Edge Cases Tests ===")
+    println()
+    println("T01"); testNullValueOverwrite(c)
+    println("T02"); testRemoveAlreadyRemoved(c)
+    println("T03"); testEmptyTableSequence(c)
+    println("T04"); testSameKeySequence(c)
+    println("T05"); testOverwriteAndRemoveCombo(c)
+    println("T06"); testHashMapUtils(c)
+    println("T07"); testClearThenMassFill(c)
+    println("T08"); testGetOrDefaultNullValue(c)
+    println("T09"); testRemoveThenReinsert(c)
+    println("T10"); testStressRemoveInsert(c)
+    println("T11"); testPolymorphicMapFull(c)
+    println("T12"); testMixedInterfaceCalls(c)
+    println("TEND"); c.summary()
+}

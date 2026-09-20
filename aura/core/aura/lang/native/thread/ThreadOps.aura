@@ -25,20 +25,20 @@ package aura.lang.native.thread
 // AOT 路径下由运行库直接调用 `aura_thread_create/join/...` C 封装。
 // ─────────────────────────────────────────────────────────────────────────────
 
-extern object ThreadOps {
+extern interface ThreadOps {
 
     /// 新建 OS 线程执行函数 `fn_id(arg)`，返回线程句柄（0 表示失败）。
-    native fun create(fn_id: Int, arg: Int): Int
+    fun create(fn_id: Int, arg: Int): Int
 
     /// 等待线程结束并返回其返回值（线程不存在时返回 0）。
-    native fun join(thread_id: Int): Int
+    fun join(thread_id: Int): Int
 
     /// 休眠指定毫秒数。
-    native fun sleepMs(ms: Int): Unit
+    fun sleepMs(ms: Int): Unit
 
     /// 当前线程标识。
-    native fun currentId(): Int
+    fun currentId(): Int
 
     /// 可用 CPU 核心数（并行度）。
-    native fun cores(): Int
+    fun cores(): Int
 }

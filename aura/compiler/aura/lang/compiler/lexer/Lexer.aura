@@ -32,41 +32,106 @@ object LexerUtils {
     // ── 字符分类辅助 ──
 
     /// 字符是否在给定字符集合中（空串恒为 false）。
+    ///
+    /// **性能关键**：走 `charCodeAt` 整数比较。旧实现是
+    /// `set.indexOf(ch)` —— `String.indexOf` 在每个位置都要
+    /// `substring` 一次（AOT 下每次分配），字符分类又逐字符调用
+    /// （`lxIsLetter` 的集合长达 52 字符）→ 词法分析阶段的
+    /// **主要 CPU 与内存热点**。
     private fun lxIn(set: String, ch: String): Boolean {
+        val cl: Int = ch.length
+        if (cl == 0) {
+            return false
+        }
+        if (cl > 1) {
+            // 多字符参数（不应出现）：退回子串匹配语义
+            val sn: Int = set.length
+            var k: Int = 0
+            while (k + cl <= sn) {
+                if (set.substring(k, k + cl) == ch) {
+                    return true
+                }
+                k = k + 1
+            }
+            return false
+        }
+        val c: Int = ch.charCodeAt(0)
+        var i: Int = 0
+        val n: Int = set.length
+        while (i < n) {
+            if (set.charCodeAt(i) == c) {
+                return true
+            }
+            i = i + 1
+        }
+        return false
+    }
+
+    /// 十进制数字（`'0'`..`'9'`）。
+    fun lxIsDigit(ch: String): Boolean {
         if (ch == "") {
             return false
         }
-        return set.indexOf(ch) >= 0
-    }
-
-    /// 十进制数字。
-    fun lxIsDigit(ch: String): Boolean {
-        return lxIn("0123456789", ch)
+        val c: Int = ch.charCodeAt(0)
+        return c >= 48 && c <= 57
     }
 
     /// 十六进制数字。
     fun lxIsHexDigit(ch: String): Boolean {
-        return lxIn("0123456789abcdefABCDEF", ch)
+        if (ch == "") {
+            return false
+        }
+        val c: Int = ch.charCodeAt(0)
+        if (c >= 48 && c <= 57) {
+            return true
+        }
+        if (c >= 97 && c <= 102) {
+            return true
+        }
+        return c >= 65 && c <= 70
     }
 
     /// 字母（ASCII）。
     fun lxIsLetter(ch: String): Boolean {
-        return lxIn("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", ch)
+        if (ch == "") {
+            return false
+        }
+        val c: Int = ch.charCodeAt(0)
+        if (c >= 65 && c <= 90) {
+            return true
+        }
+        return c >= 97 && c <= 122
     }
 
     /// 标识符起始字符。
     fun lxIsIdentStart(ch: String): Boolean {
-        return lxIsLetter(ch) || ch == "_"
+        if (ch == "") {
+            return false
+        }
+        if (lxIsLetter(ch)) {
+            return true
+        }
+        return ch.charCodeAt(0) == 95
     }
 
     /// 标识符后续字符。
     fun lxIsIdentPart(ch: String): Boolean {
-        return lxIsLetter(ch) || lxIsDigit(ch) || ch == "_"
+        if (ch == "") {
+            return false
+        }
+        if (lxIsLetter(ch) || lxIsDigit(ch)) {
+            return true
+        }
+        return ch.charCodeAt(0) == 95
     }
 
-    /// 空白字符。
+    /// 空白字符（空格 / `\t` / `\n` / `\r`）。
     fun lxIsSpace(ch: String): Boolean {
-        return lxIn(" \t\n\r", ch)
+        if (ch == "") {
+            return false
+        }
+        val c: Int = ch.charCodeAt(0)
+        return c == 32 || c == 9 || c == 10 || c == 13
     }
 
     /// 列表安全取值（越界返回空串）。
@@ -79,12 +144,14 @@ object LexerUtils {
 
     /// 十进制字符串 → Int（仅供 span 还原使用）。
     fun lxToInt(text: String): Int {
-        val digits: String = "0123456789"
-        val len: Int = text.length()
+        val len: Int = text.length
         var total: Int = 0
         var i: Int = 0
         while (i < len) {
-            total = total * 10 + digits.indexOf(toStr(text[i]))
+            val d: Int = text.charCodeAt(i) - 48
+            if (d >= 0 && d <= 9) {
+                total = total * 10 + d
+            }
             i = i + 1
         }
         return total

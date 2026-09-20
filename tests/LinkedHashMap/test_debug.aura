@@ -1,0 +1,18 @@
+package test
+
+import aura.lang.collection.LinkedHashMap
+
+fun main(): Int {
+    var m = LinkedHashMap<Int, String>()
+    println("created")
+    m.put(3, "three")
+    println("after put(3)")
+    m.put(1, "one")
+    println("after put(1)")
+    m.put(2, "two")
+    println("after put(2)")
+    println("size=" + m.getSize())
+    println("firstKey=" + m.firstKey())
+    println("lastKey=" + m.lastKey())
+    return 0
+}

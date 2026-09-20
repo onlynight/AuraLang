@@ -32,7 +32,12 @@ object AotUtils {
 
     /// 默认 AOT 选项。
     fun defaultAotOptions(): AotOptions {
-        return AotOptions(targetDefault(), optLevelDefault(), "main")
+        return AotOptions(targetDefault(), optLevelDefault(), "main", "")
+    }
+
+    /// 默认 AOT 选项（指定源文件目录）。
+    fun defaultAotOptionsEx(basePath: String): AotOptions {
+        return AotOptions(targetDefault(), optLevelDefault(), "main", basePath)
     }
 
     /// 空结果占位。
@@ -79,6 +84,12 @@ object AotUtils {
         val r: AotLinkResult = AotLinkResult()
         val opts: AotOptions = AotUtils.defaultAotOptions()
         opts.emitCSource = false
+        return compileAotIrOnlyEx(hir, opts)
+    }
+
+    fun compileAotIrOnlyEx(hir: Hir, opts: AotOptions): AotLinkResult {
+        val r: AotLinkResult = AotLinkResult()
+        opts.emitCSource = false
         val aot: AotResult = AotUtils.aotCompile(hir, opts)
 
         r.llvmIr = aot.llvmIr
@@ -97,11 +108,15 @@ object AotUtils {
     /// 通过 `FileSystem.writeText` 落盘 IR，经 `Process.run` 调用 LLVM 工具链。
     /// `llvmHome` 为 LLVM 根目录（如 `D:/DevTools/LLVM/clang+llvm-23.1.0-...`）。
     fun aotBuildExeFromHir(hir: Hir, moduleName: String, outDir: String, llvmHome: String): AotExeResult {
+        return aotBuildExeFromHirEx(hir, moduleName, outDir, llvmHome, "")
+    }
+
+    fun aotBuildExeFromHirEx(hir: Hir, moduleName: String, outDir: String, llvmHome: String, basePath: String): AotExeResult {
         val r: AotExeResult = AotExeResult()
 
-        println("[A1] compileAotIrOnly enter")
-        val a: AotLinkResult = AotUtils.compileAotIrOnly(hir)
-        println("[A2] IR done lines=" + toStr(a.irLines))
+        val opts: AotOptions = AotUtils.defaultAotOptionsEx(basePath)
+        opts.emitCSource = false
+        val a: AotLinkResult = AotUtils.compileAotIrOnlyEx(hir, opts)
         val tgt: String = a.targetTriple
         r.target = tgt
 
@@ -118,36 +133,19 @@ object AotUtils {
         // 1. 落盘 LLVM IR
         FileSystem.mkdirP(outDir)
         FileSystem.writeText(llPath, a.llvmIr)
-        println("[A3] ll written")
 
-        // 2. Phase 6.5.8：llc -verify 门禁（在编译前独立验证 IR 合法性）
-        //    失败时立即定位首个非法指令，避免编译到一半才报错、定位困难。
+        // 2. Phase 6.5.8 + A3：llc -verify-each 合并到主编译命令
+        //    原实现先独立验证再编译（两次进程启动），现合并为一次调用，
+        //    减少 ~100-200ms 的进程启动开销。
         val llc: String = toolPreferredPath("llc", llvmHome)
         val clang: String = toolPreferredPath("clang", llvmHome)
         val optFlag: String = a.optFlag
-        val verifyLog: String = outDir + "/" + moduleName + ".verify.log"
-        val verifyCmd: String = llc + " -mtriple " + tgt + " " + llPath +
-            " -verify-each 2> " + AotUtils.aotWinPath(verifyLog)
-        val verifyExit: Int = Process.run(verifyCmd)
-        println("[A4] verify exit=" + toStr(verifyExit))
-        if (verifyExit != 0) {
-            // IR 验证失败：保留 .ll + .verify.log，直接返回
-            if (FileSystem.exists(verifyLog)) {
-                val vlog: String = FileSystem.readText(verifyLog)
-                r.irError = aotLineAt(vlog, 0)
-            }
-            return r
-        }
-
-        // 3. llc：IR → 目标文件
-        //    把 stderr 重定向到日志文件，失败时保留 .ll 并回读首个错误行
-        //    （定位首个非法指令，无需重跑）。
         val logPath: String = outDir + "/" + moduleName + ".llc.log"
         r.llcLog = logPath
         val llcCmd: String = llc + " -mtriple " + tgt + " " + llPath +
-            " -o " + objPath + " " + optFlag + " -filetype=obj 2> " + AotUtils.aotWinPath(logPath)
+            " -o " + objPath + " " + optFlag + " -filetype=obj -verify-each 2> " +
+            AotUtils.aotWinPath(logPath)
         r.llcExit = Process.run(llcCmd)
-        println("[A5] llc exit=" + toStr(r.llcExit))
         if (r.llcExit != 0) {
             if (FileSystem.exists(logPath)) {
                 val log: String = FileSystem.readText(logPath)
@@ -162,11 +160,28 @@ object AotUtils {
         //    Phase C.2：aura_std_cffi.c 编译步骤已移除。
         //    所有 std 函数（String/Collections/Math/FileSystem 等）均由 Aura 实现提供，
         //    编译到 user.obj 中；链接器自动解析系统 libc 函数（malloc/free/printf 等）。
+        //    并发原语（Channel）由 runtime/channel.ll 以纯 LLVM IR 提供；
+        //    Thread 原语（aura_thread_*）由 runtime/libc.ll declare、
+        //    实际实现由 aura_syscalls.c 在 Rust AOT 路径下链接。
         //
         //    与 Rust 侧 `link_to_executable` 一致：链接宿主目标**不加** `-target`
         //    （`-target` 会让 clang 走另一套库/ABI，链接 C 运行库时失败）；
         //    交叉编译目标三元组已由 llc 的 `-mtriple` 决定。
         var clangCmd: String = clang + " " + objPath
+        // 编译 aura_syscalls.c（线程桥，不含与 IR 重复的符号）。
+        // 目录解析：优先 Aura 侧自带位置 `aura/runtime/cffi`（不依赖 Rust 编译器目录），
+        // 回退旧位置 `compiler/src/std/cffi`；两处都不存在时跳过（仅影响 Thread/并发）。
+        val cffiDir: String = AotUtils.resolveCffiDir()
+        if (cffiDir != "") {
+            val sysObj: String = outDir + "/" + moduleName + "_syscalls.obj"
+            val sysCmd: String = clang + " -c " + cffiDir + "/aura_syscalls.c"
+                + " -o " + AotUtils.aotWinPath(sysObj)
+                + " -I " + cffiDir
+            val sysExit: Int = Process.run(sysCmd)
+            if (sysExit == 0 && FileSystem.exists(sysObj)) {
+                clangCmd = clangCmd + " " + AotUtils.aotWinPath(sysObj)
+            }
+        }
         clangCmd = clangCmd + " -o " + exePath + " " + optFlag
         // Windows 目标：COFF 对象经 lld-link 链接时需要显式 `subsystem`
         // （否则报 `lld-link: error: subsystem must be defined`）。
@@ -191,12 +206,12 @@ object AotUtils {
     fun aotWinPath(p: String): String {
         var out: String = ""
         var i: Int = 0
-        while (i < p.length) {
-            val c: String = toStr(p[i])
-            if (c == "/") {
+        val len: Int = p.length
+        while (i < len) {
+            if (p.charCodeAt(i) == 47) {  // '/'
                 out = out + "\\"
             } else {
-                out = out + c
+                out = out + p.substring(i, i + 1)
             }
             i = i + 1
         }
@@ -206,6 +221,21 @@ object AotUtils {
     /// 默认 LLVM 工具链根目录（与根 `Cargo.toml` 的 `[workspace.metadata.aura].llvm-home` 一致）。
     fun llvmHomeDefault(): String {
         return "D:/DevTools/LLVM/clang+llvm-23.1.0-x86_64-pc-windows-msvc"
+    }
+
+    /// 解析 C 运行时源码目录（`aura_syscalls.c` 所在目录）。
+    ///
+    /// 优先使用 Aura 侧自带位置 `aura/runtime/cffi`——这是 Aura 编译器自身的依赖，
+    /// 与 Rust 编译器目录无关；回退旧位置 `compiler/src/std/cffi` 以兼容过渡期工作区。
+    /// 两处都不存在时返回空串（调用方据此跳过线程桥编译，仅影响 Thread/并发）。
+    fun resolveCffiDir(): String {
+        if (FileSystem.exists("aura/runtime/cffi/aura_syscalls.c")) {
+            return "aura/runtime/cffi"
+        }
+        if (FileSystem.exists("compiler/src/std/cffi/aura_syscalls.c")) {
+            return "compiler/src/std/cffi"
+        }
+        return ""
     }
 }
 
@@ -240,6 +270,9 @@ class AotOptions {
     /// 断言；故给「只要 IR + 工具链」的构建入口提供关闭开关（见 `compileAotIrOnly`）。
     var emitCSource: Boolean = true
 
+    /// 源文件目录（用于定位 runtime/*.ll 文件）。
+    var basePath: String = ""
+
     init(target: TargetTriple, optLevel: OptimizationLevel, moduleName: String) {
         this.target = target
         this.optLevel = optLevel
@@ -249,6 +282,19 @@ class AotOptions {
         this.llvmHome = ""
         this.linkStdCffi = false
         this.emitCSource = true
+        this.basePath = ""
+    }
+
+    init(target: TargetTriple, optLevel: OptimizationLevel, moduleName: String, basePath: String) {
+        this.target = target
+        this.optLevel = optLevel
+        this.moduleName = moduleName
+        this.linkRuntime = true
+        this.emitDebug = false
+        this.llvmHome = ""
+        this.linkStdCffi = false
+        this.emitCSource = true
+        this.basePath = basePath
     }
 }
 
@@ -316,7 +362,7 @@ class AotCodeGenerator {
         val triple: String = tgt.toTriple()
         val flag: String = lvl.flag()
 
-        val ir: String = emitLlvmIr(hir, options.moduleName, triple)
+        val ir: String = emitLlvmIrEx(hir, options.moduleName, triple, options.basePath)
 
         val objPath: String = options.moduleName + "." + tgt.objectExt()
         var exePath: String = options.moduleName

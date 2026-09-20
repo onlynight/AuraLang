@@ -1,23 +1,10 @@
 // aura:///aura/lang/native/file/FileOps.aura
 package aura.lang.native.file
-// ------------------------------------------------------------------
-// File I/O operations -- Phase S2
-//
-// Provides file read/write operations, wrapping syscalls.
-//
-// Usage:
-//   val fd: Int = FileOps.open(pathAddr, O_WRONLY | O_CREAT)
-//   FileOps.write(fd, bufAddr, bufLen)
-//   FileOps.close(fd)
-// ------------------------------------------------------------------
-
 import aura.lang.native.Syscalls
 import aura.lang.native.Memory
 
-/// File I/O operations
-extern object FileOps {
-
-    // -- Constants --
+/// File I/O operations - declarations
+extern interface FileOps {
     const val O_RDONLY: Int = 0
     const val O_WRONLY: Int = 1
     const val O_RDWR: Int = 2
@@ -29,7 +16,6 @@ extern object FileOps {
     const val SEEK_END: Int = 2
     const val F_OK: Int = 0
 
-    // -- Syscall declarations --
     @native(SYS_OPEN)   fun open(path: Long, flags: Int): Int
     @native(SYS_CLOSE)  fun close(fd: Int): Int
     @native(SYS_READ)   fun read(fd: Int, buf: Long, count: Long): Long
@@ -40,54 +26,19 @@ extern object FileOps {
     @native(SYS_ACCESS) fun access(path: Long, mode: Int): Int
     @native(SYS_MKDIR)  fun mkdir(path: Long, mode: Int): Int
     @native(SYS_RMDIR)  fun rmdir(path: Long): Int
+    @native(SYS_RENAME) fun rename(old: Long, new: Long): Int
+}
 
-    /// Open file
-    fun openFile(path: Long, flags: Int): Int {
-        return open(path, flags)
-    }
-
-    /// Close file
-    fun closeFile(fd: Int): Int {
-        return close(fd)
-    }
-
-    /// Read file
-    fun readFile(fd: Int, buf: Long, count: Long): Long {
-        return read(fd, buf, count)
-    }
-
-    /// Write file
-    fun writeFile(fd: Int, buf: Long, count: Long): Long {
-        return write(fd, buf, count)
-    }
-
-    /// Move file pointer
-    fun seekFile(fd: Int, offset: Long, whence: Int): Long {
-        return lseek(fd, offset, whence)
-    }
-
-    /// Get file status
-    fun statFile(fd: Int, buf: Long): Long {
-        return fstat(fd, buf)
-    }
-
-    /// Delete file
-    fun deleteFile(path: Long): Int {
-        return unlink(path)
-    }
-
-    /// Check if file exists
-    fun exists(path: Long): Boolean {
-        return access(path, F_OK) == 0
-    }
-
-    /// Create directory
-    fun mkdirFile(path: Long, mode: Int): Int {
-        return mkdir(path, mode)
-    }
-
-    /// Remove empty directory
-    fun rmdirFile(path: Long): Int {
-        return rmdir(path)
-    }
+/// File I/O operations - implementation
+object FileOpsImpl {
+    fun openFile(path: Long, flags: Int): Int { return FileOps.open(path, flags) }
+    fun closeFile(fd: Int): Int { return FileOps.close(fd) }
+    fun readFile(fd: Int, buf: Long, count: Long): Long { return FileOps.read(fd, buf, count) }
+    fun writeFile(fd: Int, buf: Long, count: Long): Long { return FileOps.write(fd, buf, count) }
+    fun seekFile(fd: Int, offset: Long, whence: Int): Long { return FileOps.lseek(fd, offset, whence) }
+    fun statFile(fd: Int, buf: Long): Long { return FileOps.fstat(fd, buf) }
+    fun deleteFile(path: Long): Int { return FileOps.unlink(path) }
+    fun exists(path: Long): Boolean { return FileOps.access(path, 0) == 0 }
+    fun mkdirFile(path: Long, mode: Int): Int { return FileOps.mkdir(path, mode) }
+    fun rmdirFile(path: Long): Int { return FileOps.rmdir(path) }
 }

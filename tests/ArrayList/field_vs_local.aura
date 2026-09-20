@@ -1,0 +1,36 @@
+// Test: local variable vs field indexing
+package test
+
+import aura.lang.collection.ArrayList
+
+class MyClass {
+    private var data: List<Int>
+    
+    constructor() {
+        data = arrayListOf<Int>()
+    }
+    
+    fun testField(): Unit {
+        data.add(1)
+        data.add(2)
+        println("field.size=" + data.size)
+        println("field[0]=" + data[0])
+        println("field.getAt(0)=" + data.getAt(0))
+    }
+    
+    fun testLocal(): Unit {
+        var l: List<Int> = arrayListOf<Int>()
+        l.add(1)
+        l.add(2)
+        println("local.size=" + l.size)
+        println("local[0]=" + l[0])
+        println("local.getAt(0)=" + l.getAt(0))
+    }
+}
+
+fun main(): Int {
+    var m = MyClass()
+    m.testLocal()
+    m.testField()
+    return 0
+}

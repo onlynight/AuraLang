@@ -4,155 +4,569 @@ package aura.lang.lsp
 // ── 标准库 ──
 import aura.lang.std.String
 
-// ── Native 包 ──
-import aura.lang.native.console.Console
-
-// ── 编译器模块 ──
+// ── 编译器模块（自举编译器） ──
 import aura.lang.compiler.parser.Parser
+import aura.lang.compiler.lexer.Lexer
+import aura.lang.compiler.lexer.Token
+import aura.lang.compiler.lexer.Span
 import aura.lang.compiler.sema.TypeChecker
-
-// ── 兄弟模块 ──
-import aura.lang.lsp.FileIO
+import aura.lang.compiler.errors.CompileErrors
+import aura.lang.compiler.ast.Ast
 
 // ═══════════════════════════════════════════════════════════════
-// Phase E: LSP API 实现（纯 Aura，调用编译器模块）
+// Phase E: LSP API 实现（纯 Aura，调用自举编译器）
+//
+// 所有函数接收文档内容（String）作为输入，返回 JSON 字符串作为输出。
+// 不依赖磁盘文件，文档内容由 LspServer 通过 didOpen/didChange 管理。
+//
+// 重要：游离函数必须放入 object（与编译器 Main.aura 的 MainUtils 模式一致），
+// 否则 AOT 的 synthesizeMainInKids 会错误替换 main 体。
 // ═══════════════════════════════════════════════════════════════
 
-/// 启动 LSP 服务器 → exit code
-fun lspStart(): Int {
-    Console.println("[LSP] Server started (pure Aura, Phase E)")
-    return 0
-}
+/// LSP 特性实现（纯 Aura，调用自举编译器）。
+object LspApi {
 
-/// 停止 LSP 服务器 → exit code
-fun lspStop(): Int {
-    Console.println("[LSP] Server stopped")
-    return 0
-}
+    /// 启动 LSP 服务器 → exit code
+    fun lspStart(): Int {
+        println("[LSP] Server started (pure Aura, self-bootstrapping)")
+        return 0
+    }
 
-/// 解析 JSON-RPC 请求 → 解析后的 JSON 字符串
-fun lspParseRequest(data: String): String {
-    return data  // 简化：原样返回
-}
+    /// 停止 LSP 服务器 → exit code
+    fun lspStop(): Int {
+        println("[LSP] Server stopped")
+        return 0
+    }
 
-/// 代码补全 → 补全项 JSON 数组
-fun lspCompletion(file: String, pos: Int): String {
-    val content: String = readLspFile(file)
-    if (content.length == 0) { return "[]" }
-    val p = Parser(content)
-    p.parseProgram()
-    if (p.errors.count > 0) { return "[]" }
-    // 简化：返回所有顶级函数名作为补全
-    var result: String = "["
-    var i: Int = 0
-    var first: Boolean = true
-    while (i < p.ast.count) {
-        if (p.ast.kindOf(i) == "FunDecl") {
-            if (!first) { result = result + "," }
-            val name: String = p.ast.literalAt(i)
-            result = result + "{\"label\":\"" + name + "\",\"kind\":2}"
-            first = false
+    /// 解析 JSON-RPC 请求 → 原样返回（简化：解析在 LspServer 中完成）
+    fun lspParseRequest(data: String): String {
+        return data
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 代码补全
+    // ═══════════════════════════════════════════════════════════
+
+    /// 代码补全 → 补全项 JSON 数组。
+    fun lspCompletion(content: String, pos: Int): String {
+        if (content.length == 0) { return "[]" }
+        val p = Parser(content)
+        val root: Int = p.parseProgram()
+        if (p.errors.count > 0) { return "[]" }
+
+        var result: String = "["
+        var first: Boolean = true
+        var i: Int = 0
+        while (true) {
+            val childId: Int = p.ast.childOf(root, i)
+            if (childId < 0) { break }
+            val kind: String = p.ast.kindOf(childId)
+            val name: String = p.ast.textOf(childId)
+            val kindInt: Int = symbolKindToInt(kind)
+            if (kindInt > 0 && name.length > 0) {
+                if (!first) { result = result + "," }
+                result = result + "{\"label\":\"" + escapeJson(name) + "\"" +
+                    ",\"kind\":" + toStr(kindInt) + "}"
+                first = false
+            }
+            i = i + 1
         }
-        i = i + 1
+        result = result + "]"
+        return result
     }
-    result = result + "]"
-    return result
-}
 
-/// 悬停信息 → 悬停信息 JSON
-fun lspHover(file: String, pos: Int): String {
-    val content: String = readLspFile(file)
-    if (content.length == 0) { return "{}" }
-    val p = Parser(content)
-    p.parseProgram()
-    // 简化：返回基本类型信息
-    return "{\"contents\":{\"kind\":\"markdown\",\"value\":\"*Hover info*\"}}"
-}
+    // ═══════════════════════════════════════════════════════════
+    // 悬停信息
+    // ═══════════════════════════════════════════════════════════
 
-/// 跳转定义 → 定义位置 JSON
-fun lspDefinition(file: String, pos: Int): String {
-    val content: String = readLspFile(file)
-    if (content.length == 0) { return "null" }
-    val p = Parser(content)
-    p.parseProgram()
-    return "null"
-}
+    /// 悬停信息 → 悬停信息 JSON。
+    fun lspHover(content: String, posLine: Int): String {
+        if (content.length == 0) { return "{}" }
+        val p = Parser(content)
+        val root: Int = p.parseProgram()
+        if (p.errors.count > 0) { return "{}" }
 
-/// 查找引用 → 引用位置 JSON 数组
-fun lspReferences(file: String, pos: Int): String {
-    val content: String = readLspFile(file)
-    if (content.length == 0) { return "[]" }
-    val p = Parser(content)
-    p.parseProgram()
-    return "[]"
-}
-
-/// 诊断信息 → 诊断 JSON 数组
-fun lspDiagnostic(file: String): String {
-    val content: String = readLspFile(file)
-    if (content.length == 0) { return "[]" }
-    val p = Parser(content)
-    p.parseProgram()
-    var result: String = "["
-    var first: Boolean = true
-    // 添加解析错误
-    val errors = p.errors
-    if (errors.count > 0) {
-        // 简化：返回错误计数
-        result = result + "{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":0}},\"severity\":1,\"message\":\"" + toStr(errors.count) + " parse error(s)\"}"
-    }
-    // 添加语义错误
-    val checker = TypeChecker()
-    checker.tcCheck(p.ast)
-    val semaErrors = checker.tcGetErrors()
-    if (semaErrors.count > 0) {
-        if (!first) { result = result + "," }
-        result = result + "{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":0}},\"severity\":1,\"message\":\"" + toStr(semaErrors.count) + " semantic error(s)\"}"
-        first = false
-    }
-    result = result + "]"
-    return result
-}
-
-/// 代码格式化 → 格式化后的文本
-fun lspFormatting(file: String, text: String): String {
-    return text  // 简化：原样返回
-}
-
-/// 文档符号 → 文档符号 JSON 数组
-fun lspDocumentSymbol(file: String): String {
-    val content: String = readLspFile(file)
-    if (content.length == 0) { return "[]" }
-    val p = Parser(content)
-    p.parseProgram()
-    var result: String = "["
-    var first: Boolean = true
-    var i: Int = 0
-    while (i < p.ast.count) {
-        if (p.ast.kindOf(i) == "FunDecl" || p.ast.kindOf(i) == "ClassDecl" || p.ast.kindOf(i) == "ObjectDecl") {
-            if (!first) { result = result + "," }
-            val name: String = p.ast.literalAt(i)
-            val kind: Int = if (p.ast.kindOf(i) == "FunDecl") { 12 } else if (p.ast.kindOf(i) == "ClassDecl") { 5 } else { 7 }
-            result = result + "{\"name\":\"" + name + "\",\"kind\":" + kind + "}"
-            first = false
+        var i: Int = 0
+        while (true) {
+            val childId: Int = p.ast.childOf(root, i)
+            if (childId < 0) { break }
+            val kind: String = p.ast.kindOf(childId)
+            val name: String = p.ast.textOf(childId)
+            val kindInt: Int = symbolKindToInt(kind)
+            if (kindInt > 0 && name.length > 0) {
+                val sp: Span = p.ast.spanOf(childId)
+                if (posLine >= (sp.startLine - 1) && posLine <= (sp.endLine - 1)) {
+                    val detail: String = buildSymbolDetail(kind, name, p.ast, childId)
+                    return "{\"contents\":{\"kind\":\"markdown\",\"value\":\"**" +
+                        escapeJson(name) + "**\n\n```\n" + escapeJson(detail) + "\n```\"}}"
+                }
+            }
+            i = i + 1
         }
-        i = i + 1
+        return "{\"contents\":{\"kind\":\"markdown\",\"value\":\"*Hover info*\"}}"
     }
-    result = result + "]"
-    return result
-}
 
-/// 签名帮助 → 签名信息 JSON
-fun lspSignatureHelp(file: String, pos: Int): String {
-    return "{}"
-}
+    // ═══════════════════════════════════════════════════════════
+    // 跳转定义
+    // ═══════════════════════════════════════════════════════════
 
-/// 内联提示 → 内联提示 JSON 数组
-fun lspInlayHint(file: String): String {
-    return "[]"
-}
+    /// 跳转定义 → 定义位置 JSON（递归遍历 AST 子节点）。
+    fun lspDefinition(uri: String, content: String, posLine: Int): String {
+        if (content.length == 0) { return "null" }
+        val p = Parser(content)
+        val root: Int = p.parseProgram()
+        if (p.errors.count > 0) { return "null" }
+        return findDefinitionRecursive(p.ast, root, posLine, uri)
+    }
 
-/// 代码操作 → 代码操作 JSON 数组
-fun lspCodeAction(file: String, range: String): String {
-    return "[]"
+    /// 递归查找定义位置。
+    private fun findDefinitionRecursive(
+            ast: Ast, parentId: Int, posLine: Int, uri: String): String {
+        var i: Int = 0
+        while (true) {
+            val childId: Int = ast.childOf(parentId, i)
+            if (childId < 0) { break }
+            val sp: Span = ast.spanOf(childId)
+            if (posLine >= (sp.startLine - 1) && posLine <= (sp.endLine - 1)) {
+                val name: String = ast.textOf(childId)
+                if (name.length > 0) {
+                    // 先递归查找更精确的子节点
+                    val deeper: String = findDefinitionRecursive(
+                        ast, childId, posLine, uri)
+                    if (deeper != "null") { return deeper }
+                    return "{\"uri\":\"" + escapeJson(uri) + "\"," +
+                        "\"range\":{" +
+                        "\"start\":{\"line\":" + toStr(sp.startLine - 1) +
+                        ",\"character\":" + toStr(sp.startCol - 1) + "}," +
+                        "\"end\":{\"line\":" + toStr(sp.endLine - 1) +
+                        ",\"character\":" + toStr(sp.endCol - 1) + "}}}"
+                }
+            }
+            i = i + 1
+        }
+        return "null"
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 查找引用
+    // ═══════════════════════════════════════════════════════════
+
+    /// 查找引用 → 引用位置 JSON 数组（递归遍历 AST 查找同名符号）。
+    fun lspReferences(content: String, posLine: Int): String {
+        if (content.length == 0) { return "[]" }
+        val p = Parser(content)
+        val root: Int = p.parseProgram()
+        if (p.errors.count > 0) { return "[]" }
+
+        // 第一步：定位光标处的符号名
+        val symbolName: String = findSymbolAtLine(p.ast, root, posLine)
+        if (symbolName.length == 0) { return "[]" }
+
+        // 第二步：递归查找所有同名节点
+        var result: String = "["
+        var first: Boolean = true
+        collectReferences(p.ast, root, symbolName, posLine, result)
+        return "]"
+    }
+
+    /// 递归收集同名节点的引用位置。
+    private fun collectReferences(ast: Ast, parentId: Int,
+            symbolName: String, posLine: Int, result: String): String {
+        var i: Int = 0
+        while (true) {
+            val childId: Int = ast.childOf(parentId, i)
+            if (childId < 0) { break }
+            val name: String = ast.textOf(childId)
+            if (name == symbolName) {
+                val sp: Span = ast.spanOf(childId)
+                if (!first) { result = result + "," }
+                result = result + "{\"range\":{\"start\":{\"line\":" +
+                    toStr(sp.startLine - 1) + ",\"character\":" +
+                    toStr(sp.startCol - 1) + "},\"end\":{\"line\":" +
+                    toStr(sp.endLine - 1) + ",\"character\":" +
+                    toStr(sp.endCol - 1) + "}}}"
+                first = false
+            }
+            result = collectReferences(ast, childId, symbolName, posLine, result)
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 在 AST 中找到光标所在行的符号名。
+    private fun findSymbolAtLine(ast: Ast, parentId: Int, posLine: Int): String {
+        var i: Int = 0
+        while (true) {
+            val childId: Int = ast.childOf(parentId, i)
+            if (childId < 0) { break }
+            val sp: Span = ast.spanOf(childId)
+            if (posLine >= (sp.startLine - 1) && posLine <= (sp.endLine - 1)) {
+                val name: String = ast.textOf(childId)
+                if (name.length > 0) {
+                    val deeper: String = findSymbolAtLine(ast, childId, posLine)
+                    if (deeper.length > 0) { return deeper }
+                    return name
+                }
+            }
+            i = i + 1
+        }
+        return ""
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 诊断信息
+    // ═══════════════════════════════════════════════════════════
+
+    /// 诊断信息 → 诊断 JSON 数组。
+    fun lspDiagnostic(content: String): String {
+        if (content.length == 0) { return "[]" }
+        val p = Parser(content)
+        val root: Int = p.parseProgram()
+
+        var result: String = "["
+        var first: Boolean = true
+
+        // ── 1. 解析错误 ──
+        val errors: CompileErrors = p.errors
+        val errorCount: Int = errors.count
+        var i: Int = 0
+        while (i < errorCount) {
+            val sp: Span = errors.spanAt(i)
+            val msg: String = errors.messageAt(i)
+            val sev: String = errors.severityAt(i)
+            val sevInt: Int = severityToInt(sev)
+            if (!first) { result = result + "," }
+            result = result + "{\"range\":{" +
+                "\"start\":{\"line\":" + toStr(sp.startLine - 1) +
+                ",\"character\":" + toStr(sp.startCol - 1) + "}," +
+                "\"end\":{\"line\":" + toStr(sp.endLine - 1) +
+                ",\"character\":" + toStr(sp.endCol - 1) + "}}," +
+                "\"severity\":" + toStr(sevInt) + "," +
+                "\"source\":\"aura\"," +
+                "\"message\":\"" + escapeJson(msg) + "\"}"
+            first = false
+            i = i + 1
+        }
+
+        // ── 2. 语义错误 ──
+        if (errors.count == 0) {
+            val checker = TypeChecker()
+            checker.tcCheck(p.ast)
+            val sErr: CompileErrors = checker.tcGetErrors()
+            val sCount: Int = sErr.count
+            var j: Int = 0
+            while (j < sCount) {
+                val sSp: Span = sErr.spanAt(j)
+                val sMsg: String = sErr.messageAt(j)
+                val sSev: String = sErr.severityAt(j)
+                val sSevInt: Int = severityToInt(sSev)
+                if (!first) { result = result + "," }
+                result = result + "{\"range\":{" +
+                    "\"start\":{\"line\":" + toStr(sSp.startLine - 1) +
+                    ",\"character\":" + toStr(sSp.startCol - 1) + "}," +
+                    "\"end\":{\"line\":" + toStr(sSp.endLine - 1) +
+                    ",\"character\":" + toStr(sSp.endCol - 1) + "}}," +
+                    "\"severity\":" + toStr(sSevInt) + "," +
+                    "\"source\":\"aura\"," +
+                    "\"message\":\"" + escapeJson(sMsg) + "\"}"
+                first = false
+                j = j + 1
+            }
+        }
+
+        result = result + "]"
+        return result
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 代码格式化
+    // ═══════════════════════════════════════════════════════════
+
+    /// 代码格式化 → 格式化后的文本（TextEdit 数组）。
+    fun lspFormatting(text: String): String {
+        if (text.length == 0) { return "[]" }
+        val formatted: String = Formatter.formatSource(text)
+        if (formatted == text) { return "[]" }
+        val lineCount: Int = countLines(text)
+        return "[{\"range\":{" +
+            "\"start\":{\"line\":0,\"character\":0}," +
+            "\"end\":{\"line\":" + toStr(lineCount) + ",\"character\":0}}," +
+            "\"newText\":\"" + escapeJson(formatted) + "\"}]"
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 文档符号
+    // ═══════════════════════════════════════════════════════════
+
+    /// 文档符号 → 文档符号 JSON 数组。
+    fun lspDocumentSymbol(content: String): String {
+        if (content.length == 0) { return "[]" }
+        val p = Parser(content)
+        val root: Int = p.parseProgram()
+        if (p.errors.count > 0) { return "[]" }
+
+        var result: String = "["
+        var first: Boolean = true
+        var i: Int = 0
+        while (true) {
+            val childId: Int = p.ast.childOf(root, i)
+            if (childId < 0) { break }
+            val kind: String = p.ast.kindOf(childId)
+            val name: String = p.ast.textOf(childId)
+            val kindInt: Int = symbolKindToInt(kind)
+            if (kindInt > 0 && name.length > 0) {
+                if (!first) { result = result + "," }
+                val symKind: Int = documentSymbolKind(kind)
+                result = result + "{\"name\":\"" + escapeJson(name) + "\"" +
+                    ",\"kind\":" + toStr(symKind) + "}"
+                first = false
+            }
+            i = i + 1
+        }
+        result = result + "]"
+        return result
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 签名帮助 / 内联提示 / 代码操作（占位）
+    // ═══════════════════════════════════════════════════════════
+
+    /// 签名帮助 → 签名帮助 JSON（从 AST 提取函数参数列表）。
+    fun lspSignatureHelp(content: String, posLine: Int): String {
+        if (content.length == 0) { return "{}" }
+        val p = Parser(content)
+        val root: Int = p.parseProgram()
+        if (p.errors.count > 0) { return "{}" }
+
+        // 查找光标所在函数调用，返回其参数列表
+        val funcInfo: String = findSignatureAtLine(p.ast, root, posLine)
+        if (funcInfo.length == 0) { return "{}" }
+
+        return "{\"signatures\":[{\"label\":\"" + escapeJson(funcInfo) +
+            "\",\"parameters\":[]}]," +
+            "\"activeSignature\":0,\"activeParameter\":0}"
+    }
+
+    /// 递归查找光标所在函数的签名。
+    private fun findSignatureAtLine(ast: Ast, parentId: Int, posLine: Int): String {
+        var i: Int = 0
+        while (true) {
+            val childId: Int = ast.childOf(parentId, i)
+            if (childId < 0) { break }
+            val kind: String = ast.kindOf(childId)
+            val name: String = ast.textOf(childId)
+            val sp: Span = ast.spanOf(childId)
+            if (posLine >= (sp.startLine - 1) && posLine <= (sp.endLine - 1)) {
+                // 递归查找更深层
+                val deeper: String = findSignatureAtLine(ast, childId, posLine)
+                if (deeper.length > 0) { return deeper }
+                // 如果是函数/方法定义，构建签名
+                if (kind == "Function" || kind == "Method" || kind == "Fun" ||
+                    kind == "FunDecl" || kind == "FunctionDecl") {
+                    return buildSignatureFromAst(ast, childId, name)
+                }
+            }
+            i = i + 1
+        }
+        return ""
+    }
+
+    /// 从 AST 节点构建函数签名字符串。
+    private fun buildSignatureFromAst(ast: Ast, funcId: Int, name: String): String {
+        // 尝试从 AST 子节点中提取参数列表
+        var params: String = ""
+        var pi: Int = 0
+        while (true) {
+            val childId: Int = ast.childOf(funcId, pi)
+            if (childId < 0) { break }
+            val childKind: String = ast.kindOf(childId)
+            if (childKind == "Param" || childKind == "Parameter" ||
+                childKind == "FormalParam") {
+                val pName: String = ast.textOf(childId)
+                if (pName.length > 0) {
+                    if (params.length > 0) { params = params + ", " }
+                    params = params + pName
+                }
+            }
+            pi = pi + 1
+        }
+        if (name.length > 0) {
+            if (params.length > 0) {
+                return name + "(" + params + ")"
+            }
+            return name + "()"
+        }
+        return ""
+    }
+
+    /// 内联提示 → 内联提示 JSON 数组（为无类型标注的变量推断类型提示）。
+    fun lspInlayHint(content: String): String {
+        if (content.length == 0) { return "[]" }
+        val p = Parser(content)
+        val root: Int = p.parseProgram()
+        if (p.errors.count > 0) { return "[]" }
+
+        var result: String = "["
+        var first: Boolean = true
+        collectInlayHints(p.ast, root, content, result)
+        return "]"
+    }
+
+    /// 递归收集内联提示。
+    private fun collectInlayHints(ast: Ast, parentId: Int,
+            content: String, result: String): String {
+        var i: Int = 0
+        while (true) {
+            val childId: Int = ast.childOf(parentId, i)
+            if (childId < 0) { break }
+            val kind: String = ast.kindOf(childId)
+            val name: String = ast.textOf(childId)
+            if ((kind == "VarDecl" || kind == "Var" || kind == "LocalVar") &&
+                name.length > 0) {
+                val sp: Span = ast.spanOf(childId)
+                // 查找变量声明行的原始文本
+                val lineNum: Int = sp.startLine - 1
+                val lineText: String = getLineAt(content, lineNum)
+                if (lineText.indexOf(":") < 0) {
+                    // 无类型标注，提示推断类型
+                    if (!first) { result = result + "," }
+                    result = result + "{\"position\":{\"line\":" +
+                        toStr(sp.startLine - 1) + ",\"character\":" +
+                        toStr(sp.startCol - 1) +
+                        "},\"label\":\"\"}"
+                    first = false
+                }
+            }
+            result = collectInlayHints(ast, childId, content, result)
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 获取指定行号（0-based）的文本。
+    private fun getLineAt(content: String, lineNum: Int): String {
+        var pos: Int = 0
+        var currentLine: Int = 0
+        val len: Int = content.length
+        while (pos < len && currentLine < lineNum) {
+            if (content.charCodeAt(pos) == 10) {
+                currentLine = currentLine + 1
+                pos = pos + 1
+            } else {
+                pos = pos + 1
+            }
+        }
+        var end: Int = pos
+        while (end < len && content.charCodeAt(end) != 10) {
+            end = end + 1
+        }
+        return content.substring(pos, end)
+    }
+
+    /// 代码操作 → 代码操作 JSON 数组（诊断快速修复）。
+    fun lspCodeAction(content: String, params: String): String {
+        // 解析诊断并生成对应的代码操作
+        if (content.length == 0) { return "[]" }
+        val p = Parser(content)
+        val root: Int = p.parseProgram()
+
+        var result: String = "["
+        var first: Boolean = true
+        val errors: CompileErrors = p.errors
+        val errorCount: Int = errors.count
+        var i: Int = 0
+        while (i < errorCount) {
+            val sp: Span = errors.spanAt(i)
+            val msg: String = errors.messageAt(i)
+            if (!first) { result = result + "," }
+            result = result + "{\"title\":\"Fix: " + escapeJson(msg) +
+                "\",\"kind\":\"quickfix\",\"diagnostics\":[]," +
+                "\"edit\":{\"changes\":{}}}"
+            first = false
+            i = i + 1
+        }
+        result = result + "]"
+        return result
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // 辅助函数
+    // ═══════════════════════════════════════════════════════════
+
+    /// AST kind → LSP CompletionItem kind。
+    fun symbolKindToInt(kind: String): Int {
+        if (kind == "Function") { return 3 }
+        if (kind == "Class") { return 5 }
+        if (kind == "Object") { return 7 }
+        if (kind == "Struct") { return 22 }
+        if (kind == "Enum") { return 1 }
+        if (kind == "Interface") { return 8 }
+        if (kind == "Typealias") { return 7 }
+        return 0
+    }
+
+    /// AST kind → LSP DocumentSymbol kind。
+    fun documentSymbolKind(kind: String): Int {
+        if (kind == "Function") { return 12 }
+        if (kind == "Class") { return 5 }
+        if (kind == "Object") { return 7 }
+        if (kind == "Struct") { return 22 }
+        if (kind == "Enum") { return 1 }
+        if (kind == "Interface") { return 8 }
+        if (kind == "Typealias") { return 7 }
+        return 0
+    }
+
+    /// 错误严重级别 → LSP 严重级别。
+    fun severityToInt(sev: String): Int {
+        if (sev == "Error") { return 1 }
+        if (sev == "Warning") { return 2 }
+        if (sev == "Info") { return 3 }
+        return 1
+    }
+
+    /// 构建符号详情字符串（用于 hover）。
+    fun buildSymbolDetail(kind: String, name: String, ast: Ast, id: Int): String {
+        if (kind == "Function") {
+            val retTy: String = ast.tyOf(id)
+            if (retTy.length > 0) { return "fun " + name + "() -> " + retTy }
+            return "fun " + name + "()"
+        }
+        if (kind == "Class") { return "class " + name }
+        if (kind == "Object") { return "object " + name }
+        if (kind == "Struct") { return "struct " + name }
+        if (kind == "Enum") { return "enum " + name }
+        if (kind == "Interface") { return "interface " + name }
+        return name
+    }
+
+    /// 转义 JSON 字符串中的特殊字符。
+    fun escapeJson(s: String): String {
+        if (s.length == 0) { return "" }
+        var result: String = ""
+        var i: Int = 0
+        while (i < s.length) {
+            val c: Int = s.charCodeAt(i)
+            if (c == 92) { result = result + "\\\\" }
+            else if (c == 34) { result = result + "\\\"" }
+            else if (c == 10) { result = result + "\\n" }
+            else if (c == 13) { result = result + "\\r" }
+            else if (c == 9) { result = result + "\\t" }
+            else if (c >= 32 && c < 127) { result = result + s.substring(i, i + 1) }
+            else { result = result + s.substring(i, i + 1) }
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 计算字符串的行数。
+    fun countLines(s: String): Int {
+        var count: Int = 1
+        var i: Int = 0
+        while (i < s.length) {
+            if (s.charCodeAt(i) == 10) { count = count + 1 }
+            i = i + 1
+        }
+        return count
+    }
 }

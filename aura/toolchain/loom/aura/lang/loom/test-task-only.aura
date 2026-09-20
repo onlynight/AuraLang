@@ -1,0 +1,16 @@
+// aura:///test/task-only.aura
+package test
+
+import "Task.aura"
+import "TaskType.aura"
+
+fun testTask(): Int {
+    println("creating task...")
+    val t: Task = createTask("clean", TaskType.CLEAN)
+    println("task created: " + t.name)
+    return 0
+}
+
+fun main(): Int {
+    return testTask()
+}

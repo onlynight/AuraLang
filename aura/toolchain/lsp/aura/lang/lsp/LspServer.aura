@@ -3,203 +3,370 @@ package aura.lang.lsp
 
 // ── 标准库 ──
 import aura.lang.std.String
-import aura.lang.std.Collections
-
-// ── Native 包 ──
-import aura.lang.native.console.Console
 
 // ── 兄弟模块 ──
 import aura.lang.lsp.LspRequest
 import aura.lang.lsp.LspResponse
 import aura.lang.lsp.LspApi
-import aura.lang.lsp.FileIO
 
 // ═══════════════════════════════════════════════════════════════
 // LSP 服务器主类
+//
+// 职责：
+//   1. 文档生命周期管理（didOpen / didChange / didClose）
+//   2. JSON-RPC 消息解析与分派
+//   3. 委托 LspApi 完成补全、悬停、诊断等特性
+//
+// 所有文档内容保存在内存 Map 中，不依赖磁盘文件。
 // ═══════════════════════════════════════════════════════════════
 
 class LspServer {
-    var running: Boolean = false
-    private var requestId: Int = 1
-    private var documents: Map<String, String> = mutableMapOf()
-    private var diagnostics: Map<String, String> = mutableMapOf()
 
-    /// 启动 LSP 服务器
+    /// 服务器是否正在运行。
+    var running: Boolean = false
+
+    /// 文档存储：当前文档 URI。
+    private var currentUri: String = ""
+    private var currentText: String = ""
+    private var currentDiagnostics: String = ""
+
+    // ─────────────────────────────────────────────────────────────
+    // 生命周期
+    // ─────────────────────────────────────────────────────────────
+
+    /// 启动 LSP 服务器。
     fun start(): Int {
-        val result: Int = lspStart()
-        if (result == 0) {
-            this.running = true
-            Console.println("LSP server started (pure Aura)")
+        this.running = true
+        println("[LSP] Server started (pure Aura, self-bootstrapping)")
+        return 0
+    }
+
+    /// 停止 LSP 服务器。
+    fun stop(): Int {
+        this.running = false
+        println("[LSP] Server stopped")
+        return 0
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // 请求处理入口
+    // ─────────────────────────────────────────────────────────────
+
+    /// 处理一条 JSON-RPC 消息，返回响应 JSON 字符串。
+    ///
+    /// 通知（无 id 字段）不产生响应，返回空字符串。
+    fun handleRequest(data: String): String {
+        val id: Int = extractTopInt(data, "id")
+        val method: String = extractTopString(data, "method")
+
+        if (method.length == 0) { return "" }
+
+        // 通知（无 id）不产生响应
+        if (id < 0) { return "" }
+
+        val params: String = extractParams(data)
+        val result: String = dispatchRequest(method, params)
+
+        val response: LspResponse = LspResponse(id, result, "")
+        return response.toJson()
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // 请求分派
+    // ─────────────────────────────────────────────────────────────
+
+    /// 分派请求到具体处理器。
+    private fun dispatchRequest(method: String, params: String): String {
+        val uri: String = extractNestedField(params, "textDocument", "uri")
+        val posChar: Int = extractNestedInt(params, "position", "character")
+        val posLine: Int = extractNestedInt(params, "position", "line")
+
+        if (method == "initialize") {
+            return "{\"capabilities\":{" +
+                "\"textDocumentSync\":{\"openClose\":true,\"change\":2,\"save\":true}," +
+                "\"completionProvider\":{\"triggerCharacters\":[\".\",\"(\",\":\"]}," +
+                "\"definitionProvider\":true," +
+                "\"hoverProvider\":true," +
+                "\"diagnosticProvider\":true," +
+                "\"documentFormattingProvider\":true," +
+                "\"documentSymbolProvider\":true," +
+                "\"referenceProvider\":true," +
+                "\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\",\"]}," +
+                "\"inlayHintProvider\":{\"resolveProvider\":false}," +
+                "\"codeActionProvider\":true}}}"
+        } else if (method == "textDocument/didOpen") {
+            return handleDidOpen(params)
+        } else if (method == "textDocument/didChange") {
+            return handleDidChange(params)
+        } else if (method == "textDocument/didClose") {
+            return handleDidClose(params)
+        } else if (method == "textDocument/completion") {
+            return LspApi.lspCompletion(currentText, posChar)
+        } else if (method == "textDocument/hover") {
+            return LspApi.lspHover(currentText, posLine)
+        } else if (method == "textDocument/definition") {
+            return LspApi.lspDefinition(currentUri, currentText, posLine)
+        } else if (method == "textDocument/references") {
+            return LspApi.lspReferences(currentText, posLine)
+        } else if (method == "textDocument/diagnostic") {
+            return currentDiagnostics
+        } else if (method == "textDocument/formatting") {
+            return LspApi.lspFormatting(currentText)
+        } else if (method == "textDocument/documentSymbol") {
+            return LspApi.lspDocumentSymbol(currentText)
+        } else if (method == "textDocument/signatureHelp") {
+            return LspApi.lspSignatureHelp(currentText, posLine)
+        } else if (method == "textDocument/inlayHint") {
+            return LspApi.lspInlayHint(currentText)
+        } else if (method == "textDocument/codeAction") {
+            return LspApi.lspCodeAction(currentText, params)
+            val text: String = documents.getOrDefault(uri, "")
+            return LspApi.lspDiagnostic(text)
+        } else if (method == "textDocument/formatting") {
+            val text: String = documents.getOrDefault(uri, "")
+            return LspApi.lspFormatting(text)
+        } else if (method == "textDocument/documentSymbol") {
+            val text: String = documents.getOrDefault(uri, "")
+            return LspApi.lspDocumentSymbol(text)
+        } else if (method == "textDocument/signatureHelp") {
+            val text: String = documents.getOrDefault(uri, "")
+            return LspApi.lspSignatureHelp(text, posChar)
+        } else if (method == "textDocument/inlayHint") {
+            val text: String = documents.getOrDefault(uri, "")
+            return LspApi.lspInlayHint(text)
+        } else if (method == "textDocument/codeAction") {
+            val text: String = documents.getOrDefault(uri, "")
+            return LspApi.lspCodeAction(text, params)
+        } else if (method == "shutdown") {
+            return "null"
+        } else if (method == "exit") {
+            this.stop()
+            return "null"
+        }
+        return "{\"error\":\"Unknown method: " + method + "\"}"
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // 文档生命周期
+    // ─────────────────────────────────────────────────────────────
+
+    /// 处理 didOpen：保存文档内容并计算诊断。
+    private fun handleDidOpen(params: String): String {
+        this.currentUri = extractNestedField(params, "textDocument", "uri")
+        this.currentText = extractNestedField(params, "textDocument", "text")
+        this.currentDiagnostics = LspApi.lspDiagnostic(this.currentText)
+        return "{}"
+    }
+
+    /// 处理 didChange：更新文档内容并重新计算诊断。
+    private fun handleDidChange(params: String): String {
+        this.currentUri = extractNestedField(params, "textDocument", "uri")
+        this.currentText = findLastTextInContentChanges(params)
+        this.currentDiagnostics = LspApi.lspDiagnostic(this.currentText)
+        return "{}"
+    }
+
+    /// 处理 didClose：清除文档和诊断缓存。
+    private fun handleDidClose(params: String): String {
+        this.currentUri = ""
+        this.currentText = ""
+        this.currentDiagnostics = ""
+        return "{}"
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // JSON 解析工具
+    // ─────────────────────────────────────────────────────────────
+
+    /// 在 s 的 from 位置之后查找 sub 的起始索引（绝对索引）。
+    private fun indexOfFrom(s: String, from: Int, sub: String): Int {
+        if (from < 0 || from >= s.length) { return -1 }
+        val subLen: Int = sub.length
+        if (subLen == 0) { return from }
+        val sLen: Int = s.length
+        if (subLen > sLen - from) { return -1 }
+        var i: Int = from
+        while (i <= sLen - subLen) {
+            var j: Int = 0
+            var found: Boolean = true
+            while (j < subLen) {
+                if (s.charCodeAt(i + j) != sub.charCodeAt(j)) {
+                    found = false
+                    break
+                }
+                j = j + 1
+            }
+            if (found) {
+                return i
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// 从指定位置提取子串（绕过 AOT 的 substring 对转义字符的 bug）。
+    private fun mySubstring(s: String, start: Int, end: Int): String {
+        var result: String = ""
+        var i: Int = start
+        while (i < end && i < s.length) {
+            result = result + String.fromCharCode(s.charCodeAt(i) as Int)
+            i = i + 1
         }
         return result
     }
 
-    /// 停止 LSP 服务器
-    fun stop(): Int {
-        running = false
-        return lspStop()
-    }
-
-    /// 处理 incoming 请求
-    fun handleRequest(data: String): String {
-        val parsed: String = lspParseRequest(data)
-        val request: LspRequest = parseRequest(parsed)
-        if (request == null) {
-            return "{\"jsonrpc\":\"2.0\",\"error\":\"Invalid request\"}"
-        }
-        val result: String = dispatchRequest(request)
-        val response: LspResponse = LspResponse(request.id, result, "")
-        return response.toJson()
-    }
-
-    /// 分派请求到具体处理器
-    private fun dispatchRequest(req: LspRequest): String {
-        val params: String = req.params
-        val file: String = extractField(params, "textDocument", "uri")
-        val pos: Int = extractIntField(params, "position", "character")
-
-        if (req.method == "textDocument/didOpen") {
-            return handleDidOpen(params)
-        } else if (req.method == "textDocument/didChange") {
-            return handleDidChange(params)
-        } else if (req.method == "textDocument/didClose") {
-            return handleDidClose(params)
-        } else if (req.method == "textDocument/completion") {
-            return lspCompletion(file, pos)
-        } else if (req.method == "textDocument/hover") {
-            return lspHover(file, pos)
-        } else if (req.method == "textDocument/definition") {
-            return lspDefinition(file, pos)
-        } else if (req.method == "textDocument/references") {
-            return lspReferences(file, pos)
-        } else if (req.method == "textDocument/diagnostic") {
-            return lspDiagnostic(file)
-        } else if (req.method == "textDocument/formatting") {
-            val text: String = documents.getOrDefault(file, "")
-            return lspFormatting(file, text)
-        } else if (req.method == "textDocument/documentSymbol") {
-            return lspDocumentSymbol(file)
-        } else if (req.method == "textDocument/signatureHelp") {
-            return lspSignatureHelp(file, pos)
-        } else if (req.method == "textDocument/inlayHint") {
-            return lspInlayHint(file)
-        } else if (req.method == "textDocument/codeAction") {
-            return lspCodeAction(file, params)
-        } else if (req.method == "shutdown") {
-            return "null"
-        } else if (req.method == "exit") {
-            stop()
-            return "null"
-        }
-        return "{\"error\":\"Unknown method: " + req.method + "\"}"
-    }
-
-    /// 处理 didOpen
-    private fun handleDidOpen(params: String): String {
-        val uri: String = extractField(params, "textDocument", "uri")
-        val text: String = extractField(params, "textDocument", "text")
-        documents.put(uri, text)
-        val diag: String = lspDiagnostic(uri)
-        diagnostics.put(uri, diag)
-        return "null"
-    }
-
-    /// 处理 didChange
-    private fun handleDidChange(params: String): String {
-        val uri: String = extractField(params, "textDocument", "uri")
-        val text: String = extractField(params, "contentChanges", "text")
-        documents.put(uri, text)
-        val diag: String = lspDiagnostic(uri)
-        diagnostics.put(uri, diag)
-        return "null"
-    }
-
-    /// 处理 didClose
-    private fun handleDidClose(params: String): String {
-        val uri: String = extractField(params, "textDocument", "uri")
-        documents.remove(uri)
-        diagnostics.remove(uri)
-        return "null"
-    }
-
-    /// 从 JSON 中提取嵌套字段
-    private fun extractField(json: String, parent: String, key: String): String {
-        val parentStart: Int = json.indexOf("\"" + parent + "\"")
-        if (parentStart < 0) { return "" }
-        val braceStart: Int = json.indexOf("{", parentStart)
-        if (braceStart < 0) { return "" }
-        val keyStart: Int = json.indexOf("\"" + key + "\"", braceStart)
+    /// 从顶层 JSON 提取字符串字段。
+    private fun extractTopString(json: String, key: String): String {
+        val keyStart: Int = indexOfFrom(json, 0, "\"" + key + "\"")
         if (keyStart < 0) { return "" }
-        val colonIdx: Int = json.indexOf(":", keyStart)
+        val colonIdx: Int = indexOfFrom(json, keyStart, ":")
         if (colonIdx < 0) { return "" }
-        val valueStart: Int = json.indexOf("\"", colonIdx)
+        val valueStart: Int = indexOfFrom(json, colonIdx, "\"")
         if (valueStart < 0) { return "" }
-        val valueEnd: Int = json.indexOf("\"", valueStart + 1)
+        val valueEnd: Int = indexOfFrom(json, valueStart + 1, "\"")
         if (valueEnd < 0) { return "" }
-        return String.substring(json, valueStart + 1, valueEnd)
+        return mySubstring(json, valueStart + 1, valueEnd)
     }
 
-    /// 从 JSON 中提取整数字段
-    private fun extractIntField(json: String, parent: String, key: String): Int {
-        val parentStart: Int = json.indexOf("\"" + parent + "\"")
+    /// 从顶层 JSON 提取整数字段（返回 -1 表示未找到）。
+    private fun extractTopInt(json: String, key: String): Int {
+        val keyStart: Int = indexOfFrom(json, 0, "\"" + key + "\"")
+        if (keyStart < 0) { return -1 }
+        val colonIdx: Int = indexOfFrom(json, keyStart, ":")
+        if (colonIdx < 0) { return -1 }
+        return parseJsonNumber(json, colonIdx)
+    }
+
+    /// 从嵌套 JSON 提取字符串字段：parent.key。
+    private fun extractNestedField(json: String, parent: String, key: String): String {
+        val parentStart: Int = indexOfFrom(json, 0, "\"" + parent + "\"")
+        if (parentStart < 0) { return "" }
+        val braceStart: Int = indexOfFrom(json, parentStart, "{")
+        if (braceStart < 0) { return "" }
+        val keyStart: Int = indexOfFrom(json, braceStart, "\"" + key + "\"")
+        if (keyStart < 0) { return "" }
+        val colonIdx: Int = indexOfFrom(json, keyStart, ":")
+        if (colonIdx < 0) { return "" }
+        val valueStart: Int = indexOfFrom(json, colonIdx, "\"")
+        if (valueStart < 0) { return "" }
+        val valueEnd: Int = indexOfFrom(json, valueStart + 1, "\"")
+        if (valueEnd < 0) { return "" }
+        return mySubstring(json, valueStart + 1, valueEnd)
+    }
+
+    /// 从嵌套 JSON 提取整数字段：parent.key。
+    private fun extractNestedInt(json: String, parent: String, key: String): Int {
+        val parentStart: Int = indexOfFrom(json, 0, "\"" + parent + "\"")
         if (parentStart < 0) { return 0 }
-        val keyStart: Int = json.indexOf("\"" + key + "\"", parentStart)
+        val keyStart: Int = indexOfFrom(json, parentStart, "\"" + key + "\"")
         if (keyStart < 0) { return 0 }
-        val colonIdx: Int = json.indexOf(":", keyStart)
+        val colonIdx: Int = indexOfFrom(json, keyStart, ":")
         if (colonIdx < 0) { return 0 }
+        return parseJsonNumber(json, colonIdx)
+    }
+
+    /// 提取 params 字段（整个 JSON 对象字符串）。
+    private fun extractParams(json: String): String {
+        val paramsStart: Int = indexOfFrom(json, 0, "\"params\"")
+        if (paramsStart < 0) { return "" }
+        val braceStart: Int = indexOfFrom(json, paramsStart, "{")
+        if (braceStart < 0) { return "" }
+        var depth: Int = 0
+        var i: Int = braceStart
+        while (i < json.length) {
+            if (json.charCodeAt(i) == 123) { depth = depth + 1 }
+            else if (json.charCodeAt(i) == 125) {
+                depth = depth - 1
+                if (depth == 0) {
+                    return mySubstring(json, braceStart, i + 1)
+                }
+            }
+            i = i + 1
+        }
+        return ""
+    }
+
+    /// 从 JSON 中的冒号位置开始解析整数。
+    private fun parseJsonNumber(json: String, colonIdx: Int): Int {
         var i: Int = colonIdx + 1
-        while (i < json.length && (String.charCodeAt(json, i) == 32 || String.charCodeAt(json, i) == 9)) {
+        while (i < json.length && (json.charCodeAt(i) == 32 || json.charCodeAt(i) == 9)) {
+            i = i + 1
+        }
+        var negative: Boolean = false
+        if (i < json.length && json.charCodeAt(i) == 45) {
+            negative = true
             i = i + 1
         }
         var numStr: String = ""
-        while (i < json.length && String.charCodeAt(json, i) >= 48 && String.charCodeAt(json, i) <= 57) {
-            numStr = numStr + String.substring(json, i, i + 1)
+        while (i < json.length && json.charCodeAt(i) >= 48 && json.charCodeAt(i) <= 57) {
+            numStr = numStr + String.fromCharCode(json.charCodeAt(i) as Int)
             i = i + 1
         }
-        if (numStr.length == 0) { return 0 }
-        return String.toInt(numStr)
+        if (numStr.length == 0) { return -1 }
+        val result: Int = numStr.toInt()
+        if (negative) { return -result }
+        return result
     }
 
-    /// 解析 JSON-RPC 请求
-    private fun parseRequest(json: String): LspRequest {
-        val id: Int = extractIntField(json, null, "id")
-        val method: String = extractTopField(json, "method")
-        val params: String = ""
-
-        if (method.length == 0) { return null }
-
-        val paramsStart: Int = json.indexOf("\"params\"")
-        if (paramsStart >= 0) {
-            val braceStart: Int = json.indexOf("{", paramsStart)
-            if (braceStart >= 0) {
-                var depth: Int = 0
-                var i: Int = braceStart
-                while (i < json.length) {
-                    if (String.charCodeAt(json, i) == 123) { depth = depth + 1 }
-                    else if (String.charCodeAt(json, i) == 125) {
-                        depth = depth - 1
-                        if (depth == 0) {
-                            params = String.substring(json, braceStart, i + 1)
-                            break
-                        }
-                    }
-                    i = i + 1
+    /// 从 contentChanges 数组中提取最后一个 text 值。
+    private fun findLastTextInContentChanges(params: String): String {
+        val ccStart: Int = indexOfFrom(params, 0, "\"contentChanges\"")
+        if (ccStart < 0) {
+            return findLastFieldValue(params, "text")
+        }
+        val bracketStart: Int = indexOfFrom(params, ccStart, "[")
+        if (bracketStart < 0) {
+            return findLastFieldValue(params, "text")
+        }
+        // 找到 contentChanges 数组的结束位置
+        var depth: Int = 0
+        var end: Int = params.length
+        var i: Int = bracketStart
+        while (i < params.length) {
+            if (params.charCodeAt(i) == 91) { depth = depth + 1 }
+            else if (params.charCodeAt(i) == 93) {
+                depth = depth - 1
+                if (depth == 0) {
+                    end = i + 1
+                    break
                 }
             }
+            i = i + 1
         }
-        return LspRequest(id, method, params)
+        // 在数组范围内查找最后一个 "text" 值
+        var searchStart: Int = bracketStart
+        var lastText: String = ""
+        while (searchStart < end) {
+            val textKeyIdx: Int = indexOfFrom(params, searchStart, "\"text\"")
+            if (textKeyIdx < 0 || textKeyIdx >= end) { break }
+            val colonIdx: Int = indexOfFrom(params, textKeyIdx, ":")
+            if (colonIdx < 0 || colonIdx >= end) { break }
+            val valueStart: Int = indexOfFrom(params, colonIdx, "\"")
+            if (valueStart < 0 || valueStart >= end) { break }
+            val valueEnd: Int = indexOfFrom(params, valueStart + 1, "\"")
+            if (valueEnd < 0 || valueEnd >= end) { break }
+            lastText = mySubstring(params, valueStart + 1, valueEnd)
+            searchStart = valueEnd + 1
+        }
+        return lastText
     }
 
-    /// 从顶层 JSON 提取字段
-    private fun extractTopField(json: String, key: String): String {
-        val keyStart: Int = json.indexOf("\"" + key + "\"")
-        if (keyStart < 0) { return "" }
-        val colonIdx: Int = json.indexOf(":", keyStart)
-        if (colonIdx < 0) { return "" }
-        val valueStart: Int = json.indexOf("\"", colonIdx)
-        if (valueStart < 0) { return "" }
-        val valueEnd: Int = json.indexOf("\"", valueStart + 1)
-        if (valueEnd < 0) { return "" }
-        return String.substring(json, valueStart + 1, valueEnd)
+    /// 在 JSON 中查找最后一个指定 key 的值。
+    private fun findLastFieldValue(json: String, key: String): String {
+        var searchStart: Int = 0
+        var lastValue: String = ""
+        while (searchStart < json.length) {
+            val keyIdx: Int = indexOfFrom(json, searchStart, "\"" + key + "\"")
+            if (keyIdx < 0) { break }
+            val colonIdx: Int = indexOfFrom(json, keyIdx, ":")
+            if (colonIdx < 0) { break }
+            val valueStart: Int = indexOfFrom(json, colonIdx, "\"")
+            if (valueStart < 0) { break }
+            val valueEnd: Int = indexOfFrom(json, valueStart + 1, "\"")
+            if (valueEnd < 0) { break }
+            lastValue = mySubstring(json, valueStart + 1, valueEnd)
+            searchStart = valueEnd + 1
+        }
+        return lastValue
     }
 }

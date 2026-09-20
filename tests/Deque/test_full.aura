@@ -1,0 +1,38 @@
+package test
+
+import aura.lang.collection.Deque
+
+fun main(): Int {
+    // Test Deque basic operations
+    var d = Deque<Int>()
+    
+    // Test pushBack
+    d.pushBack(1)
+    d.pushBack(2)
+    d.pushBack(3)
+    
+    assert(d.count() == 3, "Deque count should be 3")
+    assert(d.back() == 3, "Deque back should be 3")
+    
+    // Test pushFront
+    d.pushFront(0)
+    assert(d.count() == 4, "Deque count after pushFront should be 4")
+    assert(d.front() == 0, "Deque front should be 0")
+    
+    // Test popBack
+    d.popBack()
+    assert(d.count() == 3, "Deque count after popBack should be 3")
+    assert(d.back() == 2, "Deque back after popBack should be 2")
+    
+    // Test popFront
+    d.popFront()
+    assert(d.count() == 2, "Deque count after popFront should be 2")
+    assert(d.front() == 1, "Deque front after popFront should be 1")
+    
+    // Test clear
+    d.clear()
+    assert(d.isEmpty() == true, "Deque should be empty after clear")
+    
+    println("Deque tests passed")
+    return 0
+}

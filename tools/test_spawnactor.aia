@@ -1,7 +1,0 @@
-import aura.lang.std.Actor.spawnActor
-fun main(): Int {
-    println("a")
-    val a = spawnActor("test")
-    println("b")
-    return a
-}

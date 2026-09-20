@@ -45,12 +45,24 @@ object AstUtils {
     }
 
     /// 子节点列表的长度。
+    ///
+    /// **性能关键**：改为单次 `charCodeAt` 扫描计数。旧实现 `split(",")`
+    /// 每次调用都分配一张 List + 每个 id 一个字符串，而该函数常出现在
+    /// 「遍历子节点」的循环条件里 → 分配量随 (子节点数)² 增长。
     fun kidsCount(list: String): Int {
         if (list == "") {
             return 0
         }
-        val parts: List<String> = list.split(",")
-        return parts.size
+        var count: Int = 1
+        var i: Int = 0
+        val len: Int = list.length
+        while (i < len) {
+            if (list.charCodeAt(i) == 44) {
+                count = count + 1
+            }
+            i = i + 1
+        }
+        return count
     }
 
     /// 取子节点列表的第 index 个 id。
@@ -76,22 +88,21 @@ object AstUtils {
     }
 
     /// 取第 index 个以 sep 分隔的字段。
+    ///
+    /// **性能关键**：单次字符码扫描 + 一次 `substring`。
+    /// 旧实现逐字符 `result = result + text[j]` 拼结果（每字符一次分配，
+    /// 且字符串越长复制越多 → 平方级内存），分隔符比较也用 `text[i] == sep`
+    /// （每字符一个临时字符串）。
     fun fieldAt(text: String, index: Int, sep: String): String {
         var i: Int = 0
         var fieldStart: Int = 0
         var cur: Int = 0
-        var fieldLen: Int = text.length
+        val fieldLen: Int = text.length
+        val sepCode: Int = sep.charCodeAt(0)
         while (i < fieldLen) {
-            val c: String = text[i]
-            if (c == sep) {
+            if (text.charCodeAt(i) == sepCode) {
                 if (cur == index) {
-                    var result: String = ""
-                    var j: Int = fieldStart
-                    while (j < i) {
-                        result = result + text[j]
-                        j = j + 1
-                    }
-                    return result
+                    return text.substring(fieldStart, i)
                 }
                 cur = cur + 1
                 fieldStart = i + 1
@@ -99,13 +110,7 @@ object AstUtils {
             i = i + 1
         }
         if (cur == index) {
-            var result: String = ""
-            var j: Int = fieldStart
-            while (j < fieldLen) {
-                result = result + text[j]
-                j = j + 1
-            }
-            return result
+            return text.substring(fieldStart, fieldLen)
         }
         return ""
     }
@@ -120,45 +125,15 @@ object AstUtils {
         var i: Int = 0
         var neg: Boolean = false
         // 处理负号
-        if (len > 0 && toStr(text[0]) == "-") {
+        if (len > 0 && text.charCodeAt(0) == 45) {
             neg = true
             i = 1
         }
         while (i < len) {
-            val c: String = toStr(text[i])
-            // 手动计算数字值（避免 indexOf 在 VM 内类调用时未链接）
-            var digit: Int = -1
-            if (c == "0") {
-                digit = 0
-            }
-            if (c == "1") {
-                digit = 1
-            }
-            if (c == "2") {
-                digit = 2
-            }
-            if (c == "3") {
-                digit = 3
-            }
-            if (c == "4") {
-                digit = 4
-            }
-            if (c == "5") {
-                digit = 5
-            }
-            if (c == "6") {
-                digit = 6
-            }
-            if (c == "7") {
-                digit = 7
-            }
-            if (c == "8") {
-                digit = 8
-            }
-            if (c == "9") {
-                digit = 9
-            }
-            if (digit >= 0) {
+            // 字符码直接算数字（48 = '0'）：零分配。旧实现每字符做 10 次
+            // 字符串比较（每次比较先分配一个临时字符串）。
+            val digit: Int = text.charCodeAt(i) - 48
+            if (digit >= 0 && digit <= 9) {
                 total = total * 10 + digit
             }
             i = i + 1
@@ -236,11 +211,10 @@ class Ast {
             var i: Int = 0
             var len: Int = text.length
             while (i < len) {
-                val c: String = toStr(text[i])
-                if (c == "\n") {
+                if (text.charCodeAt(i) == 10) {
                     buf = buf + "\\n"
                 } else {
-                    buf = buf + c
+                    buf = buf + text.substring(i, i + 1)
                 }
                 i = i + 1
             }
@@ -283,11 +257,11 @@ class Ast {
         var i: Int = 0
         var len: Int = raw.length
         while (i < len) {
-            if (i + 1 < len && toStr(raw[i]) == "\\" && toStr(raw[i + 1]) == "n") {
+            if (i + 1 < len && raw.charCodeAt(i) == 92 && raw.charCodeAt(i + 1) == 110) {
                 result = result + "\n"
                 i = i + 2
             } else {
-                result = result + toStr(raw[i])
+                result = result + raw.substring(i, i + 1)
                 i = i + 1
             }
         }

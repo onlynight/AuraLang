@@ -1,0 +1,18 @@
+import aura.lang.std.Ascii
+
+fun main(): Unit {
+    // Test String.fromCharCode directly
+    println(String.fromCharCode(65))
+    println(String.fromCharCode(97))
+    
+    // Test Ascii.fromCode
+    println(Ascii.fromCode(65))
+    println(Ascii.fromCode(97))
+    
+    // Test Ascii.toUpper
+    println(Ascii.toUpper("abc"))
+    
+    // Test Ascii.allAlpha
+    println(Ascii.allAlpha("abc"))
+    println(Ascii.allAlpha("ab1"))
+}

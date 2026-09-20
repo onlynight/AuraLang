@@ -34,7 +34,7 @@ class AotModuleLinker {
     /// 输出 HIR。
     var hir: Hir = Hir()
 
-    /// 已加载的规范化路径（换行分隔）。
+    /// 已加载的规范化路径（换行分隔；String contains 比 ArrayList.contains 更快）。
     var seen: String = ""
 
     /// 执行模块链接。
@@ -43,11 +43,22 @@ class AotModuleLinker {
     /// 未找到的导入（换行分隔；供诊断）。
     var missing: String = ""
 
+    /// 文件内容缓存（预加载后供 loadPath 复用，避免重复 I/O）。
+    ///
+    /// 编码：每条记录 = `规范化路径\n内容长度\n内容`，按读取顺序拼接。
+    /// **刻意不用 `HashMap`**：Aura 自举编译器对自身做 AOT 时，泛型集合的
+    /// 生成代码尚不可靠 —— `HashMap()` 构造即崩溃（EXIT 0xC0000005），
+    /// 链接阶段直接从「读文件」变成段错误，自举编译无法推进。
+    /// 扁平字符串编码只用到已充分验证的 String/Int 操作，规避该后端缺陷，
+    /// 同时保留「一次性预读、后续复用」的优化意图。
+    var cacheBlob: String = ""
+
     init() {
         this.hir = Hir()
         this.seen = ""
         this.loader = HirLowerer()
         this.missing = ""
+        this.cacheBlob = ""
     }
 
     /// 入口文件 → 合并 HIR（含递归 import）。
@@ -57,11 +68,14 @@ class AotModuleLinker {
         this.missing = ""
         this.loader = HirLowerer()
         this.loader.useHir(this.hir)
-        // Phase B.3：入口文件 + 递归 import + 自动包含 std 模块
-        var kids: String = this.loadPath(entryPath)
-        // 自动包含 std 模块（用户代码引用 String/Math/FileSystem 等时，
-        // 对应 Aura 实现必须参与编译；否则 preludeTable 移除后会出现 undefined symbol）
+        this.cacheBlob = ""
+
+        // B1: 预加载 std 模块文件到缓存（消除重复 I/O）
         val stdMods: String = ModuleLinkUtils.essentialStdModules()
+        this.preloadCache(stdMods)
+
+        // 入口文件 + 递归 import + 自动包含 std 模块
+        var kids: String = this.loadPath(entryPath)
         var si: Int = 0
         while (si < aotLineCount(stdMods)) {
             val sp: String = aotLineAt(stdMods, si)
@@ -71,9 +85,83 @@ class AotModuleLinker {
             }
             si = si + 1
         }
-        println("[L9] link done modules=" + toStr(this.loadedCount()))
-        this.hir.rootId = this.hir.add("HirProgram", "", "", Span(0, 0, 1, 1, 1, 1), kids)
+        this.hir.rootId = this.hir.add("HirProgram", "", "", Span(0, 0, 1, 1, 1, 1),
+            this.loader.synthesizeMainInKids(kids, Span(0, 0, 1, 1, 1, 1)))
         return this.hir
+    }
+
+    /// B1: 预加载多个文件内容到 fileCache（顺序读取）。
+    ///
+    /// 将已知路径的文件内容预读入内存，避免 loadPath 中的重复 I/O。
+    ///
+    /// **为什么这里是顺序读取（而不是 Thread.spawn 并行）**：
+    /// 并行版本把「待读路径 / 读取结果 / 线程 id」放在 `object ParallelState`
+    /// 的单例字段里，由 worker 线程按唯一索引写入。但 **AOT 后端目前不支持
+    /// `object` 单例字段访问**：
+    ///   1. `ParallelState.paths` 会被发射成**每次调用都新建一个 `ArrayList` 对象**
+    ///      （而非读取单例全局的字段），所以写入的根本不是同一份数据；
+    ///   2. `ArrayList` 实例又会被当作**裸集合句柄**（`AuraDynList*`）传给
+    ///      `Collections.listAppend`，而 `%struct.ArrayList`（16 字节：data + size）
+    ///      与 `AuraDynList`（24 字节：len + cap + items）布局不同 —— 读 `items`
+    ///      会读到分配块之外的野值（实测为 MSVC 堆的 `0xABAB…` 填充），
+    ///      随即在 `realloc` 中段错误（0xC0000005）。
+    /// 这正是「自举编译器编译成功、一运行就崩」的直接根因。
+    ///
+    /// 顺序读取只依赖 `AotModuleLinker` 自身的实例字段（Class 实例字段在 AOT 下
+    /// 语义正确），因此对两个后端都成立。实测并行版与顺序版自举耗时相同
+    /// （均约 13.2s：40+ 模块的读取并非瓶颈），故本改动无性能回退。
+    fun preloadCache(paths: String): Unit {
+        var i: Int = 0
+        val pathCount: Int = aotLineCount(paths)
+        while (i < pathCount) {
+            val p: String = aotLineAt(paths, i)
+            val norm: String = ModuleLinkUtils.normalizePath(p)
+            if (norm != "" && FileSystem.exists(norm) && this.cacheGet(norm) == "") {
+                val content: String = FileSystem.readText(norm)
+                this.cacheBlob = this.cacheBlob + norm + "\n" + toStr(content.length) + "\n" + content
+            }
+            i = i + 1
+        }
+    }
+
+    /// 从扁平缓存取文件内容（未命中返回 ""）。
+    ///
+    /// 记录布局：`路径\n内容长度\n内容`；按记录顺序线性扫描（缓存条目数为
+    /// std 模块数量级，扫描开销可忽略）。
+    fun cacheGet(path: String): String {
+        var pos: Int = 0
+        while (pos < this.cacheBlob.length) {
+            val nl1: Int = this.cacheLineEnd(pos)
+            if (nl1 < 0) {
+                return ""
+            }
+            val key: String = aotSlice(this.cacheBlob, pos, nl1 - pos)
+            val lenStart: Int = nl1 + 1
+            val nl2: Int = this.cacheLineEnd(lenStart)
+            if (nl2 < 0) {
+                return ""
+            }
+            val len: Int = aotToInt(aotSlice(this.cacheBlob, lenStart, nl2 - lenStart))
+            val bodyStart: Int = nl2 + 1
+            if (key == path) {
+                return aotSlice(this.cacheBlob, bodyStart, len)
+            }
+            pos = bodyStart + len
+        }
+        return ""
+    }
+
+    /// 自 `from` 起第一个换行的下标（无则返回 -1，供缓存解码用）。
+    fun cacheLineEnd(from: Int): Int {
+        if (from >= this.cacheBlob.length) {
+            return -1
+        }
+        val rest: String = aotSlice(this.cacheBlob, from, this.cacheBlob.length - from)
+        val rel: Int = aotIndexOfSub(rest, "\n")
+        if (rel < 0) {
+            return -1
+        }
+        return from + rel
     }
 
     /// 已加载的模块数。
@@ -96,24 +184,19 @@ class AotModuleLinker {
         }
         this.seen = this.seen + norm + "\n"
 
-        val source: String = FileSystem.readText(norm)
+        // B1: 优先从缓存读取（预加载阶段已填充），避免重复 I/O
+        val source: String
+        val cached: String = this.cacheGet(norm)
+        if (cached != "") {
+            source = cached
+        } else {
+            source = FileSystem.readText(norm)
+        }
         val p: Parser = Parser(source)
         p.parseProgram()
         // 注意：不能直接 `p.ast.kindOf(...)` —— VM 对「字段访问得到的对象再调方法」
         // 会错乱 this 绑定（既有缺陷）。必须先取局部变量。
         val ast: Ast = p.ast
-        println("[L8] parsed count=" + toStr(ast.count))
-        println("[L8b] seenLines=" + toStr(aotLineCount(this.seen)))
-        val k0D: String = ast.kindOf(0)
-        println("[L8c] k0=" + k0D)
-        if (aotLineCount(this.seen) == 1) {
-            var zz: Int = 0
-            while (zz < ast.count) {
-                println("[K" + toStr(zz) + "] " + ast.kindOf(zz) + " | " + ast.textOf(zz))
-                zz = zz + 1
-            }
-            println("[K9] dumped")
-        }
 
         val dir: String = ModuleLinkUtils.dirOf(norm)
         // 分段收集、最后一次归并：`out = appendKids(out, …)` 在整棵导入树上是
@@ -198,8 +281,18 @@ class AotModuleLinker {
             return ModuleLinkUtils.normalizePath(ModuleLinkUtils.joinPath(baseDir, imp))
         }
         val rel: String = ModuleLinkUtils.replaceAllDots(imp)
+        // 候选根目录（按优先级）：
+        //   aura/compiler/    — Aura 编译器本体
+        //   aura/core/        — 核心库与标准库
+        //   aura/toolchain/*  — 纯 Aura 工具链（cli / lsp / debugger / loom）
+        //   <rel>             — 相对仓库根的裸路径
         val candidates: String = "aura/compiler/" + rel + ".aura\n" +
-            "aura/core/" + rel + ".aura\n" + rel + ".aura\n"
+            "aura/core/" + rel + ".aura\n" +
+            "aura/toolchain/cli/" + rel + ".aura\n" +
+            "aura/toolchain/lsp/" + rel + ".aura\n" +
+            "aura/toolchain/debugger/" + rel + ".aura\n" +
+            "aura/toolchain/loom/" + rel + ".aura\n" +
+            rel + ".aura\n"
         var i: Int = 0
         val n: Int = aotLineCount(candidates)
         while (i < n) {
@@ -275,12 +368,12 @@ object ModuleLinkUtils {
     fun replaceAllDots(s: String): String {
         var out: String = ""
         var i: Int = 0
-        while (i < s.length) {
-            val c: String = toStr(s[i])
-            if (c == ".") {
+        val len: Int = s.length
+        while (i < len) {
+            if (s.charCodeAt(i) == 46) {  // '.'
                 out = out + "/"
             } else {
-                out = out + c
+                out = out + s.substring(i, i + 1)
             }
             i = i + 1
         }
@@ -291,8 +384,7 @@ object ModuleLinkUtils {
     fun dirOf(p: String): String {
         var i: Int = p.length - 1
         while (i >= 0) {
-            val c: String = toStr(p[i])
-            if (c == "/" || c == "\\") {
+            if (p.charCodeAt(i) == 47 || p.charCodeAt(i) == 92) {  // '/' or '\\'
                 return aotSlice(p, 0, i)
             }
             i = i - 1
@@ -326,12 +418,12 @@ object ModuleLinkUtils {
     fun slashify(p: String): String {
         var out: String = ""
         var i: Int = 0
-        while (i < p.length) {
-            val c: String = toStr(p[i])
-            if (c == "\\") {
+        val len: Int = p.length
+        while (i < len) {
+            if (p.charCodeAt(i) == 92) {  // '\\'
                 out = out + "/"
             } else {
-                out = out + c
+                out = out + p.substring(i, i + 1)
             }
             i = i + 1
         }
@@ -344,14 +436,14 @@ object ModuleLinkUtils {
         var out: String = ""
         var i: Int = 0
         var seg: String = ""
-        while (i <= parts.length) {
-            var c: String = "/"
-            if (i < parts.length) {
-                c = toStr(parts[i])
+        val len: Int = parts.length
+        while (i <= len) {
+            var c: Int = 47  // '/'
+            if (i < len) {
+                c = parts.charCodeAt(i)
             }
-            if (c == "/") {
+            if (c == 47) {
                 if (seg == "..") {
-                    // 弹出上一段
                     out = popSegment(out)
                 } else if (seg != "" && seg != ".") {
                     if (out != "") {
@@ -361,7 +453,7 @@ object ModuleLinkUtils {
                 }
                 seg = ""
             } else {
-                seg = seg + c
+                seg = seg + parts.substring(i, i + 1)
             }
             i = i + 1
         }
@@ -372,7 +464,7 @@ object ModuleLinkUtils {
     fun popSegment(path: String): String {
         var i: Int = path.length - 1
         while (i >= 0) {
-            if (toStr(path[i]) == "/") {
+            if (path.charCodeAt(i) == 47) {
                 return aotSlice(path, 0, i)
             }
             i = i - 1

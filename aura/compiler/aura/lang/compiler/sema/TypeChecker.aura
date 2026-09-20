@@ -30,6 +30,8 @@ import aura.lang.std.String
 import aura.lang.compiler.ast.Ast
 import aura.lang.compiler.lexer.Span
 import aura.lang.compiler.errors.CompileError
+import aura.lang.compiler.sema.SymbolTable
+import aura.lang.compiler.sema.TypeInfo
 
 /// 语义检查器。
 class TypeChecker {

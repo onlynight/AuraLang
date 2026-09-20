@@ -312,7 +312,7 @@ HIR 采用与 AST 一致的「扁平 arena」表示（`kinds/texts/tys/spans/kid
 
 | # | 任务 | 现状 | 说明 |
 |---|------|------|------|
-| 6.5.10 | Aura 编译器自身 AOT 出 exe | 前置能力已就位（类 / 集合 / std 签名表 / 多模块链接），**尚未端到端跑通** | 剩余阻塞：① `when` / lambda / 字符串插值 / `try` 在 Aura 侧 HIR 降级仍不完整；② **发射期剩余超线性开销**：`Emit.aura`（15k 节点 / 140 方法）单模块发射仍需数分钟（详见「性能优化」节）；③ std 包名 `aura.lang.std.String` 无对应 `.aura` 文件（其实现由 C 运行库提供），链接器按「不可解析即忽略」处理。 |
+| 6.5.10 | Aura 编译器自身 AOT 出 exe | ✅ **已端到端跑通**（实测） | 冻结载体 `dist/bootstrap/aura-compiler.exe` 连续两轮自举 `Main.aura` 成功且行为一致（`scripts/self-bootstrap-frozen.ps1`，无需 Rust）；Aura 版 CLI（`aura/toolchain/cli`）亦可编译为原生 exe 并用 `build --aot` 产出可执行文件。 |
 | 6.5.15 | 编译器自身的性能优化（6.5.10 前置） | **HIR arena 已改为堆列表**（与 `Ast` 一致）；**表/变量查找已由 O(len²) 改为单次 `split` 线性扫描** | 合并 48 个模块 / 49876 节点现在可完成（此前无法完成）；小模块发射 8–18x 提速。剩余见「性能优化」节 |
 
 ### 性能优化（6.5.15：为 6.5.10 自举扫清吞吐瓶颈）

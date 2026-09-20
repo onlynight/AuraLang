@@ -133,6 +133,38 @@ object FfiEmitUtils {
         return out
     }
 
+    /// 发射 @native (builtin) malloc 函数。
+    ///
+    /// 生成 LLVM IR 调用 libc malloc：
+    ///   define i64 @Memory.alloc(i64 %n) {
+    ///     %r = call i64 @malloc(i64 %n)
+    ///     ret i64 %r
+    ///   }
+    fun ffiEmitBuiltinAlloc(name: String): String {
+        val sym: String = sanitizeLlvm(name)
+        var out: String = "define i64 @" + sym + "(i64 %%n) {\n"
+        out = out + "  %r = call i64 @malloc(i64 %%n)\n"
+        out = out + "  ret i64 %r\n"
+        out = out + "}\n"
+        return out
+    }
+
+    /// 发射 @native (builtin) free 函数。
+    ///
+    /// 生成 LLVM IR 调用 libc free：
+    ///   define void @Memory.free(i64 %addr) {
+    ///     call void @free(i64 %addr)
+    ///     ret void
+    ///   }
+    fun ffiEmitBuiltinFree(name: String): String {
+        val sym: String = sanitizeLlvm(name)
+        var out: String = "define void @" + sym + "(i64 %%addr) {\n"
+        out = out + "  call void @free(i64 %%addr)\n"
+        out = out + "  ret void\n"
+        out = out + "}\n"
+        return out
+    }
+
     /// 发射 @native(asm = "...") 内联汇编函数。
     ///
     /// 生成 LLVM inline asm：
@@ -218,6 +250,10 @@ object FfiEmitUtils {
                 return ffiEmitBuiltinMemCopy(name)
             } else if (name.endsWith(".set")) {
                 return ffiEmitBuiltinMemSet(name)
+            } else if (name.endsWith(".alloc")) {
+                return ffiEmitBuiltinAlloc(name)
+            } else if (name.endsWith(".free")) {
+                return ffiEmitBuiltinFree(name)
             } else {
                 return ""
             }

@@ -71,8 +71,7 @@ class SymbolTable {
         var cur: Int = 0
         val n: Int = text.length()
         while (i < n) {
-            val c: String = toStr(text[i])
-            if (c == "\n") {
+            if (text.charCodeAt(i) == 10) {
                 if (cur == index) {
                     return text.substring(fieldStart, i)
                 }
@@ -94,9 +93,9 @@ class SymbolTable {
         var fieldStart: Int = 0
         var cur: Int = 0
         val n: Int = line.length()
+        val sepChar: Int = aotSlice(sep, 0, 1).charCodeAt(0)
         while (i < n) {
-            val c: String = toStr(line[i])
-            if (c == sep) {
+            if (line.charCodeAt(i) == sepChar) {
                 if (cur == fieldIdx) {
                     return line.substring(fieldStart, i)
                 }
@@ -326,8 +325,7 @@ object SymbolTableUtils {
         var cur: Int = 0
         val n: Int = scopes.length()
         while (i < n) {
-            val c: String = toStr(scopes[i])
-            if (c == "\n") {
+            if (scopes.charCodeAt(i) == 10) {
                 if (cur == index) {
                     return scopes.substring(lineStart, i)
                 }
@@ -345,12 +343,11 @@ object SymbolTableUtils {
 
     /// 十进制字符串 → Int。
     fun symToIntOf(text: String): Int {
-        val digits: String = "0123456789"
         val len: Int = text.length()
         var total: Int = 0
         var i: Int = 0
         while (i < len) {
-            total = total * 10 + digits.indexOf(toStr(text[i]))
+            total = total * 10 + (text.charCodeAt(i) - 48)
             i = i + 1
         }
         return total

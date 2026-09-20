@@ -17,7 +17,7 @@ package aura.lang.native.arch.x86_64_windows
 import aura.lang.native.Memory
 
 /// Windows x86_64 系统调用
-extern object Syscalls {
+extern interface Syscalls {
 
     // ── 标准文件描述符 ──
     const val STDIN: Int = 0
@@ -51,16 +51,41 @@ extern object Syscalls {
     // 注意：Windows 使用 FFI 方式，不是 syscall 指令
 
     /// 写入控制台（简化实现）
-    @native(asm = "call qword [rip + WriteFile]") fun writeFile(handle: Long, buf: Long, count: Long): Long
+    @native(asm = "call qword ptr [rip+WriteFile]") fun writeFile(handle: Long, buf: Long, count: Long): Long
 
     /// 读取控制台（简化实现）
-    @native(asm = "call qword [rip + ReadFile]") fun readFile(handle: Long, buf: Long, count: Long): Long
+    @native(asm = "call qword ptr [rip+ReadFile]") fun readFile(handle: Long, buf: Long, count: Long): Long
 
     /// 获取当前时间
-    @native(asm = "call qword [rip + GetSystemTimeAsFileTime]") fun getTime(): Long
+    @native(asm = "call qword ptr [rip+GetSystemTimeAsFileTime]") fun getTime(): Long
 
     /// 退出进程
-    @native(asm = "call qword [rip + ExitProcess]") fun exitProcess(code: Int)
+    @native(asm = "call qword ptr [rip+ExitProcess]") fun exitProcess(code: Int)
+
+    // ── Windows 文件 API（kernel32.dll FFI） ──
+
+    /// CreateFileA — 创建/打开文件（ANSI）
+    @native(asm = "call qword ptr [rip+CreateFileA]") fun createFileA(
+        lpFileName: Long,
+        dwDesiredAccess: Int,
+        dwShareMode: Int,
+        lpSecurityAttributes: Long,
+        dwCreationDisposition: Int,
+        dwFlagsAndAttributes: Int,
+        hTemplateFile: Long
+    ): Long
+
+    /// ReadFile — 读取文件（带 lpNumberOfBytesRead）
+    @native(asm = "call qword ptr [rip+ReadFile]") fun winReadFile(
+        hFile: Long,
+        lpBuffer: Long,
+        nNumberOfBytesToRead: Long,
+        lpNumberOfBytesRead: Long,
+        lpOverlapped: Long
+    ): Int
+
+    /// CloseHandle — 关闭句柄
+    @native(asm = "call qword ptr [rip+CloseHandle]") fun closeHandle(hObject: Long): Int
 
     // ── Nt* 系统调用（Phase 2: 直接 syscall 指令）──
     // Windows Nt* 服务号（x86_64，常见值）

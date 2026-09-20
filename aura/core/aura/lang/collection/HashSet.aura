@@ -10,69 +10,139 @@ package aura.lang.collection
 ///
 /// @see Set, HashMap, ArrayList
 /// @since 0.5
-class HashSet<T> {
+// 注意：继承/实现一律用 `:` 形式。`implements` 关键字**不被支持** ——
+// 写成 `class HashSet<T> implements Set<T>` 时编译器不注册该类：
+// 结构体退化成 `%struct.HashSet = type opaque`、且**一个方法都不发射**
+//（实测 `tests/HashSet/test_basic.aura` 因此崩溃）。
+class HashSet<T> : Set<T> {
 
     // ── 内部存储 ──
 
-    private var data: ArrayList<T>
+    /// 元素存储（**运行期列表句柄**）。
+    ///
+    /// 类型必须写成接口 `List<T>`：若写成 `ArrayList<T>`，发射器会把 `data` 当成
+    /// 用户类实例，于是 `Collections.getAt(data, i)` / `data.first()` 之类的调用
+    /// 被解析成 `ArrayList_*` 类方法，把列表句柄当 `%struct.ArrayList` 解引用 ——
+    /// 实测 `tests/HashSet/test_basic.aura` 直接崩溃。
+    private var data: List<T>
+    private var _size: Int = 0
 
     // ── 构造 ──
 
     /// 创建空集合
-    init() {
-        data = ArrayList<T>()
+    ///
+    /// `data` 必须是**运行期列表句柄**（`arrayListOf<T>()` → `AuraDynList`），
+    /// 不能是 `ArrayList<T>()`（用户类实例）：`Collections.getAt(data, i)`
+    /// 是按「列表头 + items 数组」解引用的，传类实例指针会直接访问违规
+    /// （实测 `tests/HashSet/test_basic.aura` 栈溢出/崩溃）。
+    constructor() {
+        data = arrayListOf<T>()
+        _size = 0
     }
 
-    /// 从可变参数创建集合
-    init(vararg items: T) {
-        data = ArrayList<T>()
-        var i: Int = 0
-        while (i < items.size) {
-            add(items[i])
-            i = i + 1
-        }
+    // ── Collection 接口实现 ──
+
+    /// 元素数量
+    override fun count(): Int {
+        return _size
+    }
+
+    /// 按下标获取元素
+    override fun getAt(index: Int): T {
+        return data.getAt(index)
+    }
+
+    /// 检查集合是否为空
+    override fun isEmpty(): Boolean {
+        return _size == 0
+    }
+
+    /// 获取第一个元素
+    override fun first(): T {
+        if (_size == 0) throw "set is empty"
+        return this.get(0)
+    }
+
+    /// 获取最后一个元素
+    override fun last(): T {
+        if (_size == 0) throw "set is empty"
+        return this.get(_size - 1)
     }
 
     // ── 属性 ──
 
     /// 集合元素数量
     val size: Int
-        get() = data.size
+        get() = _size
 
     // ── 修改方法 ──
 
     /// 添加元素（如果不存在）
-    fun add(item: T): Boolean {
-        if (contains(item)) return false
+    override fun add(item: T): Boolean {
+        var i: Int = 0
+        while (i < _size) {
+            if (this.get(i) == item) {
+                return false
+            }
+            i = i + 1
+        }
         data.add(item)
+        _size = _size + 1
         return true
     }
 
     /// 移除元素
-    fun remove(item: T): Boolean {
-        val index = data.indexOf(item)
+    ///
+    /// 用「重建运行期列表」而不是 `data.remove(index)`：`data` 是运行期句柄，
+    /// `remove` 会被解析到 `ArrayList_remove`（类方法）而把句柄当实例。
+    override fun removeItem(item: T): Boolean {
+        val index: Int = this.indexOf(item)
         if (index < 0) {
             return false
         }
-        data.remove(index)
+        val kept = arrayListOf<T>()
+        var i: Int = 0
+        while (i < _size) {
+            if (i != index) {
+                kept.add(this.get(i))
+            }
+            i = i + 1
+        }
+        data = kept
+        _size = _size - 1
         return true
     }
 
     /// 清空集合
-    fun clear(): Unit {
-        data.clear()
+    override fun clear(): Unit {
+        data = arrayListOf<T>()
+        _size = 0
     }
 
     // ── 查找方法 ──
 
     /// 检查集合是否包含指定元素
-    fun contains(item: T): Boolean {
-        return data.contains(item)
+    override fun contains(item: T): Boolean {
+        var i: Int = 0
+        while (i < _size) {
+            if (this.get(i) == item) {
+                return true
+            }
+            i = i + 1
+        }
+        return false
     }
 
     /// 查找元素的索引（未找到返回 -1）
-    fun indexOf(item: T): Int {
-        return data.indexOf(item)
+    override fun indexOf(item: T): Int {
+        var i: Int = 0
+        while (i < _size) {
+            if (this.get(i) == item) {
+                return i
+            }
+            i = i + 1
+        }
+        return -1
     }
 
     // ── 集合运算 ──
@@ -122,41 +192,47 @@ class HashSet<T> {
     // ── 转换 ──
 
     /// 转换为列表
-    fun toList(): ArrayList<T> {
+    override fun toList(): ArrayList<T> {
         return data
     }
 
     /// 转换为字符串表示
     override fun toString(): String {
-        return data.toString()
+        // 不能写 `data.toString()`（`data` 是运行期句柄，会被解析到 ArrayList 类方法），
+        // 这里按索引逐个取值自行拼接。
+        var result: String = "{"
+        var i: Int = 0
+        while (i < _size) {
+            if (i > 0) {
+                result = result + ", "
+            }
+            result = result + this.get(i)
+            i = i + 1
+        }
+        result = result + "}"
+        return result
     }
 
     // ── 内部访问 ──
 
     /// 获取指定索引的元素（内部使用）
     fun get(index: Int): T {
-        return data[index]
+        return Collections.getAt(data, index)
     }
 }
 
 // ── HashSet 工具对象 ──
 
 /// HashSet 工厂工具对象。
+///
+/// 注意：**不使用方法级泛型** `fun <T> ...`：自举编译器的 parser 不支持这种
+/// 形式（报 `Expected RParen, got Ident` / `Expected Arrow, got Colon`），
+/// 整个文件都编译不过。工厂方法改为在调用处直接 `HashSet<T>()`。
 object HashSetUtils {
 
-    /// 创建不可变集合
-    fun <T> setOf(vararg items: T): HashSet<T> {
-        return HashSet<T>(items)
-    }
-
-    /// 创建可变集合
-    fun <T> mutableSetOf(vararg items: T): HashSet<T> {
-        return setOf(items)
-    }
-
-    /// 创建空集合
-    fun <T> emptySet(): HashSet<T> {
-        return HashSet<T>()
+    /// 创建空集合（元素类型由调用处的变量标注决定）
+    fun newSet(): HashSet<Any> {
+        return HashSet<Any>()
     }
 }
 

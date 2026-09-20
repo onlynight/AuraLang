@@ -1,0 +1,23 @@
+// aura:///test/loom-init.aura
+package test
+
+import aura.lang.std.String
+import aura.lang.std.Process
+
+import "LoomMain.aura"
+import "Manifest.aura"
+import "TaskGraph.aura"
+import "Task.aura"
+
+fun testLoomInit(): Int {
+    println("starting loom init test")
+    val loom: Loom = Loom()
+    println("loom created")
+    loom.init(".")
+    println("loom init done")
+    return 0
+}
+
+fun main(): Int {
+    return testLoomInit()
+}

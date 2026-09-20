@@ -1,4 +1,0 @@
-fun main(): Int {
-    println("hello")
-    return 42
-}

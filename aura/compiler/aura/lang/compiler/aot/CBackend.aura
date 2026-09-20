@@ -14,6 +14,7 @@ import aura.lang.std.String
 import aura.lang.compiler.lexer.Span
 import aura.lang.compiler.hir.Hir
 import aura.lang.compiler.aot.AotUtil
+import aura.lang.compiler.aot.EmitBuffer
 
 /// C 后端顶层辅助工具。
 object CBackendUtils {
@@ -90,8 +91,8 @@ class CEmitter {
     /// 累积的函数定义。
     var funcs: String = ""
 
-    /// 当前函数体。
-    var fBody: String = ""
+    /// 当前函数体（原生缓冲区累积，末尾零拷贝交出）。
+    var fBodyBuf: EmitBuffer = EmitBuffer()
 
     /// 当前函数局部变量表（`name|ctype`，每行一项）。
     var fVars: String = ""
@@ -101,7 +102,7 @@ class CEmitter {
 
     init() {
         this.funcs = ""
-        this.fBody = ""
+        this.fBodyBuf = EmitBuffer()
         this.fVars = ""
         this.fRetTy = "void"
     }
@@ -123,7 +124,7 @@ class CEmitter {
 
     /// 发射单个函数。
     private fun emitFunction(hir: Hir, id: Int): String {
-        this.fBody = ""
+        this.fBodyBuf.sbReset()
         this.fVars = ""
         var retTy: String = CBackendUtils.cType(hir.tyOf(id))
         if (retTy == "") {
@@ -157,12 +158,14 @@ class CEmitter {
         if (bodyId >= 0) {
             this.emitBody(hir, bodyId, 1)
         }
-        if (retTy != "void" && !this.fBody.contains("return ")) {
-            this.fBody = this.fBody + "    return 0;\n"
+        val bodyStr: String = this.fBodyBuf.sbBuild()
+        if (retTy != "void" && !bodyStr.contains("return ")) {
+            this.fBodyBuf.sbReset()
+            this.fBodyBuf.sbAdd(bodyStr + "    return 0;\n")
         }
 
         var out: String = retTy + " " + sanitizeLlvm(hir.textOf(id)) + "(" + params + ") {\n"
-        out = out + this.fBody
+        out = out + this.fBodyBuf.sbBuild()
         out = out + "}\n\n"
         return out
     }
@@ -205,51 +208,51 @@ class CEmitter {
                 cty = "int"
             }
             this.fVars = this.fVars + name + "|" + cty + "\n"
-            this.fBody = this.fBody + pad + cty + " " + name + " = " + initExpr + ";\n"
+            this.fBodyBuf.sbAdd(pad + cty + " " + name + " = " + initExpr + ";\n")
         } else if (k == "HirReturn") {
             val kids: String = hir.kidsOf(id)
             if (hirKidsCount(kids) > 0) {
-                this.fBody = this.fBody + pad + "return "
-                    + this.emitExpr(hir, hirKidsAt(kids, 0)) + ";\n"
+                this.fBodyBuf.sbAdd(pad + "return "
+                    + this.emitExpr(hir, hirKidsAt(kids, 0)) + ";\n")
             } else {
-                this.fBody = this.fBody + pad + "return;\n"
+                this.fBodyBuf.sbAdd(pad + "return;\n")
             }
         } else if (k == "HirAssign") {
             val kids: String = hir.kidsOf(id)
             if (hirKidsCount(kids) >= 2) {
                 val target: String = this.emitExpr(hir, hirKidsAt(kids, 0))
                 val value: String = this.emitExpr(hir, hirKidsAt(kids, 1))
-                this.fBody = this.fBody + pad + target + " = " + value + ";\n"
+                this.fBodyBuf.sbAdd(pad + target + " = " + value + ";\n")
             }
         } else if (k == "HirIf") {
             val kids: String = hir.kidsOf(id)
             val n: Int = hirKidsCount(kids)
             if (n >= 2) {
-                this.fBody = this.fBody + pad + "if ("
-                    + this.emitExpr(hir, hirKidsAt(kids, 0)) + ") {\n"
+                this.fBodyBuf.sbAdd(pad + "if ("
+                    + this.emitExpr(hir, hirKidsAt(kids, 0)) + ") {\n")
                 this.emitBody(hir, hirKidsAt(kids, 1), depth + 1)
-                this.fBody = this.fBody + pad + "}"
+                this.fBodyBuf.sbAdd(pad + "}")
                 if (n > 2) {
-                    this.fBody = this.fBody + " else {\n"
+                    this.fBodyBuf.sbAdd(" else {\n")
                     this.emitBody(hir, hirKidsAt(kids, 2), depth + 1)
-                    this.fBody = this.fBody + pad + "}"
+                    this.fBodyBuf.sbAdd(pad + "}")
                 }
-                this.fBody = this.fBody + "\n"
+                this.fBodyBuf.sbAdd("\n")
             }
         } else if (k == "HirWhile") {
             val kids: String = hir.kidsOf(id)
             if (hirKidsCount(kids) >= 2) {
-                this.fBody = this.fBody + pad + "while ("
-                    + this.emitExpr(hir, hirKidsAt(kids, 0)) + ") {\n"
+                this.fBodyBuf.sbAdd(pad + "while ("
+                    + this.emitExpr(hir, hirKidsAt(kids, 0)) + ") {\n")
                 this.emitBody(hir, hirKidsAt(kids, 1), depth + 1)
-                this.fBody = this.fBody + pad + "}\n"
+                this.fBodyBuf.sbAdd(pad + "}\n")
             }
         } else if (k == "HirBlock") {
-            this.fBody = this.fBody + pad + "{\n"
+            this.fBodyBuf.sbAdd(pad + "{\n")
             this.emitBody(hir, id, depth + 1)
-            this.fBody = this.fBody + pad + "}\n"
+            this.fBodyBuf.sbAdd(pad + "}\n")
         } else {
-            this.fBody = this.fBody + pad + this.emitExpr(hir, id) + ";\n"
+            this.fBodyBuf.sbAdd(pad + this.emitExpr(hir, id) + ";\n")
         }
     }
 

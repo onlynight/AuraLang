@@ -4,8 +4,16 @@
 
 use crate::vm::native::NativeRegistry;
 use crate::vm::value::Value;
+use std::io::Write;
 
 pub fn register(reg: &mut NativeRegistry) {
+    // aura.lang.native.console.Console 接口原生函数
+    reg.register(
+        "aura.lang.native.console.Console.println",
+        nat_console_println,
+    );
+    reg.register("aura.lang.native.console.Console.print", nat_console_print);
+    // aura.lang.std.Console 终端控制函数
     reg.register("aura.lang.std.Console.clear", nat_clear);
     reg.register("aura.lang.std.Console.cursorUp", nat_cursor_up);
     reg.register("aura.lang.std.Console.cursorDown", nat_cursor_down);
@@ -33,6 +41,52 @@ pub fn register(reg: &mut NativeRegistry) {
 
 fn arg0_str(args: &[Value]) -> String {
     args.first().map(|v| v.as_string()).unwrap_or_default()
+}
+
+/// Console.println(msg: Long) — 从指针读取 C 字符串并输出到 stdout
+fn nat_console_println(args: &[Value]) -> Value {
+    if let Some(&Value::Int(ptr)) = args.first() {
+        unsafe {
+            if ptr != 0 {
+                let c_str = std::ffi::CStr::from_ptr(ptr as *const std::ffi::c_char);
+                if let Ok(s) = c_str.to_str() {
+                    println!("{}", s);
+                    let _ = std::io::stdout().flush();
+                }
+            } else {
+                println!();
+            }
+        }
+    } else {
+        // Fallback: treat as regular string value
+        let s = arg0_str(args);
+        if !s.is_empty() {
+            println!("{}", s);
+        } else {
+            println!();
+        }
+    }
+    Value::Null
+}
+
+/// Console.print(msg: Long) — 从指针读取 C 字符串并输出到 stdout（无换行）
+fn nat_console_print(args: &[Value]) -> Value {
+    if let Some(&Value::Int(ptr)) = args.first() {
+        unsafe {
+            if ptr != 0 {
+                let c_str = std::ffi::CStr::from_ptr(ptr as *const std::ffi::c_char);
+                if let Ok(s) = c_str.to_str() {
+                    print!("{}", s);
+                    let _ = std::io::stdout().flush();
+                }
+            }
+        }
+    } else {
+        let s = arg0_str(args);
+        print!("{}", s);
+        let _ = std::io::stdout().flush();
+    }
+    Value::Null
 }
 
 /// console.clear() → Unit

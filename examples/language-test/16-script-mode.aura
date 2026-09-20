@@ -1,7 +1,28 @@
-// ════════════════════════════════════════════════════════════
-// Phase 16 — 脚本模式测试（P16）
-// 顶层语句（无 main 也能执行）
-// ════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════
+// Phase 16 — 脚本模式（P16）
+// 顶层声明（val / var / fun / class / typealias）+ 顶层可执行语句
+// 全程**不写 main**，两版编译器 AOT 均能顺序执行顶层语句
+// ════════════════════════════════════════════════════════════════
+//
+// 验证：
+//   aura build examples/language-test/16-script-mode.aura --aot --output <path>   (Rust AOT)
+//   aura-compiler <file> -o <path>                                                        (Aura self-host AOT)
+//
+// ── 说明 ────────────────────────────────────────────────────────
+// 「脚本模式」= 顶层可执行语句无需写 main。
+//
+// Rust 编译器：`synthesize_main_if_missing`（compiler/src/codegen/hir.rs）
+//   无 main 时把顶层语句合成 main 体；已有 main 时把顶层语句 splice 到
+//   main 体首。
+//
+// Aura 自举编译器：`synthesizeMainInKids`（aura/compiler/aura/lang/
+// compiler/hir/Hir.aura），由 AOT 模块链接器（aot/ModuleLink.aura 的
+// `link()`）在生成 `HirProgram` 前调用。无 main 时把顶层可执行语句
+// （含顶层 val/var）包成 `fun main(): Unit` 并插到顶层节点最前。
+// 顶层 val/var 在合成 main 内成为**局部变量**——`var i = 0` 之后的
+// `i = i + 1` 必须作用在同一变量上（否则循环变量被当全局符号解析、
+// 赋值丢失，while 死循环）。
+// ════════════════════════════════════════════════════════════════
 
 import aura.lang.std.Math
 
@@ -9,52 +30,15 @@ import aura.lang.std.Math
 val globalInt: Int = 42
 var globalVar: String = "hello"
 
-// ── §16.2 顶层函数 ──
+// ── §16.2 顶层类型别名 ──
+typealias Answer = Int
+
+// ── §16.3 顶层函数 ──
 fun topLevelFunc(x: Int): Int {
     return x * 2
 }
 
-// ── §16.3 顶层语句（脚本模式核心）──
-// 以下语句将在程序启动时自动执行
-
-// 输出顶层变量
-println("§16.1 globalInt=" + globalInt.toString())
-println("§16.1 globalVar=" + globalVar.toString())
-
-// 调用顶层函数
-val result = topLevelFunc(21)
-println("§16.2 topLevelFunc(21)=" + result.toString())
-
-// 修改全局变量
-globalVar = "world"
-println("§16.1 globalVar after change=" + globalVar.toString())
-
-// 使用标准库
-// val pi = Math.PI  // AOT 暂不支持命名空间访问
-println("§16.3 Math.PI= 3.14159")
-
-// 表达式语句
-val sum = 1 + 2 + 3
-println("§16.3 sum=" + sum.toString())
-
-// 控制流
-if (true) {
-    println("§16.3 if block")
-}
-
-// 循环
-var i = 0
-while (i < 3) {
-    println("§16.3 while i=" + i.toString())
-    i = i + 1
-}
-
-// for 循环
-for (j in 0..2) {
-    println("§16.3 for j=" + j.toString())
-}
-
-// 类定义
+// ── §16.4 顶层类 ──
 class ScriptClass {
     val name: String = "Script"
 
@@ -63,15 +47,60 @@ class ScriptClass {
     }
 }
 
+// ── §16.5 顶层可执行语句（无 main，脚本模式）──
+println("═══ Phase 16: 脚本模式 ═══")
+println("")
+
+// 输出顶层变量
+println("§16.1 globalInt=" + globalInt.toString())
+println("§16.1 globalVar=" + globalVar.toString())
+
+// 调用顶层函数
+val result = topLevelFunc(21)
+println("§16.3 topLevelFunc(21)=" + result.toString())
+
+// 修改顶层变量
+globalVar = "world"
+println("§16.1 globalVar after change=" + globalVar.toString())
+
+// 使用标准库
+// 注：AOT 暂不支持 object 属性访问（`Math.PI` 生成未定义值），
+// 改用等价方法调用。
+println("§16.5 Math.abs(-7)=" + Math.abs(-7).toString())
+
+// 类型别名
+val ans: Answer = topLevelFunc(20)
+println("§16.2 Answer(≡Int)=" + ans.toString())
+
+// 表达式语句
+val sum = 1 + 2 + 3
+println("§16.5 sum=" + sum.toString())
+
+// 控制流：if
+if (true) {
+    println("§16.5 if block")
+}
+
+// 控制流：while
+var i = 0
+while (i < 3) {
+    println("§16.5 while i=" + i.toString())
+    i = i + 1
+}
+
+// 控制流：for
+for (j in 0..2) {
+    println("§16.5 for j=" + j.toString())
+}
+
+// 顶层类实例化
 val obj = ScriptClass()
-println("§16.3 ScriptClass.greet()=" + obj.greet())
+println("§16.4 ScriptClass.greet()=" + obj.greet())
 
 // 高阶函数
-// val add3 = (a: Int) -> a + 3  // AOT 暂不支持 lambda
-// println("§16.3 add3(10)=" + add3(10).toString())
+// 注：AOT 暂不支持 lambda 表达式（见 docs/AOT一致性检查报告.md），
+// 使用顶层函数替代。
+println("§16.5 topLevelFunc(10)=" + topLevelFunc(10).toString())
 
-// 尾随 lambda
-// val list = [1, 2, 3]  // AOT 暂不支持数组字面量
-println("§16.3 list.map doubled= []")
-
-println("=== Phase 16 Complete ===")
+println("")
+println("═══ Phase 16 完成 ✓ ═══")

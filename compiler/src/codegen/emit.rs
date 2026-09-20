@@ -9,8 +9,8 @@
 use crate::codegen::hir::HirProgram;
 use crate::codegen::mir::{BasicBlock, LowerCtx, MirClosure, MirFunction, MirInstr, Terminator};
 use crate::codegen::opcode::{
-    BytecodeClosure, BytecodeFunction, BytecodeModule, BytecodeNative, ClassDef, Const, OpCode,
-    TYPE_ID_BOOL, TYPE_ID_CSTRING, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_I64, TYPE_ID_PTR,
+    BytecodeClosure, BytecodeFunction, BytecodeModule, BytecodeNative, ClassDef, Const, FfiAbi,
+    OpCode, TYPE_ID_BOOL, TYPE_ID_CSTRING, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_I64, TYPE_ID_PTR,
     TYPE_ID_VOID, VirtualTable,
 };
 use std::cell::RefCell;
@@ -29,7 +29,7 @@ fn method_slot(name: &str) -> u16 {
 /// 将 MIR 函数列表发射为字节码模块
 pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) -> BytecodeModule {
     // 原生函数表
-    let natives: Vec<BytecodeNative> = hir
+    let mut natives: Vec<BytecodeNative> = hir
         .natives
         .iter()
         .map(|n| {
@@ -57,6 +57,96 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
     // 用户函数索引 = 闭包总数 + 函数序号
     for (i, f) in mir_funcs.iter().enumerate() {
         fn_index.insert(f.name.as_str(), total_closures + i as u16);
+    }
+    // Phase 4: 添加内置原生短名到 natives 表（与 ctx.natives 对齐）
+    // 这些短名在 NativeRegistry 中已注册，但不在 HIR 程序的 natives 中，
+    // 编译器需要它们在 bytecode native 表中才能发射 CallNativeArgs。
+    let builtin_native_names: &[(&str, u16)] = &[
+        ("split", 2),
+        ("substring", 3),
+        ("substringBefore", 2),
+        ("substringAfter", 2),
+        ("indexOf", 2),
+        ("lastIndexOf", 2),
+        ("replace", 3),
+        ("contains", 2),
+        ("startsWith", 2),
+        ("endsWith", 2),
+        ("toLowerCase", 1),
+        ("toUpperCase", 1),
+        ("fromCharCode", 1),
+        ("charCodeAt", 2),
+        ("length", 1),
+        ("isEmpty", 1),
+        ("countChar", 2),
+        ("repeat", 2),
+        ("splitLines", 1),
+        ("joinLines", 2),
+        ("trim", 1),
+        ("trimStart", 1),
+        ("trimEnd", 1),
+        ("padStart", 3),
+        ("padEnd", 3),
+        ("first", 1),
+        ("last", 1),
+        ("isBlank", 1),
+        ("containsAny", 2),
+        ("containsAll", 2),
+        ("join", 2),
+        ("substringBeforeLast", 2),
+        ("substringAfterLast", 2),
+        ("size", 1),
+        ("get", 2),
+        ("add", 2),
+        ("remove", 2),
+        ("clear", 1),
+        ("set", 3),
+        // String 全限定名（companion 方法，Aura 编译）
+        ("String.fromCharCode", 1),
+        ("String.charCodeAt", 2),
+        ("String.length", 1),
+        ("String.isEmpty", 1),
+        ("String.substring", 3),
+        ("String.split", 2),
+        ("String.contains", 2),
+        ("String.startsWith", 2),
+        ("String.endsWith", 2),
+        ("String.indexOf", 2),
+        ("String.lastIndexOf", 2),
+        ("String.replace", 3),
+        ("String.toLowerCase", 1),
+        ("String.toUpperCase", 1),
+        ("String.trim", 1),
+        ("String.trimStart", 1),
+        ("String.trimEnd", 1),
+        ("String.padStart", 3),
+        ("String.padEnd", 3),
+        ("String.repeat", 2),
+        ("String.splitLines", 1),
+        ("String.joinLines", 2),
+        ("String.countChar", 2),
+        ("String.first", 1),
+        ("String.last", 1),
+        ("String.isBlank", 1),
+        ("String.containsAny", 2),
+        ("String.containsAll", 2),
+        ("String.join", 2),
+        ("String.substringBefore", 2),
+        ("String.substringAfter", 2),
+        ("String.substringBeforeLast", 2),
+        ("String.substringAfterLast", 2),
+    ];
+    for (name, param_count) in builtin_native_names {
+        if !natives.iter().any(|n| n.name == *name) {
+            natives.push(BytecodeNative {
+                name: name.to_string(),
+                param_count: *param_count,
+                ffi_abi: FfiAbi::None,
+                ffi_lib: None,
+                param_types: Vec::new(),
+                ret_type: TYPE_ID_VOID,
+            });
+        }
     }
     // 原生函数名 -> 索引
     let mut native_index: HashMap<&str, u16> = HashMap::new();

@@ -1,0 +1,20 @@
+// Test HashSet basic operations
+package test
+
+import aura.lang.collection.HashSet
+
+fun main(): Int {
+    var s = HashSet<Int>()
+    s.add(1)
+    s.add(2)
+    s.add(3)
+    s.add(2) // duplicate
+    println("size=" + s.count())
+    println("contains(2)=" + s.contains(2))
+    println("contains(4)=" + s.contains(4))
+    println("isEmpty=" + s.isEmpty())
+    s.removeItem(2)
+    println("after remove size=" + s.count())
+    println("contains(2)=" + s.contains(2))
+    return 0
+}

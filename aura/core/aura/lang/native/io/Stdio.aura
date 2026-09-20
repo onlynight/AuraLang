@@ -46,36 +46,45 @@ object Stdio {
     /// 将 Aura String 复制到内存缓冲区（含 NUL 终止符）。
     /// 返回缓冲区地址，失败返回 0。
     fun stringToBuffer(s: String): Long {
-        if (s == null || s.length == 0) {
+        // `s.length` 在 AOT 下是 `strlen`（O(n)）：必须先取出到局部量，
+        // 否则循环条件里的 `s.length` 会让整段退化成 O(n²)。
+        val slen: Int = s.length
+        if (s == null || slen == 0) {
             val buf: Long = Allocator.malloc(1)
             if (buf == 0) { return 0 }
             Memory.write(buf, 0)
             return buf
         }
-        val len: Long = s.length + 1  // +1 for NUL terminator
+        val len: Long = slen as Long + 1  // +1 for NUL terminator
         val buf: Long = Allocator.malloc(len)
         if (buf == 0) { return 0 }
         var i: Int = 0
-        while (i < s.length) {
+        while (i < slen) {
             Memory.write(buf + i, s.charCodeAt(i))
             i = i + 1
         }
-        Memory.write(buf + s.length, 0)  // NUL terminator
+        Memory.write(buf + (slen as Long), 0)  // NUL terminator
         return buf
     }
 
     /// 将内存缓冲区转换为 Aura String（不包含 NUL 终止符）。
+    ///
+    /// **零拷贝**：Aura(AOT) 的 `String` 与 C 字符串同为「NUL 结尾的 `i8*`」，
+    /// 因此只需在 `maxLen` 处补一个 NUL，即可把缓冲区**本身**当作字符串返回。
+    ///
+    /// 旧实现逐字符 `result = result + String.fromCharCode(c)`：每次拼接都要
+    /// 复制已累积的整段前缀 → 读取 n 字节文件要分配约 n²/2 字节。
+    /// 实测：自举编译器读取自身 300 KB 源码时因此吃掉数十 GB 内存、单文件
+    /// 耗时 >20 秒（种子编译器由 Rust 后端生成、该模式被优化掉，故只有
+    /// 自举产物会暴露）。
+    ///
+    /// **注意**：返回的字符串与 `buf` 是同一块内存 —— 调用方此后**不得**
+    /// `Allocator.free(buf)`。
     fun bufferToString(buf: Long, maxLen: Long): String {
         if (buf == 0) { return "" }
-        var result: String = ""
-        var i: Long = 0
-        while (i < maxLen) {
-            val c: Byte = Memory.read(buf + i)
-            if (c == 0) { break }
-            result = result + String.fromCharCode(c)
-            i = i + 1
-        }
-        return result
+        if (maxLen <= 0) { return "" }
+        Memory.write(buf + maxLen, 0 as Byte)
+        return buf
     }
 
     /// 计算缓冲区中字符串的长度（不含 NUL 终止符）。
@@ -151,9 +160,8 @@ object Stdio {
             }
             i = i + 1
         }
-        val result: String = bufferToString(buf, end)
-        Allocator.free(buf)
-        return result
+        // 零拷贝：缓冲区即返回字符串，不能再 free
+        return bufferToString(buf, end)
     }
 
     /// 从标准输入读取全部（直到 EOF）。
@@ -169,9 +177,12 @@ object Stdio {
             total = total + bytesRead
             if (total >= 65536) { break }
         }
-        result = bufferToString(buf, total)
-        Allocator.free(buf)
-        return result
+        if (total <= 0) {
+            Allocator.free(buf)
+            return ""
+        }
+        // 零拷贝：缓冲区即返回字符串，不能再 free
+        return bufferToString(buf, total)
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -223,8 +234,13 @@ object Stdio {
             if (n <= 0) { break }
             total = total + n
         }
+        if (total <= 0) {
+            Allocator.free(buf)
+            FileOps.close(fd)
+            return ""
+        }
+        // 零拷贝：缓冲区即返回字符串（bufferToString 会补 NUL），不能再 free
         val content: String = bufferToString(buf, total)
-        Allocator.free(buf)
         FileOps.close(fd)
         return content
     }
@@ -234,7 +250,11 @@ object Stdio {
         val pathBuf: Long = stringToBuffer(path)
         if (pathBuf == 0) { return false }
 
-        val fd: Int = FileOps.open(pathBuf, 1 | 0x40 | 0x200)  // O_WRONLY | O_CREAT | O_TRUNC
+        // 标志位用 **Linux 约定**（Aura 侧唯一真相源，见 `SyscallsUtils.O_*`）：
+        // O_WRONLY(1) | O_CREAT(0x40) | O_TRUNC(0x200)。
+        // Windows 目标由 AOT 发射器的 CRT 包装器把标志位翻译成 `_O_*`
+        //（`_O_CREAT=0x100`；直接透传 0x40 会被 UCRT 判为非法标志 → open 失败）。
+        val fd: Int = FileOps.open(pathBuf, 1 | 0x40 | 0x200)
         if (fd < 0) {
             Allocator.free(pathBuf)
             return false

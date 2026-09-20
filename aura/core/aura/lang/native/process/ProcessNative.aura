@@ -101,6 +101,12 @@ object ProcessNative {
     }
 
     /// 以 shell 同步执行命令行，返回退出码（阻塞直到结束）。
+    ///
+    /// 注意：调用点由 AOT 发射器**内置降级**为平台命令执行
+    ///（Windows → UCRT `system`，即 `cmd /C <command>`）；
+    /// 下面的 `fork`/`execve` 组合实现只服务于非 Windows 目标，
+    /// 在 Windows 上永远不会被执行（`fork` 在 Windows 不存在，
+    /// 旧路径会把 `spawn` 的返回值 0 误判为子进程并 `exit(1)`）。
     fun run(command: String): Int {
         val childPid: Int = spawn(command)
         if (childPid <= 0) {

@@ -13,6 +13,7 @@ package aura.lang.compiler.aot
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
+import aura.lang.std.FileSystem
 import aura.lang.compiler.aot.AotUtil
 
 object RuntimeUtils {
@@ -106,102 +107,49 @@ object RuntimeUtils {
     /// Phase A 改造：@native 包装器不再依赖 C 运行库符号（aura_syscalls.c），
     /// 改为直接生成 LLVM IR（内联 syscall/asm/fence/atomicrmw）+ declare 系统 libc。
     fun runtimeDeclarationsEx(defs: String): String {
-        // 用原生缓冲区累积：旧实现 `out = out + …` 对数百行声明是 O(n²) 拷贝，
-        // 且 AOT 无 GC 时每一级中间串都永久驻留（整份声明文本量级）。
+        return runtimeDeclarationsExEx(defs, "")
+    }
+
+    fun runtimeDeclarationsExEx(defs: String, basePath: String): String {
+        // Phase D: 所有 runtime IR 已拆分到独立 .ll 文件
+        // 基础目录从源文件路径推导（例如 "aura/compiler/aura/lang/compiler/" → "aura/compiler/aura/lang/compiler/aot/runtime/"）
+        val base: String
+        if (basePath != "") {
+            base = basePath + "aot/runtime/"
+        } else {
+            base = "aura/compiler/aura/lang/compiler/aot/runtime/"
+        }
+        val files: List<String> = list("libc.ll", "crt.ll", "args.ll", "types.ll", "exception.ll", "channel.ll")
         val out: EmitBuffer = EmitBuffer()
-        out.sbAdd("; ---- Aura Runtime Declarations ----\n")
-        // C 入口用到：把宿主 argc/argv 注入运行时（`Process.arg/argCount` 依赖它）
-        out.sbAdd("declare void @aura_args_set(i32, i8**)\n")
-        // Phase A：系统 libc 声明（由链接器解析）
-        // @native 包装器不再调用 C 封装（aura_syscall_dispatch / aura_cpu_* / aura_memory_*），
-        // 改为直接生成 LLVM IR（内联 syscall/asm/fence/atomicrmw）+ declare 系统函数。
-        out.sbAdd("; ---- System libc (Phase A: pure LLVM IR) ----\n")
-        out.sbAdd("declare i64 @malloc(i64)\n")
-        out.sbAdd("declare void @free(i64)\n")
-        out.sbAdd("declare i64 @strlen(i8*)\n")
-        out.sbAdd("declare void @exit(i32)\n")
-        // 注意：**不要**在此声明 `@getpid`。
-        // `aura/core/aura/lang/native/**/Syscalls.aura` 已用
-        // `@native(SYS_GETPID) fun getpid(): Int` 提供实现，发射器会把它发成
-        // `define i32 @getpid()`；若这里再 `declare i32 @getpid()`，
-        // llc 直接报 `invalid redefinition of function 'getpid'`。
-        // 需要 `getpid` 的调用点会解析到该 Aura 包装器（同名同签名）。
-        //
-        // ── Windows 平台实现（CRT / UCRT）──
-        // `@native(SYS_*)` 成员在 Windows 目标下由 `Emit.aura::winCrtWrapper`
-        // 映射为这些 CRT 实现（Linux 目标走裸 syscall，不引用这里）。
-        // 非 Windows 目标下声明未被引用，属无害冗余。
-        out.sbAdd("; ---- Windows CRT（@native(SYS_*) 的平台实现）----\n")
-        out.sbAdd("declare i32 @_write(i32, i8*, i32)\n")
-        out.sbAdd("declare i32 @_read(i32, i8*, i32)\n")
-        out.sbAdd("declare i32 @_open(i8*, i32, i32)\n")
-        out.sbAdd("declare i32 @_close(i32)\n")
-        out.sbAdd("declare i64 @_lseeki64(i32, i64, i32)\n")
-        out.sbAdd("declare i32 @_fstat(i32, i8*)\n")
-        out.sbAdd("declare i32 @_stat64(i8*, i8*)\n")
-        out.sbAdd("declare i32 @_access(i8*, i32)\n")
-        out.sbAdd("declare i32 @_unlink(i8*)\n")
-        out.sbAdd("declare i32 @_mkdir(i8*)\n")
-        out.sbAdd("declare i32 @_rmdir(i8*)\n")
-        out.sbAdd("declare i32 @_getpid()\n")
-        // Phase C: _snprintf 用于内联 float→string 转换（替换 aura_to_str_float）
-        out.sbAdd("declare i32 @_snprintf(i8*, i32, i8*, ...)\n")
-        out.sbAdd("@fmt_float_g = private unnamed_addr constant [3 x i8] c\"%g\\00\"\n")
-        // ── 命令行参数（跨平台，`aura_std_cffi.c`）──
-        //
-        // 生成的 C 入口先 `aura_args_set(argc, argv)` 注入宿主参数，以下两个
-        // 访问器从注入结果读取（Rust 侧实现 `Process.arg/argCount` 用的就是它们）。
-        // Aura 侧 `ProcessNative.argCount/arg` 通过 `ProcessOps` 的无函数体成员
-        // 调用（符号名即成员名），故此处必须补 `declare`，否则 llc 报
-        // `use of undefined value '@aura_process_argCount'`。
-        out.sbAdd("; ---- Command line args (portable) ----\n")
-        out.sbAdd("declare i64 @aura_process_argCount()\n")
-        // 全量参数（'\n' 连接）。**不要**改用逐条访问器 `aura_process_arg(i64)`：
-        // extern object 成员调用点会补「接收者」占位，索引会落到第 2 个参数槽
-        //（C 只认第 1 个）→ `arg(i)` 恒返回 argv[0]。
-        out.sbAdd("declare i8* @aura_process_args()\n")
-        // Phase D: setjmp/longjmp 异常桥（try/catch）— 已迁移到纯 IR
-        // emitTry 调用系统 libc 的 setjmp（@setjmp / @_setjmp），
-        // emitThrow 调用系统 libc 的 longjmp（@longjmp / @_longjmp）。
-        // jmp_buf 栈管理（嵌套 try/catch 支持）由 IR 内的全局数组实现。
-        // 非 Windows 目标：@setjmp / @longjmp
-        out.sbAdd("; ---- Phase D: setjmp/longjmp (pure IR, system libc) ----\n")
-        out.sbAdd("declare i32 @setjmp(i8*)\n")
-        out.sbAdd("declare void @longjmp(i8*, i32)\n")
-        // Windows 目标：@_setjmp / @_longjmp（UCRT）
-        out.sbAdd("declare i32 @_setjmp(i8*)\n")
-        out.sbAdd("declare void @_longjmp(i8*, i32)\n")
-        // 异常值全局变量（__throw 写入，catch 块读取）
-        out.sbAdd("@aura_exception_value = internal global i8* null\n")
-        // jmp_buf 栈（支持嵌套 try/catch；IR 内联管理，不依赖 C 源码）
-        out.sbAdd("@aura_jmp_stack = internal global [64 x i8*] zeroinitializer\n")
-        out.sbAdd("@aura_jmp_depth = internal global i32 0\n")
-        // Phase D.2: LLVM 原生异常处理基础设施（invoke/landingpad/resume）
-        // personality 函数：LLVM 用它分派异常到 landing pad。
-        // 目标平台决定 personality 符号名：
-        //   Windows MSVC: @__CxxFrameHandler3 / @__CxxFrameHandler4
-        //   Linux:        @__gxx_personality_v0
-        //   macOS:        @__gxx_personality_v0
-        // 此处声明为 external，由链接器解析（目标平台 CRT 提供实现）。
-        out.sbAdd("; ---- Phase D.2: LLVM exception handling ----\n")
-        out.sbAdd("declare i8* @llvm.eh_personality(i8*)\n")
-        // personality 函数声明（平台特定，由链接器解析）
-        out.sbAdd("declare i32 @__gxx_personality_v0(i32, i8*, i32, i8*, i8*, i8*)\n")
-        // `is` 类型检查（`when` 模式 / `x is T`）：签名 `(value: i8*, typeName: i8*) → i1`，
-        // typeName 为 C 字符串（不是 AuraString 结构体指针），与 Rust 侧声明保持一致。
-        out.sbAdd("declare i1 @aura_isOfType(i8*, i8*)\n")
-        // Phase C: 以下 C 映射声明已移除（Emit.aura 改用 Aura 编译的 String_* 函数）
-        // "declare i8* @aura_lang_std_String_charAt(i8*, i64)\n" +
-        // "declare i32 @aura_lang_std_String_equals(i8*, i8*)\n" +
-        // 内存诊断：AotUtil.aura::aotMemMB 依赖此 C 函数
-        out.sbAdd("declare i32 @aura_mem_used_mb()\n")
+        out.sbAdd("; ---- Aura Runtime Declarations (from .ll files) ----\n")
+        var i: Int = 0
+        while (i < files.size) {
+            val path: String = base + files[i]
+            if (FileSystem.exists(path)) {
+                val content: String = FileSystem.readText(path)
+                out.sbAdd(content)
+            } else {
+                out.sbAdd("; WARNING: missing runtime file: " + path + "\n")
+            }
+            i = i + 1
+        }
+        // runtimeTable() / preludeTable() 已全部清空，保留调用以维持兼容性
         appendDeclarations(out, runtimeTable())
         val seenR: String = runtimeFunctionNames()
-        // `defs`：本模块已有 `define` 的符号（见 `Emit.aura::fDefNames`）。
-        // 必须一并跳过，否则同一符号 define + declare 并存，llc 报
-        // `invalid redefinition of function 'toString'`。
         appendDeclarationsFiltered(out, preludeTable(), seenR + defs)
         return out.sbBuild()
+    }
+
+    /// 创建字符串列表（避免依赖 List.of 等 stdlib）。
+    fun list(a: String, b: String, c: String, d: String, e: String, f: String): List<String> {
+        val r: List<String> = mutableListOf()
+        r.add(a)
+        r.add(b)
+        r.add(c)
+        r.add(d)
+        r.add(e)
+        r.add(f)
+        return r
     }
 
     /// [`runtimeDeclarationsEx`] 的兼容入口（不做 define 过滤）。

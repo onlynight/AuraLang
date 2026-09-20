@@ -278,10 +278,8 @@ class Parser {
 
     /// 解析整个程序，返回 Program 节点 id（id 0）。
     fun parseProgram(): Int {
-        println("[PP] enter")
         var kids = noKids()
         while (!this.prsAtEnd()) {
-            println("[PP] iter kind=" + this.prsCurKind() + " pos=" + toStr(this.pos))
             this.prsSkipDocs()
             // 语句分隔符 `;`：Rust 侧允许顶层出现，统一跳过
             while (this.prsCheck("Semicolon")) {
@@ -289,11 +287,9 @@ class Parser {
             }
             if (!this.prsAtEnd()) {
                 val d = this.parseTopLevel()
-                println("[PP] topLevel ok")
                 kids = kidsAdd(kids, d)
             }
         }
-        println("[PP] loop end")
         return this.ast.add("Program", "", "", this.prsCurSpan(), kids)
     }
 
@@ -421,7 +417,6 @@ class Parser {
     /// 解析函数声明。
     /// `fun name(params): RetType { body }` 或 `fun name(params): RetType = expr`
     fun parseFunction(): Int {
-        println("[PF] enter")
         this.prsAdvance() // Fun
         // 泛型类型参数 `<T>` / `<T: Comparable<T>>`：整体跳过。
         // 不跳过时 `prsCurLit()` 会取到 `<`（非法名字），`prsExpectName` 又**不消费**
@@ -450,24 +445,42 @@ class Parser {
         }
         val name: String = this.prsCurLit()
         this.prsExpectName()
-        println("[PF] name=" + name)
 
         this.prsExpect("LParen")
         var params = noKids()
         if (!this.prsCheck("RParen")) {
             while (true) {
                 var pname: String = this.prsCurLit()
+                var isVararg: Boolean = false
                 // `vararg` 是软关键字（词法器产出的仍是 Ident）：`vararg nums: Int`。
                 // 不跳过会把 `vararg` 当作参数名，真正的参数名 `nums` 无处安放，
                 // 整个参数列表反同步（`fun f(vararg xs: Int)` 声明被吞掉 → 崩）。
                 if (pname == "vararg" && this.prsKind(this.pos + 1) == "Ident") {
                     this.prsAdvance()
                     pname = this.prsCurLit()
+                    isVararg = true
                 }
                 this.prsExpectParamName()
                 var pty: String = ""
                 if (this.prsMatch("Colon")) {
                     pty = this.parseTypeName()
+                }
+                // `vararg xs: T` 在 AOT 侧的形参就是**一个原生列表句柄**
+                // （调用点打包成列表传入）。这里标注成 `Vararg<T>`：
+                //   * `TypeMapper` 把它映射成 `i8*`（与原 `Any` 表示一致，签名不变）；
+                //   * 发射器据此把形参登记成**集合变量**，于是函数体内
+                //     `xs.size` → `Collections_count`、`xs[i]` → `Collections.getAt`，
+                //     而不是被当成 C 字符串（`strlen` / `String_charAt`）；
+                //   * 调用点据此**无条件打包**（哪怕只有一个实参）。
+                // 旧实现丢掉 vararg 标记、类型退化成 `Any`：实测
+                // `HashMapUtils.mapOf("only", 1)` 的 `pairs.size` 发成 `strlen(列表句柄)`
+                // → 循环边界是垃圾，读出空表。
+                if (isVararg) {
+                    if (pty == "") {
+                        pty = "Vararg<Any>"
+                    } else {
+                        pty = "Vararg<" + pty + ">"
+                    }
                 }
                 // 默认参数值 `name: Type = expr`：作为 Param 的子节点保存，
                 // 调用点实参不足时由发射器补齐。不解析会让 `=` 处的参数列表
@@ -483,13 +496,11 @@ class Parser {
             }
         }
         this.prsExpect("RParen")
-        println("[PF] params done")
 
         var retTy: String = ""
         if (this.prsMatch("Colon")) {
             retTy = this.parseTypeName()
         }
-        println("[PF] retTy=" + retTy)
 
         var bodyKids = noKids()
         if (this.prsCheck("LBrace")) {
@@ -497,7 +508,6 @@ class Parser {
         } else if (this.prsMatch("Assign")) {
             bodyKids = kidsAdd(bodyKids, this.parseExpr())
         }
-        println("[PF] body=" + bodyKids)
 
         val paramsNode = this.ast.add("Params", "", "", this.prsCurSpan(), params)
         var bodyNode: Int = -1
@@ -709,6 +719,14 @@ class Parser {
 
     /// 解析 extern object 声明：`extern object Name { ... }`
     /// 兼容旧语法：`extern interface Name { ... }`（已废弃）
+    ///
+    /// 名字还允许是**字符串库名**：`extern interface "runtime" { fun f() }`
+    /// （常量/运行时符号分组，与 Rust 解析器 `self.advance().literal` 对齐）。
+    /// 字符串形式此前被 `prsExpectName` 拒绝且**不消费令牌**，导致整条声明
+    /// 反同步：成员被当顶层无体函数解析，发射器为它们发成「返回默认值的
+    /// `define`」stub，与运行库预置的 `@aura_process_argCount` 定义重复 →
+    /// llc 报 `invalid redefinition of function 'aura_process_argCount'`，
+    /// 自举产物整个模块编译失败。
     fun parseExternObject(): Int {
         this.prsAdvance() // Extern
         // 接受 "Object"（新语法）或 "Interface"（已废弃）
@@ -718,7 +736,11 @@ class Parser {
             this.prsExpect("Object")
         }
         val name: String = this.prsCurLit()
-        this.prsExpectName()
+        if (this.prsCheck("StringLiteral")) {
+            this.prsAdvance() // 字符串库名（字面量已由 prsCurLit 取得）
+        } else {
+            this.prsExpectName()
+        }
         
         var kids = noKids()
         if (this.prsCheck("LBrace")) {
@@ -1560,7 +1582,7 @@ class Parser {
         return left
     }
 
-    /// 一元表达式（- / ! / +）。
+    /// 一元表达式（- / ! / + / await）。
     fun parseUnary(): Int {
         val k = this.prsCurKind()
         if (k == "Minus" || k == "Bang" || k == "Plus") {
@@ -1568,6 +1590,11 @@ class Parser {
             val operand = this.parseUnary()
             val sp = ParserUtils.mergeSpan(this.prsCurSpan(), this.ast.spanOf(operand))
             return this.ast.add("Unary", k, "", sp, kidsAdd(noKids(), operand))
+        }
+        // `await expr` → 直接透传表达式（AOT 下同步执行，无挂起语义）。
+        if (k == "Await") {
+            this.prsAdvance()
+            return this.parseUnary()
         }
         return this.parsePostfix()
     }
@@ -1771,6 +1798,29 @@ class Parser {
         }
         if (k == "Null") {
             return this.leafLit("NullLiteral")
+        }
+        // `async { ... }` → 立即调用的无参 lambda（IIFE）。
+        // 必须在 `prsIsNameToken()` 之前：`Async` 是软关键字，否则被当标识符
+        // （求值为 0），后面的块变成独立表达式（返回值丢失）。
+        if (k == "Async") {
+            val aSp: Span = this.prsCurSpan()
+            this.prsAdvance() // async
+            var blk: Int = this.parseBlock()
+            // 单表达式块：取内层表达式作为 lambda 体。
+            // 块体 lambda 在发射器里按「语句序列」处理，**末条表达式不会作为返回值**
+            // （实测 `{ it % 2 == 0 }` 生成 `ret i32 0` → filter 恒空）。
+            val bkKids: String = this.ast.kidsOf(blk)
+            if (kidsCount(bkKids) == 1) {
+                val only: Int = this.ast.childOf(blk, 0)
+                if (this.ast.kindOf(only) == "ExprStmt"
+                    && kidsCount(this.ast.kidsOf(only)) == 1) {
+                    blk = this.ast.childOf(only, 0)
+                }
+            }
+            val emptyParams: Int = this.ast.add("Params", "", "", aSp, noKids())
+            val lam: Int = this.ast.add("Lambda", "", "", aSp,
+                kidsAdd(kidsAdd(noKids(), emptyParams), blk))
+            return this.ast.add("Call", "", "", aSp, kidsAdd(noKids(), lam))
         }
         // 标识符：软关键字（`value` / `data` / …）同样按标识符处理
         if (this.prsIsNameToken()) {
@@ -2206,17 +2256,25 @@ object ParserUtils {
     }
 
     /// 子串（start 起 length 长，越界截断）。
+    ///
+    /// **性能关键**：直接 `substring` 一次分配。旧实现逐字符
+    /// `out = out + toStr(text[i])`：每个字符一次 `String_charAt` 分配 +
+    /// 一次整串复制 —— 该函数为每个 token 文本调用，是解析阶段平方级
+    /// 内存/耗时的主因之一。
     fun prsSlice(text: String, start: Int, length: Int): String {
-        var out: String = ""
-        var i: Int = start
-        val end: Int = start + length
-        while (i < end && i < text.length) {
-            if (i >= 0) {
-                out = out + toStr(text[i])
-            }
-            i = i + 1
+        var s: Int = start
+        if (s < 0) {
+            s = 0
         }
-        return out
+        var end: Int = s + length
+        val len: Int = text.length
+        if (end > len) {
+            end = len
+        }
+        if (end <= s) {
+            return ""
+        }
+        return text.substring(s, end)
     }
 
     /// 合并两个 span（用于复合节点）。
@@ -2239,7 +2297,7 @@ object ParserUtils {
         val wordChars: String = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
         var i: Int = 0
         while (i < s.length) {
-            if (wordChars.indexOf(toStr(s[i])) < 0) {
+            if (wordChars.indexOf(aotSlice(s, i, 1)) < 0) {
                 return false
             }
             i = i + 1

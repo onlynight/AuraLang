@@ -155,20 +155,15 @@ pub fn link_to_object(
     object_path: &Path,
     options: &AotOptions,
 ) -> Result<(), AotError> {
-    // P6.5.8：编译前先独立验证 IR 合法性（`llc -verify-each`）。
-    // 失败时立即定位首个非法指令，避免编译到一半才报错、定位困难。
-    {
-        let mut verify_cmd = build_command("llc", options)?;
-        verify_cmd.arg(ll_path).arg("-verify-each");
-        run_and_report(&mut verify_cmd, "llc -verify")?;
-    }
-
+    // R1: 合并 verify-each 到主编译命令，减少一次进程启动（~100-200ms）
+    // 原实现在编译前独立调用 llc -verify-each，现合并到主命令的 -verify-each 标志。
     let mut cmd = build_command("llc", options)?;
     cmd.arg(ll_path)
         .arg("-o")
         .arg(object_path)
         .arg(options.opt_level.as_llvm_flag())
-        .arg("-filetype=obj");
+        .arg("-filetype=obj")
+        .arg("-verify-each");
 
     // 调试信息：DWARF 元数据已在 LLVM IR 文本中生成（!DIFile / !DISubprogram），
     // llc 无需 -g 标志；仅 clang 链接时需要 -g 保留调试信息。
@@ -251,11 +246,24 @@ pub fn link_to_executable(
 ///
 /// 编译 `compiler/src/std/cffi/aura_std_cffi.c` 为 `.o`/`.obj` 文件，
 /// 供 AOT 可执行文件链接使用。
+///
+/// R2: 编译缓存——如果 `.o` 文件比 `.c` 源文件新，跳过重编（节省 ~200ms/文件）。
 fn compile_std_cffi(options: &AotOptions) -> Result<Vec<PathBuf>, AotError> {
     // C FFI 源文件路径
-    let cffi_src = concat!(env!("CARGO_MANIFEST_DIR"), "/src/std/cffi/aura_std_cffi.c");
-    let syscalls_src = concat!(env!("CARGO_MANIFEST_DIR"), "/src/std/cffi/aura_syscalls.c");
-    let cffi_header = concat!(env!("CARGO_MANIFEST_DIR"), "/src/std/cffi/aura_std_cffi.h");
+    let cffi_src = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/std/cffi/aura_std_cffi.c"
+    ));
+    // aura_syscalls.c 的单一真相源已迁至 Aura 侧（Aura 编译器自身也依赖它），
+    // 此处引用同一文件，避免两份副本漂移。
+    let syscalls_src = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../aura/runtime/cffi/aura_syscalls.c"
+    ));
+    let cffi_header = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/std/cffi/aura_std_cffi.h"
+    ));
 
     // 输出文件路径（临时文件）
     let ext = if cfg!(target_os = "windows") { "obj" } else { "o" };
@@ -263,35 +271,39 @@ fn compile_std_cffi(options: &AotOptions) -> Result<Vec<PathBuf>, AotError> {
     let cffi_obj = tmp_dir.join(format!("aura_std_cffi.{}", ext));
     let syscalls_obj = tmp_dir.join(format!("aura_syscalls.{}", ext));
 
-    // 找 clang
-    let clang_path = find_tool("clang", options).ok_or_else(|| {
-        AotError::ToolError("clang not found, cannot compile std C FFI".to_string())
-    })?;
-
-    // 编译 aura_std_cffi.c
-    let mut cmd = Command::new(&clang_path);
-    cmd.arg("-c")
-        .arg(cffi_src)
-        .arg("-o")
-        .arg(&cffi_obj)
-        .arg("-I")
-        .arg(Path::new(cffi_header).parent().unwrap());
-    run_and_report(&mut cmd, "clang")?;
-
-    // 编译 aura_syscalls.c（包含 setjmp/longjmp 异常桥等）
-    let mut cmd = Command::new(&clang_path);
-    cmd.arg("-c")
-        .arg(syscalls_src)
-        .arg("-o")
-        .arg(&syscalls_obj)
-        .arg("-I")
-        .arg(Path::new(cffi_header).parent().unwrap());
-    run_and_report(&mut cmd, "clang")?;
+    // R2: 编译缓存——如果目标文件比源文件新，跳过编译
+    for (src, obj) in [
+        (cffi_src, cffi_obj.clone()),
+        (syscalls_src, syscalls_obj.clone()),
+    ] {
+        if needs_recompile(src, &obj) {
+            let clang_path = find_tool("clang", options).ok_or_else(|| {
+                AotError::ToolError("clang not found, cannot compile std C FFI".to_string())
+            })?;
+            let mut cmd = Command::new(&clang_path);
+            cmd.arg("-c").arg(src).arg("-o").arg(&obj).arg("-I").arg(cffi_header.parent().unwrap());
+            run_and_report(&mut cmd, "clang")?;
+        }
+    }
 
     Ok(vec![
         cffi_obj,
         syscalls_obj,
     ])
+}
+
+/// R2: 判断是否需要重新编译——目标文件不存在或比源文件旧。
+fn needs_recompile(src: &Path, obj: &Path) -> bool {
+    if !obj.exists() {
+        return true;
+    }
+    // 比较修改时间
+    let src_mtime = src.metadata().and_then(|m| m.modified()).ok();
+    let obj_mtime = obj.metadata().and_then(|m| m.modified()).ok();
+    match (src_mtime, obj_mtime) {
+        (Some(s), Some(o)) => s > o,
+        _ => true, // 无法比较时重新编译
+    }
 }
 
 /// 执行命令并报告结果

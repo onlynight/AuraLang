@@ -5,23 +5,43 @@ package aura.lang.debugger
 import aura.lang.std.String
 
 // ═══════════════════════════════════════════════════════════════
-// 断点管理 — Breakpoint 类
+// 断点数据类 — 完全纯 Aura 实现
 // ═══════════════════════════════════════════════════════════════
 
 class Breakpoint {
-    val id: Int
-    val file: String
-    val line: Int
-    val enabled: Boolean
+    var id: Int
+    var file: String
+    var line: Int
+    var funcName: String = ""
+    var funcOffset: Int = -1
+    var enabled: Boolean = true
+    var hitCount: Int = 0
+    var condition: String = ""
 
-    fun Breakpoint(id: Int, file: String, line: Int, enabled: Boolean) {
+    init(id: Int, file: String, line: Int, enabled: Boolean) {
         this.id = id
         this.file = file
         this.line = line
         this.enabled = enabled
     }
 
-    fun toStr(): String {
-        return "#" + toStr(id) + " " + (if (enabled) { "✓" } else { "✗" }) + " " + file + ":" + toStr(line)
+    /// 人类可读描述。
+    fun formatStr(): String {
+        var s: String = "#" + toStr(id) + " "
+        s = s + (if (enabled) { "[✓]" } else { "[✗]" }) + " "
+        s = s + file + ":" + toStr(line)
+        if (funcName != "") {
+            s = s + " (func: " + funcName + ")"
+        }
+        if (funcOffset >= 0) {
+            s = s + " @ instr " + toStr(funcOffset)
+        }
+        if (hitCount > 0) {
+            s = s + " (hits: " + toStr(hitCount) + ")"
+        }
+        if (condition != "") {
+            s = s + " if " + condition
+        }
+        return s
     }
 }

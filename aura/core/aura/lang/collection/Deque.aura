@@ -1,0 +1,84 @@
+// aura:///aura/lang/collection/Deque.aura
+package aura.lang.collection
+// 集合包：双端队列实现
+
+import aura.lang.collection.LinkedList
+
+/// Deque<T> — 双端队列实现，基于 LinkedList。
+///
+/// - 支持两端插入和删除
+/// - 时间复杂度：pushFront/pushBack/popFront/popBack O(1)
+/// - 空间复杂度：O(n)
+///
+/// @see LinkedList, List, Deque
+/// @since 0.5
+class Deque<T> {
+
+    private var data: LinkedList<T>
+    private var _size: Int = 0
+
+    constructor() {
+        this.data = LinkedList<T>()
+        this._size = 0
+    }
+
+    /// 元素数量
+    fun count(): Int {
+        return data.count()
+    }
+
+    /// 在队尾添加元素
+    fun pushBack(item: T): Unit {
+        data.pushBack(item)
+        _size = _size + 1
+    }
+
+    /// 在队头添加元素
+    fun pushFront(item: T): Unit {
+        data.prepend(item)
+        _size = _size + 1
+    }
+
+    /// 移除并返回队尾元素
+    fun popBack(): T {
+        if (_size == 0) {
+            return null
+        }
+        var value: T = data.last()
+        data.removeLast()
+        _size = _size - 1
+        return value
+    }
+
+    /// 移除并返回队头元素
+    fun popFront(): T {
+        if (_size == 0) {
+            return null
+        }
+        var value: T = data.first()
+        data.removeFirst()
+        _size = _size - 1
+        return value
+    }
+
+    /// 获取队尾元素
+    fun back(): T {
+        return data.last()
+    }
+
+    /// 获取队头元素
+    fun front(): T {
+        return data.first()
+    }
+
+    /// 检查是否为空
+    fun isEmpty(): Boolean {
+        return data.isEmpty()
+    }
+
+    /// 清空队列
+    fun clear(): Unit {
+        data.clear()
+        _size = 0
+    }
+}

@@ -10,7 +10,7 @@ package aura.lang.native.arch.aarch64_linux
 import aura.lang.native.Memory
 
 /// aarch64 Linux 系统调用
-extern object Syscalls {
+extern interface Syscalls {
 
     // ── 系统调用号 ──
 

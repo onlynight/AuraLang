@@ -1,0 +1,33 @@
+package test
+
+import aura.lang.collection.ArrayList
+import aura.lang.collection.HashSet
+import aura.lang.collection.HashMap
+
+fun main(): Int {
+    // Test ArrayList
+    var al = ArrayList<Int>()
+    al.add(1)
+    al.add(2)
+    al.add(3)
+    println("ArrayList: size=" + al.count())
+    println("ArrayList: get(1)=" + al.getAt(1))
+    
+    // Test HashSet
+    var hs = HashSet<Int>()
+    hs.add(1)
+    hs.add(2)
+    hs.add(1)
+    println("HashSet: size=" + hs.count())
+    println("HashSet: contains(1)=" + (hs.contains(1) ? "true" : "false"))
+    
+    // Test HashMap
+    var hm = HashMap<Int, Int>()
+    hm.put(1, 10)
+    hm.put(2, 20)
+    println("HashMap: size=" + hm.getSize())
+    println("HashMap: get(1)=" + hm.get(1))
+    
+    println("ALL TESTS PASSED")
+    return 0
+}

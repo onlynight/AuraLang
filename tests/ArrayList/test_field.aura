@@ -1,0 +1,43 @@
+package test
+
+import aura.lang.collection.ArrayList
+
+fun main(): Int {
+    // Test ArrayList as local variable
+    var local = ArrayList<Int>()
+    local.add(1)
+    local.add(2)
+    local.add(3)
+    println("local count=" + local.count())
+    println("local getAt(0)=" + local.getAt(0))
+    
+    // Test ArrayList as field
+    var holder = Holder()
+    holder.addLocal(1)
+    holder.addLocal(2)
+    holder.addLocal(3)
+    println("field count=" + holder.getCount())
+    println("field getAt(0)=" + holder.getAt(0))
+    
+    return 0
+}
+
+class Holder {
+    var data: ArrayList<Int>
+    
+    constructor() {
+        data = ArrayList<Int>()
+    }
+    
+    fun addLocal(item: Int): Unit {
+        data.add(item)
+    }
+    
+    fun getCount(): Int {
+        return data.count()
+    }
+    
+    fun getAt(index: Int): Int {
+        return data.getAt(index)
+    }
+}

@@ -1,0 +1,11 @@
+package test
+
+import aura.lang.collection.LinkedHashMap
+
+fun main(): Int {
+    var m = LinkedHashMap<Int, Int>()
+    m.put(1, 10)
+    println("after put size=" + m.getSize())
+    println("get(1)=" + m.get(1))
+    return 0
+}
