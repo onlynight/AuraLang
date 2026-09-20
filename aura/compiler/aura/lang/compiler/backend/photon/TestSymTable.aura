@@ -1,0 +1,153 @@
+// Test symbol table generation
+package aura.lang.compiler.backend.photon
+import aura.lang.std.String
+import "PhotonObjectWriter.aura"
+import "x86_64/X86Encoder.aura"
+
+fun main() {
+    val writer = PhotonObjectWriter()
+    
+    val encoder = X86Encoder()
+    encoder.emitPrologue(48)
+    encoder.emitLeaRIP("rcx", "@str.0")
+    encoder.emitCallRel("println")
+    encoder.emitXorRR("eax", "eax")
+    encoder.emitEpilogue()
+    
+    val mcHex = encoder.toHex()
+    val relocs = encoder.getRelocations()
+    
+    // Build reloc string with ;; separator
+    var relocHex: String = ""
+    var i: Int = 0
+    while (i < relocs.size) {
+        if (relocHex != "") { relocHex = relocHex + ";;" }
+        relocHex = relocHex + relocs[i]
+        i = i + 1
+    }
+    
+    println("Relocs: " + relocHex)
+    
+    val coffHex = writer.emitFromMachineCode(mcHex, relocHex, "hello", "main")
+    println("COFF hex length: " + coffHex.length)
+    
+    // Parse symbol table
+    // File header: 20 bytes = 40 hex chars
+    // Section table: 44 * 2 = 88 bytes = 176 hex chars
+    // String table: 4 + 7 + 8 + 1 = 20 bytes = 40 hex chars
+    // Reloc table: 10 * 2 = 20 bytes = 40 hex chars
+    // Symbol table starts at: 20 + 88 + 20 + 20 = 148 bytes = 296 hex chars
+    
+    val symStart: Int = 296
+    println("Symbol table starts at hex offset: " + symStart)
+    
+    // Symbol 0 (main)
+    val sym0Name: String = coffHex.substring(symStart, symStart + 16)
+    println("Sym 0 Name hex: " + sym0Name)
+    
+    // Convert hex to ASCII
+    var sym0Ascii: String = ""
+    var j: Int = 0
+    while (j < sym0Name.length) {
+        val byteHex: String = sym0Name.substring(j, j + 2)
+        val byteVal: Int = hexToInt(byteHex)
+        if (byteVal >= 32 && byteVal < 127) {
+            sym0Ascii = sym0Ascii + charFromCode(byteVal)
+        } else {
+            sym0Ascii = sym0Ascii + "."
+        }
+        j = j + 2
+    }
+    println("Sym 0 Name ASCII: " + sym0Ascii)
+    
+    // Symbol 1 (@str.0)
+    val sym1Name: String = coffHex.substring(symStart + 36, symStart + 52)
+    println("Sym 1 Name hex: " + sym1Name)
+    
+    var sym1Ascii: String = ""
+    j = 0
+    while (j < sym1Name.length) {
+        val byteHex: String = sym1Name.substring(j, j + 2)
+        val byteVal: Int = hexToInt(byteHex)
+        if (byteVal >= 32 && byteVal < 127) {
+            sym1Ascii = sym1Ascii + charFromCode(byteVal)
+        } else {
+            sym1Ascii = sym1Ascii + "."
+        }
+        j = j + 2
+    }
+    println("Sym 1 Name ASCII: " + sym1Ascii)
+}
+
+fun hexToInt(hex: String): Int {
+    var total: Int = 0
+    var i: Int = 0
+    while (i < hex.length) {
+        val c: Int = hex.substring(i, i + 1).charCodeAt(0)
+        var digit: Int = 0
+        if (c >= 48 && c <= 57) { digit = c - 48 }
+        else if (c >= 97 && c <= 102) { digit = c - 87 }
+        else if (c >= 65 && c <= 70) { digit = c - 55 }
+        total = total * 16 + digit
+        i = i + 1
+    }
+    return total
+}
+
+fun charFromCode(code: Int): String {
+    if (code == 65) return "A"
+    if (code == 66) return "B"
+    if (code == 67) return "C"
+    if (code == 68) return "D"
+    if (code == 69) return "E"
+    if (code == 70) return "F"
+    if (code == 71) return "G"
+    if (code == 72) return "H"
+    if (code == 73) return "I"
+    if (code == 74) return "J"
+    if (code == 75) return "K"
+    if (code == 76) return "L"
+    if (code == 77) return "M"
+    if (code == 78) return "N"
+    if (code == 79) return "O"
+    if (code == 80) return "P"
+    if (code == 81) return "Q"
+    if (code == 82) return "R"
+    if (code == 83) return "S"
+    if (code == 84) return "T"
+    if (code == 85) return "U"
+    if (code == 86) return "V"
+    if (code == 87) return "W"
+    if (code == 88) return "X"
+    if (code == 89) return "Y"
+    if (code == 90) return "Z"
+    if (code == 97) return "a"
+    if (code == 98) return "b"
+    if (code == 99) return "c"
+    if (code == 100) return "d"
+    if (code == 101) return "e"
+    if (code == 102) return "f"
+    if (code == 103) return "g"
+    if (code == 104) return "h"
+    if (code == 105) return "i"
+    if (code == 106) return "j"
+    if (code == 107) return "k"
+    if (code == 108) return "l"
+    if (code == 109) return "m"
+    if (code == 110) return "n"
+    if (code == 111) return "o"
+    if (code == 112) return "p"
+    if (code == 113) return "q"
+    if (code == 114) return "r"
+    if (code == 115) return "s"
+    if (code == 116) return "t"
+    if (code == 117) return "u"
+    if (code == 118) return "v"
+    if (code == 119) return "w"
+    if (code == 120) return "x"
+    if (code == 121) return "y"
+    if (code == 122) return "z"
+    if (code == 46) return "."
+    if (code == 32) return " "
+    return "?"
+}

@@ -1,0 +1,960 @@
+// aura:///aura/lang/compiler/backend/AotBackend.aura
+package aura.lang.compiler.backend.photon
+// ─────────────────────────────────────────────────────────────
+// AOT 后端 — COFF/ELF 发射 — Phase E (任务 E.1)
+//
+// 按照 docs/Lir2MacCode/参考go rust设计新的编译后端.md 第九章
+// 完整实现：指令编码 → 目标文件组装 → 系统链接
+//
+// ── COFF 目标文件格式（Windows .obj）──
+//
+//   文件头 (20 字节)
+//   节表 (40 字节/节)
+//   字符串表
+//   符号表
+//   重定位表
+//   节数据
+//
+// ── x86_64 调用约定（Windows x64）──
+//
+//   参数传递:    rcx, rdx, r8, r9, 然后栈（8 字节对齐）
+//   返回值:      rax (整数) / xmm0 (浮点)
+//   被调用者保存: rbx, rbp, r12, r13, r14, r15
+//   影子空间:    32 字节（4 × 8 字节）
+//   栈对齐:      16 字节
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.std.FileSystem
+
+import "x86_64/X86Encoder.aura"
+
+// ─────────────────────────────────────────────────────────────
+// AotBackend — COFF/ELF 目标文件发射器
+// ─────────────────────────────────────────────────────────────
+
+/// AOT 后端：从 MachineDag + LirProgram 发射 COFF/ELF 目标文件。
+class PhotonObjectWriter {
+
+    /// 目标架构。
+    var target: String = "x86_64"
+
+    /// 操作系统。
+    var os: String = "windows"
+
+    /// 优化级别。
+    var optimizeLevel: Int = 2
+
+    /// 是否包含调试信息。
+    var debugInfo: Boolean = false
+
+    /// .text 节内容（hex 编码）。
+    var textSection: String = ""
+
+    /// .rdata 节内容（hex 编码）。
+    var rdataSection: String = ""
+
+    /// .data 节内容（hex 编码）。
+    var dataSection: String = ""
+
+    /// .bss 节内容（hex 编码）。
+    var bssSection: String = ""
+
+    /// 重定位表（格式: offset|symbol|type）。
+    var relocs: String = ""
+
+    /// 符号表（格式: name|value|section|type|storage）。
+    var symbols: String = ""
+
+    /// 字符串常量列表（逗号分隔）。
+    var stringConsts: String = ""
+
+    /// 函数列表（逗号分隔）。
+    var functions: String = ""
+
+    /// 节数据偏移（运行时计算）。
+    var textOffset: Int = 0
+    var rdataOffset: Int = 0
+    var dataOffset: Int = 0
+
+    /// 节大小。
+    var textSize: Int = 0
+    var rdataSize: Int = 0
+    var dataSize: Int = 0
+
+    init() {
+        this.target = "x86_64"
+        this.os = "windows"
+        this.optimizeLevel = 2
+        this.debugInfo = false
+        this.textSection = ""
+        this.rdataSection = ""
+        this.dataSection = ""
+        this.bssSection = ""
+        this.relocs = ""
+        this.symbols = ""
+        this.stringConsts = ""
+        this.functions = ""
+        this.textOffset = 0
+        this.rdataOffset = 0
+        this.dataOffset = 0
+        this.textSize = 0
+        this.rdataSize = 0
+        this.dataSize = 0
+    }
+
+    // ── 主入口 ──
+
+    /// 主入口：生成 COFF 目标文件（hex 编码）。
+    fun emit(): String {
+        if (this.os == "windows") {
+            return this.buildCoffFile()
+        }
+        return ""
+    }
+
+    /// 从机器码 hex 字符串发射 COFF 文件。
+    ///
+    /// @param machineCodeHex  .text 节机器码（hex）
+    /// @param relocEntries    重定位项（格式: offset|symbol）
+    /// @param stringConsts    字符串常量（逗号分隔）
+    /// @param functionName    入口函数名
+    fun emitFromMachineCode(machineCodeHex: String, relocEntries: String,
+                            stringConsts: String, functionName: String): String {
+        this.textSection = machineCodeHex
+        this.stringConsts = stringConsts
+        this.functions = functionName
+        this.relocs = relocEntries
+
+        // 符号表依赖重定位表：重定位引用的外部符号要登记为「未定义符号」
+        this.buildSymbols(functionName, stringConsts)
+
+        return this.buildCoffFile()
+    }
+
+    // ── 符号表构建 ──
+
+    /// 构建符号表。
+    ///
+    /// 记录格式：`name|value|section|type|storage`
+    ///
+    /// | 字段 | 含义 |
+    /// |------|------|
+    /// | section | 0 = 未定义（外部引用），1 = .text，2 = .rdata |
+    /// | type    | 0x0020 = 函数，0x0000 = 数据 |
+    /// | storage | 2 = IMAGE_SYM_CLASS_EXTERNAL，3 = IMAGE_SYM_CLASS_STATIC |
+    ///
+    /// **顺序即符号索引**：函数 → 字符串常量 → 重定位引用的外部符号。
+    /// 重定位表通过符号名在本表中的位置解析出 SymbolTableIndex。
+    private fun buildSymbols(functionName: String, stringConsts: String): Unit {
+        val recs: List<String> = arrayListOf<String>()
+
+        // 1) 函数符号：值 = 函数在 .text 内的偏移（单函数场景为 0）
+        if (functionName != "") {
+            recs.add(functionName + "|0|1|0x0020|2")
+        }
+
+        // 2) 字符串常量符号：值 = 该字符串在 .rdata 内的字节偏移
+        //    （必须逐个累加，否则 @str.1/@str.2 会全部指向 .rdata 起点）
+        val parts: List<String> = this.splitComma(stringConsts)
+        var rdataOff: Int = 0
+        var i: Int = 0
+        while (i < parts.size) {
+            if (parts[i] != "") {
+                recs.add("@str." + this.toStr(i) + "|" + this.toStr(rdataOff) + "|2|0|3")
+                rdataOff = rdataOff + parts[i].length + 1  // 内容 + NUL 终止符
+            }
+            i = i + 1
+        }
+
+        // 3) 重定位引用的外部符号（section = 0 表示未定义，由链接器解析）
+        val externals: List<String> = this.collectExternalSymbols()
+        var j: Int = 0
+        while (j < externals.size) {
+            recs.add(externals[j] + "|0|0|0x0020|2")
+            j = j + 1
+        }
+
+        this.symbols = this.joinRecords(recs)
+    }
+
+    // ── 重定位表构建 ──
+
+    /// 设置重定位表原始内容（格式：条目以 `;;` 分隔，每条 `offset|symbol|type`）。
+    private fun buildRelocs(relocEntries: String): Unit {
+        this.relocs = relocEntries
+    }
+
+    /// 解析重定位条目列表。
+    ///
+    /// 兼容两种拼接形式：
+    ///   - 条目间以 `;;` 分隔（`X86Encoder.getRelocations()` 的标准拼接）
+    ///   - 条目首尾直接以 `|` 相连（每 3 个字段为一条记录）
+    private fun parseRelocEntries(text: String): List<String> {
+        val out: List<String> = arrayListOf<String>()
+        if (text == "") {
+            return out
+        }
+        val bySemi: List<String> = this.splitDoubleSemi(text)
+        if (bySemi.size > 1) {
+            var i: Int = 0
+            while (i < bySemi.size) {
+                if (bySemi[i] != "") {
+                    out.add(bySemi[i])
+                }
+                i = i + 1
+            }
+            return out
+        }
+        // 无 `;;` 分隔符：按 `|` 每 3 个字段重组一条记录
+        val fields: List<String> = this.splitPipe(text)
+        var k: Int = 0
+        while (k + 2 < fields.size) {
+            out.add(fields[k] + "|" + fields[k + 1] + "|" + fields[k + 2])
+            k = k + 3
+        }
+        return out
+    }
+
+    /// 收集「被重定位引用、但本模块未定义」的外部符号（去重，保持出现顺序）。
+    private fun collectExternalSymbols(): List<String> {
+        val out: List<String> = arrayListOf<String>()
+        val entries: List<String> = this.parseRelocEntries(this.relocs)
+        var i: Int = 0
+        while (i < entries.size) {
+            val fields: List<String> = this.splitPipe(entries[i])
+            if (fields.size >= 2) {
+                val sym: String = fields[1]
+                if (!this.isDefinedSymbol(sym) && !this.containsString(out, sym)) {
+                    out.add(sym)
+                }
+            }
+            i = i + 1
+        }
+        return out
+    }
+
+    /// 判断符号是否由本模块定义（函数名，或 `@str.N` 形式的字符串常量）。
+    private fun isDefinedSymbol(name: String): Boolean {
+        if (name.startsWith("@str.")) {
+            return true
+        }
+        val funcs: List<String> = this.splitComma(this.functions)
+        var i: Int = 0
+        while (i < funcs.size) {
+            if (funcs[i] != "" && funcs[i] == name) {
+                return true
+            }
+            i = i + 1
+        }
+        return false
+    }
+
+    /// 组成重定位记录（`offset|symbolIndex|coffType`），解析符号名到符号表索引。
+    ///
+    /// 原实现把符号名直接当十进制数解析（`strToInt("@str.0")` = 0），
+    /// 导致所有重定位都指向符号 0（main），链接器无法正确定位目标。
+    private fun composeRelocations(): List<String> {
+        val out: List<String> = arrayListOf<String>()
+        val entries: List<String> = this.parseRelocEntries(this.relocs)
+        val symRecs: List<String> = this.splitDoubleSemi(this.symbols)
+        var i: Int = 0
+        while (i < entries.size) {
+            val fields: List<String> = this.splitPipe(entries[i])
+            if (fields.size >= 3) {
+                val idx: Int = this.symbolIndexOf(symRecs, fields[1])
+                if (idx >= 0) {
+                    out.add(fields[0] + "|" + this.toStr(idx) + "|" + this.toStr(this.coffRelocType(fields[2])))
+                }
+            }
+            i = i + 1
+        }
+        return out
+    }
+
+    /// 在符号记录列表中按名字查找索引（未找到返回 -1）。
+    private fun symbolIndexOf(symRecs: List<String>, name: String): Int {
+        var i: Int = 0
+        while (i < symRecs.size) {
+            val f: List<String> = this.splitPipe(symRecs[i])
+            if (f.size > 0 && f[0] == name) {
+                return i
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// 重定位类型名 → COFF 类型码。
+    ///
+    /// IMAGE_REL_AMD64_REL32 = 0x0004（RIP 相对 32 位，适用于 `call rel32`
+    /// 与 `[rip+disp32]`），IMAGE_REL_AMD64_ADDR64 = 0x0001。
+    private fun coffRelocType(typeName: String): Int {
+        if (typeName == "R_X86_64_REL32" || typeName == "R_X86_64_PLT32" ||
+            typeName == "R_X86_64_PC32" || typeName == "REL32") {
+            return 0x0004
+        }
+        if (typeName == "R_X86_64_64" || typeName == "ADDR64") {
+            return 0x0001
+        }
+        return this.strToInt(typeName)
+    }
+
+    /// 取符号记录中的名字（第一个 `|` 之前的字段）。
+    private fun symbolName(rec: String): String {
+        val f: List<String> = this.splitPipe(rec)
+        if (f.size > 0) {
+            return f[0]
+        }
+        return ""
+    }
+
+    /// 以 `;;` 连接记录列表。
+    private fun joinRecords(recs: List<String>): String {
+        var out: String = ""
+        var i: Int = 0
+        while (i < recs.size) {
+            if (i > 0) {
+                out = out + ";;"
+            }
+            out = out + recs[i]
+            i = i + 1
+        }
+        return out
+    }
+
+    /// 判断字符串列表是否包含指定元素。
+    private fun containsString(list: List<String>, value: String): Boolean {
+        var i: Int = 0
+        while (i < list.size) {
+            if (list[i] == value) {
+                return true
+            }
+            i = i + 1
+        }
+        return false
+    }
+
+    // ── COFF 文件构建 ──
+
+    /// 构建完整的 COFF 目标文件（返回 hex 字符串）。
+    ///
+    /// ── 布局（严格按 Microsoft PE/COFF 规范）──
+    ///
+    /// ```
+    ///   0            IMAGE_FILE_HEADER            20 字节
+    ///   20           IMAGE_SECTION_HEADER × N     40 字节/节
+    ///   20+40N       .text 原始数据                （16 字节对齐）
+    ///   …            .rdata 原始数据               （4 字节对齐）
+    ///   …            .text 重定位表                （10 字节/项）
+    ///   …            符号表                        （18 字节/项）
+    ///   …            字符串表                      （4 字节长度前缀 + 名称串）
+    /// ```
+    ///
+    /// **关键约束**：所有 PointerToXxx 都必须由「实际写入的字节数」推出。
+    /// 原实现把字符串表按 20 字节记账、实际只写 18 字节，并且节头多写了 4 字节
+    /// （44 vs 40），导致符号表实际位置比声明位置早 2 字节 —— 链接器按声明偏移
+    /// 读取时，符号名整体错位 2 字节（"main" → "in"、"@str.0" → "tr.0"）。
+    private fun buildCoffFile(): String {
+        // ── 1. 规整节内容 ──
+        this.textSection = this.normalizeHex(this.textSection)
+        this.textSize = this.hexByteCount(this.textSection)
+        this.rdataSection = this.stringConstsToHex(this.stringConsts)
+        this.rdataSize = this.hexByteCount(this.rdataSection)
+
+        var sectionCount: Int = 1                 // .text 恒存在
+        if (this.rdataSize > 0) {
+            sectionCount = 2                      // .rdata
+        }
+
+        val symRecs: List<String> = this.splitDoubleSemi(this.symbols)
+        val symCount: Int = symRecs.size
+        val relocRecs: List<String> = this.composeRelocations()
+        val relocCount: Int = relocRecs.size
+
+        // ── 2. 长符号名 → 字符串表 ──
+        // 名称 ≥ 8 字符时，符号表里写「4 字节 0 + 4 字节字符串表偏移」。
+        val strNameOffsets: List<Int> = arrayListOf<Int>()   // 与 symRecs 一一对应，-1 = 短名内联
+        var strTabHex: String = ""
+        var strTabSize: Int = 4                               // 含自身的 4 字节长度前缀
+        var s: Int = 0
+        while (s < symCount) {
+            val nm: String = this.symbolName(symRecs[s])
+            if (nm.length >= 8) {
+                strNameOffsets.add(strTabSize)
+                strTabHex = strTabHex + this.asciiToHex(nm, -1) + "00"
+                strTabSize = strTabSize + nm.length + 1
+            } else {
+                strNameOffsets.add(-1)
+            }
+            s = s + 1
+        }
+
+        // ── 3. 布局偏移 ──
+        val headerSize: Int = 20
+        val sectionHeaderSize: Int = 40
+        val sectionTableEnd: Int = headerSize + sectionHeaderSize * sectionCount
+
+        val textRawOffset: Int = this.alignUp(sectionTableEnd, 16)
+        val textRawEnd: Int = textRawOffset + this.textSize
+        val rdataRawOffset: Int = this.alignUp(textRawEnd, 4)
+        val rdataRawEnd: Int = rdataRawOffset + this.rdataSize
+        val relocOffset: Int = this.alignUp(rdataRawEnd, 4)
+        val relocEnd: Int = relocOffset + 10 * relocCount
+        val symTabOffset: Int = relocEnd
+        val symTabEnd: Int = symTabOffset + 18 * symCount
+
+        this.textOffset = textRawOffset
+        this.rdataOffset = rdataRawOffset
+
+        var buf: String = ""
+
+        // ── 4. 文件头（20 字节）──
+        buf = buf + this.writeIntLe(0x8664, 2)        // Machine = IMAGE_FILE_MACHINE_AMD64
+        buf = buf + this.writeIntLe(sectionCount, 2)  // NumberOfSections
+        buf = buf + this.writeIntLe(0, 4)             // TimeDateStamp
+        buf = buf + this.writeIntLe(symTabOffset, 4)  // PointerToSymbolTable
+        buf = buf + this.writeIntLe(symCount, 4)      // NumberOfSymbols
+        buf = buf + this.writeIntLe(0, 2)             // SizeOfOptionalHeader
+        buf = buf + this.writeIntLe(0, 2)             // Characteristics（.obj 为 0）
+
+        // ── 5. 节头（40 字节/节）──
+        //   注意字段顺序与宽度：… PointerToRelocations(4)
+        //   NumberOfRelocations(2) NumberOfLinenumbers(2) Characteristics(4)
+        buf = buf + this.padSectionName(".text", 8)
+        buf = buf + this.writeIntLe(0, 4)              // VirtualSize（.obj 为 0）
+        buf = buf + this.writeIntLe(0, 4)              // VirtualAddress
+        buf = buf + this.writeIntLe(this.textSize, 4)  // SizeOfRawData
+        buf = buf + this.writeIntLe(textRawOffset, 4)  // PointerToRawData
+        buf = buf + this.writeIntLe(relocOffset, 4)    // PointerToRelocations
+        buf = buf + this.writeIntLe(0, 4)              // PointerToLinenumbers
+        buf = buf + this.writeIntLe(relocCount, 2)     // NumberOfRelocations（2 字节）
+        buf = buf + this.writeIntLe(0, 2)              // NumberOfLinenumbers（2 字节）
+        buf = buf + this.writeIntLe(0x60500020, 4)     // CNT_CODE|MEM_EXECUTE|MEM_READ|ALIGN_16
+
+        if (this.rdataSize > 0) {
+            buf = buf + this.padSectionName(".rdata", 8)
+            buf = buf + this.writeIntLe(0, 4)
+            buf = buf + this.writeIntLe(0, 4)
+            buf = buf + this.writeIntLe(this.rdataSize, 4)
+            buf = buf + this.writeIntLe(rdataRawOffset, 4)
+            buf = buf + this.writeIntLe(0, 4)          // 无重定位
+            buf = buf + this.writeIntLe(0, 4)
+            buf = buf + this.writeIntLe(0, 2)
+            buf = buf + this.writeIntLe(0, 2)
+            buf = buf + this.writeIntLe(0x40300040, 4) // CNT_INITIALIZED_DATA|MEM_READ|ALIGN_4
+        }
+
+        // ── 6. .text 原始数据 ──
+        buf = buf + this.padToBytes(buf, textRawOffset)
+        buf = buf + this.textSection
+
+        // ── 7. .rdata 原始数据 ──
+        if (this.rdataSize > 0) {
+            buf = buf + this.padToBytes(buf, rdataRawOffset)
+            buf = buf + this.rdataSection
+        }
+
+        // ── 8. 重定位表（10 字节/项：VA(4) + SymbolTableIndex(4) + Type(2)）──
+        buf = buf + this.padToBytes(buf, relocOffset)
+        var r: Int = 0
+        while (r < relocCount) {
+            val rf: List<String> = this.splitPipe(relocRecs[r])
+            buf = buf + this.writeIntLe(this.strToInt(rf[0]), 4)  // 节内偏移
+            buf = buf + this.writeIntLe(this.strToInt(rf[1]), 4)  // 符号索引
+            buf = buf + this.writeIntLe(this.strToInt(rf[2]), 2)  // 类型（REL32 = 4）
+            r = r + 1
+        }
+
+        // ── 9. 符号表（18 字节/项）──
+        buf = buf + this.padToBytes(buf, symTabOffset)
+        var i: Int = 0
+        while (i < symCount) {
+            val f: List<String> = this.splitPipe(symRecs[i])
+            if (strNameOffsets[i] >= 0) {
+                // 长名：4 字节 0 + 4 字节字符串表偏移
+                buf = buf + this.writeIntLe(0, 4)
+                buf = buf + this.writeIntLe(strNameOffsets[i], 4)
+            } else {
+                buf = buf + this.padSectionName(f[0], 8)          // Value
+            }
+            buf = buf + this.writeIntLe(this.strToInt(f[1]), 4)   // Value
+            buf = buf + this.writeIntLe(this.strToInt(f[2]), 2)   // SectionNumber
+            buf = buf + this.writeIntLe(this.hexToInt(f[3]), 2)   // Type
+            buf = buf + this.writeIntLe(this.strToInt(f[4]), 1)   // StorageClass
+            buf = buf + this.writeIntLe(0, 1)                     // NumberOfAuxSymbols
+            i = i + 1
+        }
+
+        // ── 10. 字符串表（长度前缀 + 长名串）──
+        buf = buf + this.writeIntLe(strTabSize, 4)
+        buf = buf + strTabHex
+
+        return buf
+    }
+
+    // ── 布局辅助 ──
+
+    /// 向上对齐到 alignment 的整数倍。
+    private fun alignUp(value: Int, alignment: Int): Int {
+        if (alignment <= 1) {
+            return value
+        }
+        return ((value + alignment - 1) / alignment) * alignment
+    }
+
+    /// 用 0 字节把缓冲区补齐到目标字节长度。
+    ///
+    /// @param current 当前缓冲区（hex，长度 / 2 = 字节数）
+    /// @param target  目标字节长度
+    private fun padToBytes(current: String, target: Int): String {
+        var out: String = ""
+        while (current.length + out.length < target * 2) {
+            out = out + "00"
+        }
+        return out
+    }
+
+    // ── 辅助方法 ──
+
+    /// 计算节数量。
+    private fun countSections(): Int {
+        var count: Int = 1  // .text
+        if (this.rdataSize > 0) {
+            count = count + 1  // .rdata
+        }
+        return count
+    }
+
+    /// 计算重定位项数量。
+    private fun countRelocs(): Int {
+        if (this.relocs == "") {
+            return 0
+        }
+        return this.splitDoubleSemi(this.relocs).size
+    }
+
+    /// 计算符号数量。
+    private fun countSymbols(): Int {
+        if (this.symbols == "") {
+            return 0
+        }
+        var count: Int = 0
+        var start: Int = 0
+        var i: Int = 0
+        var len: Int = this.symbols.length
+        while (i < len - 1) {
+            if (this.symbols.substring(i, i + 2) == ";;") {
+                count = count + 1
+                start = i + 2
+            }
+            i = i + 1
+        }
+        if (start < len) {
+            count = count + 1
+        }
+        return count
+    }
+
+    /// 规范化 hex 字符串（确保偶数长度）。
+    private fun normalizeHex(hex: String): String {
+        if (hex.length % 2 != 0) {
+            return "0" + hex
+        }
+        return hex
+    }
+
+    /// 计算 hex 字符串的字节数。
+    private fun hexByteCount(hex: String): Int {
+        return hex.length / 2
+    }
+
+    /// 字符串常量列表转 hex。
+    private fun stringConstsToHex(consts: String): String {
+        if (consts == "") {
+            return ""
+        }
+        var out: String = ""
+        val parts: List<String> = this.splitComma(consts)
+        var i: Int = 0
+        while (i < parts.size) {
+            out = out + this.asciiToHex(parts[i], -1)
+            out = out + "00"  // NUL 终止
+            i = i + 1
+        }
+        return out
+    }
+
+    /// ASCII 字符串转 hex（带 NUL 填充到指定长度）。
+    private fun asciiToHex(text: String, padLen: Int): String {
+        var out: String = ""
+        var i: Int = 0
+        while (i < text.length) {
+            val c: Int = text.substring(i, i + 1).charCodeAt(0)
+            out = out + this.hexDigit(c / 16) + this.hexDigit(c % 16)
+            i = i + 1
+        }
+        // 填充
+        if (padLen > 0) {
+            while (out.length < padLen * 2) {
+                out = out + "00"
+            }
+        }
+        return out
+    }
+
+    /// 节名填充到 8 字节。
+    private fun padSectionName(name: String, len: Int): String {
+        var out: String = ""
+        var i: Int = 0
+        while (i < name.length && i < len) {
+            val c: Int = name.substring(i, i + 1).charCodeAt(0)
+            out = out + this.hexDigit(c / 16) + this.hexDigit(c % 16)
+            i = i + 1
+        }
+        while (out.length < len * 2) {
+            out = out + "00"
+        }
+        return out
+    }
+
+    /// 写小端整数到 hex 字符串。
+    private fun writeIntLe(value: Int, bytes: Int): String {
+        var out: String = ""
+        var v: Int = value
+        var i: Int = 0
+        while (i < bytes) {
+            out = out + this.hexDigit(v / 16 % 16) + this.hexDigit(v % 16)
+            v = v / 256
+            i = i + 1
+        }
+        return out
+    }
+
+    /// 按分号分割（用于符号条目）。
+    private fun splitDoubleSemi(text: String): List<String> {
+        val result: List<String> = arrayListOf<String>()
+        if (text == "") {
+            return result
+        }
+        var start: Int = 0
+        var i: Int = 0
+        var len: Int = text.length
+        while (i < len - 1) {
+            if (text.substring(i, i + 2) == ";;") {
+                result.add(text.substring(start, i))
+                start = i + 2
+            }
+            i = i + 1
+        }
+        if (start < len) {
+            result.add(text.substring(start, len))
+        }
+        return result
+    }
+
+    /// 按管道符分割。
+    private fun splitPipe(text: String): List<String> {
+        val result: List<String> = arrayListOf<String>()
+        if (text == "") {
+            return result
+        }
+        var start: Int = 0
+        var i: Int = 0
+        var len: Int = text.length
+        while (i < len) {
+            if (text.substring(i, i + 1).charCodeAt(0) == 124) {  // '|'
+                result.add(text.substring(start, i))
+                start = i + 1
+            }
+            i = i + 1
+        }
+        if (start < len) {
+            result.add(text.substring(start, len))
+        }
+        return result
+    }
+
+    /// 按逗号分割。
+    private fun splitPipe2(text: String): List<String> {
+        val result: List<String> = arrayListOf<String>()
+        if (text == "") {
+            return result
+        }
+        var start: Int = 0
+        var i: Int = 0
+        var len: Int = text.length
+        while (i < len) {
+            if (text.substring(i, i + 1).charCodeAt(0) == 44) {  // ','
+                result.add(text.substring(start, i))
+                start = i + 1
+            }
+            i = i + 1
+        }
+        if (start < len) {
+            result.add(text.substring(start, len))
+        }
+        return result
+    }
+
+    /// 字符串转整数。
+    private fun strToInt(text: String): Int {
+        if (text == "") { return 0 }
+        var total: Int = 0
+        var neg: Boolean = false
+        var i: Int = 0
+        if (text.charCodeAt(0) == 45) { neg = true; i = 1 }
+        while (i < text.length) {
+            total = total * 10 + (text.substring(i, i + 1).charCodeAt(0) - 48)
+            i = i + 1
+        }
+        if (neg) { return -total }
+        return total
+    }
+
+    /// 十六进制字符串转整数。
+    private fun hexToInt(text: String): Int {
+        if (text == "") { return 0 }
+        var total: Int = 0
+        var i: Int = 0
+        while (i < text.length) {
+            val c: Int = text.substring(i, i + 1).charCodeAt(0)
+            var digit: Int = 0
+            if (c >= 48 && c <= 57) { digit = c - 48 }       // 0-9
+            else if (c >= 97 && c <= 102) { digit = c - 87 }  // a-f
+            else if (c >= 65 && c <= 70) { digit = c - 55 }   // A-F
+            total = total * 16 + digit
+            i = i + 1
+        }
+        return total
+    }
+
+    /// 整数转十六进制数字字符。
+    private fun hexDigit(d: Int): String {
+        if (d == 0) return "0"
+        if (d == 1) return "1"
+        if (d == 2) return "2"
+        if (d == 3) return "3"
+        if (d == 4) return "4"
+        if (d == 5) return "5"
+        if (d == 6) return "6"
+        if (d == 7) return "7"
+        if (d == 8) return "8"
+        if (d == 9) return "9"
+        if (d == 10) return "a"
+        if (d == 11) return "b"
+        if (d == 12) return "c"
+        if (d == 13) return "d"
+        if (d == 14) return "e"
+        return "f"
+    }
+
+    /// 整数转十进制字符串。
+    ///
+    /// 原实现写成 `result = toStr(n % 10) + result`：当 n 为个位数时
+    /// `n % 10 == n`，于是 `toStr(n)` 调用自身 → 无限递归
+    /// （VM 报 `call stack overflow (max depth 4096)`）。
+    /// 此前只在 `toStr(0)` 处被调用（恰好直接返回 "0"）而侥幸未暴露。
+    private fun toStr(n: Int): String {
+        if (n == 0) { return "0" }
+        var value: Int = n
+        var neg: Boolean = false
+        if (value < 0) { neg = true; value = -value }
+        var result: String = ""
+        while (value > 0) {
+            result = this.hexDigit(value % 10) + result
+            value = value / 10
+        }
+        if (neg) { result = "-" + result }
+        return result
+    }
+
+    /// 按逗号分割字符串。
+    private fun splitComma(text: String): List<String> {
+        val result: List<String> = arrayListOf<String>()
+        if (text == "") {
+            return result
+        }
+        var start: Int = 0
+        var i: Int = 0
+        var len: Int = text.length
+        while (i < len) {
+            if (text.substring(i, i + 1).charCodeAt(0) == 44) {  // ','
+                result.add(text.substring(start, i))
+                start = i + 1
+            }
+            i = i + 1
+        }
+        if (start < len) {
+            result.add(text.substring(start, len))
+        }
+        return result
+    }
+
+    // ── 目标文件落盘 ──
+
+    /// 把当前目标文件写成 **hex 文本**（VM 路径的落盘通道）。
+    ///
+    /// 建议路径形如 `build/hello.obj.hex`，随后由构建脚本把 hex 转成二进制 `.obj`。
+    /// 返回文件是否确实落盘（`FileSystem.writeText` 自身不返回状态）。
+    ///
+    /// **为什么不在这里直接写二进制**：VM 执行路径没有可用的原始字节写盘原语 ——
+    /// `FileSystem.writeBytes` 依赖 `Array<Byte>` + `String.fromCharCode`（LLVM IR 链路，
+    /// 本项目不使用）；`Memory.write` / `Allocator` / `FileOps` 属 `extern interface`
+    /// builtin，只有在 AOT / 自举运行时才存在。原生落盘见 `PhotonNativeWriter`。
+    fun writeObjectHexFile(path: String): Boolean {
+        FileSystem.writeText(path, this.buildCoffFile())
+        return FileSystem.exists(path)
+    }
+
+    /// 由目标文件路径推导 hex 文本路径：`build/hello.obj` → `build/hello.obj.hex`。
+    fun hexPathFor(objectPath: String): String {
+        return objectPath + ".hex"
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// PhotonObjectWriterUtils — 工具对象
+// ─────────────────────────────────────────────────────────────
+
+object PhotonObjectWriterUtils {
+
+    /// COFF 常量。
+    val COFF_MACHINE_AMD64: Int = 0x8664
+    val COFF_CHAR_EXECUTABLE: Int = 0x0102
+    val SECTION_CODE: Int = 0x20
+    val SECTION_MEM_READ: Int = 0x40000000
+    val SECTION_MEM_EXECUTE: Int = 0x20000000
+    val SECTION_MEM_WRITE: Int = 0x80000000
+    val SECTION_ALIGN_16: Int = 0x0010
+    val REL32: Int = 0x04
+
+    /// ELF 常量。
+    val ELF_MAGIC: Int = 0x7F454C46
+    val ELF_CLASS64: Int = 2
+    val ELF_DATA_LE: Int = 1
+    val ELF_TYPE_REL: Int = 1
+    val ELF_MACHINE_X86_64: Int = 62
+    val ELF_VERSION: Int = 1
+
+    /// 创建空的 AOT 后端。
+    fun emptyBackend(): PhotonObjectWriter {
+        return PhotonObjectWriter()
+    }
+
+    /// 创建 helloworld 的机器码。
+    ///
+    /// ⚠️ 这里的 `call println` 指向一个**尚未实现**的 runtime 符号，
+    /// 因此产出的 .obj 无法链接成 exe（lld-link 会报 undefined symbol: println）。
+    /// 用于验证「编码 + COFF 组装」链路；需要真正可运行的产物请用
+    /// `buildHelloWorldObject()`。
+    fun helloworldMachineCode(): String {
+        val enc = X86EncoderUtils.emptyEncoder()
+        enc.emitPrologue(48)
+        enc.emitLeaRIP("rcx", "@str.0")
+        enc.emitCallRel("println")
+        enc.emitXorRR("eax", "eax")
+        enc.emitEpilogue()
+        return enc.toHex()
+    }
+
+    /// 获取 helloworld 的重定位项。
+    fun helloworldRelocs(): String {
+        val enc = X86EncoderUtils.emptyEncoder()
+        enc.emitPrologue(48)
+        enc.emitLeaRIP("rcx", "@str.0")
+        enc.emitCallRel("println")
+        enc.emitXorRR("eax", "eax")
+        enc.emitEpilogue()
+        return PhotonObjectWriterUtils.joinRelocRecords(enc.getRelocations())
+    }
+
+    // ── 可运行的 helloworld（Phase E3 冒烟目标）──
+
+    /// 把 `X86Encoder` 的重定位记录拼成 `;;` 分隔的字符串。
+    fun joinRelocRecords(relocs: List<String>): String {
+        var out: String = ""
+        var i: Int = 0
+        while (i < relocs.size) {
+            if (i > 0) { out = out + ";;" }
+            out = out + relocs[i]
+            i = i + 1
+        }
+        return out
+    }
+
+    /// 把 COFF hex 文本写入文件（**VM 路径**的落盘通道）。
+    ///
+    /// 走 `FileSystem.writeText` → 预编译 stdlib 的 `Stdio.writeFile`，在种子编译器下可解析。
+    /// 返回文件是否确实落盘；随后由构建脚本把 `.hex` 转成二进制 `.obj`。
+    ///
+    /// 与 `PhotonObjectWriter.writeObjectHexFile()` 的分工：
+    /// 本方法面向"手上已有 hex 字符串"的调用方（例如 `PhotonRuntime.buildMainObject()`）；
+    /// 后者面向"已配置好的 writer 实例"，由 writer 重新序列化后写文件。
+    fun saveHexFile(path: String, coffHex: String): Boolean {
+        FileSystem.writeText(path, coffHex)
+        return FileSystem.exists(path)
+    }
+
+    /// 生成「可直接链接运行」的 helloworld `main`。
+    ///
+    /// 与 `helloworldMachineCode()` 的差别：不依赖任何 runtime 符号，
+    /// 直接通过导入表调用 kernel32（Windows x64 调用约定）：
+    ///
+    /// ```asm
+    /// main:
+    ///   push rbp
+    ///   mov  rbp, rsp
+    ///   sub  rsp, 0x30            ; 32 字节影子空间 + 16 字节栈对齐
+    ///   mov  ecx, -11             ; STD_OUTPUT_HANDLE
+    ///   call [rip + __imp_GetStdHandle]
+    ///   mov  rcx, rax             ; hStdOut
+    ///   lea  rdx, [rip + @str.0]  ; lpBuffer
+    ///   mov  r8d, <len>           ; nNumberOfBytesToWrite
+    ///   xor  r9, r9               ; lpNumberOfBytesWritten = NULL
+    ///   mov  [rbp - 0x10], r9     ; lpOverlapped = NULL（第 5 参数在 [rsp+0x20]）
+    ///   call [rip + __imp_WriteFile]
+    ///   xor  rcx, rcx             ; exit code = 0
+    ///   call [rip + __imp_ExitProcess]
+    ///   ret                       ; 不可达，仅为函数完整性
+    /// ```
+    ///
+    /// 栈偏移推导：`push rbp` 后 rbp ≡ 0 (mod 16)，`sub rsp,0x30` 后
+    /// rsp = rbp-0x30 且 ≡ 0 (mod 16)（满足 call 前对齐要求）；
+    /// 影子空间起点为 rsp，第 5 参数槽 = rsp+0x20 = rbp-0x10。
+    fun emitHelloWorldMain(enc: X86Encoder, text: String): Unit {
+        enc.emitPrologue(0x30)
+        enc.emitMovRI32("rcx", -11)              // GetStdHandle(STD_OUTPUT_HANDLE)
+        enc.emitCallImport("GetStdHandle")
+        enc.emitMovRR("rcx", "rax")              // hFile = hStdOut
+        enc.emitLeaRIP("rdx", "@str.0")          // lpBuffer
+        enc.emitMovRI32("r8", text.length)       // nNumberOfBytesToWrite
+        enc.emitXorRR("r9", "r9")                // lpNumberOfBytesWritten = NULL
+        enc.emitStackStore(-0x10, "r9")          // lpOverlapped = NULL
+        enc.emitCallImport("WriteFile")
+        enc.emitXorRR("rcx", "rcx")              // ExitProcess(0)
+        enc.emitCallImport("ExitProcess")
+        enc.emitRet()
+    }
+
+    /// 生成可运行的 helloworld 目标文件（返回 COFF hex）。
+    ///
+    /// 产出可直接交给 lld-link 链接：
+    ///
+    /// ```
+    /// lld-link /SUBSYSTEM:CONSOLE /ENTRY:main /MACHINE:X64 /NODEFAULTLIB \
+    ///          /OUT:hello.exe hello.obj kernel32.lib
+    /// ```
+    fun buildHelloWorldObject(text: String): String {
+        val enc = X86EncoderUtils.emptyEncoder()
+        PhotonObjectWriterUtils.emitHelloWorldMain(enc, text)
+
+        val writer = PhotonObjectWriter()
+        return writer.emitFromMachineCode(
+            enc.toHex(),
+            PhotonObjectWriterUtils.joinRelocRecords(enc.getRelocations()),
+            text,
+            "main"
+        )
+    }
+}

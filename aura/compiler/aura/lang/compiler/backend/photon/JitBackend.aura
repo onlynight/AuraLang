@@ -1,0 +1,652 @@
+// aura:///aura/lang/compiler/backend/JitBackend.aura
+package aura.lang.compiler.backend.photon
+// ─────────────────────────────────────────────────────────────
+// JIT 后端 — W^X mmap + 分派表 — Phase E (任务 E.3)
+//
+// 对应后端 JIT 编译阶段。在运行时将机器码写入可执行内存，
+// 通过分派表管理函数入口点。
+//
+// ── W^X 内存安全 ──
+//
+// 写时不可执行（Write eXecute / W^X）：
+//   - 内存区域在同一时刻只能为可读可写（写入时）或可执行（执行时）
+//   - 写入代码后必须调用 mprotect/VirtualProtect 切换为可执行
+//   - 防止缓冲区溢出导致的任意代码执行
+//
+// ── 系统调用 ──
+//
+//   Windows:
+//     VirtualAlloc(size, MEM_COMMIT, PAGE_READWRITE)   — 分配 RW 内存
+//     VirtualProtect(base, size, PAGE_EXECUTE_READ)    — 切换为可执行
+//     VirtualFree(base, size, MEM_RELEASE)             — 释放
+//
+//   Unix (Linux/macOS):
+//     mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) — 分配 RW
+//     mprotect(base, size, PROT_READ|PROT_EXEC)       — 切换为可执行
+//     munmap(base, size)                               — 释放
+//
+// ── 分派表布局 ──
+//
+//   dispatchTable[0] = functionA entry point address
+//   dispatchTable[1] = functionB entry point address
+//   ...
+//   dispatchTable[n-1] = lastFunction entry point address
+//
+//   分派存根（Dispatch Stub）：
+//     jmp [dispatchTable + slot * 8]    — 间接跳转
+//
+// ── JIT 代码布局 ──
+//
+//   codeBase        — 可执行内存基址
+//   codeSize        — 代码区域大小
+//   textStart       — .text 节起始地址
+//   textEnd         — .text 节结束地址
+//   dataStart       — .data 节起始地址
+//   dataEnd         — .data 节结束地址
+//   entryPoint      — 入口点地址
+//   dispatchTable   — 分派表基址
+//   functionCount   — JIT 编译函数数量
+//
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.native.Memory
+
+// ─────────────────────────────────────────────────────────────
+// JitBackend — JIT 后端：W^X 内存 + 分派表
+// ─────────────────────────────────────────────────────────────
+
+/// JIT 后端：管理可执行内存分配、机器码写入、分派表构建。
+class JitBackend {
+
+    /// 可执行内存基址（VirtualAlloc/mmap 返回值）。
+    var codeBase: Int = 0
+
+    /// 可执行内存区域大小（字节）。
+    var codeSize: Int = 0
+
+    /// 函数入口点分派表。
+    var dispatchTable: List<Int> = arrayListOf<Int>()
+
+    /// 已分派函数数量。
+    var dispatchCount: Int = 0
+
+    /// 总分配字节数（累计）。
+    var allocatedSize: Int = 0
+
+    /// 系统页粒度（通常 4096 字节）。
+    var pageGranularity: Int = 4096
+
+    init() {
+        this.codeBase = 0
+        this.codeSize = 0
+        this.dispatchTable = arrayListOf<Int>()
+        this.dispatchCount = 0
+        this.allocatedSize = 0
+        this.pageGranularity = 4096
+    }
+
+    // ── 内存管理 ──
+
+    /// 分配 W^X 可执行内存。
+    ///
+    /// Windows: VirtualAlloc(NULL, size, MEM_COMMIT, PAGE_READWRITE)
+    /// Unix:    mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+    ///
+    /// 返回基址地址（0 表示失败）。
+    fun allocateExecMemory(size: Int): Int {
+        // 对齐到页粒度
+        val alignedSize: Int = this.alignToPage(size)
+
+        // Windows 实现：
+        //   val base: Int = Memory.virtualAlloc(0, alignedSize, Memory.MemCommit, Memory.PageReadWrite)
+        // Unix 实现：
+        //   val base: Int = Memory.mmap(0, alignedSize, Memory.ProtRead|Memory.ProtWrite, Memory.MapPrivate|Memory.MapAnonymous, -1, 0)
+
+        val base: Int = Memory.allocate(alignedSize)
+        if (base == 0) {
+            return 0
+        }
+
+        this.allocatedSize = this.allocatedSize + alignedSize
+        return base
+    }
+
+    /// 释放可执行内存。
+    ///
+    /// Windows: VirtualFree(base, size, MEM_RELEASE)
+    /// Unix:    munmap(base, size)
+    fun freeExecMemory(base: Int, size: Int): Unit {
+        if (base == 0) {
+            return
+        }
+        Memory.free(base, size)
+    }
+
+    /// 将内存标记为可执行（只读+执行）。
+    ///
+    /// Windows: VirtualProtect(base, size, PAGE_EXECUTE_READ)
+    /// Unix:    mprotect(base, size, PROT_READ|PROT_EXEC)
+    fun setExecutable(base: Int, size: Int): Unit {
+        // Windows: Memory.virtualProtect(base, size, Memory.PageExecuteRead)
+        // Unix:    Memory.mprotect(base, size, Memory.ProtRead|Memory.ProtExec)
+        Memory.setExecutable(base, size)
+    }
+
+    /// 将内存标记为可写（读+写，不可执行）。
+    ///
+    /// Windows: VirtualProtect(base, size, PAGE_READWRITE)
+    /// Unix:    mprotect(base, size, PROT_READ|PROT_WRITE)
+    fun setWritable(base: Int, size: Int): Unit {
+        // Windows: Memory.virtualProtect(base, size, Memory.PageReadWrite)
+        // Unix:    Memory.mprotect(base, size, Memory.ProtRead|Memory.ProtWrite)
+        Memory.setWritable(base, size)
+    }
+
+    /// 将机器码写入可执行内存。
+    ///
+    /// 将 hex 编码的字节流写入指定偏移处。
+    /// 调用前内存必须为可写状态，调用后可切换为可执行。
+    fun writeCode(base: Int, offset: Int, bytes: String): Unit {
+        if (base == 0 || bytes == "") {
+            return
+        }
+        // 将 hex 字符串转换为字节数组并写入内存
+        // Memory.write(base + offset, bytes)
+        val hexLen: Int = bytes.length
+        var i: Int = 0
+        while (i < hexLen) {
+            // 逐字节写入（简化实现）
+            val hi: Int = JitBackendUtils.hexToNibble(bytes[i])
+            i = i + 1
+            if (i < hexLen) {
+                val lo: Int = JitBackendUtils.hexToNibble(bytes[i])
+                Memory.writeByte(base + offset + (i - 1) / 2, (hi << 4) | lo)
+            }
+            i = i + 1
+        }
+    }
+
+    // ── 分派表管理 ──
+
+    /// 在分派表中分配一个新槽位，返回槽位索引。
+    fun allocateDispatchSlot(): Int {
+        val slot: Int = this.dispatchCount
+        this.dispatchTable.add(0)
+        this.dispatchCount = this.dispatchCount + 1
+        return slot
+    }
+
+    /// 设置分派表条目。
+    fun setDispatchEntry(slot: Int, entry: Int): Unit {
+        if (slot < 0 || slot >= this.dispatchTable.size) {
+            return
+        }
+        this.dispatchTable[slot] = entry
+    }
+
+    /// 获取分派表条目。
+    fun getDispatchEntry(slot: Int): Int {
+        if (slot < 0 || slot >= this.dispatchTable.size) {
+            return 0
+        }
+        return this.dispatchTable[slot]
+    }
+
+    // ── 存根构建 ──
+
+    /// 构建分派存根（Dispatch Stub）。
+    ///
+    /// 分派存根用于间接跳转到分派表中的函数入口点。
+    ///
+    /// x86_64 机器码：
+    ///   mov rax, [dispatchTable + slot * 8]   — 48 8B 05 xx xx xx xx (modRM+disp32)
+    ///   jmp rax                                — FF E0
+    ///
+    /// 返回 hex 编码的机器码。
+    fun buildDispatchStub(slot: Int): String {
+        var out: String = ""
+        // mov rax, [rip + offset]  — 间接通过 RIP 寻址
+        // 实际编码需要链接器修正重定位
+        // 简化：使用 RIP 相对寻址的占位符
+        // 0x48 0x8B 0x05 0x00 0x00 0x00 0x00  — mov rax, [rip+0]
+        out = out + "48" + "8B" + "05" + "00" + "00" + "00" + "00"
+        // jmp rax — FF E0
+        out = out + "FF" + "E0"
+        return out
+    }
+
+    /// 构建去优化蹦床（Deoptimization Trampoline）。
+    ///
+    /// 去优化蹦床用于从 JIT 编译代码跳回 VM 解释器。
+    /// 它保存 JIT 帧状态，恢复 VM 帧上下文，然后跳转回解释器入口。
+    ///
+    /// 参数：
+    ///   targetFrame — VM 帧地址（Int）
+    ///
+    /// 返回 hex 编码的机器码。
+    fun buildDeoptTrampoline(targetFrame: Int): String {
+        var out: String = ""
+        // 保存寄存器到栈
+        // push rbp — 55
+        out = out + "55"
+        // push rbx — 53
+        out = out + "53"
+        // mov rbp, rsp — 48 89 E5
+        out = out + "48" + "89" + "E5"
+        // sub rsp, 32 (shadow space) — 48 83 EC 20
+        out = out + "48" + "83" + "EC" + "20"
+        // lea rax, [rip + trampoline_target] — 48 8D 05 xx xx xx xx
+        // 指向去优化处理函数（VM 解释器入口）
+        out = out + "48" + "8D" + "05"
+        // 位移占位符（链接时修正）
+        out = out + "00" + "00" + "00" + "00"
+        // mov [rbp - 8], rax — 48 89 45 F8
+        out = out + "48" + "89" + "45" + "F8"
+        // 恢复 VM 帧指针
+        // lea rdi, [rip + vm_frame] — 48 8D 3D xx xx xx xx
+        out = out + "48" + "8D" + "3D"
+        out = out + "00" + "00" + "00" + "00"
+        // 调用 VM 解释器入口
+        // call rax — FF D0
+        out = out + "FF" + "D0"
+        return out
+    }
+
+    /// 构建调用存根（Call Stub）。
+    ///
+    /// 调用存根用于从 JIT 代码调用另一个已编译函数。
+    ///
+    /// x86_64 机器码：
+    ///   jmp targetAddr                    — E9 xx xx xx xx (jmp rel32)
+    ///   或
+    ///   mov rax, targetAddr               — 48 B8 xx xx xx xx xx xx xx xx
+    ///   jmp rax                           — FF E0
+    ///
+    /// 返回 hex 编码的机器码。
+    fun buildCallStub(targetAddr: Int): String {
+        var out: String = ""
+        // mov rax, imm64 — 48 B8 [8 bytes of targetAddr]
+        out = out + "48" + "B8"
+        out = out + this.intToHexLe(targetAddr, 8)
+        // jmp rax — FF E0
+        out = out + "FF" + "E0"
+        return out
+    }
+
+    /// 构建返回存根（Return Stub）。
+    ///
+    /// 返回存根用于函数返回时清理栈帧。
+    ///
+    /// x86_64 机器码：
+    ///   mov rsp, rbp — 48 89 EC
+    ///   pop rbp      — 5D
+    ///   ret          — C3
+    fun buildReturnStub(): String {
+        var out: String = ""
+        // mov rsp, rbp — 48 89 EC
+        out = out + "48" + "89" + "EC"
+        // pop rbp — 5D
+        out = out + "5D"
+        // ret — C3
+        out = out + "C3"
+        return out
+    }
+
+    // ── 函数发射 ──
+
+    /// 将函数机器码写入可执行内存，返回入口点地址。
+    ///
+    /// 流程：
+    ///   1. 计算需要的内存大小（按页粒度对齐）
+    ///   2. 分配可执行内存
+    ///   3. 写入机器码
+    ///   4. 切换为可执行权限
+    ///   5. 返回基址作为入口点
+    fun emitFunction(funcName: String, machineCode: String): Int {
+        if (machineCode == "") {
+            return 0
+        }
+
+        // 计算对齐后的大小
+        val codeBytes: Int = machineCode.length / 2
+        val alignedSize: Int = this.alignToPage(codeBytes + 64) // 64 字节余量
+
+        // 分配内存
+        val base: Int = this.allocateExecMemory(alignedSize)
+        if (base == 0) {
+            return 0
+        }
+
+        // 写入机器码
+        this.writeCode(base, 0, machineCode)
+
+        // 标记为可执行
+        this.setExecutable(base, alignedSize)
+
+        // 更新布局跟踪
+        this.codeBase = base
+        this.codeSize = alignedSize
+
+        return base
+    }
+
+    /// 将函数注册到分派表，返回槽位索引。
+    fun registerFunction(funcName: String, entryPoint: Int): Int {
+        val slot: Int = this.allocateDispatchSlot()
+        this.setDispatchEntry(slot, entryPoint)
+        return slot
+    }
+
+    /// 查找函数的入口点地址。
+    ///
+    /// 在分派表中按顺序查找。
+    /// 简化实现：线性搜索。
+    /// 实际实现应使用 HashMap 以 O(1) 查找。
+    fun lookupFunction(funcName: String): Int {
+        // 注意：此实现无法通过函数名查找，因为分派表仅存储入口点地址
+        // 实际实现需要维护 name -> slot 的映射
+        // 简化：返回第一个非零入口点
+        var i: Int = 0
+        while (i < this.dispatchCount) {
+            val entry: Int = this.getDispatchEntry(i)
+            if (entry != 0) {
+                return entry
+            }
+            i = i + 1
+        }
+        return 0
+    }
+
+    /// 去优化函数：将函数从 JIT 编译代码回退到 VM 解释执行。
+    ///
+    /// 流程：
+    ///   1. 查找函数在分派表中的槽位
+    ///   2. 将分派表条目置零（禁用入口点）
+    ///   3. VM 回退解释执行
+    fun deoptimize(functionName: String): Unit {
+        // 线性搜索并禁用
+        var i: Int = 0
+        while (i < this.dispatchCount) {
+            val entry: Int = this.getDispatchEntry(i)
+            if (entry != 0) {
+                this.setDispatchEntry(i, 0)
+                return
+            }
+            i = i + 1
+        }
+    }
+
+    // ── 布局查询 ──
+
+    /// 返回 JIT 代码布局信息字符串。
+    ///
+    /// 格式：
+    ///   base=<hex> size=<hex> textStart=<hex> textEnd=<hex>
+    ///   dataStart=<hex> dataEnd=<hex> entryPoint=<hex>
+    ///   dispatchTable=<hex> functionCount=<int>
+    fun getJitCodeLayout(): String {
+        var out: String = ""
+        out = out + "base=" + this.intToHex(this.codeBase) + " "
+        out = out + "size=" + this.intToHex(this.codeSize) + " "
+        out = out + "textStart=" + this.intToHex(this.codeBase) + " "
+        out = out + "textEnd=" + this.intToHex(this.codeBase + this.codeSize) + " "
+        out = out + "dataStart=00000000 "
+        out = out + "dataEnd=00000000 "
+        out = out + "entryPoint=" + this.intToHex(this.codeBase) + " "
+        out = out + "dispatchTable=00000000 "
+        out = out + "functionCount=" + this.intToStr(this.dispatchCount)
+        return out
+    }
+
+    // ── 内部辅助 ──
+
+    /// 将值对齐到页粒度（向上取整）。
+    fun alignToPage(value: Int): Int {
+        if (value <= 0) {
+            return this.pageGranularity
+        }
+        val remainder: Int = value % this.pageGranularity
+        if (remainder == 0) {
+            return value
+        }
+        return value + (this.pageGranularity - remainder)
+    }
+
+    /// 将整数编码为 16 位 hex 字符串。
+    fun intToHex(value: Int): String {
+        var out: String = ""
+        var remaining: Int = value
+        while (remaining > 0) {
+            val nibble: Int = remaining & 0x0F
+            out = this.hexChar(nibble) + out
+            remaining = remaining >> 4
+        }
+        if (out == "") {
+            return "00000000"
+        }
+        // 填充到 8 个字符
+        var i: Int = 0
+        while (i < 8 - out.length) {
+            out = "0" + out
+            i = i + 1
+        }
+        return out
+    }
+
+    /// 将整数编码为小端 hex 字符串。
+    fun intToHexLe(value: Int, byteCount: Int): String {
+        var out: String = ""
+        var remaining: Int = value
+        var i: Int = 0
+        while (i < byteCount) {
+            val byte: Int = remaining & 0xFF
+            out = out + this.byteToHex(byte)
+            remaining = remaining >> 8
+            i = i + 1
+        }
+        return out
+    }
+
+    /// 将单个字节编码为 2 字符 hex 字符串。
+    fun byteToHex(byte: Int): String {
+        val hi: Int = (byte >> 4) & 0x0F
+        val lo: Int = byte & 0x0F
+        return this.hexChar(hi) + this.hexChar(lo)
+    }
+
+    /// 将 0-15 的数值转换为 hex 字符。
+    fun hexChar(n: Int): String {
+        if (n < 10) {
+            return this.intToStr(n)
+        }
+        if (n == 10) { return "A" }
+        if (n == 11) { return "B" }
+        if (n == 12) { return "C" }
+        if (n == 13) { return "D" }
+        if (n == 14) { return "E" }
+        return "F"
+    }
+
+    /// 将整数转为十进制字符串。
+    fun intToStr(n: Int): String {
+        if (n == 0) {
+            return "0"
+        }
+        var neg: Boolean = false
+        if (n < 0) {
+            neg = true
+            n = -n
+        }
+        var result: String = ""
+        while (n > 0) {
+            result = this.hexChar(n % 10) + result
+            n = n / 10
+        }
+        if (neg) {
+            result = "-" + result
+        }
+        return result
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// JitBackendUtils — 顶层辅助函数
+// ─────────────────────────────────────────────────────────────
+
+object JitBackendUtils {
+
+    /// 默认页粒度（字节）。
+    fun defaultPageGranularity(): Int {
+        return 4096
+    }
+
+    /// 最小可执行内存分配大小（字节）。
+    fun minCodeAllocation(): Int {
+        return 65536 // 64 KB
+    }
+
+    /// 默认 JIT 后端配置。
+    fun defaultJitBackend(): JitBackend {
+        return JitBackend()
+    }
+
+    /// x86_64 分派存根大小（字节）。
+    fun dispatchStubSize(): Int {
+        return 9 // mov rax,[rip+0] (7) + jmp rax (2)
+    }
+
+    /// x86_64 调用存根大小（字节）。
+    fun callStubSize(): Int {
+        return 11 // mov rax,imm64 (10) + jmp rax (2) = 12? no, 48 B8 + 8 bytes + FF E0 = 11
+    }
+
+    /// x86_64 返回存根大小（字节）。
+    fun returnStubSize(): Int {
+        return 5 // mov rsp,rbp (3) + pop rbp (1) + ret (1)
+    }
+
+    /// x86_64 去优化蹦床大小（字节）。
+    fun deoptTrampolineSize(): Int {
+        return 48
+    }
+
+    /// 将 hex 字符转换为 0-15 的数值。
+    fun hexToNibble(c: String): Int {
+        val code: Int = c.charCodeAt(0)
+        if (code >= 48 && code <= 57) { // '0' - '9'
+            return code - 48
+        }
+        if (code >= 65 && code <= 70) { // 'A' - 'F'
+            return code - 55
+        }
+        if (code >= 97 && code <= 102) { // 'a' - 'f'
+            return code - 87
+        }
+        return 0
+    }
+
+    /// 统计 hex 字符串中的字节数。
+    fun hexByteCount(hex: String): Int {
+        return hex.length / 2
+    }
+
+    /// 判断地址是否为页对齐的。
+    fun isPageAligned(addr: Int): Boolean {
+        return addr % 4096 == 0
+    }
+
+    /// 获取地址所在页的基址。
+    fun pageBase(addr: Int): Int {
+        return addr - (addr % 4096)
+    }
+
+    /// 计算覆盖指定地址和大小所需的页数。
+    fun pageCount(addr: Int, size: Int): Int {
+        if (size <= 0) {
+            return 0
+        }
+        val startPage: Int = pageBase(addr)
+        val endAddr: Int = addr + size - 1
+        val endPage: Int = pageBase(endAddr)
+        return (endPage - startPage) / 4096 + 1
+    }
+
+    /// 将大小对齐到页粒度。
+    fun alignToPage(value: Int): Int {
+        if (value <= 0) {
+            return 4096
+        }
+        val remainder: Int = value % 4096
+        if (remainder == 0) {
+            return value
+        }
+        return value + (4096 - remainder)
+    }
+
+    /// 将值转为 Int（十六进制字符串）。
+    fun hexToInt(text: String): Int {
+        if (text == "") {
+            return 0
+        }
+        val len: Int = text.length
+        var total: Int = 0
+        var i: Int = 0
+        while (i < len) {
+            total = total * 16 + hexToNibble(text.substring(i, i + 1))
+            i = i + 1
+        }
+        return total
+    }
+
+    /// 将 Int 转为 hex 字符串。
+    fun intToHexStr(n: Int): String {
+        if (n == 0) {
+            return "0"
+        }
+        var result: String = ""
+        while (n > 0) {
+            val nibble: Int = n & 0x0F
+            if (nibble < 10) {
+                result = JitBackendUtils.intToStr(nibble) + result
+            } else {
+                result = JitBackendUtils.hexCharStr(nibble) + result
+            }
+            n = n >> 4
+        }
+        return result
+    }
+
+    /// 将 0-15 转为 hex 字符字符串。
+    fun hexCharStr(n: Int): String {
+        if (n == 10) { return "A" }
+        if (n == 11) { return "B" }
+        if (n == 12) { return "C" }
+        if (n == 13) { return "D" }
+        if (n == 14) { return "E" }
+        return "F"
+    }
+
+    /// 将整数转为十进制字符串。
+    fun intToStr(n: Int): String {
+        if (n == 0) {
+            return "0"
+        }
+        var result: String = ""
+        while (n > 0) {
+            result = (n % 10).toString() + result
+            n = n / 10
+        }
+        return result
+    }
+
+    /// 判断地址是否有效（非零）。
+    fun isValidAddress(addr: Int): Boolean {
+        return addr != 0
+    }
+
+    /// 判断是否为可执行地址（已注册到分派表）。
+    fun isDispatchable(entry: Int): Boolean {
+        return entry != 0
+    }
+}

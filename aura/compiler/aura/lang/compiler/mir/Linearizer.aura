@@ -1,0 +1,462 @@
+// aura:///aura/lang/compiler/mir/Linearizer.aura
+package aura.lang.compiler.mir
+// ─────────────────────────────────────────────────────────────
+// SSA → TAC 线性化器 — Phase A (任务 A.4)
+//
+// 将 SSA MIR 转换为现有 TAC MIR（Mir.aura 格式），确保 VM 路径不受影响。
+// 线性化策略：
+//   1. 将 SSA Value 分配为栈槽（类似 TAC 的寄存器槽）
+//   2. Phi 节点转化为分支 + 赋值
+//   3. Memory chain 线性化为 load/store 序列
+//   4. 复用现有 Codegen.aura 的字节码发射器
+//
+// ── 设计方式 ──
+//
+//   * 输入：MirSsaProgram（SSA MIR）
+//   * 输出：Mir（TAC MIR，与现有 Mir.aura 兼容）
+//   * 保持现有 Codegen.aura 不变
+//
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import "../Mir.aura"
+import "../lexer/Span.aura"
+// 同包依赖：SSA 程序 / 扁平字符串助手。
+// 同包符号需显式导入才进入编译单元（否则退化为未解析调用 #65535）。
+import "SsaMir.aura"
+
+/// SSA → TAC 线性化器。
+class Linearizer {
+
+    /// 输入 SSA MIR 程序。
+    private var src: MirSsaProgram = MirSsaProgram()
+
+    /// 输出 TAC MIR。
+    private var tac: Mir = Mir()
+
+    /// SSA ValueID → TAC 临时变量名 映射（扁平字符串：vid|name\n）。
+    private var valMap: String = ""
+
+    /// 临时变量计数器。
+    private var tmpCounter: Int = 0
+
+    /// 标签计数器。
+    private var labelCounter: Int = 0
+
+    /// 块 ID → 标签名 映射（扁平字符串：blockId|label,blockId|label,…）。
+    private var blockLabelMap: String = ""
+
+    /// 当前 TAC MIR 根节点。
+    private var curRoot: Int = 0
+
+    init() {
+        this.src = MirSsaProgram()
+        this.tac = Mir()
+        this.valMap = ""
+        this.tmpCounter = 0
+        this.labelCounter = 0
+        this.blockLabelMap = ""
+        this.curRoot = 0
+    }
+
+    // ── 主入口 ──
+
+    /// 执行 SSA → TAC 转换，返回 TAC MIR。
+    fun linearize(src: MirSsaProgram): Mir {
+        this.src = src
+        this.tac = Mir()
+        this.valMap = ""
+        this.tmpCounter = 0
+        this.labelCounter = 0
+        this.blockLabelMap = ""
+
+        // 创建 MirProgram 根节点
+        this.curRoot = this.tac.add("MirProgram", "", "", Span(0, 0, 1, 1, 1, 1), mirNoKids())
+
+        // 遍历所有函数
+        var fi: Int = 0
+        while (fi < this.src.functionCount) {
+            val func: MirFunction = this.src.functions[fi]
+            this.linearizeFunction(func)
+            fi = fi + 1
+        }
+
+        this.tac.rootId = this.curRoot
+        return this.tac
+    }
+
+    // ── 函数线性化 ──
+
+    /// 线性化一个函数。
+    private fun linearizeFunction(func: MirFunction): Int {
+        // 创建 MirFunc 节点
+        val sp: Span = Span(0, 0, 1, 1, 1, 1)
+        val funcId: Int = this.tac.add("MirFunc", func.name, toStr(func.returnType), sp, mirNoKids())
+
+        // 创建入口块
+        this.tac.add("MirBlock", "@entry", "", sp, mirNoKids())
+
+        // 处理参数
+        var paramKids: String = mirNoKids()
+        val params: List<String> = splitComma(func.params)
+        var i: Int = 0
+        while (i < params.size) {
+            val paramValId: Int = strToInt(params[i])
+            val paramVal: MirValue = this.src.valueOf(paramValId)
+            val varName: String = paramVal.aux  // 参数名存储在 aux 字段
+            val loadId: Int = this.tac.add("LOAD_VAR", varName, "", sp, mirNoKids())
+            paramKids = mirKidsAdd(paramKids, loadId)
+            i = i + 1
+        }
+
+        // 线性化所有块
+        val blocks: List<String> = splitComma(func.blocks)
+        var bi: Int = 0
+        while (bi < blocks.size) {
+            val blockId: Int = strToInt(blocks[bi])
+            val block: MirBlock = this.src.blockOf(blockId)
+            this.linearizeBlock(block)
+            bi = bi + 1
+        }
+
+        return funcId
+    }
+
+    // ── 块线性化 ──
+
+    /// 线性化一个块。
+    private fun linearizeBlock(block: MirBlock): Int {
+        val sp: Span = Span(0, 0, 1, 1, 1, 1)
+        val blockId: Int = this.tac.add("MirBlock", "@block" + toStr(block.id), "", sp, mirNoKids())
+
+        // 处理 Phi 节点 → 转化为 LOAD_VAR（取第一个入边值）
+        val phis: List<String> = splitComma(block.phis)
+        var pi: Int = 0
+        while (pi < phis.size) {
+            val phiValId: Int = strToInt(phis[pi])
+            val phiVal: MirValue = this.src.valueOf(phiValId)
+            val tmpName: String = this.allocTmp()
+            // Phi → LOAD_VAR（简化：取第一个入边值）
+            val incoming: List<String> = splitComma(phiVal.args)
+            if (incoming.size > 0) {
+                val firstIncomingId: Int = strToInt(incoming[0])
+                val firstIncoming: MirValue = this.src.valueOf(firstIncomingId)
+                if (firstIncoming.isConst()) {
+                    // 常量入边：直接 LOAD 常量
+                    this.tac.add("LOAD_INT", firstIncoming.aux, toStr(phiVal.type), sp, mirNoKids())
+                    this.valMap = this.valMapAdd(phiValId, tmpName)
+                } else {
+                    // 非常量入边：LOAD_VAR（临时变量）
+                    val firstTmpName: String = this.valMapLookup(firstIncomingId)
+                    if (firstTmpName != "") {
+                        this.tac.add("LOAD_VAR", firstTmpName, toStr(phiVal.type), sp, mirNoKids())
+                        this.valMap = this.valMapAdd(phiValId, tmpName)
+                    }
+                }
+            }
+            pi = pi + 1
+        }
+
+        // 处理普通指令
+        val instrList: List<String> = splitComma(block.instrs)
+        var ii: Int = 0
+        while (ii < instrList.size) {
+            val instrValId: Int = strToInt(instrList[ii])
+            val instrVal: MirValue = this.src.valueOf(instrValId)
+            this.linearizeInstr(instrVal)
+            ii = ii + 1
+        }
+
+        // 处理终结指令
+        if (block.term >= 0) {
+            val termVal: MirValue = this.src.valueOf(block.term)
+            this.linearizeTerminator(termVal)
+        }
+
+        return blockId
+    }
+
+    // ── 指令线性化 ──
+
+    /// 线性化一条普通指令。
+    ///
+    /// 映射 SSA ops → TAC ops:
+    ///   Add → ADD, Sub → SUB, Mul → MUL, SDiv → DIV, SRem → MOD,
+    ///   ICmpEq → EQ, ICmpNe → NEQ, ICmpSlt → LT, ICmpSgt → GT,
+    ///   ICmpSle → LE, ICmpSge → GE, And → AND, Or → OR, Xor → XOR,
+    ///   Shl → SHL, Shr → SHR, Neg → NEG, Not → NOT,
+    ///   Call → CALL, GetField → GET_FIELD
+    private fun linearizeInstr(val: MirValue): Int {
+        val sp: Span = Span(0, 0, 1, 1, 1, 1)
+        val op: String = val.op
+        val args: List<String> = splitComma(val.args)
+        val tmpName: String = this.allocTmp()
+
+        if (val.isConst()) {
+            // 常量加载
+            return this.tac.add("LOAD_INT", val.aux, toStr(val.type), sp, mirNoKids())
+        }
+
+        if (op == "Add" || op == "Sub" || op == "Mul" || op == "SDiv" || op == "SRem"
+            || op == "And" || op == "Or" || op == "Xor" || op == "Shl" || op == "Shr"
+            || op == "ICmpEq" || op == "ICmpNe" || op == "ICmpSlt" || op == "ICmpSle"
+            || op == "ICmpSgt" || op == "ICmpSge") {
+            // 算术/比较指令
+            if (args.size >= 2) {
+                val leftName: String = this.valMapLookup(strToInt(args[0]))
+                val rightName: String = this.valMapLookup(strToInt(args[1]))
+                val opName: String = this.mapToTacOp(op)
+                val result: String = leftName + " " + opName + " " + rightName
+                val instrId: Int = this.tac.add(opName, result, toStr(val.type), sp, mirNoKids())
+                this.valMap = this.valMapAdd(val.id, tmpName)
+                return instrId
+            }
+        }
+
+        if (op == "Neg") {
+            if (args.size >= 1) {
+                val name: String = this.valMapLookup(strToInt(args[0]))
+                val instrId: Int = this.tac.add("NEG", name, toStr(val.type), sp, mirNoKids())
+                this.valMap = this.valMapAdd(val.id, tmpName)
+                return instrId
+            }
+        }
+
+        if (op == "Not") {
+            if (args.size >= 1) {
+                val name: String = this.valMapLookup(strToInt(args[0]))
+                val instrId: Int = this.tac.add("NOT", name, toStr(val.type), sp, mirNoKids())
+                this.valMap = this.valMapAdd(val.id, tmpName)
+                return instrId
+            }
+        }
+
+        if (op == "Call") {
+            // 函数调用
+            var argsStr: String = ""
+            var i: Int = 0
+            while (i < args.size) {
+                val argName: String = this.valMapLookup(strToInt(args[i]))
+                if (argName != "") {
+                    if (argsStr != "") {
+                        argsStr = argsStr + " "
+                    }
+                    argsStr = argsStr + argName
+                }
+                i = i + 1
+            }
+            val instrId: Int = this.tac.add("CALL", val.aux + " " + argsStr, toStr(val.type), sp, mirNoKids())
+            this.valMap = this.valMapAdd(val.id, tmpName)
+            return instrId
+        }
+
+        if (op == "GetField") {
+            if (args.size >= 1) {
+                val objName: String = this.valMapLookup(strToInt(args[0]))
+                val instrId: Int = this.tac.add("GET_FIELD", objName + "." + val.aux, toStr(val.type), sp, mirNoKids())
+                this.valMap = this.valMapAdd(val.id, tmpName)
+                return instrId
+            }
+        }
+
+        // 默认：STORE_VAR（将值存储到临时变量）
+        var argsStr: String = ""
+        var i: Int = 0
+        while (i < args.size) {
+            val argName: String = this.valMapLookup(strToInt(args[i]))
+            if (argName != "") {
+                if (argsStr != "") {
+                    argsStr = argsStr + " "
+                }
+                argsStr = argsStr + argName
+            }
+            i = i + 1
+        }
+        val storeId: Int = this.tac.add("STORE_VAR", tmpName + " = " + argsStr, toStr(val.type), sp, mirNoKids())
+        this.valMap = this.valMapAdd(val.id, tmpName)
+        return storeId
+    }
+
+    // ── 终结指令线性化 ──
+
+    /// 线性化终结指令。
+    ///
+    /// 映射:
+    ///   Ret    → RETURN
+    ///   Br     → JUMP
+    ///   CondBr → JUMP_IF_FALSE
+    private fun linearizeTerminator(val: MirValue): Int {
+        val sp: Span = Span(0, 0, 1, 1, 1, 1)
+        val op: String = val.op
+
+        if (op == "Ret") {
+            if (val.args != "") {
+                val retVal: String = this.valMapLookup(strToInt(splitComma(val.args)[0]))
+                if (retVal != "") {
+                    return this.tac.add("RETURN", retVal, "", sp, mirNoKids())
+                }
+            }
+            return this.tac.add("RETURN", "", "", sp, mirNoKids())
+        }
+
+        if (op == "Br") {
+            if (val.args != "") {
+                val target: String = this.getBlockLabel(strToInt(splitComma(val.args)[0]))
+                return this.tac.add("JUMP", target, "", sp, mirNoKids())
+            }
+            return this.tac.add("JUMP", "@end", "", sp, mirNoKids())
+        }
+
+        if (op == "CondBr") {
+            // CondBr(cond, thenBlock, elseBlock)
+            val args: List<String> = splitComma(val.args)
+            if (args.size >= 3) {
+                val condName: String = this.valMapLookup(strToInt(args[0]))
+                val thenLabel: String = this.getBlockLabel(strToInt(args[1]))
+                val elseLabel: String = this.getBlockLabel(strToInt(args[2]))
+                return this.tac.add("JUMP_IF_FALSE", condName + " " + thenLabel + " " + elseLabel, "", sp, mirNoKids())
+            }
+            return this.tac.add("JUMP_IF_FALSE", "@true @false", "", sp, mirNoKids())
+        }
+
+        // 默认：NOP
+        return this.tac.add("NOP", "", "", sp, mirNoKids())
+    }
+
+    // ── 辅助方法 ──
+
+    /// 分配临时变量名（如 "%t0", "%t1", …）。
+    private fun allocTmp(): String {
+        val name: String = "%t" + toStr(this.tmpCounter)
+        this.tmpCounter = this.tmpCounter + 1
+        return name
+    }
+
+    /// 生成唯一标签名（如 "L0", "L1", …）。
+    private fun newLabel(prefix: String): String {
+        val n: Int = this.labelCounter
+        this.labelCounter = this.labelCounter + 1
+        return prefix + toStr(n)
+    }
+
+    /// 获取块的标签名。
+    ///
+    /// 查找 blockLabelMap 中的 blockId|label 映射；若未找到则生成
+    /// "@block{id}" 并写入映射表。
+    private fun getBlockLabel(blockId: Int): String {
+        val key: String = toStr(blockId)
+        // 遍历 blockLabelMap 查找
+        val pairs: List<String> = MirUtils.mirSplit(this.blockLabelMap, ",")
+        var i: Int = 0
+        while (i < pairs.size) {
+            val pair: String = pairs[i]
+            if (pair != "" && pair.contains("|")) {
+                val parts: List<String> = MirUtils.mirSplit(pair, "|")
+                if (parts.size >= 2 && parts[0] == key) {
+                    return parts[1]
+                }
+            }
+            i = i + 1
+        }
+        // 未找到：生成新标签并写入映射
+        val label: String = "@block" + toStr(blockId)
+        this.blockLabelMap = this.blockLabelAdd(blockId, label)
+        return label
+    }
+
+    /// 向 blockLabelMap 追加一个 blockId|label 映射。
+    private fun blockLabelAdd(blockId: Int, label: String): String {
+        if (this.blockLabelMap == "") {
+            return toStr(blockId) + "|" + label
+        }
+        return this.blockLabelMap + "," + toStr(blockId) + "|" + label
+    }
+
+    /// 映射 MIR 操作符到 TAC 操作符。
+    private fun mapToTacOp(mirOp: String): String {
+        if (mirOp == "Add") { return "ADD" }
+        if (mirOp == "Sub") { return "SUB" }
+        if (mirOp == "Mul") { return "MUL" }
+        if (mirOp == "SDiv") { return "DIV" }
+        if (mirOp == "SRem") { return "MOD" }
+        if (mirOp == "ICmpEq") { return "EQ" }
+        if (mirOp == "ICmpNe") { return "NEQ" }
+        if (mirOp == "ICmpSlt") { return "LT" }
+        if (mirOp == "ICmpSle") { return "LE" }
+        if (mirOp == "ICmpSgt") { return "GT" }
+        if (mirOp == "ICmpSge") { return "GE" }
+        if (mirOp == "And") { return "AND" }
+        if (mirOp == "Or") { return "OR" }
+        if (mirOp == "Xor") { return "XOR" }
+        if (mirOp == "Shl") { return "SHL" }
+        if (mirOp == "Shr") { return "SHR" }
+        return mirOp
+    }
+
+    /// 向变量映射表追加条目。
+    private fun valMapAdd(valId: Int, name: String): String {
+        return this.valMap + toStr(valId) + "|" + name + "\n"
+    }
+
+    /// 从变量映射表查找。
+    private fun valMapLookup(valId: Int): String {
+        val key: String = toStr(valId)
+        val lines: List<String> = MirUtils.mirSplit(this.valMap, "\n")
+        var i: Int = 0
+        while (i < lines.size) {
+            val line: String = lines[i]
+            if (line != "" && line.contains("|")) {
+                val parts: List<String> = MirUtils.mirSplit(line, "|")
+                if (parts.size >= 2 && parts[0] == key) {
+                    return parts[1]
+                }
+            }
+            i = i + 1
+        }
+        return ""
+    }
+
+    /// 分割逗号分隔字符串。
+    private fun splitComma(text: String): List<String> {
+        if (text == "") {
+            return arrayListOf<String>()
+        }
+        return MirUtils.mirSplit(text, ",")
+    }
+
+    /// 字符串转整数。
+    private fun strToInt(text: String): Int {
+        return SsaMirUtils.strToInt(text)
+    }
+
+    /// 整数转字符串。
+    private fun toStr(n: Int): String {
+        return SsaMirUtils.toStr(n)
+    }
+
+    /// 空的子节点列表。
+    private fun mirNoKids(): String {
+        return ""
+    }
+
+    /// 向子节点列表追加。
+    private fun mirKidsAdd(list: String, child: Int): String {
+        if (list == "") {
+            return toStr(child)
+        }
+        return list + "," + toStr(child)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Linearizer 工具对象
+// ─────────────────────────────────────────────────────────────
+
+object LinearizerUtils {
+
+    /// 执行 SSA → TAC 转换。
+    fun linearize(ssa: MirSsaProgram): Mir {
+        val linearizer: Linearizer = Linearizer()
+        return linearizer.linearize(ssa)
+    }
+}

@@ -148,16 +148,51 @@ if (-not $NoBootstrap) {
 if ($Aot) {
     $Out = Join-Path $AucDir 'aura-compiler.exe'
     Write-Host "[build-aura-compiler] mode: AOT (LLVM) -> $Out"
-    & $Aura build $Entry --aot --output $Out
+    $AuraArgs = @('build', $Entry, '--aot', '--output', $Out)
 } else {
     $Out = Join-Path $AucDir 'aura-compiler.auc'
     Write-Host "[build-aura-compiler] mode: bytecode -> $Out"
-    & $Aura build $Entry --output $Out
+    $AuraArgs = @('build', $Entry, '--output', $Out)
 }
 
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "[build-aura-compiler] ERROR: compilation failed" -ForegroundColor Red
+# The seed writes progress/errors to stderr; with $ErrorActionPreference='Stop'
+# a single stderr line aborts the script, so relax it for this call only.
+$prevEap   = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+$BuildLog  = (& $Aura @AuraArgs 2>&1 | Out-String)
+$BuildExit = $LASTEXITCODE
+$ErrorActionPreference = $prevEap
+
+# Echo the informative lines only (skip the per-import [debug] noise)
+($BuildLog -split "`r?`n") |
+    Where-Object { $_ -match '\S' -and $_ -notmatch 'compiler_pkg_root|resolving compiler pkg import' } |
+    Select-Object -Last 20 |
+    ForEach-Object { Write-Host $_ }
+
+if ($BuildExit -ne 0) {
+    Write-Host "[build-aura-compiler] ERROR: compilation failed (exit $BuildExit)" -ForegroundColor Red
     exit 1
 }
 
-Write-Host "[build-aura-compiler] OK: $Out" -ForegroundColor Green
+# ---- artifact integrity check -------------------------------------------
+# The seed compiler degrades SILENTLY: it exits 0 while package imports are
+# unresolved and many calls are unresolved, so the .auc only contains the entry
+# file itself (not the imported compiler modules).
+# See docs/Lir2MacCode/*.md section 15.12.
+$PkgRootMisses = ([regex]::Matches($BuildLog, 'compiler_pkg_root is None!')).Count
+# Pattern = "error: " + U+672A U+89E3 U+6790 ("unresolved"), spelled as char codes
+# so the source line itself stays ASCII.
+$Unresolved    = ([regex]::Matches($BuildLog, 'error: ' + [char]0x672A + [char]0x89E3 + [char]0x6790)).Count
+if ($PkgRootMisses -gt 0 -or $Unresolved -gt 0) {
+    Write-Host "[build-aura-compiler] ERROR: incomplete artifact - exit=0 but unresolved symbols remain" -ForegroundColor Red
+    Write-Host "  compiler_pkg_root is None! : $PkgRootMisses (aura.lang.compiler.* package imports unresolved)"
+    Write-Host "  unresolved function calls  : $Unresolved"
+    Write-Host "  artifact: $Out"
+    Write-Host "  It covers only $Entry and cannot be used as a compiler."
+    Write-Host "  Bootstrap chain status: seed lacks the llvm feature (--aot/--aot-embed unusable),"
+    Write-Host "  and compiler/Cargo.toml is gone (-RebuildSeed/-Aot unusable)."
+    Write-Host "  Route: docs/Lir2MacCode/*.md section 15.12 (bootstrap mainline S1-S4)."
+    exit 1
+}
+
+Write-Host "[build-aura-compiler] OK: $Out ($((Get-Item $Out).Length) bytes)" -ForegroundColor Green

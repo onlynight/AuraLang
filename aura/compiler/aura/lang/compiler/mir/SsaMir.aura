@@ -1,0 +1,429 @@
+// aura:///aura/lang/compiler/mir/SsaMir.aura
+package aura.lang.compiler.mir
+// ─────────────────────────────────────────────────────────────
+// SSA MIR 定义 — Phase A (任务 A.2)
+//
+// 替换现有 TAC 风格 MIR（Mir.aura），引入 SSA 形式以支持高级优化。
+// 使用 List-based arena 表示（与 Mir.aura / Hir.aura 结构一致）。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.collection.ArrayList
+// 同包依赖：TypeRegistry 为字段依赖，MirUtils（mirSplit）为同包助手。
+// 同包符号需显式导入才进入编译单元（否则退化为未解析调用 #65535）。
+import "TypeRegistry.aura"
+import "Mir.aura"
+
+// ─────────────────────────────────────────────────────────────
+// MirValue — SSA 值节点
+// ─────────────────────────────────────────────────────────────
+
+/// SSA 值节点（每个值只被赋值一次，可被多次使用）。
+class MirValue {
+
+    /// 值 ID（全局唯一）。
+    var id: Int = 0
+
+    /// 操作符（如 "Add"、"Load"、"Phi"、"Const"、"Br"、"CondBr"、"Ret"）。
+    var op: String = ""
+
+    /// 结果类型 TypeID。
+    var type: Int = 0
+
+    /// 操作数 ValueID 列表（逗号分隔字符串）。
+    var args: String = ""
+
+    /// 辅助信息（常量值、内存偏移、Phi 入边等）。
+    var aux: String = ""
+
+    /// 所属基本块 BlockID。
+    var block: Int = 0
+
+    /// 使用计数（DCE 用）。
+    var useCount: Int = 0
+
+    init() {
+        this.id = 0
+        this.op = ""
+        this.type = 0
+        this.args = ""
+        this.aux = ""
+        this.block = 0
+        this.useCount = 0
+    }
+
+    /// 获取第 i 个操作数的 ValueID。
+    fun argAt(i: Int): Int {
+        if (this.args == "") {
+            return -1
+        }
+        val parts: List<String> = MirUtils.mirSplit(this.args, ",")
+        if (i < 0 || i >= parts.size) {
+            return -1
+        }
+        return SsaMirUtils.strToInt(parts[i])
+    }
+
+    /// 获取操作数个数。
+    fun argCount(): Int {
+        if (this.args == "") {
+            return 0
+        }
+        return MirUtils.mirSplit(this.args, ",").size
+    }
+
+    /// 是否为常量。
+    fun isConst(): Boolean {
+        return this.op == "Const"
+    }
+
+    /// 是否为 Phi 节点。
+    fun isPhi(): Boolean {
+        return this.op == "Phi"
+    }
+
+    /// 是否为终结指令。
+    fun isTerminator(): Boolean {
+        val op: String = this.op
+        if (op == "Br" || op == "CondBr" || op == "Ret" || op == "Switch") {
+            return true
+        }
+        return false
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// MirBlock — 基本块
+// ─────────────────────────────────────────────────────────────
+
+/// 基本块（Phi 节点 + 指令序列 + 终结指令）。
+class MirBlock {
+
+    /// 块 ID。
+    var id: Int = 0
+
+    /// 块首 Phi 节点 ValueID（逗号分隔字符串）。
+    var phis: String = ""
+
+    /// 块内普通指令 ValueID（逗号分隔字符串）。
+    var instrs: String = ""
+
+    /// 终结指令 ValueID（-1 表示无终结指令）。
+    var term: Int = -1
+
+    /// 后继块 BlockID（逗号分隔字符串）。
+    var succs: String = ""
+
+    /// 前驱块 BlockID（逗号分隔字符串）。
+    var preds: String = ""
+
+    init() {
+        this.id = 0
+        this.phis = ""
+        this.instrs = ""
+        this.term = -1
+        this.succs = ""
+        this.preds = ""
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// MirFunction — SSA 函数
+// ─────────────────────────────────────────────────────────────
+
+/// SSA 函数（参数 + 基本块列表）。
+class MirFunction {
+
+    /// 函数名。
+    var name: String = ""
+
+    /// 函数类型 TypeID。
+    var type: Int = 0
+
+    /// 基本块列表（BlockID 逗号分隔字符串）。
+    var blocks: String = ""
+
+    /// 入口块 BlockID。
+    var entryBlock: Int = 0
+
+    /// 参数 ValueID 列表（逗号分隔字符串）。
+    var params: String = ""
+
+    /// 返回类型 TypeID。
+    var returnType: Int = 0
+
+    /// 是否为原生函数。
+    var isNative: Boolean = false
+
+    init() {
+        this.name = ""
+        this.type = 0
+        this.blocks = ""
+        this.entryBlock = 0
+        this.params = ""
+        this.returnType = 0
+        this.isNative = false
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// MirSsaProgram — 程序根节点（SSA MIR）
+// ─────────────────────────────────────────────────────────────
+
+/// SSA MIR 程序根节点。
+class MirSsaProgram {
+
+    /// 类型注册表。
+    var types: TypeRegistry = TypeRegistry()
+
+    /// 值节点表（List<MirValue>）。
+    var values: List<MirValue> = arrayListOf<MirValue>()
+
+    /// 块节点表（List<MirBlock>）。
+    var blocks: List<MirBlock> = arrayListOf<MirBlock>()
+
+    /// 函数节点表（List<MirFunction>）。
+    var functions: List<MirFunction> = arrayListOf<MirFunction>()
+
+    /// 值总数。
+    var valueCount: Int = 0
+
+    /// 块总数。
+    var blockCount: Int = 0
+
+    /// 函数总数。
+    var functionCount: Int = 0
+
+    /// 当前正在构建的函数索引（-1 表示不在函数上下文中）。
+    var currentFunc: Int = -1
+
+    init() {
+        this.types = TypeRegistry()
+        this.values = arrayListOf<MirValue>()
+        this.blocks = arrayListOf<MirBlock>()
+        this.functions = arrayListOf<MirFunction>()
+        this.valueCount = 0
+        this.blockCount = 0
+        this.functionCount = 0
+        this.currentFunc = -1
+    }
+
+    // ── 值管理 ──
+
+    /// 创建一个新的 SSA 值节点，返回 ValueID。
+    fun addValue(op: String, typeId: Int, args: String, aux: String, blockId: Int): Int {
+        val v: MirValue = MirValue()
+        v.id = this.valueCount
+        v.op = op
+        v.type = typeId
+        v.args = args
+        v.aux = aux
+        v.block = blockId
+        v.useCount = 0
+        this.values.add(v)
+        this.valueCount = this.values.size
+        return v.id
+    }
+
+    /// 通过 ValueID 获取值节点。
+    fun valueOf(id: Int): MirValue {
+        if (id < 0 || id >= this.values.size) {
+            return MirValue()
+        }
+        return this.values[id]
+    }
+
+    // ── 块管理 ──
+
+    /// 创建一个新的基本块，返回 BlockID。
+    fun addBlock(): Int {
+        val b: MirBlock = MirBlock()
+        b.id = this.blockCount
+        this.blocks.add(b)
+        this.blockCount = this.blocks.size
+        return b.id
+    }
+
+    /// 通过 BlockID 获取块节点。
+    fun blockOf(id: Int): MirBlock {
+        if (id < 0 || id >= this.blocks.size) {
+            return MirBlock()
+        }
+        return this.blocks[id]
+    }
+
+    /// 向块追加一个 Phi 节点。
+    fun addPhi(blockId: Int, typeId: Int, incoming: String, aux: String): Int {
+        val b: MirBlock = this.blockOf(blockId)
+        val vid: Int = this.addValue("Phi", typeId, incoming, aux, blockId)
+        b.phis = MirBlockUtils.phisAdd(b.phis, vid)
+        return vid
+    }
+
+    /// 向块追加一条普通指令。
+    fun addInstr(blockId: Int, op: String, typeId: Int, args: String, aux: String): Int {
+        val b: MirBlock = this.blockOf(blockId)
+        val vid: Int = this.addValue(op, typeId, args, aux, blockId)
+        b.instrs = MirBlockUtils.instrsAdd(b.instrs, vid)
+        return vid
+    }
+
+    /// 设置块的终结指令。
+    fun setTerminator(blockId: Int, op: String, typeId: Int, args: String, aux: String): Int {
+        val b: MirBlock = this.blockOf(blockId)
+        val vid: Int = this.addValue(op, typeId, args, aux, blockId)
+        b.term = vid
+        return vid
+    }
+
+    // ── 函数管理 ──
+
+    /// 创建一个新的函数，返回 FunctionID。
+    fun addFunction(name: String, funcTypeId: Int, retTypeId: Int, isNative: Boolean): Int {
+        val f: MirFunction = MirFunction()
+        f.name = name
+        f.type = funcTypeId
+        f.returnType = retTypeId
+        f.isNative = isNative
+        f.blocks = ""
+        f.entryBlock = -1
+        f.params = ""
+        this.functions.add(f)
+        this.functionCount = this.functions.size
+        this.currentFunc = this.functions.size - 1
+        return this.currentFunc
+    }
+
+    /// 通过 FunctionID 获取函数节点。
+    fun functionOf(id: Int): MirFunction {
+        if (id < 0 || id >= this.functions.size) {
+            return MirFunction()
+        }
+        return this.functions[id]
+    }
+
+    /// 结束当前函数的构建，返回 FunctionID。
+    fun endFunction(): Int {
+        if (this.currentFunc < 0) {
+            return -1
+        }
+        val fid: Int = this.currentFunc
+        this.currentFunc = -1
+        return fid
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// SsaMirUtils — 工具对象
+// ─────────────────────────────────────────────────────────────
+
+object SsaMirUtils {
+
+    /// 字符串转整数。
+    fun strToInt(text: String): Int {
+        if (text == "") {
+            return 0
+        }
+        val len: Int = text.length
+        var total: Int = 0
+        var i: Int = 0
+        var neg: Boolean = false
+        // 用 `text[i]` 比较、`indexOf` 取数字值：
+        // `charCodeAt(i)` 在本 VM 下忽略下标（恒返回首字符码点），不可用于逐字符解析。
+        if (len > 0 && text[0] == "-") {
+            neg = true
+            i = 1
+        }
+        while (i < len) {
+            val digit: Int = "0123456789".indexOf(text[i])
+            if (digit >= 0 && digit <= 9) {
+                total = total * 10 + digit
+            }
+            i = i + 1
+        }
+        if (neg) {
+            return -total
+        }
+        return total
+    }
+
+    /// 整数转字符串。
+    fun toStr(n: Int): String {
+        if (n == 0) {
+            return "0"
+        }
+        var neg: Boolean = false
+        if (n < 0) {
+            neg = true
+            n = -n
+        }
+        var result: String = ""
+        while (n > 0) {
+            result = digitChar(n % 10) + result
+            n = n / 10
+        }
+        if (neg) {
+            result = "-" + result
+        }
+        return result
+    }
+
+    /// 把 0-9 的数字转换为单字符字符串。
+    ///
+    /// **不能写成 `toStr(n % 10)`**：当 `n < 10` 时 `n % 10 == n`，会退化为
+    /// `toStr(n)` 的自我调用 → 无限递归（实测 `TypeRegistry()` 构造即
+    /// 「call stack overflow (max depth 4096)」）。
+    ///
+    /// 这里用**扁平字符串查表**而不是 `String.fromCharCode(48 + value)`：
+    /// 后者在本 VM/自举链路下无法解析（实测「call to undefined function #65535」）。
+    fun digitChar(value: Int): String {
+        if (value < 0 || value > 9) {
+            return ""
+        }
+        return "0123456789".substring(value, value + 1)
+    }
+
+    /// 创建空的 SSA MIR 程序。
+    fun emptyProgram(): MirSsaProgram {
+        return MirSsaProgram()
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// MirBlockUtils — 块列表工具
+// ─────────────────────────────────────────────────────────────
+
+object MirBlockUtils {
+
+    /// 向 Phi 列表追加一个 ValueID。
+    fun phisAdd(list: String, vid: Int): String {
+        if (list == "") {
+            return SsaMirUtils.toStr(vid)
+        }
+        return list + "," + SsaMirUtils.toStr(vid)
+    }
+
+    /// 向指令列表追加一个 ValueID。
+    fun instrsAdd(list: String, vid: Int): String {
+        if (list == "") {
+            return SsaMirUtils.toStr(vid)
+        }
+        return list + "," + SsaMirUtils.toStr(vid)
+    }
+
+    /// 向后继列表追加一个 BlockID。
+    fun succsAdd(list: String, bid: Int): String {
+        if (list == "") {
+            return SsaMirUtils.toStr(bid)
+        }
+        return list + "," + SsaMirUtils.toStr(bid)
+    }
+
+    /// 向前驱列表追加一个 BlockID。
+    fun predsAdd(list: String, bid: Int): String {
+        if (list == "") {
+            return SsaMirUtils.toStr(bid)
+        }
+        return list + "," + SsaMirUtils.toStr(bid)
+    }
+}

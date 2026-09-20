@@ -1,0 +1,227 @@
+// aura:///aura/lang/compiler/backend/photon/PhotonRuntime.aura
+package aura.lang.compiler.backend.photon
+// ─────────────────────────────────────────────────────────────
+// Photon 最小 runtime（Phase E3）
+//
+// 提供 `println(ptr)` —— 目前唯一用真实机器码实现的运行时函数，
+// 作为「Aura 用户代码 → 调用 runtime → 直连 kernel32」这条链路的验证载体。
+//
+// 之所以现在能实现：编码器已支持**函数内局部标签与跳转**
+// （见 X86Encoder.emitLabel / emitJmpLabel / emitJccLabel），
+// 因而可以写出扫描 NUL 的 strlen 循环。
+//
+// ── 调用约定（Windows x64）──
+//
+//   println(rcx = char*)  →  无返回值
+//
+// ── 栈帧布局（sub rsp, 0x50）──
+//
+//   [rsp, rsp+0x20)   影子空间（shadow space）—— 被调函数可任意改写，禁止放局部变量！
+//   [rbp-0x30]        第 5 个参数的入栈槽（= rsp+0x20，调用时须为 NULL）
+//   [rbp-0x28]        hStdOut
+//   [rbp-0x20]        入参指针
+//   [rbp-0x18]        字符串长度（strlen 结果）
+//   [rbp-0x10]        栈上构造的换行符（0x0D 0x0A）
+//
+// ⚠️ 踩坑记录：最初用 `sub rsp,0x30` 并把 hStdOut/ptr/len 放在
+// [rbp-0x18]/[rbp-0x20]/[rbp-0x28]，结果这些槽位正好落在被调函数的
+// **影子空间**内 —— WriteFile 溢出 rcx/rdx/r8/r9 时把它们全写坏
+// （[rbp-0x28]←rdx、[rbp-0x20]←r8、[rbp-0x18]←r9），
+// 表现为「第一次 WriteFile 正常、第二次静默失败」。
+// 结论：局部变量必须放在 [rsp+0x20, rbp) 区间，即影子空间**之上**。
+//
+// 对齐：`push rbp` 后 rbp ≡ 0 (mod 16)，`sub rsp,0x50`（80 是 16 的倍数）
+// 后 rsp ≡ 0 (mod 16)，满足 call 前的 16 字节对齐要求。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+
+import "x86_64/X86Encoder.aura"
+import "PhotonObjectWriter.aura"
+
+object PhotonRuntime {
+
+    /// 帧大小：影子空间 32 字节 + 5 个 8 字节局部槽（0x30..0x50）—— 取 0x50 并保持 16 对齐。
+    val FRAME_SIZE: Int = 0x50
+
+    /// 第 5 个参数的入栈槽（= rsp+0x20）。
+    val OFF_SHADOW_ARG5: Int = -0x30
+
+    /// hStdOut 保存槽。
+    val OFF_HSTDOUT: Int = -0x28
+
+    /// 入参指针保存槽。
+    val OFF_PTR: Int = -0x20
+
+    /// 字符串长度保存槽。
+    val OFF_LEN: Int = -0x18
+
+    /// 换行符缓冲区（2 字节）。
+    val OFF_NEWLINE: Int = -0x10
+
+    // ── println 实现 ──
+
+    /// 编码 `println(rcx = char*)`：
+    ///
+    /// ```asm
+    /// println:
+    ///   push rbp; mov rbp, rsp; sub rsp, 0x50
+    ///   mov  [rbp-0x20], rcx          ; 保存入参指针
+    ///   mov  rdx, rcx                 ; rdx 作为扫描指针
+    /// strlen_loop:
+    ///   cmp  byte [rdx], 0
+    ///   je   strlen_done
+    ///   inc  rdx
+    ///   jmp  strlen_loop
+    /// strlen_done:
+    ///   sub  rdx, rcx                 ; rdx = 长度
+    ///   mov  [rbp-0x18], rdx
+    ///   mov  ecx, -11                 ; STD_OUTPUT_HANDLE
+    ///   call [rip+__imp_GetStdHandle]
+    ///   mov  [rbp-0x28], rax          ; hStdOut
+    ///   ; WriteFile(hStdOut, ptr, len, NULL, NULL)
+    ///   mov  rcx, [rbp-0x28]
+    ///   mov  rdx, [rbp-0x20]
+    ///   mov  r8,  [rbp-0x18]
+    ///   xor  r9, r9
+    ///   mov  [rbp-0x30], r9
+    ///   call [rip+__imp_WriteFile]
+    ///   ; 追加换行：WriteFile(hStdOut, "\r\n", 2, NULL, NULL)
+    ///   mov  byte [rbp-0x10], 0x0D
+    ///   mov  byte [rbp-0x0F], 0x0A
+    ///   mov  rcx, [rbp-0x28]
+    ///   lea  rdx, [rbp-0x10]
+    ///   mov  r8d, 2
+    ///   xor  r9, r9
+    ///   mov  [rbp-0x30], r9
+    ///   call [rip+__imp_WriteFile]
+    ///   leave; ret
+    /// ```
+    fun emitPrintln(enc: X86Encoder): Unit {
+        enc.emitPrologue(PhotonRuntime.FRAME_SIZE)
+
+        // 保存入参指针
+        enc.emitStackStore(PhotonRuntime.OFF_PTR, "rcx")
+
+        // strlen：扫描到 NUL
+        enc.emitMovRR("rdx", "rcx")
+        enc.emitLabel("strlen_loop")
+        enc.emitCmpByteMemImm8("rdx", 0)
+        enc.emitJccLabel("eq", "strlen_done")
+        enc.emitIncRR("rdx")
+        enc.emitJmpLabel("strlen_loop")
+        enc.emitLabel("strlen_done")
+        enc.emitSubRR("rdx", "rcx")
+        enc.emitStackStore(PhotonRuntime.OFF_LEN, "rdx")
+
+        // hStdOut = GetStdHandle(STD_OUTPUT_HANDLE)
+        enc.emitMovRI32("rcx", -11)
+        enc.emitCallImport("GetStdHandle")
+        enc.emitStackStore(PhotonRuntime.OFF_HSTDOUT, "rax")
+
+        // WriteFile(hStdOut, ptr, len, NULL, NULL)
+        enc.emitStackLoad("rcx", PhotonRuntime.OFF_HSTDOUT)
+        enc.emitStackLoad("rdx", PhotonRuntime.OFF_PTR)
+        enc.emitStackLoad("r8", PhotonRuntime.OFF_LEN)
+        enc.emitXorRR("r9", "r9")
+        enc.emitStackStore(PhotonRuntime.OFF_SHADOW_ARG5, "r9")
+        enc.emitCallImport("WriteFile")
+
+        // 换行符就地构造在栈上（位于影子空间之上），免去 runtime 的 .rdata
+        enc.emitStoreByteMemImm8(PhotonRuntime.OFF_NEWLINE, 0x0D)
+        enc.emitStoreByteMemImm8(PhotonRuntime.OFF_NEWLINE + 1, 0x0A)
+
+        // WriteFile(hStdOut, "\r\n", 2, NULL, NULL)
+        enc.emitStackLoad("rcx", PhotonRuntime.OFF_HSTDOUT)
+        enc.emitLeaStack("rdx", PhotonRuntime.OFF_NEWLINE)
+        enc.emitMovRI32("r8", 2)
+        enc.emitXorRR("r9", "r9")
+        enc.emitStackStore(PhotonRuntime.OFF_SHADOW_ARG5, "r9")
+        enc.emitCallImport("WriteFile")
+
+        enc.emitEpilogue()
+    }
+
+    // ── 用户代码：main ──
+
+    /// 编码 `main`：调用 runtime 的 `println` 打印文本，返回 0。
+    ///
+    /// ```asm
+    /// main:
+    ///   push rbp; mov rbp, rsp; sub rsp, 0x30
+    ///   lea  rcx, [rip + @str.0]
+    ///   call println                  ; 跨对象：由 runtime.obj 提供
+    ///   xor  eax, eax
+    ///   leave; ret
+    /// ```
+    fun emitPrintMain(enc: X86Encoder, text: String): Unit {
+        enc.emitPrologue(0x30)
+        enc.emitLeaRIP("rcx", "@str.0")
+        enc.emitCallRel("println")
+        enc.emitXorRR("eax", "eax")
+        enc.emitEpilogue()
+    }
+
+    // ── 目标文件产出 ──
+
+    /// 生成 runtime 目标文件（定义 `println`）。
+    fun buildRuntimeObject(): String {
+        val enc = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitPrintln(enc)
+        val writer = PhotonObjectWriter()
+        return writer.emitFromMachineCode(
+            enc.toHex(),
+            PhotonObjectWriterUtils.joinRelocRecords(enc.getRelocations()),
+            "",
+            "println"
+        )
+    }
+
+    /// 生成用户代码目标文件（定义 `main`，引用 `println`）。
+    fun buildMainObject(text: String): String {
+        val enc = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitPrintMain(enc, text)
+        val writer = PhotonObjectWriter()
+        return writer.emitFromMachineCode(
+            enc.toHex(),
+            PhotonObjectWriterUtils.joinRelocRecords(enc.getRelocations()),
+            text,
+            "main"
+        )
+    }
+
+    // ── 目标文件落盘（VM 路径：hex 文本；AOT 路径见 PhotonNativeWriter）──
+
+    /// 生成 runtime 目标文件并落盘为 hex 文本。
+    ///
+    /// 与 `buildRuntimeObject()` 的差别：这里把目标文件交给**写入器自身**
+    /// 的 `writeObjectHexFile()` —— 即由 writer 的字段**重新序列化**后再写文件。
+    /// 若与 `buildRuntimeObject()` 的返回值不一致，说明 `buildCoffFile()`
+    /// 存在非确定性（构建脚本会做这项一致性校验）。
+    fun writeRuntimeObjectHexFile(path: String): Boolean {
+        val enc = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitPrintln(enc)
+        val writer = PhotonObjectWriter()
+        writer.emitFromMachineCode(
+            enc.toHex(),
+            PhotonObjectWriterUtils.joinRelocRecords(enc.getRelocations()),
+            "",
+            "println"
+        )
+        return writer.writeObjectHexFile(path)
+    }
+
+    /// 生成用户代码目标文件并落盘为 hex 文本（同上，重新序列化落盘）。
+    fun writeMainObjectHexFile(text: String, path: String): Boolean {
+        val enc = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitPrintMain(enc, text)
+        val writer = PhotonObjectWriter()
+        writer.emitFromMachineCode(
+            enc.toHex(),
+            PhotonObjectWriterUtils.joinRelocRecords(enc.getRelocations()),
+            text,
+            "main"
+        )
+        return writer.writeObjectHexFile(path)
+    }
+}

@@ -1,0 +1,36 @@
+// aura:///aura/lang/compiler/backend/photon/PhotonCoffDumper.aura
+package aura.lang.compiler.backend.photon
+// 输出 COFF hex 到 stdout，供外部脚本转为 binary
+
+import aura.lang.std.String
+import "PhotonObjectWriter.aura"
+import "x86_64/X86Encoder.aura"
+
+fun main() {
+    // 生成机器码
+    val encoder = X86Encoder()
+    encoder.emitPrologue(48)
+    encoder.emitLeaRIP("rcx", "@str.0")
+    encoder.emitCallRel("println")
+    encoder.emitXorRR("eax", "eax")
+    encoder.emitEpilogue()
+
+    val mcHex = encoder.toHex()
+    val relocs = encoder.getRelocations()
+
+    // 构建重定位字符串（用 ;; 分隔条目）
+    var relocHex: String = ""
+    var i: Int = 0
+    while (i < relocs.size) {
+        if (relocHex != "") { relocHex = relocHex + ";;" }
+        relocHex = relocHex + relocs[i]
+        i = i + 1
+    }
+
+    // 生成 COFF
+    val writer = PhotonObjectWriter()
+    val coffHex = writer.emitFromMachineCode(mcHex, relocHex, "hello", "main")
+
+    // 输出纯 hex（无其他内容）
+    println(coffHex)
+}

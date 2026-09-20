@@ -1,0 +1,353 @@
+// aura:///aura/lang/compiler/backend/RegisterAllocator.aura
+package aura.lang.compiler.backend.photon
+// ─────────────────────────────────────────────────────────────
+// 寄存器分配（RegisterAllocator）— Phase D (任务 D.1)
+//
+// 乐观图着色（Optimistic Graph Coloring）：
+//   1. DFS 遍历 DAG 节点
+//   2. 为每个节点构建干扰列表
+//   3. 分配空闲颜色（物理寄存器）
+//   4. 无空闲颜色时尝试乐观重着色
+//   5. 失败则溢出（spill）
+//
+// 颜色存储使用扁平字符串："nodeId|color\n" 格式（同 SsaBuilder varMap 模式）
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+
+/// 寄存器分配器：乐观图着色算法。
+class RegisterAllocator {
+
+    /// 可用颜色（物理寄存器名）。
+    private var availColors: String = "rax,rbx,rcx,rdx,rsi,rdi,r12,r13,r14,r15"
+
+    /// 节点颜色表（扁平字符串 "nodeId|color\n"）。
+    private var colorMap: String = ""
+
+    /// 溢出节点列表（逗号分隔的 nodeId）。
+    private var spilled: String = ""
+
+    /// 调用栈（DFS 用，逗号分隔的 nodeId）。
+    private var callStack: String = ""
+
+    /// 溢出槽数量。
+    private var spillSlots: Int = 0
+
+    /// DAG 引用。
+    private var dag: MachineDag = null
+
+    init() {
+        this.colorMap = ""
+        this.spilled = ""
+        this.callStack = ""
+        this.spillSlots = 0
+        this.dag = null
+    }
+
+    /// 主入口：执行寄存器分配。
+    fun allocate(d: MachineDag): Unit {
+        this.dag = d
+        this.colorMap = ""
+        this.spilled = ""
+        this.callStack = ""
+        this.spillSlots = 0
+
+        // DFS 遍历所有根节点
+        val roots: List<String> = d.roots.split(",")
+        var i: Int = 0
+        while (i < roots.size) {
+            val root: Int = strToInt(roots[i])
+            if (root >= 0) {
+                this.dfs(root)
+            }
+            i = i + 1
+        }
+    }
+
+    /// DFS 遍历。
+    private fun dfs(rootNode: Int): Unit {
+        if (this.callStackContains(rootNode)) {
+            return
+        }
+        this.callStackPush(rootNode)
+
+        val node: DagNode = this.dag.nodeOf(rootNode)
+        val interference: String = this.buildInterference(rootNode)
+        val color: String = this.assignColor(rootNode, interference)
+
+        // 递归处理子节点
+        if (node.kind == "Value" || node.kind == "Reg") {
+            val args: List<String> = node.args.split(",")
+            var j: Int = 0
+            while (j < args.size) {
+                val arg: Int = strToInt(args[j])
+                if (arg >= 0) {
+                    this.dfs(arg)
+                }
+                j = j + 1
+            }
+        }
+
+        this.callStackPop()
+    }
+
+    /// 分配颜色（寄存器）。
+    private fun assignColor(nodeId: Int, interference: String): String {
+        val used: String = this.getUsedColors(interference)
+        val free: String = this.getFreeColor(used)
+        if (free != "") {
+            this.colorPut(nodeId, free)
+            return free
+        }
+        if (this.tryOptimisticRecolor(nodeId, interference)) {
+            return this.colorGet(nodeId)
+        }
+        this.spill(nodeId)
+        return "spill_slot_" + toStr(this.spillSlots)
+    }
+
+    /// 构建干扰列表。
+    private fun buildInterference(nodeId: Int): String {
+        var result: String = ""
+        val node: DagNode = this.dag.nodeOf(nodeId)
+        val args: List<String> = node.args.split(",")
+        var i: Int = 0
+        while (i < args.size) {
+            val arg: Int = strToInt(args[i])
+            if (arg >= 0) {
+                val argColor: String = this.colorGet(arg)
+                if (argColor != "") {
+                    if (result != "") { result = result + "," }
+                    result = result + argColor
+                }
+            }
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 获取已使用的颜色集合。
+    private fun getUsedColors(interference: String): String {
+        return interference
+    }
+
+    /// 查找空闲颜色。
+    private fun getFreeColor(used: String): String {
+        val avail: List<String> = this.availColors.split(",")
+        val usedList: List<String> = used.split(",")
+        var i: Int = 0
+        while (i < avail.size) {
+            var conflict: Boolean = false
+            var j: Int = 0
+            while (j < usedList.size) {
+                if (avail[i] == usedList[j]) {
+                    conflict = true
+                    break
+                }
+                j = j + 1
+            }
+            if (!conflict) {
+                return avail[i]
+            }
+            i = i + 1
+        }
+        return ""
+    }
+
+    /// 乐观重着色。
+    private fun tryOptimisticRecolor(nodeId: Int, interference: String): Boolean {
+        val avail: List<String> = this.availColors.split(",")
+        val usedList: List<String> = interference.split(",")
+        var i: Int = 0
+        while (i < usedList.size) {
+            val conflictColor: String = usedList[i]
+            val conflictingNode: Int = this.findConflictingNode(nodeId, conflictColor)
+            if (conflictingNode >= 0) {
+                this.spill(conflictingNode)
+                val used: String = this.getUsedColors(this.buildInterference(nodeId))
+                val free: String = this.getFreeColor(used)
+                if (free != "") {
+                    this.colorPut(nodeId, free)
+                    return true
+                }
+            }
+            i = i + 1
+        }
+        return false
+    }
+
+    /// 查找使用指定颜色的冲突节点。
+    private fun findConflictingNode(nodeId: Int, color: String): Int {
+        val node: DagNode = this.dag.nodeOf(nodeId)
+        val args: List<String> = node.args.split(",")
+        var i: Int = 0
+        while (i < args.size) {
+            val arg: Int = strToInt(args[i])
+            if (arg >= 0) {
+                val argColor: String = this.colorGet(arg)
+                if (argColor == color) {
+                    return arg
+                }
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// 溢出节点。
+    private fun spill(nodeId: Int): Unit {
+        if (this.spilled == "") {
+            this.spilled = toStr(nodeId)
+        } else {
+            this.spilled = this.spilled + "," + toStr(nodeId)
+        }
+        this.spillSlots = this.spillSlots + 1
+    }
+
+    // ── 颜色表操作（扁平字符串）──
+
+    /// 存储颜色。
+    private fun colorPut(nodeId: Int, color: String): Unit {
+        this.colorRemove(nodeId)
+        this.colorMap = this.colorMap + toStr(nodeId) + "|" + color + "\n"
+    }
+
+    /// 读取颜色。
+    private fun colorGet(nodeId: Int): String {
+        val lines: List<String> = this.colorMap.split("\n")
+        var i: Int = 0
+        while (i < lines.size) {
+            if (lines[i] != "" && lines[i].contains("|")) {
+                val parts: List<String> = lines[i].split("|")
+                if (parts.size >= 2 && strToInt(parts[0]) == nodeId) {
+                    return parts[1]
+                }
+            }
+            i = i + 1
+        }
+        return ""
+    }
+
+    /// 删除颜色。
+    private fun colorRemove(nodeId: Int): Unit {
+        val lines: List<String> = this.colorMap.split("\n")
+        var result: String = ""
+        var i: Int = 0
+        while (i < lines.size) {
+            if (lines[i] != "" && lines[i].contains("|")) {
+                val parts: List<String> = lines[i].split("|")
+                if (parts.size >= 2 && strToInt(parts[0]) != nodeId) {
+                    if (result != "") { result = result + "\n" }
+                    result = result + lines[i]
+                }
+            }
+            i = i + 1
+        }
+        this.colorMap = result
+    }
+
+    // ── 调用栈操作 ──
+
+    private fun callStackContains(nodeId: Int): Boolean {
+        if (this.callStack == "") { return false }
+        val parts: List<String> = this.callStack.split(",")
+        var i: Int = 0
+        while (i < parts.size) {
+            if (strToInt(parts[i]) == nodeId) { return true }
+            i = i + 1
+        }
+        return false
+    }
+
+    private fun callStackPush(nodeId: Int): Unit {
+        if (this.callStack == "") {
+            this.callStack = toStr(nodeId)
+        } else {
+            this.callStack = this.callStack + "," + toStr(nodeId)
+        }
+    }
+
+    private fun callStackPop(): Unit {
+        val parts: List<String> = this.callStack.split(",")
+        if (parts.size <= 1) {
+            this.callStack = ""
+        } else {
+            var result: String = ""
+            var i: Int = 0
+            while (i < parts.size - 1) {
+                if (result != "") { result = result + "," }
+                result = result + parts[i]
+                i = i + 1
+            }
+            this.callStack = result
+        }
+    }
+
+    // ── 查询 ──
+
+    fun isReservedReg(reg: String): Boolean {
+        return reg == "rbp" || reg == "rsp"
+    }
+
+    fun getSpillSlots(): Int {
+        return this.spillSlots
+    }
+
+    fun isSpilled(nodeId: Int): Boolean {
+        val color: String = this.colorGet(nodeId)
+        return color != "" && color.startsWith("spill_slot_")
+    }
+
+    fun getColor(nodeId: Int): String {
+        return this.colorGet(nodeId)
+    }
+
+    fun getSpilledNodes(): String {
+        return this.spilled
+    }
+
+    fun getAvailableRegisters(): String {
+        return this.availColors
+    }
+
+    fun getCallStack(): String {
+        return this.callStack
+    }
+
+    // ── 工具 ──
+
+    private fun strToInt(text: String): Int {
+        if (text == "") { return 0 }
+        val len: Int = text.length
+        var total: Int = 0
+        var i: Int = 0
+        var neg: Boolean = false
+        if (len > 0 && text.charCodeAt(0) == 45) { neg = true; i = 1 }
+        while (i < len) {
+            val digit: Int = text.charCodeAt(i) - 48
+            if (digit >= 0 && digit <= 9) { total = total * 10 + digit }
+            i = i + 1
+        }
+        if (neg) { return -total }
+        return total
+    }
+
+    private fun toStr(n: Int): String {
+        if (n == 0) { return "0" }
+        var neg: Boolean = false
+        if (n < 0) { neg = true; n = -n }
+        var result: String = ""
+        while (n > 0) {
+            result = toStr(n % 10) + result
+            n = n / 10
+        }
+        if (neg) { result = "-" + result }
+        return result
+    }
+}
+
+object RegisterAllocatorUtils {
+    fun emptyAllocator(): RegisterAllocator {
+        return RegisterAllocator()
+    }
+}

@@ -1,0 +1,38 @@
+// Test splitDoubleSemi on symbols string
+package aura.lang.compiler.backend.photon
+import aura.lang.std.String
+
+fun main() {
+    val symbols: String = "main|0|1|0x0001|0x01;;@str.0|0|2|0x0001|0x02"
+    println("Symbols: " + symbols)
+    
+    var parts: List<String> = splitDoubleSemi(symbols)
+    println("Number of parts: " + parts.size)
+    
+    var i: Int = 0
+    while (i < parts.size) {
+        println("Part $i: '" + parts[i] + "'")
+        i = i + 1
+    }
+}
+
+fun splitDoubleSemi(text: String): List<String> {
+    val result: List<String> = arrayListOf<String>()
+    if (text == "") {
+        return result
+    }
+    var start: Int = 0
+    var i: Int = 0
+    var len: Int = text.length
+    while (i < len - 1) {
+        if (text.substring(i, i + 2) == ";;") {
+            result.add(text.substring(start, i))
+            start = i + 2
+        }
+        i = i + 1
+    }
+    if (start < len) {
+        result.add(text.substring(start, len))
+    }
+    return result
+}
