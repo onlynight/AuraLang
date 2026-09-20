@@ -120,7 +120,7 @@ fn check_embedded_stdlib() {
             missing.join(", ")
         );
         println!(
-            "cargo:warning=Aura: Run `aura stdlib-compile aura/core/aura/lang/std --output build` to precompile"
+            "cargo:warning=Aura: Run `aura stdlib-compile ../../aura/core/aura/lang/std --output build` to precompile"
         );
     }
 }

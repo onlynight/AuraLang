@@ -2,6 +2,7 @@
 members = [
     "compiler",
     "cli",
+    "loom",
 ]
 resolver = "2"
 

@@ -358,9 +358,9 @@ unsafe fn windows_get_module_handle() -> usize {
 unsafe fn get_proc_address(handle: usize, name: *const u16) -> usize {
     unsafe {
         unsafe extern "system" {
-            fn GetProcAddress(module: usize, proc_name: *const u16) -> usize;
+            fn GetProcAddressW(module: usize, proc_name: *const u16) -> usize;
         }
-        GetProcAddress(handle, name)
+        GetProcAddressW(handle, name)
     }
 }
 

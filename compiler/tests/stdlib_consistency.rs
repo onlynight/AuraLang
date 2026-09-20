@@ -95,7 +95,7 @@ fn scan_aura_files(dir: PathBuf) -> Vec<PathBuf> {
 #[test]
 fn test_stdlib_consistency() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let aura_dir = manifest_dir.join("../aura/core/aura/lang/std");
+    let aura_dir = manifest_dir.join("../../aura/core/aura/lang/std");
     let rust_dir = manifest_dir.join("src/std");
 
     let (consistent, inconsistent, warnings) = check_consistency(
