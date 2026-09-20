@@ -132,19 +132,17 @@ class TypeMapper {
         // `'%var.N' defined with type '{ i8, i8, i8, i8 }' but expected 'ptr'`。
         // 让类名走结构体/指针的通用映射即可。
         else if (ty == "List" || ty == "Map" || ty == "Set" || ty == "Value" ||
-            ty == "Iterator" || ty == "Closure" || ty == "ArrayList"
-            || ty == "HashSet" || ty == "LinkedList") {
+            ty == "Iterator" || ty == "Closure") {
             return "i8*"
         }
         else if (ty.startsWith("List<") || ty.startsWith("Map<") ||
-            ty.startsWith("Set<") || ty.startsWith("Array<")
-            || ty.startsWith("ArrayList<") || ty.startsWith("HashSet<")
-            || ty.startsWith("LinkedList<")) {
-            // 集合实现的类型名同样按**句柄 `i8*`** 表示：
-            // 构造侧（`ArrayList()` / `mutableListOf()`）本来就发射成
-            // `aura_lang_std_Collections_emptyList()`（句柄），若类型侧仍当成
-            // `%struct.ArrayList*`，成员访问会拿句柄做结构体 `getelementptr`
-            // → 读到垃圾指针并崩溃（实测 `HashMap` 建桶时 0xC0000005）。
+            ty.startsWith("Set<") || ty.startsWith("Array<")) {
+            return "i8*"
+        }
+        else if (ty.startsWith("Vararg<")) {
+            // `vararg xs: T` 形参：AOT 侧就是一个原生列表句柄（与 `List<T>` 同形）。
+            // 必须映射成 `i8*`，否则会落到通用类分支生成 `%struct.Vararg*`
+            //（无定义类型 → llc 报 use of undefined type）。
             return "i8*"
         }
         else if (ty.startsWith("Pointer<")) { return "ptr" }

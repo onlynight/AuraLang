@@ -1,0 +1,13 @@
+package test
+
+import aura.lang.collection.LinkedList
+import aura.lang.collection.ListNode
+
+fun main(): Int {
+    var node = ListNode<Int>(42)
+    println("node value=" + node.value)
+    var l = LinkedList<Int>()
+    l.addBack(1)
+    println("size=" + l.count())
+    return 0
+}

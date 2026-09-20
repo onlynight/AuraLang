@@ -25,12 +25,17 @@ import aura.lang.std.string.StringOps
 /// 标准库集合操作（纯 Aura 实现）。
 object Collections {
 
-    // ── 内部常量 ──
-
-    private const val LIST_MIN_CAP: Long = 4
-    private const val MAP_MIN_CAP: Long = 4
-    private const val LIST_HDR_SIZE: Long = 24
-    private const val MAP_HDR_SIZE: Long = 32
+    // ── 内部常量（必须**内联字面量**，不能写成 `private const val`）──
+    //
+    // AOT 发射器不支持 `const val` 的编译期折叠：对象内常量会被当作**实例字段**
+    // 读取。而核心库里存在两个同名 object `Collections`
+    //（`aura.lang.collection.Collections` 与 `aura.lang.std.collection.Collections`），
+    // 两者共用同一个符号/结构体（`%struct.Collections`），字段索引互相错位 ——
+    // 实测「最小容量」（应为 4）读成 0、「表头大小」（应为 24/32）读成 0，
+    // 于是 `Memory.alloc(0)` 拿到 0 字节块、紧接着写入 len/cap →
+    // 堆越界破坏（进程以 0xC0000374 STATUS_HEAP_CORRUPTION 退出）。
+    //
+    // 因此这里直接使用字面量：最小容量 4，列表头 24，映射头 32。
 
     // ══════════════════════════════════════════════════════════
     //  List 操作
@@ -38,12 +43,12 @@ object Collections {
 
     /// 创建空列表。
     fun emptyList(): Long {
-        return newList(LIST_MIN_CAP)
+        return newList(4)
     }
 
     /// 创建包含最多 3 个元素的列表。
     fun listOf(a: Long, b: Long, c: Long): Long {
-        val l: Long = newList(LIST_MIN_CAP)
+        val l: Long = newList(4)
         push(l, a)
         push(l, b)
         push(l, c)
@@ -52,7 +57,7 @@ object Collections {
 
     /// 创建 Pair（2 元素列表），用于 `to` 运算符解构。
     fun pairOf(a: Long, b: Long): Long {
-        val l: Long = newList(LIST_MIN_CAP)
+        val l: Long = newList(4)
         push(l, a)
         push(l, b)
         return l
@@ -92,7 +97,7 @@ object Collections {
     /// 追加元素（原地修改，返回自身句柄）。
     fun listAppend(list: Long, value: Long): Long {
         if (list == 0) {
-            val l: Long = newList(LIST_MIN_CAP)
+            val l: Long = newList(4)
             push(l, value)
             return l
         }
@@ -114,7 +119,7 @@ object Collections {
     /// 按下标写入（越界则追加，原地修改）。
     fun listSet(list: Long, idx: Long, value: Long): Long {
         if (list == 0) {
-            val l: Long = newList(LIST_MIN_CAP)
+            val l: Long = newList(4)
             push(l, value)
             return l
         }
@@ -185,7 +190,7 @@ object Collections {
 
     /// 取前 n 个元素。
     fun take(list: Long, n: Long): Long {
-        val out: Long = newList(LIST_MIN_CAP)
+        val out: Long = newList(4)
         if (list == 0 || n <= 0) { return out }
         val len: Long = Memory.read64(list)
         val items: Long = Memory.read64(list + 16)
@@ -202,7 +207,7 @@ object Collections {
     /// 闭包 ABI: (env: i8*, element: i64) -> i64 (non-zero = keep)
     /// sig 格式: "i64|i64" (retTy|paramTys, env 由发射器自动前置)
     fun filter(list: Long, clo: Long): Long {
-        val out: Long = newList(LIST_MIN_CAP)
+        val out: Long = newList(4)
         if (list == 0) { return out }
         val len: Long = Memory.read64(list)
         val items: Long = Memory.read64(list + 16)
@@ -223,7 +228,7 @@ object Collections {
     /// 闭包 ABI: (env: i8*, element: i64) -> i64 (transformed value)
     /// sig 格式: "i64|i64" (retTy|paramTys, env 由发射器自动前置)
     fun map(list: Long, clo: Long): Long {
-        val out: Long = newList(LIST_MIN_CAP)
+        val out: Long = newList(4)
         if (list == 0) { return out }
         val len: Long = Memory.read64(list)
         val items: Long = Memory.read64(list + 16)
@@ -243,12 +248,12 @@ object Collections {
 
     /// 创建可变映射表。
     fun mutableMapOf(): Long {
-        return newMap(MAP_MIN_CAP * 2)
+        return newMap(4 * 2)
     }
 
     /// 创建空映射表。
     fun emptyMap(): Long {
-        return newMap(MAP_MIN_CAP)
+        return newMap(4)
     }
 
     /// 写入键值对（原地修改，覆盖已有键）。
@@ -324,8 +329,8 @@ object Collections {
 
     /// 创建新的列表（len=0, 指定 cap）。
     private fun newList(cap: Long): Long {
-        if (cap < LIST_MIN_CAP) { cap = LIST_MIN_CAP }
-        val l: Long = Memory.alloc(LIST_HDR_SIZE)
+        if (cap < 4) { cap = 4 }
+        val l: Long = Memory.alloc(24)
         if (l == 0) { return 0 }
         val items: Long = Memory.alloc(cap * 8)
         Memory.write64(l, 0)
@@ -344,7 +349,7 @@ object Collections {
         val cap: Long = Memory.read64(l + 8)
         if (len >= cap) {
             var newcap: Long = cap * 2
-            if (newcap < LIST_MIN_CAP) { newcap = LIST_MIN_CAP }
+            if (newcap < 4) { newcap = 4 }
             val oldItems: Long = Memory.read64(l + 16)
             val newItems: Long = Memory.alloc(newcap * 8)
             if (newItems == 0) { return }
@@ -363,8 +368,8 @@ object Collections {
 
     /// 创建新的映射表。
     private fun newMap(cap: Long): Long {
-        if (cap < MAP_MIN_CAP) { cap = MAP_MIN_CAP }
-        val m: Long = Memory.alloc(MAP_HDR_SIZE)
+        if (cap < 4) { cap = 4 }
+        val m: Long = Memory.alloc(32)
         if (m == 0) { return 0 }
         val keys: Long = Memory.alloc(cap * 8)
         val vals: Long = Memory.alloc(cap * 8)
@@ -386,7 +391,7 @@ object Collections {
     /// 扩展映射表容量。
     private fun growMap(m: Long, oldLen: Long, oldCap: Long) {
         var newcap: Long = oldCap * 2
-        if (newcap < MAP_MIN_CAP) { newcap = MAP_MIN_CAP }
+        if (newcap < 4) { newcap = 4 }
         val oldKeys: Long = Memory.read64(m + 16)
         val oldVals: Long = Memory.read64(m + 24)
         val newKeys: Long = Memory.alloc(newcap * 8)

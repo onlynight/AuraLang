@@ -40,6 +40,11 @@ object CommandsUtils {
             return CompilerApiUtils.aotBuildExeFile(src, outPath, args.getValue("--llvm-home"))
         } else {
             val result: String = CompilerApiUtils.codegenCompile(content)
+            // 检查编译是否失败（codegenCompile 失败时返回 "error: ..." 前缀）
+            if (result.startsWith("error")) {
+                println("Compilation failed: " + result)
+                return 1
+            }
             if (out.length > 0) {
                 FileIOUtils.writeTextFile(out, result)
                 println("Compiled: " + out)

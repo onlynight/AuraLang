@@ -1,0 +1,10 @@
+package test
+
+import aura.lang.collection.LinkedList
+
+fun main(): Int {
+    var l = LinkedList<Integer>()
+    l.addBack(1)
+    println("size=" + l.count())
+    return 0
+}

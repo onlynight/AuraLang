@@ -451,17 +451,36 @@ class Parser {
         if (!this.prsCheck("RParen")) {
             while (true) {
                 var pname: String = this.prsCurLit()
+                var isVararg: Boolean = false
                 // `vararg` 是软关键字（词法器产出的仍是 Ident）：`vararg nums: Int`。
                 // 不跳过会把 `vararg` 当作参数名，真正的参数名 `nums` 无处安放，
                 // 整个参数列表反同步（`fun f(vararg xs: Int)` 声明被吞掉 → 崩）。
                 if (pname == "vararg" && this.prsKind(this.pos + 1) == "Ident") {
                     this.prsAdvance()
                     pname = this.prsCurLit()
+                    isVararg = true
                 }
                 this.prsExpectParamName()
                 var pty: String = ""
                 if (this.prsMatch("Colon")) {
                     pty = this.parseTypeName()
+                }
+                // `vararg xs: T` 在 AOT 侧的形参就是**一个原生列表句柄**
+                // （调用点打包成列表传入）。这里标注成 `Vararg<T>`：
+                //   * `TypeMapper` 把它映射成 `i8*`（与原 `Any` 表示一致，签名不变）；
+                //   * 发射器据此把形参登记成**集合变量**，于是函数体内
+                //     `xs.size` → `Collections_count`、`xs[i]` → `Collections.getAt`，
+                //     而不是被当成 C 字符串（`strlen` / `String_charAt`）；
+                //   * 调用点据此**无条件打包**（哪怕只有一个实参）。
+                // 旧实现丢掉 vararg 标记、类型退化成 `Any`：实测
+                // `HashMapUtils.mapOf("only", 1)` 的 `pairs.size` 发成 `strlen(列表句柄)`
+                // → 循环边界是垃圾，读出空表。
+                if (isVararg) {
+                    if (pty == "") {
+                        pty = "Vararg<Any>"
+                    } else {
+                        pty = "Vararg<" + pty + ">"
+                    }
                 }
                 // 默认参数值 `name: Type = expr`：作为 Param 的子节点保存，
                 // 调用点实参不足时由发射器补齐。不解析会让 `=` 处的参数列表

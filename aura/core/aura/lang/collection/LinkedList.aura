@@ -1,0 +1,269 @@
+// aura:///aura/lang/collection/LinkedList.aura
+package aura.lang.collection
+// 集合包：链表实现
+
+/// 链表节点
+class ListNode<T> {
+    var value: T
+    var next: ListNode<T>
+    var prev: ListNode<T>
+
+    constructor(value: T) {
+        this.value = value
+        this.next = null
+        this.prev = null
+    }
+}
+
+/// LinkedList<T> — 基于双向链表的 List 实现。
+///
+/// - 时间复杂度：add/remove O(1) 均摊, getAt O(n)
+/// - 空间复杂度：O(n)
+/// - 元素有序，允许重复
+///
+/// @see List, ArrayList, LinkedList
+/// @since 0.5
+class LinkedList<T> : List<T> {
+
+    // ── 内部存储 ──
+
+    private var head: ListNode<T>
+    private var tail: ListNode<T>
+    private var _size: Int = 0
+
+    // ── 构造 ──
+
+    /// 创建空链表
+    constructor() {
+        this.head = null
+        this.tail = null
+        this._size = 0
+    }
+
+    // ── Collection 接口实现 ──
+
+    /// 元素数量
+    override fun count(): Int {
+        return _size
+    }
+
+    /// 按下标获取元素
+    override fun getAt(index: Int): T {
+        if (index < 0 || index >= _size) {
+            return null
+        }
+        var current: ListNode<T> = head
+        var i: Int = 0
+        while (i < index) {
+            current = current.next
+            i = i + 1
+        }
+        return current.value
+    }
+
+    /// 检查集合是否包含指定元素
+    override fun contains(item: T): Boolean {
+        var current: ListNode<T> = head
+        while (current != null) {
+            if (current.value == item) {
+                return true
+            }
+            current = current.next
+        }
+        return false
+    }
+
+    /// 查找元素的索引（未找到返回 -1）
+    override fun indexOf(item: T): Int {
+        var current: ListNode<T> = head
+        var i: Int = 0
+        while (current != null) {
+            if (current.value == item) {
+                return i
+            }
+            current = current.next
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// 检查集合是否为空
+    override fun isEmpty(): Boolean {
+        return _size == 0
+    }
+
+    /// 获取第一个元素
+    override fun first(): T {
+        if (_size == 0) {
+            return null
+        }
+        return head.value
+    }
+
+    /// 获取最后一个元素
+    override fun last(): T {
+        if (_size == 0) {
+            return null
+        }
+        return tail.value
+    }
+
+    /// 转换为字符串表示
+    override fun toString(): String {
+        return "[Linked]"
+    }
+
+    // ── List 接口实现 ──
+
+    /// 添加元素到末尾
+    fun addBack(item: T): Unit {
+        var node: ListNode<T> = ListNode<T>(item)
+        if (tail != null) {
+            tail.next = node
+            node.prev = tail
+        } else {
+            head = node
+        }
+        tail = node
+        _size = _size + 1
+    }
+
+    /// 在队尾添加元素（pushBack 别名）
+    fun pushBack(item: T): Unit {
+        addBack(item)
+    }
+
+    /// 在指定索引处插入元素
+    override fun insert(index: Int, item: T): Unit {
+        if (index <= 0) {
+            prepend(item)
+            return
+        }
+        if (index >= _size) {
+            addBack(item)
+            return
+        }
+        var current: ListNode<T> = head
+        var i: Int = 0
+        while (i < index - 1) {
+            current = current.next
+            i = i + 1
+        }
+        var node: ListNode<T> = ListNode<T>(item)
+        node.next = current.next
+        node.prev = current
+        current.next.prev = node
+        current.next = node
+        _size = _size + 1
+    }
+
+    /// 移除指定索引处的元素
+    override fun removeAt(index: Int): T {
+        if (index < 0 || index >= _size) {
+            return null
+        }
+        if (index == 0) {
+            return removeFirst()
+        }
+        if (index == _size - 1) {
+            return removeLast()
+        }
+        var current: ListNode<T> = head
+        var i: Int = 0
+        while (i < index) {
+            current = current.next
+            i = i + 1
+        }
+        var value: T = current.value
+        current.prev.next = current.next
+        current.next.prev = current.prev
+        _size = _size - 1
+        return value
+    }
+
+    /// 移除指定元素
+    override fun removeItem(item: T): Boolean {
+        var current: ListNode<T> = head
+        while (current != null) {
+            if (current.value == item) {
+                if (current == head) {
+                    head = current.next
+                    if (head != null) {
+                        head.prev = null
+                    }
+                } else {
+                    current.prev.next = current.next
+                    if (current.next != null) {
+                        current.next.prev = current.prev
+                    } else {
+                        tail = current.prev
+                    }
+                }
+                _size = _size - 1
+                return true
+            }
+            current = current.next
+        }
+        return false
+    }
+
+    /// 清空链表
+    override fun clear(): Unit {
+        head = null
+        tail = null
+        _size = 0
+    }
+
+    // ── LinkedList 特有方法 ──
+
+    /// 在开头插入元素
+    fun prepend(item: T): Unit {
+        var node: ListNode<T> = ListNode<T>(item)
+        node.next = head
+        if (head != null) {
+            head.prev = node
+        }
+        head = node
+        if (tail == null) {
+            tail = node
+        }
+        _size = _size + 1
+    }
+
+    /// 在末尾添加元素
+    fun append(item: T): Unit {
+        add(item)
+    }
+
+    /// 移除第一个元素
+    fun removeFirst(): T {
+        if (_size == 0) {
+            return null
+        }
+        var value: T = head.value
+        head = head.next
+        if (head != null) {
+            head.prev = null
+        } else {
+            tail = null
+        }
+        _size = _size - 1
+        return value
+    }
+
+    /// 移除最后一个元素
+    fun removeLast(): T {
+        if (_size == 0) {
+            return null
+        }
+        var value: T = tail.value
+        tail = tail.prev
+        if (tail != null) {
+            tail.next = null
+        } else {
+            head = null
+        }
+        _size = _size - 1
+        return value
+    }
+}

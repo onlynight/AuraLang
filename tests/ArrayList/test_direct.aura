@@ -1,0 +1,16 @@
+package test
+
+import aura.lang.collection.ArrayList
+
+fun main(): Int {
+    var l = ArrayList<Int>()
+    l.add(1)
+    l.add(2)
+    l.add(3)
+    println("count=" + l.count())
+    println("getAt(0)=" + l.getAt(0))
+    println("getAt(2)=" + l.getAt(2))
+    var idx = l.indexOf(2)
+    println("indexOf(2)=" + idx)
+    return 0
+}

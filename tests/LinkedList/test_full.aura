@@ -1,0 +1,40 @@
+package test
+
+import aura.lang.collection.LinkedList
+import aura.lang.collection.ListNode
+
+fun main(): Int {
+    // Test LinkedList basic operations
+    var l = LinkedList<Int>()
+    
+    // Test addBack
+    l.addBack(1)
+    l.addBack(2)
+    l.addBack(3)
+    
+    assert(l.count() == 3, "LinkedList count should be 3")
+    assert(l.first() == 1, "LinkedList first should be 1")
+    assert(l.last() == 3, "LinkedList last should be 3")
+    
+    // Test prepend
+    l.prepend(0)
+    assert(l.count() == 4, "LinkedList count after prepend should be 4")
+    assert(l.first() == 0, "LinkedList first after prepend should be 0")
+    
+    // Test removeFirst
+    l.removeFirst()
+    assert(l.count() == 3, "LinkedList count after removeFirst should be 3")
+    assert(l.first() == 1, "LinkedList first after removeFirst should be 1")
+    
+    // Test removeLast
+    l.removeLast()
+    assert(l.count() == 2, "LinkedList count after removeLast should be 2")
+    assert(l.last() == 2, "LinkedList last after removeLast should be 2")
+    
+    // Test clear
+    l.clear()
+    assert(l.isEmpty() == true, "LinkedList should be empty after clear")
+    
+    println("LinkedList tests passed")
+    return 0
+}

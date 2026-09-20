@@ -1360,6 +1360,16 @@ class LlvmEmitter {
                 }
             }
         }
+        // 接收者是**返回集合的方法调用**（`m.keys().size` / `xs.filter{…}.size`）：
+        // 其结果在 LLVM 侧同样是 `i8*`，只能按被调用函数的 **Aura 返回类型**判定。
+        // 否则 `.size` 落到字符串分支被算成 `strlen(列表句柄)`（实测
+        // `hashmap_edge_cases` 的 `pmf.keysCount` / `ssr.keysCount` 失败）。
+        if (hir.kindOf(recvId) == "HirCall") {
+            val art: String = this.callAuraRetTy(hir, recvId)
+            if (art != "" && EmitUtils.isCollectionTypeName(this.resolveAlias(art))) {
+                return true
+            }
+        }
         val ty: String = hir.tyOf(recvId)
         if (ty != "" && EmitUtils.isCollectionTypeName(this.resolveAlias(ty))) {
             // 排除 ArrayList（用户定义的类），避免下标访问被降级为 Collections.getAt
@@ -1406,6 +1416,14 @@ class LlvmEmitter {
                         return this.typeArgElemTy(fty)
                     }
                 }
+            }
+        }
+        // 接收者是「返回集合的方法调用」（`m.keys()[i]`）：元素类型取该调用的
+        // **Aura 返回类型**的类型参数（与 `isCollectionReceiver` 的判定一致）。
+        if (hir.kindOf(recvId) == "HirCall") {
+            val art: String = this.callAuraRetTy(hir, recvId)
+            if (art != "" && EmitUtils.isCollectionTypeName(this.resolveAlias(art))) {
+                return this.typeArgElemTy(art)
             }
         }
         return "i8*"
@@ -2083,7 +2101,13 @@ class LlvmEmitter {
                     // 类型登记元素类型，否则 `.size` 会被当成字符串长度
                     // （`aura_strlen`）、下标会被当成 `charAt`，集合读取全变成空值。
                     val pAuraTy: String = hir.tyOf(cid)
-                    if (EmitUtils.isCollectionTypeName(this.resolveAlias(pAuraTy))) {
+                    // `vararg xs: T` 形参（标注为 `Vararg<T>`，见 Parser）：
+                    // AOT 侧收到的是**原生列表句柄**，必须按集合变量登记，否则
+                    // `xs.size` 会被当成字符串长度（`strlen`）、`xs[i]` 当成
+                    // `String_charAt` —— 实测 `HashMapUtils.mapOf("only", 1)` 读出空表。
+                    if (aotContains(pAuraTy, "Vararg<")) {
+                        this.markListVarTyped(pname, this.typeArgElemTy(pAuraTy))
+                    } else if (EmitUtils.isCollectionTypeName(this.resolveAlias(pAuraTy))) {
                         this.markListVarTyped(pname, this.typeArgElemTy(pAuraTy))
                     }
                     // 函数类型参数（`fun f(x: Int, f: (Int) -> Int)`）：
@@ -3029,6 +3053,13 @@ class LlvmEmitter {
             if (sym == "" && this.isThisNode(hir, rk)) {
                 sym = this.curClassSym()
             }
+            // 接口类型变量持有**类实例**（`var m: Map<String,Int> = HashMap<String,Int>()`）：
+            // `inferType` 只给 `i8*`，反解不出类符号 → 回退到变量登记表。
+            // 否则 `m.keys()` 的返回类型解析不到 `List<K>`，`.size` 落到字符串分支
+            // 被算成 `strlen(列表句柄)`（实测 `pmf.keysCount`/`pmf.valuesCount` 失败）。
+            if (sym == "" && hir.kindOf(rk) == "HirVar") {
+                sym = this.clsVarOf(hir.textOf(rk))
+            }
             if (sym != "") {
                 val owner: String = this.ownerClassInChain(sym, fname, hirKidsCount(kids))
                 if (owner != "") {
@@ -3898,6 +3929,56 @@ class LlvmEmitter {
             i = i + 1
         }
         return ""
+    }
+
+    /// 把实参 id 列表里的 `from..total` 项**打包成原生列表**并返回其句柄（`i8*`）。
+    ///
+    /// `fun f(vararg xs: Any)` 的 AOT 签名只有一个 `i8*` 形参（原生列表句柄），
+    /// 而 HIR 会把每个实参各发一份 —— 形参数与实参数不一致，callee 只拿到第一个
+    /// 实参（实测 `HashMapUtils.mapOf("only", 1)` 读出空表）。
+    /// 这里把剩余实参逐个装箱后追加进新列表，作为一个句柄实参传入。
+    fun packVarargsIds(hir: Hir, argIds: String, from: Int, total: Int): String {
+        val empty: String = this.freshVar()
+        this.fBody.sbAdd("  ")
+        this.fBody.sbAdd(empty)
+        this.fBody.sbAdd(" = call i64 @Collections_emptyList(%struct.Collections* @aura_obj_Collections)\n")
+        var cur: String = empty
+        var i: Int = from
+        while (i < total) {
+            var aId: Int = aotToInt(aotFieldAt(argIds, i, ","))
+            if (hir.kindOf(aId) == "HirNamedArg") {
+                val nk: String = hir.kidsOf(aId)
+                if (hirKidsCount(nk) > 0) {
+                    aId = hirKidsAt(nk, 0)
+                }
+            }
+            val aTy: String = this.inferType(hir, aId)
+            val av: String = this.emitExpr(hir, aId)
+            val boxed0: String = this.boxToPtr(av, aTy)
+            val boxed64: String = this.freshVar()
+            this.fBody.sbAdd("  ")
+            this.fBody.sbAdd(boxed64)
+            this.fBody.sbAdd(" = ptrtoint i8* ")
+            this.fBody.sbAdd(boxed0)
+            this.fBody.sbAdd(" to i64\n")
+            val nxt: String = this.freshVar()
+            this.fBody.sbAdd("  ")
+            this.fBody.sbAdd(nxt)
+            this.fBody.sbAdd(" = call i64 @Collections_listAppend(%struct.Collections* @aura_obj_Collections, i64 ")
+            this.fBody.sbAdd(cur)
+            this.fBody.sbAdd(", i64 ")
+            this.fBody.sbAdd(boxed64)
+            this.fBody.sbAdd(")\n")
+            cur = nxt
+            i = i + 1
+        }
+        val curPtr: String = this.freshVar()
+        this.fBody.sbAdd("  ")
+        this.fBody.sbAdd(curPtr)
+        this.fBody.sbAdd(" = inttoptr i64 ")
+        this.fBody.sbAdd(cur)
+        this.fBody.sbAdd(" to i8*\n")
+        return curPtr
     }
 
     /// 构造本次调用的实参 id 列表（`id0,id1,…`）。
@@ -5882,10 +5963,47 @@ class LlvmEmitter {
         if (fname == "") {
             return "0"
         }
+        // `x.hashCode()`：接收者是 `Any`（`i8*`，无类符号）时走基类默认实现
+        // `Any_hashCode`（`aura/core/aura/lang/Any.aura`，按值的规范字符串散列）。
+        //
+        // 旧实现没有任何解析路径 → 调用被**静默丢弃**、表达式恒为 `0`：
+        // `HashMap.hashKey` 的 `key.hashCode()` 因此对所有键返回 0，经混合后
+        // 仍是同一个桶下标 → 全部键挤进同一条链，`put` 的链扫描退化成 O(n²)，
+        // 每次比较还要 `toStr` 分配 → 实测 5000 次 put 内存涨到 500MB+ 且不结束。
+        if (aotLastSegment(fname) == "hashCode" && n >= 1) {
+            val rIdH: Int = hirKidsAt(kids, 0)
+            var clsH: String = this.structSymOfPtr(this.inferType(hir, rIdH))
+            if (clsH == "" && hir.kindOf(rIdH) == "HirVar") {
+                clsH = this.clsVarOf(hir.textOf(rIdH))
+            }
+            // 类自带 `hashCode` 覆写时交给常规路径（`Cls_hashCode`）
+            var useAnyHash: Boolean = (clsH == "")
+            if (clsH != "" && this.funcSignatureOf(sanitizeLlvm(clsH) + "_hashCode") == "") {
+                useAnyHash = true
+            }
+            if (useAnyHash && this.funcSignatureOf("Any_hashCode") != "") {
+                val rTyH: String = this.inferType(hir, rIdH)
+                val rVH: String = this.emitExpr(hir, rIdH)
+                val rsH: String = this.coerceValue(rVH, rTyH, "i8*")
+                val tH: String = this.freshVar()
+                this.fBody.sbAdd("  ")
+                this.fBody.sbAdd(tH)
+                this.fBody.sbAdd(" = call i32 @Any_hashCode(i8* ")
+                this.fBody.sbAdd(rsH)
+                this.fBody.sbAdd(")\n")
+                return tH
+            }
+        }
         // 集合构造：`arrayListOf<T>()` / `listOf()` / `mutableListOf()` …
         // （泛型实参已在解析器消费，HIR 中不出现类型参数）→ 空列表句柄 + 逐个追加。
         // Phase B: 已切换到 Aura Collections 实现（i64/Long 类型）。
-        if (this.isCollectionCtor(fname)) {
+        //
+        // 排除**用户对象限定**的同名方法：`HashMapUtils.mapOf(...)` 的末段是
+        // `mapOf`，若不排除会被当成内置构造器，发出原始列表并存入
+        // `%struct.HashMap*` 变量 → 后续按结构体解引用（实测 `hashmap_edge_cases`
+        // 报 `'%var.N' defined with type 'ptr' but expected 'i32'`）。
+        if (this.isCollectionCtor(fname)
+            && !this.isUserQualifiedCollectionCall(hir, id, kids, n)) {
             val empty: String = this.freshVar()
             this.fBody.sbAdd("  ")
             this.fBody.sbAdd(empty)
@@ -7361,8 +7479,47 @@ class LlvmEmitter {
         // 实参 id 顺序：命名实参按形参名重排（见 `buildArgIds`）
         val argIds: String = this.buildArgIds(hir, kids, effArgStart, n, sym, ai)
         val argTotal: Int = aotCsvCount(argIds)
+        // ── vararg 打包 ──
+        // `fun f(vararg xs: T)` 的 AOT 签名只有一个 `i8*` 形参（原生列表句柄），
+        // 调用点必须把整组实参打包成一个列表传入（**哪怕只有一个实参**）。
+        // 判定依据是形参节点的 Aura 类型标注 `Vararg<T>`（见 Parser）：只比较
+        // LLVM 类型无法把 `vararg xs: Any` 与普通 `Any` 形参区分开。
+        var packAt: Int = -1
+        var pTotal: Int = 0
+        if (paramsCsv != "") {
+            pTotal = aotCsvCount(paramsCsv)
+        }
+        var isVarargSym: Boolean = false
+        val vDefs: String = this.paramDefsOf(sym)
+        if (vDefs != "") {
+            val vTotal: Int = aotCsvCount(vDefs)
+            if (vTotal > 0) {
+                val lastPid: Int = aotToInt(aotFieldAt(vDefs, vTotal - 1, ","))
+                if (lastPid >= 0 && aotContains(hir.tyOf(lastPid), "Vararg<")) {
+                    isVarargSym = true
+                }
+            }
+        }
+        if (isVarargSym && pTotal > 0) {
+            val pa: Int = pTotal - 1 - ai
+            if (pa >= 0 && pa <= argTotal) {
+                packAt = pa
+            }
+        }
+        var packedVararg: Boolean = false
         var i: Int = 0
         while (i < argTotal) {
+            if (packAt >= 0 && i >= packAt) {
+                val packed: String = this.packVarargsIds(hir, argIds, packAt, argTotal)
+                if (args != "") {
+                    args = args + ", "
+                }
+                args = args + "i8* " + packed
+                ai = pTotal
+                i = argTotal
+                packedVararg = true
+                break
+            }
             var aId: Int = aotToInt(aotFieldAt(argIds, i, ","))
             // 命名实参 `f(name = v)`：取标记节点的子表达式求值
             if (hir.kindOf(aId) == "HirNamedArg") {
@@ -7382,7 +7539,15 @@ class LlvmEmitter {
                     wantTy = aTy
                 }
             }
-            var coerced: String = this.coerceArg(sym, a, aTy, wantTy)
+            // 被调用函数该位置的 **Aura 形参类型**（`Any` / `V` → Plan A 句柄槽）
+            var wantAura: String = ""
+            if (vDefs != "") {
+                val pidA: Int = aotToInt(aotFieldAt(vDefs, ai, ","))
+                if (pidA >= 0) {
+                    wantAura = hir.tyOf(pidA)
+                }
+            }
+            var coerced: String = this.coerceArgAura(sym, a, aTy, wantTy, wantAura)
             // 指针形参的空值：字面量 `null` 求值为常量 `0`，直接写 `%struct.X* 0`
             // 会被 llc 拒绝（integer/byte constant must have integer/byte type），
             // 必须写成 `null`。
@@ -7401,6 +7566,16 @@ class LlvmEmitter {
             }
             ai = ai + 1
             i = i + 1
+        }
+        // vararg 实参为空（`f()` / 只有固定实参）：仍必须传一个**空列表**，
+        // 否则 callee 的列表形参拿到 `undef`（读 `.size` 即野值）。
+        if (packAt >= 0 && !packedVararg) {
+            val packed0: String = this.packVarargsIds(hir, argIds, argTotal, argTotal)
+            if (args != "") {
+                args = args + ", "
+            }
+            args = args + "i8* " + packed0
+            ai = pTotal
         }
 
         // 默认参数补齐：实参少于形参时，用形参节点的默认值表达式填充
@@ -7948,6 +8123,10 @@ class LlvmEmitter {
             if ((fname == "length" || fname == "size") && hirKidsCount(kids) == 1) {
                 return "i32"
             }
+            // `x.hashCode()` → `Any_hashCode` 返回 i32（见 `emitCall` 同名前缀分支）
+            if (aotLastSegment(fname) == "hashCode") {
+                return "i32"
+            }
             // `String.fromCharCode(c)` → 单字符 C 字符串（`emitCall` 0.4) 分支内联构造）。
             if (aotLastSegment(fname) == "fromCharCode") {
                 return "i8*"
@@ -8012,7 +8191,9 @@ class LlvmEmitter {
                 return aotFieldAt(csig, 0, "|")
             }
             // 集合构造 / 集合方法 → 列表句柄 `i8*`
-            if (this.isCollectionCtor(fname)) {
+            // （用户对象限定的同名方法除外：`HashMapUtils.mapOf` 返回 `%struct.HashMap*`）
+            if (this.isCollectionCtor(fname)
+                && !this.isUserQualifiedCollectionCall(hir, id, kids, hirKidsCount(kids))) {
                 return "i8*"
             }
             if (fname == "add" && hirKidsCount(kids) >= 1
@@ -8963,11 +9144,75 @@ class LlvmEmitter {
     }
 
     /// 集合构造器名（0 参形式返回空列表）。
+    ///
+    /// **注意**：这里只按末段名判断，因此调用方必须先用
+    /// `isUserQualifiedCollectionCall` 排除用户对象限定的同名方法
+    /// （`HashMapUtils.mapOf(...)`），否则会被误当成内置构造器。
     fun isCollectionCtor(name: String): Boolean {
         val bare: String = aotLastSegment(name)
         return bare == "arrayListOf" || bare == "mutableListOf" || bare == "listOf"
             || bare == "emptyList" || bare == "arrayOf" || bare == "mutableSetOf"
             || bare == "setOf" || bare == "mutableMapOf" || bare == "mapOf"
+    }
+
+    /// 限定名调用（`HashMapUtils.mapOf(...)`）的**接收者名**。
+    ///
+    /// HIR 对成员调用有两种形状（见 `stdClassReceiver`）：
+    ///   * 形态 A：`HirCall` 自带文本（callee 名），kids[0] 是第一个实参；
+    ///   * 形态 B：`HirCall` 文本为空，kids[0] 是 `HirMember(method, [receiver])`。
+    ///
+    /// 形态 B 下 `emitCall` 用 `hir.textOf(kids[0])` 取出的是**裸方法名**，于是
+    /// `HashMapUtils.mapOf(...)` 的 `mapOf` 会被 `isCollectionCtor` 误判成内置
+    /// 集合构造器。这里回推出接收者名，供调用方排除这类**用户对象限定**的调用。
+    ///
+    /// 注意：两种形态都要探测。HIR 也可能把 `HashMapUtils.mapOf(...)` 降级成
+    /// `HirCall text="mapOf"` 且 **kids[0] 就是接收者**（`stdClassReceiver` 描述
+    /// 的「形态 A」），此时文本非空但仍需识别接收者。误判风险由调用方兜底：
+    /// 只有接收者名确实是用户 object/class 时才排除内置构造路径
+    /// （`listOf(a, b)` 这类裸名调用的 kids[0] 只是普通实参，不会被误伤）。
+    fun qualifiedCallReceiverName(hir: Hir, id: Int, kids: String, n: Int): String {
+        if (n < 1) {
+            return ""
+        }
+        val calleeId: Int = hirKidsAt(kids, 0)
+        val ck: String = hir.kindOf(calleeId)
+        if (ck == "HirMember") {
+            val mk: String = hir.kidsOf(calleeId)
+            if (hirKidsCount(mk) < 1) {
+                return ""
+            }
+            val recvId: Int = hirKidsAt(mk, 0)
+            val rk: String = hir.kindOf(recvId)
+            if (rk == "HirVar" || rk == "HirIdent") {
+                return hir.textOf(recvId)
+            }
+            return ""
+        }
+        if (ck == "HirVar" || ck == "HirIdent") {
+            return hir.textOf(calleeId)
+        }
+        return ""
+    }
+
+    /// 该调用是否为**用户对象/类限定**的集合同名方法
+    /// （`HashMapUtils.mapOf(...)` / `MyFactory.listOf(...)`）。
+    ///
+    /// 这类调用的末段恰好与内置集合工厂同名，必须走用户函数而不是内置构造路径：
+    /// 否则会被发成原始列表（`Collections_listAppend`）并塞进
+    /// `%struct.HashMap*` 之类的变量，后续按结构体解引用 → 野指针/非法 IR。
+    fun isUserQualifiedCollectionCall(hir: Hir, id: Int, kids: String, n: Int): Boolean {
+        val rn: String = this.qualifiedCallReceiverName(hir, id, kids, n)
+        if (rn == "") {
+            return false
+        }
+        // 集合命名空间（`Collections.listOf(...)`）仍按内置构造处理
+        if (aotContains(rn, "ollections")) {
+            return false
+        }
+        if (aotListContains(this.fObjectClassNames, rn)) {
+            return true
+        }
+        return this.isStructSym(sanitizeLlvm(rn))
     }
 
     /// 该 HIR 节点是否为集合构造调用（用于类型推断与变量登记）。
@@ -8979,6 +9224,9 @@ class LlvmEmitter {
         var fname: String = hir.textOf(id)
         if (fname == "" && hirKidsCount(kids) > 0) {
             fname = hir.textOf(hirKidsAt(kids, 0))
+        }
+        if (this.isUserQualifiedCollectionCall(hir, id, kids, hirKidsCount(kids))) {
+            return false
         }
         return this.isCollectionCtor(fname)
     }
@@ -9046,6 +9294,27 @@ class LlvmEmitter {
             return this.boxToPtr(v, fromTy)
         }
         return this.coerceValue(v, fromTy, wantTy)
+    }
+
+    /// 实参转换（额外知道被调用函数的 **Aura 形参类型**）。
+    ///
+    /// `Any` / 泛型类型形参（`K` / `V` / `T`）形参在 AOT 侧是 **Plan A 句柄槽**，
+    /// 窄整型实参必须装箱。仅按 LLVM 类型区分不出来（`i8*` 既可能是 C 字符串、
+    /// 也可能是句柄槽），而漏装箱时字面量 `0` 会被 `coerceValue` 折叠成 `null`
+    ///（它原本是为「指针位传 `0`」准备的兜底）—— 实测 `m.containsValue(0)`
+    /// 恒为 false（`i8* null` 传进了值槽）。
+    fun coerceArgAura(sym: String, v: String, fromTy: String, wantTy: String, auraTy: String): String {
+        if (wantTy == "i8*" && fromTy != "" && !fromTy.endsWith("*")
+            && fromTy != "i8*" && fromTy != "ptr") {
+            var at: String = auraTy
+            if (at.endsWith("?")) {
+                at = aotSlice(at, 0, at.length - 1)
+            }
+            if (at == "Any" || this.tm.isGenericTypeParam(at)) {
+                return this.boxToPtr(v, fromTy)
+            }
+        }
+        return this.coerceArg(sym, v, fromTy, wantTy)
     }
 
     /// 把值装箱为 `i8*` 句柄存入集合（Plan A 低位标记：整数 → `(v<<1)|1`）。

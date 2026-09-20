@@ -1,0 +1,33 @@
+package test
+
+import aura.lang.collection.HashSet
+
+fun main(): Int {
+    // Test HashSet add
+    var s = HashSet<Int>()
+    s.add(1)
+    s.add(2)
+    s.add(3)
+    
+    assert(s.count() == 3, "HashSet count should be 3")
+    assert(s.contains(1) == true, "HashSet should contain 1")
+    assert(s.contains(2) == true, "HashSet should contain 2")
+    assert(s.contains(3) == true, "HashSet should contain 3")
+    assert(s.contains(4) == false, "HashSet should not contain 4")
+    
+    // Test HashSet duplicate
+    s.add(1)
+    assert(s.count() == 3, "HashSet count should still be 3 after duplicate add")
+    
+    // Test HashSet removeItem
+    s.removeItem(2)
+    assert(s.count() == 2, "HashSet count after removeItem should be 2")
+    assert(s.contains(2) == false, "HashSet should not contain 2 after removeItem")
+    
+    // Test HashSet clear
+    s.clear()
+    assert(s.isEmpty() == true, "HashSet should be empty after clear")
+    
+    println("HashSet tests passed")
+    return 0
+}

@@ -19,7 +19,7 @@ class MyClass {
     }
     
     fun testLocal(): Unit {
-        var l: ArrayList<Int> = arrayListOf<Int>()
+        var l: List<Int> = arrayListOf<Int>()
         l.add(1)
         l.add(2)
         println("local.size=" + l.size)

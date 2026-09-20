@@ -202,8 +202,8 @@ fun testKeysValues(c: Checker): Unit {
         m.put("k" + i, i)
         i = i + 1
     }
-    var ks: ArrayList<String> = m.keys()
-    var vs: ArrayList<Int> = m.values()
+    var ks: List<String> = m.keys()
+    var vs: List<Int> = m.values()
     c.check("kv.size", ks.size == 10)
     c.check("kv.valuesSize", vs.size == 10)
     c.check("kv.mapSize", m.size == 10)
@@ -316,7 +316,7 @@ fun testMixedInterfaceCalls(c: Checker): Unit {
 
 fun testCollidingKeys(c: Checker): Unit {
     var m: HashMap<String, Int> = HashMap<String, Int>()
-    var pairs: ArrayList<String> = arrayListOf<String>()
+    var pairs: List<String> = arrayListOf<String>()
     pairs.add("1")
     pairs.add("10")
     pairs.add("100")

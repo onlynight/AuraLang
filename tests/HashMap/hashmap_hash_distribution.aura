@@ -182,8 +182,8 @@ fun testKeysValuesCorrespondence(c: Checker): Unit {
         m.put(i, "val-" + i)
         i = i + 1
     }
-    var ks: ArrayList<Int> = m.keys()
-    var vs: ArrayList<String> = m.values()
+    var ks: List<Int> = m.keys()
+    var vs: List<String> = m.values()
     c.check("kvc.keysSize", ks.size == n)
     c.check("kvc.valuesSize", vs.size == n)
     c.check("kvc.equalSize", ks.size == vs.size)
@@ -272,7 +272,7 @@ fun testNoDuplicateKeysLarge(c: Checker): Unit {
         m.put(i, i)
         i = i + 1
     }
-    var ks: ArrayList<Int> = m.keys()
+    var ks: List<Int> = m.keys()
     c.check("ndk.size", ks.size == n)
     // 检查无重复
     var dup: Boolean = false

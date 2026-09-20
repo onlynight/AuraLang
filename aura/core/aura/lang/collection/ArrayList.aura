@@ -63,16 +63,25 @@ class ArrayList<T> : List<T> {
     // ── 访问方法 ──
 
     /// 按下标获取元素
+    ///
+    /// 必须写成下标形式 `data[index]`：HIR 会把它降级为 `Collections.getAt(data, i)`
+    /// 这条**已有正确发射路径**的调用。显式写 `Collections.listGet(data, index)`
+    /// 时发射器无法解析（Aura 侧 `Long` 签名 vs 运行时 `i8*` 句柄），调用被静默
+    /// 丢弃 → 恒返回 null（实测 `getAt(0)=null`）。
     fun get(index: Int): T {
-        return Collections.listGet(data, index)
+        return data[index]
     }
 
     /// 按下标设置元素
+    ///
+    /// 同样必须用下标赋值 `data[index] = value`：HIR 降级为
+    /// `Collections.set(data, index, value)` 并回写字段。显式调用
+    /// `Collections.set(...)` 会因接收者实参错位而发成 `set(null, i, v)`。
     fun set(index: Int, value: T): Unit {
         if (index < 0 || index >= _size) {
             throw "index: $index, size: $_size"
         }
-        Collections.listSet(data, index, value)
+        data[index] = value
     }
 
     /// 获取第一个元素
@@ -91,7 +100,10 @@ class ArrayList<T> : List<T> {
 
     /// 在末尾添加元素
     fun add(item: T): Unit {
-        data.add(item)
+        // Bug 2 fix: 使用 data.add(item) 触发编译器 add 拦截逻辑（Emit.aura line 5987），
+        // 路由到 C 运行库函数（aura_lang_std_Collections_listAppend，i8* 签名）。
+        // 旧调用 Collections.listAppend(data, item) 走 Aura 函数（Long/i64 参数），与 AOT 不兼容。
+        data = data.add(item)
         _size = _size + 1
     }
 
@@ -134,7 +146,7 @@ class ArrayList<T> : List<T> {
     override fun contains(item: T): Boolean {
         var i: Int = 0
         while (i < _size) {
-            if (Collections.listGet(data, i) == item) {
+            if (data[i] == item) {
                 return true
             }
             i = i + 1
@@ -146,7 +158,7 @@ class ArrayList<T> : List<T> {
     override fun indexOf(item: T): Int {
         var i: Int = 0
         while (i < _size) {
-            if (Collections.listGet(data, i) == item) {
+            if (data[i] == item) {
                 return i
             }
             i = i + 1
@@ -158,7 +170,7 @@ class ArrayList<T> : List<T> {
     override fun lastIndexOf(item: T): Int {
         var i: Int = _size - 1
         while (i >= 0) {
-            if (Collections.listGet(data, i) == item) {
+            if (data[i] == item) {
                 return i
             }
             i = i - 1
