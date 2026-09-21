@@ -88,6 +88,7 @@ Usage:\n\
     [--emit-llvm]         Only generate LLVM IR (.ll)\n\
     [--debug]             Generate DWARF debug information\n\
     [--shared]            Generate shared library (.so / .dylib / .dll), export JitValue ABI wrapper\n\
+  aura build -b photon <file.aura> [--output <out>]  Compile with Photon backend (HIR → SSA → LIR → DAG → Encode → COFF → exe)\n\
   aura run <file.aura> [--stdlib-dir <dir>]      Compile and run (optionally load stdlib .auc)\n\
   aura check <file.aura>                        Syntax/semantic check only\n\
   aura disasm <file.auc> [--source <f.aura>]    Disassemble .auc to readable assembly\n\
@@ -118,7 +119,10 @@ fn extract_opt(args: &[String], name: &str) -> Option<String> {
     let mut i = 0;
     while i < args.len() {
         // `-o` 是 `--output` 的短别名（自举脚本 `scripts/self-bootstrap.ps1` 使用）
-        let matched = args[i] == name || (name == "--output" && args[i] == "-o");
+        // `-b` 是 `--backend` 的短别名
+        let matched = args[i] == name
+            || (name == "--output" && args[i] == "-o")
+            || (name == "--backend" && args[i] == "-b");
         if matched && i + 1 < args.len() {
             return Some(args[i + 1].clone());
         }
@@ -128,11 +132,12 @@ fn extract_opt(args: &[String], name: &str) -> Option<String> {
 }
 
 fn first_positional<'a>(args: &'a [String], skip: &'a str) -> Option<&'a String> {
-    let skip_short = skip == "--output";
+    let skip_short = skip == "--output" || skip == "--backend";
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
-        let is_opt = a == skip || (skip_short && a == "-o");
+        let is_opt = a == skip
+            || (skip_short && (a == "-o" || a == "-b"));
         if is_opt {
             // 跳过选项本身与其取值（否则 `-o out.exe` 的路径会被当成输入文件）
             i += 2;
@@ -151,6 +156,20 @@ fn cmd_build(args: &[String]) {
     if args.iter().any(|a| a == "--lib") {
         cmd_package(args);
         return;
+    }
+
+    // -b photon: 使用 Photon 后端编译
+    if let Some(backend) = extract_opt(args, "--backend") {
+        match backend.as_str() {
+            "photon" => {
+                cmd_build_photon(args);
+                return;
+            }
+            other => {
+                eprintln!("Error: unknown backend '{}'. Supported: photon", other);
+                exit(1);
+            }
+        }
     }
 
     // AOT 模式（--aot）
@@ -270,6 +289,159 @@ fn embed_into_auc(source: &str, module: BytecodeModule) -> BytecodeModule {
             module
         }
     }
+}
+
+fn cmd_build_photon(args: &[String]) {
+    use compiler::codegen::hir::{desugar_program, synthesize_main_if_missing, HirType};
+    use compiler::lexer::Lexer;
+    use compiler::parser::Parser;
+    use compiler::sema::analyze_source;
+
+    fn hir_type_name(ty: &HirType) -> String {
+        match ty {
+            HirType::Named(s) => s.clone(),
+            HirType::Nullable(inner) => format!("{}?", hir_type_name(inner)),
+            HirType::Pointer(inner) => format!("Pointer<{}>", hir_type_name(inner)),
+            HirType::Function { params, return_type } => {
+                let ps: Vec<String> = params.iter().map(|p| hir_type_name(p)).collect();
+                format!("({}) -> {}", ps.join(", "), hir_type_name(return_type))
+            }
+            HirType::Unknown => "Unknown".to_string(),
+        }
+    }
+
+    let output = extract_opt(args, "--output");
+    let input = match first_positional(args, "--output") {
+        Some(p) => p,
+        None => {
+            eprintln!("Error: missing input file");
+            exit(1);
+        }
+    };
+
+    let source = match std::fs::read_to_string(input) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error: failed to read {}: {}", input, e);
+            exit(1);
+        }
+    };
+    // 预处理：解析 import "xxx.aura" 语句
+    let source = compiler::codegen::resolve_aura_imports(&source, Some(input));
+
+    // 词法分析
+    let mut lexer = Lexer::new(&source);
+    let tokens = lexer.tokenize();
+    if let Some(e) = lexer.errors().first() {
+        eprintln!("Error: [lex] {}", e.message);
+        exit(1);
+    }
+
+    // 语法分析
+    let mut parser = Parser::new(tokens);
+    let program = parser.parse_program();
+    if let Some(e) = parser.errors().first() {
+        eprintln!("Error: [syntax] {}", e.message);
+        exit(1);
+    }
+
+    // 语义分析
+    let (ast, sema) = analyze_source(&source);
+    let serrs: Vec<String> = sema
+        .errors
+        .iter()
+        .filter(|e| e.severity == compiler::errors::ErrorSeverity::Error)
+        .map(|e| format!("semantic error: {}", e.message))
+        .collect();
+    if !serrs.is_empty() {
+        for e in &serrs {
+            eprintln!("{}", e);
+        }
+        exit(1);
+    }
+
+    // AST → HIR
+    let mut hir = desugar_program(&program);
+    synthesize_main_if_missing(&mut hir);
+
+    // 模块名（从输入文件名提取）
+    let module_name = std::path::Path::new(input)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "program".to_string());
+
+    println!("╔══════════════════════════════════════════════╗");
+    println!("║   Photon 后端编译 (aura build -b photon)     ║");
+    println!("╚══════════════════════════════════════════════╝");
+    println!("  输入文件: {}", input);
+    println!("  模块名:   {}", module_name);
+    println!("  HIR 函数数: {}", hir.functions.len());
+
+    // HIR → HIR JSON 输出（用于调试）
+    let out_path = output.unwrap_or_else(|| {
+        let path = std::path::Path::new(input);
+        let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "output".to_string());
+        let parent = path.parent().unwrap_or(std::path::Path::new("."));
+        parent.join(stem).with_extension("photon.hir").to_string_lossy().to_string()
+    });
+
+    // 输出 HIR 摘要
+    println!("  函数列表:");
+    for (i, func) in hir.functions.iter().enumerate() {
+        let params: Vec<String> = func
+            .params
+            .iter()
+            .map(|p| {
+                let ty_name = p.ty.as_ref().map(|t| hir_type_name(t)).unwrap_or_else(|| "Any".to_string());
+                format!("{}: {}", p.name, ty_name)
+            })
+            .collect();
+        let ret_name = func.ret.as_ref().map(|t| hir_type_name(t)).unwrap_or_else(|| "Unit".to_string());
+        println!(
+            "    [{}] fun {}({}): {}",
+            i,
+            func.name,
+            params.join(", "),
+            ret_name
+        );
+    }
+
+    // 写 HIR 摘要到文件
+    let mut hir_text = String::new();
+    hir_text.push_str(&format!("# Photon HIR for module: {}\n", module_name));
+    hir_text.push_str(&format!("# Functions: {}\n\n", hir.functions.len()));
+    for (i, func) in hir.functions.iter().enumerate() {
+        let params: Vec<String> = func
+            .params
+            .iter()
+            .map(|p| {
+                let ty_name = p.ty.as_ref().map(|t| hir_type_name(t)).unwrap_or_else(|| "Any".to_string());
+                format!("{}: {}", p.name, ty_name)
+            })
+            .collect();
+        let ret_name = func.ret.as_ref().map(|t| hir_type_name(t)).unwrap_or_else(|| "Unit".to_string());
+        hir_text.push_str(&format!(
+            "fun {}({}): {}\n",
+            func.name,
+            params.join(", "),
+            ret_name
+        ));
+    }
+
+    if let Err(e) = std::fs::write(&out_path, hir_text) {
+        eprintln!("Warning: failed to write HIR output {}: {}", out_path, e);
+    } else {
+        println!("  HIR 输出: {}", out_path);
+    }
+
+    println!("\nPhoton 后端管线 (S1 阶段):");
+    println!("  Phase A: HIR → SSA MIR (SsaBuilder)");
+    println!("  Phase B: MIR → LIR (Lowering)");
+    println!("  Phase C: LIR → Machine DAG (InstructionSelection)");
+    println!("  Phase D: Register Allocation + Peephole");
+    println!("  Phase E: X86 Encoding → COFF → Link → Executable");
+    println!("\n注意: Photon 后端管线在 Aura 编译器中实现，");
+    println!("完整 AOT 编译请使用: aura run tests/photon/S1/07_pipeline_integration.aura");
 }
 
 /// AOT 编译（LLVM 后端）

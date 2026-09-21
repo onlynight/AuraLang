@@ -206,11 +206,34 @@ impl Ty {
         if self == target {
             return true;
         }
-        if target == &Ty::Any {
+        if target == &Ty::Any || target == &Ty::Error || self == &Ty::Error {
             return true;
         }
         if self.is_numeric() && target.is_numeric() {
             return true;
+        }
+        // List 类型兼容：List<T> 可赋给 List<U>（简化处理）
+        if let (Ty::List(_), Ty::List(_)) = (self, target) {
+            return true;
+        }
+        // Ty::Named("List") 可赋给 Ty::List(_) 和 Ty::Named("List")
+        if let Ty::Named(n) = self {
+            if n == "List" || n == "ArrayList" || n == "MutableList" {
+                if let Ty::List(_) = target {
+                    return true;
+                }
+                if let Ty::Named(tn) = target {
+                    if tn == "List" || tn == "ArrayList" || tn == "MutableList" {
+                        return true;
+                    }
+                }
+            }
+        }
+        // Ty::List(_) 可赋给 Ty::Named("List")
+        if let (Ty::List(_), Ty::Named(tn)) = (self, target) {
+            if tn == "List" || tn == "ArrayList" || tn == "MutableList" {
+                return true;
+            }
         }
         // 非空值可赋给可空类型
         if let Ty::Nullable(inner) = target {

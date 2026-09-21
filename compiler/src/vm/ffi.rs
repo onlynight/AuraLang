@@ -13,6 +13,11 @@
 use std::cell::RefCell;
 use std::sync::{Arc, Mutex};
 
+#[cfg(windows)]
+unsafe extern "system" {
+    fn GetProcAddress(hmodule: usize, procname: *const std::os::raw::c_char) -> usize;
+}
+
 /// 回调注册表条目：回调 ID → Aura 函数索引
 #[derive(Debug, Clone)]
 pub struct CallbackEntry {
@@ -357,10 +362,20 @@ unsafe fn windows_get_module_handle() -> usize {
 #[cfg(windows)]
 unsafe fn get_proc_address(handle: usize, name: *const u16) -> usize {
     unsafe {
-        unsafe extern "system" {
-            fn GetProcAddressW(module: usize, proc_name: *const u16) -> usize;
+        // Convert wide string to ANSI string
+        use std::ffi::CStr;
+        let wide = std::slice::from_raw_parts(name, 0);
+        // Find the length of the wide string
+        let mut len = 0;
+        while *name.add(len) != 0 {
+            len += 1;
         }
-        GetProcAddressW(handle, name)
+        // Convert to String
+        let wide_vec: Vec<u16> = std::slice::from_raw_parts(name, len).to_vec();
+        let wide_str = String::from_utf16_lossy(&wide_vec);
+        // Convert to CString (ANSI)
+        let c_name = std::ffi::CString::new(wide_str).unwrap();
+        GetProcAddress(handle, c_name.as_ptr())
     }
 }
 

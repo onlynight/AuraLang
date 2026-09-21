@@ -84,6 +84,11 @@ fn main() {
     println!("cargo:rerun-if-env-changed=AURA_LLVM_HOME");
     println!("cargo:rerun-if-env-changed=LLVM_CONFIG");
     println!("cargo:rerun-if-changed=build.rs");
+
+    // Windows: 链接 kernel32.lib（用于 GetProcAddress/GetProcAddressW/LoadLibraryW）
+    if cfg!(target_os = "windows") {
+        println!("cargo:rustc-link-lib=dylib=kernel32");
+    }
 }
 
 /// Phase 3: 检查嵌入式标准库 .auc 文件是否存在
