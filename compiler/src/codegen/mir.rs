@@ -220,6 +220,10 @@ impl LowerCtx {
             ("toUpperCase", 1),
             ("fromCharCode", 1),
             ("charCodeAt", 2),
+            // `charAt(i): Char` —— 与 `std_string.rs` 的注册表保持一致（唯一真相源）。
+            ("charAt", 2),
+            ("replaceAll", 3),
+            ("matches", 2),
             ("length", 1),
             ("isEmpty", 1),
             ("countChar", 2),
@@ -242,6 +246,9 @@ impl LowerCtx {
             // String 全限定名（companion 方法，Aura 编译）
             ("String.fromCharCode", 1),
             ("String.charCodeAt", 2),
+            ("String.charAt", 2),
+            ("String.replaceAll", 3),
+            ("String.matches", 2),
             ("String.length", 1),
             ("String.isEmpty", 1),
             ("String.substring", 3),

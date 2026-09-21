@@ -1237,6 +1237,49 @@ impl Vm {
         Value::Ref(h)
     }
 
+    /// 原位集合写入：`set(list, i, v)` / `listSet(list, i, v)`。
+    ///
+    /// 堆列表（`Value::Ref`）必须**原地**写；值列表（`Value::List`）只能返回值语义的
+    /// 新列表（保持既有 native 语义）。返回 `Some(结果)` 表示已在解释器层处理完。
+    ///
+    /// 背景：前端把 `l.set(i, v)` 与 `arr[i] = v` 都重写为 `Collections.set(...)`，
+    /// 而 `std_collections::nat_set` / `nat_list_set` 只认 `Value::List`，对堆列表
+    /// 一律返回 `Null` —— photon 后端 `RegisterAllocator` 的
+    /// `liveAtEnd.set(j, liveOut)` 因此既没有效果、还会把变量写成 null。
+    fn try_inline_coll_set(&mut self, name: &str, args: &[Value]) -> Option<Value> {
+        let is_set = matches!(
+            name,
+            "set" | "listSet" | "aura.lang.std.Collections.set" | "aura.lang.std.Collections.listSet"
+        );
+        if !is_set {
+            return None;
+        }
+        let idx = args.get(1).map(|v| v.as_int()).unwrap_or(-1);
+        let val = args.get(2).cloned().unwrap_or(Value::Null);
+        match args.first() {
+            Some(Value::Ref(h)) => {
+                let h = *h;
+                if self.heap.is_map(h) {
+                    // `m["k"] = v` → Map 键写入
+                    let key = args.get(1).cloned().unwrap_or(Value::Null);
+                    self.heap.map_set(h, key, val);
+                } else if idx >= 0 {
+                    // `l[i] = v` / `l.set(i, v)` → 列表下标写入
+                    self.heap.list_set(h, idx as usize, val);
+                }
+                Some(Value::Ref(h))
+            }
+            Some(Value::List(items)) => {
+                let mut items = items.clone();
+                if idx >= 0 && (idx as usize) < items.len() {
+                    items[idx as usize] = val;
+                }
+                Some(Value::List(items))
+            }
+            _ => Some(Value::Null),
+        }
+    }
+
     /// 原生 / FFI 函数调用
     fn do_call_native(&mut self, top: usize, idx: usize) -> Result<(), VmError> {
         if idx >= self.module.natives.len() {
@@ -1275,6 +1318,52 @@ impl Vm {
         if is_exit_native(&native.name) {
             let code = crate::std::std_process::last_int_arg(&args).unwrap_or(0) as i32;
             self.request_exit(code);
+            return Ok(());
+        }
+
+        // ── 可变集合工厂 → 堆对象 ──
+        //
+        // VM 有两套列表/映射表示：
+        //   * 堆表示 `Value::Ref(h)` —— `LIST_PUSH` / `LIST_POP` / `MAP_SET` 等
+        //     **原位**指令只支持它（见 `Instr::ListPush` 的 `_ => {}` 分支）；
+        //   * 值表示 `Value::List(Vec<Value>)` —— 纯函数式 native（`listOf`、
+        //     `split` 等）产出，只适合读操作。
+        //
+        // `mutableListOf()` 若走 native 会拿到**值表示**，于是 `l.add(x)` 的
+        // `LIST_PUSH` 静默丢弃（列表永远为空）→ `l.size` 恒为 0、`l[0]` 恒为
+        // null、`l.set(i, v)` 无效果。photon 后端 `RegisterAllocator` 的
+        // `liveAtEnd.set(j, liveOut)` 正踩在此处（表现为 VM 段错误或静默空值）。
+        //
+        // 因此在解释器层把可变工厂改写为堆对象，后续原位指令即可正常工作。
+        let is_mut_list = matches!(
+            native.name.as_str(),
+            "mutableListOf"
+                | "arrayListOf"
+                | "aura.lang.std.Collections.mutableListOf"
+                | "aura.lang.std.Collections.arrayListOf"
+        );
+        if is_mut_list {
+            let h = self.heap.alloc_list(args.len().max(1));
+            for a in args {
+                self.heap.list_push(h, a);
+            }
+            self.frames[top].stack.push(Value::Ref(h));
+            return Ok(());
+        }
+        let is_mut_map = matches!(
+            native.name.as_str(),
+            "mutableMapOf" | "aura.lang.std.Collections.mutableMapOf"
+        );
+        if is_mut_map {
+            let h = self.heap.alloc_map();
+            self.frames[top].stack.push(Value::Ref(h));
+            return Ok(());
+        }
+
+        // 原位集合写入（`l.set(i, v)` / `arr[i] = v` → `Collections.set`）：
+        // 堆列表必须原地写，否则调用方丢弃返回值后毫无效果。
+        if let Some(v) = self.try_inline_coll_set(&native.name, &args) {
+            self.frames[top].stack.push(v);
             return Ok(());
         }
 
@@ -1424,6 +1513,44 @@ impl Vm {
         if is_exit_native(&native.name) {
             let code = crate::std::std_process::last_int_arg(&args).unwrap_or(0) as i32;
             self.request_exit(code);
+            return Ok(());
+        }
+
+        // ── 可变集合工厂 → 堆对象（与 `do_call_native` 中的同名逻辑保持一致）──
+        //
+        // `mutableListOf()` 等由字节码以 `CALL_NATIVE_ARGS` 调用，走的是本函数。
+        // 若交给纯函数式 native，会得到**值表示** `Value::List`，而 `LIST_PUSH`
+        // 只对**堆表示** `Value::Ref` 做原位操作 → `l.add(x)` 静默失效
+        // （`l.size` 恒 0、`l[0]` 恒 null、`l.set(i, v)` 无效果）。
+        let is_mut_list = matches!(
+            native.name.as_str(),
+            "mutableListOf"
+                | "arrayListOf"
+                | "aura.lang.std.Collections.mutableListOf"
+                | "aura.lang.std.Collections.arrayListOf"
+        );
+        if is_mut_list {
+            let h = self.heap.alloc_list(args.len().max(1));
+            for a in args {
+                self.heap.list_push(h, a);
+            }
+            self.frames[top].stack.push(Value::Ref(h));
+            return Ok(());
+        }
+        let is_mut_map = matches!(
+            native.name.as_str(),
+            "mutableMapOf" | "aura.lang.std.Collections.mutableMapOf"
+        );
+        if is_mut_map {
+            let h = self.heap.alloc_map();
+            self.frames[top].stack.push(Value::Ref(h));
+            return Ok(());
+        }
+
+        // 原位集合写入（`l.set(i, v)` / `arr[i] = v` → `Collections.set`）：
+        // 堆列表必须原地写，否则调用方丢弃返回值后毫无效果。
+        if let Some(v) = self.try_inline_coll_set(&native.name, &args) {
+            self.frames[top].stack.push(v);
             return Ok(());
         }
 

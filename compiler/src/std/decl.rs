@@ -46,6 +46,11 @@ pub const PRELUDE_NAMES: &[&str] = &[
     //   MIR 误判为用户函数调用 → 字节码 `Call(idx)` 查表失败 → 回退索引 0
     //   （= 入口 main）→ **自己调用自己**：无限递归 + 内存无上限增长。
     "charCodeAt",
+    // `charAt` 与 `std_string.rs::register` 的裸名注册保持一致（见上方说明）：
+    // 缺失会让 `String.charAt` 被误判为用户函数。
+    "charAt",
+    "replaceAll",
+    "matches",
     "fromCharCode",
     "substring",
     "substringBefore",
@@ -61,6 +66,22 @@ pub const PRELUDE_NAMES: &[&str] = &[
     "listOf",
     "mutableListOf",
     "arrayOf",
+    // ── 集合工厂（与 `std_collections.rs` 的注册表保持一致）──
+    //
+    // 缺登记时，`mutableMapOf(...)` 这类调用会被 MIR 当成**用户函数**，
+    // 字节码查 `fn_index` 失败 → `未解析的函数调用 'mutableMapOf'`
+    // （与上方 String 短名同理）。`mutableListOf` 早已登记，其余工厂遗漏。
+    "arrayListOf",
+    "emptyList",
+    "pairOf",
+    "mapOf",
+    "mutableMapOf",
+    "emptyMap",
+    "hashMapOf",
+    "setOf",
+    "mutableSetOf",
+    "emptySet",
+    "hashSetOf",
     "min",
     "max",
     // 类型查询与内省（prelu，免 import）
@@ -242,6 +263,7 @@ fn build_all_names() -> HashSet<&'static str> {
         "makeCallback",
         // ── String 实例方法（VM native 回退）──
         "charCodeAt",
+        "charAt",
         "fromCharCode",
         "substring",
     ] {

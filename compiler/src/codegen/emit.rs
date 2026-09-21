@@ -76,6 +76,14 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
         ("toUpperCase", 1),
         ("fromCharCode", 1),
         ("charCodeAt", 2),
+        // `charAt(i): Char` —— 与 `std_string.rs` 的注册表保持一致。
+        // 缺它时 `s.charAt(i)` 的 callee（`String.charAt`）不在 native 表里 →
+        // 字节码发射退化为 `Call(idx)` 查 `fn_index` 失败 →
+        // `[bytecode] error: 未解析的函数调用 'String.charAt'` + 运行期
+        // `call to undefined function #65535`。
+        ("charAt", 2),
+        ("replaceAll", 3),
+        ("matches", 2),
         ("length", 1),
         ("isEmpty", 1),
         ("countChar", 2),
@@ -104,6 +112,9 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
         // String 全限定名（companion 方法，Aura 编译）
         ("String.fromCharCode", 1),
         ("String.charCodeAt", 2),
+        ("String.charAt", 2),
+        ("String.replaceAll", 3),
+        ("String.matches", 2),
         ("String.length", 1),
         ("String.isEmpty", 1),
         ("String.substring", 3),

@@ -63,6 +63,15 @@ pub(crate) struct EmitCtx {
     pub const_counter: u64,
     /// 当前函数内变量作用域栈
     pub var_scope: Vec<HashMap<String, VarSlot>>,
+    /// 函数级变量回退表：登记该函数内**曾经声明过**的全部变量。
+    ///
+    /// 作用域栈在离开块时会弹出条目，但 Aura 的动态语义允许在块外继续引用块内
+    /// 声明的名字（VM 按槽位查找即可）。AOT 若在块外查不到就退化为「按名字造
+    /// SSA 值」→ 发射出未定义值（llc: `use of undefined value '%a0'`，
+    /// 自举编译 `Emit.emitBinary` 等长函数时必现）。此表作为兜底。
+    pub func_vars: HashMap<String, VarSlot>,
+    /// 函数级 Aura 类型回退表（用途同 `func_vars`）。
+    pub func_aura_types: HashMap<String, String>,
     /// 全局常量/变量定义（模块顶层，§9.2.1 generate_globals）
     pub globals: Vec<String>,
     /// 全局常量去重（key → 对应 LLVM 全局名），避免同一字符串重复分配
@@ -170,6 +179,8 @@ impl EmitCtx {
             const_counter: 0,
             loop_stack: Vec::new(),
             var_scope: vec![HashMap::new()],
+            func_vars: HashMap::new(),
+            func_aura_types: HashMap::new(),
             globals: Vec::new(),
             global_const_map: HashMap::new(),
             subprogram_meta: Vec::new(),
@@ -242,15 +253,15 @@ impl EmitCtx {
     }
 
     pub fn declare_var(&mut self, name: &str, llvm_name: String, llvm_ty: String) {
+        let slot = VarSlot {
+            llvm_name,
+            llvm_ty,
+        };
         if let Some(scope) = self.var_scope.last_mut() {
-            scope.insert(
-                name.to_string(),
-                VarSlot {
-                    llvm_name,
-                    llvm_ty,
-                },
-            );
+            scope.insert(name.to_string(), slot.clone());
         }
+        // 函数级回退表（见 `func_vars` 说明）：离开块后仍可解析该名字。
+        self.func_vars.insert(name.to_string(), slot);
     }
 
     pub fn lookup_var(&self, name: &str) -> Option<&VarSlot> {
@@ -259,7 +270,8 @@ impl EmitCtx {
                 return Some(v);
             }
         }
-        None
+        // 块外引用块内声明：回退到函数级表，避免造出未定义 SSA 值。
+        self.func_vars.get(name)
     }
 
     pub fn enter_scope(&mut self) {
@@ -280,6 +292,7 @@ impl EmitCtx {
         if let Some(scope) = self.var_aura_types.last_mut() {
             scope.insert(name.to_string(), aura_ty.to_string());
         }
+        self.func_aura_types.insert(name.to_string(), aura_ty.to_string());
     }
 
     /// 查询变量的 Aura 类型名（未记录返回 `""`）。
@@ -289,7 +302,8 @@ impl EmitCtx {
                 return v.clone();
             }
         }
-        String::new()
+        // 同 `lookup_var`：块外引用时回退到函数级表。
+        self.func_aura_types.get(name).cloned().unwrap_or_default()
     }
 
     pub fn llvm_type(&self, ty: &HirType) -> String {
@@ -1281,6 +1295,12 @@ pub fn emit_program(
 /// 生成单个函数的 LLVM IR
 fn emit_function(ctx: &mut EmitCtx, func: &HirFunction) -> Result<String, AotError> {
     ctx.enter_scope();
+    // 函数级变量回退表**按函数重置**：EmitCtx 在整个模块内复用，若不清空，
+    // 上一个函数的同名局部变量槽（`%var.N`，属于另一个 LLVM 函数）会被当成
+    // 本函数的变量，发射出跨函数的未定义引用
+    // （llc: `use of undefined value '%var.61899'`）。
+    ctx.func_vars.clear();
+    ctx.func_aura_types.clear();
 
     let mut blocks = FuncBlocks::new();
     let entry_name = ctx.fresh_bb("entry");
@@ -2169,6 +2189,29 @@ fn emit_index_assign(
     Ok(())
 }
 
+/// 生成「值 ≠ 零 / 假」的比较谓词 IR 文本。
+///
+/// **不能一律写 `icmp ne <ty> <ir>, 0`**：LLVM 要求
+///   * 整型 → 与整型 `0` 比较；
+///   * 浮点 → 只能用 `fcmp`，与 `0.0` 比较；
+///   * 指针 → 与 `null` 比较（写整型 `0` 会被 llc 拒绝：
+///     `integer/byte constant must have integer/byte type`）。
+///
+/// 自举编译 `Main.aura` 时，条件表达式会出现 `i8*` 类型（如 `String?` 判空），
+/// 旧实现统一发 `icmp ne i8* %x, 0` → llc 直接失败（`module.ll:43282:42`）。
+fn bool_pred_ir(ir: &str, ty: &str) -> String {
+    if ty == "i1" {
+        return format!("icmp eq i1 {}, true", ir);
+    }
+    if is_int_ty(ty) {
+        return format!("icmp ne {} {}, 0", ty, ir);
+    }
+    if ty == "float" || ty == "double" {
+        return format!("fcmp one {} {}, 0.0", ty, ir);
+    }
+    format!("icmp ne {} {}, null", ty, ir)
+}
+
 /// 生成 if 语句（无返回值）
 fn emit_if_stmt(
     ctx: &mut EmitCtx,
@@ -2184,11 +2227,7 @@ fn emit_if_stmt(
     // 生成条件表达式
     let (cond_ir, cond_ty) = emit_expr_val(ctx, blocks, cond)?;
     let icmp_var = ctx.fresh_var();
-    let pred = if cond_ty == "i1" {
-        format!("icmp eq i1 {}, true", cond_ir)
-    } else {
-        format!("icmp ne {} {}, 0", cond_ty, cond_ir)
-    };
+    let pred = bool_pred_ir(&cond_ir, &cond_ty);
     {
         let cur = blocks.last_mut();
         cur.body.push(format!("{} = {}", icmp_var, pred));
@@ -2242,11 +2281,7 @@ fn emit_while_stmt(
     let _ = blocks.add_block_named(&cond_name);
     let (cond_ir, cond_ty) = emit_expr_val(ctx, blocks, cond)?;
     let icmp_var = ctx.fresh_var();
-    let pred = if cond_ty == "i1" {
-        format!("icmp eq i1 {}, true", cond_ir)
-    } else {
-        format!("icmp ne {} {}, 0", cond_ty, cond_ir)
-    };
+    let pred = bool_pred_ir(&cond_ir, &cond_ty);
     {
         let cur = blocks.last_mut();
         cur.body.push(format!("{} = {}", icmp_var, pred));
@@ -2404,6 +2439,10 @@ fn emit_expr_val(
                 const_counter: ctx.const_counter,
                 loop_stack: Vec::new(),
                 var_scope: vec![HashMap::new()],
+                // 闭包体是**独立函数**：外层函数的 `alloca` 槽名在此不可用，
+                // 故回退表为空，未捕获的外层变量仍由既有捕获逻辑处理。
+                func_vars: HashMap::new(),
+                func_aura_types: HashMap::new(),
                 globals: Vec::new(),
                 global_const_map: ctx.global_const_map.clone(),
                 subprogram_meta: Vec::new(),
@@ -3369,7 +3408,19 @@ fn emit_unary(
 
     match op {
         HirUnOp::Minus => {
-            cur.body.push(format!("{} = sub {} {}, {}", tmp, v_ty, 0, v_ir));
+            // 浮点取负必须用 `fsub`（`sub` 只接受整型），且零值要与类型匹配：
+            //   `sub float 0, %x`   → integer/byte constant must have integer/byte type
+            //   `sub float 0.0, %x` → invalid operand type for instruction
+            // 自举编译 `VmOps.neg` 的浮点分支（`-parseFloat(…)`）时必现。
+            let op = if is_float_ty(&v_ty) { "fsub" } else { "sub" };
+            cur.body.push(format!(
+                "{} = {} {} {}, {}",
+                tmp,
+                op,
+                v_ty,
+                zero_value(&v_ty),
+                v_ir
+            ));
             Ok((tmp, v_ty))
         }
         HirUnOp::Not => {
@@ -4311,7 +4362,27 @@ fn emit_call(
             return Ok((tmp, "i8*".to_string()));
         }
         // Map.put(map, key, value) → void（原地修改 Map）
-        if (bare == "put" || bare == "set") && args_ir.len() == 3 {
+        //
+        // 仅对**非平台接口限定名**生效：`Memory.set(addr, v, n)` 同样是 3 个实参、
+        // 裸名同为 `set`，旧实现会把它误判为 Map 写入 —— 自举编译
+        // `Vm.newArray` 时 `Memory.set` 因此走进「求值被调用者」的兜底分支，
+        // 发射出未定义值 `%Memory`（llc: `use of undefined value '%Memory'`）。
+        let platform_qual = matches!(
+            callee.split('.').next().unwrap_or(""),
+            "Memory"
+                | "Syscalls"
+                | "FileOps"
+                | "Allocator"
+                | "Cpu"
+                | "ThreadOps"
+                | "ProcessNative"
+                | "NetworkOps"
+                | "Clock"
+                | "Console"
+                | "EnvOps"
+                | "MathOps"
+        );
+        if !platform_qual && (bare == "put" || bare == "set") && args_ir.len() == 3 {
             let (m, _) = &args_ir[0];
             let (k, k_ty) = &args_ir[1];
             let (v, v_ty) = &args_ir[2];
@@ -4565,6 +4636,60 @@ fn coerce_arg(
             format!("{} = {} {} {} to {}", t, op, from, val, to),
         );
         return (t, to.to_string());
+    }
+    // 浮点 ↔ `Any`（`i8*`）：Plan A 的 64 位值表示只有「低位标记整数」与
+    // 「真实指针」两种形态，**没有浮点标签位**，因此浮点只能退化为**十进制
+    // 字符串**（`aura_to_str_float`），读回时用 `String_toFloat` 解析。
+    //
+    // 缺少这一条时的表现：`fun f(a: Any, b: Any): Any { … return <Float 表达式> }`
+    // （典型如 `VmOps.add` 的浮点分支）会在 if 表达式合并处生成
+    // `phi i8* [%float_val, …]` → llc 报
+    //   `%var.N' defined with type 'float' but expected 'ptr'`
+    // 自举编译 `Main.aura` 时必现。
+    if is_float_ty(from) && to == "i8*" {
+        if from == "double" {
+            let s = ctx.fresh_var();
+            blocks.last_mut().body.push(format!(
+                "{} = call i8* @aura_to_str_float(double {})",
+                s, val
+            ));
+            return (s, to.to_string());
+        }
+        let e = ctx.fresh_var();
+        let s = ctx.fresh_var();
+        emit(
+            &mut blocks.last_mut().body,
+            format!("{} = fpext float {} to double", e, val),
+        );
+        emit(
+            &mut blocks.last_mut().body,
+            format!("{} = call i8* @aura_to_str_float(double {})", s, e),
+        );
+        return (s, to.to_string());
+    }
+    if from == "i8*" && is_float_ty(to) {
+        let p = ctx.fresh_var();
+        let d = ctx.fresh_var();
+        emit(
+            &mut blocks.last_mut().body,
+            format!("{} = call i8* @aura_to_str_any(i8* {})", p, val),
+        );
+        emit(
+            &mut blocks.last_mut().body,
+            format!(
+                "{} = call double @aura_lang_std_String_toFloat(i8* {})",
+                d, p
+            ),
+        );
+        if to == "double" {
+            return (d, to.to_string());
+        }
+        let f = ctx.fresh_var();
+        emit(
+            &mut blocks.last_mut().body,
+            format!("{} = fptrunc double {} to float", f, d),
+        );
+        return (f, to.to_string());
     }
     // 指针 → 整数：AOT 中 `Any`（`i8*`）与标量类型互转（装箱/拆箱）。
     // 缺少这一条时会把 `i8*` 直接塞进 `i32` 字段 → insertvalue 报
@@ -4820,6 +4945,28 @@ fn emit_coerce_to(
             );
             return v;
         }
+        if is_float_ty(from) {
+            // 浮点 → Any：Plan A 无浮点标签位，退化为十进制字符串表示
+            // （与 `coerce_arg` 的处理保持一致；读回用 String_toFloat）。
+            let d = if from == "double" {
+                val.to_string()
+            } else {
+                let e = ctx.fresh_var();
+                insert_before_terminator(
+                    blocks,
+                    block,
+                    format!("{} = fpext float {} to double", e, val),
+                );
+                e
+            };
+            let s = ctx.fresh_var();
+            insert_before_terminator(
+                blocks,
+                block,
+                format!("{} = call i8* @aura_to_str_float(double {})", s, d),
+            );
+            return s;
+        }
         return val.to_string();
     }
     // i8* → 整型：Plan A 低位标记拆箱（aura_to_int_any），再截断到目标宽度
@@ -4842,6 +4989,34 @@ fn emit_coerce_to(
         let v = ctx.fresh_var();
         insert_before_terminator(blocks, block, format!("{} = trunc i64 {} to {}", v, d, to));
         return v;
+    }
+    // i8* → 浮点：先按 Plan A 解析出字符串，再解析回数值
+    if from == "i8*" && is_float_ty(to) {
+        let p = ctx.fresh_var();
+        insert_before_terminator(
+            blocks,
+            block,
+            format!("{} = call i8* @aura_to_str_any(i8* {})", p, val),
+        );
+        let d = ctx.fresh_var();
+        insert_before_terminator(
+            blocks,
+            block,
+            format!(
+                "{} = call double @aura_lang_std_String_toFloat(i8* {})",
+                d, p
+            ),
+        );
+        if to == "double" {
+            return d;
+        }
+        let f = ctx.fresh_var();
+        insert_before_terminator(
+            blocks,
+            block,
+            format!("{} = fptrunc double {} to float", f, d),
+        );
+        return f;
     }
     // 整型互转兜底
     if is_int_ty(from) && is_int_ty(to) {
@@ -5474,11 +5649,7 @@ fn emit_if_expr(
 
     let (cond_ir, cond_ty) = emit_expr_val(ctx, blocks, cond)?;
     let icmp_var = ctx.fresh_var();
-    let pred = if cond_ty == "i1" {
-        format!("icmp eq i1 {}, true", cond_ir)
-    } else {
-        format!("icmp ne {} {}, 0", cond_ty, cond_ir)
-    };
+    let pred = bool_pred_ir(&cond_ir, &cond_ty);
     {
         let cur = blocks.last_mut();
         cur.body.push(format!("{} = {}", icmp_var, pred));
@@ -5644,11 +5815,24 @@ fn emit_if_expr(
             let ty = then_ty.clone();
             let then_val = if is_numeric_type(&ty) {
                 let phi_val = ctx.fresh_var();
-                let then_operand = if then_ir == "null" { "0".to_string() } else { then_ir };
+                // 浮点必须用 `fadd`（`add` 只接受整型），零值也随类型走
+                let norm_op = if is_float_ty(&ty) { "fadd" } else { "add" };
+                let then_operand = if then_ir == "null" {
+                    zero_value(&ty).to_string()
+                } else {
+                    then_ir
+                };
                 insert_before_terminator(
                     blocks,
                     &then_actual_block,
-                    format!("{} = add {} {}, 0", phi_val, ty, then_operand),
+                    format!(
+                        "{} = {} {} {}, {}",
+                        phi_val,
+                        norm_op,
+                        ty,
+                        zero_value(&ty),
+                        then_operand
+                    ),
                 );
                 phi_val
             } else {
@@ -5656,11 +5840,24 @@ fn emit_if_expr(
             };
             let else_val = if is_numeric_type(&ty) {
                 let phi_val = ctx.fresh_var();
-                let else_operand = if else_ir == "null" { "0".to_string() } else { else_ir };
+                // 浮点必须用 `fadd`（`add` 只接受整型），零值也随类型走
+                let norm_op = if is_float_ty(&ty) { "fadd" } else { "add" };
+                let else_operand = if else_ir == "null" {
+                    zero_value(&ty).to_string()
+                } else {
+                    else_ir
+                };
                 insert_before_terminator(
                     blocks,
                     &else_actual_block,
-                    format!("{} = add {} {}, 0", phi_val, ty, else_operand),
+                    format!(
+                        "{} = {} {} {}, {}",
+                        phi_val,
+                        norm_op,
+                        ty,
+                        zero_value(&ty),
+                        else_operand
+                    ),
                 );
                 phi_val
             } else {
@@ -5726,7 +5923,20 @@ fn emit_block_expr(
                 }
                 HirStmt::Return(Some(e)) => {
                     let (v, t) = emit_expr_val(ctx, blocks, e)?;
-                    blocks.set_terminator(&format!("ret {} {}", sanitize_ty_for_ret(&t), v));
+                    // 必须与 `emit_statement` 的 `HirStmt::Return` 一样，
+                    // 把返回值 coerce 到**函数声明的返回类型**：
+                    // 块体（表达式体）里 `return <Int 表达式>` 而函数返回 `Any`（i8*）时，
+                    // 旧实现直接发 `ret i32 %v` → llc 报
+                    // `value doesn't match function result type 'ptr'`
+                    // （自举编译 `VmOps.add` 等 Any 运算函数时必现）。
+                    let want = ctx.current_ret_ty.clone();
+                    if want.is_empty() || want == "void" {
+                        blocks.set_terminator("ret void");
+                        ctx.exit_scope();
+                        return Ok((v, t));
+                    }
+                    let converted = coerce_arg(ctx, blocks, v.clone(), &t, &want);
+                    blocks.set_terminator(&format!("ret {} {}", converted.1, converted.0));
                     ctx.exit_scope();
                     return Ok((v, t));
                 }

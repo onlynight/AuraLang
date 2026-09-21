@@ -460,6 +460,19 @@ fn find_lang_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
         if is_lang && dir.join("native").is_dir() {
             return Some(dir.to_path_buf());
         }
+        // 核心语言根回退：`<proj>/aura/core/aura/lang`。
+        //
+        // 编译**自举编译器**（入口 `aura/compiler/aura/lang/compiler/Main.aura`）时，
+        // 从入口目录向上找不到「名为 `lang` 且含 `native/`」的目录，于是
+        // `import aura.lang.native.*` 不会被内联 —— `object Syscalls { const val
+        // O_WRONLY … }`、`object Allocator { … }` 等都不参与编译单元，成员访问会
+        // 发射出未定义值 `%Syscalls`（AOT 链接期报
+        // `use of undefined value '%Syscalls'`）。
+        // 这里补一条回退：沿祖先查找 `<ancestor>/aura/core/aura/lang`。
+        let core_lang = dir.join("aura").join("core").join("aura").join("lang");
+        if core_lang.join("native").is_dir() {
+            return Some(core_lang);
+        }
         cur = dir.parent();
     }
     None

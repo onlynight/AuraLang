@@ -136,6 +136,13 @@ pub struct Lexer {
 impl Lexer {
     /// 从源码字符串创建 Lexer
     pub fn new(source: &str) -> Self {
+        // 跳过 UTF-8 BOM（U+FEFF）。
+        //
+        // Windows 编辑器（记事本、PowerShell `Set-Content -Encoding utf8`、
+        // 部分 VS Code 配置）会在文件头写入 BOM。此前词法器把它当作普通字符，
+        // 直接报 `lex error: Unexpected character: ''`，整个文件无法编译
+        // （实测 `tests/photon/S1/PhotonPipelineTest2.aura` 就因此长期无法运行）。
+        let source = source.strip_prefix('\u{feff}').unwrap_or(source);
         let chars: Vec<(char, usize)> = source.char_indices().map(|(idx, ch)| (ch, idx)).collect();
 
         Self {

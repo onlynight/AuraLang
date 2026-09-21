@@ -352,6 +352,29 @@ impl Heap {
         }
     }
 
+    /// 该句柄指向的是否为 Map（`set` 需要据此区分「列表下标」与「Map 键」）。
+    pub fn is_map(&self, handle: usize) -> bool {
+        matches!(
+            self.slots.get(handle).and_then(|s| s.data.as_ref()),
+            Some(HeapData::Map(_))
+        )
+    }
+
+    /// List 按下标原地写入（越界为无操作）。
+    ///
+    /// `l.set(i, v)` 经前端重写为 `Collections.set(l, i, v)`；堆列表必须**原地**
+    /// 生效，否则调用方丢弃返回值后列表毫无变化（纯函数式 native 只能返回值语义
+    /// 的 `Value::List`，对 `Value::Ref` 直接返回 `Null`）。
+    pub fn list_set(&mut self, handle: usize, index: usize, value: Value) {
+        if let Some(slot) = self.slots.get_mut(handle) {
+            if let Some(HeapData::List(elems)) = &mut slot.data {
+                if index < elems.len() {
+                    elems[index] = value;
+                }
+            }
+        }
+    }
+
     // ── Map 操作（5.7） ──
 
     /// Map 插入键值对

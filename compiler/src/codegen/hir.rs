@@ -79,6 +79,19 @@ thread_local! {
     static INTERFACE_NAMES: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
     /// 枚举名 → 变体名列表（供 `when` 中裸变体模式 `RED -> ...` 降级为 `Color.RED`）
     static ENUM_TABLE: RefCell<HashMap<String, Vec<String>>> = RefCell::new(HashMap::new());
+    /// 编译期常量表：`(对象名, 常量名) → 字面量`。
+    ///
+    /// `object Syscalls { const val O_WRONLY: Int = 0x0001 }` 这类成员在 AST 中是
+    /// **带字面量初值的 `const` 字段**（[`StructField::is_const`]）。LLVM IR 并没有
+    /// 「对象静态字段」这一概念，若不在此折成常量，`Syscalls.O_WRONLY` 会降级为
+    /// `HirExpr::Member { Var("Syscalls"), "O_WRONLY" }`，AOT 发射器只能把
+    /// `Syscalls` 当普通变量发出 `%Syscalls`（从未定义）→ llc 报
+    /// `use of undefined value '%Syscalls'`。
+    ///
+    /// 自举编译时 `AucSerializer`（`FileOps.open(path, Syscalls.O_WRONLY | …)`）
+    /// 等位置必现。
+    static OBJECT_CONSTS: RefCell<HashMap<(String, String), Literal>> =
+        RefCell::new(HashMap::new());
 }
 
 /// 判断名称是否为已知的结构体/类（用于检测构造器调用）
@@ -345,6 +358,21 @@ fn sema_expr_class(object: &Expr) -> Option<String> {
     })
 }
 
+/// 解析方法接收者的静态类型：sema 优先，回退到降级期记录的声明类型
+/// （`LOCAL_TYPE_SCOPES`，见 `lookup_expr_type`）。
+///
+/// `val instr: DagInstruction = list[i]`、`for (instr in list)` 这类接收者，
+/// sema 常只给出 `Any` 甚至无记录，仅凭 sema 会让方法派发失败并退化成裸名调用
+/// （photon 后端大量 `instr.nodeAt(j)` / `instr.nodeCount()` 因此失败）。
+fn resolve_receiver_type(e: &Expr) -> Option<String> {
+    if let Some(t) = sema_expr_class(e) {
+        if !t.is_empty() {
+            return Some(t);
+        }
+    }
+    lookup_expr_type(e).filter(|t| !t.is_empty())
+}
+
 /// 沿继承链在成员表中查找拥有方法 `method` 的类。
 fn find_method_in_chain(
     table: &HashMap<String, ClassEntry>,
@@ -450,8 +478,18 @@ fn resolve_method_owner(object: &Expr, method: &str) -> Option<(String, ClassEnt
             }
         }
     }
-    // 1) sema 静态类型 + 继承链查找
-    let sema_ty = sema_expr_class(object);
+    // 1) 接收者静态类型：sema 优先，回退到降级期记录的声明类型
+    //    （`val instr: DagInstruction = list[i]` 这类列表元素接收者，
+    //      sema 常给不出具体类型；仅凭 sema 会退化成裸名调用）
+    let sema_ty = resolve_receiver_type(object);
+    // `Any` / `Nothing` / 无类型信息都属**动态接收者**：不能用「类型已知但无此方法」
+    // 的规则提前终止，否则会跳过后面的「全表唯一候选」兜底 ——
+    // `for (instr in list) { instr.nodeAt(0) }`（列表元素/循环变量接收者）在
+    // photon 后端里大量出现，正是被这条提前 return 挡住，发射出裸名 `nodeAt`。
+    let dynamic_recv = match sema_ty.as_deref() {
+        None | Some("Any") | Some("Nothing") => true,
+        _ => false,
+    };
     if let Some(ref ty) = sema_ty {
         if let Some(found) = find_method_in_chain(&table, ty, method) {
             return Some(found);
@@ -459,7 +497,7 @@ fn resolve_method_owner(object: &Expr, method: &str) -> Option<(String, ClassEnt
         // 已知接收者类型且是成员表中的类但无此方法 → 尝试 `Any` 的默认实现
         //（所有 class / object 都隐式继承 Any，`hashCode` / `equals` / `toString`
         //  等基类方法即使未显式重写也应命中 Any 的默认实现）
-        if table.contains_key(ty) {
+        if table.contains_key(ty) && !dynamic_recv {
             return any_base_method(&table, method);
         }
         // 类型不在成员表（List/String/Any/泛型等）：继续尝试字段接收者兜底
@@ -468,11 +506,15 @@ fn resolve_method_owner(object: &Expr, method: &str) -> Option<(String, ClassEnt
     if let Some(found) = field_receiver_method(&table, object, method) {
         return Some(found);
     }
-    // 已知非类类型（List/String/Any/泛型等）→ 先试 `Any` 默认实现，再交给内置方法
-    if sema_ty.is_some() {
-        return any_base_method(&table, method);
+    // 已知**具体**非类类型（List/String/泛型等）→ 先试 `Any` 默认实现，
+    // 再交给内置方法（保持既有语义：具体类型上找不到方法不再猜全局唯一候选）
+    if !dynamic_recv {
+        if let Some(found) = any_base_method(&table, method) {
+            return Some(found);
+        }
+        return None;
     }
-    // 1.8) 无类型信息：`Any` 默认实现优先于「全表唯一候选」兜底
+    // 1.8) 动态接收者：`Any` 默认实现优先于「全表唯一候选」兜底
     //      （`hashCode` / `equals` 被大量类重写，唯一候选兜底必然失败）
     if let Some(found) = any_base_method(&table, method) {
         return Some(found);
@@ -716,6 +758,11 @@ fn build_class_table(program: &Program) -> HashMap<String, ClassEntry> {
         "toLowerCase",
         "toUpperCase",
         "charCodeAt",
+        // `charAt(i): Char` —— 此前缺失：`s.charAt(i)` 无法派发到
+        // `String.charAt`，会退化成裸名 `charAt` → 字节码报
+        // 「未解析的函数调用 'charAt'」。photon 后端大量使用它
+        // （`LirUtils.strToInt` / `MachineDagUtils.strToInt` / `PhotonSystemLinker.strToInt`）。
+        "charAt",
         "substringBefore",
         "substringAfter",
         "substringBeforeLast",
@@ -1660,7 +1707,10 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                                     crate::ast::Literal::Null => Const::Null,
                                     crate::ast::Literal::Char(c) => Const::Int(*c as i64),
                                 };
-                                constants.push((name.clone(), c));
+                                // 同名常量去重（见 ExternObject 分支同注释）
+                                if !constants.iter().any(|(n, _)| n == name) {
+                                    constants.push((name.clone(), c));
+                                }
                             }
                         }
                     }
@@ -1669,6 +1719,46 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
             Decl::ExternObject(e) => {
                 // extern object: 绑定到 AOT 动态库的函数接口（或系统级外部绑定）
                 INTERFACE_NAMES.with(|n| n.borrow_mut().insert(e.name.clone()));
+                // 接口内的常量声明（`extern interface Syscalls { const val O_WRONLY: Int = 0x1 }`）。
+                //
+                // 旧实现**整段丢弃** `e.constants`（只有 `Decl::Extern` 分支处理了常量），
+                // 于是 `Syscalls.O_WRONLY` 无值可折：成员访问会发射出未定义值
+                // `%Syscalls`，AOT 链接期报 `use of undefined value '%Syscalls'`。
+                // 这里做两件事：
+                //   1) 注册进 OBJECT_CONSTS → `Interface.CONST` 在降级期直接内联为字面量；
+                //   2) 收进 `program.constants` → 保留 `@CONST` 全局常量（emit_ffi_constants）。
+                for stmt in &e.constants {
+                    if let Stmt::Val {
+                        name,
+                        initializer,
+                        ..
+                    } = stmt
+                    {
+                        if let Some(init) = initializer {
+                            if let Expr::Literal(lit, _) = init.as_ref() {
+                                let c = match lit {
+                                    crate::ast::Literal::Int(i) => Const::Int(*i),
+                                    crate::ast::Literal::Float(f) => Const::Float(*f),
+                                    crate::ast::Literal::String(s) => Const::Str(s.clone()),
+                                    crate::ast::Literal::Bool(b) => Const::Bool(*b),
+                                    crate::ast::Literal::Null => Const::Null,
+                                    crate::ast::Literal::Char(c) => Const::Int(*c as i64),
+                                };
+                                // 同名常量去重：多个 extern 接口会声明同名常量
+                                // （`Syscalls.O_RDONLY` 与 `FileOps.O_RDONLY`，取值一致）。
+                                // 重复入表会让 AOT 发射出两个 `@O_RDONLY = global …`，
+                                // llc 报 `redefinition of global '@O_RDONLY'`。
+                                if !constants.iter().any(|(n, _)| n == name) {
+                                    constants.push((name.clone(), c));
+                                }
+                                OBJECT_CONSTS.with(|m| {
+                                    m.borrow_mut()
+                                        .insert((e.name.clone(), name.clone()), lit.clone());
+                                });
+                            }
+                        }
+                    }
+                }
                 for f in &e.functions {
                     if f.name == "loadLibrary" {
                         continue; // loadLibrary 是内部方法，不生成原生函数
@@ -1902,6 +1992,17 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                 obj_entry.is_singleton = true;
                 for f in &o.fields {
                     obj_entry.fields.push(f.name.clone());
+                    // `const val` 成员：记录字面量，供 `Obj.CONST` 内联（见 OBJECT_CONSTS）
+                    if f.is_const {
+                        if let Some(init) = &f.default_value {
+                            if let Expr::Literal(lit, _) = init.as_ref() {
+                                OBJECT_CONSTS.with(|m| {
+                                    m.borrow_mut()
+                                        .insert((o.name.clone(), f.name.clone()), lit.clone());
+                                });
+                            }
+                        }
+                    }
                     let default_ty = Box::new(Type::Named {
                         name: "Int".into(),
                         span: f.span,
@@ -3695,6 +3796,16 @@ fn desugar_expr_stmt(e: &Expr) -> HirStmt {
             } = callee.as_ref()
             {
                 if name.as_str() == "set" {
+                    // 平台接口的 `set` 不是集合写入：`Memory.set(addr, v, n)` 是
+                    // memset。误改写成 `Collections.set(Memory, …)` 会把接口名当
+                    // 容器**求值**，发射出未定义值 `%Memory`
+                    // （llc: `use of undefined value '%Memory'`，自举编译
+                    //  `Vm.newArray` 时必现）。
+                    if let Expr::Ident(obj, _) = object.as_ref() {
+                        if INTERFACE_NAMES.with(|n| n.borrow().contains(obj)) {
+                            return HirStmt::Expr(desugar_expr(e));
+                        }
+                    }
                     let mut call_args = vec![desugar_expr(object)];
                     for a in args {
                         call_args.push(desugar_expr(a));
@@ -5145,6 +5256,14 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                             };
                         }
                     }
+                }
+            }
+            // 编译期常量：`Obj.CONST` → 字面量（对象 `const val` 成员，见 OBJECT_CONSTS）
+            if let Expr::Ident(obj_name, _) = object.as_ref() {
+                if let Some(lit) = OBJECT_CONSTS
+                    .with(|m| m.borrow().get(&(obj_name.clone(), name.clone())).cloned())
+                {
+                    return HirExpr::Lit(lit);
                 }
             }
             // 访问器 getter：obj.prop → Class.prop.get(obj)
