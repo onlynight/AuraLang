@@ -3574,7 +3574,19 @@ impl Checker {
                     let owner_type = _obj_ty.non_null().name().to_string();
                     self.check_access(sym.visibility, &owner_type, name, span);
                 }
-                return self.check_call_args(&cloned, args, span);
+                let ret = self.check_call_args(&cloned, args, span);
+                // 符号表里的 stdlib 函数常常拿不到精确返回类型（退化成 `Any`）。
+                // 此时**不要就此收尾**，继续往下查 `std_sigs` 表 —— 那里有更精确的
+                // LLVM 级签名（如 `String.substring` → `i8*` → `String`）。
+                //
+                // 否则 `val s = str.substring(i, j)` 的静态类型会变成 `Any`，
+                // 字符串插值 `"$s"` 便会认为 s 不是字符串，对 String 接收者发出
+                // **虚方法** `toString` 调用（`CallVirtual`）→ VM 报
+                // `runtime error: method call on non-object value`
+                // （`tests/photon/S1/TestSubstring.aura` 正是此症）。
+                if ret != Ty::Any {
+                    return ret;
+                }
             }
             // Phase D: std 签名表兜底 — 避免 String.split 等退化为 Ty::Any
             let type_name = _obj_ty.non_null().name();

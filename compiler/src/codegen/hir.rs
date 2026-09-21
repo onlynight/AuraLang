@@ -4563,8 +4563,41 @@ fn desugar_expr(e: &Expr) -> HirExpr {
             ..
         } => {
             if *op == UnOp::Increment || *op == UnOp::Decrement {
-                // ++/-- 作为语句语义，这里近似为自身值
-                desugar_expr(operand)
+                // `x++` / `++x` / `x--` / `--x` → 赋值 + 取值块：
+                //   `{ x = x ± 1; x }`
+                //
+                // 旧实现**直接丢弃**了自增（此处原注释写「近似为自身值」并返回
+                // `desugar_expr(operand)`），于是 `i++` 是**静默空操作**：
+                // `while (i < n) { i++ }` 永不前进 —— 一旦语法侧补上后缀解析
+                // （`parse_postfix_chain`），这种循环立刻变成死循环。
+                //
+                // 之所以降级为「块表达式」而不是 `HirExpr::Assign`：后者在 AOT
+                // （`emit.rs`）与字节码（`mir.rs`）两条代码生成路径上**都未实现**，
+                // 只有**语句**形式的 `HirStmt::Assign` 被支持。块表达式用
+                // `HirStmt::Assign` + 尾表达式，语句/表达式两种位置都能正确执行。
+                //
+                // 语义说明：AST 未区分前缀与后缀，故统一按「返回新值」的前缀语义
+                // 降级（后缀的「旧值」语义需要 AST 增补标记）。仓库内 22 处
+                // `++`/`--` 全为语句位置，不依赖返回值。
+                let target = desugar_expr(operand);
+                let value = HirExpr::Binary {
+                    op: if *op == UnOp::Increment {
+                        HirBinOp::Add
+                    } else {
+                        HirBinOp::Sub
+                    },
+                    lhs: Box::new(target.clone()),
+                    rhs: Box::new(HirExpr::Lit(Literal::Int(1))),
+                };
+                HirExpr::Block(HirBlock {
+                    stmts: vec![
+                        HirStmt::Assign {
+                            target: target.clone(),
+                            value,
+                        },
+                        HirStmt::Expr(target),
+                    ],
+                })
             } else {
                 HirExpr::Unary {
                     op: HirUnOp::from_ast(*op),
@@ -5475,6 +5508,21 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                 let h = desugar_expr(p);
                 let is_str = matches!(p, Expr::Literal(crate::ast::Literal::String(_), _))
                     || lookup_expr_type(p).as_deref().map(is_string_type_name).unwrap_or(false);
+                if std::env::var("AURA_DEBUG_INTERP").is_ok() {
+                    let sp = p.span();
+                    eprintln!(
+                        "[interp] span=({},{}) type={:?} is_str={} kind={}",
+                        sp.start,
+                        sp.end,
+                        lookup_expr_type(p),
+                        is_str,
+                        match p {
+                            Expr::Ident(n, _) => format!("ident:{}", n),
+                            Expr::Literal(..) => "literal".to_string(),
+                            _ => "other".to_string(),
+                        }
+                    );
+                }
                 if is_str {
                     hir_parts.push(h);
                 } else {

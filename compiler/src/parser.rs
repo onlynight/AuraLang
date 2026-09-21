@@ -3276,6 +3276,36 @@ impl Parser {
                         span: Span::merge(&start, &self.current().span),
                     };
                 }
+                // 后缀自增/自减：`x++` / `x--`（C/Kotlin 风格）。
+                //
+                // 此前只解析**前缀**形式（见 `parse_prefix_expression` 的
+                // `DoublePlus` / `DoubleMinus` 分支），后缀一律落到下面的 `_ => break`：
+                //   * 语句位置 → `++` 被当作下一条语句的开头后又被丢弃，
+                //     于是 `i++` 变成**空操作**（循环永不前进，静默错误）；
+                //   * 块尾（`{ i++ }`）→ `Expected Arrow, got Colon` +
+                //     `Expected RBrace, got EOF` 级联报错，位置还会漂到文件末尾，
+                //     极难定位。
+                //
+                // 例如 `tests/photon/phase_a_ssa_regression_test.aura` 里的
+                // `validEntries++` / `memTokenCount++` / `fii++`。
+                TokenKind::DoublePlus | TokenKind::DoubleMinus => {
+                    // 后缀自增/自减必须**紧贴操作数所在行**：Aura 用换行分隔语句，
+                    // 若不加此限制，下一行开头的 `++x` 会被当成上一行末尾表达式的
+                    // 后缀 —— 实测 `var p = 0` 后接 `++p` 会变成 `0++`，再被
+                    // `try_parse_infix_call` 的中缀调用启发式拼成 `p(++0)`，
+                    // 生成错乱字节码（读到未初始化槽位 + `CALL 65535`）。
+                    let op_line = self.current().span.start_line;
+                    if expr.span().end_line != op_line {
+                        break;
+                    }
+                    let is_inc = self.current().kind == TokenKind::DoublePlus;
+                    self.advance();
+                    expr = Expr::Unary {
+                        op: if is_inc { UnOp::Increment } else { UnOp::Decrement },
+                        operand: Box::new(expr),
+                        span: Span::merge(&start, &self.current().span),
+                    };
+                }
                 _ => break,
             }
         }

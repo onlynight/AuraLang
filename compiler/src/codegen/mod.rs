@@ -180,11 +180,19 @@ pub fn compile_source(source: &str) -> Result<BytecodeModule, String> {
     // 语法
     let mut parser = Parser::new(tokens);
     let program = parser.parse_program();
+    // 诊断必须带**位置**：`CompileError` 一直携带 `span`，但此前只打印 message，
+    // 于是「parse error: Expected RBrace, got EOF」这类报错无法定位到行。
+    // 对多函数/大文件（几百行）而言，无位置的语法错误几乎不可用。
     let perrs: Vec<String> = parser
         .errors()
         .iter()
         .filter(|e| e.severity == crate::errors::ErrorSeverity::Error)
-        .map(|e| format!("parse error: {}", e.message))
+        .map(|e| {
+            format!(
+                "parse error: {} (line {}, col {})",
+                e.message, e.span.start_line, e.span.start_col
+            )
+        })
         .collect();
     if !perrs.is_empty() {
         return Err(perrs.join("\n"));
@@ -295,6 +303,17 @@ pub fn resolve_aura_imports(source: &str, file_path: Option<&str>) -> String {
                     &mut visited,
                 ));
             }
+        }
+    }
+    // 调试：把**内联展开后**的完整源码写到 `AURA_DUMP_EXPANDED` 指定的路径。
+    //
+    // 诊断价值：内联后的源码是词法/语法/语义各阶段真正看到的文本，其行号也就是
+    // 报错里的行号。此前报错定位到「line 6869」却无人知道那是哪个文件
+    // （入口文件可能只有几百行），因为展开结果从不落地。
+    if let Ok(path) = std::env::var("AURA_DUMP_EXPANDED") {
+        if !path.is_empty() {
+            let _ = std::fs::write(&path, &out);
+            eprintln!("[aura] expanded source ({} bytes) -> {}", out.len(), path);
         }
     }
     out
