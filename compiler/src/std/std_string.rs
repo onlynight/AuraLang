@@ -3,45 +3,73 @@
 //! 提供 Kotlin 风格的字符串工具：`contains`、`startsWith`、`endsWith`、
 //! `split`、`replace`、`trim`、`substring`、`format` 等。
 
-use crate::vm::native::NativeRegistry;
+use crate::vm::native::{NativeFn, NativeRegistry};
 use crate::vm::value::Value;
 
 pub fn register(reg: &mut NativeRegistry) {
     // ── 纯逻辑函数（已上移到 Aura 层，但 VM 仍需 native 实现）──
-    reg.register("aura.lang.std.String.contains", nat_contains);
-    reg.register("aura.lang.std.String.startsWith", nat_starts_with);
-    reg.register("aura.lang.std.String.endsWith", nat_ends_with);
-    reg.register("aura.lang.std.String.split", nat_split);
-    reg.register("aura.lang.std.String.join", nat_join);
-    reg.register("aura.lang.std.String.replace", nat_replace);
-    reg.register("aura.lang.std.String.trim", nat_trim);
-    reg.register("aura.lang.std.String.trimStart", nat_trim_start);
-    reg.register("aura.lang.std.String.trimEnd", nat_trim_end);
-    reg.register("aura.lang.std.String.substring", nat_substring);
-    reg.register("aura.lang.std.String.substringBefore", nat_substring_before);
-    reg.register("aura.lang.std.String.substringAfter", nat_substring_after);
-    reg.register("aura.lang.std.String.toLowerCase", nat_to_lower);
-    reg.register("aura.lang.std.String.toUpperCase", nat_to_upper);
-    reg.register("aura.lang.std.String.length", nat_length);
-    reg.register("aura.lang.std.String.isEmpty", nat_is_empty);
-    reg.register("aura.lang.std.String.repeat", nat_repeat);
-    reg.register("aura.lang.std.String.indexOf", nat_index_of);
-    reg.register("aura.lang.std.String.lastIndexOf", nat_last_index_of);
-    reg.register("aura.lang.std.String.padStart", nat_pad_start);
-    reg.register("aura.lang.std.String.padEnd", nat_pad_end);
-    reg.register("aura.lang.std.String.splitLines", nat_split_lines);
-    reg.register("aura.lang.std.String.joinLines", nat_join_lines);
-    reg.register("aura.lang.std.String.countChar", nat_count_char);
-    reg.register("aura.lang.std.String.first", nat_first);
-    reg.register("aura.lang.std.String.last", nat_last);
-    reg.register("aura.lang.std.String.isBlank", nat_is_blank);
-    reg.register("aura.lang.std.String.containsAny", nat_contains_any);
-    reg.register("aura.lang.std.String.containsAll", nat_contains_all);
+    //
+    // 每个方法注册两种**限定名**：
+    //   * `aura.lang.std.String.<m>` — stdlib 合并后的全限定符号；
+    //   * `String.<m>`               — 编译器对 String 值方法调用发射的名字。
+    //
+    // 早先只注册了全限定名，导致经 VM 编译的代码（例如编译器自身的 Aura 模块）
+    // 里 `s.substring(a, b)` 被发射为 `String.substring` 后**无法解析**，
+    // 表现为 `[vm] Unlinked external function 'String.substring', call ignored`，
+    // 随后在 null 值上继续调用，最终 `call to undefined function #65535` 崩溃。
+    // `String.charCodeAt` 曾被单独补过，正是同一根因的局部修法；这里统一处理。
+    let qualified: &[(&str, NativeFn)] = &[
+        ("contains", nat_contains),
+        ("startsWith", nat_starts_with),
+        ("endsWith", nat_ends_with),
+        ("split", nat_split),
+        ("join", nat_join),
+        ("replace", nat_replace),
+        ("trim", nat_trim),
+        ("trimStart", nat_trim_start),
+        ("trimEnd", nat_trim_end),
+        ("substring", nat_substring),
+        ("substringBefore", nat_substring_before),
+        ("substringAfter", nat_substring_after),
+        ("toLowerCase", nat_to_lower),
+        ("toUpperCase", nat_to_upper),
+        ("length", nat_length),
+        ("isEmpty", nat_is_empty),
+        ("repeat", nat_repeat),
+        ("indexOf", nat_index_of),
+        ("lastIndexOf", nat_last_index_of),
+        ("padStart", nat_pad_start),
+        ("padEnd", nat_pad_end),
+        ("splitLines", nat_split_lines),
+        ("joinLines", nat_join_lines),
+        ("countChar", nat_count_char),
+        ("first", nat_first),
+        ("last", nat_last),
+        ("isBlank", nat_is_blank),
+        ("containsAny", nat_contains_any),
+        ("containsAll", nat_contains_all),
+        ("fromCharCode", nat_from_char_code),
+        ("charAt", nat_char_at),
+        ("charCodeAt", nat_char_at_code),
+        ("replaceAll", nat_replace_all),
+        ("format", nat_format),
+        ("escape", nat_escape),
+        ("unescape", nat_unescape),
+        ("matches", nat_matches),
+    ];
+    for (name, f) in qualified {
+        reg.register(&format!("aura.lang.std.String.{name}"), *f);
+        reg.register(&format!("String.{name}"), *f);
+    }
 
     // ── 短名注册（实例方法调用 `text.substring(i, j)` 解析为 "substring"）──
     // Aura 编译的 companion 方法（如 String.indexOf）内部调用实例方法
     // （如 `text.substring(i, j)`），编译器将短名 "substring" 发射为原生调用。
     // 这些短名不在 stdlib_func_map 中（非 prelu），需在此注册为 native 回退。
+    //
+    // 注意：只注册**不会与容器/其他类型同名方法冲突**的短名；
+    // `length` / `first` / `last` / `trim` / `split` / `join` 等保持不注册短名，
+    // 以免覆盖 List / Map 上的同名方法。
     reg.register("substring", nat_substring);
     reg.register("substringBefore", nat_substring_before);
     reg.register("substringAfter", nat_substring_after);
@@ -54,17 +82,8 @@ pub fn register(reg: &mut NativeRegistry) {
     reg.register("toLowerCase", nat_to_lower);
     reg.register("toUpperCase", nat_to_upper);
     reg.register("fromCharCode", nat_from_char_code);
-    reg.register("aura.lang.std.String.fromCharCode", nat_from_char_code);
     reg.register("charCodeAt", nat_char_at_code);
-    reg.register("aura.lang.std.String.charCodeAt", nat_char_at_code);
-    reg.register("String.charCodeAt", nat_char_at_code);
-
-    // ── 复杂函数（正则/格式化/转义，Rust native 实现）──
-    reg.register("aura.lang.std.String.replaceAll", nat_replace_all);
-    reg.register("aura.lang.std.String.format", nat_format);
-    reg.register("aura.lang.std.String.escape", nat_escape);
-    reg.register("aura.lang.std.String.unescape", nat_unescape);
-    reg.register("aura.lang.std.String.matches", nat_matches);
+    reg.register("charAt", nat_char_at);
 }
 
 fn s0(args: &[Value]) -> String {
@@ -384,6 +403,28 @@ fn nat_from_char_code(args: &[Value]) -> Value {
     match char::from_u32(code) {
         Some(c) => Value::str_(c.to_string()),
         None => Value::Null,
+    }
+}
+
+/// String.charAt(index) — 取位置 index 的字符（越界返回空串）
+///
+/// 兼容两种参数布局：
+///   * `(text, index)`         — 实例方法 / 静态方法调用
+///   * `(self, text, index)`   — companion 方法调用（VM 注入 self）
+fn nat_char_at(args: &[Value]) -> Value {
+    let (text, idx) = if args.len() >= 3 && !matches!(args.first(), Some(Value::Str(_))) {
+        (
+            args.get(1).map(|v| v.as_string()).unwrap_or_default(),
+            args.get(2).map(|v| v.as_int()).unwrap_or(0),
+        )
+    } else if args.len() >= 2 && matches!(args.get(1), Some(Value::Int(_))) {
+        (s0(args), args.get(1).map(|v| v.as_int()).unwrap_or(0))
+    } else {
+        (s0(args), i0(args))
+    };
+    match text.chars().nth(idx as usize) {
+        Some(c) => Value::str_(c.to_string()),
+        None => Value::str_(""),
     }
 }
 
