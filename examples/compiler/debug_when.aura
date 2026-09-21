@@ -1,6 +1,0 @@
-fun main() {
-    when (event) {
-        is MouseClick && true -> handleClick(event)
-        else -> {}
-    }
-}

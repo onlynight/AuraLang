@@ -1,3 +1,0 @@
-// 简单 Lambda 测试
-val f = x -> x * 2
-println(f(21))

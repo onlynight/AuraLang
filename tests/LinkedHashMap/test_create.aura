@@ -1,9 +1,0 @@
-package test
-
-import aura.lang.collection.LinkedHashMap
-
-fun main(): Int {
-    var m = LinkedHashMap<Int, Int>()
-    println("created")
-    return 0
-}

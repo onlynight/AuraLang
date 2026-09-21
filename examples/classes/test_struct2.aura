@@ -1,8 +1,0 @@
-struct Player {
-    var x: Float = 100f
-    var y: Float = 200f
-}
-
-fun main() {
-    println("Hello")
-}

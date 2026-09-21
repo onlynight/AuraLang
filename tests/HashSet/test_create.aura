@@ -1,9 +1,0 @@
-package test
-
-import aura.lang.collection.HashSet
-
-fun main(): Int {
-    var s = HashSet<Int>()
-    println("created")
-    return 0
-}
