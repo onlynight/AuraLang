@@ -6,6 +6,10 @@ use crate::vm::native::NativeRegistry;
 use crate::vm::value::Value;
 
 pub fn register(reg: &mut NativeRegistry) {
+    // 裸名 `assert(...)`：源码里普遍直接写 `assert(cond)`，
+    // 而此前只注册了全限定名 → `[bytecode] error: 未解析的函数调用 'assert'`
+    // （实测 111 处调用点）。裸名与全限定名都注册，两侧都能解析。
+    reg.register("assert", nat_assert);
     reg.register("aura.lang.std.Assert.assert", nat_assert);
     reg.register("aura.lang.std.Assert.assertTrue", nat_assert_true);
     reg.register("aura.lang.std.Assert.assertFalse", nat_assert_false);

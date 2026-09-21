@@ -159,6 +159,37 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
             });
         }
     }
+    // ── 与 MIR 的原生分类保持一致 ──
+    //
+    // MIR 侧（`MirContext::register_builtin_native_names`）现在以**运行期
+    // NativeRegistry** 为兜底，凡注册表里有的名字都会被分类成原生调用
+    // （`MirInstr::CallNative`）。而这里的 natives 表只由「HIR 的 native 声明 +
+    // 上面的硬编码名单」构成，两边一旦不一致，发射阶段就报
+    //   `[bytecode] error: 未解析的原生调用 'X'（原生函数表无此名）`
+    // （实测 `toStr` 即由此回归：`S2/06_liveness_test` 从通过变失败）。
+    //
+    // 因此按 MIR **实际使用的** CallNative 名补齐。只补真实调用点，不会抢占
+    // 同名用户函数（用户函数走 `fn_index`，与此表无关）。
+    for f in mir_funcs {
+        for blk in &f.blocks {
+            for ins in &blk.instrs {
+                if let crate::codegen::mir::MirInstr::CallNative { func, .. } = ins {
+                    if !natives.iter().any(|n| n.name == *func) {
+                        natives.push(BytecodeNative {
+                            name: func.clone(),
+                            // argc 由调用点的 `CallNativeArgs` 携带，此处仅用于
+                            // 不带 argc 的 `CallNative` 路径
+                            param_count: 0,
+                            ffi_abi: FfiAbi::None,
+                            ffi_lib: None,
+                            param_types: Vec::new(),
+                            ret_type: TYPE_ID_VOID,
+                        });
+                    }
+                }
+            }
+        }
+    }
     // 原生函数名 -> 索引
     let mut native_index: HashMap<&str, u16> = HashMap::new();
     for (i, n) in natives.iter().enumerate() {

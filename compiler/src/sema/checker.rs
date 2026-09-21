@@ -3642,6 +3642,18 @@ impl Checker {
             if crate::std::decl::is_prelude(name) {
                 return Ty::Any;
             }
+            // 集合工厂的类型：`var l = arrayListOf<Int>()` 必须推断出**列表**类型。
+            //
+            // 这些工厂多为原生函数，符号表里查不到返回类型 → 退化为 `Ty::Any`；
+            // 于是后续 `l.getAt(0)` / `l.add(1)` 跳过 `is_list_like_type` 的
+            // 内建列表分派，退化成裸名调用 →
+            // `未解析的函数调用 'getAt'`（实测 108 处调用点）。
+            if let Some(t) = collection_factory_ty(name) {
+                for a in args {
+                    self.check_expr(a);
+                }
+                return t;
+            }
         }
         // 否则作为表达式检查（可能是 lambda 调用等）
         let callee_ty = self.check_expr(callee);
@@ -5013,4 +5025,23 @@ pub fn analyze_source(source: &str) -> (Program, SemanticResult) {
         info: result.info,
     };
     (program, result2)
+}
+
+/// 集合工厂函数的返回类型（`arrayListOf<Int>()` → `List<Any>`）。
+///
+/// 这些工厂几乎都是原生函数，符号表里没有可推断的返回类型，此前一律退化为
+/// `Ty::Any`。而 `var l = arrayListOf<Int>()` 一旦拿到 `Any`，后续
+/// `l.getAt(0)` / `l.add(1)` / `l.getSize()` 就会跳过 `is_list_like_type`
+/// 的**内建列表分派**，退化成裸名调用 →
+/// `[bytecode] error: 未解析的函数调用 'getAt'`。
+fn collection_factory_ty(name: &str) -> Option<Ty> {
+    match name {
+        "listOf" | "arrayListOf" | "mutableListOf" | "arrayOf" | "emptyList"
+        | "listOfNotNull" | "setOf" | "mutableSetOf" | "hashSetOf" | "emptySet"
+        | "linkedSetOf" => Some(Ty::List(Box::new(Ty::Any))),
+        "mapOf" | "mutableMapOf" | "hashMapOf" | "emptyMap" | "linkedHashMapOf" => {
+            Some(Ty::Map(Box::new(Ty::Any), Box::new(Ty::Any)))
+        }
+        _ => None,
+    }
 }

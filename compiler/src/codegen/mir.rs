@@ -298,6 +298,51 @@ impl LowerCtx {
         for (name, pc) in list_methods {
             self.register_native(name, *pc);
         }
+
+        // ── 兜底：以**运行期原生注册表**为单一真相源 ──
+        //
+        // 上面这些硬编码名单必须与 `std_*.rs` 里的 `reg.register(...)` 手工同步，
+        // 漏一处就会让 MIR 把该调用当成**用户函数**发射 `Call`：字节码查
+        // `fn_index` 失败 →
+        //   `[bytecode] error: 未解析的函数调用 'X'` + 运行期
+        //   `call to undefined function #65535`
+        // 实测漏过 `charAt` / `mutableMapOf` / `count` / `sleep` / `spawn` …，
+        // 逐个补名字是补不完的（注册表有数百个名字）。
+        //
+        // 于是这里直接用运行期注册表补齐。安全性：MIR 的调用分派**先查用户
+        // 函数**（`ctx.user_functions`）再查 natives（见 `HirExpr::Call` 的
+        // 降低），因此补名不会抢占同名用户函数。
+        //
+        // 参数个数未知时按 0 记：只影响不带 argc 的 `CALL_NATIVE` 路径，
+        // 实际调用点几乎都用带 argc 的 `CALL_NATIVE_ARGS`。
+        let reg = crate::vm::native::NativeRegistry::new();
+        for name in reg.names() {
+            if !self.natives.contains(&name) {
+                self.register_native(&name, 0);
+            }
+        }
+
+        // ── 短名（裸名）兜底 ──
+        //
+        // 注册表里的 std 函数多为**全限定名**（`aura.lang.std.Collections.count`），
+        // 而源码里普遍写裸名 `l.count()` / `sleep(1)`。此前只能靠上面那些名单
+        // 手工补裸名，漏一个就报 `未解析的函数调用 'count'`。
+        //
+        // 这里按「限定名的最后一段」反推短名，**仅当该短名在注册表中唯一**
+        // 才登记 —— 多个模块同名（如 `add` / `get` / `set`）时保持不登记，
+        // 避免把调用静默派发到错误的原生函数（宁可报未解析，也不要错误解析）。
+        let mut short_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for name in reg.names() {
+            if let Some(short) = name.rsplit('.').next() {
+                *short_counts.entry(short.to_string()).or_insert(0) += 1;
+            }
+        }
+        for (short, n) in short_counts {
+            if n == 1 && !self.natives.contains(&short) {
+                self.register_native(&short, 0);
+            }
+        }
     }
 
     /// 注册原生函数签名

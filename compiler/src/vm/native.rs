@@ -377,6 +377,18 @@ impl NativeRegistry {
         self.fns.contains_key(name) || self.dynamic.contains(name)
     }
 
+    /// 列出全部已注册的原生函数名。
+    ///
+    /// 「编译期看不见、运行期却注册了」的分裂长期靠**手工同步硬编码名单**
+    /// （`decl.rs` 的 prelude/内建表、`emit.rs` 的 `builtin_native_names`、
+    /// `hir.rs` 的 String 方法白名单 …），任何一处漏登记就表现为
+    /// `[bytecode] error: 未解析的函数调用 'X'`。
+    /// 有了这个列举 API，前端就能以**运行期注册表**为单一真相源做兜底，
+    /// 而不再逐个补名字。
+    pub fn names(&self) -> Vec<String> {
+        self.fns.keys().cloned().collect()
+    }
+
     /// 动态加载库（P8.9）。
     pub fn load_library(&mut self, path: &str, abi: FfiAbi) -> Result<(), String> {
         self.dynamic.load_lib(path, abi)

@@ -16,6 +16,8 @@ pub fn register(reg: &mut NativeRegistry) {
     reg.register("aura.lang.std.Time.epoch", nat_epoch);
     reg.register("aura.lang.std.Time.currentTime", nat_current_time);
     reg.register("aura.lang.std.Time.sleep", nat_sleep);
+    // 裸名 `sleep(...)`：源码普遍写裸名（实测 13 处调用点未解析）。
+    reg.register("sleep", nat_sleep);
     reg.register("aura.lang.std.Time.toDateString", nat_to_date_string);
     reg.register("aura.lang.std.Time.toTimeString", nat_to_time_string);
     reg.register("aura.lang.std.Time.formatDate", nat_format_date);

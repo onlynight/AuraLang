@@ -13,6 +13,8 @@ pub fn register(reg: &mut NativeRegistry) {
     reg.register("aura.lang.std.Process.argCount", nat_arg_count);
     reg.register("aura.lang.std.Process.pid", nat_pid);
     reg.register("aura.lang.std.Process.spawn", nat_spawn);
+    // 裸名 `spawn(...)`：同上，源码普遍用裸名（实测 94 处调用点未解析）。
+    reg.register("spawn", nat_spawn);
     reg.register("aura.lang.std.Process.run", nat_run);
     reg.register("aura.lang.std.Process.kill", nat_kill);
     reg.register("aura.lang.std.Process.wait", nat_wait);

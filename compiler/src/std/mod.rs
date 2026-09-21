@@ -139,8 +139,12 @@ pub fn register_all(reg: &mut NativeRegistry) {
     std_console::register(reg);
     #[cfg(feature = "std-path")]
     std_path::register(reg);
-    // #[cfg(feature = "std-assert")]
-    // std_assert::register(reg);
+    // `std-assert` feature 一直是开启的（见 Cargo.toml 的 default），但这里的
+    // 注册调用被注释掉了 → `assert(...)` 既非用户函数也非原生 →
+    // `[bytecode] error: 未解析的函数调用 'assert'`（实测 111 处调用点）。
+    // 恢复注册（断言走运行期原生实现）。
+    #[cfg(feature = "std-assert")]
+    std_assert::register(reg);
     #[cfg(feature = "std-iter")]
     std_iter::register(reg);
 }
