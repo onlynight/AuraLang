@@ -118,8 +118,8 @@ object CompilerApiUtils {
         }
         val hl = HirLowerer()
         hl.lower(p.ast)
-        val options = AotUtils.defaultAotOptions()
-        val result = AotUtils.aotCompile(hl.hir, options)
+        val options = Aot.defaultAotOptions()
+        val result = Aot.aotCompile(hl.hir, options)
         return result.llvmIr
     }
 
@@ -148,7 +148,7 @@ object CompilerApiUtils {
             return 1
         }
         // 执行编译后的 exe（Windows 路径需反斜杠）
-        val exePath: String = AotUtils.aotWinPath(outPath + ".exe")
+        val exePath: String = Aot.aotWinPath(outPath + ".exe")
         val runCode: Int = ProcessNative.run(exePath)
         return runCode
     }
@@ -226,7 +226,7 @@ object CompilerApiUtils {
         if (code != 0) {
             return "error: AOT compilation failed"
         }
-        val exePath: String = AotUtils.aotWinPath(outPath + ".exe")
+        val exePath: String = Aot.aotWinPath(outPath + ".exe")
         val runCode: Int = ProcessNative.run(exePath)
         if (runCode != 0) {
             return "error: execution failed with code " + toStr(runCode)
@@ -258,9 +258,9 @@ object CompilerApiUtils {
         val home: String = if (llvmHome.length > 0) {
             llvmHome
         } else {
-            AotUtils.llvmHomeDefault()
+            Aot.llvmHomeDefault()
         }
-        val r = AotUtils.aotBuildExeFromHirEx(hir, cliStemOf(outPath), cliDirOf(outPath),
+        val r = Aot.aotBuildExeFromHirEx(hir, cliStemOf(outPath), cliDirOf(outPath),
             home, cliBaseDirOf(inputPath))
         if (r.ok) {
             println("✓ Executable generated: " + r.exePath)

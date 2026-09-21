@@ -147,7 +147,7 @@ object ReplUtils {
             return 1
         }
 
-        val exePath: String = AotUtils.aotWinPath(outPath + ".exe")
+        val exePath: String = Aot.aotWinPath(outPath + ".exe")
         val runCode: Int = ProcessNative.run(exePath)
         return runCode
     }

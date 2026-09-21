@@ -15,7 +15,7 @@ import aura.lang.std.String
 
 // ── 内存诊断（分阶段定位 AOT 运行时内存增长；见 C 运行库 aura_mem_used_mb）──
 
-object AotUtilUtils {
+object AotUtil {
 
     /// 当前 AOT 运行时存活分配（MiB）。AOT 无 GC，所有分配只增不减，
     /// 该值即「进程累计未释放字节 / 1MiB」。

@@ -26,6 +26,7 @@ package aura.lang.compiler.jit
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
+import aura.lang.compiler.jit.JitUtil
 
 /// 最小引导 JIT 工具函数集合。
 object JitCoreUtils {
@@ -352,7 +353,7 @@ class JitCoreCompiler {
     /// 执行已编译单元；返回结果文本或 `deopt:<原因>`。
     fun execute(func: Int, args: String, localCount: Int): String {
         val r: String = JitCoreUtils.jitCoreExecute(this.unitCodeOf(func), args, localCount)
-        if (jitSlice(r, 0, 5) == "deopt") {
+        if (JitUtil.jitSlice(r, 0, 5) == "deopt") {
             this.deopts = this.deopts + 1
         }
         return r

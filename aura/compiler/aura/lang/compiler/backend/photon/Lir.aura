@@ -71,6 +71,10 @@ class LirValue {
     /// S2: 用于 Load/Store 指令的内存依赖排序。
     var chain: Int = -1
 
+    // ── IR 缓存（避免每次访问都 split+strToInt）──
+    private var _cachedArgs: List<Int> = null
+    private var _argsParsed: Boolean = false
+
     init() {
         this.id = 0
         this.op = ""
@@ -80,18 +84,17 @@ class LirValue {
         this.block = 0
         this.useCount = 0
         this.chain = -1
+        this._cachedArgs = null
+        this._argsParsed = false
     }
 
     /// 获取第 i 个操作数的 ValueID。
     fun argAt(i: Int): Int {
-        if (this.args == "") {
-            return -1
+        this.ensureArgsParsed()
+        if (this._cachedArgs != null && i >= 0 && i < this._cachedArgs.size) {
+            return this._cachedArgs[i]
         }
-        val parts: List<String> = LirUtils.splitArgs(this.args)
-        if (i < 0 || i >= parts.size) {
-            return -1
-        }
-        return LirUtils.strToInt(parts[i])
+        return -1
     }
 
     /// 获取操作数个数。
@@ -99,7 +102,41 @@ class LirValue {
         if (this.args == "") {
             return 0
         }
-        return LirUtils.splitArgs(this.args).size
+        this.ensureArgsParsed()
+        if (this._cachedArgs != null) {
+            return this._cachedArgs.size
+        }
+        return 0
+    }
+
+    private fun ensureArgsParsed(): Unit {
+        if (!this._argsParsed) {
+            this._cachedArgs = this.parseArgs(this.args)
+            this._argsParsed = true
+        }
+    }
+
+    private fun parseArgs(text: String): List<Int> {
+        val result: List<Int> = arrayListOf<Int>()
+        if (text == "") {
+            return result
+        }
+        var current: String = ""
+        var i: Int = 0
+        while (i < text.length) {
+            var c: String = text.substring(i, i + 1)
+            if (c == ",") {
+                result.add(MachineDagUtils.strToInt(current))
+                current = ""
+            } else {
+                current = current + c
+            }
+            i = i + 1
+        }
+        if (current != "") {
+            result.add(MachineDagUtils.strToInt(current))
+        }
+        return result
     }
 
     /// 是否为常量指令（Const 或 ConstImm）。
@@ -403,12 +440,12 @@ object LirUtils {
         var total: Int = 0
         var i: Int = 0
         var neg: Boolean = false
-        if (len > 0 && text[0] == "-") {
+        if (len > 0 && text.charAt(0).toString() == "-") {
             neg = true
             i = 1
         }
         while (i < len) {
-            val digit: Int = "0123456789".indexOf(text[i])
+            val digit: Int = "0123456789".indexOf(text.charAt(i))
             if (digit >= 0 && digit <= 9) {
                 total = total * 10 + digit
             }
@@ -464,7 +501,7 @@ object LirUtils {
         var start: Int = 0
         var i: Int = 0
         while (i < len) {
-            if (text[i] == ",") {
+            if (text.charAt(i).toString() == ",") {
                 out.add(text.substring(start, i))
                 start = i + 1
             }

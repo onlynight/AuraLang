@@ -344,7 +344,7 @@ object MirUtils {
             // 恒返回首字符的码点（实测 `"42".charCodeAt(1) == 52` 而非 50），
             // 用它比较分隔符永远不成立 → 整个字符串会被当成 1 个字段。
             while (i < len) {
-                if (text[i] == separator) {
+                if (text.charAt(i).toString() == separator) {
                     out.add(text.substring(start, i))
                     start = i + 1
                 }

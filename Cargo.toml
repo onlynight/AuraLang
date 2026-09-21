@@ -1,0 +1,7 @@
+# Root Cargo.toml — 仅用于 find_project_root 定位项目根目录。
+# 实际工作区在 rust/ 子目录。
+# 此文件使编译器从 tests/ 目录运行时能正确解析 aura.lang.compiler.* 包导入。
+
+[workspace]
+members = ["rust"]
+resolver = "2"

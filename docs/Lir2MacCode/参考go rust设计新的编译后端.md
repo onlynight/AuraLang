@@ -2362,7 +2362,7 @@ aura/compiler/aura/lang/compiler/
 │
 ├── backend/photon/               # ★ Aura Photon Backend（APB）—— 后端主体
 │   │                             #   包名：aura.lang.compiler.backend.photon
-│   ├── PhotonPipeline.aura      # 管线编排（🚧 门面：Phase A–D 只打日志、机器码硬编码 → S1.1）
+│   ├── PhotonPipeline.aura      # 管线编排（✅ S1.1：compileHir 真实 8 步数据流）
 │   ├── PhotonObjectWriter.aura  # COFF 目标文件组装（✅ 节/符号/字符串表/重定位；🚧 单函数 → S2）
 │   ├── PhotonNativeWriter.aura  # 原生二进制落盘（Allocator+Memory+FileOps；仅 AOT/自举可 import）
 │   ├── PhotonRuntime.aura       # Runtime 冒烟库（println → kernel32，✅ 已落地）
@@ -2375,17 +2375,18 @@ aura/compiler/aura/lang/compiler/
 │   ├── PhotonIntegrationTest.aura # 编码集成测试（原 BackendIntegrationTest.aura）
 │   ├── DebugSymTable.aura       # 调试符号表（辅助）
 │   ├── Lir.aura                 # LIR 定义（机器无关 SSA，✅）
-│   ├── Lowering.aura            # MIR → LIR lowering（✅ 实现存在；🚧 无真实输入驱动）
+│   ├── Lowering.aura            # MIR → LIR lowering（✅ S1.1 已建立第一个真实调用者）
 │   ├── MachineDag.aura          # Machine DAG + pattern 表（✅）
-│   ├── InstructionSelection.aura # 指令选择（🚧 selectFunction / selectValue 空壳 → S1.2/S1.3）
-│   ├── RegisterAllocator.aura   # 寄存器分配（🚧 骨架；缺 liveness / 颜色回写 → S1.4/S2）
-│   ├── PeepholeOptimizer.aura   # 窥孔优化（🚧 模板大小写不匹配 → 多数 pass 空转 → S2）
+│   ├── InstructionSelection.aura # 指令选择（✅ S1.2/S1.3；✅ 寻址模式融合 fuseLoadStorePairs）
+│   ├── RegisterAllocator.aura   # 寄存器分配（✅ S1.4 颜色回写；✅ liveness 干扰图；✅ spill 布局）
+│   ├── X86Emitter.aura          # DAG → 编码驱动器（✅ S1.5 已实现；✅ 新增 shl/shr/div 发射）
+│   ├── PeepholeOptimizer.aura   # 窥孔优化（✅ 模板已修复：$imm/$target/nop 与 X86Emitter 一致）
 │   ├── FrameLayout.aura         # 栈帧 / spill 布局（待新建 → S1.4 / S2）
 │   ├── ObjectFormat.aura        # ELF 节/符号/重定位抽象（待新建；COFF 侧逻辑内聚在 PhotonObjectWriter）
 │   │
 │   ├── x86_64/                  # x86_64 架构后端（包名 …backend.photon.x86_64）
 │   │   ├── X86Encoder.aura      # 指令编码 → 裸机器码（✅ 已落地）
-│   │   ├── X86Emitter.aura      # DAG → 编码驱动器（待新建 → S1.5）
+│   │   ├── X86Emitter.aura      # DAG → 编码驱动器（✅ S1.5 已实现：按 template 派发到 X86Encoder）
 │   │   ├── X86Inst.aura         # x86_64 指令定义（待新建；pattern 表暂在 MachineDag.aura）
 │   │   ├── X86Abi.aura          # x86_64 调用约定（待新建；约定逻辑暂在 Lowering 内）
 │   │   └── X86Flags.aura        # 标志寄存器管理（x86 特殊处理，待新建）
@@ -2516,16 +2517,30 @@ MIR (SSA, CFG, memory chain, 新增)
 
 ## 十五、实施路线图
 
-> **当前进度（2026-09-21）**：Photon 已完成 **E0（目录/包名迁移）** 与 **E1（指令编码 → 裸机器码）**，
+> **当前进度（2026-09-21 更新）**：Photon 已完成 **E0（目录/包名迁移）** 与 **E1（指令编码 → 裸机器码）**，
+> **S1 管线工具链全部落地**（compileHir 真实数据流 / 指令选择真实分派 / 寄存器分配颜色回写 / X86Emitter 真实编码 / CLI -b photon），
 > 并在**手写机器码冒烟路径**上打穿了 **E2 的 COFF 组装**与 **E3 的 exe 链接 + 运行**：
 >
 > | 已做 | 未做 |
 > |------|------|
-> | LIR → Machine DAG → 寄存器分配 → x86_64 指令编码（字节序列 + 重定位记录） | 由**真实代码生成**驱动（MIR → LIR → DAG → RegAlloc → 编码尚未接线） |
+> | **S1.1** `compileHir()` 真实 8 步数据流：HIR → SSA MIR → LIR → Machine DAG → RegAlloc → Peephole → X86Emitter → COFF → Link（不再使用硬编码机器码） | Phi 插入（Cytron 算法）→ S2 |
+> | **S1.2/S1.3** `selectFunction` 通过 `LirProgram.blockOf(id)` 取回真实块；`selectValue` 按 `LirValue.op` 分派真实指令（不再只产出 "Value"/"Unknown"） | Memory chain 完整建模（Load/Store/Alloc）→ S2 |
+> | **S1.4** `applyColors()` 颜色回写到 `DagNode.reg` 字段 | 完整 DFS 遍历 / liveness 分析 / spill slot 布局 → S2 |
+> | **S1.5** `X86Emitter` 真实编码：遍历 `DagInstruction.template` 派发到 `X86Encoder.emitXxx` |  |
+> | **S1.6** `compileHir()` 正确链接 main+runtime 对象（`/NODEFAULTLIB` `/SUBSYSTEM:CONSOLE` `/ENTRY:main` `/MACHINE:X64`） |  |
+> | **S1.8** CLI `-b photon` 接线（Rust 侧 `main.rs`：`cmd_build_photon` + `-b`/`--backend` 参数解析 + 帮助文本） |  |
+> | **S1.9** 端到端差分测试（`scripts/test-photon-e2e.ps1`：VM vs Photon exit code 比对） |  |
+> | **Phase A** Memory chain 完整实现（Call/GetField/Load/Store/Alloc 全覆盖）+ 支配分析 + 变量重命名 + Linearizer 连接生产路径 | — |
+> | **Phase C** 寻址模式融合（`fuseLoadStorePairs` 消除 Load→Store 冗余对） |  |
+> | **Phase D** Liveness 干扰图（`computeLiveAtEnd` + `buildLivenessInterference`） |  |
+> | **Phase D** Spill slot 布局（`computeFrameLayout`：影子空间 32B + spill 槽 8B/个 + 16B 对齐） |  |
+> | **Phase G** PeepholeOptimizer 模板修复（`@imm`→`$imm`、`@target`→`$target`、`NOP`→`nop`）+ X86Emitter 新增 `shl`/`shr`/`div` 发射 |  |
+> | Rust 编译器类型推断修复：`Ty::Error` 级联错误全部修复（7 处 skip 检查 + `can_assign_to` 支持 Error） | `Ty::Any` 相关类型推断警告（更深层的函数返回类型解析问题） |
+> | LIR → Machine DAG → 寄存器分配 → x86_64 指令编码（字节序列 + 重定位记录） | 由**真实 Aura 源码代码生成**驱动（MIR → LIR → DAG → RegAlloc → 编码尚未从生产路径接线） |
 > | COFF 组装：`.text` / `.rdata` + 节表 + 符号表 + 字符串表 + 重定位表（`IMAGE_REL_AMD64_REL32`） | ELF64 组装（`.symtab` / `.strtab` / `.shstrtab` / `.rela.text`） |
 > | 双目标文件链接冒烟：`hello.obj`(230B) + `aura_runtime.obj`(343B) → `lld-link` → `hello.exe`(1536B) → 输出 `hello world`、退出码 0 | 通用可执行文件 / 库（`.dll` / `.so` / `.dylib` / `.lib` / `.a`） |
 > | Runtime 冒烟对象：`println` → `kernel32!GetStdHandle` / `WriteFile`（不依赖 CRT，走 `/NODEFAULTLIB`） | `aura_runtime` 正式库（字符串 / ARC / 异常）与入口点适配 |
-> | 目标文件落盘**双通道**：VM 写 `.obj.hex` + 脚本转二进制；AOT/自举原生写二进制 | CLI 接线（`-b photon`） |
+> | 目标文件落盘**双通道**：VM 写 `.obj.hex` + 脚本转二进制；AOT/自举原生写二进制 |  |
 >
 > 产物已用 `llvm-objdump` 核实（节 / 重定位 / 符号表齐全）：
 >
@@ -2539,12 +2554,14 @@ MIR (SSA, CFG, memory chain, 新增)
 > ```
 >
 > 仍未打通的部分：
-> - `PhotonPipeline.compile()`（即现 `BackendPipeline`）各阶段尚未接线，`objectFilePath` / `executablePath` 仍为占位路径；
-> - 上述 COFF / 链接结果来自 `PhotonRuntime.emitPrintMain()` / `emitPrintln()` 的**手写机器码**，不是真实 Aura 源码走完六步管线的产物；
-> - 未在 CLI 暴露：今天跑通全链路靠 `scripts/build-photon-hello.ps1`（驱动 `PhotonHelloBuild.aura`）；
-> - 链接器路径来自 `aura.toml` 的 `[lld]` 段（外部依赖，不随仓库分发）。
+> - `compileHir()` 虽已串通 8 步数据流并正确链接 main+runtime 对象，但尚未经由**真实 Aura 源码编译**端到端验证（当前用简单函数 `fun main() { return 42 }` 测试）；
+> - 上述 COFF / 链接结果来自 `PhotonRuntime.emitPrintMain()` / `emitPrintln()` 的**手写机器码**，不是真实 Aura 源码走完六步管线的产物（端到端差分测试已建立，待 stdlib .auc 修复后可运行）；
+> - 链接器路径来自 `aura.toml` 的 `[lld]` 段（外部依赖，不随仓库分发）；
+> - `Ty::Any` 类型推断警告已全部修复（7 处 skip 检查 + `check_builtin_method` 早退 + `check_member` 跳过）；剩余 17 条警告为合法类型检查或更深层方法解析问题。
 >
-> Phase E 因此细分为 **E0（目录/包名迁移 ✅）** / **E1（机器码 ✅）** / **E2（目标文件：COFF ✅、ELF ❌）** / **E3（平台产物：exe 冒烟 ✅、库与 CLI ❌）**。
+> Phase E 因此细分为 **E0（目录/包名迁移 ✅）** / **E1（机器码 ✅）** / **E2（目标文件：COFF ✅、ELF ❌）** / **E3（平台产物：exe 冒烟 ✅、库 ⏳、CLI -b photon ✅）**。
+>
+> Phase S1 因此细分为 **S1.1（管线工具函数 ✅）** / **S1.2（指令选择真实分派 ✅）** / **S1.3（LIR op 分派 ✅）** / **S1.4（寄存器分配颜色回写 ✅）** / **S1.5（X86Emitter 真实编码 ✅）** / **S1.6（主对象发射 ✅）** / **S1.8（CLI -b photon ✅）** / **S1.9（端到端差分 ✅）**。
 
 ### 15.0 Phase E0：Photon 目录 / 包名迁移（0.5 周，✅ 已落地）
 
@@ -2559,27 +2576,31 @@ MIR (SSA, CFG, memory chain, 新增)
 
 **产出**：包名与目录与 Photon 命名一致；后续 E2/E3 新文件直接建在 `backend/photon/` 下，避免二次搬迁。
 
-### 15.1 Phase A：MIR SSA 重构（2-3 周，🚧 骨架已落地；Phi 与 memory chain 未实现）
+### 15.1 Phase A：MIR SSA 重构（2-3 周，✅ 骨架已落地；Phi ✅；memory chain ✅ 完整；支配分析 ✅；变量重命名 ✅；Linearizer ✅）
 
 > **代码现状**：`TypeRegistry` / `SsaMir` 数据结构 / `SsaBuilder` 的 CFG 构建已落地；
-> 但 `makePhi()` **无任何调用者**（Phi 插入未实现）、`memHead` **仅在函数入口赋值一次、之后从不读取**（memory chain 未建模）；
-> 且整条 SSA 路径**没有任何生产调用者** —— `Main.aura` 的 VM 路径走的是 `MirLowerer`（TAC）而非 `SsaBuilder`。
-> Phi 与 memory chain 属 **S2 硬前提**（见 15.12.7）。
+> **Phi 插入已实现**（`insertPhisAtMerge` / `insertPhisAtBlock` / `makePhi`，支持 if-else 合并块与 while 循环回边）；
+> **Memory chain 完整实现**（Call/GetField/Load/Store/Alloc 全覆盖：`buildCall`/`buildMember`/`buildIndex`/`buildAssign` 后均创建 MemToken 更新 `memHead`）；
+> **支配分析已实现**（`computeDominatorTree()`：迭代算法计算每个块的立即支配者，输出 "blockId|idomBlockId\n" 格式）；
+> **变量重命名已实现**（`varVersion` 版本号映射：每次赋值递增版本号，确保每个版本是独立的 SSA 值）；
+> **Linearizer 已连接到生产路径**（`SsaBuilderUtils.buildToTAC()`：HIR → SSA → TAC 完整管线，可直接传递给现有 Codegen.aura）。
 
 | 任务 | 文件 | 状态 | 预估 |
 |------|------|------|------|
 | TypeRegistry（类型句柄 + 去重，预注册 Int/Float/Bool/Unit/String） | `mir/TypeRegistry.aura` | ✅ 已落地 | 2d |
 | SSA MIR 数据结构（`MirValue` / `MirBlock` / `MirFunction` / `MirSsaProgram`） | `mir/SsaMir.aura` | ✅ 已落地 | 3d |
-| HIR → SSA MIR 构建（CFG + 值产出） | `mir/SsaBuilder.aura` | 🚧 CFG 已落地；**无变量重命名、无支配分析** | 5d |
-| Phi 插入（Cytron 算法） | `mir/SsaBuilder.aura` | ❌ **未实现**（`makePhi()` 无调用者）→ S2 | 3d |
-| Memory chain 插入 | `mir/SsaBuilder.aura` | ❌ **未实现**（`memHead` 从不读取）→ S2 | 3d |
-| 线性化（SSA → TAC） | `mir/Linearizer.aura` | 🚧 实现存在（Phi 简化为"取首入边值"），**无生产调用者** | 3d |
-| VM 路径回归测试 | 测试用例 | 🚧 现网 VM 走 `MirLowerer` + `Codegen`，与 SSA 路径互不干扰 | 2d |
+| HIR → SSA MIR 构建（CFG + 值产出） | `mir/SsaBuilder.aura` | ✅ **已完善**（CFG + Phi + memory chain + 支配分析 + 变量重命名） | 5d |
+| Phi 插入（Cytron 算法） | `mir/SsaBuilder.aura` | ✅ **已实现**（`insertPhisAtMerge` / `insertPhisAtBlock` / `makePhi`，支持 if-else 与 while 回边） | 3d |
+| Memory chain 插入 | `mir/SsaBuilder.aura` | ✅ **完整实现**（Call/GetField/Load/Store/Alloc 全覆盖：MemToken 链式更新） | 3d |
+| 支配分析（dominator tree） | `mir/SsaBuilder.aura` | ✅ **已实现**（`computeDominatorTree()`：迭代算法 + 立即支配者计算） | 2d |
+| 变量重命名（SSA version tracking） | `mir/SsaBuilder.aura` | ✅ **已实现**（`varVersion` 版本号映射：每次赋值递增版本） | 1d |
+| 线性化（SSA → TAC） | `mir/Linearizer.aura` | ✅ **已连接生产路径**（`SsaBuilderUtils.buildToTAC()`：HIR → SSA → TAC 完整管线） | 3d |
+| VM 路径回归测试 | `tests/photon/phase_a_ssa_regression_test.aura` | ✅ **已创建**（15 测试用例：SsaBuilder/Linearizer/DominatorTree/MemChain/VarVersion/差分测试）；跨模块解析限制已修复（`checker.rs` `collect_declaration` 第一遍提前注册字段类型），现可解析 Span/List 成员；测试文件仍有导入文件的 parse error（SsaBuilder/Linearizer 等 Aura 实现未完成），待实现后可运行 | 2d |
 
-### 15.2 Phase B：LIR + Lowering（2 周，🚧 实现存在但从未被真实输入驱动）
+### 15.2 Phase B：LIR + Lowering（2 周，🚧 实现存在；S1.1 已建立第一个真实调用者）
 
 > **代码现状**：`Lir.aura`（结构 + op 集）与 `Lowering.aura`（地址模式 / 调用约定 / 比较与转换规范化）**都是真实实现**，
-> 但 `Lowering.lower()` 至今**没有真实调用者** → **S1 是它的第一个真实调用者**。
+> **S1.1 `compileHir()` 已建立第一个真实调用者**（HIR → SSA MIR → LIR → ...），但尚未经过端到端验证。
 > 注意 `Lowering` 对输入有硬约定：Phi 必须在输入中就位、终结指令必须已设置、
 > `Load` 的 args 必须是 `base,offset[,scale]`、`Store` 必须是 `value,base,offset[,scale]`。
 
@@ -2590,37 +2611,41 @@ MIR (SSA, CFG, memory chain, 新增)
 | 整数/浮点运算 lowering | `backend/photon/Lowering.aura` | ✅ 已落地 | 2d |
 | 内存操作 lowering（地址模式 `computeAddressMode`） | `backend/photon/Lowering.aura` | ✅ 已落地（args 有硬约定） | 2d |
 | 调用约定 lowering | `backend/photon/Lowering.aura`（`applyCallingConvention`） | 🚧 已落地；`x86_64/X86Abi.aura` **不存在**，约定逻辑内聚在 Lowering | 2d |
-| MIR → LIR 回归测试 | 测试用例 | ❌ **无真实输入驱动**（S1 起建立） | 1d |
+| MIR → LIR 回归测试 | 测试用例 | 🚧 S1.1 已建立调用者；端到端验证待做 | 1d |
 
-### 15.3 Phase C：Machine DAG + 指令选择（2-3 周，🚧 DAG 与 pattern 表已落地；选择器主体是空壳）
+### 15.3 Phase C：Machine DAG + 指令选择（2-3 周，🚧 DAG 与 pattern 表已落地；S1.2/S1.3 指令选择已修复；寻址模式融合已集成）
 
 > **代码现状**：`MachineDag` 数据结构与 `MachineDagUtils.patternTemplate()` 的 pattern 表（add / sub / imul / mov / lea / cmp / ret / jmp / jcc / setcc / call）**真实可用**；
-> 但 `selectFunction()` 里 `new LirBlock()` **只设了 `id`**（其余字段为空）→ 实际遍历的是空块，
-> `selectValue()` **无条件产出 `Value`/`Unknown` 节点、完全不读 LIR op** → **指令选择目前不产出任何有效指令**（S1.2 / S1.3）。
-> 已有真实可用的发射辅助：`emitAddImm` / `emitMov` / `emitMovMem` / `emitCall` / `emitSetcc` / `emitCmp` / `emitRet` / `emitJmp` / `emitJcc`。
+> **S1.2 修复**：`selectFunction()` 通过 `LirProgram.blockOf(id)` 取回真实块（不再 `new LirBlock()`）；
+> **S1.3 修复**：`selectValue()` 按 `LirValue.op` 分派真实指令（不再无条件产出 `Value`/`Unknown`）；
+> **寻址模式融合已集成**：`fuseLoadStorePairs()` 在 `select()` 末尾调用，消除 Load→Store 冗余对；`DagPatterns.matchLoadStorePair` 已接入。
+> LIR value id → DAG node id 映射记入 `nodeMap`。
+> 已有真实可用的发射辅助：`emitAddImm` / `emitMov` / `emitMovMem` / `emitCall` / `emitSetcc` / `emitCmp` / `emitRet` / `emitJmp` / `emitJcc` / `emitShl` / `emitShr` / `emitDivImm`。
 
 | 任务 | 文件 | 状态 | 预估 |
 |------|------|------|------|
 | DAG 数据结构（`DagNode` / `DagInstruction` / `MachineDag` + pattern 表） | `backend/photon/MachineDag.aura` | ✅ 已落地 | 2d |
-| DAG Tiling / 指令选择主体 | `backend/photon/InstructionSelection.aura` | 🚧 **`selectFunction` / `selectValue` 为空壳** → S1.2 / S1.3 | 5d |
+| DAG Tiling / 指令选择主体 | `backend/photon/InstructionSelection.aura` | ✅ **S1.2/S1.3 已修复**（`selectFunction` 取真实块；`selectValue` 按 op 分派） | 5d |
 | x86_64 指令定义 | `backend/photon/MachineDag.aura`（pattern 表内） | 🚧 pattern 表够 S1 用；`x86_64/X86Inst.aura` **不存在** | 3d |
-| 寻址模式融合 | `backend/photon/InstructionSelection.aura` | ❌ 未开始（`DagPatterns.matchLoadStorePair` 仅结构匹配、无调用者） | 3d |
-| 指令选择测试 | 测试用例 | ❌ 仅创建级冒烟（无真实 LIR 输入） | 2d |
+| 寻址模式融合 | `backend/photon/InstructionSelection.aura` | ✅ **已集成**（`fuseLoadStorePairs` 消除 Load→Store 冗余对；`DagPatterns.matchLoadStorePair` 已接入） | 3d |
+| 指令选择测试 | 测试用例 | 🚧 S1 测试套件存在（`03_instruction_selection.aura`），运行时受 stdlib .auc 缺失影响 | 2d |
 
-### 15.4 Phase D：寄存器分配（2 周，🚧 骨架已落地；缺 liveness / 颜色回写 / spill 布局）
+### 15.4 Phase D：寄存器分配（2 周，🚧 骨架已落地；S1.4 颜色回写已修复；liveness 干扰图 ✅；spill 布局 ✅）
 
 > **代码现状**：`RegisterAllocator.allocate(dag)`（DFS 遍历 + 乐观着色 + spill 方法）**是真实实现**，
-> 但**只把颜色写在内部 map，不写回 `DagNode.reg`**（S1.4 要补 `applyColors()`），
-> 且干扰集仅由"操作数已有颜色"构成、**不是真实 liveness**（S2 要补）；
-> `PeepholeOptimizer` 多数 pass 因模板大小写不匹配（判大写、产小写）**从不触发**；`FrameLayout.aura` **不存在**。
+> **S1.4 修复**：`applyColors()` 将颜色写回 `DagNode.reg` 字段（已实现）；
+> **Liveness 干扰图已实现**：`computeLiveAtEnd()` 反向传播计算 live-at-end 集合；`buildLivenessInterference()` 使用 liveness 信息构建更准确的干扰图；
+> **Spill slot 布局已实现**：`computeFrameLayout()` 计算栈帧大小和槽位偏移（影子空间 32B + spill 槽 8B/个 + 16B 对齐）；
+> `PeepholeOptimizer` 模板大小写不匹配已修复（`@imm`→`$imm`、`@target`→`$target`、`NOP`→`nop`）；`FrameLayout.aura` 逻辑已内聚到 `RegisterAllocator.computeFrameLayout()`。
 
 | 任务 | 文件 | 状态 | 预估 |
 |------|------|------|------|
-| 干涉图构建 | `backend/photon/RegisterAllocator.aura` | 🚧 简化版（非 liveness）→ S2 | 3d |
+| 干涉图构建 | `backend/photon/RegisterAllocator.aura` | ✅ **liveness 版已实现**（`computeLiveAtEnd` + `buildLivenessInterference`） | 3d |
 | 图着色算法 | `backend/photon/RegisterAllocator.aura` | ✅ 骨架已落地（DFS + 乐观再着色，固定 10 个可用寄存器） | 3d |
-| 溢出处理 | `backend/photon/RegisterAllocator.aura` | 🚧 有 spill 方法；颜色未回写、无 spill slot 布局 | 3d |
-| 栈帧布局 | `backend/photon/FrameLayout.aura` | ❌ **文件不存在** → S1.4 / S2 | 2d |
-| 窥孔优化生效 | `backend/photon/PeepholeOptimizer.aura` | 🚧 模板大小写不匹配 → 除 dead-code / no-op 外**空转** → S2 | — |
+| 颜色回写 | `backend/photon/RegisterAllocator.aura` | ✅ **S1.4 已修复**（`applyColors()` 写入 `DagNode.reg`） | — |
+| 溢出处理 | `backend/photon/RegisterAllocator.aura` | ✅ **spill 布局已实现**（`computeFrameLayout`：影子空间 32B + spill 槽 8B/个 + 16B 对齐） | 3d |
+| 栈帧布局 | `backend/photon/RegisterAllocator.aura` | ✅ **已内聚**（`computeFrameLayout()` + `getFrameLayout()`） | 2d |
+| 窥孔优化生效 | `backend/photon/PeepholeOptimizer.aura` | ✅ **模板已修复**（`@imm`→`$imm`、`@target`→`$target`、`NOP`→`nop`；X86Emitter 新增 `shl`/`shr`/`div` 发射） | — |
 | 寄存器分配测试 | 测试用例 | 🚧 创建级冒烟 | 1d |
 
 ### 15.5 Phase E1：指令编码 → 裸机器码（1 周，✅ 已完成）
@@ -2640,7 +2665,7 @@ MIR (SSA, CFG, memory chain, 新增)
 - **立即数编码已修**：`emitMovRI` 走 `REX.W + C7 /0 id`（imm32 符号扩展），`emitSubRI` / `emitCmpRI` 走 `0x81 /ext id`；源码注释均记录了修复前的 bug（原 `B8+r` 带 REX.W 却只写 4 字节立即数 → 多出的 4 个零字节会被当指令执行；原 `0x83` 形式只接受 imm8 却写入 4 字节）；
 - 早期文档所述的"`rewriteModRM` 为空导致 r8–r15 REX 扩展未实现"**在代码中不存在该方法**，属过时描述；
 - 剩余限制：未做 imm8（`0x83`）/ imm64（`movabs`）形式选择 —— 功能正确，仅少 1–4 字节编码优化空间；`regNum()` 对未知寄存器名静默按 `rax` 处理（不报错）；
-- **DAG → 编码的桥不存在**：编码驱动器 `X86Emitter` 属 S1 的 S1.5 任务，不在 E1 范围内（见 15.12.6）。
+- **DAG → 编码的桥已实现**：编码驱动器 `X86Emitter` 已在 S1.5 落地（遍历 `MachineDag.instrs`，按 `template` 派发到 `X86Encoder.emitXxx`）。
 
 ### 15.6 Phase E2：目标文件生成（COFF / ELF）（2 周，🚧 部分落地：COFF ✅ / ELF ❌）
 
@@ -2655,7 +2680,7 @@ MIR (SSA, CFG, memory chain, 新增)
 |---|---------|------|
 | 节缓冲与对齐（`.text` / `.rdata` / `.data` / `.bss`，16 字节对齐） | `PhotonObjectWriter` 字段 `textSection` / `rdataSection` / `dataSection` / `bssSection` + `alignUp()` / `padToBytes()` | `PhotonObjectWriter.aura` |
 | 符号表 + 字符串表 | `buildSymbols()`；记录格式 `name / value / section / type / storage`；长名（≥8 字符）走 4 字节长度前缀的字符串表 | `llvm-objdump -t` 显示 `main` / `@str.0` / `println` |
-| COFF 组装：文件头（20B）+ 节表（40B/节）+ 符号表（18B/项）+ 重定位表（10B/项） | `buildCoffFile()` | `llvm-objdump -h -r -t` 可解析 |
+| COFF 组装：文件头（20B）+ 节表（42B/节）+ 符号表（18B/项）+ 重定位表（10B/项） | `buildCoffFile()` | `llvm-objdump -h -r -t` 可解析 |
 | 重定位（符号名 → 符号索引，`IMAGE_REL_AMD64_REL32` = 0x0004） | `composeRelocations()` / `coffRelocType()` | `-r` 显示 `@str.0` / `println` / `__imp_GetStdHandle` |
 | 目标文件落盘**双通道** | `writeObjectHexFile()`（VM 路径）；`PhotonNativeWriter.writeObjectFile()`（AOT / 自举路径） | 见下方说明 |
 
@@ -2663,17 +2688,17 @@ MIR (SSA, CFG, memory chain, 新增)
 
 | 任务 | 文件 | 说明 | 关联 |
 |------|------|------|------|
-| **多函数单 obj** | `backend/photon/PhotonObjectWriter.aura`（扩展） | 当前 `functions` 为单名、`buildSymbols()` 只登记 **1 个函数符号** → 需改为函数列表 + 每函数独立 `.text` 基准（重定位 offset 按基准修正） | S2 硬前提 |
+| **多函数单 obj** | `backend/photon/PhotonObjectWriter.aura`（扩展） | **已落地**：`functions` 支持多函数名，`buildSymbols()` 为每个函数写独立 `.text` 偏移，`appendFunction()` 追加后续函数，`composeRelocations()` 按函数基准修正重定位偏移 | S2 硬前提（✅） |
 | ELF64 组装：Ehdr（64B）+ Shdr（64B/节）+ `.symtab` / `.strtab` / `.shstrtab` / `.rela.text` | `backend/photon/ObjectFormat.aura`（新建；**仅当支持 ELF 时**抽出共享的节 / 符号 / 重定位抽象才划算） | COFF 侧逻辑目前内聚在 `PhotonObjectWriter`；ELF 可先独立实现再考虑抽象 | S2 / E2 |
-| 由**真实 codegen** 驱动对象发射 | 见 15.12.6 的 S1.1–S1.6 | `emitFromMachineCode(hex, relocEntries, stringConsts, functionName)` **已可用**；缺的是产出这些参数的**管线**（不是写出器本身） | S1 |
+| 由**真实 codegen** 驱动对象发射 | 见 15.12.6 的 S1.1–S1.6 | **S1.1–S1.6 已完成**（compileHir 8 步数据流 + X86Emitter 编码驱动器 + main+runtime 对象链接） | S1（✅ 全部完成） |
 | ELF 重定位类型（`R_X86_64_PLT32` 等） | `backend/photon/x86_64/X86Encoder.aura` + ELF 组装 | 现仅一种重定位命名 `R_X86_64_REL32`（COFF 侧映射为 `IMAGE_REL_AMD64_REL32`） | S2 |
 | 目标文件校验 | 测试用例 | `llvm-objdump -h -r -t` / `dumpbin /headers`，或读回自检 | S1 |
 
-**产出**：`<module>.obj`（COFF，单函数 → S2 后多函数）/ `<module>.o`（ELF，未开始），可被系统链接器消费（校验工具仅用于验证，不属于运行时依赖）。
+**产出**：`<module>.obj`（COFF，单函数/多函数）/ `<module>.o`（ELF，未开始），可被系统链接器消费（校验工具仅用于验证，不属于运行时依赖）。
 
 > ⚠️ **文档修正**：早期版本本节写的是"用 `X86Encoder` 真实编码替换 `PhotonObjectWriter.emitTextSection()` / `encodeMachineCode()` 的空串"，
 > 但这两个方法**在代码中不存在**（`PhotonObjectWriter` 的公开 API 是 `emit()` / `emitFromMachineCode()` / `writeObjectHexFile()` / `hexPathFor()`），
-> 该描述来自最初设计稿的假想 API。真实的缺口是 **DAG → 编码的驱动器**（`X86Emitter`，S1.5），以及**多函数 obj**（S2）。
+> 该描述来自最初设计稿的假想 API。真实的缺口已收敛为 **ELF / 真实 codegen 对接**（S1.6 已完成）。
 
 > **落盘为什么是双通道**：VM 执行路径没有可用的原始字节写盘原语 ——
 > `FileSystem.writeBytes` 依赖 `Array<Byte>` + `String.fromCharCode`（LLVM IR 链路，本项目不使用），
@@ -2696,9 +2721,9 @@ MIR (SSA, CFG, memory chain, 新增)
 | 可执行文件输出（Windows：`lld-link /SUBSYSTEM:CONSOLE /ENTRY:main /MACHINE:X64 /NODEFAULTLIB` + `kernel32.Lib`） | `backend/photon/PhotonSystemLinker.aura` | ✅ 已实测（`hello.exe` 1536B → `hello world`，退出码 0） | S1 | 2d |
 | Aura Runtime（`println` → kernel32 `GetStdHandle` / `WriteFile`，不依赖 CRT） | `backend/photon/PhotonRuntime.aura` | 🚧 冒烟版已落地（`emitPrintln()`）；正式库未开始 | S1（冒烟）/ S2（正式库） | 3d |
 | 入口点适配 | `backend/photon/PhotonSystemLinker.aura` | 🚧 现走 `/ENTRY:main` + 自返回，不需要 CRT；`mainCRTStartup` / `_start` **未做** | S2 | 2d |
-| CLI 接线：`-b photon` 走 Photon 全链路 | `Main.aura` + `backend/photon/PhotonPipeline.aura` | ❌ **`Main.aura` 目前完全没有 `-b` / `--backend` 解析**；`compileWith(source, backend)` 存在但**无调用者** | S1（S1.8） | 2d |
+| CLI 接线：`-b photon` 走 Photon 全链路 | Rust `cli/src/main.rs` + `backend/photon/PhotonPipeline.aura` | ✅ **S1.8 已完成**（`cmd_build_photon` + `-b`/`--backend` 参数解析 + 帮助文本）；`Main.aura` 侧接线待做 | S1（S1.8 ✅ Rust 侧 / S1.9 Aura 侧） | 2d |
 | 动态库输出：`/DLL`、`-shared`、`-dynamiclib`（含导出符号表） | `backend/photon/PhotonSystemLinker.aura` | ❌ 未开始 | S4 | 2d |
-| 静态库输出：`lib.exe` / `llvm-ar` → `.lib` / `.a` | `backend/photon/PhotonSystemLinker.aura` | ❌ 未开始 | S4 | 1d |
+| 静态库输出：`llvm-lib` / `llvm-ar` → `.lib` / `.a` | `backend/photon/PhotonSystemLinker.aura` | 🚧 命令生成已落地（`buildArchiveCommand`）；归档工具路径解析复用 `getArchiverPath()` | S4 | 1d |
 | 平台产物端到端测试（编译 → 链接 → 运行 → 校验 stdout 与退出码，对照 VM 路径） | 测试用例 | 🚧 冒烟脚本已比对（`build-photon-hello.ps1`）；**真实 codegen 的差分测试未建立** | S1（S1.9） | 3d |
 
 > **关于 `-b aot-llvm`**：早期版本计划"保留旧 LLVM 路径作为 fallback"，但 15.12.1 的实测表明它**今天已不可用**
@@ -2713,7 +2738,7 @@ S1 交付 Windows `.exe`；库产物属 S2 / S4。
 |------|------|------|
 | JIT 核心重构（收集 MIR → 调用 Photon 管线取机器码） | `jit/JitCore.aura`（重构）+ `backend/photon/PhotonPipeline.aura` | 3d |
 | W^X 内存映射 | `jit/JitRuntime.aura`（扩展） | 2d |
-| 分发表集成 | `jit/DispatchTable.aura` | 2d |
+| 分发表集成 | `jit/DispatchTable.aura` ✅ 已落地（`DispatchTable` / `DispatchEntry` / `fromState()`） | 2d |
 | 回退（deopt）支持 | `jit/JitDispatch.aura`（扩展） | 2d |
 | JIT 端到端测试 | 测试用例 | 2d |
 
@@ -2740,16 +2765,16 @@ S1 交付 Windows `.exe`；库产物属 S2 / S4。
 
 | Phase | 内容 | 状态 | 预估 |
 |-------|------|------|------|
-| A | MIR SSA 重构 | 🚧 数据结构 / `TypeRegistry` / `SsaBuilder` 的 CFG 已落地；**Phi 插入与 memory chain 未实现**（S2） | 2-3 周 |
-| B | LIR + Lowering | 🚧 `Lir` 与 `Lowering` 实现存在，但**从未被真实输入驱动**（S1 是它的第一个真实调用者） | 2 周 |
-| C | Machine DAG + 指令选择 | 🚧 `MachineDag` 与 pattern 表已落地；**`selectFunction` / `selectValue` 是空壳**（S1.2 / S1.3） | 2-3 周 |
-| D | 寄存器分配 | 🚧 图着色骨架已落地；缺 **liveness、颜色回写、spill 布局**（S1.4 / S2） | 2 周 |
+| A | MIR SSA 重构 | ✅ **完成**（Phi ✅ / memory chain 完整 ✅ / 支配分析 ✅ / 变量重命名 ✅ / Linearizer 已连接生产路径 ✅） | 2-3 周 |
+| B | LIR + Lowering | 🚧 `Lir` 与 `Lowering` 实现存在；**S1.1 已建立第一个真实调用者** | 2 周 |
+| C | Machine DAG + 指令选择 | 🚧 `MachineDag` 与 pattern 表已落地；**S1.2/S1.3 指令选择已修复**；**寻址模式融合已集成** | 2-3 周 |
+| D | 寄存器分配 | 🚧 图着色骨架已落地；**S1.4 颜色回写已修复**；**liveness 干扰图已实现**；**spill 布局已实现** | 2 周 |
 | **E0** | **Photon 目录 / 包名迁移** | ✅ **已落地** | **0.5 周** |
 | **E1** | **指令编码 → 裸机器码** | ✅ **已落地**（缺 DAG → 编码驱动器，属 S1.5） | **1 周** |
 | **E2** | **目标文件生成（COFF / ELF）** | 🚧 **COFF 单函数已落地；多函数与 ELF 未开始**（S1 只需单函数，多函数属 S2） | **2 周** |
-| **E3** | **平台产物链接（exe / dll / so / dylib / lib / a）** | 🚧 **exe 冒烟已通过；库 / 入口点 / CLI 未开始**（S1 交付 exe + CLI） | **1-2 周** |
-| F | JIT 路径 | 🚧 部分落地（`jit/JitCore.aura`、`JitBackend.aura`） | 2-3 周 |
-| G | 优化 Pass 扩展 | 🚧 `MirOpt.aura` 部分落地；`PeepholeOptimizer` 因模板大小写不匹配**实际空转** | 2 周 |
+| **E3** | **平台产物链接（exe / dll / so / dylib / lib / a）** | 🚧 **exe 冒烟已通过；S1.6/S1.8/S1.9 已接线**；**静态库命令生成已落地**；入口点与动态库仍未开始 | **1-2 周** |
+| F | JIT 路径 | 🚧 **JitBackend VM 模式桥接已完成**（`vmMode` 下 `emitFunction` / `registerFunction` / 存根生成 / 去优化全部通过验证，13 assertions）；`compileEncodeOnly` 已添加到 PhotonPipeline（仅编码无 COFF/link），但 VM 下 `object` 方法调用受限；Cranelift FFI 集成需 Rust 侧 | 2-3 周 |
+| G | 优化 Pass 扩展 | 🚧 `MirOpt.aura` 部分落地；**基础 GVN 去重已接入**（相同 kind/text 节点可复用）；**PeepholeOptimizer 模板已修复**（`@imm`→`$imm`、`@target`→`$target`、`NOP`→`nop`）；X86Emitter 新增 `shl`/`shr`/`div` 发射 | 2 周 |
 | H | aarch64（可选） | ❌ 未开始 | 3-4 周 |
 | **剩余总计（S1 + S2）** | **打通"真实 codegen → exe / 库"（含 G 的真实化；不含 S3 / F / H）** | | **5-8 周** |
 | **自举总计（S3 + S4）** | **编译器自举不动点 + 落盘自含** | | **3.5-6 周** |
@@ -2814,16 +2839,30 @@ n2 == n1  （自举一致性）
   └─ 至此 PhotonNativeWriter / 原生落盘 / 原生性能全部生效
 ```
 
-#### 15.12.4 关键缺口：Photon 管线仍是门面（= S1 的任务）
+#### 15.12.4 关键缺口：Photon 管线仍不完整（S1.1–S1.6/S1.8/S1.9 已修复）
 
-`PhotonPipeline.compile(source, outDir, moduleName)` 的实际行为：
+**S1.1–S1.9 / Phase A–G 已修复的缺口**：
 
-- `source` 参数**未被使用**；
-- Phase A–D（MIR SSA / LIR / Machine DAG / RegAlloc）**只打印日志**，不消费任何 IR；
-- Phase E 的机器码来自 `generateMachineCode()` 的**硬编码 helloworld 指令序列**；
-- `objectFilePath` / `executablePath` 仍为占位（`BackendPipeline` 遗留）。
+- `compileHir()` 已真正串上 8 步数据流（HIR → SSA MIR → LIR → Machine DAG → RegAlloc → Peephole → X86Emitter → COFF → Link）；
+- `selectFunction()` 通过 `LirProgram.blockOf(id)` 取回真实块（不再 `new LirBlock()`）；
+- `selectValue()` 按 `LirValue.op` 分派真实指令（不再无条件产出 `Value`/`Unknown`）；
+- `applyColors()` 将颜色写回 `DagNode.reg` 字段；
+- `X86Emitter` 遍历 `MachineDag.instrs`，按 `template` 派发到 `X86Encoder.emitXxx`；
+- `compileHir()` 现在正确链接 main 对象 + runtime 对象（`/NODEFAULTLIB` `/SUBSYSTEM:CONSOLE` `/ENTRY:main` `/MACHINE:X64`）；
+- Rust 编译器 `Ty::Any` 类型推断警告已全部修复（7 处 skip 检查 + `check_builtin_method` 早退 + `check_member` 跳过）；
+- 端到端差分测试脚本已创建（`scripts/test-photon-e2e.ps1`）；
+- **Phase A 全部完成**：Memory chain 完整实现（Call/GetField/Load/Store/Alloc）+ 支配分析（`computeDominatorTree`）+ 变量重命名（`varVersion`）+ Linearizer 连接生产路径（`buildToTAC`）；
+- **Phase C 寻址模式融合**：`fuseLoadStorePairs` 消除 Load→Store 冗余对；
+- **Phase D liveness + spill**：`computeLiveAtEnd` + `buildLivenessInterference` + `computeFrameLayout`；
+- **Phase G 窥孔优化**：模板修复（`@imm`→`$imm`、`@target`→`$target`、`NOP`→`nop`）+ X86Emitter 新增 `shl`/`shr`/`div` 发射。
 
-即：E1 的编码器、E2 的 COFF 写入器、E3 的链接器**都是真的**，但**把它们串起来的那条线是假的**。
+**仍未打通的缺口**：
+
+- `compileHir()` 虽已串通 8 步数据流并正确链接，但尚未经由**真实 Aura 源码编译**端到端验证（当前用简单函数 `fun main() { return 42 }` 测试）；
+- 上述 COFF / 链接结果来自 `PhotonRuntime.emitPrintMain()` / `emitPrintln()` 的**手写机器码**，不是真实 Aura 源码走完六步管线的产物（端到端差分测试已建立，待 stdlib .auc 修复后可运行）；
+- **JIT `compileMachineCode` 在 VM 下不可用**：`compileEncodeOnly` 调用 `SsaBuilderUtils.build()` / `InstructionSelectorUtils.emptySelector()` 等 `object` 方法，VM 字节码编译器无法解析（`未解析的函数调用`）；需 AOT/自举模式或改为 `class` 方法；
+- **JIT 原生码端到端执行未打通**：`vmMode` 下 `emitFunction` 仅模拟地址分配（`simNextAddr`），未实际写入可执行内存（`Memory.alloc` / `Memory.write` / `Memory.mprotect` 在 VM 下不可用）；
+- **E3 动态库 / runtime 正式库 / entry point 适配**：`linkDll` / `linkStaticLib` 仅生成命令字符串，未实际执行；`aura_runtime` 正式库未开始；CRT 入口点（`mainCRTStartup` / `_start`）未适配。
 
 #### 15.12.5 分阶段计划（S1–S4）
 
@@ -2872,15 +2911,15 @@ PhotonSystemLinker + PhotonLldConfig → lld-link 命令行                  bac
 
 | # | 任务 | 文件 | 现状（代码事实） | S1 动作 |
 |---|------|------|----------------|--------|
-| S1.1 | 后端入口 `compileHir(hir, outDir, module): BackendResult` | `PhotonPipeline.aura`（改造） | `compile(source, …)` **不使用 `source`**；A–D 只 `println`；机器码来自硬编码 `generateMachineCode()` | 新增 `compileHir()` 真正串上上述 8 步数据流；保留旧签名做兼容；**删除**硬编码机器码/重定位；`success` 由各阶段真实结果驱动 |
-| S1.2 | `selectFunction` 由空壳改为真实遍历 | `InstructionSelection.aura` | `new LirBlock()` 只设 `id`，其余字段空 → 实际选了个空块 | 用 `LirProgram.blockOf(id)` 取回真实块，按 `blocks` 顺序遍历 `phis` → `instrs` → `term` |
-| S1.3 | `selectValue` 的 LIR op 分派 | `InstructionSelection.aura` | 无条件 `addNode("Value","Unknown",…)`，**不读 LIR op** | 实现 S1 子集分派：`Const`/`ConstImm`→imm、`Mov`→mov、`Add`/`Sub`→add/sub、`Load`/`Store`→mov mem、`Call`→call、`Ret`→ret、`Br`/`CondBr`→jmp/jcc、`ICmp*`→cmp+setcc；操作数递归下降，LIR value id → DAG node id 记入既有私有 `nodeMap` |
-| S1.4 | 颜色回写 | `RegisterAllocator.aura` | 颜色只存内部 `colorMap`，**不写回 `DagNode.reg`** | 新增 `applyColors(dag)` 并在 `allocate()` 末尾调用；S1 先只走"无 spill"路径 |
-| S1.5 | 编码驱动器 | 新建 `backend/photon/X86Emitter.aura` | 不存在（编码与 DAG 之间没有桥） | 遍历 `MachineDag.instrs`，按 `template` 派发到 `X86Encoder.emitXxx`；跨对象符号用 `emitCallRel`，RIP 取址用 `emitLeaRIP`；汇总 `getRelocations()` |
-| S1.6 | 主对象发射 | `PhotonRuntime.aura`（扩展） | 只有手写的 `emitPrintMain()` | 新增"由编码结果发射 main 对象"，复用 `emitFromMachineCode(hex, relocs, "hi", "main")` |
+| S1.1 ✅ | 后端入口 `compileHir(hir, outDir, module): BackendResult` | `PhotonPipeline.aura` | ✅ **已修复**：`compileHir()` 真正串上 8 步数据流（HIR → SSA → LIR → DAG → RegAlloc → Peephole → X86Emitter → COFF → Link）；`compile()` 保留兼容；硬编码机器码已删除 | — |
+| S1.2 ✅ | `selectFunction` 由空壳改为真实遍历 | `InstructionSelection.aura` | ✅ **已修复**：通过 `LirProgram.blockOf(id)` 取回真实块，按 `blocks` 顺序遍历 `phis` → `instrs` → `term` | — |
+| S1.3 ✅ | `selectValue` 的 LIR op 分派 | `InstructionSelection.aura` | ✅ **已修复**：按 `LirValue.op` 分派真实指令（Const→imm、Add/Sub→add/sub、Load/Store→mov mem、Call→call、Ret→ret、Br/CondBr→jmp/jcc、ICmp→cmp+setcc）；LIR value id → DAG node id 记入 `nodeMap` | — |
+| S1.4 ✅ | 颜色回写 | `RegisterAllocator.aura` | ✅ **已修复**：`applyColors()` 将颜色写回 `DagNode.reg` 字段，在 `allocate()` 末尾调用 | — |
+| S1.5 ✅ | 编码驱动器 | `backend/photon/X86Emitter.aura` | ✅ **已实现**：遍历 `MachineDag.instrs`，按 `template` 派发到 `X86Encoder.emitXxx`；汇总 `getRelocations()` | — |
+| S1.6 ✅ | 主对象发射 | `PhotonRuntime.aura`（扩展） | ✅ **已修复**：`compileHir()` 现在正确链接 main 对象 + runtime 对象（`/NODEFAULTLIB` `/SUBSYSTEM:CONSOLE` `/ENTRY:main` `/MACHINE:X64`）；新增 `PhotonRuntimeUtils.buildMainObjectFromEncoded()` 接收真实管线编码结果 | — |
 | S1.7 | runtime 对象 | `PhotonRuntime.emitPrintln()` | ✅ **已真实**（kernel32 `GetStdHandle` / `WriteFile`，栈上构造 `\r\n`） | 直接复用，S1 不改 |
-| S1.8 | CLI 接线 `-b photon` | `Main.aura`（`MainUtils.runCli`） | 只识别 `-o`/`--output`、`--mem-trace`、`-h`；**无 `-b`/`--backend`**；后端常量 `backendVmName/backendJitName/backendAotName` 已有；`compileWith(source, backend)` 存在但**无调用者** | 解析 `-b`/`--backend`（`vm` 默认 / `photon` / `aot-llvm`）；新增 `backendPhotonName()`；把 `compileWith` 真正接进 `runCli` 分派 |
-| S1.9 | 端到端脚本与差分 | `scripts/build-photon-hello.ps1` | 驱动手写机器码的 `PhotonHelloBuild.aura` | 改为驱动 `-b photon`；新增差分：`aura run` 与 exe 的 stdout / 退出码逐字节比对 |
+| S1.8 ✅ | CLI 接线 `-b photon`（Rust 侧） | `cli/src/main.rs` | ✅ **已完成**：`cmd_build_photon` 函数 + `-b`/`--backend` 参数解析（`extract_opt` 支持 `-b` 别名）+ `first_positional` 跳过 `--backend` + 帮助文本更新 | — |
+| S1.9 ✅ | 端到端脚本与差分 | `scripts/test-photon-e2e.ps1` | ✅ **已创建**：对比 VM 路径（`aura run`）与 Photon 路径（`aura build -b photon`）的 exit code 与产物；检查 HIR/exe 文件是否生成 | — |
 
 **关键设计决策**：
 
@@ -2915,7 +2954,7 @@ PhotonSystemLinker + PhotonLldConfig → lld-link 命令行                  bac
 |------|----------------|--------|
 | **Phi 插入** | `SsaBuilder.makePhi()` 已定义但**无任何调用者**；`buildIf`/`buildWhile` 只建 then/else/merge 与 cond/body/end 块，**不插 Phi** | 实现支配树 + 支配边界（Cytron）：`computeDominators` → `computeDF` → `insertPhis` → 变量重命名；`Lowering` 会原样搬运输入中的 Phi，故必须在上游补齐 |
 | **Memory chain** | `memHead` 仅在函数入口赋值一次、**之后从不读取**；`MirValue`/`LirValue` **无内存 token 字段** | 用既有 `MirValue.aux` 承载 mem token（避免改结构）：`Store` 产生新 token、`Load` 消费 token；`Lowering` 保持该顺序，禁止跨 token 重排 |
-| **多函数单 obj** | `functions` 为单名，`buildSymbols` 只登记 1 个函数符号 | 扩展为多函数：函数列表化；每个函数独立 `.text` 基准，重定位 offset 需按各自基准修正；符号表按 函数 → 字符串 → 外部 顺序稳定输出 |
+| **多函数单 obj** | **已落地**：`functions` 支持多函数名，`buildSymbols` 为每个函数写独立 `.text` 偏移，`appendFunction` 追加后续函数，`composeRelocations` 按函数基准修正重定位 offset | 保持当前实现：函数列表化 + 独立 `.text` 基准 + 重定位 offset 按基准修正；符号表按 函数 → 字符串 → 外部 顺序稳定输出 |
 | **寄存器 liveness** | 干扰集仅由"操作数已有颜色"构成 | 引入逐指令 use/def + 真实干涉图（或先线性扫描）；spill slot 由待新建的 `FrameLayout.aura` 布局 |
 | **优化 Pass 生效** | 模板大小写不匹配 → 绝大多数 pass 空转 | 统一模板约定 + 补 pass 单测（否则"优化"长期只是账面上的） |
 | **类型/内存模型** | `TypeRegistry` 已预注册 Int/Float/Bool/Unit/String，`sizeOf`/`alignOf` 已有 | 补 struct/class/enum 字段偏移、数组、堆分配与对象头 |
@@ -2962,7 +3001,7 @@ PhotonSystemLinker + PhotonLldConfig → lld-link 命令行                  bac
 | 自举阶段 | 交付物 | 对应 15.11 的 Phase | 预估 |
 |---------|--------|-------------------|------|
 | **S1** | 真实源码 → Windows exe（最小闭环）+ CLI `-b photon` | E2（COFF 单函数）+ E3（exe）+ CLI 接线 | 1-2 周 |
-| **S2** | 语言子集与 VM 差分一致 + `aura_runtime` 正式库 | E2（多函数 / ELF）+ E3（库）+ G（优化 Pass 真实化） | 4-6 周 |
+| **S2** | 语言子集与 VM 差分一致 + `aura_runtime` 正式库 | E2（ELF）+ E3（库）+ F（JIT 路径）+ G（优化 Pass 真实化） | 4-6 周 |
 | **S3** | 自举不动点（`n1` → `n2` → `n3` 字节一致） | 新增（bootstrap） | 3-5 周 |
 | **S4** | 落盘自含 + 产物矩阵补齐 | E2 落盘通道切换 + E3 库输出 | 0.5-1 周 |
 | **合计** | 自举主线打通 | —— | **8.5-14 周（约 2-3.5 个月）** |

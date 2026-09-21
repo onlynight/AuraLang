@@ -139,8 +139,13 @@ class PhotonSystemLinker {
 
     /// 构建完整的链接器命令行。
     fun buildCommand(): String {
+        if (PhotonSystemLinkerUtils.isStaticLib(this.outputType)) {
+            return this.buildArchiveCommand(this.objectFiles, this.outputName)
+        }
         if (this.os == "windows") {
             return this.buildLldLinkCommand(this.objectFiles, this.outputName)
+        } else if (this.os == "linux") {
+            return this.buildLdCommand(this.objectFiles, this.outputName)
         } else if (this.os == "macos") {
             return this.buildLd64Command(this.objectFiles, this.outputName)
         }
@@ -166,6 +171,25 @@ class PhotonSystemLinker {
     }
 
     // ── lld-link 命令构建（Windows）──
+
+    /// 构建静态库归档命令（.lib / .a）。
+    ///
+    /// 静态库不是链接产物，而是对象文件归档；Windows 用 llvm-lib，其余用 llvm-ar。
+    /// 这里统一返回可直接由 Process.run() 执行的完整命令。
+    fun buildArchiveCommand(objectFiles: String, outputName: String): String {
+        var outName: String = outputName
+        if (this.os == "windows") {
+            if (!outName.endsWith(".lib")) {
+                outName = outName + ".lib"
+            }
+            return this.getArchiverPath() + " /OUT:" + outName + " " + objectFiles + " "
+        }
+
+        if (!outName.endsWith(".a")) {
+            outName = outName + ".a"
+        }
+        return this.getArchiverPath() + " rcs " + outName + " " + objectFiles + " "
+    }
 
     /// 构建 lld-link 命令。
     ///
@@ -202,7 +226,8 @@ class PhotonSystemLinker {
 
         // 输出类型标志
         if (this.outputType == "dll") {
-            cmd = cmd + "/DLL "
+            cmd = cmd + this.sharedLibFlag("windows") + " "
+            // 共享库不写 /ENTRY；若未来需要 DllMain，可由上层显式设置。
         }
 
         // 库文件（逗号分隔；缺后缀自动补 .lib）
@@ -229,6 +254,19 @@ class PhotonSystemLinker {
         }
 
         return cmd
+    }
+
+    /// 返回共享库专用链接器标志。
+    ///
+    /// Windows 共享库用 `/DLL`；Linux 共享库用 `-shared`；macOS 用 `-dynamiclib`。
+    private fun sharedLibFlag(os: String): String {
+        if (os == "windows") {
+            return "/DLL"
+        }
+        if (os == "macos") {
+            return "-dynamiclib"
+        }
+        return "-shared"
     }
 
     // ── ld 命令构建（Linux）──
@@ -507,7 +545,7 @@ object PhotonSystemLinkerUtils {
         var start: Int = 0
         var i: Int = 0
         while (i < len) {
-            if (text[i] == ",") {
+            if (text.charAt(i).toString() == ",") {
                 out.add(text.substring(start, i))
                 start = i + 1
             }
@@ -526,7 +564,7 @@ object PhotonSystemLinkerUtils {
         var i: Int = 0
         val len: Int = text.length
         while (i < len) {
-            if (text[i] == ",") {
+            if (text.charAt(i).toString() == ",") {
                 count = count + 1
             }
             i = i + 1
@@ -540,7 +578,7 @@ object PhotonSystemLinkerUtils {
         var i: Int = 0
         val len: Int = p.length
         while (i < len) {
-            if (p[i] == "/") {
+            if (p.charAt(i).toString() == "/") {
                 out = out + "\\"
             } else {
                 out = out + p.substring(i, i + 1)
@@ -625,7 +663,7 @@ object PhotonSystemLinkerUtils {
 
     /// 判断是否为静态库输出。
     fun isStaticLib(type: String): Boolean {
-        return type == "obj"
+        return type == "obj" || type == "lib" || type == "a"
     }
 
     /// 判断是否为共享库输出。
@@ -641,7 +679,7 @@ object PhotonSystemLinkerUtils {
     /// 判断输出类型是否有效。
     fun isValidOutputType(type: String): Boolean {
         if (type == "exe" || type == "dll" || type == "so" ||
-            type == "dylib" || type == "obj") {
+            type == "dylib" || type == "obj" || type == "lib" || type == "a") {
             return true
         }
         return false

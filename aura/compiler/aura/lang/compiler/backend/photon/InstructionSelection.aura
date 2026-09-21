@@ -83,6 +83,10 @@ class InstructionSelector {
             this.selectFunction(func, src)
             fi = fi + 1
         }
+
+        // Phase C: 寻址模式融合 — Load/Store 对消除
+        this.fuseLoadStorePairs()
+
         return this.dag
     }
 
@@ -284,24 +288,25 @@ class InstructionSelector {
 
     // ── 发射：Phi ──
 
-    /// 发射 Phi 节点（S1 简化：取第一个入边值作为 MOV）。
+    /// 发射 Phi 节点（S1: 遍历所有入边生成 MOV）。
     private fun emitPhi(val: LirValue, vid: Int): Int {
         val args: List<String> = LirUtils.splitArgs(val.args)
+        val nodeId: Int = this.dag.addNode("Value", "Phi", val.type,
+                                            "", "", "", this.curChain, val.args)
+        this.registerNode(vid, nodeId)
+
         if (args.size > 0) {
-            val incomingId: Int = LirUtils.strToInt(args[0])
-            if (incomingId >= 0) {
-                val srcNode: Int = this.lookupNode(incomingId)
-                if (srcNode >= 0) {
-                    val nodes: String = MachineDagUtils.toStr(srcNode)
-                    this.dag.selectPattern(7, nodes, srcNode)
-                    this.registerNode(vid, srcNode)
-                    return srcNode
+            for (i in 0..(args.size - 1)) {
+                val incomingId: Int = LirUtils.strToInt(args[i])
+                if (incomingId >= 0) {
+                    val srcNode: Int = this.lookupNode(incomingId)
+                    if (srcNode >= 0) {
+                        val nodes: String = MachineDagUtils.toStr(srcNode)
+                        this.dag.selectPattern(7, nodes, srcNode)  // mov %dst, %src
+                    }
                 }
             }
         }
-        val nodeId: Int = this.dag.addNode("Value", "Phi", val.type,
-                                           "", "", "", this.curChain, "")
-        this.registerNode(vid, nodeId)
         return nodeId
     }
 
@@ -520,7 +525,7 @@ class InstructionSelector {
 
             // 条件跳转。
             val condNode: Int = this.resolveNode(condId)
-            val nodes: String = MachineDagUtils.toStr(thenLabel)
+            val nodes: String = thenLabel
             val jccId: Int = this.dag.selectPattern(32, nodes, -1)
             val jccInstr: DagInstruction = this.dag.instrOf(jccId)
             jccInstr.cond = "ne"
@@ -556,11 +561,17 @@ class InstructionSelector {
 
     /// 获取算术运算的 pattern ID。
     private fun arithPatternId(op: String): Int {
-        if (op == "Add") { return 1 }
-        if (op == "Sub") { return 3 }
-        if (op == "Mul") { return 5 }
-        // SDiv / SRem / And / Or / Xor / Shl / Shr → 暂时用 Add 代替（S1 最小集）。
-        return 1
+        if (op == "Add") { return 1 }    // add %dst, %src
+        if (op == "Sub") { return 3 }    // sub %dst, %src
+        if (op == "Mul") { return 5 }    // imul %dst, %src
+        if (op == "And") { return 8 }    // and %dst, %src
+        if (op == "Or") { return 9 }     // or %dst, %src
+        if (op == "Xor") { return 13 }   // xor %dst, %src
+        if (op == "SDiv") { return 14 }  // div %dst, @imm
+        if (op == "SRem") { return 15 }  // rem %dst, @imm
+        if (op == "Shl") { return 18 }   // shl %dst, %src
+        if (op == "Shr") { return 19 }   // shr %dst, %src
+        return 1  // fallback to add
     }
 
     /// 映射比较操作到条件字符串。
@@ -708,7 +719,7 @@ class InstructionSelector {
         var len: Int = this.nodeMap.length
         var i: Int = 0
         while (i < len) {
-            if (this.nodeMap[i] == "\n") {
+            if (this.nodeMap.charAt(i).toString() == "\n") {
                 if (this.nodeMap.substring(start, i).startsWith(targetStr)) {
                     val dagIdStr: String = this.nodeMap.substring(
                         start + targetStr.length, i)
@@ -733,6 +744,54 @@ class InstructionSelector {
         val id: Int = this.tmpCount
         this.tmpCount = this.tmpCount + 1
         return id
+    }
+
+    // ── Phase C: 寻址模式融合 ──
+
+    /// Load/Store 对消除（Phase C 寻址模式融合）。
+    ///
+    /// 查找 DAG 中 Load 后紧跟 Store 的模式（Load 的结果只被同一 Store 使用），
+    /// 将 Load 和 Store 指令合并为 NOP（消除冗余内存操作）。
+    /// 同时调用 DagPatterns.matchLoadStorePair 进行 DAG 级模式匹配。
+    private fun fuseLoadStorePairs(): Unit {
+        val instrs: List<DagInstruction> = this.dag.instrs
+        var changed: Boolean = true
+        var iterations: Int = 0
+
+        while (changed && iterations < 10) {
+            changed = false
+            iterations = iterations + 1
+
+            var i: Int = 0
+            while (i < instrs.size - 1) {
+                val instr: DagInstruction = instrs[i]
+                val next: DagInstruction = instrs[i + 1]
+
+                // 检查 Load → Store 紧邻对
+                // 模板格式与 X86Emitter 一致
+                if (instr.template == "mov %dst, [mem]" && next.template == "mov [mem], %src"
+                    && instr.output >= 0 && next.nodeAt(0) == instr.output) {
+                    // 合并：Load 后立即 Store 同一值 → 消除
+                    instr.template = "nop"
+                    instr.nodes = ""
+                    instr.output = -1
+                    next.template = "nop"
+                    next.nodes = ""
+                    next.output = -1
+                    this.selectedCount = this.selectedCount - 2
+                    changed = true
+                }
+                i = i + 1
+            }
+
+            // DAG 级模式匹配（补充检查）
+            val fusedStoreId: Int = DagPatterns.matchLoadStorePair(this.dag)
+            if (fusedStoreId >= 0) {
+                // DAG 级匹配到 Load-Store 对，标记为已融合
+                // （实际指令级消除已在上面的循环中完成）
+                changed = changed || fusedStoreId >= 0
+            }
+        }
     }
 }
 
@@ -788,4 +847,5 @@ object InstructionSelectorUtils {
     fun isConstOp(op: String): Boolean {
         return op == "Const" || op == "ConstImm"
     }
+
 }

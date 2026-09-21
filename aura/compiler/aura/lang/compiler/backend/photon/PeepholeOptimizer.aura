@@ -47,6 +47,7 @@ class PeepholeOptimizer {
         var changed: Boolean = false
 
         changed = changed || this.optimizeMovChain()
+        changed = changed || this.optimizeSelfMove()
         changed = changed || this.optimizeDeadCode()
         changed = changed || this.optimizeCommonSubexpression()
         changed = changed || this.optimizeConstantFold()
@@ -60,7 +61,7 @@ class PeepholeOptimizer {
         return changed
     }
 
-    /// 优化 MOV 链：MOV r1, r2; MOV r3, r1 → MOV r3, r2
+    /// 优化 MOV 链：mov r1, r2; mov r3, r1 → mov r3, r2
     private fun optimizeMovChain(): Boolean {
         var changed: Boolean = false
         val instrs: List<DagInstruction> = this.dag.instrs
@@ -68,14 +69,36 @@ class PeepholeOptimizer {
         while (i < instrs.size - 1) {
             val instr: DagInstruction = instrs[i]
             val next: DagInstruction = instrs[i + 1]
-            // 检查 MOV r1, r2 后跟 MOV r3, r1
-            if (instr.template == "MOV %dst, %src" && next.template == "MOV %dst, %src") {
+            // 检查 mov r1, r2 后跟 mov r3, r1（模板与 X86Emitter 一致：$imm 格式）
+            if (instr.template == "mov %dst, %src" && next.template == "mov %dst, %src") {
                 val src1: Int = instr.nodeAt(0)
                 val dst1: Int = instr.output
                 val src2: Int = next.nodeAt(0)
                 if (dst1 >= 0 && src2 == dst1) {
-                    // 合并：MOV r3, r2
+                    // 合并：mov r3, r2
                     next.nodes = toStr(src1)
+                    this.optimized = this.optimized + 1
+                    changed = true
+                }
+            }
+            i = i + 1
+        }
+        return changed
+    }
+
+    /// 自移动消除：mov r, r → nop
+    private fun optimizeSelfMove(): Boolean {
+        var changed: Boolean = false
+        val instrs: List<DagInstruction> = this.dag.instrs
+        var i: Int = 0
+        while (i < instrs.size) {
+            val instr: DagInstruction = instrs[i]
+            if (instr.template == "mov %dst, %src") {
+                val dst: Int = instr.nodeAt(0)
+                if (dst >= 0 && instr.output == dst) {
+                    instr.template = "nop"
+                    instr.nodes = ""
+                    instr.output = -1
                     this.optimized = this.optimized + 1
                     changed = true
                 }
@@ -97,7 +120,7 @@ class PeepholeOptimizer {
                 // 检查输出是否被使用
                 if (instr.output < 0 || this.isUnused(instr.output)) {
                     // 移除指令（标记）
-                    instr.template = "NOP"
+                    instr.template = "nop"
                     instr.nodes = ""
                     instr.output = -1
                     this.optimized = this.optimized + 1
@@ -116,16 +139,16 @@ class PeepholeOptimizer {
         var i: Int = 0
         while (i < instrs.size) {
             val instr: DagInstruction = instrs[i]
-            if (instr.template == "NOP") { i = i + 1; continue }
+            if (instr.template == "nop") { i = i + 1; continue }
             // 查找后续相同模板和相同输入的指令
             var j: Int = i + 1
             while (j < instrs.size) {
                 val next: DagInstruction = instrs[j]
-                if (next.template == "NOP") { j = j + 1; continue }
+                if (next.template == "nop") { j = j + 1; continue }
                 if (next.template == instr.template && next.nodes == instr.nodes) {
                     // 合并：使用相同输出
                     next.output = instr.output
-                    next.template = "NOP"
+                    next.template = "nop"
                     next.nodes = ""
                     this.optimized = this.optimized + 1
                     changed = true
@@ -138,44 +161,30 @@ class PeepholeOptimizer {
         return changed
     }
 
-    /// 常量折叠：ADD r1, r2, 0 → NOP, MUL r1, r2, 1 → NOP
+    /// 常量折叠：add r1, r2, 0 → NOP, imul r1, r2, 1 → NOP
     private fun optimizeConstantFold(): Boolean {
         var changed: Boolean = false
         val instrs: List<DagInstruction> = this.dag.instrs
         var i: Int = 0
         while (i < instrs.size) {
             val instr: DagInstruction = instrs[i]
-            // ADD with 0
-            if (instr.template == "ADD %dst, %src, $imm" && instr.mem == "0") {
-                instr.template = "NOP"
+            // add with 0
+            if (instr.template == "add %dst, %src, $imm" && instr.mem == "0") {
+                instr.template = "nop"
                 instr.nodes = ""
                 this.optimized = this.optimized + 1
                 changed = true
             }
-            // MUL with 1
-            if (instr.template == "MUL %dst, %src, $imm" && instr.mem == "1") {
-                instr.template = "NOP"
+            // imul with 1
+            if (instr.template == "imul %dst, %src, $imm" && instr.mem == "1") {
+                instr.template = "nop"
                 instr.nodes = ""
                 this.optimized = this.optimized + 1
                 changed = true
             }
-            // SUB with 0
-            if (instr.template == "SUB %dst, %src, $imm" && instr.mem == "0") {
-                instr.template = "NOP"
-                instr.nodes = ""
-                this.optimized = this.optimized + 1
-                changed = true
-            }
-            // AND with -1
-            if (instr.template == "AND %dst, %src, $imm" && instr.mem == "-1") {
-                instr.template = "NOP"
-                instr.nodes = ""
-                this.optimized = this.optimized + 1
-                changed = true
-            }
-            // OR with 0
-            if (instr.template == "OR %dst, %src, $imm" && instr.mem == "0") {
-                instr.template = "NOP"
+            // sub with 0
+            if (instr.template == "sub %dst, %src, $imm" && instr.mem == "0") {
+                instr.template = "nop"
                 instr.nodes = ""
                 this.optimized = this.optimized + 1
                 changed = true
@@ -185,7 +194,7 @@ class PeepholeOptimizer {
         return changed
     }
 
-    /// 强度削减：MUL by 2^n → SHL, DIV by 2^n → SHR
+    /// 强度削减：imul by 2^n → shl, div by 2^n → shr
     private fun optimizeStrengthReduce(): Boolean {
         var changed: Boolean = false
         val instrs: List<DagInstruction> = this.dag.instrs
@@ -195,16 +204,16 @@ class PeepholeOptimizer {
             val mem: String = instr.mem
             if (mem != "" && this.isPowerOfTwo(mem)) {
                 val shift: Int = this.log2(this.strToInt(mem))
-                // MUL by 2^n → SHL
-                if (instr.template == "MUL %dst, %src, $imm" && shift >= 1 && shift <= 63) {
-                    instr.template = "SHL %dst, $shift"
+                // imul by 2^n → shl
+                if (instr.template == "imul %dst, %src, $imm" && shift >= 1 && shift <= 63) {
+                    instr.template = "shl %dst, $shift"
                     instr.mem = toStr(shift)
                     this.optimized = this.optimized + 1
                     changed = true
                 }
-                // DIV by 2^n → SHR
-                if (instr.template == "DIV %dst, $imm" && shift >= 1 && shift <= 63) {
-                    instr.template = "SHR %dst, $shift"
+                // div by 2^n → shr
+                if (instr.template == "div %dst, $imm" && shift >= 1 && shift <= 63) {
+                    instr.template = "shr %dst, $shift"
                     instr.mem = toStr(shift)
                     this.optimized = this.optimized + 1
                     changed = true
@@ -215,7 +224,7 @@ class PeepholeOptimizer {
         return changed
     }
 
-    /// 复制传播：如果 MOV r1, r2 已执行，将 r2 的用途替换为 r1。
+    /// 复制传播：如果 mov r1, r2 已执行，将 r2 的用途替换为 r1。
     private fun optimizeCopyPropagate(): Boolean {
         var changed: Boolean = false
         val instrs: List<DagInstruction> = this.dag.instrs
@@ -225,7 +234,7 @@ class PeepholeOptimizer {
         var i: Int = 0
         while (i < instrs.size) {
             val instr: DagInstruction = instrs[i]
-            if (instr.template == "MOV %dst, %src" && instr.output >= 0) {
+            if (instr.template == "mov %dst, %src" && instr.output >= 0) {
                 copyMap.add(toStr(instr.nodeAt(0)) + "|" + toStr(instr.output))
             }
             i = i + 1
@@ -235,7 +244,7 @@ class PeepholeOptimizer {
         i = 0
         while (i < instrs.size) {
             val instr: DagInstruction = instrs[i]
-            if (instr.template == "NOP") { i = i + 1; continue }
+            if (instr.template == "nop") { i = i + 1; continue }
             var k: Int = 0
             while (k < copyMap.size) {
                 val parts: List<String> = this.splitStr(copyMap[k], "|")
@@ -261,6 +270,7 @@ class PeepholeOptimizer {
     }
 
     /// 冗余 Load/Store 消除。
+    /// 冗余 load/store 消除。
     private fun optimizeRedundantLoadStore(): Boolean {
         var changed: Boolean = false
         val instrs: List<DagInstruction> = this.dag.instrs
@@ -268,12 +278,12 @@ class PeepholeOptimizer {
         while (i < instrs.size - 1) {
             val instr: DagInstruction = instrs[i]
             val next: DagInstruction = instrs[i + 1]
-            // LOAD r1, [addr]; STORE r1, [addr] → NOP
-            if (instr.template == "LOAD %dst, [addr]" && next.template == "STORE %src, [addr]"
+            // mov r1, [mem]; mov [mem], r1 → NOP (redundant load-store)
+            if (instr.template == "mov %dst, [mem]" && next.template == "mov [mem], %src"
                 && instr.output >= 0 && next.nodeAt(0) == instr.output) {
-                instr.template = "NOP"
+                instr.template = "nop"
                 instr.nodes = ""
-                next.template = "NOP"
+                next.template = "nop"
                 next.nodes = ""
                 this.optimized = this.optimized + 2
                 changed = true
@@ -290,7 +300,7 @@ class PeepholeOptimizer {
         // 移除连续 NOP
         var i: Int = 0
         while (i < instrs.size - 1) {
-            if (instrs[i].template == "NOP" && instrs[i + 1].template == "NOP") {
+            if (instrs[i].template == "nop" && instrs[i + 1].template == "nop") {
                 // 保留一个
                 i = i + 2
                 this.optimized = this.optimized + 1
@@ -309,9 +319,9 @@ class PeepholeOptimizer {
         var i: Int = 0
         while (i < instrs.size) {
             val instr: DagInstruction = instrs[i]
-            // ADD r1, r2, 0
-            if (instr.template == "ADD %dst, %src, $imm" && instr.mem == "0") {
-                instr.template = "NOP"
+            // add r1, r2, 0
+            if (instr.template == "add %dst, %src, $imm" && instr.mem == "0") {
+                instr.template = "nop"
                 instr.nodes = ""
                 this.optimized = this.optimized + 1
                 changed = true
@@ -321,7 +331,7 @@ class PeepholeOptimizer {
         return changed
     }
 
-    /// 标志复用：CMP; Jcc; CMP; Jcc → CMP; Jcc; Jcc
+    /// 标志复用：cmp; jcc; cmp; jcc → cmp; jcc; jcc
     private fun optimizeFlagReuse(): Boolean {
         var changed: Boolean = false
         val instrs: List<DagInstruction> = this.dag.instrs
@@ -330,11 +340,11 @@ class PeepholeOptimizer {
             val instr: DagInstruction = instrs[i]
             val mid: DagInstruction = instrs[i + 1]
             val next: DagInstruction = instrs[i + 2]
-            // CMP r1, r2; Jcc L1; CMP r1, r2; Jcc L2
-            if (instr.template == "CMP %src, $imm" && mid.template == "Jcc L1"
-                && next.template == "CMP %src, $imm" && instr.mem == next.mem) {
-                // 合并：CMP; Jcc L1; Jcc L2
-                next.template = "Jcc L2"
+            // cmp r1, imm; jcc target; cmp r1, imm; jcc target
+            if (instr.template == "cmp %src, $imm" && mid.template == "jcc $target"
+                && next.template == "cmp %src, $imm" && instr.mem == next.mem) {
+                // 合并：cmp; jcc target; jcc target
+                next.template = "jcc $target"
                 next.nodes = ""
                 next.mem = mid.cond
                 this.optimized = this.optimized + 1

@@ -26,6 +26,7 @@ package aura.lang.compiler.backend.photon
 
 import aura.lang.std.String
 import aura.lang.std.FileSystem
+import aura.lang.std.Process
 
 import "x86_64/X86Encoder.aura"
 
@@ -72,6 +73,12 @@ class PhotonObjectWriter {
     /// 函数列表（逗号分隔）。
     var functions: String = ""
 
+    /// 每个函数在 .text 节内的起始字节偏移（格式: name|offset|offsets...）。
+    ///
+    /// 多函数单 obj（S2）需要为每个函数定义独立符号，并且把函数内重定位
+    /// 偏移转换为 .text 节内绝对偏移。单函数时首函数 offset 固定为 0。
+    var functionOffsets: String = ""
+
     /// 节数据偏移（运行时计算）。
     var textOffset: Int = 0
     var rdataOffset: Int = 0
@@ -81,6 +88,15 @@ class PhotonObjectWriter {
     var textSize: Int = 0
     var rdataSize: Int = 0
     var dataSize: Int = 0
+
+    /// COFF 布局缓存（buildCoffFile 内部使用）。
+    var coffSectionCount: Int = 0
+    var coffSymTabOffset: Int = 0
+    var coffSymCount: Int = 0
+    var coffRelocOffset: Int = 0
+    var coffRelocCount: Int = 0
+    var coffStrTabSize: Int = 0
+    var coffStrTabHex: String = ""
 
     init() {
         this.target = "x86_64"
@@ -95,6 +111,7 @@ class PhotonObjectWriter {
         this.symbols = ""
         this.stringConsts = ""
         this.functions = ""
+        this.functionOffsets = ""
         this.textOffset = 0
         this.rdataOffset = 0
         this.dataOffset = 0
@@ -105,10 +122,13 @@ class PhotonObjectWriter {
 
     // ── 主入口 ──
 
-    /// 主入口：生成 COFF 目标文件（hex 编码）。
+    /// 主入口：生成目标文件（hex 编码）。
     fun emit(): String {
         if (this.os == "windows") {
             return this.buildCoffFile()
+        }
+        if (this.os == "linux") {
+            return this.buildElfFile()
         }
         return ""
     }
@@ -126,10 +146,42 @@ class PhotonObjectWriter {
         this.functions = functionName
         this.relocs = relocEntries
 
+        // 单函数 API 的后向兼容入口：首函数永远位于 .text 偏移 0。
+        this.functionOffsets = functionName + "|0"
+
         // 符号表依赖重定位表：重定位引用的外部符号要登记为「未定义符号」
         this.buildSymbols(functionName, stringConsts)
 
         return this.buildCoffFile()
+    }
+
+    /// 追加额外函数的机器码到 .text 节（多函数支持）。
+    ///
+    /// @param machineCodeHex  该函数的机器码（hex）
+    /// @param functionName    该函数名
+    /// @param relocEntries    该函数的重定位项（格式: offset|symbol）
+    fun appendFunction(machineCodeHex: String, functionName: String,
+                        relocEntries: String): Unit {
+        // 多函数单 obj：先记录本函数在 .text 内的基准偏移，再追加机器码。
+        // 后续重定位项会按这个基准换算为节内绝对偏移。
+        val funcOffset: Int = this.hexByteCount(this.textSection)
+        if (this.functions == "") {
+            this.functions = functionName
+            this.functionOffsets = functionName + "|0"
+        } else {
+            this.functions = this.functions + "," + functionName
+            this.functionOffsets = this.functionOffsets + ";" + functionName + "|" + this.toStr(funcOffset)
+        }
+
+        // 追加机器码到 textSection
+        this.textSection = this.textSection + machineCodeHex
+
+        // 追加重定位项；用 `;;` 分隔函数边界，composeRelocations 会按 functionOffsets 转换。
+        if (this.relocs == "") {
+            this.relocs = relocEntries
+        } else {
+            this.relocs = this.relocs + ";;" + relocEntries
+        }
     }
 
     // ── 符号表构建 ──
@@ -149,14 +201,25 @@ class PhotonObjectWriter {
     private fun buildSymbols(functionName: String, stringConsts: String): Unit {
         val recs: List<String> = arrayListOf<String>()
 
-        // 1) 函数符号：支持逗号分隔的多函数列表
-        //    单函数场景为 0，多函数场景每个函数一个符号条目
+        // 1) 函数符号：支持逗号分隔的多函数列表。
+        //    单函数场景 offset=0；多函数场景必须用 functionOffsets 为每个函数写独立 .text 偏移，
+        //    否则 call helper 会被链接到 .text 起点（main），导致调用错位。
         if (functionName != "") {
             val funcParts: List<String> = this.splitComma(functionName)
+            val offsetParts: List<String> = this.splitDoubleSemi(this.functionOffsets)
             var fi: Int = 0
             while (fi < funcParts.size) {
                 if (funcParts[fi] != "") {
-                    recs.add(funcParts[fi] + "|0|1|0x0020|2")
+                    val symOffset: Int = 0
+                    if (fi < offsetParts.size) {
+                        val of: List<String> = this.splitPipe(offsetParts[fi])
+                        if (of.size >= 2 && of[0] == funcParts[fi]) {
+                            symOffset = this.strToInt(of[1])
+                        } else if (of.size >= 2) {
+                            symOffset = this.strToInt(of[1])
+                        }
+                    }
+                    recs.add(funcParts[fi] + "|" + this.toStr(symOffset) + "|1|0x0020|2")
                 }
                 fi = fi + 1
             }
@@ -262,22 +325,47 @@ class PhotonObjectWriter {
     ///
     /// 原实现把符号名直接当十进制数解析（`strToInt("@str.0")` = 0），
     /// 导致所有重定位都指向符号 0（main），链接器无法正确定位目标。
+    ///
+    /// S2 多函数单 obj：`appendFunction()` 传入的 offset 是该函数内的相对偏移，
+    /// 这里按函数顺序累加，换算为 .text 节内绝对偏移。
     private fun composeRelocations(): List<String> {
         val out: List<String> = arrayListOf<String>()
         val entries: List<String> = this.parseRelocEntries(this.relocs)
         val symRecs: List<String> = this.splitDoubleSemi(this.symbols)
+        val offsetParts: List<String> = this.splitDoubleSemi(this.functionOffsets)
         var i: Int = 0
         while (i < entries.size) {
             val fields: List<String> = this.splitPipe(entries[i])
             if (fields.size >= 3) {
                 val idx: Int = this.symbolIndexOf(symRecs, fields[1])
                 if (idx >= 0) {
-                    out.add(fields[0] + "|" + this.toStr(idx) + "|" + this.toStr(this.coffRelocType(fields[2])))
+                    val localOffset: Int = this.strToInt(fields[0])
+                    val absoluteOffset: Int = this.textOffsetForEntryIndex(i, offsetParts) + localOffset
+                    out.add(this.toStr(absoluteOffset) + "|" + this.toStr(idx) + "|" + this.toStr(this.coffRelocType(fields[2])))
                 }
             }
             i = i + 1
         }
         return out
+    }
+
+    /// 按重定位条目序号（已按 appendFunction 调用顺序展平）定位所属函数的 .text 基准。
+    private fun textOffsetForEntryIndex(entryIndex: Int, offsetParts: List<String>): Int {
+        if (offsetParts.size == 0) {
+            return 0
+        }
+        if (entryIndex < offsetParts.size) {
+            val of: List<String> = this.splitPipe(offsetParts[entryIndex])
+            if (of.size >= 2) {
+                return this.strToInt(of[1])
+            }
+        }
+        // 没有精确元数据时保持旧行为：所有条目都视为属于首函数。
+        val first: List<String> = this.splitPipe(offsetParts[0])
+        if (first.size >= 2) {
+            return this.strToInt(first[1])
+        }
+        return 0
     }
 
     /// 在符号记录列表中按名字查找索引（未找到返回 -1）。
@@ -370,74 +458,83 @@ class PhotonObjectWriter {
         this.rdataSection = this.stringConstsToHex(this.stringConsts)
         this.rdataSize = this.hexByteCount(this.rdataSection)
 
-        var sectionCount: Int = 1                 // .text 恒存在
+        // ── 2. 计数 ──
+        this.coffSectionCount = 1
         if (this.rdataSize > 0) {
-            sectionCount = 2                      // .rdata
+            this.coffSectionCount = 2
         }
-
         val symRecs: List<String> = this.splitDoubleSemi(this.symbols)
-        val symCount: Int = symRecs.size
+        this.coffSymCount = symRecs.size
         val relocRecs: List<String> = this.composeRelocations()
-        val relocCount: Int = relocRecs.size
+        this.coffRelocCount = relocRecs.size
 
-        // ── 2. 长符号名 → 字符串表 ──
-        // 名称 ≥ 8 字符时，符号表里写「4 字节 0 + 4 字节字符串表偏移」。
-        val strNameOffsets: List<Int> = arrayListOf<Int>()   // 与 symRecs 一一对应，-1 = 短名内联
-        var strTabHex: String = ""
-        var strTabSize: Int = 4                               // 含自身的 4 字节长度前缀
+        // ── 3. 长符号名 → 字符串表 ──
+        this.coffStrTabHex = ""
+        this.coffStrTabSize = 4
         var s: Int = 0
-        while (s < symCount) {
+        while (s < this.coffSymCount) {
             val nm: String = this.symbolName(symRecs[s])
             if (nm.length >= 8) {
-                strNameOffsets.add(strTabSize)
-                strTabHex = strTabHex + this.asciiToHex(nm, -1) + "00"
-                strTabSize = strTabSize + nm.length + 1
-            } else {
-                strNameOffsets.add(-1)
+                this.coffStrTabHex = this.coffStrTabHex + this.asciiToHex(nm, -1) + "00"
+                this.coffStrTabSize = this.coffStrTabSize + nm.length + 1
             }
             s = s + 1
         }
 
-        // ── 3. 布局偏移 ──
+        // ── 4. 布局偏移 ──
         val headerSize: Int = 20
-        val sectionHeaderSize: Int = 40
-        val sectionTableEnd: Int = headerSize + sectionHeaderSize * sectionCount
-
+        val sectionHeaderSize: Int = 42
+        val sectionTableEnd: Int = headerSize + sectionHeaderSize * this.coffSectionCount
         val textRawOffset: Int = this.alignUp(sectionTableEnd, 16)
         val textRawEnd: Int = textRawOffset + this.textSize
         val rdataRawOffset: Int = this.alignUp(textRawEnd, 4)
         val rdataRawEnd: Int = rdataRawOffset + this.rdataSize
-        val relocOffset: Int = this.alignUp(rdataRawEnd, 4)
-        val relocEnd: Int = relocOffset + 10 * relocCount
-        val symTabOffset: Int = relocEnd
-        val symTabEnd: Int = symTabOffset + 18 * symCount
+        this.coffRelocOffset = this.alignUp(rdataRawEnd, 4)
+        this.coffSymTabOffset = this.coffRelocOffset + 10 * this.coffRelocCount
 
         this.textOffset = textRawOffset
         this.rdataOffset = rdataRawOffset
 
+        // ── 5. 构建缓冲区 ──
         var buf: String = ""
+        buf = this.buildCoffHeader(buf)
+        buf = this.buildSectionHeaders(buf)
+        buf = buf + this.padToBytes(buf, textRawOffset)
+        buf = buf + this.textSection
+        if (this.rdataSize > 0) {
+            buf = buf + this.padToBytes(buf, rdataRawOffset)
+            buf = buf + this.rdataSection
+        }
+        buf = this.buildRelocationTable(buf)
+        buf = this.buildSymbolTable(buf)
+        buf = this.buildStringTable(buf)
 
-        // ── 4. 文件头（20 字节）──
+        return buf
+    }
+
+    /// 构建 COFF 文件头（20 字节）。
+    private fun buildCoffHeader(buf: String): String {
         buf = buf + this.writeIntLe(0x8664, 2)        // Machine = IMAGE_FILE_MACHINE_AMD64
-        buf = buf + this.writeIntLe(sectionCount, 2)  // NumberOfSections
+        buf = buf + this.writeIntLe(this.coffSectionCount, 2)  // NumberOfSections
         buf = buf + this.writeIntLe(0, 4)             // TimeDateStamp
-        buf = buf + this.writeIntLe(symTabOffset, 4)  // PointerToSymbolTable
-        buf = buf + this.writeIntLe(symCount, 4)      // NumberOfSymbols
+        buf = buf + this.writeIntLe(this.coffSymTabOffset, 4)  // PointerToSymbolTable
+        buf = buf + this.writeIntLe(this.coffSymCount, 4)      // NumberOfSymbols
         buf = buf + this.writeIntLe(0, 2)             // SizeOfOptionalHeader
         buf = buf + this.writeIntLe(0, 2)             // Characteristics（.obj 为 0）
+        return buf
+    }
 
-        // ── 5. 节头（40 字节/节）──
-        //   注意字段顺序与宽度：… PointerToRelocations(4)
-        //   NumberOfRelocations(2) NumberOfLinenumbers(2) Characteristics(4)
+    /// 构建节头条目（42 字节/节）。
+    private fun buildSectionHeaders(buf: String): String {
         buf = buf + this.padSectionName(".text", 8)
         buf = buf + this.writeIntLe(0, 4)              // VirtualSize（.obj 为 0）
         buf = buf + this.writeIntLe(0, 4)              // VirtualAddress
         buf = buf + this.writeIntLe(this.textSize, 4)  // SizeOfRawData
-        buf = buf + this.writeIntLe(textRawOffset, 4)  // PointerToRawData
-        buf = buf + this.writeIntLe(relocOffset, 4)    // PointerToRelocations
+        buf = buf + this.writeIntLe(this.textOffset, 4)  // PointerToRawData
+        buf = buf + this.writeIntLe(this.coffRelocOffset, 4)    // PointerToRelocations
         buf = buf + this.writeIntLe(0, 4)              // PointerToLinenumbers
-        buf = buf + this.writeIntLe(relocCount, 2)     // NumberOfRelocations（2 字节）
-        buf = buf + this.writeIntLe(0, 2)              // NumberOfLinenumbers（2 字节）
+        buf = buf + this.writeIntLe(this.coffRelocCount, 2)     // NumberOfRelocations
+        buf = buf + this.writeIntLe(0, 2)              // NumberOfLinenumbers
         buf = buf + this.writeIntLe(0x60500020, 4)     // CNT_CODE|MEM_EXECUTE|MEM_READ|ALIGN_16
 
         if (this.rdataSize > 0) {
@@ -445,46 +542,60 @@ class PhotonObjectWriter {
             buf = buf + this.writeIntLe(0, 4)
             buf = buf + this.writeIntLe(0, 4)
             buf = buf + this.writeIntLe(this.rdataSize, 4)
-            buf = buf + this.writeIntLe(rdataRawOffset, 4)
+            buf = buf + this.writeIntLe(this.rdataOffset, 4)
             buf = buf + this.writeIntLe(0, 4)          // 无重定位
             buf = buf + this.writeIntLe(0, 4)
             buf = buf + this.writeIntLe(0, 2)
             buf = buf + this.writeIntLe(0, 2)
             buf = buf + this.writeIntLe(0x40300040, 4) // CNT_INITIALIZED_DATA|MEM_READ|ALIGN_4
         }
+        return buf
+    }
 
-        // ── 6. .text 原始数据 ──
-        buf = buf + this.padToBytes(buf, textRawOffset)
-        buf = buf + this.textSection
-
-        // ── 7. .rdata 原始数据 ──
-        if (this.rdataSize > 0) {
-            buf = buf + this.padToBytes(buf, rdataRawOffset)
-            buf = buf + this.rdataSection
-        }
-
-        // ── 8. 重定位表（10 字节/项：VA(4) + SymbolTableIndex(4) + Type(2)）──
-        buf = buf + this.padToBytes(buf, relocOffset)
+    /// 构建重定位表（10 字节/项：VA(4) + SymbolTableIndex(4) + Type(2)）。
+    private fun buildRelocationTable(buf: String): String {
+        val relocRecs: List<String> = this.composeRelocations()
+        buf = buf + this.padToBytes(buf, this.coffRelocOffset)
         var r: Int = 0
-        while (r < relocCount) {
+        while (r < this.coffRelocCount) {
             val rf: List<String> = this.splitPipe(relocRecs[r])
             buf = buf + this.writeIntLe(this.strToInt(rf[0]), 4)  // 节内偏移
             buf = buf + this.writeIntLe(this.strToInt(rf[1]), 4)  // 符号索引
             buf = buf + this.writeIntLe(this.strToInt(rf[2]), 2)  // 类型（REL32 = 4）
             r = r + 1
         }
+        return buf
+    }
 
-        // ── 9. 符号表（18 字节/项）──
-        buf = buf + this.padToBytes(buf, symTabOffset)
+    /// 构建符号表（18 字节/项）。
+    private fun buildSymbolTable(buf: String): String {
+        val symRecs: List<String> = this.splitDoubleSemi(this.symbols)
+        buf = buf + this.padToBytes(buf, this.coffSymTabOffset)
+
+        // 计算长符号名偏移
+        val strNameOffsets: List<Int> = arrayListOf<Int>()
+        var strTabSize: Int = 4
+        var s: Int = 0
+        while (s < this.coffSymCount) {
+            val nm: String = this.symbolName(symRecs[s])
+            if (nm.length >= 8) {
+                strNameOffsets.add(strTabSize)
+                strTabSize = strTabSize + nm.length + 1
+            } else {
+                strNameOffsets.add(-1)
+            }
+            s = s + 1
+        }
+
         var i: Int = 0
-        while (i < symCount) {
+        while (i < this.coffSymCount) {
             val f: List<String> = this.splitPipe(symRecs[i])
             if (strNameOffsets[i] >= 0) {
                 // 长名：4 字节 0 + 4 字节字符串表偏移
                 buf = buf + this.writeIntLe(0, 4)
                 buf = buf + this.writeIntLe(strNameOffsets[i], 4)
             } else {
-                buf = buf + this.padSectionName(f[0], 8)          // Value
+                buf = buf + this.padSectionName(f[0], 8)          // Name（短名内联）
             }
             buf = buf + this.writeIntLe(this.strToInt(f[1]), 4)   // Value
             buf = buf + this.writeIntLe(this.strToInt(f[2]), 2)   // SectionNumber
@@ -493,11 +604,13 @@ class PhotonObjectWriter {
             buf = buf + this.writeIntLe(0, 1)                     // NumberOfAuxSymbols
             i = i + 1
         }
+        return buf
+    }
 
-        // ── 10. 字符串表（长度前缀 + 长名串）──
-        buf = buf + this.writeIntLe(strTabSize, 4)
-        buf = buf + strTabHex
-
+    /// 构建字符串表（长度前缀 + 长名串）。
+    private fun buildStringTable(buf: String): String {
+        buf = buf + this.writeIntLe(this.coffStrTabSize, 4)
+        buf = buf + this.coffStrTabHex
         return buf
     }
 
@@ -811,13 +924,331 @@ class PhotonObjectWriter {
     /// 本项目不使用）；`Memory.write` / `Allocator` / `FileOps` 属 `extern interface`
     /// builtin，只有在 AOT / 自举运行时才存在。原生落盘见 `PhotonNativeWriter`。
     fun writeObjectHexFile(path: String): Boolean {
-        FileSystem.writeText(path, this.buildCoffFile())
+        FileSystem.writeText(path, this.emit())
         return FileSystem.exists(path)
+    }
+
+    /// 把当前目标文件写成 **二进制**（通过 hex 中转）。
+    ///
+    /// 先用 `writeObjectHexFile` 写 hex 临时文件，再通过 PowerShell 脚本转二进制。
+    /// 注意：PowerShell 脚本需要 `$` 变量，而 Aura 字符串中 `$` 是插值符号，
+    /// 因此此方法在 VM 路径下暂不可用，需由外部构建脚本完成 hex→binary 转换。
+    fun writeObjectBinaryFile(path: String): Boolean {
+        val hexPath: String = path + ".hex"
+        this.writeObjectHexFile(hexPath)
+        // PowerShell 脚本需 $ 变量，Aura 字符串无法直接表示，
+        // 因此仅写 hex 文件，由外部脚本完成 hex→binary 转换。
+        return FileSystem.exists(hexPath)
     }
 
     /// 由目标文件路径推导 hex 文本路径：`build/hello.obj` → `build/hello.obj.hex`。
     fun hexPathFor(objectPath: String): String {
         return objectPath + ".hex"
+    }
+
+    // ── ELF 目标文件生成 ──
+
+    private fun buildElfFile(): String {
+        // ── 1. 规整节内容 ──
+        this.textSection = this.normalizeHex(this.textSection)
+        this.textSize = this.hexByteCount(this.textSection)
+        this.rdataSection = this.stringConstsToHex(this.stringConsts)
+        this.rdataSize = this.hexByteCount(this.rdataSection)
+
+        // ── 2. 计数 ──
+        val symRecs: List<String> = this.splitDoubleSemi(this.symbols)
+        val symCount: Int = symRecs.size
+        val relocRecs: List<String> = this.composeRelocations()
+        val relocCount: Int = relocRecs.size
+
+        // ── 3. 构建符号名字符串表（strtab）──
+        var strTabSize: Int = 1
+        var strTabHex: String = ""
+        val symNameOffsets: List<Int> = arrayListOf<Int>()
+        symNameOffsets.add(0)
+        var s: Int = 0
+        while (s < symCount) {
+            val nm: String = this.symbolName(symRecs[s])
+            symNameOffsets.add(strTabSize)
+            strTabHex = strTabHex + this.asciiToHex(nm, -1) + "00"
+            strTabSize = strTabSize + nm.length + 1
+            s = s + 1
+        }
+
+        // ── 4. 布局偏移 ──
+        val headerSize: Int = 64
+        val sectionHeaderSize: Int = 64
+
+        var numSections: Int = 5
+        if (this.rdataSize > 0) { numSections = numSections + 1 }
+        if (relocCount > 0) { numSections = numSections + 1 }
+
+        val sectionTableEnd: Int = headerSize + sectionHeaderSize * numSections
+
+        val textOff: Int = this.alignUp(sectionTableEnd, 16)
+        val textEnd: Int = textOff + this.textSize
+
+        var rdataOff: Int = textEnd
+        var rdataEnd: Int = textEnd
+        if (this.rdataSize > 0) {
+            rdataOff = this.alignUp(textEnd, 4)
+            rdataEnd = rdataOff + this.rdataSize
+        }
+
+        var relocOff: Int = rdataEnd
+        var relocEnd: Int = rdataEnd
+        if (relocCount > 0) {
+            relocOff = this.alignUp(rdataEnd, 8)
+            relocEnd = relocOff + 24 * relocCount
+        }
+
+        val symTabOff: Int = this.alignUp(relocEnd, 8)
+        val symTabEnd: Int = symTabOff + 24 * (symCount + 1)
+
+        val strTabOff: Int = this.alignUp(symTabEnd, 1)
+        val strTabEnd: Int = strTabOff + strTabSize
+
+        val shStrTabOff: Int = this.alignUp(strTabEnd, 1)
+
+        // ── 5. 构建节名字符串表（shstrtab）──
+        var shStrTabSize: Int = 1
+        var shTextNameOff: Int = shStrTabSize
+        shStrTabSize = shStrTabSize + 5 + 1
+
+        var shRdataNameOff: Int = 0
+        if (this.rdataSize > 0) {
+            shRdataNameOff = shStrTabSize
+            shStrTabSize = shStrTabSize + 7 + 1
+        }
+
+        var shRelNameOff: Int = 0
+        if (relocCount > 0) {
+            shRelNameOff = shStrTabSize
+            shStrTabSize = shStrTabSize + 9 + 1
+        }
+
+        var shSymNameOff: Int = shStrTabSize
+        shStrTabSize = shStrTabSize + 7 + 1
+
+        var shStrNameOff: Int = shStrTabSize
+        shStrTabSize = shStrTabSize + 7 + 1
+
+        var shShStrNameOff: Int = shStrTabSize
+        shStrTabSize = shStrTabSize + 9 + 1
+
+        // ── 6. 节索引 ──
+        var secRdata: Int = -1
+        var secRel: Int = -1
+        var secSym: Int = 2
+        var secStr: Int = 3
+        var secShStr: Int = 4
+
+        if (this.rdataSize > 0) {
+            secRdata = 2
+            secSym = 3
+            secStr = 4
+            secShStr = 5
+        }
+        if (relocCount > 0) {
+            secRel = secSym
+            secSym = secSym + 1
+            secStr = secStr + 1
+            secShStr = secShStr + 1
+        }
+
+        this.textOffset = textOff
+        this.rdataOffset = rdataOff
+
+        // ── 7. 写 ELF Header (64 字节) ──
+        var buf: String = ""
+        buf = buf + "7f" + "45" + "4c" + "46"
+        buf = buf + "02"
+        buf = buf + "01"
+        buf = buf + "01"
+        buf = buf + "00"
+        buf = buf + "0000000000000000"
+        buf = buf + this.writeIntLe(1, 2)
+        buf = buf + this.writeIntLe(62, 2)
+        buf = buf + this.writeIntLe(1, 4)
+        buf = buf + this.writeIntLe(0, 8)
+        buf = buf + this.writeIntLe(0, 8)
+        buf = buf + this.writeIntLe(sectionTableEnd, 8)
+        buf = buf + this.writeIntLe(0, 4)
+        buf = buf + this.writeIntLe(64, 2)
+        buf = buf + this.writeIntLe(0, 2)
+        buf = buf + this.writeIntLe(0, 2)
+        buf = buf + this.writeIntLe(64, 2)
+        buf = buf + this.writeIntLe(numSections, 2)
+        buf = buf + this.writeIntLe(secShStr, 2)
+
+        // ── 8. 写 Section Headers ──
+        buf = buf + this.writeIntLe(0, 4)
+        buf = buf + this.writeIntLe(0, 4)
+        buf = buf + this.writeIntLe(0, 8)
+        buf = buf + this.writeIntLe(0, 8)
+        buf = buf + this.writeIntLe(0, 8)
+        buf = buf + this.writeIntLe(0, 4)
+        buf = buf + this.writeIntLe(0, 4)
+        buf = buf + this.writeIntLe(0, 8)
+        buf = buf + this.writeIntLe(0, 8)
+
+        buf = buf + this.writeIntLe(shTextNameOff, 4)
+        buf = buf + this.writeIntLe(1, 4)
+        buf = buf + this.writeIntLe(6, 8)
+        buf = buf + this.writeIntLe(0, 8)
+        buf = buf + this.writeIntLe(textOff, 8)
+        buf = buf + this.writeIntLe(this.textSize, 8)
+        buf = buf + this.writeIntLe(0, 4)
+        buf = buf + this.writeIntLe(0, 4)
+        buf = buf + this.writeIntLe(16, 8)
+        buf = buf + this.writeIntLe(0, 8)
+
+        if (this.rdataSize > 0) {
+            buf = buf + this.writeIntLe(shRdataNameOff, 4)
+            buf = buf + this.writeIntLe(1, 4)
+            buf = buf + this.writeIntLe(2, 8)
+            buf = buf + this.writeIntLe(0, 8)
+            buf = buf + this.writeIntLe(rdataOff, 8)
+            buf = buf + this.writeIntLe(this.rdataSize, 8)
+            buf = buf + this.writeIntLe(0, 4)
+            buf = buf + this.writeIntLe(0, 4)
+            buf = buf + this.writeIntLe(4, 8)
+            buf = buf + this.writeIntLe(0, 8)
+        }
+
+        if (relocCount > 0) {
+            buf = buf + this.writeIntLe(shRelNameOff, 4)
+            buf = buf + this.writeIntLe(9, 4)
+            buf = buf + this.writeIntLe(0, 8)
+            buf = buf + this.writeIntLe(0, 8)
+            buf = buf + this.writeIntLe(relocOff, 8)
+            buf = buf + this.writeIntLe(24 * relocCount, 8)
+            buf = buf + this.writeIntLe(1, 4)
+            buf = buf + this.writeIntLe(secSym, 4)
+            buf = buf + this.writeIntLe(8, 8)
+            buf = buf + this.writeIntLe(24, 8)
+        }
+
+        buf = buf + this.writeIntLe(shSymNameOff, 4)
+        buf = buf + this.writeIntLe(2, 4)
+        buf = buf + this.writeIntLe(0, 8)
+        buf = buf + this.writeIntLe(0, 8)
+        buf = buf + this.writeIntLe(symTabOff, 8)
+        buf = buf + this.writeIntLe(24 * (symCount + 1), 8)
+        buf = buf + this.writeIntLe(secStr, 4)
+        buf = buf + this.writeIntLe(1, 4)
+        buf = buf + this.writeIntLe(8, 8)
+        buf = buf + this.writeIntLe(24, 8)
+
+        buf = buf + this.writeIntLe(shStrNameOff, 4)
+        buf = buf + this.writeIntLe(3, 4)
+        buf = buf + this.writeIntLe(0, 8)
+        buf = buf + this.writeIntLe(0, 8)
+        buf = buf + this.writeIntLe(strTabOff, 8)
+        buf = buf + this.writeIntLe(strTabSize, 8)
+        buf = buf + this.writeIntLe(0, 4)
+        buf = buf + this.writeIntLe(0, 4)
+        buf = buf + this.writeIntLe(1, 8)
+        buf = buf + this.writeIntLe(0, 8)
+
+        buf = buf + this.writeIntLe(shShStrNameOff, 4)
+        buf = buf + this.writeIntLe(3, 4)
+        buf = buf + this.writeIntLe(0, 8)
+        buf = buf + this.writeIntLe(0, 8)
+        buf = buf + this.writeIntLe(shStrTabOff, 8)
+        buf = buf + this.writeIntLe(shStrTabSize, 8)
+        buf = buf + this.writeIntLe(0, 4)
+        buf = buf + this.writeIntLe(0, 4)
+        buf = buf + this.writeIntLe(1, 8)
+        buf = buf + this.writeIntLe(0, 8)
+
+        // ── 9. 写 .text 节数据 ──
+        buf = buf + this.padToBytes(buf, textOff)
+        buf = buf + this.textSection
+
+        // ── 10. 写 .rodata 节数据 ──
+        if (this.rdataSize > 0) {
+            buf = buf + this.padToBytes(buf, rdataOff)
+            buf = buf + this.rdataSection
+        }
+
+        // ── 11. 写 .rel.text 重定位表 ──
+        if (relocCount > 0) {
+            buf = buf + this.padToBytes(buf, relocOff)
+            var r: Int = 0
+            while (r < relocCount) {
+                val rf: List<String> = this.splitPipe(relocRecs[r])
+                buf = buf + this.writeIntLe(this.strToInt(rf[0]), 8)
+                val symIdx: Int = this.strToInt(rf[1]) + 1
+                val coffType: Int = this.strToInt(rf[2])
+                val elfType: Int = this.elfRelocType(coffType)
+                buf = buf + this.writeIntLe(elfType, 4)
+                buf = buf + this.writeIntLe(symIdx, 4)
+                r = r + 1
+            }
+        }
+
+        // ── 12. 写 .symtab 符号表 ──
+        buf = buf + this.padToBytes(buf, symTabOff)
+        buf = buf + this.writeIntLe(0, 4)
+        buf = buf + this.writeIntLe(0, 1)
+        buf = buf + this.writeIntLe(0, 1)
+        buf = buf + this.writeIntLe(0, 2)
+        buf = buf + this.writeIntLe(0, 8)
+        buf = buf + this.writeIntLe(0, 8)
+
+        var i: Int = 0
+        while (i < symCount) {
+            val f: List<String> = this.splitPipe(symRecs[i])
+            buf = buf + this.writeIntLe(symNameOffsets[i + 1], 4)
+            val coffType2: Int = this.hexToInt(f[3])
+            var elfType2: Int = 1
+            if (coffType2 == 0x0020) { elfType2 = 2 }
+            val storage: Int = this.strToInt(f[4])
+            var binding: Int = 0
+            if (storage == 2) { binding = 1 }
+            buf = buf + this.writeIntLe(elfType2 * 16 + binding, 1)
+            buf = buf + this.writeIntLe(0, 1)
+            val coffSection: Int = this.strToInt(f[2])
+            var elfShndx: Int = 0
+            if (coffSection == 1) { elfShndx = 1 }
+            else if (coffSection == 2 && this.rdataSize > 0) { elfShndx = secRdata }
+            buf = buf + this.writeIntLe(elfShndx, 2)
+            buf = buf + this.writeIntLe(this.strToInt(f[1]), 8)
+            buf = buf + this.writeIntLe(0, 8)
+            i = i + 1
+        }
+
+        // ── 13. 写 .strtab 符号名字符串表 ──
+        buf = buf + this.padToBytes(buf, strTabOff)
+        buf = buf + "00"
+        buf = buf + strTabHex
+
+        // ── 14. 写 .shstrtab 节名字符串表 ──
+        buf = buf + this.padToBytes(buf, shStrTabOff)
+        buf = buf + "00"
+        buf = buf + this.asciiToHex(".text", -1) + "00"
+        if (this.rdataSize > 0) {
+            buf = buf + this.asciiToHex(".rodata", -1) + "00"
+        }
+        if (relocCount > 0) {
+            buf = buf + this.asciiToHex(".rel.text", -1) + "00"
+        }
+        buf = buf + this.asciiToHex(".symtab", -1) + "00"
+        buf = buf + this.asciiToHex(".strtab", -1) + "00"
+        buf = buf + this.asciiToHex(".shstrtab", -1) + "00"
+
+        return buf
+    }
+
+    /// COFF 重定位类型 → ELF 重定位类型。
+    ///
+    /// IMAGE_REL_AMD64_REL32 (4) → R_X86_64_PLT32 (20)
+    /// IMAGE_REL_AMD64_ADDR64 (1) → R_X86_64_64 (1)
+    private fun elfRelocType(coffType: Int): Int {
+        if (coffType == 4) { return 20 }
+        if (coffType == 1) { return 1 }
+        return 0
     }
 }
 
@@ -964,5 +1395,41 @@ object PhotonObjectWriterUtils {
             text,
             "main"
         )
+    }
+
+    /// S2 多函数单 obj 测试/驱动辅助：把首函数用 `emitFromMachineCode`，后续函数用
+    /// `appendFunction` 追加，返回最终 COFF hex。
+    fun buildMultiFunctionObject(
+        firstMachineCodeHex: String,
+        firstRelocEntries: String,
+        stringConsts: String,
+        firstFunctionName: String,
+        restFunctions: List<String>,
+        restMachineCodes: List<String>,
+        restRelocEntries: List<String>
+    ): String {
+        val writer = PhotonObjectWriter()
+        writer.emitFromMachineCode(
+            firstMachineCodeHex,
+            firstRelocEntries,
+            stringConsts,
+            firstFunctionName
+        )
+
+        var i = 1
+        while (i < restFunctions.size) {
+            val relocs = ""
+            if (i - 1 < restRelocEntries.size) {
+                relocs = restRelocEntries[i - 1]
+            }
+            writer.appendFunction(
+                restMachineCodes[i - 1],
+                restFunctions[i],
+                relocs
+            )
+            i = i + 1
+        }
+
+        return writer.emit()
     }
 }

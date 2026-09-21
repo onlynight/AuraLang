@@ -26,6 +26,7 @@ import "../lexer/Span.aura"
 import "SsaMir.aura"
 import "TypeRegistry.aura"
 import "Mir.aura"
+import "Linearizer.aura"
 
 /// HIR → SSA MIR 构建器。
 class SsaBuilder {
@@ -60,6 +61,11 @@ class SsaBuilder {
     /// 循环退出块栈（逗号分隔 BlockID，用于 break/continue 的退出目标查找）。
     private var loopStack: String = ""
 
+    /// Phase A S2: 变量版本号映射（扁平字符串：name|version\n）。
+    ///
+    /// 用于 SSA 变量重命名：每次赋值递增版本号，确保每个版本是独立的 SSA 值。
+    private var varVersion: String = ""
+
     init() {
         this.program = MirSsaProgram()
         this.types = this.program.types
@@ -69,6 +75,7 @@ class SsaBuilder {
         this.memHead = -1
         this.curParams = ""
         this.varMap = ""
+        this.varVersion = ""
         this.loopStack = ""
     }
 
@@ -126,6 +133,7 @@ class SsaBuilder {
         this.curFunc = fid
         this.curParams = ""
         this.varMap = ""
+        this.varVersion = ""
 
         // 创建入口块
         val entryBlock: Int = this.program.addBlock()
@@ -281,6 +289,9 @@ class SsaBuilder {
         this.program.setTerminator(this.curBlock, "CondBr", 0,
             toStr(condVal) + "," + toStr(thenBlock) + "," + toStr(elseBlock), "")
 
+        // 保存 varMap 快照（用于检测 then/else 中定义的变量）
+        val varMapBefore: String = this.varMap
+
         // 构建 then 块
         this.curBlock = thenBlock
         this.buildBlock(src, HirUtils.hirKidsAt(kids, 1))
@@ -290,6 +301,9 @@ class SsaBuilder {
         if (thenBlockObj.term < 0) {
             this.program.setTerminator(this.curBlock, "Br", 0, toStr(mergeBlock), "")
         }
+
+        // 保存 then 块中定义的变量
+        val varMapAfterThen: String = this.varMap
 
         // 构建 else 块
         if (kCount > 2) {
@@ -305,8 +319,144 @@ class SsaBuilder {
             this.program.setTerminator(this.curBlock, "Br", 0, toStr(mergeBlock), "")
         }
 
+        // 保存 else 块中定义的变量
+        val varMapAfterElse: String = this.varMap
+
+        // 在 merge 块插入 Phi 节点（for variables defined in both branches）
+        this.insertPhisAtMerge(mergeBlock, varMapBefore, varMapAfterThen, varMapAfterElse)
+
+        // 恢复 varMap 到 merge 块的状态（合并 then/else 的定义）
+        this.varMap = varMapAfterElse  // else 块的定义优先
+
         // 继续构建 merge 块
         this.curBlock = mergeBlock
+    }
+
+    /// 在 merge 块插入 Phi 节点。
+    ///
+    /// 比较 then/else 分支中定义的变量，为两分支都定义的变量插入 Phi。
+    /// varMap 格式：name|vid\nname|vid\n...
+    private fun insertPhisAtMerge(mergeBlock: Int, before: String,
+                                    afterThen: String, afterElse: String): Unit {
+        // 找出 then 中新增/修改的变量
+        val thenDefs: List<String> = this.findChangedVars(before, afterThen)
+        // 找出 else 中新增/修改的变量
+        val elseDefs: List<String> = this.findChangedVars(before, afterElse)
+
+        // 对 then 中定义的变量，检查是否在 else 中也定义
+        var i: Int = 0
+        while (i < thenDefs.size) {
+            val varName: String = thenDefs.get(i)
+            // 检查 else 是否也定义了这个变量
+            var foundInElse: Boolean = false
+            var j: Int = 0
+            while (j < elseDefs.size) {
+                if (elseDefs[j] == varName) {
+                    foundInElse = true
+                    break
+                }
+                j = j + 1
+            }
+            if (foundInElse) {
+                // 获取 then 和 else 中的 ValueID
+                val thenVid: Int = this.lookupVar(before, varName, afterThen)
+                val elseVid: Int = this.lookupVar(before, varName, afterElse)
+                if (thenVid >= 0 && elseVid >= 0) {
+                    // 插入 Phi 节点（返回 ValueID，但不更新 varMap）
+                    val typeId: Int = 0  // 默认 Int 类型
+                    val incoming: String = toStr(thenVid) + "," + toStr(elseVid)
+                    this.makePhi(mergeBlock, typeId, incoming, "")
+                }
+            }
+            i = i + 1
+        }
+    }
+
+    /// 找出两个 varMap 快照之间新增/修改的变量。
+    /// 返回变量名列表。
+    private fun findChangedVars(before: String, after: String): List<String> {
+        val result: List<String> = arrayListOf<String>()
+        if (before == after) {
+            return result
+        }
+        // 简单实现：比较字符串差异，找出新增的变量名
+        // 格式：name|vid\nname|vid\n...
+        val beforeLines: List<String> = this.splitStr(before, "\n")
+        val afterLines: List<String> = this.splitStr(after, "\n")
+
+        // 找出 after 中有但 before 中没有的变量
+        var i: Int = 0
+        while (i < afterLines.size) {
+            val afterLine: String = afterLines.get(i)
+            if (afterLine == "") { i = i + 1; continue }
+            val parts: List<String> = this.splitStr(afterLine, "|")
+            if (parts.size < 2) { i = i + 1; continue }
+            val name: String = parts[0]
+            // 检查 before 中是否有这个变量
+            var found: Boolean = false
+            var j: Int = 0
+            while (j < beforeLines.size) {
+                if (beforeLines[j] != "") {
+                    val bParts: List<String> = this.splitStr(beforeLines[j], "|")
+                    if (bParts.size >= 1 && bParts[0] == name) {
+                        found = true
+                        break
+                    }
+                }
+                j = j + 1
+            }
+            if (!found) {
+                result.add(name)
+            }
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 在 varMap 中查找变量的 ValueID。
+    private fun lookupVar(before: String, name: String, after: String): Int {
+        // 先查 after（新定义的值）
+        val afterLines: List<String> = this.splitStr(after, "\n")
+        var i: Int = 0
+        while (i < afterLines.size) {
+            val line: String = afterLines.get(i)
+            if (line == "") { i = i + 1; continue }
+            val parts: List<String> = this.splitStr(line, "|")
+            if (parts.size >= 2 && parts[0] == name) {
+                return this.strToInt(parts[1])
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// 在指定块插入 Phi 节点（for loop back-edge）。
+    ///
+    /// 比较块前状态和块后状态，为两状态都定义的变量插入 Phi。
+    /// 用于 while 循环的回边 Phi 插入。
+    private fun insertPhisAtBlock(blockId: Int, before: String,
+                                    after: String, exitState: String): Unit {
+        // 找出 after 中新增/修改的变量（相对于 before）
+        val afterDefs: List<String> = this.findChangedVars(before, after)
+
+        // 对 after 中定义的变量，检查是否在 before 中也定义
+        var i: Int = 0
+        while (i < afterDefs.size) {
+            val varName: String = afterDefs.get(i)
+            // 检查 before 是否也有这个变量（即循环前的值）
+            val beforeVid: Int = this.lookupVar("", varName, before)
+            if (beforeVid >= 0) {
+                // 获取 after 中的 ValueID
+                val afterVid: Int = this.lookupVar("", varName, after)
+                if (afterVid >= 0) {
+                    // 插入 Phi 节点
+                    val typeId: Int = 0  // 默认 Int 类型
+                    val incoming: String = toStr(beforeVid) + "," + toStr(afterVid)
+                    this.makePhi(blockId, typeId, incoming, "")
+                }
+            }
+            i = i + 1
+        }
     }
 
     /// 构建 while 语句。
@@ -323,6 +473,9 @@ class SsaBuilder {
         if (kCount < 2) {
             return
         }
+
+        // 保存 varMap 快照（循环前的状态）
+        val varMapBefore: String = this.varMap
 
         // 创建条件块（当前块）、循环体块、结束块
         val condBlock: Int = this.curBlock
@@ -349,8 +502,18 @@ class SsaBuilder {
             this.program.setTerminator(this.curBlock, "Br", 0, toStr(condBlock), "")
         }
 
+        // 保存循环体中定义的变量
+        val varMapAfterBody: String = this.varMap
+
+        // 在 cond 块插入 Phi 节点（for variables defined in body and before loop）
+        // 注意：Phi 节点插入到 cond 块，用于循环回边
+        this.insertPhisAtBlock(condBlock, varMapBefore, varMapAfterBody, varMapBefore)
+
         // 将结束块弹出循环栈
         this.loopStackPop()
+
+        // 恢复 varMap 到循环后的状态
+        this.varMap = varMapAfterBody
 
         // 继续构建结束块
         this.curBlock = endBlock
@@ -380,6 +543,10 @@ class SsaBuilder {
     }
 
     /// 构建赋值语句。
+    /// 构建赋值语句（Phase A S2: 内存链 Store）。
+    ///
+    /// 赋值可能是寄存器赋值或内存 Store。
+    /// 当 memHead >= 0 时，创建 Store 指令并更新内存链。
     fun buildAssign(src: Hir, id: Int) {
         val kids: String = src.kidsOf(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
@@ -388,6 +555,21 @@ class SsaBuilder {
         }
         val varName: String = src.textOf(id)
         val val: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, 1))
+
+        // Phase A S2: 内存链 — 赋值是内存写入操作
+        if (this.memHead >= 0) {
+            val varTy: String = src.tyOf(id)
+            val varTypeId: Int = this.types.fromTypeName(varTy)
+            var args: String = toStr(val)
+            args = args + "," + toStr(this.memHead)
+            this.program.addValue("Store", varTypeId, args, varName, this.curBlock)
+
+            // 更新内存链 — Store 后创建新的 mem token
+            val memTypeId: Int = this.types.intType(64)
+            this.memHead = this.program.addValue("MemToken", memTypeId, toStr(val), "mem_after_store", this.curBlock)
+        }
+
+        // 存储到变量映射（无论是否内存链，都更新 varMap）
         this.varMapAdd(varName, val)
     }
 
@@ -414,6 +596,9 @@ class SsaBuilder {
         }
         if (kind == "HirMember") {
             return this.buildMember(src, id)
+        }
+        if (kind == "HirIndex") {
+            return this.buildIndex(src, id)
         }
         if (kind == "HirBlock") {
             // 块表达式：构建块，返回最后一个表达式的值
@@ -540,8 +725,27 @@ class SsaBuilder {
             i = i + 1
         }
 
+        // Phase A: 内存链 — 将当前 memHead 作为 Call 的附加参数
+        // 这样 Call 的内存依赖被显式建模
+        if (this.memHead >= 0) {
+            if (args == "") {
+                args = toStr(this.memHead)
+            } else {
+                args = args + "," + toStr(this.memHead)
+            }
+        }
+
         val typeId: Int = this.types.fromTypeName(src.tyOf(id))
-        return this.program.addValue("Call", typeId, args, funcName, this.curBlock)
+        val callVal: Int = this.program.addValue("Call", typeId, args, funcName, this.curBlock)
+
+        // Phase A: 更新内存链 — Call 后创建新的 mem token
+        // 新 token 依赖 Call 的结果，表示调用后的内存状态
+        if (this.memHead >= 0) {
+            val memTypeId: Int = this.types.intType(64)
+            this.memHead = this.program.addValue("MemToken", memTypeId, toStr(callVal), "mem_after_call", this.curBlock)
+        }
+
+        return callVal
     }
 
     /// 构建成员访问。
@@ -554,10 +758,55 @@ class SsaBuilder {
         }
 
         val objVal: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, 0))
-        val args: String = toStr(objVal)
-        val typeId: Int = this.types.fromTypeName(src.tyOf(id))
+        var args: String = toStr(objVal)
 
-        return this.program.addValue("GetField", typeId, args, fieldName, this.curBlock)
+        // Phase A: 内存链 — GetField 可能读取内存，依赖 memHead
+        if (this.memHead >= 0) {
+            args = args + "," + toStr(this.memHead)
+        }
+
+        val typeId: Int = this.types.fromTypeName(src.tyOf(id))
+        val fieldVal: Int = this.program.addValue("GetField", typeId, args, fieldName, this.curBlock)
+
+        // Phase A: 更新内存链 — GetField 后创建新的 mem token
+        if (this.memHead >= 0) {
+            val memTypeId: Int = this.types.intType(64)
+            this.memHead = this.program.addValue("MemToken", memTypeId, toStr(fieldVal), "mem_after_get", this.curBlock)
+        }
+
+        return fieldVal
+    }
+
+    /// 构建数组/集合元素访问（Phase A S2: 内存链 Load）。
+    ///
+    /// HirIndex 表示 a[i] 形式的元素访问，属于内存读取操作。
+    /// 依赖 memHead 建立内存顺序，访问后更新内存链。
+    fun buildIndex(src: Hir, id: Int): Int {
+        val kids: String = src.kidsOf(id)
+        val kCount: Int = HirUtils.hirKidsCount(kids)
+        if (kCount < 2) {
+            return -1
+        }
+
+        val baseVal: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, 0))
+        val idxVal: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, 1))
+        var args: String = toStr(baseVal) + "," + toStr(idxVal)
+
+        // Phase A S2: 内存链 — Load 依赖 memHead
+        if (this.memHead >= 0) {
+            args = args + "," + toStr(this.memHead)
+        }
+
+        val typeId: Int = this.types.fromTypeName(src.tyOf(id))
+        val loadVal: Int = this.program.addValue("Load", typeId, args, "", this.curBlock)
+
+        // Phase A S2: 更新内存链 — Load 后创建新的 mem token
+        if (this.memHead >= 0) {
+            val memTypeId: Int = this.types.intType(64)
+            this.memHead = this.program.addValue("MemToken", memTypeId, toStr(loadVal), "mem_after_load", this.curBlock)
+        }
+
+        return loadVal
     }
 
     // ── Phi 节点 ──
@@ -605,6 +854,39 @@ class SsaBuilder {
     /// 使用 `name|vid\n` 拼接格式，与 MirLower.aura 一致。
     private fun varMapAdd(name: String, vid: Int) {
         this.varMap = this.varMap + name + "|" + toStr(vid) + "\n"
+        // Phase A S2: 变量重命名 — 每次赋值递增版本号
+        this.bumpVarVersion(name)
+    }
+
+    /// Phase A S2: 递增变量版本号（SSA 变量重命名）。
+    ///
+    /// 每次赋值创建新的 SSA 版本，确保每个版本是独立的 SSA 值。
+    private fun bumpVarVersion(name: String): Unit {
+        val currentVersion: Int = this.getVarVersion(name)
+        val newVersion: Int = currentVersion + 1
+        this.setVarVersion(name, newVersion)
+    }
+
+    /// Phase A S2: 获取变量版本号。
+    private fun getVarVersion(name: String): Int {
+        val lines: List<String> = MirUtils.mirSplit(this.varVersion, "\n")
+        var i: Int = 0
+        while (i < lines.size) {
+            val line: String = lines.get(i)
+            if (line != "" && line.contains("|")) {
+                val parts: List<String> = MirUtils.mirSplit(line, "|")
+                if (parts.size >= 2 && parts[0] == name) {
+                    return strToInt(parts[1])
+                }
+            }
+            i = i + 1
+        }
+        return 0
+    }
+
+    /// Phase A S2: 设置变量版本号。
+    private fun setVarVersion(name: String, version: Int): Unit {
+        this.varVersion = this.varVersion + name + "|" + toStr(version) + "\n"
     }
 
     /// 从变量映射表查找变量值，返回 SSA ValueID。
@@ -614,7 +896,7 @@ class SsaBuilder {
         val lines: List<String> = MirUtils.mirSplit(this.varMap, "\n")
         var i: Int = 0
         while (i < lines.size) {
-            val line: String = lines[i]
+            val line: String = lines.get(i)
             if (line != "" && line.contains("|")) {
                 val parts: List<String> = MirUtils.mirSplit(line, "|")
                 if (parts.size >= 2 && parts[0] == name) {
@@ -651,6 +933,104 @@ class SsaBuilder {
         }
     }
 
+    // ── Phase A S2: 支配分析（Dominator Tree）──
+
+    /// 计算支配树（Phase A S2）。
+    ///
+    /// 使用迭代算法计算每个基本块的立即支配者（idom）。
+    /// 算法：从 entry 开始，迭代更新每个块的最早已定义支配者。
+    ///
+    /// 返回扁平字符串 "blockId|idomBlockId\n" 格式的支配树。
+    fun computeDominatorTree(): String {
+        val funcCount: Int = this.program.functionCount
+        var result: String = ""
+
+        var fi: Int = 0
+        while (fi < funcCount) {
+            val func: MirFunction = this.program.functionOf(fi)
+            val entryBlock: Int = func.entryBlock
+            val blocks: List<String> = this.splitStr(func.blocks, ",")
+
+            // 初始化：每个块的 idom = -1（未知），entry 的 idom = entry 自身
+            val idom: List<String> = arrayListOf<String>()
+            var bi: Int = 0
+            while (bi < blocks.size) {
+                val bid: Int = this.strToInt(blocks[bi])
+                if (bid == entryBlock) {
+                    idom.add(toStr(entryBlock))
+                } else {
+                    idom.add(toStr(-1))
+                }
+                bi = bi + 1
+            }
+
+            // 迭代直到收敛
+            var changed: Boolean = true
+            var iterations: Int = 0
+            while (changed && iterations < 100) {
+                changed = false
+                iterations = iterations + 1
+                bi = 0
+                while (bi < blocks.size) {
+                    val bid: Int = this.strToInt(blocks[bi])
+                    if (bid == entryBlock) { bi = bi + 1; continue }
+
+                    val block: MirBlock = this.program.blockOf(bid)
+                    val preds: List<String> = this.splitStr(block.preds, ",")
+
+                    // 找到第一个已定义 idom 的前驱块
+                    var newIdom: Int = -1
+                    var pi: Int = 0
+                    while (pi < preds.size) {
+                        val predId: Int = this.strToInt(preds[pi])
+                        if (predId >= 0) {
+                            // 找到 predId 在 idom 列表中的位置
+                            var ri: Int = 0
+                            while (ri < blocks.size) {
+                                if (this.strToInt(blocks[ri]) == predId) {
+                                    if (this.strToInt(idom[ri]) >= 0) {
+                                        newIdom = this.strToInt(idom[ri])
+                                        break
+                                    }
+                                    break
+                                }
+                                ri = ri + 1
+                            }
+                            if (newIdom >= 0) { break }
+                        }
+                        pi = pi + 1
+                    }
+
+                    // 处理多个前驱的情况：取交集（简化为最早定义者）
+                    if (newIdom >= 0) {
+                        val curIdom: Int = this.strToInt(idom[bi])
+                        if (curIdom != newIdom) {
+                            idom[bi] = toStr(newIdom)
+                            changed = true
+                        }
+                    }
+                    bi = bi + 1
+                }
+            }
+
+            // 输出支配树
+            bi = 0
+            while (bi < blocks.size) {
+                val bid: Int = this.strToInt(blocks[bi])
+                val idomVal: String = idom[bi]
+                result = result + toStr(bid) + "|" + idomVal + "\n"
+                bi = bi + 1
+            }
+            fi = fi + 1
+        }
+        return result
+    }
+
+    /// 获取支配树的扁平字符串（块ID → 立即支配者块ID）。
+    fun getDominatorTree(): String {
+        return this.computeDominatorTree()
+    }
+
     // ── 工具方法 ──
 
     /// 字符串转整数。
@@ -661,6 +1041,24 @@ class SsaBuilder {
     /// 整数转字符串。
     private fun toStr(n: Int): String {
         return SsaMirUtils.toStr(n)
+    }
+
+    /// 按单字符分隔符分割字符串（VM 不支持 String.split）。
+    private fun splitStr(text: String, sep: String): List<String> {
+        val out: List<String> = arrayListOf<String>()
+        if (text == "") { return out }
+        val len: Int = text.length
+        var start: Int = 0
+        var i: Int = 0
+        while (i < len) {
+            if (text.charCodeAt(i) == sep.charCodeAt(0)) {
+                out.add(text.substring(start, i))
+                start = i + 1
+            }
+            i = i + 1
+        }
+        out.add(text.substring(start, len))
+        return out
     }
 }
 
@@ -674,5 +1072,23 @@ object SsaBuilderUtils {
     fun build(hir: Hir): MirSsaProgram {
         val builder: SsaBuilder = SsaBuilder()
         return builder.build(hir)
+    }
+
+    /// Phase A S2: 执行 HIR → SSA → TAC 降级（连接 Linearizer 到生产路径）。
+    ///
+    /// 完整 SSA 路径：
+    ///   1. SsaBuilder.build(hir) — HIR → SSA MIR
+    ///   2. Linearizer.linearize(ssa) — SSA MIR → TAC MIR
+    ///
+    /// 返回 TAC MIR，可直接传递给现有 Codegen.aura。
+    /// 当 Linearizer 不可用时，回退到 MirLower（TAC 直出）。
+    fun buildToTAC(hir: Hir): Mir {
+        // Step 1: HIR → SSA MIR
+        val builder: SsaBuilder = SsaBuilder()
+        val ssa: MirSsaProgram = builder.build(hir)
+
+        // Step 2: SSA → TAC MIR（通过 Linearizer）
+        val lin: Linearizer = Linearizer()
+        return lin.linearize(ssa)
     }
 }

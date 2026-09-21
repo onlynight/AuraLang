@@ -1,0 +1,50 @@
+// tests/photon/S3/04_binary_write_debug.aura
+// Debug: test different PowerShell command formats
+import aura.lang.std.Process
+import aura.lang.std.FileSystem
+
+fun main() {
+    println("=== Debug binary writing ===")
+    
+    // Test 1: simple echo
+    println("[1] echo test")
+    val rc1 = Process.run("echo hello123")
+    println("  rc=" + rc1)
+    
+    // Test 2: PowerShell with simple command
+    println("[2] PS simple")
+    val rc2 = Process.run("powershell -Command Write-Output hello_from_ps")
+    println("  rc=" + rc2)
+    
+    // Test 3: PowerShell with quoted command
+    println("[3] PS quoted")
+    val rc3 = Process.run("powershell -Command \"Write-Output 'hello_quoted'\"")
+    println("  rc=" + rc3)
+    
+    // Test 4: PowerShell with script file
+    println("[4] PS script file")
+    val scriptContent = "Write-Output 'hello_from_script'\n"
+    FileSystem.writeText("build/photon/test_script.ps1", scriptContent)
+    val rc4 = Process.run("powershell -ExecutionPolicy Bypass -File build/photon/test_script.ps1")
+    println("  rc=" + rc4)
+    
+    // Test 5: hex to binary conversion
+    println("[5] hex to binary")
+    FileSystem.writeText("build/photon/test.hex", "48656c6c6f")
+    val rc5 = Process.run("powershell -ExecutionPolicy Bypass -Command [IO.File]::WriteAllBytes('build/photon/test.bin', [Convert]::FromHexString([IO.File]::ReadAllText('build/photon/test.hex'))); Remove-Item 'build/photon/test.hex' -Force")
+    println("  rc=" + rc5)
+    if (FileSystem.exists("build/photon/test.bin")) {
+        println("  binary file created!")
+    } else {
+        println("  binary file NOT created")
+    }
+    
+    // Test 6: PowerShell with -EncodedCommand
+    println("[6] PS encoded")
+    val script = "Write-Output 'hello_encoded'"
+    // base64 encode (simplified - just for testing)
+    val rc6 = Process.run("powershell -EncodedCommand U3RvcA==")
+    println("  rc=" + rc6)
+    
+    println("=== Done ===")
+}

@@ -255,7 +255,7 @@ object MainUtils {
 
     /// 源码 → AOT 链接摘要（IR 文本 + llc/clang 命令 + C 源码）。
     fun compileAotSource(source: String): AotLinkResult {
-        return compileAot(MainUtils.sourceToHir(source))
+        return Aot.compileAot(MainUtils.sourceToHir(source))
     }
 
     /// S1: 源码 → Photon 管线摘要。
@@ -272,7 +272,7 @@ object MainUtils {
     /// 源码 → 原生可执行文件。
     fun aotBuildExeSource(source: String, moduleName: String, outDir: String,
                           llvmHome: String): AotExeResult {
-        return aotBuildExeFromHir(MainUtils.sourceToHir(source), moduleName, outDir, llvmHome)
+        return Aot.aotBuildExeFromHir(MainUtils.sourceToHir(source), moduleName, outDir, llvmHome)
     }
 
     /// 源**文件**（含其递归 `import` 依赖）→ 原生可执行文件。
@@ -293,26 +293,26 @@ object MainUtils {
     fun aotBuildExeFileTraced(inputPath: String, moduleName: String, outDir: String,
                               llvmHome: String, trace: Boolean): AotExeResult {
         if (trace) {
-            aotMemMark("start")
+            AotUtil.aotMemMark("start")
         }
         val linker = AotModuleLinker()
         val hir: Hir = linker.link(inputPath)
         if (trace) {
-            aotMemMark("link done modules=" + toStr(linker.loadedCount()) +
+            AotUtil.aotMemMark("link done modules=" + toStr(linker.loadedCount()) +
                 " nodes=" + toStr(hir.count))
         }
         // 从输入路径推导 runtime/*.ll 的基础目录
         val basePath: String = aotBaseDirFromInput(inputPath)
-        val r = aotBuildExeFromHirEx(hir, moduleName, outDir, llvmHome, basePath)
+        val r = Aot.aotBuildExeFromHirEx(hir, moduleName, outDir, llvmHome, basePath)
         if (trace) {
-            aotMemMark("emit + toolchain done")
+            AotUtil.aotMemMark("emit + toolchain done")
         }
         return r
     }
 
     /// S1.8: Photon 后端编译文件为可执行文件。
     fun photonBuildExeFile(inputPath: String, moduleName: String, outDir: String,
-                          trace: Boolean): Unit {
+                          trace: Boolean, outputType: String): Unit {
         val linker = AotModuleLinker()
         val hir: Hir = linker.link(inputPath)
         if (trace) {
@@ -321,6 +321,7 @@ object MainUtils {
         }
 
         val pipeline = PhotonPipelineUtils.emptyPipeline()
+        pipeline.setOutputType(outputType)
         val result = pipeline.compileHir(hir, outDir, moduleName)
 
         if (result.success) {
@@ -362,7 +363,7 @@ object MainUtils {
 
         val out: String = jc.execute(0, args, r.locals)
         r.result = out
-        if (jitSlice(out, 0, 5) == "deopt") {
+        if (JitUtil.jitSlice(out, 0, 5) == "deopt") {
             r.deopt = true
             r.reason = out
         }
@@ -402,9 +403,9 @@ object MainUtils {
                 " irLines=" + toStr(r.irLines) + " hasMain=" + toStr(r.hasMain) +
                 "\n--- llvm ir ---\n" + r.llvmIr
         } else if (backend == "jit") {
-            val r = MainUtils.jitCompileFunction(source, "square", "5")
-            return "jit func=" + r.funcName + " compiled=" + toStr(r.compiled) +
-                " deopt=" + toStr(r.deopt) + " result=" + r.result
+            println("ERROR: JIT backend requires Rust toolchain (AuraLangWithRust/). " +
+                    "Use -b vm, -b aot, or -b photon instead.")
+            return ""
         } else if (backend == "photon") {
             return MainUtils.photonCompileSource(source)
         }
@@ -421,7 +422,7 @@ object MainUtils {
         while (i >= 0) {
             val cc: Int = p.charCodeAt(i)
             if (cc == 47 || cc == 92) {
-                return jitSlice(p, 0, i)
+                return JitUtil.jitSlice(p, 0, i)
             }
             i = i - 1
         }
@@ -439,7 +440,7 @@ object MainUtils {
             }
             i = i + 1
         }
-        var name: String = jitSlice(p, start, p.length - start)
+        var name: String = JitUtil.jitSlice(p, start, p.length - start)
         var dot: Int = -1
         var j: Int = 0
         while (j < name.length) {
@@ -449,7 +450,7 @@ object MainUtils {
             j = j + 1
         }
         if (dot > 0) {
-            name = jitSlice(name, 0, dot)
+            name = JitUtil.jitSlice(name, 0, dot)
         }
         return name
     }
@@ -473,9 +474,16 @@ object MainUtils {
         var outputPath: String = ""
         var backend: String = "vm"
         var trace: Boolean = false
-        // Same base offset as main(): skip "exe" and "run" when invoked via `aura run`.
+        var outputType: String = "exe"
+        // Same base offset as main(): skip "exe" and subcommand when invoked via CLI.
         var base: Int = 0
         if (argc >= 3 && Process.arg(1) == "run") {
+            base = 2
+        } else if (argc >= 3 && Process.arg(1) == "build") {
+            base = 2
+        } else if (argc >= 3 && Process.arg(1) == "check") {
+            base = 2
+        } else if (argc >= 3 && Process.arg(1) == "disasm") {
             base = 2
         }
         var i: Int = base + 1
@@ -491,6 +499,14 @@ object MainUtils {
                     backend = Process.arg(i + 1)
                     i = i + 1
                 }
+            } else if (a == "--dll") {
+                outputType = "dll"
+            } else if (a == "--shared" || a == "--so") {
+                outputType = "so"
+            } else if (a == "--dylib") {
+                outputType = "dylib"
+            } else if (a == "--lib" || a == "--static") {
+                outputType = "lib"
             } else if (a == "--mem-trace") {
                 trace = true
             } else if (a == "-h" || a == "--help") {
@@ -520,13 +536,13 @@ object MainUtils {
         // S1.8: 按后端选择编译路径
         if (backend == "photon") {
             println(MainUtils.banner() + " — Photon AOT compilation " + inputPath)
-            photonBuildExeFile(inputPath, stem, outDir, trace)
+            photonBuildExeFile(inputPath, stem, outDir, trace, outputType)
             return
         }
 
         println(MainUtils.banner() + " — AOT compilation " + inputPath)
         val r: AotExeResult = MainUtils.aotBuildExeFileTraced(inputPath, stem, outDir,
-            llvmHomeDefault(), trace)
+            Aot.llvmHomeDefault(), trace)
         if (r.ok) {
             println("✓ Executable generated: " + r.exePath)
         } else {
@@ -620,12 +636,12 @@ object MainUtils {
         val exeSrc = "fun main(): Int {\n" +
             "    return 6 * 7\n" +
             "}\n"
-        val exeR = MainUtils.aotBuildExeSource(exeSrc, "aura_demo", "build/aot-demo", llvmHomeDefault())
+        val exeR = MainUtils.aotBuildExeSource(exeSrc, "aura_demo", "build/aot-demo", Aot.llvmHomeDefault())
         println("aot ok=" + toStr(exeR.ok) + " llc=" + toStr(exeR.llcExit) +
             " clang=" + toStr(exeR.clangExit))
         println("exe=" + exeR.exePath)
         if (exeR.ok) {
-            val code = runBuiltExe(exeR.exePath)
+            val code = Aot.runBuiltExe(exeR.exePath)
             println("exe exit code = " + toStr(code))
         }
 

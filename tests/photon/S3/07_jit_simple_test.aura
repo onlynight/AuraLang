@@ -1,0 +1,54 @@
+// tests/photon/S3/07_jit_simple_test.aura
+// Simple JIT test - no compileMachineCode, just dispatch table and stubs
+package tests.photon.S3
+
+import aura.lang.compiler.backend.photon.JitBackend
+import aura.lang.compiler.test.TestRunner
+import aura.lang.std.String
+
+fun main() {
+    val t = TestRunner()
+    t.begin("JitBackend simple test")
+
+    val backend = JitBackend()
+    backend.vmMode = true
+
+    // Test 1: allocateExecMemory returns nonzero
+    val addr = backend.allocateExecMemory(4096)
+    t.assertEq(addr > 0, true, "allocateExecMemory returns nonzero address")
+
+    // Test 2: registerFunction
+    val slot = backend.registerFunction("test", addr)
+    t.assertEq(slot == 0, true, "dispatch slot starts at 0")
+    t.assertEq(backend.getDispatchEntry(0) == addr, true, "dispatch entry is stored")
+
+    // Test 3: buildDispatchStub
+    val stub = backend.buildDispatchStub(0)
+    t.assertEq(stub != "", true, "dispatch stub is generated")
+    t.assertEq(stub.length == 18, true, "dispatch stub is 9 bytes")
+
+    // Test 4: buildCallStub
+    val callStub = backend.buildCallStub(addr)
+    t.assertEq(callStub != "", true, "call stub is generated")
+    t.assertEq(callStub.length == 24, true, "call stub is 12 bytes")
+
+    // Test 5: buildReturnStub
+    val retStub = backend.buildReturnStub()
+    t.assertEq(retStub != "", true, "return stub is generated")
+    t.assertEq(retStub.length == 10, true, "return stub is 5 bytes")
+
+    // Test 6: buildDeoptTrampoline
+    val deopt = backend.buildDeoptTrampoline(0)
+    t.assertEq(deopt != "", true, "deopt trampoline is generated")
+
+    // Test 7: deoptimize
+    backend.deoptimize("test")
+    t.assertEq(backend.getDispatchEntry(0) == 0, true, "deoptimized function cleared")
+
+    // Test 8: layout info
+    val layout = backend.getJitCodeLayout()
+    t.assertEq(layout != "", true, "layout info is generated")
+
+    println("")
+    println(t.report())
+}

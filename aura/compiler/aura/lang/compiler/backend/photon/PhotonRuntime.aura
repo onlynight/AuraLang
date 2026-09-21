@@ -225,3 +225,42 @@ object PhotonRuntime {
         return writer.writeObjectHexFile(path)
     }
 }
+
+// ─────────────────────────────────────────────────────────────
+// PhotonRuntimeUtils — 顶层辅助函数（S1.6）
+// ─────────────────────────────────────────────────────────────
+
+object PhotonRuntimeUtils {
+
+    /// 生成 runtime 目标文件并落盘为 hex 文本（供 compileHir 链接使用）。
+    fun writeRuntimeObjectHexFile(path: String): Boolean {
+        val enc = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitPrintln(enc)
+        val writer = PhotonObjectWriter()
+        writer.emitFromMachineCode(
+            enc.toHex(),
+            PhotonObjectWriterUtils.joinRelocRecords(enc.getRelocations()),
+            "",
+            "println"
+        )
+        return writer.writeObjectHexFile(path)
+    }
+
+    /// 由真实代码生成的机器码生成 main 目标文件（S1.6）。
+    ///
+    /// 将 X86Emitter 产出的 hex + reloc 记录写入 COFF 目标文件。
+    /// 与 emitPrintMain 的区别：这里的机器码来自真实管线，不是手写。
+    fun buildMainObjectFromEncoded(
+        machineCodeHex: String,
+        relocRecords: String,
+        moduleName: String
+    ): String {
+        val writer = PhotonObjectWriter()
+        return writer.emitFromMachineCode(
+            machineCodeHex,
+            relocRecords,
+            "",
+            moduleName
+        )
+    }
+}

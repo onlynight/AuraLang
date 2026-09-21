@@ -36,6 +36,7 @@ import "PeepholeOptimizer.aura"
 import "PhotonObjectWriter.aura"
 import "PhotonSystemLinker.aura"
 import "PhotonLldConfig.aura"
+import "PhotonRuntime.aura"
 import "X86Emitter.aura"
 import "x86_64/X86Encoder.aura"
 
@@ -73,11 +74,20 @@ class PhotonPipeline {
     /// 模块名。
     private var moduleName: String = "program"
 
+    /// 输出类型（"exe" / "dll" / "so" / "dylib" / "lib"）。
+    private var outputType: String = "exe"
+
     init() {
         this.targetTriple = "x86_64-pc-windows-msvc"
         this.optLevel = 1
         this.outDir = "."
         this.moduleName = "program"
+        this.outputType = "exe"
+    }
+
+    /// 设置输出类型（"exe" / "dll" / "so" / "dylib" / "lib"）。
+    fun setOutputType(t: String): Unit {
+        this.outputType = t
     }
 
     // ── 主入口（保留旧签名兼容）──
@@ -139,9 +149,10 @@ class PhotonPipeline {
         allocator.allocate(dag)
         println("  spillSlots=" + allocator.getSpillSlots())
 
-        // 窥孔优化（S1 阶段基本空转，但保留管线位置）。
-        // val peephole = PeepholeOptimizerUtils.emptyOptimizer()
-        // peephole.optimize(dag)
+        // 窥孔优化
+        val peephole = PeepholeOptimizerUtils.emptyOptimizer()
+        peephole.optimize(dag)
+        println("  peephole passes=" + peephole.getPassCount())
 
         // ── Phase E: 指令编码 → 目标文件 → 链接 ──
         println("[Phase E] Instruction Encoding → Object → Link")
@@ -149,6 +160,7 @@ class PhotonPipeline {
         // Step 4: 指令编码
         println("  Step 4: X86Emitter — 指令编码")
         val emitter = X86EmitterUtils.emptyEmitter()
+        emitter.setAllocator(allocator)
         emitter.emitFunction(dag, moduleName)
         val machineCodeHex: String = emitter.getOutputHex()
         val relocRecords: String = emitter.getRelocRecords()
@@ -174,17 +186,63 @@ class PhotonPipeline {
         val objPath = this.outDir + "/" + this.moduleName + ".obj"
         result.objectFilePath = objPath
 
-        // 写入 hex 文件（VM 路径）
-        writer.writeObjectHexFile(objPath + ".hex")
+        // 写入二进制目标文件（VM 路径：hex → PowerShell 转二进制）
+        writer.writeObjectBinaryFile(objPath)
 
-        // Step 6: 系统链接
+        // Step 6: 系统链接（S1.6：链接 main 对象；共享库不链接 runtime 入口对象）
         println("  Step 6: PhotonSystemLinker — 系统链接")
+
+        // 生成 runtime 目标文件（定义 println，供 main 引用）；Unix 共享库不需要 runtime 入口对象
+        var runtimeObjPath: String = ""
+        if (this.outputType != "so" && this.outputType != "dylib") {
+            runtimeObjPath = this.outDir + "/aura_runtime.obj"
+            val runtimeResult: Boolean = PhotonRuntimeUtils.writeRuntimeObjectHexFile(runtimeObjPath)
+            println("    runtime 对象: " + runtimeObjPath +
+                    (if (runtimeResult) " ✓" else " ⚠ 写入失败"))
+        } else {
+            println("    runtime 对象: 跳过（Unix 共享库输出不链接 runtime）")
+        }
+
+        // 设置链接器：main 对象 + 可选 runtime 对象
         val linker = PhotonSystemLinkerUtils.defaultLinker()
-        linker.setOutputType("exe")
+        linker.setOutputType(this.outputType)
+        if (runtimeObjPath == "") {
+            linker.objectFiles = objPath
+        } else {
+            linker.objectFiles = objPath + " " + runtimeObjPath
+        }
+        if (this.outputType == "exe") {
+            linker.addFlag("/SUBSYSTEM:CONSOLE")
+            linker.addFlag("/ENTRY:main")
+            linker.addFlag("/MACHINE:X64")
+            linker.addFlag("/NODEFAULTLIB")
+        }
+        linker.useDefaultLibs = false
         val linkCmd = linker.buildCommand()
         result.linkCommand = linkCmd
-        result.executablePath = this.outDir + "/" + this.moduleName + ".exe"
+        // 根据输出类型设置可执行文件路径
+        if (this.outputType == "exe") {
+            result.executablePath = this.outDir + "/" + this.moduleName + ".exe"
+        } else if (this.outputType == "dll") {
+            result.executablePath = this.outDir + "/" + this.moduleName + ".dll"
+        } else if (this.outputType == "lib") {
+            result.executablePath = this.outDir + "/" + this.moduleName + ".lib"
+        } else if (this.outputType == "so") {
+            result.executablePath = this.outDir + "/lib" + this.moduleName + ".so"
+        } else if (this.outputType == "dylib") {
+            result.executablePath = this.outDir + "/lib" + this.moduleName + ".dylib"
+        } else {
+            result.executablePath = this.outDir + "/" + this.moduleName + ".exe"
+        }
         println("    链接命令: " + linkCmd)
+
+        // Step 6b: 执行链接（如果链接器可用）
+        val linkRc: Int = linker.runLinker(linkCmd)
+        if (linkRc == 0) {
+            println("    ✓ 链接成功: " + result.executablePath)
+        } else {
+            println("    ⚠ 链接失败 (rc=" + this.toStr(linkRc) + ")")
+        }
 
         result.functionCount = lir.functionCount
         result.success = true
@@ -192,6 +250,76 @@ class PhotonPipeline {
         println("")
         println("══════════════════════════════════════════════")
         println("Photon 管线完成 — 目标文件已生成")
+        println("══════════════════════════════════════════════")
+
+        return result
+    }
+
+    // ── JIT 专用：仅编码（不做 COFF/link） ──
+
+    /// 从 HIR 编译为机器码（仅编码，不做 COFF 组装与链接）。
+    ///
+    /// JIT 路径专用：只需要裸机器码 hex，不需要目标文件或链接。
+    /// 数据流：HIR → SSA MIR → LIR → MachineDag → RegAlloc → Peephole → Encode
+    fun compileEncodeOnly(hir: Hir, outDir: String, moduleName: String): BackendResult {
+        this.outDir = outDir
+        this.moduleName = moduleName
+
+        val result = BackendResult()
+
+        println("╔══════════════════════════════════════════════╗")
+        println("║   Photon JIT 编码管线（仅编码，无 COFF/link）  ║")
+        println("╚══════════════════════════════════════════════╝")
+
+        // ── Phase A: HIR → SSA MIR ──
+        println("[Phase A] HIR → SSA MIR (SsaBuilder)")
+        val ssaBuilder = SsaBuilderUtils.build(hir)
+        println("  functions=" + ssaBuilder.functionCount +
+                " values=" + ssaBuilder.valueCount +
+                " blocks=" + ssaBuilder.blockCount)
+
+        // ── Phase B: MIR → LIR ──
+        println("[Phase B] MIR → LIR (Lowering)")
+        val lowering = Lowering()
+        val lir = lowering.lower(ssaBuilder)
+        println("  LIR functions=" + lir.functionCount +
+                " values=" + lir.valueCount +
+                " blocks=" + lir.blockCount)
+
+        // ── Phase C: LIR → Machine DAG ──
+        println("[Phase C] LIR → Machine DAG (InstructionSelection)")
+        val selector = InstructionSelectorUtils.emptySelector()
+        val dag = selector.select(lir)
+        println("  DAG nodes=" + dag.nodeCount +
+                " instrs=" + dag.instrCount)
+
+        // ── Phase D: 寄存器分配 + 窥孔 ──
+        println("[Phase D] Register Allocation + Peephole")
+        val allocator = RegisterAllocatorUtils.emptyAllocator()
+        allocator.allocate(dag)
+        println("  spillSlots=" + allocator.getSpillSlots())
+
+        val peephole = PeepholeOptimizerUtils.emptyOptimizer()
+        peephole.optimize(dag)
+        println("  peephole passes=" + peephole.getPassCount())
+
+        // ── Phase E Step 4: 指令编码（仅此一步，不做 COFF/link） ──
+        println("[Phase E] Instruction Encoding only")
+        val emitter = X86EmitterUtils.emptyEmitter()
+        emitter.setAllocator(allocator)
+        emitter.emitFunction(dag, moduleName)
+        val machineCodeHex: String = emitter.getOutputHex()
+        result.machineCodeHex = machineCodeHex
+        result.encodedByteCount = machineCodeHex.length / 2
+        println("  机器码 hex（前 80 字符）: " + this.substring(machineCodeHex, 0, this.min(result.encodedByteCount * 2, 80)))
+        println("  字节数: " + result.encodedByteCount)
+
+        result.functionCount = lir.functionCount
+        result.success = true
+
+        println("")
+        println("══════════════════════════════════════════════")
+        println("Photon JIT 编码完成 — 机器码已生成")
         println("══════════════════════════════════════════════")
 
         return result
@@ -210,6 +338,35 @@ class PhotonPipeline {
     private fun min(a: Int, b: Int): Int {
         if (a < b) { return a }
         return b
+    }
+
+    /// 整数转字符串。
+    private fun toStr(n: Int): String {
+        if (n == 0) { return "0" }
+        var neg: Boolean = false
+        if (n < 0) { neg = true; n = -n }
+        var result: String = ""
+        while (n > 0) {
+            result = this.digitChar(n % 10) + result
+            n = n / 10
+        }
+        if (neg) { result = "-" + result }
+        return result
+    }
+
+    /// 将单个数字转为字符串。
+    private fun digitChar(d: Int): String {
+        if (d == 0) { return "0" }
+        if (d == 1) { return "1" }
+        if (d == 2) { return "2" }
+        if (d == 3) { return "3" }
+        if (d == 4) { return "4" }
+        if (d == 5) { return "5" }
+        if (d == 6) { return "6" }
+        if (d == 7) { return "7" }
+        if (d == 8) { return "8" }
+        if (d == 9) { return "9" }
+        return ""
     }
 }
 

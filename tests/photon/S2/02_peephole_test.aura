@@ -11,7 +11,7 @@ import "../../../aura/compiler/aura/lang/compiler/backend/photon/PeepholeOptimiz
 fun main() {
     println("═══ 窥孔优化测试 ═══")
     var pass = 0
-    var total = 3
+    var total = 5
 
     // [1] 空 DAG
     println("[1] 空 DAG")

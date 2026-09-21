@@ -140,6 +140,30 @@ class X86Encoder {
         this.writeInt(imm)
     }
 
+    /// 编码 IMUL r/m64, imm32（REX.W 0F AF /r id，3-操作数形式）。
+    fun emitImulRI(dst: String, imm: Int): Unit {
+        val d: Int = this.regNum(dst)
+        this.writeByte(this.rexByte(true, 0, d))
+        this.writeByte(0x0F)
+        this.writeByte(0xAF)
+        this.writeByte(0xC0 + (d & 7))
+        this.writeInt(imm)
+    }
+
+    /// 编码 CDQ（符号扩展 rax → rdx:rax，除法/取余前置操作）。
+    fun emitCdq(): Unit {
+        this.writeByte(0x99)
+    }
+
+    /// 编码 IDIV r/m64（0xF7 /F，有符号除法，商→rax，余数→rdx）。
+    /// 注意：IDIV 的源操作数隐含为 rdx:rax，dst/src 参数仅用于定位 r/m 字段。
+    fun emitIdiv(rmReg: String): Unit {
+        val rm: Int = this.regNum(rmReg)
+        this.writeByte(this.rexByte(true, 0, rm))
+        this.writeByte(0xF7)
+        this.writeByte(0xC8 + (rm & 7))  // mod=11, /F, rm=reg
+    }
+
     /// 编码 MOV reg, [rip + disp32]（RIP 相对寻址）。
     fun emitMovRIP(dst: String, symbol: String): Unit {
         val d: Int = this.regNum(dst)
