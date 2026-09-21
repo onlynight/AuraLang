@@ -24,3 +24,9 @@ libs/
 !dist/bootstrap/aura-compiler.exe
 !aura/seed/aura.exe
 rust/
+
+# AOT 运行时 LLVM IR（libc/crt/args/types/exception/channel 声明）。
+# `Runtime.aura::runtimeDeclarationsExEx` 在**运行期**从磁盘读取这些文件并
+# 注入模块头部；上方 `*.ll` 会忽略它们（曾因此在 d497f28 后整批丢失），
+# 故此处显式放行，必须随仓库分发。
+!aura/compiler/aura/lang/compiler/aot/runtime/*.ll

@@ -27,6 +27,31 @@ extern "C" {
 #endif
 
 /* ────────────────────────────────────────────────────────────────────────────
+ * 命令行参数全局（argc / argv）
+ *
+ * AOT 生成的模块 IR 在入口 wrapper 里会写入这两个全局：
+ *   store i32 %argc, i32* @aura_argc_global
+ *   store i8** %argv, i8*** @aura_argv_global
+ * 而 `aura_std_cffi.c` 的 `Process.arg` / `Process.args` 会读取它们。
+ *
+ * 旧设计把定义放在 `runtime/args.ll`（随 .ll 运行时一起喂给 llc/clang）；
+ * 冻结种子的 AOT 链接只编译「模块 IR + 本文件 + aura_std_cffi.c」，
+ * 不带 args.ll，于是这三个符号链接期未定义
+ * （`lld-link: error: undefined symbol: aura_argv_global` 等）。
+ * 因此把定义落在本 C 文件，去掉对 .ll 运行时的依赖。
+ *
+ * 类型必须与 IR 严格一致：i32 / i8**。
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+int aura_argc_global = 0;
+char **aura_argv_global = 0;
+
+void aura_args_set(int argc, char **argv) {
+    aura_argc_global = argc;
+    aura_argv_global = argv;
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
  * 平台检测
  * ──────────────────────────────────────────────────────────────────────────── */
 

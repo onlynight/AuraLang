@@ -3,7 +3,7 @@ package aura.lang.compiler.backend.photon
 // Debug: test LirProgram creation
 
 import aura.lang.std.String
-import "Lir.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/Lir.aura"
 
 fun main() {
     println("═══ Debug Lir ═══")

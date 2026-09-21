@@ -53,10 +53,20 @@ object Process {
 
 /// 进程句柄（有状态实例）。
 ///
+/// 说明：构造参数用 `init(...)` 块表达（语言既有惯例），而不是
+/// `class ProcessHandle(pid: Int)` —— 后者是「主构造器参数」语法，
+/// AST 无此概念，会报 `parse error: Expected Arrow, got LBrace`。
+///
 /// @since 0.2
-class ProcessHandle(pid: Int) {
-    
-    private val pid: Int = pid
+class ProcessHandle {
+
+    /// 目标进程 id。
+    private var pid: Int = 0
+
+    /// 绑定到指定进程。
+    init(pid: Int) {
+        this.pid = pid
+    }
     
     fun wait(): Int {
         return ProcessNative.wait(pid)

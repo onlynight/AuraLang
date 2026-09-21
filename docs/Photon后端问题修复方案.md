@@ -799,30 +799,38 @@ private fun getSuccIndices(index: Int, instrs: List<DagInstruction>): List<Int> 
 
 **现状：** `vm/VmJitBridge.aura:45-53` 声明了 `@native jit_compile/jit_load/jit_call/register_dispatch/lookup_dispatch`，但实现在 `AuraLangWithRust/`（未被 git 跟踪）中。从干净克隆视角，这些 native 函数无法解析。
 
-**修复方案：**
+**✅ 已实施（2026-09-21，方案 A 变体 — Photon JIT）：**
 
-**方案 A（推荐 — 迁移到 Photon JIT）：**
-
-删除 `VmJitBridge.aura` 中的 @native 声明，将其桥接函数指向 Photon 的 JIT 后端：
+不删除 `VmJitBridge`（它服务于 VM 字节码热点的 Cranelift 路径），而是**给 CLI 提供独立的 Photon JIT 路径**：
 
 ```
-// VmJitBridge.aura 修改后的 native 调用
-// 旧: val blob_b64 = jit_compile(clif_text)
-// 新: val result = JitBackend.compileFunction(clifText)
-```
-
-`JitBackend.aura` 已经是纯 Aura 实现（508 行），可以直接替代 @native 调用。
-
-**方案 B（最小改动 — 标记不可用）：**
-
-在 `Main.aura` 的 CLI 中禁用 JIT 后端：
-
-```
+// Main.aura
 } else if (backend == "jit") {
-    println("ERROR: JIT backend requires Rust toolchain (AuraLangWithRust/). Use -b vm or -b aot or -b photon instead.")
-    return ""
+    return MainUtils.photonJitSource(source)   // HIR → MIR → LIR → DAG → RegAlloc → Encode（裸机器码）
 }
 ```
+
+配套改动：
+
+| 位置 | 改动 |
+|------|------|
+| `backend/photon/PhotonPipeline.aura` | 新增 `compileJit(hir, moduleName)`（等价 `compileEncodeOnly`，JIT 命名入口，不组装 COFF / 不链接） |
+| `backend/photon/JitBackend.aura` | `vmMode` **默认 `true`**（VM 安全：绝不触碰 `Memory`）；`enableNativeExec()` 供 AOT / 自举切换真实 W^X；`emitFunction` 多函数共享一块可执行内存（16 字节对齐顺序追加）；`lookupFunction` / `deoptimize` 支持按函数名定位；新增 `slotCount()` / `functionCount()` / `isVmMode()` 数值查询 |
+| `Main.aura` | `MainUtils.photonJitSource(source, native)`；`compileWith` / `runCli` 接线 `-b jit` 与 `--jit-native`；`cliUsage` 更新 |
+| `core/aura/lang/native/JitExec.aura` | 新增 `extern object JitExec { call0 / callI64 }`：JIT 真实执行原语（函数指针调用），**纯声明**，AOT 只 `declare`、不引入必需链接符号 |
+| `aot/Emit.aura` | 新增 `JitExec.*` **调用点**降级（2.86 分支 + `inferType` 分支）：`inttoptr` + 间接 `call`，纯 IR、无外部符号 |
+| `tests/photon/S3/08_jit_pipeline_test.aura` | 新增：VM 下 `compileEncodeOnly` / `compileJit` / `compileMachineCode` / `emitFunction` / 分派 / 去优化 / 存根 / `executeNative` 空操作，33 assertions 全通过 |
+
+**真实执行的实现方式（不影响 AOT）：**
+
+1. `JitBackend.executeNative(entry, arg)` / `executeNative0(entry)` 调用 `JitExec.callI64/call0`；
+2. `vmMode == true` 时**直接短路返回 0**，绝不触碰 extern 符号 → 种子 VM 下永不崩溃；
+3. `aot/Emit.aura` 对 `JitExec.*` 的调用点发射 `%fp = inttoptr i64 <entry> to i64 (i64)*` + `call i64 %fp(...)`，**不引用任何外部符号**（无需改 `aura_syscalls.c`）；分支按 `fname` + 接收者名 `JitExec` 精确命中，且置于 2.9 外部对象兜底之前，因此：
+   - 未使用该入口的程序，AOT 产物**逐字节不变**；
+   - 不会产生 `call @callI64` 这类未定义符号；
+4. 真实执行需 `-b jit --jit-native` 显式开启，并依赖 AOT / 自举（原生）运行时。
+
+> 本机无 `llc` / `clang` / `lld-link`，原生 exe 无法在此环境构建，故「真实执行」的端到端运行需在具备 LLVM 工具链的环境验证；VM 侧已验证「真实执行入口是安全空操作」及全部 JIT 管线断言。
 
 ---
 
@@ -1096,3 +1104,242 @@ private fun applyCallingConvention(): Unit {
 | **Phase 3** | 问题 7（AOT 退役判据） | 文档 | 随时可写 |
 | **Phase 4** | 问题 8（JIT 死路径清理） | 2-4h | Phase 3 完成后做 |
 | **Phase 4** | 问题 11-13（卫生清理） | 2-3h | 随时可做 |
+
+---
+
+## 修复记录（2026-09-21）
+
+> 背景：`aura/seed/aura.exe`（种子 VM）的 stdlib `String.auc` 未加载，导致
+> `String.substring` / `charCodeAt` / `startsWith` / `String.split` / `List.get`
+> 全部是**未链接外部函数**（`[vm] Unlinked external function …`，返回默认值）。
+> 凡是建立在这批方法之上的 Aura 代码，在种子 VM 下都会静默产生错误结果。
+> 实测可用：`s[i]` 索引、`s.length`、`==`、`+`、`List.add/size/[i]`。
+
+### A. Photon E3「hello.exe」链路打通
+
+| 文件 | 改动 |
+|------|------|
+| `backend/photon/PhotonObjectWriter.aura` | 新增种子 VM 安全字符串原语（`chAt` / `chEq` / `isDoubleSemi` / `sliceOf` / `hasPrefix` / `codeOf` / `byteHex` / `digitOf` / `hexValOf`），并把 `padSectionName` / `asciiToHex` / `splitDoubleSemi` / `splitPipe` / `splitPipe2` / `splitComma` / `strToInt` / `hexToInt` / `isDefinedSymbol` / `countSymbols` 全部改为不依赖 `substring`/`charCodeAt`/`startsWith` |
+| `backend/photon/PhotonHelloBuild.aura` | 说明退出码不可靠（脚本按标记判定）；`getLldPath`/`buildArgumentList` 在 VM 下返回空串，由脚本补齐 |
+| `scripts/build-photon-hello.ps1` | ① 新增 `Get-LldDirFromManifest`（**显式 UTF-8** 读 `aura.toml` 的 `[lld]` 段，按 `-Lld` > 驱动实际路径 > manifest > PATH 解析）；② 驱动退出码不再作为失败判据；③ 驱动未给出链接参数时按 `PhotonSystemLinker` 同构规则在脚本内生成 |
+
+**修复前**：COFF 节名 `00000`/`000000`、符号表为空、`.rdata` 无内容 → `lld-link: error: string table empty`。
+**修复后**：节名 `.text`/`.rdata`、符号 `main`/`@str.0`/`println`、`.rdata` 12 字节，`lld-link` 链接产出 `hello.exe`（1536B），运行输出 `hello world`（`68 65 6C 6C 6F 20 77 6F 72 6C 64 0D 0A`），退出码 0。
+
+> 复现：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-photon-hello.ps1`
+> 校验：`llvm-readobj --file-headers --sections --symbols build/lldtest/hello.obj`
+
+### B. Photon JIT（问题 8）与真实执行
+
+见问题 8 的「✅ 已实施」小节：`compileJit` / `vmMode` 默认安全 / 多函数共享可执行内存 /
+`JitExec.call0|callI64` + `aot/Emit.aura` 2.86 调用点降级 / CLI `-b jit [--jit-native]`；
+`tests/photon/S3/08_jit_pipeline_test.aura` 33 assertions 全通过。
+
+### C. ~~仍存在的同源风险（未修）~~ → **已消除**
+
+> 2026-09-21 第二轮：种子已重建（`rust/` cargo 构建 + `aura/core/aura/lang/**` 源码预编译
+> 为 `rust/build/aura_core_auc/**` 嵌入），VM 启动加载 **1034** 个 Aura 函数（此前 172 个
+> 且大量加载失败）。`String.substring` / `charCodeAt` / `toUpperCase` / `indexOf` /
+> `contains` / `split` 等在种子 VM 下**均已可用**，下述风险不复存在：
+
+- ~~`backend/photon/PhotonLldConfig.aura`（`substring`/`indexOf`/`startsWith`）~~ → 已可用；
+- ~~`backend/photon/PhotonRuntime.aura` 中的字符串处理~~ → 已可用；
+- `tests/photon/S1/PhotonValidation.aura` 自带 `splitStr` 的写法仍可保留（不再因此停测）。
+
+### D. 前端方法派发修复（新种子，2026-09-21 第二轮）
+
+**背景**：换用重建后的种子后重跑全部 photon 测试，得到基线 **20 OK / 23 FAIL**，
+主导错误是 `[bytecode] error: 未解析的函数调用 '<name>'` +
+`Runtime error: call to undefined function #65535`。
+
+| 类别 | 根因 | 修复 |
+|------|------|------|
+| **A. `String.charAt` 无法解析** | `charAt` 在**四张硬编码的 String 方法表**中缺失（只有 `charCodeAt`）：`hir.rs::build_class_table` 的 `string_methods` 白名单、`emit.rs::builtin_native_names`、`mir.rs::register_builtin_native_names`、`decl.rs` 的内置名集合 | 四处补齐 `charAt`（并顺带补 `replaceAll` / `matches`）；`s.charAt(i)` 现可派发为 `String.charAt` |
+| **B. 列表元素 / 循环变量接收者无法派发** | `hir.rs::resolve_method_owner` 只读 sema 类型；接收者为 `Any`（`for (instr in list)`、`val x: T = list[i]`）时会在「类型已知但无此方法」分支**提前 `return None`**，跳过「全表唯一候选」兜底 → 发射裸名 | ① 新增 `resolve_receiver_type()`：sema 优先、回退 `lookup_expr_type`（降级期记录的声明类型）；② 引入 `dynamic_recv`（`Any`/`Nothing`/无类型）：动态接收者不再提前终止，继续走 `Any` 默认实现 → 字段接收者 → 全表唯一候选 |
+| **C. 测试侧过期导入（非编译器缺陷）** | 后端源码早已从 `tests/photon/S1/` 迁到 `aura/compiler/aura/lang/compiler/backend/photon/`，9 个测试仍用 `import "Lir.aura"` 这类**裸相对**路径（按入口目录解析 → 落空） | 批量改为 `"../../../aura/compiler/aura/lang/compiler/backend/photon/…"`；另修 2 处 `X86Encoder.aura` 漏 `x86_64/` 前缀，并去掉 1 个文件的 BOM |
+
+**结果：38 OK / 7 FAIL**（全部 45 个 photon 测试）。
+
+### E. 剩余问题清单（按类型）
+
+| 测试 | 现象 | 归类 |
+|------|------|------|
+| `S1/PhotonPipelineTest2.aura`、`S3/01_bootstrap_test.aura` | 仍有 19 个未解析名（`emptyEmitter` / `emitFunction` / `kidsOf` / `kindOf` / `strToInt` / `aotSlice` …） | 测试导入不全 → 相关类不在编译单元（机械补 import 即可） |
+| `S2/03_pipeline_test.aura`、`S2/06_liveness_test.aura`、`S3/02_end_to_end_exe.aura`、`S1/TestSubstring.aura` | **已能编译运行**，但后续断言/取值失败（如管线走到「寄存器分配」阶段后终止） | **真正的后端逻辑问题** —— 正对应本文档 P0 的 1.2–1.6：`emitMovRR` 丢 `src`、Load/Store 偏移硬编码 0、`emitRet` 无条件清 `eax`、Phi 只取首入边 |
+| `phase_a_ssa_regression_test.aura` | `parse error: Expected Arrow, got Colon` + `Expected RBrace, got EOF` | 测试 fixture 自身语法非法/被截断 |
+
+**建议下一步**：按 P0 的 1.2 → 1.3 → 1.4 → 1.6 顺序修复（1.2/1.4 是 `X86Emitter` 局部改动，
+1.3 依赖 `Lowering.aura::applyCallingConvention()` 填充栈偏移），每修一项即重跑上述 4 个用例观察断言推进。
+
+---
+
+## 修复记录（2026-09-22，种子重建第二轮）
+
+### F. 集合表示修复（本轮主要收益）
+
+**背景**：重建种子后（`rust/` cargo + `aura/core` 源码预编译嵌入），VM 侧集合操作全面失真：
+`l.size` 恒为 0、`l[0]` 恒为 null、`l.set(i, v)` 直接 **访问违规**（`0xC0000005`）。
+
+**根因：VM 里有两套集合表示，而派发规则把它们串了线**
+
+| 表示 | 产出方 | 支持的指令 |
+|------|--------|-----------|
+| 堆对象 `Value::Ref(h)` | `NEW_LIST` 等原位指令 | `LIST_PUSH` / `LIST_POP` / `MAP_SET`（**只支持这一种**） |
+| 值对象 `Value::List(Vec<Value>)` | 纯函数式 native（`listOf` / `split` …） | 只能读 |
+
+三处叠加导致崩溃/静默错误：
+
+1. **`Collections` 模块被嵌入**（`aura/lang/std/collection/Collections.auc`）——它是 **Plan A 裸内存实现**
+   （`listSize` → `Memory.read64(list)`），而 VM 的派发规则是「嵌入 Aura 实现优先于 Rust native」，
+   于是顶掉了 `std_collections.rs` 里 53 个面向 `Value::List/Map` 的正确实现。
+   **修复**：不再嵌入 `Collections`（VM 一律走 Rust native；AOT 路径按源码编译并映射到 C 运行库，不受影响）。
+2. **`mutableListOf()` 返回值表示**，而 `l.add(x)` 编译为 `LIST_PUSH`（只认堆对象）→ 静默丢弃。
+   **修复**：解释器层把 `mutableListOf` / `arrayListOf` / `mutableMapOf` 改写为**堆对象**分配
+   （`do_call_native` 与 `do_call_native_args` 两条派发路径均覆盖）。
+3. **`Collections.set` 对堆列表返回 `Null`**（`nat_set` 只认 `Value::List`），
+   而前端把 `l.set(i,v)`、`arr[i] = v` 都重写为 `Collections.set(...)`。
+   **修复**：解释器层原位写入 —— 按堆对象种类分派（新增 `heap.is_map` 判断走 `map_set` 还是
+   新增的 `heap.list_set`），值表示保持既有语义。
+
+### G. 顺带修复
+
+- `charAt` 在四张硬编码 String 方法表中缺失（`hir.rs::build_class_table` 白名单 / `emit.rs` /
+  `mir.rs` / `decl.rs`）→ 四处补齐（并补 `replaceAll` / `matches`）。
+- 集合工厂补进 `decl.rs` 内置名集合（`mutableMapOf` / `arrayListOf` / `emptyList` / `mapOf` /
+  `setOf` / `hashSetOf` / `emptySet` …）：缺登记时 `mutableMapOf` 会被当成用户函数 →
+  `未解析的函数调用 'mutableMapOf'`。
+- `hir.rs::resolve_method_owner`：接收者类型增加 `LOCAL_TYPE_SCOPES` 回退；**动态接收者**
+  （`Any` / `Nothing` / 无类型）不再提前 `return None`，继续走「全表唯一候选」兜底 →
+  `for (instr in list) { instr.nodeAt(j) }` 这类列表元素/循环变量接收者可正常派发。
+- 词法器兼容 **UTF-8 BOM**（`\u{FEFF}`）：Windows 编辑器写入 BOM 的文件此前直接
+  `lex error: Unexpected character: ''`（`PhotonPipelineTest2.aura` 长期因此无法运行）。
+- 测试侧：9 个用例的过期相对导入、2 处 `X86Encoder.aura` 漏 `x86_64/` 前缀。
+
+### H. 结果与剩余
+
+**43 OK / 2 FAIL**（全部 45 个 photon 测试；本轮 38/7 → 43/2）
+
+| 剩余失败 | 现象 | 归类 |
+|---------|------|------|
+| `S1/TestSubstring.aura` | `method call on non-object value` + `semantic warning: cannot assign 'String' to 'Int'` | **前端类型推断**：未标注类型的 `val sub = text.substring(...)` 被推断成 `Int`，运行时对 Int 调方法；与 photon 后端无关 |
+| `phase_a_ssa_regression_test.aura` | `parse error: Expected Arrow, got Colon` / `Expected RBrace, got EOF` | Phase A（SSA/MIR）fixture 自身语法非法，属既有问题 |
+
+**种子**：已用最新构建覆盖 `aura/seed/aura.exe`（sha256 `E23B8FCC…`）。VM 加载 **1000** 个 Aura
+函数，较此前 1034 少 34 个正是「不再嵌入 `Collections`」所致。
+
+**注意**：`tests/ArrayList/*` 等既有失败属同一类「内置名表缺失 / 集合类自身语义」问题，与 photon 后端无关。
+
+---
+
+## 修复记录（2026-09-22 续：43/43 全部通过）
+
+### I. `S1/TestSubstring` —— 字符串插值对 String 发出虚 `toString`
+
+**症状**：`Runtime error: method call on non-object value`；另有长期存在的误告警
+`semantic warning: cannot assign 'String' to 'Int'`。
+
+**根因链（三层）**
+
+1. 方法调用的类型推断：`checker.rs` 先查**符号表**里的 `String.substring`（来自加载的 stdlib
+   模块），其返回类型退化为 `Any` 后立即 `return`，**没机会**查更精确的
+   `sema/std_sigs.rs` 表（`substring` → `i8*` → `String`）。
+   **修复**：符号表给的返回类型是 `Any` 时不再收尾，继续查 `std_sigs`（`if ret != Ty::Any`）。
+   *对照实验*：用环境变量临时回退该改动，在 80 个非 photon 测试上结果完全一致（44/36），
+   确认无回归。
+2. 于是 `val sub = text.substring(...)` 的静态类型是 `Any`，插值脱糖（`hir.rs` 的
+   `Expr::StrInterp`）判断「不是 String」→ 多包一层 `toString`；
+3. `wrap_tostring` 对 `Any` 走 `class_declaring_tostring("Any")` → **虚方法** `CallVirtual`
+   → VM 对 `Value::Str` 接收者报 `method call on non-object value`
+   （`do_call_method` 只接受 `Value::Ref`）。
+
+现在 `sub` 正确推断为 `String`，不再包 `toString`，用例输出正确的 `6d61696e`。
+
+### J. `phase_a_ssa_regression_test` —— 后缀 `++` 从未被解析
+
+**症状**：`parse error: Expected Arrow, got Colon` + `Expected RBrace, got EOF`，
+且报错位置（line 6869）落在**总是被内联的 `Any.aura`** 里，极难定位。
+
+**根因**：解析器**只实现了前缀** `++x`（`parse_prefix_expression`），后缀 `x++` 落到
+`parse_postfix_chain` 的默认分支：
+- 语句位置 → `++` 被静默丢弃 → `i++` 是**空操作**（循环永不前进）；
+- 块尾 `{ i++ }` → 报错级联到文件末尾。
+
+**修复（两处，缺一不可）**
+
+1. `parser.rs`：在 `parse_postfix_chain` 增加 `DoublePlus`/`DoubleMinus` 分支。
+   **必须限制在操作数同行** —— 否则下一行开头的 `++p` 会被当成上一行末尾表达式的后缀
+   （`var p = 0` 后接 `++p` → `0++`，再被中缀调用启发式拼成 `p(++0)`，生成读到未初始化
+   槽位的错乱字节码）。这一约束是调试过程中实测得到的。
+2. `hir.rs`：`Expr::Unary{Increment/Decrement}` 此前**直接丢弃**自增（原注释「近似为自身值」）。
+   改为降级为**块表达式** `{ x = x ± 1; x }`：
+   - 不能用 `HirExpr::Assign` —— 它在 AOT（`emit.rs`）与字节码（`mir.rs`）两条路径上
+     **都未实现**，只有语句形式 `HirStmt::Assign` 可用；
+   - 语义：AST 未区分前缀/后缀，统一「返回新值」；仓库内 22 处 `++`/`--` 全为语句位置，
+     不依赖返回值。
+
+**配套的诊断改进**（否则此类错误无从下手）
+
+- 语法错误现在带**位置**：`parse error: … (line N, col M)`（此前只打印 message）。
+- 新增 `AURA_DUMP_EXPANDED=<path>`：把**内联展开后**的完整源码落盘，报错行号即该文件的行号。
+- 新增 `AURA_DEBUG_INTERP=1`：打印插值片段的类型判定（`type=… is_str=…`），用于诊断
+  「插值多包 toString」这类问题。
+
+### K. 当前状态
+
+- **photon 套件：43 OK / 43，0 失败、0 超时**（`aura/seed/aura.exe` 与 `rust/target` 均一致）。
+- AOT hello 正常产出并运行。
+- 种子已刷新：sha256 `107C2B99…`（8,900,096 B），VM 加载 1000 个 Aura 函数。
+- 非 photon 测试（196 个）仍有大量失败：主要是**既有**的两类问题 ——
+  「内置名表缺失」（`未解析的函数调用 'count' / 'sub' / 'store'`）与
+  「`tests/complier`、`tests/concurrent` 等区域自身未完成」；
+  另 `tests/phase9_compiler_tests.aura` 运行极慢（内部调用 Aura 侧编译器，且报
+  `failed to read import file: …/aot/StdSigs.aura`），属既有问题。
+  **对照实验已确认本轮改动无回归**（80 个用例，回退前后同为 44/36）。
+
+---
+
+## 修复记录（2026-09-22 续 2：清理「内置名表缺失」整类问题）
+
+### L. 结构性修复：以运行期注册表为单一真相源
+
+「内置名表缺失」此前靠**手工同步多处硬编码名单**（`decl.rs` 的 prelude/内建表、
+`emit.rs` 的 `builtin_native_names`、`mir.rs` 的 `register_builtin_native_names`、
+`hir.rs` 的 String 方法白名单），漏一处就报
+`[bytecode] error: 未解析的函数调用 'X'`。改为：
+
+1. `NativeRegistry::names()`（新增）—— 列举运行期全部已注册原生名；
+2. `mir.rs::register_builtin_native_names` 末尾用注册表补齐全部原生名；
+   安全性：MIR 的调用分派**先查用户函数**（`ctx.user_functions`）再查 natives，
+   因此补名不会抢占同名用户函数；
+3. 同处补「**唯一短名**」：把 `aura.lang.std.Collections.count` 这类限定名的最后
+   一段反推为短名，**仅当该短名在注册表中唯一**才登记（多个模块同名如
+   `add`/`get`/`set` 时保持不登记，避免静默派发到错误实现）；
+4. `emit.rs` 按 MIR **实际使用的** `CallNative` 名补齐字节码 natives 表 ——
+   **必做**：否则 MIR 分类为原生、而发射表没有该名 →
+   `未解析的原生调用 'toStr'（原生函数表无此名）`
+   （此不一致曾让 `S2/06_liveness_test` 从通过变失败，已修复并回归验证）。
+
+### M. 顺带修掉的几处真实缺陷
+
+| 缺陷 | 现象 | 修复 |
+|------|------|------|
+| `std_assert::register` 在 `register_all` 里被**注释掉**（`std-assert` feature 却开着） | `assert(...)` 未解析（111 处调用点） | 恢复注册 + 补裸名 `assert` |
+| `sleep` / `spawn` 只注册了限定名（`aura.lang.std.Time.sleep`） | 裸名调用未解析 | 追加裸名注册 |
+| 集合工厂 `arrayListOf<Int>()` 的返回类型退化为 `Any` | `var l = arrayListOf<Int>()` 后 `l.getAt(0)` / `l.add(1)` 跳过 `is_list_like_type` 的内建列表分派 → 裸名 `getAt` 未解析（108 处） | 新增 `collection_factory_ty()`：`listOf/arrayListOf/mutableListOf/arrayOf/emptyList/setOf/...` → `Ty::List`，`mapOf/mutableMapOf/hashMapOf/...` → `Ty::Map` |
+
+### N. 结果
+
+- **非 photon（195 个）：OK 111 → 120，FAIL 84 → 75**（+9 个用例）。
+- 未解析调用点总数：1365 → 990。
+- **photon 保持 43/43**（`aura/seed/aura.exe` 与 `rust/target` 均一致）；AOT 正常。
+- 种子已刷新：sha256 `0DDAF8A5…`。
+
+### O. 剩余（非机械可解）
+
+未解析名前列已转为**类方法解析**问题：`kidsOf`(56) / `spanOf`(44) / `destroy`(43) /
+`new`(43) / `begin`(39) / `report`(38) / `textOf`(26) / `kindOf`(24) …
+根因是**接收者类型未知 + 方法名在多个类中重名**（如 `Ast` 与 `Hir` 都有 `kidsOf`），
+此时「全表唯一候选」兜底失效，退化成裸名调用。
+另有 `aura_mem_used_mb`（AOT 专用运行库符号，VM 侧无实现）与若干未完成的子系统
+（`tests/complier`、`tests/concurrent`）属既有缺口。
+这些都需要在「类型推断 / 方法归属」层面继续推进，不是补名单能解决的。

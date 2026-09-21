@@ -10,8 +10,8 @@ package aura.lang.compiler.backend.photon
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
-import "x86_64/X86Encoder.aura"
-import "PhotonPipeline.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/x86_64/X86Encoder.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/PhotonPipeline.aura"
 
 /// 测试入口。
 fun main() {

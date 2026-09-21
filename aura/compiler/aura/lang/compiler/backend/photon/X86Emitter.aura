@@ -24,8 +24,12 @@ class X86Emitter {
     /// 重定位项列表（逗号分隔的 "offset|symbol|type" 记录）。
     private var relocRecords: String = ""
 
-    /// 当前帧大小。
-    private var frameSize: Int = 0x50
+    /// 当前帧大小（`0x50` = 80；**必须写十进制** —— 见下方说明）。
+    ///
+    /// AOT 发射器把 `var` 字段初始值按**原文**写进 IR，而 LLVM 的整型常量
+    /// 不接受 `0x` 前缀（会被当作十六进制浮点字面量，报
+    /// `floating point constant invalid for type`），因此这里统一用十进制。
+    private var frameSize: Int = 80
 
     /// 寄存器分配器引用（用于 spill 节点检测）。
     private var allocator: RegisterAllocator = null

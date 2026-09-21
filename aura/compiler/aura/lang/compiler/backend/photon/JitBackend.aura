@@ -52,6 +52,7 @@ package aura.lang.compiler.backend.photon
 import aura.lang.std.String
 import aura.lang.std.Builtin
 import aura.lang.native.Memory
+import aura.lang.native.JitExec
 import "../../hir/Hir.aura"
 import "PhotonPipeline.aura"
 
@@ -66,20 +67,37 @@ class JitBackend {
     const val PROT_WRITE: Int = 2
     const val PROT_EXEC: Int = 4
 
-    /// 可执行内存基址（VirtualAlloc/mmap 返回值）。
+    /// 可执行内存基址（VirtualAlloc/mmap 返回值；多函数共享同一块）。
     var codeBase: Int = 0
 
     /// 可执行内存区域大小（字节）。
     var codeSize: Int = 0
 
-    /// 函数入口点分派表（VM 安全：使用字符串存储多个条目）。
-    var dispatchEntries: String = ""
+    /// 已使用的代码字节数（多函数顺序追加时使用）。
+    var usedSize: Int = 0
 
-    /// 当前分派表条目值（简化：单个条目）。
-    var dispatchEntryValue: Int = 0
+    /// 已发射（编码 + 写入）的函数数量。
+    private var funcCount: Int = 0
 
-    /// 已分派函数数量。
-    var dispatchCount: Int = 0
+    /// 最近一次注册的函数名（供 `lookupFunction` / `deoptimize` 按名定位）。
+    ///
+    /// 说明：VM 运行时的字符串 stdlib（`split` / `substring` / `indexOf` /
+    /// `charAt` 等）不可用，无法维护「名字 → 槽位」的通用映射；这里记录最近
+    /// 一次注册的名字，覆盖 JIT 的常见单函数场景。原生运行时可在此基础上扩展
+    /// 为完整映射。
+    private var lastFuncName: String = ""
+
+    /// 最近一次注册的分派条目值。
+    private var dispatchEntryValue: Int = 0
+
+    /// 最近一次注册的分派槽位。
+    private var lastDispatchSlot: Int = -1
+
+    /// 槽位 0 的分派条目值。
+    private var firstDispatchEntry: Int = 0
+
+    /// 已分配的分派槽位数量。
+    private var dispatchCount: Int = 0
 
     /// 总分配字节数（累计）。
     var allocatedSize: Int = 0
@@ -87,23 +105,85 @@ class JitBackend {
     /// 系统页粒度（通常 4096 字节）。
     var pageGranularity: Int = 4096
 
-    /// VM 模式标志：为 true 时跳过所有 Memory 外部调用（仅用于 VM 测试）。
-    /// AOT / 自举模式下设为 false，Memory 调用会真实执行。
-    var vmMode: Boolean = false
+    /// VM 模式标志：为 true 时跳过所有 Memory 外部调用（模拟分配）。
+    ///
+    /// 默认 **true** —— `Memory` 是 `extern interface`，只在 AOT / 自举（原生）
+    /// 运行时才会被降低为真实调用；种子 VM 的字节码后端无法解析
+    /// （`未解析的函数调用 'Memory.alloc'`），运行时会以
+    /// `call to undefined function #65535` 崩溃。
+    ///
+    /// 因此默认走「VM 安全」路径：地址与写入均为模拟。
+    /// 在 AOT / 自举（原生）运行时调用 [`enableNativeExec`] 关闭模拟，
+    /// 才会真实分配 W^X 内存并写入机器码。
+    var vmMode: Boolean = true
 
-    /// vmMode 下用于模拟分配的假地址计数器。
-    var simNextAddr: Int = 0x100000
+    /// 是否运行在原生（AOT / 自举）运行时。
+    var nativeRuntime: Boolean = false
+
+    /// vmMode 下用于模拟分配的假地址计数器（`0x100000` = 1048576）。
+    ///
+    /// **必须写十进制**：发射器把 `var` 字段初始值按原文写进 LLVM IR，
+    /// 而 `i32 0x100000` 会被 LLVM 当作十六进制浮点字面量而报
+    /// `floating point constant invalid for type`。
+    var simNextAddr: Int = 1048576
 
     init() {
         this.codeBase = 0
         this.codeSize = 0
-        this.dispatchEntries = ""
+        this.usedSize = 0
+        this.funcCount = 0
+        this.lastFuncName = ""
         this.dispatchEntryValue = 0
+        this.lastDispatchSlot = -1
+        this.firstDispatchEntry = 0
         this.dispatchCount = 0
         this.allocatedSize = 0
         this.pageGranularity = 4096
+        this.vmMode = true
+        this.nativeRuntime = false
+        this.simNextAddr = 1048576
+    }
+
+    /// 启用原生执行：关闭 VM 模拟，真实分配 W^X 内存并写入机器码。
+    ///
+    /// **仅可在 AOT / 自举（原生）运行时调用**；种子 VM 下调用会在首次
+    /// 触碰 `Memory` 时崩溃。
+    fun enableNativeExec(): Unit {
         this.vmMode = false
-        this.simNextAddr = 0x100000
+        this.nativeRuntime = true
+    }
+
+    /// 当前是否处于 VM 模拟模式。
+    fun isVmMode(): Boolean {
+        return this.vmMode
+    }
+
+    // ── 真实执行 ──
+
+    /// 调用 `entry` 处已发射的机器码，返回结果（`rax`）。
+    ///
+    /// 通过 [`JitExec.callI64`]（AOT 发射器降级为 `inttoptr` + 间接 `call`）
+    /// 把控制权交给 JIT 代码。**仅原生模式可用**：
+    ///
+    ///   * `vmMode == true`（种子 VM / 默认）→ 直接返回 0，绝不触碰 `JitExec`；
+    ///   * `vmMode == false`（AOT / 自举，已 `enableNativeExec()`）→ 真实调用。
+    ///
+    /// 目标函数按平台 C ABI（Windows x64：`arg0` → `rcx`，返回值 `rax`）。
+    fun executeNative(entry: Int, arg0: Int): Int {
+        if (this.vmMode || entry == 0) {
+            return 0
+        }
+        val r: Long = JitExec.callI64(entry as Long, arg0 as Long)
+        return r as Int
+    }
+
+    /// 调用无参 JIT 函数，返回结果（`rax`）。语义同 [`executeNative`]。
+    fun executeNative0(entry: Int): Int {
+        if (this.vmMode || entry == 0) {
+            return 0
+        }
+        val r: Long = JitExec.call0(entry as Long)
+        return r as Int
     }
 
     // ── 内存管理 ──
@@ -208,47 +288,33 @@ class JitBackend {
     /// 在分派表中分配一个新槽位，返回槽位索引。
     fun allocateDispatchSlot(): Int {
         val slot: Int = this.dispatchCount
-        // 简化：分派表为单个条目，直接设为 0
-        this.dispatchEntries = "0"
         this.dispatchCount = slot + 1
         return slot
     }
 
-    /// 设置分派表条目（简化：直接存储为整数）。
+    /// 设置分派表条目。
     fun setDispatchEntry(slot: Int, entry: Int): Unit {
-        this.dispatchEntryValue = entry
-        if (this.dispatchCount < 1) {
-            this.dispatchCount = 1
+        if (slot == 0) {
+            this.firstDispatchEntry = entry
+        }
+        if (slot >= this.lastDispatchSlot) {
+            this.lastDispatchSlot = slot
+            this.dispatchEntryValue = entry
+        }
+        if (this.dispatchCount <= slot) {
+            this.dispatchCount = slot + 1
         }
     }
 
-    /// 获取分派表条目（简化：直接返回整数）。
+    /// 获取分派表条目（0 表示空槽 / 未分配）。
     fun getDispatchEntry(slot: Int): Int {
-        return this.dispatchEntryValue
-    }
-
-    /// 简单整数解析。
-    fun parseInt(text: String): Int {
-        var result: Int = 0
-        var neg: Boolean = false
-        var i: Int = 0
-        val len = text.length
-        if (i < len) {
-            val c: Char = text[i]
-            if (c == '-') {
-                neg = true
-                i = i + 1
-            }
+        if (slot == this.lastDispatchSlot) {
+            return this.dispatchEntryValue
         }
-        while (i < len) {
-            val c: Char = text[i]
-            if (c >= '0' && c <= '9') {
-                result = result * 10 + (c - '0')
-            }
-            i = i + 1
+        if (slot == 0) {
+            return this.firstDispatchEntry
         }
-        if (neg) { result = -result }
-        return result
+        return 0
     }
 
     // ── 存根构建 ──
@@ -355,38 +421,57 @@ class JitBackend {
 
     /// 将函数机器码写入可执行内存，返回入口点地址。
     ///
-    /// 流程：
-    ///   1. 计算需要的内存大小（按页粒度对齐）
-    ///   2. 分配可执行内存
-    ///   3. 写入机器码
-    ///   4. 切换为可执行权限
-    ///   5. 返回基址作为入口点
+    /// 多个函数**共享同一块**可执行内存（见设计 10.3.2）：首次调用时按页
+    /// 粒度分配一块内存，后续调用在 `usedSize` 处按 16 字节对齐顺序追加，
+    /// 因此入口地址是 `codeBase + offset` 而非基址。
+    ///
+    /// VM 模式下地址为模拟值、写入被跳过；原生模式下真实 W^X 写入。
     fun emitFunction(funcName: String, machineCode: String): Int {
         if (machineCode == "") {
             return 0
         }
 
-        // 计算对齐后的大小
         val codeBytes: Int = machineCode.length / 2
-        val alignedSize: Int = this.alignToPage(codeBytes + 64) // 64 字节余量
 
-        // 分配内存
-        val base: Int = this.allocateExecMemory(alignedSize)
+        // 首次调用：分配一块共享可执行内存。
+        var base: Int = this.codeBase
         if (base == 0) {
-            return 0
+            val reserve: Int = this.alignToPage(codeBytes + 64) // 64 字节余量
+            base = this.allocateExecMemory(reserve)
+            if (base == 0) {
+                return 0
+            }
+            this.codeBase = base
+            this.codeSize = reserve
+            this.usedSize = 0
+        } else if (this.usedSize + codeBytes + 16 > this.codeSize) {
+            // 需要更大的内存；VM 模式直接扩容（模拟），原生模式无法就地扩容，
+            // 本次发射失败（调用方可先分配足够大的空间）。
+            if (!this.vmMode) {
+                return 0
+            }
+            this.codeSize = this.alignToPage(this.usedSize + codeBytes + 64)
         }
 
-        // 写入机器码
-        this.writeCode(base, 0, machineCode)
+        val offset: Int = this.usedSize
+        val entry: Int = base + offset
 
-        // 标记为可执行
-        this.setExecutable(base, alignedSize)
+        // 写入机器码（VM 模式下 writeCode 内部跳过）。
+        this.writeCode(base, offset, machineCode)
 
-        // 更新布局跟踪
-        this.codeBase = base
-        this.codeSize = alignedSize
+        // 切换为可执行权限（VM 模式下 setExecutable 内部跳过）。
+        this.setExecutable(base, this.codeSize)
 
-        return base
+        // 16 字节对齐追加。
+        this.usedSize = offset + codeBytes
+        val rem: Int = this.mod16(codeBytes)
+        if (rem != 0) {
+            this.usedSize = this.usedSize + (16 - rem)
+        }
+
+        this.funcCount = this.funcCount + 1
+        this.lastFuncName = funcName
+        return entry
     }
 
     /// 使用 Photon 管线把 HIR 编译为机器码（hex），供 JIT 侧直接消费。
@@ -404,40 +489,53 @@ class JitBackend {
     }
 
     /// 将函数注册到分派表，返回槽位索引。
+    ///
+    /// 记录函数名，使 [`lookupFunction`] / [`deoptimize`] 可按名定位最近注册的
+    /// 函数（VM 运行时无法维护通用名字映射，见 `lastFuncName` 说明）。
     fun registerFunction(funcName: String, entryPoint: Int): Int {
         val slot: Int = this.allocateDispatchSlot()
         this.setDispatchEntry(slot, entryPoint)
+        this.lastFuncName = funcName
         return slot
     }
 
-    /// 查找函数的入口点地址。
+    /// 查找函数的入口点地址（按函数名）。
     ///
-    /// 在分派表中按顺序查找。
-    /// 简化实现：线性搜索。
-    /// 实际实现应使用 HashMap 以 O(1) 查找。
+    /// VM 运行时字符串 stdlib 不可用，无法维护「名字 → 槽位」通用映射；
+    /// 这里按最近一次注册的函数名匹配（覆盖单函数 JIT 场景）。
+    /// 未找到返回 0（调用方应回退解释器）。
     fun lookupFunction(funcName: String): Int {
-        // 注意：此实现无法通过函数名查找，因为分派表仅存储入口点地址
-        // 实际实现需要维护 name -> slot 的映射
-        // 简化：返回第一个非零入口点
-        var i: Int = 0
-        while (i < this.dispatchCount) {
-            val entry: Int = this.getDispatchEntry(i)
-            if (entry != 0) {
-                return entry
+        if (funcName == this.lastFuncName) {
+            if (this.lastDispatchSlot >= 0) {
+                return this.getDispatchEntry(this.lastDispatchSlot)
             }
-            i = i + 1
         }
         return 0
+    }
+
+    /// 已发射函数数量。
+    fun functionCount(): Int {
+        return this.funcCount
+    }
+
+    /// 已分配的（非空）分派槽位数量。
+    fun slotCount(): Int {
+        return this.dispatchCount
     }
 
     /// 去优化函数：将函数从 JIT 编译代码回退到 VM 解释执行。
     ///
     /// 流程：
-    ///   1. 查找函数在分派表中的槽位
+    ///   1. 按函数名定位分派槽位（最近注册者）
     ///   2. 将分派表条目置零（禁用入口点）
     ///   3. VM 回退解释执行
     fun deoptimize(functionName: String): Unit {
-        // 线性搜索并禁用
+        // 1. 最近注册者 → 其槽位
+        if (functionName == this.lastFuncName && this.lastDispatchSlot >= 0) {
+            this.setDispatchEntry(this.lastDispatchSlot, 0)
+            return
+        }
+        // 2. 兜底：名字未知时禁用第一个非空槽位（兼容旧调用）。
         var i: Int = 0
         while (i < this.dispatchCount) {
             val entry: Int = this.getDispatchEntry(i)
@@ -454,24 +552,38 @@ class JitBackend {
     /// 返回 JIT 代码布局信息字符串。
     ///
     /// 格式：
-    ///   base=<hex> size=<hex> textStart=<hex> textEnd=<hex>
+    ///   base=<hex> size=<hex> used=<hex> textStart=<hex> textEnd=<hex>
     ///   dataStart=<hex> dataEnd=<hex> entryPoint=<hex>
-    ///   dispatchTable=<hex> functionCount=<int>
+    ///   dispatchTable=<hex> functionCount=<int> mode=<vm|native>
     fun getJitCodeLayout(): String {
+        var mode: String = "native"
+        if (this.vmMode) {
+            mode = "vm"
+        }
         var out: String = ""
         out = out + "base=" + this.intToHex(this.codeBase) + " "
         out = out + "size=" + this.intToHex(this.codeSize) + " "
+        out = out + "used=" + this.intToHex(this.usedSize) + " "
         out = out + "textStart=" + this.intToHex(this.codeBase) + " "
-        out = out + "textEnd=" + this.intToHex(this.codeBase + this.codeSize) + " "
+        out = out + "textEnd=" + this.intToHex(this.codeBase + this.usedSize) + " "
         out = out + "dataStart=00000000 "
         out = out + "dataEnd=00000000 "
         out = out + "entryPoint=" + this.intToHex(this.codeBase) + " "
         out = out + "dispatchTable=00000000 "
-        out = out + "functionCount=" + this.intToStr(this.dispatchCount)
+        out = out + "functionCount=" + this.intToStr(this.funcCount) + " "
+        out = out + "mode=" + mode
         return out
     }
 
     // ── 内部辅助 ──
+
+    /// 对 16 取模（非负）。
+    fun mod16(n: Int): Int {
+        if (n <= 0) {
+            return 0
+        }
+        return n - (n / 16) * 16
+    }
 
     /// 将值对齐到页粒度（向上取整）。
     fun alignToPage(value: Int): Int {
@@ -585,10 +697,30 @@ object JitBackendUtils {
         return 65536 // 64 KB
     }
 
-    /// 默认 JIT 后端配置。
+    /// 默认 JIT 后端配置（VM 安全：模拟分配，不触碰 Memory）。
     fun defaultJitBackend(): JitBackend {
         return JitBackend()
     }
+
+    /// 原生 JIT 后端配置（关闭 VM 模拟，真实 W^X 分配）。
+    ///
+    /// **仅可在 AOT / 自举（原生）运行时使用**；种子 VM 下会因
+    /// `Memory` 不可解析而崩溃，请改用 [`defaultJitBackend`]。
+    fun nativeJitBackend(): JitBackend {
+        val b: JitBackend = JitBackend()
+        b.enableNativeExec()
+        return b
+    }
+
+    /// 判断当前运行环境是否具备原生内存能力（`Memory` extern）。
+    ///
+    /// 纯 Aura 无法在运行期可靠探测（探测本身就会触发不可解析调用），
+    /// 因此由入口显式传入：默认返回 false（VM 安全）。
+    fun nativeRuntimeAvailable(): Boolean {
+        return false
+    }
+
+    // ── 整数解析 ──
 
     /// 简单整数解析（不使用 charCodeAt）。
     fun parseSimpleInt(text: String): Int {
@@ -747,24 +879,6 @@ object JitBackendUtils {
             n = n / 10
         }
         return result
-    }
-
-    /// 拆分 dispatchEntries 字符串，返回条目数量。
-    fun splitEntries(): Int {
-        if (this.dispatchEntries == "") {
-            return 0
-        }
-        var count: Int = 1
-        var i: Int = 0
-        val len = this.dispatchEntries.length
-        while (i < len) {
-            val c: Int = this.dispatchEntries[i]
-            if (c == 44) { // ','
-                count = count + 1
-            }
-            i = i + 1
-        }
-        return count
     }
 
     /// 从逗号分隔字符串中取第 index 个字段值。

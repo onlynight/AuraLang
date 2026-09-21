@@ -21,7 +21,8 @@ Set-Location $Root
 # Find aura binary
 if (-not $AuraBin) {
     foreach ($c in @(
-        'AuraLangWithRust\target\debug\aura.exe',
+        'rust\target\release\aura.exe',
+        'rust\target\debug\aura.exe',
         'aura\seed\aura.exe',
         'target\debug\aura.exe'
     )) {

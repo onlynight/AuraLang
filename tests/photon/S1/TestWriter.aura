@@ -1,8 +1,8 @@
 // Test PhotonObjectWriter directly
 package aura.lang.compiler.backend.photon
 import aura.lang.std.String
-import "PhotonObjectWriter.aura"
-import "x86_64/X86Encoder.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/PhotonObjectWriter.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/x86_64/X86Encoder.aura"
 
 fun main() {
     val writer = PhotonObjectWriter()

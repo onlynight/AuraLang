@@ -307,7 +307,7 @@ class PhotonObjectWriter {
 
     /// 判断符号是否由本模块定义（函数名，或 `@str.N` 形式的字符串常量）。
     private fun isDefinedSymbol(name: String): Boolean {
-        if (name.startsWith("@str.")) {
+        if (this.hasPrefix(name, "@str.")) {
             return true
         }
         val funcs: List<String> = this.splitComma(this.functions)
@@ -636,6 +636,154 @@ class PhotonObjectWriter {
         return out
     }
 
+    // ── 种子 VM 安全的字符串原语 ──
+    //
+    // 背景：经 `aura/seed/aura.exe`（字节码 VM）执行时，stdio/stdlib 里的
+    // `String.substring` / `String.charCodeAt` / `String.startsWith` / `List.get`
+    // 都是**未链接外部函数**（`[vm] Unlinked external function`），一律返回
+    // 默认值 —— `substring(...)` 恒返回 `"0"`、`charCodeAt(...)` 恒返回 0 号字符的
+    // 码值。实测可用的只有 `s[i]` 索引、`s.length`、`==` 与 `+`。
+    //
+    // 因此 COFF 组装不能依赖上述方法，这里用「索引 + 已知字符表」重建它们。
+
+    /// 取第 i 个字符（1 字符字符串）；越界返回空串。
+    private fun chAt(s: String, i: Int): String {
+        if (i < 0 || i >= s.length) {
+            return ""
+        }
+        return s[i]
+    }
+
+    /// 判断 `s` 在 `i` 处是否为字符 `c`。
+    private fun chEq(s: String, i: Int, c: String): Boolean {
+        return this.chAt(s, i) == c
+    }
+
+    /// 判断 `s` 在 `i` 处是否为 `";;"`（符号条目分隔符）。
+    private fun isDoubleSemi(s: String, i: Int): Boolean {
+        return this.chEq(s, i, ";") && this.chEq(s, i + 1, ";")
+    }
+
+    /// 切片 `[start, end)`（`substring` 的种子 VM 安全替代）。
+    private fun sliceOf(s: String, start: Int, end: Int): String {
+        var out: String = ""
+        var i: Int = start
+        var e: Int = end
+        if (i < 0) { i = 0 }
+        if (e > s.length) { e = s.length }
+        while (i < e) {
+            out = out + s[i]
+            i = i + 1
+        }
+        return out
+    }
+
+    /// 判断 `s` 是否以 `prefix` 开头（`startsWith` 的种子 VM 安全替代）。
+    private fun hasPrefix(s: String, prefix: String): Boolean {
+        if (prefix.length > s.length) {
+            return false
+        }
+        var i: Int = 0
+        while (i < prefix.length) {
+            if (s[i] != prefix[i]) {
+                return false
+            }
+            i = i + 1
+        }
+        return true
+    }
+
+    /// 取字符的 ASCII 码（`charCodeAt` 的种子 VM 安全替代）。
+    ///
+    /// 实现为「已知字符表 + 线性查找」：可打印 ASCII 被切成若干连续段，
+    /// 段内 `code = base + index`。未收录字符（如反引号）返回 -1，
+    /// 由调用方降级为 `00`。
+    private fun codeOf(c: String): Int {
+        if (c == "") { return -1 }
+        if (c == " ") { return 32 }
+        if (c == "!") { return 33 }
+        if (c == "\"") { return 34 }
+        if (c == "#") { return 35 }
+        if (c == "$") { return 36 }
+        if (c == "[") { return 91 }
+        if (c == "\\") { return 92 }
+        if (c == "]") { return 93 }
+        if (c == "^") { return 94 }
+        if (c == "_") { return 95 }
+        if (c == "{") { return 123 }
+        if (c == "|") { return 124 }
+        if (c == "}") { return 125 }
+        if (c == "~") { return 126 }
+
+        var i: Int = 0
+        val seg1: String = "%&'()*+,-./"
+        while (i < seg1.length) {
+            if (c == seg1[i]) { return 37 + i }
+            i = i + 1
+        }
+        val digits: String = "0123456789"
+        i = 0
+        while (i < digits.length) {
+            if (c == digits[i]) { return 48 + i }
+            i = i + 1
+        }
+        val seg2: String = ":;<=>?@"
+        i = 0
+        while (i < seg2.length) {
+            if (c == seg2[i]) { return 58 + i }
+            i = i + 1
+        }
+        val upper: String = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        i = 0
+        while (i < upper.length) {
+            if (c == upper[i]) { return 65 + i }
+            i = i + 1
+        }
+        val lower: String = "abcdefghijklmnopqrstuvwxyz"
+        i = 0
+        while (i < lower.length) {
+            if (c == lower[i]) { return 97 + i }
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// 码值 → 2 位 hex（无效码值降级为 `00`）。
+    private fun byteHex(code: Int): String {
+        if (code < 0 || code > 255) {
+            return "00"
+        }
+        return this.hexDigit(code / 16) + this.hexDigit(code % 16)
+    }
+
+    /// 十进制数字字符 → 数值（非数字返回 0）。
+    private fun digitOf(c: String): Int {
+        var i: Int = 0
+        val digits: String = "0123456789"
+        while (i < digits.length) {
+            if (c == digits[i]) { return i }
+            i = i + 1
+        }
+        return 0
+    }
+
+    /// 十六进制数字字符 → 数值（无效返回 0）。
+    private fun hexValOf(c: String): Int {
+        var i: Int = 0
+        val lower: String = "0123456789abcdef"
+        while (i < lower.length) {
+            if (c == lower[i]) { return i }
+            i = i + 1
+        }
+        val upper: String = "0123456789ABCDEF"
+        i = 0
+        while (i < upper.length) {
+            if (c == upper[i]) { return i }
+            i = i + 1
+        }
+        return 0
+    }
+
     // ── 辅助方法 ──
 
     /// 计算节数量。
@@ -665,7 +813,7 @@ class PhotonObjectWriter {
         var i: Int = 0
         var len: Int = this.symbols.length
         while (i < len - 1) {
-            if (this.symbols.substring(i, i + 2) == ";;") {
+            if (this.isDoubleSemi(this.symbols, i)) {
                 count = count + 1
                 start = i + 2
             }
@@ -711,8 +859,7 @@ class PhotonObjectWriter {
         var out: String = ""
         var i: Int = 0
         while (i < text.length) {
-            val c: Int = text.substring(i, i + 1).charCodeAt(0)
-            out = out + this.hexDigit(c / 16) + this.hexDigit(c % 16)
+            out = out + this.byteHex(this.codeOf(text[i]))
             i = i + 1
         }
         // 填充
@@ -729,8 +876,7 @@ class PhotonObjectWriter {
         var out: String = ""
         var i: Int = 0
         while (i < name.length && i < len) {
-            val c: Int = name.substring(i, i + 1).charCodeAt(0)
-            out = out + this.hexDigit(c / 16) + this.hexDigit(c % 16)
+            out = out + this.byteHex(this.codeOf(name[i]))
             i = i + 1
         }
         while (out.length < len * 2) {
@@ -752,7 +898,7 @@ class PhotonObjectWriter {
         return out
     }
 
-    /// 按分号分割（用于符号条目）。
+    /// 按 `;;` 分割（用于符号条目）。
     private fun splitDoubleSemi(text: String): List<String> {
         val result: List<String> = arrayListOf<String>()
         if (text == "") {
@@ -762,14 +908,14 @@ class PhotonObjectWriter {
         var i: Int = 0
         var len: Int = text.length
         while (i < len - 1) {
-            if (text.substring(i, i + 2) == ";;") {
-                result.add(text.substring(start, i))
+            if (this.isDoubleSemi(text, i)) {
+                result.add(this.sliceOf(text, start, i))
                 start = i + 2
             }
             i = i + 1
         }
         if (start < len) {
-            result.add(text.substring(start, len))
+            result.add(this.sliceOf(text, start, len))
         }
         return result
     }
@@ -784,14 +930,14 @@ class PhotonObjectWriter {
         var i: Int = 0
         var len: Int = text.length
         while (i < len) {
-            if (text.substring(i, i + 1).charCodeAt(0) == 124) {  // '|'
-                result.add(text.substring(start, i))
+            if (this.chEq(text, i, "|")) {
+                result.add(this.sliceOf(text, start, i))
                 start = i + 1
             }
             i = i + 1
         }
         if (start < len) {
-            result.add(text.substring(start, len))
+            result.add(this.sliceOf(text, start, len))
         }
         return result
     }
@@ -806,14 +952,14 @@ class PhotonObjectWriter {
         var i: Int = 0
         var len: Int = text.length
         while (i < len) {
-            if (text.substring(i, i + 1).charCodeAt(0) == 44) {  // ','
-                result.add(text.substring(start, i))
+            if (this.chEq(text, i, ",")) {
+                result.add(this.sliceOf(text, start, i))
                 start = i + 1
             }
             i = i + 1
         }
         if (start < len) {
-            result.add(text.substring(start, len))
+            result.add(this.sliceOf(text, start, len))
         }
         return result
     }
@@ -824,9 +970,9 @@ class PhotonObjectWriter {
         var total: Int = 0
         var neg: Boolean = false
         var i: Int = 0
-        if (text.charCodeAt(0) == 45) { neg = true; i = 1 }
+        if (this.chEq(text, 0, "-")) { neg = true; i = 1 }
         while (i < text.length) {
-            total = total * 10 + (text.substring(i, i + 1).charCodeAt(0) - 48)
+            total = total * 10 + this.digitOf(text[i])
             i = i + 1
         }
         if (neg) { return -total }
@@ -839,12 +985,7 @@ class PhotonObjectWriter {
         var total: Int = 0
         var i: Int = 0
         while (i < text.length) {
-            val c: Int = text.substring(i, i + 1).charCodeAt(0)
-            var digit: Int = 0
-            if (c >= 48 && c <= 57) { digit = c - 48 }       // 0-9
-            else if (c >= 97 && c <= 102) { digit = c - 87 }  // a-f
-            else if (c >= 65 && c <= 70) { digit = c - 55 }   // A-F
-            total = total * 16 + digit
+            total = total * 16 + this.hexValOf(text[i])
             i = i + 1
         }
         return total
@@ -900,14 +1041,14 @@ class PhotonObjectWriter {
         var i: Int = 0
         var len: Int = text.length
         while (i < len) {
-            if (text.substring(i, i + 1).charCodeAt(0) == 44) {  // ','
-                result.add(text.substring(start, i))
+            if (this.chEq(text, i, ",")) {
+                result.add(this.sliceOf(text, start, i))
                 start = i + 1
             }
             i = i + 1
         }
         if (start < len) {
-            result.add(text.substring(start, len))
+            result.add(this.sliceOf(text, start, len))
         }
         return result
     }

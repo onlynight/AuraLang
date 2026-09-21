@@ -1,9 +1,10 @@
-﻿// aura:///aura/lang/compiler/backend/photon/PhotonPipelineTest2.aura
+// aura:///aura/lang/compiler/backend/photon/PhotonPipelineTest2.aura
 package aura.lang.compiler.backend.photon
 import aura.lang.std.String
-import "MachineDag.aura"
-import "RegisterAllocator.aura"
-import "X86Encoder.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/MachineDag.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/RegisterAllocator.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/x86_64/X86Encoder.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/X86Emitter.aura"
 
 fun main() {
     println("═══ S1 Test ═══")

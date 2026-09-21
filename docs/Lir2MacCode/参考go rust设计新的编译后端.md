@@ -2713,6 +2713,26 @@ MIR (SSA, CFG, memory chain, 新增)
 > **已落地**：exe 链接冒烟 —— `lld-link /SUBSYSTEM:CONSOLE /ENTRY:main /MACHINE:X64 /NODEFAULTLIB`
 > + `kernel32.Lib`，产物 `hello.exe`(1536B) 运行输出 `hello world`、退出码 0；
 > 链接器探测（`AURA_LINKER` → `aura.toml [lld]` → PATH）已实现于 `PhotonLldConfig.aura`。
+>
+> **2026-09-21 修复（本机实测通过，`powershell -File scripts/build-photon-hello.ps1`）**：
+> 1. **COFF 组装在种子 VM 下曾整体失效** —— `PhotonObjectWriter` 的
+>    `padSectionName` / `asciiToHex` / `splitPipe` / `splitComma` / `strToInt` /
+>    `hexToInt` / `isDefinedSymbol` 全部建立在 `String.substring` / `charCodeAt` /
+>    `startsWith` 之上，而这些在种子 VM 下是**未链接外部函数**（返回默认值），
+>    产物因此是「节名 `00000`、符号表空、`.rdata` 无内容」的畸形 COFF
+>    （lld 报 `string table empty`）。已改为基于 `s[i]` 索引 + 已知字符表
+>    （`chAt` / `chEq` / `sliceOf` / `hasPrefix` / `codeOf`）的种子 VM 安全实现。
+>    修复后 `llvm-readobj` 校验：节名 `.text` / `.rdata`、3 个符号
+>    （`main`(text,EXT) / `@str.0`(rdata,STATIC) / `println`(UNDEF,EXT)）、
+>    `.rdata` 12 字节 = `"hello world\0"`。
+> 2. **lld 解析改由构建脚本读 `aura.toml`** —— Aura 侧 `PhotonLldConfig` 同样
+>    依赖上述不可用方法，只能退回裸工具名 `lld-link.exe`；脚本现按
+>    `-Lld` > 驱动实际路径 > `aura.toml [lld]` > PATH 的优先级解析
+>    （注意：读取 manifest 必须显式 UTF-8，否则 PS 5.1 按 ANSI 解码会把 `[lld]`
+>    段头与前一行中文注释**粘连**而解析不到）。
+> 3. 驱动退出码不可靠（`Process.exit` 在种子 VM 下也是未链接外部函数），
+>    脚本改为以 `===MAIN===` / `===RUNTIME===` 标记判定成功。
+
 > **待做**：`.dll` / `.so` / `.dylib` / `.lib` / `.a` 输出、`aura_runtime` 正式库、CRT / `_start` 入口点适配、CLI 接线。
 
 | 任务 | 文件 | 状态 | 关联 | 预估 |
@@ -2773,7 +2793,7 @@ S1 交付 Windows `.exe`；库产物属 S2 / S4。
 | **E1** | **指令编码 → 裸机器码** | ✅ **已落地**（缺 DAG → 编码驱动器，属 S1.5） | **1 周** |
 | **E2** | **目标文件生成（COFF / ELF）** | 🚧 **COFF 单函数已落地；多函数与 ELF 未开始**（S1 只需单函数，多函数属 S2） | **2 周** |
 | **E3** | **平台产物链接（exe / dll / so / dylib / lib / a）** | 🚧 **exe 冒烟已通过；S1.6/S1.8/S1.9 已接线**；**静态库命令生成已落地**；入口点与动态库仍未开始 | **1-2 周** |
-| F | JIT 路径 | 🚧 **JitBackend VM 模式桥接已完成**（`vmMode` 下 `emitFunction` / `registerFunction` / 存根生成 / 去优化全部通过验证，13 assertions）；`compileEncodeOnly` 已添加到 PhotonPipeline（仅编码无 COFF/link），但 VM 下 `object` 方法调用受限；Cranelift FFI 集成需 Rust 侧 | 2-3 周 |
+| F | JIT 路径 | 🚧 **Photon JIT 已接线（含真实执行原语）**：`compileEncodeOnly` / `compileJit` 在 VM 下可用；`JitBackend` 默认 VM 安全（`vmMode=true`，不触碰 `Memory`），`emitFunction` 多函数共享可执行内存 + 按名分派 / 去优化；新增 `JitExec.call0/callI64` + `aot/Emit.aura` 2.86 调用点降级（纯 IR `inttoptr` + 间接 `call`，零外部符号、AOT 产物不变）实现「调用 JIT 入口」；CLI `-b jit [--jit-native]`；`tests/photon/S3/08_jit_pipeline_test.aura` 33 assertions 全通过。**待环境验证**：真实执行的端到端运行需 LLVM 工具链产出原生 exe | 1 周 |
 | G | 优化 Pass 扩展 | 🚧 `MirOpt.aura` 部分落地；**基础 GVN 去重已接入**（相同 kind/text 节点可复用）；**PeepholeOptimizer 模板已修复**（`@imm`→`$imm`、`@target`→`$target`、`NOP`→`nop`）；X86Emitter 新增 `shl`/`shr`/`div` 发射 | 2 周 |
 | H | aarch64（可选） | ❌ 未开始 | 3-4 周 |
 | **剩余总计（S1 + S2）** | **打通"真实 codegen → exe / 库"（含 G 的真实化；不含 S3 / F / H）** | | **5-8 周** |
@@ -2860,8 +2880,10 @@ n2 == n1  （自举一致性）
 
 - `compileHir()` 虽已串通 8 步数据流并正确链接，但尚未经由**真实 Aura 源码编译**端到端验证（当前用简单函数 `fun main() { return 42 }` 测试）；
 - 上述 COFF / 链接结果来自 `PhotonRuntime.emitPrintMain()` / `emitPrintln()` 的**手写机器码**，不是真实 Aura 源码走完六步管线的产物（端到端差分测试已建立，待 stdlib .auc 修复后可运行）；
-- **JIT `compileMachineCode` 在 VM 下不可用**：`compileEncodeOnly` 调用 `SsaBuilderUtils.build()` / `InstructionSelectorUtils.emptySelector()` 等 `object` 方法，VM 字节码编译器无法解析（`未解析的函数调用`）；需 AOT/自举模式或改为 `class` 方法；
-- **JIT 原生码端到端执行未打通**：`vmMode` 下 `emitFunction` 仅模拟地址分配（`simNextAddr`），未实际写入可执行内存（`Memory.alloc` / `Memory.write` / `Memory.mprotect` 在 VM 下不可用）；
+- ✅ **JIT 编码在 VM 下可用**（2026-09-21 修复）：`compileEncodeOnly` / `compileJit` 本身可被种子 VM 执行，此前的失败是**测试未显式导入依赖闭包**导致 `Lexer` / `Ast` / `SsaBuilderUtils` 等符号在按需注册下不可见（`未解析的函数调用`），进而运行期 `call to undefined function #65535`。`tests/photon/S3/08_jit_pipeline_test.aura` 现以完整闭包显式导入并跑通 30 条断言；
+- ✅ **JIT 内存路径不再在 VM 下崩溃**：`JitBackend.vmMode` 默认 `true`（VM 安全：地址 / 写入均为模拟），`Memory.alloc/write/mprotect` 仅在 `enableNativeExec()`（AOT / 自举）后才被触碰；`emitFunction` 改为多函数共享一块可执行内存（16 字节对齐顺序追加），`lookupFunction` / `deoptimize` 支持按函数名定位，CLI `-b jit` 已由「Rust FFI 报错」改为 Photon JIT 路径；
+- ✅ **JIT 原生码「真实执行」原语已就位**（2026-09-21）：新增 `aura/lang/native/JitExec.aura`（`extern object JitExec { call0 / callI64 }`）作为「调用函数指针」的声明；`aot/Emit.aura` 对 `JitExec.*` 的**调用点**发射纯 IR 的 `inttoptr` + 间接 `call`（2.86 分支 + `inferType` 分支），不引用任何外部符号，因此无需改 `aura_syscalls.c`，且未使用该入口的程序 AOT 产物逐字节不变。`JitBackend.executeNative / executeNative0` 在 `vmMode == true` 时短路返回 0（种子 VM 下永不触碰 extern），`-b jit --jit-native` 显式开启原生执行；
+- ⏳ **真实执行的端到端验证受环境限制**：需 LLVM 工具链（`llc` / `clang` / `lld-link`）产出原生 exe 才能运行；当前验证覆盖 VM 侧全部管线断言 + `executeNative` 空操作 + AOT 产物不变性（调用点精确命中）；
 - **E3 动态库 / runtime 正式库 / entry point 适配**：`linkDll` / `linkStaticLib` 仅生成命令字符串，未实际执行；`aura_runtime` 正式库未开始；CRT 入口点（`mainCRTStartup` / `_start`）未适配。
 
 #### 15.12.5 分阶段计划（S1–S4）

@@ -61,6 +61,7 @@ import aura.lang.compiler.aot.ModuleLink
 
 // Photon 后端
 import aura.lang.compiler.backend.photon.PhotonPipeline
+import aura.lang.compiler.backend.photon.JitBackend
 
 // JIT 后端
 import aura.lang.compiler.jit.JitUtil
@@ -269,6 +270,52 @@ object MainUtils {
             "\n--- machine code ---\n" + result.machineCodeHex
     }
 
+    /// 源码 → Photon JIT：HIR → 机器码 → 分派表（可选真实执行）。
+    ///
+    /// 数据流与 [`photonCompileSource`] 相同（Phase A–E），但只做**指令编码**
+    /// （不组装 COFF、不链接），产物交给 `JitBackend.emitFunction` 写入内存。
+    ///
+    /// `native` 为 true 时开启**真实执行**：`Memory.alloc` / `Memory.write` /
+    /// `Memory.mprotect` 与 `JitExec.callI64` 都是 `extern` 声明，**仅在
+    /// AOT / 自举（原生）运行时可用**；种子 VM 下会以
+    /// `call to undefined function #65535` 崩溃。因此该开关默认关闭：
+    ///
+    ///   * `native == false`（默认）→ VM 安全：地址 / 写入为模拟值，不执行；
+    ///   * `native == true`（CLI `-b jit --jit-native`）→ 真实 W^X 写入 + 调用。
+    fun photonJitSource(source: String, native: Boolean): String {
+        val hir = MainUtils.sourceToHir(source)
+        val backend = JitBackend()
+        if (native) {
+            backend.enableNativeExec()
+        }
+
+        val hex: String = backend.compileMachineCode(hir, "build/photon", "jit_main")
+        if (hex == "") {
+            return "success=false reason=empty-machine-code"
+        }
+
+        val entry: Int = backend.emitFunction("main", hex)
+        val slot: Int = backend.registerFunction("main", entry)
+        var mode: String = "vm-safe"
+        if (!backend.isVmMode()) {
+            mode = "native"
+        }
+
+        var out: String = "success=" + toStr(entry != 0) +
+            " mode=" + mode +
+            " bytes=" + toStr(hex.length / 2) +
+            " entry=" + toStr(entry) +
+            " slot=" + toStr(slot)
+
+        // 真实执行：仅在原生模式下发生（VM 模式下 executeNative 直接返回 0）。
+        if (!backend.isVmMode() && entry != 0) {
+            val result: Int = backend.executeNative0(entry)
+            out = out + " result=" + toStr(result)
+        }
+
+        return out + "\n--- machine code ---\n" + hex
+    }
+
     /// 源码 → 原生可执行文件。
     fun aotBuildExeSource(source: String, moduleName: String, outDir: String,
                           llvmHome: String): AotExeResult {
@@ -394,7 +441,7 @@ object MainUtils {
     ///
     /// - `vm`      → 完整编译并解释执行（`compileAndRun`）
     /// - `aot`     → HIR → LLVM IR 文本 + llc/clang 命令摘要
-    /// - `jit`     → 对叶子函数 `square(x)` 做 JIT 编译并执行（无则回退说明）
+    /// - `jit`     → Photon JIT：HIR → MIR → LIR → DAG → RegAlloc → Encode（裸机器码）
     /// - `photon`  → S1: HIR → MIR → LIR → DAG → RegAlloc → Encode → COFF
     fun compileWith(source: String, backend: String): String {
         if (backend == "aot") {
@@ -403,9 +450,7 @@ object MainUtils {
                 " irLines=" + toStr(r.irLines) + " hasMain=" + toStr(r.hasMain) +
                 "\n--- llvm ir ---\n" + r.llvmIr
         } else if (backend == "jit") {
-            println("ERROR: JIT backend requires Rust toolchain (AuraLangWithRust/). " +
-                    "Use -b vm, -b aot, or -b photon instead.")
-            return ""
+            return MainUtils.photonJitSource(source, false)
         } else if (backend == "photon") {
             return MainUtils.photonCompileSource(source)
         }
@@ -462,9 +507,11 @@ object MainUtils {
             "      aura-compiler --selftest              Run compiler self-test\n" +
             "      aura-compiler                         Print usage\n" +
             "\nOptions:\n" +
-            "  -b <backend>    Backend: vm (default), photon, aot\n" +
+            "  -b <backend>    Backend: vm (default), photon, jit, aot\n" +
             "  -o <output>     Output path\n" +
-            "  --mem-trace     Enable memory tracing (AOT)\n"
+            "  --mem-trace     Enable memory tracing (AOT)\n" +
+            "  --jit-native    JIT: real W^X write + native call (requires an\n" +
+            "                  AOT/self-hosted build; unavailable under the seed VM)\n"
     }
 
     /// CLI 模式：读取命令行参数 → 读源文件 → AOT 产出原生可执行文件。
@@ -475,6 +522,8 @@ object MainUtils {
         var backend: String = "vm"
         var trace: Boolean = false
         var outputType: String = "exe"
+        // JIT 真实执行开关（仅 AOT / 自举运行时可用；见 photonJitSource）。
+        var jitNative: Boolean = false
         // Same base offset as main(): skip "exe" and subcommand when invoked via CLI.
         var base: Int = 0
         if (argc >= 3 && Process.arg(1) == "run") {
@@ -509,6 +558,8 @@ object MainUtils {
                 outputType = "lib"
             } else if (a == "--mem-trace") {
                 trace = true
+            } else if (a == "--jit-native") {
+                jitNative = true
             } else if (a == "-h" || a == "--help") {
                 println(MainUtils.cliUsage())
                 return
@@ -537,6 +588,14 @@ object MainUtils {
         if (backend == "photon") {
             println(MainUtils.banner() + " — Photon AOT compilation " + inputPath)
             photonBuildExeFile(inputPath, stem, outDir, trace, outputType)
+            return
+        }
+
+        // JIT：源码 → Photon 裸机器码 → 分派表（不链接、不落盘 exe）
+        if (backend == "jit") {
+            println(MainUtils.banner() + " — Photon JIT compilation " + inputPath)
+            val src: String = FileSystem.readText(inputPath)
+            println(MainUtils.photonJitSource(src, jitNative))
             return
         }
 

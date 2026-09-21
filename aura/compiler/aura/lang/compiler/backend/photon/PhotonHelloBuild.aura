@@ -23,6 +23,7 @@ package aura.lang.compiler.backend.photon
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
+import aura.lang.std.Process
 import "PhotonObjectWriter.aura"
 import "PhotonRuntime.aura"
 import "PhotonSystemLinker.aura"
@@ -78,4 +79,17 @@ fun main() {
 
     println("===LINK-ARGS===")
     println(linker.buildArgumentList())
+
+    // 显式 0 退出（仅为原生运行时的语义正确性；脚本不据此判定成功）。
+    //
+    // 说明一 —— 退出码：种子 VM 下 `Process.exit` 也是未链接外部函数，
+    // 进程实际以 1 退出，因此 `scripts/build-photon-hello.ps1` **不**看退出码，
+    // 而以是否产出 `===MAIN===` / `===RUNTIME===` 标记来判定成功。
+    //
+    // 说明二 —— `getLldPath()` / `buildArgumentList()` 在种子 VM 下返回空串：
+    // `PhotonLldConfig` 依赖 `String.substring` / `indexOf` / `startsWith`，
+    // 而种子 VM 未能加载 stdlib `String.auc`（`Unlinked external function`），
+    // 这些方法一律返回默认值。构建脚本因而在 PowerShell 侧直接读 `aura.toml`
+    // 的 `[lld]` 段补齐链接器路径与链接参数。
+    Process.exit(0)
 }

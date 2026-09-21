@@ -5,12 +5,12 @@ package aura.lang.compiler.backend.photon
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
-import "Lir.aura"
-import "MachineDag.aura"
-import "InstructionSelection.aura"
-import "RegisterAllocator.aura"
-import "X86Emitter.aura"
-import "PhotonObjectWriter.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/Lir.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/MachineDag.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/InstructionSelection.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/RegisterAllocator.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/X86Emitter.aura"
+import "../../../aura/compiler/aura/lang/compiler/backend/photon/PhotonObjectWriter.aura"
 
 fun main() {
     println("╔══════════════════════════════════════════════╗")
