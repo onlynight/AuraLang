@@ -4324,6 +4324,29 @@ impl Checker {
                         }
                     };
                 }
+                // 内建集合类型（List/ArrayList/MutableList/Array/Set）的成员访问
+                // sema 可能把 List<String> 推断为 Ty::Named("List") 而非 Ty::List(elem)
+                let is_builtin_coll = type_name == "List"
+                    || type_name == "ArrayList"
+                    || type_name == "MutableList"
+                    || type_name == "Array"
+                    || type_name == "Set";
+                if is_builtin_coll {
+                    return match name {
+                        "size" | "count" => Ty::Int,
+                        "isEmpty" => Ty::Boolean,
+                        "first" | "last" => Ty::Any,
+                        "get" | "getAt" => Ty::Any,
+                        "set" => Ty::Unit,
+                        "add" | "push" | "append" => Ty::Unit,
+                        "contains" => Ty::Boolean,
+                        "indexOf" => Ty::Int,
+                        _ => {
+                            self.report(span, format!("unresolved member '{}' on {}", name, type_name));
+                            Ty::Error
+                        }
+                    };
+                }
                 // struct/enum 字段
                 let field = format!("{}.{}", type_name, name);
                 if let Some(t) = self.lookup_var_ty(&field) {

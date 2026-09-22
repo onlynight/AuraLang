@@ -105,7 +105,16 @@ impl Value {
         Value::Ptr(p)
     }
 
-    /// 取出字符串内容（非字符串类型返回其 Display 文本）
+    /// 取出字符串内容（非字符串类型返回其 Display 文本）。
+    ///
+    /// ⚠ 这里**不能**把 `Ptr` 一律按 C 字符串解读（曾如此实现）：VM 里存在
+    /// 大量非字符串指针（FFI 句柄、缓冲区句柄、内部结构体地址），无条件解引用
+    /// 会静默段错误（实测自举 `--selftest` 在 Example 1 直接终止）。
+    ///
+    /// 项目 ABI 确实是「Aura `String` ≡ NUL 结尾的 `i8*`」（见
+    /// `aura/lang/native/io/Stdio.aura::bufferToString` 注释），但适配必须
+    /// **按声明类型**在边界处做（形参/返回值声明为 `String`/`CString` 的位置），
+    /// 即利用 `native.param_types` / 函数签名，而不是靠「值是不是 Ptr」来猜。
     pub fn as_string(&self) -> String {
         match self {
             Value::Str(s) => s.to_string(),

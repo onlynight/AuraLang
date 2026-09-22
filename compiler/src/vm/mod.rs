@@ -1719,6 +1719,26 @@ impl Vm {
         }
         let current_co =
             if self.frames.is_empty() { 0 } else { self.frames.last().unwrap().coroutine_id };
+        // 诊断（2026-09-23）：按函数名子串打印**形参个数 vs 实参个数**，
+        // 用于判定调用约定问题（典型：object 方法到底带不带 self）。
+        // 打开方式：`AURA_VM_ARGS=strlen`。
+        {
+            use std::sync::OnceLock;
+            static FILTER: OnceLock<Option<String>> = OnceLock::new();
+            let filter = FILTER.get_or_init(|| std::env::var("AURA_VM_ARGS").ok());
+            if let Some(pat) = filter {
+                let fname = self.module.funcs[func_idx].name.clone();
+                if fname.contains(pat.as_str()) {
+                    eprintln!(
+                        "[vm] args: func={} param_count={} argc={} args={:?}",
+                        fname,
+                        self.module.funcs[func_idx].param_count,
+                        args.len(),
+                        args.iter().map(|v| v.to_string()).collect::<Vec<_>>()
+                    );
+                }
+            }
+        }
         let mut frame = Frame::new(&self.module.funcs[func_idx], args, current_co);
         frame.func = func_idx;
         self.frames.push(frame);

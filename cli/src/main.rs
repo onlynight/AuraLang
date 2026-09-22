@@ -311,6 +311,7 @@ fn cmd_build_photon(args: &[String]) {
     }
 
     let output = extract_opt(args, "--output");
+    let link = args.iter().any(|a| a == "--link");
     let input = match first_positional(args, "--output") {
         Some(p) => p,
         None => {
@@ -375,12 +376,12 @@ fn cmd_build_photon(args: &[String]) {
     println!("  模块名:   {}", module_name);
     println!("  HIR 函数数: {}", hir.functions.len());
 
-    // HIR → HIR JSON 输出（用于调试）
-    let out_path = output.unwrap_or_else(|| {
+    // .phir 输出路径
+    let phir_path = output.unwrap_or_else(|| {
         let path = std::path::Path::new(input);
         let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "output".to_string());
         let parent = path.parent().unwrap_or(std::path::Path::new("."));
-        parent.join(stem).with_extension("photon.hir").to_string_lossy().to_string()
+        parent.join(stem).with_extension("phir").to_string_lossy().to_string()
     });
 
     // 输出 HIR 摘要
@@ -404,32 +405,72 @@ fn cmd_build_photon(args: &[String]) {
         );
     }
 
-    // 写 HIR 摘要到文件
-    let mut hir_text = String::new();
-    hir_text.push_str(&format!("# Photon HIR for module: {}\n", module_name));
-    hir_text.push_str(&format!("# Functions: {}\n\n", hir.functions.len()));
-    for (i, func) in hir.functions.iter().enumerate() {
-        let params: Vec<String> = func
-            .params
-            .iter()
-            .map(|p| {
-                let ty_name = p.ty.as_ref().map(|t| hir_type_name(t)).unwrap_or_else(|| "Any".to_string());
-                format!("{}: {}", p.name, ty_name)
-            })
-            .collect();
-        let ret_name = func.ret.as_ref().map(|t| hir_type_name(t)).unwrap_or_else(|| "Unit".to_string());
-        hir_text.push_str(&format!(
-            "fun {}({}): {}\n",
-            func.name,
-            params.join(", "),
-            ret_name
-        ));
+    // ── HIR → .phir 文本（直接序列化，无 JSON 中间步骤）──
+    let phir_text = hir_to_phir(&hir, &module_name, &input);
+
+    if let Err(e) = std::fs::write(&phir_path, &phir_text) {
+        eprintln!("Warning: failed to write .phir output {}: {}", phir_path, e);
+    } else {
+        println!("  .phir 输出: {} ({} 字符)", phir_path, phir_text.len());
     }
 
-    if let Err(e) = std::fs::write(&out_path, hir_text) {
-        eprintln!("Warning: failed to write HIR output {}: {}", out_path, e);
+    // ── Phase 1: 调用 Photon 后端（通过外部驱动）──
+    println!("\n[Phase 1] 调用 Photon 后端...");
+    
+    // 查找 aura.exe 路径
+    let aura_exe = std::env::current_exe()
+        .unwrap_or_default()
+        .parent()
+        .map(|p| p.join("aura.exe"))
+        .unwrap_or_default();
+    
+    if aura_exe.exists() {
+        // 构建驱动参数
+        let driver_path = "aura/compiler/aura/lang/compiler/backend/photon/PhotonDriver.aura";
+        
+        let mut cmd = std::process::Command::new(&aura_exe);
+        cmd.args(["run", driver_path]);
+        cmd.env("AURA_PHOTON_PHIR", &phir_path);
+        cmd.env("AURA_PHOTON_OUT", "build/photon_test");
+        cmd.env("AURA_PHOTON_MODULE", &module_name);
+        
+        println!("  调用驱动: {}", driver_path);
+        println!("  .phir 文件: {}", phir_path);
+        println!("  输出目录: build/photon_test");
+        println!("  模块名: {}", module_name);
+        
+        let output = cmd.output();
+        match output {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                
+                if !stderr.is_empty() {
+                    // 只显示非调试信息
+                    for line in stderr.lines() {
+                        if !line.contains("[debug]") && !line.contains("semantic warning") {
+                            eprintln!("{}", line);
+                        }
+                    }
+                }
+                
+                println!("{}", stdout);
+
+                // ── Photon 后处理：hex → 二进制 .obj → 链接 → 运行 ──────────
+                //
+                // 为什么要放在 CLI：**VM（字节码）解释路径下 Aura 侧的
+                // `FileOps.*` 写入不可用**（实测 `FileOps.open` 恒返回 0，
+                // 于是只能落下 hex 文本），而 lld-link 需要的是**二进制** COFF。
+                // Rust CLI 具备完整文件系统能力，由它补上这一步，
+                // 使 `aura build -b photon` 真正产出可执行文件。
+                photon_postprocess(&stdout, &module_name);
+            }
+            Err(e) => {
+                eprintln!("Error: failed to run Photon driver: {}", e);
+            }
+        }
     } else {
-        println!("  HIR 输出: {}", out_path);
+        eprintln!("Warning: aura.exe not found, skipping Photon backend");
     }
 
     println!("\nPhoton 后端管线 (S1 阶段):");
@@ -438,8 +479,883 @@ fn cmd_build_photon(args: &[String]) {
     println!("  Phase C: LIR → Machine DAG (InstructionSelection)");
     println!("  Phase D: Register Allocation + Peephole");
     println!("  Phase E: X86 Encoding → COFF → Link → Executable");
-    println!("\n注意: Photon 后端管线在 Aura 编译器中实现，");
-    println!("完整 AOT 编译请使用: aura run tests/photon/S1/07_pipeline_integration.aura");
+}
+
+/// Photon 后端后处理：把管线落下的 hex 目标文件转成二进制、执行链接、运行产物。
+///
+/// `driver_stdout` 为 PhotonDriver 的标准输出（其中含 `链接命令: …` 一行）。
+/// 产物目录与 PhotonDriver 的 `AURA_PHOTON_OUT` 一致（`build/photon_test`）。
+fn photon_postprocess(driver_stdout: &str, module_name: &str) {
+    let out_dir = "build/photon_test";
+
+    // 1) hex → 二进制（main 对象 + runtime 对象）
+    //
+    // 两种落盘形态都要覆盖：
+    //   * `<name>.obj.hex` —— 管线走 `writeObjectBinaryFile` 时的名字；
+    //   * `<name>.obj` **本身**是 hex 文本 —— runtime 对象的回退路径
+    //     （`PhotonRuntimeUtils.writeRuntimeObjectHexFile`）直接写在目标名上。
+    //     实测若不处理它，lld-link 会报 `unknown file type`。
+    //
+    // 安全判定：只有当文件**全部字符都是十六进制**时才当作 hex 解码，
+    // 避免把真正的二进制 COFF（含 NUL / 非 hex 字节）误当文本改写。
+    for bin_path in [
+        format!("{}/{}.obj", out_dir, module_name),
+        format!("{}/aura_runtime.obj", out_dir),
+    ] {
+        let hex_path = format!("{}.hex", bin_path);
+        let source: Option<(String, String)> = if let Ok(s) = std::fs::read_to_string(&hex_path) {
+            Some((hex_path.clone(), s))
+        } else if let Ok(s) = std::fs::read_to_string(&bin_path) {
+            let t = s.trim();
+            if !t.is_empty() && t.chars().all(|c| c.is_ascii_hexdigit()) {
+                Some((bin_path.clone(), s))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let Some((src_path, text)) = source else {
+            continue;
+        };
+        let hex: String = text.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+        if hex.is_empty() || hex.len() % 2 != 0 {
+            eprintln!("  [post] {} 不是合法 hex，跳过", src_path);
+            continue;
+        }
+        let cs: Vec<char> = hex.chars().collect();
+        let mut bytes = Vec::with_capacity(cs.len() / 2);
+        for i in (0..cs.len()).step_by(2) {
+            let hi = cs[i].to_digit(16).unwrap_or(0) as u8;
+            let lo = cs[i + 1].to_digit(16).unwrap_or(0) as u8;
+            bytes.push((hi << 4) | lo);
+        }
+        match std::fs::write(&bin_path, &bytes) {
+            Ok(_) => println!("  [post] {} → {} ({} 字节)", src_path, bin_path, bytes.len()),
+            Err(e) => eprintln!("  [post] 写入 {} 失败: {}", bin_path, e),
+        }
+    }
+
+    // 2) 执行链接（复用管线自己打印的命令行）
+    let Some(link_line) = driver_stdout
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("链接命令: "))
+    else {
+        println!("  [post] 未取到链接命令，跳过链接");
+        return;
+    };
+    println!("  [post] 执行链接: {}", link_line);
+    match std::process::Command::new("cmd")
+        .args(["/C", link_line])
+        .status()
+    {
+        Ok(s) if s.success() => println!("  [post] ✓ 链接成功"),
+        Ok(s) => println!("  [post] ⚠ 链接失败 (exit={:?})", s.code()),
+        Err(e) => eprintln!("  [post] 链接器启动失败: {}", e),
+    }
+
+    // 3) 运行产物 —— 端到端验证：退出码即 Aura `main` 的返回值
+    let exe_path = format!("{}/{}.exe", out_dir, module_name);
+    if std::path::Path::new(&exe_path).exists() {
+        match std::process::Command::new(&exe_path).status() {
+            Ok(s) => println!(
+                "  [post] 运行 {} → 退出码 {}",
+                exe_path,
+                s.code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "信号终止".to_string())
+            ),
+            Err(e) => eprintln!("  [post] 运行产物失败: {}", e),
+        }
+    } else {
+        println!("  [post] 未生成可执行文件: {}", exe_path);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HIR → Aura 兼容 JSON 序列化
+//
+// 将 Rust HIR (HirProgram) 序列化为 Aura 侧 HirSerializer 可解析的
+// kind/text/ty/kids 递归树 JSON 格式。
+//
+// 格式示例:
+// {"kind":"Program","text":"","ty":"","kids":[
+//   {"kind":"HirFunction","text":"main","ty":"Unit","kids":[
+//     {"kind":"HirParam","text":"x","ty":"Int","kids":[]},
+//     {"kind":"Block","text":"","ty":"","kids":[
+//       {"kind":"Return","text":"","ty":"","kids":[
+//         {"kind":"Lit","text":"42","ty":"Int","kids":[]}
+//       ]}
+//     ]}
+//   ]}
+// ]}
+// ─────────────────────────────────────────────────────────────────────────────
+
+use compiler::codegen::hir::{HirProgram, HirFunction, HirBlock, HirStmt, HirExpr, HirBinOp, HirUnOp};
+use compiler::ast::Literal;
+
+fn escape_json(s: &str) -> String {
+    let mut result = String::new();
+    for c in s.chars() {
+        match c {
+            '"' => result.push_str("\\\""),
+            '\\' => result.push_str("\\\\"),
+            '\n' => result.push_str("\\n"),
+            '\r' => result.push_str("\\r"),
+            '\t' => result.push_str("\\t"),
+            _ => result.push(c),
+        }
+    }
+    result
+}
+
+fn literal_to_text_and_type(lit: &Literal) -> (String, String) {
+    match lit {
+        Literal::Int(v) => (v.to_string(), "Int".to_string()),
+        Literal::Float(v) => (v.to_string(), "Float".to_string()),
+        Literal::String(s) => ("\"".to_string() + s + "\"", "String".to_string()),
+        Literal::Char(c) => ("'".to_string() + &c.to_string() + "'", "Char".to_string()),
+        Literal::Bool(v) => (v.to_string(), "Boolean".to_string()),
+        Literal::Null => ("null".to_string(), "Null".to_string()),
+    }
+}
+
+fn binop_to_text(op: &HirBinOp) -> String {
+    match op {
+        HirBinOp::Add => "+",
+        HirBinOp::Sub => "-",
+        HirBinOp::Mul => "*",
+        HirBinOp::Div => "/",
+        HirBinOp::Rem => "%",
+        HirBinOp::Eq => "==",
+        HirBinOp::Ne => "!=",
+        HirBinOp::Lt => "<",
+        HirBinOp::Gt => ">",
+        HirBinOp::Le => "<=",
+        HirBinOp::Ge => ">=",
+        HirBinOp::And => "&&",
+        HirBinOp::Or => "||",
+        HirBinOp::BitAnd => "&",
+        HirBinOp::BitOr => "|",
+        HirBinOp::BitXor => "^",
+        HirBinOp::Shl => "<<",
+        HirBinOp::Shr => ">>",
+        HirBinOp::To => "to",
+        HirBinOp::Is => "is",
+        HirBinOp::As => "as",
+    }
+    .to_string()
+}
+
+fn unop_to_text(op: &HirUnOp) -> String {
+    match op {
+        HirUnOp::Minus => "-".to_string(),
+        HirUnOp::Not => "!".to_string(),
+    }
+}
+
+/// 序列化表达式为 Aura JSON 节点
+fn expr_to_json(expr: &HirExpr) -> String {
+    match expr {
+        HirExpr::Lit(lit) => {
+            let (text, ty) = literal_to_text_and_type(lit);
+            format!(
+                "{{\"kind\":\"HirLit\",\"text\":\"{}\",\"ty\":\"{}\",\"kids\":[]}}",
+                escape_json(&text),
+                escape_json(&ty)
+            )
+        }
+        HirExpr::Var(name) => {
+            format!(
+                "{{\"kind\":\"HirVar\",\"text\":\"{}\",\"ty\":\"\",\"kids\":[]}}",
+                escape_json(name)
+            )
+        }
+        HirExpr::Binary { op, lhs, rhs } => {
+            let lhs_json = expr_to_json(lhs);
+            let rhs_json = expr_to_json(rhs);
+            let text = binop_to_text(op);
+            format!(
+                "{{\"kind\":\"HirBinary\",\"text\":\"{}\",\"ty\":\"\",\"kids\":[{},{}]}}",
+                escape_json(&text),
+                lhs_json,
+                rhs_json
+            )
+        }
+        HirExpr::Unary { op, operand } => {
+            let operand_json = expr_to_json(operand);
+            let text = unop_to_text(op);
+            format!(
+                "{{\"kind\":\"HirUnary\",\"text\":\"{}\",\"ty\":\"\",\"kids\":[{}]}}",
+                escape_json(&text),
+                operand_json
+            )
+        }
+        HirExpr::Call { callee, args } => {
+            let args_json: Vec<String> = args.iter().map(|a| expr_to_json(a)).collect();
+            let args_str = args_json.join(",");
+            format!(
+                "{{\"kind\":\"HirCall\",\"text\":\"{}\",\"ty\":\"\",\"kids\":[{}]}}",
+                escape_json(callee),
+                args_str
+            )
+        }
+        HirExpr::Member { object, name } => {
+            let obj_json = expr_to_json(object);
+            format!(
+                "{{\"kind\":\"HirMember\",\"text\":\"{}\",\"ty\":\"\",\"kids\":[{}]}}",
+                escape_json(name),
+                obj_json
+            )
+        }
+        HirExpr::Index { container, index } => {
+            let cont_json = expr_to_json(container);
+            let idx_json = expr_to_json(index);
+            format!(
+                "{{\"kind\":\"HirIndex\",\"text\":\"\",\"ty\":\"\",\"kids\":[{},{}]}}",
+                cont_json,
+                idx_json
+            )
+        }
+        HirExpr::New { type_name, args } => {
+            let args_json: Vec<String> = args.iter().map(|a| expr_to_json(a)).collect();
+            let args_str = args_json.join(",");
+            format!(
+                "{{\"kind\":\"HirNew\",\"text\":\"{}\",\"ty\":\"\",\"kids\":[{}]}}",
+                escape_json(type_name),
+                args_str
+            )
+        }
+        HirExpr::If { cond, then_e, else_e } => {
+            let cond_json = expr_to_json(cond);
+            let then_json = expr_to_json(then_e);
+            let else_json = expr_to_json(else_e);
+            format!(
+                "{{\"kind\":\"HirIf\",\"text\":\"\",\"ty\":\"\",\"kids\":[{},{},{}]}}",
+                cond_json,
+                then_json,
+                else_json
+            )
+        }
+        HirExpr::Block(block) => {
+            let stmts_json: Vec<String> = block.stmts.iter().map(|s| stmt_to_json(s)).collect();
+            let stmts_str = stmts_json.join(",");
+            format!(
+                "{{\"kind\":\"HirBlock\",\"text\":\"\",\"ty\":\"\",\"kids\":[{}]}}",
+                stmts_str
+            )
+        }
+        _ => {
+            // 其他表达式类型（Box, WeakRef, Await, Lambda, CallVirtual）
+            // 暂时序列化为空节点
+            "{\"kind\":\"HirExpr\",\"text\":\"\",\"ty\":\"\",\"kids\":[]}".to_string()
+        }
+    }
+}
+
+/// 序列化语句为 Aura JSON 节点
+fn stmt_to_json(stmt: &HirStmt) -> String {
+    match stmt {
+        HirStmt::Val { name, ty, init } => {
+            let ty_str = ty.as_ref().map(|t| hir_type_name_helper(t)).unwrap_or_default();
+            let kids = if let Some(init) = init {
+                format!("[{}]", expr_to_json(init))
+            } else {
+                "[]".to_string()
+            };
+            format!(
+                "{{\"kind\":\"HirValDecl\",\"text\":\"{}\",\"ty\":\"{}\",\"kids\":{}}}",
+                escape_json(name),
+                escape_json(&ty_str),
+                kids
+            )
+        }
+        HirStmt::Var { name, ty, init } => {
+            let ty_str = ty.as_ref().map(|t| hir_type_name_helper(t)).unwrap_or_default();
+            let kids = if let Some(init) = init {
+                format!("[{}]", expr_to_json(init))
+            } else {
+                "[]".to_string()
+            };
+            format!(
+                "{{\"kind\":\"HirVarDecl\",\"text\":\"{}\",\"ty\":\"{}\",\"kids\":{}}}",
+                escape_json(name),
+                escape_json(&ty_str),
+                kids
+            )
+        }
+        HirStmt::Assign { target, value } => {
+            let target_json = expr_to_json(target);
+            let value_json = expr_to_json(value);
+            format!(
+                "{{\"kind\":\"HirAssign\",\"text\":\"\",\"ty\":\"\",\"kids\":[{},{}]}}",
+                target_json,
+                value_json
+            )
+        }
+        HirStmt::Expr(e) => {
+            let e_json = expr_to_json(e);
+            format!(
+                "{{\"kind\":\"HirExprStmt\",\"text\":\"\",\"ty\":\"\",\"kids\":[{}]}}",
+                e_json
+            )
+        }
+        HirStmt::Return(v) => {
+            let kids = if let Some(v) = v {
+                format!("[{}]", expr_to_json(v))
+            } else {
+                "[]".to_string()
+            };
+            format!(
+                "{{\"kind\":\"HirReturn\",\"text\":\"\",\"ty\":\"\",\"kids\":{}}}",
+                kids
+            )
+        }
+        HirStmt::If { cond, then_b, else_b } => {
+            let cond_json = expr_to_json(cond);
+            let then_json = block_to_json(then_b);
+            let else_json = if let Some(else_b) = else_b {
+                block_to_json(else_b)
+            } else {
+                "{\"kind\":\"HirBlock\",\"text\":\"\",\"ty\":\"\",\"kids\":[]}".to_string()
+            };
+            format!(
+                "{{\"kind\":\"HirIf\",\"text\":\"\",\"ty\":\"\",\"kids\":[{},{},{}]}}",
+                cond_json,
+                then_json,
+                else_json
+            )
+        }
+        HirStmt::While { cond, body } => {
+            let cond_json = expr_to_json(cond);
+            let body_json = block_to_json(body);
+            format!(
+                "{{\"kind\":\"HirWhile\",\"text\":\"\",\"ty\":\"\",\"kids\":[{},{}]}}",
+                cond_json,
+                body_json
+            )
+        }
+        HirStmt::Break => "{\"kind\":\"HirBreak\",\"text\":\"\",\"ty\":\"\",\"kids\":[]}".to_string(),
+        HirStmt::Continue => "{\"kind\":\"HirContinue\",\"text\":\"\",\"ty\":\"\",\"kids\":[]}".to_string(),
+        HirStmt::Block(block) => block_to_json(block),
+        _ => {
+            // 其他语句类型（Defer, Try 等）暂时序列化为空节点
+            "{\"kind\":\"HirStmt\",\"text\":\"\",\"ty\":\"\",\"kids\":[]}".to_string()
+        }
+    }
+}
+
+/// 序列化块为 Aura JSON 节点
+fn block_to_json(block: &HirBlock) -> String {
+    let stmts_json: Vec<String> = block.stmts.iter().map(|s| stmt_to_json(s)).collect();
+    let stmts_str = stmts_json.join(",");
+    format!(
+        "{{\"kind\":\"HirBlock\",\"text\":\"\",\"ty\":\"\",\"kids\":[{}]}}",
+        stmts_str
+    )
+}
+
+/// 序列化 HIR 类型为字符串（辅助函数）
+fn hir_type_name_helper(ty: &compiler::codegen::hir::HirType) -> String {
+    use compiler::codegen::hir::HirType;
+    match ty {
+        HirType::Named(s) => s.clone(),
+        HirType::Nullable(inner) => format!("{}?", hir_type_name_helper(inner)),
+        HirType::Pointer(inner) => format!("Pointer<{}>", hir_type_name_helper(inner)),
+        HirType::Function { params, return_type } => {
+            let ps: Vec<String> = params.iter().map(|p| hir_type_name_helper(p)).collect();
+            format!("({}) -> {}", ps.join(", "), hir_type_name_helper(return_type))
+        }
+        HirType::Unknown => "Unknown".to_string(),
+    }
+}
+
+/// 将完整的 HIR 程序序列化为 .phir 文本（Photon IR 格式 §2.5 缩进语法）
+fn hir_to_phir(hir: &HirProgram, module_name: &str, source_path: &str) -> String {
+    let mut out = String::new();
+
+    // 模块头
+    out.push_str(&format!("# module {} target x86_64\n", module_name));
+    if !source_path.is_empty() {
+        out.push_str(&format!("# source {}\n", source_path));
+    }
+    out.push_str("\n");
+
+    // 原生函数声明
+    for func in &hir.natives {
+        let params_str = func.params.iter().map(|p| {
+            let ty = p.ty.as_ref().map(|t| hir_type_name_helper(t)).unwrap_or_else(|| "Any".to_string());
+            format!("{}: {}", p.name, ty)
+        }).collect::<Vec<_>>().join(", ");
+        let ret = func.ret.as_ref().map(|t| hir_type_name_helper(t)).unwrap_or_else(|| "Unit".to_string());
+        out.push_str(&format!("native fun {}({}) -> {}\n", func.name, params_str, ret));
+    }
+    if !hir.natives.is_empty() {
+        out.push_str("\n");
+    }
+
+    // 函数定义
+    for func in &hir.functions {
+        if func.is_native {
+            continue; // 跳过原生函数（已在上面处理）
+        }
+
+        // 函数签名
+        let params_str = func.params.iter().map(|p| {
+            let ty = p.ty.as_ref().map(|t| hir_type_name_helper(t)).unwrap_or_else(|| "Any".to_string());
+            format!("{}: {}", p.name, ty)
+        }).collect::<Vec<_>>().join(", ");
+
+        let ret = func.ret.as_ref().map(|t| hir_type_name_helper(t)).unwrap_or_else(|| "Unit".to_string());
+        out.push_str(&format!("fun {}({}) -> {} {{\n", func.name, params_str, ret));
+
+        // 函数体
+        let mut indent = 1;
+        for stmt in &func.body.stmts {
+            stmt_to_phir(&mut out, stmt, &mut indent);
+        }
+
+        out.push_str("}\n\n");
+    }
+
+    // 顶层语句（脚本模式）
+    if let Some(ref block) = hir.top_level_statements {
+        out.push_str("fun main() -> Unit {\n");
+        let mut indent = 1;
+        for stmt in &block.stmts {
+            stmt_to_phir(&mut out, stmt, &mut indent);
+        }
+        out.push_str("}\n\n");
+    }
+
+    out
+}
+
+/// 序列化语句为 .phir 文本
+fn stmt_to_phir(out: &mut String, stmt: &HirStmt, indent: &mut usize) {
+    use compiler::codegen::hir::{HirStmt, HirExpr};
+
+    let indent_str = "    ".repeat(*indent);
+
+    match stmt {
+        HirStmt::Val { name, ty, init } => {
+            let ty_str = ty.as_ref().map(|t| hir_type_name_helper(t)).unwrap_or_default();
+            out.push_str(&indent_str);
+            out.push_str("val ");
+            out.push_str(name);
+            if !ty_str.is_empty() {
+                out.push_str(": ");
+                out.push_str(&ty_str);
+            }
+            if let Some(init) = init {
+                out.push_str(" = ");
+                expr_to_phir(out, init);
+            }
+            out.push_str("\n");
+        }
+        HirStmt::Var { name, ty, init } => {
+            let ty_str = ty.as_ref().map(|t| hir_type_name_helper(t)).unwrap_or_default();
+            out.push_str(&indent_str);
+            out.push_str("var ");
+            out.push_str(name);
+            if !ty_str.is_empty() {
+                out.push_str(": ");
+                out.push_str(&ty_str);
+            }
+            if let Some(init) = init {
+                out.push_str(" = ");
+                expr_to_phir(out, init);
+            }
+            out.push_str("\n");
+        }
+        HirStmt::Assign { target, value } => {
+            out.push_str(&indent_str);
+            expr_to_phir(out, target);
+            out.push_str(" = ");
+            expr_to_phir(out, value);
+            out.push_str("\n");
+        }
+        HirStmt::Expr(e) => {
+            out.push_str(&indent_str);
+            expr_to_phir(out, e);
+            out.push_str("\n");
+        }
+        HirStmt::Return(v) => {
+            out.push_str(&indent_str);
+            out.push_str("return");
+            if let Some(v) = v {
+                out.push_str(" ");
+                expr_to_phir(out, v);
+            }
+            out.push_str("\n");
+        }
+        HirStmt::If { cond, then_b, else_b } => {
+            out.push_str(&indent_str);
+            out.push_str("if ");
+            expr_to_phir(out, cond);
+            out.push_str(" {\n");
+            *indent += 1;
+            for s in &then_b.stmts {
+                stmt_to_phir(out, s, indent);
+            }
+            *indent -= 1;
+            out.push_str(&indent_str);
+            out.push_str("}");
+
+            if let Some(else_b) = else_b {
+                out.push_str(" else {\n");
+                *indent += 1;
+                for s in &else_b.stmts {
+                    stmt_to_phir(out, s, indent);
+                }
+                *indent -= 1;
+                out.push_str(&indent_str);
+                out.push_str("}\n");
+            } else {
+                out.push_str("\n");
+            }
+        }
+        HirStmt::While { cond, body } => {
+            out.push_str(&indent_str);
+            out.push_str("while ");
+            expr_to_phir(out, cond);
+            out.push_str(" {\n");
+            *indent += 1;
+            for s in &body.stmts {
+                stmt_to_phir(out, s, indent);
+            }
+            *indent -= 1;
+            out.push_str(&indent_str);
+            out.push_str("}\n");
+        }
+        HirStmt::Break => {
+            out.push_str(&indent_str);
+            out.push_str("break\n");
+        }
+        HirStmt::Continue => {
+            out.push_str(&indent_str);
+            out.push_str("continue\n");
+        }
+        HirStmt::Block(block) => {
+            out.push_str(&indent_str);
+            out.push_str("{\n");
+            *indent += 1;
+            for s in &block.stmts {
+                stmt_to_phir(out, s, indent);
+            }
+            *indent -= 1;
+            out.push_str(&indent_str);
+            out.push_str("}\n");
+        }
+        HirStmt::Defer(block) => {
+            out.push_str(&indent_str);
+            out.push_str("defer {\n");
+            *indent += 1;
+            for s in &block.stmts {
+                stmt_to_phir(out, s, indent);
+            }
+            *indent -= 1;
+            out.push_str(&indent_str);
+            out.push_str("}\n");
+        }
+        HirStmt::Try { body, catch_var, catch_type, catch_body, finally } => {
+            out.push_str(&indent_str);
+            out.push_str("try {\n");
+            *indent += 1;
+            for s in &body.stmts {
+                stmt_to_phir(out, s, indent);
+            }
+            *indent -= 1;
+            out.push_str(&indent_str);
+            out.push_str("}");
+
+            if let Some(cv) = catch_var {
+                out.push_str(" catch ");
+                if let Some(ct) = catch_type {
+                    out.push_str(&format!("{}: {}", cv, ct));
+                } else {
+                    out.push_str(cv);
+                }
+                out.push_str(" {\n");
+                *indent += 1;
+                for s in &catch_body.stmts {
+                    stmt_to_phir(out, s, indent);
+                }
+                *indent -= 1;
+                out.push_str(&indent_str);
+                out.push_str("}");
+            }
+
+            if let Some(fin) = finally {
+                out.push_str(" finally {\n");
+                *indent += 1;
+                for s in &fin.stmts {
+                    stmt_to_phir(out, s, indent);
+                }
+                *indent -= 1;
+                out.push_str(&indent_str);
+                out.push_str("}");
+            }
+            out.push_str("\n");
+        }
+    }
+}
+
+/// 序列化表达式为 .phir 文本
+fn expr_to_phir(out: &mut String, expr: &HirExpr) {
+    use compiler::codegen::hir::{HirExpr, HirBinOp, HirUnOp};
+    use compiler::ast::Literal;
+
+    match expr {
+        HirExpr::Lit(lit) => {
+            match lit {
+                Literal::Int(v) => out.push_str(&v.to_string()),
+                Literal::Float(v) => out.push_str(&v.to_string()),
+                Literal::String(s) => out.push_str(&format!("\"{}\"", s)),
+                Literal::Char(c) => out.push_str(&format!("'{}'", c)),
+                Literal::Bool(v) => out.push_str(&v.to_string()),
+                Literal::Null => out.push_str("null"),
+            }
+        }
+        HirExpr::Var(name) => {
+            out.push_str(name);
+        }
+        HirExpr::Binary { op, lhs, rhs } => {
+            expr_to_phir(out, lhs);
+            out.push_str(" ");
+            match op {
+                HirBinOp::Add => out.push_str("+"),
+                HirBinOp::Sub => out.push_str("-"),
+                HirBinOp::Mul => out.push_str("*"),
+                HirBinOp::Div => out.push_str("/"),
+                HirBinOp::Rem => out.push_str("%"),
+                HirBinOp::Eq => out.push_str("=="),
+                HirBinOp::Ne => out.push_str("!="),
+                HirBinOp::Lt => out.push_str("<"),
+                HirBinOp::Gt => out.push_str(">"),
+                HirBinOp::Le => out.push_str("<="),
+                HirBinOp::Ge => out.push_str(">="),
+                HirBinOp::And => out.push_str("&&"),
+                HirBinOp::Or => out.push_str("||"),
+                HirBinOp::BitAnd => out.push_str("&"),
+                HirBinOp::BitOr => out.push_str("|"),
+                HirBinOp::BitXor => out.push_str("^"),
+                HirBinOp::Shl => out.push_str("<<"),
+                HirBinOp::Shr => out.push_str(">>"),
+                HirBinOp::To => out.push_str("to"),
+                HirBinOp::Is => out.push_str("is"),
+                HirBinOp::As => out.push_str("as"),
+            }
+            out.push_str(" ");
+            expr_to_phir(out, rhs);
+        }
+        HirExpr::Unary { op, operand } => {
+            match op {
+                HirUnOp::Minus => out.push_str("-"),
+                HirUnOp::Not => out.push_str("!"),
+            }
+            expr_to_phir(out, operand);
+        }
+        HirExpr::Call { callee, args } => {
+            out.push_str(callee);
+            out.push_str("(");
+            let args_str: Vec<String> = args.iter().map(|a| {
+                let mut s = String::new();
+                expr_to_phir(&mut s, a);
+                s
+            }).collect();
+            out.push_str(&args_str.join(", "));
+            out.push_str(")");
+        }
+        HirExpr::Member { object, name } => {
+            expr_to_phir(out, object);
+            out.push_str(".");
+            out.push_str(name);
+        }
+        HirExpr::Index { container, index } => {
+            expr_to_phir(out, container);
+            out.push_str("[");
+            expr_to_phir(out, index);
+            out.push_str("]");
+        }
+        HirExpr::New { type_name, args } => {
+            out.push_str("new ");
+            out.push_str(type_name);
+            out.push_str("(");
+            let args_str: Vec<String> = args.iter().map(|a| {
+                let mut s = String::new();
+                expr_to_phir(&mut s, a);
+                s
+            }).collect();
+            out.push_str(&args_str.join(", "));
+            out.push_str(")");
+        }
+        HirExpr::If { cond, then_e, else_e } => {
+            out.push_str("(");
+            expr_to_phir(out, cond);
+            out.push_str(" ? ");
+            expr_to_phir(out, then_e);
+            out.push_str(" : ");
+            expr_to_phir(out, else_e);
+            out.push_str(")");
+        }
+        HirExpr::Block(block) => {
+            out.push_str("{\n");
+            let mut indent = 1;
+            for s in &block.stmts {
+                stmt_to_phir(out, s, &mut indent);
+            }
+            out.push_str("}");
+        }
+        HirExpr::Box(inner) => {
+            out.push_str("box(");
+            expr_to_phir(out, inner);
+            out.push_str(")");
+        }
+        HirExpr::WeakRef(inner) => {
+            out.push_str("weak(");
+            expr_to_phir(out, inner);
+            out.push_str(")");
+        }
+        HirExpr::Await(inner) => {
+            out.push_str("await ");
+            expr_to_phir(out, inner);
+        }
+        HirExpr::Lambda { params, body } => {
+            out.push_str("fun(");
+            let params_str: Vec<String> = params.iter().map(|p| {
+                let ty = p.ty.as_ref().map(|t| hir_type_name_helper(t)).unwrap_or_else(|| "Any".to_string());
+                format!("{}: {}", p.name, ty)
+            }).collect();
+            out.push_str(&params_str.join(", "));
+            out.push_str(") {\n");
+            let mut indent = 1;
+            for s in &body.stmts {
+                stmt_to_phir(out, s, &mut indent);
+            }
+            out.push_str("}");
+        }
+        HirExpr::CallVirtual { recv, name, args } => {
+            expr_to_phir(out, recv);
+            out.push_str(".");
+            out.push_str(name);
+            out.push_str("(");
+            let args_str: Vec<String> = args.iter().map(|a| {
+                let mut s = String::new();
+                expr_to_phir(&mut s, a);
+                s
+            }).collect();
+            out.push_str(&args_str.join(", "));
+            out.push_str(")");
+        }
+    }
+}
+
+/// 将完整的 HIR 程序序列化为 Aura 兼容的 JSON 字符串
+fn hir_to_aura_json(hir: &HirProgram) -> String {
+    // 创建 Program 根节点
+    let mut func_jsons: Vec<String> = Vec::new();
+
+    for func in &hir.functions {
+        let func_json = function_to_json(func);
+        func_jsons.push(func_json);
+    }
+
+    let funcs_str = func_jsons.join(",");
+
+    format!(
+        "{{\"kind\":\"HirProgram\",\"text\":\"\",\"ty\":\"\",\"kids\":[{}]}}",
+        funcs_str
+    )
+}
+
+/// 序列化单个函数为 Aura JSON 节点
+fn function_to_json(func: &HirFunction) -> String {
+    let ret_type = func
+        .ret
+        .as_ref()
+        .map(|t| hir_type_name_helper(t))
+        .unwrap_or_else(|| "Unit".to_string());
+
+    let mut kids_jsons: Vec<String> = Vec::new();
+
+    // 参数
+    for param in &func.params {
+        let param_ty = param
+            .ty
+            .as_ref()
+            .map(|t| hir_type_name_helper(t))
+            .unwrap_or_default();
+        let kids = if let Some(ref dv) = param.default_value {
+            format!("[{}]", expr_to_json(dv))
+        } else {
+            "[]".to_string()
+        };
+        kids_jsons.push(format!(
+            "{{\"kind\":\"HirParam\",\"text\":\"{}\",\"ty\":\"{}\",\"kids\":{}}}",
+            escape_json(&param.name),
+            escape_json(&param_ty),
+            kids
+        ));
+    }
+
+    // 函数体
+    if !func.is_native {
+        let body_json = block_to_json(&func.body);
+        kids_jsons.push(body_json);
+    }
+
+    let kids_str = kids_jsons.join(",");
+
+    format!(
+        "{{\"kind\":\"HirFunction\",\"text\":\"{}\",\"ty\":\"{}\",\"kids\":[{}]}}",
+        escape_json(&func.name),
+        escape_json(&ret_type),
+        kids_str
+    )
+}
+
+/// 查找 aura 可执行文件路径
+fn find_aura_exe() -> Option<String> {
+    let candidates = [
+        "rust/target/release/aura.exe",
+        "build/bin/aura.exe",
+        "aura/seed/aura.exe",
+        "target/release/aura.exe",
+        "target/debug/aura.exe",
+    ];
+    for c in &candidates {
+        if std::path::Path::new(c).exists() {
+            return Some(c.to_string());
+        }
+    }
+    None
+}
+
+/// 从输出中提取标记后的内容
+fn extract_marker(output: &str, marker: &str) -> Option<String> {
+    let lines: Vec<&str> = output.lines().collect();
+    let mut in_marker = false;
+    let mut result = String::new();
+    
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed == marker {
+            in_marker = true;
+            continue;
+        }
+        if in_marker {
+            if trimmed.is_empty() {
+                break;
+            }
+            if !result.is_empty() {
+                result.push('\n');
+            }
+            result.push_str(trimmed);
+        }
+    }
+    
+    if result.is_empty() { None } else { Some(result) }
 }
 
 /// AOT 编译（LLVM 后端）

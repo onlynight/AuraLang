@@ -152,6 +152,15 @@ struct ClassEntry {
     method_arities: HashMap<String, std::collections::HashSet<usize>>,
     /// 声明为 open/abstract 的方法名（虚方法，动态分派）
     open_methods: std::collections::HashSet<String>,
+    /// 是否为**接口**声明（`interface Foo { fun m() }`）。
+    ///
+    /// 接口只参与「接收者静态类型已知」的解析路径（`m.put(k, v)`，`m: Map<K, V>`
+    /// → `Map.put` → `open_methods` → 虚分派）。它**必须排除**在下方
+    /// 「全表唯一候选」兜底之外：接口方法没有实现体，一旦被兜底选中，发射出的
+    /// `Map.put(...)` / `List.size(...)` 是没有定义的符号；同时接口方法名进入
+    /// 候选集还会破坏「唯一性」，让一批原本能解析的调用（如 `XxxUtils.method`）
+    /// 一起退化成裸名。
+    is_interface: bool,
     superclass: Option<String>,
     companion_methods: std::collections::HashSet<String>,
     companion_fields: std::collections::HashSet<String>,
@@ -363,19 +372,23 @@ fn sema_expr_class(object: &Expr) -> Option<String> {
     })
 }
 
-/// 解析方法接收者的静态类型：sema 优先，回退到降级期记录的声明类型
-/// （`LOCAL_TYPE_SCOPES`，见 `lookup_expr_type`）。
+/// 解析方法接收者的静态类型：降级期记录的声明类型优先（`LOCAL_TYPE_SCOPES`），
+/// sema 作为补充（sema 有时会给出错误的类型，如将 `hir` 变量推断为 `TypeRegistry`）。
 ///
 /// `val instr: DagInstruction = list[i]`、`for (instr in list)` 这类接收者，
 /// sema 常只给出 `Any` 甚至无记录，仅凭 sema 会让方法派发失败并退化成裸名调用
 /// （photon 后端大量 `instr.nodeAt(j)` / `instr.nodeCount()` 因此失败）。
 fn resolve_receiver_type(e: &Expr) -> Option<String> {
-    if let Some(t) = sema_expr_class(e) {
-        if !t.is_empty() {
-            return Some(t);
+    // 对于标识符，优先使用降级期记录的声明类型（LOCAL_TYPE_SCOPES 更可靠）
+    if let Expr::Ident(name, _) = e {
+        if let Some(t) = lookup_local_type(name) {
+            if !t.is_empty() {
+                return Some(t);
+            }
         }
     }
-    lookup_expr_type(e).filter(|t| !t.is_empty())
+    // 回退到 sema
+    sema_expr_class(e).filter(|t| !t.is_empty())
 }
 
 /// 推断声明的静态类型：显式类型提示优先；无提示时从初始化表达式推断。
@@ -396,6 +409,23 @@ fn infer_decl_type(type_hint: Option<&crate::ast::Type>, init: Option<&Expr>) ->
                 return Some(name.to_string());
             }
         }
+        // 静态工厂 / 工具对象方法：**优先采用 sema 给出的静态类型**。
+        //
+        // 例：`val p = PhotonPipelineUtils.emptyPipeline()` —— 下面那条
+        // 「`ClassName.fn(...)` → ClassName」的启发式会返回 `PhotonPipelineUtils`
+        //（工具对象本身也是 `CLASS_TABLE` 里的条目），于是 `p.compileHir(...)`
+        // 被派发到不存在的 `PhotonPipelineUtils.compileHir` → 运行期 `#65535`。
+        // 方法**真正声明的返回类型**（`PhotonPipeline`）只有 sema 知道，故先问 sema；
+        // 仅当 sema 给不出「类表里存在的类名」时才退回旧启发式。
+        // 实测受影响：`PhotonPipelineUtils.emptyPipeline()` /
+        // `PeepholeOptimizerUtils.emptyOptimizer()` / `X86EncoderUtils.emptyEncoder()`
+        // —— photon 管线在 Phase C/D 全部死于此。
+        if let Some(t) = sema_expr_class(e) {
+            let table = CLASS_TABLE.with(|t| t.borrow().clone());
+            if table.contains_key(t.as_str()) {
+                return Some(t);
+            }
+        }
         // `ClassName.fn(...)` → ClassName（伴生方法返回的通常是该类的实例或值）
         if let Expr::MemberAccess { object, .. } = callee.as_ref() {
             if let Expr::Ident(name, _) = object.as_ref() {
@@ -407,6 +437,26 @@ fn infer_decl_type(type_hint: Option<&crate::ast::Type>, init: Option<&Expr>) ->
         }
     }
     None
+}
+
+/// 接口方法名全集（供字节码发射器构建**全局虚方法槽位**）。
+///
+/// `CallVirtual` 只携带方法名，真正的槽位号来自发射器的全局表
+/// （`emit.rs` 的 `slot_names` / `METHOD_SLOTS`，且必须在函数发射之前一次建成）。
+/// 接口方法（`Map.keys` / `Map.put` …）只存在于类表的接口条目里 ——
+/// HIR 会跳过 `Decl::Interface`，`hir.structs[*].virtual_methods` 里没有它们。
+/// 若不当成一个来源补进去，`CallVirtual("keys")` 取不到槽位、落到默认槽，
+/// 就会**分派到别的函数**（实测 `HashMap.toString` 因此自递归到栈溢出）。
+pub fn interface_method_names() -> Vec<String> {
+    let table = CLASS_TABLE.with(|t| t.borrow().clone());
+    let mut names: Vec<String> = table
+        .iter()
+        .filter(|(_, e)| e.is_interface)
+        .flat_map(|(_, e)| e.open_methods.iter().cloned())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// 沿继承链在成员表中查找拥有方法 `method` 的类。
@@ -499,6 +549,18 @@ fn any_base_method(
 
 /// 方法调用的接收者类解析：静态类型命中（含继承链）→ 全表唯一候选兜底
 /// （无类型信息时按「方法名 + 实参个数」过滤，仍唯一才采用）
+/// `[DEBUG] resolve_method_owner` 系列输出开关（**默认关闭**）。
+///
+/// 这几行原先是无条件 `eprintln!`。自举编译时（展开源码 2 万+ 行，几乎每行都有
+/// 方法调用）会把 stderr 刷到 MB 级 —— 实测 `run Main.aura --selftest` 300s
+/// 内写了 **3.5 MB**，既淹没真实诊断，也显著拖慢编译。
+/// 需要排查「方法归属解析」时设 `AURA_DEBUG_RESOLVE=1`。
+fn resolve_debug_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("AURA_DEBUG_RESOLVE").is_some())
+}
+
 fn resolve_method_owner(
     object: &Expr,
     method: &str,
@@ -523,6 +585,12 @@ fn resolve_method_owner(
     //    （`val instr: DagInstruction = list[i]` 这类列表元素接收者，
     //      sema 常给不出具体类型；仅凭 sema 会退化成裸名调用）
     let sema_ty = resolve_receiver_type(object);
+    if resolve_debug_enabled() {
+        eprintln!(
+            "[DEBUG] resolve_method_owner: method={}, object={:?}, sema_ty={:?}",
+            method, object, sema_ty
+        );
+    }
     // `Any` / `Nothing` / 无类型信息都属**动态接收者**：不能用「类型已知但无此方法」
     // 的规则提前终止，否则会跳过后面的「全表唯一候选」兜底 ——
     // `for (instr in list) { instr.nodeAt(0) }`（列表元素/循环变量接收者）在
@@ -532,16 +600,28 @@ fn resolve_method_owner(
         _ => false,
     };
     if let Some(ref ty) = sema_ty {
+        if resolve_debug_enabled() {
+            eprintln!("[DEBUG]   trying find_method_in_chain for type='{}' method='{}'", ty, method);
+        }
         if let Some(found) = find_method_in_chain(&table, ty, method) {
+            if resolve_debug_enabled() {
+                eprintln!("[DEBUG]   found: {}", found.0);
+            }
             return Some(found);
         }
         // 已知接收者类型且是成员表中的类但无此方法 → 尝试 `Any` 的默认实现
         //（所有 class / object 都隐式继承 Any，`hashCode` / `equals` / `toString`
         //  等基类方法即使未显式重写也应命中 Any 的默认实现）
         if table.contains_key(ty) && !dynamic_recv {
+            if resolve_debug_enabled() {
+                eprintln!("[DEBUG]   type '{}' is in CLASS_TABLE but method not found, trying any_base_method", ty);
+            }
             return any_base_method(&table, method);
         }
         // 类型不在成员表（List/String/Any/泛型等）：继续尝试字段接收者兜底
+        if resolve_debug_enabled() {
+            eprintln!("[DEBUG]   type '{}' is NOT in CLASS_TABLE", ty);
+        }
     }
     // 1.5) 字段接收者兜底：`this.<field>` / 裸字段（sema 缺失或类型不可用时）
     if let Some(found) = field_receiver_method(&table, object, method) {
@@ -562,32 +642,84 @@ fn resolve_method_owner(
     }
     // 2) 兜底（无类型信息时）：整个成员表中唯一拥有该方法的类
     //    当方法名在多个类中重名（如 `kidsOf` 同时属于 Ast 与 Hir）时，
-    //    再用「实参个数」过滤：仅保留 AST 形参个数与调用点一致的候选。
+    //    先用接收者类型过滤，再用「实参个数」过滤。
     //    这能在不影响「类型已知」路径的情况下，一次性把 50+ 个
     //    「接收者未知 + 重名」的调用点从裸名退化解成正确的类方法分派。
-    let cands: Vec<String> =
-        table.iter().filter(|(_, e)| e.methods.contains(method)).map(|(n, _)| n.clone()).collect();
+    let mut cands: Vec<String> = table
+        .iter()
+        .filter(|(_, e)| !e.is_interface && e.methods.contains(method))
+        .map(|(n, _)| n.clone())
+        .collect();
+    
+    // 2.0) 多候选时，先用接收者类型过滤（sema 或 lookup_expr_type 可能给出类型）
+    if cands.len() > 1 {
+        if let Some(ref ty) = sema_ty {
+            if !ty.is_empty() && ty != "Any" && ty != "Nothing" {
+                // 检查接收者类型是否直接匹配某个候选
+                let direct_match = cands.iter().find(|c| c.as_str() == ty.as_str());
+                if let Some(m) = direct_match {
+                    return Some((m.clone(), table.get(m.as_str()).unwrap().clone()));
+                }
+                // 检查接收者类型是否是某个候选的子类（沿继承链向上找）
+                let mut cur = Some(ty.clone());
+                while let Some(cn) = cur {
+                    if cands.iter().any(|c| c.as_str() == cn.as_str()) {
+                        let m = cands.iter().find(|c| c.as_str() == cn.as_str()).unwrap().clone();
+                        return Some((m, table.get(cn.as_str()).unwrap().clone()));
+                    }
+                    cur = table.get(cn.as_str()).and_then(|e| e.superclass.clone());
+                }
+                // 按类型过滤候选
+                let filtered: Vec<String> = cands
+                    .iter()
+                    .filter(|c| {
+                        let mut cur: Option<String> = Some((**c).clone());
+                        while let Some(cn) = cur {
+                            if cn.as_str() == ty.as_str() { return true; }
+                            cur = table.get(cn.as_str()).and_then(|e| e.superclass.clone());
+                        }
+                        false
+                    })
+                    .cloned()
+                    .collect();
+                if !filtered.is_empty() {
+                    cands = filtered;
+                }
+            }
+        }
+    }
+    
     if cands.len() == 1 {
         let n = cands.into_iter().next()?;
-        let e = table.get(&n)?.clone();
-        return Some((n, e));
+        let n_str = n.clone();
+        return Some((n_str, table.get(n.as_str()).unwrap().clone()));
     }
     // 2.5) 多候选 + 已知实参个数：按 arity 过滤，仍唯一则采用
     if let Some(nc) = arg_count {
         let filtered: Vec<String> = cands
-            .into_iter()
+            .iter()
             .filter(|n| {
                 table
-                    .get(n)
+                    .get(n.as_str())
                     .and_then(|e| e.method_arities.get(method))
                     .map_or(false, |s| s.contains(&nc))
             })
+            .cloned()
             .collect();
         if filtered.len() == 1 {
             let n = filtered.into_iter().next()?;
-            let e = table.get(&n)?.clone();
-            return Some((n, e));
+            let n_str = n.clone();
+            return Some((n_str, table.get(n.as_str()).unwrap().clone()));
         }
+        if filtered.len() < cands.len() {
+            cands = filtered;
+        }
+    }
+    // 2.6) 仍多候选：取第一个（保守退化，避免裸名）
+    if !cands.is_empty() {
+        let n = cands.into_iter().next()?;
+        let n_str = n.clone();
+        return Some((n_str, table.get(n.as_str()).unwrap().clone()));
     }
     None
 }
@@ -758,6 +890,34 @@ fn build_class_table(program: &Program) -> HashMap<String, ClassEntry> {
                     }
                 }
                 table.insert(s.name.clone(), e);
+            }
+            Decl::Interface(i) => {
+                // 接口声明**暂不进类表** —— 已试过并回退，记录结论与门槛，避免重复踩：
+                //
+                // 目标：让接口方法的调用点（`m.put(k, v)`，`m: Map<K, V>`）在静态解析
+                // 阶段命中「接收者类型 → 方法」，从而复用既有的
+                // `open_methods → HirExpr::CallVirtual` 虚分派通路。
+                //
+                // 实测结果（2026-09-23）：
+                //   * 仅入表（方法名 + arity，不进 `open_methods`）：
+                //     `未解析 'put'` 69 → 14 ✓，但调用点解析成**接口限定名**
+                //     `Map.put(...)` —— 接口没有实现体，运行期从「未链接的原生调用
+                //     （仅告警、被忽略）」变成**致命**的 `call to undefined
+                //     function #65535`，Example 1 直接中断。
+                //   * 入表 + 虚化（进 `open_methods`）：
+                //     `CallVirtual` 走全局槽位表 `METHOD_SLOTS`，而该表只收集
+                //     `hir.structs[*].virtual_methods`（HIR 跳过 `Decl::Interface`，
+                //     接口方法天然缺槽）→ 取不到槽位落到默认槽 → **误分派**：
+                //     `HashMap.toString` 自递归到 `call stack overflow`
+                //     （看门狗实证 `toString@1 <- toString@8 <- …` 深度 4019）。
+                //     已尝试把 `interface_method_names()` 并入槽位表，递归仍在 ——
+                //     说明还需打通**内嵌 std 的跨模块 vtable**：经 `stdlib_func_map`
+                //     分派进去的函数，其 `CallMethod` 槽位属于 std 模块自己的
+                //     vtable，而 VM 按宿主模块的 `vtables[type_tag]` 查找。
+                //
+                // 因此顺序应当是：**先**让接口方法的虚分派在（含内嵌 std 的）
+                // 两个模块上都成立，**再**把接口登记进类表；否则是负收益。
+                let _ = i;
             }
             Decl::Object(o) => {
                 let mut e = ClassEntry {
@@ -2476,6 +2636,18 @@ fn desugar_program_impl(program: &Program) -> HirProgram {
                     Some(HirType::Named("Any".into())),
                 ),
                 "CStr" => (
+                    vec![HirParam {
+                        name: "p".into(),
+                        ty: Some(HirType::Named("Any".into())),
+                        default_value: None,
+                        is_vararg: false,
+                    }],
+                    Some(HirType::Named("String".into())),
+                ),
+                // `CString` 的逆操作：指针 / 地址 → Aura `String`。
+                // VM 侧由 `native_builtin_read_cstr` 按 NUL 结尾拷出真 `String`；
+                // AOT 侧恒等（`String ≡ i8*`）。签名与 `CStr` 同形（`Any` → `String`）。
+                "ReadCStr" => (
                     vec![HirParam {
                         name: "p".into(),
                         ty: Some(HirType::Named("Any".into())),
@@ -4260,6 +4432,34 @@ fn is_list_like_type(ty: &str) -> bool {
         || base.starts_with("Collection")
         || base.starts_with("Iterable")
         || base.starts_with("Sequence")
+        // 具体集合类：`HashSet` / `LinkedHashSet` / `TreeSet` 都不以 `Set` 开头，
+        // 漏掉它们会让 `hs.add(x)` / `hs.getSize()` 退化为类成员访问或裸名调用
+        //（同 `ArrayList` 的历史问题）。
+        || base.starts_with("HashSet")
+        || base.starts_with("LinkedHashSet")
+        || base.starts_with("TreeSet")
+}
+
+/// 是否为「运行期按 Map 语义」的类型名。
+///
+/// 与 `is_list_like_type` 同源：`Map` / `MutableMap` 是**接口**，具体实现是
+/// `HashMap` / `LinkedHashMap` / `TreeMap`。此前的 Map 分支只认 `Map*` 前缀，
+/// 于是 `HashMap<String, Int>` 上的 `.put()` / `.getSize()` **落不到该分支**，
+/// 继续往下走「普通方法调用」→ `resolve_receiver_type` 拿到的是带泛型的
+/// `HashMap<String,Int>`（不在 `CLASS_TABLE` 里）→ 最终退化成**裸名** `put`
+/// → 字节码查表失败 → 运行期 `call to undefined function #65535`
+/// （实测自举编译器 `Codegen.constIdxMap.put(...)` 与 P0 photon 用例都死于此）。
+///
+/// 注意 `HashMap.aura` 是**真实 Aura 类**（方法齐全），所以映射到
+/// `HashMap.<method>` 后能直接解析到该类的方法，无需额外原生落点。
+fn is_map_like_type(ty: &str) -> bool {
+    let base = ty.trim_end_matches('?');
+    base.starts_with("Map")
+        || base.starts_with("MutableMap")
+        || base.starts_with("HashMap")
+        || base.starts_with("LinkedHashMap")
+        || base.starts_with("TreeMap")
+        || base.starts_with("SortedMap")
 }
 
 /// 判断 AST 表达式是否为字符串字面量或字符串插值
@@ -4833,7 +5033,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     }
                     // P15: List 高阶方法（filter/map/take）→ 内联循环块
                     if matches!(name.as_str(), "filter" | "map" | "take") {
-                        if let Some(ty) = lookup_expr_type(object) {
+                        if let Some(ty) = resolve_receiver_type(object) {
                             if is_list_like_type(&ty) {
                                 return desugar_list_hof(name, object, args);
                             }
@@ -4845,7 +5045,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     // `ArrayList.getSize`（读私有字段 `_size`），而运行期 `l` 是
                     // `Value::List` → 字段不存在 → 取到 null。
                     if name.as_str() == "getSize" && args.is_empty() {
-                        if let Some(ty) = lookup_expr_type(object) {
+                        if let Some(ty) = resolve_receiver_type(object) {
                             if is_list_like_type(&ty) {
                                 return HirExpr::Call {
                                     callee: "__list_len".into(),
@@ -4855,7 +5055,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                         }
                     }
                     if name.as_str() == "isEmpty" && args.is_empty() {
-                        if let Some(ty) = lookup_expr_type(object) {
+                        if let Some(ty) = resolve_receiver_type(object) {
                             if is_list_like_type(&ty) {
                                 return HirExpr::Call {
                                     callee: "aura.lang.std.Collections.isEmpty".into(),
@@ -4866,7 +5066,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     }
                     // List/Array/Set 的 Collection 通用方法调用 → Collections.* 原生函数
                     if name.as_str() == "get" || name.as_str() == "getAt" {
-                        if let Some(ty) = lookup_expr_type(object) {
+                        if let Some(ty) = resolve_receiver_type(object) {
                             if is_list_like_type(&ty) {
                                 let mut all_args = vec![desugar_expr(object)];
                                 for a in args {
@@ -4885,8 +5085,8 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     // 方法解析会退化为**裸名**（如 `put`）→ 字节码查表失败
                     // （运行期报「未定义函数」）。这里按名字显式改派到 `HashMap`：
                     // 运行期该变量必然持有 HashMap 实例（项目内 Map 的唯一实现）。
-                    if let Some(ty) = lookup_expr_type(object) {
-                        if ty.starts_with("Map") || ty.starts_with("MutableMap") {
+                    if let Some(ty) = resolve_receiver_type(object) {
+                        if is_map_like_type(&ty) {
                             let mapped: Option<&str> = match name.as_str() {
                                 "get" => Some("get"),
                                 "put" => Some("put"),
@@ -4918,7 +5118,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                         }
                     }
                     if name.as_str() == "contains" || name.as_str() == "indexOf" {
-                        if let Some(ty) = lookup_expr_type(object) {
+                        if let Some(ty) = resolve_receiver_type(object) {
                             if is_list_like_type(&ty) {
                                 let callee = if name.as_str() == "contains" {
                                     "aura.lang.std.Collections.contains".to_string()
@@ -4941,7 +5141,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                         || name.as_str() == "push"
                         || name.as_str() == "append"
                     {
-                        if let Some(ty) = lookup_expr_type(object) {
+                        if let Some(ty) = resolve_receiver_type(object) {
                             if is_list_like_type(&ty) {
                                 let mut all_args = vec![desugar_expr(object)];
                                 for a in args {
@@ -4956,7 +5156,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     }
                     // set(i, v) → Collections.set(collection, i, v)，结果回赋到集合变量
                     if name.as_str() == "set" {
-                        if let Some(ty) = lookup_expr_type(object) {
+                        if let Some(ty) = resolve_receiver_type(object) {
                             if is_list_like_type(&ty) {
                                 let mut all_args = vec![desugar_expr(object)];
                                 for a in args {
@@ -5175,9 +5375,74 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                         };
                     }
                     // 普通方法调用：降级为 method(obj, args...)
-                    // 如果方法是内置方法，解析为完整原生函数名
-                    let resolved_name =
-                        resolve_builtin_method(name).unwrap_or_else(|| name.clone());
+                    //
+                    // ★ 接收者是**对象/类名**（`StringOps.strlen(x)` 这类静态调用）时，
+                    //   必须走「类名.方法 + object 占位」这条既有约定，**不能**把
+                    //   成员名交给 `resolve_builtin_method`：后者只按名称匹配 prelu
+                    //   全局函数（`strlen`/`toString` …），而本分支的实参列表会把
+                    //   **接收者**放在首位 → `StringOps.strlen(x)` 被改写成
+                    //   `strlen(StringOps, x)`，真正的 `x` 落到形参之外 → 结果恒错。
+                    //
+                    //   实测最小复现（2026-09-23）：
+                    //     object PB { fun viaObject(x: Long): Long { return StringOps.strlen(x) } }
+                    //     main 里直接 `StringOps.strlen(tb)` = 5 ✓，经 `PB.viaObject(tb)` = 0 ✗
+                    //   `StringBuilder.append` 内部正是这种形态（`StringOps.strlen(text)`），
+                    //   于是 `n` 恒为 0 → 缓冲长度恒为 0 → 发射内容为空。
+                    // ⚠ 已两次试过并回退（2026-09-23），结论记在此处，别再重复踩：
+                    //
+                    // 现象（最小复现 `build/probe_self.aura`）：
+                    //   main 里 `StringOps.strlen(tb)` = 5 ✓
+                    //   `object PB` 内同一句         = 0 ✗（被「全表唯一候选」错选成
+                    //                                  `Stdio.strlen`，VM 诊断实测
+                    //                                  `func=Stdio.strlen param_count=2 argc=2
+                    //                                   args=["<ref#6>", <地址>]`）
+                    //
+                    // 试过的改法：把「首字母大写 Ident 接收者」的限定调用精确成
+                    // `Recv.method`（callee 不套 prelu 名、不走唯一候选）。
+                    //   结果：分支确实命中（`[DEBUG] qualified owner call: recv=StringOps`），
+                    //   但发射出的 `StringOps.strlen` **在模块里不是可调用函数** →
+                    //   运行期 `call to undefined function #65535` ✗
+                    //   （一次全量改动还把所有大写命名空间都改了，包括 `Memory.read`，
+                    //    导致静默崩溃 ✗）。
+                    //
+                    // 真正的事实（VM 诊断 + 帧日志）：
+                    //   * `main` 里那次调用**没有出现 `push_frame` 帧** → 它走的是
+                    //     **原生/std 模块**路径（全名原生调用，由 VM 原生注册表或内嵌
+                    //     std 处理），所以能返回 5 ✓；
+                    //   * `StringOps` 由 essential-std 提供，**不在本编译单元的声明里**
+                    //     （实测 `in_table=false`），所以「精确成 `StringOps.strlen` 直连」
+                    //     这条路根本不存在这个函数 ✗；
+                    //   * 正解应当是：**让 object 作用域内的 std 对象限定调用也走
+                    //     `is_std_module` / 标准库模块那条既有路径**（与 main 一致），
+                    //     而不是自己拼 `Recv.method`。
+                    // 下一步请先查：object 作用域内为什么没有走 std 模块分支
+                    // （`is_std_module` / `is_fqn` 判定在两种上下文中取到的 receiver 是否不同）。
+                    //
+                    // ★★ 更正（2026-09-23 查明）：上面「object 作用域解析差异」是**误判**，
+                    //   不要再按它改本函数。真实根因在 **VM 的指针算术**：
+                    //     `CString(s)` 产出 `Value::Ptr`，经 `Long` 形参进入嵌入 std 的
+                    //     Aura 实现后，`Memory.read(text + n)` 里的 `text + n` 落进
+                    //     `bin_add` 的 Float 分支（`Ptr.as_float()` = 0.0）→
+                    //     `ptr + 0` = `Float(0.0)`、`ptr + 8` = `Float(8.0)`，
+                    //     于是 `Memory.read` 读到地址 0 → `c == 0` → NUL 扫描恒得 0。
+                    //   已在 `rust/compiler/src/vm/interp.rs` 修好：`bin_add` / `bin_sub`
+                    //   对含 `Ptr` 的操作数一律按**地址**做整数运算（与 `value_eq_abi`
+                    //   同一条「指针即地址」ABI）。
+                    //   验证：`class` + `init()` + `append()` + `build()` 的完整复刻探针
+                    //   由「输出空串」变为 `out=[helloworld]`；自举 `--selftest` 恢复
+                    //   打印真实字节码文本。
+                    // 其余情况：按内建方法名（prelu）或接收者类型推断解析
+                    let resolved_name = resolve_builtin_method(name).unwrap_or_else(|| {
+                        if let Some(ref t) = resolve_receiver_type(object) {
+                            if !t.is_empty() && t != "Any" && t != "Nothing" {
+                                let table = CLASS_TABLE.with(|t| t.borrow().clone());
+                                if table.contains_key(t.as_str()) {
+                                    return format!("{}.{}", t, name);
+                                }
+                            }
+                        }
+                        name.clone()
+                    });
                     let mut all_args = vec![desugar_expr(object)];
                     for a in args {
                         all_args.push(desugar_expr(a));
@@ -5301,7 +5566,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
             }
             // P15: List/Array 内建成员 → Collection 通用接口调用
             // （VM 的 GetField 不支持 Value::List，需降级为原生函数）
-            if let Some(ty) = lookup_expr_type(object) {
+            if let Some(ty) = resolve_receiver_type(object) {
                 if is_list_like_type(&ty) {
                     match name.as_str() {
                         "size" | "length" | "count" => {

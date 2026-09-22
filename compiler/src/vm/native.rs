@@ -327,6 +327,17 @@ impl NativeRegistry {
         r.register("Cpu.memFence", native_cpu_mem_fence);
         r.register("Cpu.cpuid", native_cpu_cpuid);
         r.register("Cpu.atomicAdd", native_cpu_atomic_add);
+        // `Builtin.cstr` 系列（`prelu.aura:CString/CStr`，前端以同名原生函数注册，
+        // 见 `codegen/hir.rs` P8.5）：Aura String ↔ C 字符串的**既有接口**。
+        // 之前 VM 未实现它们，`CString(s)` 落到「未链接 → 0」，导致
+        // `StringBuilder.append(handle, text)` 首行 `if (text == 0) return`
+        // 直接返回、发射缓冲永远为空。
+        r.register("CString", native_builtin_cstring);
+        r.register("CStr", native_builtin_cstring);
+        r.register("ReadCStr", native_builtin_read_cstr);
+        r.register("cstr", native_builtin_cstring);
+        r.register("Builtin.cstr", native_builtin_cstring);
+        r.register("aura.lang.std.Builtin.cstr", native_builtin_cstring);
     }
 
     /// 注册 native 包的线程桥原语（`aura.lang.native.thread.ThreadOps`）。
@@ -636,6 +647,12 @@ pub fn native_cast(args: &[Value]) -> Value {
 
     // 基本类型转换
     match target_type.as_str() {
+        // 窄整型：VM 以 Int 承载，按位宽截断（`Memory.write(addr, x as Byte)`
+        // 依赖这一转换；此前这些名字未列入基本类型，命中包装类后直接抛异常）
+        "Byte" | "UByte" | "UInt8" => Value::Int(value.as_int() & 0xFF),
+        "Short" | "Char" | "UShort" | "UInt16" => Value::Int(value.as_int() & 0xFFFF),
+        "Int8" => Value::Int(((value.as_int() & 0xFF) as i8) as i64),
+        "Int16" => Value::Int(((value.as_int() & 0xFFFF) as i16) as i64),
         "Int" | "Long" => Value::Int(value.as_int()),
         "Float" | "Double" | "Number" => Value::Float(value.as_float()),
         "Boolean" | "Bool" => Value::Bool(value.as_bool()),
@@ -1041,6 +1058,11 @@ fn native_fn_index(args: &[Value]) -> Value {
 fn native_memory_alloc(args: &[Value]) -> Value {
     let n = arg_i64(args, 0).max(0) as usize;
     let p = unsafe { libc::malloc(n.max(1)) };
+    // 返回 `Int`（不是 `Ptr`）：曾试过返回 `Ptr` 以便 `as_string()` 把
+    // 缓冲按 C 字符串解读，但 VM 里 `Ptr` 会被 `as_string()` 无条件解引用，
+    // 而不少指针并非 C 字符串（FFI 句柄等）→ 静默段错误（实测 Example 1 直接终止）。
+    // 结论：String ≡ i8* 这条 ABI 的适配必须**按声明类型**做（见 `as_string` 注释），
+    // 不能靠「是不是 Ptr」来猜。
     Value::Int(p as i64)
 }
 
@@ -1087,6 +1109,67 @@ fn native_memory_read64(args: &[Value]) -> Value {
         return Value::Int(0);
     }
     Value::Int(unsafe { std::ptr::read_unaligned(a as *const i64) })
+}
+
+/// `CString(s)` / `CStr(s)` / `Builtin.cstr(s)` → NUL 结尾的 C 字符串指针。
+///
+/// 项目既定 ABI 是「Aura `String` ≡ NUL 结尾的 `i8*`」（该 ABI 写在
+/// `aura/lang/native/io/Stdio.aura::bufferToString` 的注释里，也是
+/// `StringBuilder.append(handle: Long, text: Long)` / `StringOps.strlen(addr: Long)`
+/// 等既有接口的前提）。AOT 下天然成立；VM 里 `Value::Str(Rc<str>)` 既没有 NUL
+/// 结尾、也不是裸指针，因此必须在这里造一份 NUL 结尾副本再交出地址。
+///
+/// 副本按「源串底层地址」缓存：同一个 `Rc<str>`（同一份字符串）复用同一副本，
+/// 避免高频调用（如发射缓冲每次 append）持续泄漏。
+fn native_builtin_cstring(args: &[Value]) -> Value {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    thread_local! {
+        /// 源串地址 → NUL 结尾副本地址
+        static CSTR_CACHE: RefCell<HashMap<usize, i64>> = RefCell::new(HashMap::new());
+    }
+    match args.first() {
+        Some(Value::Str(s)) => {
+            let key = s.as_ptr() as usize;
+            let p = CSTR_CACHE.with(|c| {
+                let mut m = c.borrow_mut();
+                if let Some(&p) = m.get(&key) {
+                    return p;
+                }
+                let mut bytes = s.as_bytes().to_vec();
+                bytes.push(0);
+                let p = Box::leak(bytes.into_boxed_slice()).as_ptr() as i64;
+                m.insert(key, p);
+                p
+            });
+            Value::Ptr(p)
+        }
+        // 已经是指针/句柄：ABI 一致，原样透传
+        Some(Value::Ptr(p)) => Value::Ptr(*p),
+        Some(Value::Int(i)) => Value::Ptr(*i),
+        Some(Value::Null) | None => Value::Ptr(0),
+        Some(other) => {
+            let mut bytes = other.as_string().into_bytes();
+            bytes.push(0);
+            Value::Ptr(Box::leak(bytes.into_boxed_slice()).as_ptr() as i64)
+        }
+    }
+}
+
+/// `ReadCStr(ptr) / readCStr(ptr)` → Aura `String`（`CString` 的逆操作）。
+///
+/// 对应自举侧 `Vm.aura` 的 `READ_CSTR` 指令与 `aura.ffi.readCStr`。
+fn native_builtin_read_cstr(args: &[Value]) -> Value {
+    let p = match args.first() {
+        Some(Value::Ptr(p)) => *p,
+        Some(Value::Int(i)) => *i,
+        _ => 0,
+    };
+    if p == 0 {
+        return Value::str_("");
+    }
+    let c = unsafe { std::ffi::CStr::from_ptr(p as *const std::os::raw::c_char) };
+    Value::str_(c.to_string_lossy().to_string())
 }
 
 /// Memory.write(addr, v)

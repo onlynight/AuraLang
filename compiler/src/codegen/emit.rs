@@ -224,6 +224,15 @@ pub fn emit_module(hir: &HirProgram, mir_funcs: &[MirFunction], ctx: &LowerCtx) 
             }
         }
     }
+    // 接口方法同样必须占槽：`CallVirtual` 只带方法名，槽位由本表决定。
+    // 接口声明不在 `hir.structs` 中（HIR 跳过 `Decl::Interface`），从类表的
+    // 接口条目补齐；否则取不到槽位 → 落到默认槽 → 误分派到别的函数
+    // （实测 `HashMap.toString` 自递归 → 栈溢出）。
+    for vm in crate::codegen::hir::interface_method_names() {
+        if !slot_names.contains(&vm) {
+            slot_names.push(vm);
+        }
+    }
     let mut vtables: Vec<VirtualTable> = Vec::new();
     const NO_METHOD: u16 = u16::MAX;
     for s in hir.structs.iter().filter(|st| st.is_class) {

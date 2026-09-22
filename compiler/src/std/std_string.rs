@@ -429,10 +429,30 @@ fn nat_char_at(args: &[Value]) -> Value {
 }
 
 /// String.charCodeAt(index) — 获取位置 index 字符的 Unicode 码点（越界返回 -1）
+///
+/// ⚠ 历史缺陷（2026-09-23 修复）：此处曾写成 `let idx = i0(args)`，而 `i0`
+/// 取的是 **args[0]（接收者字符串本身）**，于是索引恒为 0 —— **任何**
+/// `s.charCodeAt(i)` 都返回**首字符**的码点。后果极广（VM 解释路径下所有
+/// 「按字符码驱动」的逻辑同时错）：
+///   * `HirUtils.hirFieldAt` 拿 `,` 的码点（44）去比较 → 分隔符永不命中，
+///     整串被当成**一个字段**返回；
+///   * `HirUtils.hirKidsCount` 恒为 1 → **所有** kids 列表被截成 1 个元素；
+///   * `HirUtils.hirToIntOf("41")` 得 44（每位都取到首字符 `'4'` → 4*10+4）；
+///   表象则是一连串「看不出关联」的症状：自举编译器发射的字节码**只剩函数头**、
+///   photon `.phir` 解析出 **0 个函数**、`splitComma` 切不开寄存器表……
+/// 参数布局与 `nat_char_at` 保持一致（兼容 VM 注入 self 的 companion 调用）。
 fn nat_char_at_code(args: &[Value]) -> Value {
-    let s = s0(args);
-    let idx = i0(args) as usize;
-    match s.chars().nth(idx) {
+    let (text, idx) = if args.len() >= 3 && !matches!(args.first(), Some(Value::Str(_))) {
+        (
+            args.get(1).map(|v| v.as_string()).unwrap_or_default(),
+            args.get(2).map(|v| v.as_int()).unwrap_or(0),
+        )
+    } else if args.len() >= 2 && matches!(args.get(1), Some(Value::Int(_))) {
+        (s0(args), args.get(1).map(|v| v.as_int()).unwrap_or(0))
+    } else {
+        (s0(args), i0(args))
+    };
+    match text.chars().nth(idx as usize) {
         Some(c) => Value::Int(c as i64),
         None => Value::Int(-1),
     }

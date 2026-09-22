@@ -40,6 +40,65 @@ impl Vm {
         let func = self.frames[top].func;
         let ip = self.frames[top].ip;
 
+        // ── 死循环看门狗（诊断）──────────────────────────────────────────
+        // `AURA_VM_WATCH=N`：每执行 N 条指令打印一次当前帧栈（函数名 + ip）。
+        //
+        // 某些死循环**完全不调用任何 std 函数**（纯 Aura 计算），因此
+        // stderr 上不会有任何 stdlib 派发日志可看 —— 自举编译器里
+        // `EmitBuffer`（AOT 发射）就这类：实测 180s 只有 6 次
+        // `StringBuilder.create`，其余全是空转。打开本开关后，
+        // 输出尾部就是正在空转的函数与指令位置。
+        //
+        // 例：AURA_VM_WATCH=5000000 aura run build/auc/compiler/aura-compiler.auc
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            use std::sync::OnceLock;
+            static WATCH_INTERVAL: OnceLock<u64> = OnceLock::new();
+            static WATCH_TICK: AtomicU64 = AtomicU64::new(0);
+            let interval = *WATCH_INTERVAL.get_or_init(|| {
+                std::env::var("AURA_VM_WATCH")
+                    .ok()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0)
+            });
+            if interval > 0 {
+                let tick = WATCH_TICK.fetch_add(1, Ordering::Relaxed) + 1;
+                if tick % interval == 0 {
+                    let mut stack = String::new();
+                    for (i, fr) in self.frames.iter().rev().enumerate() {
+                        if i >= 16 {
+                            stack.push_str("... ");
+                            break;
+                        }
+                        let n = self
+                            .module
+                            .funcs
+                            .get(fr.func)
+                            .map(|f| f.name.as_str())
+                            .unwrap_or("<bad>");
+                        stack.push_str(&format!("{}@{} <- ", n, fr.ip));
+                    }
+                    eprintln!(
+                        "[vm] watch: tick={} depth={} {}",
+                        tick,
+                        self.frames.len(),
+                        stack
+                    );
+                    // 栈顶帧的局部变量（定位「参数异常」用，例如
+                    // `StringBuilder.reserve(sb, need)` 里的 need 是否为天文数字）
+                    if let Some(fr) = self.frames.last() {
+                        let locs: Vec<String> = fr
+                            .locals
+                            .iter()
+                            .take(6)
+                            .map(|v| format!("{:?}", v))
+                            .collect();
+                        eprintln!("[vm]   locals: [{}]", locs.join(", "));
+                    }
+                }
+            }
+        }
+
         // 跑到函数末尾：入口帧视为 Halt，否则隐式 ReturnUnit
         if ip >= self.module.funcs[func].code.len() {
             if self.frames.len() == 1 {
@@ -95,8 +154,8 @@ impl Vm {
             Instr::Shr => bin_op(self, top, bin_shr)?,
 
             // ── 比较 ──
-            Instr::Eq => bin_op(self, top, |a, b| Value::Bool(a == b))?,
-            Instr::Ne => bin_op(self, top, |a, b| Value::Bool(a != b))?,
+            Instr::Eq => bin_op(self, top, value_eq_abi)?,
+            Instr::Ne => bin_op(self, top, value_ne_abi)?,
             Instr::Lt => bin_op(self, top, bin_lt)?,
             Instr::Gt => bin_op(self, top, bin_gt)?,
             Instr::Le => bin_op(self, top, bin_le)?,
@@ -781,11 +840,33 @@ impl Vm {
         }
     }
 
+    /// 窄整型类型名（数值语义，不是类实例语义）。
+    ///
+    /// 这些名字在 `core` 里有同名包装类，会命中 `class_id_by_name`，
+    /// 因此必须在类检查之前拦截做数值转换（见 `aura_cast`）。
+    fn is_narrow_int_type_name(name: &str) -> bool {
+        matches!(
+            name,
+            "Byte"
+                | "Short"
+                | "Char"
+                | "UByte"
+                | "UShort"
+                | "Int8"
+                | "Int16"
+                | "UInt8"
+                | "UInt16"
+        )
+    }
+
     /// 基本类型名匹配（`as?` 对基本类型做严格类型判断，而非数值转换）
     fn basic_type_matches(value: &Value, target_name: &str) -> bool {
         let tn = value.type_name();
         match target_name {
             "Int" | "Long" | "Int32" | "Int64" => tn == "Int",
+            // 窄整型在 VM 里统一以 Int 承载（同 `native_cast`）
+            "Byte" | "Short" | "Char" | "UByte" | "UShort" | "Int8" | "Int16" | "UInt8"
+            | "UInt16" => tn == "Int",
             "Float" | "Double" | "Number" | "Float32" | "Float64" => tn == "Float",
             "Boolean" | "Bool" => tn == "Boolean",
             "String" => tn == "String",
@@ -828,6 +909,20 @@ impl Vm {
             }
             "aura_cast" if args.len() >= 2 => {
                 let target_name = args[1].as_string();
+                // 窄整型（Byte/Short/Char/…）：先做**数值转换**，不要走下面的类实例检查。
+                //
+                // `core` 里存在 `Byte.aura` / `Short.aura` 等包装类，所以
+                // `class_id_by_name("Byte")` 会**命中**，旧的 `Some(id)` 分支用
+                // `is_instance_of` 严格判断 → `0 as Byte`（Int 值）被判为不可转换，
+                // 运行期抛 `as cast failed: cannot cast value to class 'Byte'`。
+                // 实测影响面（冻结种子下 10 行探针即可复现）：
+                //   * 任何 `x as Byte` 都崩 —— 包括 `Memory.write(addr, 0 as Byte)`；
+                //   * 内嵌 std 的 `StringBuilder.create()` 第一行就是 `0 as Byte`，
+                //     于是自举编译器（Lexer 依赖 StringBuilder）一启动就死。
+                // 注意 BASIC_TYPES 白名单只覆盖 `None` 分支，且缺 Byte/Short/Char。
+                if Self::is_narrow_int_type_name(&target_name) {
+                    return Ok(Some(crate::vm::native::native_cast(args)));
+                }
                 match self.class_id_by_name(&target_name) {
                     Some(id) => {
                         if self.is_instance_of(&args[0], id) {
@@ -1247,6 +1342,36 @@ impl Vm {
     /// 一律返回 `Null` —— photon 后端 `RegisterAllocator` 的
     /// `liveAtEnd.set(j, liveOut)` 因此既没有效果、还会把变量写成 null。
     fn try_inline_coll_set(&mut self, name: &str, args: &[Value]) -> Option<Value> {
+        // ── Map 写入：`m.put(k, v)` → `Collections.hashMapPut` ──────────────
+        //
+        // 与下面的 `set` 同源：VM 有两套映射表示，只有 `Value::Ref`（堆表示，
+        // `mutableMapOf()` 产出）**原位**写入才有效果。
+        //   * 堆表示 → 本函数原地 `map_set` 并返回同一句柄；
+        //   * 值表示 `Value::Map` → 交给 Rust native 走值语义（返回新映射，
+        //     由调用方回赋），此处返回 `None` 放行；
+        //   * 非映射接收者 → 同样放行，避免把调用静默吞掉。
+        // 没有这一层时，`m.put(k, v)` 作为**语句**使用会毫无效果（返回值被丢弃）。
+        let is_map_put = matches!(
+            name,
+            "hashMapPut" | "aura.lang.std.Collections.hashMapPut"
+        );
+        if is_map_put {
+            let key = args.get(1).cloned().unwrap_or(Value::Null);
+            let val = args.get(2).cloned().unwrap_or(Value::Null);
+            return match args.first() {
+                Some(Value::Ref(h)) => {
+                    let h = *h;
+                    if self.heap.is_map(h) {
+                        self.heap.map_set(h, key, val);
+                        Some(Value::Ref(h))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+        }
+
         let is_set = matches!(
             name,
             "set" | "listSet" | "aura.lang.std.Collections.set" | "aura.lang.std.Collections.listSet"
@@ -1291,6 +1416,25 @@ impl Vm {
         let native = self.module.natives[idx].clone();
         let param_count = native.param_count as usize;
         let args = self.pop_n(top, param_count)?;
+
+        // ── 原生调用追踪（诊断，默认关闭）─────────────────────────────────
+        // `AURA_VM_TRACE_CALL=<子串>`：打印名字含该子串的原生调用。
+        //
+        // 用途：定位「同一 std 方法在 main 作用域正常、在 object 方法体内失效」
+        // 这类**作用域相关的调用名差异** —— 前端在不同作用域可能生成不同的 callee
+        // 名，导致 `stdlib_func_map`（嵌入 .auc 的 Aura 实现）命中或落空；落空时
+        // 退回 Rust native，而两套实现**句柄语义不兼容**（Aura 侧是裸内存，
+        // Rust 侧是注册表下标），表现为句柄为 0 / 读到垃圾。
+        // 实测：`StringBuilder.create` 在 main 里派发到 Aura 实现（句柄=裸内存），
+        // 在 object 方法体内落到 Rust native（返回下标 0）→ `appendN` 立刻 `sb==0`。
+        if trace_call_enabled(&native.name) {
+            eprintln!(
+                "[vm] native-call: {} param_count={} argc={}",
+                native.name,
+                param_count,
+                args.len()
+            );
+        }
 
         // `throw expr` 由 HIR 降级为 `__throw(expr)`：在原生派发前拦截，
         // 展开到最近的异常处理器（`try/catch`），无处理器则报未捕获异常。
@@ -1474,6 +1618,14 @@ impl Vm {
         let native = self.module.natives[idx].clone();
         // 使用实际参数个数而非声明的 param_count
         let mut args = self.pop_n(top, argc)?;
+
+        // 原生调用追踪（诊断，默认关闭；见 `trace_call_enabled` 的说明）
+        if trace_call_enabled(&native.name) {
+            eprintln!(
+                "[vm] native-call(args): {} param_count={} argc={}",
+                native.name, native.param_count, argc
+            );
+        }
 
         // 对象单例方法（object 上的 `Class.method(...)`）会在调用点注入 self 作为首参，
         // 使 `argc = 声明参数个数 + 1`。原生实现按声明签名取值，此处剥离注入的 self，
@@ -2036,6 +2188,42 @@ where
     Ok(())
 }
 
+/// `AURA_VM_TRACE_CALL=<子串>`：是否追踪该原生调用（诊断用，默认关闭）。
+///
+/// 见 `do_call_native` 里的说明：用于定位作用域相关的「调用名差异」——
+/// 前端在 main 与 object 方法体内可能给同一 std 方法生成不同的 callee 名，
+/// 前者命中 `stdlib_func_map`（嵌入的 Aura 实现），后者落空退回 Rust native，
+/// 而两套实现的句柄语义不兼容。
+fn trace_call_enabled(name: &str) -> bool {
+    use std::sync::OnceLock;
+    static FILTER: OnceLock<Option<String>> = OnceLock::new();
+    match FILTER.get_or_init(|| std::env::var("AURA_VM_TRACE_CALL").ok()) {
+        Some(sub) if !sub.is_empty() => name.contains(sub.as_str()),
+        _ => false,
+    }
+}
+
+/// `==` 的 ABI 适配：**任一侧是指针**（`Ptr`）时按地址比较。
+///
+/// 项目 ABI 是「指针即地址」：`Memory.alloc` / `Allocator.malloc` 返回 `Ptr`，
+/// 而既有代码普遍用 `addr == 0` / `addr != 0` 判空。`Value` 的派生 `PartialEq`
+/// 会让 `Ptr(0) == Int(0)` 为 false，因此这里对含指针的比较统一取地址比数值；
+/// 其余情况保持派生语义（`Int`/`Str`/`Null` 等互不相等的行为不变）。
+fn value_eq_abi(a: Value, b: Value) -> Value {
+    if matches!(a, Value::Ptr(_)) || matches!(b, Value::Ptr(_)) {
+        return Value::Bool(a.as_int() == b.as_int());
+    }
+    Value::Bool(a == b)
+}
+
+/// `!=` 的 ABI 适配（`value_eq_abi` 取反）。
+fn value_ne_abi(a: Value, b: Value) -> Value {
+    match value_eq_abi(a, b) {
+        Value::Bool(v) => Value::Bool(!v),
+        _ => Value::Bool(false),
+    }
+}
+
 /// 集合 / 字符串的内建成员访问（`size` / `length` / `first` / `last` / `isEmpty`）。
 ///
 /// 背景：`GetField` 指令只携带字段名的 FNV-1a 哈希（见 `codegen::emit::field_index`），
@@ -2118,6 +2306,20 @@ fn bin_add(a: Value, b: Value) -> Value {
     if matches!(a, Value::Str(_)) || matches!(b, Value::Str(_)) {
         return Value::str_(&format!("{}{}", a, b));
     }
+    // ── 指针算术（"指针即地址" ABI）──
+    // 与 `value_eq_abi` 同源：含 `Ptr` 的 `+` 一律按**地址**做整数运算，结果取 `Int`。
+    //
+    // 此前含 `Ptr` 的加法会掉进下面的 Float 分支（`as_float()` 对 `Ptr` 返回 0.0）：
+    //   `ptr + 0` → `Float(0.0)`，`ptr + 8` → `Float(8.0)`
+    // 于是「指针 + 偏移」退化成小浮点地址。实测后果（2026-09-23）：
+    //   `CString("hello")` 产出 `Ptr`，经 `Long` 形参进入嵌入 std 的
+    //   `StringBuilder.append` 后，`Memory.read(text + n)` 读的是地址 0
+    //   → NUL 扫描恒得 0 → 发射缓冲恒空 → 自举编译器打印不出字节码。
+    // 注意与 `Memory.alloc` 的差异：后者特意返回 `Int`（见 `native_memory_alloc`），
+    // 所以「句柄 + 偏移」一直是正常的；只有 `CString` 这条 `Ptr` 路径会踩到 Float 分支。
+    if matches!(a, Value::Ptr(_)) || matches!(b, Value::Ptr(_)) {
+        return Value::Int(a.as_int().wrapping_add(b.as_int()));
+    }
     if both_int(&a, &b) {
         Value::Int(a.as_int().wrapping_add(b.as_int()))
     } else {
@@ -2126,6 +2328,10 @@ fn bin_add(a: Value, b: Value) -> Value {
 }
 
 fn bin_sub(a: Value, b: Value) -> Value {
+    // 指针差值（同 `bin_add` 的 ABI 适配：按地址做整数运算）
+    if matches!(a, Value::Ptr(_)) || matches!(b, Value::Ptr(_)) {
+        return Value::Int(a.as_int().wrapping_sub(b.as_int()));
+    }
     if both_int(&a, &b) {
         Value::Int(a.as_int().wrapping_sub(b.as_int()))
     } else {

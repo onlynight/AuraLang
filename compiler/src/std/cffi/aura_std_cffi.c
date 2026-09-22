@@ -415,6 +415,16 @@ int64_t aura_string_length(const char *s) {
     return s ? (int64_t)strlen(s) : 0;
 }
 
+/* `CString` 的逆操作：C 字符串指针 → Aura `String`。
+ *
+ * AOT 下 Aura `String` **就是** NUL 结尾的 `i8*`（项目既定 ABI），所以这里是
+ * 恒等返回 —— 与旧的零拷贝路径行为完全一致，不产生任何复制。
+ * VM（字节码）路径下由 `rust/compiler/src/vm/native.rs::native_builtin_read_cstr`
+ * 实现（拷出一份真 `String`，带类型标签），二者语义对齐。
+ *
+ * 用途：`EmitBuffer.sbBuild()` 用它把原生缓冲区的字节显式变成 `String`。 */
+const char *ReadCStr(const char *p) { return p ? p : ""; }
+
 int64_t aura_string_charCodeAt(const char *s, int64_t idx) {
     if (!s || idx < 0 || (size_t)idx >= strlen(s)) return -1;
     return (unsigned char)s[idx];
@@ -1711,6 +1721,92 @@ int aura_lang_std_Collections_mapContains(const void *map, const char *key) {
         if (m->keys[i] && strcmp(m->keys[i], key) == 0) return 1;
     }
     return 0;
+}
+
+/* ── Map 调用点补全：`Collections.mapContainsKey` / `mapContainsValue` /
+ *    `mapKeys` / `mapValues` / `hashMapPut` ──────────────────────────────────
+ *
+ * 这 5 个名字在 **VM（Rust native）** 侧早已存在（`std_collections.rs` 的
+ * `nat_map_contains_key` / `nat_map_contains_value` / `nat_map_keys` /
+ * `nat_map_values` / `nat_hash_map_put`），但 AOT 的「调用点符号层」此前只导出
+ * `Collections.mapContains`。一旦前端把 `m.containsKey(k)` / `m.put(k, v)` 降级为
+ * `Collections.mapContainsKey(...)` / `Collections.hashMapPut(...)`，AOT 产物就会在
+ * 链接期报 undefined symbol —— 这正是「集合映射表两头不齐」的那半边。
+ *
+ * 这里按同一 Plan A ABI（`AuraDynMap = { len, cap, keys, vals }`，键/值为 C 字符串）
+ * 补齐，语义与 VM native 一一对应：
+ *   * `mapContainsKey`  → 存在该键
+ *   * `mapContainsValue`→ 存在该值（先比指针，再按字符串内容比）
+ *   * `mapKeys` / `mapValues` → 新建 `AuraDynList`（与 VM 返回 `Value::List` 对齐）
+ *   * `hashMapPut`      → 存在则覆盖、否则追加，返回同一映射句柄
+ *     （AOT 的映射是可变结构体，原地写入即可，无需返回新对象） */
+int aura_lang_std_Collections_mapContainsKey(const void *map, const char *key) {
+    return aura_lang_std_Collections_mapContains(map, key);
+}
+
+int aura_lang_std_Collections_mapContainsValue(const void *map, const void *value) {
+    const AuraDynMap *m = (const AuraDynMap *)map;
+    if (!m) return 0;
+    const char *v = value ? (const char *)value : "";
+    for (int64_t i = 0; i < m->len; i++) {
+        const char *cur = m->vals[i];
+        if (cur == v) return 1;
+        if (cur && v && strcmp(cur, v) == 0) return 1;
+    }
+    return 0;
+}
+
+const void *aura_lang_std_Collections_mapKeys(const void *map) {
+    const AuraDynMap *m = (const AuraDynMap *)map;
+    AuraDynList *out = aura_dynlist_new(4);
+    if (!m) return (const void *)out;
+    for (int64_t i = 0; i < m->len; i++) {
+        aura_dynlist_push(out, m->keys[i] ? m->keys[i] : "");
+    }
+    return (const void *)out;
+}
+
+const void *aura_lang_std_Collections_mapValues(const void *map) {
+    const AuraDynMap *m = (const AuraDynMap *)map;
+    AuraDynList *out = aura_dynlist_new(4);
+    if (!m) return (const void *)out;
+    for (int64_t i = 0; i < m->len; i++) {
+        aura_dynlist_push(out, m->vals[i] ? m->vals[i] : "");
+    }
+    return (const void *)out;
+}
+
+const void *aura_lang_std_Collections_hashMapPut(const void *map, const void *key, const void *value) {
+    AuraDynMap *m = (AuraDynMap *)map;
+    if (!m) {
+        m = aura_map_new(4);
+        if (!m) return 0;
+    }
+    const char *k = key ? (const char *)key : "";
+    const char *v = value ? (const char *)value : "";
+    for (int64_t i = 0; i < m->len; i++) {
+        if (m->keys[i] && strcmp(m->keys[i], k) == 0) {
+            m->vals[i] = v;
+            return (const void *)m;
+        }
+    }
+    if (m->len >= m->cap) {
+        int64_t ncap = m->cap * 2;
+        const char **nk = (const char **)aura_mem_alloc((int64_t)sizeof(const char *) * ncap);
+        const char **nv = (const char **)aura_mem_alloc((int64_t)sizeof(const char *) * ncap);
+        if (!nk || !nv) return (const void *)m;
+        for (int64_t i = 0; i < m->len; i++) {
+            nk[i] = m->keys[i];
+            nv[i] = m->vals[i];
+        }
+        m->keys = nk;
+        m->vals = nv;
+        m->cap = ncap;
+    }
+    m->keys[m->len] = k;
+    m->vals[m->len] = v;
+    m->len++;
+    return (const void *)m;
 }
 
 /** 列表按下标写入（越界则追加） */

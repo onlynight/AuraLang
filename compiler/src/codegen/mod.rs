@@ -372,14 +372,22 @@ fn resolve_aura_imports_rec(
                     None
                 }
             } else if let Some(pkg) = rest.strip_prefix(COMPILER_PKG_ROOT) {
-                eprintln!("[debug] resolving compiler pkg import: {} -> {}", rest, pkg);
+                // 导入解析日志：默认静默（自举时每个 import 都会打，刷屏明显）。
+                // 需要排查包路径映射时设 `AURA_DEBUG_IMPORT=1`。
+                if std::env::var_os("AURA_DEBUG_IMPORT").is_some() {
+                    eprintln!("[debug] resolving compiler pkg import: {} -> {}", rest, pkg);
+                }
                 if let Some(root) = compiler_pkg_root {
                     let rel = pkg_to_aura_path(pkg);
                     let target_path = root.join(rel);
-                    eprintln!("[debug] target path: {}", target_path.display());
+                    if std::env::var_os("AURA_DEBUG_IMPORT").is_some() {
+                        eprintln!("[debug] target path: {}", target_path.display());
+                    }
                     Some(target_path)
                 } else {
-                    eprintln!("[debug] compiler_pkg_root is None!");
+                    if std::env::var_os("AURA_DEBUG_IMPORT").is_some() {
+                        eprintln!("[debug] compiler_pkg_root is None!");
+                    }
                     None
                 }
             } else if let Some(pkg) = rest.strip_prefix(COLLECTION_PKG_ROOT) {

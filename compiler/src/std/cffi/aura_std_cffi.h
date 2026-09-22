@@ -318,6 +318,9 @@ void __throw(const void *value);
 
 // aura.lang.std.String.*
 int64_t aura_lang_std_String_length(const char *s);
+
+/** `CString` 的逆操作：C 字符串指针 → Aura String（AOT 下恒等，String ≡ i8*） */
+const char *ReadCStr(const char *p);
 int aura_lang_std_String_contains(const char *s, const char *sub);
 int aura_lang_std_String_startsWith(const char *s, const char *prefix);
 int aura_lang_std_String_endsWith(const char *s, const char *suffix);
@@ -361,6 +364,13 @@ void aura_lang_std_Collections_mapSet(const void *map, const char *key, const vo
 const void *aura_lang_std_Collections_mapGet(const void *map, const char *key);
 int64_t aura_lang_std_Collections_mapSize(const void *map);
 int aura_lang_std_Collections_mapContains(const void *map, const char *key);
+/* Map 调用点补全（与 `vm/../std_collections.rs` 的同名 native 语义对齐）：
+ * 此前只导出 `mapContains`，一旦前端降级出下面这几个名字，AOT 产物会缺符号。 */
+int aura_lang_std_Collections_mapContainsKey(const void *map, const char *key);
+int aura_lang_std_Collections_mapContainsValue(const void *map, const void *value);
+const void *aura_lang_std_Collections_mapKeys(const void *map);
+const void *aura_lang_std_Collections_mapValues(const void *map);
+const void *aura_lang_std_Collections_hashMapPut(const void *map, const void *key, const void *value);
 /** 列表按下标写入（越界则追加） */
 void aura_lang_std_Collections_listSet(const void *list, int64_t idx, const void *value);
 

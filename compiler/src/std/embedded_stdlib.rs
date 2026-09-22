@@ -48,8 +48,8 @@
 //
 //   aura/core/aura/lang/String.aura            → aura_core_auc/aura/lang/String.auc
 //   aura/core/aura/lang/std/Math.aura          → aura_core_auc/aura/lang/std/Math.auc
-//   aura/core/aura/lang/std/collection/Collections.aura
-//                                             → aura_core_auc/aura/lang/std/collection/Collections.auc
+//   aura/core/aura/lang/collection/Collections.aura
+//                                             → aura_core_auc/aura/lang/collection/Collections.auc
 //   aura/core/aura/lang/native/io/Stdio.aura   → aura_core_auc/aura/lang/native/io/Stdio.auc
 //
 // 因此生成只需**一条命令**（一次编译整棵 core 树，输出自带镜像目录层级）：
@@ -73,8 +73,11 @@ pub static EMBEDDED_MATH_AUC: &[u8] = core_auc!("aura/lang/std/Math.auc");
 pub static EMBEDDED_TIME_AUC: &[u8] = core_auc!("aura/lang/std/Time.auc");
 
 /// 嵌入的 Collections 标准库 — 纯逻辑
-pub static EMBEDDED_COLLECTIONS_AUC: &[u8] =
-    core_auc!("aura/lang/std/collection/Collections.auc");
+// `EMBEDDED_COLLECTIONS_AUC` 已**移除**：集合语义统一到
+// `aura/core/aura/lang/collection/Collections.aura`（原 `std/collection/Collections.aura`
+// 已合并进该文件并删除，避免两个同名 object `Collections` 共用 `%struct.Collections`），
+// 且该模块**刻意不嵌入**（原因见下方 `EMBEDDED_STDLIB_MODULES` 的说明）。
+// 不嵌入就不需要 `include_bytes!`，也就不会再因路径/产物残留而误载。
 
 /// 嵌入的 Test 标准库 — 纯逻辑
 pub static EMBEDDED_TEST_AUC: &[u8] = core_auc!("aura/lang/std/Test.auc");
@@ -215,7 +218,7 @@ pub static EMBEDDED_STDLIB_MODULES: &[(&str, &str, &[u8])] = &[
     ("Time", "aura.lang.std", EMBEDDED_TIME_AUC),
     // ── `Collections` **不嵌入**（重要）──
     //
-    // `aura/lang/std/collection/Collections.aura` 的实现全部绑定 **Plan A 原生内存
+    // `aura/lang/collection/Collections.aura` 的实现全部绑定 **Plan A 原生内存
     // 布局**（`Collections.listSize` → `Memory.read64(list)`，`listSet` →
     // `Memory.write64(items + idx*8, …)`），只对 AOT/自举世界的裸内存列表成立。
     // 而 VM 里 `Value::List` / `Value::Map` 是 Rust 侧对象，同一份实现对它们是
@@ -225,11 +228,14 @@ pub static EMBEDDED_STDLIB_MODULES: &[(&str, &str, &[u8])] = &[
     // VM 的派发规则是「嵌入 Aura 实现优先于 Rust native」，一旦嵌入就会顶掉
     // `std_collections.rs` 里 53 个**面向 `Value::List`/`Value::Map` 的正确实现**
     // （`listSize` / `listGet` / `listSet` / `set` / `listOf` / `mapOf` …）。
-    // 因此这里不嵌入，VM 一律走 Rust native；AOT 路径不受影响（它按源码编译，
-    // 并把 `aura.lang.std.Collections.*` 映射到 C 运行库
-    // `aura_lang_std_Collections_{set,listSet,listGet,listSize,…}`）。
+    // 因此这里不嵌入，VM 一律走 Rust native。
+    //
+    // AOT/LLVM 侧不受影响：它按**源码**编译该文件，Plan A 实现即其运行期实现
+    // （发射器把 `Collections.*` 落成 `@Collections_*` 符号）。
+    // Photon 侧尚未支持集合，需要自己的运行期实现（不复用 `@Collections_*`）。
+    //
     // 待集合模块改为「双表示兼容」的纯 Aura 实现后，再把本行打开。
-    // ("Collections", "aura.lang.std", EMBEDDED_COLLECTIONS_AUC),
+    // ("Collections", "aura.lang.collection", EMBEDDED_COLLECTIONS_AUC),
     ("Test", "aura.lang.std", EMBEDDED_TEST_AUC),
     ("Ascii", "aura.lang.std", EMBEDDED_ASCII_AUC),
     ("Assert", "aura.lang.std", EMBEDDED_ASSERT_AUC),

@@ -34,6 +34,12 @@ pub const PRELUDE_NAMES: &[&str] = &[
     "strlen",
     "CString",
     "CStr",
+    // `CString` 的逆操作：C 字符串指针 → Aura String。
+    // 运行期由 `vm/native.rs::native_builtin_read_cstr` 实现（VM）/
+    // `aura_std_cffi.c::ReadCStr`（AOT，恒等）。缺此声明会让调用点报
+    // `semantic warning: unresolved reference 'ReadCStr'`，并退化成
+    // 「未解析函数」→ 0xFFFF（`EmitBuffer.sbBuild()` 依赖它）。
+    "ReadCStr",
     "ptrIsNull",
     "ptrToInt",
     "intToPtr",
@@ -137,6 +143,7 @@ pub const PRELUDE_NAMES: &[&str] = &[
     "aura.lang.std.strlen",
     "aura.lang.std.CString",
     "aura.lang.std.CStr",
+    "aura.lang.std.ReadCStr",
     "aura.lang.std.ptrIsNull",
     "aura.lang.std.ptrToInt",
     "aura.lang.std.intToPtr",
