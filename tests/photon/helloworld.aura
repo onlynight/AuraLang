@@ -1,0 +1,4 @@
+// helloworld.aura - 使用 Photon 后端编译的 Hello World
+fun main() {
+    println("Hello, World!")
+}

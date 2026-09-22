@@ -217,6 +217,41 @@ class TypeRegistry {
         return this.kinds[id]
     }
 
+    /// 是否为整数类型。
+    fun isInt(id: Int): Boolean {
+        return this.kindOf(id) == "Int"
+    }
+
+    /// 是否为浮点类型。
+    fun isFloat(id: Int): Boolean {
+        return this.kindOf(id) == "Float"
+    }
+
+    /// 是否为布尔类型。
+    fun isBool(id: Int): Boolean {
+        return this.kindOf(id) == "Basic" && this.nameOf(id) == "Bool"
+    }
+
+    /// 是否为字符串类型。
+    fun isString(id: Int): Boolean {
+        return this.kindOf(id) == "Basic" && this.nameOf(id) == "String"
+    }
+
+    /// 是否为指针类型。
+    fun isPtr(id: Int): Boolean {
+        return this.kindOf(id) == "Ptr"
+    }
+
+    /// 是否为结构体类型。
+    fun isStruct(id: Int): Boolean {
+        return this.kindOf(id) == "Struct"
+    }
+
+    /// 是否为函数类型。
+    fun isFunc(id: Int): Boolean {
+        return this.kindOf(id) == "Func"
+    }
+
     fun widthOf(id: Int): Int {
         if (id < 0 || id >= this.widths.size) { return 0 }
         return this.widths[id]

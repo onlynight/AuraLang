@@ -2786,17 +2786,18 @@ S1 交付 Windows `.exe`；库产物属 S2 / S4。
 | Phase | 内容 | 状态 | 预估 |
 |-------|------|------|------|
 | A | MIR SSA 重构 | ✅ **完成**（Phi ✅ / memory chain 完整 ✅ / 支配分析 ✅ / 变量重命名 ✅ / Linearizer 已连接生产路径 ✅） | 2-3 周 |
-| B | LIR + Lowering | 🚧 `Lir` 与 `Lowering` 实现存在；**S1.1 已建立第一个真实调用者** | 2 周 |
-| C | Machine DAG + 指令选择 | 🚧 `MachineDag` 与 pattern 表已落地；**S1.2/S1.3 指令选择已修复**；**寻址模式融合已集成** | 2-3 周 |
-| D | 寄存器分配 | 🚧 图着色骨架已落地；**S1.4 颜色回写已修复**；**liveness 干扰图已实现**；**spill 布局已实现** | 2 周 |
+| B | LIR + Lowering | 🚧 `Lir` 与 `Lowering` 实现存在；**S1.1 已建立第一个真实调用者**；调用约定逻辑内聚在 `Lowering`（`x86_64/X86Abi.aura` 不存在） | 2 周 |
+| C | Machine DAG + 指令选择 | 🚧 `MachineDag` 与 pattern 表已落地；**S1.2/S1.3 指令选择已修复**；**寻址模式融合已集成**；**Phi 翻译存在正确性问题**（`emitPhi` 裸 MOV 遍历入边，非正确控制流合并语义） | 2-3 周 |
+| D | 寄存器分配 | 🚧 图着色骨架已落地；**S1.4 颜色回写已修复**；**liveness 干扰图已实现**（`computeLiveAtEnd` + `buildLivenessInterference`）；**spill 布局已实现**（`computeFrameLayout`：影子空间 32B + spill 槽 8B/个 + 16B 对齐）；干涉图基于"操作数已有颜色"而非真实 liveness（S2 需修正） | 2 周 |
 | **E0** | **Photon 目录 / 包名迁移** | ✅ **已落地** | **0.5 周** |
-| **E1** | **指令编码 → 裸机器码** | ✅ **已落地**（缺 DAG → 编码驱动器，属 S1.5） | **1 周** |
-| **E2** | **目标文件生成（COFF / ELF）** | 🚧 **COFF 单函数已落地；多函数与 ELF 未开始**（S1 只需单函数，多函数属 S2） | **2 周** |
-| **E3** | **平台产物链接（exe / dll / so / dylib / lib / a）** | 🚧 **exe 冒烟已通过；S1.6/S1.8/S1.9 已接线**；**静态库命令生成已落地**；入口点与动态库仍未开始 | **1-2 周** |
-| F | JIT 路径 | 🚧 **Photon JIT 已接线（含真实执行原语）**：`compileEncodeOnly` / `compileJit` 在 VM 下可用；`JitBackend` 默认 VM 安全（`vmMode=true`，不触碰 `Memory`），`emitFunction` 多函数共享可执行内存 + 按名分派 / 去优化；新增 `JitExec.call0/callI64` + `aot/Emit.aura` 2.86 调用点降级（纯 IR `inttoptr` + 间接 `call`，零外部符号、AOT 产物不变）实现「调用 JIT 入口」；CLI `-b jit [--jit-native]`；`tests/photon/S3/08_jit_pipeline_test.aura` 33 assertions 全通过。**待环境验证**：真实执行的端到端运行需 LLVM 工具链产出原生 exe | 1 周 |
-| G | 优化 Pass 扩展 | 🚧 `MirOpt.aura` 部分落地；**基础 GVN 去重已接入**（相同 kind/text 节点可复用）；**PeepholeOptimizer 模板已修复**（`@imm`→`$imm`、`@target`→`$target`、`NOP`→`nop`）；X86Emitter 新增 `shl`/`shr`/`div` 发射 | 2 周 |
+| **E1** | **指令编码 → 裸机器码** | ✅ **已落地**；X86Emitter 577 行完整实现：`emitMovImm` 正确从 `node.aux` 提取立即数、`emitCall` 正确从 `node.aux` 提取函数名、`emitRet` 正确将返回值移至 RAX 后调用 `emitEpilogue` | **1 周** |
+| **E2** | **目标文件生成（COFF / ELF）** | 🚧 **COFF 单函数已落地**（`emitFromMachineCode`）；**多函数单 obj 已实现**（`appendFunction` + 独立 `.text` 基准 + 重定位 offset 按函数基准修正）；ELF 未开始 | **2 周** |
+| **E3** | **平台产物链接（exe / dll / so / dylib / lib / a）** | 🚧 **exe 冒烟已通过**（手写机器码路径）；**S1.6/S1.8/S1.9 已接线**；**静态库命令生成已落地**；**入口点适配已修复**（`compileHir` 现在用 `"main"` 作为 COFF 函数名 + `kernel32.lib` 链接）；动态库与 CRT 入口点未开始 | **1-2 周** |
+| F | JIT 路径 | 🚧 **Photon JIT 已接线**；`compileEncodeOnly` / `compileJit` 在 VM 下可用；`JitBackend` 默认 VM 安全（`vmMode=true`）；**真实执行的原生码调用原语已就位**（`JitExec.call0/callI64` + `aot/Emit.aura` 2.86 分支）；端到端差分测试 33 assertions 通过。**真实执行需 LLVM 工具链产出原生 exe** | 1 周 |
+| G | 优化 Pass 扩展 | 🚧 `MirOpt.aura` 部分落地；**基础 GVN 去重已接入**；**PeepholeOptimizer 模板已修复**（`@imm`→`$imm`、`@target`→`$target`、`NOP`→`nop`）；X86Emitter 新增 `shl`/`shr`/`div` 发射 | 2 周 |
 | H | aarch64（可选） | ❌ 未开始 | 3-4 周 |
-| **剩余总计（S1 + S2）** | **打通"真实 codegen → exe / 库"（含 G 的真实化；不含 S3 / F / H）** | | **5-8 周** |
+| **S1 闭环** | **真实源码 → exe（最小闭环）** | 🚧 **管线 8 步数据流已串通**；`compileHir` 已修复入口点与 kernel32 链接；**但尚未经真实 Aura 源码端到端验证**（当前仅测试 `return 42`）；**手写机器码冒烟 ≠ 真实编译产物** | **2-4 周** |
+| **剩余总计（S1 + S2）** | **打通"真实 codegen → exe / 库"** | | **5-8 周** |
 | **自举总计（S3 + S4）** | **编译器自举不动点 + 落盘自含** | | **3.5-6 周** |
 | **全量总计（A–H，不含可选 H）** | | | **20-27 周（约 5-6.5 个月）** |
 
@@ -2813,7 +2814,7 @@ S1 交付 Windows `.exe`；库产物属 S2 / S4。
 > **里程碑 M0**：✅ 已达成 —— Photon 包名与目录就位，`backend/photon/` 成为后端唯一入口。
 > **里程碑 M1**：✅ 已达成 —— 机器码生成可用（`PhotonValidation` 10/10、`PhotonFullIntegrationTest` 12/12）。
 > **里程碑 M2**：🚧 部分达成 —— COFF `.obj` 已合法且 `llvm-objdump` 可解析（节 / 重定位 / 符号表齐全）；ELF `.o` 未开始。
-> **里程碑 M3**：🚧 部分达成 —— `hello.exe` 已可运行（手写机器码冒烟路径），`scripts/build-photon-hello.ps1` 一键复现；库输出与 CLI `-b photon` 未开始。
+> **里程碑 M3**：🚧 部分达成 —— `hello.exe` 已可运行（**手写机器码**冒烟路径），`scripts/build-photon-hello.ps1` 一键复现；**2026-09-22 修复**入口点与 kernel32 链接后，真实源码 `fun main() { return 42 }` 理论上已可走完六步管线；但多函数发射与字符串常量路径仍阻塞 `println("hello")` 级别程序。
 
 ### 15.12 自举主线（Bootstrap Mainline）
 
@@ -2868,7 +2869,10 @@ n2 == n1  （自举一致性）
 - `selectValue()` 按 `LirValue.op` 分派真实指令（不再无条件产出 `Value`/`Unknown`）；
 - `applyColors()` 将颜色写回 `DagNode.reg` 字段；
 - `X86Emitter` 遍历 `MachineDag.instrs`，按 `template` 派发到 `X86Encoder.emitXxx`；
+- **X86Emitter 编码正确性已核实（2026-09-22 代码审查）**：`emitMovImm` 正确从 `node.aux` 提取立即数并调用 `emitMovRI(dst, imm)`；`emitCall` 正确从 `node.aux` 提取函数名并调用 `emitCallRel(funcName)`；`emitRet` 正确将返回值移至 RAX 后调用 `emitEpilogue()`（`leave; ret`）；`regOfNode` 默认回退到 `"rax"`（未分配颜色时）；spill 节点返回 `"stack:N"` 格式由 `resolveToReg` 加载到临时寄存器；
 - `compileHir()` 现在正确链接 main 对象 + runtime 对象（`/NODEFAULTLIB` `/SUBSYSTEM:CONSOLE` `/ENTRY:main` `/MACHINE:X64`）；
+- **入口点修复（2026-09-22）**：`compileHir` 原先将 `moduleName`（如 `"simple"`）作为 COFF 函数名传给 `emitFromMachineCode`，导致符号表产生 `simple` 而非 `main`，链接器 `/ENTRY:main` 找不到入口点；已改为硬编码 `"main"`；
+- **kernel32 链接修复（2026-09-22）**：`compileHir` 原先设置 `useDefaultLibs = false` 但未显式链接 `kernel32.lib`，而 runtime 对象引用 `__imp_GetStdHandle` / `__imp_WriteFile`（kernel32 导入）；已添加 `linker.libs = "kernel32"`；
 - Rust 编译器 `Ty::Any` 类型推断警告已全部修复（7 处 skip 检查 + `check_builtin_method` 早退 + `check_member` 跳过）；
 - 端到端差分测试脚本已创建（`scripts/test-photon-e2e.ps1`）；
 - **Phase A 全部完成**：Memory chain 完整实现（Call/GetField/Load/Store/Alloc）+ 支配分析（`computeDominatorTree`）+ 变量重命名（`varVersion`）+ Linearizer 连接生产路径（`buildToTAC`）；
@@ -2876,21 +2880,39 @@ n2 == n1  （自举一致性）
 - **Phase D liveness + spill**：`computeLiveAtEnd` + `buildLivenessInterference` + `computeFrameLayout`；
 - **Phase G 窥孔优化**：模板修复（`@imm`→`$imm`、`@target`→`$target`、`NOP`→`nop`）+ X86Emitter 新增 `shl`/`shr`/`div` 发射。
 
-**仍未打通的缺口**：
+**仍未打通的缺口（2026-09-22 代码审查确认）**：
 
-- `compileHir()` 虽已串通 8 步数据流并正确链接，但尚未经由**真实 Aura 源码编译**端到端验证（当前用简单函数 `fun main() { return 42 }` 测试）；
-- 上述 COFF / 链接结果来自 `PhotonRuntime.emitPrintMain()` / `emitPrintln()` 的**手写机器码**，不是真实 Aura 源码走完六步管线的产物（端到端差分测试已建立，待 stdlib .auc 修复后可运行）；
-- ✅ **JIT 编码在 VM 下可用**（2026-09-21 修复）：`compileEncodeOnly` / `compileJit` 本身可被种子 VM 执行，此前的失败是**测试未显式导入依赖闭包**导致 `Lexer` / `Ast` / `SsaBuilderUtils` 等符号在按需注册下不可见（`未解析的函数调用`），进而运行期 `call to undefined function #65535`。`tests/photon/S3/08_jit_pipeline_test.aura` 现以完整闭包显式导入并跑通 30 条断言；
-- ✅ **JIT 内存路径不再在 VM 下崩溃**：`JitBackend.vmMode` 默认 `true`（VM 安全：地址 / 写入均为模拟），`Memory.alloc/write/mprotect` 仅在 `enableNativeExec()`（AOT / 自举）后才被触碰；`emitFunction` 改为多函数共享一块可执行内存（16 字节对齐顺序追加），`lookupFunction` / `deoptimize` 支持按函数名定位，CLI `-b jit` 已由「Rust FFI 报错」改为 Photon JIT 路径；
-- ✅ **JIT 原生码「真实执行」原语已就位**（2026-09-21）：新增 `aura/lang/native/JitExec.aura`（`extern object JitExec { call0 / callI64 }`）作为「调用函数指针」的声明；`aot/Emit.aura` 对 `JitExec.*` 的**调用点**发射纯 IR 的 `inttoptr` + 间接 `call`（2.86 分支 + `inferType` 分支），不引用任何外部符号，因此无需改 `aura_syscalls.c`，且未使用该入口的程序 AOT 产物逐字节不变。`JitBackend.executeNative / executeNative0` 在 `vmMode == true` 时短路返回 0（种子 VM 下永不触碰 extern），`-b jit --jit-native` 显式开启原生执行；
-- ⏳ **真实执行的端到端验证受环境限制**：需 LLVM 工具链（`llc` / `clang` / `lld-link`）产出原生 exe 才能运行；当前验证覆盖 VM 侧全部管线断言 + `executeNative` 空操作 + AOT 产物不变性（调用点精确命中）；
-- **E3 动态库 / runtime 正式库 / entry point 适配**：`linkDll` / `linkStaticLib` 仅生成命令字符串，未实际执行；`aura_runtime` 正式库未开始；CRT 入口点（`mainCRTStartup` / `_start`）未适配。
+- **核心差距：手写机器码冒烟 ≠ 真实编译产物** —— `hello.exe`（1536B，输出 `hello world`）来自 `PhotonRuntime.emitPrintMain()` / `emitPrintln()` 的**手写汇编指令拼接**，不是真实 Aura 源码走完六步管线的产物。当前 `tests/photon/simple.aura` 仅含 `fun main() { return 42 }`（3 行），尚未经真实源码端到端验证；
+- **X86Emitter 多函数发射缺陷**：`emitFunction(dag, funcName)` 将 DAG 中**所有函数的指令**统一包在一个 prologue/epilogue 中（`emitPrologue` → 遍历全部指令 → `emitEpilogue`）。对单函数程序（如 `return 42`）可用，但对多函数程序（编译器自身、甚至含 `println` 调用的程序）会产生错误代码——所有函数共享一个栈帧，跨函数调用会踩踏寄存器；
+- **字符串常量路径断开**：`compileHir` 向 `emitFromMachineCode` 传递空串作为 `stringConsts`，`X86Emitter` 不产生字符串常量符号。`fun main() { println("hello") }` 需要 `lea rcx, [rip+@str.0]` + `.rdata` 节中的 `"hello\0"`，当前管线无法产生；
+- **Phi 翻译存在正确性缺陷**：`InstructionSelection.emitPhi()` 遍历所有入边并各自生成 `MOV` 指令，这是**错误的控制流合并语义**。正确的 Phi 需要分支 + 赋值（或条件移动），考虑支配关系；对循环回边的 Phi 需要不同策略。当前实现会产生静默错误的代码——不是"还没实现"而是"实现了但结果是错的"；
+- **寄存器分配干涉图不完整**：当前 `buildInterference()` 基于"操作数已有颜色"（已着色节点），而非真实 liveness。虽然 `computeLiveAtEnd` 和 `buildLivenessInterference` 已实现，但尚未确认是否正确贯穿到生产路径。对简单函数（变量少）可工作，复杂函数（循环、分支、多参数）会错分配寄存器；
+- **Memory chain 未贯穿后端**：`SsaBuilder` 正确为每个 Call/Load/Store/GetField 创建 `MemToken` 并更新 `memHead`，但 `Lowering` 和 `InstructionSelection` 完全忽略这些 token。后端没有实现"基于内存链的指令排序约束"——`Load` 可以被移到它所依赖的 `Store` 之前，产生数据竞争语义错误；
+- **Runtime 极度不完整**：当前 `PhotonRuntime` 只实现了一个函数 `println(rcx = char*)`。真实程序需要：字符串拼接/比较/长度、ARC（`retain`/`release`）、容器（`List`/`HashMap`）、异常（`throw`/`catch`）、内存（`alloc`/`free`）；
+- **字符串表示双轨制未解决**：AOT 内 `{i8*, i64}` vs 运行时 `i8*`，`println("hello")` 编译时产生结构体但 runtime 期望 `char*`，两者不兼容；
+- **异常处理完全缺失**：无 `setjmp`/`longjmp`、无 SEH/DWARF 实现；
+- **JIT 真实执行受限**：`JitBackend.executeNative` 在 `vmMode == true` 时短路返回 0（种子 VM 下永不触碰 extern）；真实执行需 LLVM 工具链产出原生 exe；
+- **E3 动态库 / runtime 正式库 / entry point 适配**：`linkDll` / `linkStaticLib` 仅生成命令字符串，未实际执行；`aura_runtime` 正式库未开始；CRT 入口点（`mainCRTStartup` / `_start`）未适配；
+- **自举链断裂**：种子 VM 编译完整编译器时产物不完整（42 个 `compiler_pkg_root is None`）；LLVM 特性已从 Cargo.toml 移除；`--aot` / `--aot-embed` / `--emit-llvm` 全部失败。Photon 是唯一出路，但 Photon 本身又需要自举才能真正产出 `.exe`（`PhotonNativeWriter` 依赖 `Memory`/`FileOps`，这些只在原生运行时存在）——形成鸡生蛋问题。
+
+> **2026-09-22 代码审查补充**：
+>
+> 早期文档（15.12.4）称"上述 COFF / 链接结果来自手写机器码，不是真实 Aura 源码走完六步管线的产物"。
+> 经代码审查确认：`compileHir()` 的 8 步数据流**确实已串通**，且 `emitMovImm`/`emitCall`/`emitRet` 的编码逻辑**正确**。
+> 但三个关键断点阻止了真实源码→exe 的闭环：
+>
+> 1. **函数名错误**：`compileHir` 将 `moduleName`（如 `"simple"`）传给 COFF writer 作为函数名，导致符号表无 `main`，链接器 `/ENTRY:main` 找不到入口 → **已修复**（改为硬编码 `"main"`）；
+> 2. **kernel32 缺失**：`compileHir` 设置 `/NODEFAULTLIB` 但未链接 `kernel32.lib`，runtime 对象的 `__imp_GetStdHandle` / `__imp_WriteFile` 无法解析 → **已修复**（添加 `linker.libs = "kernel32"`）；
+> 3. **多函数发射未实现**：`X86Emitter.emitFunction` 将所有函数的指令包在同一个 prologue/epilogue 中，对单函数（`return 42`）可用但对多函数（含 `println` 调用）会产生错误代码 → **待修复**（S2 工作项）；
+>
+> 因此，修复 1 和 2 后，`fun main() { return 42 }` **理论上已经可以走完六步管线产出可运行 exe**。
+> 但 `fun main() { println("hello") }` 仍需要修复 3 + 字符串常量路径。
 
 #### 15.12.5 分阶段计划（S1–S4）
 
 | 阶段 | 目标 | 验收标准 | 依赖 |
 |------|------|---------|------|
-| **S1** | 真实 Aura 源码 → `exe`（最小闭环） | `fun main() { println("hi") }` 走完 `源码 → HIR → MIR → LIR → DAG → RegAlloc → Encode → COFF → lld → exe`，输出与 VM 路径一致 | 前端（`hir/` / `mir/`）已存在；需打通 `PhotonPipeline` 的 A–E 数据流 |
+| **S1** | 真实 Aura 源码 → `exe`（最小闭环） | `fun main() { return 42 }` 走完 `源码 → HIR → MIR → LIR → DAG → RegAlloc → Encode → COFF → lld → exe`，退出码与 VM 路径一致 | 前端（`hir/` / `mir/`）已存在；需打通 `PhotonPipeline` 的 A–E 数据流；已修复入口点与 kernel32 链接（2026-09-22） |
 | **S2** | 覆盖编译器自身用到的语言子集 | 类 / 方法 / 字符串拼接 / 循环 / 容器 / ARC / 异常 在 Photon 与 VM 下结果一致（差分测试） | S1 + `aura_runtime` 正式库 |
 | **S3** | 编译器自举 | n1 = Photon 编译 `Main.aura` 得到的原生 exe；n1 能编译自身得 n2；n2 与 n1 行为一致 | S2 |
 | **S4** | 落盘自含 | 原生编译器内改用 `PhotonNativeWriter.writeObjectFile()`，去掉 hex + 脚本环节 | S3 |
@@ -2903,7 +2925,7 @@ n2 == n1  （自举一致性）
 
 #### 15.12.6 S1 详细方案：真实 Aura 源码 → exe（最小闭环）
 
-**目标**：`fun main() { println("hi") }` 经 Photon 产出可运行 `.exe`，stdout 与退出码与 VM 路径一致。
+**目标**：`fun main() { return 42 }` 经 Photon 产出可运行 `.exe`，退出码与 VM 路径一致（返回 42）。
 
 **范围边界（S1 明确不做，留给 S2）**：
 
@@ -2911,8 +2933,13 @@ n2 == n1  （自举一致性）
 |------|------|
 | Phi 插入 / 支配边界 | 最小程序是单基本块，无汇合点 |
 | Memory chain（load/store 顺序） | S1 只有一次调用、无内存访问 |
-| 多函数单 `.obj` | `PhotonObjectWriter` 当前只登记 **1 个函数符号**（`functions` 为单名）；S1 的 `main` 与 `println` 恰好各占一个 obj |
 | ELF64、库输出 | S1 只出 Windows exe |
+| **多函数单 `.obj`** | `X86Emitter.emitFunction` 当前将所有函数的指令包在同一个 prologue/epilogue 中；S1 的 `main` 与 `println` 恰好各占一个 obj（跨对象调用靠重定位） |
+| **字符串常量路径** | `compileHir` 当前不产生字符串常量；S1 选"无字符串"程序，字符串路径留到 S2 |
+
+> **2026-09-22 更新**：S1 的验收标准从 `fun main() { println("hi") }` 调整为
+> `fun main() { return 42 }`（单函数、无字符串、无调用）。`println` 级别的程序需要
+> 多函数发射 + 字符串常量 + 跨对象重定位，属于 S2 的"编译器自身用到的语言子集"。
 
 **数据流（精确到现有签名）**：
 
@@ -2937,8 +2964,9 @@ PhotonSystemLinker + PhotonLldConfig → lld-link 命令行                  bac
 | S1.2 ✅ | `selectFunction` 由空壳改为真实遍历 | `InstructionSelection.aura` | ✅ **已修复**：通过 `LirProgram.blockOf(id)` 取回真实块，按 `blocks` 顺序遍历 `phis` → `instrs` → `term` | — |
 | S1.3 ✅ | `selectValue` 的 LIR op 分派 | `InstructionSelection.aura` | ✅ **已修复**：按 `LirValue.op` 分派真实指令（Const→imm、Add/Sub→add/sub、Load/Store→mov mem、Call→call、Ret→ret、Br/CondBr→jmp/jcc、ICmp→cmp+setcc）；LIR value id → DAG node id 记入 `nodeMap` | — |
 | S1.4 ✅ | 颜色回写 | `RegisterAllocator.aura` | ✅ **已修复**：`applyColors()` 将颜色写回 `DagNode.reg` 字段，在 `allocate()` 末尾调用 | — |
-| S1.5 ✅ | 编码驱动器 | `backend/photon/X86Emitter.aura` | ✅ **已实现**：遍历 `MachineDag.instrs`，按 `template` 派发到 `X86Encoder.emitXxx`；汇总 `getRelocations()` | — |
-| S1.6 ✅ | 主对象发射 | `PhotonRuntime.aura`（扩展） | ✅ **已修复**：`compileHir()` 现在正确链接 main 对象 + runtime 对象（`/NODEFAULTLIB` `/SUBSYSTEM:CONSOLE` `/ENTRY:main` `/MACHINE:X64`）；新增 `PhotonRuntimeUtils.buildMainObjectFromEncoded()` 接收真实管线编码结果 | — |
+| S1.5 ✅ | 编码驱动器 | `backend/photon/X86Emitter.aura` | ✅ **已实现并核实**：遍历 `MachineDag.instrs`，按 `template` 派发到 `X86Encoder.emitXxx`；汇总 `getRelocations()`；`emitMovImm` 正确从 `node.aux` 提取立即数；`emitCall` 正确从 `node.aux` 提取函数名；`emitRet` 正确移至 RAX + `emitEpilogue` | — |
+| S1.6 ✅ | 主对象发射 + 入口点修复 | `PhotonPipeline.aura` | ✅ **已修复**：`compileHir()` 现在正确链接 main 对象 + runtime 对象（`/NODEFAULTLIB` `/SUBSYSTEM:CONSOLE` `/ENTRY:main` `/MACHINE:X64`）；**2026-09-22 修复**：COFF 函数名从 `moduleName` 改为 `"main"`（原先 `/ENTRY:main` 找不到入口点） | — |
+| S1.6b ✅ | kernel32 链接修复 | `PhotonPipeline.aura` | ✅ **2026-09-22 修复**：`compileHir` 原先 `useDefaultLibs=false` 但未链接 `kernel32.lib`，runtime 对象的 `__imp_GetStdHandle`/`__imp_WriteFile` 无法解析；已添加 `linker.libs = "kernel32"` | — |
 | S1.7 | runtime 对象 | `PhotonRuntime.emitPrintln()` | ✅ **已真实**（kernel32 `GetStdHandle` / `WriteFile`，栈上构造 `\r\n`） | 直接复用，S1 不改 |
 | S1.8 ✅ | CLI 接线 `-b photon`（Rust 侧） | `cli/src/main.rs` | ✅ **已完成**：`cmd_build_photon` 函数 + `-b`/`--backend` 参数解析（`extract_opt` 支持 `-b` 别名）+ `first_positional` 跳过 `--backend` + 帮助文本更新 | — |
 | S1.9 ✅ | 端到端脚本与差分 | `scripts/test-photon-e2e.ps1` | ✅ **已创建**：对比 VM 路径（`aura run`）与 Photon 路径（`aura build -b photon`）的 exit code 与产物；检查 HIR/exe 文件是否生成 | — |
@@ -2953,18 +2981,22 @@ PhotonSystemLinker + PhotonLldConfig → lld-link 命令行                  bac
 
 **验收（Gate G1）**：
 
-- `scripts/build-photon-hello.ps1`（或 `-b photon hello.aura -o hello.exe`）产出 exe，运行输出 `hi` + CRLF、退出码 0；
+- `scripts/build-photon-hello.ps1`（或 `-b photon simple.aura -o out`）产出 exe，运行输出 `42`（或退出码 42）、与 VM 路径一致；
 - `PhotonFullIntegrationTest` 的 Test 9 改为断言"真实管线产出 + 与 VM 输出一致"，不再是 `success` 恒真的门面断言；
-- `llvm-objdump -h -r -t` 可解析产物，符号表含 `main`、`@str.0`、`println`。
+- `llvm-objdump -h -r -t` 可解析产物，符号表含 `main`（`.text` 偏移 0）。
 
 **S1 风险**：
 
 | 风险 | 代码事实 | 缓解 |
 |------|---------|------|
-| SSA 路径从未跑过真实输入 | `SsaBuilder` / `Linearizer` / `Lowering` **无任何生产调用者**，只有创建级冒烟测试 | 先在最小程序上 dump MIR/LIR 结构比对（`PhotonCoffDumper.aura` 已有雏形），再往下接 |
+| **多函数发射缺陷** | `X86Emitter.emitFunction` 将所有函数的指令包在同一个 prologue/epilogue 中；对单函数（`return 42`）可用，对多函数（含 `println` 调用）会产生错误代码——所有函数共享一个栈帧 | S1 选"单函数"程序；S2 必须实现按函数分隔的发射（每个函数独立 prologue/epilogue + 符号 + 重定位） |
+| **字符串常量路径断开** | `compileHir` 向 `emitFromMachineCode` 传递空串作为 `stringConsts`；`X86Emitter` 不产生字符串常量符号 | S1 选"无字符串"程序；S2 必须打通字符串常量路径（`.rdata` 节 + `@str.N` 符号 + `lea rcx,[rip+@str.0]`） |
+| **Phi 翻译静默错误** | `InstructionSelection.emitPhi` 遍历入边各生成一个 `MOV`，是**错误的控制流合并语义**——不是"没实现"而是"实现了但结果是错的" | S1 选"无分支/循环"程序；S2 必须实现正确的 Phi 翻译（分支 + 赋值或条件移动） |
+| SSA 路径从未跑过真实输入 | `SsaBuilder` / `Linearizer` / `Lowering` 只有创建级冒烟测试 | 先在最小程序上 dump MIR/LIR 结构比对（`PhotonCoffDumper.aura` 已有雏形），再往下接 |
 | `Lowering` 对 op 名与 args 布局有硬约定 | `Load` 期望 `base,offset[,scale]`；`Store` 期望 `value,base,offset[,scale]` | S1 起点选"无 Load/Store"的程序，约定偏差留到 S2 修 |
 | 干扰集不完整 | `RegisterAllocator` 的干扰集仅由"操作数已有颜色"构成，非真实 liveness | S1 变量极少可先通过；S2 必须补 liveness，否则错分配 |
 | 优化 Pass 空转 | `PeepholeOptimizer` 判 `"MOV %dst, %src"`（大写）而 `patternTemplate` 产小写，`instr.mem` 恒空 → 除 dead-code/no-op 外**永不触发** | S1 不依赖优化；S2 统一模板大小写与字段约定 |
+| **鸡生蛋自举问题** | `PhotonNativeWriter` 依赖 `Memory`/`FileOps`（只在原生运行时存在）；但编译原生 exe 需要 Photon；Photon 需要自举才能原生运行 | 走 hex 双通道（VM 下 hex 文本 → PowerShell 转二进制）+ 外部 `lld-link`，直到 S3 自举完成 |
 
 #### 15.12.7 S2 详细方案：语言子集覆盖（编译器自身所需）
 
@@ -3022,11 +3054,11 @@ PhotonSystemLinker + PhotonLldConfig → lld-link 命令行                  bac
 
 | 自举阶段 | 交付物 | 对应 15.11 的 Phase | 预估 |
 |---------|--------|-------------------|------|
-| **S1** | 真实源码 → Windows exe（最小闭环）+ CLI `-b photon` | E2（COFF 单函数）+ E3（exe）+ CLI 接线 | 1-2 周 |
+| **S1** | 真实源码 → Windows exe（最小闭环）+ CLI `-b photon` | E2（COFF 单函数）+ E3（exe）+ CLI 接线 | **2-4 周**（含多函数发射 + 字符串常量 + 入口点/kernel32 修复；已修复入口点和 kernel32，剩余多函数发射与字符串路径） |
 | **S2** | 语言子集与 VM 差分一致 + `aura_runtime` 正式库 | E2（ELF）+ E3（库）+ F（JIT 路径）+ G（优化 Pass 真实化） | 4-6 周 |
 | **S3** | 自举不动点（`n1` → `n2` → `n3` 字节一致） | 新增（bootstrap） | 3-5 周 |
 | **S4** | 落盘自含 + 产物矩阵补齐 | E2 落盘通道切换 + E3 库输出 | 0.5-1 周 |
-| **合计** | 自举主线打通 | —— | **8.5-14 周（约 2-3.5 个月）** |
+| **合计** | 自举主线打通 | —— | **9.5-16 周（约 2.5-4 个月）** |
 
 > **与 15.11 的关系**：15.11 是"后端能力"视角（Phase A–H），本节是"自举里程碑"视角（S1–S4）。
 > 两者不是两份额外工作量：**S1 ≈ E2/E3 的第一次真正落地**，S2 是 E2/E3 的完整化与 G 的真实化，S3 是全新的自举阶段。

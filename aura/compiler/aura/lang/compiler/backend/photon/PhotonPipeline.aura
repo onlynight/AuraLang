@@ -172,12 +172,31 @@ class PhotonPipeline {
         // Step 5: 目标文件组装
         println("  Step 5: PhotonObjectWriter — COFF 目标文件组装")
         val writer = PhotonObjectWriterUtils.emptyBackend()
-        val coffHex: String = writer.emitFromMachineCode(
-            machineCodeHex,
-            relocRecords,
-            "",  // 字符串常量（S1 最小集：无字符串）
-            moduleName
-        )
+
+        // 获取函数偏移表（多函数发射支持）。
+        val funcOffsets: String = emitter.getFuncOffsets()
+        println("    函数偏移: " + funcOffsets)
+
+        // 获取字符串常量列表。
+        val stringConsts: String = selector.stringConstants
+        if (stringConsts != "") {
+            println("    字符串常量: " + stringConsts)
+        }
+
+        // 设置 COFF 写入器的多函数数据。
+        writer.textSection = machineCodeHex
+        writer.relocs = relocRecords
+        writer.stringConsts = stringConsts
+        writer.functionOffsets = funcOffsets
+
+        // 从函数偏移表解析函数名列表。
+        val funcNames: List<String> = this.parseFuncNames(funcOffsets)
+        writer.functions = this.joinComma(funcNames)
+        println("    函数列表: " + writer.functions)
+
+        // 构建符号表和 COFF/ELF 文件（按 OS 分派）。
+        writer.buildSymbols(writer.functions, writer.stringConsts)
+        val coffHex: String = writer.emit()
         result.coffHex = coffHex
         result.coffSize = coffHex.length / 2
         println("    COFF 大小: " + result.coffSize + " 字节")
@@ -218,6 +237,7 @@ class PhotonPipeline {
             linker.addFlag("/NODEFAULTLIB")
         }
         linker.useDefaultLibs = false
+        linker.libs = "kernel32"  // runtime 对象引用 kernel32!GetStdHandle/WriteFile
         val linkCmd = linker.buildCommand()
         result.linkCommand = linkCmd
         // 根据输出类型设置可执行文件路径
@@ -380,6 +400,66 @@ class PhotonPipeline {
         if (d == 8) { return "8" }
         if (d == 9) { return "9" }
         return ""
+    }
+
+    /// 从函数偏移表解析函数名列表（格式 "funcName|offset;;funcName|offset"）。
+    private fun parseFuncNames(funcOffsets: String): List<String> {
+        val result: List<String> = arrayListOf<String>()
+        if (funcOffsets == "") { return result }
+        val parts: List<String> = this.splitDoubleSemi(funcOffsets)
+        var i: Int = 0
+        while (i < parts.size) {
+            val part: String = parts[i]
+            val pipeIdx: Int = this.indexOf(part, "|")
+            if (pipeIdx > 0) {
+                result.add(part.substring(0, pipeIdx))
+            }
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 将列表用逗号连接。
+    private fun joinComma(items: List<String>): String {
+        var result: String = ""
+        var i: Int = 0
+        while (i < items.size) {
+            if (i > 0) { result = result + "," }
+            result = result + items[i]
+            i = i + 1
+        }
+        return result
+    }
+
+    /// 按 `;;` 分隔字符串。
+    private fun splitDoubleSemi(text: String): List<String> {
+        val result: List<String> = arrayListOf<String>()
+        if (text == "") { return result }
+        var start: Int = 0
+        var i: Int = 0
+        while (i < text.length - 1) {
+            if (text.charAt(i) == ';' && text.charAt(i + 1) == ';') {
+                result.add(text.substring(start, i - start))
+                i = i + 2
+                start = i
+            } else {
+                i = i + 1
+            }
+        }
+        result.add(text.substring(start))
+        return result
+    }
+
+    /// 查找字符在字符串中的位置（返回 -1 表示未找到）。
+    private fun indexOf(text: String, ch: String): Int {
+        var i: Int = 0
+        while (i < text.length) {
+            if (text.charAt(i).toString() == ch) {
+                return i
+            }
+            i = i + 1
+        }
+        return -1
     }
 }
 

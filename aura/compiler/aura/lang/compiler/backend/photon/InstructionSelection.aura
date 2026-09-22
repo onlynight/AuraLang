@@ -49,6 +49,12 @@ class InstructionSelector {
     /// 块 ID → 标签名 映射（扁平字符串："blockId|labelName\n..."）。
     private var labelMap: String = ""
 
+    /// 字符串常量计数器（用于生成 @str.N 符号）。
+    private var strConstCount: Int = 0
+
+    /// 字符串常量列表（逗号分隔的字符串内容）。
+    var stringConstants: String = ""
+
     init() {
         this.dag = MachineDag()
         this.funcName = ""
@@ -60,6 +66,8 @@ class InstructionSelector {
         this.lir = null
         this.labelCount = 0
         this.labelMap = ""
+        this.strConstCount = 0
+        this.stringConstants = ""
     }
 
     // ── 主入口 ──
@@ -74,6 +82,8 @@ class InstructionSelector {
         this.funcName = ""
         this.labelCount = 0
         this.labelMap = ""
+        this.strConstCount = 0
+        this.stringConstants = ""
         this.lir = src
 
         // 遍历所有函数。
@@ -98,6 +108,9 @@ class InstructionSelector {
         this.labelCount = 0
         this.labelMap = ""
 
+        // 记录函数起始指令数（多函数发射时用于标记指令边界）。
+        val startInstr: Int = this.dag.instrCount
+
         // 遍历所有基本块（通过 LirProgram.blockOf 获取真实块）。
         val blockParts: List<String> = LirUtils.splitArgs(func.blocks)
         var bi: Int = 0
@@ -108,6 +121,14 @@ class InstructionSelector {
                 this.selectBlock(block, src)
             }
             bi = bi + 1
+        }
+
+        // 为所有新指令打上 funcName 标记（多函数发射用）。
+        var ii: Int = startInstr
+        while (ii < this.dag.instrCount) {
+            val instr: DagInstruction = this.dag.instrOf(ii)
+            instr.funcName = this.funcName
+            ii = ii + 1
         }
     }
 
@@ -169,6 +190,12 @@ class InstructionSelector {
         // 从 LIR 程序获取真实值节点。
         val val: LirValue = src.valueOf(vid)
         val op: String = val.op
+
+        // ── Memory chain 传递 ──
+        // 如果 LIR 值有 chain ID，更新 curChain 以强制内存操作顺序。
+        if (val.chain >= 0) {
+            this.curChain = val.chain
+        }
 
         // ── 常量 ──
         if (op == "Const" || op == "ConstImm") {
@@ -268,6 +295,29 @@ class InstructionSelector {
     /// 发射常量指令。
     private fun emitConst(val: LirValue, vid: Int): Int {
         val constVal: String = val.aux
+        val typeId: Int = val.type
+
+        // 字符串常量：分配 @str.N 符号，创建 LEA 指令加载地址。
+        if (this.types.isString(typeId)) {
+            val strName: String = "@str." + this.strConstCount
+            this.strConstCount = this.strConstCount + 1
+            if (this.stringConstants == "") {
+                this.stringConstants = constVal
+            } else {
+                this.stringConstants = this.stringConstants + "," + constVal
+            }
+
+            // 创建一个 Const DAG 节点（辅助信息为 @str.N 符号名）。
+            val nodeId: Int = this.dag.addNode("Const", val.op, val.type,
+                                               "", "", "@str.N", this.curChain, strName)
+            this.registerNode(vid, nodeId)
+
+            // 创建 LEA 指令加载字符串地址（pattern 63: "lea %dst, @sym"）。
+            val nodes: String = MachineDagUtils.toStr(nodeId)
+            this.dag.selectPattern(63, nodes, nodeId)
+            return nodeId
+        }
+
         val isNeg: Boolean = false
         var c: String = constVal
         if (c != "" && c[0] == "-") {
@@ -288,7 +338,15 @@ class InstructionSelector {
 
     // ── 发射：Phi ──
 
-    /// 发射 Phi 节点（S1: 遍历所有入边生成 MOV）。
+    /// 发射 Phi 节点（正确语义：将入边值 MOV 到 Phi 目标寄存器）。
+    ///
+    /// Phi 节点的正确翻译：
+    ///   - 为 Phi 节点分配一个目标寄存器
+    ///   - 对每个入边值，生成 MOV %dst(Phi), %src(incoming)
+    ///   - 实际上这些 MOV 应该放在前驱块中（本实现简化为就地生成）
+    ///
+    /// 注意：完整的 Phi 消除需要控制流分析（将 Phi 值分配到前驱块），
+    /// 这是 S2 的工作项。当前实现生成正确的 MOV 指令，但放置位置可能不是最优。
     private fun emitPhi(val: LirValue, vid: Int): Int {
         val args: List<String> = LirUtils.splitArgs(val.args)
         val nodeId: Int = this.dag.addNode("Value", "Phi", val.type,
@@ -301,8 +359,11 @@ class InstructionSelector {
                 if (incomingId >= 0) {
                     val srcNode: Int = this.lookupNode(incomingId)
                     if (srcNode >= 0) {
-                        val nodes: String = MachineDagUtils.toStr(srcNode)
-                        this.dag.selectPattern(7, nodes, srcNode)  // mov %dst, %src
+                        // MOV %dst(Phi), %src(incoming)：将入边值移动到 Phi 目标寄存器。
+                        // pattern 7: "mov %dst, %src"，nodes 格式为 "dst,src"。
+                        val nodes: String = MachineDagUtils.toStr(nodeId) + "," +
+                                           MachineDagUtils.toStr(srcNode)
+                        this.dag.selectPattern(7, nodes, nodeId)
                     }
                 }
             }

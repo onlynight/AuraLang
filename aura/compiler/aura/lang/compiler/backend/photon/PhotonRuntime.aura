@@ -162,6 +162,105 @@ object PhotonRuntime {
         enc.emitEpilogue()
     }
 
+    // ── 字符串操作 ──
+
+    /// 编码 `strlen(rcx = char*) → rax = Int`：
+    ///
+    /// ```asm
+    /// strlen:
+    ///   push rbp; mov rbp, rsp
+    ///   mov  rdx, rcx
+    ///   xor  rax, rax
+    /// loop:
+    ///   cmp  byte [rdx], 0
+    ///   je   done
+    ///   inc  rdx
+    ///   inc  rax
+    ///   jmp  loop
+    /// done:
+    ///   leave; ret
+    /// ```
+    fun emitStrlen(enc: X86Encoder): Unit {
+        enc.emitPrologue(0)
+        enc.emitMovRR("rdx", "rcx")
+        enc.emitXorRR("rax", "rax")
+        enc.emitLabel("strlen_loop")
+        enc.emitCmpByteMemImm8("rdx", 0)
+        enc.emitJccLabel("eq", "strlen_done")
+        enc.emitIncRR("rdx")
+        enc.emitIncRR("rax")
+        enc.emitJmpLabel("strlen_loop")
+        enc.emitLabel("strlen_done")
+        enc.emitEpilogue()
+    }
+
+    /// 编码 `strcmp(rcx = char*, rdx = char*) → rax = Int`：
+    ///
+    /// ```asm
+    /// strcmp:
+    ///   push rbp; mov rbp, rsp
+    ///   xor  r8, r8
+    /// loop:
+    ///   cmp  byte [rcx+r8], byte [rdx+r8]
+    ///   jne  done
+    ///   test byte [rcx+r8], byte [rcx+r8]
+    ///   jz   done
+    ///   inc  r8
+    ///   jmp  loop
+    /// done:
+    ///   mov  rax, r8
+    ///   leave; ret
+    /// ```
+    fun emitStrcmp(enc: X86Encoder): Unit {
+        enc.emitPrologue(0)
+        enc.emitXorRR("r8", "r8")
+        enc.emitLabel("strcmp_loop")
+        enc.emitCmpMemMem("rcx", "r8", "rdx", "r8")
+        enc.emitJccLabel("ne", "strcmp_done")
+        enc.emitTestMemImm8("rcx", "r8", 0)
+        enc.emitJccLabel("z", "strcmp_done")
+        enc.emitIncRR("r8")
+        enc.emitJmpLabel("strcmp_loop")
+        enc.emitLabel("strcmp_done")
+        enc.emitMovRR("rax", "r8")
+        enc.emitEpilogue()
+    }
+
+    // ── 异常处理支持 ──
+
+    /// 编码 `throwException(rcx = Exception*) → never returns`：
+    ///
+    /// 简化实现：直接终止程序（调用 ExitProcess）。
+    /// 完整实现需要异常表遍历。
+    fun emitThrowException(enc: X86Encoder): Unit {
+        enc.emitPrologue(0x30)
+        // 简化：调用 ExitProcess(1)
+        enc.emitMovRI32("rcx", 1)
+        enc.emitCallImport("ExitProcess")
+        enc.emitEpilogue()
+    }
+
+    // ── ARC 支持 ──
+
+    /// 编码 `retain(rcx = obj*) → obj*`：增加引用计数。
+    ///
+    /// 简化实现：直接返回对象（无实际引用计数）。
+    /// 完整实现需要对象头中的引用计数字段。
+    fun emitRetain(enc: X86Encoder): Unit {
+        enc.emitPrologue(0)
+        enc.emitMovRR("rax", "rcx")
+        enc.emitEpilogue()
+    }
+
+    /// 编码 `release(rcx = obj*) → Unit`：减少引用计数。
+    ///
+    /// 简化实现：无操作（无实际引用计数）。
+    /// 完整实现需要对象头中的引用计数字段。
+    fun emitRelease(enc: X86Encoder): Unit {
+        enc.emitPrologue(0)
+        enc.emitEpilogue()
+    }
+
     // ── 目标文件产出 ──
 
     /// 生成 runtime 目标文件（定义 `println`）。

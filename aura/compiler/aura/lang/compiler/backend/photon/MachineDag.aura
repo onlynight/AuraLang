@@ -170,6 +170,9 @@ class DagInstruction {
     /// 指令的十六进制编码（空格分隔字节）。
     var bytes: String = ""
 
+    /// 所属函数名（多函数发射时用于标记指令边界）。
+    var funcName: String = ""
+
     init() {
         this.id = 0
         this.template = ""
@@ -179,6 +182,7 @@ class DagInstruction {
         this.cond = ""
         this.mem = ""
         this.bytes = ""
+        this.funcName = ""
     }
 
     /// 获取第 i 个输入节点的 ID。
@@ -532,6 +536,8 @@ object MachineDagUtils {
         if (patternId == 40) { return "setcc %dst" }
         // 调用
         if (patternId == 50) { return "call %func" }
+        // 字符串地址加载（lea %dst, @sym）
+        if (patternId == 63) { return "lea %dst, @sym" }
         // 默认
         return "nop"
     }
@@ -571,6 +577,7 @@ object MachineDagUtils {
         if (patternId == 32) { return 8 }
         if (patternId == 40) { return 1 }
         if (patternId == 50) { return 4 + 16 }
+        if (patternId == 63) { return 4 } // lea %dst, @sym — side effect (loads address)
         return 0
     }
 

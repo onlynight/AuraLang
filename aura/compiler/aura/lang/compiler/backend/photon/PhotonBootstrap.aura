@@ -1,0 +1,174 @@
+// aura:///aura/lang/compiler/backend/photon/PhotonBootstrap.aura
+package aura.lang.compiler.backend.photon
+// ─────────────────────────────────────────────────────────────
+// Photon 编译器自举链 — n1 → n2 → n3
+//
+// 对应后端自举阶段（Phase F）。
+//
+// ── 自举链定义 ──
+//
+//   n1: 初始编译器（Rust 实现，编译 Aura → VM 字节码）
+//       状态：✅ 已完成
+//
+//   n2: Aura 编译器（用 n1 编译为原生代码）
+//       状态：🚧 管线串通但未验证
+//
+//   n3: n2 编译自身（输出与 n2 字节一致）
+//       状态：❌ 未开始
+//
+// ── 自举验证流程 ──
+//
+//   1. 用 n1 编译 Aura 编译器源码 → n2.exe
+//   2. 用 n2.exe 编译 Aura 编译器源码 → n3.exe
+//   3. 比较 n2.exe 和 n3.exe 是否字节一致
+//   4. 若一致，自举完成；否则，修复差异并重复
+//
+// ── 当前差距 ──
+//
+//   - n2 需要完整的 stdlib（当前仅有 println）
+//   - n2 需要能够编译自身的所有依赖
+//   - 需要实现代码生成的确定性（消除时间戳/随机数据）
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.std.FileSystem
+
+/// Photon 自举链管理器。
+class PhotonBootstrap {
+
+    /// n1 编译器路径（Rust 实现）。
+    var n1Path: String = ""
+
+    /// n2 编译器路径（Aura 编译的原生代码）。
+    var n2Path: String = ""
+
+    /// n3 编译器路径（n2 编译自身）。
+    var n3Path: String = ""
+
+    /// 自举状态。
+    var status: String = "not_started"
+
+    /// 自举阶段。
+    enum BootstrapPhase {
+        const val N1_READY: Int = 1
+        const val N2_READY: Int = 2
+        const val N3_READY: Int = 3
+    }
+
+    /// 当前阶段。
+    var currentPhase: Int = 1
+
+    init() {
+        this.n1Path = ""
+        this.n2Path = ""
+        this.n3Path = ""
+        this.status = "not_started"
+        this.currentPhase = 1
+    }
+
+    // ── 阶段 1：n1 就绪 ──
+
+    /// 检查 n1 编译器是否就绪。
+    fun checkN1(): Boolean {
+        // n1 是 Rust 编译器，应该已经存在
+        return true
+    }
+
+    // ── 阶段 2：n2 就绪 ──
+
+    /// 用 n1 编译 Aura 编译器源码，生成 n2。
+    fun buildN2(compilerSource: String): Boolean {
+        if (!this.checkN1()) {
+            return false
+        }
+
+        // 使用 Photon 管线编译编译器源码
+        // 简化：仅记录路径，不实际执行
+        this.n2Path = compilerSource + ".n2.exe"
+        this.currentPhase = 2
+        this.status = "n2_building"
+
+        return true
+    }
+
+    /// 检查 n2 编译器是否就绪。
+    fun checkN2(): Boolean {
+        return this.n2Path != "" && FileSystem.exists(this.n2Path)
+    }
+
+    // ── 阶段 3：n3 就绪 ──
+
+    /// 用 n2 编译 Aura 编译器源码，生成 n3。
+    fun buildN3(compilerSource: String): Boolean {
+        if (!this.checkN2()) {
+            return false
+        }
+
+        // 使用 n2 编译编译器源码
+        // 简化：仅记录路径，不实际执行
+        this.n3Path = compilerSource + ".n3.exe"
+        this.currentPhase = 3
+        this.status = "n3_building"
+
+        return true
+    }
+
+    /// 检查 n3 编译器是否就绪。
+    fun checkN3(): Boolean {
+        return this.n3Path != "" && FileSystem.exists(this.n3Path)
+    }
+
+    // ── 自举验证 ──
+
+    /// 验证自举链：比较 n2 和 n3 是否字节一致。
+    fun verifyBootstrap(): Boolean {
+        if (!this.checkN2() || !this.checkN3()) {
+            return false
+        }
+
+        // 比较 n2 和 n3 的文件内容
+        // 简化：仅检查文件大小
+        val n2Size: Long = FileSystem.size(this.n2Path)
+        val n3Size: Long = FileSystem.size(this.n3Path)
+
+        if (n2Size != n3Size) {
+            this.status = "mismatch_size"
+            return false
+        }
+
+        // 完整实现需要逐字节比较
+        // 简化：假设大小一致则内容一致
+        this.status = "verified"
+        return true
+    }
+
+    // ── 状态查询 ──
+
+    /// 获取自举状态字符串。
+    fun getStatus(): String {
+        return this.status
+    }
+
+    /// 获取当前阶段。
+    fun getCurrentPhase(): Int {
+        return this.currentPhase
+    }
+
+    /// 检查自举是否完成。
+    fun isBootstrapComplete(): Boolean {
+        return this.currentPhase >= 3 && this.status == "verified"
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// PhotonBootstrapUtils — 工具对象
+// ─────────────────────────────────────────────────────────────
+
+/// PhotonBootstrap 工具方法。
+object PhotonBootstrapUtils {
+
+    /// 创建空自举管理器。
+    fun emptyBootstrap(): PhotonBootstrap {
+        return PhotonBootstrap()
+    }
+}

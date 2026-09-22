@@ -152,7 +152,8 @@ class PhotonObjectWriter {
         // 符号表依赖重定位表：重定位引用的外部符号要登记为「未定义符号」
         this.buildSymbols(functionName, stringConsts)
 
-        return this.buildCoffFile()
+        // 按 OS 分派：windows → COFF，linux → ELF。
+        return this.emit()
     }
 
     /// 追加额外函数的机器码到 .text 节（多函数支持）。
@@ -198,7 +199,7 @@ class PhotonObjectWriter {
     ///
     /// **顺序即符号索引**：函数 → 字符串常量 → 重定位引用的外部符号。
     /// 重定位表通过符号名在本表中的位置解析出 SymbolTableIndex。
-    private fun buildSymbols(functionName: String, stringConsts: String): Unit {
+    fun buildSymbols(functionName: String, stringConsts: String): Unit {
         val recs: List<String> = arrayListOf<String>()
 
         // 1) 函数符号：支持逗号分隔的多函数列表。
@@ -451,7 +452,7 @@ class PhotonObjectWriter {
     /// 原实现把字符串表按 20 字节记账、实际只写 18 字节，并且节头多写了 4 字节
     /// （44 vs 40），导致符号表实际位置比声明位置早 2 字节 —— 链接器按声明偏移
     /// 读取时，符号名整体错位 2 字节（"main" → "in"、"@str.0" → "tr.0"）。
-    private fun buildCoffFile(): String {
+    fun buildCoffFile(): String {
         // ── 1. 规整节内容 ──
         this.textSection = this.normalizeHex(this.textSection)
         this.textSize = this.hexByteCount(this.textSection)

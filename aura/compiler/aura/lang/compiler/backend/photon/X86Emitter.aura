@@ -37,35 +37,60 @@ class X86Emitter {
     /// 字符串常量表（逗号分隔）。
     private var strConsts: String = ""
 
+    /// 函数偏移表（多函数发射：函数名 → .text 节内起始偏移，格式 "funcName|offset" 用 ;; 分隔）。
+    private var funcOffsets: String = ""
+
     init() {
         this.enc = X86EncoderUtils.emptyEncoder()
         this.outputHex = ""
         this.relocRecords = ""
         this.frameSize = 0x50
         this.strConsts = ""
+        this.funcOffsets = ""
     }
 
     // ── 主入口 ──
 
-    /// 发射整个 MachineDag 为机器码（含 prologue/epilogue）。
+    /// 发射整个 MachineDag 为机器码（支持多函数：每个函数独立 prologue/epilogue）。
     fun emitFunction(dag: MachineDag, funcName: String): Unit {
         this.enc.reset()
         this.outputHex = ""
         this.relocRecords = ""
+        this.funcOffsets = ""
 
-        // Prologue。
-        this.enc.emitPrologue(this.frameSize)
-
-        // 遍历所有指令。
         var i: Int = 0
+        var currentFunc: String = ""
+        var needPrologue: Boolean = true
+
         while (i < dag.instrCount) {
             val instr: DagInstruction = dag.instrOf(i)
+            val instrFunc: String = instr.funcName
+
+            // 函数边界检测：第一个指令或函数名变化时发射 prologue。
+            if (needPrologue || instrFunc != currentFunc) {
+                // 如果之前有函数，发射 epilogue。
+                if (!needPrologue && currentFunc != "") {
+                    this.enc.emitEpilogue()
+                }
+                // 记录当前函数的起始偏移。
+                val offset: Int = this.enc.byteCount()
+                if (this.funcOffsets == "") {
+                    this.funcOffsets = instrFunc + "|" + toStr(offset)
+                } else {
+                    this.funcOffsets = this.funcOffsets + ";;" + instrFunc + "|" + toStr(offset)
+                }
+                // 发射当前函数的 prologue。
+                this.enc.emitPrologue(this.frameSize)
+                currentFunc = instrFunc
+                needPrologue = false
+            }
+
             this.emitInstr(instr, dag)
             i = i + 1
         }
 
-        // Epilogue（如果最后一个指令不是 ret）。
-        if (dag.instrCount > 0) {
+        // 发射最后一个函数的 epilogue。
+        if (currentFunc != "" && dag.instrCount > 0) {
             val lastInstr: DagInstruction = dag.instrOf(dag.instrCount - 1)
             if (lastInstr.template != "ret") {
                 this.enc.emitEpilogue()
@@ -78,6 +103,11 @@ class X86Emitter {
         // 获取最终 hex 和重定位。
         this.outputHex = this.enc.toHex()
         this.relocRecords = this.joinRelocRecords(this.enc.getRelocations())
+    }
+
+    /// 获取函数偏移表（格式 "funcName|offset;;funcName|offset"）。
+    fun getFuncOffsets(): String {
+        return this.funcOffsets
     }
 
     // ── 单指令发射 ──
@@ -110,6 +140,8 @@ class X86Emitter {
             this.emitMovStore(instr, dag)
         } else if (template == "lea %dst, [mem]") {
             this.emitLea(instr, dag)
+        } else if (template == "lea %dst, @sym") {
+            this.emitLeaSym(instr, dag)
         } else if (template == "cmp %src, $imm") {
             this.emitCmpImm(nodes, dag)
         } else if (template == "cmp %src1, %src2") {
@@ -251,6 +283,17 @@ class X86Emitter {
             val dst: String = this.regOfNode(dstNode)
             val offset: Int = this.parseStackOffset(instr.mem)
             this.enc.emitLeaStack(dst, offset)
+        }
+    }
+
+    /// 发射字符串地址加载指令（lea %dst, [rip+@str.N]）。
+    private fun emitLeaSym(instr: DagInstruction, dag: MachineDag): Unit {
+        if (instr.output >= 0) {
+            val dstNode: DagNode = dag.nodeOf(instr.output)
+            val dst: String = this.regOfNode(dstNode)
+            // 从节点的 aux 字段获取符号名（@str.N）。
+            val symbol: String = dstNode.aux
+            this.enc.emitLeaRIP(dst, symbol)
         }
     }
 
