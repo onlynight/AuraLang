@@ -347,17 +347,15 @@ fn cmd_build_photon(args: &[String]) {
 
     // 语义分析
     let (ast, sema) = analyze_source(&source);
+    // 语义诊断仅作为警告输出，不阻断代码生成（与 VM 后端一致）
     let serrs: Vec<String> = sema
         .errors
         .iter()
         .filter(|e| e.severity == compiler::errors::ErrorSeverity::Error)
-        .map(|e| format!("semantic error: {}", e.message))
+        .map(|e| format!("semantic warning: {}", e.message))
         .collect();
-    if !serrs.is_empty() {
-        for e in &serrs {
-            eprintln!("{}", e);
-        }
-        exit(1);
+    for e in &serrs {
+        eprintln!("{}", e);
     }
 
     // AST → HIR

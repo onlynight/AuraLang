@@ -145,6 +145,11 @@ struct ClassEntry {
     /// 字段名 → 字段类型（用于 AOT 字段访问）
     field_types: HashMap<String, HirType>,
     methods: std::collections::HashSet<String>,
+    /// 方法名 → 实参个数集合（AST 形参数，不含 self）。
+    /// 用于「接收者类型未知 + 方法名在多个类中重名」时的消歧：
+    /// `kidsOf`(Ast) 取 1 参、`kidsOf`(Hir) 取 2 参，此时唯一候选兜底失效，
+    /// 加「方法名 + 实参个数」过滤后可重新变唯一。
+    method_arities: HashMap<String, std::collections::HashSet<usize>>,
     /// 声明为 open/abstract 的方法名（虚方法，动态分派）
     open_methods: std::collections::HashSet<String>,
     superclass: Option<String>,
@@ -373,6 +378,37 @@ fn resolve_receiver_type(e: &Expr) -> Option<String> {
     lookup_expr_type(e).filter(|t| !t.is_empty())
 }
 
+/// 推断声明的静态类型：显式类型提示优先；无提示时从初始化表达式推断。
+///
+/// `val ast = Ast()` → `Ast`（构造器调用，类名即类型）
+/// `val s: String = ...` → `String`（显式提示优先）
+/// `val x = 42` → `None`（字面量无法确定类）
+fn infer_decl_type(type_hint: Option<&crate::ast::Type>, init: Option<&Expr>) -> Option<String> {
+    if let Some(ty) = type_hint.and_then(ast_type_name) {
+        return Some(ty);
+    }
+    let e = init?;
+    // `ClassName(args...)` → ClassName（构造器/伴生方法调用）
+    if let Expr::Call { callee, .. } = e {
+        if let Expr::Ident(name, _) = callee.as_ref() {
+            let table = CLASS_TABLE.with(|t| t.borrow().clone());
+            if table.contains_key(name.as_str()) {
+                return Some(name.to_string());
+            }
+        }
+        // `ClassName.fn(...)` → ClassName（伴生方法返回的通常是该类的实例或值）
+        if let Expr::MemberAccess { object, .. } = callee.as_ref() {
+            if let Expr::Ident(name, _) = object.as_ref() {
+                let table = CLASS_TABLE.with(|t| t.borrow().clone());
+                if table.contains_key(name.as_str()) {
+                    return Some(name.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// 沿继承链在成员表中查找拥有方法 `method` 的类。
 fn find_method_in_chain(
     table: &HashMap<String, ClassEntry>,
@@ -462,7 +498,12 @@ fn any_base_method(
 }
 
 /// 方法调用的接收者类解析：静态类型命中（含继承链）→ 全表唯一候选兜底
-fn resolve_method_owner(object: &Expr, method: &str) -> Option<(String, ClassEntry)> {
+/// （无类型信息时按「方法名 + 实参个数」过滤，仍唯一才采用）
+fn resolve_method_owner(
+    object: &Expr,
+    method: &str,
+    arg_count: Option<usize>,
+) -> Option<(String, ClassEntry)> {
     let table = CLASS_TABLE.with(|t| t.borrow().clone());
     if table.is_empty() {
         return None;
@@ -520,12 +561,33 @@ fn resolve_method_owner(object: &Expr, method: &str) -> Option<(String, ClassEnt
         return Some(found);
     }
     // 2) 兜底（无类型信息时）：整个成员表中唯一拥有该方法的类
+    //    当方法名在多个类中重名（如 `kidsOf` 同时属于 Ast 与 Hir）时，
+    //    再用「实参个数」过滤：仅保留 AST 形参个数与调用点一致的候选。
+    //    这能在不影响「类型已知」路径的情况下，一次性把 50+ 个
+    //    「接收者未知 + 重名」的调用点从裸名退化解成正确的类方法分派。
     let cands: Vec<String> =
         table.iter().filter(|(_, e)| e.methods.contains(method)).map(|(n, _)| n.clone()).collect();
     if cands.len() == 1 {
         let n = cands.into_iter().next()?;
         let e = table.get(&n)?.clone();
         return Some((n, e));
+    }
+    // 2.5) 多候选 + 已知实参个数：按 arity 过滤，仍唯一则采用
+    if let Some(nc) = arg_count {
+        let filtered: Vec<String> = cands
+            .into_iter()
+            .filter(|n| {
+                table
+                    .get(n)
+                    .and_then(|e| e.method_arities.get(method))
+                    .map_or(false, |s| s.contains(&nc))
+            })
+            .collect();
+        if filtered.len() == 1 {
+            let n = filtered.into_iter().next()?;
+            let e = table.get(&n)?.clone();
+            return Some((n, e));
+        }
     }
     None
 }
@@ -611,7 +673,7 @@ fn operator_method_for(op: BinOp, lhs: &Expr) -> Option<String> {
         BinOp::Ge => "ge",
         _ => return None,
     };
-    let (class, entry) = resolve_method_owner(lhs, name)?;
+    let (class, entry) = resolve_method_owner(lhs, name, Some(1))?;
     if entry.operators.contains(name) { Some(format!("{}.{}", class, name)) } else { None }
 }
 
@@ -640,6 +702,10 @@ fn build_class_table(program: &Program) -> HashMap<String, ClassEntry> {
                 }
                 for m in &c.methods {
                     e.methods.insert(m.name.clone());
+                    e.method_arities
+                        .entry(m.name.clone())
+                        .or_default()
+                        .insert(m.params.len());
                     if m.modifiers.iter().any(|x| matches!(x, FnModifier::Operator)) {
                         e.operators.insert(m.name.clone());
                     }
@@ -677,6 +743,10 @@ fn build_class_table(program: &Program) -> HashMap<String, ClassEntry> {
                 }
                 for m in &s.methods {
                     e.methods.insert(m.name.clone());
+                    e.method_arities
+                        .entry(m.name.clone())
+                        .or_default()
+                        .insert(m.params.len());
                     if m.modifiers.iter().any(|x| matches!(x, FnModifier::Operator)) {
                         e.operators.insert(m.name.clone());
                     }
@@ -710,6 +780,10 @@ fn build_class_table(program: &Program) -> HashMap<String, ClassEntry> {
                 }
                 for m in &o.methods {
                     e.methods.insert(m.name.clone());
+                    e.method_arities
+                        .entry(m.name.clone())
+                        .or_default()
+                        .insert(m.params.len());
                     if m.modifiers.iter().any(|x| matches!(x, FnModifier::Operator)) {
                         e.operators.insert(m.name.clone());
                     }
@@ -3552,7 +3626,9 @@ fn desugar_stmt(s: &Stmt) -> HirStmt {
             ..
         } => {
             register_local(name);
-            register_local_type(name, type_hint.as_deref().and_then(ast_type_name));
+            // 推断类型：显式类型提示优先，否则从构造器/调用推断
+            let ty = infer_decl_type(type_hint.as_deref(), initializer.as_deref());
+            register_local_type(name, ty);
             HirStmt::Val {
                 name: name.clone(),
                 ty: HirType::from_ast_opt(type_hint),
@@ -3566,7 +3642,8 @@ fn desugar_stmt(s: &Stmt) -> HirStmt {
             ..
         } => {
             register_local(name);
-            register_local_type(name, type_hint.as_deref().and_then(ast_type_name));
+            let ty = infer_decl_type(type_hint.as_deref(), initializer.as_deref());
+            register_local_type(name, ty);
             HirStmt::Var {
                 name: name.clone(),
                 ty: HirType::from_ast_opt(type_hint),
@@ -5004,7 +5081,7 @@ fn desugar_expr(e: &Expr) -> HirExpr {
                     }
                     // 类方法分派：接收者静态类型（含继承链）→ Class.method(self, args)；
                     // open/abstract 方法（可被子类重写）→ CallVirtual 动态分派
-                    if let Some((class, entry)) = resolve_method_owner(object, name) {
+                    if let Some((class, entry)) = resolve_method_owner(object, name, Some(args.len())) {
                         let mut all_args = vec![];
                         // object 方法由 HIR 统一带 self 形参（见 `desugar_class_method(_, _, true)`），
                         // 调用点必须**占位**：单例没有实例可传，用 null 占位（object 无实例状态，
