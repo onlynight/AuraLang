@@ -1,0 +1,13 @@
+// tests/photon/P3/06_syscall_exit.aura
+// Phase 3.6: 退出进程测试
+//
+// 测试: exit syscall
+
+import aura.lang.std.String
+import aura.lang.native.Syscalls
+
+fun main() {
+    println("Before exit")
+    Syscalls.exit(0)
+    println("This should not print")
+}

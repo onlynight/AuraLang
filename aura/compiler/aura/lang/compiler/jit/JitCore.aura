@@ -436,7 +436,12 @@ class JitCoreVm {
     }
 
     /// 弹栈。
-    fun pop(): String {
+    ///
+    /// 名字**不能**叫 `pop`：`VmStack`（3 个重载）/`VmFrameStack`/
+    /// `VmCollections`/`JitInterp` 都定义了 `pop`，`this.pop()` 在接收者
+    /// 静态类型缺失时只能靠「全表唯一候选」兜底 → 重名即失败 → 降级为裸名
+    /// 调用（`未解析的函数调用 'pop'`）。改用唯一名保证可解析。
+    fun jitPop(): String {
         val n: Int = jitLineCount(this.stack)
         if (n == 0) {
             this.error = "stack-underflow"
@@ -487,13 +492,13 @@ class JitCoreVm {
             this.push(jitRecordGet(this.locals, arg))
             return
         } else if (op == "STORE_LOCAL") {
-            this.locals = jitRecordSet(this.locals, arg, this.pop())
+            this.locals = jitRecordSet(this.locals, arg, this.jitPop())
             return
         } else if (op == "DECL_LOCAL") {
             this.locals = jitRecordSet(this.locals, arg, "0")
             return
         } else if (op == "POP") {
-            this.pop()
+            this.jitPop()
             return
         } else if (op == "DUP") {
             val n: Int = jitLineCount(this.stack)
@@ -505,23 +510,23 @@ class JitCoreVm {
             this.push(jitLineAt(this.stack, n - 1))
             return
         } else if (op == "ADD" || op == "SUB" || op == "MUL" || op == "DIV" || op == "MOD") {
-            val b: Int = jitParseInt(this.pop())
-            val a: Int = jitParseInt(this.pop())
+            val b: Int = jitParseInt(this.jitPop())
+            val a: Int = jitParseInt(this.jitPop())
             this.push(this.arith(op, a, b))
             return
         } else if (op == "EQ") {
-            val b: String = this.pop()
-            val a: String = this.pop()
+            val b: String = this.jitPop()
+            val a: String = this.jitPop()
             this.push(this.boolStr(a == b))
             return
         } else if (op == "NEQ") {
-            val b: String = this.pop()
-            val a: String = this.pop()
+            val b: String = this.jitPop()
+            val a: String = this.jitPop()
             this.push(this.boolStr(a != b))
             return
         } else if (op == "LT" || op == "GT" || op == "LE" || op == "GE") {
-            val b: Int = jitParseInt(this.pop())
-            val a: Int = jitParseInt(this.pop())
+            val b: Int = jitParseInt(this.jitPop())
+            val a: Int = jitParseInt(this.jitPop())
             if (op == "LT") {
                 this.push(this.boolStr(a < b))
             } else if (op == "GT") {
@@ -533,10 +538,10 @@ class JitCoreVm {
             }
             return
         } else if (op == "NOT") {
-            this.push(this.boolStr(!this.truthy(this.pop())))
+            this.push(this.boolStr(!this.truthy(this.jitPop())))
             return
         } else if (op == "NEG") {
-            this.push(toStr(0 - jitParseInt(this.pop())))
+            this.push(toStr(0 - jitParseInt(this.jitPop())))
             return
         } else if (op == "POS") {
             // 恒等
@@ -545,17 +550,17 @@ class JitCoreVm {
             this.ip = jitParseInt(arg)
             return
         } else if (op == "JUMP_IF_FALSE") {
-            if (!this.truthy(this.pop())) {
+            if (!this.truthy(this.jitPop())) {
                 this.ip = jitParseInt(arg)
             }
             return
         } else if (op == "JUMP_IF_TRUE") {
-            if (this.truthy(this.pop())) {
+            if (this.truthy(this.jitPop())) {
                 this.ip = jitParseInt(arg)
             }
             return
         } else if (op == "RETURN") {
-            this.result = this.pop()
+            this.result = this.jitPop()
             this.halt = true
             return
         } else {

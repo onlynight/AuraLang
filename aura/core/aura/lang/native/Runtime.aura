@@ -1,16 +1,28 @@
 // aura:///aura/lang/native/Runtime.aura
 package aura.lang.native
+// ─────────────────────────────────────────────────────────────
+// 运行时入口 — Phase 4.5
+//
+// 提供运行时初始化和原子操作。
+// 零外部依赖，纯 Aura 实现。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
 import aura.lang.native.Syscalls
-import aura.lang.native.Memory
+import aura.lang.native.arch.x86_64_linux.Syscalls as LinuxSyscalls
+import aura.lang.native.arch.x86_64_windows.Syscalls as WindowsSyscalls
 import aura.lang.native.Cpu
 import aura.lang.native.memory.Allocator
 import aura.lang.std.string.StringOps
 import aura.lang.native.console.Console
+import "Memory.aura"
+import "GC.aura"
 
 /// Runtime - declarations
 extern interface Runtime {
     @native(asm = "lock inc qword [rdi]") fun arcIncrement(ptr: Long)
     @native(asm = "lock dec qword [rdi]") fun arcDecrement(ptr: Long): Long
+    @native(asm = "cmpxchg qword [rdi], rcx") fun cas(ptr: Long, expected: Long, desired: Long): Boolean
     @native(asm = "nop") fun coroutineYield(ctx: Long)
 }
 
@@ -48,5 +60,153 @@ object RuntimeImpl {
     fun trackFree(size: Long) {
         allocLive = allocLive - size
         freeCount = freeCount + 1
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 运行时配置 — Phase 4.5
+// ═══════════════════════════════════════════════════════════════
+
+/// 运行时配置
+object RuntimeConfig {
+    var heapSize: Long = 64 * 1024 * 1024  // 64MB 默认堆大小
+    var stackSize: Long = 8 * 1024 * 1024   // 8MB 默认栈大小
+    var gcEnabled: Boolean = true
+    var debugMode: Boolean = false
+    var maxThreadCount: Int = 1024
+
+    init() {
+        this.heapSize = 64 * 1024 * 1024
+        this.stackSize = 8 * 1024 * 1024
+        this.gcEnabled = true
+        this.debugMode = false
+        this.maxThreadCount = 1024
+    }
+}
+
+/// 运行时状态
+object RuntimeState {
+    var initialized: Boolean = false
+    var mainThreadId: Long = 0
+    var startTime: Long = 0
+    var activeThreads: Int = 0
+    var allocatedObjects: Long = 0
+    var freedObjects: Long = 0
+
+    init() {
+        this.initialized = false
+        this.mainThreadId = 0
+        this.startTime = 0
+        this.activeThreads = 0
+        this.allocatedObjects = 0
+        this.freedObjects = 0
+    }
+}
+
+/// 运行时入口
+object Runtime {
+
+    /// 初始化运行时
+    fun init(): Boolean {
+        if (RuntimeState.initialized) { return true }
+
+        // 1. 初始化内存管理器
+        val memInit: Boolean = MemoryManager.init(RuntimeConfig.heapSize)
+        if (!memInit) { return false }
+
+        // 2. 初始化 GC
+        GC.setEnabled(RuntimeConfig.gcEnabled)
+
+        // 3. 记录初始状态
+        RuntimeState.mainThreadId = 0  // TODO: 获取当前线程 ID
+        RuntimeState.startTime = 0     // TODO: 获取系统时间
+        RuntimeState.activeThreads = 1
+        RuntimeState.initialized = true
+
+        return true
+    }
+
+    /// 清理运行时
+    fun cleanup(): Unit {
+        if (!RuntimeState.initialized) { return }
+
+        // 1. 运行 GC
+        if (RuntimeConfig.gcEnabled) {
+            GC.collect()
+        }
+
+        // 2. 释放内存
+        MemoryManager.free()
+
+        // 3. 清除状态
+        RuntimeState.initialized = false
+        RuntimeState.activeThreads = 0
+    }
+
+    // ── 原子操作 (使用 Runtime interface) ──
+
+    /// ARC 引用计数增加
+    fun arcIncrement(obj: Long): Unit {
+        if (obj == 0) { return }
+        Runtime.arcIncrement(obj)
+        RuntimeState.allocatedObjects = RuntimeState.allocatedObjects + 1
+    }
+
+    /// ARC 引用计数减少
+    fun arcDecrement(obj: Long): Long {
+        if (obj == 0) { return 0 }
+        return Runtime.arcDecrement(obj)
+    }
+
+    /// CAS (Compare-And-Swap) 操作
+    fun cas(addr: Long, expected: Long, desired: Long): Boolean {
+        return Runtime.cas(addr, expected, desired)
+    }
+
+    /// 获取运行时状态
+    fun isInitialized(): Boolean {
+        return RuntimeState.initialized
+    }
+
+    /// 获取主线程 ID
+    fun getMainThreadId(): Long {
+        return RuntimeState.mainThreadId
+    }
+
+    /// 获取活跃线程数
+    fun getActiveThreadCount(): Int {
+        return RuntimeState.activeThreads
+    }
+
+    /// 获取已分配对象数
+    fun getAllocatedObjects(): Long {
+        return RuntimeState.allocatedObjects
+    }
+
+    /// 获取已释放对象数
+    fun getFreedObjects(): Long {
+        return RuntimeState.freedObjects
+    }
+
+    /// 设置调试模式
+    fun setDebugMode(enabled: Boolean): Unit {
+        RuntimeConfig.debugMode = enabled
+    }
+
+    /// 获取调试模式
+    fun isDebugMode(): Boolean {
+        return RuntimeConfig.debugMode
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// RuntimeUtils — 顶层辅助函数
+// ─────────────────────────────────────────────────────────────
+
+object RuntimeUtils {
+
+    /// 创建空的 RuntimeConfig 实例。
+    fun emptyConfig(): RuntimeConfig {
+        return RuntimeConfig()
     }
 }

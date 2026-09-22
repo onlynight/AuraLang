@@ -1,0 +1,25 @@
+// tests/photon/P2/03_array_ops.aura
+// Phase 2.3: 数组操作测试
+//
+// 测试: 数组声明、索引、遍历
+
+import aura.lang.std.String
+
+fun main() {
+    var arr: Int[5] = [1, 2, 3, 4, 5]
+    
+    // 索引访问
+    println("arr[0] = " + toStr(arr[0]))
+    println("arr[4] = " + toStr(arr[4]))
+    
+    // 修改元素
+    arr[2] = 99
+    println("arr[2] = " + toStr(arr[2]))
+    
+    // 遍历数组
+    var sum: Int = 0
+    for (var i: Int = 0; i < 5; i = i + 1) {
+        sum = sum + arr[i]
+    }
+    println("sum = " + toStr(sum))
+}

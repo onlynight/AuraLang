@@ -8,6 +8,8 @@ package aura.lang.compiler.backend.photon
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
+// 本文件直接使用 `MachineDag` / `DagInstruction` 类型，必须显式导入。
+import "MachineDag.aura"
 
 /// 窥孔优化器：对 Machine DAG 进行局部优化。
 class PeepholeOptimizer {
@@ -116,7 +118,7 @@ class PeepholeOptimizer {
         while (i >= 0) {
             val instr: DagInstruction = instrs[i]
             // 非副作用、非终结、非调用指令
-            if (!instr.isSideEffect() && !instr.isTerminator() && (instr.flags & 16) == 0) {
+            if (!instr.isSideEffect() && !instr.isDagTerminator() && (instr.flags & 16) == 0) {
                 // 检查输出是否被使用
                 if (instr.output < 0 || this.isUnused(instr.output)) {
                     // 移除指令（标记）

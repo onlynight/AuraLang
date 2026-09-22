@@ -199,7 +199,7 @@ class HashMap<K, V> : Map<K, V> {
         }
         ks.add(key)
         vs.add(value)
-        fs.add(true)
+        fs = this.boolAliveAppend(fs, true)
         this._records = this._records + 1
         if (existed == false) {
             this._size = this._size + 1
@@ -224,7 +224,7 @@ class HashMap<K, V> : Map<K, V> {
                     var old: V = vs[i]
                     ks.add(key)
                     vs.add(null)
-                    fs.add(false)
+                    fs = this.boolAliveAppend(fs, false)
                     this._size = this._size - 1
                     this._records = this._records + 1
                     this.checkResize()
@@ -318,6 +318,19 @@ class HashMap<K, V> : Map<K, V> {
     }
 
     // ── 内部辅助 ──
+
+    /// 向「存活标记桶」追加一项并返回该桶。
+    ///
+    /// 不能就地写 `fs.add(v)`：`fs` 是从嵌套泛型 `List<List<Boolean>>`
+    /// 按下标取出的 `var` 局部变量，当前前端在该形态下拿不到接收者类型，
+    /// `.add` 会退化成裸名调用（`未解析的函数调用 'add'`）。
+    /// 经一个**显式声明类型**的局部/形参中转后即可正常派发；
+    /// 列表是引用语义，回写 `fs = …` 不产生额外拷贝。
+    private fun boolAliveAppend(bucket: List<Boolean>, alive: Boolean): List<Boolean> {
+        val t: List<Boolean> = bucket
+        t.add(alive)
+        return t
+    }
 
     /// 分配 `cap` 条空桶链并写入三个桶数组字段。
     private fun allocBuckets(cap: Int): Unit {

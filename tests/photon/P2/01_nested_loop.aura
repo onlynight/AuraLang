@@ -1,0 +1,16 @@
+// tests/photon/P2/01_nested_loop.aura
+// Phase 2.1: 嵌套循环测试
+//
+// 测试: 嵌套循环和累加
+
+import aura.lang.std.String
+
+fun main() {
+    var sum: Int = 0
+    for (var i: Int = 0; i < 5; i = i + 1) {
+        for (var j: Int = 0; j < 5; j = j + 1) {
+            sum = sum + i + j
+        }
+    }
+    println("sum = " + toStr(sum))
+}

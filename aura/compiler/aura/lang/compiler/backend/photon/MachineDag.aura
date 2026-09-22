@@ -221,7 +221,12 @@ class DagInstruction {
     }
 
     /// 是否为终止指令（RET/JMP 等）。
-    fun isTerminator(): Boolean {
+    ///
+    /// 名字**不能**叫 `isTerminator`：该方法名同时被 `LirInstruction`、
+    /// `SsaMirValue` 使用，而旧前端在接收者类型未落到具体类时只能靠
+    /// 「全表唯一候选」兜底解析，重名即降级为裸名调用
+    /// （`[bytecode] error: 未解析的函数调用 'isTerminator'`）。
+    fun isDagTerminator(): Boolean {
         return (this.flags & 8) != 0
     }
 }

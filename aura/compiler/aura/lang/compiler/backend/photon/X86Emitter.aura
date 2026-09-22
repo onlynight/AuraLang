@@ -118,19 +118,19 @@ class X86Emitter {
         val nodes: List<String> = MachineDagUtils.splitArgs(instr.nodes)
         val cond: String = instr.cond
 
-        if (template == "add %dst, %src, $imm") {
+        if (template == "add %dst, %src, @imm") {
             this.emitAddImm(nodes, dag)
         } else if (template == "add %dst, %src") {
             this.emitAddRR(nodes, dag)
-        } else if (template == "sub %dst, %src, $imm") {
+        } else if (template == "sub %dst, %src, @imm") {
             this.emitSubImm(nodes, dag)
         } else if (template == "sub %dst, %src") {
             this.emitSubRR(nodes, dag)
-        } else if (template == "imul %dst, %src, $imm") {
+        } else if (template == "imul %dst, %src, @imm") {
             this.emitImulImm(nodes, dag)
         } else if (template == "imul %dst, %src") {
             this.emitImulRR(nodes, dag)
-        } else if (template == "mov %dst, $imm") {
+        } else if (template == "mov %dst, @imm") {
             this.emitMovImm(nodes, dag)
         } else if (template == "mov %dst, %src") {
             this.emitMovRR(instr, dag)
@@ -142,7 +142,7 @@ class X86Emitter {
             this.emitLea(instr, dag)
         } else if (template == "lea %dst, @sym") {
             this.emitLeaSym(instr, dag)
-        } else if (template == "cmp %src, $imm") {
+        } else if (template == "cmp %src, @imm") {
             this.emitCmpImm(nodes, dag)
         } else if (template == "cmp %src1, %src2") {
             this.emitCmpRR(nodes, dag)
@@ -152,13 +152,13 @@ class X86Emitter {
             this.emitCall(nodes, dag)
         } else if (template == "ret") {
             this.emitRet(nodes, dag)
-        } else if (template == "jmp $target") {
+        } else if (template == "jmp @target") {
             this.emitJmp(nodes, dag)
-        } else if (template == "jcc $target") {
+        } else if (template == "jcc @target") {
             this.emitJcc(cond, nodes, dag)
-        } else if (template == "shl %dst, $shift") {
+        } else if (template == "shl %dst, @shift") {
             this.emitShl(nodes, dag, instr.mem)
-        } else if (template == "shr %dst, $shift") {
+        } else if (template == "shr %dst, @shift") {
             this.emitShr(nodes, dag, instr.mem)
         } else if (template == "div %dst, %src") {
             this.emitDivRR(instr, dag)
@@ -329,9 +329,35 @@ class X86Emitter {
             val nodeId: Int = MachineDagUtils.strToInt(nodes[0])
             val node: DagNode = dag.nodeOf(nodeId)
             val funcName: String = node.aux
+            // 先按 Win64 约定装载实参寄存器，再发 CALL。
+            this.emitCallArgs(node, dag)
             if (funcName != "" && funcName != "$imm") {
                 this.enc.emitCallRel(funcName)
             }
+        }
+    }
+
+    /// 按 Windows x64 调用约定把实参装载到 rcx / rdx / r8 / r9。
+    ///
+    /// 背景：`Lowering.applyCallingConvention` 目前是**空壳**（只做记录），
+    /// 而 runtime 侧的函数是按 Win64 ABI 取参的 —— 例如
+    /// `PhotonRuntime.emitPrintln` 第一条就是 `mov [rbp-0x20], rcx`（入参指针直接读 rcx）。
+    /// 此前只发 `call` 而不装参，寄存器里是脏值 → 调用必然打印垃圾或直接崩溃。
+    ///
+    /// 实参节点列表由指令选择阶段写在 Call 节点的 `args`（已剔除内存链 token）。
+    private fun emitCallArgs(callNode: DagNode, dag: MachineDag): Unit {
+        val argParts: List<String> = MachineDagUtils.splitArgs(callNode.args)
+        val argRegs: List<String> = listOf("rcx", "rdx", "r8", "r9")
+        var i: Int = 0
+        while (i < argParts.size && i < argRegs.size) {
+            val srcNode: DagNode = dag.nodeOf(MachineDagUtils.strToInt(argParts[i]))
+            val srcReg: String = this.regOfNode(srcNode)
+            // 栈引用先装回临时寄存器（r10），再搬进参数寄存器
+            val realReg: String = this.resolveToReg(srcReg, "r10")
+            if (realReg != "" && realReg != argRegs[i]) {
+                this.enc.emitMovRR(argRegs[i], realReg)
+            }
+            i = i + 1
         }
     }
 
@@ -344,6 +370,12 @@ class X86Emitter {
             if (reg != "" && reg != "rax") {
                 this.enc.emitMovRR("rax", reg)
             }
+        } else {
+            // **Unit 函数（无返回值）必须显式清零 eax**。
+            // 否则进程退出码会取到上一条指令留在 eax 里的残留值 —— 实测
+            // `fun main() { println("Hello, World!") }` 因此返回了 WriteFile 的
+            // BOOL（退出码 1）而不是 0。
+            this.enc.emitXorRR("eax", "eax")
         }
         this.enc.emitEpilogue()
     }

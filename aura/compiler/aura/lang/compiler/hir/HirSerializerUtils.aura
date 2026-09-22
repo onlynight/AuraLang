@@ -1,0 +1,35 @@
+// aura:///aura/lang/compiler/hir/HirSerializerUtils.aura
+package aura.lang.compiler.hir
+// ─────────────────────────────────────────────────────────────
+// HIR 序列化器工具类 — Phase 1 基础设施
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.std.FileSystem
+import aura.lang.compiler.lexer.Span
+import "HirSerializer.aura"
+
+/// HIR 序列化器工具类。
+object HirSerializerUtils {
+
+    /// 创建空的序列化器。
+    fun emptySerializer(): HirSerializer {
+        return HirSerializer()
+    }
+
+    /// 从 JSON 文本解析 HIR。
+    fun parseHir(json: String): Hir {
+        val serializer: HirSerializer = HirSerializer()
+        return serializer.parse(json)
+    }
+
+    /// 从文件读取并解析 HIR。
+    fun loadHir(filePath: String): Hir {
+        val file: FileSystem = FileSystem()
+        val content: String = file.readText(filePath)
+        if (content == "") {
+            return Hir()
+        }
+        return parseHir(content)
+    }
+}

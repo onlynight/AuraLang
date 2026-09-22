@@ -15,6 +15,10 @@ package aura.lang.compiler.backend.photon
 import aura.lang.std.String
 import "Lir.aura"
 import "MachineDag.aura"
+// `emitConst` 需要按类型 id 判断字符串常量（this.types.isString）：
+// 缺这个 import 时 `this.types` 成员无法解析 → 接收者退化为 `<error>`
+// → 与 TypeUtils/ValueCheck 等的同名 `isString` 冲突 → 裸名调用未解析。
+import "../../mir/TypeRegistry.aura"
 
 /// DAG Tiling 指令选择器。
 class InstructionSelector {
@@ -55,6 +59,13 @@ class InstructionSelector {
     /// 字符串常量列表（逗号分隔的字符串内容）。
     var stringConstants: String = ""
 
+    /// 类型注册表（MIR/LIR 的类型 id → 类型名）。
+    ///
+    /// `emitConst` 需要它把 `LirValue.type` 判定为「字符串 / 数值」。
+    /// 由 `select()` 从 `LirProgram.types` 绑定（见 Lowering 的 `dst.types`），
+    /// 保证与产出这些类型 id 的是**同一个**注册表。
+    var types: TypeRegistry = TypeRegistry()
+
     init() {
         this.dag = MachineDag()
         this.funcName = ""
@@ -68,6 +79,7 @@ class InstructionSelector {
         this.labelMap = ""
         this.strConstCount = 0
         this.stringConstants = ""
+        this.types = TypeRegistry()
     }
 
     // ── 主入口 ──
@@ -85,12 +97,26 @@ class InstructionSelector {
         this.strConstCount = 0
         this.stringConstants = ""
         this.lir = src
+        // 绑定 LIR 的类型注册表：`emitConst` 用它判定字符串常量。
+        this.types = src.types
 
-        // 遍历所有函数。
+        // 只选择**从入口 `main` 可达**的函数。
+        //
+        // 否则会把 `Any.toString` / `Any.equals` / `Any.hashCode` 这些**未被使用**
+        // 的方法一并编进 .text —— 它们内部会调用 runtime 未提供的符号
+        // （实测 `lld-link: undefined symbol: toStr` / 以及 .phir 玩具解析器把
+        //  某些源码行误当成调用而生成的垃圾符号名）。结果是：连
+        // `println("Hello, World!")` 这种只用到 `println` 的程序都**链不出来**。
+        //
+        // 找不到入口（脚本型模块等情况）时退回「全选」，避免行为回退。
+        val reachable: String = this.computeReachable(src, "main")
+        val hasEntry: Boolean = this.nameInList(reachable, "main")
         var fi: Int = 0
         while (fi < src.functionCount) {
             val func: LirFunction = src.functionOf(fi)
-            this.selectFunction(func, src)
+            if (!hasEntry || this.nameInList(reachable, func.name)) {
+                this.selectFunction(func, src)
+            }
             fi = fi + 1
         }
 
@@ -98,6 +124,74 @@ class InstructionSelector {
         this.fuseLoadStorePairs()
 
         return this.dag
+    }
+
+    // ── 可达性分析（死函数消除）──
+
+    /// 从入口函数出发，按 LIR 的 `Call` 指令收集可达函数名（逗号分隔）。
+    ///
+    /// 见 `select()` 里的说明：不可达函数会被编进 .text 并引入 runtime 未提供的
+    /// 外部符号（`toStr` 等），让链接直接失败。
+    private fun computeReachable(src: LirProgram, entry: String): String {
+        var out: String = ""
+        var pending: String = entry
+        var guard: Int = 0
+        while (pending != "" && guard < 128) {
+            guard = guard + 1
+            val heads: List<String> = LirUtils.splitArgs(pending)
+            val cur: String = heads[0]
+            // 其余待处理名字（保持队列语义）
+            var rest: String = ""
+            var i: Int = 1
+            while (i < heads.size) {
+                if (rest == "") { rest = heads[i] } else { rest = rest + "," + heads[i] }
+                i = i + 1
+            }
+            pending = rest
+
+            if (!this.nameInList(out, cur)) {
+                if (out == "") { out = cur } else { out = out + "," + cur }
+                // 扫描 `cur` 的所有基本块，收集其 Call 的被调函数名
+                var fi: Int = 0
+                while (fi < src.functionCount) {
+                    val f: LirFunction = src.functionOf(fi)
+                    if (f.name == cur) {
+                        val blks: List<String> = LirUtils.splitArgs(f.blocks)
+                        var bi: Int = 0
+                        while (bi < blks.size) {
+                            val b: LirBlock = src.blockOf(LirUtils.strToInt(blks[bi]))
+                            val instrIds: List<String> = LirUtils.splitArgs(b.instrs)
+                            var ii: Int = 0
+                            while (ii < instrIds.size) {
+                                val v: LirValue = src.valueOf(LirUtils.strToInt(instrIds[ii]))
+                                if (v.op == "Call" && v.aux != "") {
+                                    if (pending == "") {
+                                        pending = v.aux
+                                    } else {
+                                        pending = pending + "," + v.aux
+                                    }
+                                }
+                                ii = ii + 1
+                            }
+                            bi = bi + 1
+                        }
+                    }
+                    fi = fi + 1
+                }
+            }
+        }
+        return out
+    }
+
+    /// 逗号分隔名表中是否包含指定名字。
+    private fun nameInList(list: String, name: String): Boolean {
+        val parts: List<String> = LirUtils.splitArgs(list)
+        var i: Int = 0
+        while (i < parts.size) {
+            if (parts[i] == name) { return true }
+            i = i + 1
+        }
+        return false
     }
 
     // ── 函数级选择 ──
@@ -533,14 +627,46 @@ class InstructionSelector {
             funcNode = this.resolveNode(LirUtils.strToInt(args[0]))
         }
 
-        // 创建 Call 指令（pattern 50: "call %func"）。
+        // 创建 Call 节点并据它选择 pattern 50（"call %func"）。
+        //
+        // ⚠ 顺序与指向很关键：`call` 指令的 `nodes` 必须指向**Call 节点本身**
+        // （其 `aux` 才是被调函数名）。旧实现把「第一个实参的 DAG 节点」当成
+        // funcNode 传进去，发射器于是读到该实参的 aux —— 对字符串实参就是
+        // `@str.N`，会生成 `call @str.N`（即便寄存器就绪也会链到错误符号）。
         val funcName: String = val.aux
-        val callArgs: String = MachineDagUtils.toStr(funcNode)
-        this.dag.selectPattern(50, callArgs, -1)
-
         val nodeId: Int = this.dag.addNode("Value", "Call", val.type,
                                            "", "", "", this.curChain, funcName)
         this.registerNode(vid, nodeId)
+
+        // 把**实参节点**记到 Call 节点的 `args`，供发射器按 Win64 约定装载
+        // rcx/rdx/r8/r9（见 `X86Emitter.emitCallArgs`）。
+        //
+        // 需要跳过内存链 token：`SsaBuilder.buildCall` 会把当前 mem 状态作为
+        // **最后一个**实参追加进来（OP 为 `MemToken` / aux 为 entry_mem|mem_after_store），
+        // 它只是内存依赖建模，不是真正的函数参数。
+        var argNodes: String = ""
+        var k: Int = 0
+        while (k < args.size) {
+            val argLirId: Int = LirUtils.strToInt(args[k])
+            val argVal: LirValue = this.lir.valueOf(argLirId)
+            val isMemToken: Boolean = argVal.op == "MemToken"
+                || argVal.aux == "entry_mem" || argVal.aux == "mem_after_store"
+            if (!isMemToken) {
+                val argNode: Int = this.resolveNode(argLirId)
+                if (argNode >= 0) {
+                    if (argNodes == "") {
+                        argNodes = MachineDagUtils.toStr(argNode)
+                    } else {
+                        argNodes = argNodes + "," + MachineDagUtils.toStr(argNode)
+                    }
+                }
+            }
+            k = k + 1
+        }
+        val callNode: DagNode = this.dag.nodeOf(nodeId)
+        callNode.args = argNodes
+
+        this.dag.selectPattern(50, MachineDagUtils.toStr(nodeId), -1)
         return nodeId
     }
 
@@ -711,8 +837,17 @@ class InstructionSelector {
         return this.dag.selectPattern(patternId, nodes, outputNode)
     }
 
-    /// 发射 CALL 指令。
-    fun emitCall(funcNode: Int, argc: Int): Int {
+    /// 发射 CALL 指令（按节点 ID 形态）。
+    ///
+    /// ⚠ 名字必须与 `emitCall(val: LirValue, vid: Int)` **不同**：
+    /// Aura 是扁平命名空间、按**名字**解析（不按签名重载）。两者同名时，
+    /// `selectInstr` 里的 `this.emitCall(val, vid)` 会绑到本重载 —— `val`
+    /// （一个 `LirValue` 引用）被塞进 `funcNode: Int` 形参，`MachineDagUtils.toStr`
+    /// 对它取不到数值 → 返回**空串** → 生成 `nodes=""` 的 `call %func` 指令，
+    /// 发射器 `emitCall` 的 `nodes.size >= 1` 守卫直接跳过 → 机器码里**一个
+    /// `e8` 都没有**（实测：helloworld 的 `println` 被整条丢掉）。
+    /// 本重载当前**没有调用点**，保留供测试/外部使用。
+    fun emitCallNode(funcNode: Int, argc: Int): Int {
         val nodes: String = MachineDagUtils.toStr(funcNode)
         return this.dag.selectPattern(50, nodes, -1)
     }

@@ -1,0 +1,590 @@
+# module helloworld target x86_64
+# source tests/photon/helloworld.aura
+
+native fun __throw(value: Any) -> Unit
+native fun __new_exception(type_name: String, message: String) -> Any
+native fun __size(iterable: Any) -> Int
+native fun __get(iterable: Any, index: Int) -> Any
+native fun println(message: Any) -> Unit
+native fun print(message: Any) -> Unit
+native fun puts(message: String) -> Unit
+native fun fnIndex(name: String) -> Int
+native fun abs(x: Float) -> Float
+native fun sqrt(x: Float) -> Float
+native fun pow(x: Float) -> Float
+native fun toInt(x: Any) -> Int
+native fun toFloat(x: Any) -> Float
+native fun toStr(x: Any) -> String
+native fun toString(x: Any) -> String
+native fun clock() -> Float
+native fun strlen(s: String) -> Int
+native fun CString(s: String) -> Any
+native fun CStr(p: Any) -> String
+native fun ReadCStr(p: Any) -> String
+native fun ptrIsNull(p: Any) -> Boolean
+native fun ptrToInt(p: Any) -> Int
+native fun intToPtr(i: Int) -> Any
+native fun makeCallback(fn: Any) -> Any
+native fun charCodeAt() -> Any
+native fun charAt() -> Any
+native fun replaceAll() -> Any
+native fun matches() -> Any
+native fun fromCharCode() -> Any
+native fun substring() -> Any
+native fun substringBefore() -> Any
+native fun substringAfter() -> Any
+native fun indexOf() -> Any
+native fun lastIndexOf() -> Any
+native fun replace() -> Any
+native fun contains() -> Any
+native fun startsWith() -> Any
+native fun endsWith() -> Any
+native fun toLowerCase() -> Any
+native fun toUpperCase() -> Any
+native fun listOf(item0: Value, item1: Value, item2: Value, item3: Value, item4: Value, item5: Value, item6: Value, item7: Value, item8: Value, item9: Value) -> Any
+native fun mutableListOf() -> Any
+native fun arrayOf() -> Any
+native fun arrayListOf() -> Any
+native fun emptyList() -> Any
+native fun pairOf() -> Any
+native fun mapOf() -> Any
+native fun mutableMapOf() -> Any
+native fun emptyMap() -> Any
+native fun hashMapOf() -> Any
+native fun setOf() -> Any
+native fun mutableSetOf() -> Any
+native fun emptySet() -> Any
+native fun hashSetOf() -> Any
+native fun min() -> Any
+native fun max() -> Any
+native fun typeof() -> Any
+native fun isNull() -> Any
+native fun isNotNull() -> Any
+native fun isZero() -> Any
+native fun isPositive() -> Any
+native fun isNegative() -> Any
+native fun toBool() -> Any
+native fun sizeOf() -> Any
+native fun hash() -> Any
+native fun compare() -> Any
+native fun clone() -> Any
+native fun identity() -> Any
+native fun assertTrue() -> Any
+native fun assertFalse() -> Any
+native fun assertEq() -> Any
+native fun assertNotEq() -> Any
+native fun assertNotNull() -> Any
+native fun assertNull() -> Any
+native fun assertContains() -> Any
+native fun assertNotContains() -> Any
+native fun assertGt() -> Any
+native fun assertGte() -> Any
+native fun assertLt() -> Any
+native fun assertLte() -> Any
+native fun assertApprox() -> Any
+native fun assertArrayEq() -> Any
+native fun assertMapEq() -> Any
+native fun pass() -> Any
+native fun fail() -> Any
+native fun equals(a: Any, b: Any) -> Boolean
+native fun hashCode(x: Any) -> Int
+native fun typeOf(x: Any) -> String
+native fun aura_isOfType(value: Any, type_name: String) -> Boolean
+native fun aura_cast(value: Any, type_name: String) -> Any
+native fun aura_cast_safety(value: Any, type_name: String) -> Any
+native fun aura.lang.std.println() -> Any
+native fun aura.lang.std.print() -> Any
+native fun aura.lang.std.puts() -> Any
+native fun aura.lang.std.abs() -> Any
+native fun aura.lang.std.sqrt() -> Any
+native fun aura.lang.std.pow() -> Any
+native fun aura.lang.std.toInt() -> Any
+native fun aura.lang.std.toFloat() -> Any
+native fun aura.lang.std.toStr() -> Any
+native fun aura.lang.std.toString() -> Any
+native fun aura.lang.std.clock() -> Any
+native fun aura.lang.std.strlen() -> Any
+native fun aura.lang.std.CString() -> Any
+native fun aura.lang.std.CStr() -> Any
+native fun aura.lang.std.ReadCStr() -> Any
+native fun aura.lang.std.ptrIsNull() -> Any
+native fun aura.lang.std.ptrToInt() -> Any
+native fun aura.lang.std.intToPtr() -> Any
+native fun aura.lang.std.makeCallback() -> Any
+native fun aura.lang.std.listOf() -> Any
+native fun aura.lang.std.typeof() -> Any
+native fun aura.lang.std.isNull() -> Any
+native fun aura.lang.std.isNotNull() -> Any
+native fun aura.lang.std.isZero() -> Any
+native fun aura.lang.std.isPositive() -> Any
+native fun aura.lang.std.isNegative() -> Any
+native fun aura.lang.std.toBool() -> Any
+native fun aura.lang.std.sizeOf() -> Any
+native fun aura.lang.std.hash() -> Any
+native fun aura.lang.std.compare() -> Any
+native fun aura.lang.std.clone() -> Any
+native fun aura.lang.std.identity() -> Any
+native fun aura.lang.std.assertTrue() -> Any
+native fun aura.lang.std.assertFalse() -> Any
+native fun aura.lang.std.assertEq() -> Any
+native fun aura.lang.std.assertNotEq() -> Any
+native fun aura.lang.std.assertNotNull() -> Any
+native fun aura.lang.std.assertNull() -> Any
+native fun aura.lang.std.assertContains() -> Any
+native fun aura.lang.std.assertNotContains() -> Any
+native fun aura.lang.std.assertGt() -> Any
+native fun aura.lang.std.assertGte() -> Any
+native fun aura.lang.std.assertLt() -> Any
+native fun aura.lang.std.assertLte() -> Any
+native fun aura.lang.std.assertApprox() -> Any
+native fun aura.lang.std.assertArrayEq() -> Any
+native fun aura.lang.std.assertMapEq() -> Any
+native fun aura.lang.std.pass() -> Any
+native fun aura.lang.std.fail() -> Any
+native fun aura.lang.std.equals() -> Any
+native fun aura.lang.std.hashCode() -> Any
+native fun aura.lang.std.typeOf() -> Any
+native fun aura.lang.std.aura_isOfType() -> Any
+native fun aura.lang.std.aura_cast() -> Any
+native fun aura.lang.std.aura_cast_safety() -> Any
+native fun malloc(size: Int) -> Any
+native fun free(ptr: Any) -> Unit
+native fun aura.lang.concurrent.Coroutine.spawn(expr: Any) -> Int
+native fun aura.lang.concurrent.Actor.send(actor: Int, msg: Any) -> Unit
+native fun aura.lang.concurrent.Coroutine.ask(actor: Int, msg: Any) -> Any
+native fun aura.lang.concurrent.Channel.newChannel(bound: Int) -> Int
+native fun aura.lang.concurrent.Channel.channelSend(ch: Int, val: Any) -> Unit
+native fun aura.lang.concurrent.Channel.channelRecv(ch: Int) -> Any
+native fun aura.lang.concurrent.Channel.channelTryRecv(ch: Int) -> Any
+native fun aura.lang.concurrent.Channel.select(ch1: Int, ch2: Int) -> Any
+native fun aura.lang.concurrent.Coroutine.spawnActor(name: String) -> Int
+native fun aura.lang.concurrent.Actor.spawnActor(name: String) -> Int
+native fun aura.lang.concurrent.Actor.supervise(parent: Int, child: Int) -> Unit
+native fun aura.lang.concurrent.Actor.actorAlive(id: Int) -> Boolean
+native fun aura.lang.concurrent.Thread.spawn(fn_id: Int, arg: Int) -> Int
+native fun aura.lang.concurrent.Thread.join(thread_id: Int) -> Int
+native fun aura.lang.concurrent.Thread.sleep(ms: Int) -> Unit
+native fun aura.lang.concurrent.Thread.id() -> Int
+native fun aura.lang.concurrent.Thread.parallelism() -> Int
+native fun aura.lang.concurrent.Thread.availableCores() -> Int
+native fun aura.lang.concurrent.Mutex.new() -> Int
+native fun aura.lang.concurrent.Mutex.lock(lock_id: Int) -> Unit
+native fun aura.lang.concurrent.Mutex.unlock(lock_id: Int) -> Unit
+native fun aura.lang.concurrent.Mutex.tryLock(lock_id: Int) -> Boolean
+native fun aura.lang.concurrent.Mutex.destroy(lock_id: Int) -> Unit
+native fun aura.lang.concurrent.Atomic.new(initial: Int) -> Int
+native fun aura.lang.concurrent.Atomic.load(atomic_id: Int) -> Int
+native fun aura.lang.concurrent.Atomic.store(atomic_id: Int, value: Int) -> Unit
+native fun aura.lang.concurrent.Atomic.add(atomic_id: Int, delta: Int) -> Int
+native fun aura.lang.concurrent.Atomic.sub(atomic_id: Int, delta: Int) -> Int
+native fun aura.lang.concurrent.Atomic.cas(atomic_id: Int, expected: Int, desired: Int) -> Boolean
+native fun aura.lang.concurrent.Atomic.destroy(atomic_id: Int) -> Unit
+native fun aura.lang.concurrent.RwLock.new() -> Int
+native fun aura.lang.concurrent.RwLock.readLock(lock_id: Int) -> Unit
+native fun aura.lang.concurrent.RwLock.writeLock(lock_id: Int) -> Unit
+native fun aura.lang.concurrent.RwLock.readUnlock(lock_id: Int) -> Unit
+native fun aura.lang.concurrent.RwLock.writeUnlock(lock_id: Int) -> Unit
+native fun aura.lang.concurrent.RwLock.destroy(lock_id: Int) -> Unit
+native fun aura.lang.concurrent.Condvar.new() -> Int
+native fun aura.lang.concurrent.Condvar.wait(cv_id: Int, mutex_id: Int) -> Unit
+native fun aura.lang.concurrent.Condvar.signal(cv_id: Int) -> Unit
+native fun aura.lang.concurrent.Condvar.broadcast(cv_id: Int) -> Unit
+native fun aura.lang.concurrent.Condvar.destroy(cv_id: Int) -> Unit
+native fun aura.lang.concurrent.Barrier.new(count: Int) -> Int
+native fun aura.lang.concurrent.Barrier.wait(barrier_id: Int) -> Int
+native fun aura.lang.concurrent.Barrier.destroy(barrier_id: Int) -> Unit
+native fun aura.lang.concurrent.Future.spawn(fn_id: Int, arg: Int) -> Int
+native fun aura.lang.concurrent.Future.await(future_id: Int) -> Int
+native fun aura.lang.concurrent.Future.isDone(future_id: Int) -> Boolean
+native fun aura.lang.concurrent.Future.all(future_ids: Int) -> Any
+native fun aura.lang.concurrent.Future.any(future_ids: Int) -> Int
+native fun aura.lang.concurrent.Future.cancel(future_id: Int) -> Unit
+native fun aura.lang.concurrent.Semaphore.new(permits: Int) -> Int
+native fun aura.lang.concurrent.Semaphore.acquire(sem_id: Int) -> Unit
+native fun aura.lang.concurrent.Semaphore.tryAcquire(sem_id: Int) -> Boolean
+native fun aura.lang.concurrent.Semaphore.release(sem_id: Int) -> Unit
+native fun aura.lang.concurrent.Semaphore.count(sem_id: Int) -> Int
+native fun aura.lang.concurrent.Semaphore.destroy(sem_id: Int) -> Unit
+native fun aura.lang.std.IO.println(msg: String) -> Any
+native fun aura.lang.std.IO.print(msg: String) -> Any
+native fun aura.lang.std.IO.readLine() -> Unit
+native fun aura.lang.std.IO.readAll() -> Unit
+native fun aura.lang.std.IO.flush() -> Unit
+native fun aura.lang.std.IO.fileRead(path: String) -> Any
+native fun aura.lang.std.IO.fileWrite(path: String, content: String) -> Any
+native fun aura.lang.std.IO.writeFile(path: String, content: String) -> Any
+native fun aura.lang.std.IO.readFile(path: String) -> Any
+native fun aura.lang.std.IO.fileExists(path: String) -> Any
+native fun aura.lang.std.Math.abs(x: Float) -> Any
+native fun aura.lang.std.Math.min(a: Int, b: Int) -> Any
+native fun aura.lang.std.Math.max(a: Int, b: Int) -> Any
+native fun aura.lang.std.Math.ceil(x: Float) -> Any
+native fun aura.lang.std.Math.floor(x: Float) -> Any
+native fun aura.lang.std.Math.round(x: Float) -> Any
+native fun aura.lang.std.Math.trunc(x: Float) -> Any
+native fun aura.lang.std.Math.sqrt(x: Float) -> Any
+native fun aura.lang.std.Math.cbrt(x: Float) -> Any
+native fun aura.lang.std.Math.pow(base: Float, exp: Float) -> Any
+native fun aura.lang.std.Math.exp(x: Float) -> Any
+native fun aura.lang.std.Math.log(x: Float) -> Any
+native fun aura.lang.std.Math.log2(x: Float) -> Any
+native fun aura.lang.std.Math.log10(x: Float) -> Any
+native fun aura.lang.std.Math.sin(x: Float) -> Any
+native fun aura.lang.std.Math.cos(x: Float) -> Any
+native fun aura.lang.std.Math.tan(x: Float) -> Any
+native fun aura.lang.std.Math.asin(x: Float) -> Any
+native fun aura.lang.std.Math.acos(x: Float) -> Any
+native fun aura.lang.std.Math.atan(x: Float) -> Any
+native fun aura.lang.std.Math.atan2(y: Float, x: Float) -> Any
+native fun aura.lang.std.Math.PI() -> Unit
+native fun aura.lang.std.Math.E() -> Unit
+native fun aura.lang.std.Math.INT_MAX() -> Unit
+native fun aura.lang.std.Math.INT_MIN() -> Unit
+native fun aura.lang.std.Math.FLOAT_MAX() -> Unit
+native fun aura.lang.std.Math.sign(x: Float) -> Any
+native fun aura.lang.std.Math.clamp(x: Float, lo: Float, hi: Float) -> Any
+native fun aura.lang.std.String.contains(text: String, substr: String) -> Any
+native fun aura.lang.std.String.startsWith(text: String, prefix: String) -> Any
+native fun aura.lang.std.String.endsWith(text: String, suffix: String) -> Any
+native fun aura.lang.std.String.split(text: String, sep: String) -> Any
+native fun aura.lang.std.String.join(text: String, sep: String) -> Any
+native fun aura.lang.std.String.replace(text: String, target: String, replacement: String) -> Any
+native fun aura.lang.std.String.replaceAll(text: String, target: String, replacement: String) -> Any
+native fun aura.lang.std.String.trim(text: String) -> Any
+native fun aura.lang.std.String.trimStart(text: String) -> Any
+native fun aura.lang.std.String.trimEnd(text: String) -> Any
+native fun aura.lang.std.String.substring(text: String, start: Int, end: Int) -> Any
+native fun aura.lang.std.String.substringBefore(text: String, sep: String) -> Any
+native fun aura.lang.std.String.substringAfter(text: String, sep: String) -> Any
+native fun aura.lang.std.String.toLowerCase(text: String) -> Any
+native fun aura.lang.std.String.toUpperCase(text: String) -> Any
+native fun aura.lang.std.String.length(text: String) -> Any
+native fun aura.lang.std.String.isEmpty(text: String) -> Any
+native fun aura.lang.std.String.format(template: String) -> Any
+native fun aura.lang.std.String.repeat(n: Int, text: String) -> Any
+native fun aura.lang.std.String.indexOf(text: String, substr: String) -> Any
+native fun aura.lang.std.String.lastIndexOf(text: String, substr: String) -> Any
+native fun aura.lang.std.String.padStart(text: String, length: Int, pad: String) -> Any
+native fun aura.lang.std.String.padEnd(text: String, length: Int, pad: String) -> Any
+native fun aura.lang.std.String.escape(text: String) -> Any
+native fun aura.lang.std.String.unescape(text: String) -> Any
+native fun aura.lang.std.String.splitLines(text: String) -> Any
+native fun aura.lang.std.String.joinLines(text: String) -> Any
+native fun aura.lang.std.String.countChar(text: String, char: String) -> Any
+native fun aura.lang.std.String.first(text: String) -> Any
+native fun aura.lang.std.String.last(text: String) -> Any
+native fun aura.lang.std.String.isBlank(text: String) -> Any
+native fun aura.lang.std.String.matches(text: String, regex: String) -> Any
+native fun aura.lang.std.String.containsAny(text: String, patterns: String) -> Any
+native fun aura.lang.std.String.containsAll(text: String, patterns: String) -> Any
+native fun aura.lang.std.Collections.listOf(item0: Value, item1: Value, item2: Value, item3: Value, item4: Value, item5: Value, item6: Value, item7: Value, item8: Value, item9: Value) -> Any
+native fun aura.lang.std.Collections.mutableListOf() -> Unit
+native fun aura.lang.std.Collections.emptyList() -> Unit
+native fun aura.lang.std.Collections.arrayOf() -> Unit
+native fun aura.lang.std.Collections.listContains(list: List, item: Value) -> Any
+native fun aura.lang.std.Collections.listIndexOf(list: List, item: Value) -> Any
+native fun aura.lang.std.Collections.listRemove(list: List, item: Value) -> Any
+native fun aura.lang.std.Collections.listReverse(list: List) -> Any
+native fun aura.lang.std.Collections.listSort(list: List) -> Any
+native fun aura.lang.std.Collections.listGet(list: List, index: Int) -> Any
+native fun aura.lang.std.Collections.listSet(list: List, index: Int, value: Value) -> Any
+native fun aura.lang.std.Collections.listInsert(list: List, index: Int, value: Value) -> Any
+native fun aura.lang.std.Collections.listSubList(list: List, from: Int, to: Int) -> Any
+native fun aura.lang.std.Collections.listAppend(list: List, value: Value) -> Any
+native fun aura.lang.std.Collections.listSize(list: List) -> Any
+native fun aura.lang.std.Collections.getAt(collection: Any, index: Int) -> Any
+native fun aura.lang.std.Collections.count(collection: Any) -> Any
+native fun aura.lang.std.Collections.isEmpty(collection: Any) -> Any
+native fun aura.lang.std.Collections.contains(collection: Any, item: Any) -> Any
+native fun aura.lang.std.Collections.indexOf(collection: Any, item: Any) -> Any
+native fun aura.lang.std.Collections.set(collection: Any, index: Int, value: Any) -> Any
+native fun aura.lang.std.Collections.pairOf(a: Any, b: Any) -> Any
+native fun aura.lang.std.Collections.mapOf() -> Unit
+native fun aura.lang.std.Collections.mutableMapOf() -> Unit
+native fun aura.lang.std.Collections.emptyMap() -> Unit
+native fun aura.lang.std.Collections.mapContains(map: Map, value: Value) -> Any
+native fun aura.lang.std.Collections.mapContainsKey(map: Map, key: Value) -> Any
+native fun aura.lang.std.Collections.mapContainsValue(map: Map, value: Value) -> Any
+native fun aura.lang.std.Collections.mapRemove(map: Map, key: Value) -> Any
+native fun aura.lang.std.Collections.mapKeys(map: Map) -> Any
+native fun aura.lang.std.Collections.mapValues(map: Map) -> Any
+native fun aura.lang.std.Collections.setOf() -> Unit
+native fun aura.lang.std.Collections.mutableSetOf() -> Unit
+native fun aura.lang.std.Collections.emptySet() -> Unit
+native fun aura.lang.std.Collections.arrayListOf(item0: Value, item1: Value, item2: Value, item3: Value, item4: Value, item5: Value, item6: Value, item7: Value, item8: Value, item9: Value) -> Any
+native fun aura.lang.std.Collections.arrayListSize(list: List) -> Any
+native fun aura.lang.std.Collections.linkedListOf(item0: Value, item1: Value, item2: Value, item3: Value, item4: Value, item5: Value, item6: Value, item7: Value, item8: Value, item9: Value) -> Any
+native fun aura.lang.std.Collections.linkedAddFirst(list: List, value: Value) -> Any
+native fun aura.lang.std.Collections.linkedAddLast(list: List, value: Value) -> Any
+native fun aura.lang.std.Collections.linkedRemoveFirst(list: List) -> Any
+native fun aura.lang.std.Collections.linkedRemoveLast(list: List) -> Any
+native fun aura.lang.std.Collections.hashSetOf(item0: Value, item1: Value, item2: Value, item3: Value, item4: Value, item5: Value, item6: Value, item7: Value, item8: Value, item9: Value) -> Any
+native fun aura.lang.std.Collections.hashSetContains(set: List, item: Value) -> Any
+native fun aura.lang.std.Collections.hashSetAdd(set: List, item: Value) -> Any
+native fun aura.lang.std.Collections.hashSetRemove(set: List, item: Value) -> Any
+native fun aura.lang.std.Collections.hashMapOf(k0: Value, v0: Value, k1: Value, v1: Value, k2: Value, v2: Value, k3: Value, v3: Value, k4: Value, v4: Value) -> Any
+native fun aura.lang.std.Collections.hashMapGet(map: Map, key: Value) -> Any
+native fun aura.lang.std.Collections.hashMapPut(map: Map, key: Value, value: Value) -> Any
+native fun aura.lang.std.Collections.hashMapRemove(map: Map, key: Value) -> Any
+native fun aura.lang.std.Collections.linkedHashMapOf(k0: Value, v0: Value, k1: Value, v1: Value, k2: Value, v2: Value, k3: Value, v3: Value, k4: Value, v4: Value) -> Any
+native fun aura.lang.std.Collections.linkedHashMapKeys(map: Map) -> Any
+native fun aura.lang.std.Collections.linkedHashMapFirstKey(map: Map) -> Any
+native fun aura.lang.std.Collections.linkedHashMapLastKey(map: Map) -> Any
+native fun aura.lang.std.FileSystem.exists(path: String) -> Any
+native fun aura.lang.std.FileSystem.isFile(path: String) -> Any
+native fun aura.lang.std.FileSystem.isDirectory(path: String) -> Any
+native fun aura.lang.std.FileSystem.readText(path: String) -> Any
+native fun aura.lang.std.FileSystem.writeText(path: String, content: String) -> Any
+native fun aura.lang.std.FileSystem.readBytes(path: String) -> Any
+native fun aura.lang.std.FileSystem.writeBytes(path: String, data: List) -> Any
+native fun aura.lang.std.FileSystem.delete(path: String) -> Any
+native fun aura.lang.std.FileSystem.mkdir(path: String) -> Any
+native fun aura.lang.std.FileSystem.mkdirP(path: String) -> Any
+native fun aura.lang.std.FileSystem.rename(old: String, new: String) -> Any
+native fun aura.lang.std.FileSystem.copy(src: String, dst: String) -> Any
+native fun aura.lang.std.FileSystem.listDir(path: String) -> Any
+native fun aura.lang.std.FileSystem.listFiles(path: String) -> Any
+native fun aura.lang.std.FileSystem.fileSize(path: String) -> Any
+native fun aura.lang.std.FileSystem.lastModified(path: String) -> Any
+native fun aura.lang.std.FileSystem.absolutePath(path: String) -> Any
+native fun aura.lang.std.FileSystem.homeDir() -> Unit
+native fun aura.lang.std.FileSystem.tempDir() -> Unit
+native fun aura.lang.std.FileSystem.currentDir() -> Unit
+native fun aura.lang.std.FileSystem.walk(root: String, maxDepth: Int) -> Any
+native fun aura.lang.std.Network.tcpConnect(host: String, port: Int) -> Any
+native fun aura.lang.std.Network.tcpListen(port: Int) -> Any
+native fun aura.lang.std.Network.tcpSend(handle: Int, message: String) -> Any
+native fun aura.lang.std.Network.tcpRecv(handle: Int) -> Any
+native fun aura.lang.std.Network.tcpClose(handle: Int) -> Any
+native fun aura.lang.std.Network.udpSend(target: String, port: Int, message: String) -> Any
+native fun aura.lang.std.Network.udpRecv(handle: Int) -> Any
+native fun aura.lang.std.Network.udpClose(handle: Int) -> Any
+native fun aura.lang.std.Network.isHostReachable(host: String) -> Any
+native fun aura.lang.std.Network.getHostname() -> Unit
+native fun aura.lang.std.Network.getLocalIp() -> Unit
+native fun aura.lang.std.Json.parse(text: String) -> Any
+native fun aura.lang.std.Json.stringify(value: Value, pretty: Bool) -> Any
+native fun aura.lang.std.Json.isValid(text: String) -> Any
+native fun aura.lang.std.Json.get(obj: Value, key: String) -> Any
+native fun aura.lang.std.Json.set(obj: Value, key: String, value: Value) -> Any
+native fun aura.lang.std.Json.keys(obj: Value) -> Any
+native fun aura.lang.std.Json.values(obj: Value) -> Any
+native fun aura.lang.std.Json.length(obj: Value) -> Any
+native fun aura.lang.std.Json.contains(obj: Value, key: String) -> Any
+native fun aura.lang.std.Json.remove(obj: Value, key: String) -> Any
+native fun aura.lang.std.Time.now() -> Unit
+native fun aura.lang.std.Time.epoch() -> Unit
+native fun aura.lang.std.Time.currentTime() -> Unit
+native fun aura.lang.std.Time.sleep(seconds: Float) -> Any
+native fun aura.lang.std.Time.duration(seconds: Float) -> Any
+native fun aura.lang.std.Time.toDateString(timestamp: Int) -> Any
+native fun aura.lang.std.Time.toTimeString(timestamp: Int) -> Any
+native fun aura.lang.std.Time.formatDate(timestamp: Int, pattern: String) -> Any
+native fun aura.lang.std.Time.diff(t1: Float, t2: Float) -> Any
+native fun aura.lang.std.Time.parseDate(text: String) -> Any
+native fun aura.lang.std.Test.assertTrue(condition: Value, message: String) -> Any
+native fun aura.lang.std.Test.assertFalse(condition: Value, message: String) -> Any
+native fun aura.lang.std.Test.assertEq(a: Value, b: Value, message: String) -> Any
+native fun aura.lang.std.Test.assertNotEq(a: Value, b: Value, message: String) -> Any
+native fun aura.lang.std.Test.assertNotNull(value: Value, message: String) -> Any
+native fun aura.lang.std.Test.assertNull(value: Value, message: String) -> Any
+native fun aura.lang.std.Test.assertContains(text: String, substr: String, message: String) -> Any
+native fun aura.lang.std.Test.assertNotContains(text: String, substr: String, message: String) -> Any
+native fun aura.lang.std.Test.assertThrows() -> Unit
+native fun aura.lang.std.Test.assertGt(a: Float, b: Float, message: String) -> Any
+native fun aura.lang.std.Test.assertGte(a: Float, b: Float, message: String) -> Any
+native fun aura.lang.std.Test.assertLt(a: Float, b: Float, message: String) -> Any
+native fun aura.lang.std.Test.assertLte(a: Float, b: Float, message: String) -> Any
+native fun aura.lang.std.Test.assertApprox(a: Float, b: Float, epsilon: Float, message: String) -> Any
+native fun aura.lang.std.Test.assertArrayEq(a: Value, b: Value, message: String) -> Any
+native fun aura.lang.std.Test.assertMapEq(a: Value, b: Value, message: String) -> Any
+native fun aura.lang.std.Test.pass(message: String) -> Any
+native fun aura.lang.std.Test.fail(message: String) -> Any
+native fun aura.lang.std.Builtin.typeof(value: Value) -> Any
+native fun aura.lang.std.Builtin.typeOf(value: Value) -> Any
+native fun aura.lang.std.Builtin.isNull(value: Value) -> Any
+native fun aura.lang.std.Builtin.isNotNull(value: Value) -> Any
+native fun aura.lang.std.Builtin.isZero(value: Value) -> Any
+native fun aura.lang.std.Builtin.isPositive(value: Value) -> Any
+native fun aura.lang.std.Builtin.isNegative(value: Value) -> Any
+native fun aura.lang.std.Builtin.toString(value: Value) -> Any
+native fun aura.lang.std.Builtin.toInt(value: Value) -> Any
+native fun aura.lang.std.Builtin.toFloat(value: Value) -> Any
+native fun aura.lang.std.Builtin.toBool(value: Value) -> Any
+native fun aura.lang.std.Builtin.sizeOf(value: Value) -> Any
+native fun aura.lang.std.Builtin.hash(value: Value) -> Any
+native fun aura.lang.std.Builtin.compare(a: Value, b: Value) -> Any
+native fun aura.lang.std.Builtin.clone(value: Value) -> Any
+native fun aura.lang.std.Builtin.identity(value: Value) -> Any
+native fun aura.lang.std.Env.get(name: String, default: String) -> Any
+native fun aura.lang.std.Env.set(name: String, value: String) -> Any
+native fun aura.lang.std.Env.remove(name: String) -> Any
+native fun aura.lang.std.Env.has(name: String) -> Any
+native fun aura.lang.std.Env.keys() -> Unit
+native fun aura.lang.std.Env.values() -> Unit
+native fun aura.lang.std.Env.all() -> Unit
+native fun aura.lang.std.Env.home() -> Unit
+native fun aura.lang.std.Env.tmp() -> Unit
+native fun aura.lang.std.Env.pwd() -> Unit
+native fun aura.lang.std.Env.platform() -> Unit
+native fun aura.lang.std.Env.os() -> Unit
+native fun aura.lang.std.Env.arch() -> Unit
+native fun aura.lang.std.StringBuilder.create() -> Any
+native fun aura.lang.std.StringBuilder.append(handle: Long, text: String) -> Any
+native fun aura.lang.std.StringBuilder.appendChar(handle: Long, ch: Char) -> Any
+native fun aura.lang.std.StringBuilder.appendInt(handle: Long, value: Int) -> Any
+native fun aura.lang.std.StringBuilder.length(handle: Long) -> Any
+native fun aura.lang.std.StringBuilder.finish(handle: Long) -> Any
+native fun aura.lang.std.StringBuilder.reset(handle: Long) -> Any
+native fun aura.lang.std.Process.exit(code: Int) -> Any
+native fun aura.lang.std.Process.exitCode() -> Unit
+native fun aura.lang.std.Process.args() -> Any
+native fun aura.lang.std.Process.arg(index: Int) -> Any
+native fun aura.lang.std.Process.argCount() -> Any
+native fun aura.lang.std.Process.pid() -> Unit
+native fun aura.lang.std.Process.spawn(command: String) -> Any
+native fun aura.lang.std.Process.run(command: String) -> Any
+native fun aura.lang.std.Process.kill(pid: Int) -> Any
+native fun aura.lang.std.Process.wait(pid: Int) -> Any
+native fun aura.lang.std.Process.exitProcess(code: Int) -> Any
+native fun aura.lang.std.Random.nextInt() -> Unit
+native fun aura.lang.std.Random.nextLong() -> Unit
+native fun aura.lang.std.Random.nextFloat() -> Unit
+native fun aura.lang.std.Random.nextDouble() -> Unit
+native fun aura.lang.std.Random.nextBool() -> Unit
+native fun aura.lang.std.Random.nextIntRange(min: Int, max: Int) -> Any
+native fun aura.lang.std.Random.nextFloatRange(min: Float, max: Float) -> Any
+native fun aura.lang.std.Random.choice() -> Unit
+native fun aura.lang.std.Random.shuffle(list: List) -> Any
+native fun aura.lang.std.Random.seed() -> Unit
+native fun aura.lang.std.Random.random() -> Unit
+native fun aura.lang.std.Encoding.base64Encode(text: String) -> Any
+native fun aura.lang.std.Encoding.base64Decode(text: String) -> Any
+native fun aura.lang.std.Encoding.hexEncode(text: String) -> Any
+native fun aura.lang.std.Encoding.hexDecode(text: String) -> Any
+native fun aura.lang.std.Encoding.urlEncode(text: String) -> Any
+native fun aura.lang.std.Encoding.urlDecode(text: String) -> Any
+native fun aura.lang.std.Encoding.byteToHex(byte: Int) -> Any
+native fun aura.lang.std.Encoding.hexToByte(hex: String) -> Any
+native fun aura.lang.std.Ascii.isAlpha(text: String) -> Any
+native fun aura.lang.std.Ascii.isDigit(text: String) -> Any
+native fun aura.lang.std.Ascii.isAlphaNumeric(text: String) -> Any
+native fun aura.lang.std.Ascii.isWhitespace(text: String) -> Any
+native fun aura.lang.std.Ascii.isUpper(text: String) -> Any
+native fun aura.lang.std.Ascii.isLower(text: String) -> Any
+native fun aura.lang.std.Ascii.toUpper(text: String) -> Any
+native fun aura.lang.std.Ascii.toLower(text: String) -> Any
+native fun aura.lang.std.Ascii.codeAt(text: String, index: Int) -> Any
+native fun aura.lang.std.Ascii.charAt(text: String, index: Int) -> Any
+native fun aura.lang.std.Ascii.fromCode(code: Int) -> Any
+native fun aura.lang.std.Ascii.codePointAt(text: String, index: Int) -> Any
+native fun aura.lang.std.Console.clear() -> Unit
+native fun aura.lang.std.Console.cursorUp(n: Int) -> Any
+native fun aura.lang.std.Console.cursorDown(n: Int) -> Any
+native fun aura.lang.std.Console.cursorLeft(n: Int) -> Any
+native fun aura.lang.std.Console.cursorRight(n: Int) -> Any
+native fun aura.lang.std.Console.cursorShow() -> Unit
+native fun aura.lang.std.Console.cursorHide() -> Unit
+native fun aura.lang.std.Console.reset() -> Unit
+native fun aura.lang.std.Console.red(text: String) -> Any
+native fun aura.lang.std.Console.green(text: String) -> Any
+native fun aura.lang.std.Console.yellow(text: String) -> Any
+native fun aura.lang.std.Console.blue(text: String) -> Any
+native fun aura.lang.std.Console.magenta(text: String) -> Any
+native fun aura.lang.std.Console.cyan(text: String) -> Any
+native fun aura.lang.std.Console.white(text: String) -> Any
+native fun aura.lang.std.Console.bold(text: String) -> Any
+native fun aura.lang.std.Console.italic(text: String) -> Any
+native fun aura.lang.std.Console.underline(text: String) -> Any
+native fun aura.lang.std.Console.dim(text: String) -> Any
+native fun aura.lang.std.Console.inverse(text: String) -> Any
+native fun aura.lang.std.Console.size() -> Unit
+native fun aura.lang.std.Console.width() -> Unit
+native fun aura.lang.std.Console.height() -> Unit
+native fun aura.lang.std.Path.join() -> Unit
+native fun aura.lang.std.Path.dirname(path: String) -> Any
+native fun aura.lang.std.Path.basename(path: String) -> Any
+native fun aura.lang.std.Path.extname(path: String) -> Any
+native fun aura.lang.std.Path.relative(from: String, to: String) -> Any
+native fun aura.lang.std.Path.resolve(path: String) -> Any
+native fun aura.lang.std.Path.normalize(path: String) -> Any
+native fun aura.lang.std.Path.isAbsolute(path: String) -> Any
+native fun aura.lang.std.Path.isRelative(path: String) -> Any
+native fun aura.lang.std.Path.split(path: String) -> Any
+native fun aura.lang.std.Path.separators(path: String) -> Any
+native fun aura.lang.std.Path.fromUnix(path: String) -> Any
+native fun aura.lang.std.Path.fromWindows(path: String) -> Any
+native fun aura.lang.std.Assert.assert(condition: Value, message: String) -> Any
+native fun aura.lang.std.Assert.assertTrue(condition: Value, message: String) -> Any
+native fun aura.lang.std.Assert.assertFalse(condition: Value, message: String) -> Any
+native fun aura.lang.std.Assert.assertEq(a: Value, b: Value, message: String) -> Any
+native fun aura.lang.std.Assert.assertNotEq(a: Value, b: Value, message: String) -> Any
+native fun aura.lang.std.Assert.assertNotNull(value: Value, message: String) -> Any
+native fun aura.lang.std.Assert.assertNull(value: Value, message: String) -> Any
+native fun aura.lang.std.Assert.debugAssert(condition: Value, message: String) -> Any
+native fun aura.lang.std.Iter.sum(list: List) -> Any
+native fun aura.lang.std.Iter.avg(list: List) -> Any
+native fun aura.lang.std.Iter.min(list: List) -> Any
+native fun aura.lang.std.Iter.max(list: List) -> Any
+native fun aura.lang.std.Iter.product(list: List) -> Any
+native fun aura.lang.std.Iter.contains(list: List, item: Value) -> Any
+native fun aura.lang.std.Iter.indexOf(list: List, item: Value) -> Any
+native fun aura.lang.std.Iter.count(list: List) -> Any
+native fun aura.lang.std.Iter.every(list: List, predicate: Value) -> Any
+native fun aura.lang.std.Iter.some(list: List, predicate: Value) -> Any
+native fun aura.lang.std.Iter.flatMap(list: List, fn: Value) -> Any
+native fun aura.lang.std.Iter.zip() -> Unit
+native fun aura.lang.std.Iter.unzip(list: List) -> Any
+native fun aura.lang.std.Iter.enumerate(list: List) -> Any
+native fun aura.lang.std.Iter.chain() -> Unit
+native fun aura.lang.std.Iter.take(list: List, n: Int) -> Any
+native fun aura.lang.std.Iter.skip(list: List, n: Int) -> Any
+native fun aura.lang.std.Iter.dropWhile(list: List, predicate: Value) -> Any
+native fun aura.lang.std.Iter.takeWhile(list: List, predicate: Value) -> Any
+native fun aura.lang.std.Iter.distinct(list: List) -> Any
+native fun aura.lang.std.Iter.groupBy(list: List, keyFn: Value) -> Any
+native fun aura.lang.std.Iter.partition(list: List, predicate: Value) -> Any
+native fun aura.lang.std.Iter.fold(list: List, init: Value, fn: Value) -> Any
+native fun aura.lang.std.Iter.scan(list: List, init: Value, fn: Value) -> Any
+native fun aura.lang.std.Iter.toMap(list: List, keyFn: Value, valueFn: Value) -> Any
+native fun aura.lang.std.Iter.toList(value: Value) -> Any
+native fun aura.lang.std.Iter.range(from: Int, to: Int) -> Any
+native fun aura.lang.std.Iter.rangeTo(from: Int, to: Int) -> Any
+native fun aura.lang.std.Iter.rangeUntil(from: Int, to: Int) -> Any
+native fun aura.lang.std.Iter.repeatN(value: Value, count: Int) -> Any
+
+fun main() -> Unit {
+    return println("Hello, World!")
+}
+
+fun Any.toString(self: Any) -> String {
+    if self == null {
+        return "null"
+    }
+    return toStr(self)
+}
+
+fun Any.equals(self: Any, other: Any) -> Boolean {
+    if self == null {
+        return other == null
+    }
+    if other == null {
+        return false
+    }
+    return toStr(self) == toStr(other)
+}
+
+fun Any.hashCode(self: Any) -> Int {
+    if self == null {
+        return 0
+    }
+    val s: String = toStr(self)
+    var hash: Int = 0
+    var i: Int = 0
+    while i < s.length {
+        hash = hash * 31 + String.charCodeAt(s, i)
+        i = i + 1
+    }
+    return hash
+}
+

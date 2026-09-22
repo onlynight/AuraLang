@@ -21,6 +21,7 @@ package aura.lang.compiler
 import aura.lang.std.String
 import aura.lang.std.FileSystem
 import aura.lang.std.Process
+import aura.lang.std.Env
 
 import aura.lang.compiler.lexer.Span
 import aura.lang.compiler.lexer.Token
@@ -516,7 +517,7 @@ object MainUtils {
 
     /// CLI 模式：读取命令行参数 → 读源文件 → AOT 产出原生可执行文件。
     fun runCli(): Unit {
-        val argc: Int = Process.argCount()
+        val argc: Int = cliArgCount()
         var inputPath: String = ""
         var outputPath: String = ""
         var backend: String = "vm"
@@ -526,26 +527,26 @@ object MainUtils {
         var jitNative: Boolean = false
         // Same base offset as main(): skip "exe" and subcommand when invoked via CLI.
         var base: Int = 0
-        if (argc >= 3 && Process.arg(1) == "run") {
+        if (argc >= 3 && cliArg(1) == "run") {
             base = 2
-        } else if (argc >= 3 && Process.arg(1) == "build") {
+        } else if (argc >= 3 && cliArg(1) == "build") {
             base = 2
-        } else if (argc >= 3 && Process.arg(1) == "check") {
+        } else if (argc >= 3 && cliArg(1) == "check") {
             base = 2
-        } else if (argc >= 3 && Process.arg(1) == "disasm") {
+        } else if (argc >= 3 && cliArg(1) == "disasm") {
             base = 2
         }
         var i: Int = base + 1
         while (i < argc) {
-            val a: String = Process.arg(i)
+            val a: String = cliArg(i)
             if (a == "-o" || a == "--output") {
                 if (i + 1 < argc) {
-                    outputPath = Process.arg(i + 1)
+                    outputPath = cliArg(i + 1)
                     i = i + 1
                 }
             } else if (a == "-b" || a == "--backend") {
                 if (i + 1 < argc) {
-                    backend = Process.arg(i + 1)
+                    backend = cliArg(i + 1)
                     i = i + 1
                 }
             } else if (a == "--dll") {
@@ -729,6 +730,66 @@ object MainUtils {
     }
 }
 
+// ════════════════════════════════════════════════════════════════
+// 命令行取参桥接（冻结种子 VM 的逃生通道）
+//
+// 背景：冻结种子（`aura/seed/aura.exe`）的**内嵌 std `.auc`** 里
+// `ProcessNative.arg` / `args` / `argCount` 的函数体存在形参错位 ——
+// 实测最小复现（与编译器自身无关）：
+//     cliArgCount()  → operand stack underflow (need 1 args) in `Process.argCount` at ip=1
+//     cliArg(0)      → operand stack underflow (need 1 args) in `ProcessNative.arg` at ip=18
+//     Process.args()      → operand stack underflow (need 1 args) in `ProcessNative.args` at ip=1
+// 即「对象方法调用少传 self」。这三处是**烘焙进二进制**的产物，
+// 改 Aura 源码无效，只能重建种子。
+//
+// 但 `Env.get(...)` 走的是另一条（可用的）链路。因此 CLI 取参改为：
+//   1) 优先环境变量通道（由 scripts/bootstrap-*.ps1 注入）
+//        AURA_ARGV_COUNT=N  AURA_ARG_0=... AURA_ARG_1=...
+//   2) 环境变量缺失时回退 `Process.*`（在重建后的种子里是正常的）
+// 这样自举编译器在**当前冻结种子**下也能跑起来，从而让前端降级
+// （Hir.aura 的 `Collections.*` 白名单等）有端到端验收手段。
+// ════════════════════════════════════════════════════════════════
+
+/// 读取环境变量通道的参数个数；无该通道时返回 -1。
+fun cliEnvArgCount(): Int {
+    val s: String = Env.get("AURA_ARGV_COUNT")
+    if (s == "") {
+        return -1
+    }
+    var n: Int = 0
+    var k: Int = 0
+    while (k < s.length) {
+        val c: Int = s.charCodeAt(k)
+        if (c < 48 || c > 57) {
+            return -1
+        }
+        n = n * 10 + (c - 48)
+        k = k + 1
+    }
+    return n
+}
+
+/// 命令行参数个数（argv[0] 计入）。
+fun cliArgCount(): Int {
+    val envN: Int = cliEnvArgCount()
+    if (envN >= 0) {
+        return envN
+    }
+    return cliArgCount()
+}
+
+/// 取第 i 个命令行参数（i=0 为可执行文件名）。
+fun cliArg(i: Int): String {
+    val envN: Int = cliEnvArgCount()
+    if (envN >= 0) {
+        if (i < 0 || i >= envN) {
+            return ""
+        }
+        return Env.get("AURA_ARG_" + toStr(i))
+    }
+    return cliArg(i)
+}
+
 /// 编译器入口：有命令行参数时编译指定源文件，否则仅打印用法。
 ///
 /// 注意：自检样例**不再**在无参数时自动运行；需要回归自检时显式调用
@@ -738,19 +799,19 @@ fun main() {
     // the VM passes [exe, "run", file.auc, ...].  Skip those two so that
     // arg(1) is the first user-supplied argument, matching standalone invocation.
     var base: Int = 0
-    if (Process.argCount() >= 3 && Process.arg(1) == "run") {
+    if (cliArgCount() >= 3 && cliArg(1) == "run") {
         base = 2
     }
 
-    if (Process.argCount() >= base + 2) {
-        val first: String = Process.arg(base + 1)
+    if (cliArgCount() >= base + 2) {
+        val first: String = cliArg(base + 1)
         if (first == "--selftest" || first == "-t") {
             MainUtils.runSelfTest()
             return
         }
         if (first == "--run-auc") {
-            if (Process.argCount() >= base + 3) {
-                val aucPath: String = Process.arg(base + 2)
+            if (cliArgCount() >= base + 3) {
+                val aucPath: String = cliArg(base + 2)
                 val vm: VmRunner = VmRunner()
                 vm.loadAucAndRun(aucPath)
                 println("result=" + toStr(vm.getReturnValue()))

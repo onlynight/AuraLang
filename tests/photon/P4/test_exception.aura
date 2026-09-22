@@ -1,0 +1,29 @@
+// tests/photon/P4/test_exception.aura
+// Phase 4.6: Exception handling test
+//
+// Test: Exception creation and handling
+
+import aura.lang.std.String
+import aura.lang.errors.Exception
+import aura.lang.errors.ExceptionHandler
+
+fun main() {
+    // 创建异常
+    val ex1: Exception = Exception("Test exception")
+    println("Exception: " + ex1.message)
+    println("Type: " + ex1.type)
+    
+    // 创建运行时异常
+    val ex2: RuntimeException = RuntimeException("Runtime error")
+    println("RuntimeException: " + ex2.message)
+    
+    // 创建空指针异常
+    val ex3: NullPointerException = NullPointerException()
+    println("NPE: " + ex3.message)
+    
+    // 创建数组越界异常
+    val ex4: ArrayIndexOutOfBoundsException = ArrayIndexOutOfBoundsException(10, 5)
+    println("AIOOBE: " + ex4.message)
+    
+    println("Exception test passed")
+}

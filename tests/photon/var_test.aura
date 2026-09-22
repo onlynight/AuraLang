@@ -1,0 +1,34 @@
+// tests/photon/var_test.aura
+// Test program with variables and control flow
+
+fun main() {
+    // Test 1: Basic variables
+    val x: Int = 10
+    val y: Int = 20
+    val z: Int = x + y
+    
+    // Test 2: While loop
+    var i: Int = 0
+    var sum: Int = 0
+    while (i < 5) {
+        sum = sum + i
+        i = i + 1
+    }
+    
+    // Test 3: If statement
+    if (sum == 10) {
+        // sum should be 0+1+2+3+4 = 10
+    }
+    
+    // Test 4: Function call
+    val result: Int = addNumbers(3, 4)
+    
+    // Test 5: String concatenation
+    val name: String = "World"
+    
+    return
+}
+
+fun addNumbers(a: Int, b: Int): Int {
+    return a + b
+}

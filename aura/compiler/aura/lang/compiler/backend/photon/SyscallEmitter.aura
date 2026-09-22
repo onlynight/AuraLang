@@ -1,0 +1,124 @@
+// aura:///aura/lang/compiler/backend/photon/SyscallEmitter.aura
+package aura.lang.compiler.backend.photon
+// ─────────────────────────────────────────────────────────────
+// 系统调用指令发射�?�?Phase 3.1/3.2
+//
+// �?@native(N) 转换为直�?syscall 指令，无需中间层�?// 支持 Linux x86_64 �?Windows x86_64 (Nt*) 两种调用约定�?//
+// ── Linux x86_64 syscall 约定 ──
+//   rax = syscall �? rdi/rsi/rdx/r10/r8/r9 = 参数 1-6
+//   返回值在 rax
+//
+// ── Windows x86_64 syscall 约定 (Nt*) ──
+//   rax = 服务�? rcx/rdx/r8/r9 = 参数 1-4, 栈上 = 参数 5+
+//   返回值在 rax
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import "x86_64/X86Encoder.aura"
+
+/// 系统调用发射器：生成 syscall 指令�?object SyscallEmitter {
+
+    /// Linux x86_64 syscall 寄存器顺序�?    val LINUX_SYSCALL_REGS: String = "rdi,rsi,rdx,r10,r8,r9"
+
+    /// Windows x86_64 syscall 寄存器顺序�?    val WINDOWS_SYSCALL_REGS: String = "rcx,rdx,r8,r9"
+
+    /// 发射 Linux syscall 指令�?    ///
+    /// @param enc 编码�?    /// @param syscallNum syscall �?    /// @param args 参数列表（逗号分隔的节�?ID�?    /// @param nodeCount 参数数量
+    fun emitLinuxSyscall(enc: X86Encoder, syscallNum: Int, args: String, nodeCount: Int): Unit {
+        // 1. 设置 syscall �? mov rax, N
+        SyscallEmitter.emitMovRegImm32(enc, "rax", syscallNum)
+
+        // 2. 设置参数寄存�? rdi/rsi/rdx/r10/r8/r9
+        if (nodeCount > 0 && args != "") {
+            val regs: List<String> = SyscallEmitter.splitComma(SyscallEmitter.LINUX_SYSCALL_REGS)
+            val argList: List<String> = SyscallEmitter.splitComma(args)
+            var i: Int = 0
+            while (i < nodeCount && i < regs.count()) {
+                // 从源节点加载参数到目标寄存器
+                val srcReg: String = SyscallEmitter.getRegFromNode(argList[i])
+                if (srcReg != "" && srcReg != regs[i]) {
+                    enc.emitMovRR(regs[i], srcReg)
+                }
+                i = i + 1
+            }
+        }
+
+        // 3. 执行 syscall
+        enc.emitSyscall()
+    }
+
+    /// 发射 Windows Nt* syscall 指令�?    ///
+    /// @param enc 编码�?    /// @param serviceNum Nt* 服务�?    /// @param args 参数列表（逗号分隔的节�?ID�?    /// @param nodeCount 参数数量
+    fun emitWindowsSyscall(enc: X86Encoder, serviceNum: Int, args: String, nodeCount: Int): Unit {
+        // 1. 设置服务�? mov rax, N
+        SyscallEmitter.emitMovRegImm32(enc, "rax", serviceNum)
+
+        // 2. 设置参数寄存�? rcx/rdx/r8/r9
+        if (nodeCount > 0 && args != "") {
+            val regs: List<String> = SyscallEmitter.splitComma(SyscallEmitter.WINDOWS_SYSCALL_REGS)
+            val argList: List<String> = SyscallEmitter.splitComma(args)
+            var i: Int = 0
+            while (i < nodeCount && i < regs.count()) {
+                // 从源节点加载参数到目标寄存器
+                val srcReg: String = SyscallEmitter.getRegFromNode(argList[i])
+                if (srcReg != "" && srcReg != regs[i]) {
+                    enc.emitMovRR(regs[i], srcReg)
+                }
+                i = i + 1
+            }
+        }
+
+        // 3. 执行 syscall
+        enc.emitSyscall()
+    }
+
+    /// 判断是否�?Linux syscall�?    fun isLinuxSyscall(syscallNum: Int): Boolean {
+        // Linux syscall 号范�? 0-500
+        return syscallNum >= 0 && syscallNum <= 500
+    }
+
+    /// 判断是否�?Windows Nt* 服务号�?    fun isWindowsSyscall(serviceNum: Int): Boolean {
+        // Windows Nt* 服务号范�? 0x0000000000000000 - 0x00000000000000FF
+        return serviceNum >= 0x0000000000000000 && serviceNum <= 0x00000000000000FF
+    }
+
+    /// 辅助: 发射 mov reg, imm32�?    private fun emitMovRegImm32(enc: X86Encoder, reg: String, imm: Int): Unit {
+        enc.emitMovRI32(reg, imm)
+    }
+
+    /// 辅助: 从节�?ID 字符串获取寄存器名�?    private fun getRegFromNode(nodeId: String): String {
+        // 简化实�? 假设节点 ID 就是寄存器名
+        // 实际实现需要从 MachineDag 中查�?        return nodeId
+    }
+
+    /// 辅助: 按逗号分隔字符串�?    private fun splitComma(s: String): List<String> {
+        val result: List<String> = arrayListOf<String>()
+        if (s == "") { return result }
+        var start: Int = 0
+        var pos: Int = 0
+        val len: Int = s.length
+        while (pos < len) {
+            if (s[pos] == ",") {
+                if (pos > start) {
+                    result.add(s.substring(start, pos))
+                }
+                start = pos + 1
+            }
+            pos = pos + 1
+        }
+        if (start < len) {
+            result.add(s.substring(start, len))
+        }
+        return result
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// SyscallEmitterUtils �?顶层辅助函数
+// ─────────────────────────────────────────────────────────────
+
+object SyscallEmitterUtils {
+
+    /// 创建空的 syscall 发射器实例�?    fun empty(): Unit {
+        // 空操作，用于初始�?    }
+}

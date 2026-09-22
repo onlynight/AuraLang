@@ -355,7 +355,7 @@ object ModuleLinkUtils {
             "aura/core/aura/lang/native/network/NetworkOps.aura\n" +
             // Phase P1-P3: 纯 Aura 标准库模块（已验证可自动包含）
             "aura/core/aura/lang/std/string/StringBuilder.aura\n" +
-            "aura/core/aura/lang/std/collection/Collections.aura\n" +
+            "aura/core/aura/lang/collection/Collections.aura\n" +
             "aura/core/aura/lang/std/FileSystem.aura\n" +
             "aura/core/aura/lang/native/file/FileOps.aura\n" +
             "aura/core/aura/lang/std/string/StringOps.aura\n" +

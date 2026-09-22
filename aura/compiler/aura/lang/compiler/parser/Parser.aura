@@ -280,6 +280,13 @@ class Parser {
     fun parseProgram(): Int {
         var kids = noKids()
         while (!this.prsAtEnd()) {
+            // ★ 前进保障（防死循环）：本循环唯一的推进途径是下面的 `parseTopLevel()`。
+            // 而 `parseTopLevel` → `parseStatement` → `parseExpr` 在遇到**未识别
+            // token** 时会走「意外 token」错误恢复并**一个 token 都不消费**返回。
+            // 此前该情形会让本循环纯 CPU 空转：不分配内存（实测常驻 ~32MB）、
+            // 也不产出任何诊断，表现为「编译很久不出结果」。
+            // 记录进入时的游标，循环末尾若未前进则强制推进一格。
+            val before: Int = this.pos
             this.prsSkipDocs()
             // 语句分隔符 `;`：Rust 侧允许顶层出现，统一跳过
             while (this.prsCheck("Semicolon")) {
@@ -288,6 +295,16 @@ class Parser {
             if (!this.prsAtEnd()) {
                 val d = this.parseTopLevel()
                 kids = kidsAdd(kids, d)
+            }
+            if (this.pos == before) {
+                // 既不推进也无法到达 EOF：记一条诊断后丢弃该 token，保证收敛。
+                this.errors.pushAt(
+                    severityError(),
+                    "意外的 token（顶层）: " + this.prsCurKind(),
+                    this.prsCurSpan().start,
+                    this.prsCurSpan().end
+                )
+                this.prsAdvance()
             }
         }
         return this.ast.add("Program", "", "", this.prsCurSpan(), kids)
@@ -1274,6 +1291,9 @@ class Parser {
         this.prsExpect("LBrace")
         var kids = noKids()
         while (!this.prsCheck("RBrace") && !this.prsAtEnd()) {
+            // ★ 前进保障：同 `parseProgram`。块内语句解析同样可能在未知 token 上
+            // 零消费返回（错误恢复），不设保障就会纯 CPU 空转。
+            val before: Int = this.pos
             // 跳过文档注释后再判断是否已到块尾，避免把 `}` 当作语句吃掉
             this.prsSkipDocs()
             // 语句分隔符 `;`（可选）：Rust 侧允许 `a; b; c` 单行多语句，
@@ -1284,6 +1304,15 @@ class Parser {
             }
             if (!this.prsCheck("RBrace") && !this.prsAtEnd()) {
                 kids = kidsAdd(kids, this.parseStatement())
+            }
+            if (this.pos == before) {
+                this.errors.pushAt(
+                    severityError(),
+                    "意外的 token（语句）: " + this.prsCurKind(),
+                    this.prsCurSpan().start,
+                    this.prsCurSpan().end
+                )
+                this.prsAdvance()
             }
         }
         this.prsExpect("RBrace")
@@ -1638,6 +1667,21 @@ class Parser {
                 val sp: Span = ParserUtils.mergeSpan(this.ast.spanOf(node), this.prsCurSpan())
                 this.prsAdvance()
                 node = this.ast.add("Unwrap", "", "", sp, kidsAdd(noKids(), node))
+            } else if (k == "QuestionMark") {
+                // 安全调用 `expr?.name`：词法器产出 `?` + `.`（两个 token）。
+                // Elvis `expr ?: fallback` 由 `parseBinary` 处理；此处仅处理 SafeAccess。
+                // 不识别会让 `x?.y` 在 `?` 处反同步（整个表达式被吞掉）。
+                if (this.prsKind(this.pos + 1) == "Colon") {
+                    break // Elvis → parseBinary 处理
+                }
+                this.prsAdvance() // 消费 `?`
+                if (this.prsCheck("Dot")) {
+                    this.prsAdvance() // 消费 `.`（可选）
+                }
+                val saMember: String = this.prsCurLit()
+                this.prsExpectName()
+                val saSp: Span = ParserUtils.mergeSpan(this.ast.spanOf(node), this.prsCurSpan())
+                node = this.ast.add("SafeAccess", saMember, "", saSp, kidsAdd(noKids(), node))
             } else if (k == "Dot") {
                 this.prsAdvance()
                 val member: String = this.prsCurLit()

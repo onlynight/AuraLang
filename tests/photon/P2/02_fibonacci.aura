@@ -1,0 +1,35 @@
+// tests/photon/P2/02_fibonacci.aura
+// Phase 2.2: Fibonacci 序列测试
+//
+// 测试: 递归和循环实现
+
+import aura.lang.std.String
+
+fun fib_recursive(n: Int): Int {
+    if (n <= 1) {
+        return n
+    }
+    return fib_recursive(n - 1) + fib_recursive(n - 2)
+}
+
+fun fib_iterative(n: Int): Int {
+    if (n <= 1) {
+        return n
+    }
+    var prev: Int = 0
+    var curr: Int = 1
+    var i: Int = 2
+    while (i <= n) {
+        var next: Int = prev + curr
+        prev = curr
+        curr = next
+        i = i + 1
+    }
+    return curr
+}
+
+fun main() {
+    var n: Int = 10
+    println("fib_recursive(" + toStr(n) + ") = " + toStr(fib_recursive(n)))
+    println("fib_iterative(" + toStr(n) + ") = " + toStr(fib_iterative(n)))
+}

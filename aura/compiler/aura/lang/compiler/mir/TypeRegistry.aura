@@ -133,7 +133,7 @@ class TypeRegistry {
         val lineKey: String = line.substring(0, sepPos)
         if (lineKey != key) { return -1 }
         val idStr: String = line.substring(sepPos + 1, len)
-        return strToInt(idStr)
+        return this.dedupStrToInt(idStr)
     }
 
     /// 检查字符串是否包含子串。
@@ -392,7 +392,14 @@ class TypeRegistry {
         return "0123456789".substring(value, value + 1)
     }
 
-    private fun strToInt(text: String): Int {
+    /// 十进制字符串转整数。
+    ///
+    /// 名字刻意带类前缀语义前缀 `dedup`：**不要**改回 `strToInt`。
+    /// 本方法只能靠「全表唯一候选」兜底解析（`this.` 形式在旧前端下同样
+    /// 退化为裸名），而同名方法在编译单元内至少还有 SsaMirUtils / LirUtils /
+    /// MachineDagUtils 三份，重名即失败
+    /// （`[bytecode] error: 未解析的函数调用 'strToInt'`）。
+    private fun dedupStrToInt(text: String): Int {
         if (text == "") { return 0 }
         val len: Int = text.length
         var total: Int = 0

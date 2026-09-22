@@ -19,8 +19,21 @@ object AotUtil {
 
     /// 当前 AOT 运行时存活分配（MiB）。AOT 无 GC，所有分配只增不减，
     /// 该值即「进程累计未释放字节 / 1MiB」。
+    ///
+    /// ⚠ `aura_mem_used_mb` 是**AOT 运行库符号**（`aot/runtime/memdiag.ll` 的
+    /// `declare` + C 运行库实现），VM（字节码）模式没有实现，且字节码发射器对
+    /// 未解析调用是**硬报错**（`未解析的函数调用 'aura_mem_used_mb'`）而不是
+    /// 静默降级。
+    ///
+    /// 因此这里用**编译期常量**把调用挡在字节码产物之外（`if (false)` 分支在
+    /// 降级期即被消除，不会触发调用解析；实测死分支里的调用不会被解析）。
+    /// 需要 `--mem-trace` 的 AOT 内存诊断时，把下面的 `false` 改成 `true`
+    /// **并用 AOT/native 方式构建编译器**（此时符号由 memdiag.ll + C 运行库提供）。
     fun aotMemMB(): String {
-        return toStr(aura_mem_used_mb())
+        if (false) {
+            return toStr(aura_mem_used_mb())
+        }
+        return "0"
     }
 
     /// 打印一条带标记的内存观测（形如 `[mem] <tag> = <n> MB`）。

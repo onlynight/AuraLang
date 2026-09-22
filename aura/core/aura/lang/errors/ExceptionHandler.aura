@@ -1,0 +1,78 @@
+// aura:///aura/lang/errors/ExceptionHandler.aura
+package aura.lang.errors
+// ─────────────────────────────────────────────────────────────
+// 异常处理器 — Phase 4.3
+//
+// 运行时异常处理支持。
+// 零外部依赖，纯 Aura 实现。
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.native.arch.x86_64_linux.Syscalls
+
+/// 异常处理器
+object ExceptionHandler {
+    var currentException: Exception = null
+    var throwCount: Long = 0
+    var catchCount: Long = 0
+
+    /// 抛出异常
+    fun throwException(ex: Exception): Unit {
+        this.currentException = ex
+        this.throwCount = this.throwCount + 1
+        // 查找异常处理器 (SEH 异常表)
+        // 如果找到，跳转到处理器
+        // 如果没找到，终止程序
+        Syscalls.exitGroup(1)
+    }
+
+    /// 恢复执行
+    fun resume(): Unit {
+        this.currentException = null
+        this.catchCount = this.catchCount + 1
+    }
+
+    /// 获取当前异常
+    fun getCurrentException(): Exception {
+        return this.currentException
+    }
+
+    /// 检查是否有异常
+    fun hasException(): Boolean {
+        return this.currentException != null
+    }
+
+    /// 获取抛出次数
+    fun getThrowCount(): Long {
+        return this.throwCount
+    }
+
+    /// 获取捕获次数
+    fun getCatchCount(): Long {
+        return this.catchCount
+    }
+
+    /// 清除异常状态
+    fun clear(): Unit {
+        this.currentException = null
+        this.throwCount = 0
+        this.catchCount = 0
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// ExceptionUtils — 顶层辅助函数
+// ─────────────────────────────────────────────────────────────
+
+object ExceptionUtils {
+
+    /// 创建空的 Exception 实例。
+    fun emptyException(): Exception {
+        return Exception("")
+    }
+
+    /// 创建空的 RuntimeException 实例。
+    fun emptyRuntimeException(): RuntimeException {
+        return RuntimeException("")
+    }
+}

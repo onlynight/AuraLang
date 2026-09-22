@@ -54,7 +54,25 @@ object StringBuilder {
     /// 追加字符串（返回自身句柄，便于链式调用）。
     fun append(handle: Long, text: Long): Long {
         if (text == 0) { return handle }
-        val n: Long = StringOps.strlen(text)
+        // ── 长度就地算（不调 `StringOps.strlen`）────────────────────────────
+        // 历史现象：`n` 恒为 0 → 缓冲长度恒为 0 → 发射内容全空。当时的排查把
+        // 它记成「`StringOps.strlen` 在 object 方法体内被前端错解析」（见
+        // `rust/compiler/src/codegen/hir.rs:5322` 起的长注释）。
+        // **真实根因（2026-09-23 查明）在 VM 的指针算术**：`CString(s)` 产出的是
+        // `Value::Ptr`，经 `Long` 形参传进来后，`Memory.read(text + n)` 里的
+        // `text + n` 落进了 `bin_add` 的 Float 分支（`Ptr` 的 `as_float()` = 0.0）
+        // → 读到地址 0 → `c == 0` → 扫描立刻结束、`n = 0`。
+        // 该缺陷已在 `rust/compiler/src/vm/interp.rs` 的 `bin_add`/`bin_sub` 修好
+        //（含 `Ptr` 的加减一律按地址做整数运算）。
+        //
+        // 这里仍保留**就地扫描**：它只依赖 `Memory.read`（同 `appendN` 一直在用的
+        // native 原语族），少一次跨对象调用，语义与本 API 完全一致。
+        var n: Long = 0
+        var c: Byte = Memory.read(text + n)
+        while (c != 0) {
+            n = n + 1
+            c = Memory.read(text + n)
+        }
         appendN(handle, text, n)
         return handle
     }
@@ -167,12 +185,33 @@ object StringBuilder {
     // ── 内部辅助 ──
 
     /// 确保容量 >= need（几何增长，保证 append 摊还 O(1)）。
+    ///
+    /// ⚠ 死循环防护（2026-09-23）：此前的写法在 `need` 异常巨大时**永久空转** ——
+    /// `newcap = newcap * 2` 会先溢出成负数、再溢出成 0，于是 `newcap < need`
+    /// 恒成立，纯整数运算、不分配内存，表现为「CPU 100%、内存不动、永不返回」。
+    /// 实测自举编译器跑到 AOT/字节码发射阶段时因此卡死（`need` 读到
+    /// 1972206093664 ≈ 1.8TB，来自对**非法句柄**调用 `strlen`）。
+    /// 现在：先夹取 need，再保证 newcap 每轮**严格增长**且不超过上限，否则直接放弃扩容。
     private fun reserve(sb: Long, need: Long) {
+        // 非法句柄（0/null）：不做任何事，避免基于垃圾指针算出天文数字
+        if (sb == 0) { return }
+        // 上限 256MB：正常发射量远小于此；超过说明参数已错乱，直接放弃（不扩容）
+        val SB_MAX_CAP: Long = 268435456
+        var want: Long = need
+        if (want < 0 || want > SB_MAX_CAP) { return }
         val cap: Long = Memory.read64(sb + 16)
-        if (cap >= need) { return }
+        if (cap >= want) { return }
         var newcap: Long = cap
         if (newcap < SB_INIT_CAP) { newcap = SB_INIT_CAP }
-        while (newcap < need) { newcap = newcap * 2 }
+        // 倍增 + 严格增长 + 上限三重保护：任一轮不增长即退出循环
+        while (newcap < want) {
+            val next: Long = newcap * 2
+            if (next <= newcap || next > SB_MAX_CAP) {
+                newcap = SB_MAX_CAP
+                break
+            }
+            newcap = next
+        }
         val oldBuf: Long = Memory.read64(sb)
         val newBuf: Long = Memory.alloc(newcap)
         if (newBuf == 0) { return }
@@ -187,11 +226,20 @@ object StringBuilder {
     }
 
     /// 底层追加 n 字节（不含 NUL）。
+    ///
+    /// ⚠ 安全检查（2026-09-23）：`n` 由调用方给出（`append` 就地扫描得到）。当
+    /// `n` 异常（负数 / 天文数字，实测曾出现 `n = 1972206093664`）时，旧实现会拿它
+    /// 去 `reserve` 扩容 —— 先触发倍增死循环（`newcap*2` 溢出成 0），即便侥幸返回
+    /// 也会**越界写**。这里对「句柄 / n / 扩容后实际容量」三重校验，
+    /// 任何一项不成立就放弃本次追加（丢数据总好过崩或死循环）。
     private fun appendN(handle: Long, src: Long, n: Long) {
         val sb: Long = handle
-        if (n < 0) { return }
+        if (sb == 0) { return }
+        if (n < 0 || n > 67108864) { return }
         val len: Long = Memory.read64(sb + 8)
         reserve(sb, len + n + 1)
+        val cap: Long = Memory.read64(sb + 16)
+        if (cap < len + n + 1) { return }
         val buf: Long = Memory.read64(sb)
         if (buf == 0) { return }
         if (src != 0 && n > 0) {

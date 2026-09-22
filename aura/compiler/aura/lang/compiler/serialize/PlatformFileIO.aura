@@ -102,15 +102,17 @@ object PlatformFileIO {
             return empty
         }
         val slen: Int = s.length
-        val len: Long = slen.toLong() + 1
+        // Int → Long 一律用 `as Long`：`.toLong()` 在多个类型上重名，
+        // 接收者类型拿不到时会退化成裸名调用（未解析）。
+        val len: Long = (slen as Long) + 1L
         val buf: Long = Allocator.malloc(len)
         if (buf == 0) { return 0 }
         var i: Int = 0
         while (i < slen) {
-            Memory.write(buf + i.toLong(), s.charCodeAt(i))
+            Memory.write(buf + (i as Long), s.charCodeAt(i))
             i = i + 1
         }
-        Memory.write(buf + slen.toLong(), 0)
+        Memory.write(buf + (slen as Long), 0)
         return buf
     }
 }

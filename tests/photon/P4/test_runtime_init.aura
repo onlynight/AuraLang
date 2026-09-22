@@ -1,0 +1,37 @@
+// tests/photon/P4/test_runtime_init.aura
+// Phase 4.6: Runtime initialization test
+//
+// Test: Full runtime initialization and cleanup
+
+import aura.lang.std.String
+import aura.lang.native.Runtime
+import aura.lang.native.Memory
+import aura.lang.native.GC
+import aura.lang.errors.Exception
+
+fun main() {
+    // 初始化运行时
+    println("Initializing runtime...")
+    val initResult: Boolean = Runtime.init()
+    println("Init: " + toStr(initResult))
+    
+    // 检查状态
+    println("Initialized: " + toStr(Runtime.isInitialized()))
+    println("Main thread: " + toStr(Runtime.getMainThreadId()))
+    println("Active threads: " + toStr(Runtime.getActiveThreadCount()))
+    
+    // 测试内存分配
+    val ptr: Long = MemoryManager.alloc(100)
+    println("Alloc: " + toStr(ptr))
+    
+    // 测试 GC
+    GC.collect()
+    println("GC count: " + toStr(GC.getGcCount()))
+    
+    // 清理运行时
+    println("Cleaning up...")
+    Runtime.cleanup()
+    println("Initialized: " + toStr(Runtime.isInitialized()))
+    
+    println("Runtime test passed")
+}

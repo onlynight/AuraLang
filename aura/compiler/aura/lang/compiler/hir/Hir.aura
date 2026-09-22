@@ -37,6 +37,13 @@ package aura.lang.compiler.hir
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
+// 本文件必须**自包含**：以下两个类是 HirLowerer 签名/实现直接依赖的
+// 跨包类型，缺 import 时只有在「整个编译器一次性编译」的入口下才会
+// 因为同编译单元而侥幸解析；单独/经 Parser 之外的入口编译时，接收者
+// 类型退化为 `<error>`，`ast.kidsOf(...)` 等方法派发失败被降级为裸名调用
+// （`[bytecode] error: 未解析的函数调用 'kidsOf'/'spanOf'` …）。
+import aura.lang.compiler.lexer.Span
+import aura.lang.compiler.ast.Ast
 
 object HirUtils {
 
@@ -1396,6 +1403,11 @@ class HirLowerer {
             return this.lowerMember(ast, id)
         }
 
+        // 安全调用 `?.`：近似降级为普通成员访问（完整空安全检查留待运行时）
+        if (kind == "SafeAccess") {
+            return this.lowerMember(ast, id)
+        }
+
         // 下标访问
         if (kind == "Index") {
             return this.lowerIndex(ast, id)
@@ -1539,7 +1551,7 @@ class HirLowerer {
         // List/Array/Set.get(i) / getAt(i) → Collections.getAt(collection, i)
         if (kCount >= 2) {
             val calleeId: Int = HirUtils.hirKidsAt(kids, 0)
-            if (ast.kindOf(calleeId) == "Member") {
+            if (ast.kindOf(calleeId) == "Member" || ast.kindOf(calleeId) == "SafeAccess") {
                 val memberName: String = ast.textOf(calleeId)
                 if (memberName == "get" || memberName == "getAt") {
                     val calleeKids: String = ast.kidsOf(calleeId)
@@ -1636,6 +1648,94 @@ class HirLowerer {
                         // 接收者是 String：跳过 Collections 转换，走普通方法调用路径
                     }
                 }
+                // count() / getSize() / isEmpty() → Collections.count / Collections.isEmpty
+                //
+                // 这三个成员名此前**没有**映射表项，方法调用退化为裸名：
+                // 字节码发射器报 `未解析的函数调用 'count'` 并落成函数下标 0xFFFF，
+                // 运行期表现为 `call to undefined function #65535`（实测
+                // `xs.count()`、`m.getSize()` 都是这条路径）。
+                // 运行库侧的名字来自 Rust native 注册表（`std_collections.rs`）：
+                //   aura.lang.std.Collections.count / isEmpty
+                // 对 List 与 Map 都成立（内部按对象长度取值），因此不需要区分接收者。
+                if (memberName == "count" || memberName == "getSize" || memberName == "isEmpty") {
+                    val calleeKids: String = ast.kidsOf(calleeId)
+                    if (HirUtils.hirKidsCount(calleeKids) >= 1) {
+                        val recvId: Int = HirUtils.hirKidsAt(calleeKids, 0)
+                        val recvTy: String = ast.tyOf(recvId)
+                        // String 有同名成员（`s.count()` 之类），必须排除
+                        if (recvTy != "String" && !this.receiverNotForCollections(recvId)) {
+                            var hirKids: String = HirUtils.hirNoKids()
+                            val recvHirId: Int = this.lowerExpr(ast, recvId)
+                            if (recvHirId >= 0) {
+                                hirKids = HirUtils.hirKidsAdd(hirKids, recvHirId)
+                            }
+                            var qname: String = "Collections.count"
+                            if (memberName == "isEmpty") {
+                                qname = "Collections.isEmpty"
+                            }
+                            return this.hir.add("HirCall", qname, "", sp, hirKids)
+                        }
+                    }
+                }
+                // ── Map 成员：containsKey / containsValue / keys / values / put ──
+                //
+                // 与上面的 `count/getSize/isEmpty` 同源：成员名缺映射 → 退化为裸名
+                // → 字节码落成函数下标 0xFFFF → 运行期 `call to undefined function
+                // #65535`（实测 `m.containsKey("a")` 编译期即未解析）。
+                //
+                // **两个后端的落点本轮已齐**：
+                //   * VM（Rust native，`std_collections.rs`）：
+                //     `Collections.mapContainsKey` / `mapContainsValue` /
+                //     `mapKeys` / `mapValues` / `hashMapPut`；
+                //   * AOT（`aura_std_cffi.c` 的调用点符号层，Plan A `AuraDynMap`）：
+                //     `aura_lang_std_Collections_mapContainsKey` / `_mapContainsValue` /
+                //     `_mapKeys` / `_mapValues` / `_hashMapPut`（本轮补齐）。
+                //
+                // 接收者守卫沿用 `receiverNotForCollections`（与 get/set/contains 一致）：
+                //   * 用户集合类实例（`HashMap`/`ArrayList`/`HashSet`/…）与 `this`
+                //     → **保留普通方法调用**，走该类自己的方法
+                //     （`HashMap.put` / `HashMap.containsKey` / `HashMap.keys` …），
+                //     语义与 Plan A 实现一致，也避免把类实例当裸映射头解引用；
+                //   * 接口 / 未知接收者（`Map<...>`、泛型、`Any`）→ 降级为 `Collections.*`。
+                //
+                // 注意 `put` 的返回值语义：VM 的 `Collections.hashMapPut` 对
+                // **值表示**映射返回新映射；对**堆表示**（`Value::Ref`，`mutableMapOf`
+                // 产出）由解释器 `try_inline_coll_set` 原地写入（本轮已把 `hashMapPut`
+                // 纳入该拦截），因此 `m.put(k, v)` 作为语句也能生效。
+                if (memberName == "containsKey" || memberName == "containsValue"
+                    || memberName == "keys" || memberName == "values"
+                    || memberName == "put") {
+                    val mapKids: String = ast.kidsOf(calleeId)
+                    if (HirUtils.hirKidsCount(mapKids) >= 1
+                        && !this.receiverNotForCollections(HirUtils.hirKidsAt(mapKids, 0))) {
+                        var mapHirKids: String = HirUtils.hirNoKids()
+                        val mapRecvHirId: Int =
+                            this.lowerExpr(ast, HirUtils.hirKidsAt(mapKids, 0))
+                        if (mapRecvHirId >= 0) {
+                            mapHirKids = HirUtils.hirKidsAdd(mapHirKids, mapRecvHirId)
+                        }
+                        var mi: Int = 1
+                        while (mi < kCount) {
+                            val mChildHirId: Int =
+                                this.lowerExpr(ast, HirUtils.hirKidsAt(kids, mi))
+                            if (mChildHirId >= 0) {
+                                mapHirKids = HirUtils.hirKidsAdd(mapHirKids, mChildHirId)
+                            }
+                            mi = mi + 1
+                        }
+                        var mapQname: String = "Collections.mapContainsKey"
+                        if (memberName == "containsValue") {
+                            mapQname = "Collections.mapContainsValue"
+                        } else if (memberName == "keys") {
+                            mapQname = "Collections.mapKeys"
+                        } else if (memberName == "values") {
+                            mapQname = "Collections.mapValues"
+                        } else if (memberName == "put") {
+                            mapQname = "Collections.hashMapPut"
+                        }
+                        return this.hir.add("HirCall", mapQname, "", sp, mapHirKids)
+                    }
+                }
             }
         }
 
@@ -1650,7 +1750,7 @@ class HirLowerer {
             if (calleeKind == "Ident" || calleeKind == "This" || calleeKind == "Super") {
                 calleeName = ast.textOf(calleeId)
                 argStart = 1
-            } else if (calleeKind == "Member") {
+            } else if (calleeKind == "Member" || calleeKind == "SafeAccess") {
                 // 方法调用 `obj.method(args)`：名字取成员名，**接收者对象**作为首个实参。
                 // 必须降级「成员节点的接收者子节点」本身，而不是成员节点：若降级成员节点，
                 // kids[0] 会变成一次成员访问（求值得到 0/null），方法调用丢失接收者，

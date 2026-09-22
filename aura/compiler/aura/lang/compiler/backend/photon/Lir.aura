@@ -35,6 +35,11 @@ package aura.lang.compiler.backend.photon
 
 import aura.lang.std.String
 import "../../mir/TypeRegistry.aura"
+// 本文件调用 `MachineDagUtils.strToInt`：必须显式导入，否则 `MachineDagUtils`
+// 不在编译单元内 → 接收者类型退化为 `<error>` → `strToInt` 与
+// `LirUtils.strToInt` 重名、「全表唯一候选」兜底失效 → 降级为裸名调用
+// （`[bytecode] error: 未解析的函数调用 'strToInt'`）。
+import "MachineDag.aura"
 
 // ─────────────────────────────────────────────────────────────
 // LirValue — LIR 值节点
@@ -341,6 +346,25 @@ class LirProgram {
             return LirValue()
         }
         return this.values[id]
+    }
+
+    /// 同 `addValue`，但**同时把值登记到所属块的指令列表**（`LirBlock.instrs`）。
+    ///
+    /// Photon 管线里「块指令列表」是下游各级的枚举依据：InstructionSelection 遍历
+    /// `LirBlock.instrs` 生成 DAG，寄存器分配 / 窥孔 / 发射器同理。而 Lowering 原先
+    /// 一律用 `addValue` 建值（只写 `values` 表，靠 `block` 字段记录归属），于是每个
+    /// 块的 `instrs` 恒为空 → Phase C `DAG nodes=0` → Phase E 机器码 **0 字节**
+    /// （photon 端到端「成功: true 但产物是空壳」的直接原因之一）。
+    ///
+    /// 这里特意保持与 `addValue` **完全相同的实参顺序**，只为让 Lowering 能整体
+    /// 机械替换（无需逐处重排实参，避免引入新的错位）。
+    fun addInstrValue(op: String, typeId: Int, args: String, aux: String, blockId: Int): Int {
+        val vid: Int = this.addValue(op, typeId, args, aux, blockId)
+        if (blockId >= 0 && blockId < this.blocks.size) {
+            val b: LirBlock = this.blocks[blockId]
+            b.instrs = LirBlockUtils.instrsAdd(b.instrs, vid)
+        }
+        return vid
     }
 
     // ── 块管理 ──

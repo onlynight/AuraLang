@@ -32,6 +32,10 @@ import aura.lang.compiler.lexer.Span
 import aura.lang.compiler.errors.CompileError
 import aura.lang.compiler.sema.SymbolTable
 import aura.lang.compiler.sema.TypeInfo
+// `TypeUtils.isNumeric` / `TypeUtils.isString` 必须按「对象名限定」调用：
+// 二者与 VmOps / TypeRegistry / ValueCheck / Builtin 的同名方法重名，
+// 裸调用时「全表唯一候选」兜底失效 → 降级为裸名调用（未解析）。
+import aura.lang.compiler.sema.Type
 
 /// 语义检查器。
 class TypeChecker {
@@ -582,6 +586,9 @@ class TypeChecker {
         if (kind == "Member") {
             ty = this.tcCheckMember(ast, id)
         }
+        if (kind == "SafeAccess") {
+            ty = this.tcCheckSafeAccess(ast, id)
+        }
         if (kind == "IfExpr") {
             ty = this.tcCheckIfExpr(ast, id)
         }
@@ -617,11 +624,11 @@ class TypeChecker {
 
             // 基本类型检查
             if (op == "+" || op == "-" || op == "*" || op == "/" || op == "%") {
-                if (isNumeric(lhsTy) && isNumeric(rhsTy)) {
+                if (TypeUtils.isNumeric(lhsTy) && TypeUtils.isNumeric(rhsTy)) {
                     return lhsTy
-                } else if (isString(lhsTy) && isString(rhsTy) && op == "+") {
+                } else if (TypeUtils.isString(lhsTy) && TypeUtils.isString(rhsTy) && op == "+") {
                     return "String"
-                } else if (lhsTy != "" && rhsTy != "" && lhsTy != rhsTy && !isNumeric(lhsTy)) {
+                } else if (lhsTy != "" && rhsTy != "" && lhsTy != rhsTy && !TypeUtils.isNumeric(lhsTy)) {
                     this.tcError("运算符 " + op + " 类型不兼容: " + lhsTy + " " + op + " " + rhsTy,
                         ast.spanOf(id).start, ast.spanOf(id).end,
                         ast.spanOf(id).startLine, ast.spanOf(id).startCol,
@@ -629,7 +636,7 @@ class TypeChecker {
                     return "Any"
                 }
             } else if (op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=") {
-                if (lhsTy == rhsTy || isNumeric(lhsTy) && isNumeric(rhsTy)) {
+                if (lhsTy == rhsTy || TypeUtils.isNumeric(lhsTy) && TypeUtils.isNumeric(rhsTy)) {
                     return "Boolean"
                 }
                 return "Boolean"
@@ -651,7 +658,7 @@ class TypeChecker {
             val op: String = ast.textOf(opId)
             val operandId: Int = kidsAt(kids, 1)
             val operandTy: String = this.tcCheckExpr(ast, operandId)
-            if (op == "-" && isNumeric(operandTy)) {
+            if (op == "-" && TypeUtils.isNumeric(operandTy)) {
                 return operandTy
             } else if (op == "!" && isBoolean(operandTy)) {
                 return "Boolean"
@@ -684,13 +691,22 @@ class TypeChecker {
     fun tcCheckMember(ast: Ast, id: Int): String {
         val kids: String = ast.kidsOf(id)
         val kCount: Int = kidsCount(kids)
-        if (kCount >= 2) {
+        if (kCount >= 1) {
             val objId: Int = kidsAt(kids, 0)
-            val memberName: String = ast.textOf(kidsAt(kids, 1))
+            val memberName: String = ast.textOf(id)
             val objTy: String = this.tcCheckExpr(ast, objId)
 
+            // 非空断言检查：`.` 不能用于可空类型
+            if (isNullable(objTy)) {
+                this.tcError("不能对可空类型 '" + objTy + "' 使用 '.'，请使用 '?.'",
+                    ast.spanOf(id).start, ast.spanOf(id).end,
+                    ast.spanOf(id).startLine, ast.spanOf(id).startCol,
+                    ast.spanOf(id).endLine, ast.spanOf(id).endCol)
+            }
+
             // 简单成员类型推断
-            if (isString(objTy)) {
+            val baseTy: String = nonNull(objTy)
+            if (TypeUtils.isString(baseTy)) {
                 if (memberName == "length" || memberName == "size") {
                     return "Int"
                 }
@@ -700,7 +716,7 @@ class TypeChecker {
                 return "Any"
             }
             // List/Array/Set 成员（Collection 通用接口）
-            if (objTy.startsWith("List") || objTy.startsWith("Array") || objTy.startsWith("Set")) {
+            if (baseTy.startsWith("List") || baseTy.startsWith("Array") || baseTy.startsWith("Set")) {
                 if (memberName == "size" || memberName == "count" || memberName == "length") {
                     return "Int"
                 }
@@ -714,6 +730,53 @@ class TypeChecker {
                 return "Any"
             }
             // 其他类型暂不检查
+        }
+        return "Any"
+    }
+
+    /// 检查安全调用表达式 `?.`。
+    fun tcCheckSafeAccess(ast: Ast, id: Int): String {
+        val kids: String = ast.kidsOf(id)
+        val kCount: Int = kidsCount(kids)
+        if (kCount >= 1) {
+            val objId: Int = kidsAt(kids, 0)
+            val memberName: String = ast.textOf(id)
+            val objTy: String = this.tcCheckExpr(ast, objId)
+
+            // 非空对象上使用 `?.` → 警告（不必要的安全调用）
+            if (!isNullable(objTy) && objTy != "") {
+                this.tcError("对非空类型 '" + objTy + "' 使用不必要的安全调用 '?.'",
+                    ast.spanOf(id).start, ast.spanOf(id).end,
+                    ast.spanOf(id).startLine, ast.spanOf(id).startCol,
+                    ast.spanOf(id).endLine, ast.spanOf(id).endCol)
+            }
+
+            // 成员类型推断（与非空成员相同，但结果标记为可空）
+            val baseTy: String = nonNull(objTy)
+            if (TypeUtils.isString(baseTy)) {
+                if (memberName == "length" || memberName == "size") {
+                    return "Int?"
+                }
+                if (memberName == "isEmpty") {
+                    return "Boolean?"
+                }
+                return "Any?"
+            }
+            // List/Array/Set 成员（Collection 通用接口）
+            if (baseTy.startsWith("List") || baseTy.startsWith("Array") || baseTy.startsWith("Set")) {
+                if (memberName == "size" || memberName == "count" || memberName == "length") {
+                    return "Int?"
+                }
+                if (memberName == "isEmpty") {
+                    return "Boolean?"
+                }
+                if (memberName == "set") {
+                    return "Unit?"
+                }
+                return "Any?"
+            }
+            // 其他类型暂不检查，默认可空
+            return "Any?"
         }
         return "Any"
     }
@@ -756,7 +819,7 @@ class TypeChecker {
             val containerId: Int = kidsAt(kids, 0)
             val containerTy: String = this.tcCheckExpr(ast, containerId)
             this.tcCheckExpr(ast, kidsAt(kids, 1))
-            if (isString(containerTy)) {
+            if (TypeUtils.isString(containerTy)) {
                 return "Char"
             }
         }

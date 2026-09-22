@@ -1,4 +1,0 @@
-# Photon HIR for module: simple
-# Functions: 1
-
-fun main(): Int

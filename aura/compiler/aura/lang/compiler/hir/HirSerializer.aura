@@ -1,0 +1,238 @@
+// aura:///aura/lang/compiler/hir/HirSerializer.aura
+package aura.lang.compiler.hir
+// ─────────────────────────────────────────────────────────────
+// HIR 序列化/反序列化 — Phase 1 基础设施
+//
+// 将 JSON 格式的 HIR 描述反序列化为 Aura HIR (扁平 arena 表示)。
+//
+// JSON 格式示例:
+// {
+//   "version": 1,
+//   "module": "test",
+//   "functions": [
+//     {
+//       "name": "main",
+//       "params": [],
+//       "ret": "Unit",
+//       "isNative": false,
+//       "body": {
+//         "stmts": [
+//           { "kind": "Return", "kids": [{"kind": "Lit", "text": "42", "ty": "Int"}] }
+//         ]
+//       }
+//     }
+//   ]
+// }
+// ─────────────────────────────────────────────────────────────
+
+import aura.lang.std.String
+import aura.lang.compiler.lexer.Span
+
+/// HIR 序列化器：将 JSON 文本解析为 Aura HIR。
+class HirSerializer {
+
+    /// 输出 HIR。
+    var hir: Hir = Hir()
+
+    /// 当前节点 ID 映射表（用于构建 kids 关系）。
+    private var nodeMap: String = ""
+
+    init() {
+        this.hir = Hir()
+        this.nodeMap = ""
+    }
+
+    // ── JSON 解析 ──
+
+    /// 从 JSON 文本解析 HIR。
+    fun parse(json: String): Hir {
+        this.hir = Hir()
+        this.nodeMap = ""
+
+        // 解析顶层字段
+        val root: Int = this.parseObject(json, -1)
+        this.hir.rootId = root
+        return this.hir
+    }
+
+    /// 解析 JSON 对象。
+    private fun parseObject(json: String, parentId: Int): Int {
+        // 简化解析：提取 kind, text, ty, kids 等字段
+        var pos: Int = 0
+        var len: Int = json.length
+        var key: String = ""
+        var val: String = ""
+
+        while (pos < len) {
+            // 寻找下一个字段
+            val braceOpen: Int = json.indexOf("{", pos)
+            if (braceOpen < 0) break
+            val braceClose: Int = json.indexOf("}", braceOpen)
+            if (braceClose < 0) break
+
+            val inner: String = json.substring(braceOpen + 1, braceClose)
+            pos = braceClose + 1
+
+            // 解析字段
+            val fields: String = this.parseFields(inner)
+
+            // 创建节点
+            val kind: String = this.getField(fields, "kind")
+            val text: String = this.getField(fields, "text")
+            val ty: String = this.getField(fields, "ty")
+            val kidsJson: String = this.getField(fields, "kids")
+
+            if (kind == "") continue
+
+            // 创建空 span
+            val sp: Span = Span(0, 0, 1, 1, 1, 1)
+
+            // 创建节点
+            val nodeId: Int = this.hir.add(kind, text, ty, sp, "")
+
+            if (parentId >= 0) {
+                this.hir.kids[parentId] = HirUtils.hirKidsAdd(this.hir.kids[parentId], nodeId)
+            }
+
+            // 解析子节点
+            if (kidsJson != "" && kidsJson != "[]") {
+                this.parseKids(kidsJson, nodeId)
+            }
+        }
+
+        return -1
+    }
+
+    /// 解析子节点列表。
+    private fun parseKids(kidsJson: String, parentId: Int): Unit {
+        // 解析 JSON 数组中的对象
+        var pos: Int = 0
+        var len: Int = kidsJson.length
+
+        while (pos < len) {
+            val braceOpen: Int = kidsJson.indexOf("{", pos)
+            if (braceOpen < 0) break
+            val braceClose: Int = kidsJson.indexOf("}", braceOpen)
+            if (braceClose < 0) break
+
+            val inner: String = kidsJson.substring(braceOpen + 1, braceClose)
+            pos = braceClose + 1
+
+            val fields: String = this.parseFields(inner)
+            val kind: String = this.getField(fields, "kind")
+            val text: String = this.getField(fields, "text")
+            val ty: String = this.getField(fields, "ty")
+
+            if (kind == "") continue
+
+            val sp: Span = Span(0, 0, 1, 1, 1, 1)
+            val nodeId: Int = this.hir.add(kind, text, ty, sp, "")
+
+            this.hir.kids[parentId] = HirUtils.hirKidsAdd(this.hir.kids[parentId], nodeId)
+        }
+    }
+
+    /// 解析 JSON 字段列表。
+    private fun parseFields(json: String): String {
+        var result: String = ""
+        var pos: Int = 0
+        var len: Int = json.length
+
+        while (pos < len) {
+            // 寻找 "key": "value" 或 "key": [value]
+            val quoteOpen: Int = json.indexOf("\"", pos)
+            if (quoteOpen < 0) break
+
+            val quoteClose: Int = json.indexOf("\"", quoteOpen + 1)
+            if (quoteClose < 0) break
+
+            val key: String = json.substring(quoteOpen + 1, quoteClose)
+            pos = quoteClose + 1
+
+            // 寻找冒号
+            val colon: Int = json.indexOf(":", pos)
+            if (colon < 0) break
+            pos = colon + 1
+
+            // 寻找值
+            val valStart: Int = this.skipWhitespace(json, pos)
+            if (valStart >= len) break
+
+            var valEnd: Int = valStart
+            if (json[valStart] == '"') {
+                valEnd = json.indexOf("\"", valStart + 1)
+                if (valEnd < 0) break
+                valEnd = valEnd + 1
+            } else if (json[valStart] == '[') {
+                valEnd = json.indexOf("]", valStart)
+                if (valEnd < 0) break
+                valEnd = valEnd + 1
+            } else {
+                // 数字或布尔值
+                while (valEnd < len && json[valEnd] != ',' && json[valEnd] != '}') {
+                    valEnd = valEnd + 1
+                }
+            }
+
+            val value: String = json.substring(valStart, valEnd).trim()
+            result = result + key + "=" + value + ";"
+            pos = valEnd
+        }
+
+        return result
+    }
+
+    /// 获取字段值。
+    private fun getField(fields: String, key: String): String {
+        if (fields == "") return ""
+
+        var pos: Int = 0
+        var len: Int = fields.length
+        val searchKey: String = key + "="
+
+        while (pos < len) {
+            if (fields.startsWith(searchKey, pos)) {
+                val valStart: Int = pos + searchKey.length
+                val valEnd: Int = fields.indexOf(";", valStart)
+                if (valEnd < 0) {
+                    return fields.substring(valStart)
+                }
+                return fields.substring(valStart, valEnd)
+            }
+            pos = pos + 1
+        }
+
+        return ""
+    }
+
+    /// 跳过空白字符。
+    private fun skipWhitespace(s: String, pos: Int): Int {
+        while (pos < s.length) {
+            val c: String = s.substring(pos, pos + 1)
+            if (c == " " || c == "\t" || c == "\n" || c == "\r") {
+                pos = pos + 1
+            } else {
+                break
+            }
+        }
+        return pos
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// 工具对象
+// ─────────────────────────────────────────────────────────────
+
+object HirSerializerUtils {
+
+    /// 创建空序列化器。
+    fun emptySerializer(): HirSerializer {
+        return HirSerializer()
+    }
+
+    /// 从 JSON 解析 HIR。
+    fun parseHir(json: String): Hir {
+        val ser: HirSerializer = HirSerializer()
+        return ser.parse(json)
+    }
+}

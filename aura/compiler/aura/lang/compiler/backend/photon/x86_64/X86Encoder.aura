@@ -543,6 +543,55 @@ class X86Encoder {
         this.writeByte(imm & 255)
     }
 
+    // ── 内存比较（基址 + 索引 寻址）──
+    //
+    // 与 emitCmpByteMemImm8（仅支持「基址」）互补：这里支持 [base + index]
+    // 双寄存器寻址，供 PhotonRuntime 的 strcmp / NUL 扫描循环使用。
+
+    /// 编码「两个字节内存操作数比较」：`[baseA + idxA]` 与 `[baseB + idxB]`。
+    ///
+    /// 展开为：
+    ///   mov al, [baseA + idxA]     ; 8A /r, reg=000(al), rm=100(SIB)
+    ///   cmp al, [baseB + idxB]     ; 3A /r, reg=000(al), rm=100(SIB)
+    ///
+    /// 语义：两个字节**相等**时 ZF=1，可直接接 `emitJccLabel("ne"/"e", …)`。
+    /// 典型调用点：PhotonRuntime.emitStrcmp 的 `strcmp_loop`。
+    fun emitCmpMemMem(baseA: String, idxA: String, baseB: String, idxB: String): Unit {
+        val a: Int = this.regNum(baseA)
+        val ia: Int = this.regNum(idxA)
+        val rexA: Int = this.rexIndexed(false, a, ia)
+        if (rexA != 0x40) {
+            this.writeByte(rexA)
+        }
+        this.writeByte(0x8A)              // MOV r8, r/m8
+        this.writeMemIndexed(0, a, ia)
+
+        val b: Int = this.regNum(baseB)
+        val ib: Int = this.regNum(idxB)
+        val rexB: Int = this.rexIndexed(false, b, ib)
+        if (rexB != 0x40) {
+            this.writeByte(rexB)
+        }
+        this.writeByte(0x3A)              // CMP r8, r/m8
+        this.writeMemIndexed(0, b, ib)
+    }
+
+    /// 编码 TEST byte ptr [baseReg + idxReg], imm8（F6 /0 ib）。
+    ///
+    /// `test x, 0` 等价于「x 是否为 0」：结果为 0 时 ZF=1，
+    /// 常与 `emitJccLabel("z"/"ne", …)` 搭配（扫描 NUL 终止符）。
+    fun emitTestMemImm8(baseReg: String, idxReg: String, imm: Int): Unit {
+        val b: Int = this.regNum(baseReg)
+        val x: Int = this.regNum(idxReg)
+        val rex: Int = this.rexIndexed(false, b, x)
+        if (rex != 0x40) {
+            this.writeByte(rex)
+        }
+        this.writeByte(0xF6)              // TEST r/m8, imm8
+        this.writeMemIndexed(0, b, x)     // reg=000 (/0)
+        this.writeByte(imm & 255)
+    }
+
     // ── 查询 ──
 
     /// 获取编码后的字节序列（十六进制字符串）。
@@ -618,6 +667,36 @@ class X86Encoder {
         if (r >= 8) { rex = rex + 4 }
         if (b >= 8) { rex = rex + 1 }
         return rex
+    }
+
+    /// 组合「基址 + 索引」寻址所需的 REX 前缀（含 REX.X）。
+    ///
+    /// reg 字段固定为 0（本组指令只用到 al），故 REX.R 恒为 0；
+    /// REX.X 由索引寄存器是否落在 r8-r15 决定。
+    private fun rexIndexed(w: Boolean, baseReg: Int, indexReg: Int): Int {
+        var rex: Int = this.rexByte(w, 0, baseReg)
+        if (indexReg >= 8) { rex = rex + 2 }
+        return rex
+    }
+
+    /// 写入 `mod=00 [base + index]` 形式的 ModRM(+SIB) 内存操作数。
+    ///
+    /// - `reg` 为 ModRM.reg 字段（操作码的 /r 或立即数组扩展位）。
+    /// - base 低 3 位为 101（rbp/r13）时，mod=00 会被 CPU 解释成 disp32，
+    ///   故退化为 mod=01 + disp8=0（与 `emitCmpByteMemImm8` 的处理一致）。
+    /// - index 低 3 位为 100（rsp/r12）按 x86 约定表示「无索引」。
+    private fun writeMemIndexed(reg: Int, baseReg: Int, indexReg: Int): Unit {
+        val regField: Int = (reg & 7) << 3
+        val base: Int = baseReg & 7
+        val index: Int = (indexReg & 7) << 3
+        if (base == 5) {
+            this.writeByte(0x40 + regField + 4)   // mod=01, rm=100(SIB)
+            this.writeByte(index + base)          // ss=00, index, base
+            this.writeByte(0)                     // disp8 = 0
+        } else {
+            this.writeByte(0x00 + regField + 4)   // mod=00, rm=100(SIB)
+            this.writeByte(index + base)          // ss=00, index, base
+        }
     }
 
     /// 获取寄存器编号。
