@@ -1,0 +1,11 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<snippet>
+    <content><![CDATA[class  :  {
+    override fun ():  {
+        
+    }
+}]]></content>
+    <tabTrigger>class</tabTrigger>
+    <scope>source.aura</scope>
+    <description>Create a class implementing interface</description>
+</snippet>

@@ -1,0 +1,14 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<snippet>
+    <content><![CDATA[when () {
+     -> {
+        
+    }
+    else -> {
+        
+    }
+}]]></content>
+    <tabTrigger>when</tabTrigger>
+    <scope>source.aura</scope>
+    <description>When expression</description>
+</snippet>

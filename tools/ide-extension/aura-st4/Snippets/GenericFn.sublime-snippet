@@ -1,0 +1,9 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<snippet>
+    <content><![CDATA[fun <> (: ):  {
+    return 
+}]]></content>
+    <tabTrigger>gen</tabTrigger>
+    <scope>source.aura</scope>
+    <description>Generic function</description>
+</snippet>

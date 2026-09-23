@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Build output
+out/
+dist/
+
+# Testing
+.vscode-test/
+
+# IDE
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Editor
+*.code-workspace
+
+# Logs
+*.log
+
+# VSIX
+*.vsix

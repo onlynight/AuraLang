@@ -1,0 +1,9 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<snippet>
+    <content><![CDATA[while () {
+    
+}]]></content>
+    <tabTrigger>while</tabTrigger>
+    <scope>source.aura</scope>
+    <description>While loop</description>
+</snippet>

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<snippet>
+    <content><![CDATA[fun ${1:name}(${2:params}): ${3:ReturnType} = ${4:expression}]]></content>
+    <tabTrigger>fn=</tabTrigger>
+    <scope>source.aura</scope>
+    <description>Single expression function</description>
+</snippet>
