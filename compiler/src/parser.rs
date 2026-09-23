@@ -2984,6 +2984,42 @@ impl Parser {
             return self.parse_block();
         }
 
+        // ── 数组/列表字面量：`[e1, e2, …]` ──
+        //
+        // 语言层没有独立的数组字面量节点，统一降级为 stdlib 的 `arrayListOf(...)`，
+        // 由 HIR 层继续下沉为堆列表构造 `__list_new(...)`（见 codegen/hir.rs）。
+        //
+        // 此前 `[` 只在**后缀**位置被处理（索引 `a[i]`），前缀位置没有任何产生式，
+        // 于是 `var arr: Int[5] = [1, 2, 3, 4, 5]` 里的 `[`/`]`/`,` 被当成裸字面量：
+        //   semantic warning: unresolved reference '['
+        //   [0] HirLit text=[  ty=String      ← arr 被初始化成字符串 "["
+        // 后果是 VM 与 Photon 两侧都只能产出残骸（`arr[0] = null`、`sum = 0.0`）。
+        if self.check(TokenKind::LBracket) {
+            self.advance(); // [
+            let mut elements: Vec<Expr> = Vec::new();
+            if !self.check(TokenKind::RBracket) {
+                loop {
+                    elements.push(self.parse_expression(0));
+                    if self.check(TokenKind::Comma) {
+                        self.advance();
+                        if self.check(TokenKind::RBracket) {
+                            break; // 允许尾随逗号
+                        }
+                        continue;
+                    }
+                    break;
+                }
+            }
+            self.expect(TokenKind::RBracket);
+            let literal = Expr::Call {
+                callee: Box::new(Expr::Ident("arrayListOf".to_string(), start)),
+                args: elements,
+                span: Span::merge(&start, &self.current().span),
+            };
+            // 允许继续后缀：`[1,2,3][0]`、`[1,2].size` 等
+            return self.parse_postfix_chain(literal, start);
+        }
+
         // 字面量
         if self.check(TokenKind::IntLiteral) {
             let tok = self.advance();

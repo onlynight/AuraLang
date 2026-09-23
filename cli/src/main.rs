@@ -1140,7 +1140,25 @@ fn expr_to_phir(out: &mut String, expr: &HirExpr) {
             match lit {
                 Literal::Int(v) => out.push_str(&v.to_string()),
                 Literal::Float(v) => out.push_str(&v.to_string()),
-                Literal::String(s) => out.push_str(&format!("\"{}\"", s)),
+                // 字符串字面量必须**转义**后写入 .phir：
+                // .phir 是行式文本格式，直接写原始字节会让含控制字符的字符串
+                // （如 "Hello\r\n"）把行截断，Aura 侧按行解析后拿到残骸
+                //（实测 test_syscall_write 的 "Hello, World!\r\n" 被解析成
+                // "Hello, World!,"，产物 .rdata 里只剩一个逗号）。
+                Literal::String(s) => {
+                    out.push('"');
+                    for ch in s.chars() {
+                        match ch {
+                            '\\' => out.push_str("\\\\"),
+                            '"' => out.push_str("\\\""),
+                            '\n' => out.push_str("\\n"),
+                            '\r' => out.push_str("\\r"),
+                            '\t' => out.push_str("\\t"),
+                            c => out.push(c),
+                        }
+                    }
+                    out.push('"');
+                }
                 Literal::Char(c) => out.push_str(&format!("'{}'", c)),
                 Literal::Bool(v) => out.push_str(&v.to_string()),
                 Literal::Null => out.push_str("null"),
