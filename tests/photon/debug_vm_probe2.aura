@@ -1,0 +1,55 @@
+// 调试：List 构造与 add/get
+fun probeArrayListOfStr(): String {
+    val l: List<String> = arrayListOf<String>()
+    l.add("alpha")
+    l.add("beta")
+    var out: String = "size=" + toStr(l.size) + ";"
+    var i: Int = 0
+    while (i < l.size) {
+        out = out + "[" + l.get(i) + "]"
+        i = i + 1
+    }
+    return out
+}
+
+fun probeListOf(): String {
+    val l: List<String> = listOf("alpha", "beta")
+    var out: String = "size=" + toStr(l.size) + ";"
+    var i: Int = 0
+    while (i < l.size) {
+        out = out + "[" + l.get(i) + "]"
+        i = i + 1
+    }
+    return out
+}
+
+fun probeMutable(): String {
+    val l: List<String> = mutableListOf<String>()
+    l.add("alpha")
+    l.add("beta")
+    var out: String = "size=" + toStr(l.size) + ";"
+    var i: Int = 0
+    while (i < l.size) {
+        out = out + "[" + l.get(i) + "]"
+        i = i + 1
+    }
+    return out
+}
+
+fun probeSplit(): String {
+    val l: List<String> = "a==b==c".split("==")
+    var out: String = "size=" + toStr(l.size) + ";"
+    var i: Int = 0
+    while (i < l.size) {
+        out = out + "[" + l.get(i) + "]"
+        i = i + 1
+    }
+    return out
+}
+
+fun main() {
+    println("arrayListOf: " + probeArrayListOfStr())
+    println("listOf:      " + probeListOf())
+    println("mutableList: " + probeMutable())
+    println("split:       " + probeSplit())
+}

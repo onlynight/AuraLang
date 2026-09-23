@@ -45,22 +45,21 @@ class PeepholeOptimizer {
     }
 
     /// 执行一趟优化。
+    ///
+    /// ⚠️ **当前整趟禁用（返回 false，不做任何改写）**。
+    ///
+    /// 原因：本文件里的若干趟是「跨整个 DAG、按节点 ID 全局重写」的启发式，
+    /// 没有按函数隔离、也没有校验被替换的节点是否真的是同一处的操作数，实测
+    /// 会破坏代码正确性。最典型的是 `optimizeCopyPropagate`：它把**所有**
+    /// `mov dst, src` 收进一张全局表，然后拿 `src → dst` 去替换**所有**指令的
+    /// 操作数 —— 连定义这条 mov 的指令本身、以及其它函数里的同名节点 ID 也一起
+    /// 换掉。实测 `mov rbx,10`（Const 10）的操作数被换成后面某个乘法结果节点，
+     /// 发射出来变成 `mov rdi,0`，`println("a + b = " + toStr(a+b))` 输出 ` b =`。
+    ///
+    /// 这些趟需要按「基本块内、单函数、单次使用」重写后才能重新启用
+    /// （属于后续优化工作项，不影响 Phase D 的寄存器分配正确性）。
     private fun runPass(): Boolean {
-        var changed: Boolean = false
-
-        changed = changed || this.optimizeMovChain()
-        changed = changed || this.optimizeSelfMove()
-        changed = changed || this.optimizeDeadCode()
-        changed = changed || this.optimizeCommonSubexpression()
-        changed = changed || this.optimizeConstantFold()
-        changed = changed || this.optimizeStrengthReduce()
-        changed = changed || this.optimizeCopyPropagate()
-        changed = changed || this.optimizeRedundantLoadStore()
-        changed = changed || this.optimizeNoOp()
-        changed = changed || this.optimizeImmediateFold()
-        changed = changed || this.optimizeFlagReuse()
-
-        return changed
+        return false
     }
 
     /// 优化 MOV 链：mov r1, r2; mov r3, r1 → mov r3, r2

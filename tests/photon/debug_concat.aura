@@ -1,0 +1,8 @@
+import aura.lang.std.String
+
+fun main() {
+    println("x" + "y")
+    println(toStr(7) + "z")
+    println("x = " + toStr(7))
+    println("q" + "w" + "e")
+}

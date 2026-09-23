@@ -83,7 +83,7 @@ if (Test-Path $hirFile) {
 # List all files in output dir
 $files = Get-ChildItem $OutDir -Recurse -File
 if ($files.Count -gt 0) {
-    Write-Host "    Files in $OutDir:"
+    Write-Host "    Files in ${OutDir}:"
     foreach ($f in $files) {
         Write-Host "      $($f.Name) ($($f.Length) bytes)"
     }

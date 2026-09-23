@@ -1138,7 +1138,7 @@ private fun applyCallingConvention(): Unit {
 ### C. ~~仍存在的同源风险（未修）~~ → **已消除**
 
 > 2026-09-21 第二轮：种子已重建（`rust/` cargo 构建 + `aura/core/aura/lang/**` 源码预编译
-> 为 `rust/build/aura_core_auc/**` 嵌入），VM 启动加载 **1034** 个 Aura 函数（此前 172 个
+> 为 `build/aura_core_auc/**` 嵌入），VM 启动加载 **1034** 个 Aura 函数（此前 172 个
 > 且大量加载失败）。`String.substring` / `charCodeAt` / `toUpperCase` / `indexOf` /
 > `contains` / `split` 等在种子 VM 下**均已可用**，下述风险不复存在：
 

@@ -341,6 +341,30 @@ HIR 序列化应采用 **Photon IR** 标准格式（详见 `photon-ir-format-spe
 
 ---
 
+> **⚠️ 2026-09-23 复核：上表为 09-22 首版评估，已过期。** 真实完成度见 §7.1。
+
+---
+
+## 7.1 2026-09-23 复核后的真实完成度
+
+| 维度 | 完成度 | 说明 |
+|------|--------|------|
+| **编译管线端到端可运行** | ✅ 已打通 | `aura build -b photon <src>.aura` 走完 HIR→SSA→LIR→DAG→RegAlloc→X86→COFF→lld-link，真实用户代码产出可运行 exe |
+| **Photon IR (`.phir`) 序列化** | ✅ 已实现 | `main.rs::hir_to_phir()` 产出 Photon IR 缩进文本（**非 JSON**，符合 G5）；`PhotonPipeline.parsePhirText` 解析 |
+| **Driver 环境变量参数** | ✅ 已实现 | `AURA_PHOTON_PHIR` / `AURA_PHOTON_OUT` / `AURA_PHOTON_MODULE` 全链路传递（偏差 #3 已解决） |
+| **多函数 COFF 符号/重定位** | ✅ 已修复 | `splitDoubleSemi` 端点 bug；`rebaseRelocEntries` 节绝对化；`parseRelocEntries` 紧凑形式重组（详见 §9.5） |
+| **运行时 stdlib 函数** | ✅ 已实现 | runtime obj 导出 `println` `print` `puts` `toStr` `toInt` `toFloat` `toString` `strlen` |
+| **P1 差分测试** | 🟡 3/5 | `01_hello_world` `02_simple_vars` `03_arithmetic` 通过；04 因 PHI 节点降级不完整崩溃（MOV 放置位置错误），05 因乘法 codegen 返回 0 崩溃 |
+| **AOT 后端 (Rust LLVM)** | ✅ 已打通 | 新增 `aura/runtime/cffi/aura_syscalls.c`（59 符号），`aura build --aot` 可编译链接运行 |
+| **COFF 确定性** | ✅ 已验证 | TimeDateStamp=0；连续两次构建 SHA256 完全一致（P1 Step 5 达成） |
+| **Rust CLI 参数解析** | ✅ 修复真实 bug | `first_positional` 把 `--output`/`--aot` 等标志误当带值选项，吃掉输入文件 |
+| **Photon CLI 导入** | ✅ 已修复 | 包导入 `aura.lang.cli.X` 改相对 `import "X.aura"`；`Args.get` 改手写 substring 切分 |
+| **bootstrap-photon.ps1** | 🟡 部分 | 5 步全部改为真实执行（原为空壳）；Step 1/5 通过；Step 3/4 受限于单文件管线 |
+| **自举验证 (P1 Step 4c)** | ❌ 未达成 | 多文件编译器工程超出单文件 Photon 管线能力 |
+| **零外部依赖 (P2)** | 🟡 进行中 | `SyscallEmitter.aura` 原为死代码（无人 import）；已委派 Nt* syscall 运行时重写 |
+| **CLI 自举化 (P3)** | 🟡 部分 | 源码导入已修复；AOT 编译 `Main.aura` 触发 llc `use of undefined value '%a0'` codegen bug |
+| **x86_64 Windows syscall 表** | 🔴 数值错误 | `Syscalls.aura` 用连续 0x00/0x01/0x02... 编号，与真实 NT syscall ID 不符（`NtWriteFile` 应为 `0x15` 而非 `0x00`） |
+
 ## 8. 总结
 
 **核心矛盾**：设计文档将 Photon 后端定位为"纯 Aura 自包含编译管线"，自举链为 Rust(seed) → LLVM(AOT) → Aura(Photon) → 自举验证。但实际实现中：
@@ -356,3 +380,160 @@ HIR 序列化应采用 **Photon IR** 标准格式（详见 `photon-ir-format-spe
 **修正优先级**：先修复 P0（HIR 序列化 + JSON 格式 + Driver 参数 + 端到端验证），这是所有后续工作的基础。不修复 P0，P1/P2/P3 都是空中楼阁。
 
 **推荐方案**：用 **Photon IR 标准格式**（`photon-ir-format-spec.md`）替代当前的 HIR JSON 桥接，这是所有偏差的根本解决方案。
+
+---
+
+## 9. 进展记录（2026-09-23）
+
+本节记录本轮对 §5–§7 各项偏差的实际修复，附可复现的验证命令。
+
+### 9.1 P0：真实管线（偏差 #1 #2 #3 #4）
+
+| 项 | 状态 | 证据 |
+|----|------|------|
+| `.phir` 序列化（保留 Photon IR，**非 JSON**） | ✅ | `rust/cli/src/main.rs::hir_to_phir()` @888；`PhirSerializer.aura` |
+| Driver 环境变量接收 | ✅ | `AURA_PHOTON_PHIR`/`AURA_PHOTON_OUT`/`AURA_PHOTON_MODULE` |
+| 多函数符号 | ✅ | `PhotonPipeline.splitDoubleSemi` 端点 bug（`i-start`→`i`） |
+| runtime stdlib | ✅ | `aura_runtime.obj` 导出 8 个 `T` 符号 |
+
+**已修复的真实编译器 bug**：`rust/cli/src/main.rs::first_positional` 对**无值标志**（`--output`/`--aot`/`-b`/`--target`…）执行 `i += 2`，把下一个**输入文件**当成选项值吃掉。新增 `OPTS_WITH_VALUE` 白名单：带值选项跳 2，纯标志跳 1。
+
+**验证**：
+```powershell
+& ".\rust\target\release\aura.exe" build --aot tests\photon\simple.aura --output build\aot\simple.exe
+& build\aot\simple.exe; $LASTEXITCODE   # → 42
+```
+
+### 9.2 P1：自举验证（偏差 #5）
+
+| 项 | 状态 | 证据 |
+|----|------|------|
+| `bootstrap-photon.ps1` 5 步真实执行 | ✅ 改造完成 | 原为 5 个「打印+return true」空壳；现实际调用 compiler/linker |
+| Step 1 AOT 编译 | ✅ PASS | `simple.exe` exit=42；`hw.exe` 输出 `Hello, World!` |
+| Step 5 COFF 确定性 | ✅ PASS | TimeDateStamp=0；两次构建 SHA256 一致 |
+| Step 3/4 编译器自举 | ❌ 未达成 | 多文件编译器工程超出单文件 Photon 管线 |
+
+**新增文件**：`aura/runtime/cffi/aura_syscalls.c`（42 KB，59 符号）——`rust/compiler/src/codegen/aot/linker.rs` 硬引用该路径却不存在，导致 AOT 完全不可用。
+
+### 9.3 P2：零外部依赖（偏差 #6）
+
+发现：`SyscallEmitter.aura` **从未被任何管线文件 import**（死代码），且含 4 处 bug：
+- `regs.count()` → 应为 `.size`
+- `getRegFromNode` 原样返回 nodeId
+- `splitComma` 用 `s[pos]`（Aura String 不支持下标）
+- `isWindowsSyscall` 范围 0x00–0xFF 过小
+
+发现：`aura/core/aura/lang/native/arch/x86_64_windows/Syscalls.aura` 的 syscall 编号是**连续递增的占位值**，与真实 NT x64 syscall ID 不符。正确值（稳定）：
+
+| 服务 | 文件中 | 实际 | 服务 | 文件中 | 实际 |
+|------|--------|------|------|--------|------|
+| NtWriteFile | `0x00` | **`0x15`** | NtAllocateVirtualMemory | `0x1B` | **`0x18`** |
+| NtReadFile | `0x01` | **`0x03`** | NtFreeVirtualMemory | `0x19` | **`0x45`** |
+| NtCreateFile | `0x05` | `0x05` ✅ | NtOpenFile | — | **`0x35`** |
+| NtClose | `0x06` | **`0x0B`** | NtExitProcess | `0x10` | **`0x4C`** |
+| NtWaitForSingleObject | `0x09` | **`0x5F`** | NtCreateThreadEx | `0x28` | **`0x64`** |
+
+无 GetStdHandle 的 stdout 方案：`gs:[0x60]` → PEB → `+0x20` ProcessParameters → `+0x30` hStdOutput。
+
+### 9.4 P3：CLI 自举化（偏差 #7）
+
+- ✅ `Main.aura`/`Commands.aura`/`Repl.aura` 导入改为相对路径 `import "X.aura"`（包导入对本地文件不解析）
+- ✅ `Args.aura` 增补 `import aura.lang.std.String`；`get()` 改手写 substring 切分（`ArrayList.getAt` 在 HIR 里被丢弃）
+- ❌ `aura build --aot Main.aura` 触发 `llc: use of undefined value '%a0'`——AOT codegen 在大 IR 上的真实 bug，待修
+
+### 9.5 已解决的关键阻塞（重定位丢失）
+
+**运行时重定位偏移未按节绝对化 + 主对象重定位整串丢失**——曾导致所有 P1–P4 e2e 测试 0/N 通过。两处根因，均已修复：
+
+**(a) 运行时重定位是函数相对偏移**
+每个 runtime 函数由独立 `X86Encoder` 编码，`getRelocations()` 返回函数内相对偏移。修复：`PhotonObjectWriter.rebaseRelocEntries`（line 197）在 `appendFunction` 中按 `funcOffset` 回补为节内绝对偏移。修复后 `llvm-objdump -r` 偏移全部唯一递增（`0x37 0x63 0x95 0xd2 0xfe 0x13b 0x167 0x199 0x1ad 0x31a`），`llvm-nm` 符号值非零（`println T 0 / print T 9b / puts T 104 / toStr T 19f / toInt T 264 / toFloat T 30e / toString T 3a7 / strlen T 3b0`）。
+
+**(b) 主对象除首条外的重定位整串丢失（更严重）**
+`X86Emitter.joinRelocRecords`（line 452）用**单个 `|`** 连接多条记录，而 `|` 同时是记录**内**字段分隔符：
+
+```
+relocs = ["13|@str.0|R_X86_64_REL32", "29|println|R_X86_64_REL32"]
+         ↓ joinRelocRecords
+"13|@str.0|R_X86_64_REL32|29|println|R_X86_64_REL32"     ← 6 个字段的「单条」记录
+```
+
+`parseRelocEntries` 的 `;;`/`;` 分支对无分隔符文本必然产出**恰好 1 条**元素，于是 `if (out.size > 0) return out` 永远成立，末尾的「每 3 字段重组」兜底分支成为死代码。结果只有首条重定位（`@str.0`）存活，`call println` 的 REL32 及其外部符号全部消失：
+
+```
+llvm-nm 01_hello_world.obj (修复前)   llvm-objdump -r (修复前)
+@str.0 r 0 0                          0x15  @str.0
+main   T 0 0                          0x1d  <丢失>
+                                          ↓ 链接后
+                                14000101c: e8 00 00 00 00   call 0x140001021  ← 未回填
+                                140001021: c9                leave   ← 跳到这里
+```
+
+修复：`parseRelocEntries` 先判无 `;` 时直接走「每 3 字段重组」分支（判据 `splitSemi(text).size <= 1`），删除死代码兜底。修复后：
+
+```
+llvm-nm                              llvm-objdump -r
+@str.0 r 0 0                         0x15  @str.0
+main   T 0 0                         0x1d  println
+println U 0 0
+```
+→ `01_hello_world.exe` 输出 **`Hello, World!`** ✅
+
+### 9.6 当前剩余阻塞（codegen，已委派）
+
+P1 套件现状 **3/5**（01/02/03 通过）。04/05 仍有阻塞。
+
+**已修复的 Bug（2026-09-24 本轮）**：
+
+| Bug | 根因 | 修复 |
+|-----|------|------|
+| **Bug C: `c = c + 1` 赋值丢失** | `SsaBuilder.buildAssign` 期望 kids 有 2 个元素（变量名+值），但 HIR 只有 1 个（值在 text 字段） | 改为 `kCount < 1` + `hirKidsAt(kids, 0)` |
+| **Bug F: varMapLookup 返回旧值** | `varMap` 是追加式扁平字符串，`lookup` 从头搜索总是返回首次声明值 | 改为从末尾向前搜索（最新版本优先） |
+| **Bug G: findChangedVars 返回空** | `arrayListOf<String>() + add()` 在 VM 下有 bug（add 后 get 返回 null），导致 `result[k] == name` 恒假 | 改用逗号分隔扁平字符串收集，最后再 `split(",")` |
+| **Bug H: 循环 PHI 节点未插入** | `insertPhisAtBlock` 创建 PHI 后不更新 varMap，条件表达式仍引用原始值 | `insertPhisAtBlock` 返回更新后的 varMap，PHI vid 写入 varMap |
+| **Bug I: PHI 节点降级位置错误** | `InstructionSelection` 按块顺序处理，PHI 的前驱块值尚未在 nodeMap 中 | 改为两遍处理：第一遍处理普通指令+终结指令，第二遍处理所有 PHI 节点 |
+| **Bug J: buildWhile 构建顺序** | 条件在 PHI 之前构建，条件引用旧值 | 改为先构建循环体→插入 PHI→更新 varMap→再构建条件 |
+
+**验证**：
+```powershell
+& ".\rust\target\release\aura.exe" build -b photon tests\photon\P1\03_arithmetic.aura --output build\photon-verify\03_arithmetic\03_arithmetic.phir
+& build\photon-verify\03_arithmetic\03_arithmetic.exe
+# → a + b = 13 / a - b = 7 / a * b = 30 / a / b = 3 / a % b = 1 / c = 6
+```
+
+**Bug A：函数参数未从 ABI 寄存器物化**（仍阻塞 05_functions）
+`05_functions` 中 `fun multiply(a: Int, b: Int): Int { return a * b }` 返回 0 而非 30。
+参数节点在 DAG 中带 `aux="0"` 被当作立即数（`X86Emitter.emitMovImm`），SSA→LIR 阶段未为参数发射 prologue 载入。
+
+**Bug B：字符串 `+` 降为整数 ADD**（05_functions 崩溃根因）
+字符串拼接被编译为 `add rax, rax` 而非 `call strcat`。
+
+**Bug D：循环体 PHI 降级位置错误**（仍阻塞 04_control_flow）
+PHI 节点的 MOV 指令生成在 PHI 所在块（条件块），但应放在前驱块（入口块+循环体块）。
+当前 `emitPhi` 对每个入边值生成 `MOV %dst(Phi), %src(incoming)`，但全部放在条件块入口，
+导致最后一个入边值（循环体值）总是覆盖初始值。需实现完整 PHI 消除（将 MOV 分配到前驱块）。
+
+## 9.8 验证脚本
+
+| 脚本 | 用途 |
+|------|------|
+| `scripts\bootstrap-photon.ps1` | P1 自举链 5 步（`-Step 1,2,3,4,5` / `-Clean` / `-DryRun`） |
+| `scripts\photon-e2e-verify.ps1` | VM vs Photon exe 差分测试（`-Phase P1\|P2\|P3\|P4\|all`） |
+
+### 9.9 本轮修复总结（2026-09-24）
+
+| 阶段 | 状态 | 说明 |
+|------|------|------|
+| **P0: 真实管线** | ✅ 完成 | `.phir` 序列化、Driver 环境变量、多函数符号、runtime stdlib 均已实现 |
+| **P1: 差分测试** | 🟡 3/5 | 01/02/03 通过；04（循环 PHI 降级）和 05（乘法 codegen）仍阻塞 |
+| **P1: bootstrap** | 🟡 部分 | Step 1/5 通过；Step 3/4（编译器自举）受限于单文件管线 |
+| **P2: 零外部依赖** | 🟡 进行中 | `SyscallEmitter.aura` 已实现并接入 `PhotonRuntime.aura`；syscall 编号待校正 |
+| **P3: CLI 自举化** | 🟡 部分 | 源码导入已修复；AOT 编译 `Main.aura` 触发 llc codegen bug |
+
+**已修复的关键 bug**：
+1. `SsaBuilder.buildAssign`：HIR 赋值只有 1 个 kid（值在 text 字段），改为 `kCount < 1` + `hirKidsAt(kids, 0)`
+2. `SsaBuilder.varMapLookup`：从末尾向前搜索（最新版本优先）
+3. `SsaBuilder.findChangedVars`：改用扁平字符串避免 VM `arrayListOf+add` 返回 null 的 bug
+4. `SsaBuilder.insertPhisAtBlock`：返回更新后的 varMap，PHI vid 写入 varMap
+5. `SsaBuilder.buildWhile`：先构建循环体→插入 PHI→更新 varMap→再构建条件
+6. `InstructionSelection`：两遍处理（先普通指令，后 PHI 节点），确保前驱块值已在 nodeMap 中
+

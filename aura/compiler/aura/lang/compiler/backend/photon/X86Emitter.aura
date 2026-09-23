@@ -40,6 +40,16 @@ class X86Emitter {
     /// 函数偏移表（多函数发射：函数名 → .text 节内起始偏移，格式 "funcName|offset" 用 ;; 分隔）。
     private var funcOffsets: String = ""
 
+    /// 当前是否正在发射 main 函数（P2：无 CRT 时需显式调用 exit）。
+    private var isMainFunc: Boolean = false
+
+    /// 当前函数需要保存/恢复的非易失寄存器（逗号分隔，按 push 顺序）。
+    ///
+    /// Windows x64 规定 rbx / rsi / rdi / r12-r15 由**被调函数**负责保留。
+    /// 生成代码里这些寄存器会被分配器随意使用（常量轮转、值着色），若不保存，
+    /// 调用方跨调用存活的值会被悄悄改掉（实测 `"x = " + toStr(x)` 输出 `42`）。
+    private var savedRegs: String = ""
+
     init() {
         this.enc = X86EncoderUtils.emptyEncoder()
         this.outputHex = ""
@@ -47,6 +57,7 @@ class X86Emitter {
         this.frameSize = 0x50
         this.strConsts = ""
         this.funcOffsets = ""
+        this.isMainFunc = false
     }
 
     // ── 主入口 ──
@@ -57,6 +68,8 @@ class X86Emitter {
         this.outputHex = ""
         this.relocRecords = ""
         this.funcOffsets = ""
+        this.isMainFunc = (funcName == "main")
+        this.savedRegs = ""
 
         var i: Int = 0
         var currentFunc: String = ""
@@ -70,7 +83,7 @@ class X86Emitter {
             if (needPrologue || instrFunc != currentFunc) {
                 // 如果之前有函数，发射 epilogue。
                 if (!needPrologue && currentFunc != "") {
-                    this.enc.emitEpilogue()
+                    this.emitEpilogueWithRestore()
                 }
                 // 记录当前函数的起始偏移。
                 val offset: Int = this.enc.byteCount()
@@ -79,8 +92,20 @@ class X86Emitter {
                 } else {
                     this.funcOffsets = this.funcOffsets + ";;" + instrFunc + "|" + toStr(offset)
                 }
-                // 发射当前函数的 prologue。
-                this.enc.emitPrologue(this.frameSize)
+                // 计算本函数用到的非易失寄存器并在 prologue 之前 push。
+                this.isMainFunc = (instrFunc == "main")
+                this.savedRegs = this.collectSavedRegs(dag, i, instrFunc)
+                var sr: Int = 0
+                val srParts: List<String> = MachineDagUtils.splitArgs(this.savedRegs)
+                while (sr < srParts.size) {
+                    this.enc.emitPush(srParts[sr])
+                    sr = sr + 1
+                }
+                // 发射当前函数的 prologue。若保存了奇数个寄存器，多留 8 字节
+                // 保持 16 字节栈对齐（call 前 rsp % 16 == 0）。
+                var frame: Int = this.frameSize
+                if (srParts.size % 2 == 1) { frame = frame + 8 }
+                this.enc.emitPrologue(frame)
                 currentFunc = instrFunc
                 needPrologue = false
             }
@@ -93,7 +118,7 @@ class X86Emitter {
         if (currentFunc != "" && dag.instrCount > 0) {
             val lastInstr: DagInstruction = dag.instrOf(dag.instrCount - 1)
             if (lastInstr.template != "ret") {
-                this.enc.emitEpilogue()
+                this.emitEpilogueWithRestore()
             }
         }
 
@@ -108,6 +133,62 @@ class X86Emitter {
     /// 获取函数偏移表（格式 "funcName|offset;;funcName|offset"）。
     fun getFuncOffsets(): String {
         return this.funcOffsets
+    }
+
+    // ── 非易失寄存器保存/恢复 ──
+
+    /// 该寄存器是否为 Win64 非易失寄存器（需被调函数保留）。
+    private fun isCalleeSaved(r: String): Boolean {
+        return r == "rbx" || r == "rsi" || r == "rdi"
+            || r == "r12" || r == "r13" || r == "r14" || r == "r15"
+    }
+
+    /// 收集某个函数（从 `startIdx` 起、funcName 相同）用到的非易失寄存器。
+    private fun collectSavedRegs(dag: MachineDag, startIdx: Int, funcName: String): String {
+        var found: String = ""
+        var j: Int = startIdx
+        while (j < dag.instrCount) {
+            val instr: DagInstruction = dag.instrOf(j)
+            if (instr.funcName != funcName) { break }
+            if (instr.output >= 0) {
+                found = this.addSavedReg(found, this.regOfNode(dag.nodeOf(instr.output)))
+            }
+            var k: Int = 0
+            while (k < instr.nodeCount()) {
+                val nid: Int = instr.nodeAt(k)
+                if (nid >= 0) {
+                    found = this.addSavedReg(found, this.regOfNode(dag.nodeOf(nid)))
+                }
+                k = k + 1
+            }
+            j = j + 1
+        }
+        return found
+    }
+
+    /// 若寄存器为非易失且未登记，则追加到列表中。
+    private fun addSavedReg(list: String, r: String): String {
+        if (!this.isCalleeSaved(r)) { return list }
+        val parts: List<String> = MachineDagUtils.splitArgs(list)
+        var i: Int = 0
+        while (i < parts.size) {
+            if (parts[i] == r) { return list }
+            i = i + 1
+        }
+        if (list == "") { return r }
+        return list + "," + r
+    }
+
+    /// 发射 epilogue：`leave` → 恢复非易失寄存器 → `ret`。
+    private fun emitEpilogueWithRestore(): Unit {
+        this.enc.emitLeave()
+        val parts: List<String> = MachineDagUtils.splitArgs(this.savedRegs)
+        var i: Int = parts.size - 1
+        while (i >= 0) {
+            this.enc.emitPop(parts[i])
+            i = i - 1
+        }
+        this.enc.emitRet()
     }
 
     // ── 单指令发射 ──
@@ -174,6 +255,11 @@ class X86Emitter {
             this.emitShlRR(instr, dag)
         } else if (template == "shr %dst, %src") {
             this.emitShrRR(instr, dag)
+        } else if (template == "label") {
+            // 基本块标签：登记当前偏移，供 jmp / jcc 回填位移。
+            if (nodes.size >= 1 && nodes[0] != "") {
+                this.enc.emitLabel(nodes[0])
+            }
         } else if (template == "nop") {
             // 空操作。
         }
@@ -319,6 +405,8 @@ class X86Emitter {
         if (nodes.size >= 1) {
             val dst: String = this.regOfNode(dag.nodeOf(MachineDagUtils.strToInt(nodes[0])))
             this.enc.emitSetcc(dst, instr.cond)
+            // SETcc 只写低 8 位：必须零扩展，否则高位脏值让 `cmp reg, 0` 误判
+            this.enc.emitMovzxRegReg8(dst, dst)
         }
     }
 
@@ -334,6 +422,19 @@ class X86Emitter {
             if (funcName != "" && funcName != "$imm") {
                 this.enc.emitCallRel(funcName)
             }
+            // ── 返回值落地（Win64：返回值固定放在 rax）──
+            //
+            // 调用结果必须显式搬到该节点被分配的寄存器/溢出槽，否则后续
+            // 使用者按 `node.reg` 取到的仍是**旧值**（实测 `"x = " + toStr(x)`
+            // 里 strcat 的第二个实参读成第一个实参的寄存器；println 拿不到实参）。
+            val dst: String = this.regOfNode(node)
+            if (dst != "" && dst != "rax") {
+                if (dst.startsWith("stack:")) {
+                    this.enc.emitStackStore(this.stackOffsetOf(dst), "rax")
+                } else {
+                    this.enc.emitMovRR(dst, "rax")
+                }
+            }
         }
     }
 
@@ -348,16 +449,30 @@ class X86Emitter {
     private fun emitCallArgs(callNode: DagNode, dag: MachineDag): Unit {
         val argParts: List<String> = MachineDagUtils.splitArgs(callNode.args)
         val argRegs: List<String> = listOf("rcx", "rdx", "r8", "r9")
-        var i: Int = 0
-        while (i < argParts.size && i < argRegs.size) {
+        // **逆序装载**：若后面的实参来源寄存器恰好是前面某个实参的目标寄存器
+        // （典型：`strcat(toStr(x), y)` 中 toStr 的返回值被分配到 rcx），
+        // 正序装载会先覆写 rcx 再读它 → 两个实参变成同一个值。
+        var i: Int = argParts.size - 1
+        if (i > argRegs.size - 1) { i = argRegs.size - 1 }
+        while (i >= 0) {
             val srcNode: DagNode = dag.nodeOf(MachineDagUtils.strToInt(argParts[i]))
+
+            // ── 整数常量：直接 emit mov argReg, imm（避免 rax clobber）──
+            if (srcNode.kind == "Const" && !srcNode.aux.startsWith("@str.")) {
+                val imm: Int = MachineDagUtils.strToInt(srcNode.aux)
+                this.enc.emitMovRI(argRegs[i], imm)
+                i = i - 1
+                continue
+            }
+
+            // ── 字符串常量 / 普通寄存器值：从节点寄存器搬到参数寄存器 ──
             val srcReg: String = this.regOfNode(srcNode)
             // 栈引用先装回临时寄存器（r10），再搬进参数寄存器
             val realReg: String = this.resolveToReg(srcReg, "r10")
             if (realReg != "" && realReg != argRegs[i]) {
                 this.enc.emitMovRR(argRegs[i], realReg)
             }
-            i = i + 1
+            i = i - 1
         }
     }
 
@@ -377,7 +492,15 @@ class X86Emitter {
             // BOOL（退出码 1）而不是 0。
             this.enc.emitXorRR("eax", "eax")
         }
-        this.enc.emitEpilogue()
+
+        // P2：无 CRT 时，main 必须显式调用 exit（NtTerminateProcess syscall）。
+        // 否则 `ret` 会返回到未定义的地址（OS 未推送返回地址）。
+        if (this.isMainFunc) {
+            this.enc.emitMovRR("rcx", "rax")  // exit code = rax
+            this.enc.emitCallRel("exit")      // 调用 runtime 的 exit 函数（不返回）
+        } else {
+            this.emitEpilogueWithRestore()
+        }
     }
 
     private fun emitJmp(nodes: List<String>, dag: MachineDag): Unit {
@@ -514,39 +637,58 @@ class X86Emitter {
         }
     }
 
+    /// 取除法/取余指令的**除数**节点。
+    ///
+    /// `InstructionSelection.emitArith` 统一按 `nodes = "dst,src"`（`output` 也是
+    /// dst）选择 pattern，所以除数在 `nodes[1]`；单元测试形态只给 `nodes[0]`。
+    /// 旧实现固定取 `nodes[0]`，于是 `a / b` 被编成 `idiv dst`（自己除自己）——
+    /// 实测 `10 / 3` 输出 1、`10 % 3` 输出 0。
+    private fun divSrcNode(instr: DagInstruction): Int {
+        val nodes: List<String> = MachineDagUtils.splitArgs(instr.nodes)
+        if (nodes.size >= 2) {
+            return MachineDagUtils.strToInt(nodes[1])
+        }
+        if (nodes.size == 1) {
+            return MachineDagUtils.strToInt(nodes[0])
+        }
+        return -1
+    }
+
     private fun emitDivRR(instr: DagInstruction, dag: MachineDag): Unit {
-        // div %dst, %src → cdq + idiv (商→rax, 余数→rdx)
+        // div %dst, %src → cqo + idiv (商→rax, 余数→rdx)
         if (instr.output >= 0) {
             val dstNode: DagNode = dag.nodeOf(instr.output)
             val dst: String = this.regOfNode(dstNode)
-            val nodes: List<String> = MachineDagUtils.splitArgs(instr.nodes)
-            if (nodes.size >= 1) {
-                val srcNodeId: Int = MachineDagUtils.strToInt(nodes[0])
+            val srcNodeId: Int = this.divSrcNode(instr)
+            if (srcNodeId >= 0) {
                 val srcNode: DagNode = dag.nodeOf(srcNodeId)
                 val src: String = this.regOfNode(srcNode)
                 if (dst != "rax") {
                     this.enc.emitMovRR("rax", dst)
                 }
-                this.enc.emitCdq()
+                this.enc.emitCqo()
                 this.enc.emitIdiv(src)
+                // 商在 rax，如果需要则移动到 dst 寄存器
+                if (dst != "rax") {
+                    this.enc.emitMovRR(dst, "rax")
+                }
             }
         }
     }
 
     private fun emitRemRR(instr: DagInstruction, dag: MachineDag): Unit {
-        // rem %dst, %src → cdq + idiv (余数→rdx)
+        // rem %dst, %src → cqo + idiv (余数→rdx)
         if (instr.output >= 0) {
             val dstNode: DagNode = dag.nodeOf(instr.output)
             val dst: String = this.regOfNode(dstNode)
-            val nodes: List<String> = MachineDagUtils.splitArgs(instr.nodes)
-            if (nodes.size >= 1) {
-                val srcNodeId: Int = MachineDagUtils.strToInt(nodes[0])
+            val srcNodeId: Int = this.divSrcNode(instr)
+            if (srcNodeId >= 0) {
                 val srcNode: DagNode = dag.nodeOf(srcNodeId)
                 val src: String = this.regOfNode(srcNode)
                 if (dst != "rax") {
                     this.enc.emitMovRR("rax", dst)
                 }
-                this.enc.emitCdq()
+                this.enc.emitCqo()
                 this.enc.emitIdiv(src)
                 if (dst != "rdx") {
                     this.enc.emitMovRR(dst, "rdx")

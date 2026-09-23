@@ -1,0 +1,15 @@
+// 调试：如何构造空 List<String>
+fun n0(): Int {
+    val l: List<String> = emptyList()
+    return l.size
+}
+
+fun n1(): Int {
+    val l: List<String> = listOf()
+    return l.size
+}
+
+fun main() {
+    println("emptyList().size=" + toStr(n0()))
+    println("listOf().size   =" + toStr(n1()))
+}

@@ -59,6 +59,25 @@ class InstructionSelector {
     /// 字符串常量列表（逗号分隔的字符串内容）。
     var stringConstants: String = ""
 
+    /// 当前函数已处理的参数计数（用于确定 ABI 寄存器 rcx/rdx/r8/r9）。
+    private var paramIndex: Int = 0
+
+    /// Const 节点的寄存器轮转计数器（避免所有 Const 都默认到 rax 导致 clobber）。
+    private var constRegCounter: Int = 0
+
+    /// Const 节点轮转寄存器列表。
+    ///
+    /// **只用 Windows x64 的非易失（callee-saved）寄存器**：rbx / rsi / rdi /
+    /// r12-r15。常量的值经常要跨越调用存活（例如 `println("x = " + toStr(x))`
+    /// 里的字符串地址），放进易失寄存器（rax/rcx/rdx/r8-r11）会被被调函数
+    /// 无条件覆写 —— 实测常量被换成 `toStr` 的返回值，输出变成 `42` 而不是
+    /// `x = 42`。配合「函数入口保存/出口恢复」这套约定才成立。
+    private var constRegs: List<String> = listOf("rbx", "rsi", "rdi", "r12", "r13", "r14", "r15")
+
+    /// PHI 前驱信息：blockId|phiVid|incomingVid\n...
+    /// 用于 PHI 消除：在前驱块末尾插入 MOV phi_node, incoming_node。
+    private var phiPreds: String = ""
+
     /// 类型注册表（MIR/LIR 的类型 id → 类型名）。
     ///
     /// `emitConst` 需要它把 `LirValue.type` 判定为「字符串 / 数值」。
@@ -80,6 +99,10 @@ class InstructionSelector {
         this.strConstCount = 0
         this.stringConstants = ""
         this.types = TypeRegistry()
+        this.paramIndex = 0
+        this.constRegCounter = 0
+        this.constRegs = listOf("rbx", "rsi", "rdi", "r12", "r13", "r14", "r15")
+        this.phiPreds = ""
     }
 
     // ── 主入口 ──
@@ -96,7 +119,10 @@ class InstructionSelector {
         this.labelMap = ""
         this.strConstCount = 0
         this.stringConstants = ""
+        this.paramIndex = 0
+        this.constRegCounter = 0
         this.lir = src
+        this.phiPreds = ""
         // 绑定 LIR 的类型注册表：`emitConst` 用它判定字符串常量。
         this.types = src.types
 
@@ -201,12 +227,30 @@ class InstructionSelector {
         this.funcName = func.name
         this.labelCount = 0
         this.labelMap = ""
+        this.paramIndex = 0
+        this.constRegCounter = 0
+        this.phiPreds = ""
 
         // 记录函数起始指令数（多函数发射时用于标记指令边界）。
         val startInstr: Int = this.dag.instrCount
 
-        // 遍历所有基本块（通过 LirProgram.blockOf 获取真实块）。
+        // 第一遍：分析 PHI 前驱信息（用于 PHI 消除）。
+        this.analyzePhiPreds(func, src)
+
         val blockParts: List<String> = LirUtils.splitArgs(func.blocks)
+
+        // 第二遍：处理所有 Phi 节点（注册到 nodeMap，供前驱块 MOV 使用）。
+        var bi2: Int = 0
+        while (bi2 < blockParts.size) {
+            val blockId2: Int = LirUtils.strToInt(blockParts[bi2])
+            if (blockId2 >= 0) {
+                val block2: LirBlock = src.blockOf(blockId2)
+                this.selectBlockPhis(block2, src)
+            }
+            bi2 = bi2 + 1
+        }
+
+        // 第三遍：处理所有基本块（含 PHI MOVs 在终结指令之前）。
         var bi: Int = 0
         while (bi < blockParts.size) {
             val blockId: Int = LirUtils.strToInt(blockParts[bi])
@@ -226,6 +270,44 @@ class InstructionSelector {
         }
     }
 
+    // ── PHI 前驱分析（用于 PHI 消除）──
+
+    /// 分析所有 PHI 节点的前驱块，记录到 phiPreds。
+    /// 格式：blockId|phiVid|incomingVid\n...
+    private fun analyzePhiPreds(func: LirFunction, src: LirProgram): Unit {
+        this.phiPreds = ""
+        val blockParts: List<String> = LirUtils.splitArgs(func.blocks)
+        var bi: Int = 0
+        while (bi < blockParts.size) {
+            val blockId: Int = LirUtils.strToInt(blockParts[bi])
+            if (blockId >= 0) {
+                val block: LirBlock = src.blockOf(blockId)
+                val phiParts: List<String> = LirUtils.splitArgs(block.phis)
+                var pi: Int = 0
+                while (pi < phiParts.size) {
+                    val phiVid: Int = LirUtils.strToInt(phiParts[pi])
+                    if (phiVid >= 0) {
+                        val phiVal: LirValue = src.valueOf(phiVid)
+                        val args: List<String> = LirUtils.splitArgs(phiVal.args)
+                        var ai: Int = 0
+                        while (ai < args.size) {
+                            val incomingVid: Int = LirUtils.strToInt(args[ai])
+                            if (incomingVid >= 0) {
+                                val incomingVal: LirValue = src.valueOf(incomingVid)
+                                val srcBlockId: Int = incomingVal.block
+                                this.phiPreds = this.phiPreds + srcBlockId + "|" +
+                                                phiVid + "|" + incomingVid + "\n"
+                            }
+                            ai = ai + 1
+                        }
+                    }
+                    pi = pi + 1
+                }
+            }
+            bi = bi + 1
+        }
+    }
+
     // ── 块级选择 ──
 
     /// 选择单个基本块的指令。
@@ -235,8 +317,9 @@ class InstructionSelector {
         this.registerLabel(block.id, label)
         this.labelCount = this.labelCount + 1
 
-        // S2: 先处理普通指令，再处理 Phi 节点。
-        // 这样 Phi 节点的入边值已经在 nodeMap 中，可以正确发射 MOV。
+        // **发射块标签指令**（template="label"）。
+        this.dag.addInstr("label", label, -1, 0, "", "", "")
+
         // 处理普通指令。
         val instrParts: List<String> = LirUtils.splitArgs(block.instrs)
         var ii: Int = 0
@@ -248,7 +331,18 @@ class InstructionSelector {
             ii = ii + 1
         }
 
-        // 处理 Phi 节点。
+        // PHI 消除：在本块末尾（终结指令之前）发射前驱 MOV。
+        // 对于以本块为前驱的每个 PHI 节点，插入 MOV phi_node, incoming_node。
+        this.emitPhiMovsForBlock(block.id)
+
+        // 处理终结指令。
+        if (block.term >= 0) {
+            this.selectValue(block.term, block.id, src)
+        }
+    }
+
+    /// 第二遍处理：仅处理块中的 Phi 节点。
+    fun selectBlockPhis(block: LirBlock, src: LirProgram): Unit {
         val phiParts: List<String> = LirUtils.splitArgs(block.phis)
         var pi: Int = 0
         while (pi < phiParts.size) {
@@ -258,11 +352,44 @@ class InstructionSelector {
             }
             pi = pi + 1
         }
+    }
 
-        // 处理终结指令。
-        if (block.term >= 0) {
-            this.selectValue(block.term, block.id, src)
+    /// 为指定块发射 PHI 前驱 MOV 指令。
+    /// 在块末尾（终结指令之前）插入 MOV phi_node, incoming_node。
+    private fun emitPhiMovsForBlock(blockId: Int): Unit {
+        if (this.phiPreds == "") { return }
+        val lines: List<String> = this.splitFlat(this.phiPreds, "\n")
+        var i: Int = 0
+        while (i < lines.size) {
+            val line: String = lines.get(i)
+            if (line != "") {
+                val parts: List<String> = this.splitFlat(line, "|")
+                if (parts.size >= 3 && parts[0] == this.intToStr(blockId)) {
+                    val phiVid: Int = LirUtils.strToInt(parts[1])
+                    val incomingVid: Int = LirUtils.strToInt(parts[2])
+                    val phiNode: Int = this.lookupNode(phiVid)
+                    val incomingNode: Int = this.lookupNode(incomingVid)
+                    if (phiNode >= 0 && incomingNode >= 0) {
+                        // MOV phi_node, incoming_node（pattern 7）。
+                        val nodes: String = MachineDagUtils.toStr(phiNode) + "," +
+                                           MachineDagUtils.toStr(incomingNode)
+                        this.dag.selectPattern(7, nodes, phiNode)
+                    }
+                }
+            }
+            i = i + 1
         }
+    }
+
+    /// 按分隔符拆分字符串（避免 VM arrayListOf+add bug）。
+    private fun splitFlat(text: String, sep: String): List<String> {
+        if (text == "") { return emptyList() }
+        return text.split(sep)
+    }
+
+    /// 整数转字符串。
+    private fun intToStr(n: Int): String {
+        return MachineDagUtils.toStr(n)
     }
 
     // ── 值级选择（核心 S1.3 修复）──
@@ -291,14 +418,22 @@ class InstructionSelector {
             this.curChain = val.chain
         }
 
+        // ── MemToken（内存依赖链令牌，不发射任何指令）──
+        if (op == "MemToken" || val.aux == "entry_mem" || val.aux == "mem_after_store") {
+            val memNodeId: Int = this.dag.addNode("Value", "MemToken", val.type,
+                                                  "", "", "", this.curChain, "")
+            this.registerNode(vid, memNodeId)
+            return memNodeId
+        }
+
         // ── 常量 ──
         if (op == "Const" || op == "ConstImm") {
             return this.emitConst(val, vid)
         }
 
-        // ── 参数（函数参数视为常量入口）──
+        // ── 参数（从 Windows x64 ABI 寄存器加载）──
         if (op == "Param") {
-            return this.emitConst(val, vid)
+            return this.emitParam(val, vid)
         }
 
         // ── Phi 节点（S1 简化：取第一个入边值）──
@@ -339,13 +474,20 @@ class InstructionSelector {
         }
 
         // ── 比较运算 → CMP + SETcc ──
-        if (op == "SEq" || op == "SNe" || op == "Slt" || op == "Sgt"
+        //
+        // ⚠️ SsaBuilder.mapBinaryOp 产出的是 **ICmp\* 系列**（`ICmpEq` /
+        // `ICmpNe` / `ICmpSlt` / `ICmpSgt` / `ICmpSle` / `ICmpSge`）。旧实现只认
+        // `SEq`/`Slt` 这类短名 → 比较值退化成「无指令的 Value 节点」，
+        // `if x > 3` 的 `cmp` 拿不到结果（实测两个分支都执行）。
+        if (op == "ICmpEq" || op == "ICmpNe"
+            || op == "ICmpSlt" || op == "ICmpSgt" || op == "ICmpSle" || op == "ICmpSge"
+            || op == "ICmpUlt" || op == "ICmpUgt" || op == "ICmpUle" || op == "ICmpUge"
+            || op == "SEq" || op == "SNe" || op == "Slt" || op == "Sgt"
             || op == "Sle" || op == "Sge"
             || op == "Ult" || op == "Ugt" || op == "Ule" || op == "Uge"
             || op == "OEq" || op == "ONe" || op == "Olt" || op == "Ogt"
             || op == "Ole" || op == "Oge"
-            || op == "UEq" || op == "UNe" || op == "Ult" || op == "Ugt"
-            || op == "ULE" || op == "UGE") {
+            || op == "UEq" || op == "UNe" || op == "ULE" || op == "UGE") {
             return this.emitCmpSetcc(val, vid)
         }
 
@@ -391,6 +533,10 @@ class InstructionSelector {
         val constVal: String = val.aux
         val typeId: Int = val.type
 
+        // 轮转分配寄存器给 Const 节点（避免所有 Const 默认到 rax 导致 clobber）。
+        val reg: String = this.constRegs[this.constRegCounter % this.constRegs.size]
+        this.constRegCounter = this.constRegCounter + 1
+
         // 字符串常量：分配 @str.N 符号，创建 LEA 指令加载地址。
         if (this.types.isString(typeId)) {
             val strName: String = "@str." + this.strConstCount
@@ -401,9 +547,9 @@ class InstructionSelector {
                 this.stringConstants = this.stringConstants + "," + constVal
             }
 
-            // 创建一个 Const DAG 节点（辅助信息为 @str.N 符号名）。
+            // 创建一个 Const DAG 节点（辅助信息为 @str.N 符号名，reg 为轮转寄存器）。
             val nodeId: Int = this.dag.addNode("Const", val.op, val.type,
-                                               "", "", "@str.N", this.curChain, strName)
+                                               reg, "", "", this.curChain, strName)
             this.registerNode(vid, nodeId)
 
             // 创建 LEA 指令加载字符串地址（pattern 63: "lea %dst, @sym"）。
@@ -419,9 +565,9 @@ class InstructionSelector {
             c = c.substring(1)
         }
 
-        // 创建一个 Const DAG 节点。
+        // 创建一个 Const DAG 节点（reg 为轮转寄存器，避免 clobber）。
         val nodeId: Int = this.dag.addNode("Const", val.op, val.type,
-                                           "", "", "", this.curChain, c)
+                                           reg, "", "", this.curChain, c)
         this.registerNode(vid, nodeId)
 
         // 创建 MOV 立即数指令（pattern 6: "mov %dst, $imm"）。
@@ -436,32 +582,17 @@ class InstructionSelector {
     ///
     /// Phi 节点的正确翻译：
     ///   - 为 Phi 节点分配一个目标寄存器
-    ///   - 对每个入边值，生成 MOV %dst(Phi), %src(incoming)
-    ///   - 实际上这些 MOV 应该放在前驱块中（本实现简化为就地生成）
+    ///   - MOV 指令由 emitPhiMovsForBlock 在前驱块末尾发射（PHI 消除）
     ///
-    /// 注意：完整的 Phi 消除需要控制流分析（将 Phi 值分配到前驱块），
-    /// 这是 S2 的工作项。当前实现生成正确的 MOV 指令，但放置位置可能不是最优。
+    /// 注意：完整的 Phi 消除需要控制流分析（将 Phi 值分配到前驱块）。
+    /// 本实现通过 analyzePhiPreds 在前驱块末尾插入 MOV phi_node, incoming_node，
+    /// emitPhi 仅注册节点，不发射 MOV。
     private fun emitPhi(val: LirValue, vid: Int): Int {
         val args: List<String> = LirUtils.splitArgs(val.args)
         val nodeId: Int = this.dag.addNode("Value", "Phi", val.type,
                                             "", "", "", this.curChain, val.args)
         this.registerNode(vid, nodeId)
-
-        if (args.size > 0) {
-            for (i in 0..(args.size - 1)) {
-                val incomingId: Int = LirUtils.strToInt(args[i])
-                if (incomingId >= 0) {
-                    val srcNode: Int = this.lookupNode(incomingId)
-                    if (srcNode >= 0) {
-                        // MOV %dst(Phi), %src(incoming)：将入边值移动到 Phi 目标寄存器。
-                        // pattern 7: "mov %dst, %src"，nodes 格式为 "dst,src"。
-                        val nodes: String = MachineDagUtils.toStr(nodeId) + "," +
-                                           MachineDagUtils.toStr(srcNode)
-                        this.dag.selectPattern(7, nodes, nodeId)
-                    }
-                }
-            }
-        }
+        // MOV 由 emitPhiMovsForBlock 在前驱块末尾发射，此处不发射。
         return nodeId
     }
 
@@ -483,15 +614,89 @@ class InstructionSelector {
         val lhsNode: Int = this.resolveNode(lhs)
         val rhsNode: Int = this.resolveNode(rhs)
 
+        // ── 字符串拼接：String + String → 调用 runtime strcat ──
+        if (val.op == "Add" && this.types.isString(val.type)) {
+            return this.emitStrcat(val, vid, lhsNode, rhsNode)
+        }
+
         // 根据 op 选择 pattern。
         val patternId: Int = this.arithPatternId(val.op)
-        val nodes: String = MachineDagUtils.toStr(rhsNode) + "," +
-                            MachineDagUtils.toStr(lhsNode)
-        this.dag.selectPattern(patternId, nodes, lhsNode)
 
-        // 结果节点使用 lhsNode（寄存器会覆盖）。
-        this.registerNode(vid, lhsNode)
-        return lhsNode
+        // **结果使用新的虚拟寄存器节点**（kind="Reg"，交给分配器着色）：
+        // 旧实现直接复用 lhsNode 的寄存器 —— 若 lhs 是常量/参数/其它活值，
+        // 会被 `add`/`sub` 就地覆写（实测 `addq %rbx,%rbx` 把字符串常量
+        // 变成整数相加并把地址翻倍）。
+        val resNode: Int = this.dag.addNode("Reg", val.op, val.type,
+                                            "", "", "", this.curChain, "")
+        this.registerNode(vid, resNode)
+
+        // mov %dst(resNode), %src(lhsNode)
+        this.dag.selectPattern(7, MachineDagUtils.toStr(lhsNode), resNode)
+
+        // 指令语义：dst = dst op src。
+        val nodes: String = MachineDagUtils.toStr(resNode) + "," +
+                            MachineDagUtils.toStr(rhsNode)
+        this.dag.selectPattern(patternId, nodes, resNode)
+
+        return resNode
+    }
+
+    /// 把源串字面量登记进字符串常量池并生成 `lea %dst, @str.N` 节点。
+    ///
+    /// `literal` 需要带引号（与 `emitConst` 的字符串分支一致，写入 .rdata 时
+    /// 由 PhotonObjectWriter 去引号）。
+    private fun emitStringConstNode(vid: Int, literal: String): Int {
+        val reg: String = this.constRegs[this.constRegCounter % this.constRegs.size]
+        this.constRegCounter = this.constRegCounter + 1
+
+        val strName: String = "@str." + this.strConstCount
+        this.strConstCount = this.strConstCount + 1
+        if (this.stringConstants == "") {
+            this.stringConstants = literal
+        } else {
+            this.stringConstants = this.stringConstants + "," + literal
+        }
+
+        val strTypeId: Int = this.types.fromTypeName("String")
+        val nodeId: Int = this.dag.addNode("Const", "ConstImm", strTypeId,
+                                           reg, "", "", this.curChain, strName)
+        this.registerNode(vid, nodeId)
+        this.dag.selectPattern(63, MachineDagUtils.toStr(nodeId), nodeId)
+        return nodeId
+    }
+
+    /// 发射字符串拼接（String + String → 调用 runtime strcat）。
+    private fun emitStrcat(val: LirValue, vid: Int, lhsNode: Int, rhsNode: Int): Int {
+        // 创建 Call 节点（被调函数 strcat）。
+        val nodeId: Int = this.dag.addNode("Value", "Call", val.type,
+                                           "", "", "", this.curChain, "strcat")
+        this.registerNode(vid, nodeId)
+
+        // 设置调用实参（lhs=rcx, rhs=rdx）。
+        val callNode: DagNode = this.dag.nodeOf(nodeId)
+        callNode.args = MachineDagUtils.toStr(lhsNode) + "," + MachineDagUtils.toStr(rhsNode)
+
+        // 选择 call 模式（pattern 50: "call %func"）。
+        this.dag.selectPattern(50, MachineDagUtils.toStr(nodeId), -1)
+        return nodeId
+    }
+
+    /// 发射参数加载（从 Windows x64 ABI 寄存器读取）。
+    ///
+    /// 参数值已在 ABI 寄存器中（rcx, rdx, r8, r9），不需要发射 MOV 指令。
+    /// 只需创建节点并将 reg 设为对应的 ABI 寄存器。
+    private fun emitParam(val: LirValue, vid: Int): Int {
+        // 确定 ABI 寄存器。
+        val abiRegs: List<String> = listOf("rcx", "rdx", "r8", "r9")
+        val idx: Int = this.paramIndex
+        this.paramIndex = this.paramIndex + 1
+        val abiReg: String = if (idx < abiRegs.size) abiRegs[idx] else "rcx"
+
+        // 创建节点：kind="Param"（分配器不处理），reg=abiReg。
+        val nodeId: Int = this.dag.addNode("Param", "Param", val.type,
+                                           abiReg, "", "", this.curChain, val.aux)
+        this.registerNode(vid, nodeId)
+        return nodeId
     }
 
     // ── 发射：内存操作 ──
@@ -583,11 +788,22 @@ class InstructionSelector {
         val lhsNode: Int = this.resolveNode(lhs)
         val rhsNode: Int = this.resolveNode(rhs)
 
-        // CMP 指令（pattern 20: "cmp %src, $imm" 或 pattern 21: "cmp %src1, %src2"）。
+        // CMP 指令（pattern 20: "cmp %src, @imm" 或 pattern 21: "cmp %src1, %src2"）。
+        //
+        // pattern 20 的 `nodes[1]` 是**立即数本身**（不是节点 id）：
+        // `X86Emitter.emitCmpImm` 直接 `strToInt(nodes[1])`。旧实现把 rhs 的
+        // 节点 id 塞进去，编出来的立即数是节点编号。
         if (this.isConstNode(rhsNode)) {
-            val cmpNodes: String = MachineDagUtils.toStr(lhsNode) + "," +
-                                   MachineDagUtils.toStr(rhsNode)
-            this.dag.selectPattern(20, cmpNodes, -1)
+            val rhsDag: DagNode = this.dag.nodeOf(rhsNode)
+            if (rhsDag.aux.startsWith("@str.")) {
+                // 字符串常量：比较指针，走寄存器形式
+                val cmpNodes: String = MachineDagUtils.toStr(lhsNode) + "," +
+                                       MachineDagUtils.toStr(rhsNode)
+                this.dag.selectPattern(21, cmpNodes, -1)
+            } else {
+                val cmpNodes: String = MachineDagUtils.toStr(lhsNode) + "," + rhsDag.aux
+                this.dag.selectPattern(20, cmpNodes, -1)
+            }
         } else {
             val cmpNodes: String = MachineDagUtils.toStr(lhsNode) + "," +
                                    MachineDagUtils.toStr(rhsNode)
@@ -634,6 +850,25 @@ class InstructionSelector {
         // funcNode 传进去，发射器于是读到该实参的 aux —— 对字符串实参就是
         // `@str.N`，会生成 `call @str.N`（即便寄存器就绪也会链到错误符号）。
         val funcName: String = val.aux
+
+        // ── 特例：`toStr(<Bool 常量>)` ──
+        //
+        // runtime 的 toStr 只认整数 → `toStr(true)` 会打印 `1`，而语言语义
+        //（以及 VM 参考实现）要求 `true`。这里直接把常量折叠成字符串常量
+        // `"true"` / `"false"`（生成 `lea %dst, @str.N`），无需改 runtime。
+        if (funcName == "toStr" && args.size >= 1) {
+            val a0: Int = LirUtils.strToInt(args[0])
+            if (a0 >= 0) {
+                val argVal: LirValue = this.lir.valueOf(a0)
+                // Lowering 把 `Const` 改写成 `ConstImm`，两种都认
+                val isConst: Boolean = argVal.op == "Const" || argVal.op == "ConstImm"
+                if (isConst && this.types.isBool(argVal.type)) {
+                    val lit: String = if (argVal.aux == "1") "\"true\"" else "\"false\""
+                    return this.emitStringConstNode(vid, lit)
+                }
+            }
+        }
+
         val nodeId: Int = this.dag.addNode("Value", "Call", val.type,
                                            "", "", "", this.curChain, funcName)
         this.registerNode(vid, nodeId)
@@ -703,6 +938,19 @@ class InstructionSelector {
     // ── 发射：CondBr ──
 
     /// 发射 CondBr（条件跳转）指令。
+    ///
+    /// 语义：`CondBr(cond, thenBlock, elseBlock)` →
+    /// ```asm
+    /// cmp cond, 0
+    /// jne thenLabel
+    /// jmp elseLabel      ; 只有 args 给了第三个块才发
+    /// ```
+    /// 块布局：SSA 里 then/body 块紧跟在当前块之后创建，因此**落到 then**、
+    /// 显式 `jmp else` 跳过 then 块才是正确的。
+    ///
+    /// 旧实现只发了一条裸 `jcc ne thenLabel`：既没有 `cmp`（标志位取自上一条
+    /// 无关指令）、也没有 else 边 —— 实测 `if/else` 两个分支都执行，
+    /// `while` 的退出块不可达（循环体后代码全被丢掉）。
     private fun emitCondBr(val: LirValue, vid: Int): Int {
         val args: List<String> = LirUtils.splitArgs(val.args)
         if (args.size >= 2) {
@@ -710,12 +958,24 @@ class InstructionSelector {
             val thenBlockId: Int = LirUtils.strToInt(args[1])
             val thenLabel: String = this.lookupLabel(thenBlockId)
 
-            // 条件跳转。
+            // cond 是 0/1（setcc + 零扩展），与 0 比较后按 ne 跳转。
             val condNode: Int = this.resolveNode(condId)
-            val nodes: String = thenLabel
-            val jccId: Int = this.dag.selectPattern(32, nodes, -1)
+            if (condNode >= 0) {
+                this.dag.selectPattern(20, MachineDagUtils.toStr(condNode) + ",0", -1)
+            }
+
+            val jccId: Int = this.dag.selectPattern(32, thenLabel, -1)
             val jccInstr: DagInstruction = this.dag.instrOf(jccId)
             jccInstr.cond = "ne"
+
+            // else / 循环退出块：紧跟其后的无条件跳转
+            if (args.size >= 3) {
+                val elseBlockId: Int = LirUtils.strToInt(args[2])
+                val elseLabel: String = this.lookupLabel(elseBlockId)
+                if (elseLabel != "") {
+                    this.dag.selectPattern(31, elseLabel, -1)
+                }
+            }
         }
         return -1
     }
@@ -763,12 +1023,16 @@ class InstructionSelector {
 
     /// 映射比较操作到条件字符串。
     private fun mapCmpOpToCond(op: String): String {
-        if (op == "SEq") { return "eq" }
-        if (op == "SNe") { return "ne" }
-        if (op == "Slt") { return "lt" }
-        if (op == "Sgt") { return "gt" }
-        if (op == "Sle") { return "le" }
-        if (op == "Sge") { return "ge" }
+        if (op == "SEq" || op == "ICmpEq" || op == "OEq" || op == "UEq") { return "eq" }
+        if (op == "SNe" || op == "ICmpNe" || op == "ONe" || op == "UNe") { return "ne" }
+        if (op == "Slt" || op == "ICmpSlt" || op == "Olt") { return "lt" }
+        if (op == "Sgt" || op == "ICmpSgt" || op == "Ogt") { return "gt" }
+        if (op == "Sle" || op == "ICmpSle" || op == "Ole") { return "le" }
+        if (op == "Sge" || op == "ICmpSge" || op == "Oge") { return "ge" }
+        if (op == "ICmpUlt" || op == "Ult") { return "ubl" }
+        if (op == "ICmpUgt" || op == "Ugt") { return "uog" }
+        if (op == "ICmpUle" || op == "Ule") { return "ule" }
+        if (op == "ICmpUge" || op == "Uge") { return "uge" }
         if (op == "Ult") { return "ubl" }
         if (op == "Ugt") { return "uog" }
         if (op == "Ule") { return "ule" }

@@ -70,6 +70,9 @@ class PhotonObjectWriter {
     /// 字符串常量列表（逗号分隔）。
     var stringConsts: String = ""
 
+    /// .data 节符号名（为空则不添加 .data 符号）。
+    var dataSymbolName: String = ""
+
     /// 函数列表（逗号分隔）。
     var functions: String = ""
 
@@ -110,6 +113,7 @@ class PhotonObjectWriter {
         this.relocs = ""
         this.symbols = ""
         this.stringConsts = ""
+        this.dataSymbolName = ""
         this.functions = ""
         this.functionOffsets = ""
         this.textOffset = 0
@@ -171,18 +175,46 @@ class PhotonObjectWriter {
             this.functionOffsets = functionName + "|0"
         } else {
             this.functions = this.functions + "," + functionName
-            this.functionOffsets = this.functionOffsets + ";" + functionName + "|" + this.toStr(funcOffset)
+            this.functionOffsets = this.functionOffsets + ";;" + functionName + "|" + this.toStr(funcOffset)
         }
 
         // 追加机器码到 textSection
         this.textSection = this.textSection + machineCodeHex
 
-        // 追加重定位项；用 `;;` 分隔函数边界，composeRelocations 会按 functionOffsets 转换。
+        // 追加重定位项：将每个条目的偏移加上 funcOffset，变为节内绝对偏移。
+        // 用 `;;` 分隔函数边界。
+        val rebasedEntries: String = this.rebaseRelocEntries(relocEntries, funcOffset)
         if (this.relocs == "") {
-            this.relocs = relocEntries
+            this.relocs = rebasedEntries
         } else {
-            this.relocs = this.relocs + ";;" + relocEntries
+            this.relocs = this.relocs + ";;" + rebasedEntries
         }
+    }
+
+    /// 将重定位条目中的偏移加上基准偏移，变为节内绝对偏移。
+    ///
+    /// 条目格式：`offset|symbol|type`，以 `;` 分隔多个条目。
+    private fun rebaseRelocEntries(entries: String, baseOffset: Int): String {
+        if (entries == "") {
+            return ""
+        }
+        val parts: List<String> = this.splitSemi(entries)
+        var out: String = ""
+        var i: Int = 0
+        while (i < parts.size) {
+            if (parts[i] != "") {
+                if (i > 0) { out = out + ";" }
+                val fields: List<String> = this.splitPipe(parts[i])
+                if (fields.size >= 3) {
+                    val newOffset: Int = this.strToInt(fields[0]) + baseOffset
+                    out = out + this.toStr(newOffset) + "|" + fields[1] + "|" + fields[2]
+                } else {
+                    out = out + parts[i]
+                }
+            }
+            i = i + 1
+        }
+        return out
     }
 
     // ── 符号表构建 ──
@@ -241,6 +273,41 @@ class PhotonObjectWriter {
             i = i + 1
         }
 
+        // 2b) .data 节符号：值为节内偏移，section 按实际节顺序计算。
+        //     有 .rdata 时 .data 为第 3 节，否则为第 2 节。
+        //
+        //     `dataSymbolName` 支持逗号分隔的多个条目，形如 `name` 或 `name:size`
+        //    （如 "toStrBuffer:32,strcatBuffer:128"）。偏移按声明顺序累加，
+        //     未写 size 时默认 8 字节。
+        //
+        //     ⚠ 旧实现固定「第 i 个名字 → 偏移 8*i」，于是 toStrBuffer 与
+        //     strcatBuffer 各只有 8 字节并互相重叠 —— toStr 写 32 字节就会
+        //     踩坏相邻缓冲区。
+        if (this.dataSymbolName != "" && this.dataSection != "") {
+            var dataSecNum: Int = 2
+            if (this.stringConsts != "") {
+                dataSecNum = 3
+            }
+            val dparts: List<String> = this.splitComma(this.dataSymbolName)
+            var dataOff: Int = 0
+            var di: Int = 0
+            while (di < dparts.size) {
+                val spec: String = dparts[di]
+                if (spec != "") {
+                    var nm: String = spec
+                    var sz: Int = 8
+                    val colon: Int = spec.indexOf(":")
+                    if (colon > 0) {
+                        nm = spec.substring(0, colon)
+                        sz = this.strToInt(spec.substring(colon + 1))
+                    }
+                    recs.add(nm + "|" + this.toStr(dataOff) + "|" + this.toStr(dataSecNum) + "|0|2")
+                    dataOff = dataOff + sz
+                }
+                di = di + 1
+            }
+        }
+
         // 3) 重定位引用的外部符号（section = 0 表示未定义，由链接器解析）
         val externals: List<String> = this.collectExternalSymbols()
         var j: Int = 0
@@ -269,23 +336,38 @@ class PhotonObjectWriter {
         if (text == "") {
             return out
         }
-        val bySemi: List<String> = this.splitDoubleSemi(text)
-        if (bySemi.size > 1) {
-            var i: Int = 0
-            while (i < bySemi.size) {
-                if (bySemi[i] != "") {
-                    out.add(bySemi[i])
-                }
-                i = i + 1
+        // 紧凑形式：多条记录以 `|` 直连、整串无 `;`/`;;`
+        // （`X86Emitter.joinRelocRecords` 的输出，见 X86Emitter.aura:452）。
+        // 必须先判空再走 `;;`/`;` 分支，否则整串会被当作**单条** 6+ 字段记录，
+        // 除首条外的所有重定位（典型如 `main` 里 `call println` 的 REL32）
+        // 会连带其外部符号一起丢失，链接器便无 relocation 可回填。
+        // 判据：无 `;` 时 `splitSemi` 只返回 1 个元素。
+        if (this.splitSemi(text).size <= 1) {
+            val fields: List<String> = this.splitPipe(text)
+            var k: Int = 0
+            while (k + 2 < fields.size) {
+                out.add(fields[k] + "|" + fields[k + 1] + "|" + fields[k + 2])
+                k = k + 3
             }
             return out
         }
-        // 无 `;;` 分隔符：按 `|` 每 3 个字段重组一条记录
-        val fields: List<String> = this.splitPipe(text)
-        var k: Int = 0
-        while (k + 2 < fields.size) {
-            out.add(fields[k] + "|" + fields[k + 1] + "|" + fields[k + 2])
-            k = k + 3
+        // 分组形式：先按 `;;` 分隔函数组，再按 `;` 分隔组内条目
+        val byDoubleSemi: List<String> = this.splitDoubleSemi(text)
+        var gi: Int = 0
+        while (gi < byDoubleSemi.size) {
+            val group: String = byDoubleSemi[gi]
+            if (group != "") {
+                // 按 `;` 分隔组内的条目
+                val bySemi: List<String> = this.splitSemi(group)
+                var si: Int = 0
+                while (si < bySemi.size) {
+                    if (bySemi[si] != "") {
+                        out.add(bySemi[si])
+                    }
+                    si = si + 1
+                }
+            }
+            gi = gi + 1
         }
         return out
     }
@@ -308,10 +390,20 @@ class PhotonObjectWriter {
         return out
     }
 
-    /// 判断符号是否由本模块定义（函数名，或 `@str.N` 形式的字符串常量）。
+    /// 判断符号是否由本模块定义（函数名，或 `@str.N` 形式的字符串常量，或 .data 符号）。
     private fun isDefinedSymbol(name: String): Boolean {
         if (this.hasPrefix(name, "@str.")) {
             return true
+        }
+        if (this.dataSymbolName != "") {
+            val dnames: List<String> = this.splitComma(this.dataSymbolName)
+            var dn: Int = 0
+            while (dn < dnames.size) {
+                if (dnames[dn] != "" && dnames[dn] == name) {
+                    return true
+                }
+                dn = dn + 1
+            }
         }
         val funcs: List<String> = this.splitComma(this.functions)
         var i: Int = 0
@@ -326,28 +418,34 @@ class PhotonObjectWriter {
 
     /// 组成重定位记录（`offset|symbolIndex|coffType`），解析符号名到符号表索引。
     ///
-    /// 原实现把符号名直接当十进制数解析（`strToInt("@str.0")` = 0），
-    /// 导致所有重定位都指向符号 0（main），链接器无法正确定位目标。
-    ///
-    /// S2 多函数单 obj：`appendFunction()` 传入的 offset 是该函数内的相对偏移，
-    /// 这里按函数顺序累加，换算为 .text 节内绝对偏移。
+    /// 重定位偏移已在 `appendFunction` 中按函数基准换算为节内绝对偏移，
+    /// 此处仅需解析符号名到符号表索引。
     private fun composeRelocations(): List<String> {
         val out: List<String> = arrayListOf<String>()
-        val entries: List<String> = this.parseRelocEntries(this.relocs)
         val symRecs: List<String> = this.splitDoubleSemi(this.symbols)
-        val offsetParts: List<String> = this.splitDoubleSemi(this.functionOffsets)
-        var i: Int = 0
-        while (i < entries.size) {
-            val fields: List<String> = this.splitPipe(entries[i])
-            if (fields.size >= 3) {
-                val idx: Int = this.symbolIndexOf(symRecs, fields[1])
-                if (idx >= 0) {
-                    val localOffset: Int = this.strToInt(fields[0])
-                    val absoluteOffset: Int = this.textOffsetForEntryIndex(i, offsetParts) + localOffset
-                    out.add(this.toStr(absoluteOffset) + "|" + this.toStr(idx) + "|" + this.toStr(this.coffRelocType(fields[2])))
+
+        // 按 `;;` 分隔函数组，每个组内的条目属于同一个函数
+        val groups: List<String> = this.splitDoubleSemi(this.relocs)
+        var fi: Int = 0
+        while (fi < groups.size) {
+            val group: String = groups[fi]
+            if (group != "") {
+                // 解析该组内的重定位条目
+                val entries: List<String> = this.parseRelocEntries(group)
+                var i: Int = 0
+                while (i < entries.size) {
+                    val fields: List<String> = this.splitPipe(entries[i])
+                    if (fields.size >= 3) {
+                        val idx: Int = this.symbolIndexOf(symRecs, fields[1])
+                        if (idx >= 0) {
+                            val absoluteOffset: Int = this.strToInt(fields[0])
+                            out.add(this.toStr(absoluteOffset) + "|" + this.toStr(idx) + "|" + this.toStr(this.coffRelocType(fields[2])))
+                        }
+                    }
+                    i = i + 1
                 }
             }
-            i = i + 1
+            fi = fi + 1
         }
         return out
     }
@@ -460,11 +558,16 @@ class PhotonObjectWriter {
         this.textSize = this.hexByteCount(this.textSection)
         this.rdataSection = this.stringConstsToHex(this.stringConsts)
         this.rdataSize = this.hexByteCount(this.rdataSection)
+        this.dataSection = this.normalizeHex(this.dataSection)
+        this.dataSize = this.hexByteCount(this.dataSection)
 
         // ── 2. 计数 ──
         this.coffSectionCount = 1
         if (this.rdataSize > 0) {
             this.coffSectionCount = 2
+        }
+        if (this.dataSize > 0) {
+            this.coffSectionCount = this.coffSectionCount + 1
         }
         val symRecs: List<String> = this.splitDoubleSemi(this.symbols)
         this.coffSymCount = symRecs.size
@@ -492,11 +595,14 @@ class PhotonObjectWriter {
         val textRawEnd: Int = textRawOffset + this.textSize
         val rdataRawOffset: Int = this.alignUp(textRawEnd, 4)
         val rdataRawEnd: Int = rdataRawOffset + this.rdataSize
-        this.coffRelocOffset = this.alignUp(rdataRawEnd, 4)
+        val dataRawOffset: Int = this.alignUp(rdataRawEnd, 4)
+        val dataRawEnd: Int = dataRawOffset + this.dataSize
+        this.coffRelocOffset = this.alignUp(dataRawEnd, 4)
         this.coffSymTabOffset = this.coffRelocOffset + 10 * this.coffRelocCount
 
         this.textOffset = textRawOffset
         this.rdataOffset = rdataRawOffset
+        this.dataOffset = dataRawOffset
 
         // ── 5. 构建缓冲区 ──
         var buf: String = ""
@@ -507,6 +613,10 @@ class PhotonObjectWriter {
         if (this.rdataSize > 0) {
             buf = buf + this.padToBytes(buf, rdataRawOffset)
             buf = buf + this.rdataSection
+        }
+        if (this.dataSize > 0) {
+            buf = buf + this.padToBytes(buf, dataRawOffset)
+            buf = buf + this.dataSection
         }
         buf = this.buildRelocationTable(buf)
         buf = this.buildSymbolTable(buf)
@@ -551,6 +661,18 @@ class PhotonObjectWriter {
             buf = buf + this.writeIntLe(0, 2)
             buf = buf + this.writeIntLe(0, 2)
             buf = buf + this.writeIntLe(0x40300040, 4) // CNT_INITIALIZED_DATA|MEM_READ|ALIGN_4
+        }
+        if (this.dataSize > 0) {
+            buf = buf + this.padSectionName(".data", 8)
+            buf = buf + this.writeIntLe(0, 4)
+            buf = buf + this.writeIntLe(0, 4)
+            buf = buf + this.writeIntLe(this.dataSize, 4)
+            buf = buf + this.writeIntLe(this.dataOffset, 4)
+            buf = buf + this.writeIntLe(0, 4)          // 无重定位
+            buf = buf + this.writeIntLe(0, 4)
+            buf = buf + this.writeIntLe(0, 2)
+            buf = buf + this.writeIntLe(0, 2)
+            buf = buf + this.writeIntLe(0xC0300040, 4) // CNT_INITIALIZED_DATA|MEM_READ|MEM_WRITE|ALIGN_4
         }
         return buf
     }
@@ -915,6 +1037,28 @@ class PhotonObjectWriter {
             if (this.isDoubleSemi(text, i)) {
                 result.add(this.sliceOf(text, start, i))
                 start = i + 2
+            }
+            i = i + 1
+        }
+        if (start < len) {
+            result.add(this.sliceOf(text, start, len))
+        }
+        return result
+    }
+
+    /// 按 `;` 分割（用于单个函数内的重定位条目）。
+    private fun splitSemi(text: String): List<String> {
+        val result: List<String> = arrayListOf<String>()
+        if (text == "") {
+            return result
+        }
+        var start: Int = 0
+        var i: Int = 0
+        var len: Int = text.length
+        while (i < len) {
+            if (this.chEq(text, i, ";")) {
+                result.add(this.sliceOf(text, start, i))
+                start = i + 1
             }
             i = i + 1
         }
@@ -1512,7 +1656,7 @@ object PhotonObjectWriterUtils {
         var out: String = ""
         var i: Int = 0
         while (i < relocs.size) {
-            if (i > 0) { out = out + ";;" }
+            if (i > 0) { out = out + ";" }
             out = out + relocs[i]
             i = i + 1
         }

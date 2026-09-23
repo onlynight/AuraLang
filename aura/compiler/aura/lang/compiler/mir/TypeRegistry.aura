@@ -218,18 +218,37 @@ class TypeRegistry {
     }
 
     /// 是否为整数类型。
+    ///
+    /// 除内部 `Int` 类型（`intType(width)`）外，还要认**按名字**注册的整型
+    ///（`fromTypeName("Int")` / `"Long"` …）。`.phir` 里的类型都是名字形式，
+    /// 不认它们会让 `buildLit` / 零值初始化退化成「非整数」分支。
     fun isInt(id: Int): Boolean {
-        return this.kindOf(id) == "Int"
+        val k: String = this.kindOf(id)
+        if (k == "Int") { return true }
+        if (k != "Basic") { return false }
+        val n: String = this.nameOf(id)
+        return n == "Int" || n == "Long" || n == "Short" || n == "Byte"
+            || n == "Int8" || n == "Int16" || n == "Int32" || n == "Int64"
+            || n == "UInt" || n == "UByte" || n == "UShort" || n == "ULong"
     }
 
     /// 是否为浮点类型。
     fun isFloat(id: Int): Boolean {
-        return this.kindOf(id) == "Float"
+        val k: String = this.kindOf(id)
+        if (k == "Float") { return true }
+        if (k != "Basic") { return false }
+        val n: String = this.nameOf(id)
+        return n == "Float" || n == "Double" || n == "Float32" || n == "Float64"
     }
 
-    /// 是否为布尔类型。
+    /// 是否为布尔类型（`Bool` 与 Aura 源码里的 `Boolean` 都算）。
     fun isBool(id: Int): Boolean {
-        return this.kindOf(id) == "Basic" && this.nameOf(id) == "Bool"
+        val k: String = this.kindOf(id)
+        if (k == "Basic") {
+            val n: String = this.nameOf(id)
+            return n == "Bool" || n == "Boolean" || n == "bool"
+        }
+        return k == "Bool" || k == "Boolean"
     }
 
     /// 是否为字符串类型。

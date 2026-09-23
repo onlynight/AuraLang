@@ -375,39 +375,70 @@ class SsaBuilder {
     /// 找出两个 varMap 快照之间新增/修改的变量。
     /// 返回变量名列表。
     private fun findChangedVars(before: String, after: String): List<String> {
-        val result: List<String> = arrayListOf<String>()
+        // ⚠️ 不能用 arrayListOf + add（VM bug：add 后 get 返回 null）。
+        // 用逗号分隔的扁平字符串收集结果，最后再 split。
         if (before == after) {
-            return result
+            return emptyList()
         }
-        // 简单实现：比较字符串差异，找出新增的变量名
+        var resultStr: String = ""
         // 格式：name|vid\nname|vid\n...
         val beforeLines: List<String> = this.splitStr(before, "\n")
         val afterLines: List<String> = this.splitStr(after, "\n")
 
-        // 找出 after 中有但 before 中没有的变量
-        var i: Int = 0
-        while (i < afterLines.size) {
+        // 从 after 末尾向前搜索（最新版本优先）
+        var i: Int = afterLines.size - 1
+        while (i >= 0) {
             val afterLine: String = afterLines.get(i)
-            if (afterLine == "") { i = i + 1; continue }
+            if (afterLine == "") { i = i - 1; continue }
             val parts: List<String> = this.splitStr(afterLine, "|")
-            if (parts.size < 2) { i = i + 1; continue }
+            if (parts.size < 2) { i = i - 1; continue }
             val name: String = parts[0]
-            // 检查 before 中是否有这个变量
-            var found: Boolean = false
-            var j: Int = 0
-            while (j < beforeLines.size) {
+            val afterVid: Int = this.strToInt(parts[1])
+            // 检查是否已记录过
+            if (this.containsInFlat(resultStr, name)) { i = i - 1; continue }
+            // 在 before 中查找同名变量的最新 vid
+            var beforeVid: Int = -1
+            var j: Int = beforeLines.size - 1
+            while (j >= 0) {
                 if (beforeLines[j] != "") {
                     val bParts: List<String> = this.splitStr(beforeLines[j], "|")
-                    if (bParts.size >= 1 && bParts[0] == name) {
-                        found = true
+                    if (bParts.size >= 2 && bParts[0] == name) {
+                        beforeVid = this.strToInt(bParts[1])
                         break
                     }
                 }
-                j = j + 1
+                j = j - 1
             }
-            if (!found) {
-                result.add(name)
+            // 新变量（before 中没有）或值发生了变化
+            if (beforeVid < 0 || beforeVid != afterVid) {
+                resultStr = resultStr + name + ","
             }
+            i = i - 1
+        }
+        // 去掉末尾逗号后拆分
+        if (resultStr == "") { return emptyList() }
+        val trimmed: String = this.substring(resultStr, 0, resultStr.length - 1)
+        return trimmed.split(",")
+    }
+
+    /// 检查扁平字符串（逗号分隔）中是否包含指定名称。
+    private fun containsInFlat(flat: String, name: String): Boolean {
+        if (flat == "") { return false }
+        val parts: List<String> = flat.split(",")
+        var i: Int = 0
+        while (i < parts.size) {
+            if (parts[i] == name) { return true }
+            i = i + 1
+        }
+        return false
+    }
+
+    /// 字符串截取（避免依赖不可靠的 substring 实现）。
+    private fun substring(s: String, start: Int, end: Int): String {
+        var result: String = ""
+        var i: Int = start
+        while (i < end && i < s.length) {
+            result = result + s.charAt(i).toString()
             i = i + 1
         }
         return result
@@ -415,17 +446,17 @@ class SsaBuilder {
 
     /// 在 varMap 中查找变量的 ValueID。
     private fun lookupVar(before: String, name: String, after: String): Int {
-        // 先查 after（新定义的值）
+        // 先查 after（新定义的值），从末尾向前搜索以获取最新版本
         val afterLines: List<String> = this.splitStr(after, "\n")
-        var i: Int = 0
-        while (i < afterLines.size) {
+        var i: Int = afterLines.size - 1
+        while (i >= 0) {
             val line: String = afterLines.get(i)
-            if (line == "") { i = i + 1; continue }
+            if (line == "") { i = i - 1; continue }
             val parts: List<String> = this.splitStr(line, "|")
             if (parts.size >= 2 && parts[0] == name) {
                 return this.strToInt(parts[1])
             }
-            i = i + 1
+            i = i - 1
         }
         return -1
     }
@@ -435,28 +466,67 @@ class SsaBuilder {
     /// 比较块前状态和块后状态，为两状态都定义的变量插入 Phi。
     /// 用于 while 循环的回边 Phi 插入。
     private fun insertPhisAtBlock(blockId: Int, before: String,
-                                    after: String, exitState: String): Unit {
-        // 找出 after 中新增/修改的变量（相对于 before）
-        val afterDefs: List<String> = this.findChangedVars(before, after)
+                                    after: String, exitState: String): String {
+        // 用逗号分隔的扁平字符串收集变更变量名（不能用 arrayListOf+add，VM bug）
+        val afterDefsStr: String = this.findChangedVarsStr(before, after)
+        if (afterDefsStr == "") { return this.varMap }
 
-        // 对 after 中定义的变量，检查是否在 before 中也定义
+        val afterDefs: List<String> = afterDefsStr.split(",")
+        var newVarMap: String = this.varMap
         var i: Int = 0
         while (i < afterDefs.size) {
             val varName: String = afterDefs.get(i)
-            // 检查 before 是否也有这个变量（即循环前的值）
             val beforeVid: Int = this.lookupVar("", varName, before)
             if (beforeVid >= 0) {
-                // 获取 after 中的 ValueID
                 val afterVid: Int = this.lookupVar("", varName, after)
                 if (afterVid >= 0) {
-                    // 插入 Phi 节点
-                    val typeId: Int = 0  // 默认 Int 类型
+                    val typeId: Int = 0
                     val incoming: String = toStr(beforeVid) + "," + toStr(afterVid)
-                    this.makePhi(blockId, typeId, incoming, "")
+                    val phiVid: Int = this.makePhi(blockId, typeId, incoming, "")
+                    // 更新 varMap 指向 Phi 节点（追加新版本）
+                    newVarMap = newVarMap + varName + "|" + toStr(phiVid) + "\n"
                 }
             }
             i = i + 1
         }
+        return newVarMap
+    }
+
+    /// 找出两个 varMap 快照之间新增/值变化的变量名，返回逗号分隔字符串。
+    private fun findChangedVarsStr(before: String, after: String): String {
+        if (before == after) { return "" }
+        var resultStr: String = ""
+        val beforeLines: List<String> = this.splitStr(before, "\n")
+        val afterLines: List<String> = this.splitStr(after, "\n")
+
+        var i: Int = afterLines.size - 1
+        while (i >= 0) {
+            val afterLine: String = afterLines.get(i)
+            if (afterLine == "") { i = i - 1; continue }
+            val parts: List<String> = this.splitStr(afterLine, "|")
+            if (parts.size < 2) { i = i - 1; continue }
+            val name: String = parts[0]
+            val afterVid: Int = this.strToInt(parts[1])
+            if (this.containsInFlat(resultStr, name)) { i = i - 1; continue }
+            var beforeVid: Int = -1
+            var j: Int = beforeLines.size - 1
+            while (j >= 0) {
+                if (beforeLines[j] != "") {
+                    val bParts: List<String> = this.splitStr(beforeLines[j], "|")
+                    if (bParts.size >= 2 && bParts[0] == name) {
+                        beforeVid = this.strToInt(bParts[1])
+                        break
+                    }
+                }
+                j = j - 1
+            }
+            if (beforeVid < 0 || beforeVid != afterVid) {
+                resultStr = resultStr + name + ","
+            }
+            i = i - 1
+        }
+        if (resultStr == "") { return "" }
+        return this.substring(resultStr, 0, resultStr.length - 1)
     }
 
     /// 构建 while 语句。
@@ -477,22 +547,22 @@ class SsaBuilder {
         // 保存 varMap 快照（循环前的状态）
         val varMapBefore: String = this.varMap
 
-        // 创建条件块（当前块）、循环体块、结束块
-        val condBlock: Int = this.curBlock
+        // 保存当前块（入口块），创建新的条件块
+        val entryBlock: Int = this.curBlock
+        val condBlock: Int = this.program.addBlock()
         val bodyBlock: Int = this.program.addBlock()
         val endBlock: Int = this.program.addBlock()
 
         // 将结束块推入循环栈
         this.loopStackPush(endBlock)
 
-        // 降级条件
-        val condVal: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, 0))
+        // 入口块跳转到条件块（如果尚未设置终结指令）
+        val entryBlockObj: MirBlock = this.program.blockOf(entryBlock)
+        if (entryBlockObj.term < 0) {
+            this.program.setTerminator(entryBlock, "Br", 0, toStr(condBlock), "")
+        }
 
-        // 设置条件块的终结指令
-        this.program.setTerminator(condBlock, "CondBr", 0,
-            toStr(condVal) + "," + toStr(bodyBlock) + "," + toStr(endBlock), "")
-
-        // 构建循环体
+        // 先构建循环体（使用循环前的值），以便知道哪些变量被修改
         this.curBlock = bodyBlock
         this.buildBlock(src, HirUtils.hirKidsAt(kids, 1))
 
@@ -505,9 +575,18 @@ class SsaBuilder {
         // 保存循环体中定义的变量
         val varMapAfterBody: String = this.varMap
 
-        // 在 cond 块插入 Phi 节点（for variables defined in body and before loop）
-        // 注意：Phi 节点插入到 cond 块，用于循环回边
-        this.insertPhisAtBlock(condBlock, varMapBefore, varMapAfterBody, varMapBefore)
+        // 在 cond 块插入 Phi 节点并更新 varMap
+        this.varMap = this.insertPhisAtBlock(condBlock, varMapBefore, varMapAfterBody, varMapBefore)
+
+        // 切换到条件块，使用更新后的 varMap（包含 Phi 节点）
+        this.curBlock = condBlock
+
+        // 降级条件（现在使用 Phi 节点作为变量值）
+        val condVal: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, 0))
+
+        // 设置条件块的终结指令
+        this.program.setTerminator(condBlock, "CondBr", 0,
+            toStr(condVal) + "," + toStr(bodyBlock) + "," + toStr(endBlock), "")
 
         // 将结束块弹出循环栈
         this.loopStackPop()
@@ -550,11 +629,11 @@ class SsaBuilder {
     fun buildAssign(src: Hir, id: Int) {
         val kids: String = src.kidsOf(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
-        if (kCount < 2) {
+        if (kCount < 1) {
             return
         }
         val varName: String = src.textOf(id)
-        val val: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, 1))
+        val val: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, 0))
 
         // Phase A S2: 内存链 — 赋值是内存写入操作
         if (this.memHead >= 0) {
@@ -894,8 +973,9 @@ class SsaBuilder {
     /// 遍历所有 `name|vid\n` 行，按 `|` 拆分后匹配名称。
     private fun varMapLookup(name: String): Int {
         val lines: List<String> = MirUtils.mirSplit(this.varMap, "\n")
-        var i: Int = 0
-        while (i < lines.size) {
+        // 从末尾向前搜索：最后一次赋值（最新版本）优先
+        var i: Int = lines.size - 1
+        while (i >= 0) {
             val line: String = lines.get(i)
             if (line != "" && line.contains("|")) {
                 val parts: List<String> = MirUtils.mirSplit(line, "|")
@@ -903,7 +983,7 @@ class SsaBuilder {
                     return strToInt(parts[1])
                 }
             }
-            i = i + 1
+            i = i - 1
         }
         // 未找到：返回 0 值常量
         return this.program.addValue("Const", this.types.intType(64), "", "0", this.curBlock)
@@ -1045,20 +1125,9 @@ class SsaBuilder {
 
     /// 按单字符分隔符分割字符串（VM 不支持 String.split）。
     private fun splitStr(text: String, sep: String): List<String> {
-        val out: List<String> = arrayListOf<String>()
-        if (text == "") { return out }
-        val len: Int = text.length
-        var start: Int = 0
-        var i: Int = 0
-        while (i < len) {
-            if (text.charCodeAt(i) == sep.charCodeAt(0)) {
-                out.add(text.substring(start, i))
-                start = i + 1
-            }
-            i = i + 1
-        }
-        out.add(text.substring(start, len))
-        return out
+        // 见 MirUtils.mirSplit 的说明：`arrayListOf + add` 在本 VM 下会丢元素。
+        if (text == "" || sep == "") { return emptyList() }
+        return text.split(sep)
     }
 }
 

@@ -1,0 +1,7 @@
+import aura.lang.std.String
+
+fun main() {
+    var x: Int = 42
+    println("x = " + toStr(x))
+    println("lit = " + toStr(7))
+}

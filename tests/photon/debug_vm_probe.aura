@@ -1,0 +1,50 @@
+// 调试：验证 VM 下 (1) 嵌套 if 内赋值 (2) List<Boolean> 行为
+fun nestedAssign(x: Int): Int {
+    var flag: Int = 0
+    if (x > 0) {
+        if (x > 5) {
+            flag = 1
+        } else {
+            flag = 2
+        }
+    } else {
+        flag = 3
+    }
+    return flag
+}
+
+fun boolList(): String {
+    val b: List<Boolean> = arrayListOf<Boolean>()
+    b.add(true)
+    b.add(false)
+    b.add(true)
+    var out: String = ""
+    var i: Int = 0
+    while (i < b.size) {
+        if (b.get(i)) { out = out + "1" } else { out = out + "0" }
+        i = i + 1
+    }
+    return out
+}
+
+fun strList(): String {
+    val b: List<String> = arrayListOf<String>()
+    b.add("1")
+    b.add("0")
+    b.add("1")
+    var out: String = ""
+    var i: Int = 0
+    while (i < b.size) {
+        if (b.get(i) == "1") { out = out + "1" } else { out = out + "0" }
+        i = i + 1
+    }
+    return out
+}
+
+fun main() {
+    println("nestedAssign(7)=" + toStr(nestedAssign(7)) + " (expect 1)")
+    println("nestedAssign(3)=" + toStr(nestedAssign(3)) + " (expect 2)")
+    println("nestedAssign(-1)=" + toStr(nestedAssign(-1)) + " (expect 3)")
+    println("boolList=" + boolList() + " (expect 101)")
+    println("strList=" + strList() + " (expect 101)")
+}

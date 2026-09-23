@@ -1,0 +1,67 @@
+// 调试：验证 .phir 表达式扫描逻辑在 VM 下的行为
+fun isDigitChar(ch: String): Boolean {
+    if (ch.length != 1) { return false }
+    val c: Int = ch.charCodeAt(0)
+    return c >= 48 && c <= 57
+}
+
+fun findTopOp(text: String, ops: List<String>): List<String> {
+    val n: Int = text.length
+    val masked: List<Boolean> = arrayListOf<Boolean>()
+    var depth: Int = 0
+    var inStr: Boolean = false
+    var esc: Boolean = false
+    var i: Int = 0
+    while (i < n) {
+        val c: Int = text.charCodeAt(i)
+        var m: Boolean = false
+        if (inStr) {
+            if (esc) { esc = false }
+            else if (c == 92) { esc = true }
+            else if (c == 34) { inStr = false }
+        } else {
+            if (c == 34) { inStr = true }
+            else if (c == 40 || c == 91) { depth = depth + 1 }
+            else if (c == 41 || c == 93) { depth = depth - 1 }
+            else if (depth == 0) { m = true }
+        }
+        masked.add(m)
+        i = i + 1
+    }
+    println("  masked.size=" + masked.size + " n=" + n)
+    var dump: String = ""
+    var di: Int = 0
+    while (di < masked.size) {
+        if (masked.get(di)) { dump = dump + "1" } else { dump = dump + "0" }
+        di = di + 1
+    }
+    println("  mask=" + dump)
+
+    var pos: Int = n - 1
+    while (pos >= 1) {
+        if (masked.get(pos)) {
+            var oi: Int = 0
+            while (oi < ops.size) {
+                val op: String = ops.get(oi)
+                if (pos + op.length <= n && text.substring(pos, pos + op.length) == op) {
+                    return listOf(op, "" + pos)
+                }
+                oi = oi + 1
+            }
+        }
+        pos = pos - 1
+    }
+    return listOf("", "-1")
+}
+
+fun main() {
+    println("case1:");
+    val r1: List<String> = findTopOp("self == null", listOf("==", "!="))
+    println("  => op=[" + r1.get(0) + "] pos=" + r1.get(1))
+    println("case2:");
+    val r2: List<String> = findTopOp("self == null", listOf("||"))
+    println("  => op=[" + r2.get(0) + "] pos=" + r2.get(1))
+    println("case3:");
+    val r3: List<String> = findTopOp("\"while i = \" + toStr(i)", listOf("+", "-"))
+    println("  => op=[" + r3.get(0) + "] pos=" + r3.get(1))
+}
