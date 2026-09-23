@@ -361,9 +361,9 @@ HIR 序列化应采用 **Photon IR** 标准格式（详见 `photon-ir-format-spe
 | **Photon CLI 导入** | ✅ 已修复 | 包导入 `aura.lang.cli.X` 改相对 `import "X.aura"`；`Args.get` 改手写 substring 切分 |
 | **bootstrap-photon.ps1** | 🟡 部分 | 5 步全部改为真实执行（原为空壳）；Step 1/5 通过；Step 3/4 受限于单文件管线 |
 | **自举验证 (P1 Step 4c)** | ❌ 未达成 | 多文件编译器工程超出单文件 Photon 管线能力 |
-| **零外部依赖 (P2)** | 🟡 进行中 | `SyscallEmitter.aura` 原为死代码（无人 import）；已委派 Nt* syscall 运行时重写 |
+| **零外部依赖 (P2)** | ✅ 已验证 | 产物 exe **无导入表**（`llvm-readobj --coff-imports` 为空）；`println`/`print` 走 `NtWriteFile` syscall、`exit` 走 `NtTerminateProcess`；`linker.useDefaultLibs=false`、`linker.libs=""`。详见 §10.4.3 |
 | **CLI 自举化 (P3)** | 🟡 部分 | 源码导入已修复；AOT 编译 `Main.aura` 触发 llc `use of undefined value '%a0'` codegen bug |
-| **x86_64 Windows syscall 表** | 🔴 数值错误 | `Syscalls.aura` 用连续 0x00/0x01/0x02... 编号，与真实 NT syscall ID 不符（`NtWriteFile` 应为 `0x15` 而非 `0x00`） |
+| **x86_64 Windows syscall 表** | ✅ Photon 路径不依赖 | `Syscalls.aura` 的编号已部分校正（`NtAllocateVirtualMemory=0x18`、`NtReadFile=0x03`、`NtClose=0x0B`）；Photon 路径**不 import 该表**，`PhotonRuntime` 用在本机 ntdll 实测过的字面量（`NtWriteFile=0x08`、`NtTerminateProcess=0x2C`），运行结果已验证 |
 
 ## 8. 总结
 
@@ -550,8 +550,11 @@ PHI 节点的 MOV 指令生成在 PHI 所在块（条件块），但应放在前
 
 ```
 scripts\photon-suite.ps1 -Phase P1   → PASS=5 FAIL=0     （exit code 全为 0）
-scripts\photon-suite.ps1 -Phase P2   → PASS=2 FAIL=2     （01/02 通过；03/04 见 §10.4）
+scripts\photon-suite.ps1 -Phase P2   → PASS=4 FAIL=0     （含数组/列表端到端，见 §10.4.2）
+scripts\photon-suite.ps1 -Phase P3   → PASS=6 FAIL=0     （syscall/Nt* 用例）
 scripts\photon-try.ps1               → 单文件编译/运行（30s 超时保护，超时杀进程树）
+tests\photon\S1\01_x86_encoder.aura  → PASS: 8/8
+aura build --aot tests\photon\simple.aura → exit 42
 ```
 
 P1 bootstrap 的**可独立验证项**：
@@ -592,29 +595,121 @@ P1 bootstrap 的**可独立验证项**：
 | stdlib 名映射 | `String.length`→`strlen`、`Any.toString`→`toString`、`Any.equals`→`streq`（否则链接报 `undefined symbol: String.length`） |
 | `strcat` 别名安全 | s2 先按已知长度拷到栈 scratch（128B，`emitLeaStack`），再写结果缓冲区；复制改为定长计数循环 |
 
-### 10.4 P2 剩余阻塞（已定位，未完成）
+### 10.4 P2 差分测试：3/4
 
-| 测试 | 阻塞点 | 需要的特性 |
-|------|--------|-----------|
-| `P2/03_array_ops` | 链接缺失 `aura.lang.std.Collections.set`；数组字面量/索引读写没有 codegen 路径。注意 VM 参考输出本身就是退化的（`arr[0] = null`、`sum = 0.0`），即**语言层**数组支持同样缺失 | 堆分配 + Load/Store + Gep（属设计文档 P2「Arena 分配器」范围） |
-| `P2/04_string_ops` | `s3` 指向 `strcatBuffer` 静态缓冲区，后续 `"s3 = " + s3` 会覆写它 → `s3.length()` 得到 16（缓冲区已被改写）而不是 11，随之判等失败 | 「拼接结果不可变」：需要 bump 分配器（每次拼接返回新地址）或按调用点分配缓冲区 |
+| 测试 | 状态 | 说明 |
+|------|------|------|
+| `P2/01_nested_loop` | ✅ | 嵌套循环累加 = 100（回边感知活跃区间，见 B8） |
+| `P2/02_fibonacci` | ✅ | 递归 55 / 迭代 55（PHI 前驱边块修正，见 B9） |
+| `P2/03_array_ops` | ✅ | `arr[0] = 1` / `arr[4] = 5` / `arr[2] = 99` / `sum = 111` —— 前端数组字面量 + 堆列表 runtime（见 §10.4.2） |
+| `P2/04_string_ops` | ✅ | `s3 = Hello World`、`len = 11`、`Match!` —— 字符串 arena（见 §10.4.1） |
+
+#### 10.4.1 字符串 arena（修复 04）
+
+旧 `strcat` 把结果写进**唯一的**静态缓冲区 `strcatBuffer`，于是：
+
+1. 链式拼接时源与目标别名（`"B: " + s3` 中 s3 就是该缓冲区）→ 边读边写、
+   源永无 NUL → 写越界（访问违例，退出码 `-1073741819`）；
+2. 即使不崩溃，`s3` 也会被下一次拼接覆写 → `s3.length()` 得到 16（"s3 = Hello World"）
+   而不是 11，`s3 == "Hello World"` 随之失败。
+
+现改为 **bump 分配 arena**（`heapArena:16384` + 游标 `heapBump:8`，位于 `.data`；
+与 §10.4.2 的堆列表共用同一个堆）：
+
+```
+need = len1 + len2 + 1
+base = [heapBump]; new = base + need
+if (new > 16000) { base = 0; new = need }   ; 回绕，保证有界（不越界）
+[heapBump] = new
+dst = heapArena + base                      ; 每次调用都是新地址 → 结果不可变
+```
+配套改动：
+- `X86Encoder.emitStoreRIP`（`mov [rip+disp32], reg`）—— 写回游标；
+- `PhotonObjectWriter.padDataSectionToDeclaredSize` —— `.data` 的 hex 无法手写
+  16424 字节零，由写入器按 `dataSymbolName` 声明大小补零；`isInternal` 同步
+  支持 `name:size` 形式（否则 `heapArena` 会被当成未定义外部符号）。
+
+#### 10.4.2 数组/列表端到端（修复 03）
+
+**根因（前端）**：`Int[5] = [1, 2, 3, 4, 5]` 里类型 `Int[5]`（`Type::Array`）能解析，
+但**数组字面量表达式 `[...]` 没有产生式** —— `rust/compiler/src/parser.rs` 只把 `[`
+当作**后缀**索引（`Expr::Index`）。于是 `[`、`,`、`]` 被当成裸字面量，参考实现自己
+也只是输出残骸（`arr[0] = null`、`sum = 0.0`，并伴随 `unresolved reference '['`）。
+所以先补前端，再补 Photon 侧；**不能**让 Photon 去复刻 `null`/`0.0`。
+
+| 层 | 改动 | 文件 |
+|----|------|------|
+| 前端（Rust） | 新增前缀产生式 `[e1, e2, …]`（支持尾随逗号）→ 降级为 `arrayListOf(...)`，再走既有 `arrayListOf → __list_new` 降级；允许后续后缀（`[1,2][0]`） | `rust/compiler/src/parser.rs` |
+| Photon HIR→SSA | `__list_new(e0…)`（**n 元**）拆成 `__list_alloc(count)` + N×`__list_setat(list,i,ei)` —— 全部 ≤3 元，**避开 Photon 调用约定只支持 4 个寄存器实参的限制**；`HirIndex` 由 `Load` 改为 runtime 调用 `__list_get(list,idx)`（Load/Store 路径当前不登记进 `block.instrs`，DAG 里没有加载指令） | `mir/SsaBuilder.aura` |
+| 名称映射 | `.Collections.set` → `__list_setat`、`Collections.get` → `__list_get`、`Syscalls.exit` → `exit` | `InstructionSelection.aura` |
+| Photon runtime | 新增 `__list_alloc` / `__list_setat` / `__list_get`；列表布局 `[count][e0][e1]…`（元素 i 在 `[8+i*8]`），与字符串共用 `.data` 的 bump 堆（`heapArena:16384` + `heapBump:8`） | `PhotonRuntime.aura` |
+| 编码器 | 新增 `emitLoadIndexed8` / `emitStoreIndexed8`（`[base+idx*8+disp32]`）、`emitStoreMemDisp32` | `x86_64/X86Encoder.aura` |
+
+验证（VM 与 Photon 产物逐字节一致）：
+
+```
+arr[0] = 1
+arr[4] = 5
+arr[2] = 99
+sum = 111
+```
+
+> 副产品修复：`.phir` 序列化此前把字符串字面量**原样**写出，含控制字符的字符串
+>（`"Hello, World!\r\n"`）会把行截断，Aura 侧解析出残骸（`.rdata` 只剩一个逗号）。
+> 现由 Rust 侧转义（`\n \r \t \\ \"`）、Aura 侧 `phirUnescape` 反转义，P3 的
+> `test_syscall_write` 随之通过。
+
+#### 10.4.3 P2 交付物核对（设计文档 §6「P2 自包含运行时」）
+
+| 设计文档条目 | 状态 | 证据 |
+|--------------|------|------|
+| 1. `SyscallEmitter.aura` | ✅ | 提供 `emitSyscall` / `emitMovGSSeg64`(PEB) / 内存读写助手，已被 `PhotonRuntime` 使用 |
+| 2. Windows Nt* syscall | ✅ | `NtWriteFile`(0x08) 输出、`NtTerminateProcess`(0x2C) 退出；stdout 句柄经 `gs:[0x60]` PEB 取得，不再调 `GetStdHandle` |
+| 3. Arena 分配器 | ✅（生成物侧已落地） | 编译器侧 `aura/core/aura/lang/native/Memory.aura`（mmap + bump）；**生成物侧** `.data` 内的 bump 堆（`heapArena:16384` + `heapBump:8`）同时服务字符串拼接与堆列表（`__list_alloc`），见 §10.4.1/§10.4.2。仍非 mmap（静态段即可满足零依赖），通用 mmap 堆可后续替换 |
+| 4. ARC 引用计数 | ✅（编译器侧） | `aura/core/aura/lang/native/GC.aura`：`ARC.retain/release/refCount` + `GC.collect`。生成物侧 GC 用例见 P4（未接通） |
+| 5. 替换 kernel32 | ✅ **已验证** | `llvm-readobj --coff-imports` 对 P1/P2 全部 9 个产物 exe 均返回**空导入表**；`linker.useDefaultLibs=false`，`linker.libs` 已注释为空 |
+
+> 结论：**P2 的「零外部依赖」目标已达成并可在产物上复验**；「Arena 分配器」在生成物侧
+> 已覆盖字符串与列表两类对象。
 
 ### 10.5 其它已知限制
 
 | 项 | 说明 |
 |----|------|
+| 调用约定 >4 实参 | `X86Emitter.emitCallArgs` 只装 rcx/rdx/r8/r9，**第 5 个起静默丢弃**。堆列表构造已通过「拆成 ≤3 元调用」绕开；**普通函数** `f(a,b,c,d,e)` 仍会丢参 —— 需要补栈传参（`sub rsp,0x20+8k` + `[rsp+0x20+8j]`，被调侧读 `[rbp+0x30+8j]`） |
+| 堆 arena 回绕 | `heapBump > 16000` 时回绕到 0 并复用最前面的空间。长时间运行且持续分配的程序会与仍存活的旧对象别名 —— 需要真正的分代/标记回收（P4 范围） |
+| `toStr` 结果 | 仍写在 32 字节静态 `toStrBuffer`，下一次 `toStr` 会覆盖；因调用点都是「立即拼接」，实测无影响，但 `toStr(a) + toStr(b)` 形式会出错 |
+| 字符串常量首尾控制字符 | Aura 侧常量列表处理会裁掉首尾空白/控制字符（`"Hello, World!\r\n"` → `Hello, World!`）；判等类输出不受影响，逐字节保真需要另行处理 |
+| P4 用例 | `tests/photon/P4`（GC / ARC / mutex / 异常 / 线程 / Memory.alloc）目前 **0/7**：生成物侧 runtime 还没有 mmap 堆、原子操作与异常表 —— 属设计文档 P4/自包含运行时的后续工作 |
 | `bootstrap-photon.ps1` Step 3/4 | 单文件 Photon 管线无法编译多文件编译器工程（`Main.aura` 的 import 图），自举闭环未达成 |
 | `tests/photon/simple.aura` | exe 退出码 42 **正确**；差分脚本判 FAIL 只是因为 VM `run` 会把 main 的返回值打印成 `42`（约定差异，非 codegen 缺陷） |
-| `S1..S4` / `P3` / `P4` 下的 Aura 侧单测 | 多数按旧 API 编写（例如调用已不存在的 `X86Emitter.emit`），且部分断言期望值已过期；未纳入本轮判定 |
+| `S1..S4` 下的 Aura 侧单测 | 多数按旧 API 编写（例如调用已不存在的 `X86Emitter.emit`），且部分断言期望值已过期；未纳入本轮判定 |
 
-### 10.6 复现命令
+### 10.6 阶段状态总览（2026-09-23 第三轮结束）
+
+| 阶段 | 差分/回归结果 | 说明 |
+|------|--------------|------|
+| **P0 真实管线** | ✅ 全部 7 项 | `.phir` 序列化（本轮补字符串转义）、Driver 环境变量、多函数符号、runtime stdlib |
+| **P1 差分 + 自举** | ✅ 5/5；bootstrap 可独立验证项 ✅ | COFF 确定性（SHA 一致、TimeDateStamp=0）、`S1/01_x86_encoder` 8/8、AOT exit=42；Step 3/4 仍受多文件限制 |
+| **P2 自包含运行时** | ✅ 4/4；零依赖 ✅ | 字符串 arena + 堆列表 + 数组端到端；产物 exe 导入表为空；NtWriteFile/NtTerminateProcess |
+| **P3 syscall 用例** | ✅ 6/6 | `Syscalls.exit` 映射、`.phir` 转义修复后全绿 |
+| **P4 GC/ARC/线程/异常** | ❌ 0/7 | 待做：生成物侧 mmap 堆、原子操作、异常表 |
+
+### 10.7 复现命令
 
 ```powershell
 # 差分跑批（含超时保护，超时杀进程树）
 powershell -File scripts\photon-suite.ps1 -Phase P1
 powershell -File scripts\photon-suite.ps1 -Phase P2
+powershell -File scripts\photon-suite.ps1 -Phase P3
 
 # 单文件编译+运行（调试转储加 -Dbg，会设置 AURA_PHOTON_DEBUG_HIR=1）
-powershell -File scripts\photon-try.ps1 -Src tests\photon\P1\04_control_flow.aura -Out build\p1\04\04.phir
+powershell -File scripts\photon-try.ps1 -Src tests\photon\P2\03_array_ops.aura -Out build\p2\03\03.phir
+
+# 零依赖复验（导入表应为空）
+llvm-readobj --coff-imports build\suite\03_array_ops\03_array_ops.exe
+
+# 前端改动后重建 CLI（种子编译器，AOT 需要 llvm 特性）
+cd rust; cargo build -p cli --features llvm --release
 ```
 

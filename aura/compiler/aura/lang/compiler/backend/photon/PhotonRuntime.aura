@@ -511,28 +511,38 @@ object PhotonRuntime {
 
     /// 编码 `strcat(rcx = s1, rdx = s2) → rax = 拼接结果`。
     ///
-    /// 使用 .data 段的静态缓冲区（128 字节）存储拼接结果。
+    /// 结果从 .data 段的**bump 分配 arena** 里切一块新内存（每次调用返回
+    /// 不同地址），因此拼接结果是**不可变**的 —— 后续拼接不会覆写它。
+    ///
+    /// ```asm
+    ///   len1 = strlen(s1); len2 = strlen(s2)
+    ///   need = len1 + len2 + 1
+    ///   base = [strcatBump]; new = base + need
+    ///   if (new > ARENA_LIMIT) { base = 0; new = need }   ; 回绕，避免越界
+    ///   [strcatBump] = new
+    ///   dst = strcatArena + base
+    ///   dst[0..len1) = s1; dst[len1..len1+len2] = s2; 末尾 NUL
+    ///   rax = dst
+    /// ```
+    ///
+    /// ⚠️ 旧实现返回**同一个**静态缓冲区：链式拼接时源与目标别名
+    ///（`"B: " + s3` 里 s3 就是该缓冲区），边读边写导致源永无 NUL → 写越界；
+    /// 即使不崩溃，`s3` 也会被下一次拼接覆写 —— 实测
+    /// `P2/04_string_ops` 的 `s3.length()` 得到 16 而不是 11，判等随之失败。
     fun emitStrcat(enc: X86Encoder): Unit {
-        // 0x1A0 = 416 字节：保存寄存器 + s1/s2/len1/len2 + 128 字节栈 scratch，
-        // 16 字节对齐（0x1A0 % 16 == 0）。
-        enc.emitPrologue(0x1A0)
+        // 0x120 = 288 字节：保存寄存器 + s1/s2/len1/len2/newBump，
+        // 16 字节对齐（0x120 % 16 == 0）。
+        enc.emitPrologue(0x120)
 
-        // 保存 callee-saved r12 / rsi / rdi（Win64 非易失寄存器）
+        // 保存 callee-saved r12 / rbx / rsi / rdi（Win64 非易失寄存器）
         enc.emitStackStore(-0x88, "r12")
+        enc.emitStackStore(-0x98, "rbx")
         enc.emitStackStore(-0xA8, "rsi")
         enc.emitStackStore(-0xB0, "rdi")
 
-        // ⚠️ 结果必须写进 **.data 段静态缓冲区**，不能用栈缓冲区。
-        //
-        // 旧实现用 `lea r12, [rbp-0x80]`（自身栈帧）当结果缓冲区：函数返回后
-        // 该区域仍位于调用者的 rsp 之下，紧接着 `call println` 会用 println
-        // 自己的栈帧无条件覆写这段内存 —— 实测拼接结果被清成空串，
-        // `println("a" + "b")` 什么都不输出（而 toStr 用静态缓冲区就正常）。
-        enc.emitLeaRIP("r12", "strcatBuffer")  // r12 = .data 段 128 字节缓冲区
-
         // 保存两个字符串指针
         enc.emitStackStore(-0x90, "rcx")  // s1
-        enc.emitStackStore(-0x98, "rdx")  // s2
+        enc.emitStackStore(-0xC0, "rdx")  // s2
 
         // 计算 s1 长度
         enc.emitStackLoad("rax", -0x90)   // rax = s1
@@ -547,7 +557,7 @@ object PhotonRuntime {
         enc.emitStackStore(-0xA0, "rdx")  // len1 = rdx
 
         // 计算 s2 长度
-        enc.emitStackLoad("rax", -0x98)   // rax = s2
+        enc.emitStackLoad("rax", -0xC0)   // rax = s2
         enc.emitXorRR("rdx", "rdx")        // rdx = 0
         enc.emitLabel("strcat_len2_loop")
         enc.emitCmpByteMemImm8("rax", 0)
@@ -558,37 +568,30 @@ object PhotonRuntime {
         enc.emitLabel("strcat_len2_done")
         enc.emitStackStore(-0xB8, "rdx")  // len2 = rdx（供复制阶段定长使用）
 
-        // ── 复制阶段：s2 先落栈上 scratch，再写结果缓冲区 ──
+        // ── 分配阶段：从 bump arena 切一块**新**内存当目标 ──
         //
-        // ⚠️ 不能边读 s2 边写 `strcatBuffer`：链式拼接时 s2 **可能就是这个
-        // 静态缓冲区本身**（`"B: " + s3` 里 s3 就是缓冲区）。旧实现用
-        // 「扫描源直到 NUL」的循环复制，源被自己不断写入的非 NUL 字节覆盖，
-        // 循环永不结束 → 越过 128 字节缓冲区继续写 → 访问违例
-        //（实测 P2/04_string_ops / dbg_str 退出码 -1073741819）。
-        // 现改为：先把 s2 按**已知长度**拷到栈 scratch（长度已知 → 循环必然
-        // 终止），再拷 s1 到缓冲区，最后把 scratch 追加到缓冲区末尾。
-        //
-        // 注：scratch 为 128 字节，与结果缓冲区同量级；更长的字符串本来就
-        // 超出该静态缓冲区的能力（旧实现同样是未定义行为）。
-        val scratchOff: Int = -0x1A0
+        // need = len1 + len2 + 1（含结尾 NUL）
+        enc.emitMovRR("rcx", "rdx")          // rcx = len2
+        enc.emitStackLoad("rax", -0xA0)      // len1
+        enc.emitAddRR("rcx", "rax")
+        enc.emitIncRR("rcx")                 // rcx = need
 
-        // ① s2 → scratch（含结尾 NUL，因此计数 = len2 + 1）
-        enc.emitStackLoad("rsi", -0x98)
-        enc.emitLeaStack("rdi", scratchOff)
-        enc.emitStackLoad("rcx", -0xB8)   // len2
-        enc.emitIncRR("rcx")
-        enc.emitLabel("strcat_c0_loop")
-        enc.emitCmpRI("rcx", 0)
-        enc.emitJccLabel("eq", "strcat_c0_done")
-        enc.emitMovzxRegMemByte("rax", "rsi")
-        enc.emitMovByteMemReg("rdi", "rax")
-        enc.emitIncRR("rsi")
-        enc.emitIncRR("rdi")
-        enc.emitSubRI("rcx", 1)
-        enc.emitJmpLabel("strcat_c0_loop")
-        enc.emitLabel("strcat_c0_done")
+        // base = [heapBump]；new = base + need；越界则回绕到 0 重新开始
+        enc.emitMovRIP("rax", "heapBump")    // rax = base
+        enc.emitMovRR("rbx", "rax")
+        enc.emitAddRR("rbx", "rcx")          // rbx = new
+        enc.emitCmpRI("rbx", 16000)
+        enc.emitJccLabel("le", "strcat_alloc_ok")
+        enc.emitXorRR("rax", "rax")          // base = 0
+        enc.emitMovRR("rbx", "rcx")          // new = need
+        enc.emitLabel("strcat_alloc_ok")
+        enc.emitStoreRIP("heapBump", "rbx")
 
-        // ② s1 → 缓冲区（计数 = len1 + 1，含 NUL）
+        // dst = heapArena + base
+        enc.emitLeaRIP("r12", "heapArena")
+        enc.emitAddRR("r12", "rax")
+
+        // ① s1 → dst（计数 = len1 + 1，含 NUL）
         enc.emitStackLoad("rsi", -0x90)
         enc.emitMovRR("rdi", "r12")
         enc.emitStackLoad("rcx", -0xA0)   // len1
@@ -604,13 +607,13 @@ object PhotonRuntime {
         enc.emitJmpLabel("strcat_c1_loop")
         enc.emitLabel("strcat_c1_done")
 
-        // ③ 目标指针回到缓冲区 + len1（覆盖上一步写下的 NUL）
+        // ② 目标指针回到 dst + len1（覆盖上一步写下的 NUL）
         enc.emitMovRR("rdi", "r12")
         enc.emitStackLoad("rcx", -0xA0)   // len1
         enc.emitAddRR("rdi", "rcx")
 
-        // ④ scratch → 缓冲区 + len1（含 NUL）
-        enc.emitLeaStack("rsi", scratchOff)
+        // ③ s2 → dst + len1（计数 = len2 + 1，含 NUL）
+        enc.emitStackLoad("rsi", -0xC0)
         enc.emitStackLoad("rcx", -0xB8)   // len2
         enc.emitIncRR("rcx")
         enc.emitLabel("strcat_c2_loop")
@@ -624,12 +627,65 @@ object PhotonRuntime {
         enc.emitJmpLabel("strcat_c2_loop")
 
         enc.emitLabel("strcat_done")
-        enc.emitMovRR("rax", "r12")  // 返回缓冲区指针
-        // 恢复 callee-saved r12 / rsi / rdi（rax 已持有返回值，不受影响）
+        enc.emitMovRR("rax", "r12")  // 返回新分配的字符串指针
+        // 恢复 callee-saved r12 / rbx / rsi / rdi（rax 已持有返回值）
         enc.emitStackLoad("rdi", -0xB0)
         enc.emitStackLoad("rsi", -0xA8)
+        enc.emitStackLoad("rbx", -0x98)
         enc.emitStackLoad("r12", -0x88)
         enc.emitEpilogue()
+    }
+
+    // ── 堆列表实现（数组/列表字面量 + 索引读写）──
+    //
+    // 内存布局（8 字节槽）：
+    //
+    //   [0]      count（元素个数，64 位）
+    //   [8]      元素 0
+    //   [16]     元素 1
+    //   …        元素 i 位于 [8 + i*8]
+    //
+    // 对象从 `heapArena` 用 bump 游标分配（与 `strcat` 共用同一个堆）。
+    // 元素统一按 64 位槽存放 —— Photon 目前只有 Int/Bool/Float/String 指针
+    // 这几种标量，都在 8 字节以内（字符串存的是指针）。
+    //
+    // 为什么在 Photon 侧用 runtime 函数而不是 Load/Gep：那条路径当前是空的
+    //（`Lowering.lowerLoad/lowerStore` 走 `addValueWithChain`，值不登记进
+    // `LirBlock.instrs`，DAG 里根本没有加载/存储指令）。
+
+    /// 编码 `__list_alloc(rcx = count) → rax = list`。
+    fun emitListAlloc(enc: X86Encoder): Unit {
+        enc.emitPrologue(0x20)
+        enc.emitMovRR("r8", "rcx")     // r8 = count
+        enc.emitShlRI("rcx", 3)        // count * 8
+        enc.emitAddRI("rcx", 8)        // + 计数头
+        // bump 分配（rax = base，rdx = new）
+        enc.emitMovRIP("rax", "heapBump")
+        enc.emitMovRR("rdx", "rax")
+        enc.emitAddRR("rdx", "rcx")
+        enc.emitCmpRI("rdx", 16000)
+        enc.emitJccLabel("le", "list_alloc_ok")
+        enc.emitXorRR("rax", "rax")
+        enc.emitMovRR("rdx", "rcx")
+        enc.emitLabel("list_alloc_ok")
+        enc.emitStoreRIP("heapBump", "rdx")
+        enc.emitLeaRIP("r9", "heapArena")
+        enc.emitAddRR("rax", "r9")               // rax = list 指针
+        enc.emitStoreMemDisp32("rax", 0, "r8")   // [list] = count
+        enc.emitEpilogue()
+    }
+
+    /// 编码 `__list_setat(rcx = list, rdx = idx, r8 = val) → rax = list`。
+    fun emitListSetAt(enc: X86Encoder): Unit {
+        enc.emitStoreIndexed8("rcx", "rdx", 8, "r8")
+        enc.emitMovRR("rax", "rcx")
+        enc.emitRet()
+    }
+
+    /// 编码 `__list_get(rcx = list, rdx = idx) → rax = value`。
+    fun emitListGet(enc: X86Encoder): Unit {
+        enc.emitLoadIndexed8("rax", "rcx", "rdx", 8)
+        enc.emitRet()
     }
 
     // ── print 实现（无换行）──
@@ -974,9 +1030,35 @@ object PhotonRuntime {
             PhotonObjectWriterUtils.joinRelocRecords(enc10.getRelocations())
         )
 
-        // 设置 .data 节和符号（toStrBuffer 32B）
+        val enc11 = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitListAlloc(enc11)
+        writer.appendFunction(
+            enc11.toHex(),
+            "__list_alloc",
+            PhotonObjectWriterUtils.joinRelocRecords(enc11.getRelocations())
+        )
+
+        val enc12 = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitListSetAt(enc12)
+        writer.appendFunction(
+            enc12.toHex(),
+            "__list_setat",
+            PhotonObjectWriterUtils.joinRelocRecords(enc12.getRelocations())
+        )
+
+        val enc13 = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitListGet(enc13)
+        writer.appendFunction(
+            enc13.toHex(),
+            "__list_get",
+            PhotonObjectWriterUtils.joinRelocRecords(enc13.getRelocations())
+        )
+
+        // 设置 .data 节和符号：toStrBuffer(32B) + 字符串 bump arena(4096B) +
+        // arena 游标(8B)。写入器会按声明大小把内容补零（见
+        // `PhotonObjectWriter.padDataSectionToDeclaredSize`）。
         writer.dataSection = "0000000000000000000000000000000000000000000000000000000000000000"
-        writer.dataSymbolName = "toStrBuffer"
+        writer.dataSymbolName = "toStrBuffer:32,heapArena:16384,heapBump:8"
 
         // 构建符号表（包含所有函数和 .data 符号）
         writer.buildSymbols(writer.functions, writer.stringConsts)
@@ -1046,11 +1128,24 @@ object PhotonRuntime {
         PhotonRuntime.emitStreq(enc10)
         writer.appendFunction(enc10.toHex(), "streq", PhotonObjectWriterUtils.joinRelocRecords(enc10.getRelocations()))
 
-        // .data 段：toStrBuffer(32B) + strcatBuffer(128B) = 160 字节。
+        val enc11 = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitListAlloc(enc11)
+        writer.appendFunction(enc11.toHex(), "__list_alloc", PhotonObjectWriterUtils.joinRelocRecords(enc11.getRelocations()))
+
+        val enc12 = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitListSetAt(enc12)
+        writer.appendFunction(enc12.toHex(), "__list_setat", PhotonObjectWriterUtils.joinRelocRecords(enc12.getRelocations()))
+
+        val enc13 = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitListGet(enc13)
+        writer.appendFunction(enc13.toHex(), "__list_get", PhotonObjectWriterUtils.joinRelocRecords(enc13.getRelocations()))
+
+        // .data 段：toStrBuffer(32B) + 堆 arena(16KB) + bump 游标(8B)。
         // 槽位大小必须显式声明（`name:size`）—— 旧实现固定「每个符号 8 字节」，
-        // 于是 strcatBuffer 只有 8 字节且与 toStrBuffer 重叠。
+        // 于是缓冲区之间互相重叠；写入器会按声明大小把内容补零
+        //（`PhotonObjectWriter.padDataSectionToDeclaredSize`）。
         writer.dataSection = "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-        writer.dataSymbolName = "toStrBuffer:32,strcatBuffer:128"
+        writer.dataSymbolName = "toStrBuffer:32,heapArena:16384,heapBump:8"
         writer.buildSymbols(writer.functions, writer.stringConsts)
         writer.emit()
         return writer.writeObjectHexFile(path)
@@ -1125,11 +1220,24 @@ object PhotonRuntimeUtils {
         PhotonRuntime.emitStreq(enc10)
         writer.appendFunction(enc10.toHex(), "streq", PhotonObjectWriterUtils.joinRelocRecords(enc10.getRelocations()))
 
-        // .data 段：toStrBuffer(32B) + strcatBuffer(128B) = 160 字节。
+        val enc11 = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitListAlloc(enc11)
+        writer.appendFunction(enc11.toHex(), "__list_alloc", PhotonObjectWriterUtils.joinRelocRecords(enc11.getRelocations()))
+
+        val enc12 = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitListSetAt(enc12)
+        writer.appendFunction(enc12.toHex(), "__list_setat", PhotonObjectWriterUtils.joinRelocRecords(enc12.getRelocations()))
+
+        val enc13 = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitListGet(enc13)
+        writer.appendFunction(enc13.toHex(), "__list_get", PhotonObjectWriterUtils.joinRelocRecords(enc13.getRelocations()))
+
+        // .data 段：toStrBuffer(32B) + 堆 arena(16KB) + bump 游标(8B)。
         // 槽位大小必须显式声明（`name:size`）—— 旧实现固定「每个符号 8 字节」，
-        // 于是 strcatBuffer 只有 8 字节且与 toStrBuffer 重叠。
+        // 于是缓冲区之间互相重叠；写入器会按声明大小把内容补零
+        //（`PhotonObjectWriter.padDataSectionToDeclaredSize`）。
         writer.dataSection = "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-        writer.dataSymbolName = "toStrBuffer:32,strcatBuffer:128"
+        writer.dataSymbolName = "toStrBuffer:32,heapArena:16384,heapBump:8"
         writer.buildSymbols(writer.functions, writer.stringConsts)
         writer.emit()
         return writer.writeObjectHexFile(path)

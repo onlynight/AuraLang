@@ -399,7 +399,8 @@ class PhotonObjectWriter {
             val dnames: List<String> = this.splitComma(this.dataSymbolName)
             var dn: Int = 0
             while (dn < dnames.size) {
-                if (dnames[dn] != "" && dnames[dn] == name) {
+                // 条目可能带 `:size` 后缀，必须去掉后再比较
+                if (dnames[dn] != "" && this.dataSymbolBaseName(dnames[dn]) == name) {
                     return true
                 }
                 dn = dn + 1
@@ -559,6 +560,14 @@ class PhotonObjectWriter {
         this.rdataSection = this.stringConstsToHex(this.stringConsts)
         this.rdataSize = this.hexByteCount(this.rdataSection)
         this.dataSection = this.normalizeHex(this.dataSection)
+        // 把 .data 补齐到 `dataSymbolName` 声明的总大小。
+        //
+        // 为什么需要：`dataSection` 的 hex 是**逐字节**写死的，而符号大小写在
+        // `dataSymbolName`（`name:size`）。若 hex 比声明短，节的实际大小就以
+        // hex 为准 —— 符号会指向节尾之外（读/写越界）。字符串堆 arena 有
+        // 数千字节，不可能在 Aura 源码里手写等长的零 hex，因此由 writer
+        // 按声明大小补零。
+        this.dataSection = this.padDataSectionToDeclaredSize()
         this.dataSize = this.hexByteCount(this.dataSection)
 
         // ── 2. 计数 ──
@@ -961,6 +970,43 @@ class PhotonObjectWriter {
     /// 计算 hex 字符串的字节数。
     private fun hexByteCount(hex: String): Int {
         return hex.length / 2
+    }
+
+    /// 把 `.data` hex 内容补齐到 `dataSymbolName` 声明的总字节数（补零）。
+    ///
+    /// `dataSymbolName` 形如 `toStrBuffer:32,strcatArena:4096,strcatBump:8`；
+    /// 声明大小即符号跨距，节的实际大小必须 ≥ 该跨距，否则符号指向节外。
+    private fun padDataSectionToDeclaredSize(): String {
+        if (this.dataSymbolName == "") { return this.dataSection }
+        val specs: List<String> = this.splitComma(this.dataSymbolName)
+        var declared: Int = 0
+        var i: Int = 0
+        while (i < specs.size) {
+            val spec: String = specs[i]
+            if (spec != "") {
+                val colon: Int = spec.indexOf(":")
+                if (colon > 0) {
+                    declared = declared + this.strToInt(spec.substring(colon + 1))
+                } else {
+                    declared = declared + 8
+                }
+            }
+            i = i + 1
+        }
+        var out: String = this.dataSection
+        while (this.hexByteCount(out) < declared) {
+            out = out + "00"
+        }
+        return out
+    }
+
+    /// 去掉 `dataSymbolName` 条目里的 `:size` 后缀，取纯符号名。
+    private fun dataSymbolBaseName(spec: String): String {
+        val colon: Int = spec.indexOf(":")
+        if (colon > 0) {
+            return spec.substring(0, colon)
+        }
+        return spec
     }
 
     /// 字符串常量列表转 hex。

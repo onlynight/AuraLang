@@ -997,6 +997,13 @@ class InstructionSelector {
         if (name == "String.length" || name == "String.size") { return "strlen" }
         if (name == "Any.toString") { return "toString" }
         if (name == "Any.equals") { return "streq" }
+        // 堆列表：`arr[i] = v` 由 HIR 降级为 `.Collections.set(arr, i, v)`
+        //（返回容器本身），对应 runtime 的 `__list_setat`。
+        if (name == "aura.lang.std.Collections.set") { return "__list_setat" }
+        if (name == "aura.lang.std.Collections.get") { return "__list_get" }
+        // syscall 封装：`Syscalls.exit(code)` → runtime 的 `exit`
+        //（内部为 NtTerminateProcess syscall；参数已在 rcx）。
+        if (name == "aura.lang.native.Syscalls.exit" || name == "Syscalls.exit") { return "exit" }
         return name
     }
 

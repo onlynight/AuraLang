@@ -903,6 +903,9 @@ class SsaBuilder {
 
         // Phase A: 内存链 — 将当前 memHead 作为 Call 的附加参数
         // 这样 Call 的内存依赖被显式建模
+        if (funcName == "__list_new") {
+            return this.buildListNew(args, kCount)
+        }
         if (this.memHead >= 0) {
             if (args == "") {
                 args = toStr(this.memHead)
@@ -922,6 +925,42 @@ class SsaBuilder {
         }
 
         return callVal
+    }
+
+    /// 把 n 元 `__list_new(e0, e1, …)` 降级为 `alloc(count)` + `count` 次 `setat`。
+    ///
+    /// 为什么要拆：`__list_new` 是 **n 元**调用，而 Photon 的调用约定
+    ///（`X86Emitter.emitCallArgs`）只把前 4 个实参装进 rcx/rdx/r8/r9，第 5 个起
+    /// **静默丢弃** —— `[1, 2, 3, 4, 5]` 会丢掉元素 5。拆成
+    /// `__list_alloc(count)` / `__list_setat(list, i, ei)`（都 ≤3 元）后既不必
+    /// 引入栈传参，列表布局也完全由 runtime 掌控
+    ///（`[count][e0][e1]…`，见 `PhotonRuntime.emitListAlloc`）。
+    ///
+    /// `elems` 是已经构建好的元素值 id（逗号分隔）。
+    private fun buildListNew(elems: String, count: Int): Int {
+        val i64: Int = this.types.intType(64)
+        // 计数常量（args 里必须是值 id，不能直接塞字面量）
+        val cntVal: Int = this.program.addValue("Const", i64, "", toStr(count), this.curBlock)
+        val listVal: Int = this.program.addValue("Call", i64, toStr(cntVal), "__list_alloc", this.curBlock)
+
+        if (elems != "") {
+            val parts: List<String> = elems.split(",")
+            var i: Int = 0
+            while (i < parts.size) {
+                val idxVal: Int = this.program.addValue("Const", i64, "", toStr(i), this.curBlock)
+                val setArgs: String = toStr(listVal) + "," + toStr(idxVal) + "," + parts[i]
+                this.program.addValue("Call", i64, setArgs, "__list_setat", this.curBlock)
+                i = i + 1
+            }
+        }
+
+        // 与 buildCall 保持一致：调用后推进内存链
+        if (this.memHead >= 0) {
+            val memTypeId: Int = this.types.intType(64)
+            this.memHead = this.program.addValue("MemToken", memTypeId, toStr(listVal),
+                                                 "mem_after_call", this.curBlock)
+        }
+        return listVal
     }
 
     /// 构建成员访问。
@@ -968,21 +1007,28 @@ class SsaBuilder {
         val idxVal: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, 1))
         var args: String = toStr(baseVal) + "," + toStr(idxVal)
 
-        // Phase A S2: 内存链 — Load 依赖 memHead
+        // Phase A S2: 内存链 — 访问依赖 memHead
         if (this.memHead >= 0) {
             args = args + "," + toStr(this.memHead)
         }
 
+        // ── 元素访问降级为 runtime 调用 `__list_get(container, index)` ──
+        //
+        // 为什么不发射 Load：Photon 的 Load/Store 路径（`Lowering.lowerLoad` →
+        // `addValueWithChain`）**不把值登记进 `LirBlock.instrs`**，DAG 里根本
+        // 没有加载/存储指令（实测嵌套循环的 Store 全部消失）。索引访问统一走
+        // runtime 调用，与 `__list_new` / `.Collections.set` 共用同一套列表布局
+        //（`[count][e0][e1]…`，元素 i 在 [8 + i*8]）。
         val typeId: Int = this.types.fromTypeName(src.tyOf(id))
-        val loadVal: Int = this.program.addValue("Load", typeId, args, "", this.curBlock)
+        val getVal: Int = this.program.addValue("Call", typeId, args, "__list_get", this.curBlock)
 
-        // Phase A S2: 更新内存链 — Load 后创建新的 mem token
+        // Phase A S2: 更新内存链 — 访问后创建新的 mem token
         if (this.memHead >= 0) {
             val memTypeId: Int = this.types.intType(64)
-            this.memHead = this.program.addValue("MemToken", memTypeId, toStr(loadVal), "mem_after_load", this.curBlock)
+            this.memHead = this.program.addValue("MemToken", memTypeId, toStr(getVal), "mem_after_get", this.curBlock)
         }
 
-        return loadVal
+        return getVal
     }
 
     // ── Phi 节点 ──

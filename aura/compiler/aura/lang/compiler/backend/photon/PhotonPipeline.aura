@@ -1061,6 +1061,40 @@ class PhotonPipeline {
         return out
     }
 
+    /// 反转义 .phir 字符串字面量内容（`\n` `\r` `\t` `\\` `\"`）。
+    ///
+    /// 与 Rust 侧 `hir_to_phir` 的转义互逆：那边把控制字符写成转义序列，
+    /// 这里还原成真实字符。
+    private fun phirUnescape(s: String): String {
+        var out: String = ""
+        var i: Int = 0
+        while (i < s.length) {
+            val c: String = s.substring(i, i + 1)
+            if (c == "\\" && i + 1 < s.length) {
+                val n: String = s.substring(i + 1, i + 2)
+                if (n == "n") {
+                    out = out + "\n"
+                } else if (n == "r") {
+                    out = out + "\r"
+                } else if (n == "t") {
+                    out = out + "\t"
+                } else if (n == "\\") {
+                    out = out + "\\"
+                } else if (n == "\"") {
+                    out = out + "\""
+                } else {
+                    // 未知转义：原样保留后续字符（与多数语言一致）
+                    out = out + n
+                }
+                i = i + 2
+            } else {
+                out = out + c
+                i = i + 1
+            }
+        }
+        return out
+    }
+
     /// 解析 .phir 表达式为 HIR 节点，返回节点 id。
     ///
     /// 与前代的区别：**递归下降 + 运算符优先级 + 类型推断** ——
@@ -1096,7 +1130,14 @@ class PhotonPipeline {
                 k = k + 1
             }
             if (valid) {
-                return hir.add("HirLit", t, "String", Span(0, 0, 1, 1, 1, 1), "")
+                // ⚠️ 必须**反转义**：Rust 侧序列化器把控制字符写成 `\n` / `\r` /
+                // `\t` / `\\` / `\"`（否则原始 CR/LF 会把 .phir 的行截断）。
+                // 这里还原成真实字符后仍保**带引号**的形式 —— 下游
+                //（`emitConst` → StringConstants → `PhotonObjectWriter.unquote`）
+                // 的口径是「带引号存放、写 .rdata 时去引号」。
+                val inner: String = this.phirUnescape(t.substring(1, t.length - 1))
+                return hir.add("HirLit", "\"" + inner + "\"", "String",
+                               Span(0, 0, 1, 1, 1, 1), "")
             }
         }
 

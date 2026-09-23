@@ -184,6 +184,68 @@ class X86Encoder {
         this.writeRelocPlaceholder(symbol)
     }
 
+    /// 编码 MOV [rip + disp32], reg（RIP 相对存储）。
+    ///
+    /// 与 `emitMovRIP` 对称，用于写回 .data 段的全局可变槽位
+    /// （如字符串 bump 分配器的游标 `strcatBump`）。
+    fun emitStoreRIP(symbol: String, reg: String): Unit {
+        val r: Int = this.regNum(reg)
+        this.writeByte(this.rexByte(true, r, 0))
+        this.writeByte(0x89)
+        this.writeByte(0x05 + ((r & 7) << 3))  // 05 = mod=00, rm=101 (RIP)
+        this.writeRelocPlaceholder(symbol)
+    }
+
+    /// 编码 MOV reg, [base + index*8 + disp32]（REX.W 8B /r，SIB scale=8）。
+    ///
+    /// 用于堆列表元素读取（元素宽度 8 字节，头部 8 字节计数）。
+    /// mod=10 固定用 disp32 —— 这样 base=rbp/r13 时也不会与「mod=00 + rm=101
+    /// 表示 RIP 相对」冲突。
+    fun emitLoadIndexed8(dst: String, base: String, index: String, disp: Int): Unit {
+        val d: Int = this.regNum(dst)
+        val b: Int = this.regNum(base)
+        val x: Int = this.regNum(index)
+        var rex: Int = 0x48
+        if (d >= 8) { rex = rex + 4 }   // REX.R
+        if (x >= 8) { rex = rex + 2 }   // REX.X
+        if (b >= 8) { rex = rex + 1 }   // REX.B
+        this.writeByte(rex)
+        this.writeByte(0x8B)
+        this.writeByte(0x80 + ((d & 7) << 3) + 4)      // mod=10, reg=d, rm=100(SIB)
+        this.writeByte(0xC0 + ((x & 7) << 3) + (b & 7)) // scale=8, index, base
+        this.writeInt(disp)
+    }
+
+    /// 编码 MOV [base + index*8 + disp32], reg（REX.W 89 /r，SIB scale=8）。
+    fun emitStoreIndexed8(base: String, index: String, disp: Int, src: String): Unit {
+        val s: Int = this.regNum(src)
+        val b: Int = this.regNum(base)
+        val x: Int = this.regNum(index)
+        var rex: Int = 0x48
+        if (s >= 8) { rex = rex + 4 }
+        if (x >= 8) { rex = rex + 2 }
+        if (b >= 8) { rex = rex + 1 }
+        this.writeByte(rex)
+        this.writeByte(0x89)
+        this.writeByte(0x80 + ((s & 7) << 3) + 4)
+        this.writeByte(0xC0 + ((x & 7) << 3) + (b & 7))
+        this.writeInt(disp)
+    }
+
+    /// 编码 MOV [base + disp32], reg（REX.W 89 /r）。
+    fun emitStoreMemDisp32(base: String, disp: Int, src: String): Unit {
+        val s: Int = this.regNum(src)
+        val b: Int = this.regNum(base)
+        var rex: Int = 0x48
+        if (s >= 8) { rex = rex + 4 }
+        if (b >= 8) { rex = rex + 1 }
+        this.writeByte(rex)
+        this.writeByte(0x89)
+        // mod=10 (disp32)，rm = base（base=101 即 rbp/r13 在 mod=10 下合法）
+        this.writeByte(0x80 + ((s & 7) << 3) + (b & 7))
+        this.writeInt(disp)
+    }
+
     /// 编码 LEA reg, [rip + disp32]（加载地址）。
     fun emitLeaRIP(dst: String, symbol: String): Unit {
         val d: Int = this.regNum(dst)
