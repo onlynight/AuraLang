@@ -30,6 +30,7 @@ package aura.lang.compiler.backend.photon
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
+import aura.lang.std.Env
 
 // ─────────────────────────────────────────────────────────────
 // DagNode — DAG 节点
@@ -336,7 +337,7 @@ class MachineDag {
         i.bytes = bytes
         this.instrs.add(i)
         this.instrCount = this.instrs.size
-        if (template == "ret") {
+        if (template == "ret" && Env.get("AURA_PHOTON_TRACE", "") == "1") {
             println("    [DAG] addInstr RET id=" + toStr(i.id) + " instrCount=" + toStr(this.instrCount) + " nodes=" + nodes)
         }
         return i.id
@@ -361,7 +362,12 @@ class MachineDag {
     ///
     /// 返回新指令的 ID。
     fun selectPattern(patternId: Int, inputNodes: String, outputNode: Int): Int {
-        println("    [DAG] selectPattern patternId=" + toStr(patternId) + " inputNodes=" + inputNodes + " outputNode=" + toStr(outputNode))
+        // ⚠️ 这条打印是**逐模式**的（每个 LIR 值至少一次）：真实工程 12 万个值
+        // 就是 12 万次字符串拼接 + 写管道，曾让 Phase C 成为整条管线的主要耗时。
+        // 必须门控在 AURA_PHOTON_TRACE 下。
+        if (Env.get("AURA_PHOTON_TRACE", "") == "1") {
+            println("    [DAG] selectPattern patternId=" + toStr(patternId) + " inputNodes=" + inputNodes + " outputNode=" + toStr(outputNode))
+        }
         // 检查模式缓存：同一模式已匹配过则复用。
         val cached: Int = this.patternCacheGet(patternId)
         if (cached >= 0) {

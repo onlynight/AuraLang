@@ -14,6 +14,7 @@ package aura.lang.compiler.backend.photon
 import aura.lang.std.String
 import aura.lang.std.FileSystem
 import aura.lang.std.Env
+import aura.lang.native.time.Clock
 
 // Phase A: MIR SSA
 import "../../mir/TypeRegistry.aura"
@@ -94,6 +95,12 @@ class PhotonPipeline {
     /// 当前函数的变量类型环境（扁平字符串 "name=ty\n"）。
     private var phirEnv: String = ""
 
+    // ── 临时性能探针（定位解析阶段内存/时间黑洞）──
+    private var phirScanSig: Int = 0
+    private var phirScanEnv: Int = 0
+    private var phirScanCalls: Int = 0
+    private var phirFuncNo: Int = 0
+
     init() {
         this.targetTriple = "x86_64-pc-windows-msvc"
         this.optLevel = 1
@@ -132,6 +139,33 @@ class PhotonPipeline {
     /// 从 HIR 编译为可执行文件（S1 真实数据流）。
     ///
     /// 数据流：HIR → SSA MIR → LIR → MachineDag → RegAlloc → Encode → COFF → Link
+    /// 调试轨迹缓冲（AURA_PHOTON_TRACE=1 时落盘）。
+    private var traceBuf: String = ""
+
+    /// 轨迹起始时刻（毫秒），用于给每条轨迹打相对时间。
+    private var traceT0: Long = 0
+
+    /// 临时性能探针：类型环境/签名表的查询次数与累计扫描字符数。
+    private var dbgEnvGet: Int = 0
+    private var dbgEnvSet: Int = 0
+    private var dbgEnvScanned: Int = 0
+    private var dbgEnvSetScanned: Int = 0
+    private var dbgSigCalls: Int = 0
+    private var dbgSigScanned: Int = 0
+
+    /// 追加一条调试轨迹并**立即落盘**。
+    ///
+    /// 为什么落盘而不是 `println`：VM 的 stdout 是带缓冲的，进程被 OOM killer
+    /// 终止时缓冲区内容整体丢失（实测大工程编译崩溃时终端一行都看不到），
+    /// 无法定位崩溃点。文件写入每条都同步，崩溃前的进度得以保留。
+    private fun traceMark(msg: String): Unit {
+        if (Env.get("AURA_PHOTON_TRACE") != "1") { return }
+        // 注意：不要用 Clock.timeMs() —— 该原生在 VM 路径下**未注册**
+        //（`[bytecode] error: 未解析的函数调用 'Clock.timeMs'`），会让驱动直接失败。
+        this.traceBuf = this.traceBuf + msg + "\n"
+        FileSystem.writeText(this.outDir + "/photon_trace.log", this.traceBuf)
+    }
+
     fun compileHir(hir: Hir, outDir: String, moduleName: String): BackendResult {
         this.outDir = outDir
         this.moduleName = moduleName
@@ -151,6 +185,7 @@ class PhotonPipeline {
         FileSystem.mkdirP(this.outDir)
 
         // ── Phase A: HIR → SSA MIR ──
+        this.traceMark("phaseA")
         println("[Phase A] HIR → SSA MIR (SsaBuilder)")
         val ssaBuilder = SsaBuilderUtils.build(hir)
         println("  functions=" + ssaBuilder.functionCount +
@@ -159,8 +194,14 @@ class PhotonPipeline {
         if (Env.get("AURA_PHOTON_DEBUG_HIR") == "1") {
             this.photonDumpSsa(ssaBuilder)
         }
+        // 阶段短路开关（性能诊断用）：AURA_PHOTON_STOP=A|B|C|D
+        if (Env.get("AURA_PHOTON_STOP") == "A") {
+            result.errorMessage = "STOPPED_AFTER_PHASE_A"
+            return result
+        }
 
         // ── Phase B: MIR → LIR ──
+        this.traceMark("phaseB")
         println("[Phase B] MIR → LIR (Lowering)")
         val lowering = Lowering()
         val lir = lowering.lower(ssaBuilder)
@@ -170,14 +211,24 @@ class PhotonPipeline {
         if (Env.get("AURA_PHOTON_DEBUG_HIR") == "1") {
             this.photonDumpLir(lir)
         }
+        if (Env.get("AURA_PHOTON_STOP") == "B") {
+            result.errorMessage = "STOPPED_AFTER_PHASE_B"
+            return result
+        }
 
         // ── Phase C: LIR → Machine DAG ──
+        this.traceMark("phaseC")
         println("[Phase C] LIR → Machine DAG (InstructionSelection)")
         val selector = InstructionSelectorUtils.emptySelector()
         val dag = selector.select(lir)
         println("  DAG nodes=" + dag.nodeCount +
                 " instrs=" + dag.instrCount)
+        if (Env.get("AURA_PHOTON_STOP") == "C") {
+            result.errorMessage = "STOPPED_AFTER_PHASE_C"
+            return result
+        }
         // ── Phase D: 寄存器分配 + 窥孔 ──
+        this.traceMark("phaseD")
         println("[Phase D] Register Allocation + Peephole")
         val allocator = RegisterAllocatorUtils.emptyAllocator()
         allocator.allocate(dag)
@@ -203,6 +254,10 @@ class PhotonPipeline {
         val peephole = PeepholeOptimizerUtils.emptyOptimizer()
         peephole.optimize(dag)
         println("  peephole passes=" + peephole.getPassCount())
+        if (Env.get("AURA_PHOTON_STOP") == "D") {
+            result.errorMessage = "STOPPED_AFTER_PHASE_D"
+            return result
+        }
         if (Env.get("AURA_PHOTON_DEBUG_HIR") == "1") {
             var pi2: Int = 0
             while (pi2 < dag.instrCount) {
@@ -214,6 +269,7 @@ class PhotonPipeline {
         }
 
         // ── Phase E: 指令编码 → 目标文件 → 链接 ──
+        this.traceMark("phaseE")
         println("[Phase E] Instruction Encoding → Object → Link")
 
         // Step 4: 指令编码
@@ -374,6 +430,7 @@ class PhotonPipeline {
 
         // Step 2: 解析 .phir → HIR
         val hir: Hir = this.parsePhirText(phirText)
+        this.traceMark("hir nodes=" + hir.count)
         println("  HIR nodes: " + hir.count)
         if (Env.get("AURA_PHOTON_DEBUG_HIR") == "1") {
             var di: Int = 0
@@ -432,16 +489,34 @@ class PhotonPipeline {
     private fun parsePhirText(text: String): Hir {
         val hir: Hir = Hir()
         this.phirLines = text.split("\n")
+        this.traceMark("split lines=" + this.phirLines.size)
         this.phirPos = 0
         this.phirSigs = this.phirCollectSigs()
+        this.traceMark("sigs len=" + this.phirSigs.length)
         this.phirEnv = ""
 
         var funcKids: String = ""
+        var funcSeen: Int = 0
         while (this.phirPos < this.phirLines.size) {
-            val line: String = this.phirLines.get(this.phirPos).trim()
+            val line: String = this.phirLines[this.phirPos].trim()
             if (line.startsWith("fun ")) {
-                val funcId: Int = this.phirParseFunc(hir)
+                var funcId: Int = -1
+                if (Env.get("AURA_PHOTON_SKIPFUN") == "1") {
+                    this.phirPos = this.phirPos + 1
+                } else {
+                    funcId = this.phirParseFunc(hir)
+                }
                 funcKids = HirUtils.hirKidsAdd(funcKids, funcId)
+                funcSeen = funcSeen + 1
+                if (funcSeen <= 20 || funcSeen % 50 == 0) {
+                    this.traceMark("parse funcs=" + funcSeen + " line=" + this.phirPos +
+                                   " hir=" + hir.count +
+                                   " envLen=" + this.phirEnv.length +
+                                   " envGet=" + this.dbgEnvGet + " envScan=" + this.dbgEnvScanned +
+                                   " envSet=" + this.dbgEnvSet + " envSetScan=" + this.dbgEnvSetScanned +
+                                   " sigLen=" + this.phirSigs.length +
+                                   " sigCalls=" + this.dbgSigCalls + " sigScan=" + this.dbgSigScanned)
+                }
             } else {
                 this.phirPos = this.phirPos + 1
             }
@@ -453,11 +528,14 @@ class PhotonPipeline {
     }
 
     /// 预扫描：收集所有 `[native] fun NAME(...) -> RET` 的返回类型。
+    ///
+    /// 产出以 `\n` 开头（`"\nname=ret\n…"`），使 `phirSigLookup` 的
+    /// `indexOf("\n" + name + "=")` 能精确匹配**每一项**（含首项）。
     private fun phirCollectSigs(): String {
-        var sigs: String = ""
+        var sigs: String = "\n"
         var i: Int = 0
         while (i < this.phirLines.size) {
-            val line: String = this.phirLines.get(i).trim()
+            val line: String = this.phirLines[i].trim()
             var head: String = ""
             if (line.startsWith("native fun ")) {
                 head = line.substring(11)
@@ -481,16 +559,25 @@ class PhotonPipeline {
                     sigs = sigs + name + "=" + ret + "\n"
                 }
             }
+            if (i % 4000 == 0) {
+                this.traceMark("sigsScan i=" + i + " sigsLen=" + sigs.length)
+            }
             i = i + 1
         }
         return sigs
     }
 
     /// 查找字符在 `start` 之后第一次出现的位置（-1 表示未找到）。
+    ///
+    /// ⚠️ 必须用 `charCodeAt` 比较码点，不能 `s.substring(i, i+1) == ch`：
+    /// 后者每步分配一个 1 字符串，在**无 GC** 运行时是持续的分配源。
     private fun phirFindChar(s: String, start: Int, ch: String): Int {
+        if (ch == "") { return -1 }
+        val code: Int = ch.charCodeAt(0)
         var i: Int = start
-        while (i < s.length) {
-            if (s.substring(i, i + 1) == ch) { return i }
+        val len: Int = s.length
+        while (i < len) {
+            if (s.charCodeAt(i) == code) { return i }
             i = i + 1
         }
         return -1
@@ -506,36 +593,43 @@ class PhotonPipeline {
     }
 
     /// 查询类型环境：返回 "name=ty" 中的 ty（未找到返回 ""）。
+    ///
+    /// 环境串的不变式：形如 `"\nname=ty\nname2=ty2\n"`（**以 `\n` 开头**），
+    /// 因此可用 `indexOf("\n" + name + "=")` 做整名精确匹配 —— 若不以 `\n`
+    /// 开头，首项永远匹配不到，且 `x` 会误命中 `foo=…x=…` 的中间片段。
     private fun phirEnvGet(name: String): String {
-        val key: String = name + "="
-        var lineStart: Int = 0
-        var pos: Int = 0
+        if (name == "") { return "" }
+        this.dbgEnvGet = this.dbgEnvGet + 1
+        this.dbgEnvScanned = this.dbgEnvScanned + this.phirEnv.length
+        val key: String = "\n" + name + "="
+        val at: Int = this.phirEnv.indexOf(key)
+        if (at < 0) { return "" }
+        val start: Int = at + key.length
+        var e: Int = start
         val len: Int = this.phirEnv.length
-        while (pos <= len) {
-            if (pos == len || this.phirEnv.substring(pos, pos + 1) == "\n") {
-                val line: String = this.phirEnv.substring(lineStart, pos)
-                if (line.startsWith(key)) {
-                    return line.substring(key.length)
-                }
-                lineStart = pos + 1
-            }
-            pos = pos + 1
-        }
-        return ""
+        while (e < len && this.phirEnv.charCodeAt(e) != 10) { e = e + 1 }
+        return this.phirEnv.substring(start, e)
     }
 
     /// 写入类型环境（覆盖同名项）。
+    ///
+    /// 逐字符用 `charCodeAt` 而非 `substring(pos, pos+1)`：旧写法每字符分配一个
+    /// 临时串，而本函数**每个声明/参数**都会调用一次，是另一处无 GC 分配源。
     private fun phirEnvSet(name: String, ty: String): Unit {
+        this.dbgEnvSet = this.dbgEnvSet + 1
+        this.dbgEnvSetScanned = this.dbgEnvSetScanned + this.phirEnv.length
         val key: String = name + "="
-        var out: String = ""
+        var out: String = "\n"
         var lineStart: Int = 0
         var pos: Int = 0
         val len: Int = this.phirEnv.length
         while (pos <= len) {
-            if (pos == len || this.phirEnv.substring(pos, pos + 1) == "\n") {
-                val line: String = this.phirEnv.substring(lineStart, pos)
-                if (line != "" && !line.startsWith(key)) {
-                    out = out + line + "\n"
+            if (pos == len || this.phirEnv.charCodeAt(pos) == 10) {
+                if (pos > lineStart) {
+                    val line: String = this.phirEnv.substring(lineStart, pos)
+                    if (!line.startsWith(key)) {
+                        out = out + line + "\n"
+                    }
                 }
                 lineStart = pos + 1
             }
@@ -545,22 +639,30 @@ class PhotonPipeline {
     }
 
     /// 查询函数签名返回类型。
+    ///
+    /// ⚠️ 这是解析阶段**最大的**分配热点，也是「内存疯狂上涨直到溢出」的直接原因：
+    /// 旧实现对整张签名表逐字符 `substring(pos, pos+1)`，每次查询分配 ≈ 表长
+    /// 个临时字符串。实测编译 `Main.aura`（2345 个函数，签名表 ≈ 100 KB）时，
+    /// 每 34 个函数就产生 117 万次分配，而 VM/无 GC 运行时不会回收 —— 内存
+    /// 线性冲向 4 GB 后 OOM。
+    ///
+    /// 现改为：
+    ///   * `indexOf(key)` —— 走原生实现（C 级 `memmem`），**零分配**；
+    ///   * 从命中点用 `charCodeAt` 扫到行尾取返回类型（该行 ≤ 数十字符）。
+    ///
+    /// `phirSigs` 的不变式：以 `\n` 开头（见 `phirCollectSigs`），保证首项也能命中。
     private fun phirSigLookup(name: String): String {
-        val key: String = name + "="
-        var lineStart: Int = 0
-        var pos: Int = 0
+        if (name == "") { return "" }
+        this.dbgSigCalls = this.dbgSigCalls + 1
+        this.dbgSigScanned = this.dbgSigScanned + this.phirSigs.length
+        val key: String = "\n" + name + "="
+        val at: Int = this.phirSigs.indexOf(key)
+        if (at < 0) { return "" }
+        val start: Int = at + key.length
+        var e: Int = start
         val len: Int = this.phirSigs.length
-        while (pos <= len) {
-            if (pos == len || this.phirSigs.substring(pos, pos + 1) == "\n") {
-                val line: String = this.phirSigs.substring(lineStart, pos)
-                if (line.startsWith(key)) {
-                    return line.substring(key.length)
-                }
-                lineStart = pos + 1
-            }
-            pos = pos + 1
-        }
-        return ""
+        while (e < len && this.phirSigs.charCodeAt(e) != 10) { e = e + 1 }
+        return this.phirSigs.substring(start, e)
     }
 
     /// 二元运算的结果类型推断。
@@ -577,7 +679,9 @@ class PhotonPipeline {
 
     /// 解析 .phir 函数定义（phirPos 指向 `fun ... {` 行）。
     private fun phirParseFunc(hir: Hir): Int {
-        val line: String = this.phirLines.get(this.phirPos).trim()
+        this.phirFuncNo = this.phirFuncNo + 1
+        val line: String = this.phirLines[this.phirPos].trim()
+        if (this.phirFuncNo % 25 == 0) { println("      [s1] n=" + this.phirFuncNo + " " + line.substring(4, 40)) }
         val nameEnd: Int = this.phirFindChar(line, 4, "(")
         val funcName: String = line.substring(4, nameEnd).trim()
 
@@ -596,14 +700,14 @@ class PhotonPipeline {
             paramsStr = line.substring(nameEnd + 1, paramsEnd)
         }
 
-        // 类型环境重置为参数
-        this.phirEnv = ""
+        // 类型环境重置为参数（保持「以 \n 开头」的不变式，见 phirEnvGet）
+        this.phirEnv = "\n"
         var paramKids: String = ""
         if (paramsStr.trim() != "") {
             val params: List<String> = paramsStr.split(",")
             var pi: Int = 0
             while (pi < params.size) {
-                val p: String = params.get(pi).trim()
+                val p: String = params[pi].trim()
                 if (p != "") {
                     val colon: Int = p.indexOf(":")
                     var pName: String = p
@@ -621,10 +725,12 @@ class PhotonPipeline {
         }
 
         this.phirPos = this.phirPos + 1          // 跳过 "fun ... {" 行
+        if (this.phirFuncNo % 25 == 0) { println("      [s3] n=" + this.phirFuncNo + " " + funcName) }
         val bodyId: Int = this.phirParseBlock(hir)
         if (this.phirPos < this.phirLines.size) {
             this.phirPos = this.phirPos + 1      // 吃掉函数体结束 "}"
         }
+        if (this.phirFuncNo % 25 == 0) { println("      [s4] n=" + this.phirFuncNo + " " + funcName) }
 
         var funcKids: String = HirUtils.hirKidsAdd(paramKids, bodyId)
         return hir.add("HirFunction", funcName, retTy, Span(0, 0, 1, 1, 1, 1), funcKids)
@@ -635,7 +741,7 @@ class PhotonPipeline {
     private fun phirParseBlock(hir: Hir): Int {
         var stmtKids: String = ""
         while (this.phirPos < this.phirLines.size) {
-            val t: String = this.phirLines.get(this.phirPos).trim()
+            val t: String = this.phirLines[this.phirPos].trim()
             if (t.startsWith("}")) { break }
             if (t == "" || t.startsWith("#")) {
                 this.phirPos = this.phirPos + 1
@@ -651,7 +757,7 @@ class PhotonPipeline {
 
     /// 解析一条语句（消费 1..n 行）。
     private fun phirParseStatement(hir: Hir): Int {
-        val t: String = this.phirLines.get(this.phirPos).trim()
+        val t: String = this.phirLines[this.phirPos].trim()
 
         if (t.startsWith("val ") || t.startsWith("var ")) {
             return this.phirParseDecl(hir, t)
@@ -727,9 +833,10 @@ class PhotonPipeline {
     private fun phirParseDecl(hir: Hir, text: String): Int {
         val isVal: Boolean = text.startsWith("val ")
         var nameEnd: Int = 4
-        while (nameEnd < text.length
-            && text.substring(nameEnd, nameEnd + 1) != ":"
-            && text.substring(nameEnd, nameEnd + 1) != "=") {
+        val textLen: Int = text.length
+        while (nameEnd < textLen) {
+            val nc: Int = text.charCodeAt(nameEnd)
+            if (nc == 58 || nc == 61) { break }   // ':' / '='
             nameEnd = nameEnd + 1
         }
         val name: String = text.substring(4, nameEnd).trim()
@@ -769,7 +876,7 @@ class PhotonPipeline {
 
         var elseId: Int = -1
         if (this.phirPos < this.phirLines.size) {
-            val t: String = this.phirLines.get(this.phirPos).trim()
+            val t: String = this.phirLines[this.phirPos].trim()
             if (t == "}") {
                 this.phirPos = this.phirPos + 1
             } else if (t.startsWith("} else if ")) {
@@ -878,19 +985,19 @@ class PhotonPipeline {
     /// 按优先级从低到高查找顶层二元运算符，返回 [op, posStr] 或 ["", "-1"]。
     private fun phirSplitBinary(t: String): List<String> {
         var r: List<String> = this.phirFindTopOp(t, listOf("||"))
-        if (r.get(0) != "") { return r }
+        if (r[0] != "") { return r }
         r = this.phirFindTopOp(t, listOf("&&"))
-        if (r.get(0) != "") { return r }
+        if (r[0] != "") { return r }
         r = this.phirFindTopOp(t, listOf("==", "!="))
-        if (r.get(0) != "") { return r }
+        if (r[0] != "") { return r }
         r = this.phirFindTopOp(t, listOf("<=", ">=", "<", ">"))
-        if (r.get(0) != "") { return r }
+        if (r[0] != "") { return r }
         r = this.phirFindTopOp(t, listOf("+", "-"))
-        if (r.get(0) != "") { return r }
+        if (r[0] != "") { return r }
         r = this.phirFindTopOp(t, listOf("*", "/", "%"))
-        if (r.get(0) != "") { return r }
+        if (r[0] != "") { return r }
         r = this.phirFindTopOp(t, listOf("<<", ">>", "&", "|", "^"))
-        if (r.get(0) != "") { return r }
+        if (r[0] != "") { return r }
         return listOf("", "-1")
     }
 
@@ -920,7 +1027,7 @@ class PhotonPipeline {
                 else if (depth == 0 && i > 0) {
                     var oi: Int = 0
                     while (oi < ops.size) {
-                        val op: String = ops.get(oi)
+                        val op: String = ops[oi]
                         if (i + op.length <= n && text.substring(i, i + op.length) == op) {
                             val prev: String = text.substring(i - 1, i)
                             var ok: Boolean = true
@@ -1016,7 +1123,14 @@ class PhotonPipeline {
     /// 是否为 ASCII 标识符字符（字母 / 数字 / 下划线）。理由同上。
     private fun phirIsWordChar(ch: String): Boolean {
         if (ch.length != 1) { return false }
-        val c: Int = ch.charCodeAt(0)
+        return this.phirIsWordCode(ch.charCodeAt(0))
+    }
+
+    /// 码点版字符合法性判断（**零分配**）。
+    ///
+    /// 逐字符扫描一律用本函数，不要 `substring(i, i+1)` 后再比较字符串 ——
+    /// 后者每步分配一个 1 字符串，在无 GC 运行时随输入规模线性堆积。
+    private fun phirIsWordCode(c: Int): Boolean {
         if (c >= 48 && c <= 57) { return true }
         if (c >= 65 && c <= 90) { return true }
         if (c >= 97 && c <= 122) { return true }
@@ -1066,32 +1180,38 @@ class PhotonPipeline {
     /// 与 Rust 侧 `hir_to_phir` 的转义互逆：那边把控制字符写成转义序列，
     /// 这里还原成真实字符。
     private fun phirUnescape(s: String): String {
+        // 常见情形：完全没有转义 → 直接复用原串（零分配）。
+        if (s.indexOf("\\") < 0) { return s }
         var out: String = ""
+        var start: Int = 0
         var i: Int = 0
-        while (i < s.length) {
-            val c: String = s.substring(i, i + 1)
-            if (c == "\\" && i + 1 < s.length) {
-                val n: String = s.substring(i + 1, i + 2)
-                if (n == "n") {
+        val len: Int = s.length
+        while (i < len) {
+            if (s.charCodeAt(i) == 92 && i + 1 < len) {
+                // 先冲掉转义点之前的整段原文（切片，而非逐字符拼接）
+                if (i > start) { out = out + s.substring(start, i) }
+                val n: Int = s.charCodeAt(i + 1)
+                if (n == 110) {
                     out = out + "\n"
-                } else if (n == "r") {
+                } else if (n == 114) {
                     out = out + "\r"
-                } else if (n == "t") {
+                } else if (n == 116) {
                     out = out + "\t"
-                } else if (n == "\\") {
+                } else if (n == 92) {
                     out = out + "\\"
-                } else if (n == "\"") {
+                } else if (n == 34) {
                     out = out + "\""
                 } else {
                     // 未知转义：原样保留后续字符（与多数语言一致）
-                    out = out + n
+                    out = out + s.substring(i + 1, i + 2)
                 }
                 i = i + 2
+                start = i
             } else {
-                out = out + c
                 i = i + 1
             }
         }
+        if (start < len) { out = out + s.substring(start, len) }
         return out
     }
 
@@ -1105,11 +1225,13 @@ class PhotonPipeline {
         if (t == "") { return -1 }
 
         // 数字字面量
+        // （逐字符用 charCodeAt：`.`=46 `-`=45，零分配）
         var isNumber: Boolean = true
         var j: Int = 0
-        while (j < t.length) {
-            val ch: String = t.substring(j, j + 1)
-            if (!(this.phirIsDigitChar(ch) || ch == "." || ch == "-")) { isNumber = false; break }
+        val tLen: Int = t.length
+        while (j < tLen) {
+            val cc: Int = t.charCodeAt(j)
+            if (!((cc >= 48 && cc <= 57) || cc == 46 || cc == 45)) { isNumber = false; break }
             j = j + 1
         }
         if (isNumber) {
@@ -1117,16 +1239,16 @@ class PhotonPipeline {
             return hir.add("HirLit", t, ty, Span(0, 0, 1, 1, 1, 1), "")
         }
 
-        // 字符串字面量：必须以 " 开头且以 " 结尾，且中间无未转义引号
-        if (t.startsWith("\"") && t.length >= 2 && t.substring(t.length - 1, t.length) == "\"") {
+        // 字符串字面量：必须以 " 开头且以 " 结尾，且中间无未转义引号（零分配扫描）
+        if (t.startsWith("\"") && tLen >= 2 && t.charCodeAt(tLen - 1) == 34) {
             var valid: Boolean = true
             var esc: Boolean = false
             var k: Int = 1
-            while (k < t.length - 1) {
-                val c: String = t.substring(k, k + 1)
+            while (k < tLen - 1) {
+                val c: Int = t.charCodeAt(k)
                 if (esc) { esc = false }
-                else if (c == "\\") { esc = true }
-                else if (c == "\"") { valid = false; break }
+                else if (c == 92) { esc = true }
+                else if (c == 34) { valid = false; break }
                 k = k + 1
             }
             if (valid) {
@@ -1154,9 +1276,9 @@ class PhotonPipeline {
 
         // 二元表达式（按优先级）
         val split: List<String> = this.phirSplitBinary(t)
-        if (split.get(0) != "") {
-            val op: String = split.get(0)
-            val pos: Int = LirUtils.strToInt(split.get(1))
+        if (split[0] != "") {
+            val op: String = split[0]
+            val pos: Int = LirUtils.strToInt(split[1])
             val lhsText: String = t.substring(0, pos).trim()
             val rhsText: String = t.substring(pos + op.length).trim()
             val lhsId: Int = this.parsePhirExpr(hir, lhsText)
@@ -1188,9 +1310,10 @@ class PhotonPipeline {
             val callee: String = t.substring(0, parenPos).trim()
             var isIdent: Boolean = callee != ""
             var ci: Int = 0
-            while (ci < callee.length) {
-                val cc: String = callee.substring(ci, ci + 1)
-                if (!(this.phirIsWordChar(cc) || cc == "." || cc == ":")) {
+            val calleeLen: Int = callee.length
+            while (ci < calleeLen) {
+                val cc: Int = callee.charCodeAt(ci)
+                if (!(this.phirIsWordCode(cc) || cc == 46 || cc == 58)) {
                     isIdent = false; break
                 }
                 ci = ci + 1
@@ -1220,8 +1343,8 @@ class PhotonPipeline {
 
         // 成员访问 obj.field
         val dotSplit: List<String> = this.phirFindTopOp(t, listOf("."))
-        if (dotSplit.get(0) == ".") {
-            val dotPos: Int = LirUtils.strToInt(dotSplit.get(1))
+        if (dotSplit[0] == ".") {
+            val dotPos: Int = LirUtils.strToInt(dotSplit[1])
             val objId: Int = this.parsePhirExpr(hir, t.substring(0, dotPos).trim())
             val field: String = t.substring(dotPos + 1).trim()
             return hir.add("HirMember", field, "", Span(0, 0, 1, 1, 1, 1),
@@ -1241,9 +1364,8 @@ class PhotonPipeline {
         // 变量引用（带类型环境查询）
         var isVar: Boolean = t != ""
         j = 0
-        while (j < t.length) {
-            val ch: String = t.substring(j, j + 1)
-            if (!this.phirIsWordChar(ch)) { isVar = false; break }
+        while (j < tLen) {
+            if (!this.phirIsWordCode(t.charCodeAt(j))) { isVar = false; break }
             j = j + 1
         }
         if (isVar) {

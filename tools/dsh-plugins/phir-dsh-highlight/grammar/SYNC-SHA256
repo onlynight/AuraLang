@@ -1,0 +1,5 @@
+756ce6b741632be2ea7f9f1875e4686af56fe1762d00c84cec7de6489af0a01c  phir.tmLanguage.json
+upstream      D:\Code\AuraLang\tools\ide-extension\phir-vscode-extension\syntaxes\phir.tmLanguage.json
+checkout      D:\Code\AuraLang\tools
+language id   PHIR
+displayName   PHIR

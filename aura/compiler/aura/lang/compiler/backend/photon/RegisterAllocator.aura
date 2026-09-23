@@ -27,8 +27,13 @@ class RegisterAllocator {
     /// 实测 `"x = " + toStr(x)` 里字符串地址被 `toStr` 的返回值顶掉。
     private var availColors: String = "rbx,rsi,rdi,r12,r13,r14,r15"
 
-    /// 节点颜色表（扁平字符串 "nodeId|color\n"）。
-    private var colorMap: String = ""
+    /// 节点颜色表（**按 DAG 节点 ID 直接下标**，O(1)）。
+    ///
+    /// ⚠️ 旧实现是扁平字符串 `"nodeId|color\n"` + 全表扫描查找：条目数与
+    /// 整个 DAG 的节点数同阶，每次 `colorGet` 都要 O(N) 扫描并逐行
+    /// `substring` 分配 ⇒ Phase D（干扰图 + 着色）在真实工程上退化为 O(N²)
+    /// 并持续分配内存。键是整数节点 ID，直接下标即可。
+    private var colors: List<String> = arrayListOf<String>()
 
     /// 溢出节点列表（逗号分隔的 nodeId）。
     private var spilled: String = ""
@@ -61,7 +66,7 @@ class RegisterAllocator {
     private var labelInstrMap: String = ""
 
     init() {
-        this.colorMap = ""
+        this.colors = arrayListOf<String>()
         this.spilled = ""
         this.callStack = ""
         this.spillSlots = 0
@@ -77,7 +82,7 @@ class RegisterAllocator {
     /// 主入口：执行寄存器分配。
     fun allocate(d: MachineDag): Unit {
         this.dag = d
-        this.colorMap = ""
+        this.colors = arrayListOf<String>()
         this.spilled = ""
         this.callStack = ""
         this.spillSlots = 0
@@ -137,33 +142,15 @@ class RegisterAllocator {
 
     /// S1.4: 将颜色表中的寄存器名回写到 DagNode.reg 字段。
     fun applyColors(): Unit {
-        if (this.colorMap == "") { return }
-        var lineStart: Int = 0
-        var pos: Int = 0
-        val len: Int = this.colorMap.length
-        while (pos <= len) {
-            if (pos == len || this.colorMap[pos] == "\n") {
-                val line: String = this.colorMap.substring(lineStart, pos)
-                if (line != "") {
-                    // 找 | 分隔符
-                    var sepPos: Int = -1
-                    var i: Int = 0
-                    while (i < line.length) {
-                        if (line.charAt(i).toString() == "|") { sepPos = i; break }
-                        i = i + 1
-                    }
-                    if (sepPos > 0) {
-                        val nodeId: Int = strToInt(line.substring(0, sepPos))
-                        val color: String = line.substring(sepPos + 1, line.length)
-                        if (nodeId >= 0 && nodeId < this.dag.nodeCount) {
-                            val node: DagNode = this.dag.nodeOf(nodeId)
-                            node.reg = color
-                        }
-                    }
-                }
-                lineStart = pos + 1
+        var i: Int = 0
+        val len: Int = this.colors.size
+        while (i < len) {
+            val color: String = this.colors[i]
+            if (color != "" && i < this.dag.nodeCount) {
+                val node: DagNode = this.dag.nodeOf(i)
+                node.reg = color
             }
-            pos = pos + 1
+            i = i + 1
         }
     }
 
@@ -885,59 +872,29 @@ class RegisterAllocator {
         return text.split("|")
     }
 
-    // ── 颜色表操作（扁平字符串）──
+    // ── 颜色表操作（按节点 ID 下标）──
 
     /// 存储颜色。
+    ///
+    /// ⚠️ 一律用**下标**读写 `List`：本 VM 下 `list.get(i)` 是「未链接外部函数」，
+    /// 调用被静默忽略并返回 null（实测 `list.get(0)` → null）；`list.set(i, v)`
+    /// 同样不可靠。`list[i]` 读 / `list[i] = v` 写才是该 VM 支持的路径。
     private fun colorPut(nodeId: Int, color: String): Unit {
-        this.colorRemove(nodeId)
-        if (this.colorMap == "") {
-            this.colorMap = toStr(nodeId) + "|" + color + "\n"
-        } else if (this.colorMap.endsWith("\n")) {
-            this.colorMap = this.colorMap + toStr(nodeId) + "|" + color + "\n"
-        } else {
-            this.colorMap = this.colorMap + "\n" + toStr(nodeId) + "|" + color + "\n"
-        }
+        if (nodeId < 0) { return }
+        while (this.colors.size <= nodeId) { this.colors.add("") }
+        this.colors[nodeId] = color
     }
 
     /// 读取颜色。
     private fun colorGet(nodeId: Int): String {
-        val targetKey: String = toStr(nodeId) + "|"
-        var lineStart: Int = 0
-        var pos: Int = 0
-        val len: Int = this.colorMap.length
-        while (pos <= len) {
-            if (pos == len || this.colorMap[pos] == "\n") {
-                val line: String = this.colorMap.substring(lineStart, pos)
-                if (line.length > targetKey.length && line.startsWith(targetKey)) {
-                    return line.substring(targetKey.length, line.length)
-                }
-                lineStart = pos + 1
-            }
-            pos = pos + 1
-        }
-        return ""
+        if (nodeId < 0 || nodeId >= this.colors.size) { return "" }
+        return this.colors[nodeId]
     }
 
     /// 删除颜色。
     private fun colorRemove(nodeId: Int): Unit {
-        if (this.colorMap == "") { return }
-        val targetKey: String = toStr(nodeId) + "|"
-        var lineStart: Int = 0
-        var pos: Int = 0
-        var result: String = ""
-        val len: Int = this.colorMap.length
-        while (pos <= len) {
-            if (pos == len || this.colorMap[pos] == "\n") {
-                val line: String = this.colorMap.substring(lineStart, pos)
-                if (line != "" && line.length > targetKey.length && !line.startsWith(targetKey)) {
-                    if (result != "") { result = result + "\n" }
-                    result = result + line
-                }
-                lineStart = pos + 1
-            }
-            pos = pos + 1
-        }
-        this.colorMap = result
+        if (nodeId < 0 || nodeId >= this.colors.size) { return }
+        this.colors[nodeId] = ""
     }
 
     // ── 调用栈操作 ──

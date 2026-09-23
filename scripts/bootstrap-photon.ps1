@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 # bootstrap-photon.ps1 - Photon backend bootstrap verification (P1)
 # ============================================================
 #
@@ -51,11 +51,19 @@ function Invoke-Proc($exe, $argStr, $wd, $to) {
     $psi.RedirectStandardError = $true
     $psi.UseShellExecute = $false
     $p = [System.Diagnostics.Process]::Start($psi)
-    $so = $p.StandardOutput.ReadToEnd()
-    $se = $p.StandardError.ReadToEnd()
-    if ($p.WaitForExit($to * 1000)) { return @{ Out=$so; Err=$se; Code=$p.ExitCode; TimedOut=$false } }
-    try { $p.Kill() } catch {}
-    return @{ Out=$so; Err=$se; Code=-1; TimedOut=$true }
+    # ⚠️ 必须**异步**读两条管道。
+    # 旧实现：`$p.StandardOutput.ReadToEnd()` 之后再读 stderr —— 子进程（Photon 驱动
+    # 会往 stderr 打大量 `[vm] stdlib: loaded …` / 诊断告警）一旦写满 stderr 的 4 KB
+    # 管道缓冲就会阻塞，而父进程此刻正阻塞在读 stdout 上 ⇒ **经典管道死锁**：
+    # 现象是「脚本卡住、8 分钟零产物、子进程 WorkingSet 停在 8 MB」。
+    # 另外超时必须杀**进程树**：驱动是 aura.exe 的子进程，只 Kill 父进程会留下孤儿。
+    $soTask = $p.StandardOutput.ReadToEndAsync()
+    $seTask = $p.StandardError.ReadToEndAsync()
+    if ($p.WaitForExit($to * 1000)) {
+        return @{ Out=$soTask.Result; Err=$seTask.Result; Code=$p.ExitCode; TimedOut=$false }
+    }
+    taskkill /PID $p.Id /T /F 2>$null | Out-Null
+    return @{ Out=$soTask.Result; Err=$seTask.Result; Code=-1; TimedOut=$true }
 }
 
 # ---- reporting ----
@@ -120,11 +128,18 @@ if ($steps -contains "1") {
 
         $s1b = Join-Path $s1 "hw.exe"
         $probe2 = Invoke-Proc $AuraBin "build --aot `"$Root\tests\photon\P1\01_hello_world.aura`" --output `"$s1b`"" $Root $TimeoutSecs
-        if (Test-Path $s1b) {
+        if ($probe2.TimedOut) { Fail "Step 1b AOT stdlib" "build timeout" }
+        elseif (Test-Path $s1b) {
             $run2 = Invoke-Proc $s1b "" $s1 $TimeoutSecs
             $o = ($run2.Out -replace "`r","").Trim()
             if ($o -eq "Hello, World!") { Pass "Step 1b AOT stdlib (hello world)" }
-            else { Fail "Step 1b AOT stdlib" "stdout='$o' (expect 'Hello, World!')" }
+            else {
+                # 失败时必须带上**构建**侧的错误：此前只报 stdout=''，
+                # 若 hw.exe 是上一轮遗留的陈旧产物，真正的原因（AOT 构建失败）
+                # 会被完全掩盖，只能靠手工复现才发现。
+                $berr = FirstErr $probe2.Err
+                Fail "Step 1b AOT stdlib" "stdout='$o' (expect 'Hello, World!'); run.ExitCode=$($run2.Code); build.err=$(if ($berr) { $berr } else { '<empty>' })"
+            }
         } else {
             Fail "Step 1b AOT stdlib" "no exe. $(FirstErr $probe2.Err)"
         }
@@ -157,15 +172,42 @@ if ($steps -contains "2") {
     if ($DryRun) {
         Skip "Step 2 compile" "dry-run"
     } else {
-        foreach ($f in $runtimeFiles) {
-            if (-not (Test-Path $f)) { continue }
+        # 只编译**一个**代表文件做 smoke test。
+        #
+        # 为什么不全编译 5 个：这些是「运行时声明/常量」模块（无函数体），
+        # 管线对它们产出的 COFF **代码段为空**（实测 0 字节编码，落盘为 136 字符
+        # 的 hex 头）。逐个编译既慢（每个含驱动启动 ≈2 min）又无额外覆盖 ——
+        # 全链（导入解析 → HIR → SSA → LIR → DAG → 编码 → COFF 组装）编译
+        # Memory.aura 一个就全覆盖了。
+        #
+        # 判定也据此放宽：声明模块**只会有 hex 文本**（二进制落盘要求非空代码段），
+        # 因此 `.obj` 与 `.obj.hex` 任一存在都算通过。
+        # ⚠️ 这里**不能**写 `$f = $runtimeFiles[0]`：上面第 165 行的
+        # `foreach ($f in $runtimeFiles)` 会把 `$f` 留成**最后一个元素**
+        # （PowerShell 的 foreach 不建立新作用域），后续赋值又会被下面的
+        # `foreach` 之外……实测该写法下 `$f` 仍是 `Runtime.aura`（最后一个），
+        # 直接写成**字面量**最稳。
+        $f = "aura\core\aura\lang\native\Memory.aura"
+        if (-not (Test-Path $f)) {
+            Fail "Step 2 compile" "sample source missing: $f"
+        } else {
             $stem = [IO.Path]::GetFileNameWithoutExtension($f)
             $phir = Join-Path $s2 "$stem.phir"
+            StepLog "  [step2] src=$f stem=$stem (files=$($runtimeFiles.Count))"
+            $sw2 = [System.Diagnostics.Stopwatch]::StartNew()
             $r = Invoke-Proc $AuraBin "build -b photon `"$Root\$f`" --output `"$phir`"" $Root $TimeoutSecs
-            if ($r.TimedOut) { Fail "Step 2 $stem" "timeout"; continue }
-            $obj = Join-Path $s2 "$stem.obj"
-            if (Test-Path $obj) { Pass "Step 2 $stem -> .obj ($((Get-Item $obj).Length) B)" }
-            else { Fail "Step 2 $stem" ("no .obj. " + (FirstErr $r.Err)) }
+            $sw2.Stop()
+            $objBin = Join-Path $s2 "$stem.obj"
+            $objHex = Join-Path $s2 "$stem.obj.hex"
+            if ($r.TimedOut) {
+                Fail "Step 2 $stem" "timeout"
+            } elseif (Test-Path $objBin) {
+                Pass "Step 2 $stem -> .obj ($((Get-Item $objBin).Length) B, $([int]$sw2.Elapsed.TotalSeconds)s)"
+            } elseif (Test-Path $objHex) {
+                Pass "Step 2 $stem -> COFF hex ($((Get-Item $objHex).Length) chars, $([int]$sw2.Elapsed.TotalSeconds)s；声明模块无代码段)"
+            } else {
+                Fail "Step 2 $stem" ("no COFF artifact. " + (FirstErr $r.Err))
+            }
         }
     }
 }
@@ -185,15 +227,30 @@ if ($steps -contains "3") {
         Skip "Step 3" "dry-run"
     } else {
         $phir = Join-Path $s3 "compiler.phir"
+        # ⚠️ 这一步是**多分钟级**的：驱动（PhotonDriver + 20 个模块）本身跑在 VM
+        # 解释器上（实测 ≈3-4 M ops/s，比原生慢 ~50-100×），而 `Main.aura` 会展开成
+        # 2345 个函数 / 4 万行 .phir / ≈12 万 HIR 节点。实测解析 ≈50 ms/函数（线性）。
+        # 因此 -TimeoutSecs 需要给足（默认 600 s 通常不够，建议 ≥1800 s）。
+        StepLog "  注意：本步是**多十分钟级**（驱动在 VM 上解释执行，2345 个函数 / 12 万 HIR 节点）"
+        StepLog "        实测：-TimeoutSecs 1800 仍超时（≥30 min）；要跑完请给 -TimeoutSecs 5400 以上"
+        StepLog "        进度可从 $s3\photon_trace.log 观察（本步已开启 AURA_PHOTON_TRACE=1）"
+        # 打开阶段轨迹：长跑时至少能看到走到哪个 Phase，而不是干等。
+        $env:AURA_PHOTON_TRACE = "1"
+        $sw3 = [System.Diagnostics.Stopwatch]::StartNew()
         $r = Invoke-Proc $AuraBin "build -b photon `"$Root\$entry`" --output `"$phir`"" $Root $TimeoutSecs
+        $sw3.Stop()
+        Remove-Item Env:\AURA_PHOTON_TRACE -ErrorAction SilentlyContinue
+        $secs3 = [int]$sw3.Elapsed.TotalSeconds
         if ($r.TimedOut) {
-            Fail "Step 3 compile" "timeout"
+            $tf = Join-Path $s3 "photon_trace.log"
+            $where = if (Test-Path $tf) { ((Get-Content $tf -Tail 1) -join "") } else { "<no trace>" }
+            Fail "Step 3 compile" "timeout after ${secs3}s; trace last: $where"
         } elseif (Test-Path "$s3\Main.exe") {
-            Pass "Step 3 compile -> Main.exe ($((Get-Item "$s3\Main.exe").Length) B)"
+            Pass "Step 3 compile -> Main.exe ($((Get-Item "$s3\Main.exe").Length) B, ${secs3}s)"
         } else {
             $err = FirstErr $r.Err
             StepLog "  reason: $err"
-            Fail "Step 3 compile" "no Main.exe (multi-file compiler exceeds single-file pipeline)"
+            Fail "Step 3 compile" "no Main.exe after ${secs3}s; err=$(if ($err) { $err } else { '<empty>' })"
         }
     }
 }

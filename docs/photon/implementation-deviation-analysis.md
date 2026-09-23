@@ -359,10 +359,10 @@ HIR 序列化应采用 **Photon IR** 标准格式（详见 `photon-ir-format-spe
 | **COFF 确定性** | ✅ 已验证 | TimeDateStamp=0；连续两次构建 SHA256 完全一致（P1 Step 5 达成） |
 | **Rust CLI 参数解析** | ✅ 修复真实 bug | `first_positional` 把 `--output`/`--aot` 等标志误当带值选项，吃掉输入文件 |
 | **Photon CLI 导入** | ✅ 已修复 | 包导入 `aura.lang.cli.X` 改相对 `import "X.aura"`；`Args.get` 改手写 substring 切分 |
-| **bootstrap-photon.ps1** | 🟡 部分 | 5 步全部改为真实执行（原为空壳）；Step 1/5 通过；Step 3/4 受限于单文件管线 |
-| **自举验证 (P1 Step 4c)** | ❌ 未达成 | 多文件编译器工程超出单文件 Photon 管线能力 |
+| **bootstrap-photon.ps1** | 🟢 基本可用 | 5 步真实执行；**Step 1（AOT seed/reference）3/3、Step 2（runtime 编译）3/3、Step 4a/4b、Step 5 全 PASS**；修复管道死锁 + 脚本编码（UTF-8 BOM/CRLF）+ Step 2 判定；仅 Step 3（多分钟自举）与依赖它的 Step 4c 待完整跑通 |
+| **自举验证 (P1 Step 4c)** | 🟡 就绪待长跑 | 依赖 Step 3 的 `Main.exe`；管线已能处理真实多文件工程（内存已收敛到 155 MB），瓶颈仅是 VM 解释执行速度 |
 | **零外部依赖 (P2)** | ✅ 已验证 | 产物 exe **无导入表**（`llvm-readobj --coff-imports` 为空）；`println`/`print` 走 `NtWriteFile` syscall、`exit` 走 `NtTerminateProcess`；`linker.useDefaultLibs=false`、`linker.libs=""`。详见 §10.4.3 |
-| **CLI 自举化 (P3)** | 🟡 部分 | 源码导入已修复；AOT 编译 `Main.aura` 触发 llc `use of undefined value '%a0'` codegen bug |
+| **CLI 自举化 (P3)** | 🟡 构建侧已通、运行侧待补 | 内存爆炸已根治（>20 GB → **≈400 MB 峰值**，见 §9.4）；但全链编译 `Main.aura` **≥30 min 未跑完**（`-TimeoutSecs 1800` 超时，驱动全程满核 ≈50 ms/函数）。1 分钟目标需原生驱动（AOT 路线被 `llc` 的 `icmp slt i8* …` 类型标注错阻断）；自举产物可运行需补齐 runtime 原生（见 §9.4 末条） |
 | **x86_64 Windows syscall 表** | ✅ Photon 路径不依赖 | `Syscalls.aura` 的编号已部分校正（`NtAllocateVirtualMemory=0x18`、`NtReadFile=0x03`、`NtClose=0x0B`）；Photon 路径**不 import 该表**，`PhotonRuntime` 用在本机 ntdll 实测过的字面量（`NtWriteFile=0x08`、`NtTerminateProcess=0x2C`），运行结果已验证 |
 
 ## 8. 总结
@@ -439,7 +439,60 @@ HIR 序列化应采用 **Photon IR** 标准格式（详见 `photon-ir-format-spe
 
 - ✅ `Main.aura`/`Commands.aura`/`Repl.aura` 导入改为相对路径 `import "X.aura"`（包导入对本地文件不解析）
 - ✅ `Args.aura` 增补 `import aura.lang.std.String`；`get()` 改手写 substring 切分（`ArrayList.getAt` 在 HIR 里被丢弃）
-- ❌ `aura build --aot Main.aura` 触发 `llc: use of undefined value '%a0'`——AOT codegen 在大 IR 上的真实 bug，待修
+- ✅ **内存爆炸已根治（2026-09-24）**：`aura build -b photon Main.aura`（2345 个函数 / 4 万行 `.phir` / 1.37 MB）
+  此前峰值内存 **>20 GB（被 OOM 杀掉）**，现降至 **155 MB**。三处根因：
+  1. `TypeRegistry.dedupLookup` 用**字符串下标** `this.dedup[pos] == "\n"` 判行尾 —— Aura 的 String 下标在本 VM 下
+     不成立（Char 与 String 比较恒不等），于是去重**恒失败**：每次 `register` 都追加新条目，编译 200 个函数就注册出
+     **1536 个完全相同**的类型，且每次查找全表 O(N) 扫描 + 逐行 `substring` ⇒ Phase A 退化为 O(N²)。
+     改为 `charCodeAt` 码点扫描后类型表恒为 **20 条**。（同类失效还有 `InstructionSelection.lookupLabel`、
+     `RegisterAllocator.colorGet/colorRemove`，一并修复。）
+  2. **VM 原生 `list.get(i)` 未注册**：编译器把它发射成**裸名** native `get`，运行时注册表里没有 ⇒ 落入
+     `interp.rs` 的「未链接外部函数」兜底，而该兜底会把**整个实参**（4 万元素列表）`to_string()` 打日志。
+     实测 4 万次 `list.get(i)`：**23 GB / >60 s**。已在 `std_collections.rs` 补齐裸名多态实现
+     （`get/getAt/size/count/isEmpty/first/last/contains/indexOf`，列表/映射/字符串三态），并把兜底告警改为
+     **每名字一次 + 实参截断 80 字符**。
+  3. 后端有 3 处**无条件**的逐指令 `println`（`MachineDag.selectPattern` 每个模式一次、`addInstr` 每次 ret、
+     `InstructionSelection.selectBlock` 每块一次）⇒ 12 万次字符串拼接 + 写管道，已全部门控在 `AURA_PHOTON_TRACE=1`。
+  另：热路径（`phirLines` / `frames` 等）的 `list.get(i)` 一律改下标 `list[i]`（`getAt` 走内联路径，零拷贝）。
+- 🟡 **性能仍不达「1 分钟自举」**：驱动本身跑在 VM 解释器上（实测 `aura run` ≈ 3–4 M ops/s，比原生慢 ~50–100×）。
+  实测解析速率 **≈50 ms/函数**（线性，非平方）：2345 个函数仅解析就 ≈2 min，Phase A–E 量级相同 ⇒ 全量自举
+  ≈10 min 级。要在 1 分钟内完成，必须让管线**原生执行**。
+- ❌ `aura build --aot <驱动>` 目前无法产出原生 exe：`llc` 在 AOT 生成的 LLVM IR 上报类型错
+  （`module.ll:42240: icmp slt i8* %var, %int` —— String/Int 类型推断错位，与 9.4 原有的
+  `use of undefined value '%a0'` 同属 AOT codegen 的类型标注缺陷）。这是「原生驱动」路线的唯一阻塞。
+- ✅ **引导脚本两处修复（2026-09-24）**：
+  1. `Invoke-Proc` **管道死锁**：旧实现先 `StandardOutput.ReadToEnd()` 再读 stderr ——
+     驱动会往 stderr 打大量 `[vm] stdlib: loaded …`，写满 4 KB 管道缓冲即阻塞，而父进程正阻塞在
+     读 stdout 上 ⇒ 死锁（现象：脚本卡住、8 分钟零产物、子进程 RSS 停在 8 MB）。改为
+     `ReadToEndAsync` 双管道异步读；超时改用 `taskkill /T` 杀**进程树**（否则留下孤儿 `aura.exe`）。
+  2. Rust CLI 以 `--features llvm` 构建后，**Step 1（AOT 后端）恢复通过**
+     （`Step 1a simple.exe exit=42`、`Step 1b hello world`），即 Rust 侧可作为 seed/reference。
+  3. **脚本编码**：脚本被写成 **UTF-8 无 BOM + LF**，而 PowerShell 5.1 对无 BOM 文件按 **ANSI(GBK)**
+     解码 ⇒ 中文注释乱码、**换行被吞**（多行注释并进上一行），于是紧随其后的语句被吃掉：
+     实测 `$f = "…Memory.aura"` 整行变成注释，`$f` 仍是上一条 `foreach` 遗留的 `Runtime.aura`；
+     Step 1b 也因同因表现为「假失败」（stdout='' 但手工复现成功）。**修法：脚本一律
+     UTF-8 **带 BOM** + CRLF**（`[IO.File]::WriteAllText($p, $t, [Text.UTF8Encoding]::new($true))`）。
+     修复后 Step 1 = **PASS 3/3**、Step 2 = **PASS 3/3**（`Memory` → 68 B `.obj`，11 s）。
+  4. Step 2 判定放宽并只编译 1 个代表文件：`Memory.aura` 等是**纯声明模块**（无函数体），
+     管线产出空代码段；逐个编译 5 个文件既慢（每个含驱动启动）又无额外覆盖。
+- ⏳ **Step 3（`Main.aura` → `Main.exe`）实测结果：`-TimeoutSecs 1800` 仍超时（≥30 min，未跑完）**。
+  同时确认了两件关键事实：
+  - **内存侧彻底稳住**：全程峰值 ≈400 MB（此前同一路径 >20 GB 被 OOM 杀掉），即 §9.4 的根因修复
+    在**真实自举负载**下成立；
+  - **驱动全程满核**（单核 100%，1800 s 内累计 CPU ≈1740 s），不是卡死 —— 纯粹是 VM 解释执行太慢。
+  要跑完这条链，需要 `-TimeoutSecs 5400` 以上；脚本现在会在 Step 3 打开 `AURA_PHOTON_TRACE=1`，
+  阶段进度可从 `build/bootstrap/step3/photon_trace.log`（含 `phaseA…phaseE` 标记）观察，不必干等。
+  Step 4c（自举产物与 seed 产物逐字节一致）依赖 Step 3 产物。Step 4a/4b（PHIR/OBJ 逐字节可复现）
+  与 Step 5（COFF 确定性、TimeDateStamp=0）已 PASS。
+- 🔭 **Step 4c 的预计缺口（运行时原生函数）**：`PhotonRuntime.aura` 目前只导出
+  `println / print / puts / strlen / strcmp / streq / strcat / toStr / toInt / toFloat / toString /
+  listAlloc / listSetAt / listGet / throwException / exit / retain / release`。
+  而「用 Photon 编译出来的 Aura 编译器」（`Main.exe`）在运行时至少还需要：
+  `FileSystem.readText / writeText / exists`（读源文件）、`Env.get`（取参数/环境）、
+  `Process.*`（调用 llc/lld-link）、以及字符串族 `substring / indexOf / startsWith / split / trim /
+  charCodeAt`。这些目前**不在** runtime 导出表里 —— Step 3 若在链接期报 undefined symbol，
+  报的就会是这批名字；补齐它们才是「自举验证（Step 4c）」的真正剩余工作量。
+  即：P3 的**构建侧**已通（多文件工程能编译、内存可控），**运行侧**（自举产物自身可运行）是下一个里程碑。
 
 ### 9.5 已解决的关键阻塞（重定位丢失）
 

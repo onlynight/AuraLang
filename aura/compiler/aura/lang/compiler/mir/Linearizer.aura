@@ -101,7 +101,7 @@ class Linearizer {
         val params: List<String> = splitComma(func.params)
         var i: Int = 0
         while (i < params.size) {
-            val paramValId: Int = strToInt(params.get(i))
+            val paramValId: Int = strToInt(params[i])
             val paramVal: MirValue = this.src.valueOf(paramValId)
             val varName: String = paramVal.aux  // 参数名存储在 aux 字段
             val loadId: Int = this.tac.add("LOAD_VAR", varName, "", sp, mirNoKids())
@@ -161,7 +161,7 @@ class Linearizer {
         val instrList: List<String> = splitComma(block.instrs)
         var ii: Int = 0
         while (ii < instrList.size) {
-            val instrValId: Int = strToInt(instrList.get(ii))
+            val instrValId: Int = strToInt(instrList[ii])
             val instrVal: MirValue = this.src.valueOf(instrValId)
             this.linearizeInstr(instrVal)
             ii = ii + 1
@@ -236,7 +236,7 @@ class Linearizer {
             var argsStr: String = ""
             var i: Int = 0
             while (i < args.size) {
-                val argName: String = this.valMapLookup(strToInt(args.get(i)))
+                val argName: String = this.valMapLookup(strToInt(args[i]))
                 if (argName != "") {
                     if (argsStr != "") {
                         argsStr = argsStr + " "
@@ -263,7 +263,7 @@ class Linearizer {
         var argsStr: String = ""
         var i: Int = 0
         while (i < args.size) {
-            val argName: String = this.valMapLookup(strToInt(args.get(i)))
+            val argName: String = this.valMapLookup(strToInt(args[i]))
             if (argName != "") {
                 if (argsStr != "") {
                     argsStr = argsStr + " "
@@ -349,7 +349,7 @@ class Linearizer {
         val pairs: List<String> = MirUtils.mirSplit(this.blockLabelMap, ",")
         var i: Int = 0
         while (i < pairs.size) {
-            val pair: String = pairs.get(i)
+            val pair: String = pairs[i]
             if (pair != "" && pair.contains("|")) {
                 val parts: List<String> = MirUtils.mirSplit(pair, "|")
                 if (parts.size >= 2 && parts[0] == key) {
@@ -404,7 +404,7 @@ class Linearizer {
         val lines: List<String> = MirUtils.mirSplit(this.valMap, "\n")
         var i: Int = 0
         while (i < lines.size) {
-            val line: String = lines.get(i)
+            val line: String = lines[i]
             if (line != "" && line.contains("|")) {
                 val parts: List<String> = MirUtils.mirSplit(line, "|")
                 if (parts.size >= 2 && parts[0] == key) {

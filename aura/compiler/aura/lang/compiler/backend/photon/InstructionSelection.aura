@@ -13,6 +13,7 @@ package aura.lang.compiler.backend.photon
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
+import aura.lang.std.Env
 import "Lir.aura"
 import "MachineDag.aura"
 // `emitConst` 需要按类型 id 判断字符串常量（this.types.isString）：
@@ -35,8 +36,13 @@ class InstructionSelector {
     /// 已选择的指令数量计数器。
     var selectedCount: Int = 0
 
-    /// LIR → DAG 节点 ID 映射（扁平字符串："lirId|dagId\n..."）。
-    private var nodeMap: String = ""
+    /// LIR → DAG 节点 ID 映射（**按 LIR 值 ID 直接下标**，O(1)）。
+    ///
+    /// ⚠️ 旧实现是扁平字符串 `"lirId|dagId\n…"`，`lookupNode` 全表扫描
+    ///（含逐行 `substring` + `charAt` 比较 + `startsWith`）：编译真实工程时
+    /// 该表条目数与**整个模块的值数**同阶（数万条），每次查询 O(N) 且分配
+    /// ⇒ 整条 Phase C 退化为 O(N²) 并持续吃内存。键就是整数 ID，直接下标即可。
+    private var nodeMapIds: List<Int> = arrayListOf<Int>()
 
     /// 当前内存链头节点 ID（-1 表示无内存依赖）。
     private var curChain: Int = -1
@@ -50,8 +56,8 @@ class InstructionSelector {
     /// 标签计数器（用于控制流块的本地标签）。
     private var labelCount: Int = 0
 
-    /// 块 ID → 标签名 映射（扁平字符串："blockId|labelName\n..."）。
-    private var labelMap: String = ""
+    /// 块 ID → 标签名 映射（**按块 ID 直接下标**，O(1)）。
+    private var labelNames: List<String> = arrayListOf<String>()
 
     /// 字符串常量计数器（用于生成 @str.N 符号）。
     private var strConstCount: Int = 0
@@ -90,12 +96,12 @@ class InstructionSelector {
         this.funcName = ""
         this.patterns = ""
         this.selectedCount = 0
-        this.nodeMap = ""
+        this.nodeMapIds = arrayListOf<Int>()
         this.curChain = -1
         this.tmpCount = 0
         this.lir = null
         this.labelCount = 0
-        this.labelMap = ""
+        this.labelNames = arrayListOf<String>()
         this.strConstCount = 0
         this.stringConstants = ""
         this.types = TypeRegistry()
@@ -110,13 +116,13 @@ class InstructionSelector {
     /// 将 LIR 程序转换为 MachineDag（主入口）。
     fun select(src: LirProgram): MachineDag {
         this.dag = MachineDag()
-        this.nodeMap = ""
+        this.nodeMapIds = arrayListOf<Int>()
         this.curChain = -1
         this.tmpCount = 0
         this.selectedCount = 0
         this.funcName = ""
         this.labelCount = 0
-        this.labelMap = ""
+        this.labelNames = arrayListOf<String>()
         this.strConstCount = 0
         this.stringConstants = ""
         this.paramIndex = 0
@@ -226,7 +232,7 @@ class InstructionSelector {
     fun selectFunction(func: LirFunction, src: LirProgram): Unit {
         this.funcName = func.name
         this.labelCount = 0
-        this.labelMap = ""
+        this.labelNames = arrayListOf<String>()
         this.paramIndex = 0
         this.constRegCounter = 0
         this.phiPreds = ""
@@ -478,7 +484,9 @@ class InstructionSelector {
         this.emitPhiMovsForBlock(block.id)
 
         // 处理终结指令。
-        println("    [IS] selectBlock term=" + toStr(block.term) + " instrs=" + block.instrs)
+        if (Env.get("AURA_PHOTON_TRACE", "") == "1") {
+            println("    [IS] selectBlock term=" + toStr(block.term) + " instrs=" + block.instrs)
+        }
         if (block.term >= 0) {
             this.selectValue(block.term, block.id, src)
         }
@@ -504,7 +512,7 @@ class InstructionSelector {
         val lines: List<String> = this.splitFlat(this.phiPreds, "\n")
         var i: Int = 0
         while (i < lines.size) {
-            val line: String = lines.get(i)
+            val line: String = lines[i]
             if (line != "") {
                 val parts: List<String> = this.splitFlat(line, "|")
                 if (parts.size >= 3 && parts[0] == this.intToStr(blockId)) {
@@ -1266,28 +1274,23 @@ class InstructionSelector {
 
     /// 注册块 ID → 标签名映射。
     private fun registerLabel(blockId: Int, label: String): Unit {
-        this.labelMap = this.labelMap + MachineDagUtils.toStr(blockId) + "|" +
-                        label + "\n"
+        if (blockId < 0) { return }
+        while (this.labelNames.size <= blockId) { this.labelNames.add("") }
+        this.labelNames[blockId] = label
     }
 
     /// 查找块 ID 对应的标签名。
+    ///
+    /// ⚠️ 行尾判定必须用 `charCodeAt(pos) == 10`：旧实现写的是
+    /// `this.labelMap[pos] == "\n"`，而 **Aura 的 String 下标在本 VM 下不可用**
+    /// （Char 与 String 比较恒不等），于是循环只在 `pos == len` 时进入行分支，
+    /// 整个表被当成一行处理 —— 查找实际恒失败、只能走 `bb<id>` 兜底。
+    /// 兜底名恰好与 `selectBlock` 现在的命名一致，所以此前“看起来能用”，
+    /// 但任何命名约定变化都会立刻退化成标签解析失败。
     private fun lookupLabel(blockId: Int): String {
-        if (this.labelMap == "") {
-            return "bb" + LirUtils.toStr(blockId)
-        }
-        val targetKey: String = LirUtils.toStr(blockId) + "|"
-        var lineStart: Int = 0
-        var pos: Int = 0
-        val len: Int = this.labelMap.length
-        while (pos <= len) {
-            if (pos == len || this.labelMap[pos] == "\n") {
-                val line: String = this.labelMap.substring(lineStart, pos)
-                if (line.length > targetKey.length && line.startsWith(targetKey)) {
-                    return line.substring(targetKey.length, line.length)
-                }
-                lineStart = pos + 1
-            }
-            pos = pos + 1
+        if (blockId >= 0 && blockId < this.labelNames.size) {
+            val s: String = this.labelNames[blockId]
+            if (s != "") { return s }
         }
         return "bb" + LirUtils.toStr(blockId)
     }
@@ -1369,45 +1372,22 @@ class InstructionSelector {
 
     // ── 节点映射管理 ──
 
-    /// 注册 LIR ID → DAG ID 映射。
+    /// 注册 LIR ID → DAG ID 映射（首次注册优先，与旧「全表扫描取首条」语义一致）。
+    ///
+    /// ⚠️ 用下标读写 `List`：本 VM 下 `list.get(i)` 未链接（静默返回 null），
+    /// `list.set(i, v)` 亦不可靠；`list[i]` / `list[i] = v` 才是可用路径。
     private fun registerNode(lirId: Int, dagId: Int): Unit {
-        if (this.nodeMap == "") {
-            this.nodeMap = MachineDagUtils.toStr(lirId) + "|" +
-                           MachineDagUtils.toStr(dagId) + "\n"
-        } else {
-            this.nodeMap = this.nodeMap + MachineDagUtils.toStr(lirId) + "|" +
-                           MachineDagUtils.toStr(dagId) + "\n"
+        if (lirId < 0) { return }
+        while (this.nodeMapIds.size <= lirId) { this.nodeMapIds.add(-1) }
+        if (this.nodeMapIds[lirId] < 0) {
+            this.nodeMapIds[lirId] = dagId
         }
     }
 
-    /// 查找 LIR ID 对应的 DAG ID。
+    /// 查找 LIR ID 对应的 DAG ID（O(1)）。
     private fun lookupNode(lirId: Int): Int {
-        if (this.nodeMap == "") {
-            return -1
-        }
-        val targetStr: String = MachineDagUtils.toStr(lirId) + "|"
-        var start: Int = 0
-        var len: Int = this.nodeMap.length
-        var i: Int = 0
-        while (i < len) {
-            if (this.nodeMap.charAt(i).toString() == "\n") {
-                if (this.nodeMap.substring(start, i).startsWith(targetStr)) {
-                    val dagIdStr: String = this.nodeMap.substring(
-                        start + targetStr.length, i)
-                    return MachineDagUtils.strToInt(dagIdStr)
-                }
-                start = i + 1
-                i = start
-            } else {
-                i = i + 1
-            }
-        }
-        if (this.nodeMap.substring(start, len).startsWith(targetStr)) {
-            val dagIdStr: String = this.nodeMap.substring(
-                start + targetStr.length, len)
-            return MachineDagUtils.strToInt(dagIdStr)
-        }
-        return -1
+        if (lirId < 0 || lirId >= this.nodeMapIds.size) { return -1 }
+        return this.nodeMapIds[lirId]
     }
 
     /// 生成下一个临时值计数器。

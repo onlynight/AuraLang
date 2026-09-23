@@ -19,6 +19,7 @@ package aura.lang.compiler.mir
 // ─────────────────────────────────────────────────────────────
 
 import aura.lang.std.String
+import aura.lang.std.Env
 import "../hir/Hir.aura"
 import "../lexer/Span.aura"
 // 同包依赖：输出程序类型 / 类型注册表 / 扁平字符串助手。
@@ -45,6 +46,20 @@ class SsaBuilder {
 
     /// 临时值计数器（用于调试命名）。
     private var tmpCount: Int = 0
+
+    /// 临时性能探针：已构建函数数（用于定位 Phase A 的规模行为）。
+    private var dbgFuncCount: Int = 0
+
+    /// 临时性能探针：varMap/varVersion 查询次数与累计扫描字符数。
+    private var dbgLookups: Int = 0
+    private var dbgScanned: Int = 0
+
+    /// 临时性能探针：各类操作调用次数。
+    private var dbgStmts: Int = 0
+    private var dbgExprs: Int = 0
+    private var dbgBlocks: Int = 0
+    private var dbgCalls: Int = 0
+    private var dbgHasType: Int = 0
 
     /// 内存链当前值（memory chain head）。
     private var memHead: Int = -1
@@ -110,7 +125,20 @@ class SsaBuilder {
             val childId: Int = HirUtils.hirKidsAt(kids, i)
             val childKind: String = src.kindOf(childId)
             if (childKind == "HirFunction") {
+                this.dbgFuncCount = this.dbgFuncCount + 1
+                // 逐函数探针（性能诊断用，AURA_PHOTON_TRACE=1 时才打印）。
+                // 默认关闭：真实工程有 2000+ 函数，逐函数 println 既刷屏又拖慢。
+                val traceOn: Boolean = Env.get("AURA_PHOTON_TRACE", "") == "1"
+                if (this.dbgFuncCount >= 20 && traceOn) {
+                    println("      [ssab] n=" + this.dbgFuncCount + " " + src.textOf(childId))
+                }
                 this.buildFunction(src, childId)
+                if (this.dbgFuncCount >= 20 && traceOn) {
+                    println("      [ssae] n=" + this.dbgFuncCount + " values=" + this.program.valueCount +
+                            " exprs=" + this.dbgExprs +
+                            " tys=" + this.types.count + " tyCalls=" + this.types.dbgCalls +
+                            " tyScanned=" + this.types.dbgScanned)
+                }
             }
             i = i + 1
         }
@@ -212,6 +240,7 @@ class SsaBuilder {
 
     /// 构建一个语句。
     fun buildStmt(src: Hir, id: Int) {
+        this.dbgStmts = this.dbgStmts + 1
         val kind: String = src.kindOf(id)
 
         if (kind == "HirValDecl" || kind == "HirVarDecl") {
@@ -346,7 +375,7 @@ class SsaBuilder {
         // 对 then 中定义的变量，检查是否在 else 中也定义
         var i: Int = 0
         while (i < thenDefs.size) {
-            val varName: String = thenDefs.get(i)
+            val varName: String = thenDefs[i]
             // 检查 else 是否也定义了这个变量
             var foundInElse: Boolean = false
             var j: Int = 0
@@ -376,89 +405,110 @@ class SsaBuilder {
     /// 返回变量名列表。
     private fun findChangedVars(before: String, after: String): List<String> {
         // ⚠️ 不能用 arrayListOf + add（VM bug：add 后 get 返回 null）。
-        // 用逗号分隔的扁平字符串收集结果，最后再 split。
-        if (before == after) {
-            return emptyList()
-        }
-        var resultStr: String = ""
-        // 格式：name|vid\nname|vid\n...
-        val beforeLines: List<String> = this.splitStr(before, "\n")
-        val afterLines: List<String> = this.splitStr(after, "\n")
-
-        // 从 after 末尾向前搜索（最新版本优先）
-        var i: Int = afterLines.size - 1
-        while (i >= 0) {
-            val afterLine: String = afterLines.get(i)
-            if (afterLine == "") { i = i - 1; continue }
-            val parts: List<String> = this.splitStr(afterLine, "|")
-            if (parts.size < 2) { i = i - 1; continue }
-            val name: String = parts[0]
-            val afterVid: Int = this.strToInt(parts[1])
-            // 检查是否已记录过
-            if (this.containsInFlat(resultStr, name)) { i = i - 1; continue }
-            // 在 before 中查找同名变量的最新 vid
-            var beforeVid: Int = -1
-            var j: Int = beforeLines.size - 1
-            while (j >= 0) {
-                if (beforeLines[j] != "") {
-                    val bParts: List<String> = this.splitStr(beforeLines[j], "|")
-                    if (bParts.size >= 2 && bParts[0] == name) {
-                        beforeVid = this.strToInt(bParts[1])
-                        break
-                    }
-                }
-                j = j - 1
-            }
-            // 新变量（before 中没有）或值发生了变化
-            if (beforeVid < 0 || beforeVid != afterVid) {
-                resultStr = resultStr + name + ","
-            }
-            i = i - 1
-        }
-        // 去掉末尾逗号后拆分
-        if (resultStr == "") { return emptyList() }
-        val trimmed: String = this.substring(resultStr, 0, resultStr.length - 1)
-        return trimmed.split(",")
+        val csv: String = this.changedVarsCsv(before, after)
+        if (csv == "") { return emptyList() }
+        return csv.split(",")
     }
 
-    /// 检查扁平字符串（逗号分隔）中是否包含指定名称。
-    private fun containsInFlat(flat: String, name: String): Boolean {
-        if (flat == "") { return false }
-        val parts: List<String> = flat.split(",")
+    /// 收集「最新 vid 发生变化」的变量名，返回逗号分隔串（最新优先，去重）。
+    ///
+    /// ⚠️ 性能关键：本函数**每个 `if` 语句**都会被调用（`insertPhisAtMerge`），
+    /// 旧实现每次都对 `before`/`after` 整表 `split("\n")`，再对每个候选变量
+    /// 逐行 `split("|")` 比对 —— 单次调用 O(A²) 次字符串分配（A = 变量表条目
+    /// 数，随函数内赋值数增长）。编译 `Main.aura` 时，`Lexer.scanString` /
+    /// `Lexer.scanChar` 这类「大函数 + 深层嵌套 if」把 Phase A 拖到
+    /// 单函数 10–25 秒、峰值内存 800 MB+。
+    ///
+    /// 现改为纯整数索引扫描（`charCodeAt` 比较 + `\n`/`|` 码点定位），
+    /// 只对**命中**的名字切片一次，整体 O(表长 × 变量数) 且零中间分配。
+    private fun changedVarsCsv(before: String, after: String): String {
+        if (before == after) { return "" }
+        var resultStr: String = ""
+        var end: Int = after.length
+        while (end > 0) {
+            var start: Int = end - 1
+            while (start >= 0 && after.charCodeAt(start) != 10) { start = start - 1 }
+            start = start + 1
+            if (end > start) {
+                var sep: Int = start
+                while (sep < end && after.charCodeAt(sep) != 124) { sep = sep + 1 }
+                if (sep < end) {
+                    val name: String = after.substring(start, sep)
+                    if (name != "" && !this.containsInFlat(resultStr, name)) {
+                        val afterVid: Int = this.strToInt(after.substring(sep + 1, end))
+                        val beforeVid: Int = this.mapVidOf(before, name)
+                        // 新变量（before 中没有）或值发生了变化
+                        if (beforeVid < 0 || beforeVid != afterVid) {
+                            if (resultStr == "") {
+                                resultStr = name
+                            } else {
+                                resultStr = resultStr + "," + name
+                            }
+                        }
+                    }
+                }
+            }
+            end = start - 1
+        }
+        return resultStr
+    }
+
+    /// 比较 `s[from, to)` 是否与 `token` 逐字符相等（**零分配**）。
+    private fun tokenRangeEquals(s: String, from: Int, to: Int, token: String): Boolean {
+        if (to - from != token.length) { return false }
         var i: Int = 0
-        while (i < parts.size) {
-            if (parts[i] == name) { return true }
+        while (i < token.length) {
+            if (s.charCodeAt(from + i) != token.charCodeAt(i)) { return false }
+            i = i + 1
+        }
+        return true
+    }
+
+    /// 在 `name|vid\n…` 扁平变量表中，从末尾向前找 `name` 的最新 vid（未找到 -1）。
+    ///
+    /// 零分配：倒序按 `\n` 定位行，行内按 `|`（124）定位，只对命中项切片一次。
+    private fun mapVidOf(map: String, name: String): Int {
+        if (map == "" || name == "") { return -1 }
+        var end: Int = map.length
+        while (end > 0) {
+            var start: Int = end - 1
+            while (start >= 0 && map.charCodeAt(start) != 10) { start = start - 1 }
+            start = start + 1
+            if (end > start) {
+                var sep: Int = start
+                while (sep < end && map.charCodeAt(sep) != 124) { sep = sep + 1 }
+                if (sep < end && this.tokenRangeEquals(map, start, sep, name)) {
+                    return this.strToInt(map.substring(sep + 1, end))
+                }
+            }
+            end = start - 1
+        }
+        return -1
+    }
+
+    /// 检查扁平字符串（逗号分隔）中是否包含指定名称（零分配扫描，不拆分）。
+    private fun containsInFlat(flat: String, name: String): Boolean {
+        if (flat == "" || name == "") { return false }
+        var start: Int = 0
+        val len: Int = flat.length
+        var i: Int = 0
+        while (i <= len) {
+            if (i == len || flat.charCodeAt(i) == 44) {
+                if (this.tokenRangeEquals(flat, start, i, name)) { return true }
+                start = i + 1
+            }
             i = i + 1
         }
         return false
     }
 
-    /// 字符串截取（避免依赖不可靠的 substring 实现）。
-    private fun substring(s: String, start: Int, end: Int): String {
-        var result: String = ""
-        var i: Int = start
-        while (i < end && i < s.length) {
-            result = result + s.charAt(i).toString()
-            i = i + 1
-        }
-        return result
-    }
-
     /// 在 varMap 中查找变量的 ValueID。
+    ///
+    /// `before` 参数保留以兼容调用点（原实现同样只查 `after`；
+    /// `afterThen`/`afterElse` 快照本身已包含 `before` 的全部条目）。
     private fun lookupVar(before: String, name: String, after: String): Int {
-        // 先查 after（新定义的值），从末尾向前搜索以获取最新版本
-        val afterLines: List<String> = this.splitStr(after, "\n")
-        var i: Int = afterLines.size - 1
-        while (i >= 0) {
-            val line: String = afterLines.get(i)
-            if (line == "") { i = i - 1; continue }
-            val parts: List<String> = this.splitStr(line, "|")
-            if (parts.size >= 2 && parts[0] == name) {
-                return this.strToInt(parts[1])
-            }
-            i = i - 1
-        }
-        return -1
+        // 从末尾向前搜索以获取最新版本（零分配）
+        return this.mapVidOf(after, name)
     }
 
     /// 在指定块插入 Phi 节点（for loop back-edge）。
@@ -475,7 +525,7 @@ class SsaBuilder {
         var newVarMap: String = this.varMap
         var i: Int = 0
         while (i < afterDefs.size) {
-            val varName: String = afterDefs.get(i)
+            val varName: String = afterDefs[i]
             val beforeVid: Int = this.lookupVar("", varName, before)
             if (beforeVid >= 0) {
                 val afterVid: Int = this.lookupVar("", varName, after)
@@ -493,40 +543,10 @@ class SsaBuilder {
     }
 
     /// 找出两个 varMap 快照之间新增/值变化的变量名，返回逗号分隔字符串。
+    ///
+    /// 与 `findChangedVars` 同源，共用零分配的 `changedVarsCsv`。
     private fun findChangedVarsStr(before: String, after: String): String {
-        if (before == after) { return "" }
-        var resultStr: String = ""
-        val beforeLines: List<String> = this.splitStr(before, "\n")
-        val afterLines: List<String> = this.splitStr(after, "\n")
-
-        var i: Int = afterLines.size - 1
-        while (i >= 0) {
-            val afterLine: String = afterLines.get(i)
-            if (afterLine == "") { i = i - 1; continue }
-            val parts: List<String> = this.splitStr(afterLine, "|")
-            if (parts.size < 2) { i = i - 1; continue }
-            val name: String = parts[0]
-            val afterVid: Int = this.strToInt(parts[1])
-            if (this.containsInFlat(resultStr, name)) { i = i - 1; continue }
-            var beforeVid: Int = -1
-            var j: Int = beforeLines.size - 1
-            while (j >= 0) {
-                if (beforeLines[j] != "") {
-                    val bParts: List<String> = this.splitStr(beforeLines[j], "|")
-                    if (bParts.size >= 2 && bParts[0] == name) {
-                        beforeVid = this.strToInt(bParts[1])
-                        break
-                    }
-                }
-                j = j - 1
-            }
-            if (beforeVid < 0 || beforeVid != afterVid) {
-                resultStr = resultStr + name + ","
-            }
-            i = i - 1
-        }
-        if (resultStr == "") { return "" }
-        return this.substring(resultStr, 0, resultStr.length - 1)
+        return this.changedVarsCsv(before, after)
     }
 
     /// 构建 while 语句。
@@ -619,7 +639,7 @@ class SsaBuilder {
             val recLines: List<String> = this.splitStr(phiRecs, "\n")
             var ri: Int = 0
             while (ri < recLines.size) {
-                val rec: String = recLines.get(ri)
+                val rec: String = recLines[ri]
                 if (rec != "") {
                     val recParts: List<String> = this.splitStr(rec, "|")
                     if (recParts.size >= 3) {
@@ -697,6 +717,7 @@ class SsaBuilder {
 
     /// 构建块（HirBlock）。
     fun buildBlock(src: Hir, id: Int) {
+        this.dbgBlocks = this.dbgBlocks + 1
         val kids: String = src.kidsOf(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
         var i: Int = 0
@@ -753,6 +774,7 @@ class SsaBuilder {
 
     /// 构建一个表达式，返回 SSA ValueID。
     fun buildExpr(src: Hir, id: Int): Int {
+        this.dbgExprs = this.dbgExprs + 1
         val kind: String = src.kindOf(id)
 
         if (kind == "HirLit") {
@@ -884,6 +906,7 @@ class SsaBuilder {
 
     /// 构建函数调用。
     fun buildCall(src: Hir, id: Int): Int {
+        this.dbgCalls = this.dbgCalls + 1
         val funcName: String = src.textOf(id)
         val kids: String = src.kidsOf(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
@@ -1091,19 +1114,10 @@ class SsaBuilder {
 
     /// Phase A S2: 获取变量版本号。
     private fun getVarVersion(name: String): Int {
-        val lines: List<String> = MirUtils.mirSplit(this.varVersion, "\n")
-        var i: Int = 0
-        while (i < lines.size) {
-            val line: String = lines.get(i)
-            if (line != "" && line.contains("|")) {
-                val parts: List<String> = MirUtils.mirSplit(line, "|")
-                if (parts.size >= 2 && parts[0] == name) {
-                    return strToInt(parts[1])
-                }
-            }
-            i = i + 1
-        }
-        return 0
+        // 零分配倒序扫描（见 mapVidOf）；未找到时与原实现一致返回 0。
+        val v: Int = this.mapVidOf(this.varVersion, name)
+        if (v < 0) { return 0 }
+        return v
     }
 
     /// Phase A S2: 设置变量版本号。
@@ -1115,19 +1129,9 @@ class SsaBuilder {
     ///
     /// 遍历所有 `name|vid\n` 行，按 `|` 拆分后匹配名称。
     private fun varMapLookup(name: String): Int {
-        val lines: List<String> = MirUtils.mirSplit(this.varMap, "\n")
-        // 从末尾向前搜索：最后一次赋值（最新版本）优先
-        var i: Int = lines.size - 1
-        while (i >= 0) {
-            val line: String = lines.get(i)
-            if (line != "" && line.contains("|")) {
-                val parts: List<String> = MirUtils.mirSplit(line, "|")
-                if (parts.size >= 2 && parts[0] == name) {
-                    return strToInt(parts[1])
-                }
-            }
-            i = i - 1
-        }
+        // 从末尾向前搜索：最后一次赋值（最新版本）优先（零分配，见 mapVidOf）
+        val vid: Int = this.mapVidOf(this.varMap, name)
+        if (vid >= 0) { return vid }
         // 未找到：返回 0 值常量
         return this.program.addValue("Const", this.types.intType(64), "", "0", this.curBlock)
     }

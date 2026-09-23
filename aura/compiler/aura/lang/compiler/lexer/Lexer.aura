@@ -146,7 +146,7 @@ object LexerUtils {
         var i: Int = 0
         while (i < items.size) {
             if (i == index) {
-                return items.get(i)
+                return items[i]
             }
             i = i + 1
         }

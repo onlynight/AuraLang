@@ -76,6 +76,10 @@ class TypeRegistry {
         }
 
         val id: Int = this.kinds.size
+        if (id % 200 == 0) {
+            println("      [tyreg] id=" + id + " kind=" + kind + " name=" + name +
+                    " fields=" + fieldIds + " elem=" + toStr(elemId) + " len=" + toStr(arrayLen))
+        }
         this.kinds.add(kind)
         this.widths.add(width)
         this.names.add(name)
@@ -94,46 +98,53 @@ class TypeRegistry {
 
     // ── 去重表操作 ──
 
+    /// 临时性能探针：去重查找次数与累计扫描字符数。
+    var dbgCalls: Int = 0
+    var dbgScanned: Int = 0
+
     /// 在扁平字符串中去重查找。找到返回 ID，否则返回 -1。
+    ///
+    /// ⚠️ 原实现有两处致命问题：
+    ///   1. 用**字符串下标** `this.dedup[pos]` / `line[i]` 判断 `\n` 与 `|` ——
+    ///      Aura 的 String 下标在本 VM 下不成立（实测恒不等），于是循环永远
+    ///      走不到行尾分支，查找**恒返回 -1**；
+    ///   2. 恒 -1 ⇒ 每次 `register` 都追加新条目，去重表无界增长
+    ///      （实测编译 `Main.aura` 时注册出 1500+ 个**完全相同**的基本类型），
+    ///      而每次查找又要全表 O(N) 扫描 + 逐行 `substring` 分配 ⇒ Phase A
+    ///      退化为 O(N²) 且内存暴涨。
+    ///
+    /// 现改为 `charCodeAt` 逐码点扫描（`\n`=10、`|`=124），零中间分配，
+    /// 只在**命中**时切片一次。
     private fun dedupLookup(key: String): Int {
-        if (this.dedup == "") { return -1 }
-        // 手动遍历：按 \n 分行，按 | 分列
+        this.dbgCalls = this.dbgCalls + 1
+        this.dbgScanned = this.dbgScanned + this.dedup.length
+        if (this.dedup == "" || key == "") { return -1 }
+        val klen: Int = key.length
         var lineStart: Int = 0
         var pos: Int = 0
         val len: Int = this.dedup.length
         while (pos <= len) {
-            if (pos == len || this.dedup[pos] == "\n") {
-                val line: String = this.dedup.substring(lineStart, pos)
-                val foundId: Int = this.dedupLineLookup(line, key)
-                if (foundId >= 0) {
-                    return foundId
+            if (pos == len || this.dedup.charCodeAt(pos) == 10) {
+                // 行区间 [lineStart, pos)，格式 "key|id"
+                if (pos - lineStart > klen && this.dedup.charCodeAt(lineStart + klen) == 124) {
+                    var same: Boolean = true
+                    var i: Int = 0
+                    while (i < klen) {
+                        if (this.dedup.charCodeAt(lineStart + i) != key.charCodeAt(i)) {
+                            same = false
+                            break
+                        }
+                        i = i + 1
+                    }
+                    if (same) {
+                        return this.dedupStrToInt(this.dedup.substring(lineStart + klen + 1, pos))
+                    }
                 }
                 lineStart = pos + 1
             }
             pos = pos + 1
         }
         return -1
-    }
-
-    /// 在单行中查找 key。行格式："key|id"。
-    private fun dedupLineLookup(line: String, key: String): Int {
-        if (line == "") { return -1 }
-        // 找到 | 位置
-        var sepPos: Int = -1
-        var i: Int = 0
-        val len: Int = line.length
-        while (i < len) {
-            if (line[i] == "|") {
-                sepPos = i
-                break
-            }
-            i = i + 1
-        }
-        if (sepPos < 0) { return -1 }
-        val lineKey: String = line.substring(0, sepPos)
-        if (lineKey != key) { return -1 }
-        val idStr: String = line.substring(sepPos + 1, len)
-        return this.dedupStrToInt(idStr)
     }
 
     /// 检查字符串是否包含子串。
@@ -146,7 +157,8 @@ class TypeRegistry {
             var match: Boolean = true
             var j: Int = 0
             while (j < slen) {
-                if (text[i + j] != sub[j]) {
+                // 字符串下标在本 VM 下不可用：一律 charCodeAt 比较码点
+                if (text.charCodeAt(i + j) != sub.charCodeAt(j)) {
                     match = false
                     break
                 }
@@ -424,9 +436,13 @@ class TypeRegistry {
         var total: Int = 0
         var i: Int = 0
         var neg: Boolean = false
-        if (len > 0 && text[0] == "-") { neg = true; i = 1 }
+        // ⚠️ 原实现用字符串下标（`text[0] == "-"`、`text[i]`）与
+        // `"0123456789".indexOf(char)`：String 下标在本 VM 下不可用，转换结果
+        // 恒为 0 —— 去重表一旦命中也会返回错误的 TypeID（全部塌成 0）。
+        // 改为 charCodeAt 直接算数字（45='-'，48='0'）。
+        if (len > 0 && text.charCodeAt(0) == 45) { neg = true; i = 1 }
         while (i < len) {
-            val c: Int = "0123456789".indexOf(text[i])
+            val c: Int = text.charCodeAt(i) - 48
             if (c >= 0 && c <= 9) { total = total * 10 + c }
             i = i + 1
         }
@@ -441,7 +457,7 @@ class TypeRegistry {
         var i: Int = 0
         val len: Int = text.length
         while (i < len) {
-            if (text[i] == ",") { count = count + 1 }
+            if (text.charCodeAt(i) == 44) { count = count + 1 }   // ','
             i = i + 1
         }
         return count
