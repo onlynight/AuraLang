@@ -100,20 +100,19 @@ fn check_embedded_stdlib() {
         Err(_) => return,
     };
 
-    // .auc 文件路径（相对于 compiler/ 目录）
-    let std_auc_dir = manifest_dir.parent().unwrap().join("build");
+    // .auc 文件路径（项目根 build/aura_core_auc/，目录镜像 aura/core/）
+    let aura_core_auc_dir = manifest_dir.parent().unwrap().parent().unwrap().join("build/aura_core_auc");
 
-    // 需要嵌入的标准库模块
+    // 需要嵌入的标准库模块（相对 build/aura_core_auc/ 的路径）
     let required_modules = [
-        "Math",
-        "Time",
-        "Collections",
-        "Test",
+        "aura/lang/std/Math.auc",
+        "aura/lang/std/Time.auc",
+        "aura/lang/std/Test.auc",
     ];
 
     let mut missing = Vec::new();
     for module in &required_modules {
-        let auc_path = std_auc_dir.join(format!("{}.auc", module));
+        let auc_path = aura_core_auc_dir.join(module);
         if !auc_path.exists() {
             missing.push(module.to_string());
         }
@@ -125,7 +124,7 @@ fn check_embedded_stdlib() {
             missing.join(", ")
         );
         println!(
-            "cargo:warning=Aura: Run `aura stdlib-compile ../../aura/core/aura/lang/std --output build` to precompile"
+            "cargo:warning=Aura: Run `aura stdlib-compile aura/core --output build/aura_core_auc` to precompile"
         );
     }
 }

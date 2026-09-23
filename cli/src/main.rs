@@ -131,19 +131,34 @@ fn extract_opt(args: &[String], name: &str) -> Option<String> {
     None
 }
 
+/// 已知的「带取值」选项——其后紧跟一个值（输出路径/三元组等），
+/// 扫描位置参数时必须把「选项 + 取值」成对跳过，否则取值会被误认成输入文件。
+///
+/// 其余 `--xxx` 一律视为无取值的开关（如 `--aot`、`--debug`），只跳过自己。
+const OPTS_WITH_VALUE: &[&str] = &[
+    "--output", "-o", "--backend", "-b", "--target", "--opt",
+    "--llvm-home", "--expr",
+];
+
+fn is_opt_with_value(a: &str) -> bool {
+    OPTS_WITH_VALUE.iter().any(|o| *o == a)
+}
+
 fn first_positional<'a>(args: &'a [String], skip: &'a str) -> Option<&'a String> {
-    let skip_short = skip == "--output" || skip == "--backend";
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
-        let is_opt = a == skip
-            || (skip_short && (a == "-o" || a == "-b"));
-        if is_opt {
-            // 跳过选项本身与其取值（否则 `-o out.exe` 的路径会被当成输入文件）
+        if a == skip {
+            // 要跳过的选项：带取值则连取值一起跳过，纯开关只跳过自己。
+            i += if is_opt_with_value(a) { 2 } else { 1 };
+            continue;
+        }
+        if is_opt_with_value(a) {
+            // `--output <path>` 等的取值永远不是输入文件。
             i += 2;
             continue;
         }
-        if !a.starts_with("--") {
+        if !a.starts_with("--") && !a.starts_with('-') {
             return Some(&args[i]);
         }
         i += 1;
@@ -408,6 +423,15 @@ fn cmd_build_photon(args: &[String]) {
     // ── HIR → .phir 文本（直接序列化，无 JSON 中间步骤）──
     let phir_text = hir_to_phir(&hir, &module_name, &input);
 
+    // 确保 .phir 输出的父目录存在
+    if let Some(parent) = std::path::Path::new(&phir_path).parent() {
+        if !parent.exists() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!("Warning: failed to create directory {}: {}", parent.display(), e);
+            }
+        }
+    }
+
     if let Err(e) = std::fs::write(&phir_path, &phir_text) {
         eprintln!("Warning: failed to write .phir output {}: {}", phir_path, e);
     } else {
@@ -428,15 +452,21 @@ fn cmd_build_photon(args: &[String]) {
         // 构建驱动参数
         let driver_path = "aura/compiler/aura/lang/compiler/backend/photon/PhotonDriver.aura";
         
+        // 输出目录 = .phir 文件所在目录（确保与 --output 一致）
+        let out_dir = std::path::Path::new(&phir_path)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| "build/photon_test".to_string());
+
         let mut cmd = std::process::Command::new(&aura_exe);
         cmd.args(["run", driver_path]);
         cmd.env("AURA_PHOTON_PHIR", &phir_path);
-        cmd.env("AURA_PHOTON_OUT", "build/photon_test");
+        cmd.env("AURA_PHOTON_OUT", &out_dir);
         cmd.env("AURA_PHOTON_MODULE", &module_name);
         
         println!("  调用驱动: {}", driver_path);
         println!("  .phir 文件: {}", phir_path);
-        println!("  输出目录: build/photon_test");
+        println!("  输出目录: {}", out_dir);
         println!("  模块名: {}", module_name);
         
         let output = cmd.output();
@@ -463,7 +493,7 @@ fn cmd_build_photon(args: &[String]) {
                 // 于是只能落下 hex 文本），而 lld-link 需要的是**二进制** COFF。
                 // Rust CLI 具备完整文件系统能力，由它补上这一步，
                 // 使 `aura build -b photon` 真正产出可执行文件。
-                photon_postprocess(&stdout, &module_name);
+                photon_postprocess(&stdout, &module_name, &out_dir);
             }
             Err(e) => {
                 eprintln!("Error: failed to run Photon driver: {}", e);
@@ -484,9 +514,8 @@ fn cmd_build_photon(args: &[String]) {
 /// Photon 后端后处理：把管线落下的 hex 目标文件转成二进制、执行链接、运行产物。
 ///
 /// `driver_stdout` 为 PhotonDriver 的标准输出（其中含 `链接命令: …` 一行）。
-/// 产物目录与 PhotonDriver 的 `AURA_PHOTON_OUT` 一致（`build/photon_test`）。
-fn photon_postprocess(driver_stdout: &str, module_name: &str) {
-    let out_dir = "build/photon_test";
+/// `out_dir` 为产物目录（与 AURA_PHOTON_OUT 一致）。
+fn photon_postprocess(driver_stdout: &str, module_name: &str, out_dir: &str) {
 
     // 1) hex → 二进制（main 对象 + runtime 对象）
     //
@@ -1793,7 +1822,7 @@ fn cmd_stdlib_compile(args: &[String]) {
         exit(1);
     }
 
-    let out_dir = output.unwrap_or_else(|| "std-auc".to_string());
+    let out_dir = output.unwrap_or_else(|| "build/aura_core_auc".to_string());
     let out_path = std::path::Path::new(&out_dir);
 
     if let Err(e) = std::fs::create_dir_all(out_path) {

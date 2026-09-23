@@ -40,7 +40,9 @@ pub struct StdlibCompileResult {
 ///
 /// This is the main entry point for Phase 2 stdlib compilation:
 /// 1. Scans `core_dir` for .aura files
-/// 2. Compiles each .aura → .auc via `compiler::codegen::compile_source`
+/// 2. Compiles each .aura → .auc via `compiler::codegen::compile_source`,
+///    preserving the directory structure under `output_dir` so every class
+///    lands in its own `.auc` file (its own package)
 /// 3. Generates stdlib index (module metadata)
 /// 4. Generates FFI index (extern declarations)
 /// 5. Optionally compiles the C FFI library (if `cffi_dir` exists)
@@ -87,13 +89,25 @@ pub fn compile_stdlib(
     std::fs::create_dir_all(output_dir)
         .map_err(|e| LoomError::Config(format!("cannot create {}: {}", output_dir.display(), e)))?;
 
-    // 3. Compile each .aura → .auc
+    // 3. Compile each .aura → .auc (preserving directory structure so each
+    //    class lands in its own package — the relative path from `core_dir`
+    //    is mirrored under `output_dir` with `.aura` → `.auc`).
     let mut auc_files = Vec::new();
     let mut compile_errors = Vec::new();
 
     for aura_file in &aura_files {
-        let module_name = aura_file.file_stem().and_then(|s| s.to_str()).unwrap_or("module");
-        let auc_path = output_dir.join(format!("{}.auc", module_name));
+        // Compute the path relative to `core_dir` so the output tree mirrors
+        // the source tree (e.g. `aura/lang/std/Math.aura` → `aura/lang/std/Math.auc`).
+        let rel_path = aura_file.strip_prefix(core_dir).unwrap_or(aura_file);
+        let rel_str = rel_path.to_string_lossy().to_string();
+        let out_name = rel_str.strip_suffix(".aura").unwrap_or(&rel_str);
+        let auc_path = output_dir.join(format!("{}.auc", out_name));
+
+        // Create parent directory if needed.
+        if let Some(parent) = auc_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| LoomError::Config(format!("cannot create {}: {}", parent.display(), e)))?;
+        }
 
         let source = std::fs::read_to_string(aura_file).map_err(|e| {
             LoomError::Config(format!("cannot read {}: {}", aura_file.display(), e))
@@ -102,14 +116,14 @@ pub fn compile_stdlib(
         match compile_source(&source) {
             Ok(module) => {
                 if let Err(e) = write_auc(&auc_path.to_string_lossy(), &module) {
-                    compile_errors.push(format!("write failed for {}: {}", module_name, e));
+                    compile_errors.push(format!("write failed for {}: {}", rel_str, e));
                     continue;
                 }
-                tracing::debug!("  compiled {} → {}", module_name, auc_path.display());
+                tracing::debug!("  compiled {} → {}", rel_str, auc_path.display());
                 auc_files.push(auc_path);
             }
             Err(e) => {
-                compile_errors.push(format!("compile failed for {}: {}", module_name, e));
+                compile_errors.push(format!("compile failed for {}: {}", rel_str, e));
             }
         }
     }

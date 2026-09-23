@@ -2,6 +2,11 @@
 # itself a pnpm workspace. No packages are federated.
 packages: []
 
+# Windows treats pnpm's default symlinked virtual store as an "untrusted mount
+# point", which makes `node_modules/typescript/bin/tsc` unreachable during the
+# build. Hoisted layout materialises real directories instead.
+nodeLinker: hoisted
+
 allowBuilds:
   esbuild: true
 

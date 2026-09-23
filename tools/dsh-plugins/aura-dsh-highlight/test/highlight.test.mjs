@@ -10,6 +10,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -34,6 +35,23 @@ import {
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '..');
+
+/**
+ * Resolve a path relative to the checkout root.
+ *
+ * The plugin has lived at both `<repo>/tools/dsh-plugins/...` and
+ * `<repo>/rust/tools/dsh-plugins/...`, so a fixed `../..` depth is not stable.
+ * Walking up until the target exists keeps the fixture reachable either way.
+ */
+function fixturePath(...segments) {
+  for (let dir = root; ; dir = resolve(dir, '..')) {
+    const candidate = resolve(dir, ...segments);
+    if (existsSync(candidate)) return candidate;
+    if (dirname(dir) === dir) {
+      throw new Error(`fixture not found: ${segments.join('/')}`);
+    }
+  }
+}
 
 const HELLO = `// a line comment
 fun main() {
@@ -253,7 +271,7 @@ test('shiki: dark mode selects the dark palette', async () => {
 });
 
 test('shiki: real fixture file round-trips', async () => {
-  const path = resolve(root, '..', '..', '..', 'examples', 'basics', 'mini_struct.aura');
+  const path = fixturePath('examples', 'basics', 'mini_struct.aura');
   const code = await readFile(path, 'utf8');
   const tokens = await tokenizeAura(code, { theme: 'light' });
   assert.equal(tokens.length, code.split('\n').length);

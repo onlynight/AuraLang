@@ -123,33 +123,37 @@ fn test_stdlib_consistency() {
 
 #[test]
 fn test_embedded_stdlib_modules_exist() {
-    let build_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../build");
+    let build_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../build/aura_core_auc");
     let modules = [
-        "Math.auc",
-        "Time.auc",
-        "Collections.auc",
-        "Test.auc",
-        "Ascii.auc",
-        "Assert.auc",
-        "Encoding.auc",
-        "Iter.auc",
-        "Json.auc",
-        "StringBuilder.auc",
-        "TestHelper.auc",
-        "Path.auc",
-        "String.auc",
-        "Actor.auc",
-        "Channel.auc",
-        "Coroutine.auc",
-        // 并发包（aura.lang.concurrent）：同步原语为纯 Aura，Thread/Future 为 native 声明占位
-        "Atomic.auc",
-        "Mutex.auc",
-        "RwLock.auc",
-        "Condvar.auc",
-        "Barrier.auc",
-        "Semaphore.auc",
-        "Thread.auc",
-        "Future.auc",
+        "aura/lang/std/Math.auc",
+        "aura/lang/std/Time.auc",
+        "aura/lang/std/Test.auc",
+        "aura/lang/std/Ascii.auc",
+        "aura/lang/std/Assert.auc",
+        "aura/lang/std/Encoding.auc",
+        "aura/lang/std/Iter.auc",
+        "aura/lang/std/Json.auc",
+        "aura/lang/std/string/StringBuilder.auc",
+        "aura/lang/std/TestHelper.auc",
+        "aura/lang/std/Path.auc",
+        "aura/lang/String.auc",
+        "aura/lang/std/Random.auc",
+        "aura/lang/std/File.auc",
+        "aura/lang/std/Process.auc",
+        // 异常类层次结构
+        "aura/lang/errors/Throwable.auc",
+        "aura/lang/errors/Error.auc",
+        "aura/lang/errors/Exception.auc",
+        "aura/lang/errors/IOException.auc",
+        // 并发同步原语
+        "aura/lang/concurrent/Atomic.auc",
+        "aura/lang/concurrent/Mutex.auc",
+        "aura/lang/concurrent/RwLock.auc",
+        "aura/lang/concurrent/Condvar.auc",
+        "aura/lang/concurrent/Barrier.auc",
+        "aura/lang/concurrent/Semaphore.auc",
+        "aura/lang/concurrent/Thread.auc",
+        "aura/lang/concurrent/Future.auc",
     ];
 
     let mut missing = Vec::new();
@@ -162,7 +166,7 @@ fn test_embedded_stdlib_modules_exist() {
 
     if !missing.is_empty() {
         panic!(
-            "嵌入标准库模块缺失: {:?}\n请先运行: aura stdlib-compile aura/core/aura/lang/std --output build（并发包：aura/core/aura/lang/concurrent）",
+            "嵌入标准库模块缺失: {:?}\n请先运行: aura stdlib-compile aura/core --output build/aura_core_auc",
             missing
         );
     }

@@ -5,14 +5,15 @@
 //!
 //! 编译（**两步，顺序不能颠倒**）：
 //! ```text
-//! aura stdlib-compile aura/core --output rust/build/aura_core_auc
+//! aura stdlib-compile aura/core --output build/aura_core_auc
 //! cargo build -p cli --features llvm
 //! ```
 //! 第二条 `cargo build` 不能省：`.auc` 是通过 `include_bytes!` 编进二进制的，
 //! 只跑 `stdlib-compile` 不会刷新运行期看到的副本。
 //!
-//! 输出**只此一处**：`rust/build/aura_core_auc/`，且目录结构镜像 `aura/core/`
-//! （见下方「嵌入路径约定」）。一次编译整棵 core 树即可覆盖全部嵌入模块。
+//! 输出**只此一处**：`build/aura_core_auc/`（项目根目录），且目录结构镜像
+//! `aura/core/`（见下方「嵌入路径约定」）。一次编译整棵 core 树即可覆盖全部
+//! 嵌入模块。
 //!
 //! 调用优先级：
 //!   1. 嵌入 .auc 中的 Aura 编译函数（`stdlib_func_map`，非 native 声明）
@@ -39,30 +40,30 @@
 //!   aura/core/aura/lang/concurrent/ — 并发设施
 //!   aura/core/aura/lang/native/     — native 原语声明（Layer 0-A）
 //!   aura/compiler/aura/lang/compiler/ — 编译器基础设施（Layer 0-B）
-//!   rust/build/aura_core_auc/         — 预编译 .auc（目录镜像 aura/core/）
+//!   build/aura_core_auc/              — 预编译 .auc（目录镜像 aura/core/）
 
 // ── 嵌入路径约定 ──
 //
-// `.auc` 字节码**统一收拢**在 `rust/build/aura_core_auc/` 下，目录结构**镜像
+// `.auc` 字节码**统一收拢**在 `build/aura_core_auc/`（项目根目录）下，目录结构**镜像
 // `aura/core/`** 的源码路径（去掉 `aura/core/` 前缀，`.aura` → `.auc`）：
 //
-//   aura/core/aura/lang/String.aura            → aura_core_auc/aura/lang/String.auc
-//   aura/core/aura/lang/std/Math.aura          → aura_core_auc/aura/lang/std/Math.auc
+//   aura/core/aura/lang/String.aura            → build/aura_core_auc/aura/lang/String.auc
+//   aura/core/aura/lang/std/Math.aura          → build/aura_core_auc/aura/lang/std/Math.auc
 //   aura/core/aura/lang/collection/Collections.aura
-//                                             → aura_core_auc/aura/lang/collection/Collections.auc
-//   aura/core/aura/lang/native/io/Stdio.aura   → aura_core_auc/aura/lang/native/io/Stdio.auc
+//                                             → build/aura_core_auc/aura/lang/collection/Collections.auc
+//   aura/core/aura/lang/native/io/Stdio.aura   → build/aura_core_auc/aura/lang/native/io/Stdio.auc
 //
 // 因此生成只需**一条命令**（一次编译整棵 core 树，输出自带镜像目录层级）：
 //
-//   aura stdlib-compile aura/core --output rust/build/aura_core_auc
+//   aura stdlib-compile aura/core --output build/aura_core_auc
 //
 // 之后 `cargo build` 不能省：`.auc` 通过 `core_auc!`（= `include_bytes!`）
 // 编进二进制，只跑 `stdlib-compile` 不会刷新运行期看到的副本。
 
-/// 嵌入 `rust/build/aura_core_auc/<相对路径>` 下的 `.auc`。
+/// 嵌入 `build/aura_core_auc/<相对路径>` 下的 `.auc`。
 macro_rules! core_auc {
     ($rel:literal) => {
-        include_bytes!(concat!("../../../build/aura_core_auc/", $rel))
+        include_bytes!(concat!("../../../../build/aura_core_auc/", $rel))
     };
 }
 
