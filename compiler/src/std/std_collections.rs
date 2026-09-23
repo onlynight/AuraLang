@@ -15,6 +15,27 @@ pub fn register_prelude(reg: &mut NativeRegistry) {
     reg.register("listOf", nat_list_of);
     reg.register("mutableListOf", nat_mutable_list_of);
     reg.register("arrayOf", nat_array_of);
+    // ── List/集合裸名方法（`xs.get(i)` / `xs.size` 等）──
+    //
+    // ⚠️ 编译器对**接收者静态类型无法解析**的集合方法调用会发射**裸名** native
+    // （见 `codegen::emit` / `codegen::mir` 的 native 名单里的 `("get", 2)`、
+    // `("size", 1)` …）。这些名字此前只存在于名单、**运行时注册表里没有**，
+    // 于是每次调用都落入 `interp.rs` 的「未链接外部函数」兜底 —— 而该兜底
+    // 会把**整个实参**（可能是一个 4 万元素的列表）`to_string()` 打进日志：
+    // 实测 4 万次 `list.get(i)` 峰值内存 **23GB**、耗时 > 60s（正是
+    // `Main.aura` 自举编译时「内存轻松超过 20G」的直接原因）。
+    //
+    // 这里补齐裸名实现（列表/映射/字符串多态），既消除兜底日志，也让这些调用
+    // 真正返回正确结果（此前兜底返回 `Value::Int(0)`）。
+    reg.register("get", nat_index_get);
+    reg.register("getAt", nat_index_get);
+    reg.register("size", nat_len_generic);
+    reg.register("count", nat_len_generic);
+    reg.register("isEmpty", nat_is_empty);
+    reg.register("first", nat_first_generic);
+    reg.register("last", nat_last_generic);
+    reg.register("contains", nat_contains_generic);
+    reg.register("indexOf", nat_index_of_generic);
     // HIR 会把 `xs.size` / `xs.length` / `xs.isEmpty` 等成员访问降级为 `Collections.listSize`
     // （依赖 sema 类型信息）。该函数必须**始终可用**，不能依赖用户 `import Collections`，
     // 否则降级结果会落入「未链接的外部函数」分支返回 0。
@@ -172,6 +193,93 @@ fn nat_list_size(args: &[Value]) -> Value {
     match &args[0] {
         Value::List(items) => Value::Int(items.len() as i64),
         _ => Value::Int(0),
+    }
+}
+
+// ── 裸名集合方法（多态：列表 / 映射 / 字符串）──
+
+/// `get(x, i)` / `getAt(x, i)`：列表按下标、映射按键。
+///
+/// 多态的原因：编译器在接收者静态类型解析失败时会发射裸名 `get`，
+/// 而该调用既可能来自列表也可能来自映射（`m.get(key)`），实现必须两者都认。
+fn nat_index_get(args: &[Value]) -> Value {
+    let key = args.get(1).cloned().unwrap_or(Value::Null);
+    match &args[0] {
+        Value::List(items) => {
+            let idx = key.as_int();
+            if idx < 0 {
+                return Value::Null;
+            }
+            items.get(idx as usize).cloned().unwrap_or(Value::Null)
+        }
+        Value::Map(map) => map.get(&key).cloned().unwrap_or(Value::Null),
+        _ => Value::Null,
+    }
+}
+
+/// `size(x)` / `count(x)`：列表长度 / 映射条目数 / 字符串字符数。
+fn nat_len_generic(args: &[Value]) -> Value {
+    match &args[0] {
+        Value::List(items) => Value::Int(items.len() as i64),
+        Value::Map(map) => Value::Int(map.len() as i64),
+        Value::Str(s) => Value::Int(s.chars().count() as i64),
+        _ => Value::Int(0),
+    }
+}
+
+/// `first(x)`：列表首元素。
+fn nat_first_generic(args: &[Value]) -> Value {
+    match &args[0] {
+        Value::List(items) => items.first().cloned().unwrap_or(Value::Null),
+        Value::Str(s) => s
+            .chars()
+            .next()
+            .map(|c| Value::str_(c.to_string()))
+            .unwrap_or(Value::Null),
+        _ => Value::Null,
+    }
+}
+
+/// `last(x)`：列表末元素。
+fn nat_last_generic(args: &[Value]) -> Value {
+    match &args[0] {
+        Value::List(items) => items.last().cloned().unwrap_or(Value::Null),
+        Value::Str(s) => s
+            .chars()
+            .last()
+            .map(|c| Value::str_(c.to_string()))
+            .unwrap_or(Value::Null),
+        _ => Value::Null,
+    }
+}
+
+/// `contains(x, v)`：列表元素包含 / 映射键包含 / 字符串子串包含。
+fn nat_contains_generic(args: &[Value]) -> Value {
+    let item = args.get(1).cloned().unwrap_or(Value::Null);
+    match &args[0] {
+        Value::List(items) => Value::Bool(items.iter().any(|i| *i == item)),
+        Value::Map(map) => Value::Bool(map.contains_key(&item)),
+        Value::Str(s) => Value::Bool(s.contains(&item.to_string())),
+        _ => Value::Bool(false),
+    }
+}
+
+/// `indexOf(x, v)`：列表/字符串查找，未找到返回 -1。
+fn nat_index_of_generic(args: &[Value]) -> Value {
+    let item = args.get(1).cloned().unwrap_or(Value::Null);
+    match &args[0] {
+        Value::List(items) => match items.iter().position(|x| *x == item) {
+            Some(i) => Value::Int(i as i64),
+            None => Value::Int(-1),
+        },
+        Value::Str(s) => {
+            let needle = item.to_string();
+            match s.find(&needle) {
+                Some(byte_pos) => Value::Int(s[..byte_pos].chars().count() as i64),
+                None => Value::Int(-1),
+            }
+        }
+        _ => Value::Int(-1),
     }
 }
 

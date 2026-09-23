@@ -8,6 +8,41 @@ use crate::codegen::opcode::FfiAbi;
 use crate::vm::value::Value;
 use crate::vm::{Handler, Instr, Vm, VmError};
 
+/// 未链接外部函数告警：**每个名字只报一次**，实参只做截断预览。
+///
+/// 原实现每次调用都 `args.iter().map(|v| v.to_string())`：当实参里含大列表时，
+/// 单条日志就要构造数百 KB 字符串。实测 4 万次 `list.get(i)`（裸名 `get` 未注册
+/// → 走本兜底）峰值内存 **23GB**、耗时超过一分钟 —— 「未链接告警」自己变成了
+/// OOM 元凶。现改为名字去重 + 预览截断（80 字符 + 原始长度）。
+fn warn_unlinked_once(name: &str, args: &[Value]) {
+    use std::cell::RefCell;
+    use std::collections::HashSet;
+    thread_local! {
+        static WARNED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    }
+    let first = WARNED.with(|w| w.borrow_mut().insert(name.to_string()));
+    if !first {
+        return;
+    }
+    let preview: Vec<String> = args
+        .iter()
+        .take(4)
+        .map(|v| {
+            let s = v.to_string();
+            let n = s.chars().count();
+            if n > 80 {
+                format!("{}…<{} chars>", s.chars().take(80).collect::<String>(), n)
+            } else {
+                s
+            }
+        })
+        .collect();
+    eprintln!(
+        "[vm] Unlinked external function `{}`, call ignored (args: {:?})",
+        name, preview
+    );
+}
+
 // P9: FFI 动态库加载
 #[cfg(windows)]
 use std::ffi::OsStr;
@@ -1594,11 +1629,7 @@ impl Vm {
             ) {
                 Some(v) => v,
                 None => {
-                    eprintln!(
-                        "[vm] Unlinked external function `{}`, call ignored (args: {:?})",
-                        native.name,
-                        args.iter().map(|v| v.to_string()).collect::<Vec<_>>()
-                    );
+                    warn_unlinked_once(&native.name, &args);
                     Value::Int(0)
                 }
             }
@@ -1775,11 +1806,7 @@ impl Vm {
             ) {
                 Some(v) => v,
                 None => {
-                    eprintln!(
-                        "[vm] Unlinked external function `{}`, call ignored (args: {:?})",
-                        native.name,
-                        args.iter().map(|v| v.to_string()).collect::<Vec<_>>()
-                    );
+                    warn_unlinked_once(&native.name, &args);
                     Value::Int(0)
                 }
             }
