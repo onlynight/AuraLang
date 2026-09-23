@@ -1,0 +1,1555 @@
+{
+    "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+    "name": "Photon IR",
+    "scopeName": "source.phir",
+    "fileTypes": [
+        "phir"
+    ],
+    "information_for_contributors": [
+        "This grammar is modeled after the Aura VSCode plugin's tmLanguage.json structure.",
+        "Scope name: 'source.phir' - all scope names use the '.phir' suffix for consistency.",
+        "Declarations use begin/end + beginCaptures/endCaptures for fine-grained highlighting.",
+        "PHIR syntax: # comments, @ globals, v0 SSA values, ss0 stack slots, bb basic blocks."
+    ],
+    "patterns": [
+        {
+            "include": "#comments"
+        },
+        {
+            "include": "#module-header"
+        },
+        {
+            "include": "#globals"
+        },
+        {
+            "include": "#native-function-declaration"
+        },
+        {
+            "include": "#function-declaration"
+        },
+        {
+            "include": "#code"
+        }
+    ],
+    "repository": {
+        "comments": {
+            "patterns": [
+                {
+                    "include": "#comment-line"
+                }
+            ]
+        },
+        "comment-line": {
+            "begin": "#",
+            "end": "$",
+            "name": "comment.line.number-sign.phir"
+        },
+
+        "module-header": {
+            "begin": "#\\s*(module|source|dialect)\\b",
+            "end": "$",
+            "name": "meta.module-header.phir",
+            "patterns": [
+                {
+                    "match": "\\b(module|source|dialect)\\b",
+                    "name": "storage.type.keyword.phir"
+                },
+                {
+                    "match": "0x[0-9A-Fa-f]+",
+                    "name": "constant.numeric.hex.phir"
+                },
+                {
+                    "match": "\"[^\"]*\"",
+                    "name": "string.quoted.double.phir"
+                },
+                {
+                    "match": "\\b[\\w-]+",
+                    "name": "entity.name.module.phir"
+                }
+            ]
+        },
+
+        "globals": {
+            "begin": "(@)([\\w.]+)(?=\\s*=)",
+            "beginCaptures": {
+                "1": {
+                    "name": "punctuation.accessor.global.phir"
+                },
+                "2": {
+                    "name": "entity.name.global.phir"
+                }
+            },
+            "end": ";|$",
+            "patterns": [
+                {
+                    "include": "#comments"
+                },
+                {
+                    "match": "\\b(void|bool|i1|i8|i16|i32|i64|i128|f32|f64|ptr|string)\\b",
+                    "name": "storage.type.builtin.phir"
+                },
+                {
+                    "include": "#string"
+                },
+                {
+                    "include": "#hex-literal"
+                },
+                {
+                    "include": "#decimal-literal"
+                },
+                {
+                    "include": "#boolean-literal"
+                }
+            ]
+        },
+
+        "native-function-declaration": {
+            "begin": "\\b(native)\\s+(fun)\\s+([\\w.]+)(\\s*\\()",
+            "beginCaptures": {
+                "1": {
+                    "name": "storage.type.native.phir"
+                },
+                "2": {
+                    "name": "storage.type.function.phir"
+                },
+                "3": {
+                    "name": "entity.name.function.phir"
+                },
+                "4": {
+                    "name": "punctuation.section.parameters.begin.phir"
+                }
+            },
+            "end": "(\\))",
+            "endCaptures": {
+                "1": {
+                    "name": "punctuation.section.parameters.end.phir"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#comments"
+                },
+                {
+                    "include": "#parameter"
+                },
+                {
+                    "include": "#return-arrow"
+                },
+                {
+                    "include": "#type-annotation"
+                }
+            ]
+        },
+
+        "function-declaration": {
+            "begin": "\\b(fun)\\s+([\\w.]+)",
+            "beginCaptures": {
+                "1": {
+                    "name": "storage.type.function.phir"
+                },
+                "2": {
+                    "name": "entity.name.function.phir"
+                }
+            },
+            "end": "^(\\})$",
+            "endCaptures": {
+                "1": {
+                    "name": "punctuation.section.block.end.phir"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#comments"
+                },
+                {
+                    "include": "#function-parameters"
+                },
+                {
+                    "include": "#return-type"
+                },
+                {
+                    "include": "#body"
+                }
+            ]
+        },
+
+        "function-parameters": {
+            "begin": "(\\()",
+            "beginCaptures": {
+                "1": {
+                    "name": "punctuation.section.parameters.begin.phir"
+                }
+            },
+            "end": "(\\))",
+            "endCaptures": {
+                "1": {
+                    "name": "punctuation.section.parameters.end.phir"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#comments"
+                },
+                {
+                    "include": "#parameter"
+                },
+                {
+                    "include": "#type-annotation"
+                },
+                {
+                    "include": "#builtin-types"
+                }
+            ]
+        },
+
+        "return-type": {
+            "begin": "(->)\\s*",
+            "beginCaptures": {
+                "1": {
+                    "name": "keyword.operator.assignment.phir"
+                }
+            },
+            "end": "(?=\\s*\\{|\\s*$|\\s*;|\\s*,)",
+            "patterns": [
+                {
+                    "include": "#comments"
+                },
+                {
+                    "include": "#builtin-types"
+                },
+                {
+                    "include": "#type-name"
+                }
+            ]
+        },
+
+        "type-name": {
+            "match": "[\\w.]+(?:<[^>]+>)?",
+            "name": "entity.name.type.phir"
+        },
+
+        "block-open-brace": {
+            "match": "\\{(?=\\s*$)",
+            "name": "punctuation.section.block.begin.phir"
+        },
+
+        "parameter": {
+            "match": "([\\w]+)(\\s*:\\s*([\\w?]+(?:<[^>]+>)?(?:\\s*->\\s*[\\w?]+(?:<[^>]+>)?)?)?)?(,)?",
+            "captures": {
+                "1": {
+                    "name": "variable.parameter.phir"
+                },
+                "3": {
+                    "name": "entity.name.type.phir"
+                },
+                "4": {
+                    "name": "punctuation.separator.delimiter.phir"
+                }
+            }
+        },
+
+        "return-arrow": {
+            "match": "->",
+            "name": "keyword.operator.assignment.phir"
+        },
+
+        "type-annotation": {
+            "match": "(?<![:?])(:)(?!\\s*[:?])\\s*([\\w?]+(?:<[^>]+>)?(?:\\s*->\\s*[\\w?]+(?:<[^>]+>)?)?)",
+            "captures": {
+                "1": {
+                    "name": "punctuation.separator.type-annotation.phir"
+                },
+                "2": {
+                    "name": "entity.name.type.phir"
+                }
+            }
+        },
+
+        "builtin-types": {
+            "patterns": [
+                {
+                    "match": "\\b(void|bool|i1|i8|i16|i32|i64|i128|f32|f64|ptr|string|vector)\\b",
+                    "name": "storage.type.builtin.phir"
+                },
+                {
+                    "match": "\\b(Int|Long|Short|Byte|Float|Double|Boolean|Char|String|Any|Nothing|Unit|List|Map|Set|Array|MutableList|MutableMap|MutableSet|Result|Optional|Throwable|Exception|Iterable|Iterator|Sequence|Pair|Triple|Comparable|Number|Annotation)\\b",
+                    "name": "storage.type.builtin.phir"
+                }
+            ]
+        },
+
+        "preamble-stack-slot": {
+            "match": "\\b(ss\\d+)\\s*=(?!=)\\s*([\\w?]+(?:<[^>]+>)?)\\s+(\\d+)",
+            "captures": {
+                "1": {
+                    "name": "variable.stack-slot.phir"
+                },
+                "2": {
+                    "name": "entity.name.type.builtin.phir"
+                },
+                "3": {
+                    "name": "constant.numeric.phir"
+                }
+            }
+        },
+
+        "preamble-fn-ref": {
+            "begin": "\\b(fn\\d+)\\s*=(?!=)",
+            "beginCaptures": {
+                "1": {
+                    "name": "entity.name.parameter.phir"
+                }
+            },
+            "end": ";|$",
+            "patterns": [
+                {
+                    "include": "#comments"
+                },
+                {
+                    "include": "#global-reference"
+                },
+                {
+                    "include": "#parameter"
+                },
+                {
+                    "include": "#return-arrow"
+                },
+                {
+                    "include": "#type-annotation"
+                },
+                {
+                    "include": "#builtin-types"
+                }
+            ]
+        },
+
+        "preamble-sig": {
+            "begin": "\\b(sig\\d+)\\s*=",
+            "beginCaptures": {
+                "1": {
+                    "name": "entity.name.parameter.phir"
+                }
+            },
+            "end": ";|$",
+            "patterns": [
+                {
+                    "include": "#comments"
+                },
+                {
+                    "include": "#parameter"
+                },
+                {
+                    "include": "#return-arrow"
+                },
+                {
+                    "include": "#type-annotation"
+                },
+                {
+                    "include": "#builtin-types"
+                }
+            ]
+        },
+
+        "preamble-global-value": {
+            "begin": "\\b(gv\\d+)\\s*=",
+            "beginCaptures": {
+                "1": {
+                    "name": "entity.name.parameter.phir"
+                }
+            },
+            "end": ";|$",
+            "patterns": [
+                {
+                    "include": "#comments"
+                },
+                {
+                    "include": "#global-reference"
+                },
+                {
+                    "include": "#vmctx"
+                },
+                {
+                    "include": "#dialect-instruction"
+                },
+                {
+                    "include": "#local-reference"
+                },
+                {
+                    "include": "#index-access"
+                },
+                {
+                    "include": "#constant-add"
+                }
+            ]
+        },
+
+        "basic-block": {
+            "begin": "\\b(bb)\\s+([\\w]+)(\\s*\\([^)]*\\))?(:)",
+            "beginCaptures": {
+                "1": {
+                    "name": "storage.type.keyword.phir"
+                },
+                "2": {
+                    "name": "entity.name.block.phir"
+                },
+                "3": {
+                    "name": "meta.block-params.phir"
+                }
+            },
+            "end": "(?=\\bb\\b|^\\s*\\}|$)",
+            "patterns": [
+                {
+                    "include": "#comments"
+                },
+                {
+                    "include": "#block-params"
+                },
+                {
+                    "include": "#block-open-brace"
+                },
+                {
+                    "include": "#body"
+                }
+            ]
+        },
+
+        "block-params": {
+            "begin": "\\(",
+            "end": "\\)",
+            "patterns": [
+                {
+                    "include": "#parameter"
+                }
+            ]
+        },
+
+        "statement-assignment": {
+            "begin": "([\\w]+)\\s*=(?!=)",
+            "beginCaptures": {
+                "1": {
+                    "name": "variable.local.phir"
+                }
+            },
+            "end": ";|$",
+            "patterns": [
+                {
+                    "include": "#comments"
+                },
+                {
+                    "include": "#operand"
+                },
+                {
+                    "include": "#dialect-instruction"
+                },
+                {
+                    "include": "#instruction-opcode"
+                },
+                {
+                    "include": "#attribute-block"
+                },
+                {
+                    "include": "#numeric-literal"
+                },
+                {
+                    "include": "#boolean-literal"
+                },
+                {
+                    "include": "#nan-literal"
+                },
+                {
+                    "include": "#local-reference"
+                },
+                {
+                    "include": "#stack-slot-reference"
+                },
+                {
+                    "include": "#global-reference"
+                },
+                {
+                    "include": "#type-annotation"
+                },
+                {
+                    "include": "#builtin-types"
+                },
+                {
+                    "include": "#operators"
+                },
+                {
+                    "include": "#string"
+                },
+                {
+                    "include": "#return-arrow"
+                },
+                {
+                    "include": "#constant-add"
+                },
+                {
+                    "include": "#null-literal"
+                },
+                {
+                    "include": "#self-reference"
+                },
+                {
+                    "include": "#field-access"
+                },
+                {
+                    "include": "#function-call"
+                },
+                {
+                    "include": "#variable"
+                }
+            ]
+        },
+
+        "statement-store": {
+            "begin": "\\b(store)\\b",
+            "beginCaptures": {
+                "1": {
+                    "name": "keyword.statement.phir"
+                }
+            },
+            "end": ";|$",
+            "patterns": [
+                {
+                    "include": "#comments"
+                },
+                {
+                    "include": "#attribute-block"
+                },
+                {
+                    "include": "#type-annotation"
+                },
+                {
+                    "include": "#builtin-types"
+                },
+                {
+                    "include": "#local-reference"
+                },
+                {
+                    "include": "#stack-slot-reference"
+                },
+                {
+                    "include": "#global-reference"
+                },
+                {
+                    "include": "#comma"
+                }
+            ]
+        },
+
+        "statement-load": {
+            "begin": "\\b(load)\\b",
+            "beginCaptures": {
+                "1": {
+                    "name": "keyword.statement.phir"
+                }
+            },
+            "end": ";|$",
+            "patterns": [
+                {
+                    "include": "#comments"
+                },
+                {
+                    "include": "#attribute-block"
+                },
+                {
+                    "include": "#type-annotation"
+                },
+                {
+                    "include": "#builtin-types"
+                },
+                {
+                    "include": "#local-reference"
+                },
+                {
+                    "include": "#stack-slot-reference"
+                }
+            ]
+        },
+
+        "statement-def": {
+            "begin": "\\b(let|var|val)\\b",
+            "beginCaptures": {
+                "1": {
+                    "name": "storage.type.variable.phir"
+                }
+            },
+            "end": ";|$",
+            "patterns": [
+                {
+                    "include": "#comments"
+                },
+                {
+                    "include": "#variable-parameter"
+                },
+                {
+                    "include": "#type-annotation"
+                },
+                {
+                    "include": "#builtin-types"
+                },
+                {
+                    "include": "#numeric-literal"
+                },
+                {
+                    "include": "#boolean-literal"
+                },
+                {
+                    "include": "#null-literal"
+                },
+                {
+                    "include": "#local-reference"
+                },
+                {
+                    "include": "#global-reference"
+                },
+                {
+                    "include": "#self-reference"
+                },
+                {
+                    "include": "#field-access"
+                },
+                {
+                    "include": "#function-call"
+                },
+                {
+                    "include": "#operators"
+                },
+                {
+                    "include": "#variable"
+                }
+            ]
+        },
+
+        "statement-debug": {
+            "begin": "\\b(debug|printf|verify)\\b",
+            "beginCaptures": {
+                "1": {
+                    "name": "keyword.statement.phir"
+                }
+            },
+            "end": ";|$",
+            "patterns": [
+                {
+                    "include": "#comments"
+                },
+                {
+                    "include": "#debug-variable"
+                },
+                {
+                    "include": "#local-reference"
+                }
+            ]
+        },
+
+        "debug-variable": {
+            "match": "([\\w]+)(\\s*=>\\s*)(v\\d+)",
+            "captures": {
+                "1": {
+                    "name": "variable.debug-var.phir"
+                },
+                "2": {
+                    "name": "keyword.operator.assignment.phir"
+                },
+                "3": {
+                    "name": "variable.local.phir"
+                }
+            }
+        },
+
+        "terminator": {
+            "patterns": [
+                {
+                    "include": "#terminator-return"
+                },
+                {
+                    "include": "#terminator-br-if"
+                },
+                {
+                    "include": "#terminator-br"
+                },
+                {
+                    "include": "#terminator-call"
+                },
+                {
+                    "include": "#terminator-unreachable"
+                }
+            ]
+        },
+
+        "terminator-return": {
+            "begin": "\\b(return)\\b",
+            "beginCaptures": {
+                "1": {
+                    "name": "keyword.terminator.phir"
+                }
+            },
+            "end": ";|$",
+            "patterns": [
+                {
+                    "include": "#local-reference"
+                },
+                {
+                    "include": "#numeric-literal"
+                },
+                {
+                    "include": "#boolean-literal"
+                },
+                {
+                    "include": "#variable"
+                }
+            ]
+        },
+
+        "terminator-br-if": {
+            "begin": "\\b(br)\\s+(if)\\b",
+            "beginCaptures": {
+                "1": {
+                    "name": "keyword.terminator.phir"
+                },
+                "2": {
+                    "name": "keyword.terminator.phir"
+                }
+            },
+            "end": ";|$",
+            "patterns": [
+                {
+                    "include": "#local-reference"
+                },
+                {
+                    "include": "#block-target"
+                },
+                {
+                    "include": "#block-args"
+                },
+                {
+                    "include": "#comma"
+                }
+            ]
+        },
+
+        "terminator-br": {
+            "begin": "\\b(br)\\b",
+            "beginCaptures": {
+                "1": {
+                    "name": "keyword.terminator.phir"
+                }
+            },
+            "end": ";|$",
+            "patterns": [
+                {
+                    "include": "#block-target"
+                },
+                {
+                    "include": "#block-args"
+                }
+            ]
+        },
+
+        "block-target": {
+            "match": "\\b([\\w]+)\\b",
+            "name": "entity.name.block.phir"
+        },
+
+        "block-args": {
+            "begin": "\\(",
+            "end": "\\)",
+            "patterns": [
+                {
+                    "include": "#local-reference"
+                },
+                {
+                    "include": "#numeric-literal"
+                },
+                {
+                    "include": "#comma"
+                }
+            ]
+        },
+
+        "terminator-call": {
+            "begin": "(?:(v\\d+)\\s*=(?!=)\\s*)?(call)\\b",
+            "beginCaptures": {
+                "1": {
+                    "name": "variable.local.phir"
+                },
+                "2": {
+                    "name": "keyword.terminator.phir"
+                }
+            },
+            "end": ";|$",
+            "patterns": [
+                {
+                    "include": "#attribute-block"
+                },
+                {
+                    "include": "#local-reference"
+                },
+                {
+                    "include": "#global-reference"
+                },
+                {
+                    "include": "#function-call-target"
+                },
+                {
+                    "include": "#call-args"
+                },
+                {
+                    "include": "#return-arrow"
+                },
+                {
+                    "include": "#type-annotation"
+                },
+                {
+                    "include": "#builtin-types"
+                },
+                {
+                    "include": "#numeric-literal"
+                },
+                {
+                    "include": "#boolean-literal"
+                }
+            ]
+        },
+
+        "function-call-target": {
+            "match": "([\\w.]+)",
+            "captures": {
+                "1": {
+                    "name": "entity.name.function.call.phir"
+                }
+            }
+        },
+
+        "function-call": {
+            "begin": "([\\w.]+)(\\s*\\()",
+            "beginCaptures": {
+                "1": {
+                    "name": "entity.name.function.call.phir"
+                },
+                "2": {
+                    "name": "punctuation.section.parameters.begin.phir"
+                }
+            },
+            "end": "(\\))",
+            "endCaptures": {
+                "1": {
+                    "name": "punctuation.section.parameters.end.phir"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#comments"
+                },
+                {
+                    "include": "#call-args-content"
+                }
+            ]
+        },
+
+        "call-args-content": {
+            "patterns": [
+                {
+                    "include": "#local-reference"
+                },
+                {
+                    "include": "#stack-slot-reference"
+                },
+                {
+                    "include": "#global-reference"
+                },
+                {
+                    "include": "#self-reference"
+                },
+                {
+                    "include": "#string"
+                },
+                {
+                    "include": "#numeric-literal"
+                },
+                {
+                    "include": "#boolean-literal"
+                },
+                {
+                    "include": "#nan-literal"
+                },
+                {
+                    "include": "#null-literal"
+                },
+                {
+                    "include": "#builtin-types"
+                },
+                {
+                    "include": "#field-access"
+                },
+                {
+                    "include": "#function-call"
+                },
+                {
+                    "include": "#operators"
+                },
+                {
+                    "include": "#variable"
+                },
+                {
+                    "include": "#comma"
+                }
+            ]
+        },
+
+        "call-args": {
+            "begin": "\\(",
+            "end": "\\)",
+            "patterns": [
+                {
+                    "include": "#local-reference"
+                },
+                {
+                    "include": "#global-reference"
+                },
+                {
+                    "include": "#numeric-literal"
+                },
+                {
+                    "include": "#boolean-literal"
+                },
+                {
+                    "include": "#type-annotation"
+                },
+                {
+                    "include": "#builtin-types"
+                },
+                {
+                    "include": "#comma"
+                }
+            ]
+        },
+
+        "terminator-unreachable": {
+            "match": "\\b(unreachable)\\b",
+            "name": "keyword.terminator.phir"
+        },
+
+        "exception-landing": {
+            "begin": "(\\[)(\\s*)(return|unwind)(\\s*:\\s*)",
+            "beginCaptures": {
+                "1": {
+                    "name": "punctuation.section.exception.begin.phir"
+                },
+                "3": {
+                    "name": "keyword.statement.phir"
+                },
+                "4": {
+                    "name": "keyword.operator.assignment.phir"
+                }
+            },
+            "end": "(\\])",
+            "endCaptures": {
+                "1": {
+                    "name": "punctuation.section.exception.end.phir"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#block-target"
+                },
+                {
+                    "include": "#comma"
+                }
+            ]
+        },
+
+        "scope-block": {
+            "begin": "\\b(scope)\\s+(\\d+)(\\s*\\{)",
+            "beginCaptures": {
+                "1": {
+                    "name": "keyword.statement.phir"
+                },
+                "2": {
+                    "name": "variable.scope-id.phir"
+                },
+                "3": {
+                    "name": "punctuation.section.scope.begin.phir"
+                }
+            },
+            "end": "(\\})",
+            "endCaptures": {
+                "1": {
+                    "name": "punctuation.section.scope.end.phir"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#comments"
+                },
+                {
+                    "include": "#block-open-brace"
+                },
+                {
+                    "include": "#body"
+                }
+            ]
+        },
+
+        "indent-if": {
+            "begin": "\\b(if)\\b",
+            "beginCaptures": {
+                "1": {
+                    "name": "keyword.control.phir"
+                }
+            },
+            "end": "(^\\s*\\})",
+            "endCaptures": {
+                "1": {
+                    "name": "punctuation.section.block.end.phir"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#comments"
+                },
+                {
+                    "include": "#block-open-brace"
+                },
+                {
+                    "include": "#body"
+                }
+            ]
+        },
+
+        "indent-else": {
+            "match": "\\b(else)\\b",
+            "name": "keyword.control.phir"
+        },
+
+        "indent-while": {
+            "begin": "\\b(while)\\b",
+            "beginCaptures": {
+                "1": {
+                    "name": "keyword.control.phir"
+                }
+            },
+            "end": "(^\\s*\\})",
+            "endCaptures": {
+                "1": {
+                    "name": "punctuation.section.block.end.phir"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#comments"
+                },
+                {
+                    "include": "#block-open-brace"
+                },
+                {
+                    "include": "#body"
+                }
+            ]
+        },
+
+        "attribute-block": {
+            "begin": "\\{\\s*",
+            "end": "\\}",
+            "name": "meta.attribute.phir",
+            "patterns": [
+                {
+                    "include": "#attribute-name"
+                },
+                {
+                    "include": "#attribute-block"
+                },
+                {
+                    "include": "#atomic-attr"
+                }
+            ]
+        },
+
+        "attribute-name": {
+            "match": "\\b(commutative|associative|readonly|volatile|nounwind|noreturn|norecurse|tail|inline|speculatable|seqcst|release|acquire|unordered|relaxed|monotonic)\\b",
+            "name": "entity.name.attr.phir"
+        },
+
+        "atomic-attr": {
+            "begin": "\\b(atomic)\\b",
+            "beginCaptures": {
+                "1": {
+                    "name": "entity.name.attr.phir"
+                }
+            },
+            "end": "(?=\\s|})",
+            "patterns": [
+                {
+                    "include": "#attribute-name"
+                }
+            ]
+        },
+
+        "function-attribute": {
+            "match": "\\b(noinline|cold|noreturn|nosideeffects|noalias|nobuiltin|always_inline)\\b",
+            "name": "entity.name.attr.phir"
+        },
+
+        "calling-convention": {
+            "match": "\\b(system_v|fast|cold|windows_fastcall|probestack|apple_aarch64|winch)\\b",
+            "name": "entity.name.calling-convention.phir"
+        },
+
+        "ownership-modifier": {
+            "match": "\\b(owned|borrowed|guaranteed|copy)\\b(?=\\s*\\()",
+            "name": "storage.modifier.ownership.phir"
+        },
+
+        "instruction-opcode": {
+            "match": "\\b(add|sub|mul|div|rem|imul|idiv|irem|fadd|fsub|fmul|fdiv|frem|fneg|fabs|fmin|fmax|frnd|iand|ior|ixor|ishl|ishr|iushr|and|or|xor|shl|shr|ushr|icmp|fcmp|phi|select|sextend|uextend|ireduce|br|br_table|call|invoke|vcall|ret|new|retain|release|getfield|setfield|gep|syscall|fence|const|let|var|ss_load|ss_store|vadd|vsub|vmul|vdiv|vsplat|vload|vstore)\\b",
+            "name": "support.instruction.phir"
+        },
+
+        "dialect-instruction": {
+            "begin": "\\b((?:load|store|fpromote|fdemote|fcvt|fcvt_from_uint|fcvt_to_uint|fcvt_from_sint|fcvt_to_sint|fcvt_from_float|fcvt_to_float|fmin|fmax|frnd|vload|vstore|atom\\.load|atom\\.store|atom\\.cas|atom\\.cmpxchg)\\.)(\\w+)?",
+            "beginCaptures": {
+                "1": {
+                    "name": "keyword.dialect.phir"
+                },
+                "2": {
+                    "name": "entity.name.type.builtin.phir"
+                }
+            },
+            "end": "$"
+        },
+
+        "operand": {
+            "begin": "\\b(const|copy|move)\\b",
+            "beginCaptures": {
+                "1": {
+                    "name": "storage.modifier.operand.phir"
+                }
+            },
+            "end": ";|$",
+            "patterns": [
+                {
+                    "include": "#type-annotation"
+                },
+                {
+                    "include": "#builtin-types"
+                },
+                {
+                    "include": "#numeric-literal"
+                },
+                {
+                    "include": "#boolean-literal"
+                },
+                {
+                    "include": "#nan-literal"
+                },
+                {
+                    "include": "#local-reference"
+                },
+                {
+                    "include": "#global-reference"
+                }
+            ]
+        },
+
+        "local-reference": {
+            "match": "\\b(v\\d+)\\b",
+            "name": "variable.local.phir"
+        },
+
+        "stack-slot-reference": {
+            "match": "\\b(ss\\d+)\\b",
+            "name": "variable.stack-slot.phir"
+        },
+
+        "global-reference": {
+            "match": "(@)([\\w.]+)",
+            "captures": {
+                "1": {
+                    "name": "punctuation.accessor.global.phir"
+                },
+                "2": {
+                    "name": "entity.name.global.phir"
+                }
+            }
+        },
+
+        "local-copy-reference": {
+            "match": "%%([\\w]+)",
+            "captures": {
+                "1": {
+                    "name": "variable.local.phir"
+                }
+            }
+        },
+
+        "self-reference": {
+            "match": "\\b(this|self)\\b",
+            "name": "variable.language.this.phir"
+        },
+
+        "variable": {
+            "match": "\\b([a-zA-Z_]\\w*)\\b",
+            "name": "variable.other.phir"
+        },
+
+        "vmctx": {
+            "match": "\\b(vmctx)\\b",
+            "name": "variable.language.vmctx.phir"
+        },
+
+        "field-access": {
+            "match": "([\\w]+)(\\.)([\\w]+)",
+            "captures": {
+                "1": {
+                    "name": "variable.local.phir"
+                },
+                "2": {
+                    "name": "punctuation.separator.period.phir"
+                },
+                "3": {
+                    "name": "variable.other.property.phir"
+                }
+            }
+        },
+
+        "index-access": {
+            "match": "([\\w]+)(\\[)([^\\]]+)(\\])",
+            "captures": {
+                "1": {
+                    "name": "variable.local.phir"
+                },
+                "2": {
+                    "name": "punctuation.section.index.begin.phir"
+                },
+                "3": {
+                    "name": "constant.numeric.phir"
+                },
+                "4": {
+                    "name": "punctuation.section.index.end.phir"
+                }
+            }
+        },
+
+        "deref": {
+            "match": "(\\*)(v\\d+)",
+            "captures": {
+                "1": {
+                    "name": "keyword.operator.bitwise.phir"
+                },
+                "2": {
+                    "name": "variable.local.phir"
+                }
+            }
+        },
+
+        "constant-add": {
+            "match": "\\b(add)\\b",
+            "name": "support.instruction.phir"
+        },
+
+        "string": {
+            "begin": "\"",
+            "end": "\"",
+            "name": "string.quoted.double.phir",
+            "patterns": [
+                {
+                    "match": "\\\\.",
+                    "name": "constant.character.escape.phir"
+                }
+            ]
+        },
+
+        "numeric-literal": {
+            "patterns": [
+                {
+                    "include": "#hex-literal"
+                },
+                {
+                    "include": "#decimal-literal"
+                }
+            ]
+        },
+
+        "hex-literal": {
+            "match": "0(x|X)[A-Fa-f0-9][A-Fa-f0-9_]*",
+            "name": "constant.numeric.hex.phir"
+        },
+
+        "decimal-literal": {
+            "match": "\\b\\d[\\d_]*(\\.[\\d_]+)?((e|E)\\d+)?(u|U)?(L|F|f|D|d)?\\b",
+            "name": "constant.numeric.phir"
+        },
+
+        "boolean-literal": {
+            "match": "\\b(true|false)\\b",
+            "name": "constant.language.boolean.phir"
+        },
+
+        "nan-literal": {
+            "match": "\\bNaN\\b",
+            "name": "constant.language.nan.phir"
+        },
+
+        "null-literal": {
+            "match": "\\bnull\\b",
+            "name": "constant.language.null.phir"
+        },
+
+        "keywords": {
+            "match": "\\b(fun|native|if|else|while|return|br|unreachable|call|invoke|scope|debug|printf|verify|store|load|new|retain|release)\\b",
+            "name": "keyword.control.phir"
+        },
+
+        "operators": {
+            "patterns": [
+                {
+                    "include": "#comparison-operators"
+                },
+                {
+                    "include": "#assignment-operators"
+                },
+                {
+                    "include": "#arithmetic-operators"
+                },
+                {
+                    "include": "#logical-operators"
+                },
+                {
+                    "include": "#bitwise-operators"
+                },
+                {
+                    "include": "#other-operators"
+                }
+            ]
+        },
+
+        "comparison-operators": {
+            "match": "(==|!=|<=|>=|<|>)",
+            "name": "keyword.operator.comparison.phir"
+        },
+
+        "assignment-operators": {
+            "match": "=>|->|=|\\?",
+            "name": "keyword.operator.assignment.phir"
+        },
+
+        "arithmetic-operators": {
+            "match": "([+*/%-])",
+            "name": "keyword.operator.arithmetic.phir"
+        },
+
+        "logical-operators": {
+            "match": "(&&|\\|\\|)",
+            "name": "keyword.operator.logical.phir"
+        },
+
+        "bitwise-operators": {
+            "match": "(&|\\||\\^|~|<<|>>>|>>)",
+            "name": "keyword.operator.bitwise.phir"
+        },
+
+        "other-operators": {
+            "patterns": [
+                {
+                    "match": "\\b(is|as)\\b",
+                    "name": "keyword.operator.comparison.phir"
+                }
+            ]
+        },
+
+        "comma": {
+            "match": ",",
+            "name": "punctuation.separator.delimiter.phir"
+        },
+
+        "variable-parameter": {
+            "match": "([\\w]+)(?=\\s*[:=])",
+            "captures": {
+                "1": {
+                    "name": "variable.parameter.phir"
+                }
+            }
+        },
+
+        "body": {
+            "patterns": [
+                {
+                    "include": "#comments"
+                },
+                {
+                    "include": "#block-open-brace"
+                },
+                {
+                    "include": "#indent-if"
+                },
+                {
+                    "include": "#indent-else"
+                },
+                {
+                    "include": "#indent-while"
+                },
+                {
+                    "include": "#basic-block"
+                },
+                {
+                    "include": "#scope-block"
+                },
+                {
+                    "include": "#preamble-stack-slot"
+                },
+                {
+                    "include": "#preamble-fn-ref"
+                },
+                {
+                    "include": "#preamble-sig"
+                },
+                {
+                    "include": "#preamble-global-value"
+                },
+                {
+                    "include": "#statement-def"
+                },
+                {
+                    "include": "#statement-debug"
+                },
+                {
+                    "include": "#statement-store"
+                },
+                {
+                    "include": "#statement-load"
+                },
+                {
+                    "include": "#statement-assignment"
+                },
+                {
+                    "include": "#terminator"
+                },
+                {
+                    "include": "#exception-landing"
+                },
+                {
+                    "include": "#function-attribute"
+                },
+                {
+                    "include": "#calling-convention"
+                },
+                {
+                    "include": "#ownership-modifier"
+                },
+                {
+                    "include": "#dialect-instruction"
+                },
+                {
+                    "include": "#instruction-opcode"
+                },
+                {
+                    "include": "#operand"
+                },
+                {
+                    "include": "#local-reference"
+                },
+                {
+                    "include": "#stack-slot-reference"
+                },
+                {
+                    "include": "#global-reference"
+                },
+                {
+                    "include": "#local-copy-reference"
+                },
+                {
+                    "include": "#self-reference"
+                },
+                {
+                    "include": "#vmctx"
+                },
+                {
+                    "include": "#builtin-types"
+                },
+                {
+                    "include": "#type-annotation"
+                },
+                {
+                    "include": "#field-access"
+                },
+                {
+                    "include": "#index-access"
+                },
+                {
+                    "include": "#function-call"
+                },
+                {
+                    "include": "#deref"
+                },
+                {
+                    "include": "#operators"
+                },
+                {
+                    "include": "#string"
+                },
+                {
+                    "include": "#hex-literal"
+                },
+                {
+                    "include": "#decimal-literal"
+                },
+                {
+                    "include": "#boolean-literal"
+                },
+                {
+                    "include": "#nan-literal"
+                },
+                {
+                    "include": "#null-literal"
+                },
+                {
+                    "include": "#return-arrow"
+                },
+                {
+                    "include": "#debug-variable"
+                },
+                {
+                    "include": "#keywords"
+                },
+                {
+                    "include": "#variable"
+                },
+                {
+                    "match": ",",
+                    "name": "punctuation.separator.delimiter.phir"
+                },
+                {
+                    "match": ";",
+                    "name": "punctuation.terminator.statement.phir"
+                },
+                {
+                    "match": "\\.",
+                    "name": "punctuation.separator.period.phir"
+                }
+            ]
+        },
+
+        "code": {
+            "patterns": [
+                {
+                    "include": "#comments"
+                },
+                {
+                    "include": "#module-header"
+                },
+                {
+                    "include": "#globals"
+                },
+                {
+                    "include": "#native-function-declaration"
+                },
+                {
+                    "include": "#function-declaration"
+                },
+                {
+                    "include": "#body"
+                }
+            ]
+        }
+    }
+}

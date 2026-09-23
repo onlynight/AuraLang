@@ -51,8 +51,14 @@ class RegisterAllocator {
     /// 标签 → 指令索引映射（"bb0|0\nbb1|3\n..."），用于控制流感知的 liveness 分析。
     private var labelIndexMap: String = ""
 
-    /// 节点活跃区间表（"nodeId|defIdx|lastIdx\n"）。
+    /// 节点活跃区间表（"nodeId|firstIdx|lastIdx\n"，已做回边修正）。
     private var nodeSpan: String = ""
+
+    /// 循环回边表（"targetIdx|jumpIdx\n"）。
+    private var backEdges: String = ""
+
+    /// 标签名 → 指令索引（"bbN|idx\n"）。
+    private var labelInstrMap: String = ""
 
     init() {
         this.colorMap = ""
@@ -64,6 +70,8 @@ class RegisterAllocator {
         this.maxLiveRegs = 0
         this.labelIndexMap = ""
         this.nodeSpan = ""
+        this.backEdges = ""
+        this.labelInstrMap = ""
     }
 
     /// 主入口：执行寄存器分配。
@@ -77,6 +85,14 @@ class RegisterAllocator {
         this.maxLiveRegs = 0
         this.labelIndexMap = ""
         this.nodeSpan = ""
+        this.backEdges = ""
+        this.labelInstrMap = ""
+
+        // Step -1: 回边（循环）分析与回边修正后的活跃区间。
+        // 必须在着色前算好：着色逐节点进行，区间一算错就无法挽回
+        //（见 buildBackEdges 的说明）。
+        this.buildBackEdges()
+        this.buildNodeSpans()
 
         // Phase D: 基于 liveness 的干扰图构建
         // Step 0: **登记固定寄存器节点**。
@@ -89,7 +105,7 @@ class RegisterAllocator {
         var fi: Int = 0
         while (fi < d.nodeCount) {
             val fn: DagNode = d.nodeOf(fi)
-            if (fn.kind != "Value" && fn.kind != "Reg" && fn.reg != "") {
+            if (fn.kind != "Value" && fn.kind != "Reg" && fn.kind != "Const" && fn.reg != "") {
                 this.colorPut(fi, fn.reg)
             }
             fi = fi + 1
@@ -98,10 +114,14 @@ class RegisterAllocator {
         // Step 1: 活跃区间在 `buildIntervalInterference` 里现场扫描指令流计算
 
         // Step 2: 迭代分配（按活跃区间构建干扰图）
+        //
+        // ⚠️ `Const` 也必须参与着色（与 Value/Reg 同等）：指令选择阶段不再给
+        // 常量预分配轮转寄存器，否则常量会一次性占满整个非易失寄存器池
+        //（见 InstructionSelection.emitConst 的说明）。
         var i: Int = 0
         while (i < d.nodeCount) {
             val node: DagNode = d.nodeOf(i)
-            if (node.kind == "Value" || node.kind == "Reg") {
+            if (node.kind == "Value" || node.kind == "Reg" || node.kind == "Const") {
                 val interference: String = this.buildIntervalInterference(i)
                 this.assignColor(i, interference)
             }
@@ -544,10 +564,8 @@ class RegisterAllocator {
     /// 两者，实测 `toStr` 的返回值落到 `rbx`（正好是 `"x = "` 常量的寄存器），
     /// 常量被覆写、`strcat` 两个实参变成同值。
     ///
-    /// 也不用「全程序 live-in/live-out 定点迭代」的版本：那需要 `List<String>`
-    /// 的 `add`/`set`，而本 VM 下 `arrayListOf + add` 会丢元素（见
-    /// MirUtils.mirSplit 的说明），liveness 集合恒为空 → 干扰图恒空。
-    /// 区间版现场扫描指令流，只用扁平字符串。
+    /// 区间必须是**回边修正后**的（见 `buildBackEdges` / `buildNodeSpans`），
+    /// 否则循环携带值会被线性区间错误地判为「短命」。
     private fun buildIntervalInterference(nodeId: Int): String {
         var result: String = ""
         val firstN: Int = this.nodeFirstIdx(nodeId)
@@ -574,8 +592,137 @@ class RegisterAllocator {
         return result
     }
 
-    /// 节点首次出现的指令索引（-1 = 未出现）。
+    // ── 回边（循环）感知的活跃区间 ──
+
+    /// 扫描指令流，收集「循环回边」与「标签 → 指令索引」。
+    ///
+    /// 为什么需要回边：活跃区间用 [firstIdx, lastIdx] 的**线性**区间近似，
+    /// 无法表达「循环回边让活跃区间绕圈」。实测 P2/01_nested_loop：
+    /// 外层循环的 `sum` Phi 由循环体内的 phi-MOV 定义（索引 28）、被循环体外的
+    /// 打印块使用（索引 20），线性区间算成 [3,20]，与循环体内临时值的 [33,34]
+    /// 不相交 → 分配器把同一个 `rbx` 分给两者 → 循环体覆盖掉 Phi，
+    /// 循环结束后打印 `1`（应为 100）。
+    private fun buildBackEdges(): Unit {
+        this.backEdges = ""
+        this.labelInstrMap = ""
+        val instrs: List<DagInstruction> = this.dag.instrs
+        var i: Int = 0
+        while (i < instrs.size) {
+            if (instrs[i].template == "label") {
+                val parts: List<String> = this.splitPipe(instrs[i].nodes)
+                if (parts.size >= 1 && parts[0] != "") {
+                    this.labelInstrMap = this.labelInstrMap + parts[0] + "|" + toStr(i) + "\n"
+                }
+            }
+            i = i + 1
+        }
+        i = 0
+        while (i < instrs.size) {
+            val tpl: String = instrs[i].template
+            if (tpl == "jmp @target" || tpl == "jcc @target") {
+                val parts: List<String> = this.splitPipe(instrs[i].nodes)
+                if (parts.size >= 1 && parts[0] != "") {
+                    val tgt: Int = this.labelInstrIndexOf(parts[0])
+                    if (tgt >= 0 && tgt < i) {
+                        this.backEdges = this.backEdges + toStr(tgt) + "|" + toStr(i) + "\n"
+                    }
+                }
+            }
+            i = i + 1
+        }
+    }
+
+    /// 标签名 → 指令索引。
+    private fun labelInstrIndexOf(name: String): Int {
+        if (this.labelInstrMap == "") { return -1 }
+        val targetKey: String = name + "|"
+        val lines: List<String> = this.splitNewline(this.labelInstrMap)
+        var i: Int = 0
+        while (i < lines.size) {
+            if (lines[i] != "" && lines[i].startsWith(targetKey)) {
+                val rest: String = lines[i].substring(targetKey.length, lines[i].length)
+                return strToInt(rest)
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// 计算所有节点的**回边修正后**活跃区间，写入 `nodeSpan`
+    ///（格式 `nodeId|firstIdx|lastIdx\n`）。
+    ///
+    /// 修正规则：若节点的线性区间 [f,l] 与某条回边区间 [t,j]（t <= j，且
+    /// t 是回边目标、j 是回边指令索引）**相交但不被其包含**，说明该值跨越了
+    /// 循环边界（在本轮迭代定义、下一轮迭代使用），把区间扩展到覆盖该回边。
+    /// 迭代到不动点，嵌套循环随之逐层扩展。
+    private fun buildNodeSpans(): Unit {
+        this.nodeSpan = ""
+        var i: Int = 0
+        while (i < this.dag.nodeCount) {
+            var f: Int = this.rawFirstIdx(i)
+            var l: Int = this.rawLastIdx(i)
+            if (f >= 0 && this.backEdges != "") {
+                var changed: Boolean = true
+                var guard: Int = 0
+                while (changed && guard < 8) {
+                    changed = false
+                    guard = guard + 1
+                    val edges: List<String> = this.splitNewline(this.backEdges)
+                    var e: Int = 0
+                    while (e < edges.size) {
+                        if (edges[e] != "") {
+                            val p: List<String> = this.splitPipe(edges[e])
+                            if (p.size >= 2) {
+                                val t: Int = strToInt(p[0])
+                                val j: Int = strToInt(p[1])
+                                val intersects: Boolean = f <= j && l >= t
+                                val contained: Boolean = f >= t && l <= j
+                                if (intersects && !contained) {
+                                    if (f > t) { f = t; changed = true }
+                                    if (l < j) { l = j; changed = true }
+                                }
+                            }
+                        }
+                        e = e + 1
+                    }
+                }
+            }
+            this.nodeSpan = this.nodeSpan + toStr(i) + "|" + toStr(f) + "|" + toStr(l) + "\n"
+            i = i + 1
+        }
+    }
+
+    /// 读取 `nodeSpan` 中的字段（field=1 首索引，field=2 末索引）。
+    private fun spanField(nodeId: Int, field: Int): Int {
+        if (this.nodeSpan == "") { return -1 }
+        val targetKey: String = toStr(nodeId) + "|"
+        val lines: List<String> = this.splitNewline(this.nodeSpan)
+        var i: Int = 0
+        while (i < lines.size) {
+            val line: String = lines[i]
+            if (line != "" && line.startsWith(targetKey)) {
+                val parts: List<String> = this.splitPipe(line)
+                if (parts.size >= 3) {
+                    return strToInt(parts[field])
+                }
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// 节点首次出现的指令索引（回边修正后；-1 = 未出现）。
     private fun nodeFirstIdx(nodeId: Int): Int {
+        return this.spanField(nodeId, 1)
+    }
+
+    /// 节点最后出现的指令索引（回边修正后；-1 = 未出现）。
+    private fun nodeLastIdx(nodeId: Int): Int {
+        return this.spanField(nodeId, 2)
+    }
+
+    /// 节点首次出现的指令索引（未修正）。
+    private fun rawFirstIdx(nodeId: Int): Int {
         val instrs: List<DagInstruction> = this.dag.instrs
         var j: Int = 0
         while (j < instrs.size) {
@@ -585,8 +732,8 @@ class RegisterAllocator {
         return -1
     }
 
-    /// 节点最后出现的指令索引（-1 = 未出现）。
-    private fun nodeLastIdx(nodeId: Int): Int {
+    /// 节点最后出现的指令索引（未修正）。
+    private fun rawLastIdx(nodeId: Int): Int {
         val instrs: List<DagInstruction> = this.dag.instrs
         var j: Int = instrs.size - 1
         while (j >= 0) {
@@ -730,6 +877,12 @@ class RegisterAllocator {
     private fun splitNewline(text: String): List<String> {
         if (text == "") { return emptyList() }
         return text.split("\n")
+    }
+
+    /// 按竖线分割字符串。
+    private fun splitPipe(text: String): List<String> {
+        if (text == "") { return emptyList() }
+        return text.split("|")
     }
 
     // ── 颜色表操作（扁平字符串）──

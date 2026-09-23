@@ -277,7 +277,18 @@ class X86Encoder {
     fun emitSetcc(dst: String, cond: String): Unit {
         val d: Int = this.regNum(dst)
         val c: Int = this.condCode(cond)
-        if (d >= 8) { this.writeByte(0x41) }  // REX.B
+        // REX 前缀：
+        //   d >= 8  → REX.B（r8-r15b 只能通过 REX 访问）
+        //   d in 4..7 → 裸 REX 0x40（spl/bpl/sil/dil 必须带 REX；不带 REX 的
+        //             索引 4..7 表示 ah/ch/dh/bh）
+        // 旧实现只处理 d>=8，`setcc rsi` 被编成 `setcc %dh`，而紧随其后的
+        // `movzx rsi, sil`（带 REX）读的是 %sil —— 两者寄存器不一致，
+        // 比较结果恒为脏值（实测 `if n <= 1` 恒真，factorial 恒返回 1）。
+        if (d >= 8) {
+            this.writeByte(0x41)
+        } else if (d >= 4) {
+            this.writeByte(0x40)
+        }
         this.writeByte(0x0F)
         this.writeByte(0x90 + c)
         this.writeByte(0xC0 + (d & 7))
@@ -521,6 +532,15 @@ class X86Encoder {
         val r: Int = this.regNum(reg)
         this.writeByte(this.rexByte(true, r, 5))
         this.writeByte(0x8B)
+        this.writeByte(0x80 + ((r & 7) << 3) + 5)
+        this.writeInt(offset)
+    }
+
+    /// 编码 LEA reg, [rbp + disp32]（REX.W 8D /r）。
+    fun emitLeaStack(dst: String, offset: Int): Unit {
+        val r: Int = this.regNum(dst)
+        this.writeByte(this.rexByte(true, r, 5))
+        this.writeByte(0x8D)
         this.writeByte(0x80 + ((r & 7) << 3) + 5)
         this.writeInt(offset)
     }

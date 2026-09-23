@@ -1,0 +1,70 @@
+{
+    "comments": {
+        "lineComment": "#"
+    },
+    "brackets": [
+        ["{", "}"],
+        ["[", "]"],
+        ["(", ")"],
+        ["<", ">"]
+    ],
+    "autoClosingPairs": [
+        { "open": "{", "close": "}" },
+        { "open": "[", "close": "]" },
+        { "open": "(", "close": ")" },
+        { "open": "<", "close": ">", "notIn": ["comment"] },
+        { "open": "\"", "close": "\"", "notIn": ["string"] }
+    ],
+    "surroundingPairs": [
+        ["{", "}"],
+        ["[", "]"],
+        ["(", ")"],
+        ["<", ">"],
+        ["\"", "\""]
+    ],
+    "indentationRules": {
+        "increaseIndentPattern": "^\\s*(\\{)$",
+        "decreaseIndentPattern": "^\\s*\\}"
+    },
+    "folding": {
+        "languageFolding": [
+            {
+                "start": "^\\s*fun\\s+\\w+.*\\{",
+                "end": "^\\s*}",
+                "startsAtFirstColumn": true,
+                "nestable": true,
+                "exclusive": false,
+                "expansion": "none",
+                "collapsed": true,
+                "comment": "fold function bodies"
+            },
+            {
+                "start": "^\\s*bb\\s+\\w+",
+                "end": "^\\s*(bb\\s+\\w+|\\})",
+                "startsAtFirstColumn": true,
+                "nestable": true,
+                "exclusive": true,
+                "expansion": "none",
+                "collapsed": false,
+                "comment": "fold basic blocks"
+            },
+            {
+                "start": "^\\s*scope\\s+\\d+\\s*\\{",
+                "end": "^\\s*}",
+                "startsAtFirstColumn": true,
+                "nestable": true,
+                "exclusive": false,
+                "expansion": "none",
+                "collapsed": true,
+                "comment": "fold debug scopes"
+            }
+        ]
+    },
+    "wordPattern": "(-?\\d+(?:\\.\\d+)?|[a-zA-Z_$][\\w$]*)",
+    "onEnterRules": [
+        {
+            "beforeText": "^\\s*#.*$",
+            "action": { "indent": "indent", "removeTrailingWhitespace": true }
+        }
+    ]
+}

@@ -106,10 +106,20 @@ class Lowering {
         val blockParts: List<String> = LirUtils.splitArgs(srcFunc.blocks)
         var bi: Int = 0
         var entryLirBlock: Int = -1
+
+        // ── 第一遍：建块 ──
+        //
+        // 块 id 必须与 SSA 块 id **保持一致**：`Br` / `CondBr` 的 args 里装的
+        // 是块 id，下游（InstructionSelection.emitBr/emitCondBr）直接拿它当
+        // 标签查表，没有任何重映射环节。SSA 侧块按创建顺序连续编号（同一函数
+        // 的块也是连续的），此处同序 `addBlock()` 即天然对齐。
         while (bi < blockParts.size) {
             val srcBlockId: Int = SsaMirUtils.strToInt(blockParts[bi])
             if (srcBlockId >= 0) {
-                val dstBlockId: Int = this.lowerBlock(srcBlockId, src, dst, lfunc)
+                val dstBlockId: Int = dst.addBlock()
+                val dstBlock: LirBlock = dst.blockOf(dstBlockId)
+                dstBlock.label = "bb" + LirUtils.toStr(dstBlockId)
+                lfunc.blocks = LirBlockUtils.succsAdd(lfunc.blocks, dstBlockId)
                 if (entryLirBlock < 0) {
                     entryLirBlock = dstBlockId
                 }
@@ -119,63 +129,50 @@ class Lowering {
 
         lfunc.entryBlock = entryLirBlock
 
-        // 结束当前函数
-        dst.endFunction()
-        this.currentFunc = -1
-        return lfuncId
-    }
-
-    // ── 块级降低 ──
-
-    /// 降低一个基本块。
-    fun lowerBlock(srcBlockId: Int, src: MirSsaProgram, dst: LirProgram, lfunc: LirFunction): Int {
-        val srcBlock: MirBlock = src.blockOf(srcBlockId)
-        val dstBlockId: Int = dst.addBlock()
-        val dstBlock: LirBlock = dst.blockOf(dstBlockId)
-
-        // 设置块标签
-        dstBlock.label = "bb" + LirUtils.toStr(dstBlockId)
-
-        // 添加块到函数的块列表
-        lfunc.blocks = LirBlockUtils.succsAdd(lfunc.blocks, dstBlockId)
-
-        // 降低 Phi 节点
-        val phiParts: List<String> = LirUtils.splitArgs(srcBlock.phis)
-        var pi: Int = 0
-        while (pi < phiParts.size) {
-            val srcValId: Int = SsaMirUtils.strToInt(phiParts[pi])
-            if (srcValId >= 0) {
-                this.lowerValue(srcValId, src, dst, dstBlockId)
+        // 本函数的块 id 集合（",0,1,2," 形式，便于 contains 判断）。
+        var blockSet: String = ","
+        bi = 0
+        while (bi < blockParts.size) {
+            val srcBlockId: Int = SsaMirUtils.strToInt(blockParts[bi])
+            if (srcBlockId >= 0) {
+                blockSet = blockSet + LirUtils.toStr(srcBlockId) + ","
             }
-            pi = pi + 1
+            bi = bi + 1
         }
 
-        // 降低普通指令
+        // ── 第二遍：按 SSA 值 id **全局升序**降低 ──
         //
-        // ⚠ 枚举方式：**按值表 + `value.block` 归属**，而不是只信 `srcBlock.instrs`。
+        // ⚠ 为什么必须是全局升序，而不是「逐块降低」：
+        // 每个 SSA 值恰好产出 1 个 LIR 值（addValue/addInstrValue/addPhi/
+        // setTerminator 都是「追加一个值」），因此只要按 SSA id 升序降低，
+        // **LIR 值 id 就恒等于 SSA 值 id**，args 里的操作数引用天然有效。
         //
-        // 原因：SSA 构建期绝大多数值是用 `program.addValue(...)` 创建的 —— 它只写
-        // `values` 表（`block` 字段记录归属块），**不**登记 `MirBlock.instrs`
-        //（只有 `addInstr` / `setTerminator` 会登记）。若只按 `instrs` 枚举，
-        // 每个块就只剩终结指令被降级 → LIR 每块 1 个值 → Phase C `DAG nodes=0`
-        // → Phase E 机器码 **0 字节**（photon 端到端「成功: true 但产物是空壳」
-        // 的直接原因）。Phi 与终结指令分别由上面的 phi 循环和下面的 term 分支处理，
-        // 这里跳过以免重复降级。
+        // 旧实现按块顺序降低：`SsaBuilder.buildWhile` 先构建循环体、再构建条件块，
+        // 于是循环体值的 id 比条件块（Phi 所在块）**小**。按块顺序降低会让 LIR id
+        // 与 SSA id 错位，而 `lowerValue` 只原样复制 `args`（不做重映射）——
+        // 实测 04_control_flow 的 `"while i = " + toStr(i)` 被降成
+        // `Add(Phi, Const5)`（整数相加），运行即段错误。
         var vi: Int = 0
         while (vi < src.valueCount) {
             val v: MirValue = src.valueOf(vi)
-            if (v.block == srcBlockId && v.op != "Phi" && vi != srcBlock.term) {
-                this.lowerValue(vi, src, dst, dstBlockId)
+            if (blockSet.indexOf("," + LirUtils.toStr(v.block) + ",") >= 0) {
+                val dstBlockId: Int = v.block
+                val blk: MirBlock = src.blockOf(v.block)
+                if (blk.term == vi) {
+                    this.lowerTerminator(vi, src, dst, dstBlockId)
+                } else if (v.op == "Phi") {
+                    dst.addPhi(dstBlockId, v.type, v.args, v.aux)
+                } else {
+                    this.lowerValue(vi, src, dst, dstBlockId)
+                }
             }
             vi = vi + 1
         }
 
-        // 降低终结指令
-        if (srcBlock.term >= 0) {
-            this.lowerTerminator(srcBlock.term, src, dst, dstBlockId)
-        }
-
-        return dstBlockId
+        // 结束当前函数
+        dst.endFunction()
+        this.currentFunc = -1
+        return lfuncId
     }
 
     // ── 值级降低 ──

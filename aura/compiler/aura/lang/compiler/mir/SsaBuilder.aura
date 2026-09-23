@@ -537,6 +537,20 @@ class SsaBuilder {
     ///   end  → 循环结束
     ///
     /// 使用 loopStack 记录循环退出块，供 break/continue 查找。
+    ///
+    /// ⚠️ Phi 的插入时机（循环变量正确性的关键）：
+    /// Phi **必须在构建循环体之前**创建并写入 varMap。旧实现在循环体构建完
+    /// 之后再插入 Phi —— 此时循环体里对 `i` 的每一处引用都已解析成**循环前的
+    /// 旧值**（如 `var i = 0` 的常量 0），循环体读到的 `i` 永远是初值：
+    /// 实测 `while (i < 5) { println(...); i = i + 1 }` 打印 "while i = 0" 无限
+    /// 循环（`i + 1` 恒为 0+1，`i` 本身从不更新）。
+    ///
+    /// 现改为：
+    ///   1. 预扫描循环体，收集被赋值的变量名；
+    ///   2. 对「循环前已存在」的那些变量，先在 cond 块建 Phi（入边 0 = 循环前值，
+    ///      入边 1 先占位）并把 varMap 指向 Phi；
+    ///   3. 构建循环体 —— 所有引用自然解析到 Phi；
+    ///   4. 回填 Phi 的入边 1 = 循环体末尾该变量的值。
     fun buildWhile(src: Hir, id: Int) {
         val kids: String = src.kidsOf(id)
         val kCount: Int = HirUtils.hirKidsCount(kids)
@@ -562,9 +576,34 @@ class SsaBuilder {
             this.program.setTerminator(entryBlock, "Br", 0, toStr(condBlock), "")
         }
 
-        // 先构建循环体（使用循环前的值），以便知道哪些变量被修改
+        val bodyKid: Int = HirUtils.hirKidsAt(kids, 1)
+
+        // ── 步骤 1+2：预建循环变量 Phi ──
+        // phiRecs：每行 "name|phiVid|beforeVid"
+        val assignedNames: String = this.collectAssignedVars(src, bodyKid, "")
+        var phiRecs: String = ""
+        var phiVarEntries: String = ""
+        if (assignedNames != "") {
+            val names: List<String> = assignedNames.split(",")
+            var ni: Int = 0
+            while (ni < names.size) {
+                val nm: String = names[ni]
+                val beforeVid: Int = this.lookupVar("", nm, varMapBefore)
+                if (beforeVid >= 0) {
+                    // 入边 1 先占位为 beforeVid，稍后回填。
+                    val incoming: String = toStr(beforeVid) + "," + toStr(beforeVid)
+                    val phiVid: Int = this.makePhi(condBlock, 0, incoming, "")
+                    this.varMap = this.varMap + nm + "|" + toStr(phiVid) + "\n"
+                    phiVarEntries = phiVarEntries + nm + "|" + toStr(phiVid) + "\n"
+                    phiRecs = phiRecs + nm + "|" + toStr(phiVid) + "|" + toStr(beforeVid) + "\n"
+                }
+                ni = ni + 1
+            }
+        }
+
+        // ── 步骤 3：构建循环体（varMap 已指向 Phi）──
         this.curBlock = bodyBlock
-        this.buildBlock(src, HirUtils.hirKidsAt(kids, 1))
+        this.buildBlock(src, bodyKid)
 
         // 循环体结束：跳回条件块
         val bodyBlockObj: MirBlock = this.program.blockOf(this.curBlock)
@@ -575,13 +614,40 @@ class SsaBuilder {
         // 保存循环体中定义的变量
         val varMapAfterBody: String = this.varMap
 
-        // 在 cond 块插入 Phi 节点并更新 varMap
-        this.varMap = this.insertPhisAtBlock(condBlock, varMapBefore, varMapAfterBody, varMapBefore)
+        // ── 步骤 4：回填 Phi 的第二条入边（循环体末尾的值）──
+        if (phiRecs != "") {
+            val recLines: List<String> = this.splitStr(phiRecs, "\n")
+            var ri: Int = 0
+            while (ri < recLines.size) {
+                val rec: String = recLines.get(ri)
+                if (rec != "") {
+                    val recParts: List<String> = this.splitStr(rec, "|")
+                    if (recParts.size >= 3) {
+                        val nm: String = recParts[0]
+                        val phiVid: Int = this.strToInt(recParts[1])
+                        val beforeVid: Int = this.strToInt(recParts[2])
+                        val afterVid: Int = this.lookupVar("", nm, varMapAfterBody)
+                        if (phiVid >= 0 && afterVid >= 0) {
+                            this.program.valueOf(phiVid).args =
+                                toStr(beforeVid) + "," + toStr(afterVid)
+                        }
+                    }
+                }
+                ri = ri + 1
+            }
+        }
 
         // 切换到条件块，使用更新后的 varMap（包含 Phi 节点）
         this.curBlock = condBlock
 
-        // 降级条件（现在使用 Phi 节点作为变量值）
+        // ⚠️ 条件块看到的循环变量必须是 **Phi**，不能是循环体末尾的值：
+        // `lookupVar` 从 varMap 末尾向前搜索（最新版本优先），而 varMapAfterBody
+        // 末尾是循环体里 `i = i + 1` 的结果。若直接沿用，条件会退化成
+        // `(i+1) < 5` —— 实测 while 循环只跑 4 次（for 只跑 2 次）。
+        // 这里把 varMap 重置为「循环前状态 + Phi 条目」（Phi 在末尾 → 优先命中）。
+        this.varMap = varMapBefore + phiVarEntries
+
+        // 降级条件（使用 Phi 节点作为变量值）
         val condVal: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, 0))
 
         // 设置条件块的终结指令
@@ -591,11 +657,42 @@ class SsaBuilder {
         // 将结束块弹出循环栈
         this.loopStackPop()
 
-        // 恢复 varMap 到循环后的状态
-        this.varMap = varMapAfterBody
+        // ⚠️ 循环之后的变量值必须是 **Phi**，不能是循环体末尾的值。
+        // 理由：`end` 块可以从条件块直接到达（循环一次都没进），此时循环体里的
+        // 值**根本没有被求值**——它不支配 end 块，引用它就是非法 SSA。
+        // 实测 P2/01_nested_loop：`sum` 被解析成内层循环体的 `sum + i + j`
+        //（属于内层块），既违反支配关系，又让该表达式被发射到错误的块里。
+        // Phi 恰好携带「最后写回的值 or 循环前的值」，是唯一正确的选择。
+        // 因此这里不再还原 `varMapAfterBody`（varMap 已在上一步设为
+        // `varMapBefore + phiVarEntries`）。
 
         // 继续构建结束块
         this.curBlock = endBlock
+    }
+
+    /// 递归收集 HIR 子树中被赋值（`HirAssign`）的变量名，返回逗号分隔串（去重）。
+    ///
+    /// 供 `buildWhile` 预判循环携带变量（loop-carried variables）。
+    private fun collectAssignedVars(src: Hir, id: Int, out: String): String {
+        var result: String = out
+        if (src.kindOf(id) == "HirAssign") {
+            val name: String = src.textOf(id)
+            if (name != "" && !this.containsInFlat(result, name)) {
+                if (result == "") {
+                    result = name
+                } else {
+                    result = result + "," + name
+                }
+            }
+        }
+        val kids: String = src.kidsOf(id)
+        val kCount: Int = HirUtils.hirKidsCount(kids)
+        var i: Int = 0
+        while (i < kCount) {
+            result = this.collectAssignedVars(src, HirUtils.hirKidsAt(kids, i), result)
+            i = i + 1
+        }
+        return result
     }
 
     /// 构建块（HirBlock）。

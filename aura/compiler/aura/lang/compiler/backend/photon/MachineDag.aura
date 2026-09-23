@@ -186,6 +186,12 @@ class DagInstruction {
     }
 
     /// 获取第 i 个输入节点的 ID。
+    ///
+    /// ⚠️ 非数字 token 必须返回 -1：`label` / `jmp @target` / `jcc @target` 的
+    /// `nodes` 存的是**标签名**（如 `bb4`），而 `MachineDagUtils.strToInt` 会从
+    /// 任意字符串里**提取数字**（`strToInt("bb4") == 4`）。若不拦截，活跃区间
+    /// 分析会把「标签 bb4」当成「节点 4」，跨函数/跨块的假干扰随之产生，
+    /// 分配器把寄存器全判为占用 → 节点无颜色 → 回退 `rax` → 互相覆写。
     fun nodeAt(i: Int): Int {
         if (this.nodes == "") {
             return -1
@@ -194,7 +200,11 @@ class DagInstruction {
         if (i < 0 || i >= parts.size) {
             return -1
         }
-        return MachineDagUtils.strToInt(parts[i])
+        val token: String = parts[i]
+        if (!MachineDagUtils.isNumericToken(token)) {
+            return -1
+        }
+        return MachineDagUtils.strToInt(token)
     }
 
     /// 获取输入节点个数。
@@ -326,6 +336,9 @@ class MachineDag {
         i.bytes = bytes
         this.instrs.add(i)
         this.instrCount = this.instrs.size
+        if (template == "ret") {
+            println("    [DAG] addInstr RET id=" + toStr(i.id) + " instrCount=" + toStr(this.instrCount) + " nodes=" + nodes)
+        }
         return i.id
     }
 
@@ -348,6 +361,7 @@ class MachineDag {
     ///
     /// 返回新指令的 ID。
     fun selectPattern(patternId: Int, inputNodes: String, outputNode: Int): Int {
+        println("    [DAG] selectPattern patternId=" + toStr(patternId) + " inputNodes=" + inputNodes + " outputNode=" + toStr(outputNode))
         // 检查模式缓存：同一模式已匹配过则复用。
         val cached: Int = this.patternCacheGet(patternId)
         if (cached >= 0) {
@@ -442,6 +456,21 @@ object MachineDagUtils {
             return -total
         }
         return total
+    }
+
+    /// 判断字符串是否为合法的整数 token（可带前导 `-`）。
+    ///
+    /// 用于区分「节点 ID」与「标签名」等非数字占位串。
+    fun isNumericToken(text: String): Boolean {
+        if (text == "") { return false }
+        var k: Int = 0
+        if (text.charAt(0).toString() == "-") { k = 1 }
+        if (k >= text.length) { return false }
+        while (k < text.length) {
+            if ("0123456789".indexOf(text.charAt(k)) < 0) { return false }
+            k = k + 1
+        }
+        return true
     }
 
     /// 整数转字符串。

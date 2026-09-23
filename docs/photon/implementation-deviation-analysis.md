@@ -354,7 +354,7 @@ HIR 序列化应采用 **Photon IR** 标准格式（详见 `photon-ir-format-spe
 | **Driver 环境变量参数** | ✅ 已实现 | `AURA_PHOTON_PHIR` / `AURA_PHOTON_OUT` / `AURA_PHOTON_MODULE` 全链路传递（偏差 #3 已解决） |
 | **多函数 COFF 符号/重定位** | ✅ 已修复 | `splitDoubleSemi` 端点 bug；`rebaseRelocEntries` 节绝对化；`parseRelocEntries` 紧凑形式重组（详见 §9.5） |
 | **运行时 stdlib 函数** | ✅ 已实现 | runtime obj 导出 `println` `print` `puts` `toStr` `toInt` `toFloat` `toString` `strlen` |
-| **P1 差分测试** | 🟡 3/5 | `01_hello_world` `02_simple_vars` `03_arithmetic` 通过；04 因 PHI 节点降级不完整崩溃（MOV 放置位置错误），05 因乘法 codegen 返回 0 崩溃 |
+| **P1 差分测试** | ✅ 5/5 | `01..05` stdout 与 VM 一致、退出码全 0（详见 §10） |
 | **AOT 后端 (Rust LLVM)** | ✅ 已打通 | 新增 `aura/runtime/cffi/aura_syscalls.c`（59 符号），`aura build --aot` 可编译链接运行 |
 | **COFF 确定性** | ✅ 已验证 | TimeDateStamp=0；连续两次构建 SHA256 完全一致（P1 Step 5 达成） |
 | **Rust CLI 参数解析** | ✅ 修复真实 bug | `first_positional` 把 `--output`/`--aot` 等标志误当带值选项，吃掉输入文件 |
@@ -480,7 +480,8 @@ println U 0 0
 
 ### 9.6 当前剩余阻塞（codegen，已委派）
 
-P1 套件现状 **3/5**（01/02/03 通过）。04/05 仍有阻塞。
+P1 套件现状 **5/5**（2026-09-23 第二轮修复后全绿；见 §10）。
+以下为本轮之前的历史定位记录，保留作为 bug 索引。
 
 **已修复的 Bug（2026-09-24 本轮）**：
 
@@ -524,10 +525,11 @@ PHI 节点的 MOV 指令生成在 PHI 所在块（条件块），但应放在前
 | 阶段 | 状态 | 说明 |
 |------|------|------|
 | **P0: 真实管线** | ✅ 完成 | `.phir` 序列化、Driver 环境变量、多函数符号、runtime stdlib 均已实现 |
-| **P1: 差分测试** | 🟡 3/5 | 01/02/03 通过；04（循环 PHI 降级）和 05（乘法 codegen）仍阻塞 |
+| **P1: 差分测试** | ✅ 5/5 | 01–05 全通过（退出码 0）；04/05 的阻塞已在本轮修复，见 §10 |
 | **P1: bootstrap** | 🟡 部分 | Step 1/5 通过；Step 3/4（编译器自举）受限于单文件管线 |
 | **P2: 零外部依赖** | 🟡 进行中 | `SyscallEmitter.aura` 已实现并接入 `PhotonRuntime.aura`；syscall 编号待校正 |
 | **P3: CLI 自举化** | 🟡 部分 | 源码导入已修复；AOT 编译 `Main.aura` 触发 llc codegen bug |
+
 
 **已修复的关键 bug**：
 1. `SsaBuilder.buildAssign`：HIR 赋值只有 1 个 kid（值在 text 字段），改为 `kCount < 1` + `hirKidsAt(kids, 0)`
@@ -536,4 +538,83 @@ PHI 节点的 MOV 指令生成在 PHI 所在块（条件块），但应放在前
 4. `SsaBuilder.insertPhisAtBlock`：返回更新后的 varMap，PHI vid 写入 varMap
 5. `SsaBuilder.buildWhile`：先构建循环体→插入 PHI→更新 varMap→再构建条件
 6. `InstructionSelection`：两遍处理（先普通指令，后 PHI 节点），确保前驱块值已在 nodeMap 中
+
+---
+
+## 10. 2026-09-23 第二轮：P0 收尾 + P1/P2 打通
+
+本轮目标：完成 §6 P0 的第 4/5 项差分测试（`04_control_flow` / `05_functions`），
+然后逐阶段验证 P1/P2。**P0 全部 7 项现已完成**，P1 差分 5/5 通过。
+
+### 10.1 验证结果（可复现）
+
+```
+scripts\photon-suite.ps1 -Phase P1   → PASS=5 FAIL=0     （exit code 全为 0）
+scripts\photon-suite.ps1 -Phase P2   → PASS=2 FAIL=2     （01/02 通过；03/04 见 §10.4）
+scripts\photon-try.ps1               → 单文件编译/运行（30s 超时保护，超时杀进程树）
+```
+
+P1 bootstrap 的**可独立验证项**：
+- Step 5 COFF 确定性 ✅ —— 同一源两次构建 `02_simple_vars.obj` 的 SHA256 完全一致
+  （`A9581D29…43E9`），COFF 头 `TimeDateStamp=0x00000000`。
+  本轮大量改动都落在 codegen（标签命名、活跃区间、PHI 搬运），确定性仍然成立。
+- Step 1/2/3/4 未在本轮重跑（Step 3/4 依赖多文件编译器自举，见 §10.5）。
+- `tests\photon\S1\01_x86_encoder.aura` 回归 **PASS: 8/8**（覆盖本轮改动过的 `emitSetcc`）。
+
+`01..05` 的 stdout 与 VM 逐字节一致，且退出码为 0（此前 01/02 为 -2147483645）。
+
+### 10.2 本轮修复的编译器 bug（按依赖顺序）
+
+| # | 文件 | 根因 | 症状 |
+|---|------|------|------|
+| B1 | `InstructionSelection.aura` | 类内**同名方法重载被静默遮蔽**：`private fun emitRet(val,vid)` 被后定义的 `fun emitRet(reg)` 整体遮蔽（Aura 类方法不支持重载） | `ret` 指令的返回值节点被写成 `vid`，函数返回值全错（`multiply(5,6)=0`） |
+| B2 | 同上 | PHI 前驱 MOV 的 `nodes[0]` 应是**源**、`output` 是**目标**；旧实现两者都填 phi → `mov phi, phi` 自拷贝 | 循环变量永不更新（死循环） |
+| B3 | 同上 | `selectBlock` 用 `labelCount` 命名标签，而 `lookupLabel` 前向引用时 fallback 成 `"bb"+blockId` | 前向跳转标签名不匹配 → `resolveLabels` 直接返回 false → **所有**跳转保持 `disp=0`（两个分支都执行） |
+| B4 | 同上 | `emitConst` 用「轮转寄存器」把常量钉死在 rbx/rsi/rdi/r12-r15，且分配器 Step 0 预登记为已占用 | 7 个非易失寄存器在第 0 个节点着色前就被占满 → 跨循环/调用值拿不到颜色 → 回退 `rax` → 被 `call` 覆写 |
+| B5 | 同上 | `emitParam` 直接把参数节点钉在 ABI 寄存器（rcx/rdx，**易失**） | 递归 `factorial` 的 `n` 被递归调用覆写（结果恒 1） |
+| B6 | `MachineDag.aura` | `DagInstruction.nodeAt` 用 `strToInt` 解析 `nodes`，而 `strToInt("bb4")==4` | 标签名被当成节点 ID → 活跃区间跨函数假重叠 → 分配器把寄存器全判为占用 |
+| B7 | `X86Encoder.aura` | `emitSetcc` 只对 `d>=8` 发 REX；`sil/dil/spl/bpl` 需要裸 REX 0x40 | `setcc rsi` 编成 `setcc %dh`，与随后的 `movzx %sil` 不一致 → 比较结果恒为脏值 |
+| B8 | `RegisterAllocator.aura` | 活跃区间是**线性** `[first,last]`，无法表达循环回边「绕圈」 | 循环携带值被判为短命 → 与循环体临时值共用寄存器 → 覆盖（`01_nested_loop` 得 6 而非 100） |
+| B9 | `InstructionSelection.aura` | `analyzePhiPreds` 用「入边值的**定义块**」当前驱块，而非控制流前驱块 | PHI MOV 发到错误块（`prev = curr` 被放到条件块开头 → `fib_iterative` 得 512） |
+| B10 | 同上 | `emitCall` 里对 `args[0]` 调 `resolveNode`（死代码）会**现场发射**属于后面块的值 | 表达式被发射到错误的块（嵌套循环累加丢失） |
+| B11 | `Lowering.aura` | 按「块顺序」降低，LIR 值 id 与 SSA 值 id 错位，而 `args` 原样复制**不重映射** | 操作数指向错误的值（字符串拼接降成整数 ADD，段错误） |
+| B12 | `SsaBuilder.aura` | 循环 Phi 在**循环体构建之后**才插入 → 循环体里的引用已解析成循环前的旧值 | `while` 里读到的 `i` 恒为初值（死循环打印 `i = 0`） |
+| B13 | 同上 | 循环后 `varMap` 还原成「循环体末尾的值」 | 该值不支配循环出口块（非法 SSA），且 `i+1` 被当成条件操作数（循环少跑一次） |
+| B14 | `PhotonRuntime.aura` | `exit` 用 `NtTerminateProcess(0, …)`：当前进程伪句柄是 **-1**，不是 0 | syscall 返回错误 → `call exit` 返回 → 落到 `int3` 填充 → 退出码 0x80000003（03 还多打一行垃圾） |
+| B15 | 同上 | `strcat` 边读 s2 边写单一静态结果缓冲区；链式拼接时 s2 就是该缓冲区 | 循环写越界 → 访问违例（`"a" + "b" + "c"` 崩溃） |
+
+### 10.3 顺带补齐的运行时能力
+
+| 项 | 说明 |
+|----|------|
+| `streq` | 新增 runtime 函数：`streq(rcx, rdx) → rax = 1/0`，供字符串 `==`/`!=` 比**内容** |
+| 字符串判等 codegen | `emitCmpSetcc` 对 String 操作数改走 `call streq` + `cmp rax,0` + `setne/sete` |
+| stdlib 名映射 | `String.length`→`strlen`、`Any.toString`→`toString`、`Any.equals`→`streq`（否则链接报 `undefined symbol: String.length`） |
+| `strcat` 别名安全 | s2 先按已知长度拷到栈 scratch（128B，`emitLeaStack`），再写结果缓冲区；复制改为定长计数循环 |
+
+### 10.4 P2 剩余阻塞（已定位，未完成）
+
+| 测试 | 阻塞点 | 需要的特性 |
+|------|--------|-----------|
+| `P2/03_array_ops` | 链接缺失 `aura.lang.std.Collections.set`；数组字面量/索引读写没有 codegen 路径。注意 VM 参考输出本身就是退化的（`arr[0] = null`、`sum = 0.0`），即**语言层**数组支持同样缺失 | 堆分配 + Load/Store + Gep（属设计文档 P2「Arena 分配器」范围） |
+| `P2/04_string_ops` | `s3` 指向 `strcatBuffer` 静态缓冲区，后续 `"s3 = " + s3` 会覆写它 → `s3.length()` 得到 16（缓冲区已被改写）而不是 11，随之判等失败 | 「拼接结果不可变」：需要 bump 分配器（每次拼接返回新地址）或按调用点分配缓冲区 |
+
+### 10.5 其它已知限制
+
+| 项 | 说明 |
+|----|------|
+| `bootstrap-photon.ps1` Step 3/4 | 单文件 Photon 管线无法编译多文件编译器工程（`Main.aura` 的 import 图），自举闭环未达成 |
+| `tests/photon/simple.aura` | exe 退出码 42 **正确**；差分脚本判 FAIL 只是因为 VM `run` 会把 main 的返回值打印成 `42`（约定差异，非 codegen 缺陷） |
+| `S1..S4` / `P3` / `P4` 下的 Aura 侧单测 | 多数按旧 API 编写（例如调用已不存在的 `X86Emitter.emit`），且部分断言期望值已过期；未纳入本轮判定 |
+
+### 10.6 复现命令
+
+```powershell
+# 差分跑批（含超时保护，超时杀进程树）
+powershell -File scripts\photon-suite.ps1 -Phase P1
+powershell -File scripts\photon-suite.ps1 -Phase P2
+
+# 单文件编译+运行（调试转储加 -Dbg，会设置 AURA_PHOTON_DEBUG_HIR=1）
+powershell -File scripts\photon-try.ps1 -Src tests\photon\P1\04_control_flow.aura -Out build\p1\04\04.phir
+```
 

@@ -319,6 +319,50 @@ object PhotonRuntime {
         enc.emitEpilogue()
     }
 
+    // ── 字符串相等比较 ──
+
+    /// 编码 `streq(rcx = char*, rdx = char*) → rax = 1/0`（内容相等）。
+    ///
+    /// 为什么不用 `strcmp`：`emitStrcmp` 返回的是「首个不同字节的下标」
+    ///（相等时返回长度），无法用于判等。`streq` 返回严格的 0/1。
+    ///
+    /// ```asm
+    /// streq:
+    ///   push rbp; mov rbp, rsp
+    ///   xor  r8, r8
+    /// loop:
+    ///   mov  al, [rcx+r8]
+    ///   cmp  al, [rdx+r8]
+    ///   jne  not_equal
+    ///   test al, al
+    ///   jz   equal
+    ///   inc  r8
+    ///   jmp  loop
+    /// equal:
+    ///   mov  eax, 1
+    ///   leave; ret
+    /// not_equal:
+    ///   xor  eax, eax
+    ///   leave; ret
+    /// ```
+    fun emitStreq(enc: X86Encoder): Unit {
+        enc.emitPrologue(0)
+        enc.emitXorRR("r8", "r8")
+        enc.emitLabel("streq_loop")
+        enc.emitCmpMemMem("rcx", "r8", "rdx", "r8")
+        enc.emitJccLabel("ne", "streq_not_equal")
+        enc.emitTestMemImm8("rcx", "r8", 0)
+        enc.emitJccLabel("z", "streq_equal")
+        enc.emitIncRR("r8")
+        enc.emitJmpLabel("streq_loop")
+        enc.emitLabel("streq_equal")
+        enc.emitMovRI32("eax", 1)
+        enc.emitEpilogue()
+        enc.emitLabel("streq_not_equal")
+        enc.emitXorRR("eax", "eax")
+        enc.emitEpilogue()
+    }
+
     // ── 异常处理支持 ──
 
     /// 编码 `throwException(rcx = Exception*) → never returns`：
@@ -354,8 +398,15 @@ object PhotonRuntime {
         enc.emitPrologue(0x20)
         // 保存退出码（rcx 将被覆盖为 processHandle）
         enc.emitStackStore(-0x10, "rcx")
-        // NtTerminateProcess(0, exitStatus)
-        enc.emitXorRR("r10", "r10")  // processHandle = 0 (当前进程) → arg1 必须在 r10
+        // NtTerminateProcess(NtCurrentProcess(), exitStatus)
+        //
+        // ⚠️ 当前进程的**伪句柄是 -1（0xFFFFFFFFFFFFFFFF）**，不是 0：
+        // `NtTerminateProcess(0, …)` 会以 STATUS_INVALID_HANDLE 直接返回，
+        // 进程不会终止 —— `call exit` 于是返回，执行流继续落到 main 之后的
+        // `int3` 填充字节上，进程以 0x80000003（STATUS_BREAKPOINT）结束
+        //（实测 01/02 退出码恒为 -2147483645；03 还额外打印出一行垃圾）。
+        // arg1 走 r10（Win64 syscall 约定）。
+        enc.emitMovRI("r10", -1)
         enc.emitStackLoad("rdx", -0x10)  // exitStatus
         SyscallEmitter.emitSyscall(enc, 0x2C)  // NtTerminateProcess（本机 ntdll 实测 0x2C）
         enc.emitEpilogue()  // 不可达，仅为函数完整性
@@ -462,7 +513,9 @@ object PhotonRuntime {
     ///
     /// 使用 .data 段的静态缓冲区（128 字节）存储拼接结果。
     fun emitStrcat(enc: X86Encoder): Unit {
-        enc.emitPrologue(0xC8)  // 200 bytes: 局部变量空间，16-byte aligned
+        // 0x1A0 = 416 字节：保存寄存器 + s1/s2/len1/len2 + 128 字节栈 scratch，
+        // 16 字节对齐（0x1A0 % 16 == 0）。
+        enc.emitPrologue(0x1A0)
 
         // 保存 callee-saved r12 / rsi / rdi（Win64 非易失寄存器）
         enc.emitStackStore(-0x88, "r12")
@@ -503,30 +556,72 @@ object PhotonRuntime {
         enc.emitIncRR("rdx")
         enc.emitJmpLabel("strcat_len2_loop")
         enc.emitLabel("strcat_len2_done")
+        enc.emitStackStore(-0xB8, "rdx")  // len2 = rdx（供复制阶段定长使用）
 
-        // 复制 s1 到缓冲区
-        enc.emitStackLoad("rsi", -0x90)   // rsi = s1 (源)
-        enc.emitMovRR("rdi", "r12")       // rdi = buffer (目标)
-        enc.emitLabel("strcat_copy1_loop")
-        enc.emitMovzxRegMemByte("rax", "rsi")  // rax = *rsi
-        enc.emitMovByteMemReg("rdi", "rax")  // *rdi = rax
-        enc.emitCmpByteMemImm8("rsi", 0)
-        enc.emitJccLabel("eq", "strcat_copy1_done")
+        // ── 复制阶段：s2 先落栈上 scratch，再写结果缓冲区 ──
+        //
+        // ⚠️ 不能边读 s2 边写 `strcatBuffer`：链式拼接时 s2 **可能就是这个
+        // 静态缓冲区本身**（`"B: " + s3` 里 s3 就是缓冲区）。旧实现用
+        // 「扫描源直到 NUL」的循环复制，源被自己不断写入的非 NUL 字节覆盖，
+        // 循环永不结束 → 越过 128 字节缓冲区继续写 → 访问违例
+        //（实测 P2/04_string_ops / dbg_str 退出码 -1073741819）。
+        // 现改为：先把 s2 按**已知长度**拷到栈 scratch（长度已知 → 循环必然
+        // 终止），再拷 s1 到缓冲区，最后把 scratch 追加到缓冲区末尾。
+        //
+        // 注：scratch 为 128 字节，与结果缓冲区同量级；更长的字符串本来就
+        // 超出该静态缓冲区的能力（旧实现同样是未定义行为）。
+        val scratchOff: Int = -0x1A0
+
+        // ① s2 → scratch（含结尾 NUL，因此计数 = len2 + 1）
+        enc.emitStackLoad("rsi", -0x98)
+        enc.emitLeaStack("rdi", scratchOff)
+        enc.emitStackLoad("rcx", -0xB8)   // len2
+        enc.emitIncRR("rcx")
+        enc.emitLabel("strcat_c0_loop")
+        enc.emitCmpRI("rcx", 0)
+        enc.emitJccLabel("eq", "strcat_c0_done")
+        enc.emitMovzxRegMemByte("rax", "rsi")
+        enc.emitMovByteMemReg("rdi", "rax")
         enc.emitIncRR("rsi")
         enc.emitIncRR("rdi")
-        enc.emitJmpLabel("strcat_copy1_loop")
-        enc.emitLabel("strcat_copy1_done")
+        enc.emitSubRI("rcx", 1)
+        enc.emitJmpLabel("strcat_c0_loop")
+        enc.emitLabel("strcat_c0_done")
 
-        // 复制 s2 到缓冲区
-        enc.emitStackLoad("rsi", -0x98)   // rsi = s2 (源)
-        enc.emitLabel("strcat_copy2_loop")
-        enc.emitMovzxRegMemByte("rax", "rsi")  // rax = *rsi
-        enc.emitMovByteMemReg("rdi", "rax")  // *rdi = rax
-        enc.emitCmpByteMemImm8("rsi", 0)
+        // ② s1 → 缓冲区（计数 = len1 + 1，含 NUL）
+        enc.emitStackLoad("rsi", -0x90)
+        enc.emitMovRR("rdi", "r12")
+        enc.emitStackLoad("rcx", -0xA0)   // len1
+        enc.emitIncRR("rcx")
+        enc.emitLabel("strcat_c1_loop")
+        enc.emitCmpRI("rcx", 0)
+        enc.emitJccLabel("eq", "strcat_c1_done")
+        enc.emitMovzxRegMemByte("rax", "rsi")
+        enc.emitMovByteMemReg("rdi", "rax")
+        enc.emitIncRR("rsi")
+        enc.emitIncRR("rdi")
+        enc.emitSubRI("rcx", 1)
+        enc.emitJmpLabel("strcat_c1_loop")
+        enc.emitLabel("strcat_c1_done")
+
+        // ③ 目标指针回到缓冲区 + len1（覆盖上一步写下的 NUL）
+        enc.emitMovRR("rdi", "r12")
+        enc.emitStackLoad("rcx", -0xA0)   // len1
+        enc.emitAddRR("rdi", "rcx")
+
+        // ④ scratch → 缓冲区 + len1（含 NUL）
+        enc.emitLeaStack("rsi", scratchOff)
+        enc.emitStackLoad("rcx", -0xB8)   // len2
+        enc.emitIncRR("rcx")
+        enc.emitLabel("strcat_c2_loop")
+        enc.emitCmpRI("rcx", 0)
         enc.emitJccLabel("eq", "strcat_done")
+        enc.emitMovzxRegMemByte("rax", "rsi")
+        enc.emitMovByteMemReg("rdi", "rax")
         enc.emitIncRR("rsi")
         enc.emitIncRR("rdi")
-        enc.emitJmpLabel("strcat_copy2_loop")
+        enc.emitSubRI("rcx", 1)
+        enc.emitJmpLabel("strcat_c2_loop")
 
         enc.emitLabel("strcat_done")
         enc.emitMovRR("rax", "r12")  // 返回缓冲区指针
@@ -871,6 +966,14 @@ object PhotonRuntime {
             PhotonObjectWriterUtils.joinRelocRecords(enc9.getRelocations())
         )
 
+        val enc10 = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitStreq(enc10)
+        writer.appendFunction(
+            enc10.toHex(),
+            "streq",
+            PhotonObjectWriterUtils.joinRelocRecords(enc10.getRelocations())
+        )
+
         // 设置 .data 节和符号（toStrBuffer 32B）
         writer.dataSection = "0000000000000000000000000000000000000000000000000000000000000000"
         writer.dataSymbolName = "toStrBuffer"
@@ -938,6 +1041,10 @@ object PhotonRuntime {
         val enc9 = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitExit(enc9)
         writer.appendFunction(enc9.toHex(), "exit", PhotonObjectWriterUtils.joinRelocRecords(enc9.getRelocations()))
+
+        val enc10 = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitStreq(enc10)
+        writer.appendFunction(enc10.toHex(), "streq", PhotonObjectWriterUtils.joinRelocRecords(enc10.getRelocations()))
 
         // .data 段：toStrBuffer(32B) + strcatBuffer(128B) = 160 字节。
         // 槽位大小必须显式声明（`name:size`）—— 旧实现固定「每个符号 8 字节」，
@@ -1013,6 +1120,10 @@ object PhotonRuntimeUtils {
         val enc9 = X86EncoderUtils.emptyEncoder()
         PhotonRuntime.emitExit(enc9)
         writer.appendFunction(enc9.toHex(), "exit", PhotonObjectWriterUtils.joinRelocRecords(enc9.getRelocations()))
+
+        val enc10 = X86EncoderUtils.emptyEncoder()
+        PhotonRuntime.emitStreq(enc10)
+        writer.appendFunction(enc10.toHex(), "streq", PhotonObjectWriterUtils.joinRelocRecords(enc10.getRelocations()))
 
         // .data 段：toStrBuffer(32B) + strcatBuffer(128B) = 160 字节。
         // 槽位大小必须显式声明（`name:size`）—— 旧实现固定「每个符号 8 字节」，
