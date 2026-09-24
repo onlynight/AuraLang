@@ -803,7 +803,15 @@ class SsaBuilder {
             return
         }
         val varName: String = src.textOf(id)
-        val val: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, 0))
+        // ⚠️ 取**最后一个** kid 作为右值：`HirAssign` 的 kids 形状有两个来源——
+        //   * Rust 前端（.phir 路径）：kids = [右值]（目标名在 text，见 Bug C）；
+        //   * Aura 自举前端 `HirLowerer.lowerAssign`：kids = [目标表达式…, 右值]
+        //     （它遍历 AST 的全部 kids）。
+        // 旧实现固定取 kids[0]：在自举前端下拿到的是**目标**（如 `c` 的当前值），
+        // 于是 `c = c + 1` 退化成「把 c 的原值再存一次」，循环变量永不递增
+        // （实测 04_control_flow 产物死循环、03_arithmetic 输出 `c = 5`）。
+        val lastKid: Int = HirUtils.hirKidsCount(kids) - 1
+        val val: Int = this.buildExpr(src, HirUtils.hirKidsAt(kids, lastKid))
 
         // Phase A S2: 内存链 — 赋值是内存写入操作
         if (this.memHead >= 0) {

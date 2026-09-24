@@ -169,24 +169,20 @@ class HatSerializer {
         }
 
         // 普通指令
-        var instrs: String = block.instrs
-        if (instrs != "") {
-            var ii: Int = 0
-            var iStart: Int = 0
-            var iLen: Int = instrs.length
-            while (ii <= iLen) {
-                if (ii == iLen || instrs.charCodeAt(ii) == 44) {
-                    if (ii > iStart) {
-                        val instrStr: String = HatParserUtils.safeSubstring(instrs, iStart, ii).trim()
-                        val instrId: Int = HatSerializerUtils.strToInt(instrStr)
-                        if (instrId >= 0) {
-                            this.serializeInstr(mir, instrId)
-                        }
-                    }
-                    iStart = ii + 1
-                }
-                ii = ii + 1
+        //
+        // ⚠️ 不能遍历 `block.instrs`：`SsaBuilder` 走的是 `program.addValue(...)`
+        // （只登记值 + `value.block`），**从不写 `MirBlock.instrs`** —— 按
+        // `instrs` 遍历会把函数体整段丢掉（实测 `main` 只剩一条 `@ret @t2`，
+        // 且 `@t2` 从未定义 ⇒ HAT 解析器报 unresolved value、DAG 空转）。
+        // 这里与 `Lowering.lowerFunction` 保持一致：按全局 `values` 顺序、
+        // 用 `v.block == blockId` 归块（值 id 顺序即程序顺序）。
+        var vi: Int = 0
+        while (vi < mir.valueCount) {
+            val v: MirValue = mir.valueOf(vi)
+            if (v.block == blockId && block.term != vi && v.op != "Phi" && v.op != "Param") {
+                this.serializeInstr(mir, vi)
             }
+            vi = vi + 1
         }
 
         // 终结指令
@@ -225,9 +221,16 @@ class HatSerializer {
         var head: String = "    @" + target + " = @" + op
 
         // 副操作码：比较子操作（`@icmp @i32_slt`）/ 被调函数名（`@call @println`）
-        if (instr.op == "ICmp" || instr.op == "FCmp" || instr.op == "Call") {
+        if (instr.op == "Call") {
             if (instr.aux != "") {
                 head = head + " @" + instr.aux
+            }
+        } else if (op == "icmp" || op == "fcmp") {
+            // SsaBuilder 产出的比较 op 是「谓词内嵌」的（`ICmpSle` / `FCmpOLT`），
+            // 需还原成 HAT 的 `@icmp @<pred>` 形态。
+            val pred: String = this.cmpPredicate(instr.op, instr.aux)
+            if (pred != "") {
+                head = head + " @" + pred
             }
         }
 
@@ -409,13 +412,48 @@ class HatSerializer {
         if (value.aux == "null" || value.aux == "") {
             return "null"
         }
-        // 字符串常量需要引号包裹
+        // 字符串常量需要引号包裹，并对 `\ " 换行 制表 |` 做转义
+        //
+        // HAT 是**行式**文本：字面量里的裸换行会把一条指令截成两行，HAT 解析
+        // 出残骸（实测 P3/test_syscall_write 的 `"Hello, World!\r\n"` → 解析后
+        // 值丢失，产物 exe 访问违例 0xC0000005）。设计文档 §3.5 也规定
+        // `\` → `\\`、换行 → `\n`、`|` → `\|`。
         if (this.typeName(mir, value.type) == "String") {
-            if (!value.aux.startsWith("\"")) {
-                return "\"" + value.aux + "\""
+            var body: String = value.aux
+            val blen: Int = body.length
+            if (blen >= 2 && body.startsWith("\"") && body.endsWith("\"")) {
+                body = HatParserUtils.safeSubstring(body, 1, blen - 1)
             }
+            return "\"" + this.escapeHatText(body) + "\""
         }
         return value.aux
+    }
+
+    /// 转义 HAT 字符串字面量载荷（`\` / `"` / 换行 / 回车 / 制表 / `|`）。
+    private fun escapeHatText(s: String): String {
+        var out: String = ""
+        var i: Int = 0
+        val len: Int = s.length
+        while (i < len) {
+            val c: Int = s.charCodeAt(i)
+            if (c == 92) {
+                out = out + "\\\\"
+            } else if (c == 34) {
+                out = out + "\\\""
+            } else if (c == 10) {
+                out = out + "\\n"
+            } else if (c == 13) {
+                out = out + "\\r"
+            } else if (c == 9) {
+                out = out + "\\t"
+            } else if (c == 124) {
+                out = out + "\\|"
+            } else {
+                out = out + s.substring(i, i + 1)
+            }
+            i = i + 1
+        }
+        return out
     }
 
     /// 根据常量类型名选择 HAT 常量操作码。
@@ -445,6 +483,35 @@ class HatSerializer {
         return "i32_const"
     }
 
+    /// 比较谓词还原：SSA op（`ICmpSle` / `FCmpOLT`）→ HAT 谓词（`i32_sle` / `f64_lt`）。
+    ///
+    /// `SsaBuilder.mapBinaryOp` 把谓词编进了 op 名（下游 `Lowering.mapCmpOp`
+    /// 与 `InstructionSelection` 都按 `ICmpSle` 这类名字匹配），而 HAT 用
+    /// `@icmp @<pred>` 形态，故此处需要一层双向映射。
+    private fun cmpPredicate(op: String, aux: String): String {
+        if (op == "ICmpEq") { return "i32_eq" }
+        if (op == "ICmpNe") { return "i32_ne" }
+        if (op == "ICmpSlt") { return "i32_slt" }
+        if (op == "ICmpSgt") { return "i32_sgt" }
+        if (op == "ICmpSle") { return "i32_sle" }
+        if (op == "ICmpSge") { return "i32_sge" }
+        if (op == "ICmpUlt") { return "i32_ult" }
+        if (op == "ICmpUgt") { return "i32_ugt" }
+        if (op == "ICmpUle") { return "i32_ule" }
+        if (op == "ICmpUge") { return "i32_uge" }
+        if (op == "FCmpOEQ") { return "f64_eq" }
+        if (op == "FCmpONE") { return "f64_ne" }
+        if (op == "FCmpOLT") { return "f64_lt" }
+        if (op == "FCmpOGT") { return "f64_gt" }
+        if (op == "FCmpOLE") { return "f64_le" }
+        if (op == "FCmpOGE") { return "f64_ge" }
+        // 兼容 HAT 解析路径（op 已归一为 ICmp/FCmp，谓词留在 aux）
+        if (op == "ICmp" || op == "FCmp") {
+            return aux
+        }
+        return ""
+    }
+
     /// 获取操作码名称。
     private fun opName(mir: MirSsaProgram, op: String): String {
         if (op == "Const") {
@@ -459,10 +526,10 @@ class HatSerializer {
         if (op == "Mul") {
             return "mul"
         }
-        if (op == "Div") {
+        if (op == "Div" || op == "SDiv") {
             return "div"
         }
-        if (op == "Rem") {
+        if (op == "Rem" || op == "SRem") {
             return "rem"
         }
         if (op == "Neg") {
@@ -480,10 +547,10 @@ class HatSerializer {
         if (op == "Not") {
             return "not"
         }
-        if (op == "ICmp") {
+        if (op == "ICmp" || op.startsWith("ICmp")) {
             return "icmp"
         }
-        if (op == "FCmp") {
+        if (op == "FCmp" || op.startsWith("FCmp")) {
             return "fcmp"
         }
         if (op == "Call") {

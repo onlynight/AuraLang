@@ -17,12 +17,22 @@ import "PhotonRuntime.aura"
 
 fun main() {
     val hatPath = Env.get("AURA_HAT_SRC", "tests/hat/hello_world.hat")
+    val phirPath = Env.get("AURA_HAT_PHIR", "")
     val outDir = Env.get("AURA_HAT_OUT", "build/hat_test")
     val moduleName = Env.get("AURA_HAT_MODULE", "hello")
 
     val pipeline = PhotonPipelineUtils.emptyPipeline()
     pipeline.outDir = outDir
     pipeline.moduleName = moduleName
+
+    // 可选前置步骤：把 .phir 转成 .hat（复用 PHIR 用例源），再走 HAT 管线
+    if (phirPath != "") {
+        if (!pipeline.phirToHat(phirPath, hatPath, moduleName)) {
+            println("===RESULT===fail")
+            println("===ERR===phirToHat failed: " + phirPath)
+            Process.exit(1)
+        }
+    }
 
     val result = pipeline.compileHat(hatPath)
 

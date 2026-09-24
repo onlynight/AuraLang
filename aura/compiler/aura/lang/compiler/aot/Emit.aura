@@ -5266,13 +5266,19 @@ class LlvmEmitter {
             var structTy: String = aTy
             var otherVal: String = b
             var otherTy: String = bTy
-            var otherKid: Int = a1
+            // `otherKid` 是「非可空结构体那一侧」的 HIR kid id，供下方
+            // `isNullLit(hir, otherKid)` 判定是不是与 `null` 字面量比较。
+            // ⚠️ 旧实现写的是 `a1` / `a0` —— 这两个名字在 emitBinary 里**从未声明**
+            //（`a1` 仅在 5149 行的另一分支内作为 String 局部量存在），VM 下静默取 0，
+            // AOT 下则被发射成未定义值 ⇒ 自举编译报
+            //   `module.ll:...: error: use of undefined value '%a0'`。
+            var otherKid: Int = bid
             if (!EmitUtils.isNullableStructTy(aTy)) {
                 structVal = b
                 structTy = bTy
                 otherVal = a
                 otherTy = aTy
-                otherKid = a0
+                otherKid = aid
             }
             // **与非 null 值比较**（`old == 1`）必须比较 **payload（字段 0）**，
             // 只比标签位会退化成「判空」（实测 HashMap 的 `put`/`remove` 旧值断言

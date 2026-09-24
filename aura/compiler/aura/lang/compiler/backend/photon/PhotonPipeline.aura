@@ -49,6 +49,7 @@ import "../../hir/Hir.aura"
 
 // HAT v2.0
 import "../../hir/hat/HatParser.aura"
+import "../../hir/hat/HatSerializer.aura"
 
 /// 新后端编译结果。
 class BackendResult {
@@ -475,6 +476,31 @@ class PhotonPipeline {
 
         // Step 3: 从 SSA MIR 继续管线（Phase B-E）
         return this.compileFromSsa(ssaMIR)
+    }
+
+    /// 将 .phir 文本转换为 .hat 文本（PHIR → HIR → SSA MIR → HAT）。
+    ///
+    /// 用途：Rust 前端目前只产出 .phir，HAT 管线需要 .hat 输入。本方法把既有
+    /// 用例（P1/P2/P3）的 .phir 转成 HAT 文本落盘，再由 compileHat() 走 HAT 路径，
+    /// 从而让两条管线处理同一份程序、可比对产物。
+    ///
+    /// 注意：调用方需保证 hatPath 的父目录已存在（FileSystem.writeText 不建父目录）。
+    fun phirToHat(phirPath: String, hatPath: String, moduleName: String): Boolean {
+        val phirText: String = FileSystem.readText(phirPath)
+        if (phirText == "" || phirText == null) {
+            println("[photon] phirToHat: failed to read " + phirPath)
+            return false
+        }
+        val hir: Hir = this.parsePhirText(phirText)
+        val ssaMIR: MirSsaProgram = SsaBuilderUtils.build(hir)
+        if (Env.get("AURA_PHOTON_DEBUG_HIR") == "1") {
+            println("  [SSA-BEFORE-HAT]")
+            this.photonDumpSsa(ssaMIR)
+        }
+        val hatText: String = HatSerializerUtils.serializeHat(ssaMIR, moduleName)
+        FileSystem.writeText(hatPath, hatText)
+        println("  .hat 输出: " + hatPath + " (" + hatText.length + " 字符)")
+        return true
     }
 
     /// 从 SSA MIR 继续管线（Phase B-E）。

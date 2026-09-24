@@ -1058,13 +1058,27 @@ class PhotonObjectWriter {
     }
 
     /// 写小端整数到 hex 字符串。
+    ///
+    /// ⚠️ 必须**按字节取低位再拆分 nibble**，不能直接用 `v % 16` / `v / 256`：
+    /// COFF 的节特征位里存在**超出 i32 范围**的常量（`.data` 的
+    /// `0xC0400040 = CNT_INITIALIZED_DATA|MEM_READ|MEM_WRITE|ALIGN_4`），
+    /// 而 Aura 的 `Int` 在 AOT 下是 i32 —— 字面量回绕成负数后，
+    /// 负数的 `%` 取余得到负的 nibble，`hexDigit` 输出垃圾，于是 `.data` 的
+    /// Characteristics 被写成 `0xFFFFFFF0`（含 `LNK_REMOVE` 位）⇒ lld-link 报
+    ///   `relocation against symbol in discarded section: toStrBuffer/heapArena/...`
+    /// 链接直接失败。VM 的 `Int` 更宽（字面量不回绕），因此该缺陷只在原生自举
+    /// 路径暴露（实测：同一 runtime 目标文件仅此 4 字节不同）。
+    ///
+    /// `v & 255` 对 i32 二进制补码恒为非负，故对正负值都给出正确字节，且与原
+    /// 实现（正值路径）逐字节一致。
     private fun writeIntLe(value: Int, bytes: Int): String {
         var out: String = ""
         var v: Int = value
         var i: Int = 0
         while (i < bytes) {
-            out = out + this.hexDigit(v / 16 % 16) + this.hexDigit(v % 16)
-            v = v / 256
+            val byteVal: Int = v & 255
+            out = out + this.hexDigit(byteVal / 16) + this.hexDigit(byteVal % 16)
+            v = v >> 8
             i = i + 1
         }
         return out

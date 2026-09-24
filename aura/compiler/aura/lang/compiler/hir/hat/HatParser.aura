@@ -581,7 +581,7 @@ class HatParser {
 
     /// 解析普通指令。
     private fun parseInstruction(line: String): Unit {
-        val eqPos: Int = this.findChar(line, 0, 61)
+        val eqPos: Int = this.findCharTop(line, 0, 61)
         if (eqPos < 0) {
             // 无返回值指令
             this.parseNoRetInstruction(line)
@@ -597,7 +597,7 @@ class HatParser {
 
         // 解析类型
         var tyStr: String = "Int"
-        val colonPos: Int = this.findChar(rhs, 0, 58)
+        val colonPos: Int = this.findCharTop(rhs, 0, 58)
         if (colonPos > 0) {
             tyStr = HatParserUtils.safeSubstringFrom(rhs, colonPos + 1).trim()
             rhs = HatParserUtils.safeSubstring(rhs, 0, colonPos).trim()
@@ -614,7 +614,7 @@ class HatParser {
             rhs = HatParserUtils.safeSubstringFrom(rhs, 1)
         }
 
-        val parenPos: Int = this.findChar(rhs, 0, 40)
+        val parenPos: Int = this.findCharTop(rhs, 0, 40)
         if (parenPos < 0) {
             op = rhs
         } else {
@@ -642,7 +642,20 @@ class HatParser {
         }
 
         // 映射操作码
+        val opRaw: String = op
         op = this.mapOp(op)
+
+        // 字符串常量：反转义 HAT 字面量（与 `HatSerializer.escapeHatText` 对称）
+        if (opRaw == "const_str") {
+            aux = this.unescapeHatConst(aux)
+        }
+
+        // 谓词内嵌：HAT 的 `@icmp @i32_sle` 需要还原成下游期望的 `ICmpSle`
+        //（`Lowering.mapCmpOp` / `InstructionSelection` 都按谓词内嵌名匹配）
+        if (aux != "" && (op == "ICmp" || op == "FCmp")) {
+            op = this.cmpOpName(op, aux)
+            aux = ""
+        }
 
         // 创建指令
         val vid: Int = this.prog.addInstr(this.curBlock, op, ty, argsStr, aux)
@@ -666,13 +679,13 @@ class HatParser {
 
         // 解析并去掉类型注释（: Type）
         var tyStr: String = "Unit"
-        val colonPos: Int = this.findChar(rest, 0, 58)
+        val colonPos: Int = this.findCharTop(rest, 0, 58)
         if (colonPos > 0) {
             tyStr = HatParserUtils.safeSubstringFrom(rest, colonPos + 1).trim()
             rest = HatParserUtils.safeSubstring(rest, 0, colonPos).trim()
         }
 
-        val parenPos: Int = this.findChar(rest, 0, 40)
+        val parenPos: Int = this.findCharTop(rest, 0, 40)
         if (parenPos < 0) {
             op = rest
         } else {
@@ -698,7 +711,15 @@ class HatParser {
             }
         }
 
+        val opRaw: String = op
         op = this.mapOp(op)
+        if (opRaw == "const_str") {
+            aux = this.unescapeHatConst(aux)
+        }
+        if (aux != "" && (op == "ICmp" || op == "FCmp")) {
+            op = this.cmpOpName(op, aux)
+            aux = ""
+        }
         val ty: Int = this.types.fromTypeName(tyStr)
         this.prog.addInstr(this.curBlock, op, ty, argsStr, aux)
     }
@@ -818,8 +839,8 @@ class HatParser {
         if (op == "add") { return "Add" }
         if (op == "sub") { return "Sub" }
         if (op == "mul") { return "Mul" }
-        if (op == "div") { return "Div" }
-        if (op == "rem") { return "Rem" }
+        if (op == "div") { return "SDiv" }
+        if (op == "rem") { return "SRem" }
         if (op == "neg") { return "Neg" }
         if (op == "and") { return "And" }
         if (op == "or") { return "Or" }
@@ -857,6 +878,25 @@ class HatParser {
         if (op == "f64_to_str") { return "F64ToStr" }
         if (op == "str_to_i32") { return "StrToI32" }
         return op
+    }
+
+    /// HAT 比较谓词 → 谓词内嵌的 SSA op 名（`i32_sle` → `ICmpSle`）。
+    ///
+    /// 与 `SsaBuilder.mapBinaryOp`（`ICmpEq` / `ICmpSlt` / … / `SDiv`）以及
+    /// 下游 `Lowering.mapCmpOp` 的词汇表严格一致；未知谓词原样拼接，至少不丢信息。
+    private fun cmpOpName(base: String, pred: String): String {
+        val p: String = pred.trim()
+        if (p == "i32_eq" || p == "i64_eq" || p == "str_eq" || p == "f64_eq") { return "ICmpEq" }
+        if (p == "i32_ne" || p == "i64_ne" || p == "str_ne" || p == "f64_ne") { return "ICmpNe" }
+        if (p == "i32_slt" || p == "i64_slt" || p == "f64_lt") { return "ICmpSlt" }
+        if (p == "i32_sgt" || p == "i64_sgt" || p == "f64_gt") { return "ICmpSgt" }
+        if (p == "i32_sle" || p == "i64_sle" || p == "f64_le") { return "ICmpSle" }
+        if (p == "i32_sge" || p == "i64_sge" || p == "f64_ge") { return "ICmpSge" }
+        if (p == "i32_ult" || p == "i64_ult") { return "ICmpUlt" }
+        if (p == "i32_ugt" || p == "i64_ugt") { return "ICmpUgt" }
+        if (p == "i32_ule" || p == "i64_ule") { return "ICmpUle" }
+        if (p == "i32_uge" || p == "i64_uge") { return "ICmpUge" }
+        return base + p
     }
 
     // ── 值引用解析 ──
@@ -924,6 +964,81 @@ class HatParser {
         while (i < len) {
             if (s.charCodeAt(i) == code) {
                 return i
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+    /// 反转义 HAT 字符串字面量：`\\` → `\`、`\"` → `"`、`\n`/`\r`/`\t`/`\|` → 对应字符。
+    ///
+    /// 与 `HatSerializer.escapeHatText` 严格对称；返回结果仍按 SSA 侧约定保留
+    /// 外层引号（`"…"`），因为下游（对象写入器的字符串池）按该载荷取字面量。
+    private fun unescapeHatConst(aux: String): String {
+        val blen: Int = aux.length
+        var body: String = aux
+        var quoted: Boolean = false
+        if (blen >= 2 && aux.startsWith("\"") && aux.endsWith("\"")) {
+            body = HatParserUtils.safeSubstring(aux, 1, blen - 1)
+            quoted = true
+        }
+        var out: String = ""
+        var i: Int = 0
+        val len: Int = body.length
+        while (i < len) {
+            if (body.charCodeAt(i) == 92 && i + 1 < len) {
+                val n: Int = body.charCodeAt(i + 1)
+                if (n == 110) {
+                    out = out + "\n"
+                } else if (n == 114) {
+                    out = out + "\r"
+                } else if (n == 116) {
+                    out = out + "\t"
+                } else if (n == 34) {
+                    out = out + "\""
+                } else if (n == 92) {
+                    out = out + "\\"
+                } else if (n == 124) {
+                    out = out + "|"
+                } else {
+                    out = out + body.substring(i, i + 1)
+                }
+                i = i + 2
+            } else {
+                out = out + body.substring(i, i + 1)
+                i = i + 1
+            }
+        }
+        if (quoted) {
+            return "\"" + out + "\""
+        }
+        return out
+    }
+
+    /// 查找 `code` 字符，**跳过双引号字符串内部**。
+    ///
+    /// 为什么必须这样：HAT 字符串字面量里可以合法出现 `(` / `:` / `=` ——
+    /// `@t0 = @const_str "add(3,4) = " : String`。旧实现在整行上找第一个 `(`，
+    /// 于是字符串内部被切开：op 变成 `const_str "add`、实参变成 `3,4) = "`，
+    /// 常量值整条错位（实测 P1/05_functions 的 stdout 乱码、COFF 少 44 字节）。
+    private fun findCharTop(s: String, start: Int, code: Int): Int {
+        var i: Int = start
+        var len: Int = s.length
+        var inStr: Boolean = false
+        while (i < len) {
+            val c: Int = s.charCodeAt(i)
+            if (inStr) {
+                if (c == 92) {          // 反斜杠转义：跳过下一字符
+                    i = i + 2
+                    continue
+                }
+                if (c == 34) { inStr = false }
+            } else {
+                if (c == 34) {
+                    inStr = true
+                } else if (c == code) {
+                    return i
+                }
             }
             i = i + 1
         }

@@ -1,0 +1,125 @@
+// aura:///aura/lang/compiler/backend/photon/PhotonHatCompile.aura
+// HAT v2.0 独立编译链路驱动 — 源码 → HIR → SSA MIR → .hat → LIR → DAG → X86 → COFF → Link
+//
+// 与 PHIR 链路（`PhotonDriver`：源码 → .phir → HIR → SSA → …）**完全独立**：
+// 本驱动不生成、也不读取任何 `.phir`。HAT 文本由 Aura 侧前端
+// （`AotModuleLinker`：源码 + 递归 import → 合并 HIR）经 `SsaBuilder` +
+// `HatSerializer` 直接产出，随后再由 `PhotonPipeline.compileHat` 从 `.hat`
+// 文本重新解析进入后端 —— 即「HAT IR 是这条链路的真正中间表示」。
+//
+// ⚠️ 运行前提：**原生运行时**（自举产物 / AOT）。在冻结种子 VM 下实测不可用 ——
+//   `AotModuleLinker` / `HirLowerer` 依赖「把同一个 Hir arena 交给另一个对象填写」，
+//   而种子 VM 下跨对象的对象字段绑定/方法返回对象会失真：
+//     · link() 后 `linker.hir.count = 4`（只含入口文件，std 模块未合并）
+//     · `linker.seen` 只有 1 个模块（22 条 std 路径全部未 load）
+//     · `linker.link(p)` 的**返回值**字段全为 null（`ret.count` → null）
+//   因此本文件是「HAT 独立链路」的驱动骨架，等原生驱动可用后再启用。
+//
+// 用法:
+//   aura run aura/compiler/aura/lang/compiler/backend/photon/PhotonHatCompile.aura
+//
+// 环境变量:
+//   AURA_HAT_AURA    入口 .aura 源码路径（含递归 import）  [必填]
+//   AURA_HAT_SRC     输出/输入的 .hat 路径                [默认 <out>/program.hat]
+//   AURA_HAT_OUT     输出目录                            [默认 build/hat_test]
+//   AURA_HAT_MODULE  模块名                              [默认 program]
+//
+// 输出标记（供构建脚本解析）:
+//   ===COFF-MAIN===<hex>
+//   ===COFF-RUNTIME===<hex>
+//   ===LINK===<link command>
+//   ===RESULT===success|fail
+//   ===ERR===<message>
+import aura.lang.std.String
+import aura.lang.std.FileSystem
+import aura.lang.std.Env
+import aura.lang.std.Process
+
+// ── 自举前端（源码 → HIR）的模块闭包 ──
+//
+// ⚠️ 必须把前端模块**全部列出**：Aura 编译器各模块间存在「隐式同编译单元」约定
+// （例如 `Parser.aura` 只用 `import aura.lang.std.String`，却直接使用
+// `CompileErrors` / `Ast` / `Lexer`）。AOT 路径按**入口文件的 import 闭包**内联，
+// 未列出的模块不会参与编译，其类定义缺失 → `call void @CompileErrors()`
+// （llc: `use of undefined value '@CompileErrors'`）。`Main.aura` 正是靠这一串
+// import 才自举成功的，这里与之保持一致。
+import aura.lang.compiler.lexer.Span
+import aura.lang.compiler.lexer.Token
+import aura.lang.compiler.lexer.Lexer
+import aura.lang.compiler.ast.Ast
+import aura.lang.compiler.errors.CompileError
+import aura.lang.compiler.parser.Parser
+import aura.lang.compiler.hir.Hir
+import aura.lang.compiler.aot.AotUtil
+import aura.lang.compiler.aot.Emit
+import aura.lang.compiler.aot.ModuleLink
+
+import "../../mir/SsaMir.aura"
+import "../../mir/SsaBuilder.aura"
+import "../../hir/hat/HatSerializer.aura"
+
+import "PhotonPipeline.aura"
+import "PhotonRuntime.aura"
+
+fun main() {
+    val srcPath = Env.get("AURA_HAT_AURA", "")
+    val outDir = Env.get("AURA_HAT_OUT", "build/hat_test")
+    val moduleName = Env.get("AURA_HAT_MODULE", "program")
+    var hatPath = Env.get("AURA_HAT_SRC", "")
+    if (hatPath == "") {
+        hatPath = outDir + "/" + moduleName + ".hat"
+    }
+
+    if (srcPath == "" || !FileSystem.exists(srcPath)) {
+        println("===RESULT===fail")
+        println("===ERR===source not found: " + srcPath)
+        Process.exit(1)
+    }
+
+    // ── 前端：源码（含递归 import）→ 合并 HIR ──
+    val linker = AotModuleLinker()
+    val hir: Hir = linker.link(srcPath)
+    println("[hat-front] modules=" + toStr(linker.loadedCount()) +
+            " hirNodes=" + toStr(hir.count))
+    if (linker.missing != "") {
+        // 注意：不要用 String.replace —— VM 路径下类方法调用未链接
+        println("[hat-front] missing imports: " + linker.missing)
+    }
+
+    // ── HIR → SSA MIR → HAT 文本（HAT 是这条链路的中间表示）──
+    val ssa: MirSsaProgram = SsaBuilderUtils.build(hir)
+    println("[hat-front] ssa functions=" + toStr(ssa.functionCount) +
+            " values=" + toStr(ssa.valueCount) +
+            " blocks=" + toStr(ssa.blockCount))
+
+    val hatText: String = HatSerializerUtils.serializeHat(ssa, moduleName)
+    FileSystem.mkdirP(outDir)
+    FileSystem.writeText(hatPath, hatText)
+    println("[hat-front] .hat = " + hatPath + " (" + toStr(hatText.length) + " 字符)")
+
+    // ── HAT 文本 → SSA MIR → LIR → DAG → RegAlloc → X86 → COFF ──
+    val pipeline = PhotonPipelineUtils.emptyPipeline()
+    pipeline.outDir = outDir
+    pipeline.moduleName = moduleName
+    val result = pipeline.compileHat(hatPath)
+
+    // 输出 COFF hex（主对象）
+    println("===COFF-MAIN===")
+    println(result.coffHex)
+
+    // 输出 COFF hex（runtime 对象）
+    val rtHex: String = PhotonRuntime.buildRuntimeObject()
+    println("===COFF-RUNTIME===")
+    println(rtHex)
+
+    // 输出链接信息
+    println("===LINK===")
+    println(result.linkCommand)
+
+    println("===RESULT===" + (if (result.success) "success" else "fail"))
+    if (!result.success) {
+        println("===ERR===" + result.errorMessage)
+    }
+
+    Process.exit(0)
+}

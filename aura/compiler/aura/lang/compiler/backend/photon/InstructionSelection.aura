@@ -1007,8 +1007,13 @@ class InstructionSelector {
         if (name == "Any.equals") { return "streq" }
         // 堆列表：`arr[i] = v` 由 HIR 降级为 `.Collections.set(arr, i, v)`
         //（返回容器本身），对应 runtime 的 `__list_setat`。
-        if (name == "aura.lang.std.Collections.set") { return "__list_setat" }
-        if (name == "aura.lang.std.Collections.get") { return "__list_get" }
+        // 全限定名来自 Rust 前端；`Collections.set` / `.Collections.set` 来自
+        // Aura 自举前端（`HirLowerer.lowerAssign` 直接写 `Collections.set`）——
+        // 三种写法都要映射，否则链接期报 `undefined symbol: Collections.set`。
+        if (name == "aura.lang.std.Collections.set" || name == "Collections.set"
+            || name == ".Collections.set") { return "__list_setat" }
+        if (name == "aura.lang.std.Collections.get" || name == "Collections.get"
+            || name == ".Collections.get") { return "__list_get" }
         // syscall 封装：`Syscalls.exit(code)` → runtime 的 `exit`
         //（内部为 NtTerminateProcess syscall；参数已在 rcx）。
         if (name == "aura.lang.native.Syscalls.exit" || name == "Syscalls.exit") { return "exit" }
