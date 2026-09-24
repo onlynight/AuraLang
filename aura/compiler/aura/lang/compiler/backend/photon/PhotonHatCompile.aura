@@ -87,7 +87,9 @@ fun main() {
     }
 
     // ── HIR → SSA MIR → HAT 文本（HAT 是这条链路的中间表示）──
+    println("[hat-front] ssa start (nodes=" + toStr(hir.count) + ")")
     val ssa: MirSsaProgram = SsaBuilderUtils.build(hir)
+    println("[hat-front] ssa done")
     println("[hat-front] ssa functions=" + toStr(ssa.functionCount) +
             " values=" + toStr(ssa.valueCount) +
             " blocks=" + toStr(ssa.blockCount))

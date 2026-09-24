@@ -1001,10 +1001,26 @@ class InstructionSelector {
     ///（`strlen`）。前端不做映射的话，链接阶段会报
     /// `undefined symbol: String.length`（实测 P2/04_string_ops）。
     /// 未列出的名字原样返回 —— 用户函数保持原名。
-    private fun mapStdlibFuncName(name: String): String {
+    ///
+    /// `recvTy` 是第一个实参（方法调用的接收者）的类型名。两种前端发出的
+    /// 被调名形态不同，都要能命中：
+    ///   * Rust 前端发**全限定名**（`String.length` / `Any.equals`）；
+    ///   * Aura 自举前端 `HirLowerer.lowerCall` 只取**成员名**（`length` /
+    ///     `equals`）—— 裸名落到 `undefined symbol: length`（实测 P2/04）。
+    /// 与下方 `Collections.set` 的三种拼法（全限定 / `Collections.` / `.Collections.`）
+    /// 是同一策略：按接收者类型把裸名补齐。
+    private fun mapStdlibFuncName(name: String, recvTy: String): String {
         if (name == "String.length" || name == "String.size") { return "strlen" }
         if (name == "Any.toString") { return "toString" }
         if (name == "Any.equals") { return "streq" }
+        // 裸名 + 接收者类型：`s.length()` / `s.size()` / `a.equals(b)`。
+        // 只认 String 接收者 —— runtime 的 `strlen` / `streq` 都是按 NUL 结尾
+        // C 串实现的，其他接收者不能走这条路。
+        if (recvTy == "String" || recvTy == "String?") {
+            if (name == "length" || name == "size") { return "strlen" }
+            if (name == "equals") { return "streq" }
+            if (name == "toString") { return "toString" }
+        }
         // 堆列表：`arr[i] = v` 由 HIR 降级为 `.Collections.set(arr, i, v)`
         //（返回容器本身），对应 runtime 的 `__list_setat`。
         // 全限定名来自 Rust 前端；`Collections.set` / `.Collections.set` 来自
@@ -1014,6 +1030,13 @@ class InstructionSelector {
             || name == ".Collections.set") { return "__list_setat" }
         if (name == "aura.lang.std.Collections.get" || name == "Collections.get"
             || name == ".Collections.get") { return "__list_get" }
+        // `Collections.getAt` / `Collections.at`：与 `get` 同语义（`arr[i]` 的读侧），
+        // HIR 降级对「带下标的读」写出的名字与 `set` 侧不对称，三种拼法都要命中，
+        // 否则链接期报 `undefined symbol: Collections.getAt`（实测自举 Main.aura）。
+        if (name == "aura.lang.std.Collections.getAt" || name == "Collections.getAt"
+            || name == ".Collections.getAt") { return "__list_get" }
+        if (name == "aura.lang.std.Collections.at" || name == "Collections.at"
+            || name == ".Collections.at") { return "__list_get" }
         // syscall 封装：`Syscalls.exit(code)` → runtime 的 `exit`
         //（内部为 NtTerminateProcess syscall；参数已在 rcx）。
         if (name == "aura.lang.native.Syscalls.exit" || name == "Syscalls.exit") { return "exit" }
@@ -1062,6 +1085,22 @@ class InstructionSelector {
 
     // ── 发射：Call ──
 
+    /// 取第一个实参（方法调用的接收者）的类型名，供裸名补齐用。
+    ///
+    /// `SsaBuilder.buildCall` 对方法调用把接收者放在**第一个**实参，所以
+    /// `args[0]` 就是接收者。跳过内存链 token（`MemToken`）—— 它只可能是
+    /// **最后一个**参数，这里只在 `args[0]` 上判断。
+    private fun callReceiverTypeName(args: List<String>): String {
+        if (args.size < 1) { return "" }
+        val a0: Int = LirUtils.strToInt(args[0])
+        if (a0 < 0) { return "" }
+        val v: LirValue = this.lir.valueOf(a0)
+        if (v.op == "MemToken" || v.aux == "entry_mem" || v.aux == "mem_after_store") {
+            return ""
+        }
+        return this.types.typeNameOf(v.type)
+    }
+
     /// 发射 Call 指令。
     private fun emitCall(val: LirValue, vid: Int): Int {
         // 解析参数。
@@ -1080,7 +1119,10 @@ class InstructionSelector {
         // （其 `aux` 才是被调函数名）。旧实现把「第一个实参的 DAG 节点」当成
         // funcNode 传进去，发射器于是读到该实参的 aux —— 对字符串实参就是
         // `@str.N`，会生成 `call @str.N`（即便寄存器就绪也会链到错误符号）。
-        val funcName: String = this.mapStdlibFuncName(val.aux)
+        // 接收者类型（仅用于裸名补齐，见 `mapStdlibFuncName`）。
+        // 只 `valueOf` 读类型，**不能** `resolveNode`（见上面的 ⚠️）。
+        val recvTy: String = this.callReceiverTypeName(args)
+        val funcName: String = this.mapStdlibFuncName(val.aux, recvTy)
 
         // ── 特例：`toStr(<Bool 常量>)` ──
         //

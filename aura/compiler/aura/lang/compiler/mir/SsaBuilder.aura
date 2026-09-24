@@ -118,9 +118,28 @@ class SsaBuilder {
         }
 
         // 递归构建子节点
-        val kids: String = src.kidsOf(rootIdx)
+        this.buildKidFunctions(src, src.kidsOf(rootIdx))
+
+        return this.program
+    }
+
+    /// 遍历一个子节点列表，为其中每个函数建 SSA；容器节点（`object` / `class`）
+    /// 递归下钻。
+    ///
+    /// **为什么要下钻**：`HirLowerer.lowerExternObject` 把 `object X { fun m() }`
+    /// 降级为 `HirExternObject` 容器节点，**方法作为容器的子节点**（不是 `HirProgram`
+    /// 的直接子节点）。若只扫根节点的 `HirFunction` 直接子节点，`object` 方法会被
+    /// 整批丢掉 —— 实测自举 `Main.aura`：根只有 4 个顶层 `fun`，`object MainUtils`
+    /// 的 11 个方法（`cliUsage` / `runCli` / `runSelfTest` / `compile` / …）全部缺失，
+    /// 链接期 11 条 `undefined symbol`。
+    ///
+    /// 调用点无需改造：`HirLowerer.lowerCall` 对 `X.m()` 只取**成员名**作 calleeName
+    /// （裸名），`lowerFunction` 也不为对象方法附加接收者参数，所以只要方法被建成
+    /// 顶层函数，`call @m` 就能解析到。
+    fun buildKidFunctions(src: Hir, kids: String): Int {
+        val built: Int = this.countFunctionKids(src, kids)
         val kCount: Int = HirUtils.hirKidsCount(kids)
-        i = 0
+        var i: Int = 0
         while (i < kCount) {
             val childId: Int = HirUtils.hirKidsAt(kids, i)
             val childKind: String = src.kindOf(childId)
@@ -137,17 +156,46 @@ class SsaBuilder {
                             " exprs=" + this.dbgExprs +
                             " tys=" + this.types.count)
                 }
+            } else if (childKind == "HirExternObject" || childKind == "HirObject") {
+                // 容器本身不生成 IR（lowerExternObject 的约定），只承载方法分组信息。
+                this.buildKidFunctions(src, src.kidsOf(childId))
             }
             i = i + 1
         }
+        return built
+    }
 
-        return this.program
+    /// 统计子节点列表（含容器递归）中的函数个数。
+    fun countFunctionKids(src: Hir, kids: String): Int {
+        var total: Int = 0
+        val kCount: Int = HirUtils.hirKidsCount(kids)
+        var i: Int = 0
+        while (i < kCount) {
+            val childId: Int = HirUtils.hirKidsAt(kids, i)
+            val childKind: String = src.kindOf(childId)
+            if (childKind == "HirFunction") {
+                total = total + 1
+            } else if (childKind == "HirExternObject" || childKind == "HirObject") {
+                total = total + this.countFunctionKids(src, src.kidsOf(childId))
+            }
+            i = i + 1
+        }
+        return total
     }
 
     // ── 函数构建 ──
 
     /// 构建一个函数的 SSA MIR，返回 FunctionID。
     fun buildFunction(src: Hir, id: Int): Int {
+        // 进度探针：大规模自举编译（111 模块 / 15 万 HIR 节点）时每 200 个函数
+        // 汇报一次，用来定位「SSA 降级卡在第几个函数」。（计数在 build() 循环里）
+        if (this.dbgFuncCount % 200 == 0) {
+            println("[ssa-prog] funcs=" + toStr(this.dbgFuncCount) +
+                    " values=" + toStr(this.program.valueCount))
+        }
+        if (Env.get("AURA_SSA_PERFN", "") == "1") {
+            println("[ssa-fn] n=" + toStr(this.dbgFuncCount) + " " + src.textOf(id))
+        }
         val traceOn: Boolean = Env.get("AURA_PHOTON_TRACE", "") == "1"
         val name: String = src.textOf(id)
         val retTy: String = src.tyOf(id)
@@ -455,11 +503,27 @@ class SsaBuilder {
         var end: Int = after.length
         while (end > 0) {
             var start: Int = end - 1
-            while (start >= 0 && after.charCodeAt(start) != 10) { start = start - 1 }
-            start = start + 1
+            // ⚠️ 反向扫描必须**只用合法下标**调 `charCodeAt`：
+            //   AOT 把 `String.charCodeAt(i)` 降级成无边界检查的内联访存
+            //   （`getelementptr i8, i8* s, i64 i` + `load i8`，见 Emit.aura §2.7），
+            //   直接绕过 Aura 源码里的 `index < 0` 保护。一旦 `start` 走到 -1
+            //   就会读到字符串缓冲区之前一个字节：轻则读到垃圾使扫描不终止，
+            //   重则访问违规（0xC0000005）。原写法 `while (start >= 0 &&
+            //   after.charCodeAt(start) != 10)` 就踩了这个坑。
+            //   改为：循环体内只读 `start > 0` 的字节，下标 0 在循环外单独判定。
+            while (start > 0) {
+                if (after.charCodeAt(start) == 10) { start = start + 1; break }
+                start = start - 1
+            }
+            if (start == 0) {
+                if (after.charCodeAt(0) == 10) { start = 1 }
+            }
             if (end > start) {
                 var sep: Int = start
-                while (sep < end && after.charCodeAt(sep) != 124) { sep = sep + 1 }
+                while (sep < end) {
+                    if (after.charCodeAt(sep) == 124) { break }
+                    sep = sep + 1
+                }
                 if (sep < end) {
                     val name: String = after.substring(start, sep)
                     if (name != "" && !this.containsInFlat(resultStr, name)) {
@@ -494,7 +558,8 @@ class SsaBuilder {
 
     /// 在 `name|vid\n…` 扁平变量表中，从末尾向前找 `name` 的最新 vid（未找到 -1）。
     ///
-    /// 零分配：倒序按 `\n` 定位行，行内按 `|`（124）定位，只对命中项切片一次。
+    /// 零分配：按 `\n` 定位行，行内按 `|`（124）定位，只对命中项切片一次。
+    /// ⚠️ 所有 `charCodeAt` 调用都必须落在 `[0, len)` 内（AOT 内联访存无边界检查）。
     private fun mapVidOf(map: String, name: String): Int {
         if (map == "" || name == "") { return -1 }
         // Forward scan: iterate through each line, keep last match (backward scan crashes in AOT)
@@ -513,7 +578,10 @@ class SsaBuilder {
                 }
                 if (match && map.charCodeAt(i + nlen) == 124) {
                     var j: Int = i + nlen + 1
-                    while (j < mlen && map.charCodeAt(j) != 10) { j = j + 1 }
+                    while (j < mlen) {
+                        if (map.charCodeAt(j) == 10) { break }
+                        j = j + 1
+                    }
                     val sub: String = map.substring(i + nlen + 1, j)
                     result = this.strToInt(sub)
                 }
@@ -685,8 +753,27 @@ class SsaBuilder {
                         val beforeVid: Int = this.strToInt(recParts[2])
                         val afterVid: Int = this.lookupVar("", nm, varMapAfterBody)
                         if (phiVid >= 0 && afterVid >= 0) {
-                            this.program.valueOf(phiVid).args =
-                                toStr(beforeVid) + "," + toStr(afterVid)
+                            // ⚠️ 必须经**命名局部变量**中转写回，两个坑都不能踩：
+                            //
+                            // (1) 不能写成 `this.program.valueOf(id).args = …`
+                            //     （链式临时值上直接赋字段）。AOT 载体下该模式
+                            //     **丢失写回**：临时 MirValue 不是 arena 里的那个
+                            //     对象，赋值落到死副本上 —— PHI 的第二条入边永远
+                            //     停留在占位值（`@phi(@t13, @t13)`），循环变量
+                            //     永不更新，产物死循环（实测 P1/04、P2/01、P2/02、
+                            //     P2/03；同一份源码 3 次独立 AOT 构建结果一致，
+                            //     不是非确定性问题）。先 `val pv = valueOf(id)`
+                            //     再写 `pv.args`，则 VM 与 AOT 两侧都正确持久化。
+                            //
+                            // (2) 也不能 `this.values.set(id, v)` 重新插回槽位：
+                            //     `ArrayList.set` 的实现是 `data[index] = value`，
+                            //     而 `lowerAssign` 的下标分支产出的 `HirAssign`
+                            //     **目标名为空**（`text=""`），AOT 发不出真正的
+                            //     字段写回，反而把 arena 里该槽位的对象**毁掉**
+                            //     （实测同一 ValueID 回写后读出 `args='i'`、
+                            //     `op='??'`，PHI 与整个 SSA 变残骸）。
+                            val pv: MirValue = this.program.valueOf(phiVid)
+                            pv.args = toStr(beforeVid) + "," + toStr(afterVid)
                         }
                     }
                 }
