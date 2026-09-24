@@ -4,15 +4,27 @@ version.workspace = true
 edition.workspace = true
 
 [[bin]]
+name = "aurac"
+path = "src/compiler_main.rs"
+
+[[bin]]
 name = "aura"
 path = "src/main.rs"
 
 [[bin]]
-name = "aura-lsp"
+name = "aurap"
+path = "src/package_main.rs"
+
+[[bin]]
+name = "photon"
+path = "src/photon_main.rs"
+
+[[bin]]
+name = "auralsp"
 path = "src/lsp_main.rs"
 
 [[bin]]
-name = "aura-debug"
+name = "aurad"
 path = "src/debugger_main.rs"
 
 [dependencies]

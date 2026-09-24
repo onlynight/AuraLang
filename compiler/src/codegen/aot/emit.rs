@@ -5855,6 +5855,17 @@ fn resolve_member_field_owner(
         {
             candidates.push(cls);
             obj_type_resolved = true;
+        } else {
+            // LLVM 类型是 i8*（不透明指针）但 Aura 类型已知时（如
+            // `val f: MirFunction = …` 经 `Collections.getAt` 返回 i8*），
+            // 用 Aura 类型反推结构体名，避免回退全局扫描选错类
+            // （MirFunction/MirBlock 等都有 blocks 字段，选错会读到
+            //   错误的结构体字段偏移 → 访问违例或静默数据损坏）。
+            let aura_ty = ctx.lookup_var_aura_ty(var);
+            if !aura_ty.is_empty() && ctx.known_structs.contains(&aura_ty) {
+                candidates.push(aura_ty);
+                obj_type_resolved = true;
+            }
         }
     }
     for cls in &candidates {

@@ -1,15 +1,15 @@
-//! `aura-debug` - Aura language debugger
+//! `aurad` - Aura language debugger
 //
 // Modeled after GDB / LLDB, providing interactive source-level debugging: breakpoints,
 // stepping, variable inspection, and call stacks.
 // Supports three debug modes: VM (interpretation), JIT (compiled tracing), AOT (DWARF + external debugger).
 //
 // Usage:
-//   aura-debug <file.aura>                          VM mode debugging (default)
-//   aura-debug --mode jit <file.aura>            JIT mode debugging
-//   aura-debug --mode aot <file.aura>            AOT mode debugging
-//   aura-debug --mode aot --launch <file.aura>   AOT + launch external debugger
-//   aura-debug --help                            Show help
+//   aurad <file.aura>                          VM mode debugging (default)
+//   aurad --mode jit <file.aura>            JIT mode debugging
+//   aurad --mode aot <file.aura>            AOT mode debugging
+//   aurad --mode aot --launch <file.aura>   AOT + launch external debugger
+//   aurad --help                            Show help
 
 use std::process;
 
@@ -26,7 +26,7 @@ fn main() {
     }
 
     if args[1] == "--version" || args[1] == "-V" {
-        println!("aura-debug 0.1.0");
+        println!("aurad 0.1.0");
         return;
     }
 
@@ -111,30 +111,26 @@ fn main() {
 
 fn print_usage() {
     println!(
-        "aura-debug - Aura language debugger
+        "aurad - Aura language debugger
 
 ![P15] Usage:
-  aura-debug <file.aura>                          VM mode (default)
-  aura-debug --mode jit <file.aura>            JIT mode
-  aura-debug --mode aot <file.aura>            AOT mode
-  aura-debug --mode aot --launch <file.aura>   AOT + external debugger
+  aurad <file.aura>                          VM mode (default)
+  aurad --mode jit <file.aura>            JIT mode
+  aurad --mode aot <file.aura>            AOT mode
+  aurad --mode aot --launch <file.aura>   AOT + external debugger
+  aurad --help                              Show help
 
-![P15] Options:
-  --mode <vm|jit|aot>     Debug mode (default: vm)
-  --launch                AOT: launch external debugger (lldb/gdb)
-  --help, -h              Show this help
-  --version, -V           Show version
-
-![P15] Interactive commands:
-  break <line|function>    Set breakpoint
-  continue                 Continue to next breakpoint
-  step / next / out      Step execution
-  backtrace                Show call stack
-  list [line]              Show source code
-  print <expr>             Print value
-  locals / stack           Show locals / operand stack
-  info                     Debugger status summary
-  help                     Show help
-  quit                     Exit debugger"
+Interactive commands:
+  break <line|func> [cond]
+  continue
+  step / next / out
+  backtrace
+  list [start] [lines]
+  print <expr>
+  locals
+  stack
+  info
+  quit
+"
     );
 }

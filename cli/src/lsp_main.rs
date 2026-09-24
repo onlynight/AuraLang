@@ -4,11 +4,10 @@
 //! Split out from `aura.exe` to avoid linking unrelated VM/AOT/JIT code into the LSP process.
 //!
 //! Usage:
-//!   aura-lsp                    # Communicate via stdio (default)
-//!   aura-lsp --port <port>      # Communicate via TCP socket (reserved)
+//!   auralsp                    # Communicate via stdio (default)
+//!   auralsp --port <port>      # Communicate via TCP socket (reserved)
 
 fn main() {
-    // Parse command-line arguments (currently only stdio mode is supported)
     let args: Vec<String> = std::env::args().collect();
 
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -18,10 +17,10 @@ fn main() {
     }
 
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("aura-lsp 0.1.0");
+        println!("auralsp 0.1.0");
         return;
     }
 
-    eprintln!("[aura-lsp] LSP server starting (stdio mode)");
+    eprintln!("[auralsp] LSP server starting (stdio mode)");
     compiler::lsp::run_lsp_server();
 }
