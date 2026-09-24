@@ -649,6 +649,31 @@ fn emit_native_wrapper(
                 || target_triple.contains("win32")
                 || target_triple.contains("win64");
 
+
+            // ── Windows 目标：交回 `aura_syscalls.c` 的 C 分发器 ──
+            //
+            // 直接发内联 `syscall` 在当前 LLVM/Windows 目标下会被汇编器拒绝：
+            //   `<inline asm>:1:26: error: invalid operand for instruction`
+            //（命名寄存器约束 + Windows 汇编器对 `syscall` 的锯齿形约束检查）。
+            // 而且 Windows 的 Nt* 服务号与寄存器约定（rcx/rdx/r8/r9、r10 传第 4 参）
+            // 与 Linux 完全不同 —— 必须由 C 层 `aura_syscall_dispatch(nr, a1…a6)`
+            // 做平台分发（该文件随 AOT 链接，声明见 `RUNTIME_FUNCTIONS`）。
+            if is_windows {
+                let mut call_args: Vec<String> = vec![format!("i64 {}", nr_str)];
+                for i in 0..6 {
+                    let a = if i < func.params.len() {
+                        format!("i64 %arg.{}", i)
+                    } else {
+                        "i64 0".to_string()
+                    };
+                    call_args.push(a);
+                }
+                format!(
+                    "%result = call i64 @aura_syscall_dispatch({})",
+                    call_args.join(", ")
+                )
+            } else {
+
             // 使用命名寄存器约束直接设置 syscall ABI 寄存器，无需 mov 指令
             // Linux: rax=nr, rdi=arg0, rsi=arg1, rdx=arg2, r10=arg3, r8=arg4, r9=arg5
             // Windows: rax=service, rcx=arg0, rdx=arg1, r8=arg2, r9=arg3
@@ -704,7 +729,12 @@ fn emit_native_wrapper(
                 constraints,
                 arg_list.join(", ")
             );
-            if ret_str == "void" { call } else { format!("%result = {}", call) }
+            if ret_str == "void" {
+                call
+            } else {
+                format!("%result = {}", call)
+            }
+            }
         }
         crate::ast::NativeAttr::Asm(code) => {
             // 内联汇编：生成 LLVM inline asm 调用
@@ -721,6 +751,65 @@ fn emit_native_wrapper(
                     "call i64 @aura_cpu_atomic_add(i64 %arg.0, i64 0)".to_string()
                 } else {
                     "call i64 @aura_cpu_atomic_add(i64 0, i64 0)".to_string()
+                }
+            } else if {
+                // ARC 引用计数（`Memory.aura` 的 `@native(asm="lock inc"/"lock dec")`
+                // 与 `Runtime.aura` 的 `lock inc qword [rdi]`）。
+                let lc = code.to_lowercase();
+                let nlc = func.name.to_lowercase();
+                lc.contains("lock inc")
+                    || lc.contains("lock dec")
+                    || nlc.contains("arcincrement")
+                    || nlc.contains("arcdecrement")
+            } {
+                // 与 Aura 侧发射器（`aot/Emit.aura`）保持一致：改发**平台无关**的
+                // `atomicrmw`，不用 `lock inc/dec` 内联汇编。原因（同侧注释）：
+                //   * `.intel_syntax noprefix; lock inc` 缺内存操作数 →
+                //     当前汇编器直接报 `<inline asm>:1:26: invalid operand for instruction`；
+                //   * `=r` 输出约束对 `lock inc` 无意义（它不会写该输出寄存器）。
+                // `atomicrmw` 返回**旧值** → inc 取 old+1、dec 取 old-1。
+                let lc = code.to_lowercase();
+                let nlc = func.name.to_lowercase();
+                let is_inc = lc.contains("lock inc") || nlc.contains("arcincrement");
+                // 本函数是自由函数（无 `ctx`），且每个 wrapper 自成函数体，
+                // 故用固定局部名即可（不与 `%arg.N` 冲突）。
+                let pt = "%arc.pt".to_string();
+                let old = "%arc.old".to_string();
+                let mut s = format!("{} = inttoptr i64 %arg.0 to i64*", pt);
+                s.push_str(&format!(
+                    "\n{} = atomicrmw {} i64* {}, i64 1 seq_cst",
+                    old,
+                    if is_inc { "add" } else { "sub" },
+                    pt
+                ));
+                if ret_str != "void" {
+                    s.push_str(&format!(
+                        "\n%result = {} i64 {}, 1",
+                        if is_inc { "add" } else { "sub" },
+                        old
+                    ));
+                }
+                s
+            } else if code.to_lowercase().contains("cpuid") {
+                // `Cpu.aura` 的 `@native(asm="cpuid")`：eax/ebx/ecx/edx 全被写，
+                // 返回值必须用**结构体输出约束**配平。旧写法
+                // `call i64 asm "…cpuid", "=r,r"(i32)` 既没有操作数引用、也不对应
+                // 真实寄存器 → `invalid operand for instruction`。
+                let cp = "%cp.v".to_string();
+                let eax = "%cp.eax".to_string();
+                let mut s = format!(
+                    "{} = call {{ i32, i32, i32, i32 }} asm sideeffect \"cpuid\", \"={{ax}},={{bx}},={{cx}},={{dx}},0\"(i32 %arg.0)",
+                    cp
+                );
+                s.push_str(&format!(
+                    "\n{} = extractvalue {{ i32, i32, i32, i32 }} {}, 0",
+                    eax, cp
+                ));
+                if ret_str == "void" {
+                    s
+                } else {
+                    s.push_str(&format!("\n%result = zext i32 {} to i64", eax));
+                    s
                 }
             } else {
                 // 通用内联汇编：生成 LLVM inline asm 调用。
@@ -1171,6 +1260,15 @@ pub fn emit_program(
     dispatch_section.push_str("; ---- Thread Dispatch Table ----\n");
     let mut fn_ptrs: Vec<String> = Vec::new();
     let func_count = program.functions.len();
+    // 已生成 trampoline 的函数名（去重）。
+    //
+    // 为什么需要：`program.functions` 中同一函数可能**重复登记**（自举工程实测：
+    // `X86Encoder.emitLeaStack` / `Allocator.totalAllocs` / `Allocator.totalFrees`
+    // 各出现两次）。函数**定义**那边做了去重，trampoline 这边没有 ⇒ 重复的
+    // `define internal i64 @X_trampoline` 让 llc 直接报
+    //   `error: invalid redefinition of function 'X_trampoline'`
+    //（自举编译卡点）。重复条目复用已生成的 trampoline，同时保持分派表下标对齐。
+    let mut emitted_tramp: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for (idx, func) in program.functions.iter().enumerate() {
         if func.is_native {
@@ -1181,6 +1279,10 @@ pub fn emit_program(
 
         let sanitized = sanitizellvm(&func.name);
         let tramp_name = format!("@{}_trampoline", sanitized);
+        if !emitted_tramp.insert(tramp_name.clone()) {
+            fn_ptrs.push(format!("ptr {}", tramp_name));
+            continue;
+        }
 
         // 生成 trampoline: i64 fn(i64 arg)
         // 将 arg 截断/扩展到第一个参数类型，调用原函数，返回结果
@@ -2755,6 +2857,17 @@ fn emit_variable_load(
             slot.llvm_name
         ));
         Ok((tmp, slot.llvm_ty))
+    } else if ctx.known_structs.contains(name) {
+        // 裸类型名 / object 单例名被当作**值**使用（如 `return SyscallEmitter`，
+        // `SyscallEmitter` 是 `object` 单例）。AOT 把 object 的方法编译为
+        // `Type_method(self, …)`，单例本身无状态、`self` 只是占位，因此用
+        // `null`（i8*）作该值即可。
+        //
+        // 旧实现落到下面「未声明变量」分支，发出 `%<TypeName>` + 类型 i32 ⇒
+        // 再被装箱成 `sext i32 %SyscallEmitter to i64`，llc 报
+        //   `error: use of undefined value '%SyscallEmitter'`
+        // （自举编译 `SyscallEmitterUtils.empty` 时实测）。
+        Ok(("null".to_string(), "i8*".to_string()))
     } else {
         // 未声明变量：作为外部引用（可能是函数调用或全局变量）
         // 添加 % 前缀，确保 LLVM IR 语法正确
@@ -3345,7 +3458,60 @@ fn emit_binary(
                     return Ok(("true".to_string(), "i1".to_string()));
                 }
             }
-            let pred = if is_signed && l_ty.starts_with("i") {
+            // ② 指针 ↔ 整数的**混合比较**统一到 `i64`。
+            //
+            // 为什么必须做：Aura 的动态语义允许 `list[i] < 0`、`s[i] == 'x'` 这类
+            // 写法，而 AOT 下**列表/字符串在 LLVM 层都是 `i8*` 句柄**，元素类型
+            // 无法静态确定 —— `Collections.getAt` 的返回类型只能是 `i8*`。
+            // 旧实现随后按 `l_ty.starts_with("i")` 判定「整型比较」（`i8*` 也满足
+            // 该前缀！），直接发 `icmp slt i8* %x, %int` ⇒ llc 报
+            //   `'%int.4056' defined with type 'i32' but expected 'ptr'`
+            // （正是 `InstructionSelector.registerNode` 里 `while (… <= lirId)` /
+            //  `if (this.nodeMapIds[lirId] < 0)` 触发的自举阻塞）。
+            //
+            // 处理：指针 `ptrtoint → i64`，整数 `sext → i64`，两侧同为 i64 再比较。
+            if l_ty == "i8*" || r_ty == "i8*" {
+                if l_ty == "i8*" {
+                    let c = ctx.fresh_var();
+                    blocks
+                        .last_mut()
+                        .body
+                        .push(format!("{} = ptrtoint i8* {} to i64", c, l_ir));
+                    l_ir = c;
+                    l_ty = "i64".to_string();
+                }
+                if r_ty == "i8*" {
+                    let c = ctx.fresh_var();
+                    blocks
+                        .last_mut()
+                        .body
+                        .push(format!("{} = ptrtoint i8* {} to i64", c, r_ir));
+                    r_ir = c;
+                    r_ty = "i64".to_string();
+                }
+            }
+            // 两侧同为整型但位宽不同（如 `i32` 字面量 vs `i64`）→ 统一到 i64，
+            // 否则会发出 `icmp slt i64 %x, %y` 而 `%y` 实际是 i32。
+            if is_int_ty(&l_ty) && is_int_ty(&r_ty) && l_ty != r_ty {
+                if int_bits(&l_ty) < int_bits(&r_ty) {
+                    let c = ctx.fresh_var();
+                    blocks
+                        .last_mut()
+                        .body
+                        .push(format!("{} = sext {} {} to {}", c, l_ty, l_ir, r_ty));
+                    l_ir = c;
+                    l_ty = r_ty.clone();
+                } else {
+                    let c = ctx.fresh_var();
+                    blocks
+                        .last_mut()
+                        .body
+                        .push(format!("{} = sext {} {} to {}", c, r_ty, r_ir, l_ty));
+                    r_ir = c;
+                    r_ty = l_ty.clone();
+                }
+            }
+            let pred = if is_signed && is_int_ty(&l_ty) {
                 format!("icmp {} {} {}, {}", icmp_pred, l_ty, l_ir, r_ir)
             } else {
                 let fcmp_pred = match op {
@@ -3490,7 +3656,10 @@ fn string_method_symbol(name: &str) -> Option<String> {
     match name {
         "contains" | "startsWith" | "endsWith" | "toUpperCase" | "toLowerCase" | "trim"
         | "substring" | "charAt" | "replace" | "replaceAll" | "padStart" | "substringBefore"
-        | "substringAfter" | "split" | "lastIndexOf" | "countChar" => {
+        | "substringAfter" | "split" | "lastIndexOf" | "countChar"
+        // `String.fromCharCode(code)` 是 companion（静态）方法，**没有接收者**，
+        // 但同样落在 legacy C 符号 `aura_string_fromCharCode`（实现见 aura_std_cffi.c）。
+        | "fromCharCode" => {
             Some(format!("aura.lang.std.String.{}", name))
         }
         _ => None,
@@ -3814,14 +3983,47 @@ fn emit_call(
                 format!("{}.{}", v, callee_owned),
                 format!("{}_{}", v, callee_owned),
             ];
+            let mut matched = false;
             for cand in candidates {
                 if ctx.func_ret_types.contains_key(&cand) {
                     callee_owned = cand;
                     effective_args.remove(0);
+                    matched = true;
                     break;
                 }
             }
+            if !matched {
+                // 没有任何 std 调用点符号可改派（如 `StringOps.strlen`）：**仍要剔除
+                // 幽灵首参**。否则命名空间名会被当普通值放进调用实参，再被装箱成
+                //   `sext i32 %StringOps to i64`
+                // llc 报 `error: use of undefined value '%StringOps'`
+                //（自举编译 `ConsoleImpl.print` 实测）。
+                // 判据保守：首字母大写（类型/命名空间命名约定）且不在作用域内
+                //（已在上面确认），因此不会误删真实接收者（用户变量名极少大写）。
+                let is_type_like = v
+                    .chars()
+                    .next()
+                    .map(|c| c.is_ascii_uppercase())
+                    .unwrap_or(false);
+                if is_type_like {
+                    effective_args.remove(0);
+                }
+            }
         }
+    }
+    // `strlen(x)`（HIR 侧由 `StringOps.strlen(x)` 降级而来）→ 运行时 `aura_strlen`。
+    // VM 路径有专门原生实现（见 `vm/native.rs` 里 StringBuilder/StringOps 的处理），
+    // AOT 侧直接落到 runtime 表内的 `aura_strlen`（签名 `i64(i8*)`，声明由
+    // `RUNTIME_FUNCTIONS` 统一发射）。
+    if callee_owned == "strlen" && effective_args.len() == 1 {
+        let (v, t) = emit_expr_val(ctx, blocks, &effective_args[0])?;
+        let ptr = coerce_val_to_i8ptr(ctx, blocks, &v, &t);
+        let dst = ctx.fresh_var();
+        blocks
+            .last_mut()
+            .body
+            .push(format!("{} = call i64 @aura_strlen(i8* {})", dst, ptr));
+        return Ok((dst, "i64".to_string()));
     }
     // ── 方法解析容错（Phase C.2 自举修复）──
     //
@@ -3912,8 +4114,45 @@ fn emit_call(
             }
         }
     }
+    // ── 字符串实例方法 → legacy C 运行时符号（`aura_string_<m>`）──
+    //
+    // `record.substring(i, i + 1).charCodeAt(0)` 这类调用在 HIR 里可能是
+    // `String.substring(record, i, i+1)`（点分）或裸名。此前会发射
+    //   `call void @String_substring(...)`
+    // 两个问题一起发生：符号 `String_substring` **未被声明**（llc 报
+    // `use of undefined value`），且返回类型查不到 → 退化成 `void`，字符串结果被
+    // 丢弃，于是链式调用外层的接收者被写成 `0`（自举编译 `X86Encoder.fieldOf` 实测）。
+    // 这里显式改派到 runtime 表内的 `aura_string_<m>`（声明由 `RUNTIME_FUNCTIONS`
+    // 统一发射），签名随后从 runtime 表取回。
+    {
+        let bare_name = callee_owned
+            .rsplit('.')
+            .next()
+            .unwrap_or(&callee_owned)
+            .to_string();
+        if let Some(std_sym) = string_method_symbol(&bare_name) {
+            let legacy = crate::codegen::aot::runtime::translate_to_legacy_c(&sanitizellvm(&std_sym));
+            // 签名表有两张：`runtime_signature`（内置 runtime 函数）与
+            // `cffi_signature`（aura_std_cffi.c 的 C 实现）。
+
+            // 字符串族只登记在**后者**里（`aura_string_substring` / `trim` /
+            // `split` …），只查前者会全部落空 ⇒ 返回 `NO-SIG`，符号与返回类型
+            // 都无法修正。
+            if runtime_lookup_sig(&legacy).is_some() {
+                callee_owned = legacy;
+            }
+        }
+    }
+
     let callee: &str = &callee_owned;
-    let param_tys = ctx.func_param_types.get(callee).cloned();
+    // 参数/返回类型：优先 Aura 侧签名；缺失时回退到 **runtime 声明表**
+    //（否则 std 字符串方法会退化成 `void` 返回，见上）。
+    let runtime_sig: Option<(String, Vec<String>)> = runtime_lookup_sig(callee);
+    let param_tys: Option<Vec<String>> = ctx
+        .func_param_types
+        .get(callee)
+        .cloned()
+        .or_else(|| runtime_sig.as_ref().map(|(_, params)| params.clone()));
 
     // ── Thread.spawn / Future.spawn 特殊处理：函数引用 → 函数索引 ──
     // spawn(fn, arg) 中 fn 期望函数索引（整数），
@@ -4003,7 +4242,11 @@ fn emit_call(
         // P6.5 修复（#14/#32）：此前未解析的返回类型默认 i32，导致返回指针/结构体/
         // void 的函数调用点生成非法 IR（`call i32 @func` vs `ret i8*`/`ret void`）。
         // 改为 void：与 Aura 侧 AOT 发射器一致（retTy == "" → 不发调用或 void）。
-        ctx.func_ret_types.get(callee).cloned().unwrap_or_else(|| "void".to_string())
+        ctx.func_ret_types
+            .get(callee)
+            .cloned()
+            .or_else(|| runtime_sig.as_ref().map(|(ret, _)| ret.clone()))
+            .unwrap_or_else(|| "void".to_string())
     };
     // 按被调方声明的参数类型转换实参（LLVM IR 对调用/声明类型一致性要求严格）
     let args_ir: Vec<(String, String)> = match &param_tys {
@@ -4019,6 +4262,116 @@ fn emit_call(
         }
         None => args_ir,
     };
+
+    // ── 编译器内置：`Memory.read*/write*/copy/set/alloc/free` ──
+    //
+    // `object Memory`（`aura/core/aura/lang/native/Memory.aura`）的成员是**无 `@native`
+    // 注解的编译器内置**（load/store/malloc/free，见该文件顶部注释）。此前调用点照常
+    // 发射 `call i64 @Memory_read(...)`，而 HIR 又把这些成员登记成 extern
+    // （FFI 生成器给出 `declare i8 @Memory_read(i64)`，返回类型也不对）⇒ 链接期
+    //   `lld-link: error: undefined symbol: Memory_read / Memory_set`。
+    // 这里在**调用点**直接降级为 load/store/memcpy/memset/malloc/free（与
+    // `emit_native_wrapper` 里 Builtin 分支的写法一致）。
+    {
+        let bare = callee.rsplit('.').next().unwrap_or(callee).to_string();
+        if callee.starts_with("Memory") || callee.contains(".Memory.") {
+            let arg = |i: usize| -> (String, String) {
+                args_ir
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_else(|| ("0".to_string(), "i64".to_string()))
+            };
+            let (read_ty, ptr_ty) = match bare.as_str() {
+                "read16" => ("i16", "i16*"),
+                "read32" => ("i32", "i32*"),
+                "read64" => ("i64", "i64*"),
+                "read" => ("i8", "i8*"),
+                _ => ("", ""),
+            };
+            let (write_ty, wptr_ty) = match bare.as_str() {
+                "write16" => ("i16", "i16*"),
+                "write32" => ("i32", "i32*"),
+                "write64" => ("i64", "i64*"),
+                "write" => ("i8", "i8*"),
+                _ => ("", ""),
+            };
+            if !read_ty.is_empty() {
+                let (addr, _) = arg(0);
+                let p = ctx.fresh_var();
+                let v = ctx.fresh_var();
+                let cur = blocks.last_mut();
+                cur.body
+                    .push(format!("{} = inttoptr i64 {} to {}", p, addr, ptr_ty));
+                cur.body.push(format!(
+                    "{} = load {}, {} {}",
+                    v, read_ty, ptr_ty, p
+                ));
+                return Ok((v, read_ty.to_string()));
+            }
+            if !write_ty.is_empty() {
+                let (addr, _) = arg(0);
+                let (val, val_ty) = arg(1);
+                // 值宽度对齐到目标宽度（避免 `store i64 %x, i8* %p` 这类越界写）。
+                let (val2, _vt2) = coerce_arg(ctx, blocks, val, &val_ty, write_ty);
+                let p = ctx.fresh_var();
+                let cur = blocks.last_mut();
+                cur.body
+                    .push(format!("{} = inttoptr i64 {} to {}", p, addr, wptr_ty));
+                cur.body.push(format!(
+                    "store {} {}, {} {}",
+                    write_ty, val2, wptr_ty, p
+                ));
+                return Ok(("0".to_string(), "i32".to_string()));
+            }
+            if bare == "copy" {
+                let (dst, _) = arg(0);
+                let (src, _) = arg(1);
+                let (n, _) = arg(2);
+                let pd = ctx.fresh_var();
+                let ps = ctx.fresh_var();
+                let cur = blocks.last_mut();
+                cur.body.push(format!("{} = inttoptr i64 {} to i8*", pd, dst));
+                cur.body.push(format!("{} = inttoptr i64 {} to i8*", ps, src));
+                cur.body.push(format!(
+                    "call void @llvm.memcpy.p0i8.p0i8.i64(i8* {}, i8* {}, i64 {}, i1 false)",
+                    pd, ps, n
+                ));
+                return Ok(("0".to_string(), "i32".to_string()));
+            }
+            if bare == "set" {
+                let (addr, _) = arg(0);
+                let (val, val_ty) = arg(1);
+                let (n, _) = arg(2);
+                let (v8, _) = coerce_arg(ctx, blocks, val, &val_ty, "i8");
+                let p = ctx.fresh_var();
+                let cur = blocks.last_mut();
+                cur.body.push(format!("{} = inttoptr i64 {} to i8*", p, addr));
+                cur.body.push(format!(
+                    "call void @llvm.memset.p0i8.i64(i8* {}, i8 {}, i64 {}, i1 false)",
+                    p, v8, n
+                ));
+                return Ok(("0".to_string(), "i32".to_string()));
+            }
+            if bare == "alloc" {
+                let (n, _) = arg(0);
+                let p = ctx.fresh_var();
+                let v = ctx.fresh_var();
+                let cur = blocks.last_mut();
+                cur.body.push(format!("{} = call i8* @malloc(i64 {})", p, n));
+                cur.body
+                    .push(format!("{} = ptrtoint i8* {} to i64", v, p));
+                return Ok((v, "i64".to_string()));
+            }
+            if bare == "free" {
+                let (addr, _) = arg(0);
+                let p = ctx.fresh_var();
+                let cur = blocks.last_mut();
+                cur.body.push(format!("{} = inttoptr i64 {} to i8*", p, addr));
+                cur.body.push(format!("call void @free(i8* {})", p));
+                return Ok(("0".to_string(), "i32".to_string()));
+            }
+        }
+    }
 
     // 内置异常构造器 `Runtime(msg)`：Aura 侧 `throw Runtime("...")` 经 HIR 降级为
     // `__throw(Runtime("..."))`。`msg` 是 String `i8*`，直接传给 `@Runtime(i8*)`
@@ -4493,6 +4846,22 @@ fn function_sig_of(ctx: &EmitCtx, ft: &HirType) -> Option<(String, Vec<String>)>
 }
 
 /// 判断 LLVM 类型字符串是否为整数（i1/i8/i16/i32/i64…）
+/// 统一签名查询：先查内置 runtime 表，再查 C FFI 表（`aura_std_cffi.c`）。
+///
+/// 两张表是互补的：`aura_string_*`（substring/trim/split…）只登记在 C FFI 表里，
+/// `aura_list_*` 等只在内置表里。只查其中一张会让调用点拿不到返回类型 ⇒ 退化成
+/// `call void @…`（丢弃返回值、链式调用接收者变成 `0`），自举编译即因此失败。
+fn runtime_lookup_sig(name: &str) -> Option<(String, Vec<String>)> {
+    crate::codegen::aot::runtime::cffi_signature(name)
+        .or_else(|| crate::codegen::aot::runtime::runtime_signature(name))
+        .map(|(ret, params)| {
+            (
+                ret.to_string(),
+                params.iter().map(|p| p.to_string()).collect::<Vec<String>>(),
+            )
+        })
+}
+
 fn is_int_ty(t: &str) -> bool {
     t.len() >= 2 && t.starts_with('i') && t[1..].chars().all(|c| c.is_ascii_digit())
 }
@@ -4541,10 +4910,21 @@ fn coerce_arg(
         body.push(format!("{} = bitcast {}* {} to {}", cast, from, alloca, to));
         return (cast, to.to_string());
     }
-    // 指针 → 结构体值：从指针 load 出结构体（如 `return this`，this 为对象指针，
+    // 指针 → 结构体**指针**：直接 bitcast（结构体按引用传递，Phase A.1）。
+    // 旧实现把 `%struct.X*` 也走下面的 load 路径，bitcast 成 `%struct.X**`
+    // 后从结构体头部 load 出第一个字段值（如 `name` 字符串指针），再当作
+    // 结构体指针返回 → 后续对「结构体」的字段 GEP/store 实际落在
+    // 只读 .rodata 区 → 0xC0000005 访问违例。
+    if is_ptr_ty(from) && is_struct_ptr_ty(to) {
+        let cast = ctx.fresh_var();
+        let body = &mut blocks.last_mut().body;
+        body.push(format!("{} = bitcast {} {} to {}", cast, from, val, to));
+        return (cast, to.to_string());
+    }
+    // 指针 → 结构体**值**：从指针 load 出结构体（如 `return this`，this 为对象指针，
     // 而函数签名按值返回 `%struct.X`；不转换会生成非法 IR：
     // `value doesn't match function result type '%struct.X'`）
-    if is_ptr_ty(from) && to.starts_with("%struct.") {
+    if is_ptr_ty(from) && to.starts_with("%struct.") && !to.ends_with('*') {
         let cast = ctx.fresh_var();
         let loaded = ctx.fresh_var();
         let body = &mut blocks.last_mut().body;
@@ -5339,25 +5719,25 @@ fn emit_member_access(
     let is_pointer = obj_ty.ends_with('*') || obj_ty == "i8*" || obj_ty == "ptr";
 
     if is_pointer {
-        // 对象是指针：先 load 结构体值，再 extractvalue
+        // 对象指针：bitcast → GEP 取字段地址 → load 字段值
+        // （与 emit_member_assign 的 GEP+store 对称，避免 load+extractvalue
+        //  的值语义与 GEP 的指针语义字段偏移不一致）
         let gep = ctx.fresh_var();
-        let loaded = ctx.fresh_var();
         let struct_type = owner_struct.clone().unwrap_or_else(|| "i8*".to_string());
 
         if struct_type != "i8*" {
-            // 对象指针可能是 i8*（self 参数等），先 bitcast 到具体结构体指针再 load
             let cast = ctx.fresh_var();
             cur.body.push(format!(
                 "{} = bitcast {} {} to {}*",
                 cast, obj_ty, obj_ir, struct_type
             ));
             cur.body.push(format!(
-                "{} = load {}, {}* {}",
-                loaded, struct_type, struct_type, cast
+                "{} = getelementptr {}, {}* {}, i32 0, i32 {}",
+                gep, struct_type, struct_type, cast, field_idx
             ));
             cur.body.push(format!(
-                "{} = extractvalue {} {}, {}",
-                tmp, struct_type, loaded, field_idx
+                "{} = load {}, {}* {}",
+                tmp, field_llvm_ty, field_llvm_ty, gep
             ));
         } else {
             // 回退到 i8* 方式

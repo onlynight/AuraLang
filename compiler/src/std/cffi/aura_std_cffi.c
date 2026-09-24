@@ -430,6 +430,21 @@ int64_t aura_string_charCodeAt(const char *s, int64_t idx) {
     return (unsigned char)s[idx];
 }
 
+/* `String.fromCharCode(code)`（companion/静态方法）→ `aura_string_fromCharCode`。
+ *
+ * 此前没有任何实现：AOT 编译自举驱动时调用点发 `@String_fromCharCode`（未声明、
+ * 未定义）→ llc 报 `use of undefined value '@String_fromCharCode'`。
+ * 与 `charAt` 一样按字节值处理（Aura 的 Char 是单字节码元），
+ * 并且**每次分配独立 2 字节**（不能返回静态缓冲，否则多次调用互相覆盖，
+ * 同 `aura_env_get` 的教训）。 */
+const char *aura_string_fromCharCode(int64_t code) {
+    char *p = (char *)malloc(2);
+    if (!p) return "";
+    p[0] = (char)(code & 0xFF);
+    p[1] = 0;
+    return p;
+}
+
 /* 单字符字符串缓存（256 个字节值）。
  *
  * AOT 发射器把字符串索引 `s[i]` / `.charAt(i)` 落到 `aura_string_charAt`。
@@ -1383,11 +1398,25 @@ const char *aura_env_os(void) { return aura_env_platform(); }
 const char *aura_env_arch(void) { return "x86_64"; }
 
 const char *aura_env_get(const char *name) {
-    static char env_buf[512];
+    /* ⚠️ 必须**每次返回独立分配**，不能返回 static 缓冲。
+     *
+     * 旧实现用 `static char env_buf[512]`：Aura 侧 `Env.get(name, def)` 的返回值
+     * 是裸指针，多次调用拿到的是**同一块内存**，后一次调用会覆盖前一次的结果 ——
+     * 实测 AOT 编译的
+     *     val a = Env.get("TESTA", "?"); val b = Env.get("TESTB", "?"); val c = Env.get("TESTC", "?")
+     * 打印 `a=CCC b=CCC c=CCC`（三个变量指向同一缓冲，值都是最后一次的）。
+     * 直接自举驱动 `PhotonDriver.aura` 里正是连续三次 `Env.get`
+     *（PHIR / OUT / MODULE），导致 `phirPath` 读成模块名、报
+     * `Failed to read .phir file: 01_hello_world`。
+     *
+     * 泄漏量可忽略（环境变量读取次数极少），换来正确的值语义。 */
     const char *v = getenv(name ? name : "");
     if (!v) return "";
-    snprintf(env_buf, sizeof(env_buf), "%s", v);
-    return env_buf;
+    size_t n = strlen(v) + 1;
+    char *p = (char *)malloc(n);
+    if (!p) return "";
+    memcpy(p, v, n);
+    return p;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════

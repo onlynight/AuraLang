@@ -157,6 +157,34 @@ pub const RUNTIME_FUNCTIONS: &[RuntimeFn] = &[
         ret: "i64",
         params: &[("s", "i8*")],
     },
+    // `String.fromCharCode(code)`：companion（静态）方法，Aura 侧无接收者，
+    // 调用点经 `string_method_symbol` 落到 `aura_string_fromCharCode`
+    // （实现见 aura_std_cffi.c）。不登记就没有声明 → llc 报
+    // `use of undefined value '@String_fromCharCode'`。
+    RuntimeFn {
+        name: "aura_string_fromCharCode",
+        ret: "i8*",
+        params: &[("code", "i64")],
+    },
+    // 平台系统调用分发器（`aura/runtime/cffi/aura_syscalls.c`）。
+    //
+    // Windows 目标的 `@native(N)` 包装器不再发内联 `syscall`（汇编器会拒），
+    // 而是调用本函数由 C 层做 Nt* 转换；因此必须在此登记，
+    // 否则生成的 `call i64 @aura_syscall_dispatch(…)` 没有声明，
+    // llc 报 `use of undefined value '@aura_syscall_dispatch'`。
+    RuntimeFn {
+        name: "aura_syscall_dispatch",
+        ret: "i64",
+        params: &[
+            ("nr", "i64"),
+            ("a1", "i64"),
+            ("a2", "i64"),
+            ("a3", "i64"),
+            ("a4", "i64"),
+            ("a5", "i64"),
+            ("a6", "i64"),
+        ],
+    },
     RuntimeFn {
         name: "aura_to_str",
         ret: "i8*",
