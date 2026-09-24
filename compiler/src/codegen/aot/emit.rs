@@ -2944,7 +2944,24 @@ fn aura_ty_of_expr(ctx: &EmitCtx, e: &HirExpr) -> String {
             ) {
                 return "List".to_string();
             }
-            ctx.func_ret_aura_types.get(callee).cloned().unwrap_or_default()
+            let exact = ctx.func_ret_aura_types.get(callee).cloned().unwrap_or_default();
+            if !exact.is_empty() {
+                return exact;
+            }
+            // 方法调用在 HIR 里可能是**裸名**（`functionOf`），而签名表的键是
+            // 类限定名（`MirSsaProgram.functionOf`）——按 `.<callee>` 后缀补一次
+            // 确定性匹配。不做这一步时返回类型为空 ⇒ 成员访问落入「按字段名全局
+            // 扫描」的兜底 ⇒ 选错结构体 ⇒ 生成类型混淆的 bitcast/GEP，产物行为
+            // 错误（实测循环 PHI 回填静默失败、`i` 永不递增）。
+            let suffix = format!(".{}", callee);
+            let mut keys: Vec<&String> = ctx.func_ret_aura_types.keys().collect();
+            keys.sort();
+            for k in keys {
+                if k.ends_with(suffix.as_str()) {
+                    return ctx.func_ret_aura_types[k].clone();
+                }
+            }
+            String::new()
         }
         // 字段访问 `this.src` / `obj.field`：按所属类的字段声明类型解析。
         // 类体内裸字段在 HIR 中即 `Member{Var("self"), field}`（`Lexer.peek` 的
@@ -4130,6 +4147,25 @@ fn emit_call(
             .next()
             .unwrap_or(&callee_owned)
             .to_string();
+        // `length` 是唯一「String 与程序内类同名」的方法（`Span.length()` /
+        // `StringBuilder.length(handle)` / `Json.length(obj)` 都在程序内定义），
+        // 因此不能像其它字符串专有方法那样按裸名改派：只有 owner 明确是 String
+        // 时才落到 runtime 的 `aura_string_length`。
+        //
+        // 触发场景（自举编译 `Lexer.__ctor1` 实测）：`this.n = source.length()` 的
+        // HIR 保留点分名 `String.length`，该符号不在程序内 ⇒ 原样发射成
+        //   `call void @String_length(i8* %src)`
+        // 未声明（llc: `use of undefined value '@String_length'`）且返回类型退化为
+        // void。
+        if bare_name == "length" {
+            let owner = match callee_owned.rfind('.') {
+                Some(pos) => callee_owned[..pos].to_string(),
+                None => String::new(),
+            };
+            if owner == "String" || owner.ends_with(".String") {
+                callee_owned = "aura_string_length".to_string();
+            }
+        }
         if let Some(std_sym) = string_method_symbol(&bare_name) {
             let legacy = crate::codegen::aot::runtime::translate_to_legacy_c(&sanitizellvm(&std_sym));
             // 签名表有两张：`runtime_signature`（内置 runtime 函数）与
@@ -5832,9 +5868,20 @@ fn resolve_member_field_owner(
     if obj_type_resolved {
         return None;
     }
-    ctx.class_field_types.iter().find_map(|(class, fields)| {
-        fields.get(name).map(|(ty, idx)| (class.clone(), ty.clone(), *idx))
-    })
+    // 兜底：按字段名全局扫描。⚠️ 必须**确定性**选择 —— 直接迭代 `HashMap`
+    // 的语义（顺序随 `RandomState` 变化）会让**同一份源码在不同构建下发射出不同
+    // 的 IR**：`Hir` / `Mir` 等类都有同名字段时，取到的类随机，
+    // 于是自举产物行为随机（实测 `bitcast %struct.Hir* → %struct.Mir*` 交替出现，
+    // Phi 回填读到错误结构体的字段 ⇒ 循环变量永不更新、产物死循环）。
+    // 这里按类名字典序固定顺序，保证「同源码 → 同 IR」。
+    let mut classes: Vec<&String> = ctx.class_field_types.keys().collect();
+    classes.sort();
+    for class in classes {
+        if let Some((ty, idx)) = ctx.class_field_types.get(class).and_then(|m| m.get(name)) {
+            return Some((class.clone(), ty.clone(), *idx));
+        }
+    }
+    None
 }
 
 /// 从 LLVM 类型串反推结构体类名：`%struct.Lexer*` / `%struct.Lexer` → `Lexer`

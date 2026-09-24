@@ -425,6 +425,19 @@ int64_t aura_string_length(const char *s) {
  * 用途：`EmitBuffer.sbBuild()` 用它把原生缓冲区的字节显式变成 `String`。 */
 const char *ReadCStr(const char *p) { return p ? p : ""; }
 
+/* `CString(text)` / `CStr(text)` — Aura `String` → C 字符串指针（FFI 入口）。
+ *
+ * AOT 下 Aura `String` **就是** NUL 结尾的 `i8*`（与 `ReadCStr` 同一既定 ABI），
+ * 因此这里恒等返回、不复制。Aura 侧定义见 `aura/core/aura/lang/prelu.aura`：
+ *     fun CString(text: String): String { return Builtin.cstr(text) }
+ * 其中 `Builtin.cstr` 是**仅 VM 有实现**的原生（`native_builtin_cstring`）；
+ * AOT 自举编译时 `CString` 被当作外部符号发射（`declare i8* @CString(i8*)`），
+ * 若 C 运行时没有定义，链接期即报
+ *     `lld-link: error: undefined symbol: CString`
+ * （自举 `PhotonHatCompile` 实测：`EmitBuffer.sbAdd` 一路都走 `CString`）。 */
+const char *CString(const char *s) { return s ? s : ""; }
+const char *CStr(const char *s) { return CString(s); }
+
 int64_t aura_string_charCodeAt(const char *s, int64_t idx) {
     if (!s || idx < 0 || (size_t)idx >= strlen(s)) return -1;
     return (unsigned char)s[idx];
